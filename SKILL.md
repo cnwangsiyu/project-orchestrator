@@ -85,7 +85,9 @@ orchestrator) and `report.md` (written by the worker). Task ids are `t1`, `t2`, 
 read-only commands (a `git log`, a status check). Anything that needs exploring code, editing,
 building, testing, devices or more than a few minutes goes to a worker. When in doubt, delegate.
 
-Otherwise:
+Otherwise, **route before you plan**: check the request against every open task and every recently
+finished one (*Routing to an existing worker*). Whatever belongs to an existing worker goes to it as
+an amendment; only the remainder goes through the steps below.
 
 1. **Shape the tasks.** One task = one independently verifiable outcome. Split only where the
    pieces can run or be reviewed separately; record dependencies (`blocked` until the
@@ -106,6 +108,45 @@ Otherwise:
 If the user's request is ambiguous in a way that changes what gets built, ask them first —
 a wrong brief wastes a whole worker session. Small open details: choose, note the assumption in
 the brief, and move on.
+
+## Routing to an existing worker
+
+A worker that has already explored the code, built the project or reproduced the bug carries
+context a new session would spend a long time rebuilding — and two sessions editing the same area
+is exactly the conflict this skill exists to avoid. So new work that is part of an existing task's
+territory goes to that task's worker.
+
+**Give it to the existing worker** when the new work, or a part of it:
+- changes the same files, module or interface the task is already changing;
+- is a refinement, extension, fix or follow-up of that task's goal ("also handle X", "the result
+  is wrong when Y", "while you're there…");
+- depends on knowledge the worker gathered (its repro, its build, its investigation).
+
+**Start a new task instead** when the work is independently verifiable and touches a different
+area; when the amendment would turn the task into something much bigger than its goal; or when the
+worker's context is a liability — it has been running very long or was compacted, or it is stuck.
+In that case the new task's brief points at the old task's `report.md` rather than reusing the
+session.
+
+**Split** a request that is partly inside and partly outside an existing task: the inside part
+becomes an amendment, the rest a new task. If the new task builds on the amendment, mark it
+`blocked` on the old task (or give both the agreed contract, as in *Coordinating tasks*).
+
+How to amend, by the worker's state:
+- **Running:** append an `## Amendment <n> (<date>)` section to its `brief.md` (goal, done-when,
+  what it changes in the original plan), then SendMessage: "Amendment <n> added to your brief:
+  <one-line summary>. Fold it in; your DONE must cover it." Workers read messages at their next tool
+  round, so it lands mid-work without restarting anything.
+- **Reported DONE but not merged yet:** hold the merge, amend as above; the task reopens and
+  reports DONE again when the amendment is in.
+- **Merged and stopped:** resume it with `cd <its workspace> && claude --bg --resume <session id>`
+  if its context is still valuable and its worktree still exists (recreate the task branch from
+  the current base tip first); otherwise start a new task pointing at its report. Either way it is
+  new work on top of the base, merged like any other task.
+
+Record every amendment in the ledger (same task id, a Log line, scope column updated) and re-check
+the updated scope against the other open tasks. Tell the user in one line which task absorbed the
+request and why.
 
 ## Choosing isolation
 
@@ -226,7 +267,9 @@ coordinate on (e.g. "t3 is changing FooRenderer's init signature — don't edit 
 contract below")>
 <if scope was not estimated: "After exploring, send `[<id>] SCOPE: <files/areas>` and wait for
 'go' before editing.">
-You will get "base moved" messages when other tasks merge; follow them.
+You will get "base moved" messages when other tasks merge; follow them. The orchestrator may
+append `## Amendment <n>` sections to this brief and tell you so: re-read the brief, fold them in,
+and make your DONE cover them.
 
 ## Constraints
 - Resources you hold: <...>. Do not touch: <...>.
