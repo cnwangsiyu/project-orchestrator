@@ -4,7 +4,8 @@ description: >-
   Turn the current conversation into the orchestrator ("主对话") for the current git worktree's
   branch: the user only says what they want; this session plans the work, launches independent
   background Claude sessions (`claude --bg`) to execute each task, decides code isolation (work
-  in place vs. a dedicated git worktree + branch), tracks everything in a durable ledger, relays
+  in place vs. a dedicated git worktree + branch), coordinates scope and merge order across tasks
+  so they don't conflict, tracks everything in a durable ledger, relays
   results and questions to the user, and fast-forward merges finished work back into the base
   branch — while keeping its own context small. Use for 主对话, 统一入口管理任务, 管理这个分支的所有任务,
   任务编排, 调度/派发任务给其他对话, 让别的会话去做, orchestrate this branch, or
@@ -59,8 +60,8 @@ in each task's files.
 Base worktree: <path> · Orchestrator: <session name> · Push allowed: no
 
 ## Tasks
-| id | title | status | session (id · name) | workspace · branch | resources | outcome / blocker |
-|----|-------|--------|---------------------|--------------------|-----------|-------------------|
+| id | title | status | depends on | scope (areas it changes) | session (id · name) | workspace · branch | resources | outcome / blocker |
+|----|-------|--------|------------|--------------------------|---------------------|--------------------|-----------|-------------------|
 
 ## Worktrees
 | path | branch | created for | state (active / idle-reusable / removed) |
@@ -90,14 +91,16 @@ Otherwise:
    pieces can run or be reviewed separately; record dependencies (`blocked` until the
    prerequisite is merged). Don't over-split: each worker is a full session that re-reads context
    cold, so a task should be worth at least several minutes of work.
-2. **Choose isolation** (next section) and claim any exclusive resources in the ledger.
-3. **Write `tasks/<id>/brief.md`** from the template below. It must be self-contained: the worker
+2. **Plan against what is already running** (*Coordinating tasks*): estimate each task's scope,
+   check it against every open task, and decide parallel vs. sequenced and the merge order.
+3. **Choose isolation** (next section) and claim any exclusive resources in the ledger.
+4. **Write `tasks/<id>/brief.md`** from the template below. It must be self-contained: the worker
    knows nothing of this conversation. Include the user's intent in their own words, the
    acceptance criteria, the relevant facts already established, and pointers (paths, commits,
    docs) rather than pasted content.
-4. **Launch** (see *Launching a worker*), record the session in the ledger, subscribe to its idle
+5. **Launch** (see *Launching a worker*), record the session in the ledger, subscribe to its idle
    notice.
-5. **Tell the user in one or two lines** what was started and where. Then end the turn — worker
+6. **Tell the user in one or two lines** what was started and where. Then end the turn — worker
    messages wake the orchestrator; never poll or sleep.
 
 If the user's request is ambiguous in a way that changes what gets built, ask them first —
@@ -139,6 +142,49 @@ Rules that apply to every choice:
   still the right call, tell the user the cost in one line and proceed unless disk is short
   (`df -h`) — then ask.
 
+## Coordinating tasks
+
+The orchestrator owns the whole: what gets delivered is the base branch after every task is
+merged, and it has to work as one piece. Conflicts are cheapest to prevent at planning time,
+cheap to fix right after a merge, and expensive once several branches have drifted.
+
+**Know each task's scope.** Record in the ledger the areas a task will change — directories,
+modules, key files, public interfaces — plus any shared hot spots it touches: project and build
+files (`project.pbxproj`, `CMakeLists.txt`, `Podfile`/lockfiles, `package.json`), central
+registries, generated code, shared configs. When the scope can't be estimated from the request,
+the brief asks the worker to send `[<id>] SCOPE: <files/areas it plans to change>` after its
+initial exploration and before editing; check it against the other open tasks and reply "go" or
+adjust the plan.
+
+**Decide how overlapping tasks run:**
+- Disjoint scopes → run in parallel.
+- Same files or the same hot spot → sequence them (the later one is `blocked` until the earlier
+  one is merged), or fold them into a single task if they are really one change.
+- One task changes an interface another depends on → the interface task goes first and is merged;
+  the dependent task starts from the new base. If both must run at once, write the agreed
+  contract into both briefs and have the interface owner report any deviation immediately.
+- A new request contradicts a running task's goal → tell the user and propose amending,
+  re-scoping or cancelling the running task; don't launch something that will fight it.
+
+**Merge in a deliberate order.** One merge at a time, in dependency order, foundational and small
+changes first. Each merge moves the base, so every later branch must be re-based onto it.
+
+**Keep running workers in sync.** After every change to the base branch (a merge, or commits by a
+base-worktree writer), message each running branch worker: "base moved to `<sha>`: `<task>` —
+`<one-line summary>`, touched `<areas>`. Rebase before you report DONE; rebase now if this
+overlaps your work." Call out semantic changes explicitly (renamed APIs, changed behavior or
+defaults, moved files) — those break code without producing git conflicts.
+
+**Resolving conflicts.** The task that merges later rebases and resolves, in its own worktree.
+Its brief (or the follow-up message) carries the other task's report summary, so it understands
+both intents. If the two intents can't both be honored, the worker asks; the orchestrator
+decides when the user's goals settle it, otherwise asks the user with both options laid out.
+
+**Verify the combination.** A task passing on its own branch doesn't prove the set works. After
+merging tasks that interact, and always before telling the user that a multi-task goal is
+delivered, launch a short verification task on the base branch (build plus the relevant tests or
+runs). Report the goal as delivered only after it passes; failures become new tasks.
+
 ## Launching a worker
 
 ```bash
@@ -174,6 +220,14 @@ create or switch worktrees/branches, and do not touch the base worktree unless t
 ## Context
 <established facts, relevant paths/commits/docs, prior task outcomes>
 
+## Other active tasks
+<for each open task that could interact: id, goal in one line, scope, and what to avoid or
+coordinate on (e.g. "t3 is changing FooRenderer's init signature — don't edit it; build on the
+contract below")>
+<if scope was not estimated: "After exploring, send `[<id>] SCOPE: <files/areas>` and wait for
+'go' before editing.">
+You will get "base moved" messages when other tasks merge; follow them.
+
 ## Constraints
 - Resources you hold: <...>. Do not touch: <...>.
 - Git: <read-only: no commits | commit your own changes on your branch (authorized); explicit
@@ -187,7 +241,8 @@ create or switch worktrees/branches, and do not touch the base worktree unless t
 1. Write the full report to <absolute path to report.md>. Start it with a summary of at most 10
    lines: outcome, branch + commit(s), how it was verified, open issues. Details below that.
 2. Then SendMessage the orchestrator, at most 8 lines, first line exactly
-   `[<id>] DONE | QUESTION | BLOCKED | FAILED: <one-line headline>`.
+   `[<id>] DONE | QUESTION | BLOCKED | FAILED: <one-line headline>`. A DONE lists the areas
+   actually changed and any interface or behavior change other code might depend on.
 3. For a QUESTION or BLOCKED, wait for the reply instead of guessing on decisions that belong to
    the user. Never ask the orchestrator or the user to do something your permissions denied.
 4. If the orchestrator is not in ListAgents, write the report and end your turn.
@@ -227,10 +282,12 @@ without asking:
 2. If the base moved since the rebase, send the worker "rebase onto `<base branch>` again,
    re-verify, report DONE", then retry. If the ff merge fails because of the user's uncommitted
    changes, stop and ask the user.
-3. After merging: mark the task `merged`, log the new base commit, `claude stop <id>` the worker
+3. Send the "base moved" notice to every running branch worker (*Coordinating tasks*), and unblock
+   tasks that were waiting on this one.
+4. After merging: mark the task `merged`, log the new base commit, `claude stop <id>` the worker
    (its conversation is kept; `claude --bg --resume <session id>` brings it back), and release its
    resources.
-4. Branch and worktree cleanup: delete the merged task branch (`git branch -d`, which refuses
+5. Branch and worktree cleanup: delete the merged task branch (`git branch -d`, which refuses
    unmerged work). Remove the worktree with `git worktree remove <path>` (no `--force`); if it
    refuses because of untracked build output, or the repo is heavy, keep it as
    `idle-reusable` instead. Use `claude rm <id>` only for sessions whose work is merged or
