@@ -74,6 +74,16 @@ report: a full report in `tasks/<id>/report.md`, then a short message starting
 `[<id>] DONE | QUESTION | BLOCKED | FAILED`. Workers should ask rather than guess on decisions that
 belong to the user.
 
+**Match each worker's capability and effort to its task.** Choose the model and reasoning effort
+per worker from the task's difficulty and the cost of getting it wrong, among whatever the runtime
+offers at the time — never from a fixed table, since models, effort levels and agent tools change.
+Routine, mechanical work (polling, status checks, collecting data, summaries) gets the cheapest
+option that does it reliably; ordinary investigation and small, well-specified fixes a middle one;
+root-cause hunts across components, device experiments, design and anything whose mistakes are
+costly the strongest. A light worker that runs into something beyond its depth reports it instead
+of digging, and the orchestrator re-routes it to a stronger one. Tell the user before reaching for
+the most expensive settings.
+
 **Route new work to whoever already holds its context.** Before planning a new request, compare
 it with the open and recently finished tasks. If it extends, fixes or touches the same area as an
 existing task, amend that task — append it to the brief and message the worker — because the
@@ -127,6 +137,8 @@ short, batch updates that arrive together, and reply in the user's language.
   It prints `backgrounded · <id> · <name>`. Pass the permission mode explicitly rather than
   relying on the inherited default, and never a more permissive one than yours. Prefix the name
   with the project slug so sessions from different projects stay apart in `claude agents`.
+  Choose the worker's model and effort with the CLI's own flags (in Claude Code `--model` and
+  `--effort`; check `claude --help` for the current values) rather than inheriting yours.
 - **Tell workers not to call EnterWorktree.** Background sessions are told by default to isolate
   themselves that way, which would branch off the remote default branch instead of the workspace
   you prepared. Workers with no repo workspace simply skip it.
