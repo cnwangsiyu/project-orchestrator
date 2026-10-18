@@ -74,15 +74,21 @@ report: a full report in `tasks/<id>/report.md`, then a short message starting
 `[<id>] DONE | QUESTION | BLOCKED | FAILED`. Workers should ask rather than guess on decisions that
 belong to the user.
 
-**Match each worker's capability and effort to its task.** Choose the model and reasoning effort
-per worker from the task's difficulty and the cost of getting it wrong, among whatever the runtime
-offers at the time — never from a fixed table, since models, effort levels and agent tools change.
-Routine, mechanical work (polling, status checks, collecting data, summaries) gets the cheapest
-option that does it reliably; ordinary investigation and small, well-specified fixes a middle one;
-root-cause hunts across components, device experiments, design and anything whose mistakes are
-costly the strongest. A light worker that runs into something beyond its depth reports it instead
-of digging, and the orchestrator re-routes it to a stronger one. Tell the user before reaching for
-the most expensive settings.
+**Match each worker's capability and effort to its task.** Decide per worker, from the task's
+difficulty, how ambiguous it is, what a wrong answer costs, and how closely you will check the
+result — choosing among whatever the runtime offers now, never from a fixed table, since models,
+effort scales and agent tools change and the same level name means different things on different
+models. Higher effort buys more verification, edge cases and independent judgment; lower effort
+returns a usable starting point sooner, which suits routine, well-scoped work whose output you
+review anyway. Effort is usually the first knob: raise or lower it within a model, and change the
+model only for a gap effort cannot close. Cheap workers pay off on routine, independent or bulky
+work (polling, collecting data, summaries, sweeps too large for one context); a hard, tightly
+coupled chain of reasoning — root-cause hunts across components, device experiments, design,
+anything costly to get wrong — goes to one strong worker rather than being split thin. The top
+settings have diminishing returns and can overthink; use them only where a lesser one has visibly
+fallen short. Outcomes are the evidence: a light worker that hits something beyond its depth
+reports it instead of digging, and you re-route it stronger; work that strong workers finish
+easily can run lighter next time. Tell the user before reaching for the most expensive settings.
 
 **Route new work to whoever already holds its context.** Before planning a new request, compare
 it with the open and recently finished tasks. If it extends, fixes or touches the same area as an
@@ -137,8 +143,8 @@ short, batch updates that arrive together, and reply in the user's language.
   It prints `backgrounded · <id> · <name>`. Pass the permission mode explicitly rather than
   relying on the inherited default, and never a more permissive one than yours. Prefix the name
   with the project slug so sessions from different projects stay apart in `claude agents`.
-  Choose the worker's model and effort with the CLI's own flags (in Claude Code `--model` and
-  `--effort`; check `claude --help` for the current values) rather than inheriting yours.
+  Set the worker's model and effort explicitly with the CLI's own flags (in Claude Code `--model`
+  and `--effort`; check `claude --help` for the current values) — otherwise it inherits yours.
 - **Tell workers not to call EnterWorktree.** Background sessions are told by default to isolate
   themselves that way, which would branch off the remote default branch instead of the workspace
   you prepared. Workers with no repo workspace simply skip it.
