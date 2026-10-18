@@ -157,10 +157,17 @@ short, batch updates that arrive together, and reply in the user's language.
 - **Notifications:** `SendMessage(to=<worker>, message="", notify_when_idle=true)` subscribes to
   one notice when the worker next goes idle; renew it while the task is open. Worker messages and
   idle notices wake the orchestrator, so end the turn instead of waiting.
-- **Lifecycle:** `claude agents --json` lists sessions; `claude logs <id>` shows recent output
+- **Lifecycle:** `claude agents --json` lists live sessions (`--all` also lists finished ones;
+  read fields defensively, since some entries lack `status`); `claude logs <id>` shows recent output
   (last resort); `claude stop <id>` stops a worker but keeps its conversation;
   `claude --bg --resume <session id> [--model …] [--effort …] "<prompt>"` brings a stopped one
   back with its conversation, optionally on a different model and effort (verified on 2.1.302; it
-  gets a new short id, so look it up again);
+  gets a new short id, so look it up again). Resume needs the full session id — the `sessionId`
+  field of `claude agents --json --all`, or the `<id>.jsonl` name under
+  `~/.claude/projects/<cwd slug>/` — and should run from the worker's original workspace.
+  A background session keeps its own saved options: resuming it *with* new flags starts a **copy**
+  (new id, same conversation, new settings) and leaves the original as it was; without flags the
+  same command continues the original. The copy and the original then share the worker's name, so
+  address the live one as `name [ref]` from `ListAgents`, and stop or remove the stale one.
   `claude rm <id>` deletes the session and possibly its worktree, so use it only once the work is
   merged or abandoned.
