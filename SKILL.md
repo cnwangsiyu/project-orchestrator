@@ -74,7 +74,8 @@ report: a full report in `tasks/<id>/report.md`, then a short message starting
 `[<id>] DONE | QUESTION | BLOCKED | FAILED`. Workers should ask rather than guess on decisions that
 belong to the user.
 
-**Match each worker's capability and effort to its task.** Decide per worker, from the task's
+**Match each worker's capability and effort to its task.** Decide per task — again for every task
+or amendment a worker takes on, not once per worker — from the task's
 difficulty, how ambiguous it is, what a wrong answer costs, and how closely you will check the
 result — choosing among whatever the runtime offers now, never from a fixed table, since models,
 effort scales and agent tools change and the same level name means different things on different
@@ -145,6 +146,8 @@ short, batch updates that arrive together, and reply in the user's language.
   with the project slug so sessions from different projects stay apart in `claude agents`.
   Set the worker's model and effort explicitly with the CLI's own flags (in Claude Code `--model`
   and `--effort`; check `claude --help` for the current values) — otherwise it inherits yours.
+  To change them for a worker's next task, stop it and resume it with the new flags (see
+  Lifecycle); a message cannot change a running session's model or effort.
 - **Tell workers not to call EnterWorktree.** Background sessions are told by default to isolate
   themselves that way, which would branch off the remote default branch instead of the workspace
   you prepared. Workers with no repo workspace simply skip it.
@@ -156,6 +159,8 @@ short, batch updates that arrive together, and reply in the user's language.
   idle notices wake the orchestrator, so end the turn instead of waiting.
 - **Lifecycle:** `claude agents --json` lists sessions; `claude logs <id>` shows recent output
   (last resort); `claude stop <id>` stops a worker but keeps its conversation;
-  `claude --bg --resume <session id>` should bring a stopped one back (not yet verified);
+  `claude --bg --resume <session id> [--model …] [--effort …] "<prompt>"` brings a stopped one
+  back with its conversation, optionally on a different model and effort (verified on 2.1.302; it
+  gets a new short id, so look it up again);
   `claude rm <id>` deletes the session and possibly its worktree, so use it only once the work is
   merged or abandoned.
