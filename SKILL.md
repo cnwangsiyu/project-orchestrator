@@ -169,6 +169,10 @@ short, batch updates that arrive together, and reply in the user's language.
   FREE but unplugged device is visible; `take --offline` books one ahead of a plug-in. A hold
   survives unplugging: a worker whose held device drops reports BLOCKED (the user must re-plug,
   unlock or re-trust it) and keeps the hold rather than returning it.
+  `status` also lists connected physical devices that are not registered yet. A new device is
+  registered with `res add <id> --device <udid|serial> --for "<what it is>"`, whose default policy
+  `ask-user` keeps it unusable until the user says it may be shared (then `--force` on take, or
+  edit its policy in the registry to `open`); never guess that a new phone is shareable.
   The script lives in this skill's `scripts/res`, symlinked into `_shared/`.
 - **Create worktrees yourself** with `git -C <repo> worktree add -b <branch> <path> <base>`, next to
   the repo's other worktrees and following its branch naming. `claude --worktree` branches from the

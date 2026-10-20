@@ -19,6 +19,9 @@ res take <id> --by <session> --project <slug> --for "<purpose>" [--task <id>] [-
 res extend <id> --by <session> --until <when>
 res return <id> --by <session> [--note "<text>"]
 res return <id> --by <session> --force --note "<why>"   reclaim a hold whose holder is gone
+res add <id> --device <udid|serial|-> --for "<description>" [--policy open|ask-user|never]
+                                      register a resource (default policy ask-user: the user
+                                      decides whether a newly plugged-in device may be shared)
 res log [<n>]                         last n history lines (default 20)
 Devices show their live link (usbmux / devicectl / adb). take refuses a device that is not connected
 unless --offline (booking ahead of a plug-in).
@@ -54,10 +57,20 @@ conn() {
   state=$(printf '%s\n' "$line" | sed -E 's/.*\((UDID|ADB|USBMUX)\) +//; s/  .*//')
   case "$state" in available*|device) echo connected ;; *) echo "${state:-not seen}" ;; esac
 }
+# Physical devices that are connected but not in the registry, one "<id> <source>" per line.
+unregistered() {
+  probe
+  printf '%s\n' "$DEVS" | sed -nE \
+    -e 's/^([^ ]+) \((USBMUX|ADB)\) device$/\1 \2/p' \
+    -e 's/.* ([0-9A-Fa-f-]+) \(UDID\) +(available|connected).*physical.*/\1 devicectl/p' |
+    sort -u -k1,1 | while read -r dev src; do
+      awk -F'\t' -v d="$dev" '$4==d{f=1} END{exit !f}' "$REG" || echo "$dev $src"
+    done
+}
 log() { printf '%s\t%s\t%s\t%s\t%s\n' "$(now)" "$1" "$2" "$3" "$4" >>"$LOG"; }
 
 parse() {
-  BY= PROJECT= PURPOSE= TASK= UNTIL= NOTE= FORCE= OFFLINE=
+  BY= PROJECT= PURPOSE= TASK= UNTIL= NOTE= FORCE= OFFLINE= DEVICE= POLICY=
   while [ $# -gt 0 ]; do
     case "$1" in
       --by) BY="$2"; shift 2 ;;
@@ -68,6 +81,8 @@ parse() {
       --note) NOTE="$2"; shift 2 ;;
       --force) FORCE=1; shift ;;
       --offline) OFFLINE=1; shift ;;
+      --device) DEVICE="$2"; shift 2 ;;
+      --policy) POLICY="$2"; shift 2 ;;
       *) die "unknown option '$1'" ;;
     esac
   done
@@ -80,6 +95,7 @@ write_info() {
 
 cmd_status() {
   [ -f "$REG" ] || die "no registry at $REG"
+  probe  # once here: conn and unregistered run in subshells and would each probe again
   printf '%-16s %-9s %-9s %-12s %-34s %s\n' ID KIND POLICY LINK HOLDER "SINCE → UNTIL / PURPOSE"
   while IFS=$'\t' read -r id kind policy dev desc; do
     case "$id" in ''|\#*) continue ;; esac
@@ -93,6 +109,27 @@ cmd_status() {
     fi
     printf '%-16s %-9s %-9s %-12s %-34s %s\n' "$id" "$kind" "$policy" "$(conn "$dev")" "$holder" "$detail"
   done <"$REG"
+  [ -n "${1:-}" ] && return 0
+  local new; new=$(unregistered)
+  if [ -n "$new" ]; then
+    echo
+    echo "Connected but not registered (add with: res add <id> --device <id> --for \"<what it is>\"):"
+    printf '%s\n' "$new" | sed 's/^/  /'
+  fi
+}
+
+cmd_add() {
+  local id="${1:-}"; shift || true; parse "$@"
+  [ -n "$id" ] && [ -n "$DEVICE" ] && [ -n "$PURPOSE" ] || die "add needs <id>, --device and --for"
+  case "$id" in *[!A-Za-z0-9_.-]*) die "id may use letters, digits, . _ - only" ;; esac
+  [ -z "$(reg_line "$id")" ] || die "'$id' already exists"
+  [ "$DEVICE" = - ] || ! awk -F'\t' -v d="$DEVICE" '$4==d{f=1} END{exit !f}' "$REG" || die "device $DEVICE is already registered"
+  POLICY="${POLICY:-ask-user}"
+  case "$POLICY" in open|ask-user|never) ;; *) die "policy must be open, ask-user or never" ;; esac
+  local kind=device; [ "$DEVICE" = - ] && kind=checkout
+  printf '%s\t%s\t%s\t%s\t%s\n' "$id" "$kind" "$POLICY" "$DEVICE" "$PURPOSE" >>"$REG"
+  log add "$id" "${BY:-?}" "$POLICY · $DEVICE · $PURPOSE"
+  echo "added $id ($kind, $POLICY)"
 }
 
 cmd_take() {
@@ -104,7 +141,7 @@ cmd_take() {
     ask-user) [ -n "$FORCE" ] || { echo "res: '$id' needs the user's OK first (policy ask-user); once given, retry with --force" >&2; exit 3; } ;;
   esac
   if [ "$dev" != - ] && [ -z "$OFFLINE" ] && [ "$(field "$id" by)" != "$BY" ]; then
-    link=$(conn "$dev")
+    probe; link=$(conn "$dev")
     [ "$link" = connected ] || { echo "res: '$id' is not connected ($link) — ask the user to plug in / unlock / trust it; --offline holds it anyway" >&2; exit 4; }
   fi
   mkdir -p "$LOCKS"
@@ -153,6 +190,7 @@ case "${1:-}" in
   take) shift; cmd_take "$@" ;;
   extend) shift; cmd_extend "$@" ;;
   return) shift; cmd_return "$@" ;;
+  add) shift; cmd_add "$@" ;;
   log) shift; cmd_log "$@" ;;
   -h|--help|help|'') usage ;;
   *) usage >&2; exit 1 ;;
