@@ -1,0 +1,132 @@
+#!/bin/bash
+# res — shared resource holds across project orchestrators (devices, shared checkouts).
+# State lives in $RES_DIR (default ~/.claude/orchestrator/_shared):
+#   resources.tsv   registry: id<TAB>kind<TAB>policy<TAB>description   (policy: open | ask-user | never)
+#   locks/<id>.d/   present while held (mkdir is atomic, so two sessions can't both take it)
+#   log.tsv         append-only history of takes and returns
+set -euo pipefail
+
+RES_DIR="${RES_DIR:-$HOME/.claude/orchestrator/_shared}"
+REG="$RES_DIR/resources.tsv"
+LOCKS="$RES_DIR/locks"
+LOG="$RES_DIR/log.tsv"
+
+usage() {
+  cat <<'EOF'
+res status [<id>]                     show every resource (or one) and who holds it
+res take <id> --by <session> --project <slug> --for "<purpose>" [--task <id>] [--until <when>]
+res extend <id> --by <session> --until <when>
+res return <id> --by <session> [--note "<text>"]
+res return <id> --by <session> --force --note "<why>"   reclaim a hold whose holder is gone
+res log [<n>]                         last n history lines (default 20)
+Exit codes: 0 ok, 2 held by someone else, 3 policy forbids, 1 usage/other error.
+EOF
+}
+
+die() { echo "res: $*" >&2; exit 1; }
+now() { date '+%Y-%m-%d %H:%M'; }
+
+reg_line() { awk -F'\t' -v id="$1" '$1==id' "$REG"; }
+need_id() {
+  [ -n "${1:-}" ] || die "missing resource id"
+  [ -n "$(reg_line "$1")" ] || die "unknown resource '$1' (see: res status)"
+}
+field() { awk -F'\t' -v k="$2" '$1==k{print $2}' "$LOCKS/$1.d/info" 2>/dev/null || true; }
+log() { printf '%s\t%s\t%s\t%s\t%s\n' "$(now)" "$1" "$2" "$3" "$4" >>"$LOG"; }
+
+parse() {
+  BY= PROJECT= PURPOSE= TASK= UNTIL= NOTE= FORCE=
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --by) BY="$2"; shift 2 ;;
+      --project) PROJECT="$2"; shift 2 ;;
+      --for) PURPOSE="$2"; shift 2 ;;
+      --task) TASK="$2"; shift 2 ;;
+      --until) UNTIL="$2"; shift 2 ;;
+      --note) NOTE="$2"; shift 2 ;;
+      --force) FORCE=1; shift ;;
+      *) die "unknown option '$1'" ;;
+    esac
+  done
+}
+
+write_info() {
+  printf 'by\t%s\nproject\t%s\ntask\t%s\nfor\t%s\nsince\t%s\nuntil\t%s\n' \
+    "$BY" "$PROJECT" "$TASK" "$PURPOSE" "$1" "$UNTIL" >"$LOCKS/$2.d/info"
+}
+
+cmd_status() {
+  [ -f "$REG" ] || die "no registry at $REG"
+  printf '%-16s %-9s %-9s %-34s %s\n' ID KIND POLICY HOLDER "SINCE → UNTIL / PURPOSE"
+  while IFS=$'\t' read -r id kind policy desc; do
+    case "$id" in ''|\#*) continue ;; esac
+    [ -n "${1:-}" ] && [ "$id" != "$1" ] && continue
+    if [ -d "$LOCKS/$id.d" ]; then
+      local task; task=$(field "$id" task)
+      holder="$(field "$id" by) ($(field "$id" project)${task:+/$task})"
+      detail="$(field "$id" since) → $(field "$id" until | sed 's/^$/?/') · $(field "$id" for)"
+    else
+      holder=FREE; detail="$desc"
+    fi
+    printf '%-16s %-9s %-9s %-34s %s\n' "$id" "$kind" "$policy" "$holder" "$detail"
+  done <"$REG"
+}
+
+cmd_take() {
+  local id="${1:-}"; shift || true; need_id "$id"; parse "$@"
+  [ -n "$BY" ] && [ -n "$PROJECT" ] && [ -n "$PURPOSE" ] || die "take needs --by, --project and --for"
+  local policy; policy=$(reg_line "$id" | cut -f3)
+  case "$policy" in
+    never) echo "res: '$id' is off limits (policy never): $(reg_line "$id" | cut -f4)" >&2; exit 3 ;;
+    ask-user) [ -n "$FORCE" ] || { echo "res: '$id' needs the user's OK first (policy ask-user); once given, retry with --force" >&2; exit 3; } ;;
+  esac
+  mkdir -p "$LOCKS"
+  if mkdir "$LOCKS/$id.d" 2>/dev/null; then
+    write_info "$(now)" "$id"
+    log take "$id" "$BY ($PROJECT${TASK:+/$TASK})" "$PURPOSE${UNTIL:+ · until $UNTIL}"
+    echo "took $id"
+  elif [ "$(field "$id" by)" = "$BY" ]; then
+    echo "already held by you: $id"
+  else
+    echo "res: '$id' is held by $(field "$id" by) ($(field "$id" project)) since $(field "$id" since), until $(field "$id" until | sed 's/^$/?/') — $(field "$id" for)" >&2
+    echo "res: message that session (SendMessage) and wait; do not use the resource meanwhile" >&2
+    exit 2
+  fi
+}
+
+cmd_extend() {
+  local id="${1:-}"; shift || true; need_id "$id"; parse "$@"
+  [ -d "$LOCKS/$id.d" ] || die "'$id' is not held"
+  [ "$(field "$id" by)" = "$BY" ] || die "'$id' is held by $(field "$id" by), not $BY"
+  local info="$LOCKS/$id.d/info" tmp; tmp=$(mktemp)
+  awk -F'\t' -v u="$UNTIL" 'BEGIN{OFS="\t"} $1=="until"{$2=u} {print}' "$info" >"$tmp" && mv "$tmp" "$info"
+  log extend "$id" "$BY" "until $UNTIL"
+  echo "extended $id until $UNTIL"
+}
+
+cmd_return() {
+  local id="${1:-}"; shift || true; need_id "$id"; parse "$@"
+  [ -n "$BY" ] || die "return needs --by"
+  [ -d "$LOCKS/$id.d" ] || { echo "$id was not held"; return 0; }
+  local holder; holder=$(field "$id" by)
+  if [ "$holder" != "$BY" ]; then
+    [ -n "$FORCE" ] && [ -n "$NOTE" ] || die "'$id' is held by $holder; only --force --note \"<why>\" may reclaim it"
+    log reclaim "$id" "$BY" "from $holder: $NOTE"
+  else
+    log return "$id" "$BY" "$NOTE"
+  fi
+  rm -rf "$LOCKS/$id.d"
+  echo "returned $id"
+}
+
+cmd_log() { [ -f "$LOG" ] && tail -n "${1:-20}" "$LOG" || true; }
+
+case "${1:-}" in
+  status) shift; cmd_status "$@" ;;
+  take) shift; cmd_take "$@" ;;
+  extend) shift; cmd_extend "$@" ;;
+  return) shift; cmd_return "$@" ;;
+  log) shift; cmd_log "$@" ;;
+  -h|--help|help|'') usage ;;
+  *) usage >&2; exit 1 ;;
+esac

@@ -109,6 +109,15 @@ ports and shared caches have a single holder at a time. In heavy repos a new wor
 checkout and a cold build, so reuse idle ones or run tasks one after another — say so when you
 choose. Record every worktree you create and remove it once its work is merged or abandoned.
 
+**Hold shared resources through the shared table, not through another orchestrator.** Devices and
+checkouts that several projects use are listed in `~/.claude/orchestrator/_shared/resources.tsv`,
+and every hold on them goes through `~/.claude/orchestrator/_shared/res` (see Mechanics), so any
+project can see who has what without asking. Check `res status` before planning work that needs
+one. The session that actually uses the resource — usually the worker — takes it right before use
+and returns it right after; put the exact commands in its brief. If it is held, message the holder
+and wait; never use a held resource. Priority clashes between projects go to the user. A resource
+only this project uses stays in the ledger; add newly shared ones to the registry.
+
 **Prevent conflicts by planning, and fix the rest early.** Know what each task will change (ask the
 worker to report its intended scope first when you can't tell). Run disjoint tasks in parallel;
 sequence or merge tasks that hit the same files or hot spots such as project/build files and
@@ -151,6 +160,12 @@ short, batch updates that arrive together, and reply in the user's language.
 - **Tell workers not to call EnterWorktree.** Background sessions are told by default to isolate
   themselves that way, which would branch off the remote default branch instead of the workspace
   you prepared. Workers with no repo workspace simply skip it.
+- **Shared resources:** `res status`; `res take <id> --by <session name> --project <slug>
+  --for "<purpose>" [--task <id>] [--until <when>]` (exit 2 = held by someone else, 3 = policy
+  `never`, or `ask-user` without the user's OK — then retry with `--force`); `res extend <id> --by
+  <name> --until <when>`; `res return <id> --by <name>`. A hold whose holder session is gone may be
+  reclaimed with `res return <id> --by <name> --force --note "<why>"`. `res log` shows history.
+  The script lives in this skill's `scripts/res`, symlinked into `_shared/`.
 - **Create worktrees yourself** with `git -C <repo> worktree add -b <branch> <path> <base>`, next to
   the repo's other worktrees and following its branch naming. `claude --worktree` branches from the
   remote default branch, not from the base you chose.
