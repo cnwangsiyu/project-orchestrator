@@ -165,7 +165,7 @@ short, batch updates that arrive together, and reply in the user's language.
   `never`, or `ask-user` without the user's OK — then retry with `--force`; 4 = device not
   connected); `res extend <id> --by <name> --until <when>`; `res return <id> --by <name>`. A hold
   whose holder session is gone may be reclaimed with `res return <id> --by <name> --force --note
-  "<why>"`. `res log` shows history. `status` shows each device's live link (devicectl / adb), so a
+  "<why>"`. `res log` shows history. `status` shows each device's live link (usbmux / devicectl / adb), so a
   FREE but unplugged device is visible; `take --offline` books one ahead of a plug-in. A hold
   survives unplugging: a worker whose held device drops reports BLOCKED (the user must re-plug,
   unlock or re-trust it) and keeps the hold rather than returning it.

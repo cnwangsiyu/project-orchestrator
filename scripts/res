@@ -20,7 +20,7 @@ res extend <id> --by <session> --until <when>
 res return <id> --by <session> [--note "<text>"]
 res return <id> --by <session> --force --note "<why>"   reclaim a hold whose holder is gone
 res log [<n>]                         last n history lines (default 20)
-Devices show their live link (devicectl / adb). take refuses a device that is not connected
+Devices show their live link (usbmux / devicectl / adb). take refuses a device that is not connected
 unless --offline (booking ahead of a plug-in).
 Exit codes: 0 ok, 2 held by someone else, 3 policy forbids, 4 device not connected, 1 usage/other error.
 EOF
@@ -36,10 +36,12 @@ need_id() {
 }
 field() { awk -F'\t' -v k="$2" '$1==k{print $2}' "$LOCKS/$1.d/info" 2>/dev/null || true; }
 # Live link of a device: connected | <devicectl state> | not seen. One probe per run.
+# usbmux (pymobiledevice3) comes first: devicectl shows iOS < 17 devices only by ECID.
 DEVS=
 probe() {
   [ -n "$DEVS" ] && return 0
-  DEVS=$( { xcrun devicectl list devices 2>/dev/null || true
+  DEVS=$( { pymobiledevice3 usbmux list 2>/dev/null | sed -nE 's/.*"Identifier": "([^"]+)".*/\1 (USBMUX) device/p' || true
+            xcrun devicectl list devices 2>/dev/null || true
             adb devices 2>/dev/null | awk -F'\t' 'NR>1 && NF==2{print $1 " (ADB) " $2}' || true; } )
   DEVS="${DEVS:-none}"
 }
@@ -49,7 +51,7 @@ conn() {
   local line state
   line=$(printf '%s\n' "$DEVS" | grep -F -- "$1 (" | head -1 || true)
   [ -n "$line" ] || { echo "not seen"; return; }
-  state=$(printf '%s\n' "$line" | sed -E 's/.*\((UDID|ADB)\) +//; s/  .*//')
+  state=$(printf '%s\n' "$line" | sed -E 's/.*\((UDID|ADB|USBMUX)\) +//; s/  .*//')
   case "$state" in available*|device) echo connected ;; *) echo "${state:-not seen}" ;; esac
 }
 log() { printf '%s\t%s\t%s\t%s\t%s\n' "$(now)" "$1" "$2" "$3" "$4" >>"$LOG"; }
