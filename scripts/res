@@ -39,13 +39,21 @@ need_id() {
 }
 field() { awk -F'\t' -v k="$2" '$1==k{print $2}' "$LOCKS/$1.d/info" 2>/dev/null || true; }
 # Live link of a device: connected | <devicectl state> | not seen. One probe per run.
-# usbmux (pymobiledevice3) comes first: devicectl shows iOS < 17 devices only by ECID.
+# usbmux comes first: devicectl shows iOS < 17 devices only by ECID. The three sources run in
+# parallel; idevice_id (libimobiledevice) is preferred over pymobiledevice3, which is ~1 s slower.
+# `probe quick` skips devicectl (0.2 s to several s): enough when usbmux or adb sees the device.
 DEVS=
 probe() {
   [ -n "$DEVS" ] && return 0
-  DEVS=$( { pymobiledevice3 usbmux list 2>/dev/null | sed -nE 's/.*"Identifier": "([^"]+)".*/\1 (USBMUX) device/p' || true
-            xcrun devicectl list devices 2>/dev/null || true
-            adb devices 2>/dev/null | awk -F'\t' 'NR>1 && NF==2{print $1 " (ADB) " $2}' || true; } )
+  local t; t=$(mktemp -d)
+  { if command -v idevice_id >/dev/null; then idevice_id -l 2>/dev/null | sed 's/$/ (USBMUX) device/'
+    else pymobiledevice3 usbmux list 2>/dev/null | sed -nE 's/.*"Identifier": "([^"]+)".*/\1 (USBMUX) device/p'
+    fi >"$t/1" || true; } &
+  [ "${1:-}" = quick ] || { xcrun devicectl list devices >"$t/2" 2>/dev/null || true; } &
+  { adb devices 2>/dev/null | awk -F'\t' 'NR>1 && NF==2{print $1 " (ADB) " $2}' >"$t/3" || true; } &
+  wait
+  DEVS=$(cat "$t/1" "$t/2" "$t/3" 2>/dev/null || true)
+  rm -rf "$t"
   DEVS="${DEVS:-none}"
 }
 conn() {
@@ -56,16 +64,6 @@ conn() {
   [ -n "$line" ] || { echo "not seen"; return; }
   state=$(printf '%s\n' "$line" | sed -E 's/.*\((UDID|ADB|USBMUX)\) +//; s/  .*//')
   case "$state" in available*|device) echo connected ;; *) echo "${state:-not seen}" ;; esac
-}
-# Physical devices that are connected but not in the registry, one "<id> <source>" per line.
-unregistered() {
-  probe
-  printf '%s\n' "$DEVS" | sed -nE \
-    -e 's/^([^ ]+) \((USBMUX|ADB)\) device$/\1 \2/p' \
-    -e 's/.* ([0-9A-Fa-f-]+) \(UDID\) +(available|connected).*physical.*/\1 devicectl/p' |
-    sort -u -k1,1 | while read -r dev src; do
-      awk -F'\t' -v d="$dev" '$4==d{f=1} END{exit !f}' "$REG" || echo "$dev $src"
-    done
 }
 log() { printf '%s\t%s\t%s\t%s\t%s\n' "$(now)" "$1" "$2" "$3" "$4" >>"$LOG"; }
 
@@ -95,27 +93,46 @@ write_info() {
 
 cmd_status() {
   [ -f "$REG" ] || die "no registry at $REG"
-  probe  # once here: conn and unregistered run in subshells and would each probe again
-  printf '%-16s %-9s %-9s %-12s %-34s %s\n' ID KIND POLICY LINK HOLDER "SINCE → UNTIL / PURPOSE"
-  while IFS=$'\t' read -r id kind policy dev desc; do
-    case "$id" in ''|\#*) continue ;; esac
-    [ -n "${1:-}" ] && [ "$id" != "$1" ] && continue
-    if [ -d "$LOCKS/$id.d" ]; then
-      local task; task=$(field "$id" task)
-      holder="$(field "$id" by) ($(field "$id" project)${task:+/$task})"
-      detail="$(field "$id" since) → $(field "$id" until | sed 's/^$/?/') · $(field "$id" for)"
-    else
-      holder=FREE; detail="$desc"
-    fi
-    printf '%-16s %-9s %-9s %-12s %-34s %s\n' "$id" "$kind" "$policy" "$(conn "$dev")" "$holder" "$detail"
-  done <"$REG"
-  [ -n "${1:-}" ] && return 0
-  local new; new=$(unregistered)
-  if [ -n "$new" ]; then
-    echo
-    echo "Connected but not registered (add with: res add <id> --device <id> --for \"<what it is>\"):"
-    printf '%s\n' "$new" | sed 's/^/  /'
-  fi
+  # A status of one checkout needs no device probe. One awk renders everything: a fork per
+  # field and row cost ~1.5 s.
+  if [ -z "${1:-}" ] || [ "$(reg_line "$1" | cut -f4)" != - ]; then probe; fi
+  local infos=() t; t=$(mktemp); printf '%s\n' "$DEVS" >"$t"
+  for f in "$LOCKS"/*.d/info; do [ -f "$f" ] && infos+=("$f"); done
+  awk -F'\t' -v only="${1:-}" '
+    function state(dev,   i, l) {
+      if (dev == "-") return "-"
+      for (i = 1; i <= nd; i++) if (index(D[i], dev " (")) {
+        l = D[i]; sub(/.*\((UDID|ADB|USBMUX)\) +/, "", l); sub(/  .*/, "", l)
+        return (l ~ /^available/ || l == "device") ? "connected" : (l == "" ? "not seen" : l)
+      }
+      return "not seen"
+    }
+    FILENAME == devs { D[++nd] = $0; next }
+    FILENAME != reg { n = split(FILENAME, a, "/"); id = a[n-1]; sub(/\.d$/, "", id); H[id, $1] = $2; held[id] = 1; next }
+    /^#/ || $1 == "" { next }
+    { known[$4] = 1 }
+    only != "" && $1 != only { next }
+    !hdr++ { printf "%-16s %-9s %-9s %-12s %-34s %s\n", "ID", "KIND", "POLICY", "LINK", "HOLDER", "SINCE → UNTIL / PURPOSE" }
+    {
+      if ($1 in held) {
+        t = H[$1, "task"]; u = H[$1, "until"]
+        holder = H[$1, "by"] " (" H[$1, "project"] (t != "" ? "/" t : "") ")"
+        detail = H[$1, "since"] " → " (u != "" ? u : "?") " · " H[$1, "for"]
+      } else { holder = "FREE"; detail = $5 }
+      printf "%-16s %-9s %-9s %-12s %-34s %s\n", $1, $2, $3, state($4), holder, detail
+    }
+    END {
+      if (only != "") exit
+      for (i = 1; i <= nd; i++) {
+        l = D[i]; id = ""
+        if (match(l, /^[^ ]+ \((USBMUX|ADB)\) device$/)) { id = l; sub(/ .*/, "", id); src = (l ~ /ADB/) ? "ADB" : "USBMUX" }
+        else if (l ~ /\(UDID\) +(available|connected).*physical/) { id = l; sub(/ \(UDID\).*/, "", id); sub(/.* /, "", id); src = "devicectl" }
+        if (id != "" && !(id in known) && !(id in seen)) { seen[id] = 1; out = out "  " id " " src "\n" }
+      }
+      if (out != "") printf "\nConnected but not registered (add with: res add <id> --device <id> --for \"<what it is>\"):\n%s", out
+    }
+  ' reg="$REG" devs="$t" "$t" ${infos[@]+"${infos[@]}"} "$REG"
+  rm -f "$t"
 }
 
 cmd_add() {
@@ -141,7 +158,8 @@ cmd_take() {
     ask-user) [ -n "$FORCE" ] || { echo "res: '$id' needs the user's OK first (policy ask-user); once given, retry with --force" >&2; exit 3; } ;;
   esac
   if [ "$dev" != - ] && [ -z "$OFFLINE" ] && [ "$(field "$id" by)" != "$BY" ]; then
-    probe; link=$(conn "$dev")
+    probe quick; link=$(conn "$dev")
+    [ "$link" = connected ] || { DEVS=; probe; link=$(conn "$dev"); }
     [ "$link" = connected ] || { echo "res: '$id' is not connected ($link) — ask the user to plug in / unlock / trust it; --offline holds it anyway" >&2; exit 4; }
   fi
   mkdir -p "$LOCKS"
