@@ -5,12 +5,14 @@
 #                   (policy: open | ask-user | never; device-id: iOS UDID or adb serial, - for none)
 #   locks/<id>.d/   present while held (mkdir is atomic, so two sessions can't both take it)
 #   log.tsv         append-only history of takes and returns
+#   notes/<id>.md   pitfalls of that resource (model/OS quirks, workarounds); printed on take
 set -euo pipefail
 
 RES_DIR="${RES_DIR:-$HOME/.claude/orchestrator/_shared}"
 REG="$RES_DIR/resources.tsv"
 LOCKS="$RES_DIR/locks"
 LOG="$RES_DIR/log.tsv"
+NOTES="$RES_DIR/notes"
 
 usage() {
   cat <<'EOF'
@@ -22,6 +24,8 @@ res return <id> --by <session> --force --note "<why>"   reclaim a hold whose hol
 res add <id> --device <udid|serial|-> --for "<description>" [--policy open|ask-user|never]
                                       register a resource (default policy ask-user: the user
                                       decides whether a newly plugged-in device may be shared)
+res note <id> --by <session> --note "<pitfall and workaround>"
+                                      append a dated pitfall to notes/<id>.md (shown on every take)
 res log [<n>]                         last n history lines (default 20)
 Devices show their live link (usbmux / devicectl / adb). take refuses a device that is not connected
 unless --offline (booking ahead of a plug-in).
@@ -133,6 +137,7 @@ cmd_status() {
     }
   ' reg="$REG" devs="$t" "$t" ${infos[@]+"${infos[@]}"} "$REG"
   rm -f "$t"
+  [ -z "${1:-}" ] || show_notes "$1"
 }
 
 cmd_add() {
@@ -166,9 +171,9 @@ cmd_take() {
   if mkdir "$LOCKS/$id.d" 2>/dev/null; then
     write_info "$(now)" "$id"
     log take "$id" "$BY ($PROJECT${TASK:+/$TASK})" "$PURPOSE${UNTIL:+ · until $UNTIL}"
-    echo "took $id"
+    echo "took $id"; show_notes "$id"
   elif [ "$(field "$id" by)" = "$BY" ]; then
-    echo "already held by you: $id"
+    echo "already held by you: $id"; show_notes "$id"
   else
     echo "res: '$id' is held by $(field "$id" by) ($(field "$id" project)) since $(field "$id" since), until $(field "$id" until | sed 's/^$/?/') — $(field "$id" for)" >&2
     echo "res: message that session (SendMessage) and wait; do not use the resource meanwhile" >&2
@@ -201,6 +206,21 @@ cmd_return() {
   echo "returned $id"
 }
 
+show_notes() {
+  [ -s "$NOTES/$1.md" ] || return 0
+  echo; echo "── notes for $1 ($NOTES/$1.md) — read before use ──"; cat "$NOTES/$1.md"
+}
+
+cmd_note() {
+  local id="${1:-}"; shift || true; need_id "$id"; parse "$@"
+  [ -n "$BY" ] && [ -n "$NOTE" ] || die "note needs --by and --note"
+  mkdir -p "$NOTES"
+  [ -f "$NOTES/$id.md" ] || printf '# %s\n\n' "$(reg_line "$id" | cut -f5)" >"$NOTES/$id.md"
+  printf -- '- %s (%s): %s\n' "$(date '+%Y-%m-%d')" "$BY" "$NOTE" >>"$NOTES/$id.md"
+  log note "$id" "$BY" "$NOTE"
+  echo "noted on $id"
+}
+
 cmd_log() { [ -f "$LOG" ] && tail -n "${1:-20}" "$LOG" || true; }
 
 case "${1:-}" in
@@ -209,6 +229,7 @@ case "${1:-}" in
   extend) shift; cmd_extend "$@" ;;
   return) shift; cmd_return "$@" ;;
   add) shift; cmd_add "$@" ;;
+  note) shift; cmd_note "$@" ;;
   log) shift; cmd_log "$@" ;;
   -h|--help|help|'') usage ;;
   *) usage >&2; exit 1 ;;
