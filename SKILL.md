@@ -162,9 +162,13 @@ short, batch updates that arrive together, and reply in the user's language.
   you prepared. Workers with no repo workspace simply skip it.
 - **Shared resources:** `res status`; `res take <id> --by <session name> --project <slug>
   --for "<purpose>" [--task <id>] [--until <when>]` (exit 2 = held by someone else, 3 = policy
-  `never`, or `ask-user` without the user's OK — then retry with `--force`); `res extend <id> --by
-  <name> --until <when>`; `res return <id> --by <name>`. A hold whose holder session is gone may be
-  reclaimed with `res return <id> --by <name> --force --note "<why>"`. `res log` shows history.
+  `never`, or `ask-user` without the user's OK — then retry with `--force`; 4 = device not
+  connected); `res extend <id> --by <name> --until <when>`; `res return <id> --by <name>`. A hold
+  whose holder session is gone may be reclaimed with `res return <id> --by <name> --force --note
+  "<why>"`. `res log` shows history. `status` shows each device's live link (devicectl / adb), so a
+  FREE but unplugged device is visible; `take --offline` books one ahead of a plug-in. A hold
+  survives unplugging: a worker whose held device drops reports BLOCKED (the user must re-plug,
+  unlock or re-trust it) and keeps the hold rather than returning it.
   The script lives in this skill's `scripts/res`, symlinked into `_shared/`.
 - **Create worktrees yourself** with `git -C <repo> worktree add -b <branch> <path> <base>`, next to
   the repo's other worktrees and following its branch naming. `claude --worktree` branches from the

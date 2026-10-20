@@ -1,7 +1,8 @@
 #!/bin/bash
 # res — shared resource holds across project orchestrators (devices, shared checkouts).
 # State lives in $RES_DIR (default ~/.claude/orchestrator/_shared):
-#   resources.tsv   registry: id<TAB>kind<TAB>policy<TAB>description   (policy: open | ask-user | never)
+#   resources.tsv   registry: id<TAB>kind<TAB>policy<TAB>device-id<TAB>description
+#                   (policy: open | ask-user | never; device-id: iOS UDID or adb serial, - for none)
 #   locks/<id>.d/   present while held (mkdir is atomic, so two sessions can't both take it)
 #   log.tsv         append-only history of takes and returns
 set -euo pipefail
@@ -14,12 +15,14 @@ LOG="$RES_DIR/log.tsv"
 usage() {
   cat <<'EOF'
 res status [<id>]                     show every resource (or one) and who holds it
-res take <id> --by <session> --project <slug> --for "<purpose>" [--task <id>] [--until <when>]
+res take <id> --by <session> --project <slug> --for "<purpose>" [--task <id>] [--until <when>] [--offline]
 res extend <id> --by <session> --until <when>
 res return <id> --by <session> [--note "<text>"]
 res return <id> --by <session> --force --note "<why>"   reclaim a hold whose holder is gone
 res log [<n>]                         last n history lines (default 20)
-Exit codes: 0 ok, 2 held by someone else, 3 policy forbids, 1 usage/other error.
+Devices show their live link (devicectl / adb). take refuses a device that is not connected
+unless --offline (booking ahead of a plug-in).
+Exit codes: 0 ok, 2 held by someone else, 3 policy forbids, 4 device not connected, 1 usage/other error.
 EOF
 }
 
@@ -32,10 +35,27 @@ need_id() {
   [ -n "$(reg_line "$1")" ] || die "unknown resource '$1' (see: res status)"
 }
 field() { awk -F'\t' -v k="$2" '$1==k{print $2}' "$LOCKS/$1.d/info" 2>/dev/null || true; }
+# Live link of a device: connected | <devicectl state> | not seen. One probe per run.
+DEVS=
+probe() {
+  [ -n "$DEVS" ] && return 0
+  DEVS=$( { xcrun devicectl list devices 2>/dev/null || true
+            adb devices 2>/dev/null | awk -F'\t' 'NR>1 && NF==2{print $1 " (ADB) " $2}' || true; } )
+  DEVS="${DEVS:-none}"
+}
+conn() {
+  [ "$1" = - ] && { echo -; return; }
+  probe
+  local line state
+  line=$(printf '%s\n' "$DEVS" | grep -F -- "$1 (" | head -1 || true)
+  [ -n "$line" ] || { echo "not seen"; return; }
+  state=$(printf '%s\n' "$line" | sed -E 's/.*\((UDID|ADB)\) +//; s/  .*//')
+  case "$state" in available*|device) echo connected ;; *) echo "${state:-not seen}" ;; esac
+}
 log() { printf '%s\t%s\t%s\t%s\t%s\n' "$(now)" "$1" "$2" "$3" "$4" >>"$LOG"; }
 
 parse() {
-  BY= PROJECT= PURPOSE= TASK= UNTIL= NOTE= FORCE=
+  BY= PROJECT= PURPOSE= TASK= UNTIL= NOTE= FORCE= OFFLINE=
   while [ $# -gt 0 ]; do
     case "$1" in
       --by) BY="$2"; shift 2 ;;
@@ -45,6 +65,7 @@ parse() {
       --until) UNTIL="$2"; shift 2 ;;
       --note) NOTE="$2"; shift 2 ;;
       --force) FORCE=1; shift ;;
+      --offline) OFFLINE=1; shift ;;
       *) die "unknown option '$1'" ;;
     esac
   done
@@ -57,8 +78,8 @@ write_info() {
 
 cmd_status() {
   [ -f "$REG" ] || die "no registry at $REG"
-  printf '%-16s %-9s %-9s %-34s %s\n' ID KIND POLICY HOLDER "SINCE → UNTIL / PURPOSE"
-  while IFS=$'\t' read -r id kind policy desc; do
+  printf '%-16s %-9s %-9s %-12s %-34s %s\n' ID KIND POLICY LINK HOLDER "SINCE → UNTIL / PURPOSE"
+  while IFS=$'\t' read -r id kind policy dev desc; do
     case "$id" in ''|\#*) continue ;; esac
     [ -n "${1:-}" ] && [ "$id" != "$1" ] && continue
     if [ -d "$LOCKS/$id.d" ]; then
@@ -68,18 +89,22 @@ cmd_status() {
     else
       holder=FREE; detail="$desc"
     fi
-    printf '%-16s %-9s %-9s %-34s %s\n' "$id" "$kind" "$policy" "$holder" "$detail"
+    printf '%-16s %-9s %-9s %-12s %-34s %s\n' "$id" "$kind" "$policy" "$(conn "$dev")" "$holder" "$detail"
   done <"$REG"
 }
 
 cmd_take() {
   local id="${1:-}"; shift || true; need_id "$id"; parse "$@"
   [ -n "$BY" ] && [ -n "$PROJECT" ] && [ -n "$PURPOSE" ] || die "take needs --by, --project and --for"
-  local policy; policy=$(reg_line "$id" | cut -f3)
+  local policy dev link; policy=$(reg_line "$id" | cut -f3); dev=$(reg_line "$id" | cut -f4)
   case "$policy" in
-    never) echo "res: '$id' is off limits (policy never): $(reg_line "$id" | cut -f4)" >&2; exit 3 ;;
+    never) echo "res: '$id' is off limits (policy never): $(reg_line "$id" | cut -f5)" >&2; exit 3 ;;
     ask-user) [ -n "$FORCE" ] || { echo "res: '$id' needs the user's OK first (policy ask-user); once given, retry with --force" >&2; exit 3; } ;;
   esac
+  if [ "$dev" != - ] && [ -z "$OFFLINE" ] && [ "$(field "$id" by)" != "$BY" ]; then
+    link=$(conn "$dev")
+    [ "$link" = connected ] || { echo "res: '$id' is not connected ($link) — ask the user to plug in / unlock / trust it; --offline holds it anyway" >&2; exit 4; }
+  fi
   mkdir -p "$LOCKS"
   if mkdir "$LOCKS/$id.d" 2>/dev/null; then
     write_info "$(now)" "$id"
