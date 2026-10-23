@@ -198,3 +198,14 @@ short, batch updates that arrive together, and reply in the user's language.
   address the live one as `name [ref]` from `ListAgents`, and stop or remove the stale one.
   `claude rm <id>` deletes the session and possibly its worktree, so use it only once the work is
   merged or abandoned.
+- **A worker went offline? Resume it, don't replace it.** Background workers can drop out (for
+  example when the orchestrator's own session restarts): they vanish from `claude agents` and
+  `ListAgents` shows them only as offline Remote Control rows. When the next task belongs to such a
+  worker, resume the original session so its context survives, instead of spawning a fresh worker
+  with a re-written brief. If `claude agents --json --all` doesn't list it, its full id is the
+  `sessionId` in `~/.claude/jobs/<short id>/state.json` (the short id is the one `--bg` printed;
+  the job's `cwd` is there too). Resume from that `cwd`, and in the prompt include anything that
+  changed meanwhile (moved worktrees, new main, the new task). If a replacement worker already
+  started on the same work, stop it first, and tell the resumed worker to re-read any shared state
+  (a doc, a branch) the replacement may have touched. Afterwards, address the resumed worker as
+  `name [ref]` from `ListAgents`, because the offline row keeps the same name.
