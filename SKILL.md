@@ -209,3 +209,8 @@ short, batch updates that arrive together, and reply in the user's language.
   started on the same work, stop it first, and tell the resumed worker to re-read any shared state
   (a doc, a branch) the replacement may have touched. Afterwards, address the resumed worker as
   `name [ref]` from `ListAgents`, because the offline row keeps the same name.
+- **Split research into small tasks.** WebSearch has a per-session budget (200 calls shared by the
+  session and all its subagents, refilling ~100/hour); one worker fanning out to many subagents
+  exhausts it mid-task. Give each research topic its own worker session with a short question list,
+  tell workers not to fan out search subagents, and have them WebFetch known official URLs instead of
+  searching for them.
