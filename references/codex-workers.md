@@ -50,7 +50,7 @@ Relative plan usage, from OpenAI's Codex pricing as of 2026-10: Sol = 1x, Astra 
 - `gpt-6-luna` is fast and cheap, for extraction, summaries and focused small edits.
 - Don't pick `gpt-6-sol` or the `gpt-5.6-*` models: they're older at the same or higher cost.
 
-**User preference (updated 2026-10-30): use the table below.** It is the guide's original per-task recommendation. On 2026-10-30 the user first asked to try Terra first. Then Terra stopped a multi-step implementation task after one turn with most of it undone, and the user said not to prefer Terra but not to drop it either: "也不是完全不用 Terra 吧，要么改回 lynx 那个主对话之前调研出来的第一版推荐吧". So Sol does coding, review, debugging and procedural work; Terra does docs/reports and the tight-usage case; Luna does lookups. Keep checking every worker's work:
+Pick the model from the table below. Check every worker's work:
 - the cited file:line exist and say what's claimed;
 - builds and tests really ran;
 - commits contain only the intended files;
