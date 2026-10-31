@@ -22,9 +22,7 @@ Use this when the user asks for Codex workers, for example because Claude Code c
   - First verify any write whose result is unknown, before redoing it.
 - **Queue a message for a worker:** `codex queue --thread <session uuid> --message "<text>"` (codex-cli 0.166). Tested 2026-10-30 with `codex exec`: a message queued while the run is going is NOT seen by that run. It is delivered at the next `codex exec resume` of the thread. So it works as a mailbox (peers or the orchestrator can leave instructions anytime), not live steering. `--resume` tries to resume the thread on the local app-server daemon. Live mid-run delivery for daemon-hosted sessions is unverified. To change course now, stop the run and resume.
 - **A run that was already started without notification:** start a background watcher. It waits on the PID (`while kill -0 <pid>; do sleep 20; done`), then prints the last `turn.completed`/`turn.failed` line.
-- **Optional Codex plugin**: `node ~/.claude/plugins/cache/openai-codex/codex/<ver>/scripts/codex-companion.mjs task --background --write [--resume] --model <id> --effort <low…xhigh>`, then `status` / `result` / `cancel <job>`. Two caveats:
-  - Never use `--model spark`. It maps to the retired `gpt-5.3-codex-spark`.
-  - The plugin rejects the efforts `max` and `ultra`. Use `codex exec -c model_reasoning_effort=...` for those.
+- **No Codex Claude Code plugin** (removed 2026-10-30 at the user's request): use `codex exec` or `scripts/codex-worker.mjs` (below). Add any missing capability (e.g. a review mode) to codex-worker, not via the plugin. Never use the model alias `spark`, which maps to a retired model.
 
 ## Live steering: codex-worker + an app-server hub (verified 2026-10-30, codex-cli 0.166)
 
