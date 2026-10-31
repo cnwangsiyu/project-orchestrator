@@ -112,11 +112,11 @@ const judge = (windows) => {
 const hours = (h) => (h < 24 ? `${h.toFixed(1)}h` : `${(h / 24).toFixed(1)}d`);
 const RANK = { ok: 0, watch: 1, tight: 2, unknown: 1 };
 const lean = (c, x) => {
+  // Both tight: the user prefers spending Codex (2026-10-30), so lean Codex; the reset times say when Claude-only work can resume.
   if (c.status === 'tight' && x.status === 'tight') {
-    const [first, other] = c.freesAt <= x.freesAt ? ['claude', x] : ['codex', c];
-    const at = Math.min(c.freesAt, x.freesAt);
-    return `both tight: tell the user; run only what matters now. ${first} frees up first (in ${Number.isFinite(at) ? hours((at - now) / 3600000) : '?'}; `
-      + `the other in ${Number.isFinite(other.freesAt) ? hours((other.freesAt - now) / 3600000) : '?'}), so queue deferrable work for it`;
+    const when = (v) => (Number.isFinite(v.freesAt) ? hours((v.freesAt - now) / 3600000) : '?');
+    return `codex (both tight; user prefers Codex then): tell the user, run what matters now on Codex, keep on Claude only `
+      + `what needs Claude, defer the rest (codex frees up in ${when(x)}, claude in ${when(c)})`;
   }
   if (RANK[c.status] === RANK[x.status]) return c.status === 'unknown' ? 'unknown: read the other vendor manually' : 'either: route by task fit';
   return RANK[c.status] > RANK[x.status]

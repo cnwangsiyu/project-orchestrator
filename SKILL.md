@@ -134,8 +134,9 @@ and switch whenever the user says so. Default: **auto**.
     plan may have no 5-hour window); the script reads whatever windows exist. A nearly full window
     that resets within the hour matters less than a moderately full week with days to go. Move
     work either vendor can do toward the one with headroom; keep vendor-specific work where it
-    must run; when both are tight, tell the user, run only what matters now and queue the rest
-    for whichever frees up first. Say in the launch line when quota changed the choice.
+    must run; when both are tight, tell the user and prefer Codex (user, 2026-10-30): run what
+    matters now on Codex, keep on Claude only what needs Claude, and defer the rest. Say in the
+    launch line when quota changed the choice.
 - **gpt-first**: route as much as possible to Codex, including work you'd otherwise give a
   subagent (Agent tool): use a short `codex exec` (Luna/Terra/Sol by difficulty, read-only for
   research) instead. Fall back to Claude only for what Codex can't do (browser or computer use,
