@@ -2,13 +2,14 @@
 // codex-worker: run and steer Codex workers through a shared Codex app-server ("hub") over WebSocket.
 //
 //   codex-worker hub                                                       (start the hub if it isn't up)
-//   codex-worker start  --cwd DIR --effort E --sandbox S [--model M] [--name N] --log FILE [--out FILE]  "<prompt>"
-//   codex-worker turn   --thread ID --effort E --log FILE [--out FILE] [--model M] [--sandbox S]       "<prompt>"
+//   codex-worker start  --cwd DIR --effort E --sandbox S [--network on|off] [--model M] [--name N] --log FILE [--out FILE]  "<prompt>"
+//   codex-worker turn   --thread ID --effort E --log FILE [--out FILE] [--model M] [--sandbox S [--network on|off]]      "<prompt>"
 //   codex-worker wait   --thread ID [--log FILE] [--out FILE]
 //   codex-worker steer  --thread ID                                                                     "<message>"
 //   codex-worker interrupt --thread ID
 //   codex-worker status --thread ID
 //   codex-worker list   [--cwd DIR] [--search TEXT] [--limit N]
+//   codex-worker quota                                                     (the account's rate-limit windows, JSON)
 //
 // `start` and `turn` follow the turn until it ends: every notification is appended to --log as JSONL, the first stdout
 // line is `thread=<id> turn=<id>`, and the process exits 0 on completed, 1 on failed/interrupted. On exit it prints
@@ -16,8 +17,11 @@
 // to --out. Run them as a harness background task so their exit notifies the orchestrator. `wait` re-attaches to a
 // thread's running turn (e.g. after the orchestrator restarted) and exits the same way, at once if the turn already
 // ended. `steer` injects a message into the running turn, `interrupt` stops it. `list` shows recent worker threads.
-// Sandbox S is read-only | workspace-write | danger-full-access. Requires a hub on ws://127.0.0.1:47321 (localhost
-// only; `hub` starts one detached so it outlives any one session); override the URL with CODEX_HUB.
+// Sandbox S is read-only | workspace-write | danger-full-access. In workspace-write the network follows Codex's config
+// (`[sandbox_workspace_write] network_access`) unless --network on|off, and Codex keeps every git metadata dir
+// read-only (so the worker can edit files but not add, commit or fetch).
+// Requires a hub on ws://127.0.0.1:47321 (localhost only; `hub` starts one detached so it outlives any one session);
+// override the URL with CODEX_HUB.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -36,6 +40,22 @@ if ((cmd === 'start' || cmd === 'turn') && typeof opts.effort !== 'string') die(
 if (cmd === 'start' && typeof opts.sandbox !== 'string') die('start needs --sandbox (read-only | workspace-write | danger-full-access; never wider than the orchestrator)');
 const SANDBOX_POLICY = { 'read-only': 'readOnly', 'workspace-write': 'workspaceWrite', 'danger-full-access': 'dangerFullAccess' };
 if (opts.sandbox !== undefined && !SANDBOX_POLICY[opts.sandbox]) die(`unknown --sandbox ${opts.sandbox}`);
+if (opts.network === true) opts.network = 'on';
+if (opts.network !== undefined && !['on', 'off'].includes(opts.network)) die('--network takes on or off');
+if (opts.network !== undefined && opts.sandbox !== 'workspace-write') die('--network goes with --sandbox workspace-write');
+// Codex's own default for workspace-write network, so an explicit turn-level policy doesn't silently change it.
+const configNetwork = () => {
+  try {
+    const toml = fs.readFileSync(path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'config.toml'), 'utf8');
+    const section = toml.split(/^\[/m).find((s) => s.startsWith('sandbox_workspace_write]')) ?? '';
+    return /^\s*network_access\s*=\s*true\b/m.test(section);
+  } catch { return false; }
+};
+// The turn-level sandbox policy. Don't add git dirs as writable roots: Codex overrides them read-only on purpose, since
+// a sandboxed write to .git/hooks or .git/config would run outside the sandbox at the next git command.
+const sandboxPolicy = (mode) => mode === 'workspace-write'
+  ? { type: 'workspaceWrite', networkAccess: opts.network === undefined ? configNetwork() : opts.network === 'on' }
+  : { type: SANDBOX_POLICY[mode] };
 
 const hub = process.env.CODEX_HUB || 'ws://127.0.0.1:47321';
 const ready = () => fetch(hub.replace(/^ws/, 'http') + '/readyz', { signal: AbortSignal.timeout(2000) }).then((r) => r.ok, () => false);
@@ -136,14 +156,17 @@ try {
     });
     const threadId = th.thread?.id ?? th.threadId;
     if (opts.name) await call('thread/name/set', { threadId, name: opts.name }).catch(() => {});
-    const ts = await call('turn/start', { threadId, input: textInput(text), effort: opts.effort, model: opts.model });
+    const ts = await call('turn/start', {
+      threadId, input: textInput(text), effort: opts.effort, model: opts.model,
+      sandboxPolicy: opts.network !== undefined ? sandboxPolicy(opts.sandbox) : undefined,
+    });
     follow(threadId, ts.turn?.id ?? ts.turnId);
   } else if (cmd === 'turn') {
     if (!opts.thread || !text) die('turn needs --thread and a prompt');
     await call('thread/resume', { threadId: opts.thread, model: opts.model }).catch(() => {});
     const ts = await call('turn/start', {
       threadId: opts.thread, input: textInput(text), effort: opts.effort, model: opts.model,
-      sandboxPolicy: opts.sandbox && { type: SANDBOX_POLICY[opts.sandbox] },
+      sandboxPolicy: opts.sandbox && sandboxPolicy(opts.sandbox),
     });
     follow(opts.thread, ts.turn?.id ?? ts.turnId);
   } else if (cmd === 'wait') {
@@ -182,6 +205,10 @@ try {
       const when = new Date((t.updatedAt ?? t.createdAt) * 1000).toLocaleString('sv-SE').slice(0, 16);
       console.log([t.id, when, t.status?.type ?? '-', t.source ?? '-', t.name ?? '-', t.cwd].join('\t'));
     }
+    finish(0);
+  } else if (cmd === 'quota') {
+    const r = await call('account/rateLimits/read', {});
+    console.log(JSON.stringify(r.rateLimitsByLimitId ?? { [r.rateLimits?.limitId ?? 'codex']: r.rateLimits }));
     finish(0);
   } else die(`unknown command ${cmd}`);
 } catch (e) { die(e.message, 1); }

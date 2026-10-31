@@ -125,6 +125,17 @@ and switch whenever the user says so. Default: **auto**.
     mid-run handoffs you can broker by steering (hub-started workers only).
   - Codex Terra: docs and reports. Codex Luna: quick lookups and image generation. Codex: second
     opinions.
+  - Then weigh both vendors' quota, never just one. Before launching a worker either vendor
+    could run (and at least every half hour while work is queued), run
+    `node <this skill>/scripts/quota.mjs`. It reads Claude (`claude -p /usage`) and Codex (the
+    hub) together, caches the result for 10 minutes for every orchestrator, and prints each window's
+    used share, reset and pace (used share ÷ elapsed share of the window; above 1 burns faster
+    than the window lasts), a status per vendor and a lean. Windows differ by plan (a higher
+    plan may have no 5-hour window); the script reads whatever windows exist. A nearly full window
+    that resets within the hour matters less than a moderately full week with days to go. Move
+    work either vendor can do toward the one with headroom; keep vendor-specific work where it
+    must run; when both are tight, tell the user, run only what matters now and queue the rest
+    for whichever frees up first. Say in the launch line when quota changed the choice.
 - **gpt-first**: route as much as possible to Codex, including work you'd otherwise give a
   subagent (Agent tool): use a short `codex exec` (Luna/Terra/Sol by difficulty, read-only for
   research) instead. Fall back to Claude only for what Codex can't do (browser or computer use,
