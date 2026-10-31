@@ -214,3 +214,6 @@ short, batch updates that arrive together, and reply in the user's language.
   exhausts it mid-task. Give each research topic its own worker session with a short question list,
   tell workers not to fan out search subagents, and have them WebFetch known official URLs instead of
   searching for them.
+- **Codex workers.** When the user wants workers on the Codex CLI instead (e.g. Claude credit is
+  low), follow `references/codex-workers.md`: launch/resume commands, permissions, what Codex
+  can't do (no messaging, so you relay), and which GPT model and effort to pick per task.
