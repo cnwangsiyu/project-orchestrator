@@ -57,14 +57,18 @@ shared hub over WebSocket, so the process that started a worker and the one that
 
 ## Differences from Claude workers
 
-- **No messaging.** Codex has no SendMessage or ListAgents, so peers can't reach it and you can't redirect it mid-run. The brief must be self-contained:
+- **Messaging is one-way, from you to the worker.** Codex has no SendMessage or ListAgents, so it can't message you or peers, and
+  peers can't find it by name. You (or a peer you give the thread id to) can reach it:
+  - workers started through the hub (`codex-worker.mjs start`/`turn`): `codex-worker.mjs steer` reaches the running turn
+    immediately, and `interrupt` stops it. Relay device handoffs, changed plans and peer requests this way;
+  - `codex exec` runs can't be steered: queue a message with `codex queue` (it's read at the next resume), or stop and resume.
+  The worker still reports only through its files and its final message, so the brief must be self-contained:
   - the workspace and the files it must not touch;
   - the git and push rules;
   - device holds through `res` (Codex can run the script);
   - where to write the report.
-
-  The orchestrator relays everything else, such as device handoffs, changed plans and peer requests, by resuming the worker after its run ends.
-- **Keep on Claude workers**: long device runs that must share phones with other projects mid-run, and anything that needs Artifact/Docs tools.
+- **Keep on Claude workers**: anything that needs Artifact/Docs tools, browser or computer use. Device runs that share phones
+  mid-run can go to a hub-started Codex worker now: steer it with handoffs. It can't negotiate with peers itself, so you broker.
 - **Verify before reporting.** Spot-check the cited file:line and commits, as for any worker.
 
 ## Choosing model and effort
