@@ -26,6 +26,29 @@ Use this when the user asks for Codex workers, for example because Claude Code c
   - Never use `--model spark`. It maps to the retired `gpt-5.3-codex-spark`.
   - The plugin rejects the efforts `max` and `ultra`. Use `codex exec -c model_reasoning_effort=...` for those.
 
+## Live steering: codex-worker + an app-server hub (verified 2026-10-30, codex-cli 0.166)
+
+`codex exec` can't be steered mid-run, but the app-server protocol can: `turn/steer` injects a message into the running turn (taken
+into account in that same turn), and `turn/interrupt` stops it. `scripts/codex-worker.mjs` wraps this. Every command connects to one
+shared hub over WebSocket, so the process that started a worker and the one that steers it can differ.
+
+- **Hub**, one per machine, localhost only, reused by every orchestrator. Check `curl -s http://127.0.0.1:47321/readyz`; if it's not
+  up, start it detached so it outlives your session: `nohup codex app-server --listen ws://127.0.0.1:47321 >~/.codex/hub.log 2>&1 &`.
+  Running workers die if the hub dies. `CODEX_HUB` overrides the URL. (The managed daemon's unix socket speaks WebSocket too; Node's
+  WebSocket can't dial a unix socket, hence the TCP hub.)
+- **Start** a worker as a harness background task (its exit is the completion signal; it exits 0 on completed, 1 on
+  failed/interrupted):
+  `node ~/.agents/skills/project-orchestrator/scripts/codex-worker.mjs start --cwd <workspace> --model <id> --effort <e> [--sandbox read-only] --name <worker> --log <task dir>/codex.jsonl "<one line pointing at the brief>"`
+  Its first stdout line is `thread=<id> turn=<id>`. Record the thread in the ledger.
+- **Steer** the running turn: `codex-worker.mjs steer --thread <id> "<message>"`. This is the messaging channel: relay peer requests,
+  device handoffs and plan changes this way.
+- **Interrupt**: `codex-worker.mjs interrupt --thread <id>`. **New task** on the same thread: `codex-worker.mjs turn --thread <id>
+  --log <file> "<what changed + new task>"` (also as a background task). **Status**: `codex-worker.mjs status --thread <id>`.
+- The log is app-server notifications: agent text is `item/completed` with `item.type == "agentMessage"`; the end is
+  `turn/completed` with `turn.status`.
+- Workers started this way use `approvalPolicy: never` and default `sandbox: danger-full-access`. Pass `--sandbox read-only` for
+  read-only tasks.
+
 ## Permissions and environment
 
 - The user's `~/.codex/config.toml` defaults to yolo (`approval_policy = "never"`, `sandbox_mode = "danger-full-access"`), which is the equivalent of bypass mode. On another machine, check it before assuming. The CLI flags are `-s read-only|workspace-write|danger-full-access` and `--dangerously-bypass-approvals-and-sandbox`.
