@@ -50,13 +50,13 @@ Relative plan usage, from OpenAI's Codex pricing as of 2026-10: Sol = 1x, Astra 
 - `gpt-6-luna` is fast and cheap, for extraction, summaries and focused small edits.
 - Don't pick `gpt-6-sol` or the `gpt-5.6-*` models: they're older at the same or higher cost.
 
-**User preference (2026-10-30): try Terra first.** OpenAI positions it as close to Sol at half the usage. Default to Terra at the same effort you'd give Sol, and check its work harder:
+**User preference (updated 2026-10-30): default to Sol, not Terra.** The user first asked to try Terra first, then, after Terra stopped a multi-step implementation task after one turn with most of it undone, said "之后还是别优先用 terra 吧，感觉不太靠谱". So default to `gpt-6.1-sol` at the effort the task needs. Use Terra only when the user asks for it. Keep checking every worker's work:
 - the cited file:line exist and say what's claimed;
 - builds and tests really ran;
 - commits contain only the intended files;
 - conclusions match the evidence.
 
-If Terra's result fails that check, or it stalls, resume or relaunch on Sol (same or higher effort) and note it in the ledger. Repeated misses on one kind of task mean that kind defaults to Sol from then on.
+If Sol's result fails that check, or it stalls, resume it with a sharper instruction, or raise the effort, and note it in the ledger.
 
 **Tell the user promptly when Codex keeps falling short** (user's instruction, 2026-10-30), on any model. Report it right away rather than quietly working around it. Examples:
 - repeated failed acceptance or escalations;
@@ -68,14 +68,14 @@ Include what happened (task, model, effort, symptom) and what you did about it. 
 
 | Task | Default (try first) | Escalate to |
 |---|---|---|
-| Code review | Terra `high` | Sol `high` |
-| High-stakes review (concurrency, ABI, crash fix) | Terra `xhigh` | Sol `xhigh`; Astra `high` as a second opinion |
-| Implementing in a large C++/ObjC/Java codebase | Terra `high` (`xhigh` for cross-module or threading designs) | Sol `high` / `xhigh` |
-| Debugging | Terra `xhigh` | Sol `xhigh`, then Astra `xhigh` |
-| Log or data analysis | Terra `medium`; Luna `medium` for pure extraction | Sol `medium` |
-| Docs or reports | Terra `medium` | Sol `medium` |
-| Long procedural build/device workflows | Terra `medium`; `high` for diagnosis steps | Sol `medium` / `high` |
-| Quick lookups | Luna `low` | Terra `low` |
+| Code review | Sol `high` | Sol `xhigh` |
+| High-stakes review (concurrency, ABI, crash fix) | Sol `xhigh` | Astra `high` as a second opinion |
+| Implementing in a large C++/ObjC/Java codebase | Sol `high` (`xhigh` for cross-module or threading designs) | Sol `xhigh` |
+| Debugging | Sol `xhigh` | Astra `xhigh` |
+| Log or data analysis | Sol `medium`; Luna `medium` for pure extraction | Sol `high` |
+| Docs or reports | Sol `medium` | Sol `high` |
+| Long procedural build/device workflows | Sol `medium`; `high` for diagnosis steps | Sol `high` |
+| Quick lookups | Luna `low` | Sol `low` |
 
 Avoid Astra, Fast, `max` and `ultra` unless a task has already failed on Sol.
 
