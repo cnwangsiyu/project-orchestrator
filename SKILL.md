@@ -105,13 +105,15 @@ easily can run lighter next time. Tell the user before reaching for the most exp
 task runs on Claude or on GPT (Codex) according to the active mode. Record the mode in the ledger
 and switch whenever the user says so. Default: **auto**.
 - **claude-first**: almost everything runs on Claude. Use Codex only for a second opinion from a
-  different model (independent review, cross-check of a conclusion or a design).
+  different model (independent review, cross-check of a conclusion or a design) and for image
+  generation, which Claude can't do (recipe in `references/codex-workers.md`).
 - **auto**: pick the best model per task, and say which in one line when launching.
   - Claude: the orchestrator; tasks that need the browser, computer use, Artifact/Docs tools, or a
     worker that must negotiate with peers itself.
   - Codex Sol: long implementation, deploy and build/test runs, debugging, and device runs whose
     mid-run handoffs you can broker by steering (hub-started workers only).
-  - Codex Terra: docs and reports. Codex Luna: quick lookups. Codex: second opinions.
+  - Codex Terra: docs and reports. Codex Luna: quick lookups and image generation. Codex: second
+    opinions.
 - **gpt-first**: route as much as possible to Codex, including work you'd otherwise give a
   subagent (Agent tool): use a short `codex exec` (Luna/Terra/Sol by difficulty, read-only for
   research) instead. Fall back to Claude only for what Codex can't do (browser or computer use,

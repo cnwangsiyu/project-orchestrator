@@ -80,6 +80,22 @@ shared hub over WebSocket, so the process that started a worker and the one that
   can't negotiate with peers, so you broker.
 - **Verify before reporting.** Spot-check the cited file:line and commits, as for any worker.
 
+## Image generation (verified 2026-10-30, codex-cli 0.166)
+
+Codex has a built-in image tool (`image_gen.imagegen`; feature flag `image_generation`, stable and on by default; check with
+`codex features list`). Claude can't generate images, so image requests go to Codex in every routing mode.
+
+- **Run** a short `codex exec` as a background task, Luna `low`, `-s workspace-write`, in the folder the image should land in:
+  `codex exec [--skip-git-repo-check] -C <dir> -s workspace-write -m gpt-6-luna -c model_reasoning_effort='"low"' --json -o <dir>/codex-last.md "Generate one image with your image generation tool: <description, style, aspect>. Save it in the current directory as <name>.png and report the saved path." < /dev/null > <dir>/codex.jsonl 2>&1`
+  The model only phrases the prompt and copies the file, so Luna `low` is enough; the image quality comes from the image
+  tool, not the chat model. A test run (one 1254×1254 PNG, 1.5 MB) took about a minute and ~74K input (mostly cached) /
+  ~300 output tokens.
+- **Where the image is:** the tool writes to `~/.codex/generated_images/<thread id>/exec-<uuid>.png`; the copy into the
+  workspace is a plain `cp` the model runs, so ask for the name and folder explicitly. The image call itself does not
+  appear in the `--json` events (only the `cp` does): confirm the file exists, then look at it (Read the PNG) before
+  reporting.
+- **Iterate** by resuming the same thread with what to change, so it keeps the earlier prompt and style.
+
 ## Choosing model and effort
 
 Relative plan usage, from OpenAI's Codex pricing as of 2026-10: Sol = 1x, Astra ≈ 5x, Terra ≈ 0.5x, Luna ≈ 0.05x. The Fast tier costs about 2.5x more. Higher effort just spends more tokens.
