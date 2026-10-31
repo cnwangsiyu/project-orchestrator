@@ -1,11 +1,13 @@
 # Codex CLI as a worker
 
-Use this when the user asks for Codex workers, for example because Claude Code credit is low. Codex runs on the user's ChatGPT plan, not on Claude credit. Verified 2026-10-30 on codex-cli 0.166.0. The model catalog changes, so re-check it with `codex debug models` before relying on the ids below.
+Use this whenever the routing mode in SKILL.md puts a task on Codex — by default (**auto**) that is long implementation, build/test and debugging runs, docs and quick lookups — or the user asks for Codex workers, for example because Claude Code credit is low. Codex runs on the user's ChatGPT plan, not on Claude credit.
+
+**Which launcher:** use `scripts/codex-worker.mjs` through the hub (below) by default, since only it can steer, interrupt and re-attach. Use plain `codex exec` for short one-shot runs that will never need steering (read-only lookups, second opinions, gpt-first subagent replacements). Verified 2026-10-30 on codex-cli 0.166.0. The model catalog changes, so re-check it with `codex debug models` before relying on the ids below.
 
 ## Launch, resume, follow
 
 - **Launch** from the worker's workspace as a harness background task (Bash with `run_in_background`):
-  `codex exec -C <workspace> -m <model> -c model_reasoning_effort='"<effort>"' --json -o <task dir>/codex-last.md "<one line pointing at the brief>" < /dev/null > <task dir>/codex.jsonl 2>&1`
+  `codex exec -C <workspace> -s <sandbox> -m <model> -c model_reasoning_effort='"<effort>"' --json -o <task dir>/codex-last.md "<one line pointing at the brief>" < /dev/null > <task dir>/codex.jsonl 2>&1`
   - Never launch it with a trailing `&` inside a normal Bash call. That run gives no exit notification, so a failure goes unnoticed. In one case a usage-limit stop sat unseen until the user asked.
   - Always redirect stdin from `/dev/null`. Otherwise Codex waits on "Reading additional input from stdin".
   - Outside a git repo, add `--skip-git-repo-check` (to `exec` and `exec resume`).
@@ -32,24 +34,29 @@ shared hub over WebSocket, so the process that started a worker and the one that
 
 - **Hub**, one per machine, localhost only, reused by every orchestrator. Check `curl -s http://127.0.0.1:47321/readyz`; if it's not
   up, start it detached so it outlives your session: `nohup codex app-server --listen ws://127.0.0.1:47321 >~/.codex/hub.log 2>&1 &`.
-  Running workers die if the hub dies. `CODEX_HUB` overrides the URL. (The managed daemon's unix socket speaks WebSocket too; Node's
+  Running workers die if the hub dies. `CODEX_HUB` overrides the URL. The hub has no
+  authentication: any local process can start or steer a thread on it, so keep it on 127.0.0.1 and only on a machine you trust. (The managed daemon's unix socket speaks WebSocket too; Node's
   WebSocket can't dial a unix socket, hence the TCP hub.)
 - **Start** a worker as a harness background task (its exit is the completion signal; it exits 0 on completed, 1 on
   failed/interrupted):
-  `node ~/.agents/skills/project-orchestrator/scripts/codex-worker.mjs start --cwd <workspace> --model <id> --effort <e> [--sandbox read-only] --name <worker> --log <task dir>/codex.jsonl "<one line pointing at the brief>"`
-  Its first stdout line is `thread=<id> turn=<id>`. Record the thread in the ledger.
+  `node ~/.agents/skills/project-orchestrator/scripts/codex-worker.mjs start --cwd <workspace> --model <id> --effort <e> --sandbox <s> --name <worker> --log <task dir>/codex.jsonl "<one line pointing at the brief>"`
+  `--effort` is required. Its first stdout line is `thread=<id> turn=<id>`. Record the thread in the ledger.
+- **Re-attach** after the orchestrator restarted (its background tasks, including the `start`/`turn` follower, are gone, but
+  the turn keeps running on the hub): `codex-worker.mjs wait --thread <id> --log <file>`, again as a background task. It exits
+  like `start` when the turn ends, or at once if it already has.
 - **Steer** the running turn: `codex-worker.mjs steer --thread <id> "<message>"`. This is the messaging channel: relay peer requests,
   device handoffs and plan changes this way.
 - **Interrupt**: `codex-worker.mjs interrupt --thread <id>`. **New task** on the same thread: `codex-worker.mjs turn --thread <id>
   --log <file> "<what changed + new task>"` (also as a background task). **Status**: `codex-worker.mjs status --thread <id>`.
 - The log is app-server notifications: agent text is `item/completed` with `item.type == "agentMessage"`; the end is
   `turn/completed` with `turn.status`.
-- Workers started this way use `approvalPolicy: never` and default `sandbox: danger-full-access`. Pass `--sandbox read-only` for
-  read-only tasks.
+- Workers started this way use `approvalPolicy: never`, so the sandbox is their only bound. `--sandbox` defaults to
+  `danger-full-access`; choose it by the rule under Permissions below.
 
 ## Permissions and environment
 
 - The user's `~/.codex/config.toml` defaults to yolo (`approval_policy = "never"`, `sandbox_mode = "danger-full-access"`), which is the equivalent of bypass mode. On another machine, check it before assuming. The CLI flags are `-s read-only|workspace-write|danger-full-access` and `--dangerously-bypass-approvals-and-sandbox`.
+- **Never give a Codex worker more than the orchestrator has.** That is the same rule as for Claude workers, and it keeps a Codex worker from doing what this session's permissions would block. `danger-full-access` only when the orchestrator runs in bypass mode; otherwise `workspace-write` for writers, and keep anything the orchestrator would need approval for (pushes, external posts, installs) out of the brief and do it yourself, with approval.
 - **Read-only tasks**: pass `-s read-only`, and say "read-only" in the brief.
 - **Skills**: `~/.codex/skills` is symlinked to the same skills directory, so Codex sees most skills. Some can be disabled per skill in config.toml under `[[skills.config]] enabled = false`.
 - **Memory**: `~/.codex/AGENTS.md` bridges to Claude's `memory/MEMORY.md` files.
@@ -65,10 +72,12 @@ shared hub over WebSocket, so the process that started a worker and the one that
   The worker still reports only through its files and its final message, so the brief must be self-contained:
   - the workspace and the files it must not touch;
   - the git and push rules;
-  - device holds through `res` (Codex can run the script);
-  - where to write the report.
-- **Keep on Claude workers**: anything that needs Artifact/Docs tools, browser or computer use. Device runs that share phones
-  mid-run can go to a hub-started Codex worker now: steer it with handoffs. It can't negotiate with peers itself, so you broker.
+  - device holds through `res` (Codex can run the script), taken as `--by codex:<thread id>`;
+  - where to write the report, and to start its final message with `[<id>] DONE | QUESTION | BLOCKED | FAILED`. A question
+    ends the run; resume it with the answer.
+- **Keep on Claude workers**: anything that needs Artifact/Docs tools, browser or computer use, or a worker that must negotiate
+  with peers itself. Device runs that share phones mid-run can go to a hub-started Codex worker: steer it with handoffs. It
+  can't negotiate with peers, so you broker.
 - **Verify before reporting.** Spot-check the cited file:line and commits, as for any worker.
 
 ## Choosing model and effort
@@ -86,7 +95,7 @@ Relative plan usage, from OpenAI's Codex pricing as of 2026-10: Sol = 1x, Astra 
 - `gpt-6-luna` is fast and cheap, for extraction, summaries and focused small edits.
 - Don't pick `gpt-6-sol` or the `gpt-5.6-*` models: they're older at the same or higher cost.
 
-Pick the model from the table below. Check every worker's work:
+Start from the table below, then adjust by the task's difficulty and stakes as SKILL.md describes. Check every worker's work:
 - the cited file:line exist and say what's claimed;
 - builds and tests really ran;
 - commits contain only the intended files;

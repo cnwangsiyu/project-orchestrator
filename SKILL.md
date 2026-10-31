@@ -4,7 +4,7 @@ description: >-
   Turn the current conversation into the orchestrator ("主对话") for one project: the user only
   says what they want, and this session gathers the project's resources (repos, branches,
   worktrees, MRs, docs, devices), plans the work, hands each task to an independent background
-  Claude session, sets up whatever workspace each task needs (none, an existing checkout, or a
+  worker session (Claude Code or Codex), sets up whatever workspace each task needs (none, an existing checkout, or a
   fresh worktree + branch in any of the project's repos), keeps tasks from conflicting, integrates
   finished work, and reports to the user — while keeping its own context small. One orchestrator
   conversation per project; it does not need to start inside a repo or on a particular branch. Use
@@ -20,7 +20,8 @@ This session becomes the orchestrator for one **project** — a body of work the
 such as a feature, a release, an investigation or an ongoing area of ownership. A project may span
 several repos and branches, or none at all (research, docs, package validation, coordination).
 The user talks only to the orchestrator; the work itself is done by **workers**, independent
-background Claude sessions the orchestrator launches, briefs, coordinates and integrates.
+background sessions — Claude Code or Codex, per the routing mode below — that the orchestrator
+launches, briefs, coordinates and integrates.
 
 Projects are the unit of separation: each orchestrator conversation owns exactly one project and
 handles every task in it. Where this session happens to have started — which directory, which
@@ -32,7 +33,8 @@ together — not labor.
 
 When the skill starts (and whenever you lose track): load the messaging tools, learn your own
 session name, settle which project this is, open or create its ledger, reconcile it with the live
-sessions, and show the user the current status in a few lines.
+sessions (`claude agents --json` for Claude workers, `codex-worker.mjs status`/`wait` for the
+Codex threads the ledger records), and show the user the current status in a few lines.
 
 ## Principles
 
@@ -63,8 +65,11 @@ reading their output, and rely on their messages and idle notices instead of pol
 and report. Besides the resource map, record per task what a restarted orchestrator would need:
 goal, status, dependencies, the repos and areas it changes, its session, workspace and branch,
 the branch it integrates into, held resources, outcome. Update it before telling the user
-anything. On a restart or after compaction, re-read the ledger and reconcile it with
-`claude agents --json`.
+anything. Only the orchestrator writes the ledger; workers write only inside their own
+`tasks/<id>/`. On a restart or after compaction, re-read the ledger and reconcile it with the live
+sessions as above. A restart also ends the orchestrator's own background tasks, so a Codex run it
+was following loses its completion signal: re-attach with `codex-worker.mjs wait` (see
+`references/codex-workers.md`).
 
 **Give each worker a self-contained brief.** A worker knows nothing of this conversation. The
 brief carries the user's intent in their words, what done means and how to verify it, the facts
@@ -72,14 +77,19 @@ and resources already established, its workspace and git permissions (or that it
 resources it holds and must not touch, the other active tasks it might collide with, and how to
 report: a full report in `tasks/<id>/report.md`, then a short message starting
 `[<id>] DONE | QUESTION | BLOCKED | FAILED`. Workers should ask rather than guess on decisions that
-belong to the user.
+belong to the user. State the git rules explicitly, push included: background Claude sessions are
+told by default to commit and push their branch before finishing, and only the brief overrides
+that — so say "commit locally, do not push" (or whatever this task allows). Codex workers can't
+message anyone: they end their run with the report and put the same status word first in their
+final message; a QUESTION ends the run, and you resume it with the answer.
 
 **Match each worker's capability and effort to its task.** Decide per task — again for every task
 or amendment a worker takes on, not once per worker — from the task's
 difficulty, how ambiguous it is, what a wrong answer costs, and how closely you will check the
 result — choosing among whatever the runtime offers now, never from a fixed table, since models,
 effort scales and agent tools change and the same level name means different things on different
-models. Higher effort buys more verification, edge cases and independent judgment; lower effort
+models. (The table in `references/codex-workers.md` is a starting point for Codex workers, not a
+substitute for this judgment.) Higher effort buys more verification, edge cases and independent judgment; lower effort
 returns a usable starting point sooner, which suits routine, well-scoped work whose output you
 review anyway. Effort is usually the first knob: raise or lower it within a model, and change the
 model only for a gap effort cannot close. Cheap workers pay off on routine, independent or bulky
@@ -90,6 +100,24 @@ settings have diminishing returns and can overthink; use them only where a lesse
 fallen short. Outcomes are the evidence: a light worker that hits something beyond its depth
 reports it instead of digging, and you re-route it stronger; work that strong workers finish
 easily can run lighter next time. Tell the user before reaching for the most expensive settings.
+
+**Pick the vendor by the routing mode** (user, 2026-10-30). Every new worker, subagent and side
+task runs on Claude or on GPT (Codex) according to the active mode. Record the mode in the ledger
+and switch whenever the user says so. Default: **auto**.
+- **claude-first**: almost everything runs on Claude. Use Codex only for a second opinion from a
+  different model (independent review, cross-check of a conclusion or a design).
+- **auto**: pick the best model per task, and say which in one line when launching.
+  - Claude: the orchestrator; tasks that need the browser, computer use, Artifact/Docs tools, or a
+    worker that must negotiate with peers itself.
+  - Codex Sol: long implementation, deploy and build/test runs, debugging, and device runs whose
+    mid-run handoffs you can broker by steering (hub-started workers only).
+  - Codex Terra: docs and reports. Codex Luna: quick lookups. Codex: second opinions.
+- **gpt-first**: route as much as possible to Codex, including work you'd otherwise give a
+  subagent (Agent tool): use a short `codex exec` (Luna/Terra/Sol by difficulty, read-only for
+  research) instead. Fall back to Claude only for what Codex can't do (browser or computer use,
+  Artifact/Docs tools, negotiating with peers) or a task it already failed after an escalation.
+- In every mode: follow `references/codex-workers.md` for launching, permissions and verifying
+  Codex workers, and tell the user promptly if Codex keeps falling short.
 
 **Route new work to whoever already holds its context.** Before planning a new request, compare
 it with the open and recently finished tasks. If it extends, fixes or touches the same area as an
@@ -104,7 +132,7 @@ runs anywhere, e.g. the project folder under `~/.claude/orchestrator/<project>/`
 work can share an existing checkout. A lone writer may commit straight to a project-owned branch in
 an idle checkout. Parallel or risky writers get their own worktree, created on demand in the right
 repo and cut from the right base — the project branch, a release branch, or the upstream default,
-whatever the task calls for. One writer per worktree. Builds count as writes. Devices, simulators,
+whatever the task calls for (see Mechanics for where and how). One writer per worktree. Builds count as writes. Devices, simulators,
 ports and shared caches have a single holder at a time. In heavy repos a new worktree costs a big
 checkout and a cold build, so reuse idle ones or run tasks one after another — say so when you
 choose. Record every worktree you create and remove it once its work is merged or abandoned.
@@ -131,7 +159,9 @@ a verification run.
 **Merge locally into project branches on your own authority; ask before anything else.** The user
 pre-approved merging verified task branches into branches the ledger marks as project-owned: have
 the worker rebase onto the target tip and re-verify, then fast-forward (`git merge --ff-only`),
-which can't lose work and fails safely. Then stop the worker and clean up what was merged
+which can't lose work and fails safely. Run it in the checkout that has the target branch checked
+out (git refuses to move a branch checked out elsewhere); if that checkout has uncommitted changes
+that the merge would touch, ask the user instead of working around them. Then stop the worker and clean up what was merged
 (`git branch -d`, `git worktree remove` without `--force`; keep heavy worktrees for reuse).
 Merging into shared branches, pushing, opening or updating MRs/PRs, posting externally, force
 operations, and deleting unmerged work need the user's say-so.
@@ -150,22 +180,30 @@ short, batch updates that arrive together, and reply in the user's language.
   header of `ListAgents` gives this session's own name — workers address their reports to it.
 - **Launch a worker** from its workspace:
   `cd <workspace> && claude --bg --permission-mode <your own mode> -n <name> "<one line pointing at the brief>"`.
-  It prints `backgrounded · <id> · <name>`. Pass the permission mode explicitly rather than
-  relying on the inherited default, and never a more permissive one than yours. Prefix the name
+  It prints `backgrounded · <id> · <name>`. Pass your own permission mode explicitly rather than
+  relying on the inherited default: never a more permissive one, and not a stricter one either,
+  since a session in a different mode holds your messages for its user's approval. Codex workers
+  follow the same bound through their sandbox (see `references/codex-workers.md`). Prefix the name
   with the project slug so sessions from different projects stay apart in `claude agents`.
   Set the worker's model and effort explicitly with the CLI's own flags (in Claude Code `--model`
   and `--effort`; check `claude --help` for the current values) — otherwise it inherits yours.
   To change them for a worker's next task, stop it and resume it with the new flags (see
   Lifecycle); a message cannot change a running session's model or effort.
-- **Tell workers not to call EnterWorktree.** Background sessions are told by default to isolate
-  themselves that way, which would branch off the remote default branch instead of the workspace
-  you prepared. Workers with no repo workspace simply skip it.
+- **Tell workers how to treat EnterWorktree.** Background sessions are told by default to isolate
+  themselves before their first edit, and their edits may be refused in a checkout outside
+  `.claude/worktrees/` until they do. A new worktree from `EnterWorktree(name=…)` would branch off
+  the remote default branch instead of the workspace you prepared, so the brief says: "Your
+  workspace is `<path>`, already prepared. Never create a worktree; if you are asked to isolate,
+  call `EnterWorktree(path=\"<path>\")`; if that fails, continue in place." Workers with no repo
+  workspace skip it.
 - **Shared resources:** `res status`; `res take <id> --by <session name> --project <slug>
   --for "<purpose>" [--task <id>] [--until <when>]` (exit 2 = held by someone else, 3 = policy
   `never`, or `ask-user` without the user's OK — then retry with `--force`; 4 = device not
   connected); `res extend <id> --by <name> --until <when>`; `res return <id> --by <name>`. A hold
   whose holder session is gone may be reclaimed with `res return <id> --by <name> --force --note
-  "<why>"`. `res log` shows history. `status` shows each device's live link (usbmux / devicectl / adb), so a
+  "<why>"`. `res log` shows history. A Codex worker takes holds as `--by codex:<thread id>`; it
+  can't receive messages, so whoever needs its resource asks that worker's orchestrator (the
+  `--project` column), which relays by steering. `status` shows each device's live link (usbmux / devicectl / adb), so a
   FREE but unplugged device is visible; `take --offline` books one ahead of a plug-in. A hold
   survives unplugging: a worker whose held device drops reports BLOCKED (the user must re-plug,
   unlock or re-trust it) and keeps the hold rather than returning it.
@@ -178,9 +216,13 @@ short, batch updates that arrive together, and reply in the user's language.
   not in a project ledger, since every project using it needs them. `res take` and
   `res status <id>` print the notes; workers record what they discover and say if it is unconfirmed.
   The script lives in this skill's `scripts/res`, symlinked into `_shared/`.
-- **Create worktrees yourself** with `git -C <repo> worktree add -b <branch> <path> <base>`, next to
-  the repo's other worktrees and following its branch naming. `claude --worktree` branches from the
-  remote default branch, not from the base you chose.
+- **Create worktrees yourself** with `git -C <repo> worktree add -b <branch> <path> <base>`, with
+  `<path>` under `<repo>/.claude/worktrees/` (where background sessions accept edits; reuse the
+  repo's existing location if it already keeps worktrees elsewhere and workers edit there fine),
+  following the repo's branch naming. If the main checkout's `git status` then lists `.claude/`,
+  add `.claude/worktrees/` to `<repo>/.git/info/exclude` (not to the tracked `.gitignore`).
+  `claude --worktree` branches from the remote default branch,
+  not from the base you chose.
 - **Notifications:** `SendMessage(to=<worker>, message="", notify_when_idle=true)` subscribes to
   one notice when the worker next goes idle; renew it while the task is open. Worker messages and
   idle notices wake the orchestrator, so end the turn instead of waiting.
@@ -215,22 +257,5 @@ short, batch updates that arrive together, and reply in the user's language.
   tell workers not to fan out search subagents, and have them WebFetch known official URLs instead of
   searching for them.
 - **Codex workers.** For workers on the Codex CLI, follow `references/codex-workers.md`. It covers
-  `codex exec`, and `scripts/codex-worker.mjs` for live steer and interrupt; permissions; what Codex can't do; and which GPT model
-  and effort to pick per task.
-- **Model routing modes** (user, 2026-10-30). Pick the vendor for every new worker, subagent and side task by the active mode.
-  Record the mode in the ledger, and switch whenever the user says so. Default: **auto**.
-  - **claude-first**: almost everything runs on Claude (workers, subagents). Use GPT (Codex) only for a second opinion from a
-    different model (independent review, cross-check of a conclusion or a design) and for image generation; GPT is strong at images.
-  - **auto**: pick the best model per task, and say which in one line when launching. Typical split:
-    - Claude: the orchestrator; tasks that need the browser, devices, Artifact/Docs tools, or judgement-heavy mid-run coordination
-      (e.g. a device review shared with other workers).
-    - Codex Sol: long implementation, deploy and build/test runs, debugging.
-    - Codex Terra: docs and reports.
-    - Codex Luna: quick lookups.
-    - GPT: image generation, and second opinions.
-  - **gpt-first**: route as much as possible to GPT/Codex. That includes work you'd otherwise give a subagent (Agent tool): use a
-    short `codex exec` (Luna/Terra/Sol by difficulty, read-only for research) instead. Fall back to Claude only when GPT can't do
-    it: browser or computer use, devices that need mid-run coordination it can't do, Artifact/Docs tools, or a task it already
-    failed after an escalation.
-  - In every mode: verify GPT workers' results as `references/codex-workers.md` says, and tell the user promptly if Codex keeps
-    falling short.
+  `scripts/codex-worker.mjs` (the default: live steer, interrupt, re-attach) and `codex exec`;
+  permissions; what Codex can't do; and which GPT model and effort to start from per task.

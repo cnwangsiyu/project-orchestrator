@@ -176,13 +176,14 @@ cmd_take() {
     echo "already held by you: $id"; show_notes "$id"
   else
     echo "res: '$id' is held by $(field "$id" by) ($(field "$id" project)) since $(field "$id" since), until $(field "$id" until | sed 's/^$/?/') — $(field "$id" for)" >&2
-    echo "res: message that session (SendMessage) and wait; do not use the resource meanwhile" >&2
+    echo "res: message that session (SendMessage; for a codex:<thread> holder, its project's orchestrator) and wait; do not use the resource meanwhile" >&2
     exit 2
   fi
 }
 
 cmd_extend() {
   local id="${1:-}"; shift || true; need_id "$id"; parse "$@"
+  [ -n "$BY" ] && [ -n "$UNTIL" ] || die "extend needs --by and --until"
   [ -d "$LOCKS/$id.d" ] || die "'$id' is not held"
   [ "$(field "$id" by)" = "$BY" ] || die "'$id' is held by $(field "$id" by), not $BY"
   local info="$LOCKS/$id.d/info" tmp; tmp=$(mktemp)

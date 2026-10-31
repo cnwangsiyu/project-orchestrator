@@ -1,17 +1,19 @@
 #!/usr/bin/env node
 // codex-worker: run and steer Codex workers through a shared Codex app-server ("hub") over WebSocket.
 //
-//   codex-worker start  --cwd DIR [--model M] [--effort E] [--sandbox S] [--name N] --log FILE  "<prompt>"
-//   codex-worker turn   --thread ID --log FILE [--effort E] [--model M]                          "<prompt>"
-//   codex-worker steer  --thread ID                                                             "<message>"
+//   codex-worker start  --cwd DIR --effort E [--model M] [--sandbox S] [--name N] --log FILE  "<prompt>"
+//   codex-worker turn   --thread ID --effort E --log FILE [--model M]                        "<prompt>"
+//   codex-worker wait   --thread ID [--log FILE]
+//   codex-worker steer  --thread ID                                                           "<message>"
 //   codex-worker interrupt --thread ID
 //   codex-worker status --thread ID
 //
 // `start` and `turn` follow the turn until it ends: every notification is appended to --log as JSONL, the first stdout
 // line is `thread=<id> turn=<id>`, and the process exits 0 on completed, 1 on failed/interrupted. Run them as a
-// harness background task so their exit notifies the orchestrator. `steer` injects a message into the running turn,
-// `interrupt` stops it. Requires a hub: `codex app-server --listen ws://127.0.0.1:47321` (localhost only) running as a
-// long-lived background task; override the URL with CODEX_HUB.
+// harness background task so their exit notifies the orchestrator. `wait` re-attaches to a thread's running turn (e.g.
+// after the orchestrator restarted) and exits the same way, at once if the turn already ended. `steer` injects a message
+// into the running turn, `interrupt` stops it. Requires a hub: `codex app-server --listen ws://127.0.0.1:47321`
+// (localhost only), started detached with nohup so it outlives any one session; override the URL with CODEX_HUB.
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -23,7 +25,8 @@ for (let i = 0; i < rest.length; i++) {
 }
 const text = pos.join(' ');
 const die = (msg, code = 2) => { process.stderr.write(`codex-worker: ${msg}\n`); process.exit(code); };
-if (!cmd) die('usage: codex-worker start|turn|steer|interrupt|status ...');
+if (!cmd) die('usage: codex-worker start|turn|wait|steer|interrupt|status ...');
+if ((cmd === 'start' || cmd === 'turn') && typeof opts.effort !== 'string') die(`${cmd} needs --effort (the catalog default may be low)`);
 
 const hub = process.env.CODEX_HUB || 'ws://127.0.0.1:47321';
 const ws = new WebSocket(hub);
@@ -88,6 +91,17 @@ try {
     await call('thread/resume', { threadId: opts.thread, model: opts.model }).catch(() => {});
     const ts = await call('turn/start', { threadId: opts.thread, input: textInput(text), effort: opts.effort, model: opts.model });
     follow(opts.thread, ts.turn?.id ?? ts.turnId);
+  } else if (cmd === 'wait') {
+    if (!opts.thread) die('wait needs --thread');
+    await call('thread/resume', { threadId: opts.thread }).catch(() => {});
+    const t = await currentTurn(opts.thread);
+    if (!t) die('thread has no turns', 3);
+    if (t.status === 'inProgress') follow(opts.thread, t.id);
+    else {
+      console.log(`thread=${opts.thread} turn=${t.id}`);
+      console.log(`turn ${t.status}${t.error ? ' error=' + JSON.stringify(t.error) : ''}`);
+      finish(t.status === 'completed' ? 0 : 1);
+    }
   } else if (cmd === 'steer') {
     if (!opts.thread || !text) die('steer needs --thread and a message');
     await call('thread/resume', { threadId: opts.thread }).catch(() => {});
