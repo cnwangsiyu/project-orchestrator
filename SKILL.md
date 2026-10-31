@@ -214,6 +214,23 @@ short, batch updates that arrive together, and reply in the user's language.
   exhausts it mid-task. Give each research topic its own worker session with a short question list,
   tell workers not to fan out search subagents, and have them WebFetch known official URLs instead of
   searching for them.
-- **Codex workers.** When the user wants workers on the Codex CLI instead (e.g. Claude credit is
-  low), follow `references/codex-workers.md`: launch/resume commands, permissions, what Codex
-  can't do (no messaging, so you relay), and which GPT model and effort to pick per task.
+- **Codex workers.** For workers on the Codex CLI, follow `references/codex-workers.md`. It covers
+  `codex exec`, and `scripts/codex-worker.mjs` for live steer and interrupt; permissions; what Codex can't do; and which GPT model
+  and effort to pick per task.
+- **Model routing modes** (user, 2026-10-30). Pick the vendor for every new worker, subagent and side task by the active mode.
+  Record the mode in the ledger, and switch whenever the user says so. Default: **auto**.
+  - **claude-first**: almost everything runs on Claude (workers, subagents). Use GPT (Codex) only for a second opinion from a
+    different model (independent review, cross-check of a conclusion or a design) and for image generation; GPT is strong at images.
+  - **auto**: pick the best model per task, and say which in one line when launching. Typical split:
+    - Claude: the orchestrator; tasks that need the browser, devices, Artifact/Docs tools, or judgement-heavy mid-run coordination
+      (e.g. a device review shared with other workers).
+    - Codex Sol: long implementation, deploy and build/test runs, debugging.
+    - Codex Terra: docs and reports.
+    - Codex Luna: quick lookups.
+    - GPT: image generation, and second opinions.
+  - **gpt-first**: route as much as possible to GPT/Codex. That includes work you'd otherwise give a subagent (Agent tool): use a
+    short `codex exec` (Luna/Terra/Sol by difficulty, read-only for research) instead. Fall back to Claude only when GPT can't do
+    it: browser or computer use, devices that need mid-run coordination it can't do, Artifact/Docs tools, or a task it already
+    failed after an escalation.
+  - In every mode: verify GPT workers' results as `references/codex-workers.md` says, and tell the user promptly if Codex keeps
+    falling short.
