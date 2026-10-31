@@ -20,6 +20,7 @@ Use this when the user asks for Codex workers, for example because Claude Code c
   - On a usage limit, the run ends with `turn.failed` and "You've hit your usage limit".
   - Report that to the user; a fresh account or a later retry are the options. Resume once it's sorted.
   - First verify any write whose result is unknown, before redoing it.
+- **Queue a message for a worker:** `codex queue --thread <session uuid> --message "<text>"` (codex-cli 0.166). Tested 2026-10-30 with `codex exec`: a message queued while the run is going is NOT seen by that run. It is delivered at the next `codex exec resume` of the thread. So it works as a mailbox (peers or the orchestrator can leave instructions anytime), not live steering. `--resume` tries to resume the thread on the local app-server daemon. Live mid-run delivery for daemon-hosted sessions is unverified. To change course now, stop the run and resume.
 - **A run that was already started without notification:** start a background watcher. It waits on the PID (`while kill -0 <pid>; do sleep 20; done`), then prints the last `turn.completed`/`turn.failed` line.
 - **Optional Codex plugin**: `node ~/.claude/plugins/cache/openai-codex/codex/<ver>/scripts/codex-companion.mjs task --background --write [--resume] --model <id> --effort <low…xhigh>`, then `status` / `result` / `cancel <job>`. Two caveats:
   - Never use `--model spark`. It maps to the retired `gpt-5.3-codex-spark`.
