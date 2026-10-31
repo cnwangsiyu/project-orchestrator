@@ -58,6 +58,14 @@ Relative plan usage, from OpenAI's Codex pricing as of 2026-10: Sol = 1x, Astra 
 
 If Terra's result fails that check, or it stalls, resume or relaunch on Sol (same or higher effort) and note it in the ledger. Repeated misses on one kind of task mean that kind defaults to Sol from then on.
 
+**Tell the user promptly when Codex keeps falling short** (user's instruction, 2026-10-30), on any model. Report it right away rather than quietly working around it. Examples:
+- repeated failed acceptance or escalations;
+- fabricated evidence;
+- touching files it was told not to touch;
+- stalls or unfinished runs.
+
+Include what happened (task, model, effort, symptom) and what you did about it. The user decides whether to keep using Codex.
+
 | Task | Default (try first) | Escalate to |
 |---|---|---|
 | Code review | Terra `high` | Sol `high` |
