@@ -83,6 +83,17 @@ that — so say "commit locally, do not push" (or whatever this task allows). Co
 message anyone: they end their run with the report and put the same status word first in their
 final message; a QUESTION ends the run, and you resume it with the answer.
 
+**Carry memory across sessions yourself.** A worker loads, at best, the memory of the project its
+working directory maps to — never this conversation's own memory, and a Codex worker reads even
+that only if it chooses to. So give every brief a "Relevant memory" section: the memories that
+bear on this task (the user's working preferences, pitfalls, decisions). Quote inline what the
+worker must not miss; list the rest as absolute paths under an explicit order — "before anything
+else, read each of these with a shell command; they are required input". A bare list of paths is
+not enough: light workers answer without opening them. Pick what matters; don't dump the whole
+index. In the other direction, ask each worker for a "Durable lessons"
+section in its report — facts, pitfalls or user corrections worth keeping beyond this task — and
+save the ones that hold up to your memory, so later workers get them through their briefs.
+
 **Match each worker's capability and effort to its task.** Decide per task — again for every task
 or amendment a worker takes on, not once per worker — from the task's
 difficulty, how ambiguous it is, what a wrong answer costs, and how closely you will check the
