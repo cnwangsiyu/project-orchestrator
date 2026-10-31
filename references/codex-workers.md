@@ -4,13 +4,23 @@ Use this when the user asks for Codex workers, for example because Claude Code c
 
 ## Launch, resume, follow
 
-- **Launch** in a background Bash from the worker's workspace:
-  `codex exec -C <workspace> -m <model> -c model_reasoning_effort='"<effort>"' --json -o <task dir>/codex-last.md "<one line pointing at the brief>" > <task dir>/codex.jsonl 2>&1`
-  The session id is the `thread_id` in the first JSONL events. Record it in the ledger next to the cwd and brief, because Codex sessions don't appear in `claude agents` or `ListAgents`.
+- **Launch** from the worker's workspace as a harness background task (Bash with `run_in_background`):
+  `codex exec -C <workspace> -m <model> -c model_reasoning_effort='"<effort>"' --json -o <task dir>/codex-last.md "<one line pointing at the brief>" < /dev/null > <task dir>/codex.jsonl 2>&1`
+  - Never launch it with a trailing `&` inside a normal Bash call. That run gives no exit notification, so a failure goes unnoticed. In one case a usage-limit stop sat unseen until the user asked.
+  - Always redirect stdin from `/dev/null`. Otherwise Codex waits on "Reading additional input from stdin".
+  - Outside a git repo, add `--skip-git-repo-check` (to `exec` and `exec resume`).
+  - The session id is the `thread_id` in the first JSONL events. Record it in the ledger next to the cwd and brief, because Codex sessions don't appear in `claude agents` or `ListAgents`.
 - **Resume** the same worker for its next task, so its context survives:
-  `codex exec resume <session uuid> -c model_reasoning_effort='"<effort>"' -o <file> "<what changed + new task>"`
-  Run it from the original workspace. A worker can only be resumed after its current run has ended.
-- **Follow**: the background Bash exiting is the completion signal. The final answer is in the `-o` file.
+  `codex exec resume [--skip-git-repo-check] <session uuid> [-m <model>] -c model_reasoning_effort='"<effort>"' --json -o <file> "<what changed + new task>" < /dev/null`
+  - Run it from the original workspace, also as a background task.
+  - A worker can only be resumed after its current run has ended.
+  - `-m` switches the model for the resumed run, for example to escalate.
+  - Sessions are not tied to the ChatGPT account: after an account switch, resume still continues with the full context.
+- **Follow**: the background task's exit is the completion signal. The final answer is in the `-o` file. Check how the run ended in the JSONL: the last `turn.completed`, or a `turn.failed` with its error.
+  - On a usage limit, the run ends with `turn.failed` and "You've hit your usage limit".
+  - Report that to the user; a fresh account or a later retry are the options. Resume once it's sorted.
+  - First verify any write whose result is unknown, before redoing it.
+- **A run that was already started without notification:** start a background watcher. It waits on the PID (`while kill -0 <pid>; do sleep 20; done`), then prints the last `turn.completed`/`turn.failed` line.
 - **Optional Codex plugin**: `node ~/.claude/plugins/cache/openai-codex/codex/<ver>/scripts/codex-companion.mjs task --background --write [--resume] --model <id> --effort <low…xhigh>`, then `status` / `result` / `cancel <job>`. Two caveats:
   - Never use `--model spark`. It maps to the retired `gpt-5.3-codex-spark`.
   - The plugin rejects the efforts `max` and `ultra`. Use `codex exec -c model_reasoning_effort=...` for those.
