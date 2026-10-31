@@ -36,6 +36,11 @@ shared hub over WebSocket, so the process that started a worker and the one that
   starts it detached (log in `~/.codex/hub.log`) so it outlives your session. Running workers die if the hub dies. `CODEX_HUB` overrides the URL. The hub has no
   authentication: any local process can start or steer a thread on it, so keep it on 127.0.0.1 and only on a machine you trust. (The managed daemon's unix socket speaks WebSocket too; Node's
   WebSocket can't dial a unix socket, hence the TCP hub.)
+- **After a re-login or plan change, restart the hub.** It keeps the login it started with, so once `~/.codex/auth.json`
+  changes, hub calls fail with `401 ... token_expired` (seen 2026-10-30 after the upgrade to Pro). Restart it only while no
+  worker runs on it — `codex-worker.mjs list` shows every thread `notLoaded` — by stopping the `codex app-server --listen`
+  process and running `codex-worker.mjs hub`; otherwise tell the other orchestrators first. `codex exec` runs read the
+  login fresh and aren't affected.
 - **Start** a worker as a harness background task (its exit is the completion signal; it exits 0 on completed, 1 on
   failed/interrupted):
   `node ~/.agents/skills/project-orchestrator/scripts/codex-worker.mjs start --cwd <workspace> --model <id> --effort <e> --sandbox <s> --name <worker> --log <task dir>/codex.jsonl --out <task dir>/codex-last.md "<one line pointing at the brief>"`
@@ -107,7 +112,7 @@ Codex has a built-in image tool (`image_gen.imagegen`; feature flag `image_gener
 
 ## Choosing model and effort
 
-Relative plan usage, from OpenAI's Codex pricing as of 2026-10: Sol = 1x, Astra ≈ 5x, Terra ≈ 0.5x, Luna ≈ 0.05x. The Fast tier costs about 2.5x more. Higher effort just spends more tokens.
+Plan: Pro since 2026-10-30 (the API reports `prolite`): a single weekly window, no 5-hour window. Relative plan usage, from OpenAI's Codex pricing as of 2026-10: Sol = 1x, Astra ≈ 5x, Terra ≈ 0.5x, Luna ≈ 0.05x. The Fast tier costs about 2.5x more. Higher effort just spends more tokens.
 
 **Efforts.** Codex offers `low`, `medium`, `high`, `xhigh`, `max` and `ultra` (Luna stops at `max`). There is no `none` or `minimal`.
 - `ultra` makes the model fan out its own sub-agents. Avoid it: the orchestrator already parallelizes, and `ultra` multiplies usage.
