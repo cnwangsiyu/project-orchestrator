@@ -50,16 +50,25 @@ Relative plan usage, from OpenAI's Codex pricing as of 2026-10: Sol = 1x, Astra 
 - `gpt-6-luna` is fast and cheap, for extraction, summaries and focused small edits.
 - Don't pick `gpt-6-sol` or the `gpt-5.6-*` models: they're older at the same or higher cost.
 
-| Task | Model + effort | Why |
+**User preference (2026-10-30): try Terra first.** OpenAI positions it as close to Sol at half the usage. Default to Terra at the same effort you'd give Sol, and check its work harder:
+- the cited file:line exist and say what's claimed;
+- builds and tests really ran;
+- commits contain only the intended files;
+- conclusions match the evidence.
+
+If Terra's result fails that check, or it stalls, resume or relaunch on Sol (same or higher effort) and note it in the ledger. Repeated misses on one kind of task mean that kind defaults to Sol from then on.
+
+| Task | Default (try first) | Escalate to |
 |---|---|---|
-| Code review | Sol `high` | Needs cross-file reasoning; `xhigh` rarely adds on normal diffs |
-| High-stakes review (concurrency, ABI, crash fix) | Sol `xhigh`; Astra `high` as a second opinion | Catches subtle races |
-| Implementing in a large C++/ObjC/Java codebase | Sol `high` (`xhigh` for cross-module or threading designs) | Large context, strong coding |
-| Debugging | Sol `xhigh`; if it stalls, Astra `xhigh`, then `max` | Hard reasoning pays off here |
-| Log or data analysis | Sol `medium`; Luna `medium` for pure extraction | Mostly reading |
-| Docs or reports | Terra `medium` | Positioned for writing, at half Sol's usage |
-| Long procedural build/device workflows | Sol `medium`; raise to `high` for diagnosis steps | Steps are routine |
-| Quick lookups | Luna `low` | About 1/20 of Sol's usage, fastest |
-| Usage is tight | Terra `medium` for most work, Luna `low` for lookups; keep Sol `high` for the one hard problem | Avoid Astra, Fast, `max`, `ultra` |
+| Code review | Terra `high` | Sol `high` |
+| High-stakes review (concurrency, ABI, crash fix) | Terra `xhigh` | Sol `xhigh`; Astra `high` as a second opinion |
+| Implementing in a large C++/ObjC/Java codebase | Terra `high` (`xhigh` for cross-module or threading designs) | Sol `high` / `xhigh` |
+| Debugging | Terra `xhigh` | Sol `xhigh`, then Astra `xhigh` |
+| Log or data analysis | Terra `medium`; Luna `medium` for pure extraction | Sol `medium` |
+| Docs or reports | Terra `medium` | Sol `medium` |
+| Long procedural build/device workflows | Terra `medium`; `high` for diagnosis steps | Sol `medium` / `high` |
+| Quick lookups | Luna `low` | Terra `low` |
+
+Avoid Astra, Fast, `max` and `ultra` unless a task has already failed on Sol.
 
 Sources: the OpenAI model docs and Codex pricing/model pages, the Codex CLI changelog, and the local `codex debug models` output. Benchmark numbers for the GPT-6.x models were mostly vendor or second-hand figures in 2026-10, so treat the ranking as guidance and switch models when a worker struggles.
