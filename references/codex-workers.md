@@ -50,13 +50,13 @@ Relative plan usage, from OpenAI's Codex pricing as of 2026-10: Sol = 1x, Astra 
 - `gpt-6-luna` is fast and cheap, for extraction, summaries and focused small edits.
 - Don't pick `gpt-6-sol` or the `gpt-5.6-*` models: they're older at the same or higher cost.
 
-**User preference (updated 2026-10-30): default to Sol, not Terra.** The user first asked to try Terra first, then, after Terra stopped a multi-step implementation task after one turn with most of it undone, said "之后还是别优先用 terra 吧，感觉不太靠谱". So default to `gpt-6.1-sol` at the effort the task needs. Use Terra only when the user asks for it. Keep checking every worker's work:
+**User preference (updated 2026-10-30): use the table below.** It is the guide's original per-task recommendation. On 2026-10-30 the user first asked to try Terra first. Then Terra stopped a multi-step implementation task after one turn with most of it undone, and the user said not to prefer Terra but not to drop it either: "也不是完全不用 Terra 吧，要么改回 lynx 那个主对话之前调研出来的第一版推荐吧". So Sol does coding, review, debugging and procedural work; Terra does docs/reports and the tight-usage case; Luna does lookups. Keep checking every worker's work:
 - the cited file:line exist and say what's claimed;
 - builds and tests really ran;
 - commits contain only the intended files;
 - conclusions match the evidence.
 
-If Sol's result fails that check, or it stalls, resume it with a sharper instruction, or raise the effort, and note it in the ledger.
+If a worker's result fails that check, or it stalls, resume it with a sharper instruction, raise the effort, or move a Terra task to Sol, and note it in the ledger.
 
 **Tell the user promptly when Codex keeps falling short** (user's instruction, 2026-10-30), on any model. Report it right away rather than quietly working around it. Examples:
 - repeated failed acceptance or escalations;
@@ -66,17 +66,16 @@ If Sol's result fails that check, or it stalls, resume it with a sharper instruc
 
 Include what happened (task, model, effort, symptom) and what you did about it. The user decides whether to keep using Codex.
 
-| Task | Default (try first) | Escalate to |
+| Task | Model + effort | Why |
 |---|---|---|
-| Code review | Sol `high` | Sol `xhigh` |
-| High-stakes review (concurrency, ABI, crash fix) | Sol `xhigh` | Astra `high` as a second opinion |
-| Implementing in a large C++/ObjC/Java codebase | Sol `high` (`xhigh` for cross-module or threading designs) | Sol `xhigh` |
-| Debugging | Sol `xhigh` | Astra `xhigh` |
-| Log or data analysis | Sol `medium`; Luna `medium` for pure extraction | Sol `high` |
-| Docs or reports | Sol `medium` | Sol `high` |
-| Long procedural build/device workflows | Sol `medium`; `high` for diagnosis steps | Sol `high` |
-| Quick lookups | Luna `low` | Sol `low` |
-
-Avoid Astra, Fast, `max` and `ultra` unless a task has already failed on Sol.
+| Code review | Sol `high` | Needs cross-file reasoning; `xhigh` rarely adds on normal diffs |
+| High-stakes review (concurrency, ABI, crash fix) | Sol `xhigh`; Astra `high` as a second opinion | Catches subtle races |
+| Implementing in a large C++/ObjC/Java codebase | Sol `high` (`xhigh` for cross-module or threading designs) | Large context, strong coding |
+| Debugging | Sol `xhigh`; if it stalls, Astra `xhigh`, then `max` | Hard reasoning pays off here |
+| Log or data analysis | Sol `medium`; Luna `medium` for pure extraction | Mostly reading |
+| Docs or reports | Terra `medium` | Positioned for writing, at half Sol's usage |
+| Long procedural build/device workflows | Sol `medium`; raise to `high` for diagnosis steps | Steps are routine |
+| Quick lookups | Luna `low` | About 1/20 of Sol's usage, fastest |
+| Usage is tight | Terra `medium` for most work, Luna `low` for lookups; keep Sol `high` for the one hard problem | Avoid Astra, Fast, `max`, `ultra` |
 
 Sources: the OpenAI model docs and Codex pricing/model pages, the Codex CLI changelog, and the local `codex debug models` output. Benchmark numbers for the GPT-6.x models were mostly vendor or second-hand figures in 2026-10, so treat the ranking as guidance and switch models when a worker struggles.
