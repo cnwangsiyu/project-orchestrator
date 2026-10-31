@@ -32,26 +32,33 @@ Use this whenever the routing mode in SKILL.md puts a task on Codex — by defau
 into account in that same turn), and `turn/interrupt` stops it. `scripts/codex-worker.mjs` wraps this. Every command connects to one
 shared hub over WebSocket, so the process that started a worker and the one that steers it can differ.
 
-- **Hub**, one per machine, localhost only, reused by every orchestrator. Check `curl -s http://127.0.0.1:47321/readyz`; if it's not
-  up, start it detached so it outlives your session: `nohup codex app-server --listen ws://127.0.0.1:47321 >~/.codex/hub.log 2>&1 &`.
-  Running workers die if the hub dies. `CODEX_HUB` overrides the URL. The hub has no
+- **Hub**, one per machine, localhost only, reused by every orchestrator. `codex-worker.mjs hub` checks it and, if it's down,
+  starts it detached (log in `~/.codex/hub.log`) so it outlives your session. Running workers die if the hub dies. `CODEX_HUB` overrides the URL. The hub has no
   authentication: any local process can start or steer a thread on it, so keep it on 127.0.0.1 and only on a machine you trust. (The managed daemon's unix socket speaks WebSocket too; Node's
   WebSocket can't dial a unix socket, hence the TCP hub.)
 - **Start** a worker as a harness background task (its exit is the completion signal; it exits 0 on completed, 1 on
   failed/interrupted):
-  `node ~/.agents/skills/project-orchestrator/scripts/codex-worker.mjs start --cwd <workspace> --model <id> --effort <e> --sandbox <s> --name <worker> --log <task dir>/codex.jsonl "<one line pointing at the brief>"`
-  `--effort` is required. Its first stdout line is `thread=<id> turn=<id>`. Record the thread in the ledger.
+  `node ~/.agents/skills/project-orchestrator/scripts/codex-worker.mjs start --cwd <workspace> --model <id> --effort <e> --sandbox <s> --name <worker> --log <task dir>/codex.jsonl --out <task dir>/codex-last.md "<one line pointing at the brief>"`
+  `--effort` and `--sandbox` are required. Its first stdout line is `thread=<id> turn=<id>`. Record the thread in the ledger.
+  On exit it prints `turn <status>`, the thread's token usage and `final: <first line of the final message>` — so the
+  completion notice already carries the worker's `[<id>] DONE | QUESTION | …` line — and writes the whole final message to `--out`.
 - **Re-attach** after the orchestrator restarted (its background tasks, including the `start`/`turn` follower, are gone, but
-  the turn keeps running on the hub): `codex-worker.mjs wait --thread <id> --log <file>`, again as a background task. It exits
-  like `start` when the turn ends, or at once if it already has.
+  the turn keeps running on the hub): `codex-worker.mjs wait --thread <id> --log <file> --out <file>`, again as a background
+  task. It exits like `start` when the turn ends, or at once if it already has. Several clients can follow one turn.
+- **Find** a thread whose id the ledger lost: `codex-worker.mjs list [--cwd <workspace>] [--search <name>]` (hub and `codex exec`
+  threads, newest first: id, updated, status, source, name, cwd).
 - **Steer** the running turn: `codex-worker.mjs steer --thread <id> "<message>"`. This is the messaging channel: relay peer requests,
   device handoffs and plan changes this way.
 - **Interrupt**: `codex-worker.mjs interrupt --thread <id>`. **New task** on the same thread: `codex-worker.mjs turn --thread <id>
-  --log <file> "<what changed + new task>"` (also as a background task). **Status**: `codex-worker.mjs status --thread <id>`.
+  --effort <e> --log <file> --out <file> [--model <id>] [--sandbox <s>] "<what changed + new task>"` (also as a background
+  task); `--model`, `--effort` and `--sandbox` change it for this and later turns, e.g. read-only research, then a write task.
+  **Status**: `codex-worker.mjs status --thread <id>`.
 - The log is app-server notifications: agent text is `item/completed` with `item.type == "agentMessage"`; the end is
   `turn/completed` with `turn.status`.
-- Workers started this way use `approvalPolicy: never`, so the sandbox is their only bound. `--sandbox` defaults to
-  `danger-full-access`; choose it by the rule under Permissions below.
+- Workers started this way use `approvalPolicy: never`, so the sandbox is their only bound; choose it by the rule under
+  Permissions below. Nobody answers at the hub: codex-worker refuses every server request validly, and if a worker asks
+  the user a question it is told to end the turn with a `QUESTION` final message (in tests, hub workers had no
+  question tool at all).
 
 ## Permissions and environment
 
