@@ -12,6 +12,7 @@
 //   codex-worker status --thread ID
 //   codex-worker list   [--cwd DIR] [--search TEXT] [--limit N]
 //   codex-worker quota                                                     (the account's rate-limit windows, JSON)
+//   codex-worker usage                                                     (account id, windows and reset cards, JSON)
 //   codex-worker reset-credits                                             (reset cards: count and expiries, JSON)
 //   codex-worker reset-credit-use --key UUID [--credit ID]                 (redeem one reset card; irreversible)
 //
@@ -24,8 +25,9 @@
 // Sandbox S is read-only | workspace-write | danger-full-access. In workspace-write the network follows Codex's config
 // (`[sandbox_workspace_write] network_access`) unless --network on|off, and Codex keeps every git metadata dir
 // read-only (so the worker can edit files but not add, commit or fetch).
-// Requires a hub on ws://127.0.0.1:47321 (localhost only; `hub` starts one detached so it outlives any one session);
-// override the URL with CODEX_HUB.
+// Requires the account's hub (localhost only; `hub` starts one detached so it outlives any one session): `main` is
+// ws://127.0.0.1:47321 on ~/.codex, other accounts come from ~/.claude/orchestrator/_shared/codex-accounts.json via
+// --account; CODEX_HOME / CODEX_HUB override both.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';

@@ -20,7 +20,7 @@ This session becomes the orchestrator for one **project** — a body of work the
 such as a feature, a release, an investigation or an ongoing area of ownership. A project may span
 several repos and branches, or none at all (research, docs, package validation, coordination).
 The user talks only to the orchestrator; the work itself is done by **workers**, independent
-background sessions — Claude Code or Codex, per the routing mode below — that the orchestrator
+background sessions — Claude Code or Codex, as `scripts/route.mjs` picks — that the orchestrator
 launches, briefs, coordinates and integrates.
 
 Projects are the unit of separation: each orchestrator conversation owns exactly one project and
@@ -33,7 +33,7 @@ together — not labor.
 
 When the skill starts (and whenever you lose track): load the messaging tools, learn your own
 session name, settle which project this is, open or create its ledger, reconcile it with the live
-sessions (`claude agents --json` for Claude workers, `codex-worker.mjs status`/`wait` for the
+sessions (`claude agents --json` for Claude workers, `codex-worker.mjs --account <name> status`/`wait` for the
 Codex threads the ledger records), and show the user the current status in a few lines.
 
 ## Principles
@@ -68,7 +68,7 @@ the branch it integrates into, held resources, outcome. Update it before telling
 anything. Only the orchestrator writes the ledger; workers write only inside their own
 `tasks/<id>/`. On a restart or after compaction, re-read the ledger and reconcile it with the live
 sessions as above. A restart also ends the orchestrator's own background tasks, so a Codex run it
-was following loses its completion signal: re-attach with `codex-worker.mjs wait` (see
+was following loses its completion signal: re-attach with `codex-worker.mjs --account <name> wait` (see
 `references/codex-workers.md`).
 
 **Give each worker a self-contained brief.** A worker knows nothing of this conversation. The
@@ -94,75 +94,65 @@ index. In the other direction, ask each worker for a "Durable lessons"
 section in its report — facts, pitfalls or user corrections worth keeping beyond this task — and
 save the ones that hold up to your memory, so later workers get them through their briefs.
 
-**Match each worker's capability and effort to its task.** Decide per task — again for every task
-or amendment a worker takes on, not once per worker — from the task's
-difficulty, how ambiguous it is, what a wrong answer costs, and how closely you will check the
-result — choosing among whatever the runtime offers now, never from a fixed table, since models,
-effort scales and agent tools change and the same level name means different things on different
-models. (The tables in `references/model-routing.md` are the starting point for both vendors, not a
-substitute for this judgment.) Higher effort buys more verification, edge cases and independent judgment; lower effort
-returns a usable starting point sooner, which suits routine, well-scoped work whose output you
-review anyway. Effort is usually the first knob: raise or lower it within a model, and change the
-model only for a gap effort cannot close. When a test, build or exact check will catch a miss, start
-a notch lower and re-run only the failures higher — cheaper and at least as good as running
-everything high; when a miss would be silent or costly, start at the level the task needs. Cheap workers pay off on routine, independent or bulky
-work (polling, collecting data, summaries, sweeps too large for one context); a hard, tightly
+**Fit capability to the task — through the router.** Cheap workers pay off on routine, independent or
+bulky work (polling, collecting data, summaries, sweeps too large for one context). A hard, tightly
 coupled chain of reasoning — root-cause hunts across components, device experiments, design,
-anything costly to get wrong — goes to one strong worker rather than being split thin. The top
-settings have diminishing returns and can overthink; use them only where a lesser one has visibly
-fallen short. Outcomes are the evidence: a light worker that hits something beyond its depth
-reports it instead of digging, and you re-route it stronger; work that strong workers finish
-easily can run lighter next time. Tell the user before reaching for the most expensive settings.
+anything costly to get wrong — goes to one strong worker rather than being split thin. That split
+is your call. The model and effort for each piece come from the router below.
 
-**Pick the vendor by the routing mode** (user, 2026-10-30). Every new worker, subagent and side
-task runs on Claude or on GPT (Codex) according to the active mode. Record the mode in the ledger
-and switch whenever the user says so. Default: **auto**.
-- **claude-first**: almost everything runs on Claude. Use Codex only for a second opinion from a
-  different model (independent review, cross-check of a conclusion or a design) and for image
-  generation, which Claude can't do (recipe in `references/codex-workers.md`).
-- **auto**: pick vendor, model and effort per task from `references/model-routing.md` (task table
-  built from public benchmarks, prices and plan usage), and say in one line which and why when
-  launching. Its core:
-  - Claude only: the orchestrator; computer use (the Codex CLI can't do it), browser, Artifact/Docs
-    tools, a worker that must negotiate with peers itself.
-  - Codex Sol 6.1 (`high`; `xhigh` for hard or long work) is the coding workhorse — implementation,
-    build/test/deploy runs, debugging, code review — at a fraction of Opus's cost per solved task.
-  - Claude Sonnet 5.5 `medium`: computer use and other Claude-only work; while Claude has spare
-    (see the budget below), also docs, reports and other knowledge work (it scores far above GPT
-    there) and research.
-  - Opus 5.5 `high`: design, open-ended or ambiguous work, escalations. Haiku 5.5 `low` or Codex
-    Luna `low`: lookups, polling, bulk extraction (Luna never writes code). Codex Terra: drafts
-    and image reading only, not code. Codex Luna: image generation.
-  - Fable 5.1 and Astra only as escalations after the strong default visibly fell short, and tell
-    the user first; high-stakes reviews and second opinions use the other vendor.
-  - Then apply the quota budget (user, 2026-11-03), weighing both vendors, never just one:
-    **Codex is use-it-or-lose-it** — aim to spend its week by the reset, so everything either
-    vendor can do goes to Codex first. **Claude also runs the orchestrators** and must never run
-    out before Codex: about 20% of its window stays reserved for orchestration, and Claude workers
-    take Claude-only work always, plus the work Claude is clearly better at (docs, design,
-    research, open-ended work) only while Claude has spare.
-    Before launching a worker either vendor could run (and at least every half hour while work is
-    queued), run `node <this skill>/scripts/quota.mjs`. It reads Claude (`claude -p /usage`) and
-    Codex (the hub) together, caches the result for 10 minutes for every orchestrator, and prints
-    each window's used share, reset and pace (used share ÷ elapsed share of the window), a
-    `budget` line projecting each vendor's share at reset, and a `lean` that applies the budget:
-    `claude has spare` / `near budget` / `over budget`, `codex underused` (spend it: raise effort,
-    add second-opinion reviews, pull queued work forward), `codex overspending`, `split`, or
-    `codex out` (tell the user; Claude takes what matters within its room, the rest waits). With
-    several Codex accounts (side by side, one `CODEX_HOME` and hub each; see
-    `references/codex-workers.md`) it also names the account for new Codex work — the one whose quota
-    is lost first — and record that account per Codex worker in the ledger. Reset cards come last:
-    it suggests one only at ≥99% on every account or before a card expires, and you redeem it only
-    with the user's OK (or a standing approval in memory). Notes
-    flag a nearly used Fable window and headroom that a reset within a day would discard. The
-    actions per lean are in `references/model-routing.md`. Say in the launch line when quota
-    changed the choice.
-- **gpt-first**: route as much as possible to Codex, including work you'd otherwise give a
-  subagent (Agent tool): use a short `codex exec` (Luna for lookups and extraction, Terra for
-  writing, Sol for anything touching code; read-only for research) instead. Fall back to Claude only for what Codex can't do (browser or computer use,
-  Artifact/Docs tools, negotiating with peers) or a task it already failed after an escalation.
-- In every mode: follow `references/codex-workers.md` for launching, permissions and verifying
-  Codex workers, and tell the user promptly if Codex keeps falling short.
+**Route every task with `scripts/route.mjs`; judge only what it can't** (user, 2026-11-03). Every new
+worker, subagent, side task, escalation and amendment that changes the work gets its vendor, model,
+effort, Codex account and launch command from
+`node <this skill>/scripts/route.mjs <category> [flags]`, so the policy is the same every time.
+- **Your judgment is the input:**
+  - the category: one row of `route.mjs --table`;
+  - `--stakes low|normal|high` — what a wrong answer costs;
+  - `--auto-check` when a test, build or exact acceptance check will catch a miss;
+  - `--failures N`: how often this task has already visibly fallen short, counted per task and kept
+    in the ledger. Each failure moves it one step up the escalation ladder. Count one when a result
+    fails your verification, a worker stalls or reports something beyond its depth;
+  - `--writes` / `--read-only`, `--against <vendor>` for a second opinion, and `--mode`, `--cwd`,
+    `--task-dir`, `--name` so the printed command is ready to run.
+
+  When a task spans categories, split it or pick the row for its hardest part.
+- **The script computes the rest** from its table and the quota state in `scripts/lib/state.mjs`:
+  - Hard locks: computer use, browser, Artifact/Docs and peer negotiation stay on Claude, which the
+    Codex CLI can't do; image generation goes to Codex.
+  - Quota moves: Codex first for anything either vendor can do. Claude takes the work it is clearly
+    better at only while it has spare.
+  - Effort notches: lower for an automatic check, higher for high stakes, higher while Codex is
+    underused or front-loading its reset cards.
+  - The escalation ladder, the Codex account, the sandbox, and a cross-vendor second opinion for
+    reviews and designs.
+- **Follow its output:**
+  - Launch with the printed command and say the one-line `why` to the user.
+  - Ask the user first for anything under "needs the user's OK" (Fable, Astra, `max`, an exhausted
+    ladder, a card redemption).
+  - Start the printed second opinion too.
+  - On `DEFER`, park the task in the ledger and retry when the reason clears (it prints when).
+  - If the user declines a pending card redemption, re-run with `--no-redeem` for the fallback.
+  - Say anything under "tell the user" right away.
+  - Don't override the script by hand. If its pick is wrong for a whole kind of task, change the
+    table in `route.mjs` (and `references/model-routing.md`) instead, so the change sticks.
+- **Act on the quota lean.** Run `node <this skill>/scripts/quota.mjs` when you plan a batch of
+  work, and at least every half hour while work is queued. Its `lean:` lines are the
+  account-level actions only you can take:
+  - redeem a reset card, with the user's OK;
+  - ask the user to log in an account;
+  - restart a hub;
+  - while Codex is underused or front-loading, pull queued and deferred work forward and add
+    second-opinion reviews;
+  - while Claude is over budget, keep the orchestrator itself lean (Haiku subagents, fewer reads).
+
+  Its rules, from goals the user set on 2026-11-03:
+  - Codex is use-it-or-lose-it: spend every account's week by its reset.
+  - Claude runs the orchestrators, so it never runs out before Codex: 20% of its week is kept in
+    reserve.
+  - Reset cards come last: at 99%, or just before a card expires.
+
+  `references/model-routing.md` explains each line and the benchmarks behind the table.
+- Follow `references/codex-workers.md` for launching, permissions and verifying Codex workers. Tell
+  the user promptly if Codex keeps falling short.
 
 **Route new work to whoever already holds its context.** Before planning a new request, compare
 it with the open and recently finished tasks. If it extends, fixes or touches the same area as an
@@ -230,10 +220,9 @@ short, batch updates that arrive together, and reply in the user's language.
   since a session in a different mode holds your messages for its user's approval. Codex workers
   follow the same bound through their sandbox (see `references/codex-workers.md`). Prefix the name
   with the project slug so sessions from different projects stay apart in `claude agents`.
-  Set the worker's model and effort explicitly with the CLI's own flags — otherwise it inherits
-  yours: in Claude Code `--model opus|sonnet|haiku|fable` and `--effort low|medium|high|xhigh|max`
-  (check `claude --help` for the current values). Subagents you start with the Agent tool take a
-  `model` (e.g. `haiku` for lookups, `sonnet` for research) and otherwise run on your model.
+  Always pass the model and effort `route.mjs` printed (`--model opus|sonnet|haiku|fable`,
+  `--effort low|medium|high|xhigh|max`) — otherwise the worker inherits yours. Subagents you start
+  with the Agent tool take the routed `model` and otherwise run on your model.
   To change them for a worker's next task, stop it and resume it with the new flags (see
   Lifecycle); a message cannot change a running session's model or effort.
 - **Tell workers how to treat EnterWorktree.** Background sessions are told by default to isolate
@@ -305,5 +294,5 @@ short, batch updates that arrive together, and reply in the user's language.
   searching for them.
 - **Codex workers.** For workers on the Codex CLI, follow `references/codex-workers.md`. It covers
   `scripts/codex-worker.mjs` (the default: live steer, interrupt, re-attach) and `codex exec`;
-  permissions; and what Codex can't do. Model and effort choice for both vendors is in
-  `references/model-routing.md`.
+  permissions; several accounts and reset cards; and what Codex can't do. Model, effort and
+  account come from `scripts/route.mjs`.

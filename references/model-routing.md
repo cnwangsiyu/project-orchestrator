@@ -1,7 +1,7 @@
-# Model and effort routing (auto mode)
+# Model and effort routing
 
-The starting point for picking vendor, model and effort per worker, subagent or side task. SKILL.md's judgment rules
-still apply: this table is the default, and outcomes override it. Researched 2026-11-03 (Claude Code 2.1.317,
+Why `scripts/route.mjs` routes the way it does, and the quota policy behind it. The script is the source of truth;
+this file is its rationale. Researched 2026-11-03 (Claude Code 2.1.317,
 codex-cli 0.166); re-check `claude --help`, `codex debug models` and the sources at the bottom when a model changes.
 
 ## The lineup at a glance
@@ -24,93 +24,108 @@ the model inside a pool, quota decides the pool.
 Don't pick `gpt-6-sol` or `gpt-5.6-*` (older at the same or higher cost), Codex `ultra` (fans out its own sub-agents
 and multiplies usage), the Fast/Ultrafast tiers (2.5x+ usage), or the alias `spark`.
 
-## Task → first pick
+## The routing table lives in the script
 
-"Alt" is the other vendor's equivalent, used when quota points that way (see Quota — Claude picks for work Codex
-can also do are conditional on Claude having spare) or as a second opinion. "Escalate"
-is the next step when the first pick visibly falls short.
+`scripts/route.mjs` holds the table and applies it the same way every time. `route.mjs --table` prints it. Each row has
+three parts:
 
-| Task | First pick | Alt | Escalate |
-|---|---|---|---|
-| Quick lookup, find a file, status check, poll | Haiku `low` (Agent subagent) | Luna `low` (`codex exec`) | Sonnet `medium` |
-| Bulk extraction, classification, summarizing data or logs | Luna `medium` | Haiku `medium` | Sol `medium` |
-| Log or data analysis that needs reasoning | Sol `medium` | Sonnet `medium` | Sol `high` |
-| Web research and synthesis | Sonnet `medium` | Sol `medium` | Opus `high` for judgment-heavy synthesis |
-| Well-scoped implementation (clear spec, tests or a build to check it) | Sol `high` | Sonnet `medium` | Sol `xhigh` |
-| Large, cross-module or threading implementation; refactor | Sol `xhigh` | Opus `high` | Opus `xhigh` |
-| UI or frontend work that needs a browser or a visual check | Sonnet `high` | — | Opus `high` |
-| Debugging, root cause across components | Sol `xhigh` | Opus `high` | Switch vendor (Opus `xhigh` ⇄ Sol `max`), then Fable `high` or Astra `xhigh` (tell the user) |
-| Routine code review | Sol `high` | Sonnet `high` | Sol `xhigh` |
-| High-stakes review (concurrency, ABI, crash fix, security) | Opus `xhigh` **and** Sol `xhigh`, independently | — | Astra `high` as a third opinion |
-| Design, architecture, plan, trade-off decision | Opus `high` | — | Opus `xhigh`, with Sol `xhigh` as a second opinion |
-| Docs, reports, user-facing writing, Feishu docs | Sonnet `medium` | Terra `medium` (drafts only; review closely) | Opus `medium` for analysis-heavy reports |
-| Long procedural build, deploy or device workflow | Sol `medium` (`high` for diagnosis steps) | Sonnet `medium` | Sol `high` |
-| Computer use, browser automation, Artifact/Docs tools, peer negotiation | Sonnet `medium` | — (Claude only) | Opus `high` |
-| Device run that hands phones over mid-run | Sol `medium` through the hub (you broker by steering) | Sonnet `medium` (negotiates itself) | — |
-| Scientific or numerical computation | Sol `xhigh` | Opus `xhigh` | Astra `high` |
-| Image generation | Luna `low` (Codex only) | — | — |
-| Reading screenshots or images (no computer use) | Sonnet `medium` | Terra `medium` | Opus `high` |
-| Second opinion on any conclusion | The other vendor at the same tier | — | — |
+- a first pick;
+- the other vendor's alternative;
+- an escalation ladder, plus a cross-vendor second opinion for high-stakes reviews and designs.
 
-The orchestrator itself stays on whatever the user runs it with (Opus 5.5 by default); it delegates rather than
-thinking at `max`.
+The orchestrator supplies only the inputs a script can't judge: the category, the stakes, whether an automatic check
+catches a miss, and how many times the task has fallen short. How the table was chosen:
 
-## Effort rules
+- **Codex Sol is the coding default.** It runs implementation, debugging, review, analysis, build/deploy runs and
+  science. Its cost per solved task is a fraction of Opus's at about the same score.
+- **Claude takes the work it is clearly ahead on, while Claude has spare:** docs, research, image reading,
+  high-stakes review and design. On GDPval, Opus and Sonnet score ≈1845 against Astra's 1542. HLE with tools is
+  Opus's best result, at 67.7%.
+- **Claude-only work:** computer use, browser, Artifact/Docs tools and peer negotiation. The Codex CLI can't do
+  them.
+- **Codex-only work:** image generation.
+- **Cheap rows:** Luna for lookups and extraction, never for code. Terra for prose drafts only. The Claude
+  alternatives are Haiku and Sonnet.
+- **Escalation order:** effort before model, and a vendor switch on a stalled debug for different blind spots. Fable
+  and Astra come last and always need the user's OK.
 
-- **Always set effort explicitly.** Defaults differ: Claude Code runs Opus/Sonnet/Haiku at `medium` and Fable at
-  `high`; the Codex catalog defaults Sol to `low`, while the user's config sets `high`. Claude takes
-  `--effort low|medium|high|xhigh|max`; Codex adds `ultra` (never use it).
-- **Claude:** `low` for subagent lookups; `medium` for most agentic work (Opus 5.5 `medium` beat Opus 5 `max` at ~1/5
-  the cost); `high` for complex coding; `xhigh` for long (>30 min) agentic or coding runs; `max` only after `xhigh`
-  visibly fell short, and then on Opus rather than Sonnet.
-- **Codex:** never below `medium` for coding on Sol; `medium` for routine work, `high` as the coding default, `xhigh`
-  for hard or long work, `max` for the one hardest problem. Luna at `medium`–`high` for extraction; Luna `low` only for
-  trivial lookups and images.
-- **Cheap first, escalate on failure — when a miss is caught automatically.** In Anthropic's data, running at
-  low/medium and re-running only the failures at high solved more tasks (≈97%) for less than running everything at high
-  (95%). Start one notch below the table when a test, build or exact acceptance check will catch a miss; don't when a
-  miss is silent or costly (device runs, irreversible operations, design, reviews whose output you won't re-verify).
-- **Effort before model:** step effort within a model first; switch model, or vendor, when effort can't close the gap.
-  Switching vendor on a stalled debug also buys a different set of blind spots.
-- Note each escalation in the ledger with its symptom; when a kind of task runs easily, start it lower next time.
+To change routing for a kind of task, edit the table in `route.mjs` and this rationale together.
 
-## Quota: spend Codex fully, keep Claude alive (user, 2026-11-03)
+## What the router does, in order
 
-The two subscriptions have different jobs:
+1. **Ladder.** `--failures N` moves N steps up the row's ladder. Past its end, the router asks for the user's OK.
+2. **Vendor.**
+   - Claude-only and Codex-only rows are locked.
+   - Other rows run on Claude only while Claude's budget allows: `claudeBetter` rows need `spare`; design, high-stakes
+     review, or any `--stakes high`, also stays on Claude at `near`.
+   - Codex is used unless every account is out.
+   - A disallowed first pick moves to the alternative before any failure, or to the next allowed ladder step after
+     failures. With neither available, the router prints `DEFER`.
+   - A Codex 5-hour pause moves work to Claude only while Claude has spare. A full Claude 5-hour window defers new
+     Claude work, Claude-only rows included, until it resets.
+   - When every Codex account is out, `--stakes low` work waits for Codex; the rest goes to Claude within its budget.
+3. **Effort**, one notch per rule:
+   - Lower with `--auto-check` (no failures, stakes not high).
+   - Higher for `--stakes high`; lower for `--stakes low`.
+   - Higher on Codex while it is underused or front-loading cards (lookups, extraction, drafts and images excepted).
+   - Lower on Codex while it is overspending and a check exists.
+   - Higher on Claude when its headroom expires within a day.
+   - Floors: Sol, Terra and Astra never go below `medium`. No notch raises past `xhigh`; only the ladder reaches `max`.
+   - Fable is swapped for Opus `xhigh` while Fable's own window is ≥70%.
+4. **Gates.** Fable, Astra, `max` effort, an exhausted ladder and every card redemption need the user's OK. Two or more
+   Codex steps that fell short on one task print a "tell the user" line.
+   - Hard Codex work (`implement-hard`, `debug`, `science`, `review`) gets an extra independent Codex review while Codex
+     is underused or front-loading.
+5. **Launch.**
+   - The account is the one the quota state picks. When two or more accounts must each be spent within 48h, launches
+     rotate across them.
+   - The sandbox is `read-only` for read tasks. Writers get `danger-full-access` only when the orchestrator runs in
+     bypass mode, else `workspace-write`.
+   - The launcher is `codex exec` with that account's `CODEX_HOME` for one-shot rows, the hub `codex-worker` for
+     the rest, and `claude --bg` or an Agent subagent for Claude.
 
-- **Codex is use-it-or-lose-it.** The target is to have every Codex account's week spent by its reset. Reset cards
-  extend that, and they gain most when an account is spent early in its cycle, so Codex is front-loaded while cards
-  are in hand. Everything either vendor can do goes to Codex first.
-- **Claude also runs the orchestrators.** If it runs out, nothing can be dispatched. It must never run out before
-  Codex. About 20% of its window stays reserved for orchestration (`QUOTA_CLAUDE_RESERVE`), so Claude workers get at
-  most the other 80%.
+## Quota policy (user, 2026-11-03)
 
-So the Claude picks in the table above are conditional. Rows that only Claude can do (computer use, browser,
-Artifact/Docs, peer negotiation) always stay on Claude. Rows where Claude is merely better (docs, design, research,
-open-ended work, UI) stay on Claude only while Claude has spare; otherwise use the Codex alternative (Sol `medium`
-for docs and research, Sol `xhigh` for design, with a closer review).
+All thresholds live in `POLICY` in `scripts/lib/state.mjs`.
 
-Run `node <this skill>/scripts/quota.mjs` before launching a worker either vendor could run, and at least every half
-hour while work is queued. Its `budget` line projects each vendor's share at reset at the current rate. Its `lean`
-line applies these rules:
+- **Codex is use-it-or-lose-it.** Spend every account's week by its reset.
+- **Claude never runs out before Codex.** Claude runs the orchestrators, so 20% of its week stays in reserve. Claude
+  workers fit under the other 80%.
+- **Reset cards come last.**
 
-| Script says | Do |
-|---|---|
-| `codex first` | Default: anything either vendor can do runs on Codex. |
-| `claude has spare` (projected ≤60%) | Claude also takes the work it is clearly better at. |
-| `claude near budget` (60–80%) | Claude gets only Claude-only work, design and high-stakes calls. |
-| `claude over budget` (projected >80%, or on course to run out before Codex) | No new Claude workers except Claude-only work that can't wait. Move Claude-strength work to Codex Sol. Keep the orchestrator lean: Haiku subagents, fewer reads, short briefs. |
-| `codex underused` (projected <85%) | Spend it. Raise effort on Codex work (`high` → `xhigh`). Add Codex second-opinion reviews. Pull queued or deferred work forward. Move Claude-strength work that Codex can do well enough (research, routine docs) to Codex. |
-| `codex overspending` (projected >115%) | Lower effort where a test or build catches misses. Save Sol `xhigh` and Astra for what matters. |
-| `split` (Codex overspending, Claude has spare) | Claude also takes some work either vendor can do, while it stays under its cap. |
-| `new Codex work → account X` | Several Codex accounts: start new Codex workers on that account (`--account X`); it is the one whose unused quota is lost first. |
-| `redeem a reset card` | Every account is spent (≥99%), or a card is about to expire: redeem with the user's OK (see codex-workers.md). Never earlier: quota first, then cards. |
-| reset card with a deadline | A card expires before its account's window resets: spend that account to 99% by then, then redeem. Below the printed break-even, let the card lapse. |
-| `codex out on every account` | Tell the user. Claude takes what matters before the next Codex reset, within its room under the cap. The rest waits. |
-| `expiring` note | A window resets within a day with much left (for Claude, above the reserve). Use stronger settings there and pull queued work forward. Never start Fable or Astra on that basis alone. |
-| Fable note | Fable's own window is at ≥70%: skip Fable. |
+Only the weekly window sets budgets, deadlines and card math; a 5-hour window just pauses work until it resets.
+Projections use the recent burn rate (readings spanning ≥3h of the last 24h in the same window). Without that history
+they use the window average, with its first tenth floored.
 
-Say in the launch line which model and effort you chose and, when quota changed the choice, why.
+`quota.mjs` lean lines and what the orchestrator does about each:
+
+| Lean line | Condition | Do |
+|---|---|---|
+| `codex first` | always, unless Codex is out | The router already sends shared work to Codex. |
+| `claude has spare` | Claude projected ≤60% at its reset | Claude also takes the work it's clearly better at. |
+| `claude near budget` | projected 60–80% | Claude takes Claude-only work, design and high-stakes calls. |
+| `claude over budget` | used ≥80% or projected >80% | No new Claude workers except Claude-only work that can't wait. Keep the orchestrator lean: Haiku subagents, fewer reads, short briefs. |
+| `claude usage unreadable` | no reading | Claude-only work only. Check `claude -p /usage`. |
+| `new Codex work → account X` / `rotate across …` | several accounts | The router uses the open account whose quota is lost first (its reset, or an earlier card expiry; a tie goes to a live hub), or rotates when several must be spent within 48h. |
+| `codex front-load` / `codex underused` | the account new Codex work lands on holds cards, or — after the first tenth of its week, or with a card deadline — isn't on course for 100% by its deadline | Pull queued and deferred work forward. Add second-opinion reviews. The router raises Codex effort. |
+| `codex overspending` | one account left, no cards, projected >115% | The router lowers effort where a check exists. Save Sol `xhigh` and Astra for what matters. |
+| `redeem a reset card` | every account ≥99%, or a card expires within the hour (or within a day on a spent account) and still gains | Ask the user (or use a standing approval in memory), then run the printed `reset-credit-use … --credit <id>` and `quota.mjs --fresh`. If declined, route with `--no-redeem`. |
+| `X: spent; hold its card` | a spent account's card while another account has quota | Nothing yet: quota first. Redeem when the open accounts are spent, or a day before the card expires. |
+| card with a deadline | a card expires before its account's week resets | Spend that account to 99% by then and redeem. Below the printed break-even, let it lapse. |
+| `codex paused` | every open account's 5-hour window is full | Claude takes work only while it has spare; otherwise wait. |
+| `codex out on every account` | weeks spent, no card worth redeeming | Tell the user. Claude takes what matters within its room. |
+| `account X: not logged in` / `hub unreachable` / `login changed` | — | Ask the user for `! CODEX_HOME=… codex login`. Start the hub with `codex-worker.mjs --account X hub`, or restart it once no thread runs on it. |
+| `stop` | neither vendor readable | The router defers everything. Check both, tell the user. |
+| `expiring` lines, Fable line | a week resets within a day with ≥25% spendable; Fable window ≥70% | The router already adjusts effort and avoids Fable. Pull queued work forward. |
+
+Card math: redeeming at usage u with d hours of a T-hour week left gains about u + d/T − 1 weeks:
+
+- a full new week,
+- minus the unused share forfeited,
+- minus the delay to the next natural reset, since the clock restarts.
+
+At u ≈ 100% the gain is d/T, so a week spent early in its cycle and then redeemed gains the most. That's why Codex is
+front-loaded while cards are in hand.
 
 ## Sources (2026-11-03)
 
