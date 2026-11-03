@@ -127,26 +127,30 @@ and switch whenever the user says so. Default: **auto**.
     tools, a worker that must negotiate with peers itself.
   - Codex Sol 6.1 (`high`; `xhigh` for hard or long work) is the coding workhorse — implementation,
     build/test/deploy runs, debugging, code review — at a fraction of Opus's cost per solved task.
-  - Claude Sonnet 5.5 `medium`: docs, reports and other knowledge work (it scores far above GPT
-    there), research, well-scoped coding that needs Claude tools, computer use. Opus 5.5 `high`:
-    design, open-ended or ambiguous work, escalations. Haiku 5.5 `low` or Codex Luna `low`:
-    lookups, polling, bulk extraction (Luna never writes code). Codex Terra: drafts and image
-    reading only, not code. Codex Luna: image generation.
+  - Claude Sonnet 5.5 `medium`: computer use and other Claude-only work; while Claude has spare
+    (see the budget below), also docs, reports and other knowledge work (it scores far above GPT
+    there) and research.
+  - Opus 5.5 `high`: design, open-ended or ambiguous work, escalations. Haiku 5.5 `low` or Codex
+    Luna `low`: lookups, polling, bulk extraction (Luna never writes code). Codex Terra: drafts
+    and image reading only, not code. Codex Luna: image generation.
   - Fable 5.1 and Astra only as escalations after the strong default visibly fell short, and tell
     the user first; high-stakes reviews and second opinions use the other vendor.
-  - Then weigh both vendors' quota, never just one. Before launching a worker either vendor
-    could run (and at least every half hour while work is queued), run
-    `node <this skill>/scripts/quota.mjs`. It reads Claude (`claude -p /usage`) and Codex (the
-    hub) together, caches the result for 10 minutes for every orchestrator, and prints each window's
-    used share, reset and pace (used share ÷ elapsed share of the window; above 1 burns faster
-    than the window lasts), a status per vendor and a lean — including which side has more
-    headroom when both are fine, a Fable window that is nearly used, and headroom that expires
-    unused at a reset within a day. Windows differ by plan (a higher plan may have no 5-hour
-    window); the script reads whatever windows exist. A nearly full window that resets within the
-    hour matters less than a moderately full week with days to go. Move work either vendor can do
-    toward the one with headroom; keep vendor-specific work where it must run; when both are
-    tight, tell the user and prefer Codex (user, 2026-10-30): run what matters now on Codex, keep
-    on Claude only what needs Claude, and defer the rest. Say in the launch line when quota
+  - Then apply the quota budget (user, 2026-11-03), weighing both vendors, never just one:
+    **Codex is use-it-or-lose-it** — aim to spend its week by the reset, so everything either
+    vendor can do goes to Codex first. **Claude also runs the orchestrators** and must never run
+    out before Codex: about 20% of its window stays reserved for orchestration, and Claude workers
+    take Claude-only work always, plus the work Claude is clearly better at (docs, design,
+    research, open-ended work) only while Claude has spare.
+    Before launching a worker either vendor could run (and at least every half hour while work is
+    queued), run `node <this skill>/scripts/quota.mjs`. It reads Claude (`claude -p /usage`) and
+    Codex (the hub) together, caches the result for 10 minutes for every orchestrator, and prints
+    each window's used share, reset and pace (used share ÷ elapsed share of the window), a
+    `budget` line projecting each vendor's share at reset, and a `lean` that applies the budget:
+    `claude has spare` / `near budget` / `over budget`, `codex underused` (spend it: raise effort,
+    add second-opinion reviews, pull queued work forward), `codex overspending`, `split`, or
+    `codex out` (tell the user; Claude takes what matters within its room, the rest waits). Notes
+    flag a nearly used Fable window and headroom that a reset within a day would discard. The
+    actions per lean are in `references/model-routing.md`. Say in the launch line when quota
     changed the choice.
 - **gpt-first**: route as much as possible to Codex, including work you'd otherwise give a
   subagent (Agent tool): use a short `codex exec` (Luna for lookups and extraction, Terra for

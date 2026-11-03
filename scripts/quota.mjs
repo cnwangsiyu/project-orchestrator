@@ -6,8 +6,9 @@
 // Claude comes from `claude -p /usage`, Codex from the hub (`codex-worker.mjs quota`). For every window it prints the
 // used share, the reset time and the pace: used share ÷ elapsed share of the window, so above 1 means burning faster
 // than the window can sustain until it resets. Each vendor is ok | watch | tight | unknown, and the last line leans
-// toward the vendor with headroom (also when both are fine but one burns faster), followed by notes on a nearly used
-// one-model window and on headroom a reset within a day will discard. The result is cached for 10 minutes in ~/.claude/orchestrator/_shared/quota.json,
+// toward a budget: Codex first and spent fully by its reset, Claude kept under its window minus a reserve for the
+// orchestrators (QUOTA_CLAUDE_RESERVE, default 20%) so it never runs out before Codex. Notes flag a nearly used
+// one-model window and headroom a reset within a day will discard. The result is cached for 10 minutes in ~/.claude/orchestrator/_shared/quota.json,
 // shared by every orchestrator; --fresh re-reads both.
 import fs from 'node:fs';
 import os from 'node:os';
@@ -110,9 +111,25 @@ const judge = (windows) => {
   }
   return { status, why, freesAt: status === 'tight' ? freesAt : null };
 };
-const maxPace = (ws) => {
-  const ps = (ws ?? []).filter((w) => !w.scoped).map(pace).filter((p) => p != null);
-  return ps.length ? Math.max(...ps) : null;
+// Budget targets (user, 2026-11-03): Codex quota is use-it-or-lose-it, so aim to spend its whole window by the reset;
+// Claude also runs the orchestrators, so it must never run out before Codex — keep a reserve of its window for
+// orchestration and give Claude workers only what fits under the rest.
+const CLAUDE_RESERVE = Number(process.env.QUOTA_CLAUDE_RESERVE ?? 20); // percent of Claude's window kept for orchestration
+const CLAUDE_SPARE = 60; // projected % at or below which Claude also takes the work it is clearly better at
+// The binding window: the non-scoped one with the highest pace. projected = share used at its reset at the current
+// rate; outIn = hours until 100% at that rate.
+const budget = (ws) => {
+  let best = null;
+  for (const w of (ws ?? []).filter((x) => !x.scoped)) {
+    const p = pace(w);
+    if (p == null) continue;
+    const left = (w.resetsAt - now) / 3600000;
+    const rate = w.used / Math.max(0.1 * w.windowMins / 60, w.windowMins / 60 - left); // percent per hour so far
+    const outIn = rate > 0 ? (100 - w.used) / rate : Infinity;
+    const elapsed = 1 - left / (w.windowMins / 60); // share of the window gone
+    if (!best || p > best.pace) best = { label: w.label, used: w.used, pace: p, projected: Math.round(p * 100), left, outIn, elapsed };
+  }
+  return best;
 };
 // Per-window hints: a one-model window (e.g. Fable) nearly used up, and headroom that a reset within a day will discard.
 const notes = (vendor, ws) => {
@@ -120,33 +137,46 @@ const notes = (vendor, ws) => {
   for (const w of ws ?? []) {
     const left = w.resetsAt ? (w.resetsAt - now) / 3600000 : null;
     if (w.scoped && w.used >= 70) out.push(`${vendor} ${w.label} ${w.used}% used: avoid that model until it resets${left != null ? ` in ${hours(left)}` : ''}`);
-    if (!w.scoped && left != null && left > 0 && left < 24 && (w.windowMins ?? 0) >= 1440 && w.used <= 60)
-      out.push(`expiring: ${vendor} ${w.label} resets in ${hours(left)} with ${100 - w.used}% left; fine to use stronger settings there`);
+    const room = 100 - w.used - (vendor === 'claude' ? CLAUDE_RESERVE : 0);
+    if (!w.scoped && left != null && left > 0 && left < 24 && (w.windowMins ?? 0) >= 1440 && room >= 25)
+      out.push(`expiring: ${vendor} ${w.label} resets in ${hours(left)} with ${room}% spendable${vendor === 'claude' ? ` above the ${CLAUDE_RESERVE}% reserve` : ''}; use stronger settings there and pull queued work forward`);
   }
   return out;
 };
-const hours = (h) => (h < 24 ? `${h.toFixed(1)}h` : `${(h / 24).toFixed(1)}d`);
-const RANK = { ok: 0, watch: 1, tight: 2, unknown: 1 };
+const hours = (h) => (!Number.isFinite(h) ? 'never' : h < 24 ? `${h.toFixed(1)}h` : `${(h / 24).toFixed(1)}d`);
+// The lean: Codex first for everything either vendor can do; Claude for Claude-only work, plus its strengths while it
+// has spare; then corrections when Codex is under- or over-spending, Claude is over its budget, or Codex is out.
 const lean = (c, x) => {
-  // Both tight: the user prefers spending Codex (2026-10-30), so lean Codex; the reset times say when Claude-only work can resume.
-  if (c.status === 'tight' && x.status === 'tight') {
-    const when = (v) => (Number.isFinite(v.freesAt) ? hours((v.freesAt - now) / 3600000) : '?');
-    return `codex (both tight; user prefers Codex then): tell the user, run what matters now on Codex, keep on Claude only `
-      + `what needs Claude, defer the rest (codex frees up in ${when(x)}, claude in ${when(c)})`;
+  const bc = budget(data.claude), bx = budget(data.codex);
+  const parts = [];
+  const claudeCap = 100 - CLAUDE_RESERVE;
+  const codexOut = !!bx && (bx.used >= 95 || bx.outIn < 0.5) && bx.left > 0.5;
+  // Claude must outlast Codex: over its cap, projected over it, or on course to run out before Codex does.
+  const claudeOver = !!bc && (bc.used >= claudeCap || bc.projected > claudeCap
+    || (!!bx && bc.outIn < bc.left && bc.outIn < Math.min(bx.outIn, bx.left)));
+  if (codexOut) {
+    const room = bc ? claudeCap - bc.used : null;
+    parts.push(`codex out (${bx.label} ${bx.used}%, resets in ${hours(bx.left)}): tell the user; Claude takes what matters before then, `
+      + `within ${room != null ? `${room}% of room` : 'its budget'} under its ${claudeCap}% cap (now ${bc ? `${bc.used}%, projected ${bc.projected}%` : '?'}), `
+      + 'and the rest waits for the Codex reset');
+  } else {
+    const codexHot = !!bx && bx.projected > 115;
+    const claudeSpare = !!bc && !claudeOver && bc.projected <= CLAUDE_SPARE;
+    parts.push(codexHot && claudeSpare
+      ? `split: Codex is overspending and Claude has spare, so Claude also takes work either vendor can do while it stays under ${claudeCap}%`
+      : 'codex first: send everything either vendor can do to Codex');
+    if (claudeOver) parts.push(`claude over budget (${bc.label} ${bc.used}%, projected ${bc.projected}% vs cap ${claudeCap}%, out in ${hours(bc.outIn)}): `
+      + "no new Claude workers except Claude-only work that can't wait; move Claude-strength work (docs, design, research) to Codex Sol; "
+      + 'keep the orchestrator lean (Haiku subagents, fewer reads)');
+    else if (bc && bc.projected <= CLAUDE_SPARE) parts.push(`claude has spare (projected ${bc.projected}%): it also takes the work it is clearly better at (docs, design, research, open-ended work)`);
+    else if (bc) parts.push(`claude near budget (projected ${bc.projected}%): Claude-only work plus design and high-stakes calls; everything else on Codex`);
+    // Right after a reset the projection is noise, so only call Codex underused once a tenth of the window has passed.
+    if (bx && bx.projected < 85 && bx.elapsed >= 0.1) parts.push(`codex underused (projected ${bx.projected}% by reset in ${hours(bx.left)}): raise effort on Codex work, add second-opinion reviews, pull queued work forward`);
+    else if (bx && bx.projected > 115) parts.push(`codex overspending (projected ${bx.projected}%, out in ${hours(bx.outIn)} vs reset in ${hours(bx.left)}): lower effort where a check catches misses; save Sol xhigh and Astra for what matters`);
   }
-  if (RANK[c.status] === RANK[x.status]) {
-    if (c.status === 'unknown') return 'unknown: read the other vendor manually';
-    // Same status: still point work either vendor can do at the one burning its window more slowly.
-    const pc = maxPace(data.claude), px = maxPace(data.codex);
-    if (pc != null && px != null && Math.abs(pc - px) >= 0.3 && Math.max(pc, px) >= 0.5) {
-      const side = pc > px ? 'codex' : 'claude';
-      return `either: route by task fit; work either vendor can do → ${side} (pace claude ${pc.toFixed(1)} vs codex ${px.toFixed(1)})`;
-    }
-    return 'either: route by task fit';
-  }
-  return RANK[c.status] > RANK[x.status]
-    ? 'codex: move work either vendor can do to Codex; keep on Claude only what needs Claude'
-    : 'claude: move work either vendor can do to Claude; keep on Codex only what needs Codex (e.g. images)';
+  if (!bc) parts.push('claude usage unreadable: check it manually before launching Claude workers');
+  if (!bx && x.status !== 'ok') parts.push('codex usage unreadable: check it manually');
+  return parts.join('; ');
 };
 
 let data;
@@ -173,5 +203,8 @@ for (const [vendor, ws] of [['claude', data.claude], ['codex', data.codex]]) {
 }
 console.log(`claude: ${c.status}${c.why ? ` (${c.why})` : ''}`);
 console.log(`codex: ${x.status}${x.why ? ` (${x.why})` : ''}${data.codexPlan ? ` [plan ${data.codexPlan}]` : ''}`);
+const bc = budget(data.claude), bx = budget(data.codex);
+const proj = (b) => (b ? ` [projected ${b.projected}% at reset]` : '');
+console.log(`budget: codex target ~100% by reset${proj(bx)}; claude cap ${100 - CLAUDE_RESERVE}%, ${CLAUDE_RESERVE}% reserved for orchestration${proj(bc)}`);
 console.log(`lean: ${result.lean}`);
 for (const n of result.notes) console.log(`note: ${n}`);

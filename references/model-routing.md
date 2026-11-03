@@ -18,7 +18,7 @@ the model inside a pool, quota decides the pool.
 | Claude **Fable 5.1** | 5 | Long-horizon reasoning, but at or below Opus 5.5 on most coding benchmarks for ~3x the cost; its own weekly cap (≤50% of the week, and it also counts toward the all-models week) | Only after Opus `xhigh` visibly fell short, or the longest single-thread reasoning; tell the user first | Default anything |
 | Codex **Sol 6.1** | 1 | Near Astra at ~1/5 the usage (AA index: `high` 50 at $0.59/task, `xhigh` 52 at $0.76; Opus `high` 52 at $3.46); 500K context | The coding workhorse: implementation, build/test/deploy runs, debugging, code review, log analysis | `low` effort for any coding (TB4 31%) |
 | Codex **Astra** | 5 (10x on cached input) | Frontier, +2–5 points over Sol; best on Terminal-Bench-Science (64.6%) | Escalation after Sol `xhigh` failed; a strongest-GPT second opinion; numerical or scientific work Sol couldn't crack | Default anything; small tasks (it over-tests and asks questions) |
-| Codex **Terra 6.1** | 0.5 | Writing and visual understanding; not a coding model (TB4 32% at `medium`) | Bulk prose drafts, translation, reading screenshots or images, when Claude quota is tight | Coding; computer use (the Codex CLI can't do computer use at all) |
+| Codex **Terra 6.1** | 0.5 | Writing and visual understanding; not a coding model (TB4 32% at `medium`) | Bulk prose drafts, translation, reading screenshots or images, writing when Claude has no spare | Coding; computer use (the Codex CLI can't do computer use at all) |
 | Codex **Luna** | 0.05 | Extraction, classification, structured summaries; very weak at coding (TB4 13% at `max`) | Bulk extraction or classification, quick lookups, image generation (the image tool does the work) | Any code change or code reasoning |
 
 Don't pick `gpt-6-sol` or `gpt-5.6-*` (older at the same or higher cost), Codex `ultra` (fans out its own sub-agents
@@ -26,7 +26,8 @@ and multiplies usage), the Fast/Ultrafast tiers (2.5x+ usage), or the alias `spa
 
 ## Task → first pick
 
-"Alt" is the other vendor's equivalent, used when quota points that way (see Quota) or as a second opinion. "Escalate"
+"Alt" is the other vendor's equivalent, used when quota points that way (see Quota — Claude picks for work Codex
+can also do are conditional on Claude having spare) or as a second opinion. "Escalate"
 is the next step when the first pick visibly falls short.
 
 | Task | First pick | Alt | Escalate |
@@ -73,22 +74,39 @@ thinking at `max`.
   Switching vendor on a stalled debug also buys a different set of blind spots.
 - Note each escalation in the ledger with its symptom; when a kind of task runs easily, start it lower next time.
 
-## Quota
+## Quota: spend Codex fully, keep Claude alive (user, 2026-11-03)
+
+The two subscriptions have different jobs:
+
+- **Codex is use-it-or-lose-it.** The target is to have its week spent by the reset. Everything either vendor can do
+  goes to Codex first.
+- **Claude also runs the orchestrators.** If it runs out, nothing can be dispatched. It must never run out before
+  Codex. About 20% of its window stays reserved for orchestration (`QUOTA_CLAUDE_RESERVE`), so Claude workers get at
+  most the other 80%.
+
+So the Claude picks in the table above are conditional. Rows that only Claude can do (computer use, browser,
+Artifact/Docs, peer negotiation) always stay on Claude. Rows where Claude is merely better (docs, design, research,
+open-ended work, UI) stay on Claude only while Claude has spare; otherwise use the Codex alternative (Sol `medium`
+for docs and research, Sol `xhigh` for design, with a closer review).
 
 Run `node <this skill>/scripts/quota.mjs` before launching a worker either vendor could run, and at least every half
-hour while work is queued. Its `lean` line applies these rules:
+hour while work is queued. Its `budget` line projects each vendor's share at reset at the current rate. Its `lean`
+line applies these rules:
 
-- **Both ok:** route by the table. If one vendor is burning clearly faster, send work either vendor could do to the
-  other (the script names the side with headroom).
-- **One vendor at `watch`:** move work either vendor could do to the other; for what must stay, step effort down one
-  notch where an automatic check exists.
-- **One vendor at `tight`:** keep there only what must run there and move the rest. Both tight: tell the user and
-  prefer Codex (user, 2026-10-30) — run what matters now on Codex, keep on Claude only what needs Claude, defer the rest.
-- **Fable window:** skip Fable once its window shows ≥70% (the script flags it).
-- **Headroom about to expire:** when a window resets within a day with much left (the script prints `expiring`), use
-  stronger settings on that vendor — a second-opinion review, `xhigh` instead of `high` — since the unused share is lost
-  at reset. That alone is no reason to start Fable or Astra.
-- Say in the launch line which model and effort you chose and, when quota changed the choice, why.
+| Script says | Do |
+|---|---|
+| `codex first` | Default: anything either vendor can do runs on Codex. |
+| `claude has spare` (projected ≤60%) | Claude also takes the work it is clearly better at. |
+| `claude near budget` (60–80%) | Claude gets only Claude-only work, design and high-stakes calls. |
+| `claude over budget` (projected >80%, or on course to run out before Codex) | No new Claude workers except Claude-only work that can't wait. Move Claude-strength work to Codex Sol. Keep the orchestrator lean: Haiku subagents, fewer reads, short briefs. |
+| `codex underused` (projected <85%) | Spend it. Raise effort on Codex work (`high` → `xhigh`). Add Codex second-opinion reviews. Pull queued or deferred work forward. Move Claude-strength work that Codex can do well enough (research, routine docs) to Codex. |
+| `codex overspending` (projected >115%) | Lower effort where a test or build catches misses. Save Sol `xhigh` and Astra for what matters. |
+| `split` (Codex overspending, Claude has spare) | Claude also takes some work either vendor can do, while it stays under its cap. |
+| `codex out` | Tell the user. Claude takes what matters before the Codex reset, within its room under the cap. The rest waits for the reset. |
+| `expiring` note | A window resets within a day with much left (for Claude, above the reserve). Use stronger settings there and pull queued work forward. Never start Fable or Astra on that basis alone. |
+| Fable note | Fable's own window is at ≥70%: skip Fable. |
+
+Say in the launch line which model and effort you chose and, when quota changed the choice, why.
 
 ## Sources (2026-11-03)
 
