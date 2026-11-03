@@ -133,7 +133,8 @@ card gains about `used + time-left/window − 1` windows:
 ## Image generation (verified 2026-10-30, codex-cli 0.166)
 
 Codex has a built-in image tool (`image_gen.imagegen`; feature flag `image_generation`, stable and on by default; check with
-`codex features list`). Claude can't generate images, so image requests always go to Codex (`route.mjs image-gen`).
+`codex features list`). Claude can't generate images, and the user prefers Codex for every image-producing task (2026-11-03), so they all go to
+Codex (`route.mjs image-gen`: Luna `low` first, Sol `medium` when iterating on a result needs judgment).
 
 - **Run** a short `codex exec` as a background task, Luna `low`, `-s workspace-write`, in the folder the image should land in:
   `CODEX_HOME=<account home> codex exec [--skip-git-repo-check] -C <dir> -s workspace-write -m gpt-6-luna -c model_reasoning_effort='"low"' --json -o <dir>/codex-last.md "Generate one image with your image generation tool: <description, style, aspect>. Save it in the current directory as <name>.png and report the saved path." < /dev/null > <dir>/codex.jsonl 2>&1`

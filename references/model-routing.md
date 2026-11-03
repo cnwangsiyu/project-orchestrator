@@ -43,7 +43,9 @@ catches a miss, and how many times the task has fallen short. How the table was 
   Opus's best result, at 67.7%.
 - **Claude-only work:** computer use, browser, Artifact/Docs tools and peer negotiation. The Codex CLI can't do
   them.
-- **Codex-only work:** image generation.
+- **Codex-only work:** every task whose output is an image — generating, editing, variants, icons, illustrations,
+  mockup images (user, 2026-11-03). Luna `low` writes the prompt (the image tool makes the picture); Sol `medium` if an
+  iteration needs more judgment.
 - **Cheap rows:** Luna for lookups and extraction, never for code. Terra for prose drafts only. The Claude
   alternatives are Haiku and Sonnet.
 - **Escalation order:** effort before model, and a vendor switch on a stalled debug for different blind spots. Fable

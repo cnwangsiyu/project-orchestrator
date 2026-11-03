@@ -117,7 +117,8 @@ effort, Codex account and launch command from
   When a task spans categories, split it or pick the row for its hardest part.
 - **The script computes the rest** from its table and the quota state in `scripts/lib/state.mjs`:
   - Hard locks: computer use, browser, Artifact/Docs and peer negotiation stay on Claude, which the
-    Codex CLI can't do; image generation goes to Codex.
+    Codex CLI can't do; every task whose output is an image (generating, editing, variants, icons,
+    illustrations, mockup images) goes to Codex as `image-gen` (user, 2026-11-03).
   - Quota moves: Codex first for anything either vendor can do. Claude takes the work it is clearly
     better at only while it has spare.
   - Effort notches: lower for an automatic check, higher for high stakes, higher while Codex is
