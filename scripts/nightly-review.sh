@@ -2,6 +2,9 @@
 # nightly-review: launch the daily routing review as a fresh background Claude session (run by launchd at 03:07).
 # Install: references/nightly-review.md, "Schedule". Log: ~/.claude/orchestrator/_shared/routing-review/launch.log
 set -u
+# launchd starts with a bare environment: put the user's tools (claude/codex in ~/.local/bin, Homebrew, nvm's node) on PATH.
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+if [ -s "$HOME/.nvm/nvm.sh" ]; then . "$HOME/.nvm/nvm.sh" >/dev/null 2>&1; nvm use default >/dev/null 2>&1 || true; fi
 SKILL="${0:A:h:h}"
 DIR="$HOME/.claude/orchestrator/_shared/routing-review"
 mkdir -p "$DIR"
