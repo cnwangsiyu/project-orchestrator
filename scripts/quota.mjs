@@ -8,7 +8,7 @@
 // window shows its used share, reset and projection at reset (from the recent burn rate when there is one). The lean
 // lines come from lib/state.mjs, where all quota policy lives. Readings are cached for 10 minutes in
 // ~/.claude/orchestrator/_shared/quota.json and shared by every orchestrator; --fresh re-reads everything.
-import { readState, analyze, leanLines, winState, weekly, fmt, fmtAgo, hours, POLICY } from './lib/state.mjs';
+import { readState, analyze, leanLines, winState, weekly, fmt, fmtAgo, POLICY } from './lib/state.mjs';
 
 const args = process.argv.slice(2);
 const data = readState({ fresh: args.includes('--fresh') });
@@ -41,7 +41,7 @@ for (const r of st.codex.rows) {
   if (r.a.resets) console.log(`  codex  ${tag}reset cards: ${r.a.resets.count}${r.a.resets.credits.length ? ` (expire ${r.a.resets.credits.map((c) => fmt(c.expiresAt)).join(', ')})` : ''}`);
 }
 if (!data.codexAccounts) console.log(`  codex  unavailable: ${data.errors.codex ?? 'unknown error'}`);
-console.log(`budget: claude ${st.claude.status} (cap ${st.claude.cap}%, ${POLICY.claudeReserve}% reserved for orchestration); `
+console.log(`budget: claude ${st.claude.status} (now: spare ≤${st.claude.spareLine}%, cap ${st.claude.cap}%, ${st.claude.reserve ?? '?'}% kept for orchestration until the reset); `
   + `codex ${st.codex.out ? 'out' : st.codex.rotate ? `→ rotate ${st.codex.rotate.map((r) => r.a.name).join('/')}` : st.codex.pick ? `→ ${st.codex.pick.a.name}` : st.codex.redeem ? `→ redeem a card on ${st.codex.redeem.a.name}` : 'unreadable'}${st.codex.underused ? ', underused' : ''}${st.codex.overspending ? ', overspending' : ''}`
   + `${st.codex.cardsHeld ? `, ${st.codex.cardsHeld} reset card(s)` : ''}`);
 for (const l of lean) console.log(`lean: ${l}`);

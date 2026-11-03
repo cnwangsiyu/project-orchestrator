@@ -203,13 +203,18 @@ export const fmtAgo = (t) => { const m = Math.round((now - t) / 60000); return m
 // Codex quota is use-it-or-lose-it: spend every account's week by its reset, front-loaded while it holds reset cards.
 // Claude runs the orchestrators, so it never runs out before Codex: a reserve of its week stays for orchestration.
 export const POLICY = {
-  claudeReserve: Number(process.env.QUOTA_CLAUDE_RESERVE ?? 20), // % of Claude's week kept for orchestration
-  claudeSpare: 60, // projected % at or below which Claude also takes the work it is clearly better at
+  // Claude's budget moves with the clock (user, 2026-11-03), so a week about to reset isn't hoarded:
+  // - reserve: what the orchestrators burn until the reset (orchPerDay × days left, at least reserveMin);
+  // - end cap: never plan to finish the week above 100 − margin − uncertainty, where the projection's uncertainty
+  //   shrinks to 0 at the reset (a full week ahead: 100 − 5 − 15 = 80%);
+  // - spare line: spareGap below the end cap, also shrinking with time (a full week ahead: 60%).
+  claudeOrchPerDay: Number(process.env.QUOTA_CLAUDE_ORCH_PER_DAY ?? 20 / 7), // % of Claude's week the orchestrators use per day
+  claudeReserveMin: 2, claudeMargin: 5, claudeUncertainty: 15, claudeSpareGap: 20,
   redeemAt: 99, // a reset card is suggested only once an account's week is this spent
   throttle5h: 95, // a 5-hour window this full pauses new work on that vendor/account until it resets
   overspend: 115, // projected % at reset above which a lone Codex account without cards is overspending
   fableAvoid: 70, // Fable's own window at or above this: no Fable
-  expiringH: 24, expiringRoom: 25, // a week resetting within a day with this much spendable left
+  expiringH: 24, expiringRoom: 25, // a Codex week resetting within a day with this much left
 };
 
 // Reset-card plan for one account. Redeeming at usage u with d hours of a T-hour week left gains about u + d/T − 1
@@ -250,14 +255,21 @@ export const analyze = (data) => {
   const P = POLICY, hist = data.history ?? {};
   // Claude
   const cw = weekly(data.claude), cs = winState(cw, hist.claude), c5 = shortWin(data.claude);
-  const cap = 100 - P.claudeReserve;
-  const claude = { readable: !!cw, week: cs, cap, room: cs ? Math.max(0, cap - cs.used) : null, status: 'unknown', throttledUntil: null, avoidFable: false, expiring: false };
+  // With no reset time, assume a full window ahead (the most cautious budget).
+  const leftShare = cs ? (cs.left == null ? 1 : Math.min(1, cs.left / cs.windowH)) : 1;
+  const reserve = cs ? Math.max(P.claudeReserveMin, Math.round(P.claudeOrchPerDay * (cs.left ?? cs.windowH) / 24)) : null;
+  const cap = Math.round(100 - P.claudeMargin - P.claudeUncertainty * leftShare);
+  const spareLine = Math.round(cap - P.claudeSpareGap * leftShare);
+  // room: what Claude workers may still spend now — keep the reserve for the orchestrators and stay under the end cap.
+  const room = cs ? Math.max(0, Math.min(100 - P.claudeMargin - reserve, cap) - cs.used) : null;
+  const claude = { readable: !!cw, week: cs, cap, spareLine, reserve, room, status: 'unknown', throttledUntil: null, avoidFable: false, expiring: false };
   if (cs) {
     const proj = cs.projected ?? cs.used;
-    claude.status = cs.used >= cap || proj > cap ? 'over' : proj > P.claudeSpare ? 'near' : 'spare';
+    claude.status = room <= 0 || proj > cap ? 'over' : proj > spareLine ? 'near' : 'spare';
     if (c5 && c5.used >= P.throttle5h && c5.resetsAt) claude.throttledUntil = c5.resetsAt;
     claude.avoidFable = (data.claude ?? []).some((w) => w.scoped && /fable/i.test(w.label) && w.used >= P.fableAvoid);
-    claude.expiring = cs.left != null && cs.left < P.expiringH && claude.room >= P.expiringRoom;
+    // A week resetting within a day with room left: what isn't spent is lost, so stronger settings are fine.
+    claude.expiring = cs.left != null && cs.left < P.expiringH && room >= P.expiringRoom && proj < cap;
   }
   // Codex accounts
   const rows = (data.codexAccounts ?? []).map((a) => {
@@ -316,14 +328,14 @@ export const leanLines = (st, data) => {
   if (X.out && X.throttledOnly) out.push(`codex paused: 5h windows full, free in ${hours(X.nextFree)} — Claude takes it only while it has spare; otherwise wait`);
   else if (X.out) out.push(`codex out on every account (next free in ${hours(X.nextFree)}): tell the user; ${C.status === 'over' || C.status === 'unknown'
     ? 'Claude takes only Claude-only work that can\'t wait; the rest waits'
-    : `Claude takes what matters, within ${C.room}% of room under its ${C.cap}% cap; the rest waits`}`);
+    : `Claude takes what matters, within ${C.room}% of room (keeping ${C.reserve}% for the orchestrators); the rest waits`}`);
   else if (!X.readable) out.push('codex usage unreadable: start the hubs (codex-worker.mjs --account <name> hub); until then route as if Codex has room and say so');
   else out.push('codex first: everything either vendor can do runs on Codex');
   const cw = C.week;
   if (C.status === 'unknown') out.push('claude usage unreadable: no new Claude workers except Claude-only work; check `claude -p /usage`');
-  else if (C.status === 'over') out.push(`claude over budget (week ${cw.used}%, projected ${cw.projected ?? '?'}% vs cap ${C.cap}%): no new Claude workers except Claude-only work that can't wait; Claude-strength work goes to Codex; keep the orchestrator lean`);
-  else if (C.status === 'near') out.push(`claude near budget (projected ${cw.projected ?? cw.used}%): Claude-only work, design and high-stakes calls; everything else on Codex`);
-  else out.push(`claude has spare (projected ${cw.projected ?? cw.used}%): it also takes the work it is clearly better at`);
+  else if (C.status === 'over') out.push(`claude over budget (week ${cw.used}%, projected ${cw.projected ?? '?'}% vs ${C.cap}% now, ${C.reserve}% kept for the orchestrators until the reset in ${hours(cw.left)}): no new Claude workers except Claude-only work that can't wait; Claude-strength work goes to Codex; keep the orchestrator lean`);
+  else if (C.status === 'near') out.push(`claude near budget (projected ${cw.projected ?? cw.used}%, spare line ${C.spareLine}%, cap ${C.cap}%): Claude-only work, design and high-stakes calls; everything else on Codex`);
+  else out.push(`claude has spare (projected ${cw.projected ?? cw.used}% ≤ ${C.spareLine}%): it also takes the work it is clearly better at`);
   if (C.throttledUntil) out.push(`claude 5h window full: no new Claude workers until ${fmt(C.throttledUntil)}`);
   for (const r of X.throttled) out.push(`codex ${r.a.name} 5h window full until ${fmt(r.throttledUntil)}`);
   if (X.underused) out.push(X.frontLoad ? 'codex front-load (reset cards in hand): raise effort on Codex work one notch, add second-opinion reviews, pull queued work forward'
@@ -334,7 +346,7 @@ export const leanLines = (st, data) => {
   for (const r of X.rows) if (r.spent && r.cp?.redeem && X.redeem !== r)
     out.push(`${r.a.name}: spent; hold its card ${r.cp.txt} while another account has quota (quota first) — it gains ~${Math.round(r.cp.gain * 100)}% now, falling ~${Math.round(2400 / r.s.windowH)}%/day while held; redeem when the open accounts are spent${r.cp.expH != null && r.cp.expH < r.s.left ? ', or a day before it expires' : ''}`);
   if (C.avoidFable) out.push('Fable window nearly used: no Fable');
-  if (C.expiring) out.push(`claude week resets in ${hours(cw.left)} with ${C.room}% spendable above the reserve: stronger settings are fine on Claude`);
+  if (C.expiring) out.push(`claude week resets in ${hours(cw.left)} with ${C.room}% spendable beyond the ${C.reserve}% reserve: stronger settings are fine on Claude`);
   for (const r of X.rows) if (r.s?.left != null && r.s.left < POLICY.expiringH && 100 - r.s.used >= POLICY.expiringRoom && !r.spent)
     out.push(`codex ${r.a.name} week resets in ${hours(r.s.left)} with ${100 - r.s.used}% left: put Codex work there now, at stronger settings`);
   return out;

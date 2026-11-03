@@ -89,8 +89,18 @@ To change routing for a kind of task, edit the table in `route.mjs` and this rat
 All thresholds live in `POLICY` in `scripts/lib/state.mjs`.
 
 - **Codex is use-it-or-lose-it.** Spend every account's week by its reset.
-- **Claude never runs out before Codex.** Claude runs the orchestrators, so 20% of its week stays in reserve. Claude
-  workers fit under the other 80%.
+- **Claude never runs out before Codex.** Claude runs the orchestrators, so it keeps a reserve for them until the
+  reset. Its budget moves with the clock (user, 2026-11-03), so a week about to reset isn't hoarded. With L the share
+  of the week still left:
+  - **reserve** = the orchestrators' burn until the reset: about 2.9% of the week per day
+    (`QUOTA_CLAUDE_ORCH_PER_DAY`), at least 2%. That is ≈20% with a full week left and ≈3% with a day left.
+  - **cap** = 100 − 5 − 15·L. Claude never plans to finish the week above this. The 15·L term is the projection's
+    uncertainty and vanishes at the reset: 80% with a full week ahead, 95% at the reset.
+  - **spare line** = cap − 20·L: 60% with a full week ahead, converging on the cap at the reset.
+  - **room** = what Claude workers may still spend now: min(95 − reserve, cap) − used.
+
+  The projection is the share used at the reset at the current burn rate, so a fast burn early in the week trips the
+  cap, while 85% used with 2h left and a slow burn reads as spare.
 - **Reset cards come last.**
 
 Only the weekly window sets budgets, deadlines and card math; a 5-hour window just pauses work until it resets.
@@ -102,9 +112,9 @@ they use the window average, with its first tenth floored.
 | Lean line | Condition | Do |
 |---|---|---|
 | `codex first` | always, unless Codex is out | The router already sends shared work to Codex. |
-| `claude has spare` | Claude projected ≤60% at its reset | Claude also takes the work it's clearly better at. |
-| `claude near budget` | projected 60–80% | Claude takes Claude-only work, design and high-stakes calls. |
-| `claude over budget` | used ≥80% or projected >80% | No new Claude workers except Claude-only work that can't wait. Keep the orchestrator lean: Haiku subagents, fewer reads, short briefs. |
+| `claude has spare` | projected at reset ≤ the spare line (60% a week out, ≈95% at the reset) | Claude also takes the work it's clearly better at. |
+| `claude near budget` | projected between the spare line and the cap | Claude takes Claude-only work, design and high-stakes calls. |
+| `claude over budget` | projected above the cap (80% a week out, 95% at the reset), or no room left after the reserve | No new Claude workers except Claude-only work that can't wait. Keep the orchestrator lean: Haiku subagents, fewer reads, short briefs. |
 | `claude usage unreadable` | no reading | Claude-only work only. Check `claude -p /usage`. |
 | `new Codex work → account X` / `rotate across …` | several accounts | The router uses the open account whose quota is lost first (its reset, or an earlier card expiry; a tie goes to a live hub), or rotates when several must be spent within 48h. |
 | `codex front-load` / `codex underused` | the account new Codex work lands on holds cards, or — after the first tenth of its week, or with a card deadline — isn't on course for 100% by its deadline | Pull queued and deferred work forward. Add second-opinion reviews. The router raises Codex effort. |

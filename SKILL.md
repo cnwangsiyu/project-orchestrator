@@ -146,8 +146,9 @@ effort, Codex account and launch command from
 
   Its rules, from goals the user set on 2026-11-03:
   - Codex is use-it-or-lose-it: spend every account's week by its reset.
-  - Claude runs the orchestrators, so it never runs out before Codex: 20% of its week is kept in
-    reserve.
+  - Claude runs the orchestrators, so it never runs out before Codex. Its budget moves with the
+    clock: a reserve for the orchestrators until the reset, and caps that loosen as the reset nears
+    so a week about to reset isn't hoarded.
   - Reset cards come last: at 99%, or just before a card expires.
 
   `references/model-routing.md` explains each line and the benchmarks behind the table.
