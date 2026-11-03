@@ -148,7 +148,12 @@ and switch whenever the user says so. Default: **auto**.
     `budget` line projecting each vendor's share at reset, and a `lean` that applies the budget:
     `claude has spare` / `near budget` / `over budget`, `codex underused` (spend it: raise effort,
     add second-opinion reviews, pull queued work forward), `codex overspending`, `split`, or
-    `codex out` (tell the user; Claude takes what matters within its room, the rest waits). Notes
+    `codex out` (tell the user; Claude takes what matters within its room, the rest waits). With
+    several Codex accounts (side by side, one `CODEX_HOME` and hub each; see
+    `references/codex-workers.md`) it also names the account for new Codex work — the one whose quota
+    is lost first — and record that account per Codex worker in the ledger. Reset cards come last:
+    it suggests one only at ≥99% on every account or before a card expires, and you redeem it only
+    with the user's OK (or a standing approval in memory). Notes
     flag a nearly used Fable window and headroom that a reset within a day would discard. The
     actions per lean are in `references/model-routing.md`. Say in the launch line when quota
     changed the choice.

@@ -78,8 +78,9 @@ thinking at `max`.
 
 The two subscriptions have different jobs:
 
-- **Codex is use-it-or-lose-it.** The target is to have its week spent by the reset. Everything either vendor can do
-  goes to Codex first.
+- **Codex is use-it-or-lose-it.** The target is to have every Codex account's week spent by its reset. Reset cards
+  extend that, and they gain most when an account is spent early in its cycle, so Codex is front-loaded while cards
+  are in hand. Everything either vendor can do goes to Codex first.
 - **Claude also runs the orchestrators.** If it runs out, nothing can be dispatched. It must never run out before
   Codex. About 20% of its window stays reserved for orchestration (`QUOTA_CLAUDE_RESERVE`), so Claude workers get at
   most the other 80%.
@@ -102,7 +103,10 @@ line applies these rules:
 | `codex underused` (projected <85%) | Spend it. Raise effort on Codex work (`high` → `xhigh`). Add Codex second-opinion reviews. Pull queued or deferred work forward. Move Claude-strength work that Codex can do well enough (research, routine docs) to Codex. |
 | `codex overspending` (projected >115%) | Lower effort where a test or build catches misses. Save Sol `xhigh` and Astra for what matters. |
 | `split` (Codex overspending, Claude has spare) | Claude also takes some work either vendor can do, while it stays under its cap. |
-| `codex out` | Tell the user. Claude takes what matters before the Codex reset, within its room under the cap. The rest waits for the reset. |
+| `new Codex work → account X` | Several Codex accounts: start new Codex workers on that account (`--account X`); it is the one whose unused quota is lost first. |
+| `redeem a reset card` | Every account is spent (≥99%), or a card is about to expire: redeem with the user's OK (see codex-workers.md). Never earlier: quota first, then cards. |
+| reset card with a deadline | A card expires before its account's window resets: spend that account to 99% by then, then redeem. Below the printed break-even, let the card lapse. |
+| `codex out on every account` | Tell the user. Claude takes what matters before the next Codex reset, within its room under the cap. The rest waits. |
 | `expiring` note | A window resets within a day with much left (for Claude, above the reserve). Use stronger settings there and pull queued work forward. Never start Fable or Astra on that basis alone. |
 | Fable note | Fable's own window is at ≥70%: skip Fable. |
 

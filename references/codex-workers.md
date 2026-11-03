@@ -36,7 +36,7 @@ shared hub over WebSocket, so the process that started a worker and the one that
   starts it detached (log in `~/.codex/hub.log`) so it outlives your session. Running workers die if the hub dies. `CODEX_HUB` overrides the URL. The hub has no
   authentication: any local process can start or steer a thread on it, so keep it on 127.0.0.1 and only on a machine you trust. (The managed daemon's unix socket speaks WebSocket too; Node's
   WebSocket can't dial a unix socket, hence the TCP hub.)
-- **After a re-login or plan change, restart the hub.** It keeps the login it started with, so once `~/.codex/auth.json`
+- **After a re-login or plan change, restart that account's hub.** (To use another account, add it as a profile — see Several Codex accounts — rather than re-logging the main home.) It keeps the login it started with, so once `~/.codex/auth.json`
   changes, hub calls fail with `401 ... token_expired` (seen 2026-10-30 after the upgrade to Pro). Restart it only while no
   worker runs on it — `codex-worker.mjs list` shows every thread `notLoaded` — by stopping the `codex app-server --listen`
   process and running `codex-worker.mjs hub`; otherwise tell the other orchestrators first. `codex exec` runs read the
@@ -65,12 +65,47 @@ shared hub over WebSocket, so the process that started a worker and the one that
   the user a question it is told to end the turn with a `QUESTION` final message (in tests, hub workers had no
   question tool at all).
 
+## Several Codex accounts and reset cards (user, 2026-11-03)
+
+**Accounts run side by side; nobody switches logins.** Each account is a profile in
+`~/.claude/orchestrator/_shared/codex-accounts.json` with its own `CODEX_HOME` (so its own login) and its own hub port.
+`main` is `~/.codex` on port 47321.
+
+- **Add an account:** run `codex-worker.mjs account-add <name>`. It creates `~/.codex-<name>`, symlinks the main home's
+  `config.toml`, `AGENTS.md`, `skills` and `rules` into it, and assigns the next hub port. The user then logs it in once
+  with `! CODEX_HOME=~/.codex-<name> codex login`. After that, start its hub with
+  `codex-worker.mjs --account <name> hub`. `codex-worker.mjs accounts` lists the profiles.
+- **Name the account on every command.** `--account <name>` works with every codex-worker command (start, turn, wait,
+  steer, interrupt, status, list, hub, usage, reset-credit-use). For `codex exec`, prefix `CODEX_HOME=<home>`.
+- **Threads belong to their account.** Resume, steer and wait on the same account that started the thread. Record the
+  account in the ledger next to the thread id. Memories and session history are per home; the shared `AGENTS.md`
+  bridge still applies to every account.
+- **Pick the account with `quota.mjs`.** It reads every account live through its hub. If a hub is down, it projects
+  that account from its last reading and says so.
+  - Its `lean` names the account for new Codex work: the one whose unused quota is lost first (its reset, or an
+    earlier expiring card).
+  - It flags a login whose hub still runs the old account. Restart that hub once no thread runs on it.
+
+**Reset cards ("rate-limit reset credits").** `codex-worker.mjs [--account <name>] reset-credits` lists an account's
+cards with their expiry. Redeeming a card puts the account's windows back to 0% and restarts their clock now. So the
+card gains about `used + time-left/window − 1` windows:
+
+- It is worth the most when the window is spent early in its cycle. With cards in hand, Codex is front-loaded.
+- The quota comes first, then the cards (user, 2026-11-03). `quota.mjs` suggests a card only when:
+  - every account is at ≥99%, or
+  - a card would otherwise expire. A card that expires before its window resets sets a deadline to spend that
+    account by, with a break-even usage below which the card isn't worth redeeming.
+- Redeem with `codex-worker.mjs [--account <name>] reset-credit-use --key <new uuid>`. Reuse the same key if you retry
+  the same attempt. Redeeming is irreversible: do it only with the user's OK, or with a standing approval recorded in
+  memory.
+- After redeeming, run `quota.mjs --fresh`.
+
 ## Permissions and environment
 
 - The user's `~/.codex/config.toml` defaults to yolo (`approval_policy = "never"`, `sandbox_mode = "danger-full-access"`), which is the equivalent of bypass mode. On another machine, check it before assuming. The CLI flags are `-s read-only|workspace-write|danger-full-access` and `--dangerously-bypass-approvals-and-sandbox`.
 - **Never give a Codex worker more than the orchestrator has.** That is the same rule as for Claude workers, and it keeps a Codex worker from doing what this session's permissions would block. `danger-full-access` only when the orchestrator runs in bypass mode; otherwise `workspace-write` for writers, and keep anything the orchestrator would need approval for (pushes, external posts, installs) out of the brief and do it yourself, with approval.
 - **`workspace-write` can't run git writes** (verified 2026-10-30): Codex keeps every git metadata dir read-only in it — the worktree's `.git`, the main repo's `.git/worktrees/<name>`, even when added as a writable root — so `git add`, `commit`, `fetch` and `rebase` fail with "Operation not permitted". That is deliberate (a sandboxed write to `.git/hooks` or `.git/config` would run outside the sandbox at the next git command), so don't work around it. Brief such workers to edit only, leave the changes uncommitted and report the changed files and a commit message; then review the diff and commit yourself. If the diff touches hook scripts or their config (`.husky/`, `.pre-commit-config.yaml`, `core.hooksPath` targets, package scripts run by hooks), commit with `--no-verify` or ask the user, since your commit would run them unsandboxed. Its network follows `[sandbox_workspace_write] network_access` in `~/.codex/config.toml` (on in the user's config); `--network on|off` overrides it per worker or turn.
-- **Quota**: `codex-worker.mjs quota` prints the account's rate-limit windows as JSON; `scripts/quota.mjs` combines it with Claude's (see SKILL.md, routing).
+- **Quota**: `codex-worker.mjs [--account <name>] usage` prints an account's windows, reset cards and id as JSON (`quota` the windows only); `scripts/quota.mjs` combines every account with Claude's (see SKILL.md, routing).
 - **Read-only tasks**: pass `-s read-only`, and say "read-only" in the brief.
 - **Skills**: `~/.codex/skills` is symlinked to the same skills directory, so Codex sees most skills. Some can be disabled per skill in config.toml under `[[skills.config]] enabled = false`.
 - **Memory**: `~/.codex/AGENTS.md` bridges to Claude: it tells Codex to read `~/.claude/CLAUDE.md`, then the memory files a brief's "Relevant memory" section names, then the `memory/MEMORY.md` of the project its working directory maps to. That is only an instruction (in a 2026-10 sample, about 4 of 7 real worker runs read any Claude memory), so the brief's "Relevant memory" section, as SKILL.md describes, is what makes it reliable. Tested 2026-10-30 on Luna `low`: given only a list of memory paths, it answered without opening any file; told "before anything else, read each of these with a shell command; they are required input", it read them and `~/.claude/CLAUDE.md` and answered both questions correctly. What Codex learns goes to its own `~/.codex/memories/`, which Claude never reads; the report's "Durable lessons" section brings it back.

@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // codex-worker: run and steer Codex workers through a shared Codex app-server ("hub") over WebSocket.
 //
+//   codex-worker [--account NAME] <command> …                             (any command, on that account's home and hub)
+//   codex-worker accounts | account-add NAME [--home DIR] [--port N]      (list / add an account profile)
 //   codex-worker hub                                                       (start the hub if it isn't up)
 //   codex-worker start  --cwd DIR --effort E --sandbox S [--network on|off] [--model M] [--name N] --log FILE [--out FILE]  "<prompt>"
 //   codex-worker turn   --thread ID --effort E --log FILE [--out FILE] [--model M] [--sandbox S [--network on|off]]      "<prompt>"
@@ -10,6 +12,8 @@
 //   codex-worker status --thread ID
 //   codex-worker list   [--cwd DIR] [--search TEXT] [--limit N]
 //   codex-worker quota                                                     (the account's rate-limit windows, JSON)
+//   codex-worker reset-credits                                             (reset cards: count and expiries, JSON)
+//   codex-worker reset-credit-use --key UUID [--credit ID]                 (redeem one reset card; irreversible)
 //
 // `start` and `turn` follow the turn until it ends: every notification is appended to --log as JSONL, the first stdout
 // line is `thread=<id> turn=<id>`, and the process exits 0 on completed, 1 on failed/interrupted. On exit it prints
@@ -27,7 +31,23 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 
-const [cmd, ...rest] = process.argv.slice(2);
+// --account NAME (anywhere on the line) picks a profile from the accounts file: its own CODEX_HOME, so its own login,
+// and its own hub. Without it: CODEX_HOME / CODEX_HUB from the environment, else ~/.codex and the default hub.
+const ACCOUNTS = process.env.CODEX_ACCOUNTS || path.join(os.homedir(), '.claude', 'orchestrator', '_shared', 'codex-accounts.json');
+const readAccounts = () => { try { return JSON.parse(fs.readFileSync(ACCOUNTS, 'utf8')); } catch { return {}; } };
+const writeAccounts = (reg) => {
+  fs.mkdirSync(path.dirname(ACCOUNTS), { recursive: true });
+  const t = `${ACCOUNTS}.${process.pid}`; fs.writeFileSync(t, JSON.stringify(reg, null, 1)); fs.renameSync(t, ACCOUNTS);
+};
+const argv = process.argv.slice(2);
+const ai = argv.indexOf('--account');
+const account = ai >= 0 ? argv.splice(ai, 2)[1] : null;
+if (account) {
+  const prof = readAccounts()[account] ?? (account === 'main' ? { home: path.join(os.homedir(), '.codex'), hub: 'ws://127.0.0.1:47321' } : null);
+  if (!prof) { process.stderr.write(`codex-worker: unknown account ${account} (codex-worker accounts; add one with account-add)\n`); process.exit(2); }
+  process.env.CODEX_HOME = prof.home; process.env.CODEX_HUB = prof.hub;
+}
+const [cmd, ...rest] = argv;
 const opts = {}; const pos = [];
 for (let i = 0; i < rest.length; i++) {
   if (rest[i].startsWith('--')) opts[rest[i].slice(2)] = rest[i + 1]?.startsWith('--') || rest[i + 1] === undefined ? true : rest[++i];
@@ -35,7 +55,7 @@ for (let i = 0; i < rest.length; i++) {
 }
 const text = pos.join(' ');
 const die = (msg, code = 2) => { process.stderr.write(`codex-worker: ${msg}\n`); process.exit(code); };
-if (!cmd) die('usage: codex-worker hub|start|turn|wait|steer|interrupt|status|list ...');
+if (!cmd) die('usage: codex-worker [--account NAME] hub|start|turn|wait|steer|interrupt|status|list|quota|usage|reset-credits|reset-credit-use|accounts|account-add ...');
 if ((cmd === 'start' || cmd === 'turn') && typeof opts.effort !== 'string') die(`${cmd} needs --effort (the catalog default may be low)`);
 if (cmd === 'start' && typeof opts.sandbox !== 'string') die('start needs --sandbox (read-only | workspace-write | danger-full-access; never wider than the orchestrator)');
 const SANDBOX_POLICY = { 'read-only': 'readOnly', 'workspace-write': 'workspaceWrite', 'danger-full-access': 'dangerFullAccess' };
@@ -57,11 +77,41 @@ const sandboxPolicy = (mode) => mode === 'workspace-write'
   ? { type: 'workspaceWrite', networkAccess: opts.network === undefined ? configNetwork() : opts.network === 'on' }
   : { type: SANDBOX_POLICY[mode] };
 
+if (cmd === 'accounts') {
+  const reg = readAccounts();
+  if (!Object.keys(reg).length) console.log('main\t~/.codex\tws://127.0.0.1:47321\t(default; no accounts file yet)');
+  for (const [name, a] of Object.entries(reg)) console.log([name, a.home, a.hub, a.email ?? '-', a.plan ?? '-'].join('\t'));
+  process.exit(0);
+}
+if (cmd === 'account-add') {
+  // A second (third, …) account: its own CODEX_HOME sharing the main home's config, instructions, skills and rules (not
+  // its sessions, logins or databases), and its own hub port. The user logs it in once; it then runs side by side.
+  const name = pos[0];
+  if (!name || !/^[a-z0-9_-]+$/i.test(name)) die('usage: codex-worker account-add <name> [--home DIR] [--port N]');
+  const reg = readAccounts();
+  const main = path.join(os.homedir(), '.codex');
+  reg.main ??= { home: main, hub: 'ws://127.0.0.1:47321' };
+  if (reg[name]) die(`account ${name} exists: ${reg[name].home} ${reg[name].hub}`);
+  const ports = Object.values(reg).map((a) => Number(new URL(a.hub).port));
+  const port = Number(opts.port ?? Math.max(...ports) + 1);
+  const home = path.resolve(typeof opts.home === 'string' ? opts.home : path.join(os.homedir(), `.codex-${name}`));
+  fs.mkdirSync(home, { recursive: true });
+  for (const f of ['config.toml', 'AGENTS.md', 'skills', 'rules']) {
+    const src = path.join(main, f), dst = path.join(home, f);
+    if (fs.existsSync(src) && !fs.existsSync(dst)) fs.symlinkSync(src, dst);
+  }
+  reg[name] = { home, hub: `ws://127.0.0.1:${port}` };
+  writeAccounts(reg);
+  console.log(`account ${name}: ${home}, hub ws://127.0.0.1:${port}`);
+  console.log(`log it in once:  CODEX_HOME=${home} codex login`);
+  console.log(`then:            node ${process.argv[1]} --account ${name} hub`);
+  process.exit(0);
+}
 const hub = process.env.CODEX_HUB || 'ws://127.0.0.1:47321';
 const ready = () => fetch(hub.replace(/^ws/, 'http') + '/readyz', { signal: AbortSignal.timeout(2000) }).then((r) => r.ok, () => false);
 if (cmd === 'hub') {
   if (await ready()) { console.log(`hub up at ${hub}`); process.exit(0); }
-  const logPath = path.join(os.homedir(), '.codex', 'hub.log');
+  const logPath = path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'hub.log');
   const out = fs.openSync(logPath, 'a');
   spawn('codex', ['app-server', '--listen', hub], { detached: true, stdio: ['ignore', out, out] }).unref();
   for (let i = 0; i < 30; i++) {
@@ -210,5 +260,26 @@ try {
     const r = await call('account/rateLimits/read', {});
     console.log(JSON.stringify(r.rateLimitsByLimitId ?? { [r.rateLimits?.limitId ?? 'codex']: r.rateLimits }));
     finish(0);
+  } else if (cmd === 'usage') {
+    // One read of everything quota.mjs needs: the logged-in account, its windows, its reset cards.
+    const r = await call('account/rateLimits/read', {});
+    console.log(JSON.stringify({
+      accountId: r.accountId ?? null, ordinaryUsageAllowed: r.ordinaryUsageAllowed ?? null,
+      buckets: r.rateLimitsByLimitId ?? { [r.rateLimits?.limitId ?? 'codex']: r.rateLimits }, resetCredits: r.rateLimitResetCredits ?? null,
+    }));
+    finish(0);
+  } else if (cmd === 'reset-credits') {
+    // Rate-limit reset credits ("reset cards"): available count plus, when the backend lists them, each credit's
+    // grant and expiry (unix seconds; expiresAt null = never). credits null = only the count is known.
+    const r = await call('account/rateLimits/read', {});
+    console.log(JSON.stringify(r.rateLimitResetCredits ?? null));
+    finish(0);
+  } else if (cmd === 'reset-credit-use') {
+    // Redeems one reset credit: the eligible windows go back to 0% and their reset clock restarts now. Irreversible;
+    // --key makes a retry of the same attempt safe (the backend answers alreadyRedeemed instead of spending another).
+    if (typeof opts.key !== 'string') die('reset-credit-use needs --key <uuid> (reuse it when retrying the same attempt)');
+    const r = await call('account/rateLimitResetCredit/consume', { idempotencyKey: opts.key, creditId: typeof opts.credit === 'string' ? opts.credit : null });
+    console.log(JSON.stringify(r));
+    finish(r.outcome === 'reset' || r.outcome === 'alreadyRedeemed' ? 0 : 1);
   } else die(`unknown command ${cmd}`);
 } catch (e) { die(e.message, 1); }
