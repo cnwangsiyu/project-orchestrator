@@ -152,6 +152,8 @@ const readCodexAll = () => {
 // ---- reading, with a shared 10-minute cache and a 48-hour history for recent burn rates ----
 const TTL_MS = 10 * 60 * 1000;
 export const CACHE = process.env.QUOTA_CACHE || path.join(SHARED, 'quota.json');
+export const QUOTA_LOG = process.env.QUOTA_LOG_FILE || path.join(SHARED, 'quota-log.jsonl');
+export const ROUTE_LOG = process.env.ROUTE_LOG_FILE || path.join(SHARED, 'route-log.jsonl');
 export const readState = ({ fresh = false } = {}) => {
   let data = readJson(CACHE, null);
   const failed = data && (data.errors?.claude || data.errors?.codex);
@@ -169,6 +171,12 @@ export const readState = ({ fresh = false } = {}) => {
     push('claude', weekly(data.claude));
     for (const a of data.codexAccounts ?? []) if (a.live) push(`codex:${a.name}`, weekly(a.windows));
     withLock(CACHE, () => writeJson(CACHE, data));
+    // Append a compact snapshot for the nightly review: weekly usage, resets and cards per vendor/account.
+    if (process.env.QUOTA_LOG !== '0') {
+      const wk = (ws) => { const w = weekly(ws); return w ? { used: w.used, resetsAt: w.resetsAt } : null; };
+      const snap = { t: now, claude: wk(data.claude), codex: (data.codexAccounts ?? []).filter((a) => a.live).map((a) => ({ name: a.name, ...wk(a.windows), cards: (a.resets?.credits ?? []).map((c) => ({ id: c.id, expiresAt: c.expiresAt })), cardCount: a.resets?.count ?? null })) };
+      try { fs.appendFileSync(QUOTA_LOG, JSON.stringify(snap) + '\n'); } catch {}
+    }
   }
   return data;
 };

@@ -2,7 +2,7 @@
 // route: pick vendor, model, effort, account and the exact launch command for one task, deterministically.
 //
 //   route <category> [--stakes low|normal|high] [--auto-check] [--failures N] [--writes | --read-only]
-//                    [--against claude|codex] [--no-redeem] [--mode <orchestrator permission mode>] [--cwd DIR] [--task-dir DIR]
+//                    [--against claude|codex] [--no-redeem] [--project SLUG] [--dry] [--mode <orchestrator permission mode>] [--cwd DIR] [--task-dir DIR]
 //                    [--name NAME] [--fresh] [--json]
 //   route --table          (the routing table: categories, first pick, alternative, escalation ladder)
 //
@@ -13,7 +13,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readState, analyze, leanLines, readProfiles, hours, withLock, SHARED } from './lib/state.mjs';
+import { readState, analyze, leanLines, readProfiles, hours, withLock, SHARED, ROUTE_LOG } from './lib/state.mjs';
 
 const SKILL = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const RR = process.env.ROUTE_RR || path.join(SHARED, 'route-rotation.txt'); // launch counter for account rotation
@@ -57,7 +57,7 @@ const notch = (m, d, cap = 'xhigh') => {
 const label = (m) => `${m.vendor === 'claude' ? `Claude ${m.model}` : `Codex ${m.model}`} ${m.effort}`;
 
 // ---- args ----
-const BOOL = new Set(['auto-check', 'writes', 'read-only', 'fresh', 'json', 'table', 'no-redeem']);
+const BOOL = new Set(['auto-check', 'writes', 'read-only', 'fresh', 'json', 'table', 'no-redeem', 'dry']);
 const argv = process.argv.slice(2), opts = {}, pos = [];
 for (let i = 0; i < argv.length; i++) {
   if (!argv[i].startsWith('--')) { pos.push(argv[i]); continue; }
@@ -186,6 +186,14 @@ const out = {
   secondOpinion: second ? { ...second, ...launch(second, second === T.second ? T.shape : 'worker') } : null,
   needsUserOK: needsOK, tellUser: tell, why, notes, redeemFirst, quota: leanLines(st, data),
 };
+// Every real routing decision is logged for the nightly review (--dry or ROUTE_LOG=0 to skip, e.g. for experiments).
+if (!opts.dry && process.env.ROUTE_LOG !== '0') {
+  const rec = { t: Date.now(), project: typeof opts.project === 'string' ? opts.project : null, name: typeof opts.name === 'string' ? opts.name : null, category: cat, stakes, failures,
+    autoCheck: !!opts['auto-check'], noRedeem, deferred, pick: m ? { vendor: m.vendor, model: m.model, effort: m.effort, account: out.pick?.account ?? null } : null,
+    second: second ? { vendor: second.vendor, model: second.model, effort: second.effort } : null, why, needsOK, tell,
+    quota: { claude: QC.status, codexOut: QX.out, underused: QX.underused, frontLoad: QX.frontLoad, overspending: QX.overspending, redeemDue: !!QX.redeem } };
+  try { fs.appendFileSync(ROUTE_LOG, JSON.stringify(rec) + '\n'); } catch {}
+}
 if (opts.json) { console.log(JSON.stringify(out)); process.exit(0); }
 if (deferred) console.log(`DEFER ${cat}: ${deferred}`);
 else {

@@ -112,7 +112,9 @@ effort, Codex account and launch command from
     in the ledger. Each failure moves it one step up the escalation ladder. Count one when a result
     fails your verification, a worker stalls or reports something beyond its depth;
   - `--writes` / `--read-only`, `--against <vendor>` for a second opinion, and `--mode`, `--cwd`,
-    `--task-dir`, `--name` so the printed command is ready to run.
+    `--task-dir`, `--name` so the printed command is ready to run;
+  - always `--project <slug>`: every decision is logged to `_shared/route-log.jsonl` for the
+    nightly review, which needs the project (use `--dry` only to try things out).
 
   When a task spans categories, split it or pick the row for its hardest part.
 - **The script computes the rest** from its table and the quota state in `scripts/lib/state.mjs`:
@@ -134,7 +136,14 @@ effort, Codex account and launch command from
   - If the user declines a pending card redemption, re-run with `--no-redeem` for the fallback.
   - Say anything under "tell the user" right away.
   - Don't override the script by hand. If its pick is wrong for a whole kind of task, change the
-    table in `route.mjs` (and `references/model-routing.md`) instead, so the change sticks.
+    table in `route.mjs` (and `references/model-routing.md`) instead, so the change sticks, and run
+    `node <this skill>/scripts/test/route-scenarios.mjs` before committing.
+- **The nightly review tunes the policy.** Every night around 03:07 a session named
+  `routing-nightly-review-<date>` reviews the day's routing, quota and card waste, bad cases and
+  model news (`references/nightly-review.md`), adjusts the table and thresholds within the user's
+  hard rules, and messages each orchestrator what changed. Treat its messages as the user's
+  delegated policy updates: follow them from your next dispatch. Put the bad cases it should see
+  in your ledger (failures, escalations, the user's complaints about a model).
 - **Act on the quota lean.** Run `node <this skill>/scripts/quota.mjs` when you plan a batch of
   work, and at least every half hour while work is queued. Its `lean:` lines are the
   account-level actions only you can take:

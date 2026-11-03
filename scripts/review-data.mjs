@@ -1,0 +1,103 @@
+#!/usr/bin/env node
+// review-data: the facts the nightly routing review starts from, for the last N hours (default 24).
+//
+//   review-data [--hours N] [--json] [--save-catalog]
+//
+// Sections: routing decisions (route-log.jsonl), quota and reset-card waste (quota-log.jsonl), the current lean, and the
+// model catalog compared with the last saved snapshot (--save-catalog stores today's as the new baseline).
+import fs from 'node:fs';
+import path from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { SHARED, ROUTE_LOG, QUOTA_LOG, readState, analyze, leanLines, fmt } from './lib/state.mjs';
+
+const argv = process.argv.slice(2);
+const opt = (k) => { const i = argv.indexOf(`--${k}`); return i < 0 ? null : argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[i + 1] : true; };
+const H = Number(opt('hours') ?? 24), since = Date.now() - H * 3600000;
+const lines = (f) => { try { return fs.readFileSync(f, 'utf8').split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean); } catch { return []; } };
+const count = (xs, key) => xs.reduce((m, x) => { const k = key(x); m[k] = (m[k] ?? 0) + 1; return m; }, {});
+
+// ---- routing ----
+const routes = lines(ROUTE_LOG).filter((r) => r.t >= since);
+const routing = {
+  decisions: routes.length,
+  byProject: count(routes, (r) => r.project ?? '(none)'),
+  byCategory: count(routes, (r) => r.category),
+  byPick: count(routes.filter((r) => r.pick), (r) => `${r.pick.vendor}:${r.pick.model}:${r.pick.effort}`),
+  byAccount: count(routes.filter((r) => r.pick?.account), (r) => r.pick.account),
+  deferred: routes.filter((r) => r.deferred).map((r) => ({ t: fmt(r.t), project: r.project, category: r.category, why: r.deferred })),
+  escalations: routes.filter((r) => r.failures > 0).map((r) => ({ t: fmt(r.t), project: r.project, name: r.name, category: r.category, failures: r.failures, pick: r.pick })),
+  tellUser: routes.filter((r) => r.tell?.length).map((r) => ({ t: fmt(r.t), project: r.project, name: r.name, tell: r.tell })),
+  needsOK: routes.filter((r) => r.needsOK?.length).map((r) => ({ t: fmt(r.t), project: r.project, category: r.category, needsOK: r.needsOK })),
+  withoutProject: routes.filter((r) => !r.project).length,
+};
+
+// ---- quota: what each week reset threw away, and which cards expired unused ----
+const snaps = lines(QUOTA_LOG).sort((a, b) => a.t - b.t);
+const resets = [], cardsExpired = [], cardsRedeemed = [];
+const track = (key, get) => {
+  let prev = null;
+  for (const s of snaps) {
+    const cur = get(s);
+    if (!cur || cur.resetsAt == null) continue;
+    if (prev && Math.abs(cur.resetsAt - prev.resetsAt) > 3600000 && s.t >= since) {
+      // The window rolled over (natural reset) or restarted early (a redeemed card): what was left is gone or reused.
+      const natural = prev.resetsAt <= s.t + 600000;
+      resets.push({ who: key, at: fmt(natural ? prev.resetsAt : s.t), kind: natural ? 'natural reset' : 'early restart (card)', usedBefore: prev.used, unused: Math.max(0, 100 - prev.used) });
+    }
+    prev = cur;
+  }
+};
+track('claude', (s) => s.claude);
+const names = [...new Set(snaps.flatMap((s) => (s.codex ?? []).map((a) => a.name)))];
+for (const n of names) track(`codex:${n}`, (s) => (s.codex ?? []).find((a) => a.name === n));
+for (const n of names) {
+  const seen = new Map(); // card id → { expiresAt, lastSeen }
+  for (const s of snaps) for (const a of (s.codex ?? []).filter((x) => x.name === n)) {
+    const ids = new Set(a.cards.map((c) => c.id));
+    for (const c of a.cards) seen.set(c.id, { expiresAt: c.expiresAt, lastSeen: s.t });
+    for (const [id, v] of seen) if (!ids.has(id) && !v.gone) {
+      v.gone = s.t;
+      if (s.t < since) continue;
+      if (v.expiresAt && v.expiresAt <= s.t) cardsExpired.push({ account: n, card: id.slice(-8), expiredAt: fmt(v.expiresAt) });
+      else cardsRedeemed.push({ account: n, card: id.slice(-8), at: fmt(s.t) });
+    }
+  }
+}
+const quota = { snapshots: snaps.filter((s) => s.t >= since).length, resets, cardsExpired, cardsRedeemed };
+
+// ---- now ----
+const data = readState();
+const st = analyze(data);
+const now = { lean: leanLines(st, data), claude: st.claude.status, codex: st.codex.rows.map((r) => ({ name: r.a.name, live: r.a.live, week: r.s?.used ?? null, resetsIn: r.s?.left != null ? `${Math.round(r.s.left)}h` : null, cards: r.a.resets?.count ?? null })) };
+
+// ---- model catalog ----
+const CATALOG = path.join(SHARED, 'model-catalog.json');
+const catalogNow = { codex: [], claude: [] };
+try {
+  const raw = execFileSync('codex', ['debug', 'models'], { encoding: 'utf8', timeout: 60000, maxBuffer: 64 << 20, stdio: ['ignore', 'pipe', 'ignore'] });
+  const j = JSON.parse(raw.slice(raw.indexOf('{')));
+  catalogNow.codex = (j.models ?? j).filter((m) => m.visibility !== 'hide').map((m) => ({ slug: m.slug, desc: m.description, ctx: m.context_window, efforts: (m.supported_reasoning_levels ?? []).map((x) => x.effort ?? x) }));
+} catch (e) { catalogNow.codexError = String(e.message).split('\n')[0]; }
+try {
+  const help = execFileSync('claude', ['--help'], { encoding: 'utf8', timeout: 30000, stdio: ['ignore', 'pipe', 'ignore'] });
+  const modelHelp = (help.match(/--model <model>[\s\S]*?(?=\n\s+-[-\w])/) ?? [''])[0]; // just the --model option's text
+  catalogNow.claude = [...new Set((modelHelp.match(/'([a-z0-9.\[\]-]+)'/g) ?? []).map((x) => x.slice(1, -1)))];
+  catalogNow.claudeVersion = execFileSync('claude', ['--version'], { encoding: 'utf8', timeout: 30000 }).trim();
+} catch (e) { catalogNow.claudeError = String(e.message).split('\n')[0]; }
+let prevCat = null; try { prevCat = JSON.parse(fs.readFileSync(CATALOG, 'utf8')); } catch {}
+const slugs = (c) => new Set((c?.codex ?? []).map((m) => m.slug));
+const catalog = {
+  codexAdded: [...slugs(catalogNow)].filter((x) => prevCat && !slugs(prevCat).has(x)),
+  codexRemoved: [...slugs(prevCat)].filter((x) => !slugs(catalogNow).has(x)),
+  claudeAliases: catalogNow.claude, claudeVersion: catalogNow.claudeVersion ?? null, baseline: prevCat ? fmt(prevCat.savedAt) : 'none (run with --save-catalog)',
+};
+if (opt('save-catalog')) fs.writeFileSync(CATALOG, JSON.stringify({ ...catalogNow, savedAt: Date.now() }, null, 1));
+
+const result = { hours: H, routing, quota, now, catalog };
+if (opt('json')) { console.log(JSON.stringify(result, null, 1)); process.exit(0); }
+const show = (title, v) => console.log(`\n## ${title}\n${typeof v === 'string' ? v : JSON.stringify(v, null, 1)}`);
+console.log(`# routing review data — last ${H}h (to ${fmt(Date.now())})`);
+show('routing', routing);
+show('quota and cards', quota);
+show('now', now);
+show('model catalog', catalog);
