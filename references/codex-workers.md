@@ -97,8 +97,8 @@ card gains about `used + time-left/window − 1` windows:
   - a card would otherwise expire. A card that expires before its window resets sets a deadline to spend that
     account by, with a break-even usage below which the card isn't worth redeeming.
 - Redeem with `codex-worker.mjs [--account <name>] reset-credit-use --key <new uuid>`. Reuse the same key if you retry
-  the same attempt. Redeeming is irreversible: do it only with the user's OK, or with a standing approval recorded in
-  memory.
+  the same attempt. Redeeming is irreversible: ask the user every time and redeem only after an explicit yes; there is no
+  standing approval (user, 2026-11-03).
 - After redeeming, run `quota.mjs --fresh`.
 
 ## Permissions and environment

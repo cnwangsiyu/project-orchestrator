@@ -137,7 +137,8 @@ effort, Codex account and launch command from
 - **Act on the quota lean.** Run `node <this skill>/scripts/quota.mjs` when you plan a batch of
   work, and at least every half hour while work is queued. Its `lean:` lines are the
   account-level actions only you can take:
-  - redeem a reset card, with the user's OK;
+  - redeem a reset card — only after asking the user each time and getting a yes (never on your
+    own; user, 2026-11-03);
   - ask the user to log in an account;
   - restart a hub;
   - while Codex is underused or front-loading, pull queued and deferred work forward and add
