@@ -6,7 +6,8 @@
 // Claude comes from `claude -p /usage`, Codex from the hub (`codex-worker.mjs quota`). For every window it prints the
 // used share, the reset time and the pace: used share ÷ elapsed share of the window, so above 1 means burning faster
 // than the window can sustain until it resets. Each vendor is ok | watch | tight | unknown, and the last line leans
-// toward the vendor with headroom. The result is cached for 10 minutes in ~/.claude/orchestrator/_shared/quota.json,
+// toward the vendor with headroom (also when both are fine but one burns faster), followed by notes on a nearly used
+// one-model window and on headroom a reset within a day will discard. The result is cached for 10 minutes in ~/.claude/orchestrator/_shared/quota.json,
 // shared by every orchestrator; --fresh re-reads both.
 import fs from 'node:fs';
 import os from 'node:os';
@@ -109,6 +110,21 @@ const judge = (windows) => {
   }
   return { status, why, freesAt: status === 'tight' ? freesAt : null };
 };
+const maxPace = (ws) => {
+  const ps = (ws ?? []).filter((w) => !w.scoped).map(pace).filter((p) => p != null);
+  return ps.length ? Math.max(...ps) : null;
+};
+// Per-window hints: a one-model window (e.g. Fable) nearly used up, and headroom that a reset within a day will discard.
+const notes = (vendor, ws) => {
+  const out = [];
+  for (const w of ws ?? []) {
+    const left = w.resetsAt ? (w.resetsAt - now) / 3600000 : null;
+    if (w.scoped && w.used >= 70) out.push(`${vendor} ${w.label} ${w.used}% used: avoid that model until it resets${left != null ? ` in ${hours(left)}` : ''}`);
+    if (!w.scoped && left != null && left > 0 && left < 24 && (w.windowMins ?? 0) >= 1440 && w.used <= 60)
+      out.push(`expiring: ${vendor} ${w.label} resets in ${hours(left)} with ${100 - w.used}% left; fine to use stronger settings there`);
+  }
+  return out;
+};
 const hours = (h) => (h < 24 ? `${h.toFixed(1)}h` : `${(h / 24).toFixed(1)}d`);
 const RANK = { ok: 0, watch: 1, tight: 2, unknown: 1 };
 const lean = (c, x) => {
@@ -118,7 +134,16 @@ const lean = (c, x) => {
     return `codex (both tight; user prefers Codex then): tell the user, run what matters now on Codex, keep on Claude only `
       + `what needs Claude, defer the rest (codex frees up in ${when(x)}, claude in ${when(c)})`;
   }
-  if (RANK[c.status] === RANK[x.status]) return c.status === 'unknown' ? 'unknown: read the other vendor manually' : 'either: route by task fit';
+  if (RANK[c.status] === RANK[x.status]) {
+    if (c.status === 'unknown') return 'unknown: read the other vendor manually';
+    // Same status: still point work either vendor can do at the one burning its window more slowly.
+    const pc = maxPace(data.claude), px = maxPace(data.codex);
+    if (pc != null && px != null && Math.abs(pc - px) >= 0.3 && Math.max(pc, px) >= 0.5) {
+      const side = pc > px ? 'codex' : 'claude';
+      return `either: route by task fit; work either vendor can do → ${side} (pace claude ${pc.toFixed(1)} vs codex ${px.toFixed(1)})`;
+    }
+    return 'either: route by task fit';
+  }
   return RANK[c.status] > RANK[x.status]
     ? 'codex: move work either vendor can do to Codex; keep on Claude only what needs Claude'
     : 'claude: move work either vendor can do to Claude; keep on Codex only what needs Codex (e.g. images)';
@@ -134,7 +159,7 @@ if (args.includes('--fresh') || !data || now - data.checkedAt > TTL_MS) {
   const tmp = `${CACHE}.${process.pid}`; fs.writeFileSync(tmp, JSON.stringify(data)); fs.renameSync(tmp, CACHE);
 }
 const c = judge(data.claude), x = judge(data.codex);
-const result = { checkedAt: new Date(data.checkedAt).toISOString(), claude: { ...c, windows: data.claude }, codex: { ...x, plan: data.codexPlan ?? null, windows: data.codex }, errors: data.errors, lean: lean(c, x) };
+const result = { checkedAt: new Date(data.checkedAt).toISOString(), claude: { ...c, windows: data.claude }, codex: { ...x, plan: data.codexPlan ?? null, windows: data.codex }, errors: data.errors, lean: lean(c, x), notes: [...notes('claude', data.claude), ...notes('codex', data.codex)] };
 if (args.includes('--json')) { console.log(JSON.stringify(result)); process.exit(0); }
 
 const fmt = (t) => t ? new Date(t).toLocaleString('sv-SE').slice(5, 16) : '?';
@@ -149,3 +174,4 @@ for (const [vendor, ws] of [['claude', data.claude], ['codex', data.codex]]) {
 console.log(`claude: ${c.status}${c.why ? ` (${c.why})` : ''}`);
 console.log(`codex: ${x.status}${x.why ? ` (${x.why})` : ''}${data.codexPlan ? ` [plan ${data.codexPlan}]` : ''}`);
 console.log(`lean: ${result.lean}`);
+for (const n of result.notes) console.log(`note: ${n}`);

@@ -1,6 +1,6 @@
 # Codex CLI as a worker
 
-Use this whenever the routing mode in SKILL.md puts a task on Codex — by default (**auto**) that is long implementation, build/test and debugging runs, docs and quick lookups — or the user asks for Codex workers, for example because Claude Code credit is low. Codex runs on the user's ChatGPT plan, not on Claude credit.
+Use this whenever the routing mode in SKILL.md puts a task on Codex — by default (**auto**) that is coding: implementation, build/test/deploy and debugging runs, code review; plus bulk extraction, quick lookups and images (see `references/model-routing.md`) — or the user asks for Codex workers, for example because Claude Code credit is low. Codex runs on the user's ChatGPT plan, not on Claude credit.
 
 **Which launcher:** use `scripts/codex-worker.mjs` through the hub (below) by default, since only it can steer, interrupt and re-attach. Use plain `codex exec` for short one-shot runs that will never need steering (read-only lookups, second opinions, gpt-first subagent replacements). Verified 2026-10-30 on codex-cli 0.166.0. The model catalog changes, so re-check it with `codex debug models` before relying on the ids below.
 
@@ -112,26 +112,31 @@ Codex has a built-in image tool (`image_gen.imagegen`; feature flag `image_gener
 
 ## Choosing model and effort
 
-Plan: Pro since 2026-10-30 (the API reports `prolite`): a single weekly window, no 5-hour window. Relative plan usage, from OpenAI's Codex pricing as of 2026-10: Sol = 1x, Astra ≈ 5x, Terra ≈ 0.5x, Luna ≈ 0.05x. The Fast tier costs about 2.5x more. Higher effort just spends more tokens.
+Pick model and effort from `references/model-routing.md`, which covers both vendors from public benchmarks, prices
+and plan usage. Codex-specific facts behind it (2026-11-03):
 
-**Efforts.** Codex offers `low`, `medium`, `high`, `xhigh`, `max` and `ultra` (Luna stops at `max`). There is no `none` or `minimal`.
-- `ultra` makes the model fan out its own sub-agents. Avoid it: the orchestrator already parallelizes, and `ultra` multiplies usage.
-- Set the effort explicitly on every launch. The catalog default for Sol is `low`; the user's config sets `high`.
+- **Plan:** Pro since 2026-10-30 (the API reports `prolite`): a single weekly window — OpenAI's docs say Pro plans
+  currently have no five-hour limit. Plan credits per MTok, relative to Sol 6.1: Astra 5x (10x on cached input),
+  Terra 0.5x, Luna 0.05x (0.1x cached). Fast costs 2.5x of included usage, Ultrafast 8x. There is no per-effort
+  multiplier: higher effort just spends more tokens. Sol has no long-context surcharge in Codex.
+- **Efforts:** `low`, `medium`, `high`, `xhigh`, `max`, `ultra` (Luna stops at `max`); no `none` or `minimal` in the
+  CLI. `ultra` makes the model fan out its own sub-agents — avoid it, since the orchestrator already parallelizes.
+  Set the effort on every launch: the catalog default for Sol is `low` (weak for coding: Terminal-Bench 4 31%); the
+  user's config sets `high`.
+- **Models:** `gpt-6.1-sol` is the workhorse and Codex's default (near Astra, 500K context); `gpt-6-astra` is the
+  frontier model at 5x; `gpt-6.1-terra` is positioned for writing and visual understanding, not coding (its
+  computer-use strength doesn't help here: the Codex CLI can't do computer use); `gpt-6-luna` is fast and cheap, for
+  extraction, classification, summaries and images, and should not write code. Don't pick `gpt-6-sol` or the
+  `gpt-5.6-*` models: they're older at the same or higher cost.
 
-**Models.**
-- `gpt-6.1-sol` is the workhorse: near Astra, 500K context.
-- `gpt-6-astra` is the frontier model and expensive.
-- `gpt-6.1-terra` is mid-tier (writing, computer use). It's new and its coding strength is unconfirmed, so check its output.
-- `gpt-6-luna` is fast and cheap, for extraction, summaries and focused small edits.
-- Don't pick `gpt-6-sol` or the `gpt-5.6-*` models: they're older at the same or higher cost.
-
-Start from the table below, then adjust by the task's difficulty and stakes as SKILL.md describes. Check every worker's work:
+Check every worker's work:
 - the cited file:line exist and say what's claimed;
 - builds and tests really ran;
 - commits contain only the intended files;
 - conclusions match the evidence.
 
-If a worker's result fails that check, or it stalls, resume it with a sharper instruction, raise the effort, or move a Terra task to Sol, and note it in the ledger.
+If a worker's result fails that check, or it stalls, resume it with a sharper instruction, raise the effort, or follow
+the escalation column in `references/model-routing.md`, and note it in the ledger.
 
 **Tell the user promptly when Codex keeps falling short** (user's instruction, 2026-10-30), on any model. Report it right away rather than quietly working around it. Examples:
 - repeated failed acceptance or escalations;
@@ -140,17 +145,3 @@ If a worker's result fails that check, or it stalls, resume it with a sharper in
 - stalls or unfinished runs.
 
 Include what happened (task, model, effort, symptom) and what you did about it. The user decides whether to keep using Codex.
-
-| Task | Model + effort | Why |
-|---|---|---|
-| Code review | Sol `high` | Needs cross-file reasoning; `xhigh` rarely adds on normal diffs |
-| High-stakes review (concurrency, ABI, crash fix) | Sol `xhigh`; Astra `high` as a second opinion | Catches subtle races |
-| Implementing in a large C++/ObjC/Java codebase | Sol `high` (`xhigh` for cross-module or threading designs) | Large context, strong coding |
-| Debugging | Sol `xhigh`; if it stalls, Astra `xhigh`, then `max` | Hard reasoning pays off here |
-| Log or data analysis | Sol `medium`; Luna `medium` for pure extraction | Mostly reading |
-| Docs or reports | Terra `medium` | Positioned for writing, at half Sol's usage |
-| Long procedural build/device workflows | Sol `medium`; raise to `high` for diagnosis steps | Steps are routine |
-| Quick lookups | Luna `low` | About 1/20 of Sol's usage, fastest |
-| Usage is tight | Terra `medium` for most work, Luna `low` for lookups; keep Sol `high` for the one hard problem | Avoid Astra, Fast, `max`, `ultra` |
-
-Sources: the OpenAI model docs and Codex pricing/model pages, the Codex CLI changelog, and the local `codex debug models` output. Benchmark numbers for the GPT-6.x models were mostly vendor or second-hand figures in 2026-10, so treat the ranking as guidance and switch models when a worker struggles.

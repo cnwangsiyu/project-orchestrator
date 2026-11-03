@@ -99,11 +99,13 @@ or amendment a worker takes on, not once per worker — from the task's
 difficulty, how ambiguous it is, what a wrong answer costs, and how closely you will check the
 result — choosing among whatever the runtime offers now, never from a fixed table, since models,
 effort scales and agent tools change and the same level name means different things on different
-models. (The table in `references/codex-workers.md` is a starting point for Codex workers, not a
+models. (The tables in `references/model-routing.md` are the starting point for both vendors, not a
 substitute for this judgment.) Higher effort buys more verification, edge cases and independent judgment; lower effort
 returns a usable starting point sooner, which suits routine, well-scoped work whose output you
 review anyway. Effort is usually the first knob: raise or lower it within a model, and change the
-model only for a gap effort cannot close. Cheap workers pay off on routine, independent or bulky
+model only for a gap effort cannot close. When a test, build or exact check will catch a miss, start
+a notch lower and re-run only the failures higher — cheaper and at least as good as running
+everything high; when a miss would be silent or costly, start at the level the task needs. Cheap workers pay off on routine, independent or bulky
 work (polling, collecting data, summaries, sweeps too large for one context); a hard, tightly
 coupled chain of reasoning — root-cause hunts across components, device experiments, design,
 anything costly to get wrong — goes to one strong worker rather than being split thin. The top
@@ -118,28 +120,37 @@ and switch whenever the user says so. Default: **auto**.
 - **claude-first**: almost everything runs on Claude. Use Codex only for a second opinion from a
   different model (independent review, cross-check of a conclusion or a design) and for image
   generation, which Claude can't do (recipe in `references/codex-workers.md`).
-- **auto**: pick the best model per task, and say which in one line when launching.
-  - Claude: the orchestrator; tasks that need the browser, computer use, Artifact/Docs tools, or a
-    worker that must negotiate with peers itself.
-  - Codex Sol: long implementation, deploy and build/test runs, debugging, and device runs whose
-    mid-run handoffs you can broker by steering (hub-started workers only).
-  - Codex Terra: docs and reports. Codex Luna: quick lookups and image generation. Codex: second
-    opinions.
+- **auto**: pick vendor, model and effort per task from `references/model-routing.md` (task table
+  built from public benchmarks, prices and plan usage), and say in one line which and why when
+  launching. Its core:
+  - Claude only: the orchestrator; computer use (the Codex CLI can't do it), browser, Artifact/Docs
+    tools, a worker that must negotiate with peers itself.
+  - Codex Sol 6.1 (`high`; `xhigh` for hard or long work) is the coding workhorse — implementation,
+    build/test/deploy runs, debugging, code review — at a fraction of Opus's cost per solved task.
+  - Claude Sonnet 5.5 `medium`: docs, reports and other knowledge work (it scores far above GPT
+    there), research, well-scoped coding that needs Claude tools, computer use. Opus 5.5 `high`:
+    design, open-ended or ambiguous work, escalations. Haiku 5.5 `low` or Codex Luna `low`:
+    lookups, polling, bulk extraction (Luna never writes code). Codex Terra: drafts and image
+    reading only, not code. Codex Luna: image generation.
+  - Fable 5.1 and Astra only as escalations after the strong default visibly fell short, and tell
+    the user first; high-stakes reviews and second opinions use the other vendor.
   - Then weigh both vendors' quota, never just one. Before launching a worker either vendor
     could run (and at least every half hour while work is queued), run
     `node <this skill>/scripts/quota.mjs`. It reads Claude (`claude -p /usage`) and Codex (the
     hub) together, caches the result for 10 minutes for every orchestrator, and prints each window's
     used share, reset and pace (used share ÷ elapsed share of the window; above 1 burns faster
-    than the window lasts), a status per vendor and a lean. Windows differ by plan (a higher
-    plan may have no 5-hour window); the script reads whatever windows exist. A nearly full window
-    that resets within the hour matters less than a moderately full week with days to go. Move
-    work either vendor can do toward the one with headroom; keep vendor-specific work where it
-    must run; when both are tight, tell the user and prefer Codex (user, 2026-10-30): run what
-    matters now on Codex, keep on Claude only what needs Claude, and defer the rest. Say in the
-    launch line when quota changed the choice.
+    than the window lasts), a status per vendor and a lean — including which side has more
+    headroom when both are fine, a Fable window that is nearly used, and headroom that expires
+    unused at a reset within a day. Windows differ by plan (a higher plan may have no 5-hour
+    window); the script reads whatever windows exist. A nearly full window that resets within the
+    hour matters less than a moderately full week with days to go. Move work either vendor can do
+    toward the one with headroom; keep vendor-specific work where it must run; when both are
+    tight, tell the user and prefer Codex (user, 2026-10-30): run what matters now on Codex, keep
+    on Claude only what needs Claude, and defer the rest. Say in the launch line when quota
+    changed the choice.
 - **gpt-first**: route as much as possible to Codex, including work you'd otherwise give a
-  subagent (Agent tool): use a short `codex exec` (Luna/Terra/Sol by difficulty, read-only for
-  research) instead. Fall back to Claude only for what Codex can't do (browser or computer use,
+  subagent (Agent tool): use a short `codex exec` (Luna for lookups and extraction, Terra for
+  writing, Sol for anything touching code; read-only for research) instead. Fall back to Claude only for what Codex can't do (browser or computer use,
   Artifact/Docs tools, negotiating with peers) or a task it already failed after an escalation.
 - In every mode: follow `references/codex-workers.md` for launching, permissions and verifying
   Codex workers, and tell the user promptly if Codex keeps falling short.
@@ -210,8 +221,10 @@ short, batch updates that arrive together, and reply in the user's language.
   since a session in a different mode holds your messages for its user's approval. Codex workers
   follow the same bound through their sandbox (see `references/codex-workers.md`). Prefix the name
   with the project slug so sessions from different projects stay apart in `claude agents`.
-  Set the worker's model and effort explicitly with the CLI's own flags (in Claude Code `--model`
-  and `--effort`; check `claude --help` for the current values) — otherwise it inherits yours.
+  Set the worker's model and effort explicitly with the CLI's own flags — otherwise it inherits
+  yours: in Claude Code `--model opus|sonnet|haiku|fable` and `--effort low|medium|high|xhigh|max`
+  (check `claude --help` for the current values). Subagents you start with the Agent tool take a
+  `model` (e.g. `haiku` for lookups, `sonnet` for research) and otherwise run on your model.
   To change them for a worker's next task, stop it and resume it with the new flags (see
   Lifecycle); a message cannot change a running session's model or effort.
 - **Tell workers how to treat EnterWorktree.** Background sessions are told by default to isolate
@@ -283,4 +296,5 @@ short, batch updates that arrive together, and reply in the user's language.
   searching for them.
 - **Codex workers.** For workers on the Codex CLI, follow `references/codex-workers.md`. It covers
   `scripts/codex-worker.mjs` (the default: live steer, interrupt, re-attach) and `codex exec`;
-  permissions; what Codex can't do; and which GPT model and effort to start from per task.
+  permissions; and what Codex can't do. Model and effort choice for both vendors is in
+  `references/model-routing.md`.
