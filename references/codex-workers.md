@@ -112,6 +112,32 @@ card gains about `used + time-left/window − 1` windows:
 - **Memory**: `~/.codex/AGENTS.md` bridges to Claude: it tells Codex to read `~/.claude/CLAUDE.md`, then the memory files a brief's "Relevant memory" section names, then the `memory/MEMORY.md` of the project its working directory maps to. That is only an instruction (in a 2026-10 sample, about 4 of 7 real worker runs read any Claude memory), so the brief's "Relevant memory" section, as SKILL.md describes, is what makes it reliable. Tested 2026-10-30 on Luna `low`: given only a list of memory paths, it answered without opening any file; told "before anything else, read each of these with a shell command; they are required input", it read them and `~/.claude/CLAUDE.md` and answered both questions correctly. What Codex learns goes to its own `~/.codex/memories/`, which Claude never reads; the report's "Durable lessons" section brings it back.
 - Codex has no Artifact or Claude Docs tools. Feishu work goes through `lark-cli`, which the lark skills document.
 
+## Sub-agents inside a Codex worker (verified 2026-11-04, codex-cli 0.166)
+
+A Codex worker can spawn its own sub-agents: the `multi_agent` feature is stable and on (`codex features list`;
+`multi_agent = true` in `~/.codex/config.toml`). Tested with `codex exec` and with a hub `codex-worker start`, both on
+Luna `low` with a read-only sandbox. In each run the worker spawned 2 sub-agents through `collaboration.spawn_agent`,
+and both returned the right file contents.
+
+- **Sandbox:** sub-agents inherit the worker's sandbox. A write in a read-only run failed with "operation not
+  permitted".
+- **Quota:** sub-agents spend the same account's Codex quota, never Claude's. So fanning out inside a Codex worker
+  spends quota that would otherwise expire, and costs the orchestrator nothing.
+- **Visibility:** the run's JSONL (`codex exec --json` or the hub log) shows only `collab_tool_call` items with
+  `"tool":"wait"`. The spawns themselves don't appear there. Each sub-agent is its own thread under
+  `<account home>/sessions/`, with `parent_thread_id` set to the worker's thread.
+
+How to use them:
+
+- **Allowed, and encouraged, for independent parts of one task.** Examples: research across several sources,
+  reading or checking several modules, independent verifications, or a draft plus a separate review of it. Say so
+  in the brief: "You may use sub-agents for independent parts of this task."
+- **Writers:** sub-agents must not edit the same files concurrently. Give each one a disjoint set of files, or let
+  them only read and analyse while the worker makes the edits. Git still follows the sandbox rules above.
+- **Not `ultra`.** That effort makes the model fan out on its own and multiplies usage. Explicit sub-agents for
+  parts that really are independent are the controlled form.
+- The worker's report covers its sub-agents' results; the orchestrator doesn't track them separately.
+
 ## Differences from Claude workers
 
 - **Messaging is one-way, from you to the worker.** Codex has no SendMessage or ListAgents, so it can't message you or peers, and
@@ -157,7 +183,8 @@ facts behind it (2026-11-03):
   Terra 0.5x, Luna 0.05x (0.1x cached). Fast costs 2.5x of included usage, Ultrafast 8x. There is no per-effort
   multiplier: higher effort just spends more tokens. Sol has no long-context surcharge in Codex.
 - **Efforts:** `low`, `medium`, `high`, `xhigh`, `max`, `ultra` (Luna stops at `max`); no `none` or `minimal` in the
-  CLI. `ultra` makes the model fan out its own sub-agents — avoid it, since the orchestrator already parallelizes.
+  CLI. `ultra` makes the model fan out its own sub-agents — avoid it; when a task has independent parts, let the
+  worker spawn sub-agents explicitly instead (see Sub-agents inside a Codex worker).
   Set the effort on every launch: the catalog default for Sol is `low` (weak for coding: Terminal-Bench 4 31%); the
   user's config sets `high`.
 - **Models:** `gpt-6.1-sol` is the workhorse and Codex's default (near Astra, 500K context); `gpt-6-astra` is the
