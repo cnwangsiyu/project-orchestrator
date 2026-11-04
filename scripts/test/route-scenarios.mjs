@@ -52,6 +52,8 @@ const CASES = [
   ['claudeOver', ['docs'], 'codex gpt-6.1-sol high @main'],
   ['claudeOver', ['design'], 'codex gpt-6.1-sol xhigh @main'],
   ['claudeOver', ['computer-use'], 'claude sonnet medium'],
+  ['claudeOver', ['lookup', '--failures', '1'], 'codex gpt-6.1-sol medium @main'], // the Codex step (cheap rows get no quota notch)
+  ['quiet', ['lookup', '--failures', '2'], 'claude sonnet medium'],
   ['claudeOver', ['debug', '--failures', '1'], 'codex gpt-6.1-sol max @main'],
   ['claudeOver', ['debug', '--failures', '2'], 'codex gpt-6-astra xhigh @main'],
   ['claudeNearReset', ['docs'], 'claude sonnet medium'], // spare near the reset (only 8% room: no expiring notch)
