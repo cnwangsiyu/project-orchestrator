@@ -48,6 +48,13 @@ hub over WebSocket (`--account <name>`, default `main`), so the process that sta
   `--effort` and `--sandbox` are required. Its first stdout line is `thread=<id> turn=<id>`. Record the thread in the ledger.
   On exit it prints `turn <status>`, the thread's token usage and `final: <first line of the final message>` — so the
   completion notice already carries the worker's `[<id>] DONE | QUESTION | …` line — and writes the whole final message to `--out`.
+- **Stall alarm** (verified 2026-11-04). `start`, `turn` and `wait` exit with code **4** and print `stalled: …` when the
+  turn has had no events of its own for `--stall-min` minutes (default 30; `0` turns it off).
+  - The turn keeps running on the hub; the alarm only wakes you.
+  - A running shell command still produces events, but a worker waiting on its own sub-agents can be quiet that long.
+    So first check `status` and the worker's child threads (`parent_thread_id` under `<account home>/sessions/`).
+  - Then re-attach with `wait` as a background task, or steer or interrupt the turn.
+  - It exists because a worker once sat silent for 18h with nobody noticing (video-agent W222).
 - **Re-attach** after the orchestrator restarted (its background tasks, including the `start`/`turn` follower, are gone, but
   the turn keeps running on the hub): `codex-worker.mjs --account <name> wait --thread <id> --log <file> --out <file>`, again as a background
   task. It exits like `start` when the turn ends, or at once if it already has. Several clients can follow one turn.

@@ -32,7 +32,9 @@ These are the user's decisions (2026-10-30 to 2026-11-03):
   - week resets with the share they left unused;
   - reset cards that expired unused, and cards redeemed;
   - the current lean;
-  - the model catalog compared with the saved baseline.
+  - the model catalog compared with the saved baseline;
+  - outcomes (`outcome.mjs` records): first-pass rate, rework rounds and minutes per vendor, model and category of the
+    first attempt, the failures, and named tasks with routing decisions but no outcome yet.
 - **Orchestrators:** the projects are `~/.claude/orchestrator/*/ledger.md`, except `_shared`. For each one, read
   only what changed in the last day:
   - `find ~/.claude/orchestrator/<p>/tasks -name report.md -mtime -1`;
@@ -58,6 +60,9 @@ Look for evidence in the data, not hunches. Typical findings:
   - a card expired unused;
   - a Claude week ended far under its cap while work was deferred or pushed to Codex;
   - Claude ran close to empty.
+- **Outcomes:** compare vendors and models by first-pass rate, rework rounds and time within the same category. Only
+  reviewed records count for code work. Change a row only when its numbers hold over several tasks; one task is an
+  anecdote. When `missing` lists tasks without an outcome, remind their orchestrator to record them.
 - **Bad cases:**
   - one category escalating repeatedly from its first pick: the pick is too weak, so raise its effort or model;
   - first picks that always succeed easily at a high cost: lower them;

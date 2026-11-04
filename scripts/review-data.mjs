@@ -17,7 +17,32 @@ const lines = (f) => { try { return fs.readFileSync(f, 'utf8').split('\n').filte
 const count = (xs, key) => xs.reduce((m, x) => { const k = key(x); m[k] = (m[k] ?? 0) + 1; return m; }, {});
 
 // ---- routing ----
-const routes = lines(ROUTE_LOG).filter((r) => r.t >= since);
+const all = lines(ROUTE_LOG);
+const routes = all.filter((r) => r.t >= since && r.kind !== 'outcome');
+// Outcomes (outcome.mjs): first-pass rate, rework rounds and time per vendor / model / category of the first attempt.
+const outs = all.filter((r) => r.t >= since && r.kind === 'outcome');
+const agg = (key) => {
+  const m = {};
+  for (const o of outs) {
+    const k = key(o); if (!k) continue;
+    const a = (m[k] ??= { tasks: 0, pass: 0, rework: 0, fail: 0, reviewed: 0, rounds: [], minutes: [] });
+    a.tasks++; a[o.result]++; if (o.reviewed) a.reviewed++;
+    if (o.rounds != null) a.rounds.push(o.rounds); if (o.minutes != null) a.minutes.push(o.minutes);
+  }
+  const mean = (xs) => (xs.length ? Math.round((xs.reduce((s, x) => s + x, 0) / xs.length) * 10) / 10 : null);
+  return Object.fromEntries(Object.entries(m).map(([k, a]) => [k, { tasks: a.tasks, firstPass: `${a.pass}/${a.tasks}`, rework: a.rework, fail: a.fail,
+    reviewed: a.reviewed, meanRounds: mean(a.rounds), meanMinutes: mean(a.minutes) }]));
+};
+const outcomes = {
+  recorded: outs.length,
+  byVendor: agg((o) => o.first?.vendor), byModel: agg((o) => o.first && `${o.first.vendor}:${o.first.model}:${o.first.effort}`),
+  byCategory: agg((o) => o.category), byVendorCategory: agg((o) => o.first && o.category && `${o.first.vendor}:${o.category}`),
+  fails: outs.filter((o) => o.result === 'fail').map((o) => ({ project: o.project, name: o.name, category: o.category, first: o.first, note: o.note })),
+  unjoined: outs.filter((o) => !o.first).map((o) => `${o.project}/${o.name}`),
+  // Finished-looking tasks with routing decisions but no outcome yet (named, older than a day): remind the orchestrator.
+  missing: [...new Set(all.filter((r) => r.kind !== 'outcome' && r.name && r.project && r.t < Date.now() - 86400000 && r.t >= since - 6 * 86400000).map((r) => `${r.project}/${r.name.replace(/-(fix|r|R)[\w-]*$/, '')}`))]
+    .filter((k) => !all.some((o) => o.kind === 'outcome' && `${o.project}/${o.name}` === k)).slice(0, 30),
+};
 const routing = {
   decisions: routes.length,
   byProject: count(routes, (r) => r.project ?? '(none)'),
@@ -93,11 +118,12 @@ const catalog = {
 };
 if (opt('save-catalog')) fs.writeFileSync(CATALOG, JSON.stringify({ ...catalogNow, savedAt: Date.now() }, null, 1));
 
-const result = { hours: H, routing, quota, now, catalog };
+const result = { hours: H, routing, outcomes, quota, now, catalog };
 if (opt('json')) { console.log(JSON.stringify(result, null, 1)); process.exit(0); }
 const show = (title, v) => console.log(`\n## ${title}\n${typeof v === 'string' ? v : JSON.stringify(v, null, 1)}`);
 console.log(`# routing review data — last ${H}h (to ${fmt(Date.now())})`);
 show('routing', routing);
+show('outcomes (first attempt\'s vendor/model/category)', outcomes);
 show('quota and cards', quota);
 show('now', now);
 show('model catalog', catalog);

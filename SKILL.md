@@ -93,6 +93,26 @@ that — so say "commit locally, do not push" (or whatever this task allows). Co
 message anyone: they end their run with the report and put the same status word first in their
 final message; a QUESTION ends the run, and you resume it with the answer.
 
+Every brief for work that writes or touches devices carries these safety clauses, word for word or
+close (user, 2026-11-04, after a worker overwrote a user header and another wiped test-app data):
+- "Never overwrite, delete or move files outside this task's scope: the user's files, uncommitted
+  changes, shared headers or configs. If you touch one by mistake, restore it byte-for-byte and
+  say so in the report."
+- "On devices and simulators, back up app data before any destructive step (reinstalling with
+  --remove-existing-content, wiping app containers or Documents, erasing a simulator), or ask
+  first."
+
+**Judge every vendor the same way, and record how each task ended** (user, 2026-11-04).
+- Code work (`implement`, `implement-hard`, `debug`, `science`) is accepted only after an
+  independent read-only review, whichever vendor wrote it: route it with
+  `route.mjs review --name <task>-R` (route.mjs prints the command).
+- When a task is finally accepted or given up, record it once:
+  `node <this skill>/scripts/outcome.mjs --project <slug> --name <task> --result pass|rework|fail [--rounds N] [--minutes M] [--reviewed] [--note "…"]`.
+  - Use the same `--name` you passed to `route.mjs`, and name fix rounds `<task>-fix1`, `<task>-fix2`…
+  - `pass` means accepted at its first check. `rework --rounds N` counts every fix round, on any vendor.
+  - The nightly review turns these records into first-pass rates, rework rounds and times per
+    vendor, model and category. That is the evidence for changing the routing table.
+
 **Carry memory across sessions yourself.** A worker loads, at best, the memory of the project its
 working directory maps to — never this conversation's own memory, and a Codex worker reads even
 that only if it chooses to. So give every brief a "Relevant memory" section: the memories that

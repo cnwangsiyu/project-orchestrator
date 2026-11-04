@@ -6,7 +6,7 @@
 //   codex-worker hub                                                       (start the hub if it isn't up)
 //   codex-worker start  --cwd DIR --effort E --sandbox S [--network on|off] [--model M] [--name N] --log FILE [--out FILE]  "<prompt>"
 //   codex-worker turn   --thread ID --effort E --log FILE [--out FILE] [--model M] [--sandbox S [--network on|off]]      "<prompt>"
-//   codex-worker wait   --thread ID [--log FILE] [--out FILE]
+//   codex-worker wait   --thread ID [--log FILE] [--out FILE]            (start/turn/wait take --stall-min M, default 30)
 //   codex-worker steer  --thread ID                                                                     "<message>"
 //   codex-worker interrupt --thread ID
 //   codex-worker status --thread ID
@@ -17,7 +17,8 @@
 //   codex-worker reset-credit-use --key UUID [--credit ID]                 (redeem one reset card; irreversible)
 //
 // `start` and `turn` follow the turn until it ends: every notification is appended to --log as JSONL, the first stdout
-// line is `thread=<id> turn=<id>`, and the process exits 0 on completed, 1 on failed/interrupted. On exit it prints
+// line is `thread=<id> turn=<id>`, and the process exits 0 on completed, 1 on failed/interrupted, 4 when the turn has
+// been silent for --stall-min minutes (default 30; the turn keeps running — re-attach with `wait`). On exit it prints
 // `turn <status>`, the token usage and `final: <first line of the final message>`, and writes the whole final message
 // to --out. Run them as a harness background task so their exit notifies the orchestrator. `wait` re-attaches to a
 // thread's running turn (e.g. after the orchestrator restarted) and exits the same way, at once if the turn already
@@ -187,12 +188,27 @@ const report = async (threadId, turn, final, usage) => {
   }
   finish(turn.status === 'completed' ? 0 : 1);
 };
+// Stall alarm: no event for this turn in --stall-min minutes (default 30, 0 = off) ends the follower with exit 4 so the
+// orchestrator wakes up. The turn keeps running on the hub. A worker waiting on its own sub-agents can be quiet that long,
+// so check before acting: `status`, child threads (parent_thread_id) under <home>/sessions/, then `wait` again, steer
+// or interrupt.
+const STALL_MIN = opts['stall-min'] === undefined ? 30 : Number(opts['stall-min']);
 const follow = (threadId, turnId) => {
   console.log(`thread=${threadId} turn=${turnId}`);
-  let final, usage;
+  let final, usage, last = Date.now();
+  if (STALL_MIN > 0) setInterval(() => {
+    const idle = (Date.now() - last) / 60000;
+    if (idle < STALL_MIN) return;
+    const line = `stalled: no events for ${idle < 1 ? `${Math.round(idle * 60)}s` : `${Math.round(idle)}m`} on turn ${turnId} (thread ${threadId}); the turn is still running on the hub — check status and sub-agent threads, then wait again, steer or interrupt`;
+    console.log(line);
+    if (opts.log) try { fs.appendFileSync(path.resolve(opts.log), JSON.stringify({ stalled: true, idleMin: Math.round(idle), at: Date.now() }) + '\n'); } catch {}
+    finish(4);
+  }, Math.min(60000, Math.max(5000, STALL_MIN * 30000))).unref();
   handlers.push((m) => {
     const p = m.params || {};
     if (p.turnId !== undefined && p.turnId !== turnId) return;
+    // Only this turn's or thread's own events count as progress; account-wide updates (rate limits…) don't.
+    if (p.turnId === turnId || p.threadId === threadId || p.turn?.id === turnId) last = Date.now();
     if (m.method === 'item/completed' && p.item?.type === 'agentMessage' && p.item.text) final = p.item.text;
     else if (m.method === 'thread/tokenUsage/updated') usage = p.tokenUsage?.total;
     else if (m.method === 'turn/completed' && (p.turn?.id ?? p.turnId) === turnId) report(threadId, p.turn ?? { id: turnId, status: 'completed' }, final, usage);
