@@ -104,8 +104,17 @@ Look for evidence in the data, not hunches. Typical findings:
 Do this only when something changed, or an orchestrator has to act (missing `--project`, a pending card decision to
 put to the user).
 
-- **Recipients:** live orchestrators are the `ListAgents` rows whose name equals the `Orchestrator session:` name in
-  a ledger, or ends in `主对话`. Message each one that is on this machine.
+- **Recipients:** every orchestrator, local or remote (user, 2026-11-03). These are the `ListAgents` rows whose name
+  equals the `Orchestrator session:` name in a ledger, or ends in `主对话`.
+  - Include the local background sessions, and the Remote Control sessions on other machines that are not offline.
+  - Message each one.
+- **Remote orchestrators run on another machine with their own checkout.** When the skill changed, start their
+  message with:
+  `git -C ~/.agents/skills pull --ff-only origin main && git -C ~/.agents/skills submodule update --init project-orchestrator && git -C ~/.agents/skills/project-orchestrator pull --ff-only origin main`,
+  then re-read the changed docs.
+  - Their routing and quota logs stay on their machine, so this review doesn't see them.
+  - If their decisions matter for a finding, say so in the report.
+  - Remote Control reports no read receipt: list them in the report as "sent, unconfirmed".
 - **Message:**
   - One line on what changed and why.
   - What to do differently. Usually "keep routing with `route.mjs`; the table already reflects it". Spell out any
