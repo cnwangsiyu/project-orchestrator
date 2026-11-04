@@ -60,6 +60,14 @@ finite: each log, diff or transcript read here pushes task state out and eventua
 compacted away. So delegate anything beyond a quick lookup, ask workers questions instead of
 reading their output, and rely on their messages and idle notices instead of polling.
 
+**Delegate to workers, not subagents** (user, 2026-11-03). Whenever a background worker can do
+it, launch a worker (`claude --bg` or a Codex worker, as `route.mjs` prints) rather than an Agent
+subagent — even for lookups, sweeps and research. Subagents run inside your session: their usage
+counts against the Claude budget that keeps the orchestrators alive, they can't run on Codex quota
+that would otherwise expire, and their results land in your context. Use a subagent only when a
+worker can't do the job — e.g. an answer you need inline within seconds to make the very next
+decision, and only on the routed (cheap) model.
+
 **Keep durable state in a ledger, not in memory.** Use
 `~/.claude/orchestrator/<project>/ledger.md`, plus a `tasks/<id>/` folder per task for its brief
 and report. Besides the resource map, record per task what a restarted orchestrator would need:
@@ -153,7 +161,8 @@ effort, Codex account and launch command from
   - restart a hub;
   - while Codex is underused or front-loading, pull queued and deferred work forward and add
     second-opinion reviews;
-  - while Claude is over budget, keep the orchestrator itself lean (Haiku subagents, fewer reads).
+  - while Claude is over budget, keep the orchestrator itself lean: no subagents, fewer reads,
+    short briefs.
 
   Its rules, from goals the user set on 2026-11-03:
   - Codex is use-it-or-lose-it: spend every account's week by its reset.
@@ -233,8 +242,9 @@ short, batch updates that arrive together, and reply in the user's language.
   follow the same bound through their sandbox (see `references/codex-workers.md`). Prefix the name
   with the project slug so sessions from different projects stay apart in `claude agents`.
   Always pass the model and effort `route.mjs` printed (`--model opus|sonnet|haiku|fable`,
-  `--effort low|medium|high|xhigh|max`) — otherwise the worker inherits yours. Subagents you start
-  with the Agent tool take the routed `model` and otherwise run on your model.
+  `--effort low|medium|high|xhigh|max`) — otherwise the worker inherits yours. In the rare case a
+  subagent is unavoidable (see "Delegate to workers"), pass it the routed `model`; otherwise it runs
+  on yours.
   To change them for a worker's next task, stop it and resume it with the new flags (see
   Lifecycle); a message cannot change a running session's model or effort.
 - **Tell workers how to treat EnterWorktree.** Background sessions are told by default to isolate

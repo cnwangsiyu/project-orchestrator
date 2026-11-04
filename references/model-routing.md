@@ -14,7 +14,7 @@ the model inside a pool, quota decides the pool.
 |---|---|---|---|---|
 | Claude **Opus 5.5** | 2 | Top or tied on most coding (FrontierCode 54%, CursorBench 58%), knowledge work (GDPval 1846), HLE with tools 67.7%; `medium` is the sweet spot | Open-ended or ambiguous work, design, hard-debugging escalation, high-stakes review, analysis-heavy reports | Routine bulk work; `max` by default |
 | Claude **Sonnet 5.5** | 1 | Near Opus on well-scoped work: Terminal-Bench 4 70.6% (vendor), OSWorld 80%, GDPval 1844, SWE-bench Pro subset 87.6% at $0.11 per solved task | Well-specified coding, computer use, browser, docs and reports, Artifact/Docs work, research | `max` (costs as much as Opus `max`, scores lower); open-ended design |
-| Claude **Haiku 5.5** | 0.05 | Cheapest Claude; beats Luna on code (TB4 33–39%, FrontierCode 46%) | Lookups, file finding, summaries, polling, Explore-style subagents | Anything needing judgment |
+| Claude **Haiku 5.5** | 0.05 | Cheapest Claude; beats Luna on code (TB4 33–39%, FrontierCode 46%) | Lookups, file finding, summaries, polling (as a background worker) | Anything needing judgment |
 | Claude **Fable 5.1** | 5 | Long-horizon reasoning, but at or below Opus 5.5 on most coding benchmarks for ~3x the cost; its own weekly cap (≤50% of the week, and it also counts toward the all-models week) | Only after Opus `xhigh` visibly fell short, or the longest single-thread reasoning; tell the user first | Default anything |
 | Codex **Sol 6.1** | 1 | Near Astra at ~1/5 the usage (AA index: `high` 50 at $0.59/task, `xhigh` 52 at $0.76; Opus `high` 52 at $3.46); 500K context | The coding workhorse: implementation, build/test/deploy runs, debugging, code review, log analysis | `low` effort for any coding (TB4 31%) |
 | Codex **Astra** | 5 (10x on cached input) | Frontier, +2–5 points over Sol; best on Terminal-Bench-Science (64.6%) | Escalation after Sol `xhigh` failed; a strongest-GPT second opinion; numerical or scientific work Sol couldn't crack | Default anything; small tasks (it over-tests and asks questions) |
@@ -84,7 +84,7 @@ To change routing for a kind of task, edit the table in `route.mjs` and this rat
    - The sandbox is `read-only` for read tasks. Writers get `danger-full-access` only when the orchestrator runs in
      bypass mode, else `workspace-write`.
    - The launcher is `codex exec` with that account's `CODEX_HOME` for one-shot rows, the hub `codex-worker` for
-     the rest, and `claude --bg` or an Agent subagent for Claude.
+     the rest, and a `claude --bg` worker for Claude (never an Agent subagent).
 
 ## Quota policy (user, 2026-11-03)
 
@@ -116,7 +116,7 @@ they use the window average, with its first tenth floored.
 | `codex first` | always, unless Codex is out | The router already sends shared work to Codex. |
 | `claude has spare` | projected at reset ≤ the spare line (60% a week out, ≈95% at the reset) | Claude also takes the work it's clearly better at. |
 | `claude near budget` | projected between the spare line and the cap | Claude takes Claude-only work, design and high-stakes calls. |
-| `claude over budget` | projected above the cap (80% a week out, 95% at the reset), or no room left after the reserve | No new Claude workers except Claude-only work that can't wait. Keep the orchestrator lean: Haiku subagents, fewer reads, short briefs. |
+| `claude over budget` | projected above the cap (80% a week out, 95% at the reset), or no room left after the reserve | No new Claude workers except Claude-only work that can't wait. Keep the orchestrator lean: no subagents, fewer reads, short briefs. |
 | `claude usage unreadable` | no reading | Claude-only work only. Check `claude -p /usage`. |
 | `new Codex work → account X` / `rotate across …` | several accounts | The router uses the open account whose quota is lost first (its reset, or an earlier card expiry; a tie goes to a live hub), or rotates when several must be spent within 48h. |
 | `codex front-load` / `codex underused` | the account new Codex work lands on holds cards, or — after the first tenth of its week, or with a card deadline — isn't on course for 100% by its deadline | Pull queued and deferred work forward. Add second-opinion reviews. The router raises Codex effort. |

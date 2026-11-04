@@ -24,7 +24,8 @@ const SOL = 'gpt-6.1-sol', ASTRA = 'gpt-6-astra', TERRA = 'gpt-6.1-terra', LUNA 
 // The routing table (sources and rationale: references/model-routing.md).
 //   kind: claudeOnly (Claude tools: computer use, browser, Artifact/Docs, peer negotiation) | codexOnly (images) |
 //         claudeBetter (Claude only while it has spare; design stays on Claude when near budget) | codexFirst
-//   shape: subagent (quick, answer comes back into the orchestrator) | exec (one-shot Codex, no steering) | worker
+//   shape: exec (one-shot: `codex exec` on Codex, a short background worker on Claude) | worker (steerable / long).
+//   Claude work always launches as a background worker, never an Agent subagent (user, 2026-11-03).
 const TABLE = {
   lookup: { desc: 'quick lookup, find a file, status check', kind: 'codexFirst', shape: 'exec', writes: false, first: X(LUNA, 'low'), alt: C('haiku', 'low'), ladder: [C('sonnet', 'medium')] },
   extract: { desc: 'bulk extraction, classification, summarizing data or logs', kind: 'codexFirst', shape: 'exec', writes: false, first: X(LUNA, 'medium'), alt: C('haiku', 'medium'), ladder: [X(SOL, 'medium')] },
@@ -168,7 +169,6 @@ if (QX.rotate && m?.vendor === 'codex') {
 const profiles = readProfiles();
 const launch = (x, shape = T.shape) => {
   if (x.vendor === 'claude') {
-    if (shape === 'exec' || shape === 'subagent') return { launcher: 'agent', command: `Agent(model: "${x.model}", prompt: <self-contained question>)  — or a background worker: cd ${cwd} && claude --bg --permission-mode ${mode} -n ${name} --model ${x.model} --effort ${x.effort} ${prompt}` };
     return { launcher: 'claude-bg', command: `cd ${cwd} && claude --bg --permission-mode ${mode} -n ${name} --model ${x.model} --effort ${x.effort} ${prompt}` };
   }
   const an = acct?.a.name ?? 'main', home = profiles[an]?.home ?? '~/.codex';

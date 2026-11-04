@@ -40,7 +40,8 @@ These are the user's decisions (2026-10-30 to 2026-11-03):
   - in the ledger, the entries dated today or yesterday: failures, escalations, user corrections, complaints about a
     model.
 
-  Delegate wide reads to a cheap subagent: `route.mjs extract`, or a Haiku Agent.
+  Delegate wide reads to a background worker routed with `route.mjs extract --project routing-review` (a
+  Codex Luna run), not a subagent.
 - **Model news:** WebFetch the official pages directly. Use at most about 10 fetches, with no search fan-out.
   - Anthropic: platform.claude.com/docs/en/about-claude/models/overview and /pricing, anthropic.com/news.
   - OpenAI: learn.chatgpt.com/docs/models.md, /pricing.md, /changelog.
