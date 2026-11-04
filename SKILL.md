@@ -66,10 +66,9 @@ subagent — even for lookups, sweeps and research. Subagents run inside your se
 counts against the Claude budget that keeps the orchestrators alive, they can't run on Codex quota
 that would otherwise expire, and their results land in your context. Use a subagent only when a
 worker can't do the job — e.g. an answer you need inline within seconds to make the very next
-decision, and only on the routed (cheap) model. Codex workers may fan
-out their own sub-agents (verified 2026-11-04): those run on the same Codex account's quota, so
-allow it in the brief for the independent parts of a task, with disjoint files for writers
-(`references/codex-workers.md`).
+decision, and only on the routed (cheap) model. Codex workers are
+allowed to use their own sub-agents (verified 2026-11-04; user: allowed, the worker decides);
+briefs neither ask for nor restrict them (`references/codex-workers.md`).
 
 **Keep durable state in a ledger, not in memory.** Use
 `~/.claude/orchestrator/<project>/ledger.md`, plus a `tasks/<id>/` folder per task for its brief
