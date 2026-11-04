@@ -74,6 +74,11 @@ To change routing for a kind of task, edit the table in `route.mjs` and this rat
    - Higher on Claude when its headroom expires within a day.
    - Floors: Sol, Terra and Astra never go below `medium`. No notch raises past `xhigh`; only the ladder reaches `max`.
    - Fable is swapped for Opus `xhigh` while Fable's own window is ≥70%.
+   - A retry can come out identical to the attempt that failed: the Codex notch has already put the first pick at the
+     next step's effort, and Claude's budget rules out the Claude steps. In that case the router says so and adds a
+     note rather than calling it an escalation. The retry is no stronger, so put the failure's concrete findings in
+     its brief. Seen on 2026-11-03 in video-agent W228c: `implement --failures 2` ran the same Sol `xhigh` as the
+     first picks.
 4. **Gates.** Fable, Astra, `max` effort, an exhausted ladder and every card redemption need the user's OK. Two or more
    Codex steps that fell short on one task print a "tell the user" line.
    - Hard Codex work (`implement-hard`, `debug`, `science`, `review`) gets an extra independent Codex review while Codex

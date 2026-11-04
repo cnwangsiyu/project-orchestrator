@@ -108,7 +108,7 @@ if (st.stop) deferred = "neither vendor's usage is readable — check `claude -p
 else if (T.kind === 'claudeOnly' && QC.throttledUntil) deferred = `Claude-only work and Claude's 5h window is full${retry((QC.throttledUntil - Date.now()) / 3600000)}`;
 else if (T.kind === 'codexOnly' && codexOut) deferred = `Codex-only work and Codex is ${QX.throttledOnly ? 'paused by its 5h window' : 'out'}${retry(QX.nextFree)}`;
 else if (codexOut && !QX.throttledOnly && stakes === 'low' && T.kind !== 'claudeOnly') deferred = `Codex is out and this is low-stakes: it waits for Codex${retry(QX.nextFree)}`;
-let m = null;
+let m = null, prevRaw = null;
 if (!deferred) {
   const firstOk = allowed(base[0]) ? base[0] : T.alt && allowed(T.alt) && cat !== 'second-opinion' ? T.alt : null;
   const ladder = [firstOk, ...base.slice(1).filter(allowed)].filter(Boolean)
@@ -117,6 +117,7 @@ if (!deferred) {
   else {
     if (firstOk && firstOk !== base[0]) why.push(`${base[0].vendor} not available for this (${base[0].vendor === 'claude' ? `claude ${QC.throttledUntil ? '5h-throttled' : QC.status}` : QX.throttledOnly ? 'codex paused by its 5h window' : 'codex out'}) → ${firstOk.vendor}`);
     m = ladder[Math.min(failures, ladder.length - 1)];
+    if (failures) prevRaw = ladder[Math.min(failures - 1, ladder.length - 1)];
     if (failures) why.push(`escalated to step ${Math.min(failures, ladder.length - 1)} of ${ladder.length - 1} after ${failures} failure(s)`);
     if (failures >= ladder.length) needsOK.push(`escalation ladder exhausted after ${failures} failure(s): tell the user before trying again`);
     const codexFails = ladder.slice(0, Math.min(failures, ladder.length)).filter((x) => x.vendor === 'codex').length;
@@ -126,16 +127,27 @@ if (!deferred) {
 }
 
 // ---- 2. effort ----
-if (m) {
-  const step = (d, reason) => { const n = notch(m, d); if (n.effort !== m.effort) { why.push(reason); m = n; } };
-  if (failures === 0 && opts['auto-check'] && stakes !== 'high') step(-1, 'one notch lower: an automatic check catches a miss');
-  if (failures === 0 && stakes === 'high') step(+1, 'one notch higher: high stakes');
-  if (failures === 0 && stakes === 'low') step(-1, 'one notch lower: low stakes');
+// tune(): the effort notches for a ladder step taken after f failures. Also used to rebuild the previous attempt, so a
+// retry that a quota notch has made identical to it is flagged instead of reported as an escalation.
+const tune = (x, f, log) => {
+  const step = (d, reason) => { const n = notch(x, d); if (n.effort !== x.effort) { log(reason); x = n; } };
+  if (f === 0 && opts['auto-check'] && stakes !== 'high') step(-1, 'one notch lower: an automatic check catches a miss');
+  if (f === 0 && stakes === 'high') step(+1, 'one notch higher: high stakes');
+  if (f === 0 && stakes === 'low') step(-1, 'one notch lower: low stakes');
   const cheap = ['lookup', 'extract', 'image-gen', 'draft'].includes(cat);
-  if (m.vendor === 'codex' && QX.underused && !cheap) step(+1, QX.frontLoad ? 'one notch higher: front-loading Codex while reset cards are in hand' : 'one notch higher: Codex underused');
-  else if (m.vendor === 'codex' && QX.overspending && opts['auto-check'] && stakes !== 'high') step(-1, 'one notch lower: Codex overspending');
-  if (m.vendor === 'claude' && QC.expiring && !cheap) step(+1, 'one notch higher: Claude headroom expires within a day');
-  if (m.vendor === 'claude' && m.model === 'fable' && QC.avoidFable) { m = C('opus', 'xhigh'); why.push('Fable window nearly used → Opus xhigh'); }
+  if (x.vendor === 'codex' && QX.underused && !cheap) step(+1, QX.frontLoad ? 'one notch higher: front-loading Codex while reset cards are in hand' : 'one notch higher: Codex underused');
+  else if (x.vendor === 'codex' && QX.overspending && opts['auto-check'] && stakes !== 'high') step(-1, 'one notch lower: Codex overspending');
+  if (x.vendor === 'claude' && QC.expiring && !cheap) step(+1, 'one notch higher: Claude headroom expires within a day');
+  if (x.vendor === 'claude' && x.model === 'fable' && QC.avoidFable) { x = C('opus', 'xhigh'); log('Fable window nearly used → Opus xhigh'); }
+  return x;
+};
+if (m) {
+  m = tune(m, failures, (r) => why.push(r));
+  const prev = prevRaw && tune(prevRaw, failures - 1, () => {});
+  if (prev && prev.vendor === m.vendor && prev.model === m.model && prev.effort === m.effort) {
+    why.push(`same ${label(m)} as the previous attempt: a quota notch already raised that one, and the quota rules leave no stronger step`);
+    notes.push(`this retry is not stronger than the one that fell short: its only lever is the brief — put the failure's concrete findings (review items, failing test, symptom) in it`);
+  }
   // ---- 3. gates ----
   if (m.model === 'fable') needsOK.push('Fable (≈3x Opus cost, own weekly cap)');
   if (m.model === ASTRA) needsOK.push('Astra (5x Sol usage)');

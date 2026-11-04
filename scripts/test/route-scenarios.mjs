@@ -70,6 +70,11 @@ const CASES = [
   ['codex5h', ['implement'], 'DEFER'],
   ['stale', ['analysis'], 'codex gpt-6.1-sol medium @b'],
   ['unreadable', ['implement'], 'DEFER'],
+  // A retry a quota notch made identical to the failed attempt is flagged, not passed off as an escalation (nightly
+  // review 2026-11-04: video-agent W228c, implement --failures 2, ran the same Sol xhigh as every first pick).
+  ['claudeOver', ['implement', '--failures', '1'], 'codex gpt-6.1-sol xhigh @main', 'not stronger'],
+  ['claudeOver', ['implement', '--failures', '2'], 'codex gpt-6.1-sol xhigh @main', 'not stronger'],
+  ['quiet', ['implement', '--failures', '1'], 'codex gpt-6.1-sol xhigh @main', '!not stronger'],
 ];
 const ERRORS = [['fresh', ['implement', '--failures', '-1']], ['fresh', ['implement', '--stakes', 'hgih']], ['fresh', ['second-opinion']], ['fresh', ['nope']]];
 
@@ -80,12 +85,17 @@ const run = (sc, args) => {
   const env = { ...process.env, QUOTA_CACHE: cache, CODEX_ACCOUNTS: path.join(tmp, 'none.json'), ROUTE_LOG: '0', QUOTA_LOG: '0', ROUTE_RR: path.join(tmp, 'rr.txt') };
   return execFileSync(process.execPath, [ROUTE, ...args, '--json'], { encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'] });
 };
-for (const [sc, args, want] of CASES) {
+// Optional 4th field: a substring the notes must contain ('!text': must not contain).
+for (const [sc, args, want, note] of CASES) {
   try { fs.rmSync(path.join(tmp, 'rr.txt'), { force: true }); } catch {}
   let got;
   try {
     const o = JSON.parse(run(sc, args));
     got = o.deferred ? 'DEFER' : `${o.pick.vendor} ${o.pick.model} ${o.pick.effort}${o.pick.account ? ` @${o.pick.account}` : ''}`;
+    if (note) {
+      const has = (o.notes || []).some((x) => x.includes(note.replace(/^!/, '')));
+      if (has === note.startsWith('!')) got += ` (notes ${note.startsWith('!') ? 'contain' : 'lack'} "${note.replace(/^!/, '')}")`;
+    }
   } catch (e) { got = `ERROR ${String(e.stderr || e.message).split('\n')[0]}`; }
   const ok = got === want;
   if (!ok) fail++;
