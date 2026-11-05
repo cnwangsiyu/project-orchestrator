@@ -79,11 +79,16 @@ To change routing for a kind of task, edit the table in `route.mjs` and this rat
      note rather than calling it an escalation. The retry is no stronger, so put the failure's concrete findings in
      its brief. Seen on 2026-11-03 in video-agent W228c: `implement --failures 2` ran the same Sol `xhigh` as the
      first picks.
-4. **Gates.** Fable, Astra, `max` effort, an exhausted ladder and every card redemption need the user's OK. Two or more
+4. **Review.** Code work must pass `--impact`.
+   - `release`: always reviewed (`review-high` when stakes are high).
+   - `service`: reviewed only at high stakes.
+   - `throwaway`: never reviewed.
+   - Reviewers follow `references/review-rubric.md` and block only on P0/P1.
+5. **Gates.** Fable, Astra, `max` effort, an exhausted ladder and every card redemption need the user's OK. Two or more
    Codex steps that fell short on one task print a "tell the user" line.
    - Hard Codex work (`implement-hard`, `debug`, `science`, `review`) gets an extra independent Codex review while Codex
      is underused or front-loading.
-5. **Launch.**
+6. **Launch.**
    - The account is the one the quota state picks. When two or more accounts must each be spent within 48h, launches
      rotate across them.
    - The sandbox is `read-only` for read tasks. Writers get `danger-full-access` only when the orchestrator runs in

@@ -4,7 +4,8 @@
 //   outcome --project SLUG --name NAME --result pass|rework|fail [--rounds N] [--minutes M] [--reviewed] [--note "..."]
 //
 // Call it once per task when it is finally accepted or given up (not per round):
-//   pass   — accepted on its first independent check (review, tests, your verification) with no fix round
+//   pass   — accepted at its first check with no fix round (a review verdict of MERGE or MERGE-WITH-NOTES is a pass;
+//            P2 notes are not rework)
 //   rework — accepted after N fix rounds (--rounds N, counting every vendor's rounds)
 //   fail   — abandoned, or the ladder was exhausted without an accepted result
 // --reviewed marks that an independent review (not just your own look) judged it. --minutes is the wall-clock time from
@@ -37,7 +38,7 @@ const first = mine[0]?.pick ?? null, last = mine.at(-1)?.pick ?? null;
 const rec = {
   t: Date.now(), kind: 'outcome', project: opts.project, name: opts.name, result: opts.result, rounds, minutes,
   reviewed: !!opts.reviewed, note: typeof opts.note === 'string' ? opts.note : null,
-  category: mine[0]?.category ?? null, first, accepted: opts.result === 'fail' ? null : last, decisions: mine.length,
+  category: mine[0]?.category ?? null, impact: mine[0]?.impact ?? null, first, accepted: opts.result === 'fail' ? null : last, decisions: mine.length,
 };
 fs.appendFileSync(ROUTE_LOG, JSON.stringify(rec) + '\n');
 console.log(`recorded ${opts.project}/${opts.name}: ${opts.result}${rounds ? ` after ${rounds} round(s)` : ''}`

@@ -37,6 +37,9 @@ const outcomes = {
   recorded: outs.length,
   byVendor: agg((o) => o.first?.vendor), byModel: agg((o) => o.first && `${o.first.vendor}:${o.first.model}:${o.first.effort}`),
   byCategory: agg((o) => o.category), byVendorCategory: agg((o) => o.first && o.category && `${o.first.vendor}:${o.category}`),
+  byImpact: agg((o) => o.impact),
+  // The fair vendor comparison: reviewed release work only (the only work every vendor's output is judged the same way).
+  reviewedReleaseByVendor: agg((o) => o.reviewed && o.impact === 'release' && o.first?.vendor),
   fails: outs.filter((o) => o.result === 'fail').map((o) => ({ project: o.project, name: o.name, category: o.category, first: o.first, note: o.note })),
   unjoined: outs.filter((o) => !o.first).map((o) => `${o.project}/${o.name}`),
   // Finished-looking tasks with routing decisions but no outcome yet (named, older than a day): remind the orchestrator.

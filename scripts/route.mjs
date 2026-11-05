@@ -2,7 +2,8 @@
 // route: pick vendor, model, effort, account and the exact launch command for one task, deterministically.
 //
 //   route <category> [--stakes low|normal|high] [--auto-check] [--failures N] [--writes | --read-only]
-//                    [--against claude|codex] [--no-redeem] [--project SLUG] [--dry] [--mode <orchestrator permission mode>] [--cwd DIR] [--task-dir DIR]
+//                    [--against claude|codex] [--no-redeem] [--project SLUG] [--dry]
+//                    [--impact release|service|throwaway]   (required for implement, implement-hard, debug, science) [--mode <orchestrator permission mode>] [--cwd DIR] [--task-dir DIR]
 //                    [--name NAME] [--fresh] [--json]
 //   route --table          (the routing table: categories, first pick, alternative, escalation ladder)
 //
@@ -79,6 +80,16 @@ const failures = opts.failures === undefined ? 0 : Number(opts.failures);
 if (!Number.isInteger(failures) || failures < 0) die(`--failures takes a whole number ≥ 0, not ${opts.failures}`);
 if (cat === 'second-opinion' && !['claude', 'codex'].includes(opts.against)) die('second-opinion needs --against claude|codex (the vendor whose conclusion is checked)');
 const writes = opts['read-only'] ? false : opts.writes ? true : T.writes;
+// Code work declares its impact, which decides the review (user, 2026-11-04): can a mistake be undone within hours by
+// redeploying or rolling back, without lasting damage? release = no (app/SDK code that ships in a release, published
+// libraries, data migrations or bulk data changes, contracts released clients depend on, auth/privacy/billing);
+// service = yes (ordinary live-service changes, internal tools); throwaway = demos, prototypes, experiments, test scripts.
+const CODE = ['implement', 'implement-hard', 'debug', 'science'];
+const IMPACTS = ['release', 'service', 'throwaway'];
+const impact = typeof opts.impact === 'string' ? opts.impact : null;
+if (CODE.includes(cat) && !IMPACTS.includes(impact)) die(`${cat} needs --impact release|service|throwaway — can a mistake be undone within hours by redeploy/rollback without lasting damage? no → release; yes → service; demo/prototype/test script → throwaway`);
+if (impact && !IMPACTS.includes(impact)) die(`--impact takes release, service or throwaway, not ${impact}`);
+const reviewKind = !CODE.includes(cat) ? null : impact === 'throwaway' ? null : impact === 'release' ? (stakes === 'high' ? 'review-high' : 'review') : stakes === 'high' ? 'review-high' : null;
 
 // ---- state ----
 const data = readState({ fresh: !!opts.fresh });
@@ -188,7 +199,9 @@ const launch = (x, shape = T.shape) => {
   return { launcher: 'codex-worker', account: an, command: `node ${SKILL}/scripts/codex-worker.mjs --account ${an} start --cwd ${cwd} --model ${x.model} --effort ${x.effort} --sandbox ${sandbox} --name ${name} --log ${taskDir}/codex.jsonl --out ${taskDir}/codex-last.md ${prompt}   (background task)` };
 };
 // The same quality gate for both vendors, so outcomes compare: code work gets an independent review before it's accepted.
-if (m && ['implement', 'implement-hard', 'debug', 'science'].includes(cat)) notes.push(`after the worker reports: independent review — route.mjs review --project ${typeof opts.project === 'string' ? opts.project : '<slug>'} --name ${name}-R (read-only); then record the end with scripts/outcome.mjs`);
+// Review only where a mistake is costly to undo; reviewers follow references/review-rubric.md (blocking issues only).
+if (m && reviewKind) notes.push(`review required (impact ${impact}${stakes === 'high' ? ', high stakes' : ''}): after the worker reports, route.mjs ${reviewKind} --project ${typeof opts.project === 'string' ? opts.project : '<slug>'} --name ${name}-R; brief the reviewer with references/review-rubric.md (blocks only on P0/P1, at most 2 rounds); then record with scripts/outcome.mjs --reviewed`);
+else if (m && CODE.includes(cat)) notes.push(`no review (impact ${impact}${impact === 'service' ? ', not high stakes' : ''}): accept on your own check (tests, build, acceptance), then record with scripts/outcome.mjs`);
 else if (m && cat !== 'review' && cat !== 'review-high' && cat !== 'second-opinion') notes.push('when the task ends: record it with scripts/outcome.mjs (pass | rework --rounds N | fail)');
 // Fixed safety clauses for anything that writes or touches devices (SKILL.md, "Give each worker a self-contained brief").
 if (m && writes) notes.push('brief: include the safety clauses — never overwrite, delete or move files outside the task\'s scope (user files, uncommitted changes, shared headers/configs); restore anything touched by mistake byte-for-byte and report it');
@@ -206,7 +219,7 @@ const out = {
 };
 // Every real routing decision is logged for the nightly review (--dry or ROUTE_LOG=0 to skip, e.g. for experiments).
 if (!opts.dry && process.env.ROUTE_LOG !== '0') {
-  const rec = { t: Date.now(), project: typeof opts.project === 'string' ? opts.project : null, name: typeof opts.name === 'string' ? opts.name : null, category: cat, stakes, failures,
+  const rec = { t: Date.now(), project: typeof opts.project === 'string' ? opts.project : null, name: typeof opts.name === 'string' ? opts.name : null, category: cat, stakes, failures, impact, review: reviewKind,
     autoCheck: !!opts['auto-check'], noRedeem, deferred, pick: m ? { vendor: m.vendor, model: m.model, effort: m.effort, account: out.pick?.account ?? null } : null,
     second: second ? { vendor: second.vendor, model: second.model, effort: second.effort } : null, why, needsOK, tell,
     quota: { claude: QC.status, codexOut: QX.out, underused: QX.underused, frontLoad: QX.frontLoad, overspending: QX.overspending, redeemDue: !!QX.redeem } };

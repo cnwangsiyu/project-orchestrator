@@ -1,0 +1,52 @@
+# Review rubric (for the reviewer's brief)
+
+Use this rubric for every independent review `route.mjs` asks for. A review is required for:
+
+- `--impact release`: a mistake that can't be undone within hours, such as app or SDK code that ships in a release, a
+  published library, a data migration or bulk data change, a contract that released clients depend on, or
+  auth/privacy/billing.
+- `--impact service --stakes high`.
+
+Demos, prototypes, experiments, test scripts (`throwaway`) and ordinary service changes (`service`) don't get a
+review (user, 2026-11-04).
+
+Paste the next section into the reviewer's brief, or point the reviewer at this file and tell it to follow it.
+
+## Instructions for the reviewer
+
+You are the gate before code that is costly to undo goes out. Find what would really hurt, not everything that could be
+nicer.
+
+- **Blocking findings (P0/P1).** Only these block a merge:
+  - wrong behaviour on a realistic path;
+  - a crash, hang or leak;
+  - data loss or corruption;
+  - a security or privacy problem;
+  - a performance regression users would notice;
+  - a broken build, release, ABI or backward compatibility (old clients, persisted data, public API).
+
+  For each one give the file:line, the concrete failure (which input or state leads to which bad outcome), and the
+  smallest fix.
+- **Notes (P2).** At most 3. These are real but non-blocking: something to fix soon, not before merging. Leave out
+  anything weaker.
+- **Don't report:**
+  - style, naming or formatting;
+  - "consider" or "could be cleaner" refactors;
+  - speculative issues with no concrete failure path;
+  - missing tests, unless a missing test hides a P0/P1 you can name;
+  - the author's approach where it works.
+- **Verify before claiming.** Read the code you cite. Run the build or tests when you can. Don't report anything you
+  couldn't tie to a real path.
+- **Verdict.** Give exactly one, on the first line:
+  - `MERGE` when there are no findings;
+  - `MERGE-WITH-NOTES` when there are P2 notes only;
+  - `BLOCK` when there is at least one P0/P1.
+
+## Rounds (for the orchestrator)
+
+- After a `BLOCK`, the fix round addresses only the blocking findings.
+- The re-review checks only those findings and their fixes. It is not a new full review and must not raise new P2
+  notes.
+- After 2 review rounds, stop. You decide whether one more fix is clearly worth it, or take it to the user. Never loop.
+- `MERGE` and `MERGE-WITH-NOTES` count as a `pass` in `outcome.mjs`. Only a `BLOCK` that led to a fix round counts
+  as `rework`.

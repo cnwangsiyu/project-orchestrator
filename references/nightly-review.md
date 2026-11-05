@@ -60,8 +60,11 @@ Look for evidence in the data, not hunches. Typical findings:
   - a card expired unused;
   - a Claude week ended far under its cap while work was deferred or pushed to Codex;
   - Claude ran close to empty.
-- **Outcomes:** compare vendors and models by first-pass rate, rework rounds and time within the same category. Only
-  reviewed records count for code work. Change a row only when its numbers hold over several tasks; one task is an
+- **Outcomes:** compare vendors and models by first-pass rate, rework rounds and time within the same category.
+  - For code quality, use `reviewedReleaseByVendor`: reviewed `release` work is the only work every vendor is judged
+    on the same way.
+  - Check `byImpact` too. A run of `service`/`throwaway` failures that a review would have caught suggests moving
+    that kind of work to `release`. Review rounds that block on trivia suggest tightening `review-rubric.md`. Change a row only when its numbers hold over several tasks; one task is an
   anecdote. When `missing` lists tasks without an outcome, remind their orchestrator to record them.
 - **Bad cases:**
   - one category escalating repeatedly from its first pick: the pick is too weak, so raise its effort or model;

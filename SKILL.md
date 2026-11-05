@@ -102,14 +102,30 @@ close (user, 2026-11-04, after a worker overwrote a user header and another wipe
   --remove-existing-content, wiping app containers or Documents, erasing a simulator), or ask
   first."
 
-**Judge every vendor the same way, and record how each task ended** (user, 2026-11-04).
-- Code work (`implement`, `implement-hard`, `debug`, `science`) is accepted only after an
-  independent read-only review, whichever vendor wrote it: route it with
-  `route.mjs review --name <task>-R` (route.mjs prints the command).
+**Review only what is costly to undo, and record how each task ended** (user, 2026-11-04).
+- Code work (`implement`, `implement-hard`, `debug`, `science`) declares `--impact`. Ask: can a
+  mistake be undone within hours by redeploying or rolling back, without lasting damage?
+  - `release` — no. Examples: app/SDK code that ships in a release (e.g. mobile C++), published
+    libraries, data migrations or bulk data changes, contracts that released clients depend on,
+    auth/privacy/billing. Always reviewed.
+  - `service` — yes. Examples: ordinary live-service changes, internal tools and services.
+    Reviewed only with `--stakes high`.
+  - `throwaway` — demos, prototypes, experiments, test scripts. Never reviewed.
+- The decision is the same whichever vendor wrote the code. `route.mjs` prints the review
+  command (`review`, or `review-high` for high stakes) when one is due.
+- The reviewer follows `references/review-rubric.md`:
+  - only P0/P1 issues block (real failures, crashes, data loss, security, a broken release or
+    compatibility);
+  - at most 3 non-blocking notes, and no style or "consider" comments;
+  - a re-review only checks the blocked findings;
+  - at most 2 rounds, then you decide or ask the user.
+- Work without a review is accepted on your own check: tests, build, acceptance.
 - When a task is finally accepted or given up, record it once:
   `node <this skill>/scripts/outcome.mjs --project <slug> --name <task> --result pass|rework|fail [--rounds N] [--minutes M] [--reviewed] [--note "…"]`.
   - Use the same `--name` you passed to `route.mjs`, and name fix rounds `<task>-fix1`, `<task>-fix2`…
-  - `pass` means accepted at its first check. `rework --rounds N` counts every fix round, on any vendor.
+  - `pass` means accepted at its first check (a review verdict of MERGE or MERGE-WITH-NOTES is a
+    pass). `rework --rounds N` counts every fix round, on any vendor. Add `--reviewed` when a
+    review judged it.
   - The nightly review turns these records into first-pass rates, rework rounds and times per
     vendor, model and category. That is the evidence for changing the routing table.
 
@@ -143,6 +159,8 @@ effort, Codex account and launch command from
     fails your verification, a worker stalls or reports something beyond its depth;
   - `--writes` / `--read-only`, `--against <vendor>` for a second opinion, and `--mode`, `--cwd`,
     `--task-dir`, `--name` so the printed command is ready to run;
+  - for code work, `--impact release|service|throwaway` (see "Review only what is costly to
+    undo"); route.mjs refuses code work without it;
   - always `--project <slug>`: every decision is logged to `_shared/route-log.jsonl` for the
     nightly review, which needs the project (use `--dry` only to try things out).
 

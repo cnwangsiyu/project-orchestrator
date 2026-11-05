@@ -75,11 +75,22 @@ const CASES = [
   ['claudeOver', ['implement', '--failures', '1'], 'codex gpt-6.1-sol xhigh @main', 'not stronger'],
   ['claudeOver', ['implement', '--failures', '2'], 'codex gpt-6.1-sol xhigh @main', 'not stronger'],
   ['quiet', ['implement', '--failures', '1'], 'codex gpt-6.1-sol xhigh @main', '!not stronger'],
+  // Review policy by impact (user, 2026-11-04).
+  ['quiet', ['implement', '--impact', 'release'], 'codex gpt-6.1-sol high @main', 'route.mjs review --'],
+  ['quiet', ['implement', '--impact', 'release', '--stakes', 'high'], 'codex gpt-6.1-sol xhigh @main', 'route.mjs review-high'],
+  ['quiet', ['implement', '--impact', 'service'], 'codex gpt-6.1-sol high @main', 'no review'],
+  ['quiet', ['implement', '--impact', 'service', '--stakes', 'high'], 'codex gpt-6.1-sol xhigh @main', 'route.mjs review-high'],
+  ['quiet', ['debug', '--impact', 'throwaway', '--stakes', 'high'], 'codex gpt-6.1-sol xhigh @main', 'no review'],
+  ['quiet', ['docs'], 'claude sonnet medium', '!review'],
 ];
-const ERRORS = [['fresh', ['implement', '--failures', '-1']], ['fresh', ['implement', '--stakes', 'hgih']], ['fresh', ['second-opinion']], ['fresh', ['nope']]];
+const ERRORS = [['fresh', ['implement', '__noimpact']], ['fresh', ['implement', '--impact', 'prod']], ['fresh', ['implement', '--failures', '-1']], ['fresh', ['implement', '--stakes', 'hgih']], ['fresh', ['second-opinion']], ['fresh', ['nope']]];
 
 let fail = 0;
-const run = (sc, args) => {
+const CODE = ['implement', 'implement-hard', 'debug', 'science'];
+const run = (sc, args0) => {
+  // Code categories need --impact; default it to service unless the case says otherwise ('__noimpact' tests the error).
+  let args = args0.filter((a) => a !== '__noimpact');
+  if (CODE.includes(args[0]) && !args.includes('--impact') && !args0.includes('__noimpact')) args = [...args, '--impact', 'service'];
   const cache = path.join(tmp, 'q.json');
   fs.writeFileSync(cache, JSON.stringify({ checkedAt: now, claude: S[sc].claude, codexAccounts: S[sc].codex, errors: {}, history: {} }));
   const env = { ...process.env, QUOTA_CACHE: cache, CODEX_ACCOUNTS: path.join(tmp, 'none.json'), ROUTE_LOG: '0', QUOTA_LOG: '0', ROUTE_RR: path.join(tmp, 'rr.txt') };
