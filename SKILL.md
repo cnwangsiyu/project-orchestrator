@@ -55,10 +55,27 @@ and the skills or tools that serve them. Discover what the current request needs
 do any wide search — and record it, rather than surveying everything up front. Mark which branches
 the project owns (it may merge into them locally) and which are shared with other people.
 
-**Protect the orchestrator's context.** It is the one place that sees every task, and it is
-finite: each log, diff or transcript read here pushes task state out and eventually gets
-compacted away. So delegate anything beyond a quick lookup, ask workers questions instead of
-reading their output, and rely on their messages and idle notices instead of polling.
+**Protect the orchestrator's context: judge, don't labour** (user, 2026-11-05). This session is the
+one place that sees every task, and its context is finite. Each page, log, diff, screenshot or
+transcript read here pushes task state out and ends in compaction. It also burns the Claude budget
+that keeps the orchestrators alive.
+- **What you do yourself:** decide, plan, write briefs, answer workers, integrate
+  (`git merge --ff-only`, the ledger), and take quick looks with small output.
+- **The test for everything else:** will it take more than two or three tool calls, or return
+  more than a few KB? If so, it is a task. Route it with `route.mjs` like any other, which
+  decides who does it.
+  - That covers browser and console clicking, judging screenshots, reading source or logs,
+    running tests or builds, device runs, and long CLI output.
+  - Don't do it "just this once" yourself.
+- **Read reports through `node <this skill>/scripts/report-summary.mjs <task dir>`.** It prints the
+  report's `## Summary` (and a Codex worker's final line), capped at 3 KB. Ask the worker for
+  anything more rather than opening the full report.
+- **Cap the output of anything you run** (`| head -c 3000`, `--stat`, `| tail -20`).
+- **Wait on notifications, never on sleep loops:** worker messages, idle notices, background
+  task exits.
+- **The nightly review measures this.** `scripts/orch-usage.mjs` reports each orchestrator's own
+  tool output, browser calls, screenshots read, sleep polls and compactions, and flags any that
+  go over the limits.
 
 **Delegate to workers, not subagents** (user, 2026-11-03). Whenever a background worker can do
 it, launch a worker (`claude --bg` or a Codex worker, as `route.mjs` prints) rather than an Agent
@@ -85,7 +102,9 @@ was following loses its completion signal: re-attach with `codex-worker.mjs --ac
 brief carries the user's intent in their words, what done means and how to verify it, the facts
 and resources already established, its workspace and git permissions (or that it has none), the
 resources it holds and must not touch, the other active tasks it might collide with, and how to
-report: a full report in `tasks/<id>/report.md`, then a short message starting
+report: a full report in `tasks/<id>/report.md` that opens with a `## Summary` of at most 20 lines
+(outcome; what changed, with commits; how it was verified; decisions needed from the user; risks),
+then a short message starting
 `[<id>] DONE | QUESTION | BLOCKED | FAILED`. Workers should ask rather than guess on decisions that
 belong to the user. State the git rules explicitly, push included: background Claude sessions are
 told by default to commit and push their branch before finishing, and only the brief overrides

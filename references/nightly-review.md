@@ -35,6 +35,9 @@ These are the user's decisions (2026-10-30 to 2026-11-03):
   - the model catalog compared with the saved baseline;
   - outcomes (`outcome.mjs` records): first-pass rate, rework rounds and minutes per vendor, model and category of the
     first attempt, the failures, and named tasks with routing decisions but no outcome yet.
+- **Orchestrator context use:** `node ~/.agents/skills/project-orchestrator/scripts/orch-usage.mjs --hours 24`.
+  For each local orchestrator it gives its own tool output, browser/computer-use calls, screenshots read, sleep
+  polls and compactions, with FLAG lines above the limits.
 - **Orchestrators:** the projects are `~/.claude/orchestrator/*/ledger.md`, except `_shared`. For each one, read
   only what changed in the last day:
   - `find ~/.claude/orchestrator/<p>/tasks -name report.md -mtime -1`;
@@ -66,6 +69,9 @@ Look for evidence in the data, not hunches. Typical findings:
   - Check `byImpact` too. A run of `service`/`throwaway` failures that a review would have caught suggests moving
     that kind of work to `release`. Review rounds that block on trivia suggest tightening `review-rubric.md`. Change a row only when its numbers hold over several tasks; one task is an
   anecdote. When `missing` lists tasks without an outcome, remind their orchestrator to record them.
+- **Orchestrators doing work themselves:** for each FLAG from `orch-usage`, tell that orchestrator what kind of work
+  to hand to workers, using its largest results as the example. Repeated flags on the same kind of work may mean a
+  missing route category or a brief template gap.
 - **Bad cases:**
   - one category escalating repeatedly from its first pick: the pick is too weak, so raise its effort or model;
   - first picks that always succeed easily at a high cost: lower them;
