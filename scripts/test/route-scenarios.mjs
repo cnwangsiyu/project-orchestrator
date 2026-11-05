@@ -82,6 +82,10 @@ const CASES = [
   ['quiet', ['implement', '--impact', 'service', '--stakes', 'high'], 'codex gpt-6.1-sol xhigh @main', 'route.mjs review-high'],
   ['quiet', ['debug', '--impact', 'throwaway', '--stakes', 'high'], 'codex gpt-6.1-sol xhigh @main', 'no review'],
   ['quiet', ['docs'], 'claude sonnet medium', '!review'],
+  // Browser workers get the Chrome pairing clause; code work doesn't (nightly review 2026-11-05: video-agent W258).
+  ['claudeOver', ['computer-use'], 'claude sonnet medium', 'select_browser'],
+  ['fresh', ['ui-browser'], 'claude sonnet high', 'select_browser'],
+  ['fresh', ['implement', '--auto-check'], 'codex gpt-6.1-sol high @main', '!select_browser'],
 ];
 const ERRORS = [['fresh', ['implement', '__noimpact']], ['fresh', ['implement', '--impact', 'prod']], ['fresh', ['implement', '--failures', '-1']], ['fresh', ['implement', '--stakes', 'hgih']], ['fresh', ['second-opinion']], ['fresh', ['nope']]];
 

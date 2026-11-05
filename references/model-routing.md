@@ -43,6 +43,12 @@ catches a miss, and how many times the task has fallen short. How the table was 
   Opus's best result, at 67.7%.
 - **Claude-only work:** computer use, browser, Artifact/Docs tools and peer negotiation. The Codex CLI can't do
   them.
+  - A background Claude worker can drive the user's signed-in Chrome. Its brief names the Chrome by `deviceId`
+    (recorded in the ledger once the user has picked it), and the worker calls `select_browser` with that id when
+    several browsers are connected. A worker that still can't reach the browser reports BLOCKED with the tool's
+    error. Clicking never falls back to the orchestrator: video-agent W258 did, and that orchestrator then made 510
+    browser calls in 24h (nightly review 2026-11-05). Headless Playwright suits pages that don't need the user's
+    sign-in, as W260 did.
 - **Codex-only work:** every task whose output is an image — generating, editing, variants, icons, illustrations,
   mockup images (user, 2026-11-03). Luna `low` writes the prompt (the image tool makes the picture); Sol `medium` if an
   iteration needs more judgment.

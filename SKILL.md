@@ -67,6 +67,9 @@ that keeps the orchestrators alive.
   - That covers browser and console clicking, judging screenshots, reading source or logs,
     running tests or builds, device runs, and long CLI output.
   - Don't do it "just this once" yourself.
+  - Browser work goes to a `computer-use` or `ui-browser` worker, which can reach the user's Chrome
+    (`references/model-routing.md`, Claude-only work). If that worker reports it can't reach the
+    browser, fix the pairing; don't take over the clicking.
 - **Read reports through `node <this skill>/scripts/report-summary.mjs <task dir>`.** It prints the
   report's `## Summary` (and a Codex worker's final line), capped at 3 KB. Ask the worker for
   anything more rather than opening the full report.
