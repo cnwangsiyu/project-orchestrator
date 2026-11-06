@@ -29,9 +29,18 @@ const BUCKETS = [
   ['build/test', /xcodebuild|gradle|\bmake\b|cmake|ninja|swift (build|test)|cargo|bazel|\b(npm|pnpm|yarn)\b.*\b(test|run|build)|pytest|node --test/],
   ['device', /devicectl|idevice|\badb\b|simctl|pymobiledevice/],
   ['external CLIs', /bytedcli|lark-cli|bitscli|\bcurl\b|\bgh\b/],
-  ['sleep/poll', /\bsleep\b|until |while /],
+  ['sleep/poll', /\bsleep\s+\d|^\s*(while|until)\b/],
   ['read/search files', /\b(cat|sed|head|tail|less|jq|grep|rg|find|ls|wc)\b/],
 ];
+// A sleep poll is a foreground wait that holds the turn: a while/until loop that sleeps, or a sleep of a minute or more.
+// Not counted: run_in_background watchers (`while kill -0 PID; do sleep 60; done`), which notify on exit — the pattern
+// SKILL.md asks for — and the few seconds a dispatch command sleeps to confirm a launch (nightly review 2026-11-06: 115
+// of 123 flagged calls were background watchers, and most of the rest were dispatches with `sleep 2–40`).
+const isPoll = (cmd, background) => {
+  if (background) return false;
+  const secs = [...cmd.matchAll(/\bsleep\s+(\d+)/g)].reduce((n, m) => n + Number(m[1]), 0);
+  return secs > 0 && (/\b(while|until)\b[^\n]*?;\s*do\b/.test(cmd) || secs >= 60);
+};
 const bucket = (cmd) => (BUCKETS.find(([, re]) => re.test(cmd)) ?? ['other shell'])[0];
 const sizeOf = (c) => (typeof c === 'string' ? c.length : Array.isArray(c) ? c.reduce((n, x) => n + (x.type === 'image' ? 6000 : x.text?.length ?? JSON.stringify(x).length), 0) : JSON.stringify(c ?? '').length);
 
@@ -63,7 +72,7 @@ const analyse = async (file) => {
       if (b.type !== 'tool_use') continue;
       const inp = b.input ?? {};
       let kind = b.name, desc = '';
-      if (b.name === 'Bash') { const c = String(inp.command ?? ''); kind = `shell: ${bucket(c)}`; desc = c.replace(/\s+/g, ' ').slice(0, 120); if (kind === 'shell: sleep/poll') sleepPolls++; }
+      if (b.name === 'Bash') { const c = String(inp.command ?? ''); kind = `shell: ${bucket(c)}`; desc = c.replace(/\s+/g, ' ').slice(0, 120); if (isPoll(c, inp.run_in_background)) sleepPolls++; }
       else if (/claude-in-chrome|computer-use|Claude_Browser/.test(b.name)) { kind = 'browser/computer-use'; browserCalls++; desc = b.name.split('__').pop(); }
       else if (b.name === 'Read') { desc = inp.file_path ?? ''; if (/\.(png|jpe?g|gif|webp|heic)$/i.test(desc)) { kind = 'Read image'; imageReads++; } }
       else if (b.name === 'Agent' || b.name === 'Task') { kind = 'subagent'; subagents++; desc = String(inp.description ?? ''); }

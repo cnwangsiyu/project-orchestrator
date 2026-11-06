@@ -76,7 +76,9 @@ that keeps the orchestrators alive.
   anything more rather than opening the full report.
 - **Cap the output of anything you run** (`| head -c 3000`, `--stat`, `| tail -20`).
 - **Wait on notifications, never on sleep loops:** worker messages, idle notices, background
-  task exits.
+  task exits. A `run_in_background` watcher such as `while kill -0 <pid>; do sleep 60; done` is a
+  notification (it wakes you on exit) and isn't counted as a poll; a foreground loop or a sleep of
+  a minute or more is.
 - **The nightly review measures this.** `scripts/orch-usage.mjs` reports each orchestrator's own
   tool output, browser calls, screenshots read, sleep polls and compactions, and flags any that
   go over the limits.
@@ -148,8 +150,9 @@ close (user, 2026-11-04, after a worker overwrote a user header and another wipe
 - When a task is finally accepted or given up, record it once:
   `node <this skill>/scripts/outcome.mjs --project <slug> --name <task> --result pass|rework|fail [--rounds N] [--minutes M] [--reviewed] [--note "…"]`.
   - Use the same `--name` you passed to `route.mjs`, and name fix rounds `<task>-fix1`, `<task>-fix2`…
-  - `pass` means accepted at its first check (a review verdict of MERGE or MERGE-WITH-NOTES is a
-    pass). `rework --rounds N` counts every fix round, on any vendor. Add `--reviewed` when a
+  - `pass` means accepted at its first check, with no fix round (a review verdict of MERGE or
+    MERGE-WITH-NOTES is a pass). Any fix round makes it `rework --rounds N`, counting every round
+    on any vendor; `outcome.mjs` records `pass --rounds N` (N ≥ 1) as rework. Add `--reviewed` when a
     review judged it.
   - The nightly review turns these records into first-pass rates, rework rounds and times per
     vendor, model and category. That is the evidence for changing the routing table.

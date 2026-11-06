@@ -25,6 +25,9 @@ if (!['pass', 'rework', 'fail'].includes(opts.result)) die('--result takes pass,
 const rounds = opts.rounds === undefined ? (opts.result === 'pass' ? 0 : null) : Number(opts.rounds);
 if (rounds !== null && (!Number.isInteger(rounds) || rounds < 0)) die('--rounds takes a whole number ≥ 0');
 if (opts.result === 'rework' && !rounds) die('rework needs --rounds N (N ≥ 1)');
+// A fix round means the first attempt was not accepted: `pass --rounds N` (N ≥ 1) is rework (nightly review 2026-11-06:
+// 10 of 22 records said pass with 1–7 rounds, which showed a 100% first-pass rate).
+if (opts.result === 'pass' && rounds) { console.error(`outcome: ${rounds} fix round(s) is rework, not pass — recording rework`); opts.result = 'rework'; }
 const minutes = opts.minutes === undefined ? null : Number(opts.minutes);
 if (minutes !== null && !(minutes >= 0)) die('--minutes takes a number ≥ 0');
 

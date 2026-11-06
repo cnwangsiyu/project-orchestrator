@@ -20,7 +20,8 @@ const count = (xs, key) => xs.reduce((m, x) => { const k = key(x); m[k] = (m[k] 
 const all = lines(ROUTE_LOG);
 const routes = all.filter((r) => r.t >= since && r.kind !== 'outcome');
 // Outcomes (outcome.mjs): first-pass rate, rework rounds and time per vendor / model / category of the first attempt.
-const outs = all.filter((r) => r.t >= since && r.kind === 'outcome');
+// Older records said `pass` with fix rounds; outcome.mjs now records those as rework, so read them the same way.
+const outs = all.filter((r) => r.t >= since && r.kind === 'outcome').map((o) => (o.result === 'pass' && o.rounds > 0 ? { ...o, result: 'rework' } : o));
 const agg = (key) => {
   const m = {};
   for (const o of outs) {
