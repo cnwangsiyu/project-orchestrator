@@ -175,6 +175,16 @@ if (!second && m && m.vendor === 'codex' && QX.underused && ['implement-hard', '
 
 // ---- 4. account and launcher ----
 const mode = typeof opts.mode === 'string' ? opts.mode : 'default';
+// Claude workers follow the user's own default permission mode (settings.json permissions.defaultMode) unless --mode is given.
+// This is only the Claude launch flag: the Codex sandbox below still depends on an explicit --mode, so the local default never silently widens it.
+const claudeMode = typeof opts.mode === 'string' ? opts.mode : (() => {
+  try {
+    const home = process.env.HOME || '';
+    const d = JSON.parse(fs.readFileSync(path.join(home, '.claude', 'settings.json'), 'utf8'));
+    const v = d?.permissions?.defaultMode ?? d?.defaultMode;
+    return typeof v === 'string' && /^[A-Za-z]+$/.test(v) ? v : 'default';
+  } catch { return 'default'; }
+})();
 const sandbox = !writes ? 'read-only' : mode === 'bypassPermissions' ? 'danger-full-access' : 'workspace-write';
 const cwd = typeof opts.cwd === 'string' ? opts.cwd : '<workspace>', taskDir = typeof opts['task-dir'] === 'string' ? opts['task-dir'] : '<task dir>';
 const name = typeof opts.name === 'string' ? opts.name : '<project>-<task>';
@@ -192,7 +202,7 @@ if (QX.rotate && m?.vendor === 'codex') {
 const profiles = readProfiles();
 const launch = (x, shape = T.shape) => {
   if (x.vendor === 'claude') {
-    return { launcher: 'claude-bg', command: `cd ${cwd} && claude --bg --permission-mode ${mode} -n ${name} --model ${x.model} --effort ${x.effort} ${prompt}` };
+    return { launcher: 'claude-bg', command: `cd ${cwd} && claude --bg --permission-mode ${claudeMode} -n ${name} --model ${x.model} --effort ${x.effort} ${prompt}` };
   }
   const an = acct?.a.name ?? 'main', home = profiles[an]?.home ?? '~/.codex';
   if (shape === 'exec') return { launcher: 'codex-exec', account: an, command: `CODEX_HOME=${home} codex exec${inRepo === false ? ' --skip-git-repo-check' : ''} -C ${cwd} -s ${sandbox} -m ${x.model} -c model_reasoning_effort='"${x.effort}"' --json -o ${taskDir}/codex-last.md ${prompt} < /dev/null > ${taskDir}/codex.jsonl 2>&1   (background task${inRepo === null ? '; add --skip-git-repo-check outside a repo' : ''})` };
