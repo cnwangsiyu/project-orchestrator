@@ -154,6 +154,17 @@ const TTL_MS = 10 * 60 * 1000;
 export const CACHE = process.env.QUOTA_CACHE || path.join(SHARED, 'quota.json');
 export const QUOTA_LOG = process.env.QUOTA_LOG_FILE || path.join(SHARED, 'quota-log.jsonl');
 export const ROUTE_LOG = process.env.ROUTE_LOG_FILE || path.join(SHARED, 'route-log.jsonl');
+// Outcome ↔ routing-decision join, shared by outcome.mjs and review-data.mjs so both read the log the same way.
+// Reviews (NAME-R, review / second-opinion rows) are checks of a task, not attempts at it: they get no outcome of their own.
+export const isReviewDecision = (r) => ['review', 'review-high', 'second-opinion'].includes(r.category) || /-R\d*$/.test(r.name ?? '');
+// Names are compared without a leading "<project>-" (orchestrators write both T17 and lynx-view-T17). A decision belongs to
+// an outcome when its name is the outcome's name or derives from it (NAME-fix1, NAME-r2, NAME-<subtask>).
+const bare = (project, name) => (name.startsWith(`${project}-`) ? name.slice(project.length + 1) : name);
+export const outcomeOwns = (project, outcomeName, r) => {
+  if (r.project !== project || !r.name) return false;
+  const o = bare(project, outcomeName), d = bare(project, r.name);
+  return d === o || d.startsWith(`${o}-`);
+};
 export const readState = ({ fresh = false } = {}) => {
   let data = readJson(CACHE, null);
   const failed = data && (data.errors?.claude || data.errors?.codex);

@@ -12,7 +12,7 @@
 // the first launch to acceptance. The record joins the task's routing decisions in route-log.jsonl by project + name,
 // so it carries the vendor, model, effort and category of the first attempt and of the attempt that was accepted.
 import fs from 'node:fs';
-import { ROUTE_LOG } from './lib/state.mjs';
+import { ROUTE_LOG, outcomeOwns, isReviewDecision } from './lib/state.mjs';
 
 const argv = process.argv.slice(2), opts = {};
 for (let i = 0; i < argv.length; i++) if (argv[i].startsWith('--')) {
@@ -33,10 +33,11 @@ if (minutes !== null && !(minutes >= 0)) die('--minutes takes a number ≥ 0');
 
 let routes = [];
 try { routes = fs.readFileSync(ROUTE_LOG, 'utf8').split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean); } catch {}
-// The task's own decisions: same project and name, or a fix-round name derived from it (NAME-fix…, NAME-r2, NAME-R…).
-// Reviews of the task (NAME-R, review / second-opinion rows) are checks, not attempts, so they don't count as the pick.
-const mine = routes.filter((r) => r.kind !== 'outcome' && r.project === opts.project && r.name && (r.name === opts.name || r.name.startsWith(`${opts.name}-`)) && r.pick
-  && !['review', 'review-high', 'second-opinion'].includes(r.category) && !/-R\d*$/.test(r.name));
+// The task's own decisions: same project and name (with or without the "<project>-" prefix), or a name derived from it
+// (NAME-fix1, NAME-r2). Reviews of the task are checks, not attempts, so they don't count as the pick.
+const owned = routes.filter((r) => r.kind !== 'outcome' && r.pick && outcomeOwns(opts.project, opts.name, r));
+const mine = owned.filter((r) => !isReviewDecision(r));
+if (!mine.length && owned.length) console.error(`outcome: ${opts.name} is a review run; record the outcome once, under the name of the task it reviewed`);
 const first = mine[0]?.pick ?? null, last = mine.at(-1)?.pick ?? null;
 const rec = {
   t: Date.now(), kind: 'outcome', project: opts.project, name: opts.name, result: opts.result, rounds, minutes,

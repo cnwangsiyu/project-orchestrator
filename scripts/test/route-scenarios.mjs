@@ -130,6 +130,25 @@ for (const [sc, args] of ERRORS) {
   if (!ok) fail++;
   console.log(`${ok ? 'ok  ' : 'FAIL'} ${sc.padEnd(19)} ${args.join(' ').padEnd(36)} rejected`);
 }
+// Outcome join (outcome.mjs / review-data.mjs): prefix-tolerant, fix rounds fold in, reviews and look-alike suffixes don't.
+{
+  const { outcomeOwns, isReviewDecision } = await import('../lib/state.mjs');
+  const d = (name, category = 'implement', project = 'p') => ({ project, name, category });
+  const cases = [
+    [outcomeOwns('lynx-view', 'T17', d('lynx-view-T17', 'debug', 'lynx-view')), true],
+    [outcomeOwns('lynx-view', 'lynx-view-T17', d('T17', 'debug', 'lynx-view')), true],
+    [outcomeOwns('p', 'W1', d('W1-fix2')), true],
+    [outcomeOwns('p', 'cloud-device', d('cloud-device-research')), true],
+    [outcomeOwns('p', 'macbook', d('macbook-repo-audit', 'implement', 'q')), false],
+    [outcomeOwns('p', 'W27', d('W277')), false],
+    [isReviewDecision(d('W277-R', 'implement')), true],
+    [isReviewDecision(d('W268-mr2-review', 'review')), true],
+    [isReviewDecision(d('secretary-macbook-repo-audit', 'analysis')), false],
+  ];
+  const bad = cases.map(([got, want], i) => (got === want ? null : i)).filter((i) => i !== null);
+  if (bad.length) fail++;
+  console.log(`${bad.length ? 'FAIL' : 'ok  '} outcome join        ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
+}
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(fail ? `\n${fail} failing` : '\nall pass');
 process.exit(fail ? 1 : 0);

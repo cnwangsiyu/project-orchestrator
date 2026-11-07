@@ -8,7 +8,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { SHARED, ROUTE_LOG, QUOTA_LOG, readState, analyze, leanLines, fmt } from './lib/state.mjs';
+import { SHARED, ROUTE_LOG, QUOTA_LOG, readState, analyze, leanLines, fmt, outcomeOwns, isReviewDecision } from './lib/state.mjs';
 
 const argv = process.argv.slice(2);
 const opt = (k) => { const i = argv.indexOf(`--${k}`); return i < 0 ? null : argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[i + 1] : true; };
@@ -42,10 +42,14 @@ const outcomes = {
   // The fair vendor comparison: reviewed release work only (the only work every vendor's output is judged the same way).
   reviewedReleaseByVendor: agg((o) => o.reviewed && o.impact === 'release' && o.first?.vendor),
   fails: outs.filter((o) => o.result === 'fail').map((o) => ({ project: o.project, name: o.name, category: o.category, first: o.first, note: o.note })),
-  unjoined: outs.filter((o) => !o.first).map((o) => `${o.project}/${o.name}`),
+  // Outcomes recorded under a review's name (NAME-R): the reviewed task's own outcome is what counts.
+  reviewOutcomes: outs.filter((o) => !o.first && all.some((r) => r.kind !== 'outcome' && isReviewDecision(r) && outcomeOwns(o.project, o.name, r))).map((o) => `${o.project}/${o.name}`),
+  unjoined: outs.filter((o) => !o.first && !all.some((r) => r.kind !== 'outcome' && isReviewDecision(r) && outcomeOwns(o.project, o.name, r))).map((o) => `${o.project}/${o.name}`),
   // Finished-looking tasks with routing decisions but no outcome yet (named, older than a day): remind the orchestrator.
-  missing: [...new Set(all.filter((r) => r.kind !== 'outcome' && r.name && r.project && r.t < Date.now() - 86400000 && r.t >= since - 6 * 86400000).map((r) => `${r.project}/${r.name.replace(/-(fix|r|R)[\w-]*$/, '')}`))]
-    .filter((k) => !all.some((o) => o.kind === 'outcome' && `${o.project}/${o.name}` === k)).slice(0, 30),
+  // Uses outcome.mjs's join; reviews need no outcome, and fix rounds (NAME-fix1, NAME-r2) fold into their task.
+  missing: [...new Set(all.filter((r) => r.kind !== 'outcome' && r.name && r.project && !isReviewDecision(r) && r.t < Date.now() - 86400000 && r.t >= since - 6 * 86400000)
+    .filter((r) => !all.some((o) => o.kind === 'outcome' && outcomeOwns(o.project, o.name, r)))
+    .map((r) => `${r.project}/${r.name.replace(/-(fix|r)\d+$/, '')}`))].slice(0, 30),
 };
 const routing = {
   decisions: routes.length,

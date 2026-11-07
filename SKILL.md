@@ -150,6 +150,7 @@ close (user, 2026-11-04, after a worker overwrote a user header and another wipe
 - When a task is finally accepted or given up, record it once:
   `node <this skill>/scripts/outcome.mjs --project <slug> --name <task> --result pass|rework|fail [--rounds N] [--minutes M] [--reviewed] [--note "…"]`.
   - Use the same `--name` you passed to `route.mjs`, and name fix rounds `<task>-fix1`, `<task>-fix2`…
+    A review run (`<task>-R`) gets no outcome of its own: its verdict goes into the task's record.
   - `pass` means accepted at its first check, with no fix round (a review verdict of MERGE or
     MERGE-WITH-NOTES is a pass). Any fix round makes it `rework --rounds N`, counting every round
     on any vendor; `outcome.mjs` records `pass --rounds N` (N ≥ 1) as rework. Add `--reviewed` when a
