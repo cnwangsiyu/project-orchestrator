@@ -219,7 +219,8 @@ if (!deferred) {
 // retry that a quota notch has made identical to it is flagged instead of reported as an escalation.
 // TTADK takes the Codex pick when the gateway has its model; when the ChatGPT accounts are out, it also takes models it
 // lacks as Sol. Image generation never runs there, not even its Sol fallback step: the gateway has no image tool.
-const onTTADK = (x) => x?.vendor === 'codex' && !!TT && cat !== 'image-gen' && (ttHas(x.model) || chatgptOut);
+// research without the search proxy stays off TTADK on every step, fallbacks included (nightly review 11-07 dry run).
+const onTTADK = (x) => x?.vendor === 'codex' && !!TT && cat !== 'image-gen' && !(cat === 'research' && !TT.search) && (ttHas(x.model) || chatgptOut);
 const tune = (x, f, log) => {
   const step = (d, reason) => { const n = notch(x, d); if (n.effort !== x.effort) { log(reason); x = n; } };
   // On TTADK the cost notches save nothing (company quota) and the high-stakes notch is already in its rungs.

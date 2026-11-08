@@ -146,6 +146,8 @@ const CASES = [
   ['fresh', ['implement', '--impact', 'service'], 'codex gpt-6.1-sol xhigh @main', 'never put internal code'],
   ['ttSearch', ['research'], 'codex gpt-6.1-sol high @ttadk', 'never put internal code'],
   ['ttSearch', ['research', '--exclude-account', 'ttadk'], 'claude sonnet medium'],
+  // Without the proxy, research's Codex fallback step stays on a ChatGPT account, never TTADK (no search there).
+  ['ttClaudeOver', ['research'], 'codex gpt-6.1-sol medium @main'],
   ['ttFresh', ['image-read'], 'codex gpt-6.1-sol high @ttadk', 'no web search'],
   // TTADK ladders never step back to a weaker Codex model or effort.
   ['ttFresh', ['lookup', '--failures', '2'], 'codex gpt-6.1-sol xhigh @ttadk'], // cheap rows climb to xhigh, not max

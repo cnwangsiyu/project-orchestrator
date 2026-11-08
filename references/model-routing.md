@@ -147,8 +147,8 @@ To change routing for a kind of task, edit the table in `route.mjs` and this rat
   ChatGPT accounts, and the auto-check and low-stakes notches don't apply on TTADK either. TTADK has no windows.
 - **No concurrency cap on TTADK.** A rate-limited run is retried once on TTADK, then re-routed with
   `--exclude-account ttadk`. So is a run that fails for TTADK reasons.
-- **ChatGPT quota waste.** Preferring TTADK leaves more of the ChatGPT weeks unspent. The user chose this; the nightly
-  review still reports the waste.
+- **ChatGPT quota left unspent.** Preferring TTADK leaves more of the ChatGPT weeks unspent. The user chose this: on a
+  TTADK device it is not waste, and the nightly review doesn't report it as such (hard rule, user 2026-11-07).
 - **Browser row.** `browser` (web pages in the user's signed-in Chrome) goes to TTADK Codex, Sol `medium`, through the
   hub with `--browser-origins`, when the account is browser-ready (`browser-setup`). Otherwise it goes to Claude Sonnet
   `medium` (Claude in Chrome). Its ladder runs Sol `high`, then Claude.
