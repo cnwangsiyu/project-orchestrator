@@ -1,9 +1,38 @@
 # Nightly routing review
 
-A fresh background Claude session runs this every night at about 03:07 (user, 2026-11-03), via `scripts/nightly-review.sh`.
-It reviews the last 24 hours of dispatching, quota and reset-card use, bad cases and model news. Then it tunes the routing
-policy (`scripts/route.mjs`, `scripts/lib/state.mjs`, the docs) and tells every orchestrator to follow the new policy.
-"No change" is a fine outcome when the evidence is thin.
+This runs every night at about 03:07 (user, 2026-11-03), via `scripts/nightly-review.sh`. It reviews the last 24 hours
+of dispatching, quota and reset-card use, bad cases and model news. Then it tunes the routing policy (`scripts/route.mjs`,
+`scripts/lib/state.mjs`, the docs) and tells every orchestrator to follow the new policy. "No change" is a fine outcome
+when the evidence is thin.
+
+## Who does what
+
+With a healthy TTADK account the review runs on TTADK, so it burns company quota rather than the user's own (user,
+2026-11-07). The launcher gathers the data, a **TTADK worker** does the review, and a short **Claude finisher**
+checks it and does what only Claude can. Without TTADK, or when the worker fails, one Claude session does all of it,
+both parts below.
+
+- **The worker** (Codex `gpt-6.1-sol` xhigh on TTADK, full access, network on): steps 1, 2, 3 and 5.
+  - The launcher has already run `review-data` (24h, 168h) and `orch-usage` into `<date>.data/`; read those files
+    instead of running the scripts.
+  - Model news: use web search and fetch the official pages yourself (the same pages and limits as in step 1).
+  - Step 3 as written: worktree, edits, `route-scenarios.mjs` must print `all pass` before any commit, push, fast-forward,
+    `--save-catalog`. Edit only the files step 3 names; anything else goes to proposals.
+  - Don't message anyone (Codex can't reach the sessions). Instead write `<date>.notify.json`:
+    `{"changed": bool, "commits": ["<sha> <subject>", …], "remotePull": bool, "message": "<the step-4 message>",
+    "actions": [{"orchestrator": "<ledger Orchestrator session name>", "text": "<what it has to act on>"}],
+    "proposals": bool}`. Write it even when nothing changed (`"changed": false`).
+  - Write the report (step 5) with "Notified: pending (finisher)" in its notified section.
+- **The finisher** (Claude Sonnet medium, bypass): only the checks and step 4.
+  1. Read the report and `notify.json`. Check that each listed commit is on `origin/main` in both repos and that the
+     live checkouts are at it; run `node scripts/test/route-scenarios.mjs` once.
+  2. Read tonight's diff (`git show` of the listed commits) against the hard rules above. If a commit breaks one, revert
+     it (`git revert`, push both repos, fast-forward), and move it to proposals in the report.
+  3. Step 4: find the recipients with `ListAgents` as described there and send the message (with the pull line for
+     remote orchestrators when `remotePull` is true), plus each action to its orchestrator. Nothing to send when
+     `changed` is false and `actions` is empty.
+  4. If `proposals` is true, send one PushNotification pointing at the report. Fill in the report's notified section.
+     Then end the turn.
 
 ## Hard rules — never change these; propose to the user instead
 
@@ -172,9 +201,12 @@ put to the user).
 
 ## Schedule (this machine)
 
-`~/Library/LaunchAgents/com.user.routing-nightly-review.plist` runs `scripts/nightly-review.sh` daily at 03:07. The
-script stops earlier review sessions and starts `routing-nightly-review-<date>` (Opus `high`, bypass, cwd
-`_shared/routing-review/`). Its log is `_shared/routing-review/launch.log`.
+`~/Library/LaunchAgents/com.user.routing-nightly-review.plist` runs `scripts/nightly-review.sh` daily at 03:07, on the
+machine the orchestrators run on (the Mac mini since 2026-11-07). The script stops earlier review sessions, then (see
+"Who does what") either runs the TTADK worker (`<date>.worker.jsonl`, up to 40 min) and starts the finisher
+`routing-nightly-review-<date>-finish` (Sonnet `medium`, bypass), or starts the full Claude review
+`routing-nightly-review-<date>` (Opus `high`, bypass). cwd `_shared/routing-review/`; log `_shared/routing-review/launch.log`.
+`NIGHTLY_MODE=claude` forces the Claude review; `NIGHTLY_MODE=dry` runs the worker read-only and stops (a test).
 
 - **Install or reload:** `launchctl bootstrap gui/$(id -u) <plist>`, or `launchctl kickstart -k gui/$(id -u)/com.user.routing-nightly-review`
   to run it now.

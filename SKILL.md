@@ -67,9 +67,9 @@ that keeps the orchestrators alive.
   - That covers browser and console clicking, judging screenshots, reading source or logs,
     running tests or builds, device runs, and long CLI output.
   - Don't do it "just this once" yourself.
-  - Browser work goes to a `browser` worker (TTADK Codex when browser-ready, else Claude), or to a
-    `computer-use` / `ui-browser` worker for desktop apps and frontend checks; all of them can reach
-    the user's Chrome. If that worker reports it can't reach the browser, fix the pairing; don't take
+  - Browser work goes to a `browser` worker (web pages) or a `ui-browser` worker (frontend work with a
+    visual check), both TTADK Codex when browser-ready, else Claude; desktop apps go to a
+    `computer-use` worker (Claude). All of them can reach the user's Chrome. If that worker reports it can't reach the browser, fix the pairing; don't take
     over the clicking. The one exception is the minimal
     permission-only part this session is already authorized for (see "Plan around permissions").
 - **Read reports through `node <this skill>/scripts/report-summary.mjs <task dir>`.** It prints the

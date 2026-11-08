@@ -35,7 +35,9 @@ const TABLE = {
   research: { desc: 'web research and synthesis', kind: 'claudeBetter', shape: 'worker', writes: false, first: C('sonnet', 'medium'), alt: X(SOL, 'medium'), ladder: [C('opus', 'high')] },
   implement: { desc: 'well-scoped implementation (clear spec, a test or build checks it)', kind: 'codexFirst', shape: 'worker', writes: true, first: X(SOL, 'high'), alt: C('sonnet', 'medium'), ladder: [X(SOL, 'xhigh'), C('opus', 'high')] },
   'implement-hard': { desc: 'large, cross-module or threading implementation; refactor', kind: 'codexFirst', shape: 'worker', writes: true, first: X(SOL, 'xhigh'), alt: C('opus', 'high'), ladder: [C('opus', 'xhigh'), X(SOL, 'max')] },
-  'ui-browser': { desc: 'UI or frontend work that needs a browser or a visual check', kind: 'claudeOnly', shape: 'worker', writes: true, first: C('sonnet', 'high'), alt: null, ladder: [C('opus', 'high')] },
+  // UI work with a visual check in Chrome (user, 2026-11-07): TTADK Codex when browser-ready (verified: it found every real
+  // defect on a planted page, with CSS causes), else Claude as before.
+  'ui-browser': { desc: 'UI or frontend work that needs a browser or a visual check', kind: 'browser', shape: 'worker', writes: true, first: X(SOL, 'high'), alt: C('sonnet', 'high'), ladder: [C('opus', 'high')] },
   debug: { desc: 'debugging, root cause across components', kind: 'codexFirst', shape: 'worker', writes: true, first: X(SOL, 'xhigh'), alt: C('opus', 'high'), ladder: [C('opus', 'xhigh'), X(SOL, 'max'), C('fable', 'high'), X(ASTRA, 'xhigh')] },
   review: { desc: 'routine code review', kind: 'codexFirst', shape: 'worker', writes: false, first: X(SOL, 'high'), alt: C('sonnet', 'high'), ladder: [X(SOL, 'xhigh')] },
   'review-high': { desc: 'high-stakes review (concurrency, ABI, crash fix, security)', kind: 'claudeBetter', keepNear: true, shape: 'worker', writes: false, first: C('opus', 'xhigh'), alt: X(SOL, 'xhigh'), second: X(SOL, 'xhigh'), ladder: [X(ASTRA, 'high')] },
@@ -191,7 +193,7 @@ let deferred = null;
 const retry = (h) => (h != null && Number.isFinite(h) ? ` — retry in ${hours(h)}` : '');
 if (st.stop) deferred = "neither vendor's usage is readable — check `claude -p /usage` and the Codex hubs before dispatching";
 else if (ttFixable && stakes !== 'high' && !opts.urgent) deferred = `TTADK is down (${QX.ttadk.reason}): tell the user now so they can fix it; this waits for TTADK — re-run with --urgent (or --stakes high) to run it now on personal quota`;
-else if (T.kind === 'claudeOnly' && QC.throttledUntil) deferred = `Claude-only work and Claude's 5h window is full${retry((QC.throttledUntil - Date.now()) / 3600000)}`;
+else if ((T.kind === 'claudeOnly' || (T.kind === 'browser' && !browserViaCodex)) && QC.throttledUntil) deferred = `Claude-only work and Claude's 5h window is full${retry((QC.throttledUntil - Date.now()) / 3600000)}`;
 else if (T.kind === 'codexOnly' && chatgptOut) deferred = `Codex-only work and Codex is ${QX.throttledOnly ? 'paused by its 5h window' : 'out'}${retry(QX.nextFree)}`;
 else if (codexOut && !QX.throttledOnly && stakes === 'low' && T.kind !== 'claudeOnly' && !(T.kind === 'browser' && !browserViaCodex)) deferred = `Codex is out and this is low-stakes: it waits for Codex${retry(QX.nextFree)}`;
 let m = null, prevRaw = null;
@@ -321,7 +323,8 @@ const launch = (x, shape = T.shape, acct = pickAcct) => {
   // A TTADK codex exec bypasses codex-worker, so it brings the account's proxy up first (exit 6 when it can't).
   const proxyFirst = TT?.search && an === TT.name ? `node ${SKILL}/scripts/codex-worker.mjs --account ${an} proxy >/dev/null && ` : '';
   if (shape === 'exec') return { launcher: 'codex-exec', account: an, command: `${proxyFirst}CODEX_HOME=${home} codex exec${inRepo === false ? ' --skip-git-repo-check' : ''} -C ${cwd} -s ${sandbox} -m ${x.model} -c model_reasoning_effort='"${x.effort}"' --json -o ${taskDir}/codex-last.md ${prompt} < /dev/null > ${taskDir}/codex.jsonl 2>&1   (background task${inRepo === null ? '; add --skip-git-repo-check outside a repo' : ''})` };
-  const origins = cat === 'browser' ? ` --browser-origins '${[...POLICY.browserOrigins, ...(typeof opts.origins === 'string' ? opts.origins.split(',') : [])].map((o) => o.trim()).filter(Boolean).join(',')}'` : '';
+  // ui-browser also reaches the local dev server (a host pattern matches any port).
+  const origins = ['browser', 'ui-browser'].includes(cat) ? ` --browser-origins '${[...(cat === 'ui-browser' ? ['localhost', '127.0.0.1'] : []), ...POLICY.browserOrigins, ...(typeof opts.origins === 'string' ? opts.origins.split(',') : [])].map((o) => o.trim()).filter(Boolean).join(',')}'` : '';
   return { launcher: 'codex-worker', account: an, command: `node ${SKILL}/scripts/codex-worker.mjs --account ${an} start --cwd ${cwd} --model ${x.model} --effort ${x.effort} --sandbox ${sandbox} --name ${name}${origins} --log ${taskDir}/codex.jsonl --out ${taskDir}/codex-last.md ${prompt}   (background task)` };
 };
 // The same quality gate for both vendors, so outcomes compare: code work gets an independent review before it's accepted.
@@ -336,7 +339,7 @@ if (m && ['build-run', 'implement', 'implement-hard', 'debug', 'ui-browser', 'co
 // to the orchestrator (nightly review 11-05: W258 blocked on "can't see local browser 1e7c2b37", the user then chose
 // "orchestrator does the console", and that orchestrator made 510 browser calls in 24h).
 if (m && ['ui-browser', 'computer-use'].includes(cat)) notes.push('brief: name the Chrome to use by its deviceId from the ledger (the user picks it once; mcp__claude-in-chrome__list_connected_browsers lists them) and tell the worker: if a browser tool says several browsers are connected, call select_browser with that deviceId; if the browser still isn\'t reachable, report BLOCKED with the tool\'s exact error, never ask the orchestrator to click for it. Headless Playwright is fine where the user\'s sign-in isn\'t needed');
-if (m && cat === 'browser') notes.push('brief: include the browser safety clause — read and navigate freely, but ask the user (AskUserQuestion; a Codex worker reports BLOCKED) before anything irreversible on a page: submitting a form that changes data, approving, deleting, publishing, sending a message, payments');
+if (m && ['browser', 'ui-browser'].includes(cat)) notes.push('brief: include the browser safety clause — read and navigate freely, but ask the user (AskUserQuestion; a Codex worker reports BLOCKED) before anything irreversible on a page: submitting a form that changes data, approving, deleting, publishing, sending a message, payments');
 // Every worker can search the web (Codex and Claude Code have it on by default; TTADK through its proxy).
 if (m) notes.push('brief: web searches go to the public internet — never put internal code, internal project or product names, people, internal URLs or secrets into a search query; search for the public topic only');
 if (ttadkRun) {
@@ -345,7 +348,7 @@ if (ttadkRun) {
   notes.push(`on TTADK (account ${TT.name}): if the run fails rate-limited (QPM / concurrency), retry it once there; if it fails again, or fails for TTADK reasons (SSO, auth, gateway errors), re-route with --exclude-account ${TT.name}`);
   if (!TT.live && T.shape !== 'exec') notes.push(`TTADK hub is down: start it first — node ${SKILL}/scripts/codex-worker.mjs --account ${TT.name} hub`);
 }
-if (m && cat === 'browser') {
+if (m && ['browser', 'ui-browser'].includes(cat)) {
   notes.push('Chrome must be running before the worker starts (workers can\'t launch it): pgrep -x "Google Chrome" >/dev/null || open -a "Google Chrome"');
   if (m.vendor === 'codex') notes.push(`"Browser is not available: chrome" (codex-worker prints browser-unavailable:) means the Chrome extension host is briefly disconnected: wait a minute, retry once, then re-route with --exclude-account ${acct?.a?.name ?? TT?.name}`);
   if (m.vendor === 'codex') notes.push(`brief: include the "Codex browser brief" clauses from references/codex-workers.md (plugin bootstrap from ${TT?.chromePlugin ?? '<chrome plugin>'}/scripts/browser-client.mjs; work in tabs you create; a tab your own click opens may be claimed via user.openTabs()/claimTab and must be closed; never touch the user's other tabs); sites outside --browser-origins are declined — add them with --origins when the task needs them`);

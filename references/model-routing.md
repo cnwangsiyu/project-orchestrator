@@ -128,7 +128,8 @@ To change routing for a kind of task, edit the table in `route.mjs` and this rat
   - Image generation never runs on TTADK, its Sol fallback step included.
   - The extra Codex review added while ChatGPT Codex quota is underused runs on a ChatGPT account (its purpose is to
     spend that quota). Other Codex second opinions follow TTADK first.
-  - Not TTADK-capable, so routed as before: Claude-only rows (`computer-use`, `ui-browser`), `image-gen` (no image tool
+  - Not TTADK-capable, so routed as before: Claude-only rows (`computer-use`; `ui-browser` and `browser` go to TTADK once
+    `browser-setup` is done, user 2026-11-07), `image-gen` (no image tool
     on the gateway), `research` on a TTADK account without its local proxy (Codex sends no search tool to the gateway;
     the proxy in `references/codex-workers.md` adds it for every TTADK worker),
     `second-opinion --against codex`, a high-stakes review of Codex-written code (Claude first), and `browser` before

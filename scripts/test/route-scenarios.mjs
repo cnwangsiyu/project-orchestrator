@@ -134,6 +134,10 @@ const CASES = [
   ['ttNoBrowser', ['browser'], 'claude sonnet medium', 'never switch to another connected browser'],
   ['fresh', ['browser'], 'claude sonnet medium'],
   ['ttFresh', ['browser', '--exclude-account', 'ttadk'], 'claude sonnet medium'],
+  // ui-browser: TTADK when browser-ready (localhost reachable), else Claude Sonnet high as before.
+  ['ttFresh', ['ui-browser'], 'codex gpt-6.1-sol high @ttadk', 'Chrome must be running'],
+  ['ttNoBrowser', ['ui-browser'], 'claude sonnet high'],
+  ['ttFresh', ['ui-browser', '--exclude-account', 'ttadk'], 'claude sonnet high'],
   // Never-read hub: route as if Codex has room (as before TTADK existed).
   ['unreadHub', ['implement', '--impact', 'service'], 'codex gpt-6.1-sol high @main', 'routing as if it has room'],
   ['unreadHub', ['image-gen'], 'codex gpt-6-luna low @main'],
