@@ -150,6 +150,19 @@ To change routing for a kind of task, edit the table in `route.mjs` and this rat
     review compares outcomes per category and flags a category that gets worse.
 - **No quota notches on TTADK.** Quota-driven effort notches (underused, front-load, overspending) apply only to
   ChatGPT accounts, and the auto-check and low-stakes notches don't apply on TTADK either. TTADK has no windows.
+- **TTADK's other models (tested 2026-11-07, ~110 runs on TTADK, plus public data).** None beats Sol on quality where
+  it matters: agentic coding, debugging and frontend tasks tied at full marks; Sol had the best pure reasoning (12/12,
+  with DeepSeek-V4.1-Flash), and public indexes put it clearly ahead (Artificial Analysis v5: Sol 55, GLM-5.3 and
+  DeepSeek-V4.1-Flash 32; DeepSWE: Sol 75, Kimi-K3 and GLM-5.3 ~67). So Sol stays the default.
+  - **Kimi-K3** is the second reviewer of Codex-written code on TTADK (user, 2026-11-07): 100% recall on planted
+    defects (Sol 88%), misses not overlapping Sol's, no nitpicks. Its Chinese prose read most naturally (25/25 vs Sol
+    24, one judge, one run) but it is slow (88–150s for a short essay): docs stay on Sol until the nightly review shows
+    rework on Chinese docs.
+  - GPT-5.6-Terra and DeepSeek-V4.1-Flash are faster (Terra 510s vs Sol 858s over seven Codex tasks; Flash 200+
+    tokens/s) but each slipped on spec-following or reasoning; not used by default.
+  - Gateway aliases: `deepseek-v4-pro-0813` and `deepseek-v4-flash-0731` currently resolve to deepseek-v4.1-flash;
+    `auto` is glm-5 (slow, timed out once); `auto-max` is gpt-5.4; `gpt-5.5` is expired. GLM-5.3 drove the desktop's
+    Safari through osascript during a Codex task: don't route agentic work to it.
 - **No concurrency cap on TTADK.** A rate-limited run is retried once on TTADK, then re-routed with
   `--exclude-account ttadk`. So is a run that fails for TTADK reasons.
 - **ChatGPT quota left unspent.** Preferring TTADK leaves more of the ChatGPT weeks unspent. The user chose this: on a

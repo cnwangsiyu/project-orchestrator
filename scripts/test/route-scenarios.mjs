@@ -45,6 +45,7 @@ const S = {
   unreadHub: { claude: cl(10, 120), codex: [{ name: 'main', live: false, email: 'm@example.com', home: '/tmp/main', seenAt: null, windows: null, resets: null }] },
   ttCard: { claude: cl(10, 120), codex: [acc('main', 99, 100, [400]), tt()] },
   ttClaudeOver: { claude: cl(93, 30), codex: [acc('main', 20, 120), tt()] },
+  ttKimi: { claude: cl(10, 120), codex: [acc('main', 20, 120), tt({ models: ['gpt-6.1-sol', 'gpt-5.6-terra', 'kimi-k3'] })] },
   // TTADK with its web search hub + proxy set up (ttadk-setup).
   ttSearch: { claude: cl(10, 120), codex: [acc('main', 20, 120), tt({ search: true, searchLive: true })] },
   pickExcluded: { claude: cl(10, 120), codex: [acc('main', 50, 100), acc('b', 99, 100, [10])] },
@@ -176,6 +177,7 @@ const CASES = [
   ['ttFresh', ['lookup', '--stakes', 'low'], 'codex gpt-6.1-sol medium @ttadk'],
   // A Codex-written change is reviewed by Claude first.
   ['ttFresh', ['review', '--author', 'codex'], 'codex gpt-6.1-sol xhigh @ttadk', 'second TTADK reviewer'],
+  ['ttKimi', ['review', '--author', 'codex'], 'codex gpt-6.1-sol xhigh @ttadk', 'Kimi-K3, a different model family'],
   ['ttFresh', ['review-high', '--author', 'codex'], 'claude opus xhigh'],
   ['fresh', ['review', '--author', 'codex'], 'claude sonnet high'],
   // Claude has no room: a fresh TTADK reviewer stands in instead of deferring or dropping the second opinion.
@@ -249,6 +251,14 @@ for (const [sc, args, want] of [
   const ok = got === want;
   if (!ok) fail++;
   console.log(`${ok ? 'ok  ' : 'FAIL'} ${sc.padEnd(19)} ${(args.join(' ') + ' (proxy first)').padEnd(36)} ${ok ? got : `want ${want}, got ${got}`}`);
+}
+// The second reviewer of Codex-written code is Kimi-K3 on TTADK when the gateway lists it, else Sol.
+for (const [sc, want] of [['ttKimi', 'kimi-k3 high @ttadk'], ['ttFresh', 'gpt-6.1-sol xhigh @ttadk']]) {
+  let got;
+  try { const so = JSON.parse(run(sc, ['review', '--author', 'codex'])).secondOpinion; got = so ? `${so.model} ${so.effort} @${so.account}` : 'none'; } catch (e) { got = 'ERROR'; }
+  const ok = got === want;
+  if (!ok) fail++;
+  console.log(`${ok ? 'ok  ' : 'FAIL'} ${sc.padEnd(19)} ${'review --author codex (2nd)'.padEnd(36)} ${ok ? got : `want "${want}", got "${got}"`}`);
 }
 // computer-use passes the allowed apps to the worker.
 {

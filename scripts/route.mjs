@@ -22,6 +22,7 @@ const RR = process.env.ROUTE_RR || path.join(SHARED, 'route-rotation.txt'); // l
 const C = (model, effort) => ({ vendor: 'claude', model, effort });
 const X = (model, effort) => ({ vendor: 'codex', model, effort });
 const SOL = 'gpt-6.1-sol', ASTRA = 'gpt-6-astra', TERRA = 'gpt-6.1-terra', LUNA = 'gpt-6-luna';
+const KIMI = 'kimi-k3'; // TTADK only: a different model family, best planted-bug recall (2026-11-07 tests)
 
 // The routing table (sources and rationale: references/model-routing.md).
 //   kind: claudeOnly (Claude tools: computer use, browser, Artifact/Docs, peer negotiation) | codexOnly (images) |
@@ -265,11 +266,13 @@ if (second && m.vendor === second.vendor) second = second.vendor === 'codex' ? C
 // Claude has no room for the cross-vendor second opinion: a fresh TTADK reviewer stands in rather than dropping it.
 if (second && !allowed(second) && second.vendor === 'claude' && TT && ttHas(SOL)) { second = X(SOL, 'xhigh'); notes.push('Claude has no room for the second opinion: a fresh TTADK Sol reviewer stands in (same model family as the first; say so in the report)'); }
 if (second && !allowed(second)) second = null;
-// A Codex-written change reviewed on TTADK gets a second free reviewer with a different focus.
+// A Codex-written change reviewed on TTADK gets a second free reviewer from a different model family: Kimi-K3 found
+// every planted defect where Sol missed some, and their misses didn't overlap (user, 2026-11-07). Sol when the gateway
+// doesn't list Kimi.
 let ttSecondReviewer = false;
 if (!second && m && cat === 'review' && authorCodex && onTTADK(m)) {
-  second = X(SOL, 'xhigh'); ttSecondReviewer = true;
-  notes.push('second TTADK reviewer (free): a fresh thread with a different focus — failure paths, concurrency, input edge cases and tests rather than the main logic; merge both reports and keep only P0/P1 items (references/review-rubric.md)');
+  second = ttHas(KIMI) ? X(KIMI, 'high') : X(SOL, 'xhigh'); ttSecondReviewer = true;
+  notes.push(`second TTADK reviewer (free): ${second.model === KIMI ? 'Kimi-K3, a different model family,' : 'a fresh Sol thread'} with a different focus — failure paths, concurrency, input edge cases and tests rather than the main logic; merge both reports and keep only P0/P1 items (references/review-rubric.md)`);
 }
 // Its point is to spend Codex quota that would otherwise be lost, so: only where the review policy wants a review anyway
 // (release code, or service code at high stakes; user, 2026-11-07), and never on a TTADK device, whose quota is left

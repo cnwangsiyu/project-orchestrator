@@ -127,6 +127,8 @@ Look for evidence in the data, not hunches. Typical findings:
 - **Bad cases:**
   - one category escalating repeatedly from its first pick: the pick is too weak, so raise its effort or model;
   - first picks that always succeed easily at a high cost: lower them (personal-quota picks only; never TTADK);
+  - docs on TTADK Sol needing rework for their Chinese prose: propose Kimi-K3 for `docs` (user, 2026-11-07: watch
+    first, switch on evidence);
   - "tell the user" events;
   - user corrections in a ledger;
   - categories the orchestrators keep stretching to fit a task: add a row, or clarify a description;
