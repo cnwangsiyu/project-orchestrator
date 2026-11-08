@@ -111,8 +111,18 @@ if (cmd === 'accounts') {
 // local pieces the ChatGPT app uses: its bundled `chrome` and `computer-use` plugins (instructions + browser-client) and
 // ChatGPT.app's node_repl MCP server, which loads @oai/browser-desktop (Chrome, via the ChatGPT Chrome extension and its
 // native host) and @oai/sky (desktop apps, via the "Codex Computer Use" helper).
-// `browser-setup` writes what a CLI run needs into the account's config.toml (backed up first):
-// - enable the bundled chrome and computer-use plugins;
+// `browser-setup` gives the account the main home's plugins (user, 2026-11-07: align the accounts) and writes what a CLI
+// run needs into its config.toml (backed up first):
+// - installs (`codex plugin add`, which a config entry alone does not do) the bundled chrome, computer-use and visualize
+//   plugins, and documents / pdf / spreadsheets / presentations / template-creator from the primary runtime the app
+//   unpacks under ~/.cache/codex-runtimes (their dependencies live there, shared by every home). The name
+//   `openai-bundled` is reserved and resolves only on the app's own home, so another home lists the same plugin dirs
+//   through a small local marketplace `chatgpt-bundled` (<home>/marketplaces/chatgpt-bundled, plugins symlinked to the
+//   app's unpacked copy). App-only plugins stay off: in-app `browser`, `codex-app-tools`, and `unified-computer-use`,
+//   whose cua_repl needs the app's browser access host ("The browser access host is unavailable" on a CLI run, tested
+//   2026-11-07); so do ChatGPT connectors;
+// - node_repl as an MCP server, as the ChatGPT app writes it into the main home's config.toml (the chrome and
+//   computer-use plugins are instructions + hooks on that server, not servers themselves);
 // - node_repl with tool calls auto-approved (under approvalPolicy never they would be refused outright);
 // - NODE_REPL_TRUSTED_SERVICES for sky + browser (the ChatGPT app sets it itself; a CLI launch has to).
 // Per-site and per-app access stays per task: `start/turn --browser-origins` / `--computer-use-apps` answer those approvals.
@@ -130,21 +140,33 @@ if (cmd === 'browser-setup' || cmd === 'computer-use-setup') {
   try { execFileSync(process.execPath, [path.join(chromePlugin, 'scripts', 'check-extension-installed.js'), '--browser', 'chrome', '--json'], { encoding: 'utf8', timeout: 20000 }); }
   catch (e) { die(`ChatGPT Chrome extension check failed (${String(e.stdout || e.message).split('\n')[0]}): in the ChatGPT app, Settings > Computer use > Google Chrome > install the browser extension`, 1); }
   const MARK = '# --- Browser/Computer Use (codex-worker browser-setup) ---', END = '# --- end browser-setup ---';
+  const runtime = path.join(os.homedir(), '.cache', 'codex-runtimes', 'codex-primary-runtime', 'plugins', 'openai-primary-runtime');
+  const docPlugins = ['documents', 'pdf', 'spreadsheets', 'presentations', 'template-creator'];
+  const hasRuntime = fs.existsSync(path.join(runtime, 'plugins', 'documents'));
+  if (!hasRuntime) console.error(`note: the ChatGPT app's primary runtime is not under ${runtime} (open the ChatGPT app once to unpack it); document plugins skipped`);
+  // The bundled plugins through a local marketplace of our own name (see above); rebuilt on every run, so a rerun after
+  // a ChatGPT app update picks up the new plugin versions.
+  const bundled = ['chrome', 'computer-use', 'visualize'];
+  const ownMarket = path.join(home, 'marketplaces', 'chatgpt-bundled');
+  fs.mkdirSync(path.join(ownMarket, '.agents', 'plugins'), { recursive: true });
+  try { fs.rmSync(path.join(ownMarket, 'plugins'), { force: true }); } catch {}
+  fs.symlinkSync(path.join(market, 'plugins'), path.join(ownMarket, 'plugins'));
+  const manifest = JSON.parse(fs.readFileSync(path.join(market, '.agents', 'plugins', 'marketplace.json'), 'utf8'));
+  fs.writeFileSync(path.join(ownMarket, '.agents', 'plugins', 'marketplace.json'), JSON.stringify({ ...manifest, name: 'chatgpt-bundled', plugins: manifest.plugins.filter((x) => bundled.includes(x.name)) }, null, 2));
+  const runtimeBlock = hasRuntime ? `
+[marketplaces.openai-primary-runtime]
+source_type = "local"
+source = "${runtime}"
+${docPlugins.map((p) => `\n[plugins."${p}@openai-primary-runtime"]\nenabled = true\n`).join('')}` : '';
   // The same node_repl environment the ChatGPT app writes for itself, with the app's own version (the Chrome backend
   // checks it: without these, the browser runtime reports "Browser is not available: chrome").
   let appVersion = '';
   try { appVersion = execFileSync('/usr/libexec/PlistBuddy', ['-c', 'Print :CFBundleShortVersionString', '/Applications/ChatGPT.app/Contents/Info.plist'], { encoding: 'utf8' }).trim(); } catch {}
   const block = `${MARK}
-[marketplaces.openai-bundled]
+[marketplaces.chatgpt-bundled]
 source_type = "local"
-source = "${market}"
-
-[plugins."chrome@openai-bundled"]
-enabled = true
-
-[plugins."computer-use@openai-bundled"]
-enabled = true
-
+source = "${ownMarket}"
+${bundled.map((p) => `\n[plugins."${p}@chatgpt-bundled"]\nenabled = true\n`).join('')}${runtimeBlock}
 [mcp_servers.node_repl]
 args = []
 command = "${repl}/bin/node_repl"
@@ -171,18 +193,25 @@ ${END}
     const i = toml.indexOf(MARK), j = toml.indexOf(END, i);
     toml = toml.slice(0, i) + block + (j >= 0 ? toml.slice(j + END.length).replace(/^\n/, '') : '');
   } else {
-    if (/^\[mcp_servers\.node_repl\]/m.test(toml) || /^\[plugins\."(computer-use|chrome)@openai-bundled"\]/m.test(toml) || /^\[marketplaces\.openai-bundled\]/m.test(toml))
+    if (/^\[mcp_servers\.node_repl\]/m.test(toml) || /^\[plugins\."[^"]+@(openai-bundled|openai-primary-runtime|chatgpt-bundled)"\]/m.test(toml) || /^\[marketplaces\.(openai-bundled|openai-primary-runtime|chatgpt-bundled)\]/m.test(toml))
       die(`${cfg} already has node_repl / plugin / openai-bundled sections that differ from what this writes; edit them by hand (references/codex-workers.md, "Browser use on a Codex worker")`, 1);
     toml += `\n${block}`;
   }
   if (fs.existsSync(cfg)) fs.copyFileSync(cfg, `${cfg}.bak-browser-${Date.now()}`);
   fs.writeFileSync(cfg, toml);
+  // Install them; `plugin add` keeps the entries above as they are.
+  const installed = [], failed = [];
+  for (const id of [...bundled.map((p) => `${p}@chatgpt-bundled`), ...(hasRuntime ? docPlugins.map((p) => `${p}@openai-primary-runtime`) : [])]) {
+    try { execFileSync('codex', ['plugin', 'add', id], { env: { ...process.env, CODEX_HOME: home }, stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8', timeout: 60000 }); installed.push(id); }
+    catch (e) { failed.push(`${id} (${String(e.stderr || e.message).trim().split('\n')[0]})`); }
+  }
   // Remember on the account profile that this home can take browser work (route.mjs reads it).
   const reg = readAccounts();
   const name = account ?? Object.keys(reg).find((k) => path.resolve(reg[k].home) === path.resolve(home));
   if (name && reg[name]) { reg[name].browser = true; reg[name].chromePlugin = chromePlugin; writeAccounts(reg); }
+  console.log(`plugins installed: ${installed.join(', ') || 'none'}${failed.length ? `; FAILED: ${failed.join('; ')}` : ''}`);
   console.log(`browser use configured in ${cfg}${name ? ` (account ${name} marked browser-ready)` : ''}. Launch workers through the hub with --browser-origins <patterns> (and --computer-use-apps <bundle ids> for desktop apps); keep Chrome running.`);
-  process.exit(0);
+  process.exit(failed.length ? 1 : 0);
 }
 // The TTADK company gateway as a Codex account (user, 2026-11-07: prefer it whenever it works). Its own CODEX_HOME whose
 // config points the model provider at the gateway, authenticated by `ttadk get_params --sso sso` (SSO, no key).
@@ -249,7 +278,7 @@ ${keep ? `\n# --- previous config ---\n${keep}` : ''}`);
   writeAccounts(reg);
   console.log(`TTADK account ${name}: ${home}, hub ws://127.0.0.1:${port}; codex models: ${models.join(', ')}`);
   console.log(`start its hub:   node ${process.argv[1]} --account ${name} hub`);
-  console.log(`browser use:     node ${process.argv[1]} --account ${name} browser-setup`);
+  console.log(`browser use:     node ${process.argv[1]} --account ${name} browser-setup   (also enables the main home's document plugins)`);
   console.log(`web search:      through the local proxy on 127.0.0.1:${searchPort} (started with the hub, and by start/turn/wait)`);
   process.exit(0);
 }

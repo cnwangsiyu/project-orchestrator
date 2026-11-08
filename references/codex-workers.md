@@ -205,7 +205,17 @@ account is browser-ready, and to Claude otherwise.
   ChatGPT app's computer-use setup asks for.
 - **Account config.** Run `codex-worker.mjs --account <name> browser-setup` on an account with its own config.toml,
   such as `ttadk`. It refuses a home whose config.toml is a symlink to `~/.codex`. It writes:
-  - the bundled marketplace, with the `chrome` and `computer-use` plugins enabled;
+  - the main home's plugins, installed with `codex plugin add` (an enabled entry in config.toml alone does not install
+    a plugin; before 2026-11-07 TTADK ran with none of them): `chrome`, `computer-use` and `visualize` from the app's
+    bundled marketplace, and `documents`, `pdf`, `spreadsheets`, `presentations` and `template-creator` from the
+    primary runtime (`~/.cache/codex-runtimes/codex-primary-runtime/...`, unpacked by the ChatGPT app; their
+    dependencies live there too). They are skills and hooks, so they work on any model provider (user, 2026-11-07:
+    align the accounts). The marketplace name `openai-bundled` resolves only on the app's own home, so other homes
+    list the same plugin dirs through `<home>/marketplaces/chatgpt-bundled` (rebuilt on every run, plugins symlinked
+    to the app's unpacked copy). Rerun `browser-setup` after a ChatGPT app update.
+  - Not enabled: the in-app `browser`, `codex-app-tools`, and `unified-computer-use`, whose `cua_repl` needs the app's
+    browser access host (a CLI run gets "The browser access host is unavailable", tested 2026-11-07); ChatGPT
+    connectors (Gmail, Drive…) come with a ChatGPT account and don't exist on TTADK;
   - `node_repl` with `default_tools_approval_mode = "approve"` (otherwise CLI runs refuse its calls outright);
   - `NODE_REPL_TRUSTED_SERVICES = {"sky":"@oai/sky/service","browser":"@oai/browser-desktop/service"}`. The ChatGPT app
     sets this itself; without it the CLI fails with "Trusted RPC service is not configured: browser", or with "sky
