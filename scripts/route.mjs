@@ -47,7 +47,10 @@ const TABLE = {
   'build-run': { desc: 'long procedural build, deploy or device workflow (Codex: you broker device handoffs by steering)', kind: 'codexFirst', shape: 'worker', writes: true, first: X(SOL, 'medium'), alt: C('sonnet', 'medium'), ladder: [X(SOL, 'high'), C('opus', 'high')] },
   // Web pages in the user's signed-in Chrome (user, 2026-11-07): TTADK Codex when it is set up for browser use, else Claude.
   browser: { desc: "operating web pages in the user's signed-in Chrome: internal consoles, Feishu docs, dashboards, forms (not desktop apps)", kind: 'browser', shape: 'worker', writes: false, first: X(SOL, 'medium'), alt: C('sonnet', 'medium'), ladder: [X(SOL, 'high'), C('sonnet', 'medium'), C('opus', 'high')] },
-  'computer-use': { desc: 'computer use on desktop apps, Artifact/Docs tools, negotiating with peers (web pages in Chrome: the browser row)', kind: 'claudeOnly', shape: 'worker', writes: true, first: C('sonnet', 'medium'), alt: null, ladder: [C('opus', 'high')] },
+  // Desktop apps (user, 2026-11-07): TTADK Codex through the ChatGPT app's computer-use plugin when browser-setup is done
+  // (it also enables computer use) — a terminal Claude worker has no desktop computer-use tool (only Claude in Chrome).
+  'computer-use': { desc: 'operating desktop apps (web pages in Chrome: browser; Artifact/Docs tools or peer negotiation: claude-tools); pass --apps <bundle ids>', kind: 'browser', shape: 'worker', writes: true, first: X(SOL, 'medium'), alt: C('sonnet', 'medium'), ladder: [C('opus', 'high')] },
+  'claude-tools': { desc: 'work that needs Claude-only tools: Artifact/Docs tools, negotiating with other sessions', kind: 'claudeOnly', shape: 'worker', writes: true, first: C('sonnet', 'medium'), alt: null, ladder: [C('opus', 'high')] },
   science: { desc: 'scientific or numerical computation', kind: 'codexFirst', shape: 'worker', writes: true, first: X(SOL, 'xhigh'), alt: C('opus', 'xhigh'), ladder: [X(ASTRA, 'high')] },
   // Every task whose output is an image goes to Codex (user, 2026-11-03: Codex is better at it). The image tool makes the
   // picture; the chat model only writes prompts and checks results, so Luna low first, Sol when iterating needs judgment.
@@ -64,6 +67,7 @@ const notch = (m, d, cap = 'xhigh') => {
 const label = (m) => `${m.vendor === 'claude' ? `Claude ${m.model}` : `Codex ${m.model}`} ${m.effort}`;
 
 // ---- args ----
+// --apps a,b: the desktop apps (bundle ids) a computer-use worker may operate; others are declined.
 const BOOL = new Set(['auto-check', 'writes', 'read-only', 'fresh', 'json', 'table', 'no-redeem', 'dry', 'urgent']);
 // --urgent: run now even while TTADK is down for a fixable reason (that work would otherwise wait for the fix).
 // --exclude-account a,b: route around accounts that just failed (e.g. TTADK after a rate-limited retry or an auth error).
@@ -171,7 +175,7 @@ if (ttCapable) {
   if (eff === 'max') eff = 'xhigh';
   let e0 = notch(X(SOL, eff), 0);
   if (stakes === 'high') e0 = notch(e0, +1);
-  const cheapRow = ['lookup', 'extract', 'draft', 'browser'].includes(cat); // browser: misses are page trouble, not depth
+  const cheapRow = ['lookup', 'extract', 'draft', 'browser', 'computer-use'].includes(cat); // browser/desktop misses are UI trouble, not depth
   const rungs = [e0];
   while (ei(rungs.at(-1).effort) < ei('xhigh')) rungs.push(notch(rungs.at(-1), +1));
   if (!cheapRow) rungs.push(X(SOL, 'max'));
@@ -324,8 +328,9 @@ const launch = (x, shape = T.shape, acct = pickAcct) => {
   const proxyFirst = TT?.search && an === TT.name ? `node ${SKILL}/scripts/codex-worker.mjs --account ${an} proxy >/dev/null && ` : '';
   if (shape === 'exec') return { launcher: 'codex-exec', account: an, command: `${proxyFirst}CODEX_HOME=${home} codex exec${inRepo === false ? ' --skip-git-repo-check' : ''} -C ${cwd} -s ${sandbox} -m ${x.model} -c model_reasoning_effort='"${x.effort}"' --json -o ${taskDir}/codex-last.md ${prompt} < /dev/null > ${taskDir}/codex.jsonl 2>&1   (background task${inRepo === null ? '; add --skip-git-repo-check outside a repo' : ''})` };
   // ui-browser also reaches the local dev server (a host pattern matches any port).
+  const apps = cat === 'computer-use' && typeof opts.apps === 'string' ? ` --computer-use-apps '${opts.apps.split(',').map((a) => a.trim()).filter(Boolean).join(',')}'` : '';
   const origins = ['browser', 'ui-browser'].includes(cat) ? ` --browser-origins '${[...(cat === 'ui-browser' ? ['localhost', '127.0.0.1'] : []), ...POLICY.browserOrigins, ...(typeof opts.origins === 'string' ? opts.origins.split(',') : [])].map((o) => o.trim()).filter(Boolean).join(',')}'` : '';
-  return { launcher: 'codex-worker', account: an, command: `node ${SKILL}/scripts/codex-worker.mjs --account ${an} start --cwd ${cwd} --model ${x.model} --effort ${x.effort} --sandbox ${sandbox} --name ${name}${origins} --log ${taskDir}/codex.jsonl --out ${taskDir}/codex-last.md ${prompt}   (background task)` };
+  return { launcher: 'codex-worker', account: an, command: `node ${SKILL}/scripts/codex-worker.mjs --account ${an} start --cwd ${cwd} --model ${x.model} --effort ${x.effort} --sandbox ${sandbox} --name ${name}${origins}${apps} --log ${taskDir}/codex.jsonl --out ${taskDir}/codex-last.md ${prompt}   (background task)` };
 };
 // The same quality gate for both vendors, so outcomes compare: code work gets an independent review before it's accepted.
 // Review only where a mistake is costly to undo; reviewers follow references/review-rubric.md (blocking issues only).
@@ -339,6 +344,12 @@ if (m && ['build-run', 'implement', 'implement-hard', 'debug', 'ui-browser', 'co
 // to the orchestrator (nightly review 11-05: W258 blocked on "can't see local browser 1e7c2b37", the user then chose
 // "orchestrator does the console", and that orchestrator made 510 browser calls in 24h).
 if (m && ['ui-browser', 'computer-use'].includes(cat)) notes.push('brief: name the Chrome to use by its deviceId from the ledger (the user picks it once; mcp__claude-in-chrome__list_connected_browsers lists them) and tell the worker: if a browser tool says several browsers are connected, call select_browser with that deviceId; if the browser still isn\'t reachable, report BLOCKED with the tool\'s exact error, never ask the orchestrator to click for it. Headless Playwright is fine where the user\'s sign-in isn\'t needed');
+if (m && cat === 'computer-use') {
+  if (m.vendor === 'codex') {
+    notes.push(`brief: use Computer Use via node_repl as the computer-use skill says (bootstrap: globalThis.sky = (await import("@oai/sky")).sky;); operate only the apps given${opts.apps ? '' : ' — pass them to route.mjs with --apps <bundle ids>, e.g. --apps com.apple.Notes; without it every app is declined'}; ask (report BLOCKED) before anything irreversible: sending, deleting, purchases, changing settings`);
+    notes.push('the screen must stay unlocked: codex-worker exits 5 on a locked Mac — tell the user and retry after they unlock');
+  } else notes.push('a terminal Claude worker has no desktop computer-use tool (only Claude in Chrome for web pages): if this needs a desktop app, set up TTADK browser-setup on this machine or ask the user, rather than launching a worker that will report BLOCKED');
+}
 if (m && ['browser', 'ui-browser'].includes(cat)) notes.push('brief: include the browser safety clause — read and navigate freely, but ask the user (AskUserQuestion; a Codex worker reports BLOCKED) before anything irreversible on a page: submitting a form that changes data, approving, deleting, publishing, sending a message, payments');
 // Every worker can search the web (Codex and Claude Code have it on by default; TTADK through its proxy).
 if (m) notes.push('brief: web searches go to the public internet — never put internal code, internal project or product names, people, internal URLs or secrets into a search query; search for the public topic only');

@@ -69,7 +69,8 @@ that keeps the orchestrators alive.
   - Don't do it "just this once" yourself.
   - Browser work goes to a `browser` worker (web pages) or a `ui-browser` worker (frontend work with a
     visual check), both TTADK Codex when browser-ready, else Claude; desktop apps go to a
-    `computer-use` worker (Claude). All of them can reach the user's Chrome. If that worker reports it can't reach the browser, fix the pairing; don't take
+    `computer-use` worker (TTADK Codex when browser-ready; a terminal Claude worker has no desktop
+    computer-use tool). All of them can reach the user's Chrome. If that worker reports it can't reach the browser, fix the pairing; don't take
     over the clicking. The one exception is the minimal
     permission-only part this session is already authorized for (see "Plan around permissions").
 - **Read reports through `node <this skill>/scripts/report-summary.mjs <task dir>`.** It prints the
@@ -196,9 +197,9 @@ effort, Codex account and launch command from
 
   When a task spans categories, split it or pick the row for its hardest part.
 - **The script computes the rest** from its table and the quota state in `scripts/lib/state.mjs`:
-  - Hard locks: computer use on desktop apps, Artifact/Docs and peer negotiation stay on Claude,
-    which the Codex CLI can't do; browser work in Chrome goes to TTADK Codex once `browser-setup` is
-    done, else to Claude; every task whose output is an image (generating, editing, variants, icons,
+  - Hard locks: Artifact/Docs tools and peer negotiation stay on Claude (`claude-tools`); browser
+    work, frontend visual checks and desktop apps (`browser`, `ui-browser`, `computer-use --apps
+    <bundle ids>`) go to TTADK Codex once `browser-setup` is done, else to Claude; every task whose output is an image (generating, editing, variants, icons,
     illustrations, mockup images) goes to Codex as `image-gen` (user, 2026-11-03).
   - Quota moves: Codex first for anything either vendor can do. Claude takes the work it is clearly
     better at only while it has spare.
@@ -218,8 +219,8 @@ effort, Codex account and launch command from
   - Every TTADK worker can search the web through its local proxy, once `ttadk-setup` has set it
     up; briefs say search queries must not carry internal information.
   - Browser work (`browser`: web pages in the user's Chrome) goes to TTADK Codex when that account
-    is browser-ready, otherwise to Claude. Desktop apps, Artifact/Docs and peer negotiation stay
-    on Claude (`computer-use`). Setup for a new machine: `references/codex-workers.md`, "TTADK" and
+    is browser-ready, otherwise to Claude. Desktop apps (`computer-use`) too; Artifact/Docs and peer
+    negotiation stay on Claude (`claude-tools`). Setup for a new machine: `references/codex-workers.md`, "TTADK" and
     "Browser use on a Codex worker".
   - Effort notches: lower for an automatic check, higher for high stakes, higher while Codex is
     underused or front-loading its reset cards. On TTADK only the high-stakes one applies, and its

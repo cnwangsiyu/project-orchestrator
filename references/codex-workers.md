@@ -299,7 +299,7 @@ and for what is the worker's own call. Briefs don't ask for them, forbid them or
   - device holds through `res` (Codex can run the script), taken as `--by codex:<thread id>`;
   - where to write the report, and to start its final message with `[<id>] DONE | QUESTION | BLOCKED | FAILED`. A question
     ends the run; resume it with the answer.
-- **Keep on Claude workers**: anything that needs Artifact/Docs tools or computer use on desktop apps (browser work goes
+- **Keep on Claude workers**: anything that needs Artifact/Docs tools (browser work, frontend checks and desktop apps go
   to TTADK Codex once `browser-setup` is done), or a worker that must negotiate
   with peers itself. Device runs that share phones mid-run can go to a hub-started Codex worker: steer it with handoffs. It
   can't negotiate with peers, so you broker.
@@ -338,7 +338,7 @@ facts behind it (2026-11-03):
   user's config sets `high`.
 - **Models:** `gpt-6.1-sol` is the workhorse and Codex's default (near Astra, 500K context); `gpt-6-astra` is the
   frontier model at 5x; `gpt-6.1-terra` is positioned for writing and visual understanding, not coding (its
-  computer-use strength doesn't help here: the Codex CLI can't do computer use); `gpt-6-luna` is fast and cheap, for
+  computer-use strength is not what the Codex computer-use plugin relies on); `gpt-6-luna` is fast and cheap, for
   extraction, classification, summaries and images, and should not write code. Don't pick `gpt-6-sol` or the
   `gpt-5.6-*` models: they're older at the same or higher cost.
 

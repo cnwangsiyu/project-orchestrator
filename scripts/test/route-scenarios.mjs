@@ -115,7 +115,12 @@ const CASES = [
   // Free Sol max (no OK on TTADK) before personal Claude.
   ['ttFresh', ['implement-hard', '--impact', 'service', '--failures', '1'], 'codex gpt-6.1-sol max @ttadk'],
   ['ttFresh', ['implement-hard', '--impact', 'service', '--failures', '2'], 'claude opus xhigh'],
-  ['ttFresh', ['computer-use'], 'claude sonnet medium'],
+  // Desktop apps go to TTADK when browser-setup is done (it enables computer use); Claude-only tools stay on Claude.
+  ['ttFresh', ['computer-use', '--apps', 'com.apple.calculator'], 'codex gpt-6.1-sol medium @ttadk', 'Computer Use via node_repl'],
+  ['ttFresh', ['computer-use'], 'codex gpt-6.1-sol medium @ttadk', 'pass them to route.mjs with --apps'],
+  ['ttNoBrowser', ['computer-use'], 'claude sonnet medium', 'no desktop computer-use tool'],
+  ['ttFresh', ['claude-tools'], 'claude sonnet medium'],
+  ['fresh', ['claude-tools'], 'claude sonnet medium'],
   ['ttFresh', ['second-opinion', '--against', 'codex'], 'claude opus high'],
   // A TTADK device leaves ChatGPT/Claude quota for the user's other device: no underused effort raise (user, 2026-11-07).
   ['ttFresh', ['implement', '--exclude-account', 'ttadk'], 'codex gpt-6.1-sol high @main'],
@@ -244,6 +249,14 @@ for (const [sc, args, want] of [
   const ok = got === want;
   if (!ok) fail++;
   console.log(`${ok ? 'ok  ' : 'FAIL'} ${sc.padEnd(19)} ${(args.join(' ') + ' (proxy first)').padEnd(36)} ${ok ? got : `want ${want}, got ${got}`}`);
+}
+// computer-use passes the allowed apps to the worker.
+{
+  let got;
+  try { got = JSON.parse(run('ttFresh', ['computer-use', '--apps', 'com.apple.calculator,com.apple.Notes'])).pick?.command ?? ''; } catch (e) { got = 'ERROR'; }
+  const ok = got.includes("--computer-use-apps 'com.apple.calculator,com.apple.Notes'");
+  if (!ok) fail++;
+  console.log(`${ok ? 'ok  ' : 'FAIL'} ttFresh             computer-use --apps (command)        ${ok ? 'has --computer-use-apps' : got.slice(0, 120)}`);
 }
 // Redemption prompt only when the work really lands on the card account.
 for (const [sc, args, want] of [

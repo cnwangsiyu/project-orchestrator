@@ -41,8 +41,12 @@ catches a miss, and how many times the task has fallen short. How the table was 
 - **Claude takes the work it is clearly ahead on, while Claude has spare:** docs, research, image reading,
   high-stakes review and design. On GDPval, Opus and Sonnet score ≈1845 against Astra's 1542. HLE with tools is
   Opus's best result, at 67.7%.
-- **Claude-only work:** computer use on desktop apps, Artifact/Docs tools and peer negotiation. The Codex CLI can't
-  do them. Browser work in Chrome (`browser`) goes to TTADK Codex once `browser-setup` is done, else to Claude.
+- **Claude-only work (`claude-tools`):** Artifact/Docs tools and peer negotiation.
+- **Browser and desktop work:** `browser` (web pages in Chrome), `ui-browser` (frontend work with a visual check) and
+  `computer-use` (desktop apps; `--apps <bundle ids>`) go to TTADK Codex once `browser-setup` is done, else to Claude
+  (user, 2026-11-07). A terminal Claude worker can drive Chrome (Claude in Chrome) but has no desktop computer-use tool
+  (ledger 10-31), so for desktop apps the Claude fallback may only report BLOCKED. TTADK desktop work needs an unlocked
+  screen.
   - A background Claude worker can drive the user's signed-in Chrome. Its brief names the Chrome by `deviceId`
     (recorded in the ledger once the user has picked it), and the worker calls `select_browser` with that id when
     several browsers are connected. A worker that still can't reach the browser reports BLOCKED with the tool's
@@ -128,7 +132,7 @@ To change routing for a kind of task, edit the table in `route.mjs` and this rat
   - Image generation never runs on TTADK, its Sol fallback step included.
   - The extra Codex review added while ChatGPT Codex quota is underused runs on a ChatGPT account (its purpose is to
     spend that quota). Other Codex second opinions follow TTADK first.
-  - Not TTADK-capable, so routed as before: Claude-only rows (`computer-use`; `ui-browser` and `browser` go to TTADK once
+  - Not TTADK-capable, so routed as before: `claude-tools` (`browser`, `ui-browser` and `computer-use` go to TTADK once
     `browser-setup` is done, user 2026-11-07), `image-gen` (no image tool
     on the gateway), `research` on a TTADK account without its local proxy (Codex sends no search tool to the gateway;
     the proxy in `references/codex-workers.md` adds it for every TTADK worker),

@@ -40,8 +40,8 @@ These are the user's decisions (2026-10-30 to 2026-11-03):
 
 - **One routing mode, auto.** Routing is computed by the scripts. The orchestrator judges only the category, the
   stakes, whether an automatic check exists, and the failure count.
-- **Computer use on desktop apps, Artifact/Docs tools and peer negotiation run on Claude.** The Codex CLI can't do
-  them. Browser work in Chrome is not in this lock: it goes to TTADK Codex when browser-ready (rule below).
+- **Artifact/Docs tools and peer negotiation run on Claude** (`claude-tools`). Browser work, frontend visual checks and
+  desktop apps are not in this lock: they go to TTADK Codex when browser-ready (rules below).
 - **Every task whose output is an image runs on Codex.**
 - **Codex quota is use-it-or-lose-it.** Spend every account's week by its reset; everything either vendor can do
   goes to Codex first.
@@ -63,7 +63,8 @@ These are the user's decisions (2026-10-30 to 2026-11-03):
   - TTADK is the company's quota and the rest is the user's own: on a TTADK device, never lower a TTADK effort to save
     cost (it saves nothing), never count an unspent Claude week as waste, and judge a TTADK row only on quality and
     success. Moving work from TTADK to personal quota needs evidence that TTADK does it worse.
-  - Desktop computer use stays on Claude.
+  - Desktop apps (`computer-use`) go to TTADK Codex when browser-ready (user, 2026-11-07): a terminal Claude worker has
+    no desktop computer-use tool (ledger 10-31), so Claude there is only a fallback that may report BLOCKED.
 - **Permissions (2026-11-05):**
   - Before dispatching, the orchestrator does only the minimal permission-only part it is already authorized for,
     and workers do the rest.
