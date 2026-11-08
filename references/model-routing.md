@@ -102,6 +102,29 @@ To change routing for a kind of task, edit the table in `route.mjs` and this rat
    - The launcher is `codex exec` with that account's `CODEX_HOME` for one-shot rows, the hub `codex-worker` for
      the rest, and a `claude --bg` worker for Claude (never an Agent subagent).
 
+## Codex accounts: TTADK first (user, 2026-11-07)
+
+- **TTADK first, for everything its Sol can handle.** When the TTADK company gateway is healthy (CLI present, SSO
+  active, `gpt-6.1-sol` listed), every row runs first on TTADK `gpt-6.1-sol`, Claude-strength rows included (docs,
+  research, design, high-stakes review). The effort is the row's first-pick effort, at least `medium`. After a failure
+  it goes one notch up on Sol, then the row's own ladder.
+  - Not TTADK-capable, so routed as before: Claude-only rows (`computer-use`, `ui-browser`), `image-gen` (no image tool
+    on the gateway), `second-opinion --against codex`, and `browser` before `browser-setup`.
+  - Cross-vendor pairs stay cross-vendor: with Sol first, the second opinion is Claude.
+  - Trade-off accepted by the user: on knowledge-work benchmarks (GDPval), Claude scores well above GPT. The nightly
+    review compares outcomes per category and flags a category that gets worse.
+- **No quota notches on TTADK.** Quota-driven effort notches (underused, front-load, overspending) apply only to
+  ChatGPT accounts. TTADK has no windows.
+- **No concurrency cap on TTADK.** A rate-limited run is retried once on TTADK, then re-routed with
+  `--exclude-account ttadk`. So is a run that fails for TTADK reasons.
+- **ChatGPT quota waste.** Preferring TTADK leaves more of the ChatGPT weeks unspent. The user chose this; the nightly
+  review still reports the waste.
+- **Browser row.** `browser` (web pages in the user's signed-in Chrome) goes to TTADK Codex, Sol `medium`, through the
+  hub with `--browser-origins`, when the account is browser-ready (`browser-setup`). Otherwise it goes to Claude Sonnet
+  `medium` (Claude in Chrome). Its ladder runs Sol `high`, then Claude.
+  - Measured: the two do the same read and interaction tasks, but Claude was 3–10x faster per task.
+  - Chrome must be running before either starts.
+
 ## Quota policy (user, 2026-11-03)
 
 All thresholds live in `POLICY` in `scripts/lib/state.mjs`.

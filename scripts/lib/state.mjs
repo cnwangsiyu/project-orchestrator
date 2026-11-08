@@ -130,10 +130,44 @@ const rollForward = (acc) => {
   const credits = all.filter((c) => !c.expiresAt || c.expiresAt > now);
   return { ...acc, windows, resets: acc.resets ? { count: Math.max(0, (acc.resets.count ?? 0) - (all.length - credits.length)), credits } : null };
 };
+// A TTADK (company gateway) account has no ChatGPT rate-limit windows: what matters is whether it works right now — the
+// ttadk CLI present, its SSO session active, the gateway listing the models, the hub up — and how many turns it runs.
+const readTtadk = (name, prof) => {
+  const out = { name, kind: 'ttadk', home: prof.home, hub: prof.hub, browser: !!prof.browser, chromePlugin: prof.chromePlugin ?? null,
+    models: prof.models ?? [], windows: [], resets: null, healthy: false, reason: null, live: false, active: 0, ssoExpiresAt: null, email: prof.email ?? null };
+  const bin = prof.ttadkBin && fs.existsSync(prof.ttadkBin) ? prof.ttadkBin : null;
+  if (!bin) { out.reason = 'ttadk CLI not found (npm install -g @byted/ttadk@latest --registry=https://bnpm.byted.org, then codex-worker ttadk-setup)'; return out; }
+  try {
+    const st = JSON.parse(execFileSync(bin, ['auth', 'status', '-f', 'json'], { encoding: 'utf8', timeout: 30000, stdio: ['ignore', 'pipe', 'ignore'] }));
+    const sso = (st.providers ?? []).find((x) => x.provider === 'sso');
+    out.email = st.account ?? out.email;
+    out.ssoExpiresAt = sso?.expiresAt ? Date.parse(sso.expiresAt) : null;
+    if (sso?.status !== 'active' || (out.ssoExpiresAt && out.ssoExpiresAt <= now)) { out.reason = 'TTADK SSO not logged in or expired (the user runs `! ttadk auth login sso`)'; return out; }
+  } catch (e) { out.reason = `ttadk auth status failed: ${String(e.message).split('\n')[0]}`; return out; }
+  try {
+    const mj = JSON.parse(execFileSync(bin, ['models', '-f', 'json'], { encoding: 'utf8', timeout: 60000, stdio: ['ignore', 'pipe', 'ignore'] }));
+    const ms = Array.isArray(mj) ? mj : mj.models ?? []; // {tool, count, models: [...]}
+    out.models = ms.filter((m) => (m.availableAgents ?? []).includes('codex') && m.realtimeHealth?.tier !== 'unhealthy').map((m) => m.id);
+  } catch {}
+  if (!out.models.includes('gpt-6.1-sol')) { out.reason = 'the TTADK gateway lists no healthy gpt-6.1-sol for codex'; return out; }
+  out.healthy = true;
+  try {
+    const list = execFileSync(process.execPath, [WORKER, '--account', name, 'list', '--limit', '60'], { encoding: 'utf8', timeout: 30000, stdio: ['ignore', 'pipe', 'pipe'] });
+    out.live = true;
+    out.active = list.split('\n').filter((l) => l.split('\t')[2] === 'active').length;
+  } catch { out.live = false; }
+  return out;
+};
 const readCodexAll = () => {
   const accounts = [];
   updateProfiles((reg) => {
     for (const [name, prof] of Object.entries(reg)) {
+      if (prof.kind === 'ttadk') {
+        const t = readTtadk(name, prof);
+        reg[name] = { ...prof, models: t.models, email: t.email, seenAt: now };
+        accounts.push({ ...t, seenAt: now });
+        continue;
+      }
       const login = readLogin(prof.home);
       try {
         const u = parseUsage(JSON.parse(execFileSync(process.execPath, [WORKER, '--account', name, 'usage'], { encoding: 'utf8', timeout: 30000, stdio: ['ignore', 'pipe', 'pipe'] })));
@@ -233,6 +267,9 @@ export const POLICY = {
   throttle5h: 95, // a 5-hour window this full pauses new work on that vendor/account until it resets
   overspend: 115, // projected % at reset above which a lone Codex account without cards is overspending
   fableAvoid: 70, // Fable's own window at or above this: no Fable
+  ttadkSsoWarnH: 48, // warn when the TTADK SSO session expires within this many hours
+  // Sites a browser worker may reach without asking (host globs); route.mjs passes them as --browser-origins.
+  browserOrigins: ['*.bytedance.net', '*.byted.org', '*.larkoffice.com', '*.feishu.cn', '*.tiktok-row.net', '*.byteintl.net', '*.bytedance.com'],
   expiringH: 24, expiringRoom: 25, // a Codex week resetting within a day with this much left
 };
 
@@ -291,7 +328,13 @@ export const analyze = (data) => {
     claude.expiring = cs.left != null && cs.left < P.expiringH && room >= P.expiringRoom && proj < cap;
   }
   // Codex accounts
-  const rows = (data.codexAccounts ?? []).map((a) => {
+  // TTADK: preferred for Codex work whenever it is healthy and under its concurrency cap (user, 2026-11-07).
+  const tt = (data.codexAccounts ?? []).find((a) => a.kind === 'ttadk') ?? null;
+  // No concurrency cap (user, 2026-11-07): a rate-limited run is retried once on TTADK, then re-routed without it.
+  const ttadk = tt ? { name: tt.name, home: tt.home, healthy: !!tt.healthy, reason: tt.reason, live: !!tt.live, active: tt.active ?? 0,
+    models: tt.models ?? [], browser: !!tt.browser, chromePlugin: tt.chromePlugin ?? null, ssoLeftH: tt.ssoExpiresAt ? (tt.ssoExpiresAt - now) / 3600000 : null } : null;
+  if (ttadk) ttadk.usable = ttadk.healthy;
+  const rows = (data.codexAccounts ?? []).filter((a) => a.kind !== 'ttadk').map((a) => {
     const w = weekly(a.windows), s = winState(w, hist[`codex:${a.name}`]), w5 = shortWin(a.windows);
     const unconstrained = !!a.windows && !w; // read fine, but no limit window (or unlimited credits)
     const spent = !unconstrained && !!s && (s.used >= P.redeemAt || (a.allowed === false && !(w5 && w5.used >= P.throttle5h)));
@@ -312,6 +355,7 @@ export const analyze = (data) => {
   const throttled = rows.filter((r) => r.throttledUntil).sort((x, y) => x.throttledUntil - y.throttledUntil);
   const cardsHeld = rows.reduce((n, r) => n + (r.a.resets?.count ?? 0), 0);
   const codex = {
+    ttadk,
     readable: rows.some((r) => r.known), rows, pick, redeem, cardsHeld, throttled, rotate, open,
     out: !pick && !redeem && rows.some((r) => r.known),
     // Out only because 5-hour windows are full: a pause of hours, not a spent week.
@@ -326,7 +370,7 @@ export const analyze = (data) => {
     && (codex.frontLoad || ((ps.used + (ps.rate ?? 0) * after.deadline) < 100 && (after.cp?.deadlineH || ps.elapsed >= 0.1)));
   codex.overspending = !!ps && !codex.frontLoad && cardsHeld === 0 && open.length <= 1 && ps.projected != null && ps.projected > P.overspend;
   // Claude may never outlast-fail Codex: with Codex out it takes only what fits its room.
-  const stop = !claude.readable && !codex.readable;
+  const stop = !claude.readable && !codex.readable && !codex.ttadk?.healthy;
   return { claude, codex, stop, policy: P };
 };
 
@@ -340,11 +384,19 @@ export const leanLines = (st, data) => {
     if (!r.a.live && r.a.loggedIn === false) out.push(`account ${r.a.name}: not logged in — ask the user to run \`! CODEX_HOME=${r.a.home} codex login\`, then start its hub: codex-worker.mjs --account ${r.a.name} hub`);
     else if (!r.a.live) out.push(`account ${r.a.name}: hub unreachable${r.a.windows ? ` (using its reading from ${fmtAgo(r.a.seenAt)})` : ''} — start it: codex-worker.mjs --account ${r.a.name} hub`);
   }
+  const T = X.ttadk;
+  if (T) {
+    if (T.usable) out.push(`TTADK first: every task its gpt-6.1-sol can handle runs on account ${T.name} (route.mjs does this); the ChatGPT accounts below take image generation, and everything when TTADK fails (route.mjs --exclude-account ${T.name}); ${T.active} TTADK turns running`);
+    else out.push(`TTADK unavailable — ${T.reason}; Codex work falls back to the ChatGPT accounts`);
+    if (T.healthy && !T.live) out.push(`TTADK hub down — start it before hub workers: codex-worker.mjs --account ${T.name} hub (codex exec runs don't need it)`);
+    if (T.healthy && T.ssoLeftH != null && T.ssoLeftH < POLICY.ttadkSsoWarnH) out.push(`TTADK SSO expires in ${hours(T.ssoLeftH)}: ask the user to run \`! ttadk auth login sso\` before it lapses`);
+  }
   if (X.redeem) out.push(`redeem a reset card${multi ? ` on ${who(X.redeem)}` : ''}: ${X.redeem.cp.line} — ask the user first, every time; only after a yes: `
     + `codex-worker.mjs --account ${X.redeem.a.name} reset-credit-use --key <new uuid>${X.redeem.cp.card ? ` --credit ${X.redeem.cp.card.id}` : ''}, then quota.mjs --fresh`);
-  if (X.rotate) out.push(`new Codex work → rotate across ${X.rotate.map((r) => r.a.name).join(', ')} (each must be spent within ${hours(Math.max(...X.rotate.map((r) => r.deadline)))}); route.mjs alternates per launch`);
-  else if (X.pick && multi) out.push(`new Codex work → account ${who(X.pick)} (week ${X.pick.s?.used ?? '-'}%, its quota is lost first: ${hours(X.pick.deadline)})${X.pickStale ? ' — from a stale reading' : ''}`);
-  if (X.out && X.throttledOnly) out.push(`codex paused: 5h windows full, free in ${hours(X.nextFree)} — Claude takes it only while it has spare; otherwise wait`);
+  if (X.rotate) out.push(`${X.ttadk?.usable ? 'ChatGPT-account work' : 'new Codex work'} → rotate across ${X.rotate.map((r) => r.a.name).join(', ')} (each must be spent within ${hours(Math.max(...X.rotate.map((r) => r.deadline)))}); route.mjs alternates per launch`);
+  else if (X.pick && multi) out.push(`${X.ttadk?.usable ? 'ChatGPT-account work (images, TTADK fallback)' : 'new Codex work'} → account ${who(X.pick)} (week ${X.pick.s?.used ?? '-'}%, its quota is lost first: ${hours(X.pick.deadline)})${X.pickStale ? ' — from a stale reading' : ''}`);
+  if (X.out && T?.usable) out.push('ChatGPT Codex accounts are out; Codex work continues on TTADK (models it lacks wait or go to Claude)');
+  else if (X.out && X.throttledOnly) out.push(`codex paused: 5h windows full, free in ${hours(X.nextFree)} — Claude takes it only while it has spare; otherwise wait`);
   else if (X.out) out.push(`codex out on every account (next free in ${hours(X.nextFree)}): tell the user; ${C.status === 'over' || C.status === 'unknown'
     ? 'Claude takes only Claude-only work that can\'t wait; the rest waits'
     : `Claude takes what matters, within ${C.room}% of room (keeping ${C.reserve}% for the orchestrators); the rest waits`}`);

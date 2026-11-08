@@ -16,6 +16,8 @@ const wk = (used, leftH, label = 'week') => ({ label, used, resetsAt: now + left
 const cl = (used, leftH, fable = 0) => [wk(used, leftH, 'week (all models)'), { ...wk(fable, leftH, 'week (Fable)'), scoped: true }];
 const acc = (name, used, leftH, cards = [], extra = {}) => ({ name, live: true, email: `${name}@example.com`, home: `/tmp/${name}`, plan: 'prolite', seenAt: now,
   windows: [wk(used, leftH)], resets: { count: cards.length, credits: cards.map((e, i) => ({ id: `RateLimitResetCredit_${name}card${i}`, expiresAt: now + e * h })) }, ...extra });
+const tt = (extra = {}) => ({ name: 'ttadk', kind: 'ttadk', home: '/tmp/ttadk', hub: 'ws://127.0.0.1:47399', healthy: true, reason: null, live: true, active: 2,
+  models: ['gpt-6.1-sol', 'gpt-5.6-terra', 'gpt-5.5'], browser: true, chromePlugin: '/tmp/chrome-plugin', ssoExpiresAt: now + 240 * h, windows: [], resets: null, ...extra });
 const five = (used, leftH) => ({ label: '5h', used, resetsAt: now + leftH * h, windowMins: 300, scoped: false });
 
 const S = {
@@ -33,6 +35,11 @@ const S = {
   codex5h: { claude: cl(70, 120), codex: [{ ...acc('main', 40, 120), windows: [wk(40, 120), five(99, 2)] }] },
   stale: { claude: cl(10, 120), codex: [{ ...acc('main', 20, 120), live: false, seenAt: now - 5 * h, error: 'hub down' }, acc('b', 50, 100)] },
   unreadable: { claude: null, codex: [] },
+  // TTADK (company gateway) account: no rate-limit windows; healthy = ttadk CLI + SSO + gpt-6.1-sol listed.
+  ttFresh: { claude: cl(10, 120), codex: [acc('main', 20, 120), tt()] },
+  ttNoBrowser: { claude: cl(10, 120), codex: [acc('main', 20, 120), tt({ browser: false })] },
+  ttUnhealthy: { claude: cl(10, 120), codex: [acc('main', 20, 120), tt({ healthy: false, reason: 'TTADK SSO not logged in or expired' })] },
+  ttChatOut: { claude: cl(10, 48), codex: [acc('main', 99, 48), tt()] },
 };
 // [scenario, route args, expectation]; expectation: 'DEFER' or "vendor model effort [@account]"
 const CASES = [
@@ -82,6 +89,28 @@ const CASES = [
   ['quiet', ['implement', '--impact', 'service', '--stakes', 'high'], 'codex gpt-6.1-sol xhigh @main', 'route.mjs review-high'],
   ['quiet', ['debug', '--impact', 'throwaway', '--stakes', 'high'], 'codex gpt-6.1-sol xhigh @main', 'no review'],
   ['quiet', ['docs'], 'claude sonnet medium', '!review'],
+  // TTADK preferred when healthy (user, 2026-11-07); no quota notches on it; fallback via --exclude-account or ill health.
+  ['ttFresh', ['implement'], 'codex gpt-6.1-sol high @ttadk', 'retry it once'],
+  ['ttFresh', ['lookup'], 'codex gpt-6.1-sol medium @ttadk'],
+  // Everything TTADK Sol can handle goes there first (user, 2026-11-07), Claude-strength rows included.
+  ['ttFresh', ['docs'], 'codex gpt-6.1-sol medium @ttadk'],
+  ['ttFresh', ['design'], 'codex gpt-6.1-sol high @ttadk'],
+  ['ttFresh', ['review-high'], 'codex gpt-6.1-sol xhigh @ttadk'],
+  ['ttFresh', ['implement', '--failures', '1'], 'codex gpt-6.1-sol xhigh @ttadk'],
+  // Not TTADK-capable: images, Claude-only rows, a second opinion on Codex's work.
+  ['ttFresh', ['image-gen'], 'codex gpt-6-luna low @main'],
+  ['ttFresh', ['computer-use'], 'claude sonnet medium'],
+  ['ttFresh', ['second-opinion', '--against', 'codex'], 'claude opus high'],
+  ['ttFresh', ['implement', '--exclude-account', 'ttadk'], 'codex gpt-6.1-sol xhigh @main'],
+  ['ttUnhealthy', ['implement'], 'codex gpt-6.1-sol xhigh @main'],
+  ['ttChatOut', ['lookup'], 'codex gpt-6.1-sol medium @ttadk'],
+  ['ttChatOut', ['image-gen'], 'DEFER'],
+  // Browser work: TTADK Codex when it is browser-ready, else Claude.
+  ['ttFresh', ['browser'], 'codex gpt-6.1-sol medium @ttadk', 'Chrome must be running'],
+  ['ttFresh', ['browser', '--failures', '2'], 'claude sonnet medium'],
+  ['ttNoBrowser', ['browser'], 'claude sonnet medium', 'never switch to another connected browser'],
+  ['fresh', ['browser'], 'claude sonnet medium'],
+  ['ttFresh', ['browser', '--exclude-account', 'ttadk'], 'claude sonnet medium'],
   // Browser workers get the Chrome pairing clause; code work doesn't (nightly review 2026-11-05: video-agent W258).
   ['claudeOver', ['computer-use'], 'claude sonnet medium', 'select_browser'],
   ['fresh', ['ui-browser'], 'claude sonnet high', 'select_browser'],

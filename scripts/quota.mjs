@@ -41,6 +41,8 @@ for (const r of st.codex.rows) {
   if (r.a.resets) console.log(`  codex  ${tag}reset cards: ${r.a.resets.count}${r.a.resets.credits.length ? ` (expire ${r.a.resets.credits.map((c) => fmt(c.expiresAt)).join(', ')})` : ''}`);
 }
 if (!data.codexAccounts) console.log(`  codex  unavailable: ${data.errors.codex ?? 'unknown error'}`);
+const TTA = st.codex.ttadk;
+if (TTA) console.log(`  codex  ${TTA.name} (TTADK gateway): ${TTA.healthy ? 'healthy' : `unavailable — ${TTA.reason}`}; hub ${TTA.live ? 'up' : 'down'}; ${TTA.active} turns running; browser ${TTA.browser ? 'ready' : 'not set up'}${TTA.ssoLeftH != null ? `; SSO ${Math.round(TTA.ssoLeftH)}h left` : ''}; models ${TTA.models.join(', ')}`);
 console.log(`budget: claude ${st.claude.status} (now: spare ≤${st.claude.spareLine}%, cap ${st.claude.cap}%, ${st.claude.reserve ?? '?'}% kept for orchestration until the reset); `
   + `codex ${st.codex.out ? 'out' : st.codex.rotate ? `→ rotate ${st.codex.rotate.map((r) => r.a.name).join('/')}` : st.codex.pick ? `→ ${st.codex.pick.a.name}` : st.codex.redeem ? `→ redeem a card on ${st.codex.redeem.a.name}` : 'unreadable'}${st.codex.underused ? ', underused' : ''}${st.codex.overspending ? ', overspending' : ''}`
   + `${st.codex.cardsHeld ? `, ${st.codex.cardsHeld} reset card(s)` : ''}`);

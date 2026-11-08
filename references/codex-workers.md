@@ -108,12 +108,134 @@ card gains about `used + time-left/window − 1` windows:
   standing approval (user, 2026-11-03).
 - After redeeming, run `quota.mjs --fresh`.
 
+## TTADK (company gateway) as a Codex account (user, 2026-11-07)
+
+TTADK serves the company's model gateway, which includes GPT-6.1 Sol. It runs the same Codex binary, so `codex exec`,
+resume, the read-only sandbox and hub workers behave as with a ChatGPT account (verified 2026-11-06/07).
+
+**Why it's preferred:** usage goes to the company and counts toward the user's Devmind AI contribution, not to a
+ChatGPT plan. **Prefer it whenever it is healthy; fall back to the ChatGPT accounts when it isn't.** `route.mjs` does
+this.
+
+### Setup on a new machine
+
+1. Install the CLI: `npm install -g @byted/ttadk@latest --registry=https://bnpm.byted.org`.
+2. Log in to SSO once. The user runs `! ttadk auth login sso`. The session lasts about two weeks; `quota.mjs` warns two
+   days before it ends.
+3. Run `node <this skill>/scripts/codex-worker.mjs ttadk-setup`. It:
+   - checks `ttadk`, the SSO session and that the gateway lists `gpt-6.1-sol` for codex;
+   - creates `~/.codex-ttadk` with the gateway provider config (auth through `ttadk get_params --sso sso`);
+   - symlinks `AGENTS.md`, `skills` and `rules` from `~/.codex`;
+   - registers account `ttadk` (kind `ttadk`) on the next hub port.
+4. Start its hub: `codex-worker.mjs --account ttadk hub`. Hub workers need it; `codex exec` runs don't.
+5. For browser work, also run `codex-worker.mjs --account ttadk browser-setup` (see the next section).
+
+### Models and routing
+
+- **Models:** the gateway's codex list is `ttadk models -f json` (agents including `codex`). As of 2026-11 it has
+  `gpt-6.1-sol` and `gpt-5.6-terra`, but no Luna, Astra or GPT-6.1 Terra. The image tool isn't served either.
+- **Routing:** every task TTADK's Sol can handle runs there first (user, 2026-11-07), as Sol at the row's effort (at
+  least `medium`). Claude-only rows, image generation, second opinions on Codex's work, and browser work before
+  `browser-setup` follow the earlier routing (`references/model-routing.md`).
+- **Quality:** a 40-run benchmark against ChatGPT's GPT-6.1 Sol showed equal pass rates, the same reasoning-token
+  scaling with effort, and equal output speed. Small calls carry about 5s of extra latency.
+
+### Health and fallback
+
+`quota.mjs` and `route.mjs` treat TTADK as usable when the `ttadk` CLI is present, the SSO session is active and the
+gateway lists a healthy `gpt-6.1-sol`. The hub being down only matters for hub workers, and the router says to start it.
+
+There is no concurrency cap (user, 2026-11-07):
+- The gateway limits queries per minute. About 90 per minute sustained was fine; a burst of 20 simultaneous starts got
+  throttled.
+- **A rate-limited run is retried once on TTADK.** `codex-worker` prints a `rate-limited:` line when a turn fails that
+  way.
+- If the retry fails too, or the run fails for TTADK reasons (SSO, auth, gateway error), re-route with
+  `route.mjs … --exclude-account ttadk`.
+- Record repeated TTADK trouble in the ledger; the nightly review reads it.
+
+### Data
+
+The guide states no data-security rules, and a compliance question about it was taken offline. Use it for TikTok/ByteDance
+engineering work. Ask the user before sending other companies' or personal data through it.
+
+## Browser use (and Computer Use) on a Codex worker (verified 2026-11-07)
+
+A Codex worker can operate the user's signed-in Chrome through the ChatGPT app's **Chrome plugin**. It can also operate
+desktop apps through the **computer-use plugin**. Both use the local pieces the ChatGPT desktop app uses, and both work
+with any model provider, TTADK included. Routing (user, 2026-11-07): the `browser` row goes to TTADK Codex when that
+account is browser-ready, and to Claude otherwise.
+
+### Prerequisites (once per machine)
+
+- **ChatGPT desktop app.** Install it and open it once. It unpacks the bundled plugins under
+  `~/.codex/.tmp/bundled-marketplaces/openai-bundled/` and ships `node_repl` under
+  `/Applications/ChatGPT.app/Contents/Resources/cua_node/`.
+- **ChatGPT Chrome extension.** In the ChatGPT app, go to Settings > Computer use > Google Chrome and install the
+  extension; this also registers the native host `com.openai.codexextension`. Verify with
+  `node <plugin>/scripts/check-extension-installed.js --browser chrome --json`.
+- **macOS permissions (computer use only).** "Codex Computer Use" needs Screen Recording and Accessibility, which the
+  ChatGPT app's computer-use setup asks for.
+- **Account config.** Run `codex-worker.mjs --account <name> browser-setup` on an account with its own config.toml,
+  such as `ttadk`. It refuses a home whose config.toml is a symlink to `~/.codex`. It writes:
+  - the bundled marketplace, with the `chrome` and `computer-use` plugins enabled;
+  - `node_repl` with `default_tools_approval_mode = "approve"` (otherwise CLI runs refuse its calls outright);
+  - `NODE_REPL_TRUSTED_SERVICES = {"sky":"@oai/sky/service","browser":"@oai/browser-desktop/service"}`. The ChatGPT app
+    sets this itself; without it the CLI fails with "Trusted RPC service is not configured: browser", or with "sky
+    requires node_repl" for computer use.
+
+  It then marks the account `browser: true` in `codex-accounts.json`.
+
+### Running a browser worker
+
+- **Hub workers only.** Per-site approval ("Allow Browser use to access <origin>?") and per-app approval arrive as MCP
+  elicitations. Only `codex-worker` can answer them: `--browser-origins` takes origins or host globs such as
+  `*.bytedance.net`, and `--computer-use-apps` takes bundle ids. Those flags start the thread on-request; the worker
+  accepts listed sites and apps for the session, declines everything else, and logs each decision.
+  - `codex exec` can't answer elicitations, so it can't reach any site.
+  - The official `[browser_use.origins]`, `[browser_use.default_origin_policy]` and `[computer_use.macos.bundle_ids]`
+    config is not consulted on CLI runs (tested).
+  - `route.mjs browser` prints the command, with `POLICY.browserOrigins` (internal domains) plus `--origins`.
+- **Chrome must already be running.** In the read-only sandbox a worker can't check processes or launch apps, and the
+  plugin's own docs say to ask before launching Chrome. Run `pgrep -x "Google Chrome" >/dev/null || open -a "Google Chrome"`
+  before dispatching.
+- **Computer use needs an unlocked screen.** A locked Mac shows no windows (`cgWindowNotFound`), and `codex-worker`
+  exits 5 early. The ChatGPT app's "Locked use" unlock is reserved to its own turns by design. Don't try to reuse it.
+- **Codex browser brief.** Paste these clauses into every Codex browser worker's brief:
+  1. "Use the node_repl `js` tool (may appear as `mcp__node_repl__js`). First run:
+     `const { setupBrowserRuntime } = await import("<chrome plugin>/scripts/browser-client.mjs"); const agent = await setupBrowserRuntime(); const chrome = await agent.browsers.get("chrome"); nodeRepl.write(await chrome.documentation());`
+     and follow that documentation, including tab-claiming-chrome."
+  2. "Work in tabs you create (`chrome.tabs.new()`). If your own click opens a new tab, you may claim exactly that tab:
+     list `chrome.user.openTabs()` before and after the click, and claim the new entry whose URL matches the link. Close
+     the tabs you created and any tab you claimed; claimed tabs are not closed automatically. Never read, touch or
+     close the user's other tabs."
+  3. "Read-only unless this brief says otherwise: don't submit, approve, buy or change settings."
+  4. "Don't read cookies, passwords or storage. If a site is declined or sign-in blocks you, report BLOCKED with the
+     exact error rather than working around it."
+- **Measured (2026-11-07, TTADK Sol, read-only):**
+  - Feishu wiki: read and followed a new-tab link; BITS and ByteCloud dashboards: read.
+  - Google search: typed a query and pressed Enter; example.com: screenshot.
+  - A site outside the allow-list was declined.
+  - Each task took 50–110s. Claude in Chrome did the same suite in 4–20s, because Codex reloads the plugin and its
+    docs on every run.
+- **Fragility:** this relies on ChatGPT.app internals (`NODE_REPL_TRUSTED_SERVICES`, the cua_node paths). After a
+  ChatGPT app update, rerun `browser-setup`, or fix `config.toml` by hand if a path moved. If Codex browser work keeps
+  failing, re-route with `--exclude-account ttadk` (it goes to Claude) and tell the user.
+  - `browser-setup` writes the node_repl env the ChatGPT app writes for itself, including `env_vars` for the
+    `BROWSER_USE_ACCESS_*` pass-through, `BROWSER_USE_AVAILABLE_BACKENDS = "chrome,iab,mcpapps"`,
+    `BROWSER_USE_TINYSKY_ENABLED`, and `BROWSER_USE_CODEX_APP_VERSION`, which is read from ChatGPT.app's Info.plist.
+    Rerunning it rewrites its own marked block in place.
+- **"Browser is not available: chrome"** comes up even when everything is set up, if the extension's native host
+  ("ChatGPT for Chrome", socket under `/tmp/codex-browser-use/`) is momentarily disconnected. On 2026-11-07 it came back
+  on its own within a minute. `codex-worker` prints a `browser-unavailable:` line. Check
+  `pgrep -f "ChatGPT for Chrome"`, wait a minute, and retry once. If it fails again, re-route to Claude.
+
 ## Permissions and environment
 
 - The user's `~/.codex/config.toml` defaults to yolo (`approval_policy = "never"`, `sandbox_mode = "danger-full-access"`), which is the equivalent of bypass mode. On another machine, check it before assuming. The CLI flags are `-s read-only|workspace-write|danger-full-access` and `--dangerously-bypass-approvals-and-sandbox`.
 - **Never give a Codex worker more than the orchestrator has.** That is the same rule as for Claude workers, and it keeps a Codex worker from doing what this session's permissions would block. `danger-full-access` only when the orchestrator runs in bypass mode; otherwise `workspace-write` for writers, and keep anything the orchestrator would need approval for (pushes, external posts, installs) out of the brief and do it yourself, with approval.
 - **`workspace-write` can't run git writes** (verified 2026-10-30): Codex keeps every git metadata dir read-only in it — the worktree's `.git`, the main repo's `.git/worktrees/<name>`, even when added as a writable root — so `git add`, `commit`, `fetch` and `rebase` fail with "Operation not permitted". That is deliberate (a sandboxed write to `.git/hooks` or `.git/config` would run outside the sandbox at the next git command), so don't work around it. Brief such workers to edit only, leave the changes uncommitted and report the changed files and a commit message; then review the diff and commit yourself. If the diff touches hook scripts or their config (`.husky/`, `.pre-commit-config.yaml`, `core.hooksPath` targets, package scripts run by hooks), commit with `--no-verify` or ask the user, since your commit would run them unsandboxed. Its network follows `[sandbox_workspace_write] network_access` in `~/.codex/config.toml` (on in the user's config); `--network on|off` overrides it per worker or turn.
-- **Quota**: `codex-worker.mjs [--account <name>] usage` prints an account's windows, reset cards and id as JSON (`quota` the windows only); `scripts/quota.mjs` combines every account with Claude's (see SKILL.md, routing).
+- **Quota**: `codex-worker.mjs [--account <name>] usage` prints a ChatGPT account's windows, reset cards and id as JSON (`quota` the windows only); `scripts/quota.mjs` combines every account with Claude's (see SKILL.md, routing). A TTADK account has no windows; `quota.mjs` reports its health instead (see TTADK above).
 - **Read-only tasks**: pass `-s read-only`, and say "read-only" in the brief.
 - **Skills**: `~/.codex/skills` is symlinked to the same skills directory, so Codex sees most skills. Some can be disabled per skill in config.toml under `[[skills.config]] enabled = false`.
 - **Memory**: `~/.codex/AGENTS.md` bridges to Claude: it tells Codex to read `~/.claude/CLAUDE.md`, then the memory files a brief's "Relevant memory" section names, then the `memory/MEMORY.md` of the project its working directory maps to. That is only an instruction (in a 2026-10 sample, about 4 of 7 real worker runs read any Claude memory), so the brief's "Relevant memory" section, as SKILL.md describes, is what makes it reliable. Tested 2026-10-30 on Luna `low`: given only a list of memory paths, it answered without opening any file; told "before anything else, read each of these with a shell command; they are required input", it read them and `~/.claude/CLAUDE.md` and answered both questions correctly. What Codex learns goes to its own `~/.codex/memories/`, which Claude never reads; the report's "Durable lessons" section brings it back.

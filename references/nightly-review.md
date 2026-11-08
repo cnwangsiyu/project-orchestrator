@@ -21,6 +21,12 @@ These are the user's decisions (2026-10-30 to 2026-11-03):
   - Suggest one only at ≥99%, or before a card expires.
   - Every redemption needs the user's explicit yes, every time. Never redeem a card yourself.
 - **Fable, Astra, `max` effort and an exhausted ladder need the user's OK.**
+- **Codex accounts and browser (2026-11-07):**
+  - Every task TTADK's GPT-6.1 Sol can handle runs there first whenever TTADK is healthy. Only the tasks it can't
+    handle, or all tasks while it's unhealthy or excluded, follow the earlier routing (ChatGPT accounts, Claude).
+  - TTADK has no concurrency cap: retry a rate-limited run once, then re-route without it.
+  - Browser work goes to TTADK Codex when it is browser-ready, else to Claude.
+  - Desktop computer use stays on Claude.
 - **Permissions (2026-11-05):**
   - Before dispatching, the orchestrator does only the minimal permission-only part it is already authorized for,
     and workers do the rest.

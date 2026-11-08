@@ -200,6 +200,17 @@ effort, Codex account and launch command from
     illustrations, mockup images) goes to Codex as `image-gen` (user, 2026-11-03).
   - Quota moves: Codex first for anything either vendor can do. Claude takes the work it is clearly
     better at only while it has spare.
+  - TTADK first (user, 2026-11-07): when the TTADK company gateway is healthy, every task its
+    GPT-6.1 Sol can handle runs there first, Claude-strength rows included. Exceptions are
+    Claude-only work, image generation, a second opinion on Codex's own work, and browser work
+    before `browser-setup`. Everything else follows the routing above; ChatGPT accounts are
+    used by their quota. TTADK has no concurrency cap: a
+    rate-limited run is retried once on TTADK, then re-routed with `--exclude-account ttadk`; so
+    is a run that fails for TTADK reasons (SSO, auth, gateway errors).
+  - Browser work (`browser`: web pages in the user's Chrome) goes to TTADK Codex when that account
+    is browser-ready, otherwise to Claude. Desktop apps, Artifact/Docs and peer negotiation stay
+    on Claude (`computer-use`). Setup for a new machine: `references/codex-workers.md`, "TTADK" and
+    "Browser use on a Codex worker".
   - Effort notches: lower for an automatic check, higher for high stakes, higher while Codex is
     underused or front-loading its reset cards.
   - The escalation ladder, the Codex account, the sandbox, and a cross-vendor second opinion for

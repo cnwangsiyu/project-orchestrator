@@ -3,7 +3,8 @@
 //
 //   route <category> [--stakes low|normal|high] [--auto-check] [--failures N] [--writes | --read-only]
 //                    [--against claude|codex] [--no-redeem] [--project SLUG] [--dry]
-//                    [--impact release|service|throwaway]   (required for implement, implement-hard, debug, science) [--mode <orchestrator permission mode>] [--cwd DIR] [--task-dir DIR]
+//                    [--impact release|service|throwaway]   (required for implement, implement-hard, debug, science)
+//                    [--exclude-account a,b] [--origins p,q] [--mode <orchestrator permission mode>] [--cwd DIR] [--task-dir DIR]
 //                    [--name NAME] [--fresh] [--json]
 //   route --table          (the routing table: categories, first pick, alternative, escalation ladder)
 //
@@ -14,7 +15,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readState, analyze, leanLines, readProfiles, hours, withLock, SHARED, ROUTE_LOG } from './lib/state.mjs';
+import { readState, analyze, leanLines, readProfiles, hours, withLock, SHARED, ROUTE_LOG, POLICY } from './lib/state.mjs';
 
 const SKILL = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const RR = process.env.ROUTE_RR || path.join(SHARED, 'route-rotation.txt'); // launch counter for account rotation
@@ -42,7 +43,9 @@ const TABLE = {
   docs: { desc: 'docs, reports, user-facing writing, Feishu docs', kind: 'claudeBetter', shape: 'worker', writes: true, first: C('sonnet', 'medium'), alt: X(SOL, 'medium'), ladder: [C('opus', 'medium')] },
   draft: { desc: 'bulk prose drafts or translation, reviewed afterwards', kind: 'codexFirst', shape: 'exec', writes: true, first: X(TERRA, 'medium'), alt: C('sonnet', 'low'), ladder: [X(SOL, 'medium')] },
   'build-run': { desc: 'long procedural build, deploy or device workflow (Codex: you broker device handoffs by steering)', kind: 'codexFirst', shape: 'worker', writes: true, first: X(SOL, 'medium'), alt: C('sonnet', 'medium'), ladder: [X(SOL, 'high'), C('opus', 'high')] },
-  'computer-use': { desc: 'computer use, browser automation, Artifact/Docs tools, negotiating with peers', kind: 'claudeOnly', shape: 'worker', writes: true, first: C('sonnet', 'medium'), alt: null, ladder: [C('opus', 'high')] },
+  // Web pages in the user's signed-in Chrome (user, 2026-11-07): TTADK Codex when it is set up for browser use, else Claude.
+  browser: { desc: "operating web pages in the user's signed-in Chrome: internal consoles, Feishu docs, dashboards, forms (not desktop apps)", kind: 'browser', shape: 'worker', writes: false, first: X(SOL, 'medium'), alt: C('sonnet', 'medium'), ladder: [X(SOL, 'high'), C('sonnet', 'medium'), C('opus', 'high')] },
+  'computer-use': { desc: 'computer use on desktop apps, Artifact/Docs tools, negotiating with peers (web pages in Chrome: the browser row)', kind: 'claudeOnly', shape: 'worker', writes: true, first: C('sonnet', 'medium'), alt: null, ladder: [C('opus', 'high')] },
   science: { desc: 'scientific or numerical computation', kind: 'codexFirst', shape: 'worker', writes: true, first: X(SOL, 'xhigh'), alt: C('opus', 'xhigh'), ladder: [X(ASTRA, 'high')] },
   // Every task whose output is an image goes to Codex (user, 2026-11-03: Codex is better at it). The image tool makes the
   // picture; the chat model only writes prompts and checks results, so Luna low first, Sol when iterating needs judgment.
@@ -60,6 +63,8 @@ const label = (m) => `${m.vendor === 'claude' ? `Claude ${m.model}` : `Codex ${m
 
 // ---- args ----
 const BOOL = new Set(['auto-check', 'writes', 'read-only', 'fresh', 'json', 'table', 'no-redeem', 'dry']);
+// --exclude-account a,b: route around accounts that just failed (e.g. TTADK after a rate-limited retry or an auth error).
+// --origins p,q: extra sites (origins or host globs) a Codex browser worker may reach besides POLICY.browserOrigins.
 const argv = process.argv.slice(2), opts = {}, pos = [];
 for (let i = 0; i < argv.length; i++) {
   if (!argv[i].startsWith('--')) { pos.push(argv[i]); continue; }
@@ -96,28 +101,46 @@ const data = readState({ fresh: !!opts.fresh });
 const st = analyze(data);
 const { claude: QC, codex: QX } = st;
 const noRedeem = !!opts['no-redeem'];
-const codexOut = QX.out || (noRedeem && !QX.pick && !!QX.redeem); // a declined redemption leaves Codex out
+const excluded = new Set((typeof opts['exclude-account'] === 'string' ? opts['exclude-account'] : '').split(',').map((x) => x.trim()).filter(Boolean));
+// ChatGPT accounts (the quota-managed ones): out when every open account is spent/excluded and no card is due.
+const chatgptOpen = (QX.open ?? []).filter((r) => !excluded.has(r.a.name));
+const chatgptOut = QX.out || (noRedeem && !QX.pick && !!QX.redeem) || (!chatgptOpen.length && !(QX.redeem && !noRedeem && !excluded.has(QX.redeem.a.name)) && (QX.rows ?? []).length > 0);
+// TTADK (company gateway): preferred for Codex work whenever it is healthy and not excluded (user, 2026-11-07).
+const TT = QX.ttadk?.usable && !excluded.has(QX.ttadk.name) ? QX.ttadk : null;
+const ttHas = (model) => !!TT && TT.models.includes(model);
+const browserViaCodex = T.kind === 'browser' && !!TT && TT.browser;
+const codexOut = chatgptOut && !TT; // Codex is out only when neither TTADK nor a ChatGPT account can take work
 const why = [], needsOK = [], tell = [], notes = [];
 const claudeAllowed = (kind) => {
   if (QC.throttledUntil) return false; // a full 5h window: nothing new on Claude until it resets
-  if (kind === 'claudeOnly') return true;
+  if (kind === 'claudeOnly' || (kind === 'browser' && !browserViaCodex)) return true;
   if (QC.status === 'spare') return true;
   if (QC.status === 'near') return T.keepNear || stakes === 'high';
   return false; // over or unknown
 };
-const allowed = (x) => (x.vendor === 'claude' ? claudeAllowed(T.kind) : !codexOut);
+const allowed = (x) => (x.vendor === 'claude' ? claudeAllowed(T.kind) : T.kind === 'browser' ? browserViaCodex : !codexOut);
 
 // ---- 1. vendor locks, quota moves and the escalation ladder ----
 // The usable ladder: the first pick (or its same-tier alternative when quota rules it out), then every later step the
 // quota allows. --failures N takes step N, so each failure moves up even when some steps are ruled out.
 let base;
 if (cat === 'second-opinion') { base = opts.against === 'claude' ? [T.first, ...T.ladder] : [T.alt, C('opus', 'xhigh')]; why.push(`second opinion from the other vendor than ${opts.against}`); }
+else if (T.kind === 'browser' && !browserViaCodex) base = [T.alt, C('opus', 'high')];
 else base = [T.first, ...T.ladder];
+// Every task TTADK's GPT-6.1 Sol can handle goes to it first (user, 2026-11-07): Sol at the row's effort (at least
+// medium), one notch higher after a failure, then the row's own ladder. Not TTADK-capable: Claude-only rows, image
+// generation, a second opinion on Codex's work, and browser work while TTADK isn't browser-ready.
+const ttCapable = !!TT && ttHas(SOL) && T.kind !== 'claudeOnly' && cat !== 'image-gen' && !(cat === 'second-opinion' && opts.against === 'codex')
+  && !(T.kind === 'browser' && !browserViaCodex);
+if (ttCapable) {
+  const e0 = notch(X(SOL, base[0].effort === 'max' ? 'xhigh' : base[0].effort), 0);
+  base = [e0, notch(e0, +1), ...base];
+}
 let deferred = null;
 const retry = (h) => (h != null && Number.isFinite(h) ? ` — retry in ${hours(h)}` : '');
 if (st.stop) deferred = "neither vendor's usage is readable — check `claude -p /usage` and the Codex hubs before dispatching";
 else if (T.kind === 'claudeOnly' && QC.throttledUntil) deferred = `Claude-only work and Claude's 5h window is full${retry((QC.throttledUntil - Date.now()) / 3600000)}`;
-else if (T.kind === 'codexOnly' && codexOut) deferred = `Codex-only work and Codex is ${QX.throttledOnly ? 'paused by its 5h window' : 'out'}${retry(QX.nextFree)}`;
+else if (T.kind === 'codexOnly' && chatgptOut) deferred = `Codex-only work and Codex is ${QX.throttledOnly ? 'paused by its 5h window' : 'out'}${retry(QX.nextFree)}`;
 else if (codexOut && !QX.throttledOnly && stakes === 'low' && T.kind !== 'claudeOnly') deferred = `Codex is out and this is low-stakes: it waits for Codex${retry(QX.nextFree)}`;
 let m = null, prevRaw = null;
 if (!deferred) {
@@ -140,18 +163,26 @@ if (!deferred) {
 // ---- 2. effort ----
 // tune(): the effort notches for a ladder step taken after f failures. Also used to rebuild the previous attempt, so a
 // retry that a quota notch has made identical to it is flagged instead of reported as an escalation.
+// TTADK takes the Codex pick when the gateway has its model; when the ChatGPT accounts are out, it also takes models it
+// lacks as Sol (image generation excepted: the image tool is not on the gateway).
+const onTTADK = (x) => x?.vendor === 'codex' && !!TT && (ttHas(x.model) || (chatgptOut && cat !== 'image-gen'));
 const tune = (x, f, log) => {
   const step = (d, reason) => { const n = notch(x, d); if (n.effort !== x.effort) { log(reason); x = n; } };
   if (f === 0 && opts['auto-check'] && stakes !== 'high') step(-1, 'one notch lower: an automatic check catches a miss');
   if (f === 0 && stakes === 'high') step(+1, 'one notch higher: high stakes');
   if (f === 0 && stakes === 'low') step(-1, 'one notch lower: low stakes');
   const cheap = ['lookup', 'extract', 'image-gen', 'draft'].includes(cat);
-  if (x.vendor === 'codex' && QX.underused && !cheap) step(+1, QX.frontLoad ? 'one notch higher: front-loading Codex while reset cards are in hand' : 'one notch higher: Codex underused');
-  else if (x.vendor === 'codex' && QX.overspending && opts['auto-check'] && stakes !== 'high') step(-1, 'one notch lower: Codex overspending');
+  if (x.vendor === 'codex' && !onTTADK(x) && QX.underused && !cheap) step(+1, QX.frontLoad ? 'one notch higher: front-loading Codex while reset cards are in hand' : 'one notch higher: Codex underused');
+  else if (x.vendor === 'codex' && !onTTADK(x) && QX.overspending && opts['auto-check'] && stakes !== 'high') step(-1, 'one notch lower: Codex overspending');
   if (x.vendor === 'claude' && QC.expiring && !cheap) step(+1, 'one notch higher: Claude headroom expires within a day');
   if (x.vendor === 'claude' && x.model === 'fable' && QC.avoidFable) { x = C('opus', 'xhigh'); log('Fable window nearly used → Opus xhigh'); }
   return x;
 };
+if (m && onTTADK(m) && !ttHas(m.model)) {
+  const sub = notch(X(SOL, m.effort), 0);
+  why.push(`${m.model} isn't on the TTADK gateway and the ChatGPT accounts are out → ${label(sub)} on TTADK`);
+  m = sub;
+}
 if (m) {
   m = tune(m, failures, (r) => why.push(r));
   const prev = prevRaw && tune(prevRaw, failures - 1, () => {});
@@ -194,8 +225,10 @@ const inRepo = (() => {
   for (let d = path.resolve(opts.cwd); ; d = path.dirname(d)) { if (fs.existsSync(path.join(d, '.git'))) return true; if (d === path.dirname(d)) return false; }
 })();
 // The account: a rotation across accounts that must all be spent soon, else the earliest deadline.
-let acct = QX.pick ?? (noRedeem ? null : QX.redeem) ?? null;
-if (QX.rotate && m?.vendor === 'codex') {
+let acct = (QX.pick && !excluded.has(QX.pick.a.name) ? QX.pick : chatgptOpen[0]) ?? (noRedeem ? null : QX.redeem) ?? null;
+const ttadkRun = m && onTTADK(m);
+if (ttadkRun) acct = { a: { name: TT.name, live: TT.live } };
+else if (QX.rotate && m?.vendor === 'codex' && QX.rotate.every((r) => !excluded.has(r.a.name))) {
   const n = withLock(RR, () => { let c = 0; try { c = Number(fs.readFileSync(RR, 'utf8')) || 0; } catch {} fs.writeFileSync(RR, String(c + 1)); return c; });
   acct = QX.rotate[n % QX.rotate.length];
 }
@@ -206,7 +239,8 @@ const launch = (x, shape = T.shape) => {
   }
   const an = acct?.a.name ?? 'main', home = profiles[an]?.home ?? '~/.codex';
   if (shape === 'exec') return { launcher: 'codex-exec', account: an, command: `CODEX_HOME=${home} codex exec${inRepo === false ? ' --skip-git-repo-check' : ''} -C ${cwd} -s ${sandbox} -m ${x.model} -c model_reasoning_effort='"${x.effort}"' --json -o ${taskDir}/codex-last.md ${prompt} < /dev/null > ${taskDir}/codex.jsonl 2>&1   (background task${inRepo === null ? '; add --skip-git-repo-check outside a repo' : ''})` };
-  return { launcher: 'codex-worker', account: an, command: `node ${SKILL}/scripts/codex-worker.mjs --account ${an} start --cwd ${cwd} --model ${x.model} --effort ${x.effort} --sandbox ${sandbox} --name ${name} --log ${taskDir}/codex.jsonl --out ${taskDir}/codex-last.md ${prompt}   (background task)` };
+  const origins = cat === 'browser' ? ` --browser-origins '${[...POLICY.browserOrigins, ...(typeof opts.origins === 'string' ? opts.origins.split(',') : [])].map((o) => o.trim()).filter(Boolean).join(',')}'` : '';
+  return { launcher: 'codex-worker', account: an, command: `node ${SKILL}/scripts/codex-worker.mjs --account ${an} start --cwd ${cwd} --model ${x.model} --effort ${x.effort} --sandbox ${sandbox} --name ${name}${origins} --log ${taskDir}/codex.jsonl --out ${taskDir}/codex-last.md ${prompt}   (background task)` };
 };
 // The same quality gate for both vendors, so outcomes compare: code work gets an independent review before it's accepted.
 // Review only where a mistake is costly to undo; reviewers follow references/review-rubric.md (blocking issues only).
@@ -220,6 +254,16 @@ if (m && ['build-run', 'implement', 'implement-hard', 'debug', 'ui-browser', 'co
 // to the orchestrator (nightly review 11-05: W258 blocked on "can't see local browser 1e7c2b37", the user then chose
 // "orchestrator does the console", and that orchestrator made 510 browser calls in 24h).
 if (m && ['ui-browser', 'computer-use'].includes(cat)) notes.push('brief: name the Chrome to use by its deviceId from the ledger (the user picks it once; mcp__claude-in-chrome__list_connected_browsers lists them) and tell the worker: if a browser tool says several browsers are connected, call select_browser with that deviceId; if the browser still isn\'t reachable, report BLOCKED with the tool\'s exact error, never ask the orchestrator to click for it. Headless Playwright is fine where the user\'s sign-in isn\'t needed');
+if (ttadkRun) {
+  notes.push(`on TTADK (account ${TT.name}): if the run fails rate-limited (QPM / concurrency), retry it once there; if it fails again, or fails for TTADK reasons (SSO, auth, gateway errors), re-route with --exclude-account ${TT.name}`);
+  if (!TT.live && T.shape !== 'exec') notes.push(`TTADK hub is down: start it first — node ${SKILL}/scripts/codex-worker.mjs --account ${TT.name} hub`);
+}
+if (m && cat === 'browser') {
+  notes.push('Chrome must be running before the worker starts (workers can\'t launch it): pgrep -x "Google Chrome" >/dev/null || open -a "Google Chrome"');
+  if (m.vendor === 'codex') notes.push(`"Browser is not available: chrome" (codex-worker prints browser-unavailable:) means the Chrome extension host is briefly disconnected: wait a minute, retry once, then re-route with --exclude-account ${acct?.a?.name ?? TT?.name}`);
+  if (m.vendor === 'codex') notes.push(`brief: include the "Codex browser brief" clauses from references/codex-workers.md (plugin bootstrap from ${TT?.chromePlugin ?? '<chrome plugin>'}/scripts/browser-client.mjs; work in tabs you create; a tab your own click opens may be claimed via user.openTabs()/claimTab and must be closed; never touch the user's other tabs); sites outside --browser-origins are declined — add them with --origins when the task needs them`);
+  else notes.push('Claude browser worker (Claude in Chrome): if the extension reports several browsers, select only this Mac\'s Chrome (deviceId in the ledger); never switch to another connected browser');
+}
 if (m?.vendor === 'codex' && sandbox === 'workspace-write') notes.push('workspace-write can\'t run git writes: brief the worker to edit only and report the files and a commit message; you review and commit');
 if (m?.vendor === 'codex' && acct && !acct.a.live) notes.push(T.shape === 'exec' ? `account ${acct.a.name}'s reading is stale (its hub is down); codex exec still works` : `account ${acct.a.name}'s hub is down — start it first: codex-worker.mjs --account ${acct.a.name} hub`);
 if (!QX.readable && m?.vendor === 'codex') notes.push('Codex usage unreadable; routing as if it has room');
@@ -233,7 +277,7 @@ const out = {
 };
 // Every real routing decision is logged for the nightly review (--dry or ROUTE_LOG=0 to skip, e.g. for experiments).
 if (!opts.dry && process.env.ROUTE_LOG !== '0') {
-  const rec = { t: Date.now(), project: typeof opts.project === 'string' ? opts.project : null, name: typeof opts.name === 'string' ? opts.name : null, category: cat, stakes, failures, impact, review: reviewKind,
+  const rec = { t: Date.now(), project: typeof opts.project === 'string' ? opts.project : null, name: typeof opts.name === 'string' ? opts.name : null, category: cat, stakes, failures, impact, review: reviewKind, excluded: [...excluded], ttadk: !!ttadkRun,
     autoCheck: !!opts['auto-check'], noRedeem, deferred, pick: m ? { vendor: m.vendor, model: m.model, effort: m.effort, account: out.pick?.account ?? null } : null,
     second: second ? { vendor: second.vendor, model: second.model, effort: second.effort } : null, why, needsOK, tell,
     quota: { claude: QC.status, codexOut: QX.out, underused: QX.underused, frontLoad: QX.frontLoad, overspending: QX.overspending, redeemDue: !!QX.redeem } };

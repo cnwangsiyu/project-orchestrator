@@ -6,6 +6,9 @@
 //   codex-worker hub                                                       (start the hub if it isn't up)
 //   codex-worker start  --cwd DIR --effort E --sandbox S [--network on|off] [--model M] [--name N] --log FILE [--out FILE]  "<prompt>"
 //   codex-worker turn   --thread ID --effort E --log FILE [--out FILE] [--model M] [--sandbox S [--network on|off]]      "<prompt>"
+//                       start/turn also take --browser-origins <origins/host globs> and --computer-use-apps <bundle ids>
+//   codex-worker browser-setup [--account NAME]                           (Chrome + Computer Use config for that home)
+//   codex-worker ttadk-setup [--name ttadk] [--home DIR] [--port N]       (the TTADK company gateway as an account)
 //   codex-worker wait   --thread ID [--log FILE] [--out FILE]            (start/turn/wait take --stall-min M, default 30)
 //   codex-worker steer  --thread ID                                                                     "<message>"
 //   codex-worker interrupt --thread ID
@@ -32,7 +35,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 
 // --account NAME (anywhere on the line) picks a profile from the accounts file: its own CODEX_HOME, so its own login,
 // and its own hub. Without it: CODEX_HOME / CODEX_HUB from the environment, else ~/.codex and the default hub.
@@ -86,6 +89,148 @@ if (cmd === 'accounts') {
   for (const [name, a] of Object.entries(reg)) console.log([name, a.home, a.hub, a.email ?? '-', a.plan ?? '-'].join('\t'));
   process.exit(0);
 }
+// Browser use and Computer Use on a Codex worker (verified 2026-11-07 with the TTADK gateway's gpt-6.1-sol). Both drive the
+// local pieces the ChatGPT app uses: its bundled `chrome` and `computer-use` plugins (instructions + browser-client) and
+// ChatGPT.app's node_repl MCP server, which loads @oai/browser-desktop (Chrome, via the ChatGPT Chrome extension and its
+// native host) and @oai/sky (desktop apps, via the "Codex Computer Use" helper).
+// `browser-setup` writes what a CLI run needs into the account's config.toml (backed up first):
+// - enable the bundled chrome and computer-use plugins;
+// - node_repl with tool calls auto-approved (under approvalPolicy never they would be refused outright);
+// - NODE_REPL_TRUSTED_SERVICES for sky + browser (the ChatGPT app sets it itself; a CLI launch has to).
+// Per-site and per-app access stays per task: `start/turn --browser-origins` / `--computer-use-apps` answer those approvals.
+// The official [browser_use.origins] / [computer_use.macos.bundle_ids] config is not consulted on CLI runs (tested).
+if (cmd === 'browser-setup' || cmd === 'computer-use-setup') {
+  const home = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+  const cfg = path.join(home, 'config.toml');
+  const repl = '/Applications/ChatGPT.app/Contents/Resources/cua_node';
+  const market = path.join(os.homedir(), '.codex', '.tmp', 'bundled-marketplaces', 'openai-bundled');
+  const chromePlugin = path.join(market, 'plugins', 'chrome');
+  if (!fs.existsSync(path.join(repl, 'bin', 'node_repl'))) die(`ChatGPT.app's node_repl not found under ${repl}: install the ChatGPT desktop app`, 1);
+  if (!fs.existsSync(chromePlugin)) die(`bundled chrome plugin not found under ${market}: open the ChatGPT desktop app once (it unpacks the bundled plugins)`, 1);
+  try { if (fs.lstatSync(cfg).isSymbolicLink()) die(`${cfg} is a symlink to another home's config; browser-setup only writes an account's own config (TTADK homes have one)`, 1); } catch {}
+  // The ChatGPT Chrome extension must be installed and enabled, with its native host registered.
+  try { execFileSync(process.execPath, [path.join(chromePlugin, 'scripts', 'check-extension-installed.js'), '--browser', 'chrome', '--json'], { encoding: 'utf8', timeout: 20000 }); }
+  catch (e) { die(`ChatGPT Chrome extension check failed (${String(e.stdout || e.message).split('\n')[0]}): in the ChatGPT app, Settings > Computer use > Google Chrome > install the browser extension`, 1); }
+  const MARK = '# --- Browser/Computer Use (codex-worker browser-setup) ---', END = '# --- end browser-setup ---';
+  // The same node_repl environment the ChatGPT app writes for itself, with the app's own version (the Chrome backend
+  // checks it: without these, the browser runtime reports "Browser is not available: chrome").
+  let appVersion = '';
+  try { appVersion = execFileSync('/usr/libexec/PlistBuddy', ['-c', 'Print :CFBundleShortVersionString', '/Applications/ChatGPT.app/Contents/Info.plist'], { encoding: 'utf8' }).trim(); } catch {}
+  const block = `${MARK}
+[marketplaces.openai-bundled]
+source_type = "local"
+source = "${market}"
+
+[plugins."chrome@openai-bundled"]
+enabled = true
+
+[plugins."computer-use@openai-bundled"]
+enabled = true
+
+[mcp_servers.node_repl]
+args = []
+command = "${repl}/bin/node_repl"
+env_vars = ["BROWSER_USE_ACCESS_EXECUTOR_ID", "BROWSER_USE_ACCESS_PIPE_PATH", "BROWSER_USE_ACCESS_VERIFYING_IDENTITY"]
+startup_timeout_sec = 120
+default_tools_approval_mode = "approve"
+
+[mcp_servers.node_repl.env]
+NODE_REPL_NATIVE_PIPE_CONNECT_TIMEOUT_MS = "1000"
+NODE_REPL_NODE_MODULE_DIRS = "${repl}/lib/node_modules"
+NODE_REPL_NODE_PATH = "${repl}/bin/node"
+NODE_REPL_TRUSTED_CODE_PATHS = "${home}:${os.homedir()}/.codex:${repl}/lib/node_modules"
+NODE_REPL_TRUSTED_SERVICES = '{"sky":"@oai/sky/service","browser":"@oai/browser-desktop/service"}'
+BROWSER_USE_AVAILABLE_BACKENDS = "chrome,iab,mcpapps"
+BROWSER_USE_TINYSKY_ENABLED = "1"
+BROWSER_USE_CODEX_APP_BUILD_FLAVOR = "prod"
+BROWSER_USE_CODEX_APP_VERSION = "${appVersion}"
+CODEX_HOME = "${home}"
+${END}
+`;
+  let toml = fs.existsSync(cfg) ? fs.readFileSync(cfg, 'utf8') : '';
+  if (toml.includes(MARK)) {
+    // Rewrite our own block in place (rerun after a ChatGPT app update); an older block without END ran to the end.
+    const i = toml.indexOf(MARK), j = toml.indexOf(END, i);
+    toml = toml.slice(0, i) + block + (j >= 0 ? toml.slice(j + END.length).replace(/^\n/, '') : '');
+  } else {
+    if (/^\[mcp_servers\.node_repl\]/m.test(toml) || /^\[plugins\."(computer-use|chrome)@openai-bundled"\]/m.test(toml) || /^\[marketplaces\.openai-bundled\]/m.test(toml))
+      die(`${cfg} already has node_repl / plugin / openai-bundled sections that differ from what this writes; edit them by hand (references/codex-workers.md, "Browser use on a Codex worker")`, 1);
+    toml += `\n${block}`;
+  }
+  if (fs.existsSync(cfg)) fs.copyFileSync(cfg, `${cfg}.bak-browser-${Date.now()}`);
+  fs.writeFileSync(cfg, toml);
+  // Remember on the account profile that this home can take browser work (route.mjs reads it).
+  const reg = readAccounts();
+  const name = account ?? Object.keys(reg).find((k) => path.resolve(reg[k].home) === path.resolve(home));
+  if (name && reg[name]) { reg[name].browser = true; reg[name].chromePlugin = chromePlugin; writeAccounts(reg); }
+  console.log(`browser use configured in ${cfg}${name ? ` (account ${name} marked browser-ready)` : ''}. Launch workers through the hub with --browser-origins <patterns> (and --computer-use-apps <bundle ids> for desktop apps); keep Chrome running.`);
+  process.exit(0);
+}
+// The TTADK company gateway as a Codex account (user, 2026-11-07: prefer it whenever it works). Its own CODEX_HOME whose
+// config points the model provider at the gateway, authenticated by `ttadk get_params --sso sso` (SSO, no key).
+if (cmd === 'ttadk-setup') {
+  const name = typeof opts.name === 'string' ? opts.name : 'ttadk';
+  let ttadkBin = '';
+  try { ttadkBin = execFileSync('/bin/zsh', ['-lc', 'command -v ttadk'], { encoding: 'utf8' }).trim(); } catch {}
+  if (!ttadkBin) die('ttadk not found: npm install -g @byted/ttadk@latest --registry=https://bnpm.byted.org', 1);
+  let st = null;
+  try { st = JSON.parse(execFileSync(ttadkBin, ['auth', 'status', '-f', 'json'], { encoding: 'utf8', timeout: 30000 })); } catch {}
+  const sso = (st?.providers ?? []).find((x) => x.provider === 'sso');
+  if (sso?.status !== 'active') die('TTADK SSO is not logged in: ask the user to run `! ttadk auth login sso`', 1);
+  let models = [];
+  try { models = ((j) => (Array.isArray(j) ? j : j.models ?? []))(JSON.parse(execFileSync(ttadkBin, ['models', '-f', 'json'], { encoding: 'utf8', timeout: 60000, stdio: ['ignore', 'pipe', 'ignore'] }))).filter((m) => (m.availableAgents ?? []).includes('codex')).map((m) => m.id); } catch {}
+  if (!models.includes('gpt-6.1-sol')) die(`the TTADK gateway lists no gpt-6.1-sol for codex (models: ${models.join(', ') || 'none'})`, 1);
+  const reg = readAccounts();
+  reg.main ??= { home: path.join(os.homedir(), '.codex'), hub: 'ws://127.0.0.1:47321' };
+  const home = path.resolve(typeof opts.home === 'string' ? opts.home : reg[name]?.home ?? path.join(os.homedir(), `.codex-${name}`));
+  const ports = Object.entries(reg).filter(([k]) => k !== name).map(([, a]) => Number(new URL(a.hub).port));
+  const port = Number(opts.port ?? (reg[name] ? new URL(reg[name].hub).port : Math.max(...ports) + 1));
+  fs.mkdirSync(home, { recursive: true });
+  for (const f of ['AGENTS.md', 'skills', 'rules']) {
+    const src = path.join(os.homedir(), '.codex', f), dst = path.join(home, f);
+    if (fs.existsSync(src) && !fs.existsSync(dst)) fs.symlinkSync(src, dst);
+  }
+  const cfg = path.join(home, 'config.toml');
+  if (!fs.existsSync(cfg) || !fs.readFileSync(cfg, 'utf8').includes('model_provider = "ttadk_app"')) {
+    if (fs.existsSync(cfg)) fs.copyFileSync(cfg, `${cfg}.bak-ttadk-${Date.now()}`);
+    const keep = fs.existsSync(cfg) ? fs.readFileSync(cfg, 'utf8') : '';
+    fs.writeFileSync(cfg, `# TTADK company gateway (codex-worker ttadk-setup). Models: ${models.join(', ')}
+model = "gpt-6.1-sol"
+model_provider = "ttadk_app"
+
+[model_providers.ttadk_app]
+name = "ttadk_app"
+base_url = "https://llmbox-global.byteintl.net/"
+wire_api = "responses"
+
+[model_providers.ttadk_app.http_headers]
+X-Source = "ttadk"
+
+[model_providers.ttadk_app.auth]
+command = "${ttadkBin}"
+args = ["get_params", "--sso", "sso"]
+timeout_ms = 5000
+refresh_interval_ms = 2000000
+
+[sandbox_workspace_write]
+network_access = true
+${keep ? `\n# --- previous config ---\n${keep}` : ''}`);
+  }
+  reg[name] = { ...reg[name], home, hub: `ws://127.0.0.1:${port}`, kind: 'ttadk', models, ttadkBin };
+  writeAccounts(reg);
+  console.log(`TTADK account ${name}: ${home}, hub ws://127.0.0.1:${port}; codex models: ${models.join(', ')}`);
+  console.log(`start its hub:   node ${process.argv[1]} --account ${name} hub`);
+  console.log(`browser use:     node ${process.argv[1]} --account ${name} browser-setup`);
+  process.exit(0);
+}
+// The console session is locked: Computer Use sees no windows (cgWindowNotFound). The ChatGPT app's "Locked use" unlock is
+// reserved to its own turns by design, so a CLI worker can't use it; fail early instead.
+const screenLocked = () => {
+  try {
+    const out = execFileSync('python3', ['-c', "import ctypes,ctypes.util,re\ncf=ctypes.cdll.LoadLibrary(ctypes.util.find_library('CoreFoundation'))\nq=ctypes.cdll.LoadLibrary('/System/Library/Frameworks/Quartz.framework/Quartz')\nq.CGSessionCopyCurrentDictionary.restype=ctypes.c_void_p\ncf.CFCopyDescription.restype=ctypes.c_void_p;cf.CFCopyDescription.argtypes=[ctypes.c_void_p]\ncf.CFStringGetCString.argtypes=[ctypes.c_void_p,ctypes.c_char_p,ctypes.c_long,ctypes.c_uint32]\nb=ctypes.create_string_buffer(8192);cf.CFStringGetCString(cf.CFCopyDescription(q.CGSessionCopyCurrentDictionary()),b,8192,0x08000100)\nprint('locked' if re.search(r'CGSSessionScreenIsLocked\\W+=\\W*1',b.value.decode()) else 'unlocked')"], { encoding: 'utf8', timeout: 10000 });
+    return out.trim() === 'locked';
+  } catch { return false; }
+};
 if (cmd === 'account-add') {
   // A second (third, …) account: its own CODEX_HOME sharing the main home's config, instructions, skills and rules (not
   // its sessions, logins or databases), and its own hub port. The user logs it in once; it then runs side by side.
@@ -110,6 +255,17 @@ if (cmd === 'account-add') {
   console.log(`then:            node ${process.argv[1]} --account ${name} hub`);
   process.exit(0);
 }
+const CU_APPS = typeof opts['computer-use-apps'] === 'string' ? opts['computer-use-apps'].split(',').map((x) => x.trim()).filter(Boolean) : [];
+// --browser-origins: exact origins (https://x.y) or host globs (*.bytedance.net matches the host and its subdomains).
+const BU_ORIGINS = typeof opts['browser-origins'] === 'string' ? opts['browser-origins'].split(',').map((x) => x.trim()).filter(Boolean) : [];
+const originAllowed = (origin) => {
+  let host = ''; try { host = new URL(origin).hostname; } catch { return false; }
+  return BU_ORIGINS.some((p) => p === '*' || p === origin || (p.startsWith('*.') ? host === p.slice(2) || host.endsWith(p.slice(1)) : host === p));
+};
+// The per-app / per-site approvals only reach this client when the thread asks on request; under never, Codex declines
+// them itself. Other requests still get the refusals in REPLIES, so the sandbox stays the only bound.
+const APPROVAL_POLICY = CU_APPS.length || BU_ORIGINS.length ? 'on-request' : 'never';
+if (CU_APPS.length && (cmd === 'start' || cmd === 'turn') && screenLocked()) die("the screen is locked: Computer Use sees no windows while the Mac is locked (the ChatGPT app's Locked use is reserved to its own turns). Unlock it, or keep it unlocked while computer-use workers run.", 5);
 const hub = process.env.CODEX_HUB || 'ws://127.0.0.1:47321';
 const ready = () => fetch(hub.replace(/^ws/, 'http') + '/readyz', { signal: AbortSignal.timeout(2000) }).then((r) => r.ok, () => false);
 if (cmd === 'hub') {
@@ -144,7 +300,20 @@ const REPLIES = {
   'execCommandApproval': () => ({ decision: 'denied' }),
   'applyPatchApproval': () => ({ decision: 'denied' }),
   'item/permissions/requestApproval': () => ({ permissions: {} }),
-  'mcpServer/elicitation/request': () => ({ action: 'decline' }),
+  // Computer Use asks (an MCP elicitation from node_repl) before it uses each app, and Browser use before each site it
+  // reaches. Accept only the apps / sites this worker was launched with (--computer-use-apps / --browser-origins), for
+  // this session; decline everything else, as before. Each decision is logged to --log for audit.
+  'mcpServer/elicitation/request': (p) => {
+    const blob = JSON.stringify(p ?? {});
+    const fromRepl = p?.serverName === 'node_repl';
+    const app = (blob.match(/"tool_params":\{"app":"([^"]+)"/) || [])[1] ?? null;
+    const origin = (blob.match(/"tool_params":\{"origin":"([^"]+)"/) || [])[1] ?? null;
+    const isCU = fromRepl && /"connector_id":"computer-use"/.test(blob);
+    const isBU = fromRepl && /"connector_id":"browser-use"/.test(blob);
+    const ok = (isCU && app && CU_APPS.includes(app)) || (isBU && origin && originAllowed(origin));
+    if ((isCU || isBU) && opts.log) try { fs.appendFileSync(path.resolve(opts.log), JSON.stringify({ accessApproval: { kind: isCU ? 'app' : 'origin', target: app ?? origin, decision: ok ? 'accept' : 'decline', at: Date.now() } }) + '\n'); } catch {}
+    return ok ? { action: 'accept', content: {}, _meta: { persist: 'session' } } : { action: 'decline' };
+  },
   'item/tool/call': () => ({ contentItems: [{ type: 'inputText', text: 'Not available in this session.' }], success: false }),
   'item/tool/requestUserInput': (p) => ({ answers: Object.fromEntries((p.questions ?? []).map((q) => [q.id, { answers: [NO_USER] }])) }),
 };
@@ -179,6 +348,16 @@ const lastMessage = (items) => (items ?? []).filter((i) => i.type === 'agentMess
 // Prints the outcome and exits: status, usage, the final message's first line (whole message to --out).
 const report = async (threadId, turn, final, usage) => {
   console.log(`turn ${turn.status}${turn.error ? ' error=' + JSON.stringify(turn.error) : ''}`);
+  // A rate-limited / concurrency failure (e.g. the TTADK gateway's QPM limit): retry once on the same account, then
+  // re-route without it (user, 2026-11-07).
+  if (turn.status === 'failed' && /rate.?limit|qpm|too many requests|429|concurren/i.test(JSON.stringify(turn.error ?? ''))) {
+    console.log(`rate-limited: retry this task once on ${account ?? 'this account'} (codex-worker turn); if it fails again, re-route with route.mjs ... --exclude-account ${account ?? '<account>'}`);
+  }
+  // The Chrome extension's native host ("ChatGPT for Chrome") comes and goes; while it is down the browser runtime
+  // says "Browser is not available: chrome" (seen 2026-11-07; back within a minute on its own).
+  if (/Browser is not available: chrome/.test(JSON.stringify(turn.error ?? '') + (final ?? lastMessage(turn.items) ?? ''))) {
+    console.log('browser-unavailable: the Chrome extension host is not connected (pgrep -f "ChatGPT for Chrome"). Make sure Chrome is running, wait a minute and retry once; if it fails again, re-route the task to a Claude worker (route.mjs browser --exclude-account ' + (account ?? '<account>') + ')');
+  }
   if (usage) console.log(`usage (thread total) input=${usage.inputTokens} cached=${usage.cachedInputTokens} output=${usage.outputTokens}`);
   final ??= lastMessage(turn.items);
   if (!final) final = lastMessage((await readTurns(threadId).catch(() => [])).find((t) => t.id === turn.id)?.items);
@@ -220,7 +399,7 @@ try {
   if (cmd === 'start') {
     if (!opts.cwd || !text) die('start needs --cwd and a prompt');
     const th = await call('thread/start', {
-      cwd: path.resolve(opts.cwd), model: opts.model, sandbox: opts.sandbox, approvalPolicy: 'never',
+      cwd: path.resolve(opts.cwd), model: opts.model, sandbox: opts.sandbox, approvalPolicy: APPROVAL_POLICY,
     });
     const threadId = th.thread?.id ?? th.threadId;
     if (opts.name) await call('thread/name/set', { threadId, name: opts.name }).catch(() => {});
@@ -234,7 +413,7 @@ try {
     await call('thread/resume', { threadId: opts.thread, model: opts.model }).catch(() => {});
     const ts = await call('turn/start', {
       threadId: opts.thread, input: textInput(text), effort: opts.effort, model: opts.model,
-      sandboxPolicy: opts.sandbox && sandboxPolicy(opts.sandbox),
+      sandboxPolicy: opts.sandbox && sandboxPolicy(opts.sandbox), approvalPolicy: CU_APPS.length || BU_ORIGINS.length ? APPROVAL_POLICY : undefined,
     });
     follow(opts.thread, ts.turn?.id ?? ts.turnId);
   } else if (cmd === 'wait') {
