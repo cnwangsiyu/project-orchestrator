@@ -179,6 +179,13 @@ There is no concurrency cap (user, 2026-11-07):
   way.
 - If the retry fails too, or the run fails for TTADK reasons (SSO, auth, gateway error), re-route with
   `route.mjs … --exclude-account ttadk`.
+- **A hub that answers but can't start threads** (any account; 2026-11-08: `-32603: thread startup task stopped
+  before completing`, hub.log `provider auth cwd must resolve`, after the hub's working directory was removed).
+  `quota.mjs` checks two things that cost nothing: the hub process's working directory still exists, and hub.log has no
+  panic since the hub's last start. When either fails it marks the account (TTADK: unavailable; ChatGPT: not live) and
+  prints the restart: once its running turns finish, `kill <pid>; cd ~ && codex-worker.mjs --account <name> hub`.
+  `hub` itself starts from `$HOME`. The real probe, one tiny thread (`start --cwd ~ --effort low --sandbox read-only
+  "Reply OK"`), takes seconds, so run it only after a start fails that way, and in the nightly review.
 - Record repeated TTADK trouble in the ledger; the nightly review reads it.
 
 ### Data

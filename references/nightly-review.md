@@ -86,6 +86,10 @@ These are the user's decisions (2026-10-30 to 2026-11-03):
   - the model catalog compared with the saved baseline;
   - outcomes (`outcome.mjs` records): first-pass rate, rework rounds and minutes per vendor, model and category of the
     first attempt, the failures, and named tasks with routing decisions but no outcome yet.
+- **Hub probe:** on each account in `codex-accounts.json` whose hub is up, start one tiny thread
+  (`codex-worker.mjs --account <name> start --cwd ~ --effort low --sandbox read-only --name hub-probe --log <tmp> "Reply OK"`)
+  and check it answers. A failure that `quota.mjs` didn't flag is a bad case: restart that hub from `~` once no turn runs
+  on it, and record it (user, 2026-11-08: the real probe runs here and after a failed start, not on every quota read).
 - **Orchestrator context use:** `node ~/.agents/skills/project-orchestrator/scripts/orch-usage.mjs --hours 24`.
   For each local orchestrator it gives its own tool output, browser/computer-use calls, screenshots read, sleep
   polls and compactions, with FLAG lines above the limits.

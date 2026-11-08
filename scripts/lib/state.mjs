@@ -130,6 +130,31 @@ const rollForward = (acc) => {
   const credits = all.filter((c) => !c.expiresAt || c.expiresAt > now);
   return { ...acc, windows, resets: acc.resets ? { count: Math.max(0, (acc.resets.count ?? 0) - (all.length - credits.length)), credits } : null };
 };
+// A hub that answers but can't start threads (2026-11-08: a hub started inside a since-removed worktree panicked on every
+// new thread, "provider auth cwd must resolve", while every check here said healthy). Two checks that cost no quota:
+// the hub process's working directory still exists, and its hub.log shows no panic since its last start banner. A real
+// thread-start probe costs seconds, so it runs only in the nightly review or after a failed start (user, 2026-11-08).
+// Returns null when fine or not checkable (no listener, no lsof), else { pid, why, fix }.
+export const hubBroken = (name, prof) => {
+  try {
+    const port = new URL(prof.hub).port;
+    const pid = execFileSync('lsof', ['-t', '-nP', `-iTCP:${port}`, '-sTCP:LISTEN'], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }).trim().split('\n')[0];
+    if (!pid) return null;
+    const why = [];
+    const cwd = (execFileSync('lsof', ['-a', '-p', pid, '-d', 'cwd', '-Fn'], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] })
+      .split('\n').find((l) => l.startsWith('n')) ?? '').slice(1);
+    if (cwd && !fs.existsSync(cwd)) why.push(`its working directory ${cwd} no longer exists`);
+    const logPath = path.join(prof.home, 'hub.log');
+    if (fs.existsSync(logPath)) {
+      const log = fs.readFileSync(logPath, 'utf8');
+      const tail = log.slice(Math.max(0, log.lastIndexOf('codex app-server (WebSockets)')));
+      const m = tail.match(/panicked at [^\n]*\n([^\n]*)/);
+      if (m) why.push(`hub.log has a panic since its start: ${m[1].trim().slice(0, 160)}`);
+    }
+    if (!why.length) return null;
+    return { pid: Number(pid), why: why.join('; '), fix: `once its running turns finish: kill ${pid}; cd ~ && node ${WORKER} --account ${name} hub` };
+  } catch { return null; }
+};
 // A TTADK (company gateway) account has no ChatGPT rate-limit windows: what matters is whether it works right now — the
 // ttadk CLI present, its SSO session active, the gateway listing the models, the hub up — and how many turns it runs.
 const readTtadk = (name, prof) => {
@@ -159,6 +184,8 @@ const readTtadk = (name, prof) => {
     out.live = true;
     out.active = list.split('\n').filter((l) => l.split('\t')[2] === 'active').length;
   } catch { out.live = false; }
+  const broken = out.live ? hubBroken(name, prof) : null;
+  if (broken) { out.healthy = false; out.hubBroken = broken; out.reason = `its hub answers but can't start threads (${broken.why}); restart it ${broken.fix}`; }
   if (out.search) {
     try { out.searchLive = execFileSync('curl', ['-s', '-m', '2', `http://127.0.0.1:${prof.searchPort}/__health`], { encoding: 'utf8', timeout: 5000 }).includes('ttadk-search-proxy'); } catch {}
   }
@@ -178,7 +205,9 @@ const readCodexAll = () => {
       try {
         const u = parseUsage(JSON.parse(execFileSync(process.execPath, [WORKER, '--account', name, 'usage'], { encoding: 'utf8', timeout: 30000, stdio: ['ignore', 'pipe', 'pipe'] })));
         reg[name] = { ...prof, id: u.id, email: login?.id === u.id ? login.email : prof.email ?? null, plan: u.plan, seenAt: now, windows: u.windows, resets: u.resets, unlimited: u.unlimited };
-        accounts.push({ name, live: true, ...reg[name], allowed: u.allowed, staleHub: !!(login?.id && u.id && login.id !== u.id) });
+        // A broken hub still answers `usage`; count it as not live so routing prefers a working hub, and say how to fix it.
+        const broken = hubBroken(name, prof);
+        accounts.push({ name, live: !broken, ...reg[name], allowed: u.allowed, staleHub: !!(login?.id && u.id && login.id !== u.id), hubBroken: broken });
       } catch (e) {
         const error = String(e.stderr || e.message).trim().split('\n')[0];
         accounts.push(prof.windows ? { name, live: false, error, loggedIn: !!login, ...rollForward(prof) }
@@ -388,6 +417,7 @@ export const leanLines = (st, data) => {
   for (const r of X.rows) {
     if (r.a.staleHub) out.push(`account ${r.a.name}: its login changed but its hub still runs the old account — restart that hub once no thread runs on it`);
     if (!r.a.live && r.a.loggedIn === false) out.push(`account ${r.a.name}: not logged in — ask the user to run \`! CODEX_HOME=${r.a.home} codex login\`, then start its hub: codex-worker.mjs --account ${r.a.name} hub`);
+    else if (r.a.hubBroken) out.push(`account ${r.a.name}: hub answers but can't start threads (${r.a.hubBroken.why}) — restart it ${r.a.hubBroken.fix}`);
     else if (!r.a.live) out.push(`account ${r.a.name}: hub unreachable${r.a.windows ? ` (using its reading from ${fmtAgo(r.a.seenAt)})` : ''} — start it: codex-worker.mjs --account ${r.a.name} hub`);
   }
   const T = X.ttadk;
