@@ -67,7 +67,7 @@ const ensureSearchProxy = async (prof) => {
   const logPath = path.join(prof.home, 'search-proxy.log');
   const script = path.join(path.dirname(fileURLToPath(import.meta.url)), 'ttadk-search-proxy.mjs');
   spawn(process.execPath, [script, '--port', String(prof.searchPort), '--upstream', prof.upstream ?? 'https://llmbox-global.byteintl.net', '--log', logPath],
-    { detached: true, stdio: 'ignore' }).unref();
+    { detached: true, stdio: 'ignore', cwd: os.homedir() }).unref();
   for (let i = 0; i < 20; i++) { await new Promise((r) => setTimeout(r, 250)); if (await searchUp(prof)) return true; }
   return false;
 };
@@ -345,7 +345,10 @@ if (cmd === 'hub') {
   if (await ready()) { console.log(`hub up at ${hub}${await searchNote()}`); process.exit(0); }
   const logPath = path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'hub.log');
   const out = fs.openSync(logPath, 'a');
-  spawn('codex', ['app-server', '--listen', hub], { detached: true, stdio: ['ignore', out, out] }).unref();
+  // From $HOME, never the caller's cwd: a hub outlives the session that started it, and once that directory is gone
+  // (a removed worktree) the TTADK provider's auth command can't run and every new thread panics ("provider auth cwd
+  // must resolve", 2026-11-08).
+  spawn('codex', ['app-server', '--listen', hub], { detached: true, stdio: ['ignore', out, out], cwd: os.homedir() }).unref();
   for (let i = 0; i < 30; i++) {
     await new Promise((r) => setTimeout(r, 500));
     if (await ready()) { console.log(`hub started at ${hub} (log: ${logPath})${await searchNote()}`); process.exit(0); }
