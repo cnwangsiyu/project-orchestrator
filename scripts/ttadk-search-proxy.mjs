@@ -42,13 +42,23 @@ const server = http.createServer(async (req, res) => {
   for (const [k, v] of Object.entries(req.headers)) if (!HOP.has(k)) headers[k] = v;
   const ac = new AbortController();
   res.on('close', () => { if (!res.writableFinished) ac.abort(); });
+  // A network error before any response (seen 2026-11-08: five in 1.5s, then fine) is retried twice with a short backoff;
+  // the body is buffered, so resending it is safe. An HTTP error response is passed through as is.
   let up;
-  try {
-    up = await fetch(upstream + req.url, { method: req.method, headers, body: ['GET', 'HEAD'].includes(req.method) ? undefined : body, signal: ac.signal });
-  } catch (e) {
-    log(`${req.method} ${req.url} -> upstream error ${e.name}`);
-    if (!res.headersSent) res.writeHead(502, { 'content-type': 'text/plain' });
-    return res.end('ttadk-search-proxy: upstream unreachable');
+  for (let attempt = 0; ; attempt++) {
+    try {
+      up = await fetch(upstream + req.url, { method: req.method, headers, body: ['GET', 'HEAD'].includes(req.method) ? undefined : body, signal: ac.signal });
+      break;
+    } catch (e) {
+      const why = `${e.name}${e.cause?.code ? ` ${e.cause.code}` : ''}`;
+      if (ac.signal.aborted || attempt >= 2) {
+        log(`${req.method} ${req.url.split('?')[0]} -> upstream error ${why} (after ${attempt + 1} tries)`);
+        if (!res.headersSent) res.writeHead(502, { 'content-type': 'text/plain' });
+        return res.end('ttadk-search-proxy: upstream unreachable');
+      }
+      log(`${req.method} ${req.url.split('?')[0]} -> upstream error ${why}, retrying`);
+      await new Promise((r) => setTimeout(r, attempt ? 1500 : 500));
+    }
   }
   log(`${req.method} ${req.url.split('?')[0]} -> ${up.status}${added ? ' (+web_search)' : ''}`);
   const out = {};
