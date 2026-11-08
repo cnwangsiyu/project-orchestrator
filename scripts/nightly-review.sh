@@ -17,6 +17,7 @@ SKILL="${0:A:h:h}"
 DIR="$HOME/.claude/orchestrator/_shared/routing-review"
 mkdir -p "$DIR"
 DAY=$(date +%F)
+NOW=$(date "+%F %H:%M %Z")  # the window ends when the review starts (03:07 from launchd; later on a manual run)
 MODE="${NIGHTLY_MODE:-auto}"
 exec >>"$DIR/launch.log" 2>&1
 echo "== $(date '+%F %T') launching review for $DAY (mode $MODE)"
@@ -32,7 +33,7 @@ claude_review() {
   # Opus high: a design/trade-off review (route.mjs `design`); bypass, as the orchestrators run.
   echo "full Claude review: $1"
   claude --bg --permission-mode bypassPermissions -n "routing-nightly-review-$DAY" --model opus --effort high \
-    "Run the nightly routing review for the 24 hours ending now ($DAY 03:00 local): read $SKILL/references/nightly-review.md and follow it exactly."
+    "Run the nightly routing review for the 24 hours ending now ($NOW): read $SKILL/references/nightly-review.md and follow it exactly."
   echo "exit $?"
 }
 
@@ -57,7 +58,7 @@ DRYNOTE=""; [ "$MODE" = dry ] && DRYNOTE=" DRY RUN: read-only; make no edits, co
 s=$(date +%s)
 CODEX_HOME="$TT_HOME" perl -e 'alarm 2400; exec @ARGV' -- codex exec --skip-git-repo-check -C "$DIR" -s "$SANDBOX" -m gpt-6.1-sol \
   -c model_reasoning_effort='"xhigh"' --json -o "$DIR/$DAY.worker-final.md" \
-  "You are the TTADK worker of the nightly routing review for the 24 hours ending now ($DAY 03:00 local). Read $SKILL/references/nightly-review.md and follow it, doing the worker's part in its section \"Who does what\". The data is already gathered: $D/review-data-24h.txt, $D/review-data-168h.txt, $D/orch-usage-24h.txt.$DRYNOTE" \
+  "You are the TTADK worker of the nightly routing review for the 24 hours ending now ($NOW). Read $SKILL/references/nightly-review.md and follow it, doing the worker's part in its section \"Who does what\". The data is already gathered: $D/review-data-24h.txt, $D/review-data-168h.txt, $D/orch-usage-24h.txt.$DRYNOTE" \
   < /dev/null > "$DIR/$DAY.worker.jsonl" 2>&1
 rc=$?
 echo "worker exit $rc after $(( $(date +%s) - s ))s"
