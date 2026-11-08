@@ -7,8 +7,8 @@
 // none, and with `supports_standalone_web_search` it calls OpenAI's standalone `/alpha/search` endpoint instead, which
 // the gateway doesn't have (404). The gateway does run the hosted tool itself when a Responses request carries it. So
 // this local pass-through adds `{ type: "web_search" }` to every `POST …/responses` body and forwards everything else
-// unchanged, streaming the response back. Only the `ttadk_search` provider (research workers, `codex-worker start
-// --web-search`) points here; other TTADK work goes to the gateway directly, so it can't send queries to the web.
+// unchanged, streaming the response back. The TTADK account's provider (`ttadk_app`, written by `codex-worker
+// ttadk-setup`) points here, so every TTADK worker can search, as official Codex and Claude Code do by default.
 //
 // Binds 127.0.0.1 only. Logs method, path, status and whether a tool was added — never headers, tokens or bodies.
 // GET /__health answers 200 "ttadk-search-proxy" (codex-worker and quota.mjs check it).

@@ -9,9 +9,7 @@
 //                       start/turn also take --browser-origins <origins/host globs> and --computer-use-apps <bundle ids>
 //   codex-worker browser-setup [--account NAME]                           (Chrome + Computer Use config for that home)
 //   codex-worker ttadk-setup [--name ttadk] [--home DIR] [--port N] [--search-port N]   (the TTADK gateway as an account)
-//   codex-worker [--account ttadk] search-proxy                            (start/check TTADK's web search hub + proxy)
-//                       --web-search on start/turn/wait/steer/interrupt/status/list (TTADK only): the search hub, whose
-//                       workers get web search through ttadk-search-proxy.mjs; pass it on every command for that thread
+//   codex-worker [--account ttadk] proxy                                   (start/check TTADK's local proxy: web search)
 //   codex-worker wait   --thread ID [--log FILE] [--out FILE]            (start/turn/wait take --stall-min M, default 30)
 //   codex-worker steer  --thread ID                                                                     "<message>"
 //   codex-worker interrupt --thread ID
@@ -58,10 +56,9 @@ if (account) {
   process.env.CODEX_HOME = prof.home; process.env.CODEX_HUB = prof.hub;
 }
 const PROF = account ? readAccounts()[account] ?? null : null;
-// TTADK web search: research workers run on a second app-server ("search hub", same CODEX_HOME) whose provider is
-// `ttadk_search`, which points at a local proxy that adds Codex's hosted web_search tool to the requests
-// (ttadk-search-proxy.mjs says why). A thread can't switch providers inside one hub (turn/start refuses: "This chat
-// uses ttadk_search, but your current provider is ttadk_app"), hence the second hub. Both run detached, like the hub.
+// TTADK web search: the account's provider points at a local proxy that adds Codex's hosted web_search tool to the
+// requests (ttadk-search-proxy.mjs says why), so every TTADK worker can search, as on ChatGPT accounts (user,
+// 2026-11-07). The proxy runs detached, like the hub; hub/start/turn/wait bring it up when it isn't running.
 const searchUrl = (prof) => `http://127.0.0.1:${prof.searchPort}`;
 const searchUp = (prof) => fetch(`${searchUrl(prof)}/__health`, { signal: AbortSignal.timeout(2000) }).then((r) => r.ok, () => false);
 const ensureSearchProxy = async (prof) => {
@@ -72,16 +69,6 @@ const ensureSearchProxy = async (prof) => {
   spawn(process.execPath, [script, '--port', String(prof.searchPort), '--upstream', prof.upstream ?? 'https://llmbox-global.byteintl.net', '--log', logPath],
     { detached: true, stdio: 'ignore' }).unref();
   for (let i = 0; i < 20; i++) { await new Promise((r) => setTimeout(r, 250)); if (await searchUp(prof)) return true; }
-  return false;
-};
-const hubReady = (url) => fetch(url.replace(/^ws/, 'http') + '/readyz', { signal: AbortSignal.timeout(2000) }).then((r) => r.ok, () => false);
-const ensureSearchHub = async (prof) => {
-  if (!prof?.searchHub || !(await ensureSearchProxy(prof))) return false;
-  if (await hubReady(prof.searchHub)) return true;
-  const out = fs.openSync(path.join(prof.home, 'search-hub.log'), 'a');
-  spawn('codex', ['-c', 'model_provider="ttadk_search"', 'app-server', '--listen', prof.searchHub],
-    { detached: true, stdio: ['ignore', out, out], env: { ...process.env, CODEX_HOME: prof.home } }).unref();
-  for (let i = 0; i < 30; i++) { await new Promise((r) => setTimeout(r, 500)); if (await hubReady(prof.searchHub)) return true; }
   return false;
 };
 const [cmd, ...rest] = argv;
@@ -247,37 +234,23 @@ refresh_interval_ms = 2000000
 network_access = true
 ${keep ? `\n# --- previous config ---\n${keep}` : ''}`);
   }
-  // The web-search provider: same gateway auth, through the local proxy (rewritten in place on a rerun).
+  // Web search: the provider's base_url is the local proxy (ttadk-search-proxy.mjs), which forwards to the gateway.
   const searchPort = Number(opts['search-port'] ?? reg[name]?.searchPort ?? port + 100);
-  const SM = '# --- TTADK web search provider (codex-worker ttadk-setup) ---', SE = '# --- end TTADK web search provider ---';
-  const sblock = `${SM}
-[model_providers.ttadk_search]
-name = "ttadk_search"
-base_url = "http://127.0.0.1:${searchPort}/"
-wire_api = "responses"
-
-[model_providers.ttadk_search.http_headers]
-X-Source = "ttadk"
-
-[model_providers.ttadk_search.auth]
-command = "${ttadkBin}"
-args = ["get_params", "--sso", "sso"]
-timeout_ms = 5000
-refresh_interval_ms = 2000000
-${SE}
-`;
   let ctoml = fs.readFileSync(cfg, 'utf8');
-  if (ctoml.includes(SM)) { const i = ctoml.indexOf(SM), j = ctoml.indexOf(SE, i); ctoml = ctoml.slice(0, i) + sblock + (j >= 0 ? ctoml.slice(j + SE.length).replace(/^\n/, '') : ''); }
-  else if (/^\[model_providers\.ttadk_search\]/m.test(ctoml)) die(`${cfg} has a [model_providers.ttadk_search] section this didn't write; remove it and rerun`, 1);
-  else ctoml += `\n${sblock}`;
+  const sec = ctoml.match(/^\[model_providers\.ttadk_app\]\n(?:(?!^\[)[^\n]*\n?)*/m);
+  if (!sec) die(`${cfg} has no [model_providers.ttadk_app] section; move it aside and rerun ttadk-setup`, 1);
+  ctoml = ctoml.replace(sec[0], sec[0].replace(/^base_url\s*=.*$/m, `base_url = "http://127.0.0.1:${searchPort}/" # local proxy → https://llmbox-global.byteintl.net/ (web search)`));
+  // Drop the earlier second provider (research-only search, 2026-11-07), if this home has it.
+  const SM = '# --- TTADK web search provider (codex-worker ttadk-setup) ---', SE = '# --- end TTADK web search provider ---';
+  if (ctoml.includes(SM)) { const i = ctoml.indexOf(SM), j = ctoml.indexOf(SE, i); ctoml = ctoml.slice(0, i) + (j >= 0 ? ctoml.slice(j + SE.length).replace(/^\n/, '') : ''); }
   fs.writeFileSync(cfg, ctoml);
-  const searchHub = `ws://127.0.0.1:${Number(opts['search-hub-port'] ?? (reg[name]?.searchHub ? new URL(reg[name].searchHub).port : port + 1000))}`;
-  reg[name] = { ...reg[name], home, hub: `ws://127.0.0.1:${port}`, kind: 'ttadk', models, ttadkBin, searchPort, searchHub, upstream: 'https://llmbox-global.byteintl.net' };
+  const { searchHub: _drop, ...prev } = reg[name] ?? {};
+  reg[name] = { ...prev, home, hub: `ws://127.0.0.1:${port}`, kind: 'ttadk', models, ttadkBin, searchPort, upstream: 'https://llmbox-global.byteintl.net' };
   writeAccounts(reg);
   console.log(`TTADK account ${name}: ${home}, hub ws://127.0.0.1:${port}; codex models: ${models.join(', ')}`);
   console.log(`start its hub:   node ${process.argv[1]} --account ${name} hub`);
   console.log(`browser use:     node ${process.argv[1]} --account ${name} browser-setup`);
-  console.log(`web search:      research workers use --web-search (search hub ${searchHub}, proxy 127.0.0.1:${searchPort}; started with the hub)`);
+  console.log(`web search:      through the local proxy on 127.0.0.1:${searchPort} (started with the hub, and by start/turn/wait)`);
   process.exit(0);
 }
 // The console session is locked: Computer Use sees no windows (cgWindowNotFound). The ChatGPT app's "Locked use" unlock is
@@ -323,29 +296,23 @@ const originAllowed = (origin) => {
 // them itself. Other requests still get the refusals in REPLIES, so the sandbox stays the only bound.
 const APPROVAL_POLICY = CU_APPS.length || BU_ORIGINS.length ? 'on-request' : 'never';
 if (CU_APPS.length && (cmd === 'start' || cmd === 'turn') && screenLocked()) die("the screen is locked: Computer Use sees no windows while the Mac is locked (the ChatGPT app's Locked use is reserved to its own turns). Unlock it, or keep it unlocked while computer-use workers run.", 5);
-const WEB = !!opts['web-search'];
-if (WEB && PROF?.kind !== 'ttadk') die('--web-search is for a TTADK account (ChatGPT accounts have web search built in)');
-if (WEB && !PROF.searchHub) die(`account ${account} has no web search hub yet: rerun ttadk-setup`, 1);
-const hub = WEB ? PROF.searchHub : process.env.CODEX_HUB || 'ws://127.0.0.1:47321';
+const hub = process.env.CODEX_HUB || 'ws://127.0.0.1:47321';
 const ready = () => fetch(hub.replace(/^ws/, 'http') + '/readyz', { signal: AbortSignal.timeout(2000) }).then((r) => r.ok, () => false);
-const searchNote = async () => {
-  if (PROF?.kind !== 'ttadk' || !PROF.searchHub) return '';
-  return (await ensureSearchHub(PROF)) ? `; web search hub up at ${PROF.searchHub} (proxy ${searchUrl(PROF)})`
-    : `; web search hub/proxy failed to start (see ${PROF.home}/search-hub.log, search-proxy.log)`;
-};
-if (cmd === 'search-proxy') {
-  if (PROF?.kind !== 'ttadk') die('search-proxy is for a TTADK account (--account <name>, set up by ttadk-setup)');
-  if (!PROF.searchHub) die(`account ${account} has no web search hub yet: rerun ttadk-setup`, 1);
-  if (await ensureSearchHub(PROF)) { console.log(`web search hub up at ${PROF.searchHub} (proxy ${searchUrl(PROF)})`); process.exit(0); }
-  die(`web search hub/proxy did not start; see ${PROF.home}/search-hub.log and search-proxy.log`, 1);
+const proxied = PROF?.kind === 'ttadk' && !!PROF.searchPort;
+if (cmd === 'proxy' || cmd === 'search-proxy') {
+  if (PROF?.kind !== 'ttadk') die('proxy is for a TTADK account (--account <name>, set up by ttadk-setup)');
+  if (!proxied) die(`account ${account} has no proxy yet: rerun ttadk-setup`, 1);
+  if (await ensureSearchProxy(PROF)) { console.log(`TTADK proxy up at ${searchUrl(PROF)}`); process.exit(0); }
+  die(`TTADK proxy did not start; see ${PROF.home}/search-proxy.log`, 1);
 }
-// --web-search: bring up the search hub + proxy; exit 6 when that fails, so the orchestrator re-routes without TTADK.
-if (WEB && cmd !== 'hub' && !(await ensureSearchHub(PROF))) {
-  console.log(`web-search-unavailable: TTADK's web search hub/proxy is not running (codex-worker --account ${account} search-proxy; logs ${PROF.home}/search-hub.log, search-proxy.log); re-route with route.mjs research --exclude-account ${account}`);
+// Every model call of this account goes through the proxy: bring it up before work starts; exit 6 when that fails, so
+// the orchestrator re-routes without TTADK.
+if (proxied && ['hub', 'start', 'turn', 'wait'].includes(cmd) && !(await ensureSearchProxy(PROF))) {
+  console.log(`proxy-unavailable: TTADK's local proxy is not running (codex-worker --account ${account} proxy; log ${PROF.home}/search-proxy.log); re-route with route.mjs ... --exclude-account ${account}`);
   process.exit(6);
 }
+const searchNote = async () => (proxied ? `; proxy up at ${searchUrl(PROF)} (web search)` : '');
 if (cmd === 'hub') {
-  if (WEB) die('hub starts the search hub too; run it without --web-search');
   if (await ready()) { console.log(`hub up at ${hub}${await searchNote()}`); process.exit(0); }
   const logPath = path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'hub.log');
   const out = fs.openSync(logPath, 'a');

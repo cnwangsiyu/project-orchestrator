@@ -133,7 +133,9 @@ const CASES = [
   ['codexOut', ['browser', '--stakes', 'low'], 'claude sonnet low'],
   // research needs web search: on TTADK only with its search hub set up, else the earlier routing. image-read works there.
   ['ttFresh', ['research'], 'claude sonnet medium'],
-  ['ttSearch', ['research'], 'codex gpt-6.1-sol medium @ttadk', 'web search hub'],
+  ['ttSearch', ['research'], 'codex gpt-6.1-sol medium @ttadk', 'local proxy'],
+  ['ttSearch', ['docs'], 'codex gpt-6.1-sol medium @ttadk', 'never put internal code'],
+  ['fresh', ['implement', '--impact', 'service'], 'codex gpt-6.1-sol xhigh @main', 'never put internal code'],
   ['ttSearch', ['research'], 'codex gpt-6.1-sol medium @ttadk', 'never put internal code'],
   ['ttSearch', ['research', '--exclude-account', 'ttadk'], 'claude sonnet medium'],
   ['ttFresh', ['image-read'], 'codex gpt-6.1-sol medium @ttadk', 'no web search'],
@@ -198,18 +200,18 @@ for (const [sc, args, want] of [
   if (!ok) fail++;
   console.log(`${ok ? 'ok  ' : 'FAIL'} ${sc.padEnd(19)} ${(args.join(' ') + ' (2nd account)').padEnd(36)} ${ok ? got : `want "${want}", got "${got}"`}`);
 }
-// Only research workers on TTADK get --web-search (so other TTADK work can't send queries to the web).
+// Every TTADK worker searches through the proxy: a TTADK codex exec brings the proxy up first; nothing else does.
 for (const [sc, args, want] of [
-  ['ttSearch', ['research'], true],
-  ['ttSearch', ['docs'], false],
-  ['ttSearch', ['implement', '--impact', 'service'], false],
-  ['ttFresh', ['research', '--failures', '0'], false],
+  ['ttSearch', ['lookup'], true],
+  ['ttSearch', ['research'], false],
+  ['ttFresh', ['lookup'], false],
+  ['fresh', ['lookup'], false],
 ]) {
   let got;
-  try { got = / --web-search /.test(JSON.parse(run(sc, args)).pick?.command ?? ''); } catch (e) { got = `ERROR ${String(e.stderr || e.message).split('\n')[0]}`; }
+  try { got = /--account ttadk proxy >\/dev\/null && /.test(JSON.parse(run(sc, args)).pick?.command ?? ''); } catch (e) { got = `ERROR ${String(e.stderr || e.message).split('\n')[0]}`; }
   const ok = got === want;
   if (!ok) fail++;
-  console.log(`${ok ? 'ok  ' : 'FAIL'} ${sc.padEnd(19)} ${(args.join(' ') + ' (--web-search)').padEnd(36)} ${ok ? got : `want ${want}, got ${got}`}`);
+  console.log(`${ok ? 'ok  ' : 'FAIL'} ${sc.padEnd(19)} ${(args.join(' ') + ' (proxy first)').padEnd(36)} ${ok ? got : `want ${want}, got ${got}`}`);
 }
 // Redemption prompt only when the work really lands on the card account.
 for (const [sc, args, want] of [

@@ -135,8 +135,9 @@ const rollForward = (acc) => {
 const readTtadk = (name, prof) => {
   const out = { name, kind: 'ttadk', home: prof.home, hub: prof.hub, browser: !!prof.browser, chromePlugin: prof.chromePlugin ?? null,
     models: prof.models ?? [], windows: [], resets: null, healthy: false, reason: null, live: false, active: 0, ssoExpiresAt: null, email: prof.email ?? null,
-    // Web search through the search hub + proxy (codex-worker starts them on demand); searchLive: the proxy answers now.
-    search: !!(prof.searchHub && prof.searchPort), searchLive: false };
+    // Web search through the local proxy every TTADK call goes through (codex-worker starts it on demand); searchLive:
+    // the proxy answers now.
+    search: !!prof.searchPort, searchLive: false };
   const bin = prof.ttadkBin && fs.existsSync(prof.ttadkBin) ? prof.ttadkBin : null;
   if (!bin) { out.reason = 'ttadk CLI not found (npm install -g @byted/ttadk@latest --registry=https://bnpm.byted.org, then codex-worker ttadk-setup)'; return out; }
   try {

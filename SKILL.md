@@ -210,8 +210,8 @@ effort, Codex account and launch command from
     rate-limited run is retried once on TTADK, then re-routed with `--exclude-account ttadk`. On a
     TTADK device the ChatGPT and Claude quota is left for the user's other device (no TTADK there):
     nothing spends it just to use it up, and Claude takes only what TTADK can't do (user,
-    2026-11-07). `research` runs on TTADK with web search through its local proxy (`--web-search`), once
-    `ttadk-setup` has set that up; so
+    2026-11-07). every TTADK worker can search the web through its local proxy, once `ttadk-setup` has
+    set it up; briefs say search queries must not carry internal information; so
     is a run that fails for TTADK reasons (SSO, auth, gateway errors).
   - Browser work (`browser`: web pages in the user's Chrome) goes to TTADK Codex when that account
     is browser-ready, otherwise to Claude. Desktop apps, Artifact/Docs and peer negotiation stay
