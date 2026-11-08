@@ -141,9 +141,9 @@ else base = [T.first, ...T.ladder];
 // Every task TTADK's GPT-6.1 Sol can handle goes to it first (user, 2026-11-07): Sol at the row's effort (at least
 // medium), one notch higher after a failure, then the row's own ladder. Not TTADK-capable: Claude-only rows, image
 // generation, a second opinion on Codex's work, and browser work while TTADK isn't browser-ready.
-// research needs Codex's hosted web search, which the gateway lacks (tested 2026-11-07: "NO WEB SEARCH TOOL"; image
-// input works, so image-read stays).
-const ttCapable = !!TT && ttHas(SOL) && T.kind !== 'claudeOnly' && cat !== 'image-gen' && cat !== 'research' && !authorCodex
+// research needs web search. Codex doesn't send its hosted web_search tool to the gateway, so research runs on TTADK only
+// through its search hub + proxy (ttadk-setup sets them up; codex-worker start --web-search), else the earlier routing.
+const ttCapable = !!TT && ttHas(SOL) && T.kind !== 'claudeOnly' && cat !== 'image-gen' && !(cat === 'research' && !TT.search) && !authorCodex
   && !(cat === 'second-opinion' && opts.against === 'codex') && !(T.kind === 'browser' && !browserViaCodex);
 if (ttCapable) {
   // Sol at the row's effort — the higher of its first pick's and its Sol alternative's (design: Opus high / Sol xhigh →
@@ -286,9 +286,10 @@ const launch = (x, shape = T.shape, acct = pickAcct) => {
     return { launcher: 'claude-bg', command: `cd ${cwd} && claude --bg --permission-mode ${claudeMode} -n ${name} --model ${x.model} --effort ${x.effort} ${prompt}` };
   }
   const an = acct?.a.name ?? 'main', home = profiles[an]?.home ?? '~/.codex';
+  const web = cat === 'research' && !!TT && an === TT.name ? ' --web-search' : '';
   if (shape === 'exec') return { launcher: 'codex-exec', account: an, command: `CODEX_HOME=${home} codex exec${inRepo === false ? ' --skip-git-repo-check' : ''} -C ${cwd} -s ${sandbox} -m ${x.model} -c model_reasoning_effort='"${x.effort}"' --json -o ${taskDir}/codex-last.md ${prompt} < /dev/null > ${taskDir}/codex.jsonl 2>&1   (background task${inRepo === null ? '; add --skip-git-repo-check outside a repo' : ''})` };
   const origins = cat === 'browser' ? ` --browser-origins '${[...POLICY.browserOrigins, ...(typeof opts.origins === 'string' ? opts.origins.split(',') : [])].map((o) => o.trim()).filter(Boolean).join(',')}'` : '';
-  return { launcher: 'codex-worker', account: an, command: `node ${SKILL}/scripts/codex-worker.mjs --account ${an} start --cwd ${cwd} --model ${x.model} --effort ${x.effort} --sandbox ${sandbox} --name ${name}${origins} --log ${taskDir}/codex.jsonl --out ${taskDir}/codex-last.md ${prompt}   (background task)` };
+  return { launcher: 'codex-worker', account: an, command: `node ${SKILL}/scripts/codex-worker.mjs --account ${an} start --cwd ${cwd} --model ${x.model} --effort ${x.effort} --sandbox ${sandbox} --name ${name}${origins}${web} --log ${taskDir}/codex.jsonl --out ${taskDir}/codex-last.md ${prompt}   (background task)` };
 };
 // The same quality gate for both vendors, so outcomes compare: code work gets an independent review before it's accepted.
 // Review only where a mistake is costly to undo; reviewers follow references/review-rubric.md (blocking issues only).
@@ -303,8 +304,10 @@ if (m && ['build-run', 'implement', 'implement-hard', 'debug', 'ui-browser', 'co
 // "orchestrator does the console", and that orchestrator made 510 browser calls in 24h).
 if (m && ['ui-browser', 'computer-use'].includes(cat)) notes.push('brief: name the Chrome to use by its deviceId from the ledger (the user picks it once; mcp__claude-in-chrome__list_connected_browsers lists them) and tell the worker: if a browser tool says several browsers are connected, call select_browser with that deviceId; if the browser still isn\'t reachable, report BLOCKED with the tool\'s exact error, never ask the orchestrator to click for it. Headless Playwright is fine where the user\'s sign-in isn\'t needed');
 if (m && cat === 'browser') notes.push('brief: include the browser safety clause — read and navigate freely, but ask the user (AskUserQuestion; a Codex worker reports BLOCKED) before anything irreversible on a page: submitting a form that changes data, approving, deleting, publishing, sending a message, payments');
+if (m && cat === 'research') notes.push('brief: web searches go to the public internet — never put internal code, internal project or product names, people, internal URLs or secrets into a search query; search for the public topic only');
+if (ttadkRun && cat === 'research') notes.push(`research on TTADK runs on its web search hub: pass --web-search on every codex-worker command for this thread (wait, steer, interrupt, status); exit 6 (web-search-unavailable) → re-route with --exclude-account ${TT.name}`);
 if (ttadkRun) {
-  notes.push(`TTADK Codex has no web search: if the task turns out to need the web, re-route it as research (route.mjs research)`);
+  if (cat !== 'research') notes.push(`this TTADK worker has no web search (only research workers get it): if the task turns out to need the web, re-route it as research (route.mjs research)`);
   notes.push(`on TTADK (account ${TT.name}): if the run fails rate-limited (QPM / concurrency), retry it once there; if it fails again, or fails for TTADK reasons (SSO, auth, gateway errors), re-route with --exclude-account ${TT.name}`);
   if (!TT.live && T.shape !== 'exec') notes.push(`TTADK hub is down: start it first — node ${SKILL}/scripts/codex-worker.mjs --account ${TT.name} hub`);
 }

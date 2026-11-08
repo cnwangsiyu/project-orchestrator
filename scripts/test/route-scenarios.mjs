@@ -44,6 +44,8 @@ const S = {
   // a spent account with an urgent card; two accounts that must both be spent soon.
   unreadHub: { claude: cl(10, 120), codex: [{ name: 'main', live: false, email: 'm@example.com', home: '/tmp/main', seenAt: null, windows: null, resets: null }] },
   ttCard: { claude: cl(10, 120), codex: [acc('main', 99, 100, [400]), tt()] },
+  // TTADK with its web search hub + proxy set up (ttadk-setup).
+  ttSearch: { claude: cl(10, 120), codex: [acc('main', 20, 120), tt({ search: true, searchLive: true })] },
   pickExcluded: { claude: cl(10, 120), codex: [acc('main', 50, 100), acc('b', 99, 100, [10])] },
 };
 // [scenario, route args, expectation]; expectation: 'DEFER' or "vendor model effort [@account]"
@@ -129,8 +131,11 @@ const CASES = [
   ['unreadHub', ['image-gen'], 'codex gpt-6-luna low @main'],
   // Low-stakes browser work on the Claude path doesn't wait for Codex.
   ['codexOut', ['browser', '--stakes', 'low'], 'claude sonnet low'],
-  // research needs web search, which TTADK lacks: earlier routing. image-read works there.
+  // research needs web search: on TTADK only with its search hub set up, else the earlier routing. image-read works there.
   ['ttFresh', ['research'], 'claude sonnet medium'],
+  ['ttSearch', ['research'], 'codex gpt-6.1-sol medium @ttadk', 'web search hub'],
+  ['ttSearch', ['research'], 'codex gpt-6.1-sol medium @ttadk', 'never put internal code'],
+  ['ttSearch', ['research', '--exclude-account', 'ttadk'], 'claude sonnet medium'],
   ['ttFresh', ['image-read'], 'codex gpt-6.1-sol medium @ttadk', 'no web search'],
   // TTADK ladders never step back to a weaker Codex model or effort.
   ['ttFresh', ['lookup', '--failures', '2'], 'claude sonnet medium'],
@@ -192,6 +197,19 @@ for (const [sc, args, want] of [
   const ok = got === want;
   if (!ok) fail++;
   console.log(`${ok ? 'ok  ' : 'FAIL'} ${sc.padEnd(19)} ${(args.join(' ') + ' (2nd account)').padEnd(36)} ${ok ? got : `want "${want}", got "${got}"`}`);
+}
+// Only research workers on TTADK get --web-search (so other TTADK work can't send queries to the web).
+for (const [sc, args, want] of [
+  ['ttSearch', ['research'], true],
+  ['ttSearch', ['docs'], false],
+  ['ttSearch', ['implement', '--impact', 'service'], false],
+  ['ttFresh', ['research', '--failures', '0'], false],
+]) {
+  let got;
+  try { got = / --web-search /.test(JSON.parse(run(sc, args)).pick?.command ?? ''); } catch (e) { got = `ERROR ${String(e.stderr || e.message).split('\n')[0]}`; }
+  const ok = got === want;
+  if (!ok) fail++;
+  console.log(`${ok ? 'ok  ' : 'FAIL'} ${sc.padEnd(19)} ${(args.join(' ') + ' (--web-search)').padEnd(36)} ${ok ? got : `want ${want}, got ${got}`}`);
 }
 // Redemption prompt only when the work really lands on the card account.
 for (const [sc, args, want] of [

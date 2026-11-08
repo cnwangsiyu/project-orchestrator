@@ -134,7 +134,9 @@ const rollForward = (acc) => {
 // ttadk CLI present, its SSO session active, the gateway listing the models, the hub up — and how many turns it runs.
 const readTtadk = (name, prof) => {
   const out = { name, kind: 'ttadk', home: prof.home, hub: prof.hub, browser: !!prof.browser, chromePlugin: prof.chromePlugin ?? null,
-    models: prof.models ?? [], windows: [], resets: null, healthy: false, reason: null, live: false, active: 0, ssoExpiresAt: null, email: prof.email ?? null };
+    models: prof.models ?? [], windows: [], resets: null, healthy: false, reason: null, live: false, active: 0, ssoExpiresAt: null, email: prof.email ?? null,
+    // Web search through the search hub + proxy (codex-worker starts them on demand); searchLive: the proxy answers now.
+    search: !!(prof.searchHub && prof.searchPort), searchLive: false };
   const bin = prof.ttadkBin && fs.existsSync(prof.ttadkBin) ? prof.ttadkBin : null;
   if (!bin) { out.reason = 'ttadk CLI not found (npm install -g @byted/ttadk@latest --registry=https://bnpm.byted.org, then codex-worker ttadk-setup)'; return out; }
   try {
@@ -156,6 +158,9 @@ const readTtadk = (name, prof) => {
     out.live = true;
     out.active = list.split('\n').filter((l) => l.split('\t')[2] === 'active').length;
   } catch { out.live = false; }
+  if (out.search) {
+    try { out.searchLive = execFileSync('curl', ['-s', '-m', '2', `http://127.0.0.1:${prof.searchPort}/__health`], { encoding: 'utf8', timeout: 5000 }).includes('ttadk-search-proxy'); } catch {}
+  }
   return out;
 };
 const readCodexAll = () => {
@@ -332,7 +337,7 @@ export const analyze = (data) => {
   const tt = (data.codexAccounts ?? []).find((a) => a.kind === 'ttadk') ?? null;
   // No concurrency cap (user, 2026-11-07): a rate-limited run is retried once on TTADK, then re-routed without it.
   const ttadk = tt ? { name: tt.name, home: tt.home, healthy: !!tt.healthy, reason: tt.reason, live: !!tt.live, active: tt.active ?? 0,
-    models: tt.models ?? [], browser: !!tt.browser, chromePlugin: tt.chromePlugin ?? null, ssoLeftH: tt.ssoExpiresAt ? (tt.ssoExpiresAt - now) / 3600000 : null } : null;
+    models: tt.models ?? [], browser: !!tt.browser, chromePlugin: tt.chromePlugin ?? null, search: !!tt.search, searchLive: !!tt.searchLive, ssoLeftH: tt.ssoExpiresAt ? (tt.ssoExpiresAt - now) / 3600000 : null } : null;
   if (ttadk) ttadk.usable = ttadk.healthy;
   const rows = (data.codexAccounts ?? []).filter((a) => a.kind !== 'ttadk').map((a) => {
     const w = weekly(a.windows), s = winState(w, hist[`codex:${a.name}`]), w5 = shortWin(a.windows);
@@ -387,7 +392,7 @@ export const leanLines = (st, data) => {
   const T = X.ttadk;
   if (T) {
     if (T.usable) {
-      out.push(`TTADK first: every task its gpt-6.1-sol can handle runs on account ${T.name} (route.mjs does this); the ChatGPT accounts below take image generation and web research, and everything when TTADK fails (route.mjs --exclude-account ${T.name}); ${T.active} TTADK turns running`);
+      out.push(`TTADK first: every task its gpt-6.1-sol can handle runs on account ${T.name} (route.mjs does this); the ChatGPT accounts below take image generation${T.search ? '' : ' and web research (TTADK web search not set up: rerun ttadk-setup)'}, and everything when TTADK fails (route.mjs --exclude-account ${T.name}); ${T.active} TTADK turns running`);
       out.push('TTADK device: leave the ChatGPT and Claude quota for the user\'s other device (no TTADK there) — spend it only on work TTADK can\'t do; no effort raises or extra reviews just to use quota (route.mjs applies this)');
     }
     else out.push(`TTADK unavailable — ${T.reason}; Codex work falls back to the ChatGPT accounts`);

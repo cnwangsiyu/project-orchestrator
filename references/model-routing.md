@@ -116,7 +116,8 @@ To change routing for a kind of task, edit the table in `route.mjs` and this rat
   - The extra Codex review added while ChatGPT Codex quota is underused runs on a ChatGPT account (its purpose is to
     spend that quota). Other Codex second opinions follow TTADK first.
   - Not TTADK-capable, so routed as before: Claude-only rows (`computer-use`, `ui-browser`), `image-gen` (no image tool
-    on the gateway), `research` (no web search on the gateway: tested 2026-11-07, with `web_search = "live"` too),
+    on the gateway), `research` until the TTADK web search hub is set up (Codex sends no search tool to the gateway; the
+    proxy in `references/codex-workers.md` adds it, and route.mjs then launches research with `--web-search`),
     `second-opinion --against codex`, a review of Codex-written code, and `browser` before `browser-setup`.
     `image-read` works on the gateway.
   - Later ladder steps never step back: Codex steps no stronger than the Sol already tried (Luna, Terra, a weaker Sol)

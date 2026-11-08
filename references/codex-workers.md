@@ -136,11 +136,32 @@ this.
   `gpt-6.1-sol` and `gpt-5.6-terra`, but no Luna, Astra or GPT-6.1 Terra. The image tool isn't served either.
 - **Routing:** every task TTADK's Sol can handle runs there first (user, 2026-11-07), as Sol at the row's effort (at
   least `medium`), one notch higher after a failure when that is below `max`. Claude-only rows, image generation (its
-  Sol fallback step included), `research`, second opinions and reviews of Codex's work, and browser work before
-  `browser-setup` follow the earlier routing (`references/model-routing.md`). On a TTADK device the ChatGPT and Claude
+  Sol fallback step included), `research` before the web search hub is set up, second opinions and reviews of
+  Codex's work, and browser work before `browser-setup` follow the earlier routing (`references/model-routing.md`). On a TTADK device the ChatGPT and Claude
   quota is left for the user's other device.
-- **No web search** (tested 2026-11-07): the same probe found the top Hacker News story on a ChatGPT account but got
-  "NO WEB SEARCH TOOL" on TTADK, also with `web_search = "live"` and `tools.web_search = true`. Image input works.
+- **Web search, through a local proxy (verified 2026-11-07).** Image input works on the gateway as is; web search
+  doesn't, and `research` on TTADK needs this setup.
+  - *Why:* Codex sends its hosted `web_search` tool only to OpenAI's own provider; to TTADK it sends none ("NO WEB
+    SEARCH TOOL", also with `web_search = "live"`). With `supports_standalone_web_search = true` it calls OpenAI's
+    `/alpha/search` endpoint instead, which the gateway doesn't have (404). The gateway does run the hosted tool when a
+    Responses request carries it: a direct call returned `web_search_call` items.
+  - *How:* `scripts/ttadk-search-proxy.mjs` listens on 127.0.0.1 only and adds `{ type: "web_search" }` to every
+    `POST /responses`; everything else passes through unchanged (SSO auth and headers included). `ttadk-setup` writes
+    a second provider `ttadk_search` pointing at it, and registers `searchPort` (hub port + 100) and `searchHub` (hub
+    port + 1000) on the account. A thread can't switch providers inside one hub (turn/start: "This chat uses
+    ttadk_search, but your current provider is ttadk_app"), so research workers run on a second app-server, the
+    search hub (same home, `-c model_provider="ttadk_search"`).
+  - *Use:* `codex-worker --account ttadk start --web-search …` (route.mjs adds it for `research`). Pass `--web-search`
+    on every later command for that thread (`wait`, `steer`, `interrupt`, `status`). `hub` also brings up the search
+    hub and proxy; `search-proxy` starts or checks them alone; `start --web-search` starts them on demand and exits 6
+    with `web-search-unavailable:` when it can't, and then the task is re-routed with `--exclude-account ttadk`.
+  - *Scope:* only research workers get web search, so other TTADK work can't send internal code or names to a public
+    search engine; research briefs carry the same rule for their own queries.
+  - *Measured:* the codex release question answered correctly (0.167.0, published 2026-11-06, checked against the
+    GitHub API) in 18–20s on the search hub. Logs: `<home>/search-proxy.log` (method, path, status; never headers or
+    bodies) and `<home>/search-hub.log`.
+  - *Alternatives considered:* Ferry (a colleague's local gateway onto TRAE's models, with its own `/alpha/search`)
+    rides the user's personal TRAE quota, and TRAE bans heavy unattended use, so it is not used for workers.
 - **Quality:** a 40-run benchmark against ChatGPT's GPT-6.1 Sol showed equal pass rates, the same reasoning-token
   scaling with effort, and equal output speed. Small calls carry about 5s of extra latency.
 
@@ -277,7 +298,7 @@ and for what is the worker's own call. Briefs don't ask for them, forbid them or
   - where to write the report, and to start its final message with `[<id>] DONE | QUESTION | BLOCKED | FAILED`. A question
     ends the run; resume it with the answer.
 - **Keep on Claude workers**: anything that needs Artifact/Docs tools or computer use on desktop apps (browser work goes
-  to TTADK Codex once `browser-setup` is done), web research while on TTADK (no web search there), or a worker that must negotiate
+  to TTADK Codex once `browser-setup` is done), or a worker that must negotiate
   with peers itself. Device runs that share phones mid-run can go to a hub-started Codex worker: steer it with handoffs. It
   can't negotiate with peers, so you broker.
 - **Verify before reporting.** Spot-check the cited file:line and commits, as for any worker.
