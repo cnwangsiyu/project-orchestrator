@@ -90,7 +90,8 @@ To change routing for a kind of task, edit the table in `route.mjs` and this rat
    - `service`: reviewed only at high stakes.
    - `throwaway`: never reviewed.
    - Reviewers follow `references/review-rubric.md` and block only on P0/P1.
-5. **Gates.** Fable, Astra, `max` effort, an exhausted ladder and every card redemption need the user's OK. Two or more
+5. **Gates.** Fable, Astra, `max` effort (except on TTADK), an exhausted ladder and every card redemption need the
+   user's OK. Two or more
    Codex steps that fell short on one task print a "tell the user" line.
    - Hard Codex code work (`implement-hard`, `debug`, `science`) gets an extra independent Codex review while Codex is
      underused or front-loading, but only where the review policy wants a review anyway (release code, or service
@@ -108,20 +109,32 @@ To change routing for a kind of task, edit the table in `route.mjs` and this rat
 
 - **TTADK first, for everything its Sol can handle.** When the TTADK company gateway is healthy (CLI present, SSO
   active, `gpt-6.1-sol` listed), every row runs first on TTADK `gpt-6.1-sol`, Claude-strength rows included (docs,
-  research, design, high-stakes review). The effort is the row's first-pick effort, at least `medium`. After a failure
-  it goes one notch up on Sol, then the row's own ladder. Rows that start at `xhigh` (implement-hard, debug, science,
-  review-high) have no higher notch short of `max`, which needs the user's OK, so they go straight on to their own
-  ladder, which alternates vendors (Sol xhigh → Opus xhigh → Sol max); its Sol steps also run on TTADK.
+  research, design, high-stakes review).
+  - **Burn TTADK, not personal quota, without losing quality (user, 2026-11-07).** TTADK is the company's quota;
+    Claude and the ChatGPT accounts are the user's own. So on TTADK:
+    - the first effort is the higher of the row's first pick and its Sol alternative, at least `high` for docs,
+      research, image-read and analysis, `xhigh` for a review of Codex-written code, one notch up at high stakes;
+      `--auto-check` and low stakes don't lower it (that saves nothing on TTADK);
+    - after a failure Sol climbs every notch to `xhigh`, then `max` (no OK needed on TTADK; lookup, extract, draft
+      and browser stop at `xhigh`), before the row's personal-quota steps: e.g. implement-hard Sol xhigh → Sol max →
+      Opus xhigh; science Sol xhigh → Sol max → Astra (ChatGPT, needs an OK; dropped when ChatGPT is out);
+    - a routine review of Codex-written code runs on TTADK (`review --author codex`): a fresh Sol xhigh reviewer plus
+      a second free one with a different focus (failure paths, concurrency, edge cases, tests). High-stakes review
+      and design keep Claude in the pair;
+    - when Claude has no room for a cross-vendor second opinion, a fresh TTADK reviewer stands in instead of the
+      second opinion being dropped or deferred;
+    - TTADK down for a reason the user can fix (SSO, CLI, models): tell the user at once; work TTADK would take waits
+      unless it is high-stakes or `--urgent`. A rate-limited run still retries once, then re-routes.
   - Image generation never runs on TTADK, its Sol fallback step included.
   - The extra Codex review added while ChatGPT Codex quota is underused runs on a ChatGPT account (its purpose is to
     spend that quota). Other Codex second opinions follow TTADK first.
   - Not TTADK-capable, so routed as before: Claude-only rows (`computer-use`, `ui-browser`), `image-gen` (no image tool
     on the gateway), `research` on a TTADK account without its local proxy (Codex sends no search tool to the gateway;
     the proxy in `references/codex-workers.md` adds it for every TTADK worker),
-    `second-opinion --against codex`, a review of Codex-written code, and `browser` before `browser-setup`.
-    `image-read` works on the gateway.
+    `second-opinion --against codex`, a high-stakes review of Codex-written code (Claude first), and `browser` before
+    `browser-setup`. `image-read` works on the gateway.
   - Later ladder steps never step back: Codex steps no stronger than the Sol already tried (Luna, Terra, a weaker Sol)
-    are dropped, and models TTADK lacks become Sol when the ChatGPT accounts are out.
+    are dropped; Astra stays after Sol max on a ChatGPT account and is dropped when those are out.
   - **A TTADK device saves the rest (user, 2026-11-07).** The user's other device has no TTADK and uses the shared
     ChatGPT and Claude quota, so on a device with a TTADK account nothing spends that quota for its own sake: no
     underused, front-load or expiring-week effort raises, no extra quota-spending reviews, and Claude takes only
@@ -131,7 +144,7 @@ To change routing for a kind of task, edit the table in `route.mjs` and this rat
   - Trade-off accepted by the user: on knowledge-work benchmarks (GDPval), Claude scores well above GPT. The nightly
     review compares outcomes per category and flags a category that gets worse.
 - **No quota notches on TTADK.** Quota-driven effort notches (underused, front-load, overspending) apply only to
-  ChatGPT accounts. TTADK has no windows.
+  ChatGPT accounts, and the auto-check and low-stakes notches don't apply on TTADK either. TTADK has no windows.
 - **No concurrency cap on TTADK.** A rate-limited run is retried once on TTADK, then re-routed with
   `--exclude-account ttadk`. So is a run that fails for TTADK reasons.
 - **ChatGPT quota waste.** Preferring TTADK leaves more of the ChatGPT weeks unspent. The user chose this; the nightly

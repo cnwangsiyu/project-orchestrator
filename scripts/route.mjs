@@ -62,7 +62,8 @@ const notch = (m, d, cap = 'xhigh') => {
 const label = (m) => `${m.vendor === 'claude' ? `Claude ${m.model}` : `Codex ${m.model}`} ${m.effort}`;
 
 // ---- args ----
-const BOOL = new Set(['auto-check', 'writes', 'read-only', 'fresh', 'json', 'table', 'no-redeem', 'dry']);
+const BOOL = new Set(['auto-check', 'writes', 'read-only', 'fresh', 'json', 'table', 'no-redeem', 'dry', 'urgent']);
+// --urgent: run now even while TTADK is down for a fixable reason (that work would otherwise wait for the fix).
 // --exclude-account a,b: route around accounts that just failed (e.g. TTADK after a rate-limited retry or an auth error).
 // --origins p,q: extra sites (origins or host globs) a Codex browser worker may reach besides POLICY.browserOrigins.
 const argv = process.argv.slice(2), opts = {}, pos = [];
@@ -88,6 +89,8 @@ if (cat === 'second-opinion' && !['claude', 'codex'].includes(opts.against)) die
 // Claude first, so the required review is not the same model checking itself.
 if (opts.author !== undefined && !['claude', 'codex'].includes(opts.author)) die(`--author takes claude or codex, not ${opts.author}`);
 const authorCodex = ['review', 'review-high'].includes(cat) && opts.author === 'codex';
+// A routine review of Codex-written code runs on TTADK when it is there: a fresh Sol xhigh reviewer plus a second one
+// with a different focus, both free (user, 2026-11-07). High-stakes review keeps Claude first.
 const writes = opts['read-only'] ? false : opts.writes ? true : T.writes;
 // Code work declares its impact, which decides the review (user, 2026-11-04): can a mistake be undone within hours by
 // redeploying or rolling back, without lasting damage? release = no (app/SDK code that ships in a release, published
@@ -134,42 +137,60 @@ const allowed = (x) => (x.vendor === 'claude' ? claudeAllowed(T.kind) : T.kind =
 // The usable ladder: the first pick (or its same-tier alternative when quota rules it out), then every later step the
 // quota allows. --failures N takes step N, so each failure moves up even when some steps are ruled out.
 let base;
-if (cat === 'second-opinion') { base = opts.against === 'claude' ? [T.first, ...T.ladder] : [T.alt, C('opus', 'xhigh')]; why.push(`second opinion from the other vendor than ${opts.against}`); }
+if (cat === 'second-opinion') {
+  base = opts.against === 'claude' ? [T.first, ...T.ladder] : [T.alt, C('opus', 'xhigh'), ...(TT && ttHas(SOL) ? [X(SOL, 'xhigh')] : [])];
+  why.push(`second opinion from the other vendor than ${opts.against}`);
+}
 else if (T.kind === 'browser' && !browserViaCodex) base = [T.alt, C('opus', 'high')];
-else if (authorCodex) { base = [cat === 'review' ? T.alt : T.first, C('opus', 'xhigh'), X(SOL, 'xhigh')]; why.push('Codex wrote it: Claude reviews first (Codex only when Claude has no room)'); }
+else if (authorCodex && !(cat === 'review' && TT && ttHas(SOL))) { base = [cat === 'review' ? T.alt : T.first, C('opus', 'xhigh'), X(SOL, 'xhigh')]; why.push('Codex wrote it: Claude reviews first (Codex only when Claude has no room)'); }
 else base = [T.first, ...T.ladder];
 // Every task TTADK's GPT-6.1 Sol can handle goes to it first (user, 2026-11-07): Sol at the row's effort (at least
 // medium), one notch higher after a failure, then the row's own ladder. Not TTADK-capable: Claude-only rows, image
 // generation, a second opinion on Codex's work, and browser work while TTADK isn't browser-ready.
 // research needs web search. Codex doesn't send its hosted web_search tool to the gateway, so TTADK searches only through
 // its local proxy (ttadk-setup sets it up: TT.search); without it research follows the earlier routing.
-const ttCapable = !!TT && ttHas(SOL) && T.kind !== 'claudeOnly' && cat !== 'image-gen' && !(cat === 'research' && !TT.search) && !authorCodex
-  && !(cat === 'second-opinion' && opts.against === 'codex') && !(T.kind === 'browser' && !browserViaCodex);
+const ttTaskOK = T.kind !== 'claudeOnly' && cat !== 'image-gen' && !(authorCodex && cat === 'review-high')
+  && !(cat === 'second-opinion' && opts.against === 'codex');
+const ttCapable = !!TT && ttHas(SOL) && ttTaskOK && !(cat === 'research' && !TT.search) && !(T.kind === 'browser' && !browserViaCodex);
+const ei = (e) => EFFORTS.indexOf(e);
+const maxE = (a, b) => (ei(a) >= ei(b) ? a : b);
 if (ttCapable) {
-  // Sol at the row's effort — the higher of its first pick's and its Sol alternative's (design: Opus high / Sol xhigh →
-  // Sol xhigh) — then one notch higher when there is one below max (max needs the user's OK). Then the row's own
-  // steps, minus Codex steps that are no stronger than Sol already tried (no falling back to Luna or Terra, or to a
-  // weaker Sol); models TTADK lacks become Sol when the ChatGPT accounts are out. Rows that start at xhigh therefore go
-  // straight on to their own ladder, which alternates vendors (e.g. Sol xhigh → Opus xhigh → Sol max).
-  const ei = (e) => EFFORTS.indexOf(e);
+  // TTADK is the company's quota, so quality may cost TTADK effort but not personal quota (user, 2026-11-07):
+  // - start at the higher of the row's first-pick effort and its Sol alternative's (design: Opus high / Sol xhigh →
+  //   Sol xhigh); at least high for the rows Claude is better at or that need judgment (docs, research, image-read,
+  //   analysis) and xhigh for a review of Codex-written code; one notch higher at high stakes;
+  // - then every Sol notch up to xhigh, and on to max (no OK needed on TTADK) except for the cheap rows;
+  // - then the row's own steps, minus Codex steps no stronger than what TTADK already tried (no Luna, Terra or a weaker
+  //   Sol); Astra (ChatGPT, needs an OK) stays after Sol max, and when the ChatGPT accounts are out it is dropped.
   const altSol = cat !== 'second-opinion' && T.alt?.vendor === 'codex' && T.alt.model === SOL ? T.alt.effort : null;
-  const eff = altSol && ei(altSol) > ei(base[0].effort) ? altSol : base[0].effort;
-  const e0 = notch(X(SOL, eff === 'max' ? 'xhigh' : eff), 0), up = notch(e0, +1);
-  const rungs = [e0, ...(up.effort !== e0.effort ? [up] : [])];
+  let eff = altSol ? maxE(altSol, base[0].effort) : base[0].effort;
+  if (['docs', 'research', 'image-read', 'analysis'].includes(cat)) eff = maxE(eff, 'high');
+  if (authorCodex) eff = maxE(eff, 'xhigh');
+  if (eff === 'max') eff = 'xhigh';
+  let e0 = notch(X(SOL, eff), 0);
+  if (stakes === 'high') e0 = notch(e0, +1);
+  const cheapRow = ['lookup', 'extract', 'draft', 'browser'].includes(cat); // browser: misses are page trouble, not depth
+  const rungs = [e0];
+  while (ei(rungs.at(-1).effort) < ei('xhigh')) rungs.push(notch(rungs.at(-1), +1));
+  if (!cheapRow) rungs.push(X(SOL, 'max'));
   let top = ei(rungs.at(-1).effort);
-  for (let x of base) {
+  for (const x of base) {
     if (x.vendor === 'codex') {
-      if (!ttHas(x.model) && chatgptOut) x = X(SOL, x.effort);
-      if (x.model === SOL) { if (ei(x.effort) <= top) continue; top = ei(x.effort); }
-      else if (x.model !== ASTRA) continue;
+      if (x.model === ASTRA && !chatgptOut) { rungs.push(x); continue; }
+      if (x.model === SOL && ei(x.effort) > top) { rungs.push(x); top = ei(x.effort); }
+      continue;
     }
     rungs.push(x);
   }
   base = rungs;
 }
+// TTADK down for a reason the user can fix (SSO expired, CLI or models missing): the work TTADK would take waits for the
+// fix unless it is high-stakes or --urgent, so personal quota isn't spent on it meanwhile (user, 2026-11-07).
+const ttFixable = !!QX.ttadk && !QX.ttadk.usable && !excluded.has(QX.ttadk.name) && ttTaskOK && T.kind !== 'browser';
 let deferred = null;
 const retry = (h) => (h != null && Number.isFinite(h) ? ` — retry in ${hours(h)}` : '');
 if (st.stop) deferred = "neither vendor's usage is readable — check `claude -p /usage` and the Codex hubs before dispatching";
+else if (ttFixable && stakes !== 'high' && !opts.urgent) deferred = `TTADK is down (${QX.ttadk.reason}): tell the user now so they can fix it; this waits for TTADK — re-run with --urgent (or --stakes high) to run it now on personal quota`;
 else if (T.kind === 'claudeOnly' && QC.throttledUntil) deferred = `Claude-only work and Claude's 5h window is full${retry((QC.throttledUntil - Date.now()) / 3600000)}`;
 else if (T.kind === 'codexOnly' && chatgptOut) deferred = `Codex-only work and Codex is ${QX.throttledOnly ? 'paused by its 5h window' : 'out'}${retry(QX.nextFree)}`;
 else if (codexOut && !QX.throttledOnly && stakes === 'low' && T.kind !== 'claudeOnly' && !(T.kind === 'browser' && !browserViaCodex)) deferred = `Codex is out and this is low-stakes: it waits for Codex${retry(QX.nextFree)}`;
@@ -201,9 +222,11 @@ if (!deferred) {
 const onTTADK = (x) => x?.vendor === 'codex' && !!TT && cat !== 'image-gen' && (ttHas(x.model) || chatgptOut);
 const tune = (x, f, log) => {
   const step = (d, reason) => { const n = notch(x, d); if (n.effort !== x.effort) { log(reason); x = n; } };
-  if (f === 0 && opts['auto-check'] && stakes !== 'high') step(-1, 'one notch lower: an automatic check catches a miss');
-  if (f === 0 && stakes === 'high') step(+1, 'one notch higher: high stakes');
-  if (f === 0 && stakes === 'low') step(-1, 'one notch lower: low stakes');
+  // On TTADK the cost notches save nothing (company quota) and the high-stakes notch is already in its rungs.
+  const ttRung = ttCapable && onTTADK(x);
+  if (f === 0 && opts['auto-check'] && stakes !== 'high' && !ttRung) step(-1, 'one notch lower: an automatic check catches a miss');
+  if (f === 0 && stakes === 'high' && !ttRung) step(+1, 'one notch higher: high stakes');
+  if (f === 0 && stakes === 'low' && !ttRung) step(-1, 'one notch lower: low stakes');
   const cheap = ['lookup', 'extract', 'image-gen', 'draft'].includes(cat);
   if (x.vendor === 'codex' && !onTTADK(x) && !ttDevice && QX.underused && !cheap) step(+1, QX.frontLoad ? 'one notch higher: front-loading Codex while reset cards are in hand' : 'one notch higher: Codex underused');
   else if (x.vendor === 'codex' && !onTTADK(x) && QX.overspending && opts['auto-check'] && stakes !== 'high') step(-1, 'one notch lower: Codex overspending');
@@ -226,13 +249,21 @@ if (m) {
   // ---- 3. gates ----
   if (m.model === 'fable') needsOK.push('Fable (≈3x Opus cost, own weekly cap)');
   if (m.model === ASTRA) needsOK.push('Astra (5x Sol usage)');
-  if (m.effort === 'max') needsOK.push('max effort');
+  if (m.effort === 'max' && !onTTADK(m)) needsOK.push('max effort'); // on TTADK max costs only time (user, 2026-11-07)
 }
 // Second opinion: the row's cross-vendor pair, or — while Codex is underused — an extra independent Codex review of
 // hard Codex work.
 let second = m && T.second ? T.second : null;
 if (second && m.vendor === second.vendor) second = second.vendor === 'codex' ? C('opus', 'xhigh') : X(SOL, 'xhigh');
+// Claude has no room for the cross-vendor second opinion: a fresh TTADK reviewer stands in rather than dropping it.
+if (second && !allowed(second) && second.vendor === 'claude' && TT && ttHas(SOL)) { second = X(SOL, 'xhigh'); notes.push('Claude has no room for the second opinion: a fresh TTADK Sol reviewer stands in (same model family as the first; say so in the report)'); }
 if (second && !allowed(second)) second = null;
+// A Codex-written change reviewed on TTADK gets a second free reviewer with a different focus.
+let ttSecondReviewer = false;
+if (!second && m && cat === 'review' && authorCodex && onTTADK(m)) {
+  second = X(SOL, 'xhigh'); ttSecondReviewer = true;
+  notes.push('second TTADK reviewer (free): a fresh thread with a different focus — failure paths, concurrency, input edge cases and tests rather than the main logic; merge both reports and keep only P0/P1 items (references/review-rubric.md)');
+}
 // Its point is to spend Codex quota that would otherwise be lost, so: only where the review policy wants a review anyway
 // (release code, or service code at high stakes; user, 2026-11-07), and never on a TTADK device, whose quota is left
 // for the other device.

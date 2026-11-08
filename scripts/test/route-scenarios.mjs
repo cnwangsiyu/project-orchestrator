@@ -44,6 +44,7 @@ const S = {
   // a spent account with an urgent card; two accounts that must both be spent soon.
   unreadHub: { claude: cl(10, 120), codex: [{ name: 'main', live: false, email: 'm@example.com', home: '/tmp/main', seenAt: null, windows: null, resets: null }] },
   ttCard: { claude: cl(10, 120), codex: [acc('main', 99, 100, [400]), tt()] },
+  ttClaudeOver: { claude: cl(93, 30), codex: [acc('main', 20, 120), tt()] },
   // TTADK with its web search hub + proxy set up (ttadk-setup).
   ttSearch: { claude: cl(10, 120), codex: [acc('main', 20, 120), tt({ search: true, searchLive: true })] },
   pickExcluded: { claude: cl(10, 120), codex: [acc('main', 50, 100), acc('b', 99, 100, [10])] },
@@ -100,7 +101,7 @@ const CASES = [
   ['ttFresh', ['implement'], 'codex gpt-6.1-sol high @ttadk', 'retry it once'],
   ['ttFresh', ['lookup'], 'codex gpt-6.1-sol medium @ttadk'],
   // Everything TTADK Sol can handle goes there first (user, 2026-11-07), Claude-strength rows included.
-  ['ttFresh', ['docs'], 'codex gpt-6.1-sol medium @ttadk'],
+  ['ttFresh', ['docs'], 'codex gpt-6.1-sol high @ttadk'], // judgment rows start at high on TTADK (free)
   ['ttFresh', ['design'], 'codex gpt-6.1-sol xhigh @ttadk'], // the higher of Opus high and its Sol alternative (xhigh)
   ['ttFresh', ['review-high'], 'codex gpt-6.1-sol xhigh @ttadk'],
   ['ttFresh', ['implement', '--failures', '1'], 'codex gpt-6.1-sol xhigh @ttadk'],
@@ -111,18 +112,25 @@ const CASES = [
   ['ttChatOut', ['image-gen', '--failures', '1'], 'DEFER'],
   // Rows starting at xhigh have no Sol notch short of max: they follow their own vendor-alternating ladder.
   ['ttFresh', ['implement-hard', '--impact', 'service'], 'codex gpt-6.1-sol xhigh @ttadk'],
-  ['ttFresh', ['implement-hard', '--impact', 'service', '--failures', '1'], 'claude opus xhigh'],
-  ['ttFresh', ['implement-hard', '--impact', 'service', '--failures', '2'], 'codex gpt-6.1-sol max @ttadk'],
+  // Free Sol max (no OK on TTADK) before personal Claude.
+  ['ttFresh', ['implement-hard', '--impact', 'service', '--failures', '1'], 'codex gpt-6.1-sol max @ttadk'],
+  ['ttFresh', ['implement-hard', '--impact', 'service', '--failures', '2'], 'claude opus xhigh'],
   ['ttFresh', ['computer-use'], 'claude sonnet medium'],
   ['ttFresh', ['second-opinion', '--against', 'codex'], 'claude opus high'],
   // A TTADK device leaves ChatGPT/Claude quota for the user's other device: no underused effort raise (user, 2026-11-07).
   ['ttFresh', ['implement', '--exclude-account', 'ttadk'], 'codex gpt-6.1-sol high @main'],
-  ['ttUnhealthy', ['implement'], 'codex gpt-6.1-sol high @main'],
+  // TTADK down for a fixable reason: normal work waits (tell the user); high stakes or --urgent run on personal quota.
+  ['ttUnhealthy', ['implement'], 'DEFER'],
+  ['ttUnhealthy', ['implement', '--urgent'], 'codex gpt-6.1-sol high @main'],
+  ['ttUnhealthy', ['implement', '--stakes', 'high'], 'codex gpt-6.1-sol xhigh @main'],
+  ['ttUnhealthy', ['image-gen'], 'codex gpt-6-luna low @main'],
+  ['ttUnhealthy', ['computer-use'], 'claude sonnet medium'],
   ['ttChatOut', ['lookup'], 'codex gpt-6.1-sol medium @ttadk'],
   ['ttChatOut', ['image-gen'], 'DEFER'],
   // Browser work: TTADK Codex when it is browser-ready, else Claude.
   ['ttFresh', ['browser'], 'codex gpt-6.1-sol medium @ttadk', 'Chrome must be running'],
-  ['ttFresh', ['browser', '--failures', '2'], 'claude sonnet medium'],
+  ['ttFresh', ['browser', '--failures', '2'], 'codex gpt-6.1-sol xhigh @ttadk'],
+  ['ttFresh', ['browser', '--failures', '3'], 'claude sonnet medium'],
   ['ttNoBrowser', ['browser'], 'claude sonnet medium', 'never switch to another connected browser'],
   ['fresh', ['browser'], 'claude sonnet medium'],
   ['ttFresh', ['browser', '--exclude-account', 'ttadk'], 'claude sonnet medium'],
@@ -133,18 +141,35 @@ const CASES = [
   ['codexOut', ['browser', '--stakes', 'low'], 'claude sonnet low'],
   // research needs web search: on TTADK only with its search hub set up, else the earlier routing. image-read works there.
   ['ttFresh', ['research'], 'claude sonnet medium'],
-  ['ttSearch', ['research'], 'codex gpt-6.1-sol medium @ttadk', 'local proxy'],
-  ['ttSearch', ['docs'], 'codex gpt-6.1-sol medium @ttadk', 'never put internal code'],
+  ['ttSearch', ['research'], 'codex gpt-6.1-sol high @ttadk', 'local proxy'],
+  ['ttSearch', ['docs'], 'codex gpt-6.1-sol high @ttadk', 'never put internal code'],
   ['fresh', ['implement', '--impact', 'service'], 'codex gpt-6.1-sol xhigh @main', 'never put internal code'],
-  ['ttSearch', ['research'], 'codex gpt-6.1-sol medium @ttadk', 'never put internal code'],
+  ['ttSearch', ['research'], 'codex gpt-6.1-sol high @ttadk', 'never put internal code'],
   ['ttSearch', ['research', '--exclude-account', 'ttadk'], 'claude sonnet medium'],
-  ['ttFresh', ['image-read'], 'codex gpt-6.1-sol medium @ttadk', 'no web search'],
+  ['ttFresh', ['image-read'], 'codex gpt-6.1-sol high @ttadk', 'no web search'],
   // TTADK ladders never step back to a weaker Codex model or effort.
-  ['ttFresh', ['lookup', '--failures', '2'], 'claude sonnet medium'],
-  ['ttChatOut', ['debug', '--impact', 'service', '--failures', '2'], 'codex gpt-6.1-sol max @ttadk'],
+  ['ttFresh', ['lookup', '--failures', '2'], 'codex gpt-6.1-sol xhigh @ttadk'], // cheap rows climb to xhigh, not max
+  ['ttFresh', ['lookup', '--failures', '3'], 'claude sonnet medium'],
+  ['ttChatOut', ['debug', '--impact', 'service', '--failures', '1'], 'codex gpt-6.1-sol max @ttadk'],
+  ['ttChatOut', ['debug', '--impact', 'service', '--failures', '2'], 'claude opus xhigh'],
   ['ttChatOut', ['debug', '--impact', 'service', '--failures', '3'], 'claude fable high'],
+  // Astra (ChatGPT) after free Sol max; with ChatGPT out the science ladder no longer dead-ends after one failure.
+  ['ttFresh', ['science', '--impact', 'service', '--failures', '1'], 'codex gpt-6.1-sol max @ttadk'],
+  ['ttFresh', ['science', '--impact', 'service', '--failures', '2'], 'codex gpt-6-astra high @main'],
+  ['ttChatOut', ['science', '--impact', 'service', '--failures', '1'], 'codex gpt-6.1-sol max @ttadk'],
+  // No cost notches on TTADK; high stakes starts a notch up without repeating it.
+  ['ttFresh', ['debug', '--impact', 'service', '--auto-check'], 'codex gpt-6.1-sol xhigh @ttadk'],
+  ['ttFresh', ['debug', '--impact', 'service', '--auto-check', '--failures', '1'], 'codex gpt-6.1-sol max @ttadk'],
+  ['ttFresh', ['implement', '--impact', 'service', '--stakes', 'high'], 'codex gpt-6.1-sol xhigh @ttadk'],
+  ['ttFresh', ['implement', '--impact', 'service', '--stakes', 'high', '--failures', '1'], 'codex gpt-6.1-sol max @ttadk'],
+  ['ttFresh', ['lookup', '--stakes', 'low'], 'codex gpt-6.1-sol medium @ttadk'],
   // A Codex-written change is reviewed by Claude first.
-  ['ttFresh', ['review', '--author', 'codex'], 'claude sonnet high'],
+  ['ttFresh', ['review', '--author', 'codex'], 'codex gpt-6.1-sol xhigh @ttadk', 'second TTADK reviewer'],
+  ['ttFresh', ['review-high', '--author', 'codex'], 'claude opus xhigh'],
+  ['fresh', ['review', '--author', 'codex'], 'claude sonnet high'],
+  // Claude has no room: a fresh TTADK reviewer stands in instead of deferring or dropping the second opinion.
+  ['ttClaudeOver', ['second-opinion', '--against', 'codex'], 'codex gpt-6.1-sol xhigh @ttadk'],
+  ['ttClaudeOver', ['design'], 'codex gpt-6.1-sol xhigh @ttadk', 'stands in'],
   ['ttFresh', ['review', '--author', 'claude'], 'codex gpt-6.1-sol high @ttadk'],
   ['ttFresh', ['browser'], 'codex gpt-6.1-sol medium @ttadk', 'safety clause'],
   // Browser workers get the Chrome pairing clause; code work doesn't (nightly review 2026-11-05: video-agent W258).
@@ -187,7 +212,8 @@ for (const [sc, args, want, note] of CASES) {
 // a review itself, and never on a TTADK device.
 for (const [sc, args, want] of [
   ['ttFresh', ['review'], 'none'],
-  ['ttFresh', ['review-high', '--failures', '1'], 'ttadk'],
+  ['ttFresh', ['review-high', '--failures', '2'], 'ttadk'], // Opus pick (after Sol xhigh, Sol max) → Sol second on TTADK
+  ['ttFresh', ['review-high'], 'none'], // Sol pick → Opus second (Claude keeps the high-stakes pair)
   ['fresh', ['review'], 'none'],
   ['fresh', ['implement-hard', '--impact', 'release'], 'main'],
   ['fresh', ['implement-hard', '--impact', 'throwaway'], 'none'],

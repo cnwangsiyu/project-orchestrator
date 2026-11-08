@@ -206,19 +206,24 @@ effort, Codex account and launch command from
     GPT-6.1 Sol can handle runs there first, Claude-strength rows included. Exceptions are
     Claude-only work, image generation, a second opinion on Codex's own work, and browser work
     before `browser-setup`. Everything else follows the routing above; ChatGPT accounts are
-    used by their quota. TTADK has no concurrency cap: a
-    rate-limited run is retried once on TTADK, then re-routed with `--exclude-account ttadk`. On a
-    TTADK device the ChatGPT and Claude quota is left for the user's other device (no TTADK there):
-    nothing spends it just to use it up, and Claude takes only what TTADK can't do (user,
-    2026-11-07). every TTADK worker can search the web through its local proxy, once `ttadk-setup` has
-    set it up; briefs say search queries must not carry internal information; so
-    is a run that fails for TTADK reasons (SSO, auth, gateway errors).
+    used by their quota.
+  - TTADK is the company's quota and the rest is the user's own (user, 2026-11-07): spend TTADK
+    freely where it raises quality (higher efforts, Sol max without asking, free extra reviewers),
+    and personal quota only where TTADK can't do as well. On a TTADK device the ChatGPT and Claude
+    quota is left for the user's other device (no TTADK there).
+  - TTADK has no concurrency cap: a rate-limited run is retried once on TTADK, then re-routed
+    with `--exclude-account ttadk`. TTADK down for a reason the user can fix (SSO, CLI, models):
+    tell the user at once; route.mjs holds normal work until it's fixed (`--urgent` or high stakes
+    run now on personal quota).
+  - Every TTADK worker can search the web through its local proxy, once `ttadk-setup` has set it
+    up; briefs say search queries must not carry internal information.
   - Browser work (`browser`: web pages in the user's Chrome) goes to TTADK Codex when that account
     is browser-ready, otherwise to Claude. Desktop apps, Artifact/Docs and peer negotiation stay
     on Claude (`computer-use`). Setup for a new machine: `references/codex-workers.md`, "TTADK" and
     "Browser use on a Codex worker".
   - Effort notches: lower for an automatic check, higher for high stakes, higher while Codex is
-    underused or front-loading its reset cards.
+    underused or front-loading its reset cards. On TTADK only the high-stakes one applies, and its
+    ladder climbs Sol to xhigh and max before any personal-quota step.
   - The escalation ladder, the Codex account, the sandbox, and a cross-vendor second opinion for
     reviews and designs.
 - **Follow its output:**

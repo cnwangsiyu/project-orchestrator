@@ -21,7 +21,8 @@ These are the user's decisions (2026-10-30 to 2026-11-03):
 - **Reset cards: quota first, then cards.**
   - Suggest one only at ≥99%, or before a card expires.
   - Every redemption needs the user's explicit yes, every time. Never redeem a card yourself.
-- **Fable, Astra, `max` effort and an exhausted ladder need the user's OK.**
+- **Fable, Astra, `max` effort (off TTADK; on TTADK it needs no OK, user 2026-11-07) and an exhausted ladder need
+  the user's OK.**
 - **Codex accounts and browser (2026-11-07):**
   - Every task TTADK's GPT-6.1 Sol can handle runs there first whenever TTADK is healthy. Only the tasks it can't
     handle, or all tasks while it's unhealthy or excluded, follow the earlier routing (ChatGPT accounts, Claude).
@@ -30,6 +31,9 @@ These are the user's decisions (2026-10-30 to 2026-11-03):
   - On a TTADK device, leave the ChatGPT and Claude quota for the user's other device (no TTADK there): don't add
     rules that spend it for its own sake there, and don't flag unspent ChatGPT quota or lapsed cards on a TTADK device
     as waste (user, 2026-11-07).
+  - TTADK is the company's quota and the rest is the user's own: on a TTADK device, never lower a TTADK effort to save
+    cost (it saves nothing), never count an unspent Claude week as waste, and judge a TTADK row only on quality and
+    success. Moving work from TTADK to personal quota needs evidence that TTADK does it worse.
   - Desktop computer use stays on Claude.
 - **Permissions (2026-11-05):**
   - Before dispatching, the orchestrator does only the minimal permission-only part it is already authorized for,
@@ -63,7 +67,7 @@ These are the user's decisions (2026-10-30 to 2026-11-03):
     model.
 
   Delegate wide reads to a background worker routed with `route.mjs extract --project routing-review` (a
-  Codex Luna run), not a subagent.
+  Codex run: Luna on ChatGPT, Sol on TTADK), not a subagent.
 - **Model news:** WebFetch the official pages directly. Use at most about 10 fetches, with no search fan-out.
   - Anthropic: platform.claude.com/docs/en/about-claude/models/overview and /pricing, anthropic.com/news.
   - OpenAI: learn.chatgpt.com/docs/models.md, /pricing.md, /changelog.
@@ -78,7 +82,8 @@ Look for evidence in the data, not hunches. Typical findings:
 - **Waste:**
   - a Codex week reset with a large unused share;
   - a card expired unused;
-  - a Claude week ended far under its cap while work was deferred or pushed to Codex;
+  - a Claude week ended far under its cap while work was deferred or pushed to Codex (not on a TTADK device, where
+    leaving Claude quota unspent is the point);
   - Claude ran close to empty.
 - **Outcomes:** compare vendors and models by first-pass rate, rework rounds and time within the same category.
   - For code quality, use `reviewedReleaseByVendor`: reviewed `release` work is the only work every vendor is judged
@@ -91,7 +96,7 @@ Look for evidence in the data, not hunches. Typical findings:
   missing route category or a brief template gap.
 - **Bad cases:**
   - one category escalating repeatedly from its first pick: the pick is too weak, so raise its effort or model;
-  - first picks that always succeed easily at a high cost: lower them;
+  - first picks that always succeed easily at a high cost: lower them (personal-quota picks only; never TTADK);
   - "tell the user" events;
   - user corrections in a ledger;
   - categories the orchestrators keep stretching to fit a task: add a row, or clarify a description;
