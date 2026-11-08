@@ -107,7 +107,12 @@ To change routing for a kind of task, edit the table in `route.mjs` and this rat
 - **TTADK first, for everything its Sol can handle.** When the TTADK company gateway is healthy (CLI present, SSO
   active, `gpt-6.1-sol` listed), every row runs first on TTADK `gpt-6.1-sol`, Claude-strength rows included (docs,
   research, design, high-stakes review). The effort is the row's first-pick effort, at least `medium`. After a failure
-  it goes one notch up on Sol, then the row's own ladder.
+  it goes one notch up on Sol, then the row's own ladder. Rows that start at `xhigh` (implement-hard, debug, science,
+  review-high) have no higher notch short of `max`, which needs the user's OK, so they go straight on to their own
+  ladder, which alternates vendors (Sol xhigh → Opus xhigh → Sol max); its Sol steps also run on TTADK.
+  - Image generation never runs on TTADK, its Sol fallback step included.
+  - The extra Codex review added while ChatGPT Codex quota is underused runs on a ChatGPT account (its purpose is to
+    spend that quota). Other Codex second opinions follow TTADK first.
   - Not TTADK-capable, so routed as before: Claude-only rows (`computer-use`, `ui-browser`), `image-gen` (no image tool
     on the gateway), `second-opinion --against codex`, and `browser` before `browser-setup`.
   - Cross-vendor pairs stay cross-vendor: with Sol first, the second opinion is Claude.

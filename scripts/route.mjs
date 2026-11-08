@@ -133,8 +133,11 @@ else base = [T.first, ...T.ladder];
 const ttCapable = !!TT && ttHas(SOL) && T.kind !== 'claudeOnly' && cat !== 'image-gen' && !(cat === 'second-opinion' && opts.against === 'codex')
   && !(T.kind === 'browser' && !browserViaCodex);
 if (ttCapable) {
-  const e0 = notch(X(SOL, base[0].effort === 'max' ? 'xhigh' : base[0].effort), 0);
-  base = [e0, notch(e0, +1), ...base];
+  // Sol at the row's effort, then one notch higher when there is one below max (max needs the user's OK). A row that
+  // starts at xhigh (implement-hard, debug, science, review-high) therefore goes straight on to its own ladder, which
+  // already alternates vendors (e.g. Sol xhigh → Opus xhigh → Sol max); its Sol steps run on TTADK.
+  const e0 = notch(X(SOL, base[0].effort === 'max' ? 'xhigh' : base[0].effort), 0), up = notch(e0, +1);
+  base = [e0, ...(up.effort !== e0.effort ? [up] : []), ...base];
 }
 let deferred = null;
 const retry = (h) => (h != null && Number.isFinite(h) ? ` — retry in ${hours(h)}` : '');
@@ -164,8 +167,8 @@ if (!deferred) {
 // tune(): the effort notches for a ladder step taken after f failures. Also used to rebuild the previous attempt, so a
 // retry that a quota notch has made identical to it is flagged instead of reported as an escalation.
 // TTADK takes the Codex pick when the gateway has its model; when the ChatGPT accounts are out, it also takes models it
-// lacks as Sol (image generation excepted: the image tool is not on the gateway).
-const onTTADK = (x) => x?.vendor === 'codex' && !!TT && (ttHas(x.model) || (chatgptOut && cat !== 'image-gen'));
+// lacks as Sol. Image generation never runs there, not even its Sol fallback step: the gateway has no image tool.
+const onTTADK = (x) => x?.vendor === 'codex' && !!TT && cat !== 'image-gen' && (ttHas(x.model) || chatgptOut);
 const tune = (x, f, log) => {
   const step = (d, reason) => { const n = notch(x, d); if (n.effort !== x.effort) { log(reason); x = n; } };
   if (f === 0 && opts['auto-check'] && stakes !== 'high') step(-1, 'one notch lower: an automatic check catches a miss');
@@ -200,8 +203,12 @@ if (m) {
 let second = m && T.second ? T.second : null;
 if (second && m.vendor === second.vendor) second = second.vendor === 'codex' ? C('opus', 'xhigh') : X(SOL, 'xhigh');
 if (second && !allowed(second)) second = null;
+let extraReview = false;
 if (!second && m && m.vendor === 'codex' && QX.underused && ['implement-hard', 'debug', 'science', 'review'].includes(cat)) {
-  second = X(SOL, 'xhigh'); notes.push('extra independent Codex review of the result (Codex underused): run it after the worker reports, as a fresh read-only review');
+  // Its point is to spend ChatGPT quota that would otherwise be lost, so it runs on the ChatGPT account route.mjs picks
+  // (the same one as without TTADK), never on TTADK.
+  second = X(SOL, 'xhigh'); extraReview = true;
+  notes.push('extra independent Codex review of the result (ChatGPT Codex quota underused): run it on the ChatGPT account shown after the worker reports, as a fresh read-only review');
 }
 
 // ---- 4. account and launcher ----
@@ -226,14 +233,20 @@ const inRepo = (() => {
 })();
 // The account: a rotation across accounts that must all be spent soon, else the earliest deadline.
 let acct = (QX.pick && !excluded.has(QX.pick.a.name) ? QX.pick : chatgptOpen[0]) ?? (noRedeem ? null : QX.redeem) ?? null;
+const chatgptAcct = acct;
 const ttadkRun = m && onTTADK(m);
 if (ttadkRun) acct = { a: { name: TT.name, live: TT.live } };
 else if (QX.rotate && m?.vendor === 'codex' && QX.rotate.every((r) => !excluded.has(r.a.name))) {
   const n = withLock(RR, () => { let c = 0; try { c = Number(fs.readFileSync(RR, 'utf8')) || 0; } catch {} fs.writeFileSync(RR, String(c + 1)); return c; });
   acct = QX.rotate[n % QX.rotate.length];
 }
+const pickAcct = acct;
+// The second opinion's account: the extra underused review on ChatGPT; any other Codex second opinion TTADK-first.
+const secondAcct = !second || second.vendor !== 'codex' ? null
+  : extraReview ? (ttadkRun ? chatgptAcct : pickAcct)
+  : onTTADK(second) && ttHas(second.model) ? { a: { name: TT.name, live: TT.live } } : ttadkRun ? chatgptAcct : pickAcct;
 const profiles = readProfiles();
-const launch = (x, shape = T.shape) => {
+const launch = (x, shape = T.shape, acct = pickAcct) => {
   if (x.vendor === 'claude') {
     return { launcher: 'claude-bg', command: `cd ${cwd} && claude --bg --permission-mode ${claudeMode} -n ${name} --model ${x.model} --effort ${x.effort} ${prompt}` };
   }
@@ -272,7 +285,7 @@ const redeemFirst = m?.vendor === 'codex' && !QX.pick && QX.redeem && !noRedeem
 const out = {
   category: cat, stakes, failures, deferred,
   pick: m ? { ...m, ...launch(m), sandbox: m.vendor === 'codex' ? sandbox : null } : null,
-  secondOpinion: second ? { ...second, ...launch(second, second === T.second ? T.shape : 'worker') } : null,
+  secondOpinion: second ? { ...second, ...launch(second, second === T.second ? T.shape : 'worker', secondAcct) } : null,
   needsUserOK: needsOK, tellUser: tell, why, notes, redeemFirst, quota: leanLines(st, data),
 };
 // Every real routing decision is logged for the nightly review (--dry or ROUTE_LOG=0 to skip, e.g. for experiments).

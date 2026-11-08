@@ -99,6 +99,13 @@ const CASES = [
   ['ttFresh', ['implement', '--failures', '1'], 'codex gpt-6.1-sol xhigh @ttadk'],
   // Not TTADK-capable: images, Claude-only rows, a second opinion on Codex's work.
   ['ttFresh', ['image-gen'], 'codex gpt-6-luna low @main'],
+  // Image generation never lands on TTADK, its Sol fallback step included (no image tool on the gateway).
+  ['ttFresh', ['image-gen', '--failures', '1'], 'codex gpt-6.1-sol medium @main'],
+  ['ttChatOut', ['image-gen', '--failures', '1'], 'DEFER'],
+  // Rows starting at xhigh have no Sol notch short of max: they follow their own vendor-alternating ladder.
+  ['ttFresh', ['implement-hard', '--impact', 'service'], 'codex gpt-6.1-sol xhigh @ttadk'],
+  ['ttFresh', ['implement-hard', '--impact', 'service', '--failures', '1'], 'claude opus xhigh'],
+  ['ttFresh', ['implement-hard', '--impact', 'service', '--failures', '2'], 'codex gpt-6.1-sol max @ttadk'],
   ['ttFresh', ['computer-use'], 'claude sonnet medium'],
   ['ttFresh', ['second-opinion', '--against', 'codex'], 'claude opus high'],
   ['ttFresh', ['implement', '--exclude-account', 'ttadk'], 'codex gpt-6.1-sol xhigh @main'],
@@ -144,6 +151,19 @@ for (const [sc, args, want, note] of CASES) {
   const ok = got === want;
   if (!ok) fail++;
   console.log(`${ok ? 'ok  ' : 'FAIL'} ${sc.padEnd(19)} ${args.join(' ').padEnd(36)} ${ok ? got : `want "${want}", got "${got}"`}`);
+}
+// Second-opinion account: the extra underused-quota Codex review spends ChatGPT quota (never TTADK); a cross-vendor
+// Codex second opinion follows TTADK first.
+for (const [sc, args, want] of [
+  ['ttFresh', ['review'], 'main'],
+  ['ttFresh', ['review-high', '--failures', '1'], 'ttadk'],
+  ['fresh', ['review'], 'main'],
+]) {
+  let got;
+  try { got = JSON.parse(run(sc, args)).secondOpinion?.account ?? 'none'; } catch (e) { got = `ERROR ${String(e.stderr || e.message).split('\n')[0]}`; }
+  const ok = got === want;
+  if (!ok) fail++;
+  console.log(`${ok ? 'ok  ' : 'FAIL'} ${sc.padEnd(19)} ${(args.join(' ') + ' (2nd account)').padEnd(36)} ${ok ? got : `want "${want}", got "${got}"`}`);
 }
 // Rotation: two accounts with deadlines inside 48h alternate across launches.
 {

@@ -135,8 +135,10 @@ this.
 - **Models:** the gateway's codex list is `ttadk models -f json` (agents including `codex`). As of 2026-11 it has
   `gpt-6.1-sol` and `gpt-5.6-terra`, but no Luna, Astra or GPT-6.1 Terra. The image tool isn't served either.
 - **Routing:** every task TTADK's Sol can handle runs there first (user, 2026-11-07), as Sol at the row's effort (at
-  least `medium`). Claude-only rows, image generation, second opinions on Codex's work, and browser work before
-  `browser-setup` follow the earlier routing (`references/model-routing.md`).
+  least `medium`), one notch higher after a failure when that is below `max`. Claude-only rows, image generation (its
+  Sol fallback step included), second opinions on Codex's work, and browser work before `browser-setup` follow the
+  earlier routing (`references/model-routing.md`). The extra Codex review added while ChatGPT quota is underused also
+  stays on the ChatGPT accounts.
 - **Quality:** a 40-run benchmark against ChatGPT's GPT-6.1 Sol showed equal pass rates, the same reasoning-token
   scaling with effort, and equal output speed. Small calls carry about 5s of extra latency.
 
