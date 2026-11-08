@@ -295,6 +295,19 @@ for (const [sc, args] of ERRORS) {
   if (!ok) fail++;
   console.log(`${ok ? 'ok  ' : 'FAIL'} ${sc.padEnd(19)} ${args.join(' ').padEnd(36)} rejected`);
 }
+// Model catalog (review-data.mjs): read from main's home even when the caller runs under TTADK's CODEX_HOME (the nightly
+// TTADK worker did, 2026-11-08, and saved TTADK's catalog as the main baseline).
+{
+  const { codexCatalog } = await import('../lib/state.mjs');
+  const bin = path.join(tmp, 'bin'); fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(path.join(bin, 'codex'), '#!/bin/sh\nprintf \'{"models":[{"slug":"%s"}]}\' "$CODEX_HOME"\n', { mode: 0o755 });
+  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, CODEX_HOME: path.join(tmp, 'ttadk') };
+  const reg = { main: { home: path.join(tmp, 'main') }, ttadk: { kind: 'ttadk', home: path.join(tmp, 'ttadk') } };
+  const got = codexCatalog({ reg, env }).codex.map((m) => m.slug).join(',');
+  const ok = got === path.join(tmp, 'main');
+  if (!ok) fail++;
+  console.log(`${ok ? 'ok  ' : 'FAIL'} catalog source      caller CODEX_HOME=ttadk               ${ok ? 'main' : `got ${got}`}`);
+}
 // Outcome join (outcome.mjs / review-data.mjs): prefix-tolerant, fix rounds fold in, reviews and look-alike suffixes don't.
 {
   const { outcomeOwns, isReviewDecision } = await import('../lib/state.mjs');

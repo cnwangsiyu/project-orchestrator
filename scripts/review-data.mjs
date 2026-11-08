@@ -8,7 +8,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { SHARED, ROUTE_LOG, QUOTA_LOG, readState, analyze, leanLines, fmt, outcomeOwns, isReviewDecision } from './lib/state.mjs';
+import { SHARED, ROUTE_LOG, QUOTA_LOG, readState, analyze, leanLines, fmt, outcomeOwns, isReviewDecision, codexCatalog } from './lib/state.mjs';
 
 const argv = process.argv.slice(2);
 const opt = (k) => { const i = argv.indexOf(`--${k}`); return i < 0 ? null : argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[i + 1] : true; };
@@ -105,12 +105,9 @@ const now = { lean: leanLines(st, data), claude: st.claude.status, codex: st.cod
 
 // ---- model catalog ----
 const CATALOG = path.join(SHARED, 'model-catalog.json');
-const catalogNow = { codex: [], claude: [] };
-try {
-  const raw = execFileSync('codex', ['debug', 'models'], { encoding: 'utf8', timeout: 60000, maxBuffer: 64 << 20, stdio: ['ignore', 'pipe', 'ignore'] });
-  const j = JSON.parse(raw.slice(raw.indexOf('{')));
-  catalogNow.codex = (j.models ?? j).filter((m) => m.visibility !== 'hide').map((m) => ({ slug: m.slug, desc: m.description, ctx: m.context_window, efforts: (m.supported_reasoning_levels ?? []).map((x) => x.effort ?? x) }));
-} catch (e) { catalogNow.codexError = String(e.message).split('\n')[0]; }
+// Always main's catalog, whatever CODEX_HOME the caller runs under (codexCatalog says why).
+const { home: _catalogHome, ...codexNow } = codexCatalog();
+const catalogNow = { codex: [], claude: [], ...codexNow };
 try {
   const help = execFileSync('claude', ['--help'], { encoding: 'utf8', timeout: 30000, stdio: ['ignore', 'pipe', 'ignore'] });
   const modelHelp = (help.match(/--model <model>[\s\S]*?(?=\n\s+-[-\w])/) ?? [''])[0]; // just the --model option's text

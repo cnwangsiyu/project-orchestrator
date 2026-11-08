@@ -85,6 +85,17 @@ export const readProfiles = () => {
   if (!Object.keys(reg).length) reg.main = { ...MAIN_PROFILE };
   return reg;
 };
+// The Codex model catalog (`codex debug models`) as the main ChatGPT account sees it. Each home lists different models
+// (TTADK's gateway lists its own), so the caller's CODEX_HOME must not leak in: the nightly TTADK worker inherits
+// TTADK's, and on 2026-11-08 that saved TTADK's 18 models as the main baseline. review-data compares against main.
+export const codexCatalog = ({ reg = readProfiles(), env = process.env } = {}) => {
+  const home = reg.main?.home ?? MAIN_PROFILE.home;
+  try {
+    const raw = execFileSync('codex', ['debug', 'models'], { encoding: 'utf8', timeout: 60000, maxBuffer: 64 << 20, stdio: ['ignore', 'pipe', 'ignore'], env: { ...env, CODEX_HOME: home } });
+    const j = JSON.parse(raw.slice(raw.indexOf('{')));
+    return { home, codex: (j.models ?? j).filter((m) => m.visibility !== 'hide').map((m) => ({ slug: m.slug, desc: m.description, ctx: m.context_window, efforts: (m.supported_reasoning_levels ?? []).map((x) => x.effort ?? x) })) };
+  } catch (e) { return { home, codex: [], codexError: String(e.message).split('\n')[0] }; }
+};
 export const updateProfiles = (fn) => withLock(ACCOUNTS, () => { const reg = readProfiles(); fn(reg); writeJson(ACCOUNTS, reg); return reg; });
 
 const parseUsage = (usage) => {

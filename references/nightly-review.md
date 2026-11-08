@@ -28,7 +28,7 @@ both parts below.
      live checkouts are at it; run `node scripts/test/route-scenarios.mjs` once.
   2. Read tonight's diff (`git show` of the listed commits) against the hard rules above. If a commit breaks one, revert
      it (`git revert`, push both repos, fast-forward), and move it to proposals in the report.
-  3. Step 4: find the recipients with `ListAgents` as described there and send the message (with the pull line for
+  3. Step 4: build the recipient list by name as described there (ledgers, `claude agents --json`, the roster file) and send the message (with the pull line for
      remote orchestrators when `remotePull` is true), plus each action to its orchestrator. Nothing to send when
      `changed` is false and `actions` is empty.
   4. If `proposals` is true, send one PushNotification pointing at the report. Fill in the report's notified section.
@@ -177,10 +177,17 @@ Look for evidence in the data, not hunches. Typical findings:
 Do this only when something changed, or an orchestrator has to act (missing `--project`, a pending card decision to
 put to the user).
 
-- **Recipients:** every orchestrator, local or remote (user, 2026-11-03). These are the `ListAgents` rows whose name
-  equals the `Orchestrator session:` name in a ledger, or ends in `主对话`.
-  - Include the local background sessions, and the Remote Control sessions on other machines that are not offline.
-  - Message each one.
+- **Recipients:** every orchestrator, local or remote (user, 2026-11-03). Build the list by name; don't rely on a
+  `ListAgents` listing, which is truncated when there are many sessions (2026-11-08: 95 rows hidden, orchestrators
+  possibly missed). The list is the union of:
+  - the `Orchestrator session:` name in each `~/.claude/orchestrator/*/ledger.md`;
+  - the local background sessions from `claude agents --json` whose `name` ends in `主对话`;
+  - the roster `~/.claude/orchestrator/_shared/orchestrators.txt`, one session name per line, `#` lines are comments (it holds the remote
+    orchestrators, which have no ledger here; the secretary keeps it current). Today: Webview 问题跟进主对话, Lynx Game
+    主对话, Video Agent Kit 主对话, 获客平台主对话, AutoTrader 主对话.
+  - Message each one by its exact name with `SendMessage` (a bare name reaches a live session on this machine or another
+    one even when a listing doesn't show it). A name that doesn't resolve, or is offline: record it in the report as
+    "not notified (no session)" and move on.
 - **Remote orchestrators run on another machine with their own checkout.** When the skill changed, start their
   message with:
   `git -C ~/.agents/skills pull --ff-only origin main && git -C ~/.agents/skills submodule update --init project-orchestrator && git -C ~/.agents/skills/project-orchestrator pull --ff-only origin main`,
