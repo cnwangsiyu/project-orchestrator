@@ -41,8 +41,8 @@ catches a miss, and how many times the task has fallen short. How the table was 
 - **Claude takes the work it is clearly ahead on, while Claude has spare:** docs, research, image reading,
   high-stakes review and design. On GDPval, Opus and Sonnet score ≈1845 against Astra's 1542. HLE with tools is
   Opus's best result, at 67.7%.
-- **Claude-only work:** computer use, browser, Artifact/Docs tools and peer negotiation. The Codex CLI can't do
-  them.
+- **Claude-only work:** computer use on desktop apps, Artifact/Docs tools and peer negotiation. The Codex CLI can't
+  do them. Browser work in Chrome (`browser`) goes to TTADK Codex once `browser-setup` is done, else to Claude.
   - A background Claude worker can drive the user's signed-in Chrome. Its brief names the Chrome by `deviceId`
     (recorded in the ledger once the user has picked it), and the worker calls `select_browser` with that id when
     several browsers are connected. A worker that still can't reach the browser reports BLOCKED with the tool's
@@ -92,8 +92,10 @@ To change routing for a kind of task, edit the table in `route.mjs` and this rat
    - Reviewers follow `references/review-rubric.md` and block only on P0/P1.
 5. **Gates.** Fable, Astra, `max` effort, an exhausted ladder and every card redemption need the user's OK. Two or more
    Codex steps that fell short on one task print a "tell the user" line.
-   - Hard Codex work (`implement-hard`, `debug`, `science`, `review`) gets an extra independent Codex review while Codex
-     is underused or front-loading.
+   - Hard Codex code work (`implement-hard`, `debug`, `science`) gets an extra independent Codex review while Codex is
+     underused or front-loading, but only where the review policy wants a review anyway (release code, or service
+     code at high stakes; user, 2026-11-07), never on a review, and never on a TTADK device.
+   - A required review is told who wrote the code (`--author`); a Codex-written change is reviewed by Claude first.
 6. **Launch.**
    - The account is the one the quota state picks. When two or more accounts must each be spent within 48h, launches
      rotate across them.
@@ -114,7 +116,16 @@ To change routing for a kind of task, edit the table in `route.mjs` and this rat
   - The extra Codex review added while ChatGPT Codex quota is underused runs on a ChatGPT account (its purpose is to
     spend that quota). Other Codex second opinions follow TTADK first.
   - Not TTADK-capable, so routed as before: Claude-only rows (`computer-use`, `ui-browser`), `image-gen` (no image tool
-    on the gateway), `second-opinion --against codex`, and `browser` before `browser-setup`.
+    on the gateway), `research` (no web search on the gateway: tested 2026-11-07, with `web_search = "live"` too),
+    `second-opinion --against codex`, a review of Codex-written code, and `browser` before `browser-setup`.
+    `image-read` works on the gateway.
+  - Later ladder steps never step back: Codex steps no stronger than the Sol already tried (Luna, Terra, a weaker Sol)
+    are dropped, and models TTADK lacks become Sol when the ChatGPT accounts are out.
+  - **A TTADK device saves the rest (user, 2026-11-07).** The user's other device has no TTADK and uses the shared
+    ChatGPT and Claude quota, so on a device with a TTADK account nothing spends that quota for its own sake: no
+    underused, front-load or expiring-week effort raises, no extra quota-spending reviews, and Claude takes only
+    what TTADK can't do. Reset-card prompts appear only when ChatGPT-only work lands on that account. Cards may lapse
+    on this device; that is accepted (TTADK always first).
   - Cross-vendor pairs stay cross-vendor: with Sol first, the second opinion is Claude.
   - Trade-off accepted by the user: on knowledge-work benchmarks (GDPval), Claude scores well above GPT. The nightly
     review compares outcomes per category and flags a category that gets worse.
@@ -157,6 +168,8 @@ they use the window average, with its first tenth floored.
 
 | Lean line | Condition | Do |
 |---|---|---|
+| `TTADK first` | a healthy TTADK account | The router sends everything TTADK's Sol can handle there. |
+| `TTADK device` | a TTADK account is set up | Leave ChatGPT and Claude quota for the other device; no spending for its own sake. |
 | `codex first` | always, unless Codex is out | The router already sends shared work to Codex. |
 | `claude has spare` | projected at reset ≤ the spare line (60% a week out, ≈95% at the reset) | Claude also takes the work it's clearly better at. |
 | `claude near budget` | projected between the spare line and the cap | Claude takes Claude-only work, design and high-stakes calls. |

@@ -136,9 +136,11 @@ this.
   `gpt-6.1-sol` and `gpt-5.6-terra`, but no Luna, Astra or GPT-6.1 Terra. The image tool isn't served either.
 - **Routing:** every task TTADK's Sol can handle runs there first (user, 2026-11-07), as Sol at the row's effort (at
   least `medium`), one notch higher after a failure when that is below `max`. Claude-only rows, image generation (its
-  Sol fallback step included), second opinions on Codex's work, and browser work before `browser-setup` follow the
-  earlier routing (`references/model-routing.md`). The extra Codex review added while ChatGPT quota is underused also
-  stays on the ChatGPT accounts.
+  Sol fallback step included), `research`, second opinions and reviews of Codex's work, and browser work before
+  `browser-setup` follow the earlier routing (`references/model-routing.md`). On a TTADK device the ChatGPT and Claude
+  quota is left for the user's other device.
+- **No web search** (tested 2026-11-07): the same probe found the top Hacker News story on a ChatGPT account but got
+  "NO WEB SEARCH TOOL" on TTADK, also with `web_search = "live"` and `tools.web_search = true`. Image input works.
 - **Quality:** a 40-run benchmark against ChatGPT's GPT-6.1 Sol showed equal pass rates, the same reasoning-token
   scaling with effort, and equal output speed. Small calls carry about 5s of extra latency.
 
@@ -274,7 +276,8 @@ and for what is the worker's own call. Briefs don't ask for them, forbid them or
   - device holds through `res` (Codex can run the script), taken as `--by codex:<thread id>`;
   - where to write the report, and to start its final message with `[<id>] DONE | QUESTION | BLOCKED | FAILED`. A question
     ends the run; resume it with the answer.
-- **Keep on Claude workers**: anything that needs Artifact/Docs tools, browser or computer use, or a worker that must negotiate
+- **Keep on Claude workers**: anything that needs Artifact/Docs tools or computer use on desktop apps (browser work goes
+  to TTADK Codex once `browser-setup` is done), web research while on TTADK (no web search there), or a worker that must negotiate
   with peers itself. Device runs that share phones mid-run can go to a hub-started Codex worker: steer it with handoffs. It
   can't negotiate with peers, so you broker.
 - **Verify before reporting.** Spot-check the cited file:line and commits, as for any worker.

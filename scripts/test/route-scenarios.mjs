@@ -40,6 +40,11 @@ const S = {
   ttNoBrowser: { claude: cl(10, 120), codex: [acc('main', 20, 120), tt({ browser: false })] },
   ttUnhealthy: { claude: cl(10, 120), codex: [acc('main', 20, 120), tt({ healthy: false, reason: 'TTADK SSO not logged in or expired' })] },
   ttChatOut: { claude: cl(10, 48), codex: [acc('main', 99, 48), tt()] },
+  // From the 2026-11-07 review: a hub never read; a spent account with a card next to TTADK; an excluded pick next to
+  // a spent account with an urgent card; two accounts that must both be spent soon.
+  unreadHub: { claude: cl(10, 120), codex: [{ name: 'main', live: false, email: 'm@example.com', home: '/tmp/main', seenAt: null, windows: null, resets: null }] },
+  ttCard: { claude: cl(10, 120), codex: [acc('main', 99, 100, [400]), tt()] },
+  pickExcluded: { claude: cl(10, 120), codex: [acc('main', 50, 100), acc('b', 99, 100, [10])] },
 };
 // [scenario, route args, expectation]; expectation: 'DEFER' or "vendor model effort [@account]"
 const CASES = [
@@ -94,7 +99,7 @@ const CASES = [
   ['ttFresh', ['lookup'], 'codex gpt-6.1-sol medium @ttadk'],
   // Everything TTADK Sol can handle goes there first (user, 2026-11-07), Claude-strength rows included.
   ['ttFresh', ['docs'], 'codex gpt-6.1-sol medium @ttadk'],
-  ['ttFresh', ['design'], 'codex gpt-6.1-sol high @ttadk'],
+  ['ttFresh', ['design'], 'codex gpt-6.1-sol xhigh @ttadk'], // the higher of Opus high and its Sol alternative (xhigh)
   ['ttFresh', ['review-high'], 'codex gpt-6.1-sol xhigh @ttadk'],
   ['ttFresh', ['implement', '--failures', '1'], 'codex gpt-6.1-sol xhigh @ttadk'],
   // Not TTADK-capable: images, Claude-only rows, a second opinion on Codex's work.
@@ -108,8 +113,9 @@ const CASES = [
   ['ttFresh', ['implement-hard', '--impact', 'service', '--failures', '2'], 'codex gpt-6.1-sol max @ttadk'],
   ['ttFresh', ['computer-use'], 'claude sonnet medium'],
   ['ttFresh', ['second-opinion', '--against', 'codex'], 'claude opus high'],
-  ['ttFresh', ['implement', '--exclude-account', 'ttadk'], 'codex gpt-6.1-sol xhigh @main'],
-  ['ttUnhealthy', ['implement'], 'codex gpt-6.1-sol xhigh @main'],
+  // A TTADK device leaves ChatGPT/Claude quota for the user's other device: no underused effort raise (user, 2026-11-07).
+  ['ttFresh', ['implement', '--exclude-account', 'ttadk'], 'codex gpt-6.1-sol high @main'],
+  ['ttUnhealthy', ['implement'], 'codex gpt-6.1-sol high @main'],
   ['ttChatOut', ['lookup'], 'codex gpt-6.1-sol medium @ttadk'],
   ['ttChatOut', ['image-gen'], 'DEFER'],
   // Browser work: TTADK Codex when it is browser-ready, else Claude.
@@ -118,6 +124,22 @@ const CASES = [
   ['ttNoBrowser', ['browser'], 'claude sonnet medium', 'never switch to another connected browser'],
   ['fresh', ['browser'], 'claude sonnet medium'],
   ['ttFresh', ['browser', '--exclude-account', 'ttadk'], 'claude sonnet medium'],
+  // Never-read hub: route as if Codex has room (as before TTADK existed).
+  ['unreadHub', ['implement', '--impact', 'service'], 'codex gpt-6.1-sol high @main', 'routing as if it has room'],
+  ['unreadHub', ['image-gen'], 'codex gpt-6-luna low @main'],
+  // Low-stakes browser work on the Claude path doesn't wait for Codex.
+  ['codexOut', ['browser', '--stakes', 'low'], 'claude sonnet low'],
+  // research needs web search, which TTADK lacks: earlier routing. image-read works there.
+  ['ttFresh', ['research'], 'claude sonnet medium'],
+  ['ttFresh', ['image-read'], 'codex gpt-6.1-sol medium @ttadk', 'no web search'],
+  // TTADK ladders never step back to a weaker Codex model or effort.
+  ['ttFresh', ['lookup', '--failures', '2'], 'claude sonnet medium'],
+  ['ttChatOut', ['debug', '--impact', 'service', '--failures', '2'], 'codex gpt-6.1-sol max @ttadk'],
+  ['ttChatOut', ['debug', '--impact', 'service', '--failures', '3'], 'claude fable high'],
+  // A Codex-written change is reviewed by Claude first.
+  ['ttFresh', ['review', '--author', 'codex'], 'claude sonnet high'],
+  ['ttFresh', ['review', '--author', 'claude'], 'codex gpt-6.1-sol high @ttadk'],
+  ['ttFresh', ['browser'], 'codex gpt-6.1-sol medium @ttadk', 'safety clause'],
   // Browser workers get the Chrome pairing clause; code work doesn't (nightly review 2026-11-05: video-agent W258).
   ['claudeOver', ['computer-use'], 'claude sonnet medium', 'select_browser'],
   ['fresh', ['ui-browser'], 'claude sonnet high', 'select_browser'],
@@ -154,16 +176,35 @@ for (const [sc, args, want, note] of CASES) {
 }
 // Second-opinion account: the extra underused-quota Codex review spends ChatGPT quota (never TTADK); a cross-vendor
 // Codex second opinion follows TTADK first.
+// The extra underused review follows the review policy (user, 2026-11-07): only code that needs a review anyway, never on
+// a review itself, and never on a TTADK device.
 for (const [sc, args, want] of [
-  ['ttFresh', ['review'], 'main'],
+  ['ttFresh', ['review'], 'none'],
   ['ttFresh', ['review-high', '--failures', '1'], 'ttadk'],
-  ['fresh', ['review'], 'main'],
+  ['fresh', ['review'], 'none'],
+  ['fresh', ['implement-hard', '--impact', 'release'], 'main'],
+  ['fresh', ['implement-hard', '--impact', 'throwaway'], 'none'],
+  ['fresh', ['implement-hard', '--impact', 'service'], 'none'],
+  ['ttFresh', ['implement-hard', '--impact', 'release', '--exclude-account', 'ttadk'], 'none'],
 ]) {
   let got;
   try { got = JSON.parse(run(sc, args)).secondOpinion?.account ?? 'none'; } catch (e) { got = `ERROR ${String(e.stderr || e.message).split('\n')[0]}`; }
   const ok = got === want;
   if (!ok) fail++;
   console.log(`${ok ? 'ok  ' : 'FAIL'} ${sc.padEnd(19)} ${(args.join(' ') + ' (2nd account)').padEnd(36)} ${ok ? got : `want "${want}", got "${got}"`}`);
+}
+// Redemption prompt only when the work really lands on the card account.
+for (const [sc, args, want] of [
+  ['ttCard', ['docs'], false],
+  ['ttCard', ['image-gen'], true],
+  ['pickExcluded', ['implement', '--impact', 'service', '--exclude-account', 'main'], true],
+  ['bothSpent', ['implement', '--impact', 'service'], true],
+]) {
+  let got;
+  try { const o = JSON.parse(run(sc, args)); got = !!o.redeemFirst; } catch (e) { got = `ERROR ${String(e.stderr || e.message).split('\n')[0]}`; }
+  const ok = got === want;
+  if (!ok) fail++;
+  console.log(`${ok ? 'ok  ' : 'FAIL'} ${sc.padEnd(19)} ${(args.join(' ') + ' (redeem)').padEnd(36)} ${ok ? got : `want ${want}, got ${got}`}`);
 }
 // Rotation: two accounts with deadlines inside 48h alternate across launches.
 {

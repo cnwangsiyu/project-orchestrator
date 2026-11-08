@@ -328,7 +328,7 @@ export const analyze = (data) => {
     claude.expiring = cs.left != null && cs.left < P.expiringH && room >= P.expiringRoom && proj < cap;
   }
   // Codex accounts
-  // TTADK: preferred for Codex work whenever it is healthy and under its concurrency cap (user, 2026-11-07).
+  // TTADK: preferred for Codex work whenever it is healthy (user, 2026-11-07).
   const tt = (data.codexAccounts ?? []).find((a) => a.kind === 'ttadk') ?? null;
   // No concurrency cap (user, 2026-11-07): a rate-limited run is retried once on TTADK, then re-routed without it.
   const ttadk = tt ? { name: tt.name, home: tt.home, healthy: !!tt.healthy, reason: tt.reason, live: !!tt.live, active: tt.active ?? 0,
@@ -386,12 +386,16 @@ export const leanLines = (st, data) => {
   }
   const T = X.ttadk;
   if (T) {
-    if (T.usable) out.push(`TTADK first: every task its gpt-6.1-sol can handle runs on account ${T.name} (route.mjs does this); the ChatGPT accounts below take image generation, and everything when TTADK fails (route.mjs --exclude-account ${T.name}); ${T.active} TTADK turns running`);
+    if (T.usable) {
+      out.push(`TTADK first: every task its gpt-6.1-sol can handle runs on account ${T.name} (route.mjs does this); the ChatGPT accounts below take image generation and web research, and everything when TTADK fails (route.mjs --exclude-account ${T.name}); ${T.active} TTADK turns running`);
+      out.push('TTADK device: leave the ChatGPT and Claude quota for the user\'s other device (no TTADK there) — spend it only on work TTADK can\'t do; no effort raises or extra reviews just to use quota (route.mjs applies this)');
+    }
     else out.push(`TTADK unavailable — ${T.reason}; Codex work falls back to the ChatGPT accounts`);
     if (T.healthy && !T.live) out.push(`TTADK hub down — start it before hub workers: codex-worker.mjs --account ${T.name} hub (codex exec runs don't need it)`);
     if (T.healthy && T.ssoLeftH != null && T.ssoLeftH < POLICY.ttadkSsoWarnH) out.push(`TTADK SSO expires in ${hours(T.ssoLeftH)}: ask the user to run \`! ttadk auth login sso\` before it lapses`);
   }
-  if (X.redeem) out.push(`redeem a reset card${multi ? ` on ${who(X.redeem)}` : ''}: ${X.redeem.cp.line} — ask the user first, every time; only after a yes: `
+  if (X.redeem && T) out.push(`reset card due${multi ? ` on ${who(X.redeem)}` : ''}: ${X.redeem.cp.line} — on this TTADK device ask the user only when route.mjs prints redeemFirst (ChatGPT-only work landing on that account); the other device spends that quota`);
+  else if (X.redeem) out.push(`redeem a reset card${multi ? ` on ${who(X.redeem)}` : ''}: ${X.redeem.cp.line} — ask the user first, every time; only after a yes: `
     + `codex-worker.mjs --account ${X.redeem.a.name} reset-credit-use --key <new uuid>${X.redeem.cp.card ? ` --credit ${X.redeem.cp.card.id}` : ''}, then quota.mjs --fresh`);
   if (X.rotate) out.push(`${X.ttadk?.usable ? 'ChatGPT-account work' : 'new Codex work'} → rotate across ${X.rotate.map((r) => r.a.name).join(', ')} (each must be spent within ${hours(Math.max(...X.rotate.map((r) => r.deadline)))}); route.mjs alternates per launch`);
   else if (X.pick && multi) out.push(`${X.ttadk?.usable ? 'ChatGPT-account work (images, TTADK fallback)' : 'new Codex work'} → account ${who(X.pick)} (week ${X.pick.s?.used ?? '-'}%, its quota is lost first: ${hours(X.pick.deadline)})${X.pickStale ? ' — from a stale reading' : ''}`);
@@ -406,10 +410,10 @@ export const leanLines = (st, data) => {
   if (C.status === 'unknown') out.push('claude usage unreadable: no new Claude workers except Claude-only work; check `claude -p /usage`');
   else if (C.status === 'over') out.push(`claude over budget (week ${cw.used}%, projected ${cw.projected ?? '?'}% vs ${C.cap}% now, ${C.reserve}% kept for the orchestrators until the reset in ${hours(cw.left)}): no new Claude workers except Claude-only work that can't wait; Claude-strength work goes to Codex; keep the orchestrator lean`);
   else if (C.status === 'near') out.push(`claude near budget (projected ${cw.projected ?? cw.used}%, spare line ${C.spareLine}%, cap ${C.cap}%): Claude-only work, design and high-stakes calls; everything else on Codex`);
-  else out.push(`claude has spare (projected ${cw.projected ?? cw.used}% ≤ ${C.spareLine}%): it also takes the work it is clearly better at`);
+  else out.push(T ? `claude has spare (projected ${cw.projected ?? cw.used}% ≤ ${C.spareLine}%), but on this TTADK device it takes only what TTADK can't do` : `claude has spare (projected ${cw.projected ?? cw.used}% ≤ ${C.spareLine}%): it also takes the work it is clearly better at`);
   if (C.throttledUntil) out.push(`claude 5h window full: no new Claude workers until ${fmt(C.throttledUntil)}`);
   for (const r of X.throttled) out.push(`codex ${r.a.name} 5h window full until ${fmt(r.throttledUntil)}`);
-  if (X.underused) out.push(X.frontLoad ? 'codex front-load (reset cards in hand): raise effort on Codex work one notch, add second-opinion reviews, pull queued work forward'
+  if (X.underused && !T) out.push(X.frontLoad ? 'codex front-load (reset cards in hand): raise effort on Codex work one notch, add second-opinion reviews, pull queued work forward'
     : 'codex underused: raise effort on Codex work one notch, add second-opinion reviews, pull queued work forward');
   if (X.overspending) out.push('codex overspending: lower effort one notch where an automatic check catches misses; save Sol xhigh and Astra for what matters');
   for (const r of X.rows) if (r.cp && r.cp !== X.redeem?.cp && (r.cp.deadlineH || r.cp.lapse || (r.spent && !r.cp.redeem)))
@@ -417,8 +421,8 @@ export const leanLines = (st, data) => {
   for (const r of X.rows) if (r.spent && r.cp?.redeem && X.redeem !== r)
     out.push(`${r.a.name}: spent; hold its card ${r.cp.txt} while another account has quota (quota first) — it gains ~${Math.round(r.cp.gain * 100)}% now, falling ~${Math.round(2400 / r.s.windowH)}%/day while held; redeem when the open accounts are spent${r.cp.expH != null && r.cp.expH < r.s.left ? ', or a day before it expires' : ''}`);
   if (C.avoidFable) out.push('Fable window nearly used: no Fable');
-  if (C.expiring) out.push(`claude week resets in ${hours(cw.left)} with ${C.room}% spendable beyond the ${C.reserve}% reserve: stronger settings are fine on Claude`);
-  for (const r of X.rows) if (r.s?.left != null && r.s.left < POLICY.expiringH && 100 - r.s.used >= POLICY.expiringRoom && !r.spent)
+  if (C.expiring && !T) out.push(`claude week resets in ${hours(cw.left)} with ${C.room}% spendable beyond the ${C.reserve}% reserve: stronger settings are fine on Claude`);
+  for (const r of X.rows) if (!T && r.s?.left != null && r.s.left < POLICY.expiringH && 100 - r.s.used >= POLICY.expiringRoom && !r.spent)
     out.push(`codex ${r.a.name} week resets in ${hours(r.s.left)} with ${100 - r.s.used}% left: put Codex work there now, at stronger settings`);
   return out;
 };

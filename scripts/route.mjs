@@ -84,6 +84,10 @@ if (!['low', 'normal', 'high'].includes(stakes)) die(`--stakes takes low, normal
 const failures = opts.failures === undefined ? 0 : Number(opts.failures);
 if (!Number.isInteger(failures) || failures < 0) die(`--failures takes a whole number ≥ 0, not ${opts.failures}`);
 if (cat === 'second-opinion' && !['claude', 'codex'].includes(opts.against)) die('second-opinion needs --against claude|codex (the vendor whose conclusion is checked)');
+// --author claude|codex on review / review-high: the vendor that wrote the code. A Codex-written change is reviewed by
+// Claude first, so the required review is not the same model checking itself.
+if (opts.author !== undefined && !['claude', 'codex'].includes(opts.author)) die(`--author takes claude or codex, not ${opts.author}`);
+const authorCodex = ['review', 'review-high'].includes(cat) && opts.author === 'codex';
 const writes = opts['read-only'] ? false : opts.writes ? true : T.writes;
 // Code work declares its impact, which decides the review (user, 2026-11-04): can a mistake be undone within hours by
 // redeploying or rolling back, without lasting damage? release = no (app/SDK code that ships in a release, published
@@ -104,9 +108,15 @@ const noRedeem = !!opts['no-redeem'];
 const excluded = new Set((typeof opts['exclude-account'] === 'string' ? opts['exclude-account'] : '').split(',').map((x) => x.trim()).filter(Boolean));
 // ChatGPT accounts (the quota-managed ones): out when every open account is spent/excluded and no card is due.
 const chatgptOpen = (QX.open ?? []).filter((r) => !excluded.has(r.a.name));
-const chatgptOut = QX.out || (noRedeem && !QX.pick && !!QX.redeem) || (!chatgptOpen.length && !(QX.redeem && !noRedeem && !excluded.has(QX.redeem.a.name)) && (QX.rows ?? []).length > 0);
+const chatgptOut = QX.out || (noRedeem && !QX.pick && !!QX.redeem)
+  || (!chatgptOpen.length && !(QX.redeem && !noRedeem && !excluded.has(QX.redeem.a.name)) && (QX.rows ?? []).some((r) => r.known && !excluded.has(r.a.name)))
+  || (!chatgptOpen.length && (QX.rows ?? []).length > 0 && (QX.rows ?? []).every((r) => excluded.has(r.a.name)));
 // TTADK (company gateway): preferred for Codex work whenever it is healthy and not excluded (user, 2026-11-07).
 const TT = QX.ttadk?.usable && !excluded.has(QX.ttadk.name) ? QX.ttadk : null;
+// A TTADK device (a TTADK account is set up here): TTADK always first, and the shared ChatGPT and Claude quota is left
+// for the user's other device, which has no TTADK (user, 2026-11-07). So no rule here spends quota for its own sake:
+// no underused/front-load/expiring effort raises and no extra quota-spending reviews. Without TTADK nothing changes.
+const ttDevice = !!QX.ttadk;
 const ttHas = (model) => !!TT && TT.models.includes(model);
 const browserViaCodex = T.kind === 'browser' && !!TT && TT.browser;
 const codexOut = chatgptOut && !TT; // Codex is out only when neither TTADK nor a ChatGPT account can take work
@@ -126,31 +136,51 @@ const allowed = (x) => (x.vendor === 'claude' ? claudeAllowed(T.kind) : T.kind =
 let base;
 if (cat === 'second-opinion') { base = opts.against === 'claude' ? [T.first, ...T.ladder] : [T.alt, C('opus', 'xhigh')]; why.push(`second opinion from the other vendor than ${opts.against}`); }
 else if (T.kind === 'browser' && !browserViaCodex) base = [T.alt, C('opus', 'high')];
+else if (authorCodex) { base = [cat === 'review' ? T.alt : T.first, C('opus', 'xhigh'), X(SOL, 'xhigh')]; why.push('Codex wrote it: Claude reviews first (Codex only when Claude has no room)'); }
 else base = [T.first, ...T.ladder];
 // Every task TTADK's GPT-6.1 Sol can handle goes to it first (user, 2026-11-07): Sol at the row's effort (at least
 // medium), one notch higher after a failure, then the row's own ladder. Not TTADK-capable: Claude-only rows, image
 // generation, a second opinion on Codex's work, and browser work while TTADK isn't browser-ready.
-const ttCapable = !!TT && ttHas(SOL) && T.kind !== 'claudeOnly' && cat !== 'image-gen' && !(cat === 'second-opinion' && opts.against === 'codex')
-  && !(T.kind === 'browser' && !browserViaCodex);
+// research needs Codex's hosted web search, which the gateway lacks (tested 2026-11-07: "NO WEB SEARCH TOOL"; image
+// input works, so image-read stays).
+const ttCapable = !!TT && ttHas(SOL) && T.kind !== 'claudeOnly' && cat !== 'image-gen' && cat !== 'research' && !authorCodex
+  && !(cat === 'second-opinion' && opts.against === 'codex') && !(T.kind === 'browser' && !browserViaCodex);
 if (ttCapable) {
-  // Sol at the row's effort, then one notch higher when there is one below max (max needs the user's OK). A row that
-  // starts at xhigh (implement-hard, debug, science, review-high) therefore goes straight on to its own ladder, which
-  // already alternates vendors (e.g. Sol xhigh → Opus xhigh → Sol max); its Sol steps run on TTADK.
-  const e0 = notch(X(SOL, base[0].effort === 'max' ? 'xhigh' : base[0].effort), 0), up = notch(e0, +1);
-  base = [e0, ...(up.effort !== e0.effort ? [up] : []), ...base];
+  // Sol at the row's effort — the higher of its first pick's and its Sol alternative's (design: Opus high / Sol xhigh →
+  // Sol xhigh) — then one notch higher when there is one below max (max needs the user's OK). Then the row's own
+  // steps, minus Codex steps that are no stronger than Sol already tried (no falling back to Luna or Terra, or to a
+  // weaker Sol); models TTADK lacks become Sol when the ChatGPT accounts are out. Rows that start at xhigh therefore go
+  // straight on to their own ladder, which alternates vendors (e.g. Sol xhigh → Opus xhigh → Sol max).
+  const ei = (e) => EFFORTS.indexOf(e);
+  const altSol = cat !== 'second-opinion' && T.alt?.vendor === 'codex' && T.alt.model === SOL ? T.alt.effort : null;
+  const eff = altSol && ei(altSol) > ei(base[0].effort) ? altSol : base[0].effort;
+  const e0 = notch(X(SOL, eff === 'max' ? 'xhigh' : eff), 0), up = notch(e0, +1);
+  const rungs = [e0, ...(up.effort !== e0.effort ? [up] : [])];
+  let top = ei(rungs.at(-1).effort);
+  for (let x of base) {
+    if (x.vendor === 'codex') {
+      if (!ttHas(x.model) && chatgptOut) x = X(SOL, x.effort);
+      if (x.model === SOL) { if (ei(x.effort) <= top) continue; top = ei(x.effort); }
+      else if (x.model !== ASTRA) continue;
+    }
+    rungs.push(x);
+  }
+  base = rungs;
 }
 let deferred = null;
 const retry = (h) => (h != null && Number.isFinite(h) ? ` — retry in ${hours(h)}` : '');
 if (st.stop) deferred = "neither vendor's usage is readable — check `claude -p /usage` and the Codex hubs before dispatching";
 else if (T.kind === 'claudeOnly' && QC.throttledUntil) deferred = `Claude-only work and Claude's 5h window is full${retry((QC.throttledUntil - Date.now()) / 3600000)}`;
 else if (T.kind === 'codexOnly' && chatgptOut) deferred = `Codex-only work and Codex is ${QX.throttledOnly ? 'paused by its 5h window' : 'out'}${retry(QX.nextFree)}`;
-else if (codexOut && !QX.throttledOnly && stakes === 'low' && T.kind !== 'claudeOnly') deferred = `Codex is out and this is low-stakes: it waits for Codex${retry(QX.nextFree)}`;
+else if (codexOut && !QX.throttledOnly && stakes === 'low' && T.kind !== 'claudeOnly' && !(T.kind === 'browser' && !browserViaCodex)) deferred = `Codex is out and this is low-stakes: it waits for Codex${retry(QX.nextFree)}`;
 let m = null, prevRaw = null;
 if (!deferred) {
   const firstOk = allowed(base[0]) ? base[0] : T.alt && allowed(T.alt) && cat !== 'second-opinion' ? T.alt : null;
   const ladder = [firstOk, ...base.slice(1).filter(allowed)].filter(Boolean)
     .filter((x, i, a) => a.findIndex((y) => y.vendor === x.vendor && y.model === x.model && y.effort === x.effort) === i);
-  if (!ladder.length) deferred = `neither vendor has room for this now (claude ${QC.throttledUntil ? '5h-throttled' : QC.status}, codex ${codexOut ? (QX.throttledOnly ? 'paused' : 'out') : 'ok'})${retry(QX.nextFree)}`;
+  const waits = [...(base.some((x) => x.vendor === 'claude') && QC.throttledUntil ? [(QC.throttledUntil - Date.now()) / 3600000] : []),
+    ...(base.some((x) => x.vendor === 'codex') && codexOut && QX.nextFree != null ? [QX.nextFree] : [])];
+  if (!ladder.length) deferred = `neither vendor has room for this now (claude ${QC.throttledUntil ? '5h-throttled' : QC.status}, codex ${codexOut ? (QX.throttledOnly ? 'paused' : 'out') : 'ok'})${retry(waits.length ? Math.min(...waits) : null)}`;
   else {
     if (firstOk && firstOk !== base[0]) why.push(`${base[0].vendor} not available for this (${base[0].vendor === 'claude' ? `claude ${QC.throttledUntil ? '5h-throttled' : QC.status}` : QX.throttledOnly ? 'codex paused by its 5h window' : 'codex out'}) → ${firstOk.vendor}`);
     m = ladder[Math.min(failures, ladder.length - 1)];
@@ -175,9 +205,9 @@ const tune = (x, f, log) => {
   if (f === 0 && stakes === 'high') step(+1, 'one notch higher: high stakes');
   if (f === 0 && stakes === 'low') step(-1, 'one notch lower: low stakes');
   const cheap = ['lookup', 'extract', 'image-gen', 'draft'].includes(cat);
-  if (x.vendor === 'codex' && !onTTADK(x) && QX.underused && !cheap) step(+1, QX.frontLoad ? 'one notch higher: front-loading Codex while reset cards are in hand' : 'one notch higher: Codex underused');
+  if (x.vendor === 'codex' && !onTTADK(x) && !ttDevice && QX.underused && !cheap) step(+1, QX.frontLoad ? 'one notch higher: front-loading Codex while reset cards are in hand' : 'one notch higher: Codex underused');
   else if (x.vendor === 'codex' && !onTTADK(x) && QX.overspending && opts['auto-check'] && stakes !== 'high') step(-1, 'one notch lower: Codex overspending');
-  if (x.vendor === 'claude' && QC.expiring && !cheap) step(+1, 'one notch higher: Claude headroom expires within a day');
+  if (x.vendor === 'claude' && QC.expiring && !ttDevice && !cheap) step(+1, 'one notch higher: Claude headroom expires within a day');
   if (x.vendor === 'claude' && x.model === 'fable' && QC.avoidFable) { x = C('opus', 'xhigh'); log('Fable window nearly used → Opus xhigh'); }
   return x;
 };
@@ -203,12 +233,13 @@ if (m) {
 let second = m && T.second ? T.second : null;
 if (second && m.vendor === second.vendor) second = second.vendor === 'codex' ? C('opus', 'xhigh') : X(SOL, 'xhigh');
 if (second && !allowed(second)) second = null;
+// Its point is to spend Codex quota that would otherwise be lost, so: only where the review policy wants a review anyway
+// (release code, or service code at high stakes; user, 2026-11-07), and never on a TTADK device, whose quota is left
+// for the other device.
 let extraReview = false;
-if (!second && m && m.vendor === 'codex' && QX.underused && ['implement-hard', 'debug', 'science', 'review'].includes(cat)) {
-  // Its point is to spend ChatGPT quota that would otherwise be lost, so it runs on the ChatGPT account route.mjs picks
-  // (the same one as without TTADK), never on TTADK.
+if (!second && m && m.vendor === 'codex' && !ttDevice && QX.underused && ['implement-hard', 'debug', 'science'].includes(cat) && reviewKind) {
   second = X(SOL, 'xhigh'); extraReview = true;
-  notes.push('extra independent Codex review of the result (ChatGPT Codex quota underused): run it on the ChatGPT account shown after the worker reports, as a fresh read-only review');
+  notes.push('extra independent Codex review of the result (Codex underused): run it after the worker reports, as a fresh read-only review');
 }
 
 // ---- 4. account and launcher ----
@@ -232,19 +263,23 @@ const inRepo = (() => {
   for (let d = path.resolve(opts.cwd); ; d = path.dirname(d)) { if (fs.existsSync(path.join(d, '.git'))) return true; if (d === path.dirname(d)) return false; }
 })();
 // The account: a rotation across accounts that must all be spent soon, else the earliest deadline.
-let acct = (QX.pick && !excluded.has(QX.pick.a.name) ? QX.pick : chatgptOpen[0]) ?? (noRedeem ? null : QX.redeem) ?? null;
+// After the open accounts comes the reset-card account (route.mjs then asks for the redemption, below), and when no
+// account could be read at all, the first registered one (as if it has room, and the note says so).
+const redeemAcct = QX.redeem && !noRedeem && !excluded.has(QX.redeem.a.name) ? QX.redeem : null;
+let acct = (QX.pick && !excluded.has(QX.pick.a.name) ? QX.pick : chatgptOpen[0]) ?? redeemAcct
+  ?? (!QX.readable ? (QX.rows ?? []).find((r) => !excluded.has(r.a.name)) : null) ?? null;
 const chatgptAcct = acct;
 const ttadkRun = m && onTTADK(m);
 if (ttadkRun) acct = { a: { name: TT.name, live: TT.live } };
 else if (QX.rotate && m?.vendor === 'codex' && QX.rotate.every((r) => !excluded.has(r.a.name))) {
-  const n = withLock(RR, () => { let c = 0; try { c = Number(fs.readFileSync(RR, 'utf8')) || 0; } catch {} fs.writeFileSync(RR, String(c + 1)); return c; });
+  const n = withLock(RR, () => { let c = 0; try { c = Number(fs.readFileSync(RR, 'utf8')) || 0; } catch {} if (!opts.dry) fs.writeFileSync(RR, String(c + 1)); return c; });
   acct = QX.rotate[n % QX.rotate.length];
 }
 const pickAcct = acct;
 // The second opinion's account: the extra underused review on ChatGPT; any other Codex second opinion TTADK-first.
+// The second opinion's account: TTADK first for a Codex second opinion it can run; otherwise the ChatGPT account.
 const secondAcct = !second || second.vendor !== 'codex' ? null
-  : extraReview ? (ttadkRun ? chatgptAcct : pickAcct)
-  : onTTADK(second) && ttHas(second.model) ? { a: { name: TT.name, live: TT.live } } : ttadkRun ? chatgptAcct : pickAcct;
+  : !extraReview && onTTADK(second) && ttHas(second.model) ? { a: { name: TT.name, live: TT.live } } : ttadkRun ? chatgptAcct : pickAcct;
 const profiles = readProfiles();
 const launch = (x, shape = T.shape, acct = pickAcct) => {
   if (x.vendor === 'claude') {
@@ -257,7 +292,7 @@ const launch = (x, shape = T.shape, acct = pickAcct) => {
 };
 // The same quality gate for both vendors, so outcomes compare: code work gets an independent review before it's accepted.
 // Review only where a mistake is costly to undo; reviewers follow references/review-rubric.md (blocking issues only).
-if (m && reviewKind) notes.push(`review required (impact ${impact}${stakes === 'high' ? ', high stakes' : ''}): after the worker reports, route.mjs ${reviewKind} --project ${typeof opts.project === 'string' ? opts.project : '<slug>'} --name ${name}-R; brief the reviewer with references/review-rubric.md (blocks only on P0/P1, at most 2 rounds); then record with scripts/outcome.mjs --reviewed`);
+if (m && reviewKind) notes.push(`review required (impact ${impact}${stakes === 'high' ? ', high stakes' : ''}): after the worker reports, route.mjs ${reviewKind} --author ${m.vendor} --project ${typeof opts.project === 'string' ? opts.project : '<slug>'} --name ${name}-R; brief the reviewer with references/review-rubric.md (blocks only on P0/P1, at most 2 rounds); then record with scripts/outcome.mjs --reviewed`);
 else if (m && CODE.includes(cat)) notes.push(`no review (impact ${impact}${impact === 'service' ? ', not high stakes' : ''}): accept on your own check (tests, build, acceptance), then record with scripts/outcome.mjs`);
 else if (m && cat !== 'review' && cat !== 'review-high' && cat !== 'second-opinion') notes.push('when the task ends: record it with scripts/outcome.mjs (pass | rework --rounds N | fail)');
 // Fixed safety clauses for anything that writes or touches devices (SKILL.md, "Give each worker a self-contained brief").
@@ -267,7 +302,9 @@ if (m && ['build-run', 'implement', 'implement-hard', 'debug', 'ui-browser', 'co
 // to the orchestrator (nightly review 11-05: W258 blocked on "can't see local browser 1e7c2b37", the user then chose
 // "orchestrator does the console", and that orchestrator made 510 browser calls in 24h).
 if (m && ['ui-browser', 'computer-use'].includes(cat)) notes.push('brief: name the Chrome to use by its deviceId from the ledger (the user picks it once; mcp__claude-in-chrome__list_connected_browsers lists them) and tell the worker: if a browser tool says several browsers are connected, call select_browser with that deviceId; if the browser still isn\'t reachable, report BLOCKED with the tool\'s exact error, never ask the orchestrator to click for it. Headless Playwright is fine where the user\'s sign-in isn\'t needed');
+if (m && cat === 'browser') notes.push('brief: include the browser safety clause — read and navigate freely, but ask the user (AskUserQuestion; a Codex worker reports BLOCKED) before anything irreversible on a page: submitting a form that changes data, approving, deleting, publishing, sending a message, payments');
 if (ttadkRun) {
+  notes.push(`TTADK Codex has no web search: if the task turns out to need the web, re-route it as research (route.mjs research)`);
   notes.push(`on TTADK (account ${TT.name}): if the run fails rate-limited (QPM / concurrency), retry it once there; if it fails again, or fails for TTADK reasons (SSO, auth, gateway errors), re-route with --exclude-account ${TT.name}`);
   if (!TT.live && T.shape !== 'exec') notes.push(`TTADK hub is down: start it first — node ${SKILL}/scripts/codex-worker.mjs --account ${TT.name} hub`);
 }
@@ -280,7 +317,8 @@ if (m && cat === 'browser') {
 if (m?.vendor === 'codex' && sandbox === 'workspace-write') notes.push('workspace-write can\'t run git writes: brief the worker to edit only and report the files and a commit message; you review and commit');
 if (m?.vendor === 'codex' && acct && !acct.a.live) notes.push(T.shape === 'exec' ? `account ${acct.a.name}'s reading is stale (its hub is down); codex exec still works` : `account ${acct.a.name}'s hub is down — start it first: codex-worker.mjs --account ${acct.a.name} hub`);
 if (!QX.readable && m?.vendor === 'codex') notes.push('Codex usage unreadable; routing as if it has room');
-const redeemFirst = m?.vendor === 'codex' && !QX.pick && QX.redeem && !noRedeem
+const lands = (a) => !!a && !!redeemAcct && a.a.name === redeemAcct.a.name && !chatgptOpen.some((r) => r.a.name === a.a.name);
+const redeemFirst = ((m?.vendor === 'codex' && !ttadkRun && lands(pickAcct)) || (second?.vendor === 'codex' && lands(secondAcct)))
   ? `redeem a reset card on ${QX.redeem.a.name} first (with the user's OK; if declined, re-run with --no-redeem): ${QX.redeem.cp.line}` : null;
 const out = {
   category: cat, stakes, failures, deferred,

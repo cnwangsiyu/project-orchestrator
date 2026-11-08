@@ -67,9 +67,10 @@ that keeps the orchestrators alive.
   - That covers browser and console clicking, judging screenshots, reading source or logs,
     running tests or builds, device runs, and long CLI output.
   - Don't do it "just this once" yourself.
-  - Browser work goes to a `computer-use` or `ui-browser` worker, which can reach the user's Chrome
-    (`references/model-routing.md`, Claude-only work). If that worker reports it can't reach the
-    browser, fix the pairing; don't take over the clicking. The one exception is the minimal
+  - Browser work goes to a `browser` worker (TTADK Codex when browser-ready, else Claude), or to a
+    `computer-use` / `ui-browser` worker for desktop apps and frontend checks; all of them can reach
+    the user's Chrome. If that worker reports it can't reach the browser, fix the pairing; don't take
+    over the clicking. The one exception is the minimal
     permission-only part this session is already authorized for (see "Plan around permissions").
 - **Read reports through `node <this skill>/scripts/report-summary.mjs <task dir>`.** It prints the
   report's `## Summary` (and a Codex worker's final line), capped at 3 KB. Ask the worker for
@@ -195,8 +196,9 @@ effort, Codex account and launch command from
 
   When a task spans categories, split it or pick the row for its hardest part.
 - **The script computes the rest** from its table and the quota state in `scripts/lib/state.mjs`:
-  - Hard locks: computer use, browser, Artifact/Docs and peer negotiation stay on Claude, which the
-    Codex CLI can't do; every task whose output is an image (generating, editing, variants, icons,
+  - Hard locks: computer use on desktop apps, Artifact/Docs and peer negotiation stay on Claude,
+    which the Codex CLI can't do; browser work in Chrome goes to TTADK Codex once `browser-setup` is
+    done, else to Claude; every task whose output is an image (generating, editing, variants, icons,
     illustrations, mockup images) goes to Codex as `image-gen` (user, 2026-11-03).
   - Quota moves: Codex first for anything either vendor can do. Claude takes the work it is clearly
     better at only while it has spare.
@@ -205,7 +207,10 @@ effort, Codex account and launch command from
     Claude-only work, image generation, a second opinion on Codex's own work, and browser work
     before `browser-setup`. Everything else follows the routing above; ChatGPT accounts are
     used by their quota. TTADK has no concurrency cap: a
-    rate-limited run is retried once on TTADK, then re-routed with `--exclude-account ttadk`; so
+    rate-limited run is retried once on TTADK, then re-routed with `--exclude-account ttadk`. On a
+    TTADK device the ChatGPT and Claude quota is left for the user's other device (no TTADK there):
+    nothing spends it just to use it up, and Claude takes only what TTADK can't do (user,
+    2026-11-07). `research` stays off TTADK (the gateway has no web search); so
     is a run that fails for TTADK reasons (SSO, auth, gateway errors).
   - Browser work (`browser`: web pages in the user's Chrome) goes to TTADK Codex when that account
     is browser-ready, otherwise to Claude. Desktop apps, Artifact/Docs and peer negotiation stay

@@ -11,7 +11,8 @@ These are the user's decisions (2026-10-30 to 2026-11-03):
 
 - **One routing mode, auto.** Routing is computed by the scripts. The orchestrator judges only the category, the
   stakes, whether an automatic check exists, and the failure count.
-- **Computer use, browser, Artifact/Docs tools and peer negotiation run on Claude.** The Codex CLI can't do them.
+- **Computer use on desktop apps, Artifact/Docs tools and peer negotiation run on Claude.** The Codex CLI can't do
+  them. Browser work in Chrome is not in this lock: it goes to TTADK Codex when browser-ready (rule below).
 - **Every task whose output is an image runs on Codex.**
 - **Codex quota is use-it-or-lose-it.** Spend every account's week by its reset; everything either vendor can do
   goes to Codex first.
@@ -26,6 +27,9 @@ These are the user's decisions (2026-10-30 to 2026-11-03):
     handle, or all tasks while it's unhealthy or excluded, follow the earlier routing (ChatGPT accounts, Claude).
   - TTADK has no concurrency cap: retry a rate-limited run once, then re-route without it.
   - Browser work goes to TTADK Codex when it is browser-ready, else to Claude.
+  - On a TTADK device, leave the ChatGPT and Claude quota for the user's other device (no TTADK there): don't add
+    rules that spend it for its own sake there, and don't flag unspent ChatGPT quota or lapsed cards on a TTADK device
+    as waste (user, 2026-11-07).
   - Desktop computer use stays on Claude.
 - **Permissions (2026-11-05):**
   - Before dispatching, the orchestrator does only the minimal permission-only part it is already authorized for,
