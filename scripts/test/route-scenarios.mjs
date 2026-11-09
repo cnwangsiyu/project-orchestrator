@@ -376,21 +376,28 @@ for (const [sc, args] of ERRORS) {
   if (bad.length) fail++;
   console.log(`${bad.length ? 'FAIL' : 'ok  '} trae vs codex       ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
 }
-// TRAE pause (lib/trae-health.mjs): two failures within 15 min, or one hard one, pause it for 30 min after the last.
+// TRAE pause (lib/trae-health.mjs, user 2026-11-08): transient failures back off 5/10/20/30 min; auth and hard ones
+// pause 30 min; a success clears everything; an auth pause lifts once logged in again.
 {
-  const { pauseDecision, noteFailure, noteSuccess, readPause } = await import('../lib/trae-health.mjs');
-  const t0 = 1_800_000_000_000, m = 60000;
+  const { pauseDecision, failureKind, noteFailure, noteSuccess, readPause, liftAuthPause } = await import('../lib/trae-health.mjs');
+  const t0 = 1_800_000_000_000, m = 60000, q = "We're sorry, the request queue size is exceed. Please wait and try again later.";
   const home = fs.mkdtempSync(path.join(tmp, 'trae-'));
-  noteFailure(home, 'gateway 502', t0); const one = readPause(home, t0 + m);
-  const two = noteFailure(home, 'gateway 502 again', t0 + 5 * m);
-  noteSuccess(home); const cleared = readPause(home, t0 + 6 * m);
+  noteFailure(home, q, t0); const one = readPause(home, t0 + m);
+  const p1 = noteFailure(home, q, t0 + 2 * m);                       // 1st pause: 5 min
+  noteFailure(home, q, t0 + 8 * m); const p2 = noteFailure(home, q, t0 + 9 * m);   // after it: 10 min
+  noteFailure(home, q, t0 + 20 * m); const p3 = noteFailure(home, q, t0 + 21 * m); // 20 min
+  noteSuccess(home); const cleared = readPause(home, t0 + 22 * m);
+  noteFailure(home, q, t0 + 30 * m); const p4 = noteFailure(home, q, t0 + 31 * m); // back to 5 after a success
+  const ah = fs.mkdtempSync(path.join(tmp, 'trae-auth-'));
+  const pa = noteFailure(ah, '401 Unauthorized: token expired', t0); liftAuthPause(ah); const lifted = readPause(ah, t0 + m);
   const cases = [
-    [pauseDecision([{ t: t0, why: 'timeout' }], t0 + m), null],
-    [pauseDecision([{ t: t0, why: 'timeout' }, { t: t0 + 5 * m, why: 'timeout' }], t0 + 6 * m)?.pausedUntil, t0 + 35 * m],
-    [pauseDecision([{ t: t0, why: 'timeout' }, { t: t0 + 20 * m, why: 'timeout' }], t0 + 21 * m), null],
-    [pauseDecision([{ t: t0, why: '403 Forbidden: quota exceeded' }], t0 + m)?.pausedUntil, t0 + 30 * m],
-    [pauseDecision([{ t: t0, why: 'account banned' }], t0 + 31 * m), null],
-    [one, null], [two?.pausedUntil, t0 + 35 * m], [cleared, null],
+    [failureKind(q), 'transient'], [failureKind('403 Forbidden: quota exceeded'), 'hard'], [failureKind('not logged in'), 'auth'],
+    [pauseDecision([{ t: t0, why: q }], t0 + m), null],
+    [pauseDecision([{ t: t0, why: q }, { t: t0 + 20 * m, why: q }], t0 + 21 * m), null],
+    [pauseDecision([{ t: t0, why: 'account banned' }], t0 + m)?.pausedUntil, t0 + 30 * m],
+    [pauseDecision([{ t: t0, why: q }, { t: t0 + m, why: q }], t0 + 2 * m, 9)?.pausedUntil, t0 + 31 * m],
+    [one, null], [p1?.pausedUntil, t0 + 7 * m], [p2?.pausedUntil, t0 + 19 * m], [p3?.pausedUntil, t0 + 41 * m],
+    [cleared, null], [p4?.pausedUntil, t0 + 36 * m], [pa?.pausedUntil, t0 + 30 * m], [lifted, null],
   ];
   const bad = cases.map(([got, want], i) => (got === want ? null : i)).filter((i) => i !== null);
   if (bad.length) fail++;

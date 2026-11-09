@@ -206,9 +206,9 @@ effort, Codex account and launch command from
   - Company accounts first: TTADK, then TRAE CLI (account `trae`, the company's official Codex-fork
     CLI with its own model pool), then personal quota (user, 2026-11-08). route.mjs moves TTADK's work
     to TRAE when TTADK is out; the personal-quota OK gate applies only when both are out. TRAE has no
-    browser, desktop or image tools (references/codex-workers.md, "TRAE CLI"). Repeated or hard TRAE
-    failures pause it for 30 minutes (record traecli exec failures with `codex-worker.mjs --account trae
-    note-failure`), so work moves on instead of failing task by task.
+    browser, desktop or image tools (references/codex-workers.md, "TRAE CLI"). Repeated TRAE failures
+    pause it briefly (queue full: 5, then 10, 20, 30 min; quota, ban or auth: 30 min); record traecli exec
+    failures with `codex-worker.mjs --account trae note-failure`, so work moves on instead of failing task by task.
   - TTADK first (user, 2026-11-07): when the TTADK company gateway is healthy, every task its
     GPT-6.1 Sol can handle runs there first, Claude-strength rows included. Exceptions are
     Claude-only work, image generation, a second opinion on Codex's own work, and browser work

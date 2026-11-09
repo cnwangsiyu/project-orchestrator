@@ -238,10 +238,14 @@ personal quota appears only when both company accounts are out. The user chose n
   hub is sound, and it isn't paused. TRAE publishes no quota numbers; a popular model can sit "Queued for capacity": no
   progress for 15 minutes → interrupt and re-route with `--exclude-account trae`.
 - **Pause after failures** (`scripts/lib/trae-health.mjs`, user 2026-11-08). codex-worker records every failed or
-  stalled TRAE turn and clears the record on a completed one. Two failures within 15 minutes, or one that looks like a
-  quota, rate-limit, ban or auth problem, pause TRAE for 30 minutes from the last failure: `quota.mjs` shows it
-  unavailable and `route.mjs` skips it (TTADK if usable, else the personal-quota OK gate), so tasks stop failing one by
-  one. codex-worker prints `trae-paused:` when it pauses. A `traecli exec` run bypasses codex-worker: record its failure
+  stalled TRAE turn and clears the record on a completed one. While paused, `quota.mjs` shows TRAE unavailable and
+  `route.mjs` skips it (TTADK if usable, else the personal-quota OK gate), so tasks stop failing one by one. Pauses by
+  kind (user, 2026-11-08):
+  - transient — queue full (`request queue size is exceed`: seen 2026-11-08 with about 8 concurrent GPT-6.1-Sol tasks),
+    rate limits, gateway errors, timeouts, stalls: two within 15 minutes pause it for 5 minutes, then 10, 20, at most 30
+    while pauses follow each other without a success (the backoff starts over after a success or an hour clear);
+  - auth — not logged in, 401, expired token: 30 minutes, lifted as soon as `login status` is fine again;
+  - hard — quota used up, banned, 403 Forbidden: 30 minutes. codex-worker prints `trae-paused:` when it pauses. A `traecli exec` run bypasses codex-worker: record its failure
   (or a run you interrupted) with `codex-worker.mjs --account trae note-failure "<error>"`. To lift a pause by hand,
   delete `~/.trae/worker-health.json`.
 

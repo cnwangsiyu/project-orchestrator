@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { readPause } from './trae-health.mjs';
+import { readPause, liftAuthPause } from './trae-health.mjs';
 
 export const now = Date.now();
 
@@ -221,6 +221,7 @@ const readTrae = (name, prof) => {
   let status = '';
   try { status = execFileSync('/bin/sh', ['-c', '"$0" login status 2>&1', bin], { encoding: 'utf8', timeout: 30000 }); } catch (e) { status = String(e.stdout ?? ''); } // it prints to stderr
   if (!/logged in/i.test(status) || /not logged in/i.test(status)) { out.reason = 'TRAE CLI not logged in (run `traecli login --git-code`, or the user runs `! traecli login --sso`)'; return out; }
+  liftAuthPause(prof.home); // logged in again: an auth pause is over
   try {
     const ids = execFileSync(bin, ['models'], { encoding: 'utf8', timeout: 60000, stdio: ['ignore', 'pipe', 'ignore'] }).split('\n').map((l) => l.trim()).filter((l) => /^[A-Za-z0-9][\w.-]*$/.test(l));
     if (ids.length) { out.modelIds = Object.fromEntries(ids.map((i) => [i.toLowerCase(), i])); out.models = Object.keys(out.modelIds); }

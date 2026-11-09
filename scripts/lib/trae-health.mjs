@@ -1,35 +1,51 @@
 // TRAE CLI health from what its workers hit (user, 2026-11-08): quota.mjs only sees that the CLI is logged in and lists
-// its models, not that its gateway keeps failing (rate limits, a ban, long queues, outages). codex-worker records each
-// failed or stalled TRAE turn here, and any completed turn clears the record. After two failures within WINDOW_MIN, or one
-// that looks like a quota / ban / auth problem, TRAE is paused for PAUSE_MIN from the last failure: quota.mjs reports it
-// unavailable, so route.mjs stops sending it work (TTADK if usable, else the personal-quota OK gate) instead of every
-// task failing once first.
-//   <trae home>/worker-health.json  {"failures": [{"t": ms, "why": "..."}], "pausedUntil": ms|null, "reason": "..."}
+// its models, not that its gateway keeps failing. codex-worker records each failed or stalled TRAE turn here, and any
+// completed turn clears the record (and the pause). While paused, quota.mjs reports TRAE unavailable, so route.mjs stops
+// sending it work (TTADK if usable, else the personal-quota OK gate) instead of every task failing once first.
+//
+// Pauses by kind (user, 2026-11-08: 30 minutes for a passing queue overflow was too long):
+// - transient (queue full — "request queue size is exceed", rate limits, gateway errors, timeouts, stalls): two within
+//   WINDOW_MIN pause it for 5 minutes, then 10, 20, at most 30 while pauses keep following each other without a success;
+// - auth (not logged in, 401, expired token): one pauses it for 30 minutes; lifted as soon as `login status` is fine again
+//   (quota.mjs checks);
+// - hard (quota used up, banned, 403 Forbidden): one pauses it for 30 minutes.
+//   <trae home>/worker-health.json  {"failures":[{"t","why"}],"pausedUntil","reason","kind","streak"}
 import fs from 'node:fs';
 import path from 'node:path';
 
-export const PAUSE_MIN = 30, WINDOW_MIN = 15;
-const HARD = /quota|limit exceeded|rate.?limit|banned|ban\b|封禁|forbidden|unauthori[sz]ed|\b40[13]\b|not logged in|login|token expired/i;
+export const WINDOW_MIN = 15, HARD_MIN = 30, BACKOFF_MIN = [5, 10, 20, 30];
+const AUTH = /not logged in|unauthori[sz]ed|\b401\b|token expired|login (required|expired)|re-?login/i;
+const HARD = /quota|daily limit|banned|\bban\b|封禁|封号|forbidden|\b403\b/i;
+export const failureKind = (why) => (AUTH.test(why ?? '') ? 'auth' : HARD.test(why ?? '') ? 'hard' : 'transient');
 const file = (home) => path.join(home, 'worker-health.json');
 const read = (home) => { try { return JSON.parse(fs.readFileSync(file(home), 'utf8')); } catch { return { failures: [] }; } };
 const write = (home, rec) => { try { const t = `${file(home)}.${process.pid}`; fs.writeFileSync(t, JSON.stringify(rec)); fs.renameSync(t, file(home)); } catch {} };
 
-// Pure: the pause these failures call for at time now, or null.
-export const pauseDecision = (failures, now = Date.now()) => {
+// Pure: the pause these failures call for at time now, or null. streak = pauses already in a row without a success.
+export const pauseDecision = (failures, now = Date.now(), streak = 0) => {
   const recent = (failures ?? []).filter((f) => now - f.t <= WINDOW_MIN * 60000);
   if (!recent.length) return null;
-  const hard = recent.find((f) => HARD.test(f.why ?? ''));
-  if (!hard && recent.length < 2) return null;
   const last = recent.reduce((a, f) => (f.t > a.t ? f : a));
-  return { pausedUntil: last.t + PAUSE_MIN * 60000, reason: hard ? `${hard.why}`.slice(0, 200) : `${recent.length} failed or stalled TRAE turns in ${WINDOW_MIN} min (last: ${String(last.why).slice(0, 160)})` };
+  const serious = recent.filter((f) => failureKind(f.why) !== 'transient').reduce((a, f) => (!a || f.t > a.t ? f : a), null);
+  if (serious) return { kind: failureKind(serious.why), pausedUntil: serious.t + HARD_MIN * 60000, reason: String(serious.why).slice(0, 200) };
+  if (recent.length < 2) return null;
+  const mins = BACKOFF_MIN[Math.min(streak, BACKOFF_MIN.length - 1)];
+  return { kind: 'transient', pausedUntil: last.t + mins * 60000, reason: `${recent.length} failed or stalled TRAE turns in ${WINDOW_MIN} min, paused ${mins} min (last: ${String(last.why).slice(0, 140)})` };
 };
 export const noteFailure = (home, why, now = Date.now()) => {
   const rec = read(home);
+  const wasPaused = rec.pausedUntil && rec.pausedUntil > now;
   const failures = [...(rec.failures ?? []), { t: now, why: String(why ?? 'failed').slice(0, 300) }].slice(-20);
-  const p = pauseDecision(failures, now);
-  const out = { failures, pausedUntil: p?.pausedUntil ?? (rec.pausedUntil > now ? rec.pausedUntil : null), reason: p?.reason ?? rec.reason ?? null };
+  // The backoff starts over when the last pause ended more than an hour ago.
+  const streak = rec.pausedUntil && now - rec.pausedUntil > 60 * 60000 ? 0 : rec.streak ?? 0;
+  const p = wasPaused ? null : pauseDecision(failures, now, streak);
+  // A new pause starts the next backoff step and clears the failures that caused it.
+  const out = p ? { failures: [], pausedUntil: p.pausedUntil, reason: p.reason, kind: p.kind, streak: streak + 1 }
+    : { ...rec, failures };
   write(home, out);
   return out.pausedUntil && out.pausedUntil > now ? out : null;
 };
-export const noteSuccess = (home) => write(home, { failures: [], pausedUntil: null, reason: null });
+export const noteSuccess = (home) => write(home, { failures: [], pausedUntil: null, reason: null, kind: null, streak: 0 });
 export const readPause = (home, now = Date.now()) => { const r = read(home); return r.pausedUntil && r.pausedUntil > now ? r : null; };
+// An auth pause ends once the CLI is logged in again (quota.mjs calls this after a good `login status`).
+export const liftAuthPause = (home) => { const r = read(home); if (r.kind === 'auth') write(home, { ...r, pausedUntil: null, reason: null, kind: null }); };
