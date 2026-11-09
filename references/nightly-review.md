@@ -7,12 +7,17 @@ when the evidence is thin.
 
 ## Who does what
 
-With a healthy TTADK account the review runs on TTADK, so it burns company quota rather than the user's own (user,
-2026-11-07). The launcher gathers the data, a **TTADK worker** does the review, and a short **Claude finisher**
-checks it and does what only Claude can. Without TTADK, or when the worker fails, one Claude session does all of it,
-both parts below.
+The review follows the routing policy like any other task (user, 2026-11-09): the launcher gathers the data, routes
+the review with `route.mjs analysis --stakes high` (logged as project `routing`, name `routing-nightly-review-<date>`),
+and runs it as a one-shot **worker** on the account the route picks — TTADK first, then TRAE CLI. A worker that fails
+or leaves no report is re-routed without its account (up to three tries). A short **Claude finisher** (`route.mjs
+claude-tools`) checks the result and does what only Claude can. When the route lands on personal quota (a ChatGPT
+account, or a whole Claude review), a short Claude session first asks the user with a Chinese card — run now on
+personal quota, or skip tonight — and re-runs the launcher after a yes; a whole Claude review does both parts below.
+`NIGHTLY_MODE=plan scripts/nightly-review.sh` prints the decisions without running anything.
 
-- **The worker** (Codex `gpt-6.1-sol` xhigh on TTADK, full access, network on): steps 1, 2, 3 and 5.
+- **The worker** (the routed Codex model, e.g. `gpt-6.1-sol` xhigh on TTADK or TRAE; full access, network on):
+  steps 1, 2, 3 and 5.
   - The launcher has already run `review-data` (24h, 168h) and `orch-usage` into `<date>.data/`; read those files
     instead of running the scripts.
   - Model news: use web search and fetch the official pages yourself (the same pages and limits as in step 1).
@@ -261,10 +266,11 @@ other people see or that can't be undone. Write each in Chinese with the numbers
 
 `~/Library/LaunchAgents/com.user.routing-nightly-review.plist` runs `scripts/nightly-review.sh` daily at 03:07, on the
 machine the orchestrators run on (the Mac mini since 2026-11-07). The script stops earlier review sessions, then (see
-"Who does what") either runs the TTADK worker (`<date>.worker.jsonl`, up to 40 min) and starts the finisher
-`routing-nightly-review-<date>-finish` (Sonnet `medium`, bypass), or starts the full Claude review
-`routing-nightly-review-<date>` (Opus `high`, bypass). cwd `_shared/routing-review/`; log `_shared/routing-review/launch.log`.
-`NIGHTLY_MODE=claude` forces the Claude review; `NIGHTLY_MODE=dry` runs the worker read-only and stops (a test).
+"Who does what") routes and runs the worker (`<date>.worker.jsonl`, up to 40 min per try) and starts the finisher
+`routing-nightly-review-<date>-finish` (route.mjs `claude-tools`, bypass); on personal quota it starts
+`routing-nightly-review-<date>-ask` (the Chinese card) first. cwd `_shared/routing-review/`; log `_shared/routing-review/launch.log`.
+`NIGHTLY_MODE=plan` prints the routing only; `NIGHTLY_MODE=claude` forces a whole Claude review (after the card);
+`NIGHTLY_MODE=dry` runs the worker read-only and stops (a test).
 
 - **Install or reload:** `launchctl bootstrap gui/$(id -u) <plist>`, or `launchctl kickstart -k gui/$(id -u)/com.user.routing-nightly-review`
   to run it now.
