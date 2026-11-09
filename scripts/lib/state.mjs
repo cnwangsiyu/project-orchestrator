@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { readPause } from './trae-health.mjs';
 
 export const now = Date.now();
 
@@ -226,6 +227,9 @@ const readTrae = (name, prof) => {
   } catch {}
   if (!out.models.includes('gpt-6.1-sol')) { out.reason = 'TRAE CLI lists no GPT-6.1-Sol'; return out; }
   out.healthy = true;
+  // Paused after repeated or hard worker failures (lib/trae-health.mjs): unavailable until the pause ends.
+  const pause = readPause(prof.home);
+  if (pause) { out.healthy = false; out.paused = pause; out.reason = `paused until ${fmt(pause.pausedUntil)} after worker failures (${pause.reason})`; }
   try {
     const list = execFileSync(process.execPath, [WORKER, '--account', name, 'list', '--limit', '60'], { encoding: 'utf8', timeout: 30000, stdio: ['ignore', 'pipe', 'pipe'] });
     out.live = true;

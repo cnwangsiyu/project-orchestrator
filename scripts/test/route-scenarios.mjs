@@ -376,6 +376,26 @@ for (const [sc, args] of ERRORS) {
   if (bad.length) fail++;
   console.log(`${bad.length ? 'FAIL' : 'ok  '} trae vs codex       ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
 }
+// TRAE pause (lib/trae-health.mjs): two failures within 15 min, or one hard one, pause it for 30 min after the last.
+{
+  const { pauseDecision, noteFailure, noteSuccess, readPause } = await import('../lib/trae-health.mjs');
+  const t0 = 1_800_000_000_000, m = 60000;
+  const home = fs.mkdtempSync(path.join(tmp, 'trae-'));
+  noteFailure(home, 'gateway 502', t0); const one = readPause(home, t0 + m);
+  const two = noteFailure(home, 'gateway 502 again', t0 + 5 * m);
+  noteSuccess(home); const cleared = readPause(home, t0 + 6 * m);
+  const cases = [
+    [pauseDecision([{ t: t0, why: 'timeout' }], t0 + m), null],
+    [pauseDecision([{ t: t0, why: 'timeout' }, { t: t0 + 5 * m, why: 'timeout' }], t0 + 6 * m)?.pausedUntil, t0 + 35 * m],
+    [pauseDecision([{ t: t0, why: 'timeout' }, { t: t0 + 20 * m, why: 'timeout' }], t0 + 21 * m), null],
+    [pauseDecision([{ t: t0, why: '403 Forbidden: quota exceeded' }], t0 + m)?.pausedUntil, t0 + 30 * m],
+    [pauseDecision([{ t: t0, why: 'account banned' }], t0 + 31 * m), null],
+    [one, null], [two?.pausedUntil, t0 + 35 * m], [cleared, null],
+  ];
+  const bad = cases.map(([got, want], i) => (got === want ? null : i)).filter((i) => i !== null);
+  if (bad.length) fail++;
+  console.log(`${bad.length ? 'FAIL' : 'ok  '} trae pause          ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
+}
 // Outcome join (outcome.mjs / review-data.mjs): prefix-tolerant, fix rounds fold in, reviews and look-alike suffixes don't.
 {
   const { outcomeOwns, isReviewDecision } = await import('../lib/state.mjs');

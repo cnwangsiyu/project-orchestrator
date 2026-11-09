@@ -11,6 +11,7 @@
 //   codex-worker ttadk-setup [--name ttadk] [--home DIR] [--port N] [--search-port N]   (the TTADK gateway as an account)
 //   codex-worker [--account ttadk] proxy                                   (start/check TTADK's local proxy: web search)
 //   codex-worker trae-setup [--name trae] [--port N]                      (TRAE CLI as an account: its app-server is the hub)
+//   codex-worker --account trae note-failure "<error>"                    (record a failed traecli exec run; see lib/trae-health.mjs)
 //   codex-worker wait   --thread ID [--log FILE] [--out FILE]            (start/turn/wait take --stall-min M, default 30)
 //   codex-worker steer  --thread ID                                                                     "<message>"
 //   codex-worker interrupt --thread ID
@@ -39,6 +40,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { noteFailure, noteSuccess } from './lib/trae-health.mjs';
 
 // --account NAME (anywhere on the line) picks a profile from the accounts file: its own CODEX_HOME, so its own login,
 // and its own hub. Without it: CODEX_HOME / CODEX_HUB from the environment, else ~/.codex and the default hub.
@@ -292,6 +294,13 @@ ${keep ? `\n# --- previous config ---\n${keep}` : ''}`);
 // image generation; it gets Playwright MCP for its own headless Chrome. This writes into ~/.trae/traecli.toml: commits
 // without TRAE's co-author line, live web search, the playwright MCP server, and network in workspace-write (as TTADK);
 // then registers the account.
+// A traecli exec run bypasses this script: the orchestrator records its failure here (route.mjs says so).
+if (cmd === 'note-failure') {
+  if (PROF?.kind !== 'trae') die('note-failure is for the TRAE account (--account trae)');
+  const p = noteFailure(PROF.home, pos.join(' ') || 'traecli exec failed');
+  console.log(p ? `trae-paused: TRAE is paused until ${new Date(p.pausedUntil).toLocaleTimeString()} (${p.reason}); route.mjs sends its work elsewhere meanwhile` : 'recorded');
+  process.exit(0);
+}
 if (cmd === 'trae-setup') {
   const name = typeof opts.name === 'string' ? opts.name : 'trae';
   let bin = '';
@@ -486,6 +495,14 @@ const report = async (threadId, turn, final, usage) => {
   if (/Browser is not available: chrome/.test(JSON.stringify(turn.error ?? '') + (final ?? lastMessage(turn.items) ?? ''))) {
     console.log('browser-unavailable: the Chrome extension host is not connected (pgrep -f "ChatGPT for Chrome"). Make sure Chrome is running, wait a minute and retry once; if it fails again, re-route the task to a Claude worker (route.mjs browser --exclude-account ' + (account ?? '<account>') + ')');
   }
+  // TRAE: every failed turn is recorded and every completed one clears the record; repeated or hard failures pause it.
+  if (PROF?.kind === 'trae') {
+    if (turn.status === 'completed') noteSuccess(PROF.home);
+    else if (turn.status === 'failed') {
+      const p = noteFailure(PROF.home, JSON.stringify(turn.error ?? 'failed'));
+      if (p) console.log(`trae-paused: TRAE is paused until ${new Date(p.pausedUntil).toLocaleTimeString()} (${p.reason}); re-route this task with route.mjs ... --exclude-account ${account}`);
+    }
+  }
   if (usage) console.log(`usage (thread total) input=${usage.inputTokens} cached=${usage.cachedInputTokens} output=${usage.outputTokens}`);
   final ??= lastMessage(turn.items);
   if (!final) final = lastMessage((await readTurns(threadId).catch(() => [])).find((t) => t.id === turn.id)?.items);
@@ -509,6 +526,7 @@ const follow = (threadId, turnId) => {
     const line = `stalled: no events for ${idle < 1 ? `${Math.round(idle * 60)}s` : `${Math.round(idle)}m`} on turn ${turnId} (thread ${threadId}); the turn is still running on the hub — check status and sub-agent threads, then wait again, steer or interrupt`;
     console.log(line);
     if (opts.log) try { fs.appendFileSync(path.resolve(opts.log), JSON.stringify({ stalled: true, idleMin: Math.round(idle), at: Date.now() }) + '\n'); } catch {}
+    if (PROF?.kind === 'trae') noteFailure(PROF.home, `stalled ${Math.round(idle)} min (queued for capacity?)`);
     finish(4);
   }, Math.min(60000, Math.max(5000, STALL_MIN * 30000))).unref();
   handlers.push((m) => {
