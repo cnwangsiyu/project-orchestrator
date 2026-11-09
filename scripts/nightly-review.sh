@@ -69,5 +69,5 @@ fi
 
 # 3. The Claude finisher: check, notify, push notification.
 claude --bg --permission-mode bypassPermissions -n "routing-nightly-review-$DAY-finish" --model sonnet --effort medium \
-  "Finish the nightly routing review for $DAY: read $SKILL/references/nightly-review.md, section \"Who does what\" (the finisher's part), then the worker's report $DIR/$DAY.md and $DIR/$DAY.notify.json, and follow it."
+  "Finish the nightly routing review for $DAY: read $SKILL/references/nightly-review.md, section \"Who does what\" (the finisher's part) and \"Decisions for the user\", then the worker's report $DIR/$DAY.md and $DIR/$DAY.notify.json, and follow it. Ask every entry of notify.json decisions with AskUserQuestion cards in Chinese."
 echo "finisher exit $?"

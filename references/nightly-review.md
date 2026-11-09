@@ -21,7 +21,12 @@ both parts below.
   - Don't message anyone (Codex can't reach the sessions). Instead write `<date>.notify.json`:
     `{"changed": bool, "commits": ["<sha> <subject>", …], "remotePull": bool, "message": "<the step-4 message>",
     "actions": [{"orchestrator": "<ledger Orchestrator session name>", "text": "<what it has to act on>"}],
-    "proposals": bool}`. Write it even when nothing changed (`"changed": false`).
+    "proposals": bool, "decisions": [<decision>, …]}`. Write it even when nothing changed (`"changed": false`).
+  - `decisions` lists what only the user can decide (see "Decisions for the user"), **in Chinese**, one entry each:
+    `{"id": "<date>-<n>", "header": "<≤12 chars>", "question": "<one self-contained question ending in ?, with the
+    evidence in a sentence>", "options": [{"label": "<1–5 words>", "description": "<what happens if chosen>"}, …],
+    "recommended": <index of the recommended option>}` — 2 to 4 options, the recommended one first. Empty list when
+    there is nothing to decide.
   - Write the report (step 5) with "Notified: pending (finisher)" in its notified section.
 - **The finisher** (Claude Sonnet medium, bypass): only the checks and step 4.
   1. Read the report and `notify.json`. Check that each listed commit is on `origin/main` in both repos and that the
@@ -31,8 +36,14 @@ both parts below.
   3. Step 4: build the recipient list by name as described there (ledgers, `claude agents --json`, the roster file) and send the message (with the pull line for
      remote orchestrators when `remotePull` is true), plus each action to its orchestrator. Nothing to send when
      `changed` is false and `actions` is empty.
-  4. If `proposals` is true, send one PushNotification pointing at the report. Fill in the report's notified section.
-     Then end the turn.
+  4. Decisions (user, 2026-11-09: "每晚复盘如果有任何需要我决策的东西请用卡片弹窗问我，用中文"). If `decisions` is
+     not empty: first send one PushNotification in Chinese (「夜间复盘有 N 个决定等你选择」), then ask them with
+     AskUserQuestion — the card — in Chinese, at most 4 questions per card (several cards in a row if more), each
+     question self-contained, the recommended option first with 「（推荐）」 at the end of its label. Wait for the
+     answers. Then write `<date>.decisions.json` (`[{"id", "question", "answer", "notes", "at", "status": "approved"|
+     "declined"|"other", "done": null}]`) and a 「用户决定」 section in the report. If `proposals` is true but no card
+     was needed, send one PushNotification pointing at the report. Fill in the report's notified section, then end
+     the turn.
 
 ## Hard rules — never change these; propose to the user instead
 
@@ -214,15 +225,32 @@ put to the user).
   - "No reply needed."
   - Never ask an orchestrator to redeem a card, or to act on something the user hasn't approved.
 
+## Decisions for the user
+
+Only what the user must decide becomes a card; everything else the review decides itself by its recommended option and
+records (user, 2026-11-08: far fewer approval requests). Cards are for: changing a hard rule above; a new default model
+or plan; spending personal quota or company quota beyond the routing policy; reset cards; anything that changes what
+other people see or that can't be undone. Write each in Chinese with the numbers that justify it.
+
+- **Approved decisions are implemented by the next night's review**, in step 3 under the same rules (worktree, tests,
+  commit), unless the user had the routing session do it sooner. The worker reads every
+  `routing-review/*.decisions.json` entry with `status: "approved"` and `done: null`, implements it, and records the
+  commit in `done` (it may edit those files for that). The user's approval covers the files the decision needs, beyond the files step 3 normally allows; it still needs `all pass` before the commit. A declined proposal is not proposed again without new evidence.
+  A question with no answer by the next run (the launcher stops the finisher) is asked again, once more.
+
 ## 5. Report
 
 - Write `~/.claude/orchestrator/_shared/routing-review/<date>.md` with these sections:
   - the data summary;
   - findings;
   - changes, with commits;
-  - proposals that need the user: anything touching a hard rule, a new default model, a plan change;
+  - proposals that need the user: anything touching a hard rule, a new default model, a plan change (each also a
+    Chinese card in `notify.json` `decisions`; the Claude-only review asks them itself with AskUserQuestion, as the
+    finisher does);
+  - approved decisions from earlier nights implemented tonight, with commits;
   - which orchestrators were notified.
-- If there are proposals for the user, also send one PushNotification that points at the report.
+- If there are proposals for the user: a Claude-only review asks them as Chinese cards (finisher step 4); otherwise
+  send one PushNotification that points at the report.
 - Then end your turn. The next night's launcher stops this session.
 
 ## Schedule (this machine)
