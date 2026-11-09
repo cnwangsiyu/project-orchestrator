@@ -216,6 +216,10 @@ effort, Codex account and launch command from
     with `--exclude-account ttadk`. TTADK down for a reason the user can fix (SSO, CLI, models):
     tell the user at once; route.mjs holds normal work until it's fixed (`--urgent` or high stakes
     run now on personal quota).
+  - TTADK is not unlimited (measured 2026-11-08): about 500M tokens a day per user, input + output with
+    cached input counted in full, shared by all models (plus an hourly cap); it resets at 16:00 UTC.
+    When it runs out (`quota-exhausted:` from codex-worker; quota.mjs shows TTADK paused until the
+    reset), don't retry or switch models: route.mjs holds normal work until the reset, as above.
   - Every TTADK worker can search the web through its local proxy, once `ttadk-setup` has set it
     up; briefs say search queries must not carry internal information.
   - Browser work (`browser`: web pages in the user's Chrome) goes to TTADK Codex when that account

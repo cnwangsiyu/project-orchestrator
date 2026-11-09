@@ -192,11 +192,13 @@ if (ttCapable) {
   base = rungs;
 }
 // TTADK down for a reason the user can fix (SSO expired, CLI or models missing): the work TTADK would take waits for the
-// fix unless it is high-stakes or --urgent, so personal quota isn't spent on it meanwhile (user, 2026-11-07).
+// fix unless it is high-stakes or --urgent, so personal quota isn't spent on it meanwhile (user, 2026-11-07). Its daily
+// token quota used up: the same, waiting for the reset (2026-11-08).
 const ttFixable = !!QX.ttadk && !QX.ttadk.usable && !excluded.has(QX.ttadk.name) && ttTaskOK && T.kind !== 'browser';
 let deferred = null;
 const retry = (h) => (h != null && Number.isFinite(h) ? ` — retry in ${hours(h)}` : '');
 if (st.stop) deferred = "neither vendor's usage is readable — check `claude -p /usage` and the Codex hubs before dispatching";
+else if (ttFixable && stakes !== 'high' && !opts.urgent && QX.ttadk.quotaOut) deferred = `TTADK is paused (${QX.ttadk.reason}): this waits for the reset — re-run with --urgent (or --stakes high) to run it now on personal quota${retry((QX.ttadk.quotaOut.resetsAt - Date.now()) / 3600000)}`;
 else if (ttFixable && stakes !== 'high' && !opts.urgent) deferred = `TTADK is down (${QX.ttadk.reason}): tell the user now so they can fix it; this waits for TTADK — re-run with --urgent (or --stakes high) to run it now on personal quota`;
 else if ((T.kind === 'claudeOnly' || (T.kind === 'browser' && !browserViaCodex)) && QC.throttledUntil) deferred = `Claude-only work and Claude's 5h window is full${retry((QC.throttledUntil - Date.now()) / 3600000)}`;
 else if (T.kind === 'codexOnly' && chatgptOut) deferred = `Codex-only work and Codex is ${QX.throttledOnly ? 'paused by its 5h window' : 'out'}${retry(QX.nextFree)}`;

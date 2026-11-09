@@ -39,6 +39,8 @@ const S = {
   ttFresh: { claude: cl(10, 120), codex: [acc('main', 20, 120), tt()] },
   ttNoBrowser: { claude: cl(10, 120), codex: [acc('main', 20, 120), tt({ browser: false })] },
   ttUnhealthy: { claude: cl(10, 120), codex: [acc('main', 20, 120), tt({ healthy: false, reason: 'TTADK SSO not logged in or expired' })] },
+  // TTADK's daily token quota used up (2026-11-08): held until the reset like a fixable outage, not re-routed.
+  ttQuotaOut: { claude: cl(10, 120), codex: [acc('main', 20, 120), tt({ healthy: false, reason: 'its daily token quota is used up', quotaOut: { kind: 'daily', resetsAt: now + 10 * h } })] },
   ttChatOut: { claude: cl(10, 48), codex: [acc('main', 99, 48), tt()] },
   // From the 2026-11-07 review: a hub never read; a spent account with a card next to TTADK; an excluded pick next to
   // a spent account with an urgent card; two accounts that must both be spent soon.
@@ -131,6 +133,11 @@ const CASES = [
   ['ttUnhealthy', ['implement', '--stakes', 'high'], 'codex gpt-6.1-sol xhigh @main'],
   ['ttUnhealthy', ['image-gen'], 'codex gpt-6-luna low @main'],
   ['ttUnhealthy', ['computer-use'], 'claude sonnet medium'],
+  ['ttQuotaOut', ['implement'], 'DEFER'],
+  ['ttQuotaOut', ['analysis'], 'DEFER'],
+  ['ttQuotaOut', ['implement', '--urgent'], 'codex gpt-6.1-sol high @main'],
+  ['ttQuotaOut', ['implement', '--stakes', 'high'], 'codex gpt-6.1-sol xhigh @main'],
+  ['ttQuotaOut', ['image-gen'], 'codex gpt-6-luna low @main'],
   ['ttChatOut', ['lookup'], 'codex gpt-6.1-sol medium @ttadk'],
   ['ttChatOut', ['image-gen'], 'DEFER'],
   // Browser work: TTADK Codex when it is browser-ready, else Claude.

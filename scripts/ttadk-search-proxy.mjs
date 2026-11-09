@@ -12,6 +12,11 @@
 //
 // Binds 127.0.0.1 only. Logs method, path, status and whether a tool was added — never headers, tokens or bodies.
 // GET /__health answers 200 "ttadk-search-proxy" (codex-worker and quota.mjs check it).
+// Token quota: the gateway gives each user a fixed number of tokens per day (about 500M, input + output, cached input
+// counted in full; models weigh differently; measured 2026-11-08) and per hour, shared by all models. Over it, it
+// answers 403/429 "quota exceeded: Daily Limits exceeded. Resets at <ISO>". Every TTADK call passes here, so the proxy
+// records that in --quota-file (default quota-limit.json next to --log): {"kind","resetsAt","seenAt"}. quota.mjs reads
+// it and holds TTADK until the reset.
 import http from 'node:http';
 import fs from 'node:fs';
 
@@ -22,6 +27,16 @@ if (!Number.isInteger(port) || port <= 0 || !/^https:\/\//.test(upstream)) {
   process.stderr.write('usage: ttadk-search-proxy.mjs --port N --upstream https://<gateway> [--log FILE]\n'); process.exit(2);
 }
 const log = (line) => { if (typeof opt.log === 'string') try { fs.appendFileSync(opt.log, `${new Date().toISOString()} ${line}\n`); } catch {} };
+const quotaFile = typeof opt['quota-file'] === 'string' ? opt['quota-file']
+  : typeof opt.log === 'string' ? opt.log.replace(/[^/]*$/, 'quota-limit.json') : null;
+const noteQuota = (text) => {
+  const m = /(Daily|Hourly) Limits exceeded\. Resets at (\d{4}-\d\d-\d\dT[\d:.]+Z?)/i.exec(text);
+  if (!m || !quotaFile) return;
+  const resetsAt = Date.parse(m[2]);
+  if (!Number.isFinite(resetsAt)) return;
+  try { fs.writeFileSync(quotaFile, JSON.stringify({ kind: m[1].toLowerCase(), resetsAt, seenAt: Date.now() })); } catch {}
+  log(`quota: ${m[1]} limit exceeded, resets at ${new Date(resetsAt).toISOString()}`);
+};
 const HOP = new Set(['host', 'connection', 'content-length', 'accept-encoding', 'transfer-encoding', 'keep-alive']);
 
 const server = http.createServer(async (req, res) => {
@@ -64,6 +79,12 @@ const server = http.createServer(async (req, res) => {
   const out = {};
   up.headers.forEach((v, k) => { if (!['content-encoding', 'content-length', 'transfer-encoding', 'connection'].includes(k)) out[k] = v; });
   res.writeHead(up.status, out);
+  if (up.status === 403 || up.status === 429) {
+    // A short error body: read it whole, note a quota limit, pass it on unchanged.
+    const text = await up.text().catch(() => '');
+    noteQuota(text);
+    return res.end(text);
+  }
   try { if (up.body) for await (const c of up.body) res.write(c); } catch { /* client or upstream went away */ }
   res.end();
 });

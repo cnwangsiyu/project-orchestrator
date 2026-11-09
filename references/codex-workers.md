@@ -175,6 +175,14 @@ gateway lists a healthy `gpt-6.1-sol`. The hub being down only matters for hub w
 There is no concurrency cap (user, 2026-11-07):
 - The gateway limits queries per minute. About 90 per minute sustained was fine; a burst of 20 simultaneous starts got
   throttled.
+- **Token quota (measured 2026-11-08).** Not unlimited: each user gets a fixed number of tokens per day, about 500M
+  (input + output, cached input counted in full; models weigh differently, Sol ×1), plus an hourly cap, shared by all
+  models. Over it the gateway answers 403 `quota exceeded: Daily Limits exceeded. Resets at <ISO>` (16:00 UTC for the
+  daily one) to every model. A day of TTADK-first work used it up in about 8 hours. The proxy records the limit in
+  `<ttadk home>/quota-limit.json`; `quota.mjs` then shows TTADK paused until the reset, and `route.mjs` holds normal
+  work that TTADK would take until then (`--urgent` or high stakes run on personal quota). `codex-worker` prints
+  `quota-exhausted:` for such a failure: don't retry, and don't try another TTADK model. Usage dashboard:
+  `https://gdp-portal.bytedance.net/llmbox/dashboard` (extra quota can be requested there; that is the user's call).
 - **A rate-limited run is retried once on TTADK.** `codex-worker` prints a `rate-limited:` line when a turn fails that
   way.
 - If the retry fails too, or the run fails for TTADK reasons (SSO, auth, gateway error), re-route with

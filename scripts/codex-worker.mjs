@@ -426,7 +426,11 @@ const report = async (threadId, turn, final, usage) => {
   console.log(`turn ${turn.status}${turn.error ? ' error=' + JSON.stringify(turn.error) : ''}`);
   // A rate-limited / concurrency failure (e.g. the TTADK gateway's QPM limit): retry once on the same account, then
   // re-route without it (user, 2026-11-07).
-  if (turn.status === 'failed' && /rate.?limit|qpm|too many requests|429|concurren/i.test(JSON.stringify(turn.error ?? ''))) {
+  // The TTADK token quota (daily / hourly, shared by all models) is used up: retrying or switching models can't help.
+  const quota = /(Daily|Hourly) Limits exceeded\. Resets at (\d{4}-\d\d-\d\dT[\d:.]+Z?)/i.exec(JSON.stringify(turn.error ?? ''));
+  if (turn.status === 'failed' && quota) {
+    console.log(`quota-exhausted: ${account ?? 'this account'}'s ${quota[1].toLowerCase()} token quota is used up until ${quota[2]} (all models). Don't retry: re-route with route.mjs ... --exclude-account ${account ?? '<account>'} only for --urgent or high-stakes work; route.mjs holds the rest until the reset`);
+  } else if (turn.status === 'failed' && /rate.?limit|qpm|too many requests|429|concurren/i.test(JSON.stringify(turn.error ?? ''))) {
     console.log(`rate-limited: retry this task once on ${account ?? 'this account'} (codex-worker turn); if it fails again, re-route with route.mjs ... --exclude-account ${account ?? '<account>'}`);
   }
   // The Chrome extension's native host ("ChatGPT for Chrome") comes and goes; while it is down the browser runtime

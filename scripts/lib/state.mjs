@@ -190,6 +190,14 @@ const readTtadk = (name, prof) => {
   } catch {}
   if (!out.models.includes('gpt-6.1-sol')) { out.reason = 'the TTADK gateway lists no healthy gpt-6.1-sol for codex'; return out; }
   out.healthy = true;
+  // Token quota used up (the proxy records it; see ttadk-search-proxy.mjs): unusable until the reset, for every model.
+  try {
+    const q = JSON.parse(fs.readFileSync(path.join(prof.home, 'quota-limit.json'), 'utf8'));
+    if (q.resetsAt > now) {
+      out.healthy = false; out.quotaOut = { kind: q.kind, resetsAt: q.resetsAt };
+      out.reason = `its ${q.kind} token quota is used up (shared by all models; about 500M tokens a day); resets ${fmt(q.resetsAt)}`;
+    }
+  } catch {}
   try {
     const list = execFileSync(process.execPath, [WORKER, '--account', name, 'list', '--limit', '60'], { encoding: 'utf8', timeout: 30000, stdio: ['ignore', 'pipe', 'pipe'] });
     out.live = true;
@@ -377,7 +385,7 @@ export const analyze = (data) => {
   // TTADK: preferred for Codex work whenever it is healthy (user, 2026-11-07).
   const tt = (data.codexAccounts ?? []).find((a) => a.kind === 'ttadk') ?? null;
   // No concurrency cap (user, 2026-11-07): a rate-limited run is retried once on TTADK, then re-routed without it.
-  const ttadk = tt ? { name: tt.name, home: tt.home, healthy: !!tt.healthy, reason: tt.reason, live: !!tt.live, active: tt.active ?? 0,
+  const ttadk = tt ? { name: tt.name, home: tt.home, healthy: !!tt.healthy, reason: tt.reason, quotaOut: tt.quotaOut ?? null, live: !!tt.live, active: tt.active ?? 0,
     models: tt.models ?? [], browser: !!tt.browser, chromePlugin: tt.chromePlugin ?? null, search: !!tt.search, searchLive: !!tt.searchLive, ssoLeftH: tt.ssoExpiresAt ? (tt.ssoExpiresAt - now) / 3600000 : null } : null;
   if (ttadk) ttadk.usable = ttadk.healthy;
   const rows = (data.codexAccounts ?? []).filter((a) => a.kind !== 'ttadk').map((a) => {
@@ -437,6 +445,7 @@ export const leanLines = (st, data) => {
       out.push(`TTADK first: every task its gpt-6.1-sol can handle runs on account ${T.name} (route.mjs does this); the ChatGPT accounts below take image generation${T.search ? '' : ' and web research (TTADK web search not set up: rerun ttadk-setup)'}, and everything when TTADK fails (route.mjs --exclude-account ${T.name}); ${T.active} TTADK turns running`);
       out.push('TTADK device: leave the ChatGPT and Claude quota for the user\'s other device (no TTADK there) — spend it only on work TTADK can\'t do; no effort raises or extra reviews just to use quota (route.mjs applies this)');
     }
+    else if (T.quotaOut) out.push(`TTADK paused — ${T.reason}: nothing to fix; route.mjs holds normal-stakes work TTADK would take until the reset (high stakes or --urgent run on personal quota)`);
     else out.push(`TTADK unavailable — ${T.reason}: tell the user now so they can fix it; route.mjs holds normal-stakes work TTADK would take until then (high stakes or --urgent run on personal quota)`);
     if (T.healthy && !T.live) out.push(`TTADK hub down — start it before hub workers: codex-worker.mjs --account ${T.name} hub (codex exec runs don't need it)`);
     if (T.healthy && T.ssoLeftH != null && T.ssoLeftH < POLICY.ttadkSsoWarnH) out.push(`TTADK SSO expires in ${hours(T.ssoLeftH)}: ask the user to run \`! ttadk auth login sso\` before it lapses`);
