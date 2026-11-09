@@ -320,9 +320,27 @@ if (cmd === 'trae-setup') {
   toml = strip(strip(toml, TA, TB), MA, MB);
   // Top-level keys must come before every [table].
   toml = `${TA}\ncommit_attribution = ""\nweb_search = "live"\n${TB}\n${toml}`;
-  toml = `${toml.replace(/\n*$/, '\n')}\n${MA}\n[mcp_servers.playwright]\ncommand = "npx"\nargs = ["-y", "@playwright/mcp@latest", "--browser", "chrome", "--headless", "--isolated"]\nstartup_timeout_sec = 120\ndefault_tools_approval_mode = "approve"\n\n[sandbox_workspace_write]\nnetwork_access = true\n${MB}\n`;
+  // hatch-pet (a Codex pet toy in the shared skills dir) is off on the main home too.
+  const pet = path.join(os.homedir(), '.agents', 'skills', 'hatch-pet', 'SKILL.md');
+  const petOff = fs.existsSync(pet) ? `\n[[skills.config]]\npath = "${pet}"\nenabled = false\n` : '';
+  toml = `${toml.replace(/\n*$/, '\n')}\n${MA}${petOff}\n[mcp_servers.playwright]\ncommand = "npx"\nargs = ["-y", "@playwright/mcp@latest", "--browser", "chrome", "--headless", "--isolated"]\nstartup_timeout_sec = 120\ndefault_tools_approval_mode = "approve"\n\n[sandbox_workspace_write]\nnetwork_access = true\n${MB}\n`;
   if (fs.existsSync(cfg)) fs.copyFileSync(cfg, `${cfg}.bak-worker-${Date.now()}`);
   fs.writeFileSync(cfg, toml);
+  // The document plugins the other Codex accounts have (browser-setup): skills plus the primary runtime's shared
+  // dependencies, so they work on TRAE too. Installed from the directories the ChatGPT app unpacks.
+  const runtime = path.join(os.homedir(), '.cache', 'codex-runtimes', 'codex-primary-runtime', 'plugins', 'openai-primary-runtime', 'plugins');
+  const bundled = path.join(os.homedir(), '.codex', '.tmp', 'bundled-marketplaces', 'openai-bundled', 'plugins');
+  const want = [...['documents', 'pdf', 'spreadsheets', 'presentations', 'template-creator'].map((p) => path.join(runtime, p)), path.join(bundled, 'visualize')];
+  let have = '';
+  try { have = execFileSync(bin, ['plugin', 'list'], { encoding: 'utf8', timeout: 60000, stdio: ['ignore', 'pipe', 'pipe'] }); } catch {}
+  const plugins = [], missing = [];
+  for (const dir of want) {
+    const pn = path.basename(dir);
+    if (!fs.existsSync(dir)) { missing.push(`${pn} (not unpacked: open the ChatGPT app once)`); continue; }
+    if (new RegExp(`^\\s*id: ${pn}@`, 'm').test(have)) { plugins.push(pn); continue; }
+    try { execFileSync(bin, ['plugin', 'install', '--type', 'local', '--yes', dir], { encoding: 'utf8', timeout: 120000, stdio: ['ignore', 'pipe', 'pipe'] }); plugins.push(pn); }
+    catch (e) { missing.push(`${pn} (${String(e.stderr || e.message).trim().split('\n')[0]})`); }
+  }
   const reg = readAccounts();
   reg.main ??= { home: path.join(os.homedir(), '.codex'), hub: 'ws://127.0.0.1:47321' };
   const ports = Object.entries(reg).filter(([k]) => k !== name).map(([, a]) => Number(new URL(a.hub).port));
@@ -331,7 +349,8 @@ if (cmd === 'trae-setup') {
   reg[name] = { ...(reg[name] ?? {}), home, hub: `ws://127.0.0.1:${port}`, kind: 'trae', bin, models: Object.keys(modelIds), modelIds, search: true };
   writeAccounts(reg);
   console.log(`TRAE account ${name}: hub ws://127.0.0.1:${port} (traex app-server); models: ${ids.join(', ')}`);
-  console.log(`config: ${cfg} (no co-author line, live web search, playwright MCP)`);
+  console.log(`config: ${cfg} (no co-author line, live web search, playwright MCP, network in workspace-write, hatch-pet off)`);
+  console.log(`plugins: ${plugins.join(', ') || 'none'}${missing.length ? `; NOT installed: ${missing.join('; ')}` : ''}`);
   console.log(`start its hub:   node ${process.argv[1]} --account ${name} hub`);
   process.exit(0);
 }

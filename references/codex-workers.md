@@ -224,7 +224,13 @@ personal quota appears only when both company accounts are out. The user chose n
 - **Setup** (once per machine): install (`sh -c "$(curl -fsSL https://code.byted.org/api/tos-proxy/download/traex_install.sh)"`),
   `traecli login --git-code` (no browser needed; `--sso` otherwise), then `codex-worker.mjs trae-setup` (registers
   account `trae`, hub port next free; writes into `~/.trae/traecli.toml`: `commit_attribution = ""`, `web_search = "live"`,
-  the playwright MCP server) and `codex-worker.mjs --account trae hub` (starts `traex app-server`).
+  the playwright MCP server, network in workspace-write, `hatch-pet` off as on the main home; installs the same
+  document plugins as the other accounts: documents, pdf, spreadsheets, presentations, template-creator, visualize) and
+  `codex-worker.mjs --account trae hub` (starts `traex app-server`). Rerun `trae-setup` after a ChatGPT app update.
+- **Same skills and instructions as the other Codex workers** (checked 2026-11-08): TRAE reads `~/.agents/skills`
+  itself, and after `trae-setup` the skill list matches a TTADK worker's except TRAE's own two company plugins
+  (`traex-guide`, `ai-contribution`, kept). Like every Codex worker it has no global AGENTS.md or Claude memory: the
+  brief and the repo's own AGENTS.md carry the context.
 - **Use.** Hub workers: `codex-worker.mjs --account trae start … --model GPT-6.1-Sol` (lower-case ids are mapped).
   One-shot: `traecli exec -C <dir> -s <sandbox> -m GPT-6.1-Sol -c model_reasoning_effort='"high"' --json -o <file> "<prompt>"`.
   `route.mjs` prints both. Sessions live in `~/.trae/cli/sessions`.
