@@ -279,6 +279,64 @@ export const isReviewDecision = (r) => ['review', 'review-high', 'second-opinion
 // Names are compared without a leading "<project>-" (orchestrators write both T17 and lynx-view-T17). A decision belongs to
 // an outcome when its name is the outcome's name or derives from it (NAME-fix1, NAME-r2, NAME-<subtask>).
 const bare = (project, name) => (name.startsWith(`${project}-`) ? name.slice(project.length + 1) : name);
+// ---- TRAE CLI vs native Codex (user, 2026-11-08: measure whether TRAE's Codex fork does worse with the same model) ----
+// The harness a Codex attempt ran on: 'trae' for the TRAE CLI account, 'codex' for every other Codex account (TTADK and
+// the ChatGPT accounts run the official Codex CLI), 'claude' for Claude.
+export const harnessOf = (pick, profiles = {}) => {
+  if (!pick) return null;
+  if (pick.vendor !== 'codex') return pick.vendor;
+  return profiles[pick.account]?.kind === 'trae' || pick.account === 'trae' ? 'trae' : 'codex';
+};
+// Fisher's exact test, two-sided, on the 2x2 table [[a, b], [c, d]] (first-pass vs not, per harness).
+export const fisherExact = (a, b, c, d) => {
+  const lf = (n) => { let s = 0; for (let i = 2; i <= n; i++) s += Math.log(i); return s; };
+  const r1 = a + b, r2 = c + d, c1 = a + c, n = r1 + r2;
+  const p = (x) => Math.exp(lf(r1) + lf(r2) + lf(c1) + lf(n - c1) - lf(n) - lf(x) - lf(r1 - x) - lf(c1 - x) - lf(r2 - c1 + x));
+  const p0 = p(a); let sum = 0;
+  for (let x = Math.max(0, c1 - r2); x <= Math.min(r1, c1); x++) { const px = p(x); if (px <= p0 * (1 + 1e-7)) sum += px; }
+  return Math.min(1, sum);
+};
+// Compare outcomes of the same model on TRAE vs native Codex, by first attempt: per model, and per model + category.
+// Only like-for-like rows are compared (same model, same category); a verdict needs at least MIN tasks on each side.
+export const compareHarness = (outs, profiles = {}, MIN = 8) => {
+  const cell = () => ({ tasks: 0, pass: 0, rework: 0, fail: 0, rounds: [], minutes: [] });
+  const groups = {};
+  for (const o of outs) {
+    const h = harnessOf(o.first, profiles);
+    if (h !== 'trae' && h !== 'codex') continue;
+    for (const key of [o.first.model, `${o.first.model} / ${o.category ?? '?'}`]) {
+      const g = (groups[key] ??= { trae: cell(), codex: cell() })[h];
+      g.tasks++; g[o.result]++;
+      if (o.rounds != null) g.rounds.push(o.rounds); if (o.minutes != null) g.minutes.push(o.minutes);
+    }
+  }
+  const mean = (xs) => (xs.length ? Math.round((xs.reduce((s, x) => s + x, 0) / xs.length) * 10) / 10 : null);
+  const side = (c) => ({ tasks: c.tasks, firstPass: c.tasks ? `${c.pass}/${c.tasks} (${Math.round((100 * c.pass) / c.tasks)}%)` : '-', fail: c.fail, meanRounds: mean(c.rounds), meanMinutes: mean(c.minutes) });
+  const rows = [];
+  for (const [key, g] of Object.entries(groups)) {
+    if (!g.trae.tasks || !g.codex.tasks) continue;
+    const p = fisherExact(g.trae.pass, g.trae.tasks - g.trae.pass, g.codex.pass, g.codex.tasks - g.codex.pass);
+    const enough = g.trae.tasks >= MIN && g.codex.tasks >= MIN;
+    const tr = g.trae.pass / g.trae.tasks, cr = g.codex.pass / g.codex.tasks;
+    const verdict = !enough ? `too few tasks (need ${MIN} on each side)` : p < 0.05 ? (tr < cr ? 'TRAE significantly worse' : 'TRAE significantly better') : 'no significant difference';
+    rows.push({ key, trae: side(g.trae), codex: side(g.codex), p: Math.round(p * 1000) / 1000, verdict });
+  }
+  const onlyTrae = Object.entries(groups).filter(([k, g]) => !k.includes(' / ') && g.trae.tasks && !g.codex.tasks).map(([k, g]) => `${k}: ${g.trae.tasks} on TRAE, none on Codex`);
+  return { rows: rows.sort((x, y) => (x.key.includes(' / ') - y.key.includes(' / ')) || x.p - y.p), onlyTrae, min: MIN };
+};
+// Harness drift: TRAE's GPT-6.1-Sol prompt vs official Codex's (both CLIs cache the model catalog). 2026-11-08: 0.91 of
+// lines equal, the differences in the plugins/apps section. A drop means TRAE's fork moved away from upstream Codex.
+export const harnessDrift = (model = 'gpt-6.1-sol') => {
+  const read = (f) => { try { const j = JSON.parse(fs.readFileSync(f, 'utf8')); return (j.models ?? j).find((m) => String(m.slug).toLowerCase() === model); } catch { return null; } };
+  const t = read(path.join(os.homedir(), '.trae', 'cli', 'models_cache.json')), c = read(path.join(MAIN_PROFILE.home, 'models_cache.json'));
+  const ti = t?.model_messages?.instructions_template, ci = c?.model_messages?.instructions_template;
+  if (!ti || !ci) return { model, available: false };
+  const A = ti.split('\n'), B = new Set(ci.split('\n')), Bl = ci.split('\n');
+  const same = A.filter((l) => B.has(l)).length;
+  const keys = ['tool_mode', 'shell_type', 'apply_patch_tool_type', 'multi_agent_version', 'supports_search_tool'];
+  return { model, available: true, sharedLines: Math.round((1000 * same) / Math.max(A.length, Bl.length)) / 1000, traeLines: A.length, codexLines: Bl.length,
+    toolConfigDiffers: keys.filter((k) => JSON.stringify(t[k] ?? null) !== JSON.stringify(c[k] ?? null)) };
+};
 export const outcomeOwns = (project, outcomeName, r) => {
   if (r.project !== project || !r.name) return false;
   const o = bare(project, outcomeName), d = bare(project, r.name);

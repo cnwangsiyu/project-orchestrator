@@ -356,6 +356,26 @@ for (const [sc, args] of ERRORS) {
   if (bad.length) fail++;
   console.log(`${bad.length ? 'FAIL' : 'ok  '} trae gate/launch    ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')} (exec: ${exec.slice(0, 90)})` : ''}`);
 }
+// TRAE vs native Codex comparison (review-data.mjs, user 2026-11-08): harness attribution, Fisher's exact test, verdicts.
+{
+  const { harnessOf, fisherExact, compareHarness } = await import('../lib/state.mjs');
+  const pk = (account, model = 'gpt-6.1-sol', vendor = 'codex') => ({ vendor, model, effort: 'high', account });
+  const outs = (n, pass, account, category = 'implement') => Array.from({ length: n }, (_, i) => ({ first: pk(account), category, result: i < pass ? 'pass' : 'rework', rounds: i < pass ? 0 : 1 }));
+  const worse = compareHarness([...outs(10, 2, 'trae'), ...outs(10, 9, 'ttadk')], { trae: { kind: 'trae' } });
+  const even = compareHarness([...outs(10, 8, 'trae'), ...outs(10, 8, 'main')], { trae: { kind: 'trae' } });
+  const few = compareHarness([...outs(3, 0, 'trae'), ...outs(3, 3, 'b')], { trae: { kind: 'trae' } });
+  const cases = [
+    [harnessOf(pk('trae'), { trae: { kind: 'trae' } }), 'trae'], [harnessOf(pk('ttadk')), 'codex'], [harnessOf(pk('main', 'opus', 'claude')), 'claude'],
+    [Math.abs(fisherExact(1, 9, 11, 3) - 0.0028) < 0.0005, true], [fisherExact(5, 5, 5, 5) > 0.99, true],
+    [worse.rows.find((r) => r.key === 'gpt-6.1-sol')?.verdict, 'TRAE significantly worse'],
+    [even.rows.find((r) => r.key === 'gpt-6.1-sol')?.verdict, 'no significant difference'],
+    [/too few/.test(few.rows.find((r) => r.key === 'gpt-6.1-sol')?.verdict ?? ''), true],
+    [worse.rows.some((r) => r.key === 'gpt-6.1-sol / implement'), true],
+  ];
+  const bad = cases.map(([got, want], i) => (got === want ? null : i)).filter((i) => i !== null);
+  if (bad.length) fail++;
+  console.log(`${bad.length ? 'FAIL' : 'ok  '} trae vs codex       ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
+}
 // Outcome join (outcome.mjs / review-data.mjs): prefix-tolerant, fix rounds fold in, reviews and look-alike suffixes don't.
 {
   const { outcomeOwns, isReviewDecision } = await import('../lib/state.mjs');

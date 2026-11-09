@@ -8,7 +8,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { SHARED, ROUTE_LOG, QUOTA_LOG, readState, analyze, leanLines, fmt, outcomeOwns, isReviewDecision, codexCatalog } from './lib/state.mjs';
+import { SHARED, ROUTE_LOG, QUOTA_LOG, readState, analyze, leanLines, fmt, outcomeOwns, isReviewDecision, codexCatalog, readProfiles, compareHarness, harnessDrift } from './lib/state.mjs';
 
 const argv = process.argv.slice(2);
 const opt = (k) => { const i = argv.indexOf(`--${k}`); return i < 0 ? null : argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[i + 1] : true; };
@@ -39,6 +39,9 @@ const outcomes = {
   byVendor: agg((o) => o.first?.vendor), byModel: agg((o) => o.first && `${o.first.vendor}:${o.first.model}:${o.first.effort}`),
   byCategory: agg((o) => o.category), byVendorCategory: agg((o) => o.first && o.category && `${o.first.vendor}:${o.category}`),
   byImpact: agg((o) => o.impact),
+  // TRAE CLI vs native Codex with the same model (user, 2026-11-08); the nightly review reads it with --hours 168 and
+  // all-time (--hours 100000) as samples grow.
+  traeVsCodex: compareHarness(outs, readProfiles()),
   // The fair vendor comparison: reviewed release work only (the only work every vendor's output is judged the same way).
   reviewedReleaseByVendor: agg((o) => o.reviewed && o.impact === 'release' && o.first?.vendor),
   fails: outs.filter((o) => o.result === 'fail').map((o) => ({ project: o.project, name: o.name, category: o.category, first: o.first, note: o.note })),
@@ -123,6 +126,7 @@ const catalog = {
 };
 if (opt('save-catalog')) fs.writeFileSync(CATALOG, JSON.stringify({ ...catalogNow, savedAt: Date.now() }, null, 1));
 
+catalog.harnessDrift = harnessDrift();
 const result = { hours: H, routing, outcomes, quota, now, catalog };
 if (opt('json')) { console.log(JSON.stringify(result, null, 1)); process.exit(0); }
 const show = (title, v) => console.log(`\n## ${title}\n${typeof v === 'string' ? v : JSON.stringify(v, null, 1)}`);

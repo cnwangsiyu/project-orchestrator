@@ -125,6 +125,18 @@ Look for evidence in the data, not hunches. Typical findings:
   - Check `byImpact` too. A run of `service`/`throwaway` failures that a review would have caught suggests moving
     that kind of work to `release`. Review rounds that block on trivia suggest tightening `review-rubric.md`. Change a row only when its numbers hold over several tasks; one task is an
   anecdote. When `missing` lists tasks without an outcome, remind their orchestrator to record them.
+- **TRAE CLI vs native Codex (every night; user, 2026-11-08):** read `outcomes.traeVsCodex` from the 168-hour data,
+  and from `review-data.mjs --hours 100000 --json` once samples are small. It compares the same model (e.g.
+  gpt-6.1-sol) run on TRAE CLI against the official Codex CLI (TTADK and ChatGPT accounts), overall and per category:
+  first-pass rate, fails, rework rounds, minutes, and Fisher's exact p on first pass. Put the table in the report
+  every night, even when it says "too few tasks".
+  - "TRAE significantly worse" (p < 0.05, at least 8 tasks on each side) for a model or a category: a finding. Don't
+    change the order yourself (TTADK → TRAE → personal quota is the user's); propose keeping that category off TRAE,
+    with the numbers, and look at the failing TRAE tasks' logs for a harness cause (missing tool, prompt, queue).
+  - TRAE takes work mostly when TTADK is out (later in the day), so check that the compared tasks are alike before
+    blaming the harness.
+  - `catalog.harnessDrift`: TRAE's GPT-6.1-Sol prompt vs official Codex's. 0.908 of lines shared and no tool-config
+    difference on 2026-11-08; report a drop below 0.85 or any `toolConfigDiffers` entry.
 - **Orchestrators doing work themselves:** for each FLAG from `orch-usage`, tell that orchestrator what kind of work
   to hand to workers, using its largest results as the example. Repeated flags on the same kind of work may mean a
   missing route category or a brief template gap.
