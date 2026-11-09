@@ -203,6 +203,10 @@ effort, Codex account and launch command from
     illustrations, mockup images) goes to Codex as `image-gen` (user, 2026-11-03).
   - Quota moves: Codex first for anything either vendor can do. Claude takes the work it is clearly
     better at only while it has spare.
+  - Company accounts first: TTADK, then TRAE CLI (account `trae`, the company's official Codex-fork
+    CLI with its own model pool), then personal quota (user, 2026-11-08). route.mjs moves TTADK's work
+    to TRAE when TTADK is out; the personal-quota OK gate applies only when both are out. TRAE has no
+    browser, desktop or image tools (references/codex-workers.md, "TRAE CLI").
   - TTADK first (user, 2026-11-07): when the TTADK company gateway is healthy, every task its
     GPT-6.1 Sol can handle runs there first, Claude-strength rows included. Exceptions are
     Claude-only work, image generation, a second opinion on Codex's own work, and browser work

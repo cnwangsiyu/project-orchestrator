@@ -121,12 +121,14 @@ const chatgptOpen = (QX.open ?? []).filter((r) => !excluded.has(r.a.name));
 const chatgptOut = QX.out || (noRedeem && !QX.pick && !!QX.redeem)
   || (!chatgptOpen.length && !(QX.redeem && !noRedeem && !excluded.has(QX.redeem.a.name)) && (QX.rows ?? []).some((r) => r.known && !excluded.has(r.a.name)))
   || (!chatgptOpen.length && (QX.rows ?? []).length > 0 && (QX.rows ?? []).every((r) => excluded.has(r.a.name)));
-// TTADK (company gateway): preferred for Codex work whenever it is healthy and not excluded (user, 2026-11-07).
-const TT = QX.ttadk?.usable && !excluded.has(QX.ttadk.name) ? QX.ttadk : null;
+// TTADK (company gateway): preferred for Codex work whenever it is healthy and not excluded (user, 2026-11-07). When it
+// isn't (its daily quota used up, down, or excluded), TRAE CLI — the second company account — takes the same work under
+// the same rules, before personal quota (user, 2026-11-08). TT is whichever company account takes Codex work now.
+const TT = [QX.ttadk, QX.trae].find((a) => a?.usable && !excluded.has(a.name)) ?? null;
 // A TTADK device (a TTADK account is set up here): TTADK always first, and the shared ChatGPT and Claude quota is left
 // for the user's other device, which has no TTADK (user, 2026-11-07). So no rule here spends quota for its own sake:
 // no underused/front-load/expiring effort raises and no extra quota-spending reviews. Without TTADK nothing changes.
-const ttDevice = !!QX.ttadk;
+const ttDevice = !!QX.ttadk || !!QX.trae;
 const ttHas = (model) => !!TT && TT.models.includes(model);
 const browserViaCodex = T.kind === 'browser' && !!TT && TT.browser;
 const codexOut = chatgptOut && !TT; // Codex is out only when neither TTADK nor a ChatGPT account can take work
@@ -196,7 +198,7 @@ if (ttCapable) {
 // TTADK's token quota used up: don't hold the work silently. Route it to personal quota and gate it on the user's OK:
 // they choose to go on now or wait for the reset (user, 2026-11-08). One answer covers the pause: after "go on", the
 // orchestrator passes --urgent until the reset; after "wait", it holds TTADK's work until then.
-const ttFixable = !!QX.ttadk && !QX.ttadk.usable && !excluded.has(QX.ttadk.name) && ttTaskOK && T.kind !== 'browser';
+const ttFixable = !TT && !!QX.ttadk && !QX.ttadk.usable && !excluded.has(QX.ttadk.name) && ttTaskOK && T.kind !== 'browser';
 let deferred = null;
 const retry = (h) => (h != null && Number.isFinite(h) ? ` — retry in ${hours(h)}` : '');
 if (st.stop) deferred = "neither vendor's usage is readable — check `claude -p /usage` and the Codex hubs before dispatching";
@@ -334,6 +336,13 @@ const launch = (x, shape = T.shape, acct = pickAcct) => {
     return { launcher: 'claude-bg', command: `cd ${cwd} && claude --bg --permission-mode ${claudeMode} -n ${name} --model ${x.model} --effort ${x.effort} ${prompt}` };
   }
   const an = acct?.a.name ?? 'main', home = profiles[an]?.home ?? '~/.codex';
+  // TRAE CLI: `traecli exec` mirrors `codex exec` (its own home, ~/.trae); models go by TRAE's own ids.
+  const traeProf = profiles[an]?.kind === 'trae' ? profiles[an] : QX.trae?.name === an ? QX.trae : null;
+  if (traeProf) {
+    const id = traeProf.modelIds?.[x.model] ?? x.model;
+    if (shape === 'exec') return { launcher: 'traecli-exec', account: an, command: `${traeProf.bin ?? 'traecli'} exec${inRepo === false ? ' --skip-git-repo-check' : ''} -C ${cwd} -s ${sandbox} -m ${id} -c model_reasoning_effort='"${x.effort}"' --json -o ${taskDir}/codex-last.md ${prompt} < /dev/null > ${taskDir}/codex.jsonl 2>&1   (background task${inRepo === null ? '; add --skip-git-repo-check outside a repo' : ''})` };
+    return { launcher: 'codex-worker', account: an, command: `node ${SKILL}/scripts/codex-worker.mjs --account ${an} start --cwd ${cwd} --model ${id} --effort ${x.effort} --sandbox ${sandbox} --name ${name} --log ${taskDir}/codex.jsonl --out ${taskDir}/codex-last.md ${prompt}   (background task)` };
+  }
   // A TTADK codex exec bypasses codex-worker, so it brings the account's proxy up first (exit 6 when it can't).
   const proxyFirst = TT?.search && an === TT.name ? `node ${SKILL}/scripts/codex-worker.mjs --account ${an} proxy >/dev/null && ` : '';
   if (shape === 'exec') return { launcher: 'codex-exec', account: an, command: `${proxyFirst}CODEX_HOME=${home} codex exec${inRepo === false ? ' --skip-git-repo-check' : ''} -C ${cwd} -s ${sandbox} -m ${x.model} -c model_reasoning_effort='"${x.effort}"' --json -o ${taskDir}/codex-last.md ${prompt} < /dev/null > ${taskDir}/codex.jsonl 2>&1   (background task${inRepo === null ? '; add --skip-git-repo-check outside a repo' : ''})` };
@@ -363,7 +372,12 @@ if (m && cat === 'computer-use') {
 if (m && ['browser', 'ui-browser'].includes(cat)) notes.push('brief: include the browser safety clause — read and navigate freely, but ask the user (AskUserQuestion; a Codex worker reports BLOCKED) before anything irreversible on a page: submitting a form that changes data, approving, deleting, publishing, sending a message, payments');
 // Every worker can search the web (Codex and Claude Code have it on by default; TTADK through its proxy).
 if (m) notes.push('brief: web searches go to the public internet — never put internal code, internal project or product names, people, internal URLs or secrets into a search query; search for the public topic only');
-if (ttadkRun) {
+if (ttadkRun && TT.kind === 'trae') {
+  notes.push(`on TRAE CLI (account ${TT.name}; TTADK is ${QX.ttadk ? 'out' : 'absent'}): a popular model may sit queued ("Queued for capacity") — if a worker shows no progress for 15 minutes, interrupt it and re-route with --exclude-account ${TT.name}; on failures for TRAE reasons (login, gateway errors) re-route the same way`);
+  notes.push('brief (TRAE): no ChatGPT browser here — for a web page use the playwright MCP tools (a separate headless Chrome, no user sign-ins); git commits must carry no co-author or tool trailer');
+  if (!TT.live && T.shape !== 'exec') notes.push(`TRAE hub is down: start it first — node ${SKILL}/scripts/codex-worker.mjs --account ${TT.name} hub`);
+}
+else if (ttadkRun) {
   if (TT.search) notes.push(`TTADK runs through its local proxy (web search): exit 6 with proxy-unavailable → re-route with --exclude-account ${TT.name}`);
   else notes.push(`this TTADK account has no web search (rerun codex-worker.mjs ttadk-setup to add its proxy): if the task turns out to need the web, re-route it as research`);
   notes.push(`on TTADK (account ${TT.name}): if the run fails rate-limited (QPM / concurrency), retry it once there; if it fails again, or fails for TTADK reasons (SSO, auth, gateway errors), re-route with --exclude-account ${TT.name}`);
@@ -389,7 +403,7 @@ const out = {
 };
 // Every real routing decision is logged for the nightly review (--dry or ROUTE_LOG=0 to skip, e.g. for experiments).
 if (!opts.dry && process.env.ROUTE_LOG !== '0') {
-  const rec = { t: Date.now(), project: typeof opts.project === 'string' ? opts.project : null, name: typeof opts.name === 'string' ? opts.name : null, category: cat, stakes, failures, impact, review: reviewKind, excluded: [...excluded], ttadk: !!ttadkRun,
+  const rec = { t: Date.now(), project: typeof opts.project === 'string' ? opts.project : null, name: typeof opts.name === 'string' ? opts.name : null, category: cat, stakes, failures, impact, review: reviewKind, excluded: [...excluded], ttadk: !!ttadkRun, company: ttadkRun ? TT.name : null,
     autoCheck: !!opts['auto-check'], noRedeem, deferred, pick: m ? { vendor: m.vendor, model: m.model, effort: m.effort, account: out.pick?.account ?? null } : null,
     second: second ? { vendor: second.vendor, model: second.model, effort: second.effort } : null, why, needsOK, tell,
     quota: { claude: QC.status, codexOut: QX.out, underused: QX.underused, frontLoad: QX.frontLoad, overspending: QX.overspending, redeemDue: !!QX.redeem } };

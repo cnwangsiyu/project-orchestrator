@@ -10,6 +10,7 @@
 //   codex-worker browser-setup [--account NAME]                           (Chrome + Computer Use config for that home)
 //   codex-worker ttadk-setup [--name ttadk] [--home DIR] [--port N] [--search-port N]   (the TTADK gateway as an account)
 //   codex-worker [--account ttadk] proxy                                   (start/check TTADK's local proxy: web search)
+//   codex-worker trae-setup [--name trae] [--port N]                      (TRAE CLI as an account: its app-server is the hub)
 //   codex-worker wait   --thread ID [--log FILE] [--out FILE]            (start/turn/wait take --stall-min M, default 30)
 //   codex-worker steer  --thread ID                                                                     "<message>"
 //   codex-worker interrupt --thread ID
@@ -77,6 +78,8 @@ for (let i = 0; i < rest.length; i++) {
   if (rest[i].startsWith('--')) opts[rest[i].slice(2)] = rest[i + 1]?.startsWith('--') || rest[i + 1] === undefined ? true : rest[++i];
   else pos.push(rest[i]);
 }
+// TRAE names its models in its own case (GPT-6.1-Sol); accept the router's lower-case ids too.
+if (PROF?.kind === 'trae' && typeof opts.model === 'string') opts.model = PROF.modelIds?.[opts.model.toLowerCase()] ?? opts.model;
 const text = pos.join(' ');
 const die = (msg, code = 2) => { process.stderr.write(`codex-worker: ${msg}\n`); process.exit(code); };
 if (!cmd) die('usage: codex-worker [--account NAME] hub|start|turn|wait|steer|interrupt|status|list|quota|usage|reset-credits|reset-credit-use|accounts|account-add ...');
@@ -90,7 +93,7 @@ if (opts.network !== undefined && opts.sandbox !== 'workspace-write') die('--net
 // Codex's own default for workspace-write network, so an explicit turn-level policy doesn't silently change it.
 const configNetwork = () => {
   try {
-    const toml = fs.readFileSync(path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'config.toml'), 'utf8');
+    const toml = fs.readFileSync(PROF?.kind === 'trae' ? path.join(PROF.home, 'traecli.toml') : path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'config.toml'), 'utf8');
     const section = toml.split(/^\[/m).find((s) => s.startsWith('sandbox_workspace_write]')) ?? '';
     return /^\s*network_access\s*=\s*true\b/m.test(section);
   } catch { return false; }
@@ -282,6 +285,47 @@ ${keep ? `\n# --- previous config ---\n${keep}` : ''}`);
   console.log(`web search:      through the local proxy on 127.0.0.1:${searchPort} (started with the hub, and by start/turn/wait)`);
   process.exit(0);
 }
+// TRAE CLI as a Codex account (user, 2026-11-08: TTADK first, then TRAE, then personal quota). TRAE CLI is the company's
+// official agent CLI, a fork of Codex: `traex app-server` speaks the hub protocol, `traecli exec` mirrors `codex exec`,
+// and its GPT-6.1-Sol gets the official Codex prompt and tools (compared 2026-11-08). Its model pool is separate from
+// TTADK's. It has no ChatGPT browser/computer-use (the Chrome extension accepts only the OpenAI-signed client) and no
+// image generation; it gets Playwright MCP for its own headless Chrome. This writes into ~/.trae/traecli.toml: commits
+// without TRAE's co-author line, live web search, the playwright MCP server, and network in workspace-write (as TTADK);
+// then registers the account.
+if (cmd === 'trae-setup') {
+  const name = typeof opts.name === 'string' ? opts.name : 'trae';
+  let bin = '';
+  try { bin = execFileSync('/bin/zsh', ['-lc', 'command -v traex || ls ~/.local/bin/traex'], { encoding: 'utf8' }).trim().split('\n')[0]; } catch {}
+  if (!bin) die('TRAE CLI not found: sh -c "$(curl -fsSL https://code.byted.org/api/tos-proxy/download/traex_install.sh)"', 1);
+  let status = '';
+  try { status = execFileSync('/bin/sh', ['-c', '"$0" login status 2>&1', bin], { encoding: 'utf8', timeout: 30000 }); } catch (e) { status = String(e.stdout ?? ''); } // it prints to stderr
+  if (!/logged in/i.test(status) || /not logged in/i.test(status)) die('TRAE CLI is not logged in: run `traecli login --git-code` (or ask the user to run `! traecli login --sso`)', 1);
+  let ids = [];
+  try { ids = execFileSync(bin, ['models'], { encoding: 'utf8', timeout: 60000, stdio: ['ignore', 'pipe', 'ignore'] }).split('\n').map((l) => l.trim()).filter((l) => /^[A-Za-z0-9][\w.-]*$/.test(l)); } catch {}
+  if (!ids.some((i) => i.toLowerCase() === 'gpt-6.1-sol')) die(`TRAE CLI lists no GPT-6.1-Sol (models: ${ids.join(', ') || 'none'})`, 1);
+  const home = path.join(os.homedir(), '.trae'), cfg = path.join(home, 'traecli.toml');
+  let toml = fs.existsSync(cfg) ? fs.readFileSync(cfg, 'utf8') : '';
+  const strip = (t, a, b) => { const i = t.indexOf(a); if (i < 0) return t; const j = t.indexOf(b, i); return t.slice(0, i) + (j >= 0 ? t.slice(j + b.length).replace(/^\n/, '') : ''); };
+  const TA = '# --- worker settings (codex-worker trae-setup) ---', TB = '# --- end worker settings ---';
+  const MA = '# --- playwright MCP (codex-worker trae-setup) ---', MB = '# --- end playwright MCP ---';
+  toml = strip(strip(toml, TA, TB), MA, MB);
+  // Top-level keys must come before every [table].
+  toml = `${TA}\ncommit_attribution = ""\nweb_search = "live"\n${TB}\n${toml}`;
+  toml = `${toml.replace(/\n*$/, '\n')}\n${MA}\n[mcp_servers.playwright]\ncommand = "npx"\nargs = ["-y", "@playwright/mcp@latest", "--browser", "chrome", "--headless", "--isolated"]\nstartup_timeout_sec = 120\ndefault_tools_approval_mode = "approve"\n\n[sandbox_workspace_write]\nnetwork_access = true\n${MB}\n`;
+  if (fs.existsSync(cfg)) fs.copyFileSync(cfg, `${cfg}.bak-worker-${Date.now()}`);
+  fs.writeFileSync(cfg, toml);
+  const reg = readAccounts();
+  reg.main ??= { home: path.join(os.homedir(), '.codex'), hub: 'ws://127.0.0.1:47321' };
+  const ports = Object.entries(reg).filter(([k]) => k !== name).map(([, a]) => Number(new URL(a.hub).port));
+  const port = Number(opts.port ?? (reg[name] ? new URL(reg[name].hub).port : Math.max(...ports) + 1));
+  const modelIds = Object.fromEntries(ids.map((i) => [i.toLowerCase(), i]));
+  reg[name] = { ...(reg[name] ?? {}), home, hub: `ws://127.0.0.1:${port}`, kind: 'trae', bin, models: Object.keys(modelIds), modelIds, search: true };
+  writeAccounts(reg);
+  console.log(`TRAE account ${name}: hub ws://127.0.0.1:${port} (traex app-server); models: ${ids.join(', ')}`);
+  console.log(`config: ${cfg} (no co-author line, live web search, playwright MCP)`);
+  console.log(`start its hub:   node ${process.argv[1]} --account ${name} hub`);
+  process.exit(0);
+}
 // The console session is locked: Computer Use sees no windows (cgWindowNotFound). The ChatGPT app's "Locked use" unlock is
 // reserved to its own turns by design, so a CLI worker can't use it; fail early instead.
 const screenLocked = () => {
@@ -348,7 +392,11 @@ if (cmd === 'hub') {
   // From $HOME, never the caller's cwd: a hub outlives the session that started it, and once that directory is gone
   // (a removed worktree) the TTADK provider's auth command can't run and every new thread panics ("provider auth cwd
   // must resolve", 2026-11-08).
-  spawn('codex', ['app-server', '--listen', hub], { detached: true, stdio: ['ignore', out, out], cwd: os.homedir() }).unref();
+  // A TRAE account's hub is TRAE CLI's own app-server (`traex`, a Codex fork speaking the same protocol); it keeps its
+  // home in ~/.trae, so CODEX_HOME is not passed on.
+  const trae = PROF?.kind === 'trae';
+  const env = { ...process.env }; if (trae) delete env.CODEX_HOME;
+  spawn(trae ? PROF.bin : 'codex', ['app-server', '--listen', hub], { detached: true, stdio: ['ignore', out, out], cwd: os.homedir(), env }).unref();
   for (let i = 0; i < 30; i++) {
     await new Promise((r) => setTimeout(r, 500));
     if (await ready()) { console.log(`hub started at ${hub} (log: ${logPath})${await searchNote()}`); process.exit(0); }

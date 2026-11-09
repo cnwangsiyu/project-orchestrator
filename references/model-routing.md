@@ -114,6 +114,9 @@ To change routing for a kind of task, edit the table in `route.mjs` and this rat
 - **TTADK first, for everything its Sol can handle.** When the TTADK company gateway is healthy (CLI present, SSO
   active, `gpt-6.1-sol` listed), every row runs first on TTADK `gpt-6.1-sol`, Claude-strength rows included (docs,
   research, design, high-stakes review).
+  - **Then TRAE CLI (user, 2026-11-08).** When TTADK is out, the same rows run on TRAE CLI (account `trae`, GPT-6.1-Sol
+    with the official Codex prompt) under the same TTADK rules, before any personal quota; browser, desktop and image
+    work never go there. See codex-workers.md, "TRAE CLI as the second company account".
   - **TTADK's quota is daily, not unlimited** (about 500M tokens per user per day, shared by all models, resets 16:00
     UTC; measured 2026-11-08). When it runs out, TTADK is paused until the reset; its normal work is routed to
     personal quota behind the user's OK (go on now, or wait for the reset; user, 2026-11-08), while `--urgent` / high

@@ -210,6 +210,31 @@ const readTtadk = (name, prof) => {
   }
   return out;
 };
+// A TRAE CLI account (codex-worker trae-setup): the company's agent CLI with its own model pool, used after TTADK and
+// before personal quota (user, 2026-11-08). Healthy = the CLI present, logged in, GPT-6.1-Sol listed, the hub sound.
+const readTrae = (name, prof) => {
+  const out = { name, kind: 'trae', home: prof.home, hub: prof.hub, browser: false, chromePlugin: null, models: prof.models ?? [], modelIds: prof.modelIds ?? {},
+    windows: [], resets: null, healthy: false, reason: null, live: false, active: 0, email: null, search: true, searchLive: true };
+  const bin = prof.bin && fs.existsSync(prof.bin) ? prof.bin : null;
+  if (!bin) { out.reason = 'TRAE CLI not found (install it, then codex-worker trae-setup)'; return out; }
+  let status = '';
+  try { status = execFileSync('/bin/sh', ['-c', '"$0" login status 2>&1', bin], { encoding: 'utf8', timeout: 30000 }); } catch (e) { status = String(e.stdout ?? ''); } // it prints to stderr
+  if (!/logged in/i.test(status) || /not logged in/i.test(status)) { out.reason = 'TRAE CLI not logged in (run `traecli login --git-code`, or the user runs `! traecli login --sso`)'; return out; }
+  try {
+    const ids = execFileSync(bin, ['models'], { encoding: 'utf8', timeout: 60000, stdio: ['ignore', 'pipe', 'ignore'] }).split('\n').map((l) => l.trim()).filter((l) => /^[A-Za-z0-9][\w.-]*$/.test(l));
+    if (ids.length) { out.modelIds = Object.fromEntries(ids.map((i) => [i.toLowerCase(), i])); out.models = Object.keys(out.modelIds); }
+  } catch {}
+  if (!out.models.includes('gpt-6.1-sol')) { out.reason = 'TRAE CLI lists no GPT-6.1-Sol'; return out; }
+  out.healthy = true;
+  try {
+    const list = execFileSync(process.execPath, [WORKER, '--account', name, 'list', '--limit', '60'], { encoding: 'utf8', timeout: 30000, stdio: ['ignore', 'pipe', 'pipe'] });
+    out.live = true;
+    out.active = list.split('\n').filter((l) => l.split('\t')[2] === 'active').length;
+  } catch { out.live = false; }
+  const broken = out.live ? hubBroken(name, prof) : null;
+  if (broken) { out.healthy = false; out.hubBroken = broken; out.reason = `its hub answers but can't start threads (${broken.why}); restart it ${broken.fix}`; }
+  return out;
+};
 const readCodexAll = () => {
   const accounts = [];
   updateProfiles((reg) => {
@@ -217,6 +242,12 @@ const readCodexAll = () => {
       if (prof.kind === 'ttadk') {
         const t = readTtadk(name, prof);
         reg[name] = { ...prof, models: t.models, email: t.email, seenAt: now };
+        accounts.push({ ...t, seenAt: now });
+        continue;
+      }
+      if (prof.kind === 'trae') {
+        const t = readTrae(name, prof);
+        reg[name] = { ...prof, models: t.models, modelIds: t.modelIds, seenAt: now };
         accounts.push({ ...t, seenAt: now });
         continue;
       }
@@ -388,7 +419,12 @@ export const analyze = (data) => {
   const ttadk = tt ? { name: tt.name, home: tt.home, healthy: !!tt.healthy, reason: tt.reason, quotaOut: tt.quotaOut ?? null, live: !!tt.live, active: tt.active ?? 0,
     models: tt.models ?? [], browser: !!tt.browser, chromePlugin: tt.chromePlugin ?? null, search: !!tt.search, searchLive: !!tt.searchLive, ssoLeftH: tt.ssoExpiresAt ? (tt.ssoExpiresAt - now) / 3600000 : null } : null;
   if (ttadk) ttadk.usable = ttadk.healthy;
-  const rows = (data.codexAccounts ?? []).filter((a) => a.kind !== 'ttadk').map((a) => {
+  // TRAE CLI: the second company account, after TTADK and before personal quota (user, 2026-11-08).
+  const tr = (data.codexAccounts ?? []).find((a) => a.kind === 'trae') ?? null;
+  const trae = tr ? { name: tr.name, kind: 'trae', home: tr.home, healthy: !!tr.healthy, reason: tr.reason, live: !!tr.live, active: tr.active ?? 0,
+    models: tr.models ?? [], modelIds: tr.modelIds ?? {}, browser: false, chromePlugin: null, search: true, searchLive: true } : null;
+  if (trae) trae.usable = trae.healthy;
+  const rows = (data.codexAccounts ?? []).filter((a) => a.kind !== 'ttadk' && a.kind !== 'trae').map((a) => {
     const w = weekly(a.windows), s = winState(w, hist[`codex:${a.name}`]), w5 = shortWin(a.windows);
     const unconstrained = !!a.windows && !w; // read fine, but no limit window (or unlimited credits)
     const spent = !unconstrained && !!s && (s.used >= P.redeemAt || (a.allowed === false && !(w5 && w5.used >= P.throttle5h)));
@@ -409,7 +445,7 @@ export const analyze = (data) => {
   const throttled = rows.filter((r) => r.throttledUntil).sort((x, y) => x.throttledUntil - y.throttledUntil);
   const cardsHeld = rows.reduce((n, r) => n + (r.a.resets?.count ?? 0), 0);
   const codex = {
-    ttadk,
+    ttadk, trae,
     readable: rows.some((r) => r.known), rows, pick, redeem, cardsHeld, throttled, rotate, open,
     out: !pick && !redeem && rows.some((r) => r.known),
     // Out only because 5-hour windows are full: a pause of hours, not a spent week.
@@ -424,7 +460,7 @@ export const analyze = (data) => {
     && (codex.frontLoad || ((ps.used + (ps.rate ?? 0) * after.deadline) < 100 && (after.cp?.deadlineH || ps.elapsed >= 0.1)));
   codex.overspending = !!ps && !codex.frontLoad && cardsHeld === 0 && open.length <= 1 && ps.projected != null && ps.projected > P.overspend;
   // Claude may never outlast-fail Codex: with Codex out it takes only what fits its room.
-  const stop = !claude.readable && !codex.readable && !codex.ttadk?.healthy;
+  const stop = !claude.readable && !codex.readable && !codex.ttadk?.healthy && !codex.trae?.healthy;
   return { claude, codex, stop, policy: P };
 };
 
@@ -445,10 +481,19 @@ export const leanLines = (st, data) => {
       out.push(`TTADK first: every task its gpt-6.1-sol can handle runs on account ${T.name} (route.mjs does this); the ChatGPT accounts below take image generation${T.search ? '' : ' and web research (TTADK web search not set up: rerun ttadk-setup)'}, and everything when TTADK fails (route.mjs --exclude-account ${T.name}); ${T.active} TTADK turns running`);
       out.push('TTADK device: leave the ChatGPT and Claude quota for the user\'s other device (no TTADK there) — spend it only on work TTADK can\'t do; no effort raises or extra reviews just to use quota (route.mjs applies this)');
     }
+    else if (T.quotaOut && X.trae?.usable) out.push(`TTADK paused — ${T.reason}: nothing to fix; its work goes to TRAE meanwhile (see below)`);
     else if (T.quotaOut) out.push(`TTADK paused — ${T.reason}: nothing to fix; ask the user once whether TTADK's work goes on now on personal quota (then --urgent until the reset) or waits for the reset (route.mjs gates it on that OK; high stakes runs on personal quota without asking)`);
+    else if (X.trae?.usable) out.push(`TTADK unavailable — ${T.reason}: tell the user now so they can fix it; meanwhile its work goes to TRAE`);
     else out.push(`TTADK unavailable — ${T.reason}: tell the user now so they can fix it; route.mjs holds normal-stakes work TTADK would take until then (high stakes or --urgent run on personal quota)`);
     if (T.healthy && !T.live) out.push(`TTADK hub down — start it before hub workers: codex-worker.mjs --account ${T.name} hub (codex exec runs don't need it)`);
     if (T.healthy && T.ssoLeftH != null && T.ssoLeftH < POLICY.ttadkSsoWarnH) out.push(`TTADK SSO expires in ${hours(T.ssoLeftH)}: ask the user to run \`! ttadk auth login sso\` before it lapses`);
+  }
+  const TR = X.trae;
+  if (TR) {
+    if (TR.usable && !T?.usable) out.push(`TRAE next: with TTADK ${T ? 'out' : 'absent'}, work TTADK would take runs on TRAE CLI (account ${TR.name}, GPT-6.1-Sol; route.mjs does this) before personal quota; browser, desktop apps and images stay off TRAE`);
+    else if (TR.usable) out.push(`TRAE CLI (account ${TR.name}) is the fallback after TTADK, before personal quota`);
+    else out.push(`TRAE CLI unavailable — ${TR.reason}`);
+    if (TR.healthy && !TR.live) out.push(`TRAE hub down — start it before hub workers: codex-worker.mjs --account ${TR.name} hub (traecli exec runs don't need it)`);
   }
   if (X.redeem && T) out.push(`reset card due${multi ? ` on ${who(X.redeem)}` : ''}: ${X.redeem.cp.line} — on this TTADK device ask the user only when route.mjs prints redeemFirst (ChatGPT-only work landing on that account); the other device spends that quota`);
   else if (X.redeem) out.push(`redeem a reset card${multi ? ` on ${who(X.redeem)}` : ''}: ${X.redeem.cp.line} — ask the user first, every time; only after a yes: `

@@ -203,6 +203,35 @@ There is no concurrency cap (user, 2026-11-07):
 The guide states no data-security rules, and a compliance question about it was taken offline. Use it for TikTok/ByteDance
 engineering work. Ask the user before sending other companies' or personal data through it.
 
+## TRAE CLI as the second company account (user, 2026-11-08)
+
+Order for Codex work: **TTADK first, then TRAE CLI, then personal quota** (ChatGPT accounts / Claude). `route.mjs` picks
+TRAE whenever TTADK is out (daily quota used up, down, or `--exclude-account ttadk`) and TRAE is healthy; the OK gate for
+personal quota appears only when both company accounts are out. The user chose not to cap TRAE usage.
+
+- **What it is.** TRAE CLI (`traecli` / `traex`) is the company's official agent CLI (the compliance FAQ lists it as
+  cleared), a fork of Codex maintained by the TRAE team, with its own model pool, separate from TTADK's. Models include
+  GPT-6.1-Sol, GPT-6-Astra (often queued), GPT-5.6 Sol/Terra/Luna, Gemini 3.1 Pro, Seed, DeepSeek; no Opus on this
+  account, no Kimi.
+- **Same harness as Codex for GPT-6.1-Sol** (compared 2026-11-08): the same "You are Codex…" base prompt (about 28 lines
+  differ, in the plugin/app section), the same tools (code mode, unified exec, freeform apply_patch, multi-agent v2, web
+  search). A 5-check test (fix + tests + AGENTS.md, web search, skills, image input, resume) passed on GPT-6.1-Sol and
+  Gemini 3.1 Pro, and `traex app-server` worked unchanged as a codex-worker hub.
+- **Not on TRAE:** the ChatGPT Chrome / Computer Use plugins (its browser runtime finds no browser: the Chrome extension
+  side accepts only the OpenAI-signed Codex client, which we don't work around), and image generation. Browser, ui-browser,
+  computer-use and image work stay on TTADK / Claude / ChatGPT. A TRAE worker that needs a web page has the `playwright`
+  MCP server: a separate headless Chrome with no user sign-ins.
+- **Setup** (once per machine): install (`sh -c "$(curl -fsSL https://code.byted.org/api/tos-proxy/download/traex_install.sh)"`),
+  `traecli login --git-code` (no browser needed; `--sso` otherwise), then `codex-worker.mjs trae-setup` (registers
+  account `trae`, hub port next free; writes into `~/.trae/traecli.toml`: `commit_attribution = ""`, `web_search = "live"`,
+  the playwright MCP server) and `codex-worker.mjs --account trae hub` (starts `traex app-server`).
+- **Use.** Hub workers: `codex-worker.mjs --account trae start … --model GPT-6.1-Sol` (lower-case ids are mapped).
+  One-shot: `traecli exec -C <dir> -s <sandbox> -m GPT-6.1-Sol -c model_reasoning_effort='"high"' --json -o <file> "<prompt>"`.
+  `route.mjs` prints both. Sessions live in `~/.trae/cli/sessions`.
+- **Health.** `quota.mjs` reads the account as healthy when the CLI is present, logged in and lists GPT-6.1-Sol, and its
+  hub is sound. TRAE publishes no quota numbers; a popular model can sit "Queued for capacity": no progress for 15
+  minutes → interrupt and re-route with `--exclude-account trae`.
+
 ## Browser use (and Computer Use) on a Codex worker (verified 2026-11-07)
 
 A Codex worker can operate the user's signed-in Chrome through the ChatGPT app's **Chrome plugin**. It can also operate

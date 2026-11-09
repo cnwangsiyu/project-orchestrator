@@ -18,6 +18,10 @@ const acc = (name, used, leftH, cards = [], extra = {}) => ({ name, live: true, 
   windows: [wk(used, leftH)], resets: { count: cards.length, credits: cards.map((e, i) => ({ id: `RateLimitResetCredit_${name}card${i}`, expiresAt: now + e * h })) }, ...extra });
 const tt = (extra = {}) => ({ name: 'ttadk', kind: 'ttadk', home: '/tmp/ttadk', hub: 'ws://127.0.0.1:47399', healthy: true, reason: null, live: true, active: 2,
   models: ['gpt-6.1-sol', 'gpt-5.6-terra', 'gpt-5.5'], browser: true, chromePlugin: '/tmp/chrome-plugin', ssoExpiresAt: now + 240 * h, windows: [], resets: null, ...extra });
+// TRAE CLI (second company account, 2026-11-08): no windows, no browser, its own model ids.
+const tr = (extra = {}) => ({ name: 'trae', kind: 'trae', home: '/tmp/trae', hub: 'ws://127.0.0.1:47398', healthy: true, reason: null, live: true, active: 0,
+  models: ['gpt-6.1-sol', 'gpt-6-astra', 'gemini-3.1-pro-preview'], modelIds: { 'gpt-6.1-sol': 'GPT-6.1-Sol', 'gpt-6-astra': 'GPT-6-Astra', 'gemini-3.1-pro-preview': 'Gemini-3.1-Pro-Preview' },
+  search: true, searchLive: true, browser: false, windows: [], resets: null, ...extra });
 const five = (used, leftH) => ({ label: '5h', used, resetsAt: now + leftH * h, windowMins: 300, scoped: false });
 
 const S = {
@@ -41,6 +45,11 @@ const S = {
   ttUnhealthy: { claude: cl(10, 120), codex: [acc('main', 20, 120), tt({ healthy: false, reason: 'TTADK SSO not logged in or expired' })] },
   // TTADK's daily token quota used up (2026-11-08): personal-quota pick, gated on the user's OK (go on or wait).
   ttQuotaOut: { claude: cl(10, 120), codex: [acc('main', 20, 120), tt({ healthy: false, reason: 'its daily token quota is used up', quotaOut: { kind: 'daily', resetsAt: now + 10 * h } })] },
+  // TTADK first, then TRAE CLI, then personal quota (user, 2026-11-08).
+  ttAndTrae: { claude: cl(10, 120), codex: [acc('main', 20, 120), tt(), tr()] },
+  ttOutTrae: { claude: cl(10, 120), codex: [acc('main', 20, 120), tt({ healthy: false, reason: 'its daily token quota is used up', quotaOut: { kind: 'daily', resetsAt: now + 10 * h } }), tr()] },
+  ttOutTraeDown: { claude: cl(10, 120), codex: [acc('main', 20, 120), tt({ healthy: false, reason: 'its daily token quota is used up', quotaOut: { kind: 'daily', resetsAt: now + 10 * h } }), tr({ healthy: false, reason: 'TRAE CLI not logged in' })] },
+  traeOnly: { claude: cl(10, 120), codex: [acc('main', 20, 120), tr()] },
   ttChatOut: { claude: cl(10, 48), codex: [acc('main', 99, 48), tt()] },
   // From the 2026-11-07 review: a hub never read; a spent account with a card next to TTADK; an excluded pick next to
   // a spent account with an urgent card; two accounts that must both be spent soon.
@@ -138,6 +147,17 @@ const CASES = [
   ['ttQuotaOut', ['implement', '--urgent'], 'codex gpt-6.1-sol high @main'],
   ['ttQuotaOut', ['implement', '--stakes', 'high'], 'codex gpt-6.1-sol xhigh @main'],
   ['ttQuotaOut', ['image-gen'], 'codex gpt-6-luna low @main'],
+  ['ttAndTrae', ['analysis'], 'codex gpt-6.1-sol high @ttadk'],
+  ['ttAndTrae', ['implement'], 'codex gpt-6.1-sol high @ttadk'],
+  ['ttOutTrae', ['analysis'], 'codex gpt-6.1-sol high @trae'],
+  ['ttOutTrae', ['implement'], 'codex gpt-6.1-sol high @trae'],
+  ['ttOutTrae', ['research'], 'codex gpt-6.1-sol high @trae'],
+  ['ttOutTrae', ['image-gen'], 'codex gpt-6-luna low @main'],
+  ['ttOutTrae', ['browser'], 'claude sonnet medium'],
+  ['ttOutTraeDown', ['analysis'], 'codex gpt-6.1-sol medium @main'],
+  ['traeOnly', ['implement'], 'codex gpt-6.1-sol high @trae'],
+  ['ttAndTrae', ['implement', '--exclude-account', 'ttadk'], 'codex gpt-6.1-sol high @trae'],
+  ['ttAndTrae', ['implement', '--exclude-account', 'ttadk,trae'], 'codex gpt-6.1-sol high @main'],
   ['ttChatOut', ['lookup'], 'codex gpt-6.1-sol medium @ttadk'],
   ['ttChatOut', ['image-gen'], 'DEFER'],
   // Browser work: TTADK Codex when it is browser-ready, else Claude.
@@ -322,6 +342,19 @@ for (const [sc, args] of ERRORS) {
   const bad = cases.map(([got, want], i) => (got === want ? null : i)).filter((i) => i !== null);
   if (bad.length) fail++;
   console.log(`${bad.length ? 'FAIL' : 'ok  '} ttQuotaOut gate     ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
+}
+// TRAE: no OK gate while it can take TTADK's work; the gate returns when both company accounts are out; TRAE launches use
+// its own model ids and traecli for exec.
+{
+  const o = (sc, args) => JSON.parse(run(sc, args));
+  const gate = (sc, args) => o(sc, args).needsUserOK.some((n) => /TTADK is paused/.test(n));
+  const exec = o('ttOutTrae', ['lookup']).pick?.command ?? '';
+  const worker = o('ttOutTrae', ['implement', '--impact', 'service']).pick?.command ?? '';
+  const cases = [[gate('ttOutTrae', ['analysis']), false], [gate('ttOutTraeDown', ['analysis']), true],
+    [/^traecli exec .*-m GPT-6\.1-Sol /.test(exec), true], [/--account trae start .*--model GPT-6\.1-Sol /.test(worker), true]];
+  const bad = cases.map(([got, want], i) => (got === want ? null : i)).filter((i) => i !== null);
+  if (bad.length) fail++;
+  console.log(`${bad.length ? 'FAIL' : 'ok  '} trae gate/launch    ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')} (exec: ${exec.slice(0, 90)})` : ''}`);
 }
 // Outcome join (outcome.mjs / review-data.mjs): prefix-tolerant, fix rounds fold in, reviews and look-alike suffixes don't.
 {
