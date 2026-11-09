@@ -39,7 +39,7 @@ const S = {
   ttFresh: { claude: cl(10, 120), codex: [acc('main', 20, 120), tt()] },
   ttNoBrowser: { claude: cl(10, 120), codex: [acc('main', 20, 120), tt({ browser: false })] },
   ttUnhealthy: { claude: cl(10, 120), codex: [acc('main', 20, 120), tt({ healthy: false, reason: 'TTADK SSO not logged in or expired' })] },
-  // TTADK's daily token quota used up (2026-11-08): held until the reset like a fixable outage, not re-routed.
+  // TTADK's daily token quota used up (2026-11-08): personal-quota pick, gated on the user's OK (go on or wait).
   ttQuotaOut: { claude: cl(10, 120), codex: [acc('main', 20, 120), tt({ healthy: false, reason: 'its daily token quota is used up', quotaOut: { kind: 'daily', resetsAt: now + 10 * h } })] },
   ttChatOut: { claude: cl(10, 48), codex: [acc('main', 99, 48), tt()] },
   // From the 2026-11-07 review: a hub never read; a spent account with a card next to TTADK; an excluded pick next to
@@ -133,8 +133,8 @@ const CASES = [
   ['ttUnhealthy', ['implement', '--stakes', 'high'], 'codex gpt-6.1-sol xhigh @main'],
   ['ttUnhealthy', ['image-gen'], 'codex gpt-6-luna low @main'],
   ['ttUnhealthy', ['computer-use'], 'claude sonnet medium'],
-  ['ttQuotaOut', ['implement'], 'DEFER'],
-  ['ttQuotaOut', ['analysis'], 'DEFER'],
+  ['ttQuotaOut', ['implement'], 'codex gpt-6.1-sol high @main'],
+  ['ttQuotaOut', ['analysis'], 'codex gpt-6.1-sol medium @main'],
   ['ttQuotaOut', ['implement', '--urgent'], 'codex gpt-6.1-sol high @main'],
   ['ttQuotaOut', ['implement', '--stakes', 'high'], 'codex gpt-6.1-sol xhigh @main'],
   ['ttQuotaOut', ['image-gen'], 'codex gpt-6-luna low @main'],
@@ -314,6 +314,14 @@ for (const [sc, args] of ERRORS) {
   const ok = got === path.join(tmp, 'main');
   if (!ok) fail++;
   console.log(`${ok ? 'ok  ' : 'FAIL'} catalog source      caller CODEX_HOME=ttadk               ${ok ? 'main' : `got ${got}`}`);
+}
+// TTADK quota used up: normal work asks the user (needs OK); --urgent and high stakes don't (user, 2026-11-08).
+{
+  const gate = (args) => JSON.parse(run('ttQuotaOut', args)).needsUserOK.some((n) => /TTADK is paused/.test(n));
+  const cases = [[gate(['analysis']), true], [gate(['implement', '--impact', 'service']), true], [gate(['analysis', '--urgent']), false], [gate(['implement', '--impact', 'service', '--stakes', 'high']), false]];
+  const bad = cases.map(([got, want], i) => (got === want ? null : i)).filter((i) => i !== null);
+  if (bad.length) fail++;
+  console.log(`${bad.length ? 'FAIL' : 'ok  '} ttQuotaOut gate     ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
 }
 // Outcome join (outcome.mjs / review-data.mjs): prefix-tolerant, fix rounds fold in, reviews and look-alike suffixes don't.
 {

@@ -115,8 +115,9 @@ To change routing for a kind of task, edit the table in `route.mjs` and this rat
   active, `gpt-6.1-sol` listed), every row runs first on TTADK `gpt-6.1-sol`, Claude-strength rows included (docs,
   research, design, high-stakes review).
   - **TTADK's quota is daily, not unlimited** (about 500M tokens per user per day, shared by all models, resets 16:00
-    UTC; measured 2026-11-08). When it runs out, TTADK is paused until the reset and its normal work waits
-    (`--urgent` / high stakes run on personal quota); see codex-workers.md, "Health and fallback".
+    UTC; measured 2026-11-08). When it runs out, TTADK is paused until the reset; its normal work is routed to
+    personal quota behind the user's OK (go on now, or wait for the reset; user, 2026-11-08), while `--urgent` / high
+    stakes run on personal quota without asking; see codex-workers.md, "Health and fallback".
   - **Burn TTADK, not personal quota, without losing quality (user, 2026-11-07).** TTADK is the company's quota;
     Claude and the ChatGPT accounts are the user's own. So on TTADK:
     - the first effort is the higher of the row's first pick and its Sol alternative, at least `high` for docs,

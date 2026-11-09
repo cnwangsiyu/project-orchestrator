@@ -179,8 +179,10 @@ There is no concurrency cap (user, 2026-11-07):
   (input + output, cached input counted in full; models weigh differently, Sol ×1), plus an hourly cap, shared by all
   models. Over it the gateway answers 403 `quota exceeded: Daily Limits exceeded. Resets at <ISO>` (16:00 UTC for the
   daily one) to every model. A day of TTADK-first work used it up in about 8 hours. The proxy records the limit in
-  `<ttadk home>/quota-limit.json`; `quota.mjs` then shows TTADK paused until the reset, and `route.mjs` holds normal
-  work that TTADK would take until then (`--urgent` or high stakes run on personal quota). `codex-worker` prints
+  `<ttadk home>/quota-limit.json`; `quota.mjs` then shows TTADK paused until the reset, and `route.mjs` routes normal
+  work that TTADK would take to personal quota behind a "needs the user's OK" gate: the orchestrator asks the user once
+  whether to go on now or wait for the reset (user, 2026-11-08). "Go on": launch, and pass `--urgent` for TTADK's work
+  until the reset; "wait": hold it until then. `--urgent` and high stakes run on personal quota without asking. `codex-worker` prints
   `quota-exhausted:` for such a failure: don't retry, and don't try another TTADK model. Usage dashboard:
   `https://gdp-portal.bytedance.net/llmbox/dashboard` (extra quota can be requested there; that is the user's call).
 - **A rate-limited run is retried once on TTADK.** `codex-worker` prints a `rate-limited:` line when a turn fails that
