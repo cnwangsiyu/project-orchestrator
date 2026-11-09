@@ -117,6 +117,16 @@ const CASES = [
   ['ttFresh', ['design'], 'codex gpt-6.1-sol xhigh @ttadk'], // the higher of Opus high and its Sol alternative (xhigh)
   ['ttFresh', ['review-high'], 'codex gpt-6.1-sol xhigh @ttadk'],
   ['ttFresh', ['implement', '--failures', '1'], 'codex gpt-6.1-sol xhigh @ttadk'],
+  // TTADK's quota is daily (user, 2026-11-09): throwaway code work starts at Sol high on the company accounts, climbs on
+  // failure; release/service work and personal-quota picks are unchanged.
+  ['ttFresh', ['implement-hard', '--impact', 'throwaway'], 'codex gpt-6.1-sol high @ttadk'],
+  ['ttFresh', ['implement-hard', '--impact', 'throwaway', '--failures', '1'], 'codex gpt-6.1-sol xhigh @ttadk'],
+  ['ttFresh', ['implement-hard', '--impact', 'throwaway', '--failures', '2'], 'codex gpt-6.1-sol max @ttadk'],
+  ['ttFresh', ['debug', '--impact', 'throwaway', '--stakes', 'high'], 'codex gpt-6.1-sol xhigh @ttadk'],
+  ['ttFresh', ['implement', '--impact', 'throwaway'], 'codex gpt-6.1-sol high @ttadk'],
+  ['ttFresh', ['implement-hard', '--impact', 'release'], 'codex gpt-6.1-sol xhigh @ttadk'],
+  ['ttOutTrae', ['debug', '--impact', 'throwaway'], 'codex gpt-6.1-sol high @trae'],
+  ['quiet', ['debug', '--impact', 'throwaway'], 'codex gpt-6.1-sol xhigh @main'],
   // Not TTADK-capable: images, Claude-only rows, a second opinion on Codex's work.
   ['ttFresh', ['image-gen'], 'codex gpt-6-luna low @main'],
   // Image generation never lands on TTADK, its Sol fallback step included (no image tool on the gateway).
@@ -421,6 +431,30 @@ for (const [sc, args] of ERRORS) {
   const bad = cases.map(([got, want], i) => (got === want ? null : i)).filter((i) => i !== null);
   if (bad.length) fail++;
   console.log(`${bad.length ? 'FAIL' : 'ok  '} outcome join        ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
+}
+// One outcome per task (review-data.mjs, nightly review 2026-11-09): duplicates merge — latest result, most rounds.
+{
+  const { dedupeOutcomes } = await import('../lib/state.mjs');
+  const pk = { vendor: 'codex', model: 'gpt-6.1-sol', effort: 'high', account: 'ttadk' };
+  const o = (t, project, name, result, rounds, extra = {}) => ({ t, kind: 'outcome', project, name, result, rounds, first: pk, ...extra });
+  const out = dedupeOutcomes([
+    o(1, 'lynx-view', 'lynx-view-T17', 'pass', 2), o(5, 'lynx-view', 'lynx-view-T17', 'pass', 0),             // re-record said 0 rounds
+    o(2, 'video-agent', 'W285G', 'pass', 0), o(3, 'video-agent', 'W285G', 'rework', 2, { first: null }), o(4, 'video-agent', 'W285G', 'rework', 3),
+    o(2, 'lynx-view', 'T18', 'pass', 0), o(6, 'lynx-view', 'lynx-view-T18', 'fail', null, { reviewed: true }), // prefix-tolerant
+    o(1, 'video-agent', 'W27', 'pass', 0), o(1, 'video-agent', 'W277', 'pass', 0),                             // different tasks
+    o(1, 'p', 'X', 'pass', 0), o(2, 'q', 'X', 'pass', 0),                                                       // different projects
+  ]);
+  const get = (p, n) => out.find((x) => x.project === p && x.name.endsWith(n));
+  const cases = [
+    [out.length, 7],
+    [get('lynx-view', 'T17').rounds, 2], [get('lynx-view', 'T17').t, 5], [get('lynx-view', 'T17').dupes, 2],
+    [get('video-agent', 'W285G').result, 'rework'], [get('video-agent', 'W285G').rounds, 3], [get('video-agent', 'W285G').first?.account, 'ttadk'],
+    [get('lynx-view', 'T18').result, 'fail'], [get('lynx-view', 'T18').reviewed, true], [get('lynx-view', 'T18').rounds, 0],
+    [get('video-agent', 'W27').dupes, 1],
+  ];
+  const bad = cases.map(([got, want], i) => (got === want ? null : i)).filter((i) => i !== null);
+  if (bad.length) fail++;
+  console.log(`${bad.length ? 'FAIL' : 'ok  '} outcome dedupe      ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
 }
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(fail ? `\n${fail} failing` : '\nall pass');

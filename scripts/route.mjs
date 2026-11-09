@@ -168,6 +168,9 @@ if (ttCapable) {
   // - start at the higher of the row's first-pick effort and its Sol alternative's (design: Opus high / Sol xhigh →
   //   Sol xhigh); at least high for the rows Claude is better at or that need judgment (docs, research, image-read,
   //   analysis) and xhigh for a review of Codex-written code; one notch higher at high stakes;
+  // - throwaway code work starts at most at high (user, 2026-11-09): TTADK's quota is daily (~500M tokens) and ran out
+  //   mid-afternoon on 11-08, stopping six running tasks; throwaway work passed first time 15/17 that week, so its
+  //   xhigh first attempts spent the day's tokens for little. A failure still climbs to xhigh and max;
   // - then every Sol notch up to xhigh, and on to max (no OK needed on TTADK) except for the cheap rows;
   // - then the row's own steps, minus Codex steps no stronger than what TTADK already tried (no Luna, Terra or a weaker
   //   Sol); Astra (ChatGPT, needs an OK) stays after Sol max, and when the ChatGPT accounts are out it is dropped.
@@ -176,6 +179,7 @@ if (ttCapable) {
   if (['docs', 'research', 'image-read', 'analysis'].includes(cat)) eff = maxE(eff, 'high');
   if (authorCodex) eff = maxE(eff, 'xhigh');
   if (eff === 'max') eff = 'xhigh';
+  if (impact === 'throwaway' && ei(eff) > ei('high')) { eff = 'high'; why.push("throwaway: starts at Sol high on the company account (its daily token quota); a failure climbs to xhigh, then max"); }
   let e0 = notch(X(SOL, eff), 0);
   if (stakes === 'high') e0 = notch(e0, +1);
   const cheapRow = ['lookup', 'extract', 'draft', 'browser', 'computer-use'].includes(cat); // browser/desktop misses are UI trouble, not depth

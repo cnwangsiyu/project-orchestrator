@@ -347,6 +347,23 @@ export const outcomeOwns = (project, outcomeName, r) => {
   const o = bare(project, outcomeName), d = bare(project, r.name);
   return d === o || d.startsWith(`${o}-`);
 };
+// One outcome per task (nightly review 2026-11-09: 11 tasks in a week had 2–3 records; review-data counted each, and
+// the lynx re-records of 11-06 said 0 rounds after first records with 1–2). Records of the same project and name (with
+// or without the "<project>-" prefix) merge into one at the latest record's time: the latest result, note and accepted
+// pick; the most rounds any record gave; the first non-null first pick; reviewed if any record says so. `dupes` counts
+// the records merged.
+export const dedupeOutcomes = (records) => {
+  const by = new Map();
+  for (const o of [...records].sort((a, b) => a.t - b.t)) {
+    const k = `${o.project}\u0000${o.project && o.name ? bare(o.project, o.name) : o.name}`;
+    const p = by.get(k);
+    if (!p) { by.set(k, { ...o, dupes: 1 }); continue; }
+    const rounds = [p.rounds, o.rounds].filter((x) => x != null);
+    by.set(k, { ...p, ...o, rounds: rounds.length ? Math.max(...rounds) : null, minutes: o.minutes ?? p.minutes,
+      first: p.first ?? o.first, category: p.category ?? o.category, impact: p.impact ?? o.impact, reviewed: !!(p.reviewed || o.reviewed), dupes: p.dupes + 1 });
+  }
+  return [...by.values()];
+};
 export const readState = ({ fresh = false } = {}) => {
   let data = readJson(CACHE, null);
   const failed = data && (data.errors?.claude || data.errors?.codex);

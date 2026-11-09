@@ -72,8 +72,10 @@ These are the user's decisions (2026-10-30 to 2026-11-03):
     rules that spend it for its own sake there, and don't flag unspent ChatGPT quota or lapsed cards on a TTADK device
     as waste (user, 2026-11-07).
   - TTADK is the company's quota and the rest is the user's own: on a TTADK device, never lower a TTADK effort to save
-    cost (it saves nothing), never count an unspent Claude week as waste, and judge a TTADK row only on quality and
-    success. Moving work from TTADK to personal quota needs evidence that TTADK does it worse.
+    cost, never count an unspent Claude week as waste, and judge a TTADK row only on quality and success. Moving work
+    from TTADK to personal quota needs evidence that TTADK does it worse. The one exception (user, 2026-11-09):
+    TTADK's quota is daily (~500M tokens), so throwaway code work starts at Sol `high` on the company accounts; a
+    failure still climbs to `xhigh` and `max`.
   - Desktop apps (`computer-use`) go to TTADK Codex when browser-ready (user, 2026-11-07): a terminal Claude worker has
     no desktop computer-use tool (ledger 10-31), so Claude there is only a fallback that may report BLOCKED.
 - **Permissions (2026-11-05):**
@@ -96,7 +98,9 @@ These are the user's decisions (2026-10-30 to 2026-11-03):
   - the current lean;
   - the model catalog compared with the saved baseline;
   - outcomes (`outcome.mjs` records): first-pass rate, rework rounds and minutes per vendor, model and category of the
-    first attempt, the failures, and named tasks with routing decisions but no outcome yet.
+    first attempt, the failures, and named tasks with routing decisions but no outcome yet;
+  - `duplicates`: tasks with more than one outcome record. They count once (latest result, most rounds); remind
+    their orchestrator to record each task once, at close.
 - **Hub probe:** on each account in `codex-accounts.json` whose hub is up, start one tiny thread
   (`codex-worker.mjs --account <name> start --cwd ~ --effort low --sandbox read-only --name hub-probe --log <tmp> "Reply OK"`)
   and check it answers. A failure that `quota.mjs` didn't flag is a bad case: restart that hub from `~` once no turn runs

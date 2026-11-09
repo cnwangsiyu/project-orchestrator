@@ -44,6 +44,10 @@ const rec = {
   reviewed: !!opts.reviewed, note: typeof opts.note === 'string' ? opts.note : null,
   category: mine[0]?.category ?? null, impact: mine[0]?.impact ?? null, first, accepted: opts.result === 'fail' ? null : last, decisions: mine.length,
 };
+// Record each task once, at close. A second record merges into the first in review-data (latest result, most rounds),
+// so it only corrects; say so rather than let it pass as a new task (nightly review 2026-11-09).
+const prior = routes.filter((r) => r.kind === 'outcome' && r.project === opts.project && (outcomeOwns(opts.project, opts.name, r) && outcomeOwns(opts.project, r.name, { project: opts.project, name: opts.name })));
+if (prior.length) console.error(`outcome: ${opts.name} already has ${prior.length} outcome record(s); this one replaces their result (the review keeps the most rounds any record gave). Record each task once, when it closes.`);
 fs.appendFileSync(ROUTE_LOG, JSON.stringify(rec) + '\n');
 console.log(`recorded ${opts.project}/${opts.name}: ${opts.result}${rounds ? ` after ${rounds} round(s)` : ''}`
   + (first ? ` — first ${first.vendor} ${first.model} ${first.effort}${last && last !== first ? `, accepted on ${last.vendor} ${last.model} ${last.effort}` : ''}` : ' — no routing decision found for this name (pass the same --project/--name as route.mjs)'));

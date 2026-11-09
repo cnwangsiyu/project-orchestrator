@@ -157,6 +157,8 @@ close (user, 2026-11-04, after a worker overwrote a user header and another wipe
     MERGE-WITH-NOTES is a pass). Any fix round makes it `rework --rounds N`, counting every round
     on any vendor; `outcome.mjs` records `pass --rounds N` (N ≥ 1) as rework. Add `--reviewed` when a
     review judged it.
+  - Once per task: a second record for the same task only corrects the first (the review keeps the
+    latest result and the most rounds any record gave), and `outcome.mjs` warns when one exists.
   - The nightly review turns these records into first-pass rates, rework rounds and times per
     vendor, model and category. That is the evidence for changing the routing table.
 
@@ -228,6 +230,8 @@ effort, Codex account and launch command from
     reset), don't retry or switch models. Normal work isn't held silently: route.mjs picks personal
     quota and gates it on the user's OK — ask once whether to go on now (then `--urgent` until the
     reset) or wait for the reset (user, 2026-11-08). `--urgent` and high stakes don't ask.
+  - Because of that daily cap, throwaway code work starts at Sol `high` on the company accounts
+    (TTADK, TRAE) instead of `xhigh`; a failure still climbs to `xhigh` and `max` (user, 2026-11-09).
   - Every TTADK worker can search the web through its local proxy, once `ttadk-setup` has set it
     up; briefs say search queries must not carry internal information.
   - Browser work (`browser`: web pages in the user's Chrome) goes to TTADK Codex when that account

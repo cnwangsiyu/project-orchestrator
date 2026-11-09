@@ -126,6 +126,10 @@ To change routing for a kind of task, edit the table in `route.mjs` and this rat
     - the first effort is the higher of the row's first pick and its Sol alternative, at least `high` for docs,
       research, image-read and analysis, `xhigh` for a review of Codex-written code, one notch up at high stakes;
       `--auto-check` and low stakes don't lower it (that saves nothing on TTADK);
+    - except throwaway code work (`--impact throwaway`), which starts at most at Sol `high` on the company accounts
+      (user, 2026-11-09). TTADK's quota is daily: on 11-08 it ran out mid-afternoon and stopped six running tasks
+      across three projects, while throwaway work passed first time 15/17 that week. One notch up at high stakes; a
+      failure still climbs to `xhigh` and `max`. Release and service work keep their effort;
     - after a failure Sol climbs every notch to `xhigh`, then `max` (no OK needed on TTADK; lookup, extract, draft
       and browser stop at `xhigh`), before the row's personal-quota steps: e.g. implement-hard Sol xhigh → Sol max →
       Opus xhigh; science Sol xhigh → Sol max → Astra (ChatGPT, needs an OK; dropped when ChatGPT is out);

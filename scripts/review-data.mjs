@@ -8,7 +8,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { SHARED, ROUTE_LOG, QUOTA_LOG, readState, analyze, leanLines, fmt, outcomeOwns, isReviewDecision, codexCatalog, readProfiles, compareHarness, harnessDrift } from './lib/state.mjs';
+import { SHARED, ROUTE_LOG, QUOTA_LOG, readState, analyze, leanLines, fmt, outcomeOwns, isReviewDecision, dedupeOutcomes, codexCatalog, readProfiles, compareHarness, harnessDrift } from './lib/state.mjs';
 
 const argv = process.argv.slice(2);
 const opt = (k) => { const i = argv.indexOf(`--${k}`); return i < 0 ? null : argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[i + 1] : true; };
@@ -21,7 +21,8 @@ const all = lines(ROUTE_LOG);
 const routes = all.filter((r) => r.t >= since && r.kind !== 'outcome');
 // Outcomes (outcome.mjs): first-pass rate, rework rounds and time per vendor / model / category of the first attempt.
 // Older records said `pass` with fix rounds; outcome.mjs now records those as rework, so read them the same way.
-const outs = all.filter((r) => r.t >= since && r.kind === 'outcome').map((o) => (o.result === 'pass' && o.rounds > 0 ? { ...o, result: 'rework' } : o));
+// A task recorded more than once counts once (dedupeOutcomes: latest result, most rounds), placed at its latest record.
+const outs = dedupeOutcomes(all.filter((r) => r.kind === 'outcome')).filter((r) => r.t >= since).map((o) => (o.result === 'pass' && o.rounds > 0 ? { ...o, result: 'rework' } : o));
 const agg = (key) => {
   const m = {};
   for (const o of outs) {
@@ -36,6 +37,8 @@ const agg = (key) => {
 };
 const outcomes = {
   recorded: outs.length,
+  // Tasks with more than one outcome record (merged above): remind their orchestrator to record each task once, at close.
+  duplicates: outs.filter((o) => o.dupes > 1).map((o) => `${o.project}/${o.name} ×${o.dupes}`),
   byVendor: agg((o) => o.first?.vendor), byModel: agg((o) => o.first && `${o.first.vendor}:${o.first.model}:${o.first.effort}`),
   byCategory: agg((o) => o.category), byVendorCategory: agg((o) => o.first && o.category && `${o.first.vendor}:${o.category}`),
   byImpact: agg((o) => o.impact),
