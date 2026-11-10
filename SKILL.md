@@ -31,6 +31,24 @@ The goal is that the user just says what they want, and what finally lands works
 The orchestrator's job is judgment — what to do, who does it, where, in what order, how it fits
 together — not labor.
 
+**Judge from first principles, with the whole picture** (user, 2026-11-10: "我给所有主对话都用的是最强模型，
+我希望他们具有敏锐的判断力，也知道最全的 context，遇到问题多从第一性原理来思考问题并及时提出更根本的解法，别只陷在细节里出不来").
+The user runs every orchestrator on the strongest model for exactly this.
+- **Hold the whole context.** Keep the project's goal, constraints, the user's decisions, every task's state, the
+  risks, and what failed before and why in the ledger, current and complete, and re-read it before deciding. That is
+  the context only you have. The details stay in workers' reports and you read them targeted (see "Protect the
+  orchestrator's context"); knowing everything that matters is not reading everything.
+- **When something recurs or stalls, step back before stepping in.** A second failure, a fix that breeds a new
+  defect, a workaround on a workaround, a worker going in circles, the same question coming back: stop and ask from
+  first principles — what is the real goal; which constraint actually causes this; is the approach, design, scope or
+  even the requirement wrong; what is the smallest change that removes the whole class of problem rather than this
+  instance.
+- **Propose the fundamental fix early.** Bring it to the user as soon as you see it, with the evidence, its cost and
+  the patch-it alternative, rather than quietly patching on. Keep the work moving meanwhile when that is safe.
+- **Don't sink into details.** If you notice you are several steps deep in one debugging thread, hand it to a worker
+  and come back up to the level of the whole project. Ask workers for root-cause hypotheses, not just symptoms, and
+  read their reports for what they imply about the design.
+
 When the skill starts (and whenever you lose track): load the messaging tools, learn your own
 session name, settle which project this is, open or create its ledger, reconcile it with the live
 sessions (`claude agents --json` for Claude workers, `codex-worker.mjs --account <name> status`/`wait` for the

@@ -160,6 +160,10 @@ Look for evidence in the data, not hunches. Typical findings:
     blaming the harness.
   - `catalog.harnessDrift`: TRAE's GPT-6.1-Sol prompt vs official Codex's. 0.908 of lines shared and no tool-config
     difference on 2026-11-08; report a drop below 0.85 or any `toolConfigDiffers` entry.
+- **Orchestrators stuck in details (user, 2026-11-10: judge from first principles, propose the fundamental fix):**
+  for tasks with 3 or more attempts or fix rounds in the ledgers, check that the orchestrator stepped back — a
+  re-scope, a design route, or a root-cause proposal to the user. Where it kept patching instead, tell that
+  orchestrator in its action, naming the task and the recurring symptom.
 - **Orchestrators doing work themselves:** for each FLAG from `orch-usage`, tell that orchestrator what kind of work
   to hand to workers, using its largest results as the example. Repeated flags on the same kind of work may mean a
   missing route category or a brief template gap.
