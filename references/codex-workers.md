@@ -192,7 +192,7 @@ There is no concurrency cap (user, 2026-11-07):
 - **A hub that answers but can't start threads** (any account; 2026-11-08: `-32603: thread startup task stopped
   before completing`, hub.log `provider auth cwd must resolve`, after the hub's working directory was removed).
   `quota.mjs` checks two things that cost nothing: the hub process's working directory still exists, and hub.log has no
-  panic since the hub's last start. When either fails it marks the account (TTADK: unavailable; ChatGPT: not live) and
+  panic in the last 30 minutes since the hub's last start (a one-off panic ages out, 2026-11-09). When either fails it marks the account (TTADK: unavailable; ChatGPT: not live) and
   prints the restart: once its running turns finish, `kill <pid>; cd ~ && codex-worker.mjs --account <name> hub`.
   `hub` itself starts from `$HOME`. The real probe, one tiny thread (`start --cwd ~ --effort low --sandbox read-only
   "Reply OK"`), takes seconds, so run it only after a start fails that way, and in the nightly review.

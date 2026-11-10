@@ -437,6 +437,24 @@ for (const [sc, args] of ERRORS) {
   if (bad.length) fail++;
   console.log(`${bad.length ? 'FAIL' : 'ok  '} no silent hold      ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
 }
+// Hub panic window (lib/state.mjs recentPanic, 2026-11-09): only panics in the last 30 min, since the last banner.
+{
+  const { recentPanic } = await import('../lib/state.mjs');
+  const now = Date.parse('2026-11-10T06:30:00Z');
+  const banner = 'TRAE CLI app-server (WebSockets)\n  listening on: ws://127.0.0.1:47324\n';
+  const at = (t) => `\x1b[2m${t}\x1b[0m ERROR codex_core: something\n`;
+  const panic = "thread 'tokio-runtime-worker' (1) panicked at core-plugins/src/store.rs:98:35:\nplugin cache root should be absolute: Too many open files in system\n";
+  const cases = [
+    [recentPanic(banner + at('2026-11-10T05:26:12Z') + panic + at('2026-11-10T06:12:25Z'), now, now), null],
+    [recentPanic(banner + at('2026-11-10T06:20:00Z') + panic, now, now) != null, true],
+    [recentPanic('codex app-server (WebSockets)\n' + panic + banner, now, now), null],
+    [recentPanic(banner + panic, now, now) != null, true],
+    [recentPanic(banner + panic, now, now - 3 * 3600000), null],
+  ];
+  const bad = cases.map(([got, want], i) => (got === want ? null : i)).filter((i) => i !== null);
+  if (bad.length) fail++;
+  console.log(`${bad.length ? 'FAIL' : 'ok  '} hub panic window    ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
+}
 // Outcome join (outcome.mjs / review-data.mjs): prefix-tolerant, fix rounds fold in, reviews and look-alike suffixes don't.
 {
   const { outcomeOwns, isReviewDecision } = await import('../lib/state.mjs');
