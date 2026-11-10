@@ -430,6 +430,8 @@ for (const [sc, args] of ERRORS) {
     [pauseDecision([{ t: t0, why: q }], t0 + m), null],
     [pauseDecision([{ t: t0, why: q }, { t: t0 + 20 * m, why: q }], t0 + 21 * m), null],
     [pauseDecision([{ t: t0, why: 'account banned' }], t0 + m)?.pausedUntil, t0 + 30 * m],
+    [pauseDecision([{ t: t0, why: 'Model access temporarily restricted.' }], t0 + m, 1)?.pausedUntil, t0 + 60 * m],
+    [pauseDecision([{ t: t0, why: 'Model access temporarily restricted.' }], t0 + m, 7)?.pausedUntil, t0 + 240 * m],
     [pauseDecision([{ t: t0, why: q }, { t: t0 + m, why: q }], t0 + 2 * m, 9)?.pausedUntil, t0 + 31 * m],
     [one, null], [p1?.pausedUntil, t0 + 7 * m], [p2?.pausedUntil, t0 + 19 * m], [p3?.pausedUntil, t0 + 41 * m],
     [cleared, null], [p4?.pausedUntil, t0 + 36 * m], [pa?.pausedUntil, t0 + 30 * m], [lifted, null],

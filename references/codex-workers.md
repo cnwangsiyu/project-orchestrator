@@ -246,7 +246,8 @@ personal quota appears only when both company accounts are out. The user chose n
     while pauses follow each other without a success (the backoff starts over after a success or an hour clear);
   - auth — not logged in, 401, expired token: 30 minutes, lifted as soon as `login status` is fine again;
   - hard — quota used up, banned, 403 Forbidden, `Model access temporarily restricted` (code 983: TRAE restricted the
-    account's GPT models on 2026-11-10 after about 1.3B tokens in a day; Gemini/Seed/DeepSeek kept working): 30 minutes. codex-worker prints `trae-paused:` when it pauses. A `traecli exec` run bypasses codex-worker: record its failure
+    account's GPT models on 2026-11-10 after about 1.3B tokens in a day; Gemini/Seed/DeepSeek kept working): 30 minutes,
+    then 60, 120, at most 240 while they keep coming without a success. codex-worker prints `trae-paused:` when it pauses. A `traecli exec` run bypasses codex-worker: record its failure
   (or a run you interrupted) with `codex-worker.mjs --account trae note-failure "<error>"`. To lift a pause by hand,
   delete `~/.trae/worker-health.json`.
 
