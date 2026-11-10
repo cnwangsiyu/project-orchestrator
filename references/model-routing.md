@@ -96,8 +96,8 @@ To change routing for a kind of task, edit the table in `route.mjs` and this rat
    - `service`: reviewed only at high stakes.
    - `throwaway`: never reviewed.
    - Reviewers follow `references/review-rubric.md` and block only on P0/P1.
-5. **Gates.** Fable, Astra, `max` effort (except on TTADK), an exhausted ladder and every card redemption need the
-   user's OK. Two or more
+5. **Gates.** Fable, Astra, `max` effort (except on the actual TTADK account), an exhausted ladder and every card redemption need the
+   user's OK. TRAE keeps the `max` gate even with `--urgent`; only the personal-quota gate is covered by that flag. Two or more
    Codex steps that fell short on one task print a "tell the user" line.
    - Hard Codex code work (`implement-hard`, `debug`, `science`) gets an extra independent Codex review while Codex is
      underused or front-loading, but only where the review policy wants a review anyway (release code, or service
@@ -117,8 +117,10 @@ To change routing for a kind of task, edit the table in `route.mjs` and this rat
   active, `gpt-6.1-sol` listed), every row runs first on TTADK `gpt-6.1-sol`, Claude-strength rows included (docs,
   research, design, high-stakes review).
   - **Then TRAE CLI (user, 2026-11-08).** When TTADK is out, the same rows run on TRAE CLI (account `trae`, GPT-6.1-Sol
-    with the official Codex prompt) under the same TTADK rules, before any personal quota; browser, desktop and image
-    work never go there. See codex-workers.md, "TRAE CLI as the second company account".
+    with the official Codex prompt) with the same routing rows and efforts, before any personal quota; browser, desktop and image
+    work never go there. The `max` exemption stays on TTADK alone: the 2026-11-10 review found
+    `vesdk-mainline-T39-m1a-device` routed to TRAE/max after three failures with an empty `needsOK` list.
+    The router now distinguishes the selected company account for that gate. See codex-workers.md, "TRAE CLI as the second company account".
   - **TTADK's quota is daily, not unlimited** (about 500M tokens per user per day, shared by all models, resets 16:00
     UTC; measured 2026-11-08). When it runs out, TTADK is paused until the reset; its normal work is routed to
     personal quota behind the user's OK (go on now, or wait for the reset; user, 2026-11-08), while only `--urgent`

@@ -354,7 +354,7 @@ for (const [sc, args] of ERRORS) {
   if (bad.length) fail++;
   console.log(`${bad.length ? 'FAIL' : 'ok  '} ttQuotaOut gate     ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
 }
-// TRAE: no OK gate while it can take TTADK's work; the gate returns when both company accounts are out; TRAE launches use
+// TRAE: no personal-quota gate while it can take TTADK's work; the gate returns when both company accounts are out; TRAE launches use
 // its own model ids and traecli for exec.
 {
   const o = (sc, args) => JSON.parse(run(sc, args));
@@ -366,6 +366,29 @@ for (const [sc, args] of ERRORS) {
   const bad = cases.map(([got, want], i) => (got === want ? null : i)).filter((i) => i !== null);
   if (bad.length) fail++;
   console.log(`${bad.length ? 'FAIL' : 'ok  '} trae gate/launch    ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')} (exec: ${exec.slice(0, 90)})` : ''}`);
+}
+// Only TTADK has the max-effort exemption. The 2026-11-10 review found T39-m1a-device routed to TRAE/max with no gate.
+// Company-account selection must not extend TTADK's exemption to TRAE, including a TRAE-only device or --urgent.
+{
+  const maxGate = (sc, args) => {
+    const o = JSON.parse(run(sc, args));
+    return [o.pick?.account, o.pick?.effort, o.needsUserOK.includes('max effort')];
+  };
+  const max = ['implement-hard', '--impact', 'release', '--failures', '1'];
+  const cases = [
+    [maxGate('ttFresh', max), ['ttadk', 'max', false]],
+    [maxGate('ttAndTrae', max), ['ttadk', 'max', false]],
+    [maxGate('ttOutTrae', max), ['trae', 'max', true]],
+    [maxGate('traeOnly', max), ['trae', 'max', true]],
+    [maxGate('ttOutTrae', [...max, '--urgent']), ['trae', 'max', true]],
+    [maxGate('ttOutTrae', ['build-run', '--failures', '3']), ['trae', 'max', true]],
+    [maxGate('ttOutTrae', ['debug', '--impact', 'throwaway', '--failures', '2']), ['trae', 'max', true]],
+    [maxGate('ttOutTrae', ['implement-hard', '--impact', 'release']), ['trae', 'xhigh', false]],
+    [maxGate('claudeOver', ['debug', '--impact', 'release', '--failures', '1']), ['main', 'max', true]],
+  ];
+  const bad = cases.map(([got, want], i) => (JSON.stringify(got) === JSON.stringify(want) ? null : i)).filter((i) => i !== null);
+  if (bad.length) fail++;
+  console.log(`${bad.length ? 'FAIL' : 'ok  '} max account gate    ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
 }
 // TRAE vs native Codex comparison (review-data.mjs, user 2026-11-08): harness attribution, Fisher's exact test, verdicts.
 {

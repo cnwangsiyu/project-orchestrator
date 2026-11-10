@@ -284,7 +284,8 @@ if (m) {
   // ---- 3. gates ----
   if (m.model === 'fable') needsOK.push('Fable (≈3x Opus cost, own weekly cap)');
   if (m.model === ASTRA) needsOK.push('Astra (5x Sol usage)');
-  if (m.effort === 'max' && !onTTADK(m)) needsOK.push('max effort'); // on TTADK max costs only time (user, 2026-11-07)
+  // onTTADK also matches the TRAE fallback; only the actual TTADK account has the max-effort exemption.
+  if (m.effort === 'max' && !(onTTADK(m) && TT === QX.ttadk)) needsOK.push('max effort'); // user, 2026-11-07
 }
 // Second opinion: the row's cross-vendor pair, or — while Codex is underused — an extra independent Codex review of
 // hard Codex work.
