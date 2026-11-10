@@ -131,6 +131,36 @@ close (user, 2026-11-04, after a worker overwrote a user header and another wipe
   --remove-existing-content, wiping app containers or Documents, erasing a simulator), or ask
   first."
 
+**Prevent rework at the brief** (rework retro of 2026-11-06–10, 89 rework chains; user-approved 2026-11-10). Most
+rework came from unchecked premises, "done" proven on the wrong target, one shared rule re-implemented by several
+workers, and patching after a second same-kind defect.
+- **Preflight before an expensive launch** (devices, signing, deploys, long matrices, research that writes files): for
+  each premise, give evidence or mark it NOT-READY in the brief — the real commit/worktree path; that the worker's
+  sandbox can write its outputs (research that writes files is not `--read-only`); the tools it needs (browser, device
+  channel, upload, unlocked screen); exact dependency caches; signing team/profile/key, bundle in use, permissions,
+  runner support. Anything NOT-READY: fix it or ask the user first; don't launch into it. Stay within the permissions
+  you have: a missing credential or signing asset is one card to the user, never a worker workaround.
+- **"Done" is proven on the target artifact and entry, not on unit tests.** The brief's done-criteria name: (1) the
+  acceptance identity — which server and session (server-side evidence), which build/version/SHA, which core is loaded;
+  after switching endpoints, reconnect explicitly; (2) the production entry — the real package/loader path (e.g. a plain
+  `node` import, the final bundle, offline resources, the oldest supported OS) and the default CI test globs and cwd;
+  (3) device acceptance runs to the end before anything is recorded as passed.
+- **Shared mechanisms: contract first, then parallel.** When a state, authorization, lifetime or recovery rule is used
+  by several modules or languages, first one task (one owner) writes the contract — a state table and cross-language
+  fixtures, e.g. the atomic `admit → await → effect/commit` semantics — then the module tasks adapt to it in parallel.
+  Every task that adds state or side effects gets an executable failure contract in its brief: what happens on success,
+  partial failure, cancel, retry, duplicate, restart, revoke and timeout; side effects at most once; what old output is
+  kept.
+- **Fix rounds.** Every fix brief asks for three kinds of test: the original failure reproduced, the fix passing, and
+  the neighbouring old behaviour unchanged (not only the case the reviewer named). If the second fix of a task brings a
+  new defect of the same kind, stop patching: find whether it is a shared contract, the interface layout or a too-wide
+  patch, then simplify or split the work (a `design` route can review the approach). `route.mjs` reminds you from
+  `--failures 2` on code work. A round limit triggers this re-scoping; it never stands in for correctness.
+- **Long device or sampling matrices: qualify first.** Run a pilot with one minimal sample per gate at real rates,
+  disk, timeouts and SDK events; run the full matrix only once it passes. Device leases, deadlines, disconnects,
+  settings restore and the device's return are handled by you or a host-side script, not left to the worker's final
+  report.
+
 **Review only what is costly to undo, and record how each task ended** (user, 2026-11-04).
 - Code work (`implement`, `implement-hard`, `debug`, `science`) declares `--impact`. Ask: can a
   mistake be undone within hours by redeploying or rolling back, without lasting damage?
@@ -150,7 +180,12 @@ close (user, 2026-11-04, after a worker overwrote a user header and another wipe
   - at most 2 rounds, then you decide or ask the user.
 - Work without a review is accepted on your own check: tests, build, acceptance.
 - When a task is finally accepted or given up, record it once:
-  `node <this skill>/scripts/outcome.mjs --project <slug> --name <task> --result pass|rework|fail [--rounds N] [--minutes M] [--reviewed] [--note "…"]`.
+  `node <this skill>/scripts/outcome.mjs --project <slug> --name <task> --result pass|rework|fail [--rounds N] [--cause code|spec|process|infra|scope] [--retries N] [--scope-changes N] [--minutes M] [--reviewed] [--note "…"]`.
+  - Keep the kinds of extra work apart (rework retro 2026-11-10): `--cause` is the main cause of the fix rounds (`code`
+    the worker's code, `spec` a brief/spec gap, `process` review/acceptance/dispatch, `infra` tools/devices/platform,
+    `scope` a changed requirement); `--retries N` counts re-runs for infrastructure (quota, queue, device, signing,
+    hub), which are not rework; `--scope-changes N` counts requirement changes. The nightly review compares models and
+    accounts on `code` rework only. Record only after the task's acceptance has really run.
   - Use the same `--name` you passed to `route.mjs`, and name fix rounds `<task>-fix1`, `<task>-fix2`…
     A review run (`<task>-R`) gets no outcome of its own: its verdict goes into the task's record.
   - `pass` means accepted at its first check, with no fix round (a review verdict of MERGE or

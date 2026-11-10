@@ -145,6 +145,9 @@ Look for evidence in the data, not hunches. Typical findings:
   - Check `byImpact` too. A run of `service`/`throwaway` failures that a review would have caught suggests moving
     that kind of work to `release`. Review rounds that block on trivia suggest tightening `review-rubric.md`. Change a row only when its numbers hold over several tasks; one task is an
   anecdote. When `missing` lists tasks without an outcome, remind their orchestrator to record them.
+- **Rework causes (rework retro 2026-11-10):** `outcomes.byCause` splits rework by cause; `byVendor`, `byModel`,
+  `traeVsCodex` and `reviewedReleaseByVendor` count `code` rework only. Remind orchestrators of `reworkWithoutCause`
+  entries (record `--cause`), and report `infraRetries` and `scopeChanges` separately from model quality.
 - **TRAE CLI vs native Codex (every night; user, 2026-11-08):** read `outcomes.traeVsCodex` from the 168-hour data,
   and from `review-data.mjs --hours 100000 --json` once samples are small. It compares the same model (e.g.
   gpt-6.1-sol) run on TRAE CLI against the official Codex CLI (TTADK and ChatGPT accounts), overall and per category:

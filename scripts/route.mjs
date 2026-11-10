@@ -242,6 +242,9 @@ if (!deferred) {
     if (failures) prevRaw = ladder[Math.min(failures - 1, ladder.length - 1)];
     if (failures) why.push(`escalated to step ${Math.min(failures, ladder.length - 1)} of ${ladder.length - 1} after ${failures} failure(s)`);
     if (failures >= ladder.length) needsOK.push(`escalation ladder exhausted after ${failures} failure(s): tell the user before trying again`);
+    // Rework retro 2026-11-10 (user-approved): from the second failed attempt of code work, patching again rarely helps
+    // when the new defect is of the same kind; re-scope first.
+    if (failures >= 2 && CODE.includes(cat)) notes.push('before this fix round: if the last fix brought a new defect of the same kind (same invariant, state or race), stop patching — find whether it is a shared contract, the interface layout or a too-wide patch, then simplify or split the work (a `design` route can review the approach); the fix brief still asks for the original failure, the fix and the neighbouring old behaviour to be tested');
     const codexFails = ladder.slice(0, Math.min(failures, ladder.length)).filter((x) => x.vendor === 'codex').length;
     if (codexFails >= 2) tell.push(`Codex has fallen short on this task ${codexFails} times: tell the user what happened (model, effort, symptom)`);
     if (codexOut && !QX.throttledOnly && m.vendor === 'claude' && T.kind !== 'claudeOnly') why.push('Codex is out: Claude takes this because it matters');

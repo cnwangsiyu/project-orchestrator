@@ -478,6 +478,19 @@ for (const [sc, args] of ERRORS) {
   if (bad.length) fail++;
   console.log(`${bad.length ? 'FAIL' : 'ok  '} hub panic window    ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
 }
+// Outcome causes (rework retro 2026-11-10): model comparisons count code rework only; route.mjs tells the orchestrator
+// to re-scope instead of patching again from the second failure of code work.
+{
+  const { modelView } = await import('../lib/state.mjs');
+  const r = (cause) => modelView({ result: 'rework', rounds: 2, cause }).result;
+  const note = (args) => JSON.parse(run('fresh', args)).notes.some((n) => /new defect of the same kind/.test(n));
+  const cases = [[r('code'), 'rework'], [r(undefined), 'rework'], [r('infra'), 'pass'], [r('spec'), 'pass'], [r('scope'), 'pass'],
+    [note(['implement', '--impact', 'service', '--failures', '2']), true], [note(['implement', '--impact', 'service', '--failures', '1']), false],
+    [note(['research', '--failures', '2']), false]];
+  const bad = cases.map(([got, want], i) => (got === want ? null : i)).filter((i) => i !== null);
+  if (bad.length) fail++;
+  console.log(`${bad.length ? 'FAIL' : 'ok  '} rework causes       ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
+}
 // Outcome join (outcome.mjs / review-data.mjs): prefix-tolerant, fix rounds fold in, reviews and look-alike suffixes don't.
 {
   const { outcomeOwns, isReviewDecision } = await import('../lib/state.mjs');

@@ -8,7 +8,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { SHARED, ROUTE_LOG, QUOTA_LOG, readState, analyze, leanLines, fmt, outcomeOwns, isReviewDecision, dedupeOutcomes, codexCatalog, readProfiles, compareHarness, harnessDrift } from './lib/state.mjs';
+import { SHARED, ROUTE_LOG, QUOTA_LOG, readState, analyze, leanLines, fmt, outcomeOwns, isReviewDecision, dedupeOutcomes, codexCatalog, readProfiles, compareHarness, harnessDrift, modelView } from './lib/state.mjs';
 
 const argv = process.argv.slice(2);
 const opt = (k) => { const i = argv.indexOf(`--${k}`); return i < 0 ? null : argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[i + 1] : true; };
@@ -23,9 +23,10 @@ const routes = all.filter((r) => r.t >= since && r.kind !== 'outcome');
 // Older records said `pass` with fix rounds; outcome.mjs now records those as rework, so read them the same way.
 // A task recorded more than once counts once (dedupeOutcomes: latest result, most rounds), placed at its latest record.
 const outs = dedupeOutcomes(all.filter((r) => r.kind === 'outcome')).filter((r) => r.t >= since).map((o) => (o.result === 'pass' && o.rounds > 0 ? { ...o, result: 'rework' } : o));
-const agg = (key) => {
+const mouts = outs.map(modelView);
+const agg = (key, list = outs) => {
   const m = {};
-  for (const o of outs) {
+  for (const o of list) {
     const k = key(o); if (!k) continue;
     const a = (m[k] ??= { tasks: 0, pass: 0, rework: 0, fail: 0, reviewed: 0, rounds: [], minutes: [] });
     a.tasks++; a[o.result]++; if (o.reviewed) a.reviewed++;
@@ -39,14 +40,18 @@ const outcomes = {
   recorded: outs.length,
   // Tasks with more than one outcome record (merged above): remind their orchestrator to record each task once, at close.
   duplicates: outs.filter((o) => o.dupes > 1).map((o) => `${o.project}/${o.name} ×${o.dupes}`),
-  byVendor: agg((o) => o.first?.vendor), byModel: agg((o) => o.first && `${o.first.vendor}:${o.first.model}:${o.first.effort}`),
-  byCategory: agg((o) => o.category), byVendorCategory: agg((o) => o.first && o.category && `${o.first.vendor}:${o.category}`),
+  // Per vendor/model: code rework only (modelView). Per category/impact/cause: all rework.
+  byVendor: agg((o) => o.first?.vendor, mouts), byModel: agg((o) => o.first && `${o.first.vendor}:${o.first.model}:${o.first.effort}`, mouts),
+  byCategory: agg((o) => o.category), byVendorCategory: agg((o) => o.first && o.category && `${o.first.vendor}:${o.category}`, mouts),
   byImpact: agg((o) => o.impact),
+  byCause: agg((o) => (o.result === 'rework' ? o.cause ?? '(not recorded)' : null)),
+  infraRetries: outs.reduce((n, o) => n + (o.retries ?? 0), 0), scopeChanges: outs.reduce((n, o) => n + (o.scopeChanges ?? 0), 0),
+  reworkWithoutCause: outs.filter((o) => o.result === 'rework' && !o.cause).map((o) => `${o.project}/${o.name}`).slice(0, 30),
   // TRAE CLI vs native Codex with the same model (user, 2026-11-08); the nightly review reads it with --hours 168 and
   // all-time (--hours 100000) as samples grow.
-  traeVsCodex: compareHarness(outs, readProfiles()),
+  traeVsCodex: compareHarness(mouts, readProfiles()),
   // The fair vendor comparison: reviewed release work only (the only work every vendor's output is judged the same way).
-  reviewedReleaseByVendor: agg((o) => o.reviewed && o.impact === 'release' && o.first?.vendor),
+  reviewedReleaseByVendor: agg((o) => o.reviewed && o.impact === 'release' && o.first?.vendor, mouts),
   fails: outs.filter((o) => o.result === 'fail').map((o) => ({ project: o.project, name: o.name, category: o.category, first: o.first, note: o.note })),
   // Outcomes recorded under a review's name (NAME-R): the reviewed task's own outcome is what counts.
   reviewOutcomes: outs.filter((o) => !o.first && all.some((r) => r.kind !== 'outcome' && isReviewDecision(r) && outcomeOwns(o.project, o.name, r))).map((o) => `${o.project}/${o.name}`),

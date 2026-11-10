@@ -45,8 +45,12 @@ nicer.
 ## Rounds (for the orchestrator)
 
 - After a `BLOCK`, the fix round addresses only the blocking findings.
-- The re-review checks only those findings and their fixes. It is not a new full review and must not raise new P2
-  notes.
+- The re-review checks those findings, their fixes, and the neighbouring paths the fixes touched (a fix that brings a
+  new same-kind defect is a P1 there; rework retro 2026-11-10). It is not a new full review and must not raise new P2
+  notes elsewhere.
+- The review brief states what the reviewer judges against: the threat model, the production path (what ships and how
+  it loads), which code is inert or default-off and which is live, and the P0/P1 bar for this change.
 - After 2 review rounds, stop. You decide whether one more fix is clearly worth it, or take it to the user. Never loop.
+  If round 2 still finds the same kind of defect, re-scope the work (SKILL.md, "Fix rounds") before another fix.
 - `MERGE` and `MERGE-WITH-NOTES` count as a `pass` in `outcome.mjs`. Only a `BLOCK` that led to a fix round counts
   as `rework`.

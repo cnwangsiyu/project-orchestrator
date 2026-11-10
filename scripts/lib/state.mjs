@@ -302,6 +302,9 @@ export const isReviewDecision = (r) => ['review', 'review-high', 'second-opinion
 // Names are compared without a leading "<project>-" (orchestrators write both T17 and lynx-view-T17). A decision belongs to
 // an outcome when its name is the outcome's name or derives from it (NAME-fix1, NAME-r2, NAME-<subtask>).
 const bare = (project, name) => (name.startsWith(`${project}-`) ? name.slice(project.length + 1) : name);
+// Model comparisons count code rework only: rework whose recorded cause is spec, process, infra or scope is not the
+// model's (rework retro 2026-11-10, user-approved). Records without a cause (older ones) count as before.
+export const modelView = (o) => (o.result === 'rework' && o.cause && o.cause !== 'code' ? { ...o, result: 'pass', rounds: 0 } : o);
 // ---- TRAE CLI vs native Codex (user, 2026-11-08: measure whether TRAE's Codex fork does worse with the same model) ----
 // The harness a Codex attempt ran on: 'trae' for the TRAE CLI account, 'codex' for every other Codex account (TTADK and
 // the ChatGPT accounts run the official Codex CLI), 'claude' for Claude.

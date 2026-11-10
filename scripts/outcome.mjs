@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // outcome: record how a routed task ended, so the nightly review can compare vendors, models and categories on data.
 //
-//   outcome --project SLUG --name NAME --result pass|rework|fail [--rounds N] [--minutes M] [--reviewed] [--note "..."]
+//   outcome --project SLUG --name NAME --result pass|rework|fail [--rounds N] [--cause code|spec|process|infra|scope]
+//           [--retries N] [--scope-changes N] [--minutes M] [--reviewed] [--note "..."]
 //
 // Call it once per task when it is finally accepted or given up (not per round):
 //   pass   — accepted at its first check with no fix round (a review verdict of MERGE or MERGE-WITH-NOTES is a pass;
@@ -28,6 +29,16 @@ if (opts.result === 'rework' && !rounds) die('rework needs --rounds N (N ≥ 1)'
 // A fix round means the first attempt was not accepted: `pass --rounds N` (N ≥ 1) is rework (nightly review 2026-11-06:
 // 10 of 22 records said pass with 1–7 rounds, which showed a 100% first-pass rate).
 if (opts.result === 'pass' && rounds) { console.error(`outcome: ${rounds} fix round(s) is rework, not pass — recording rework`); opts.result = 'rework'; }
+// Kinds of extra work, kept apart so the nightly review compares models on code rework only (rework retro 2026-11-10,
+// user-approved): --retries N re-runs for infrastructure (quota, queue, device, signing, hub) — not rework; --cause is the
+// main cause of the fix rounds: code (the worker's code), spec (brief/spec gap), process (review/acceptance/dispatch),
+// infra (tools/devices/platform), scope (the requirement changed); --scope-changes N counts requirement changes.
+const CAUSES = ['code', 'spec', 'process', 'infra', 'scope'];
+const cause = typeof opts.cause === 'string' ? opts.cause : null;
+if (cause && !CAUSES.includes(cause)) die(`--cause takes ${CAUSES.join(', ')}`);
+if (opts.result === 'rework' && !cause) console.error('outcome: say why it needed fix rounds with --cause code|spec|process|infra|scope (the nightly review compares models on code rework only)');
+const count = (k) => { if (opts[k] === undefined) return 0; const n = Number(opts[k]); if (!Number.isInteger(n) || n < 0) die(`--${k} takes a whole number ≥ 0`); return n; };
+const retries = count('retries'), scopeChanges = count('scope-changes');
 const minutes = opts.minutes === undefined ? null : Number(opts.minutes);
 if (minutes !== null && !(minutes >= 0)) die('--minutes takes a number ≥ 0');
 
@@ -40,7 +51,7 @@ const mine = owned.filter((r) => !isReviewDecision(r));
 if (!mine.length && owned.length) console.error(`outcome: ${opts.name} is a review run; record the outcome once, under the name of the task it reviewed`);
 const first = mine[0]?.pick ?? null, last = mine.at(-1)?.pick ?? null;
 const rec = {
-  t: Date.now(), kind: 'outcome', project: opts.project, name: opts.name, result: opts.result, rounds, minutes,
+  t: Date.now(), kind: 'outcome', project: opts.project, name: opts.name, result: opts.result, rounds, minutes, cause, retries, scopeChanges,
   reviewed: !!opts.reviewed, note: typeof opts.note === 'string' ? opts.note : null,
   category: mine[0]?.category ?? null, impact: mine[0]?.impact ?? null, first, accepted: opts.result === 'fail' ? null : last, decisions: mine.length,
 };
@@ -49,5 +60,5 @@ const rec = {
 const prior = routes.filter((r) => r.kind === 'outcome' && r.project === opts.project && (outcomeOwns(opts.project, opts.name, r) && outcomeOwns(opts.project, r.name, { project: opts.project, name: opts.name })));
 if (prior.length) console.error(`outcome: ${opts.name} already has ${prior.length} outcome record(s); this one replaces their result (the review keeps the most rounds any record gave). Record each task once, when it closes.`);
 fs.appendFileSync(ROUTE_LOG, JSON.stringify(rec) + '\n');
-console.log(`recorded ${opts.project}/${opts.name}: ${opts.result}${rounds ? ` after ${rounds} round(s)` : ''}`
+console.log(`recorded ${opts.project}/${opts.name}: ${opts.result}${rounds ? ` after ${rounds} round(s)` : ''}${cause ? ` (${cause})` : ''}${retries ? `, ${retries} infra re-run(s)` : ''}${scopeChanges ? `, ${scopeChanges} scope change(s)` : ''}`
   + (first ? ` — first ${first.vendor} ${first.model} ${first.effort}${last && last !== first ? `, accepted on ${last.vendor} ${last.model} ${last.effort}` : ''}` : ' — no routing decision found for this name (pass the same --project/--name as route.mjs)'));
