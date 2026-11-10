@@ -373,7 +373,7 @@ short, batch updates that arrive together, and reply in the user's language.
 - **Messaging tools** are deferred: load `SendMessage` and `ListAgents` with ToolSearch first. The
   header of `ListAgents` gives this session's own name — workers address their reports to it.
 - **Launch a worker** from its workspace:
-  `cd <workspace> && claude --bg --permission-mode <your own mode> -n <name> "<one line pointing at the brief>"`.
+  `cd <workspace> && claude --bg --remote-control --permission-mode <your own mode> -n <name> "<one line pointing at the brief>"`.
   It prints `backgrounded · <id> · <name>`. Pass your own permission mode explicitly rather than
   relying on the inherited default: never a more permissive one, and not a stricter one either,
   since a session in a different mode holds your messages for its user's approval. Codex workers
@@ -425,7 +425,7 @@ short, batch updates that arrive together, and reply in the user's language.
 - **Lifecycle:** `claude agents --json` lists live sessions (`--all` also lists finished ones;
   read fields defensively, since some entries lack `status`); `claude logs <id>` shows recent output
   (last resort); `claude stop <id>` stops a worker but keeps its conversation;
-  `claude --bg --resume <session id> [--model …] [--effort …] "<prompt>"` brings a stopped one
+  `claude --bg --remote-control --resume <session id> [--model …] [--effort …] "<prompt>"` brings a stopped one
   back with its conversation, optionally on a different model and effort (verified on 2.1.302; it
   gets a new short id, so look it up again). Resume needs the full session id — the `sessionId`
   field of `claude agents --json --all`, or the `<id>.jsonl` name under

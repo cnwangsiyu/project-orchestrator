@@ -352,7 +352,7 @@ const secondAcct = !second || second.vendor !== 'codex' ? null
 const profiles = readProfiles();
 const launch = (x, shape = T.shape, acct = pickAcct) => {
   if (x.vendor === 'claude') {
-    return { launcher: 'claude-bg', command: `cd ${cwd} && claude --bg --permission-mode ${claudeMode} -n ${name} --model ${x.model} --effort ${x.effort} ${prompt}` };
+    return { launcher: 'claude-bg', command: `cd ${cwd} && claude --bg --remote-control --permission-mode ${claudeMode} -n ${name} --model ${x.model} --effort ${x.effort} ${prompt}` };
   }
   const an = acct?.a.name ?? 'main', home = profiles[an]?.home ?? '~/.codex';
   // TRAE CLI: `traecli exec` mirrors `codex exec` (its own home, ~/.trae); models go by TRAE's own ids.

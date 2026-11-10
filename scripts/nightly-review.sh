@@ -71,13 +71,13 @@ ask_personal() {  # $1 = what would run, in words
   local FIN; FIN=$(route claude-tools); set -- "$1" ${=FIN}
   echo "personal quota needed ($1): asking the user"
   [ "$MODE" = plan ] && { echo "plan: would ask with ${4:-sonnet} ${5:-medium}"; return; }
-  claude --bg --permission-mode bypassPermissions -n "routing-nightly-review-$DAY-ask" --model "${4:-sonnet}" --effort "${5:-medium}" \
+  claude --bg --remote-control --permission-mode bypassPermissions -n "routing-nightly-review-$DAY-ask" --model "${4:-sonnet}" --effort "${5:-medium}" \
     "今晚的路由夜间复盘：公司额度（TTADK、TRAE）现在都不可用，按路由策略要用个人额度才能跑（$1）。先发一条 PushNotification（中文：「夜间复盘需要你选择是否用个人额度」），再用 AskUserQuestion 卡片用中文问用户，选项：「现在用个人额度跑（推荐）」—— 会花个人额度完成今晚的复盘；「今晚跳过」—— 等明晚公司额度恢复后再复盘。用户选「现在跑」后，运行：NIGHTLY_PERSONAL_OK=1 NIGHTLY_EXCLUDE='$EXCLUDE' NIGHTLY_MODE='$MODE' nohup $SELF >/dev/null 2>&1 & 然后结束。选「跳过」就在 $DIR/launch.log 末尾追加一行「$DAY skipped by the user」后结束。不要做别的事。"
 }
 
 claude_review() {  # $1 model, $2 effort, $3 why — the whole review as one Claude session (personal quota, already approved)
   echo "full Claude review ($1 $2): $3"
-  claude --bg --permission-mode bypassPermissions -n "routing-nightly-review-$DAY" --model "$1" --effort "$2" \
+  claude --bg --remote-control --permission-mode bypassPermissions -n "routing-nightly-review-$DAY" --model "$1" --effort "$2" \
     "Run the nightly routing review for the 24 hours ending now ($NOW): read $SKILL/references/nightly-review.md and follow it exactly, doing both the worker's and the finisher's parts (ask the user's decisions as Chinese AskUserQuestion cards). $DATA"
   echo "exit $?"
 }
@@ -135,6 +135,6 @@ done
 # 3. The finisher: route.mjs claude-tools (Claude only: it messages sessions and asks the user's cards).
 F=$(route claude-tools); set -- ${=F}
 FMODEL=sonnet FEFFORT=medium; [ "$1" = ok ] && { FMODEL=$3; FEFFORT=$4; }
-claude --bg --permission-mode bypassPermissions -n "routing-nightly-review-$DAY-finish" --model "$FMODEL" --effort "$FEFFORT" \
+claude --bg --remote-control --permission-mode bypassPermissions -n "routing-nightly-review-$DAY-finish" --model "$FMODEL" --effort "$FEFFORT" \
   "Finish the nightly routing review for $DAY: read $SKILL/references/nightly-review.md, section \"Who does what\" (the finisher's part) and \"Decisions for the user\", then the worker's report $DIR/$DAY.md and $DIR/$DAY.notify.json, and follow it. Ask every entry of notify.json decisions with AskUserQuestion cards in Chinese."
 echo "finisher ($FMODEL $FEFFORT) exit $?"
