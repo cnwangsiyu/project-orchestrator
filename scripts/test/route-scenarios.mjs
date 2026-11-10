@@ -426,6 +426,7 @@ for (const [sc, args] of ERRORS) {
   const pa = noteFailure(ah, '401 Unauthorized: token expired', t0); liftAuthPause(ah); const lifted = readPause(ah, t0 + m);
   const cases = [
     [failureKind(q), 'transient'], [failureKind('403 Forbidden: quota exceeded'), 'hard'], [failureKind('not logged in'), 'auth'],
+    [failureKind('stream disconnected before completion: Model access temporarily restricted.'), 'hard'],
     [pauseDecision([{ t: t0, why: q }], t0 + m), null],
     [pauseDecision([{ t: t0, why: q }, { t: t0 + 20 * m, why: q }], t0 + 21 * m), null],
     [pauseDecision([{ t: t0, why: 'account banned' }], t0 + m)?.pausedUntil, t0 + 30 * m],

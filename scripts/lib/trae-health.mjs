@@ -8,14 +8,16 @@
 //   WINDOW_MIN pause it for 5 minutes, then 10, 20, at most 30 while pauses keep following each other without a success;
 // - auth (not logged in, 401, expired token): one pauses it for 30 minutes; lifted as soon as `login status` is fine again
 //   (quota.mjs checks);
-// - hard (quota used up, banned, 403 Forbidden): one pauses it for 30 minutes.
+// - hard (quota used up, banned, 403 Forbidden, model access restricted): one pauses it for 30 minutes.
 //   <trae home>/worker-health.json  {"failures":[{"t","why"}],"pausedUntil","reason","kind","streak"}
 import fs from 'node:fs';
 import path from 'node:path';
 
 export const WINDOW_MIN = 15, HARD_MIN = 30, BACKOFF_MIN = [5, 10, 20, 30];
 const AUTH = /not logged in|unauthori[sz]ed|\b401\b|token expired|login (required|expired)|re-?login/i;
-const HARD = /quota|daily limit|banned|\bban\b|封禁|封号|forbidden|\b403\b/i;
+// "Model access temporarily restricted" (code 983, seen 2026-11-10 after ~1.3B TRAE tokens in a day): TRAE restricted
+// the account's GPT models while Gemini/Seed/DeepSeek still worked — an account restriction, not a passing error.
+const HARD = /quota|daily limit|banned|\bban\b|封禁|封号|forbidden|\b403\b|access (temporarily )?restricted|\b983\b/i;
 export const failureKind = (why) => (AUTH.test(why ?? '') ? 'auth' : HARD.test(why ?? '') ? 'hard' : 'transient');
 const file = (home) => path.join(home, 'worker-health.json');
 const read = (home) => { try { return JSON.parse(fs.readFileSync(file(home), 'utf8')); } catch { return { failures: [] }; } };
