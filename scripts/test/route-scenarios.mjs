@@ -85,8 +85,9 @@ const CASES = [
   ['claudeOver', ['debug', '--failures', '2'], 'codex gpt-6-astra xhigh @main'],
   ['claudeNearReset', ['docs'], 'claude sonnet medium'], // spare near the reset (only 8% room: no expiring notch)
   ['codexOut', ['implement'], 'claude sonnet medium'],
-  ['codexOut', ['lookup', '--stakes', 'low'], 'DEFER'],
-  ['codexOutClaudeOver', ['implement'], 'DEFER'],
+  // Never held silently (user, 2026-11-09): these used to DEFER; now a pick behind the user's OK (checked below).
+  ['codexOut', ['lookup', '--stakes', 'low'], 'claude haiku low'],
+  ['codexOutClaudeOver', ['implement'], 'claude opus high'],
   ['codexOutClaudeOver', ['image-gen'], 'DEFER'],
   ['twoAccounts', ['implement'], 'codex gpt-6.1-sol xhigh @b'],
   ['bothSpent', ['implement'], 'codex gpt-6.1-sol xhigh @main'], // after redeeming main's card
@@ -94,7 +95,7 @@ const CASES = [
   ['expiringCard', ['review'], 'codex gpt-6.1-sol xhigh @main'],
   ['claude5h', ['computer-use'], 'DEFER'],
   ['codex5h', ['image-gen'], 'DEFER'],
-  ['codex5h', ['implement'], 'DEFER'],
+  ['codex5h', ['implement'], 'claude opus high'],
   ['stale', ['analysis'], 'codex gpt-6.1-sol medium @b'],
   ['unreadable', ['implement'], 'DEFER'],
   // A retry a quota notch made identical to the failed attempt is flagged, not passed off as an escalation (nightly
@@ -147,7 +148,7 @@ const CASES = [
   // A TTADK device leaves ChatGPT/Claude quota for the user's other device: no underused effort raise (user, 2026-11-07).
   ['ttFresh', ['implement', '--exclude-account', 'ttadk'], 'codex gpt-6.1-sol high @main'],
   // TTADK down for a fixable reason: normal work waits (tell the user); high stakes or --urgent run on personal quota.
-  ['ttUnhealthy', ['implement'], 'DEFER'],
+  ['ttUnhealthy', ['implement'], 'codex gpt-6.1-sol high @main'],
   ['ttUnhealthy', ['implement', '--urgent'], 'codex gpt-6.1-sol high @main'],
   ['ttUnhealthy', ['implement', '--stakes', 'high'], 'codex gpt-6.1-sol xhigh @main'],
   ['ttUnhealthy', ['image-gen'], 'codex gpt-6-luna low @main'],
@@ -412,6 +413,16 @@ for (const [sc, args] of ERRORS) {
   const bad = cases.map(([got, want], i) => (got === want ? null : i)).filter((i) => i !== null);
   if (bad.length) fail++;
   console.log(`${bad.length ? 'FAIL' : 'ok  '} trae pause          ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
+}
+// No silent holds (user, 2026-11-09): what used to be deferred by policy now carries a needs-OK; --urgent skips it.
+{
+  const ok = (sc, args) => JSON.parse(run(sc, args)).needsUserOK.length > 0;
+  const cases = [[ok('codexOut', ['lookup', '--stakes', 'low']), true], [ok('codexOutClaudeOver', ['implement', '--impact', 'service']), true],
+    [ok('codex5h', ['implement', '--impact', 'service']), true], [ok('ttUnhealthy', ['implement', '--impact', 'service']), true],
+    [ok('ttUnhealthy', ['implement', '--impact', 'service', '--urgent']), false], [ok('codexOut', ['lookup', '--stakes', 'low', '--urgent']), false]];
+  const bad = cases.map(([got, want], i) => (got === want ? null : i)).filter((i) => i !== null);
+  if (bad.length) fail++;
+  console.log(`${bad.length ? 'FAIL' : 'ok  '} no silent hold      ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
 }
 // Outcome join (outcome.mjs / review-data.mjs): prefix-tolerant, fix rounds fold in, reviews and look-alike suffixes don't.
 {

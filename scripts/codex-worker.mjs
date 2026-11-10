@@ -505,7 +505,7 @@ const report = async (threadId, turn, final, usage) => {
   // The TTADK token quota (daily / hourly, shared by all models) is used up: retrying or switching models can't help.
   const quota = /(Daily|Hourly) Limits exceeded\. Resets at (\d{4}-\d\d-\d\dT[\d:.]+Z?)/i.exec(JSON.stringify(turn.error ?? ''));
   if (turn.status === 'failed' && quota) {
-    console.log(`quota-exhausted: ${account ?? 'this account'}'s ${quota[1].toLowerCase()} token quota is used up until ${quota[2]} (all models). Don't retry: re-route with route.mjs ... --exclude-account ${account ?? '<account>'} only for --urgent or high-stakes work; route.mjs holds the rest until the reset`);
+    console.log(`quota-exhausted: ${account ?? 'this account'}'s ${quota[1].toLowerCase()} token quota is used up until ${quota[2]} (all models). Don't retry: re-route with route.mjs ... --exclude-account ${account ?? '<account>'} (TRAE takes it next; if it needs personal quota, route.mjs asks the user first)`);
   } else if (turn.status === 'failed' && /rate.?limit|qpm|too many requests|429|concurren/i.test(JSON.stringify(turn.error ?? ''))) {
     console.log(`rate-limited: retry this task once on ${account ?? 'this account'} (codex-worker turn); if it fails again, re-route with route.mjs ... --exclude-account ${account ?? '<account>'}`);
   }

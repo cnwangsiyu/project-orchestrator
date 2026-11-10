@@ -222,8 +222,11 @@ effort, Codex account and launch command from
     quota is left for the user's other device (no TTADK there).
   - TTADK has no concurrency cap: a rate-limited run is retried once on TTADK, then re-routed
     with `--exclude-account ttadk`. TTADK down for a reason the user can fix (SSO, CLI, models):
-    tell the user at once; route.mjs holds normal work until it's fixed (`--urgent` or high stakes
-    run now on personal quota).
+    tell the user at once; its work goes to TRAE, and only when TRAE is out too does route.mjs ask
+    the user (go on on personal quota, or wait).
+  - Never hold or postpone work on your own (user, 2026-11-09: "不要擅自决定去暂缓一些工作"), low-stakes
+    work included: when route.mjs prints "needs the user's OK", ask; when it DEFERs (nothing can run it
+    now), tell the user and ask how to proceed.
   - TTADK is not unlimited (measured 2026-11-08): about 500M tokens a day per user, input + output with
     cached input counted in full, shared by all models (plus an hourly cap); it resets at 16:00 UTC.
     When it runs out (`quota-exhausted:` from codex-worker; quota.mjs shows TTADK paused until the

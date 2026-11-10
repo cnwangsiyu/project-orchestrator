@@ -197,8 +197,10 @@ if (ttCapable) {
   }
   base = rungs;
 }
-// TTADK down for a reason the user can fix (SSO expired, CLI or models missing): the work TTADK would take waits for the
-// fix unless it is high-stakes or --urgent, so personal quota isn't spent on it meanwhile (user, 2026-11-07).
+// Never hold work on our own (user, 2026-11-09: "不要擅自决定去暂缓一些工作"). When TTADK is out the work goes to TRAE;
+// when both company accounts are out — quota used up, or down for a reason the user can fix — it is routed to personal
+// quota behind the user's OK (go on now, or wait); low-stakes work too. Only work that nothing can run right now (Claude's
+// 5h window full for Claude-only work, Codex out for Codex-only work) is deferred, and then the user is told.
 // TTADK's token quota used up: don't hold the work silently. Route it to personal quota and gate it on the user's OK:
 // they choose to go on now or wait for the reset (user, 2026-11-08). One answer covers the pause: after "go on", the
 // orchestrator passes --urgent until the reset; after "wait", it holds TTADK's work until then.
@@ -210,10 +212,14 @@ else if (ttFixable && stakes !== 'high' && !opts.urgent && QX.ttadk.quotaOut) {
   const left = (QX.ttadk.quotaOut.resetsAt - Date.now()) / 3600000;
   needsOK.push(`TTADK is paused (${QX.ttadk.reason}; ${hours(left)} left): ask the user whether to go on now on personal quota (this pick) or wait for the reset. One answer covers the pause: "go on" → launch this and pass --urgent for TTADK's work until the reset; "wait" → hold TTADK's work until then`);
 }
-else if (ttFixable && stakes !== 'high' && !opts.urgent) deferred = `TTADK is down (${QX.ttadk.reason}): tell the user now so they can fix it; this waits for TTADK — re-run with --urgent (or --stakes high) to run it now on personal quota`;
+else if (ttFixable && stakes !== 'high' && !opts.urgent) {
+  tell.push(`TTADK is down (${QX.ttadk.reason}) and TRAE can't take its work: tell the user now so they can fix TTADK`);
+  needsOK.push(`company accounts unavailable: ask the user whether to go on now on personal quota (this pick) or wait for TTADK/TRAE. One answer covers the outage: "go on" → launch this and pass --urgent for this work until a company account is back; "wait" → hold it until then`);
+}
 else if ((T.kind === 'claudeOnly' || (T.kind === 'browser' && !browserViaCodex)) && QC.throttledUntil) deferred = `Claude-only work and Claude's 5h window is full${retry((QC.throttledUntil - Date.now()) / 3600000)}`;
 else if (T.kind === 'codexOnly' && chatgptOut) deferred = `Codex-only work and Codex is ${QX.throttledOnly ? 'paused by its 5h window' : 'out'}${retry(QX.nextFree)}`;
-else if (codexOut && !QX.throttledOnly && stakes === 'low' && T.kind !== 'claudeOnly' && !(T.kind === 'browser' && !browserViaCodex)) deferred = `Codex is out and this is low-stakes: it waits for Codex${retry(QX.nextFree)}`;
+else if (codexOut && !QX.throttledOnly && stakes === 'low' && T.kind !== 'claudeOnly' && !(T.kind === 'browser' && !browserViaCodex) && !opts.urgent)
+  needsOK.push(`Codex is out (next free in ${QX.nextFree != null ? hours(QX.nextFree) : '?'}) and this is low-stakes: ask the user whether to run it now on Claude (this pick) or wait for Codex`);
 let m = null, prevRaw = null;
 if (!deferred) {
   const firstOk = allowed(base[0]) ? base[0] : T.alt && allowed(T.alt) && cat !== 'second-opinion' ? T.alt : null;
@@ -221,6 +227,12 @@ if (!deferred) {
     .filter((x, i, a) => a.findIndex((y) => y.vendor === x.vendor && y.model === x.model && y.effort === x.effort) === i);
   const waits = [...(base.some((x) => x.vendor === 'claude') && QC.throttledUntil ? [(QC.throttledUntil - Date.now()) / 3600000] : []),
     ...(base.some((x) => x.vendor === 'codex') && codexOut && QX.nextFree != null ? [QX.nextFree] : [])];
+  // Over a budget line but still runnable (Claude past its spare line, not throttled): ask instead of holding.
+  const runnable = !ladder.length ? base.find((x) => (x.vendor === 'claude' ? !QC.throttledUntil : !codexOut)) ?? null : null;
+  if (!ladder.length && runnable) {
+    ladder.push(runnable);
+    if (!opts.urgent) needsOK.push(`no vendor has room within the quota policy (claude ${QC.status}, codex ${codexOut ? 'out' : 'ok'}): ask the user whether to run it now anyway on ${runnable.vendor} (this pick) or wait${retry(waits.length ? Math.min(...waits) : null)}`);
+  }
   if (!ladder.length) deferred = `neither vendor has room for this now (claude ${QC.throttledUntil ? '5h-throttled' : QC.status}, codex ${codexOut ? (QX.throttledOnly ? 'paused' : 'out') : 'ok'})${retry(waits.length ? Math.min(...waits) : null)}`;
   else {
     if (firstOk && firstOk !== base[0]) why.push(`${base[0].vendor} not available for this (${base[0].vendor === 'claude' ? `claude ${QC.throttledUntil ? '5h-throttled' : QC.status}` : QX.throttledOnly ? 'codex paused by its 5h window' : 'codex out'}) → ${firstOk.vendor}`);
@@ -399,6 +411,8 @@ if (!QX.readable && m?.vendor === 'codex') notes.push('Codex usage unreadable; r
 const lands = (a) => !!a && !!redeemAcct && a.a.name === redeemAcct.a.name && !chatgptOpen.some((r) => r.a.name === a.a.name);
 const redeemFirst = ((m?.vendor === 'codex' && !ttadkRun && lands(pickAcct)) || (second?.vendor === 'codex' && lands(secondAcct)))
   ? `redeem a reset card on ${QX.redeem.a.name} first (with the user's OK; if declined, re-run with --no-redeem): ${QX.redeem.cp.line}` : null;
+// Deferred only when nothing can run it now; never silently (user, 2026-11-09).
+if (deferred) tell.push(`this can't run right now (${deferred.split(' — ')[0]}): tell the user and ask how to proceed — don't just hold it`);
 const out = {
   category: cat, stakes, failures, deferred,
   pick: m ? { ...m, ...launch(m), sandbox: m.vendor === 'codex' ? sandbox : null } : null,

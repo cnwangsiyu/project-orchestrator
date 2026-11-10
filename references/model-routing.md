@@ -75,7 +75,9 @@ To change routing for a kind of task, edit the table in `route.mjs` and this rat
      failures. With neither available, the router prints `DEFER`.
    - A Codex 5-hour pause moves work to Claude only while Claude has spare. A full Claude 5-hour window defers new
      Claude work, Claude-only rows included, until it resets.
-   - When every Codex account is out, `--stakes low` work waits for Codex; the rest goes to Claude within its budget.
+   - When every Codex account is out, work goes to Claude within its budget; `--stakes low` work too, after the user's
+     OK (user, 2026-11-09: never hold work on our own). Over every budget line, route.mjs still picks a runnable model
+     and asks; it DEFERs only what nothing can run now, and then the user is told.
 3. **Effort**, one notch per rule:
    - Lower with `--auto-check` (no failures, stakes not high).
    - Higher for `--stakes high`; lower for `--stakes low`.
