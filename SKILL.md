@@ -230,9 +230,12 @@ effort, Codex account and launch command from
   - TTADK is not unlimited (measured 2026-11-08): about 500M tokens a day per user, input + output with
     cached input counted in full, shared by all models (plus an hourly cap); it resets at 16:00 UTC.
     When it runs out (`quota-exhausted:` from codex-worker; quota.mjs shows TTADK paused until the
-    reset), don't retry or switch models. Normal work isn't held silently: route.mjs picks personal
-    quota and gates it on the user's OK — ask once whether to go on now (then `--urgent` until the
-    reset) or wait for the reset (user, 2026-11-08). `--urgent` and high stakes don't ask.
+    reset), don't retry or switch models: its work goes to TRAE without asking.
+  - Company accounts (TTADK, TRAE) are used without asking; personal quota (ChatGPT accounts, Claude)
+    only after asking (user, 2026-11-09). When neither company account can take work they would
+    take, route.mjs prints "needs the user's OK" — ask once: "go on" → `--urgent` for such work until
+    a company account is back; "wait" → hold it. High stakes ask too. Standing exceptions, no question:
+    image generation, Claude-only tools, browser/desktop work Claude takes, Claude second opinions.
   - Because of that daily cap, throwaway code work starts at Sol `high` on the company accounts
     (TTADK, TRAE) instead of `xhigh`; a failure still climbs to `xhigh` and `max` (user, 2026-11-09).
   - Every TTADK worker can search the web through its local proxy, once `ttadk-setup` has set it

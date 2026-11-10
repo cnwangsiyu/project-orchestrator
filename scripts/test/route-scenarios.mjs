@@ -346,10 +346,10 @@ for (const [sc, args] of ERRORS) {
   if (!ok) fail++;
   console.log(`${ok ? 'ok  ' : 'FAIL'} catalog source      caller CODEX_HOME=ttadk               ${ok ? 'main' : `got ${got}`}`);
 }
-// TTADK quota used up: normal work asks the user (needs OK); --urgent and high stakes don't (user, 2026-11-08).
+// TTADK quota used up (no TRAE): personal quota needs the user's OK, high stakes too (user, 2026-11-09); --urgent doesn't.
 {
-  const gate = (args) => JSON.parse(run('ttQuotaOut', args)).needsUserOK.some((n) => /TTADK is paused/.test(n));
-  const cases = [[gate(['analysis']), true], [gate(['implement', '--impact', 'service']), true], [gate(['analysis', '--urgent']), false], [gate(['implement', '--impact', 'service', '--stakes', 'high']), false]];
+  const gate = (args) => JSON.parse(run('ttQuotaOut', args)).needsUserOK.some((n) => /^personal quota:/.test(n));
+  const cases = [[gate(['analysis']), true], [gate(['implement', '--impact', 'service']), true], [gate(['analysis', '--urgent']), false], [gate(['implement', '--impact', 'service', '--stakes', 'high']), true]];
   const bad = cases.map(([got, want], i) => (got === want ? null : i)).filter((i) => i !== null);
   if (bad.length) fail++;
   console.log(`${bad.length ? 'FAIL' : 'ok  '} ttQuotaOut gate     ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
@@ -358,7 +358,7 @@ for (const [sc, args] of ERRORS) {
 // its own model ids and traecli for exec.
 {
   const o = (sc, args) => JSON.parse(run(sc, args));
-  const gate = (sc, args) => o(sc, args).needsUserOK.some((n) => /TTADK is paused/.test(n));
+  const gate = (sc, args) => o(sc, args).needsUserOK.some((n) => /^personal quota:/.test(n));
   const exec = o('ttOutTrae', ['lookup']).pick?.command ?? '';
   const worker = o('ttOutTrae', ['implement', '--impact', 'service']).pick?.command ?? '';
   const cases = [[gate('ttOutTrae', ['analysis']), false], [gate('ttOutTraeDown', ['analysis']), true],
@@ -413,6 +413,19 @@ for (const [sc, args] of ERRORS) {
   const bad = cases.map(([got, want], i) => (got === want ? null : i)).filter((i) => i !== null);
   if (bad.length) fail++;
   console.log(`${bad.length ? 'FAIL' : 'ok  '} trae pause          ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
+}
+// Personal quota only after asking (user, 2026-11-09): company accounts excluded by the orchestrator, or a TRAE-only
+// device with TRAE down, still ask; image generation (a standing exception) and company work don't.
+{
+  const ok = (sc, args) => JSON.parse(run(sc, args)).needsUserOK.some((n) => /^personal quota:/.test(n));
+  const cases = [[ok('ttAndTrae', ['implement', '--impact', 'service', '--exclude-account', 'ttadk,trae']), true],
+    [ok('ttAndTrae', ['implement', '--impact', 'service', '--exclude-account', 'ttadk']), false],
+    [ok('ttAndTrae', ['implement', '--impact', 'service']), false], [ok('ttOutTrae', ['image-gen']), false],
+    [ok('ttOutTraeDown', ['analysis', '--stakes', 'high']), true], [ok('ttOutTraeDown', ['analysis', '--urgent']), false],
+    [ok('traeOnly', ['implement', '--impact', 'service', '--exclude-account', 'trae']), true], [ok('fresh', ['implement', '--impact', 'service']), false]];
+  const bad = cases.map(([got, want], i) => (got === want ? null : i)).filter((i) => i !== null);
+  if (bad.length) fail++;
+  console.log(`${bad.length ? 'FAIL' : 'ok  '} personal-quota ask  ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
 }
 // No silent holds (user, 2026-11-09): what used to be deferred by policy now carries a needs-OK; --urgent skips it.
 {

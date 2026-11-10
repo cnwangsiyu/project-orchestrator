@@ -201,20 +201,22 @@ if (ttCapable) {
 // when both company accounts are out — quota used up, or down for a reason the user can fix — it is routed to personal
 // quota behind the user's OK (go on now, or wait); low-stakes work too. Only work that nothing can run right now (Claude's
 // 5h window full for Claude-only work, Codex out for Codex-only work) is deferred, and then the user is told.
-// TTADK's token quota used up: don't hold the work silently. Route it to personal quota and gate it on the user's OK:
-// they choose to go on now or wait for the reset (user, 2026-11-08). One answer covers the pause: after "go on", the
-// orchestrator passes --urgent until the reset; after "wait", it holds TTADK's work until then.
-const ttFixable = !TT && !!QX.ttadk && !QX.ttadk.usable && !excluded.has(QX.ttadk.name) && ttTaskOK && T.kind !== 'browser';
+// Personal quota only after asking (user, 2026-11-09: "如果要用我的个人额度，就提前问我；不用我的个人额度时，不需要提前问我。
+// TTADK 和 Trae 都可以直接用"). On a device with a company account, work a company account would take that no company
+// account can take now — TTADK and TRAE out, down or excluded — goes to personal quota only after the user's OK; high
+// stakes too (it used to skip the question). One answer covers the outage: after "go on" the orchestrator passes
+// --urgent until a company account is back; after "wait" it holds that work. Standing exceptions (the user's routing,
+// asked 2026-11-09: no question): image generation, Claude-only tools, browser/desktop work Claude takes, reviews whose
+// second opinion is Claude — they never ran on the company accounts anyway.
+const companyOut = !TT && (!!QX.ttadk || !!QX.trae) && ttTaskOK && T.kind !== 'browser';
 let deferred = null;
 const retry = (h) => (h != null && Number.isFinite(h) ? ` — retry in ${hours(h)}` : '');
 if (st.stop) deferred = "neither vendor's usage is readable — check `claude -p /usage` and the Codex hubs before dispatching";
-else if (ttFixable && stakes !== 'high' && !opts.urgent && QX.ttadk.quotaOut) {
-  const left = (QX.ttadk.quotaOut.resetsAt - Date.now()) / 3600000;
-  needsOK.push(`TTADK is paused (${QX.ttadk.reason}; ${hours(left)} left): ask the user whether to go on now on personal quota (this pick) or wait for the reset. One answer covers the pause: "go on" → launch this and pass --urgent for TTADK's work until the reset; "wait" → hold TTADK's work until then`);
-}
-else if (ttFixable && stakes !== 'high' && !opts.urgent) {
-  tell.push(`TTADK is down (${QX.ttadk.reason}) and TRAE can't take its work: tell the user now so they can fix TTADK`);
-  needsOK.push(`company accounts unavailable: ask the user whether to go on now on personal quota (this pick) or wait for TTADK/TRAE. One answer covers the outage: "go on" → launch this and pass --urgent for this work until a company account is back; "wait" → hold it until then`);
+else if (companyOut && !opts.urgent) {
+  const why = [QX.ttadk && `TTADK ${excluded.has(QX.ttadk.name) ? 'excluded' : QX.ttadk.quotaOut ? `quota used up, resets in ${hours((QX.ttadk.quotaOut.resetsAt - Date.now()) / 3600000)}` : `down: ${QX.ttadk.reason}`}`,
+    QX.trae && `TRAE ${excluded.has(QX.trae.name) ? 'excluded' : `unavailable: ${QX.trae.reason}`}`].filter(Boolean).join('; ');
+  if (QX.ttadk && !QX.ttadk.usable && !QX.ttadk.quotaOut && !excluded.has(QX.ttadk.name)) tell.push(`TTADK is down (${QX.ttadk.reason}): tell the user now so they can fix it`);
+  needsOK.push(`personal quota: no company account can take this (${why}). Ask the user before launching — go on now on personal quota (this pick), or wait for a company account. One answer covers the outage: "go on" → launch this and pass --urgent for such work until a company account is back; "wait" → hold it until then`);
 }
 else if ((T.kind === 'claudeOnly' || (T.kind === 'browser' && !browserViaCodex)) && QC.throttledUntil) deferred = `Claude-only work and Claude's 5h window is full${retry((QC.throttledUntil - Date.now()) / 3600000)}`;
 else if (T.kind === 'codexOnly' && chatgptOut) deferred = `Codex-only work and Codex is ${QX.throttledOnly ? 'paused by its 5h window' : 'out'}${retry(QX.nextFree)}`;

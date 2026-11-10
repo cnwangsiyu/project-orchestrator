@@ -564,7 +564,7 @@ export const leanLines = (st, data) => {
     else if (T.quotaOut && X.trae?.usable) out.push(`TTADK paused — ${T.reason}: nothing to fix; its work goes to TRAE meanwhile (see below)`);
     else if (T.quotaOut) out.push(`TTADK paused — ${T.reason}: nothing to fix; ask the user once whether TTADK's work goes on now on personal quota (then --urgent until the reset) or waits for the reset (route.mjs gates it on that OK; high stakes runs on personal quota without asking)`);
     else if (X.trae?.usable) out.push(`TTADK unavailable — ${T.reason}: tell the user now so they can fix it; meanwhile its work goes to TRAE`);
-    else out.push(`TTADK unavailable — ${T.reason}: tell the user now so they can fix it; route.mjs asks the user before its work goes to personal quota (high stakes or --urgent run there directly); never hold work without asking`);
+    else out.push(`TTADK unavailable — ${T.reason}: tell the user now so they can fix it; route.mjs asks the user before its work goes to personal quota (--urgent only once the user said go on; high stakes ask too); never hold work without asking`);
     if (T.healthy && !T.live) out.push(`TTADK hub down — start it before hub workers: codex-worker.mjs --account ${T.name} hub (codex exec runs don't need it)`);
     if (T.healthy && T.ssoLeftH != null && T.ssoLeftH < POLICY.ttadkSsoWarnH) out.push(`TTADK SSO expires in ${hours(T.ssoLeftH)}: ask the user to run \`! ttadk auth login sso\` before it lapses`);
   }
