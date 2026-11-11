@@ -580,7 +580,12 @@ try {
     const browserThread = CU_APPS.length > 0 || BU_ORIGINS.length > 0;
     // How to reach Chrome and the desktop, told to the worker directly (2026-11-10: a MacBook worker followed a Claude
     // skill, looked for mcp__claude-in-chrome__* tools that a Codex session doesn't have, and stopped).
+    // The chrome plugin must match the installed ChatGPT app, whose node_repl and browser service it talks to: the copy the
+    // app unpacks itself (bundled-marketplaces) comes first; a cached "latest" can be newer than an old app (2026-11-10:
+    // app 26.1007 on the MacBook — tabs opened, then every page call failed with "reading 'timeoutMs'").
     const findChromePlugin = () => {
+      const bundledFirst = path.join(os.homedir(), '.codex', '.tmp', 'bundled-marketplaces', 'openai-bundled', 'plugins', 'chrome');
+      if (fs.existsSync(path.join(bundledFirst, 'scripts', 'browser-client.mjs'))) return bundledFirst;
       if (PROF?.chromePlugin && fs.existsSync(path.join(PROF.chromePlugin, 'scripts', 'browser-client.mjs'))) return PROF.chromePlugin;
       const home = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
       for (const d of [path.join(home, 'plugins', 'cache'), path.join(os.homedir(), '.codex', 'plugins', 'cache')]) {

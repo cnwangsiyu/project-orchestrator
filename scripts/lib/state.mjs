@@ -268,7 +268,8 @@ export const codexBrowserReady = (home) => {
   } catch { return false; }
 };
 const chromePluginOf = (home) => {
-  for (const d of [path.join(home, 'plugins', 'cache'), path.join(os.homedir(), '.codex', '.tmp', 'bundled-marketplaces', 'openai-bundled', 'plugins')]) {
+  // The app's own unpacked copy first: it matches the app's node_repl (see codex-worker, findChromePlugin).
+  for (const d of [path.join(os.homedir(), '.codex', '.tmp', 'bundled-marketplaces', 'openai-bundled', 'plugins'), path.join(home, 'plugins', 'cache')]) {
     try {
       if (fs.existsSync(path.join(d, 'chrome', 'scripts', 'browser-client.mjs'))) return path.join(d, 'chrome');
       for (const m of fs.readdirSync(d)) for (const v of fs.readdirSync(path.join(d, m, 'chrome')).sort().reverse())

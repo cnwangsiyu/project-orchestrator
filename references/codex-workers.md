@@ -271,6 +271,11 @@ Claude skill and looked for `mcp__claude-in-chrome__*` tools a Codex session doe
 bootstrap Chrome from `<chrome plugin>/scripts/browser-client.mjs` (`setupBrowserRuntime` → `agent.browsers.get("chrome")`
 → `documentation()`), `@oai/sky` for desktop apps, only the allowed sites/apps, no Claude tools or skills. Verified on
 the mini's `main` (an app-configured home) the same day: example.com opened and read through `node_repl`.
+The chrome plugin used for that bootstrap is the copy the installed ChatGPT app unpacked
+(`~/.codex/.tmp/bundled-marketplaces/openai-bundled/plugins/chrome`), so it matches the app's `node_repl` and browser
+service; a newer cached plugin with an older app (MacBook, app 26.1007, 2026-11-10) opened tabs and then failed every
+page call with "Cannot read properties of undefined (reading 'timeoutMs')". Keep the ChatGPT app up to date on every
+machine that runs browser workers.
 `route.mjs` sends browser, ui-browser and computer-use work to TTADK when it is browser-ready, else to a browser-ready
 ChatGPT account, else to Claude. On a new machine: install the ChatGPT app and its Chrome extension, then run
 `browser-setup` for every other account (`--account b`).
