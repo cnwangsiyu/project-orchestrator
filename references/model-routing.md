@@ -149,7 +149,9 @@ workers, long unattended runs) at `medium` effort, set in each session's respawn
 
     - **GPT out on the company account** (its `gpt` family paused or restricted, or `--exclude-model gpt`): DeepSeek-V4.1-Flash
       → Gemini-3.1-Pro → DeepSeek-V4-Pro, each at high, then the row's Claude steps. No question: it is company quota.
-      `image-read` uses Gemini only (the only one that reads images).
+      `image-read` uses Gemini only: checked 2026-11-10 on TRAE, Sol and Gemini transcribed a screenshot's text, both
+      DeepSeek models said they can't see images. A DeepSeek pick prints a note: a task that depends on screenshots is
+      re-routed with `--exclude-model deepseek`.
     - **GPT up, Sol falls short**: Sol at the row's effort → … → Sol xhigh → DeepSeek-V4.1-Flash (a different family:
       its misses rarely overlap Sol's) → Sol max → Gemini-3.1-Pro → the row's Claude steps. The cheap rows (lookup,
       extract, draft) skip Sol max and the second fallback.

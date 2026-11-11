@@ -30,7 +30,8 @@ const KIMI = 'kimi-k3'; // TTADK only: a different model family, best planted-bu
 // each; Sol 0.95 at 227 s median): DeepSeek-V4.1-Flash 0.97 at 344 s, 0 false positives in review; Gemini-3.1-Pro 0.99
 // but 715 s and 3 of 12 runs hit the 40-minute limit; DeepSeek-V4-Pro 0.94 at 659 s. Left out: Seed-Evolving (0.87)
 // and Seed-2.1-Pro (0.81), which break output formats, and Cursor's Grok 4.7 (0.50, timeouts and dropped connections).
-// All ran at high effort, so they run at high here. Gemini is the only one that reads images.
+// All ran at high effort, so they run at high here. Gemini is the only one that reads images (checked 2026-11-10 on
+// TRAE: Sol and Gemini transcribed a screenshot's text; both DeepSeek models answered that they can't see images).
 const ALTS = [{ model: 'deepseek-v4.1-flash', effort: 'high' }, { model: 'gemini-3.1-pro-preview', effort: 'high', vision: true }, { model: 'deepseek-v4-pro', effort: 'high' }];
 const isAlt = (x) => x?.vendor === 'codex' && ALTS.some((a) => a.model === x.model);
 
@@ -447,6 +448,7 @@ if (ttadkRun && TT.kind === 'trae') {
 }
 if (ttadkRun && m.model === 'gemini-3.1-pro-preview') notes.push('Gemini-3.1-Pro ran past 40 minutes in 3 of 12 benchmark runs: if it shows no progress for 20 minutes, or runs past twice what the task should take, interrupt it and re-route with --exclude-model gemini (same --failures)');
 if (ttadkRun && isAlt(m)) notes.push(`brief (${m.model}): state the exact output format and the done check; it has no ChatGPT browser or image tools`);
+if (ttadkRun && isAlt(m) && !ALTS.find((a) => a.model === m.model)?.vision) notes.push(`${m.model} can't see images: if the task depends on screenshots or images, re-route with --exclude-model ${poolOf(m.model)} (Gemini or Sol reads them), or route the image reading on its own as image-read`);
 if (ttadkRun && TT.kind !== 'trae') {
   if (TT.search) notes.push(`TTADK runs through its local proxy (web search): exit 6 with proxy-unavailable → re-route with --exclude-account ${TT.name}`);
   else notes.push(`this TTADK account has no web search (rerun codex-worker.mjs ttadk-setup to add its proxy): if the task turns out to need the web, re-route it as research`);

@@ -602,6 +602,7 @@ for (const [sc, args] of ERRORS) {
     // A second free reviewer on TRAE comes from another family, not a fresh Sol.
     [o('traeFull', ['review', '--author', 'codex']).secondOpinion?.model, 'deepseek-v4.1-flash'],
     [hasNote('traeGptOut', ['implement', '--failures', '1'], /Gemini-3\.1-Pro ran past 40 minutes/), true],
+    [hasNote('traeGptOut', ['implement'], /can't see images/), true], [hasNote('traeGptOut', ['image-read'], /can't see images/), false],
     // Every family out: personal quota, behind the user's OK.
     [personal('traeAllOut', ['implement']), true],
   ];
