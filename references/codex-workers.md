@@ -245,7 +245,7 @@ personal quota appears only when both company accounts are out. The user chose n
   pause the whole account: then `quota.mjs` shows TRAE unavailable and `route.mjs` skips it (TTADK if usable, else the
   personal-quota OK gate). codex-worker knows each thread's model (`<trae home>/thread-models.json`), so a later `turn`
   or `wait` records against the right family. Pauses by kind (user, 2026-11-08):
-  - transient — queue full (`request queue size is exceed`: seen 2026-11-08 with about 8 concurrent GPT-6.1-Sol tasks),
+  - transient — queue full (`request queue size is exceed`, first seen 2026-11-08; it reflects TRAE's overall load, not our own concurrency — user 2026-11-11: don't run fewer TRAE tasks because of it),
     rate limits, gateway errors, timeouts, stalls: two within 15 minutes pause it for 5 minutes, then 10, 20, at most 30
     while pauses follow each other without a success (the backoff starts over after a success or an hour clear);
   - auth — not logged in, 401, expired token: 30 minutes, lifted as soon as `login status` is fine again;

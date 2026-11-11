@@ -119,8 +119,9 @@ that keeps the orchestrators alive.
   no sleep loops or foreground `wait`. Use the notification mechanisms above.
 - **Keep the existing limits:** same-file writers get separate worktrees or run in order (see
   **Prevent conflicts by planning** below); quota decisions come from [route.mjs](scripts/route.mjs).
-  Company accounts have no concurrency cap, but TRAE's queue overflowed at about 8 concurrent
-  GPT-6.1-Sol tasks: spread work across routed accounts/models, don't hold it (see
+  Company accounts have no concurrency cap. Don't lower TRAE concurrency for fear of its queue (user, 2026-11-11:
+  "排队跟我们自己的并发没什么关系"): queueing comes from TRAE's overall load, not from how many tasks we run; a
+  queued or queue-full worker is handled as an infrastructure miss (re-route with `--exclude-model`; see
   [TRAE CLI](references/codex-workers.md#trae-cli-as-the-second-company-account-user-2026-11-08)).
 
 **Delegate to workers, not subagents** (user, 2026-11-03). Whenever a background worker can do
