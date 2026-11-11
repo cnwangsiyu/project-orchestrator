@@ -634,6 +634,49 @@ for (const [sc, args] of ERRORS) {
   if (bad.length) fail++;
   console.log(`${bad.length ? 'FAIL' : 'ok  '} recovery probes     ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
 }
+// Approved nightly decision 2026-11-10-1: an idle weekly deadline can move without a card redemption.
+// Exercise the real review-data CLI on quota history, with all external reads isolated from live accounts.
+{
+  const bin = path.join(tmp, 'quota-bin'); fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, 'codex'), '#!/bin/sh\nprintf \'{"models":[]}\\n\'\n', { mode: 0o755 });
+  fs.writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\nprintf \'fixture\\n\'\n', { mode: 0o755 });
+  const cards = [{ id: 'keep', expiresAt: now + 200 * h }, { id: 'spent', expiresAt: now + 200 * h }];
+  const a = (name, used, resetsAt, cs = cards) => ({ name, used, resetsAt, cards: cs });
+  const before = { t: now - 2 * h, claude: { used: 99, resetsAt: now - h }, codex: [
+    a('idle', 0, now + 165 * h), a('natural', 100, now - h), a('redeemed', 99, now + 24 * h),
+    a('expired', 80, now + 24 * h, [{ id: 'expired', expiresAt: now - h }]),
+    a('unknown', 50, now + 24 * h), a('backward', 40, now + 168 * h),
+    a('near-expiry', 90, now - 0.4 * h),
+  ] };
+  const after = { t: now - 0.5 * h, claude: { used: 0, resetsAt: now + 167 * h }, codex: [
+    a('idle', 0, now + 167 * h), a('natural', 0, now + 167 * h), a('redeemed', 0, now + 167 * h, cards.slice(0, 1)),
+    a('expired', 0, now + 167 * h, []),
+    a('unknown', 0, now + 167 * h), a('backward', 40, now + 165 * h),
+    a('near-expiry', 0, now + 167 * h, cards.slice(0, 1)),
+  ] };
+  const history = path.join(tmp, 'quota-history.jsonl');
+  fs.writeFileSync(history, [before, after, { ...after, t: now - 0.25 * h }].map((s) => JSON.stringify(s)).join('\n') + '\n');
+  const cache = path.join(tmp, 'quota-review-cache.json');
+  fs.writeFileSync(cache, JSON.stringify({ checkedAt: now, claude: cl(10, 120), codexAccounts: [], errors: {}, history: {} }));
+  const profiles = path.join(tmp, 'quota-profiles.json'); fs.writeFileSync(profiles, '{}');
+  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, QUOTA_CACHE: cache, CODEX_ACCOUNTS: profiles,
+    ROUTE_LOG_FILE: path.join(tmp, 'empty-route-log'), QUOTA_LOG_FILE: history, ROUTE_LOG: '0', QUOTA_LOG: '0', TRAE_PROBE: '0' };
+  const review = path.join(path.dirname(ROUTE), 'review-data.mjs');
+  const q = JSON.parse(execFileSync(process.execPath, [review, '--hours', '24', '--json'], { encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'] })).quota;
+  const reset = (who) => q.resets.find((r) => r.who === who);
+  const cases = [
+    [q.resets.length, 4], [reset('claude')?.kind, 'natural reset'], [reset('claude')?.unused, 1],
+    [reset('codex:natural')?.kind, 'natural reset'], [reset('codex:natural')?.unused, 0],
+    [reset('codex:redeemed')?.kind, 'early restart (card)'], [reset('codex:redeemed')?.usedBefore, 99],
+    [reset('codex:near-expiry')?.kind, 'early restart (card)'],
+    [!!reset('codex:idle'), false], [!!reset('codex:expired'), false],
+    [!!reset('codex:unknown'), false], [!!reset('codex:backward'), false],
+    [q.cardsExpired.length, 1], [q.cardsRedeemed.length, 2],
+  ];
+  const bad = cases.map(([got, want], i) => (got === want ? null : `${i} (${got})`)).filter((i) => i !== null);
+  if (bad.length) fail++;
+  console.log(`${bad.length ? 'FAIL' : 'ok  '} quota reset history ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
+}
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(fail ? `\n${fail} failing` : '\nall pass');
 process.exit(fail ? 1 : 0);

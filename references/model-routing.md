@@ -255,6 +255,12 @@ Only the weekly window sets budgets, deadlines and card math; a 5-hour window ju
 Projections use the recent burn rate (readings spanning ≥3h of the last 24h in the same window). Without that history
 they use the window average, with its first tenth floored.
 
+In the nightly quota history, an early card restart requires a forward weekly deadline change and an unexpired
+card disappearing from that account's snapshots. An idle account's future deadline can move while usage stays at
+0% and its cards stay the same (b on 2026-11-10); that is neither a redemption nor lost quota. Natural resets remain
+reported once the old deadline is reached, and backward deadline corrections are not resets. This reporting fix
+implements approved decision `2026-11-10-1`; it does not authorize any card redemption.
+
 `quota.mjs` lean lines and what the orchestrator does about each:
 
 | Lean line | Condition | Do |

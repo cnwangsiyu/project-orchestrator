@@ -100,10 +100,14 @@ const track = (key, get) => {
   for (const s of snaps) {
     const cur = get(s);
     if (!cur || cur.resetsAt == null) continue;
-    if (prev && Math.abs(cur.resetsAt - prev.resetsAt) > 3600000 && s.t >= since) {
-      // The window rolled over (natural reset) or restarted early (a redeemed card): what was left is gone or reused.
+    if (prev && cur.resetsAt - prev.resetsAt > 3600000 && s.t >= since) {
+      // An idle window's deadline can move with the snapshot time (b, 2026-11-10, 0% with the same two cards).
+      // A future deadline moving is not a card restart: require an unexpired card to disappear. Backward corrections
+      // are not resets either. Keep natural rollovers, and prefer actual card evidence near the old deadline.
       const natural = prev.resetsAt <= s.t + 600000;
-      resets.push({ who: key, at: fmt(natural ? prev.resetsAt : s.t), kind: natural ? 'natural reset' : 'early restart (card)', usedBefore: prev.used, unused: Math.max(0, 100 - prev.used) });
+      const redeemed = Array.isArray(prev.cards) && Array.isArray(cur.cards)
+        && prev.cards.some((c) => (!c.expiresAt || c.expiresAt > s.t) && !cur.cards.some((d) => d.id === c.id));
+      if (redeemed || natural) resets.push({ who: key, at: fmt(redeemed ? s.t : prev.resetsAt), kind: redeemed ? 'early restart (card)' : 'natural reset', usedBefore: prev.used, unused: Math.max(0, 100 - prev.used) });
     }
     prev = cur;
   }
