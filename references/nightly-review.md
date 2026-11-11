@@ -183,6 +183,20 @@ Look for evidence in the data, not hunches. Typical findings:
     Start it as an escalation step or second opinion rather than a default. Promote it after it has worked in real
     tasks.
 
+### Fallback models (user, 2026-11-10)
+
+`outcomes.fallbackModels` in review-data: how often the company account's fallback models (DeepSeek-V4.1-Flash,
+Gemini-3.1-Pro, DeepSeek-V4-Pro; references/model-routing.md, "Fallback models on the company account") ran, why
+(`gpt-out` or `after-sol-fell-short`), how their tasks ended, and the extra reviews of their service code. Read it with
+`--hours 168` too, since a day holds few. Propose a change (a decision card, not a direct edit) when the week's data
+supports one, for example:
+- extra reviews that keep passing clean (say 10+ with nothing caught) → review only the weaker fallback, or drop the
+  extra review; reviews that catch real defects → keep it, or extend it;
+- a fallback whose tasks rework or fail clearly more than Sol's (byModel, code rework) → move it down or out of ALTS;
+  one that does as well as Sol → keep, or consider it earlier;
+- fallback steps after Sol fell short that rarely rescue a task → drop them from the escalation (faster to Claude).
+Say how many tasks the evidence rests on; the benchmark behind ALTS was 12 runs per model.
+
 ## 3. Change (small, evidenced, tested)
 
 - Make at most a few changes per night. Each one must name its evidence: numbers from review-data, a task id, a source

@@ -50,6 +50,23 @@ const outcomes = {
   // TRAE CLI vs native Codex with the same model (user, 2026-11-08); the nightly review reads it with --hours 168 and
   // all-time (--hours 100000) as samples grow.
   traeVsCodex: compareHarness(mouts, readProfiles()),
+  // Fallback models on the company account (route.mjs ALTS, user 2026-11-10: "每晚复盘可以看看是否需要调整"): how often
+  // they ran and why, how their tasks ended, and the extra reviews of their service code — what those reviews caught
+  // (task ended in rework) versus passed clean. Inputs for keeping, reordering or relaxing the fallback rules.
+  fallbackModels: (() => {
+    const fb = routes.filter((r) => r.pick?.vendor === 'codex' && r.pick.model && !/^gpt-/.test(r.pick.model) && !isReviewDecision(r));
+    const reason = (r) => ((r.why ?? []).some((w) => /its fallback models:/.test(w)) ? 'gpt-out' : (r.failures ?? 0) > 0 ? 'after-sol-fell-short' : 'other');
+    const count = (xs, k) => xs.reduce((m, x) => ((m[k(x)] = (m[k(x)] ?? 0) + 1), m), {});
+    const ended = (r) => outs.find((o) => outcomeOwns(o.project, o.name, r)) ?? null;
+    const extra = fb.filter((r) => (r.why ?? []).some((w) => /is a fallback model: its service code gets a review/.test(w)));
+    const ex = extra.map((r) => ({ task: `${r.project}/${r.name}`, model: r.pick.model, outcome: ended(r)?.result ?? '(none yet)', rounds: ended(r)?.rounds ?? null, cause: ended(r)?.cause ?? null }));
+    return {
+      launches: fb.length, byModel: count(fb, (r) => r.pick.model), byReason: count(fb, reason),
+      outcomes: count(fb.map(ended).filter(Boolean), (o) => o.result),
+      extraReviews: { count: extra.length, caught: ex.filter((e) => e.outcome === 'rework' || e.outcome === 'fail').length, clean: ex.filter((e) => e.outcome === 'pass').length, tasks: ex.slice(0, 30) },
+      reviewSecondOpinions: count(routes.filter((r) => isReviewDecision(r) && r.pick?.model && !/^gpt-/.test(r.pick.model) && r.pick.vendor === 'codex'), (r) => r.pick.model),
+    };
+  })(),
   // The fair vendor comparison: reviewed release work only (the only work every vendor's output is judged the same way).
   reviewedReleaseByVendor: agg((o) => o.reviewed && o.impact === 'release' && o.first?.vendor, mouts),
   fails: outs.filter((o) => o.result === 'fail').map((o) => ({ project: o.project, name: o.name, category: o.category, first: o.first, note: o.note })),
