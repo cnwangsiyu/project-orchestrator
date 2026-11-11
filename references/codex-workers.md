@@ -253,6 +253,13 @@ personal quota appears only when both company accounts are out. The user chose n
 
 ## Browser use (and Computer Use) on a Codex worker (verified 2026-11-07)
 
+**Which accounts count as browser-ready** (2026-11-10): an account marked by `browser-setup`, or any Codex home whose
+`config.toml` has the `node_repl` MCP server with the browser service — the ChatGPT app writes that itself into its own
+home (`~/.codex`, account `main`), so `main` is ready wherever the ChatGPT app is installed and set up for Chrome.
+`route.mjs` sends browser, ui-browser and computer-use work to TTADK when it is browser-ready, else to a browser-ready
+ChatGPT account, else to Claude. On a new machine: install the ChatGPT app and its Chrome extension, then run
+`browser-setup` for every other account (`--account b`).
+
 A Codex worker can operate the user's signed-in Chrome through the ChatGPT app's **Chrome plugin**. It can also operate
 desktop apps through the **computer-use plugin**. Both use the local pieces the ChatGPT desktop app uses, and both work
 with any model provider, TTADK included. Routing (user, 2026-11-07): the `browser` row goes to TTADK Codex when that

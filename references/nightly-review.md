@@ -72,7 +72,7 @@ These are the user's decisions (2026-10-30 to 2026-11-03):
   - Every task TTADK's GPT-6.1 Sol can handle runs there first whenever TTADK is healthy. Only the tasks it can't
     handle, or all tasks while it's unhealthy or excluded, follow the earlier routing (ChatGPT accounts, Claude).
   - TTADK has no concurrency cap: retry a rate-limited run once, then re-route without it.
-  - Browser work goes to TTADK Codex when it is browser-ready, else to Claude.
+  - Browser work goes to a browser-ready Codex account (TTADK first, else a ChatGPT account), else to Claude.
   - On a TTADK device, leave the ChatGPT and Claude quota for the user's other device (no TTADK there): don't add
     rules that spend it for its own sake there, and don't flag unspent ChatGPT quota or lapsed cards on a TTADK device
     as waste (user, 2026-11-07).

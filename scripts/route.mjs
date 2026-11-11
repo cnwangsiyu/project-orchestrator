@@ -130,7 +130,12 @@ const TT = [QX.ttadk, QX.trae].find((a) => a?.usable && !excluded.has(a.name)) ?
 // no underused/front-load/expiring effort raises and no extra quota-spending reviews. Without TTADK nothing changes.
 const ttDevice = !!QX.ttadk || !!QX.trae;
 const ttHas = (model) => !!TT && TT.models.includes(model);
-const browserViaCodex = T.kind === 'browser' && !!TT && TT.browser;
+// Browser, frontend-visual and desktop-app work runs on a Codex worker when a Codex account can drive Chrome and the
+// desktop: the company account first (TTADK with browser-setup), else a browser-ready ChatGPT account (2026-11-10: on a
+// device without TTADK, e.g. the MacBook, this used to go to Claude even though its Codex accounts can do it); else Claude.
+const ttBrowser = !!TT && !!TT.browser;
+const chatgptBrowser = chatgptOpen.filter((r) => r.a.browser);
+const browserViaCodex = T.kind === 'browser' && (ttBrowser || chatgptBrowser.length > 0);
 const codexOut = chatgptOut && !TT; // Codex is out only when neither TTADK nor a ChatGPT account can take work
 const why = [], needsOK = [], tell = [], notes = [];
 const claudeAllowed = (kind) => {
@@ -160,7 +165,7 @@ else base = [T.first, ...T.ladder];
 // its local proxy (ttadk-setup sets it up: TT.search); without it research follows the earlier routing.
 const ttTaskOK = T.kind !== 'claudeOnly' && cat !== 'image-gen' && !(authorCodex && cat === 'review-high')
   && !(cat === 'second-opinion' && opts.against === 'codex');
-const ttCapable = !!TT && ttHas(SOL) && ttTaskOK && !(cat === 'research' && !TT.search) && !(T.kind === 'browser' && !browserViaCodex);
+const ttCapable = !!TT && ttHas(SOL) && ttTaskOK && !(cat === 'research' && !TT.search) && !(T.kind === 'browser' && !ttBrowser);
 const ei = (e) => EFFORTS.indexOf(e);
 const maxE = (a, b) => (ei(a) >= ei(b) ? a : b);
 if (ttCapable) {
@@ -340,8 +345,10 @@ const inRepo = (() => {
 const redeemAcct = QX.redeem && !noRedeem && !excluded.has(QX.redeem.a.name) ? QX.redeem : null;
 let acct = (QX.pick && !excluded.has(QX.pick.a.name) ? QX.pick : chatgptOpen[0]) ?? redeemAcct
   ?? (!QX.readable ? (QX.rows ?? []).find((r) => !excluded.has(r.a.name)) : null) ?? null;
+// Browser work off the company account goes to a browser-ready ChatGPT account.
+if (T.kind === 'browser' && !ttBrowser && chatgptBrowser.length && !(acct && acct.a?.browser)) acct = chatgptBrowser[0];
 const chatgptAcct = acct;
-const ttadkRun = m && onTTADK(m);
+const ttadkRun = m && onTTADK(m) && !(T.kind === 'browser' && !ttBrowser);
 if (ttadkRun) acct = { a: { name: TT.name, live: TT.live } };
 else if (QX.rotate && m?.vendor === 'codex' && QX.rotate.every((r) => !excluded.has(r.a.name))) {
   const n = withLock(RR, () => { let c = 0; try { c = Number(fs.readFileSync(RR, 'utf8')) || 0; } catch {} if (!opts.dry) fs.writeFileSync(RR, String(c + 1)); return c; });
@@ -408,7 +415,7 @@ else if (ttadkRun) {
 if (m && ['browser', 'ui-browser'].includes(cat)) {
   notes.push('Chrome must be running before the worker starts (workers can\'t launch it): pgrep -x "Google Chrome" >/dev/null || open -a "Google Chrome"');
   if (m.vendor === 'codex') notes.push(`"Browser is not available: chrome" (codex-worker prints browser-unavailable:) means the Chrome extension host is briefly disconnected: wait a minute, retry once, then re-route with --exclude-account ${acct?.a?.name ?? TT?.name}`);
-  if (m.vendor === 'codex') notes.push(`brief: include the "Codex browser brief" clauses from references/codex-workers.md (plugin bootstrap from ${TT?.chromePlugin ?? '<chrome plugin>'}/scripts/browser-client.mjs; work in tabs you create; a tab your own click opens may be claimed via user.openTabs()/claimTab and must be closed; never touch the user's other tabs); sites outside --browser-origins are declined — add them with --origins when the task needs them`);
+  if (m.vendor === 'codex') notes.push(`brief: include the "Codex browser brief" clauses from references/codex-workers.md (plugin bootstrap from ${(ttadkRun ? TT?.chromePlugin : acct?.a?.chromePlugin) ?? TT?.chromePlugin ?? '<chrome plugin>'}/scripts/browser-client.mjs; work in tabs you create; a tab your own click opens may be claimed via user.openTabs()/claimTab and must be closed; never touch the user's other tabs); sites outside --browser-origins are declined — add them with --origins when the task needs them`);
   else notes.push('Claude browser worker (Claude in Chrome): if the extension reports several browsers, select only this Mac\'s Chrome (deviceId in the ledger); never switch to another connected browser');
 }
 if (m?.vendor === 'codex' && sandbox === 'workspace-write') notes.push('workspace-write can\'t run git writes: brief the worker to edit only and report the files and a commit message; you review and commit');

@@ -43,7 +43,8 @@ catches a miss, and how many times the task has fallen short. How the table was 
   Opus's best result, at 67.7%.
 - **Claude-only work (`claude-tools`):** Artifact/Docs tools and peer negotiation.
 - **Browser and desktop work:** `browser` (web pages in Chrome), `ui-browser` (frontend work with a visual check) and
-  `computer-use` (desktop apps; `--apps <bundle ids>`) go to TTADK Codex once `browser-setup` is done, else to Claude
+  `computer-use` (desktop apps; `--apps <bundle ids>`) go to a browser-ready Codex account — TTADK first, else a ChatGPT account (2026-11-10: a device without TTADK, like
+  the MacBook, used to send all of it to Claude) — else to Claude
   (user, 2026-11-07). A terminal Claude worker can drive Chrome (Claude in Chrome) but has no desktop computer-use tool
   (ledger 10-31), so for desktop apps the Claude fallback may only report BLOCKED. TTADK desktop work needs an unlocked
   screen.

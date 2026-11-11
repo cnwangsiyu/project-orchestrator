@@ -258,6 +258,25 @@ const readTrae = (name, prof) => {
   if (broken) { out.healthy = false; out.hubBroken = broken; out.reason = `its hub answers but can't start threads (${broken.why}); restart it ${broken.fix}`; }
   return out;
 };
+// A ChatGPT Codex home can drive Chrome and desktop apps when its config has the node_repl MCP server with the browser
+// service — written by `codex-worker browser-setup`, or by the ChatGPT app itself on its own home (~/.codex), which then
+// has no `browser` mark in the accounts file (2026-11-10: the MacBook's orchestrators sent all browser work to Claude).
+export const codexBrowserReady = (home) => {
+  try {
+    const toml = fs.readFileSync(path.join(home, 'config.toml'), 'utf8');
+    return /^\[mcp_servers\.node_repl\]/m.test(toml) && /NODE_REPL_TRUSTED_SERVICES[^\n]*browser/.test(toml);
+  } catch { return false; }
+};
+const chromePluginOf = (home) => {
+  for (const d of [path.join(home, 'plugins', 'cache'), path.join(os.homedir(), '.codex', '.tmp', 'bundled-marketplaces', 'openai-bundled', 'plugins')]) {
+    try {
+      if (fs.existsSync(path.join(d, 'chrome', 'scripts', 'browser-client.mjs'))) return path.join(d, 'chrome');
+      for (const m of fs.readdirSync(d)) for (const v of fs.readdirSync(path.join(d, m, 'chrome')).sort().reverse())
+        if (fs.existsSync(path.join(d, m, 'chrome', v, 'scripts', 'browser-client.mjs'))) return path.join(d, m, 'chrome', v);
+    } catch {}
+  }
+  return null;
+};
 const readCodexAll = () => {
   const accounts = [];
   updateProfiles((reg) => {
@@ -280,7 +299,9 @@ const readCodexAll = () => {
         reg[name] = { ...prof, id: u.id, email: login?.id === u.id ? login.email : prof.email ?? null, plan: u.plan, seenAt: now, windows: u.windows, resets: u.resets, unlimited: u.unlimited };
         // A broken hub still answers `usage`; count it as not live so routing prefers a working hub, and say how to fix it.
         const broken = hubBroken(name, prof);
-        accounts.push({ name, live: !broken, ...reg[name], allowed: u.allowed, staleHub: !!(login?.id && u.id && login.id !== u.id), hubBroken: broken });
+        const browser = !!reg[name].browser || codexBrowserReady(prof.home);
+        accounts.push({ name, live: !broken, ...reg[name], browser, chromePlugin: reg[name].chromePlugin ?? (browser ? chromePluginOf(prof.home) : null),
+          allowed: u.allowed, staleHub: !!(login?.id && u.id && login.id !== u.id), hubBroken: broken });
       } catch (e) {
         const error = String(e.stderr || e.message).trim().split('\n')[0];
         accounts.push(prof.windows ? { name, live: false, error, loggedIn: !!login, ...rollForward(prof) }

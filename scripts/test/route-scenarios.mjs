@@ -50,6 +50,9 @@ const S = {
   ttOutTrae: { claude: cl(10, 120), codex: [acc('main', 20, 120), tt({ healthy: false, reason: 'its daily token quota is used up', quotaOut: { kind: 'daily', resetsAt: now + 10 * h } }), tr()] },
   ttOutTraeDown: { claude: cl(10, 120), codex: [acc('main', 20, 120), tt({ healthy: false, reason: 'its daily token quota is used up', quotaOut: { kind: 'daily', resetsAt: now + 10 * h } }), tr({ healthy: false, reason: 'TRAE CLI not logged in' })] },
   traeOnly: { claude: cl(10, 120), codex: [acc('main', 20, 120), tr()] },
+  // Browser work on Codex without a company account (2026-11-10: the MacBook sent it all to Claude).
+  macBrowser: { claude: cl(10, 120), codex: [acc('main', 20, 120, [], { browser: true, chromePlugin: '/tmp/chrome-main' })] },
+  traeBrowserB: { claude: cl(10, 120), codex: [acc('main', 20, 120), acc('b', 30, 100, [], { browser: true }), tr()] },
   ttChatOut: { claude: cl(10, 48), codex: [acc('main', 99, 48), tt()] },
   // From the 2026-11-07 review: a hub never read; a spent account with a card next to TTADK; an excluded pick next to
   // a spent account with an urgent card; two accounts that must both be spent soon.
@@ -167,6 +170,12 @@ const CASES = [
   ['ttOutTrae', ['browser'], 'claude sonnet medium'],
   ['ttOutTraeDown', ['analysis'], 'codex gpt-6.1-sol medium @main'],
   ['traeOnly', ['implement'], 'codex gpt-6.1-sol high @trae'],
+  ['macBrowser', ['browser'], 'codex gpt-6.1-sol high @main'],
+  ['macBrowser', ['computer-use'], 'codex gpt-6.1-sol high @main'],
+  ['macBrowser', ['ui-browser'], 'codex gpt-6.1-sol xhigh @main'],
+  ['fresh', ['browser'], 'claude sonnet medium'],
+  ['traeBrowserB', ['browser'], 'codex gpt-6.1-sol medium @b'],
+  ['traeBrowserB', ['implement'], 'codex gpt-6.1-sol high @trae'],
   ['ttAndTrae', ['implement', '--exclude-account', 'ttadk'], 'codex gpt-6.1-sol high @trae'],
   ['ttAndTrae', ['implement', '--exclude-account', 'ttadk,trae'], 'codex gpt-6.1-sol high @main'],
   ['ttChatOut', ['lookup'], 'codex gpt-6.1-sol medium @ttadk'],

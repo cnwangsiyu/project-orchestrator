@@ -86,8 +86,8 @@ that keeps the orchestrators alive.
     running tests or builds, device runs, and long CLI output.
   - Don't do it "just this once" yourself.
   - Browser work goes to a `browser` worker (web pages) or a `ui-browser` worker (frontend work with a
-    visual check), both TTADK Codex when browser-ready, else Claude; desktop apps go to a
-    `computer-use` worker (TTADK Codex when browser-ready; a terminal Claude worker has no desktop
+    visual check), both on a Codex worker when a Codex account is browser-ready (TTADK first, else a ChatGPT account), else Claude; desktop apps go to a
+    `computer-use` worker (a browser-ready Codex account, TTADK first; a terminal Claude worker has no desktop
     computer-use tool). All of them can reach the user's Chrome. If that worker reports it can't reach the browser, fix the pairing; don't take
     over the clicking. The one exception is the minimal
     permission-only part this session is already authorized for (see "Plan around permissions").
@@ -254,7 +254,7 @@ effort, Codex account and launch command from
 - **The script computes the rest** from its table and the quota state in `scripts/lib/state.mjs`:
   - Hard locks: Artifact/Docs tools and peer negotiation stay on Claude (`claude-tools`); browser
     work, frontend visual checks and desktop apps (`browser`, `ui-browser`, `computer-use --apps
-    <bundle ids>`) go to TTADK Codex once `browser-setup` is done, else to Claude; every task whose output is an image (generating, editing, variants, icons,
+    <bundle ids>`) go to a browser-ready Codex account (TTADK first, else a ChatGPT account; 2026-11-10), else to Claude; every task whose output is an image (generating, editing, variants, icons,
     illustrations, mockup images) goes to Codex as `image-gen` (user, 2026-11-03).
   - Quota moves: Codex first for anything either vendor can do. Claude takes the work it is clearly
     better at only while it has spare.
@@ -294,7 +294,7 @@ effort, Codex account and launch command from
   - Every TTADK worker can search the web through its local proxy, once `ttadk-setup` has set it
     up; briefs say search queries must not carry internal information.
   - Browser work (`browser`: web pages in the user's Chrome) goes to TTADK Codex when that account
-    is browser-ready, otherwise to Claude. Desktop apps (`computer-use`) too; Artifact/Docs and peer
+    is browser-ready, else to a browser-ready ChatGPT Codex account, otherwise to Claude. Desktop apps (`computer-use`) too; Artifact/Docs and peer
     negotiation stay on Claude (`claude-tools`). Setup for a new machine: `references/codex-workers.md`, "TTADK" and
     "Browser use on a Codex worker".
   - Effort notches: lower for an automatic check, higher for high stakes, higher while Codex is
