@@ -256,6 +256,11 @@ personal quota appears only when both company accounts are out. The user chose n
 **Which accounts count as browser-ready** (2026-11-10): an account marked by `browser-setup`, or any Codex home whose
 `config.toml` has the `node_repl` MCP server with the browser service — the ChatGPT app writes that itself into its own
 home (`~/.codex`, account `main`), so `main` is ready wherever the ChatGPT app is installed and set up for Chrome.
+Two browser runtimes can ask for site/app approval: `node_repl` (browser-setup's config) and `cua_repl` (the ChatGPT
+app's unified-computer-use plugin, enabled on the app's own home). codex-worker answers both from `--browser-origins` /
+`--computer-use-apps` (2026-11-10: it used to accept only `node_repl`, so on the MacBook's `main` every site was declined
+as "The user declined approval"). Each answer is logged to `--log` as `accessApproval`; an unrecognised request is
+declined and logged with its raw content.
 `route.mjs` sends browser, ui-browser and computer-use work to TTADK when it is browser-ready, else to a browser-ready
 ChatGPT account, else to Claude. On a new machine: install the ChatGPT app and its Chrome extension, then run
 `browser-setup` for every other account (`--account b`).

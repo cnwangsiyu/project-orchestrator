@@ -455,15 +455,23 @@ const REPLIES = {
   // Computer Use asks (an MCP elicitation from node_repl) before it uses each app, and Browser use before each site it
   // reaches. Accept only the apps / sites this worker was launched with (--computer-use-apps / --browser-origins), for
   // this session; decline everything else, as before. Each decision is logged to --log for audit.
+  // Both browser runtimes ask: node_repl (browser-setup's config) and cua_repl (the ChatGPT app's unified-computer-use
+  // plugin, enabled on the app's own home — 2026-11-10: the MacBook's main account used it, every site was declined
+  // because only node_repl was recognised, and Codex reported "The user declined approval").
   'mcpServer/elicitation/request': (p) => {
     const blob = JSON.stringify(p ?? {});
-    const fromRepl = p?.serverName === 'node_repl';
-    const app = (blob.match(/"tool_params":\{"app":"([^"]+)"/) || [])[1] ?? null;
-    const origin = (blob.match(/"tool_params":\{"origin":"([^"]+)"/) || [])[1] ?? null;
-    const isCU = fromRepl && /"connector_id":"computer-use"/.test(blob);
-    const isBU = fromRepl && /"connector_id":"browser-use"/.test(blob);
-    const ok = (isCU && app && CU_APPS.includes(app)) || (isBU && origin && originAllowed(origin));
-    if ((isCU || isBU) && opts.log) try { fs.appendFileSync(path.resolve(opts.log), JSON.stringify({ accessApproval: { kind: isCU ? 'app' : 'origin', target: app ?? origin, decision: ok ? 'accept' : 'decline', at: Date.now() } }) + '\n'); } catch {}
+    const fromRepl = ['node_repl', 'cua_repl'].includes(p?.serverName);
+    const pick = (k) => (blob.match(new RegExp(`"tool_params":\\{[^}]*?"${k}":"([^"]+)"`)) || blob.match(new RegExp(`"${k}":"([^"]+)"`)) || [])[1] ?? null;
+    const app = pick('app') ?? pick('bundle_id') ?? pick('bundleId');
+    let origin = pick('origin');
+    if (!origin) { const u = pick('url'); try { origin = u ? new URL(u).origin : null; } catch {} }
+    const isCU = fromRepl && /"connector_id":"(unified-)?computer-use"|computer.?use/i.test(blob) && !!app;
+    const isBU = fromRepl && /"connector_id":"browser-use"|browser.?use|origin/i.test(blob) && !!origin;
+    const ok = (isCU && CU_APPS.includes(app)) || (isBU && originAllowed(origin));
+    if (opts.log) try {
+      fs.appendFileSync(path.resolve(opts.log), JSON.stringify({ accessApproval: { server: p?.serverName ?? null, kind: isBU ? 'origin' : isCU ? 'app' : 'unknown', target: (isBU ? origin : app) ?? null,
+        decision: ok ? 'accept' : 'decline', at: Date.now(), ...(isCU || isBU ? {} : { raw: blob.slice(0, 2000) }) } }) + '\n');
+    } catch {}
     return ok ? { action: 'accept', content: {}, _meta: { persist: 'session' } } : { action: 'decline' };
   },
   'item/tool/call': () => ({ contentItems: [{ type: 'inputText', text: 'Not available in this session.' }], success: false }),
