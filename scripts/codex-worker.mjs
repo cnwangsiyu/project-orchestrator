@@ -644,9 +644,13 @@ try {
       CU_APPS.length ? `For desktop apps, in node_repl js: globalThis.sky = (await import("@oai/sky")).sky; then follow its documentation. Apps you may use: ${CU_APPS.join(', ')}; others are declined.` : null,
       'Do not look for mcp__claude-in-chrome__* tools, ToolSearch, or skills written for Claude Code (chrome-browser, claude-in-chrome): they do not exist in this session. If node_repl or the browser is not reachable, report BLOCKED with the exact error.',
     ].filter(Boolean).join('\n');
+    // Every thread (user-approved 2026-11-11, after a TRAE DeepSeek worker copied bytedcli's TikTok SSO session into
+    // its automation browser to get past a login): the credential rule, independent of what the brief says.
+    const credRule = 'Never read, copy or load any login session or credential file (cookies, SSO/session tokens, CLI auth files such as bytedcli\'s, keychain items, .netrc, API keys), and never inject a session into a browser or tool to get past a login. Wherever a login or authorization is needed, stop and report BLOCKED with what needs signing in.';
     const th = await call('thread/start', {
       cwd: path.resolve(opts.cwd), model: opts.model, sandbox: opts.sandbox, approvalPolicy: APPROVAL_POLICY,
-      ...(browserThread ? { approvalsReviewer: 'user', developerInstructions: browserHowTo, config: { plugins: { 'unified-computer-use@openai-bundled': { enabled: false } } } } : {}),
+      developerInstructions: [browserHowTo, credRule].filter(Boolean).join('\n'),
+      ...(browserThread ? { approvalsReviewer: 'user', config: { plugins: { 'unified-computer-use@openai-bundled': { enabled: false } } } } : {}),
     });
     const threadId = th.thread?.id ?? th.threadId;
     if (PROF?.kind === 'trae') rememberThreadModel(PROF.home, threadId, opts.model);

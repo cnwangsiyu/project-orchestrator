@@ -236,6 +236,9 @@ const CASES = [
   ['claudeOver', ['computer-use'], 'claude sonnet medium', 'select_browser'],
   ['fresh', ['ui-browser'], 'claude sonnet high', 'select_browser'],
   ['fresh', ['implement', '--auto-check'], 'codex gpt-6.1-sol high @main', '!select_browser'],
+  // Credential clause in every brief (user-approved 2026-11-11).
+  ['quiet', ['lookup'], 'codex gpt-6-luna low @main', 'credential clause'],
+  ['ttOutTrae', ['analysis'], 'codex gpt-6.1-sol high @trae', 'credential clause'],
 ];
 const ERRORS = [['fresh', ['implement', '__noimpact']], ['fresh', ['implement', '--impact', 'prod']], ['fresh', ['implement', '--failures', '-1']], ['fresh', ['implement', '--stakes', 'hgih']], ['fresh', ['second-opinion']], ['fresh', ['nope']]];
 

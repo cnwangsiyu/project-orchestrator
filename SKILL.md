@@ -170,6 +170,14 @@ close (user, 2026-11-04, after a worker overwrote a user header and another wipe
   --remove-existing-content, wiping app containers or Documents, erasing a simulator), or ask
   first."
 
+Every brief, whatever the task, also carries the credential clause (user-approved 2026-11-11, after a TRAE
+DeepSeek worker copied bytedcli's TikTok SSO session file into its automation browser to get past a console
+login; the user had to sign in again):
+- "Never read, copy or load any login session or credential file (cookies, SSO/session tokens, CLI auth
+  files such as bytedcli's, keychain items, .netrc, API keys), and never inject a session into a browser or
+  tool to get past a login. Wherever a login or authorization is needed, stop and report BLOCKED with what
+  needs signing in."
+
 **Prevent rework at the brief** (rework retro of 2026-11-06–10, 89 rework chains; user-approved 2026-11-10). Most
 rework came from unchecked premises, "done" proven on the wrong target, one shared rule re-implemented by several
 workers, and patching after a second same-kind defect.
