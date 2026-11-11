@@ -19,8 +19,8 @@ const env = { ...process.env, HOME: home, PATH: `${bin}:${process.env.PATH}`,
 let id = 0;
 const call = (name, input = {}, extra = {}) => ({ type: 'assistant', timestamp: new Date(now - h).toISOString(), cwd,
   message: { content: [{ type: 'tool_use', id: `call-${id++}`, name, input }] }, ...extra });
-const result = (use, content) => ({ type: 'user', timestamp: use.timestamp,
-  message: { content: [{ type: 'tool_result', tool_use_id: use.message.content[0].id, content }] } });
+const result = (use, content, extra = {}) => ({ type: 'user', timestamp: use.timestamp,
+  message: { content: [{ type: 'tool_result', tool_use_id: use.message.content[0].id, content }] }, ...extra });
 const transcript = (entries) => fs.writeFileSync(path.join(projects, 'fixture.jsonl'), ['not json', ...entries.map((e) => JSON.stringify(e))].join('\n') + '\n');
 const run = (...args) => execFileSync(process.execPath, [SCRIPT, ...args], { encoding: 'utf8', env });
 const json = (hours = 24) => JSON.parse(run('--hours', String(hours), '--json'));
@@ -159,6 +159,53 @@ try {
   assert.equal(tests.testBuildCommands.length, 5); assert.deepEqual(tests.testBuildCommands[0], { command: 'npm test', calls: 3 });
   assert.ok(has(tests, 'runs tests/builds itself')); assert.match(tests.flags.join('\n'), /npm test.*route\.mjs/);
   console.log('ok   test/build commands, not mentions or dispatches');
+
+  // Foreground duration is paired by ID, not result order; even routing and non-shell tools can block.
+  const timed = (name, input, minutes, extra = {}) => {
+    const use = call(name, input, extra);
+    return [use, result(use, '', { timestamp: new Date(Date.parse(use.timestamp) + minutes * 60000).toISOString() })];
+  };
+  const longCommand = `inspect\n  ${'worker-progress-'.repeat(8)}`;
+  const blocking = [timed('Bash', { command: longCommand }, 12),
+    timed('Bash', { command: 'node scripts/route.mjs implement', run_in_background: false }, 9),
+    timed('Read', { file_path: 'source.js' }, 6), timed('Task', { description: 'review worker' }, 4),
+    timed('mcp__fixture__build', { command: 'remote build' }, 3),
+    timed('Bash', { command: 'background worker', run_in_background: true }, 90),
+    timed('Task', { description: 'background review', run_in_background: true }, 120),
+    timed('Agent', { description: 'background agent', run_in_background: true }, 120),
+    timed('Bash', { command: 'exactly two minutes' }, 2), timed('Read', { file_path: 'quick.js' }, 1.99),
+    timed('Read', { file_path: 'zero.js' }, 0), timed('Read', { file_path: 'backwards.js' }, -3)];
+  const noResult = call('Bash', { command: 'unfinished' }), invalidResult = call('Read'), invalidUse = call('Read', {}, { timestamp: 'invalid' });
+  transcript([...blocking.map(([use]) => use), ...blocking.map(([, res]) => res).reverse(), blocking[0][1], noResult,
+    result(call('Read'), ''), invalidResult, result(invalidResult, '', { timestamp: 'invalid' }), invalidUse,
+    result(invalidUse, '', { timestamp: new Date(now).toISOString() })]);
+  const blockingUsage = analyse();
+  assert.equal(blockingUsage.blockedMinutes, 34); assert.equal(blockingUsage.ownKB, 0);
+  assert.deepEqual(blockingUsage.blockingExamples, [
+    { minutes: 12, command: longCommand.replace(/\s+/g, ' ').slice(0, 60) },
+    { minutes: 9, command: 'node scripts/route.mjs implement' }, { minutes: 6, command: 'Read source.js' }]);
+  assert.ok(has(blockingUsage, 'blocks in the foreground'));
+  assert.match(blockingUsage.flags.join('\n'), /blocks in the foreground: 34 min \(12 min .*; 9 min .*; 6 min Read source\.js\) — run it in the background and dispatch other ready tasks meanwhile/);
+  assert.match(run(), /tool calls \d+, blocked 34 min/); assert.match(run(), /blocked: 12 min inspect /);
+  assert.ok(has(analyse(12), 'blocks in the foreground')); assert.ok(!has(analyse(48), 'blocks in the foreground'));
+  assert.equal(json().limits.blockedMinutes, 30);
+  console.log('ok   foreground blocking, background exclusions, pairing and top three examples');
+
+  // Full durations count only for completed calls in the window, strictly over two minutes; limits are strict too.
+  const blockingBoundary = timed('Bash', { command: 'long operation' }, 30);
+  const oldBlocking = timed('Bash', { command: 'old operation' }, 25, { timestamp: new Date(now - 25 * h).toISOString() });
+  transcript([...blockingBoundary, ...oldBlocking, call('Read', {}, { timestamp: undefined })]);
+  const exactBlocking = analyse();
+  assert.equal(exactBlocking.blockedMinutes, 30); assert.ok(!has(exactBlocking, 'blocks in the foreground'));
+  assert.ok(has(analyse(12), 'blocks in the foreground')); assert.ok(!has(analyse(48), 'blocks in the foreground'));
+  assert.equal(analyse(48).blockedMinutes, 55);
+  transcript([...blockingBoundary, ...timed('Bash', { command: 'short operation' }, 2),
+    ...timed('Read', { file_path: 'just-over.js' }, 2.01)]);
+  const overBlocking = analyse(); assert.equal(overBlocking.blockedMinutes, 32.01);
+  assert.ok(has(overBlocking, 'blocks in the foreground')); assert.equal(overBlocking.blockingExamples.length, 2);
+  transcript([call('Read')]);
+  assert.equal(analyse().blockedMinutes, 0); assert.deepEqual(analyse().blockingExamples, []);
+  console.log('ok   blocking duration boundaries, scaled limits and incomplete/missing timestamps');
 
   // Exact limits do not flag; all new limits scale both down and up, and old calls stay outside the window.
   const boundary = [...Array.from({ length: 5 }, () => call('Edit', { file_path: 'source.js' })),

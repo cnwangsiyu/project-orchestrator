@@ -167,6 +167,10 @@ Look for evidence in the data, not hunches. Typical findings:
 - **Orchestrators doing work themselves:** for each FLAG from `orch-usage`, tell that orchestrator what kind of work
   to hand to workers, using its largest results as the example. Repeated flags on the same kind of work may mean a
   missing route category or a brief template gap.
+- **Orchestrators blocking instead of running work in parallel:** for a `blockedMinutes` flag from `orch-usage`, or
+  a ledger where a task waited on one pending item while other tasks were ready but not dispatched, tell that
+  orchestrator which tasks could have run meanwhile, using the blocking examples and the ledger's dependencies.
+  Also report over-splitting: coupled sibling tasks needing rework or conflicting over the same contract.
 - **Bad cases:**
   - one category escalating repeatedly from its first pick: the pick is too weak, so raise its effort or model;
   - first picks that always succeed easily at a high cost: lower them (personal-quota picks only; never TTADK);

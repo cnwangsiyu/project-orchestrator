@@ -103,6 +103,26 @@ that keeps the orchestrators alive.
   tool output, browser calls, screenshots read, sleep polls and compactions, and flags any that
   go over the limits.
 
+**Split by coupling, run what is independent in parallel; don't wait on one thing** (user, 2026-11-11:
+"之后让他们都把一些能并行的事项并行起来做，记住，别老是阻塞在那等着";
+"当然，别为了并行去强拆任务，有耦合的任务请放一起做，只是没有依赖的任务可以拆出去，记住").
+- **Split by coupling, not to parallelize:** work sharing code, state, interfaces or a design decision
+  stays in one task with one worker; only parts with no dependency between them become separate tasks.
+  Never cut coupled work apart just to run it in parallel: integration and rework cost more than the
+  time saved. Where otherwise independent parts share a mechanism, apply the existing
+  **Shared mechanisms: contract first, then parallel** rule below.
+- **Plan by dependencies:** write each task's dependencies in the ledger and dispatch every task
+  whose inputs are ready at once.
+- **Before any wait** (worker, review, build, device or user answer), dispatch all other ready, independent tasks.
+  A pending decision blocks only its dependants. Ask the user several decisions together, not serially.
+- **Never block in the foreground:** launch workers in the background and wake on their notifications;
+  no sleep loops or foreground `wait`. Use the notification mechanisms above.
+- **Keep the existing limits:** same-file writers get separate worktrees or run in order (see
+  **Prevent conflicts by planning** below); quota decisions come from [route.mjs](scripts/route.mjs).
+  Company accounts have no concurrency cap, but TRAE's queue overflowed at about 8 concurrent
+  GPT-6.1-Sol tasks: spread work across routed accounts/models, don't hold it (see
+  [TRAE CLI](references/codex-workers.md#trae-cli-as-the-second-company-account-user-2026-11-08)).
+
 **Delegate to workers, not subagents** (user, 2026-11-03). Whenever a background worker can do
 it, launch a worker (`claude --bg` or a Codex worker, as `route.mjs` prints) rather than an Agent
 subagent — even for lookups, sweeps and research. Subagents run inside your session: their usage
