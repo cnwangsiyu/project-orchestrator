@@ -266,6 +266,11 @@ unified-computer-use plugin turned off for that thread and `approvalsReviewer: "
 `cua_repl` accepted the site approval and then failed every call with "Cannot read properties of undefined (reading
 'timeoutMs')", and an account set to auto-review declined approvals itself. They use `node_repl` with the chrome plugin
 instead, the path verified on TTADK and `b`. Only that thread changes; the app keeps its plugin.
+codex-worker also gives those threads developer instructions on how to start (2026-11-10: a MacBook worker followed a
+Claude skill and looked for `mcp__claude-in-chrome__*` tools a Codex session doesn't have): use `node_repl`'s `js`,
+bootstrap Chrome from `<chrome plugin>/scripts/browser-client.mjs` (`setupBrowserRuntime` → `agent.browsers.get("chrome")`
+→ `documentation()`), `@oai/sky` for desktop apps, only the allowed sites/apps, no Claude tools or skills. Verified on
+the mini's `main` (an app-configured home) the same day: example.com opened and read through `node_repl`.
 `route.mjs` sends browser, ui-browser and computer-use work to TTADK when it is browser-ready, else to a browser-ready
 ChatGPT account, else to Claude. On a new machine: install the ChatGPT app and its Chrome extension, then run
 `browser-setup` for every other account (`--account b`).

@@ -578,9 +578,28 @@ try {
     // TTADK and b) and route approvals to this client, which answers them from --browser-origins / --computer-use-apps.
     // Per thread only: the app keeps using its plugin. (A dotted "plugins.…" key doesn't take effect; the nested form does.)
     const browserThread = CU_APPS.length > 0 || BU_ORIGINS.length > 0;
+    // How to reach Chrome and the desktop, told to the worker directly (2026-11-10: a MacBook worker followed a Claude
+    // skill, looked for mcp__claude-in-chrome__* tools that a Codex session doesn't have, and stopped).
+    const findChromePlugin = () => {
+      if (PROF?.chromePlugin && fs.existsSync(path.join(PROF.chromePlugin, 'scripts', 'browser-client.mjs'))) return PROF.chromePlugin;
+      const home = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+      for (const d of [path.join(home, 'plugins', 'cache'), path.join(os.homedir(), '.codex', 'plugins', 'cache')]) {
+        try { for (const m of fs.readdirSync(d)) for (const v of ['latest', ...fs.readdirSync(path.join(d, m, 'chrome')).sort().reverse()])
+          if (fs.existsSync(path.join(d, m, 'chrome', v, 'scripts', 'browser-client.mjs'))) return path.join(d, m, 'chrome', v); } catch {}
+      }
+      const bundled = path.join(os.homedir(), '.codex', '.tmp', 'bundled-marketplaces', 'openai-bundled', 'plugins', 'chrome');
+      return fs.existsSync(path.join(bundled, 'scripts', 'browser-client.mjs')) ? bundled : null;
+    };
+    const chromePlugin = browserThread ? findChromePlugin() : null;
+    const browserHowTo = !browserThread ? null : [
+      'Browser and desktop access in this thread goes through the node_repl MCP server and its `js` tool (look for a tool from the node_repl server; in code mode call it from your exec script).',
+      BU_ORIGINS.length ? `For Chrome, start with exactly this in node_repl js: const { setupBrowserRuntime } = await import(${JSON.stringify(path.join(chromePlugin ?? '<chrome plugin root>', 'scripts', 'browser-client.mjs'))}); const agent = await setupBrowserRuntime(); const chrome = await agent.browsers.get("chrome"); nodeRepl.write(await chrome.documentation()); — then follow that documentation. Work only in tabs you create, close them when done, never touch the user's other tabs. Sites you may open: ${BU_ORIGINS.join(', ')}; others are declined.` : null,
+      CU_APPS.length ? `For desktop apps, in node_repl js: globalThis.sky = (await import("@oai/sky")).sky; then follow its documentation. Apps you may use: ${CU_APPS.join(', ')}; others are declined.` : null,
+      'Do not look for mcp__claude-in-chrome__* tools, ToolSearch, or skills written for Claude Code (chrome-browser, claude-in-chrome): they do not exist in this session. If node_repl or the browser is not reachable, report BLOCKED with the exact error.',
+    ].filter(Boolean).join('\n');
     const th = await call('thread/start', {
       cwd: path.resolve(opts.cwd), model: opts.model, sandbox: opts.sandbox, approvalPolicy: APPROVAL_POLICY,
-      ...(browserThread ? { approvalsReviewer: 'user', config: { plugins: { 'unified-computer-use@openai-bundled': { enabled: false } } } } : {}),
+      ...(browserThread ? { approvalsReviewer: 'user', developerInstructions: browserHowTo, config: { plugins: { 'unified-computer-use@openai-bundled': { enabled: false } } } } : {}),
     });
     const threadId = th.thread?.id ?? th.threadId;
     if (opts.name) await call('thread/name/set', { threadId, name: opts.name }).catch(() => {});
