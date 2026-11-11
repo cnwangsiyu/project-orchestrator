@@ -11,7 +11,7 @@
 //   codex-worker ttadk-setup [--name ttadk] [--home DIR] [--port N] [--search-port N]   (the TTADK gateway as an account)
 //   codex-worker [--account ttadk] proxy                                   (start/check TTADK's local proxy: web search)
 //   codex-worker trae-setup [--name trae] [--port N]                      (TRAE CLI as an account: its app-server is the hub)
-//   codex-worker --account trae note-failure "<error>"                    (record a failed traecli exec run; see lib/trae-health.mjs)
+//   codex-worker --account trae note-failure [--model M] "<error>"        (record a failed traecli exec run; see lib/trae-health.mjs)
 //   codex-worker wait   --thread ID [--log FILE] [--out FILE]            (start/turn/wait take --stall-min M, default 30)
 //   codex-worker steer  --thread ID                                                                     "<message>"
 //   codex-worker interrupt --thread ID
@@ -40,7 +40,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { noteFailure, noteSuccess } from './lib/trae-health.mjs';
+import { noteFailure, noteSuccess, rememberThreadModel, threadModel } from './lib/trae-health.mjs';
+// What a TRAE pause covers: one model family (route.mjs moves to the next family) or the whole account.
+const pausedWhat = (p) => (p.pool ? `TRAE's ${p.pool} models are paused` : 'TRAE is paused');
 
 // --account NAME (anywhere on the line) picks a profile from the accounts file: its own CODEX_HOME, so its own login,
 // and its own hub. Without it: CODEX_HOME / CODEX_HUB from the environment, else ~/.codex and the default hub.
@@ -297,8 +299,8 @@ ${keep ? `\n# --- previous config ---\n${keep}` : ''}`);
 // A traecli exec run bypasses this script: the orchestrator records its failure here (route.mjs says so).
 if (cmd === 'note-failure') {
   if (PROF?.kind !== 'trae') die('note-failure is for the TRAE account (--account trae)');
-  const p = noteFailure(PROF.home, pos.join(' ') || 'traecli exec failed');
-  console.log(p ? `trae-paused: TRAE is paused until ${new Date(p.pausedUntil).toLocaleTimeString()} (${p.reason}); route.mjs sends its work elsewhere meanwhile` : 'recorded');
+  const p = noteFailure(PROF.home, pos.join(' ') || 'traecli exec failed', Date.now(), typeof opts.model === 'string' ? opts.model : null);
+  console.log(p ? `trae-paused: ${pausedWhat(p)} until ${new Date(p.pausedUntil).toLocaleTimeString()} (${p.reason}); route.mjs sends its work elsewhere meanwhile` : 'recorded');
   process.exit(0);
 }
 if (cmd === 'trae-setup') {
@@ -545,10 +547,12 @@ const report = async (threadId, turn, final, usage) => {
   }
   // TRAE: every failed turn is recorded and every completed one clears the record; repeated or hard failures pause it.
   if (PROF?.kind === 'trae') {
-    if (turn.status === 'completed') noteSuccess(PROF.home);
+    const model = opts.model ?? threadModel(PROF.home, threadId);
+    if (turn.status === 'completed') noteSuccess(PROF.home, model);
     else if (turn.status === 'failed') {
-      const p = noteFailure(PROF.home, JSON.stringify(turn.error ?? 'failed'));
-      if (p) console.log(`trae-paused: TRAE is paused until ${new Date(p.pausedUntil).toLocaleTimeString()} (${p.reason}); re-route this task with route.mjs ... --exclude-account ${account}`);
+      const p = noteFailure(PROF.home, JSON.stringify(turn.error ?? 'failed'), Date.now(), model);
+      if (p) console.log(`trae-paused: ${pausedWhat(p)} until ${new Date(p.pausedUntil).toLocaleTimeString()} (${p.reason}); re-route this task with route.mjs ... ${p.pool ? `(it moves to the next model family; --exclude-model ${p.pool} for this task)` : `--exclude-account ${account}`}`);
+      else if (model) console.log(`trae-failed: a ${model} turn failed on TRAE (not paused yet); for an infrastructure error re-route this task with route.mjs ... --exclude-model ${model.toLowerCase()} (not a --failures step)`);
     }
   }
   if (usage) console.log(`usage (thread total) input=${usage.inputTokens} cached=${usage.cachedInputTokens} output=${usage.outputTokens}`);
@@ -574,7 +578,7 @@ const follow = (threadId, turnId) => {
     const line = `stalled: no events for ${idle < 1 ? `${Math.round(idle * 60)}s` : `${Math.round(idle)}m`} on turn ${turnId} (thread ${threadId}); the turn is still running on the hub — check status and sub-agent threads, then wait again, steer or interrupt`;
     console.log(line);
     if (opts.log) try { fs.appendFileSync(path.resolve(opts.log), JSON.stringify({ stalled: true, idleMin: Math.round(idle), at: Date.now() }) + '\n'); } catch {}
-    if (PROF?.kind === 'trae') noteFailure(PROF.home, `stalled ${Math.round(idle)} min (queued for capacity?)`);
+    if (PROF?.kind === 'trae') noteFailure(PROF.home, `stalled ${Math.round(idle)} min (queued for capacity?)`, Date.now(), opts.model ?? threadModel(PROF.home, threadId));
     finish(4);
   }, Math.min(60000, Math.max(5000, STALL_MIN * 30000))).unref();
   handlers.push((m) => {
@@ -628,6 +632,7 @@ try {
       ...(browserThread ? { approvalsReviewer: 'user', developerInstructions: browserHowTo, config: { plugins: { 'unified-computer-use@openai-bundled': { enabled: false } } } } : {}),
     });
     const threadId = th.thread?.id ?? th.threadId;
+    if (PROF?.kind === 'trae') rememberThreadModel(PROF.home, threadId, opts.model);
     if (opts.name) await call('thread/name/set', { threadId, name: opts.name }).catch(() => {});
     const ts = await call('turn/start', {
       threadId, input: textInput(text), effort: opts.effort, model: opts.model,

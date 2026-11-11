@@ -262,8 +262,14 @@ effort, Codex account and launch command from
     CLI with its own model pool), then personal quota (user, 2026-11-08). route.mjs moves TTADK's work
     to TRAE when TTADK is out; the personal-quota OK gate applies only when both are out. TRAE has no
     browser, desktop or image tools (references/codex-workers.md, "TRAE CLI"). Repeated TRAE failures
-    pause it briefly (queue full: 5, then 10, 20, 30 min; quota, ban or auth: 30 min); record traecli exec
-    failures with `codex-worker.mjs --account trae note-failure`, so work moves on instead of failing task by task.
+    pause the failing model family briefly (queue full: 5, then 10, 20, 30 min; restricted or quota: 30 min and up;
+    auth pauses the account); record traecli exec failures with `codex-worker.mjs --account trae note-failure
+    --model <model>`, so work moves on instead of failing task by task.
+  - Fallback models (user, 2026-11-10): when the company account's GPT is out, route.mjs uses DeepSeek-V4.1-Flash,
+    then Gemini-3.1-Pro, then DeepSeek-V4-Pro, before any personal quota; when Sol falls short, a different family
+    runs before Sol max. Their service code gets a review by another family. An infrastructure miss (timeout, queue,
+    restricted) on one task: re-route with `--exclude-model <model or family>`, same `--failures`
+    (references/model-routing.md, "Fallback models on the company account").
   - TTADK first (user, 2026-11-07): when the TTADK company gateway is healthy, every task its
     GPT-6.1 Sol can handle runs there first, Claude-strength rows included. Exceptions are
     Claude-only work, image generation, a second opinion on Codex's own work, and browser work

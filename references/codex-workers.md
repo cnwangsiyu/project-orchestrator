@@ -234,13 +234,17 @@ personal quota appears only when both company accounts are out. The user chose n
 - **Use.** Hub workers: `codex-worker.mjs --account trae start … --model GPT-6.1-Sol` (lower-case ids are mapped).
   One-shot: `traecli exec -C <dir> -s <sandbox> -m GPT-6.1-Sol -c model_reasoning_effort='"high"' --json -o <file> "<prompt>"`.
   `route.mjs` prints both. Sessions live in `~/.trae/cli/sessions`.
-- **Health.** `quota.mjs` reads the account as healthy when the CLI is present, logged in and lists GPT-6.1-Sol, its
-  hub is sound, and it isn't paused. TRAE publishes no quota numbers; a popular model can sit "Queued for capacity": no
-  progress for 15 minutes → interrupt and re-route with `--exclude-account trae`.
+- **Health.** `quota.mjs` reads the account as healthy when the CLI is present, logged in and lists GPT-6.1-Sol or one
+  of its fallback models (model-routing.md, "Fallback models on the company account"), its hub is sound, and it isn't
+  paused. TRAE publishes no quota numbers; a popular model can sit "Queued for capacity": no progress for 15 minutes →
+  interrupt and re-route with `--exclude-model <its family>` (the next family takes it).
 - **Pause after failures** (`scripts/lib/trae-health.mjs`, user 2026-11-08). codex-worker records every failed or
-  stalled TRAE turn and clears the record on a completed one. While paused, `quota.mjs` shows TRAE unavailable and
-  `route.mjs` skips it (TTADK if usable, else the personal-quota OK gate), so tasks stop failing one by one. Pauses by
-  kind (user, 2026-11-08):
+  stalled TRAE turn and clears the record on a completed one. Failures count **per model family** (gpt, deepseek,
+  gemini, seed…; 2026-11-10: TRAE restricted only GPT while the others kept working): a paused family's models drop out
+  of `route.mjs`'s choices and the next family takes the work. Auth failures, and failures noted without `--model`,
+  pause the whole account: then `quota.mjs` shows TRAE unavailable and `route.mjs` skips it (TTADK if usable, else the
+  personal-quota OK gate). codex-worker knows each thread's model (`<trae home>/thread-models.json`), so a later `turn`
+  or `wait` records against the right family. Pauses by kind (user, 2026-11-08):
   - transient — queue full (`request queue size is exceed`: seen 2026-11-08 with about 8 concurrent GPT-6.1-Sol tasks),
     rate limits, gateway errors, timeouts, stalls: two within 15 minutes pause it for 5 minutes, then 10, 20, at most 30
     while pauses follow each other without a success (the backoff starts over after a success or an hour clear);
@@ -248,8 +252,9 @@ personal quota appears only when both company accounts are out. The user chose n
   - hard — quota used up, banned, 403 Forbidden, `Model access temporarily restricted` (code 983: TRAE restricted the
     account's GPT models on 2026-11-10 after about 1.3B tokens in a day; Gemini/Seed/DeepSeek kept working): 30 minutes,
     then 60, 120, at most 240 while they keep coming without a success. codex-worker prints `trae-paused:` when it pauses. A `traecli exec` run bypasses codex-worker: record its failure
-  (or a run you interrupted) with `codex-worker.mjs --account trae note-failure "<error>"`. To lift a pause by hand,
-  delete `~/.trae/worker-health.json`.
+  (or a run you interrupted) with `codex-worker.mjs --account trae note-failure --model <model> "<error>"`. To lift a
+  pause by hand, delete `~/.trae/worker-health.json`. Verified 2026-11-10: a DeepSeek-V4.1-Flash hub worker on TRAE
+  searches the web like Sol does.
 
 ## Browser use (and Computer Use) on a Codex worker (verified 2026-11-07)
 

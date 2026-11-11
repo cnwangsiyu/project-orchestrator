@@ -133,6 +133,34 @@ workers, long unattended runs) at `medium` effort, set in each session's respawn
     work never go there. The `max` exemption stays on TTADK alone: the 2026-11-10 review found
     `vesdk-mainline-T39-m1a-device` routed to TRAE/max after three failures with an empty `needsOK` list.
     The router now distinguishes the selected company account for that gate. See codex-workers.md, "TRAE CLI as the second company account".
+  - **Fallback models on the company account (user, 2026-11-10: when GPT is unavailable or fails, route by the
+    benchmark; keep quality, spend little personal quota).** `route.mjs` ALTS, from the 2026-11-10 benchmark on TRAE
+    (6 hard tasks — bug fixes with hidden tests, a security review, a planted-bug hunt — 12 runs per model; Sol effort
+    high, the others high):
+
+    | Model | Mean score | Median time | Notes |
+    |---|---|---|---|
+    | GPT-6.1-Sol (reference) | 0.95 | 227 s | review false positives |
+    | DeepSeek-V4.1-Flash | 0.97 | 344 s | missed one timing bug; 0 review false positives |
+    | Gemini-3.1-Pro | 0.99 | 715 s | 3 of 12 runs hit the 40-minute limit; reads images |
+    | DeepSeek-V4-Pro | 0.94 | 659 s | small mistakes, review false positives |
+    | Seed-Evolving / Seed-2.1-Pro | 0.87 / 0.81 | 875 / 801 s | break output formats — not used |
+    | Grok 4.7 via Cursor CLI | 0.50 | 2403 s | half the runs timed out or dropped — not used |
+
+    - **GPT out on the company account** (its `gpt` family paused or restricted, or `--exclude-model gpt`): DeepSeek-V4.1-Flash
+      → Gemini-3.1-Pro → DeepSeek-V4-Pro, each at high, then the row's Claude steps. No question: it is company quota.
+      `image-read` uses Gemini only (the only one that reads images).
+    - **GPT up, Sol falls short**: Sol at the row's effort → … → Sol xhigh → DeepSeek-V4.1-Flash (a different family:
+      its misses rarely overlap Sol's) → Sol max → Gemini-3.1-Pro → the row's Claude steps. The cheap rows (lookup,
+      extract, draft) skip Sol max and the second fallback.
+    - **Quality guard**: service code a fallback model wrote gets the routine review (normally only release code or high
+      stakes do), and every review of fallback-written code runs with `--exclude-model <its family>`, so a different
+      family reviews it. A second free reviewer on TRAE (no Kimi there) is a fallback model of another family, not a
+      fresh Sol; so is the stand-in when Claude has no room for a second opinion.
+    - **Infrastructure misses are not failures**: a fallback model that times out, queues or is restricted on one task is
+      re-routed with `--exclude-model <model or family>` and the same `--failures`; `--failures` counts quality misses.
+    - Outcomes are logged per model (route log `pick.model`), so the nightly review's model view can reorder ALTS once
+      real tasks outnumber the benchmark.
   - **TTADK's quota is daily, not unlimited** (about 500M tokens per user per day, shared by all models, resets 16:00
     UTC; measured 2026-11-08). When it runs out, TTADK is paused until the reset; its normal work is routed to
     personal quota behind the user's OK (go on now, or wait for the reset; user, 2026-11-08), while only `--urgent`

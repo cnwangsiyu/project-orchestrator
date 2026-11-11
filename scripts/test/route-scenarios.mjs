@@ -383,15 +383,17 @@ for (const [sc, args] of ERRORS) {
     const o = JSON.parse(run(sc, args));
     return [o.pick?.account, o.pick?.effort, o.needsUserOK.includes('max effort')];
   };
-  const max = ['implement-hard', '--impact', 'release', '--failures', '1'];
+  const max = ['implement-hard', '--impact', 'release', '--failures', '1'], max2 = ['implement-hard', '--impact', 'release', '--failures', '2'];
   const cases = [
     [maxGate('ttFresh', max), ['ttadk', 'max', false]],
     [maxGate('ttAndTrae', max), ['ttadk', 'max', false]],
-    [maxGate('ttOutTrae', max), ['trae', 'max', true]],
-    [maxGate('traeOnly', max), ['trae', 'max', true]],
-    [maxGate('ttOutTrae', [...max, '--urgent']), ['trae', 'max', true]],
-    [maxGate('ttOutTrae', ['build-run', '--failures', '3']), ['trae', 'max', true]],
-    [maxGate('ttOutTrae', ['debug', '--impact', 'throwaway', '--failures', '2']), ['trae', 'max', true]],
+    // On TRAE a fallback family (Gemini in this fixture) sits between Sol xhigh and Sol max, so max is one step later.
+    [maxGate('ttOutTrae', max), ['trae', 'high', false]],
+    [maxGate('ttOutTrae', max2), ['trae', 'max', true]],
+    [maxGate('traeOnly', max2), ['trae', 'max', true]],
+    [maxGate('ttOutTrae', [...max2, '--urgent']), ['trae', 'max', true]],
+    [maxGate('ttOutTrae', ['build-run', '--failures', '4']), ['trae', 'max', true]],
+    [maxGate('ttOutTrae', ['debug', '--impact', 'throwaway', '--failures', '3']), ['trae', 'max', true]],
     [maxGate('ttOutTrae', ['implement-hard', '--impact', 'release']), ['trae', 'xhigh', false]],
     [maxGate('claudeOver', ['debug', '--impact', 'release', '--failures', '1']), ['main', 'max', true]],
   ];
@@ -545,6 +547,67 @@ for (const [sc, args] of ERRORS) {
   const bad = cases.map(([got, want], i) => (got === want ? null : i)).filter((i) => i !== null);
   if (bad.length) fail++;
   console.log(`${bad.length ? 'FAIL' : 'ok  '} outcome dedupe      ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
+}
+// Fallback models on the company account (user, 2026-11-10: "gpt 不可用/失败也按照评测结果做一下路由"): per-family
+// TRAE pauses; GPT out → DeepSeek-V4.1-Flash → Gemini-3.1-Pro → DeepSeek-V4-Pro → Claude; with GPT up, a different
+// family between Sol xhigh and Sol max; fallback-written service code gets a review by another family.
+{
+  const { noteFailure, noteSuccess, readPause, readPoolPauses, poolOf } = await import('../lib/trae-health.mjs');
+  const ids = ['gpt-6.1-sol', 'gpt-6-astra', 'deepseek-v4.1-flash', 'gemini-3.1-pro-preview', 'deepseek-v4-pro', 'seed-evolving'];
+  const full = (home) => tr({ home, models: ids, modelIds: Object.fromEntries(ids.map((i) => [i, i.toUpperCase()])) });
+  const out = { healthy: false, reason: 'its daily token quota is used up', quotaOut: { kind: 'daily', resetsAt: now + 10 * h } };
+  const okHome = fs.mkdtempSync(path.join(tmp, 'trae-ok-')), gptHome = fs.mkdtempSync(path.join(tmp, 'trae-gpt-')), allHome = fs.mkdtempSync(path.join(tmp, 'trae-all-'));
+  const t = Date.now(), R = 'stream disconnected: Model access temporarily restricted. (983)';
+  noteFailure(gptHome, R, t, 'GPT-6.1-Sol');
+  for (const mm of ['GPT-6.1-Sol', 'DeepSeek-V4.1-Flash', 'Gemini-3.1-Pro-Preview', 'DeepSeek-V4-Pro', 'Seed-Evolving']) noteFailure(allHome, R, t, mm);
+  S.traeFull = { claude: cl(10, 120), codex: [acc('main', 20, 120), tt(out), full(okHome)] };
+  S.traeGptOut = { claude: cl(10, 120), codex: [acc('main', 20, 120), tt(out), full(gptHome)] };
+  S.traeAllOut = { claude: cl(10, 120), codex: [acc('main', 20, 120), tt(out), full(allHome)] };
+  const o = (sc, args) => JSON.parse(run(sc, args));
+  const pk = (sc, args) => { const r = o(sc, args); return r.deferred ? 'DEFER' : `${r.pick.model} ${r.pick.effort} @${r.pick.account}`; };
+  const hasNote = (sc, args, re) => o(sc, args).notes.some((n) => re.test(n));
+  const personal = (sc, args) => o(sc, args).needsUserOK.some((n) => /^personal quota:/.test(n));
+  // trae-health: a restriction on one family pauses that family only; a success elsewhere leaves it paused; auth pauses all.
+  const hh = fs.mkdtempSync(path.join(tmp, 'trae-h-'));
+  noteFailure(hh, R, t, 'GPT-6.1-Sol'); noteSuccess(hh, 'DeepSeek-V4.1-Flash');
+  const gptStill = !!readPoolPauses(hh).gpt, acctFree = readPause(hh) === null;
+  noteSuccess(hh, 'GPT-6.1-Sol'); const gptCleared = !readPoolPauses(hh).gpt;
+  const ah = fs.mkdtempSync(path.join(tmp, 'trae-ha-')); noteFailure(ah, '401 Unauthorized', t, 'DeepSeek-V4.1-Flash');
+  const cases = [
+    [poolOf('Gemini-3.1-Pro-Preview'), 'gemini'], [poolOf('gpt-6.1-sol'), 'gpt'], [poolOf(null), null],
+    [gptStill, true], [acctFree, true], [gptCleared, true], [!!readPause(ah), true],
+    // GPT up: Sol, then a different family before Sol max, the second fallback after it, then Claude.
+    [pk('traeFull', ['implement']), 'gpt-6.1-sol high @trae'],
+    [pk('traeFull', ['implement', '--failures', '2']), 'deepseek-v4.1-flash high @trae'],
+    [pk('traeFull', ['implement', '--failures', '3']), 'gpt-6.1-sol max @trae'],
+    [pk('traeFull', ['implement', '--failures', '4']), 'gemini-3.1-pro-preview high @trae'],
+    [pk('traeFull', ['implement', '--failures', '5']), 'opus high @undefined'],
+    [pk('traeFull', ['lookup', '--failures', '3']), 'deepseek-v4.1-flash high @trae'],
+    // GPT paused on TRAE: the fallbacks in order, no personal-quota question, then Claude.
+    [pk('traeGptOut', ['implement']), 'deepseek-v4.1-flash high @trae'],
+    [pk('traeGptOut', ['implement', '--failures', '1']), 'gemini-3.1-pro-preview high @trae'],
+    [pk('traeGptOut', ['implement', '--failures', '2']), 'deepseek-v4-pro high @trae'],
+    [pk('traeGptOut', ['implement', '--failures', '3']), 'opus high @undefined'],
+    [personal('traeGptOut', ['implement']), false],
+    [pk('traeGptOut', ['image-read']), 'gemini-3.1-pro-preview high @trae'],
+    [pk('traeGptOut', ['lookup']), 'deepseek-v4.1-flash high @trae'],
+    [o('traeGptOut', ['lookup']).pick.command.includes('-m DEEPSEEK-V4.1-FLASH '), true],
+    // The same through --exclude-model (an infrastructure miss on one task).
+    [pk('traeFull', ['implement', '--exclude-model', 'gpt']), 'deepseek-v4.1-flash high @trae'],
+    [pk('traeFull', ['implement', '--exclude-model', 'gpt,deepseek-v4.1-flash']), 'gemini-3.1-pro-preview high @trae'],
+    // Fallback-written service code gets a review that keeps its family off the reviewer seat.
+    [hasNote('traeGptOut', ['implement', '--impact', 'service'], /route\.mjs review --author codex --exclude-model deepseek/), true],
+    [hasNote('traeGptOut', ['implement', '--impact', 'throwaway'], /review required/), false],
+    [pk('traeGptOut', ['review', '--author', 'codex', '--exclude-model', 'deepseek']), 'gemini-3.1-pro-preview high @trae'],
+    // A second free reviewer on TRAE comes from another family, not a fresh Sol.
+    [o('traeFull', ['review', '--author', 'codex']).secondOpinion?.model, 'deepseek-v4.1-flash'],
+    [hasNote('traeGptOut', ['implement', '--failures', '1'], /Gemini-3\.1-Pro ran past 40 minutes/), true],
+    // Every family out: personal quota, behind the user's OK.
+    [personal('traeAllOut', ['implement']), true],
+  ];
+  const bad = cases.map(([got, want], i) => (got === want ? null : `${i} (${got})`)).filter((i) => i !== null);
+  if (bad.length) fail++;
+  console.log(`${bad.length ? 'FAIL' : 'ok  '} fallback models     ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
 }
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(fail ? `\n${fail} failing` : '\nall pass');

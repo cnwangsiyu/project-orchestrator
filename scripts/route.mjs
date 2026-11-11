@@ -4,7 +4,7 @@
 //   route <category> [--stakes low|normal|high] [--auto-check] [--failures N] [--writes | --read-only]
 //                    [--against claude|codex] [--no-redeem] [--project SLUG] [--dry]
 //                    [--impact release|service|throwaway]   (required for implement, implement-hard, debug, science)
-//                    [--exclude-account a,b] [--origins p,q] [--mode <orchestrator permission mode>] [--cwd DIR] [--task-dir DIR]
+//                    [--exclude-account a,b] [--exclude-model m,family] [--origins p,q] [--mode <orchestrator permission mode>] [--cwd DIR] [--task-dir DIR]
 //                    [--name NAME] [--fresh] [--json]
 //   route --table          (the routing table: categories, first pick, alternative, escalation ladder)
 //
@@ -16,6 +16,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readState, analyze, leanLines, readProfiles, hours, withLock, SHARED, ROUTE_LOG, POLICY } from './lib/state.mjs';
+import { poolOf } from './lib/trae-health.mjs';
 
 const SKILL = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const RR = process.env.ROUTE_RR || path.join(SHARED, 'route-rotation.txt'); // launch counter for account rotation
@@ -23,6 +24,15 @@ const C = (model, effort) => ({ vendor: 'claude', model, effort });
 const X = (model, effort) => ({ vendor: 'codex', model, effort });
 const SOL = 'gpt-6.1-sol', ASTRA = 'gpt-6-astra', TERRA = 'gpt-6.1-terra', LUNA = 'gpt-6-luna';
 const KIMI = 'kimi-k3'; // TTADK only: a different model family, best planted-bug recall (2026-11-07 tests)
+// Fallback models on a company account, in order, for when its GPT-6.1-Sol is unavailable (paused, restricted, excluded)
+// and as a different-family step after Sol has fallen short (user, 2026-11-10: "某个模型失败的话还有的备选"; keep
+// quality, spend as little personal quota as possible). From the 2026-11-10 benchmark on TRAE (6 hard tasks, 12 runs
+// each; Sol 0.95 at 227 s median): DeepSeek-V4.1-Flash 0.97 at 344 s, 0 false positives in review; Gemini-3.1-Pro 0.99
+// but 715 s and 3 of 12 runs hit the 40-minute limit; DeepSeek-V4-Pro 0.94 at 659 s. Left out: Seed-Evolving (0.87)
+// and Seed-2.1-Pro (0.81), which break output formats, and Cursor's Grok 4.7 (0.50, timeouts and dropped connections).
+// All ran at high effort, so they run at high here. Gemini is the only one that reads images.
+const ALTS = [{ model: 'deepseek-v4.1-flash', effort: 'high' }, { model: 'gemini-3.1-pro-preview', effort: 'high', vision: true }, { model: 'deepseek-v4-pro', effort: 'high' }];
+const isAlt = (x) => x?.vendor === 'codex' && ALTS.some((a) => a.model === x.model);
 
 // The routing table (sources and rationale: references/model-routing.md).
 //   kind: claudeOnly (Claude tools: computer use, browser, Artifact/Docs, peer negotiation) | codexOnly (images) |
@@ -65,13 +75,16 @@ const notch = (m, d, cap = 'xhigh') => {
   const i = EFFORTS.indexOf(m.effort), lo = EFFORTS.indexOf(floorOf(m)), hi = Math.max(EFFORTS.indexOf(cap), i);
   return { ...m, effort: EFFORTS[Math.min(hi, Math.max(lo, i + d))] };
 };
-const label = (m) => `${m.vendor === 'claude' ? `Claude ${m.model}` : `Codex ${m.model}`} ${m.effort}`;
+const label = (m) => `${m.vendor === 'claude' ? `Claude ${m.model}` : isAlt(m) ? m.model : `Codex ${m.model}`} ${m.effort}`;
 
 // ---- args ----
 // --apps a,b: the desktop apps (bundle ids) a computer-use worker may operate; others are declined.
 const BOOL = new Set(['auto-check', 'writes', 'read-only', 'fresh', 'json', 'table', 'no-redeem', 'dry', 'urgent']);
 // --urgent: run now even while TTADK is down for a fixable reason (that work would otherwise wait for the fix).
 // --exclude-account a,b: route around accounts that just failed (e.g. TTADK after a rate-limited retry or an auth error).
+// --exclude-model m,f: route around models (an id, or a family: gpt, deepseek, gemini…) that just failed for
+// infrastructure reasons (queue full, restricted, timed out) on the company account — not a --failures step; also how a
+// review of a fallback model's code keeps that model's family off the reviewer seat.
 // --origins p,q: extra sites (origins or host globs) a Codex browser worker may reach besides POLICY.browserOrigins.
 const argv = process.argv.slice(2), opts = {}, pos = [];
 for (let i = 0; i < argv.length; i++) {
@@ -108,7 +121,7 @@ const IMPACTS = ['release', 'service', 'throwaway'];
 const impact = typeof opts.impact === 'string' ? opts.impact : null;
 if (CODE.includes(cat) && !IMPACTS.includes(impact)) die(`${cat} needs --impact release|service|throwaway — can a mistake be undone within hours by redeploy/rollback without lasting damage? no → release; yes → service; demo/prototype/test script → throwaway`);
 if (impact && !IMPACTS.includes(impact)) die(`--impact takes release, service or throwaway, not ${impact}`);
-const reviewKind = !CODE.includes(cat) ? null : impact === 'throwaway' ? null : impact === 'release' ? (stakes === 'high' ? 'review-high' : 'review') : stakes === 'high' ? 'review-high' : null;
+let reviewKind = !CODE.includes(cat) ? null : impact === 'throwaway' ? null : impact === 'release' ? (stakes === 'high' ? 'review-high' : 'review') : stakes === 'high' ? 'review-high' : null;
 
 // ---- state ----
 const data = readState({ fresh: !!opts.fresh });
@@ -116,6 +129,8 @@ const st = analyze(data);
 const { claude: QC, codex: QX } = st;
 const noRedeem = !!opts['no-redeem'];
 const excluded = new Set((typeof opts['exclude-account'] === 'string' ? opts['exclude-account'] : '').split(',').map((x) => x.trim()).filter(Boolean));
+const exModels = new Set((typeof opts['exclude-model'] === 'string' ? opts['exclude-model'] : '').split(',').map((x) => x.trim().toLowerCase()).filter(Boolean));
+const modelExcluded = (model) => exModels.has(model) || exModels.has(poolOf(model));
 // ChatGPT accounts (the quota-managed ones): out when every open account is spent/excluded and no card is due.
 const chatgptOpen = (QX.open ?? []).filter((r) => !excluded.has(r.a.name));
 const chatgptOut = QX.out || (noRedeem && !QX.pick && !!QX.redeem)
@@ -124,18 +139,22 @@ const chatgptOut = QX.out || (noRedeem && !QX.pick && !!QX.redeem)
 // TTADK (company gateway): preferred for Codex work whenever it is healthy and not excluded (user, 2026-11-07). When it
 // isn't (its daily quota used up, down, or excluded), TRAE CLI — the second company account — takes the same work under
 // the same rules, before personal quota (user, 2026-11-08). TT is whichever company account takes Codex work now.
-const TT = [QX.ttadk, QX.trae].find((a) => a?.usable && !excluded.has(a.name)) ?? null;
+const TT = [QX.ttadk, QX.trae].find((a) => a?.usable && !excluded.has(a.name) && a.models.some((x) => !modelExcluded(x))) ?? null;
 // A TTADK device (a TTADK account is set up here): TTADK always first, and the shared ChatGPT and Claude quota is left
 // for the user's other device, which has no TTADK (user, 2026-11-07). So no rule here spends quota for its own sake:
 // no underused/front-load/expiring effort raises and no extra quota-spending reviews. Without TTADK nothing changes.
 const ttDevice = !!QX.ttadk || !!QX.trae;
-const ttHas = (model) => !!TT && TT.models.includes(model);
+const ttHas = (model) => !!TT && TT.models.includes(model) && !modelExcluded(model);
 // Browser, frontend-visual and desktop-app work runs on a Codex worker when a Codex account can drive Chrome and the
 // desktop: the company account first (TTADK with browser-setup), else a browser-ready ChatGPT account (2026-11-10: on a
 // device without TTADK, e.g. the MacBook, this used to go to Claude even though its Codex accounts can do it); else Claude.
 const ttBrowser = !!TT && !!TT.browser;
 const chatgptBrowser = chatgptOpen.filter((r) => r.a.browser);
 const browserViaCodex = T.kind === 'browser' && (ttBrowser || chatgptBrowser.length > 0);
+// The fallback models the company account can run for this task, best first (ALTS).
+const ttAlts = ALTS.filter((a) => ttHas(a.model) && (cat !== 'image-read' || a.vision)).map((a) => X(a.model, a.effort));
+// A fallback of a different family from model x (a reviewer or a retry that doesn't share x's blind spots).
+const altOtherThan = (x) => ttAlts.find((a) => poolOf(a.model) !== poolOf(x?.model)) ?? null;
 const codexOut = chatgptOut && !TT; // Codex is out only when neither TTADK nor a ChatGPT account can take work
 const why = [], needsOK = [], tell = [], notes = [];
 const claudeAllowed = (kind) => {
@@ -152,7 +171,7 @@ const allowed = (x) => (x.vendor === 'claude' ? claudeAllowed(T.kind) : T.kind =
 // quota allows. --failures N takes step N, so each failure moves up even when some steps are ruled out.
 let base;
 if (cat === 'second-opinion') {
-  base = opts.against === 'claude' ? [T.first, ...T.ladder] : [T.alt, C('opus', 'xhigh'), ...(TT && ttHas(SOL) ? [X(SOL, 'xhigh')] : [])];
+  base = opts.against === 'claude' ? [T.first, ...T.ladder] : [T.alt, C('opus', 'xhigh'), ...(TT && ttHas(SOL) ? [X(SOL, 'xhigh')] : ttAlts.slice(0, 1))];
   why.push(`second opinion from the other vendor than ${opts.against}`);
 }
 else if (T.kind === 'browser' && !browserViaCodex) base = [T.alt, C('opus', 'high')];
@@ -165,10 +184,18 @@ else base = [T.first, ...T.ladder];
 // its local proxy (ttadk-setup sets it up: TT.search); without it research follows the earlier routing.
 const ttTaskOK = T.kind !== 'claudeOnly' && cat !== 'image-gen' && !(authorCodex && cat === 'review-high')
   && !(cat === 'second-opinion' && opts.against === 'codex');
-const ttCapable = !!TT && ttHas(SOL) && ttTaskOK && !(cat === 'research' && !TT.search) && !(T.kind === 'browser' && !ttBrowser);
+const ttCapable = !!TT && (ttHas(SOL) || ttAlts.length > 0) && ttTaskOK && !(cat === 'research' && !TT.search) && !(T.kind === 'browser' && !ttBrowser);
 const ei = (e) => EFFORTS.indexOf(e);
 const maxE = (a, b) => (ei(a) >= ei(b) ? a : b);
-if (ttCapable) {
+if (ttCapable && !ttHas(SOL)) {
+  // GPT-6.1-Sol unavailable on the company account (its GPT family paused or restricted, or excluded for this task):
+  // the fallback models in order, then the row's own Claude steps. Company quota, so no question; personal quota (the
+  // Claude steps) only after these have fallen short.
+  const gone = modelExcluded(SOL) ? `excluded for this task (--exclude-model ${[...exModels].join(',')})` : TT.poolPauses?.gpt ? `paused: ${TT.poolPauses.gpt.reason}` : 'not listed';
+  why.push(`GPT-6.1-Sol on ${TT.name} ${gone} → its fallback models: ${ttAlts.map(label).join(' → ')}`);
+  base = [...ttAlts, ...base.filter((x) => x.vendor === 'claude')];
+}
+else if (ttCapable) {
   // TTADK is the company's quota, so quality may cost TTADK effort but not personal quota (user, 2026-11-07):
   // - start at the higher of the row's first-pick effort and its Sol alternative's (design: Opus high / Sol xhigh →
   //   Sol xhigh); at least high for the rows Claude is better at or that need judgment (docs, research, image-read,
@@ -190,7 +217,11 @@ if (ttCapable) {
   const cheapRow = ['lookup', 'extract', 'draft', 'browser', 'computer-use'].includes(cat); // browser/desktop misses are UI trouble, not depth
   const rungs = [e0];
   while (ei(rungs.at(-1).effort) < ei('xhigh')) rungs.push(notch(rungs.at(-1), +1));
+  // After Sol xhigh has fallen short, a different model family before Sol max (its misses rarely overlap Sol's: Kimi,
+  // 2026-11-07; DeepSeek, 2026-11-10), and the second fallback after Sol max — all before personal quota.
+  if (ttAlts[0]) rungs.push(ttAlts[0]);
   if (!cheapRow) rungs.push(X(SOL, 'max'));
+  if (!cheapRow && ttAlts[1]) rungs.push(ttAlts[1]);
   let top = ei(rungs.at(-1).effort);
   for (const x of base) {
     if (x.vendor === 'codex') {
@@ -277,9 +308,9 @@ const tune = (x, f, log) => {
   if (x.vendor === 'claude' && x.model === 'fable' && QC.avoidFable) { x = C('opus', 'xhigh'); log('Fable window nearly used → Opus xhigh'); }
   return x;
 };
-if (m && onTTADK(m) && !ttHas(m.model)) {
-  const sub = notch(X(SOL, m.effort), 0);
-  why.push(`${m.model} isn't on the TTADK gateway and the ChatGPT accounts are out → ${label(sub)} on TTADK`);
+if (m && onTTADK(m) && !ttHas(m.model) && (ttHas(SOL) || ttAlts.length)) {
+  const sub = ttHas(SOL) ? notch(X(SOL, m.effort), 0) : ttAlts[0];
+  why.push(`${m.model} isn't on ${TT.name} and the ChatGPT accounts are out → ${label(sub)} on ${TT.name}`);
   m = sub;
 }
 if (m) {
@@ -289,6 +320,9 @@ if (m) {
     why.push(`same ${label(m)} as the previous attempt: a quota notch already raised that one, and the quota rules leave no stronger step`);
     notes.push(`this retry is not stronger than the one that fell short: its only lever is the brief — put the failure's concrete findings (review items, failing test, symptom) in it`);
   }
+  // Code a fallback model writes for a live service gets the routine review too (free on the company account): the
+  // benchmark behind ALTS is 12 runs per model, too few to trust them unchecked where a mistake reaches users.
+  if (isAlt(m) && CODE.includes(cat) && impact === 'service' && !reviewKind) { reviewKind = 'review'; why.push(`${m.model} is a fallback model: its service code gets a review`); }
   // ---- 3. gates ----
   if (m.model === 'fable') needsOK.push('Fable (2x Opus per token, and its own weekly cap, which the orchestrators run on)');
   if (m.model === ASTRA) needsOK.push('Astra (5x Sol usage)');
@@ -300,15 +334,20 @@ if (m) {
 let second = m && T.second ? T.second : null;
 if (second && m.vendor === second.vendor) second = second.vendor === 'codex' ? C('opus', 'xhigh') : X(SOL, 'xhigh');
 // Claude has no room for the cross-vendor second opinion: a fresh TTADK reviewer stands in rather than dropping it.
-if (second && !allowed(second) && second.vendor === 'claude' && TT && ttHas(SOL)) { second = X(SOL, 'xhigh'); notes.push('Claude has no room for the second opinion: a fresh TTADK Sol reviewer stands in (same model family as the first; say so in the report)'); }
+// A fallback model of another family is preferred over a fresh Sol: a different family has different blind spots.
+if (second && !allowed(second) && second.vendor === 'claude' && TT && (altOtherThan(m) || ttHas(SOL))) {
+  const alt = altOtherThan(m);
+  second = alt ?? X(SOL, 'xhigh');
+  notes.push(alt ? `Claude has no room for the second opinion: ${label(alt)} on ${TT.name} stands in (a different model family from the first)` : `Claude has no room for the second opinion: a fresh ${TT.name} Sol reviewer stands in (same model family as the first; say so in the report)`);
+}
 if (second && !allowed(second)) second = null;
 // A Codex-written change reviewed on TTADK gets a second free reviewer from a different model family: Kimi-K3 found
 // every planted defect where Sol missed some, and their misses didn't overlap (user, 2026-11-07). Sol when the gateway
 // doesn't list Kimi.
 let ttSecondReviewer = false;
 if (!second && m && cat === 'review' && authorCodex && onTTADK(m)) {
-  second = ttHas(KIMI) ? X(KIMI, 'high') : X(SOL, 'xhigh'); ttSecondReviewer = true;
-  notes.push(`second TTADK reviewer (free): ${second.model === KIMI ? 'Kimi-K3, a different model family,' : 'a fresh Sol thread'} with a different focus — failure paths, concurrency, input edge cases and tests rather than the main logic; merge both reports and keep only P0/P1 items (references/review-rubric.md)`);
+  second = ttHas(KIMI) && poolOf(m.model) !== 'kimi' ? X(KIMI, 'high') : altOtherThan(m) ?? X(SOL, 'xhigh'); ttSecondReviewer = true;
+  notes.push(`second ${TT.kind === 'trae' ? 'TRAE' : 'TTADK'} reviewer (free): ${second.model === KIMI ? 'Kimi-K3, a different model family,' : isAlt(second) ? `${second.model}, a different model family,` : 'a fresh Sol thread'} with a different focus — failure paths, concurrency, input edge cases and tests rather than the main logic; merge both reports and keep only P0/P1 items (references/review-rubric.md)`);
 }
 // Its point is to spend Codex quota that would otherwise be lost, so: only where the review policy wants a review anyway
 // (release code, or service code at high stakes; user, 2026-11-07), and never on a TTADK device, whose quota is left
@@ -382,7 +421,7 @@ const launch = (x, shape = T.shape, acct = pickAcct) => {
 };
 // The same quality gate for both vendors, so outcomes compare: code work gets an independent review before it's accepted.
 // Review only where a mistake is costly to undo; reviewers follow references/review-rubric.md (blocking issues only).
-if (m && reviewKind) notes.push(`review required (impact ${impact}${stakes === 'high' ? ', high stakes' : ''}): after the worker reports, route.mjs ${reviewKind} --author ${m.vendor} --project ${typeof opts.project === 'string' ? opts.project : '<slug>'} --name ${name}-R; brief the reviewer with references/review-rubric.md (blocks only on P0/P1, at most 2 rounds); then record with scripts/outcome.mjs --reviewed`);
+if (m && reviewKind) notes.push(`review required (impact ${impact}${stakes === 'high' ? ', high stakes' : ''}${isAlt(m) ? `, written by fallback model ${m.model}` : ''}): after the worker reports, route.mjs ${reviewKind} --author ${m.vendor}${isAlt(m) ? ` --exclude-model ${poolOf(m.model)}` : ''} --project ${typeof opts.project === 'string' ? opts.project : '<slug>'} --name ${name}-R; brief the reviewer with references/review-rubric.md (blocks only on P0/P1, at most 2 rounds); then record with scripts/outcome.mjs --reviewed`);
 else if (m && CODE.includes(cat)) notes.push(`no review (impact ${impact}${impact === 'service' ? ', not high stakes' : ''}): accept on your own check (tests, build, acceptance), then record with scripts/outcome.mjs`);
 else if (m && cat !== 'review' && cat !== 'review-high' && cat !== 'second-opinion') notes.push('when the task ends: record it with scripts/outcome.mjs (pass | rework --rounds N | fail)');
 // Fixed safety clauses for anything that writes or touches devices (SKILL.md, "Give each worker a self-contained brief").
@@ -402,11 +441,13 @@ if (m && ['browser', 'ui-browser'].includes(cat)) notes.push('brief: include the
 // Every worker can search the web (Codex and Claude Code have it on by default; TTADK through its proxy).
 if (m) notes.push('brief: web searches go to the public internet — never put internal code, internal project or product names, people, internal URLs or secrets into a search query; search for the public topic only');
 if (ttadkRun && TT.kind === 'trae') {
-  notes.push(`on TRAE CLI (account ${TT.name}; TTADK is ${QX.ttadk ? 'out' : 'absent'}): a popular model may sit queued ("Queued for capacity") — if a worker shows no progress for 15 minutes, interrupt it and re-route with --exclude-account ${TT.name}; on failures for TRAE reasons (login, gateway errors) re-route the same way. codex-worker records its failures (repeated ones pause TRAE: queue full 5→10→20→30 min, quota/ban/auth 30 min; quota.mjs/route.mjs then skip it); for a failed or interrupted traecli exec run, or one you interrupted, record it yourself: node ${SKILL}/scripts/codex-worker.mjs --account ${TT.name} note-failure "<error>"`);
+  notes.push(`on TRAE CLI (account ${TT.name}; TTADK is ${QX.ttadk ? 'out' : 'absent'}): a popular model may sit queued ("Queued for capacity") — if a worker shows no progress for 15 minutes, interrupt it and re-route with --exclude-model ${poolOf(m.model)} (the next model family takes it; an infrastructure miss, so the same --failures); on account failures (login, auth) re-route with --exclude-account ${TT.name}. codex-worker records failures per model family (repeated ones pause that family: queue full 5→10→20→30 min, restricted/quota 30→60→120→240 min; auth pauses the account; route.mjs then uses the next family); for a failed or interrupted traecli exec run, record it yourself: node ${SKILL}/scripts/codex-worker.mjs --account ${TT.name} note-failure --model ${m.model} "<error>"`);
   notes.push('brief (TRAE): no ChatGPT browser here — for a web page use the playwright MCP tools (a separate headless Chrome, no user sign-ins); git commits must carry no co-author or tool trailer');
   if (!TT.live && T.shape !== 'exec') notes.push(`TRAE hub is down: start it first — node ${SKILL}/scripts/codex-worker.mjs --account ${TT.name} hub`);
 }
-else if (ttadkRun) {
+if (ttadkRun && m.model === 'gemini-3.1-pro-preview') notes.push('Gemini-3.1-Pro ran past 40 minutes in 3 of 12 benchmark runs: if it shows no progress for 20 minutes, or runs past twice what the task should take, interrupt it and re-route with --exclude-model gemini (same --failures)');
+if (ttadkRun && isAlt(m)) notes.push(`brief (${m.model}): state the exact output format and the done check; it has no ChatGPT browser or image tools`);
+if (ttadkRun && TT.kind !== 'trae') {
   if (TT.search) notes.push(`TTADK runs through its local proxy (web search): exit 6 with proxy-unavailable → re-route with --exclude-account ${TT.name}`);
   else notes.push(`this TTADK account has no web search (rerun codex-worker.mjs ttadk-setup to add its proxy): if the task turns out to need the web, re-route it as research`);
   notes.push(`on TTADK (account ${TT.name}): if the run fails rate-limited (QPM / concurrency), retry it once there; if it fails again, or fails for TTADK reasons (SSO, auth, gateway errors), re-route with --exclude-account ${TT.name}`);
