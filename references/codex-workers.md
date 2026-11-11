@@ -261,6 +261,11 @@ app's unified-computer-use plugin, enabled on the app's own home). codex-worker 
 `--computer-use-apps` (2026-11-10: it used to accept only `node_repl`, so on the MacBook's `main` every site was declined
 as "The user declined approval"). Each answer is logged to `--log` as `accessApproval`; an unrecognised request is
 declined and logged with its raw content.
+Browser and desktop threads (`--browser-origins` / `--computer-use-apps`) start with the ChatGPT app's
+unified-computer-use plugin turned off for that thread and `approvalsReviewer: "user"` (2026-11-10): under the CLI hub,
+`cua_repl` accepted the site approval and then failed every call with "Cannot read properties of undefined (reading
+'timeoutMs')", and an account set to auto-review declined approvals itself. They use `node_repl` with the chrome plugin
+instead, the path verified on TTADK and `b`. Only that thread changes; the app keeps its plugin.
 `route.mjs` sends browser, ui-browser and computer-use work to TTADK when it is browser-ready, else to a browser-ready
 ChatGPT account, else to Claude. On a new machine: install the ChatGPT app and its Chrome extension, then run
 `browser-setup` for every other account (`--account b`).

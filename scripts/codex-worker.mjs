@@ -571,8 +571,16 @@ try {
   await init();
   if (cmd === 'start') {
     if (!opts.cwd || !text) die('start needs --cwd and a prompt');
+    // Browser / desktop threads (2026-11-10, the MacBook's main account): the ChatGPT app's unified-computer-use plugin
+    // (cua_repl) needs the app's own runtime — under the CLI hub it accepted the site approval, then failed every call
+    // with "Cannot read properties of undefined (reading 'timeoutMs')"; and an account set to auto-review declined the
+    // approvals itself. So these threads turn that plugin off (node_repl + the chrome plugin remain, the path verified on
+    // TTADK and b) and route approvals to this client, which answers them from --browser-origins / --computer-use-apps.
+    // Per thread only: the app keeps using its plugin. (A dotted "plugins.…" key doesn't take effect; the nested form does.)
+    const browserThread = CU_APPS.length > 0 || BU_ORIGINS.length > 0;
     const th = await call('thread/start', {
       cwd: path.resolve(opts.cwd), model: opts.model, sandbox: opts.sandbox, approvalPolicy: APPROVAL_POLICY,
+      ...(browserThread ? { approvalsReviewer: 'user', config: { plugins: { 'unified-computer-use@openai-bundled': { enabled: false } } } } : {}),
     });
     const threadId = th.thread?.id ?? th.threadId;
     if (opts.name) await call('thread/name/set', { threadId, name: opts.name }).catch(() => {});
