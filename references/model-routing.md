@@ -111,6 +111,17 @@ To change routing for a kind of task, edit the table in `route.mjs` and this rat
    - The launcher is `codex exec` with that account's `CODEX_HOME` for one-shot rows, the hub `codex-worker` for
      the rest, and a `claude --bg` worker for Claude (never an Agent subagent).
 
+## Claude models against Anthropic's selection guide (checked 2026-11-10)
+
+Source: https://claude.dev/blog/which-claude-model-should-you-build-with/ . What matches: code picks the model; the
+expensive model keeps its context for decisions and cheaper workers do the reading; effort before model; Sonnet for
+repeated well-defined agent work; Haiku for the simplest. Orchestrators run on Fable (user's choice: leading many
+workers, long unattended runs) at `medium` effort, set in each session's respawn flags.
+- The guide's "past `high`, try the next model up at a lower effort" (Fable `high` matched Opus `max` at about half the
+  cost per task) would turn the Opus `xhigh` steps into Fable steps. Not applied (user, 2026-11-10): the orchestrators
+  already use Fable's own weekly window (projected over 100% a day after moving them), and Fable needs the user's OK.
+  Revisit when the Fable window has room.
+
 ## Codex accounts: TTADK first (user, 2026-11-07)
 
 - **TTADK first, for everything its Sol can handle.** When the TTADK company gateway is healthy (CLI present, SSO

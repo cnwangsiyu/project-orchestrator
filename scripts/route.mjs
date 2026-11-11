@@ -285,7 +285,7 @@ if (m) {
     notes.push(`this retry is not stronger than the one that fell short: its only lever is the brief — put the failure's concrete findings (review items, failing test, symptom) in it`);
   }
   // ---- 3. gates ----
-  if (m.model === 'fable') needsOK.push('Fable (≈3x Opus cost, own weekly cap)');
+  if (m.model === 'fable') needsOK.push('Fable (2x Opus per token, and its own weekly cap, which the orchestrators run on)');
   if (m.model === ASTRA) needsOK.push('Astra (5x Sol usage)');
   // onTTADK also matches the TRAE fallback; only the actual TTADK account has the max-effort exemption.
   if (m.effort === 'max' && !(onTTADK(m) && TT === QX.ttadk)) needsOK.push('max effort'); // user, 2026-11-07
