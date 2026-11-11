@@ -276,6 +276,11 @@ The chrome plugin used for that bootstrap is the copy the installed ChatGPT app 
 service; a newer cached plugin with an older app (MacBook, app 26.1007, 2026-11-10) opened tabs and then failed every
 page call with "Cannot read properties of undefined (reading 'timeoutMs')". Keep the ChatGPT app up to date on every
 machine that runs browser workers.
+- **App older than its Chrome extension.** The extension (`hehggadaopoacecdllhhajmbjkdcmajg`, under
+  `~/Library/Application Support/Google/Chrome/*/Extensions/`) updates itself; the app doesn't. App 26.1007 with
+  extension 1.26.1102 (MacBook, 2026-11-10) connected and opened tabs, then every page call failed with "Cannot read
+  properties of undefined (reading 'timeoutMs')"; updating the app and restarting Chrome fixed it. codex-worker checks
+  this before a browser thread starts and exits 7 with `browser-version-mismatch:` — ask the user to update the app.
 `route.mjs` sends browser, ui-browser and computer-use work to TTADK when it is browser-ready, else to a browser-ready
 ChatGPT account, else to Claude. On a new machine: install the ChatGPT app and its Chrome extension, then run
 `browser-setup` for every other account (`--account b`).

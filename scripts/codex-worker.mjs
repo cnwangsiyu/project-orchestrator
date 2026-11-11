@@ -396,6 +396,27 @@ const originAllowed = (origin) => {
 // The per-app / per-site approvals only reach this client when the thread asks on request; under never, Codex declines
 // them itself. Other requests still get the refusals in REPLIES, so the sandbox stays the only bound.
 const APPROVAL_POLICY = CU_APPS.length || BU_ORIGINS.length ? 'on-request' : 'never';
+// The ChatGPT app (node_repl, browser service, chrome plugin) must not be older than its Chrome extension, which updates
+// itself: app 26.1007 with extension 1.26.1102 (MacBook, 2026-11-10) opened tabs, then failed every page call with
+// "Cannot read properties of undefined (reading 'timeoutMs')". Returns a message when the app is older, else null.
+const appOlderThanExtension = () => {
+  try {
+    const app = execFileSync('/usr/libexec/PlistBuddy', ['-c', 'Print :CFBundleShortVersionString', '/Applications/ChatGPT.app/Contents/Info.plist'], { encoding: 'utf8' }).trim();
+    const root = path.join(os.homedir(), 'Library', 'Application Support', 'Google', 'Chrome');
+    const exts = [];
+    for (const prof of fs.readdirSync(root)) {
+      const d = path.join(root, prof, 'Extensions', 'hehggadaopoacecdllhhajmbjkdcmajg');
+      try { for (const v of fs.readdirSync(d)) exts.push(v.replace(/_\d+$/, '')); } catch {}
+    }
+    const key = (v) => v.split('.').map(Number).filter((n) => Number.isFinite(n));
+    const a = key(app).slice(0, 2), newest = exts.map((v) => key(v).slice(1, 3)).sort((x, y) => x[0] - y[0] || x[1] - y[1]).pop();
+    if (!newest || a.length < 2) return null;
+    return newest[0] > a[0] || (newest[0] === a[0] && newest[1] > a[1])
+      ? `the ChatGPT app (${app}) is older than its Chrome extension (${exts.sort().pop()}): page calls would fail with "reading 'timeoutMs'". Ask the user to update the ChatGPT app, then restart Chrome`
+      : null;
+  } catch { return null; }
+};
+if (BU_ORIGINS.length && (cmd === 'start' || cmd === 'turn')) { const old = appOlderThanExtension(); if (old) die(`browser-version-mismatch: ${old}`, 7); }
 if (CU_APPS.length && (cmd === 'start' || cmd === 'turn') && screenLocked()) die("the screen is locked: Computer Use sees no windows while the Mac is locked (the ChatGPT app's Locked use is reserved to its own turns). Unlock it, or keep it unlocked while computer-use workers run.", 5);
 const hub = process.env.CODEX_HUB || 'ws://127.0.0.1:47321';
 const ready = () => fetch(hub.replace(/^ws/, 'http') + '/readyz', { signal: AbortSignal.timeout(2000) }).then((r) => r.ok, () => false);
