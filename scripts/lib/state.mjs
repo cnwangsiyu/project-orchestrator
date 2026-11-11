@@ -3,9 +3,9 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { readPause, readPoolPauses, liftAuthPause, poolOf } from './trae-health.mjs';
+import { readPause, readPoolPauses, liftAuthPause, poolOf, claimProbes } from './trae-health.mjs';
 
 export const now = Date.now();
 
@@ -547,6 +547,11 @@ export const analyze = (data) => {
   const tr = (data.codexAccounts ?? []).find((a) => a.kind === 'trae') ?? null;
   // Pauses are read live here (the quota cache is up to 10 minutes old): a paused model family's models are left out
   // of .models, so route.mjs moves to the next family; an account pause makes TRAE unusable.
+  // A family whose hard pause has ended gets a recovery probe in the background (lib/trae-health.mjs); it stays out of
+  // routing until the probe succeeds. TRAE_PROBE=0 turns this off (tests).
+  if (tr?.home && tr.healthy && process.env.TRAE_PROBE !== '0') for (const d of claimProbes(tr.home)) {
+    try { spawn(process.execPath, [WORKER, '--account', tr.name, 'probe', '--model', d.model], { detached: true, stdio: 'ignore', cwd: os.homedir() }).unref(); } catch {}
+  }
   const poolPauses = tr?.home ? readPoolPauses(tr.home) : {};
   const acctPause = tr?.home ? readPause(tr.home) : null;
   const trae = tr ? { name: tr.name, kind: 'trae', home: tr.home, healthy: !!tr.healthy && !acctPause, reason: acctPause ? `paused until ${new Date(acctPause.pausedUntil).toLocaleTimeString()} after worker failures (${acctPause.reason})` : tr.reason,
@@ -622,7 +627,7 @@ export const leanLines = (st, data) => {
     if (TR.usable && !T?.usable) out.push(`TRAE next: with TTADK ${T ? 'out' : 'absent'}, work TTADK would take runs on TRAE CLI (account ${TR.name}, GPT-6.1-Sol, then DeepSeek-V4.1-Flash / Gemini-3.1-Pro when GPT fails or is paused; route.mjs does this) before personal quota; browser, desktop apps and images stay off TRAE`);
     else if (TR.usable) out.push(`TRAE CLI (account ${TR.name}) is the fallback after TTADK, before personal quota`);
     else out.push(`TRAE CLI unavailable — ${TR.reason}`);
-    for (const [pool, r] of Object.entries(TR.poolPauses ?? {})) out.push(`TRAE ${pool} models paused until ${fmt(r.pausedUntil)} (${String(r.reason).slice(0, 120)}): route.mjs uses the next model family meanwhile`);
+    for (const [pool, r] of Object.entries(TR.poolPauses ?? {})) out.push(`TRAE ${pool} models ${r.pausedUntil > Date.now() ? `paused until ${fmt(r.pausedUntil)}, then probed` : 'being probed for recovery'} (${String(r.reason).slice(0, 120)}): route.mjs uses the next model family meanwhile`);
     if (TR.healthy && !TR.live) out.push(`TRAE hub down — start it before hub workers: codex-worker.mjs --account ${TR.name} hub (traecli exec runs don't need it)`);
   }
   if (X.redeem && T) out.push(`reset card due${multi ? ` on ${who(X.redeem)}` : ''}: ${X.redeem.cp.line} — on this TTADK device ask the user only when route.mjs prints redeemFirst (ChatGPT-only work landing on that account); the other device spends that quota`);

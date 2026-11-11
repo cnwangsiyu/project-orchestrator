@@ -17,6 +17,13 @@
 // (a traecli exec run noted by hand without --model), pause the whole account.
 //   <trae home>/worker-health.json  {"failures":[{"t","why"}],"pausedUntil","reason","kind","streak",
 //                                    "pools":{"gpt":{"failures","pausedUntil","reason","kind","streak"}}}
+//
+// Recovery by probe (user, 2026-11-10: find out soon when GPT is back, without spending real tasks on it): a family's
+// hard pause (restricted, quota, banned) lasts 30 minutes, no longer backing off. When it ends, the family stays out of
+// routing until a probe — a tiny one-line turn on that family's model (`codex-worker --account trae probe`, started in
+// the background by lib/state.mjs when it reads the state) — succeeds; a failed probe pauses it another 30 minutes. So
+// a recovery is seen within about 30 minutes of a routing or quota read, and no real task fails to find it out.
+// Transient pauses (queue full) still just end: the next real task is the test.
 //   <trae home>/thread-models.json  {"<thread id>":"<model>"}  (so a later turn or wait on a thread knows its model)
 import fs from 'node:fs';
 import path from 'node:path';
@@ -65,6 +72,7 @@ const step = (rec, why, now) => {
   // A new pause starts the next backoff step and clears the failures that caused it.
   return p ? { failures: [], pausedUntil: p.pausedUntil, reason: p.reason, kind: p.kind, streak: streak + 1 } : { ...rec, failures };
 };
+export const PROBE_EVERY_MIN = 30, PROBE_STALE_MIN = 10;
 // Returns the pause now in force for what failed (the account, or the model's family, with .pool set), or null.
 export const noteFailure = (home, why, now = Date.now(), model = null) => {
   const rec = read(home);
@@ -75,7 +83,11 @@ export const noteFailure = (home, why, now = Date.now(), model = null) => {
     write(home, out);
     return out.pausedUntil && out.pausedUntil > now ? out : null;
   }
-  const pr = step(rec.pools?.[pool] ?? { failures: [] }, why, now);
+  const prev = rec.pools?.[pool] ?? { failures: [] };
+  let pr = step(prev, why, now);
+  // A family's hard pause is a fixed 30 minutes: the probe, not a longer wait, decides when it is back.
+  if (pr.kind === 'hard' && pr.pausedUntil > now && pr !== prev && pr.failures.length === 0) pr = { ...pr, pausedUntil: now + PROBE_EVERY_MIN * 60000, reason: String(pr.reason).replace(/\(paused \d+ min\)$/, `(paused ${PROBE_EVERY_MIN} min, then probed)`) };
+  pr = { ...pr, model: model ?? prev.model ?? null, probingAt: null };
   write(home, { ...rec, failures: rec.failures ?? [], pools: { ...(rec.pools ?? {}), [pool]: pr } });
   return pr.pausedUntil && pr.pausedUntil > now ? { ...pr, pool } : null;
 };
@@ -86,9 +98,28 @@ export const noteSuccess = (home, model = null) => {
   write(home, { failures: [], pausedUntil: null, reason: null, kind: null, streak: 0, ...(Object.keys(pools).length ? { pools } : {}) });
 };
 export const readPause = (home, now = Date.now()) => { const r = read(home); return r.pausedUntil && r.pausedUntil > now ? r : null; };
-// The families paused now: {pool: record}.
+// The families out of routing now: {pool: record} — paused, or a hard pause that ended and awaits its probe.
+const awaitingProbe = (r, now) => r?.kind === 'hard' && r.pausedUntil && r.pausedUntil <= now;
 export const readPoolPauses = (home, now = Date.now()) =>
-  Object.fromEntries(Object.entries(read(home).pools ?? {}).filter(([, r]) => r?.pausedUntil && r.pausedUntil > now));
+  Object.fromEntries(Object.entries(read(home).pools ?? {}).filter(([, r]) => (r?.pausedUntil && r.pausedUntil > now) || awaitingProbe(r, now))
+    .map(([k, r]) => [k, awaitingProbe(r, now) ? { ...r, reason: `${r.reason}; awaiting a recovery probe` } : r]));
+// Families whose hard pause has ended and that no probe is checking now: [{pool, model}]. Marks them as being probed.
+export const claimProbes = (home, now = Date.now()) => {
+  const rec = read(home), due = [];
+  for (const [pool, r] of Object.entries(rec.pools ?? {}))
+    if (awaitingProbe(r, now) && r.model && !(r.probingAt && now - r.probingAt < PROBE_STALE_MIN * 60000)) { due.push({ pool, model: r.model }); rec.pools[pool] = { ...r, probingAt: now }; }
+  if (due.length) write(home, rec);
+  return due;
+};
+// A probe's result: success clears the family; failure pauses it another PROBE_EVERY_MIN minutes.
+export const probeResult = (home, model, ok, why = '', now = Date.now()) => {
+  const rec = read(home), pool = poolOf(model);
+  if (!pool || !rec.pools?.[pool]) return;
+  if (ok) delete rec.pools[pool];
+  else rec.pools[pool] = { ...rec.pools[pool], failures: [], pausedUntil: now + PROBE_EVERY_MIN * 60000, probingAt: null, kind: 'hard',
+    reason: `recovery probe failed (${String(why).slice(0, 160)}); next probe in ${PROBE_EVERY_MIN} min` };
+  write(home, rec);
+};
 // An auth pause ends once the CLI is logged in again (quota.mjs calls this after a good `login status`).
 export const liftAuthPause = (home) => { const r = read(home); if (r.kind === 'auth') write(home, { ...r, pausedUntil: null, reason: null, kind: null }); };
 // Thread → model, so a `turn` or `wait` on an existing thread records failures against the right family.

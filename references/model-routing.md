@@ -159,6 +159,8 @@ workers, long unattended runs) at `medium` effort, set in each session's respawn
       fresh Sol; so is the stand-in when Claude has no room for a second opinion.
     - **Infrastructure misses are not failures**: a fallback model that times out, queues or is restricted on one task is
       re-routed with `--exclude-model <model or family>` and the same `--failures`; `--failures` counts quality misses.
+    - **Recovery**: a family paused as restricted is probed every 30 minutes with a one-line turn and comes back as soon
+      as a probe passes (codex-workers.md, "Recovery probe"); real tasks keep going to the fallbacks meanwhile.
     - Outcomes are logged per model (route log `pick.model`), so the nightly review's model view can reorder ALTS once
       real tasks outnumber the benchmark.
   - **TTADK's quota is daily, not unlimited** (about 500M tokens per user per day, shared by all models, resets 16:00

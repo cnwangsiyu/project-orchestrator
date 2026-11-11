@@ -253,7 +253,14 @@ personal quota appears only when both company accounts are out. The user chose n
     account's GPT models on 2026-11-10 after about 1.3B tokens in a day; Gemini/Seed/DeepSeek kept working): 30 minutes,
     then 60, 120, at most 240 while they keep coming without a success. codex-worker prints `trae-paused:` when it pauses. A `traecli exec` run bypasses codex-worker: record its failure
   (or a run you interrupted) with `codex-worker.mjs --account trae note-failure --model <model> "<error>"`. To lift a
-  pause by hand, delete `~/.trae/worker-health.json`. Verified 2026-11-10: a DeepSeek-V4.1-Flash hub worker on TRAE
+  pause by hand, delete `~/.trae/worker-health.json`.
+- **Recovery probe** (user, 2026-11-10: notice soon when GPT is back, without failing real tasks). A model family's
+  hard pause (restricted, quota, banned) is a fixed 30 minutes instead of backing off. When it ends the family stays
+  out of routing until a probe succeeds: the next `route.mjs`/`quota.mjs` read starts `codex-worker.mjs --account trae
+  probe --model <its model>` in the background (one read-only "reply OK" turn at low effort through `traecli exec`).
+  OK → the family is back (verified end to end 2026-11-10: about 20 seconds); failure → 30 more minutes, then the next
+  probe. A recovery is seen within about 30 minutes, and no real task is spent on it. Transient pauses (queue full)
+  still just end. The whole-account pauses (auth, or failures noted without `--model`) keep the backoff above. Verified 2026-11-10: a DeepSeek-V4.1-Flash hub worker on TRAE
   searches the web like Sol does.
 
 ## Browser use (and Computer Use) on a Codex worker (verified 2026-11-07)

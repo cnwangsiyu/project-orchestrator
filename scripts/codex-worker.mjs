@@ -12,6 +12,7 @@
 //   codex-worker [--account ttadk] proxy                                   (start/check TTADK's local proxy: web search)
 //   codex-worker trae-setup [--name trae] [--port N]                      (TRAE CLI as an account: its app-server is the hub)
 //   codex-worker --account trae note-failure [--model M] "<error>"        (record a failed traecli exec run; see lib/trae-health.mjs)
+//   codex-worker --account trae probe --model M                          (recovery probe of a paused model family; lib/state.mjs starts it)
 //   codex-worker wait   --thread ID [--log FILE] [--out FILE]            (start/turn/wait take --stall-min M, default 30)
 //   codex-worker steer  --thread ID                                                                     "<message>"
 //   codex-worker interrupt --thread ID
@@ -40,7 +41,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { noteFailure, noteSuccess, rememberThreadModel, threadModel } from './lib/trae-health.mjs';
+import { noteFailure, noteSuccess, rememberThreadModel, threadModel, probeResult } from './lib/trae-health.mjs';
 // What a TRAE pause covers: one model family (route.mjs moves to the next family) or the whole account.
 const pausedWhat = (p) => (p.pool ? `TRAE's ${p.pool} models are paused` : 'TRAE is paused');
 
@@ -297,6 +298,22 @@ ${keep ? `\n# --- previous config ---\n${keep}` : ''}`);
 // without TRAE's co-author line, live web search, the playwright MCP server, and network in workspace-write (as TTADK);
 // then registers the account.
 // A traecli exec run bypasses this script: the orchestrator records its failure here (route.mjs says so).
+// Recovery probe (lib/trae-health.mjs): one tiny read-only turn on the paused family's model via traecli exec.
+if (cmd === 'probe') {
+  if (PROF?.kind !== 'trae' || typeof opts.model !== 'string') die('probe is for the TRAE account: --account trae probe --model M');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'trae-probe-'));
+  let out = '', ok = false;
+  try {
+    out = execFileSync(PROF.bin ?? 'traecli', ['exec', '--skip-git-repo-check', '-C', dir, '-s', 'read-only', '-m', opts.model, '-c', 'model_reasoning_effort="low"', '--json', 'Reply with the single word OK.'],
+      { encoding: 'utf8', timeout: 180000, stdio: ['ignore', 'pipe', 'pipe'] });
+    ok = /"type":"turn\.completed"/.test(out) && !/"type":"(turn\.failed|error)"/.test(out);
+  } catch (e) { out = String(e.stdout ?? '') + String(e.stderr ?? e.message); }
+  fs.rmSync(dir, { recursive: true, force: true });
+  const why = ok ? '' : (/"message":"([^"]{1,200})/.exec(out)?.[1] ?? out.trim().split('\n').at(-1) ?? 'failed').slice(0, 200);
+  probeResult(PROF.home, opts.model, ok, why);
+  console.log(ok ? `probe ok: ${opts.model} answers again; its family is back in routing` : `probe failed: ${opts.model} — ${why}`);
+  process.exit(ok ? 0 : 1);
+}
 if (cmd === 'note-failure') {
   if (PROF?.kind !== 'trae') die('note-failure is for the TRAE account (--account trae)');
   const p = noteFailure(PROF.home, pos.join(' ') || 'traecli exec failed', Date.now(), typeof opts.model === 'string' ? opts.model : null);

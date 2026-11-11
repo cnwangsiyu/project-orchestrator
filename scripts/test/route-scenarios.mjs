@@ -247,7 +247,7 @@ const run = (sc, args0) => {
   if (CODE.includes(args[0]) && !args.includes('--impact') && !args0.includes('__noimpact')) args = [...args, '--impact', 'service'];
   const cache = path.join(tmp, 'q.json');
   fs.writeFileSync(cache, JSON.stringify({ checkedAt: now, claude: S[sc].claude, codexAccounts: S[sc].codex, errors: {}, history: {} }));
-  const env = { ...process.env, QUOTA_CACHE: cache, CODEX_ACCOUNTS: path.join(tmp, 'none.json'), ROUTE_LOG: '0', QUOTA_LOG: '0', ROUTE_RR: path.join(tmp, 'rr.txt') };
+  const env = { ...process.env, QUOTA_CACHE: cache, CODEX_ACCOUNTS: path.join(tmp, 'none.json'), ROUTE_LOG: '0', QUOTA_LOG: '0', TRAE_PROBE: '0', ROUTE_RR: path.join(tmp, 'rr.txt') };
   return execFileSync(process.execPath, [ROUTE, ...args, '--json'], { encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'] });
 };
 // Optional 4th field: a substring the notes must contain ('!text': must not contain).
@@ -608,6 +608,30 @@ for (const [sc, args] of ERRORS) {
   const bad = cases.map(([got, want], i) => (got === want ? null : `${i} (${got})`)).filter((i) => i !== null);
   if (bad.length) fail++;
   console.log(`${bad.length ? 'FAIL' : 'ok  '} fallback models     ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
+}
+// Recovery probes (user, 2026-11-10): a family's hard pause is a fixed 30 minutes; after it the family stays out until
+// a probe succeeds; a failed probe pauses it 30 more; transient pauses just end.
+{
+  const { noteFailure, readPoolPauses, claimProbes, probeResult } = await import('../lib/trae-health.mjs');
+  const t0 = 1_800_000_000_000, m = 60000, R = 'Model access temporarily restricted. (983)', q = 'request queue size is exceed';
+  const home = fs.mkdtempSync(path.join(tmp, 'trae-probe-'));
+  const p1 = noteFailure(home, R, t0, 'GPT-6.1-Sol');
+  const during = Object.keys(readPoolPauses(home, t0 + 10 * m)), early = claimProbes(home, t0 + 10 * m);
+  const after = Object.keys(readPoolPauses(home, t0 + 31 * m));
+  const due = claimProbes(home, t0 + 31 * m), again = claimProbes(home, t0 + 32 * m), stale = claimProbes(home, t0 + 45 * m);
+  probeResult(home, 'GPT-6.1-Sol', false, 'still restricted', t0 + 46 * m);
+  const failed = readPoolPauses(home, t0 + 47 * m).gpt?.pausedUntil;
+  probeResult(home, 'GPT-6.1-Sol', true, '', t0 + 80 * m);
+  const back = Object.keys(readPoolPauses(home, t0 + 80 * m));
+  const th = fs.mkdtempSync(path.join(tmp, 'trae-probe-q-'));
+  noteFailure(th, q, t0, 'GPT-6.1-Sol'); noteFailure(th, q, t0 + m, 'GPT-6.1-Sol');
+  const qDuring = Object.keys(readPoolPauses(th, t0 + 3 * m)), qAfter = Object.keys(readPoolPauses(th, t0 + 10 * m)), qProbe = claimProbes(th, t0 + 10 * m);
+  const cases = [[p1?.pausedUntil, t0 + 30 * m], [during.join(), 'gpt'], [early.length, 0], [after.join(), 'gpt'],
+    [JSON.stringify(due), JSON.stringify([{ pool: 'gpt', model: 'GPT-6.1-Sol' }])], [again.length, 0], [stale.length, 1],
+    [failed, t0 + 76 * m], [back.length, 0], [qDuring.join(), 'gpt'], [qAfter.length, 0], [qProbe.length, 0]];
+  const bad = cases.map(([got, want], i) => (got === want ? null : `${i} (${got})`)).filter((i) => i !== null);
+  if (bad.length) fail++;
+  console.log(`${bad.length ? 'FAIL' : 'ok  '} recovery probes     ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
 }
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(fail ? `\n${fail} failing` : '\nall pass');
