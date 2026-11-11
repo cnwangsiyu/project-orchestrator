@@ -73,7 +73,7 @@ and the skills or tools that serve them. Discover what the current request needs
 do any wide search — and record it, rather than surveying everything up front. Mark which branches
 the project owns (it may merge into them locally) and which are shared with other people.
 
-**Protect the orchestrator's context: judge, don't labour** (user, 2026-11-05). This session is the
+**Protect the orchestrator's context: judge, don't labour** (user, 2026-11-05; repeated 2026-11-11: "主对话别自己去干活，只做判断，活让 worker 去干"; the nightly review now also counts source edits — Edit/Write or shell writes in a code checkout — and test/build runs by the orchestrator itself). This session is the
 one place that sees every task, and its context is finite. Each page, log, diff, screenshot or
 transcript read here pushes task state out and ends in compaction. It also burns the Claude budget
 that keeps the orchestrators alive.
