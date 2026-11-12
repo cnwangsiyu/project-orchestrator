@@ -159,6 +159,10 @@ workers, long unattended runs) at `medium` effort, set in each session's respawn
       stakes do), and every review of fallback-written code runs with `--exclude-model <its family>`, so a different
       family reviews it. A second free reviewer on TRAE (no Kimi there) is a fallback model of another family, not a
       fresh Sol; so is the stand-in when Claude has no room for a second opinion.
+    - **Release/high-stakes guard** (user-approved 2026-11-11 retro; W291-R0 Gemini LAND missed reproduced P1s):
+      fallback review alone is not acceptance; require the other-family GPT/Claude gate in review-rubric.md.
+      For deploy/release, fallback models execute only the brief's fixed health/rollback criteria; unexpected evidence
+      waits for stronger-model judgment (W291-L1-ppe2a's unnecessary rollback), not another fallback's discretion.
     - **Infrastructure misses are not failures**: a fallback model that times out, queues or is restricted on one task is
       re-routed with `--exclude-model <model or family>` and the same `--failures`; `--failures` counts quality misses.
     - **Recovery**: a family paused as restricted is probed every 30 minutes with a one-line turn and comes back as soon

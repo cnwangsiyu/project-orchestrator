@@ -177,6 +177,10 @@ login; the user had to sign in again):
   files such as bytedcli's, keychain items, .netrc, API keys), and never inject a session into a browser or
   tool to get past a login. Wherever a login or authorization is needed, stop and report BLOCKED with what
   needs signing in."
+- **Console access preflight** (user-approved 2026-11-11 retro; W291-L1c needed signed-in consoles on headless TRAE):
+  name the console origins and already signed-in browser/account in the brief; route those steps as `browser` work.
+  Headless Playwright is for public/local pages, never a substitute for that sign-in; missing access means BLOCKED.
+  One-shot `codex exec` / `traecli exec` launches must carry the credential clause in developer instructions too.
 
 **Prevent rework at the brief** (rework retro of 2026-11-06–10, 89 rework chains; user-approved 2026-11-10). Most
 rework came from unchecked premises, "done" proven on the wrong target, one shared rule re-implemented by several
@@ -191,7 +195,17 @@ workers, and patching after a second same-kind defect.
   acceptance identity — which server and session (server-side evidence), which build/version/SHA, which core is loaded;
   after switching endpoints, reconnect explicitly; (2) the production entry — the real package/loader path (e.g. a plain
   `node` import, the final bundle, offline resources, the oldest supported OS) and the default CI test globs and cwd;
-  (3) device acceptance runs to the end before anything is recorded as passed.
+  (3) the deployment's environment/runtime, initial state, decoded config and permissions, with real module/child-process
+  paths intact (user-approved 2026-11-11 retro; W291-L1g smokes bypassed an unpackaged worker); fakes may replace external
+  providers, never the boundary being qualified; (4) device acceptance runs to the end before anything is recorded as passed.
+- **Feature flags before merge** (user-approved 2026-11-11 retro; W291-L1 landed OFF/build checks but could not activate):
+  the brief requires package-and-launch proof with the flag ON and OFF on the exact final artifact, from a clean initial
+  state (empty data dir, fresh instance/config with deployment permissions); exercise the enabled path, not just readiness.
+  Record artifact/SHA, settings and outcomes; missing proof is NOT-READY, not done. Use isolated state, never wipe user data.
+- **Deploy/release briefs** (user-approved 2026-11-11 retro; W291-L1-ppe2a mistook normal WS/mediaScope for a crash loop):
+  before any mutation, pin baseline/control probes, health checks with thresholds, sample intervals and observation window,
+  rollback triggers and exact steps to restore the prior artifact/config. A fallback model follows those criteria only;
+  an unknown signal or judgment outside them means stop and report facts, never invent a rollback condition.
 - **Shared mechanisms: contract first, then parallel.** When a state, authorization, lifetime or recovery rule is used
   by several modules or languages, first one task (one owner) writes the contract — a state table and cross-language
   fixtures, e.g. the atomic `admit → await → effect/commit` semantics — then the module tasks adapt to it in parallel.
@@ -225,6 +239,8 @@ workers, and patching after a second same-kind defect.
   - at most 3 non-blocking notes, and no style or "consider" comments;
   - a re-review only checks the blocked findings;
   - at most 2 rounds, then you decide or ask the user.
+- For a fallback model's release/high-stakes review, put the extra reviewer gate and failure probes from the rubric in
+  the brief (user-approved 2026-11-11 retro; W291-R0's Gemini LAND missed reproduced P1s).
 - Work without a review is accepted on your own check: tests, build, acceptance.
 - When a task is finally accepted or given up, record it once:
   `node <this skill>/scripts/outcome.mjs --project <slug> --name <task> --result pass|rework|fail [--rounds N] [--cause code|spec|process|infra|scope] [--retries N] [--scope-changes N] [--minutes M] [--reviewed] [--note "…"]`.

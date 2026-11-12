@@ -289,6 +289,19 @@ for (const [sc, args, want] of [
   if (!ok) fail++;
   console.log(`${ok ? 'ok  ' : 'FAIL'} ${sc.padEnd(19)} ${(args.join(' ') + ' (2nd account)').padEnd(36)} ${ok ? got : `want "${want}", got "${got}"`}`);
 }
+// user-approved 2026-11-11 retro: shell parsing must deliver the whole credential rule as one config argument.
+for (const [sc, args] of [['quiet', ['lookup']], ['ttSearch', ['lookup']], ['ttOutTrae', ['lookup']], ['quiet', ['draft']], ['quiet', ['second-opinion', '--against', 'claude']]]) {
+  let ok = false;
+  try {
+    const command = JSON.parse(run(sc, args)).pick.command;
+    const quoted = command.match(/ -c ('developer_instructions=.*') --json/)[1];
+    const config = execFileSync('/bin/sh', ['-c', `printf '%s' ${quoted}`], { encoding: 'utf8' });
+    const rule = JSON.parse(config.slice('developer_instructions='.length));
+    ok = rule === "Never read, copy or load any login session or credential file (cookies, SSO/session tokens, CLI auth files such as bytedcli's, keychain items, .netrc, API keys), and never inject a session into a browser or tool to get past a login. Wherever a login or authorization is needed, stop and report BLOCKED with what needs signing in.";
+  } catch {}
+  if (!ok) fail++;
+  console.log(`${ok ? 'ok  ' : 'FAIL'} exec credential     ${sc} ${args.join(' ')}`);
+}
 // Every TTADK worker searches through the proxy: a TTADK codex exec brings the proxy up first; nothing else does.
 for (const [sc, args, want] of [
   ['ttSearch', ['lookup'], true],
@@ -604,6 +617,10 @@ for (const [sc, args] of ERRORS) {
     [pk('traeGptOut', ['review', '--author', 'codex', '--exclude-model', 'deepseek']), 'gemini-3.1-pro-preview high @trae'],
     // A second free reviewer on TRAE comes from another family, not a fresh Sol.
     [o('traeFull', ['review', '--author', 'codex']).secondOpinion?.model, 'deepseek-v4.1-flash'],
+    [hasNote('traeGptOut', ['review', '--author', 'codex'], /independent other-family GPT\/Claude reviewer/), true],
+    [hasNote('traeGptOut', ['review-high'], /independent other-family GPT\/Claude reviewer/), true],
+    [hasNote('traeGptOut', ['build-run'], /health thresholds.*rollback triggers.*stronger-model judgment/), true],
+    [hasNote('traeGptOut', ['analysis'], /playwright MCP is for public\/local pages only.*missing login means BLOCKED/), true],
     [hasNote('traeGptOut', ['implement', '--failures', '1'], /Gemini-3\.1-Pro ran past 40 minutes/), true],
     [hasNote('traeGptOut', ['implement'], /can't see images/), true], [hasNote('traeGptOut', ['image-read'], /can't see images/), false],
     // Every family out: personal quota, behind the user's OK.
