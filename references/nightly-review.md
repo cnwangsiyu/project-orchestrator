@@ -66,17 +66,17 @@ These are the user's decisions (2026-10-30 to 2026-11-03):
 - **Reset cards: quota first, then cards.**
   - Suggest one only at ≥99%, or before a card expires.
   - Every redemption needs the user's explicit yes, every time. Never redeem a card yourself.
-- **Fable, Astra, `max` effort (off TTADK; on TTADK it needs no OK, user 2026-11-07) and an exhausted ladder need
+- **Fable, Astra on personal quota, `max` effort (off TTADK; on TTADK it needs no OK, user 2026-11-07) and an exhausted ladder need
   the user's OK.**
 - **Codex accounts and browser (2026-11-07):**
-  - Every task TTADK's GPT-6.1 Sol can handle runs there first whenever TTADK is healthy. Only the tasks it can't
-    handle, or all tasks while it's unhealthy or excluded, follow the earlier routing (ChatGPT accounts, Claude).
+  - Company accounts precede personal quota: TTADK first, then TRAE. The approved company balancing and explicit
+    `--background` exceptions may prefer TRAE while TTADK is healthy; tune only within the bounds below.
   - TTADK has no concurrency cap: retry a rate-limited run once, then re-route without it.
   - Browser work goes to a browser-ready Codex account (TTADK first, else a ChatGPT account), else to Claude.
   - On a TTADK device, leave the ChatGPT and Claude quota for the user's other device (no TTADK there): don't add
     rules that spend it for its own sake there, and don't flag unspent ChatGPT quota or lapsed cards on a TTADK device
     as waste (user, 2026-11-07).
-  - TTADK is the company's quota and the rest is the user's own: on a TTADK device, never lower a TTADK effort to save
+  - TTADK and TRAE are company quota; ChatGPT accounts and Claude are personal quota: on a TTADK device, never lower a TTADK effort to save
     cost, never count an unspent Claude week as waste, and judge a TTADK row only on quality and success. Moving work
     from TTADK to personal quota needs evidence that TTADK does it worse. The one exception (user, 2026-11-09):
     TTADK's quota is daily (~500M tokens), so throwaway code work starts at Sol `high` on the company accounts; a
@@ -105,7 +105,12 @@ These are the user's decisions (2026-10-30 to 2026-11-03):
   - outcomes (`outcome.mjs` records): first-pass rate, rework rounds and minutes per vendor, model and category of the
     first attempt, the failures, and named tasks with routing decisions but no outcome yet;
   - `duplicates`: tasks with more than one outcome record. They count once (latest result, most rounds); remind
-    their orchestrator to record each task once, at close.
+    their orchestrator to record each task once, at close. Explicit corrections override normal aggregates; inspect
+    `corrected` and `actualMismatches` before attributing outcomes to a model/account;
+  - `routing.companyPolicies`: counts of balanced/background routing decisions and their named tasks, `why` and
+    balance factors; `background` counts distinct tasks and their recorded wall-clock time;
+  - `quota.companyByHour`: company quota snapshots grouped by UTC hour, including TRAE load by model and queue
+    positions by family. Keep sample timestamps; missing telemetry is unknown, not zero load or an empty queue.
 - **Hub probe:** on each account in `codex-accounts.json` whose hub is up, start one tiny thread
   (`codex-worker.mjs --account <name> start --cwd ~ --effort low --sandbox read-only --name hub-probe --log <tmp> "Reply OK"`)
   and check it answers. A failure that `quota.mjs` didn't flag is a bad case: restart that hub from `~` once no turn runs
@@ -154,8 +159,9 @@ Look for evidence in the data, not hunches. Typical findings:
   first-pass rate, fails, rework rounds, minutes, and Fisher's exact p on first pass. Put the table in the report
   every night, even when it says "too few tasks".
   - "TRAE significantly worse" (p < 0.05, at least 8 tasks on each side) for a model or a category: a finding. Don't
-    change the order yourself (TTADK → TRAE → personal quota is the user's); propose keeping that category off TRAE,
-    with the numbers, and look at the failing TRAE tasks' logs for a harness cause (missing tool, prompt, queue).
+    change the company-before-personal order yourself; use the tuning bounds below for balancing eligibility,
+    and propose broader exclusions with the numbers. Look at failing TRAE task logs for a harness cause (missing
+    tool, prompt, queue).
   - TRAE takes work mostly when TTADK is out (later in the day), so check that the compared tasks are alike before
     blaming the harness.
   - `catalog.harnessDrift`: TRAE's GPT-6.1-Sol prompt vs official Codex's. 0.908 of lines shared and no tool-config
@@ -192,14 +198,44 @@ Look for evidence in the data, not hunches. Typical findings:
 `outcomes.fallbackModels` in review-data: how often the company account's fallback models (DeepSeek-V4.1-Flash,
 Gemini-3.1-Pro, DeepSeek-V4-Pro; references/model-routing.md, "Fallback models on the company account") ran, why
 (`gpt-out` or `after-sol-fell-short`), how their tasks ended, and the extra reviews of their service code. Read it with
-`--hours 168` too, since a day holds few. Propose a change (a decision card, not a direct edit) when the week's data
-supports one, for example:
+`--hours 168` too, since a day holds few. Reorder existing eligible fallbacks directly when the evidence is clear,
+under the tuning bounds below. Changes to quality gates or removal of a family still need a decision card, for example:
 - extra reviews that keep passing clean (say 10+ with nothing caught) → review only the weaker fallback, or drop the
   extra review; reviews that catch real defects → keep it, or extend it;
-- a fallback whose tasks rework or fail clearly more than Sol's (byModel, code rework) → move it down or out of ALTS;
-  one that does as well as Sol → keep, or consider it earlier;
+- a fallback whose tasks rework or fail clearly more than Sol's (byModel, code rework) → moving it down can follow
+  the tuning bounds; dropping its family from ALTS needs a card. One that does as well as Sol may move earlier;
 - fallback steps after Sol fell short that rarely rescue a task → drop them from the escalation (faster to Claude).
 Say how many tasks the evidence rests on; the benchmark behind ALTS was 12 runs per model.
+
+### Tuning the company-account policies
+
+Every night review the policies added on 2026-11-13 against both the day's data and the week's trend:
+
+- Company balancing currently keeps a 15% TRAE reserve, requires load <60% and no queue position >300 within
+  30 minutes, and considers quota expiry <6 hours and TTADK burn projected before reset. Read the actual factors
+  too: unknown telemetry has limited eligibility, and expiry balancing compares remaining quota shares.
+- Check TRAE's quota-aware model choice (a depleted bucket → comparable Astra quota, then eligible fallbacks),
+  the explicit `--background` lane, DeepSeek model-fit limits for build/device and high-stakes or security reviews,
+  the `--security` exclusion of TRAE GPT, Seed-Evolving's vision-only role, and Astra's later company escalation rung.
+  Background means nobody is waiting, with no deadline or near-term dependency; it never spends personal quota.
+  Keep queued hub workers pending while queue/status arrives. TRAE controls priority, so `--background` cannot
+  guarantee that high-priority quota stays untouched before depletion.
+- Read `quota.companyByHour` and, where needed, the adjacent records in `quota-log.jsonl`: TTADK/TRAE quota over
+  the day, TRAE load percentages and queue positions by hour, how often TTADK ran out and when, and the last
+  observed unused TRAE buckets before each reset. Count depletion episodes, not every depleted snapshot; report
+  sample gaps and avoid calling the last observation exact reset-time waste. Read `routing.companyPolicies`
+  alongside route-log `why`/`balance` factors to explain balanced/background dispatches, grouping task names so
+  retries are not new tasks. Compare corrected outcomes by model/account (`byModelAccount`), rework and wall-clock;
+  get queue duration from task logs when recorded. Queue position is not queue time; missing duration stays unknown.
+- Act autonomously when the evidence is clear and the change stays within the approved policy: tune reserve within
+  5–30%, load within 40–80%, queue threshold within 100–800, or expiry window within 2–10 hours; reorder existing
+  fallbacks by measured outcomes; widen or narrow the rows eligible for company balancing. Preserve capability,
+  security, model-fit, device-lease/shared-lock exclusions and quality gates. Use small steps, compare similar tasks,
+  and state in both the commit and report the old/new setting, evidence, number of days/tasks, and expected effect.
+- If the evidence is thin, conflicting or unclear, or the change crosses those bounds, retain the current policy
+  and raise a Chinese decision card with options, the data behind each and a recommendation. Examples: automatically
+  sending normal-stakes work to low priority without an explicit `--background` brief, spending personal quota,
+  dropping a model family, or changing quality gates. Apply the answer through "Decisions for the user" below.
 
 ## 3. Change (small, evidenced, tested)
 
@@ -213,12 +249,16 @@ Say how many tasks the evidence rests on; the benchmark behind ALTS was 12 runs 
 - **Edit:**
   - the table in `scripts/route.mjs`;
   - `POLICY` in `scripts/lib/state.mjs`;
+  - company balancing thresholds in `BALANCE` / `balanceFactors` in `scripts/lib/company-load.mjs`, within the tuning
+    bounds above; the corresponding eligibility, quota-choice and fallback rules in `scripts/route.mjs`;
   - the rationale in `references/model-routing.md`;
   - other docs only where they describe what changed.
 - **Test:**
   - Update the expectations in `scripts/test/route-scenarios.mjs` for any intended behaviour change. Add a case for
     each fix.
   - Run `node scripts/test/route-scenarios.mjs`. Don't commit unless it prints `all pass`.
+  - If company telemetry or review reporting changes, also run `company-telemetry-scenarios.mjs` and
+    `outcome-scenarios.mjs` under `scripts/test/`; both must print `all pass`.
 - **Commit and push:**
   1. In `project-orchestrator`, commit with a message stating the change and its evidence, then
      `git push origin HEAD:main`.
@@ -265,6 +305,11 @@ Only what the user must decide becomes a card; everything else the review decide
 records (user, 2026-11-08: far fewer approval requests). Cards are for: changing a hard rule above; a new default model
 or plan; spending personal quota or company quota beyond the routing policy; reset cards; anything that changes what
 other people see or that can't be undone. Write each in Chinese with the numbers that justify it.
+
+For company-account tuning, thin or conflicting evidence is also a reason for a card, even if the proposed setting
+is within the allowed range. Give the options, supporting and opposing data (days/tasks and telemetry gaps), and
+a recommendation. Clear, small changes inside "Tuning the company-account policies" need no new approval; changes
+outside it do. Do not treat an unanswered card as approval; keep the existing policy until the user decides.
 
 - **Approved decisions are implemented by the next night's review**, in step 3 under the same rules (worktree, tests,
   commit), unless the user had the routing session do it sooner. The worker reads every

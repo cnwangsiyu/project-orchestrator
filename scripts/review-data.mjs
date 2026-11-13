@@ -48,6 +48,7 @@ const outcomes = {
     .map((o) => ({ task: `${o.project}/${o.name}`, joined: o.first ?? null, actual: effectiveFirst(o) })),
   // Per vendor/model: code rework only (modelView). Per category/impact/cause: all rework.
   byVendor: agg((o) => effectiveFirst(o)?.vendor, mouts), byModel: agg((o) => { const p = effectiveFirst(o); return p && `${p.vendor}:${p.model}:${p.effort}`; }, mouts),
+  byModelAccount: agg((o) => { const p = effectiveFirst(o); return p && `${p.vendor}:${p.model}:${p.effort}@${p.account ?? '?'}`; }, mouts),
   byCategory: agg((o) => o.category), byVendorCategory: agg((o) => effectiveFirst(o) && o.category && `${effectiveFirst(o).vendor}:${o.category}`, mouts),
   byImpact: agg((o) => o.impact),
   byCause: agg((o) => (o.result === 'rework' ? o.cause ?? '(not recorded)' : null)),
@@ -107,6 +108,9 @@ const background = (() => {
 })();
 const routing = {
   decisions: routes.length,
+  companyPolicies: { balanced: routes.filter((r) => r.balance?.selected).length, background: routes.filter((r) => r.background).length,
+    decisions: routes.filter((r) => r.company || r.balance || r.background).map((r) => ({ t: r.t, project: r.project, name: r.name,
+      category: r.category, pick: r.pick, background: !!r.background, why: r.why ?? [], balance: r.balance ?? null })) },
   byProject: count(routes, (r) => r.project ?? '(none)'),
   byCategory: count(routes, (r) => r.category),
   byPick: count(routes.filter((r) => r.pick), (r) => `${r.pick.vendor}:${r.pick.model}:${r.pick.effort}`),
@@ -154,7 +158,12 @@ for (const n of names) {
     }
   }
 }
-const quota = { snapshots: snaps.filter((s) => s.t >= since).length, resets, cardsExpired, cardsRedeemed };
+const quota = { snapshots: snaps.filter((s) => s.t >= since).length, resets, cardsExpired, cardsRedeemed,
+  // Preserve observations within each UTC hour: averages would hide congestion peaks and quota resets.
+  companyByHour: snaps.filter((s) => s.t >= since && (s.ttadk || s.trae)).reduce((by, s) => {
+    const hour = new Date(s.t).toISOString().slice(0, 13) + ':00:00Z';
+    (by[hour] ??= []).push({ t: s.t, ttadk: s.ttadk ?? null, trae: s.trae ?? null }); return by;
+  }, {}) };
 
 // ---- now ----
 const data = readState();
