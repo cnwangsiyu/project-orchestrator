@@ -11,14 +11,19 @@
 // - hard (quota used up, banned, 403 Forbidden): a family pauses for 30 minutes, then awaits a probe; whole-account
 //   pauses back off 30, 60, 120, at most 240 minutes while they keep coming without a success;
 // - vendor restriction ("Model access temporarily restricted", code 983): a family pauses until the next 00:00 UTC
-//   strictly after the failure (08:00 China time), then awaits a probe (user, 2026-11-12; TRAE FAQ, 11-10..12 retro).
+//   strictly after the failure (08:00 China time), then awaits a probe (user, 2026-11-12; TRAE FAQ, 11-10..12 retro);
+// - unavailable (a model TRAE no longer resolves: "is unavailable because its metadata could not be resolved", code
+//   -32600 with "model", "model … not found/does not exist/unsupported"): applies to the model, not its family. One
+//   failure pauses just that model id (lowercased) for 6 hours, then the next real launch tries again — no probe — and
+//   its family-mates stay usable (user, 2026-11-13, after TRAE removed Gemini from its model list).
 //
 // Per model family (2026-11-10: TRAE restricted only its GPT models while DeepSeek and Gemini kept working, and a queue
 // overflow is per model): a failure recorded with its model pauses only that family (gpt, deepseek, gemini, seed…);
 // route.mjs then takes the next family on its fallback list. Auth failures, and failures recorded without a model
 // (a traecli exec run noted by hand without --model), pause the whole account.
 //   <trae home>/worker-health.json  {"failures":[{"t","why"}],"pausedUntil","reason","kind","streak",
-//                                    "pools":{"gpt":{"failures","pausedUntil","reason","kind","streak"}}}
+//                                    "pools":{"gpt":{"failures","pausedUntil","reason","kind","streak"}},
+//                                    "modelPauses":{"<model id>":{"pausedUntil","reason","kind","model","t"}}}
 //
 // Recovery by probe (user, 2026-11-10: find out soon when GPT is back, without spending real tasks on it): a family's
 // vendor restriction lasts until the next 00:00 UTC; other hard pauses last 30 minutes. When it ends, the family stays out of
@@ -34,19 +39,27 @@ import path from 'node:path';
 export const WINDOW_MIN = 15, HARD_MIN = 30, BACKOFF_MIN = [5, 10, 20, 30];
 // Whole-account hard failures back off 30, 60, 120, 240 minutes; family pauses use the recovery schedule below.
 export const HARD_BACKOFF_MIN = [30, 60, 120, 240];
+// A model TRAE no longer resolves stays out of routing this long, then the next real launch tries again.
+export const MODEL_PAUSE_H = 6;
 const AUTH = /not logged in|unauthori[sz]ed|\b401\b|token expired|login (required|expired)|re-?login/i;
 const RESTRICTED = /access (temporarily )?restricted|\b983\b/i;
 const HARD = /quota|daily limit|banned|\bban\b|封禁|封号|forbidden|\b403\b/i;
+// Model-not-found errors: the model itself vanished or stopped resolving, so its family-mates are unaffected.
+const UNAVAILABLE = /is unavailable because its metadata could not be resolved|model\s+[`'"\w.-]*\s*(?:is\s+)?(?:not found|does not exist|unavailable|unsupported)|(?:-32600|code\s*-32600)[\s\S]*model|model[\s\S]*-32600/i;
 const RESTRICTED_REASON = "restricted by the model vendor's policy until 08:00 China time (00:00 UTC); probed then";
 const nextUtcMidnight = (now) => (Math.floor(now / 86400000) + 1) * 86400000;
-export const failureKind = (why) => (AUTH.test(why ?? '') ? 'auth' : HARD.test(why ?? '') || RESTRICTED.test(why ?? '') ? 'hard' : 'transient');
+export const failureKind = (why) => {
+  const w = why ?? '';
+  return AUTH.test(w) ? 'auth' : HARD.test(w) || RESTRICTED.test(w) ? 'hard' : UNAVAILABLE.test(w) ? 'unavailable' : 'transient';
+};
 const file = (home) => path.join(home, 'worker-health.json');
 const read = (home) => { try { return JSON.parse(fs.readFileSync(file(home), 'utf8')); } catch { return { failures: [] }; } };
 const write = (home, rec) => { try { const t = `${file(home)}.${process.pid}`; fs.writeFileSync(t, JSON.stringify(rec)); fs.renameSync(t, file(home)); } catch {} };
 
 // Pure: the pause these failures call for at time now, or null. streak = pauses already in a row without a success.
+// A model-unavailable failure never pauses the account or a family (noteFailure pauses the model itself instead).
 export const pauseDecision = (failures, now = Date.now(), streak = 0) => {
-  const recent = (failures ?? []).filter((f) => now - f.t <= WINDOW_MIN * 60000);
+  const recent = (failures ?? []).filter((f) => now - f.t <= WINDOW_MIN * 60000 && failureKind(f.why) !== 'unavailable');
   if (!recent.length) return null;
   const last = recent.reduce((a, f) => (f.t > a.t ? f : a));
   const serious = recent.filter((f) => failureKind(f.why) !== 'transient').reduce((a, f) => (!a || f.t > a.t ? f : a), null);
@@ -76,10 +89,20 @@ const step = (rec, why, now) => {
   return p ? { failures: [], pausedUntil: p.pausedUntil, reason: p.reason, kind: p.kind, streak: streak + 1 } : { ...rec, failures };
 };
 export const PROBE_EVERY_MIN = 30, PROBE_STALE_MIN = 10;
-// Returns the pause now in force for what failed (the account, or the model's family, with .pool set), or null.
+// Returns the pause now in force for what failed (the account, or the model's family, with .pool set; a vanished model
+// gets its own pause with .modelPause set), or null.
 export const noteFailure = (home, why, now = Date.now(), model = null) => {
   const rec = read(home);
-  const pool = failureKind(why) === 'auth' ? null : poolOf(model);
+  const kind = failureKind(why);
+  // A model TRAE can't resolve pauses that model alone — never its family or the account — for MODEL_PAUSE_H hours.
+  if (kind === 'unavailable' && model) {
+    const id = String(model).toLowerCase();
+    const p = { pausedUntil: now + MODEL_PAUSE_H * 3600000, kind: 'unavailable', model: id, t: now,
+      reason: `${String(why).slice(0, 180)} (model unavailable; paused ${MODEL_PAUSE_H} h)` };
+    write(home, { ...rec, modelPauses: { ...(rec.modelPauses ?? {}), [id]: p } });
+    return { ...p, modelPause: true, pool: poolOf(model) };
+  }
+  const pool = kind === 'auth' ? null : poolOf(model);
   if (!pool) {
     const { pools } = rec;
     const out = { ...step(rec, why, now), ...(pools ? { pools } : {}) };
@@ -98,13 +121,19 @@ export const noteFailure = (home, why, now = Date.now(), model = null) => {
   write(home, { ...rec, failures: rec.failures ?? [], pools: { ...(rec.pools ?? {}), [pool]: pr } });
   return pr.pausedUntil && pr.pausedUntil > now ? { ...pr, pool } : null;
 };
-// A completed turn clears its family's record and the account's; without a model, everything.
+// A completed turn clears its family's record and the account's, plus that model's own unavailable pause;
+// without a model, everything.
 export const noteSuccess = (home, model = null) => {
   const rec = read(home), pool = poolOf(model);
   const pools = pool ? Object.fromEntries(Object.entries(rec.pools ?? {}).filter(([k]) => k !== pool)) : {};
-  write(home, { failures: [], pausedUntil: null, reason: null, kind: null, streak: 0, ...(Object.keys(pools).length ? { pools } : {}) });
+  const pauses = model ? Object.fromEntries(Object.entries(rec.modelPauses ?? {}).filter(([k]) => k !== String(model).toLowerCase())) : {};
+  write(home, { failures: [], pausedUntil: null, reason: null, kind: null, streak: 0,
+    ...(Object.keys(pools).length ? { pools } : {}), ...(Object.keys(pauses).length ? { modelPauses: pauses } : {}) });
 };
 export const readPause = (home, now = Date.now()) => { const r = read(home); return r.pausedUntil && r.pausedUntil > now ? r : null; };
+// The models TRAE no longer resolves, still out of routing now: {<model id>: record}.
+export const readModelPauses = (home, now = Date.now()) =>
+  Object.fromEntries(Object.entries(read(home).modelPauses ?? {}).filter(([, r]) => r?.pausedUntil && r.pausedUntil > now));
 // The families out of routing now: {pool: record} — paused, or a hard pause that ended and awaits its probe.
 const awaitingProbe = (r, now) => r?.kind === 'hard' && r.pausedUntil && r.pausedUntil <= now;
 export const readPoolPauses = (home, now = Date.now()) =>

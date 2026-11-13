@@ -60,6 +60,20 @@ if (TU?.utilization != null) console.log(`  ttadk  ${'day'.padEnd(34)}${String(M
 else if (TTA?.usageError) console.log(`  ttadk  ${'day'.padEnd(34)}usage unavailable — ${TTA.usageError}`);
 const TRA = st.codex.trae;
 if (TRA) console.log(`  codex  ${TRA.name} (TRAE CLI, after TTADK): ${TRA.healthy ? 'healthy' : `unavailable — ${TRA.reason}`}; hub ${TRA.live ? 'up' : 'down'}; ${TRA.active} turns running; models ${TRA.models.join(', ')}`);
+// TRAE's own quota (user-approved 2026-11-13): one daily bucket per model, plus the weekly pool. A depleted bucket only
+// puts that model in TRAE's low-priority queue; it changes no routing.
+const TRQ = TRA?.quota;
+if (TRQ) {
+  for (const [model, q] of Object.entries(TRQ.daily ?? {})) {
+    const pct = q.used != null && q.limit ? Math.round((q.used / q.limit) * 100) : q.used ?? '?';
+    console.log(`  trae   ${`${model} day`.padEnd(34)}${String(pct).padStart(3)}% used (${q.used ?? '?'}/${q.limit ?? '?'})${q.depleted ? ` — low-priority queue until ${fmt(q.resetsAt)}` : q.resetsAt ? `  resets ${fmt(q.resetsAt)}` : ''}`);
+  }
+  const w = TRQ.weekly;
+  if (w) {
+    const pct = w.used != null && w.limit ? Math.round((w.used / w.limit) * 100) : '?';
+    console.log(`  trae   ${'week'.padEnd(34)}${String(pct).padStart(3)}% used (${w.used ?? '?'} / ${w.limit ?? '?'})  resets ${fmt(w.resetsAt)}`);
+  }
+} else if (TRA?.quotaError) console.log(`  trae   ${'quota'.padEnd(34)}unavailable — ${TRA.quotaError}`);
 console.log(`budget: claude ${st.claude.status} (now: spare ≤${st.claude.spareLine}%, cap ${st.claude.cap}%, ${st.claude.reserve ?? '?'}% kept for orchestration until the reset); `
   + `codex ${st.codex.out ? 'out' : st.codex.rotate ? `→ rotate ${st.codex.rotate.map((r) => r.a.name).join('/')}` : st.codex.pick ? `→ ${st.codex.pick.a.name}` : st.codex.redeem ? `→ redeem a card on ${st.codex.redeem.a.name}` : 'unreadable'}${st.codex.underused ? ', underused' : ''}${st.codex.overspending ? ', overspending' : ''}`
   + `${st.codex.cardsHeld ? `, ${st.codex.cardsHeld} reset card(s)` : ''}`);

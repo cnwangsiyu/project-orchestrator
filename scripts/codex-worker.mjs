@@ -19,7 +19,7 @@
 //   codex-worker status --thread ID
 //   codex-worker list   [--cwd DIR] [--search TEXT] [--limit N]
 //   codex-worker quota                                                     (the account's rate-limit windows, JSON)
-//   codex-worker usage                                                     (account id, windows and reset cards, JSON)
+//   codex-worker usage                                                     (account id, windows and reset cards, JSON; TRAE: daily buckets + weekly pool)
 //   codex-worker reset-credits                                             (reset cards: count and expiries, JSON)
 //   codex-worker reset-credit-use --key UUID [--credit ID]                 (redeem one reset card; irreversible)
 //
@@ -41,9 +41,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { noteFailure, noteSuccess, rememberThreadModel, threadModel, probeResult } from './lib/trae-health.mjs';
+import { noteFailure, noteSuccess, rememberThreadModel, threadModel, probeResult, failureKind } from './lib/trae-health.mjs';
 // What a TRAE pause covers: one model family (route.mjs moves to the next family) or the whole account.
 const pausedWhat = (p) => (p.pool ? `TRAE's ${p.pool} models are paused` : 'TRAE is paused');
+// A model TRAE no longer resolves (2026-11-13: it dropped Gemini): that model alone is out of routing for 6 h.
+const unavailableHint = (p) => `model-unavailable: ${p.model} isn't available on TRAE; re-route (route.mjs skips it now)`;
 
 // --account NAME (anywhere on the line) picks a profile from the accounts file: its own CODEX_HOME, so its own login,
 // and its own hub. Without it: CODEX_HOME / CODEX_HUB from the environment, else ~/.codex and the default hub.
@@ -317,7 +319,8 @@ if (cmd === 'probe') {
 if (cmd === 'note-failure') {
   if (PROF?.kind !== 'trae') die('note-failure is for the TRAE account (--account trae)');
   const p = noteFailure(PROF.home, pos.join(' ') || 'traecli exec failed', Date.now(), typeof opts.model === 'string' ? opts.model : null);
-  console.log(p ? `trae-paused: ${pausedWhat(p)} until ${new Date(p.pausedUntil).toLocaleTimeString()} (${p.reason}); route.mjs sends its work elsewhere meanwhile` : 'recorded');
+  if (p?.modelPause) console.log(unavailableHint(p));
+  else console.log(p ? `trae-paused: ${pausedWhat(p)} until ${new Date(p.pausedUntil).toLocaleTimeString()} (${p.reason}); route.mjs sends its work elsewhere meanwhile` : 'recorded');
   process.exit(0);
 }
 if (cmd === 'trae-setup') {
@@ -568,7 +571,8 @@ const report = async (threadId, turn, final, usage) => {
     if (turn.status === 'completed') noteSuccess(PROF.home, model);
     else if (turn.status === 'failed') {
       const p = noteFailure(PROF.home, JSON.stringify(turn.error ?? 'failed'), Date.now(), model);
-      if (p) console.log(`trae-paused: ${pausedWhat(p)} until ${new Date(p.pausedUntil).toLocaleTimeString()} (${p.reason}); re-route this task with route.mjs ... ${p.pool ? `(it moves to the next model family; --exclude-model ${p.pool} for this task)` : `--exclude-account ${account}`}`);
+      if (p?.modelPause) console.log(unavailableHint(p));
+      else if (p) console.log(`trae-paused: ${pausedWhat(p)} until ${new Date(p.pausedUntil).toLocaleTimeString()} (${p.reason}); re-route this task with route.mjs ... ${p.pool ? `(it moves to the next model family; --exclude-model ${p.pool} for this task)` : `--exclude-account ${account}`}`);
       else if (model) console.log(`trae-failed: a ${model} turn failed on TRAE (not paused yet); for an infrastructure error re-route this task with route.mjs ... --exclude-model ${model.toLowerCase()} (not a --failures step)`);
     }
   }
@@ -586,9 +590,41 @@ const report = async (threadId, turn, final, usage) => {
 // so check before acting: `status`, child threads (parent_thread_id) under <home>/sessions/, then `wait` again, steer
 // or interrupt.
 const STALL_MIN = opts['stall-min'] === undefined ? 30 : Number(opts['stall-min']);
+// TRAE's queue signal (2026-11-13): while a turn waits in TRAE's model queue the hub sends `queue/status` notifications
+// ({threadId, turnId, state, position, message}); they carry this thread's id, so they already count as progress below —
+// a worker printing `queued:` lines is waiting, not stalled. Print on a state change or a ≥10% position move (at most
+// one line a minute), and the wait's length once it clears. `status --thread` reads the last state from the file.
+const queueFile = (home) => path.join(home, 'queue-status.json');
+const saveQueue = (home, threadId, q) => {
+  try {
+    let m = {}; try { m = JSON.parse(fs.readFileSync(queueFile(home), 'utf8')); } catch {}
+    m[threadId] = q;
+    fs.writeFileSync(queueFile(home), JSON.stringify(Object.fromEntries(Object.entries(m).slice(-200))));
+  } catch {}
+};
+const readQueue = (home, threadId) => { try { return JSON.parse(fs.readFileSync(queueFile(home), 'utf8'))[threadId] ?? null; } catch { return null; } };
 const follow = (threadId, turnId) => {
   console.log(`thread=${threadId} turn=${turnId}`);
   let final, usage, last = Date.now();
+  let queue = null, queueSince = null, queuePrinted = 0;
+  const queueUpdate = (p) => {
+    const t = Date.now(), state = String(p.state ?? 'queued');
+    const pos = Number.isFinite(Number(p.position)) ? Number(p.position) : null;
+    if (state !== 'ready' && !queueSince) queueSince = t;
+    const prev = queue;
+    queue = { state, position: pos, since: queueSince, turnId, at: t };
+    if (PROF?.home) saveQueue(PROF.home, threadId, queue);
+    if (state === 'ready') {
+      if (queueSince) console.log(`queue cleared after ${Math.max(1, Math.round((t - queueSince) / 60000))}m`);
+      queueSince = null;
+      return;
+    }
+    const moved = !prev || prev.state !== state
+      || (pos != null && prev.position != null && Math.abs(pos - prev.position) >= Math.max(1, Math.ceil(prev.position * 0.1)));
+    if (!moved || t - queuePrinted < 60000) return;
+    queuePrinted = t;
+    console.log(`queued: position ${pos ?? '?'} (${state})`);
+  };
   if (STALL_MIN > 0) setInterval(() => {
     const idle = (Date.now() - last) / 60000;
     if (idle < STALL_MIN) return;
@@ -605,6 +641,7 @@ const follow = (threadId, turnId) => {
     if (p.turnId === turnId || p.threadId === threadId || p.turn?.id === turnId) last = Date.now();
     if (m.method === 'item/completed' && p.item?.type === 'agentMessage' && p.item.text) final = p.item.text;
     else if (m.method === 'thread/tokenUsage/updated') usage = p.tokenUsage?.total;
+    else if (m.method === 'queue/status') queueUpdate(p);
     else if (m.method === 'turn/completed' && (p.turn?.id ?? p.turnId) === turnId) report(threadId, p.turn ?? { id: turnId, status: 'completed' }, final, usage);
   });
 };
@@ -693,7 +730,12 @@ try {
     if (!opts.thread) die('status needs --thread');
     const r = await call('thread/read', { threadId: opts.thread, includeTurns: true });
     const turns = r.thread?.turns ?? [];
-    console.log(JSON.stringify({ thread: opts.thread, name: r.thread?.name, turns: turns.length, last: turns.at(-1) && { id: turns.at(-1).id, status: turns.at(-1).status, error: turns.at(-1).error } }));
+    const lastTurn = turns.at(-1);
+    const q = PROF?.home ? readQueue(PROF.home, opts.thread) : null;
+    // Only a turn still running, with a queue signal recorded for it, has queue info; otherwise say so plainly.
+    const queue = lastTurn?.status === 'inProgress' && q && q.turnId === lastTurn.id && q.state !== 'ready'
+      ? { state: q.state, position: q.position, since: q.since } : 'no queue info';
+    console.log(JSON.stringify({ thread: opts.thread, name: r.thread?.name, turns: turns.length, last: lastTurn && { id: lastTurn.id, status: lastTurn.status, error: lastTurn.error }, queue }));
     finish(0);
   } else if (cmd === 'list') {
     const r = await call('thread/list', {
@@ -710,6 +752,20 @@ try {
     console.log(JSON.stringify(r.rateLimitsByLimitId ?? { [r.rateLimits?.limitId ?? 'codex']: r.rateLimits }));
     finish(0);
   } else if (cmd === 'usage') {
+    if (PROF?.kind === 'trae') {
+      // TRAE has no rate-limit windows: its own per-model daily (high-priority) buckets and the weekly pool
+      // (`model/internalUsage/read`, read-only), plus model → quotaKey from `model/list` (null for Seed/DeepSeek).
+      const [u, l] = await Promise.all([call('model/internalUsage/read', {}), call('model/list', {}).catch(() => null)]);
+      const modelQuotas = {};
+      for (const m of l?.models ?? l?.data ?? []) {
+        const id = m?.configName ?? m?.config_name ?? m?.id ?? m?.name ?? null;
+        const meta = m?.businessMetadata ?? m?.business_metadata ?? null;
+        const key = meta?.internal_daily_quota_key ?? meta?.internalDailyQuotaKey ?? m?.quotaKey ?? m?._meta?.trae?.quotaKey ?? null;
+        if (id && key) modelQuotas[String(id).toLowerCase()] = key;
+      }
+      console.log(JSON.stringify({ kind: 'trae', dailyUsage: u?.dailyUsage ?? [], usage: u?.usage ?? null, modelQuotas }));
+      finish(0);
+    }
     // One read of everything quota.mjs needs: the logged-in account, its windows, its reset cards.
     const r = await call('account/rateLimits/read', {});
     console.log(JSON.stringify({
@@ -731,4 +787,13 @@ try {
     console.log(JSON.stringify(r));
     finish(r.outcome === 'reset' || r.outcome === 'alreadyRedeemed' ? 0 : 1);
   } else die(`unknown command ${cmd}`);
-} catch (e) { die(e.message, 1); }
+} catch (e) {
+  // A TRAE model that no longer resolves fails at thread/start (before any turn), so the turn recorder never sees it:
+  // record it here so routing skips just that model (lib/trae-health.mjs, 2026-11-13).
+  const msg = String(e?.message ?? e);
+  if (PROF?.kind === 'trae' && failureKind(msg) === 'unavailable') {
+    const p = noteFailure(PROF.home, msg, Date.now(), opts.model ?? null);
+    if (p?.modelPause) console.log(unavailableHint(p));
+  }
+  die(msg, 1);
+}

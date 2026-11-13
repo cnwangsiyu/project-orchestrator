@@ -581,6 +581,12 @@ for (const [sc, args] of ERRORS) {
   const full = (home) => tr({ home, models: ids, modelIds: Object.fromEntries(ids.map((i) => [i, i.toUpperCase()])) });
   const out = { healthy: false, reason: 'its daily token quota is used up', quotaOut: { kind: 'daily', resetsAt: now + 10 * h } };
   const okHome = fs.mkdtempSync(path.join(tmp, 'trae-ok-')), gptHome = fs.mkdtempSync(path.join(tmp, 'trae-gpt-')), allHome = fs.mkdtempSync(path.join(tmp, 'trae-all-'));
+  // TRAE dropped Gemini (2026-11-13): this fixture mirrors the live list; Seed-Evolving is the only vision row.
+  const idsNoGem = ['gpt-6.1-sol', 'gpt-6-astra', 'deepseek-v4.1-flash', 'deepseek-v4-pro', 'seed-evolving'];
+  const noGem = (home) => tr({ home, models: idsNoGem, modelIds: Object.fromEntries(idsNoGem.map((i) => [i, i.toUpperCase()])) });
+  const noGemHome = fs.mkdtempSync(path.join(tmp, 'trae-nogem-')), mpHome = fs.mkdtempSync(path.join(tmp, 'trae-mp-'));
+  // One model-unavailable failure (2026-11-13): it pauses deepseek-v4.1-flash only; deepseek-v4-pro keeps routing.
+  noteFailure(mpHome, '-32600: model `deepseek-v4.1-flash` is unavailable because its metadata could not be resolved', Date.now(), 'deepseek-v4.1-flash');
   const t = Date.now(), R = 'stream disconnected: Model access temporarily restricted. (983)';
   const gptPause = noteFailure(gptHome, R, t, 'GPT-6.1-Sol');
   const reset = new Date(t); reset.setUTCHours(24, 0, 0, 0);
@@ -588,6 +594,8 @@ for (const [sc, args] of ERRORS) {
   S.traeFull = { claude: cl(10, 120), codex: [acc('main', 20, 120), tt(out), full(okHome)] };
   S.traeGptOut = { claude: cl(10, 120), codex: [acc('main', 20, 120), tt(out), full(gptHome)] };
   S.traeAllOut = { claude: cl(10, 120), codex: [acc('main', 20, 120), tt(out), full(allHome)] };
+  S.traeNoGem = { claude: cl(10, 120), codex: [acc('main', 20, 120), tt(out), noGem(noGemHome)] };
+  S.traeNoGemPaused = { claude: cl(10, 120), codex: [acc('main', 20, 120), tt(out), noGem(mpHome)] };
   const o = (sc, args) => JSON.parse(run(sc, args));
   const pk = (sc, args) => { const r = o(sc, args); return r.deferred ? 'DEFER' : `${r.pick.model} ${r.pick.effort} @${r.pick.account}`; };
   const hasNote = (sc, args, re) => o(sc, args).notes.some((n) => re.test(n));
@@ -608,7 +616,13 @@ for (const [sc, args] of ERRORS) {
     [pk('traeFull', ['implement', '--failures', '2']), 'deepseek-v4.1-flash high @trae'],
     [pk('traeFull', ['implement', '--failures', '3']), 'gpt-6.1-sol max @trae'],
     [pk('traeFull', ['implement', '--failures', '4']), 'gemini-3.1-pro-preview high @trae'],
-    [pk('traeFull', ['implement', '--failures', '5']), 'opus high @undefined'],
+    // GPT-6-Astra on the company account after Sol max and the fallbacks (live test 2026-11-13): company quota, no OK.
+    [pk('traeFull', ['implement', '--failures', '5']), 'gpt-6-astra high @trae'],
+    [pk('traeFull', ['implement', '--failures', '6']), 'opus high @undefined'],
+    [o('traeFull', ['implement', '--failures', '5']).needsUserOK.some((n) => /Astra/.test(n)), false],
+    [hasNote('traeFull', ['implement', '--failures', '5'], /Astra on TRAE queues TRAE-wide/), true],
+    // A ChatGPT-account Astra still asks first (5x Sol usage).
+    [o('ttFresh', ['science', '--impact', 'service', '--failures', '2']).needsUserOK.includes('Astra (5x Sol usage)'), true],
     [pk('traeFull', ['lookup', '--failures', '3']), 'deepseek-v4.1-flash high @trae'],
     // GPT paused on TRAE: the fallbacks in order, no personal-quota question, then Claude.
     [pk('traeGptOut', ['implement']), 'deepseek-v4.1-flash high @trae'],
@@ -622,6 +636,12 @@ for (const [sc, args] of ERRORS) {
     // The same through --exclude-model (an infrastructure miss on one task).
     [pk('traeFull', ['implement', '--exclude-model', 'gpt']), 'deepseek-v4.1-flash high @trae'],
     [pk('traeFull', ['implement', '--exclude-model', 'gpt,deepseek-v4.1-flash']), 'gemini-3.1-pro-preview high @trae'],
+    // With Gemini gone from TRAE (2026-11-13), Seed-Evolving is the image reader only: image-read falls back to it,
+    // implement never picks it; a model-unavailable pause drops only that model, its family-mate keeps routing.
+    [pk('traeNoGem', ['image-read', '--exclude-model', 'gpt']), 'seed-evolving medium @trae'],
+    [pk('traeNoGem', ['implement', '--exclude-model', 'gpt']), 'deepseek-v4.1-flash high @trae'],
+    [pk('traeNoGemPaused', ['implement', '--exclude-model', 'gpt']), 'deepseek-v4-pro high @trae'],
+    [pk('traeNoGemPaused', ['implement']), 'gpt-6.1-sol high @trae'],
     // The task flag uses that same exclusion path, scoped to TRAE, with the normal fallback ladder and gates.
     [pk('traeFull', ['review-high', '--security']), 'deepseek-v4.1-flash high @trae'],
     [pk('traeFull', ['implement', '--impact', 'service', '--security']), 'deepseek-v4.1-flash high @trae'],
@@ -695,6 +715,35 @@ for (const [sc, args] of ERRORS) {
     }
   }
 }
+// A model TRAE no longer resolves pauses only that model for 6 h (2026-11-13, after TRAE dropped Gemini): its
+// family-mates keep routing, the account and family never pause, and no probe is needed — the next launch tries again.
+{
+  const { failureKind, pauseDecision, noteFailure, noteSuccess, readModelPauses, readPoolPauses, readPause } = await import('../lib/trae-health.mjs');
+  const t0 = Date.parse('2026-11-13T08:00:00Z'), H = 3600000, m = 60000;
+  const e1 = '-32600: model `gemini-3.1-pro-preview` is unavailable because its metadata could not be resolved';
+  const e2 = 'model `gpt-does-not-exist` is unavailable because its metadata could not be resolved (code -32600)';
+  const home = fs.mkdtempSync(path.join(tmp, 'trae-unavail-'));
+  const p = noteFailure(home, e1, t0, 'gemini-3.1-pro-preview');
+  const live = readModelPauses(home, t0 + 6 * H - 1), expired = readModelPauses(home, t0 + 6 * H + 1);
+  const pools = readPoolPauses(home, t0 + m), acct = readPause(home, t0 + m);
+  noteFailure(home, e1, t0 + m, 'gemini-3.1-pro-preview');
+  const one = Object.keys(readModelPauses(home, t0 + 2 * m)).length;
+  const sh = fs.mkdtempSync(path.join(tmp, 'trae-unavail-s-'));
+  noteFailure(sh, e2, t0, 'gpt-does-not-exist'); noteSuccess(sh, 'gpt-does-not-exist');
+  const cleared = Object.keys(readModelPauses(sh, t0 + m)).length;
+  const cases = [
+    [failureKind(e1), 'unavailable'], [failureKind(e2), 'unavailable'],
+    [failureKind('request queue size is exceed'), 'transient'], [failureKind('401 Unauthorized'), 'auth'], [failureKind('403 Forbidden: quota exceeded'), 'hard'],
+    [pauseDecision([{ t: t0, why: e1 }], t0 + m), null], [pauseDecision([{ t: t0, why: e1 }, { t: t0 + m, why: e1 }], t0 + 2 * m), null],
+    [p?.modelPause, true], [p?.model, 'gemini-3.1-pro-preview'], [p?.pool, 'gemini'], [p?.pausedUntil, t0 + 6 * H],
+    [/model unavailable; paused 6 h/.test(p?.reason), true],
+    [Object.keys(live).join(), 'gemini-3.1-pro-preview'], [Object.keys(expired).length, 0],
+    [Object.keys(pools).length, 0], [acct, null], [one, 1], [cleared, 0],
+  ];
+  const bad = cases.map(([got, want], i) => (got === want ? null : `${i} (${got})`)).filter((i) => i !== null);
+  if (bad.length) fail++;
+  console.log(`${bad.length ? 'FAIL' : 'ok  '} model unavailable   ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
+}
 // Recovery probes (user, 2026-11-12): vendor restrictions wait for the next UTC midnight, including failed probes;
 // other hard failures keep 30-minute probes. A family stays out until a probe succeeds; transient pauses just end.
 {
@@ -754,6 +803,49 @@ for (const [sc, args] of ERRORS) {
   const bad = cases.map(([got, want], i) => (got === want ? null : `${i} (${got})`)).filter((i) => i !== null);
   if (bad.length) fail++;
   console.log(`${bad.length ? 'FAIL' : 'ok  '} recovery probes     ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
+}
+// TRAE's per-model daily high-priority quota and weekly pool (user-approved 2026-11-13): a depleted bucket only moves
+// that model into TRAE's low-priority queue — display-only, never a routing change.
+{
+  const { traeQuota, analyze, leanLines } = await import('../lib/state.mjs');
+  const sec = 1_800_000_000, day = 86400;
+  const q = traeQuota({
+    dailyUsage: [
+      { quotaKey: 'gpt_6_1', quotaLimit: '80', quotaUsed: '80', quotaRemaining: '0', usagePercent: 100, isDepleted: true, periodStart: sec, resetTime: sec + 6 * 3600 },
+      { quotaKey: 'gpt_6_astra', quotaLimit: '40', quotaUsed: '10', quotaRemaining: '30', isDepleted: false, resetTime: sec + 6 * 3600 },
+      { quotaKey: 'gpt_6', quotaLimit: '10', quotaUsed: '4' },
+    ],
+    usage: { usage_percent: 50, quota_remaining: '1000', quota_limit: '2000', is_depleted: false, reset_time: sec + day },
+    modelQuotas: { 'gpt-6.1-sol': 'gpt_6_1', 'gpt-6-astra': 'gpt_6_astra', 'seed-evolving': null },
+  });
+  const noModel = traeQuota({ dailyUsage: [{ quotaKey: 'gpt_6_1', quotaLimit: '10', quotaUsed: '10', quotaRemaining: '0', isDepleted: true }] });
+  const cases = [
+    [q.daily['gpt-6.1-sol'].depleted, true], [q.daily['gpt-6.1-sol'].used, 80], [q.daily['gpt-6.1-sol'].limit, 80],
+    [q.daily['gpt-6.1-sol'].remaining, 0], [q.daily['gpt-6.1-sol'].resetsAt, (sec + 6 * 3600) * 1000], [q.daily['gpt-6.1-sol'].quotaKey, 'gpt_6_1'],
+    [q.daily['gpt-6-astra'].depleted, false], [q.daily['gpt-6-astra'].remaining, 30],
+    [q.daily.gpt_6.remaining, 6], [q.daily.gpt_6.depleted, false], [q.daily.gpt_6.resetsAt, null],
+    [q.weekly.used, 1000], [q.weekly.limit, 2000], [q.weekly.remaining, 1000], [q.weekly.depleted, false], [q.weekly.resetsAt, (sec + day) * 1000],
+    [noModel.daily.gpt_6_1.depleted, true], [noModel.weekly, null],
+    [traeQuota({ dailyUsage: [], usage: null }), null], [traeQuota({}), null], [traeQuota(null), null], [traeQuota('nope'), null],
+  ];
+  // The depleted bucket shows in the lean and as a route note; the pick and its account are unchanged.
+  const quota = { daily: { 'gpt-6.1-sol': { used: 80, limit: 80, remaining: 0, depleted: true, resetsAt: now + 6 * h } }, weekly: null };
+  const qh = fs.mkdtempSync(path.join(tmp, 'trae-quota-'));
+  const data = { claude: cl(10, 120), codexAccounts: [acc('main', 20, 120), tr({ home: qh, quota })] };
+  process.env.TRAE_PROBE = '0';
+  const st = analyze(data);
+  const lean = leanLines(st, data).join('\n');
+  delete process.env.TRAE_PROBE;
+  S.traeQuota = { claude: cl(10, 120), codex: [acc('main', 20, 120), tr({ home: qh, quota })] };
+  const ro = JSON.parse(run('traeQuota', ['implement']));
+  cases.push(
+    [lean.includes("TRAE gpt-6.1-sol's daily high-priority quota is used up"), true],
+    [ro.pick.model, 'gpt-6.1-sol'], [ro.pick.account, 'trae'],
+    [ro.notes.some((n) => /daily high-priority quota is used up.*low-priority lane/.test(n)), true],
+  );
+  const bad = cases.map(([got, want], i) => (got === want ? null : `${i} (${got})`)).filter((i) => i !== null);
+  if (bad.length) fail++;
+  console.log(`${bad.length ? 'FAIL' : 'ok  '} trae daily quota    ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
 }
 // Approved nightly decision 2026-11-10-1: an idle weekly deadline can move without a card redemption.
 // Exercise the real review-data CLI on quota history, with all external reads isolated from live accounts.

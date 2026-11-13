@@ -150,19 +150,24 @@ workers, long unattended runs) at `medium` effort, set in each session's respawn
     |---|---|---|---|
     | GPT-6.1-Sol (reference) | 0.95 | 227 s | review false positives |
     | DeepSeek-V4.1-Flash | 0.97 | 344 s | missed one timing bug; 0 review false positives |
-    | Gemini-3.1-Pro | 0.99 | 715 s | 3 of 12 runs hit the 40-minute limit; reads images |
+    | Gemini-3.1-Pro | 0.99 | 715 s | 3 of 12 runs hit the 40-minute limit; reads images; gone from TRAE's model list 2026-11-13 |
     | DeepSeek-V4-Pro | 0.94 | 659 s | small mistakes, review false positives |
-    | Seed-Evolving / Seed-2.1-Pro | 0.87 / 0.81 | 875 / 801 s | break output formats — not used |
+    | Seed-Evolving / Seed-2.1-Pro | 0.87 / 0.81 | 875 / 801 s | break output formats — kept out of the general chain; vision-only for `image-read` (2026-11-13) |
     | Grok 4.7 via Cursor CLI | 0.50 | 2403 s | half the runs timed out or dropped — not used |
 
     - **GPT out on the company account** (its `gpt` family paused or restricted, or `--exclude-model gpt`): DeepSeek-V4.1-Flash
-      → Gemini-3.1-Pro → DeepSeek-V4-Pro, each at high, then the row's Claude steps. No question: it is company quota.
-      `image-read` uses Gemini only: checked 2026-11-10 on TRAE, Sol and Gemini transcribed a screenshot's text, both
-      DeepSeek models said they can't see images. A DeepSeek pick prints a note: a task that depends on screenshots is
-      re-routed with `--exclude-model deepseek`.
+      → DeepSeek-V4-Pro (Gemini-3.1-Pro is gone from TRAE's model list 2026-11-13), each at high, then the row's Claude
+      steps. No question: it is company quota.
+      `image-read` uses Seed-Evolving only (its only vision row): live test 2026-11-13, it transcribed a small-text
+      screenshot exactly, using only its Read tool, where Sol and the old Gemini misread a digit, and it reads text PDFs.
+      It cannot perceive audio, video or image-only (scanned) PDFs: convert scanned PDF pages to images first and route
+      them as `image-read`; audio and video have no TRAE model and stay on Claude/ChatGPT. Both DeepSeek models said they
+      can't see images (2026-11-10). A DeepSeek pick prints a note: a task that depends on screenshots is re-routed with
+      `--exclude-model deepseek`.
     - **GPT up, Sol falls short**: Sol at the row's effort → … → Sol xhigh → DeepSeek-V4.1-Flash (a different family:
-      its misses rarely overlap Sol's) → Sol max → Gemini-3.1-Pro → the row's Claude steps. The cheap rows (lookup,
-      extract, draft) skip Sol max and the second fallback.
+      its misses rarely overlap Sol's) → Sol max → DeepSeek-V4-Pro → GPT-6-Astra high on the company account (no OK:
+      company quota; live test 2026-11-13) → the row's Claude steps. The cheap rows (lookup, extract, draft, browser,
+      computer-use) skip Sol max, the second fallback and Astra.
     - **Quality guard**: service code a fallback model wrote gets the routine review (normally only release code or high
       stakes do), and every review of fallback-written code runs with `--exclude-model <its family>`, so a different
       family reviews it. A second free reviewer on TRAE (no Kimi there) is a fallback model of another family, not a
@@ -200,8 +205,10 @@ workers, long unattended runs) at `medium` effort, set in each session's respawn
       across three projects, while throwaway work passed first time 15/17 that week. One notch up at high stakes; a
       failure still climbs to `xhigh` and `max`. Release and service work keep their effort;
     - after a failure Sol climbs every notch to `xhigh`, then `max` (no OK needed on TTADK; lookup, extract, draft
-      and browser stop at `xhigh`), before the row's personal-quota steps: e.g. implement-hard Sol xhigh → Sol max →
-      Opus xhigh; science Sol xhigh → Sol max → Astra (ChatGPT, needs an OK; dropped when ChatGPT is out);
+      and browser stop at `xhigh`), then the company fallback models and GPT-6-Astra high on TRAE (company quota, no OK),
+      before the row's personal-quota steps: e.g. implement-hard Sol xhigh → DeepSeek-V4.1-Flash → Sol max →
+      DeepSeek-V4-Pro → Astra high on TRAE → Opus xhigh; science Sol xhigh → Sol max → Astra high on TRAE →
+      Astra (ChatGPT, needs an OK; dropped when ChatGPT is out);
     - a routine review of Codex-written code runs on TTADK (`review --author codex`): a fresh Sol xhigh reviewer plus
       a second free one with a different focus (failure paths, concurrency, edge cases, tests). High-stakes review
       and design keep Claude in the pair;
@@ -219,7 +226,8 @@ workers, long unattended runs) at `medium` effort, set in each session's respawn
     `second-opinion --against codex`, a high-stakes review of Codex-written code (Claude first), and `browser` before
     `browser-setup`. `image-read` works on the gateway.
   - Later ladder steps never step back: Codex steps no stronger than the Sol already tried (Luna, Terra, a weaker Sol)
-    are dropped; Astra stays after Sol max on a ChatGPT account and is dropped when those are out.
+    are dropped; Astra on the company account comes after Sol max and the company fallbacks and needs no OK; a ChatGPT
+    Astra stays after Sol max on that account, needs an OK, and is dropped when those accounts are out.
   - **A TTADK device saves the rest (user, 2026-11-07).** The user's other device has no TTADK and uses the shared
     ChatGPT and Claude quota, so on a device with a TTADK account nothing spends that quota for its own sake: no
     underused, front-load or expiring-week effort raises, no extra quota-spending reviews, and Claude takes only

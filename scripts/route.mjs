@@ -15,7 +15,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readState, analyze, leanLines, readProfiles, hours, withLock, SHARED, ROUTE_LOG, POLICY } from './lib/state.mjs';
+import { readState, analyze, leanLines, readProfiles, hours, fmt, withLock, SHARED, ROUTE_LOG, POLICY } from './lib/state.mjs';
 import { poolOf } from './lib/trae-health.mjs';
 
 const SKILL = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -32,7 +32,12 @@ const KIMI = 'kimi-k3'; // TTADK only: a different model family, best planted-bu
 // and Seed-2.1-Pro (0.81), which break output formats, and Cursor's Grok 4.7 (0.50, timeouts and dropped connections).
 // All ran at high effort, so they run at high here. Gemini is the only one that reads images (checked 2026-11-10 on
 // TRAE: Sol and Gemini transcribed a screenshot's text; both DeepSeek models answered that they can't see images).
-const ALTS = [{ model: 'deepseek-v4.1-flash', effort: 'high' }, { model: 'gemini-3.1-pro-preview', effort: 'high', vision: true }, { model: 'deepseek-v4-pro', effort: 'high' }];
+// 2026-11-13: TRAE dropped Gemini from its model list, so Seed-Evolving joins as the image reader only — live tests
+// transcribed a small-text screenshot exactly and named shapes/colours, but it cannot see audio, video or scanned PDFs
+// (convert those pages to images and route them as image-read); its 2026-11-10 general benchmark (0.87, broken output
+// formats) keeps it out of every other fallback chain.
+const ALTS = [{ model: 'deepseek-v4.1-flash', effort: 'high' }, { model: 'gemini-3.1-pro-preview', effort: 'high', vision: true },
+  { model: 'deepseek-v4-pro', effort: 'high' }, { model: 'seed-evolving', effort: 'medium', vision: true, visionOnly: true }];
 const isAlt = (x) => x?.vendor === 'codex' && ALTS.some((a) => a.model === x.model);
 
 // The routing table (sources and rationale: references/model-routing.md).
@@ -156,8 +161,9 @@ const ttHas = (model) => !!TT && TT.models.includes(model) && !modelExcluded(mod
 const ttBrowser = !!TT && !!TT.browser;
 const chatgptBrowser = chatgptOpen.filter((r) => r.a.browser);
 const browserViaCodex = T.kind === 'browser' && (ttBrowser || chatgptBrowser.length > 0);
-// The fallback models the company account can run for this task, best first (ALTS).
-const ttAlts = ALTS.filter((a) => ttHas(a.model) && (cat !== 'image-read' || a.vision)).map((a) => X(a.model, a.effort));
+// The fallback models the company account can run for this task, best first (ALTS): image-read takes the vision models,
+// every other row the general ones (Seed-Evolving is vision-only, 2026-11-13).
+const ttAlts = ALTS.filter((a) => ttHas(a.model) && (cat === 'image-read' ? a.vision : !a.visionOnly)).map((a) => X(a.model, a.effort));
 const ttModelsOK = ttHas(SOL) || ttAlts.length > 0;
 // A fallback of a different family from model x (a reviewer or a retry that doesn't share x's blind spots).
 const altOtherThan = (x) => ttAlts.find((a) => poolOf(a.model) !== poolOf(x?.model)) ?? null;
@@ -201,7 +207,7 @@ if (ttCapable && !ttHas(SOL)) {
   // GPT-6.1-Sol unavailable on the company account (its GPT family paused or restricted, or excluded for this task):
   // the fallback models in order, then the row's own Claude steps. Company quota, so no question; personal quota (the
   // Claude steps) only after these have fallen short.
-  const gone = modelExcluded(SOL) ? `excluded for this task (--exclude-model ${[...exModels].join(',')})` : modelExcluded(SOL, TT) ? 'excluded for this security task (--security)' : TT.poolPauses?.gpt ? `paused: ${TT.poolPauses.gpt.reason}` : 'not listed';
+  const gone = modelExcluded(SOL) ? `excluded for this task (--exclude-model ${[...exModels].join(',')})` : modelExcluded(SOL, TT) ? 'excluded for this security task (--security)' : TT.poolPauses?.gpt ? `paused: ${TT.poolPauses.gpt.reason}` : TT.modelPauses?.[SOL] ? `unavailable: ${TT.modelPauses[SOL].reason}` : 'not listed';
   why.push(`GPT-6.1-Sol on ${TT.name} ${gone} → its fallback models: ${ttAlts.map(label).join(' → ')}`);
   base = [...ttAlts, ...base.filter((x) => x.vendor === 'claude')];
 }
@@ -232,6 +238,9 @@ else if (ttCapable) {
   if (ttAlts[0]) rungs.push(ttAlts[0]);
   if (!cheapRow) rungs.push(X(SOL, 'max'));
   if (!cheapRow && ttAlts[1]) rungs.push(ttAlts[1]);
+  // GPT-6-Astra on the company account after Sol max and the fallbacks (live test 2026-11-13: 4 parallel tiny tasks all
+  // succeeded after ~13.5 min of TRAE-wide queueing); company quota, so no OK — the gate below covers ChatGPT only.
+  if (!cheapRow && ttHas(ASTRA)) rungs.push(X(ASTRA, 'high'));
   let top = ei(rungs.at(-1).effort);
   for (const x of base) {
     if (x.vendor === 'codex') {
@@ -336,7 +345,8 @@ if (m) {
   if (isAlt(m) && CODE.includes(cat) && impact === 'service' && !reviewKind) { reviewKind = 'review'; why.push(`${m.model} is a fallback model: its service code gets a review`); }
   // ---- 3. gates ----
   if (m.model === 'fable') needsOK.push('Fable (2x Opus per token, and its own weekly cap, which the orchestrators run on)');
-  if (m.model === ASTRA) needsOK.push('Astra (5x Sol usage)');
+  // Astra on a company account spends company quota: no OK. On a ChatGPT (personal) account it does (5x Sol usage).
+  if (m.model === ASTRA && !onTTADK(m)) needsOK.push('Astra (5x Sol usage)');
   // onTTADK also matches the TRAE fallback; only the actual TTADK account has the max-effort exemption.
   if (m.effort === 'max' && !(onTTADK(m) && TT === QX.ttadk)) needsOK.push('max effort'); // user, 2026-11-07
 }
@@ -464,13 +474,18 @@ if (m && ['browser', 'ui-browser'].includes(cat)) notes.push('brief: include the
 // Every worker can search the web (Codex and Claude Code have it on by default; TTADK through its proxy).
 if (m) notes.push('brief: web searches go to the public internet — never put internal code, internal project or product names, people, internal URLs or secrets into a search query; search for the public topic only');
 if (ttadkRun && TT.kind === 'trae') {
-  notes.push(`on TRAE CLI (account ${TT.name}; TTADK is ${QX.ttadk ? 'out' : 'absent'}): a popular model may sit queued ("Queued for capacity") — if a worker shows no progress for 15 minutes, interrupt it and re-route with --exclude-model ${poolOf(m.model)} (the next model family takes it; an infrastructure miss, so the same --failures); on account failures (login, auth) re-route with --exclude-account ${TT.name}. codex-worker records failures per model family (queue full pauses 5→10→20→30 min; vendor restriction waits until next 00:00 UTC / 08:00 China time, then a recovery probe; a failed restriction probe waits until the following 00:00 UTC; other hard failures such as quota pause 30 min, then a probe; auth pauses the account; route.mjs then uses the next family); for a failed or interrupted traecli exec run, record it yourself: node ${SKILL}/scripts/codex-worker.mjs --account ${TT.name} note-failure --model ${m.model} "<error>"`);
+  notes.push(`on TRAE CLI (account ${TT.name}; TTADK is ${QX.ttadk ? 'out' : 'absent'}): a hub worker printing \`queued: position N\` is waiting in TRAE's queue — let it wait; only interrupt a worker with no events at all for 15 minutes, or an exec run, and re-route with --exclude-model ${poolOf(m.model)} (the next model family takes it; an infrastructure miss, so the same --failures); on account failures (login, auth) re-route with --exclude-account ${TT.name}. codex-worker records failures per model family (queue full pauses 5→10→20→30 min; vendor restriction waits until next 00:00 UTC / 08:00 China time, then a recovery probe; a failed restriction probe waits until the following 00:00 UTC; other hard failures such as quota pause 30 min, then a probe; auth pauses the account; route.mjs then uses the next family); for a failed or interrupted traecli exec run, record it yourself: node ${SKILL}/scripts/codex-worker.mjs --account ${TT.name} note-failure --model ${m.model} "<error>"`);
+  // Astra on TRAE is slow but works (2026-11-13): keep it a hub worker so its queue/status lines are visible.
+  if (m.model === ASTRA) notes.push('Astra on TRAE queues TRAE-wide (≈15 min seen 2026-11-13); launch it as a hub worker (codex-worker start), not traecli exec, so queue/status shows; the 30-min stall alarm doesn\'t fire while queue/status keeps arriving');
+  // A depleted daily bucket only moves that model to TRAE's low-priority lane: routing is unchanged (2026-11-13).
+  const q = TT.quota?.daily?.[m.model];
+  if (q?.depleted) notes.push(`TRAE ${m.model}'s daily high-priority quota is used up${q.resetsAt ? ` until ${fmt(q.resetsAt)}` : ''}: requests queue in the low-priority lane (long waits; queued: lines show position). For urgent work consider a model whose bucket isn't depleted (e.g. --exclude-model gpt → DeepSeek, which has no daily bucket) or another account.`);
   notes.push('brief (TRAE): no ChatGPT browser here — playwright MCP is for public/local pages only; signed-in consoles require a browser-ready worker with console origins and a signed-in browser/account named in the brief; missing login means BLOCKED, never a Playwright sign-in workaround; git commits must carry no co-author or tool trailer');
   if (!TT.live && T.shape !== 'exec') notes.push(`TRAE hub is down: start it first — node ${SKILL}/scripts/codex-worker.mjs --account ${TT.name} hub`);
 }
 if (ttadkRun && m.model === 'gemini-3.1-pro-preview') notes.push('Gemini-3.1-Pro ran past 40 minutes in 3 of 12 benchmark runs: if it shows no progress for 20 minutes, or runs past twice what the task should take, interrupt it and re-route with --exclude-model gemini (same --failures)');
 if (ttadkRun && isAlt(m)) notes.push(`brief (${m.model}): state the exact output format and the done check; it has no ChatGPT browser or image tools`);
-if (ttadkRun && isAlt(m) && !ALTS.find((a) => a.model === m.model)?.vision) notes.push(`${m.model} can't see images: if the task depends on screenshots or images, re-route with --exclude-model ${poolOf(m.model)} (Gemini or Sol reads them), or route the image reading on its own as image-read`);
+if (ttadkRun && isAlt(m) && !ALTS.find((a) => a.model === m.model)?.vision) notes.push(`${m.model} can't see images: if the task depends on screenshots or images, re-route with --exclude-model ${poolOf(m.model)} (Sol, or Seed-Evolving for image-read, reads them), or route the image reading on its own as image-read`);
 if (ttadkRun && TT.kind !== 'trae') {
   if (TT.search) notes.push(`TTADK runs through its local proxy (web search): exit 6 with proxy-unavailable → re-route with --exclude-account ${TT.name}`);
   else notes.push(`this TTADK account has no web search (rerun codex-worker.mjs ttadk-setup to add its proxy): if the task turns out to need the web, re-route it as research`);

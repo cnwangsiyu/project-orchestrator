@@ -245,8 +245,26 @@ personal quota appears only when both company accounts are out. The user chose n
   `route.mjs` prints both. Sessions live in `~/.trae/cli/sessions`.
 - **Health.** `quota.mjs` reads the account as healthy when the CLI is present, logged in and lists GPT-6.1-Sol or one
   of its fallback models (model-routing.md, "Fallback models on the company account"), its hub is sound, and it isn't
-  paused. TRAE publishes no quota numbers; a popular model can sit "Queued for capacity": no progress for 15 minutes →
-  interrupt and re-route with `--exclude-model <its family>` (the next family takes it).
+  paused. A popular model can sit "Queued for capacity": a hub worker then prints `queued: position N (state)` from
+  TRAE's `queue/status` notifications (see "Queue position" below); let it wait, and interrupt only a worker with no
+  events at all for 15 minutes, or an exec run, then re-route with `--exclude-model <its family>`.
+- **Queue position** (user, 2026-11-13; 954 `queue/status` notifications in one 13-minute wait). Over the hub TRAE sends
+  `queue/status` `{threadId, turnId, state: queued|waiting|ready, position, message}` while a turn waits in its model
+  queue. `codex-worker start|turn|wait` prints `queued: position N (state)` on a state change or a ≥10% position move (at
+  most one line a minute) and `queue cleared after Mm` when it becomes ready; `status --thread` shows the last state
+  (or `no queue info`). These notifications carry the thread id, so they count as progress for the stall alarm — a queued
+  worker is waiting, not stalled. `traecli exec` shows none of this (no hub), which is why an exec run still uses the
+  15-minute no-progress rule.
+- **Per-model daily quota** (user-approved 2026-11-13). The hub answers the read-only `model/internalUsage/read` with
+  `{dailyUsage:[{quotaKey, quotaLimit, quotaUsed, quotaRemaining, usagePercent, isDepleted, periodStart, resetTime}],
+  usage:{usage_percent, quota_remaining, quota_limit, is_depleted, reset_time}}` — one independent daily (24 h) bucket per
+  model, plus the aggregate weekly pool (TUI "Weekly quota"). Amounts are strings, times unix seconds;
+  `model/list` maps each model to its `businessMetadata.internal_daily_quota_key` (null for Seed, DeepSeek and older GPTs:
+  no daily bucket). `codex-worker.mjs --account trae usage` prints this as `{kind:'trae', dailyUsage, usage, modelQuotas}`;
+  `quota.mjs` shows one row per model with a daily bucket plus the weekly row. A depleted bucket (`isDepleted`) moves only
+  that model into TRAE's **low-priority queue** (`queue/status` `modelQuotaLowPriority: true`; requests then wait with
+  positions in the hundreds) until its reset — routing is unchanged, and `route.mjs` adds a note when the pick's model is
+  depleted. `account/rateLimits/read` does not work for this login.
 - **Pause after failures** (`scripts/lib/trae-health.mjs`, user 2026-11-08). codex-worker records every failed or
   stalled TRAE turn and clears the record on a completed one. Failures count **per model family** (gpt, deepseek,
   gemini, seed…; 2026-11-10: TRAE restricted only GPT while the others kept working): a paused family's models drop out
@@ -263,7 +281,13 @@ personal quota appears only when both company accounts are out. The user chose n
     recovery time; the 11-10..12 retro found every block lifted just after 00:00 UTC and every earlier 30-minute probe failed;
   - other hard failures — quota used up, banned, 403 Forbidden: a family's pause is 30 minutes, then a recovery probe;
     whole-account pauses back off 30, 60, 120, at most 240 minutes while they keep coming without a success.
-    codex-worker prints `trae-paused:` when it pauses. A `traecli exec` run bypasses codex-worker: record its failure
+    codex-worker prints `trae-paused:` when it pauses.
+  - model unavailable — `is unavailable because its metadata could not be resolved`, `model … not found | does not exist |
+    unsupported`, or `-32600` together with "model" (TRAE dropped Gemini from its list, 2026-11-13): applies to the
+    **model**, not its family. One failure pauses just that model id for 6 hours (no probe; the next real launch tries
+    again) while its family-mates stay usable, and `route.mjs`/`quota.mjs` say so. A `thread/start` failure is recorded
+    too, and codex-worker prints `model-unavailable: <model> isn't available on TRAE; re-route (route.mjs skips it now)`.
+  A `traecli exec` run bypasses codex-worker: record its failure
   (or a run you interrupted) with `codex-worker.mjs --account trae note-failure --model <model> "<error>"`. To lift a
   pause by hand, delete `~/.trae/worker-health.json`.
 - **Recovery probe** (user, 2026-11-10, updated 2026-11-12). A model family's vendor restriction waits until the next
