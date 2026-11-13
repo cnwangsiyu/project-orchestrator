@@ -21,7 +21,8 @@ the model inside a pool, quota decides the pool.
 | Codex **Terra 6.1** | 0.5 | Writing and visual understanding; not a coding model (TB4 32% at `medium`) | Bulk prose drafts, translation, reading screenshots or images, writing when Claude has no spare | Coding; computer use (the Codex CLI can't do computer use at all) |
 | Codex **Luna** | 0.05 | Extraction, classification, structured summaries; very weak at coding (TB4 13% at `max`) | Bulk extraction or classification, quick lookups, image generation (the image tool does the work) | Any code change or code reasoning |
 
-Don't pick `gpt-6-sol` or `gpt-5.6-*` (older at the same or higher cost), Codex `ultra` (fans out its own sub-agents
+On personal ChatGPT accounts, don't pick `gpt-6-sol` or `gpt-5.6-*` (older at the same or higher cost); the approved
+TRAE choices below are a separate company-quota policy. Don't pick Codex `ultra` (fans out its own sub-agents
 and multiplies usage), the Fast/Ultrafast tiers (2.5x+ usage), or the alias `spark`.
 
 ## The routing table lives in the script
@@ -57,8 +58,9 @@ catches a miss, and how many times the task has fallen short. How the table was 
 - **Codex-only work:** every task whose output is an image — generating, editing, variants, icons, illustrations,
   mockup images (user, 2026-11-03). Luna `low` writes the prompt (the image tool makes the picture); Sol `medium` if an
   iteration needs more judgment.
-- **Cheap rows:** Luna for lookups and extraction, never for code. Terra for prose drafts only. The Claude
-  alternatives are Haiku and Sonnet.
+- **Cheap rows:** personal ChatGPT uses Luna for lookups and extraction, Terra for prose drafts. TTADK uses Sol.
+  Under known quota telemetry, cheap rows routed or balanced to TRAE prefer bucket-free GPT-5.5 then GPT-5.6-Terra.
+  The Claude alternatives are Haiku and Sonnet.
 - **Escalation order:** effort before model, and a vendor switch on a stalled debug for different blind spots. Fable
   and Astra come last and always need the user's OK.
 
@@ -132,13 +134,17 @@ pool. Depleting a model's daily bucket sends its requests to TRAE's shared low-p
 separately, and both providers' unused daily quota expires. Queue positions 180–3124 have been observed in US
 evening/night (Beijing daytime); US daytime load has not yet been measured, so the clock alone never implies low load.
 
-For a primary task already routed to TTADK, keep its selected model and effort and transfer it to TRAE only when:
+For a primary task already routed to TTADK, keep its effort and transfer it to TRAE only when (non-cheap rows also
+keep their selected model; cheap rows try GPT-5.5 then GPT-5.6-Terra before the selected model):
 
-- Both accounts can run that model under the existing exclusions and health rules. Browser, desktop, image work and
+- TTADK can run the original pick and TRAE can run the target model under the existing exclusions and health rules
+  (a cheap-row substitution need not be listed on TTADK). Browser, desktop, image work and
   `build-run` keep their existing preference. `--security` excludes TRAE GPT. Second opinions keep their original
   account/model and count; balancing never adds or removes a launch.
 - That TRAE model has a known, unexpired, non-depleted daily bucket with **at least 15% left**, reserved for urgent
-  work and reviews. Models without a known daily bucket are not candidates for balancing.
+  work and reviews. Exception: cheap rows may use GPT-5.5 or GPT-5.6-Terra when a known daily snapshot confirms no
+  bucket for that model; no high-priority quota is spent and no depleted-bucket low-priority lane is entered.
+  A missing/empty daily snapshot or an expired/unknown entry is not proof that a model is bucket-free.
 - Model load is **below 60%**, with **no family queue position above 300 in the last 30 minutes**. Load/queue readings
   older than 30 minutes are ignored; missing or stale signals mean unknown, allowed only for the low-priority case below.
 - At least one factor applies: **low priority** (`--stakes low`, lookup/extract/draft, or `--impact throwaway`);
@@ -165,8 +171,10 @@ and wait across US daytime and Beijing daytime. Until then, do not assume that t
 Pass `--background` only when nobody is waiting and there is no deadline or near-term dependency. Eligible work
 prefers TRAE even while congested, using this model order (user-approved 2026-11-13):
 
-1. An eligible GPT model at the row's tier whose `trae.quota.daily[model].depleted` is true: Sol, then Astra.
-   Its requests use the low-priority lane and spend no daily high-priority quota. An Astra escalation keeps its tier.
+1. Prefer eligible bucket-free GPT-5.5, then GPT-5.6-Terra: no daily high-priority quota spent and no low-priority lane.
+   If neither fits, an eligible GPT model at the row's tier whose `trae.quota.daily[model].depleted` is true: Sol,
+   then Astra. Its requests use the low-priority lane and spend no daily high-priority quota. An Astra escalation
+   keeps its tier, never moving down to these cheaper GPTs. Both choices log step 1 and name the quota/lane distinction.
 2. An eligible model without a daily bucket: DeepSeek-V4.1-Flash, then DeepSeek-V4-Pro; Seed-Evolving only for
    `image-read`. These choices spend no daily high-priority quota. A missing quota snapshot or an empty daily map
    is unknown telemetry, not evidence that a model has no bucket.
@@ -176,7 +184,9 @@ prefers TRAE even while congested, using this model order (user-approved 2026-11
 
 All existing model exclusions and pauses apply. `--security` keeps TRAE GPT off; DeepSeek is ineligible for
 build-run and sensitive reviews/acceptance (use `--exclude-model deepseek` when an implementation brief includes
-those checks). `image-read` uses only vision-capable GPT models or vision fallbacks. Browser/desktop, image generation,
+those checks). `image-read` uses only its existing vision-capable GPT models or vision fallbacks: GPT-5.5/5.6-Terra
+vision is untested, so neither is eligible; GPT-5.6-Sol quota substitution also leaves image reading unchanged.
+Browser/desktop, image generation,
 UI and build/device work retain their capability rules, and a device lease or shared lock excludes the background lane.
 Opportunistic company balancing still excludes image work; the explicit background lane permits image reading.
 
@@ -204,16 +214,41 @@ the nightly review compares dispatch reasons and recorded wall-clock time, inclu
     ChatGPT accounts stay unchanged. Briefs describe defensive intent and request findings with impact and fix, avoiding
     requests for step-by-step exploit code.
 
+    This applies to all these OpenAI models under the same vendor policy as 6.1-Sol (GPT restrictions on
+    2026-11-10/11), including 5.6-Sol, 5.5 and 5.6-Terra. Implementation that reads attack-style findings or exploit
+    steps also needs `--security` (VAK ruling, 2026-11-13). Defensive-only requirements with no attack description
+    in the worker's context can avoid that flag; see SKILL.md, "Security follows the worker's context".
+
   - **Daily quota and queue choice (user-approved 2026-11-13 task-duration retro).** If the chosen TRAE model's
-    `trae.quota.daily[model].depleted` is true, prefer GPT-6-Astra with confirmed quota left, then GPT-5.6-Sol only for
-    first-attempt lookup/extract/draft at normal or low stakes, then the row's eligible company fallback chain. Respect
-    model/family exclusions and pauses. Unknown quota leaves the normal pick unchanged; if a depleted pick has no
+    `trae.quota.daily[model].depleted` is true, prefer GPT-5.6-Sol with confirmed quota left at the same effort, then
+    GPT-6-Astra, then the row's eligible company fallback chain. GPT-5.6-Sol is no longer limited to cheap rows:
+    implementation, builds, reviews and retry rounds can use it too (except image-read, whose vision choices stay
+    unchanged). Respect model/family exclusions and pauses. Unknown quota leaves the normal pick unchanged; if a depleted pick has no
     eligible alternative, keep it queued. This changes model choice, never parallel task concurrency or account health.
     Above ~300 in a depleted model's hub queue, re-routing is worth it for the next dispatch: `--exclude-model <that model>`
     with the same `--failures`. Non-depleted/unknown buckets wait. Accepted queued turns stay pending under the rule below;
     do not interrupt or launch duplicates. For long builds/large reviews at ≥80% daily usage, consider starting just after
     the quota's resetTime (TRAE normally **22:00 UTC**, TTADK **16:00 UTC**); this is advice, never an automatic deferral.
     Explicit `--background` work instead follows the quota-preserving order in "Background work" above.
+
+  - **Other TRAE GPT evidence** (user-approved 2026-11-13, 5 hard non-security tasks x 2 runs each, effort `high`).
+    No queueing occurred in any run. The tasks were too easy to separate the GPTs; a harder round is running, so the
+    substitution and bucket-free preference orders live together in one `TRAE_GPT_ORDER` constant in `route.mjs`.
+
+    | Model | Mean score | Median time | Daily high-priority bucket |
+    |---|---|---|---|
+    | GPT-5.6-Terra | 1.00 | 119 s | None |
+    | GPT-5.6-Sol | 1.00 | 202 s | `gpt_56_sol`: 80 units |
+    | GPT-5.5 | 1.00 | 203 s | None |
+    | GPT-5.4 | 0.997 | 214 s | None |
+    | GPT-5.6-Luna | 0.994 | 282 s | None; about 3x tokens |
+    | GPT-6.1-Sol (reference, same tasks) | 1.00 | ~230 s | `gpt_6_1`: 80 units |
+    | DeepSeek-V4.1-Flash | 0.97 | 344 s | None |
+
+    Astra's bucket is `gpt_6`: 58 units. Ten runs of 5.6-Sol used 4.8 units (about 0.5/task).
+    Depleted 6.1-Sol therefore uses 5.6-Sol before Astra; cheap/background work prefers 5.5 then 5.6-Terra before
+    DeepSeek, saving daily priority quota without entering its low-priority lane. GPT-5.6-Luna is not used: it was
+    slowest among the tested GPTs and used about 3x tokens. GPT-5.4 is measured but not in the preferred orders.
 
   - **Fallback models on the company account (user, 2026-11-10: when GPT is unavailable or fails, route by the
     benchmark; keep quality, spend little personal quota).** `route.mjs` ALTS, from the 2026-11-10 benchmark on TRAE

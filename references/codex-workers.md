@@ -268,7 +268,7 @@ personal quota appears only when both company accounts are out. The user chose n
   no daily bucket). `codex-worker.mjs --account trae usage` prints this as `{kind:'trae', dailyUsage, usage, modelQuotas}`;
   `quota.mjs` shows one row per model with a daily bucket plus the weekly row. A depleted bucket (`isDepleted`) moves only
   that model into TRAE's **low-priority queue** (`queue/status` `modelQuotaLowPriority: true`; requests then wait with
-  positions in the hundreds) until its reset. For new dispatches, `route.mjs` prefers a comparable GPT with quota left,
+  positions in the hundreds) until its reset. For new dispatches, `route.mjs` prefers GPT-5.6-Sol with quota left, then Astra,
   then eligible company fallbacks (see model-routing.md, "Daily quota and queue choice"). Above ~300 for a depleted
   model, consider `--exclude-model <that model>` with the same `--failures` on the next dispatch; non-depleted/unknown
   buckets wait. Never interrupt an accepted queued turn or launch a duplicate. Keep parallel task concurrency unchanged.
@@ -505,7 +505,10 @@ facts behind it (2026-11-03):
   frontier model at 5x; `gpt-6.1-terra` is positioned for writing and visual understanding, not coding (its
   computer-use strength is not what the Codex computer-use plugin relies on); `gpt-6-luna` is fast and cheap, for
   extraction, classification, summaries and images, and should not write code. Don't pick `gpt-6-sol` or the
-  `gpt-5.6-*` models: they're older at the same or higher cost.
+  `gpt-5.6-*` models on personal ChatGPT accounts: they're older at the same or higher cost. TRAE's approved company-quota
+  choices are separate: 5.6-Sol for depleted-bucket substitution, bucket-free 5.5 then 5.6-Terra for cheap/background work
+  (2026-11-13; references/model-routing.md). Same-task rework may reuse the author thread only under SKILL.md's
+  "Rework thread choice" rule; record `outcome.mjs --actual` and the reason in the ledger.
 
 Check every worker's work:
 - the cited file:line exist and say what's claimed;

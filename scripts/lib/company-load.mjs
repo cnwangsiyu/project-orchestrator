@@ -150,14 +150,17 @@ export const ttadkBurn = (history, account, sampledAt, now = Date.now()) => {
     spanMin: (last.t - first.t) / 60000, sampledAt: last.t };
 };
 
-export const balanceFactors = ({ ttadk, trae, model, category, stakes, impact, now = Date.now() }) => {
-  const q = freshTraeQuota(trae?.quota, now)?.daily?.[model], family = poolOf(model);
+export const hasTraeDailyQuota = (quota) => Object.values(quota?.daily ?? {}).some((q) => q && typeof q === 'object' && !Array.isArray(q));
+
+export const balanceFactors = ({ ttadk, trae, model, category, stakes, impact, allowBucketFree = false, now = Date.now() }) => {
+  const quota = freshTraeQuota(trae?.quota, now), q = quota?.daily?.[model], family = poolOf(model);
+  const bucketFree = allowBucketFree && hasTraeDailyQuota(quota) && !Object.hasOwn(quota.daily, model);
   const load = freshLoad(trae?.load, now)[model] ?? null, queue = freshQueue(trae?.queue, now)[family] ?? null;
   const remainingShare = validUsage(q) && q.resetsAt > now ? Math.max(0, (q.limit - q.used) / q.limit) : null;
   const tt = ttadk?.usage;
   const ttShare = validUsage(tt) && tt.resetsAt > now ? Math.max(0, (tt.limit - tt.used) / tt.limit) : null;
   const lowPriority = stakes === 'low' || ['lookup', 'extract', 'draft'].includes(category) || impact === 'throwaway';
-  const reserveOK = q?.depleted === false && remainingShare != null && remainingShare >= BALANCE.reserveShare;
+  const reserveOK = bucketFree || (q?.depleted === false && remainingShare != null && remainingShare >= BALANCE.reserveShare);
   const congested = (load != null && load.percent >= BALANCE.loadPercent)
     || (queue?.position != null && queue.position > BALANCE.queuePosition) || !!queue?.high;
   const known = !!load && !!queue && (queue.position != null || queue.state === 'ready');
@@ -166,7 +169,7 @@ export const balanceFactors = ({ ttadk, trae, model, category, stakes, impact, n
   const expiresSoon = remainingShare != null && ttShare != null && q.resetsAt - now < BALANCE.expiresH * 3600000
     && remainingShare > ttShare;
   const triggers = [lowPriority && 'low-priority task', projectedOut && 'TTADK projected to run out', expiresSoon && 'TRAE daily quota expires soon'].filter(Boolean);
-  return { model, family, reserveOK, remainingShare, ttadkRemainingShare: ttShare, load, queue,
+  return { model, family, bucketFree, reserveOK, remainingShare, ttadkRemainingShare: ttShare, load, queue,
     congestion: congested ? 'high' : known ? 'low' : 'unknown', congestionOK, lowPriority,
     burn: ttadk?.burn ?? null, expiresSoon, triggers, eligible: reserveOK && congestionOK && triggers.length > 0 };
 };

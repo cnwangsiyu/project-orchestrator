@@ -230,6 +230,22 @@ workers, and patching after a second same-kind defect.
   new defect of the same kind, stop patching: find whether it is a shared contract, the interface layout or a too-wide
   patch, then simplify or split the work (a `design` route can review the approach). `route.mjs` reminds you from
   `--failures 2` on code work. A round limit triggers this re-scoping; it never stands in for correctness.
+- <a id="rework-thread-rule"></a>**Rework thread choice** (VAK rulings, user-approved 2026-11-13). Route the fix round first.
+  You may continue the original author's thread instead of the route's fresh thread only when all of these hold:
+  it is the same task's fix round and the retained context helps; the thread is on a company account (a personal-account
+  thread needs the user's OK); this round is not a route escalation in model, effort or family. If the route calls for
+  stronger effort/model (e.g. `--failures >=2` to `xhigh`/`max`), another family or Astra, switch to the route's thread.
+  No exclusion may be violated: `--security` forbids every TRAE GPT thread; DeepSeek threads cannot do builds, sensitive
+  reviews or acceptance; paused or unavailable models cannot be continued. If the TRAE model's bucket is depleted and
+  its queue is above 300 while someone is waiting, take the route's thread instead. Record the actual model, effort and
+  account with `outcome.mjs --actual vendor:model:effort@account`, plus a ledger line
+  `continued original thread because ...` naming the reason and the eligibility checks. This exception is for same-task
+  rework, not unrelated new tasks or independent reviewers.
+- **Security follows the worker's context** (VAK ruling, user-approved 2026-11-13). An implementation/fix round that
+  reads attack-style review findings (forged tokens, bypass, replay, still-readable-after-hide) or exploit steps counts
+  as `--security` too. Alternatively, rewrite the findings as defensive requirements only, e.g. "token validation rejects
+  tampered signatures" or "hidden items return 404", with no attack description or original attack-style findings in
+  the worker's context; then those findings alone do not require `--security`. Other security-flavoured content still does.
 - **Long device or sampling matrices: qualify first.** Run a pilot with one minimal sample per gate at real rates,
   disk, timeouts and SDK events; run the full matrix only once it passes. Device leases, deadlines, disconnects,
   settings restore and the device's return are handled by you or a host-side script, not left to the worker's final
@@ -315,10 +331,13 @@ effort, Codex account and launch command from
     undo"); route.mjs refuses code work without it;
   - `--security` for security/attack-flavoured work (vulnerability/exploit hunting, auth/session/credential handling,
     bypass, forgery/replay, path traversal, DoS or security review): exclude TRAE's GPT, then route normally
-    (user, 2026-11-12: "这种类型的任务排除掉 trae gpt 之后再按照路由规则来走就行吧，不需要写死一个路由");
+    (user, 2026-11-12: "这种类型的任务排除掉 trae gpt 之后再按照路由规则来走就行吧，不需要写死一个路由"). This includes
+    implementation that reads attack-style findings; see "Security follows the worker's context" above. Every TRAE GPT
+    here is an OpenAI model under the same vendor policy as 6.1-Sol (restrictions on 2026-11-10/11), not a policy workaround;
   - `--background` only when nobody is waiting and there is no deadline or near-term dependency: nightly cleanups,
-    doc refreshes, exploratory analysis and benchmark batches. On TRAE, prefer an eligible depleted daily bucket
-    at the row's tier (Sol, then Astra), then models without a daily bucket (DeepSeek-V4.1-Flash, then DeepSeek-V4-Pro;
+    doc refreshes, exploratory analysis and benchmark batches. On TRAE, prefer bucket-free GPT-5.5, then GPT-5.6-Terra
+    (no daily high-priority spend and no low-priority lane), then an eligible depleted daily bucket at the row's tier
+    (Sol, then Astra), then other models without a daily bucket (DeepSeek-V4.1-Flash, then DeepSeek-V4-Pro;
     Seed-Evolving only for `image-read`), then the normal TRAE pick. No quota information keeps the normal pick.
     `why` identifies the step and whether high-priority quota is spent; an Astra escalation keeps its tier.
     Model-fit and `--security` exclusions still apply: image reading needs a vision model, and DeepSeek cannot
@@ -329,7 +348,9 @@ effort, Codex account and launch command from
     a device lease or shared lock (`--device-lease` / `--shared-lock`) cannot enter this lane or company balancing.
     Background work never uses personal quota: if no company model fits, tell the user it is queued for later.
     Routes record `background: true`; the nightly `background` summary counts tasks and recorded `--minutes`
-    wall-clock time, including queues. Without this flag, the existing low-priority balancing rule is unchanged.
+    wall-clock time, including queues. Cheap rows (`lookup`, `extract`, `draft`) routed or balanced to TRAE also prefer
+    GPT-5.5 then GPT-5.6-Terra under known quota telemetry; congestion still blocks opportunistic balancing.
+    These two models' vision is untested, so neither is used for `image-read`.
   - always `--project <slug>`: every decision is logged to `_shared/route-log.jsonl` for the
     nightly review, which needs the project (use `--dry` only to try things out).
 
@@ -355,6 +376,10 @@ effort, Codex account and launch command from
     Their service code gets a review by another family. An infrastructure miss (timeout, queue-full rejection,
     restricted) on one task: re-route with `--exclude-model <model or family>`, same `--failures`
     (references/model-routing.md, "Fallback models on the company account").
+  - TRAE daily-bucket substitution (user-approved 2026-11-13 benchmark): depleted GPT-6.1-Sol prefers GPT-5.6-Sol
+    at the same effort with confirmed quota left, then Astra, then eligible existing fallbacks. GPT-5.6-Sol is no longer
+    limited to lookup/extract/draft. Unknown quota changes nothing; exclusions and vision rules still apply.
+    GPT-5.6-Luna is not used (slowest, about 3x tokens). Evidence and bucket facts: references/model-routing.md.
   - TTADK first (user, 2026-11-07): when the TTADK company gateway is healthy, every task its
     GPT-6.1 Sol can handle runs there first, Claude-strength rows included. Exceptions are
     Claude-only work, image generation, a second opinion on Codex's own work, and browser work
@@ -589,7 +614,9 @@ short, batch updates that arrive together, and reply in the user's language.
   address the live one as `name [ref]` from `ListAgents`, and stop or remove the stale one.
   `claude rm <id>` deletes the session and possibly its worktree, so use it only once the work is
   merged or abandoned.
-- **A worker went offline? Resume it, don't replace it.** Background workers can drop out (for
+- **A worker went offline? Resume it, don't replace it.** For same-task rework, first apply the
+  [rework thread choice](#rework-thread-rule) above; it overrides context reuse when routing requires a switch.
+  Background workers can drop out (for
   example when the orchestrator's own session restarts): they vanish from `claude agents` and
   `ListAgents` shows them only as offline Remote Control rows. When the next task belongs to such a
   worker, resume the original session so its context survives, instead of spawning a fresh worker
