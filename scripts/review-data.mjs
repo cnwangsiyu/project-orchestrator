@@ -8,7 +8,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { SHARED, ROUTE_LOG, QUOTA_LOG, readState, analyze, leanLines, fmt, outcomeOwns, isReviewDecision, dedupeOutcomes, codexCatalog, readProfiles, compareHarness, harnessDrift, modelView } from './lib/state.mjs';
+import { SHARED, ROUTE_LOG, QUOTA_LOG, readState, analyze, leanLines, fmt, outcomeOwns, isReviewDecision, dedupeOutcomes, codexCatalog, readProfiles, compareHarness, harnessDrift, modelView, effectiveFirst, OUTCOME_OVERRIDES } from './lib/state.mjs';
 
 const argv = process.argv.slice(2);
 const opt = (k) => { const i = argv.indexOf(`--${k}`); return i < 0 ? null : argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[i + 1] : true; };
@@ -21,9 +21,11 @@ const all = lines(ROUTE_LOG);
 const routes = all.filter((r) => r.t >= since && r.kind !== 'outcome');
 // Outcomes (outcome.mjs): first-pass rate, rework rounds and time per vendor / model / category of the first attempt.
 // Older records said `pass` with fix rounds; outcome.mjs now records those as rework, so read them the same way.
-// A task recorded more than once counts once (dedupeOutcomes: latest result, most rounds), placed at its latest record.
+// A task counts once: normal records merge, then explicit corrections override supplied fields.
 const outs = dedupeOutcomes(all.filter((r) => r.kind === 'outcome')).filter((r) => r.t >= since).map((o) => (o.result === 'pass' && o.rounds > 0 ? { ...o, result: 'rework' } : o));
 const mouts = outs.map(modelView);
+const correctedValues = (o) => Object.fromEntries(OUTCOME_OVERRIDES.filter((f) => Object.hasOwn(o, f)).map((f) => [f, o[f]]));
+const samePick = (a, b) => ['vendor', 'model', 'effort', 'account'].every((f) => (a?.[f] ?? null) === (b?.[f] ?? null));
 const agg = (key, list = outs) => {
   const m = {};
   for (const o of list) {
@@ -40,9 +42,13 @@ const outcomes = {
   recorded: outs.length,
   // Tasks with more than one outcome record (merged above): remind their orchestrator to record each task once, at close.
   duplicates: outs.filter((o) => o.dupes > 1).map((o) => `${o.project}/${o.name} ×${o.dupes}`),
+  corrected: outs.filter((o) => o.corrected).map((o) => ({ task: `${o.project}/${o.name}`, from: o.correctionFrom, to: correctedValues(o) })),
+  corrections: outs.reduce((n, o) => n + (o.corrections ?? 0), 0),
+  actualMismatches: outs.filter((o) => o.actual?.length && !samePick(o.first, effectiveFirst(o)))
+    .map((o) => ({ task: `${o.project}/${o.name}`, joined: o.first ?? null, actual: effectiveFirst(o) })),
   // Per vendor/model: code rework only (modelView). Per category/impact/cause: all rework.
-  byVendor: agg((o) => o.first?.vendor, mouts), byModel: agg((o) => o.first && `${o.first.vendor}:${o.first.model}:${o.first.effort}`, mouts),
-  byCategory: agg((o) => o.category), byVendorCategory: agg((o) => o.first && o.category && `${o.first.vendor}:${o.category}`, mouts),
+  byVendor: agg((o) => effectiveFirst(o)?.vendor, mouts), byModel: agg((o) => { const p = effectiveFirst(o); return p && `${p.vendor}:${p.model}:${p.effort}`; }, mouts),
+  byCategory: agg((o) => o.category), byVendorCategory: agg((o) => effectiveFirst(o) && o.category && `${effectiveFirst(o).vendor}:${o.category}`, mouts),
   byImpact: agg((o) => o.impact),
   byCause: agg((o) => (o.result === 'rework' ? o.cause ?? '(not recorded)' : null)),
   infraRetries: outs.reduce((n, o) => n + (o.retries ?? 0), 0), scopeChanges: outs.reduce((n, o) => n + (o.scopeChanges ?? 0), 0),
@@ -59,7 +65,7 @@ const outcomes = {
     const count = (xs, k) => xs.reduce((m, x) => ((m[k(x)] = (m[k(x)] ?? 0) + 1), m), {});
     const ended = (r) => outs.find((o) => outcomeOwns(o.project, o.name, r)) ?? null;
     const extra = fb.filter((r) => (r.why ?? []).some((w) => /is a fallback model: its service code gets a review/.test(w)));
-    const ex = extra.map((r) => ({ task: `${r.project}/${r.name}`, model: r.pick.model, outcome: ended(r)?.result ?? '(none yet)', rounds: ended(r)?.rounds ?? null, cause: ended(r)?.cause ?? null }));
+    const ex = extra.map((r) => ({ task: `${r.project}/${r.name}`, model: r.pick.model, outcome: ended(r)?.result ?? '(none yet)', rounds: ended(r)?.rounds ?? null, cause: ended(r)?.cause ?? null, actual: ended(r)?.actual ?? null }));
     return {
       launches: fb.length, byModel: count(fb, (r) => r.pick.model), byReason: count(fb, reason),
       outcomes: count(fb.map(ended).filter(Boolean), (o) => o.result),
@@ -68,17 +74,37 @@ const outcomes = {
     };
   })(),
   // The fair vendor comparison: reviewed release work only (the only work every vendor's output is judged the same way).
-  reviewedReleaseByVendor: agg((o) => o.reviewed && o.impact === 'release' && o.first?.vendor, mouts),
-  fails: outs.filter((o) => o.result === 'fail').map((o) => ({ project: o.project, name: o.name, category: o.category, first: o.first, note: o.note })),
+  reviewedReleaseByVendor: agg((o) => o.reviewed && o.impact === 'release' && effectiveFirst(o)?.vendor, mouts),
+  fails: outs.filter((o) => o.result === 'fail').map((o) => ({ project: o.project, name: o.name, category: o.category, first: o.first, actual: o.actual ?? null, note: o.note })),
   // Outcomes recorded under a review's name (NAME-R): the reviewed task's own outcome is what counts.
-  reviewOutcomes: outs.filter((o) => !o.first && all.some((r) => r.kind !== 'outcome' && isReviewDecision(r) && outcomeOwns(o.project, o.name, r))).map((o) => `${o.project}/${o.name}`),
-  unjoined: outs.filter((o) => !o.first && !all.some((r) => r.kind !== 'outcome' && isReviewDecision(r) && outcomeOwns(o.project, o.name, r))).map((o) => `${o.project}/${o.name}`),
+  reviewOutcomes: outs.filter((o) => !effectiveFirst(o) && all.some((r) => r.kind !== 'outcome' && isReviewDecision(r) && outcomeOwns(o.project, o.name, r))).map((o) => `${o.project}/${o.name}`),
+  unjoined: outs.filter((o) => !effectiveFirst(o) && !all.some((r) => r.kind !== 'outcome' && isReviewDecision(r) && outcomeOwns(o.project, o.name, r))).map((o) => `${o.project}/${o.name}`),
   // Finished-looking tasks with routing decisions but no outcome yet (named, older than a day): remind the orchestrator.
   // Uses outcome.mjs's join; reviews need no outcome, and fix rounds (NAME-fix1, NAME-r2) fold into their task.
   missing: [...new Set(all.filter((r) => r.kind !== 'outcome' && r.name && r.project && !isReviewDecision(r) && r.t < Date.now() - 86400000 && r.t >= since - 6 * 86400000)
     .filter((r) => !all.some((o) => o.kind === 'outcome' && outcomeOwns(o.project, o.name, r)))
     .map((r) => `${r.project}/${r.name.replace(/-(fix|r)\d+$/, '')}`))].slice(0, 30),
 };
+// Count tasks once across dispatches; use recorded end-to-end minutes (queue time included), never infer missing time.
+const background = (() => {
+  const tasks = new Map();
+  for (const r of routes.filter((r) => r.background && r.project && r.name && !isReviewDecision(r))) {
+    const ended = outs.find((o) => outcomeOwns(o.project, o.name, r));
+    const name = ended?.name ?? r.name;
+    const bareName = name.startsWith(`${r.project}-`) ? name.slice(r.project.length + 1) : name;
+    const key = `${r.project}/${bareName.replace(/-(fix|r)\d+$/, '')}`;
+    tasks.set(key, { task: key, minutes: ended?.minutes ?? null, result: ended?.result ?? null });
+  }
+  // Include recently completed background work even when its dispatch is outside this report's window.
+  for (const o of outs) if (all.some((r) => r.kind !== 'outcome' && r.background && !isReviewDecision(r) && outcomeOwns(o.project, o.name, r))) {
+    const name = o.name.startsWith(`${o.project}-`) ? o.name.slice(o.project.length + 1) : o.name;
+    tasks.set(`${o.project}/${name}`, { task: `${o.project}/${name}`, minutes: o.minutes ?? null, result: o.result });
+  }
+  const rows = [...tasks.values()], minutes = rows.map((r) => r.minutes).filter((m) => m != null);
+  const totalMinutes = minutes.reduce((n, m) => n + m, 0);
+  return { tasks: rows.length, completed: rows.filter((r) => r.result).length, timed: minutes.length,
+    totalMinutes, meanMinutes: minutes.length ? Math.round(totalMinutes / minutes.length * 10) / 10 : null };
+})();
 const routing = {
   decisions: routes.length,
   byProject: count(routes, (r) => r.project ?? '(none)'),
@@ -156,12 +182,13 @@ const catalog = {
 if (opt('save-catalog')) fs.writeFileSync(CATALOG, JSON.stringify({ ...catalogNow, savedAt: Date.now() }, null, 1));
 
 catalog.harnessDrift = harnessDrift();
-const result = { hours: H, routing, outcomes, quota, now, catalog };
+const result = { hours: H, routing, outcomes, background, quota, now, catalog };
 if (opt('json')) { console.log(JSON.stringify(result, null, 1)); process.exit(0); }
 const show = (title, v) => console.log(`\n## ${title}\n${typeof v === 'string' ? v : JSON.stringify(v, null, 1)}`);
 console.log(`# routing review data — last ${H}h (to ${fmt(Date.now())})`);
 show('routing', routing);
 show('outcomes (first attempt\'s vendor/model/category)', outcomes);
+show('background tasks (wall-clock minutes, including queues)', background);
 show('quota and cards', quota);
 show('now', now);
 show('model catalog', catalog);

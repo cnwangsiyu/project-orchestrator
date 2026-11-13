@@ -3,6 +3,7 @@
 //
 //   outcome --project SLUG --name NAME --result pass|rework|fail [--rounds N] [--cause code|spec|process|infra|scope]
 //           [--retries N] [--scope-changes N] [--minutes M] [--reviewed] [--note "..."]
+//           [--correct] [--actual vendor:model:effort@account ...]
 //
 // Call it once per task when it is finally accepted or given up (not per round):
 //   pass   — accepted at its first check with no fix round (a review verdict of MERGE or MERGE-WITH-NOTES is a pass;
@@ -13,17 +14,27 @@
 // the first launch to acceptance. The record joins the task's routing decisions in route-log.jsonl by project + name,
 // so it carries the vendor, model, effort and category of the first attempt and of the attempt that was accepted.
 import fs from 'node:fs';
-import { ROUTE_LOG, outcomeOwns, isReviewDecision } from './lib/state.mjs';
+import { ROUTE_LOG, outcomeOwns, isReviewDecision, dedupeOutcomes, effectiveFirst, effectiveAccepted } from './lib/state.mjs';
 
 const argv = process.argv.slice(2), opts = {};
 for (let i = 0; i < argv.length; i++) if (argv[i].startsWith('--')) {
   const k = argv[i].slice(2);
-  opts[k] = k === 'reviewed' || argv[i + 1] === undefined || argv[i + 1].startsWith('--') ? true : argv[++i];
+  const v = ['reviewed', 'correct'].includes(k) || argv[i + 1] === undefined || argv[i + 1].startsWith('--') ? true : argv[++i];
+  if (k === 'actual') (opts.actual ??= []).push(v); else opts[k] = v;
 }
 const die = (m) => { console.error(`outcome: ${m}`); process.exit(2); };
 if (typeof opts.project !== 'string' || typeof opts.name !== 'string') die('needs --project and --name (the same ones passed to route.mjs)');
-if (!['pass', 'rework', 'fail'].includes(opts.result)) die('--result takes pass, rework or fail');
-const rounds = opts.rounds === undefined ? (opts.result === 'pass' ? 0 : null) : Number(opts.rounds);
+const actual = opts.actual?.map((v) => {
+  const match = typeof v === 'string' && v.match(/^([a-z][a-z0-9-]*):([a-zA-Z0-9._-]+):(low|medium|high|xhigh|max)@([a-zA-Z0-9._-]+)$/);
+  if (!match) die('--actual takes vendor:model:effort@account (repeat in launch order)');
+  const [, vendor, model, effort, account] = match;
+  return { vendor, model, effort, account };
+});
+// Metadata-only --actual appends keep the existing result; this supports recording substitutions after close.
+const metadataOnly = opts.result === undefined && !!actual;
+if (!metadataOnly && !['pass', 'rework', 'fail'].includes(opts.result)) die('--result takes pass, rework or fail');
+if (opts.rounds === true) die('--rounds takes a whole number ≥ 0 or null');
+const rounds = opts.rounds === undefined ? (opts.result === 'pass' ? 0 : null) : opts.rounds === 'null' ? null : Number(opts.rounds);
 if (rounds !== null && (!Number.isInteger(rounds) || rounds < 0)) die('--rounds takes a whole number ≥ 0');
 if (opts.result === 'rework' && !rounds) die('rework needs --rounds N (N ≥ 1)');
 // A fix round means the first attempt was not accepted: `pass --rounds N` (N ≥ 1) is rework (nightly review 2026-11-06:
@@ -35,12 +46,13 @@ if (opts.result === 'pass' && rounds) { console.error(`outcome: ${rounds} fix ro
 // infra (tools/devices/platform), scope (the requirement changed); --scope-changes N counts requirement changes.
 const CAUSES = ['code', 'spec', 'process', 'infra', 'scope'];
 const cause = typeof opts.cause === 'string' ? opts.cause : null;
+if (opts.cause === true) die(`--cause takes ${CAUSES.join(', ')}`);
 if (cause && !CAUSES.includes(cause)) die(`--cause takes ${CAUSES.join(', ')}`);
 if (opts.result === 'rework' && !cause) console.error('outcome: say why it needed fix rounds with --cause code|spec|process|infra|scope (the nightly review compares models on code rework only)');
-const count = (k) => { if (opts[k] === undefined) return 0; const n = Number(opts[k]); if (!Number.isInteger(n) || n < 0) die(`--${k} takes a whole number ≥ 0`); return n; };
+const count = (k) => { if (opts[k] === undefined) return 0; const n = Number(opts[k]); if (opts[k] === true || !Number.isInteger(n) || n < 0) die(`--${k} takes a whole number ≥ 0`); return n; };
 const retries = count('retries'), scopeChanges = count('scope-changes');
 const minutes = opts.minutes === undefined ? null : Number(opts.minutes);
-if (minutes !== null && !(minutes >= 0)) die('--minutes takes a number ≥ 0');
+if (opts.minutes === true || (minutes !== null && (!Number.isFinite(minutes) || minutes < 0))) die('--minutes takes a number ≥ 0');
 
 let routes = [];
 try { routes = fs.readFileSync(ROUTE_LOG, 'utf8').split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean); } catch {}
@@ -50,15 +62,25 @@ const owned = routes.filter((r) => r.kind !== 'outcome' && r.pick && outcomeOwns
 const mine = owned.filter((r) => !isReviewDecision(r));
 if (!mine.length && owned.length) console.error(`outcome: ${opts.name} is a review run; record the outcome once, under the name of the task it reviewed`);
 const first = mine[0]?.pick ?? null, last = mine.at(-1)?.pick ?? null;
-const rec = {
+let rec = {
   t: Date.now(), kind: 'outcome', project: opts.project, name: opts.name, result: opts.result, rounds, minutes, cause, retries, scopeChanges,
   reviewed: !!opts.reviewed, note: typeof opts.note === 'string' ? opts.note : null,
   category: mine[0]?.category ?? null, impact: mine[0]?.impact ?? null, first, accepted: opts.result === 'fail' ? null : last, decisions: mine.length,
+  ...(actual ? { actual } : {}),
 };
 // Record each task once, at close. A second record merges into the first in review-data (latest result, most rounds),
 // so it only corrects; say so rather than let it pass as a new task (nightly review 2026-11-09).
 const prior = routes.filter((r) => r.kind === 'outcome' && r.project === opts.project && (outcomeOwns(opts.project, opts.name, r) && outcomeOwns(opts.project, r.name, { project: opts.project, name: opts.name })));
-if (prior.length) console.error(`outcome: ${opts.name} already has ${prior.length} outcome record(s); this one replaces their result (the review keeps the most rounds any record gave). Record each task once, when it closes.`);
+if ((opts.correct || metadataOnly) && !prior.some((r) => !r.correction)) die(`${opts.correct ? '--correct' : '--actual without --result'} needs an existing outcome for this project/name`);
+if (opts.correct || metadataOnly) {
+  rec = { t: rec.t, kind: 'outcome', project: opts.project, name: opts.name,
+    ...(opts.correct ? { correction: true } : {}), ...(!metadataOnly ? { result: opts.result, rounds } : {}) };
+  const fields = { rounds, cause, retries, 'scope-changes': scopeChanges, minutes, reviewed: !!opts.reviewed, note: opts.note, actual };
+  for (const [flag, value] of Object.entries(fields)) if (opts[flag] !== undefined) rec[flag === 'scope-changes' ? 'scopeChanges' : flag] = value;
+}
+if (opts.correct) console.error(`outcome: appending correction for ${opts.name}; supplied fields override the aggregate, including lower or null rounds; existing lines stay intact`);
+else if (prior.length) console.error(`outcome: ${opts.name} already has ${prior.length} outcome record(s); normal records keep the most rounds and cannot override a correction. Use --correct to fix recorded fields.`);
 fs.appendFileSync(ROUTE_LOG, JSON.stringify(rec) + '\n');
-console.log(`recorded ${opts.project}/${opts.name}: ${opts.result}${rounds ? ` after ${rounds} round(s)` : ''}${cause ? ` (${cause})` : ''}${retries ? `, ${retries} infra re-run(s)` : ''}${scopeChanges ? `, ${scopeChanges} scope change(s)` : ''}`
-  + (first ? ` — first ${first.vendor} ${first.model} ${first.effort}${last && last !== first ? `, accepted on ${last.vendor} ${last.model} ${last.effort}` : ''}` : ' — no routing decision found for this name (pass the same --project/--name as route.mjs)'));
+const effective = dedupeOutcomes([...prior, rec])[0], ranFirst = effectiveFirst(effective), ranLast = effectiveAccepted(effective);
+console.log(`${opts.correct ? 'corrected' : 'recorded'} ${opts.project}/${opts.name}: ${effective.result}${effective.rounds ? ` after ${effective.rounds} round(s)` : ''}${effective.cause ? ` (${effective.cause})` : ''}${effective.retries ? `, ${effective.retries} infra re-run(s)` : ''}${effective.scopeChanges ? `, ${effective.scopeChanges} scope change(s)` : ''}`
+  + (ranFirst ? ` — first ${ranFirst.vendor} ${ranFirst.model} ${ranFirst.effort}@${ranFirst.account ?? '?'}${effective.result !== 'fail' && ranLast && ranLast !== ranFirst ? `, accepted on ${ranLast.vendor} ${ranLast.model} ${ranLast.effort}@${ranLast.account ?? '?'}` : ''}` : ' — no routing decision found for this name (pass the same --project/--name as route.mjs)'));

@@ -481,6 +481,8 @@ const bare = (project, name) => (name.startsWith(`${project}-`) ? name.slice(pro
 // Model comparisons count code rework only: rework whose recorded cause is spec, process, infra or scope is not the
 // model's (rework retro 2026-11-10, user-approved). Records without a cause (older ones) count as before.
 export const modelView = (o) => (o.result === 'rework' && o.cause && o.cause !== 'code' ? { ...o, result: 'pass', rounds: 0 } : o);
+export const effectiveFirst = (o) => o.actual?.[0] ?? o.first;
+export const effectiveAccepted = (o) => o.actual?.at(-1) ?? o.accepted;
 // ---- TRAE CLI vs native Codex (user, 2026-11-08: measure whether TRAE's Codex fork does worse with the same model) ----
 // The harness a Codex attempt ran on: 'trae' for the TRAE CLI account, 'codex' for every other Codex account (TTADK and
 // the ChatGPT accounts run the official Codex CLI), 'claude' for Claude.
@@ -502,11 +504,17 @@ export const fisherExact = (a, b, c, d) => {
 // Only like-for-like rows are compared (same model, same category); a verdict needs at least MIN tasks on each side.
 export const compareHarness = (outs, profiles = {}, MIN = 8) => {
   const cell = () => ({ tasks: 0, pass: 0, rework: 0, fail: 0, rounds: [], minutes: [] });
-  const groups = {};
+  const groups = {}, mixed = [];
   for (const o of outs) {
-    const h = harnessOf(o.first, profiles);
+    const sequence = o.actual ?? [o.first];
+    const harnesses = new Set(sequence.filter(Boolean).map((p) => harnessOf(p, profiles)));
+    if (harnesses.size > 1 || sequence.some((p) => p && p.vendor !== 'codex')) {
+      mixed.push({ task: `${o.project}/${o.name}`, sequence, result: o.result, cause: o.cause ?? null });
+      continue;
+    }
+    const first = effectiveFirst(o), h = harnessOf(first, profiles);
     if (h !== 'trae' && h !== 'codex') continue;
-    for (const key of [o.first.model, `${o.first.model} / ${o.category ?? '?'}`]) {
+    for (const key of [first.model, `${first.model} / ${o.category ?? '?'}`]) {
       const g = (groups[key] ??= { trae: cell(), codex: cell() })[h];
       g.tasks++; g[o.result]++;
       if (o.rounds != null) g.rounds.push(o.rounds); if (o.minutes != null) g.minutes.push(o.minutes);
@@ -524,7 +532,7 @@ export const compareHarness = (outs, profiles = {}, MIN = 8) => {
     rows.push({ key, trae: side(g.trae), codex: side(g.codex), p: Math.round(p * 1000) / 1000, verdict });
   }
   const onlyTrae = Object.entries(groups).filter(([k, g]) => !k.includes(' / ') && g.trae.tasks && !g.codex.tasks).map(([k, g]) => `${k}: ${g.trae.tasks} on TRAE, none on Codex`);
-  return { rows: rows.sort((x, y) => (x.key.includes(' / ') - y.key.includes(' / ')) || x.p - y.p), onlyTrae, min: MIN };
+  return { rows: rows.sort((x, y) => (x.key.includes(' / ') - y.key.includes(' / ')) || x.p - y.p), onlyTrae, mixed, min: MIN };
 };
 // Harness drift: TRAE's GPT-6.1-Sol prompt vs official Codex's (both CLIs cache the model catalog). 2026-11-08: 0.91 of
 // lines equal, the differences in the plugins/apps section. A drop means TRAE's fork moved away from upstream Codex.
@@ -548,16 +556,30 @@ export const outcomeOwns = (project, outcomeName, r) => {
 // the lynx re-records of 11-06 said 0 rounds after first records with 1–2). Records of the same project and name (with
 // or without the "<project>-" prefix) merge into one at the latest record's time: the latest result, note and accepted
 // pick; the most rounds any record gave; the first non-null first pick; reviewed if any record says so. `dupes` counts
-// the records merged.
+// normal records merged. Corrections are applied last in timestamp order, even when a normal record is newer.
+export const OUTCOME_OVERRIDES = ['result', 'rounds', 'cause', 'retries', 'scopeChanges', 'minutes', 'note', 'reviewed', 'actual'];
 export const dedupeOutcomes = (records) => {
-  const by = new Map();
+  const by = new Map(), corrections = new Map();
   for (const o of [...records].sort((a, b) => a.t - b.t)) {
     const k = `${o.project}\u0000${o.project && o.name ? bare(o.project, o.name) : o.name}`;
+    if (o.correction) {
+      if (!corrections.has(k)) corrections.set(k, []);
+      corrections.get(k).push(o);
+      continue;
+    }
     const p = by.get(k);
     if (!p) { by.set(k, { ...o, dupes: 1 }); continue; }
     const rounds = [p.rounds, o.rounds].filter((x) => x != null);
     by.set(k, { ...p, ...o, rounds: rounds.length ? Math.max(...rounds) : null, minutes: o.minutes ?? p.minutes,
       first: p.first ?? o.first, category: p.category ?? o.category, impact: p.impact ?? o.impact, reviewed: !!(p.reviewed || o.reviewed), dupes: p.dupes + 1 });
+  }
+  for (const [k, cs] of corrections) {
+    const o = by.get(k);
+    if (!o) continue; // A correction cannot create a task; the CLI rejects these too.
+    o.correctionFrom = Object.fromEntries(OUTCOME_OVERRIDES.filter((f) => Object.hasOwn(o, f)).map((f) => [f, o[f]]));
+    for (const c of cs) for (const f of OUTCOME_OVERRIDES) if (Object.hasOwn(c, f)) o[f] = c[f];
+    o.corrected = true; o.correctedAt = cs.at(-1).t; o.corrections = cs.length;
+    o.t = Math.max(o.t, o.correctedAt);
   }
   return [...by.values()];
 };

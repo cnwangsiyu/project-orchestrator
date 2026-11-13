@@ -4,6 +4,7 @@
 // Each case fixes the quota state and the route flags and states the decision the policy must produce. When a policy
 // change is intended, update the expectations here in the same commit and say why in the commit message.
 import fs from 'node:fs';
+import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -427,12 +428,15 @@ for (const [sc, args] of ERRORS) {
 }
 // TRAE vs native Codex comparison (review-data.mjs, user 2026-11-08): harness attribution, Fisher's exact test, verdicts.
 {
-  const { harnessOf, fisherExact, compareHarness } = await import('../lib/state.mjs');
+  const { harnessOf, fisherExact, compareHarness, effectiveFirst, effectiveAccepted } = await import('../lib/state.mjs');
   const pk = (account, model = 'gpt-6.1-sol', vendor = 'codex') => ({ vendor, model, effort: 'high', account });
   const outs = (n, pass, account, category = 'implement') => Array.from({ length: n }, (_, i) => ({ first: pk(account), category, result: i < pass ? 'pass' : 'rework', rounds: i < pass ? 0 : 1 }));
   const worse = compareHarness([...outs(10, 2, 'trae'), ...outs(10, 9, 'ttadk')], { trae: { kind: 'trae' } });
   const even = compareHarness([...outs(10, 8, 'trae'), ...outs(10, 8, 'main')], { trae: { kind: 'trae' } });
   const few = compareHarness([...outs(3, 0, 'trae'), ...outs(3, 3, 'b')], { trae: { kind: 'trae' } });
+  const substituted = { project: 'p', name: 'actual', first: pk('ttadk'), accepted: pk('main'), actual: [pk('trae'), pk('trae', 'deepseek-v4-pro')], result: 'pass' };
+  const mixedRun = { ...substituted, name: 'mixed', actual: [pk('main'), pk('trae')], result: 'fail', cause: 'infra' };
+  const actualComparison = compareHarness([substituted, mixedRun, ...outs(1, 1, 'ttadk')]);
   const cases = [
     [harnessOf(pk('trae'), { trae: { kind: 'trae' } }), 'trae'], [harnessOf(pk('ttadk')), 'codex'], [harnessOf(pk('main', 'opus', 'claude')), 'claude'],
     [Math.abs(fisherExact(1, 9, 11, 3) - 0.0028) < 0.0005, true], [fisherExact(5, 5, 5, 5) > 0.99, true],
@@ -440,6 +444,12 @@ for (const [sc, args] of ERRORS) {
     [even.rows.find((r) => r.key === 'gpt-6.1-sol')?.verdict, 'no significant difference'],
     [/too few/.test(few.rows.find((r) => r.key === 'gpt-6.1-sol')?.verdict ?? ''), true],
     [worse.rows.some((r) => r.key === 'gpt-6.1-sol / implement'), true],
+    [effectiveFirst(substituted).account, 'trae'], [effectiveAccepted(substituted).model, 'deepseek-v4-pro'],
+    [effectiveFirst({ first: pk('main') }).account, 'main'], [effectiveAccepted({ accepted: pk('b') }).account, 'b'],
+    [actualComparison.rows[0].trae.tasks, 1], [actualComparison.rows[0].codex.tasks, 1],
+    [actualComparison.mixed.length, 1], [actualComparison.mixed[0].task, 'p/mixed'], [actualComparison.mixed[0].cause, 'infra'],
+    [compareHarness([substituted]).onlyTrae[0], 'gpt-6.1-sol: 1 on TRAE, none on Codex'],
+    [compareHarness([{ ...substituted, actual: [pk('main'), pk('main', 'opus', 'claude')] }]).mixed.length, 1],
   ];
   const bad = cases.map(([got, want], i) => (got === want ? null : i)).filter((i) => i !== null);
   if (bad.length) fail++;
@@ -519,12 +529,14 @@ for (const [sc, args] of ERRORS) {
 // Outcome causes (rework retro 2026-11-10): model comparisons count code rework only; route.mjs tells the orchestrator
 // to re-scope instead of patching again from the second failure of code work.
 {
-  const { modelView } = await import('../lib/state.mjs');
+  const { modelView, dedupeOutcomes } = await import('../lib/state.mjs');
   const r = (cause) => modelView({ result: 'rework', rounds: 2, cause }).result;
   const note = (args) => JSON.parse(run('fresh', args)).notes.some((n) => /new defect of the same kind/.test(n));
   const cases = [[r('code'), 'rework'], [r(undefined), 'rework'], [r('infra'), 'pass'], [r('spec'), 'pass'], [r('scope'), 'pass'],
     [note(['implement', '--impact', 'service', '--failures', '2']), true], [note(['implement', '--impact', 'service', '--failures', '1']), false],
-    [note(['research', '--failures', '2']), false]];
+    [note(['research', '--failures', '2']), false],
+    [modelView(dedupeOutcomes([{ t: 1, project: 'p', name: 'cause', result: 'rework', rounds: 2, cause: 'code' },
+      { t: 2, project: 'p', name: 'cause', correction: true, cause: 'infra' }])[0]).result, 'pass']];
   const bad = cases.map(([got, want], i) => (got === want ? null : i)).filter((i) => i !== null);
   if (bad.length) fail++;
   console.log(`${bad.length ? 'FAIL' : 'ok  '} rework causes       ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
@@ -561,12 +573,22 @@ for (const [sc, args] of ERRORS) {
     o(1, 'p', 'X', 'pass', 0), o(2, 'q', 'X', 'pass', 0),                                                       // different projects
   ]);
   const get = (p, n) => out.find((x) => x.project === p && x.name.endsWith(n));
+  const base = o(1, 'p', 'fix', 'rework', 2, { reviewed: true, cause: 'code', retries: 3, minutes: 40 });
+  const correction = { t: 2, project: 'p', name: 'p-fix', correction: true, result: 'pass', rounds: 0 };
+  const fixed = dedupeOutcomes([correction, base])[0];
+  const laterNormal = dedupeOutcomes([base, correction, o(3, 'p', 'fix', 'rework', 9)])[0];
+  const twice = dedupeOutcomes([{ ...correction, t: 4, result: 'fail', rounds: null, reviewed: false, cause: null, retries: 0 }, base, correction])[0];
   const cases = [
     [out.length, 7],
     [get('lynx-view', 'T17').rounds, 2], [get('lynx-view', 'T17').t, 5], [get('lynx-view', 'T17').dupes, 2],
     [get('video-agent', 'W285G').result, 'rework'], [get('video-agent', 'W285G').rounds, 3], [get('video-agent', 'W285G').first?.account, 'ttadk'],
     [get('lynx-view', 'T18').result, 'fail'], [get('lynx-view', 'T18').reviewed, true], [get('lynx-view', 'T18').rounds, 0],
     [get('video-agent', 'W27').dupes, 1],
+    [fixed.result, 'pass'], [fixed.rounds, 0], [fixed.corrected, true], [fixed.dupes, 1], [fixed.reviewed, true], [fixed.retries, 3],
+    [fixed.minutes, 40], [fixed.correctionFrom.rounds, 2], [fixed.correctedAt, 2],
+    [laterNormal.result, 'pass'], [laterNormal.rounds, 0], [laterNormal.dupes, 2], [laterNormal.t, 3],
+    [twice.result, 'fail'], [twice.rounds, null], [twice.reviewed, false], [twice.cause, null], [twice.retries, 0],
+    [twice.corrections, 2], [twice.correctedAt, 4], [dedupeOutcomes([correction]).length, 0],
   ];
   const bad = cases.map(([got, want], i) => (got === want ? null : i)).filter((i) => i !== null);
   if (bad.length) fail++;
@@ -1100,6 +1122,66 @@ for (const [sc, args] of ERRORS) {
   const bad = cases.map(([got, want], i) => JSON.stringify(got) === JSON.stringify(want) ? null : `${i + 1}: ${JSON.stringify(got)} != ${JSON.stringify(want)}`).filter(Boolean);
   if (bad.length) fail++;
   console.log(`${bad.length ? 'FAIL' : 'ok  '} company balancing ${cases.length} cases${bad.length ? ` — ${bad.join('; ')}` : ''}`);
+}
+// Explicit background work can wait on TRAE and must never consume personal quota, even on later ladder rungs.
+{
+  const SOL = 'gpt-6.1-sol', FLASH = 'deepseek-v4.1-flash';
+  const home = fs.mkdtempSync(path.join(tmp, 'background-'));
+  const depleted = { used: 100, limit: 100, remaining: 0, depleted: true, resetsAt: now + h };
+  const trae = tr({ home, models: [SOL, 'gpt-6-astra', FLASH], load: { [SOL]: { percent: 99, t: now } },
+    quota: { daily: { [SOL]: depleted, 'gpt-6-astra': { ...depleted, depleted: false, remaining: 50 } } } });
+  fs.writeFileSync(path.join(home, 'queue-state.json'), JSON.stringify({ gpt: { t: now, position: 4000, state: 'queued', lowPriority: true } }));
+  S.background = { claude: cl(10, 120), codex: [acc('main', 20, 120), tt(), trae] };
+  S.backgroundOnly = { ...S.background, codex: [acc('main', 20, 120), trae] };
+  S.backgroundNoModels = { ...S.background, codex: [acc('main', 20, 120), tr({ home, models: ['seed-evolving'] })] };
+  S.backgroundGemini = { ...S.background, codex: [tr({ home, live: false, models: ['gemini-3.1-pro-preview'] })] };
+  const r = (args, scenario = 'background', env) => JSON.parse(run(scenario, args, env));
+  try {
+    for (const args of [['lookup'], ['analysis'], ['implement'], ['docs'], ['research']]) {
+      const o = r([...args, '--background']);
+      assert.equal(o.pick.account, 'trae'); assert.equal(o.pick.model, SOL);
+      assert.equal(o.pick.launcher, 'codex-worker'); assert.equal(o.background, true);
+      assert.ok(o.why.includes('background: TRAE low-priority lane, leaves high-priority quota for foreground work'));
+      assert.ok(o.notes.some((n) => /expect hours.*each model request queues separately/.test(n)));
+      assert.ok(!o.notes.some((n) => /Above ~300, consider|hub queue position above ~300/.test(n)));
+    }
+    assert.equal(r(['lookup']).pick.account, 'ttadk');
+    assert.equal(r(['--background', 'lookup']).pick.account, 'trae');
+    const gemini = r(['lookup', '--background'], 'backgroundGemini');
+    assert.equal(gemini.pick.launcher, 'codex-worker');
+    assert.ok(gemini.notes.some((n) => /hub is down.*start it first/.test(n)));
+    assert.ok(!gemini.notes.some((n) => /twice what the task should take|codex exec still works/.test(n)));
+    assert.equal(r(['implement'], 'backgroundOnly').pick.model, 'gpt-6-astra');
+    assert.equal(r(['implement', '--background'], 'backgroundOnly').pick.model, SOL);
+    assert.equal(r(['lookup', '--background', '--security']).pick.model, FLASH);
+    assert.equal(r(['lookup', '--background', '--security']).pick.account, 'trae');
+    for (const args of [['review', '--security'], ['review-high', '--security'], ['lookup', '--exclude-model', 'gpt,deepseek']]) {
+      const o = r([...args, '--background'], 'backgroundOnly');
+      assert.equal(o.pick, null); assert.ok(o.deferred); assert.equal(o.secondOpinion, null);
+      assert.ok(o.tellUser.some((n) => /queued for later/.test(n))); assert.deepEqual(o.needsUserOK, []);
+    }
+    for (const args of [['browser'], ['ui-browser'], ['computer-use'], ['build-run'], ['image-read'], ['lookup', '--device-lease'], ['lookup', '--shared-lock']]) {
+      const o = r([...args, '--background']);
+      assert.equal(o.pick.account, 'ttadk'); assert.ok(!o.why.some((n) => n.startsWith('background:')));
+    }
+    assert.equal(r(['lookup', '--background', '--exclude-account', 'trae']).pick.account, 'ttadk');
+    assert.equal(r(['lookup', '--background', '--exclude-model', SOL]).pick.model, FLASH);
+    for (const scenario of ['backgroundNoModels', 'ttOutTraeDown', 'fresh', 'unreadable']) {
+      const o = r(['lookup', '--background', '--urgent'], scenario);
+      assert.equal(o.pick, null); assert.equal(o.secondOpinion, null); assert.equal(o.redeemFirst, null);
+      assert.ok(o.tellUser.some((n) => /queued for later/.test(n))); assert.deepEqual(o.needsUserOK, []);
+    }
+    for (const args of [['implement', '--failures', '20'], ['design'], ['review-high'], ['review', '--author', 'codex'], ['second-opinion', '--against', 'codex']]) {
+      const o = r([...args, '--background']);
+      for (const p of [o.pick, o.secondOpinion].filter(Boolean)) { assert.equal(p.vendor, 'codex'); assert.equal(p.account, 'trae'); }
+      assert.ok(!o.needsUserOK.some((n) => /personal quota/.test(n)));
+    }
+    const log = path.join(home, 'routes.jsonl');
+    r(['lookup', '--background', '--project', 'p', '--name', 'nightly'], 'background', { ROUTE_LOG: '1', ROUTE_LOG_FILE: log });
+    const logged = JSON.parse(fs.readFileSync(log, 'utf8'));
+    assert.equal(logged.background, true); assert.equal(logged.pick.account, 'trae');
+    console.log('ok   background lane: depletion, congestion, security, exclusions, launch, log and company-only escalation');
+  } catch (e) { fail++; console.log(`FAIL background lane: ${e.stack}`); }
 }
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(fail ? `\n${fail} failing` : '\nall pass');

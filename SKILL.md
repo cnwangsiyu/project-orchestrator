@@ -256,7 +256,7 @@ workers, and patching after a second same-kind defect.
   the brief (user-approved 2026-11-11 retro; W291-R0's Gemini LAND missed reproduced P1s).
 - Work without a review is accepted on your own check: tests, build, acceptance.
 - When a task is finally accepted or given up, record it once:
-  `node <this skill>/scripts/outcome.mjs --project <slug> --name <task> --result pass|rework|fail [--rounds N] [--cause code|spec|process|infra|scope] [--retries N] [--scope-changes N] [--minutes M] [--reviewed] [--note "…"]`.
+  `node <this skill>/scripts/outcome.mjs --project <slug> --name <task> --result pass|rework|fail [--rounds N] [--cause code|spec|process|infra|scope] [--retries N] [--scope-changes N] [--minutes M] [--reviewed] [--note "…"] [--correct] [--actual vendor:model:effort@account ...]`.
   - Keep the kinds of extra work apart (rework retro 2026-11-10): `--cause` is the main cause of the fix rounds (`code`
     the worker's code, `spec` a brief/spec gap, `process` review/acceptance/dispatch, `infra` tools/devices/platform,
     `scope` a changed requirement); `--retries N` counts re-runs for infrastructure (quota, queue, device, signing,
@@ -268,8 +268,16 @@ workers, and patching after a second same-kind defect.
     MERGE-WITH-NOTES is a pass). Any fix round makes it `rework --rounds N`, counting every round
     on any vendor; `outcome.mjs` records `pass --rounds N` (N ≥ 1) as rework. Add `--reviewed` when a
     review judged it.
-  - Once per task: a second record for the same task only corrects the first (the review keeps the
-    latest result and the most rounds any record gave), and `outcome.mjs` warns when one exists.
+  - Once per task: normal duplicate records keep the latest result, most rounds and any reviewed flag.
+    To fix an existing outcome, append `--correct`: supplied fields override the aggregate, including
+    `--rounds 0` or `--rounds null`; omitted metadata inherits. Corrections apply in timestamp order after
+    all normal records, so later duplicates cannot restore old round counts. Never edit or delete log lines.
+    The nightly review lists `corrected` before/after values and counts `corrections` separately from duplicates.
+  - When the launch differs from the joined route pick, repeat `--actual vendor:model:effort@account` in launch
+    order (also allowed with `--correct`). On an existing outcome, `--actual` without `--result` appends only
+    metadata and preserves its result. The first/last actual attempts take precedence for attribution;
+    old records still use the joined first/accepted pick. The nightly review lists `actualMismatches` and
+    excludes mixed harnesses or non-Codex sequences from TRAE-vs-Codex rows, listing them under `mixed`.
   - The nightly review turns these records into first-pass rates, rework rounds and times per
     vendor, model and category. That is the evidence for changing the routing table.
 
@@ -308,6 +316,16 @@ effort, Codex account and launch command from
   - `--security` for security/attack-flavoured work (vulnerability/exploit hunting, auth/session/credential handling,
     bypass, forgery/replay, path traversal, DoS or security review): exclude TRAE's GPT, then route normally
     (user, 2026-11-12: "这种类型的任务排除掉 trae gpt 之后再按照路由规则来走就行吧，不需要写死一个路由");
+  - `--background` only when nobody is waiting and there is no deadline or near-term dependency: nightly cleanups,
+    doc refreshes, exploratory analysis and benchmark batches. Eligible tasks prefer TRAE Sol and its fallbacks
+    even when the daily high-priority bucket is depleted or the queue is congested. Expect hours (each request
+    queues separately); launch as a hub worker, keep it pending while `queued:` lines arrive, and dispatch other
+    work meanwhile. TRAE determines request priority from quota; this flag cannot force low priority while quota
+    remains. Browser/desktop/image, UI and build/device work keep their normal capability routing; tasks holding
+    a device lease or shared lock (`--device-lease` / `--shared-lock`) cannot enter this lane or company balancing.
+    Background work never uses personal quota: if no company model fits, tell the user it is queued for later.
+    Routes record `background: true`; the nightly `background` summary counts tasks and recorded `--minutes`
+    wall-clock time, including queues. Without this flag, the existing low-priority balancing rule is unchanged.
   - always `--project <slug>`: every decision is logged to `_shared/route-log.jsonl` for the
     nightly review, which needs the project (use `--dry` only to try things out).
 
