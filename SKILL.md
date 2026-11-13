@@ -292,6 +292,9 @@ effort, Codex account and launch command from
     `--task-dir`, `--name` so the printed command is ready to run;
   - for code work, `--impact release|service|throwaway` (see "Review only what is costly to
     undo"); route.mjs refuses code work without it;
+  - `--security` for security/attack-flavoured work (vulnerability/exploit hunting, auth/session/credential handling,
+    bypass, forgery/replay, path traversal, DoS or security review): exclude TRAE's GPT, then route normally
+    (user, 2026-11-12: "这种类型的任务排除掉 trae gpt 之后再按照路由规则来走就行吧，不需要写死一个路由");
   - always `--project <slug>`: every decision is logged to `_shared/route-log.jsonl` for the
     nightly review, which needs the project (use `--dry` only to try things out).
 
@@ -307,7 +310,8 @@ effort, Codex account and launch command from
     CLI with its own model pool), then personal quota (user, 2026-11-08). route.mjs moves TTADK's work
     to TRAE when TTADK is out; the personal-quota OK gate applies only when both are out. TRAE has no
     browser, desktop or image tools (references/codex-workers.md, "TRAE CLI"). Repeated TRAE failures
-    pause the failing model family briefly (queue full: 5, then 10, 20, 30 min; restricted or quota: 30 min and up;
+    pause the failing model family (queue full: 5, then 10, 20, 30 min; vendor restriction: until next 00:00 UTC / 08:00 China time;
+    other hard failures such as quota: 30 min, then a probe;
     auth pauses the account); record traecli exec failures with `codex-worker.mjs --account trae note-failure
     --model <model>`, so work moves on instead of failing task by task.
   - Fallback models (user, 2026-11-10): when the company account's GPT is out, route.mjs uses DeepSeek-V4.1-Flash,

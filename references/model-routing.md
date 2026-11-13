@@ -133,6 +133,14 @@ workers, long unattended runs) at `medium` effort, set in each session's respawn
     work never go there. The `max` exemption stays on TTADK alone: the 2026-11-10 review found
     `vesdk-mainline-T39-m1a-device` routed to TRAE/max after three failures with an empty `needsOK` list.
     The router now distinguishes the selected company account for that gate. See codex-workers.md, "TRAE CLI as the second company account".
+
+    Security-task rule (user, 2026-11-12): the retro found three TRAE GPT restrictions, each immediately after an
+    exploit-style security review, rather than from volume or concurrency. Pass `--security` for vulnerability/exploit
+    hunting, auth/session/credential handling, bypass, forgery/replay, path traversal, DoS scenarios or security review.
+    It excludes the GPT family only on TRAE, then follows the normal routing, fallbacks and gates; TTADK GPT and personal
+    ChatGPT accounts stay unchanged. Briefs describe defensive intent and request findings with impact and fix, avoiding
+    requests for step-by-step exploit code.
+
   - **Fallback models on the company account (user, 2026-11-10: when GPT is unavailable or fails, route by the
     benchmark; keep quality, spend little personal quota).** `route.mjs` ALTS, from the 2026-11-10 benchmark on TRAE
     (6 hard tasks — bug fixes with hidden tests, a security review, a planted-bug hunt — 12 runs per model; Sol effort
@@ -165,8 +173,9 @@ workers, long unattended runs) at `medium` effort, set in each session's respawn
       waits for stronger-model judgment (W291-L1-ppe2a's unnecessary rollback), not another fallback's discretion.
     - **Infrastructure misses are not failures**: a fallback model that times out, queues or is restricted on one task is
       re-routed with `--exclude-model <model or family>` and the same `--failures`; `--failures` counts quality misses.
-    - **Recovery**: a family paused as restricted is probed every 30 minutes with a one-line turn and comes back as soon
-      as a probe passes (codex-workers.md, "Recovery probe"); real tasks keep going to the fallbacks meanwhile.
+    - **Recovery** (user, 2026-11-12): a vendor-restricted family waits until the next 00:00 UTC (08:00 China time),
+      then a one-line probe; if it fails, the next probe waits until the following 00:00 UTC. Other hard failures retain
+      30-minute probes (codex-workers.md, "Recovery probe"); real tasks keep going to the fallbacks meanwhile.
     - Outcomes are logged per model (route log `pick.model`), so the nightly review's model view can reorder ALTS once
       real tasks outnumber the benchmark.
   - **TTADK's quota is daily, not unlimited** (about 500M tokens per user per day, shared by all models, resets 16:00

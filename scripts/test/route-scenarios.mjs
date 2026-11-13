@@ -239,6 +239,14 @@ const CASES = [
   // Credential clause in every brief (user-approved 2026-11-11).
   ['quiet', ['lookup'], 'codex gpt-6-luna low @main', 'credential clause'],
   ['ttOutTrae', ['analysis'], 'codex gpt-6.1-sol high @trae', 'credential clause'],
+  // Security excludes TRAE GPT for this task; TTADK GPT and personal accounts are untouched (2026-11-12).
+  ['ttOutTrae', ['review-high', '--security'], 'codex gemini-3.1-pro-preview high @trae', 'describe defensive intent'],
+  ['ttOutTrae', ['implement', '--impact', 'service', '--security'], 'codex gemini-3.1-pro-preview high @trae'],
+  ['ttAndTrae', ['review-high', '--security'], 'codex gpt-6.1-sol xhigh @ttadk', 'describe defensive intent'],
+  ['ttFresh', ['--security', 'review-high'], 'codex gpt-6.1-sol xhigh @ttadk'],
+  ['ttFresh', ['implement', '--impact', 'service', '--security'], 'codex gpt-6.1-sol high @ttadk'],
+  ['fresh', ['review-high', '--security'], 'claude opus xhigh', 'describe defensive intent'],
+  ['fresh', ['implement', '--impact', 'service', '--security'], 'codex gpt-6.1-sol xhigh @main'],
 ];
 const ERRORS = [['fresh', ['implement', '__noimpact']], ['fresh', ['implement', '--impact', 'prod']], ['fresh', ['implement', '--failures', '-1']], ['fresh', ['implement', '--stakes', 'hgih']], ['fresh', ['second-opinion']], ['fresh', ['nope']]];
 
@@ -437,8 +445,8 @@ for (const [sc, args] of ERRORS) {
   if (bad.length) fail++;
   console.log(`${bad.length ? 'FAIL' : 'ok  '} trae vs codex       ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
 }
-// TRAE pause (lib/trae-health.mjs, user 2026-11-08): transient failures back off 5/10/20/30 min; auth and hard ones
-// pause 30 min; a success clears everything; an auth pause lifts once logged in again.
+// TRAE whole-account pauses (lib/trae-health.mjs, user 2026-11-08): transient failures back off 5/10/20/30 min;
+// auth starts at 30 min, hard failures back off; a success clears everything; auth lifts once logged in again.
 {
   const { pauseDecision, failureKind, noteFailure, noteSuccess, readPause, liftAuthPause } = await import('../lib/trae-health.mjs');
   const t0 = 1_800_000_000_000, m = 60000, q = "We're sorry, the request queue size is exceed. Please wait and try again later.";
@@ -457,8 +465,8 @@ for (const [sc, args] of ERRORS) {
     [pauseDecision([{ t: t0, why: q }], t0 + m), null],
     [pauseDecision([{ t: t0, why: q }, { t: t0 + 20 * m, why: q }], t0 + 21 * m), null],
     [pauseDecision([{ t: t0, why: 'account banned' }], t0 + m)?.pausedUntil, t0 + 30 * m],
-    [pauseDecision([{ t: t0, why: 'Model access temporarily restricted.' }], t0 + m, 1)?.pausedUntil, t0 + 60 * m],
-    [pauseDecision([{ t: t0, why: 'Model access temporarily restricted.' }], t0 + m, 7)?.pausedUntil, t0 + 240 * m],
+    [pauseDecision([{ t: t0, why: '403 Forbidden: quota exceeded' }], t0 + m, 1)?.pausedUntil, t0 + 60 * m],
+    [pauseDecision([{ t: t0, why: '403 Forbidden: quota exceeded' }], t0 + m, 7)?.pausedUntil, t0 + 240 * m],
     [pauseDecision([{ t: t0, why: q }, { t: t0 + m, why: q }], t0 + 2 * m, 9)?.pausedUntil, t0 + 31 * m],
     [one, null], [p1?.pausedUntil, t0 + 7 * m], [p2?.pausedUntil, t0 + 19 * m], [p3?.pausedUntil, t0 + 41 * m],
     [cleared, null], [p4?.pausedUntil, t0 + 36 * m], [pa?.pausedUntil, t0 + 30 * m], [lifted, null],
@@ -574,7 +582,8 @@ for (const [sc, args] of ERRORS) {
   const out = { healthy: false, reason: 'its daily token quota is used up', quotaOut: { kind: 'daily', resetsAt: now + 10 * h } };
   const okHome = fs.mkdtempSync(path.join(tmp, 'trae-ok-')), gptHome = fs.mkdtempSync(path.join(tmp, 'trae-gpt-')), allHome = fs.mkdtempSync(path.join(tmp, 'trae-all-'));
   const t = Date.now(), R = 'stream disconnected: Model access temporarily restricted. (983)';
-  noteFailure(gptHome, R, t, 'GPT-6.1-Sol');
+  const gptPause = noteFailure(gptHome, R, t, 'GPT-6.1-Sol');
+  const reset = new Date(t); reset.setUTCHours(24, 0, 0, 0);
   for (const mm of ['GPT-6.1-Sol', 'DeepSeek-V4.1-Flash', 'Gemini-3.1-Pro-Preview', 'DeepSeek-V4-Pro', 'Seed-Evolving']) noteFailure(allHome, R, t, mm);
   S.traeFull = { claude: cl(10, 120), codex: [acc('main', 20, 120), tt(out), full(okHome)] };
   S.traeGptOut = { claude: cl(10, 120), codex: [acc('main', 20, 120), tt(out), full(gptHome)] };
@@ -592,6 +601,8 @@ for (const [sc, args] of ERRORS) {
   const cases = [
     [poolOf('Gemini-3.1-Pro-Preview'), 'gemini'], [poolOf('gpt-6.1-sol'), 'gpt'], [poolOf(null), null],
     [gptStill, true], [acctFree, true], [gptCleared, true], [!!readPause(ah), true],
+    [gptPause?.pausedUntil, reset.getTime()], [gptPause?.restricted, true],
+    [/vendor's policy until 08:00 China time \(00:00 UTC\); probed then/.test(gptPause?.reason), true],
     // GPT up: Sol, then a different family before Sol max, the second fallback after it, then Claude.
     [pk('traeFull', ['implement']), 'gpt-6.1-sol high @trae'],
     [pk('traeFull', ['implement', '--failures', '2']), 'deepseek-v4.1-flash high @trae'],
@@ -611,6 +622,19 @@ for (const [sc, args] of ERRORS) {
     // The same through --exclude-model (an infrastructure miss on one task).
     [pk('traeFull', ['implement', '--exclude-model', 'gpt']), 'deepseek-v4.1-flash high @trae'],
     [pk('traeFull', ['implement', '--exclude-model', 'gpt,deepseek-v4.1-flash']), 'gemini-3.1-pro-preview high @trae'],
+    // The task flag uses that same exclusion path, scoped to TRAE, with the normal fallback ladder and gates.
+    [pk('traeFull', ['review-high', '--security']), 'deepseek-v4.1-flash high @trae'],
+    [pk('traeFull', ['implement', '--impact', 'service', '--security']), 'deepseek-v4.1-flash high @trae'],
+    [pk('traeFull', ['implement', '--security', '--failures', '1']), 'gemini-3.1-pro-preview high @trae'],
+    [pk('traeFull', ['implement', '--security', '--exclude-model', 'deepseek']), 'gemini-3.1-pro-preview high @trae'],
+    [personal('traeFull', ['implement', '--security']), false],
+    [o('traeFull', ['review-high', '--security']).security, true],
+    [o('traeFull', ['review-high']).security, false],
+    [o('traeFull', ['review-high', '--security']).why.some((n) => /security task: TRAE's GPT excluded.*deepseek-v4\.1-flash/.test(n)), true],
+    [o('ttAndTrae', ['review-high', '--security']).why.some((n) => /security task:/.test(n)), false],
+    [hasNote('traeFull', ['implement', '--security'], /review required.*written by fallback model/), true],
+    [hasNote('traeFull', ['review-high', '--security'], /brief: describe defensive intent and ask for findings with impact and fix; avoid requesting step-by-step exploit code/), true],
+    [hasNote('fresh', ['review-high'], /describe defensive intent/), false],
     // Fallback-written service code gets a review that keeps its family off the reviewer seat.
     [hasNote('traeGptOut', ['implement', '--impact', 'service'], /route\.mjs review --author codex --exclude-model deepseek/), true],
     [hasNote('traeGptOut', ['implement', '--impact', 'throwaway'], /review required/), false],
@@ -630,26 +654,62 @@ for (const [sc, args] of ERRORS) {
   if (bad.length) fail++;
   console.log(`${bad.length ? 'FAIL' : 'ok  '} fallback models     ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
 }
-// Recovery probes (user, 2026-11-10): a family's hard pause is a fixed 30 minutes; after it the family stays out until
-// a probe succeeds; a failed probe pauses it 30 more; transient pauses just end.
+// Recovery probes (user, 2026-11-12): vendor restrictions wait for the next UTC midnight, including failed probes;
+// other hard failures keep 30-minute probes. A family stays out until a probe succeeds; transient pauses just end.
 {
   const { noteFailure, readPoolPauses, claimProbes, probeResult } = await import('../lib/trae-health.mjs');
-  const t0 = 1_800_000_000_000, m = 60000, R = 'Model access temporarily restricted. (983)', q = 'request queue size is exceed';
+  const t0 = Date.parse('2026-11-12T12:00:00Z'), midnight = Date.parse('2026-11-13T00:00:00Z'), day = 86400000,
+    m = 60000, R = 'Model access temporarily restricted. (983)', hard = '403 Forbidden: quota exceeded', q = 'request queue size is exceed';
   const home = fs.mkdtempSync(path.join(tmp, 'trae-probe-'));
   const p1 = noteFailure(home, R, t0, 'GPT-6.1-Sol');
-  const during = Object.keys(readPoolPauses(home, t0 + 10 * m)), early = claimProbes(home, t0 + 10 * m);
-  const after = Object.keys(readPoolPauses(home, t0 + 31 * m));
-  const due = claimProbes(home, t0 + 31 * m), again = claimProbes(home, t0 + 32 * m), stale = claimProbes(home, t0 + 45 * m);
-  probeResult(home, 'GPT-6.1-Sol', false, 'still restricted', t0 + 46 * m);
-  const failed = readPoolPauses(home, t0 + 47 * m).gpt?.pausedUntil;
-  probeResult(home, 'GPT-6.1-Sol', true, '', t0 + 80 * m);
-  const back = Object.keys(readPoolPauses(home, t0 + 80 * m));
+  const during = Object.keys(readPoolPauses(home, t0 + 31 * m)), early = claimProbes(home, t0 + 31 * m);
+  const before = claimProbes(home, midnight - 1), after = readPoolPauses(home, midnight);
+  const due = claimProbes(home, midnight), again = claimProbes(home, midnight + m), stale = claimProbes(home, midnight + 11 * m);
+  // The persisted restriction schedule survives a probe that reports a different failure.
+  probeResult(home, 'GPT-6.1-Sol', false, 'probe timed out', midnight + 12 * m);
+  const failed = readPoolPauses(home, midnight + 13 * m).gpt;
+  const failedEarly = claimProbes(home, midnight + day - 1), nextDue = claimProbes(home, midnight + day);
+  probeResult(home, 'GPT-6.1-Sol', true, '', midnight + day + m);
+  const back = Object.keys(readPoolPauses(home, midnight + day + m));
+  const hh = fs.mkdtempSync(path.join(tmp, 'trae-probe-hard-'));
+  const hp = noteFailure(hh, hard, t0, 'GPT-6.1-Sol');
+  const hardEarly = claimProbes(hh, t0 + 29 * m), hardDue = claimProbes(hh, t0 + 30 * m);
+  probeResult(hh, 'GPT-6.1-Sol', false, hard, t0 + 31 * m);
+  const hardFailed = readPoolPauses(hh, t0 + 32 * m).gpt, hardRetry = claimProbes(hh, t0 + 61 * m);
+  // A restriction reported by a probe also switches a previously ordinary hard pause to the vendor reset.
+  probeResult(hh, 'GPT-6.1-Sol', false, R, t0 + 62 * m);
+  const newlyRestricted = readPoolPauses(hh, t0 + 63 * m).gpt;
   const th = fs.mkdtempSync(path.join(tmp, 'trae-probe-q-'));
   noteFailure(th, q, t0, 'GPT-6.1-Sol'); noteFailure(th, q, t0 + m, 'GPT-6.1-Sol');
   const qDuring = Object.keys(readPoolPauses(th, t0 + 3 * m)), qAfter = Object.keys(readPoolPauses(th, t0 + 10 * m)), qProbe = claimProbes(th, t0 + 10 * m);
-  const cases = [[p1?.pausedUntil, t0 + 30 * m], [during.join(), 'gpt'], [early.length, 0], [after.join(), 'gpt'],
+  // A restriction replaces a short pause even when it arrives while that pause is active.
+  noteFailure(th, hard, t0 + 11 * m, 'GPT-6.1-Sol');
+  const upgraded = noteFailure(th, R, t0 + 12 * m, 'GPT-6.1-Sol');
+  // A pre-change restriction record is recognized when its probe fails, even without the new marker.
+  const legacyHome = fs.mkdtempSync(path.join(tmp, 'trae-probe-legacy-'));
+  fs.writeFileSync(path.join(legacyHome, 'worker-health.json'), JSON.stringify({ failures: [], pools: {
+    gpt: { failures: [], kind: 'hard', model: 'GPT-6.1-Sol', pausedUntil: t0 + 30 * m, reason: R + ' (paused 30 min, then probed)' },
+  } }));
+  probeResult(legacyHome, 'GPT-6.1-Sol', false, 'probe timed out', midnight + m);
+  const legacyFailed = readPoolPauses(legacyHome, midnight + 2 * m).gpt;
+  const cases = [[p1?.pausedUntil, midnight], [p1?.restricted, true], [during.join(), 'gpt'], [early.length, 0],
+    [before.length, 0], [Object.keys(after).join(), 'gpt'], [/awaiting a recovery probe/.test(after.gpt?.reason), true],
     [JSON.stringify(due), JSON.stringify([{ pool: 'gpt', model: 'GPT-6.1-Sol' }])], [again.length, 0], [stale.length, 1],
-    [failed, t0 + 76 * m], [back.length, 0], [qDuring.join(), 'gpt'], [qAfter.length, 0], [qProbe.length, 0]];
+    [failed?.pausedUntil, midnight + day], [failed?.restricted, true], [failedEarly.length, 0], [nextDue.length, 1], [back.length, 0],
+    [hp?.pausedUntil, t0 + 30 * m], [hardEarly.length, 0], [hardDue.length, 1], [hardFailed?.pausedUntil, t0 + 61 * m],
+    [hardFailed?.restricted, false], [hardRetry.length, 1], [newlyRestricted?.pausedUntil, midnight], [newlyRestricted?.restricted, true],
+    [qDuring.join(), 'gpt'], [qAfter.length, 0], [qProbe.length, 0], [upgraded?.pausedUntil, midnight],
+    [legacyFailed?.pausedUntil, midnight + day], [legacyFailed?.restricted, true]];
+  // Strict UTC boundaries and both restriction match forms; no two-minute grace period rounds back or skips a reset.
+  for (const [t, message, want] of [
+    [midnight - 2 * m, R, midnight], [midnight - m, 'ACCESS RESTRICTED', midnight],
+    [midnight - 1, 'vendor error code 983', midnight], [midnight, R, midnight + day], [midnight + 1, R, midnight + day],
+  ]) {
+    const boundaryHome = fs.mkdtempSync(path.join(tmp, 'trae-probe-boundary-'));
+    const p = noteFailure(boundaryHome, message, t, 'GPT-6.1-Sol');
+    cases.push([p?.pausedUntil, want], [p?.pausedUntil > t, true], [claimProbes(boundaryHome, want - 1).length, 0],
+      [claimProbes(boundaryHome, want).length, 1]);
+  }
   const bad = cases.map(([got, want], i) => (got === want ? null : `${i} (${got})`)).filter((i) => i !== null);
   if (bad.length) fail++;
   console.log(`${bad.length ? 'FAIL' : 'ok  '} recovery probes     ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);

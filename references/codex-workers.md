@@ -249,17 +249,21 @@ personal quota appears only when both company accounts are out. The user chose n
     rate limits, gateway errors, timeouts, stalls: two within 15 minutes pause it for 5 minutes, then 10, 20, at most 30
     while pauses follow each other without a success (the backoff starts over after a success or an hour clear);
   - auth — not logged in, 401, expired token: 30 minutes, lifted as soon as `login status` is fine again;
-  - hard — quota used up, banned, 403 Forbidden, `Model access temporarily restricted` (code 983: TRAE restricted the
-    account's GPT models on 2026-11-10 after about 1.3B tokens in a day; Gemini/Seed/DeepSeek kept working): 30 minutes,
-    then 60, 120, at most 240 while they keep coming without a success. codex-worker prints `trae-paused:` when it pauses. A `traecli exec` run bypasses codex-worker: record its failure
+  - vendor restriction — `Model access temporarily restricted` / `access restricted` or code 983: pause that family
+    until the next 00:00 UTC strictly after the failure (08:00 China time; user, 2026-11-12). TRAE's FAQ specifies this
+    recovery time; the 11-10..12 retro found every block lifted just after 00:00 UTC and every earlier 30-minute probe failed;
+  - other hard failures — quota used up, banned, 403 Forbidden: a family's pause is 30 minutes, then a recovery probe;
+    whole-account pauses back off 30, 60, 120, at most 240 minutes while they keep coming without a success.
+    codex-worker prints `trae-paused:` when it pauses. A `traecli exec` run bypasses codex-worker: record its failure
   (or a run you interrupted) with `codex-worker.mjs --account trae note-failure --model <model> "<error>"`. To lift a
   pause by hand, delete `~/.trae/worker-health.json`.
-- **Recovery probe** (user, 2026-11-10: notice soon when GPT is back, without failing real tasks). A model family's
-  hard pause (restricted, quota, banned) is a fixed 30 minutes instead of backing off. When it ends the family stays
+- **Recovery probe** (user, 2026-11-10, updated 2026-11-12). A model family's vendor restriction waits until the next
+  00:00 UTC (08:00 China time); other hard pauses (quota, banned, 403) wait 30 minutes. When it ends the family stays
   out of routing until a probe succeeds: the next `route.mjs`/`quota.mjs` read starts `codex-worker.mjs --account trae
   probe --model <its model>` in the background (one read-only "reply OK" turn at low effort through `traecli exec`).
-  OK → the family is back (verified end to end 2026-11-10: about 20 seconds); failure → 30 more minutes, then the next
-  probe. A recovery is seen within about 30 minutes, and no real task is spent on it. Transient pauses (queue full)
+  OK → the family is back (verified end to end 2026-11-10: about 20 seconds); a failed restriction probe waits until
+  the following 00:00 UTC, even if its error differs; other hard failures wait 30 more minutes. Probes are claimed
+  once when due, with the existing 10-minute stale-claim retry. No restriction probe runs before its reset. Transient pauses (queue full)
   still just end. The whole-account pauses (auth, or failures noted without `--model`) keep the backoff above. Verified 2026-11-10: a DeepSeek-V4.1-Flash hub worker on TRAE
   searches the web like Sol does.
 

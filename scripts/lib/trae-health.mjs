@@ -8,8 +8,10 @@
 //   WINDOW_MIN pause it for 5 minutes, then 10, 20, at most 30 while pauses keep following each other without a success;
 // - auth (not logged in, 401, expired token): one pauses it for 30 minutes; lifted as soon as `login status` is fine again
 //   (quota.mjs checks);
-// - hard (quota used up, banned, 403 Forbidden, model access restricted): one pauses it for 30 minutes, then 60, 120,
-//   at most 240 while they keep coming without a success.
+// - hard (quota used up, banned, 403 Forbidden): a family pauses for 30 minutes, then awaits a probe; whole-account
+//   pauses back off 30, 60, 120, at most 240 minutes while they keep coming without a success;
+// - vendor restriction ("Model access temporarily restricted", code 983): a family pauses until the next 00:00 UTC
+//   strictly after the failure (08:00 China time), then awaits a probe (user, 2026-11-12; TRAE FAQ, 11-10..12 retro).
 //
 // Per model family (2026-11-10: TRAE restricted only its GPT models while DeepSeek and Gemini kept working, and a queue
 // overflow is per model): a failure recorded with its model pauses only that family (gpt, deepseek, gemini, seed…);
@@ -19,24 +21,25 @@
 //                                    "pools":{"gpt":{"failures","pausedUntil","reason","kind","streak"}}}
 //
 // Recovery by probe (user, 2026-11-10: find out soon when GPT is back, without spending real tasks on it): a family's
-// hard pause (restricted, quota, banned) lasts 30 minutes, no longer backing off. When it ends, the family stays out of
+// vendor restriction lasts until the next 00:00 UTC; other hard pauses last 30 minutes. When it ends, the family stays out of
 // routing until a probe — a tiny one-line turn on that family's model (`codex-worker --account trae probe`, started in
-// the background by lib/state.mjs when it reads the state) — succeeds; a failed probe pauses it another 30 minutes. So
-// a recovery is seen within about 30 minutes of a routing or quota read, and no real task fails to find it out.
+// the background by lib/state.mjs when it reads the state) — succeeds. A failed restriction probe waits until the following
+// 00:00 UTC; other hard failures wait another 30 minutes. The 11-10..12 retro found every restriction lifted after
+// 00:00 UTC and every earlier 30-minute probe failed, so restriction probes wait for the vendor's recovery time.
 // Transient pauses (queue full) still just end: the next real task is the test.
 //   <trae home>/thread-models.json  {"<thread id>":"<model>"}  (so a later turn or wait on a thread knows its model)
 import fs from 'node:fs';
 import path from 'node:path';
 
 export const WINDOW_MIN = 15, HARD_MIN = 30, BACKOFF_MIN = [5, 10, 20, 30];
-// Hard failures back off too (2026-11-10: TRAE's GPT restriction outlasted each 30-minute pause, so every pause end cost
-// one more failed task): 30, then 60, 120, 240 minutes while they keep coming without a success.
+// Whole-account hard failures back off 30, 60, 120, 240 minutes; family pauses use the recovery schedule below.
 export const HARD_BACKOFF_MIN = [30, 60, 120, 240];
 const AUTH = /not logged in|unauthori[sz]ed|\b401\b|token expired|login (required|expired)|re-?login/i;
-// "Model access temporarily restricted" (code 983, seen 2026-11-10 after ~1.3B TRAE tokens in a day): TRAE restricted
-// the account's GPT models while Gemini/Seed/DeepSeek still worked — an account restriction, not a passing error.
-const HARD = /quota|daily limit|banned|\bban\b|封禁|封号|forbidden|\b403\b|access (temporarily )?restricted|\b983\b/i;
-export const failureKind = (why) => (AUTH.test(why ?? '') ? 'auth' : HARD.test(why ?? '') ? 'hard' : 'transient');
+const RESTRICTED = /access (temporarily )?restricted|\b983\b/i;
+const HARD = /quota|daily limit|banned|\bban\b|封禁|封号|forbidden|\b403\b/i;
+const RESTRICTED_REASON = "restricted by the model vendor's policy until 08:00 China time (00:00 UTC); probed then";
+const nextUtcMidnight = (now) => (Math.floor(now / 86400000) + 1) * 86400000;
+export const failureKind = (why) => (AUTH.test(why ?? '') ? 'auth' : HARD.test(why ?? '') || RESTRICTED.test(why ?? '') ? 'hard' : 'transient');
 const file = (home) => path.join(home, 'worker-health.json');
 const read = (home) => { try { return JSON.parse(fs.readFileSync(file(home), 'utf8')); } catch { return { failures: [] }; } };
 const write = (home, rec) => { try { const t = `${file(home)}.${process.pid}`; fs.writeFileSync(t, JSON.stringify(rec)); fs.renameSync(t, file(home)); } catch {} };
@@ -85,8 +88,12 @@ export const noteFailure = (home, why, now = Date.now(), model = null) => {
   }
   const prev = rec.pools?.[pool] ?? { failures: [] };
   let pr = step(prev, why, now);
-  // A family's hard pause is a fixed 30 minutes: the probe, not a longer wait, decides when it is back.
-  if (pr.kind === 'hard' && pr.pausedUntil > now && pr !== prev && pr.failures.length === 0) pr = { ...pr, pausedUntil: now + PROBE_EVERY_MIN * 60000, reason: String(pr.reason).replace(/\(paused \d+ min\)$/, `(paused ${PROBE_EVERY_MIN} min, then probed)`) };
+  // Vendor restrictions have a known daily reset; retain the type when a later probe fails for another reason.
+  // A restriction also replaces an already-active short pause from a different failure.
+  if (RESTRICTED.test(why ?? '')) pr = { ...pr, failures: [], kind: 'hard', restricted: true, pausedUntil: nextUtcMidnight(now),
+    reason: `${String(why).slice(0, 180)}; ${RESTRICTED_REASON}` };
+  else if (pr.kind === 'hard' && pr.pausedUntil > now && pr !== prev && pr.failures.length === 0)
+    pr = { ...pr, restricted: false, pausedUntil: now + PROBE_EVERY_MIN * 60000, reason: String(pr.reason).replace(/\(paused \d+ min\)$/, `(paused ${PROBE_EVERY_MIN} min, then probed)`) };
   pr = { ...pr, model: model ?? prev.model ?? null, probingAt: null };
   write(home, { ...rec, failures: rec.failures ?? [], pools: { ...(rec.pools ?? {}), [pool]: pr } });
   return pr.pausedUntil && pr.pausedUntil > now ? { ...pr, pool } : null;
@@ -111,13 +118,17 @@ export const claimProbes = (home, now = Date.now()) => {
   if (due.length) write(home, rec);
   return due;
 };
-// A probe's result: success clears the family; failure pauses it another PROBE_EVERY_MIN minutes.
+// A probe's result: success clears the family; a failed restriction probe waits for the next UTC midnight,
+// other hard failures another PROBE_EVERY_MIN minutes. Recognize restrictions in older records' reason text too.
 export const probeResult = (home, model, ok, why = '', now = Date.now()) => {
   const rec = read(home), pool = poolOf(model);
   if (!pool || !rec.pools?.[pool]) return;
   if (ok) delete rec.pools[pool];
-  else rec.pools[pool] = { ...rec.pools[pool], failures: [], pausedUntil: now + PROBE_EVERY_MIN * 60000, probingAt: null, kind: 'hard',
-    reason: `recovery probe failed (${String(why).slice(0, 160)}); next probe in ${PROBE_EVERY_MIN} min` };
+  else {
+    const restricted = !!rec.pools[pool].restricted || RESTRICTED.test(rec.pools[pool].reason ?? '') || RESTRICTED.test(why);
+    rec.pools[pool] = { ...rec.pools[pool], failures: [], restricted, pausedUntil: restricted ? nextUtcMidnight(now) : now + PROBE_EVERY_MIN * 60000, probingAt: null, kind: 'hard',
+      reason: `recovery probe failed (${String(why).slice(0, 160)}); ${restricted ? RESTRICTED_REASON : `next probe in ${PROBE_EVERY_MIN} min`}` };
+  }
   write(home, rec);
 };
 // An auth pause ends once the CLI is logged in again (quota.mjs calls this after a good `login status`).
