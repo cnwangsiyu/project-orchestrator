@@ -17,6 +17,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readState, analyze, leanLines, readProfiles, hours, fmt, withLock, SHARED, ROUTE_LOG, POLICY } from './lib/state.mjs';
 import { poolOf } from './lib/trae-health.mjs';
+import { balanceFactors } from './lib/company-load.mjs';
 
 const SKILL = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const RR = process.env.ROUTE_RR || path.join(SHARED, 'route-rotation.txt'); // launch counter for account rotation
@@ -283,6 +284,7 @@ else if (T.kind === 'codexOnly' && chatgptOut) deferred = `Codex-only work and C
 else if (codexOut && !QX.throttledOnly && stakes === 'low' && T.kind !== 'claudeOnly' && !(T.kind === 'browser' && !browserViaCodex) && !opts.urgent)
   needsOK.push(`Codex is out (next free in ${QX.nextFree != null ? hours(QX.nextFree) : '?'}) and this is low-stakes: ask the user whether to run it now on Claude (this pick) or wait for Codex`);
 let m = null, prevRaw = null;
+let balance = null, balancedAccount = null;
 if (!deferred) {
   const firstOk = allowed(base[0]) ? base[0] : T.alt && allowed(T.alt) && cat !== 'second-opinion' ? T.alt : null;
   const ladder = [firstOk, ...base.slice(1).filter(allowed)].filter(Boolean)
@@ -364,12 +366,29 @@ if (m) {
   // Code a fallback model writes for a live service gets the routine review too (free on the company account): the
   // benchmark behind ALTS is 12 runs per model, too few to trust them unchecked where a mistake reaches users.
   if (isAlt(m) && CODE.includes(cat) && impact === 'service' && !reviewKind) { reviewKind = 'review'; why.push(`${m.model} is a fallback model: its service code gets a review`); }
+  // Preserve the chosen model, effort, escalation and second opinion. Only the primary account may change; this
+  // leaves review count and every launch/concurrency rule intact. Browser/images and interactive builds prefer TTADK.
+  if (onTTADK(m) && TT === QX.ttadk && QX.trae) {
+    balance = balanceFactors({ ttadk: QX.ttadk, trae: QX.trae, model: m.model, category: cat, stakes, impact });
+    const fits = QX.trae.usable && !excluded.has(QX.trae.name) && QX.trae.models.includes(m.model)
+      && !modelExcluded(m.model, QX.trae) && T.kind !== 'browser' && T.kind !== 'claudeOnly'
+      && !['build-run', 'image-gen', 'image-read'].includes(cat);
+    balance.taskEligible = !!fits;
+    balance.selected = !!fits && balance.eligible;
+    if (balance.selected) {
+      balancedAccount = QX.trae;
+      const factors = balance.triggers.map((s) => s === 'TTADK projected to run out'
+        ? `${s} at ${new Date(balance.burn.outAt).toISOString().slice(11, 16)} UTC` : s);
+      why.push(`balanced to TRAE: ${factors.join(', ')}, TRAE ${m.model} ${Math.round(balance.remainingShare * 100)}% left, `
+        + `load ${balance.load ? `${balance.load.percent}%` : 'unknown'}, queue ${balance.queue?.position ?? (balance.queue?.state === 'ready' ? 'ready' : 'unknown')}`);
+    }
+  }
   // ---- 3. gates ----
   if (m.model === 'fable') needsOK.push('Fable (2x Opus per token, and its own weekly cap, which the orchestrators run on)');
   // Astra on a company account spends company quota: no OK. On a ChatGPT (personal) account it does (5x Sol usage).
   if (m.model === ASTRA && !onTTADK(m)) needsOK.push('Astra (5x Sol usage)');
   // onTTADK also matches the TRAE fallback; only the actual TTADK account has the max-effort exemption.
-  if (m.effort === 'max' && !(onTTADK(m) && TT === QX.ttadk)) needsOK.push('max effort'); // user, 2026-11-07
+  if (m.effort === 'max' && !(onTTADK(m) && (balancedAccount ?? TT) === QX.ttadk)) needsOK.push('max effort'); // user, 2026-11-07
 }
 // Second opinion: the row's cross-vendor pair, or — while Codex is underused — an extra independent Codex review of
 // hard Codex work.
@@ -437,7 +456,8 @@ let acct = (QX.pick && !excluded.has(QX.pick.a.name) ? QX.pick : chatgptOpen[0])
 if (T.kind === 'browser' && !ttBrowser && chatgptBrowser.length && !(acct && acct.a?.browser)) acct = chatgptBrowser[0];
 const chatgptAcct = acct;
 const ttadkRun = m && onTTADK(m) && !(T.kind === 'browser' && !ttBrowser);
-if (ttadkRun) acct = { a: { name: TT.name, live: TT.live } };
+const runCompany = balancedAccount ?? TT;
+if (ttadkRun) acct = { a: { name: runCompany.name, live: runCompany.live } };
 else if (QX.rotate && m?.vendor === 'codex' && QX.rotate.every((r) => !excluded.has(r.a.name))) {
   const n = withLock(RR, () => { let c = 0; try { c = Number(fs.readFileSync(RR, 'utf8')) || 0; } catch {} if (!opts.dry) fs.writeFileSync(RR, String(c + 1)); return c; });
   acct = QX.rotate[n % QX.rotate.length];
@@ -502,29 +522,29 @@ if (m && cat === 'computer-use') {
 if (m && ['browser', 'ui-browser'].includes(cat)) notes.push('brief: include the browser safety clause — read and navigate freely, but ask the user (AskUserQuestion; a Codex worker reports BLOCKED) before anything irreversible on a page: submitting a form that changes data, approving, deleting, publishing, sending a message, payments');
 // Every worker can search the web (Codex and Claude Code have it on by default; TTADK through its proxy).
 if (m) notes.push('brief: web searches go to the public internet — never put internal code, internal project or product names, people, internal URLs or secrets into a search query; search for the public topic only');
-if (ttadkRun && TT.kind === 'trae') {
-  notes.push(`on TRAE CLI (account ${TT.name}; TTADK is ${QX.ttadk ? 'out' : 'absent'}): a hub worker printing \`queued: position N\` is waiting in TRAE's queue — let it wait; only interrupt a worker with no events at all for 15 minutes, or an exec run, and re-route with --exclude-model ${poolOf(m.model)} (the next model family takes it; an infrastructure miss, so the same --failures); on account failures (login, auth) re-route with --exclude-account ${TT.name}. codex-worker records failures per model family (queue full pauses 5→10→20→30 min; vendor restriction waits until next 00:00 UTC / 08:00 China time, then a recovery probe; a failed restriction probe waits until the following 00:00 UTC; other hard failures such as quota pause 30 min, then a probe; auth pauses the account; route.mjs then uses the next family); for a failed or interrupted traecli exec run, record it yourself: node ${SKILL}/scripts/codex-worker.mjs --account ${TT.name} note-failure --model ${m.model} "<error>"`);
+if (ttadkRun && runCompany.kind === 'trae') {
+  notes.push(`on TRAE CLI (account ${runCompany.name}; ${balancedAccount ? 'balanced from TTADK' : `TTADK is ${QX.ttadk ? 'out' : 'absent'}`}): a hub worker printing \`queued: position N\` is waiting in TRAE's queue — let it wait; only interrupt a worker with no events at all for 15 minutes, or an exec run, and re-route with --exclude-model ${poolOf(m.model)} (the next model family takes it; an infrastructure miss, so the same --failures); on account failures (login, auth) re-route with --exclude-account ${runCompany.name}. codex-worker records failures per model family (queue full pauses 5→10→20→30 min; vendor restriction waits until next 00:00 UTC / 08:00 China time, then a recovery probe; a failed restriction probe waits until the following 00:00 UTC; other hard failures such as quota pause 30 min, then a probe; auth pauses the account; route.mjs then uses the next family); for a failed or interrupted traecli exec run, record it yourself: node ${SKILL}/scripts/codex-worker.mjs --account ${runCompany.name} note-failure --model ${m.model} "<error>"`);
   // Astra on TRAE is slow but works (2026-11-13): keep it a hub worker so its queue/status lines are visible.
   if (m.model === ASTRA) notes.push('Astra on TRAE queues TRAE-wide (≈15 min seen 2026-11-13); launch it as a hub worker (codex-worker start), not traecli exec, so queue/status shows; the 30-min stall alarm doesn\'t fire while queue/status keeps arriving');
   notes.push('hub queue position above ~300: if that model\'s daily bucket is depleted, re-routing is worth it for the next dispatch with --exclude-model <that model> and the same --failures; for non-depleted or unknown buckets let it wait. Accepted queued turns stay pending: do not interrupt or launch a duplicate; keep parallel task concurrency unchanged');
-  const q = TT.quota?.daily?.[m.model];
+  const q = runCompany.quota?.daily?.[m.model];
   if (q?.depleted) notes.push(`TRAE ${m.model}'s daily high-priority quota is used up${q.resetsAt ? ` until ${fmt(q.resetsAt)}` : ''}: requests queue in the low-priority lane. Above ~300, consider --exclude-model ${m.model} for the next dispatch (same --failures); keep any accepted queued turn pending`);
   notes.push('brief (TRAE): no ChatGPT browser here — playwright MCP is for public/local pages only; signed-in consoles require a browser-ready worker with console origins and a signed-in browser/account named in the brief; missing login means BLOCKED, never a Playwright sign-in workaround; git commits must carry no co-author or tool trailer');
-  if (!TT.live && T.shape !== 'exec') notes.push(`TRAE hub is down: start it first — node ${SKILL}/scripts/codex-worker.mjs --account ${TT.name} hub`);
+  if (!runCompany.live && T.shape !== 'exec') notes.push(`TRAE hub is down: start it first — node ${SKILL}/scripts/codex-worker.mjs --account ${runCompany.name} hub`);
 }
 if (ttadkRun && ['build-run', 'review', 'review-high'].includes(cat)) {
-  const q = TT.kind === 'trae' ? TT.quota?.daily?.[m.model] : TT.usage;
+  const q = runCompany.kind === 'trae' ? runCompany.quota?.daily?.[m.model] : runCompany.usage;
   const usedPercent = q?.utilization ?? (q?.used != null && q.limit > 0 ? 100 * q.used / q.limit : null);
-  if (usedPercent >= 80) notes.push(`long builds/large reviews: ${TT.name} ${m.model}'s daily bucket is ${Math.round(usedPercent)}% used; consider starting just after the daily reset ${q.resetsAt ? `at ${new Date(q.resetsAt).toISOString()} (quota resetTime)` : `(normally ${TT.kind === 'trae' ? '22:00' : '16:00'} UTC)`}; TRAE normally 22:00 UTC, TTADK 16:00 UTC. Advisory only: do not defer work or reduce parallel task concurrency automatically`);
+  if (usedPercent >= 80) notes.push(`long builds/large reviews: ${runCompany.name} ${m.model}'s daily bucket is ${Math.round(usedPercent)}% used; consider starting just after the daily reset ${q.resetsAt ? `at ${new Date(q.resetsAt).toISOString()} (quota resetTime)` : `(normally ${runCompany.kind === 'trae' ? '22:00' : '16:00'} UTC)`}; TRAE normally 22:00 UTC, TTADK 16:00 UTC. Advisory only: do not defer work or reduce parallel task concurrency automatically`);
 }
 if (ttadkRun && m.model === 'gemini-3.1-pro-preview') notes.push('Gemini-3.1-Pro ran past 40 minutes in 3 of 12 benchmark runs: if it shows no progress for 20 minutes, or runs past twice what the task should take, interrupt it and re-route with --exclude-model gemini (same --failures)');
 if (ttadkRun && isAlt(m)) notes.push(`brief (${m.model}): state the exact output format and the done check; it has no ChatGPT browser or image tools`);
 if (ttadkRun && isAlt(m) && !ALTS.find((a) => a.model === m.model)?.vision) notes.push(`${m.model} can't see images: if the task depends on screenshots or images, re-route with --exclude-model ${poolOf(m.model)} (Sol, or Seed-Evolving for image-read, reads them), or route the image reading on its own as image-read`);
-if (ttadkRun && TT.kind !== 'trae') {
-  if (TT.search) notes.push(`TTADK runs through its local proxy (web search): exit 6 with proxy-unavailable → re-route with --exclude-account ${TT.name}`);
+if (ttadkRun && runCompany.kind !== 'trae') {
+  if (runCompany.search) notes.push(`TTADK runs through its local proxy (web search): exit 6 with proxy-unavailable → re-route with --exclude-account ${runCompany.name}`);
   else notes.push(`this TTADK account has no web search (rerun codex-worker.mjs ttadk-setup to add its proxy): if the task turns out to need the web, re-route it as research`);
-  notes.push(`on TTADK (account ${TT.name}): if the run fails rate-limited (QPM / concurrency), retry it once there; if it fails again, or fails for TTADK reasons (SSO, auth, gateway errors), re-route with --exclude-account ${TT.name}`);
-  if (!TT.live && T.shape !== 'exec') notes.push(`TTADK hub is down: start it first — node ${SKILL}/scripts/codex-worker.mjs --account ${TT.name} hub`);
+  notes.push(`on TTADK (account ${runCompany.name}): if the run fails rate-limited (QPM / concurrency), retry it once there; if it fails again, or fails for TTADK reasons (SSO, auth, gateway errors), re-route with --exclude-account ${runCompany.name}`);
+  if (!runCompany.live && T.shape !== 'exec') notes.push(`TTADK hub is down: start it first — node ${SKILL}/scripts/codex-worker.mjs --account ${runCompany.name} hub`);
 }
 if (m && ['browser', 'ui-browser'].includes(cat)) {
   notes.push('Chrome must be running before the worker starts (workers can\'t launch it): pgrep -x "Google Chrome" >/dev/null || open -a "Google Chrome"');
@@ -547,11 +567,11 @@ const out = {
   category: cat, stakes, failures, security, deferred,
   pick: m ? { ...m, ...launch(m), sandbox: m.vendor === 'codex' ? sandbox : null } : null,
   secondOpinion: second ? { ...second, ...launch(second, second === T.second ? T.shape : 'worker', secondAcct) } : null,
-  needsUserOK: needsOK, tellUser: tell, why, notes, redeemFirst, quota: leanLines(st, data),
+  needsUserOK: needsOK, tellUser: tell, why, notes, redeemFirst, balance, quota: leanLines(st, data),
 };
 // Every real routing decision is logged for the nightly review (--dry or ROUTE_LOG=0 to skip, e.g. for experiments).
 if (!opts.dry && process.env.ROUTE_LOG !== '0') {
-  const rec = { t: Date.now(), project: typeof opts.project === 'string' ? opts.project : null, name: typeof opts.name === 'string' ? opts.name : null, category: cat, stakes, failures, impact, review: reviewKind, excluded: [...excluded], ttadk: !!ttadkRun, company: ttadkRun ? TT.name : null,
+  const rec = { t: Date.now(), project: typeof opts.project === 'string' ? opts.project : null, name: typeof opts.name === 'string' ? opts.name : null, category: cat, stakes, failures, impact, review: reviewKind, excluded: [...excluded], ttadk: !!ttadkRun, company: ttadkRun ? runCompany.name : null, balance,
     autoCheck: !!opts['auto-check'], noRedeem, security, deferred, pick: m ? { vendor: m.vendor, model: m.model, effort: m.effort, account: out.pick?.account ?? null } : null,
     second: second ? { vendor: second.vendor, model: second.model, effort: second.effort } : null, why, needsOK, tell,
     quota: { claude: QC.status, codexOut: QX.out, underused: QX.underused, frontLoad: QX.frontLoad, overspending: QX.overspending, redeemDue: !!QX.redeem } };

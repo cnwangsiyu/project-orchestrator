@@ -123,11 +123,48 @@ workers, long unattended runs) at `medium` effort, set in each session's respawn
   already use Fable's own weekly window (projected over 100% a day after moving them), and Fable needs the user's OK.
   Revisit when the Fable window has room.
 
+## Load balancing between company accounts
+
+TTADK is the default; eligible work can also use TRAE before TTADK runs out (user-approved 2026-11-13).
+TTADK has about **500M tokens/day**, shared by its models, resetting at **16:00 UTC**. TRAE has independent daily
+high-priority buckets (currently Sol 80, Astra 58, 5.6-Sol 80 units), resetting at **22:00 UTC**, plus a 300-unit weekly
+pool. Depleting a model's daily bucket sends its requests to TRAE's shared low-priority queue. Every request queues
+separately, and both providers' unused daily quota expires. Queue positions 180–3124 have been observed in US
+evening/night (Beijing daytime); US daytime load has not yet been measured, so the clock alone never implies low load.
+
+For a primary task already routed to TTADK, keep its selected model and effort and transfer it to TRAE only when:
+
+- Both accounts can run that model under the existing exclusions and health rules. Browser, desktop, image work and
+  `build-run` keep their existing preference. `--security` excludes TRAE GPT. Second opinions keep their original
+  account/model and count; balancing never adds or removes a launch.
+- That TRAE model has a known, unexpired, non-depleted daily bucket with **at least 15% left**, reserved for urgent
+  work and reviews. Models without a known daily bucket are not candidates for balancing.
+- Model load is **below 60%**, with **no family queue position above 300 in the last 30 minutes**. Load/queue readings
+  older than 30 minutes are ignored; missing or stale signals mean unknown, allowed only for the low-priority case below.
+- At least one factor applies: **low priority** (`--stakes low`, lookup/extract/draft, or `--impact throwaway`);
+  **TTADK projected to run out before reset**; or **TRAE resets in under 6 hours** and its remaining share exceeds
+  TTADK's remaining share. The projection uses same-account, same-limit/reset samples from the last 2 hours, spanning
+  at least 10 minutes, with the latest reading at most 30 minutes old; missing data, zero burn or counter rollback
+  without a usable new segment skips this factor.
+
+Every decision includes structured `balance` factors in the route log; a transfer adds a `balanced to TRAE:` why line.
+Congestion blocks opportunistic transfers, never the existing fallback when TTADK is out. Accepted queued turns keep
+waiting. Company balancing needs no quota approval; personal-quota gates and the existing TRAE `max`-effort gate remain.
+There is no concurrency cap or change to launch counts.
+
+Each quota refresh appends compact `ttadk` usage/reset and `trae` daily/weekly/load/queue fields to `QUOTA_LOG`.
+`traecli models --json` supplies `_meta.trae.load.percent` with a best-effort 30-second timeout. Hub workers coalesce
+queue observations into `<trae home>/queue-state.json`, atomically at most once a minute across workers; records keep
+the latest family state and a recent high-position observation. `quota.mjs` displays fresh signals and their ages.
+All balancing thresholds live in `scripts/lib/company-load.mjs` (`BALANCE`). Revisit them after a few days of telemetry:
+the nightly review should read the quota log alongside worker queue-clear wait times and compare load, queue position
+and wait across US daytime and Beijing daytime. Until then, do not assume that time of day predicts congestion.
+
 ## Codex accounts: TTADK first (user, 2026-11-07)
 
-- **TTADK first, for everything its Sol can handle.** When the TTADK company gateway is healthy (CLI present, SSO
-  active, `gpt-6.1-sol` listed), every row runs first on TTADK `gpt-6.1-sol`, Claude-strength rows included (docs,
-  research, design, high-stakes review).
+- **TTADK first by default.** When the TTADK company gateway is healthy (CLI present, SSO
+  active, `gpt-6.1-sol` listed), rows start on TTADK `gpt-6.1-sol`, Claude-strength rows included (docs,
+  research, design, high-stakes review), subject to the company balancing rules above.
   - **Then TRAE CLI (user, 2026-11-08).** When TTADK is out, the same rows run on TRAE CLI (account `trae`, GPT-6.1-Sol
     with the official Codex prompt) with the same routing rows and efforts, before any personal quota; browser, desktop and image
     work never go there. The `max` exemption stays on TTADK alone: the 2026-11-10 review found

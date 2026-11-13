@@ -6,6 +6,7 @@ import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { readPause, readPoolPauses, readModelPauses, liftAuthPause, poolOf, claimProbes } from './trae-health.mjs';
+import { BALANCE, readTraeModels, freshLoad, readQueueState, companySnapshot, readQuotaHistory, ttadkBurn } from './company-load.mjs';
 
 export const now = Date.now();
 
@@ -380,7 +381,7 @@ const readTrae = (name, prof) => {
   const out = { name, kind: 'trae', home: prof.home, hub: prof.hub, browser: false, chromePlugin: null, models: prof.models ?? [], modelIds: prof.modelIds ?? {},
     windows: [], resets: null, healthy: false, reason: null, live: false, active: 0, email: null, search: true, searchLive: true,
     // Per-model daily buckets guide route.mjs model choice; they never pause the account or cap concurrency.
-    quota: null, quotaError: null };
+    quota: null, quotaError: null, load: {} };
   const bin = prof.bin && fs.existsSync(prof.bin) ? prof.bin : null;
   if (!bin) { out.reason = 'TRAE CLI not found (install it, then codex-worker trae-setup)'; return out; }
   let status = '';
@@ -393,10 +394,9 @@ const readTrae = (name, prof) => {
     out.quota = traeQuota(u);
     if (!out.quota) out.quotaError = 'TRAE usage listed no daily bucket or weekly pool';
   } catch (e) { out.quota = null; out.quotaError = `TRAE usage read failed (${String(e.stderr || e.message).trim().split('\n')[0]})`; }
-  try {
-    const ids = execFileSync(bin, ['models'], { encoding: 'utf8', timeout: 60000, stdio: ['ignore', 'pipe', 'ignore'] }).split('\n').map((l) => l.trim()).filter((l) => /^[A-Za-z0-9][\w.-]*$/.test(l));
-    if (ids.length) { out.modelIds = Object.fromEntries(ids.map((i) => [i.toLowerCase(), i])); out.models = Object.keys(out.modelIds); }
-  } catch {}
+  const catalog = readTraeModels(bin); // best-effort load telemetry; 30 s timeout, no raw output retained
+  out.load = catalog.load;
+  if (Object.keys(catalog.modelIds).length) { out.modelIds = catalog.modelIds; out.models = Object.keys(out.modelIds); }
   // Healthy with any model route.mjs can use: GPT-6.1-Sol first, its fallback families (route.mjs ALTS) after it.
   if (!out.models.some((m) => /^(gpt-6\.1-sol|deepseek-v4\.1-flash|gemini-3\.1-pro|deepseek-v4-pro)/.test(m))) { out.reason = 'TRAE CLI lists neither GPT-6.1-Sol nor a fallback model'; return out; }
   out.healthy = true;
@@ -581,7 +581,7 @@ export const readState = ({ fresh = false } = {}) => {
     // Append a compact snapshot for the nightly review: weekly usage, resets and cards per vendor/account.
     if (process.env.QUOTA_LOG !== '0') {
       const wk = (ws) => { const w = weekly(ws); return w ? { used: w.used, resetsAt: w.resetsAt } : null; };
-      const snap = { t: now, claude: wk(data.claude), codex: (data.codexAccounts ?? []).filter((a) => a.live).map((a) => ({ name: a.name, ...wk(a.windows), cards: (a.resets?.credits ?? []).map((c) => ({ id: c.id, expiresAt: c.expiresAt })), cardCount: a.resets?.count ?? null })) };
+      const snap = { t: now, ...companySnapshot(data.codexAccounts), claude: wk(data.claude), codex: (data.codexAccounts ?? []).filter((a) => a.live).map((a) => ({ name: a.name, ...wk(a.windows), cards: (a.resets?.credits ?? []).map((c) => ({ id: c.id, expiresAt: c.expiresAt })), cardCount: a.resets?.count ?? null })) };
       try { fs.appendFileSync(QUOTA_LOG, JSON.stringify(snap) + '\n'); } catch {}
     }
   }
@@ -618,6 +618,7 @@ export const fmtAgo = (t) => { const m = Math.round((now - t) / 60000); return m
 // Codex quota is use-it-or-lose-it: spend every account's week by its reset, front-loaded while it holds reset cards.
 // Claude runs the orchestrators, so it never runs out before Codex: a reserve of its week stays for orchestration.
 export const POLICY = {
+  companyBalance: BALANCE,
   // Claude's budget moves with the clock (user, 2026-11-03), so a week about to reset isn't hoarded:
   // - reserve: what the orchestrators burn until the reset (orchPerDay × days left, at least reserveMin);
   // - end cap: never plan to finish the week above 100 − margin − uncertainty, where the projection's uncertainty
@@ -695,7 +696,8 @@ export const analyze = (data) => {
   // No concurrency cap (user, 2026-11-07): a rate-limited run is retried once on TTADK, then re-routed without it.
   const ttadk = tt ? { name: tt.name, home: tt.home, healthy: !!tt.healthy, reason: tt.reason, quotaOut: tt.quotaOut ?? null, live: !!tt.live, active: tt.active ?? 0,
     models: tt.models ?? [], browser: !!tt.browser, chromePlugin: tt.chromePlugin ?? null, search: !!tt.search, searchLive: !!tt.searchLive, ssoLeftH: tt.ssoExpiresAt ? (tt.ssoExpiresAt - now) / 3600000 : null,
-    usage: tt.usage ?? null, usageError: tt.usageError ?? null } : null;
+    usage: tt.usage ?? null, usageError: tt.usageError ?? null,
+    burn: ttadkBurn(readQuotaHistory(QUOTA_LOG), tt, tt.seenAt ?? data.checkedAt) } : null;
   if (ttadk) ttadk.usable = ttadk.healthy;
   // TRAE CLI: the second company account, after TTADK and before personal quota (user, 2026-11-08).
   const tr = (data.codexAccounts ?? []).find((a) => a.kind === 'trae') ?? null;
@@ -714,6 +716,7 @@ export const analyze = (data) => {
     live: !!tr.live, active: tr.active ?? 0, allModels: tr.models ?? [],
     models: (tr.models ?? []).filter((m) => !poolPauses[poolOf(m)] && !modelPauses[String(m).toLowerCase()]), poolPauses, modelPauses,
     quota: tr.quota ?? null, quotaError: tr.quotaError ?? null,
+    load: freshLoad(tr.load), queue: readQueueState(tr.home),
     modelIds: tr.modelIds ?? {}, browser: false, chromePlugin: null, search: true, searchLive: true } : null;
   if (trae) trae.usable = trae.healthy && trae.models.length > 0;
   const rows = (data.codexAccounts ?? []).filter((a) => a.kind !== 'ttadk' && a.kind !== 'trae').map((a) => {
@@ -770,7 +773,7 @@ export const leanLines = (st, data) => {
   const T = X.ttadk;
   if (T) {
     if (T.usable) {
-      out.push(`TTADK first: every task its gpt-6.1-sol can handle runs on account ${T.name} (route.mjs does this); the ChatGPT accounts below take image generation${T.search ? '' : ' and web research (TTADK web search not set up: rerun ttadk-setup)'}, and everything when TTADK fails (route.mjs --exclude-account ${T.name}); ${T.active} TTADK turns running`);
+      out.push(`TTADK first by default: route.mjs balances eligible work to TRAE when daily reserve and load/queue permit; the ChatGPT accounts below take image generation${T.search ? '' : ' and web research (TTADK web search not set up: rerun ttadk-setup)'}, and work neither company account can take; ${T.active} TTADK turns running`);
       out.push('TTADK device: leave the ChatGPT and Claude quota for the user\'s other device (no TTADK there) — spend it only on work TTADK can\'t do; no effort raises or extra reviews just to use quota (route.mjs applies this)');
     }
     else if (T.quotaOut && X.trae?.usable) out.push(`TTADK paused — ${T.reason}: nothing to fix; its work goes to TRAE meanwhile (see below)`);
@@ -786,7 +789,7 @@ export const leanLines = (st, data) => {
   const TR = X.trae;
   if (TR) {
     if (TR.usable && !T?.usable) out.push(`TRAE next: with TTADK ${T ? 'out' : 'absent'}, work TTADK would take runs on TRAE CLI (account ${TR.name}, GPT-6.1-Sol and eligible alternatives; route.mjs applies daily-quota and model-fit rules, with Seed-Evolving for image-read) before personal quota; browser, desktop apps and images stay off TRAE`);
-    else if (TR.usable) out.push(`TRAE CLI (account ${TR.name}) is the fallback after TTADK, before personal quota`);
+    else if (TR.usable) out.push(`TRAE CLI (account ${TR.name}) shares eligible work with TTADK under the daily-reserve and congestion rules, and remains its fallback before personal quota`);
     else out.push(`TRAE CLI unavailable — ${TR.reason}`);
     for (const [pool, r] of Object.entries(TR.poolPauses ?? {})) out.push(`TRAE ${pool} models ${r.pausedUntil > Date.now() ? `paused until ${fmt(r.pausedUntil)}, then probed` : 'being probed for recovery'} (${String(r.reason).slice(0, 120)}): route.mjs uses the next model family meanwhile`);
     // A model TRAE no longer resolves stays out for 6 h; its family-mates keep routing (2026-11-13: TRAE dropped Gemini).

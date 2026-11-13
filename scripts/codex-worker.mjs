@@ -42,6 +42,7 @@ import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { noteFailure, noteSuccess, rememberThreadModel, threadModel, probeResult, failureKind } from './lib/trae-health.mjs';
+import { createQueueRecorder } from './lib/company-load.mjs';
 // What a TRAE pause covers: one model family (route.mjs moves to the next family) or the whole account.
 const pausedWhat = (p) => (p.pool ? `TRAE's ${p.pool} models are paused` : 'TRAE is paused');
 // A model TRAE no longer resolves (2026-11-13: it dropped Gemini): that model alone is out of routing for 6 h.
@@ -605,15 +606,17 @@ const saveQueue = (home, threadId, q) => {
 const readQueue = (home, threadId) => { try { return JSON.parse(fs.readFileSync(queueFile(home), 'utf8'))[threadId] ?? null; } catch { return null; } };
 const follow = (threadId, turnId) => {
   console.log(`thread=${threadId} turn=${turnId}`);
+  const recordQueue = PROF?.kind === 'trae' ? createQueueRecorder(PROF.home, opts.model ?? threadModel(PROF.home, threadId)) : null;
   let final, usage, last = Date.now();
   let queue = null, queueSince = null, queuePrinted = 0;
   const queueUpdate = (p) => {
     const t = Date.now(), state = String(p.state ?? 'queued');
-    const pos = Number.isFinite(Number(p.position)) ? Number(p.position) : null;
+    const pos = p.position != null && p.position !== '' && Number.isFinite(Number(p.position)) ? Number(p.position) : null;
     if (state !== 'ready' && !queueSince) queueSince = t;
     const prev = queue;
     queue = { state, position: pos, since: queueSince, turnId, at: t };
     if (PROF?.home) saveQueue(PROF.home, threadId, queue);
+    recordQueue?.(p, t);
     if (state === 'ready') {
       if (queueSince) console.log(`queue cleared after ${Math.max(1, Math.round((t - queueSince) / 60000))}m`);
       queueSince = null;
@@ -636,12 +639,13 @@ const follow = (threadId, turnId) => {
   }, Math.min(60000, Math.max(5000, STALL_MIN * 30000))).unref();
   handlers.push((m) => {
     const p = m.params || {};
+    if (p.threadId !== undefined && p.threadId !== threadId) return;
     if (p.turnId !== undefined && p.turnId !== turnId) return;
     // Only this turn's or thread's own events count as progress; account-wide updates (rate limits…) don't.
     if (p.turnId === turnId || p.threadId === threadId || p.turn?.id === turnId) last = Date.now();
     if (m.method === 'item/completed' && p.item?.type === 'agentMessage' && p.item.text) final = p.item.text;
     else if (m.method === 'thread/tokenUsage/updated') usage = p.tokenUsage?.total;
-    else if (m.method === 'queue/status') queueUpdate(p);
+    else if (m.method === 'queue/status' && (p.threadId === threadId || p.turnId === turnId)) queueUpdate(p);
     else if (m.method === 'turn/completed' && (p.turn?.id ?? p.turnId) === turnId) report(threadId, p.turn ?? { id: turnId, status: 'completed' }, final, usage);
   });
 };
@@ -704,6 +708,7 @@ try {
       threadId: opts.thread, input: textInput(text), effort: opts.effort, model: opts.model,
       sandboxPolicy: opts.sandbox && sandboxPolicy(opts.sandbox), approvalPolicy: CU_APPS.length || BU_ORIGINS.length ? APPROVAL_POLICY : undefined,
     });
+    if (PROF?.kind === 'trae' && opts.model) rememberThreadModel(PROF.home, opts.thread, opts.model);
     follow(opts.thread, ts.turn?.id ?? ts.turnId);
   } else if (cmd === 'wait') {
     if (!opts.thread) die('wait needs --thread');

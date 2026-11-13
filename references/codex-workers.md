@@ -255,6 +255,11 @@ personal quota appears only when both company accounts are out. The user chose n
   (or `no queue info`). These notifications carry the thread id, so they count as progress for the stall alarm — a queued
   worker is waiting, not stalled. `traecli exec` shows none of this (no hub), which is why an exec run still uses the
   15-minute no-progress rule.
+  For company balancing, the follower also samples each model family's latest `{t, position, state, lowPriority}` into
+  `<trae home>/queue-state.json`. Writes are atomic and coalesced to at most one per minute across workers. A `high`
+  observation retains a position above 300 for 30 minutes even after a later ready event. Other threads' events are
+  ignored. This is best-effort telemetry: it never holds a worker or reduces concurrency. `quota.mjs` reads it live,
+  ignores observations older than 30 minutes, and appends it to each quota refresh snapshot with per-model CLI load.
 - **Per-model daily quota** (user-approved 2026-11-13). The hub answers the read-only `model/internalUsage/read` with
   `{dailyUsage:[{quotaKey, quotaLimit, quotaUsed, quotaRemaining, usagePercent, isDepleted, periodStart, resetTime}],
   usage:{usage_percent, quota_remaining, quota_limit, is_depleted, reset_time}}` — one independent daily (24 h) bucket per

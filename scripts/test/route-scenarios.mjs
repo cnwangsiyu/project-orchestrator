@@ -252,13 +252,13 @@ const ERRORS = [['fresh', ['implement', '__noimpact']], ['fresh', ['implement', 
 
 let fail = 0;
 const CODE = ['implement', 'implement-hard', 'debug', 'science'];
-const run = (sc, args0) => {
+const run = (sc, args0, overrides = {}) => {
   // Code categories need --impact; default it to service unless the case says otherwise ('__noimpact' tests the error).
   let args = args0.filter((a) => a !== '__noimpact');
   if (CODE.includes(args[0]) && !args.includes('--impact') && !args0.includes('__noimpact')) args = [...args, '--impact', 'service'];
   const cache = path.join(tmp, 'q.json');
   fs.writeFileSync(cache, JSON.stringify({ checkedAt: now, claude: S[sc].claude, codexAccounts: S[sc].codex, errors: {}, history: {} }));
-  const env = { ...process.env, QUOTA_CACHE: cache, CODEX_ACCOUNTS: path.join(tmp, 'none.json'), ROUTE_LOG: '0', QUOTA_LOG: '0', TRAE_PROBE: '0', ROUTE_RR: path.join(tmp, 'rr.txt') };
+  const env = { ...process.env, QUOTA_CACHE: cache, CODEX_ACCOUNTS: path.join(tmp, 'none.json'), ROUTE_LOG: '0', QUOTA_LOG: '0', TRAE_PROBE: '0', ROUTE_RR: path.join(tmp, 'rr.txt'), QUOTA_LOG_FILE: path.join(tmp, 'empty-company-history'), ...overrides };
   return execFileSync(process.execPath, [ROUTE, ...args, '--mode', 'default', '--json'], { encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'] });
 };
 // Optional 4th field: a substring the notes must contain ('!text': must not contain).
@@ -1005,6 +1005,101 @@ for (const [sc, args] of ERRORS) {
   const bad = cases.map(([got, want], i) => (got === want ? null : `${i} (${got})`)).filter((i) => i !== null);
   if (bad.length) fail++;
   console.log(`${bad.length ? 'FAIL' : 'ok  '} quota reset history ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
+}
+// Company balancing leaves the model/effort, escalation and number of launches alone.
+{
+  const { BALANCE, balanceFactors, ttadkBurn } = await import('../lib/company-load.mjs');
+  const SOL = 'gpt-6.1-sol', ASTRA = 'gpt-6-astra', min = 60000;
+  const home = fs.mkdtempSync(path.join(tmp, 'balance-'));
+  const usage = (used = 40, resetsAt = now + 8 * h) => ({ used, limit: 100, resetsAt });
+  const bucket = (used = 38, extra = {}) => ({ ...usage(used), depleted: false, ...extra });
+  const load = (percent = 35, t = now) => ({ [SOL]: { percent, t } });
+  const queue = (position = 100, t = now, extra = {}) => ({ gpt: { t, position, state: 'queued', lowPriority: false, ...extra } });
+  const scenario = (key, trExtra = {}, ttExtra = {}) => {
+    S[key] = { claude: cl(10, 120), codex: [acc('main', 20, 120), tt({ search: true, usage: usage(), seenAt: now, ...ttExtra }),
+      tr({ home, load: load(), quota: { daily: { [SOL]: bucket() } }, ...trExtra })] };
+  };
+  scenario('balanced');
+  scenario('balancedBusy', { active: 10000 }, { active: 10000 });
+  scenario('balancedReserve', { quota: { daily: { [SOL]: bucket(85) } } });
+  scenario('balancedBelow', { quota: { daily: { [SOL]: bucket(85.1) } } });
+  scenario('balancedDepleted', { quota: { daily: { [SOL]: bucket(38, { depleted: true }) } } });
+  scenario('balancedNoBucket', { quota: null });
+  scenario('balancedOldBucket', { quota: { daily: { [SOL]: bucket(38, { resetsAt: now - 1 }) } } });
+  scenario('balancedNoLimit', { quota: { daily: { [SOL]: bucket(38, { limit: null }) } } });
+  scenario('balancedHot', { load: load(60) });
+  scenario('balancedCool', { load: load(59.9) });
+  scenario('balancedNoLoad', { load: {} });
+  scenario('balancedOldLoad', { load: load(90, now - 31 * min) });
+  scenario('balancedExpires', { quota: { daily: { [SOL]: bucket(38, { resetsAt: now + 5 * h }) } } });
+  scenario('balancedLater', { quota: { daily: { [SOL]: bucket(38, { resetsAt: now + 7 * h }) } } });
+  scenario('balancedLessLeft', { quota: { daily: { [SOL]: bucket(60, { resetsAt: now + 5 * h }) } } });
+  scenario('balancedDown', { healthy: false });
+  scenario('balancedOut', {}, { healthy: false, quotaOut: { resetsAt: now + h } });
+  const history = path.join(home, 'history.jsonl');
+  const samples = [120, 90, 60].map((m, i) => ({ t: now - m * min + 1000, ttadk: { name: 'ttadk', ...usage(10 + i * 10) } }));
+  fs.writeFileSync(history, samples.map((r) => JSON.stringify(r)).join('\n') + '\nnot-json\n');
+  const r = (key = 'balanced', args = ['lookup'], q = queue(), env = {}) => {
+    fs.writeFileSync(path.join(home, 'queue-state.json'), JSON.stringify(q));
+    return JSON.parse(run(key, args, env));
+  };
+  const cases = [];
+  const account = (key, args, q, env) => r(key, args, q, env).pick.account;
+  for (const args of [['lookup'], ['extract'], ['draft'], ['analysis', '--stakes', 'low'], ['implement', '--impact', 'throwaway']])
+    cases.push([account('balanced', args), 'trae']);
+  for (const key of ['balancedBelow', 'balancedDepleted', 'balancedNoBucket', 'balancedOldBucket', 'balancedNoLimit', 'balancedHot', 'balancedDown'])
+    cases.push([account(key), 'ttadk']);
+  for (const key of ['balancedReserve', 'balancedCool', 'balancedBusy', 'balancedNoLoad', 'balancedOldLoad'])
+    cases.push([account(key), 'trae']);
+  for (const args of [['analysis'], ['implement'], ['review'], ['build-run', '--stakes', 'low'], ['browser'], ['ui-browser'], ['computer-use'], ['image-read', '--stakes', 'low'], ['lookup', '--security'], ['lookup', '--exclude-account', 'trae']])
+    cases.push([account('balanced', args), 'ttadk']);
+  cases.push([r('balanced', ['image-gen']).pick.account, 'main']);
+  cases.push([account('balanced', ['lookup'], queue(300)), 'trae'], [account('balanced', ['lookup'], queue(301)), 'ttadk']);
+  cases.push([account('balanced', ['lookup'], queue(301, now - 31 * min)), 'trae'], [account('balanced', ['lookup'], {}), 'trae']);
+  cases.push([account('balanced', ['lookup'], queue(1, now, { high: { t: now - 10 * min, position: 3100 } })), 'ttadk']);
+  cases.push([account('balanced', ['lookup'], queue(1, now, { high: { t: now - 31 * min, position: 3100 } })), 'trae']);
+  // Family isolation: other families' queues never count against GPT.
+  cases.push([account('balanced', ['lookup'], { ...queue(), deepseek: { t: now, position: 5000, state: 'queued' } }), 'trae']);
+  cases.push([account('balancedExpires', ['analysis']), 'trae'], [account('balancedLater', ['analysis']), 'ttadk'],
+    [account('balancedLessLeft', ['analysis']), 'ttadk'], [account('balancedExpires', ['analysis'], {}), 'ttadk']);
+  const env = { QUOTA_LOG_FILE: history };
+  const projected = r('balanced', ['implement'], queue(), env);
+  cases.push([projected.pick.account, 'trae'], [projected.balance.burn.beforeReset, true],
+    [projected.why.some((s) => /balanced to TRAE:.*TTADK projected to run out at .* UTC.*62% left.*load 35%/.test(s)), true],
+    [account('balancedNoLoad', ['implement'], queue(), env), 'ttadk'], [account('balanced', ['implement'], {}, env), 'ttadk'],
+    [account('balanced', ['implement'], queue(400), env), 'ttadk'], [account('balancedOut', ['implement'], queue(400)), 'trae']);
+  // Balancing transfers the current rung; it never substitutes an excluded/paused model or changes review count.
+  scenario('balancedAstra', { quota: { daily: { [ASTRA]: bucket() } }, load: { [ASTRA]: { t: now, percent: 10 } } }, { models: [SOL, ASTRA] });
+  const pausedHome = fs.mkdtempSync(path.join(tmp, 'balance-paused-'));
+  const { noteFailure } = await import('../lib/trae-health.mjs');
+  noteFailure(pausedHome, 'Model access temporarily restricted. (983)', now, SOL);
+  scenario('balancedPaused', { home: pausedHome });
+  cases.push([account('balancedPaused'), 'ttadk']);
+  const idle = r(), busy = r('balancedBusy'), review = r('balanced', ['review', '--author', 'codex', '--stakes', 'low']);
+  cases.push([idle.pick.account, busy.pick.account], [idle.pick.effort, busy.pick.effort], [idle.deferred, null],
+    [idle.needsUserOK.length, 0], [review.pick.account, 'trae'], [review.secondOpinion.account, 'ttadk'],
+    [r('balanced', ['review', '--author', 'codex']).secondOpinion.model, review.secondOpinion.model],
+    [idle.notes.some((s) => /balanced from TTADK/.test(s)), true]);
+  // Exact time/share boundaries and synthetic burn-rate failures.
+  const ttAccount = { name: 'ttadk', usage: usage() };
+  const factors = (q) => balanceFactors({ ttadk: ttAccount, trae: { quota: { daily: { [SOL]: q } }, load: load(), queue: queue() },
+    model: SOL, category: 'analysis', stakes: 'normal', now });
+  cases.push([factors(bucket(38, { resetsAt: now + BALANCE.expiresH * h })).expiresSoon, false],
+    [factors(bucket(40, { resetsAt: now + h })).expiresSoon, false]);
+  const burn = (rows, a = ttAccount, stamp = now) => ttadkBurn(rows, a, stamp, now);
+  cases.push([burn(samples).beforeReset, true], [burn([]), null], [burn(samples, ttAccount, now - 31 * min), null],
+    [burn(samples.map((s) => ({ ...s, ttadk: { ...s.ttadk, used: 40 } }))), null],
+    [burn(samples.map((s) => ({ ...s, ttadk: { ...s.ttadk, resetsAt: now - h } }))), null],
+    [burn(samples.map((s) => ({ ...s, ttadk: { ...s.ttadk, limit: 200 } }))), null],
+    [burn(samples.map((s) => ({ ...s, t: now - 5 * min }))), null],
+    [burn(samples.map((s) => ({ ...s, ttadk: { ...s.ttadk, used: 90 } }))), null]);
+  const log = path.join(home, 'route-log.jsonl');
+  r('balanced', ['implement'], queue(), { ...env, ROUTE_LOG: '1', ROUTE_LOG_FILE: log });
+  const logged = JSON.parse(fs.readFileSync(log, 'utf8').trim());
+  cases.push([logged.company, 'trae'], [logged.balance.selected, true], [logged.balance.load.percent, 35], [logged.balance.burn.beforeReset, true]);
+  const bad = cases.map(([got, want], i) => JSON.stringify(got) === JSON.stringify(want) ? null : `${i + 1}: ${JSON.stringify(got)} != ${JSON.stringify(want)}`).filter(Boolean);
+  if (bad.length) fail++;
+  console.log(`${bad.length ? 'FAIL' : 'ok  '} company balancing ${cases.length} cases${bad.length ? ` — ${bad.join('; ')}` : ''}`);
 }
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(fail ? `\n${fail} failing` : '\nall pass');

@@ -32,7 +32,9 @@ if (args.includes('--json')) {
     codexPick: codex.pick?.a.name ?? null, redeem: codex.redeem ? { account: codex.redeem.a.name, card: codex.redeem.cp.card?.id ?? null } : null,
     codexOut: codex.out, underused: codex.underused, frontLoad: codex.frontLoad, overspending: codex.overspending, lean,
     ttadk: codex.ttadk ? { name: codex.ttadk.name, healthy: codex.ttadk.healthy, reason: codex.ttadk.reason, quotaOut: codex.ttadk.quotaOut,
-      usage: codex.ttadk.usage, usageError: codex.ttadk.usageError } : null,
+      usage: codex.ttadk.usage, usageError: codex.ttadk.usageError, burn: codex.ttadk.burn } : null,
+    trae: codex.trae ? { name: codex.trae.name, healthy: codex.trae.healthy, quota: codex.trae.quota,
+      quotaError: codex.trae.quotaError, load: codex.trae.load, queue: codex.trae.queue } : null,
   }));
   process.exit(0);
 }
@@ -59,7 +61,7 @@ const TU = TTA?.usage;
 if (TU?.utilization != null) console.log(`  ttadk  ${'day'.padEnd(34)}${String(Math.round(TU.utilization)).padStart(3)}% used (${fmtTokens(TU.used)} / ${fmtTokens(TU.limit)})  resets ${fmt(TU.resetsAt)}`);
 else if (TTA?.usageError) console.log(`  ttadk  ${'day'.padEnd(34)}usage unavailable — ${TTA.usageError}`);
 const TRA = st.codex.trae;
-if (TRA) console.log(`  codex  ${TRA.name} (TRAE CLI, after TTADK): ${TRA.healthy ? 'healthy' : `unavailable — ${TRA.reason}`}; hub ${TRA.live ? 'up' : 'down'}; ${TRA.active} turns running; models ${TRA.models.join(', ')}`);
+if (TRA) console.log(`  codex  ${TRA.name} (TRAE CLI, company balancing/fallback): ${TRA.healthy ? 'healthy' : `unavailable — ${TRA.reason}`}; hub ${TRA.live ? 'up' : 'down'}; ${TRA.active} turns running; models ${TRA.models.join(', ')}`);
 // TRAE's own quota (user-approved 2026-11-13): one daily bucket per model, plus the weekly pool. A depleted bucket only
 // puts that model in TRAE's low-priority queue; it changes no routing.
 const TRQ = TRA?.quota;
@@ -74,6 +76,10 @@ if (TRQ) {
     console.log(`  trae   ${'week'.padEnd(34)}${String(pct).padStart(3)}% used (${w.used ?? '?'} / ${w.limit ?? '?'})  resets ${fmt(w.resetsAt)}`);
   }
 } else if (TRA?.quotaError) console.log(`  trae   ${'quota'.padEnd(34)}unavailable — ${TRA.quotaError}`);
+for (const [model, l] of Object.entries(TRA?.load ?? {})) console.log(`  trae   ${model} load ${l.percent}% (${Math.round(l.ageMin)}m ago)`);
+for (const [family, q] of Object.entries(TRA?.queue ?? {})) console.log(`  trae   ${family} queue ${q.position ?? '?'} (${q.state}, ${Math.round(q.ageMin)}m ago)${q.lowPriority === true ? ' — low priority' : ''}${q.high ? `; position ${q.high.position} seen in last 30m` : ''}`);
+if (TRA && !Object.keys(TRA.load).length) console.log('  trae   load unknown (missing or older than 30m)');
+if (TRA && !Object.keys(TRA.queue).length) console.log('  trae   queue unknown (missing or older than 30m)');
 console.log(`budget: claude ${st.claude.status} (now: spare ≤${st.claude.spareLine}%, cap ${st.claude.cap}%, ${st.claude.reserve ?? '?'}% kept for orchestration until the reset); `
   + `codex ${st.codex.out ? 'out' : st.codex.rotate ? `→ rotate ${st.codex.rotate.map((r) => r.a.name).join('/')}` : st.codex.pick ? `→ ${st.codex.pick.a.name}` : st.codex.redeem ? `→ redeem a card on ${st.codex.redeem.a.name}` : 'unreadable'}${st.codex.underused ? ', underused' : ''}${st.codex.overspending ? ', overspending' : ''}`
   + `${st.codex.cardsHeld ? `, ${st.codex.cardsHeld} reset card(s)` : ''}`);
