@@ -171,8 +171,16 @@ workers, long unattended runs) at `medium` effort, set in each session's respawn
       fallback review alone is not acceptance; require the other-family GPT/Claude gate in review-rubric.md.
       For deploy/release, fallback models execute only the brief's fixed health/rollback criteria; unexpected evidence
       waits for stronger-model judgment (W291-L1-ppe2a's unnecessary rollback), not another fallback's discretion.
-    - **Infrastructure misses are not failures**: a fallback model that times out, queues or is restricted on one task is
-      re-routed with `--exclude-model <model or family>` and the same `--failures`; `--failures` counts quality misses.
+    - **Infrastructure misses are not quality failures**: a request that fails with a timeout, queue-full error or
+      restriction is re-routed with `--exclude-model <model or family>` and the same `--failures`; `--failures` counts
+      quality misses.
+    - **An accepted queued TRAE turn stays pending.** A reported queue position is evidence of provider queueing,
+      not a failed turn; `modelQuotaLowPriority` alone describes scheduling priority. Keep its thread and turn and
+      follow completion notifications; do not
+      interrupt or launch a replacement merely because files stop changing or no local process is running. Likewise,
+      `inProgress` alone does not prove useful execution: report queued work separately from work making progress.
+      Dispatch other ready, independent tasks before waiting, and keep TRAE concurrency unchanged. The 2026-11-13
+      review found that interruptions of queued W291-C0, hidden-simple and W303 turns sent them to the back of the queue.
     - **Recovery** (user, 2026-11-12): a vendor-restricted family waits until the next 00:00 UTC (08:00 China time),
       then a one-line probe; if it fails, the next probe waits until the following 00:00 UTC. Other hard failures retain
       30-minute probes (codex-workers.md, "Recovery probe"); real tasks keep going to the fallbacks meanwhile.
