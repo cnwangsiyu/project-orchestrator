@@ -2,7 +2,8 @@
 
 One design owned by the routing/global-rules orchestrator: collect every five minutes, review at 03:07, and run
 separately coordinated cleanup at 04:30 local time. The two new launchd files are **templates only**, cleanup is
-**dry by default**, and installation/apply require review. No sampler/review command runs a model, signals a process,
+**dry by default**, and installation/apply require review. The owner installed these agents on 2026-11-13 (see Installed State below).
+No sampler/review command runs a model, signals a process,
 probes a device, changes a lease or reads authentication storage.
 
 ## Sampling
@@ -36,17 +37,19 @@ identify denied, timed-out and malformed probes without storing their raw diagno
   counter reset or compiler setting is changed. Storage-only output from an unused cache means available, rate UNKNOWN.
 - Chrome GUI/headless counts and running/not-observed state. CPU history flags **suspected** hangs; responsiveness is unknown.
 
-The probes all start concurrently with **independent** deadlines: 1.75 seconds each, CPU 1.85 seconds to accommodate
+The probes all start concurrently with **independent** deadlines: 1.75 seconds each, CPU **4 seconds** to accommodate
 `top -l 2 -s 1`. The CPU probe cannot consume another probe's budget; timers also bound injected/stalled probes and
 abort timed-out children. JSON `probeTimeouts` records budgets. No sudo. Metadata reads are bounded (2 MiB per
 ledger/route file); oversized route history marks ownership unverified instead of performing an expensive scan.
-Installation acceptance still requires a **complete** host run <2 seconds on the actual machine; a fast blocked run
+Installation acceptance requires a **complete** host run within the independent deadlines, including at load ~20
+(up to ~4s for CPU, not a <2s total requirement); a fast blocked run
 does not establish full-probe performance. No fallback circumvents sandbox process restrictions.
 
 The earlier reports of blocked process, CPU, swap and memorystatus probes were **worker-sandbox restrictions**, not
 host limitations. The orchestrator must run **one unsandboxed read-only sample** from the durable reviewed checkout
 before installing either resource agent: `node "$SKILL/scripts/resource-sample.mjs" --read-only --json`. Verify
-`complete:true`, no required `failedProbes`, useful process/ownership coverage and full-probe timing <2 seconds.
+`complete:true`, no required `failedProbes`, useful process/ownership coverage and full-probe timing within ~4 seconds.
+Missing/unavailable/storage-only ccache counters stay optional UNKNOWN in `ccache`; they do not fail a sample or cause exit 2.
 If the host sample fails, diagnose its named probes and retain partial UNKNOWN data; do not install or weaken gates.
 
 The sampler's diagnostic memory estimate prefers `kern.memorystatus_level * RAM`, with a page estimate fallback.
@@ -76,6 +79,12 @@ work holds the slot and a lane throughout preflight/staging/build/acceptance. SG
 and long multiprocess focused tests need a lane only. Host unit tests without a full native build, single-TU compilation,
 docs/analysis and device-only work are exempt. Acquire slot before lane, release in reverse on every exit (`trap EXIT`),
 use bounded `res wait --timeout`, and pass the long-lived wrapper PID rather than a short-lived res process PID.
+
+User approved **2-3 heavy lanes on 2026-11-13**. The optional third `heavy-lane-3` requires known
+`load1m <=8 && availableBytes >=32 * 2**30` at each acquisition attempt, and releases like every lane. The normal
+v1.2 gates and single package slot stay unchanged. Implementation/rollout belongs exclusively to vesdk-mainline:
+[requested contract and owner tests](heavy-lane-3-request.md). This checkout does not edit `res`. Sampler/review
+recognize lane 3 only if present in registry/lease/status/journal/wait data; absence on v1.2 is not incomplete.
 
 `heavyLocks` includes an equivalent status snapshot, bounded 128 KiB `log.tsv` tail and observed `res wait` processes.
 Event IDs use journal inode/byte offset, so repeated tails are deduplicated. Purpose, return/reclaim notes and arbitrary
@@ -140,12 +149,29 @@ each project's orchestrator maintains this **non-secret** file alongside its led
 
 Use real epoch milliseconds, exact task-directory names and absolute task-specific paths; do not register broad
 HOME/root/shared source paths for a task. Update on dispatch, resource wait, retry, activity and close. Allowed waits:
-resource/load/memory/heavy-build/dependency/user/network. `ready:true` means its dependencies are satisfied and it
+resource/load/memory/heavy-build/dependency/user/network/quota. `ready:true` means its dependencies are satisfied and it
 could execute if resources were admitted. CPU idle during unverified waits is only **possible** under-use; explicit
 user/network/dependency waits are not under-use. Missing activity/status never authorizes cleanup. A later matching
 route reopens a task; failed outcomes alone do not mean abandoned. A final pass/rework outcome supplies a terminal
 timestamp and any later dispatch overrides it; newer explicit per-task metadata takes precedence. Without either,
 the ledger's global mtime is conservatively used, which can overprotect old tasks.
+
+## Live Idle Hints
+
+Normal sampler mode calls `resource-idle-hint.mjs` after each append. It can also run on its own interval; never
+install both without review. Read-only/dry-run samples never write hints. Three consecutive five-minute samples
+(4-6 minute spacing, fresh last sample) must have `load1m <6`, CPU idle **>50%**, complete task/lock/process evidence
+and **no heavy lock waiters**. Latest ready-but-undispatched tasks need explicit ledger `status: ready` (exact word)
+or `resource-tasks.json` `ready:true` with ready/queued/waiting status and no user/dependency/network/quota wait.
+Running/terminal/unknown states and observed dispatched processes cannot qualify. A route reopening the task clears
+readiness; never infer ready from vague pending/TODO prose or a terminal task mentioning READY elsewhere.
+
+Hints go to `~/.claude/orchestrator/_shared/idle-hints.jsonl`, grouped by exact ledger orchestrator name, at most
+once per **60 minutes** per orchestrator (including across projects). Print the exact target/message; sampler prints
+delivery text to stderr to keep stdout a JSON record. Exclusive append/cooldown checking prevents duplicate delivery;
+stale locks/oversized history need owner inspection, never automatic deletion. Missing targets/metrics mean no hint.
+Each orchestrator checks a cheap `tail -n 20` on startup/resume/compact and its patrol wake as required by SKILL.md.
+No active Claude session, login, model call or live messaging is needed. This is **hint only**, never dispatch.
 
 ## Review and Retention
 
@@ -164,6 +190,18 @@ authoritative gate coverage/overload periods, approved **12/20 lane-aware** entr
 outage observations/periods. Hub durations require two complete adjacent probes with common missing ports; a single
 missing-listener sample is flagged but has no invented duration. Onset/recovery is bounded by probes, not exact.
 
+`utilisation` includes CPU hours idle >50% with explicitly ready tasks, authoritative combined-gate hours, memory
+mean/min/max available GiB and pressure hours, per-lane/aggregate occupancy, queue wall-hours and task-hours,
+and top correlated causes (no ready tasks / user / lock gate / quota / ready but undispatched). Every metric carries
+its own observed coverage and no coverage is UNKNOWN, not zero. Lane occupancy divides HELD lane-time by observed
+provisioned lane-time; lane-3 presence is not evidence that its take gate was open. Queue task-hours count multiple
+waiting tasks, unlike wall-hours. Causes are diagnostic ledger hints, not proven causal explanations.
+`resource-review.mjs` joins default resource logs with quota history; `review-data.mjs` exposes the same utilisation
+section in JSON and a three-line text summary. Synthetic `--input`/`--stdin` reports do not implicitly read host quota.
+Unused TTADK **tokens** and TRAE per-model high-priority **units** require observed daily rollovers and a last reading
+<=30 minutes before reset. They are upper-bound sampled estimates, not exact reset-time counters; absent/far-away
+readings and wholly missed resets are UNKNOWN and tokens/units are never summed together.
+
 Above 50 MiB the sampler atomically renames its own active log through `.1` ... `.6`; only the oldest telemetry
 archive is removed. Maximum retained telemetry is about 350 MiB; actual days depend on process count. This is
 **size-bounded**, not guaranteed 24h/7-day retention. Check report coverage before decisions. Current data files are
@@ -176,6 +214,9 @@ and tunes only within dated user-approved bounds. `scripts/resource-policy.json`
 one package slot / two heavy lanes with **null tuning bounds**: the fixed value 20 is approved, not a range for further tuning. No autonomous
 range is invented. Thin evidence or any unapproved/out-of-range change goes to a Chinese decision card. The shared
 controller's owner implements/acknowledges any further enforcement change; observation policy alone cannot apply it.
+The new utilisation approval is separately recorded: lanes may float in **[2,3]**, but the brief gives only fixed
+idle-hint 6/50/3/60, lane-3 8/32 and TTADK expiry 4h/70% values, not numeric threshold tuning bounds. Use those
+approved values; ask a Chinese card before changing them. Do not reinterpret the range as permission to tune 12/20/16.
 
 `tuning.direction` reports possibly-too-strict (observed wait for a free resource under a closed gate, >=60% idle,
 normal pressure, no swap growth), possibly-too-loose (matching-holder build under an open gate, sustained pressure
@@ -281,6 +322,17 @@ follow local macOS scheduling; sleeping machines may produce gaps or a late cale
 Do not also install the secretary's old 04:30 agent: one owner/coordinator only. Review/transfer any existing job
 before bootstrapping these. Applying cleanup needs a separate authorization after complete dry-run/coordination and
 browser recovery qualification; merely installing these dry templates is not approval to signal/delete anything.
+For hub rendering, omit `--node` to use absolute `process.execPath`; never substitute `$(command -v node)` under
+nvm/zsh. An override must be absolute (obtain it via `node -p 'process.execPath'`); bare `node` is rejected.
+
+## Installed State
+
+Owner-reported **2026-11-13**: SessionStart hook installed in `settings.json`; four agents
+`dev.project-orchestrator.hub.{ttadk,trae,main,b}` installed; terminating idle hub b was verified to restart it in
+~35s. `com.user.resource-sample` runs every **300s** and `com.user.resource-cleanup` at **04:30 local time** with
+**`MINI_CLEANUP_MODE=dry`**. Installed sampling at load ~17 exposed the former CPU timeout; this edit raises its
+independent budget to 4s. Complete sampling at load ~20 still needs owner host acceptance, not a synthetic claim.
+These facts come from the brief; this edit-only task does not reinstall, read settings/sign-ins, or alter cleanup mode.
 
 For removal, first confirm no cleanup/recovery is running, then `launchctl bootout "gui/$(id -u)/com.user.resource-sample"`
 and `launchctl bootout "gui/$(id -u)/com.user.resource-cleanup"`. Keep audits/history; do not delete old process state.

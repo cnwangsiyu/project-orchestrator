@@ -6,7 +6,7 @@ import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { readPause, readPoolPauses, readModelPauses, liftAuthPause, poolOf, claimProbes } from './trae-health.mjs';
-import { BALANCE, readTraeModels, freshLoad, readQueueState, companySnapshot, readQuotaHistory, ttadkBurn, freshTraeQuota } from './company-load.mjs';
+import { BALANCE, readTraeModels, freshLoad, readQueueState, companySnapshot, readQuotaHistory, ttadkBurn, freshTraeQuota, ttadkExpiringUnused, TTADK_EXPIRY_HINT } from './company-load.mjs';
 import { withLock, writeJson as atomicJson } from './shared-file.mjs';
 export { withLock } from './shared-file.mjs';
 
@@ -864,6 +864,7 @@ export const leanLines = (st, data) => {
   }
   const T = X.ttadk;
   if (T) {
+    if (T.usable && ttadkExpiringUnused(T)) out.push(TTADK_EXPIRY_HINT);
     if (T.usable) {
       out.push(`TTADK first by default: route.mjs balances eligible work to TRAE when daily reserve and load/queue permit; the ChatGPT accounts below take image generation${T.search ? '' : ' and web research (TTADK web search not set up: rerun ttadk-setup)'}, and work neither company account can take; ${T.active} TTADK turns running`);
       out.push('TTADK device: leave the ChatGPT and Claude quota for the user\'s other device (no TTADK there) — spend it only on work TTADK can\'t do; no effort raises or extra reviews just to use quota (route.mjs applies this)');

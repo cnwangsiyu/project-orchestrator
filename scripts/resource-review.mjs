@@ -2,14 +2,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { GIB, LOG, readJsonl, TERMINAL } from './lib/resource-data.mjs';
+import { GIB, LOG, SHARED, readJsonl, TERMINAL } from './lib/resource-data.mjs';
 import { assessThresholds, inspectLockInterval, reviewLockTiming } from './lib/resource-lock-review.mjs';
 import { reviewExtras } from './lib/resource-extras.mjs';
 import { laneAdmission } from './lib/resource-locks.mjs';
+import { resourceUtilisation, utilisationLines } from './lib/resource-utilisation.mjs';
 
 const finite = (x) => typeof x === 'number' && Number.isFinite(x);
 const ownerKey = (o) => o?.project ? `${o.project}/${o.task ?? '(project only)'}` : '(unknown)';
-export function review(input, { hours = 24, now = Date.now(), maxGapMs = 600000, loadGate = 12, loadGateWithOneHeavyTask = 20, memoryGateGiB = 16, approvedRanges = null, approvalEvidence = null } = {}) {
+export function review(input, { hours = 24, now = Date.now(), maxGapMs = 600000, loadGate = 12, loadGateWithOneHeavyTask = 20, memoryGateGiB = 16, approvedRanges = null, approvalEvidence = null, quotaRecords = [] } = {}) {
   const since = now - hours * 3600000, samples = [...new Map(input.filter((s) => s.schema === 1 && finite(s.t) && s.t >= since - maxGapMs && s.t <= now).map((s) => [`${s.host}/${s.t}`, s])).values()].sort((a, b) => a.t - b.t);
   const hosts = new Set(samples.map((s) => s.host));
   if (hosts.size > 1) return { hours, coverage: { observedMinutes: 0, reason: 'mixed hosts refused; review each machine separately' }, badCases: [], resourceShares: [], suggestions: [] };
@@ -56,7 +57,8 @@ export function review(input, { hours = 24, now = Date.now(), maxGapMs = 600000,
     const packages = (a.heavyRoots ?? []).filter((p) => p.workload ? p.workload.class === 'package' : ['xcodebuild', 'gradle'].includes(p.kind));
     if (a.processComplete && b.processComplete && packages.length > 1) record('overlapping_package_builds', packages.map((p) => p.id).sort().join(','), a, b.t, `${packages.length} independent package roots; PIDs ${packages.map((p) => p.pid).join(',')}; compiler children excluded`, [...new Set(packages.map((p) => ownerKey(p.owner)))]);
     const heavyOwners = [...new Set((a.heavyRoots ?? []).filter((p) => (!p.workload || ['package', 'lane'].includes(p.workload.class)) && p.owner?.project && p.owner?.task).map((p) => ownerKey(p.owner)))];
-    if (a.processComplete && b.processComplete && heavyOwners.length > 2) record('overlapping_heavy_workloads', heavyOwners.join(','), a, b.t, `${heavyOwners.length} owners with independent build/test roots; verify two-lane leases and workload classification before calling this a violation`, heavyOwners);
+    const capacity = a.heavyLocks?.complete && a.heavyLocks.locks.some((l) => l.id === 'heavy-lane-3') ? 3 : 2;
+    if (a.processComplete && b.processComplete && heavyOwners.length > capacity) record('overlapping_heavy_workloads', heavyOwners.join(','), a, b.t, `${heavyOwners.length} owners with independent build/test roots; verify ${capacity}-lane leases and workload classification before calling this a violation`, heavyOwners);
     if (!a.processComplete || !b.processComplete) continue;
     counters.processMinutes += minutes;
     const next = new Map((b.processes ?? []).map((p) => [p.id, p]));
@@ -81,7 +83,7 @@ export function review(input, { hours = 24, now = Date.now(), maxGapMs = 600000,
   const firstDisk = diskSamples[0], lastDisk = diskSamples.at(-1);
   const suggestions = [];
   const has = (type) => badCases.some((c) => c.type === type);
-  if (has('overlapping_package_builds') || has('overlapping_heavy_workloads')) suggestions.push('Audit wrapper adoption of the ONE machine-wide heavy-build slot and TWO heavy-task lanes; do not kill competing builds.');
+  if (has('overlapping_package_builds') || has('overlapping_heavy_workloads')) suggestions.push('Audit wrapper adoption of the ONE machine-wide heavy-build slot and 2-3 provisioned heavy-task lanes; lane 3 requires its stricter take-time gate. Do not kill competing builds.');
   if (has('heavy_build_without_lock')) suggestions.push('Fix matching-wrapper heavy-build/lane adoption before blaming thresholds; verify workload exemptions with the exact owner.');
   if (has('stale_heavy_lock')) suggestions.push('Ask the recorded holder/controller owner to inspect STALE PID holds; only res wait may reclaim eligible >600s holds. Review never returns/reclaims locks.');
   if (has('hub_outage') || has('hub_partial_outage') || extras.hubs.outageObservations.length) suggestions.push('Report hub listener outages to the routing/global-rules owner with probe time/ports. Daemon restart causality and application health need owner confirmation; never auto-restart hubs here.');
@@ -93,7 +95,7 @@ export function review(input, { hours = 24, now = Date.now(), maxGapMs = 600000,
   return { schema: 1, hours, window: { since: new Date(since).toISOString(), until: new Date(now).toISOString() },
     coverage: { samples: samples.filter((s) => s.t >= since).length, observedMinutes: +(observedMs / 60000).toFixed(2), requestedMinutes: hours * 60, coveragePct: +(observedMs / (hours * 3600000) * 100).toFixed(2), gaps, cpuMinutes: counters.cpuMinutes, processMinutes: counters.processMinutes, heavyGateMinutes: lockStats.gateMinutes, heavyLockMinutes: lockStats.lockMinutes, hubMinutes: extras.hubs.observedMinutes, ccacheMinutes: extras.ccache.observedMinutes, incompleteSamples: samples.filter((s) => !s.complete).length,
       note: 'Intervals require two samples <=10 min apart; no extrapolation through gaps, before first sample or after last. CPU/RSS omit short-lived processes between samples.' },
-    utilisation: { meanCpuIdlePct: counters.cpuMinutes ? +(counters.cpuIdleMinutes / counters.cpuMinutes * 100).toFixed(2) : null, contentionMinutes: observedMs ? counters.contentionMinutes : null, underuseMinutes: counters.cpuMinutes ? counters.underuseMinutes : null, possibleUnderuseMinutes: counters.cpuMinutes ? counters.possibleUnderuseMinutes : null },
+    utilisation: { ...resourceUtilisation(samples, { since, now, maxGapMs, quotaRecords }), meanCpuIdlePct: counters.cpuMinutes ? +(counters.cpuIdleMinutes / counters.cpuMinutes * 100).toFixed(2) : null, contentionMinutes: observedMs ? counters.contentionMinutes : null, underuseMinutes: counters.cpuMinutes ? counters.underuseMinutes : null, possibleUnderuseMinutes: counters.cpuMinutes ? counters.possibleUnderuseMinutes : null },
     diskTrend: firstDisk && lastDisk && lastDisk.t > firstDisk.t ? { startAt: firstDisk.at, endAt: lastDisk.at, freeBytesStart: firstDisk.disk.freeBytes, freeBytesEnd: lastDisk.disk.freeBytes, changeBytes: lastDisk.disk.freeBytes - firstDisk.disk.freeBytes } : null,
     resourceShares, resourceShareNote: 'CPU share is cumulative process CPU deltas; RSS share is sampled RSS*time (shared pages double-count), not ownership of physical RAM.', badCases, suggestions,
     heavyLocks: reviewLockTiming(samples, { since, now, maxGapMs }),
@@ -107,6 +109,7 @@ export function review(input, { hours = 24, now = Date.now(), maxGapMs = 600000,
 }
 export function formatReview(r) {
   const lines = [`# Machine resources: last ${r.hours}h`, `Coverage: ${r.coverage.observedMinutes} observed minutes; ${r.coverage.samples ?? 0} samples; CPU=${r.coverage.cpuMinutes ?? 0} min, processes=${r.coverage.processMinutes ?? 0} min. Missing data is UNKNOWN.`, `CPU idle: ${r.utilisation?.meanCpuIdlePct ?? 'UNKNOWN'}%; contention: ${r.utilisation?.contentionMinutes ?? 'UNKNOWN'} min.`, ''];
+  lines.push(...utilisationLines(r.utilisation), '');
   lines.push(`Approved limit=min(20, 12 + 8 * lanes held by others), STALE/own excluded; memory >=16 GiB. res v1.2 live per T88 contract; overload analysis uses each sample's limit and authoritative verdict. Observed controller: overloaded=${r.heavyGate?.overloadedMinutes ?? 'UNKNOWN'} min; open=${r.heavyGate?.openMinutes ?? 'UNKNOWN'} min; authoritative=${r.coverage.heavyGateMinutes ?? 0} min, locks=${r.coverage.heavyLockMinutes ?? 0} min.`);
   for (const entry of r.tuning?.controllerMismatchObservations ?? []) lines.push(`Gate rollout mismatch: ${entry.at}; other lanes=${entry.otherLanes}, approved gate=${entry.loadGate}, observed gate=${entry.observedLoadGate}; caller PID=${entry.callerPid ?? 'observer'}. Approved reading=${entry.approvedReading}, controller reading=${entry.observedReading}; notify res owner, never bypass.`);
   const bounds = (v) => `${v.durationMinutesLower ?? 0}..${v.durationMinutesUpper ?? 'UNKNOWN'} min`;
@@ -133,10 +136,10 @@ export function formatReview(r) {
   return lines.join('\n');
 }
 async function main() {
-  const args = process.argv.slice(2); let hours = 24, file = LOG, stdin = false, json = false;
+  const args = process.argv.slice(2); let hours = 24, file = LOG, stdin = false, json = false, explicitInput = false;
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--hours') hours = Number(args[++i]);
-    else if (args[i] === '--input') file = args[++i];
+    else if (args[i] === '--input') { file = args[++i]; explicitInput = true; }
     else if (args[i] === '--stdin') stdin = true;
     else if (args[i] === '--json') json = true;
     else if (args[i] === '--read-only') continue;
@@ -155,7 +158,9 @@ async function main() {
     if (!files.length) errors.push('resource log absent; sampler not installed or no retained samples');
   }
   const policy = JSON.parse(fs.readFileSync(new URL('./resource-policy.json', import.meta.url), 'utf8'));
-  const r = review(rows, { ...policy, hours }); r.readErrors = errors;
+  const quotaFile = path.join(SHARED, 'quota-log.jsonl');
+  const quotaRead = stdin || explicitInput ? { rows: [], errors: [] } : await readJsonl([quotaFile], Date.now() - (hours + 24) * 3600000);
+  const r = review(rows, { ...policy, hours, quotaRecords: quotaRead.rows }); r.readErrors = errors; r.quotaReadErrors = quotaRead.errors;
   console.log(json ? JSON.stringify(r, null, 2) : formatReview(r) + (errors.length ? `\nRead errors: ${errors.join('; ')}` : ''));
   if (!r.coverage.observedMinutes || errors.length) process.exitCode = 2;
 }

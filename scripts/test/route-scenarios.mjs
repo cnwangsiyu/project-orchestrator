@@ -1202,7 +1202,8 @@ for (const [sc, args] of ERRORS) {
     [factors(bucket(40, { resetsAt: now + h })).expiresSoon, false]);
   const burn = (rows, a = ttAccount, stamp = now) => ttadkBurn(rows, a, stamp, now);
   cases.push([burn(samples).beforeReset, true], [burn([]), null], [burn(samples, ttAccount, now - 31 * min), null],
-    [burn(samples.map((s) => ({ ...s, ttadk: { ...s.ttadk, used: 40 } }))), null],
+    [burn(samples.map((s) => ({ ...s, ttadk: { ...s.ttadk, used: 40 } }))).beforeReset, false],
+    [burn(samples.map((s) => ({ ...s, ttadk: { ...s.ttadk, used: 40 } }))).projectedAtReset, 40],
     [burn(samples.map((s) => ({ ...s, ttadk: { ...s.ttadk, resetsAt: now - h } }))), null],
     [burn(samples.map((s) => ({ ...s, ttadk: { ...s.ttadk, limit: 200 } }))), null],
     [burn(samples.map((s) => ({ ...s, t: now - 5 * min }))), null],

@@ -11,6 +11,9 @@ import { execFileSync } from 'node:child_process';
 import { SHARED, ROUTE_LOG, QUOTA_LOG, readState, analyze, leanLines, fmt, outcomeOwns, isReviewDecision, dedupeOutcomes, codexCatalog, readProfiles, compareHarness, harnessDrift, modelView, effectiveFirst, OUTCOME_OVERRIDES } from './lib/state.mjs';
 import { loadDigest, isRouteDecision } from './lib/global-rules.mjs';
 import { auditGlobalRules } from './lib/global-rules-audit.mjs';
+import { LOG as RESOURCE_LOG, readJsonl } from './lib/resource-data.mjs';
+import { review as resourceReview } from './resource-review.mjs';
+import { utilisationLines } from './lib/resource-utilisation.mjs';
 
 const argv = process.argv.slice(2);
 const opt = (k) => { const i = argv.indexOf(`--${k}`); return i < 0 ? null : argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[i + 1] : true; };
@@ -195,7 +198,11 @@ if (opt('save-catalog')) fs.writeFileSync(CATALOG, JSON.stringify({ ...catalogNo
 catalog.harnessDrift = harnessDrift();
 const globalRules = auditGlobalRules({ records: all, version: loadDigest().version, since, profiles: readProfiles(),
   ledgerRoot: process.env.RULES_LEDGER_ROOT || path.dirname(SHARED) });
-const result = { hours: H, routing, outcomes, background, quota, now, catalog, globalRules };
+const resourceFiles = [RESOURCE_LOG, ...Array.from({ length: 6 }, (_, i) => `${RESOURCE_LOG}.${i + 1}`)].filter((f) => fs.existsSync(f));
+const resourceRows = await readJsonl(resourceFiles, since - 600000);
+const resources = resourceReview(resourceRows.rows, { hours: H, quotaRecords: snaps });
+const utilisation = { ...resources.utilisation, coverage: resources.coverage, readErrors: resourceRows.errors };
+const result = { hours: H, routing, outcomes, background, quota, utilisation, now, catalog, globalRules };
 if (opt('json')) { console.log(JSON.stringify(result, null, 1)); process.exit(0); }
 const show = (title, v) => console.log(`\n## ${title}\n${typeof v === 'string' ? v : JSON.stringify(v, null, 1)}`);
 console.log(`# routing review data — last ${H}h (to ${fmt(Date.now())})`);
@@ -203,6 +210,7 @@ show('routing', routing);
 show('outcomes (first attempt\'s vendor/model/category)', outcomes);
 show('background tasks (wall-clock minutes, including queues)', background);
 show('quota and cards', quota);
+show('utilisation', utilisationLines(utilisation).join('\n'));
 show('now', now);
 show('model catalog', catalog);
 show('global rules', globalRules);

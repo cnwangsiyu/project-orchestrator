@@ -98,8 +98,26 @@ function smallText(file, max = 2 ** 21) {
 const taskPaths = (text) => [...text.matchAll(/(?:~\/|\/Users\/|\/private\/tmp\/|\/tmp\/)[^\s`"'<>|,;)]+/g)].map((m) => safePath(m[0].replace(/^~/, os.homedir()))).filter(Boolean);
 const stateOf = (s) => {
   const word = String(s ?? '').trim().replace(/^\*+/, '').match(/^([a-zA-Z-]+)/)?.[1]?.toLowerCase();
-  return TERMINAL.has(word) || ['running', 'queued', 'waiting', 'blocked', 'idle', 'paused'].includes(word) ? word : 'unknown';
+  return TERMINAL.has(word) || ['ready', 'running', 'queued', 'waiting', 'blocked', 'idle', 'paused'].includes(word) ? word : 'unknown';
 };
+// Undispatched only: running/blocked tasks and unresolved prerequisites are never hints to launch.
+export const isRunnableTask = (t) => t?.ready === true && ['ready', 'queued', 'waiting'].includes(t.status)
+  && !['dependency', 'user', 'network', 'quota'].includes(t.waitReason);
+export const isReadyTask = (t) => isRunnableTask(t) && t.dispatched !== true;
+export function readTelemetryTail(file, maxBytes = 2 ** 20) {
+  if (unsafeFile(file) || !/\.jsonl(?:\.[1-6])?$/.test(file)) throw Error('non-telemetry path refused');
+  if (!fs.existsSync(file)) return [];
+  if (fs.lstatSync(file).isSymbolicLink() || unsafeFile(fs.realpathSync(file))) throw Error('unsafe telemetry path refused');
+  const fd = fs.openSync(file, 'r');
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) throw Error('nonregular telemetry refused');
+    const offset = Math.max(0, stat.size - maxBytes), buf = Buffer.alloc(Math.min(stat.size, maxBytes));
+    const bytes = fs.readSync(fd, buf, 0, buf.length, offset), lines = buf.subarray(0, bytes).toString('utf8').split('\n');
+    if (offset) lines.shift();
+    return lines.filter((s) => s.trim()).map((s) => JSON.parse(s));
+  } finally { fs.closeSync(fd); }
+}
 export async function readJsonl(files, since = -Infinity, end = Infinity) {
   const rows = [], errors = [];
   for (const file of files) {
@@ -148,7 +166,7 @@ export async function readRegistry({ roots = [path.join(os.homedir(), '.claude/o
           const heading = block.match(/^###\s+([TW]\d+[a-zA-Z0-9-]*)\b/m);
           if (!heading) continue;
           const t = get(resolveTask(heading[1])), status = [...block.matchAll(/^\s*-\s*status:\s*(.+)$/gmi)].at(-1)?.[1];
-          if (status) t.status = stateOf(status);
+          if (status) { t.status = stateOf(status); t.ready = /^ready$/i.test(status.trim()); }
           t.paths.push(...taskPaths(block.split('\n').filter((line) => /\b(?:worktree|cwd|workspace|checkout)\b/i.test(line)).join('\n')).filter((p) => /worktrees?|\/tasks\//.test(p)));
         }
         let stateColumn = -1;
@@ -158,7 +176,7 @@ export async function readRegistry({ roots = [path.join(os.homedir(), '.claude/o
           const header = cells.findIndex((x) => /^(?:state|status)$/i.test(x));
           if (header >= 0) { stateColumn = header; continue; }
           if (stateColumn < 0 || !/^[TW]\d+[\w-]*$/.test(cells[0] ?? '')) continue;
-          const t = get(resolveTask(cells[0])); t.status = stateOf(cells[stateColumn]);
+          const t = get(resolveTask(cells[0])); t.status = stateOf(cells[stateColumn]); t.ready = /^ready$/i.test(cells[stateColumn]);
           t.paths.push(...taskPaths(line).filter((p) => /worktrees?|\/tasks\//.test(p)));
         }
         // Optional authoritative resource state; maintained by the owner, never by the sampler.
@@ -171,7 +189,8 @@ export async function readRegistry({ roots = [path.join(os.homedir(), '.claude/o
             const t = get(row.task); t.status = stateOf(row.status); t.stateSource = 'metadata';
             t.changedAt = Number.isFinite(row.changedAt) ? row.changedAt : changedAt;
             t.activityAt = Number.isFinite(row.activityAt) ? row.activityAt : null;
-            t.ready = row.ready === true; t.waitReason = ['resource', 'load', 'memory', 'heavy-build', 'dependency', 'user', 'network'].includes(row.waitReason) ? row.waitReason : null;
+            t.ready = row.ready === true; t.waitReason = ['resource', 'load', 'memory', 'heavy-build', 'dependency', 'user', 'network', 'quota'].includes(row.waitReason) ? row.waitReason : null;
+            if (row.waitReason != null && t.waitReason === null) t.ready = false;
             t.paths.push(...(row.paths ?? []).map(safePath).filter(Boolean));
             t.workers.push(...(row.workers ?? []).map(safeId).filter(Boolean));
           }
@@ -200,6 +219,7 @@ export async function readRegistry({ roots = [path.join(os.homedir(), '.claude/o
       const t = tasks.get(key); t.route = { t: r.t, terminal: r.kind === 'outcome' && ['pass', 'rework'].includes(r.result) };
       if (t.stateSource !== 'metadata' || r.t >= t.changedAt) {
         t.status = t.route.terminal ? 'done' : 'running';
+        t.ready = false;
         t.changedAt = r.t; t.stateSource = 'route';
       }
     }

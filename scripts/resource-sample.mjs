@@ -11,8 +11,9 @@ import { attribute, category, commandName, GIB, LOG, SHARED, parseCpu, parseCwd,
 import { lockSnapshot, matchBuildLock, observeWaiters, parseHeavyCheck, parseHeavyStatus, readLockJournal, workload } from './lib/resource-locks.mjs';
 import { parseCcacheStats, parseHubListeners } from './lib/resource-extras.mjs';
 import { readHubDiagnostics } from './lib/hub-state.mjs';
+import { writeIdleHints } from './resource-idle-hint.mjs';
 const exec = promisify(execFile);
-export async function collect({ registry = null, budgetMs = 1750, cpuBudgetMs = 1850, probe = null, leases = null, journal = null, shared = SHARED, statusText = null } = {}) {
+export async function collect({ registry = null, budgetMs = 1750, cpuBudgetMs = 4000, probe = null, leases = null, journal = null, shared = SHARED, statusText = null } = {}) {
   const start = performance.now(), psStartedAt = Date.now(), errors = [];
   const probeTimeouts = {};
   const callProbe = async (label, exe, args, options) => {
@@ -85,7 +86,7 @@ export async function collect({ registry = null, budgetMs = 1750, cpuBudgetMs = 
   const ccache = parseCcacheStats(cacheReading.stdout ?? '', { ...cacheReading, scope: cacheDir });
   if (!heavyGate.authoritative) failProbe('heavy-check', heavyGate.error);
   if (!hubs.complete) failProbe('hub listeners', hubs.error);
-  if (!ccache.complete) failProbe('ccache', ccache.error);
+  // Optional cache counters are expected UNKNOWN on an unused or unavailable cache.
   if (registry === null) {
     try { registry = await readRegistry(); }
     catch { registry = { complete: false, errors: ['registry: unavailable'], tasks: [], projects: [], mappings: [] }; }
@@ -151,7 +152,11 @@ export async function collect({ registry = null, budgetMs = 1750, cpuBudgetMs = 
     hubSupervisors: readHubDiagnostics(os.homedir()),
     topCpu: [...processes].sort((a, b) => b.cpuPct - a.cpuPct).slice(0, 20).map((p) => p.id),
     topRss: [...processes].sort((a, b) => b.rssBytes - a.rssBytes).slice(0, 20).map((p) => p.id),
-    tasks: registry.tasks.filter((t) => !['unknown', 'done', 'finished', 'completed', 'merged', 'abandoned', 'cancelled', 'canceled'].includes(t.status)).map(({ project, task, status, ready, waitReason }) => ({ project, task, status, ready, waitReason })),
+    tasks: registry.tasks.filter((t) => !['unknown', 'done', 'finished', 'completed', 'merged', 'abandoned', 'cancelled', 'canceled'].includes(t.status))
+      .map(({ project, task, status, ready, waitReason }) => ({ project, task, status, ready, waitReason,
+        dispatched: status === 'running' || processes.some((p) => p.owner?.project === project && p.owner?.task === task) })),
+    projects: registry.projects.map(({ project, orchestrator }) => ({ project, orchestrator })),
+    taskStateComplete: registry.complete && registry.tasks.every((t) => t.status !== 'unknown'),
     taskStateCounts: Object.fromEntries([...new Set(registry.tasks.map((t) => t.status))].map((s) => [s, registry.tasks.filter((t) => t.status === s).length])),
     devices: { source: 'read-only resource lease metadata + host processes; no device probe or real device utilisation', inUseProcessCount: counts.device, simulatorProcessCount: counts.simulator, leases },
     chrome: { guiProcessCount: counts.chrome, headlessProcessCount: counts.headless, state: processComplete ? counts.chrome ? 'running (responsiveness unknown)' : 'not observed' : 'unknown' },
@@ -177,7 +182,11 @@ async function main() {
   const args = process.argv.slice(2), allowed = new Set(['--read-only', '--dry-run', '--json']);
   for (const arg of args) if (!allowed.has(arg)) throw Error(`unknown option: ${arg}`);
   const sample = await collect(), readOnly = args.includes('--read-only') || args.includes('--dry-run');
-  if (!readOnly) appendSample(sample);
+  if (!readOnly) {
+    appendSample(sample);
+    try { writeIdleHints({ print: (line) => console.error(line) }); }
+    catch (e) { console.error(`Idle hints UNKNOWN: ${e.message}`); }
+  }
   console.log(JSON.stringify(sample));
   console.error(`${readOnly ? 'READ ONLY' : 'APPENDED'}: ${sample.complete ? 'COMPLETE' : 'INCOMPLETE / UNKNOWN'}; ${sample.processes.length} processes; ${sample.durationMs} ms; available=${sample.memory.availableBytes === null ? 'unknown' : (sample.memory.availableBytes / GIB).toFixed(1) + ' GiB'}`);
   if (sample.failedProbes.length) console.error(`Failed probes (UNKNOWN): ${sample.failedProbes.join(', ')}`);

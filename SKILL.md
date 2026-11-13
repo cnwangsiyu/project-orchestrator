@@ -54,6 +54,13 @@ session name, settle which project this is, open or create its ledger, reconcile
 sessions (`claude agents --json` for Claude workers, `codex-worker.mjs --account <name> status`/`wait` for the
 Codex threads the ledger records), and show the user the current status in a few lines.
 
+On every startup/resume/compact or patrol wake, cheaply read
+`tail -n 20 ~/.claude/orchestrator/_shared/idle-hints.jsonl` if it exists. Match the exact `target` to your
+orchestrator name, check the timestamp and current ledger, and route genuinely ready independent work when appropriate.
+The five-minute sampler writes at most one idle hint per orchestrator per 60 minutes after three low-load/high-idle
+samples with no heavy waiters. This file is the delivery mechanism; it needs no Claude session. Hints never dispatch,
+override dependencies/quota/leases or authorize new work. Keep ready/dispatched state current in the ledger/metadata.
+
 ## Global rules (owner: Orchestrator 主对话)
 
 User, 2026-11-13: the routing/global-rules orchestrator owns global policy here (「都交给他来负责，让他统一管理」); the secretary only relays, keeps ledgers and asks decision cards, never owns or changes policy.
@@ -385,6 +392,9 @@ effort, Codex account and launch command from
     wall-clock time, including queues. Cheap rows (`lookup`, `extract`, `draft`) routed or balanced to TRAE also prefer
     GPT-5.6-Terra, then GPT-5.5, then Flash under known quota telemetry; congestion still blocks opportunistic balancing.
     These two models' vision is untested, so neither is used for `image-read`.
+    When TTADK reset is <4h away and its existing burn projection is <70% of its daily limit, eligible background
+    and light work prefer TTADK over TRAE: "TTADK quota expiring unused: good time for reviews, docs and exploratory work".
+    Missing/stale projection data changes nothing; model-fit, quality, resource and personal-quota rules stay intact.
   - always `--project <slug>`: every decision is logged to `_shared/route-log.jsonl` for the
     nightly review, which needs the project (use `--dry` only to try things out).
 
@@ -535,13 +545,18 @@ and take-time notes at `~/.claude/orchestrator/_shared/notes/heavy-build.md`. Us
 - **Scope and slots:** full-package builds (env verify, app `xcodebuild`, Gradle assemble with native) hold
   `heavy-build` plus one of `heavy-lane-1`/`heavy-lane-2` for the whole run: one full-package build and at most two
   heavy tasks machine-wide. SG packaging, native-compiling or long multi-process focused tests need one lane.
+  User approved **2-3 lanes on 2026-11-13**: a third `heavy-lane-3` may be taken only at
+  `load1m <=8 && availableBytes >=32 * 2**30`, with known readings at acquisition time and ordinary reverse release.
+  This is a pending [contract request](references/heavy-lane-3-request.md) to vesdk-mainline, not a local `res` edit
+  or a claim of deployment. Until owner rollout use the installed lanes only. ONE full-package slot stays unchanged.
   Host unit tests without a full native build, single-TU compiles, analysis/docs and build-free device sessions are
   not heavy. These caps never lower model-worker concurrency; keep independent ready work running.
 - **Take and gate:** `res take <id> --by <session> --project <slug> --for "<purpose>" --task <task-id> --pid $$`
   returns 0 taken, 2 busy. Plain `take` must first pass `res heavy-check` (0 OK, 5 overloaded; invalid/unreadable
   metrics return 1, no acquisition). User-approved entry load (2026-11-13, secretary option A):
   **limit = 12 + 8 * lanes held by others, capped at 20** (12 with none, 20 with one or more).
-  STALE and caller-owned locks do not count; two occupied lanes still leave no task capacity. Memory remains
+  STALE and caller-owned locks do not count; two occupied lanes leave no capacity on the existing two-lane contract.
+  After owner rollout, only lane 3 can add capacity under its stricter 8/32 gate. Normal-lane memory remains
   **>=16 GiB**. T88 reports shared `res` v1.2 live (2026-11-13): `heavy-check` prints `limit`/`lanes_held`;
   verify sampled output and report legacy/policy mismatches to its owner, never bypass the live gate.
   macOS available memory
@@ -584,6 +599,8 @@ and take-time notes at `~/.claude/orchestrator/_shared/notes/heavy-build.md`. Us
   or restarts hubs. Cleanup is separate at 04:30, dry by default. Templates are not installed automatically; the
   orchestrator must validate one complete unsandboxed host sample before installation. Never directly kill live
   orchestrators/workers or user apps; use the guarded cleanup and disk rules.
+  Include a two/three-line nightly utilisation summary: idle CPU with ready work, gate/memory time, lane occupancy,
+  quota unused at reset, queue hours and top idleness causes. Read idle hints on every wake as above.
 - Device leases last at most **2 h**, then the worker returns the device and reports results/remaining work. Put the
   preflight in the brief: device connected, unlocked, app data backed up; include the return command and deadline.
 

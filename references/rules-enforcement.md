@@ -25,6 +25,9 @@ Local native CLI help, Claude Code 2.1.323, confirms `--bg` and `--append-system
 Routed Claude workers use `--append-system-prompt "$(node <skill>/scripts/rules-worker-digest.mjs)"`;
 Codex threads and one-shot execs receive the same worker section as developer instructions. Existing resumed
 threads retain their earlier instructions: re-brief them with the current digest before continuing.
+On each orchestrator wake, also `tail -n 20 ~/.claude/orchestrator/_shared/idle-hints.jsonl` when present and match
+its exact target/name. This passive file-delivery path is documented in SKILL.md; no Claude messaging session is needed
+and the hook does not auto-dispatch or change its bounded injection implementation.
 
 Owner installation only: merge `templates/session-start-hook.json` into the existing `~/.claude/settings.json`
 without replacing other hooks/settings. Its exact fragment uses an absolute Node binary; adjust if Node moves:
@@ -74,7 +77,7 @@ Do not confuse an empty successful list with an unreachable hub. Installation co
 
 ```bash
 skill="$HOME/.agents/skills/project-orchestrator"
-node "$skill/scripts/render-hub-launchd.mjs" --out /tmp/po-hub-launchd --skill "$skill" --node "$(command -v node)"
+node "$skill/scripts/render-hub-launchd.mjs" --out /tmp/po-hub-launchd --skill "$skill"
 plutil -lint /tmp/po-hub-launchd/*.plist
 mkdir -p "$HOME/Library/LaunchAgents" "$HOME/.claude/orchestrator/_shared/hub-launchd"
 for account in ttadk trae main b; do
@@ -89,3 +92,16 @@ Confirm each account profile/bin/proxy configuration exists first; no auth files
 labels before bootstrap; don't overwrite an existing agent without review. To remove an installed agent, use
 `launchctl bootout gui/$(id -u)/dev.project-orchestrator.hub.<account>`; it stops only owned children, not a reachable
 unmanaged hub retained in standby. No install/bootstrap/bootout command was run by this task.
+
+The renderer defaults to absolute `process.execPath`; an explicit `--node` must be absolute, not `node` or a
+relative path. Under nvm/zsh `command -v node` can return a bare shell-resolved name. If overriding, obtain the
+binary with `node -p 'process.execPath'`; launchd cannot use the interactive shell's nvm function.
+
+## Installed State
+
+Owner-reported **2026-11-13** installation: SessionStart hook merged into `settings.json`; four hub agents
+`dev.project-orchestrator.hub.{ttadk,trae,main,b}` installed. The owner verified that terminating idle hub b caused
+restart in approximately **35 seconds**. `com.user.resource-sample` is installed at **300 seconds** and
+`com.user.resource-cleanup` at **04:30 local time**, with **`MINI_CLEANUP_MODE=dry`**. These are host installation
+facts from the brief, not live checks by this edit-only task. Reinstalling/reading settings or sign-in storage is out
+of scope. The lane-3 contract request is separate and must not be confused with these installed agents.

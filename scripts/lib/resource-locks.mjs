@@ -3,7 +3,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { GIB, SHARED, safeHolder, safeId, unsafeFile, category, commandName } from './resource-data.mjs';
 
-export const HEAVY_IDS = ['heavy-build', 'heavy-lane-1', 'heavy-lane-2'];
+export const BASE_HEAVY_IDS = ['heavy-build', 'heavy-lane-1', 'heavy-lane-2'];
+export const HEAVY_IDS = BASE_HEAVY_IDS;
+export const ALL_HEAVY_IDS = [...BASE_HEAVY_IDS, 'heavy-lane-3'];
 export const heavyLoadLimit = (lanes) => Number.isSafeInteger(lanes) && lanes >= 0 ? Math.min(20, 12 + 8 * lanes) : null;
 // Prefer contract fields, retaining compatibility with previously persisted samples.
 export const heavyCheckLimit = (gate) => {
@@ -17,19 +19,22 @@ export const heavyCheckLanes = (gate) => {
 export function laneAdmission(snapshot, caller = {}, limits = { empty: 12, one: 20 }) {
   const unknown = () => ({ state: 'UNKNOWN', otherLanes: null, loadGate: null, reason: 'lane/PID identity incomplete; never assume the higher gate' });
   if (!snapshot?.complete) return unknown();
-  let otherLanes = 0;
-  for (const id of ['heavy-lane-1', 'heavy-lane-2']) {
+  let otherLanes = 0; const availableLanes = [];
+  const laneIds = snapshot.locks.filter((l) => /^heavy-lane-[123]$/.test(l.id)).map((l) => l.id);
+  if (!['heavy-lane-1', 'heavy-lane-2'].every((id) => laneIds.includes(id))) return unknown();
+  for (const id of laneIds) {
     const lock = snapshot.locks.find((row) => row.id === id);
     if (!lock) return unknown();
-    if (lock.state === 'FREE' || lock.stale === true || lock.state === 'STALE') continue;
+    if (lock.state === 'FREE' || lock.stale === true || lock.state === 'STALE') { availableLanes.push(id); continue; }
     const own = Number.isSafeInteger(caller.pid) && caller.pid > 0 && lock.local === true
       && lock.pidIdentity === 'observed' && lock.pid === caller.pid;
-    if (own) continue;
+    if (own) { availableLanes.push(id); continue; }
     if (lock.state !== 'HELD' || lock.stale !== false || lock.local !== true || lock.pidIdentity !== 'observed') return unknown();
     otherLanes++;
   }
-  return { state: otherLanes >= 2 ? 'NO_CAPACITY' : 'KNOWN', otherLanes,
-    loadGate: otherLanes === 0 ? limits.empty : otherLanes === 1 ? limits.one : null,
+  return { state: otherLanes >= laneIds.length ? 'NO_CAPACITY' : 'KNOWN', otherLanes,
+    loadGate: otherLanes === 0 ? limits.empty : otherLanes < laneIds.length ? limits.one : null,
+    thirdLaneOnly: availableLanes.length === 1 && availableLanes[0] === 'heavy-lane-3',
     reason: 'approved v1.2 entry policy; STALE and the caller\'s verified own locks excluded' };
 }
 const finite = (v) => typeof v === 'number' && Number.isFinite(v);
@@ -39,11 +44,11 @@ const identity = (s) => {
   return { holder: safeHolder(m?.[1] ?? s), project: safeId(m?.[2]), task: safeId(m?.[3]) };
 };
 
-export function parseHeavyStatus(text, expected = HEAVY_IDS) {
+export function parseHeavyStatus(text, expected = BASE_HEAVY_IDS) {
   const locks = [], errors = [], seen = new Set();
   for (const line of String(text).split('\n')) {
-    if (!/^heavy-(?:build|lane-[12])\s/.test(line)) continue;
-    const m = line.match(/^(heavy-(?:build|lane-[12]))\s+slot\s+\S+\s+\S+\s+(.*)$/);
+    if (!/^heavy-(?:build|lane-[123])\s/.test(line)) continue;
+    const m = line.match(/^(heavy-(?:build|lane-[123]))\s+slot\s+\S+\s+\S+\s+(.*)$/);
     if (!m || seen.has(m[1])) { errors.push('invalid/duplicate heavy status row (content omitted)'); continue; }
     const [, id, rest] = m, freeRow = /^FREE(?:\s|$)/.test(rest), heldRow = rest.match(/^(.*?)\s+(\d{4}-\d{2}-\d{2} \d{2}:\d{2})(?:\s|$)/);
     if (!freeRow && !heldRow) { errors.push('unparseable heavy holder/start (content omitted)'); continue; }
@@ -93,8 +98,9 @@ export function parseHeavyCheck(text, exitCode = 0) {
 
 export function lockSnapshot(leases, rows, { host, psStartedAt, now, processComplete }) {
   const pids = new Map(rows.map((p) => [p.pid, p]));
-  const complete = leases.complete === true && HEAVY_IDS.every((id) => leases.registered?.includes(id));
-  const locks = HEAVY_IDS.map((id) => {
+  const ids = ALL_HEAVY_IDS.filter((id) => BASE_HEAVY_IDS.includes(id) || leases.registered?.includes(id) || leases.held.some((l) => l.id === id));
+  const complete = leases.complete === true && ids.every((id) => leases.registered?.includes(id));
+  const locks = ids.map((id) => {
     const held = leases.held.find((l) => l.id === id);
     if (!held) return { id, state: complete ? 'FREE' : 'UNKNOWN', stale: complete ? false : null };
     const local = held.host === host && held.pid > 0;
@@ -124,7 +130,7 @@ export function readLockJournal(shared = SHARED, maxBytes = 128 * 1024) {
     while (cursor < bytes) {
       const end = buf.indexOf(10, cursor); if (end < 0 || end >= bytes) break; // An append may still be writing its final row.
       const line = buf.subarray(cursor, end).toString('utf8'), fields = line.split('\t'), t = minuteTime(fields[0]);
-      if (HEAVY_IDS.includes(fields[2]) && ['take', 'return', 'reclaim', 'extend'].includes(fields[1])) {
+      if (ALL_HEAVY_IDS.includes(fields[2]) && ['take', 'return', 'reclaim', 'extend'].includes(fields[1])) {
         if (t === null || fields.length < 5) errors.push('invalid heavy journal row (content omitted)');
         else events.push({ eventId: `${stat.dev}:${stat.ino}:${offset + cursor}`, t, precisionMs: 60000,
           action: fields[1], resource: fields[2], ...identity(fields[3]) });
@@ -141,7 +147,7 @@ export function readLockJournal(shared = SHARED, maxBytes = 128 * 1024) {
 function waitCommand(cmd) {
   const tokens = [...cmd.matchAll(/"([^"\n]*)"|'([^'\n]*)'|([^\s]+)/g)].map((m) => m[1] ?? m[2] ?? m[3]);
   const i = tokens.findIndex((v) => path.basename(v) === 'res');
-  if (i < 0 || i > 1 || tokens[i + 1] !== 'wait' || !HEAVY_IDS.includes(tokens[i + 2])) return null;
+  if (i < 0 || i > 1 || tokens[i + 1] !== 'wait' || !ALL_HEAVY_IDS.includes(tokens[i + 2])) return null;
   if (i === 1 && !/^(?:bash|sh|zsh)$/.test(path.basename(tokens[0]))) return null;
   const get = (key) => { const j = tokens.indexOf(key, i + 3); return j < 0 ? null : tokens[j + 1]; };
   const pid = Number(get('--pid')), timeout = get('--timeout');

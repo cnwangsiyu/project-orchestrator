@@ -17,7 +17,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readState, analyze, leanLines, readProfiles, hours, fmt, withLock, SHARED, ROUTE_LOG, POLICY } from './lib/state.mjs';
 import { poolOf } from './lib/trae-health.mjs';
-import { balanceFactors, hasTraeDailyQuota } from './lib/company-load.mjs';
+import { balanceFactors, hasTraeDailyQuota, ttadkExpiringUnused, TTADK_EXPIRY_HINT } from './lib/company-load.mjs';
 import { normalizeLadder } from './lib/model-ladder.mjs';
 import { loadDigest } from './lib/global-rules.mjs';
 
@@ -102,7 +102,7 @@ const BOOL = new Set(['auto-check', 'writes', 'read-only', 'fresh', 'json', 'tab
 // infrastructure reasons (queue full, restricted, timed out) on the company account — not a --failures step; also how a
 // review of a fallback model's code keeps that model's family off the reviewer seat.
 // --security: security/attack-flavoured tasks exclude GPT only on TRAE; other accounts route normally.
-// --background: nobody is waiting; prefer TRAE even when depleted/congested, and never spend personal quota.
+// --background: nobody is waiting; prefer TRAE unless TTADK quota is expiring unused, never personal quota.
 // --device-lease / --shared-lock: the task holds a shared resource and cannot enter the balancing/background lane.
 // --origins p,q: extra sites (origins or host globs) a Codex browser worker may reach besides POLICY.browserOrigins.
 const argv = process.argv.slice(2), opts = {}, pos = [];
@@ -183,7 +183,9 @@ const taskFits = (a) => T.kind !== 'claudeOnly' && cat !== 'image-gen'
   && !(cat === 'research' && !a.search) && !(T.kind === 'browser' && !a.browser);
 const routingModelFits = (model, account) => model === SOL || tierModels(account).includes(model) || ALTS.some((a) => a.model === model
   && (cat === 'image-read' ? a.vision : !a.visionOnly) && !(deepseekUnfit && poolOf(model) === 'deepseek'));
-const companyOrder = background && backgroundEligible ? [QX.trae, QX.ttadk] : [QX.ttadk, QX.trae];
+const expiringUnused = QX.ttadk?.usable && !excluded.has(QX.ttadk.name) && ttadkExpiringUnused(QX.ttadk);
+const preferExpiringTtadk = expiringUnused && (background && backgroundEligible || tier === 'light' && laneEligible);
+const companyOrder = background && backgroundEligible && !preferExpiringTtadk ? [QX.trae, QX.ttadk] : [QX.ttadk, QX.trae];
 const TT = companyOrder.find((a) => a?.usable && !excluded.has(a.name)
   && (!background || taskFits(a)) && a.models.some((x) => !modelExcluded(x, a) && (!background || routingModelFits(x, a)))) ?? null;
 const backgroundLane = background && backgroundEligible && TT?.kind === 'trae';
@@ -427,7 +429,8 @@ const resolveRung = (raw, index) => {
   if (!x) return null;
   x = tune(quotaChoice(x, log, taskTier), index, log);
   // Resolve balancing before normalization too; keep its account and telemetry with this rung only.
-  if (!background && onTTADK(x) && TT === QX.ttadk && QX.trae) {
+  if (preferExpiringTtadk && onTTADK(x) && TT === QX.ttadk) log(TTADK_EXPIRY_HINT);
+  if (!background && !preferExpiringTtadk && onTTADK(x) && TT === QX.ttadk && QX.trae) {
     const light = taskTier === 'light' && laneEligible;
     const free = x.model !== ASTRA ? bucketFreeModels(QX.trae, taskTier) : [];
     const candidates = x.model === SOL ? [...new Set([...(light ? free : []), ...tierModels(QX.trae, taskTier), x.model])]

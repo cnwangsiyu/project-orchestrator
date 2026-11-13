@@ -1,4 +1,4 @@
-import { HEAVY_IDS, heavyCheckLanes, heavyCheckLimit, laneAdmission } from './resource-locks.mjs';
+import { ALL_HEAVY_IDS, heavyCheckLanes, heavyCheckLimit, laneAdmission } from './resource-locks.mjs';
 import { GIB } from './resource-data.mjs';
 
 const finite = (v) => typeof v === 'number' && Number.isFinite(v);
@@ -7,7 +7,7 @@ const sameHolder = (a, b) => !!a.holder && a.holder === b.holder && (!a.project 
 const minutes = (n) => finite(n) ? +(n / 60000).toFixed(2) : null;
 
 export function reviewLockTiming(samples, { since, now, maxGapMs }) {
-  const events = [...new Map(samples.flatMap((s) => s.heavyLocks?.journal?.events ?? []).filter((e) => HEAVY_IDS.includes(e.resource) && finite(e.t) && e.t <= now && typeof e.eventId === 'string').map((e) => [e.eventId, e])).values()];
+  const events = [...new Map(samples.flatMap((s) => s.heavyLocks?.journal?.events ?? []).filter((e) => ALL_HEAVY_IDS.includes(e.resource) && finite(e.t) && e.t <= now && typeof e.eventId === 'string').map((e) => [e.eventId, e])).values()];
   // Map insertion order preserves journal row order within the same minute, including immediate take/return.
   events.sort((a, b) => a.t - b.t);
   const holds = [], open = new Map();
@@ -131,7 +131,7 @@ export function inspectLockInterval(a, b, { span, record, loadGate = 12, loadGat
     const callers = waiters.length ? waiters.map((w) => ({ pid: w.holderPid })) : [{}];
     return callers.every((caller) => {
       const admission = laneAdmission(s.heavyLocks, caller, { empty: loadGate, one: loadGateWithOneHeavyTask });
-      return admission.state === 'KNOWN' && admission.loadGate === heavyCheckLimit(s.heavyGate)
+      return admission.state === 'KNOWN' && !admission.thirdLaneOnly && admission.loadGate === heavyCheckLimit(s.heavyGate)
         && (heavyCheckLanes(s.heavyGate) === null || admission.otherLanes === heavyCheckLanes(s.heavyGate));
     });
   };
@@ -178,7 +178,7 @@ export function assessThresholds(samples, stats, { loadGate, loadGateWithOneHeav
     return callers.map((caller) => {
       const admission = laneAdmission(s.heavyLocks, caller, limits), gate = s.heavyGate;
       const observedLimit = heavyCheckLimit(gate), observedLanes = heavyCheckLanes(gate);
-      const comparable = admission.state === 'KNOWN' && gate?.authoritative;
+      const comparable = admission.state === 'KNOWN' && !admission.thirdLaneOnly && gate?.authoritative;
       const sameContext = comparable && (observedLanes === null || observedLanes === admission.otherLanes);
       const matches = sameContext ? observedLimit === admission.loadGate : null;
       const reading = comparable ? matches ? gate.state : gate.load1m > admission.loadGate || gate.availableBytes < memoryGateGiB * GIB ? 'OVERLOADED' : 'OK' : 'UNKNOWN';

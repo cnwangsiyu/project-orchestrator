@@ -133,6 +133,14 @@ export const readQuotaHistory = (file) => {
 };
 const validUsage = (q) => q && Number.isFinite(q.used) && q.used >= 0 && Number.isFinite(q.limit) && q.limit > 0
   && Number.isFinite(q.resetsAt);
+const expiryPolicy = JSON.parse(fs.readFileSync(new URL('../resource-policy.json', import.meta.url), 'utf8')).ttadkExpiry;
+export const TTADK_EXPIRY_HINT = 'TTADK quota expiring unused: good time for reviews, docs and exploratory work';
+export const ttadkExpiringUnused = (account, now = Date.now()) => {
+  const q = account?.usage, burn = account?.burn;
+  return validUsage(q) && q.used < q.limit && q.resetsAt > now && q.resetsAt - now < expiryPolicy.windowHours * 3600000
+    && burn?.resetsAt === q.resetsAt && age(burn.sampledAt, now) !== null
+    && Number.isFinite(burn.projectedAtReset) && burn.projectedAtReset / q.limit < expiryPolicy.projectedShareBelow;
+};
 export const ttadkBurn = (history, account, sampledAt, now = Date.now()) => {
   const q = account?.usage;
   if (!validUsage(q) || q.resetsAt <= now || age(sampledAt, now) == null) return null;
@@ -146,10 +154,11 @@ export const ttadkBurn = (history, account, sampledAt, now = Date.now()) => {
   const first = samples[start], last = samples.at(-1);
   if (!first || last.t - first.t < BALANCE.burnMinSpanMin * 60000) return null;
   const perHour = (last.ttadk.used - first.ttadk.used) / ((last.t - first.t) / 3600000);
-  if (perHour <= 0) return null;
-  const outAt = last.t + Math.max(0, q.limit - q.used) / perHour * 3600000;
-  return { perHour, outAt, resetsAt: q.resetsAt, beforeReset: outAt < q.resetsAt,
-    spanMin: (last.t - first.t) / 60000, sampledAt: last.t };
+  if (perHour < 0) return null;
+  const outAt = perHour > 0 ? last.t + Math.max(0, q.limit - q.used) / perHour * 3600000 : null;
+  return { perHour, outAt, resetsAt: q.resetsAt,
+    projectedAtReset: q.used + perHour * (q.resetsAt - last.t) / 3600000,
+    spanMin: (last.t - first.t) / 60000, sampledAt: last.t, beforeReset: outAt !== null && outAt < q.resetsAt };
 };
 
 export const hasTraeDailyQuota = (quota, now = Date.now()) => Object.values(freshTraeQuota(quota, now)?.daily ?? {})

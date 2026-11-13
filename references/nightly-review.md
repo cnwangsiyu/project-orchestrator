@@ -184,6 +184,17 @@ Read [resources.md](resources.md) and the launcher's `resource-review-24h.txt/.j
 `node scripts/resource-review.mjs --hours 24 [--json]` or `--hours 96 --json` is read-only. Include this
 step every night, even when coverage is zero. Never extrapolate missing samples or infer CPU/RSS consumers from load.
 
+Send the user **two or three lines every night** from `utilisation` in `resource-review`/`review-data`: CPU hours
+idle >50% while ready work existed and over the gate, memory availability/pressure, heavy-lane occupancy and queue
+hours; TTADK tokens/TRAE per-model units unused at reset (sampled estimates/UNKNOWN); top idleness causes and action.
+Readiness and metric coverage are separate; do not call gaps zero use, combine tokens with units, or claim causal
+proof from idle correlations. Check `idle-hints.jsonl` targets on each orchestrator wake; hints never dispatch.
+Approved utilisation settings (2026-11-13): lanes **2-3**, lane-3 take gate **load <=8 / memory >=32 GiB**,
+idle hint **three samples at load <6 / CPU idle >50%, 60min cooldown**, TTADK expiry **<4h / projected <70%**.
+Tune only inside explicit approved ranges; only lane count has numeric bounds in this brief. Retain the specified
+point thresholds or ask a Chinese card for ranges before tuning them. `heavy-lane-3-request.md` goes to vesdk-mainline
+for contract implementation/acknowledgement; report pending until rollout. Keep 12/20/16 and the ONE package slot.
+
 - Report coverage, metric availability, CPU idle with resource-ready queued tasks versus unverified waits, load/pressure/
   swap contention, sampled project/task shares, independent package-build overlap, continuous idle workers, possible
   terminal-task orphans, suspected hung Chrome, simulator services and disk trend. Give concrete UTC times, task owner,
@@ -214,7 +225,8 @@ step every night, even when coverage is zero. Never extrapolate missing samples 
   dispatch ready lightweight work first; do not reduce model concurrency to fix compiler fan-out. Preserve affected-only
   fix tests, final full gates, cache provenance, device leases and quality constraints.
 - Tune only within `scripts/resource-policy.json`'s **dated user-approved** `approvedRanges` and `approvalEvidence`.
-  No numeric tuning range was supplied on 2026-11-13, so these start null: fixed 20 is approved, not a tuning range. Retain 12 / 20 / 16 / 1 / 2 and ask a Chinese
+  No numeric tuning range for the ordinary gate was supplied on 2026-11-13, so these start null: fixed 20 is approved,
+  not a tuning range. Retain 12 / 20 / 16 / 1 and the installed lanes (2, or 3 after owner rollout) and ask a Chinese
   decision card for any change until the user records bounds. Never invent an approved range. With bounds recorded,
   small changes require at least three days of adequately covered comparable tasks, queue/wall-time and pressure evidence,
   old/new values and rollback criteria. Thin/conflicting evidence or values outside bounds require a card; silence is no OK.
