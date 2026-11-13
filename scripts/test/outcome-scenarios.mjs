@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dedupeOutcomes } from '../lib/state.mjs';
 
@@ -42,6 +42,7 @@ try {
   const count = rows().length;
   for (const args of [
     ['--name', 'absent', '--correct', '--result', 'pass'],
+    ['--name', 'absent', '--correct', '--minutes', '42'],
     ['--name', 'absent', '--actual', 'codex:gpt-6.1-sol:high@trae'],
     ['--name', 'T72', '--actual', 'codex:gpt-6.1-sol:high'],
     ['--name', 'T72', '--actual', 'codex:gpt-6.1-sol:typo@trae'],
@@ -119,5 +120,25 @@ try {
   assert.equal(hourly[firstHour][1].trae.queue.gpt.position, 500); // Preserve the peak, not an hourly average.
   assert.deepEqual(Object.values(hourly)[1], [{ ...observations[2], trae: null }]);
   console.log('ok   nightly tuning: dispatch counts/factors, effective account outcomes and timestamped hourly company telemetry');
+  const metadataBefore = fs.readFileSync(log, 'utf8');
+  for (const args of [['--minutes', '42'], ['--cause', 'spec'], ['--rounds', '1'], ['--rounds', 'null'],
+    ['--retries', '0', '--scope-changes', '0', '--note', 'metadata correction']]) {
+    cli('--name', 'T63', '--correct', ...args);
+    const latest = rows().at(-1);
+    assert.equal(latest.correction, true); assert.ok(!Object.hasOwn(latest, 'result'));
+    if (!args.includes('--rounds')) assert.ok(!Object.hasOwn(latest, 'rounds'));
+    const corrected = dedupeOutcomes(rows().filter((r) => r.kind === 'outcome')).find((o) => o.name === 'T63');
+    assert.equal(corrected.result, 'fail'); assert.equal(corrected.reviewed, true);
+    assert.deepEqual(corrected.actual.map((p) => p.model), ['gpt-6.1-sol', 'deepseek-v4-pro']);
+  }
+  assert.ok(fs.readFileSync(log, 'utf8').startsWith(metadataBefore));
+  const metadata = dedupeOutcomes(rows().filter((r) => r.kind === 'outcome')).find((o) => o.name === 'T63');
+  assert.equal(metadata.minutes, 42); assert.equal(metadata.cause, 'spec'); assert.equal(metadata.rounds, null);
+  assert.equal(metadata.retries, 0); assert.equal(metadata.scopeChanges, 0); assert.equal(metadata.note, 'metadata correction');
+  const metadataAppend = spawnSync(process.execPath, [path.join(scripts, 'outcome.mjs'), '--project', 'p', '--name', 'T37',
+    '--actual', 'codex:gpt-6.1-sol:medium@main'], { env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  assert.equal(metadataAppend.status, 0); assert.match(metadataAppend.stdout, /recorded p\/T37: fail/);
+  assert.match(metadataAppend.stderr, /appending metadata/); assert.ok(!metadataAppend.stderr.includes('Use --correct'));
+  console.log('ok   metadata-only corrections inherit result, preserve omitted fields and lower/null rounds');
   console.log('\nall pass');
 } finally { fs.rmSync(tmp, { recursive: true, force: true }); }

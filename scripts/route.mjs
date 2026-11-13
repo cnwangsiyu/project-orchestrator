@@ -338,7 +338,7 @@ if (!deferred) {
 // TTADK takes the Codex pick when the gateway has its model; when the ChatGPT accounts are out, it also takes models it
 // lacks as Sol. Image generation never runs there, not even its Sol fallback step: the gateway has no image tool.
 // research without the search proxy stays off TTADK on every step, fallbacks included (nightly review 11-07 dry run).
-const onTTADK = (x) => x?.vendor === 'codex' && !!TT && cat !== 'image-gen' && !(cat === 'research' && !TT.search) && (ttHas(x.model) || (chatgptOut && ttModelsOK));
+const onTTADK = (x) => x?.vendor === 'codex' && !!TT && taskFits(TT) && (ttHas(x.model) || (chatgptOut && ttModelsOK));
 // TRAE sets request priority. Prefer models that avoid daily high-priority spend; missing telemetry is not free quota.
 const backgroundChoice = (x, log) => {
   const daily = TT.quota?.daily;
@@ -495,7 +495,7 @@ let acct = (QX.pick && !excluded.has(QX.pick.a.name) ? QX.pick : chatgptOpen[0])
 // Browser work off the company account goes to a browser-ready ChatGPT account.
 if (T.kind === 'browser' && !ttBrowser && chatgptBrowser.length && !(acct && acct.a?.browser)) acct = chatgptBrowser[0];
 const chatgptAcct = acct;
-const ttadkRun = m && onTTADK(m) && !(T.kind === 'browser' && !ttBrowser);
+const ttadkRun = m && onTTADK(m);
 const runCompany = balancedAccount ?? TT;
 if (ttadkRun) acct = { a: { name: runCompany.name, live: runCompany.live } };
 else if (QX.rotate && m?.vendor === 'codex' && QX.rotate.every((r) => !excluded.has(r.a.name))) {

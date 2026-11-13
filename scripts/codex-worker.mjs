@@ -43,6 +43,7 @@ import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { noteFailure, noteSuccess, rememberThreadModel, threadModel, probeResult, failureKind } from './lib/trae-health.mjs';
 import { createQueueRecorder } from './lib/company-load.mjs';
+import { saveQueue, readQueue } from './lib/worker-queue.mjs';
 // What a TRAE pause covers: one model family (route.mjs moves to the next family) or the whole account.
 const pausedWhat = (p) => (p.pool ? `TRAE's ${p.pool} models are paused` : 'TRAE is paused');
 // A model TRAE no longer resolves (2026-11-13: it dropped Gemini): that model alone is out of routing for 6 h.
@@ -595,36 +596,29 @@ const STALL_MIN = opts['stall-min'] === undefined ? 30 : Number(opts['stall-min'
 // ({threadId, turnId, state, position, message}); they carry this thread's id, so they already count as progress below —
 // a worker printing `queued:` lines is waiting, not stalled. Print on a state change or a ≥10% position move (at most
 // one line a minute), and the wait's length once it clears. `status --thread` reads the last state from the file.
-const queueFile = (home) => path.join(home, 'queue-status.json');
-const saveQueue = (home, threadId, q) => {
-  try {
-    let m = {}; try { m = JSON.parse(fs.readFileSync(queueFile(home), 'utf8')); } catch {}
-    m[threadId] = q;
-    fs.writeFileSync(queueFile(home), JSON.stringify(Object.fromEntries(Object.entries(m).slice(-200))));
-  } catch {}
-};
-const readQueue = (home, threadId) => { try { return JSON.parse(fs.readFileSync(queueFile(home), 'utf8'))[threadId] ?? null; } catch { return null; } };
 const follow = (threadId, turnId) => {
   console.log(`thread=${threadId} turn=${turnId}`);
   const recordQueue = PROF?.kind === 'trae' ? createQueueRecorder(PROF.home, opts.model ?? threadModel(PROF.home, threadId)) : null;
   let final, usage, last = Date.now();
-  let queue = null, queueSince = null, queuePrinted = 0;
+  let queueSince = null, lastPrintedQueue = null, queuePrinted = null;
   const queueUpdate = (p) => {
     const t = Date.now(), state = String(p.state ?? 'queued');
     const pos = p.position != null && p.position !== '' && Number.isFinite(Number(p.position)) ? Number(p.position) : null;
     if (state !== 'ready' && !queueSince) queueSince = t;
-    const prev = queue;
-    queue = { state, position: pos, since: queueSince, turnId, at: t };
+    const queue = { state, position: pos, since: queueSince, turnId, at: t };
     if (PROF?.home) saveQueue(PROF.home, threadId, queue);
     recordQueue?.(p, t);
     if (state === 'ready') {
       if (queueSince) console.log(`queue cleared after ${Math.max(1, Math.round((t - queueSince) / 60000))}m`);
       queueSince = null;
+      lastPrintedQueue = null;
       return;
     }
+    const prev = lastPrintedQueue;
     const moved = !prev || prev.state !== state
       || (pos != null && prev.position != null && Math.abs(pos - prev.position) >= Math.max(1, Math.ceil(prev.position * 0.1)));
-    if (!moved || t - queuePrinted < 60000) return;
+    if (!moved || (queuePrinted != null && t - queuePrinted < 60000)) return;
+    lastPrintedQueue = queue;
     queuePrinted = t;
     console.log(`queued: position ${pos ?? '?'} (${state})`);
   };

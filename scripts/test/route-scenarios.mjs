@@ -860,6 +860,39 @@ for (const [sc, args] of ERRORS) {
   if (bad.length) fail++;
   console.log(`${bad.length ? 'FAIL' : 'ok  '} recovery probes     ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
 }
+// Company quota must never change a browser-ready personal pick, its approvals or browser launch flags.
+{
+  const SOL = 'gpt-6.1-sol', ASTRA = 'gpt-6-astra';
+  const home = fs.mkdtempSync(path.join(tmp, 'browser-quota-'));
+  const bucket = (depleted) => ({ used: depleted ? 100 : 20, limit: 100, remaining: depleted ? 0 : 80,
+    depleted, resetsAt: now + h });
+  try {
+    for (const company of [[], [tt({ healthy: false, quotaOut: { resetsAt: now + h } })], [tt({ browser: false })]]) {
+      for (const astraDepleted of [false, true]) {
+        const personal = [acc('main', 20, 120), acc('b', 30, 100, [], { browser: true })];
+        const trae = tr({ home, models: [SOL, ASTRA, 'deepseek-v4.1-flash'],
+          quota: { daily: { [SOL]: bucket(true), [ASTRA]: bucket(astraDepleted) } } });
+        S.browserQuota = { claude: cl(10, 120), codex: [...personal, ...company, trae] };
+        S.browserQuotaBaseline = { ...S.browserQuota, codex: [...personal, ...company, { ...trae, quota: null }] };
+        for (const cat of ['browser', 'ui-browser', 'computer-use']) {
+          const args = [cat, ...(cat === 'computer-use' ? ['--apps', 'com.apple.Notes'] : ['--origins', 'example.com'])];
+          const baseline = JSON.parse(run('browserQuotaBaseline', args)), routed = JSON.parse(run('browserQuota', args));
+          assert.equal(routed.pick.model, SOL); assert.equal(routed.pick.account, 'b');
+          assert.deepEqual(routed.pick, baseline.pick); assert.deepEqual(routed.needsUserOK, baseline.needsUserOK);
+          assert.equal(routed.balance?.selected ?? false, false);
+          assert.ok(!routed.why.some((s) => /bucket is depleted|background:|balanced to TRAE/.test(s)));
+          const exhaustedArgs = [...args, '--failures', '20'];
+          const exhausted = JSON.parse(run('browserQuota', exhaustedArgs));
+          assert.ok(exhausted.needsUserOK.length > 0);
+          assert.deepEqual(exhausted.needsUserOK, JSON.parse(run('browserQuotaBaseline', exhaustedArgs)).needsUserOK);
+          const background = JSON.parse(run('browserQuota', [...args, '--background']));
+          assert.equal(background.pick, null); assert.ok(background.deferred); assert.deepEqual(background.needsUserOK, []);
+        }
+      }
+    }
+    console.log('ok   browser quota isolation: absent/out/unready TTADK, depleted Sol/Astra, personal approvals and background');
+  } catch (e) { fail++; console.log(`FAIL browser quota isolation: ${e.stack}`); }
+}
 // TRAE's per-model daily high-priority quota and weekly pool (user-approved 2026-11-13): a depleted bucket only moves
 // that model into TRAE's low-priority queue; new dispatches prefer comparable GPT quota, then eligible fallbacks.
 {
@@ -920,6 +953,9 @@ for (const [sc, args] of ERRORS) {
   scenario('quotaFallbackBusy', { ...quota.daily, 'deepseek-v4.1-flash': bucket(100) });
   scenario('quotaNoAstra', quota.daily, { models: ids.filter((m) => m !== 'gpt-6-astra') });
   scenario('quotaSecondFallback', { ...quota.daily, 'gpt-6-astra': bucket(100), 'deepseek-v4.1-flash': bucket(100) });
+  scenario('quotaExpiredSol', { ...quota.daily, 'gpt-6.1-sol': bucket(100, { resetsAt: now - 1 }) });
+  scenario('quotaExpiredAstra', { ...quota.daily, 'gpt-6-astra': bucket(20, { resetsAt: now - 1 }) });
+  scenario('quotaExpiredFallback', { 'gpt-6.1-sol': bucket(100), 'deepseek-v4.1-flash': bucket(100, { resetsAt: now - 1 }) });
   const pausedHome = fs.mkdtempSync(path.join(tmp, 'quota-astra-paused-'));
   const { noteFailure } = await import('../lib/trae-health.mjs');
   noteFailure(pausedHome, '-32600: model `gpt-6-astra` is unavailable because its metadata could not be resolved', now, 'gpt-6-astra');
@@ -951,6 +987,9 @@ for (const [sc, args] of ERRORS) {
     ['quotaFallbackBusy', ['implement', '--failures', '2'], 'gpt-6-astra'],
     ['quotaAllBusy', ['implement'], 'gpt-6.1-sol'],
     ['quotaTT', ['implement'], 'gpt-6.1-sol'], // healthy TTADK remains first
+    ['quotaExpiredSol', ['implement'], 'gpt-6.1-sol'],
+    ['quotaExpiredAstra', ['implement'], 'deepseek-v4.1-flash'],
+    ['quotaExpiredFallback', ['implement'], 'deepseek-v4.1-flash'],
   ]) {
     const r = route(sc, args);
     cases.push([r.pick.model, want], [r.failures, args.includes('--failures') ? Number(args[args.indexOf('--failures') + 1]) : 0]);
@@ -960,6 +999,7 @@ for (const [sc, args] of ERRORS) {
     [JSON.stringify(busy.pick), JSON.stringify(idle.pick)], [JSON.stringify(busy.needsUserOK), JSON.stringify(idle.needsUserOK)],
     [busy.deferred, null], [note(busy, /parallel task concurrency unchanged/), true],
     [missing.why.some((n) => /bucket is depleted/.test(n)), false],
+    [route('quotaExpiredSol').why.some((n) => /bucket is depleted/.test(n)), false],
     [note(idle, /above ~300.*depleted.*--exclude-model <that model>.*same --failures/), true],
     [note(idle, /non-depleted or unknown buckets let it wait.*Accepted queued turns stay pending/), true],
     [note(route('quotaAllBusy'), /--exclude-model gpt-6.1-sol.*same --failures/), true],
@@ -1191,6 +1231,7 @@ for (const [sc, args] of ERRORS) {
   const ids = [SOL, ASTRA, FLASH, PRO, SEED];
   const bucket = (depleted = false) => ({ used: depleted ? 100 : 20, limit: 100, remaining: depleted ? 0 : 80, depleted, resetsAt: now + h });
   const active = { [SOL]: bucket(), [ASTRA]: bucket() };
+  const expired = (depleted = false) => ({ ...bucket(depleted), resetsAt: now - 1 });
   const scenario = (daily, models = ids, extra = {}) => {
     S.backgroundOrder = { claude: cl(10, 120), codex: [acc('main', 20, 120), tr({ home, models,
       modelIds: Object.fromEntries(models.map((id) => [id, id])), quota: daily === null ? null : { daily }, ...extra })] };
@@ -1228,6 +1269,9 @@ for (const [sc, args] of ERRORS) {
     [null, ['image-read'], SOL, 3],
     [null, ['image-read', '--security'], SEED, 3],
     [active, ['image-read', '--exclude-model', SEED], SOL, 3],
+    [{ ...active, [SOL]: expired(true) }, ['analysis'], FLASH, 2],
+    [{ [SOL]: expired(true), [ASTRA]: expired(true) }, ['analysis'], SOL, 3],
+    [{ ...active, [FLASH]: expired(), [PRO]: bucket() }, ['analysis'], SOL, 3],
   ];
   try {
     for (const [daily, args, model, step, models = ids] of cases) {

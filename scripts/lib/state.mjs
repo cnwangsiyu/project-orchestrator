@@ -6,7 +6,9 @@ import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { readPause, readPoolPauses, readModelPauses, liftAuthPause, poolOf, claimProbes } from './trae-health.mjs';
-import { BALANCE, readTraeModels, freshLoad, readQueueState, companySnapshot, readQuotaHistory, ttadkBurn } from './company-load.mjs';
+import { BALANCE, readTraeModels, freshLoad, readQueueState, companySnapshot, readQuotaHistory, ttadkBurn, freshTraeQuota } from './company-load.mjs';
+import { withLock, writeJson as atomicJson } from './shared-file.mjs';
+export { withLock } from './shared-file.mjs';
 
 export const now = Date.now();
 
@@ -67,21 +69,8 @@ export const ACCOUNTS = process.env.CODEX_ACCOUNTS || path.join(SHARED, 'codex-a
 const WORKER = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'codex-worker.mjs');
 export const MAIN_PROFILE = { home: path.join(os.homedir(), '.codex'), hub: 'ws://127.0.0.1:47321' };
 
-// A tiny cross-process lock (mkdir is atomic) around read-modify-write of a shared file; stale after 30 s.
-export const withLock = (file, fn) => {
-  const lock = `${file}.lock`, until = Date.now() + 10000;
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  for (;;) {
-    try { fs.mkdirSync(lock); break; } catch {
-      try { if (Date.now() - fs.statSync(lock).mtimeMs > 30000) { fs.rmdirSync(lock); continue; } } catch {}
-      if (Date.now() > until) throw new Error(`lock busy: ${lock}`);
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
-    }
-  }
-  try { return fn(); } finally { try { fs.rmdirSync(lock); } catch {} }
-};
 const readJson = (f, dflt) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return dflt; } };
-const writeJson = (f, v) => { const t = `${f}.${process.pid}`; fs.writeFileSync(t, JSON.stringify(v, null, 1)); fs.renameSync(t, f); };
+const writeJson = (f, v) => atomicJson(f, v, 1);
 export const readProfiles = () => {
   const reg = readJson(ACCOUNTS, {});
   if (!Object.keys(reg).length) reg.main = { ...MAIN_PROFILE };
@@ -737,7 +726,7 @@ export const analyze = (data) => {
   const trae = tr ? { name: tr.name, kind: 'trae', home: tr.home, healthy: !!tr.healthy && !acctPause, reason: acctPause ? `paused until ${new Date(acctPause.pausedUntil).toLocaleTimeString()} after worker failures (${acctPause.reason})` : tr.reason,
     live: !!tr.live, active: tr.active ?? 0, allModels: tr.models ?? [],
     models: (tr.models ?? []).filter((m) => !poolPauses[poolOf(m)] && !modelPauses[String(m).toLowerCase()]), poolPauses, modelPauses,
-    quota: tr.quota ?? null, quotaError: tr.quotaError ?? null,
+    quota: freshTraeQuota(tr.quota), quotaError: tr.quotaError ?? null,
     load: freshLoad(tr.load), queue: readQueueState(tr.home),
     modelIds: tr.modelIds ?? {}, browser: false, chromePlugin: null, search: true, searchLive: true } : null;
   if (trae) trae.usable = trae.healthy && trae.models.length > 0;
@@ -817,7 +806,7 @@ export const leanLines = (st, data) => {
     // A model TRAE no longer resolves stays out for 6 h; its family-mates keep routing (2026-11-13: TRAE dropped Gemini).
     for (const [model, r] of Object.entries(TR.modelPauses ?? {})) out.push(`TRAE model ${model} unavailable since ${fmt(r.t)} (${String(r.reason).slice(0, 120)}); routing skips it`);
     // Daily depletion queues only this model; route.mjs can substitute an eligible model on new dispatches.
-    for (const [model, q] of Object.entries(TR.quota?.daily ?? {})) if (q.depleted)
+    for (const [model, q] of Object.entries(TR.quota?.daily ?? {})) if (q?.depleted)
       out.push(`TRAE ${model}'s daily high-priority quota is used up${q.resetsAt ? ` until ${fmt(q.resetsAt)}` : ''}: its requests queue in the low-priority lane (long waits; queued: lines show the position)`);
     if (TR.healthy && !TR.live) out.push(`TRAE hub down — start it before hub workers: codex-worker.mjs --account ${TR.name} hub (traecli exec runs don't need it)`);
   }

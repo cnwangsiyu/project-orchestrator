@@ -30,8 +30,8 @@ const actual = opts.actual?.map((v) => {
   const [, vendor, model, effort, account] = match;
   return { vendor, model, effort, account };
 });
-// Metadata-only --actual appends keep the existing result; this supports recording substitutions after close.
-const metadataOnly = opts.result === undefined && !!actual;
+// Metadata-only appends/corrections keep the existing result and all omitted fields.
+const metadataOnly = opts.result === undefined && (!!actual || !!opts.correct);
 if (!metadataOnly && !['pass', 'rework', 'fail'].includes(opts.result)) die('--result takes pass, rework or fail');
 if (opts.rounds === true) die('--rounds takes a whole number ≥ 0 or null');
 const rounds = opts.rounds === undefined ? (opts.result === 'pass' ? 0 : null) : opts.rounds === 'null' ? null : Number(opts.rounds);
@@ -79,6 +79,7 @@ if (opts.correct || metadataOnly) {
   for (const [flag, value] of Object.entries(fields)) if (opts[flag] !== undefined) rec[flag === 'scope-changes' ? 'scopeChanges' : flag] = value;
 }
 if (opts.correct) console.error(`outcome: appending correction for ${opts.name}; supplied fields override the aggregate, including lower or null rounds; existing lines stay intact`);
+else if (metadataOnly) console.error(`outcome: appending metadata for ${opts.name}; existing result and omitted fields stay intact`);
 else if (prior.length) console.error(`outcome: ${opts.name} already has ${prior.length} outcome record(s); normal records keep the most rounds and cannot override a correction. Use --correct to fix recorded fields.`);
 fs.appendFileSync(ROUTE_LOG, JSON.stringify(rec) + '\n');
 const effective = dedupeOutcomes([...prior, rec])[0], ranFirst = effectiveFirst(effective), ranLast = effectiveAccepted(effective);

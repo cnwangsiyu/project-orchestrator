@@ -8,7 +8,7 @@ import childProcess from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { BALANCE, parseTraeModels, readTraeModels, freshLoad, freshQueue, readQueueState, writeQueueState,
-  companySnapshot, readQuotaHistory } from '../lib/company-load.mjs';
+  companySnapshot, readQuotaHistory, freshTraeQuota } from '../lib/company-load.mjs';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'company-telemetry-'));
@@ -35,6 +35,13 @@ try {
   assert.deepEqual(freshLoad({ [SOL]: { percent: 99, t: now + min } }, now), {});
   assert.equal(freshLoad({ [SOL]: { percent: 0, t: now - 30 * min } }, now)[SOL].percent, 0);
   assert.deepEqual(freshQueue({ gpt: { t: now - 31 * min, position: 999 } }, now), {});
+  const bucket = { used: 100, limit: 100, depleted: true, resetsAt: now - 1 };
+  const quota = { daily: { expired: bucket, boundary: { ...bucket, resetsAt: now },
+    active: { ...bucket, resetsAt: now + 1 }, unknown: { ...bucket, resetsAt: null } }, weekly: bucket };
+  const current = freshTraeQuota(quota, now);
+  assert.equal(current.daily.expired, null); assert.equal(current.daily.boundary, null); assert.equal(current.weekly, null);
+  assert.equal(current.daily.active, quota.daily.active); assert.equal(current.daily.unknown, quota.daily.unknown);
+  assert.ok(Object.hasOwn(current.daily, 'expired')); assert.equal(quota.daily.expired, bucket);
 
   const queueFile = path.join(tmp, 'queue-state.json');
   const event = { t: now, position: 3100, state: 'queued', lowPriority: true, message: 'discard-me' };
@@ -128,7 +135,12 @@ globalThis.WebSocket = class {
         notify({threadId:'another-thread',state:'queued',position:9999});
         notify({state:'queued',position:8888});
         notify({threadId:'fixture',turnId:'other-turn',state:'queued',position:7777});
-        notify({threadId:'fixture',turnId:'turn',state:'waiting',position:42,modelQuotaLowPriority:true,message:'discard-me'});
+        const base = Date.now(); let clock = base; Date.now = () => clock;
+        const events = JSON.parse(process.env.FIXTURE_QUEUE_EVENTS || '[[0,"waiting",42]]');
+        for (const [offset, state, position] of events) {
+          clock = base + offset;
+          notify({threadId:'fixture',turnId:'turn',state,position,modelQuotaLowPriority:true,message:'discard-me'});
+        }
         this.onmessage({data:JSON.stringify({method:'turn/completed',params:{threadId:'fixture',turnId:'turn',turn:{id:'turn',status:'completed',items:[{type:'agentMessage',text:'done'}]}}})});
       }, 10);
     });
@@ -145,6 +157,18 @@ globalThis.WebSocket = class {
   assert.equal(recorded.gpt.message, undefined);
   assert.equal(recorded.gpt.high, undefined);
   console.log('ok   real worker follow records only its own queue/status against the remembered model family');
+  for (const [events, positions] of [
+    [[[0, 'queued', 1000], [61000, 'queued', 950], [122000, 'queued', 900], [183000, 'queued', 850]], [1000, 900]],
+    [[[0, 'queued', 1000], [1000, 'waiting', 1000], [61000, 'waiting', 1000]], [1000, 1000]],
+    [[[0, 'queued', 1000], [1000, 'queued', 500], [59000, 'queued', 400], [60000, 'queued', 300]], [1000, 300]],
+    [[[0, 'queued', 1000], [1000, 'ready', 0], [2000, 'waiting', 900], [61000, 'waiting', 900]], [1000, 900]],
+  ]) {
+    const followed = exec(process.execPath, ['--import', transport, path.join(root, 'codex-worker.mjs'), '--account', 'trae',
+      'wait', '--thread', 'fixture'], { env: { ...env, FIXTURE_QUEUE_EVENTS: JSON.stringify(events) }, encoding: 'utf8', timeout: 5000 });
+    assert.deepEqual([...followed.matchAll(/queued: position (\d+)/g)].map((m) => Number(m[1])), positions);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(workerHome, 'queue-status.json'), 'utf8')).fixture.position, events.at(-1)[2]);
+  }
+  console.log('ok   real worker queue printing: cumulative 10% moves, pending state changes, minute throttle and ready/requeue');
   console.log('\nall pass');
 } finally {
   childProcess.execFileSync = exec; syncBuiltinESMExports();
