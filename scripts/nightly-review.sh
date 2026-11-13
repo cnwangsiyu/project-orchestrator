@@ -64,7 +64,14 @@ if [ "$MODE" != plan ] && [ ! -s "$D/review-data-24h.txt" ]; then
   node "$SKILL/scripts/orch-usage.mjs" --hours 24 > "$D/orch-usage-24h.txt" 2>&1
   echo "data gathered in $D"
 fi
-DATA="The data is already gathered: $D/review-data-24h.txt, $D/review-data-168h.txt, $D/orch-usage-24h.txt."
+if [ "$MODE" != plan ]; then
+  node "$SKILL/scripts/resource-review.mjs" --hours 24 > "$D/resource-review-24h.txt" 2>&1
+  node "$SKILL/scripts/resource-review.mjs" --hours 24 --json > "$D/resource-review-24h.json" 2> "$D/resource-review-24h.err"
+  node "$SKILL/scripts/resource-review.mjs" --hours 96 --json > "$D/resource-review-96h.json" 2> "$D/resource-review-96h.err"
+  node "$SKILL/scripts/resource-sample.mjs" --read-only --json > "$D/resource-now.json" 2> "$D/resource-now.err"
+  echo "read-only resource evidence gathered; exit 2 / missing intervals means UNKNOWN, never permission to clean"
+fi
+DATA="The data is already gathered: $D/review-data-24h.txt, $D/review-data-168h.txt, $D/orch-usage-24h.txt. Machine resources: $D/resource-review-24h.txt, $D/resource-review-24h.json, $D/resource-review-96h.json (multi-day threshold evidence), $D/resource-now.json and adjacent .err files. Follow the Machine resources step; no process/file cleanup or agent installation in the review worker."
 
 # Personal quota needs the user's OK first: a short Claude session asks with a Chinese card, then re-runs this script.
 ask_personal() {  # $1 = what would run, in words

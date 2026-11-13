@@ -9,6 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { loadDigest } from '../lib/global-rules.mjs';
 
 const ROUTE = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'route.mjs');
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'route-test-'));
@@ -279,6 +280,29 @@ for (const [sc, args, want, note] of CASES) {
   if (!ok) fail++;
   console.log(`${ok ? 'ok  ' : 'FAIL'} ${sc.padEnd(19)} ${args.join(' ').padEnd(36)} ${ok ? got : `want "${want}", got "${got}"`}`);
 }
+// Both sides of the global-rules/tier-routing merge must survive in commands, notes and route evidence.
+{
+  try {
+    const log = path.join(tmp, 'merged-route-log.jsonl');
+    const merged = JSON.parse(run('ttFresh', ['review-high', '--author', 'codex', '--project', 'fixture', '--name', 'fixture-T1', '--urgent', '--user-ok', 'ledger:fixture/card-1'], { ROUTE_LOG: '1', ROUTE_LOG_FILE: log }));
+    const rec = JSON.parse(fs.readFileSync(log, 'utf8').trim());
+    assert.equal(rec.tier, 'hard'); assert.equal(rec.tier, merged.tier);
+    assert.equal(rec.second.account, merged.secondOpinion.account);
+    assert.equal(rec.personalApproved, true); assert.equal(rec.approvalRef, 'ledger:fixture/card-1');
+    assert.match(merged.pick.command, /--append-system-prompt/); assert.match(merged.pick.command, /launch-audit\.mjs/);
+    assert.match(merged.pick.command, /--permission-mode bypassPermissions/); assert.match(merged.pick.command, /--remote-control/);
+    for (const sc of ['ttFresh', 'ttOutTraeDown', 'fresh']) {
+      const routed = JSON.parse(run(sc, ['build-run']));
+      assert.ok(routed.notes.some((s) => /heavy-build\.sh.*res take\/return.*heavy-build first/.test(s)));
+      assert.ok(!routed.notes.some((s) => /at most 3 concurrent heavy builds/.test(s)));
+    }
+    for (const sc of ['unreadHub']) {
+      const routed = JSON.parse(run(sc, ['analysis']));
+      assert.ok(routed.notes.some((s) => /list --limit 1.*only if unreachable.*global-rules owner/.test(s)));
+    }
+    console.log('ok   merged tier routing, worker digest, approvals and resource/hub notes');
+  } catch (e) { fail++; console.log(`FAIL merged tier/global rules: ${e.message}`); }
+}
 // Second-opinion account: the extra underused-quota Codex review spends ChatGPT quota (never TTADK); a cross-vendor
 // Codex second opinion follows TTADK first.
 // The extra underused review follows the review policy (user, 2026-11-07): only code that needs a review anyway, never on
@@ -307,7 +331,8 @@ for (const [sc, args] of [['quiet', ['lookup']], ['ttSearch', ['lookup']], ['ttO
     const quoted = command.match(/ -c ('developer_instructions=.*') --json/)[1];
     const config = execFileSync('/bin/sh', ['-c', `printf '%s' ${quoted}`], { encoding: 'utf8' });
     const rule = JSON.parse(config.slice('developer_instructions='.length));
-    ok = rule === "Never read, copy or load any login session or credential file (cookies, SSO/session tokens, CLI auth files such as bytedcli's, keychain items, .netrc, API keys), and never inject a session into a browser or tool to get past a login. Wherever a login or authorization is needed, stop and report BLOCKED with what needs signing in.";
+    const digest = loadDigest();
+    ok = rule === `Global worker rules ${digest.version}\n${digest.worker}`;
   } catch {}
   if (!ok) fail++;
   console.log(`${ok ? 'ok  ' : 'FAIL'} exec credential     ${sc} ${args.join(' ')}`);
@@ -397,7 +422,8 @@ for (const [sc, args] of ERRORS) {
   const exec = o('ttOutTrae', ['lookup']).pick?.command ?? '';
   const worker = o('ttOutTrae', ['implement', '--impact', 'service']).pick?.command ?? '';
   const cases = [[gate('ttOutTrae', ['analysis']), false], [gate('ttOutTraeDown', ['analysis']), true],
-    [/^traecli exec .*-m GPT-6\.1-Sol /.test(exec), true], [/--account trae start .*--model GPT-6\.1-Sol /.test(worker), true]];
+    [/(?:^|&& )traecli exec .*-m GPT-6\.1-Sol /.test(exec), true], [/--account trae start .*--model GPT-6\.1-Sol /.test(worker), true],
+    [exec.includes('/scripts/launch-audit.mjs'), true]];
   const bad = cases.map(([got, want], i) => (got === want ? null : i)).filter((i) => i !== null);
   if (bad.length) fail++;
   console.log(`${bad.length ? 'FAIL' : 'ok  '} trae gate/launch    ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')} (exec: ${exec.slice(0, 90)})` : ''}`);
@@ -763,8 +789,8 @@ for (const [sc, args] of ERRORS) {
   for (const cat of ['analysis', 'review', 'implement']) cases.push([o('traeGptOut', [cat]).pick.model, 'deepseek-v4.1-flash']);
   for (const cat of ['build-run', 'ui-browser', 'computer-use']) {
     const r = o('ttFresh', [cat]);
-    cases.push([hasNote(r, /finished tasks by task directory.*never kill other tasks' processes/), true],
-      [hasNote(r, /at most 3 concurrent heavy builds unless the ledger sets N otherwise/), true],
+    cases.push([hasNote(r, /guarded executor.*continuous idle evidence.*every orchestrator's release/), true],
+      [hasNote(r, /at most 3 concurrent heavy builds unless the ledger sets N otherwise/), false],
       [hasNote(r, /at most 2 h, then return the device and report.*device connected, unlocked, app data backed up/), true]);
   }
   cases.push([hasNote(o('traeFull', ['implement', '--impact', 'release']), /route\.mjs review --author codex --impact release/), true]);
@@ -1214,7 +1240,7 @@ for (const [sc, args] of ERRORS) {
     assert.equal(r(['--background', 'lookup']).pick.account, 'trae');
     const gemini = r(['lookup', '--background'], 'backgroundGemini');
     assert.equal(gemini.pick.launcher, 'codex-worker');
-    assert.ok(gemini.notes.some((n) => /hub is down.*start it first/.test(n)));
+    assert.ok(gemini.notes.some((n) => /list --limit 1.*only if unreachable.*global-rules owner/.test(n)));
     assert.ok(!gemini.notes.some((n) => /twice what the task should take|codex exec still works/.test(n)));
     assert.equal(r(['implement'], 'backgroundOnly').pick.model, FLASH);
     assert.equal(r(['implement', '--background'], 'backgroundOnly').pick.model, FLASH);

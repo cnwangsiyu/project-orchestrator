@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "fail_closed": true,
+  "never_command_regex": [
+    "(?i)(?:^|[/\\s])(?:claude|codex|ttadk|trae|traex|traecli)(?:[/\\s.-]|$)",
+    "(?i)(?:codex-worker|route\\.mjs|supervisor|agent.?hub|chrome.?mcp)"
+  ],
+  "never_system_command_regex": "(?i)(?:launchd|kernel_task|WindowServer|loginwindow|watchdogd)",
+  "never_system_prefixes": ["/System/", "/usr/libexec/", "/usr/sbin/", "/sbin/"],
+  "extra_live_task_dirs": [],
+  "live_task_rules": "Protect agent trees, their specific cwd/workspace paths, active Claude session cwd paths and explicit extra_live_task_dirs. Generic HOME or / cwd is not a task directory; the agent tree is still protected. Missing cwd for a candidate means report only.",
+  "gui_apps": {
+    "default": "report_only",
+    "chrome": "restart_only_after_all_orchestrators_explicitly_release",
+    "editors_and_xcode": "report_only"
+  },
+  "managed_services": ["simulator", "core_simulator", "gradle_kotlin_daemon"],
+  "killable_categories": ["headless_browser", "xcode_build_tool", "node_test_leftover", "device_tunnel"],
+  "device_rule": "Any held device or unreadable lease metadata protects ALL device tools and tunnels. Never probe or change a device. Locks remain held even if expired or disconnected.",
+  "thresholds": {
+    "orphan_min_age_seconds": 1800,
+    "idle_seconds": 7200,
+    "idle_max_cpu_percent": 0.5,
+    "sample_seconds": 2,
+    "max_history_gap_seconds": 600,
+    "gui_high_cpu_percent": 100,
+    "gui_min_age_seconds": 3600,
+    "chrome_high_cpu_seconds": 3600,
+    "max_inventory_age_seconds": 180,
+    "coordination_seconds": 1200,
+    "term_wait_seconds": 30,
+    "chrome_start_wait_seconds": 45
+  },
+  "coordination": {
+    "roster": "~/.claude/orchestrator/_shared/orchestrators.txt",
+    "exclude_names": ["Orchestrator 主对话"],
+    "secretary": "工作秘书",
+    "rule": "Every roster member must explicitly release each target identity. Missing, offline, ambiguous, timeout and claim replies all veto that identity. New targets require new coordination. New roster members veto until they answer."
+  },
+  "chrome": {
+    "binary": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "args": ["--restore-last-session"],
+    "exclude_regex": "(?i)(?:--headless|headless_shell|chrome-headless-shell|playwright|--remote-debugging-pipe)",
+    "native_host_log_regex": "(?i)(?:Claude Chrome Native Host.*(?:ping|status)|(?:ping|status).*Claude Chrome Native Host)",
+    "restart_attempts": 2,
+    "rule": "Only the revalidated GUI tree, never a headless/test tree. If any descendant is protected or unidentified, veto the whole restart. Once termination starts, always attempt restoration even after a partial failure."
+  },
+  "disk_rule": "Only explicitly registered self-made build clones/templates, below 1 TB decimal free space; guarded disk executor only. Never source worktrees, user files, reports, caches or credentials.",
+  "owner_rule": "Ordinary process termination requires known terminal owner task, continuous idle >=2h, no recent task activity, and every orchestrator release. PPID=1 alone is never proof.",
+  "credentials_rule": "Never read, copy or load login, credential, cookie, token or keychain files. Never inject a session. If sign-in or authorization is needed, stop and report BLOCKED."
+}

@@ -19,7 +19,8 @@ personal quota, or skip tonight — and re-runs the launcher after a yes; a whol
 - **The worker** (the routed Codex model, e.g. `gpt-6.1-sol` xhigh on TTADK or TRAE; full access, network on):
   steps 1, 2, 3 and 5.
   - The launcher has already run `review-data` (24h, 168h) and `orch-usage` into `<date>.data/`; read those files
-    instead of running the scripts.
+    instead of running the scripts. It also gathered `resource-review-24h.txt/.json`, `resource-review-96h.json` and a
+    read-only `resource-now.json`; resource failures/coverage gaps are UNKNOWN, not empty or healthy.
   - Model news: use web search and fetch the official pages yourself (the same pages and limits as in step 1).
   - Step 3 as written: worktree, edits, `route-scenarios.mjs` must print `all pass` before any commit, push, fast-forward,
     `--save-catalog`. Edit only the files step 3 names; anything else goes to proposals.
@@ -83,13 +84,10 @@ These are the user's decisions (2026-10-30 to 2026-11-03):
     failure still climbs to `xhigh` and `max`.
   - Desktop apps (`computer-use`) go to TTADK Codex when browser-ready (user, 2026-11-07): a terminal Claude worker has
     no desktop computer-use tool (ledger 10-31), so Claude there is only a fallback that may report BLOCKED.
-- **Permissions (2026-11-05):**
-  - Before dispatching, the orchestrator does only the minimal permission-only part it is already authorized for,
-    and workers do the rest.
-  - When nobody holds a permission, the worker asks for it.
-  - A blocked Claude worker asks the user in its own session and retries.
-  - Nobody takes over a denied step, and relayed instructions are not authorization.
-  - See SKILL.md, "Plan around permissions".
+- **Permissions (2026-11-05; tightened 2026-11-13):** Claude workers use Remote Control and explicit Bypass;
+  only actions Bypass cannot pass need authorization cards. Agents execute non-secret actions after approval;
+  only the user types passwords/codes. Denials cannot be laundered, and Codex signing/credential files remain
+  forbidden even with authorization. See [permission plan](../SKILL.md#permission-plan).
 - **Git:** commit and push only `~/.agents/skills` changes, to `origin main`. Never force-push.
 
 ## 1. Gather (keep your own context small)
@@ -134,9 +132,99 @@ These are the user's decisions (2026-10-30 to 2026-11-03):
 
   A new model, price or plan rule only counts once an official page states it.
 
+### Account and model health
+
+Owned by the routing/global-rules orchestrator (user, 2026-11-13), not the secretary. Include these checks every
+night even when routing policy did not change; use sanctioned account-status/expiry metadata, never read login,
+signing or credential files. Unknown login/expiry is unknown, not healthy; missing sign-in means BLOCKED.
+
+- **Company logins:** check TTADK SSO expiry and TRAE login state. When any company login expires within **3 days**,
+  put a Chinese reminder/renewal card in `decisions` for the finisher to show the user; report already-expired or
+  missing login immediately. The user alone types secrets; don't transplant sessions or automate credential entry.
+- **Dated TTADK reminder:** SSO expires **2026-11-21 19:37 PST** (2026-11-22 03:37 UTC), as supplied by the user
+  on 2026-11-13. Start reminders by **2026-11-18 19:37 PST**, unless sanctioned metadata confirms renewal.
+  `quota.mjs` uses `leanLines` and `POLICY.ttadkSsoWarnH = 72` in `scripts/lib/state.mjs`, including the boundary;
+  this gives at least two days' notice with nightly checks. Don't run live auth reads as a Codex workaround.
+- **Quota health:** inspect Claude all-model/Fable weekly projections, TRAE login/restriction recovery and Codex
+  reset-card deadlines. Every reset-card redemption needs a fresh user OK, even after prior approvals. Company
+  quota continues without asking; ask before personal quota or deferring runnable work. No LLM total-cost caps.
+- **Persistent orchestrator models:** model selection lives in `~/.claude/jobs/<id>/state.json` `respawnFlags`;
+  a `/model` switch is lost on restart. VAK and routing stay on **Fable**; Webview and Lynx returned to **Opus on
+  2026-11-11** because their Fable weekly projection exceeded budget. These are orchestrator choices, not worker defaults.
+- **Dated model check:** on/after **2026-11-17 09:00 PST** (Fable weekly reset; 2026-11-17 17:00 UTC), ask the user
+  by Chinese card whether Webview/Lynx should move back to Fable, with fresh weekly projections and Opus/Fable
+  options. Do not switch automatically; record the decision and update `respawnFlags` only after approval.
+
 ## 2. Find what to fix
 
 Look for evidence in the data, not hunches. Typical findings:
+
+### Global Rule Compliance (User, 2026-11-13)
+
+Read `review-data.globalRules` for the day and week. Report violations **per orchestrator**: unrouted launches,
+personal-quota launches without recorded user OK, TRAE GPT launches on security routes, and missing/stale
+`rules-ack` vs the digest version. Read the launcher-provided `orch-usage` flags/blockedMinutes alongside them
+for labour and foreground blocking. Launch records are attempts, not completion proof; legacy routes without
+launch evidence and missing remote ledgers stay unknown, never proven compliant or violated.
+
+Compare the last three nightly reports. A rule broken on three nights needs a concrete tool-level enforcement
+proposal (evidence, owner, smallest effective gate and false-positive risk), not another repeated reminder.
+Use a Chinese decision card if approval or a hard-rule change is needed; never silently expand permissions or
+change thresholds. Push digest-version notes through the owner and require ledger `rules-ack <version>` from
+each recipient. Hook injection records are not acknowledgements.
+
+For a reported unreachable hub, first probe `codex-worker --account <name> list --limit 1`; an empty successful
+list is reachable. Start with `codex-worker --account <name> hub` only if unreachable, and tell the global-rules
+owner. Opt-in KeepAlive templates/commands are in `rules-enforcement.md`; this review does not install them.
+
+### Machine resources
+
+Read [resources.md](resources.md) and the launcher's `resource-review-24h.txt/.json`, `resource-now.json` and adjacent
+`.err` files, plus `resource-review-96h.json` for multi-day threshold evidence. If run separately,
+`node scripts/resource-review.mjs --hours 24 [--json]` or `--hours 96 --json` is read-only. Include this
+step every night, even when coverage is zero. Never extrapolate missing samples or infer CPU/RSS consumers from load.
+
+- Report coverage, metric availability, CPU idle with resource-ready queued tasks versus unverified waits, load/pressure/
+  swap contention, sampled project/task shares, independent package-build overlap, continuous idle workers, possible
+  terminal-task orphans, suspected hung Chrome, simulator services and disk trend. Give concrete UTC times, task owner,
+  PID identity and evidence; include local times in the human report. RSS shares double-count shared pages, and a
+  simulator service is not proof of a booted/unused simulator. Idle network/model waits are not necessarily waste.
+- Include lock wait/hold lower-upper bounds and censoring, STALE local-PID observations, persistent heavy-build/lane
+  candidates without matching wrapper-PID holders, authoritative overload periods versus >12 / <16 GiB, and threshold
+  strict/loose/conflicting/insufficient assessment. `res status` is parsed from captures; live status writes temporary
+  files, so the sampler uses read-only registry/metadata/PID observations. Minute journal timestamps cannot give exact
+  holds, and the live journal has no wait starts/timeouts; sampled waits are not a complete queue history. Never reclaim.
+- Report hub ports 47321-47324 and all/partial listener outages, including isolated observations with duration UNKNOWN.
+  Denied probes are UNKNOWN, not all four down. The user reported a Claude-daemon restart outage on **2026-11-13 at
+  11:36 PST (19:36 UTC)**; distinguish that user report from measured history. Do not invent pre-install observations,
+  assert daemon causality from ports, or restart hubs in the resource review.
+- Report shared ccache latest cumulative rate and window hit/miss deltas/coverage/resets. The T83 pilot validated
+  Android SDK native graph/host CMake-Ninja launchers, not Xcode or full APK acceptance. An empty/cache-stat-free first
+  cold run has rate UNKNOWN; do not confuse pilot 100% hits with today's rate or attribute shared hits to one owner.
+- Baseline: ONE full-package slot, TWO heavy-task lanes, load >12 / available memory <16 GiB blocks heavy admission.
+  Check the installed shared controller with its owner (Webview / vesdk-mainline), including the current memory estimator;
+  a fallback page estimate and memorystatus percentage are not interchangeable benchmarks. Shift heavy builds and
+  dispatch ready lightweight work first; do not reduce model concurrency to fix compiler fan-out. Preserve affected-only
+  fix tests, final full gates, cache provenance, device leases and quality constraints.
+- Tune only within `scripts/resource-policy.json`'s **dated user-approved** `approvedRanges` and `approvalEvidence`.
+  No numeric tuning range was supplied on 2026-11-13, so these start null: retain 12 / 16 / 1 / 2 and ask a Chinese
+  decision card for any change until the user records bounds. Never invent an approved range. With bounds recorded,
+  small changes require at least three days of adequately covered comparable tasks, queue/wall-time and pressure evidence,
+  old/new values and rollback criteria. Thin/conflicting evidence or values outside bounds require a card; silence is no OK.
+  Use the 96h report: automatic eligibility requires >=80% comparable coverage on each of three full UTC days, consistent
+  heavy-check estimator, no bypass candidates, valid dated approval and in-range candidates. This is a precondition,
+  not proof of optimal thresholds; compare like task wall/wait outcomes, and change one gate at a time.
+  Update observation policy in step 3 and put a controller update for its owner in `notify.json.actions`; only that owner
+  updates the shared enforcement contract. Report it as pending until acknowledged, not already enforced.
+- Add each project's concrete bad cases to `notify.json.actions` for its exact orchestrator name (union of ledgers and
+  roster as in step 4). Unknown owners go to the routing/global-rules orchestrator for attribution, never a guessed project.
+  Projects respond by fixing wrapper bypasses, concurrency/cache reuse or task-state metadata, not killing others' builds.
+- The 04:30 [guarded cleanup](resources.md#cleanup) consumes the same history and separately coordinates **every**
+  orchestrator. This review worker never sends signals, deletes live files, releases leases, enables apply or installs
+  launchd agents. Hung Chrome means restart and a real browser-tool reconnect check afterwards, not just termination.
+  Self-made build clone/template cleanup is only below 1 TB free and behind the explicit artifact allowlist/guards.
+
+### Routing And Resource Findings
 
 - **Waste:**
   - a Codex week reset with a large unused share;
@@ -256,12 +344,17 @@ Every night review the policies added on 2026-11-13 against both the day's data 
     bounds above; the corresponding eligibility, quota-choice and fallback rules in `scripts/route.mjs`;
   - the rationale in `references/model-routing.md`;
   - other docs only where they describe what changed.
+  - `scripts/resource-policy.json`, only within evidenced user-approved ranges above; telemetry/cleanup code or changing
+    the one-slot, protection or disk safety rules needs a separately authorized task, not silent nightly edits.
 - **Test:**
   - Update the expectations in `scripts/test/route-scenarios.mjs` for any intended behaviour change. Add a case for
     each fix.
   - Run `node scripts/test/route-scenarios.mjs`. Don't commit unless it prints `all pass`.
   - If company telemetry or review reporting changes, also run `company-telemetry-scenarios.mjs` and
     `outcome-scenarios.mjs` under `scripts/test/`; both must print `all pass`.
+  - For resource policy/reporting changes run `resource-scenarios.mjs`, `resource-nightly-scenarios.mjs` and
+    `resource-lock-scenarios.mjs` under `scripts/test/`, plus `python3 -B scripts/resource-cleanup/test_cleanup.py`
+    and `python3 -B scripts/resource-cleanup/test_disk_cleanup.py`; all must pass with synthetic data.
 - **Commit and push:**
   1. In `project-orchestrator`, commit with a message stating the change and its evidence, then
      `git push origin HEAD:main`.
@@ -277,6 +370,9 @@ Every night review the policies added on 2026-11-13 against both the day's data 
 Do this only when something changed, or an orchestrator has to act (missing `--project`, a pending card decision to
 put to the user).
 
+- **Owner and delivery (user, 2026-11-13):** the routing/global-rules orchestrator owns rollout for every global
+  rule change, not just nightly routing edits. Send a short policy note through the secretary for the mini's
+  group; notify MacBook orchestrators directly. The secretary only relays, keeps ledgers/roster and asks cards.
 - **Recipients:** every orchestrator, local or remote (user, 2026-11-03). Build the list by name; don't rely on a
   `ListAgents` listing, which is truncated when there are many sessions (2026-11-08: 95 rows hidden, orchestrators
   possibly missed). The list is the union of:
@@ -285,9 +381,9 @@ put to the user).
   - the roster `~/.claude/orchestrator/_shared/orchestrators.txt`, one session name per line, `#` lines are comments (it holds the remote
     orchestrators, which have no ledger here; the secretary keeps it current). Today: Webview 问题跟进主对话, Lynx Game
     主对话, Video Agent Kit 主对话, 获客平台主对话, AutoTrader 主对话.
-  - Message each one by its exact name with `SendMessage` (a bare name reaches a live session on this machine or another
-    one even when a listing doesn't show it). A name that doesn't resolve, or is offline: record it in the report as
-    "not notified (no session)" and move on.
+  - For the mini group, send the secretary the exact recipient list and note to relay; for MacBook orchestrators,
+    use `SendMessage` by exact name. A bare name reaches another machine even when a listing doesn't show it.
+    Record relay delivery separately from confirmed recipients; unresolved/offline names are "not notified (no session)".
 - **Remote orchestrators run on another machine with their own checkout.** When the skill changed, start their
   message with:
   `git -C ~/.agents/skills pull --ff-only origin main && git -C ~/.agents/skills submodule update --init project-orchestrator && git -C ~/.agents/skills/project-orchestrator pull --ff-only origin main`,

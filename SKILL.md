@@ -54,6 +54,24 @@ session name, settle which project this is, open or create its ledger, reconcile
 sessions (`claude agents --json` for Claude workers, `codex-worker.mjs --account <name> status`/`wait` for the
 Codex threads the ledger records), and show the user the current status in a few lines.
 
+## Global rules (owner: Orchestrator 主对话)
+
+User, 2026-11-13: the routing/global-rules orchestrator owns global policy here (「都交给他来负责，让他统一管理」); the secretary only relays, keeps ledgers and asks decision cards, never owns or changes policy.
+The versioned [global-rules digest](references/global-rules.md) is the single injection source. Read it at startup/resume/compact and after a change; write `rules-ack <version>` in your ledger. See [four-layer enforcement and opt-in hook/launchd installation](references/rules-enforcement.md).
+
+- **Resources:** [machine resources](references/resources.md) supplies five-minute sampling, nightly retro/guarded cleanup and detection of builds without holders; [shared `res`](#shared-resources), the [live lock contract](/Users/bytedance/code/.claude-data/orchestrator/vesdk-mainline/tasks/T83/lock-contract.md) and [build/cache discipline](#build-discipline) require the wrapper or explicit take/return, build-then-lane order, finite waits/gates, reverse release, incremental/cold acceptance builds and scoped ccache/Gradle caches (first cache use cold).
+- **Disk:** [workspace retention](#workspace-retention) sets no worker space caps; auto-clean self-made build clones/templates/caches only when the data disk has <1 TB free; real workspaces/user data require a user card.
+- **Claude settings:** [documented settings](#claude-worker-settings) record `CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP=1`; idle-stop has no switch (pin or keep working), with no settings mutation.
+- **Claude workers:** [launch](#claude-worker-settings) always uses Remote Control + explicit Bypass; [permissions](#permission-plan) use cards for what Bypass cannot pass, agents execute non-secret actions, only the user types secrets.
+- **TRAE:** [account rules](references/codex-workers.md#trae-cli-as-the-second-company-account-user-2026-11-08) separate restrictions from concurrency/quota, never reduce concurrency for queues, enforce only QPM/TPM limits for LLM use (no total-cost caps), and name the concrete worker model in reports.
+- **Work and quota:** [judgment](#judge-not-labour) stays with orchestrators, [independent tasks](#split-by-coupling) run in parallel while coupled work stays together; [quota](#route-every-task) never silently holds work, uses company quota without asking, personal quota after asking, reset cards only after a fresh OK every time.
+- **Signing/credentials:** [worker safety](#worker-credential-safety) forbids Codex workers on this machine from touching signing/credential files, including hashing, regardless of authorization; strip/use sanitized public inputs or have the user run it once.
+- **Orchestrator models:** [account/model health](references/nightly-review.md#account-and-model-health) records persistent `jobs/<id>/state.json` `respawnFlags`, VAK/routing on Fable, Webview/Lynx on Opus since 2026-11-11, and a user check on/after 2026-11-17 09:00 PST.
+- **Account reminders:** [nightly health](references/nightly-review.md#account-and-model-health) owns cards for company logins expiring within three days, TTADK SSO (2026-11-21 19:37 PST), TRAE login, Codex reset cards and Claude/Fable weekly projections; [`POLICY`](scripts/lib/state.mjs) supplies the 72-hour TTADK warning to `quota.mjs`.
+- **Rollout:** [policy notification](#global-rule-rollout) sends each change to all orchestrators: via the secretary for the mini group, directly to MacBook orchestrators.
+
+<a id="global-rule-rollout"></a>Whenever a global rule/digest version changes, its owner sends a short note (version, changes, reason, required action and detail link) to all orchestrators: through the secretary for the mini's group, directly to MacBook orchestrators. Each recipient writes `rules-ack <version>` in its ledger; the owner checks acknowledgements, not just send receipts. Record delivery/offline recipients; the secretary relays and maintains the roster, not policy. See [nightly rollout](references/nightly-review.md#4-tell-the-orchestrators).
+
 ## Principles
 
 **Settle the project first.** Take the project from the user's words; otherwise infer it from the
@@ -73,7 +91,7 @@ and the skills or tools that serve them. Discover what the current request needs
 do any wide search — and record it, rather than surveying everything up front. Mark which branches
 the project owns (it may merge into them locally) and which are shared with other people.
 
-**Protect the orchestrator's context: judge, don't labour** (user, 2026-11-05; repeated 2026-11-11: "主对话别自己去干活，只做判断，活让 worker 去干"; the nightly review now also counts source edits — Edit/Write or shell writes in a code checkout — and test/build runs by the orchestrator itself). This session is the
+<a id="judge-not-labour"></a>**Protect the orchestrator's context: judge, don't labour** (user, 2026-11-05; repeated 2026-11-11 and reaffirmed 2026-11-13: "主对话别自己去干活，只做判断，活让 worker 去干"; the nightly review now also counts source edits — Edit/Write or shell writes in a code checkout — and test/build runs by the orchestrator itself). This session is the
 one place that sees every task, and its context is finite. Each page, log, diff, screenshot or
 transcript read here pushes task state out and ends in compaction. It also burns the Claude budget
 that keeps the orchestrators alive.
@@ -89,8 +107,7 @@ that keeps the orchestrators alive.
     visual check), both on a Codex worker when a Codex account is browser-ready (TTADK first, else a ChatGPT account), else Claude; desktop apps go to a
     `computer-use` worker (a browser-ready Codex account, TTADK first; a terminal Claude worker has no desktop
     computer-use tool). All of them can reach the user's Chrome. If that worker reports it can't reach the browser, fix the pairing; don't take
-    over the clicking. The one exception is the minimal
-    permission-only part this session is already authorized for (see "Plan around permissions").
+    over the clicking. Coordinate authorization cards rather than doing the worker's action (see "Plan around permissions").
 - **Read reports through `node <this skill>/scripts/report-summary.mjs <task dir>`.** It prints the
   report's `## Summary` (and a Codex worker's final line), capped at 3 KB. Ask the worker for
   anything more rather than opening the full report.
@@ -103,7 +120,7 @@ that keeps the orchestrators alive.
   tool output, browser calls, screenshots read, sleep polls and compactions, and flags any that
   go over the limits.
 
-**Split by coupling, run what is independent in parallel; don't wait on one thing** (user, 2026-11-11:
+<a id="split-by-coupling"></a>**Split by coupling, run what is independent in parallel; don't wait on one thing** (user, 2026-11-11; reaffirmed 2026-11-13:
 "之后让他们都把一些能并行的事项并行起来做，记住，别老是阻塞在那等着";
 "当然，别为了并行去强拆任务，有耦合的任务请放一起做，只是没有依赖的任务可以拆出去，记住").
 - **Split by coupling, not to parallelize:** work sharing code, state, interfaces or a design decision
@@ -169,6 +186,15 @@ Every code brief includes this short **Acceptance** block:
 - **Out of scope:** list what this task does not change.
 - **Open questions:** resolved answers, or explicitly marked NOT-READY with an owner; resolve blockers before dispatch.
 
+Every **build brief** also includes (user, 2026-11-13): "Full-package builds use `scripts/heavy-build.sh <command...>`
+with holder/project/task/timeout set, or explicit equivalent `res` take/return. Build tasks must take/return required resources via
+`~/.claude/orchestrator/_shared/res`, following [build discipline](#build-discipline). Classify this run as full-package,
+other heavy or not heavy; name its lock IDs, exact take/wait/return commands, finite `--timeout <minutes>` and
+long-lived wrapper `--pid $$`. Install `trap EXIT` cleanup before acquisition, release only acquired holds in reverse
+order on every exit (including a lane-acquisition timeout), and report/queue on timeout; never bypass the locks/gate."
+Non-heavy builds need no heavy-* lock, but still follow applicable shared checkout/cache holds. Put approved build
+parallelism, the fixed per-base build directory, incremental/focused checks and cold acceptance build in the brief.
+
 Before dispatch, take **30 seconds to self-check**: premises have evidence, the worker can run the acceptance checks
 with its workspace/tools/access, and the scope does not conflict with sibling tasks. Amend gaps before launching.
 
@@ -181,7 +207,7 @@ close (user, 2026-11-04, after a worker overwrote a user header and another wipe
   --remove-existing-content, wiping app containers or Documents, erasing a simulator), or ask
   first."
 
-Every brief, whatever the task, also carries the credential clause (user-approved 2026-11-11, after a TRAE
+<a id="worker-credential-safety"></a>Every brief, whatever the task, also carries the credential clause (user-approved 2026-11-11, after a TRAE
 DeepSeek worker copied bytedcli's TikTok SSO session file into its automation browser to get past a console
 login; the user had to sign in again):
 - "Never read, copy or load any login session or credential file (cookies, SSO/session tokens, CLI auth
@@ -192,6 +218,9 @@ login; the user had to sign in again):
   name the console origins and already signed-in browser/account in the brief; route those steps as `browser` work.
   Headless Playwright is for public/local pages, never a substitute for that sign-in; missing access means BLOCKED.
   One-shot `codex exec` / `traecli exec` launches must carry the credential clause in developer instructions too.
+- **Codex signing boundary on this machine** (user, 2026-11-13): never touch signing or credential files, including
+  keychain-password files or hashing them, even with authorization. Design the task to strip those inputs/use a
+  sanitized public version, or have the user run the necessary operation once. Never plan on approval lifting this ban.
 
 **Prevent rework at the brief** (rework retro of 2026-11-06–10, 89 rework chains; user-approved 2026-11-10). Most
 rework came from unchecked premises, "done" proven on the wrong target, one shared rule re-implemented by several
@@ -201,7 +230,8 @@ workers, and patching after a second same-kind defect.
   sandbox can write its outputs (research that writes files is not `--read-only`); the tools it needs (browser, device
   channel, upload, unlocked screen); exact dependency caches; signing team/profile/key, bundle in use, permissions,
   runner support. Anything NOT-READY: fix it or ask the user first; don't launch into it. Stay within the permissions
-  you have: a missing credential or signing asset is one card to the user, never a worker workaround.
+  you have: a missing credential or signing asset is one card to the user, never a worker workaround; for Codex use
+  the signing boundary above, not an authorization plan.
 - <a id="done-on-target"></a>**"Done" is proven on the target artifact and entry, not on unit tests.** The brief's done-criteria name: (1) the
   acceptance identity — which server and session (server-side evidence), which build/version/SHA, which core is loaded;
   after switching endpoints, reconnect explicitly; (2) the production entry — the real package/loader path (e.g. a plain
@@ -226,7 +256,8 @@ workers, and patching after a second same-kind defect.
 - **Fix rounds.** When a miss is `spec` or `process` (`outcome --cause`), first amend the brief's Acceptance block and
   say what changed; do not dispatch another attempt with the same brief. Every fix brief asks for three kinds of test:
   the original failure reproduced, the fix passing, and
-  the neighbouring old behaviour unchanged (not only the case the reviewer named). If the second fix of a task brings a
+  the neighbouring old behaviour unchanged (not only the case the reviewer named). Run affected tests only in fix
+  rounds (user, 2026-11-13), not the full matrix; the target-artifact acceptance gate still applies. If the second fix of a task brings a
   new defect of the same kind, stop patching: find whether it is a shared contract, the interface layout or a too-wide
   patch, then simplify or split the work (a `design` route can review the approach). `route.mjs` reminds you from
   `--failures 2` on code work. A round limit triggers this re-scoping; it never stands in for correctness.
@@ -314,7 +345,7 @@ coupled chain of reasoning — root-cause hunts across components, device experi
 anything costly to get wrong — goes to one strong worker rather than being split thin. That split
 is your call. The model and effort for each piece come from the router below.
 
-**Route every task with `scripts/route.mjs`; judge only what it can't** (user, 2026-11-03). Every new
+<a id="route-every-task"></a>**Route every task with `scripts/route.mjs`; judge only what it can't** (user, 2026-11-03; work/quota rules reaffirmed 2026-11-13). Every new
 worker, subagent, side task, escalation and amendment that changes the work gets its vendor, model,
 effort, Codex account and launch command from
 `node <this skill>/scripts/route.mjs <category> [flags]`, so the policy is the same every time.
@@ -481,7 +512,7 @@ happen. Split a request that is only partly related. Start a fresh task when the
 independent, or when the old worker's context has become a liability (very long, compacted,
 stuck); point the new brief at the old report.
 
-**Fit the workspace to the task.** Decide per task, not per project. Work that touches no code
+<a id="workspace-retention"></a>**Fit the workspace to the task.** Decide per task, not per project. Work that touches no code
 runs anywhere, e.g. the project folder under `~/.claude/orchestrator/<project>/`. Read-only code
 work can share an existing checkout. A lone writer may commit straight to a project-owned branch in
 an idle checkout. Parallel or risky writers get their own worktree, created on demand in the right
@@ -489,24 +520,76 @@ repo and cut from the right base — the project branch, a release branch, or th
 whatever the task calls for (see Mechanics for where and how). One writer per worktree. Builds count as writes. Devices, simulators,
 ports and shared caches have a single holder at a time. In heavy repos a new worktree costs a big
 checkout and a cold build, so reuse idle ones or run tasks one after another — say so when you
-choose. Record every worktree you create and remove it once its work is merged or abandoned.
+choose. Record every worktree you create and keep reusable ones after merge/abandonment under the disk rule:
+no worker space caps (user, 2026-11-13). Auto-clean only self-made build clones/templates/caches, and only when the
+data disk has **<1 TB free**; confirm ownership and that no active task needs them. Deleting real workspaces or user data
+always needs the user's decision card, regardless of free space.
 
-**Build and device environment discipline** (user-approved task-duration retro, 2026-11-13):
+<a id="build-discipline"></a>**Build and device environment discipline** (user-approved; heavy-build lock live 2026-11-13,
+vesdk-mainline T83 Part A): follow the [full lock contract](/Users/bytedance/code/.claude-data/orchestrator/vesdk-mainline/tasks/T83/lock-contract.md)
+and take-time notes at `~/.claude/orchestrator/_shared/notes/heavy-build.md`. Use the live shared `res`, not a private lock.
 
-- Before builds/device runs, identify orphaned build/test process trees of finished tasks by their task directory and
-  clean only those trees. Never kill another task's processes; uncertain ownership means leave it alone.
-- On the mini, run at most **N concurrent heavy builds**, with **N = 3** unless the ledger says otherwise. This limits
-  heavy build processes, not parallel model workers; keep other ready tasks running.
+- Before builds/device runs, inspect orphaned build/test trees using task ownership and recent activity. Cleanup uses
+  [resources.md](references/resources.md#cleanup)'s guarded executor only: terminal owner, continuous idle evidence,
+  live-session/lease protections and every orchestrator's release. PPID=1 or process age alone is never permission to kill.
+- **Scope and slots:** full-package builds (env verify, app `xcodebuild`, Gradle assemble with native) hold
+  `heavy-build` plus one of `heavy-lane-1`/`heavy-lane-2` for the whole run: one full-package build and at most two
+  heavy tasks machine-wide. SG packaging, native-compiling or long multi-process focused tests need one lane.
+  Host unit tests without a full native build, single-TU compiles, analysis/docs and build-free device sessions are
+  not heavy. These caps never lower model-worker concurrency; keep independent ready work running.
+- **Take and gate:** `res take <id> --by <session> --project <slug> --for "<purpose>" --task <task-id> --pid $$`
+  returns 0 taken, 2 busy. Plain `take` must first pass `res heavy-check` (0 OK, 5 overloaded; invalid/unreadable
+  metrics return 1, no acquisition). Gate at load1m **>12** or available memory **<16 GiB**; macOS available memory
+  is `kern.memorystatus_level / 100 * physical memory` (fallback/Linux details in the contract), not swap/page diagnostics.
+- **Build entry:** full-package briefs require [heavy-build.sh](scripts/heavy-build.sh) or explicit equivalent
+  `res` take/return; other heavy tasks use the lane-only protocol. The wrapper never installs tools or bypasses a
+  gate, preserves the command's exit status and terminates owned child groups before returning holds. Don't nest
+  it or reuse an already-held heavy lock. The resource sampler independently detects builds without holders.
+- **Order and bounded waiting:** full-package runs take `heavy-build` first, then one lane; never hold a lane while
+  waiting for `heavy-build`. Use `res wait <id>` with the same holder/project/purpose/task/PID flags and always
+  `--timeout <minutes>`; it backs off and enforces the heavy-* gate (0 taken, 2 timeout). Run waits in the background
+  worker/wrapper, not the orchestrator's foreground. Timeout means report/queue, never bypass; prolonged overload
+  goes to the user with readings to decide thresholds, never automatic threshold changes.
+- **Return and stale holds:** use the long-lived wrapper's `--pid $$` (default is caller PID, not `res` PID).
+  Install `trap EXIT` before acquiring and `res return <id> --by <session>` only for acquired holds, in reverse order,
+  on every exit, including failure to acquire the lane. `res status` shows PID/host/start and marks a local dead-PID
+  hold STALE; `res wait` reclaims STALE heavy-* holds older than 10 minutes and logs in `log.tsv`. Other confirmed
+  stale releases require `res return <id> --by <session> --force --note "<reason>"`; never force an active/unverified hold.
+- **Approved build discipline:** compile **6**, link **1**, Xcode **`-jobs 6`**, Gradle **2 workers**. Build incrementally
+  in a fixed per-base directory, with **one cold build before acceptance**; don't run a native build when native code
+  didn't change. Fix rounds use affected tests only.
+  Auto-clean self-made clones/templates only when the data disk has **<1 TB free**; follow [workspace retention](#workspace-retention)
+  for all deletion boundaries.
+- **ccache (T83 Part B, 2026-11-13):** Android NDK and host CMake **Ninja/Makefiles** use both
+  `CMAKE_C_COMPILER_LAUNCHER`/`CMAKE_CXX_COMPILER_LAUNCHER=/opt/homebrew/bin/ccache`; not the Xcode generator.
+  Shared `CCACHE_DIR=$HOME/.vesdk-dev/ccache`, `CCACHE_CONFIGPATH=$CCACHE_DIR/ccache.conf`: max_size=96G,
+  base_dir=/Users/bytedance, hash_dir=false, compiler_check=content. Grant writes only to the approved cache path
+  or use task-scratch cache data with shared config, never broad HOME access. No shared-counter clearing or sloppiness;
+  keep mutable build trees separate and verify generated compiler commands. Only the SDK native graph is validated,
+  not full APK/Gradle acceptance; **first real use is cold**. See [enable snippets/scope limits](/Users/bytedance/code/.claude-data/orchestrator/vesdk-mainline/tasks/T83/enable-build-cache.md).
+- **Gradle pure builds:** public/sanitized inputs, task-private Gradle home; `--build-cache --daemon --max-workers=2`,
+  `-Dorg.gradle.daemon.idletimeout=300000`, `-Dorg.gradle.jvmargs=-Xmx6g`. No daemon when process-exit credential
+  isolation or signing/login material is involved. Omit routine clean/rerun/header regeneration; stop only the task's
+  own daemon when isolation requires it. These flags never authorize signing/credential access; use the enable snippets above.
+- [Machine resources](references/resources.md): a five-minute sampler and nightly retro attribute CPU/RSS, lock/wait/
+  STALE/bypass evidence, authoritative heavy-check readings, shared ccache rates and hub listener outages to projects/tasks.
+  Keep `resource-tasks.json` current for ready/queued/waiting work and exact worktree/worker mappings; shared-repo ownership
+  stays ambiguous without task evidence. Send each project its cases; tune only within evidenced, dated user-approved
+  ranges, otherwise ask Chinese cards. Missing probes are UNKNOWN, never zero/healthy; telemetry never reclaims locks
+  or restarts hubs. Cleanup is separate at 04:30, dry by default. Templates are not installed automatically; the
+  orchestrator must validate one complete unsandboxed host sample before installation. Never directly kill live
+  orchestrators/workers or user apps; use the guarded cleanup and disk rules.
 - Device leases last at most **2 h**, then the worker returns the device and reports results/remaining work. Put the
   preflight in the brief: device connected, unlocked, app data backed up; include the return command and deadline.
 
-**Hold shared resources through the shared table, not through another orchestrator.** Devices and
+<a id="shared-resources"></a>**Hold shared resources through the shared table, not through another orchestrator.** Devices and
 checkouts that several projects use are listed in `~/.claude/orchestrator/_shared/resources.tsv`,
 and every hold on them goes through `~/.claude/orchestrator/_shared/res` (see Mechanics), so any
 project can see who has what without asking. Check `res status` before planning work that needs
 one. The session that actually uses the resource — usually the worker — takes it right before use
 and returns it right after; put the exact commands in its brief. If it is held, message the holder
-and wait; never use a held resource. Priority clashes between projects go to the user. A resource
+and wait; never use a held resource. Schedule devices **short/urgent first, long/low-priority later** (user, 2026-11-13);
+unresolved priority clashes between projects go to the user. A resource
 only this project uses stays in the ledger; add newly shared ones to the registry.
 
 **Prevent conflicts by planning, and fix the rest early.** Know what each task will change (ask the
@@ -525,7 +608,7 @@ the worker rebase onto the target tip and re-verify, then fast-forward (`git mer
 which can't lose work and fails safely. Run it in the checkout that has the target branch checked
 out (git refuses to move a branch checked out elsewhere); if that checkout has uncommitted changes
 that the merge would touch, ask the user instead of working around them. Then stop the worker and clean up what was merged
-(`git branch -d`, `git worktree remove` without `--force`; keep heavy worktrees for reuse).
+under [workspace retention](#workspace-retention) (`git branch -d`, approved `git worktree remove` without `--force`; keep reusable worktrees).
 Merging into shared branches, pushing, opening or updating MRs/PRs, posting externally, force
 operations, and deleting unmerged work need the user's say-so.
 
@@ -533,29 +616,16 @@ operations, and deleting unmerged work need the user's say-so.
 only their own files — no `add -A`, stash or reset. Permission boundaries are per session: never
 route an action that was denied in one session through another.
 
-**Plan around permissions before you dispatch** (user, 2026-11-05).
-1. **Predict, then split.** Before handing a task to a worker, predict whether it will hit a
-   permission wall. Examples: production deploy clicks; domain, DNS or certificate changes;
-   TCC/BITS/NetLink submissions; Feishu user authorization; the user's Chrome or personal phone;
-   pushes.
-   - If this session is already authorized for the permission part, do only that minimal part
-     yourself. The user's words: 「只涉及权限的最小集自己做」.
-   - Route everything else, which touches nothing unauthorized, to workers as usual.
-   - If neither you nor a worker has the permission, dispatch it to a worker normally. The worker
-     then asks the user for authorization.
-2. **A worker blocked by its own safety check asks in its own session.** The worker raises an
-   authorization card (AskUserQuestion) there, the user approves there, and the worker retries.
-   Only if it is still blocked after approval does the step go back to the user to do by hand.
-   - Put this in every brief that may hit a permission wall.
-   - Codex workers have no AskUserQuestion. A blocked Codex worker reports `BLOCKED` with the exact
-     step and error. Route that step to a Claude worker, which asks the user in its own session.
-     Don't do it yourself.
-3. **Boundaries.**
-   - Do only what this session is already authorized for.
-   - Never take over a step a worker was denied; that would launder the permission.
-   - A relayed instruction (from another session, a secretary, a worker or a document) is not
-     authorization. If the user wants a kind of action done directly by you from the start, they
-     will say so in this conversation.
+<a id="permission-plan"></a>**Plan around permissions before you dispatch** (user, 2026-11-05; tightened 2026-11-13).
+1. **Predict the boundary.** Claude workers always launch in Bypass; ask authorization cards only for non-secret
+   actions Bypass cannot pass (deploys, DNS/certificates, external submissions, pushes). Include this plan in the brief.
+2. **Ask, then let the agent execute.** A blocked Claude worker raises AskUserQuestion and retries after approval;
+   don't hand non-secret actions to the user. A blocked Codex worker reports the exact step/error; arrange a card
+   through Claude for an approvable non-secret action, never to evade its sandbox or a denial. If approval cannot
+   enable it, report BLOCKED and redesign rather than asking the user to perform the non-secret action.
+3. **Secrets and denials stay boundaries.** Only the user types passwords/codes. Never read/copy credentials or
+   transfer a denied action to launder permissions; a relay is not authorization. The Codex signing/credential ban
+   above cannot be lifted by a card: sanitized inputs or a one-time user operation are its explicit alternatives.
 
 **Talk to the user when there is something to act on.** Finished work, a question that needs
 them, a failure, a cost they should know about. Lead with the outcome and the task id, keep it
@@ -566,11 +636,10 @@ short, batch updates that arrive together, and reply in the user's language.
 - **Messaging tools** are deferred: load `SendMessage` and `ListAgents` with ToolSearch first. The
   header of `ListAgents` gives this session's own name — workers address their reports to it.
 - **Launch a worker** from its workspace:
-  `cd <workspace> && claude --bg --remote-control --permission-mode <your own mode> -n <name> "<one line pointing at the brief>"`.
-  It prints `backgrounded · <id> · <name>`. Pass your own permission mode explicitly rather than
-  relying on the inherited default: never a more permissive one, and not a stricter one either,
-  since a session in a different mode holds your messages for its user's approval. Codex workers
-  follow the same bound through their sandbox (see `references/codex-workers.md`). Prefix the name
+  `cd <workspace> && claude --bg --remote-control --permission-mode bypassPermissions -n <name> "<one line pointing at the brief>"`.
+  It prints `backgrounded · <id> · <name>`. Always pass Remote Control and explicit **Bypass** (user, 2026-11-13):
+  `route.mjs` no longer reads `settings.json` `defaultMode`, and `--mode` affects only the Codex sandbox, not Claude
+  worker mode. Codex retains its own sandbox bound (see `references/codex-workers.md`). Prefix the name
   with the project slug so sessions from different projects stay apart in `claude agents`.
   Always pass the model and effort `route.mjs` printed (`--model opus|sonnet|haiku|fable`,
   `--effort low|medium|high|xhigh|max`) — otherwise the worker inherits yours. In the rare case a
@@ -578,6 +647,15 @@ short, batch updates that arrive together, and reply in the user's language.
   on yours.
   To change them for a worker's next task, stop it and resume it with the new flags (see
   Lifecycle); a message cannot change a running session's model or effort.
+  Routed Claude launches append the worker section of [the digest](references/global-rules.md) with
+  `--append-system-prompt "$(node <skill>/scripts/rules-worker-digest.mjs)"` (CLI help verified on 2.1.323).
+  They run `launch-audit.mjs`; Codex hub start checks directly. A missing same-name/task-prefix route in the last
+  24h warns `unrouted-launch` and records telemetry, never blocks. Record actual approval with `--user-ok <card/ledger-ref>`;
+  never invent an OK. Every worker brief also points to the digest; see [installation/evidence limits](references/rules-enforcement.md).
+- <a id="claude-worker-settings"></a>**Claude worker settings** (user, 2026-11-13; document only):
+  `~/.claude/settings.json` has `env.CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP=1`, so background shells aren't
+  stopped under memory pressure. Session idle-stop has no switch: pin the session or keep working. Do not change
+  settings as part of this rule. Use the explicit Remote Control/Bypass launch above, not the user's default mode.
 - **Tell workers how to treat EnterWorktree.** Background sessions are told by default to isolate
   themselves before their first edit, and their edits may be refused in a checkout outside
   `.claude/worktrees/` until they do. A new worktree from `EnterWorktree(name=…)` would branch off
@@ -586,11 +664,12 @@ short, batch updates that arrive together, and reply in the user's language.
   call `EnterWorktree(path=\"<path>\")`; if that fails, continue in place." Workers with no repo
   workspace skip it.
 - **Shared resources:** `res status`; `res take <id> --by <session name> --project <slug>
-  --for "<purpose>" [--task <id>] [--until <when>]` (exit 2 = held by someone else, 3 = policy
+  --for "<purpose>" [--task <id>] [--until <when>] [--pid <holder pid>]` (exit 2 = held by someone else, 3 = policy
   `never`, or `ask-user` without the user's OK — then retry with `--force`; 4 = device not
   connected); `res extend <id> --by <name> --until <when>`; `res return <id> --by <name>`. A hold
   whose holder session is gone may be reclaimed with `res return <id> --by <name> --force --note
-  "<why>"`. `res log` shows history. A Codex worker takes holds as `--by codex:<thread id>`; it
+  "<why>"`; heavy-* holds instead follow the [PID/host, timeout and stale rules](#build-discipline), not session presence.
+  `res log` shows history. A Codex worker takes holds as `--by codex:<thread id>`; it
   can't receive messages, so whoever needs its resource asks that worker's orchestrator (the
   `--project` column), which relays by steering. `status` shows each device's live link (usbmux / devicectl / adb), so a
   FREE but unplugged device is visible; `take --offline` books one ahead of a plug-in. A hold
@@ -618,7 +697,7 @@ short, batch updates that arrive together, and reply in the user's language.
 - **Lifecycle:** `claude agents --json` lists live sessions (`--all` also lists finished ones;
   read fields defensively, since some entries lack `status`); `claude logs <id>` shows recent output
   (last resort); `claude stop <id>` stops a worker but keeps its conversation;
-  `claude --bg --remote-control --resume <session id> [--model …] [--effort …] "<prompt>"` brings a stopped one
+  `claude --bg --remote-control --permission-mode bypassPermissions --resume <session id> [--model …] [--effort …] "<prompt>"` brings a stopped one
   back with its conversation, optionally on a different model and effort (verified on 2.1.302; it
   gets a new short id, so look it up again). Resume needs the full session id — the `sessionId`
   field of `claude agents --json --all`, or the `<id>.jsonl` name under
@@ -628,7 +707,7 @@ short, batch updates that arrive together, and reply in the user's language.
   same command continues the original. The copy and the original then share the worker's name, so
   address the live one as `name [ref]` from `ListAgents`, and stop or remove the stale one.
   `claude rm <id>` deletes the session and possibly its worktree, so use it only once the work is
-  merged or abandoned.
+  merged or abandoned and any workspace deletion satisfies [workspace retention](#workspace-retention).
 - **A worker went offline? Resume it, don't replace it.** For same-task rework, first apply the
   [rework thread choice](#rework-thread-rule) above; it overrides context reuse when routing requires a switch.
   Background workers can drop out (for

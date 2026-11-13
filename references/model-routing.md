@@ -358,8 +358,8 @@ the nightly review compares dispatch reasons and recorded wall-clock time, inclu
     - Outcomes are logged per model and task tier (route log `pick.model`, `tier`), so the nightly review's model view
       can reorder candidates within approved tiers and eligible ALTS once real tasks outnumber the benchmark.
   - **TTADK's quota is daily, not unlimited** (about 500M tokens per user per day, shared by all models, resets 16:00
-    UTC; measured 2026-11-08). When it runs out, TTADK is paused until the reset; its normal work is routed to
-    personal quota behind the user's OK (go on now, or wait for the reset; user, 2026-11-08), while only `--urgent`
+    UTC; measured 2026-11-08). When it runs out, TTADK is paused until the reset; its normal work goes to TRAE,
+    then personal quota behind the user's OK (go on now, or wait for the reset; reaffirmed 2026-11-13), while only `--urgent`
     (already approved) runs there without asking — high stakes ask too (user, 2026-11-09); see codex-workers.md, "Health and fallback".
   - **Burn TTADK, not personal quota, without losing quality (user, 2026-11-07).** TTADK is the company's quota;
     Claude and the ChatGPT accounts are the user's own. So on TTADK:
@@ -380,8 +380,9 @@ the nightly review compares dispatch reasons and recorded wall-clock time, inclu
       and design keep Claude in the pair;
     - when Claude has no room for a cross-vendor second opinion, a fresh TTADK reviewer stands in instead of the
       second opinion being dropped or deferred;
-    - TTADK down for a reason the user can fix (SSO, CLI, models): tell the user at once; work TTADK would take waits
-      unless it is high-stakes or `--urgent`. A rate-limited run still retries once, then re-routes.
+    - TTADK down for a reason the user can fix (SSO, CLI, models): tell the user at once; work goes to TRAE, then
+      personal quota only after asking (user, 2026-11-13). Never hold runnable work on your own. A rate-limited run
+      still retries once, then re-routes.
   - Image generation never runs on TTADK, its Sol fallback step included.
   - The extra Codex review added while ChatGPT Codex quota is underused runs on a ChatGPT account (its purpose is to
     spend that quota). Other Codex second opinions follow TTADK first.
@@ -473,7 +474,7 @@ implements approved decision `2026-11-10-1`; it does not authorize any card rede
 | `redeem a reset card` | every account ≥99%, or a card expires within the hour (or within a day on a spent account) and still gains | Ask the user every time — never redeem on your own (user, 2026-11-03) — and only after an explicit yes run the printed `reset-credit-use … --credit <id>` and `quota.mjs --fresh`. If declined, route with `--no-redeem`. |
 | `X: spent; hold its card` | a spent account's card while another account has quota | Nothing yet: quota first. Redeem when the open accounts are spent, or a day before the card expires. |
 | card with a deadline | a card expires before its account's week resets | Spend that account to 99% by then and redeem. Below the printed break-even, let it lapse. |
-| `codex paused` | every open account's 5-hour window is full | Claude takes work only while it has spare; otherwise wait. |
+| `codex paused` | every open account's 5-hour window is full | Use eligible company capacity; personal quota needs approval. If nothing can run, tell the user rather than silently waiting (2026-11-13). |
 | `codex out on every account` | weeks spent, no card worth redeeming | Tell the user. Claude takes what matters within its room. |
 | `account X: not logged in` / `hub unreachable` / `login changed` | — | Ask the user for `! CODEX_HOME=… codex login`. Start the hub with `codex-worker.mjs --account X hub`, or restart it once no thread runs on it. |
 | `stop` | neither vendor readable | The router defers everything. Check both, tell the user. |

@@ -574,6 +574,7 @@ export const harnessDrift = (model = 'gpt-6.1-sol') => {
     toolConfigDiffers: keys.filter((k) => JSON.stringify(t[k] ?? null) !== JSON.stringify(c[k] ?? null)) };
 };
 export const outcomeOwns = (project, outcomeName, r) => {
+  if (['launch', 'unrouted', 'approval'].includes(r.kind)) return false;
   if (r.project !== project || !r.name) return false;
   const o = bare(project, outcomeName), d = bare(project, r.name);
   return d === o || d.startsWith(`${o}-`);
@@ -717,7 +718,7 @@ export const POLICY = {
   throttle5h: 95, // a 5-hour window this full pauses new work on that vendor/account until it resets
   overspend: 115, // projected % at reset above which a lone Codex account without cards is overspending
   fableAvoid: 70, // Fable's own window at or above this: no Fable
-  ttadkSsoWarnH: 48, // warn when the TTADK SSO session expires within this many hours
+  ttadkSsoWarnH: 72, // user, 2026-11-13: three-day warning leaves at least two days for renewal
   // Sites a browser worker may reach without asking (host globs); route.mjs passes them as --browser-origins.
   browserOrigins: ['*.bytedance.net', '*.byted.org', '*.larkoffice.com', '*.feishu.cn', '*.tiktok-row.net', '*.byteintl.net', '*.bytedance.com'],
   expiringH: 24, expiringRoom: 25, // a Codex week resetting within a day with this much left
@@ -859,7 +860,7 @@ export const leanLines = (st, data) => {
     if (r.a.staleHub) out.push(`account ${r.a.name}: its login changed but its hub still runs the old account — restart that hub once no thread runs on it`);
     if (!r.a.live && r.a.loggedIn === false) out.push(`account ${r.a.name}: not logged in — ask the user to run \`! CODEX_HOME=${r.a.home} codex login\`, then start its hub: codex-worker.mjs --account ${r.a.name} hub`);
     else if (r.a.hubBroken) out.push(`account ${r.a.name}: hub answers but can't start threads (${r.a.hubBroken.why}) — restart it ${r.a.hubBroken.fix}`);
-    else if (!r.a.live) out.push(`account ${r.a.name}: hub unreachable${r.a.windows ? ` (using its reading from ${fmtAgo(r.a.seenAt)})` : ''} — start it: codex-worker.mjs --account ${r.a.name} hub`);
+    else if (!r.a.live) out.push(`account ${r.a.name}: hub unreachable${r.a.windows ? ` (using its reading from ${fmtAgo(r.a.seenAt)})` : ''} — probe codex-worker.mjs --account ${r.a.name} list --limit 1; only if unreachable, start with codex-worker.mjs --account ${r.a.name} hub; tell the global-rules owner`);
   }
   const T = X.ttadk;
   if (T) {
@@ -871,8 +872,8 @@ export const leanLines = (st, data) => {
     else if (T.quotaOut) out.push(`TTADK paused — ${T.reason}: nothing to fix; ask the user once whether TTADK's work goes on now on personal quota (then --urgent until the reset) or waits for the reset (route.mjs gates it on that OK; high stakes ask too)`);
     else if (X.trae?.usable) out.push(`TTADK unavailable — ${T.reason}: tell the user now so they can fix it; meanwhile its work goes to TRAE`);
     else out.push(`TTADK unavailable — ${T.reason}: tell the user now so they can fix it; route.mjs asks the user before its work goes to personal quota (--urgent only once the user said go on; high stakes ask too); never hold work without asking`);
-    if (T.healthy && !T.live) out.push(`TTADK hub down — start it before hub workers: codex-worker.mjs --account ${T.name} hub (codex exec runs don't need it)`);
-    if (T.healthy && T.ssoLeftH != null && T.ssoLeftH < POLICY.ttadkSsoWarnH) out.push(`TTADK SSO expires in ${hours(T.ssoLeftH)}: ask the user to run \`! ttadk auth login sso\` before it lapses`);
+    if (T.healthy && !T.live) out.push(`TTADK hub down — probe codex-worker.mjs --account ${T.name} list --limit 1; only if unreachable, start with codex-worker.mjs --account ${T.name} hub; tell the global-rules owner (codex exec runs don't need it)`);
+    if (T.healthy && T.ssoLeftH != null && T.ssoLeftH <= POLICY.ttadkSsoWarnH) out.push(`TTADK SSO expires in ${hours(T.ssoLeftH)}: ask the user to run \`! ttadk auth login sso\` before it lapses`);
     // The dashboard's own daily number: warn before the gateway starts answering 403 (user, 2026-11-13).
     if (T.usable && T.usage?.utilization != null && T.usage.utilization >= 80)
       out.push(`TTADK daily quota ${Math.round(T.usage.utilization)}% used: TRAE takes over when it runs out`);
@@ -888,7 +889,7 @@ export const leanLines = (st, data) => {
     // Daily depletion queues only this model; route.mjs can substitute an eligible model on new dispatches.
     for (const [model, q] of Object.entries(TR.quota?.daily ?? {})) if (q?.depleted)
       out.push(`TRAE ${model}'s daily high-priority quota is used up${q.resetsAt ? ` until ${fmt(q.resetsAt)}` : ''}: its requests queue in the low-priority lane (long waits; queued: lines show the position)`);
-    if (TR.healthy && !TR.live) out.push(`TRAE hub down — start it before hub workers: codex-worker.mjs --account ${TR.name} hub (traecli exec runs don't need it)`);
+    if (TR.healthy && !TR.live) out.push(`TRAE hub down — probe codex-worker.mjs --account ${TR.name} list --limit 1; only if unreachable, start with codex-worker.mjs --account ${TR.name} hub; tell the global-rules owner (traecli exec runs don't need it)`);
   }
   if (X.redeem && T) out.push(`reset card due${multi ? ` on ${who(X.redeem)}` : ''}: ${X.redeem.cp.line} — on this TTADK device ask the user only when route.mjs prints redeemFirst (ChatGPT-only work landing on that account); the other device spends that quota`);
   else if (X.redeem) out.push(`redeem a reset card${multi ? ` on ${who(X.redeem)}` : ''}: ${X.redeem.cp.line} — ask the user first, every time; only after a yes: `

@@ -9,6 +9,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { SHARED, ROUTE_LOG, QUOTA_LOG, readState, analyze, leanLines, fmt, outcomeOwns, isReviewDecision, dedupeOutcomes, codexCatalog, readProfiles, compareHarness, harnessDrift, modelView, effectiveFirst, OUTCOME_OVERRIDES } from './lib/state.mjs';
+import { loadDigest, isRouteDecision } from './lib/global-rules.mjs';
+import { auditGlobalRules } from './lib/global-rules-audit.mjs';
 
 const argv = process.argv.slice(2);
 const opt = (k) => { const i = argv.indexOf(`--${k}`); return i < 0 ? null : argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[i + 1] : true; };
@@ -18,7 +20,7 @@ const count = (xs, key) => xs.reduce((m, x) => { const k = key(x); m[k] = (m[k] 
 
 // ---- routing ----
 const all = lines(ROUTE_LOG);
-const routes = all.filter((r) => r.t >= since && r.kind !== 'outcome');
+const routes = all.filter((r) => r.t >= since && isRouteDecision(r));
 // Outcomes (outcome.mjs): first-pass rate, rework rounds and time per vendor / model / category of the first attempt.
 // Older records said `pass` with fix rounds; outcome.mjs now records those as rework, so read them the same way.
 // A task counts once: normal records merge, then explicit corrections override supplied fields.
@@ -82,7 +84,7 @@ const outcomes = {
   unjoined: outs.filter((o) => !effectiveFirst(o) && !all.some((r) => r.kind !== 'outcome' && isReviewDecision(r) && outcomeOwns(o.project, o.name, r))).map((o) => `${o.project}/${o.name}`),
   // Finished-looking tasks with routing decisions but no outcome yet (named, older than a day): remind the orchestrator.
   // Uses outcome.mjs's join; reviews need no outcome, and fix rounds (NAME-fix1, NAME-r2) fold into their task.
-  missing: [...new Set(all.filter((r) => r.kind !== 'outcome' && r.name && r.project && !isReviewDecision(r) && r.t < Date.now() - 86400000 && r.t >= since - 6 * 86400000)
+  missing: [...new Set(all.filter((r) => isRouteDecision(r) && r.name && r.project && !isReviewDecision(r) && r.t < Date.now() - 86400000 && r.t >= since - 6 * 86400000)
     .filter((r) => !all.some((o) => o.kind === 'outcome' && outcomeOwns(o.project, o.name, r)))
     .map((r) => `${r.project}/${r.name.replace(/-(fix|r)\d+$/, '')}`))].slice(0, 30),
 };
@@ -191,7 +193,9 @@ const catalog = {
 if (opt('save-catalog')) fs.writeFileSync(CATALOG, JSON.stringify({ ...catalogNow, savedAt: Date.now() }, null, 1));
 
 catalog.harnessDrift = harnessDrift();
-const result = { hours: H, routing, outcomes, background, quota, now, catalog };
+const globalRules = auditGlobalRules({ records: all, version: loadDigest().version, since, profiles: readProfiles(),
+  ledgerRoot: process.env.RULES_LEDGER_ROOT || path.dirname(SHARED) });
+const result = { hours: H, routing, outcomes, background, quota, now, catalog, globalRules };
 if (opt('json')) { console.log(JSON.stringify(result, null, 1)); process.exit(0); }
 const show = (title, v) => console.log(`\n## ${title}\n${typeof v === 'string' ? v : JSON.stringify(v, null, 1)}`);
 console.log(`# routing review data — last ${H}h (to ${fmt(Date.now())})`);
@@ -201,3 +205,4 @@ show('background tasks (wall-clock minutes, including queues)', background);
 show('quota and cards', quota);
 show('now', now);
 show('model catalog', catalog);
+show('global rules', globalRules);

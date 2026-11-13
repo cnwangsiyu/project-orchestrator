@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.user.resource-cleanup</string>
+  <key>ProgramArguments</key><array><string>/bin/bash</string><string>{{SKILL}}/scripts/resource-cleanup.sh</string></array>
+  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>4</integer><key>Minute</key><integer>30</integer></dict>
+  <key>EnvironmentVariables</key><dict><key>MINI_CLEANUP_MODE</key><string>dry</string><key>PATH</key><string>{{PATH}}</string></dict>
+  <key>StandardOutPath</key><string>{{HOME}}/.claude/orchestrator/_shared/resource-cleanup/launchd.out</string>
+  <key>StandardErrorPath</key><string>{{HOME}}/.claude/orchestrator/_shared/resource-cleanup/launchd.err</string>
+  <key>ProcessType</key><string>Background</string>
+</dict></plist>

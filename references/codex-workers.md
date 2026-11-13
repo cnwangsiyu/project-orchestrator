@@ -29,6 +29,11 @@ Use this whenever `scripts/route.mjs` puts a task on Codex — mostly coding (im
 
 ## Live steering: codex-worker + an app-server hub (verified 2026-10-30, codex-cli 0.166)
 
+**Hub recovery / persistence (user, 2026-11-13):** probe `codex-worker --account <name> list --limit 1` first;
+start with `codex-worker --account <name> hub` only if unreachable, and tell the global-rules owner. An empty
+successful list is reachable, not a restart signal. [KeepAlive templates and owner-only install commands](rules-enforcement.md#opt-in-launchd-hubs)
+cover ttadk including its proxy, trae, main and b; `hub --foreground` owns children under launchd, not Claude.
+
 `codex exec` can't be steered mid-run, but the app-server protocol can: `turn/steer` injects a message into the running turn (taken
 into account in that same turn), and `turn/interrupt` stops it. `scripts/codex-worker.mjs` wraps this. Every command connects to its account's
 hub over WebSocket (`--account <name>`, default `main`), so the process that started a worker and the one that steers it can differ.
@@ -218,6 +223,10 @@ Order for Codex work: **TTADK first, then TRAE CLI, then personal quota** (ChatG
 TRAE whenever TTADK is out (daily quota used up, down, or `--exclude-account ttadk`) and TRAE is healthy; the OK gate for
 personal quota needs approval based on the actual primary/second-opinion account, including ladder fall-throughs
 while a company account remains usable (`--urgent` and standing exceptions apply). The user chose not to cap TRAE usage.
+User, 2026-11-13: restrictions are unrelated to our concurrency/quota; never lower concurrency for fear of queueing.
+For LLM use, only QPM/TPM throughput limits matter; impose no total-cost caps. Provider daily buckets and queues
+remain routing telemetry, not local spending/concurrency caps. Reports must name the concrete worker model
+(e.g. `TRAE GPT-6.1-Sol high`), not just "TRAE".
 
 - **What it is.** TRAE CLI (`traecli` / `traex`) is the company's official agent CLI (the compliance FAQ lists it as
   cleared), a fork of Codex maintained by the TRAE team, with its own model pool, separate from TTADK's. Models include
@@ -428,7 +437,8 @@ account is browser-ready, and to Claude otherwise.
 ## Permissions and environment
 
 - The user's `~/.codex/config.toml` defaults to yolo (`approval_policy = "never"`, `sandbox_mode = "danger-full-access"`), which is the equivalent of bypass mode. On another machine, check it before assuming. The CLI flags are `-s read-only|workspace-write|danger-full-access` and `--dangerously-bypass-approvals-and-sandbox`.
-- **Never give a Codex worker more than the orchestrator has.** That is the same rule as for Claude workers, and it keeps a Codex worker from doing what this session's permissions would block. `danger-full-access` only when the orchestrator runs in bypass mode; otherwise `workspace-write` for writers, and keep anything the orchestrator would need approval for (pushes, external posts, installs) out of the brief and do it yourself, with approval.
+- **Never give a Codex worker more than the orchestrator has.** `danger-full-access` only when the orchestrator runs in bypass mode; otherwise `workspace-write` for writers. Claude workers separately always use explicit Bypass (user, 2026-11-13). For approvable non-secret actions (pushes, external posts, installs), arrange a user card and let an authorized agent execute, not the user; never evade a sandbox/denial. See [permission plan](../SKILL.md#permission-plan).
+- **Signing/credential files on this machine** (user, 2026-11-13): Codex never touches them, including keychain-password files or hashing, regardless of authorization. Use [sanitized/stripped inputs or a one-time user operation](../SKILL.md#worker-credential-safety), never an approval workaround.
 - **`workspace-write` can't run git writes** (verified 2026-10-30): Codex keeps every git metadata dir read-only in it — the worktree's `.git`, the main repo's `.git/worktrees/<name>`, even when added as a writable root — so `git add`, `commit`, `fetch` and `rebase` fail with "Operation not permitted". That is deliberate (a sandboxed write to `.git/hooks` or `.git/config` would run outside the sandbox at the next git command), so don't work around it. Brief such workers to edit only, leave the changes uncommitted and report the changed files and a commit message; then review the diff and commit yourself. If the diff touches hook scripts or their config (`.husky/`, `.pre-commit-config.yaml`, `core.hooksPath` targets, package scripts run by hooks), commit with `--no-verify` or ask the user, since your commit would run them unsandboxed. Its network follows `[sandbox_workspace_write] network_access` in `~/.codex/config.toml` (on in the user's config); `--network on|off` overrides it per worker or turn.
 - **Quota**: `codex-worker.mjs [--account <name>] usage` prints a ChatGPT account's windows, reset cards and id as JSON (`quota` the windows only); `scripts/quota.mjs` combines every account with Claude's (see SKILL.md, routing). A TTADK account has no windows; `quota.mjs` reports its health instead (see TTADK above).
 - **Read-only tasks**: pass `-s read-only`, and say "read-only" in the brief.

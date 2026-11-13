@@ -1,0 +1,6 @@
+{
+  "schema": 1,
+  "allowed_roots": [],
+  "artifacts": [],
+  "note": "Empty allowlist is intentional. Only reviewed, self-made disposable build clones/templates with a matching marker may be registered; never source worktrees, credentials or user files."
+}

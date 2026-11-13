@@ -44,6 +44,8 @@ import { fileURLToPath } from 'node:url';
 import { noteFailure, noteSuccess, rememberThreadModel, threadModel, probeResult, failureKind } from './lib/trae-health.mjs';
 import { createQueueRecorder } from './lib/company-load.mjs';
 import { saveQueue, readQueue } from './lib/worker-queue.mjs';
+import { loadDigest, auditLaunch } from './lib/global-rules.mjs';
+import { runHubForeground, hubListReachable } from './lib/hub-foreground.mjs';
 // What a TRAE pause covers: one model family (route.mjs moves to the next family) or the whole account.
 const pausedWhat = (p) => (p.pool ? `TRAE's ${p.pool} models are paused` : 'TRAE is paused');
 // A model TRAE no longer resolves (2026-11-13: it dropped Gemini): that model alone is out of routing for 6 h.
@@ -99,6 +101,7 @@ if (opts.sandbox !== undefined && !SANDBOX_POLICY[opts.sandbox]) die(`unknown --
 if (opts.network === true) opts.network = 'on';
 if (opts.network !== undefined && !['on', 'off'].includes(opts.network)) die('--network takes on or off');
 if (opts.network !== undefined && opts.sandbox !== 'workspace-write') die('--network goes with --sandbox workspace-write');
+if (cmd === 'start') auditLaunch({ name: opts.name, account: account ?? 'main', model: opts.model, userOK: opts['user-ok'] });
 // Codex's own default for workspace-write network, so an explicit turn-level policy doesn't silently change it.
 const configNetwork = () => {
   try {
@@ -445,6 +448,12 @@ if (CU_APPS.length && (cmd === 'start' || cmd === 'turn') && screenLocked()) die
 const hub = process.env.CODEX_HUB || 'ws://127.0.0.1:47321';
 const ready = () => fetch(hub.replace(/^ws/, 'http') + '/readyz', { signal: AbortSignal.timeout(2000) }).then((r) => r.ok, () => false);
 const proxied = PROF?.kind === 'ttadk' && !!PROF.searchPort;
+if (cmd === 'hub' && opts.foreground) {
+  try {
+    process.exit(await runHubForeground({ account, profile: PROF, hub, home: os.homedir(),
+      script: fileURLToPath(import.meta.url), interval: Number(opts['check-ms'] ?? 10000) }));
+  } catch (error) { die(`foreground hub: ${error.message}`, 1); }
+}
 if (cmd === 'proxy' || cmd === 'search-proxy') {
   if (PROF?.kind !== 'ttadk') die('proxy is for a TTADK account (--account <name>, set up by ttadk-setup)');
   if (!proxied) die(`account ${account} has no proxy yet: rerun ttadk-setup`, 1);
@@ -459,7 +468,9 @@ if (proxied && ['hub', 'start', 'turn', 'wait'].includes(cmd) && !(await ensureS
 }
 const searchNote = async () => (proxied ? `; proxy up at ${searchUrl(PROF)} (web search)` : '');
 if (cmd === 'hub') {
-  if (await ready()) { console.log(`hub up at ${hub}${await searchNote()}`); process.exit(0); }
+  if (hubListReachable({ script: fileURLToPath(import.meta.url), account })) {
+    console.log(`hub up at ${hub}${await searchNote()}`); process.exit(0);
+  }
   const logPath = path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'hub.log');
   const out = fs.openSync(logPath, 'a');
   // From $HOME, never the caller's cwd: a hub outlives the session that started it, and once that directory is gone
@@ -478,6 +489,7 @@ if (cmd === 'hub') {
 }
 
 const ws = new WebSocket(hub);
+if (cmd === 'list') setTimeout(() => die(`hub list probe timed out (${hub}); tell the global-rules owner`, 1), 5000).unref();
 let done = false, nextId = 0;
 const pending = new Map();
 const handlers = [];
@@ -523,7 +535,7 @@ const REPLIES = {
   'item/tool/requestUserInput': (p) => ({ answers: Object.fromEntries((p.questions ?? []).map((q) => [q.id, { answers: [NO_USER] }])) }),
 };
 ws.onclose = () => { if (!done) die(`hub connection closed (${hub}); is it running? (codex-worker hub)`); };
-ws.onerror = () => { if (!done) die(`cannot reach the hub at ${hub}; start it with: codex-worker hub`); };
+ws.onerror = () => { if (!done) die(`cannot reach the hub at ${hub}; probe with codex-worker list --limit 1, start with codex-worker hub only if unreachable, and tell the global-rules owner`); };
 ws.onmessage = (ev) => {
   const line = String(ev.data);
   let m; try { m = JSON.parse(line); } catch { return; }
@@ -679,12 +691,10 @@ try {
       CU_APPS.length ? `For desktop apps, in node_repl js: globalThis.sky = (await import("@oai/sky")).sky; then follow its documentation. Apps you may use: ${CU_APPS.join(', ')}; others are declined.` : null,
       'Do not look for mcp__claude-in-chrome__* tools, ToolSearch, or skills written for Claude Code (chrome-browser, claude-in-chrome): they do not exist in this session. If node_repl or the browser is not reachable, report BLOCKED with the exact error.',
     ].filter(Boolean).join('\n');
-    // Every thread (user-approved 2026-11-11, after a TRAE DeepSeek worker copied bytedcli's TikTok SSO session into
-    // its automation browser to get past a login): the credential rule, independent of what the brief says.
-    const credRule = 'Never read, copy or load any login session or credential file (cookies, SSO/session tokens, CLI auth files such as bytedcli\'s, keychain items, .netrc, API keys), and never inject a session into a browser or tool to get past a login. Wherever a login or authorization is needed, stop and report BLOCKED with what needs signing in.';
+    const digest = loadDigest();
     const th = await call('thread/start', {
       cwd: path.resolve(opts.cwd), model: opts.model, sandbox: opts.sandbox, approvalPolicy: APPROVAL_POLICY,
-      developerInstructions: [browserHowTo, credRule].filter(Boolean).join('\n'),
+      developerInstructions: [browserHowTo, `Global worker rules ${digest.version}\n${digest.worker}`].filter(Boolean).join('\n'),
       ...(browserThread ? { approvalsReviewer: 'user', config: { plugins: { 'unified-computer-use@openai-bundled': { enabled: false } } } } : {}),
     });
     const threadId = th.thread?.id ?? th.threadId;

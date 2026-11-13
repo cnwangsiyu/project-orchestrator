@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "loadGate": 12,
+  "memoryGateGiB": 16,
+  "heavyPackageSlots": 1,
+  "heavyTaskLanes": 2,
+  "approvedRanges": null,
+  "approvalEvidence": null,
+  "note": "These are observation baselines, not a second admission controller. The shared res helper owns enforcement. No autonomous tuning range was supplied; require a dated user decision before recording one."
+}

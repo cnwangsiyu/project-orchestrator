@@ -4,7 +4,7 @@
 //   route <category> [--stakes low|normal|high] [--auto-check] [--failures N] [--writes | --read-only]
 //                    [--against claude|codex] [--no-redeem] [--project SLUG] [--dry]
 //                    [--impact release|service|throwaway]   (required for implement, implement-hard, debug, science)
-//                    [--exclude-account a,b] [--exclude-model m,family] [--origins p,q] [--mode <orchestrator permission mode>] [--cwd DIR] [--task-dir DIR]
+//                    [--exclude-account a,b] [--exclude-model m,family] [--origins p,q] [--mode <orchestrator mode for Codex sandbox>] [--cwd DIR] [--task-dir DIR]
 //                    [--name NAME] [--fresh] [--json] [--security] [--background]
 //   route --table          (the routing table: categories, first pick, alternative, escalation ladder)
 //
@@ -19,6 +19,7 @@ import { readState, analyze, leanLines, readProfiles, hours, fmt, withLock, SHAR
 import { poolOf } from './lib/trae-health.mjs';
 import { balanceFactors, hasTraeDailyQuota } from './lib/company-load.mjs';
 import { normalizeLadder } from './lib/model-ladder.mjs';
+import { loadDigest } from './lib/global-rules.mjs';
 
 const SKILL = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const RR = process.env.ROUTE_RR || path.join(SHARED, 'route-rotation.txt'); // launch counter for account rotation
@@ -534,16 +535,9 @@ if (second) {
 
 // ---- 4. account and launcher ----
 const mode = typeof opts.mode === 'string' ? opts.mode : 'default';
-// Claude workers follow the user's own default permission mode (settings.json permissions.defaultMode) unless --mode is given.
-// This is only the Claude launch flag: the Codex sandbox below still depends on an explicit --mode, so the local default never silently widens it.
-const claudeMode = typeof opts.mode === 'string' ? opts.mode : (() => {
-  try {
-    const home = process.env.HOME || '';
-    const d = JSON.parse(fs.readFileSync(path.join(home, '.claude', 'settings.json'), 'utf8'));
-    const v = d?.permissions?.defaultMode ?? d?.defaultMode;
-    return typeof v === 'string' && /^[A-Za-z]+$/.test(v) ? v : 'default';
-  } catch { return 'default'; }
-})();
+// User, 2026-11-13: Claude workers always use Bypass, independent of settings.defaultMode or --mode.
+// --mode still bounds the Codex sandbox; this must not silently widen Codex permissions.
+const claudeMode = 'bypassPermissions';
 const sandbox = !writes ? 'read-only' : mode === 'bypassPermissions' ? 'danger-full-access' : 'workspace-write';
 const cwd = typeof opts.cwd === 'string' ? opts.cwd : '<workspace>', taskDir = typeof opts['task-dir'] === 'string' ? opts['task-dir'] : '<task dir>';
 const name = typeof opts.name === 'string' ? opts.name : '<project>-<task>';
@@ -584,12 +578,15 @@ if (!background && !opts.urgent && ttDevice && personalPicks.length) {
   const selected = personalPicks.map(({ x, account, secondary }) => `${secondary ? 'second opinion' : 'primary'} ${label(x)}${x.vendor === 'codex' ? ` on ${account?.a?.name ?? 'main'}` : ''}`).join('; ');
   needsOK.push(`personal quota: actual selected ${selected}.${unknownCompanyState ? ` company account state unknown (${unknownCompanyReason}).` : ''} Ask the user before launching, even if a company account still has eligible models — go on now on personal quota, or wait for a company account. One answer covers the fall-through/outage: "go on" → pass --urgent for this work; "wait" → hold it until then`);
 }
-// user-approved 2026-11-11 retro: exec bypasses codex-worker's thread rule; both CLIs accept this string config key.
-const credRule = 'Never read, copy or load any login session or credential file (cookies, SSO/session tokens, CLI auth files such as bytedcli\'s, keychain items, .netrc, API keys), and never inject a session into a browser or tool to get past a login. Wherever a login or authorization is needed, stop and report BLOCKED with what needs signing in.';
+// One-shot execs get the same worker rules as hub threads; the digest is the single injection source.
+const digest = loadDigest();
+const credRule = `Global worker rules ${digest.version}\n${digest.worker}`;
 const execCred = ` -c 'developer_instructions=${JSON.stringify(credRule).replaceAll("'", "'\\''")}'`;
+const shellQuote = (value) => `'${String(value).replaceAll("'", "'\\''")}'`;
+const launchAudit = (x, an) => `node ${shellQuote(`${SKILL}/scripts/launch-audit.mjs`)} --name ${shellQuote(name)} --vendor ${x.vendor} --account ${shellQuote(an)} --model ${shellQuote(x.model)}${typeof opts['user-ok'] === 'string' ? ` --user-ok ${shellQuote(opts['user-ok'])}` : ''} && `;
 const launch = (x, shape = T.shape, acct = pickAcct) => {
   if (x.vendor === 'claude') {
-    return { launcher: 'claude-bg', command: `cd ${cwd} && claude --bg --remote-control --permission-mode ${claudeMode} -n ${name} --model ${x.model} --effort ${x.effort} ${prompt}` };
+    return { launcher: 'claude-bg', command: `${launchAudit(x, 'claude')}cd ${cwd} && claude --bg --remote-control --permission-mode ${claudeMode} -n ${name} --model ${x.model} --effort ${x.effort} --append-system-prompt "$(node ${shellQuote(`${SKILL}/scripts/rules-worker-digest.mjs`)})" ${prompt}` };
   }
   const an = acct?.a.name ?? 'main', home = profiles[an]?.home ?? '~/.codex';
   // TRAE CLI: `traecli exec` mirrors `codex exec` (its own home, ~/.trae); models go by TRAE's own ids.
@@ -597,12 +594,12 @@ const launch = (x, shape = T.shape, acct = pickAcct) => {
   if (traeProf) {
     const id = traeProf.modelIds?.[x.model] ?? x.model;
     // Quota substitution can put Astra on a short row too; keep its queue/status visible through the hub.
-    if (shape === 'exec' && x.model !== ASTRA && !backgroundLane) return { launcher: 'traecli-exec', account: an, command: `${traeProf.bin ?? 'traecli'} exec${inRepo === false ? ' --skip-git-repo-check' : ''} -C ${cwd} -s ${sandbox} -m ${id} -c model_reasoning_effort='"${x.effort}"'${execCred} --json -o ${taskDir}/codex-last.md ${prompt} < /dev/null > ${taskDir}/codex.jsonl 2>&1   (background task${inRepo === null ? '; add --skip-git-repo-check outside a repo' : ''})` };
+    if (shape === 'exec' && x.model !== ASTRA && !backgroundLane) return { launcher: 'traecli-exec', account: an, command: `${launchAudit(x, an)}${traeProf.bin ?? 'traecli'} exec${inRepo === false ? ' --skip-git-repo-check' : ''} -C ${cwd} -s ${sandbox} -m ${id} -c model_reasoning_effort='"${x.effort}"'${execCred} --json -o ${taskDir}/codex-last.md ${prompt} < /dev/null > ${taskDir}/codex.jsonl 2>&1   (background task${inRepo === null ? '; add --skip-git-repo-check outside a repo' : ''})` };
     return { launcher: 'codex-worker', account: an, command: `node ${SKILL}/scripts/codex-worker.mjs --account ${an} start --cwd ${cwd} --model ${id} --effort ${x.effort} --sandbox ${sandbox} --name ${name} --log ${taskDir}/codex.jsonl --out ${taskDir}/codex-last.md ${prompt}   (background task)` };
   }
   // A TTADK codex exec bypasses codex-worker, so it brings the account's proxy up first (exit 6 when it can't).
   const proxyFirst = TT?.search && an === TT.name ? `node ${SKILL}/scripts/codex-worker.mjs --account ${an} proxy >/dev/null && ` : '';
-  if (shape === 'exec') return { launcher: 'codex-exec', account: an, command: `${proxyFirst}CODEX_HOME=${home} codex exec${inRepo === false ? ' --skip-git-repo-check' : ''} -C ${cwd} -s ${sandbox} -m ${x.model} -c model_reasoning_effort='"${x.effort}"'${execCred} --json -o ${taskDir}/codex-last.md ${prompt} < /dev/null > ${taskDir}/codex.jsonl 2>&1   (background task${inRepo === null ? '; add --skip-git-repo-check outside a repo' : ''})` };
+  if (shape === 'exec') return { launcher: 'codex-exec', account: an, command: `${launchAudit(x, an)}${proxyFirst}CODEX_HOME=${home} codex exec${inRepo === false ? ' --skip-git-repo-check' : ''} -C ${cwd} -s ${sandbox} -m ${x.model} -c model_reasoning_effort='"${x.effort}"'${execCred} --json -o ${taskDir}/codex-last.md ${prompt} < /dev/null > ${taskDir}/codex.jsonl 2>&1   (background task${inRepo === null ? '; add --skip-git-repo-check outside a repo' : ''})` };
   // ui-browser also reaches the local dev server (a host pattern matches any port).
   const apps = cat === 'computer-use' && typeof opts.apps === 'string' ? ` --computer-use-apps '${opts.apps.split(',').map((a) => a.trim()).filter(Boolean).join(',')}'` : '';
   const origins = ['browser', 'ui-browser'].includes(cat) ? ` --browser-origins '${[...(cat === 'ui-browser' ? ['localhost', '127.0.0.1'] : []), ...POLICY.browserOrigins, ...(typeof opts.origins === 'string' ? opts.origins.split(',') : [])].map((o) => o.trim()).filter(Boolean).join(',')}'` : '';
@@ -625,7 +622,8 @@ if (isAlt(m) && ['review', 'review-high'].includes(cat)) notes.push('release/hig
 if (m && cat === 'build-run') notes.push('deploy/release brief: pin baseline/control probes, health thresholds, sample intervals and observation window, rollback triggers and exact prior artifact/config restore steps before acting; a fallback model follows these only — unexpected evidence needs stronger-model judgment, stop and report rather than invent a rollback condition');
 if (m && writes) notes.push('brief: include the safety clauses — never overwrite, delete or move files outside the task\'s scope (user files, uncommitted changes, shared headers/configs); restore anything touched by mistake byte-for-byte and report it');
 if (m && ['build-run', 'implement', 'implement-hard', 'debug', 'ui-browser', 'computer-use'].includes(cat)) notes.push('brief: on devices and simulators, back up app data before any destructive step (reinstall with --remove-existing-content, wiping app containers or Documents, erasing simulators), or ask first');
-if (m && ['build-run', 'ui-browser', 'computer-use'].includes(cat)) notes.push('before builds/device runs: identify orphaned build/test process trees of finished tasks by task directory and clean only those; never kill other tasks\' processes. Mini: at most 3 concurrent heavy builds unless the ledger sets N otherwise (not a model-worker concurrency cap). Device lease: at most 2 h, then return the device and report; brief preflight: device connected, unlocked, app data backed up');
+if (m && ['build-run', 'ui-browser', 'computer-use'].includes(cat)) notes.push('before builds/device runs: inspect finished-task process trees, but cleanup requires references/resources.md\'s guarded executor, continuous idle evidence, live-session/lease protections and every orchestrator\'s release; PPID=1 or age alone is not permission to kill. Device lease: at most 2 h, then return the device and report; brief preflight: device connected, unlocked, app data backed up');
+if (m && ['build-run', 'implement', 'implement-hard', 'debug', 'ui-browser'].includes(cat)) notes.push('build brief: full-package builds must use scripts/heavy-build.sh or equivalent res take/return per the live heavy-build contract: heavy-build first, then one of two lanes; reverse return on every exit; bounded wait/gates at load1m >12 or available memory <16 GiB, UNKNOWN blocks admission, timeout means report/queue, never bypass. Other heavy tasks take one lane. Compile 6/link 1, Xcode -jobs 6, Gradle 2 workers; fixed per-base incremental builds, one cold acceptance build, affected fix tests and scoped ccache/Gradle caches (first use cold). Not a model-worker concurrency cap; resource telemetry observes holders without reclaiming locks or restarting hubs.');
 // Claude browser workers can reach the user's signed-in Chrome; a worker that can't find it must not hand the clicking back
 // to the orchestrator (nightly review 11-05: W258 blocked on "can't see local browser 1e7c2b37", the user then chose
 // "orchestrator does the console", and that orchestrator made 510 browser calls in 24h).
@@ -648,7 +646,7 @@ if (ttadkRun && runCompany.kind === 'trae') {
   const q = runCompany.quota?.daily?.[m.model];
   if (q?.depleted && !backgroundLane) notes.push(`TRAE ${m.model}'s daily high-priority quota is used up${q.resetsAt ? ` until ${fmt(q.resetsAt)}` : ''}: requests queue in the low-priority lane. Above ~300, consider --exclude-model ${m.model} for the next dispatch (same --failures); keep any accepted queued turn pending`);
   notes.push('brief (TRAE): no ChatGPT browser here — playwright MCP is for public/local pages only; signed-in consoles require a browser-ready worker with console origins and a signed-in browser/account named in the brief; missing login means BLOCKED, never a Playwright sign-in workaround; git commits must carry no co-author or tool trailer');
-  if (!runCompany.live && (T.shape !== 'exec' || backgroundLane)) notes.push(`TRAE hub is down: start it first — node ${SKILL}/scripts/codex-worker.mjs --account ${runCompany.name} hub`);
+  if (!runCompany.live && (T.shape !== 'exec' || backgroundLane)) notes.push(`TRAE hub may be unreachable: probe with node ${SKILL}/scripts/codex-worker.mjs --account ${runCompany.name} list --limit 1; start with codex-worker hub only if unreachable, then tell the global-rules owner`);
 }
 if (ttadkRun && ['build-run', 'review', 'review-high'].includes(cat)) {
   const q = runCompany.kind === 'trae' ? runCompany.quota?.daily?.[m.model] : runCompany.usage;
@@ -662,7 +660,7 @@ if (ttadkRun && runCompany.kind !== 'trae') {
   if (runCompany.search) notes.push(`TTADK runs through its local proxy (web search): exit 6 with proxy-unavailable → re-route with --exclude-account ${runCompany.name}`);
   else notes.push(`this TTADK account has no web search (rerun codex-worker.mjs ttadk-setup to add its proxy): if the task turns out to need the web, re-route it as research`);
   notes.push(`on TTADK (account ${runCompany.name}): if the run fails rate-limited (QPM / concurrency), retry it once there; if it fails again, or fails for TTADK reasons (SSO, auth, gateway errors), re-route with --exclude-account ${runCompany.name}`);
-  if (!runCompany.live && (T.shape !== 'exec' || backgroundLane)) notes.push(`TTADK hub is down: start it first — node ${SKILL}/scripts/codex-worker.mjs --account ${runCompany.name} hub`);
+  if (!runCompany.live && (T.shape !== 'exec' || backgroundLane)) notes.push(`TTADK hub may be unreachable: probe with node ${SKILL}/scripts/codex-worker.mjs --account ${runCompany.name} list --limit 1; start with codex-worker hub only if unreachable, then tell the global-rules owner`);
 }
 if (m && ['browser', 'ui-browser'].includes(cat)) {
   notes.push('Chrome must be running before the worker starts (workers can\'t launch it): pgrep -x "Google Chrome" >/dev/null || open -a "Google Chrome"');
@@ -671,7 +669,7 @@ if (m && ['browser', 'ui-browser'].includes(cat)) {
   else notes.push('Claude browser worker (Claude in Chrome): if the extension reports several browsers, select only this Mac\'s Chrome (deviceId in the ledger); never switch to another connected browser');
 }
 if (m?.vendor === 'codex' && sandbox === 'workspace-write') notes.push('workspace-write can\'t run git writes: brief the worker to edit only and report the files and a commit message; you review and commit');
-if (m?.vendor === 'codex' && acct && !acct.a.live) notes.push(T.shape === 'exec' && !backgroundLane ? `account ${acct.a.name}'s reading is stale (its hub is down); codex exec still works` : `account ${acct.a.name}'s hub is down — start it first: codex-worker.mjs --account ${acct.a.name} hub`);
+if (m?.vendor === 'codex' && acct && !acct.a.live) notes.push(T.shape === 'exec' && !backgroundLane ? `account ${acct.a.name}'s reading is stale (its hub may be unreachable); codex exec still works` : `account ${acct.a.name}'s hub may be unreachable: probe with codex-worker.mjs --account ${acct.a.name} list --limit 1; start with codex-worker hub only if unreachable, then tell the global-rules owner`);
 if (!QX.readable && m?.vendor === 'codex') notes.push('Codex usage unreadable; routing as if it has room');
 const lands = (a) => !!a && !!redeemAcct && a.a.name === redeemAcct.a.name && !chatgptOpen.some((r) => r.a.name === a.a.name);
 const redeemFirst = ((m?.vendor === 'codex' && !ttadkRun && lands(pickAcct)) || (second?.vendor === 'codex' && lands(secondAcct)))
@@ -688,11 +686,13 @@ const out = {
   secondOpinion: second ? { ...second, ...launch(second, second === T.second ? T.shape : 'worker', secondAcct) } : null,
   needsUserOK: needsOK, tellUser: tell, why, notes, redeemFirst, balance, quota: leanLines(st, data),
 };
+out.notes.push('launch audit: every launch must match a same-name/task-prefix route decision in the last 24h; unrouted-launch warns and logs without blocking. Record actual user approval with --user-ok <card/ledger-reference>, never invent it. Claude/one-shot launches run launch-audit; hub start checks directly.');
 // Every real routing decision is logged for the nightly review (--dry or ROUTE_LOG=0 to skip, e.g. for experiments).
 if (!opts.dry && process.env.ROUTE_LOG !== '0') {
   const rec = { t: Date.now(), project: typeof opts.project === 'string' ? opts.project : null, name: typeof opts.name === 'string' ? opts.name : null, category: cat, stakes, failures, impact, review: reviewKind, excluded: [...excluded], ttadk: !!ttadkRun, company: ttadkRun ? runCompany.name : null, balance,
     autoCheck: !!opts['auto-check'], noRedeem, security, background, tier, deferred, pick: m ? { vendor: m.vendor, model: m.model, effort: m.effort, account: out.pick?.account ?? null } : null,
-    second: second ? { vendor: second.vendor, model: second.model, effort: second.effort } : null, why, needsOK, tell,
+    second: second ? { vendor: second.vendor, model: second.model, effort: second.effort, account: out.secondOpinion?.account ?? null } : null, why, needsOK, tell,
+    personalApproved: !!opts.urgent, approvalRef: typeof opts['user-ok'] === 'string' ? opts['user-ok'] : null,
     quota: { claude: QC.status, codexOut: QX.out, underused: QX.underused, frontLoad: QX.frontLoad, overspending: QX.overspending, redeemDue: !!QX.redeem } };
   try { fs.appendFileSync(ROUTE_LOG, JSON.stringify(rec) + '\n'); } catch {}
 }
