@@ -317,11 +317,15 @@ effort, Codex account and launch command from
     bypass, forgery/replay, path traversal, DoS or security review): exclude TRAE's GPT, then route normally
     (user, 2026-11-12: "这种类型的任务排除掉 trae gpt 之后再按照路由规则来走就行吧，不需要写死一个路由");
   - `--background` only when nobody is waiting and there is no deadline or near-term dependency: nightly cleanups,
-    doc refreshes, exploratory analysis and benchmark batches. Eligible tasks prefer TRAE Sol and its fallbacks
-    even when the daily high-priority bucket is depleted or the queue is congested. Expect hours (each request
-    queues separately); launch as a hub worker, keep it pending while `queued:` lines arrive, and dispatch other
-    work meanwhile. TRAE determines request priority from quota; this flag cannot force low priority while quota
-    remains. Browser/desktop/image, UI and build/device work keep their normal capability routing; tasks holding
+    doc refreshes, exploratory analysis and benchmark batches. On TRAE, prefer an eligible depleted daily bucket
+    at the row's tier (Sol, then Astra), then models without a daily bucket (DeepSeek-V4.1-Flash, then DeepSeek-V4-Pro;
+    Seed-Evolving only for `image-read`), then the normal TRAE pick. No quota information keeps the normal pick.
+    `why` identifies the step and whether high-priority quota is spent; an Astra escalation keeps its tier.
+    Model-fit and `--security` exclusions still apply: image reading needs a vision model, and DeepSeek cannot
+    replace builds or sensitive reviews/acceptance. Expect hours (each request queues separately); launch as a hub
+    worker, keep it pending while `queued:` lines arrive, and dispatch other work meanwhile. TRAE determines request
+    priority: `--background` cannot force a model with daily quota left into low priority, so the normal-pick fallback
+    can spend that quota. Browser/desktop/image-generation, UI and build/device work keep their capability routing; tasks holding
     a device lease or shared lock (`--device-lease` / `--shared-lock`) cannot enter this lane or company balancing.
     Background work never uses personal quota: if no company model fits, tell the user it is queued for later.
     Routes record `background: true`; the nightly `background` summary counts tasks and recorded `--minutes`

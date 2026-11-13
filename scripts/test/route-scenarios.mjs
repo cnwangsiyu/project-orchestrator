@@ -1141,7 +1141,7 @@ for (const [sc, args] of ERRORS) {
       const o = r([...args, '--background']);
       assert.equal(o.pick.account, 'trae'); assert.equal(o.pick.model, SOL);
       assert.equal(o.pick.launcher, 'codex-worker'); assert.equal(o.background, true);
-      assert.ok(o.why.includes('background: TRAE low-priority lane, leaves high-priority quota for foreground work'));
+      assert.ok(o.why.some((n) => /background: GPT-6.1-Sol bucket depleted.*no high-priority quota spent \(step 1\)/.test(n)));
       assert.ok(o.notes.some((n) => /expect hours.*each model request queues separately/.test(n)));
       assert.ok(!o.notes.some((n) => /Above ~300, consider|hub queue position above ~300/.test(n)));
     }
@@ -1160,7 +1160,8 @@ for (const [sc, args] of ERRORS) {
       assert.equal(o.pick, null); assert.ok(o.deferred); assert.equal(o.secondOpinion, null);
       assert.ok(o.tellUser.some((n) => /queued for later/.test(n))); assert.deepEqual(o.needsUserOK, []);
     }
-    for (const args of [['browser'], ['ui-browser'], ['computer-use'], ['build-run'], ['image-read'], ['lookup', '--device-lease'], ['lookup', '--shared-lock']]) {
+    assert.equal(r(['image-read', '--background']).pick.account, 'trae');
+    for (const args of [['browser'], ['ui-browser'], ['computer-use'], ['build-run'], ['image-read', '--device-lease'], ['lookup', '--device-lease'], ['lookup', '--shared-lock']]) {
       const o = r([...args, '--background']);
       assert.equal(o.pick.account, 'ttadk'); assert.ok(!o.why.some((n) => n.startsWith('background:')));
     }
@@ -1182,6 +1183,86 @@ for (const [sc, args] of ERRORS) {
     assert.equal(logged.background, true); assert.equal(logged.pick.account, 'trae');
     console.log('ok   background lane: depletion, congestion, security, exclusions, launch, log and company-only escalation');
   } catch (e) { fail++; console.log(`FAIL background lane: ${e.stack}`); }
+}
+// Background chooses depleted GPT buckets, then eligible no-bucket models, then reports normal quota spend.
+{
+  const SOL = 'gpt-6.1-sol', ASTRA = 'gpt-6-astra', FLASH = 'deepseek-v4.1-flash', PRO = 'deepseek-v4-pro', SEED = 'seed-evolving';
+  const home = fs.mkdtempSync(path.join(tmp, 'background-order-'));
+  const ids = [SOL, ASTRA, FLASH, PRO, SEED];
+  const bucket = (depleted = false) => ({ used: depleted ? 100 : 20, limit: 100, remaining: depleted ? 0 : 80, depleted, resetsAt: now + h });
+  const active = { [SOL]: bucket(), [ASTRA]: bucket() };
+  const scenario = (daily, models = ids, extra = {}) => {
+    S.backgroundOrder = { claude: cl(10, 120), codex: [acc('main', 20, 120), tr({ home, models,
+      modelIds: Object.fromEntries(models.map((id) => [id, id])), quota: daily === null ? null : { daily }, ...extra })] };
+  };
+  const r = (args = ['analysis']) => JSON.parse(run('backgroundOrder', [...args, '--background']));
+  const cases = [
+    [{ ...active, [SOL]: bucket(true) }, ['analysis'], SOL, 1],
+    [{ ...active, [ASTRA]: bucket(true) }, ['analysis'], ASTRA, 1],
+    [{ [SOL]: bucket(true), [ASTRA]: bucket(true) }, ['lookup'], SOL, 1],
+    [{ [ASTRA]: bucket(true) }, ['analysis'], ASTRA, 1, [ASTRA]],
+    [{ ...active, [ASTRA]: bucket(true) }, ['analysis', '--exclude-model', ASTRA], FLASH, 2],
+    [{ [SOL]: bucket(true), [ASTRA]: bucket(true) }, ['analysis', '--exclude-model', SOL], ASTRA, 1],
+    [active, ['analysis'], FLASH, 2],
+    [active, ['analysis', '--exclude-model', FLASH], PRO, 2],
+    [{ ...active, [FLASH]: bucket() }, ['analysis'], PRO, 2],
+    [{ ...active, [FLASH]: { used: null, limit: null, remaining: null, depleted: false, resetsAt: null }, [PRO]: bucket() }, ['analysis'], SOL, 3],
+    [{ ...active, [FLASH]: bucket(), [PRO]: bucket() }, ['analysis'], SOL, 3],
+    [active, ['analysis', '--exclude-model', 'deepseek'], SOL, 3],
+    [active, ['review-high'], SOL, 3],
+    [active, ['review', '--impact', 'release'], SOL, 3],
+    [active, ['second-opinion', '--against', 'claude', '--stakes', 'high'], SOL, 3],
+    [null, ['analysis'], SOL, 3],
+    [{}, ['analysis'], SOL, 3],
+    [undefined, ['analysis'], SOL, 3],
+    [{ [SOL]: bucket(true), [ASTRA]: bucket(true) }, ['analysis', '--security'], FLASH, 2],
+    [active, ['analysis', '--security', '--exclude-model', FLASH], PRO, 2],
+    [{ ...active, [FLASH]: bucket(), [PRO]: bucket() }, ['analysis', '--security'], FLASH, 3],
+    [null, ['analysis', '--security'], FLASH, 3],
+    [{ ...active, [SOL]: bucket(true) }, ['image-read'], SOL, 1],
+    [{ ...active, [ASTRA]: bucket(true) }, ['image-read'], ASTRA, 1],
+    [active, ['image-read'], SEED, 2],
+    [{ ...active, [SOL]: bucket(true) }, ['image-read', '--security'], SEED, 2],
+    [{ ...active, [SEED]: bucket() }, ['image-read'], SOL, 3],
+    [{ ...active, [SEED]: bucket() }, ['image-read', '--security'], SEED, 3],
+    [null, ['image-read'], SOL, 3],
+    [null, ['image-read', '--security'], SEED, 3],
+    [active, ['image-read', '--exclude-model', SEED], SOL, 3],
+  ];
+  try {
+    for (const [daily, args, model, step, models = ids] of cases) {
+      scenario(daily, models);
+      const o = r(args);
+      assert.equal(o.pick?.model, model, `${args.join(' ')} step ${step}`);
+      assert.equal(o.pick.account, 'trae'); assert.equal(o.pick.launcher, 'codex-worker');
+      assert.ok(o.why.some((n) => n.startsWith('background:') && n.includes(`(step ${step})`)), JSON.stringify(o.why));
+      if (step === 3) assert.ok(o.why.some((n) => /normal TRAE pick.*spend[s]? high-priority quota/.test(n)));
+      if (args[0] === 'image-read') assert.ok([SOL, ASTRA, SEED].includes(o.pick.model));
+      if (args.includes('--security')) assert.ok(!o.pick.model.startsWith('gpt-'));
+      assert.ok(!o.needsUserOK.some((n) => /personal quota/.test(n)));
+    }
+    scenario(active);
+    for (const args of [['review-high', '--security'], ['review', '--security'], ['image-read', '--security', '--exclude-model', SEED]]) {
+      const o = r(args); assert.equal(o.pick, null); assert.ok(o.tellUser.some((n) => /queued for later/.test(n)));
+    }
+    // Unknown quota retains the ordinary rung; an Astra rung keeps its tier even if Sol is depleted.
+    const args = ['implement', '--failures', '5'];
+    scenario(null); assert.equal(r(args).pick.model, ASTRA);
+    scenario({ ...active, [SOL]: bucket(true) }); assert.equal(r(args).pick.model, ASTRA);
+    // Fallback service code still requires review; sensitive acceptance keeps the stronger family.
+    scenario(active);
+    assert.ok(r(['implement']).notes.some((n) => /review required.*fallback model/.test(n)));
+    const reviewed = r(['review', '--author', 'codex', '--impact', 'release']);
+    assert.ok(!reviewed.pick.model.startsWith('deepseek'));
+    assert.ok(!reviewed.secondOpinion?.model.startsWith('deepseek'));
+    // Model pauses and explicit exclusions apply before quota preference.
+    const pausedHome = fs.mkdtempSync(path.join(tmp, 'background-order-paused-'));
+    const { noteFailure } = await import('../lib/trae-health.mjs');
+    noteFailure(pausedHome, '-32600: model `gpt-6.1-sol` is unavailable because its metadata could not be resolved', now, SOL);
+    scenario({ [SOL]: bucket(true), [ASTRA]: bucket(true) }, ids, { home: pausedHome });
+    assert.equal(r().pick.model, ASTRA);
+    console.log(`ok   background model order: ${cases.length} quota/security/vision cases, tiers, quality gates and pauses`);
+  } catch (e) { fail++; console.log(`FAIL background model order: ${e.stack}`); }
 }
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(fail ? `\n${fail} failing` : '\nall pass');

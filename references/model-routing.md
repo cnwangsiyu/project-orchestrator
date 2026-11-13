@@ -160,6 +160,32 @@ All balancing thresholds live in `scripts/lib/company-load.mjs` (`BALANCE`). Rev
 the nightly review should read the quota log alongside worker queue-clear wait times and compare load, queue position
 and wait across US daytime and Beijing daytime. Until then, do not assume that time of day predicts congestion.
 
+### Background work: preserve high-priority quota
+
+Pass `--background` only when nobody is waiting and there is no deadline or near-term dependency. Eligible work
+prefers TRAE even while congested, using this model order (user-approved 2026-11-13):
+
+1. An eligible GPT model at the row's tier whose `trae.quota.daily[model].depleted` is true: Sol, then Astra.
+   Its requests use the low-priority lane and spend no daily high-priority quota. An Astra escalation keeps its tier.
+2. An eligible model without a daily bucket: DeepSeek-V4.1-Flash, then DeepSeek-V4-Pro; Seed-Evolving only for
+   `image-read`. These choices spend no daily high-priority quota. A missing quota snapshot or an empty daily map
+   is unknown telemetry, not evidence that a model has no bucket.
+3. Otherwise keep the row's normal TRAE pick; it spends high-priority quota when available. With no quota
+   information, use this step too and say that quota spend is unknown. `why` names the selected step and its cost,
+   for example `background: GPT-6.1-Sol bucket depleted → low-priority lane, no high-priority quota spent (step 1)`.
+
+All existing model exclusions and pauses apply. `--security` keeps TRAE GPT off; DeepSeek is ineligible for
+build-run and sensitive reviews/acceptance (use `--exclude-model deepseek` when an implementation brief includes
+those checks). `image-read` uses only vision-capable GPT models or vision fallbacks. Browser/desktop, image generation,
+UI and build/device work retain their capability rules, and a device lease or shared lock excludes the background lane.
+Opportunistic company balancing still excludes image work; the explicit background lane permits image reading.
+
+TRAE decides request priority: the flag cannot force low priority while the chosen model has daily quota left.
+Expect hours because every request queues separately. Launch as a hub worker so queue/status shows, keep it pending
+while `queued:` lines arrive, and dispatch other work meanwhile. Background never spends personal quota: if no company
+model fits, tell the user it is queued for later. Quality gates remain in force. Routes record `background: true`;
+the nightly review compares dispatch reasons and recorded wall-clock time, including queue waits.
+
 ## Codex accounts: TTADK first (user, 2026-11-07)
 
 - **TTADK first by default.** When the TTADK company gateway is healthy (CLI present, SSO
@@ -187,6 +213,7 @@ and wait across US daytime and Beijing daytime. Until then, do not assume that t
     with the same `--failures`. Non-depleted/unknown buckets wait. Accepted queued turns stay pending under the rule below;
     do not interrupt or launch duplicates. For long builds/large reviews at ≥80% daily usage, consider starting just after
     the quota's resetTime (TRAE normally **22:00 UTC**, TTADK **16:00 UTC**); this is advice, never an automatic deferral.
+    Explicit `--background` work instead follows the quota-preserving order in "Background work" above.
 
   - **Fallback models on the company account (user, 2026-11-10: when GPT is unavailable or fails, route by the
     benchmark; keep quality, spend little personal quota).** `route.mjs` ALTS, from the 2026-11-10 benchmark on TRAE

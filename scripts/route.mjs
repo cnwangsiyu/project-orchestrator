@@ -144,6 +144,8 @@ const security = !!opts.security;
 const background = !!opts.background;
 const laneEligible = T.kind !== 'browser' && T.kind !== 'claudeOnly'
   && !['build-run', 'image-gen', 'image-read'].includes(cat) && !opts['device-lease'] && !opts['shared-lock'];
+// Background image reading can wait on a vision model; opportunistic company balancing still excludes images.
+const backgroundEligible = laneEligible || (cat === 'image-read' && !opts['device-lease'] && !opts['shared-lock']);
 const excluded = new Set((typeof opts['exclude-account'] === 'string' ? opts['exclude-account'] : '').split(',').map((x) => x.trim()).filter(Boolean));
 const exModels = new Set((typeof opts['exclude-model'] === 'string' ? opts['exclude-model'] : '').split(',').map((x) => x.trim().toLowerCase()).filter(Boolean));
 const modelExcluded = (model, account = null) => exModels.has(model) || exModels.has(poolOf(model))
@@ -160,12 +162,12 @@ const deepseekUnfit = cat === 'build-run' || cat === 'review-high'
   || (['review', 'second-opinion'].includes(cat) && (impact === 'release' || stakes === 'high' || security));
 const taskFits = (a) => T.kind !== 'claudeOnly' && cat !== 'image-gen'
   && !(cat === 'research' && !a.search) && !(T.kind === 'browser' && !a.browser);
-const routingModelFits = (model) => model === SOL || ALTS.some((a) => a.model === model
+const routingModelFits = (model, account) => model === SOL || (backgroundEligible && account.kind === 'trae' && model === ASTRA) || ALTS.some((a) => a.model === model
   && (cat === 'image-read' ? a.vision : !a.visionOnly) && !(deepseekUnfit && poolOf(model) === 'deepseek'));
-const companyOrder = background && laneEligible ? [QX.trae, QX.ttadk] : [QX.ttadk, QX.trae];
+const companyOrder = background && backgroundEligible ? [QX.trae, QX.ttadk] : [QX.ttadk, QX.trae];
 const TT = companyOrder.find((a) => a?.usable && !excluded.has(a.name)
-  && (!background || taskFits(a)) && a.models.some((x) => !modelExcluded(x, a) && (!background || routingModelFits(x)))) ?? null;
-const backgroundLane = background && laneEligible && TT?.kind === 'trae';
+  && (!background || taskFits(a)) && a.models.some((x) => !modelExcluded(x, a) && (!background || routingModelFits(x, a)))) ?? null;
+const backgroundLane = background && backgroundEligible && TT?.kind === 'trae';
 // A TTADK device (a TTADK account is set up here): TTADK always first, and the shared ChatGPT and Claude quota is left
 // for the user's other device, which has no TTADK (user, 2026-11-07). So no rule here spends quota for its own sake:
 // no underused/front-load/expiring effort raises and no extra quota-spending reviews. Without TTADK nothing changes.
@@ -181,12 +183,11 @@ const browserViaCodex = T.kind === 'browser' && (ttBrowser || chatgptBrowser.len
 // every other row the general ones (Seed-Evolving is vision-only, 2026-11-13).
 const ttAlts = ALTS.filter((a) => ttHas(a.model) && (cat === 'image-read' ? a.vision : !a.visionOnly)
   && !(deepseekUnfit && poolOf(a.model) === 'deepseek')).map((a) => X(a.model, a.effort));
-const ttModelsOK = ttHas(SOL) || ttAlts.length > 0;
+const ttModelsOK = ttHas(SOL) || ttAlts.length > 0 || (backgroundLane && ttHas(ASTRA));
 // A fallback of a different family from model x (a reviewer or a retry that doesn't share x's blind spots).
 const altOtherThan = (x) => ttAlts.find((a) => poolOf(a.model) !== poolOf(x?.model)) ?? null;
 const codexOut = chatgptOut && !ttModelsOK; // An account with only excluded or unsupported models can't take work.
 const why = [], needsOK = [], tell = [], notes = [];
-if (backgroundLane) why.push('background: TRAE low-priority lane, leaves high-priority quota for foreground work');
 const claudeAllowed = (kind) => {
   if (background) return false;
   if (QC.throttledUntil) return false; // a full 5h window: nothing new on Claude until it resets
@@ -228,8 +229,9 @@ if (ttCapable && !ttHas(SOL)) {
   // the fallback models in order, then the row's own Claude steps. Company quota, so no question; personal quota (the
   // Claude steps) only after these have fallen short.
   const gone = modelExcluded(SOL) ? `excluded for this task (--exclude-model ${[...exModels].join(',')})` : modelExcluded(SOL, TT) ? 'excluded for this security task (--security)' : TT.poolPauses?.gpt ? `paused: ${TT.poolPauses.gpt.reason}` : TT.modelPauses?.[SOL] ? `unavailable: ${TT.modelPauses[SOL].reason}` : 'not listed';
-  why.push(`GPT-6.1-Sol on ${TT.name} ${gone} → its fallback models: ${ttAlts.map(label).join(' → ')}`);
-  base = [...ttAlts, ...base.filter((x) => x.vendor === 'claude')];
+  const fallbacks = [...ttAlts, ...(backgroundLane && ttHas(ASTRA) ? [X(ASTRA, maxE('high', T.first.effort))] : [])];
+  why.push(`GPT-6.1-Sol on ${TT.name} ${gone} → its fallback models: ${fallbacks.map(label).join(' → ')}`);
+  base = [...fallbacks, ...base.filter((x) => x.vendor === 'claude')];
 }
 else if (ttCapable) {
   // TTADK is the company's quota, so quality may cost TTADK effort but not personal quota (user, 2026-11-07):
@@ -337,10 +339,33 @@ if (!deferred) {
 // lacks as Sol. Image generation never runs there, not even its Sol fallback step: the gateway has no image tool.
 // research without the search proxy stays off TTADK on every step, fallbacks included (nightly review 11-07 dry run).
 const onTTADK = (x) => x?.vendor === 'codex' && !!TT && cat !== 'image-gen' && !(cat === 'research' && !TT.search) && (ttHas(x.model) || (chatgptOut && ttModelsOK));
+// TRAE sets request priority. Prefer models that avoid daily high-priority spend; missing telemetry is not free quota.
+const backgroundChoice = (x, log) => {
+  const daily = TT.quota?.daily;
+  const known = daily && Object.values(daily).some((q) => q && typeof q === 'object');
+  if (known) {
+    // Sol/Astra serve the row's GPT tier. An Astra escalation must not fall back down to Sol or a cheaper family.
+    const depleted = (x.model === ASTRA ? [ASTRA] : [SOL, ASTRA]).find((id) => ttHas(id) && daily[id]?.depleted === true);
+    if (depleted) {
+      log(`background: ${depleted === SOL ? 'GPT-6.1-Sol' : 'GPT-6-Astra'} bucket depleted → low-priority lane, no high-priority quota spent (step 1)`);
+      return depleted === x.model ? x : X(depleted, x.effort);
+    }
+    const unbucketed = x.model === ASTRA ? null : (cat === 'image-read' ? ['seed-evolving'] : ['deepseek-v4.1-flash', 'deepseek-v4-pro'])
+      .map((id) => ttAlts.find((a) => a.model === id)).find((a) => a && !Object.hasOwn(daily, a.model));
+    if (unbucketed) {
+      log(`background: ${unbucketed.model} has no daily bucket → no high-priority quota spent (step 2)`);
+      return unbucketed.model === x.model ? x : unbucketed;
+    }
+  }
+  log(`background: normal TRAE pick ${label(x)} — ${known ? 'no eligible depleted/no-bucket model; spends high-priority quota when available' : 'no daily quota info; may spend high-priority quota'} (step 3); TRAE decides request priority`);
+  return x;
+};
 // Daily depletion affects new model choices, never account health, concurrency or an accepted queued turn.
 // Use a comparable GPT with confirmed quota left; an unknown bucket is not evidence of spare priority capacity.
 const quotaChoice = (x, log = (r) => why.push(r), f = failures) => {
-  if (backgroundLane || !onTTADK(x) || TT.kind !== 'trae' || !TT.quota?.daily?.[x.model]?.depleted) return x;
+  if (!onTTADK(x) || TT.kind !== 'trae') return x;
+  if (backgroundLane) return backgroundChoice(x, log);
+  if (!TT.quota?.daily?.[x.model]?.depleted) return x;
   // 5.6 is adequate only for simple first-attempt lookup/extraction/drafting, never an escalated or high-stakes row.
   const simple = ['lookup', 'extract', 'draft'].includes(cat) && f === 0 && stakes !== 'high';
   const gpt = [ASTRA, ...(simple ? [SOL56] : [])].find((model) => {
