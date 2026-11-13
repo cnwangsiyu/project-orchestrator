@@ -29,8 +29,9 @@ export const readTraeModels = (bin, run = execFileSync) => {
   try {
     const raw = run(bin, ['models', '--json'], { encoding: 'utf8', timeout: 30000,
       maxBuffer: 8 << 20, stdio: ['ignore', 'pipe', 'ignore'] });
-    return parseTraeModels(JSON.parse(raw));
-  } catch { return { modelIds: {}, load: {} }; }
+    const parsed = parseTraeModels(JSON.parse(raw));
+    return Object.keys(parsed.modelIds).length ? parsed : { ...parsed, error: 'TRAE models/load listed no models' };
+  } catch (e) { return { modelIds: {}, load: {}, error: `TRAE models/load read failed (${e.code === 'ETIMEDOUT' ? 'timeout' : 'query error'})` }; }
 };
 export const freshLoad = (rows, now = Date.now()) => Object.fromEntries(Object.entries(rows ?? {}).flatMap(([model, r]) => {
   const ageMin = age(r?.t, now), percent = num(r?.percent);

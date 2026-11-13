@@ -29,8 +29,8 @@ try {
   assert.equal(read.load[SOL].percent, 35);
   assert.deepEqual(invocation.slice(0, 2), ['fixture-cli', ['models', '--json']]);
   assert.equal(invocation[2].timeout, 30000);
-  assert.deepEqual(readTraeModels('fixture-cli', () => { throw Error('discard-me'); }), { modelIds: {}, load: {} });
-  assert.deepEqual(readTraeModels('fixture-cli', () => 'malformed'), { modelIds: {}, load: {} });
+  assert.deepEqual(readTraeModels('fixture-cli', () => { throw Error('discard-me'); }), { modelIds: {}, load: {}, error: 'TRAE models/load read failed (query error)' });
+  assert.deepEqual(readTraeModels('fixture-cli', () => 'malformed'), { modelIds: {}, load: {}, error: 'TRAE models/load read failed (query error)' });
   assert.deepEqual(freshLoad({ [SOL]: { percent: 99, t: now - 31 * min } }, now), {});
   assert.deepEqual(freshLoad({ [SOL]: { percent: 99, t: now + min } }, now), {});
   assert.equal(freshLoad({ [SOL]: { percent: 0, t: now - 30 * min } }, now)[SOL].percent, 0);

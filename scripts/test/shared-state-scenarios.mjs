@@ -13,6 +13,7 @@ import { noteFailure, noteSuccess, readPoolPauses, claimProbes, probeResult, lif
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'shared-state-'));
 const healthURL = new URL('../lib/trae-health.mjs', import.meta.url).href;
 const queueURL = new URL('../lib/worker-queue.mjs', import.meta.url).href;
+const sharedURL = new URL('../lib/shared-file.mjs', import.meta.url).href;
 const now = Date.now(), min = 60000;
 const children = new Set();
 const run = (source) => {
@@ -110,6 +111,31 @@ try {
   await timeout(Promise.all(queueWriters.map((w) => w.done)));
   assert.equal(Object.keys(JSON.parse(fs.readFileSync(queue, 'utf8'))).length, 19);
   console.log('ok   per-thread queue updates retain every entry during concurrent writes');
+
+  const cache = path.join(tmp, 'quota.json');
+  const snapshot = { checkedAt: now, codexAccounts: [{ name: 'ttadk', kind: 'ttadk', healthy: true },
+    { name: 'trae', kind: 'trae', healthy: true }] };
+  writeJson(cache, snapshot);
+  const cacheReader = run(`
+    import fs from 'node:fs';
+    import assert from 'node:assert/strict';
+    const end = Date.now() + 500;
+    do {
+      const data = JSON.parse(fs.readFileSync(${JSON.stringify(cache)}, 'utf8'));
+      assert.equal(data.codexAccounts.length, 2);
+      assert.ok(data.codexAccounts.every((a) => a.healthy));
+    } while (Date.now() < end);
+    process.disconnect();
+  `);
+  const cacheWriters = Array.from({ length: 4 }, (_, writer) => run(`
+    const {withLock, writeJson} = await import(${JSON.stringify(sharedURL)});
+    for (let sequence = 0; sequence < 100; sequence++) withLock(${JSON.stringify(cache)}, () =>
+      writeJson(${JSON.stringify(cache)}, {...${JSON.stringify(snapshot)}, writer:${writer}, sequence}));
+    process.disconnect();
+  `));
+  await timeout(Promise.all([cacheReader.done, ...cacheWriters.map((w) => w.done)]));
+  assert.equal(JSON.parse(fs.readFileSync(cache, 'utf8')).codexAccounts.length, 2);
+  console.log('ok   unlocked cache reader sees only complete company snapshots during 400 concurrent atomic writes');
 
   const stale = (file) => {
     const lock = `${file}.lock`; fs.mkdirSync(lock);

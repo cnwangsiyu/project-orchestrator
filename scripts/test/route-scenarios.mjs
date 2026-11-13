@@ -15,12 +15,12 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'route-test-'));
 const now = Date.now(), h = 3600000, W = 10080;
 const wk = (used, leftH, label = 'week') => ({ label, used, resetsAt: now + leftH * h, windowMins: W, scoped: false });
 const cl = (used, leftH, fable = 0) => [wk(used, leftH, 'week (all models)'), { ...wk(fable, leftH, 'week (Fable)'), scoped: true }];
-const acc = (name, used, leftH, cards = [], extra = {}) => ({ name, live: true, email: `${name}@example.com`, home: `/tmp/${name}`, plan: 'prolite', seenAt: now,
+const acc = (name, used, leftH, cards = [], extra = {}) => ({ name, live: true, email: `${name}@example.com`, home: path.join(tmp, name), plan: 'prolite', seenAt: now,
   windows: [wk(used, leftH)], resets: { count: cards.length, credits: cards.map((e, i) => ({ id: `RateLimitResetCredit_${name}card${i}`, expiresAt: now + e * h })) }, ...extra });
-const tt = (extra = {}) => ({ name: 'ttadk', kind: 'ttadk', home: '/tmp/ttadk', hub: 'ws://127.0.0.1:47399', healthy: true, reason: null, live: true, active: 2,
+const tt = (extra = {}) => ({ name: 'ttadk', kind: 'ttadk', home: path.join(tmp, 'ttadk'), hub: 'ws://127.0.0.1:47399', healthy: true, reason: null, live: true, active: 2,
   models: ['gpt-6.1-sol', 'gpt-5.6-terra', 'gpt-5.5'], browser: true, chromePlugin: '/tmp/chrome-plugin', ssoExpiresAt: now + 240 * h, windows: [], resets: null, ...extra });
 // TRAE CLI (second company account, 2026-11-08): no windows, no browser, its own model ids.
-const tr = (extra = {}) => ({ name: 'trae', kind: 'trae', home: '/tmp/trae', hub: 'ws://127.0.0.1:47398', healthy: true, reason: null, live: true, active: 0,
+const tr = (extra = {}) => ({ name: 'trae', kind: 'trae', home: path.join(tmp, 'trae'), hub: 'ws://127.0.0.1:47398', healthy: true, reason: null, live: true, active: 0,
   models: ['gpt-6.1-sol', 'gpt-6-astra', 'gemini-3.1-pro-preview'], modelIds: { 'gpt-6.1-sol': 'GPT-6.1-Sol', 'gpt-6-astra': 'GPT-6-Astra', 'gemini-3.1-pro-preview': 'Gemini-3.1-Pro-Preview' },
   search: true, searchLive: true, browser: false, windows: [], resets: null, ...extra,
   ...(extra.quota ? { quota: { sampledAt: now, ...extra.quota } } : {}) });
@@ -58,7 +58,7 @@ const S = {
   ttChatOut: { claude: cl(10, 48), codex: [acc('main', 99, 48), tt()] },
   // From the 2026-11-07 review: a hub never read; a spent account with a card next to TTADK; an excluded pick next to
   // a spent account with an urgent card; two accounts that must both be spent soon.
-  unreadHub: { claude: cl(10, 120), codex: [{ name: 'main', live: false, email: 'm@example.com', home: '/tmp/main', seenAt: null, windows: null, resets: null }] },
+  unreadHub: { claude: cl(10, 120), codex: [{ name: 'main', live: false, email: 'm@example.com', home: path.join(tmp, 'main'), seenAt: null, windows: null, resets: null }] },
   ttCard: { claude: cl(10, 120), codex: [acc('main', 99, 100, [400]), tt()] },
   ttClaudeOver: { claude: cl(93, 30), codex: [acc('main', 20, 120), tt()] },
   ttKimi: { claude: cl(10, 120), codex: [acc('main', 20, 120), tt({ models: ['gpt-6.1-sol', 'gpt-5.6-terra', 'kimi-k3'] })] },

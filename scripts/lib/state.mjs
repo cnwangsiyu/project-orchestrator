@@ -72,9 +72,19 @@ export const MAIN_PROFILE = { home: path.join(os.homedir(), '.codex'), hub: 'ws:
 const readJson = (f, dflt) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return dflt; } };
 const writeJson = (f, v) => atomicJson(f, v, 1);
 export const readProfiles = () => {
-  const reg = readJson(ACCOUNTS, {});
-  if (!Object.keys(reg).length) reg.main = { ...MAIN_PROFILE };
-  return reg;
+  // A corrupt registry is not an unconfigured device. Retry a racing replacement, but never overwrite it with main.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const reg = JSON.parse(fs.readFileSync(ACCOUNTS, 'utf8'));
+      if (!reg || Array.isArray(reg) || typeof reg !== 'object'
+        || Object.values(reg).some((p) => !p || typeof p !== 'object' || Array.isArray(p))) throw Error('invalid registry');
+      if (!Object.keys(reg).length) reg.main = { ...MAIN_PROFILE };
+      return reg;
+    } catch (e) {
+      if (e.code === 'ENOENT') return { main: { ...MAIN_PROFILE } };
+      if (attempt) throw Error(`account registry unreadable (${e.code ?? 'invalid JSON/schema'})`);
+    }
+  }
 };
 // The Codex model catalog (`codex debug models`) as the main ChatGPT account sees it. Each home lists different models
 // (TTADK's gateway lists its own), so the caller's CODEX_HOME must not leak in: the nightly TTADK worker inherits
@@ -367,7 +377,7 @@ export const traeQuota = (payload, sampledAt = Date.now()) => {
 // A TRAE CLI account (codex-worker trae-setup): the company's agent CLI with its own model pool, used after TTADK and
 // before personal quota (user, 2026-11-08). Healthy = the CLI present, logged in, GPT-6.1-Sol listed, the hub sound.
 const readTrae = (name, prof) => {
-  const out = { name, kind: 'trae', home: prof.home, hub: prof.hub, browser: false, chromePlugin: null, models: prof.models ?? [], modelIds: prof.modelIds ?? {},
+  const out = { name, kind: 'trae', home: prof.home, hub: prof.hub, browser: false, chromePlugin: null, models: prof.models ?? Object.keys(prof.modelIds ?? {}), modelIds: prof.modelIds ?? {},
     windows: [], resets: null, healthy: false, reason: null, live: false, active: 0, email: null, search: true, searchLive: true,
     // Per-model daily buckets guide route.mjs model choice; they never pause the account or cap concurrency.
     quota: null, quotaError: null, load: {} };
@@ -383,9 +393,18 @@ const readTrae = (name, prof) => {
     out.quota = traeQuota(u);
     if (!out.quota) out.quotaError = 'TRAE usage listed no daily bucket or weekly pool';
   } catch (e) { out.quota = null; out.quotaError = `TRAE usage read failed (${String(e.stderr || e.message).trim().split('\n')[0]})`; }
-  const catalog = readTraeModels(bin); // best-effort load telemetry; 30 s timeout, no raw output retained
-  out.load = catalog.load;
-  if (Object.keys(catalog.modelIds).length) { out.modelIds = catalog.modelIds; out.models = Object.keys(out.modelIds); }
+  // Keep the last known catalog when the new load query fails; telemetry is not account health.
+  let catalogError = null;
+  try {
+    const catalog = readTraeModels(bin);
+    out.load = catalog.load;
+    catalogError = catalog.error ?? null;
+    if (Object.keys(catalog.modelIds).length) { out.modelIds = catalog.modelIds; out.models = Object.keys(out.modelIds); }
+  } catch { catalogError = 'TRAE models/load read failed'; }
+  if (catalogError) {
+    out.quotaError = [out.quotaError, catalogError].filter(Boolean).join('; ');
+    if (!out.models.length) return { ...out, stateUnknown: true, reason: `company account state unknown (${catalogError})` };
+  }
   // Healthy with any model route.mjs can use: GPT-6.1-Sol first, its fallback families (route.mjs ALTS) after it.
   if (!out.models.some((m) => /^(gpt-6\.1-sol|deepseek-v4\.1-flash|gemini-3\.1-pro|deepseek-v4-pro)/.test(m))) { out.reason = 'TRAE CLI lists neither GPT-6.1-Sol nor a fallback model'; return out; }
   out.healthy = true;
@@ -421,38 +440,56 @@ const chromePluginOf = (home) => {
   }
   return null;
 };
-const readCodexAll = () => {
-  const accounts = [];
-  updateProfiles((reg) => {
-    for (const [name, prof] of Object.entries(reg)) {
-      if (prof.kind === 'ttadk') {
-        const t = readTtadk(name, prof);
-        reg[name] = { ...prof, models: t.models, email: t.email, seenAt: now };
-        accounts.push({ ...t, seenAt: now });
-        continue;
-      }
-      if (prof.kind === 'trae') {
-        const t = readTrae(name, prof);
-        reg[name] = { ...prof, models: t.models, modelIds: t.modelIds, seenAt: now };
-        accounts.push({ ...t, seenAt: now });
-        continue;
-      }
-      const login = readLogin(prof.home);
+const companyProfiles = (reg) => Object.entries(reg).filter(([, p]) => p.kind === 'ttadk' || p.kind === 'trae')
+  .map(([name, p]) => ({ name, kind: p.kind }));
+const unknownCompany = (name, prof, error) => ({ name, kind: prof.kind, home: prof.home, hub: prof.hub,
+  models: prof.models ?? [], windows: [], resets: null, healthy: false, live: false, stateUnknown: true,
+  reason: `company account state unknown (${error})`, stateError: error });
+const companyUnknown = (data, registered) => registered.filter((p) => {
+  const a = data?.codexAccounts?.find((a) => a.name === p.name && a.kind === p.kind);
+  return !a || a.stateUnknown || typeof a.healthy !== 'boolean';
+});
+const readCodexAll = (reg, errors) => {
+  const accounts = [], updates = {};
+  // Provider calls can exceed the shared lock's 10 s wait / 30 s stale age. Read first; lock only the short merge.
+  for (const [name, prof] of Object.entries(reg)) {
+    if (prof.kind === 'ttadk' || prof.kind === 'trae') {
       try {
-        const u = parseUsage(JSON.parse(execFileSync(process.execPath, [WORKER, '--account', name, 'usage'], { encoding: 'utf8', timeout: 30000, stdio: ['ignore', 'pipe', 'pipe'] })));
-        reg[name] = { ...prof, id: u.id, email: login?.id === u.id ? login.email : prof.email ?? null, plan: u.plan, seenAt: now, windows: u.windows, resets: u.resets, unlimited: u.unlimited };
-        // A broken hub still answers `usage`; count it as not live so routing prefers a working hub, and say how to fix it.
-        const broken = hubBroken(name, prof);
-        const browser = !!reg[name].browser || codexBrowserReady(prof.home);
-        accounts.push({ name, live: !broken, ...reg[name], browser, chromePlugin: reg[name].chromePlugin ?? (browser ? chromePluginOf(prof.home) : null),
-          allowed: u.allowed, staleHub: !!(login?.id && u.id && login.id !== u.id), hubBroken: broken });
+        const t = prof.kind === 'ttadk' ? readTtadk(name, prof) : readTrae(name, prof);
+        if (!t.stateUnknown) updates[name] = { models: t.models, seenAt: now,
+          ...(prof.kind === 'ttadk' ? { email: t.email } : { modelIds: t.modelIds }) };
+        accounts.push({ ...t, seenAt: now });
       } catch (e) {
-        const error = String(e.stderr || e.message).trim().split('\n')[0];
-        accounts.push(prof.windows ? { name, live: false, error, loggedIn: !!login, ...rollForward(prof) }
-          : { name, live: false, error, loggedIn: !!login, home: prof.home, hub: prof.hub, email: login?.email ?? null, windows: null, resets: null });
+        const error = `account read failed (${e.code ?? 'query error'})`;
+        errors[`codex:${name}`] = error;
+        accounts.push(unknownCompany(name, prof, error));
       }
+      continue;
     }
-  });
+    const login = readLogin(prof.home);
+    try {
+      const u = parseUsage(JSON.parse(execFileSync(process.execPath, [WORKER, '--account', name, 'usage'], { encoding: 'utf8', timeout: 30000, stdio: ['ignore', 'pipe', 'pipe'] })));
+      updates[name] = { id: u.id, email: login?.id === u.id ? login.email : prof.email ?? null, plan: u.plan, seenAt: now, windows: u.windows, resets: u.resets, unlimited: u.unlimited };
+      // A broken hub still answers `usage`; count it as not live so routing prefers a working hub, and say how to fix it.
+      const broken = hubBroken(name, prof);
+      const browser = !!prof.browser || codexBrowserReady(prof.home);
+      accounts.push({ name, live: !broken, ...prof, ...updates[name], browser, chromePlugin: prof.chromePlugin ?? (browser ? chromePluginOf(prof.home) : null),
+        allowed: u.allowed, staleHub: !!(login?.id && u.id && login.id !== u.id), hubBroken: broken });
+    } catch (e) {
+      const error = String(e.stderr || e.message).trim().split('\n')[0];
+      accounts.push(prof.windows ? { name, live: false, error, loggedIn: !!login, ...rollForward(prof) }
+        : { name, live: false, error, loggedIn: !!login, home: prof.home, hub: prof.hub, email: login?.email ?? null, windows: null, resets: null });
+    }
+  }
+  if (Object.keys(updates).length) try {
+    updateProfiles((current) => {
+      for (const [name, fields] of Object.entries(updates)) {
+        const p = current[name], before = reg[name];
+        if (p && p.kind === before.kind && p.home === before.home && p.hub === before.hub && !(p.seenAt > fields.seenAt))
+          current[name] = { ...p, ...fields };
+      }
+    });
+  } catch (e) { errors.registryWrite = String(e.message).split('\n')[0]; }
   return accounts;
 };
 
@@ -572,14 +609,50 @@ export const dedupeOutcomes = (records) => {
   }
   return [...by.values()];
 };
-export const readState = ({ fresh = false } = {}) => {
+export const readState = ({ fresh = false, profiles, registryError = null } = {}) => {
   let data = readJson(CACHE, null);
+  const object = (v) => v && typeof v === 'object' && !Array.isArray(v);
+  const windows = (v) => v == null || (Array.isArray(v) && v.every(object));
+  const validCache = (d) => d && typeof d === 'object' && !Array.isArray(d) && Number.isFinite(d.checkedAt)
+    && d.checkedAt <= Date.now() && windows(d.claude) && Array.isArray(d.codexAccounts)
+    && d.codexAccounts.every((a) => a && typeof a === 'object' && typeof a.name === 'string'
+      && windows(a.windows) && (a.models == null || (Array.isArray(a.models) && a.models.every((m) => typeof m === 'string'))))
+    && (d.history == null || (object(d.history) && Object.values(d.history).every((h) => Array.isArray(h) && h.every(object))))
+    && (d.errors == null || object(d.errors)) && (d.companyAccounts == null || (Array.isArray(d.companyAccounts)
+      && d.companyAccounts.every((p) => object(p) && typeof p.name === 'string' && ['ttadk', 'trae'].includes(p.kind))));
+  if (!validCache(data)) data = readJson(CACHE, null); // tolerate a legacy writer racing this read
+  const cacheError = !validCache(data) && fs.existsSync(CACHE) ? 'quota cache unreadable or incomplete' : null;
+  if (!validCache(data)) data = null;
+  if (!profiles) try { profiles = readProfiles(); } catch (e) { profiles = {}; registryError = e.message; }
+  const registered = registryError ? data?.companyAccounts ?? companyProfiles(Object.fromEntries((data?.codexAccounts ?? [])
+    .filter((a) => a.kind === 'ttadk' || a.kind === 'trae').map((a) => [a.name, a]))) : companyProfiles(profiles);
+  const missingBefore = companyUnknown(data, registered).length > 0;
   const failed = data && (data.errors?.claude || data.errors?.codex);
-  if (fresh || !data || !('codexAccounts' in data) || now - data.checkedAt > TTL_MS || (failed && now - data.checkedAt > 2 * 60000)) {
+  if (fresh || !data || registryError || missingBefore || now - data.checkedAt > TTL_MS || (failed && now - data.checkedAt > 2 * 60000)) {
     const prev = data;
-    data = { checkedAt: now, claude: null, codexAccounts: null, errors: {}, history: prev?.history ?? {} };
-    try { data.claude = readClaude(); } catch (e) { data.errors.claude = String(e.message).split('\n')[0]; }
-    try { data.codexAccounts = readCodexAll(); } catch (e) { data.errors.codex = String(e.stderr || e.message).trim().split('\n')[0]; }
+    const refresh = () => {
+      const next = { checkedAt: now, claude: null, codexAccounts: [], errors: {}, history: prev?.history ?? {}, companyAccounts: registered };
+      try { next.claude = readClaude(); } catch (e) { next.errors.claude = String(e.message).split('\n')[0]; }
+      try {
+        if (registryError) throw Error(registryError);
+        next.codexAccounts = readCodexAll(profiles, next.errors);
+      } catch (e) {
+        next.errors.codex = String(e.message).split('\n')[0];
+        next.codexAccounts = (prev?.codexAccounts ?? []).filter((a) => a.kind !== 'ttadk' && a.kind !== 'trae')
+          .map((a) => ({ ...rollForward(a), live: false }));
+      }
+      for (const p of companyUnknown(next, registered)) {
+        if (next.codexAccounts.some((a) => a.name === p.name && a.kind === p.kind && a.stateUnknown)) continue;
+        next.codexAccounts = next.codexAccounts.filter((a) => a.name !== p.name);
+        next.codexAccounts.push(unknownCompany(p.name, profiles[p.name] ?? p, next.errors.codex ?? 'account reading missing'));
+      }
+      if (registryError) next.errors.registry = registryError;
+      if (cacheError) next.errors.cacheRead = cacheError;
+      return next;
+    };
+    data = refresh();
+    // A missing cached reading already triggered its one fresh retry. Retry a newly failed fresh reading once too.
+    if (!missingBefore && companyUnknown(data, registered).length) data = refresh();
     const push = (key, w) => {
       if (!w) return;
       const h = (data.history[key] ?? []).filter((x) => now - x.t < 48 * 3600000);
@@ -588,7 +661,8 @@ export const readState = ({ fresh = false } = {}) => {
     };
     push('claude', weekly(data.claude));
     for (const a of data.codexAccounts ?? []) if (a.live) push(`codex:${a.name}`, weekly(a.windows));
-    withLock(CACHE, () => writeJson(CACHE, data));
+    // Atomic rename prevents partial reads; a persistence/lock failure cannot invalidate the live readings.
+    try { withLock(CACHE, () => writeJson(CACHE, data)); } catch (e) { data.errors.cacheWrite = String(e.message).split('\n')[0]; }
     // Append a compact snapshot for the nightly review: weekly usage, resets and cards per vendor/account.
     if (process.env.QUOTA_LOG !== '0') {
       const wk = (ws) => { const w = weekly(ws); return w ? { used: w.used, resetsAt: w.resetsAt } : null; };
@@ -596,7 +670,9 @@ export const readState = ({ fresh = false } = {}) => {
       try { fs.appendFileSync(QUOTA_LOG, JSON.stringify(snap) + '\n'); } catch {}
     }
   }
-  return data;
+  const errors = { ...data.errors };
+  if (registryError) errors.registry = registryError; else delete errors.registry;
+  return { ...data, companyAccounts: registered, errors };
 };
 
 // ---- window math ----
@@ -750,8 +826,11 @@ export const analyze = (data) => {
   const redeem = urgent[0] ?? (!pick ? redeemable[0] ?? null : null);
   const throttled = rows.filter((r) => r.throttledUntil).sort((x, y) => x.throttledUntil - y.throttledUntil);
   const cardsHeld = rows.reduce((n, r) => n + (r.a.resets?.count ?? 0), 0);
+  const registeredCompany = data.companyAccounts ?? companyProfiles(Object.fromEntries((data.codexAccounts ?? []).map((a) => [a.name, a])));
   const codex = {
     ttadk, trae,
+    companyAccounts: registeredCompany,
+    companyUnknown: companyUnknown(data, registeredCompany), registryError: data.errors?.registry ?? null,
     readable: rows.some((r) => r.known), rows, pick, redeem, cardsHeld, throttled, rotate, open,
     out: !pick && !redeem && rows.some((r) => r.known),
     // Out only because 5-hour windows are full: a pause of hours, not a spent week.
@@ -774,7 +853,8 @@ export const analyze = (data) => {
 export const leanLines = (st, data) => {
   const { claude: C, codex: X } = st, out = [];
   const multi = X.rows.length > 1, who = (r) => `${r.a.name}${r.a.email ? ` (${r.a.email})` : ''}`;
-  if (st.stop) return ['stop: neither vendor\'s usage is readable — dispatch nothing quota-dependent; check `claude -p /usage` and the Codex hubs, tell the user'];
+  if (X.companyUnknown.length || X.registryError) out.push(`company account state unknown (${X.companyUnknown.map((a) => `${a.name}/${a.kind}`).join(', ') || X.registryError}): check quota.mjs --fresh; personal quota needs the user's OK`);
+  if (st.stop) return [...out, 'stop: neither vendor\'s usage is readable — dispatch nothing quota-dependent; check `claude -p /usage` and the Codex hubs, tell the user'];
   for (const r of X.rows) {
     if (r.a.staleHub) out.push(`account ${r.a.name}: its login changed but its hub still runs the old account — restart that hub once no thread runs on it`);
     if (!r.a.live && r.a.loggedIn === false) out.push(`account ${r.a.name}: not logged in — ask the user to run \`! CODEX_HOME=${r.a.home} codex login\`, then start its hub: codex-worker.mjs --account ${r.a.name} hub`);

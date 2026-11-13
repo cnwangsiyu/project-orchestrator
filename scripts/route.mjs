@@ -137,7 +137,9 @@ if (impact && !IMPACTS.includes(impact)) die(`--impact takes release, service or
 let reviewKind = !CODE.includes(cat) ? null : impact === 'throwaway' ? null : impact === 'release' ? (stakes === 'high' ? 'review-high' : 'review') : stakes === 'high' ? 'review-high' : null;
 
 // ---- state ----
-const data = readState({ fresh: !!opts.fresh });
+let profiles, registryError = null;
+try { profiles = readProfiles(); } catch (e) { profiles = {}; registryError = e.message; }
+const data = readState({ fresh: !!opts.fresh, profiles, registryError });
 const st = analyze(data);
 const { claude: QC, codex: QX } = st;
 const noRedeem = !!opts['no-redeem'];
@@ -176,7 +178,7 @@ const backgroundLane = background && backgroundEligible && TT?.kind === 'trae';
 // A TTADK device (a TTADK account is set up here): TTADK always first, and the shared ChatGPT and Claude quota is left
 // for the user's other device, which has no TTADK (user, 2026-11-07). So no rule here spends quota for its own sake:
 // no underused/front-load/expiring effort raises and no extra quota-spending reviews. Without TTADK nothing changes.
-const ttDevice = !!QX.ttadk || !!QX.trae;
+const ttDevice = !!QX.ttadk || !!QX.trae || QX.companyAccounts.length > 0 || !!QX.registryError;
 const ttHas = (model) => !!TT && TT.models.includes(model) && !modelExcluded(model, TT);
 // Browser, frontend-visual and desktop-app work runs on a Codex worker when a Codex account can drive Chrome and the
 // desktop: the company account first (TTADK with browser-setup), else a browser-ready ChatGPT account (2026-11-10: on a
@@ -194,6 +196,9 @@ const ttModelsOK = ttHas(SOL) || ttAlts.length > 0 || ttBucketFree.length > 0 ||
 const altOtherThan = (x) => ttAlts.find((a) => poolOf(a.model) !== poolOf(x?.model)) ?? null;
 const codexOut = chatgptOut && !ttModelsOK; // An account with only excluded or unsupported models can't take work.
 const why = [], needsOK = [], tell = [], notes = [];
+const unknownCompanyState = QX.companyUnknown.length > 0 || !!QX.registryError;
+const unknownCompanyReason = QX.companyUnknown.map((a) => `${a.name}/${a.kind}`).join(', ') || QX.registryError;
+if (unknownCompanyState) tell.push(`company account state unknown (${unknownCompanyReason}): check quota.mjs --fresh before launching; a registered company account is not absent`);
 const claudeAllowed = (kind) => {
   if (background) return false;
   if (QC.throttledUntil) return false; // a full 5h window: nothing new on Claude until it resets
@@ -533,12 +538,12 @@ const companyAccount = (a) => [QX.ttadk, QX.trae].some((c) => c && c.name === a?
 const personalException = (x, secondary) => cat === 'image-gen' || T.kind === 'claudeOnly'
   || (x.vendor === 'claude' && (T.kind === 'browser' || (ttHas(SOL) && (secondary || claudeReviewFirst))));
 const personalPicks = [{ x: m, account: pickAcct, secondary: false }, { x: second, account: secondAcct, secondary: true }]
-  .filter(({ x, account, secondary }) => x && (x.vendor === 'claude' || !companyAccount(account)) && !personalException(x, secondary));
+  .filter(({ x, account, secondary }) => x && (x.vendor === 'claude' || !companyAccount(account))
+    && (unknownCompanyState || !personalException(x, secondary)));
 if (!background && !opts.urgent && ttDevice && personalPicks.length) {
   const selected = personalPicks.map(({ x, account, secondary }) => `${secondary ? 'second opinion' : 'primary'} ${label(x)}${x.vendor === 'codex' ? ` on ${account?.a?.name ?? 'main'}` : ''}`).join('; ');
-  needsOK.push(`personal quota: actual selected ${selected}. Ask the user before launching, even if a company account still has eligible models — go on now on personal quota, or wait for a company account. One answer covers the fall-through/outage: "go on" → pass --urgent for this work; "wait" → hold it until then`);
+  needsOK.push(`personal quota: actual selected ${selected}.${unknownCompanyState ? ` company account state unknown (${unknownCompanyReason}).` : ''} Ask the user before launching, even if a company account still has eligible models — go on now on personal quota, or wait for a company account. One answer covers the fall-through/outage: "go on" → pass --urgent for this work; "wait" → hold it until then`);
 }
-const profiles = readProfiles();
 // user-approved 2026-11-11 retro: exec bypasses codex-worker's thread rule; both CLIs accept this string config key.
 const credRule = 'Never read, copy or load any login session or credential file (cookies, SSO/session tokens, CLI auth files such as bytedcli\'s, keychain items, .netrc, API keys), and never inject a session into a browser or tool to get past a login. Wherever a login or authorization is needed, stop and report BLOCKED with what needs signing in.';
 const execCred = ` -c 'developer_instructions=${JSON.stringify(credRule).replaceAll("'", "'\\''")}'`;
