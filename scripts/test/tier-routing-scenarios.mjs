@@ -21,13 +21,13 @@ const active = { [SOL]: bucket(), [ASTRA]: bucket(), [SOL56]: bucket() };
 const depleted = { ...active, [SOL]: bucket(true) };
 const window = { label: 'week', used: 10, resetsAt: now + 120 * h, windowMins: 10080, scoped: false };
 const home = path.join(tmp, 'trae'); fs.mkdirSync(home);
-const run = (args, { models = ids, daily = depleted, company = false, traeHome = home, claudeUsed = 10 } = {}) => {
+const run = (args, { models = ids, daily = depleted, company = false, traeHome = home, claudeUsed = 10, sampledAt = now } = {}) => {
   const a = args.slice();
   if (['implement', 'implement-hard', 'debug', 'science'].includes(a[0]) && !a.includes('--impact')) a.push('--impact', 'service');
   const trae = { name: 'trae', kind: 'trae', home: traeHome, healthy: true, live: true, search: true, searchLive: true,
     models, modelIds: Object.fromEntries(models.map((id) => [id, id.toUpperCase()])), windows: [],
     load: Object.fromEntries(models.map((id) => [id, { t: now, percent: 10 }])),
-    quota: daily === null ? null : { daily, sampledAt: now } };
+    quota: daily === null ? null : { daily, sampledAt } };
   fs.writeFileSync(path.join(traeHome, 'queue-state.json'), JSON.stringify({
     gpt: { t: now, position: 0, state: 'ready' }, deepseek: { t: now, position: 0, state: 'ready' },
   }));
@@ -167,7 +167,32 @@ try {
   assert.equal(run(['analysis'], { daily: active }).pick.model, SOL);
   assert.equal(run(['analysis', '--exclude-model', SOL], { daily: active }).pick.model, SOL56);
 
-  // Independent CLI property oracle: stable quotas/flags must never produce a weaker adjacent retry.
+  // Re-review P1: current hard-tier capacity must see Astra even when the initial CODE tier could not.
+  const astraOnly = [
+    { models: [ASTRA], daily: active },
+    { models: [ASTRA], daily: null },
+    { models: [ASTRA], daily: active, sampledAt: now - 31 * 60000 },
+  ];
+  for (const config of astraOnly) for (const flags of [[], ['--background'], ['--stakes', 'low'], ['--stakes', 'low', '--background']]) {
+    const args = ['implement', '--impact', 'service', '--failures', '1', ...flags];
+    const r = run(args, config);
+    assert.equal(r.tier, 'hard'); assert.equal(r.deferred, null);
+    assert.equal(r.pick.model, ASTRA); assert.equal(r.pick.account, 'trae');
+    assert.ok(!personalGate(r));
+    assert.equal(r.needsUserOK.includes('max effort'), r.pick.effort === 'max');
+  }
+  for (const config of astraOnly) {
+    for (const flags of [['--security'], ['--exclude-model', ASTRA], ['--exclude-account', 'trae']]) {
+      const args = ['implement', '--impact', 'service', '--failures', '1', ...flags];
+      const r = run(args, config);
+      assert.notEqual(r.pick?.account, 'trae'); assert.ok(personalGate(r));
+      const background = run([...args, '--background'], config);
+      assert.equal(background.pick, null); assert.ok(background.deferred);
+      assert.ok(!personalGate(background));
+    }
+  }
+
+  // Independent CLI oracles: monotonic retries and approval for actual personal fall-throughs with company capacity.
   const effort = ['low', 'medium', 'high', 'xhigh', 'max'];
   const gptRank = ['gpt-6-luna', 'gpt-6.1-terra', GPT55, TERRA56, SOL56, SOL, ASTRA];
   const claudeRank = ['haiku', 'sonnet', 'opus', 'fable'];
@@ -177,6 +202,7 @@ try {
     { daily: active, models: ids.filter((id) => id !== SOL) },
     { daily: depleted, company: true }, { daily: depleted, claudeUsed: 93 },
     { daily: active, models: [GPT55, TERRA56] },
+    ...astraOnly,
   ];
   const cases = [
     ['lookup'], ['analysis', '--auto-check'], ['analysis', '--stakes', 'low'], ['analysis', '--stakes', 'high'],
@@ -185,7 +211,7 @@ try {
     ['design', '--background'], ['image-read', '--background'], ['second-opinion', '--against', 'claude'],
     ['analysis', '--exclude-model', SOL], ['analysis', '--exclude-account', 'trae'],
   ];
-  let checks = 0;
+  let checks = 0, approvalChecks = 0;
   for (const config of scenarios) for (const args of cases) {
     let previous = null;
     const seen = new Map(); let topGPT = -1;
@@ -193,6 +219,32 @@ try {
       const r = run([...args, '--failures', String(failures)], config), p = r.pick;
       if (!p) { assert.ok(r.deferred); continue; }
       const label = `${args.join(' ')} failures=${failures} config=${JSON.stringify(config)}`;
+      const excludeAt = args.indexOf('--exclude-model'), excludeAccountAt = args.indexOf('--exclude-account');
+      const excludedModels = new Set(excludeAt < 0 ? [] : args[excludeAt + 1].split(','));
+      const excludedAccounts = new Set(excludeAccountAt < 0 ? [] : args[excludeAccountAt + 1].split(','));
+      const security = args.includes('--security'), category = args[0];
+      const fits = (model, account) => !excludedAccounts.has(account) && !excludedModels.has(model)
+        && !excludedModels.has(model.startsWith('gpt-') ? 'gpt' : model.split('-')[0])
+        && !(security && account === 'trae' && model.startsWith('gpt-'));
+      const tierCandidates = r.tier === 'hard' ? [SOL, ASTRA] : r.tier === 'normal' ? [SOL, SOL56, TERRA56, FLASH] : [TERRA56, GPT55, FLASH];
+      const deepseekFits = category !== 'review-high' && !(['review', 'second-opinion'].includes(category) && (security || args.includes('high')));
+      const companyModels = category === 'image-read' ? [SOL, ASTRA, SEED]
+        : [SOL, ...tierCandidates.filter((m) => m !== FLASH || deepseekFits), ...(deepseekFits ? [FLASH] : [])];
+      const traeAvailable = (config.models ?? ids).some((m) => companyModels.includes(m) && fits(m, 'trae'));
+      const ttAvailable = !!config.company && fits(SOL, 'ttadk');
+      const companyHasSol = ttAvailable || ((config.models ?? ids).includes(SOL) && fits(SOL, 'trae'));
+      if (traeAvailable || ttAvailable) {
+        for (const [pick, secondary] of [[p, false], [r.secondOpinion, true]]) {
+          if (!pick) continue;
+          const personal = pick.vendor === 'claude' || !['trae', 'ttadk'].includes(pick.account);
+          // Standing cross-vendor exceptions authorize Claude beside company Sol, not personal Codex retries.
+          const crossVendorException = pick.vendor === 'claude' && companyHasSol
+            && (secondary || (category === 'review-high' && args.includes('--author') && args.includes('codex'))
+              || (category === 'second-opinion' && args.includes('codex')));
+          if (personal && !crossVendorException) assert.ok(personalGate(r), label);
+          approvalChecks++;
+        }
+      }
       const key = `${p.vendor}:${p.model}`, e = effort.indexOf(p.effort), rank = gptRank.indexOf(p.model);
       if (previous) {
         if (key === `${previous.vendor}:${previous.model}`) {
@@ -214,6 +266,6 @@ try {
       previous = p;
     }
   }
-  console.log(`ok   availability review reproductions, max gates, secondary/quality boundaries; ${checks} monotonic retry checks`);
+  console.log(`ok   availability review reproductions, max gates, secondary/quality boundaries; ${checks} monotonic retry checks; ${approvalChecks} company-capacity approval checks`);
   console.log('all pass: difficulty tiers, depletion, availability, pauses, background, balancing, safety and escalation');
 } finally { fs.rmSync(tmp, { recursive: true, force: true }); }

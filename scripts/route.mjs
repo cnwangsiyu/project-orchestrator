@@ -154,7 +154,7 @@ const background = !!opts.background;
 const tierFor = (f) => ['implement-hard', 'debug', 'science', 'review-high', 'design'].includes(cat) || stakes === 'high'
   || (f >= 1 && CODE.includes(cat)) ? 'hard'
   : ['lookup', 'extract', 'draft'].includes(cat) || stakes === 'low' || background ? 'light' : 'normal';
-const tier = tierFor(failures), initialTier = tierFor(0);
+const tier = tierFor(failures);
 const laneEligible = T.kind !== 'browser' && T.kind !== 'claudeOnly'
   && !['build-run', 'image-gen', 'image-read'].includes(cat) && !opts['device-lease'] && !opts['shared-lock'];
 // Background image reading can wait on a vision model; opportunistic company balancing still excludes images.
@@ -180,7 +180,7 @@ const chatgptOut = QX.out || (noRedeem && !QX.pick && !!QX.redeem)
 // the same rules, before personal quota (user, 2026-11-08). TT is whichever company account takes Codex work now.
 const taskFits = (a) => T.kind !== 'claudeOnly' && cat !== 'image-gen'
   && !(cat === 'research' && !a.search) && !(T.kind === 'browser' && !a.browser);
-const routingModelFits = (model, account) => model === SOL || tierModels(account, initialTier).includes(model) || ALTS.some((a) => a.model === model
+const routingModelFits = (model, account) => model === SOL || tierModels(account).includes(model) || ALTS.some((a) => a.model === model
   && (cat === 'image-read' ? a.vision : !a.visionOnly) && !(deepseekUnfit && poolOf(model) === 'deepseek'));
 const companyOrder = background && backgroundEligible ? [QX.trae, QX.ttadk] : [QX.ttadk, QX.trae];
 const TT = companyOrder.find((a) => a?.usable && !excluded.has(a.name)
@@ -201,7 +201,7 @@ const browserViaCodex = T.kind === 'browser' && (ttBrowser || chatgptBrowser.len
 // every other row the general ones (Seed-Evolving is vision-only, 2026-11-13).
 const ttAlts = ALTS.filter((a) => ttHas(a.model) && (cat === 'image-read' ? a.vision : !a.visionOnly)
   && !(deepseekUnfit && poolOf(a.model) === 'deepseek')).map((a) => X(a.model, a.effort));
-const ttTierModels = tierModels(TT, initialTier);
+const ttTierModels = tierModels(TT);
 const ttModelsOK = ttHas(SOL) || ttAlts.length > 0 || ttTierModels.length > 0;
 const companyPick = (id, effort) => X(id, ALTS.find((a) => a.model === id)?.effort ?? effort);
 const priorityAvailable = (id, account) => {

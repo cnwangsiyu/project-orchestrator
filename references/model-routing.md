@@ -244,6 +244,8 @@ the nightly review compares dispatch reasons and recorded wall-clock time, inclu
     never a weaker GPT. Tier candidates are **availability substitutions for the current attempt, not retry rungs**:
     pick the first usable candidate, then increase its effort before existing stronger quality steps. A ladder's
     initial attempt uses its original tier; later CODE rungs use hard, so `--failures` cannot reinterpret earlier picks.
+    Company model/account eligibility always uses the current tier after failures/stakes; an initial normal/light
+    CODE tier must not hide Astra from a hard retry, even with missing or stale quota telemetry.
     Resolve availability, quota, effort and balancing for the whole ladder before indexing by failures. Normalize the
     actual picks: drop equal/lower effort on any previously tried model, weaker GPTs, and earlier fallback stages
     already bypassed by a stronger substitution. Existing independent-family/stronger row steps remain eligible.
