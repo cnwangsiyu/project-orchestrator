@@ -19,6 +19,8 @@ lane_held=0
 child=''
 acquiring=''
 spawning=0
+lane_error=''
+unknown_lane3=0
 cleanup() {
   local status=$?
   trap - EXIT
@@ -39,6 +41,7 @@ cleanup() {
   fi
   if [ "$lane_held" -eq 1 ]; then "$res" return "$lane" --by "$by" || status=1; fi
   if [ "$build_held" -eq 1 ]; then "$res" return heavy-build --by "$by" || status=1; fi
+  [ -z "$lane_error" ] || rm -f "$lane_error"
   exit "$status"
 }
 trap cleanup EXIT
@@ -48,26 +51,47 @@ trap 'exit 129' HUP
 take_lock() {
   local status
   acquiring="$1"
+  unknown_lane3=0
+  if [ "$1" = heavy-lane-3 ] && [ -z "$lane_error" ]; then
+    lane_error=$(mktemp "${TMPDIR:-/tmp}/heavy-build-lane3.XXXXXX") || return 1
+  fi
   spawning=1
-  "$res" wait "$1" --by "$by" --project "$project" --for "full-package build" \
-    --task "$task" --pid "$$" --timeout "${2:-$timeout}" &
+  if [ "$1" = heavy-lane-3 ]; then
+    "$res" wait "$1" --by "$by" --project "$project" --for "full-package build" \
+      --task "$task" --pid "$$" --timeout "${2:-$timeout}" 2>"$lane_error" &
+  else
+    "$res" wait "$1" --by "$by" --project "$project" --for "full-package build" \
+      --task "$task" --pid "$$" --timeout "${2:-$timeout}" &
+  fi
   child=$!
   spawning=0
   wait "$child"
   status=$?
   child=''
+  if [ "$1" = heavy-lane-3 ]; then
+    cat "$lane_error" >&2
+    if [ "$status" -eq 1 ] && grep -Fxq "res: unknown resource 'heavy-lane-3' (see: res status)" "$lane_error"; then
+      unknown_lane3=1
+    fi
+  fi
   if [ "$status" -ne 0 ]; then acquiring=''; fi
   return "$status"
 }
 take_lane() {
   if [ -n "$preferred_lane" ]; then take_lock "$preferred_lane"; return $?; fi
-  local deadline duration remaining delay=1 status candidate
+  local deadline duration remaining delay=1 status candidate lane3_missing=0
   duration=$(awk -v t="$timeout" 'BEGIN {s=t*60; printf "%.0f\n", int(s)+(s>int(s))}')
   deadline=$((SECONDS + duration))
   while :; do
     for candidate in heavy-lane-1 heavy-lane-2 heavy-lane-3; do
+      [ "$candidate" != heavy-lane-3 ] || [ "$lane3_missing" -eq 0 ] || continue
       lane="$candidate"
       if take_lock "$lane" 0; then return 0; else status=$?; fi
+      if [ "$unknown_lane3" -eq 1 ]; then
+        echo 'heavy-build: lane 3 is not registered; continuing bounded waits on lanes 1/2' >&2
+        lane3_missing=1
+        continue
+      fi
       [ "$status" -eq 2 ] || return "$status"
     done
     remaining=$((deadline - SECONDS))

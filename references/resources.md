@@ -106,7 +106,9 @@ The handover reports ` M scripts/res` (uncommitted) and last source commits `2be
 these are handover evidence, not a fresh git query. Immutable v1.2 code/contract fixtures preserve that baseline.
 Tests are the T88-adapted T83/T86/T88 suites from
 `$HOME/code/.claude-data/orchestrator/vesdk-mainline/tasks/T88/tmp.o8ieJ1` (166+101+377=644 assertions).
-The 17 imported suite/fixture files and the v1.2 source/contract fixtures are byte-preserved. Compatibility
+The v1.2 source/contract and saved device/registry fixtures are byte-preserved. Of the 17 imported files,
+the T88 and legacy test scripts have local lifecycle adaptations: holders are explicitly stopped/reaped,
+and retry mutations wait for observed backoff instead of racing a timer. All 644 imported assertions remain. Compatibility
 tests compare CLI help and scratch stdout/stderr/exit transcripts against that baseline, normalizing only
 scratch paths and the approved appended `lane3=OPEN|CLOSED` field. Registry, journal, notes and original
 metadata fields are compared too; the historical legacy suite covers 27 device/checkout/policy commands.
@@ -121,25 +123,32 @@ Owner commands from that checkout (workers must NOT run these against live state
 
 ```bash
 bash scripts/res/install.sh
-# After switch, with callers still quiescent, add this row once to _shared/resources.tsv:
-# scripts/res/resources-lane3.tsv (literal TAB-separated row)
+# The installer backs up code/registry and publishes the reviewed lane-3 row itself.
 # Install the maintained notes text:
 cp scripts/res/notes/heavy-build.md "$HOME/.claude/orchestrator/_shared/notes/heavy-build.md"
 ```
 
-The installer runs the full suites, backs up the current target, and atomically replaces the symlink via
-`ln -sfn` to a temporary name then `mv -f`. It checks held `locks/heavy-*.d` and any `res wait` twice (before
-and after tests), refuses unreadable process data, and prints a quoted rollback command pointing to the backup:
+The installer runs the full suites, backs up the current target AND `resources.tsv`, stages the reviewed lane-3
+row (idempotent, rejecting duplicate/conflicting registrations), and atomically publishes each entry. It replaces
+the code symlink via `ln -sfn` to a temporary name then `mv -f`, BEFORE the registry rename so old code cannot
+admit an ungated lane 3. Both entries are published before it returns; no separate manual registration step.
+They are not one filesystem transaction: the owner keeps callers quiescent throughout, and a failed publication
+automatically restores the registry before old code. The wrapper's missing-lane fallback also covers legacy installs.
+It checks held `locks/heavy-*.d` and any argv containing a res path/basename followed by `wait`, including
+env/nohup/quoted-shell wrappers, twice (before and after tests), refuses unreadable process data, and prints a
+quoted rollback command restoring the registry atomically BEFORE the code backup:
 
 ```bash
+cp -p "<printed-backup>/resources.tsv" "$HOME/.claude/orchestrator/_shared/.resources-rollback" &&
+mv -f "$HOME/.claude/orchestrator/_shared/.resources-rollback" "$HOME/.claude/orchestrator/_shared/resources.tsv" &&
 ln -sfn "<printed-backup>/res" "$HOME/.claude/orchestrator/_shared/.res-rollback" &&
 mv -f "$HOME/.claude/orchestrator/_shared/.res-rollback" "$HOME/.claude/orchestrator/_shared/res"
 ```
 
 The owner coordinates idle callers throughout; the checks are not a global admission pause. `--force` explicitly
-overrides held-lock/waiter refusal, never permits killing others. Missing `ps` access still blocks. Back up the
-registry/notes before their separate reviewed installation; on rollback remove the lane-3 row and restore the
-notes under quiescence BEFORE switching back to v1.2 (which cannot gate a registered lane 3).
+overrides held-lock/waiter refusal, never permits killing others. Missing `ps` access still blocks. Back up notes
+before their separate reviewed installation; restore those notes under quiescence before running the printed
+registry/code rollback. Never switch back to v1.2 while a lane-3 row is registered.
 `RES_INSTALL_DIR` is only an isolated installer-test override, not an alternate production lock backend.
 The reviewed registry row is in `scripts/res/resources-lane3.tsv` (literal TAB-separated, five columns):
 
@@ -154,20 +163,22 @@ finite waits/backoff, reverse release on every exit, STALE >600s, memory basis a
 Known pitfalls: old Bash waiters keep old code until re-invoked; macOS availability is memorystatus percent * RAM,
 not page/swap diagnostics (pages fallback only when the sysctl is explicitly missing). Bad metrics fail closed.
 STALE means local dead PID; wait alone can reclaim heavy holds at age **>600 seconds**, and lane 3 also needs its
-strict gate OPEN. PID reuse/legacy/remote metadata stay conservative. Same-by take never refreshes PID/start.
-Normal take for old lanes still needs caller heavy-check; lane-3 take enforces its own stricter gate too.
+strict gate OPEN. PID reuse/legacy/remote metadata stay conservative. Same-by take never refreshes PID/start;
+lane-3 re-take of an existing same-holder hold returns 0 even when its gate is CLOSED, without acquiring anew.
+Normal take for old lanes still needs caller heavy-check; new lane-3 acquisitions enforce the stricter gate.
 
 `node scripts/res/test/run.mjs` runs the 644 imported assertions plus lane-3/install/parser/compatibility tests
 inside temporary HOME/state/fixture directories. No live take/return, device probe or credential read. Default PID
 tables are scratch fixtures because sandboxed host `ps` is denied; only test-created PIDs are checked, with no
 global enumeration. Owners may additionally use `RES_TEST_NATIVE_PS=1 node scripts/res/test/run.mjs` for native
-process-table qualification where permitted; fixture success does not establish host-probe access. Original tests
-are byte-preserved and copied before running, including the historical saved script/registry used by the 166-case
+process-table qualification where permitted; fixture success does not establish host-probe access. Suites are copied
+before running; lifecycle-only adaptations do not change the historical saved script/registry used by the 166-case
 legacy regression. Historical matched 166/267-version runs are described in the T89 handover, not claimed here.
 The full runner gives these four sequential res suites a 1200-second aggregate budget; each individual suite
 has a 300-second deadline. This accommodates their real bounded backoff, not a controller timeout exemption.
 New fixtures cover exact/rounded 8/32 boundaries, take/wait/recovery, STALE reclaim, optional-lane observation,
-real wrapper fallback/pinning/reverse release and owner install refusal/backup/rollback in fake shared state.
+same-holder CLOSED-gate re-take, real wrapper missing-lane fallback/pinning/reverse release, wrapped waiter refusal,
+atomic registry publication/idempotence and owner install failure/backup/rollback in fake shared state.
 
 `heavyLocks` includes an equivalent status snapshot, bounded 128 KiB `log.tsv` tail and observed `res wait` processes.
 Event IDs use journal inode/byte offset, so repeated tails are deduplicated. Purpose, return/reclaim notes and arbitrary

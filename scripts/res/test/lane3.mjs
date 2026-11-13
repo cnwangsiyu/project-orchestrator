@@ -75,6 +75,14 @@ eq(take(pages32).code, 0); release();
 eq(take({ ...pages32, RES_TEST_VM_STAT: pages32.RES_TEST_VM_STAT.replace('2097152.', '2097151.') }).code, 5);
 eq(take().code, 0); // Page headroom is zero, memorystatus still supplies 32 GiB.
 const original = metadata(); eq(take().code, 0); eq(metadata(), original);
+const originalJournal = fs.readFileSync(path.join(state, 'log.tsv'), 'utf8');
+for (const extra of [{ RES_TEST_LOAD1M: '9' }, { RES_TEST_MEMORYSTATUS_LEVEL: '49' },
+  { RES_TEST_LOAD1M: '21' }, { RES_TEST_LOAD1M: 'bad' }]) {
+  eq(run(['take', ...takeArgs('heavy-lane-3', 'lane3-test', process.ppid)], extra).code, 0);
+  eq(metadata(), original); eq(fs.readFileSync(path.join(state, 'log.tsv'), 'utf8'), originalJournal);
+  eq(run(['take', ...takeArgs('heavy-lane-3', 'other')], extra).code, extra.RES_TEST_LOAD1M === 'bad' ? 1 : 5);
+  eq(metadata(), original);
+}
 ok(run(['status', 'heavy-lane-3']).text.includes('lane3-test (scratch)'));
 eq(run(['take', ...takeArgs('heavy-lane-3', 'other')]).code, 2);
 eq(wait({}, '0.02').code, 0); // Idempotent own hold is retained.
@@ -189,6 +197,55 @@ for (const [load, bytes, expected] of [['8', '34359738368', 'OPEN'], ['8.001', '
 }
 // Existing CLI help, output ordering, exit codes and persisted formats vs exact v1.2.
 const baseline = path.join(base, 'fixtures/v1.2-res');
+// Missing optional lane 3 during rollout must still wait within the normal-lane budget.
+const legacyRegistry = registry.split('\n').filter((line) => !line.startsWith('heavy-lane-3\t')).join('\n');
+const rollout = path.join(root, 'rollout'); fs.mkdirSync(path.join(rollout, 'locks'), { recursive: true });
+fs.writeFileSync(path.join(rollout, 'resources.tsv'), legacyRegistry);
+for (const id of ['heavy-lane-1', 'heavy-lane-2'])
+  eq(run(['take', ...takeArgs(id, 'rollout-owner')], { RES_DIR: rollout }).code, 0);
+const rolloutInfo = fs.readFileSync(path.join(rollout, 'locks/heavy-lane-1.d/info'), 'utf8');
+for (const source of [res, baseline]) {
+  const started = Date.now();
+  const timedOut = wrapper({ RES_DIR: rollout, RES_COMMAND: source, HEAVY_BUILD_TIMEOUT: '0.02' });
+  eq(timedOut.status, 2, timedOut.stderr); ok(Date.now() - started >= 1000);
+  ok(timedOut.stderr.includes('continuing bounded waits on lanes 1/2'));
+  eq(fs.existsSync(path.join(rollout, 'locks/heavy-build.d')), false);
+  eq(fs.readFileSync(path.join(rollout, 'locks/heavy-lane-1.d/info'), 'utf8'), rolloutInfo);
+}
+const fallback = spawn('/bin/bash', [path.resolve(base, '../../heavy-build.sh'), '/bin/sh', '-c', 'exit 7'], {
+  env: { ...env, RES_DIR: rollout, RES_COMMAND: res, HEAVY_BUILD_BY: 'wrapper', HEAVY_BUILD_PROJECT: 'scratch',
+    HEAVY_BUILD_TASK: 'rollout', HEAVY_BUILD_TIMEOUT: '0.2', HEAVY_BUILD_LANE: '' } });
+let fallbackOutput = '', fallbackTimer;
+const fallbackReady = new Promise((resolve) => {
+  const capture = (b) => { fallbackOutput += b; if (fallbackOutput.includes('continuing bounded waits on lanes 1/2')) resolve(); };
+  fallback.stdout.on('data', capture); fallback.stderr.on('data', capture);
+});
+const fallbackDone = once(fallback, 'close');
+try {
+  await Promise.race([fallbackReady, fallbackDone.then(([code]) => { throw Error(`fallback exited ${code}: ${fallbackOutput}`); }),
+    new Promise((_, reject) => { fallbackTimer = setTimeout(() => reject(Error('fallback did not reach normal-lane wait')), 10000); })]);
+  ok(fs.existsSync(path.join(rollout, 'locks/heavy-build.d')));
+  eq(run(['return', 'heavy-lane-2', '--by', 'rollout-owner'], { RES_DIR: rollout }).code, 0);
+  eq((await fallbackDone)[0], 7, fallbackOutput); ok(fallbackOutput.includes('took heavy-lane-2'));
+} finally {
+  clearTimeout(fallbackTimer);
+  if (fallback.exitCode === null && fallback.signalCode === null) { fallback.kill('SIGTERM'); await fallbackDone; }
+}
+eq(fs.existsSync(path.join(rollout, 'locks/heavy-build.d')), false);
+eq(fs.existsSync(path.join(rollout, 'locks/heavy-lane-2.d')), false);
+eq(fs.readFileSync(path.join(rollout, 'locks/heavy-lane-1.d/info'), 'utf8'), rolloutInfo);
+eq(wrapper({ RES_DIR: rollout, HEAVY_BUILD_LANE: 'heavy-lane-3' }).status, 1);
+eq(run(['take', ...takeArgs('heavy-lane-2', 'rollout-owner')], { RES_DIR: rollout }).code, 0);
+const errorRes = path.join(root, 'error-res');
+fs.writeFileSync(errorRes, `#!/bin/bash
+if [ "$1" = wait ] && [ "$2" = heavy-lane-3 ]; then echo 'res: cannot read lane-3 metrics' >&2; exit 1; fi
+exec "$RES_SOURCE" "$@"
+`, { mode: 0o755 });
+const failedGate = wrapper({ RES_DIR: rollout, RES_COMMAND: errorRes });
+eq(failedGate.status, 1); ok(!failedGate.stderr.includes('continuing bounded waits'));
+eq(fs.existsSync(path.join(rollout, 'locks/heavy-build.d')), false);
+for (const id of ['heavy-lane-1', 'heavy-lane-2'])
+  eq(run(['return', id, '--by', 'rollout-owner'], { RES_DIR: rollout }).code, 0);
 eq(run(['--help']).text, run(['--help'], {}, baseline).text);
 const transcript = (script, name) => {
   const dir = path.join(root, name); fs.mkdirSync(dir);
@@ -238,8 +295,26 @@ eq(sampled.heavyGate.lane3, 'OPEN'); eq(sampled.heavyLocks.lane3, 'OPEN');
 const installState = path.join(root, 'install-state'), installBin = path.join(root, 'install-bin');
 fs.mkdirSync(path.join(installState, 'locks'), { recursive: true }); fs.mkdirSync(installBin);
 fs.symlinkSync(baseline, path.join(installState, 'res'));
-fs.writeFileSync(path.join(installBin, 'node'), '#!/bin/sh\nexit "${INSTALL_TEST_EXIT:-0}"\n', { mode: 0o755 });
-fs.writeFileSync(path.join(installBin, 'ps'), '#!/bin/sh\nprintf "%s\\n" "${INSTALL_TEST_PS:-1 /bin/launchd}"\nexit "${INSTALL_PS_EXIT:-0}"\n', { mode: 0o755 });
+const installRegistry = path.join(installState, 'resources.tsv');
+fs.writeFileSync(installRegistry, legacyRegistry, { mode: 0o640 });
+fs.writeFileSync(path.join(installState, 'log.tsv'), 'unchanged journal\n');
+fs.writeFileSync(path.join(installBin, 'node'), `#!/bin/sh
+if [ -n "\${INSTALL_TEST_PS_AFTER:-}" ]; then printf '%s\\n' "$INSTALL_TEST_PS_AFTER" >"$FIXTURE_DIR/install-ps-after"; fi
+exit "\${INSTALL_TEST_EXIT:-0}"
+`, { mode: 0o755 });
+fs.writeFileSync(path.join(installBin, 'ps'), `#!/bin/sh
+if [ -f "$FIXTURE_DIR/install-ps-after" ]; then cat "$FIXTURE_DIR/install-ps-after";
+else printf '%s\\n' "\${INSTALL_TEST_PS:-1 /bin/launchd}"; fi
+exit "\${INSTALL_PS_EXIT:-0}"
+`, { mode: 0o755 });
+fs.writeFileSync(path.join(installBin, 'mv'), `#!/bin/bash
+if [[ "$*" = *'.resources-switch.'* ]] && [ "\${INSTALL_FAIL_REGISTRY:-0}" = 1 ] && [ ! -f "$FIXTURE_DIR/install-mv-failed" ]; then
+  readlink "$RES_INSTALL_DIR/res" >"$FIXTURE_DIR/install-code-at-registry-publish"
+  touch "$FIXTURE_DIR/install-mv-failed"
+  exit 1
+fi
+exec /bin/mv "$@"
+`, { mode: 0o755 });
 const install = (args = [], extra = {}) => {
   const r = spawnSync('/bin/bash', [path.join(base, '../install.sh'), ...args], { env: { ...env,
     PATH: `${installBin}:${env.PATH}`, RES_INSTALL_DIR: installState, ...extra }, encoding: 'utf8', timeout: 10000 });
@@ -249,17 +324,46 @@ fs.mkdirSync(path.join(installState, 'locks/heavy-lane-3.d'));
 eq(install().code, 2); eq(fs.readlinkSync(path.join(installState, 'res')), baseline);
 fs.rmdirSync(path.join(installState, 'locks/heavy-lane-3.d'));
 eq(install([], { INSTALL_TEST_PS: '123 /bin/bash /scratch/res wait iphone11 --timeout 1' }).code, 2);
+for (const argv of ['env FOO=bar /scratch/res wait iphone11', 'nohup res wait heavy-build',
+  "zsh -c '/scratch/res wait heavy-lane-3'", 'zsh -c \'exec env FOO=bar "/scratch/res" wait heavy-build\'',
+  '/safe/project/scripts/res/res wait heavy-build'])
+  eq(install([], { INSTALL_TEST_PS: `123 ${argv}` }).code, 2, argv);
 eq(install([], { INSTALL_PS_EXIT: '1' }).code, 2);
 eq(install([], { INSTALL_TEST_EXIT: '1' }).code, 1);
+eq(install([], { INSTALL_TEST_PS_AFTER: '123 nohup /scratch/res wait heavy-build' }).code, 2);
+fs.unlinkSync(path.join(root, 'install-ps-after'));
 eq(fs.readlinkSync(path.join(installState, 'res')), baseline);
-const switched = install(); eq(switched.code, 0); eq(fs.readlinkSync(path.join(installState, 'res')), res);
-const backup = fs.readdirSync(installState).find((name) => name.startsWith('res-backup.'));
+eq(fs.readFileSync(installRegistry, 'utf8'), legacyRegistry);
+eq(install([], { INSTALL_FAIL_REGISTRY: '1' }).code, 1);
+eq(fs.readFileSync(path.join(root, 'install-code-at-registry-publish'), 'utf8').trim(), res);
+eq(fs.readlinkSync(path.join(installState, 'res')), baseline);
+eq(fs.readFileSync(installRegistry, 'utf8'), legacyRegistry);
+const nonWaiters = '1 /bin/launchd\n123 /scratch/res status\n124 /scratch/res waiter\n125 /scratch/resource wait\n126 zsh -c "res heavy-check"';
+const switched = install([], { INSTALL_TEST_PS: nonWaiters }); eq(switched.code, 0); eq(fs.readlinkSync(path.join(installState, 'res')), res);
+const backup = path.basename(path.dirname(switched.text.match(/^Backup: (.+)$/m)[1]));
 eq(fs.readFileSync(path.join(installState, backup, 'res'), 'utf8'), fs.readFileSync(baseline, 'utf8'));
+eq(fs.readFileSync(path.join(installState, backup, 'resources.tsv'), 'utf8'), legacyRegistry);
+const installedRegistry = legacyRegistry + fs.readFileSync(path.join(base, '../resources-lane3.tsv'), 'utf8');
+eq(fs.readFileSync(installRegistry, 'utf8'), installedRegistry);
+eq(fs.statSync(installRegistry).mode & 0o777, 0o640);
+const registryInode = fs.statSync(installRegistry).ino;
+eq(install().code, 0); eq(fs.readFileSync(installRegistry, 'utf8'), installedRegistry);
+eq(fs.statSync(installRegistry).ino, registryInode);
+for (const badRow of [installedRegistry + fs.readFileSync(path.join(base, '../resources-lane3.tsv'), 'utf8'),
+  installedRegistry.replace('heavy-lane-3\tslot\topen', 'heavy-lane-3\tslot\tnever')]) {
+  fs.writeFileSync(installRegistry, badRow);
+  eq(install().code, 2); eq(fs.readFileSync(installRegistry, 'utf8'), badRow);
+  eq(fs.readlinkSync(path.join(installState, 'res')), res);
+}
+fs.writeFileSync(installRegistry, installedRegistry);
 ok(switched.text.includes('Rollback')); ok(switched.text.includes('ln -sfn'));
-const rollback = switched.text.split('\n').find((line) => line.startsWith('ln -sfn'));
+const rollback = switched.text.split('\n').find((line) => line.startsWith('cp -p'));
 eq(spawnSync('/bin/bash', ['-c', rollback]).status, 0);
 eq(fs.readFileSync(path.join(installState, 'res'), 'utf8'), fs.readFileSync(baseline, 'utf8'));
+eq(fs.readFileSync(installRegistry, 'utf8'), legacyRegistry);
 eq(install(['--force'], { INSTALL_TEST_PS: '123 /scratch/res wait heavy-lane-3' }).code, 0);
-eq(fs.readdirSync(installState).filter((name) => name.startsWith('.res-')).length, 0);
+eq(fs.readFileSync(installRegistry, 'utf8'), installedRegistry);
+eq(fs.readFileSync(path.join(installState, 'log.tsv'), 'utf8'), 'unchanged journal\n');
+eq(fs.readdirSync(installState).filter((name) => name.startsWith('.res-') || name.startsWith('.resources-')).length, 0);
 eq(fs.readdirSync(path.join(state, 'locks')).length, 0);
 console.log(`ALL ${count} ASSERTIONS PASSED`);

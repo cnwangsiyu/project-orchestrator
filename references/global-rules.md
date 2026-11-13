@@ -1,7 +1,8 @@
 # Global Rules
-version: 2026-11-13.7
+version: 2026-11-13.8
 
 ## Changes In This Version
+- Fix lane-3 same-holder re-take, legacy wrapper fallback and owner code/registry publication with rollback; detect res wait through any wrapper and synchronize test-holder lifetimes.
 - Approved utilisation: passive idle hints, expiring TTADK quota preference and nightly utilisation; CPU probe has an independent 4s budget, optional ccache stays UNKNOWN.
 - Global-rules owner takes over the whole res tool; v1.3 lane 3 is implemented here and staged pending owner switch, with load <=8 and avail >=32 GiB (2-3 lanes). Telemetry only observes it.
 - Persist both heavy-check formats with limit/lanes_held; overload review uses each sample's limit; live formula is min(20, 12 + 8 * lanes held by others).

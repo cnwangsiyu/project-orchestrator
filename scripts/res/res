@@ -400,6 +400,10 @@ cmd_take() {
     ask-user) [ -n "$FORCE" ] || { echo "res: '$id' needs the user's OK first (policy ask-user); once given, retry with --force" >&2; exit 3; } ;;
   esac
   if [ "$id" = heavy-lane-3 ]; then
+    if [ "$(field "$id" by)" = "$BY" ]; then
+      echo "already held by you: $id"; show_notes "$id"
+      return 0
+    fi
     local reading rc=0
     reading=$(cmd_heavy_check --pid "$PID") || rc=$?
     # Existing lanes keep their ungated plain-take behavior. Lane 3 cannot

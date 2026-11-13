@@ -567,6 +567,8 @@ and take-time notes at `~/.claude/orchestrator/_shared/notes/heavy-build.md`. Us
   gate, preserves the command's exit status and terminates owned child groups before returning holds. Don't nest
   it or reuse an already-held heavy lock. The resource sampler independently detects builds without holders.
   By default it tries lanes 1, 2, then 3 and retries within the finite timeout; `HEAVY_BUILD_LANE` can pin 1/2/3.
+  If optional lane 3 is unknown on a legacy installation, unpinned callers continue bounded waits on lanes 1/2;
+  other errors still stop the wrapper. The owner installer publishes code plus the backed-up registry row under quiescence.
 - **Order and bounded waiting:** full-package runs take `heavy-build` first, then one lane; never hold a lane while
   waiting for `heavy-build`. Use `res wait <id>` with the same holder/project/purpose/task/PID flags and always
   `--timeout <minutes>`; it backs off and enforces the heavy-* gate (0 taken, 2 timeout). Run waits in the background

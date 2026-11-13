@@ -40,6 +40,8 @@ TAB-separated keys in order: by/project/task/for/since/until/pid/host/start. No 
 Status is observational, uses the same columns/notes, and does not reclaim. `until` is informational.
 PID reuse counts as alive in the controller; legacy/remote metadata is not automatically reclaimed.
 Same-by idempotent take never refreshes PID/start: a replacement process must return/re-take.
+For an existing lane-3 hold, same-by re-take returns 0 without a new gate probe even if load/memory later closes
+the gate; it does not acquire anew. New lane-3 acquisitions and bounded waits retain their admission checks.
 
 Devices including iphone11/iphone8/s21 retain connection probes, `--offline`, ask-user/never policy,
 default ask-user registration, notes and force-return coordination. `add --device -` still creates a
@@ -64,10 +66,13 @@ lanes 1/2 remain compatible and need not adopt lane 3. Timeout arguments stay fi
 and zero allowed); pass the same long-lived `--pid $$` to heavy-check, take and wait.
 
 The maintained `scripts/heavy-build.sh` tries lanes 1, 2, then 3 with bounded retry and reverse release.
-`HEAVY_BUILD_LANE` explicitly pins a lane; pin 1/2 until v1.3 code and its registry row are installed together.
-The installer only switches code. The owner installs the registry row/notes separately under quiescence and
-publishes the combined rules digest with caller acknowledgements. Rollback restores registry/notes before
-switching to the printed v1.2 code backup so no old controller can admit a registered, ungated lane 3.
+`HEAVY_BUILD_LANE` explicitly pins a lane. If unpinned lane 3 is unknown on a legacy installation, the wrapper
+continues bounded waits on lanes 1/2 within the same timeout; unrelated errors still fail closed, and an explicit
+missing lane-3 pin remains an error. The installer backs up code/registry, stages an idempotent lane-3 row and
+publishes code before the atomic registry rename under owner quiescence, restoring both on publication failure.
+The owner installs notes separately and publishes the combined rules digest with caller acknowledgements.
+Rollback restores notes and the registry before switching to the printed code backup, so no old controller can
+admit a registered, ungated lane 3. These two filesystem entries are not a single atomic transaction.
 
 Telemetry recognizes an optional third lane only when observed; its absence does not make v1.2 incomplete.
 `thirdLaneOnly` observations are excluded from normal-gate tuning because 8/32 admission is a distinct context.

@@ -12,6 +12,27 @@ export RES_TEST_MEMSIZE=68719476736 RES_TEST_SWAPUSAGE='used = 0M'
 export RES_TEST_VM_STAT=$'Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free: 1048576.\nPages inactive: 0.\nPages speculative: 0.'
 OUT="$ROOT/last-output.txt"
 COUNT=0
+changer=''
+starting_changer=0
+cleanup_changer() {
+  trap - EXIT
+  trap '' INT TERM HUP
+  if [ "$starting_changer" -eq 1 ] && [ -z "$changer" ]; then changer="${!:-}"; fi
+  [ -n "$changer" ] || return 0
+  kill -TERM "$changer" 2>/dev/null || true
+  wait "$changer" 2>/dev/null || true
+}
+trap cleanup_changer EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+wait_for_retry() {
+  local deadline=$((SECONDS + 10))
+  until grep -Fq 'retry in 1s' "$OUT"; do
+    [ "$SECONDS" -lt "$deadline" ] || return 1
+    sleep 0.05
+  done
+}
 other_pid="$PPID"
 dead=2147483647
 host=$(hostname)
@@ -161,25 +182,33 @@ release heavy-build
 
 # Retry sampling tracks a new other lane, and lowers the limit when it leaves.
 clear_holds
+: >"$OUT"
+starting_changer=1
 (
-  sleep 1
+  wait_for_retry
   "$RES" take heavy-lane-1 --by retry-fixture --project scratch --for retry --pid "$other_pid" >"$ROOT/retry-take.txt" 2>&1
 ) & changer=$!
+starting_changer=0
 expect 0 "$RES" wait heavy-build --by T88 --project scratch --for retry-lane-enters --pid "$$" --timeout 0.1
 contains 'load1m=15.00 limit=12 lanes_held=0'
 contains 'load1m=15.00 limit=20 lanes_held=1'
 wait "$changer"
+changer=''
 release heavy-build
 hold heavy-build "$other_pid"
+: >"$OUT"
+starting_changer=1
 (
-  sleep 1
+  wait_for_retry
   "$RES" return heavy-lane-1 --by retry-fixture >"$ROOT/retry-return-lane.txt" 2>&1
   "$RES" return heavy-build --by fixture-heavy-build >"$ROOT/retry-return-build.txt" 2>&1
 ) & changer=$!
+starting_changer=0
 expect 2 "$RES" wait heavy-build --by T88 --project scratch --for retry-lane-leaves --pid "$$" --timeout 0.1
 contains 'load1m=15.00 limit=20 lanes_held=1'
 contains 'load1m=15.00 limit=12 lanes_held=0'
 wait "$changer"
+changer=''
 [ ! -d "$RES_DIR/locks/heavy-build.d" ] || fail 'retry acquired build after threshold dropped'
 pass 'retry recalculates lane-aware limit before acquisition'
 

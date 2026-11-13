@@ -14,6 +14,34 @@ cp "$SOURCE/stage/heavy-build.md" "$RES_DIR/notes/heavy-build.md"
 printf 'SCRATCH_ROOT=%s\n' "$ROOT"
 COUNT=0
 OUT="$ROOT/evidence/last-output.txt"
+holder=''
+releaser=''
+starting_child=''
+stop_child() {
+  [ -n "$1" ] || return 0
+  kill -TERM "$1" 2>/dev/null || true
+  wait "$1" 2>/dev/null || true
+}
+cleanup_children() {
+  trap - EXIT
+  trap '' INT TERM HUP
+  case "$starting_child" in
+    holder) [ -n "$holder" ] || holder="${!:-}" ;;
+    releaser) [ -n "$releaser" ] || releaser="${!:-}" ;;
+  esac
+  stop_child "$holder"; stop_child "$releaser"
+}
+trap cleanup_children EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+wait_for_retry() {
+  local deadline=$((SECONDS + 10))
+  until grep -Fq 'retry in 1s' "$OUT"; do
+    [ "$SECONDS" -lt "$deadline" ] || return 1
+    sleep 0.05
+  done
+}
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 pass() { COUNT=$((COUNT + 1)); printf 'PASS %02d: %s\n' "$COUNT" "$*"; }
 expect() {
@@ -124,9 +152,13 @@ release heavy-build
 
 # A held slot is retried and can be returned by its real owner while waiting.
 new_hold heavy-build
-(sleep 1; "$RES" return heavy-build --by owner >"$ROOT/evidence/background-return.txt") & releaser=$!
+: >"$OUT"
+starting_child=releaser
+(wait_for_retry; "$RES" return heavy-build --by owner >"$ROOT/evidence/background-return.txt") & releaser=$!
+starting_child=''
 expect 0 "$RES" wait heavy-build --by waiter --project test --for retry --pid "$$" --timeout 0.1
 wait "$releaser"
+releaser=''
 release heavy-build waiter
 new_hold heavy-build
 start=$SECONDS
@@ -210,8 +242,11 @@ release tiktok_vesdk
 
 # Long-lived explicit holder survives a separate invoking shell, for take and wait.
 gate 1 1048576
+: >"$FIXTURE_DIR/holder-alive"
 for command in take wait; do
-  sleep 3 & holder=$!
+  starting_child=holder
+  tail -f "$FIXTURE_DIR/holder-alive" >/dev/null & holder=$!
+  starting_child=''
   export RES HOLDER_PID="$holder" COMMAND="$command" INVOKER_FILE="$FIXTURE_DIR/invoker-pid"
   expect 0 /bin/bash -c '
     printf "%s\n" "$$" >"$INVOKER_FILE"
@@ -228,10 +263,11 @@ for command in take wait; do
   absent 'STALE owner'
   change_info heavy-build start "$((epoch - 1000))"
   expect 2 "$RES" wait heavy-build --by waiter --project test --for live-handoff --timeout 0
-  wait "$holder"
+  stop_child "$holder"
+  holder=''
   expect 0 "$RES" status heavy-build
   contains 'STALE owner'
-  pass "$command --pid $holder survived exited invoking shell $invoker; stale only after holder exit"
+  pass "$command --pid $HOLDER_PID survived exited invoking shell $invoker; stale only after holder exit"
   release heavy-build
 done
 
