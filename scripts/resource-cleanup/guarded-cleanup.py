@@ -4,6 +4,7 @@
 All signals use exact revalidated PIDs; no pkill, process groups, devices or files.
 """
 import argparse
+from contextlib import contextmanager
 import datetime as dt
 import fcntl
 import json
@@ -16,6 +17,30 @@ import sys
 import time
 
 import inventory as inv
+
+
+class CleanupInterrupted(Exception):
+    pass
+
+
+@contextmanager
+def cleanup_signals(ignore=False):
+    watched = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+    previous = {sig: signal.getsignal(sig) for sig in watched}
+
+    def interrupt(sig, frame):
+        # Disarm before unwinding; repeated signals must not interrupt recovery.
+        for item in watched:
+            signal.signal(item, signal.SIG_IGN)
+        raise CleanupInterrupted("cleanup interrupted by " + signal.Signals(sig).name)
+
+    try:
+        for sig in watched:
+            signal.signal(sig, signal.SIG_IGN if ignore else interrupt)
+        yield
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
 
 
 def subtree(root, snap):
@@ -130,6 +155,12 @@ def signal_member(member, sig):
     p = rows.get(member["pid"])
     if p is None or p["identity"] != member["identity"]:
         return False
+    held, lease_errors = inv.leases()
+    holders, holder_errors = inv.lock_holders(rows, held)
+    if lease_errors or holder_errors:
+        raise RuntimeError("resource-lock holder identity unavailable before signal")
+    if any(pid in holders for pid in inv.chain(p["pid"], rows)):
+        raise RuntimeError("resource-lock holder or descendant; refusing signal")
     try:
         os.kill(p["pid"], sig)
         return True
@@ -176,6 +207,11 @@ def restore_chrome(policy, logdir):
 
 
 def execute_action(action, claims, policy, histories, logdir, events, claims_path=None):
+    with cleanup_signals():
+        return _execute_action(action, claims, policy, histories, logdir, events, claims_path)
+
+
+def _execute_action(action, claims, policy, histories, logdir, events, claims_path=None):
     chrome = action["action"] == "restart_chrome_after_release"
     if chrome and not os.access(policy["chrome"]["binary"], os.X_OK):
         raise RuntimeError("Chrome binary unavailable; refusing termination")
@@ -243,7 +279,8 @@ def execute_action(action, claims, policy, histories, logdir, events, claims_pat
     finally:
         # Includes interrupts/errors AFTER the first termination attempt.
         if chrome and restoration_needed:
-            events.append({"root_identity": action["root_identity"], "chrome_restore": restore_chrome(policy, logdir)})
+            with cleanup_signals(ignore=True):
+                events.append({"root_identity": action["root_identity"], "chrome_restore": restore_chrome(policy, logdir)})
 
 
 def main():

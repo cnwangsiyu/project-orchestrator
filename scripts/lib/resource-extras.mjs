@@ -44,9 +44,19 @@ export function reviewExtras(samples, { since, maxGapMs, record }) {
   let hubMinutes = 0, outageMinutes = 0, partialMinutes = 0, cacheMinutes = 0, hits = 0, misses = 0, resets = 0;
   const transitions = [];
   const outageObservations = samples.filter((s) => s.t >= since && s.hubs?.complete && s.hubs.state !== 'ALL_LISTENING').map((s) => ({ at: s.at ?? new Date(s.t).toISOString(), state: s.hubs.state, missingPorts: s.hubs.missingPorts }));
+  const supervisorObservations = samples.filter((s) => s.t >= since && s.hubSupervisors).flatMap((s) =>
+    (s.hubSupervisors.entries ?? []).filter((entry) => ['BLOCKED', 'BACKOFF'].includes(entry.state?.mode)
+      || entry.logs?.some((log) => log.oversized)).map((entry) => ({ at: s.at ?? new Date(s.t).toISOString(), ...entry })));
   for (let i = 0; i + 1 < samples.length; i++) {
     const a = samples[i], b = samples[i + 1], gap = b.t - a.t, span = b.t - Math.max(a.t, since);
     if (gap <= 0 || gap > maxGapMs || span <= 0) continue;
+    if (a.hubSupervisors?.complete && b.hubSupervisors?.complete) {
+      for (const entry of a.hubSupervisors.entries ?? []) {
+        const next = b.hubSupervisors.entries?.find((row) => row.account === entry.account);
+        if (entry.state?.mode === 'BLOCKED' && next?.state?.mode === 'BLOCKED') record('hub_supervisor_blocked', entry.account, a, b.t,
+          `hub ${entry.account} gave up after ${entry.state.failures} failures (${entry.state.reason}); notify global-rules owner, repair before clearing state/restarting; telemetry never starts it`, []);
+      }
+    }
     if (a.hubs?.complete && b.hubs?.complete) {
       hubMinutes += span / 60000;
       if (a.hubs.state !== b.hubs.state || (a.hubs.missingPorts ?? []).join(',') !== (b.hubs.missingPorts ?? []).join(',')) transitions.push({
@@ -75,7 +85,10 @@ export function reviewExtras(samples, { since, maxGapMs, record }) {
   }
   const latest = samples.filter((s) => s.t >= since && s.ccache?.complete).at(-1);
   const latestObservation = samples.filter((s) => s.t >= since && s.ccache).at(-1);
+  const latestSupervisors = samples.filter((s) => s.t >= since && s.hubSupervisors).at(-1);
   return {
+    hubSupervisors: { latest: latestSupervisors?.hubSupervisors ?? null, observations: supervisorObservations,
+      note: 'Supervisor BACKOFF/BLOCKED and oversized logs are reported separately from TCP listener health; log contents and credentials are never read.' },
     hubs: { ports: HUB_PORTS, observedMinutes: hubMinutes, allMissingMinutes: hubMinutes ? outageMinutes : null, partialMissingMinutes: hubMinutes ? partialMinutes : null, outageObservations, transitions,
       note: 'Outage durations require two adjacent complete probes <=10 min apart with common absent ports; isolated observations have no invented duration. Outage onset/recovery is bounded by probes. Denied/failed probes are UNKNOWN.' },
     ccache: { observedMinutes: cacheMinutes, sampledHits: cacheMinutes ? hits : null, sampledMisses: cacheMinutes ? misses : null,

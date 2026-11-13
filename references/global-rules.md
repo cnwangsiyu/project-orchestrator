@@ -1,7 +1,9 @@
 # Global Rules
-version: 2026-11-13.2
+version: 2026-11-13.5
 
 ## Changes In This Version
+- Persist both heavy-check formats with limit/lanes_held; overload review uses each sample's limit; live formula is min(20, 12 + 8 * lanes held by others).
+- Close cleanup/lock interruption races, bound hook disk stalls, and surface hub backoff/logs; adopt live T88 v1.2 load gates 12/20.
 - Integrate machine-wide resource sampling/retro/guarded cleanup; failed probes stay UNKNOWN, unsandboxed host qualification precedes installation.
 - Consolidate owner-led policy, injection, launch/lock checks, acknowledgements and nightly audit.
 - Live heavy-build contract and completed Android-native ccache pilot; first real cache use is cold.
@@ -17,7 +19,7 @@ version: 2026-11-13.2
 - TRAE restrictions are unrelated to our concurrency/quota; never reduce concurrency for queues. LLM throughput limits are QPM/TPM, no total-cost caps.
 - Resources use shared `res`: short/urgent first, long/low-priority later; resources.md supplies five-minute sampling/retro/guarded cleanup and unlocked-build detection. Failed probes are UNKNOWN; telemetry never restarts hubs/reclaims locks. Validate a complete unsandboxed host sample before installation.
 - Full-package builds hold `heavy-build` then one of `heavy-lane-1`/`heavy-lane-2` throughout; other heavy tasks hold a lane (one full build, two heavy tasks total).
-- Use `scripts/heavy-build.sh` or explicit `res` take/return. Plain take needs heavy-check; wait always has a finite timeout. Gate at load1m >12 or available memory <16 GiB; timeout means report/queue, never bypass.
+- Use `scripts/heavy-build.sh` or explicit `res` take/return. Plain take needs heavy-check; wait has a finite timeout. Live T88 v1.2 load limit = 12 + 8 * lanes held by others, capped at 20; STALE and caller-owned locks don't count, memory >=16 GiB unchanged. Check limit/lanes_held in heavy-check output; never bypass; timeout means report/queue.
 - Pass the long-lived wrapper PID; return only owned holds in reverse order on every exit. STALE local dead-PID heavy locks older than 10 minutes may be reclaimed by res wait; never force active/unverified holds.
 - Compile 6/link 1/Xcode -jobs 6/Gradle 2 workers; fixed per-base incremental directories, one cold acceptance build, affected tests in fixes, no native rebuild without native changes.
 - No worker disk caps; auto-clean self-made clones/templates/caches only below 1 TB free on the data disk; deleting real workspaces/user data needs a card.
@@ -28,6 +30,7 @@ version: 2026-11-13.2
 - Orchestrator models persist in jobs/<id>/state.json respawnFlags, not /model: VAK/routing Fable; Webview/Lynx Opus since 2026-11-11. On/after 2026-11-17 09:00 PST ask whether to restore Fable.
 - Nightly account/model health: card for any company login expiring within 3 days, TRAE login state, Codex reset cards, Claude/Fable weekly projections. TTADK SSO expires 2026-11-21 19:37 PST; 72h warning, remind by 2026-11-18 19:37 PST unless renewed.
 - Hub unreachable: probe with `codex-worker --account <name> list --limit 1`; start with `codex-worker --account <name> hub` only if unreachable; tell the global-rules owner. An empty successful list is reachable, not a restart signal; never duplicate workers.
+- Cleanup never terminates any res-lock holder/tree; ambiguous PID/host/start metadata vetoes it. TERM/HUP/INT unwind through Chrome restoration, protected from repeated signals; SIGKILL/crash cannot guarantee recovery. Hub retries back off and eventually BLOCKED; nightly review reports state and log sizes.
 
 ## Worker Rules
 - Never read, copy or load any login session or credential file (cookies, SSO/session tokens, CLI auth files such as bytedcli's, keychain items, .netrc, API keys), and never inject a session into a browser or tool to get past a login. Wherever a login or authorization is needed, stop and report BLOCKED with what needs signing in.

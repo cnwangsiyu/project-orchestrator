@@ -265,10 +265,38 @@ def leases():
             rid = lock.name[:-2]
             held.append({"id": rid, "kind": resources.get(rid, "unknown"),
                          "holder": data.get("by", "unknown"), "project": data.get("project", ""),
-                         "task": data.get("task", ""), "until": data.get("until", "")})
+                         "task": data.get("task", ""), "until": data.get("until", ""),
+                         "pid": int(data["pid"]) if re.fullmatch(r"[1-9]\d*", data.get("pid", "")) else None,
+                         "host": data.get("host") or None,
+                         "start_epoch": int(data["start"]) if re.fullmatch(r"[1-9]\d*", data.get("start", "")) else None})
     except (OSError, ValueError) as e:
         errors.append("lease metadata: " + str(e))
     return held, errors
+
+
+def lock_holders(rows, held, now=None):
+    """Every res lock protects its local holder; ambiguous identities veto cleanup."""
+    now = time.time() if now is None else now
+    protected, errors = set(), []
+    host = os.uname().nodename
+    for lock in held:
+        pid, lock_host, start = lock.get("pid"), lock.get("host"), lock.get("start_epoch")
+        if not isinstance(pid, int) or pid <= 0 or not isinstance(lock_host, str) or not lock_host or not isinstance(start, (int, float)) or not 0 < start <= now + 1:
+            errors.append("resource-lock holder metadata ambiguous: " + str(lock.get("id", "unknown")))
+            continue
+        if lock_host != host:
+            continue  # A verified remote host's PID is not a local PID.
+        p = rows.get(pid)
+        if p is None:
+            continue  # Dead local holder has no tree; this never reclaims its lock.
+        protected.add(pid)
+        try:
+            started = time.mktime(time.strptime(p["started"], "%a %b %d %H:%M:%S %Y"))
+            if started > start + 1:
+                raise ValueError("PID reused")
+        except (KeyError, ValueError, OverflowError):
+            errors.append("resource-lock holder start identity ambiguous: " + str(lock.get("id", "unknown")))
+    return protected, errors
 
 
 def category(cmd):
@@ -378,9 +406,10 @@ def collect(policy, histories=(), sample_seconds=None):
     managed, mge = managed_pids()
     paths, sessions, ae = session_dirs()
     held, he = leases()
+    holder_pids, holder_errors = lock_holders(rows, held, now)
     names, ne = roster()
     owned, oe = task_owners(rows, cwd)
-    errors = errors0 + errors + ce + ae + he + ne + mge + oe
+    errors = errors0 + errors + ce + ae + he + holder_errors + ne + mge + oe
     activity_cache = {}
     agent_seeds = {pid for pid, p in rows.items() if any(re.search(r, p["_command"]) for r in policy["never_command_regex"])}
     agent_seeds.add(os.getpid())
@@ -415,6 +444,8 @@ def collect(policy, histories=(), sample_seconds=None):
             reasons.append("launchd_managed_service_or_descendant")
         if any(x in agent_seeds for x in ancestors):
             reasons.append("agent_session_supervisor_or_descendant")
+        if any(x in holder_pids for x in ancestors):
+            reasons.append("resource_lock_holder_or_descendant")
         if not p["cwd"]:
             reasons.append("cwd_unknown")
         for root in roots:
@@ -475,7 +506,8 @@ def collect(policy, histories=(), sample_seconds=None):
             "captured_at": dt.datetime.now().astimezone().isoformat(), "complete": not errors,
             "errors": errors, "policy_hash": hashlib.sha256(json.dumps(policy, sort_keys=True).encode()).hexdigest(),
             "health": health(), "orchestrators": names, "sessions": sessions,
-            "held_resources": held, "live_task_dirs": roots, "broad_session_dirs_ignored": broad,
+            "held_resources": held, "resource_lock_holder_pids": sorted(holder_pids),
+            "live_task_dirs": roots, "broad_session_dirs_ignored": broad,
             "sample_seconds": span, "process_count": len(rows), "processes": list(rows.values()),
             "candidates": candidates, "top20_rss_pids": [p["pid"] for p in top_rss],
             "top20_cpu_pids": [p["pid"] for p in top_cpu]}

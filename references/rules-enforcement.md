@@ -12,8 +12,9 @@ job/login/auth stores or run a CLI/network query. Use named orchestrators for re
 the bounded transcript windows can be missed on a first injection, and a skill-maintenance session in the skill
 cwd can also match. Cached recognition survives compaction; explicit names/roster remain preferred.
 
-Input errors, missing files, contention and write failures are fail-open (exit 0). A 250 ms timer bounds stdin
-waiting; reads are bounded and the seen-state lock is nonblocking. `rules-seen.json` atomically records session
+Input errors, missing files, contention and write failures are fail-open (exit 0). A hard 700 ms timer bounds stdin
+and all asynchronous filesystem operations, including stalled reads and atomic writes; the template timeout is 2s.
+Reads are bounded and the seen-state lock is nonblocking. `rules-seen.json` atomically records session
 versions and eight recent version snapshots; older comparisons request a full re-read. It records injection,
 NOT acknowledgement. After a version change each orchestrator writes `rules-ack <version>` in its ledger.
 The owner pushes change notes via the secretary for the mini group and directly to MacBook orchestrators.
@@ -29,7 +30,7 @@ Owner installation only: merge `templates/session-start-hook.json` into the exis
 without replacing other hooks/settings. Its exact fragment uses an absolute Node binary; adjust if Node moves:
 
 ```json
-{"hooks":{"SessionStart":[{"matcher":"startup|resume|compact","hooks":[{"type":"command","command":"/Users/bytedance/.nvm/versions/node/v22.17.0/bin/node \"$HOME/.agents/skills/project-orchestrator/scripts/rules-digest-hook.mjs\"","timeout":1}]}]}}
+{"hooks":{"SessionStart":[{"matcher":"startup|resume|compact","hooks":[{"type":"command","command":"/Users/bytedance/.nvm/versions/node/v22.17.0/bin/node \"$HOME/.agents/skills/project-orchestrator/scripts/rules-digest-hook.mjs\"","timeout":2}]}]}}
 ```
 
 ## Launch And Build Evidence
@@ -60,6 +61,8 @@ the worker's credential-denying sandbox/brief remains mandatory.
 
 Templates exist for ttadk (including its proxy), trae, main and b. Each runs `codex-worker hub --foreground` with
 RunAtLoad/KeepAlive, 10-second launchd throttling, an explicit Node PATH, HOME cwd and separate logs. Foreground
+supervisors additionally use persistent exponential backoff and BLOCKED standby after five consecutive failures;
+their 8 MiB rotating logs/state are checked in the nightly resource review (see resources.md). Foreground
 mode probes `list --limit 1` before starting a hub, owns its foreground hub/proxy children, and exits on their
 failure so launchd restarts them independently of Claude daemon/session restarts. A reachable existing hub is
 retained in standby, never restarted or duplicated. A missing/unusable sign-in remains BLOCKED; no credential

@@ -5,10 +5,11 @@ import { fileURLToPath } from 'node:url';
 import { GIB, LOG, readJsonl, TERMINAL } from './lib/resource-data.mjs';
 import { assessThresholds, inspectLockInterval, reviewLockTiming } from './lib/resource-lock-review.mjs';
 import { reviewExtras } from './lib/resource-extras.mjs';
+import { laneAdmission } from './lib/resource-locks.mjs';
 
 const finite = (x) => typeof x === 'number' && Number.isFinite(x);
 const ownerKey = (o) => o?.project ? `${o.project}/${o.task ?? '(project only)'}` : '(unknown)';
-export function review(input, { hours = 24, now = Date.now(), maxGapMs = 600000, loadGate = 12, memoryGateGiB = 16, approvedRanges = null, approvalEvidence = null } = {}) {
+export function review(input, { hours = 24, now = Date.now(), maxGapMs = 600000, loadGate = 12, loadGateWithOneHeavyTask = 20, memoryGateGiB = 16, approvedRanges = null, approvalEvidence = null } = {}) {
   const since = now - hours * 3600000, samples = [...new Map(input.filter((s) => s.schema === 1 && finite(s.t) && s.t >= since - maxGapMs && s.t <= now).map((s) => [`${s.host}/${s.t}`, s])).values()].sort((a, b) => a.t - b.t);
   const hosts = new Set(samples.map((s) => s.host));
   if (hosts.size > 1) return { hours, coverage: { observedMinutes: 0, reason: 'mixed hosts refused; review each machine separately' }, badCases: [], resourceShares: [], suggestions: [] };
@@ -26,7 +27,7 @@ export function review(input, { hours = 24, now = Date.now(), maxGapMs = 600000,
     if (gap <= 0 || gap > maxGapMs) { gaps++; continue; }
     const span = b.t - Math.max(a.t, since); if (span <= 0) continue;
     const minutes = span / 60000; observedMs += span;
-    const stats = inspectLockInterval(a, b, { span, record });
+    const stats = inspectLockInterval(a, b, { span, record, loadGate, loadGateWithOneHeavyTask, memoryGateGiB });
     for (const key of Object.keys(stats)) lockStats[key] += stats[key];
     if (stats.comparableMinutes) lockStats.comparableIntervals.push({ start: Math.max(a.t, since), end: b.t });
     const waiting = (a.tasks ?? []).filter((t) => ['queued', 'waiting', 'blocked'].includes(t.status) && !['dependency', 'user', 'network'].includes(t.waitReason));
@@ -47,8 +48,9 @@ export function review(input, { hours = 24, now = Date.now(), maxGapMs = 600000,
       const active = [...new Set((a.heavyRoots ?? []).map((p) => ownerKey(p.owner)))];
       record('contention', active.join(','), a, b.t, `load=${a.load?.[0] ?? 'unknown'} / cores=${a.cores}; memory pressure=${a.memory?.pressure ?? 'unknown'} (free-percentage heuristic)`, active);
     }
-    if (!a.heavyGate?.authoritative && (finite(a.load?.[0]) && a.load[0] > 12 || finite(a.memory?.availableBytes) && a.memory.availableBytes < 16 * GIB)) {
-      record('admission_gate_estimate', 'host', a, b.t, `non-authoritative legacy/sample estimate only: load=${a.load?.[0] ?? 'unknown'}, available=${finite(a.memory?.availableBytes) ? (a.memory.availableBytes / GIB).toFixed(1) + ' GiB' : 'unknown'}; heavy-check UNKNOWN, not an established gate closure`);
+    const admission = laneAdmission(a.heavyLocks, {}, { empty: loadGate, one: loadGateWithOneHeavyTask });
+    if (!a.heavyGate?.authoritative && (admission.state === 'KNOWN' && finite(a.load?.[0]) && a.load[0] > admission.loadGate || finite(a.memory?.availableBytes) && a.memory.availableBytes < memoryGateGiB * GIB)) {
+      record('admission_gate_estimate', 'host', a, b.t, `non-authoritative sample estimate only: load=${a.load?.[0] ?? 'unknown'}, entry limit=${admission.loadGate ?? 'UNKNOWN'}, available=${finite(a.memory?.availableBytes) ? (a.memory.availableBytes / GIB).toFixed(1) + ' GiB' : 'unknown'}; heavy-check UNKNOWN, not an established gate closure`);
     }
     if (finite(a.memory?.swapUsedBytes) && finite(b.memory?.swapUsedBytes) && b.memory.swapUsedBytes - a.memory.swapUsedBytes > GIB) record('swap_growth', 'host', a, b.t, `swap allocation grew ${((b.memory.swapUsedBytes - a.memory.swapUsedBytes) / GIB).toFixed(2)} GiB; not swap I/O bytes`);
     const packages = (a.heavyRoots ?? []).filter((p) => p.workload ? p.workload.class === 'package' : ['xcodebuild', 'gradle'].includes(p.kind));
@@ -96,22 +98,28 @@ export function review(input, { hours = 24, now = Date.now(), maxGapMs = 600000,
     resourceShares, resourceShareNote: 'CPU share is cumulative process CPU deltas; RSS share is sampled RSS*time (shared pages double-count), not ownership of physical RAM.', badCases, suggestions,
     heavyLocks: reviewLockTiming(samples, { since, now, maxGapMs }),
     ...extras,
-    heavyGate: { loadGate: 12, memoryGateGiB: 16, authoritativeMinutes: lockStats.gateMinutes,
+    heavyGate: { loadGate, loadGateWithOneHeavyTask, memoryGateGiB, controllerRollout: 'v1.2 live per T88 contract; verify sampled output', authoritativeMinutes: lockStats.gateMinutes,
       overloadedMinutes: lockStats.gateMinutes ? lockStats.overloadedMinutes : null,
       openMinutes: lockStats.gateMinutes ? lockStats.gateMinutes - lockStats.overloadedMinutes : null,
       unknownMinutes: (observedMs / 60000) - lockStats.gateMinutes,
-      overloadPeriods: badCases.filter((c) => c.type === 'admission_gate_closed'), note: 'res heavy-check state/exit 0 or 5 is authoritative, not page estimates. Durations are sampled interval estimates; gate transitions between endpoints are not timestamped.' },
-    tuning: assessThresholds(samples, lockStats, { loadGate, memoryGateGiB, approvedRanges, approvalEvidence, since }) };
+      overloadPeriods: badCases.filter((c) => c.type === 'admission_gate_closed'), note: 'Each sample carries its own limit/lanes_held; overload periods are separated when those change. res heavy-check state/exit 0 or 5 is authoritative, not a fixed-12 comparison or page estimate. Durations are sampled interval estimates; gate transitions between endpoints are not timestamped.' },
+    tuning: assessThresholds(samples, lockStats, { loadGate, loadGateWithOneHeavyTask, memoryGateGiB, approvedRanges, approvalEvidence, since }) };
 }
 export function formatReview(r) {
   const lines = [`# Machine resources: last ${r.hours}h`, `Coverage: ${r.coverage.observedMinutes} observed minutes; ${r.coverage.samples ?? 0} samples; CPU=${r.coverage.cpuMinutes ?? 0} min, processes=${r.coverage.processMinutes ?? 0} min. Missing data is UNKNOWN.`, `CPU idle: ${r.utilisation?.meanCpuIdlePct ?? 'UNKNOWN'}%; contention: ${r.utilisation?.contentionMinutes ?? 'UNKNOWN'} min.`, ''];
-  lines.push(`Heavy gate >12 / <16 GiB: overloaded=${r.heavyGate?.overloadedMinutes ?? 'UNKNOWN'} min; open=${r.heavyGate?.openMinutes ?? 'UNKNOWN'} min; authoritative=${r.coverage.heavyGateMinutes ?? 0} min, locks=${r.coverage.heavyLockMinutes ?? 0} min.`);
+  lines.push(`Approved limit=min(20, 12 + 8 * lanes held by others), STALE/own excluded; memory >=16 GiB. res v1.2 live per T88 contract; overload analysis uses each sample's limit and authoritative verdict. Observed controller: overloaded=${r.heavyGate?.overloadedMinutes ?? 'UNKNOWN'} min; open=${r.heavyGate?.openMinutes ?? 'UNKNOWN'} min; authoritative=${r.coverage.heavyGateMinutes ?? 0} min, locks=${r.coverage.heavyLockMinutes ?? 0} min.`);
+  for (const entry of r.tuning?.controllerMismatchObservations ?? []) lines.push(`Gate rollout mismatch: ${entry.at}; other lanes=${entry.otherLanes}, approved gate=${entry.loadGate}, observed gate=${entry.observedLoadGate}; caller PID=${entry.callerPid ?? 'observer'}. Approved reading=${entry.approvedReading}, controller reading=${entry.observedReading}; notify res owner, never bypass.`);
   const bounds = (v) => `${v.durationMinutesLower ?? 0}..${v.durationMinutesUpper ?? 'UNKNOWN'} min`;
   for (const h of r.heavyLocks?.holdTimes ?? []) lines.push(`Lock hold ${h.resource}: holder=${h.holder ?? 'unknown'}, owner=${h.owner}, start=${h.startAt ?? 'UNKNOWN'}, end=${h.endAt ?? h.lastObservedAt ?? 'UNKNOWN'}, duration=${bounds(h)}, censored=${h.leftCensored}/${h.rightCensored}; ${h.source}; ${h.endReason}`);
   for (const w of r.heavyLocks?.waitTimes ?? []) lines.push(`Lock wait ${w.resource}: holder=${w.holder ?? 'unknown'}, owner=${w.owner}, PID=${w.pid}, start=${w.startAt ?? 'UNKNOWN'}, last=${w.lastObservedAt}, duration=${bounds(w)}, timeout=${w.timeoutMinutes ?? 'UNKNOWN'} min; ${w.outcome}`);
   for (const l of r.heavyLocks?.staleLocks ?? []) lines.push(`STALE observation: ${l.at}, ${l.resource}, holder=${l.holder ?? 'unknown'}, owner=${l.owner}, PID=${l.pid}, age=${l.ageSeconds ?? 'UNKNOWN'}s`);
   lines.push(r.heavyLocks?.note ?? 'Lock timings UNKNOWN: no contract observations.');
   lines.push(`Hub ports 47321-47324: observed=${r.hubs?.observedMinutes ?? 0} min; all missing=${r.hubs?.allMissingMinutes ?? 'UNKNOWN'} min; partial=${r.hubs?.partialMissingMinutes ?? 'UNKNOWN'} min.`);
+  for (const entry of r.hubSupervisors?.observations ?? []) {
+    lines.push(`Hub supervisor ${entry.account}: ${entry.at}, ${entry.state?.mode ?? 'UNKNOWN'}, failures=${entry.state?.failures ?? 'UNKNOWN'}, reason=${entry.state?.reason ?? 'UNKNOWN'}, retry=${entry.state?.retryAt ? new Date(entry.state.retryAt).toISOString() : 'owner repair required'}; tell global-rules owner.`);
+    for (const log of entry.logs ?? []) if (log.oversized) lines.push(`Hub log oversized: ${log.name}, ${log.bytes} bytes; reviewed cap=${r.hubSupervisors.latest?.logLimitBytes ?? 'UNKNOWN'} bytes; owner inspects, telemetry never truncates.`);
+  }
+  for (const error of r.hubSupervisors?.latest?.errors ?? []) lines.push(`Hub supervisor probe UNKNOWN: ${error}`);
   for (const h of r.hubs?.outageObservations ?? []) lines.push(`Hub outage observation: ${h.at}; ${h.state}; missing ports=${h.missingPorts.join(',')}; duration unknown from this observation alone.`);
   for (const h of r.hubs?.transitions ?? []) lines.push(`Hub transition ${h.from} -> ${h.to}: bounded between ${h.earliestAt} and ${h.latestAt}; missing ports at end=${h.missingPortsAtEnd.join(',')}.`);
   lines.push(`ccache: available=${r.ccache?.latestObservation?.available ?? 'UNKNOWN'}; window hit rate=${r.ccache?.windowHitRatePct ?? 'UNKNOWN'}%; hits=${r.ccache?.sampledHits ?? 'UNKNOWN'}, misses=${r.ccache?.sampledMisses ?? 'UNKNOWN'}, resets=${r.ccache?.counterResetIntervals ?? 0}; latest cumulative hit rate=${r.ccache?.latest?.hitRatePct ?? 'UNKNOWN'}%.`, r.ccache?.note ?? 'ccache stats unavailable.');

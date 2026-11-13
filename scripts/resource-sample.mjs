@@ -10,9 +10,28 @@ import { fileURLToPath } from 'node:url';
 import { attribute, category, commandName, GIB, LOG, SHARED, parseCpu, parseCwd, parsePs, parseSwap, parseVm, readLeases, readRegistry, unsafeFile } from './lib/resource-data.mjs';
 import { lockSnapshot, matchBuildLock, observeWaiters, parseHeavyCheck, parseHeavyStatus, readLockJournal, workload } from './lib/resource-locks.mjs';
 import { parseCcacheStats, parseHubListeners } from './lib/resource-extras.mjs';
+import { readHubDiagnostics } from './lib/hub-state.mjs';
 const exec = promisify(execFile);
-export async function collect({ registry = null, budgetMs = 1750, probe = null, leases = null, journal = null, shared = SHARED, statusText = null } = {}) {
+export async function collect({ registry = null, budgetMs = 1750, cpuBudgetMs = 1850, probe = null, leases = null, journal = null, shared = SHARED, statusText = null } = {}) {
   const start = performance.now(), psStartedAt = Date.now(), errors = [];
+  const probeTimeouts = {};
+  const callProbe = async (label, exe, args, options) => {
+    const timeoutMs = label === 'CPU' ? cpuBudgetMs : budgetMs;
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw Error('invalid probe budget');
+    probeTimeouts[label] = timeoutMs;
+    const controller = new AbortController();
+    let timer;
+    try {
+      return await Promise.race([
+        Promise.resolve().then(() => probe ? probe(label, exe, args, { timeoutMs, signal: controller.signal })
+          : exec(exe, args, { ...options, timeout: timeoutMs, killSignal: 'SIGKILL', signal: controller.signal })),
+        new Promise((resolve, reject) => { timer = setTimeout(() => {
+          reject(Object.assign(Error('probe timeout'), { killed: true }));
+          controller.abort();
+        }, timeoutMs); }),
+      ]);
+    } finally { clearTimeout(timer); }
+  };
   const failedProbes = new Set();
   const failProbe = (label, reason) => {
     if (!failedProbes.has(label)) errors.push(`${label}: ${reason} (output omitted)`);
@@ -21,7 +40,7 @@ export async function collect({ registry = null, budgetMs = 1750, probe = null, 
   };
   const run = async (label, exe, args) => {
     try {
-      const result = probe ? await probe(label, exe, args) : await exec(exe, args, { timeout: Math.max(1, Math.floor(budgetMs - (performance.now() - start))), maxBuffer: 4 * 2 ** 20, env: { ...process.env, LC_ALL: 'C' } });
+      const result = await callProbe(label, exe, args, { maxBuffer: 4 * 2 ** 20, env: { ...process.env, LC_ALL: 'C' } });
       if (typeof result === 'string') return result;
       if (result?.exitCode !== undefined && result.exitCode !== 0) return failProbe(label, 'unavailable');
       return typeof result?.stdout === 'string' ? result.stdout : failProbe(label, 'invalid probe result');
@@ -29,8 +48,8 @@ export async function collect({ registry = null, budgetMs = 1750, probe = null, 
   };
   const gateProbe = async () => {
     try {
-      const result = probe ? await probe('heavy-check', path.join(shared, 'res'), ['heavy-check']) : await exec(path.join(shared, 'res'), ['heavy-check'], {
-        timeout: Math.max(1, Math.floor(budgetMs - (performance.now() - start))), maxBuffer: 16384,
+      const result = await callProbe('heavy-check', path.join(shared, 'res'), ['heavy-check'], {
+        maxBuffer: 16384,
         // Do not inherit injected test metrics or RES_DIR overrides into the live observation.
         env: { HOME: os.homedir(), PATH: '/usr/bin:/bin:/usr/sbin:/sbin', LC_ALL: 'C' },
       });
@@ -39,8 +58,8 @@ export async function collect({ registry = null, budgetMs = 1750, probe = null, 
   };
   const extraProbe = async (label, exe, args, extraEnv = {}) => {
     try {
-      const result = probe ? await probe(label, exe, args) : await exec(exe, args, {
-        timeout: Math.max(1, Math.floor(budgetMs - (performance.now() - start))), maxBuffer: 16384,
+      const result = await callProbe(label, exe, args, {
+        maxBuffer: 16384,
         env: { HOME: os.homedir(), PATH: '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin', LC_ALL: 'C', ...extraEnv },
       });
       if (typeof result === 'string') return { stdout: result, exitCode: 0 };
@@ -128,7 +147,8 @@ export async function collect({ registry = null, budgetMs = 1750, probe = null, 
     durationMs: Math.round(performance.now() - start), load, cpu,
     memory: { totalBytes, availableBytes, availableBasis: validLevel ? 'memorystatus-level' : vm ? 'free+inactive+speculative (estimate)' : 'unknown', pageHeadroomBytes: vm?.pageHeadroomBytes ?? null,
       pressureFreePct: Number.isFinite(pressurePct) ? pressurePct : null, pressure: Number.isFinite(pressurePct) ? (pressurePct < 10 ? 'critical' : pressurePct < 20 ? 'warning' : 'normal') : 'unknown', swapUsedBytes, pages: vm?.pages ?? null },
-    disk, counts, heavyRoots, processes, heavyGate, heavyLocks, hubs, ccache,
+    disk, counts, heavyRoots, processes, heavyGate, heavyLocks, hubs, ccache, probeTimeouts,
+    hubSupervisors: readHubDiagnostics(os.homedir()),
     topCpu: [...processes].sort((a, b) => b.cpuPct - a.cpuPct).slice(0, 20).map((p) => p.id),
     topRss: [...processes].sort((a, b) => b.rssBytes - a.rssBytes).slice(0, 20).map((p) => p.id),
     tasks: registry.tasks.filter((t) => !['unknown', 'done', 'finished', 'completed', 'merged', 'abandoned', 'cancelled', 'canceled'].includes(t.status)).map(({ project, task, status, ready, waitReason }) => ({ project, task, status, ready, waitReason })),

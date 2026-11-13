@@ -62,10 +62,13 @@ const writeAccounts = (reg) => {
 const argv = process.argv.slice(2);
 const ai = argv.indexOf('--account');
 const account = ai >= 0 ? argv.splice(ai, 2)[1] : null;
+let foregroundAccountMissing = false;
 if (account) {
   const prof = readAccounts()[account] ?? (account === 'main' ? { home: path.join(os.homedir(), '.codex'), hub: 'ws://127.0.0.1:47321' } : null);
-  if (!prof) { process.stderr.write(`codex-worker: unknown account ${account} (codex-worker accounts; add one with account-add)\n`); process.exit(2); }
-  process.env.CODEX_HOME = prof.home; process.env.CODEX_HUB = prof.hub;
+  if (!prof) {
+    if (argv.includes('hub') && argv.includes('--foreground')) foregroundAccountMissing = true;
+    else { process.stderr.write(`codex-worker: unknown account ${account} (codex-worker accounts; add one with account-add)\n`); process.exit(2); }
+  } else { process.env.CODEX_HOME = prof.home; process.env.CODEX_HUB = prof.hub; }
 }
 const PROF = account ? readAccounts()[account] ?? null : null;
 // TTADK web search: the account's provider points at a local proxy that adds Codex's hosted web_search tool to the
@@ -451,7 +454,7 @@ const proxied = PROF?.kind === 'ttadk' && !!PROF.searchPort;
 if (cmd === 'hub' && opts.foreground) {
   try {
     process.exit(await runHubForeground({ account, profile: PROF, hub, home: os.homedir(),
-      script: fileURLToPath(import.meta.url), interval: Number(opts['check-ms'] ?? 10000) }));
+      script: fileURLToPath(import.meta.url), interval: Number(opts['check-ms'] ?? 10000), configError: foregroundAccountMissing }));
   } catch (error) { die(`foreground hub: ${error.message}`, 1); }
 }
 if (cmd === 'proxy' || cmd === 'search-proxy') {

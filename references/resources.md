@@ -25,7 +25,8 @@ identify denied, timed-out and malformed probes without storing their raw diagno
   local STALE observations. The sampler includes a pure parser for captured `res status` output (`collect({statusText})`);
   live `res status` is deliberately not invoked because it writes temporary files. No simctl/devicectl/USB probe is run.
   Simulator services do not prove booted/unused simulators; device processes/leases do not measure device utilisation.
-- Authoritative `res heavy-check` state, exit code, load1m, memorystatus available memory, page headroom and swap diagnostics.
+- Authoritative `res heavy-check` state, exit code, load1m, **limit**, **lanes_held**, memorystatus available memory,
+  page headroom and swap diagnostics. Exact contract fields are persisted alongside compatible loadGate/lanesHeld aliases.
   Exit **5** is a valid OVERLOADED reading, not a probe failure. Exit 1/timeout/malformed output is UNKNOWN, never OK.
 - Hub TCP listener liveness for **47321-47324** in every sample: LISTENING/NOT_LISTENING/UNKNOWN per port and listener
   PIDs. Narrow `lsof` LISTEN output only; no HTTP/WebSocket request, session injection, auth or restart. Listener presence
@@ -35,7 +36,9 @@ identify denied, timed-out and malformed probes without storing their raw diagno
   counter reset or compiler setting is changed. Storage-only output from an unused cache means available, rate UNKNOWN.
 - Chrome GUI/headless counts and running/not-observed state. CPU history flags **suspected** hangs; responsiveness is unknown.
 
-The probes run concurrently with a 1.75-second subprocess deadline, no sudo. Metadata reads are bounded (2 MiB per
+The probes all start concurrently with **independent** deadlines: 1.75 seconds each, CPU 1.85 seconds to accommodate
+`top -l 2 -s 1`. The CPU probe cannot consume another probe's budget; timers also bound injected/stalled probes and
+abort timed-out children. JSON `probeTimeouts` records budgets. No sudo. Metadata reads are bounded (2 MiB per
 ledger/route file); oversized route history marks ownership unverified instead of performing an expensive scan.
 Installation acceptance still requires a **complete** host run <2 seconds on the actual machine; a fast blocked run
 does not establish full-probe performance. No fallback circumvents sandbox process restrictions.
@@ -48,8 +51,20 @@ If the host sample fails, diagnose its named probes and retain partial UNKNOWN d
 
 The sampler's diagnostic memory estimate prefers `kern.memorystatus_level * RAM`, with a page estimate fallback.
 That fallback is **not** admission evidence. The installed shared `res heavy-check` is the authority: it falls back to
-pages only when the sysctl is explicitly missing, not denied or erroneous. Rounded printed readings at exactly 12/16
+pages only when the sysctl is explicitly missing, not denied or erroneous. Rounded printed readings at exactly 12/20/16
 can have either verdict; retain the controller's state, do not recompute from rounded decimals. No second semaphore.
+
+**Gate change approved 2026-11-13 (secretary option A):** **limit = 12 + 8 * lanes held by others, capped at 20**;
+entry requires load1m <= limit and available memory >=16 GiB. STALE and the caller's own verified
+locks do not count; two other lanes leave no capacity. Unknown lane/PID identity is UNKNOWN, never permission for 20.
+The contract's **T88 live v1.2** addendum reports rollout on 2026-11-13. The parser captures `limit`/`lanes_held`
+from Darwin/Linux output, while old fixed-12 samples remain explicitly legacy (`limit:12`, `lanes_held:null`, never
+an invented zero-lane count). Overload analysis uses each sample's limit and controller verdict, not a fixed 12;
+periods with different limits/lane counts are kept separate. The review also accepts historical camelCase-only samples.
+The review compares approved entry
+readings per observed waiter PID (or an observer with no own locks) with the recorded controller context; different
+caller lane counts are not proof of a rollout mismatch. Verified mismatches go to its owner, never a gate bypass.
+Preserve the exact controller verdict at rounded bounds when contexts match; alternate-context readings are estimates.
 
 ## Heavy Lock Contract
 
@@ -145,7 +160,7 @@ Reports include utilisation, resource-ready queues, contention, admission gate c
 >=2h simulator services and disk trend. Cases carry times/PIDs/owners; project/task shares use cumulative process CPU
 and sampled RSS*time. RSS double-counts shared pages and is not physical RAM ownership or promised freed memory.
 They also include wait/hold bounds, STALE observations/periods, persistent build candidates with no matching holder,
-authoritative gate coverage/overload periods versus **load >12 OR available <16 GiB**, shared ccache rates, and hub
+authoritative gate coverage/overload periods, approved **12/20 lane-aware** entry comparisons (memory 16 GiB), shared ccache rates, and hub
 outage observations/periods. Hub durations require two complete adjacent probes with common missing ports; a single
 missing-listener sample is flagged but has no invented duration. Onset/recovery is bounded by probes, not exact.
 
@@ -157,23 +172,23 @@ reported, never automatically deleted. Only the orchestrator may inspect/remove 
 no writer is running. stderr and nightly reports are not auto-pruned by this feature.
 
 `references/nightly-review.md`'s Machine resources step consumes the report, sends each project its concrete cases,
-and tunes only within dated user-approved bounds. `scripts/resource-policy.json` starts at load 12 / memory 16 GiB /
-one package slot / two heavy lanes with **null tuning bounds** because none were approved in the brief. No autonomous
+and tunes only within dated user-approved bounds. `scripts/resource-policy.json` records load 12 (empty) / 20 (one other heavy task) / memory 16 GiB /
+one package slot / two heavy lanes with **null tuning bounds**: the fixed value 20 is approved, not a range for further tuning. No autonomous
 range is invented. Thin evidence or any unapproved/out-of-range change goes to a Chinese decision card. The shared
-controller's owner implements/acknowledges enforcement changes; until then the old thresholds remain enforced.
+controller's owner implements/acknowledges any further enforcement change; observation policy alone cannot apply it.
 
 `tuning.direction` reports possibly-too-strict (observed wait for a free resource under a closed gate, >=60% idle,
 normal pressure, no swap growth), possibly-too-loose (matching-holder build under an open gate, sustained pressure
 and >1 GiB swap growth), conflicting, or insufficient-evidence. These are correlations, not causation or optimal settings.
 Bypasses/fan-out/JVM/cache problems must be investigated first. Automatic eligibility requires three full UTC days
-with >=80% comparable interval coverage each, a consistent authoritative estimator/controller policy, no bypass
+with >=80% comparable interval coverage each, one consistent other-lane admission context, a matching authoritative estimator/controller policy, no bypass
 candidates, dated valid authorization, and candidate values inside explicit bounds. A human nightly review still
 checks comparable tasks and wall/wait outcomes, chooses **one gate at a time** and records rollback conditions.
 
 The nightly hook collects **96h JSON** as well as the 24h report; a 24h run alone cannot satisfy three-day evidence.
-If the user later authorizes ranges, record `approvedRanges` as `{"loadGate":[min,max],"memoryGateGiB":[min,max]}` and
+If the user later authorizes ranges, record `approvedRanges` as `{"loadGate":[min,max],"loadGateWithOneHeavyTask":[min,max]}` and
 `approvalEvidence` as the dated approval reference. Bounds are **null today**: this document supplies no numeric approval.
-Outside bounds, thin/conflicting evidence or estimator drift means retain 12/16 and ask the user in Chinese before changes.
+Outside bounds, thin/conflicting evidence, admission-context or estimator drift means retain 12/20/16 and ask the user in Chinese before changes. Proposals change one load gate at a time; memory stays 16 GiB.
 
 ## Cleanup
 
@@ -189,6 +204,12 @@ enough. Missing ownership/cwd/history/activity, stale inventory, new descendants
 cleanup. Live orchestrators/hubs/workers and their trees, live task paths, user GUI apps, system/managed services,
 Gradle/Kotlin daemons and CoreSimulator remain protected. Unknown/held device leases protect device tools. No device
 probe, app-data wipe or lease release is permitted.
+
+Inventory retains **PID/host/epoch start for every res lock**, including heavy-build, lanes, devices and other IDs.
+Verified local holders and their complete descendant trees are protected regardless of task status or CPU idleness;
+an ancestor action is vetoed by a protected holder below it. Missing/ambiguous metadata, reused PID/start identity or
+failed lease reads veto cleanup. The last PID check rereads all holds immediately before every TERM/KILL; telemetry
+never returns a lock to make its holder disposable. Remote PIDs are not mistaken for equal local PIDs.
 
 The runtime [session prompt](../scripts/resource-cleanup/session-prompt.md) coordinates **every** roster member by
 exact name, with a 20-minute deadline and exact PID/start/hash identities. Silence, offline/ambiguous replies, claims
@@ -206,7 +227,9 @@ After termination starts, `finally` attempts direct binary `nohup ... --restore-
 process and NEW Native Host ping/status log, and retries once. This is startup evidence, not tool connectivity:
 the coordinator must reconnect through the already authorized browser tool and perform a read-only check; failure
 is BLOCKED to the secretary, without reading cookies/profiles or login storage. Partial failure/normal interruption
-still triggers restoration; SIGKILL of the executor, crash or power loss cannot guarantee `finally` runs.
+still triggers restoration. TERM/HUP/INT are controlled exceptions that unwind through recovery; repeated termination
+signals are ignored during that restoration. Original handlers are restored afterwards. SIGKILL of the executor,
+crash or power loss cannot guarantee `finally` runs.
 Even successful host startup returns `BLOCKED_browser_reconnect_pending` (exit 2) and stops further actions. Only
 an actual authorized read-only browser-tool check may mark the job-owned audit's `browser_connection` verified;
 the session prompt describes the receipt update. Missing/failed restoration or pending reconnect blocks later executors.
@@ -223,6 +246,14 @@ metadata, audits first, then deletes descriptor-relative without following symli
 partial failures remain `running` for manual review. Never invoke the disk executor directly from the routing worker.
 
 ## Privacy and Installation
+
+Hub foreground supervisors pass the same account `search-proxy.log` path as `ensureSearchProxy`. Their stdout/stderr
+logs are bounded at **8 MiB each plus one archive**, with child output handled by the rotating writer. Failure state
+under `hub-launchd/<account>.state.json` backs off 30s, 60s, 120s, 240s (cap 15 minutes); the fifth consecutive failure
+becomes **BLOCKED**. The next KeepAlive process stays in blocked standby without child-start loops. Only 60 seconds
+of stable list/proxy health resets failures. The sampler reads only these state files and log sizes; nightly review
+reports BACKOFF/BLOCKED, oversized logs and UNKNOWN diagnostics separately from listener uptime. Owner repairs the
+cause, clears the reviewed job-owned state and restarts the agent (or starts a reachable hub); never read auth storage.
 
 Raw process arguments are transient in memory for classification/attribution/hash only. Persist executable name,
 safe cwd and owner IDs, never arbitrary argument/prompt/env values, URL queries, token/password/API-key flags or

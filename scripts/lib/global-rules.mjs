@@ -6,13 +6,14 @@ import { fileURLToPath } from 'node:url';
 export const SKILL_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 export const rulesShared = () => process.env.RULES_SHARED || path.join(os.homedir(), '.claude/orchestrator/_shared');
 export const rulesLog = () => process.env.ROUTE_LOG_FILE || path.join(rulesShared(), 'route-log.jsonl');
-export const loadDigest = () => {
-  const text = fs.readFileSync(process.env.RULES_DIGEST || path.join(SKILL_ROOT, 'references/global-rules.md'), 'utf8').trim();
+export const parseDigest = (source) => {
+  const text = source.trim();
   const version = text.match(/^version: (\d{4}-\d{2}-\d{2}\.\d+)$/m)?.[1];
   const worker = text.split(/^## Worker Rules\s*$/m)[1]?.split(/^## /m)[0]?.trim();
   if (!version || !worker) throw Error('global rules digest is missing version/worker rules');
   return { text, version, worker };
 };
+export const loadDigest = () => parseDigest(fs.readFileSync(process.env.RULES_DIGEST || path.join(SKILL_ROOT, 'references/global-rules.md'), 'utf8'));
 export const readRecords = (file) => {
   try { return fs.readFileSync(file, 'utf8').split('\n').flatMap((line) => {
     try { const row = JSON.parse(line); return row && typeof row === 'object' ? [row] : []; } catch { return []; }

@@ -1,4 +1,4 @@
-import { HEAVY_IDS } from './resource-locks.mjs';
+import { HEAVY_IDS, heavyCheckLanes, heavyCheckLimit, laneAdmission } from './resource-locks.mjs';
 import { GIB } from './resource-data.mjs';
 
 const finite = (v) => typeof v === 'number' && Number.isFinite(v);
@@ -93,16 +93,17 @@ export function reviewLockTiming(samples, { since, now, maxGapMs }) {
     note: 'Holds use metadata epoch starts or minute-precision journal bounds. Null upper durations are censored, never zero. STALE does not authorize sampler reclamation. Wait starts/timeouts are absent from the live journal; only sampled res wait processes are measurable.' };
 }
 
-export function inspectLockInterval(a, b, { span, record }) {
+export function inspectLockInterval(a, b, { span, record, loadGate = 12, loadGateWithOneHeavyTask = 20, memoryGateGiB = 16 }) {
   const result = { gateMinutes: 0, overloadedMinutes: 0, lockMinutes: 0, strictMinutes: 0, looseMinutes: 0, bypassMinutes: 0, comparableMinutes: 0 };
   const gate = a.heavyGate, nextGate = b.heavyGate;
+  const sampleLimit = heavyCheckLimit(gate), sampleLanes = heavyCheckLanes(gate);
   const authoritative = gate?.authoritative && nextGate?.authoritative;
   if (authoritative) {
     result.gateMinutes = span / 60000;
     if (gate.state === 'OVERLOADED') {
       result.overloadedMinutes = span / 60000;
-      record('admission_gate_closed', 'host', a, b.t,
-        `authoritative res heavy-check: load=${gate.load1m}, available=${(gate.availableBytes / GIB).toFixed(2)} GiB (${gate.availableBasis}); blocks >12 / <16 GiB; sampled interval, transitions may occur between probes`, [...new Set((a.heavyRoots ?? []).map((p) => who(p.owner)))]);
+      record('admission_gate_closed', `host/limit-${sampleLimit}/lanes-${sampleLanes}`, a, b.t,
+        `observed res heavy-check: load=${gate.load1m}, available=${(gate.availableBytes / GIB).toFixed(2)} GiB (${gate.availableBasis}); limit=${sampleLimit ?? 'UNKNOWN'}, lanes_held=${sampleLanes ?? 'UNKNOWN'}, memory=${memoryGateGiB} GiB; approved limit=min(20, 12 + 8 * lanes held by others); controller=${gate.controllerPolicy ?? 'UNKNOWN'}; transitions may occur between probes`, [...new Set((a.heavyRoots ?? []).map((p) => who(p.owner)))]);
     }
   }
   if (!a.heavyLocks?.complete || !b.heavyLocks?.complete) return result;
@@ -125,7 +126,18 @@ export function inspectLockInterval(a, b, { span, record }) {
     } else if (checks.every((key) => p[key]?.state === 'MATCHED' && q[key]?.state === 'MATCHED')) compliant.push(p);
   }
   if (bypass.length) result.bypassMinutes = span / 60000;
-  const sameSource = authoritative && gate.availableBasis === nextGate.availableBasis;
+  const contextMatches = (s) => {
+    const waiters = s.heavyLocks.waiters ?? [];
+    const callers = waiters.length ? waiters.map((w) => ({ pid: w.holderPid })) : [{}];
+    return callers.every((caller) => {
+      const admission = laneAdmission(s.heavyLocks, caller, { empty: loadGate, one: loadGateWithOneHeavyTask });
+      return admission.state === 'KNOWN' && admission.loadGate === heavyCheckLimit(s.heavyGate)
+        && (heavyCheckLanes(s.heavyGate) === null || admission.otherLanes === heavyCheckLanes(s.heavyGate));
+    });
+  };
+  const sameSource = authoritative && gate.availableBasis === nextGate.availableBasis
+    && sampleLimit === heavyCheckLimit(nextGate) && sampleLanes === heavyCheckLanes(nextGate)
+    && contextMatches(a) && contextMatches(b);
   const pressureKnown = ['normal', 'warning', 'critical'].includes(a.memory?.pressure) && ['normal', 'warning', 'critical'].includes(b.memory?.pressure);
   const swapKnown = finite(a.memory?.swapUsedBytes) && finite(b.memory?.swapUsedBytes);
   const waiters = a.heavyLocks.waiters ?? [];
@@ -144,7 +156,7 @@ export function inspectLockInterval(a, b, { span, record }) {
   return result;
 }
 
-export function assessThresholds(samples, stats, { loadGate, memoryGateGiB, approvedRanges, approvalEvidence, since }) {
+export function assessThresholds(samples, stats, { loadGate, loadGateWithOneHeavyTask = 20, memoryGateGiB, approvedRanges, approvalEvidence, since }) {
   const direction = stats.strictMinutes > 0 && stats.looseMinutes > 0 ? 'conflicting' : stats.strictMinutes > 0 ? 'possibly-too-strict' : stats.looseMinutes > 0 ? 'possibly-too-loose' : 'insufficient-evidence';
   const daily = new Map();
   for (const entry of stats.comparableIntervals) {
@@ -160,24 +172,45 @@ export function assessThresholds(samples, stats, { loadGate, memoryGateGiB, appr
   const approvalDate = typeof approvalEvidence === 'string' ? approvalEvidence.match(/\b\d{4}-\d{2}-\d{2}\b/)?.[0] : null;
   const approvalEpoch = approvalDate ? Date.parse(approvalDate + 'T00:00:00Z') : NaN;
   const datedApproval = finite(approvalEpoch) && new Date(approvalEpoch).toISOString().slice(0, 10) === approvalDate && approvalEpoch <= (samples.at(-1)?.t ?? -Infinity);
-  const authorized = range('loadGate') && range('memoryGateGiB') && datedApproval;
-  const consistentPolicy = loadGate === 12 && memoryGateGiB === 16;
+  const limits = { empty: loadGate, one: loadGateWithOneHeavyTask };
+  const entryObservations = samples.filter((s) => s.t >= since).flatMap((s) => {
+    const callers = (s.heavyLocks?.waiters ?? []).length ? s.heavyLocks.waiters.map((w) => ({ pid: w.holderPid, holder: w.holder })) : [{}];
+    return callers.map((caller) => {
+      const admission = laneAdmission(s.heavyLocks, caller, limits), gate = s.heavyGate;
+      const observedLimit = heavyCheckLimit(gate), observedLanes = heavyCheckLanes(gate);
+      const comparable = admission.state === 'KNOWN' && gate?.authoritative;
+      const sameContext = comparable && (observedLanes === null || observedLanes === admission.otherLanes);
+      const matches = sameContext ? observedLimit === admission.loadGate : null;
+      const reading = comparable ? matches ? gate.state : gate.load1m > admission.loadGate || gate.availableBytes < memoryGateGiB * GIB ? 'OVERLOADED' : 'OK' : 'UNKNOWN';
+      return { at: s.at ?? new Date(s.t).toISOString(), callerPid: caller.pid ?? null, ...admission,
+        approvedReading: reading, observedReading: gate?.state ?? 'UNKNOWN', observedLoadGate: observedLimit,
+        observedOtherLanes: observedLanes, controllerContextMatches: comparable ? sameContext : null,
+        controllerMatchesApprovedPolicy: matches };
+    });
+  });
+  const compared = entryObservations.filter((entry) => entry.controllerMatchesApprovedPolicy !== null);
+  const consistentPolicy = loadGate === 12 && loadGateWithOneHeavyTask === 20 && memoryGateGiB === 16
+    && compared.length > 0 && compared.every((entry) => entry.controllerMatchesApprovedPolicy);
+  const candidateKey = compared.some((entry) => entry.otherLanes === 1) ? 'loadGateWithOneHeavyTask' : 'loadGate';
+  const authorized = range(candidateKey) && datedApproval;
   const candidate = ['possibly-too-strict', 'possibly-too-loose'].includes(direction) ? {
-    loadGate: loadGate + (direction === 'possibly-too-strict' ? 1 : -1),
-    memoryGateGiB: memoryGateGiB + (direction === 'possibly-too-strict' ? -1 : 1),
+    loadGate, loadGateWithOneHeavyTask, memoryGateGiB,
+    [candidateKey]: (candidateKey === 'loadGate' ? loadGate : loadGateWithOneHeavyTask) + (direction === 'possibly-too-strict' ? 1 : -1),
   } : null;
-  const inside = candidate && authorized && ['loadGate', 'memoryGateGiB'].every((key) => candidate[key] >= approvedRanges[key][0] && candidate[key] <= approvedRanges[key][1]);
+  const inside = candidate && authorized && candidate[candidateKey] >= approvedRanges[candidateKey][0] && candidate[candidateKey] <= approvedRanges[candidateKey][1];
   const consistentEstimator = new Set(samples.filter((s) => s.t >= since && s.heavyGate?.authoritative).map((s) => s.heavyGate.availableBasis)).size === 1;
-  const adequate = wellCoveredDays >= 3 && stats.bypassMinutes === 0 && consistentPolicy && consistentEstimator;
+  const consistentAdmissionContext = compared.length > 0 && new Set(compared.map((entry) => entry.otherLanes)).size === 1;
+  const adequate = wellCoveredDays >= 3 && stats.bypassMinutes === 0 && consistentPolicy && consistentEstimator && consistentAdmissionContext;
   const eligible = !!(candidate && inside && adequate);
   const askUser = !!candidate && (!authorized || !inside || !adequate);
   const action = eligible ? 'Nightly review may propose one gate change within approved ranges, with task comparison and rollback evidence. Shared controller owner must acknowledge/apply; sampler never changes enforcement.'
-    : askUser ? 'Retain 12/16. Ask the user before any change: approval/range/comparable coverage or discipline evidence is insufficient.'
-      : 'Retain 12/16: no consistent strict/loose candidate established; missing data is not evidence that thresholds are correct.';
-  return { loadGate, memoryGateGiB, heavyPackageSlots: 1, heavyTaskLanes: 2, approvedRanges, approvalEvidence, direction,
+    : askUser ? 'Retain approved entry limits 12/20 and memory 16 GiB. Ask before further tuning; the shared res owner must acknowledge any new change.'
+      : 'Retain approved entry limits 12/20 and memory 16 GiB; missing data is not evidence of correct thresholds. Verify v1.2 adoption from captured output.';
+  return { loadGate, loadGateWithOneHeavyTask, memoryGateGiB, heavyPackageSlots: 1, heavyTaskLanes: 2, approvedRanges, approvalEvidence, direction,
+    entryObservations, controllerMismatchObservations: compared.filter((entry) => !entry.controllerMatchesApprovedPolicy),
     strictCandidateMinutes: stats.strictMinutes, looseCandidateMinutes: stats.looseMinutes, bypassCandidateMinutes: stats.bypassMinutes,
     comparableMinutes: stats.comparableMinutes, wellCoveredComparableDays: wellCoveredDays, automaticRangeAuthorized: authorized,
-    observationPolicyMatchesController: consistentPolicy, consistentEstimator, candidate, candidateWithinApprovedRanges: !!inside, nightlyAdjustmentEligible: eligible, askUser,
-    decisionCard: askUser ? `资源阈值复盘：当前 load >12 或可用内存 <16 GiB 排队。观测到${direction === 'possibly-too-strict' ? '可能过严' : '可能过松'}的相关证据（${stats.strictMinutes || stats.looseMinutes} 分钟），但不能证明因果。候选 load=${candidate.loadGate} / 内存=${candidate.memoryGateGiB} GiB；可比且充分覆盖 ${wellCoveredDays} 天，锁绕过候选 ${stats.bypassMinutes} 分钟。是否授权试点及范围？请指定回滚条件；未获批准保持 12/16，由共享 res 负责人实施。` : null,
+    observationPolicyMatchesController: consistentPolicy, consistentEstimator, consistentAdmissionContext, candidate, candidateKey, candidateWithinApprovedRanges: !!inside, nightlyAdjustmentEligible: eligible, askUser,
+    decisionCard: askUser ? `资源阈值复盘：已批准无其他重任务时 load ≤12，有一个时 ≤20；可用内存仍需 ≥16 GiB，排除 STALE 和自己的锁，T88 已报告 res v1.2 上线。观测到${direction === 'possibly-too-strict' ? '可能过严' : '可能过松'}的相关证据（${stats.strictMinutes || stats.looseMinutes} 分钟），但不能证明因果。进一步候选 ${candidateKey}=${candidate[candidateKey]}，内存保持 ${memoryGateGiB} GiB；可比且充分覆盖 ${wellCoveredDays} 天，锁绕过候选 ${stats.bypassMinutes} 分钟。是否授权试点及范围？未批准不改 12/20/16，由共享 res 负责人实施。` : null,
     note: 'Candidates are correlated diagnostic steps, not proven optimal settings. Change one gate at a time, compare like tasks and wall/wait times. Bypasses, estimator drift and thin/conflicting coverage disqualify automatic tuning.', action };
 }

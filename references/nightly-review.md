@@ -190,24 +190,31 @@ step every night, even when coverage is zero. Never extrapolate missing samples 
   PID identity and evidence; include local times in the human report. RSS shares double-count shared pages, and a
   simulator service is not proof of a booted/unused simulator. Idle network/model waits are not necessarily waste.
 - Include lock wait/hold lower-upper bounds and censoring, STALE local-PID observations, persistent heavy-build/lane
-  candidates without matching wrapper-PID holders, authoritative overload periods versus >12 / <16 GiB, and threshold
+  candidates without matching wrapper-PID holders, authoritative overload periods and approved 12/20 lane-aware entry comparisons (memory 16 GiB), and threshold
   strict/loose/conflicting/insufficient assessment. `res status` is parsed from captures; live status writes temporary
   files, so the sampler uses read-only registry/metadata/PID observations. Minute journal timestamps cannot give exact
   holds, and the live journal has no wait starts/timeouts; sampled waits are not a complete queue history. Never reclaim.
 - Report hub ports 47321-47324 and all/partial listener outages, including isolated observations with duration UNKNOWN.
+  Include supervisor BACKOFF/BLOCKED state, retry/failure counts and 8 MiB log-size/rotation checks; persistent faults
+  go to the global-rules owner for repair, never silent restart loops or credential workarounds.
   Denied probes are UNKNOWN, not all four down. The user reported a Claude-daemon restart outage on **2026-11-13 at
   11:36 PST (19:36 UTC)**; distinguish that user report from measured history. Do not invent pre-install observations,
   assert daemon causality from ports, or restart hubs in the resource review.
 - Report shared ccache latest cumulative rate and window hit/miss deltas/coverage/resets. The T83 pilot validated
   Android SDK native graph/host CMake-Ninja launchers, not Xcode or full APK acceptance. An empty/cache-stat-free first
   cold run has rate UNKNOWN; do not confuse pilot 100% hits with today's rate or attribute shared hits to one owner.
-- Baseline: ONE full-package slot, TWO heavy-task lanes, load >12 / available memory <16 GiB blocks heavy admission.
+- Approved baseline (2026-11-13, secretary option A): ONE full-package slot, TWO heavy-task lanes;
+  limit = 12 + 8 * lanes held by others, capped at 20; entry load <= limit, memory >=16 GiB unchanged. STALE/own locks don't
+  count. T88 reports res contract v1.2 live on 2026-11-13: verify captured `limit`/`lanes_held`, distinguish legacy
+  output and caller-context differences, report verified rollout mismatches, never bypass the installed controller.
+  Overload analysis uses each sample's recorded limit and verdict; don't compare all readings against 12 or merge
+  closure periods across limit/lane-count changes. Old output has limit 12 and lane count UNKNOWN, not zero.
   Check the installed shared controller with its owner (Webview / vesdk-mainline), including the current memory estimator;
   a fallback page estimate and memorystatus percentage are not interchangeable benchmarks. Shift heavy builds and
   dispatch ready lightweight work first; do not reduce model concurrency to fix compiler fan-out. Preserve affected-only
   fix tests, final full gates, cache provenance, device leases and quality constraints.
 - Tune only within `scripts/resource-policy.json`'s **dated user-approved** `approvedRanges` and `approvalEvidence`.
-  No numeric tuning range was supplied on 2026-11-13, so these start null: retain 12 / 16 / 1 / 2 and ask a Chinese
+  No numeric tuning range was supplied on 2026-11-13, so these start null: fixed 20 is approved, not a tuning range. Retain 12 / 20 / 16 / 1 / 2 and ask a Chinese
   decision card for any change until the user records bounds. Never invent an approved range. With bounds recorded,
   small changes require at least three days of adequately covered comparable tasks, queue/wall-time and pressure evidence,
   old/new values and rollback criteria. Thin/conflicting evidence or values outside bounds require a card; silence is no OK.

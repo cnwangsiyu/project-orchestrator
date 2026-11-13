@@ -539,7 +539,12 @@ and take-time notes at `~/.claude/orchestrator/_shared/notes/heavy-build.md`. Us
   not heavy. These caps never lower model-worker concurrency; keep independent ready work running.
 - **Take and gate:** `res take <id> --by <session> --project <slug> --for "<purpose>" --task <task-id> --pid $$`
   returns 0 taken, 2 busy. Plain `take` must first pass `res heavy-check` (0 OK, 5 overloaded; invalid/unreadable
-  metrics return 1, no acquisition). Gate at load1m **>12** or available memory **<16 GiB**; macOS available memory
+  metrics return 1, no acquisition). User-approved entry load (2026-11-13, secretary option A):
+  **limit = 12 + 8 * lanes held by others, capped at 20** (12 with none, 20 with one or more).
+  STALE and caller-owned locks do not count; two occupied lanes still leave no task capacity. Memory remains
+  **>=16 GiB**. T88 reports shared `res` v1.2 live (2026-11-13): `heavy-check` prints `limit`/`lanes_held`;
+  verify sampled output and report legacy/policy mismatches to its owner, never bypass the live gate.
+  macOS available memory
   is `kern.memorystatus_level / 100 * physical memory` (fallback/Linux details in the contract), not swap/page diagnostics.
 - **Build entry:** full-package briefs require [heavy-build.sh](scripts/heavy-build.sh) or explicit equivalent
   `res` take/return; other heavy tasks use the lane-only protocol. The wrapper never installs tools or bypasses a

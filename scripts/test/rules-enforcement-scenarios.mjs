@@ -61,6 +61,28 @@ try {
   fs.rmdirSync(path.join(shared, 'rules-seen.json.lock'));
   console.log('ok   hook identity, roster/transcript, versions, fail-open parsing/contention and <300ms');
 
+  const stalledIO = path.join(tmp, 'stalled-io.mjs');
+  fs.writeFileSync(stalledIO, `import fs from 'node:fs/promises';
+const open=fs.open, write=fs.writeFile, realpath=fs.realpath;
+const stalled=()=>new Promise(()=>{});
+fs.open=(file,...args)=>((process.env.STALL_PHASE==='seen'&&String(file).endsWith('rules-seen.json'))||(process.env.STALL_PHASE==='digest'&&String(file).endsWith('global-rules.md')))?stalled():open(file,...args);
+fs.writeFile=(file,...args)=>process.env.STALL_PHASE==='write'?stalled():write(file,...args);
+fs.realpath=(file,...args)=>process.env.STALL_PHASE==='transcript'?stalled():realpath(file,...args);
+`);
+  for (const phase of ['seen', 'digest', 'write', 'transcript']) {
+    const start = performance.now();
+    const input = phase === 'transcript' ? event({ session_id: 'stall-transcript', transcript_path: transcript }) : event({ session_id: 'stall-' + phase, session_title: 'Stall 主对话' });
+    const result = spawnSync(process.execPath, ['--import', stalledIO, path.join(scripts, 'rules-digest-hook.mjs')],
+      { env: { ...env, STALL_PHASE: phase }, input: JSON.stringify(input), encoding: 'utf8', timeout: 1500 });
+    const elapsed = performance.now() - start;
+    assert.equal(result.status, 0, `${phase}: ${result.stderr}`);
+    assert.equal(result.stdout, ''); assert.equal(result.stderr, '');
+    assert.ok(elapsed >= 600 && elapsed < 1000, `${phase}: hard fail-open deadline, ${elapsed}ms`);
+    fs.rmSync(path.join(shared, 'rules-seen.json.lock'), { recursive: true, force: true });
+  }
+  assert.equal(JSON.parse(fs.readFileSync(path.join(scripts, '../templates/session-start-hook.json'))).hooks.SessionStart[0].hooks[0].timeout, 2);
+  console.log('ok   async hook hard deadline under stalled seen/digest/transcript reads and atomic writes');
+
   const now = Date.now();
   append({ t: now - 1000, project: 'p', name: 'T1', category: 'implement', pick: { vendor: 'codex', model: 'gpt-6.1-sol', account: 'ttadk' } });
   cli('launch-audit.mjs', ['--name', 'p-T1-fix1', '--account', 'ttadk', '--model', 'gpt-6.1-sol', '--vendor', 'codex']);
@@ -100,8 +122,8 @@ if(m.method==='turn/start')setImmediate(()=>this.onmessage({data:JSON.stringify(
 const fs=require('fs');const a=process.argv.slice(2),id=a[1],by=a[a.indexOf('--by')+1];
 fs.appendFileSync(process.env.RES_LOG,JSON.stringify({cmd:a[0],id,args:a})+'\\n');
 let h={};try{h=JSON.parse(fs.readFileSync(process.env.RES_HOLDS));}catch{}
-if(a[0]==='wait'){if(process.env.BLOCK_ID===id){setInterval(()=>{},1000);}else if(process.env.FAIL_ID===id){process.exit(2);}else{h[id]=by;fs.writeFileSync(process.env.RES_HOLDS,JSON.stringify(h));}}
-if(a[0]==='return'){if(h[id]!==by)process.exit(2);delete h[id];fs.writeFileSync(process.env.RES_HOLDS,JSON.stringify(h));}
+if(a[0]==='wait'){if(process.env.BLOCK_ID===id){setInterval(()=>{},1000);}else if(process.env.FAIL_ID===id){process.exit(2);}else{h[id]=by;fs.writeFileSync(process.env.RES_HOLDS,JSON.stringify(h));if(process.env.INTERRUPT_RESOURCE===id){process.kill(Number(a[a.indexOf('--pid')+1]),process.env.RACE_SIGNAL);setInterval(()=>{},1000);}}}
+if(a[0]==='return'){if(h[id]!==by)process.exit(2);if(process.env.REPEAT_RETURN_SIGNAL){for(const sig of ['SIGTERM','SIGHUP','SIGINT'])process.kill(process.ppid,sig);}delete h[id];fs.writeFileSync(process.env.RES_HOLDS,JSON.stringify(h));}
 `, { mode: 0o755 });
   const buildEnv = { ...env, RES_COMMAND: res, RES_LOG: reslog, RES_HOLDS: holds, HEAVY_BUILD_BY: 'fixture-holder',
     HEAVY_BUILD_PROJECT: 'p', HEAVY_BUILD_TASK: 'B1', HEAVY_BUILD_TIMEOUT: '0.01' };
@@ -119,6 +141,46 @@ if(a[0]==='return'){if(h[id]!==by)process.exit(2);delete h[id];fs.writeFileSync(
   assert.equal(spawnSync('/bin/bash', [path.join(scripts, 'heavy-build.sh'), '/bin/true'], { env: { ...buildEnv, FAIL_ID: 'heavy-lane-1' }, timeout: 5000 }).status, 2);
   assert.deepEqual(JSON.parse(fs.readFileSync(holds)), {});
   assert.deepEqual(resrows().filter((row) => row.cmd === 'return').map((row) => row.id), ['heavy-build']);
+  const raceDriver = path.join(tmp, 'race-driver.sh');
+  fs.writeFileSync(raceDriver, `set -T
+hit=0
+race() {
+  local cmd="$1"
+  [ "$hit" -eq 0 ] || return 0
+  case "$RACE_STAGE" in
+    before_pid) [ "$cmd" = 'child=$!' ] && [ "\${acquiring:-}" = "$RACE_RESOURCE" ] ;;
+    after_wait) [ "$cmd" = 'status=$?' ] && [ "\${acquiring:-}" = "$RACE_RESOURCE" ] ;;
+    clear_child) [ "$cmd" = "child=''" ] && [ "\${acquiring:-}" = "$RACE_RESOURCE" ] ;;
+    before_return) [ "$cmd" = 'return "$status"' ] && [ "\${acquiring:-}" = "$RACE_RESOURCE" ] ;;
+    before_held) { [ "$cmd" = 'build_held=1' ] && [ "$RACE_RESOURCE" = heavy-build ]; } || { [ "$cmd" = 'lane_held=1' ] && [ "$RACE_RESOURCE" = heavy-lane-1 ]; } ;;
+    after_held) [ "$cmd" = "acquiring=''" ] && [ "\${acquiring:-}" = "$RACE_RESOURCE" ] ;;
+    payload_pid) [ "$cmd" = 'child=$!' ] && [ -z "\${acquiring:-}" ] && [ "\${lane_held:-0}" -eq 1 ] ;;
+    *) return 0 ;;
+  esac || return 0
+  hit=1
+  kill -s "$RACE_SIGNAL" "$$"
+}
+trap 'race "$BASH_COMMAND"' DEBUG
+source "$BUILD_WRAPPER" "$@"
+`);
+  for (const resource of ['heavy-build', 'heavy-lane-1']) for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
+    for (const stage of ['before_pid', 'after_wait', 'clear_child', 'before_return', 'before_held', 'after_held']) {
+      reset();
+      const result = spawnSync('/bin/bash', [raceDriver, '/bin/true'], { env: { ...buildEnv, BUILD_WRAPPER: path.join(scripts, 'heavy-build.sh'), RACE_RESOURCE: resource, RACE_SIGNAL: signal, RACE_STAGE: stage, REPEAT_RETURN_SIGNAL: '1' }, encoding: 'utf8', timeout: 5000 });
+      assert.equal(result.status, { SIGTERM: 143, SIGINT: 130, SIGHUP: 129 }[signal], `${resource} ${stage}: ${result.stderr}`);
+      assert.deepEqual(JSON.parse(fs.readFileSync(holds)), {}, `${resource} ${stage}`);
+      const returns = resrows().filter((row) => row.cmd === 'return').map((row) => row.id);
+      assert.equal(returns.length, new Set(returns).size, 'no double return after held-flag assignment');
+    }
+    reset();
+    const interrupted = spawnSync('/bin/bash', [path.join(scripts, 'heavy-build.sh'), '/bin/true'], { env: { ...buildEnv, INTERRUPT_RESOURCE: resource, RACE_SIGNAL: signal, REPEAT_RETURN_SIGNAL: '1' }, encoding: 'utf8', timeout: 5000 });
+    assert.equal(interrupted.status, { SIGTERM: 143, SIGINT: 130, SIGHUP: 129 }[signal]);
+    assert.deepEqual(JSON.parse(fs.readFileSync(holds)), {});
+  }
+  reset();
+  assert.equal(spawnSync('/bin/bash', [raceDriver, '/bin/sleep', '10'], { env: { ...buildEnv, BUILD_WRAPPER: path.join(scripts, 'heavy-build.sh'), RACE_RESOURCE: 'heavy-lane-1', RACE_STAGE: 'payload_pid', RACE_SIGNAL: 'SIGTERM' }, timeout: 5000 }).status, 143);
+  assert.deepEqual(JSON.parse(fs.readFileSync(holds)), {});
+  console.log('ok   interrupted acquisition before/after PID, wait, return and held flags; cleanup survives repeated signals');
   for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
     reset();
     const ready = path.join(tmp, `child-${signal}`);

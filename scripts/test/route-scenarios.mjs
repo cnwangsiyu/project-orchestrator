@@ -294,6 +294,7 @@ for (const [sc, args, want, note] of CASES) {
     for (const sc of ['ttFresh', 'ttOutTraeDown', 'fresh']) {
       const routed = JSON.parse(run(sc, ['build-run']));
       assert.ok(routed.notes.some((s) => /heavy-build\.sh.*res take\/return.*heavy-build first/.test(s)));
+      assert.ok(routed.notes.some((s) => /entry load <=12.*<=20.*STALE and caller-owned.*memory >=16 GiB/.test(s)));
       assert.ok(!routed.notes.some((s) => /at most 3 concurrent heavy builds/.test(s)));
     }
     for (const sc of ['unreadHub']) {

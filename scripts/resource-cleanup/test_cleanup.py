@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Destructive boundaries tested entirely with fixtures/mocks; never real signals."""
+"""Mocked targets only; interruption signals are confined to this test process."""
 import copy
 import importlib.util
 import json
@@ -47,6 +47,92 @@ def claims(snap):
 
 
 class ProtectionTests(unittest.TestCase):
+    def test_res_lock_inventory_retains_pid_host_and_start(self):
+        with tempfile.TemporaryDirectory(dir=inv.BASE) as tmp, patch.object(inv, "SHARED", Path(tmp)):
+            shared = Path(tmp)
+            (shared / "resources.tsv").write_text("heavy-build\tslot\topen\t-\n")
+            lock = shared / "locks/heavy-build.d"
+            lock.mkdir(parents=True)
+            lock.joinpath("info").write_text("by\twrapper\npid\t100\nhost\tfixture\nstart\t1000\n")
+            held, errors = inv.leases()
+            self.assertEqual(errors, [])
+            self.assertEqual((held[0]["pid"], held[0]["host"], held[0]["start_epoch"]), (100, "fixture", 1000))
+
+    def test_every_lock_holder_tree_protected_and_ambiguous_holds_veto(self):
+        now = time.time()
+        rows = {pid: proc(pid, ppid) for pid, ppid in [(100, 1), (101, 100), (102, 101), (200, 1)]}
+        for p in rows.values():
+            p["_command"] = "node old.test.js"
+            p["started"] = time.strftime("%a %b %d %H:%M:%S %Y", time.localtime(now - 12000))
+        owned = {str(pid): {"project": "test", "task": "T1", "status": "done", "changedAt": (now - 9000) * 1000,
+                           "taskDir": "/tmp/orchestrator/test/tasks/T1", "evidence": "path"} for pid in rows}
+        histories = [{"complete": True, "captured_epoch": now - t, "processes": list(copy.deepcopy(rows).values())} for t in range(9000, 0, -300)]
+        held = {"id": "heavy-build", "kind": "slot", "pid": 100, "host": inv.os.uname().nodename, "start_epoch": now - 3600}
+        with patch.object(inv, "task_owners", return_value=(owned, [])), patch.object(inv, "task_activity", return_value=now - 9000), patch.object(inv, "processes", side_effect=lambda: (copy.deepcopy(rows), [])), patch.object(inv, "cwd_map", return_value=({pid: "/tmp/free" for pid in rows}, [])), patch.object(inv, "managed_pids", return_value=(set(), [])), patch.object(inv, "session_dirs", return_value=([], [], [])), patch.object(inv, "leases", return_value=([held], [])) as leases, patch.object(inv, "roster", return_value=(["A", "B"], [])), patch.object(inv, "health", return_value={}), patch.object(inv.time, "sleep"):
+            for rid in ["heavy-build", "heavy-lane-1", "heavy-lane-2", "device-phone", "other-res-lock"]:
+                held["id"] = rid
+                s = inv.collect(POLICY, histories)
+                self.assertTrue(s["complete"])
+                found = {p["pid"]: p for p in s["processes"]}
+                for pid in [100, 101, 102]:
+                    self.assertIn("resource_lock_holder_or_descendant", found[pid]["protected_reasons"])
+                    self.assertEqual(found[pid]["proposed_action"], "report_only")
+                self.assertEqual(found[200]["proposed_action"], "terminate_after_release")
+            for extra in [{"pid": None}, {"host": None}, {"start_epoch": None}, {"start_epoch": now - 20000}]:
+                leases.return_value = ([{**held, **extra}], [])
+                s = inv.collect(POLICY, histories)
+                self.assertFalse(s["complete"])
+                self.assertEqual(g.plan(s, claims(s), POLICY)["actions"], [])
+
+    def test_last_signal_check_rereads_locks_and_never_kills_holder_descendants(self):
+        root, child = proc(), proc(101, 100)
+        root["started"] = "Fri Nov 13 01:00:00 2026"
+        held = {"id": "heavy-lane-1", "pid": 100, "host": inv.os.uname().nodename, "start_epoch": time.time()}
+        with patch.object(inv, "processes", return_value=({100: root, 101: child}, [])), patch.object(inv, "leases", return_value=([held], [])), patch.object(g.os, "kill") as kill:
+            for member in [root, child]:
+                with self.assertRaises(RuntimeError):
+                    g.signal_member(member, g.signal.SIGTERM)
+            kill.assert_not_called()
+
+    def test_term_hup_unwind_and_repeated_signals_cannot_abort_chrome_restore(self):
+        root = proc(category="gui_chrome", action="restart_chrome_after_release")
+        root["command"] = POLICY["chrome"]["binary"]
+        s = snapshot([root])
+        c = claims(s)
+        a = g.plan(s, c, POLICY)["actions"][0]
+        watched = (g.signal.SIGTERM, g.signal.SIGHUP, g.signal.SIGINT)
+        previous = {sig: g.signal.getsignal(sig) for sig in watched}
+        for first in watched:
+            events = []
+            def terminate(member, sig):
+                inv.os.kill(inv.os.getpid(), first)
+            def restore(policy, logdir):
+                for repeated in watched:
+                    inv.os.kill(inv.os.getpid(), repeated)
+                return {"status": "verified"}
+            with patch.object(g.os, "access", return_value=True), patch.object(inv, "collect", return_value=s), patch.object(g, "signal_member", side_effect=terminate), patch.object(g, "restore_chrome", side_effect=restore) as restored:
+                with self.assertRaises(g.CleanupInterrupted):
+                    g.execute_action(a, c, POLICY, [], inv.BASE, events)
+                restored.assert_called_once()
+            self.assertEqual({sig: g.signal.getsignal(sig) for sig in watched}, previous)
+            self.assertTrue(any(e.get("chrome_restore", {}).get("status") == "verified" for e in events))
+
+    def test_sigkill_survivors_and_fresh_claim_veto_between_signals(self):
+        s = snapshot()
+        c = claims(s)
+        a = g.plan(s, c, POLICY)["actions"][0]
+        changed = copy.deepcopy(c)
+        changed["replies"]["B"]["claimed_identities"] = [proc()["identity"]]
+        for fresh_claims, expected in [(c, [g.signal.SIGTERM, g.signal.SIGKILL]), (changed, [g.signal.SIGTERM])]:
+            events = []
+            with patch.object(inv, "collect", return_value=s), patch.object(inv, "read_metadata", side_effect=[c, c, fresh_claims]), patch.object(g, "signal_member", return_value=True) as sent, patch.object(inv, "processes", return_value=({}, [])), patch.object(g.time, "monotonic", side_effect=range(0, 10000, 100)):
+                if fresh_claims is changed:
+                    with self.assertRaises(RuntimeError):
+                        g.execute_action(a, c, POLICY, [], inv.BASE, events, "claims.json")
+                else:
+                    g.execute_action(a, c, POLICY, [], inv.BASE, events, "claims.json")
+            self.assertEqual([call.args[1] for call in sent.call_args_list], expected)
+
     def test_shell_dry_never_launches_session_or_writes_health(self):
         with tempfile.TemporaryDirectory(dir=inv.BASE) as tmp:
             folder = Path(tmp)

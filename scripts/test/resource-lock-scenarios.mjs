@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { GIB, readLeases } from '../lib/resource-data.mjs';
-import { HEAVY_IDS, lockSnapshot, matchBuildLock, observeWaiters, parseHeavyCheck, parseHeavyStatus, readLockJournal, workload } from '../lib/resource-locks.mjs';
+import { HEAVY_IDS, heavyLoadLimit, laneAdmission, lockSnapshot, matchBuildLock, observeWaiters, parseHeavyCheck, parseHeavyStatus, readLockJournal, workload } from '../lib/resource-locks.mjs';
 import { parseCcacheStats, parseHubListeners } from '../lib/resource-extras.mjs';
 import { collect } from '../resource-sample.mjs';
 import { formatReview, review } from '../resource-review.mjs';
@@ -15,6 +15,7 @@ const tmp = fs.mkdtempSync(path.join(path.dirname(fileURLToPath(import.meta.url)
 const T = Date.parse('2026-11-13T00:00:00Z'), host = 'fixture-host'; let checks = 0;
 const test = async (name, fn) => { await fn(); checks++; console.log(`PASS ${name}`); };
 const gateText = (state = 'OK', load = 2, avail = 20) => `load1m=${load.toFixed(2)} avail=${avail.toFixed(2)}GiB (memorystatus 50%) pages_headroom=18.00GiB swap_used=0.00GiB gate=${state}`;
+const v12Text = (state, load, avail, lanes) => gateText(state, load, avail).replace(' avail=', ` limit=${heavyLoadLimit(lanes)} lanes_held=${lanes} avail=`);
 const gate = (state = 'OK') => parseHeavyCheck(gateText(state, state === 'OK' ? 2 : 13), state === 'OK' ? 0 : 5);
 const lease = (extra = {}) => ({ id: 'heavy-build', holder: 'wrapper', project: 'p', task: 'T1', pid: 100, host, startMs: T - 1000000, ...extra });
 const leases = (held = [], complete = true) => ({ held, registered: HEAVY_IDS, complete, errors: [] });
@@ -41,6 +42,7 @@ try {
   await test('authoritative Darwin/Linux gate, fallbacks, exit5 and metric errors', () => {
     const r = parseHeavyCheck(gateText('OVERLOADED', 13.57, 13.15), 5);
     assert.equal(r.authoritative, true); assert.equal(r.availableBytes, 13.15 * GIB);
+    assert.equal(r.limit, 12); assert.equal(r.lanes_held, null); assert.equal(r.controllerPolicy, 'legacy-fixed-12');
     assert.equal(parseHeavyCheck('load1m=11.00 headroom=20.00 GiB gate=OK').availableBasis, 'Linux MemAvailable');
     assert.equal(parseHeavyCheck(gateText().replace('memorystatus 50%', 'memorystatus unavailable; pages fallback')).authoritative, true);
     assert.equal(parseHeavyCheck(gateText('OK', 12, 16)).state, 'OK');
@@ -137,6 +139,29 @@ try {
     const old = runReview([sample(0, { heavyGate: null, load: [20, 20, 20] }), sample(1, { heavyGate: null })]);
     assert.equal(old.heavyGate.overloadedMinutes, null); assert.ok(old.badCases.some((c) => c.type === 'admission_gate_estimate')); assert.ok(!old.badCases.some((c) => c.type === 'admission_gate_closed'));
   });
+  await test('mixed-format overload analysis uses per-sample limits and never merges different limits', () => {
+    const legacy = parseHeavyCheck(gateText('OVERLOADED', 17, 20), 5);
+    const open = parseHeavyCheck(v12Text('OK', 17, 20, 1));
+    const closed = parseHeavyCheck(v12Text('OVERLOADED', 21, 20, 1), 5);
+    const logs = [legacy, open, closed, closed].map((heavyGate, i) => sample(i, { heavyGate }));
+    const r = runReview(logs);
+    assert.equal(r.heavyGate.overloadedMinutes, 10); assert.equal(r.heavyGate.openMinutes, 5);
+    assert.equal(r.heavyGate.overloadPeriods.length, 2);
+    assert.match(r.heavyGate.overloadPeriods[0].evidence, /limit=12, lanes_held=UNKNOWN/);
+    assert.match(r.heavyGate.overloadPeriods[1].evidence, /limit=20, lanes_held=1/);
+    const consecutive = runReview([legacy, closed, closed, open].map((heavyGate, i) => sample(i, { heavyGate })));
+    assert.deepEqual(consecutive.heavyGate.overloadPeriods.map((p) => p.minutes), [5, 10]);
+    assert.match(formatReview(consecutive), /limit=min\(20, 12 \+ 8 \* lanes held by others\)/);
+    const canonical = { ...closed }; delete canonical.loadGate; delete canonical.lanesHeld;
+    const historical = { ...closed }; delete historical.limit; delete historical.lanes_held;
+    const one = snapshot([lease({ id: 'heavy-lane-1' })]);
+    for (const observed of [canonical, historical]) {
+      const report = runReview([0, 1].map((i) => sample(i, { heavyGate: observed, heavyLocks: one, heavyRoots: [build()] })));
+      assert.equal(report.heavyGate.overloadedMinutes, 5); assert.equal(report.tuning.comparableMinutes, 5);
+      assert.equal(report.tuning.entryObservations[0].observedLoadGate, 20);
+      assert.equal(report.tuning.entryObservations[0].observedOtherLanes, 1);
+    }
+  });
   await test('bypass needs persistent candidate and unmatched holder; missing/exempt evidence is not guilt', () => {
     const p = build({ buildLock: { state: 'UNMATCHED' } });
     const logs = [sample(0, { heavyRoots: [p] }), sample(1, { heavyRoots: [p] })];
@@ -154,10 +179,73 @@ try {
   });
   await test('strict/loose diagnostic correlation, missing ranges and thin coverage ask user', () => {
     const strict = [0, 1].map((i) => sample(i, { heavyGate: gate('OVERLOADED'), heavyLocks: { ...freeLocks(), waiters: [waiter()] } }));
-    let r = runReview(strict); assert.equal(r.tuning.direction, 'possibly-too-strict'); assert.equal(r.tuning.nightlyAdjustmentEligible, false); assert.equal(r.tuning.askUser, true); assert.match(r.tuning.decisionCard, /12\/16/);
+    let r = runReview(strict); assert.equal(r.tuning.direction, 'possibly-too-strict'); assert.equal(r.tuning.nightlyAdjustmentEligible, false); assert.equal(r.tuning.askUser, true); assert.match(r.tuning.decisionCard, /12\/20\/16/);
     const loose = [0, 1].map((i) => sample(i, { heavyRoots: [build()], memory: { pressure: 'warning', swapUsedBytes: i * 2 * GIB } }));
     r = runReview(loose); assert.equal(r.tuning.direction, 'possibly-too-loose'); assert.equal(r.tuning.looseCandidateMinutes, 5);
     strict[1].heavyGate = gate(); assert.equal(runReview(strict).tuning.direction, 'insufficient-evidence');
+  });
+  await test('approved 12/20 entry gates exclude STALE/own holds and detect legacy controller output', () => {
+    const one = snapshot([lease({ id: 'heavy-lane-1' })]);
+    assert.equal(laneAdmission(freeLocks()).loadGate, 12);
+    assert.equal(laneAdmission(one).loadGate, 20);
+    assert.equal(laneAdmission(one, { pid: 100 }).loadGate, 12);
+    const stale = snapshot([lease({ id: 'heavy-lane-1', pid: 999 })]);
+    assert.equal(laneAdmission(stale).loadGate, 12);
+    const two = snapshot([lease({ id: 'heavy-lane-1' }), lease({ id: 'heavy-lane-2', pid: 101 })], [{ pid: 100, ppid: 1, started: new Date(T - 2000000).toISOString() }, { pid: 101, ppid: 1, started: new Date(T - 2000000).toISOString() }]);
+    assert.equal(laneAdmission(two).state, 'NO_CAPACITY');
+    assert.equal(laneAdmission(two, { pid: 100 }).loadGate, 20);
+    assert.equal(laneAdmission(snapshot([lease({ id: 'heavy-lane-1', host: 'remote' })])).state, 'UNKNOWN');
+    const logs = [0, 1].map((i) => sample(i, { heavyLocks: one, heavyGate: parseHeavyCheck(gateText('OVERLOADED', 17, 20), 5) }));
+    const r = runReview(logs);
+    assert.equal(r.tuning.entryObservations[0].approvedReading, 'OK');
+    assert.equal(r.tuning.controllerMismatchObservations.length, 2);
+    assert.equal(r.tuning.observationPolicyMatchesController, false);
+    assert.match(formatReview(r), /Gate rollout mismatch.*approved gate=20, observed gate=12/);
+    for (const [load, mem, expected] of [[20, 16, 'OK'], [20.01, 16, 'OVERLOADED'], [17, 15.99, 'OVERLOADED']]) {
+      const observed = parseHeavyCheck(gateText('OVERLOADED', load, mem), 5);
+      const entry = runReview([sample(0, { heavyLocks: one, heavyGate: observed })]).tuning.entryObservations[0];
+      assert.equal(entry.approvedReading, expected);
+    }
+    const ownWait = { ...one, waiters: [waiter({ resource: 'heavy-lane-2' })] };
+    assert.equal(runReview([sample(0, { heavyLocks: ownWait })]).tuning.entryObservations[0].otherLanes, 0);
+  });
+  await test('live v1.2 output captures lane-aware limits and preserves rounded controller verdicts', () => {
+    const v12 = (state, load, mem, lanes) => gateText(state, load, mem).replace(' avail=', ` limit=${lanes ? 20 : 12} lanes_held=${lanes} avail=`);
+    const one = snapshot([lease({ id: 'heavy-lane-1' })]);
+    for (const [load, mem, state] of [[20, 16, 'OK'], [20, 16, 'OVERLOADED'], [20.01, 16, 'OVERLOADED'], [17, 15.99, 'OVERLOADED']]) {
+      const observed = parseHeavyCheck(v12(state, load, mem, 1), state === 'OK' ? 0 : 5);
+      assert.equal(observed.authoritative, true); assert.equal(observed.loadGate, 20); assert.equal(observed.lanesHeld, 1);
+      assert.equal(observed.limit, 20); assert.equal(observed.lanes_held, 1);
+      assert.equal(observed.controllerPolicy, 'v1.2-lane-aware');
+      const r = runReview([sample(0, { heavyLocks: one, heavyGate: observed })]);
+      assert.equal(r.tuning.entryObservations[0].approvedReading, state);
+      assert.equal(r.tuning.controllerMismatchObservations.length, 0);
+      assert.equal(r.tuning.observationPolicyMatchesController, true);
+      const own = runReview([sample(0, { heavyLocks: { ...one, waiters: [waiter()] }, heavyGate: observed })]);
+      assert.equal(own.tuning.entryObservations[0].controllerContextMatches, false);
+      assert.equal(own.tuning.entryObservations[0].controllerMatchesApprovedPolicy, null);
+    }
+    assert.equal(parseHeavyCheck(v12('OK', 12, 16, 0)).loadGate, 12);
+    for (const lanes of [0, 1, 2, 3]) {
+      assert.equal(heavyLoadLimit(lanes), Math.min(20, 12 + 8 * lanes));
+      assert.equal(parseHeavyCheck(v12Text('OK', 12, 16, lanes)).limit, Math.min(20, 12 + 8 * lanes));
+      assert.equal(parseHeavyCheck(v12Text('OK', 12, 16, lanes)).lanes_held, lanes);
+    }
+    for (const lanes of [-1, 0.5, null, NaN]) assert.equal(heavyLoadLimit(lanes), null);
+    assert.equal(parseHeavyCheck(v12('OK', 2, 20, 1).replace('limit=20', 'limit=12')).state, 'UNKNOWN');
+    assert.equal(parseHeavyCheck(v12('OK', 2, 20, 0).replace('lanes_held=0', 'lanes_held=-1')).state, 'UNKNOWN');
+    const linux = parseHeavyCheck('load1m=17.00 limit=20 lanes_held=1 avail=20.00GiB headroom=20.00 GiB gate=OK');
+    assert.equal(linux.availableBasis, 'Linux MemAvailable'); assert.equal(linux.loadGate, 20);
+    assert.equal(linux.limit, 20); assert.equal(linux.lanes_held, 1);
+    assert.equal(parseHeavyCheck('load1m=17.00 limit=20 lanes_held=1 avail=20.00GiB headroom=19.00 GiB gate=OK').state, 'UNKNOWN');
+    const drift = [sample(0, { heavyGate: parseHeavyCheck(v12('OVERLOADED', 21, 20, 0), 5), heavyLocks: { ...freeLocks(), waiters: [waiter()] } }),
+      sample(1, { heavyGate: parseHeavyCheck(v12('OVERLOADED', 21, 20, 1), 5), heavyLocks: { ...one, waiters: [waiter()] } })];
+    assert.equal(runReview(drift).tuning.comparableMinutes, 0);
+    const uncertain = snapshot([lease({ id: 'heavy-lane-1', host: 'remote' })]);
+    const unknown = [0, 1].map((i) => sample(i, { heavyGate: parseHeavyCheck(v12('OVERLOADED', 21, 20, 1), 5), heavyLocks: { ...uncertain, waiters: [waiter()] } }));
+    assert.equal(runReview(unknown).tuning.comparableMinutes, 0);
+    const ownContext = [0, 1].map((i) => sample(i, { heavyGate: parseHeavyCheck(v12('OVERLOADED', 21, 20, 1), 5), heavyLocks: { ...one, waiters: [waiter()] } }));
+    assert.equal(runReview(ownContext).tuning.comparableMinutes, 0);
   });
   await test('three covered comparable days permit only dated authorized in-range tuning', () => {
     const logs = Array.from({ length: 865 }, (_, i) => sample(i, { heavyGate: gate('OVERLOADED'), heavyLocks: { ...freeLocks(), waiters: [waiter()] } }));
@@ -225,11 +313,50 @@ try {
     };
     const r = await collect({ registry, leases: leases(), journal: { complete: true, events: [], errors: [] }, probe });
     assert.equal(r.heavyGate.state, 'OVERLOADED'); assert.equal(r.heavyRoots[0].buildLock.state, 'UNMATCHED'); assert.equal(r.hubs.state, 'ALL_MISSING'); assert.equal(r.ccache.hitRatePct, 0); assert.equal(r.complete, true);
+    assert.equal(r.heavyGate.limit, 12); assert.equal(r.heavyGate.lanes_held, null);
+    for (const state of ['OK', 'OVERLOADED']) {
+      const current = await collect({ registry, leases: leases(), journal: { complete: true, events: [], errors: [] }, probe: (label, exe, args) => {
+        if (label !== 'heavy-check') return probe(label, exe, args);
+        const stdout = v12Text(state, state === 'OK' ? 17 : 21, 20, 1);
+        if (state === 'OVERLOADED') throw Object.assign(Error('overloaded'), { code: 5, stdout });
+        return stdout;
+      } });
+      assert.equal(current.complete, true); assert.equal(current.heavyGate.state, state);
+      const persisted = JSON.parse(JSON.stringify(current));
+      assert.equal(persisted.heavyGate.limit, 20); assert.equal(persisted.heavyGate.lanes_held, 1);
+    }
     assert.ok(!labels.some((p) => p.args.includes('status'))); assert.ok(!JSON.stringify(r).includes('PRIVATE')); assert.ok(!JSON.stringify(r).includes('_command'));
     assert.match(formatReview(runReview([sample(0, { hubs: r.hubs }), sample(1, { hubs: r.hubs })])), /hub_outage/);
     const nestedPs = '100 1 501 01:00 0.0 1024 S 00:00 Fri Nov 13 01:00:00 2026 node --test host.test.js\n300 100 501 01:00 0.0 1024 S 00:00 Fri Nov 13 01:00:00 2026 xcodebuild archive\n400 300 501 01:00 0.0 1024 S 00:00 Fri Nov 13 01:00:00 2026 clang -c file.c\n';
     const nested = await collect({ registry, leases: leases(), journal: { complete: true, events: [], errors: [] }, probe: (label, exe, args) => label === 'ps' ? nestedPs : probe(label, exe, args) });
     assert.equal(nested.heavyRoots.filter((p) => p.workload.class === 'package').length, 1); assert.equal(nested.heavyRoots.find((p) => p.pid === 300).buildLock.state, 'UNMATCHED');
+  });
+  await test('parallel sampler probes complete independently; stalled CPU cannot starve metadata', async () => {
+    const registry = { complete: true, errors: [], tasks: [], mappings: [], projects: [] };
+    const readings = { ps: '300 1 501 01:00 0.0 1024 S 00:00 Fri Nov 13 01:00:00 2026 node fixture\n', cwd: 'p300\nn/tmp/test\n',
+      CPU: 'CPU usage: 10% user, 20% sys, 70% idle', 'memory pages': 'page size of 16384 bytes\nPages free: 1.\nPages inactive: 2.\nPages speculative: 3.\n',
+      'memory pressure': 'System-wide memory free percentage: 70%', swap: 'used = 0M', memorystatus: '50\n',
+      'heavy-check': gateText(), 'hub listeners': { exitCode: 1, stdout: '', stderr: '' }, ccache: 'Hits: 0\nMisses: 10\n' };
+    const options = { registry, leases: leases(), journal: { complete: true, events: [], errors: [] }, budgetMs: 250, cpuBudgetMs: 350 };
+    let starts = [], firstCompletionStarts = 0;
+    const complete = await collect({ ...options, probe: async (label, exe, args, { timeoutMs, signal }) => {
+      assert.equal(timeoutMs, label === 'CPU' ? 350 : 250); assert.equal(signal.aborted, false); starts.push(label);
+      await new Promise((r) => setTimeout(r, label === 'CPU' ? 200 : 150));
+      firstCompletionStarts ||= starts.length;
+      return readings[label];
+    } });
+    assert.equal(firstCompletionStarts, 10); assert.equal(complete.complete, true); assert.deepEqual(complete.failedProbes, []);
+    assert.ok(complete.durationMs < 600, `parallel completion: ${complete.durationMs}ms`);
+    let cpuSignal; starts = [];
+    const stalled = await collect({ ...options, probe: async (label, exe, args, { signal }) => {
+      starts.push(label);
+      if (label === 'CPU') { cpuSignal = signal; return new Promise(() => {}); }
+      await new Promise((r) => setTimeout(r, 150)); return readings[label];
+    } });
+    assert.equal(starts.length, 10); assert.equal(cpuSignal.aborted, true);
+    assert.deepEqual(stalled.failedProbes, ['CPU']); assert.equal(stalled.processComplete, true); assert.equal(stalled.cwdComplete, true);
+    assert.equal(stalled.heavyGate.authoritative, true); assert.equal(stalled.hubs.complete, true); assert.equal(stalled.ccache.complete, true);
+    assert.ok(stalled.durationMs < 700, `isolated CPU timeout: ${stalled.durationMs}ms`);
   });
   console.log(`resource lock/hub/cache scenarios: ${checks} groups all pass`);
 } finally { fs.rmSync(tmp, { recursive: true, force: true }); }

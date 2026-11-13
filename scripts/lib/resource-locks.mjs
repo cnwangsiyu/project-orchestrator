@@ -4,6 +4,34 @@ import path from 'node:path';
 import { GIB, SHARED, safeHolder, safeId, unsafeFile, category, commandName } from './resource-data.mjs';
 
 export const HEAVY_IDS = ['heavy-build', 'heavy-lane-1', 'heavy-lane-2'];
+export const heavyLoadLimit = (lanes) => Number.isSafeInteger(lanes) && lanes >= 0 ? Math.min(20, 12 + 8 * lanes) : null;
+// Prefer contract fields, retaining compatibility with previously persisted samples.
+export const heavyCheckLimit = (gate) => {
+  const value = gate?.limit ?? gate?.loadGate;
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null;
+};
+export const heavyCheckLanes = (gate) => {
+  const value = gate?.lanes_held ?? gate?.lanesHeld;
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
+};
+export function laneAdmission(snapshot, caller = {}, limits = { empty: 12, one: 20 }) {
+  const unknown = () => ({ state: 'UNKNOWN', otherLanes: null, loadGate: null, reason: 'lane/PID identity incomplete; never assume the higher gate' });
+  if (!snapshot?.complete) return unknown();
+  let otherLanes = 0;
+  for (const id of ['heavy-lane-1', 'heavy-lane-2']) {
+    const lock = snapshot.locks.find((row) => row.id === id);
+    if (!lock) return unknown();
+    if (lock.state === 'FREE' || lock.stale === true || lock.state === 'STALE') continue;
+    const own = Number.isSafeInteger(caller.pid) && caller.pid > 0 && lock.local === true
+      && lock.pidIdentity === 'observed' && lock.pid === caller.pid;
+    if (own) continue;
+    if (lock.state !== 'HELD' || lock.stale !== false || lock.local !== true || lock.pidIdentity !== 'observed') return unknown();
+    otherLanes++;
+  }
+  return { state: otherLanes >= 2 ? 'NO_CAPACITY' : 'KNOWN', otherLanes,
+    loadGate: otherLanes === 0 ? limits.empty : otherLanes === 1 ? limits.one : null,
+    reason: 'approved v1.2 entry policy; STALE and the caller\'s verified own locks excluded' };
+}
 const finite = (v) => typeof v === 'number' && Number.isFinite(v);
 const minuteTime = (s) => /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(s ?? '') && finite(Date.parse(s.replace(' ', 'T'))) ? Date.parse(s.replace(' ', 'T')) : null;
 const identity = (s) => {
@@ -30,11 +58,24 @@ export function parseHeavyStatus(text, expected = HEAVY_IDS) {
 }
 
 export function parseHeavyCheck(text, exitCode = 0) {
-  const unknown = (reason) => ({ state: 'UNKNOWN', authoritative: false, exitCode, error: reason, loadGate: 12, memoryGateGiB: 16 });
+  const unknown = (reason) => ({ state: 'UNKNOWN', authoritative: false, exitCode, error: reason,
+    limit: null, lanes_held: null, loadGate: null, lanesHeld: null, memoryGateGiB: 16 });
   if (![0, 5].includes(exitCode)) return unknown('heavy-check metrics unavailable (output omitted)');
   const number = '(\\d+(?:\\.\\d+)?)';
-  const darwin = String(text).trim().match(new RegExp(`^load1m=${number} avail=${number}GiB \\((memorystatus \\d+%|memorystatus unavailable; pages fallback)\\) pages_headroom=${number}GiB swap_used=${number}GiB gate=(OK|OVERLOADED)$`));
-  const linux = String(text).trim().match(new RegExp(`^load1m=${number} headroom=${number} GiB gate=(OK|OVERLOADED)$`));
+  let source = String(text).trim(), loadGate = 12, lanesHeld = null;
+  const v12 = source.match(new RegExp(`^load1m=${number} limit=(\\d+) lanes_held=(\\d+) (.*)$`));
+  if (v12) {
+    loadGate = +v12[2]; lanesHeld = +v12[3];
+    if (heavyLoadLimit(lanesHeld) === null || loadGate !== heavyLoadLimit(lanesHeld)) return unknown('invalid v1.2 lane/limit reading');
+    source = `load1m=${v12[1]} ${v12[4]}`;
+    const linuxV12 = source.match(new RegExp(`^load1m=${number} avail=${number}GiB headroom=${number} GiB gate=(OK|OVERLOADED)$`));
+    if (linuxV12) {
+      if (+linuxV12[2] !== +linuxV12[3]) return unknown('Linux available/headroom mismatch');
+      source = `load1m=${linuxV12[1]} headroom=${linuxV12[2]} GiB gate=${linuxV12[4]}`;
+    }
+  }
+  const darwin = source.match(new RegExp(`^load1m=${number} avail=${number}GiB \\((memorystatus \\d+%|memorystatus unavailable; pages fallback)\\) pages_headroom=${number}GiB swap_used=${number}GiB gate=(OK|OVERLOADED)$`));
+  const linux = source.match(new RegExp(`^load1m=${number} headroom=${number} GiB gate=(OK|OVERLOADED)$`));
   if (!darwin && !linux) return unknown('unparseable heavy-check reading (output omitted)');
   const m = darwin ?? linux, state = darwin ? m[6] : m[3];
   if (!(darwin ? [m[1], m[2], m[4], m[5]] : [m[1], m[2]]).every((v) => finite(+v))) return unknown('non-finite heavy-check metrics');
@@ -44,7 +85,9 @@ export function parseHeavyCheck(text, exitCode = 0) {
   return { state, authoritative: true, exitCode, load1m: +m[1], availableBytes: +m[2] * GIB,
     availableBasis: darwin ? level !== undefined ? 'memorystatus-level' : 'pages-fallback (sysctl explicitly missing)' : 'Linux MemAvailable',
     memorystatusPct: level === undefined ? null : +level, pageHeadroomBytes: darwin ? +m[4] * GIB : null,
-    swapUsedBytes: darwin ? +m[5] * GIB : null, loadGate: 12, memoryGateGiB: 16,
+    swapUsedBytes: darwin ? +m[5] * GIB : null, limit: loadGate, lanes_held: lanesHeld,
+    loadGate, lanesHeld, memoryGateGiB: 16,
+    controllerPolicy: v12 ? 'v1.2-lane-aware' : 'legacy-fixed-12',
     note: 'Controller state is authoritative; printed readings are rounded to 0.01, so do not recompute boundary verdicts.' };
 }
 
