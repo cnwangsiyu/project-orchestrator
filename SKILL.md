@@ -121,7 +121,7 @@ that keeps the orchestrators alive.
   **Prevent conflicts by planning** below); quota decisions come from [route.mjs](scripts/route.mjs).
   Company accounts have no concurrency cap. Don't lower TRAE concurrency for fear of its queue (user, 2026-11-11:
   "排队跟我们自己的并发没什么关系"): queueing comes from TRAE's overall load, not from how many tasks we run; a
-  queued or queue-full worker is handled as an infrastructure miss (re-route with `--exclude-model`; see
+  queue-full rejection is an infrastructure miss; an accepted queued turn stays pending (see
   [TRAE CLI](references/codex-workers.md#trae-cli-as-the-second-company-account-user-2026-11-08)).
 
 **Delegate to workers, not subagents** (user, 2026-11-03). Whenever a background worker can do
@@ -161,6 +161,17 @@ that — so say "commit locally, do not push" (or whatever this task allows). Co
 message anyone: they end their run with the report and put the same status word first in their
 final message; a QUESTION ends the run, and you resume it with the answer.
 
+Every code brief includes this short **Acceptance** block:
+
+- **Done checks:** exact commands/checks and expected results on the target artifact, entry and environment; follow
+  [Done on the target artifact and entry](#done-on-target) and the existing 2026-11-11
+  [feature-flag](#feature-flags-before-merge) / [deploy-release](#deploy-release-briefs) rules where applicable.
+- **Out of scope:** list what this task does not change.
+- **Open questions:** resolved answers, or explicitly marked NOT-READY with an owner; resolve blockers before dispatch.
+
+Before dispatch, take **30 seconds to self-check**: premises have evidence, the worker can run the acceptance checks
+with its workspace/tools/access, and the scope does not conflict with sibling tasks. Amend gaps before launching.
+
 Every brief for work that writes or touches devices carries these safety clauses, word for word or
 close (user, 2026-11-04, after a worker overwrote a user header and another wiped test-app data):
 - "Never overwrite, delete or move files outside this task's scope: the user's files, uncommitted
@@ -191,18 +202,18 @@ workers, and patching after a second same-kind defect.
   channel, upload, unlocked screen); exact dependency caches; signing team/profile/key, bundle in use, permissions,
   runner support. Anything NOT-READY: fix it or ask the user first; don't launch into it. Stay within the permissions
   you have: a missing credential or signing asset is one card to the user, never a worker workaround.
-- **"Done" is proven on the target artifact and entry, not on unit tests.** The brief's done-criteria name: (1) the
+- <a id="done-on-target"></a>**"Done" is proven on the target artifact and entry, not on unit tests.** The brief's done-criteria name: (1) the
   acceptance identity — which server and session (server-side evidence), which build/version/SHA, which core is loaded;
   after switching endpoints, reconnect explicitly; (2) the production entry — the real package/loader path (e.g. a plain
   `node` import, the final bundle, offline resources, the oldest supported OS) and the default CI test globs and cwd;
   (3) the deployment's environment/runtime, initial state, decoded config and permissions, with real module/child-process
   paths intact (user-approved 2026-11-11 retro; W291-L1g smokes bypassed an unpackaged worker); fakes may replace external
   providers, never the boundary being qualified; (4) device acceptance runs to the end before anything is recorded as passed.
-- **Feature flags before merge** (user-approved 2026-11-11 retro; W291-L1 landed OFF/build checks but could not activate):
+- <a id="feature-flags-before-merge"></a>**Feature flags before merge** (user-approved 2026-11-11 retro; W291-L1 landed OFF/build checks but could not activate):
   the brief requires package-and-launch proof with the flag ON and OFF on the exact final artifact, from a clean initial
   state (empty data dir, fresh instance/config with deployment permissions); exercise the enabled path, not just readiness.
   Record artifact/SHA, settings and outcomes; missing proof is NOT-READY, not done. Use isolated state, never wipe user data.
-- **Deploy/release briefs** (user-approved 2026-11-11 retro; W291-L1-ppe2a mistook normal WS/mediaScope for a crash loop):
+- <a id="deploy-release-briefs"></a>**Deploy/release briefs** (user-approved 2026-11-11 retro; W291-L1-ppe2a mistook normal WS/mediaScope for a crash loop):
   before any mutation, pin baseline/control probes, health checks with thresholds, sample intervals and observation window,
   rollback triggers and exact steps to restore the prior artifact/config. A fallback model follows those criteria only;
   an unknown signal or judgment outside them means stop and report facts, never invent a rollback condition.
@@ -212,7 +223,9 @@ workers, and patching after a second same-kind defect.
   Every task that adds state or side effects gets an executable failure contract in its brief: what happens on success,
   partial failure, cancel, retry, duplicate, restart, revoke and timeout; side effects at most once; what old output is
   kept.
-- **Fix rounds.** Every fix brief asks for three kinds of test: the original failure reproduced, the fix passing, and
+- **Fix rounds.** When a miss is `spec` or `process` (`outcome --cause`), first amend the brief's Acceptance block and
+  say what changed; do not dispatch another attempt with the same brief. Every fix brief asks for three kinds of test:
+  the original failure reproduced, the fix passing, and
   the neighbouring old behaviour unchanged (not only the case the reviewer named). If the second fix of a task brings a
   new defect of the same kind, stop patching: find whether it is a shared contract, the interface layout or a too-wide
   patch, then simplify or split the work (a `design` route can review the approach). `route.mjs` reminds you from
@@ -316,7 +329,8 @@ effort, Codex account and launch command from
     --model <model>`, so work moves on instead of failing task by task.
   - Fallback models (user, 2026-11-10): when the company account's GPT is out, route.mjs uses DeepSeek-V4.1-Flash,
     then Gemini-3.1-Pro, then DeepSeek-V4-Pro, before any personal quota; when Sol falls short, a different family
-    runs before Sol max. Their service code gets a review by another family. An infrastructure miss (timeout, queue,
+    runs before Sol max. Apply the model-fit exclusions and daily-quota choices in references/model-routing.md.
+    Their service code gets a review by another family. An infrastructure miss (timeout, queue-full rejection,
     restricted) on one task: re-route with `--exclude-model <model or family>`, same `--failures`
     (references/model-routing.md, "Fallback models on the company account").
   - TTADK first (user, 2026-11-07): when the TTADK company gateway is healthy, every task its
@@ -414,6 +428,15 @@ whatever the task calls for (see Mechanics for where and how). One writer per wo
 ports and shared caches have a single holder at a time. In heavy repos a new worktree costs a big
 checkout and a cold build, so reuse idle ones or run tasks one after another — say so when you
 choose. Record every worktree you create and remove it once its work is merged or abandoned.
+
+**Build and device environment discipline** (user-approved task-duration retro, 2026-11-13):
+
+- Before builds/device runs, identify orphaned build/test process trees of finished tasks by their task directory and
+  clean only those trees. Never kill another task's processes; uncertain ownership means leave it alone.
+- On the mini, run at most **N concurrent heavy builds**, with **N = 3** unless the ledger says otherwise. This limits
+  heavy build processes, not parallel model workers; keep other ready tasks running.
+- Device leases last at most **2 h**, then the worker returns the device and reports results/remaining work. Put the
+  preflight in the brief: device connected, unlocked, app data backed up; include the return command and deadline.
 
 **Hold shared resources through the shared table, not through another orchestrator.** Devices and
 checkouts that several projects use are listed in `~/.claude/orchestrator/_shared/resources.tsv`,

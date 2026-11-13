@@ -17,6 +17,9 @@ Paste the next section into the reviewer's brief, or point the reviewer at this 
 You are the gate before code that is costly to undo goes out. Find what would really hurt, not everything that could be
 nicer.
 
+- **Frozen, diff-scoped review.** The brief pins the checkout's commit hash and diff base/hash. Review that diff on a
+  frozen checkout with no concurrent writer; read surrounding code only to establish a concrete failure path from the
+  change. If the checkout moves, stop and have the orchestrator pin the new revision before continuing.
 - **Blocking findings (P0/P1).** Only these block a merge:
   - wrong behaviour on a realistic path;
   - a crash, hang or leak;
@@ -57,7 +60,11 @@ nicer.
 - **Fallback reviewer gate** (user-approved 2026-11-11 retro; W291-R0's Gemini LAND missed storage/startup P1s): release
   or high-stakes work reviewed by a fallback model also needs an independent reviewer of another family, with at least
   one GPT/Claude review. Reconcile both reports and failure probes before acceptance; if unavailable, report BLOCKED.
-- After 2 review rounds, stop. You decide whether one more fix is clearly worth it, or take it to the user. Never loop.
+- **Default-off / flag-guarded code gets at most 2 review rounds.** Then the orchestrator decides: merge with notes if
+  no P0/P1 remains, or re-scope. A flag does not waive a concrete P0/P1 or the required ON/OFF acceptance proof; P2 alone
+  never blocks or earns another round.
+- For other code, after 2 review rounds, stop. You decide whether one more fix is clearly worth it, or take it to the
+  user. Never loop.
   If round 2 still finds the same kind of defect, re-scope the work (SKILL.md, "Fix rounds") before another fix.
 - `MERGE` and `MERGE-WITH-NOTES` count as a `pass` in `outcome.mjs`. Only a `BLOCK` that led to a fix round counts
   as `rework`.

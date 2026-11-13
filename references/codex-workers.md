@@ -263,8 +263,12 @@ personal quota appears only when both company accounts are out. The user chose n
   no daily bucket). `codex-worker.mjs --account trae usage` prints this as `{kind:'trae', dailyUsage, usage, modelQuotas}`;
   `quota.mjs` shows one row per model with a daily bucket plus the weekly row. A depleted bucket (`isDepleted`) moves only
   that model into TRAE's **low-priority queue** (`queue/status` `modelQuotaLowPriority: true`; requests then wait with
-  positions in the hundreds) until its reset — routing is unchanged, and `route.mjs` adds a note when the pick's model is
-  depleted. `account/rateLimits/read` does not work for this login.
+  positions in the hundreds) until its reset. For new dispatches, `route.mjs` prefers a comparable GPT with quota left,
+  then eligible company fallbacks (see model-routing.md, "Daily quota and queue choice"). Above ~300 for a depleted
+  model, consider `--exclude-model <that model>` with the same `--failures` on the next dispatch; non-depleted/unknown
+  buckets wait. Never interrupt an accepted queued turn or launch a duplicate. Keep parallel task concurrency unchanged.
+  Long builds/large reviews at ≥80% daily usage may start just after resetTime (TRAE normally 22:00 UTC; TTADK 16:00 UTC),
+  advisory only. `account/rateLimits/read` does not work for this login.
 - **Pause after failures** (`scripts/lib/trae-health.mjs`, user 2026-11-08). codex-worker records every failed or
   stalled TRAE turn and clears the record on a completed one. Failures count **per model family** (gpt, deepseek,
   gemini, seed…; 2026-11-10: TRAE restricted only GPT while the others kept working): a paused family's models drop out

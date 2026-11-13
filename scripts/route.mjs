@@ -23,6 +23,7 @@ const RR = process.env.ROUTE_RR || path.join(SHARED, 'route-rotation.txt'); // l
 const C = (model, effort) => ({ vendor: 'claude', model, effort });
 const X = (model, effort) => ({ vendor: 'codex', model, effort });
 const SOL = 'gpt-6.1-sol', ASTRA = 'gpt-6-astra', TERRA = 'gpt-6.1-terra', LUNA = 'gpt-6-luna';
+const SOL56 = 'gpt-5.6-sol';
 const KIMI = 'kimi-k3'; // TTADK only: a different model family, best planted-bug recall (2026-11-07 tests)
 // Fallback models on a company account, in order, for when its GPT-6.1-Sol is unavailable (paused, restricted, excluded)
 // and as a different-family step after Sol has fallen short (user, 2026-11-10: "某个模型失败的话还有的备选"; keep
@@ -163,7 +164,10 @@ const chatgptBrowser = chatgptOpen.filter((r) => r.a.browser);
 const browserViaCodex = T.kind === 'browser' && (ttBrowser || chatgptBrowser.length > 0);
 // The fallback models the company account can run for this task, best first (ALTS): image-read takes the vision models,
 // every other row the general ones (Seed-Evolving is vision-only, 2026-11-13).
-const ttAlts = ALTS.filter((a) => ttHas(a.model) && (cat === 'image-read' ? a.vision : !a.visionOnly)).map((a) => X(a.model, a.effort));
+const deepseekUnfit = cat === 'build-run' || cat === 'review-high'
+  || (['review', 'second-opinion'].includes(cat) && (impact === 'release' || stakes === 'high' || security));
+const ttAlts = ALTS.filter((a) => ttHas(a.model) && (cat === 'image-read' ? a.vision : !a.visionOnly)
+  && !(deepseekUnfit && poolOf(a.model) === 'deepseek')).map((a) => X(a.model, a.effort));
 const ttModelsOK = ttHas(SOL) || ttAlts.length > 0;
 // A fallback of a different family from model x (a reviewer or a retry that doesn't share x's blind spots).
 const altOtherThan = (x) => ttAlts.find((a) => poolOf(a.model) !== poolOf(x?.model)) ?? null;
@@ -298,6 +302,7 @@ if (!deferred) {
     if (failures) prevRaw = ladder[Math.min(failures - 1, ladder.length - 1)];
     if (failures) why.push(`escalated to step ${Math.min(failures, ladder.length - 1)} of ${ladder.length - 1} after ${failures} failure(s)`);
     if (failures >= ladder.length) needsOK.push(`escalation ladder exhausted after ${failures} failure(s): tell the user before trying again`);
+    if (failures >= 1 && CODE.includes(cat)) notes.push("if the last miss was spec/process, amend the brief's acceptance first and say what changed before dispatching this fix round (outcome --cause); do not repeat the same brief");
     // Rework retro 2026-11-10 (user-approved): from the second failed attempt of code work, patching again rarely helps
     // when the new defect is of the same kind; re-scope first.
     if (failures >= 2 && CODE.includes(cat)) notes.push('before this fix round: if the last fix brought a new defect of the same kind (same invariant, state or race), stop patching — find whether it is a shared contract, the interface layout or a too-wide patch, then simplify or split the work (a `design` route can review the approach); the fix brief still asks for the original failure, the fix and the neighbouring old behaviour to be tested');
@@ -314,6 +319,21 @@ if (!deferred) {
 // lacks as Sol. Image generation never runs there, not even its Sol fallback step: the gateway has no image tool.
 // research without the search proxy stays off TTADK on every step, fallbacks included (nightly review 11-07 dry run).
 const onTTADK = (x) => x?.vendor === 'codex' && !!TT && cat !== 'image-gen' && !(cat === 'research' && !TT.search) && (ttHas(x.model) || (chatgptOut && ttModelsOK));
+// Daily depletion affects new model choices, never account health, concurrency or an accepted queued turn.
+// Use a comparable GPT with confirmed quota left; an unknown bucket is not evidence of spare priority capacity.
+const quotaChoice = (x, log = (r) => why.push(r), f = failures) => {
+  if (!onTTADK(x) || TT.kind !== 'trae' || !TT.quota?.daily?.[x.model]?.depleted) return x;
+  // 5.6 is adequate only for simple first-attempt lookup/extraction/drafting, never an escalated or high-stakes row.
+  const simple = ['lookup', 'extract', 'draft'].includes(cat) && f === 0 && stakes !== 'high';
+  const gpt = [ASTRA, ...(simple ? [SOL56] : [])].find((model) => {
+    const q = TT.quota.daily[model];
+    return model !== x.model && ttHas(model) && q?.depleted === false
+      && (q.remaining > 0 || (q.used != null && q.limit > q.used));
+  });
+  const sub = gpt ? X(gpt, x.effort) : ttAlts.find((a) => a.model !== x.model && !TT.quota.daily[a.model]?.depleted);
+  log(`TRAE ${x.model}'s daily high-priority bucket is depleted → ${sub ? `${label(sub)} (${gpt ? 'comparable GPT with quota left' : 'eligible company fallback'})` : 'keep the queued model: no eligible alternative with quota left'}; parallel task concurrency is unchanged`);
+  return sub ?? x;
+};
 const tune = (x, f, log) => {
   const step = (d, reason) => { const n = notch(x, d); if (n.effort !== x.effort) { log(reason); x = n; } };
   // On TTADK the cost notches save nothing (company quota) and the high-stakes notch is already in its rungs.
@@ -334,8 +354,9 @@ if (m && onTTADK(m) && !ttHas(m.model) && (ttHas(SOL) || ttAlts.length)) {
   m = sub;
 }
 if (m) {
+  m = quotaChoice(m);
   m = tune(m, failures, (r) => why.push(r));
-  const prev = prevRaw && tune(prevRaw, failures - 1, () => {});
+  const prev = prevRaw && tune(quotaChoice(prevRaw, () => {}, failures - 1), failures - 1, () => {});
   if (prev && prev.vendor === m.vendor && prev.model === m.model && prev.effort === m.effort) {
     why.push(`same ${label(m)} as the previous attempt: a quota notch already raised that one, and the quota rules leave no stronger step`);
     notes.push(`this retry is not stronger than the one that fell short: its only lever is the brief — put the failure's concrete findings (review items, failing test, symptom) in it`);
@@ -379,6 +400,11 @@ let extraReview = false;
 if (!second && m && m.vendor === 'codex' && !ttDevice && QX.underused && ['implement-hard', 'debug', 'science'].includes(cat) && reviewKind) {
   second = X(SOL, 'xhigh'); extraReview = true;
   notes.push('extra independent Codex review of the result (Codex underused): run it after the worker reports, as a fresh read-only review');
+}
+if (second) {
+  const original = second;
+  second = quotaChoice(second, (r) => why.push(`second opinion: ${r}`));
+  if (second !== original && poolOf(second.model) === poolOf(m.model)) notes.push('quota substitution leaves the second opinion in the same model family; record this limitation and retain the GPT/Claude acceptance gate in references/review-rubric.md');
 }
 
 // ---- 4. account and launcher ----
@@ -434,7 +460,8 @@ const launch = (x, shape = T.shape, acct = pickAcct) => {
   const traeProf = profiles[an]?.kind === 'trae' ? profiles[an] : QX.trae?.name === an ? QX.trae : null;
   if (traeProf) {
     const id = traeProf.modelIds?.[x.model] ?? x.model;
-    if (shape === 'exec') return { launcher: 'traecli-exec', account: an, command: `${traeProf.bin ?? 'traecli'} exec${inRepo === false ? ' --skip-git-repo-check' : ''} -C ${cwd} -s ${sandbox} -m ${id} -c model_reasoning_effort='"${x.effort}"'${execCred} --json -o ${taskDir}/codex-last.md ${prompt} < /dev/null > ${taskDir}/codex.jsonl 2>&1   (background task${inRepo === null ? '; add --skip-git-repo-check outside a repo' : ''})` };
+    // Quota substitution can put Astra on a short row too; keep its queue/status visible through the hub.
+    if (shape === 'exec' && x.model !== ASTRA) return { launcher: 'traecli-exec', account: an, command: `${traeProf.bin ?? 'traecli'} exec${inRepo === false ? ' --skip-git-repo-check' : ''} -C ${cwd} -s ${sandbox} -m ${id} -c model_reasoning_effort='"${x.effort}"'${execCred} --json -o ${taskDir}/codex-last.md ${prompt} < /dev/null > ${taskDir}/codex.jsonl 2>&1   (background task${inRepo === null ? '; add --skip-git-repo-check outside a repo' : ''})` };
     return { launcher: 'codex-worker', account: an, command: `node ${SKILL}/scripts/codex-worker.mjs --account ${an} start --cwd ${cwd} --model ${id} --effort ${x.effort} --sandbox ${sandbox} --name ${name} --log ${taskDir}/codex.jsonl --out ${taskDir}/codex-last.md ${prompt}   (background task)` };
   }
   // A TTADK codex exec bypasses codex-worker, so it brings the account's proxy up first (exit 6 when it can't).
@@ -447,7 +474,7 @@ const launch = (x, shape = T.shape, acct = pickAcct) => {
 };
 // The same quality gate for both vendors, so outcomes compare: code work gets an independent review before it's accepted.
 // Review only where a mistake is costly to undo; reviewers follow references/review-rubric.md (blocking issues only).
-if (m && reviewKind) notes.push(`review required (impact ${impact}${stakes === 'high' ? ', high stakes' : ''}${isAlt(m) ? `, written by fallback model ${m.model}` : ''}): after the worker reports, route.mjs ${reviewKind} --author ${m.vendor}${isAlt(m) ? ` --exclude-model ${poolOf(m.model)}` : ''} --project ${typeof opts.project === 'string' ? opts.project : '<slug>'} --name ${name}-R; brief the reviewer with references/review-rubric.md (blocks only on P0/P1, at most 2 rounds); then record with scripts/outcome.mjs --reviewed`);
+if (m && reviewKind) notes.push(`review required (impact ${impact}${stakes === 'high' ? ', high stakes' : ''}${isAlt(m) ? `, written by fallback model ${m.model}` : ''}): after the worker reports, route.mjs ${reviewKind} --author ${m.vendor}${isAlt(m) ? ` --exclude-model ${poolOf(m.model)}` : ''} --impact ${impact} --project ${typeof opts.project === 'string' ? opts.project : '<slug>'} --name ${name}-R; brief the reviewer with references/review-rubric.md (blocks only on P0/P1, at most 2 rounds); then record with scripts/outcome.mjs --reviewed`);
 else if (m && CODE.includes(cat)) notes.push(`no review (impact ${impact}${impact === 'service' ? ', not high stakes' : ''}): accept on your own check (tests, build, acceptance), then record with scripts/outcome.mjs`);
 else if (m && cat !== 'review' && cat !== 'review-high' && cat !== 'second-opinion') notes.push('when the task ends: record it with scripts/outcome.mjs (pass | rework --rounds N | fail)');
 // Fixed safety clauses for anything that writes or touches devices (SKILL.md, "Give each worker a self-contained brief").
@@ -455,11 +482,13 @@ else if (m && cat !== 'review' && cat !== 'review-high' && cat !== 'second-opini
 // automation browser to get past a console login.
 if (m) notes.push('brief: include the credential clause — never read, copy or load any login session or credential file (cookies, SSO/session tokens, CLI auth files such as bytedcli\'s, keychain items, .netrc, API keys), and never inject a session into a browser or tool to get past a login; wherever a login or authorization is needed, stop and report BLOCKED with what needs signing in');
 if (security) notes.push('brief: describe defensive intent and ask for findings with impact and fix; avoid requesting step-by-step exploit code');
+if (m && ['implement', 'implement-hard', 'debug'].includes(cat)) notes.push('DeepSeek: read-only analysis and simple edits only; not full-package builds, auth/storage reviews or acceptance — re-route with --exclude-model deepseek if the brief needs those');
 // user-approved 2026-11-11 retro: W291-R0 review misses and ppe2a's unnecessary rollback.
 if (isAlt(m) && ['review', 'review-high'].includes(cat)) notes.push('release/high-stakes acceptance also requires an independent other-family GPT/Claude reviewer and the failure probes in references/review-rubric.md; if unavailable, report BLOCKED');
 if (m && cat === 'build-run') notes.push('deploy/release brief: pin baseline/control probes, health thresholds, sample intervals and observation window, rollback triggers and exact prior artifact/config restore steps before acting; a fallback model follows these only — unexpected evidence needs stronger-model judgment, stop and report rather than invent a rollback condition');
 if (m && writes) notes.push('brief: include the safety clauses — never overwrite, delete or move files outside the task\'s scope (user files, uncommitted changes, shared headers/configs); restore anything touched by mistake byte-for-byte and report it');
 if (m && ['build-run', 'implement', 'implement-hard', 'debug', 'ui-browser', 'computer-use'].includes(cat)) notes.push('brief: on devices and simulators, back up app data before any destructive step (reinstall with --remove-existing-content, wiping app containers or Documents, erasing simulators), or ask first');
+if (m && ['build-run', 'ui-browser', 'computer-use'].includes(cat)) notes.push('before builds/device runs: identify orphaned build/test process trees of finished tasks by task directory and clean only those; never kill other tasks\' processes. Mini: at most 3 concurrent heavy builds unless the ledger sets N otherwise (not a model-worker concurrency cap). Device lease: at most 2 h, then return the device and report; brief preflight: device connected, unlocked, app data backed up');
 // Claude browser workers can reach the user's signed-in Chrome; a worker that can't find it must not hand the clicking back
 // to the orchestrator (nightly review 11-05: W258 blocked on "can't see local browser 1e7c2b37", the user then chose
 // "orchestrator does the console", and that orchestrator made 510 browser calls in 24h).
@@ -477,11 +506,16 @@ if (ttadkRun && TT.kind === 'trae') {
   notes.push(`on TRAE CLI (account ${TT.name}; TTADK is ${QX.ttadk ? 'out' : 'absent'}): a hub worker printing \`queued: position N\` is waiting in TRAE's queue — let it wait; only interrupt a worker with no events at all for 15 minutes, or an exec run, and re-route with --exclude-model ${poolOf(m.model)} (the next model family takes it; an infrastructure miss, so the same --failures); on account failures (login, auth) re-route with --exclude-account ${TT.name}. codex-worker records failures per model family (queue full pauses 5→10→20→30 min; vendor restriction waits until next 00:00 UTC / 08:00 China time, then a recovery probe; a failed restriction probe waits until the following 00:00 UTC; other hard failures such as quota pause 30 min, then a probe; auth pauses the account; route.mjs then uses the next family); for a failed or interrupted traecli exec run, record it yourself: node ${SKILL}/scripts/codex-worker.mjs --account ${TT.name} note-failure --model ${m.model} "<error>"`);
   // Astra on TRAE is slow but works (2026-11-13): keep it a hub worker so its queue/status lines are visible.
   if (m.model === ASTRA) notes.push('Astra on TRAE queues TRAE-wide (≈15 min seen 2026-11-13); launch it as a hub worker (codex-worker start), not traecli exec, so queue/status shows; the 30-min stall alarm doesn\'t fire while queue/status keeps arriving');
-  // A depleted daily bucket only moves that model to TRAE's low-priority lane: routing is unchanged (2026-11-13).
+  notes.push('hub queue position above ~300: if that model\'s daily bucket is depleted, re-routing is worth it for the next dispatch with --exclude-model <that model> and the same --failures; for non-depleted or unknown buckets let it wait. Accepted queued turns stay pending: do not interrupt or launch a duplicate; keep parallel task concurrency unchanged');
   const q = TT.quota?.daily?.[m.model];
-  if (q?.depleted) notes.push(`TRAE ${m.model}'s daily high-priority quota is used up${q.resetsAt ? ` until ${fmt(q.resetsAt)}` : ''}: requests queue in the low-priority lane (long waits; queued: lines show position). For urgent work consider a model whose bucket isn't depleted (e.g. --exclude-model gpt → DeepSeek, which has no daily bucket) or another account.`);
+  if (q?.depleted) notes.push(`TRAE ${m.model}'s daily high-priority quota is used up${q.resetsAt ? ` until ${fmt(q.resetsAt)}` : ''}: requests queue in the low-priority lane. Above ~300, consider --exclude-model ${m.model} for the next dispatch (same --failures); keep any accepted queued turn pending`);
   notes.push('brief (TRAE): no ChatGPT browser here — playwright MCP is for public/local pages only; signed-in consoles require a browser-ready worker with console origins and a signed-in browser/account named in the brief; missing login means BLOCKED, never a Playwright sign-in workaround; git commits must carry no co-author or tool trailer');
   if (!TT.live && T.shape !== 'exec') notes.push(`TRAE hub is down: start it first — node ${SKILL}/scripts/codex-worker.mjs --account ${TT.name} hub`);
+}
+if (ttadkRun && ['build-run', 'review', 'review-high'].includes(cat)) {
+  const q = TT.kind === 'trae' ? TT.quota?.daily?.[m.model] : TT.usage;
+  const usedPercent = q?.utilization ?? (q?.used != null && q.limit > 0 ? 100 * q.used / q.limit : null);
+  if (usedPercent >= 80) notes.push(`long builds/large reviews: ${TT.name} ${m.model}'s daily bucket is ${Math.round(usedPercent)}% used; consider starting just after the daily reset ${q.resetsAt ? `at ${new Date(q.resetsAt).toISOString()} (quota resetTime)` : `(normally ${TT.kind === 'trae' ? '22:00' : '16:00'} UTC)`}; TRAE normally 22:00 UTC, TTADK 16:00 UTC. Advisory only: do not defer work or reduce parallel task concurrency automatically`);
 }
 if (ttadkRun && m.model === 'gemini-3.1-pro-preview') notes.push('Gemini-3.1-Pro ran past 40 minutes in 3 of 12 benchmark runs: if it shows no progress for 20 minutes, or runs past twice what the task should take, interrupt it and re-route with --exclude-model gemini (same --failures)');
 if (ttadkRun && isAlt(m)) notes.push(`brief (${m.model}): state the exact output format and the done check; it has no ChatGPT browser or image tools`);

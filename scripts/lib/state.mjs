@@ -349,7 +349,7 @@ const readTtadk = (name, prof) => {
 // The hub answers `model/internalUsage/read` (read-only, no model request) with one daily bucket per quotaKey plus the
 // aggregate weekly pool; `model/list` maps model ids to their quotaKey (null for Seed, DeepSeek and older GPTs, which
 // have no daily bucket). Amounts are strings, times unix seconds. A depleted daily bucket is what puts that model in
-// TRAE's low-priority queue (`queue/status` modelQuotaLowPriority); it changes no routing on its own.
+// TRAE's low-priority queue (`queue/status` modelQuotaLowPriority); route.mjs prefers another eligible model for new work.
 // Pure: `codex-worker --account trae usage` output → {daily:{<model id>:{used,limit,remaining,depleted,resetsAt}}, weekly}, or null.
 export const traeQuota = (payload) => {
   if (!payload || typeof payload !== 'object') return null;
@@ -379,7 +379,7 @@ export const traeQuota = (payload) => {
 const readTrae = (name, prof) => {
   const out = { name, kind: 'trae', home: prof.home, hub: prof.hub, browser: false, chromePlugin: null, models: prof.models ?? [], modelIds: prof.modelIds ?? {},
     windows: [], resets: null, healthy: false, reason: null, live: false, active: 0, email: null, search: true, searchLive: true,
-    // Per-model daily (high-priority) buckets and the weekly pool, best-effort (see traeQuota above): display only, never routing.
+    // Per-model daily buckets guide route.mjs model choice; they never pause the account or cap concurrency.
     quota: null, quotaError: null };
   const bin = prof.bin && fs.existsSync(prof.bin) ? prof.bin : null;
   if (!bin) { out.reason = 'TRAE CLI not found (install it, then codex-worker trae-setup)'; return out; }
@@ -785,13 +785,13 @@ export const leanLines = (st, data) => {
   }
   const TR = X.trae;
   if (TR) {
-    if (TR.usable && !T?.usable) out.push(`TRAE next: with TTADK ${T ? 'out' : 'absent'}, work TTADK would take runs on TRAE CLI (account ${TR.name}, GPT-6.1-Sol, then DeepSeek-V4.1-Flash / DeepSeek-V4-Pro when GPT fails or is paused, and Seed-Evolving for image-read; route.mjs does this) before personal quota; browser, desktop apps and images stay off TRAE`);
+    if (TR.usable && !T?.usable) out.push(`TRAE next: with TTADK ${T ? 'out' : 'absent'}, work TTADK would take runs on TRAE CLI (account ${TR.name}, GPT-6.1-Sol and eligible alternatives; route.mjs applies daily-quota and model-fit rules, with Seed-Evolving for image-read) before personal quota; browser, desktop apps and images stay off TRAE`);
     else if (TR.usable) out.push(`TRAE CLI (account ${TR.name}) is the fallback after TTADK, before personal quota`);
     else out.push(`TRAE CLI unavailable — ${TR.reason}`);
     for (const [pool, r] of Object.entries(TR.poolPauses ?? {})) out.push(`TRAE ${pool} models ${r.pausedUntil > Date.now() ? `paused until ${fmt(r.pausedUntil)}, then probed` : 'being probed for recovery'} (${String(r.reason).slice(0, 120)}): route.mjs uses the next model family meanwhile`);
     // A model TRAE no longer resolves stays out for 6 h; its family-mates keep routing (2026-11-13: TRAE dropped Gemini).
     for (const [model, r] of Object.entries(TR.modelPauses ?? {})) out.push(`TRAE model ${model} unavailable since ${fmt(r.t)} (${String(r.reason).slice(0, 120)}); routing skips it`);
-    // A depleted daily bucket only queues that model in TRAE's low-priority lane; routing is unchanged (2026-11-13).
+    // Daily depletion queues only this model; route.mjs can substitute an eligible model on new dispatches.
     for (const [model, q] of Object.entries(TR.quota?.daily ?? {})) if (q.depleted)
       out.push(`TRAE ${model}'s daily high-priority quota is used up${q.resetsAt ? ` until ${fmt(q.resetsAt)}` : ''}: its requests queue in the low-priority lane (long waits; queued: lines show the position)`);
     if (TR.healthy && !TR.live) out.push(`TRAE hub down — start it before hub workers: codex-worker.mjs --account ${TR.name} hub (traecli exec runs don't need it)`);

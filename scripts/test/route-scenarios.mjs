@@ -643,14 +643,14 @@ for (const [sc, args] of ERRORS) {
     [pk('traeNoGemPaused', ['implement', '--exclude-model', 'gpt']), 'deepseek-v4-pro high @trae'],
     [pk('traeNoGemPaused', ['implement']), 'gpt-6.1-sol high @trae'],
     // The task flag uses that same exclusion path, scoped to TRAE, with the normal fallback ladder and gates.
-    [pk('traeFull', ['review-high', '--security']), 'deepseek-v4.1-flash high @trae'],
+    [pk('traeFull', ['review-high', '--security']), 'gemini-3.1-pro-preview high @trae'],
     [pk('traeFull', ['implement', '--impact', 'service', '--security']), 'deepseek-v4.1-flash high @trae'],
     [pk('traeFull', ['implement', '--security', '--failures', '1']), 'gemini-3.1-pro-preview high @trae'],
     [pk('traeFull', ['implement', '--security', '--exclude-model', 'deepseek']), 'gemini-3.1-pro-preview high @trae'],
     [personal('traeFull', ['implement', '--security']), false],
     [o('traeFull', ['review-high', '--security']).security, true],
     [o('traeFull', ['review-high']).security, false],
-    [o('traeFull', ['review-high', '--security']).why.some((n) => /security task: TRAE's GPT excluded.*deepseek-v4\.1-flash/.test(n)), true],
+    [o('traeFull', ['review-high', '--security']).why.some((n) => /security task: TRAE's GPT excluded.*gemini-3\.1-pro-preview/.test(n)), true],
     [o('ttAndTrae', ['review-high', '--security']).why.some((n) => /security task:/.test(n)), false],
     [hasNote('traeFull', ['implement', '--security'], /review required.*written by fallback model/), true],
     [hasNote('traeFull', ['review-high', '--security'], /brief: describe defensive intent and ask for findings with impact and fix; avoid requesting step-by-step exploit code/), true],
@@ -689,8 +689,9 @@ for (const [sc, args] of ERRORS) {
       ['traeFull', ['--security', '--exclude-model', 'deepseek'], 'gemini-3.1-pro-preview high @trae', false],
       ['traeReviewGptOut', ['--exclude-model', 'deepseek'], 'gemini-3.1-pro-preview high @trae', false],
       ['traeReviewFull', ['--exclude-model', 'gpt,deepseek'], 'gemini-3.1-pro-preview high @trae', false],
-      ['traeReviewGptOut', [], 'deepseek-v4.1-flash high @trae', false],
-      ['traeFull', ['--security', '--failures', '2'], 'deepseek-v4-pro high @trae', false],
+      // High-stakes/security review now excludes DeepSeek; the remaining ladder is Gemini then Claude.
+      ['traeReviewGptOut', [], args[0] === 'review-high' ? 'gemini-3.1-pro-preview high @trae' : 'deepseek-v4.1-flash high @trae', false],
+      ['traeFull', ['--security', '--failures', '2'], args[0] === 'review' ? 'gemini-3.1-pro-preview high @trae' : 'opus xhigh @undefined', false],
       ['traeReviewFull', ['--security', '--exclude-model', 'deepseek,gemini'], personalPick, true],
       ['traeReviewFull', ['--security', '--exclude-model', 'deepseek,gemini', '--urgent'], personalPick, false],
       ['traeReviewGptOut', ['--exclude-model', 'deepseek,gemini'], personalPick, true],
@@ -714,6 +715,39 @@ for (const [sc, args] of ERRORS) {
       console.log(`${ok ? 'ok  ' : 'FAIL'} ${sc.padEnd(19)} ${routeArgs.join(' ')} (review pick/gate) ${ok ? `${got}, personal quota: ${gotGate}` : `want "${want}" / ${gate}, got "${got}" / ${gotGate}${checkFreeSecond && !freeSecond ? ' (extra reviewer must stay on the eligible company family)' : ''}`}`);
     }
   }
+}
+// Task-duration retro: brief amendments, model fit and build/device advice without new required flags.
+{
+  const o = (sc, args) => JSON.parse(run(sc, args));
+  const hasNote = (r, re) => r.notes.some((n) => re.test(n));
+  const cases = [];
+  for (const cat of CODE) for (const failures of [0, 1, 2]) {
+    cases.push([hasNote(o('traeFull', [cat, '--failures', String(failures)]), /if the last miss was spec\/process, amend the brief's acceptance first/), failures >= 1]);
+  }
+  cases.push([hasNote(o('traeFull', ['analysis', '--failures', '1']), /last miss was spec\/process/), false]);
+  for (const cat of ['implement', 'implement-hard', 'debug']) {
+    cases.push([hasNote(o('traeGptOut', [cat]), /DeepSeek: read-only analysis and simple edits only; not full-package builds, auth\/storage reviews or acceptance.*--exclude-model deepseek/), true]);
+  }
+  for (const args of [['build-run'], ['review-high'], ['review', '--impact', 'release'], ['review', '--stakes', 'high'], ['review', '--security']]) {
+    for (const sc of ['traeFull', 'traeGptOut', 'traeNoGem']) for (const failures of [0, 1, 2, 3, 4, 5, 6]) {
+      const r = o(sc, [...args, '--failures', String(failures)]);
+      cases.push([r.pick?.model.startsWith('deepseek') ?? false, false], [r.secondOpinion?.model.startsWith('deepseek') ?? false, false]);
+    }
+    // With GPT excluded and Gemini absent, DeepSeek cannot bypass the personal-quota approval gate.
+    const r = o('traeNoGem', [...args, '--exclude-model', 'gpt']);
+    cases.push([r.needsUserOK.some((n) => /^personal quota:/.test(n)), true]);
+  }
+  for (const cat of ['analysis', 'review', 'implement']) cases.push([o('traeGptOut', [cat]).pick.model, 'deepseek-v4.1-flash']);
+  for (const cat of ['build-run', 'ui-browser', 'computer-use']) {
+    const r = o('ttFresh', [cat]);
+    cases.push([hasNote(r, /finished tasks by task directory.*never kill other tasks' processes/), true],
+      [hasNote(r, /at most 3 concurrent heavy builds unless the ledger sets N otherwise/), true],
+      [hasNote(r, /at most 2 h, then return the device and report.*device connected, unlocked, app data backed up/), true]);
+  }
+  cases.push([hasNote(o('traeFull', ['implement', '--impact', 'release']), /route\.mjs review --author codex --impact release/), true]);
+  const bad = cases.map(([got, want], i) => (got === want ? null : `${i} (${got})`)).filter((i) => i !== null);
+  if (bad.length) fail++;
+  console.log(`${bad.length ? 'FAIL' : 'ok  '} task-duration rules ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
 }
 // A model TRAE no longer resolves pauses only that model for 6 h (2026-11-13, after TRAE dropped Gemini): its
 // family-mates keep routing, the account and family never pause, and no probe is needed — the next launch tries again.
@@ -805,7 +839,7 @@ for (const [sc, args] of ERRORS) {
   console.log(`${bad.length ? 'FAIL' : 'ok  '} recovery probes     ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
 }
 // TRAE's per-model daily high-priority quota and weekly pool (user-approved 2026-11-13): a depleted bucket only moves
-// that model into TRAE's low-priority queue — display-only, never a routing change.
+// that model into TRAE's low-priority queue; new dispatches prefer comparable GPT quota, then eligible fallbacks.
 {
   const { traeQuota, analyze, leanLines } = await import('../lib/state.mjs');
   const sec = 1_800_000_000, day = 86400;
@@ -828,8 +862,8 @@ for (const [sc, args] of ERRORS) {
     [noModel.daily.gpt_6_1.depleted, true], [noModel.weekly, null],
     [traeQuota({ dailyUsage: [], usage: null }), null], [traeQuota({}), null], [traeQuota(null), null], [traeQuota('nope'), null],
   ];
-  // The depleted bucket shows in the lean and as a route note; the pick and its account are unchanged.
-  const quota = { daily: { 'gpt-6.1-sol': { used: 80, limit: 80, remaining: 0, depleted: true, resetsAt: now + 6 * h } }, weekly: null };
+  const bucket = (used, extra = {}) => ({ used, limit: 100, remaining: 100 - used, depleted: used >= 100, resetsAt: now + 6 * h, ...extra });
+  const quota = { daily: { 'gpt-6.1-sol': bucket(100), 'gpt-6-astra': bucket(20) }, weekly: null };
   const qh = fs.mkdtempSync(path.join(tmp, 'trae-quota-'));
   const data = { claude: cl(10, 120), codexAccounts: [acc('main', 20, 120), tr({ home: qh, quota })] };
   process.env.TRAE_PROBE = '0';
@@ -840,9 +874,91 @@ for (const [sc, args] of ERRORS) {
   const ro = JSON.parse(run('traeQuota', ['implement']));
   cases.push(
     [lean.includes("TRAE gpt-6.1-sol's daily high-priority quota is used up"), true],
-    [ro.pick.model, 'gpt-6.1-sol'], [ro.pick.account, 'trae'],
-    [ro.notes.some((n) => /daily high-priority quota is used up.*low-priority lane/.test(n)), true],
+    [ro.pick.model, 'gpt-6-astra'], [ro.pick.account, 'trae'],
+    [ro.why.some((n) => /bucket is depleted.*comparable GPT with quota left/.test(n)), true],
+    [ro.needsUserOK.length, 0], [ro.failures, 0],
   );
+  const ids = ['gpt-6.1-sol', 'gpt-6-astra', 'gpt-5.6-sol', 'deepseek-v4.1-flash', 'deepseek-v4-pro'];
+  const scenario = (name, daily, extra = {}) => {
+    S[name] = { claude: cl(10, 120), codex: [acc('main', 20, 120), tr({ home: qh, models: ids,
+      modelIds: Object.fromEntries(ids.map((m) => [m, m.toUpperCase()])), quota: daily == null ? null : { daily, weekly: null }, ...extra })] };
+  };
+  scenario('quotaAstra', quota.daily);
+  scenario('quotaBoth', { ...quota.daily, 'gpt-6-astra': bucket(100), 'gpt-5.6-sol': bucket(10) });
+  scenario('quotaMissing', null);
+  scenario('quotaMissingModel', { 'gpt-6-astra': bucket(100) });
+  scenario('quotaUnknownAstra', { 'gpt-6.1-sol': bucket(100) });
+  scenario('quotaBusy', quota.daily, { active: 1000 });
+  scenario('quotaAllBusy', { ...quota.daily, 'gpt-6-astra': bucket(100) }, { models: ['gpt-6.1-sol', 'gpt-6-astra'] });
+  scenario('quota80', { 'gpt-6.1-sol': bucket(80) });
+  scenario('quota79', { 'gpt-6.1-sol': bucket(79) });
+  scenario('quotaNoLimit', { 'gpt-6.1-sol': bucket(80, { limit: null }) });
+  scenario('quotaNoReset', { 'gpt-6.1-sol': bucket(80, { resetsAt: null }) });
+  scenario('quotaChosen80', { 'gpt-6.1-sol': bucket(100), 'gpt-6-astra': bucket(80) });
+  scenario('quotaFallbackBusy', { ...quota.daily, 'deepseek-v4.1-flash': bucket(100) });
+  scenario('quotaNoAstra', quota.daily, { models: ids.filter((m) => m !== 'gpt-6-astra') });
+  scenario('quotaSecondFallback', { ...quota.daily, 'gpt-6-astra': bucket(100), 'deepseek-v4.1-flash': bucket(100) });
+  const pausedHome = fs.mkdtempSync(path.join(tmp, 'quota-astra-paused-'));
+  const { noteFailure } = await import('../lib/trae-health.mjs');
+  noteFailure(pausedHome, '-32600: model `gpt-6-astra` is unavailable because its metadata could not be resolved', now, 'gpt-6-astra');
+  scenario('quotaPausedAstra', quota.daily, { home: pausedHome });
+  S.quotaTT = { ...S.quotaAstra, codex: [tt({ usage: { used: 80, limit: 100, utilization: 80, resetsAt: now + 6 * h } }), ...S.quotaAstra.codex] };
+  const route = (sc, args = ['implement']) => JSON.parse(run(sc, args));
+  const note = (r, re) => r.notes.some((n) => re.test(n));
+  for (const [sc, args, want] of [
+    ['quotaAstra', ['implement'], 'gpt-6-astra'],
+    ['quotaBoth', ['implement'], 'deepseek-v4.1-flash'],
+    ['quotaBoth', ['implement', '--failures', '5'], 'deepseek-v4.1-flash'], // the raw pick is depleted Astra
+    ['quotaBoth', ['implement-hard'], 'deepseek-v4.1-flash'],
+    ['quotaBoth', ['lookup'], 'gpt-5.6-sol'],
+    ['quotaBoth', ['extract'], 'gpt-5.6-sol'],
+    ['quotaBoth', ['draft'], 'gpt-5.6-sol'],
+    ['quotaBoth', ['lookup', '--stakes', 'high'], 'deepseek-v4.1-flash'],
+    ['quotaBoth', ['lookup', '--failures', '1'], 'deepseek-v4.1-flash'],
+    ['quotaBoth', ['build-run'], 'gpt-6.1-sol'], // keep pending: no eligible non-depleted model
+    ['quotaMissing', ['implement'], 'gpt-6.1-sol'],
+    ['quotaMissingModel', ['implement'], 'gpt-6.1-sol'],
+    ['quotaUnknownAstra', ['implement'], 'deepseek-v4.1-flash'],
+    ['quotaNoAstra', ['implement'], 'deepseek-v4.1-flash'],
+    ['quotaPausedAstra', ['implement'], 'deepseek-v4.1-flash'],
+    ['quotaSecondFallback', ['implement'], 'deepseek-v4-pro'],
+    ['quotaAstra', ['implement', '--exclude-model', 'gpt-6-astra'], 'deepseek-v4.1-flash'],
+    ['quotaAstra', ['implement', '--exclude-model', 'gpt'], 'deepseek-v4.1-flash'],
+    ['quotaAstra', ['implement', '--security'], 'deepseek-v4.1-flash'],
+    ['quotaAstra', ['implement', '--failures', '1'], 'gpt-6-astra'],
+    ['quotaFallbackBusy', ['implement', '--failures', '2'], 'gpt-6-astra'],
+    ['quotaAllBusy', ['implement'], 'gpt-6.1-sol'],
+    ['quotaTT', ['implement'], 'gpt-6.1-sol'], // healthy TTADK remains first
+  ]) {
+    const r = route(sc, args);
+    cases.push([r.pick.model, want], [r.failures, args.includes('--failures') ? Number(args[args.indexOf('--failures') + 1]) : 0]);
+  }
+  const idle = route('quotaAstra'), busy = route('quotaBusy'), missing = route('quotaMissing');
+  cases.push(
+    [JSON.stringify(busy.pick), JSON.stringify(idle.pick)], [JSON.stringify(busy.needsUserOK), JSON.stringify(idle.needsUserOK)],
+    [busy.deferred, null], [note(busy, /parallel task concurrency unchanged/), true],
+    [missing.why.some((n) => /bucket is depleted/.test(n)), false],
+    [note(idle, /above ~300.*depleted.*--exclude-model <that model>.*same --failures/), true],
+    [note(idle, /non-depleted or unknown buckets let it wait.*Accepted queued turns stay pending/), true],
+    [note(route('quotaAllBusy'), /--exclude-model gpt-6.1-sol.*same --failures/), true],
+    [route('quotaBoth').needsUserOK.length, 0], [route('quotaAllBusy').deferred, null],
+    [route('quotaAstra', ['lookup']).pick.launcher, 'codex-worker'],
+    [route('quotaBoth', ['lookup']).pick.launcher, 'traecli-exec'],
+    [note(route('quotaBoth', ['lookup', '--failures', '1']), /this retry is not stronger/), false],
+    [route('quotaTT').pick.account, 'ttadk'],
+    [note(route('quotaAstra', ['review', '--author', 'codex']), /second TRAE reviewer/), true],
+    [route('quotaAstra', ['review', '--author', 'codex']).secondOpinion?.model, 'deepseek-v4.1-flash'],
+  );
+  // Advice uses the chosen bucket, is inclusive at 80%, and never defers work or changes the pick.
+  for (const cat of ['build-run', 'review', 'review-high']) {
+    for (const [sc, expected] of [['quota80', true], ['quota79', false], ['quotaNoLimit', false], ['quotaMissing', false], ['quotaChosen80', true], ['quotaTT', true], ['quotaNoReset', true]]) {
+      const r = route(sc, [cat]);
+      cases.push([note(r, /long builds\/large reviews:.*daily reset/), expected], [r.deferred, null]);
+    }
+  }
+  cases.push([note(route('quota80'), /long builds\/large reviews:/), false],
+    [note(route('quota80', ['build-run']), /quota resetTime.*TRAE normally 22:00 UTC, TTADK 16:00 UTC/), true],
+    [note(route('quotaNoReset', ['build-run']), /normally 22:00 UTC/), true]);
   const bad = cases.map(([got, want], i) => (got === want ? null : `${i} (${got})`)).filter((i) => i !== null);
   if (bad.length) fail++;
   console.log(`${bad.length ? 'FAIL' : 'ok  '} trae daily quota    ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);

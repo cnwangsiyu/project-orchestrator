@@ -141,6 +141,16 @@ workers, long unattended runs) at `medium` effort, set in each session's respawn
     ChatGPT accounts stay unchanged. Briefs describe defensive intent and request findings with impact and fix, avoiding
     requests for step-by-step exploit code.
 
+  - **Daily quota and queue choice (user-approved 2026-11-13 task-duration retro).** If the chosen TRAE model's
+    `trae.quota.daily[model].depleted` is true, prefer GPT-6-Astra with confirmed quota left, then GPT-5.6-Sol only for
+    first-attempt lookup/extract/draft at normal or low stakes, then the row's eligible company fallback chain. Respect
+    model/family exclusions and pauses. Unknown quota leaves the normal pick unchanged; if a depleted pick has no
+    eligible alternative, keep it queued. This changes model choice, never parallel task concurrency or account health.
+    Above ~300 in a depleted model's hub queue, re-routing is worth it for the next dispatch: `--exclude-model <that model>`
+    with the same `--failures`. Non-depleted/unknown buckets wait. Accepted queued turns stay pending under the rule below;
+    do not interrupt or launch duplicates. For long builds/large reviews at ≥80% daily usage, consider starting just after
+    the quota's resetTime (TRAE normally **22:00 UTC**, TTADK **16:00 UTC**); this is advice, never an automatic deferral.
+
   - **Fallback models on the company account (user, 2026-11-10: when GPT is unavailable or fails, route by the
     benchmark; keep quality, spend little personal quota).** `route.mjs` ALTS, from the 2026-11-10 benchmark on TRAE
     (6 hard tasks — bug fixes with hidden tests, a security review, a planted-bug hunt — 12 runs per model; Sol effort
@@ -155,9 +165,16 @@ workers, long unattended runs) at `medium` effort, set in each session's respawn
     | Seed-Evolving / Seed-2.1-Pro | 0.87 / 0.81 | 875 / 801 s | break output formats — kept out of the general chain; vision-only for `image-read` (2026-11-13) |
     | Grok 4.7 via Cursor CLI | 0.50 | 2403 s | half the runs timed out or dropped — not used |
 
+    **Model fit (2026-11-13 retro):** T73b spent about 4 h on 24 builds, 19 failed; T63's fallback attempts still lacked
+    KWS tests/iOS acceptance, and fallback reviews missed reproduced P1s (though some read-only reviews found real P1s).
+    DeepSeek is for read-only analysis and simple edits, not full-package builds, auth/storage reviews or acceptance.
+    `build-run`, `review-high`, and release/high-stakes/security review rows exclude the DeepSeek family from company
+    fallbacks. For implement/implement-hard/debug whose brief needs those checks, use `--exclude-model deepseek`;
+    the router cannot infer package/device acceptance from the category alone. Pass `--impact release` on release reviews.
+
     - **GPT out on the company account** (its `gpt` family paused or restricted, or `--exclude-model gpt`): DeepSeek-V4.1-Flash
       → DeepSeek-V4-Pro (Gemini-3.1-Pro is gone from TRAE's model list 2026-11-13), each at high, then the row's Claude
-      steps. No question: it is company quota.
+      steps, subject to the model-fit exclusions above. No question: it is company quota.
       `image-read` uses Seed-Evolving only (its only vision row): live test 2026-11-13, it transcribed a small-text
       screenshot exactly, using only its Read tool, where Sol and the old Gemini misread a digit, and it reads text PDFs.
       It cannot perceive audio, video or image-only (scanned) PDFs: convert scanned PDF pages to images first and route
@@ -167,7 +184,8 @@ workers, long unattended runs) at `medium` effort, set in each session's respawn
     - **GPT up, Sol falls short**: Sol at the row's effort → … → Sol xhigh → DeepSeek-V4.1-Flash (a different family:
       its misses rarely overlap Sol's) → Sol max → DeepSeek-V4-Pro → GPT-6-Astra high on the company account (no OK:
       company quota; live test 2026-11-13) → the row's Claude steps. The cheap rows (lookup, extract, draft, browser,
-      computer-use) skip Sol max, the second fallback and Astra.
+      computer-use) skip Sol max, the second fallback and Astra in the quality ladder; daily-quota substitution can still
+      choose Astra before dispatch. All fallback steps respect the model-fit exclusions above.
     - **Quality guard**: service code a fallback model wrote gets the routine review (normally only release code or high
       stakes do), and every review of fallback-written code runs with `--exclude-model <its family>`, so a different
       family reviews it. A second free reviewer on TRAE (no Kimi there) is a fallback model of another family, not a
