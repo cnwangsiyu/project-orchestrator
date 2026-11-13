@@ -185,6 +185,118 @@ export const hubBroken = (name, prof) => {
     return { pid: Number(pid), why: why.join('; '), fix: `once its running turns finish: kill ${pid}; cd ~ && node ${WORKER} --account ${name} hub` };
   } catch { return null; }
 };
+// ---- TTADK daily token quota (LLMBox) ----
+// TTADK's own dashboard number: GET /api/v1/user/quota on the LLMBox gateway, which wants a short-lived token in
+// `x-jwt-token` (the dashboard's header). The ttadk CLI mints and prints one itself (`ttadk auth token jwt`), so this
+// reader never opens a credential file: it asks the CLI, uses the value in memory for one read-only request and drops it.
+// Any failure leaves `usage:null` and a short `usageError`; nothing here changes TTADK's health or routing. This is the
+// user-approved 2026-11-13 exception to the credential rule, scoped to this query inside quota.mjs/state.mjs.
+export const TTADK_QUOTA_URL = 'https://llmbox-global.byteintl.net/api/v1/user/quota';
+export const TTADK_DAILY_RESET_UTC_HOUR = 16;
+export const ttadkQuotaUrl = (env = process.env) => env.TTADK_QUOTA_URL?.trim() || TTADK_QUOTA_URL;
+const quotaNum = (v) => (typeof v === 'number' && Number.isFinite(v) ? v
+  : typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v)) ? Number(v) : null);
+// ISO string, epoch seconds or epoch ms → epoch ms (null when unreadable).
+const quotaWhen = (v) => {
+  if (typeof v === 'number' && Number.isFinite(v)) return v > 1e12 ? v : v > 1e9 ? v * 1000 : null;
+  if (typeof v === 'string' && v.trim()) {
+    const t = Date.parse(v);
+    return Number.isFinite(t) ? t : quotaWhen(Number(v));
+  }
+  return null;
+};
+const quotaRound = (x) => Math.round(x * 10) / 10;
+const quotaBucket = (raw, index) => {
+  const used = quotaNum(raw.used ?? raw.tokens_used);
+  const limit = quotaNum(raw.limit ?? raw.tokens_limit ?? raw.quota);
+  const resetsAt = quotaWhen(raw.resets_at ?? raw.resetsAt ?? raw.reset_at ?? raw.resetAt ?? raw.reset);
+  const label = [raw.window, raw.period, raw.kind, raw.type, raw.name, raw.label, raw.scope, raw.interval]
+    .filter((x) => typeof x === 'string' && x.trim()).join(' ').trim() || null;
+  const rawUtil = quotaNum(raw.utilization ?? raw.utilisation ?? raw.used_percent ?? raw.percent);
+  return { index, label, used, limit, resetsAt,
+    // Compute from the numbers when both are there; else take the API's share (0–1, or already a percent).
+    utilization: used != null && limit ? quotaRound((used / limit) * 100)
+      : rawUtil == null ? null : quotaRound(rawUtil <= 1 ? rawUtil * 100 : rawUtil),
+    remaining: used != null && limit != null ? Math.max(0, limit - used) : null,
+    // A window/period that says day is the daily quota; the documented 16:00 UTC reset is the other tell.
+    daily: /\bdaily\b|\bday\b|\b24\s*h(?:ours?)?\b|per[-_ ]?day/i.test(label ?? ''),
+    atDailyReset: resetsAt != null && new Date(resetsAt).getUTCHours() === TTADK_DAILY_RESET_UTC_HOUR && new Date(resetsAt).getUTCMinutes() === 0 };
+};
+// Pick the daily bucket by its fields, never by position: the one marked day/daily, and among several plausible ones
+// the one resetting at 16:00 UTC. Every bucket is kept (minimal fields) so a caller can see what came back.
+export const selectDailyQuota = (payload) => {
+  const list = Array.isArray(payload) ? payload : payload?.quotas ?? payload?.data ?? null;
+  if (!Array.isArray(list)) return { usage: null, error: 'llmbox quota response has no quotas array' };
+  const buckets = list.filter((b) => b && typeof b === 'object').map(quotaBucket);
+  if (!buckets.length) return { usage: null, error: 'llmbox quota response lists no quotas' };
+  const minimal = buckets.map((b) => ({ label: b.label, used: b.used, limit: b.limit, utilization: b.utilization,
+    resetsAt: b.resetsAt ? new Date(b.resetsAt).toISOString() : null }));
+  const daily = buckets.filter((b) => b.daily), at16 = buckets.filter((b) => b.atDailyReset);
+  let pick = null;
+  if (buckets.length === 1) pick = buckets[0];
+  else if (daily.filter((b) => b.atDailyReset).length === 1) pick = daily.find((b) => b.atDailyReset);
+  else if (at16.length === 1) pick = at16[0];
+  else if (daily.length === 1) pick = daily[0];
+  const usage = { used: pick?.used ?? null, limit: pick?.limit ?? null, remaining: pick?.remaining ?? null,
+    utilization: pick?.utilization ?? null, resetsAt: pick?.resetsAt ?? null, source: 'llmbox', buckets: minimal };
+  if (!pick) return { usage, error: `cannot tell which of ${buckets.length} llmbox quota buckets is the daily one` };
+  if (pick.utilization == null) return { usage, error: 'the daily llmbox quota bucket has no utilization' };
+  return { usage, error: null };
+};
+// One read-only request; the token lives only in this call's headers. Returns {usage, error, status}; never throws.
+export const fetchTtadkQuota = async ({ token, header = 'x-jwt-token', url = ttadkQuotaUrl(), fetchImpl = globalThis.fetch, timeoutMs = 5000 } = {}) => {
+  if (!token) return { usage: null, status: null, error: 'no TTADK token' };
+  let res;
+  try {
+    res = await fetchImpl(url, { method: 'GET', headers: { accept: 'application/json', [header]: token }, signal: AbortSignal.timeout(timeoutMs) });
+  } catch (e) {
+    const what = `${e?.name ?? ''} ${e?.message ?? ''}`;
+    return { usage: null, status: null, error: /timeout|abort/i.test(what) ? `llmbox timed out after ${timeoutMs}ms` : 'llmbox request failed (network)' };
+  }
+  if (!res.ok) return { usage: null, status: res.status, error: `llmbox HTTP ${res.status}` };
+  let body;
+  try { body = await res.json(); } catch { return { usage: null, status: res.status, error: `llmbox returned non-JSON (HTTP ${res.status})` }; }
+  const { usage, error } = selectDailyQuota(body);
+  return { usage, status: res.status, error };
+};
+// readTtadk is synchronous (route.mjs reads the state without awaiting), so the request runs in a child node process;
+// the token goes in over stdin, never argv. The child imports this module so parsing stays in one place.
+const QUOTA_CHILD = `
+import { readFileSync } from 'node:fs';
+const { fetchTtadkQuota } = await import(${JSON.stringify(import.meta.url)});
+process.stdout.write(JSON.stringify(await fetchTtadkQuota(JSON.parse(readFileSync(0, 'utf8')))));
+`;
+const quotaViaChild = (token, header) => {
+  try {
+    const raw = execFileSync(process.execPath, ['--input-type=module', '-e', QUOTA_CHILD], { input: JSON.stringify({ token, header, url: ttadkQuotaUrl() }),
+      encoding: 'utf8', timeout: 7000, maxBuffer: 4 << 20, stdio: ['pipe', 'pipe', 'ignore'] });
+    return JSON.parse(raw);
+  } catch (e) { return { usage: null, status: null, error: `quota query failed (${e?.code === 'ETIMEDOUT' ? 'timeout' : 'child error'})` }; }
+};
+// A short-lived token from the CLI itself, never from the credential store directly; stdout is parsed and dropped.
+const ttadkToken = (bin, kind) => {
+  try {
+    const j = JSON.parse(execFileSync(bin, ['auth', 'token', kind, '-f', 'json'], { encoding: 'utf8', timeout: 30000, maxBuffer: 1 << 20, stdio: ['ignore', 'pipe', 'ignore'] }));
+    return typeof j.token === 'string' && j.token.trim() ? j.token.trim() : null;
+  } catch { return null; }
+};
+// The dashboard's x-jwt-token first; LLMBox's own CLI auth (Authorization: Bearer at-<sso>) only if that is rejected.
+const readTtadkUsage = (bin) => {
+  const tries = [];
+  const jwt = ttadkToken(bin, 'jwt');
+  if (jwt) {
+    const r = quotaViaChild(jwt, 'x-jwt-token');
+    if (r.usage) return { usage: r.usage, usageError: r.error ?? null };
+    tries.push(`jwt/x-jwt-token: ${r.error}`);
+    if (r.status !== 401 && r.status !== 403) return { usage: null, usageError: tries.join('; ') };
+  } else tries.push('jwt: ttadk auth token jwt printed no token');
+  const sso = ttadkToken(bin, 'sso');
+  if (!sso) { tries.push('sso: ttadk auth token sso printed no token'); return { usage: null, usageError: tries.join('; ') }; }
+  const r = quotaViaChild(`Bearer at-${sso.replace(/^at-/, '')}`, 'authorization');
+  if (r.usage) return { usage: r.usage, usageError: r.error ?? null };
+  tries.push(`sso/authorization: ${r.error}`);
+  return { usage: null, usageError: tries.join('; ') };
+};
 // A TTADK (company gateway) account has no ChatGPT rate-limit windows: what matters is whether it works right now — the
 // ttadk CLI present, its SSO session active, the gateway listing the models, the hub up — and how many turns it runs.
 const readTtadk = (name, prof) => {
@@ -192,7 +304,9 @@ const readTtadk = (name, prof) => {
     models: prof.models ?? [], windows: [], resets: null, healthy: false, reason: null, live: false, active: 0, ssoExpiresAt: null, email: prof.email ?? null,
     // Web search through the local proxy every TTADK call goes through (codex-worker starts it on demand); searchLive:
     // the proxy answers now.
-    search: !!prof.searchPort, searchLive: false };
+    search: !!prof.searchPort, searchLive: false,
+    // Best-effort daily token quota from LLMBox (see the approved exception above); display-only, never routing.
+    usage: null, usageError: null };
   const bin = prof.ttadkBin && fs.existsSync(prof.ttadkBin) ? prof.ttadkBin : null;
   if (!bin) { out.reason = 'ttadk CLI not found (npm install -g @byted/ttadk@latest --registry=https://bnpm.byted.org, then codex-worker ttadk-setup)'; return out; }
   try {
@@ -202,6 +316,8 @@ const readTtadk = (name, prof) => {
     out.ssoExpiresAt = sso?.expiresAt ? Date.parse(sso.expiresAt) : null;
     if (sso?.status !== 'active' || (out.ssoExpiresAt && out.ssoExpiresAt <= now)) { out.reason = 'TTADK SSO not logged in or expired (the user runs `! ttadk auth login sso`)'; return out; }
   } catch (e) { out.reason = `ttadk auth status failed: ${String(e.message).split('\n')[0]}`; return out; }
+  // The dashboard's own number, read best-effort; a failure is recorded and changes nothing else.
+  try { const q = readTtadkUsage(bin); out.usage = q.usage; out.usageError = q.usageError; } catch { out.usageError = 'quota read failed'; }
   try {
     const mj = JSON.parse(execFileSync(bin, ['models', '-f', 'json'], { encoding: 'utf8', timeout: 60000, stdio: ['ignore', 'pipe', 'ignore'] }));
     const ms = Array.isArray(mj) ? mj : mj.models ?? []; // {tool, count, models: [...]}
@@ -541,7 +657,8 @@ export const analyze = (data) => {
   const tt = (data.codexAccounts ?? []).find((a) => a.kind === 'ttadk') ?? null;
   // No concurrency cap (user, 2026-11-07): a rate-limited run is retried once on TTADK, then re-routed without it.
   const ttadk = tt ? { name: tt.name, home: tt.home, healthy: !!tt.healthy, reason: tt.reason, quotaOut: tt.quotaOut ?? null, live: !!tt.live, active: tt.active ?? 0,
-    models: tt.models ?? [], browser: !!tt.browser, chromePlugin: tt.chromePlugin ?? null, search: !!tt.search, searchLive: !!tt.searchLive, ssoLeftH: tt.ssoExpiresAt ? (tt.ssoExpiresAt - now) / 3600000 : null } : null;
+    models: tt.models ?? [], browser: !!tt.browser, chromePlugin: tt.chromePlugin ?? null, search: !!tt.search, searchLive: !!tt.searchLive, ssoLeftH: tt.ssoExpiresAt ? (tt.ssoExpiresAt - now) / 3600000 : null,
+    usage: tt.usage ?? null, usageError: tt.usageError ?? null } : null;
   if (ttadk) ttadk.usable = ttadk.healthy;
   // TRAE CLI: the second company account, after TTADK and before personal quota (user, 2026-11-08).
   const tr = (data.codexAccounts ?? []).find((a) => a.kind === 'trae') ?? null;
@@ -621,6 +738,9 @@ export const leanLines = (st, data) => {
     else out.push(`TTADK unavailable — ${T.reason}: tell the user now so they can fix it; route.mjs asks the user before its work goes to personal quota (--urgent only once the user said go on; high stakes ask too); never hold work without asking`);
     if (T.healthy && !T.live) out.push(`TTADK hub down — start it before hub workers: codex-worker.mjs --account ${T.name} hub (codex exec runs don't need it)`);
     if (T.healthy && T.ssoLeftH != null && T.ssoLeftH < POLICY.ttadkSsoWarnH) out.push(`TTADK SSO expires in ${hours(T.ssoLeftH)}: ask the user to run \`! ttadk auth login sso\` before it lapses`);
+    // The dashboard's own daily number: warn before the gateway starts answering 403 (user, 2026-11-13).
+    if (T.usable && T.usage?.utilization != null && T.usage.utilization >= 80)
+      out.push(`TTADK daily quota ${Math.round(T.usage.utilization)}% used: TRAE takes over when it runs out`);
   }
   const TR = X.trae;
   if (TR) {

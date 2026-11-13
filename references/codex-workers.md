@@ -185,6 +185,15 @@ There is no concurrency cap (user, 2026-11-07):
   until the reset; "wait": hold it until then. Only `--urgent` (already approved) runs on personal quota without asking; high stakes ask too (user, 2026-11-09). `codex-worker` prints
   `quota-exhausted:` for such a failure: don't retry, and don't try another TTADK model. Usage dashboard:
   `https://gdp-portal.bytedance.net/llmbox/dashboard` (extra quota can be requested there; that is the user's call).
+- **Where the daily number comes from (user-approved 2026-11-13).** `quota.mjs` reads TTADK's own quota from
+  `GET https://llmbox-global.byteintl.net/api/v1/user/quota` (the LLMBox dashboard's API; response shape from its
+  frontend, not yet confirmed against a live account) and prints `ttadk day 37% used (185M / 500M) resets …`; at ≥80%
+  the lean warns that TRAE takes over when it runs out. The token comes from the ttadk CLI itself
+  (`ttadk auth token jwt`, falling back to `ttadk auth token sso` for LLMBox's `Authorization: Bearer at-…`), is used in
+  memory for this one read-only query and dropped: **the approved exception to the credential rule, scoped to this query
+  inside `quota.mjs`/`lib/state.mjs`**. No worker may open, print or copy it, and it is never written to the quota cache,
+  a log or an error. A failed or unidentifiable read sets `usage:null` and `usageError` (short reason, e.g.
+  `llmbox HTTP 401`); it never affects TTADK's health, and `route.mjs` does not use the number yet.
 - **A rate-limited run is retried once on TTADK.** `codex-worker` prints a `rate-limited:` line when a turn fails that
   way.
 - If the retry fails too, or the run fails for TTADK reasons (SSO, auth, gateway error), re-route with

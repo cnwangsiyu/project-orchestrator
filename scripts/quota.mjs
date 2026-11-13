@@ -1,11 +1,12 @@
 #!/usr/bin/env node
-// quota: Claude's and every Codex account's usage side by side, and the quota lean that route.mjs applies.
+// quota: Claude's, every Codex account's and TTADK's daily token usage side by side, and the quota lean that route.mjs applies.
 //
 //   quota [--fresh] [--json]
 //
 // Claude comes from `claude -p /usage`; Codex from each account's hub (`codex-worker.mjs --account <name> usage`) for
 // every profile in ~/.claude/orchestrator/_shared/codex-accounts.json (`main` without it), with its reset cards. Each
-// window shows its used share, reset and projection at reset (from the recent burn rate when there is one). The lean
+// window shows its used share, reset and projection at reset (from the recent burn rate when there is one). TTADK's
+// daily number comes from the LLMBox dashboard API, read best-effort in lib/state.mjs. The lean
 // lines come from lib/state.mjs, where all quota policy lives. Readings are cached for 10 minutes in
 // ~/.claude/orchestrator/_shared/quota.json and shared by every orchestrator; --fresh re-reads everything.
 import { readState, analyze, leanLines, winState, weekly, fmt, fmtAgo, POLICY } from './lib/state.mjs';
@@ -14,6 +15,14 @@ const args = process.argv.slice(2);
 const data = readState({ fresh: args.includes('--fresh') });
 const st = analyze(data);
 const lean = leanLines(st, data);
+// Tokens as the dashboard shows them: 185M / 500M.
+const fmtTokens = (n) => {
+  if (n == null || !Number.isFinite(n)) return '?';
+  if (n >= 1e9) return `${+(n / 1e9).toFixed(2)}B`;
+  if (n >= 1e6) return `${+(n / 1e6).toFixed(2)}M`;
+  if (n >= 1e3) return `${+(n / 1e3).toFixed(1)}K`;
+  return String(n);
+};
 if (args.includes('--json')) {
   const { codex, claude } = st;
   console.log(JSON.stringify({
@@ -22,6 +31,8 @@ if (args.includes('--json')) {
     codex: codex.rows.map((r) => ({ name: r.a.name, email: r.a.email ?? null, live: r.a.live, plan: r.a.plan ?? null, week: r.s, spent: r.spent, throttledUntil: r.throttledUntil, unconstrained: r.unconstrained, resets: r.a.resets, cardPlan: r.cp })),
     codexPick: codex.pick?.a.name ?? null, redeem: codex.redeem ? { account: codex.redeem.a.name, card: codex.redeem.cp.card?.id ?? null } : null,
     codexOut: codex.out, underused: codex.underused, frontLoad: codex.frontLoad, overspending: codex.overspending, lean,
+    ttadk: codex.ttadk ? { name: codex.ttadk.name, healthy: codex.ttadk.healthy, reason: codex.ttadk.reason, quotaOut: codex.ttadk.quotaOut,
+      usage: codex.ttadk.usage, usageError: codex.ttadk.usageError } : null,
   }));
   process.exit(0);
 }
@@ -43,6 +54,10 @@ for (const r of st.codex.rows) {
 if (!data.codexAccounts) console.log(`  codex  unavailable: ${data.errors.codex ?? 'unknown error'}`);
 const TTA = st.codex.ttadk;
 if (TTA) console.log(`  codex  ${TTA.name} (TTADK gateway): ${TTA.healthy ? 'healthy' : `unavailable — ${TTA.reason}`}; hub ${TTA.live ? 'up' : 'down'}; ${TTA.active} turns running; browser ${TTA.browser ? 'ready' : 'not set up'}; web search ${TTA.search ? (TTA.searchLive ? 'ready (proxy up)' : 'ready (proxy starts on demand)') : 'not set up (rerun ttadk-setup)'}${TTA.ssoLeftH != null ? `; SSO ${Math.round(TTA.ssoLeftH)}h left` : ''}; models ${TTA.models.join(', ')}`);
+// TTADK's own daily quota (LLMBox dashboard API), when the token read worked; the lean warns at 80%.
+const TU = TTA?.usage;
+if (TU?.utilization != null) console.log(`  ttadk  ${'day'.padEnd(34)}${String(Math.round(TU.utilization)).padStart(3)}% used (${fmtTokens(TU.used)} / ${fmtTokens(TU.limit)})  resets ${fmt(TU.resetsAt)}`);
+else if (TTA?.usageError) console.log(`  ttadk  ${'day'.padEnd(34)}usage unavailable — ${TTA.usageError}`);
 const TRA = st.codex.trae;
 if (TRA) console.log(`  codex  ${TRA.name} (TRAE CLI, after TTADK): ${TRA.healthy ? 'healthy' : `unavailable — ${TRA.reason}`}; hub ${TRA.live ? 'up' : 'down'}; ${TRA.active} turns running; models ${TRA.models.join(', ')}`);
 console.log(`budget: claude ${st.claude.status} (now: spare ≤${st.claude.spareLine}%, cap ${st.claude.cap}%, ${st.claude.reserve ?? '?'}% kept for orchestration until the reset); `
