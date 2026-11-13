@@ -596,7 +596,7 @@ for (const [sc, args] of ERRORS) {
   console.log(`${bad.length ? 'FAIL' : 'ok  '} outcome dedupe      ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
 }
 // Fallback models on the company account (user, 2026-11-10: "gpt 不可用/失败也按照评测结果做一下路由"): per-family
-// TRAE pauses; GPT out → DeepSeek-V4.1-Flash → Gemini-3.1-Pro → DeepSeek-V4-Pro → Claude; with GPT up, a different
+// TRAE pauses; GPT out → DeepSeek-V4.1-Flash → Gemini-3.1-Pro → Claude; with GPT up, a different
 // family between Sol xhigh and Sol max; fallback-written service code gets a review by another family.
 {
   const { noteFailure, noteSuccess, readPause, readPoolPauses, poolOf } = await import('../lib/trae-health.mjs');
@@ -608,7 +608,7 @@ for (const [sc, args] of ERRORS) {
   const idsNoGem = ['gpt-6.1-sol', 'gpt-6-astra', 'deepseek-v4.1-flash', 'deepseek-v4-pro', 'seed-evolving'];
   const noGem = (home) => tr({ home, models: idsNoGem, modelIds: Object.fromEntries(idsNoGem.map((i) => [i, i.toUpperCase()])) });
   const noGemHome = fs.mkdtempSync(path.join(tmp, 'trae-nogem-')), mpHome = fs.mkdtempSync(path.join(tmp, 'trae-mp-'));
-  // One model-unavailable failure (2026-11-13): it pauses deepseek-v4.1-flash only; deepseek-v4-pro keeps routing.
+  // One model-unavailable failure pauses Flash only; Pro remains listed but is not an eligible fallback.
   noteFailure(mpHome, '-32600: model `deepseek-v4.1-flash` is unavailable because its metadata could not be resolved', Date.now(), 'deepseek-v4.1-flash');
   const t = Date.now(), R = 'stream disconnected: Model access temporarily restricted. (983)';
   const gptPause = noteFailure(gptHome, R, t, 'GPT-6.1-Sol');
@@ -650,7 +650,7 @@ for (const [sc, args] of ERRORS) {
     // GPT paused on TRAE: the fallbacks in order, no personal-quota question, then Claude.
     [pk('traeGptOut', ['implement']), 'deepseek-v4.1-flash high @trae'],
     [pk('traeGptOut', ['implement', '--failures', '1']), 'gemini-3.1-pro-preview high @trae'],
-    [pk('traeGptOut', ['implement', '--failures', '2']), 'deepseek-v4-pro high @trae'],
+    [pk('traeGptOut', ['implement', '--failures', '2']), 'opus high @undefined'],
     [pk('traeGptOut', ['implement', '--failures', '3']), 'opus high @undefined'],
     [personal('traeGptOut', ['implement']), false],
     [pk('traeGptOut', ['image-read']), 'gemini-3.1-pro-preview high @trae'],
@@ -663,7 +663,7 @@ for (const [sc, args] of ERRORS) {
     // implement never picks it; a model-unavailable pause drops only that model, its family-mate keeps routing.
     [pk('traeNoGem', ['image-read', '--exclude-model', 'gpt']), 'seed-evolving medium @trae'],
     [pk('traeNoGem', ['implement', '--exclude-model', 'gpt']), 'deepseek-v4.1-flash high @trae'],
-    [pk('traeNoGemPaused', ['implement', '--exclude-model', 'gpt']), 'deepseek-v4-pro high @trae'],
+    [pk('traeNoGemPaused', ['implement', '--exclude-model', 'gpt']), 'sonnet medium @undefined'],
     [pk('traeNoGemPaused', ['implement']), 'gpt-6.1-sol high @trae'],
     // The task flag uses that same exclusion path, scoped to TRAE, with the normal fallback ladder and gates.
     [pk('traeFull', ['review-high', '--security']), 'gemini-3.1-pro-preview high @trae'],
@@ -927,7 +927,7 @@ for (const [sc, args] of ERRORS) {
   const lean = leanLines(st, data).join('\n');
   delete process.env.TRAE_PROBE;
   S.traeQuota = { claude: cl(10, 120), codex: [acc('main', 20, 120), tr({ home: qh, quota })] };
-  const ro = JSON.parse(run('traeQuota', ['implement']));
+  const ro = JSON.parse(run('traeQuota', ['implement', '--stakes', 'high']));
   cases.push(
     [lean.includes("TRAE gpt-6.1-sol's daily high-priority quota is used up"), true],
     [ro.pick.model, 'gpt-6-astra'], [ro.pick.account, 'trae'],
@@ -971,34 +971,34 @@ for (const [sc, args] of ERRORS) {
   const route = (sc, args = ['implement']) => JSON.parse(run(sc, args));
   const note = (r, re) => r.notes.some((n) => re.test(n));
   for (const [sc, args, want] of [
-    ['quotaAstra', ['implement'], 'gpt-6-astra'],
+    ['quotaAstra', ['implement'], 'deepseek-v4.1-flash'],
     ['quotaPreferred', ['implement'], 'gpt-5.6-sol'],
-    ['quotaPreferred', ['implement', '--failures', '1'], 'gpt-5.6-sol'],
-    ['quotaPreferred', ['implement', '--stakes', 'high'], 'gpt-5.6-sol'],
+    ['quotaPreferred', ['implement', '--failures', '1'], 'gpt-6-astra'],
+    ['quotaPreferred', ['implement', '--stakes', 'high'], 'gpt-6-astra'],
     ['quotaPreferred', ['review'], 'gpt-5.6-sol'],
-    ['quotaPreferred', ['review-high'], 'gpt-5.6-sol'],
+    ['quotaPreferred', ['review-high'], 'gpt-6-astra'],
     ['quotaPreferred', ['build-run'], 'gpt-5.6-sol'],
     ['quotaPreferred', ['image-read'], 'gpt-6-astra'], // 5.6-Sol vision is not qualified
     ['quotaPreferred', ['implement', '--security'], 'deepseek-v4.1-flash'],
-    ['quotaPreferred', ['implement', '--exclude-model', 'gpt-5.6-sol'], 'gpt-6-astra'],
-    ['quota56Depleted', ['implement'], 'gpt-6-astra'],
-    ['quota56Expired', ['implement'], 'gpt-6-astra'],
-    ['quota56Paused', ['implement'], 'gpt-6-astra'],
+    ['quotaPreferred', ['implement', '--exclude-model', 'gpt-5.6-sol'], 'deepseek-v4.1-flash'],
+    ['quota56Depleted', ['implement'], 'deepseek-v4.1-flash'],
+    ['quota56Expired', ['implement'], 'deepseek-v4.1-flash'],
+    ['quota56Paused', ['implement'], 'deepseek-v4.1-flash'],
     ['quotaBoth', ['implement'], 'gpt-5.6-sol'],
-    ['quotaBoth', ['implement', '--failures', '5'], 'gpt-5.6-sol'], // the raw pick is depleted Astra
-    ['quotaBoth', ['implement-hard'], 'gpt-5.6-sol'],
-    ['quotaBoth', ['lookup'], 'gpt-5.6-sol'],
-    ['quotaBoth', ['extract'], 'gpt-5.6-sol'],
-    ['quotaBoth', ['draft'], 'gpt-5.6-sol'],
-    ['quotaBoth', ['lookup', '--stakes', 'high'], 'gpt-5.6-sol'],
-    ['quotaBoth', ['lookup', '--failures', '1'], 'gpt-5.6-sol'],
+    ['quotaBoth', ['implement', '--failures', '4'], 'deepseek-v4.1-flash'], // depleted Astra never substitutes a weaker GPT
+    ['quotaBoth', ['implement-hard'], 'deepseek-v4.1-flash'],
+    ['quotaBoth', ['lookup'], 'deepseek-v4.1-flash'],
+    ['quotaBoth', ['extract'], 'deepseek-v4.1-flash'],
+    ['quotaBoth', ['draft'], 'deepseek-v4.1-flash'],
+    ['quotaBoth', ['lookup', '--stakes', 'high'], 'deepseek-v4.1-flash'],
+    ['quotaBoth', ['lookup', '--failures', '1'], 'deepseek-v4.1-flash'],
     ['quotaBoth', ['build-run'], 'gpt-5.6-sol'],
     ['quotaMissing', ['implement'], 'gpt-6.1-sol'],
     ['quotaMissingModel', ['implement'], 'gpt-6.1-sol'],
     ['quotaUnknownAstra', ['implement'], 'deepseek-v4.1-flash'],
     ['quotaNoAstra', ['implement'], 'deepseek-v4.1-flash'],
     ['quotaPausedAstra', ['implement'], 'deepseek-v4.1-flash'],
-    ['quotaSecondFallback', ['implement'], 'deepseek-v4-pro'],
+    ['quotaSecondFallback', ['implement'], 'gpt-6.1-sol'],
     ['quotaAstra', ['implement', '--exclude-model', 'gpt-6-astra'], 'deepseek-v4.1-flash'],
     ['quotaAstra', ['implement', '--exclude-model', 'gpt'], 'deepseek-v4.1-flash'],
     ['quotaAstra', ['implement', '--security'], 'deepseek-v4.1-flash'],
@@ -1018,7 +1018,7 @@ for (const [sc, args] of ERRORS) {
     [route('quotaPreferred').pick.effort, idle.pick.effort],
     [route('quotaPreferred', ['implement', '--failures', '1']).pick.effort, 'xhigh'],
     [route('quotaPreferred').pick.command.includes('--model GPT-5.6-SOL'), true],
-    [route('quotaPreferred', ['lookup']).pick.command.includes('-m GPT-5.6-SOL'), true],
+    [route('quotaPreferred', ['lookup']).pick.command.includes('-m DEEPSEEK-V4.1-FLASH'), true],
     [route('quotaPreferred', ['implement', '--failures', '1']).notes.some((n) => /rework thread rule.*continued original thread because/.test(n)), true],
     [route('quotaPreferred').notes.some((n) => /rework thread rule/.test(n)), false],
     [JSON.stringify(busy.pick), JSON.stringify(idle.pick)], [JSON.stringify(busy.needsUserOK), JSON.stringify(idle.needsUserOK)],
@@ -1029,9 +1029,9 @@ for (const [sc, args] of ERRORS) {
     [note(idle, /non-depleted or unknown buckets let it wait.*Accepted queued turns stay pending/), true],
     [note(route('quotaAllBusy'), /--exclude-model gpt-6.1-sol.*same --failures/), true],
     [route('quotaBoth').needsUserOK.length, 0], [route('quotaAllBusy').deferred, null],
-    [route('quotaAstra', ['lookup']).pick.launcher, 'codex-worker'],
+    [route('quotaAstra', ['lookup']).pick.launcher, 'traecli-exec'],
     [route('quotaBoth', ['lookup']).pick.launcher, 'traecli-exec'],
-    [note(route('quotaBoth', ['lookup', '--failures', '1']), /this retry is not stronger/), false],
+    [note(route('quotaBoth', ['lookup', '--failures', '1']), /this retry is not stronger/), true],
     [route('quotaTT').pick.account, 'ttadk'],
     [note(route('quotaAstra', ['review', '--author', 'codex']), /second TRAE reviewer/), true],
     [route('quotaAstra', ['review', '--author', 'codex']).secondOpinion?.model, 'deepseek-v4.1-flash'],
@@ -1040,13 +1040,13 @@ for (const [sc, args] of ERRORS) {
   for (const cat of ['build-run', 'review', 'review-high']) {
     for (const [sc, expected] of [['quota80', true], ['quota79', false], ['quotaNoLimit', false], ['quotaMissing', false], ['quotaChosen80', true], ['quotaTT', true], ['quotaNoReset', true]]) {
       const r = route(sc, [cat]);
-      cases.push([note(r, /long builds\/large reviews:.*daily reset/), expected], [r.deferred, null]);
+      cases.push([note(r, /long builds\/large reviews:.*daily reset/), sc === 'quotaChosen80' && cat === 'review' ? false : expected, `${sc} ${cat}`], [r.deferred, null]);
     }
   }
   cases.push([note(route('quota80'), /long builds\/large reviews:/), false],
     [note(route('quota80', ['build-run']), /quota resetTime.*TRAE normally 22:00 UTC, TTADK 16:00 UTC/), true],
     [note(route('quotaNoReset', ['build-run']), /normally 22:00 UTC/), true]);
-  const bad = cases.map(([got, want], i) => (got === want ? null : `${i} (${got})`)).filter((i) => i !== null);
+  const bad = cases.map(([got, want, label], i) => (got === want ? null : `${i} ${label ?? ''} (${got} != ${want})`)).filter((i) => i !== null);
   if (bad.length) fail++;
   console.log(`${bad.length ? 'FAIL' : 'ok  '} trae daily quota    ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
 }
@@ -1204,20 +1204,20 @@ for (const [sc, args] of ERRORS) {
   try {
     for (const args of [['lookup'], ['analysis'], ['implement'], ['docs'], ['research']]) {
       const o = r([...args, '--background']);
-      assert.equal(o.pick.account, 'trae'); assert.equal(o.pick.model, SOL);
+      assert.equal(o.pick.account, 'trae'); assert.equal(o.pick.model, FLASH);
       assert.equal(o.pick.launcher, 'codex-worker'); assert.equal(o.background, true);
-      assert.ok(o.why.some((n) => /background: GPT-6.1-Sol bucket depleted.*no high-priority quota spent \(step 1\)/.test(n)));
+      assert.ok(o.why.some((n) => /background: deepseek-v4.1-flash has no daily bucket.*no high-priority quota spent.*\(step 2\)/.test(n)));
       assert.ok(o.notes.some((n) => /expect hours.*each model request queues separately/.test(n)));
       assert.ok(!o.notes.some((n) => /Above ~300, consider|hub queue position above ~300/.test(n)));
     }
-    assert.equal(r(['lookup']).pick.account, 'ttadk');
+    assert.equal(r(['lookup']).pick.account, 'trae'); // Light balancing now has an eligible bucket-free Flash.
     assert.equal(r(['--background', 'lookup']).pick.account, 'trae');
     const gemini = r(['lookup', '--background'], 'backgroundGemini');
     assert.equal(gemini.pick.launcher, 'codex-worker');
     assert.ok(gemini.notes.some((n) => /hub is down.*start it first/.test(n)));
     assert.ok(!gemini.notes.some((n) => /twice what the task should take|codex exec still works/.test(n)));
-    assert.equal(r(['implement'], 'backgroundOnly').pick.model, 'gpt-6-astra');
-    assert.equal(r(['implement', '--background'], 'backgroundOnly').pick.model, SOL);
+    assert.equal(r(['implement'], 'backgroundOnly').pick.model, FLASH);
+    assert.equal(r(['implement', '--background'], 'backgroundOnly').pick.model, FLASH);
     assert.equal(r(['lookup', '--background', '--security']).pick.model, FLASH);
     assert.equal(r(['lookup', '--background', '--security']).pick.account, 'trae');
     for (const args of [['review', '--security'], ['review-high', '--security'], ['lookup', '--exclude-model', 'gpt,deepseek']]) {
@@ -1249,7 +1249,7 @@ for (const [sc, args] of ERRORS) {
     console.log('ok   background lane: depletion, congestion, security, exclusions, launch, log and company-only escalation');
   } catch (e) { fail++; console.log(`FAIL background lane: ${e.stack}`); }
 }
-// Background chooses depleted GPT buckets, then eligible no-bucket models, then reports normal quota spend.
+// Background uses the light tier unless hard rules apply; image-reading keeps its vision-specific order.
 {
   const SOL = 'gpt-6.1-sol', ASTRA = 'gpt-6-astra', FLASH = 'deepseek-v4.1-flash', PRO = 'deepseek-v4-pro', SEED = 'seed-evolving';
   const home = fs.mkdtempSync(path.join(tmp, 'background-order-'));
@@ -1263,15 +1263,15 @@ for (const [sc, args] of ERRORS) {
   };
   const r = (args = ['analysis']) => JSON.parse(run('backgroundOrder', [...args, '--background']));
   const cases = [
-    [{ ...active, [SOL]: bucket(true) }, ['analysis'], SOL, 1],
-    [{ ...active, [ASTRA]: bucket(true) }, ['analysis'], ASTRA, 1],
-    [{ [SOL]: bucket(true), [ASTRA]: bucket(true) }, ['lookup'], SOL, 1],
-    [{ [ASTRA]: bucket(true) }, ['analysis'], ASTRA, 1, [ASTRA]],
+    [{ ...active, [SOL]: bucket(true) }, ['analysis'], FLASH, 2],
+    [{ ...active, [ASTRA]: bucket(true) }, ['analysis'], FLASH, 2],
+    [{ [SOL]: bucket(true), [ASTRA]: bucket(true) }, ['lookup'], FLASH, 2],
+    [{ [ASTRA]: bucket(true) }, ['analysis', '--stakes', 'high'], ASTRA, 1, [ASTRA]],
     [{ ...active, [ASTRA]: bucket(true) }, ['analysis', '--exclude-model', ASTRA], FLASH, 2],
-    [{ [SOL]: bucket(true), [ASTRA]: bucket(true) }, ['analysis', '--exclude-model', SOL], ASTRA, 1],
+    [{ [SOL]: bucket(true), [ASTRA]: bucket(true) }, ['analysis', '--exclude-model', SOL], FLASH, 2],
     [active, ['analysis'], FLASH, 2],
-    [active, ['analysis', '--exclude-model', FLASH], PRO, 2],
-    [{ ...active, [FLASH]: bucket() }, ['analysis'], PRO, 2],
+    [active, ['analysis', '--exclude-model', FLASH], SOL, 3],
+    [{ ...active, [FLASH]: bucket() }, ['analysis'], SOL, 3],
     [{ ...active, [FLASH]: { used: null, limit: null, remaining: null, depleted: false, resetsAt: null }, [PRO]: bucket() }, ['analysis'], SOL, 3],
     [{ ...active, [FLASH]: bucket(), [PRO]: bucket() }, ['analysis'], SOL, 3],
     [active, ['analysis', '--exclude-model', 'deepseek'], SOL, 3],
@@ -1282,7 +1282,6 @@ for (const [sc, args] of ERRORS) {
     [{}, ['analysis'], SOL, 3],
     [undefined, ['analysis'], SOL, 3],
     [{ [SOL]: bucket(true), [ASTRA]: bucket(true) }, ['analysis', '--security'], FLASH, 2],
-    [active, ['analysis', '--security', '--exclude-model', FLASH], PRO, 2],
     [{ ...active, [FLASH]: bucket(), [PRO]: bucket() }, ['analysis', '--security'], FLASH, 3],
     [null, ['analysis', '--security'], FLASH, 3],
     [{ ...active, [SOL]: bucket(true) }, ['image-read'], SOL, 1],
@@ -1311,7 +1310,7 @@ for (const [sc, args] of ERRORS) {
       assert.ok(!o.needsUserOK.some((n) => /personal quota/.test(n)));
     }
     scenario(active);
-    for (const args of [['review-high', '--security'], ['review', '--security'], ['image-read', '--security', '--exclude-model', SEED]]) {
+    for (const args of [['review-high', '--security'], ['review', '--security'], ['image-read', '--security', '--exclude-model', SEED], ['analysis', '--security', '--exclude-model', FLASH]]) {
       const o = r(args); assert.equal(o.pick, null); assert.ok(o.tellUser.some((n) => /queued for later/.test(n)));
     }
     // Unknown quota retains the ordinary rung; an Astra rung keeps its tier even if Sol is depleted.
@@ -1329,7 +1328,7 @@ for (const [sc, args] of ERRORS) {
     const { noteFailure } = await import('../lib/trae-health.mjs');
     noteFailure(pausedHome, '-32600: model `gpt-6.1-sol` is unavailable because its metadata could not be resolved', now, SOL);
     scenario({ [SOL]: bucket(true), [ASTRA]: bucket(true) }, ids, { home: pausedHome });
-    assert.equal(r().pick.model, ASTRA);
+    assert.equal(r().pick.model, FLASH);
     console.log(`ok   background model order: ${cases.length} quota/security/vision cases, tiers, quality gates and pauses`);
   } catch (e) { fail++; console.log(`FAIL background model order: ${e.stack}`); }
 }
@@ -1344,7 +1343,9 @@ for (const [sc, args] of ERRORS) {
   const r = (args, { daily = active, models = ids, company = true, queue = 100, extra = {}, env = {} } = {}) => {
     const trae = tr({ home, models, modelIds: Object.fromEntries(ids.map((id) => [id, id.toUpperCase()])),
       quota: daily === null ? null : { daily }, ...extra });
-    fs.writeFileSync(path.join(trae.home, 'queue-state.json'), JSON.stringify({ gpt: { t: now, position: queue, state: 'queued' } }));
+    fs.writeFileSync(path.join(trae.home, 'queue-state.json'), JSON.stringify({
+      gpt: { t: now, position: queue, state: 'queued' }, deepseek: { t: now, position: queue, state: 'queued' },
+    }));
     S.bucketFreeGPT = { claude: cl(10, 120), codex: [acc('main', 20, 120), ...(company ? [tt({ models: [SOL] })] : []), trae] };
     return JSON.parse(run('bucketFreeGPT', args, env));
   };
@@ -1352,30 +1353,31 @@ for (const [sc, args] of ERRORS) {
     for (const cat of ['lookup', 'extract', 'draft']) {
       const balanced = r([cat]), direct = r([cat], { company: false });
       for (const o of [balanced, direct]) {
-        assert.equal(o.pick.model, GPT55); assert.equal(o.pick.account, 'trae');
+        assert.equal(o.pick.model, TERRA56); assert.equal(o.pick.account, 'trae');
         assert.equal(o.pick.effort, 'medium'); assert.equal(o.pick.launcher, 'traecli-exec');
-        assert.ok(o.pick.command.includes('-m GPT-5.5'));
+        assert.ok(o.pick.command.includes('-m GPT-5.6-TERRA'));
         assert.ok(o.why.some((n) => /no daily bucket.*no high-priority quota spent.*no low-priority lane/.test(n)));
         assert.deepEqual(o.needsUserOK, []);
       }
       assert.equal(balanced.balance.bucketFree, true); assert.equal(balanced.balance.remainingShare, null);
-      assert.equal(r([cat], { daily: { ...active, [SOL]: bucket(true) } }).pick.model, GPT55);
+      assert.equal(r([cat], { daily: { ...active, [SOL]: bucket(true) } }).pick.model, TERRA56);
       assert.equal(r([cat], { queue: 301 }).pick.account, 'ttadk');
       assert.equal(r([cat, '--exclude-account', 'trae']).pick.account, 'ttadk');
-      assert.equal(r([cat, '--security']).pick.account, 'ttadk');
-      assert.equal(r([cat, '--exclude-model', GPT55]).pick.model, TERRA56);
-      assert.equal(r([cat], { daily: { ...active, [GPT55]: bucket() } }).pick.model, TERRA56);
+      assert.equal(r([cat, '--security']).pick.model, FLASH); // Security blocks GPT, not safe fallback balancing.
+      assert.equal(r([cat, '--exclude-model', TERRA56]).pick.model, GPT55);
+      assert.equal(r([cat], { daily: { ...active, [TERRA56]: bucket() } }).pick.model, GPT55);
     }
-    for (const args of [['analysis'], ['implement'], ['docs'], ['research'], ['design'], ['review-high']]) {
+    for (const args of [['analysis'], ['implement'], ['docs'], ['research']]) {
       const o = r([...args, '--background'], { queue: 4000, extra: { load: { [GPT55]: { t: now, percent: 99 } } } });
-      assert.equal(o.pick.account, 'trae'); assert.equal(o.pick.model, GPT55); assert.equal(o.pick.launcher, 'codex-worker');
-      assert.ok(o.pick.command.includes('--model GPT-5.5'));
+      assert.equal(o.pick.account, 'trae'); assert.equal(o.pick.model, TERRA56); assert.equal(o.pick.launcher, 'codex-worker');
+      assert.ok(o.pick.command.includes('--model GPT-5.6-TERRA'));
       assert.ok(o.why.some((n) => /background:.*no daily bucket.*no low-priority lane/.test(n)));
       assert.ok(!o.needsUserOK.some((n) => /personal quota/.test(n)));
     }
-    assert.equal(r(['analysis', '--background'], { daily: { ...active, [SOL]: bucket(true), [ASTRA]: bucket(true) } }).pick.model, GPT55);
-    const terra = r(['analysis', '--background', '--exclude-model', GPT55]);
-    assert.equal(terra.pick.model, TERRA56); assert.ok(terra.pick.command.includes('--model GPT-5.6-TERRA'));
+    for (const cat of ['design', 'review-high']) assert.equal(r([cat, '--background']).pick.model, SOL);
+    assert.equal(r(['analysis', '--background'], { daily: { ...active, [SOL]: bucket(true), [ASTRA]: bucket(true) } }).pick.model, TERRA56);
+    const cheap = r(['analysis', '--background', '--exclude-model', TERRA56]);
+    assert.equal(cheap.pick.model, GPT55); assert.ok(cheap.pick.command.includes('--model GPT-5.5'));
     assert.equal(r(['analysis', '--background', '--exclude-model', `${GPT55},${TERRA56}`]).pick.model, FLASH);
     assert.equal(r(['analysis', '--background'], { daily: { ...active, [GPT55]: bucket(), [TERRA56]: bucket() } }).pick.model, FLASH);
     assert.equal(r(['analysis', '--background'], { daily: { ...active, [GPT55]: { ...bucket(), resetsAt: now - 1 } } }).pick.model, TERRA56);
@@ -1393,7 +1395,7 @@ for (const [sc, args] of ERRORS) {
       assert.equal(r(['lookup'], { daily, company: false }).pick.model, SOL);
     }
     // Non-cheap foreground work and vision/capability routes are unchanged.
-    assert.equal(r(['analysis', '--stakes', 'low']).pick.model, SOL);
+    assert.equal(r(['analysis', '--stakes', 'low']).pick.model, TERRA56);
     assert.equal(r(['analysis'], { company: false }).pick.model, SOL);
     assert.equal(r(['image-read', '--background']).pick.model, SEED);
     assert.equal(r(['image-read', '--background'], { daily: { ...active, [SOL]: bucket(true) } }).pick.model, SOL);
@@ -1407,16 +1409,16 @@ for (const [sc, args] of ERRORS) {
     assert.deepEqual(review.pick, baselineReview.pick); assert.deepEqual(review.secondOpinion, baselineReview.secondOpinion);
     const pausedHome = fs.mkdtempSync(path.join(tmp, 'bucket-free-paused-'));
     const { noteFailure } = await import('../lib/trae-health.mjs');
-    noteFailure(pausedHome, '-32600: model `gpt-5.5` is unavailable because its metadata could not be resolved', now, GPT55);
-    assert.equal(r(['analysis', '--background'], { extra: { home: pausedHome } }).pick.model, TERRA56);
-    assert.equal(r(['lookup'], { extra: { home: pausedHome } }).pick.model, TERRA56);
+    noteFailure(pausedHome, '-32600: model `gpt-5.6-terra` is unavailable because its metadata could not be resolved', now, TERRA56);
+    assert.equal(r(['analysis', '--background'], { extra: { home: pausedHome } }).pick.model, GPT55);
+    assert.equal(r(['lookup'], { extra: { home: pausedHome } }).pick.model, GPT55);
     noteFailure(pausedHome, 'Model access temporarily restricted. (983)', now, SOL);
     assert.equal(r(['analysis', '--background'], { extra: { home: pausedHome } }).pick.model, FLASH);
-    assert.equal(r(['lookup'], { extra: { home: pausedHome } }).pick.account, 'ttadk');
+    assert.equal(r(['lookup'], { extra: { home: pausedHome } }).pick.model, FLASH);
     const log = path.join(home, 'routes.jsonl');
     r(['lookup', '--project', 'p', '--name', 'free-gpt'], { env: { ROUTE_LOG: '1', ROUTE_LOG_FILE: log } });
     const logged = JSON.parse(fs.readFileSync(log, 'utf8').trim());
-    assert.equal(logged.company, 'trae'); assert.equal(logged.pick.model, GPT55); assert.equal(logged.balance.bucketFree, true);
+    assert.equal(logged.company, 'trae'); assert.equal(logged.pick.model, TERRA56); assert.equal(logged.balance.bucketFree, true);
     console.log('ok   bucket-free TRAE GPT: cheap/background preference, quota, mapping, security, vision, balancing, tiers and pauses');
   } catch (e) { fail++; console.log(`FAIL bucket-free TRAE GPT: ${e.stack}`); }
 }
@@ -1476,9 +1478,12 @@ for (const [sc, args] of ERRORS) {
     // Losing Sol must not lower the floor for judgment rows, alternate-Sol tiers, high stakes or authorship.
     for (const args of [['analysis'], ['docs'], ['research'], ['design'], ['review', '--author', 'codex'],
       ['analysis', '--stakes', 'high'], ['lookup', '--stakes', 'high'], ['implement-hard', '--impact', 'throwaway']]) {
-      const withSol = r([...args, '--background'], { models: [SOL, GPT55] });
-      const withoutSol = r([...args, '--background']);
-      assert.equal(withoutSol.pick.model, GPT55); assert.equal(withoutSol.pick.effort, withSol.pick.effort, args.join(' '));
+      const hard = ['design', 'implement-hard'].includes(args[0]) || args.includes('high');
+      const candidate = hard ? ASTRA : GPT55;
+      const withSol = r([...args, '--background'], { models: [SOL, candidate] });
+      const withoutSol = r([...args, '--background'], { models: [candidate] });
+      assert.equal(withoutSol.pick.model, candidate); assert.equal(withoutSol.pick.effort, withSol.pick.effort, args.join(' '));
+      if (hard) assert.ok(r([...args, '--background']).deferred, 'hard work cannot use GPT-5.5');
     }
     // A future reset cannot make an old or missing reading current; state-cache checkedAt is not the quota sample.
     const models = [SOL, ASTRA, SOL56, GPT55, TERRA56];
@@ -1488,7 +1493,7 @@ for (const [sc, args] of ERRORS) {
       assert.equal(r(['lookup'], { models, sampledAt, company: true }).pick.account, 'ttadk');
       assert.equal(r(['analysis'], { models, sampledAt, daily: { ...active, [SOL]: bucket(true) } }).pick.model, SOL);
     }
-    assert.equal(r(['analysis', '--background'], { models, sampledAt: now - 29 * 60000 }).pick.model, GPT55);
+    assert.equal(r(['analysis', '--background'], { models, sampledAt: now - 29 * 60000 }).pick.model, TERRA56);
     assert.equal(r(['analysis'], { models, sampledAt: now - 29 * 60000, daily: { ...active, [SOL]: bucket(true) } }).pick.model, SOL56);
     console.log('ok   actual personal approval, one-model/excluded/depleted neighbours, background isolation, company effort floors and quota reading age');
   } catch (e) { fail++; console.log(`FAIL fix-round routing regressions: ${e.stack}`); }

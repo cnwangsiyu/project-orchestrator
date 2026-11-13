@@ -375,7 +375,7 @@ export const traeQuota = (payload, sampledAt = Date.now()) => {
   return { sampledAt, daily, weekly };
 };
 // A TRAE CLI account (codex-worker trae-setup): the company's agent CLI with its own model pool, used after TTADK and
-// before personal quota (user, 2026-11-08). Healthy = the CLI present, logged in, GPT-6.1-Sol listed, the hub sound.
+// before personal quota (user, 2026-11-08). Healthy = the CLI present, logged in, a nonempty catalog, the hub sound.
 const readTrae = (name, prof) => {
   const out = { name, kind: 'trae', home: prof.home, hub: prof.hub, browser: false, chromePlugin: null, models: prof.models ?? Object.keys(prof.modelIds ?? {}), modelIds: prof.modelIds ?? {},
     windows: [], resets: null, healthy: false, reason: null, live: false, active: 0, email: null, search: true, searchLive: true,
@@ -405,8 +405,8 @@ const readTrae = (name, prof) => {
     out.quotaError = [out.quotaError, catalogError].filter(Boolean).join('; ');
     if (!out.models.length) return { ...out, stateUnknown: true, reason: `company account state unknown (${catalogError})` };
   }
-  // Healthy with any model route.mjs can use: GPT-6.1-Sol first, its fallback families (route.mjs ALTS) after it.
-  if (!out.models.some((m) => /^(gpt-6\.1-sol|deepseek-v4\.1-flash|gemini-3\.1-pro|deepseek-v4-pro)/.test(m))) { out.reason = 'TRAE CLI lists neither GPT-6.1-Sol nor a fallback model'; return out; }
+  // A catalog is account health, not task capacity. route.mjs applies the tier/vision/model-fit policy.
+  if (!out.models.length) { out.reason = 'TRAE CLI lists no models'; return out; }
   out.healthy = true;
   // Paused after repeated or hard worker failures (lib/trae-health.mjs): unavailable until the pause ends.
   const pause = readPause(prof.home);

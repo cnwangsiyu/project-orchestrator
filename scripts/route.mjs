@@ -24,8 +24,13 @@ const RR = process.env.ROUTE_RR || path.join(SHARED, 'route-rotation.txt'); // l
 const C = (model, effort) => ({ vendor: 'claude', model, effort });
 const X = (model, effort) => ({ vendor: 'codex', model, effort });
 const SOL = 'gpt-6.1-sol', ASTRA = 'gpt-6-astra', TERRA = 'gpt-6.1-terra', LUNA = 'gpt-6-luna';
-// User-approved TRAE benchmark 2026-11-13; keep both orders here for the harder benchmark round.
-const TRAE_GPT_ORDER = Object.freeze({ depleted: ['gpt-5.6-sol', ASTRA], bucketFree: ['gpt-5.5', 'gpt-5.6-terra'] });
+// User-approved difficulty policy, 2026-11-13. Astra's bucket is reserved for hard work.
+const COMPANY_TIERS = Object.freeze({
+  hard: [SOL, ASTRA],
+  normal: [SOL, 'gpt-5.6-sol', 'gpt-5.6-terra', 'deepseek-v4.1-flash'],
+  light: ['gpt-5.6-terra', 'gpt-5.5', 'deepseek-v4.1-flash'],
+});
+const TRAE_BUCKETED = new Set([SOL, ASTRA, 'gpt-5.6-sol']);
 const KIMI = 'kimi-k3'; // TTADK only: a different model family, best planted-bug recall (2026-11-07 tests)
 // Fallback models on a company account, in order, for when its GPT-6.1-Sol is unavailable (paused, restricted, excluded)
 // and as a different-family step after Sol has fallen short (user, 2026-11-10: "某个模型失败的话还有的备选"; keep
@@ -40,7 +45,7 @@ const KIMI = 'kimi-k3'; // TTADK only: a different model family, best planted-bu
 // (convert those pages to images and route them as image-read); its 2026-11-10 general benchmark (0.87, broken output
 // formats) keeps it out of every other fallback chain.
 const ALTS = [{ model: 'deepseek-v4.1-flash', effort: 'high' }, { model: 'gemini-3.1-pro-preview', effort: 'high', vision: true },
-  { model: 'deepseek-v4-pro', effort: 'high' }, { model: 'seed-evolving', effort: 'medium', vision: true, visionOnly: true }];
+  { model: 'seed-evolving', effort: 'medium', vision: true, visionOnly: true }];
 const isAlt = (x) => x?.vendor === 'codex' && ALTS.some((a) => a.model === x.model);
 
 // The routing table (sources and rationale: references/model-routing.md).
@@ -145,6 +150,9 @@ const { claude: QC, codex: QX } = st;
 const noRedeem = !!opts['no-redeem'];
 const security = !!opts.security;
 const background = !!opts.background;
+const tier = ['implement-hard', 'debug', 'science', 'review-high', 'design'].includes(cat) || stakes === 'high'
+  || (failures >= 1 && CODE.includes(cat)) ? 'hard'
+  : ['lookup', 'extract', 'draft'].includes(cat) || stakes === 'low' || background ? 'light' : 'normal';
 const laneEligible = T.kind !== 'browser' && T.kind !== 'claudeOnly'
   && !['build-run', 'image-gen', 'image-read'].includes(cat) && !opts['device-lease'] && !opts['shared-lock'];
 // Background image reading can wait on a vision model; opportunistic company balancing still excludes images.
@@ -153,9 +161,14 @@ const excluded = new Set((typeof opts['exclude-account'] === 'string' ? opts['ex
 const exModels = new Set((typeof opts['exclude-model'] === 'string' ? opts['exclude-model'] : '').split(',').map((x) => x.trim().toLowerCase()).filter(Boolean));
 const modelExcluded = (model, account = null) => exModels.has(model) || exModels.has(poolOf(model))
   || (security && account?.kind === 'trae' && poolOf(model) === 'gpt');
-const cheapTraeRow = ['lookup', 'extract', 'draft'].includes(cat) && laneEligible;
+const deepseekUnfit = cat === 'build-run' || cat === 'review-high'
+  || (['review', 'second-opinion'].includes(cat) && (impact === 'release' || stakes === 'high' || security));
+const cheapTraeRow = tier === 'light' && laneEligible;
+const tierModels = (account) => account?.kind === 'trae' ? (cat === 'image-read' ? [SOL, ASTRA] : COMPANY_TIERS[tier])
+  .filter((id) => account.models.includes(id) && !modelExcluded(id, account)
+    && !(deepseekUnfit && poolOf(id) === 'deepseek')) : [];
 const bucketFreeModels = (account) => account?.kind === 'trae' && hasTraeDailyQuota(account.quota) && cat !== 'image-read'
-  ? TRAE_GPT_ORDER.bucketFree.filter((id) => account.models.includes(id) && !modelExcluded(id, account) && !Object.hasOwn(account.quota.daily, id)) : [];
+  ? tierModels(account).filter((id) => !TRAE_BUCKETED.has(id) && !Object.hasOwn(account.quota.daily, id)) : [];
 // ChatGPT accounts (the quota-managed ones): out when every open account is spent/excluded and no card is due.
 const chatgptOpen = (QX.open ?? []).filter((r) => !excluded.has(r.a.name));
 const chatgptOut = QX.out || (noRedeem && !QX.pick && !!QX.redeem)
@@ -164,12 +177,9 @@ const chatgptOut = QX.out || (noRedeem && !QX.pick && !!QX.redeem)
 // TTADK (company gateway): preferred for Codex work whenever it is healthy and not excluded (user, 2026-11-07). When it
 // isn't (its daily quota used up, down, or excluded), TRAE CLI — the second company account — takes the same work under
 // the same rules, before personal quota (user, 2026-11-08). TT is whichever company account takes Codex work now.
-const deepseekUnfit = cat === 'build-run' || cat === 'review-high'
-  || (['review', 'second-opinion'].includes(cat) && (impact === 'release' || stakes === 'high' || security));
 const taskFits = (a) => T.kind !== 'claudeOnly' && cat !== 'image-gen'
   && !(cat === 'research' && !a.search) && !(T.kind === 'browser' && !a.browser);
-const routingModelFits = (model, account) => model === SOL || (backgroundEligible && account.kind === 'trae' && model === ASTRA)
-  || (backgroundEligible && bucketFreeModels(account).includes(model)) || ALTS.some((a) => a.model === model
+const routingModelFits = (model, account) => model === SOL || tierModels(account).includes(model) || ALTS.some((a) => a.model === model
   && (cat === 'image-read' ? a.vision : !a.visionOnly) && !(deepseekUnfit && poolOf(model) === 'deepseek'));
 const companyOrder = background && backgroundEligible ? [QX.trae, QX.ttadk] : [QX.ttadk, QX.trae];
 const TT = companyOrder.find((a) => a?.usable && !excluded.has(a.name)
@@ -191,7 +201,15 @@ const browserViaCodex = T.kind === 'browser' && (ttBrowser || chatgptBrowser.len
 const ttAlts = ALTS.filter((a) => ttHas(a.model) && (cat === 'image-read' ? a.vision : !a.visionOnly)
   && !(deepseekUnfit && poolOf(a.model) === 'deepseek')).map((a) => X(a.model, a.effort));
 const ttBucketFree = backgroundLane || cheapTraeRow ? bucketFreeModels(TT) : [];
-const ttModelsOK = ttHas(SOL) || ttAlts.length > 0 || ttBucketFree.length > 0 || (backgroundLane && ttHas(ASTRA));
+const ttTierModels = tierModels(TT);
+const ttModelsOK = ttHas(SOL) || ttAlts.length > 0 || ttTierModels.length > 0;
+const companyPick = (id, effort) => X(id, ALTS.find((a) => a.model === id)?.effort ?? effort);
+const priorityAvailable = (id, account) => {
+  if (!hasTraeDailyQuota(account.quota)) return false;
+  if (!Object.hasOwn(account.quota.daily, id)) return !TRAE_BUCKETED.has(id);
+  const q = account.quota.daily[id];
+  return q?.depleted === false && (q.remaining > 0 || (q.used != null && q.limit > q.used));
+};
 // A fallback of a different family from model x (a reviewer or a retry that doesn't share x's blind spots).
 const altOtherThan = (x) => ttAlts.find((a) => poolOf(a.model) !== poolOf(x?.model)) ?? null;
 const codexOut = chatgptOut && !ttModelsOK; // An account with only excluded or unsupported models can't take work.
@@ -251,8 +269,16 @@ if (ttCapable && !ttHas(SOL)) {
   // the fallback models in order, then the row's own Claude steps. Company quota, so no question; personal quota (the
   // Claude steps) only after these have fallen short.
   const gone = modelExcluded(SOL) ? `excluded for this task (--exclude-model ${[...exModels].join(',')})` : modelExcluded(SOL, TT) ? 'excluded for this security task (--security)' : TT.poolPauses?.gpt ? `paused: ${TT.poolPauses.gpt.reason}` : TT.modelPauses?.[SOL] ? `unavailable: ${TT.modelPauses[SOL].reason}` : 'not listed';
-  const fallbacks = [...ttBucketFree.map((id) => X(id, companyEffort)), ...ttAlts,
-    ...(backgroundLane && ttHas(ASTRA) ? [X(ASTRA, maxE('high', companyEffort))] : [])];
+  const ids = [...new Set([...ttTierModels, ...ttAlts.map((a) => a.model)])];
+  const available = ids.filter((id) => !TT.quota?.daily?.[id]?.depleted);
+  const fallbacks = (available.length ? available : ids).map((id) => companyPick(id, companyEffort));
+  if (TT.kind === 'trae' && tier === 'hard' && cat !== 'image-read' && fallbacks[0]?.model === ASTRA) {
+    // A retry must not skip a newly eligible Astra after Sol/normal-tier GPT work became unavailable.
+    const rungs = [fallbacks[0]];
+    const cap = ['lookup', 'extract', 'draft', 'browser', 'computer-use'].includes(cat) ? 'xhigh' : 'max';
+    while (ei(rungs.at(-1).effort) < ei(cap)) rungs.push(notch(rungs.at(-1), +1, cap));
+    fallbacks.splice(0, 1, ...rungs);
+  }
   why.push(`GPT-6.1-Sol on ${TT.name} ${gone} → its fallback models: ${fallbacks.map(label).join(' → ')}`);
   base = [...fallbacks, ...base.filter((x) => x.vendor === 'claude')];
 }
@@ -357,19 +383,32 @@ const onTTADK = (x) => x?.vendor === 'codex' && !!TT && taskFits(TT) && (ttHas(x
 const backgroundChoice = (x, log) => {
   const daily = TT.quota?.daily;
   const known = hasTraeDailyQuota(TT.quota);
-  if (known) {
-    const freeGPT = x.model === ASTRA ? null : ttBucketFree[0];
-    if (freeGPT) {
-      log(`background: ${freeGPT} has no daily bucket → no high-priority quota spent, no low-priority lane (step 1)`);
-      return freeGPT === x.model ? x : X(freeGPT, x.effort);
+  if (cat !== 'image-read') {
+    // Preserve quality-ladder Astra/fallback rungs; background never downgrades a hard GPT to a cheap one.
+    const ids = x.model === ASTRA || (tier === 'hard' && x.model !== SOL) ? [x.model]
+      : tier === 'hard' ? ttTierModels : [...ttBucketFree, ...ttTierModels.filter((id) => daily?.[id]?.depleted)];
+    const id = known ? ids[0] : null;
+    if (id) {
+      const free = !TRAE_BUCKETED.has(id) && !Object.hasOwn(daily, id), depleted = daily[id]?.depleted;
+      const step = free ? poolOf(id) === 'gpt' ? 1 : 2 : depleted ? 1 : 3;
+      log(`background: ${id} ${free ? 'has no daily bucket → no high-priority quota spent, no low-priority lane' : depleted ? 'bucket depleted → low-priority lane, no high-priority quota spent' : 'normal TRAE pick — spends high-priority quota when available'} (step ${step})`);
+      return id === x.model ? x : companyPick(id, x.effort);
     }
-    // Sol/Astra serve the row's GPT tier. An Astra escalation must not fall back down to Sol or a cheaper family.
+    if (known && daily[x.model]?.depleted) {
+      log(`background: ${x.model} bucket depleted → low-priority lane, no high-priority quota spent (step 1)`);
+      return x;
+    }
+    log(`background: normal TRAE pick ${label(x)} — ${known ? 'no eligible tier preference; spends high-priority quota when available' : 'no daily quota info; may spend high-priority quota'} (step 3); TRAE decides request priority`);
+    return x;
+  }
+  if (known) {
+    // Image-reading retains its independent vision order, never the untested cheap GPTs.
     const depleted = (x.model === ASTRA ? [ASTRA] : [SOL, ASTRA]).find((id) => ttHas(id) && daily[id]?.depleted === true);
     if (depleted) {
       log(`background: ${depleted === SOL ? 'GPT-6.1-Sol' : 'GPT-6-Astra'} bucket depleted → low-priority lane, no high-priority quota spent (step 1)`);
       return depleted === x.model ? x : X(depleted, x.effort);
     }
-    const unbucketed = x.model === ASTRA ? null : (cat === 'image-read' ? ['seed-evolving'] : ['deepseek-v4.1-flash', 'deepseek-v4-pro'])
+    const unbucketed = x.model === ASTRA ? null : ['seed-evolving']
       .map((id) => ttAlts.find((a) => a.model === id)).find((a) => a && !Object.hasOwn(daily, a.model));
     if (unbucketed) {
       log(`background: ${unbucketed.model} has no daily bucket → no high-priority quota spent (step 2)`);
@@ -386,16 +425,14 @@ const quotaChoice = (x, log = (r) => why.push(r)) => {
   if (backgroundLane) return backgroundChoice(x, log);
   if (cheapTraeRow && x.model !== ASTRA && ttBucketFree[0]) {
     const id = ttBucketFree[0];
-    log(`cheap TRAE row: ${id} has no daily bucket → no high-priority quota spent, no low-priority lane`);
-    return id === x.model ? x : X(id, x.effort);
+    log(`light TRAE tier: ${id} has no daily bucket → no high-priority quota spent, no low-priority lane`);
+    return id === x.model ? x : companyPick(id, x.effort);
   }
   if (!TT.quota?.daily?.[x.model]?.depleted) return x;
-  const gpt = TRAE_GPT_ORDER.depleted.find((model) => {
-    const q = TT.quota.daily[model];
-    return model !== x.model && ttHas(model) && (cat !== 'image-read' || model === ASTRA) && q?.depleted === false
-      && (q.remaining > 0 || (q.used != null && q.limit > q.used));
-  });
-  const sub = gpt ? X(gpt, x.effort) : ttAlts.find((a) => a.model !== x.model && !TT.quota.daily[a.model]?.depleted);
+  const candidates = x.model === ASTRA ? [] : ttTierModels;
+  const id = candidates.find((id) => id !== x.model && priorityAvailable(id, TT));
+  const gpt = id && poolOf(id) === 'gpt';
+  const sub = id ? companyPick(id, x.effort) : ttAlts.find((a) => a.model !== x.model && !TT.quota.daily[a.model]?.depleted);
   log(`TRAE ${x.model}'s daily high-priority bucket is depleted → ${sub ? `${label(sub)} (${gpt ? 'comparable GPT with quota left' : 'eligible company fallback'})` : 'keep the queued model: no eligible alternative with quota left'}; parallel task concurrency is unchanged`);
   return sub ?? x;
 };
@@ -426,13 +463,12 @@ if (m) {
     why.push(`same ${label(m)} as the previous attempt: a quota notch already raised that one, and the quota rules leave no stronger step`);
     notes.push(`this retry is not stronger than the one that fell short: its only lever is the brief — put the failure's concrete findings (review items, failing test, symptom) in it`);
   }
-  // Code a fallback model writes for a live service gets the routine review too (free on the company account): the
-  // benchmark behind ALTS is 12 runs per model, too few to trust them unchecked where a mistake reaches users.
-  if (isAlt(m) && CODE.includes(cat) && impact === 'service' && !reviewKind) { reviewKind = 'review'; why.push(`${m.model} is a fallback model: its service code gets a review`); }
-  // Cheap TRAE work prefers bucket-free GPTs; other transfers preserve the rung. Second opinions stay on their account.
+  // Transfers follow the tier while preserving effort. Second opinions stay on their account.
   if (!background && onTTADK(m) && TT === QX.ttadk && QX.trae) {
-    const free = cheapTraeRow && m.model !== ASTRA ? bucketFreeModels(QX.trae) : [];
-    for (const model of [...free, m.model]) {
+    const free = m.model !== ASTRA ? bucketFreeModels(QX.trae) : [];
+    const candidates = m.model === SOL ? [...new Set([...(cheapTraeRow ? free : []), ...tierModels(QX.trae), m.model])]
+      : cheapTraeRow ? [...free, m.model] : [m.model];
+    for (const model of candidates) {
       balance = balanceFactors({ ttadk: QX.ttadk, trae: QX.trae, model, category: cat, stakes, impact, allowBucketFree: free.includes(model) });
       const fits = QX.trae.usable && !excluded.has(QX.trae.name) && QX.trae.models.includes(model)
         && !modelExcluded(model, QX.trae) && laneEligible;
@@ -449,6 +485,8 @@ if (m) {
       break;
     }
   }
+  // Check the actual pick, including a balancing substitution, before applying the service-code review guard.
+  if (isAlt(m) && CODE.includes(cat) && impact === 'service' && !reviewKind) { reviewKind = 'review'; why.push(`${m.model} is a fallback model: its service code gets a review`); }
   // ---- 3. gates ----
   if (m.model === 'fable') needsOK.push('Fable (2x Opus per token, and its own weekly cap, which the orchestrators run on)');
   // Astra on a company account spends company quota: no OK. On a ChatGPT (personal) account it does (5x Sol usage).
@@ -579,6 +617,7 @@ else if (m && cat !== 'review' && cat !== 'review-high' && cat !== 'second-opini
 if (m) notes.push('brief: include the credential clause — never read, copy or load any login session or credential file (cookies, SSO/session tokens, CLI auth files such as bytedcli\'s, keychain items, .netrc, API keys), and never inject a session into a browser or tool to get past a login; wherever a login or authorization is needed, stop and report BLOCKED with what needs signing in');
 if (security) notes.push('brief: describe defensive intent and ask for findings with impact and fix; avoid requesting step-by-step exploit code');
 if (m && ['implement', 'implement-hard', 'debug'].includes(cat)) notes.push('DeepSeek: read-only analysis and simple edits only; not full-package builds, auth/storage reviews or acceptance — re-route with --exclude-model deepseek if the brief needs those');
+if (m?.model === 'deepseek-v4.1-flash' || second?.model === 'deepseek-v4.1-flash') notes.push("DeepSeek-V4.1-Flash can't emit one very large file in a single turn (output limit) — not for tasks that generate a large file in one go; split the work or exclude deepseek");
 // user-approved 2026-11-11 retro: W291-R0 review misses and ppe2a's unnecessary rollback.
 if (isAlt(m) && ['review', 'review-high'].includes(cat)) notes.push('release/high-stakes acceptance also requires an independent other-family GPT/Claude reviewer and the failure probes in references/review-rubric.md; if unavailable, report BLOCKED');
 if (m && cat === 'build-run') notes.push('deploy/release brief: pin baseline/control probes, health thresholds, sample intervals and observation window, rollback triggers and exact prior artifact/config restore steps before acting; a fallback model follows these only — unexpected evidence needs stronger-model judgment, stop and report rather than invent a rollback condition');
@@ -642,7 +681,7 @@ if (security && m && ((ttCapable && TT.kind === 'trae') || (companyOut && QX.tra
   && QX.trae.models.some((x) => poolOf(x) === 'gpt' && !modelExcluded(x)))
   why.push(`security task: TRAE's GPT excluded (OpenAI policy restricted it after exploit-style reviews, 2026-11-10/11) → ${label(m)}${ttadkRun ? ` on ${TT.name}` : m.vendor === 'codex' && pickAcct ? ` on ${pickAcct.a.name}` : ''}`);
 const out = {
-  category: cat, stakes, failures, security, background, deferred,
+  category: cat, stakes, failures, security, background, tier, deferred,
   pick: m ? { ...m, ...launch(m), sandbox: m.vendor === 'codex' ? sandbox : null } : null,
   secondOpinion: second ? { ...second, ...launch(second, second === T.second ? T.shape : 'worker', secondAcct) } : null,
   needsUserOK: needsOK, tellUser: tell, why, notes, redeemFirst, balance, quota: leanLines(st, data),
@@ -650,7 +689,7 @@ const out = {
 // Every real routing decision is logged for the nightly review (--dry or ROUTE_LOG=0 to skip, e.g. for experiments).
 if (!opts.dry && process.env.ROUTE_LOG !== '0') {
   const rec = { t: Date.now(), project: typeof opts.project === 'string' ? opts.project : null, name: typeof opts.name === 'string' ? opts.name : null, category: cat, stakes, failures, impact, review: reviewKind, excluded: [...excluded], ttadk: !!ttadkRun, company: ttadkRun ? runCompany.name : null, balance,
-    autoCheck: !!opts['auto-check'], noRedeem, security, background, deferred, pick: m ? { vendor: m.vendor, model: m.model, effort: m.effort, account: out.pick?.account ?? null } : null,
+    autoCheck: !!opts['auto-check'], noRedeem, security, background, tier, deferred, pick: m ? { vendor: m.vendor, model: m.model, effort: m.effort, account: out.pick?.account ?? null } : null,
     second: second ? { vendor: second.vendor, model: second.model, effort: second.effort } : null, why, needsOK, tell,
     quota: { claude: QC.status, codexOut: QX.out, underused: QX.underused, frontLoad: QX.frontLoad, overspending: QX.overspending, redeemDue: !!QX.redeem } };
   try { fs.appendFileSync(ROUTE_LOG, JSON.stringify(rec) + '\n'); } catch {}

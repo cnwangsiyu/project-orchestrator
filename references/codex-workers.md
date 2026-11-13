@@ -509,7 +509,8 @@ facts behind it (2026-11-03):
   computer-use strength is not what the Codex computer-use plugin relies on); `gpt-6-luna` is fast and cheap, for
   extraction, classification, summaries and images, and should not write code. Don't pick `gpt-6-sol` or the
   `gpt-5.6-*` models on personal ChatGPT accounts: they're older at the same or higher cost. TRAE's approved company-quota
-  choices are separate: 5.6-Sol for depleted-bucket substitution, bucket-free 5.5 then 5.6-Terra for cheap/background work
+  choices are separate: hard work uses Sol then Astra; normal work uses Sol, 5.6-Sol, 5.6-Terra then Flash;
+  light/background work prefers bucket-free 5.6-Terra, 5.5 then Flash unless a hard rule applies
   (2026-11-13; references/model-routing.md). Same-task rework may reuse the author thread only under SKILL.md's
   "Rework thread choice" rule; record `outcome.mjs --actual` and the reason in the ledger.
 

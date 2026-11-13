@@ -335,10 +335,11 @@ effort, Codex account and launch command from
     implementation that reads attack-style findings; see "Security follows the worker's context" above. Every TRAE GPT
     here is an OpenAI model under the same vendor policy as 6.1-Sol (restrictions on 2026-11-10/11), not a policy workaround;
   - `--background` only when nobody is waiting and there is no deadline or near-term dependency: nightly cleanups,
-    doc refreshes, exploratory analysis and benchmark batches. On TRAE, prefer bucket-free GPT-5.5, then GPT-5.6-Terra
-    (no daily high-priority spend and no low-priority lane), then an eligible depleted daily bucket at the row's tier
-    (Sol, then Astra), then other models without a daily bucket (DeepSeek-V4.1-Flash, then DeepSeek-V4-Pro;
-    Seed-Evolving only for `image-read`), then the normal TRAE pick. No quota information keeps the normal pick.
+    doc refreshes, exploratory analysis and benchmark batches. On TRAE, ordinary background work is light: prefer
+    bucket-free GPT-5.6-Terra, then GPT-5.5, then DeepSeek-V4.1-Flash (no daily high-priority spend and no low-priority
+    lane). Hard categories, high stakes and failed CODE tasks remain hard: Sol, then Astra only if Sol is unusable,
+    never weaker GPTs. Image reading keeps depleted Sol/Astra, then bucket-free Seed-Evolving, then its normal vision
+    pick. No quota information keeps the normal pick. See the approved tier table in references/model-routing.md.
     Daily snapshots need a `sampledAt` reading no more than 30 minutes old; missing/future/stale readings are unknown,
     even with a future bucket reset. Cache reads preserve the original sample time.
     `why` identifies the step and whether high-priority quota is spent; an Astra escalation keeps its tier.
@@ -351,7 +352,7 @@ effort, Codex account and launch command from
     Background work never uses personal quota: if no company model fits, tell the user it is queued for later.
     Routes record `background: true`; the nightly `background` summary counts tasks and recorded `--minutes`
     wall-clock time, including queues. Cheap rows (`lookup`, `extract`, `draft`) routed or balanced to TRAE also prefer
-    GPT-5.5 then GPT-5.6-Terra under known quota telemetry; congestion still blocks opportunistic balancing.
+    GPT-5.6-Terra, then GPT-5.5, then Flash under known quota telemetry; congestion still blocks opportunistic balancing.
     These two models' vision is untested, so neither is used for `image-read`.
   - always `--project <slug>`: every decision is logged to `_shared/route-log.jsonl` for the
     nightly review, which needs the project (use `--dry` only to try things out).
@@ -374,14 +375,20 @@ effort, Codex account and launch command from
     auth pauses the account); record traecli exec failures with `codex-worker.mjs --account trae note-failure
     --model <model>`, so work moves on instead of failing task by task.
   - Fallback models (user, 2026-11-10): when the company account's GPT is out, route.mjs uses DeepSeek-V4.1-Flash,
-    then Gemini-3.1-Pro, then DeepSeek-V4-Pro, before any personal quota; when Sol falls short, a different family
+    then Gemini-3.1-Pro if listed (gone from TRAE on 2026-11-13), before any personal quota; DeepSeek-V4-Pro is removed.
+    When Sol falls short, a different family
     runs before Sol max. Apply the model-fit exclusions and daily-quota choices in references/model-routing.md.
     Their service code gets a review by another family. An infrastructure miss (timeout, queue-full rejection,
     restricted) on one task: re-route with `--exclude-model <model or family>`, same `--failures`
     (references/model-routing.md, "Fallback models on the company account").
-  - TRAE daily-bucket substitution (user-approved 2026-11-13 benchmark): depleted GPT-6.1-Sol prefers GPT-5.6-Sol
-    at the same effort with confirmed quota left, then Astra, then eligible existing fallbacks. GPT-5.6-Sol is no longer
-    limited to lookup/extract/draft. Unknown quota changes nothing; exclusions and vision rules still apply.
+  - Difficulty-tiered TRAE substitutions (user-approved 2026-11-13): hard (`implement-hard`, `debug`, `science`,
+    `review-high`, `design`, or high stakes, or `--failures >= 1` on CODE rows) uses Sol → Astra → eligible existing
+    fallbacks only when both are unusable; normal uses Sol → 5.6-Sol → 5.6-Terra → Flash; light (lookup/extract/draft,
+    low stakes or `--background`, unless hard) uses 5.6-Terra → 5.5 → Flash. Astra is reserved for hard substitutions;
+    hard never substitutes 5.6-Sol/Terra/5.5. The same table governs balancing/background choices. Unknown quota changes
+    nothing; exclusions and vision rules still apply. TTADK retains its own model picks/catalog.
+    DeepSeek-V4.1-Flash can't emit one very large file in a single turn (output limit); not for generating a large file
+    in one go: split the work or exclude deepseek.
     GPT-5.6-Luna is not used (slowest, about 3x tokens). Evidence and bucket facts: references/model-routing.md.
   - TTADK first (user, 2026-11-07): when the TTADK company gateway is healthy, every task its
     GPT-6.1 Sol can handle runs there first, Claude-strength rows included. Exceptions are

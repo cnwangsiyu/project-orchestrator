@@ -36,6 +36,7 @@ const stub = (bin, args) => {
   if (args[0] === 'models' && args.includes('--json')) {
     if (fault === 'timeouts') throw Object.assign(Error('fixture timeout'), { code: 'ETIMEDOUT' });
     if (fault === 'malformed') return 'truncated catalog JSON';
+    if (bin === traeBin && fault.startsWith('catalog:')) return JSON.stringify({ models: [{ id: fault.slice(8) }] });
   }
   if (args[0] === 'models') return args.includes('--json') ? JSON.stringify({ models: [{ id: SOL }] })
     : JSON.stringify([{ id: SOL, availableAgents: ['codex'] }]);
@@ -132,6 +133,15 @@ try {
   fs.writeFileSync(profiles, JSON.stringify(registry));
   assert.equal(analyze(readState()).codex.registryError, null, 'a repaired registry clears the unknown marker');
   console.log('ok   corrupt registry fails closed, is never overwritten, and can recover');
+
+  for (const model of ['gpt-5.6-terra', 'gpt-5.5', 'gpt-6-astra', 'deepseek-v4-pro']) {
+    fault = `catalog:${model}`;
+    const d = readState({ fresh: true });
+    assert.equal(analyze(d).codex.trae.usable, true, 'catalog health must not enforce task eligibility');
+    assert.deepEqual(d.codexAccounts.find((a) => a.kind === 'trae').models, [model]);
+  }
+  fault = '';
+  console.log('ok   live-read catalogs with only a tier model remain healthy; routing owns model eligibility');
 
   // Real router and quota entry points, with all provider I/O stubbed before they import state.mjs.
   const preload = path.join(tmp, 'preload.mjs');

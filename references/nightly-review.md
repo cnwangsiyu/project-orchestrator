@@ -196,7 +196,7 @@ Look for evidence in the data, not hunches. Typical findings:
 ### Fallback models (user, 2026-11-10)
 
 `outcomes.fallbackModels` in review-data: how often the company account's fallback models (DeepSeek-V4.1-Flash,
-Gemini-3.1-Pro, DeepSeek-V4-Pro; references/model-routing.md, "Fallback models on the company account") ran, why
+Gemini-3.1-Pro when listed, vision-only Seed-Evolving; references/model-routing.md, "Fallback models on the company account") ran, why
 (`gpt-out` or `after-sol-fell-short`), how their tasks ended, and the extra reviews of their service code. Read it with
 `--hours 168` too, since a day holds few. Reorder existing eligible fallbacks directly when the evidence is clear,
 under the tuning bounds below. Changes to quality gates or removal of a family still need a decision card, for example:
@@ -205,7 +205,10 @@ under the tuning bounds below. Changes to quality gates or removal of a family s
 - a fallback whose tasks rework or fail clearly more than Sol's (byModel, code rework) → moving it down can follow
   the tuning bounds; dropping its family from ALTS needs a card. One that does as well as Sol may move earlier;
 - fallback steps after Sol fell short that rarely rescue a task → drop them from the escalation (faster to Claude).
-Say how many tasks the evidence rests on; the benchmark behind ALTS was 12 runs per model.
+Say how many tasks the evidence rests on; the benchmark behind ALTS was 12 runs per model. DeepSeek-V4-Pro was
+removed on 2026-11-13; historical outcome records remain valid. The difficulty-tier table may be reordered within
+tiers by outcomes under the approved 2026-11-13 policy, never admitting weaker GPTs to hard work or using Astra for
+normal/light substitutions. Our mid-size benchmarks do not separate GPT quality; read them alongside public evidence.
 
 ### Tuning the company-account policies
 
