@@ -259,7 +259,7 @@ const run = (sc, args0) => {
   const cache = path.join(tmp, 'q.json');
   fs.writeFileSync(cache, JSON.stringify({ checkedAt: now, claude: S[sc].claude, codexAccounts: S[sc].codex, errors: {}, history: {} }));
   const env = { ...process.env, QUOTA_CACHE: cache, CODEX_ACCOUNTS: path.join(tmp, 'none.json'), ROUTE_LOG: '0', QUOTA_LOG: '0', TRAE_PROBE: '0', ROUTE_RR: path.join(tmp, 'rr.txt') };
-  return execFileSync(process.execPath, [ROUTE, ...args, '--json'], { encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'] });
+  return execFileSync(process.execPath, [ROUTE, ...args, '--mode', 'default', '--json'], { encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'] });
 };
 // Optional 4th field: a substring the notes must contain ('!text': must not contain).
 for (const [sc, args, want, note] of CASES) {
@@ -653,6 +653,47 @@ for (const [sc, args] of ERRORS) {
   const bad = cases.map(([got, want], i) => (got === want ? null : `${i} (${got})`)).filter((i) => i !== null);
   if (bad.length) fail++;
   console.log(`${bad.length ? 'FAIL' : 'ok  '} fallback models     ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
+  // A Codex author's review must use eligible company fallbacks before personal quota, even when Claude is over
+  // budget. Seed remains listed when all eligible review families are excluded: an account alone isn't capacity.
+  S.traeReviewFull = { ...S.traeFull, claude: cl(93, 30) };
+  S.traeReviewGptOut = { ...S.traeGptOut, claude: cl(93, 30) };
+  S.traeReviewChatOut = { ...S.traeReviewFull, codex: [acc('main', 99, 120), ...S.traeFull.codex.slice(1)] };
+  for (const [args, claudePick] of [
+    [['review', '--author', 'codex'], 'sonnet high @undefined'],
+    [['review-high', '--author', 'codex'], 'opus xhigh @undefined'],
+    [['second-opinion', '--against', 'codex'], 'opus high @undefined'],
+  ]) {
+    const personalPick = args[0] === 'second-opinion' ? claudePick : 'gpt-6.1-sol xhigh @main';
+    for (const [sc, flags, want, gate] of [
+      ['traeReviewFull', ['--security', '--exclude-model', 'deepseek', '--dry'], 'gemini-3.1-pro-preview high @trae', false],
+      ['traeFull', ['--security', '--exclude-model', 'deepseek'], 'gemini-3.1-pro-preview high @trae', false],
+      ['traeReviewGptOut', ['--exclude-model', 'deepseek'], 'gemini-3.1-pro-preview high @trae', false],
+      ['traeReviewFull', ['--exclude-model', 'gpt,deepseek'], 'gemini-3.1-pro-preview high @trae', false],
+      ['traeReviewGptOut', [], 'deepseek-v4.1-flash high @trae', false],
+      ['traeFull', ['--security', '--failures', '2'], 'deepseek-v4-pro high @trae', false],
+      ['traeReviewFull', ['--security', '--exclude-model', 'deepseek,gemini'], personalPick, true],
+      ['traeReviewFull', ['--security', '--exclude-model', 'deepseek,gemini', '--urgent'], personalPick, false],
+      ['traeReviewGptOut', ['--exclude-model', 'deepseek,gemini'], personalPick, true],
+      ['traeReviewGptOut', ['--exclude-model', 'deepseek,gemini', '--urgent'], personalPick, false],
+      ['traeReviewFull', ['--exclude-model', 'gpt,deepseek,gemini'], claudePick, true],
+      ['traeReviewChatOut', ['--security', '--exclude-model', 'deepseek,gemini'], claudePick, true],
+      ['traeReviewFull', [], 'gpt-6.1-sol xhigh @trae', false],
+      ['traeFull', [], args[0] === 'review' ? 'gpt-6.1-sol xhigh @trae' : claudePick, false],
+      ['ttFresh', ['--security', '--exclude-model', 'deepseek'], args[0] === 'review' ? 'gpt-6.1-sol xhigh @ttadk' : claudePick, false],
+    ]) {
+      const routeArgs = [...args, ...flags];
+      const result = o(sc, routeArgs);
+      const got = result.deferred ? 'DEFER' : `${result.pick.model} ${result.pick.effort} @${result.pick.account}`;
+      const gotGate = result.needsUserOK.some((n) => /^personal quota:/.test(n));
+      const checkFreeSecond = args[0] === 'review' && want === 'gemini-3.1-pro-preview high @trae';
+      const freeSecond = !checkFreeSecond
+        || (result.secondOpinion?.account === 'trae' && result.secondOpinion.model === 'gemini-3.1-pro-preview'
+          && result.notes.some((n) => /same model family; no other eligible company family/.test(n)));
+      const ok = got === want && gotGate === gate && freeSecond;
+      if (!ok) fail++;
+      console.log(`${ok ? 'ok  ' : 'FAIL'} ${sc.padEnd(19)} ${routeArgs.join(' ')} (review pick/gate) ${ok ? `${got}, personal quota: ${gotGate}` : `want "${want}" / ${gate}, got "${got}" / ${gotGate}${checkFreeSecond && !freeSecond ? ' (extra reviewer must stay on the eligible company family)' : ''}`}`);
+    }
+  }
 }
 // Recovery probes (user, 2026-11-12): vendor restrictions wait for the next UTC midnight, including failed probes;
 // other hard failures keep 30-minute probes. A family stays out until a probe succeeds; transient pauses just end.

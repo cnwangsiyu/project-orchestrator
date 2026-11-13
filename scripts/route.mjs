@@ -111,6 +111,7 @@ if (cat === 'second-opinion' && !['claude', 'codex'].includes(opts.against)) die
 // Claude first, so the required review is not the same model checking itself.
 if (opts.author !== undefined && !['claude', 'codex'].includes(opts.author)) die(`--author takes claude or codex, not ${opts.author}`);
 const authorCodex = ['review', 'review-high'].includes(cat) && opts.author === 'codex';
+const claudeReviewFirst = (authorCodex && cat === 'review-high') || (cat === 'second-opinion' && opts.against === 'codex');
 // A routine review of Codex-written code runs on TTADK when it is there: a fresh Sol xhigh reviewer plus a second one
 // with a different focus, both free (user, 2026-11-07). High-stakes review keeps Claude first.
 const writes = opts['read-only'] ? false : opts.writes ? true : T.writes;
@@ -157,9 +158,10 @@ const chatgptBrowser = chatgptOpen.filter((r) => r.a.browser);
 const browserViaCodex = T.kind === 'browser' && (ttBrowser || chatgptBrowser.length > 0);
 // The fallback models the company account can run for this task, best first (ALTS).
 const ttAlts = ALTS.filter((a) => ttHas(a.model) && (cat !== 'image-read' || a.vision)).map((a) => X(a.model, a.effort));
+const ttModelsOK = ttHas(SOL) || ttAlts.length > 0;
 // A fallback of a different family from model x (a reviewer or a retry that doesn't share x's blind spots).
 const altOtherThan = (x) => ttAlts.find((a) => poolOf(a.model) !== poolOf(x?.model)) ?? null;
-const codexOut = chatgptOut && !TT; // Codex is out only when neither TTADK nor a ChatGPT account can take work
+const codexOut = chatgptOut && !ttModelsOK; // An account with only excluded or unsupported models can't take work.
 const why = [], needsOK = [], tell = [], notes = [];
 const claudeAllowed = (kind) => {
   if (QC.throttledUntil) return false; // a full 5h window: nothing new on Claude until it resets
@@ -168,7 +170,7 @@ const claudeAllowed = (kind) => {
   if (QC.status === 'near') return T.keepNear || stakes === 'high';
   return false; // over or unknown
 };
-const allowed = (x) => (x.vendor === 'claude' ? claudeAllowed(T.kind) : T.kind === 'browser' ? browserViaCodex : !codexOut);
+const allowed = (x) => (x.vendor === 'claude' ? claudeAllowed(T.kind) : !modelExcluded(x.model) && (T.kind === 'browser' ? browserViaCodex : !codexOut));
 
 // ---- 1. vendor locks, quota moves and the escalation ladder ----
 // The usable ladder: the first pick (or its same-tier alternative when quota rules it out), then every later step the
@@ -179,16 +181,20 @@ if (cat === 'second-opinion') {
   why.push(`second opinion from the other vendor than ${opts.against}`);
 }
 else if (T.kind === 'browser' && !browserViaCodex) base = [T.alt, C('opus', 'high')];
-else if (authorCodex && !(cat === 'review' && TT && ttHas(SOL))) { base = [cat === 'review' ? T.alt : T.first, C('opus', 'xhigh'), X(SOL, 'xhigh')]; why.push('Codex wrote it: Claude reviews first (Codex only when Claude has no room)'); }
+else if (authorCodex && !(cat === 'review' && ttModelsOK)) {
+  base = [cat === 'review' ? T.alt : T.first, C('opus', 'xhigh'), X(SOL, 'xhigh')];
+  if (!ttAlts.length || ttHas(SOL)) why.push('Codex wrote it: Claude reviews first (Codex only when Claude has no room)');
+}
 else base = [T.first, ...T.ladder];
 // Every task TTADK's GPT-6.1 Sol can handle goes to it first (user, 2026-11-07): Sol at the row's effort (at least
 // medium), one notch higher after a failure, then the row's own ladder. Not TTADK-capable: Claude-only rows, image
-// generation, a second opinion on Codex's work, and browser work while TTADK isn't browser-ready.
+// generation, and browser work while TTADK isn't browser-ready. Codex high-stakes reviews and second opinions keep
+// Claude first when company Sol is available; when Sol is unavailable, company fallback families go first.
 // research needs web search. Codex doesn't send its hosted web_search tool to the gateway, so TTADK searches only through
 // its local proxy (ttadk-setup sets it up: TT.search); without it research follows the earlier routing.
-const ttTaskOK = T.kind !== 'claudeOnly' && cat !== 'image-gen' && !(authorCodex && cat === 'review-high')
-  && !(cat === 'second-opinion' && opts.against === 'codex');
-const ttCapable = !!TT && (ttHas(SOL) || ttAlts.length > 0) && ttTaskOK && !(cat === 'research' && !TT.search) && !(T.kind === 'browser' && !ttBrowser);
+const ttTaskOK = T.kind !== 'claudeOnly' && cat !== 'image-gen';
+const ttCapable = ttModelsOK && ttTaskOK && !(claudeReviewFirst && ttHas(SOL))
+  && !(cat === 'research' && !TT.search) && !(T.kind === 'browser' && !ttBrowser);
 const ei = (e) => EFFORTS.indexOf(e);
 const maxE = (a, b) => (ei(a) >= ei(b) ? a : b);
 if (ttCapable && !ttHas(SOL)) {
@@ -247,14 +253,15 @@ else if (ttCapable) {
 // stakes too (it used to skip the question). One answer covers the outage: after "go on" the orchestrator passes
 // --urgent until a company account is back; after "wait" it holds that work. Standing exceptions (the user's routing,
 // asked 2026-11-09: no question): image generation, Claude-only tools, browser/desktop work Claude takes, reviews whose
-// second opinion is Claude — they never ran on the company accounts anyway.
-const companyOut = !TT && (!!QX.ttadk || !!QX.trae) && ttTaskOK && T.kind !== 'browser';
+// second opinion is Claude while company Sol is available. Company capacity means an eligible routing model, not
+// merely a healthy account that still lists an excluded or unsupported family.
+const companyOut = !ttModelsOK && ttDevice && ttTaskOK && T.kind !== 'browser';
 let deferred = null;
 const retry = (h) => (h != null && Number.isFinite(h) ? ` — retry in ${hours(h)}` : '');
 if (st.stop) deferred = "neither vendor's usage is readable — check `claude -p /usage` and the Codex hubs before dispatching";
 else if (companyOut && !opts.urgent) {
-  const why = [QX.ttadk && `TTADK ${excluded.has(QX.ttadk.name) ? 'excluded' : QX.ttadk.quotaOut ? `quota used up, resets in ${hours((QX.ttadk.quotaOut.resetsAt - Date.now()) / 3600000)}` : `down: ${QX.ttadk.reason}`}`,
-    QX.trae && `TRAE ${excluded.has(QX.trae.name) ? 'excluded' : `unavailable: ${QX.trae.reason}`}`].filter(Boolean).join('; ');
+  const why = [QX.ttadk && `TTADK ${excluded.has(QX.ttadk.name) ? 'excluded' : QX.ttadk.quotaOut ? `quota used up, resets in ${hours((QX.ttadk.quotaOut.resetsAt - Date.now()) / 3600000)}` : QX.ttadk.usable ? 'no eligible routing model for this task' : `down: ${QX.ttadk.reason}`}`,
+    QX.trae && `TRAE ${excluded.has(QX.trae.name) ? 'excluded' : QX.trae.usable ? 'no eligible routing model for this task' : `unavailable: ${QX.trae.reason}`}`].filter(Boolean).join('; ');
   if (QX.ttadk && !QX.ttadk.usable && !QX.ttadk.quotaOut && !excluded.has(QX.ttadk.name)) tell.push(`TTADK is down (${QX.ttadk.reason}): tell the user now so they can fix it`);
   needsOK.push(`personal quota: no company account can take this (${why}). Ask the user before launching — go on now on personal quota (this pick), or wait for a company account. One answer covers the outage: "go on" → launch this and pass --urgent for such work until a company account is back; "wait" → hold it until then`);
 }
@@ -270,7 +277,7 @@ if (!deferred) {
   const waits = [...(base.some((x) => x.vendor === 'claude') && QC.throttledUntil ? [(QC.throttledUntil - Date.now()) / 3600000] : []),
     ...(base.some((x) => x.vendor === 'codex') && codexOut && QX.nextFree != null ? [QX.nextFree] : [])];
   // Over a budget line but still runnable (Claude past its spare line, not throttled): ask instead of holding.
-  const runnable = !ladder.length ? base.find((x) => (x.vendor === 'claude' ? !QC.throttledUntil : !codexOut)) ?? null : null;
+  const runnable = !ladder.length ? base.find((x) => (x.vendor === 'claude' ? !QC.throttledUntil : allowed(x))) ?? null : null;
   if (!ladder.length && runnable) {
     ladder.push(runnable);
     if (!opts.urgent) needsOK.push(`no vendor has room within the quota policy (claude ${QC.status}, codex ${codexOut ? 'out' : 'ok'}): ask the user whether to run it now anyway on ${runnable.vendor} (this pick) or wait${retry(waits.length ? Math.min(...waits) : null)}`);
@@ -297,7 +304,7 @@ if (!deferred) {
 // TTADK takes the Codex pick when the gateway has its model; when the ChatGPT accounts are out, it also takes models it
 // lacks as Sol. Image generation never runs there, not even its Sol fallback step: the gateway has no image tool.
 // research without the search proxy stays off TTADK on every step, fallbacks included (nightly review 11-07 dry run).
-const onTTADK = (x) => x?.vendor === 'codex' && !!TT && cat !== 'image-gen' && !(cat === 'research' && !TT.search) && (ttHas(x.model) || chatgptOut);
+const onTTADK = (x) => x?.vendor === 'codex' && !!TT && cat !== 'image-gen' && !(cat === 'research' && !TT.search) && (ttHas(x.model) || (chatgptOut && ttModelsOK));
 const tune = (x, f, log) => {
   const step = (d, reason) => { const n = notch(x, d); if (n.effort !== x.effort) { log(reason); x = n; } };
   // On TTADK the cost notches save nothing (company quota) and the high-stakes notch is already in its rungs.
@@ -347,11 +354,13 @@ if (second && !allowed(second) && second.vendor === 'claude' && TT && (altOtherT
 if (second && !allowed(second)) second = null;
 // A Codex-written change reviewed on TTADK gets a second free reviewer from a different model family: Kimi-K3 found
 // every planted defect where Sol missed some, and their misses didn't overlap (user, 2026-11-07). Sol when the gateway
-// doesn't list Kimi.
+// doesn't list Kimi. If Sol and every other family are excluded, a fresh thread on the current company model keeps
+// this extra reviewer free; report that it shares the first reviewer's family.
 let ttSecondReviewer = false;
 if (!second && m && cat === 'review' && authorCodex && onTTADK(m)) {
-  second = ttHas(KIMI) && poolOf(m.model) !== 'kimi' ? X(KIMI, 'high') : altOtherThan(m) ?? X(SOL, 'xhigh'); ttSecondReviewer = true;
-  notes.push(`second ${TT.kind === 'trae' ? 'TRAE' : 'TTADK'} reviewer (free): ${second.model === KIMI ? 'Kimi-K3, a different model family,' : isAlt(second) ? `${second.model}, a different model family,` : 'a fresh Sol thread'} with a different focus — failure paths, concurrency, input edge cases and tests rather than the main logic; merge both reports and keep only P0/P1 items (references/review-rubric.md)`);
+  second = ttHas(KIMI) && poolOf(m.model) !== 'kimi' ? X(KIMI, 'high') : altOtherThan(m) ?? (ttHas(SOL) ? X(SOL, 'xhigh') : { ...m }); ttSecondReviewer = true;
+  const reviewer = second.model === KIMI ? 'Kimi-K3, a different model family,' : poolOf(second.model) !== poolOf(m.model) ? `${second.model}, a different model family,` : `a fresh ${second.model === SOL ? 'Sol' : second.model} thread${isAlt(m) ? ' (same model family; no other eligible company family)' : ''}`;
+  notes.push(`second ${TT.kind === 'trae' ? 'TRAE' : 'TTADK'} reviewer (free): ${reviewer} with a different focus — failure paths, concurrency, input edge cases and tests rather than the main logic; merge both reports and keep only P0/P1 items (references/review-rubric.md)`);
 }
 // Its point is to spend Codex quota that would otherwise be lost, so: only where the review policy wants a review anyway
 // (release code, or service code at high stakes; user, 2026-11-07), and never on a TTADK device, whose quota is left
