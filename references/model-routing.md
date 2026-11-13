@@ -156,14 +156,26 @@ then DeepSeek-V4.1-Flash. Astra quality-ladder rungs are never substituted with 
   carry `sampledAt` and must be no more than 30 minutes old, matching load/queue freshness; missing/future/stale sample
   times make all daily entries unknown, regardless of reset time. Cache reads never refresh this timestamp.
 - Model load is **below 60%**, with **no family queue position above 300 in the last 30 minutes**. Load/queue readings
-  older than 30 minutes are ignored; missing or stale signals mean unknown, allowed only for the low-priority case below.
-- At least one factor applies: **low priority** (`--stakes low`, lookup/extract/draft, or `--impact throwaway`);
+  older than 30 minutes are ignored. A fresh load below 60% is sufficient when no fresh queue reading exists; queue
+  data vetoes the family only when a current/recent position exceeds 300. When a model has no fresh direct load,
+  use the busiest fresh reading in its family, then the busiest fresh account reading. Log which source was used.
+  With no fresh load at any of those levels, congestion is unknown, allowed only for the low-priority case below.
+- At least one factor applies: **light tier / low priority** (`--stakes low`, lookup/extract/draft, or `--impact throwaway`);
   **TTADK projected to run out before reset**; or **TRAE resets in under 6 hours** and its remaining share exceeds
   TTADK's remaining share. The projection uses same-account, same-limit/reset samples from the last 2 hours, spanning
   at least 10 minutes, with the latest reading at most 30 minutes old; missing data, zero burn or counter rollback
   without a usable new segment skips this factor.
 
-Every decision includes structured `balance` factors in the route log; a transfer adds a `balanced to TRAE:` why line.
+While TTADK is projected to run out before reset, every eligible normal/light dispatch moves to the first TRAE
+candidate that passes reserve and congestion: normal uses 6.1-Sol → 5.6-Sol → 5.6-Terra → DeepSeek-Flash; light
+uses 5.6-Terra → 5.5 → DeepSeek-Flash. Hard work uses only 6.1-Sol → Astra; if neither passes, it stays on TTADK.
+The candidate must also be listed, unpaused and allowed for the task. Without projected depletion, retain the
+light/low-priority and earlier-TRAE-expiry triggers. Explicit later Astra/other-family quality rungs retain their
+model so balancing does not downgrade an escalation.
+
+Every considered transfer includes structured `balance` factors in the route log, including tier and per-candidate
+rejection reasons, quota shares, congestion and load source. A transfer adds a `balanced to TRAE:` why line; a rejected
+transfer adds `stays on TTADK: <reason>`.
 Congestion blocks opportunistic transfers, never the existing fallback when TTADK is out. Accepted queued turns keep
 waiting. Company balancing needs no quota approval; personal-quota gates and the existing TRAE `max`-effort gate remain.
 There is no concurrency cap or change to launch counts.

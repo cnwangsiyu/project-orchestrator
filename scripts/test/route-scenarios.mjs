@@ -1121,7 +1121,7 @@ for (const [sc, args] of ERRORS) {
   if (bad.length) fail++;
   console.log(`${bad.length ? 'FAIL' : 'ok  '} quota reset history ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
 }
-// Company balancing leaves the model/effort, escalation and number of launches alone.
+// Sol-only quota/congestion boundaries use normal throwaway work. Light tasks require a listed light-tier model.
 {
   const { BALANCE, balanceFactors, ttadkBurn } = await import('../lib/company-load.mjs');
   const SOL = 'gpt-6.1-sol', ASTRA = 'gpt-6-astra', min = 60000;
@@ -1154,14 +1154,14 @@ for (const [sc, args] of ERRORS) {
   const history = path.join(home, 'history.jsonl');
   const samples = [120, 90, 60].map((m, i) => ({ t: now - m * min + 1000, ttadk: { name: 'ttadk', ...usage(10 + i * 10) } }));
   fs.writeFileSync(history, samples.map((r) => JSON.stringify(r)).join('\n') + '\nnot-json\n');
-  const r = (key = 'balanced', args = ['lookup'], q = queue(), env = {}) => {
+  const r = (key = 'balanced', args = ['implement', '--impact', 'throwaway'], q = queue(), env = {}) => {
     fs.writeFileSync(path.join(home, 'queue-state.json'), JSON.stringify(q));
     return JSON.parse(run(key, args, env));
   };
   const cases = [];
   const account = (key, args, q, env) => r(key, args, q, env).pick.account;
   for (const args of [['lookup'], ['extract'], ['draft'], ['analysis', '--stakes', 'low'], ['implement', '--impact', 'throwaway']])
-    cases.push([account('balanced', args), 'trae']);
+    cases.push([account('balanced', args), args[0] === 'implement' ? 'trae' : 'ttadk']);
   for (const key of ['balancedBelow', 'balancedDepleted', 'balancedNoBucket', 'balancedOldBucket', 'balancedNoLimit', 'balancedHot', 'balancedDown'])
     cases.push([account(key), 'ttadk']);
   for (const key of ['balancedReserve', 'balancedCool', 'balancedBusy', 'balancedNoLoad', 'balancedOldLoad'])
@@ -1169,19 +1169,19 @@ for (const [sc, args] of ERRORS) {
   for (const args of [['analysis'], ['implement'], ['review'], ['build-run', '--stakes', 'low'], ['browser'], ['ui-browser'], ['computer-use'], ['image-read', '--stakes', 'low'], ['lookup', '--security'], ['lookup', '--exclude-account', 'trae']])
     cases.push([account('balanced', args), 'ttadk']);
   cases.push([r('balanced', ['image-gen']).pick.account, 'main']);
-  cases.push([account('balanced', ['lookup'], queue(300)), 'trae'], [account('balanced', ['lookup'], queue(301)), 'ttadk']);
-  cases.push([account('balanced', ['lookup'], queue(301, now - 31 * min)), 'trae'], [account('balanced', ['lookup'], {}), 'trae']);
-  cases.push([account('balanced', ['lookup'], queue(1, now, { high: { t: now - 10 * min, position: 3100 } })), 'ttadk']);
-  cases.push([account('balanced', ['lookup'], queue(1, now, { high: { t: now - 31 * min, position: 3100 } })), 'trae']);
+  cases.push([account('balanced', ['implement', '--impact', 'throwaway'], queue(300)), 'trae'], [account('balanced', ['implement', '--impact', 'throwaway'], queue(301)), 'ttadk']);
+  cases.push([account('balanced', ['implement', '--impact', 'throwaway'], queue(301, now - 31 * min)), 'trae'], [account('balanced', ['implement', '--impact', 'throwaway'], {}), 'trae']);
+  cases.push([account('balanced', ['implement', '--impact', 'throwaway'], queue(1, now, { high: { t: now - 10 * min, position: 3100 } })), 'ttadk']);
+  cases.push([account('balanced', ['implement', '--impact', 'throwaway'], queue(1, now, { high: { t: now - 31 * min, position: 3100 } })), 'trae']);
   // Family isolation: other families' queues never count against GPT.
-  cases.push([account('balanced', ['lookup'], { ...queue(), deepseek: { t: now, position: 5000, state: 'queued' } }), 'trae']);
+  cases.push([account('balanced', ['implement', '--impact', 'throwaway'], { ...queue(), deepseek: { t: now, position: 5000, state: 'queued' } }), 'trae']);
   cases.push([account('balancedExpires', ['analysis']), 'trae'], [account('balancedLater', ['analysis']), 'ttadk'],
-    [account('balancedLessLeft', ['analysis']), 'ttadk'], [account('balancedExpires', ['analysis'], {}), 'ttadk']);
+    [account('balancedLessLeft', ['analysis']), 'ttadk'], [account('balancedExpires', ['analysis'], {}), 'trae']);
   const env = { QUOTA_LOG_FILE: history };
   const projected = r('balanced', ['implement'], queue(), env);
   cases.push([projected.pick.account, 'trae'], [projected.balance.burn.beforeReset, true],
     [projected.why.some((s) => /balanced to TRAE:.*TTADK projected to run out at .* UTC.*62% left.*load 35%/.test(s)), true],
-    [account('balancedNoLoad', ['implement'], queue(), env), 'ttadk'], [account('balanced', ['implement'], {}, env), 'ttadk'],
+    [account('balancedNoLoad', ['implement'], queue(), env), 'ttadk'], [account('balanced', ['implement'], {}, env), 'trae'],
     [account('balanced', ['implement'], queue(400), env), 'ttadk'], [account('balancedOut', ['implement'], queue(400)), 'trae']);
   // Balancing transfers the current rung; it never substitutes an excluded/paused model or changes review count.
   scenario('balancedAstra', { quota: { daily: { [ASTRA]: bucket() } }, load: { [ASTRA]: { t: now, percent: 10 } } }, { models: [SOL, ASTRA] });
@@ -1192,7 +1192,7 @@ for (const [sc, args] of ERRORS) {
   cases.push([account('balancedPaused'), 'ttadk']);
   const idle = r(), busy = r('balancedBusy'), review = r('balanced', ['review', '--author', 'codex', '--stakes', 'low']);
   cases.push([idle.pick.account, busy.pick.account], [idle.pick.effort, busy.pick.effort], [idle.deferred, null],
-    [idle.needsUserOK.length, 0], [review.pick.account, 'trae'], [review.secondOpinion.account, 'ttadk'],
+    [idle.needsUserOK.length, 0], [review.pick.account, 'ttadk'], [review.secondOpinion.account, 'ttadk'],
     [r('balanced', ['review', '--author', 'codex']).secondOpinion.model, review.secondOpinion.model],
     [idle.notes.some((s) => /balanced from TTADK/.test(s)), true]);
   // Exact time/share boundaries and synthetic burn-rate failures.
@@ -1239,7 +1239,7 @@ for (const [sc, args] of ERRORS) {
       assert.ok(o.notes.some((n) => /expect hours.*each model request queues separately/.test(n)));
       assert.ok(!o.notes.some((n) => /Above ~300, consider|hub queue position above ~300/.test(n)));
     }
-    assert.equal(r(['lookup']).pick.account, 'trae'); // Light balancing now has an eligible bucket-free Flash.
+    assert.equal(r(['lookup']).pick.account, 'ttadk'); // Missing Flash load falls back to the hot account; foreground balancing is vetoed.
     assert.equal(r(['--background', 'lookup']).pick.account, 'trae');
     const gemini = r(['lookup', '--background'], 'backgroundGemini');
     assert.equal(gemini.pick.launcher, 'codex-worker');
@@ -1394,7 +1394,7 @@ for (const [sc, args] of ERRORS) {
       assert.equal(r([cat, '--exclude-account', 'trae']).pick.account, 'ttadk');
       assert.equal(r([cat, '--security']).pick.model, FLASH); // Security blocks GPT, not safe fallback balancing.
       assert.equal(r([cat, '--exclude-model', TERRA56]).pick.model, GPT55);
-      assert.equal(r([cat], { daily: { ...active, [TERRA56]: bucket() } }).pick.model, GPT55);
+      assert.equal(r([cat], { daily: { ...active, [TERRA56]: bucket() } }).pick.model, TERRA56); // First light-tier candidate passes reserve.
     }
     for (const args of [['analysis'], ['implement'], ['docs'], ['research']]) {
       const o = r([...args, '--background'], { queue: 4000, extra: { load: { [GPT55]: { t: now, percent: 99 } } } });

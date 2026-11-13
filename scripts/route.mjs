@@ -431,16 +431,24 @@ const resolveRung = (raw, index) => {
   // Resolve balancing before normalization too; keep its account and telemetry with this rung only.
   if (preferExpiringTtadk && onTTADK(x) && TT === QX.ttadk) log(TTADK_EXPIRY_HINT);
   if (!background && !preferExpiringTtadk && onTTADK(x) && TT === QX.ttadk && QX.trae) {
-    const light = taskTier === 'light' && laneEligible;
     const free = x.model !== ASTRA ? bucketFreeModels(QX.trae, taskTier) : [];
-    const candidates = x.model === SOL ? [...new Set([...(light ? free : []), ...tierModels(QX.trae, taskTier), x.model])]
-      : light ? [...free, x.model] : [x.model];
+    // Walk the tier in quality order, checking reserve and congestion for each candidate. A later explicit
+    // Astra/other-family quality rung retains its model; balancing cannot turn a retry into a weaker rung.
+    const candidates = x.model === SOL ? COMPANY_TIERS[taskTier] : [x.model];
+    const checked = [];
     for (const model of candidates) {
-      factors = balanceFactors({ ttadk: QX.ttadk, trae: QX.trae, model, category: cat, stakes, impact, allowBucketFree: free.includes(model) });
-      const fits = QX.trae.usable && !excluded.has(QX.trae.name) && QX.trae.models.includes(model)
-        && !modelExcluded(model, QX.trae) && laneEligible;
+      factors = balanceFactors({ ttadk: QX.ttadk, trae: QX.trae, model, category: cat, stakes, impact, tier: taskTier, allowBucketFree: free.includes(model) });
+      const fitReasons = [!QX.trae.usable && 'TRAE account unavailable', excluded.has(QX.trae.name) && 'TRAE account excluded',
+        !laneEligible && 'task requires TTADK tools or holds a shared resource',
+        modelExcluded(model, QX.trae) && 'model excluded for this task',
+        QX.trae.poolPauses?.[poolOf(model)] && 'model family paused', QX.trae.modelPauses?.[model] && 'model paused',
+        !QX.trae.allModels.includes(model) && 'model not listed',
+        deepseekUnfit && poolOf(model) === 'deepseek' && 'model does not fit this task'].filter(Boolean);
+      const fits = !fitReasons.length && QX.trae.models.includes(model);
+      factors.reasons = [...fitReasons, ...factors.reasons];
       factors.taskEligible = !!fits;
       factors.selected = !!fits && factors.eligible;
+      checked.push(factors);
       if (!factors.selected) continue;
       transfer = QX.trae;
       x = { ...x, model };
@@ -448,9 +456,15 @@ const resolveRung = (raw, index) => {
         ? `${s} at ${new Date(factors.burn.outAt).toISOString().slice(11, 16)} UTC` : s);
       const quota = factors.bucketFree ? 'has no daily bucket, no high-priority quota spent, no low-priority lane' : `${Math.round(factors.remainingShare * 100)}% left`;
       log(`balanced to TRAE: ${triggers.join(', ')}, TRAE ${x.model} ${quota}, `
-        + `load ${factors.load ? `${factors.load.percent}%` : 'unknown'}, queue ${factors.queue?.position ?? (factors.queue?.state === 'ready' ? 'ready' : 'unknown')}`);
+        + `load ${factors.load ? `${factors.load.percent}%${factors.load.source === 'model' ? '' : ` (${factors.load.source})`}` : 'unknown'}, queue ${factors.queue?.position ?? (factors.queue?.state === 'ready' ? 'ready' : 'unobserved')}`);
       break;
     }
+    const reason = transfer ? null : checked.some((c) => c.taskEligible)
+      ? checked.some((c) => c.taskEligible && c.reserveOK && c.congestionOK)
+        ? 'no balancing trigger' : `no ${taskTier}-tier TRAE candidate passes reserve and congestion`
+      : checked[0]?.reasons[0] ?? 'no eligible TRAE candidate';
+    factors = { ...factors, tier: taskTier, reason, candidates: checked };
+    if (reason) log(`stays on TTADK: ${reason}`);
   }
   return { pick: x, raw, index, messages, transfer, balance: factors };
 };
