@@ -1,0 +1,2 @@
+#!/bin/bash
+printf 'List of devices attached\n'

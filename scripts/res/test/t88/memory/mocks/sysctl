@@ -1,0 +1,20 @@
+#!/bin/bash
+set -euo pipefail
+case "$*" in
+  '-n vm.loadavg')
+    [ "${RES_TEST_LOAD_FAILURE:-0}" != 1 ] || exit 1
+    printf '{ %s 1 1 }\n' "$RES_TEST_LOAD1M" ;;
+  '-n kern.memorystatus_level')
+    case "${RES_TEST_SYSCTL_STATUS:-ok}" in
+      missing) printf "sysctl: unknown oid 'kern.memorystatus_level'\n" >&2; exit 1 ;;
+      error) printf 'sysctl: kern.memorystatus_level: Operation not permitted\n' >&2; exit 1 ;;
+      *) printf '%s\n' "$RES_TEST_MEMORYSTATUS_LEVEL" ;;
+    esac ;;
+  '-n hw.memsize')
+    [ "${RES_TEST_MEMSIZE_FAILURE:-0}" != 1 ] || exit 1
+    printf '%s\n' "$RES_TEST_MEMSIZE" ;;
+  '-n vm.swapusage')
+    [ "${RES_TEST_SWAP_FAILURE:-0}" != 1 ] || exit 1
+    printf '%s\n' "$RES_TEST_SWAPUSAGE" ;;
+  *) exit 1 ;;
+esac

@@ -6,6 +6,7 @@
 #   locks/<id>.d/   present while held (mkdir is atomic, so two sessions can't both take it)
 #   log.tsv         append-only history of takes and returns
 #   notes/<id>.md   pitfalls of that resource (model/OS quirks, workarounds); printed on take
+# Heavy slots additionally support a gated wait and recovery of old, dead-PID holds.
 set -euo pipefail
 
 RES_DIR="${RES_DIR:-$HOME/.claude/orchestrator/_shared}"
@@ -17,7 +18,11 @@ NOTES="$RES_DIR/notes"
 usage() {
   cat <<'EOF'
 res status [<id>]                     show every resource (or one) and who holds it
-res take <id> --by <session> --project <slug> --for "<purpose>" [--task <id>] [--until <when>] [--offline]
+res take <id> --by <session> --project <slug> --for "<purpose>" [--task <id>] [--until <when>] [--offline] [--pid <pid>]
+res wait <id> --by <session> --project <slug> --for "<purpose>" --timeout <minutes> [take options]
+                                      retry held resources; heavy-* waits also enforce the gate
+                                      --pid names the long-lived holder (default: caller PID)
+res heavy-check                      print load1m and memory headroom; 5 if overloaded
 res extend <id> --by <session> --until <when>
 res return <id> --by <session> [--note "<text>"]
 res return <id> --by <session> --force --note "<why>"   reclaim a hold whose holder is gone
@@ -29,12 +34,139 @@ res note <id> --by <session> --note "<pitfall and workaround>"
 res log [<n>]                         last n history lines (default 20)
 Devices show their live link (usbmux / devicectl / adb). take refuses a device that is not connected
 unless --offline (booking ahead of a plug-in).
-Exit codes: 0 ok, 2 held by someone else, 3 policy forbids, 4 device not connected, 1 usage/other error.
+Exit codes: 0 ok, 2 held/wait timeout, 3 policy forbids, 4 device not connected,
+5 heavy gate overloaded, 1 usage/other error (including unavailable gate metrics).
 EOF
 }
 
 die() { echo "res: $*" >&2; exit 1; }
 now() { date '+%Y-%m-%d %H:%M'; }
+
+local_host() { hostname; }
+
+# Legacy holds and other hosts cannot be judged safely from this machine's PID table.
+hold_stale() {
+  local pid host
+  pid=$(field "$1" pid); host=$(field "$1" host)
+  case "$pid" in ''|*[!0-9]*|0) return 1 ;; esac
+  [ "$host" = "$(local_host)" ] || return 1
+  if ps -p "$pid" -o pid= >/dev/null 2>&1; then
+    return 1
+  else
+    [ "$?" -eq 1 ]
+  fi
+}
+
+hold_old() {
+  local start current
+  start=$(field "$1" start)
+  case "$start" in ''|*[!0-9]*) return 1 ;; esac
+  current=$(date +%s)
+  # awk avoids interpreting epoch strings with leading zeroes as shell octal.
+  awk -v start="$start" -v current="$current" 'BEGIN { exit !(current - start > 600) }'
+}
+
+cmd_heavy_check() {
+  [ $# -eq 0 ] || die "heavy-check takes no options"
+  local load headroom
+  case "$(uname -s)" in
+    Darwin)
+      load=$(LC_ALL=C sysctl -n vm.loadavg) || die "cannot read load1m"
+      load=$(printf '%s\n' "$load" | awk '{print $2}')
+      headroom=$(LC_ALL=C vm_stat | awk '
+        /page size of/ { size = $8 }
+        /^Pages free:/ { free = $3; sub(/[.]$/, "", free); nf = free ~ /^[0-9]+$/ }
+        /^Pages inactive:/ { inactive = $3; sub(/[.]$/, "", inactive); ni = inactive ~ /^[0-9]+$/ }
+        /^Pages speculative:/ { speculative = $3; sub(/[.]$/, "", speculative); ns = speculative ~ /^[0-9]+$/ }
+        END {
+          if (size <= 0 || !nf || !ni || !ns) exit 1
+          printf "%.0f\n", (free + inactive + speculative) * size
+        }') || die "cannot read memory headroom"
+      ;;
+    Linux)
+      load=$(awk '{print $1}' /proc/loadavg) || die "cannot read load1m"
+      headroom=$(awk '/^MemAvailable:/ {printf "%.0f\n", $2 * 1024; found = 1}
+        END {if (!found) exit 1}' /proc/meminfo) || die "cannot read memory headroom"
+      ;;
+    *) die "heavy-check is unsupported on this OS" ;;
+  esac
+  awk -v load="$load" -v bytes="$headroom" 'BEGIN {
+    if (load !~ /^[0-9]+([.][0-9]+)?$/ || bytes !~ /^[0-9]+$/) exit 1
+    gib = bytes / 1073741824
+    overloaded = load > 12 || gib < 16
+    printf "load1m=%.2f headroom=%.2f GiB gate=%s\n", load, gib, overloaded ? "OVERLOADED" : "OK"
+    exit overloaded ? 5 : 0
+  }'
+}
+
+# A PID dot lock serializes reclaimers and recovers dead reclaimers. Rename
+# before deleting so cleanup cannot remove a newly acquired hold's directory.
+reclaim_stale_heavy() (
+  local id="$1" by="$2" lock="$LOCKS/$1.d" snapshot retired holder pid start
+  case "$id" in heavy-*) ;; *) return 1 ;; esac
+  [ -d "$lock" ] || return 1
+  hold_stale "$id" && hold_old "$id" || return 1
+  snapshot=$(cat "$lock/info") || return 1
+  retired=$(mktemp -d "$LOCKS/.stale-$id.XXXXXX") || return 1
+  cd "$lock" || { rmdir "$retired"; return 1; }
+  shlock -p "$$" -f .reclaim 2>/dev/null || { rmdir "$retired"; return 1; }
+  trap 'rm -f .reclaim; rmdir "$retired" 2>/dev/null || true' EXIT
+  trap 'exit 1' INT TERM HUP
+  [ "$(cat info)" = "$snapshot" ] && hold_stale "$id" && hold_old "$id" || return 1
+  holder=$(field "$id" by); pid=$(field "$id" pid); start=$(field "$id" start)
+  mv "$lock" "$retired/hold" || return 1
+  log reclaim "$id" "$by" "auto-reclaim STALE heavy hold from $holder (pid=$pid start=$start; age > 10 minutes)"
+  echo "res: auto-reclaimed STALE $id from $holder (pid=$pid; age > 10 minutes)" >&2
+  rm -rf "$retired"
+)
+
+cmd_wait() {
+  local id="${1:-}"; shift || true; need_id "$id"
+  local timeout= args=() duration deadline remaining delay=1 rc ALLOW_PID=1
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --timeout)
+        [ $# -ge 2 ] || die "--timeout needs minutes"
+        [ -z "$timeout" ] || die "duplicate --timeout"
+        timeout="$2"; shift 2 ;;
+      --by|--project|--for|--task|--until|--note|--device|--policy|--pid)
+        [ $# -ge 2 ] || die "$1 needs a value"
+        args+=("$1" "$2"); shift 2 ;;
+      *) args+=("$1"); shift ;;
+    esac
+  done
+  [[ "$timeout" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "wait needs --timeout <non-negative minutes>"
+  parse ${args[@]+"${args[@]}"}
+  [ -n "$BY" ] && [ -n "$PROJECT" ] && [ -n "$PURPOSE" ] || die "wait needs --by, --project and --for"
+  validate_pid
+  duration=$(awk -v t="$timeout" 'BEGIN {s=t*60; printf "%.0f\n", int(s)+(s>int(s))}')
+  deadline=$((SECONDS + duration))
+  while :; do
+    rc=0
+    case "$id" in
+      heavy-*)
+        if cmd_heavy_check; then
+          reclaim_stale_heavy "$id" "$BY" || true
+        else
+          rc=$?
+          [ "$rc" -eq 5 ] || return "$rc"
+        fi ;;
+    esac
+    if [ "$rc" -ne 5 ]; then
+      if (cmd_take "$id" ${args[@]+"${args[@]}"}); then return 0; else rc=$?; fi
+      [ "$rc" -eq 2 ] || return "$rc"
+    fi
+    remaining=$((deadline - SECONDS))
+    if [ "$remaining" -le 0 ]; then
+      echo "res: timed out waiting for '$id' after $timeout minutes" >&2
+      return 2
+    fi
+    [ "$delay" -le "$remaining" ] || delay="$remaining"
+    echo "res: waiting for '$id'; retry in ${delay}s" >&2
+    sleep "$delay"
+    delay=$((delay * 2)); [ "$delay" -le 15 ] || delay=15
+  done
+}
 
 reg_line() { awk -F'\t' -v id="$1" '$1==id' "$REG"; }
 need_id() {
@@ -72,7 +204,7 @@ conn() {
 log() { printf '%s\t%s\t%s\t%s\t%s\n' "$(now)" "$1" "$2" "$3" "$4" >>"$LOG"; }
 
 parse() {
-  BY= PROJECT= PURPOSE= TASK= UNTIL= NOTE= FORCE= OFFLINE= DEVICE= POLICY=
+  BY= PROJECT= PURPOSE= TASK= UNTIL= NOTE= FORCE= OFFLINE= DEVICE= POLICY= PID="$PPID"
   while [ $# -gt 0 ]; do
     case "$1" in
       --by) BY="$2"; shift 2 ;;
@@ -85,14 +217,22 @@ parse() {
       --offline) OFFLINE=1; shift ;;
       --device) DEVICE="$2"; shift 2 ;;
       --policy) POLICY="$2"; shift 2 ;;
+      --pid)
+        [ "${ALLOW_PID:-}" = 1 ] || die "unknown option '$1'"
+        [ $# -ge 2 ] || die "--pid needs a value"
+        PID="$2"; shift 2 ;;
       *) die "unknown option '$1'" ;;
     esac
   done
 }
 
+validate_pid() {
+  [[ "$PID" =~ ^[1-9][0-9]*$ ]] || die "--pid must be a positive process ID"
+}
+
 write_info() {
-  printf 'by\t%s\nproject\t%s\ntask\t%s\nfor\t%s\nsince\t%s\nuntil\t%s\n' \
-    "$BY" "$PROJECT" "$TASK" "$PURPOSE" "$1" "$UNTIL" >"$LOCKS/$2.d/info"
+  printf 'by\t%s\nproject\t%s\ntask\t%s\nfor\t%s\nsince\t%s\nuntil\t%s\npid\t%s\nhost\t%s\nstart\t%s\n' \
+    "$BY" "$PROJECT" "$TASK" "$PURPOSE" "$1" "$UNTIL" "$PID" "$(local_host)" "$(date +%s)" >"$LOCKS/$2.d/info"
 }
 
 cmd_status() {
@@ -100,9 +240,10 @@ cmd_status() {
   # A status of one checkout needs no device probe. One awk renders everything: a fork per
   # field and row cost ~1.5 s.
   if [ -z "${1:-}" ] || [ "$(reg_line "$1" | cut -f4)" != - ]; then probe; fi
-  local infos=() t; t=$(mktemp); printf '%s\n' "$DEVS" >"$t"
+  local infos=() t pid_snapshot=0; t=$(mktemp); printf '%s\n' "$DEVS" >"$t"
+  ps -axo pid= >"$t.pids" 2>/dev/null && pid_snapshot=1
   for f in "$LOCKS"/*.d/info; do [ -f "$f" ] && infos+=("$f"); done
-  awk -F'\t' -v only="${1:-}" '
+  awk -F'\t' -v only="${1:-}" -v host="$(local_host)" -v pid_snapshot="$pid_snapshot" '
     function state(dev,   i, l) {
       if (dev == "-") return "-"
       for (i = 1; i <= nd; i++) if (index(D[i], dev " (")) {
@@ -112,6 +253,7 @@ cmd_status() {
       return "not seen"
     }
     FILENAME == devs { D[++nd] = $0; next }
+    FILENAME == pids { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0); P[$0] = 1; next }
     FILENAME != reg { n = split(FILENAME, a, "/"); id = a[n-1]; sub(/\.d$/, "", id); H[id, $1] = $2; held[id] = 1; next }
     /^#/ || $1 == "" { next }
     { known[$4] = 1 }
@@ -121,6 +263,9 @@ cmd_status() {
       if ($1 in held) {
         t = H[$1, "task"]; u = H[$1, "until"]
         holder = H[$1, "by"] " (" H[$1, "project"] (t != "" ? "/" t : "") ")"
+        pid = H[$1, "pid"]
+        if (pid_snapshot && H[$1, "host"] == host && pid ~ /^[0-9]+$/ && pid + 0 > 0 && !(pid in P))
+          holder = "STALE " holder
         detail = H[$1, "since"] " → " (u != "" ? u : "?") " · " H[$1, "for"]
       } else { holder = "FREE"; detail = $5 }
       printf "%-16s %-9s %-9s %-12s %-34s %s\n", $1, $2, $3, state($4), holder, detail
@@ -135,8 +280,8 @@ cmd_status() {
       }
       if (out != "") printf "\nConnected but not registered (add with: res add <id> --device <id> --for \"<what it is>\"):\n%s", out
     }
-  ' reg="$REG" devs="$t" "$t" ${infos[@]+"${infos[@]}"} "$REG"
-  rm -f "$t"
+  ' reg="$REG" devs="$t" pids="$t.pids" "$t" "$t.pids" ${infos[@]+"${infos[@]}"} "$REG"
+  rm -f "$t" "$t.pids"
   [ -z "${1:-}" ] || show_notes "$1"
 }
 
@@ -155,8 +300,9 @@ cmd_add() {
 }
 
 cmd_take() {
-  local id="${1:-}"; shift || true; need_id "$id"; parse "$@"
+  local id="${1:-}" ALLOW_PID=1; shift || true; need_id "$id"; parse "$@"
   [ -n "$BY" ] && [ -n "$PROJECT" ] && [ -n "$PURPOSE" ] || die "take needs --by, --project and --for"
+  validate_pid
   local policy dev link; policy=$(reg_line "$id" | cut -f3); dev=$(reg_line "$id" | cut -f4)
   case "$policy" in
     never) echo "res: '$id' is off limits (policy never): $(reg_line "$id" | cut -f5)" >&2; exit 3 ;;
@@ -208,8 +354,15 @@ cmd_return() {
 }
 
 show_notes() {
-  [ -s "$NOTES/$1.md" ] || return 0
-  echo; echo "── notes for $1 ($NOTES/$1.md) — read before use ──"; cat "$NOTES/$1.md"
+  if [ -s "$NOTES/$1.md" ]; then
+    echo; echo "── notes for $1 ($NOTES/$1.md) — read before use ──"; cat "$NOTES/$1.md"
+  fi
+  case "$1" in
+    heavy-*)
+      if [ "$1" != heavy-build ] && [ -s "$NOTES/heavy-build.md" ]; then
+        echo; echo "── heavy-task protocol ($NOTES/heavy-build.md) — read before use ──"; cat "$NOTES/heavy-build.md"
+      fi ;;
+  esac
 }
 
 cmd_note() {
@@ -227,6 +380,8 @@ cmd_log() { [ -f "$LOG" ] && tail -n "${1:-20}" "$LOG" || true; }
 case "${1:-}" in
   status) shift; cmd_status "$@" ;;
   take) shift; cmd_take "$@" ;;
+  wait) shift; cmd_wait "$@" ;;
+  heavy-check) shift; cmd_heavy_check "$@" ;;
   extend) shift; cmd_extend "$@" ;;
   return) shift; cmd_return "$@" ;;
   add) shift; cmd_add "$@" ;;

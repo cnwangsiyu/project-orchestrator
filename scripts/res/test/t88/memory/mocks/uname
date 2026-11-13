@@ -1,0 +1,2 @@
+#!/bin/bash
+printf '%s\n' "${RES_TEST_OS:-Darwin}"

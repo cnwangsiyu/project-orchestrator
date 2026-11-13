@@ -1,0 +1,13 @@
+# Shared resources across project orchestrators. Edit by hand; holds are managed by `res`.
+# id	kind	policy	device-id	description   (policy: open = take when FREE; ask-user = user OK first; never = off limits)   device-id: iOS UDID or adb serial, - for none
+iphone11	device	open	00008030-000549A21406802E	iPhone 11, UDID 00008030-000549A21406802E (lynx-view benchmarks, video-agent, vesdk-mainline)
+iphone8	device	open	e17810c6bbe0852b7865018de41305e974fa0317	iPhone 8 (A11, iPhone10,1) iOS 16.7.10, UDID e17810c6bbe0852b7865018de41305e974fa0317; back in service 2026-11-09 (user). Trusted, Developer Mode on, no passcode. Xcode 27/devicectl can't drive iOS<17: no XCUITest/WDA/xcodebuild test; use pymobiledevice3 (install/launch/kill/screenshot/syslog). Old .perf/.lynx apps stay installed — don't touch
+s21	device	open	R5CR10YJFLM	Samsung SM-G9980 S21 Ultra Android 15, serial R5CR10YJFLM
+ipad-air	device	ask-user	00008112-000125910107A01E	iPad Air 11 M2, UDID 00008112-000125910107A01E (user said 10-17: not for video-agent)
+iphone15pm	device	never	00008130-001A1CD83433803A	Siyu's iPhone 15 Pro Max, UDID 00008130-001A1CD83433803A — the user's own phone
+tiktok_vesdk	checkout	open	-	main checkout ~/Code/tiktok_vesdk (release/22.5.0); hold for builds/writes; .worktrees/* belong to their projects
+TikTok_iOS	checkout	open	-	~/Code/TikTok_iOS host app; hold for builds/writes (reads need no hold)
+TikTok_Android	checkout	open	-	~/Code/TikTok_Android host app; hold for builds/writes (reads need no hold)
+heavy-build	slot	open	-	ONE machine-wide full iOS/Android SDK+host-app build; also hold one heavy lane
+heavy-lane-1	slot	open	-	Heavy task lane 1: full build, SG packaging, or heavy focused test
+heavy-lane-2	slot	open	-	Heavy task lane 2: full build, SG packaging, or heavy focused test

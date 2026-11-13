@@ -13,7 +13,9 @@ const suites = fs.readdirSync(base).filter((f) => f.endsWith('.mjs') && f !== pa
 suites.push({ name: 'cleanup-python', exe: 'python3', args: ['-m', 'unittest', 'discover', '-s', 'scripts/resource-cleanup', '-p', 'test*.py', '-v'] });
 let failed = 0;
 for (const suite of suites) {
-  const r = spawnSync(suite.exe, suite.args, { cwd: root, env, encoding: 'utf8', timeout: 300000, maxBuffer: 16 * 2 ** 20 });
+  // res-scenarios runs four bounded suites sequentially (including real backoff).
+  const timeout = suite.name === 'res-scenarios.mjs' ? 1200000 : 300000;
+  const r = spawnSync(suite.exe, suite.args, { cwd: root, env, encoding: 'utf8', timeout, maxBuffer: 16 * 2 ** 20 });
   const output = `${r.stdout ?? ''}${r.stderr ?? ''}${r.error ? '\n' + r.error.message : ''}`;
   fs.writeFileSync(path.join(tmp, `${suite.name}.log`), output, { mode: 0o600 });
   const success = r.status === 0 && !r.error;

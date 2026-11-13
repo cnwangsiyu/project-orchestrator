@@ -1,0 +1,4 @@
+#!/bin/bash
+set -euo pipefail
+[ "${RES_TEST_VM_STAT_FAILURE:-0}" != 1 ] || exit 1
+printf '%s\n' "$RES_TEST_VM_STAT"

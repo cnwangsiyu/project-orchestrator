@@ -1,0 +1,6 @@
+#!/bin/bash
+if [ "${1:-}" = +%s ]; then
+  printf '%s\n' "$(<"$FIXTURE_DIR/epoch")"
+else
+  /bin/date -r "$(<"$FIXTURE_DIR/epoch")" "$@"
+fi

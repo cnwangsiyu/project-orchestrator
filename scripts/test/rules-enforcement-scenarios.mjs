@@ -122,7 +122,7 @@ if(m.method==='turn/start')setImmediate(()=>this.onmessage({data:JSON.stringify(
 const fs=require('fs');const a=process.argv.slice(2),id=a[1],by=a[a.indexOf('--by')+1];
 fs.appendFileSync(process.env.RES_LOG,JSON.stringify({cmd:a[0],id,args:a})+'\\n');
 let h={};try{h=JSON.parse(fs.readFileSync(process.env.RES_HOLDS));}catch{}
-if(a[0]==='wait'){if(process.env.BLOCK_ID===id){setInterval(()=>{},1000);}else if(process.env.FAIL_ID===id){process.exit(2);}else{h[id]=by;fs.writeFileSync(process.env.RES_HOLDS,JSON.stringify(h));if(process.env.INTERRUPT_RESOURCE===id){process.kill(Number(a[a.indexOf('--pid')+1]),process.env.RACE_SIGNAL);setInterval(()=>{},1000);}}}
+if(a[0]==='wait'){if(process.env.BLOCK_ID===id){setInterval(()=>{},1000);}else if((process.env.FAIL_ID||'').split(',').includes(id)){process.exit(2);}else{h[id]=by;fs.writeFileSync(process.env.RES_HOLDS,JSON.stringify(h));if(process.env.INTERRUPT_RESOURCE===id){process.kill(Number(a[a.indexOf('--pid')+1]),process.env.RACE_SIGNAL);setInterval(()=>{},1000);}}}
 if(a[0]==='return'){if(h[id]!==by)process.exit(2);if(process.env.REPEAT_RETURN_SIGNAL){for(const sig of ['SIGTERM','SIGHUP','SIGINT'])process.kill(process.ppid,sig);}delete h[id];fs.writeFileSync(process.env.RES_HOLDS,JSON.stringify(h));}
 `, { mode: 0o755 });
   const buildEnv = { ...env, RES_COMMAND: res, RES_LOG: reslog, RES_HOLDS: holds, HEAVY_BUILD_BY: 'fixture-holder',
@@ -138,9 +138,18 @@ if(a[0]==='return'){if(h[id]!==by)process.exit(2);if(process.env.REPEAT_RETURN_S
     assert.ok(resrows().filter((row) => row.cmd === 'wait').every((row) => row.args.includes('--pid') && row.args.includes('--timeout')));
   }
   reset();
-  assert.equal(spawnSync('/bin/bash', [path.join(scripts, 'heavy-build.sh'), '/bin/true'], { env: { ...buildEnv, FAIL_ID: 'heavy-lane-1' }, timeout: 5000 }).status, 2);
+  const missed = spawnSync('/bin/bash', [path.join(scripts, 'heavy-build.sh'), '/bin/true'], { env: { ...buildEnv, FAIL_ID: 'heavy-lane-1,heavy-lane-2,heavy-lane-3' }, encoding: 'utf8', timeout: 5000 });
+  assert.equal(missed.status, 2, missed.stderr);
   assert.deepEqual(JSON.parse(fs.readFileSync(holds)), {});
   assert.deepEqual(resrows().filter((row) => row.cmd === 'return').map((row) => row.id), ['heavy-build']);
+  for (const [failIds, lane] of [['heavy-lane-1', 'heavy-lane-2'], ['heavy-lane-1,heavy-lane-2', 'heavy-lane-3']]) {
+    reset();
+    const fallback = spawnSync('/bin/bash', [path.join(scripts, 'heavy-build.sh'), '/bin/sh', '-c', 'exit 0'], {
+      env: { ...buildEnv, FAIL_ID: failIds }, encoding: 'utf8', timeout: 5000 });
+    assert.equal(fallback.status, 0, fallback.stderr);
+    assert.deepEqual(resrows().filter((row) => row.cmd === 'return').map((row) => row.id), [lane, 'heavy-build']);
+    assert.deepEqual(JSON.parse(fs.readFileSync(holds)), {});
+  }
   const raceDriver = path.join(tmp, 'race-driver.sh');
   fs.writeFileSync(raceDriver, `set -T
 hit=0

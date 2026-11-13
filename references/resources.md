@@ -59,7 +59,8 @@ can have either verdict; retain the controller's state, do not recompute from ro
 
 **Gate change approved 2026-11-13 (secretary option A):** **limit = 12 + 8 * lanes held by others, capped at 20**;
 entry requires load1m <= limit and available memory >=16 GiB. STALE and the caller's own verified
-locks do not count; two other lanes leave no capacity. Unknown lane/PID identity is UNKNOWN, never permission for 20.
+locks do not count; two other lanes leave no capacity in v1.2. v1.3 can admit a third only at its strict 8/32 gate.
+Unknown lane/PID identity is UNKNOWN, never permission for 20.
 The contract's **T88 live v1.2** addendum reports rollout on 2026-11-13. The parser captures `limit`/`lanes_held`
 from Darwin/Linux output, while old fixed-12 samples remain explicitly legacy (`limit:12`, `lanes_held:null`, never
 an invented zero-lane count). Overload analysis uses each sample's limit and controller verdict, not a fixed 12;
@@ -71,20 +72,102 @@ Preserve the exact controller verdict at rounded bounds when contexts match; alt
 
 ## Heavy Lock Contract
 
-Follow the [live T83 lock contract](/Users/bytedance/code/.claude-data/orchestrator/vesdk-mainline/tasks/T83/lock-contract.md)
+Follow the [maintained res contract](res-contract.md)
 and [build/cache discipline](../SKILL.md#build-discipline); observations never supersede their scope or authorization rules.
 
-The live 2026-11-13 contract has ONE `heavy-build` slot and TWO `heavy-lane-*` lanes. Full iOS/Android SDK + host package
+The T88 v1.2 installation has ONE `heavy-build` slot and TWO lanes. Reviewed v1.3 adds `heavy-lane-3`, admitted
+only at load1m <=8 AND available memory >=32 GiB, so capacity floats 2-3 with load. This checkout is not a live
+rollout; the owner must switch/register it. `heavy-check` appends `lane3=OPEN|CLOSED` without changing prior fields;
+the sampler persists it verbatim (old formats have null). OPEN is gate eligibility, not a free resource. Lane-3
+holders count in the unchanged min(20, 12 + 8 * other lanes) normal gate; normal memory stays >=16 GiB.
+Full iOS/Android SDK + host package
 work holds the slot and a lane throughout preflight/staging/build/acceptance. SG packaging, sustained native compilation
 and long multiprocess focused tests need a lane only. Host unit tests without a full native build, single-TU compilation,
 docs/analysis and device-only work are exempt. Acquire slot before lane, release in reverse on every exit (`trap EXIT`),
 use bounded `res wait --timeout`, and pass the long-lived wrapper PID rather than a short-lived res process PID.
 
-User approved **2-3 heavy lanes on 2026-11-13**. The optional third `heavy-lane-3` requires known
-`load1m <=8 && availableBytes >=32 * 2**30` at each acquisition attempt, and releases like every lane. The normal
-v1.2 gates and single package slot stay unchanged. Implementation/rollout belongs exclusively to vesdk-mainline:
-[requested contract and owner tests](heavy-lane-3-request.md). This checkout does not edit `res`. Sampler/review
-recognize lane 3 only if present in registry/lease/status/journal/wait data; absence on v1.2 is not incomplete.
+Sampler/review recognize lane 3 only if present in registry/lease/status/journal/wait data; absence on v1.2
+is not incomplete. `thirdLaneOnly` identifies observations whose only physical capacity is the optional lane,
+excluding them from normal 12/20/16 tuning comparisons. A recorded controller `lane3=CLOSED` means that extra
+capacity is unavailable; old observations with no lane-3 verdict describe physical capacity only, never permission.
+
+## Res Ownership
+
+Since **2026-11-13**, the routing/global-rules owner maintains the **whole res tool**, handed over by
+vesdk-mainline: iphone11/iphone8/s21 device holds, checkouts, take/return/extend/add/note/log, heavy-build,
+heavy-lane-* and heavy-check. This repository is the source of truth: `scripts/res/res` (Bash), tests and
+owner installer under `scripts/res/`, maintained contract [res-contract.md](res-contract.md). Projects own
+their caller wrappers/PID/order/budget, not a second lock/controller. Device policies and existing state stay intact.
+
+Imported from `/Users/bytedance/.agents/skills/project-orchestrator/scripts/res`, the target of
+`$HOME/.claude/orchestrator/_shared/res` per T89 handover. Source SHA-256 is
+`24516dbc39f6e7fb783f9f1f33648bb6247600b977a709f1055d2fa76342570a`, also matching T88 `stage/res`.
+The handover reports ` M scripts/res` (uncommitted) and last source commits `2bec3be / 1b5b417 / 6397178`;
+these are handover evidence, not a fresh git query. Immutable v1.2 code/contract fixtures preserve that baseline.
+Tests are the T88-adapted T83/T86/T88 suites from
+`$HOME/code/.claude-data/orchestrator/vesdk-mainline/tasks/T88/tmp.o8ieJ1` (166+101+377=644 assertions).
+The 17 imported suite/fixture files and the v1.2 source/contract fixtures are byte-preserved. Compatibility
+tests compare CLI help and scratch stdout/stderr/exit transcripts against that baseline, normalizing only
+scratch paths and the approved appended `lane3=OPEN|CLOSED` field. Registry, journal, notes and original
+metadata fields are compared too; the historical legacy suite covers 27 device/checkout/policy commands.
+
+Change process: branch -> `node scripts/test/run-all.mjs` -> compatibility evidence/review -> **owner switches**
+the installation -> owner publishes the dated rules digest and asks callers to acknowledge/re-invoke waiters.
+After the switch, `_shared/res` remains the public CLI symlink but points to this repo's `scripts/res/res`.
+Do not change hard-coded caller paths, use private locks, migrate live state, or merge over the old installed
+target before backup. Use a durable reviewed checkout, not an ephemeral job tree. Installation is never automatic.
+
+Owner commands from that checkout (workers must NOT run these against live state):
+
+```bash
+bash scripts/res/install.sh
+# After switch, with callers still quiescent, add this row once to _shared/resources.tsv:
+# scripts/res/resources-lane3.tsv (literal TAB-separated row)
+# Install the maintained notes text:
+cp scripts/res/notes/heavy-build.md "$HOME/.claude/orchestrator/_shared/notes/heavy-build.md"
+```
+
+The installer runs the full suites, backs up the current target, and atomically replaces the symlink via
+`ln -sfn` to a temporary name then `mv -f`. It checks held `locks/heavy-*.d` and any `res wait` twice (before
+and after tests), refuses unreadable process data, and prints a quoted rollback command pointing to the backup:
+
+```bash
+ln -sfn "<printed-backup>/res" "$HOME/.claude/orchestrator/_shared/.res-rollback" &&
+mv -f "$HOME/.claude/orchestrator/_shared/.res-rollback" "$HOME/.claude/orchestrator/_shared/res"
+```
+
+The owner coordinates idle callers throughout; the checks are not a global admission pause. `--force` explicitly
+overrides held-lock/waiter refusal, never permits killing others. Missing `ps` access still blocks. Back up the
+registry/notes before their separate reviewed installation; on rollback remove the lane-3 row and restore the
+notes under quiescence BEFORE switching back to v1.2 (which cannot gate a registered lane 3).
+`RES_INSTALL_DIR` is only an isolated installer-test override, not an alternate production lock backend.
+The reviewed registry row is in `scripts/res/resources-lane3.tsv` (literal TAB-separated, five columns):
+
+```text
+heavy-lane-3\tslot\topen\t-\tConditional heavy task lane 3: load1m <= 8 and memorystatus available memory >= 32 GiB at take time
+```
+
+Here `\t` denotes TAB. Install the complete maintained take-time text from `scripts/res/notes/heavy-build.md`,
+not a delivery report: full-package slot plus lane, strict lane-3 gate, unchanged normal gate, wrapper PID,
+finite waits/backoff, reverse release on every exit, STALE >600s, memory basis and unchanged build budgets.
+
+Known pitfalls: old Bash waiters keep old code until re-invoked; macOS availability is memorystatus percent * RAM,
+not page/swap diagnostics (pages fallback only when the sysctl is explicitly missing). Bad metrics fail closed.
+STALE means local dead PID; wait alone can reclaim heavy holds at age **>600 seconds**, and lane 3 also needs its
+strict gate OPEN. PID reuse/legacy/remote metadata stay conservative. Same-by take never refreshes PID/start.
+Normal take for old lanes still needs caller heavy-check; lane-3 take enforces its own stricter gate too.
+
+`node scripts/res/test/run.mjs` runs the 644 imported assertions plus lane-3/install/parser/compatibility tests
+inside temporary HOME/state/fixture directories. No live take/return, device probe or credential read. Default PID
+tables are scratch fixtures because sandboxed host `ps` is denied; only test-created PIDs are checked, with no
+global enumeration. Owners may additionally use `RES_TEST_NATIVE_PS=1 node scripts/res/test/run.mjs` for native
+process-table qualification where permitted; fixture success does not establish host-probe access. Original tests
+are byte-preserved and copied before running, including the historical saved script/registry used by the 166-case
+legacy regression. Historical matched 166/267-version runs are described in the T89 handover, not claimed here.
+The full runner gives these four sequential res suites a 1200-second aggregate budget; each individual suite
+has a 300-second deadline. This accommodates their real bounded backoff, not a controller timeout exemption.
+New fixtures cover exact/rounded 8/32 boundaries, take/wait/recovery, STALE reclaim, optional-lane observation,
+real wrapper fallback/pinning/reverse release and owner install refusal/backup/rollback in fake shared state.
 
 `heavyLocks` includes an equivalent status snapshot, bounded 128 KiB `log.tsv` tail and observed `res wait` processes.
 Event IDs use journal inode/byte offset, so repeated tails are deduplicated. Purpose, return/reclaim notes and arbitrary
@@ -211,7 +294,7 @@ no writer is running. stderr and nightly reports are not auto-pruned by this fea
 
 `references/nightly-review.md`'s Machine resources step consumes the report, sends each project its concrete cases,
 and tunes only within dated user-approved bounds. `scripts/resource-policy.json` records load 12 (empty) / 20 (one other heavy task) / memory 16 GiB /
-one package slot / two heavy lanes with **null tuning bounds**: the fixed value 20 is approved, not a range for further tuning. No autonomous
+one package slot / two normal lanes plus conditional lane 3 (approved capacity 2-3) with **null load/memory tuning bounds**: the fixed value 20 is approved, not a range for further tuning. No autonomous
 range is invented. Thin evidence or any unapproved/out-of-range change goes to a Chinese decision card. The shared
 controller's owner implements/acknowledges any further enforcement change; observation policy alone cannot apply it.
 The new utilisation approval is separately recorded: lanes may float in **[2,3]**, but the brief gives only fixed
@@ -337,7 +420,7 @@ These facts come from the brief; this edit-only task does not reinstall, read se
 For removal, first confirm no cleanup/recovery is running, then `launchctl bootout "gui/$(id -u)/com.user.resource-sample"`
 and `launchctl bootout "gui/$(id -u)/com.user.resource-cleanup"`. Keep audits/history; do not delete old process state.
 
-Validation (fixtures are created/deleted only inside this repo):
+Validation (fixtures use isolated temporary state, never the live shared installation):
 
 ```sh
 node scripts/test/resource-scenarios.mjs

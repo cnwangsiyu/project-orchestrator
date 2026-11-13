@@ -116,6 +116,7 @@ export async function collect({ registry = null, budgetMs = 1750, cpuBudgetMs = 
   heavyLocks.journal = journal;
   heavyLocks.waiters = observeWaiters(rows, processes, psStartedAt);
   heavyLocks.waitersComplete = processComplete;
+  heavyLocks.lane3 = heavyGate.lane3 ?? null;
   if (statusText !== null) heavyLocks.capturedStatus = parseHeavyStatus(statusText);
   const counts = Object.fromEntries(['xcodebuild', 'gradle', 'native', 'node-test', 'worker', 'simulator', 'device', 'chrome', 'headless', 'daemon'].map((k) => [k, processComplete ? processes.filter((p) => p.kind === k).length : null]));
   const heavy = new Set(['xcodebuild', 'gradle', 'native', 'node-test']);

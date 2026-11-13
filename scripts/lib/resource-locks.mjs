@@ -32,10 +32,14 @@ export function laneAdmission(snapshot, caller = {}, limits = { empty: 12, one: 
     if (lock.state !== 'HELD' || lock.stale !== false || lock.local !== true || lock.pidIdentity !== 'observed') return unknown();
     otherLanes++;
   }
-  return { state: otherLanes >= laneIds.length ? 'NO_CAPACITY' : 'KNOWN', otherLanes,
-    loadGate: otherLanes === 0 ? limits.empty : otherLanes < laneIds.length ? limits.one : null,
-    thirdLaneOnly: availableLanes.length === 1 && availableLanes[0] === 'heavy-lane-3',
-    reason: 'approved v1.2 entry policy; STALE and the caller\'s verified own locks excluded' };
+  const thirdLaneOnly = availableLanes.length === 1 && availableLanes[0] === 'heavy-lane-3';
+  // Legacy observations know physical capacity, not lane-3 admission. Keep
+  // them distinct from normal tuning, and respect an explicit controller closure.
+  const capacity = availableLanes.length > 0 && (!thirdLaneOnly || snapshot.lane3 !== 'CLOSED');
+  return { state: capacity ? 'KNOWN' : 'NO_CAPACITY', otherLanes,
+    loadGate: capacity ? otherLanes === 0 ? limits.empty : limits.one : null,
+    thirdLaneOnly, lane3: snapshot.lane3 ?? null,
+    reason: 'approved normal entry policy (unchanged from v1.2); STALE and the caller\'s verified own locks excluded' };
 }
 const finite = (v) => typeof v === 'number' && Number.isFinite(v);
 const minuteTime = (s) => /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(s ?? '') && finite(Date.parse(s.replace(' ', 'T'))) ? Date.parse(s.replace(' ', 'T')) : null;
@@ -64,10 +68,13 @@ export function parseHeavyStatus(text, expected = BASE_HEAVY_IDS) {
 
 export function parseHeavyCheck(text, exitCode = 0) {
   const unknown = (reason) => ({ state: 'UNKNOWN', authoritative: false, exitCode, error: reason,
-    limit: null, lanes_held: null, loadGate: null, lanesHeld: null, memoryGateGiB: 16 });
+    limit: null, lanes_held: null, loadGate: null, lanesHeld: null, lane3: null, memoryGateGiB: 16 });
   if (![0, 5].includes(exitCode)) return unknown('heavy-check metrics unavailable (output omitted)');
   const number = '(\\d+(?:\\.\\d+)?)';
   let source = String(text).trim(), loadGate = 12, lanesHeld = null;
+  const lane3Match = source.match(/ lane3=(OPEN|CLOSED)$/);
+  const lane3 = lane3Match?.[1] ?? null;
+  if (lane3Match) source = source.slice(0, lane3Match.index);
   const v12 = source.match(new RegExp(`^load1m=${number} limit=(\\d+) lanes_held=(\\d+) (.*)$`));
   if (v12) {
     loadGate = +v12[2]; lanesHeld = +v12[3];
@@ -91,8 +98,8 @@ export function parseHeavyCheck(text, exitCode = 0) {
     availableBasis: darwin ? level !== undefined ? 'memorystatus-level' : 'pages-fallback (sysctl explicitly missing)' : 'Linux MemAvailable',
     memorystatusPct: level === undefined ? null : +level, pageHeadroomBytes: darwin ? +m[4] * GIB : null,
     swapUsedBytes: darwin ? +m[5] * GIB : null, limit: loadGate, lanes_held: lanesHeld,
-    loadGate, lanesHeld, memoryGateGiB: 16,
-    controllerPolicy: v12 ? 'v1.2-lane-aware' : 'legacy-fixed-12',
+    loadGate, lanesHeld, lane3, memoryGateGiB: 16,
+    controllerPolicy: lane3 && v12 ? 'v1.3-lane-aware' : v12 ? 'v1.2-lane-aware' : 'legacy-fixed-12',
     note: 'Controller state is authoritative; printed readings are rounded to 0.01, so do not recompute boundary verdicts.' };
 }
 

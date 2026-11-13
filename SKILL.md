@@ -66,7 +66,7 @@ override dependencies/quota/leases or authorize new work. Keep ready/dispatched 
 User, 2026-11-13: the routing/global-rules orchestrator owns global policy here (「都交给他来负责，让他统一管理」); the secretary only relays, keeps ledgers and asks decision cards, never owns or changes policy.
 The versioned [global-rules digest](references/global-rules.md) is the single injection source. Read it at startup/resume/compact and after a change; write `rules-ack <version>` in your ledger. See [four-layer enforcement and opt-in hook/launchd installation](references/rules-enforcement.md).
 
-- **Resources:** [machine resources](references/resources.md) supplies five-minute sampling, nightly retro/guarded cleanup and detection of builds without holders; [shared `res`](#shared-resources), the [live lock contract](/Users/bytedance/code/.claude-data/orchestrator/vesdk-mainline/tasks/T83/lock-contract.md) and [build/cache discipline](#build-discipline) require the wrapper or explicit take/return, build-then-lane order, finite waits/gates, reverse release, incremental/cold acceptance builds and scoped ccache/Gradle caches (first cache use cold).
+- **Resources:** [machine resources](references/resources.md) supplies five-minute sampling, nightly retro/guarded cleanup and detection of builds without holders; [shared `res`](#shared-resources), the [maintained lock contract](references/res-contract.md) and [build/cache discipline](#build-discipline) require the wrapper or explicit take/return, build-then-lane order, finite waits/gates, reverse release, incremental/cold acceptance builds and scoped ccache/Gradle caches (first cache use cold). Global-rules owns the whole tool since 2026-11-13; v1.3 lane 3 is pending its reviewed switch.
 - **Disk:** [workspace retention](#workspace-retention) sets no worker space caps; auto-clean self-made build clones/templates/caches only when the data disk has <1 TB free; real workspaces/user data require a user card.
 - **Claude settings:** [documented settings](#claude-worker-settings) record `CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP=1`; idle-stop has no switch (pin or keep working), with no settings mutation.
 - **Claude workers:** [launch](#claude-worker-settings) always uses Remote Control + explicit Bypass; [permissions](#permission-plan) use cards for what Bypass cannot pass, agents execute non-secret actions, only the user types secrets.
@@ -536,19 +536,18 @@ data disk has **<1 TB free**; confirm ownership and that no active task needs th
 always needs the user's decision card, regardless of free space.
 
 <a id="build-discipline"></a>**Build and device environment discipline** (user-approved; heavy-build lock live 2026-11-13,
-vesdk-mainline T83 Part A): follow the [full lock contract](/Users/bytedance/code/.claude-data/orchestrator/vesdk-mainline/tasks/T83/lock-contract.md)
+vesdk-mainline T83 Part A; global-rules owner since 2026-11-13): follow the [maintained lock contract](references/res-contract.md)
 and take-time notes at `~/.claude/orchestrator/_shared/notes/heavy-build.md`. Use the live shared `res`, not a private lock.
 
 - Before builds/device runs, inspect orphaned build/test trees using task ownership and recent activity. Cleanup uses
   [resources.md](references/resources.md#cleanup)'s guarded executor only: terminal owner, continuous idle evidence,
   live-session/lease protections and every orchestrator's release. PPID=1 or process age alone is never permission to kill.
 - **Scope and slots:** full-package builds (env verify, app `xcodebuild`, Gradle assemble with native) hold
-  `heavy-build` plus one of `heavy-lane-1`/`heavy-lane-2` for the whole run: one full-package build and at most two
-  heavy tasks machine-wide. SG packaging, native-compiling or long multi-process focused tests need one lane.
-  User approved **2-3 lanes on 2026-11-13**: a third `heavy-lane-3` may be taken only at
-  `load1m <=8 && availableBytes >=32 * 2**30`, with known readings at acquisition time and ordinary reverse release.
-  This is a pending [contract request](references/heavy-lane-3-request.md) to vesdk-mainline, not a local `res` edit
-  or a claim of deployment. Until owner rollout use the installed lanes only. ONE full-package slot stays unchanged.
+  `heavy-build` plus one lane for the whole run: one full-package build and two normal heavy lanes.
+  After the reviewed v1.3 switch, `heavy-lane-3` admits a third task only at load1m <=8 AND available memory >=32 GiB.
+  SG packaging, native-compiling or long multi-process focused tests need one lane.
+  The routing/global-rules owner maintains enforcement in `scripts/res/res`; until its reviewed switch use
+  the installed lanes only. Telemetry may observe optional lane 3, but never implements or admits it.
   Host unit tests without a full native build, single-TU compiles, analysis/docs and build-free device sessions are
   not heavy. These caps never lower model-worker concurrency; keep independent ready work running.
 - **Take and gate:** `res take <id> --by <session> --project <slug> --for "<purpose>" --task <task-id> --pid $$`
@@ -556,15 +555,18 @@ and take-time notes at `~/.claude/orchestrator/_shared/notes/heavy-build.md`. Us
   metrics return 1, no acquisition). User-approved entry load (2026-11-13, secretary option A):
   **limit = 12 + 8 * lanes held by others, capped at 20** (12 with none, 20 with one or more).
   STALE and caller-owned locks do not count; two occupied lanes leave no capacity on the existing two-lane contract.
-  After owner rollout, only lane 3 can add capacity under its stricter 8/32 gate. Normal-lane memory remains
+  After owner rollout, only lane 3 adds capacity under its stricter 8/32 gate; its holders count like any other lane.
+  Normal-lane memory remains
   **>=16 GiB**. T88 reports shared `res` v1.2 live (2026-11-13): `heavy-check` prints `limit`/`lanes_held`;
   verify sampled output and report legacy/policy mismatches to its owner, never bypass the live gate.
+  v1.3 appends `lane3=OPEN|CLOSED` and enforces its stricter gate in lane-3 take/wait; OPEN is not ownership.
   macOS available memory
   is `kern.memorystatus_level / 100 * physical memory` (fallback/Linux details in the contract), not swap/page diagnostics.
 - **Build entry:** full-package briefs require [heavy-build.sh](scripts/heavy-build.sh) or explicit equivalent
   `res` take/return; other heavy tasks use the lane-only protocol. The wrapper never installs tools or bypasses a
   gate, preserves the command's exit status and terminates owned child groups before returning holds. Don't nest
   it or reuse an already-held heavy lock. The resource sampler independently detects builds without holders.
+  By default it tries lanes 1, 2, then 3 and retries within the finite timeout; `HEAVY_BUILD_LANE` can pin 1/2/3.
 - **Order and bounded waiting:** full-package runs take `heavy-build` first, then one lane; never hold a lane while
   waiting for `heavy-build`. Use `res wait <id>` with the same holder/project/purpose/task/PID flags and always
   `--timeout <minutes>`; it backs off and enforces the heavy-* gate (0 taken, 2 timeout). Run waits in the background
@@ -705,7 +707,8 @@ short, batch updates that arrive together, and reply in the user's language.
   go in `_shared/notes/<id>.md` via `res note <id> --by <name> --note "<pitfall; workaround>"`,
   not in a project ledger, since every project using it needs them. `res take` and
   `res status <id>` print the notes; workers record what they discover and say if it is unconfirmed.
-  The script lives in this skill's `scripts/res`, symlinked into `_shared/`.
+  The maintained Bash script is `scripts/res/res`; after the owner's reviewed switch it is symlinked as `_shared/res`.
+  Ownership, tests, switch and rollback are in [resources.md](references/resources.md#res-ownership).
 - **Create worktrees yourself** with `git -C <repo> worktree add -b <branch> <path> <base>`, with
   `<path>` under `<repo>/.claude/worktrees/` (where background sessions accept edits; reuse the
   repo's existing location if it already keeps worktrees elsewhere and workers edit there fine),

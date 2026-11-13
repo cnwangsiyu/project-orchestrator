@@ -1,8 +1,9 @@
 # Global Rules
-version: 2026-11-13.6
+version: 2026-11-13.7
 
 ## Changes In This Version
-- Approved utilisation: passive idle hints, optional lane 3 requested (load <=8, available >=32 GiB), expiring TTADK quota preference and nightly utilisation; CPU probe has an independent 4s budget, optional ccache stays UNKNOWN.
+- Approved utilisation: passive idle hints, expiring TTADK quota preference and nightly utilisation; CPU probe has an independent 4s budget, optional ccache stays UNKNOWN.
+- Global-rules owner takes over the whole res tool; v1.3 lane 3 is implemented here and staged pending owner switch, with load <=8 and avail >=32 GiB (2-3 lanes). Telemetry only observes it.
 - Persist both heavy-check formats with limit/lanes_held; overload review uses each sample's limit; live formula is min(20, 12 + 8 * lanes held by others).
 - Close cleanup/lock interruption races, bound hook disk stalls, and surface hub backoff/logs; adopt live T88 v1.2 load gates 12/20.
 - Integrate machine-wide resource sampling/retro/guarded cleanup; failed probes stay UNKNOWN, unsandboxed host qualification precedes installation.
@@ -20,8 +21,8 @@ version: 2026-11-13.6
 - Claude workers always use `--remote-control --permission-mode bypassPermissions`; cards for what Bypass cannot pass, agents execute non-secret actions, only the user types secrets.
 - TRAE restrictions are unrelated to our concurrency/quota; never reduce concurrency for queues. LLM throughput limits are QPM/TPM, no total-cost caps.
 - Resources use shared `res`: short/urgent first, long/low-priority later; resources.md supplies five-minute sampling/retro/guarded cleanup and unlocked-build detection. Failed probes are UNKNOWN; telemetry never restarts hubs/reclaims locks. Validate a complete unsandboxed host sample before installation.
-- Full-package builds hold `heavy-build` then a lane throughout; other heavy tasks hold a lane. ONE package slot stays; normal TWO lanes may float to THREE only after vesdk-mainline implements heavy-lane-3 with take-time load1m <=8 and available >=32 GiB. See heavy-lane-3-request.md; not rolled out here, use installed lanes only.
-- Use `scripts/heavy-build.sh` or explicit `res` take/return. Plain take needs heavy-check; wait has a finite timeout. Live T88 v1.2 load limit = 12 + 8 * lanes held by others, capped at 20; STALE and caller-owned locks don't count, memory >=16 GiB unchanged. Check limit/lanes_held in heavy-check output; never bypass; timeout means report/queue.
+- Full-package builds hold `heavy-build` then a lane throughout; other heavy tasks hold a lane. Two normal lanes; after reviewed v1.3 owner switch, lane 3 requires load1m <=8 AND avail >=32 GiB at take time. One full build, 2-3 heavy tasks; OPEN does not mean FREE.
+- Use `scripts/heavy-build.sh` (tries lanes 1/2/3; explicit HEAVY_BUILD_LANE pins one) or equivalent res protocol. Plain take needs heavy-check; lane-3 take also enforces its stricter gate. Finite wait; unchanged min(20, 12 + 8 * other lanes), memory >=16 GiB; STALE/own locks excluded. Check limit/lanes_held and appended lane3=OPEN|CLOSED; old output lacks lane 3. Timeout means report/queue, never bypass.
 - Pass the long-lived wrapper PID; return only owned holds in reverse order on every exit. STALE local dead-PID heavy locks older than 10 minutes may be reclaimed by res wait; never force active/unverified holds.
 - Compile 6/link 1/Xcode -jobs 6/Gradle 2 workers; fixed per-base incremental directories, one cold acceptance build, affected tests in fixes, no native rebuild without native changes.
 - No worker disk caps; auto-clean self-made clones/templates/caches only below 1 TB free on the data disk; deleting real workspaces/user data needs a card.
@@ -44,4 +45,4 @@ version: 2026-11-13.6
 - Builds use the heavy-build wrapper or res take/return per the contract; timeout means report/queue, never bypass. Return resources/close owned children on every exit; never kill another task's processes.
 
 ## Details
-See SKILL.md's global index/build discipline, [resources.md](resources.md), nightly-review.md, and the live T83 lock-contract.md/enable-build-cache.md linked there. Launchd and hook install commands are in rules-enforcement.md; nothing is installed automatically.
+See SKILL.md's build discipline, [resources.md](resources.md), [res-contract.md](res-contract.md), nightly-review.md and cache notes. Source/install ownership is here; branch -> tests -> review -> owner switch -> digest/caller acknowledgement. No installation is automatic.

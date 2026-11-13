@@ -74,16 +74,51 @@ try {
   const snapshot = locks(true); snapshot.locks = snapshot.locks.map((l) => /lane-[12]$/.test(l.id) ? held(l.id) : l);
   assert.equal(laneAdmission(snapshot).thirdLaneOnly, true);
   assert.equal(laneAdmission(snapshot).state, 'KNOWN');
+  assert.equal(laneAdmission(snapshot).lane3, null); // Legacy capacity is not lane-3 permission.
+  const closed = { ...snapshot, lane3: 'CLOSED' }, open = { ...snapshot, lane3: 'OPEN' };
+  assert.equal(laneAdmission(closed).thirdLaneOnly, true);
+  assert.equal(laneAdmission(closed).state, 'NO_CAPACITY');
+  assert.equal(laneAdmission(closed).loadGate, null);
+  assert.equal(laneAdmission(open).state, 'KNOWN');
+  assert.equal(laneAdmission(open).loadGate, 20);
+  const v13Text = 'load1m=8.00 limit=20 lanes_held=2 avail=32.00GiB (memorystatus 50%) pages_headroom=0.00GiB swap_used=0.00GiB gate=OK lane3=CLOSED';
+  const v13 = parseHeavyCheck(v13Text);
+  assert.equal(v13.state, 'OK'); assert.equal(v13.lane3, 'CLOSED');
+  assert.equal(v13.controllerPolicy, 'v1.3-lane-aware');
+  assert.equal(parseHeavyCheck(v13Text.replace('CLOSED', 'OPEN')).lane3, 'OPEN');
+  for (const observation of [snapshot, closed, open]) {
+    const tuning = review([sample(now, { heavyLocks: observation, heavyGate: v13 })], { now }).tuning;
+    assert.equal(tuning.entryObservations[0].thirdLaneOnly, true);
+    assert.equal(tuning.entryObservations[0].controllerMatchesApprovedPolicy, null);
+    assert.equal(tuning.nightlyAdjustmentEligible, false);
+  }
   snapshot.locks[3] = held('heavy-lane-3'); assert.equal(laneAdmission(snapshot).state, 'NO_CAPACITY');
   snapshot.locks[1] = { id: 'heavy-lane-1', state: 'FREE', stale: false };
   assert.equal(laneAdmission(snapshot).thirdLaneOnly, false); assert.equal(laneAdmission(snapshot).loadGate, 20);
+  assert.equal(laneAdmission({ ...snapshot, lane3: 'CLOSED' }).loadGate, 20); // Normal capacity is unchanged.
+  const unregistered = { ...leases, registered: leases.registered.slice(0, 3),
+    held: [{ id: 'heavy-lane-3', pid: 100, host: 'fixture', startMs: now - min }] };
+  assert.equal(lockSnapshot(unregistered, [], { host: 'fixture', psStartedAt: now, now, processComplete: true }).complete, false);
   assert.equal(parseHeavyCheck('load1m=2.00 limit=20 lanes_held=2 headroom=40.00 GiB gate=OK').authoritative, true);
   const waitRows = [{ pid: 200, ppid: 100, elapsedSeconds: 60, _command: '/safe/res wait heavy-lane-3 --by fixture --project p --task T1 --pid 100 --timeout 20' }];
   assert.equal(observeWaiters(waitRows, [{ pid: 200, id: 'wait3' }], now)[0].resource, 'heavy-lane-3');
   const journalDir = path.join(tmp, 'journal'); fs.mkdirSync(journalDir);
   fs.writeFileSync(path.join(journalDir, 'log.tsv'), '2026-11-13 01:00\ttake\theavy-lane-3\tfixture (p/T1)\t\n');
   assert.equal(readLockJournal(journalDir).events[0].resource, 'heavy-lane-3');
+  const event = { eventId: 'fixture:lane3', action: 'take', resource: 'heavy-lane-3', t: now - min,
+    holder: 'fixture', project: 'p', task: 'T1', precisionMs: min };
+  const timing = review([sample(now, { heavyLocks: { ...locks(true), journal: { events: [event] } } })], { now }).heavyLocks;
+  assert.ok(timing.holdTimes.some((hold) => hold.resource === 'heavy-lane-3'));
   console.log('PASS optional third lane status, registry, capacity and gate compatibility');
+
+  const policy = JSON.parse(fs.readFileSync(path.join(root, 'resource-policy.json'), 'utf8'));
+  assert.deepEqual(policy.lane3Gate, { load1mMax: 8, availableMemoryGiBMin: 32 });
+  assert.deepEqual(policy.heavyTaskLaneRange, [2, 3]);
+  assert.equal(policy.heavyTaskLanes, 3); assert.equal(policy.thirdLaneGate, undefined);
+  assert.equal(policy.loadGate, 12); assert.equal(policy.loadGateWithOneHeavyTask, 20); assert.equal(policy.memoryGateGiB, 16);
+  assert.deepEqual(policy.idleHint, { loadBelow: 6, cpuIdleAbovePct: 50, samples: 3, cooldownMinutes: 60 });
+  assert.deepEqual(policy.ttadkExpiry, { windowHours: 4, projectedShareBelow: 0.7 });
+  console.log('PASS one lane-3 policy retains idle/expiry thresholds and ordinary gates');
 
   const account = { name: 'ttadk', usage: { used: 20, limit: 100, resetsAt: now + 3 * h } };
   const history = [{ t: now - h, ttadk: { name: 'ttadk', ...account.usage, used: 10 } }];

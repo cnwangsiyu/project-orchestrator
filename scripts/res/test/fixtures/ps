@@ -1,0 +1,21 @@
+#!/bin/bash
+# Sandbox fixture table, not a host process probe. Only test-created PIDs are
+# supplied by suites or read from their scratch holds; no global enumeration.
+set -euo pipefail
+alive() {
+  case "$1" in ''|*[!0-9]*|0|2147483647) return 1 ;; esac
+  kill -0 "$1" 2>/dev/null
+}
+case "$*" in
+  '-p '* )
+    pid="$2"
+    alive "$pid" || exit 1
+    printf '%s\n' "$pid" ;;
+  '-axo pid=')
+    for file in "$RES_DIR"/locks/*.d/info; do
+      [ -f "$file" ] || continue
+      pid=$(/usr/bin/awk -F '\t' '$1=="pid"{print $2}' "$file")
+      if alive "$pid"; then printf '%s\n' "$pid"; fi
+    done ;;
+  *) echo 'fixture ps: unsupported request' >&2; exit 2 ;;
+esac

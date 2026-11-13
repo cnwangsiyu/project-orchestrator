@@ -206,7 +206,8 @@ export function assessThresholds(samples, stats, { loadGate, loadGateWithOneHeav
   const action = eligible ? 'Nightly review may propose one gate change within approved ranges, with task comparison and rollback evidence. Shared controller owner must acknowledge/apply; sampler never changes enforcement.'
     : askUser ? 'Retain approved entry limits 12/20 and memory 16 GiB. Ask before further tuning; the shared res owner must acknowledge any new change.'
       : 'Retain approved entry limits 12/20 and memory 16 GiB; missing data is not evidence of correct thresholds. Verify v1.2 adoption from captured output.';
-  return { loadGate, loadGateWithOneHeavyTask, memoryGateGiB, heavyPackageSlots: 1, heavyTaskLanes: 2, approvedRanges, approvalEvidence, direction,
+  return { loadGate, loadGateWithOneHeavyTask, memoryGateGiB, heavyPackageSlots: 1, heavyTaskLanes: 3, heavyTaskLaneRange: [2, 3],
+    lane3Gate: { load1mMax: 8, availableMemoryGiBMin: 32 }, approvedRanges, approvalEvidence, direction,
     entryObservations, controllerMismatchObservations: compared.filter((entry) => !entry.controllerMatchesApprovedPolicy),
     strictCandidateMinutes: stats.strictMinutes, looseCandidateMinutes: stats.looseMinutes, bypassCandidateMinutes: stats.bypassMinutes,
     comparableMinutes: stats.comparableMinutes, wellCoveredComparableDays: wellCoveredDays, automaticRangeAuthorized: authorized,

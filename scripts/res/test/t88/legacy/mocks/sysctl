@@ -1,0 +1,16 @@
+#!/bin/bash
+set -euo pipefail
+case "$*" in
+  '-n kern.memorystatus_level')
+    printf "sysctl: unknown oid 'kern.memorystatus_level'\n" >&2
+    exit 1 ;;
+  '-n vm.swapusage')
+    printf 'total = 0.00M used = 0.00M free = 0.00M (encrypted)\n'
+    exit 0 ;;
+esac
+if [ -f "$FIXTURE_DIR/recover-load" ]; then
+  rm "$FIXTURE_DIR/recover-load"
+  printf '{ 99.0 1.0 1.0 }\n'
+else
+  printf '{ %s 1.0 1.0 }\n' "$(<"$FIXTURE_DIR/load")"
+fi

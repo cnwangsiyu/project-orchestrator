@@ -192,8 +192,10 @@ proof from idle correlations. Check `idle-hints.jsonl` targets on each orchestra
 Approved utilisation settings (2026-11-13): lanes **2-3**, lane-3 take gate **load <=8 / memory >=32 GiB**,
 idle hint **three samples at load <6 / CPU idle >50%, 60min cooldown**, TTADK expiry **<4h / projected <70%**.
 Tune only inside explicit approved ranges; only lane count has numeric bounds in this brief. Retain the specified
-point thresholds or ask a Chinese card for ranges before tuning them. `heavy-lane-3-request.md` goes to vesdk-mainline
-for contract implementation/acknowledgement; report pending until rollout. Keep 12/20/16 and the ONE package slot.
+point thresholds or ask a Chinese card for ranges before tuning them. The global-rules owner maintains lane-3
+enforcement in `scripts/res/res` and [res-contract.md](res-contract.md); report the reviewed switch as pending
+until owner rollout, and verify the appended `lane3=OPEN|CLOSED` without treating OPEN as FREE.
+Keep 12/20/16 and the ONE package slot. Telemetry only observes, never implements a second gate or lock.
 
 - Report coverage, metric availability, CPU idle with resource-ready queued tasks versus unverified waits, load/pressure/
   swap contention, sampled project/task shares, independent package-build overlap, continuous idle workers, possible
@@ -220,7 +222,7 @@ for contract implementation/acknowledgement; report pending until rollout. Keep 
   output and caller-context differences, report verified rollout mismatches, never bypass the installed controller.
   Overload analysis uses each sample's recorded limit and verdict; don't compare all readings against 12 or merge
   closure periods across limit/lane-count changes. Old output has limit 12 and lane count UNKNOWN, not zero.
-  Check the installed shared controller with its owner (Webview / vesdk-mainline), including the current memory estimator;
+  Check the installed shared controller with the routing/global-rules owner, including the current memory estimator;
   a fallback page estimate and memorystatus percentage are not interchangeable benchmarks. Shift heavy builds and
   dispatch ready lightweight work first; do not reduce model concurrency to fix compiler fan-out. Preserve affected-only
   fix tests, final full gates, cache provenance, device leases and quality constraints.

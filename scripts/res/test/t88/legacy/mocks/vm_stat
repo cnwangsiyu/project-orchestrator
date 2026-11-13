@@ -1,0 +1,6 @@
+#!/bin/bash
+set -euo pipefail
+printf 'Mach Virtual Memory Statistics: (page size of %s bytes)\n' "$(<"$FIXTURE_DIR/page-size")"
+printf 'Pages free: %s.\n' "$(<"$FIXTURE_DIR/free")"
+printf 'Pages inactive: %s.\n' "$(<"$FIXTURE_DIR/inactive")"
+printf 'Pages speculative: %s.\n' "$(<"$FIXTURE_DIR/speculative")"

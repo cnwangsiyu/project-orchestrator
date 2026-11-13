@@ -1,0 +1,471 @@
+#!/bin/bash
+# res — shared resource holds across project orchestrators (devices, shared checkouts).
+# State lives in $RES_DIR (default ~/.claude/orchestrator/_shared):
+#   resources.tsv   registry: id<TAB>kind<TAB>policy<TAB>device-id<TAB>description
+#                   (policy: open | ask-user | never; device-id: iOS UDID or adb serial, - for none)
+#   locks/<id>.d/   present while held (mkdir is atomic, so two sessions can't both take it)
+#   log.tsv         append-only history of takes and returns
+#   notes/<id>.md   pitfalls of that resource (model/OS quirks, workarounds); printed on take
+# Heavy slots additionally support a gated wait and recovery of old, dead-PID holds.
+set -euo pipefail
+
+RES_DIR="${RES_DIR:-$HOME/.claude/orchestrator/_shared}"
+REG="$RES_DIR/resources.tsv"
+LOCKS="$RES_DIR/locks"
+LOG="$RES_DIR/log.tsv"
+NOTES="$RES_DIR/notes"
+
+usage() {
+  cat <<'EOF'
+res status [<id>]                     show every resource (or one) and who holds it
+res take <id> --by <session> --project <slug> --for "<purpose>" [--task <id>] [--until <when>] [--offline] [--pid <pid>]
+res wait <id> --by <session> --project <slug> --for "<purpose>" --timeout <minutes> [take options]
+                                      retry held resources; heavy-* waits also enforce the gate
+                                      --pid names the long-lived holder (default: caller PID)
+res heavy-check [--pid <pid>]         print lane-aware load limit and available memory; 5 if overloaded
+res extend <id> --by <session> --until <when>
+res return <id> --by <session> [--note "<text>"]
+res return <id> --by <session> --force --note "<why>"   reclaim a hold whose holder is gone
+res add <id> --device <udid|serial|-> --for "<description>" [--policy open|ask-user|never]
+                                      register a resource (default policy ask-user: the user
+                                      decides whether a newly plugged-in device may be shared)
+res note <id> --by <session> --note "<pitfall and workaround>"
+                                      append a dated pitfall to notes/<id>.md (shown on every take)
+res log [<n>]                         last n history lines (default 20)
+Devices show their live link (usbmux / devicectl / adb). take refuses a device that is not connected
+unless --offline (booking ahead of a plug-in).
+Exit codes: 0 ok, 2 held/wait timeout, 3 policy forbids, 4 device not connected,
+5 heavy gate overloaded, 1 usage/other error (including unavailable gate metrics).
+EOF
+}
+
+die() { echo "res: $*" >&2; exit 1; }
+now() { date '+%Y-%m-%d %H:%M'; }
+
+local_host() { hostname; }
+
+# Legacy holds and other hosts cannot be judged safely from this machine's PID table.
+hold_stale() {
+  local pid host
+  pid=$(field "$1" pid); host=$(field "$1" host)
+  case "$pid" in ''|*[!0-9]*|0) return 1 ;; esac
+  [ "$host" = "$(local_host)" ] || return 1
+  if ps -p "$pid" -o pid= >/dev/null 2>&1; then
+    return 1
+  else
+    [ "$?" -eq 1 ]
+  fi
+}
+
+hold_old() {
+  local start current
+  start=$(field "$1" start)
+  case "$start" in ''|*[!0-9]*) return 1 ;; esac
+  current=$(date +%s)
+  # awk avoids interpreting epoch strings with leading zeroes as shell octal.
+  awk -v start="$start" -v current="$current" 'BEGIN { exit !(current - start > 600) }'
+}
+
+# Count other holders conservatively: incomplete/legacy/remote holds still use
+# a lane unless the existing local-PID liveness check proves them STALE.
+heavy_lanes_held() {
+  local caller_pid="$1" lock id held=0
+  for lock in "$LOCKS"/heavy-lane-*.d; do
+    [ -d "$lock" ] || continue
+    id="${lock##*/}"; id="${id%.d}"
+    [ "$(field "$id" pid)" != "$caller_pid" ] || continue
+    hold_stale "$id" && continue
+    held=$((held + 1))
+  done
+  printf '%s\n' "$held"
+}
+
+cmd_heavy_check() {
+  local PID="$PPID" lanes_held limit=12
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --pid)
+        [ $# -ge 2 ] || die "--pid needs a value"
+        PID="$2"; shift 2 ;;
+      *) die "unknown option '$1'" ;;
+    esac
+  done
+  validate_pid
+  lanes_held=$(heavy_lanes_held "$PID")
+  [ "$lanes_held" -eq 0 ] || limit=20
+  local load headroom platform pages_reading pages_headroom memorystatus memsize swap_reading swap_used
+  local has_memorystatus=1 test_dir live_dir
+  platform=$(uname -s)
+  case "$platform" in
+    Darwin)
+      if [ "${RES_TEST_METRICS:-0}" = 1 ]; then
+        # Injected readings are restricted to scratch state, never the live registry.
+        test_dir=$(cd "$RES_DIR" && pwd -P) || die "test metrics need an existing scratch RES_DIR"
+        live_dir=$(cd "$HOME/.claude/orchestrator/_shared" && pwd -P) || die "cannot resolve live RES_DIR"
+        [ "$test_dir" != "$live_dir" ] || die "test metrics require a scratch RES_DIR"
+        load="${RES_TEST_LOAD1M-}"
+        pages_reading="${RES_TEST_VM_STAT-}"
+        memorystatus="${RES_TEST_MEMORYSTATUS_LEVEL-}"
+        memsize="${RES_TEST_MEMSIZE-}"
+        swap_reading="${RES_TEST_SWAPUSAGE-}"
+        if [ "$memorystatus" = missing ]; then has_memorystatus=0; fi
+      else
+        load=$(LC_ALL=C sysctl -n vm.loadavg) || die "cannot read load1m"
+        load=$(printf '%s\n' "$load" | awk '{print $2}')
+        pages_reading=$(LC_ALL=C vm_stat) || die "cannot read memory headroom"
+        if memorystatus=$(LC_ALL=C sysctl -n kern.memorystatus_level 2>&1); then
+          memsize=$(LC_ALL=C sysctl -n hw.memsize) || die "cannot read physical memory"
+        elif [ "$memorystatus" = "sysctl: unknown oid 'kern.memorystatus_level'" ]; then
+          has_memorystatus=0
+          memsize=
+        else
+          die "cannot read macOS memorystatus level"
+        fi
+        swap_reading=$(LC_ALL=C sysctl -n vm.swapusage) || die "cannot read swap usage"
+      fi
+      pages_headroom=$(printf '%s\n' "$pages_reading" | awk '
+        /page size of/ { size = $8 }
+        /^Pages free:/ { free = $3; sub(/[.]$/, "", free); nf = free ~ /^[0-9]+$/ }
+        /^Pages inactive:/ { inactive = $3; sub(/[.]$/, "", inactive); ni = inactive ~ /^[0-9]+$/ }
+        /^Pages speculative:/ { speculative = $3; sub(/[.]$/, "", speculative); ns = speculative ~ /^[0-9]+$/ }
+        END {
+          if (size <= 0 || !nf || !ni || !ns) exit 1
+          printf "%.0f\n", (free + inactive + speculative) * size
+        }') || die "cannot read memory headroom"
+      swap_used=$(printf '%s\n' "$swap_reading" | awk '
+        {
+          for (i = 1; i <= NF - 2; i++) {
+            if ($i != "used" || $(i + 1) != "=") continue
+            value = $(i + 2)
+            if (value !~ /^[0-9]+([.][0-9]+)?[KMGT]$/) exit 1
+            unit = substr(value, length(value))
+            sub(/[KMGT]$/, "", value)
+            scale = unit == "K" ? 1024 : unit == "M" ? 1048576 : unit == "G" ? 1073741824 : 1099511627776
+            printf "%.0f\n", value * scale
+            found = 1
+            break
+          }
+        }
+        END { if (!found) exit 1 }') || die "cannot read swap usage"
+      awk -v load="$load" -v pages="$pages_headroom" -v level="$memorystatus" \
+        -v has_level="$has_memorystatus" -v ram="$memsize" -v swap="$swap_used" \
+        -v limit="$limit" -v lanes="$lanes_held" 'BEGIN {
+        if (load !~ /^[0-9]+([.][0-9]+)?$/ || pages !~ /^[0-9]+$/ || swap !~ /^[0-9]+$/) exit 1
+        if (has_level && (level !~ /^[0-9]+$/ || level > 100 || ram !~ /^[0-9]+$/ || ram <= 0)) exit 1
+        gib = (has_level ? level / 100 * ram : pages) / 1073741824
+        overloaded = load > limit || gib < 16
+        source = has_level ? sprintf("memorystatus %d%%", level) : "memorystatus unavailable; pages fallback"
+        printf "load1m=%.2f limit=%d lanes_held=%d avail=%.2fGiB (%s) pages_headroom=%.2fGiB swap_used=%.2fGiB gate=%s\n", \
+          load, limit, lanes, gib, source, pages / 1073741824, swap / 1073741824, overloaded ? "OVERLOADED" : "OK"
+        exit overloaded ? 5 : 0
+      }'
+      return $?
+      ;;
+    Linux)
+      load=$(awk '{print $1}' /proc/loadavg) || die "cannot read load1m"
+      headroom=$(awk '/^MemAvailable:/ {printf "%.0f\n", $2 * 1024; found = 1}
+        END {if (!found) exit 1}' /proc/meminfo) || die "cannot read memory headroom"
+      ;;
+    *) die "heavy-check is unsupported on this OS" ;;
+  esac
+  awk -v load="$load" -v bytes="$headroom" -v limit="$limit" -v lanes="$lanes_held" 'BEGIN {
+    if (load !~ /^[0-9]+([.][0-9]+)?$/ || bytes !~ /^[0-9]+$/) exit 1
+    gib = bytes / 1073741824
+    overloaded = load > limit || gib < 16
+    printf "load1m=%.2f limit=%d lanes_held=%d avail=%.2fGiB headroom=%.2f GiB gate=%s\n", \
+      load, limit, lanes, gib, gib, overloaded ? "OVERLOADED" : "OK"
+    exit overloaded ? 5 : 0
+  }'
+}
+
+# A PID dot lock serializes reclaimers and recovers dead reclaimers. Rename
+# before deleting so cleanup cannot remove a newly acquired hold's directory.
+reclaim_stale_heavy() (
+  local id="$1" by="$2" lock="$LOCKS/$1.d" snapshot retired holder pid start
+  case "$id" in heavy-*) ;; *) return 1 ;; esac
+  [ -d "$lock" ] || return 1
+  hold_stale "$id" && hold_old "$id" || return 1
+  snapshot=$(cat "$lock/info") || return 1
+  retired=$(mktemp -d "$LOCKS/.stale-$id.XXXXXX") || return 1
+  cd "$lock" || { rmdir "$retired"; return 1; }
+  shlock -p "$$" -f .reclaim 2>/dev/null || { rmdir "$retired"; return 1; }
+  trap 'rm -f .reclaim; rmdir "$retired" 2>/dev/null || true' EXIT
+  trap 'exit 1' INT TERM HUP
+  [ "$(cat info)" = "$snapshot" ] && hold_stale "$id" && hold_old "$id" || return 1
+  holder=$(field "$id" by); pid=$(field "$id" pid); start=$(field "$id" start)
+  mv "$lock" "$retired/hold" || return 1
+  log reclaim "$id" "$by" "auto-reclaim STALE heavy hold from $holder (pid=$pid start=$start; age > 10 minutes)"
+  echo "res: auto-reclaimed STALE $id from $holder (pid=$pid; age > 10 minutes)" >&2
+  rm -rf "$retired"
+)
+
+cmd_wait() {
+  local id="${1:-}"; shift || true; need_id "$id"
+  local timeout= args=() duration deadline remaining delay=1 rc ALLOW_PID=1
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --timeout)
+        [ $# -ge 2 ] || die "--timeout needs minutes"
+        [ -z "$timeout" ] || die "duplicate --timeout"
+        timeout="$2"; shift 2 ;;
+      --by|--project|--for|--task|--until|--note|--device|--policy|--pid)
+        [ $# -ge 2 ] || die "$1 needs a value"
+        args+=("$1" "$2"); shift 2 ;;
+      *) args+=("$1"); shift ;;
+    esac
+  done
+  [[ "$timeout" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "wait needs --timeout <non-negative minutes>"
+  parse ${args[@]+"${args[@]}"}
+  [ -n "$BY" ] && [ -n "$PROJECT" ] && [ -n "$PURPOSE" ] || die "wait needs --by, --project and --for"
+  validate_pid
+  duration=$(awk -v t="$timeout" 'BEGIN {s=t*60; printf "%.0f\n", int(s)+(s>int(s))}')
+  deadline=$((SECONDS + duration))
+  while :; do
+    rc=0
+    case "$id" in
+      heavy-*)
+        if cmd_heavy_check --pid "$PID"; then
+          reclaim_stale_heavy "$id" "$BY" || true
+        else
+          rc=$?
+          [ "$rc" -eq 5 ] || return "$rc"
+        fi ;;
+    esac
+    if [ "$rc" -ne 5 ]; then
+      if (cmd_take "$id" ${args[@]+"${args[@]}"}); then return 0; else rc=$?; fi
+      [ "$rc" -eq 2 ] || return "$rc"
+    fi
+    remaining=$((deadline - SECONDS))
+    if [ "$remaining" -le 0 ]; then
+      echo "res: timed out waiting for '$id' after $timeout minutes" >&2
+      return 2
+    fi
+    [ "$delay" -le "$remaining" ] || delay="$remaining"
+    echo "res: waiting for '$id'; retry in ${delay}s" >&2
+    sleep "$delay"
+    delay=$((delay * 2)); [ "$delay" -le 15 ] || delay=15
+  done
+}
+
+reg_line() { awk -F'\t' -v id="$1" '$1==id' "$REG"; }
+need_id() {
+  [ -n "${1:-}" ] || die "missing resource id"
+  [ -n "$(reg_line "$1")" ] || die "unknown resource '$1' (see: res status)"
+}
+field() { awk -F'\t' -v k="$2" '$1==k{print $2}' "$LOCKS/$1.d/info" 2>/dev/null || true; }
+# Live link of a device: connected | <devicectl state> | not seen. One probe per run.
+# usbmux comes first: devicectl shows iOS < 17 devices only by ECID. The three sources run in
+# parallel; idevice_id (libimobiledevice) is preferred over pymobiledevice3, which is ~1 s slower.
+# `probe quick` skips devicectl (0.2 s to several s): enough when usbmux or adb sees the device.
+DEVS=
+probe() {
+  [ -n "$DEVS" ] && return 0
+  local t; t=$(mktemp -d)
+  { if command -v idevice_id >/dev/null; then idevice_id -l 2>/dev/null | sed 's/$/ (USBMUX) device/'
+    else pymobiledevice3 usbmux list 2>/dev/null | sed -nE 's/.*"Identifier": "([^"]+)".*/\1 (USBMUX) device/p'
+    fi >"$t/1" || true; } &
+  [ "${1:-}" = quick ] || { xcrun devicectl list devices >"$t/2" 2>/dev/null || true; } &
+  { adb devices 2>/dev/null | awk -F'\t' 'NR>1 && NF==2{print $1 " (ADB) " $2}' >"$t/3" || true; } &
+  wait
+  DEVS=$(cat "$t/1" "$t/2" "$t/3" 2>/dev/null || true)
+  rm -rf "$t"
+  DEVS="${DEVS:-none}"
+}
+conn() {
+  [ "$1" = - ] && { echo -; return; }
+  probe
+  local line state
+  line=$(printf '%s\n' "$DEVS" | grep -F -- "$1 (" | head -1 || true)
+  [ -n "$line" ] || { echo "not seen"; return; }
+  state=$(printf '%s\n' "$line" | sed -E 's/.*\((UDID|ADB|USBMUX)\) +//; s/  .*//')
+  case "$state" in available*|device) echo connected ;; *) echo "${state:-not seen}" ;; esac
+}
+log() { printf '%s\t%s\t%s\t%s\t%s\n' "$(now)" "$1" "$2" "$3" "$4" >>"$LOG"; }
+
+parse() {
+  BY= PROJECT= PURPOSE= TASK= UNTIL= NOTE= FORCE= OFFLINE= DEVICE= POLICY= PID="$PPID"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --by) BY="$2"; shift 2 ;;
+      --project) PROJECT="$2"; shift 2 ;;
+      --for) PURPOSE="$2"; shift 2 ;;
+      --task) TASK="$2"; shift 2 ;;
+      --until) UNTIL="$2"; shift 2 ;;
+      --note) NOTE="$2"; shift 2 ;;
+      --force) FORCE=1; shift ;;
+      --offline) OFFLINE=1; shift ;;
+      --device) DEVICE="$2"; shift 2 ;;
+      --policy) POLICY="$2"; shift 2 ;;
+      --pid)
+        [ "${ALLOW_PID:-}" = 1 ] || die "unknown option '$1'"
+        [ $# -ge 2 ] || die "--pid needs a value"
+        PID="$2"; shift 2 ;;
+      *) die "unknown option '$1'" ;;
+    esac
+  done
+}
+
+validate_pid() {
+  [[ "$PID" =~ ^[1-9][0-9]*$ ]] || die "--pid must be a positive process ID"
+}
+
+write_info() {
+  printf 'by\t%s\nproject\t%s\ntask\t%s\nfor\t%s\nsince\t%s\nuntil\t%s\npid\t%s\nhost\t%s\nstart\t%s\n' \
+    "$BY" "$PROJECT" "$TASK" "$PURPOSE" "$1" "$UNTIL" "$PID" "$(local_host)" "$(date +%s)" >"$LOCKS/$2.d/info"
+}
+
+cmd_status() {
+  [ -f "$REG" ] || die "no registry at $REG"
+  # A status of one checkout needs no device probe. One awk renders everything: a fork per
+  # field and row cost ~1.5 s.
+  if [ -z "${1:-}" ] || [ "$(reg_line "$1" | cut -f4)" != - ]; then probe; fi
+  local infos=() t pid_snapshot=0; t=$(mktemp); printf '%s\n' "$DEVS" >"$t"
+  ps -axo pid= >"$t.pids" 2>/dev/null && pid_snapshot=1
+  for f in "$LOCKS"/*.d/info; do [ -f "$f" ] && infos+=("$f"); done
+  awk -F'\t' -v only="${1:-}" -v host="$(local_host)" -v pid_snapshot="$pid_snapshot" '
+    function state(dev,   i, l) {
+      if (dev == "-") return "-"
+      for (i = 1; i <= nd; i++) if (index(D[i], dev " (")) {
+        l = D[i]; sub(/.*\((UDID|ADB|USBMUX)\) +/, "", l); sub(/  .*/, "", l)
+        return (l ~ /^available/ || l == "device") ? "connected" : (l == "" ? "not seen" : l)
+      }
+      return "not seen"
+    }
+    FILENAME == devs { D[++nd] = $0; next }
+    FILENAME == pids { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0); P[$0] = 1; next }
+    FILENAME != reg { n = split(FILENAME, a, "/"); id = a[n-1]; sub(/\.d$/, "", id); H[id, $1] = $2; held[id] = 1; next }
+    /^#/ || $1 == "" { next }
+    { known[$4] = 1 }
+    only != "" && $1 != only { next }
+    !hdr++ { printf "%-16s %-9s %-9s %-12s %-34s %s\n", "ID", "KIND", "POLICY", "LINK", "HOLDER", "SINCE → UNTIL / PURPOSE" }
+    {
+      if ($1 in held) {
+        t = H[$1, "task"]; u = H[$1, "until"]
+        holder = H[$1, "by"] " (" H[$1, "project"] (t != "" ? "/" t : "") ")"
+        pid = H[$1, "pid"]
+        if (pid_snapshot && H[$1, "host"] == host && pid ~ /^[0-9]+$/ && pid + 0 > 0 && !(pid in P))
+          holder = "STALE " holder
+        detail = H[$1, "since"] " → " (u != "" ? u : "?") " · " H[$1, "for"]
+      } else { holder = "FREE"; detail = $5 }
+      printf "%-16s %-9s %-9s %-12s %-34s %s\n", $1, $2, $3, state($4), holder, detail
+    }
+    END {
+      if (only != "") exit
+      for (i = 1; i <= nd; i++) {
+        l = D[i]; id = ""
+        if (match(l, /^[^ ]+ \((USBMUX|ADB)\) device$/)) { id = l; sub(/ .*/, "", id); src = (l ~ /ADB/) ? "ADB" : "USBMUX" }
+        else if (l ~ /\(UDID\) +(available|connected).*physical/) { id = l; sub(/ \(UDID\).*/, "", id); sub(/.* /, "", id); src = "devicectl" }
+        if (id != "" && !(id in known) && !(id in seen)) { seen[id] = 1; out = out "  " id " " src "\n" }
+      }
+      if (out != "") printf "\nConnected but not registered (add with: res add <id> --device <id> --for \"<what it is>\"):\n%s", out
+    }
+  ' reg="$REG" devs="$t" pids="$t.pids" "$t" "$t.pids" ${infos[@]+"${infos[@]}"} "$REG"
+  rm -f "$t" "$t.pids"
+  [ -z "${1:-}" ] || show_notes "$1"
+}
+
+cmd_add() {
+  local id="${1:-}"; shift || true; parse "$@"
+  [ -n "$id" ] && [ -n "$DEVICE" ] && [ -n "$PURPOSE" ] || die "add needs <id>, --device and --for"
+  case "$id" in *[!A-Za-z0-9_.-]*) die "id may use letters, digits, . _ - only" ;; esac
+  [ -z "$(reg_line "$id")" ] || die "'$id' already exists"
+  [ "$DEVICE" = - ] || ! awk -F'\t' -v d="$DEVICE" '$4==d{f=1} END{exit !f}' "$REG" || die "device $DEVICE is already registered"
+  POLICY="${POLICY:-ask-user}"
+  case "$POLICY" in open|ask-user|never) ;; *) die "policy must be open, ask-user or never" ;; esac
+  local kind=device; [ "$DEVICE" = - ] && kind=checkout
+  printf '%s\t%s\t%s\t%s\t%s\n' "$id" "$kind" "$POLICY" "$DEVICE" "$PURPOSE" >>"$REG"
+  log add "$id" "${BY:-?}" "$POLICY · $DEVICE · $PURPOSE"
+  echo "added $id ($kind, $POLICY)"
+}
+
+cmd_take() {
+  local id="${1:-}" ALLOW_PID=1; shift || true; need_id "$id"; parse "$@"
+  [ -n "$BY" ] && [ -n "$PROJECT" ] && [ -n "$PURPOSE" ] || die "take needs --by, --project and --for"
+  validate_pid
+  local policy dev link; policy=$(reg_line "$id" | cut -f3); dev=$(reg_line "$id" | cut -f4)
+  case "$policy" in
+    never) echo "res: '$id' is off limits (policy never): $(reg_line "$id" | cut -f5)" >&2; exit 3 ;;
+    ask-user) [ -n "$FORCE" ] || { echo "res: '$id' needs the user's OK first (policy ask-user); once given, retry with --force" >&2; exit 3; } ;;
+  esac
+  if [ "$dev" != - ] && [ -z "$OFFLINE" ] && [ "$(field "$id" by)" != "$BY" ]; then
+    probe quick; link=$(conn "$dev")
+    [ "$link" = connected ] || { DEVS=; probe; link=$(conn "$dev"); }
+    [ "$link" = connected ] || { echo "res: '$id' is not connected ($link) — ask the user to plug in / unlock / trust it; --offline holds it anyway" >&2; exit 4; }
+  fi
+  mkdir -p "$LOCKS"
+  if mkdir "$LOCKS/$id.d" 2>/dev/null; then
+    write_info "$(now)" "$id"
+    log take "$id" "$BY ($PROJECT${TASK:+/$TASK})" "$PURPOSE${UNTIL:+ · until $UNTIL}"
+    echo "took $id"; show_notes "$id"
+  elif [ "$(field "$id" by)" = "$BY" ]; then
+    echo "already held by you: $id"; show_notes "$id"
+  else
+    echo "res: '$id' is held by $(field "$id" by) ($(field "$id" project)) since $(field "$id" since), until $(field "$id" until | sed 's/^$/?/') — $(field "$id" for)" >&2
+    echo "res: message that session (SendMessage; for a codex:<thread> holder, its project's orchestrator) and wait; do not use the resource meanwhile" >&2
+    exit 2
+  fi
+}
+
+cmd_extend() {
+  local id="${1:-}"; shift || true; need_id "$id"; parse "$@"
+  [ -n "$BY" ] && [ -n "$UNTIL" ] || die "extend needs --by and --until"
+  [ -d "$LOCKS/$id.d" ] || die "'$id' is not held"
+  [ "$(field "$id" by)" = "$BY" ] || die "'$id' is held by $(field "$id" by), not $BY"
+  local info="$LOCKS/$id.d/info" tmp; tmp=$(mktemp)
+  awk -F'\t' -v u="$UNTIL" 'BEGIN{OFS="\t"} $1=="until"{$2=u} {print}' "$info" >"$tmp" && mv "$tmp" "$info"
+  log extend "$id" "$BY" "until $UNTIL"
+  echo "extended $id until $UNTIL"
+}
+
+cmd_return() {
+  local id="${1:-}"; shift || true; need_id "$id"; parse "$@"
+  [ -n "$BY" ] || die "return needs --by"
+  [ -d "$LOCKS/$id.d" ] || { echo "$id was not held"; return 0; }
+  local holder; holder=$(field "$id" by)
+  if [ "$holder" != "$BY" ]; then
+    [ -n "$FORCE" ] && [ -n "$NOTE" ] || die "'$id' is held by $holder; only --force --note \"<why>\" may reclaim it"
+    log reclaim "$id" "$BY" "from $holder: $NOTE"
+  else
+    log return "$id" "$BY" "$NOTE"
+  fi
+  rm -rf "$LOCKS/$id.d"
+  echo "returned $id"
+}
+
+show_notes() {
+  if [ -s "$NOTES/$1.md" ]; then
+    echo; echo "── notes for $1 ($NOTES/$1.md) — read before use ──"; cat "$NOTES/$1.md"
+  fi
+  case "$1" in
+    heavy-*)
+      if [ "$1" != heavy-build ] && [ -s "$NOTES/heavy-build.md" ]; then
+        echo; echo "── heavy-task protocol ($NOTES/heavy-build.md) — read before use ──"; cat "$NOTES/heavy-build.md"
+      fi ;;
+  esac
+}
+
+cmd_note() {
+  local id="${1:-}"; shift || true; need_id "$id"; parse "$@"
+  [ -n "$BY" ] && [ -n "$NOTE" ] || die "note needs --by and --note"
+  mkdir -p "$NOTES"
+  [ -f "$NOTES/$id.md" ] || printf '# %s\n\n' "$(reg_line "$id" | cut -f5)" >"$NOTES/$id.md"
+  printf -- '- %s (%s): %s\n' "$(date '+%Y-%m-%d')" "$BY" "$NOTE" >>"$NOTES/$id.md"
+  log note "$id" "$BY" "$NOTE"
+  echo "noted on $id"
+}
+
+cmd_log() { [ -f "$LOG" ] && tail -n "${1:-20}" "$LOG" || true; }
+
+case "${1:-}" in
+  status) shift; cmd_status "$@" ;;
+  take) shift; cmd_take "$@" ;;
+  wait) shift; cmd_wait "$@" ;;
+  heavy-check) shift; cmd_heavy_check "$@" ;;
+  extend) shift; cmd_extend "$@" ;;
+  return) shift; cmd_return "$@" ;;
+  add) shift; cmd_add "$@" ;;
+  note) shift; cmd_note "$@" ;;
+  log) shift; cmd_log "$@" ;;
+  -h|--help|help|'') usage ;;
+  *) usage >&2; exit 1 ;;
+esac
