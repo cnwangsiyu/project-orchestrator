@@ -216,7 +216,8 @@ engineering work. Ask the user before sending other companies' or personal data 
 
 Order for Codex work: **TTADK first, then TRAE CLI, then personal quota** (ChatGPT accounts / Claude). `route.mjs` picks
 TRAE whenever TTADK is out (daily quota used up, down, or `--exclude-account ttadk`) and TRAE is healthy; the OK gate for
-personal quota appears only when both company accounts are out. The user chose not to cap TRAE usage.
+personal quota needs approval based on the actual primary/second-opinion account, including ladder fall-throughs
+while a company account remains usable (`--urgent` and standing exceptions apply). The user chose not to cap TRAE usage.
 
 - **What it is.** TRAE CLI (`traecli` / `traex`) is the company's official agent CLI (the compliance FAQ lists it as
   cleared), a fork of Codex maintained by the TRAE team, with its own model pool, separate from TTADK's. Models include
@@ -266,6 +267,8 @@ personal quota appears only when both company accounts are out. The user chose n
   model, plus the aggregate weekly pool (TUI "Weekly quota"). Amounts are strings, times unix seconds;
   `model/list` maps each model to its `businessMetadata.internal_daily_quota_key` (null for Seed, DeepSeek and older GPTs:
   no daily bucket). `codex-worker.mjs --account trae usage` prints this as `{kind:'trae', dailyUsage, usage, modelQuotas}`;
+  `state.mjs` stamps the normalized quota with `sampledAt`; daily readings older than 30 minutes or without a valid
+  sample time are unknown, even if resetTime is still in the future. Cached reads preserve the original timestamp.
   `quota.mjs` shows one row per model with a daily bucket plus the weekly row. A depleted bucket (`isDepleted`) moves only
   that model into TRAE's **low-priority queue** (`queue/status` `modelQuotaLowPriority: true`; requests then wait with
   positions in the hundreds) until its reset. For new dispatches, `route.mjs` prefers GPT-5.6-Sol with quota left, then Astra,

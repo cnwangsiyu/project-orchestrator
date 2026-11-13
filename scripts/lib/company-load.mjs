@@ -98,22 +98,23 @@ export const createQueueRecorder = (home, model) => {
 
 const compactBucket = (q) => q ? { used: num(q.used), limit: num(q.limit), resetsAt: num(q.resetsAt),
   ...(typeof q.depleted === 'boolean' ? { depleted: q.depleted } : {}) } : null;
-// An expired bucket is unknown, not depleted/spare or proof that the model has no daily bucket.
+// Stale/missing readings and expired buckets are unknown, never evidence of spare or bucket-free capacity.
 export const freshTraeQuota = (quota, now = Date.now()) => {
   if (!quota || typeof quota !== 'object' || Array.isArray(quota)) return null;
+  const dailyFresh = age(quota.sampledAt, now) != null;
   const current = (q) => {
     if (!q || typeof q !== 'object' || Array.isArray(q)) return null;
     const reset = num(q.resetsAt);
     return reset != null && reset <= now ? null : q;
   };
-  return { ...quota, daily: Object.fromEntries(Object.entries(quota.daily ?? {}).map(([id, q]) => [id, current(q)])),
+  return { ...quota, daily: Object.fromEntries(Object.entries(quota.daily ?? {}).map(([id, q]) => [id, dailyFresh ? current(q) : null])),
     weekly: current(quota.weekly) };
 };
 export const companySnapshot = (accounts, now = Date.now()) => {
   const tt = accounts?.find((a) => a.kind === 'ttadk'), tr = accounts?.find((a) => a.kind === 'trae');
   return {
     ttadk: tt ? { name: tt.name, ...compactBucket(tt.usage) } : null,
-    trae: tr ? { name: tr.name, daily: Object.fromEntries(Object.entries(tr.quota?.daily ?? {}).filter(([id]) => idOK(id))
+    trae: tr ? { name: tr.name, sampledAt: tr.quota?.sampledAt ?? null, daily: Object.fromEntries(Object.entries(tr.quota?.daily ?? {}).filter(([id]) => idOK(id))
       .map(([id, q]) => [id, compactBucket(q)])), weekly: compactBucket(tr.quota?.weekly),
       load: freshLoad(tr.load, now), queue: readQueueState(tr.home, now) } : null,
   };
@@ -150,11 +151,12 @@ export const ttadkBurn = (history, account, sampledAt, now = Date.now()) => {
     spanMin: (last.t - first.t) / 60000, sampledAt: last.t };
 };
 
-export const hasTraeDailyQuota = (quota) => Object.values(quota?.daily ?? {}).some((q) => q && typeof q === 'object' && !Array.isArray(q));
+export const hasTraeDailyQuota = (quota, now = Date.now()) => Object.values(freshTraeQuota(quota, now)?.daily ?? {})
+  .some((q) => q && typeof q === 'object' && !Array.isArray(q));
 
 export const balanceFactors = ({ ttadk, trae, model, category, stakes, impact, allowBucketFree = false, now = Date.now() }) => {
   const quota = freshTraeQuota(trae?.quota, now), q = quota?.daily?.[model], family = poolOf(model);
-  const bucketFree = allowBucketFree && hasTraeDailyQuota(quota) && !Object.hasOwn(quota.daily, model);
+  const bucketFree = allowBucketFree && hasTraeDailyQuota(quota, now) && !Object.hasOwn(quota.daily, model);
   const load = freshLoad(trae?.load, now)[model] ?? null, queue = freshQueue(trae?.queue, now)[family] ?? null;
   const remainingShare = validUsage(q) && q.resetsAt > now ? Math.max(0, (q.limit - q.used) / q.limit) : null;
   const tt = ttadk?.usage;

@@ -230,13 +230,24 @@ const ttCapable = ttModelsOK && ttTaskOK && !(claudeReviewFirst && ttHas(SOL) &&
   && !(cat === 'research' && !TT.search) && !(T.kind === 'browser' && !ttBrowser);
 const ei = (e) => EFFORTS.indexOf(e);
 const maxE = (a, b) => (ei(a) >= ei(b) ? a : b);
+const companyFirstEffort = () => {
+  const altSol = cat !== 'second-opinion' && T.alt?.vendor === 'codex' && T.alt.model === SOL ? T.alt.effort : null;
+  let eff = altSol ? maxE(altSol, base[0].effort) : base[0].effort;
+  if (['docs', 'research', 'image-read', 'analysis'].includes(cat)) eff = maxE(eff, 'high');
+  if (authorCodex) eff = maxE(eff, 'xhigh');
+  if (eff === 'max') eff = 'xhigh';
+  if (impact === 'throwaway' && ei(eff) > ei('high')) { eff = 'high'; why.push("throwaway: starts at Sol high on the company account (its daily token quota); a failure climbs to xhigh, then max"); }
+  const first = notch(X(SOL, eff), 0);
+  return (stakes === 'high' ? notch(first, +1) : first).effort;
+};
+const companyEffort = ttCapable ? companyFirstEffort() : null;
 if (ttCapable && !ttHas(SOL)) {
   // GPT-6.1-Sol unavailable on the company account (its GPT family paused or restricted, or excluded for this task):
   // the fallback models in order, then the row's own Claude steps. Company quota, so no question; personal quota (the
   // Claude steps) only after these have fallen short.
   const gone = modelExcluded(SOL) ? `excluded for this task (--exclude-model ${[...exModels].join(',')})` : modelExcluded(SOL, TT) ? 'excluded for this security task (--security)' : TT.poolPauses?.gpt ? `paused: ${TT.poolPauses.gpt.reason}` : TT.modelPauses?.[SOL] ? `unavailable: ${TT.modelPauses[SOL].reason}` : 'not listed';
-  const fallbacks = [...ttBucketFree.map((id) => X(id, maxE('medium', T.first.effort))), ...ttAlts,
-    ...(backgroundLane && ttHas(ASTRA) ? [X(ASTRA, maxE('high', T.first.effort))] : [])];
+  const fallbacks = [...ttBucketFree.map((id) => X(id, companyEffort)), ...ttAlts,
+    ...(backgroundLane && ttHas(ASTRA) ? [X(ASTRA, maxE('high', companyEffort))] : [])];
   why.push(`GPT-6.1-Sol on ${TT.name} ${gone} → its fallback models: ${fallbacks.map(label).join(' → ')}`);
   base = [...fallbacks, ...base.filter((x) => x.vendor === 'claude')];
 }
@@ -251,14 +262,7 @@ else if (ttCapable) {
   // - then every Sol notch up to xhigh, and on to max (no OK needed on TTADK) except for the cheap rows;
   // - then the row's own steps, minus Codex steps no stronger than what TTADK already tried (no Luna, Terra or a weaker
   //   Sol); Astra (ChatGPT, needs an OK) stays after Sol max, and when the ChatGPT accounts are out it is dropped.
-  const altSol = cat !== 'second-opinion' && T.alt?.vendor === 'codex' && T.alt.model === SOL ? T.alt.effort : null;
-  let eff = altSol ? maxE(altSol, base[0].effort) : base[0].effort;
-  if (['docs', 'research', 'image-read', 'analysis'].includes(cat)) eff = maxE(eff, 'high');
-  if (authorCodex) eff = maxE(eff, 'xhigh');
-  if (eff === 'max') eff = 'xhigh';
-  if (impact === 'throwaway' && ei(eff) > ei('high')) { eff = 'high'; why.push("throwaway: starts at Sol high on the company account (its daily token quota); a failure climbs to xhigh, then max"); }
-  let e0 = notch(X(SOL, eff), 0);
-  if (stakes === 'high') e0 = notch(e0, +1);
+  const e0 = X(SOL, companyEffort);
   const cheapRow = ['lookup', 'extract', 'draft', 'browser', 'computer-use'].includes(cat); // browser/desktop misses are UI trouble, not depth
   const rungs = [e0];
   while (ei(rungs.at(-1).effort) < ei('xhigh')) rungs.push(notch(rungs.at(-1), +1));
@@ -294,16 +298,12 @@ else if (ttCapable) {
 // second opinion is Claude while company Sol is available. Company capacity means an eligible routing model, not
 // merely a healthy account that still lists an excluded or unsupported family.
 const companyOut = !ttModelsOK && ttDevice && ttTaskOK && T.kind !== 'browser';
+if (companyOut && !opts.urgent && QX.ttadk && !QX.ttadk.usable && !QX.ttadk.quotaOut && !excluded.has(QX.ttadk.name))
+  tell.push(`TTADK is down (${QX.ttadk.reason}): tell the user now so they can fix it`);
 let deferred = null;
 const retry = (h) => (h != null && Number.isFinite(h) ? ` — retry in ${hours(h)}` : '');
 if (background && !TT) deferred = 'background: no eligible company model can take this task; queued for later, no personal quota';
 else if (st.stop) deferred = "neither vendor's usage is readable — check `claude -p /usage` and the Codex hubs before dispatching";
-else if (companyOut && !opts.urgent) {
-  const why = [QX.ttadk && `TTADK ${excluded.has(QX.ttadk.name) ? 'excluded' : QX.ttadk.quotaOut ? `quota used up, resets in ${hours((QX.ttadk.quotaOut.resetsAt - Date.now()) / 3600000)}` : QX.ttadk.usable ? 'no eligible routing model for this task' : `down: ${QX.ttadk.reason}`}`,
-    QX.trae && `TRAE ${excluded.has(QX.trae.name) ? 'excluded' : QX.trae.usable ? 'no eligible routing model for this task' : `unavailable: ${QX.trae.reason}`}`].filter(Boolean).join('; ');
-  if (QX.ttadk && !QX.ttadk.usable && !QX.ttadk.quotaOut && !excluded.has(QX.ttadk.name)) tell.push(`TTADK is down (${QX.ttadk.reason}): tell the user now so they can fix it`);
-  needsOK.push(`personal quota: no company account can take this (${why}). Ask the user before launching — go on now on personal quota (this pick), or wait for a company account. One answer covers the outage: "go on" → launch this and pass --urgent for such work until a company account is back; "wait" → hold it until then`);
-}
 else if ((T.kind === 'claudeOnly' || (T.kind === 'browser' && !browserViaCodex)) && QC.throttledUntil) deferred = `Claude-only work and Claude's 5h window is full${retry((QC.throttledUntil - Date.now()) / 3600000)}`;
 else if (T.kind === 'codexOnly' && chatgptOut) deferred = `Codex-only work and Codex is ${QX.throttledOnly ? 'paused by its 5h window' : 'out'}${retry(QX.nextFree)}`;
 else if (codexOut && !QX.throttledOnly && stakes === 'low' && T.kind !== 'claudeOnly' && !(T.kind === 'browser' && !browserViaCodex) && !opts.urgent)
@@ -528,6 +528,16 @@ const pickAcct = acct;
 // The second opinion's account: TTADK first for a Codex second opinion it can run; otherwise the ChatGPT account.
 const secondAcct = !second || second.vendor !== 'codex' ? null
   : !extraReview && onTTADK(second) && ttHas(second.model) ? { a: { name: TT.name, live: TT.live } } : ttadkRun ? chatgptAcct : pickAcct;
+// Company capacity does not authorize a ladder fall-through or a personal second opinion. Check actual accounts.
+const companyAccount = (a) => [QX.ttadk, QX.trae].some((c) => c && c.name === a?.a?.name);
+const personalException = (x, secondary) => cat === 'image-gen' || T.kind === 'claudeOnly'
+  || (x.vendor === 'claude' && (T.kind === 'browser' || (ttHas(SOL) && (secondary || claudeReviewFirst))));
+const personalPicks = [{ x: m, account: pickAcct, secondary: false }, { x: second, account: secondAcct, secondary: true }]
+  .filter(({ x, account, secondary }) => x && (x.vendor === 'claude' || !companyAccount(account)) && !personalException(x, secondary));
+if (!background && !opts.urgent && ttDevice && personalPicks.length) {
+  const selected = personalPicks.map(({ x, account, secondary }) => `${secondary ? 'second opinion' : 'primary'} ${label(x)}${x.vendor === 'codex' ? ` on ${account?.a?.name ?? 'main'}` : ''}`).join('; ');
+  needsOK.push(`personal quota: actual selected ${selected}. Ask the user before launching, even if a company account still has eligible models — go on now on personal quota, or wait for a company account. One answer covers the fall-through/outage: "go on" → pass --urgent for this work; "wait" → hold it until then`);
+}
 const profiles = readProfiles();
 // user-approved 2026-11-11 retro: exec bypasses codex-worker's thread rule; both CLIs accept this string config key.
 const credRule = 'Never read, copy or load any login session or credential file (cookies, SSO/session tokens, CLI auth files such as bytedcli\'s, keychain items, .netrc, API keys), and never inject a session into a browser or tool to get past a login. Wherever a login or authorization is needed, stop and report BLOCKED with what needs signing in.';

@@ -22,7 +22,8 @@ const tt = (extra = {}) => ({ name: 'ttadk', kind: 'ttadk', home: '/tmp/ttadk', 
 // TRAE CLI (second company account, 2026-11-08): no windows, no browser, its own model ids.
 const tr = (extra = {}) => ({ name: 'trae', kind: 'trae', home: '/tmp/trae', hub: 'ws://127.0.0.1:47398', healthy: true, reason: null, live: true, active: 0,
   models: ['gpt-6.1-sol', 'gpt-6-astra', 'gemini-3.1-pro-preview'], modelIds: { 'gpt-6.1-sol': 'GPT-6.1-Sol', 'gpt-6-astra': 'GPT-6-Astra', 'gemini-3.1-pro-preview': 'Gemini-3.1-Pro-Preview' },
-  search: true, searchLive: true, browser: false, windows: [], resets: null, ...extra });
+  search: true, searchLive: true, browser: false, windows: [], resets: null, ...extra,
+  ...(extra.quota ? { quota: { sampledAt: now, ...extra.quota } } : {}) });
 const five = (used, leftH) => ({ label: '5h', used, resetsAt: now + leftH * h, windowMins: 300, scoped: false });
 
 const S = {
@@ -708,12 +709,12 @@ for (const [sc, args] of ERRORS) {
     const personalPick = args[0] === 'second-opinion' ? claudePick : 'gpt-6.1-sol xhigh @main';
     for (const [sc, flags, want, gate] of [
       ['traeReviewFull', ['--security', '--exclude-model', 'deepseek', '--dry'], 'gemini-3.1-pro-preview high @trae', false],
-      ['traeFull', ['--security', '--exclude-model', 'deepseek'], 'gemini-3.1-pro-preview high @trae', false],
+      ['traeFull', ['--security', '--exclude-model', 'deepseek'], 'gemini-3.1-pro-preview high @trae', args[0] === 'review-high'], // personal Claude second opinion needs consent without company Sol
       ['traeReviewGptOut', ['--exclude-model', 'deepseek'], 'gemini-3.1-pro-preview high @trae', false],
       ['traeReviewFull', ['--exclude-model', 'gpt,deepseek'], 'gemini-3.1-pro-preview high @trae', false],
       // High-stakes/security review now excludes DeepSeek; the remaining ladder is Gemini then Claude.
       ['traeReviewGptOut', [], args[0] === 'review-high' ? 'gemini-3.1-pro-preview high @trae' : 'deepseek-v4.1-flash high @trae', false],
-      ['traeFull', ['--security', '--failures', '2'], args[0] === 'review' ? 'gemini-3.1-pro-preview high @trae' : 'opus xhigh @undefined', false],
+      ['traeFull', ['--security', '--failures', '2'], args[0] === 'review' ? 'gemini-3.1-pro-preview high @trae' : 'opus xhigh @undefined', args[0] !== 'review'], // actual personal ladder fall-through
       ['traeReviewFull', ['--security', '--exclude-model', 'deepseek,gemini'], personalPick, true],
       ['traeReviewFull', ['--security', '--exclude-model', 'deepseek,gemini', '--urgent'], personalPick, false],
       ['traeReviewGptOut', ['--exclude-model', 'deepseek,gemini'], personalPick, true],
@@ -1168,7 +1169,7 @@ for (const [sc, args] of ERRORS) {
     [idle.notes.some((s) => /balanced from TTADK/.test(s)), true]);
   // Exact time/share boundaries and synthetic burn-rate failures.
   const ttAccount = { name: 'ttadk', usage: usage() };
-  const factors = (q) => balanceFactors({ ttadk: ttAccount, trae: { quota: { daily: { [SOL]: q } }, load: load(), queue: queue() },
+  const factors = (q) => balanceFactors({ ttadk: ttAccount, trae: { quota: { sampledAt: now, daily: { [SOL]: q } }, load: load(), queue: queue() },
     model: SOL, category: 'analysis', stakes: 'normal', now });
   cases.push([factors(bucket(38, { resetsAt: now + BALANCE.expiresH * h })).expiresSoon, false],
     [factors(bucket(40, { resetsAt: now + h })).expiresSoon, false]);
@@ -1418,6 +1419,79 @@ for (const [sc, args] of ERRORS) {
     assert.equal(logged.company, 'trae'); assert.equal(logged.pick.model, GPT55); assert.equal(logged.balance.bucketFree, true);
     console.log('ok   bucket-free TRAE GPT: cheap/background preference, quota, mapping, security, vision, balancing, tiers and pauses');
   } catch (e) { fail++; console.log(`FAIL bucket-free TRAE GPT: ${e.stack}`); }
+}
+// Fix-round regressions: approval follows actual accounts, and company GPT floors/telemetry survive Sol loss.
+{
+  const SOL = 'gpt-6.1-sol', ASTRA = 'gpt-6-astra', SOL56 = 'gpt-5.6-sol', GPT55 = 'gpt-5.5', TERRA56 = 'gpt-5.6-terra';
+  const home = fs.mkdtempSync(path.join(tmp, 'actual-personal-quota-'));
+  const bucket = (depleted = false) => ({ used: depleted ? 80 : 20, limit: 80, remaining: depleted ? 0 : 60, depleted, resetsAt: now + 72 * h });
+  const active = { [SOL]: bucket(), [ASTRA]: bucket(), [SOL56]: bucket() };
+  const r = (args, { models = [GPT55], daily = active, sampledAt = now, company = false } = {}) => {
+    S.actualPersonalQuota = { claude: cl(10, 120), codex: [acc('main', 20, 120), ...(company ? [tt()] : []),
+      tr({ home, models, quota: { daily, sampledAt } })] };
+    return JSON.parse(run('actualPersonalQuota', args));
+  };
+  const gated = (o) => o.needsUserOK.some((n) => n.startsWith('personal quota:'));
+  try {
+    // Reviewer's exact reproduction: healthy TRAE has GPT-5.5 only; its one-rung lookup ladder reaches Sonnet.
+    const repro = r(['lookup', '--failures', '1']);
+    assert.equal(repro.pick.vendor, 'claude'); assert.equal(repro.pick.model, 'sonnet'); assert.ok(gated(repro));
+    assert.ok(!gated(r(['lookup']))); assert.ok(!gated(r(['lookup', '--failures', '1', '--urgent'])));
+    for (const [model, failures] of [[GPT55, 1], [TERRA56, 1], [SOL, 3], [ASTRA, 1], [SOL56, 1]]) {
+      const o = r(['lookup', '--failures', String(failures)], { models: [model] });
+      assert.ok(o.pick); assert.ok(o.pick.vendor === 'claude' || o.pick.account === 'main'); assert.ok(gated(o), model);
+    }
+    // A personal Codex account must be gated too, even while company Sol is otherwise usable.
+    const astra = r(['science', '--failures', '2'], { models: [SOL] });
+    assert.equal(astra.pick.account, 'main'); assert.equal(astra.pick.model, ASTRA); assert.ok(gated(astra));
+    assert.ok(!gated(r(['science', '--failures', '2', '--urgent'], { models: [SOL] })));
+    assert.ok(gated(r(['lookup', '--exclude-model', 'gpt'])));
+    assert.ok(gated(r(['lookup', '--exclude-account', 'trae'])));
+    assert.ok(gated(r(['lookup', '--security'])));
+    const depleted = Object.fromEntries([SOL, ASTRA, SOL56, GPT55, TERRA56].map((id) => [id, bucket(true)]));
+    assert.ok(gated(r(['lookup', '--failures', '3'], { models: [SOL], daily: depleted })));
+    assert.ok(!gated(r(['lookup'], { models: [SOL], daily: depleted }))); // accepted depleted company pick stays queued
+    const allGPTs = [SOL, ASTRA, SOL56, GPT55, TERRA56];
+    assert.ok(gated(r(['lookup', '--failures', '3'], { models: allGPTs, daily: depleted })));
+    assert.ok(gated(r(['lookup', '--exclude-model', 'gpt'], { models: allGPTs })));
+    assert.ok(!gated(r(['lookup', '--failures', '1'], { company: true }))); // healthy TTADK still handles the rung
+    for (const args of [['image-gen'], ['claude-tools'], ['browser'], ['computer-use']])
+      assert.ok(!gated(r(args)), `standing exception: ${args[0]}`);
+    assert.ok(!gated(r(['second-opinion', '--against', 'codex'], { models: [SOL] })));
+    assert.ok(!gated(r(['review-high', '--author', 'codex'], { models: [SOL] })));
+    // A personal second opinion is exempt with company Sol, but needs consent when only a fallback family can run.
+    const design = r(['design'], { models: [SOL] });
+    assert.equal(design.pick.account, 'trae'); assert.equal(design.secondOpinion.vendor, 'claude'); assert.ok(!gated(design));
+    const fallbackDesign = r(['design'], { models: ['deepseek-v4.1-flash'] });
+    assert.equal(fallbackDesign.pick.account, 'trae'); assert.equal(fallbackDesign.secondOpinion.vendor, 'claude'); assert.ok(gated(fallbackDesign));
+    assert.ok(!gated(r(['design', '--urgent'], { models: ['deepseek-v4.1-flash'] })));
+    for (const options of [{}, { models: [SOL], daily: depleted }, { models: allGPTs, daily: depleted }, { models: [GPT55], sampledAt: now - 31 * 60000 }]) {
+      for (const flags of [[], ['--exclude-model', 'gpt'], ['--exclude-account', 'trae'], ['--security']]) {
+        const o = r(['lookup', '--background', '--failures', '20', '--urgent', ...flags], options);
+        for (const p of [o.pick, o.secondOpinion].filter(Boolean)) { assert.equal(p.vendor, 'codex'); assert.equal(p.account, 'trae'); }
+        assert.ok(!gated(o));
+        if (!o.pick) { assert.ok(o.deferred); assert.ok(o.tellUser.some((n) => /queued for later/.test(n))); }
+      }
+    }
+    // Losing Sol must not lower the floor for judgment rows, alternate-Sol tiers, high stakes or authorship.
+    for (const args of [['analysis'], ['docs'], ['research'], ['design'], ['review', '--author', 'codex'],
+      ['analysis', '--stakes', 'high'], ['lookup', '--stakes', 'high'], ['implement-hard', '--impact', 'throwaway']]) {
+      const withSol = r([...args, '--background'], { models: [SOL, GPT55] });
+      const withoutSol = r([...args, '--background']);
+      assert.equal(withoutSol.pick.model, GPT55); assert.equal(withoutSol.pick.effort, withSol.pick.effort, args.join(' '));
+    }
+    // A future reset cannot make an old or missing reading current; state-cache checkedAt is not the quota sample.
+    const models = [SOL, ASTRA, SOL56, GPT55, TERRA56];
+    for (const sampledAt of [null, now - 31 * 60000, now - 48 * h, now + h]) {
+      assert.equal(r(['analysis', '--background'], { models, sampledAt }).pick.model, SOL);
+      assert.equal(r(['lookup'], { models, sampledAt }).pick.model, SOL);
+      assert.equal(r(['lookup'], { models, sampledAt, company: true }).pick.account, 'ttadk');
+      assert.equal(r(['analysis'], { models, sampledAt, daily: { ...active, [SOL]: bucket(true) } }).pick.model, SOL);
+    }
+    assert.equal(r(['analysis', '--background'], { models, sampledAt: now - 29 * 60000 }).pick.model, GPT55);
+    assert.equal(r(['analysis'], { models, sampledAt: now - 29 * 60000, daily: { ...active, [SOL]: bucket(true) } }).pick.model, SOL56);
+    console.log('ok   actual personal approval, one-model/excluded/depleted neighbours, background isolation, company effort floors and quota reading age');
+  } catch (e) { fail++; console.log(`FAIL fix-round routing regressions: ${e.stack}`); }
 }
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(fail ? `\n${fail} failing` : '\nall pass');

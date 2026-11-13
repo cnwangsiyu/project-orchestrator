@@ -88,6 +88,8 @@ To change routing for a kind of task, edit the table in `route.mjs` and this rat
    - Lower on Codex while it is overspending and a check exists.
    - Higher on Claude when its headroom expires within a day.
    - Floors: Sol, Terra and Astra never go below `medium`. No notch raises past `xhigh`; only the ladder reaches `max`.
+   - Company GPT first picks share the same row-effort calculation with or without Sol: judgment rows are at least
+     `high`, Codex-authored reviews at least `xhigh`, with the alternate-Sol tier, high-stakes notch and throwaway cap retained.
    - Fable is swapped for Opus `xhigh` while Fable's own window is ≥70%.
    - A retry can come out identical to the attempt that failed: the Codex notch has already put the first pick at the
      next step's effort, and Claude's budget rules out the Claude steps. In that case the router says so and adds a
@@ -106,6 +108,10 @@ To change routing for a kind of task, edit the table in `route.mjs` and this rat
      underused or front-loading, but only where the review policy wants a review anyway (release code, or service
      code at high stakes; user, 2026-11-07), never on a review, and never on a TTADK device.
    - A required review is told who wrote the code (`--author`); a Codex-written change is reviewed by Claude first.
+   - On a company-account device, gate the actual personal primary/second-opinion account with `personal quota:`, not
+     only the absence of company capacity. A ladder fall-through still needs consent. `--urgent` records prior consent;
+     standing exceptions are image generation, Claude-only tools, browser/desktop work Claude takes, and Claude
+     review/second-opinion routing while company Sol is eligible. Background work never falls through to personal quota.
 6. **Launch.**
    - The account is the one the quota state picks. When two or more accounts must each be spent within 48h, launches
      rotate across them.
@@ -144,7 +150,9 @@ keep their selected model; cheap rows try GPT-5.5 then GPT-5.6-Terra before the 
 - That TRAE model has a known, unexpired, non-depleted daily bucket with **at least 15% left**, reserved for urgent
   work and reviews. Exception: cheap rows may use GPT-5.5 or GPT-5.6-Terra when a known daily snapshot confirms no
   bucket for that model; no high-priority quota is spent and no depleted-bucket low-priority lane is entered.
-  A missing/empty daily snapshot or an expired/unknown entry is not proof that a model is bucket-free.
+  A missing/empty daily snapshot or an expired/unknown entry is not proof that a model is bucket-free. Daily snapshots
+  carry `sampledAt` and must be no more than 30 minutes old, matching load/queue freshness; missing/future/stale sample
+  times make all daily entries unknown, regardless of reset time. Cache reads never refresh this timestamp.
 - Model load is **below 60%**, with **no family queue position above 300 in the last 30 minutes**. Load/queue readings
   older than 30 minutes are ignored; missing or stale signals mean unknown, allowed only for the low-priority case below.
 - At least one factor applies: **low priority** (`--stakes low`, lookup/extract/draft, or `--impact throwaway`);

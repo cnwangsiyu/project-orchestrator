@@ -339,6 +339,8 @@ effort, Codex account and launch command from
     (no daily high-priority spend and no low-priority lane), then an eligible depleted daily bucket at the row's tier
     (Sol, then Astra), then other models without a daily bucket (DeepSeek-V4.1-Flash, then DeepSeek-V4-Pro;
     Seed-Evolving only for `image-read`), then the normal TRAE pick. No quota information keeps the normal pick.
+    Daily snapshots need a `sampledAt` reading no more than 30 minutes old; missing/future/stale readings are unknown,
+    even with a future bucket reset. Cache reads preserve the original sample time.
     `why` identifies the step and whether high-priority quota is spent; an Astra escalation keeps its tier.
     Model-fit and `--security` exclusions still apply: image reading needs a vision model, and DeepSeek cannot
     replace builds or sensitive reviews/acceptance. Expect hours (each request queues separately); launch as a hub
@@ -364,7 +366,8 @@ effort, Codex account and launch command from
     better at only while it has spare.
   - Company accounts first: TTADK, then TRAE CLI (account `trae`, the company's official Codex-fork
     CLI with its own model pool), then personal quota (user, 2026-11-08). route.mjs moves TTADK's work
-    to TRAE when TTADK is out; the personal-quota OK gate applies only when both are out. TRAE has no
+    to TRAE when TTADK is out; the personal-quota OK gate follows the actual selected account, including a ladder
+    fall-through while a company account still has eligible models. TRAE has no
     browser, desktop or image tools (references/codex-workers.md, "TRAE CLI"). Repeated TRAE failures
     pause the failing model family (queue full: 5, then 10, 20, 30 min; vendor restriction: until next 00:00 UTC / 08:00 China time;
     other hard failures such as quota: 30 min, then a probe;
@@ -401,10 +404,11 @@ effort, Codex account and launch command from
     When it runs out (`quota-exhausted:` from codex-worker; quota.mjs shows TTADK paused until the
     reset), don't retry or switch models: its work goes to TRAE without asking.
   - Company accounts (TTADK, TRAE) are used without asking; personal quota (ChatGPT accounts, Claude)
-    only after asking (user, 2026-11-09). When neither company account can take work they would
-    take, route.mjs prints "needs the user's OK" — ask once: "go on" → `--urgent` for such work until
-    a company account is back; "wait" → hold it. High stakes ask too. Standing exceptions, no question:
-    image generation, Claude-only tools, browser/desktop work Claude takes, Claude second opinions.
+    only after asking (user, 2026-11-09). On a company-account device, any actual personal primary or second-opinion
+    pick carries `personal quota:` approval, even if company capacity remains. Ask once: "go on" -> `--urgent` for
+    that work; "wait" -> hold it. High stakes ask too. Standing exceptions, no question: image generation,
+    Claude-only tools, browser/desktop work Claude takes, and Claude review/second-opinion routing while company Sol
+    is eligible. `--background` never falls through to personal quota.
   - Because of that daily cap, throwaway code work starts at Sol `high` on the company accounts
     (TTADK, TRAE) instead of `xhigh`; a failure still climbs to `xhigh` and `max` (user, 2026-11-09).
   - Every TTADK worker can search the web through its local proxy, once `ttadk-setup` has set it

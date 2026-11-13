@@ -8,7 +8,7 @@ import childProcess from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { BALANCE, parseTraeModels, readTraeModels, freshLoad, freshQueue, readQueueState, writeQueueState,
-  companySnapshot, readQuotaHistory, freshTraeQuota } from '../lib/company-load.mjs';
+  companySnapshot, readQuotaHistory, freshTraeQuota, hasTraeDailyQuota, balanceFactors } from '../lib/company-load.mjs';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'company-telemetry-'));
@@ -36,12 +36,24 @@ try {
   assert.equal(freshLoad({ [SOL]: { percent: 0, t: now - 30 * min } }, now)[SOL].percent, 0);
   assert.deepEqual(freshQueue({ gpt: { t: now - 31 * min, position: 999 } }, now), {});
   const bucket = { used: 100, limit: 100, depleted: true, resetsAt: now - 1 };
-  const quota = { daily: { expired: bucket, boundary: { ...bucket, resetsAt: now },
+  const quota = { sampledAt: now, daily: { expired: bucket, boundary: { ...bucket, resetsAt: now },
     active: { ...bucket, resetsAt: now + 1 }, unknown: { ...bucket, resetsAt: null } }, weekly: bucket };
   const current = freshTraeQuota(quota, now);
   assert.equal(current.daily.expired, null); assert.equal(current.daily.boundary, null); assert.equal(current.weekly, null);
   assert.equal(current.daily.active, quota.daily.active); assert.equal(current.daily.unknown, quota.daily.unknown);
   assert.ok(Object.hasOwn(current.daily, 'expired')); assert.equal(quota.daily.expired, bucket);
+  const longLived = { sampledAt: now, daily: { [SOL]: { used: 20, limit: 80, depleted: false, resetsAt: now + 72 * 60 * min } } };
+  assert.ok(hasTraeDailyQuota({ ...longLived, sampledAt: now - 30 * min }, now));
+  for (const sampledAt of [null, undefined, now + 1, now - 30 * min - 1, now - 48 * 60 * min]) {
+    const old = { ...longLived, sampledAt }, fresh = freshTraeQuota(old, now);
+    assert.equal(fresh.daily[SOL], null); assert.ok(Object.hasOwn(fresh.daily, SOL));
+    assert.equal(hasTraeDailyQuota(old, now), false);
+    for (const model of [SOL, 'gpt-5.5']) {
+      const factors = balanceFactors({ trae: { quota: old }, model, category: 'lookup', stakes: 'normal', allowBucketFree: true, now });
+      assert.equal(factors.bucketFree, false); assert.equal(factors.reserveOK, false); assert.equal(factors.eligible, false);
+    }
+  }
+  assert.equal(freshTraeQuota(longLived, now).daily[SOL], longLived.daily[SOL]);
 
   const queueFile = path.join(tmp, 'queue-state.json');
   const event = { t: now, position: 3100, state: 'queued', lowPriority: true, message: 'discard-me' };
@@ -64,9 +76,10 @@ try {
   assert.ok(!fs.readdirSync(tmp).some((s) => s.endsWith('.lock') || /\.\d+$/.test(s)));
   const snap = companySnapshot([{ kind: 'ttadk', name: 'ttadk', usage: { used: 10, limit: 100, resetsAt: now + min, raw: 'discard-me' } },
     { kind: 'trae', name: 'trae', home: tmp, load: parsed.load,
-      quota: { daily: { [SOL]: { used: 20, limit: 80, depleted: false, resetsAt: now + min, raw: 'discard-me' } }, weekly: { used: 5, limit: 300 } } }], now);
+      quota: { sampledAt: now, daily: { [SOL]: { used: 20, limit: 80, depleted: false, resetsAt: now + min, raw: 'discard-me' } }, weekly: { used: 5, limit: 300 } } }], now);
   assert.deepEqual(snap.ttadk, { name: 'ttadk', used: 10, limit: 100, resetsAt: now + min });
   assert.equal(snap.trae.daily[SOL].used, 20);
+  assert.equal(snap.trae.sampledAt, now);
   assert.equal(snap.trae.weekly.limit, 300);
   assert.equal(snap.trae.load[SOL].percent, 35);
   assert.equal(snap.trae.queue.gpt.high.position, 3100);
@@ -95,13 +108,20 @@ try {
   assert.equal(data.codexAccounts[0].healthy, true);
   assert.equal(catalogs, 1);
   assert.equal(analyze(data).codex.trae.load[SOL].percent, 35);
+  const sampledAt = data.codexAccounts[0].quota.sampledAt;
+  assert.ok(sampledAt >= now && sampledAt <= Date.now());
+  const staleData = structuredClone(data);
+  staleData.codexAccounts[0].quota.sampledAt = now - 31 * min;
+  assert.equal(analyze(staleData).codex.trae.quota.daily[SOL], null);
+  assert.equal(analyze(staleData).codex.trae.usable, true); // stale telemetry never pauses the account
   const records = readQuotaHistory(log);
   assert.equal(records.length, 1);
   assert.equal(records[0].trae.daily[SOL].used, 20);
+  assert.equal(records[0].trae.sampledAt, sampledAt);
   assert.equal(records[0].trae.weekly.limit, 300);
   assert.equal(records[0].trae.queue.gpt.high.position, 3100);
   assert.equal(records[0].trae.load[SOL].percent, 35);
-  readState();
+  assert.equal(readState().codexAccounts[0].quota.sampledAt, sampledAt);
   assert.equal(catalogs, 1); // cache does not issue a new load query or log a refresh
   assert.equal(readQuotaHistory(log).length, 1);
   readState({ fresh: true });

@@ -340,8 +340,8 @@ const readTtadk = (name, prof) => {
 // aggregate weekly pool; `model/list` maps model ids to their quotaKey (null for Seed, DeepSeek and older GPTs, which
 // have no daily bucket). Amounts are strings, times unix seconds. A depleted daily bucket is what puts that model in
 // TRAE's low-priority queue (`queue/status` modelQuotaLowPriority); route.mjs prefers another eligible model for new work.
-// Pure: `codex-worker --account trae usage` output → {daily:{<model id>:{used,limit,remaining,depleted,resetsAt}}, weekly}, or null.
-export const traeQuota = (payload) => {
+// `codex-worker --account trae usage` output → {sampledAt, daily:{<model id>:{used,limit,remaining,depleted,resetsAt}}, weekly}, or null.
+export const traeQuota = (payload, sampledAt = Date.now()) => {
   if (!payload || typeof payload !== 'object') return null;
   const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v
     : typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v)) ? Number(v) : null);
@@ -362,7 +362,7 @@ export const traeQuota = (payload) => {
   const u = payload.usage ?? null, limit = num(u?.quota_limit), remaining = num(u?.quota_remaining);
   const weekly = u ? bucket(limit != null && remaining != null ? Math.max(0, limit - remaining) : null, limit, remaining, u.is_depleted, when(u.reset_time)) : null;
   if (!Object.keys(daily).length && !weekly) return null;
-  return { daily, weekly };
+  return { sampledAt, daily, weekly };
 };
 // A TRAE CLI account (codex-worker trae-setup): the company's agent CLI with its own model pool, used after TTADK and
 // before personal quota (user, 2026-11-08). Healthy = the CLI present, logged in, GPT-6.1-Sol listed, the hub sound.
@@ -788,7 +788,7 @@ export const leanLines = (st, data) => {
       out.push('TTADK device: leave the ChatGPT and Claude quota for the user\'s other device (no TTADK there) — spend it only on work TTADK can\'t do; no effort raises or extra reviews just to use quota (route.mjs applies this)');
     }
     else if (T.quotaOut && X.trae?.usable) out.push(`TTADK paused — ${T.reason}: nothing to fix; its work goes to TRAE meanwhile (see below)`);
-    else if (T.quotaOut) out.push(`TTADK paused — ${T.reason}: nothing to fix; ask the user once whether TTADK's work goes on now on personal quota (then --urgent until the reset) or waits for the reset (route.mjs gates it on that OK; high stakes runs on personal quota without asking)`);
+    else if (T.quotaOut) out.push(`TTADK paused — ${T.reason}: nothing to fix; ask the user once whether TTADK's work goes on now on personal quota (then --urgent until the reset) or waits for the reset (route.mjs gates it on that OK; high stakes ask too)`);
     else if (X.trae?.usable) out.push(`TTADK unavailable — ${T.reason}: tell the user now so they can fix it; meanwhile its work goes to TRAE`);
     else out.push(`TTADK unavailable — ${T.reason}: tell the user now so they can fix it; route.mjs asks the user before its work goes to personal quota (--urgent only once the user said go on; high stakes ask too); never hold work without asking`);
     if (T.healthy && !T.live) out.push(`TTADK hub down — start it before hub workers: codex-worker.mjs --account ${T.name} hub (codex exec runs don't need it)`);
