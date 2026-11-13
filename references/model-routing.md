@@ -241,9 +241,17 @@ the nightly review compares dispatch reasons and recorded wall-clock time, inclu
 
     Light work on TRAE prefers bucket-free models even with Sol quota left. Normal/light substitution never uses Astra;
     hard substitution never uses 5.6-Sol, 5.6-Terra or 5.5. A failed CODE task's GPT substitution uses the hard tier,
-    never a weaker GPT. Effort escalation and the existing different-family retry rungs remain. Astra stays after
-    Sol max in the quality ladder; that rung cannot substitute back
-    to a cheaper GPT. TTADK retains its own model catalog and picks; this does not introduce TRAE-only ids there.
+    never a weaker GPT. Tier candidates are **availability substitutions for the current attempt, not retry rungs**:
+    pick the first usable candidate, then increase its effort before existing stronger quality steps. A ladder's
+    initial attempt uses its original tier; later CODE rungs use hard, so `--failures` cannot reinterpret earlier picks.
+    Resolve availability, quota, effort and balancing for the whole ladder before indexing by failures. Normalize the
+    actual picks: drop equal/lower effort on any previously tried model, weaker GPTs, and earlier fallback stages
+    already bypassed by a stronger substitution. Existing independent-family/stronger row steps remain eligible.
+    Astra stays after Sol max in the nominal quality ladder, but an earlier Astra substitution removes its later
+    equal/lower-effort duplicates, never adding a downgrade. Exhaustion retains the last strongest eligible pick and
+    asks before another attempt. Same-model `max` rungs survive normalization and still require the user's OK on
+    TRAE/personal quota; only the actual TTADK account is exempt. TTADK retains its own model catalog and picks;
+    this does not introduce TRAE-only ids there.
     `--security`, vision/model-fit exclusions, pauses and actual-personal-pick approval gates still apply.
 
     A depleted bucket uses the tier's next eligible model at the same GPT effort, with confirmed priority quota left

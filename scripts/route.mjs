@@ -18,6 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { readState, analyze, leanLines, readProfiles, hours, fmt, withLock, SHARED, ROUTE_LOG, POLICY } from './lib/state.mjs';
 import { poolOf } from './lib/trae-health.mjs';
 import { balanceFactors, hasTraeDailyQuota } from './lib/company-load.mjs';
+import { normalizeLadder } from './lib/model-ladder.mjs';
 
 const SKILL = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const RR = process.env.ROUTE_RR || path.join(SHARED, 'route-rotation.txt'); // launch counter for account rotation
@@ -150,9 +151,10 @@ const { claude: QC, codex: QX } = st;
 const noRedeem = !!opts['no-redeem'];
 const security = !!opts.security;
 const background = !!opts.background;
-const tier = ['implement-hard', 'debug', 'science', 'review-high', 'design'].includes(cat) || stakes === 'high'
-  || (failures >= 1 && CODE.includes(cat)) ? 'hard'
+const tierFor = (f) => ['implement-hard', 'debug', 'science', 'review-high', 'design'].includes(cat) || stakes === 'high'
+  || (f >= 1 && CODE.includes(cat)) ? 'hard'
   : ['lookup', 'extract', 'draft'].includes(cat) || stakes === 'low' || background ? 'light' : 'normal';
+const tier = tierFor(failures), initialTier = tierFor(0);
 const laneEligible = T.kind !== 'browser' && T.kind !== 'claudeOnly'
   && !['build-run', 'image-gen', 'image-read'].includes(cat) && !opts['device-lease'] && !opts['shared-lock'];
 // Background image reading can wait on a vision model; opportunistic company balancing still excludes images.
@@ -163,12 +165,11 @@ const modelExcluded = (model, account = null) => exModels.has(model) || exModels
   || (security && account?.kind === 'trae' && poolOf(model) === 'gpt');
 const deepseekUnfit = cat === 'build-run' || cat === 'review-high'
   || (['review', 'second-opinion'].includes(cat) && (impact === 'release' || stakes === 'high' || security));
-const cheapTraeRow = tier === 'light' && laneEligible;
-const tierModels = (account) => account?.kind === 'trae' ? (cat === 'image-read' ? [SOL, ASTRA] : COMPANY_TIERS[tier])
+const tierModels = (account, taskTier = tier) => account?.kind === 'trae' ? (cat === 'image-read' ? [SOL, ASTRA] : COMPANY_TIERS[taskTier])
   .filter((id) => account.models.includes(id) && !modelExcluded(id, account)
     && !(deepseekUnfit && poolOf(id) === 'deepseek')) : [];
-const bucketFreeModels = (account) => account?.kind === 'trae' && hasTraeDailyQuota(account.quota) && cat !== 'image-read'
-  ? tierModels(account).filter((id) => !TRAE_BUCKETED.has(id) && !Object.hasOwn(account.quota.daily, id)) : [];
+const bucketFreeModels = (account, taskTier = tier) => account?.kind === 'trae' && hasTraeDailyQuota(account.quota) && cat !== 'image-read'
+  ? tierModels(account, taskTier).filter((id) => !TRAE_BUCKETED.has(id) && !Object.hasOwn(account.quota.daily, id)) : [];
 // ChatGPT accounts (the quota-managed ones): out when every open account is spent/excluded and no card is due.
 const chatgptOpen = (QX.open ?? []).filter((r) => !excluded.has(r.a.name));
 const chatgptOut = QX.out || (noRedeem && !QX.pick && !!QX.redeem)
@@ -179,7 +180,7 @@ const chatgptOut = QX.out || (noRedeem && !QX.pick && !!QX.redeem)
 // the same rules, before personal quota (user, 2026-11-08). TT is whichever company account takes Codex work now.
 const taskFits = (a) => T.kind !== 'claudeOnly' && cat !== 'image-gen'
   && !(cat === 'research' && !a.search) && !(T.kind === 'browser' && !a.browser);
-const routingModelFits = (model, account) => model === SOL || tierModels(account).includes(model) || ALTS.some((a) => a.model === model
+const routingModelFits = (model, account) => model === SOL || tierModels(account, initialTier).includes(model) || ALTS.some((a) => a.model === model
   && (cat === 'image-read' ? a.vision : !a.visionOnly) && !(deepseekUnfit && poolOf(model) === 'deepseek'));
 const companyOrder = background && backgroundEligible ? [QX.trae, QX.ttadk] : [QX.ttadk, QX.trae];
 const TT = companyOrder.find((a) => a?.usable && !excluded.has(a.name)
@@ -200,8 +201,7 @@ const browserViaCodex = T.kind === 'browser' && (ttBrowser || chatgptBrowser.len
 // every other row the general ones (Seed-Evolving is vision-only, 2026-11-13).
 const ttAlts = ALTS.filter((a) => ttHas(a.model) && (cat === 'image-read' ? a.vision : !a.visionOnly)
   && !(deepseekUnfit && poolOf(a.model) === 'deepseek')).map((a) => X(a.model, a.effort));
-const ttBucketFree = backgroundLane || cheapTraeRow ? bucketFreeModels(TT) : [];
-const ttTierModels = tierModels(TT);
+const ttTierModels = tierModels(TT, initialTier);
 const ttModelsOK = ttHas(SOL) || ttAlts.length > 0 || ttTierModels.length > 0;
 const companyPick = (id, effort) => X(id, ALTS.find((a) => a.model === id)?.effort ?? effort);
 const priorityAvailable = (id, account) => {
@@ -264,25 +264,7 @@ const companyFirstEffort = () => {
   return (stakes === 'high' ? notch(first, +1) : first).effort;
 };
 const companyEffort = ttCapable ? companyFirstEffort() : null;
-if (ttCapable && !ttHas(SOL)) {
-  // GPT-6.1-Sol unavailable on the company account (its GPT family paused or restricted, or excluded for this task):
-  // the fallback models in order, then the row's own Claude steps. Company quota, so no question; personal quota (the
-  // Claude steps) only after these have fallen short.
-  const gone = modelExcluded(SOL) ? `excluded for this task (--exclude-model ${[...exModels].join(',')})` : modelExcluded(SOL, TT) ? 'excluded for this security task (--security)' : TT.poolPauses?.gpt ? `paused: ${TT.poolPauses.gpt.reason}` : TT.modelPauses?.[SOL] ? `unavailable: ${TT.modelPauses[SOL].reason}` : 'not listed';
-  const ids = [...new Set([...ttTierModels, ...ttAlts.map((a) => a.model)])];
-  const available = ids.filter((id) => !TT.quota?.daily?.[id]?.depleted);
-  const fallbacks = (available.length ? available : ids).map((id) => companyPick(id, companyEffort));
-  if (TT.kind === 'trae' && tier === 'hard' && cat !== 'image-read' && fallbacks[0]?.model === ASTRA) {
-    // A retry must not skip a newly eligible Astra after Sol/normal-tier GPT work became unavailable.
-    const rungs = [fallbacks[0]];
-    const cap = ['lookup', 'extract', 'draft', 'browser', 'computer-use'].includes(cat) ? 'xhigh' : 'max';
-    while (ei(rungs.at(-1).effort) < ei(cap)) rungs.push(notch(rungs.at(-1), +1, cap));
-    fallbacks.splice(0, 1, ...rungs);
-  }
-  why.push(`GPT-6.1-Sol on ${TT.name} ${gone} → its fallback models: ${fallbacks.map(label).join(' → ')}`);
-  base = [...fallbacks, ...base.filter((x) => x.vendor === 'claude')];
-}
-else if (ttCapable) {
+if (ttCapable) {
   // TTADK is the company's quota, so quality may cost TTADK effort but not personal quota (user, 2026-11-07):
   // - start at the higher of the row's first-pick effort and its Sol alternative's (design: Opus high / Sol xhigh →
   //   Sol xhigh); at least high for the rows Claude is better at or that need judgment (docs, research, image-read,
@@ -339,54 +321,25 @@ else if ((T.kind === 'claudeOnly' || (T.kind === 'browser' && !browserViaCodex))
 else if (T.kind === 'codexOnly' && chatgptOut) deferred = `Codex-only work and Codex is ${QX.throttledOnly ? 'paused by its 5h window' : 'out'}${retry(QX.nextFree)}`;
 else if (codexOut && !QX.throttledOnly && stakes === 'low' && T.kind !== 'claudeOnly' && !(T.kind === 'browser' && !browserViaCodex) && !opts.urgent)
   needsOK.push(`Codex is out (next free in ${QX.nextFree != null ? hours(QX.nextFree) : '?'}) and this is low-stakes: ask the user whether to run it now on Claude (this pick) or wait for Codex`);
-let m = null, prevRaw = null;
+let m = null;
 let balance = null, balancedAccount = null;
-if (!deferred) {
-  const firstOk = allowed(base[0]) ? base[0] : T.alt && allowed(T.alt) && cat !== 'second-opinion' ? T.alt : null;
-  const ladder = [firstOk, ...base.slice(1).filter(allowed)].filter(Boolean)
-    .filter((x, i, a) => a.findIndex((y) => y.vendor === x.vendor && y.model === x.model && y.effort === x.effort) === i);
-  const waits = [...(base.some((x) => x.vendor === 'claude') && QC.throttledUntil ? [(QC.throttledUntil - Date.now()) / 3600000] : []),
-    ...(base.some((x) => x.vendor === 'codex') && codexOut && QX.nextFree != null ? [QX.nextFree] : [])];
-  // Over a budget line but still runnable (Claude past its spare line, not throttled): ask instead of holding.
-  const runnable = !ladder.length && !background ? base.find((x) => (x.vendor === 'claude' ? !QC.throttledUntil : allowed(x))) ?? null : null;
-  if (!ladder.length && runnable) {
-    ladder.push(runnable);
-    if (!opts.urgent) needsOK.push(`no vendor has room within the quota policy (claude ${QC.status}, codex ${codexOut ? 'out' : 'ok'}): ask the user whether to run it now anyway on ${runnable.vendor} (this pick) or wait${retry(waits.length ? Math.min(...waits) : null)}`);
-  }
-  if (!ladder.length) deferred = `neither vendor has room for this now (claude ${QC.throttledUntil ? '5h-throttled' : QC.status}, codex ${codexOut ? (QX.throttledOnly ? 'paused' : 'out') : 'ok'})${retry(waits.length ? Math.min(...waits) : null)}`;
-  else {
-    if (firstOk && firstOk !== base[0]) why.push(`${base[0].vendor} not available for this (${base[0].vendor === 'claude' ? `claude ${QC.throttledUntil ? '5h-throttled' : QC.status}` : QX.throttledOnly ? 'codex paused by its 5h window' : 'codex out'}) → ${firstOk.vendor}`);
-    m = ladder[Math.min(failures, ladder.length - 1)];
-    if (failures) prevRaw = ladder[Math.min(failures - 1, ladder.length - 1)];
-    if (failures) why.push(`escalated to step ${Math.min(failures, ladder.length - 1)} of ${ladder.length - 1} after ${failures} failure(s)`);
-    if (failures >= ladder.length) needsOK.push(`escalation ladder exhausted after ${failures} failure(s): tell the user before trying again`);
-    if (failures >= 1 && CODE.includes(cat)) notes.push("if the last miss was spec/process, amend the brief's acceptance first and say what changed before dispatching this fix round (outcome --cause); do not repeat the same brief");
-    if (failures >= 1 && CODE.includes(cat)) notes.push('rework thread rule (SKILL.md, 2026-11-13): may continue the original author thread only for this same-task fix round with useful context, company account (personal needs user OK), no route escalation or exclusion, and no depleted TRAE bucket with queue >300 while someone waits; otherwise use the route thread. Record outcome.mjs --actual and ledger: "continued original thread because ..."');
-    // Rework retro 2026-11-10 (user-approved): from the second failed attempt of code work, patching again rarely helps
-    // when the new defect is of the same kind; re-scope first.
-    if (failures >= 2 && CODE.includes(cat)) notes.push('before this fix round: if the last fix brought a new defect of the same kind (same invariant, state or race), stop patching — find whether it is a shared contract, the interface layout or a too-wide patch, then simplify or split the work (a `design` route can review the approach); the fix brief still asks for the original failure, the fix and the neighbouring old behaviour to be tested');
-    const codexFails = ladder.slice(0, Math.min(failures, ladder.length)).filter((x) => x.vendor === 'codex').length;
-    if (codexFails >= 2) tell.push(`Codex has fallen short on this task ${codexFails} times: tell the user what happened (model, effort, symptom)`);
-    if (codexOut && !QX.throttledOnly && m.vendor === 'claude' && T.kind !== 'claudeOnly') why.push('Codex is out: Claude takes this because it matters');
-  }
-}
 
 // ---- 2. effort ----
-// tune(): the effort notches for a ladder step taken after f failures. Also used to rebuild the previous attempt, so a
-// retry that a quota notch has made identical to it is flagged instead of reported as an escalation.
+// Resolve effort and availability for every rung before selecting a retry; equal/lower actual steps are dropped.
 // TTADK takes the Codex pick when the gateway has its model; when the ChatGPT accounts are out, it also takes models it
 // lacks as Sol. Image generation never runs there, not even its Sol fallback step: the gateway has no image tool.
 // research without the search proxy stays off TTADK on every step, fallbacks included (nightly review 11-07 dry run).
 const onTTADK = (x) => x?.vendor === 'codex' && !!TT && taskFits(TT) && (ttHas(x.model)
   || (balancedAccount?.models.includes(x.model) && !modelExcluded(x.model, balancedAccount)) || (chatgptOut && ttModelsOK));
 // TRAE sets request priority. Prefer models that avoid daily high-priority spend; missing telemetry is not free quota.
-const backgroundChoice = (x, log) => {
+const backgroundChoice = (x, log, taskTier) => {
   const daily = TT.quota?.daily;
   const known = hasTraeDailyQuota(TT.quota);
+  const candidates = tierModels(TT, taskTier), freeModels = bucketFreeModels(TT, taskTier);
   if (cat !== 'image-read') {
     // Preserve quality-ladder Astra/fallback rungs; background never downgrades a hard GPT to a cheap one.
-    const ids = x.model === ASTRA || (tier === 'hard' && x.model !== SOL) ? [x.model]
-      : tier === 'hard' ? ttTierModels : [...ttBucketFree, ...ttTierModels.filter((id) => daily?.[id]?.depleted)];
+    const ids = x.model === ASTRA || (taskTier === 'hard' && x.model !== SOL) ? [x.model]
+      : taskTier === 'hard' ? candidates : [...freeModels, ...candidates.filter((id) => daily?.[id]?.depleted)];
     const id = known ? ids[0] : null;
     if (id) {
       const free = !TRAE_BUCKETED.has(id) && !Object.hasOwn(daily, id), depleted = daily[id]?.depleted;
@@ -420,16 +373,17 @@ const backgroundChoice = (x, log) => {
 };
 // Daily depletion affects new model choices, never account health, concurrency or an accepted queued turn.
 // Use a comparable GPT with confirmed quota left; an unknown bucket is not evidence of spare priority capacity.
-const quotaChoice = (x, log = (r) => why.push(r)) => {
+const quotaChoice = (x, log = (r) => why.push(r), taskTier = tier) => {
   if (!onTTADK(x) || TT.kind !== 'trae') return x;
-  if (backgroundLane) return backgroundChoice(x, log);
-  if (cheapTraeRow && x.model !== ASTRA && ttBucketFree[0]) {
-    const id = ttBucketFree[0];
+  if (backgroundLane) return backgroundChoice(x, log, taskTier);
+  const free = bucketFreeModels(TT, taskTier);
+  if (taskTier === 'light' && laneEligible && x.model !== ASTRA && free[0]) {
+    const id = free[0];
     log(`light TRAE tier: ${id} has no daily bucket → no high-priority quota spent, no low-priority lane`);
     return id === x.model ? x : companyPick(id, x.effort);
   }
   if (!TT.quota?.daily?.[x.model]?.depleted) return x;
-  const candidates = x.model === ASTRA ? [] : ttTierModels;
+  const candidates = x.model === ASTRA ? [] : tierModels(TT, taskTier);
   const id = candidates.find((id) => id !== x.model && priorityAvailable(id, TT));
   const gpt = id && poolOf(id) === 'gpt';
   const sub = id ? companyPick(id, x.effort) : ttAlts.find((a) => a.model !== x.model && !TT.quota.daily[a.model]?.depleted);
@@ -450,41 +404,89 @@ const tune = (x, f, log) => {
   if (x.vendor === 'claude' && x.model === 'fable' && QC.avoidFable) { x = C('opus', 'xhigh'); log('Fable window nearly used → Opus xhigh'); }
   return x;
 };
-if (m && onTTADK(m) && !ttHas(m.model) && (ttHas(SOL) || ttAlts.length)) {
-  const sub = ttHas(SOL) ? notch(X(SOL, m.effort), 0) : ttAlts[0];
-  why.push(`${m.model} isn't on ${TT.name} and the ChatGPT accounts are out → ${label(sub)} on ${TT.name}`);
-  m = sub;
-}
-if (m) {
-  m = quotaChoice(m);
-  m = tune(m, failures, (r) => why.push(r));
-  const prev = prevRaw && tune(quotaChoice(prevRaw, () => {}), failures - 1, () => {});
-  if (prev && prev.vendor === m.vendor && prev.model === m.model && prev.effort === m.effort) {
-    why.push(`same ${label(m)} as the previous attempt: a quota notch already raised that one, and the quota rules leave no stronger step`);
-    notes.push(`this retry is not stronger than the one that fell short: its only lever is the brief — put the failure's concrete findings (review items, failing test, symptom) in it`);
+const availabilityChoice = (x, taskTier, log) => {
+  const ids = [...new Set([...tierModels(TT, taskTier), ...ttAlts.map((a) => a.model)])];
+  const id = ids.find((id) => !TT.quota?.daily?.[id]?.depleted) ?? ids[0];
+  if (!id) return null;
+  const skipped = ids.filter((m) => m !== id && TT.quota?.daily?.[m]?.depleted);
+  const gone = modelExcluded(SOL) ? 'excluded for this task' : modelExcluded(SOL, TT) ? 'excluded for this security task'
+    : TT.poolPauses?.gpt ? `paused: ${TT.poolPauses.gpt.reason}` : TT.modelPauses?.[SOL] ? `unavailable: ${TT.modelPauses[SOL].reason}` : 'not listed';
+  const sub = companyPick(id, x.effort);
+  log(`GPT-6.1-Sol on ${TT.name} ${gone} → its fallback models: ${label(sub)} (availability substitution, not retry rungs)${skipped.length ? `; skipped depleted priority buckets: ${skipped.join(', ')}` : ''}`);
+  return sub;
+};
+const resolveRung = (raw, index) => {
+  const messages = [], log = (s) => messages.push(s), taskTier = tierFor(index);
+  let x = raw, transfer = null, factors = null;
+  if (ttCapable && x.vendor === 'codex' && x.model === SOL && !ttHas(SOL)) x = availabilityChoice(x, taskTier, log);
+  else if (onTTADK(x) && !ttHas(x.model) && (ttHas(SOL) || ttAlts.length)) {
+    x = ttHas(SOL) ? notch(X(SOL, x.effort), 0) : ttAlts[0];
+    log(`${raw.model} isn't on ${TT.name} and the ChatGPT accounts are out → ${label(x)} on ${TT.name}`);
   }
-  // Transfers follow the tier while preserving effort. Second opinions stay on their account.
-  if (!background && onTTADK(m) && TT === QX.ttadk && QX.trae) {
-    const free = m.model !== ASTRA ? bucketFreeModels(QX.trae) : [];
-    const candidates = m.model === SOL ? [...new Set([...(cheapTraeRow ? free : []), ...tierModels(QX.trae), m.model])]
-      : cheapTraeRow ? [...free, m.model] : [m.model];
+  if (!x) return null;
+  x = tune(quotaChoice(x, log, taskTier), index, log);
+  // Resolve balancing before normalization too; keep its account and telemetry with this rung only.
+  if (!background && onTTADK(x) && TT === QX.ttadk && QX.trae) {
+    const light = taskTier === 'light' && laneEligible;
+    const free = x.model !== ASTRA ? bucketFreeModels(QX.trae, taskTier) : [];
+    const candidates = x.model === SOL ? [...new Set([...(light ? free : []), ...tierModels(QX.trae, taskTier), x.model])]
+      : light ? [...free, x.model] : [x.model];
     for (const model of candidates) {
-      balance = balanceFactors({ ttadk: QX.ttadk, trae: QX.trae, model, category: cat, stakes, impact, allowBucketFree: free.includes(model) });
+      factors = balanceFactors({ ttadk: QX.ttadk, trae: QX.trae, model, category: cat, stakes, impact, allowBucketFree: free.includes(model) });
       const fits = QX.trae.usable && !excluded.has(QX.trae.name) && QX.trae.models.includes(model)
         && !modelExcluded(model, QX.trae) && laneEligible;
-      balance.taskEligible = !!fits;
-      balance.selected = !!fits && balance.eligible;
-      if (!balance.selected) continue;
-      balancedAccount = QX.trae;
-      m = { ...m, model };
-      const factors = balance.triggers.map((s) => s === 'TTADK projected to run out'
-        ? `${s} at ${new Date(balance.burn.outAt).toISOString().slice(11, 16)} UTC` : s);
-      const quota = balance.bucketFree ? 'has no daily bucket, no high-priority quota spent, no low-priority lane' : `${Math.round(balance.remainingShare * 100)}% left`;
-      why.push(`balanced to TRAE: ${factors.join(', ')}, TRAE ${m.model} ${quota}, `
-        + `load ${balance.load ? `${balance.load.percent}%` : 'unknown'}, queue ${balance.queue?.position ?? (balance.queue?.state === 'ready' ? 'ready' : 'unknown')}`);
+      factors.taskEligible = !!fits;
+      factors.selected = !!fits && factors.eligible;
+      if (!factors.selected) continue;
+      transfer = QX.trae;
+      x = { ...x, model };
+      const triggers = factors.triggers.map((s) => s === 'TTADK projected to run out'
+        ? `${s} at ${new Date(factors.burn.outAt).toISOString().slice(11, 16)} UTC` : s);
+      const quota = factors.bucketFree ? 'has no daily bucket, no high-priority quota spent, no low-priority lane' : `${Math.round(factors.remainingShare * 100)}% left`;
+      log(`balanced to TRAE: ${triggers.join(', ')}, TRAE ${x.model} ${quota}, `
+        + `load ${factors.load ? `${factors.load.percent}%` : 'unknown'}, queue ${factors.queue?.position ?? (factors.queue?.state === 'ready' ? 'ready' : 'unknown')}`);
       break;
     }
   }
+  return { pick: x, raw, index, messages, transfer, balance: factors };
+};
+if (!deferred) {
+  let firstOk = resolveRung(base[0], 0);
+  if (!firstOk || !allowed(firstOk.pick)) firstOk = T.alt && cat !== 'second-opinion' ? resolveRung(T.alt, 0) : null;
+  const rows = [firstOk, ...base.slice(1).map((x, i) => resolveRung(x, i + 1))].filter((r) => r && allowed(r.pick));
+  const gptOrder = [ASTRA, ...new Set(Object.values(COMPANY_TIERS).flat().filter((m) => m.startsWith('gpt-') && m !== ASTRA)), TERRA, LUNA];
+  const { kept: ladder, dropped } = normalizeLadder(rows, base, gptOrder);
+  const waits = [...(base.some((x) => x.vendor === 'claude') && QC.throttledUntil ? [(QC.throttledUntil - Date.now()) / 3600000] : []),
+    ...(base.some((x) => x.vendor === 'codex') && codexOut && QX.nextFree != null ? [QX.nextFree] : [])];
+  const runnable = !ladder.length && !background ? base.map(resolveRung).find((r) => r && (r.pick.vendor === 'claude' ? !QC.throttledUntil : allowed(r.pick))) : null;
+  if (runnable) {
+    ladder.push(runnable);
+    if (!opts.urgent) needsOK.push(`no vendor has room within the quota policy (claude ${QC.status}, codex ${codexOut ? 'out' : 'ok'}): ask the user whether to run it now anyway on ${runnable.pick.vendor} (this pick) or wait${retry(waits.length ? Math.min(...waits) : null)}`);
+  }
+  if (!ladder.length) deferred = `neither vendor has room for this now (claude ${QC.throttledUntil ? '5h-throttled' : QC.status}, codex ${codexOut ? (QX.throttledOnly ? 'paused' : 'out') : 'ok'})${retry(waits.length ? Math.min(...waits) : null)}`;
+  else {
+    const selected = ladder[Math.min(failures, ladder.length - 1)];
+    m = selected.pick; balance = selected.balance; balancedAccount = selected.transfer;
+    why.push(...selected.messages);
+    if (dropped.length) why.push(`normalized actual ladder: dropped ${dropped.map((r) => `${label(r.pick)} (${r.reason})`).join('; ')}`);
+    if (failures) why.push(`escalated to step ${Math.min(failures, ladder.length - 1)} of ${ladder.length - 1} after ${failures} failure(s)`);
+    if (failures >= ladder.length) {
+      needsOK.push(`escalation ladder exhausted after ${failures} failure(s): tell the user before trying again`);
+      notes.push(`this retry is not stronger than the one that fell short: its only lever is the brief — put the failure's concrete findings (review items, failing test, symptom) in it`);
+    }
+    if (tier === 'hard' && (balancedAccount ?? TT)?.kind === 'trae' && onTTADK(m)
+      && m.vendor === 'codex' && m.model.startsWith('gpt-') && ![SOL, ASTRA].includes(m.model)) {
+      deferred = 'no stronger eligible company rung for this hard retry; do not repeat a weaker GPT'; m = null;
+    }
+    if (failures >= 1 && CODE.includes(cat)) notes.push("if the last miss was spec/process, amend the brief's acceptance first and say what changed before dispatching this fix round (outcome --cause); do not repeat the same brief");
+    if (failures >= 1 && CODE.includes(cat)) notes.push('rework thread rule (SKILL.md, 2026-11-13): may continue the original author thread only for this same-task fix round with useful context, company account (personal needs user OK), no route escalation or exclusion, and no depleted TRAE bucket with queue >300 while someone waits; otherwise use the route thread. Record outcome.mjs --actual and ledger: "continued original thread because ..."');
+    if (failures >= 2 && CODE.includes(cat)) notes.push('before this fix round: if the last fix brought a new defect of the same kind (same invariant, state or race), stop patching — find whether it is a shared contract, the interface layout or a too-wide patch, then simplify or split the work (a `design` route can review the approach); the fix brief still asks for the original failure, the fix and the neighbouring old behaviour to be tested');
+    const codexFails = ladder.slice(0, Math.min(failures, ladder.length)).filter((r) => r.pick.vendor === 'codex').length;
+    if (codexFails >= 2) tell.push(`Codex has fallen short on this task ${codexFails} times: tell the user what happened (model, effort, symptom)`);
+    if (codexOut && !QX.throttledOnly && m?.vendor === 'claude' && T.kind !== 'claudeOnly') why.push('Codex is out: Claude takes this because it matters');
+  }
+}
+if (m) {
   // Check the actual pick, including a balancing substitution, before applying the service-code review guard.
   if (isAlt(m) && CODE.includes(cat) && impact === 'service' && !reviewKind) { reviewKind = 'review'; why.push(`${m.model} is a fallback model: its service code gets a review`); }
   // ---- 3. gates ----

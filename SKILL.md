@@ -387,6 +387,10 @@ effort, Codex account and launch command from
     low stakes or `--background`, unless hard) uses 5.6-Terra → 5.5 → Flash. Astra is reserved for hard substitutions;
     hard never substitutes 5.6-Sol/Terra/5.5. The same table governs balancing/background choices. Unknown quota changes
     nothing; exclusions and vision rules still apply. TTADK retains its own model picks/catalog.
+    Candidates are availability replacements, never retry rungs. Resolve and normalize the whole actual ladder before
+    taking `--failures N`: drop equal/lower effort on a previously tried model and any weaker GPT; retain only stronger
+    effort/model/family or the row's existing stronger steps. A retained same-model max step still needs its OK unless
+    the actual account is TTADK.
     DeepSeek-V4.1-Flash can't emit one very large file in a single turn (output limit); not for generating a large file
     in one go: split the work or exclude deepseek.
     GPT-5.6-Luna is not used (slowest, about 3x tokens). Evidence and bucket facts: references/model-routing.md.

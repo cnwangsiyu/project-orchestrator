@@ -21,7 +21,7 @@ const active = { [SOL]: bucket(), [ASTRA]: bucket(), [SOL56]: bucket() };
 const depleted = { ...active, [SOL]: bucket(true) };
 const window = { label: 'week', used: 10, resetsAt: now + 120 * h, windowMins: 10080, scoped: false };
 const home = path.join(tmp, 'trae'); fs.mkdirSync(home);
-const run = (args, { models = ids, daily = depleted, company = false, traeHome = home } = {}) => {
+const run = (args, { models = ids, daily = depleted, company = false, traeHome = home, claudeUsed = 10 } = {}) => {
   const a = args.slice();
   if (['implement', 'implement-hard', 'debug', 'science'].includes(a[0]) && !a.includes('--impact')) a.push('--impact', 'service');
   const trae = { name: 'trae', kind: 'trae', home: traeHome, healthy: true, live: true, search: true, searchLive: true,
@@ -37,7 +37,7 @@ const run = (args, { models = ids, daily = depleted, company = false, traeHome =
   const history = path.join(tmp, 'history.jsonl');
   fs.writeFileSync(history, company ? `${JSON.stringify({ t: now - h, ttadk: { name: 'ttadk', ...ttadk.usage, used: 50 } })}\n` : '');
   const cache = path.join(tmp, 'quota.json');
-  fs.writeFileSync(cache, JSON.stringify({ checkedAt: now, claude: [{ ...window, label: 'week (all models)' }],
+  fs.writeFileSync(cache, JSON.stringify({ checkedAt: now, claude: [{ ...window, used: claudeUsed, label: 'week (all models)' }],
     codexAccounts: [personal, ...(company ? [ttadk] : []), trae], errors: {}, history: {} }));
   return JSON.parse(execFileSync(process.execPath, [path.join(root, 'route.mjs'), ...a, '--mode', 'default', '--json'], {
     encoding: 'utf8', env: { ...process.env, CODEX_ACCOUNTS: path.join(tmp, 'none.json'), QUOTA_CACHE: cache,
@@ -105,8 +105,9 @@ try {
   assert.equal(run(['implement', '--failures', '1'], { traeHome: paused }).pick.model, ASTRA);
   noteFailure(paused, `-32600: model \`${TERRA56}\` is unavailable because its metadata could not be resolved`, now, TERRA56);
   assert.equal(run(['lookup'], { traeHome: paused }).pick.model, GPT55);
-  const retry = run(['implement', '--failures', '4']);
+  const retry = run(['implement', '--failures', '2']);
   assert.equal(retry.pick.model, ASTRA); assert.ok(!retry.needsUserOK.includes('Astra (5x Sol usage)'));
+  assert.equal(retry.pick.effort, 'max'); assert.ok(retry.needsUserOK.includes('max effort'));
   const noAstra = run(['debug'], { models: [SOL56, TERRA56, GPT55, PRO] });
   assert.ok(personalGate(noAstra));
   for (const [args, model] of [[['lookup'], TERRA56], [['analysis'], SOL56], [['debug'], ASTRA]]) {
@@ -128,5 +129,91 @@ try {
     }
   }
   assert.ok(run(['analysis', '--exclude-model', 'gpt']).notes.some((n) => /can't emit one very large file in a single turn \(output limit\).*split the work or exclude deepseek/.test(n)));
+  // Sol review P1: normal-tier availability candidates must not become a weaker-GPT retry ladder.
+  const unavailable = ['analysis', '--exclude-model', SOL];
+  const first = run(unavailable, { daily: active }), next = run([...unavailable, '--failures', '1'], { daily: active });
+  assert.deepEqual([first.pick.model, first.pick.effort], [SOL56, 'high']);
+  assert.deepEqual([next.pick.model, next.pick.effort], [SOL56, 'xhigh']);
+  const sameModelMax = run([...unavailable, '--failures', '2'], { daily: active, models: ids.filter((id) => id !== FLASH) });
+  assert.deepEqual([sameModelMax.pick.model, sameModelMax.pick.effort], [SOL56, 'max']);
+  assert.ok(sameModelMax.needsUserOK.includes('max effort'));
+  // Sol review P1: a later lower-effort Astra must be removed after depleted-Sol promotion to Astra max.
+  const debug = ['debug', '--impact', 'service'];
+  const max = run([...debug, '--failures', '1']);
+  assert.deepEqual([max.pick.model, max.pick.effort], [ASTRA, 'max']);
+  assert.ok(max.needsUserOK.includes('max effort'));
+  for (const failures of [2, 3]) {
+    const r = run([...debug, '--failures', String(failures)]);
+    assert.ok(r.pick.model !== ASTRA || r.pick.effort === 'max');
+  }
+  const exhaustedMax = run([...debug, '--failures', '3'], { claudeUsed: 93 });
+  assert.deepEqual([exhaustedMax.pick.model, exhaustedMax.pick.effort], [ASTRA, 'max']);
+  assert.ok(exhaustedMax.needsUserOK.includes('max effort'));
+  const ttMax = run(['implement', '--failures', '2'], { company: true, daily: null });
+  assert.deepEqual([ttMax.pick.account, ttMax.pick.effort], ['ttadk', 'max']);
+  assert.ok(!ttMax.needsUserOK.includes('max effort'));
+  // Kimi notes: name depleted skipped candidates; pin secondary substitution and the explicit Astra quality rung.
+  const skip = run(['debug', '--exclude-model', SOL], { daily: { ...active, [ASTRA]: bucket(true) } });
+  assert.equal(skip.pick.model, FLASH);
+  assert.ok(skip.why.some((s) => /skipped depleted priority buckets:.*gpt-6-astra/.test(s)));
+  const second = run(['review-high', '--author', 'codex']);
+  assert.equal(second.pick.vendor, 'claude'); assert.equal(second.secondOpinion.model, ASTRA);
+  assert.equal(second.secondOpinion.account, 'trae');
+  const sameFamily = run(['design'], { claudeUsed: 93, models: ids.filter((id) => id !== FLASH) });
+  assert.equal(sameFamily.secondOpinion.model, ASTRA);
+  assert.ok(sameFamily.notes.some((s) => /quota substitution leaves the second opinion in the same model family/.test(s)));
+  const quality = run(['analysis', '--failures', '4'], { daily: active });
+  assert.equal(quality.tier, 'normal'); assert.equal(quality.pick.model, ASTRA);
+  assert.equal(run(['analysis'], { daily: active }).pick.model, SOL);
+  assert.equal(run(['analysis', '--exclude-model', SOL], { daily: active }).pick.model, SOL56);
+
+  // Independent CLI property oracle: stable quotas/flags must never produce a weaker adjacent retry.
+  const effort = ['low', 'medium', 'high', 'xhigh', 'max'];
+  const gptRank = ['gpt-6-luna', 'gpt-6.1-terra', GPT55, TERRA56, SOL56, SOL, ASTRA];
+  const claudeRank = ['haiku', 'sonnet', 'opus', 'fable'];
+  const scenarios = [
+    { daily: active }, { daily: depleted }, { daily: null },
+    { daily: { ...depleted, [ASTRA]: bucket(true) } },
+    { daily: active, models: ids.filter((id) => id !== SOL) },
+    { daily: depleted, company: true }, { daily: depleted, claudeUsed: 93 },
+    { daily: active, models: [GPT55, TERRA56] },
+  ];
+  const cases = [
+    ['lookup'], ['analysis', '--auto-check'], ['analysis', '--stakes', 'low'], ['analysis', '--stakes', 'high'],
+    ['implement'], ['implement', '--background'], ['implement-hard', '--impact', 'throwaway'],
+    ['debug'], ['science'], ['review', '--author', 'codex'], ['review-high', '--security'],
+    ['design', '--background'], ['image-read', '--background'], ['second-opinion', '--against', 'claude'],
+    ['analysis', '--exclude-model', SOL], ['analysis', '--exclude-account', 'trae'],
+  ];
+  let checks = 0;
+  for (const config of scenarios) for (const args of cases) {
+    let previous = null;
+    const seen = new Map(); let topGPT = -1;
+    for (let failures = 0; failures <= 7; failures++) {
+      const r = run([...args, '--failures', String(failures)], config), p = r.pick;
+      if (!p) { assert.ok(r.deferred); continue; }
+      const label = `${args.join(' ')} failures=${failures} config=${JSON.stringify(config)}`;
+      const key = `${p.vendor}:${p.model}`, e = effort.indexOf(p.effort), rank = gptRank.indexOf(p.model);
+      if (previous) {
+        if (key === `${previous.vendor}:${previous.model}`) {
+          assert.ok(e >= effort.indexOf(previous.effort), label);
+          if (e === effort.indexOf(previous.effort)) assert.ok(r.needsUserOK.some((s) => /escalation ladder exhausted/.test(s)), label);
+        }
+        else if (p.vendor === 'codex' && previous.vendor === 'codex') {
+          if (rank >= 0 && gptRank.includes(previous.model)) assert.ok(rank > gptRank.indexOf(previous.model), label);
+          assert.ok(previous.model !== ASTRA || ![FLASH, SEED].includes(p.model), label);
+        } else if (p.vendor === 'claude' && previous.vendor === 'claude') {
+          assert.ok(claudeRank.indexOf(p.model) > claudeRank.indexOf(previous.model), label);
+        }
+        checks++;
+      }
+      assert.ok(e >= (seen.get(key) ?? -1), label);
+      seen.set(key, e);
+      if (rank >= 0) { assert.ok(rank >= topGPT, label); topGPT = Math.max(topGPT, rank); }
+      if (p.effort === 'max') assert.equal(r.needsUserOK.includes('max effort'), p.account !== 'ttadk', label);
+      previous = p;
+    }
+  }
+  console.log(`ok   availability review reproductions, max gates, secondary/quality boundaries; ${checks} monotonic retry checks`);
   console.log('all pass: difficulty tiers, depletion, availability, pauses, background, balancing, safety and escalation');
 } finally { fs.rmSync(tmp, { recursive: true, force: true }); }

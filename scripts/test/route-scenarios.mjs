@@ -985,13 +985,13 @@ for (const [sc, args] of ERRORS) {
     ['quota56Expired', ['implement'], 'deepseek-v4.1-flash'],
     ['quota56Paused', ['implement'], 'deepseek-v4.1-flash'],
     ['quotaBoth', ['implement'], 'gpt-5.6-sol'],
-    ['quotaBoth', ['implement', '--failures', '4'], 'deepseek-v4.1-flash'], // depleted Astra never substitutes a weaker GPT
+    ['quotaBoth', ['implement', '--failures', '4'], 'opus'], // Availability fallbacks do not become retry rungs.
     ['quotaBoth', ['implement-hard'], 'deepseek-v4.1-flash'],
     ['quotaBoth', ['lookup'], 'deepseek-v4.1-flash'],
     ['quotaBoth', ['extract'], 'deepseek-v4.1-flash'],
     ['quotaBoth', ['draft'], 'deepseek-v4.1-flash'],
     ['quotaBoth', ['lookup', '--stakes', 'high'], 'deepseek-v4.1-flash'],
-    ['quotaBoth', ['lookup', '--failures', '1'], 'deepseek-v4.1-flash'],
+    ['quotaBoth', ['lookup', '--failures', '1'], 'sonnet'],
     ['quotaBoth', ['build-run'], 'gpt-5.6-sol'],
     ['quotaMissing', ['implement'], 'gpt-6.1-sol'],
     ['quotaMissingModel', ['implement'], 'gpt-6.1-sol'],
@@ -1031,7 +1031,7 @@ for (const [sc, args] of ERRORS) {
     [route('quotaBoth').needsUserOK.length, 0], [route('quotaAllBusy').deferred, null],
     [route('quotaAstra', ['lookup']).pick.launcher, 'traecli-exec'],
     [route('quotaBoth', ['lookup']).pick.launcher, 'traecli-exec'],
-    [note(route('quotaBoth', ['lookup', '--failures', '1']), /this retry is not stronger/), true],
+    [note(route('quotaBoth', ['lookup', '--failures', '1']), /this retry is not stronger/), false],
     [route('quotaTT').pick.account, 'ttadk'],
     [note(route('quotaAstra', ['review', '--author', 'codex']), /second TRAE reviewer/), true],
     [route('quotaAstra', ['review', '--author', 'codex']).secondOpinion?.model, 'deepseek-v4.1-flash'],
@@ -1435,11 +1435,13 @@ for (const [sc, args] of ERRORS) {
   };
   const gated = (o) => o.needsUserOK.some((n) => n.startsWith('personal quota:'));
   try {
-    // Reviewer's exact reproduction: healthy TRAE has GPT-5.5 only; its one-rung lookup ladder reaches Sonnet.
-    const repro = r(['lookup', '--failures', '1']);
+    // Availability now preserves same-model effort rungs before the eventual personal Sonnet fall-through.
+    assert.equal(r(['lookup', '--failures', '1']).pick.model, GPT55);
+    assert.equal(r(['lookup', '--failures', '1']).pick.effort, 'high');
+    const repro = r(['lookup', '--failures', '3']);
     assert.equal(repro.pick.vendor, 'claude'); assert.equal(repro.pick.model, 'sonnet'); assert.ok(gated(repro));
-    assert.ok(!gated(r(['lookup']))); assert.ok(!gated(r(['lookup', '--failures', '1', '--urgent'])));
-    for (const [model, failures] of [[GPT55, 1], [TERRA56, 1], [SOL, 3], [ASTRA, 1], [SOL56, 1]]) {
+    assert.ok(!gated(r(['lookup']))); assert.ok(!gated(r(['lookup', '--failures', '3', '--urgent'])));
+    for (const [model, failures] of [[GPT55, 3], [TERRA56, 3], [SOL, 3], [ASTRA, 1], [SOL56, 1]]) {
       const o = r(['lookup', '--failures', String(failures)], { models: [model] });
       assert.ok(o.pick); assert.ok(o.pick.vendor === 'claude' || o.pick.account === 'main'); assert.ok(gated(o), model);
     }
