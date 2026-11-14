@@ -122,16 +122,10 @@ const parseUsage = (usage) => {
   } : null;
   return { plan, windows, resets, unlimited, id: usage.accountId ?? null, allowed: usage.ordinaryUsageAllowed ?? null };
 };
-// The account a home's `codex login` points at (its hub may still run an older one until it restarts). Only the
-// account id, email and plan are read from the id token; no token is kept or printed.
-const readLogin = (home) => {
-  try {
-    const a = JSON.parse(fs.readFileSync(path.join(home, 'auth.json'), 'utf8'));
-    const claims = JSON.parse(Buffer.from(a.tokens.id_token.split('.')[1], 'base64url').toString());
-    const auth = claims['https://api.openai.com/auth'] ?? {};
-    return { id: a.tokens.account_id ?? auth.chatgpt_account_id ?? null, email: claims.email ?? null, plan: auth.chatgpt_plan_type ?? null };
-  } catch { return null; }
-};
+// Identity is public registry metadata, supplemented by the hub's usage account id. An unreachable hub leaves
+// login state unknown; never inspect credential files to distinguish an outage from a missing login.
+const cachedIdentity = (prof) => ({ id: prof.id ?? null, email: prof.email ?? null,
+  plan: prof.plan ?? null, loggedIn: prof.loggedIn ?? null });
 const rollForward = (acc) => {
   const windows = (acc.windows ?? []).map((w) => {
     let { used, resetsAt } = w;
@@ -466,19 +460,20 @@ const readCodexAll = (reg, errors) => {
       }
       continue;
     }
-    const login = readLogin(prof.home);
+    const identity = cachedIdentity(prof);
     try {
       const u = parseUsage(JSON.parse(execFileSync(process.execPath, [WORKER, '--account', name, 'usage'], { encoding: 'utf8', timeout: 30000, stdio: ['ignore', 'pipe', 'pipe'] })));
-      updates[name] = { id: u.id, email: login?.id === u.id ? login.email : prof.email ?? null, plan: u.plan, seenAt: now, windows: u.windows, resets: u.resets, unlimited: u.unlimited };
+      updates[name] = { id: u.id ?? identity.id, email: !u.id || !identity.id || identity.id === u.id ? identity.email : null,
+        plan: u.plan ?? identity.plan, seenAt: now, windows: u.windows, resets: u.resets, unlimited: u.unlimited };
       // A broken hub still answers `usage`; count it as not live so routing prefers a working hub, and say how to fix it.
       const broken = hubBroken(name, prof);
       const browser = !!prof.browser || codexBrowserReady(prof.home);
       accounts.push({ name, live: !broken, ...prof, ...updates[name], browser, chromePlugin: prof.chromePlugin ?? (browser ? chromePluginOf(prof.home) : null),
-        allowed: u.allowed, staleHub: !!(login?.id && u.id && login.id !== u.id), hubBroken: broken });
+        allowed: u.allowed, staleHub: false, identitySource: u.id ? 'hub' : 'registry', hubBroken: broken });
     } catch (e) {
       const error = String(e.stderr || e.message).trim().split('\n')[0];
-      accounts.push(prof.windows ? { name, live: false, error, loggedIn: !!login, ...rollForward(prof) }
-        : { name, live: false, error, loggedIn: !!login, home: prof.home, hub: prof.hub, email: login?.email ?? null, windows: null, resets: null });
+      accounts.push(prof.windows ? { ...rollForward(prof), name, live: false, error, loggedIn: identity.loggedIn, identitySource: 'registry' }
+        : { name, live: false, error, ...identity, identitySource: 'registry', home: prof.home, hub: prof.hub, windows: null, resets: null });
     }
   }
   if (Object.keys(updates).length) try {

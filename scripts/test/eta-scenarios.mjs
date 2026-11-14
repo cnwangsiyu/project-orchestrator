@@ -43,11 +43,13 @@ const route = ({lanes={}, familyQueue={}, resetMin=540, ttAvailable=false, daily
 try {
   let r = route();
   assert.equal(r.pick.model,SOL); assert.equal(r.deferred,null); assert.equal(r.queuePatienceMin,30);
-  assert.match(r.pick.command,/--queue-patience-min/); assert.match(r.queueAlt,/--failures 0.*--exclude-model/);
+  assert.match(r.pick.command,/--queue-patience-min/); assert.match(r.queueAlt,/--failures 0.*--exclude-lane/);
+  assert.equal(r.queueAlternative.routeArgs.includes('--fresh'),false);
   assert.ok(r.why.some((s)=>/company ETA:/.test(s)));
   assert.ok(!r.needsUserOK.some((s)=>s.startsWith('personal quota:')));
   r = route({lanes:{[ASTRA]:lane(500,0.5)}});
-  assert.match(r.queueAlt,/scheduled dispatch.*--exclude-account 'trae'/);
+  assert.match(r.queueAlt,/scheduled dispatch.*--exclude-lane trae:gpt-6.1-sol/);
+  assert.equal(r.queueAlternative.account,'ttadk'); assert.equal(r.queueAlternative.model,SOL);
   assert.ok(!r.queueAlt.includes("--exclude-model 'gpt-6.1-sol'"),'TTADK handoff must keep the same model eligible');
   r = route({daily:{[SOL]:bucket(),[ASTRA]:bucket(false)},lanes:{[SOL]:lane(null,null,{state:'ready',lastProgressAt:now-29*min,itemsPerMin:2})}});
   assert.equal(r.pick.model,SOL,'equal completion spends no priority quota before considering strength');

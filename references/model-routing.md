@@ -329,11 +329,14 @@ the nightly review compares dispatch reasons and recorded wall-clock time, inclu
       M = `min(30 min, 25% of the time until the faster account resets)`. From the live queue drain the worker predicts
       the start; if predicted start plus elapsed wait exceeds the earlier deadline/alternative, it checks for work,
       confirms the queued turn is interrupted without progress, and re-routes itself with the same flags/failures,
-      the slow model excluded and depth N+1. It follows a fresh company hub worker with the same brief and a
+      the slow account/model lane excluded (`--exclude-lane`) and depth N+1. A structured `--queue-alternative`
+      keeps the same model on another account eligible. It follows a fresh company hub worker with the same brief and a
       continuation header. Maximum two automatic hops; no active/background/personal/signing auto-launch.
       Approval exits 8; deferral persists `reroute.json`/`deferUntil` and exits 9 for the orchestrator's timer; limit
       exits 10. Unconfirmed cancellation exits 7 within three seconds, with no replacement. Legacy launches without
-      route args retain exit 7. Unknown drain keeps waiting. Outcome derives automatic actual chains from hop records;
+      route args retain exit 7. Flat/unknown queues expire by elapsed patience using an independent alarm. Router
+      failures also exit 7 with persisted recovery argv/prompt; automatic reroutes remove `--fresh`, and identity
+      comes only from public registry/hub metadata. Outcome derives automatic actual chains from hop records;
       nightly reports waits and observed faster/slower/unknown starts. See references/codex-workers.md.
     - A task holding a device lease or heavy-build lock must not wait in a queue while holding it: route.mjs prefers a
       candidate that can start now, never schedules a wait, and the note says to take the lease/lock only after the

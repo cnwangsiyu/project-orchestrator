@@ -72,7 +72,7 @@ The versioned [global-rules digest](references/global-rules.md) is the single in
 - **Worker permissions:** Codex-family writing workers default to full access; reviewers stay read-only unless `--runs-tests` gives them workspace-write, and `--sandbox workspace-write|read-only` is the per-task narrower override. [Claude launch](#claude-worker-settings) always uses Remote Control + explicit Bypass. [Permissions](#permission-plan) use cards for what those modes cannot pass; login secrets remain user-only, while a registered `--signing` run may pass its designated signing input only through stdin/file descriptors.
 - **TRAE:** [account rules](references/codex-workers.md#trae-cli-as-the-second-company-account-user-2026-11-08) separate restrictions from concurrency/quota, never reduce concurrency for queues, enforce only QPM/TPM limits for LLM use (no total-cost caps), and name the concrete worker model in reports.
 - **Work and quota:** [judgment](#judge-not-labour) stays with orchestrators, [independent tasks](#split-by-coupling) run in parallel while coupled work stays together; [quota](#route-every-task) never silently holds work, uses company quota without asking, personal quota after asking, reset cards only after a fresh OK every time.
-- **Signing/credentials:** [worker safety](#worker-credential-safety) forbids login material and login bypasses for every worker. Machine policy forbids every Codex worker from signing/credential files, regardless of approval; only the resident Claude signing worker has the narrow allowlisted own-test-package exception, with secret-safe input, receipts and keychain re-locking. Everything else is BLOCKED.
+- **Signing/credentials:** [worker safety](#worker-credential-safety) forbids login material and login bypasses for every worker. Signing is limited to registry-listed own test packages with user-allowlisted identities, secret-safe input, receipts and keychain re-locking. Workers treat the registry and allowlist as read-only; everything outside that scope is BLOCKED.
 - **Orchestrator models:** [account/model health](references/nightly-review.md#account-and-model-health) records persistent `jobs/<id>/state.json` `respawnFlags`, VAK/routing on Fable, Webview/Lynx on Opus since 2026-11-11, and a user check on/after 2026-11-17 09:00 PST.
 - **Account reminders:** [nightly health](references/nightly-review.md#account-and-model-health) owns cards for company logins expiring within three days, TTADK SSO (2026-11-21 19:37 PST), TRAE login, Codex reset cards and Claude/Fable weekly projections; [`POLICY`](scripts/lib/state.mjs) supplies the 72-hour TTADK warning to `quota.mjs`.
 - **Rollout:** [policy notification](#global-rule-rollout) sends each change to all orchestrators: via the secretary for the mini group, directly to MacBook orchestrators.
@@ -251,9 +251,8 @@ login; the user had to sign in again; the second is the user's 2026-11-13 test-s
   One-shot `codex exec` / `traecli exec` launches must carry both clauses in developer instructions too.
 - **Test signing route** (user, 2026-11-13): pass `--signing`; it forces full access and makes the scoped rule the first
   route note. The brief names the registered manifest/hash and designated identity. Afterwards scan worker logs only,
-  mask any hits, and verify the receipt and keychain re-locking. Full access is not a credential authorization bypass:
-  Codex workers never touch signing/credential files regardless of approval. Only the resident Claude
-  `vesdk-signer` worker has the machine-policy exception; its allowlist and package registry remain read-only.
+  mask any hits, and verify the receipt and keychain re-locking. Routed full-access workers may sign only within
+  the registered own-test-package scope when their brief says so. The allowlist and package registry remain read-only.
 
 **Prevent rework at the brief** (rework retro of 2026-11-06–10, 89 rework chains; user-approved 2026-11-10). Most
 rework came from unchecked premises, "done" proven on the wrong target, one shared rule re-implemented by several
@@ -528,12 +527,14 @@ effort, Codex account and launch command from
     work; never wait while a same-tier company lane can finish earlier, and never hold a queued low-priority turn
     past its `queue-too-slow` deadline.
     Routed workers perform the handoff themselves: verify no work, confirm cancellation, re-route with the
-    original category/flags/exclusions and same failures, exclude the slow model, and follow a fresh company
+    original category/flags/exclusions and same failures, exclude the slow account/model lane, and follow a fresh company
     hub worker with a continuation header. Maximum two automatic hops; no active or background handoff and
     no personal quota/signing auto-launch. Exit 8 (`reroute-needs-user`) asks for approval; exit 9 persists
     `reroute.json`/`deferUntil` for the orchestrator's timer; exit 10 reports the hop limit. Cancellation failures
     exit 7 within three seconds with `queue-cancel-unconfirmed`, without launching a duplicate. Existing
-    wrapper holds must be returned by their owner on exit. Outcome reads hop records without manual `--actual`;
+    wrapper holds must be returned by their owner on exit. Flat queues also expire by elapsed patience. Router
+    failures exit 7 with a `reroute.json` recovery command/continuation prompt; reroutes never force `--fresh`,
+    and account identity comes from public registry/hub metadata, never login files. Outcome reads hop records without manual `--actual`;
     nightly review measures automatic waits and faster/slower/unknown starts. See references/codex-workers.md.
   - TTADK is not unlimited (measured 2026-11-08): about 500M tokens a day per user, input + output with
     cached input counted in full, shared by all models (plus an hourly cap); it resets at 16:00 UTC.

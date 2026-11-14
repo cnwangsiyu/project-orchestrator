@@ -112,11 +112,19 @@ if (opts.network === true) opts.network = 'on';
 if (opts.network !== undefined && !['on', 'off'].includes(opts.network)) die('--network takes on or off');
 if (opts.network !== undefined && opts.sandbox !== 'workspace-write') die('--network goes with --sandbox workspace-write');
 // Optimistic-launch patience (addendum, 2026-11-13 night): route.mjs passes the deadline it computed from the faster
-// account's reset and the alternative to take. Without a usable queue drain the worker cannot predict a start, so it
-// keeps waiting; with one, it confirms a no-progress cancellation and follows a bounded automatic re-route.
+// account's reset and the alternative to take. Positive drain can trigger an early handoff; elapsed patience also
+// expires for flat/unknown queues, independently of notifications, after confirming no-progress cancellation.
 const PATIENCE_MIN = opts['queue-patience-min'] === undefined ? null : Number(opts['queue-patience-min']);
 if (PATIENCE_MIN != null && (!Number.isFinite(PATIENCE_MIN) || PATIENCE_MIN <= 0)) die('--queue-patience-min takes a positive number of minutes');
 const QUEUE_ALT = typeof opts.alt === 'string' ? opts.alt : null;
+if (opts['queue-alternative'] !== undefined) {
+  try {
+    const alternative = JSON.parse(opts['queue-alternative']);
+    if (!alternative || typeof alternative !== 'object' || Array.isArray(alternative)) throw Error('not an object');
+    parseRouteArgs(JSON.stringify(alternative.routeArgs));
+    opts.queueAlternative = alternative;
+  } catch { die('--queue-alternative needs an object with routing argv in routeArgs'); }
+}
 const QUEUE_ALT_START_MIN = opts['queue-alt-start-min'] === undefined ? null : Number(opts['queue-alt-start-min']);
 if (QUEUE_ALT_START_MIN != null && (!Number.isFinite(QUEUE_ALT_START_MIN) || QUEUE_ALT_START_MIN < 0)) die('--queue-alt-start-min takes a number >= 0');
 let ROUTE_ARGS;
@@ -551,10 +559,12 @@ const detachHub = () => {
   pending.clear(); try { ws.close(); } catch {}
 };
 const autoReroute = async (reason, queue = {}, policy = false) => {
+  const cancelledTurn = activeTurn;
   detachHub(); exitCode = null;
   const from = { vendor: 'codex', model: String(opts.model ?? '').toLowerCase(), effort: opts.effort ?? null,
     account: account ?? 'main', position: queue.position ?? null, waitedMin: queue.waitedMin ?? 0,
-    predictedStartMin: queue.predictedStartMin ?? null };
+    predictedStartMin: queue.predictedStartMin ?? null,
+    threadId: cancelledTurn?.threadId ?? attemptThreadId, turnId: cancelledTurn?.turnId ?? null };
   try {
     const code = await rerouteWorker({ args: ROUTE_ARGS, depth: REROUTE_DEPTH, from, reason, prompt: text, opts, policy });
     finish(code);
@@ -726,33 +736,31 @@ const follow = (threadId, turnId) => {
   if (recordQueue) cleanups.add(() => recordQueue.stop());
   let final, usage, last = Date.now();
   let runningSince = Date.now(), completedItems = 0;
-  let queueSince = null, lastPrintedQueue = null, queuePrinted = null;
+  let queueSince = null, queuePosition = null, lastPrintedQueue = null, queuePrinted = null;
   let patienceSamples = [];
   let handingOff = false, reporting = false;
-  // Drain from the last 10 minutes of queue/status positions. A start is only predicted once two samples span at least
-  // two minutes and the position actually fell; a stalled or rising queue is not guessed at (the worker keeps waiting).
-  const checkPatience = (t, pos) => {
-    if (done || handingOff || reporting || workStarted || BACKGROUND || PATIENCE_MIN == null || pos == null || pos <= 0) return false;
+  // Use measured drain for an early decision, but never require drain to enforce the elapsed deadline.
+  const checkPatience = (t, pos, sample = true) => {
+    if (done || handingOff || reporting || workStarted || BACKGROUND || PATIENCE_MIN == null || queueSince == null) return false;
     // Frequent notifications must not evict the two-minute baseline from the bounded sample window.
-    if (!patienceSamples.length || t - patienceSamples.at(-1).t >= 10000) patienceSamples.push({ t, pos });
+    if (sample && pos != null && pos > 0 && (!patienceSamples.length || t - patienceSamples.at(-1).t >= 10000)) patienceSamples.push({ t, pos });
     patienceSamples = patienceSamples.filter((s) => t - s.t <= 10 * 60000).slice(-30);
     const first = patienceSamples[0], last = patienceSamples.at(-1);
-    const spanMin = (last.t - first.t) / 60000;
-    if (spanMin < 2 || last.pos >= first.pos) return;
-    const drain = (first.pos - last.pos) / spanMin;
-    if (!(drain > 0)) return;
-    const predicted = last.pos / drain;
+    const spanMin = first && last ? (last.t - first.t) / 60000 : 0;
+    const drain = spanMin >= 2 && last.pos < first.pos ? (first.pos - last.pos) / spanMin : null;
+    const predicted = drain > 0 && pos != null && pos > 0 ? pos / drain : null;
     const waitedMin = Math.max(0, (t - queueSince) / 60000);
     const deadlineMin = Math.min(PATIENCE_MIN, QUEUE_ALT_START_MIN ?? Infinity);
-    if (predicted + waitedMin <= deadlineMin) return;
+    const elapsed = waitedMin >= deadlineMin;
+    if (!elapsed && (predicted == null || predicted + waitedMin <= deadlineMin)) return false;
     // Latch before printing or sending the RPC: further queue/completion notifications must not race this handoff.
     handingOff = true; exitCode = 7;
-    const alt = QUEUE_ALT ?? `route.mjs with --exclude-model ${opts.model ?? 'this model'} and the same --failures`;
+    const alt = QUEUE_ALT ?? `route.mjs with --exclude-lane ${account ?? 'main'}:${opts.model ?? 'this model'} and the same --failures`;
     const limit = deadlineMin < PATIENCE_MIN ? `alternative start ${deadlineMin} (patience ${PATIENCE_MIN})` : `patience ${PATIENCE_MIN}`;
-    const line = `queue-too-slow: position ${last.pos}, drain ${drain.toFixed(1)}/min, predicted start in ${Math.round(predicted)} min > ${limit} — re-route: ${alt}`;
+    const line = `queue-too-slow: position ${pos ?? '?'}, drain ${drain == null ? 'unknown' : drain.toFixed(1)}/min, ${elapsed ? `elapsed wait ${waitedMin.toFixed(1)} min >=` : `predicted start in ${Math.round(predicted)} min >`} ${limit} — re-route: ${alt}`;
     try { fs.writeSync(1, `${line}\n`); } catch { console.log(line); }
-    if (opts.log) try { fs.appendFileSync(path.resolve(opts.log), JSON.stringify({ queueTooSlow: { position: last.pos, drainPerMin: drain,
-      predictedStartMin: Math.round(predicted), patienceMin: PATIENCE_MIN, alt, at: t } }) + '\n'); } catch {}
+    if (opts.log) try { fs.appendFileSync(path.resolve(opts.log), JSON.stringify({ queueTooSlow: { position: pos, drainPerMin: drain,
+      predictedStartMin: predicted == null ? null : Math.round(predicted), waitedMin, patienceMin: PATIENCE_MIN, alt, at: t } }) + '\n'); } catch {}
     // Stop the queued turn cleanly before exiting so the provider does not keep it pending after the re-route.
     // Keep the deadline referenced: a hub that never acknowledges cancellation must not leave the wrapper hanging.
     const cancel = async () => {
@@ -780,7 +788,7 @@ const follow = (threadId, turnId) => {
         }
         if (PROF?.home) saveQueue(PROF.home, threadId, { state: 'cancelled', position: null, turnId, at: Date.now() });
         clearTimeout(deadline);
-        await autoReroute('queue-too-slow', { position: last.pos, waitedMin, predictedStartMin: predicted });
+        await autoReroute('queue-too-slow', { position: pos, waitedMin, predictedStartMin: predicted });
       } catch {
         console.error('queue-cancel-unconfirmed: interrupt/read failed; check the original turn before dispatching its replacement'); finish(7);
       }
@@ -791,7 +799,8 @@ const follow = (threadId, turnId) => {
   const queueUpdate = (p) => {
     const t = Date.now(), state = String(p.state ?? 'queued');
     const pos = p.position != null && p.position !== '' && Number.isFinite(Number(p.position)) ? Number(p.position) : null;
-    if (state !== 'ready' && !queueSince) queueSince = t;
+    queuePosition = pos;
+    if (state !== 'ready' && queueSince == null) queueSince = t;
     const queue = { state, position: pos, since: queueSince, turnId, at: t };
     if (PROF?.home) saveQueue(PROF.home, threadId, queue);
     recordQueue?.(p, t);
@@ -811,9 +820,18 @@ const follow = (threadId, turnId) => {
     queuePrinted = t;
     console.log(`queued: position ${pos ?? '?'} (${state})`);
   };
+  if (PATIENCE_MIN != null && !BACKGROUND) {
+    const patienceAlarm = setInterval(() => checkPatience(Date.now(), queuePosition, false),
+      Math.min(60000, Math.max(1000, PATIENCE_MIN * 6000)));
+    patienceAlarm.unref(); cleanups.add(() => clearInterval(patienceAlarm));
+  }
   if (STALL_MIN > 0) {
     const alarm = setInterval(() => {
-    if (done) return;
+    if (done || handingOff) return;
+    // Queue patience owns known waiting turns, even when the stall and patience ticks coincide.
+    if (queueSince != null && !workStarted && !BACKGROUND && PATIENCE_MIN != null) {
+      checkPatience(Date.now(), queuePosition, false); return;
+    }
     const idle = (Date.now() - last) / 60000;
     if (idle < STALL_MIN) return;
     const line = `stalled: no events for ${idle < 1 ? `${Math.round(idle * 60)}s` : `${Math.round(idle)}m`} on turn ${turnId} (thread ${threadId}); the turn is still running on the hub — check status and sub-agent threads, then wait again, steer or interrupt`;

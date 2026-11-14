@@ -77,8 +77,30 @@ try {
   assert.match(signing.notes[1], /scan worker logs only.*mask any hits/);
   console.log('ok   Codex writers default full; reviewers stay read-only; tests and explicit overrides stay narrower');
 
-  const forbiddenText = ['regardless of', 'authorization'].join(' ');
-  const scan = spawnSync('rg', ['-n', '-i', forbiddenText, path.dirname(root)], { encoding: 'utf8' });
+  const bans = [
+    String.raw`\bCodex(?:[-\s]+family)?(?:\s+workers?)?\s+(?:must\s+)?(?:never|must\s+not|may\s+not|do(?:es)?\s+not|cannot|can't|(?:is|are)\s+(?:not\s+allowed|forbidden|prohibited)\s+to)\s+(?:sign\b|signs\b|(?:touch(?:es)?|access(?:es)?|read|handle)\s+(?:any\s+)?(?:signing|credential))`,
+    String.raw`\b(?:forbids?|prohibits?|bans?)\b[^.;\n]{0,100}\bCodex\b[^.;\n]{0,100}\b(?:signing|credential)`,
+    String.raw`\bregardless\s+of\s+(?:authorization|approval)\b`,
+    String.raw`\bCodex\s+signing\s+request\s+is\s+BLOCKED\b`,
+    String.raw`\bsigning\s+by\s+(?:any\s+)?Codex(?:\s+workers?)?\s+(?:is|remains)\s+(?:forbidden|prohibited|blocked)\b`,
+    String.raw`\b(?:only|solely)\s+(?:the\s+)?resident\s+Claude\b[^.;\n]{0,120}\b(?:exception|may\s+sign)\b`,
+  ];
+  const family = ['Co', 'dex'].join('');
+  const bannedExamples = [
+    [family, 'workers', 'never', 'touch', 'signing/credential', 'files'],
+    [family, 'workers', 'do', 'not', 'sign'],
+    [family, 'workers', 'must', 'not', 'sign'],
+    [family, 'worker', 'is', 'not', 'allowed', 'to', 'touch', 'signing', 'files'],
+    ['Signing', 'by', family, 'workers', 'is', 'forbidden'],
+    [family, 'never', 'signs'],
+    ['regardless', 'of', 'approval'], ['regardless', 'of', 'authorization'],
+    ['Machine', 'policy', 'forbids', 'every', family, 'worker', 'from', 'signing/credential', 'files'],
+  ];
+  for (const words of bannedExamples) assert.ok(bans.some((p) => new RegExp(p, 'i').test(words.join(' '))));
+  assert.ok(!bans.some((p) => new RegExp(p, 'i').test(['A Codex worker', 'never auto-launches a signing hop'].join(' '))));
+  for (const text of [digest.worker, ...signing.notes]) assert.ok(!bans.some((p) => new RegExp(p, 'i').test(text)));
+  const scan = spawnSync('rg', ['-n', '-i', '--multiline', ...bans.flatMap((p) => ['-e', p]),
+    path.join(path.dirname(root), 'SKILL.md'), path.join(path.dirname(root), 'references'), root], { encoding: 'utf8' });
   assert.equal(scan.status, 1, scan.stdout || scan.stderr || `rg exited ${scan.status}`);
   console.log('ok   scoped signing rule replaces every unconditional authorization prohibition');
 

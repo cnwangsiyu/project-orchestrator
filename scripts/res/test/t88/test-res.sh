@@ -14,25 +14,31 @@ OUT="$ROOT/last-output.txt"
 COUNT=0
 changer=''
 starting_changer=0
+waiter=''
+starting_waiter=0
 cleanup_changer() {
   trap - EXIT
   trap '' INT TERM HUP
   if [ "$starting_changer" -eq 1 ] && [ -z "$changer" ]; then changer="${!:-}"; fi
-  [ -n "$changer" ] || return 0
-  kill -TERM "$changer" 2>/dev/null || true
-  wait "$changer" 2>/dev/null || true
+  if [ "$starting_waiter" -eq 1 ] && [ -z "$waiter" ]; then waiter="${!:-}"; fi
+  for child in "$changer" "$waiter"; do
+    [ -n "$child" ] || continue
+    kill -TERM "$child" 2>/dev/null || true
+    wait "$child" 2>/dev/null || true
+  done
 }
 trap cleanup_changer EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
-wait_for_retry() {
-  local deadline=$((SECONDS + 10))
-  until grep -Fq 'retry in 1s' "$OUT"; do
+wait_for_output() {
+  local pattern="$1" needed="${2:-1}" deadline=$((SECONDS + 120))
+  until [ "$(grep -Fc -- "$pattern" "$OUT" || true)" -ge "$needed" ]; do
     [ "$SECONDS" -lt "$deadline" ] || return 1
     sleep 0.05
   done
 }
+wait_for_retry() { wait_for_output 'retry in 1s'; }
 other_pid="$PPID"
 dead=2147483647
 host=$(hostname)
@@ -189,7 +195,7 @@ starting_changer=1
   "$RES" take heavy-lane-1 --by retry-fixture --project scratch --for retry --pid "$other_pid" >"$ROOT/retry-take.txt" 2>&1
 ) & changer=$!
 starting_changer=0
-expect 0 "$RES" wait heavy-build --by T88 --project scratch --for retry-lane-enters --pid "$$" --timeout 0.1
+expect 0 "$RES" wait heavy-build --by T88 --project scratch --for retry-lane-enters --pid "$$" --timeout 2
 contains 'load1m=15.00 limit=12 lanes_held=0'
 contains 'load1m=15.00 limit=20 lanes_held=1'
 wait "$changer"
@@ -197,25 +203,36 @@ changer=''
 release heavy-build
 hold heavy-build "$other_pid"
 : >"$OUT"
+starting_waiter=1
+"$RES" wait heavy-build --by T88 --project scratch --for retry-lane-leaves --pid "$$" --timeout 2 >"$OUT" 2>&1 & waiter=$!
+starting_waiter=0
 starting_changer=1
 (
+  trap 'kill -TERM "$waiter" 2>/dev/null || true' EXIT
   wait_for_retry
   "$RES" return heavy-lane-1 --by retry-fixture >"$ROOT/retry-return-lane.txt" 2>&1
   # Keep the build occupied until the waiter observes the lower gate. Otherwise a slow lane-return command can
   # overlap its next gate sample and the build release, turning this fixture into an acquisition race.
-  deadline=$((SECONDS + 10))
-  until grep -Fq 'load1m=15.00 limit=12 lanes_held=0' "$OUT"; do
-    [ "$SECONDS" -lt "$deadline" ] || exit 1
-    sleep 0.05
-  done
+  wait_for_output 'load1m=15.00 limit=12 lanes_held=0'
   "$RES" return heavy-build --by fixture-heavy-build >"$ROOT/retry-return-build.txt" 2>&1
+  # Observe another closed-gate sample with the mutex free. This tests the threshold change, not how many
+  # subprocess probes happen to fit a six-second timeout. Separate wait fixtures retain timeout coverage.
+  samples_after_release=$(grep -Fc 'load1m=15.00 limit=12 lanes_held=0' "$OUT" || true)
+  wait_for_output 'load1m=15.00 limit=12 lanes_held=0' "$((samples_after_release + 1))"
+  [ ! -d "$RES_DIR/locks/heavy-build.d" ]
 ) & changer=$!
 starting_changer=0
-expect 2 "$RES" wait heavy-build --by T88 --project scratch --for retry-lane-leaves --pid "$$" --timeout 0.1
+wait_rc=0
+changer_rc=0
+wait "$changer" || changer_rc=$?
+changer=''
+wait "$waiter" || wait_rc=$?
+waiter=''
+[ "$changer_rc" -eq 0 ] || fail 'lane-change observer failed'
+[ "$wait_rc" -eq 143 ] || fail "expected observer-stopped waiter, got $wait_rc"
+pass 'observer stops owned waiter after the lane-aware closed gate is sampled with a free mutex'
 contains 'load1m=15.00 limit=20 lanes_held=1'
 contains 'load1m=15.00 limit=12 lanes_held=0'
-wait "$changer"
-changer=''
 [ ! -d "$RES_DIR/locks/heavy-build.d" ] || fail 'retry acquired build after threshold dropped'
 pass 'retry recalculates lane-aware limit before acquisition'
 
