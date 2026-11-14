@@ -92,10 +92,8 @@ const TABLE = {
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 const floorOf = (m) => (m.model === SOL || m.model === ASTRA || m.model === TERRA ? 'medium' : 'low'); // Sol low is weak at code
 const notch = (m, d, cap = 'xhigh') => {
-  // A notch is a different rung, so an escalation pin on the source rung does not carry over.
-  const { pinned, ...rest } = m;
   const i = EFFORTS.indexOf(m.effort), lo = EFFORTS.indexOf(floorOf(m)), hi = Math.max(EFFORTS.indexOf(cap), i);
-  return { ...rest, effort: EFFORTS[Math.min(hi, Math.max(lo, i + d))] };
+  return { ...m, effort: EFFORTS[Math.min(hi, Math.max(lo, i + d))] };
 };
 const label = (m) => `${m.vendor === 'claude' ? `Claude ${m.model}` : isAlt(m) ? m.model : `Codex ${m.model}`} ${m.effort}`;
 
@@ -188,9 +186,11 @@ const exModels = new Set((typeof opts['exclude-model'] === 'string' ? opts['excl
 const modelExcluded = (model, account = null) => exModels.has(model) || exModels.has(poolOf(model))
   || (adversarial && poolOf(model) === 'gpt')
   || (security && account?.kind === 'trae' && poolOf(model) === 'gpt');
-// Adversarial reviews are the one approved exception to the DeepSeek model-fit rule: they run on DeepSeek only with
-// the second reviewer from the other non-GPT family. Build-run still cannot use DeepSeek.
-const deepseekUnfit = cat === 'build-run' || (!adversarial && (cat === 'review-high'
+// Adversarial review rows are the one approved exception to the sensitive-review DeepSeek model-fit rule: they use
+// the other non-GPT family as second reviewer. The exception does not apply to adversarial work in other categories;
+// in particular, build-run never uses DeepSeek.
+const adversarialReview = adversarial && ['review', 'review-high', 'second-opinion'].includes(cat);
+const deepseekUnfit = cat === 'build-run' || (!adversarialReview && (cat === 'review-high'
   || (['review', 'second-opinion'].includes(cat) && (impact === 'release' || stakes === 'high' || security))));
 const tierModels = (account, taskTier = tier) => {
   const list = account?.kind === 'trae' ? (cat === 'image-read' ? [SOL, ASTRA] : COMPANY_TIERS[taskTier])
@@ -210,8 +210,10 @@ const chatgptOut = QX.out || (noRedeem && !QX.pick && !!QX.redeem)
 // the same rules, before personal quota (user, 2026-11-08). TT is whichever company account takes Codex work now.
 const taskFits = (a) => T.kind !== 'claudeOnly' && cat !== 'image-gen'
   && !(cat === 'research' && !a.search) && !(T.kind === 'browser' && !a.browser);
-const routingModelFits = (model, account) => model === SOL || tierModels(account).includes(model) || ALTS.some((a) => a.model === model
-  && (cat === 'image-read' ? a.vision : !a.visionOnly) && !(deepseekUnfit && poolOf(model) === 'deepseek'));
+const routingModelFits = (model, account) => model === SOL || tierModels(account).includes(model)
+  || (adversarial && model === KIMI && account?.kind === 'ttadk' && cat !== 'image-read')
+  || ALTS.some((a) => a.model === model && (cat === 'image-read' ? a.vision : !a.visionOnly)
+    && !(deepseekUnfit && poolOf(model) === 'deepseek'));
 const expiringUnused = QX.ttadk?.usable && !excluded.has(QX.ttadk.name) && ttadkExpiringUnused(QX.ttadk);
 const preferExpiringTtadk = expiringUnused && (background && backgroundEligible || tier === 'light' && laneEligible);
 const companyOrder = background && backgroundEligible && !preferExpiringTtadk ? [QX.trae, QX.ttadk] : [QX.ttadk, QX.trae];
@@ -272,7 +274,8 @@ const codexOut = chatgptOut && !ttModelsOK; // An account with only excluded or 
 // family (Kimi <-> DeepSeek); when only one family is available, say so and ask (Claude second, or one reviewer).
 const ADV_DEEPSEEK = 'deepseek-v4.1-flash';
 const adversarialModelFits = (model, account) => taskFits(account) && cat !== 'image-gen'
-  && (cat !== 'image-read' || ALTS.some((a) => a.model === model && a.vision));
+  && (cat !== 'image-read' || ALTS.some((a) => a.model === model && a.vision))
+  && !(deepseekUnfit && poolOf(model) === 'deepseek');
 const advCompany = (model) => [QX.ttadk, QX.trae].find((a) => a?.usable && !excluded.has(a.name)
   && a.models.includes(model) && !modelExcluded(model, a) && adversarialModelFits(model, a)) ?? null;
 // The user's order names Kimi-K3 on TTADK only; DeepSeek-V4.1-Flash may run on TTADK or TRAE.
@@ -333,6 +336,9 @@ const ttCapable = !adversarial && ttModelsOK && ttTaskOK && !(claudeReviewFirst 
   && !(cat === 'research' && !TT.search) && !(T.kind === 'browser' && !ttBrowser);
 const ei = (e) => EFFORTS.indexOf(e);
 const maxE = (a, b) => (ei(a) >= ei(b) ? a : b);
+// Keep balancing pins as control-flow state, not route-rung data: selected rungs are serialized in --json output.
+const balancePinned = new WeakSet();
+const pinBalance = (x) => { balancePinned.add(x); return x; };
 const companyFirstEffort = () => {
   const altSol = cat !== 'second-opinion' && T.alt?.vendor === 'codex' && T.alt.model === SOL ? T.alt.effort : null;
   let eff = altSol ? maxE(altSol, base[0].effort) : base[0].effort;
@@ -364,7 +370,7 @@ if (ttCapable) {
   // A light first rung that isn't Sol escalates to Sol medium before the usual Sol ladder: the retry costs more, it
   // doesn't try a second light model sideways. Only when the company account can actually run Sol — otherwise the
   // notches below keep the light pick's own model and a higher effort is the next rung, never an unlisted Sol.
-  if (lightPick && lightPick.model !== SOL && ttHas(SOL)) rungs.push({ ...X(SOL, 'medium'), pinned: true });
+  if (lightPick && lightPick.model !== SOL && ttHas(SOL)) rungs.push(pinBalance(X(SOL, 'medium')));
   while (ei(rungs.at(-1).effort) < ei('xhigh')) rungs.push(notch(rungs.at(-1), +1));
   // After Sol xhigh has fallen short, a different model family before Sol max (its misses rarely overlap Sol's: Kimi,
   // 2026-11-07; DeepSeek, 2026-11-10), and the second fallback after Sol max — all before personal quota.
@@ -526,7 +532,7 @@ const resolveRung = (raw, index) => {
     // A light first rung (TTADK Terra/5.5) walks the light tier too, so a paused/busy TRAE Terra doesn't block the
     // balance transfer while TRAE 5.5 or DeepSeek would pass. Only index 0: an escalation rung is never walked sideways.
     const lightStart = index === 0 && taskTier === 'light' && TTADK_LIGHT.includes(x.model);
-    const candidates = !x.pinned && (x.model === SOL || lightStart) ? COMPANY_TIERS[taskTier] : [x.model];
+    const candidates = !balancePinned.has(raw) && (x.model === SOL || lightStart) ? COMPANY_TIERS[taskTier] : [x.model];
     const checked = [];
     for (const model of candidates) {
       factors = balanceFactors({ ttadk: QX.ttadk, trae: QX.trae, model, category: cat, stakes, impact, tier: taskTier, allowBucketFree: free.includes(model) });

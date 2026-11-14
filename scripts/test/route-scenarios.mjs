@@ -1576,6 +1576,7 @@ for (const [sc, args] of ERRORS) {
   S.advDsOnly = { claude: cl(10, 120), codex: [acc('main', 20, 120), tt({ models: ['gpt-6.1-sol', FLASH] })] };
   S.advTtadkOut = { claude: cl(10, 120), codex: [acc('main', 20, 120), kimiTt(out), dsTrae()] };
   S.advSearch = { claude: cl(10, 120), codex: [acc('main', 20, 120), kimiTt({ search: true, searchLive: true })] };
+  S.advMatrix = { claude: cl(10, 120), codex: [acc('main', 20, 120), kimiTt({ search: true, searchLive: true })] };
   // Kimi is named for TTADK only: a TRAE-listed Kimi must not jump ahead of DeepSeek.
   S.advTraeKimi = { claude: cl(10, 120), codex: [acc('main', 20, 120), tt(out), tr({ models: ['gpt-6.1-sol', KIMI, FLASH], modelIds: {} })] };
   S.advNone = { claude: cl(10, 120), codex: [acc('main', 20, 120), tt(out), tr()] };
@@ -1625,6 +1626,10 @@ for (const [sc, args] of ERRORS) {
     // Background can use the company non-GPT lane; it never falls through to Claude.
     [pick('advBoth', ['review', '--security', '--background']), 'codex kimi-k3 high @ttadk'],
     [pick('advNone', ['review', '--security', '--background']), 'DEFER'],
+    // Exact Astra reproductions: Kimi remains eligible in the background lane, while build-run retry excludes DeepSeek.
+    [pick('advBoth', ['review', '--background', '--adversarial', '--author', 'codex', '--exclude-model', 'deepseek', '--impact', 'service']), 'codex kimi-k3 high @ttadk'],
+    [pick('advBoth', ['build-run', '--adversarial', '--impact', 'release', '--failures', '1']), 'claude opus high @-'],
+    [gated('advBoth', ['build-run', '--adversarial', '--impact', 'release', '--failures', '1']), true],
   ];
   // Never a GPT pick or second reviewer anywhere in the adversarial lane.
   for (const sc of ['advBoth', 'advDsOnly', 'advTtadkOut', 'advTraeKimi', 'advNone']) {
@@ -1637,6 +1642,44 @@ for (const [sc, args] of ERRORS) {
   const bad = cases.map(([got, want], i) => (got === want ? null : `${i} (${JSON.stringify(got)} != ${JSON.stringify(want)})`)).filter((i) => i !== null);
   if (bad.length) fail++;
   console.log(`${bad.length ? 'FAIL' : 'ok  '} adversarial review   ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
+  try {
+    // Every route category under both policy flags and both dispatch modes. This stays synthetic and bounded:
+    // 21 categories x 2 flags x 2 foreground/background modes = 84 decisions.
+    const categories = ['lookup', 'extract', 'analysis', 'research', 'implement', 'implement-hard', 'ui-browser', 'debug',
+      'review', 'review-high', 'design', 'docs', 'draft', 'build-run', 'browser', 'computer-use', 'claude-tools',
+      'science', 'image-gen', 'image-read', 'second-opinion'];
+    const tableCategories = execFileSync(process.execPath, [ROUTE, '--table'], { encoding: 'utf8' })
+      .split('\n').filter((line) => /^\S/.test(line)).map((line) => line.trim().split(/\s+/)[0]);
+    assert.deepEqual(categories, tableCategories, 'matrix category list must match route --table');
+    const reviewCategories = new Set(['review', 'review-high', 'second-opinion']);
+    const noCompanyAdversarial = new Set(['image-gen', 'image-read', 'claude-tools']);
+    const noCompanySecurity = new Set(['image-gen', 'claude-tools']);
+    let decisions = 0, companyExpected = 0;
+    for (const category of categories) {
+      for (const policyFlag of ['--adversarial', '--security']) {
+        for (const dispatchFlags of [[], ['--background']]) {
+          const args = [category, policyFlag, ...dispatchFlags];
+          if (CODE.includes(category)) args.push('--impact', 'service');
+          if (category === 'build-run') args.push('--impact', 'release');
+          if (category === 'second-opinion') args.push('--against', 'codex');
+          const routed = o('advMatrix', args);
+          const isAdversarial = policyFlag === '--adversarial' || reviewCategories.has(category);
+          if (isAdversarial && routed.pick) assert.ok(!routed.pick.model.startsWith('gpt-'), `${args.join(' ')} picked GPT`);
+          if (category === 'build-run' && routed.pick) assert.ok(!routed.pick.model.startsWith('deepseek'), `${args.join(' ')} picked DeepSeek`);
+          const companyEligible = isAdversarial ? !noCompanyAdversarial.has(category) : !noCompanySecurity.has(category);
+          if (companyEligible) {
+            companyExpected++;
+            assert.ok(routed.pick && ['ttadk', 'trae'].includes(routed.pick.account), `${args.join(' ')} missed eligible company model`);
+          }
+          decisions++;
+        }
+      }
+    }
+    assert.equal(decisions, categories.length * 4);
+    const pinnedRetry = o('advMatrix', ['lookup', '--failures', '1']);
+    assert.equal(Object.hasOwn(pinnedRetry.pick, 'pinned'), false, 'internal balance pin leaked into public JSON pick');
+    console.log(`ok   category policy matrix: ${categories.length} categories x 2 policy flags x 2 dispatch modes = ${decisions}; ${companyExpected} eligible-company assertions; no public pin metadata`);
+  } catch (e) { fail++; console.log(`FAIL category policy matrix: ${e.stack}`); }
   // The route log carries the adversarial flag for the nightly review.
   try {
     const log = path.join(tmp, 'adv-route-log.jsonl');
