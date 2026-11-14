@@ -2,6 +2,7 @@
 version: 2026-11-13.12
 
 ## Changes In This Version
+- Nightly delivery (2026-11-14): no fixed worker kill/timeout; use hub workers and archived attempt status, deliver completed/stuck Chinese status by 05:00 local and late completion afterwards. Infrastructure misses exclude the model, personal quota needs explicit OK, and missing reports/failed delivery exit nonzero. Deadline-check template remains owner-installed; digest version unchanged.
 - Signing worker (2026-11-13.12): Codex remains barred from all signing material; one resident Claude worker may sign preregistered own test packages with only the specified H6/debug credentials, under narrow reporting, quota and nightly-audit limits.
 - Integration (2026-11-13.11): the repo-owned `res` tool and contract v1.3 (optional lane 3 at load1m <=8 AND available memory >=32 GiB, installer/review fixes) merged with light procedural/test-env routing and local-only heavy-build scope; security-content routing wording is clarified in the same combined change set, with no competing sections.
 - Procedural scope (2026-11-13): test-environment or low-stakes `build-run` is light tier on both company accounts (TTADK `gpt-5.6-terra`/`gpt-5.5`, TRAE light list) and a failure escalates to Sol medium; production release/high stakes keeps Sol medium with pinned criteria. Heavy-build/lane locks are only for genuine local heavy compute — never for PPE/TCE/BITS/SCM deploys, remote pipelines or CI; shared remote/CI entry scripts stay unthrottled and local lock/verify throttles live only in local-only wrappers.

@@ -18,7 +18,13 @@ import { spawnSync } from 'node:child_process';
 const args = process.argv.slice(2);
 fs.appendFileSync(process.env.HOME + '/calls.jsonl', JSON.stringify(args) + '\\n');
 if (args[0] === '-e') { const r = spawnSync(${JSON.stringify(process.execPath)}, args, { stdio: 'inherit' }); process.exit(r.status ?? 2); }
+if (args[0]?.endsWith('/nightly-review.mjs')) { const r = spawnSync(${JSON.stringify(process.execPath)}, args, { stdio: 'inherit' }); process.exit(r.status ?? 2); }
 if (args[0]?.endsWith('/route.mjs')) console.log(JSON.stringify({ pick: { vendor: 'codex', model: 'fixture-model', effort: 'high', account: 'fixture' } }));
+else if (args[0]?.endsWith('/codex-worker.mjs')) {
+  fs.writeFileSync(process.env.HOME + '/worker-args.txt', args.join(' '));
+  fs.writeFileSync(args[args.indexOf('--out') + 1], 'fixture dry report');
+  console.log('thread=fixture-thread turn=fixture-turn');
+}
 else if (args[0]?.endsWith('/resource-sample.mjs')) { if (!args.includes('--read-only')) process.exit(99); console.log(JSON.stringify({ schema: 1, complete: false, processComplete: false })); console.error('fixture UNKNOWN'); process.exit(2); }
 else if (args[0]?.endsWith('/resource-review.mjs')) { console.log(JSON.stringify({ coverage: { observedMinutes: 0 }, badCases: [] })); console.error('fixture UNKNOWN'); process.exit(2); }
 else console.log('{}');
@@ -29,14 +35,14 @@ else console.log('{}');
   const run = spawnSync('/bin/zsh', [path.join(skill, 'scripts/nightly-review.sh')], { env: { ...process.env, HOME: tmp, NIGHTLY_MODE: 'dry', NIGHTLY_PERSONAL_OK: '0' }, encoding: 'utf8', timeout: 15000 });
   assert.equal(run.status, 0, run.stderr);
   const review = path.join(shared, 'routing-review');
-  const day = fs.readdirSync(review).find((s) => s.endsWith('.data'));
-  const data = path.join(review, day);
+  const day = fs.readdirSync(review).find((s) => s.endsWith('.run'));
+  const data = path.join(review, day, 'attempt-1/data');
   assert.ok(fs.existsSync(path.join(data, 'resource-review-24h.txt')));
   assert.ok(fs.existsSync(path.join(data, 'resource-review-24h.json')));
   assert.ok(fs.existsSync(path.join(data, 'resource-review-96h.json')));
   assert.equal(JSON.parse(fs.readFileSync(path.join(data, 'resource-now.json'), 'utf8')).complete, false);
-  assert.match(fs.readFileSync(path.join(data, 'resource-now.err'), 'utf8'), /UNKNOWN/);
-  assert.match(fs.readFileSync(path.join(tmp, 'worker-args.txt'), 'utf8'), /-s read-only/);
+  assert.match(fs.readFileSync(path.join(data, 'resource-now.json.err'), 'utf8'), /UNKNOWN/);
+  assert.match(fs.readFileSync(path.join(tmp, 'worker-args.txt'), 'utf8'), /--sandbox read-only/);
   assert.match(fs.readFileSync(path.join(tmp, 'worker-args.txt'), 'utf8'), /Machine resources:/);
   assert.ok(!fs.existsSync(path.join(tmp, 'Library/LaunchAgents')));
   const calls = fs.readFileSync(path.join(tmp, 'calls.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
