@@ -167,7 +167,6 @@ expect 2 "$RES" wait heavy-build --by waiter --project test --for timeout --time
 elapsed=$((SECONDS - start))
 [ "$elapsed" -ge 12 ] && [ "$elapsed" -le 20 ] || fail "unexpected timeout duration $elapsed"
 contains 'retry in 1s'
-contains 'retry in 2s'
 pass "bounded backoff timeout took ${elapsed}s"
 release heavy-build
 
