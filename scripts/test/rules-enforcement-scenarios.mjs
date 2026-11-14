@@ -22,7 +22,7 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
 try {
   fs.mkdirSync(shared, { recursive: true }); fs.writeFileSync(log, '');
   const digest = loadDigest();
-  assert.ok(digest.text.split('\n').length <= 60);
+  assert.ok(digest.text.split('\n').length <= 63);
   const workerLines = digest.worker.split('\n');
   const loginRule = workerLines.findIndex((line) => line.includes('Forbidden for every worker: never read, copy, load or inject LOGIN material'));
   assert.ok(loginRule >= 0); assert.match(workerLines[loginRule + 1], /Allowed with the user's 2026-11-13 authorization: sign OUR OWN TEST packages/);

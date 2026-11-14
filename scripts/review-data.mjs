@@ -113,6 +113,21 @@ const background = (() => {
     totalMinutes, meanMinutes: minutes.length ? Math.round(totalMinutes / minutes.length * 10) / 10 : null };
 })();
 const routing = {
+  automaticReroutes: (() => {
+    const hops = all.filter((r) => r.kind === 'reroute' && r.automatic && r.t >= since);
+    const rows = hops.map((r) => {
+      const launch = all.find((l) => l.kind === 'launch' && l.t >= r.t && l.name === r.name
+        && l.account === r.to?.account && String(l.model).toLowerCase() === String(r.to?.model).toLowerCase());
+      const firstEvent = launch && all.find((l) => l.kind === 'reroute-progress' && l.hopAt === r.t);
+      const startMin = firstEvent ? Math.max(0, (firstEvent.t - r.t) / 60000) : null;
+      return { t: r.t, project: r.project, name: r.name, reason: r.reason, from: r.from, to: r.to,
+        waitedMin: r.from?.waitedMin ?? null, startMin, estimateMin: r.toStartEstimateMin ?? null,
+        faster: startMin != null && r.from?.predictedStartMin != null ? startMin < r.from.predictedStartMin : null };
+    });
+    return { count: rows.length, totalWaitedMin: rows.reduce((n, r) => n + (r.waitedMin ?? 0), 0),
+      faster: rows.filter((r) => r.faster === true).length, slower: rows.filter((r) => r.faster === false).length,
+      unknown: rows.filter((r) => r.faster == null).length, recent: rows.slice(-30) };
+  })(),
   eta: {
     constants: ETA,
     byCategoryEffort: Object.fromEntries([...new Set(outs.map((o) => `${o.category}:${effectiveFirst(o)?.effort ?? '?'}`))]

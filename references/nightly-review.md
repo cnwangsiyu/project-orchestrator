@@ -175,15 +175,21 @@ for labour and foreground blocking. Launch records are attempts, not completion 
 launch evidence and missing remote ledgers stay unknown, never proven compliant or violated.
 
 For every `review-data.routing.signing` row, audit only the registered metadata and task artifacts: the package id,
-manifest and hash were present in `user-signing/registry.json`; the route used full access and only a designated
+manifest and hash were present in `user-signing/registry.json`; the route used full access and only a user-approved
 identity; a matching receipt exists under `user-signing/receipts/`; the worker report contains only PASS/FAIL,
-certificate fingerprint and hashes; and the H6 keychain was re-locked unless another registered signing run was active.
+certificate fingerprint and hashes; and the signing keychain was re-locked unless another registered signing run was active.
+The receipt's identity must match `user-signing/identities.json`, including its dated user approval and device/profile
+scope (H6/iPhone 8; cosign DH59R4RNRY/profile 3JVMQQBHUR/iPhone 11, valid to 2027-09; repo Android debug).
+Only orchestrators write registry entries; signing workers must not change registry.json or identities.json.
+Workers needing new entries report BLOCKED; new identities require a new user approval card and allowlist entry.
 Scan worker logs only for password-like strings and mask every hit in review output. A hit, missing receipt,
-unregistered id, production/release package, other keychain, or missing re-lock evidence is a violation and user card;
+unregistered id, unlisted identity, worker-written registry/allowlist, production/release package, other keychain, or missing re-lock evidence is a violation and user card;
 never inspect or reproduce the suspected secret to confirm it. Absent evidence is UNKNOWN, never assumed compliant.
 
-Compare the last three nightly reports. A rule broken on three nights needs a concrete tool-level enforcement
-proposal (evidence, owner, smallest effective gate and false-positive risk), not another repeated reminder.
+Include `routing.automaticReroutes`: automatic hops, queue waits, and observed faster/slower/unknown replacement
+starts. Missing progress evidence remains UNKNOWN, never an assumed speedup. Compare the last three nightly reports.
+A rule broken on three nights needs a concrete tool-level enforcement proposal (evidence, owner, smallest effective
+gate and false-positive risk), not another repeated reminder.
 Use a Chinese decision card if approval or a hard-rule change is needed; never silently expand permissions or
 change thresholds. Push digest-version notes through the owner and require ledger `rules-ack <version>` from
 each recipient. Hook injection records are not acknowledgements.

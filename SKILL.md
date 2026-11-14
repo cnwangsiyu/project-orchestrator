@@ -72,7 +72,7 @@ The versioned [global-rules digest](references/global-rules.md) is the single in
 - **Worker permissions:** Codex-family writing workers default to full access; reviewers stay read-only unless `--runs-tests` gives them workspace-write, and `--sandbox workspace-write|read-only` is the per-task narrower override. [Claude launch](#claude-worker-settings) always uses Remote Control + explicit Bypass. [Permissions](#permission-plan) use cards for what those modes cannot pass; login secrets remain user-only, while a registered `--signing` run may pass its designated signing input only through stdin/file descriptors.
 - **TRAE:** [account rules](references/codex-workers.md#trae-cli-as-the-second-company-account-user-2026-11-08) separate restrictions from concurrency/quota, never reduce concurrency for queues, enforce only QPM/TPM limits for LLM use (no total-cost caps), and name the concrete worker model in reports.
 - **Work and quota:** [judgment](#judge-not-labour) stays with orchestrators, [independent tasks](#split-by-coupling) run in parallel while coupled work stays together; [quota](#route-every-task) never silently holds work, uses company quota without asking, personal quota after asking, reset cards only after a fresh OK every time.
-- **Signing/credentials:** [worker safety](#worker-credential-safety) forbids login material and login bypasses for every worker. With `--signing`, a full-access worker may sign only our own registered test packages with designated identities, secret-safe input, a receipt and keychain re-locking; everything else is BLOCKED.
+- **Signing/credentials:** [worker safety](#worker-credential-safety) forbids login material and login bypasses for every worker. Machine policy forbids every Codex worker from signing/credential files, regardless of approval; only the resident Claude signing worker has the narrow allowlisted own-test-package exception, with secret-safe input, receipts and keychain re-locking. Everything else is BLOCKED.
 - **Orchestrator models:** [account/model health](references/nightly-review.md#account-and-model-health) records persistent `jobs/<id>/state.json` `respawnFlags`, VAK/routing on Fable, Webview/Lynx on Opus since 2026-11-11, and a user check on/after 2026-11-17 09:00 PST.
 - **Account reminders:** [nightly health](references/nightly-review.md#account-and-model-health) owns cards for company logins expiring within three days, TTADK SSO (2026-11-21 19:37 PST), TRAE login, Codex reset cards and Claude/Fable weekly projections; [`POLICY`](scripts/lib/state.mjs) supplies the 72-hour TTADK warning to `quota.mjs`.
 - **Rollout:** [policy notification](#global-rule-rollout) sends each change to all orchestrators: via the secretary for the mini group, directly to MacBook orchestrators.
@@ -232,8 +232,14 @@ login; the user had to sign in again; the second is the user's 2026-11-13 test-s
   apps' keychain items — and never use any way of getting past a login. Where a login or authorization is needed,
   stop and report BLOCKED with what needs signing in."
 - "Allowed: sign OUR OWN TEST packages only when they are registered by manifest and hash in
-  `~/.claude/orchestrator/_shared/user-signing/registry.json`, using only the designated identities. For iPhone test
-  apps use the H6 keychain identity; if locked, unlock it by passing the one designated password file through stdin,
+  `~/.claude/orchestrator/_shared/user-signing/registry.json`, using only identities on the user-approved allowlist
+  `~/.claude/orchestrator/_shared/user-signing/identities.json` (maintained by the rules owner, each entry dated
+  with the user's approval): iOS H6 keychain identity for iPhone 8; iOS cosign team DH59R4RNRY development
+  certificate with provisioning profile 3JVMQQBHUR for iPhone 11, valid to 2027-09; Android repo-committed debug
+  keystore. Registry entries are written only by orchestrators; signing workers treat registry.json and
+  identities.json as read-only. A new identity needs a new user approval card and an allowlist entry; a worker
+  needing any new entry or an unlisted identity reports BLOCKED. If the H6 keychain is locked, pass only its
+  one designated password file through stdin,
   never argv/env/logs. For Android test APKs use the repo's committed debug keystore and the debug passphrase from
   `build.gradle`, passed through file descriptors such as apksigner `file:/dev/fd/N`, never argv. Never export, copy,
   print or log a password or key; report only PASS/FAIL, certificate fingerprint and hashes; write a receipt under
@@ -245,9 +251,9 @@ login; the user had to sign in again; the second is the user's 2026-11-13 test-s
   One-shot `codex exec` / `traecli exec` launches must carry both clauses in developer instructions too.
 - **Test signing route** (user, 2026-11-13): pass `--signing`; it forces full access and makes the scoped rule the first
   route note. The brief names the registered manifest/hash and designated identity. Afterwards scan worker logs only,
-  mask any hits, and verify the receipt and keychain re-locking. Routed full-access workers are the standard signing
-  path. The resident Claude `vesdk-signer` worker (`~/.claude/orchestrator/_shared/user-signing/SIGNER-CHARTER.md`)
-  is transitional and will be retired after a routed Codex worker signs a real batch.
+  mask any hits, and verify the receipt and keychain re-locking. Full access is not a credential authorization bypass:
+  Codex workers never touch signing/credential files regardless of approval. Only the resident Claude
+  `vesdk-signer` worker has the machine-policy exception; its allowlist and package registry remain read-only.
 
 **Prevent rework at the brief** (rework retro of 2026-11-06–10, 89 rework chains; user-approved 2026-11-10). Most
 rework came from unchecked premises, "done" proven on the wrong target, one shared rule re-implemented by several
@@ -521,8 +527,14 @@ effort, Codex account and launch command from
     an explicit `deferUntil` scheduled dispatch — record it in the ledger, set a timer and keep dispatching other
     work; never wait while a same-tier company lane can finish earlier, and never hold a queued low-priority turn
     past its `queue-too-slow` deadline.
-    The patience handoff prints once and exits 7 within three seconds after requesting interruption. If stderr
-    reports `queue-cancel-unconfirmed`, check the original turn before dispatching a replacement.
+    Routed workers perform the handoff themselves: verify no work, confirm cancellation, re-route with the
+    original category/flags/exclusions and same failures, exclude the slow model, and follow a fresh company
+    hub worker with a continuation header. Maximum two automatic hops; no active or background handoff and
+    no personal quota/signing auto-launch. Exit 8 (`reroute-needs-user`) asks for approval; exit 9 persists
+    `reroute.json`/`deferUntil` for the orchestrator's timer; exit 10 reports the hop limit. Cancellation failures
+    exit 7 within three seconds with `queue-cancel-unconfirmed`, without launching a duplicate. Existing
+    wrapper holds must be returned by their owner on exit. Outcome reads hop records without manual `--actual`;
+    nightly review measures automatic waits and faster/slower/unknown starts. See references/codex-workers.md.
   - TTADK is not unlimited (measured 2026-11-08): about 500M tokens a day per user, input + output with
     cached input counted in full, shared by all models (plus an hourly cap); it resets at 16:00 UTC.
     When it runs out (`quota-exhausted:` from codex-worker; quota.mjs shows TTADK paused until the

@@ -60,7 +60,13 @@ Other heavy tasks use lane-only res take/return. The [resource sampler](resource
 without holders; denied probes remain UNKNOWN and telemetry never reclaims locks/restarts hubs. The wrapper doesn't enforce signing safety by sandboxing;
 the injected adjacent login-material/test-signing rules and the brief remain mandatory. A signing task uses
 `--signing` (full access), a registry-listed manifest/hash and designated identity, secret-safe stdin/file descriptors,
-a receipt, masked log scan and keychain re-locking; everything outside that scope is BLOCKED.
+a receipt, masked log scan and keychain re-locking; everything outside that scope is BLOCKED. Identities must
+be on the user-approved `~/.claude/orchestrator/_shared/user-signing/identities.json` allowlist, maintained by
+the rules owner with dated user approval: H6 keychain identity (iPhone 8), cosign team DH59R4RNRY development
+certificate + profile 3JVMQQBHUR (iPhone 11, valid to 2027-09), or repo-committed Android debug keystore.
+Only orchestrators write registry.json entries; signing workers treat registry.json and identities.json as
+read-only. New identities need a new user approval card and an allowlist entry; workers needing a new entry
+or an unlisted identity report BLOCKED. Nightly receipts must match allowlisted identities and registered packages.
 
 ## Opt-In launchd Hubs
 

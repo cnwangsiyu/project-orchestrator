@@ -8,6 +8,7 @@
 //                    [--exclude-account a,b] [--exclude-model m,family] [--origins p,q] [--mode <compatibility value>]
 //                    [--sandbox workspace-write|read-only] [--cwd DIR] [--task-dir DIR]
 //                    [--name NAME] [--fresh] [--json] [--security] [--adversarial | --defensive] [--background]
+//                    [--worker] [--auto-reroute-depth N] (followable automatic handoff; maximum 2 hops)
 //   route --table          (the routing table: categories, first pick, alternative, escalation ladder)
 //
 // The orchestrator judges only what a script can't: which category the task is, its stakes, whether an automatic check
@@ -99,14 +100,14 @@ const notch = (m, d, cap = 'xhigh') => {
 };
 const label = (m) => `${m.vendor === 'claude' ? `Claude ${m.model}` : isAlt(m) ? m.model : `Codex ${m.model}`} ${m.effort}`;
 const LOGIN_MATERIAL_RULE = `forbidden for every worker: never read, copy, load or inject LOGIN material — login sessions, SSO/session tokens, cookies, CLI auth files (for example bytedcli's), API keys, .netrc, browser profiles, or other people's/other apps' keychain items — and never use any way of getting past a login. Where a login or authorization is needed, stop and report BLOCKED with what needs signing in`;
-const TEST_SIGNING_RULE = `allowed with the user's 2026-11-13 authorization: sign OUR OWN TEST packages only when they are registered by manifest and hash in ~/.claude/orchestrator/_shared/user-signing/registry.json, and use only the designated identities. For iPhone test apps use the H6 keychain identity; if its keychain is locked, unlock it by passing the one designated password file via stdin, never argv/env/logs. For Android test APKs use the debug keystore committed in the repo and the debug passphrase from build.gradle, passed through file descriptors such as apksigner file:/dev/fd/N, never argv. Never export, copy, print or log a password or key; report only PASS/FAIL, certificate fingerprint and hashes; write a receipt under user-signing/receipts/; re-lock the keychain when done unless another registered signing run is active; never sign production/release packages and never touch other keychains. Anything outside this scope is BLOCKED and needs a card to the user`;
+const TEST_SIGNING_RULE = `allowed with the user's 2026-11-13 authorization: sign OUR OWN TEST packages only when registered by manifest and hash in ~/.claude/orchestrator/_shared/user-signing/registry.json, using only identities on the user-approved allowlist ~/.claude/orchestrator/_shared/user-signing/identities.json (maintained by the rules owner; each entry dated with the user's approval): iOS H6 keychain identity for iPhone 8; iOS cosign team DH59R4RNRY development certificate + provisioning profile 3JVMQQBHUR for iPhone 11, valid to 2027-09; Android debug keystore committed in the repo. Only orchestrators write registry.json entries; signing workers treat registry.json and identities.json as read-only. A new identity requires a new user approval card and an allowlist entry; a worker needing a new entry or an unlisted identity reports BLOCKED. If the H6 keychain is locked, pass only its one designated password file via stdin, never argv/env/logs. Android's repo debug passphrase from build.gradle goes through file descriptors such as apksigner file:/dev/fd/N, never argv. Never export, copy, print or log passwords or keys; report only PASS/FAIL, certificate fingerprint and hashes; write a receipt under user-signing/receipts/; re-lock the keychain unless another registered signing run is active; never sign production/release packages or touch other keychains. Anything outside this scope is BLOCKED and needs a user card`;
 const CREDENTIAL_NOTE = `brief: include the credential clause (two adjacent parts) — 1. ${LOGIN_MATERIAL_RULE}. 2. ${TEST_SIGNING_RULE}.`;
 const SIGNING_AUDIT_NOTE = 'after the worker finishes: scan worker logs only for password-like strings, mask any hits in all output, and verify registered package ids only, a receipt under user-signing/receipts/, and keychain re-locking when no other registered signing run is active';
 const SHARED_TEST_DEVICE_NOTE = 'brief: registered shared test phones iphone8, iphone11 and s21 are pre-authorized for OUR OWN apps: freely tap Allow/Authorize/Trust/OK on those apps and system dialogs they trigger, including camera, microphone, photos, notifications, local network, tracking, developer trust, USB debugging and install confirmations; no per-prompt approval or button whitelist. Never operate the personal iPhone 15 Pro Max (policy=never) or any device not registered in res. Take/return through res, keep the lease <=2 h and return it when done; back up app data before a destructive reinstall/wipe/erase; never enter personal-account credentials, passwords or verification codes, and make no purchases. If Codex refuses an allowed device prompt, re-route that step to Claude instead of asking the user to tap it';
 
 // ---- args ----
 // --apps a,b: the desktop apps (bundle ids) a computer-use worker may operate; others are declined.
-const BOOL = new Set(['auto-check', 'writes', 'read-only', 'runs-tests', 'signing', 'fresh', 'json', 'table', 'no-redeem', 'dry', 'urgent', 'security', 'adversarial', 'defensive', 'background', 'device-lease', 'shared-lock', 'no-local-build']);
+const BOOL = new Set(['auto-check', 'writes', 'read-only', 'runs-tests', 'signing', 'fresh', 'json', 'table', 'no-redeem', 'dry', 'urgent', 'security', 'adversarial', 'defensive', 'background', 'device-lease', 'shared-lock', 'no-local-build', 'worker']);
 // --urgent: run now even while TTADK is down for a fixable reason (that work would otherwise wait for the fix).
 // --exclude-account a,b: route around accounts that just failed (e.g. TTADK after a rate-limited retry or an auth error).
 // --exclude-model m,f: route around models (an id, or a family: gpt, deepseek, gemini…) that just failed for
@@ -155,6 +156,8 @@ const env = opts.env === undefined ? 'prod' : opts.env;
 if (!['test', 'prod'].includes(env)) die(`--env takes test or prod, not ${opts.env}`);
 const failures = opts.failures === undefined ? 0 : Number(opts.failures);
 if (!Number.isInteger(failures) || failures < 0) die(`--failures takes a whole number ≥ 0, not ${opts.failures}`);
+const autoRerouteDepth = Number(opts['auto-reroute-depth'] ?? 0);
+if (!Number.isInteger(autoRerouteDepth) || autoRerouteDepth < 0) die('--auto-reroute-depth takes a whole number >= 0');
 if (opts.sandbox !== undefined && !['workspace-write', 'read-only'].includes(opts.sandbox)) die(`--sandbox takes workspace-write or read-only, not ${opts.sandbox}`);
 if (cat === 'second-opinion' && !['claude', 'codex'].includes(opts.against)) die('second-opinion needs --against claude|codex (the vendor whose conclusion is checked)');
 // --author claude|codex on review / review-high: the vendor that wrote the code. A Codex-written change is reviewed by
@@ -853,6 +856,8 @@ const sandbox = signing ? 'danger-full-access' : sandboxOverride ?? (writes ? 'd
 const secondSandbox = sandboxOverride ?? (!writes && runsTests ? 'workspace-write' : 'read-only');
 const cwd = typeof opts.cwd === 'string' ? opts.cwd : '<workspace>', taskDir = typeof opts['task-dir'] === 'string' ? opts['task-dir'] : '<task dir>';
 const name = typeof opts.name === 'string' ? opts.name : '<project>-<task>';
+const routeArgs = [cat, ...Object.entries({ ...opts, failures }).filter(([k]) => !['json', 'dry', 'table'].includes(k))
+  .flatMap(([k, v]) => [`--${k}`, ...(v === true ? [] : [String(v)])])];
 const prompt = `"Read ${taskDir}/brief.md and follow it."`;
 const inRepo = (() => {
   if (typeof opts.cwd !== 'string') return null;
@@ -900,8 +905,8 @@ if (!background && !opts.urgent && ttDevice && personalPicks.length) {
 if (adversarial && m?.vendor === 'claude' && !opts.urgent && !needsOK.some((n) => n.startsWith('personal quota:')))
   needsOK.push('personal quota: no company non-GPT model can take this adversarial task — Claude Opus is the fallback. Ask the user before launching (go on now on personal quota, or wait for a company non-GPT model); never silently use personal quota and never substitute a GPT reviewer');
 // Optimistic-launch patience: a worker entering a low-priority lane gets a deadline derived from the faster account's
-// reset and an explicit alternative. codex-worker prints queue-too-slow and exits 7 when the live drain predicts a
-// later start, so the orchestrator can re-route instead of sitting in a queue for hours.
+// reset and an explicit alternative. codex-worker confirms cancellation before automatically following a fresh
+// company pick; approval, deferral and the hop limit wake the orchestrator with distinct exit codes.
 const queuePatience = lowPriorityPicks.length ? patienceMinutes({ now: Date.now(), ttadk: QX.ttadk }) : null;
 const shellQuote = (value) => `'${String(value).replaceAll("'", "'\\''")}'`;
 const alternative = [...etaRows].filter((r) => !lowPriorityPicks.some((l) => l.model === r.model && r.account === QX.trae?.name))
@@ -930,7 +935,23 @@ const execCred = ` -c 'developer_instructions=${JSON.stringify(credRule).replace
 const queueFlagsFor = (x) => queuePatience != null && lowPriorityPicks.some((l) => l.model === x.model)
   ? ` --queue-patience-min ${queuePatience} --alt ${shellQuote(queueAlt)}` : '';
 const launchAudit = (x, an, launchSandbox) => `node ${shellQuote(`${SKILL}/scripts/launch-audit.mjs`)} --name ${shellQuote(name)} --vendor ${x.vendor} --account ${shellQuote(an)} --model ${shellQuote(x.model)}${x.vendor === 'codex' ? ` --sandbox ${shellQuote(launchSandbox)}` : ''}${typeof opts['user-ok'] === 'string' ? ` --user-ok ${shellQuote(opts['user-ok'])}` : ''} && `;
+const workerSpec = (x, an, launchSandbox, modelId = x.model) => {
+  const workerArgs = ['--account', an, 'start', '--cwd', cwd, '--model', modelId, '--effort', x.effort,
+    '--sandbox', launchSandbox, '--name', name, '--route-args', JSON.stringify(routeArgs),
+    '--auto-reroute-depth', String(autoRerouteDepth), '--log', `${taskDir}/codex.jsonl`, '--out', `${taskDir}/codex-last.md`];
+  if (background) workerArgs.push('--background');
+  if (typeof opts['user-ok'] === 'string') workerArgs.push('--user-ok', opts['user-ok']);
+  if (queuePatience != null && lowPriorityPicks.some((l) => l.model === x.model)) workerArgs.push('--queue-patience-min', String(queuePatience), '--alt', queueAlt);
+  if (queuePatience != null && lowPriorityPicks.some((l) => l.model === x.model) && Number.isFinite(alternative?.startDelayMin))
+    workerArgs.push('--queue-alt-start-min', String(alternative.startDelayMin));
+  if (cat === 'computer-use' && typeof opts.apps === 'string') workerArgs.push('--computer-use-apps', opts.apps);
+  if (['browser', 'ui-browser'].includes(cat)) workerArgs.push('--browser-origins',
+    [...(cat === 'ui-browser' ? ['localhost', '127.0.0.1'] : []), ...POLICY.browserOrigins, ...(typeof opts.origins === 'string' ? opts.origins.split(',') : [])].join(','));
+  return { launcher: 'codex-worker', account: an, company: [QX.ttadk, QX.trae].some((a) => a?.name === an), workerArgs,
+    command: `node ${shellQuote(`${SKILL}/scripts/codex-worker.mjs`)} ${workerArgs.map((v) => /^[a-zA-Z0-9_./:-]+$/.test(v) ? v : shellQuote(v)).join(' ')} ${prompt}   (background task)` };
+};
 const launch = (x, shape = T.shape, acct = pickAcct, launchSandbox = sandbox) => {
+  if (opts.worker) shape = 'worker';
   if (x.vendor === 'claude') {
     return { launcher: 'claude-bg', command: `${launchAudit(x, 'claude', null)}cd ${cwd} && claude --bg --remote-control --permission-mode ${claudeMode} -n ${name} --model ${x.model} --effort ${x.effort} --append-system-prompt "$(node ${shellQuote(`${SKILL}/scripts/rules-worker-digest.mjs`)})" ${prompt}` };
   }
@@ -942,15 +963,12 @@ const launch = (x, shape = T.shape, acct = pickAcct, launchSandbox = sandbox) =>
     const id = traeProf.modelIds?.[x.model] ?? x.model;
     // Quota substitution can put Astra on a short row too; keep its queue/status visible through the hub.
     if (shape === 'exec' && x.model !== ASTRA && !backgroundLane && !queueFlags) return { launcher: 'traecli-exec', account: an, command: `${launchAudit(x, an, launchSandbox)}${traeProf.bin ?? 'traecli'} exec${inRepo === false ? ' --skip-git-repo-check' : ''} -C ${cwd} -s ${launchSandbox} -m ${id} -c model_reasoning_effort='"${x.effort}"'${execCred} --json -o ${taskDir}/codex-last.md ${prompt} < /dev/null > ${taskDir}/codex.jsonl 2>&1   (background task${inRepo === null ? '; add --skip-git-repo-check outside a repo' : ''})` };
-    return { launcher: 'codex-worker', account: an, command: `node ${SKILL}/scripts/codex-worker.mjs --account ${an} start --cwd ${cwd} --model ${id} --effort ${x.effort} --sandbox ${launchSandbox} --name ${name}${queueFlags} --log ${taskDir}/codex.jsonl --out ${taskDir}/codex-last.md ${prompt}   (background task)` };
+    return workerSpec(x, an, launchSandbox, id);
   }
   // A TTADK codex exec bypasses codex-worker, so it brings the account's proxy up first (exit 6 when it can't).
   const proxyFirst = TT?.search && an === TT.name ? `node ${SKILL}/scripts/codex-worker.mjs --account ${an} proxy >/dev/null && ` : '';
   if (shape === 'exec') return { launcher: 'codex-exec', account: an, command: `${launchAudit(x, an, launchSandbox)}${proxyFirst}CODEX_HOME=${home} codex exec${inRepo === false ? ' --skip-git-repo-check' : ''} -C ${cwd} -s ${launchSandbox} -m ${x.model} -c model_reasoning_effort='"${x.effort}"'${execCred} --json -o ${taskDir}/codex-last.md ${prompt} < /dev/null > ${taskDir}/codex.jsonl 2>&1   (background task${inRepo === null ? '; add --skip-git-repo-check outside a repo' : ''})` };
-  // ui-browser also reaches the local dev server (a host pattern matches any port).
-  const apps = cat === 'computer-use' && typeof opts.apps === 'string' ? ` --computer-use-apps '${opts.apps.split(',').map((a) => a.trim()).filter(Boolean).join(',')}'` : '';
-  const origins = ['browser', 'ui-browser'].includes(cat) ? ` --browser-origins '${[...(cat === 'ui-browser' ? ['localhost', '127.0.0.1'] : []), ...POLICY.browserOrigins, ...(typeof opts.origins === 'string' ? opts.origins.split(',') : [])].map((o) => o.trim()).filter(Boolean).join(',')}'` : '';
-  return { launcher: 'codex-worker', account: an, command: `node ${SKILL}/scripts/codex-worker.mjs --account ${an} start --cwd ${cwd} --model ${x.model} --effort ${x.effort} --sandbox ${launchSandbox} --name ${name}${origins}${apps} --log ${taskDir}/codex.jsonl --out ${taskDir}/codex-last.md ${prompt}   (background task)` };
+  return workerSpec(x, an, launchSandbox);
 };
 // The same quality gate for both vendors, so outcomes compare: code work gets an independent review before it's accepted.
 // Review only where a mistake is costly to undo; reviewers follow references/review-rubric.md (blocking issues only).
@@ -974,6 +992,7 @@ else if (m && cat === 'build-run') notes.push('test-environment build-run (PPE/s
 if (m && writes) notes.unshift('brief: include the safety clauses — never overwrite, delete or move files outside the task\'s scope (user files, uncommitted changes, shared headers/configs); restore anything touched by mistake byte-for-byte and report it');
 if (m && signing) notes.unshift(CREDENTIAL_NOTE, SIGNING_AUDIT_NOTE);
 else if (m) notes.push(CREDENTIAL_NOTE);
+if (m && signing) notes.push('machine worker policy: Codex never touches signing/credential files, regardless of approval; only the resident Claude signing worker has the narrow allowlisted own-test-package exception. A Codex signing request is BLOCKED, not an authorization bypass. Registry/allowlist are read-only to signing workers.');
 if (m && (['build-run', 'ui-browser', 'computer-use'].includes(cat) || opts['device-lease'])) notes.push(SHARED_TEST_DEVICE_NOTE);
 if (m && ['build-run', 'implement', 'implement-hard', 'debug', 'ui-browser', 'computer-use'].includes(cat)) notes.push('brief: on devices and simulators, back up app data before any destructive step (reinstall with --remove-existing-content, wiping app containers or Documents, erasing simulators), or ask first');
 if (m && ['build-run', 'ui-browser', 'computer-use'].includes(cat)) notes.push('before builds/device runs: inspect finished-task process trees, but cleanup requires references/resources.md\'s guarded executor, continuous idle evidence, live-session/lease protections and every orchestrator\'s release; PPID=1 or age alone is not permission to kill. Device lease: at most 2 h, then return the device and report; brief preflight: device connected, unlocked, app data backed up');
@@ -1001,9 +1020,10 @@ if (ttadkRun && runCompany.kind === 'trae') {
   if (m.model === ASTRA) notes.push('Astra on TRAE queues TRAE-wide (≈15 min seen 2026-11-13); launch it as a hub worker (codex-worker start), not traecli exec, so queue/status shows; the 30-min stall alarm doesn\'t fire while queue/status keeps arriving');
   if (!backgroundLane) notes.push(`hub queue position above ~300: ${tier === 'hard' ? 'keep the hard model; the worker\'s queue-patience deadline re-routes it if the live drain predicts a start later than the alternative — do not demote hard work to a weaker model because of a depleted bucket' : `if that model's daily bucket is depleted, re-routing is worth it for the next dispatch with --exclude-model <that model> and the same --failures; for non-depleted or unknown buckets let it wait`}. Accepted queued turns stay pending: do not interrupt or launch a duplicate; keep parallel task concurrency unchanged`);
   const q = runCompany.quota?.daily?.[m.model];
-  if (q?.depleted && !backgroundLane) notes.push(`TRAE ${m.model}'s daily high-priority quota is used up${q.resetsAt ? ` until ${fmt(q.resetsAt)}` : ''}: requests queue in the low-priority lane. ${tier === 'hard' ? 'Keep this hard model — do not demote hard work because of depletion; if its live drain predicts a start past the patience deadline, the worker reports queue-too-slow and the orchestrator re-routes' : `Above ~300, consider --exclude-model ${m.model} for the next dispatch (same --failures)`}; keep any accepted queued turn pending`);
+  if (q?.depleted && !backgroundLane) notes.push(`TRAE ${m.model}'s daily high-priority quota is used up${q.resetsAt ? ` until ${fmt(q.resetsAt)}` : ''}: requests queue in the low-priority lane. ${tier === 'hard' ? 'Keep this hard model — do not demote hard work because of depletion; if its live drain predicts a start past the patience deadline, the worker confirms no-progress cancellation and follows an automatic company re-route' : `Above ~300, consider --exclude-model ${m.model} for the next dispatch (same --failures)`}; keep any accepted queued turn pending`);
   if (lowPriorityPicks.length) notes.push(`TRAE low-priority or unknown lane (${lowPriorityPicks.map((l) => l.model).join(', ')}): launch as a hub worker (codex-worker start) so the queue position stays visible; do not interrupt while queued except for the queue-patience handoff. After TTADK or the daily bucket resets, an unfinished task may continue on the faster account if that is quicker, subject to the existing thread-continuation rule (same task, company account, no route escalation or exclusion; record outcome --actual and the ledger reason)`);
   if (resourceBound) notes.push('resource-bound task (device lease or heavy-build lock): take the lease/lock only after the first model response — a queued low-priority turn must not hold a shared resource while it waits; if the worker reports queue-too-slow, release the hold before re-routing');
+  if (!backgroundLane) notes.push('automatic handoff: routed hub workers confirm no-progress cancellation before re-routing slow queues, unavailable models or first-request 983; preserve route-args and failures, exclude the slow model and follow the fresh company task (max 2 hops). No active/background/personal/signing auto-launch; approval exits 8, reroute.json deferral exits 9, limit exits 10, unconfirmed cancellation exits 7. Wrapper owners return existing holds on exit; outcome reads automatic hop chains.');
   // The ETA comparison owns the wait decision (addendum, 2026-11-13 night): a reset is either an explicit scheduled
   // dispatch (deferUntil, above) or it lost to a lane that can finish earlier. No separate "launching then is faster"
   // advisory, because it could contradict the chosen estimate.

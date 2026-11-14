@@ -323,12 +323,17 @@ the nightly review compares dispatch reasons and recorded wall-clock time, inclu
       `deferUntil`, the reason and the runner-up, plus a `tell` line to record it in the ledger and set a timer. It
       never defers when a same-tier candidate finishes earlier, never on a retry, and never for a resource-bound task.
       A `--background` task follows the quota-preserving order above instead.
-    - Launches into a low-priority lane carry `--queue-patience-min M --alt "<alternative>"` to codex-worker, with
+    - Launches into a low-priority lane carry `--queue-patience-min M --alt "<alternative>"`, the alternative's
+      `--queue-alt-start-min` estimate, original `--route-args` and `--auto-reroute-depth` to codex-worker, with
       M = `min(30 min, 25% of the time until the faster account resets)`. From the live queue drain the worker predicts
-      the start; if it exceeds M it prints `queue-too-slow: ... re-route: <alt>` and exits 7 after interrupting the
-      queued turn, so the orchestrator re-routes instead of holding. The handoff prints once; queue/completion
-      listeners and timers stop. Interrupt acknowledgement is bounded to three seconds. If cancellation is unconfirmed,
-      stderr says to check the original turn before dispatching a replacement. Unknown drain keeps waiting.
+      the start; if predicted start plus elapsed wait exceeds the earlier deadline/alternative, it checks for work,
+      confirms the queued turn is interrupted without progress, and re-routes itself with the same flags/failures,
+      the slow model excluded and depth N+1. It follows a fresh company hub worker with the same brief and a
+      continuation header. Maximum two automatic hops; no active/background/personal/signing auto-launch.
+      Approval exits 8; deferral persists `reroute.json`/`deferUntil` and exits 9 for the orchestrator's timer; limit
+      exits 10. Unconfirmed cancellation exits 7 within three seconds, with no replacement. Legacy launches without
+      route args retain exit 7. Unknown drain keeps waiting. Outcome derives automatic actual chains from hop records;
+      nightly reports waits and observed faster/slower/unknown starts. See references/codex-workers.md.
     - A task holding a device lease or heavy-build lock must not wait in a queue while holding it: route.mjs prefers a
       candidate that can start now, never schedules a wait, and the note says to take the lease/lock only after the
       first model response.

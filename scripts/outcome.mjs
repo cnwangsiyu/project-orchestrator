@@ -24,7 +24,7 @@ for (let i = 0; i < argv.length; i++) if (argv[i].startsWith('--')) {
 }
 const die = (m) => { console.error(`outcome: ${m}`); process.exit(2); };
 if (typeof opts.project !== 'string' || typeof opts.name !== 'string') die('needs --project and --name (the same ones passed to route.mjs)');
-const actual = opts.actual?.map((v) => {
+let actual = opts.actual?.map((v) => {
   const match = typeof v === 'string' && v.match(/^([a-z][a-z0-9-]*):([a-zA-Z0-9._-]+):(low|medium|high|xhigh|max)@([a-zA-Z0-9._-]+)$/);
   if (!match) die('--actual takes vendor:model:effort@account (repeat in launch order)');
   const [, vendor, model, effort, account] = match;
@@ -60,13 +60,19 @@ try { routes = fs.readFileSync(ROUTE_LOG, 'utf8').split('\n').filter(Boolean).ma
 // (NAME-fix1, NAME-r2). Reviews of the task are checks, not attempts, so they don't count as the pick.
 const owned = routes.filter((r) => r.kind !== 'outcome' && r.pick && outcomeOwns(opts.project, opts.name, r));
 const mine = owned.filter((r) => !isReviewDecision(r));
+const hops = routes.filter((r) => r.kind === 'reroute' && r.automatic && r.from && r.to
+  && outcomeOwns(opts.project, opts.name, r) && !isReviewDecision(r));
+if (!actual && hops.length) {
+  const pick = (p) => ({ vendor: p.vendor ?? 'codex', model: p.model, effort: p.effort, account: p.account });
+  actual = [pick(hops[0].from), ...hops.map((r) => pick(r.to))];
+}
 if (!mine.length && owned.length) console.error(`outcome: ${opts.name} is a review run; record the outcome once, under the name of the task it reviewed`);
 const first = mine[0]?.pick ?? null, last = mine.at(-1)?.pick ?? null;
 let rec = {
   t: Date.now(), kind: 'outcome', project: opts.project, name: opts.name, result: opts.result, rounds, minutes, cause, retries, scopeChanges,
   reviewed: !!opts.reviewed, note: typeof opts.note === 'string' ? opts.note : null,
   category: mine[0]?.category ?? null, impact: mine[0]?.impact ?? null, first, accepted: opts.result === 'fail' ? null : last, decisions: mine.length,
-  ...(actual ? { actual } : {}),
+  ...(actual ? { actual } : {}), automaticReroutes: hops.length,
 };
 // Record each task once, at close. A second record merges into the first in review-data (latest result, most rounds),
 // so it only corrects; say so rather than let it pass as a new task (nightly review 2026-11-09).

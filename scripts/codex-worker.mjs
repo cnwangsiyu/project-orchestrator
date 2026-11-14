@@ -25,9 +25,10 @@
 //
 // `start` and `turn` follow the turn until it ends: every notification is appended to --log as JSONL, the first stdout
 // line is `thread=<id> turn=<id>`, and the process exits 0 on completed, 1 on failed/interrupted, 4 when the turn has
-// been silent for --stall-min minutes (default 30; the turn keeps running — re-attach with `wait`), and 7 when
-// --queue-patience-min M is set and the live queue drain predicts a start later than M (the turn is interrupted and
-// `queue-too-slow: ... re-route: <alt>` is printed, so the orchestrator re-routes instead of holding a queued turn).
+// been silent for --stall-min minutes (default 30; the turn keeps running — re-attach with `wait`). Routed queue
+// patience/unavailable/first-request restriction misses automatically follow a fresh company worker (at most 2 hops).
+// Exit 7 means cancellation/handoff could not be confirmed, 8 needs approval, 9 persists a deferral in reroute.json,
+// and 10 is the automatic hop limit. Without --route-args, queue patience retains its legacy exit 7 handoff.
 // On exit it prints
 // `turn <status>`, the token usage and `final: <first line of the final message>`, and writes the whole final message
 // to --out. Run them as a harness background task so their exit notifies the orchestrator. `wait` re-attaches to a
@@ -50,6 +51,7 @@ import { saveQueue, readQueue } from './lib/worker-queue.mjs';
 import { loadDigest, auditLaunch, rulesLog } from './lib/global-rules.mjs';
 import { isPolicyBlock, policyBlockRecord, appendPolicyBlock, policyBlockAction } from './lib/policy-block.mjs';
 import { runHubForeground, hubListReachable } from './lib/hub-foreground.mjs';
+import { parseRouteArgs, routeFlag, rerouteWorker, turnHasWork } from './lib/worker-reroute.mjs';
 // What a TRAE pause covers: one model family (route.mjs moves to the next family) or the whole account.
 const pausedWhat = (p) => (p.pool ? `TRAE's ${p.pool} models are paused` : 'TRAE is paused');
 // A model TRAE no longer resolves (2026-11-13: it dropped Gemini): that model alone is out of routing for 6 h.
@@ -93,7 +95,8 @@ const ensureSearchProxy = async (prof) => {
 const [cmd, ...rest] = argv;
 const opts = {}; const pos = [];
 for (let i = 0; i < rest.length; i++) {
-  if (rest[i].startsWith('--')) opts[rest[i].slice(2)] = rest[i + 1]?.startsWith('--') || rest[i + 1] === undefined ? true : rest[++i];
+  if (rest[i] === '--background') opts.background = true;
+  else if (rest[i].startsWith('--')) opts[rest[i].slice(2)] = rest[i + 1]?.startsWith('--') || rest[i + 1] === undefined ? true : rest[++i];
   else pos.push(rest[i]);
 }
 // TRAE names its models in its own case (GPT-6.1-Sol); accept the router's lower-case ids too.
@@ -110,10 +113,17 @@ if (opts.network !== undefined && !['on', 'off'].includes(opts.network)) die('--
 if (opts.network !== undefined && opts.sandbox !== 'workspace-write') die('--network goes with --sandbox workspace-write');
 // Optimistic-launch patience (addendum, 2026-11-13 night): route.mjs passes the deadline it computed from the faster
 // account's reset and the alternative to take. Without a usable queue drain the worker cannot predict a start, so it
-// keeps waiting; with one, it stops the queued turn and exits 7 so the orchestrator re-routes.
+// keeps waiting; with one, it confirms a no-progress cancellation and follows a bounded automatic re-route.
 const PATIENCE_MIN = opts['queue-patience-min'] === undefined ? null : Number(opts['queue-patience-min']);
 if (PATIENCE_MIN != null && (!Number.isFinite(PATIENCE_MIN) || PATIENCE_MIN <= 0)) die('--queue-patience-min takes a positive number of minutes');
 const QUEUE_ALT = typeof opts.alt === 'string' ? opts.alt : null;
+const QUEUE_ALT_START_MIN = opts['queue-alt-start-min'] === undefined ? null : Number(opts['queue-alt-start-min']);
+if (QUEUE_ALT_START_MIN != null && (!Number.isFinite(QUEUE_ALT_START_MIN) || QUEUE_ALT_START_MIN < 0)) die('--queue-alt-start-min takes a number >= 0');
+let ROUTE_ARGS;
+try { ROUTE_ARGS = parseRouteArgs(opts['route-args']); } catch (e) { die(e.message); }
+const REROUTE_DEPTH = Number(opts['auto-reroute-depth'] ?? (ROUTE_ARGS && routeFlag(ROUTE_ARGS, 'auto-reroute-depth')) ?? 0);
+if (!Number.isInteger(REROUTE_DEPTH) || REROUTE_DEPTH < 0) die('--auto-reroute-depth takes a whole number >= 0');
+const BACKGROUND = !!opts.background || !!(ROUTE_ARGS && routeFlag(ROUTE_ARGS, 'background'));
 if (cmd === 'start') auditLaunch({ name: opts.name, account: account ?? 'main', model: opts.model,
   sandbox: opts.sandbox, userOK: opts['user-ok'] });
 // Codex's own default for workspace-write network, so an explicit turn-level policy doesn't silently change it.
@@ -509,6 +519,15 @@ const pending = new Map();
 const handlers = [];
 const cleanups = new Set();
 let exitCode = null;
+let activeTurn = null, attemptThreadId = null, workStarted = false, hopProgressRecorded = false;
+const markWorkStarted = () => {
+  workStarted = true;
+  if (!hopProgressRecorded && opts['reroute-hop-at']) {
+    hopProgressRecorded = true;
+    try { fs.appendFileSync(rulesLog(), JSON.stringify({ kind: 'reroute-progress', t: Date.now(), name: opts.name,
+      hopAt: Number(opts['reroute-hop-at']), account: account ?? 'main', model: opts.model }) + '\n'); } catch {}
+  }
+};
 const logFile = opts.log ? path.resolve(opts.log) : null;
 const write = (obj) => ws.send(JSON.stringify(obj));
 const call = (method, params) => new Promise((resolve, reject) => {
@@ -526,6 +545,29 @@ const finish = (code) => {
   try { ws.close(); } catch {}
   process.exit(exitCode ?? code);
 };
+const detachHub = () => {
+  done = true; stopFollowing(); activeTurn = null;
+  ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null;
+  pending.clear(); try { ws.close(); } catch {}
+};
+const autoReroute = async (reason, queue = {}, policy = false) => {
+  detachHub(); exitCode = null;
+  const from = { vendor: 'codex', model: String(opts.model ?? '').toLowerCase(), effort: opts.effort ?? null,
+    account: account ?? 'main', position: queue.position ?? null, waitedMin: queue.waitedMin ?? 0,
+    predictedStartMin: queue.predictedStartMin ?? null };
+  try {
+    const code = await rerouteWorker({ args: ROUTE_ARGS, depth: REROUTE_DEPTH, from, reason, prompt: text, opts, policy });
+    finish(code);
+  } catch (e) { console.error(`reroute-failed: ${e.message}`); finish(7); }
+};
+for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => {
+  if (!activeTurn || done) {
+    if (!done || process.listenerCount(signal) === 1) finish(signal === 'SIGINT' ? 130 : 143);
+    return;
+  }
+  const timer = setTimeout(() => finish(signal === 'SIGINT' ? 130 : 143), 3000);
+  call('turn/interrupt', activeTurn).catch(() => {}).finally(() => { clearTimeout(timer); finish(signal === 'SIGINT' ? 130 : 143); });
+});
 // Nobody is at the hub to answer a worker, so every server→client request gets a valid refusal. Approvals don't
 // arrive under approvalPolicy never; a question tells the worker to report it instead of waiting.
 const NO_USER = 'No user is available to answer in this session. Do not wait for one: finish what you can, then end '
@@ -579,11 +621,14 @@ ws.onmessage = (ev) => {
   if (done) return; // During cancellation only the interrupt RPC reply is still relevant.
   if (logFile) fs.appendFileSync(logFile, line + '\n');
   if (m.id !== undefined && m.method) {
+    if (activeTurn && m.method.startsWith('item/') && (m.params?.threadId === activeTurn.threadId || m.params?.turnId === activeTurn.turnId)) markWorkStarted();
     const reply = REPLIES[m.method];
     write(reply ? { jsonrpc: '2.0', id: m.id, result: reply(m.params || {}) }
       : { jsonrpc: '2.0', id: m.id, error: { code: -32601, message: `${m.method} is not supported by codex-worker` } });
     return;
   }
+  if (!activeTurn && attemptThreadId && m.params?.threadId === attemptThreadId && m.method?.startsWith('item/')
+    && m.params.item?.type !== 'userMessage') markWorkStarted();
   for (const h of handlers) h(m);
 };
 await new Promise((resolve) => { ws.onopen = resolve; });
@@ -652,6 +697,17 @@ const report = async (threadId, turn, final, usage) => {
     if (opts.out) fs.writeFileSync(path.resolve(opts.out), final + '\n');
     console.log(`final: ${final.split('\n').find((l) => l.trim()) ?? ''}`);
   }
+  const errorText = JSON.stringify(turn.error ?? '');
+  const infrastructureMiss = PROF?.kind === 'trae' && (failureKind(errorText) === 'unavailable' || /access (temporarily )?restricted|\b983\b/i.test(errorText));
+  if (turn.status === 'failed' && ROUTE_ARGS && !BACKGROUND && !workStarted && !turnHasWork(turn) && !final
+    && (infrastructureMiss || (policyBlock && (routeFlag(ROUTE_ARGS, 'security') || routeFlag(ROUTE_ARGS, 'adversarial'))))) {
+    const observed = (await readTurns(threadId).catch(() => [])).find((t) => t.id === turn.id);
+    if (observed?.status === 'failed' && Array.isArray(observed.items) && !turnHasWork(observed) && !workStarted) {
+      await autoReroute(policyBlock ? 'policy-block' : failureKind(errorText) === 'unavailable' ? 'model-unavailable' : 'vendor-restriction', {}, policyBlock);
+      return;
+    }
+    console.log('reroute-skipped: failed turn has work or its no-progress terminal state is unconfirmed');
+  }
   finish(turn.status === 'completed' ? 0 : 1);
 };
 // Stall alarm: no event for this turn in --stall-min minutes (default 30, 0 = off) ends the follower with exit 4 so the
@@ -664,6 +720,7 @@ const STALL_MIN = opts['stall-min'] === undefined ? 30 : Number(opts['stall-min'
 // a worker printing `queued:` lines is waiting, not stalled. Print on a state change or a ≥10% position move (at most
 // one line a minute), and the wait's length once it clears. `status --thread` reads the last state from the file.
 const follow = (threadId, turnId) => {
+  activeTurn = { threadId, turnId };
   console.log(`thread=${threadId} turn=${turnId}`);
   const recordQueue = PROF?.kind === 'trae' ? createQueueRecorder(PROF.home, opts.model ?? threadModel(PROF.home, threadId)) : null;
   if (recordQueue) cleanups.add(() => recordQueue.stop());
@@ -671,10 +728,11 @@ const follow = (threadId, turnId) => {
   let runningSince = Date.now(), completedItems = 0;
   let queueSince = null, lastPrintedQueue = null, queuePrinted = null;
   let patienceSamples = [];
+  let handingOff = false, reporting = false;
   // Drain from the last 10 minutes of queue/status positions. A start is only predicted once two samples span at least
   // two minutes and the position actually fell; a stalled or rising queue is not guessed at (the worker keeps waiting).
   const checkPatience = (t, pos) => {
-    if (done || PATIENCE_MIN == null || pos == null || pos <= 0) return false;
+    if (done || handingOff || reporting || workStarted || BACKGROUND || PATIENCE_MIN == null || pos == null || pos <= 0) return false;
     // Frequent notifications must not evict the two-minute baseline from the bounded sample window.
     if (!patienceSamples.length || t - patienceSamples.at(-1).t >= 10000) patienceSamples.push({ t, pos });
     patienceSamples = patienceSamples.filter((s) => t - s.t <= 10 * 60000).slice(-30);
@@ -684,25 +742,50 @@ const follow = (threadId, turnId) => {
     const drain = (first.pos - last.pos) / spanMin;
     if (!(drain > 0)) return;
     const predicted = last.pos / drain;
-    if (predicted <= PATIENCE_MIN) return;
+    const waitedMin = Math.max(0, (t - queueSince) / 60000);
+    const deadlineMin = Math.min(PATIENCE_MIN, QUEUE_ALT_START_MIN ?? Infinity);
+    if (predicted + waitedMin <= deadlineMin) return;
     // Latch before printing or sending the RPC: further queue/completion notifications must not race this handoff.
-    done = true; exitCode = 7; stopFollowing();
+    handingOff = true; exitCode = 7;
     const alt = QUEUE_ALT ?? `route.mjs with --exclude-model ${opts.model ?? 'this model'} and the same --failures`;
-    const line = `queue-too-slow: position ${last.pos}, drain ${drain.toFixed(1)}/min, predicted start in ${Math.round(predicted)} min > patience ${PATIENCE_MIN} — re-route: ${alt}`;
+    const limit = deadlineMin < PATIENCE_MIN ? `alternative start ${deadlineMin} (patience ${PATIENCE_MIN})` : `patience ${PATIENCE_MIN}`;
+    const line = `queue-too-slow: position ${last.pos}, drain ${drain.toFixed(1)}/min, predicted start in ${Math.round(predicted)} min > ${limit} — re-route: ${alt}`;
     try { fs.writeSync(1, `${line}\n`); } catch { console.log(line); }
     if (opts.log) try { fs.appendFileSync(path.resolve(opts.log), JSON.stringify({ queueTooSlow: { position: last.pos, drainPerMin: drain,
       predictedStartMin: Math.round(predicted), patienceMin: PATIENCE_MIN, alt, at: t } }) + '\n'); } catch {}
     // Stop the queued turn cleanly before exiting so the provider does not keep it pending after the re-route.
     // Keep the deadline referenced: a hub that never acknowledges cancellation must not leave the wrapper hanging.
-    const deadline = setTimeout(() => {
-      console.error('queue-cancel-unconfirmed: interrupt acknowledgement timed out; check the original turn before dispatching its replacement');
-      finish(7);
-    }, 3000);
-    cleanups.add(() => clearTimeout(deadline));
-    call('turn/interrupt', { threadId, turnId }).then(() => finish(7), () => {
-      console.error('queue-cancel-unconfirmed: interrupt failed; check the original turn before dispatching its replacement');
-      finish(7);
-    });
+    const cancel = async () => {
+      const deadline = setTimeout(() => {
+        console.error('queue-cancel-unconfirmed: cancellation timed out; check the original turn before dispatching its replacement');
+        finish(7);
+      }, 3000);
+      cleanups.add(() => clearTimeout(deadline));
+      try {
+        if (ROUTE_ARGS) {
+          const before = (await readTurns(threadId)).find((turn) => turn.id === turnId);
+          if (!before || !Array.isArray(before.items) || before.status !== 'inProgress' || turnHasWork(before) || workStarted) {
+            handingOff = false; exitCode = null; workStarted = true; clearTimeout(deadline);
+            if (before && ['completed', 'failed', 'interrupted'].includes(before.status)) {
+              await report(threadId, before, final, usage); return;
+            }
+            console.log('reroute-skipped: turn has started or produced work; continue following it'); return;
+          }
+        }
+        await call('turn/interrupt', { threadId, turnId });
+        if (!ROUTE_ARGS) { finish(7); return; }
+        const after = (await readTurns(threadId)).find((turn) => turn.id === turnId);
+        if (!after || !Array.isArray(after.items) || after.status !== 'interrupted' || turnHasWork(after) || workStarted) {
+          console.error('queue-cancel-unconfirmed: turn not confirmed interrupted without progress; no replacement launched'); finish(7); return;
+        }
+        if (PROF?.home) saveQueue(PROF.home, threadId, { state: 'cancelled', position: null, turnId, at: Date.now() });
+        clearTimeout(deadline);
+        await autoReroute('queue-too-slow', { position: last.pos, waitedMin, predictedStartMin: predicted });
+      } catch {
+        console.error('queue-cancel-unconfirmed: interrupt/read failed; check the original turn before dispatching its replacement'); finish(7);
+      }
+    };
+    void cancel();
     return true;
   };
   const queueUpdate = (p) => {
@@ -712,7 +795,7 @@ const follow = (threadId, turnId) => {
     const queue = { state, position: pos, since: queueSince, turnId, at: t };
     if (PROF?.home) saveQueue(PROF.home, threadId, queue);
     recordQueue?.(p, t);
-    if (state === 'ready') { patienceSamples = []; runningSince = t; completedItems = 0; }
+    if (state === 'ready') { markWorkStarted(); patienceSamples = []; runningSince = t; completedItems = 0; }
     else { runningSince = null; completedItems = 0; if (checkPatience(t, pos)) return; }
     if (state === 'ready') {
       if (queueSince) console.log(`queue cleared after ${Math.max(1, Math.round((t - queueSince) / 60000))}m`);
@@ -746,6 +829,9 @@ const follow = (threadId, turnId) => {
     const p = m.params || {};
     if (p.threadId !== undefined && p.threadId !== threadId) return;
     if (p.turnId !== undefined && p.turnId !== turnId) return;
+    if ((p.threadId === threadId || p.turnId === turnId) &&
+      ((m.method.startsWith('item/') && p.item?.type !== 'userMessage')
+        || (m.method === 'thread/tokenUsage/updated' && p.tokenUsage?.total?.outputTokens > 0))) markWorkStarted();
     // Only this turn's or thread's own events count as progress; account-wide updates (rate limits…) don't.
     if (p.turnId === turnId || p.threadId === threadId || p.turn?.id === turnId) last = Date.now();
     if (m.method === 'item/completed' && runningSince != null) {
@@ -756,10 +842,13 @@ const follow = (threadId, turnId) => {
     if (m.method === 'item/completed' && p.item?.type === 'agentMessage' && p.item.text) final = p.item.text;
     else if (m.method === 'thread/tokenUsage/updated') usage = p.tokenUsage?.total;
     else if (m.method === 'queue/status' && (p.threadId === threadId || p.turnId === turnId)) queueUpdate(p);
-    else if (m.method === 'turn/completed' && (p.turn?.id ?? p.turnId) === turnId) report(threadId, p.turn ?? { id: turnId, status: 'completed' }, final, usage)
+    else if (!handingOff && !reporting && m.method === 'turn/completed' && (p.turn?.id ?? p.turnId) === turnId) {
+      reporting = true;
+      report(threadId, p.turn ?? { id: turnId, status: 'completed' }, final, usage)
       // report() is async and this handler cannot await it: an unexpected throw must still end the follower normally
       // (status 1) instead of leaving it to the 30-minute stall alarm with the policy guidance unprinted.
       .catch((e) => { console.error(`codex-worker: report failed: ${e?.stack ?? e}`); finish(1); });
+    }
   });
 };
 
@@ -805,6 +894,7 @@ try {
       ...(browserThread ? { approvalsReviewer: 'user', config: { plugins: { 'unified-computer-use@openai-bundled': { enabled: false } } } } : {}),
     });
     const threadId = th.thread?.id ?? th.threadId;
+    attemptThreadId = threadId;
     if (PROF?.kind === 'trae') rememberThreadModel(PROF.home, threadId, opts.model);
     if (opts.name) await call('thread/name/set', { threadId, name: opts.name }).catch(() => {});
     const ts = await call('turn/start', {
@@ -907,9 +997,24 @@ try {
   // A TRAE model that no longer resolves fails at thread/start (before any turn), so the turn recorder never sees it:
   // record it here so routing skips just that model (lib/trae-health.mjs, 2026-11-13).
   const msg = String(e?.message ?? e);
-  if (PROF?.kind === 'trae' && failureKind(msg) === 'unavailable') {
+  const policy = isPolicyBlock({ status: 'failed', error: msg });
+  const infrastructureMiss = PROF?.kind === 'trae' && (failureKind(msg) === 'unavailable' || /access (temporarily )?restricted|\b983\b/i.test(msg));
+  if (infrastructureMiss && !policy) {
     const p = noteFailure(PROF.home, msg, Date.now(), opts.model ?? null);
     if (p?.modelPause) console.log(unavailableHint(p));
+  }
+  if (policy) {
+    recordPolicyBlock(opts.model, msg);
+    if (PROF?.kind === 'trae') notePolicyRestriction(PROF.home, msg, Date.now(), opts.model ?? null);
+    console.log('security-policy-block: do not retry or resend to GPT; re-route with --adversarial');
+  }
+  if (cmd === 'start' && !activeTurn && !workStarted && ROUTE_ARGS && !BACKGROUND
+    && (infrastructureMiss || (policy && (routeFlag(ROUTE_ARGS, 'security') || routeFlag(ROUTE_ARGS, 'adversarial'))))) {
+    const turns = attemptThreadId ? await readTurns(attemptThreadId).catch(() => null) : [];
+    const last = turns?.at(-1);
+    if (turns && (!last || (last.status === 'failed' && Array.isArray(last.items) && !turnHasWork(last))) && !workStarted)
+      await autoReroute(policy ? 'policy-block' : failureKind(msg) === 'unavailable' ? 'model-unavailable' : 'vendor-restriction', {}, policy);
+    else console.log('reroute-skipped: start failure left an active, progressed or unconfirmed turn');
   }
   die(msg, 1);
 }
