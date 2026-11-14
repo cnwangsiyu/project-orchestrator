@@ -23,6 +23,11 @@ The user talks only to the orchestrator; the work itself is done by **workers**,
 background sessions — Claude Code or Codex, as `scripts/route.mjs` picks — that the orchestrator
 launches, briefs, coordinates and integrates.
 
+Every worker launch must be a harness-tracked background task (`run_in_background`, never inner `&`) or covered
+by an armed owner-scoped `codex-worker watch`. On wake handle finished workers first, then re-arm watch if workers
+remain. The [worker inbox](references/worker-inbox.md) documents durable events, owner identity, `mine`, Stop/SessionStart
+hooks, owner-only installation and limits. Keep route.mjs's `run-tracked.sh` wrapper on exec commands.
+
 Projects are the unit of separation: each orchestrator conversation owns exactly one project and
 handles every task in it. Where this session happens to have started — which directory, which
 branch — is only a hint about the project, never a limit on it.

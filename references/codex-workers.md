@@ -6,6 +6,11 @@ Use this whenever `scripts/route.mjs` puts a task on Codex — mostly coding (im
 
 ## Launch, resume, follow
 
+Keep route.mjs's `run-tracked.sh` wrapper for one-shot execs; the raw examples below describe the underlying CLI,
+not a substitute for the durable launcher. Every worker is a tracked background task or covered by an armed
+owner watcher, never detached with `&`. See [worker inbox and owner identity](worker-inbox.md);
+on wake handle finished workers first and re-arm `codex-worker watch --owner <session-id>` if workers remain.
+
 - **Launch** from the worker's workspace as a harness background task (Bash with `run_in_background`):
   `CODEX_HOME=<account home> codex exec -C <workspace> -s <sandbox> -m <model> -c model_reasoning_effort='"<effort>"' --json -o <task dir>/codex-last.md "<one line pointing at the brief>" < /dev/null > <task dir>/codex.jsonl 2>&1`
   - `CODEX_HOME` picks the account (see Several Codex accounts); without it the run spends `main`.

@@ -38,6 +38,11 @@ without replacing other hooks/settings. Its exact fragment uses an absolute Node
 
 ## Launch And Build Evidence
 
+Worker completion has a separate [durable owner inbox, tracked watcher and Stop enforcement](worker-inbox.md).
+The updated SessionStart template includes both digest and inbox hooks; merge it along with
+`templates/stop-hook.json` after owner review. The older digest-only fragment above is insufficient for the inbox.
+No hook was installed by the inbox task.
+
 `codex-worker start` and routed Claude/one-shot launches check the last 24h of routing decisions for the same
 name or task-prefix. Missing decisions warn `unrouted-launch` and append `kind: unrouted`; attempted launches
 append `kind: launch` with actual account/model/vendor, timestamp and matched route timestamp. They don't block.

@@ -7,6 +7,10 @@ when the evidence is thin.
 
 ## Who does what
 
+`review-data.mjs` also emits `workerInbox`: per orchestrator p50/p90/max finish-to-delivery milliseconds,
+unacknowledged events (window and all-time), and launches without session identity. Treat unknown identity/latency
+as missing evidence, not zero delay; delivery acknowledgement is not result acceptance. See [worker inbox](worker-inbox.md).
+
 The review follows the routing policy like any other task (user, 2026-11-09): the launcher gathers the data, routes
 the review with `route.mjs analysis --stakes high` (logged as project `routing`, name `routing-nightly-review-<date>`),
 and runs it as a one-shot **worker** on the account the route picks — TTADK first, then TRAE CLI. A worker that fails

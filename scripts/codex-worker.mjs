@@ -17,6 +17,7 @@
 //   codex-worker steer  --thread ID                                                                     "<message>"
 //   codex-worker interrupt --thread ID
 //   codex-worker status --thread ID
+//   codex-worker mine | watch [--owner SESSION_ID]                      (owner-scoped durable inbox; watch is a tracked background task)
 //   codex-worker list   [--cwd DIR] [--search TEXT] [--limit N]
 //   codex-worker quota                                                     (the account's rate-limit windows, JSON)
 //   codex-worker usage                                                     (account id, windows and reset cards, JSON; TRAE: daily buckets + weekly pool)
@@ -52,6 +53,7 @@ import { loadDigest, auditLaunch, rulesLog } from './lib/global-rules.mjs';
 import { isPolicyBlock, policyBlockRecord, appendPolicyBlock, policyBlockAction } from './lib/policy-block.mjs';
 import { runHubForeground, hubListReachable } from './lib/hub-foreground.mjs';
 import { parseRouteArgs, routeFlag, rerouteWorker, turnHasWork } from './lib/worker-reroute.mjs';
+import { lifecycle, resolveOwner, validOwner, inbox, readEvents, readAck, eventLine, watch, signalExit } from './lib/worker-events.mjs';
 // What a TRAE pause covers: one model family (route.mjs moves to the next family) or the whole account.
 const pausedWhat = (p) => (p.pool ? `TRAE's ${p.pool} models are paused` : 'TRAE is paused');
 // A model TRAE no longer resolves (2026-11-13: it dropped Gemini): that model alone is out of routing for 6 h.
@@ -68,6 +70,21 @@ const writeAccounts = (reg) => {
 const argv = process.argv.slice(2);
 const ai = argv.indexOf('--account');
 const account = ai >= 0 ? argv.splice(ai, 2)[1] : null;
+// Register before validation, hub connection or RPC: every attempted follower gets an exit record.
+const earlyOpts = {};
+for (let i = 1; i < argv.length; i++) if (argv[i].startsWith('--')) {
+  earlyOpts[argv[i].slice(2)] = argv[i + 1] === undefined || argv[i + 1].startsWith('--') ? true : argv[++i];
+}
+const tracker = ['start', 'turn', 'wait'].includes(argv[0]) ? lifecycle({ owner: earlyOpts.owner,
+  name: earlyOpts.name ?? earlyOpts.thread ?? 'unnamed', thread: earlyOpts.thread ?? null,
+  account: account ?? 'main', model: earlyOpts.model ?? null, effort: earlyOpts.effort ?? null,
+  mayRun: argv[0] === 'wait' && typeof earlyOpts.thread === 'string',
+  outFile: typeof earlyOpts.out === 'string' ? path.resolve(earlyOpts.out) : null,
+  logFile: typeof earlyOpts.log === 'string' ? path.resolve(earlyOpts.log) : null }) : null;
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) if (tracker) process.once(signal, () => {
+  tracker.signal(signal);
+  if (!process.listenerCount(signal)) process.exit(signalExit(signal));
+});
 let foregroundAccountMissing = false;
 if (account) {
   const prof = readAccounts()[account] ?? (account === 'main' ? { home: path.join(os.homedir(), '.codex'), hub: 'ws://127.0.0.1:47321' } : null);
@@ -101,9 +118,35 @@ for (let i = 0; i < rest.length; i++) {
 }
 // TRAE names its models in its own case (GPT-6.1-Sol); accept the router's lower-case ids too.
 if (PROF?.kind === 'trae' && typeof opts.model === 'string') opts.model = PROF.modelIds?.[opts.model.toLowerCase()] ?? opts.model;
+tracker?.set({ model: opts.model ?? null });
 const text = pos.join(' ');
 const die = (msg, code = 2) => { process.stderr.write(`codex-worker: ${msg}\n`); process.exit(code); };
+if (opts.owner !== undefined && !validOwner(opts.owner)) die('--owner needs a public session ID');
 if (!cmd) die('usage: codex-worker [--account NAME] hub|start|turn|wait|steer|interrupt|status|list|quota|usage|reset-credits|reset-credit-use|accounts|account-add ...');
+if (cmd === 'watch' || cmd === 'mine') {
+  const owner = resolveOwner(opts.owner);
+  if (!validOwner(owner)) die(`${cmd} needs --owner <session-id> (or ORCHESTRATOR_OWNER)`);
+  if (cmd === 'watch') {
+    try { process.exit(await watch(owner)); } catch (e) { die(e.message, 1); }
+  }
+  const current = inbox(readEvents(), owner, readAck(owner));
+  for (const row of current.pending) console.log(eventLine(row));
+  // Only query already-known threads; never start a hub or a replacement from mine.
+  for (const row of current.running) {
+    let status = 'unknown', observed = null;
+    if (row.thread) {
+      try {
+        const output = execFileSync(process.execPath, [...process.execArgv, fileURLToPath(import.meta.url), '--account', row.account,
+          'status', '--thread', row.thread], { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] });
+        observed = JSON.parse(output.trim()); status = observed.last?.status ?? 'unknown';
+      } catch {}
+    } else {
+      try { process.kill(row.pid, 0); status = 'running'; } catch {}
+    }
+    console.log(`${row.name}\t${status === 'inProgress' ? 'running (hub)' : status}\t${row.outFile ?? '-'}\tthread=${row.thread ?? '-'} account=${row.account}`);
+  }
+  process.exit(0);
+}
 if ((cmd === 'start' || cmd === 'turn') && typeof opts.effort !== 'string') die(`${cmd} needs --effort (the catalog default may be low)`);
 if (cmd === 'start' && typeof opts.sandbox !== 'string') die('start needs --sandbox (read-only | workspace-write | danger-full-access; never wider than the orchestrator)');
 const SANDBOX_POLICY = { 'read-only': 'readOnly', 'workspace-write': 'workspaceWrite', 'danger-full-access': 'dangerFullAccess' };
@@ -126,6 +169,7 @@ if (!Number.isInteger(REROUTE_DEPTH) || REROUTE_DEPTH < 0) die('--auto-reroute-d
 const BACKGROUND = !!opts.background || !!(ROUTE_ARGS && routeFlag(ROUTE_ARGS, 'background'));
 if (cmd === 'start') auditLaunch({ name: opts.name, account: account ?? 'main', model: opts.model,
   sandbox: opts.sandbox, userOK: opts['user-ok'] });
+if (cmd === 'start') tracker?.warning();
 // Codex's own default for workspace-write network, so an explicit turn-level policy doesn't silently change it.
 const configNetwork = () => {
   try {
@@ -551,22 +595,26 @@ const detachHub = () => {
   pending.clear(); try { ws.close(); } catch {}
 };
 const autoReroute = async (reason, queue = {}, policy = false) => {
+  tracker?.result('re-routed', { reason, mayRun: false, finalLine: '' });
   detachHub(); exitCode = null;
   const from = { vendor: 'codex', model: String(opts.model ?? '').toLowerCase(), effort: opts.effort ?? null,
     account: account ?? 'main', position: queue.position ?? null, waitedMin: queue.waitedMin ?? 0,
     predictedStartMin: queue.predictedStartMin ?? null };
   try {
-    const code = await rerouteWorker({ args: ROUTE_ARGS, depth: REROUTE_DEPTH, from, reason, prompt: text, opts, policy });
+    const code = await rerouteWorker({ args: ROUTE_ARGS, depth: REROUTE_DEPTH, from, reason, prompt: text,
+      opts: { ...opts, owner: tracker?.sessionId ?? opts.owner }, policy, onHandoff: () => tracker?.end(0) });
+    if (code === 8 || code === 9) tracker?.result('needs-user');
+    else if (code !== 0) tracker?.result('failed');
     finish(code);
   } catch (e) { console.error(`reroute-failed: ${e.message}`); finish(7); }
 };
-for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => {
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, () => {
   if (!activeTurn || done) {
-    if (!done || process.listenerCount(signal) === 1) finish(signal === 'SIGINT' ? 130 : 143);
+    if (!done || process.listenerCount(signal) === 1) finish(signalExit(signal));
     return;
   }
-  const timer = setTimeout(() => finish(signal === 'SIGINT' ? 130 : 143), 3000);
-  call('turn/interrupt', activeTurn).catch(() => {}).finally(() => { clearTimeout(timer); finish(signal === 'SIGINT' ? 130 : 143); });
+  const timer = setTimeout(() => finish(signalExit(signal)), 3000);
+  call('turn/interrupt', activeTurn).catch(() => {}).finally(() => { clearTimeout(timer); finish(signalExit(signal)); });
 });
 // Nobody is at the hub to answer a worker, so every server→client request gets a valid refusal. Approvals don't
 // arrive under approvalPolicy never; a question tells the worker to report it instead of waiting.
@@ -697,6 +745,9 @@ const report = async (threadId, turn, final, usage) => {
     if (opts.out) fs.writeFileSync(path.resolve(opts.out), final + '\n');
     console.log(`final: ${final.split('\n').find((l) => l.trim()) ?? ''}`);
   }
+  tracker?.result(/^(?:\S+\s+)?(?:BLOCKED|QUESTION)\b/.test(final?.trim() ?? '') ? 'needs-user'
+    : turn.status === 'completed' ? 'finished' : 'failed', { thread: threadId, turn: turn.id, mayRun: false,
+      finalLine: final?.split('\n').find((line) => line.trim()) ?? '' });
   const errorText = JSON.stringify(turn.error ?? '');
   const infrastructureMiss = PROF?.kind === 'trae' && (failureKind(errorText) === 'unavailable' || /access (temporarily )?restricted|\b983\b/i.test(errorText));
   if (turn.status === 'failed' && ROUTE_ARGS && !BACKGROUND && !workStarted && !turnHasWork(turn) && !final
@@ -721,6 +772,7 @@ const STALL_MIN = opts['stall-min'] === undefined ? 30 : Number(opts['stall-min'
 // one line a minute), and the wait's length once it clears. `status --thread` reads the last state from the file.
 const follow = (threadId, turnId) => {
   activeTurn = { threadId, turnId };
+  tracker?.update({ thread: threadId, turn: turnId, model: opts.model ?? null, mayRun: true });
   console.log(`thread=${threadId} turn=${turnId}`);
   const recordQueue = PROF?.kind === 'trae' ? createQueueRecorder(PROF.home, opts.model ?? threadModel(PROF.home, threadId)) : null;
   if (recordQueue) cleanups.add(() => recordQueue.stop());
@@ -895,6 +947,7 @@ try {
     });
     const threadId = th.thread?.id ?? th.threadId;
     attemptThreadId = threadId;
+    tracker?.set({ thread: threadId, mayRun: true });
     if (PROF?.kind === 'trae') rememberThreadModel(PROF.home, threadId, opts.model);
     if (opts.name) await call('thread/name/set', { threadId, name: opts.name }).catch(() => {});
     const ts = await call('turn/start', {
@@ -905,6 +958,7 @@ try {
   } else if (cmd === 'turn') {
     if (!opts.thread || !text) die('turn needs --thread and a prompt');
     await call('thread/resume', { threadId: opts.thread, model: opts.model }).catch(() => {});
+    tracker?.set({ mayRun: true });
     const ts = await call('turn/start', {
       threadId: opts.thread, input: textInput(text), effort: opts.effort, model: opts.model,
       sandboxPolicy: opts.sandbox && sandboxPolicy(opts.sandbox), approvalPolicy: CU_APPS.length || BU_ORIGINS.length ? APPROVAL_POLICY : undefined,
