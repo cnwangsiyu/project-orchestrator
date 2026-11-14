@@ -26,10 +26,10 @@ export const nameMatches = (name, row) => typeof name === 'string' && typeof row
 export const findDecision = (records, name, time = Date.now()) => records.filter((row) => isRouteDecision(row)
   && Number.isFinite(row.t) && row.t <= time && row.t >= time - 86400000 && nameMatches(name, row))
   .sort((a, b) => b.t - a.t)[0] ?? null;
-export const auditLaunch = ({ name, account, model, vendor = 'codex', userOK, time = Date.now(), log = rulesLog() }) => {
+export const auditLaunch = ({ name, account, model, vendor = 'codex', sandbox, userOK, time = Date.now(), log = rulesLog() }) => {
   const decision = findDecision(readRecords(log), name, time);
   const base = { name: name ?? null, account: account ?? null, model: model ?? null, vendor, t: time,
-    project: decision?.project ?? null, routeAt: decision?.t ?? null };
+    sandbox: sandbox ?? null, project: decision?.project ?? null, routeAt: decision?.t ?? null };
   if (!decision) process.stderr.write(`unrouted-launch: ${name ?? '(unnamed)'} ${account ?? '?'} ${model ?? '?'}; route it first\n`);
   try {
     fs.mkdirSync(path.dirname(log), { recursive: true });

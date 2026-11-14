@@ -251,7 +251,7 @@ const CASES = [
   ['fresh', ['review-high', '--security'], 'claude opus xhigh', 'describe defensive intent'],
   ['fresh', ['implement', '--impact', 'service', '--security'], 'codex gpt-6.1-sol xhigh @main'],
 ];
-const ERRORS = [['fresh', ['implement', '__noimpact']], ['fresh', ['implement', '--impact', 'prod']], ['fresh', ['implement', '--failures', '-1']], ['fresh', ['implement', '--stakes', 'hgih']], ['fresh', ['second-opinion']], ['fresh', ['nope']]];
+const ERRORS = [['fresh', ['implement', '__noimpact']], ['fresh', ['implement', '--impact', 'prod']], ['fresh', ['implement', '--failures', '-1']], ['fresh', ['implement', '--stakes', 'hgih']], ['fresh', ['implement', '--sandbox', 'danger-full-access']], ['fresh', ['second-opinion']], ['fresh', ['nope']]];
 
 let fail = 0;
 const CODE = ['implement', 'implement-hard', 'debug', 'science'];
@@ -262,7 +262,7 @@ const run = (sc, args0, overrides = {}) => {
   const cache = path.join(tmp, 'q.json');
   fs.writeFileSync(cache, JSON.stringify({ checkedAt: now, claude: S[sc].claude, codexAccounts: S[sc].codex, errors: {}, history: {} }));
   const env = { ...process.env, QUOTA_CACHE: cache, CODEX_ACCOUNTS: path.join(tmp, 'none.json'), ROUTE_LOG: '0', QUOTA_LOG: '0', TRAE_PROBE: '0', ROUTE_RR: path.join(tmp, 'rr.txt'), QUOTA_LOG_FILE: path.join(tmp, 'empty-company-history'), ...overrides };
-  return execFileSync(process.execPath, [ROUTE, ...args, '--mode', 'default', '--json'], { encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'] });
+  return execFileSync(process.execPath, [ROUTE, ...args, '--json'], { encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'] });
 };
 // Optional 4th field: a substring the notes must contain ('!text': must not contain).
 for (const [sc, args, want, note] of CASES) {
@@ -279,6 +279,34 @@ for (const [sc, args, want, note] of CASES) {
   const ok = got === want;
   if (!ok) fail++;
   console.log(`${ok ? 'ok  ' : 'FAIL'} ${sc.padEnd(19)} ${args.join(' ').padEnd(36)} ${ok ? got : `want "${want}", got "${got}"`}`);
+}
+// User decision 2026-11-13: Codex-family writers default to full access on every account. Reviewers remain read-only;
+// test-running reviews get workspace-write, and --sandbox is the only explicit narrower per-task override.
+{
+  try {
+    const routed = (sc, args) => JSON.parse(run(sc, args));
+    for (const [sc, account] of [['quiet', 'main'], ['ttFresh', 'ttadk'], ['ttOutTrae', 'trae']]) {
+      for (const mode of [[], ['--mode', 'default'], ['--mode', 'bypassPermissions']]) {
+        const writing = routed(sc, ['implement', '--impact', 'service', ...mode]);
+        assert.equal(writing.pick.account, account); assert.equal(writing.pick.sandbox, 'danger-full-access');
+        assert.match(writing.pick.command, /(?:--sandbox|-s) danger-full-access/);
+        assert.match(writing.notes[0], /never overwrite, delete or move files outside the task's scope/);
+        assert.ok(writing.notes.some((n) => /full access: the worker may commit on its task branch if the brief says so; never push to main, never force-push; commits carry no co-author\/tool trailer/.test(n)));
+        assert.ok(writing.notes.some((n) => /credential clause/.test(n)));
+        assert.ok(writing.notes.some((n) => /back up app data before any destructive step/.test(n)));
+        assert.ok(!writing.notes.some((n) => /workspace-write can't run git writes/.test(n)));
+      }
+      const review = routed(sc, ['review']);
+      assert.equal(review.pick.account, account); assert.equal(review.pick.sandbox, 'read-only');
+      assert.equal(routed(sc, ['review', '--runs-tests']).pick.sandbox, 'workspace-write');
+    }
+    const narrower = routed('quiet', ['implement', '--impact', 'service', '--sandbox', 'workspace-write']);
+    assert.equal(narrower.pick.sandbox, 'workspace-write'); assert.match(narrower.pick.command, /(?:--sandbox|-s) workspace-write/);
+    assert.equal(routed('quiet', ['implement', '--impact', 'service', '--sandbox', 'read-only']).pick.sandbox, 'read-only');
+    const testedReview = routed('ttFresh', ['review', '--runs-tests']);
+    assert.ok(testedReview.notes.some((n) => /workspace-write only for test-generated files; the reviewer must not edit/.test(n)));
+    console.log('ok   sandbox defaults/overrides: main, TTADK and TRAE writers full; reviews read-only; test runs workspace-write');
+  } catch (e) { fail++; console.log(`FAIL sandbox defaults/overrides: ${e.stack}`); }
 }
 // Both sides of the global-rules/tier-routing merge must survive in commands, notes and route evidence.
 {

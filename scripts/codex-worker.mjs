@@ -104,7 +104,8 @@ if (opts.sandbox !== undefined && !SANDBOX_POLICY[opts.sandbox]) die(`unknown --
 if (opts.network === true) opts.network = 'on';
 if (opts.network !== undefined && !['on', 'off'].includes(opts.network)) die('--network takes on or off');
 if (opts.network !== undefined && opts.sandbox !== 'workspace-write') die('--network goes with --sandbox workspace-write');
-if (cmd === 'start') auditLaunch({ name: opts.name, account: account ?? 'main', model: opts.model, userOK: opts['user-ok'] });
+if (cmd === 'start') auditLaunch({ name: opts.name, account: account ?? 'main', model: opts.model,
+  sandbox: opts.sandbox, userOK: opts['user-ok'] });
 // Codex's own default for workspace-write network, so an explicit turn-level policy doesn't silently change it.
 const configNetwork = () => {
   try {

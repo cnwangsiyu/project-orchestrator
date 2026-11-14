@@ -19,7 +19,7 @@ version: 2026-11-13.8
 - Owner pushes version/change/action/link notes via the secretary for the mini group, directly to MacBook orchestrators.
 - Orchestrators judge, workers work. Route every task; parallelize independent work, keep coupled work together.
 - Never silently hold runnable work: company quota without asking, personal quota after asking; reset cards need a fresh user OK every time.
-- Claude workers always use `--remote-control --permission-mode bypassPermissions`; cards for what Bypass cannot pass, agents execute non-secret actions, only the user types secrets.
+- Codex-family writing workers run with full access, Claude workers in Bypass; reviewers stay read-only; Codex's own safety layer still refuses signing/credential files regardless of sandbox.
 - TRAE restrictions are unrelated to our concurrency/quota; never reduce concurrency for queues. LLM throughput limits are QPM/TPM, no total-cost caps.
 - Resources use shared `res`: short/urgent first, long/low-priority later; resources.md supplies five-minute sampling/retro/guarded cleanup and unlocked-build detection. Failed probes are UNKNOWN; telemetry never restarts hubs/reclaims locks. Validate a complete unsandboxed host sample before installation.
 - Full-package builds hold `heavy-build` then a lane throughout; other heavy tasks hold a lane. Two normal lanes; after reviewed v1.3 owner switch, lane 3 requires load1m <=8 AND avail >=32 GiB at take time. One full build, 2-3 heavy tasks; OPEN does not mean FREE.

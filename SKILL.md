@@ -69,7 +69,7 @@ The versioned [global-rules digest](references/global-rules.md) is the single in
 - **Resources:** [machine resources](references/resources.md) supplies five-minute sampling, nightly retro/guarded cleanup and detection of builds without holders; [shared `res`](#shared-resources), the [maintained lock contract](references/res-contract.md) and [build/cache discipline](#build-discipline) require the wrapper or explicit take/return, build-then-lane order, finite waits/gates, reverse release, incremental/cold acceptance builds and scoped ccache/Gradle caches (first cache use cold). Global-rules owns the whole tool since 2026-11-13; v1.3 lane 3 is pending its reviewed switch.
 - **Disk:** [workspace retention](#workspace-retention) sets no worker space caps; auto-clean self-made build clones/templates/caches only when the data disk has <1 TB free; real workspaces/user data require a user card.
 - **Claude settings:** [documented settings](#claude-worker-settings) record `CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP=1`; idle-stop has no switch (pin or keep working), with no settings mutation.
-- **Claude workers:** [launch](#claude-worker-settings) always uses Remote Control + explicit Bypass; [permissions](#permission-plan) use cards for what Bypass cannot pass, agents execute non-secret actions, only the user types secrets.
+- **Worker permissions:** Codex-family writing workers default to full access; reviewers stay read-only unless `--runs-tests` gives them workspace-write, and `--sandbox workspace-write|read-only` is the per-task narrower override. [Claude launch](#claude-worker-settings) always uses Remote Control + explicit Bypass. [Permissions](#permission-plan) use cards for what those modes cannot pass, agents execute non-secret actions, only the user types secrets.
 - **TRAE:** [account rules](references/codex-workers.md#trae-cli-as-the-second-company-account-user-2026-11-08) separate restrictions from concurrency/quota, never reduce concurrency for queues, enforce only QPM/TPM limits for LLM use (no total-cost caps), and name the concrete worker model in reports.
 - **Work and quota:** [judgment](#judge-not-labour) stays with orchestrators, [independent tasks](#split-by-coupling) run in parallel while coupled work stays together; [quota](#route-every-task) never silently holds work, uses company quota without asking, personal quota after asking, reset cards only after a fresh OK every time.
 - **Signing/credentials:** [worker safety](#worker-credential-safety) forbids Codex workers on this machine from touching signing/credential files, including hashing, regardless of authorization; strip/use sanitized public inputs or have the user run it once.
@@ -207,6 +207,7 @@ with its workspace/tools/access, and the scope does not conflict with sibling ta
 
 Every brief for work that writes or touches devices carries these safety clauses, word for word or
 close (user, 2026-11-04, after a worker overwrote a user header and another wiped test-app data):
+- For writing tasks, make the scope clause the first brief note; full access makes that boundary especially important.
 - "Never overwrite, delete or move files outside this task's scope: the user's files, uncommitted
   changes, shared headers or configs. If you touch one by mistake, restore it byte-for-byte and
   say so in the report."
@@ -363,7 +364,9 @@ effort, Codex account and launch command from
   - `--failures N`: how often this task has already visibly fallen short, counted per task and kept
     in the ledger. Each failure moves it one step up the escalation ladder. Count one when a result
     fails your verification, a worker stalls or reports something beyond its depth;
-  - `--writes` / `--read-only`, `--against <vendor>` for a second opinion, and `--mode`, `--cwd`,
+  - `--writes` / `--read-only`, `--against <vendor>` for a second opinion, `--runs-tests` when a non-writing worker
+    needs workspace-write for test-generated files, and `--sandbox workspace-write|read-only` for an explicit narrower
+    Codex-family sandbox. `--mode` remains accepted for compatibility but no longer selects the sandbox. Pass `--cwd`,
     `--task-dir`, `--name` so the printed command is ready to run;
   - for code work, `--impact release|service|throwaway` (see "Review only what is costly to
     undo"); route.mjs refuses code work without it;
@@ -643,8 +646,12 @@ only their own files — no `add -A`, stash or reset. Permission boundaries are 
 route an action that was denied in one session through another.
 
 <a id="permission-plan"></a>**Plan around permissions before you dispatch** (user, 2026-11-05; tightened 2026-11-13).
-1. **Predict the boundary.** Claude workers always launch in Bypass; ask authorization cards only for non-secret
-   actions Bypass cannot pass (deploys, DNS/certificates, external submissions, pushes). Include this plan in the brief.
+1. **Predict the boundary.** Codex-family writing workers launch with full access by default; non-writing workers stay
+   read-only, or workspace-write with `--runs-tests`. Use `--sandbox workspace-write|read-only` when one task needs a
+   narrower Codex boundary. Full access may commit on the task branch only when the brief says so; never push to main,
+   never force-push, and add no co-author/tool trailer. Claude workers always launch in Bypass. Ask authorization cards
+   only for non-secret actions those modes cannot pass (deploys, DNS/certificates, external submissions, pushes).
+   Include this plan in the brief.
 2. **Ask, then let the agent execute.** A blocked Claude worker raises AskUserQuestion and retries after approval;
    don't hand non-secret actions to the user. A blocked Codex worker reports the exact step/error; arrange a card
    through Claude for an approvable non-secret action, never to evade its sandbox or a denial. If approval cannot
@@ -664,8 +671,9 @@ short, batch updates that arrive together, and reply in the user's language.
 - **Launch a worker** from its workspace:
   `cd <workspace> && claude --bg --remote-control --permission-mode bypassPermissions -n <name> "<one line pointing at the brief>"`.
   It prints `backgrounded · <id> · <name>`. Always pass Remote Control and explicit **Bypass** (user, 2026-11-13):
-  `route.mjs` no longer reads `settings.json` `defaultMode`, and `--mode` affects only the Codex sandbox, not Claude
-  worker mode. Codex retains its own sandbox bound (see `references/codex-workers.md`). Prefix the name
+  `route.mjs` no longer reads `settings.json` `defaultMode`; `--mode` is compatibility-only and does not change either
+  worker family's permissions. Codex retains the sandbox selected from write/test intent or an explicit narrower
+  `--sandbox` override (see `references/codex-workers.md`). Prefix the name
   with the project slug so sessions from different projects stay apart in `claude agents`.
   Always pass the model and effort `route.mjs` printed (`--model opus|sonnet|haiku|fable`,
   `--effort low|medium|high|xhigh|max`) — otherwise the worker inherits yours. In the rare case a

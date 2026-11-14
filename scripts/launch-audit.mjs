@@ -5,5 +5,5 @@ try {
   const argv = process.argv.slice(2), opts = {};
   for (let i = 0; i < argv.length; i += 2) opts[argv[i].replace(/^--/, '')] = argv[i + 1];
   auditLaunch({ name: opts.name, account: opts.account, model: opts.model, vendor: opts.vendor,
-    userOK: opts['user-ok'] });
+    sandbox: opts.sandbox, userOK: opts['user-ok'] });
 } catch {}

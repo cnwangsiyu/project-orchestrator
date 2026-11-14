@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 // route: pick vendor, model, effort, account and the exact launch command for one task, deterministically.
 //
-//   route <category> [--stakes low|normal|high] [--auto-check] [--failures N] [--writes | --read-only]
+//   route <category> [--stakes low|normal|high] [--auto-check] [--failures N] [--writes | --read-only] [--runs-tests]
 //                    [--against claude|codex] [--no-redeem] [--project SLUG] [--dry]
 //                    [--impact release|service|throwaway]   (required for implement, implement-hard, debug, science)
-//                    [--exclude-account a,b] [--exclude-model m,family] [--origins p,q] [--mode <orchestrator mode for Codex sandbox>] [--cwd DIR] [--task-dir DIR]
+//                    [--exclude-account a,b] [--exclude-model m,family] [--origins p,q] [--mode <compatibility value>]
+//                    [--sandbox workspace-write|read-only] [--cwd DIR] [--task-dir DIR]
 //                    [--name NAME] [--fresh] [--json] [--security] [--background]
 //   route --table          (the routing table: categories, first pick, alternative, escalation ladder)
 //
@@ -95,7 +96,7 @@ const label = (m) => `${m.vendor === 'claude' ? `Claude ${m.model}` : isAlt(m) ?
 
 // ---- args ----
 // --apps a,b: the desktop apps (bundle ids) a computer-use worker may operate; others are declined.
-const BOOL = new Set(['auto-check', 'writes', 'read-only', 'fresh', 'json', 'table', 'no-redeem', 'dry', 'urgent', 'security', 'background', 'device-lease', 'shared-lock']);
+const BOOL = new Set(['auto-check', 'writes', 'read-only', 'runs-tests', 'fresh', 'json', 'table', 'no-redeem', 'dry', 'urgent', 'security', 'background', 'device-lease', 'shared-lock']);
 // --urgent: run now even while TTADK is down for a fixable reason (that work would otherwise wait for the fix).
 // --exclude-account a,b: route around accounts that just failed (e.g. TTADK after a rate-limited retry or an auth error).
 // --exclude-model m,f: route around models (an id, or a family: gpt, deepseek, gemini…) that just failed for
@@ -123,6 +124,7 @@ const stakes = opts.stakes ?? 'normal';
 if (!['low', 'normal', 'high'].includes(stakes)) die(`--stakes takes low, normal or high, not ${stakes}`);
 const failures = opts.failures === undefined ? 0 : Number(opts.failures);
 if (!Number.isInteger(failures) || failures < 0) die(`--failures takes a whole number ≥ 0, not ${opts.failures}`);
+if (opts.sandbox !== undefined && !['workspace-write', 'read-only'].includes(opts.sandbox)) die(`--sandbox takes workspace-write or read-only, not ${opts.sandbox}`);
 if (cat === 'second-opinion' && !['claude', 'codex'].includes(opts.against)) die('second-opinion needs --against claude|codex (the vendor whose conclusion is checked)');
 // --author claude|codex on review / review-high: the vendor that wrote the code. A Codex-written change is reviewed by
 // Claude first, so the required review is not the same model checking itself.
@@ -537,11 +539,16 @@ if (second) {
 }
 
 // ---- 4. account and launcher ----
-const mode = typeof opts.mode === 'string' ? opts.mode : 'default';
-// User, 2026-11-13: Claude workers always use Bypass, independent of settings.defaultMode or --mode.
-// --mode still bounds the Codex sandbox; this must not silently widen Codex permissions.
+// User, 2026-11-13: Codex-family writing workers get full access by default. --mode remains accepted for
+// compatibility but does not select permissions; --sandbox is the explicit per-task narrower override.
+// Claude workers always use Bypass, independent of settings.defaultMode, --mode or --sandbox.
 const claudeMode = 'bypassPermissions';
-const sandbox = !writes ? 'read-only' : mode === 'bypassPermissions' ? 'danger-full-access' : 'workspace-write';
+const sandboxOverride = typeof opts.sandbox === 'string' ? opts.sandbox : null;
+const runsTests = !!opts['runs-tests'];
+const sandbox = sandboxOverride ?? (writes ? 'danger-full-access' : runsTests ? 'workspace-write' : 'read-only');
+// A second seat is a reviewer. It stays read-only unless this non-writing task explicitly needs to run tests, or the
+// orchestrator supplied a narrower sandbox override for the whole routed task.
+const secondSandbox = sandboxOverride ?? (!writes && runsTests ? 'workspace-write' : 'read-only');
 const cwd = typeof opts.cwd === 'string' ? opts.cwd : '<workspace>', taskDir = typeof opts['task-dir'] === 'string' ? opts['task-dir'] : '<task dir>';
 const name = typeof opts.name === 'string' ? opts.name : '<project>-<task>';
 const prompt = `"Read ${taskDir}/brief.md and follow it."`;
@@ -586,10 +593,10 @@ const digest = loadDigest();
 const credRule = `Global worker rules ${digest.version}\n${digest.worker}`;
 const execCred = ` -c 'developer_instructions=${JSON.stringify(credRule).replaceAll("'", "'\\''")}'`;
 const shellQuote = (value) => `'${String(value).replaceAll("'", "'\\''")}'`;
-const launchAudit = (x, an) => `node ${shellQuote(`${SKILL}/scripts/launch-audit.mjs`)} --name ${shellQuote(name)} --vendor ${x.vendor} --account ${shellQuote(an)} --model ${shellQuote(x.model)}${typeof opts['user-ok'] === 'string' ? ` --user-ok ${shellQuote(opts['user-ok'])}` : ''} && `;
-const launch = (x, shape = T.shape, acct = pickAcct) => {
+const launchAudit = (x, an, launchSandbox) => `node ${shellQuote(`${SKILL}/scripts/launch-audit.mjs`)} --name ${shellQuote(name)} --vendor ${x.vendor} --account ${shellQuote(an)} --model ${shellQuote(x.model)}${x.vendor === 'codex' ? ` --sandbox ${shellQuote(launchSandbox)}` : ''}${typeof opts['user-ok'] === 'string' ? ` --user-ok ${shellQuote(opts['user-ok'])}` : ''} && `;
+const launch = (x, shape = T.shape, acct = pickAcct, launchSandbox = sandbox) => {
   if (x.vendor === 'claude') {
-    return { launcher: 'claude-bg', command: `${launchAudit(x, 'claude')}cd ${cwd} && claude --bg --remote-control --permission-mode ${claudeMode} -n ${name} --model ${x.model} --effort ${x.effort} --append-system-prompt "$(node ${shellQuote(`${SKILL}/scripts/rules-worker-digest.mjs`)})" ${prompt}` };
+    return { launcher: 'claude-bg', command: `${launchAudit(x, 'claude', null)}cd ${cwd} && claude --bg --remote-control --permission-mode ${claudeMode} -n ${name} --model ${x.model} --effort ${x.effort} --append-system-prompt "$(node ${shellQuote(`${SKILL}/scripts/rules-worker-digest.mjs`)})" ${prompt}` };
   }
   const an = acct?.a.name ?? 'main', home = profiles[an]?.home ?? '~/.codex';
   // TRAE CLI: `traecli exec` mirrors `codex exec` (its own home, ~/.trae); models go by TRAE's own ids.
@@ -597,16 +604,16 @@ const launch = (x, shape = T.shape, acct = pickAcct) => {
   if (traeProf) {
     const id = traeProf.modelIds?.[x.model] ?? x.model;
     // Quota substitution can put Astra on a short row too; keep its queue/status visible through the hub.
-    if (shape === 'exec' && x.model !== ASTRA && !backgroundLane) return { launcher: 'traecli-exec', account: an, command: `${launchAudit(x, an)}${traeProf.bin ?? 'traecli'} exec${inRepo === false ? ' --skip-git-repo-check' : ''} -C ${cwd} -s ${sandbox} -m ${id} -c model_reasoning_effort='"${x.effort}"'${execCred} --json -o ${taskDir}/codex-last.md ${prompt} < /dev/null > ${taskDir}/codex.jsonl 2>&1   (background task${inRepo === null ? '; add --skip-git-repo-check outside a repo' : ''})` };
-    return { launcher: 'codex-worker', account: an, command: `node ${SKILL}/scripts/codex-worker.mjs --account ${an} start --cwd ${cwd} --model ${id} --effort ${x.effort} --sandbox ${sandbox} --name ${name} --log ${taskDir}/codex.jsonl --out ${taskDir}/codex-last.md ${prompt}   (background task)` };
+    if (shape === 'exec' && x.model !== ASTRA && !backgroundLane) return { launcher: 'traecli-exec', account: an, command: `${launchAudit(x, an, launchSandbox)}${traeProf.bin ?? 'traecli'} exec${inRepo === false ? ' --skip-git-repo-check' : ''} -C ${cwd} -s ${launchSandbox} -m ${id} -c model_reasoning_effort='"${x.effort}"'${execCred} --json -o ${taskDir}/codex-last.md ${prompt} < /dev/null > ${taskDir}/codex.jsonl 2>&1   (background task${inRepo === null ? '; add --skip-git-repo-check outside a repo' : ''})` };
+    return { launcher: 'codex-worker', account: an, command: `node ${SKILL}/scripts/codex-worker.mjs --account ${an} start --cwd ${cwd} --model ${id} --effort ${x.effort} --sandbox ${launchSandbox} --name ${name} --log ${taskDir}/codex.jsonl --out ${taskDir}/codex-last.md ${prompt}   (background task)` };
   }
   // A TTADK codex exec bypasses codex-worker, so it brings the account's proxy up first (exit 6 when it can't).
   const proxyFirst = TT?.search && an === TT.name ? `node ${SKILL}/scripts/codex-worker.mjs --account ${an} proxy >/dev/null && ` : '';
-  if (shape === 'exec') return { launcher: 'codex-exec', account: an, command: `${launchAudit(x, an)}${proxyFirst}CODEX_HOME=${home} codex exec${inRepo === false ? ' --skip-git-repo-check' : ''} -C ${cwd} -s ${sandbox} -m ${x.model} -c model_reasoning_effort='"${x.effort}"'${execCred} --json -o ${taskDir}/codex-last.md ${prompt} < /dev/null > ${taskDir}/codex.jsonl 2>&1   (background task${inRepo === null ? '; add --skip-git-repo-check outside a repo' : ''})` };
+  if (shape === 'exec') return { launcher: 'codex-exec', account: an, command: `${launchAudit(x, an, launchSandbox)}${proxyFirst}CODEX_HOME=${home} codex exec${inRepo === false ? ' --skip-git-repo-check' : ''} -C ${cwd} -s ${launchSandbox} -m ${x.model} -c model_reasoning_effort='"${x.effort}"'${execCred} --json -o ${taskDir}/codex-last.md ${prompt} < /dev/null > ${taskDir}/codex.jsonl 2>&1   (background task${inRepo === null ? '; add --skip-git-repo-check outside a repo' : ''})` };
   // ui-browser also reaches the local dev server (a host pattern matches any port).
   const apps = cat === 'computer-use' && typeof opts.apps === 'string' ? ` --computer-use-apps '${opts.apps.split(',').map((a) => a.trim()).filter(Boolean).join(',')}'` : '';
   const origins = ['browser', 'ui-browser'].includes(cat) ? ` --browser-origins '${[...(cat === 'ui-browser' ? ['localhost', '127.0.0.1'] : []), ...POLICY.browserOrigins, ...(typeof opts.origins === 'string' ? opts.origins.split(',') : [])].map((o) => o.trim()).filter(Boolean).join(',')}'` : '';
-  return { launcher: 'codex-worker', account: an, command: `node ${SKILL}/scripts/codex-worker.mjs --account ${an} start --cwd ${cwd} --model ${x.model} --effort ${x.effort} --sandbox ${sandbox} --name ${name}${origins}${apps} --log ${taskDir}/codex.jsonl --out ${taskDir}/codex-last.md ${prompt}   (background task)` };
+  return { launcher: 'codex-worker', account: an, command: `node ${SKILL}/scripts/codex-worker.mjs --account ${an} start --cwd ${cwd} --model ${x.model} --effort ${x.effort} --sandbox ${launchSandbox} --name ${name}${origins}${apps} --log ${taskDir}/codex.jsonl --out ${taskDir}/codex-last.md ${prompt}   (background task)` };
 };
 // The same quality gate for both vendors, so outcomes compare: code work gets an independent review before it's accepted.
 // Review only where a mistake is costly to undo; reviewers follow references/review-rubric.md (blocking issues only).
@@ -623,7 +630,7 @@ if (m?.model === 'deepseek-v4.1-flash' || second?.model === 'deepseek-v4.1-flash
 // user-approved 2026-11-11 retro: W291-R0 review misses and ppe2a's unnecessary rollback.
 if (isAlt(m) && ['review', 'review-high'].includes(cat)) notes.push('release/high-stakes acceptance also requires an independent other-family GPT/Claude reviewer and the failure probes in references/review-rubric.md; if unavailable, report BLOCKED');
 if (m && cat === 'build-run') notes.push('deploy/release brief: pin baseline/control probes, health thresholds, sample intervals and observation window, rollback triggers and exact prior artifact/config restore steps before acting; a fallback model follows these only — unexpected evidence needs stronger-model judgment, stop and report rather than invent a rollback condition');
-if (m && writes) notes.push('brief: include the safety clauses — never overwrite, delete or move files outside the task\'s scope (user files, uncommitted changes, shared headers/configs); restore anything touched by mistake byte-for-byte and report it');
+if (m && writes) notes.unshift('brief: include the safety clauses — never overwrite, delete or move files outside the task\'s scope (user files, uncommitted changes, shared headers/configs); restore anything touched by mistake byte-for-byte and report it');
 if (m && ['build-run', 'implement', 'implement-hard', 'debug', 'ui-browser', 'computer-use'].includes(cat)) notes.push('brief: on devices and simulators, back up app data before any destructive step (reinstall with --remove-existing-content, wiping app containers or Documents, erasing simulators), or ask first');
 if (m && ['build-run', 'ui-browser', 'computer-use'].includes(cat)) notes.push('before builds/device runs: inspect finished-task process trees, but cleanup requires references/resources.md\'s guarded executor, continuous idle evidence, live-session/lease protections and every orchestrator\'s release; PPID=1 or age alone is not permission to kill. Device lease: at most 2 h, then return the device and report; brief preflight: device connected, unlocked, app data backed up');
 if (m && ['build-run', 'implement', 'implement-hard', 'debug', 'ui-browser'].includes(cat)) notes.push('build brief: full-package builds must use scripts/heavy-build.sh or equivalent res take/return per references/res-contract.md: heavy-build first, then a lane; reverse return on every exit. Two normal lanes; v1.3 adds lane 3 only after reviewed owner switch, at load1m <=8 AND available memory >=32 GiB at take time (2-3 lanes with load). Wrapper tries lanes 1/2/3, HEAVY_BUILD_LANE pins one. Normal gate remains min(20, 12 + 8 * other lanes), memory >=16 GiB; STALE and caller-owned locks excluded, lane-3 holders counted. Bounded waits and authoritative heavy-check limit/lanes_held, appended lane3=OPEN|CLOSED; OPEN is not FREE. UNKNOWN blocks admission, timeout means report/queue, never bypass. Other heavy tasks take one lane. Compile 6/link 1, Xcode -jobs 6, Gradle 2 workers; fixed per-base incremental builds, one cold acceptance build, affected fix tests and scoped ccache/Gradle caches (first use cold). Not a model-worker concurrency cap; global-rules owns res, telemetry never reclaims locks/restarts hubs.');
@@ -671,7 +678,8 @@ if (m && ['browser', 'ui-browser'].includes(cat)) {
   if (m.vendor === 'codex') notes.push(`brief: include the "Codex browser brief" clauses from references/codex-workers.md (plugin bootstrap from ${(ttadkRun ? TT?.chromePlugin : acct?.a?.chromePlugin) ?? TT?.chromePlugin ?? '<chrome plugin>'}/scripts/browser-client.mjs; work in tabs you create; a tab your own click opens may be claimed via user.openTabs()/claimTab and must be closed; never touch the user's other tabs); sites outside --browser-origins are declined — add them with --origins when the task needs them`);
   else notes.push('Claude browser worker (Claude in Chrome): if the extension reports several browsers, select only this Mac\'s Chrome (deviceId in the ledger); never switch to another connected browser');
 }
-if (m?.vendor === 'codex' && sandbox === 'workspace-write') notes.push('workspace-write can\'t run git writes: brief the worker to edit only and report the files and a commit message; you review and commit');
+if (m?.vendor === 'codex' && sandbox === 'danger-full-access') notes.push('full access: the worker may commit on its task branch if the brief says so; never push to main, never force-push; commits carry no co-author/tool trailer');
+if (m?.vendor === 'codex' && runsTests && !writes && sandbox === 'workspace-write') notes.push('brief: --runs-tests grants workspace-write only for test-generated files; the reviewer must not edit the code under review');
 if (m?.vendor === 'codex' && acct && !acct.a.live) notes.push(T.shape === 'exec' && !backgroundLane ? `account ${acct.a.name}'s reading is stale (its hub may be unreachable); codex exec still works` : `account ${acct.a.name}'s hub may be unreachable: probe with codex-worker.mjs --account ${acct.a.name} list --limit 1; start with codex-worker hub only if unreachable, then tell the global-rules owner`);
 if (!QX.readable && m?.vendor === 'codex') notes.push('Codex usage unreadable; routing as if it has room');
 const lands = (a) => !!a && !!redeemAcct && a.a.name === redeemAcct.a.name && !chatgptOpen.some((r) => r.a.name === a.a.name);
@@ -686,15 +694,15 @@ if (security && m && ((ttCapable && TT.kind === 'trae') || (companyOut && QX.tra
 const out = {
   category: cat, stakes, failures, security, background, tier, deferred,
   pick: m ? { ...m, ...launch(m), sandbox: m.vendor === 'codex' ? sandbox : null } : null,
-  secondOpinion: second ? { ...second, ...launch(second, second === T.second ? T.shape : 'worker', secondAcct) } : null,
+  secondOpinion: second ? { ...second, ...launch(second, second === T.second ? T.shape : 'worker', secondAcct, secondSandbox), sandbox: second.vendor === 'codex' ? secondSandbox : null } : null,
   needsUserOK: needsOK, tellUser: tell, why, notes, redeemFirst, balance, quota: leanLines(st, data),
 };
 out.notes.push('launch audit: every launch must match a same-name/task-prefix route decision in the last 24h; unrouted-launch warns and logs without blocking. Record actual user approval with --user-ok <card/ledger-reference>, never invent it. Claude/one-shot launches run launch-audit; hub start checks directly.');
 // Every real routing decision is logged for the nightly review (--dry or ROUTE_LOG=0 to skip, e.g. for experiments).
 if (!opts.dry && process.env.ROUTE_LOG !== '0') {
   const rec = { t: Date.now(), project: typeof opts.project === 'string' ? opts.project : null, name: typeof opts.name === 'string' ? opts.name : null, category: cat, stakes, failures, impact, review: reviewKind, excluded: [...excluded], ttadk: !!ttadkRun, company: ttadkRun ? runCompany.name : null, balance,
-    autoCheck: !!opts['auto-check'], noRedeem, security, background, tier, deferred, pick: m ? { vendor: m.vendor, model: m.model, effort: m.effort, account: out.pick?.account ?? null } : null,
-    second: second ? { vendor: second.vendor, model: second.model, effort: second.effort, account: out.secondOpinion?.account ?? null } : null, why, needsOK, tell,
+    autoCheck: !!opts['auto-check'], runsTests, noRedeem, security, background, tier, deferred, pick: m ? { vendor: m.vendor, model: m.model, effort: m.effort, account: out.pick?.account ?? null, sandbox: out.pick?.sandbox ?? null } : null,
+    second: second ? { vendor: second.vendor, model: second.model, effort: second.effort, account: out.secondOpinion?.account ?? null, sandbox: out.secondOpinion?.sandbox ?? null } : null, why, needsOK, tell,
     personalApproved: !!opts.urgent, approvalRef: typeof opts['user-ok'] === 'string' ? opts['user-ok'] : null,
     quota: { claude: QC.status, codexOut: QX.out, underused: QX.underused, frontLoad: QX.frontLoad, overspending: QX.overspending, redeemDue: !!QX.redeem } };
   try { fs.appendFileSync(ROUTE_LOG, JSON.stringify(rec) + '\n'); } catch {}

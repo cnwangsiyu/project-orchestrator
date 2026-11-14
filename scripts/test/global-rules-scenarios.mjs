@@ -53,12 +53,16 @@ try {
   }
   console.log('ok   Claude primary/second-opinion launches use Remote Control and Bypass for every default/override');
 
-  for (const [mode, sandbox] of [[[], 'workspace-write'], [['--mode', 'default'], 'workspace-write'],
-    [['--mode', 'bypassPermissions'], 'danger-full-access']]) {
+  for (const [mode, sandbox] of [[[], 'danger-full-access'], [['--mode', 'default'], 'danger-full-access'],
+    [['--mode', 'acceptEdits'], 'danger-full-access'], [['--mode', 'bypassPermissions'], 'danger-full-access']]) {
     assert.ok(route(['implement', '--impact', 'service', ...mode]).pick.command.includes(` --sandbox ${sandbox} `));
     assert.ok(route(['implement', '--impact', 'service', '--read-only', ...mode]).pick.command.includes(' --sandbox read-only '));
   }
-  console.log('ok   explicit Claude Bypass does not widen the Codex sandbox');
+  assert.equal(route(['review']).pick.sandbox, 'read-only');
+  assert.equal(route(['review', '--runs-tests']).pick.sandbox, 'workspace-write');
+  assert.equal(route(['implement', '--impact', 'service', '--sandbox', 'workspace-write']).pick.sandbox, 'workspace-write');
+  assert.equal(route(['implement', '--impact', 'service', '--sandbox', 'read-only']).pick.sandbox, 'read-only');
+  console.log('ok   Codex writers default full; reviewers stay read-only; tests and explicit overrides stay narrower');
 
   assert.equal(POLICY.ttadkSsoWarnH, 72);
   for (const [left, expected] of [[73, false], [72, true], [71, true], [55, true], [48, true], [24, true]]) {

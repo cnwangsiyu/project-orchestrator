@@ -85,8 +85,9 @@ fs.realpath=(file,...args)=>process.env.STALL_PHASE==='transcript'?stalled():rea
 
   const now = Date.now();
   append({ t: now - 1000, project: 'p', name: 'T1', category: 'implement', pick: { vendor: 'codex', model: 'gpt-6.1-sol', account: 'ttadk' } });
-  cli('launch-audit.mjs', ['--name', 'p-T1-fix1', '--account', 'ttadk', '--model', 'gpt-6.1-sol', '--vendor', 'codex']);
+  cli('launch-audit.mjs', ['--name', 'p-T1-fix1', '--account', 'ttadk', '--model', 'gpt-6.1-sol', '--vendor', 'codex', '--sandbox', 'read-only']);
   assert.equal(rows().at(-1).routeAt, now - 1000);
+  assert.equal(rows().at(-1).sandbox, 'read-only');
   assert.equal(rows().filter((row) => row.kind === 'unrouted').length, 0);
   const missing = spawnSync(process.execPath, [path.join(scripts, 'launch-audit.mjs'), '--name', 'T10', '--account', 'main', '--model', 'gpt-6.1-sol'], { env, encoding: 'utf8' });
   assert.equal(missing.status, 0); assert.match(missing.stderr, /unrouted-launch/);
@@ -108,6 +109,7 @@ if(m.method==='turn/start')setImmediate(()=>this.onmessage({data:JSON.stringify(
   { env: { ...env, CODEX_ACCOUNTS: profiles, CAPTURE: captured }, encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'] });
   assert.equal(JSON.parse(fs.readFileSync(captured)).developerInstructions, `Global worker rules ${digest.version}\n${digest.worker}`);
   assert.equal(rows().at(-1).kind, 'launch'); assert.equal(rows().at(-1).account, 'main');
+  assert.equal(rows().at(-1).sandbox, 'read-only');
   console.log('ok   real codex-worker start injects the single-source worker digest and records launch evidence');
   const probeBin = path.join(tmp, 'probe-bin'), spawned = path.join(tmp, 'unexpected-hub-spawn');
   fs.mkdirSync(probeBin);
