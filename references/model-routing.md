@@ -274,8 +274,9 @@ the nightly review compares dispatch reasons and recorded wall-clock time, inclu
     | Light | `lookup`, `extract`, `draft`; or low stakes; or `--background`, unless a hard rule applies | GPT-5.6-Terra → GPT-5.5 → DeepSeek-V4.1-Flash |
 
     Light work on TRAE prefers bucket-free models even with Sol quota left. Normal/light substitution never uses Astra;
-    hard substitution never uses 5.6-Sol, 5.6-Terra or 5.5. A failed CODE task's GPT substitution uses the hard tier,
-    never a weaker GPT. Tier candidates are **availability substitutions for the current attempt, not retry rungs**:
+    hard substitution never uses 5.6-Sol, 5.6-Terra, 5.5, DeepSeek, Gemini or Seed — only Sol/Astra, otherwise the
+    rung drops to personal Claude behind the gate. A failed CODE task's GPT substitution uses the hard tier, never a
+    weaker GPT. Tier candidates are **availability substitutions for the current attempt, not retry rungs**:
     pick the first usable candidate, then increase its effort before existing stronger quality steps. A ladder's
     initial attempt uses its original tier; later CODE rungs use hard, so `--failures` cannot reinterpret earlier picks.
     Company model/account eligibility always uses the current tier after failures/stakes; an initial normal/light
@@ -364,11 +365,12 @@ the nightly review compares dispatch reasons and recorded wall-clock time, inclu
       them as `image-read`; audio and video have no TRAE model and stay on Claude/ChatGPT. Both DeepSeek models said they
       can't see images (2026-11-10). A DeepSeek pick prints a note: a task that depends on screenshots is re-routed with
       `--exclude-model deepseek`.
-    - **GPT up, Sol falls short**: Sol at the row's effort → … → Sol xhigh → DeepSeek-V4.1-Flash (a different family:
-      its misses rarely overlap Sol's) → Sol max → GPT-6-Astra high on the company account (no OK:
-      company quota; live test 2026-11-13) → the row's Claude steps. The cheap rows (lookup, extract, draft, browser,
-      computer-use) skip Sol max, the second fallback and Astra in the quality ladder; only hard-tier or vision
-      substitution can choose Astra before dispatch. All fallback steps respect the model-fit exclusions above.
+    - **GPT up, Sol falls short**: normal work goes Sol at the row's effort → … → Sol xhigh → DeepSeek-V4.1-Flash (a
+      different family: its misses rarely overlap Sol's) → Sol max → GPT-6-Astra high on the company account (no OK:
+      company quota; live test 2026-11-13) → the row's Claude steps. Hard work skips the fallback family: Sol notches
+      → Sol max → Astra high → the row's Claude steps behind the personal-quota gate. The cheap rows (lookup, extract,
+      draft, browser, computer-use) skip Sol max, the second fallback and Astra in the quality ladder; only hard-tier
+      or vision substitution can choose Astra before dispatch. All fallback steps respect the model-fit exclusions above.
     - **Quality guard**: service code a fallback model wrote gets the routine review (normally only release code or high
       stakes do), and every review of fallback-written code runs with `--exclude-model <its family>`, so a different
       family reviews it. A second free reviewer on TRAE (no Kimi there) is a fallback model of another family, not a
@@ -407,8 +409,8 @@ the nightly review compares dispatch reasons and recorded wall-clock time, inclu
       failure still climbs to `xhigh` and `max`. Release and service work keep their effort;
     - after a failure Sol climbs every notch to `xhigh`, then `max` (no OK needed on TTADK; lookup, extract, draft
       and browser stop at `xhigh`), then the company fallback models and GPT-6-Astra high on TRAE (company quota, no OK),
-      before the row's personal-quota steps: e.g. implement-hard Sol xhigh → DeepSeek-V4.1-Flash → Sol max →
-      Astra high on TRAE → Opus xhigh; science Sol xhigh → Sol max → Astra high on TRAE →
+      before the row's personal-quota steps. Hard work has no fallback-family rung: e.g. implement-hard Sol xhigh →
+      Sol max → Astra high on TRAE → Opus xhigh; science Sol xhigh → Sol max → Astra high on TRAE →
       Astra (ChatGPT, needs an OK; dropped when ChatGPT is out);
     - a routine review of Codex-written code runs on TTADK (`review --author codex`): a fresh Sol xhigh reviewer plus
       a second free one with a different focus (failure paths, concurrency, edge cases, tests). High-stakes review
