@@ -1,5 +1,12 @@
 #!/bin/bash
 # Full-package build wrapper. Do not nest it or reuse an already-held heavy lock.
+# Scope: LOCAL heavy compute only (compilers, linkers, packaging on this machine). PPE/staging/TCE/BITS/SCM deploys,
+# remote pipelines and CI runs are not heavy local work — never wrap them here, never take a heavy-build/lane lock for
+# them, and never pass --shared-lock. A shared remote/CI entry script stays unthrottled; local locks live only in a
+# local-only wrapper (route.mjs --no-local-build documents the remote case).
+# Lane order under contract v1.3: heavy-build slot first, then lanes 1, 2, then the optional lane 3; reverse return on
+# every exit. Lanes 1/2 keep their normal gate; lane-3 admission (load1m <=8 AND available memory >=32 GiB at take
+# time) is enforced by `res wait` itself, never reimplemented or bypassed here.
 set -u
 set -m
 res="${RES_COMMAND:-$HOME/.claude/orchestrator/_shared/res}"

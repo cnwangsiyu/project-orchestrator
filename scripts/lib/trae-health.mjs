@@ -92,6 +92,26 @@ const step = (rec, why, now) => {
   // A new pause starts the next backoff step and clears the failures that caused it.
   return p ? { failures: [], pausedUntil: p.pausedUntil, reason: p.reason, kind: p.kind, streak: streak + 1 } : { ...rec, failures };
 };
+// The family record a vendor restriction leaves (983, or an OpenAI cyberPolicy block on TRAE, 2026-11-13): paused
+// until the next 00:00 UTC, then a recovery probe. One shape for both signals so review-data/quota.mjs see the same
+// restriction evidence.
+const restrictionRecord = (prev, why, now, model) => ({
+  ...step(prev, why, now), failures: [], kind: 'hard', restricted: true, pausedUntil: nextUtcMidnight(now),
+  reason: `${String(why).slice(0, 180)}; ${RESTRICTED_REASON}`, model: model ?? prev.model ?? null, probingAt: null,
+});
+// A cyberPolicy block on TRAE is recorded through this same restriction path (family only, until the next 00:00 UTC).
+// TTADK never calls it: there a policy block is route-log telemetry only, with no pause. Without a model there is no
+// family to scope, so the caller keeps the kind:'policy-block' record and reports that no restriction was written.
+export const notePolicyRestriction = (home, why, now = Date.now(), model = null) => {
+  const pool = poolOf(model);
+  if (!pool) return null;
+  return update(home, (rec) => {
+    const prev = rec.pools?.[pool] ?? { failures: [] };
+    const pr = restrictionRecord(prev, why, now, model);
+    write(home, { ...rec, failures: rec.failures ?? [], pools: { ...(rec.pools ?? {}), [pool]: pr } });
+    return { ...pr, pool };
+  });
+};
 export const PROBE_EVERY_MIN = 30, PROBE_STALE_MIN = 10;
 // Returns the pause now in force for what failed (the account, or the model's family, with .pool set; a vanished model
 // gets its own pause with .modelPause set), or null.
@@ -116,8 +136,7 @@ export const noteFailure = (home, why, now = Date.now(), model = null) => update
   let pr = step(prev, why, now);
   // Vendor restrictions have a known daily reset; retain the type when a later probe fails for another reason.
   // A restriction also replaces an already-active short pause from a different failure.
-  if (RESTRICTED.test(why ?? '')) pr = { ...pr, failures: [], kind: 'hard', restricted: true, pausedUntil: nextUtcMidnight(now),
-    reason: `${String(why).slice(0, 180)}; ${RESTRICTED_REASON}` };
+  if (RESTRICTED.test(why ?? '')) pr = restrictionRecord(prev, why, now, model);
   else if (pr.kind === 'hard' && pr.pausedUntil > now && pr !== prev && pr.failures.length === 0)
     pr = { ...pr, restricted: false, pausedUntil: now + PROBE_EVERY_MIN * 60000, reason: String(pr.reason).replace(/\(paused \d+ min\)$/, `(paused ${PROBE_EVERY_MIN} min, then probed)`) };
   pr = { ...pr, model: model ?? prev.model ?? null, probingAt: null };

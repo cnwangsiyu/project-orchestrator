@@ -38,6 +38,17 @@ export const freshLoad = (rows, now = Date.now()) => Object.fromEntries(Object.e
   return idOK(model) && ageMin != null && percent != null && percent >= 0 && percent <= 100
     ? [[model.toLowerCase(), { percent, t: r.t, ageMin }]] : [];
 }));
+// Some listed models (including Astra) have no direct load. Use the busiest fresh family observation,
+// then the busiest account observation, so a quiet sibling cannot hide congestion in the fallback.
+export const modelLoad = (rows, model, now = Date.now()) => {
+  const fresh = freshLoad(rows, now), direct = fresh[model];
+  if (direct) return { ...direct, source: 'model', models: [model] };
+  const family = Object.entries(fresh).filter(([id]) => poolOf(id) === poolOf(model));
+  const candidates = family.length ? family : Object.entries(fresh);
+  if (!candidates.length) return null;
+  const busiest = candidates.reduce((a, b) => b[1].percent > a[1].percent ? b : a);
+  return { ...busiest[1], source: family.length ? 'family' : 'account', models: candidates.map(([id]) => id) };
+};
 const queueRow = (r, now) => {
   if (!r || age(r.t, now) == null) return null;
   const position = num(r.position), highPos = num(r.high?.position);
@@ -164,24 +175,32 @@ export const ttadkBurn = (history, account, sampledAt, now = Date.now()) => {
 export const hasTraeDailyQuota = (quota, now = Date.now()) => Object.values(freshTraeQuota(quota, now)?.daily ?? {})
   .some((q) => q && typeof q === 'object' && !Array.isArray(q));
 
-export const balanceFactors = ({ ttadk, trae, model, category, stakes, impact, allowBucketFree = false, now = Date.now() }) => {
+export const balanceFactors = ({ ttadk, trae, model, category, stakes, impact, tier, allowBucketFree = false, now = Date.now() }) => {
   const quota = freshTraeQuota(trae?.quota, now), q = quota?.daily?.[model], family = poolOf(model);
   const bucketFree = allowBucketFree && hasTraeDailyQuota(quota, now) && !Object.hasOwn(quota.daily, model);
-  const load = freshLoad(trae?.load, now)[model] ?? null, queue = freshQueue(trae?.queue, now)[family] ?? null;
+  const load = modelLoad(trae?.load, model, now), queue = freshQueue(trae?.queue, now)[family] ?? null;
   const remainingShare = validUsage(q) && q.resetsAt > now ? Math.max(0, (q.limit - q.used) / q.limit) : null;
   const tt = ttadk?.usage;
   const ttShare = validUsage(tt) && tt.resetsAt > now ? Math.max(0, (tt.limit - tt.used) / tt.limit) : null;
-  const lowPriority = stakes === 'low' || ['lookup', 'extract', 'draft'].includes(category) || impact === 'throwaway';
+  const lowPriority = tier === 'light' || stakes === 'low' || ['lookup', 'extract', 'draft'].includes(category) || impact === 'throwaway';
   const reserveOK = bucketFree || (q?.depleted === false && remainingShare != null && remainingShare >= BALANCE.reserveShare);
   const congested = (load != null && load.percent >= BALANCE.loadPercent)
     || (queue?.position != null && queue.position > BALANCE.queuePosition) || !!queue?.high;
-  const known = !!load && !!queue && (queue.position != null || queue.state === 'ready');
+  // Queue observations veto a transfer when present and high; an empty/stale queue is not congestion.
+  const known = !!load;
   const congestionOK = !congested && (known || lowPriority);
   const projectedOut = ttadk?.burn?.beforeReset === true;
   const expiresSoon = remainingShare != null && ttShare != null && q.resetsAt - now < BALANCE.expiresH * 3600000
     && remainingShare > ttShare;
   const triggers = [lowPriority && 'low-priority task', projectedOut && 'TTADK projected to run out', expiresSoon && 'TRAE daily quota expires soon'].filter(Boolean);
+  const reasons = [!reserveOK && (q?.depleted ? 'daily bucket depleted' : remainingShare == null
+    ? 'daily quota unknown (missing, stale or expired)' : 'daily quota below 15% reserve'),
+    load?.percent >= BALANCE.loadPercent && `load ${load.percent}% is at least ${BALANCE.loadPercent}%`,
+    (queue?.position > BALANCE.queuePosition || queue?.high) && `family queue above ${BALANCE.queuePosition}`,
+    !congestionOK && !congested && 'no fresh load reading',
+    !triggers.length && 'no balancing trigger (TTADK depletion not projected, task not light/low-priority, no earlier TRAE expiry)'].filter(Boolean);
   return { model, family, bucketFree, reserveOK, remainingShare, ttadkRemainingShare: ttShare, load, queue,
     congestion: congested ? 'high' : known ? 'low' : 'unknown', congestionOK, lowPriority,
-    burn: ttadk?.burn ?? null, expiresSoon, triggers, eligible: reserveOK && congestionOK && triggers.length > 0 };
+    burn: ttadk?.burn ?? null, projectedOut, expiresSoon, triggers, reasons,
+    eligible: reserveOK && congestionOK && triggers.length > 0 };
 };

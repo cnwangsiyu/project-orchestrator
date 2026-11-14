@@ -6,7 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { attribute, category, commandName, GIB, parseCpu, parseCwd, parsePs, parseSwap, parseVm, readJsonl, readRegistry } from '../lib/resource-data.mjs';
 import { appendSample, collect } from '../resource-sample.mjs';
-import { review } from '../resource-review.mjs';
+import { review, reviewRemoteEntryScripts } from '../resource-review.mjs';
 const base = path.dirname(fileURLToPath(import.meta.url)), tmp = fs.mkdtempSync(path.join(base, '.resource-test-'));
 let checks = 0;
 function test(name, f) { return Promise.resolve().then(f).then(() => { checks++; console.log(`PASS ${name}`); }); }
@@ -139,6 +139,24 @@ try {
     assert.ok(fs.existsSync(file + '.1')); const read = await readJsonl([file, file + '.1']); assert.equal(read.rows.length, 2); assert.equal(read.errors.length, 0);
     fs.writeFileSync(file + '.lock', ''); assert.throws(() => appendSample(sample(2), file), /lock/); fs.unlinkSync(file + '.lock');
     assert.throws(() => appendSample(sample(2), path.join(tmp, 'cookies.jsonl')), /refused/);
+  });
+  await test('remote-entry advisory ignores local cd/release wording and keeps real CI/remote signals', () => {
+    // Ordinary shell scaffolding plus a local heavy-build wrapper is not a remote/CI entry.
+    assert.deepEqual(reviewRemoteEntryScripts([
+      { path: '/repo/scripts/build.sh', text: 'cd "$(dirname "$0")"\n./heavy-build.sh --archive\n' },
+      { path: '/repo/scripts/package.sh', text: 'echo "release build"\n./heavy-build.sh\n' },
+      { path: '/repo/scripts/verify.sh', text: 'cd build && make verify\n' },
+    ]), []);
+    // Real CI/remote entry points that also take the local lock remain actionable.
+    const findings = reviewRemoteEntryScripts([
+      { path: '/repo/.github/workflows/build.yml', text: 'run: ./heavy-build.sh\n' },
+      { path: '/repo/ci/build.sh', text: 'CI=1 ./heavy-build.sh\n' },
+      { path: '/repo/scripts/remote.sh', text: 'bits repo build && res wait --shared-lock\n' },
+      { path: '/repo/scripts/deploy.sh', text: 'tce deploy && heavy-build.sh\n' },
+    ]);
+    assert.deepEqual(findings.map((f) => f.path), ['/repo/.github/workflows/build.yml', '/repo/ci/build.sh', '/repo/scripts/remote.sh', '/repo/scripts/deploy.sh']);
+    // A remote marker without a local throttle, or malformed entries, produce nothing.
+    assert.deepEqual(reviewRemoteEntryScripts([{ path: '/repo/.github/workflows/lint.yml', text: 'run: npm test\n' }, { path: 42, text: null }]), []);
   });
   console.log(`resource scenarios: ${checks} groups all pass`);
 } finally { fs.rmSync(tmp, { recursive: true, force: true }); }

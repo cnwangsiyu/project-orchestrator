@@ -34,10 +34,27 @@ const env = { ...process.env, PATH: `${mocks}:${process.env.PATH}`, RES_DIR: sta
 let count = 0;
 const eq = (actual, expected, message) => { assert.deepEqual(actual, expected, message); count++; };
 const ok = (value, message) => { assert.ok(value, message); count++; };
-const run = (args, extra = {}, script = res) => {
-  const r = spawnSync(script, args, { env: { ...env, ...extra }, encoding: 'utf8', timeout: 10000 });
+const run = (args, extra = {}, script = res, timeout = 10000) => {
+  const r = spawnSync(script, args, { env: { ...env, ...extra }, encoding: 'utf8', timeout });
   if (r.error) throw r.error;
   return { code: r.status, text: `${r.stdout}${r.stderr}` };
+};
+// Race probes must survive host load. Wait for the intended output/condition with a generous deadline instead of
+// assuming a fixed 10-second budget for process startup and the 1-second retry backoff; assertions stay the same.
+const PROBE_DEADLINE_MS = 120000;
+const waitFor = (predicate, label) => {
+  let timer = null, done = false;
+  const promise = new Promise((resolve, reject) => {
+    const started = Date.now();
+    const tick = () => {
+      if (done) return;
+      if (predicate()) { done = true; return resolve(); }
+      if (Date.now() - started >= PROBE_DEADLINE_MS) { done = true; return reject(Error(`${label} within ${PROBE_DEADLINE_MS / 1000}s`)); }
+      timer = setTimeout(tick, 50);
+    };
+    tick();
+  });
+  return { promise, cancel: () => { done = true; if (timer) clearTimeout(timer); } };
 };
 const takeArgs = (id = 'heavy-lane-3', by = 'lane3-test', pid = process.pid) =>
   [id, '--by', by, '--project', 'scratch', '--for', 'fixture', '--pid', String(pid)];
@@ -106,24 +123,21 @@ for (const dimension of ['load', 'level']) {
   fs.writeFileSync(path.join(root, 'load'), dimension === 'load' ? '9\n' : '8\n');
   fs.writeFileSync(path.join(root, 'level'), dimension === 'level' ? '49\n' : '50\n');
   const child = spawn(res, ['wait', ...takeArgs(), '--timeout', '0.1'], { env: { ...env, RES_TEST_METRICS: '0' } });
-  let output = '', timer;
-  const retried = new Promise((resolve) => {
-    const capture = (b) => { output += b; if (output.includes('retry in 1s')) resolve(); };
-    child.stdout.on('data', capture); child.stderr.on('data', capture);
-  });
+  let output = '';
+  const retried = waitFor(() => output.includes('retry in 1s'), 'waiter did not retry');
+  const capture = (b) => { output += b; };
+  child.stdout.on('data', capture); child.stderr.on('data', capture);
   const completion = once(child, 'close');
   try {
     // Open the gate only after the waiter has observed its closure, not after a startup guess.
-    await Promise.race([retried, completion.then(([code]) => {
+    await Promise.race([retried.promise, completion.then(([code]) => {
       throw Error(`waiter exited ${code} before retrying: ${output}`);
-    }), new Promise((_, reject) => {
-      timer = setTimeout(() => reject(Error(`waiter did not retry: ${output}`)), 10000);
     })]);
     eq(fs.existsSync(lock()), false);
     fs.writeFileSync(path.join(root, dimension), dimension === 'load' ? '8\n' : '50\n');
     eq((await completion)[0], 0); ok(output.includes('retry in 1s')); release();
   } finally {
-    clearTimeout(timer);
+    retried.cancel();
     if (child.exitCode === null && child.signalCode === null) { child.kill('SIGTERM'); await completion; }
   }
 }
@@ -140,7 +154,7 @@ case "$*" in
   *) exit 1 ;;
 esac
 `, { mode: 0o755 });
-const race = wait({ RES_TEST_METRICS: '0' }, '0.1');
+const race = run(['wait', ...takeArgs(), '--timeout', '0.1'], { RES_TEST_METRICS: '0' }, res, PROBE_DEADLINE_MS);
 eq(race.code, 0); ok(race.text.includes('retry in 1s')); release();
 
 // STALE visibility never mutates. Reclaim requires an OPEN lane and age strictly >600s.
@@ -215,20 +229,19 @@ for (const source of [res, baseline]) {
 const fallback = spawn('/bin/bash', [path.resolve(base, '../../heavy-build.sh'), '/bin/sh', '-c', 'exit 7'], {
   env: { ...env, RES_DIR: rollout, RES_COMMAND: res, HEAVY_BUILD_BY: 'wrapper', HEAVY_BUILD_PROJECT: 'scratch',
     HEAVY_BUILD_TASK: 'rollout', HEAVY_BUILD_TIMEOUT: '0.2', HEAVY_BUILD_LANE: '' } });
-let fallbackOutput = '', fallbackTimer;
-const fallbackReady = new Promise((resolve) => {
-  const capture = (b) => { fallbackOutput += b; if (fallbackOutput.includes('continuing bounded waits on lanes 1/2')) resolve(); };
-  fallback.stdout.on('data', capture); fallback.stderr.on('data', capture);
-});
+let fallbackOutput = '';
+const fallbackReady = waitFor(() => fallbackOutput.includes('continuing bounded waits on lanes 1/2'),
+  'fallback did not reach normal-lane wait');
+const captureFallback = (b) => { fallbackOutput += b; };
+fallback.stdout.on('data', captureFallback); fallback.stderr.on('data', captureFallback);
 const fallbackDone = once(fallback, 'close');
 try {
-  await Promise.race([fallbackReady, fallbackDone.then(([code]) => { throw Error(`fallback exited ${code}: ${fallbackOutput}`); }),
-    new Promise((_, reject) => { fallbackTimer = setTimeout(() => reject(Error('fallback did not reach normal-lane wait')), 10000); })]);
+  await Promise.race([fallbackReady.promise, fallbackDone.then(([code]) => { throw Error(`fallback exited ${code}: ${fallbackOutput}`); })]);
   ok(fs.existsSync(path.join(rollout, 'locks/heavy-build.d')));
   eq(run(['return', 'heavy-lane-2', '--by', 'rollout-owner'], { RES_DIR: rollout }).code, 0);
   eq((await fallbackDone)[0], 7, fallbackOutput); ok(fallbackOutput.includes('took heavy-lane-2'));
 } finally {
-  clearTimeout(fallbackTimer);
+  fallbackReady.cancel();
   if (fallback.exitCode === null && fallback.signalCode === null) { fallback.kill('SIGTERM'); await fallbackDone; }
 }
 eq(fs.existsSync(path.join(rollout, 'locks/heavy-build.d')), false);
@@ -317,7 +330,7 @@ exec /bin/mv "$@"
 `, { mode: 0o755 });
 const install = (args = [], extra = {}) => {
   const r = spawnSync('/bin/bash', [path.join(base, '../install.sh'), ...args], { env: { ...env,
-    PATH: `${installBin}:${env.PATH}`, RES_INSTALL_DIR: installState, ...extra }, encoding: 'utf8', timeout: 10000 });
+    PATH: `${installBin}:${env.PATH}`, RES_INSTALL_DIR: installState, ...extra }, encoding: 'utf8', timeout: PROBE_DEADLINE_MS });
   return { code: r.status, text: `${r.stdout}${r.stderr}` };
 };
 fs.mkdirSync(path.join(installState, 'locks/heavy-lane-3.d'));

@@ -247,7 +247,7 @@ login; the user had to sign in again; the second is the user's 2026-11-13 test-s
   route note. The brief names the registered manifest/hash and designated identity. Afterwards scan worker logs only,
   mask any hits, and verify the receipt and keychain re-locking. Routed full-access workers are the standard signing
   path. The resident Claude `vesdk-signer` worker (`~/.claude/orchestrator/_shared/user-signing/SIGNER-CHARTER.md`)
-  is transitional and will be retired after a routed Codex worker signs a real batch; it is not an optional alternative.
+  is transitional and will be retired after a routed Codex worker signs a real batch.
 
 **Prevent rework at the brief** (rework retro of 2026-11-06–10, 89 rework chains; user-approved 2026-11-10). Most
 rework came from unchecked premises, "done" proven on the wrong target, one shared rule re-implemented by several
@@ -293,8 +293,10 @@ workers, and patching after a second same-kind defect.
   it is the same task's fix round and the retained context helps; the thread is on a company account (a personal-account
   thread needs the user's OK); this round is not a route escalation in model, effort or family. If the route calls for
   stronger effort/model (e.g. `--failures >=2` to `xhigh`/`max`), another family or Astra, switch to the route's thread.
-  No exclusion may be violated: `--security` forbids every TRAE GPT thread; DeepSeek threads cannot do builds, sensitive
-  reviews or acceptance; paused or unavailable models cannot be continued. If the TRAE model's bucket is depleted and
+  No exclusion may be violated: `--security` forbids every TRAE GPT thread, and a security review is adversarial
+  (no GPT model on any account); DeepSeek threads cannot do builds, sensitive
+  reviews or acceptance (the adversarial review lane is the explicit exception, always with its second reviewer); paused
+  or unavailable models cannot be continued. If the TRAE model's bucket is depleted and
   its queue is above 300 while someone is waiting, take the route's thread instead. Record the actual model, effort and
   account with `outcome.mjs --actual vendor:model:effort@account`, plus a ledger line
   `continued original thread because ...` naming the reason and the eligibility checks. This exception is for same-task
@@ -304,6 +306,33 @@ workers, and patching after a second same-kind defect.
   as `--security` too. Alternatively, rewrite the findings as defensive requirements only, e.g. "token validation rejects
   tampered signatures" or "hidden items return 404", with no attack description or original attack-style findings in
   the worker's context; then those findings alone do not require `--security`. Other security-flavoured content still does.
+  A compliance confirmation or executable acceptance check written defensively is defensive work: with `--security` on a
+  review row it can carry `--defensive` and stay on TTADK GPT (see below).
+- **Adversarial security reviews** (user decision 2026-11-13, option A). OpenAI's cyberPolicy blocked a TTADK
+  gpt-6.1-sol `review-high --security` turn on 2026-11-13 ("flagged for possible cybersecurity risk … apply for
+  Daybreak access"). A `review`, `review-high` or `second-opinion` routed with `--security` is therefore adversarial by
+  default, and `--adversarial` forces the lane for any task:
+  - never a GPT model on any account; order TTADK Kimi-K3 high → DeepSeek-V4.1-Flash high on TTADK or TRAE (the
+    approved DeepSeek model-fit exception) → Claude Opus (xhigh for review/review-high, high otherwise) behind a
+    `personal quota:` `needsOK`;
+  - always a second reviewer from the other non-GPT family (Kimi ↔ DeepSeek); with only one family available, report
+    it and ask (Claude second on personal quota, or accept one reviewer);
+  - never retry a cyberPolicy-blocked thread or resend the same content to another GPT account. `codex-worker` prints
+    `security-policy-block:` and records `kind:'policy-block'` (account/model) for the nightly review on both accounts;
+    on TRAE it also leaves the same family restriction as a 983 signal (gpt out until the next 00:00 UTC, then probed),
+    while TTADK has telemetry only and no pause. Re-route with `--adversarial`. The vendor's trusted-access programme
+    is the user's/company's call.
+- **Defensive security confirmation** (`--defensive`, user ruling 2026-11-13). On `review`, `review-high` or
+  `second-opinion` it is meaningful only together with `--security`; it marks the review as non-adversarial:
+  ordinary `--security` routing (TRAE GPT excluded, TTADK GPT allowed), never the adversarial lane. Without it,
+  `--security` reviews remain adversarial by default. `--adversarial` and `--defensive` together are a usage error.
+  - The brief states only the rule to hold and its acceptance conditions, with no bypass description, exploit steps or
+    attack reproduction; it verifies "should" behaviour with focused tests and closes earlier findings without
+    restating how to bypass.
+  - If a vendor cyber-policy block stops a turn: do not retry that thread and do not resend the content to any GPT
+    account. Re-route that part with `--adversarial` (Kimi-K3 plus a DeepSeek-V4.1-Flash second reviewer). Resolve any
+    disagreement by whichever side reproduces it with an executable test, and list the rest for the user.
+  Implementation/fix work under `--security` keeps the existing rule: no TRAE GPT; TTADK GPT allowed.
 - **Long device or sampling matrices: qualify first.** Run a pilot with one minimal sample per gate at real rates,
   disk, timeouts and SDK events; run the full matrix only once it passes. Device leases, deadlines, disconnects,
   settings restore and the device's return are handled by you or a host-side script, not left to the worker's final
@@ -390,10 +419,21 @@ effort, Codex account and launch command from
     sandbox. Pass `--cwd`, `--task-dir`, `--name` so the printed command is ready to run;
   - for code work, `--impact release|service|throwaway` (see "Review only what is costly to
     undo"); route.mjs refuses code work without it;
+  - `--env test|prod` (default `prod`) and `--no-local-build` for `build-run`: `--env test` marks a
+    PPE/staging/dev procedural deploy and gives it the light tier on both company accounts (TTADK
+    5.6-Terra/5.5, TRAE light list). Production (`--impact release` without `--env test`) and high
+    stakes keep Sol medium with the pinned health/rollback criteria. A failed light run escalates to
+    Sol medium — never sideways to another light model. `--no-local-build` marks a remote/CI run, so
+    no local heavy-build/lane lock or verify throttle applies;
   - `--security` for security/attack-flavoured work (vulnerability/exploit hunting, auth/session/credential handling,
     bypass, forgery/replay, path traversal, DoS or security review): exclude TRAE's GPT, then route normally
     (user, 2026-11-12: "这种类型的任务排除掉 trae gpt 之后再按照路由规则来走就行吧，不需要写死一个路由"). This includes
-    implementation that reads attack-style findings; see "Security follows the worker's context" above. Every TRAE GPT
+    implementation that reads attack-style findings; see "Security follows the worker's context" above. A `review`,
+    `review-high` or `second-opinion` with `--security` is adversarial instead: no GPT on any account, company non-GPT
+    models with a second reviewer, Claude only after asking (see "Adversarial security reviews"). `--adversarial`
+    forces that lane for any task. `--defensive` is valid only with `--security` on review/review-high/second-opinion:
+    it keeps the ordinary security route (TRAE GPT excluded, TTADK GPT allowed) for a compliance confirmation instead
+    of the adversarial lane, and `--adversarial` + `--defensive` is a usage error. Every TRAE GPT
     here is an OpenAI model under the same vendor policy as 6.1-Sol (restrictions on 2026-11-10/11), not a policy workaround;
   - `--background` only when nobody is waiting and there is no deadline or near-term dependency: nightly cleanups,
     doc refreshes, exploratory analysis and benchmark batches. On TRAE, ordinary background work is light: prefer
@@ -405,7 +445,8 @@ effort, Codex account and launch command from
     even with a future bucket reset. Cache reads preserve the original sample time.
     `why` identifies the step and whether high-priority quota is spent; an Astra escalation keeps its tier.
     Model-fit and `--security` exclusions still apply: image reading needs a vision model, and DeepSeek cannot
-    replace builds or sensitive reviews/acceptance. Expect hours (each request queues separately); launch as a hub
+    replace builds or sensitive reviews/acceptance (except the adversarial security-review lane, which pairs it with
+    the other non-GPT family). Expect hours (each request queues separately); launch as a hub
     worker, keep it pending while `queued:` lines arrive, and dispatch other work meanwhile. TRAE determines request
     priority: `--background` cannot force a model with daily quota left into low priority, so the normal-pick fallback
     can spend that quota. Browser/desktop/image-generation, UI and build/device work keep their capability routing; tasks holding
@@ -450,7 +491,10 @@ effort, Codex account and launch command from
     fallbacks only when both are unusable; normal uses Sol → 5.6-Sol → 5.6-Terra → Flash; light (lookup/extract/draft,
     low stakes or `--background`, unless hard) uses 5.6-Terra → 5.5 → Flash. Astra is reserved for hard substitutions;
     hard never substitutes 5.6-Sol/Terra/5.5. The same table governs balancing/background choices. Unknown quota changes
-    nothing; exclusions and vision rules still apply. TTADK retains its own model picks/catalog.
+    nothing; exclusions and vision rules still apply. TTADK keeps its own catalog: normal/hard work starts at 6.1-Sol;
+    a light row starts at 5.6-Terra → 5.5 (6.1-Sol medium as the failure escalation, then the usual Sol ladder).
+    When a light first rung is balanced to TRAE, the full TRAE light list is walked (Terra → 5.5 → Flash), so one
+    paused/busy model does not block the transfer; later quality rungs keep their model.
     Candidates are availability replacements, never retry rungs. Resolve and normalize the whole actual ladder before
     taking `--failures N`: drop equal/lower effort on a previously tried model and any weaker GPT; retain only stronger
     effort/model/family or the row's existing stronger steps. A retained same-model max step still needs its OK unless
@@ -572,7 +616,12 @@ and take-time notes at `~/.claude/orchestrator/_shared/notes/heavy-build.md`. Us
   The routing/global-rules owner maintains enforcement in `scripts/res/res`; until its reviewed switch use
   the installed lanes only. Telemetry may observe optional lane 3, but never implements or admits it.
   Host unit tests without a full native build, single-TU compiles, analysis/docs and build-free device sessions are
-  not heavy. These caps never lower model-worker concurrency; keep independent ready work running.
+  not heavy. **Remote work is never heavy:** PPE/staging/TCE/BITS/SCM deploys, cloud/remote pipelines, CI runs and
+  `build-run --env test` procedural deploys never take `heavy-build`, a lane, or `--shared-lock`. Pass
+  `--no-local-build` on the route for such a run; it also skips the local heavy-build note. Shared remote/CI entry
+  scripts stay unthrottled — a local `res` lock or `verify-throttle` belongs in a local-only wrapper, never in the
+  shared entry (route.mjs's `--no-local-build` / `--env test` record the distinction).
+  These caps never lower model-worker concurrency; keep independent ready work running.
 - **Take and gate:** `res take <id> --by <session> --project <slug> --for "<purpose>" --task <task-id> --pid $$`
   returns 0 taken, 2 busy. Plain `take` must first pass `res heavy-check` (0 OK, 5 overloaded; invalid/unreadable
   metrics return 1, no acquisition). User-approved entry load (2026-11-13, secretary option A):

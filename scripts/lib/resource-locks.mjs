@@ -1,7 +1,7 @@
 // Read-only observations of the shared res contract, never a second semaphore.
 import fs from 'node:fs';
 import path from 'node:path';
-import { GIB, SHARED, safeHolder, safeId, unsafeFile, category, commandName } from './resource-data.mjs';
+import { GIB, SHARED, safeHolder, safeId, unsafeFile, category, classifyPurpose, commandName } from './resource-data.mjs';
 
 export const BASE_HEAVY_IDS = ['heavy-build', 'heavy-lane-1', 'heavy-lane-2'];
 export const HEAVY_IDS = BASE_HEAVY_IDS;
@@ -159,6 +159,8 @@ function waitCommand(cmd) {
   const get = (key) => { const j = tokens.indexOf(key, i + 3); return j < 0 ? null : tokens[j + 1]; };
   const pid = Number(get('--pid')), timeout = get('--timeout');
   return { resource: tokens[i + 2], holder: safeHolder(get('--by')), project: safeId(get('--project')), task: safeId(get('--task')),
+    // Advisory enum only; the raw --for text is dropped here and never leaves this function.
+    purposeClass: classifyPurpose(get('--for')),
     holderPid: Number.isSafeInteger(pid) && pid > 0 ? pid : null,
     timeoutMinutes: /^\d+(?:\.\d+)?$/.test(timeout ?? '') && finite(+timeout) ? +timeout : null };
 }

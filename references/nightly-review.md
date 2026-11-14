@@ -152,6 +152,9 @@ is unknown, not healthy; missing sign-in means BLOCKED.
 - **Quota health:** inspect Claude all-model/Fable weekly projections, TRAE login/restriction recovery and Codex
   reset-card deadlines. Every reset-card redemption needs a fresh user OK, even after prior approvals. Company
   quota continues without asking; ask before personal quota or deferring runnable work. No LLM total-cost caps.
+- **Signing audit:** count the transitional `vesdk-signer` worker's user-approved personal Claude usage separately
+  from all other Claude work. Use sanctioned worker/quota metadata only; never inspect signing, password, keychain or
+  session files.
 - **Persistent orchestrator models:** model selection lives in `~/.claude/jobs/<id>/state.json` `respawnFlags`;
   a `/model` switch is lost on restart. VAK and routing stay on **Fable**; Webview and Lynx returned to **Opus on
   2026-11-11** because their Fable weekly projection exceeded budget. These are orchestrator choices, not worker defaults.
@@ -177,7 +180,7 @@ identity; a matching receipt exists under `user-signing/receipts/`; the worker r
 certificate fingerprint and hashes; and the H6 keychain was re-locked unless another registered signing run was active.
 Scan worker logs only for password-like strings and mask every hit in review output. A hit, missing receipt,
 unregistered id, production/release package, other keychain, or missing re-lock evidence is a violation and user card;
-never inspect or reproduce the suspected secret to confirm it.
+never inspect or reproduce the suspected secret to confirm it. Absent evidence is UNKNOWN, never assumed compliant.
 
 Compare the last three nightly reports. A rule broken on three nights needs a concrete tool-level enforcement
 proposal (evidence, owner, smallest effective gate and false-positive risk), not another repeated reminder.
@@ -219,6 +222,12 @@ Keep 12/20/16 and the ONE package slot. Telemetry only observes, never implement
   strict/loose/conflicting/insufficient assessment. `res status` is parsed from captures; live status writes temporary
   files, so the sampler uses read-only registry/metadata/PID observations. Minute journal timestamps cannot give exact
   holds, and the live journal has no wait starts/timeouts; sampled waits are not a complete queue history. Never reclaim.
+- Include the two advisory misuse checks: `lock_taken_without_local_heavy_work` / `lock_wait_without_local_heavy_work`
+  (deploy-classified purpose, >=1 minute, complete process samples and no matched local heavy root for the holder/owner)
+  and remote-entry scripts that combine CI/remote markers with a local `res` lock or `verify-throttle`. Report them as
+  advisory leads with owner/path/time; never reclaim a lock, kill a process or bypass admission from them. Remind workers
+  that PPE/staging/TCE/BITS/SCM deploys, remote pipelines and CI runs never take a heavy-build/lane lock or `--shared-lock`,
+  and shared remote/CI entry scripts stay unthrottled.
 - Report hub ports 47321-47324 and all/partial listener outages, including isolated observations with duration UNKNOWN.
   Include supervisor BACKOFF/BLOCKED state, retry/failure counts and 8 MiB log-size/rotation checks; persistent faults
   go to the global-rules owner for repair, never silent restart loops or credential workarounds.
