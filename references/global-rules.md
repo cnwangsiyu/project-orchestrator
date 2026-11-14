@@ -2,6 +2,7 @@
 version: 2026-11-13.8
 
 ## Changes In This Version
+- Scope credential safety: login material stays forbidden; `--signing` permits only registered, designated-identity signing of our own test packages with receipts, masked log scans and keychain re-locking.
 - Fix lane-3 same-holder re-take, legacy wrapper fallback and owner code/registry publication with rollback; detect res wait through any wrapper and synchronize test-holder lifetimes.
 - Approved utilisation: passive idle hints, expiring TTADK quota preference and nightly utilisation; CPU probe has an independent 4s budget, optional ccache stays UNKNOWN.
 - Global-rules owner takes over the whole res tool; v1.3 lane 3 is implemented here and staged pending owner switch, with load <=8 and avail >=32 GiB (2-3 lanes). Telemetry only observes it.
@@ -19,7 +20,7 @@ version: 2026-11-13.8
 - Owner pushes version/change/action/link notes via the secretary for the mini group, directly to MacBook orchestrators.
 - Orchestrators judge, workers work. Route every task; parallelize independent work, keep coupled work together.
 - Never silently hold runnable work: company quota without asking, personal quota after asking; reset cards need a fresh user OK every time.
-- Codex-family writing workers run with full access, Claude workers in Bypass; reviewers stay read-only; Codex's own safety layer still refuses signing/credential files regardless of sandbox.
+- Codex-family writing workers run with full access, Claude workers in Bypass; reviewers stay read-only. `--signing` forces full access only for registry-scoped signing of our own test packages; audit registered ids, receipts, masked log scans and keychain re-locking nightly.
 - TRAE restrictions are unrelated to our concurrency/quota; never reduce concurrency for queues. LLM throughput limits are QPM/TPM, no total-cost caps.
 - Resources use shared `res`: short/urgent first, long/low-priority later; resources.md supplies five-minute sampling/retro/guarded cleanup and unlocked-build detection. Failed probes are UNKNOWN; telemetry never restarts hubs/reclaims locks. Validate a complete unsandboxed host sample before installation.
 - Full-package builds hold `heavy-build` then a lane throughout; other heavy tasks hold a lane. Two normal lanes; after reviewed v1.3 owner switch, lane 3 requires load1m <=8 AND avail >=32 GiB at take time. One full build, 2-3 heavy tasks; OPEN does not mean FREE.
@@ -39,8 +40,8 @@ version: 2026-11-13.8
 - Cleanup never terminates any res-lock holder/tree; ambiguous PID/host/start metadata vetoes it. TERM/HUP/INT unwind through Chrome restoration, protected from repeated signals; SIGKILL/crash cannot guarantee recovery. Hub retries back off and eventually BLOCKED; nightly review reports state and log sizes.
 
 ## Worker Rules
-- Never read, copy or load any login session or credential file (cookies, SSO/session tokens, CLI auth files such as bytedcli's, keychain items, .netrc, API keys), and never inject a session into a browser or tool to get past a login. Wherever a login or authorization is needed, stop and report BLOCKED with what needs signing in.
-- Codex workers on this machine never touch signing/credential files, including keychain-password files or hashing, regardless of authorization. Strip/use sanitized public inputs, or the user runs the necessary operation once; do not plan on approval lifting the ban.
+- Forbidden for every worker: never read, copy, load or inject LOGIN material — login sessions, SSO/session tokens, cookies, CLI auth files (for example bytedcli's), API keys, .netrc, browser profiles, or other people's/other apps' keychain items — and never use any way of getting past a login. Where a login or authorization is needed, stop and report BLOCKED with what needs signing in.
+- Allowed with the user's 2026-11-13 authorization: sign OUR OWN TEST packages only when they are registered by manifest and hash in `~/.claude/orchestrator/_shared/user-signing/registry.json`, and use only the designated identities. For iPhone test apps use the H6 keychain identity; if its keychain is locked, unlock it by passing the one designated password file via stdin, never argv/env/logs. For Android test APKs use the debug keystore committed in the repo and the debug passphrase from `build.gradle`, passed through file descriptors such as apksigner `file:/dev/fd/N`, never argv. Never export, copy, print or log a password or key; report only PASS/FAIL, certificate fingerprint and hashes; write a receipt under `user-signing/receipts/`; re-lock the keychain when done unless another registered signing run is active; never sign production/release packages and never touch other keychains. Anything outside this scope is BLOCKED and needs a card to the user.
 - Security follows context: attack-style findings/exploit material require a --security route, including implementation/fix work that reads them. Otherwise pass defensive requirements only; other security content still requires --security. No TRAE GPT on security decisions; don't bypass restrictions.
 - Report the concrete model, effort and account (not merely TRAE); work only within the brief and sandbox. Missing login/access means BLOCKED, never a session transplant, login bypass or permission laundering.
 - Builds use the heavy-build wrapper or res take/return per the contract; timeout means report/queue, never bypass. Return resources/close owned children on every exit; never kill another task's processes.

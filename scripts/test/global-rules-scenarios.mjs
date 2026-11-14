@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -14,6 +14,11 @@ const originalHome = process.env.HOME;
 process.env.HOME = tmp;
 try {
   const { analyze, leanLines, POLICY, now } = await import('../lib/state.mjs');
+  const { loadDigest } = await import('../lib/global-rules.mjs');
+  const digest = loadDigest();
+  const loginAt = digest.worker.indexOf('Forbidden for every worker: never read, copy, load or inject LOGIN material');
+  const signingAt = digest.worker.indexOf("Allowed with the user's 2026-11-13 authorization: sign OUR OWN TEST packages");
+  assert.ok(loginAt >= 0 && signingAt > loginAt, 'worker digest must contain adjacent login and test-signing rules');
   const h = 3600000;
   const window = { label: 'week (all models)', used: 10, resetsAt: now + 120 * h, windowMins: 10080, scoped: false };
   const main = { name: 'main', home: tmp, live: true, seenAt: now, windows: [window], resets: { count: 0, credits: [] } };
@@ -62,7 +67,16 @@ try {
   assert.equal(route(['review', '--runs-tests']).pick.sandbox, 'workspace-write');
   assert.equal(route(['implement', '--impact', 'service', '--sandbox', 'workspace-write']).pick.sandbox, 'workspace-write');
   assert.equal(route(['implement', '--impact', 'service', '--sandbox', 'read-only']).pick.sandbox, 'read-only');
+  const signing = route(['review', '--signing', '--sandbox', 'read-only']);
+  assert.equal(signing.pick.sandbox, 'danger-full-access');
+  assert.match(signing.notes[0], /OUR OWN TEST packages.*user-signing\/registry\.json/);
+  assert.match(signing.notes[1], /scan worker logs only.*mask any hits/);
   console.log('ok   Codex writers default full; reviewers stay read-only; tests and explicit overrides stay narrower');
+
+  const forbiddenText = ['regardless of', 'authorization'].join(' ');
+  const scan = spawnSync('rg', ['-n', '-i', forbiddenText, path.dirname(root)], { encoding: 'utf8' });
+  assert.equal(scan.status, 1, scan.stdout || scan.stderr || `rg exited ${scan.status}`);
+  console.log('ok   scoped signing rule replaces every unconditional authorization prohibition');
 
   assert.equal(POLICY.ttadkSsoWarnH, 72);
   for (const [left, expected] of [[73, false], [72, true], [71, true], [55, true], [48, true], [24, true]]) {

@@ -299,13 +299,23 @@ for (const [sc, args, want, note] of CASES) {
       const review = routed(sc, ['review']);
       assert.equal(review.pick.account, account); assert.equal(review.pick.sandbox, 'read-only');
       assert.equal(routed(sc, ['review', '--runs-tests']).pick.sandbox, 'workspace-write');
+      const signing = routed(sc, ['review', '--signing', '--sandbox', 'read-only']);
+      assert.equal(signing.pick.account, account); assert.equal(signing.pick.sandbox, 'danger-full-access');
+      assert.equal(signing.signing, true);
+      assert.match(signing.notes[0], /OUR OWN TEST packages.*user-signing\/registry\.json/);
+      assert.match(signing.notes[1], /scan worker logs only.*mask any hits/);
     }
     const narrower = routed('quiet', ['implement', '--impact', 'service', '--sandbox', 'workspace-write']);
     assert.equal(narrower.pick.sandbox, 'workspace-write'); assert.match(narrower.pick.command, /(?:--sandbox|-s) workspace-write/);
     assert.equal(routed('quiet', ['implement', '--impact', 'service', '--sandbox', 'read-only']).pick.sandbox, 'read-only');
     const testedReview = routed('ttFresh', ['review', '--runs-tests']);
     assert.ok(testedReview.notes.some((n) => /workspace-write only for test-generated files; the reviewer must not edit/.test(n)));
-    console.log('ok   sandbox defaults/overrides: main, TTADK and TRAE writers full; reviews read-only; test runs workspace-write');
+    const signingLog = path.join(tmp, 'signing-route-log.jsonl');
+    JSON.parse(run('quiet', ['review', '--signing', '--project', 'fixture', '--name', 'fixture-sign'],
+      { ROUTE_LOG: '1', ROUTE_LOG_FILE: signingLog }));
+    const signingRecord = JSON.parse(fs.readFileSync(signingLog, 'utf8').trim());
+    assert.equal(signingRecord.signing, true); assert.equal(signingRecord.pick.sandbox, 'danger-full-access');
+    console.log('ok   sandbox/signing defaults: main, TTADK and TRAE signing full; reviews read-only; test runs workspace-write');
   } catch (e) { fail++; console.log(`FAIL sandbox defaults/overrides: ${e.stack}`); }
 }
 // Both sides of the global-rules/tier-routing merge must survive in commands, notes and route evidence.

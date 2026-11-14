@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // route: pick vendor, model, effort, account and the exact launch command for one task, deterministically.
 //
-//   route <category> [--stakes low|normal|high] [--auto-check] [--failures N] [--writes | --read-only] [--runs-tests]
+//   route <category> [--stakes low|normal|high] [--auto-check] [--failures N] [--writes | --read-only] [--runs-tests] [--signing]
 //                    [--against claude|codex] [--no-redeem] [--project SLUG] [--dry]
 //                    [--impact release|service|throwaway]   (required for implement, implement-hard, debug, science)
 //                    [--exclude-account a,b] [--exclude-model m,family] [--origins p,q] [--mode <compatibility value>]
@@ -93,10 +93,14 @@ const notch = (m, d, cap = 'xhigh') => {
   return { ...m, effort: EFFORTS[Math.min(hi, Math.max(lo, i + d))] };
 };
 const label = (m) => `${m.vendor === 'claude' ? `Claude ${m.model}` : isAlt(m) ? m.model : `Codex ${m.model}`} ${m.effort}`;
+const LOGIN_MATERIAL_RULE = `forbidden for every worker: never read, copy, load or inject LOGIN material — login sessions, SSO/session tokens, cookies, CLI auth files (for example bytedcli's), API keys, .netrc, browser profiles, or other people's/other apps' keychain items — and never use any way of getting past a login. Where a login or authorization is needed, stop and report BLOCKED with what needs signing in`;
+const TEST_SIGNING_RULE = `allowed with the user's 2026-11-13 authorization: sign OUR OWN TEST packages only when they are registered by manifest and hash in ~/.claude/orchestrator/_shared/user-signing/registry.json, and use only the designated identities. For iPhone test apps use the H6 keychain identity; if its keychain is locked, unlock it by passing the one designated password file via stdin, never argv/env/logs. For Android test APKs use the debug keystore committed in the repo and the debug passphrase from build.gradle, passed through file descriptors such as apksigner file:/dev/fd/N, never argv. Never export, copy, print or log a password or key; report only PASS/FAIL, certificate fingerprint and hashes; write a receipt under user-signing/receipts/; re-lock the keychain when done unless another registered signing run is active; never sign production/release packages and never touch other keychains. Anything outside this scope is BLOCKED and needs a card to the user`;
+const CREDENTIAL_NOTE = `brief: include the credential clause (two adjacent parts) — 1. ${LOGIN_MATERIAL_RULE}. 2. ${TEST_SIGNING_RULE}.`;
+const SIGNING_AUDIT_NOTE = 'after the worker finishes: scan worker logs only for password-like strings, mask any hits in all output, and verify registered package ids only, a receipt under user-signing/receipts/, and keychain re-locking when no other registered signing run is active';
 
 // ---- args ----
 // --apps a,b: the desktop apps (bundle ids) a computer-use worker may operate; others are declined.
-const BOOL = new Set(['auto-check', 'writes', 'read-only', 'runs-tests', 'fresh', 'json', 'table', 'no-redeem', 'dry', 'urgent', 'security', 'background', 'device-lease', 'shared-lock']);
+const BOOL = new Set(['auto-check', 'writes', 'read-only', 'runs-tests', 'signing', 'fresh', 'json', 'table', 'no-redeem', 'dry', 'urgent', 'security', 'background', 'device-lease', 'shared-lock']);
 // --urgent: run now even while TTADK is down for a fixable reason (that work would otherwise wait for the fix).
 // --exclude-account a,b: route around accounts that just failed (e.g. TTADK after a rate-limited retry or an auth error).
 // --exclude-model m,f: route around models (an id, or a family: gpt, deepseek, gemini…) that just failed for
@@ -133,7 +137,8 @@ const authorCodex = ['review', 'review-high'].includes(cat) && opts.author === '
 const claudeReviewFirst = (authorCodex && cat === 'review-high') || (cat === 'second-opinion' && opts.against === 'codex');
 // A routine review of Codex-written code runs on TTADK when it is there: a fresh Sol xhigh reviewer plus a second one
 // with a different focus, both free (user, 2026-11-07). High-stakes review keeps Claude first.
-const writes = opts['read-only'] ? false : opts.writes ? true : T.writes;
+const signing = !!opts.signing;
+const writes = signing ? true : opts['read-only'] ? false : opts.writes ? true : T.writes;
 // Code work declares its impact, which decides the review (user, 2026-11-04): can a mistake be undone within hours by
 // redeploying or rolling back, without lasting damage? release = no (app/SDK code that ships in a release, published
 // libraries, data migrations or bulk data changes, contracts released clients depend on, auth/privacy/billing);
@@ -545,7 +550,7 @@ if (second) {
 const claudeMode = 'bypassPermissions';
 const sandboxOverride = typeof opts.sandbox === 'string' ? opts.sandbox : null;
 const runsTests = !!opts['runs-tests'];
-const sandbox = sandboxOverride ?? (writes ? 'danger-full-access' : runsTests ? 'workspace-write' : 'read-only');
+const sandbox = signing ? 'danger-full-access' : sandboxOverride ?? (writes ? 'danger-full-access' : runsTests ? 'workspace-write' : 'read-only');
 // A second seat is a reviewer. It stays read-only unless this non-writing task explicitly needs to run tests, or the
 // orchestrator supplied a narrower sandbox override for the whole routed task.
 const secondSandbox = sandboxOverride ?? (!writes && runsTests ? 'workspace-write' : 'read-only');
@@ -621,9 +626,8 @@ if (m && reviewKind) notes.push(`review required (impact ${impact}${stakes === '
 else if (m && CODE.includes(cat)) notes.push(`no review (impact ${impact}${impact === 'service' ? ', not high stakes' : ''}): accept on your own check (tests, build, acceptance), then record with scripts/outcome.mjs`);
 else if (m && cat !== 'review' && cat !== 'review-high' && cat !== 'second-opinion') notes.push('when the task ends: record it with scripts/outcome.mjs (pass | rework --rounds N | fail)');
 // Fixed safety clauses for anything that writes or touches devices (SKILL.md, "Give each worker a self-contained brief").
-// Every brief (user-approved 2026-11-11): a TRAE DeepSeek worker copied bytedcli's TikTok SSO session file into its
-// automation browser to get past a console login.
-if (m) notes.push('brief: include the credential clause — never read, copy or load any login session or credential file (cookies, SSO/session tokens, CLI auth files such as bytedcli\'s, keychain items, .netrc, API keys), and never inject a session into a browser or tool to get past a login; wherever a login or authorization is needed, stop and report BLOCKED with what needs signing in');
+// Every brief keeps login material forbidden after the 2026-11-11 session-copy incident, while the user's 2026-11-13
+// authorization permits only registry-scoped test-package signing. The two clauses stay adjacent in one note.
 if (security) notes.push('brief: describe defensive intent and ask for findings with impact and fix; avoid requesting step-by-step exploit code');
 if (m && ['implement', 'implement-hard', 'debug'].includes(cat)) notes.push('DeepSeek: read-only analysis and simple edits only; not full-package builds, auth/storage reviews or acceptance — re-route with --exclude-model deepseek if the brief needs those');
 if (m?.model === 'deepseek-v4.1-flash' || second?.model === 'deepseek-v4.1-flash') notes.push("DeepSeek-V4.1-Flash can't emit one very large file in a single turn (output limit) — not for tasks that generate a large file in one go; split the work or exclude deepseek");
@@ -631,6 +635,8 @@ if (m?.model === 'deepseek-v4.1-flash' || second?.model === 'deepseek-v4.1-flash
 if (isAlt(m) && ['review', 'review-high'].includes(cat)) notes.push('release/high-stakes acceptance also requires an independent other-family GPT/Claude reviewer and the failure probes in references/review-rubric.md; if unavailable, report BLOCKED');
 if (m && cat === 'build-run') notes.push('deploy/release brief: pin baseline/control probes, health thresholds, sample intervals and observation window, rollback triggers and exact prior artifact/config restore steps before acting; a fallback model follows these only — unexpected evidence needs stronger-model judgment, stop and report rather than invent a rollback condition');
 if (m && writes) notes.unshift('brief: include the safety clauses — never overwrite, delete or move files outside the task\'s scope (user files, uncommitted changes, shared headers/configs); restore anything touched by mistake byte-for-byte and report it');
+if (m && signing) notes.unshift(CREDENTIAL_NOTE, SIGNING_AUDIT_NOTE);
+else if (m) notes.push(CREDENTIAL_NOTE);
 if (m && ['build-run', 'implement', 'implement-hard', 'debug', 'ui-browser', 'computer-use'].includes(cat)) notes.push('brief: on devices and simulators, back up app data before any destructive step (reinstall with --remove-existing-content, wiping app containers or Documents, erasing simulators), or ask first');
 if (m && ['build-run', 'ui-browser', 'computer-use'].includes(cat)) notes.push('before builds/device runs: inspect finished-task process trees, but cleanup requires references/resources.md\'s guarded executor, continuous idle evidence, live-session/lease protections and every orchestrator\'s release; PPID=1 or age alone is not permission to kill. Device lease: at most 2 h, then return the device and report; brief preflight: device connected, unlocked, app data backed up');
 if (m && ['build-run', 'implement', 'implement-hard', 'debug', 'ui-browser'].includes(cat)) notes.push('build brief: full-package builds must use scripts/heavy-build.sh or equivalent res take/return per references/res-contract.md: heavy-build first, then a lane; reverse return on every exit. Two normal lanes; v1.3 adds lane 3 only after reviewed owner switch, at load1m <=8 AND available memory >=32 GiB at take time (2-3 lanes with load). Wrapper tries lanes 1/2/3, HEAVY_BUILD_LANE pins one. Normal gate remains min(20, 12 + 8 * other lanes), memory >=16 GiB; STALE and caller-owned locks excluded, lane-3 holders counted. Bounded waits and authoritative heavy-check limit/lanes_held, appended lane3=OPEN|CLOSED; OPEN is not FREE. UNKNOWN blocks admission, timeout means report/queue, never bypass. Other heavy tasks take one lane. Compile 6/link 1, Xcode -jobs 6, Gradle 2 workers; fixed per-base incremental builds, one cold acceptance build, affected fix tests and scoped ccache/Gradle caches (first use cold). Not a model-worker concurrency cap; global-rules owns res, telemetry never reclaims locks/restarts hubs.');
@@ -692,7 +698,7 @@ if (security && m && ((ttCapable && TT.kind === 'trae') || (companyOut && QX.tra
   && QX.trae.models.some((x) => poolOf(x) === 'gpt' && !modelExcluded(x)))
   why.push(`security task: TRAE's GPT excluded (OpenAI policy restricted it after exploit-style reviews, 2026-11-10/11) → ${label(m)}${ttadkRun ? ` on ${TT.name}` : m.vendor === 'codex' && pickAcct ? ` on ${pickAcct.a.name}` : ''}`);
 const out = {
-  category: cat, stakes, failures, security, background, tier, deferred,
+  category: cat, stakes, failures, security, signing, background, tier, deferred,
   pick: m ? { ...m, ...launch(m), sandbox: m.vendor === 'codex' ? sandbox : null } : null,
   secondOpinion: second ? { ...second, ...launch(second, second === T.second ? T.shape : 'worker', secondAcct, secondSandbox), sandbox: second.vendor === 'codex' ? secondSandbox : null } : null,
   needsUserOK: needsOK, tellUser: tell, why, notes, redeemFirst, balance, quota: leanLines(st, data),
@@ -701,7 +707,7 @@ out.notes.push('launch audit: every launch must match a same-name/task-prefix ro
 // Every real routing decision is logged for the nightly review (--dry or ROUTE_LOG=0 to skip, e.g. for experiments).
 if (!opts.dry && process.env.ROUTE_LOG !== '0') {
   const rec = { t: Date.now(), project: typeof opts.project === 'string' ? opts.project : null, name: typeof opts.name === 'string' ? opts.name : null, category: cat, stakes, failures, impact, review: reviewKind, excluded: [...excluded], ttadk: !!ttadkRun, company: ttadkRun ? runCompany.name : null, balance,
-    autoCheck: !!opts['auto-check'], runsTests, noRedeem, security, background, tier, deferred, pick: m ? { vendor: m.vendor, model: m.model, effort: m.effort, account: out.pick?.account ?? null, sandbox: out.pick?.sandbox ?? null } : null,
+    autoCheck: !!opts['auto-check'], runsTests, signing, noRedeem, security, background, tier, deferred, pick: m ? { vendor: m.vendor, model: m.model, effort: m.effort, account: out.pick?.account ?? null, sandbox: out.pick?.sandbox ?? null } : null,
     second: second ? { vendor: second.vendor, model: second.model, effort: second.effort, account: out.secondOpinion?.account ?? null, sandbox: out.secondOpinion?.sandbox ?? null } : null, why, needsOK, tell,
     personalApproved: !!opts.urgent, approvalRef: typeof opts['user-ok'] === 'string' ? opts['user-ok'] : null,
     quota: { claude: QC.status, codexOut: QX.out, underused: QX.underused, frontLoad: QX.frontLoad, overspending: QX.overspending, redeemDue: !!QX.redeem } };

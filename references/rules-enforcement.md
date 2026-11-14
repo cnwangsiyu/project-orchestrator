@@ -58,7 +58,9 @@ The wrapper holds heavy-build then the chosen lane, using gated finite res waits
 cleanup of owned process groups; never nest it or enter already holding heavy locks. Set lane 2 when appropriate.
 Other heavy tasks use lane-only res take/return. The [resource sampler](resources.md) independently detects builds
 without holders; denied probes remain UNKNOWN and telemetry never reclaims locks/restarts hubs. The wrapper doesn't enforce signing safety by sandboxing;
-the worker's credential-denying sandbox/brief remains mandatory.
+the injected adjacent login-material/test-signing rules and the brief remain mandatory. A signing task uses
+`--signing` (full access), a registry-listed manifest/hash and designated identity, secret-safe stdin/file descriptors,
+a receipt, masked log scan and keychain re-locking; everything outside that scope is BLOCKED.
 
 ## Opt-In launchd Hubs
 

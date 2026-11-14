@@ -69,10 +69,10 @@ The versioned [global-rules digest](references/global-rules.md) is the single in
 - **Resources:** [machine resources](references/resources.md) supplies five-minute sampling, nightly retro/guarded cleanup and detection of builds without holders; [shared `res`](#shared-resources), the [maintained lock contract](references/res-contract.md) and [build/cache discipline](#build-discipline) require the wrapper or explicit take/return, build-then-lane order, finite waits/gates, reverse release, incremental/cold acceptance builds and scoped ccache/Gradle caches (first cache use cold). Global-rules owns the whole tool since 2026-11-13; v1.3 lane 3 is pending its reviewed switch.
 - **Disk:** [workspace retention](#workspace-retention) sets no worker space caps; auto-clean self-made build clones/templates/caches only when the data disk has <1 TB free; real workspaces/user data require a user card.
 - **Claude settings:** [documented settings](#claude-worker-settings) record `CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP=1`; idle-stop has no switch (pin or keep working), with no settings mutation.
-- **Worker permissions:** Codex-family writing workers default to full access; reviewers stay read-only unless `--runs-tests` gives them workspace-write, and `--sandbox workspace-write|read-only` is the per-task narrower override. [Claude launch](#claude-worker-settings) always uses Remote Control + explicit Bypass. [Permissions](#permission-plan) use cards for what those modes cannot pass, agents execute non-secret actions, only the user types secrets.
+- **Worker permissions:** Codex-family writing workers default to full access; reviewers stay read-only unless `--runs-tests` gives them workspace-write, and `--sandbox workspace-write|read-only` is the per-task narrower override. [Claude launch](#claude-worker-settings) always uses Remote Control + explicit Bypass. [Permissions](#permission-plan) use cards for what those modes cannot pass; login secrets remain user-only, while a registered `--signing` run may pass its designated signing input only through stdin/file descriptors.
 - **TRAE:** [account rules](references/codex-workers.md#trae-cli-as-the-second-company-account-user-2026-11-08) separate restrictions from concurrency/quota, never reduce concurrency for queues, enforce only QPM/TPM limits for LLM use (no total-cost caps), and name the concrete worker model in reports.
 - **Work and quota:** [judgment](#judge-not-labour) stays with orchestrators, [independent tasks](#split-by-coupling) run in parallel while coupled work stays together; [quota](#route-every-task) never silently holds work, uses company quota without asking, personal quota after asking, reset cards only after a fresh OK every time.
-- **Signing/credentials:** [worker safety](#worker-credential-safety) forbids Codex workers on this machine from touching signing/credential files, including hashing, regardless of authorization; strip/use sanitized public inputs or have the user run it once.
+- **Signing/credentials:** [worker safety](#worker-credential-safety) forbids login material and login bypasses for every worker. With `--signing`, a full-access worker may sign only our own registered test packages with designated identities, secret-safe input, a receipt and keychain re-locking; everything else is BLOCKED.
 - **Orchestrator models:** [account/model health](references/nightly-review.md#account-and-model-health) records persistent `jobs/<id>/state.json` `respawnFlags`, VAK/routing on Fable, Webview/Lynx on Opus since 2026-11-11, and a user check on/after 2026-11-17 09:00 PST.
 - **Account reminders:** [nightly health](references/nightly-review.md#account-and-model-health) owns cards for company logins expiring within three days, TTADK SSO (2026-11-21 19:37 PST), TRAE login, Codex reset cards and Claude/Fable weekly projections; [`POLICY`](scripts/lib/state.mjs) supplies the 72-hour TTADK warning to `quota.mjs`.
 - **Rollout:** [policy notification](#global-rule-rollout) sends each change to all orchestrators: via the secretary for the mini group, directly to MacBook orchestrators.
@@ -215,20 +215,31 @@ close (user, 2026-11-04, after a worker overwrote a user header and another wipe
   --remove-existing-content, wiping app containers or Documents, erasing a simulator), or ask
   first."
 
-<a id="worker-credential-safety"></a>Every brief, whatever the task, also carries the credential clause (user-approved 2026-11-11, after a TRAE
+<a id="worker-credential-safety"></a>Every brief, whatever the task, carries these two adjacent credential/signing clauses (the first is the
+user-approved 2026-11-11 rule after a TRAE
 DeepSeek worker copied bytedcli's TikTok SSO session file into its automation browser to get past a console
-login; the user had to sign in again):
-- "Never read, copy or load any login session or credential file (cookies, SSO/session tokens, CLI auth
-  files such as bytedcli's, keychain items, .netrc, API keys), and never inject a session into a browser or
-  tool to get past a login. Wherever a login or authorization is needed, stop and report BLOCKED with what
-  needs signing in."
+login; the user had to sign in again; the second is the user's 2026-11-13 test-signing authorization):
+- "Forbidden for every worker: never read, copy, load or inject LOGIN material — login sessions, SSO/session
+  tokens, cookies, CLI auth files such as bytedcli's, API keys, .netrc, browser profiles, or other people's/other
+  apps' keychain items — and never use any way of getting past a login. Where a login or authorization is needed,
+  stop and report BLOCKED with what needs signing in."
+- "Allowed: sign OUR OWN TEST packages only when they are registered by manifest and hash in
+  `~/.claude/orchestrator/_shared/user-signing/registry.json`, using only the designated identities. For iPhone test
+  apps use the H6 keychain identity; if locked, unlock it by passing the one designated password file through stdin,
+  never argv/env/logs. For Android test APKs use the repo's committed debug keystore and the debug passphrase from
+  `build.gradle`, passed through file descriptors such as apksigner `file:/dev/fd/N`, never argv. Never export, copy,
+  print or log a password or key; report only PASS/FAIL, certificate fingerprint and hashes; write a receipt under
+  `user-signing/receipts/`; re-lock the keychain unless another registered signing run is active; never sign
+  production/release packages or touch other keychains. Anything outside this scope is BLOCKED and needs a user card."
 - **Console access preflight** (user-approved 2026-11-11 retro; W291-L1c needed signed-in consoles on headless TRAE):
   name the console origins and already signed-in browser/account in the brief; route those steps as `browser` work.
   Headless Playwright is for public/local pages, never a substitute for that sign-in; missing access means BLOCKED.
-  One-shot `codex exec` / `traecli exec` launches must carry the credential clause in developer instructions too.
-- **Codex signing boundary on this machine** (user, 2026-11-13): never touch signing or credential files, including
-  keychain-password files or hashing them, even with authorization. Design the task to strip those inputs/use a
-  sanitized public version, or have the user run the necessary operation once. Never plan on approval lifting this ban.
+  One-shot `codex exec` / `traecli exec` launches must carry both clauses in developer instructions too.
+- **Test signing route** (user, 2026-11-13): pass `--signing`; it forces full access and makes the scoped rule the first
+  route note. The brief names the registered manifest/hash and designated identity. Afterwards scan worker logs only,
+  mask any hits, and verify the receipt and keychain re-locking. The resident Claude `vesdk-signer` worker
+  (`~/.claude/orchestrator/_shared/user-signing/SIGNER-CHARTER.md`) remains an optional personal-quota alternative;
+  any routed full-access worker may sign within this scope when its brief says so.
 
 **Prevent rework at the brief** (rework retro of 2026-11-06–10, 89 rework chains; user-approved 2026-11-10). Most
 rework came from unchecked premises, "done" proven on the wrong target, one shared rule re-implemented by several
@@ -238,8 +249,8 @@ workers, and patching after a second same-kind defect.
   sandbox can write its outputs (research that writes files is not `--read-only`); the tools it needs (browser, device
   channel, upload, unlocked screen); exact dependency caches; signing team/profile/key, bundle in use, permissions,
   runner support. Anything NOT-READY: fix it or ask the user first; don't launch into it. Stay within the permissions
-  you have: a missing credential or signing asset is one card to the user, never a worker workaround; for Codex use
-  the signing boundary above, not an authorization plan.
+  you have: missing login access or anything outside the registered test-signing scope is one card to the user, never
+  a worker workaround. A registered `--signing` task follows the scoped rule above.
 - <a id="done-on-target"></a>**"Done" is proven on the target artifact and entry, not on unit tests.** The brief's done-criteria name: (1) the
   acceptance identity — which server and session (server-side evidence), which build/version/SHA, which core is loaded;
   after switching endpoints, reconnect explicitly; (2) the production entry — the real package/loader path (e.g. a plain
@@ -366,8 +377,9 @@ effort, Codex account and launch command from
     fails your verification, a worker stalls or reports something beyond its depth;
   - `--writes` / `--read-only`, `--against <vendor>` for a second opinion, `--runs-tests` when a non-writing worker
     needs workspace-write for test-generated files, and `--sandbox workspace-write|read-only` for an explicit narrower
-    Codex-family sandbox. `--mode` remains accepted for compatibility but no longer selects the sandbox. Pass `--cwd`,
-    `--task-dir`, `--name` so the printed command is ready to run;
+    Codex-family sandbox. Use `--signing` only for our own registry-listed test packages; it forces full access and
+    injects the scoped signing and audit notes. `--mode` remains accepted for compatibility but no longer selects the
+    sandbox. Pass `--cwd`, `--task-dir`, `--name` so the printed command is ready to run;
   - for code work, `--impact release|service|throwaway` (see "Review only what is costly to
     undo"); route.mjs refuses code work without it;
   - `--security` for security/attack-flavoured work (vulnerability/exploit hunting, auth/session/credential handling,
@@ -597,7 +609,8 @@ and take-time notes at `~/.claude/orchestrator/_shared/notes/heavy-build.md`. Us
 - **Gradle pure builds:** public/sanitized inputs, task-private Gradle home; `--build-cache --daemon --max-workers=2`,
   `-Dorg.gradle.daemon.idletimeout=300000`, `-Dorg.gradle.jvmargs=-Xmx6g`. No daemon when process-exit credential
   isolation or signing/login material is involved. Omit routine clean/rerun/header regeneration; stop only the task's
-  own daemon when isolation requires it. These flags never authorize signing/credential access; use the enable snippets above.
+  own daemon when isolation requires it. These flags do not authorize login material or signing beyond a registered
+  `--signing` test package; use the enable snippets above.
 - [Machine resources](references/resources.md): a five-minute sampler and nightly retro attribute CPU/RSS, lock/wait/
   STALE/bypass evidence, authoritative heavy-check readings, shared ccache rates and hub listener outages to projects/tasks.
   Keep `resource-tasks.json` current for ready/queued/waiting work and exact worktree/worker mappings; shared-repo ownership
@@ -656,9 +669,9 @@ route an action that was denied in one session through another.
    don't hand non-secret actions to the user. A blocked Codex worker reports the exact step/error; arrange a card
    through Claude for an approvable non-secret action, never to evade its sandbox or a denial. If approval cannot
    enable it, report BLOCKED and redesign rather than asking the user to perform the non-secret action.
-3. **Secrets and denials stay boundaries.** Only the user types passwords/codes. Never read/copy credentials or
-   transfer a denied action to launder permissions; a relay is not authorization. The Codex signing/credential ban
-   above cannot be lifted by a card: sanitized inputs or a one-time user operation are its explicit alternatives.
+3. **Secrets and denials stay boundaries.** Never read/copy login material or transfer a denied action to launder
+   permissions; a relay is not authorization. The only worker-handled secret input is within a registered `--signing`
+   test-package run, using stdin/file descriptors exactly as the scoped rule requires. Anything else remains BLOCKED.
 
 **Talk to the user when there is something to act on.** Finished work, a question that needs
 them, a failure, a cost they should know about. Lead with the outcome and the task id, keep it

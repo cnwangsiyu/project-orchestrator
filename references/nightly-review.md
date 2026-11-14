@@ -85,9 +85,10 @@ These are the user's decisions (2026-10-30 to 2026-11-03):
   - Desktop apps (`computer-use`) go to TTADK Codex when browser-ready (user, 2026-11-07): a terminal Claude worker has
     no desktop computer-use tool (ledger 10-31), so Claude there is only a fallback that may report BLOCKED.
 - **Permissions (2026-11-05; tightened 2026-11-13):** Claude workers use Remote Control and explicit Bypass;
-  only actions Bypass cannot pass need authorization cards. Agents execute non-secret actions after approval;
-  only the user types passwords/codes. Denials cannot be laundered, and Codex signing/credential files remain
-  forbidden even with authorization. See [permission plan](../SKILL.md#permission-plan).
+  only actions Bypass cannot pass need authorization cards. Login material and login bypasses remain forbidden for
+  every worker. `--signing` is the sole scoped exception: a full-access worker may sign our own registry-listed test
+  package with a designated identity, secret-safe stdin/file descriptors, a receipt and keychain re-locking. Production,
+  release, unregistered and other-keychain signing remains BLOCKED. See [permission plan](../SKILL.md#permission-plan).
 - **Git:** commit and push only `~/.agents/skills` changes, to `origin main`. Never force-push.
 
 ## 1. Gather (keep your own context small)
@@ -107,6 +108,7 @@ These are the user's decisions (2026-10-30 to 2026-11-03):
     `corrected` and `actualMismatches` before attributing outcomes to a model/account;
   - `routing.companyPolicies`: counts of balanced/background routing decisions and their named tasks, `why` and
     balance factors; `background` counts distinct tasks and their recorded wall-clock time;
+  - `routing.signing`: every `--signing` route with project, task, pick and sandbox for the signing audit below;
   - `quota.companyByHour`: company quota snapshots grouped by UTC hour, including TRAE load by model and queue
     positions by family. Keep sample timestamps; missing telemetry is unknown, not zero load or an empty queue.
 - **Hub probe:** on each account in `codex-accounts.json` whose hub is up, start one tiny thread
@@ -135,8 +137,10 @@ These are the user's decisions (2026-10-30 to 2026-11-03):
 ### Account and model health
 
 Owned by the routing/global-rules orchestrator (user, 2026-11-13), not the secretary. Include these checks every
-night even when routing policy did not change; use sanctioned account-status/expiry metadata, never read login,
-signing or credential files. Unknown login/expiry is unknown, not healthy; missing sign-in means BLOCKED.
+night even when routing policy did not change; use sanctioned account-status/expiry metadata, never read login
+material or signing secrets. The signing audit reads only registry metadata, receipts and worker logs, masks any
+password-like hit, and never opens the designated password file, keystore or keychain contents. Unknown login/expiry
+is unknown, not healthy; missing sign-in means BLOCKED.
 
 - **Company logins:** check TTADK SSO expiry and TRAE login state. When any company login expires within **3 days**,
   put a Chinese reminder/renewal card in `decisions` for the finisher to show the user; report already-expired or
@@ -166,6 +170,14 @@ personal-quota launches without recorded user OK, TRAE GPT launches on security 
 `rules-ack` vs the digest version. Read the launcher-provided `orch-usage` flags/blockedMinutes alongside them
 for labour and foreground blocking. Launch records are attempts, not completion proof; legacy routes without
 launch evidence and missing remote ledgers stay unknown, never proven compliant or violated.
+
+For every `review-data.routing.signing` row, audit only the registered metadata and task artifacts: the package id,
+manifest and hash were present in `user-signing/registry.json`; the route used full access and only a designated
+identity; a matching receipt exists under `user-signing/receipts/`; the worker report contains only PASS/FAIL,
+certificate fingerprint and hashes; and the H6 keychain was re-locked unless another registered signing run was active.
+Scan worker logs only for password-like strings and mask every hit in review output. A hit, missing receipt,
+unregistered id, production/release package, other keychain, or missing re-lock evidence is a violation and user card;
+never inspect or reproduce the suspected secret to confirm it.
 
 Compare the last three nightly reports. A rule broken on three nights needs a concrete tool-level enforcement
 proposal (evidence, owner, smallest effective gate and false-positive risk), not another repeated reminder.
