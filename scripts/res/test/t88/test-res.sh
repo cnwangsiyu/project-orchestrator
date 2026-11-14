@@ -26,9 +26,9 @@ trap cleanup_changer EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
-wait_for_retry() {
-  local deadline=$((SECONDS + 10))
-  until grep -Fq 'retry in 1s' "$OUT"; do
+wait_for_output() {
+  local deadline=$((SECONDS + 30))
+  until grep -Fq "$1" "$OUT"; do
     [ "$SECONDS" -lt "$deadline" ] || return 1
     sleep 0.05
   done
@@ -181,15 +181,17 @@ pass 'wait keeps selected PID for acquisition'
 release heavy-build
 
 # Retry sampling tracks a new other lane, and lowers the limit when it leaves.
+# Leave time for an occupied-hold diagnostic and two gate samples on busy hosts.
 clear_holds
 : >"$OUT"
 starting_changer=1
 (
-  wait_for_retry
+  wait_for_output 'retry in 1s'
   "$RES" take heavy-lane-1 --by retry-fixture --project scratch --for retry --pid "$other_pid" >"$ROOT/retry-take.txt" 2>&1
 ) & changer=$!
 starting_changer=0
-expect 0 "$RES" wait heavy-build --by T88 --project scratch --for retry-lane-enters --pid "$$" --timeout 0.1
+expect 0 "$RES" wait heavy-build --by T88 --project scratch --for retry-lane-enters --pid "$$" --timeout 0.3
+contains 'retry in 1s'
 contains 'load1m=15.00 limit=12 lanes_held=0'
 contains 'load1m=15.00 limit=20 lanes_held=1'
 wait "$changer"
@@ -199,12 +201,15 @@ hold heavy-build "$other_pid"
 : >"$OUT"
 starting_changer=1
 (
-  wait_for_retry
+  wait_for_output 'retry in 1s'
   "$RES" return heavy-lane-1 --by retry-fixture >"$ROOT/retry-return-lane.txt" 2>&1
+  # Do not free the slot while the waiter still has its earlier high-limit sample.
+  wait_for_output 'load1m=15.00 limit=12 lanes_held=0'
   "$RES" return heavy-build --by fixture-heavy-build >"$ROOT/retry-return-build.txt" 2>&1
 ) & changer=$!
 starting_changer=0
-expect 2 "$RES" wait heavy-build --by T88 --project scratch --for retry-lane-leaves --pid "$$" --timeout 0.1
+expect 2 env PATH="$SOURCE/retry-mocks:$PATH" "$RES" wait heavy-build --by T88 --project scratch --for retry-lane-leaves --pid "$$" --timeout 0.3
+contains 'retry in 1s'
 contains 'load1m=15.00 limit=20 lanes_held=1'
 contains 'load1m=15.00 limit=12 lanes_held=0'
 wait "$changer"

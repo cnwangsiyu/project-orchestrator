@@ -23,7 +23,7 @@ fi
 if [ -n "$watch_pid" ] && ! kill -0 "$watch_pid" 2>/dev/null; then
   echo "heavy-build: watched worker $watch_pid is gone" >&2; exit 143
 fi
-child='' watcher='' spawning=0 acquiring=0 acquiring_id='' output='' modern=1 build_held=0 lane_held=0 lane=''
+child='' watcher='' spawning=0 acquiring=0 acquiring_id='' output='' modern=1 build_held=0 lane_held=0 lane='' cancel_status=0
 stop_group() {
   [ -n "$1" ] || return 0
   kill -TERM -- "-$1" 2>/dev/null || true
@@ -34,7 +34,9 @@ stop_group() {
 }
 cleanup() {
   local status=$?
-  trap - EXIT; trap '' INT TERM HUP
+  trap '' INT TERM HUP
+  trap - EXIT
+  [ "$cancel_status" -eq 0 ] || status="$cancel_status"
   if [ "$spawning" -eq 1 ] && [ -z "$child" ]; then child="${!:-}"; fi
   stop_group "$watcher"
   stop_group "$child"
@@ -54,10 +56,16 @@ cleanup() {
   [ -z "$output" ] || rm -f "$output" "$output.err"
   exit "$status"
 }
+wrapper_signal() {
+  [ "$cancel_status" -ne 0 ] || cancel_status="$1"
+  # A signal-driven exit inside an EXIT handler can skip the remaining cleanup.
+  case " ${FUNCNAME[*]} " in *' cleanup '*) return 0 ;; esac
+  exit "$cancel_status"
+}
 trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-trap 'exit 129' HUP
+trap 'wrapper_signal 130' INT
+trap 'wrapper_signal 143' TERM
+trap 'wrapper_signal 129' HUP
 output=$(mktemp "${TMPDIR:-/tmp}/heavy-build-acquire.XXXXXX") || exit 1
 # Feature detection preserves compatibility with a rolled-back v1.2 controller.
 # Only its exact legacy help response selects the fallback; real errors propagate.

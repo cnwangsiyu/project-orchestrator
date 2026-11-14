@@ -357,25 +357,40 @@ check_holder_after_take() {
 
 # Rollback is run in a signal-shielded child: the controller records a pending
 # cancellation while the child and its rm/log helpers finish releasing the
-# proven-fresh directory. The wait loop survives an interrupted wait builtin.
+# proven-fresh directory. Interrupted waits keep waiting; a helper killed before
+# its shield is armed is relaunched while the fresh directory remains.
 rollback_created_id() {
-  local id="$1" by="$2"
+  local id="$1" by="$2" LOCKS="$LOCKS" LOG="$LOG" REG="$REG"
+  case "$LOCKS" in /*) ;; *) LOCKS="$PWD/$LOCKS" ;; esac
+  case "$LOG" in /*) ;; *) LOG="$PWD/$LOG" ;; esac
+  case "$REG" in /*) ;; *) REG="$PWD/$REG" ;; esac
+  cd "$LOCKS/$id.d" || return 1
   if [ -z "$(field "$id" by)" ]; then
     rm -rf "$LOCKS/$id.d" || return 1
     log return "$id" "$by" 'interrupted acquisition before metadata publication'
   else
-    cmd_return "$id" --by "$by" >/dev/null
+    cmd_return "$id" --by "$by" >/dev/null || return $?
   fi
+  # A failed rm must not count as release; a subsequent holder at the same
+  # pathname is a different directory and must not be removed by this attempt.
+  [ ! "$LOCKS/$id.d" -ef . ]
 }
 
 protected_rollback_created() {
   local id="$1" by="$2" child rc=0
-  (trap - EXIT; trap '' INT TERM HUP; rollback_created_id "$id" "$by") & child=$!
   while :; do
-    if wait "$child"; then return 0; else rc=$?; fi
-    if kill -0 "$child" 2>/dev/null; then continue; fi
+    (trap - EXIT; trap '' INT TERM HUP; rollback_created_id "$id" "$by") & child=$!
+    while :; do
+      if wait "$child"; then return 0; else rc=$?; fi
+      if ! kill -0 "$child" 2>/dev/null; then
+        # wait may have been interrupted just as cleanup completed. Read the
+        # child's cached verdict before treating a replacement path as ours.
+        if wait "$child"; then return 0; else rc=$?; fi
+        break
+      fi
+    done
     [ ! -d "$LOCKS/$id.d" ] && return 0
-    return "$rc"
+    [ "$rc" -gt 128 ] || return "$rc"
   done
 }
 
@@ -403,6 +418,7 @@ wait_take_attempt() {
     rollback_attempt || cleanup_failed=1
     TRANSACTION_CLEANING=0
     trap - EXIT
+    [ "$cleanup_failed" -eq 0 ] || exit 1
     exit "$TRANSACTION_PENDING_SIGNAL"
   }
   arm_transaction_signals() {
@@ -421,8 +437,8 @@ wait_take_attempt() {
     rollback_attempt || cleanup_failed=1
     TRANSACTION_CLEANING=0
     trap - EXIT
+    [ "$cleanup_failed" -eq 0 ] || exit 1
     [ "$TRANSACTION_PENDING_SIGNAL" -eq 0 ] || exit "$TRANSACTION_PENDING_SIGNAL"
-    [ "$cleanup_failed" -eq 0 ] || status=1
     exit "$status"
   }
   finish_attempt() {
@@ -431,9 +447,9 @@ wait_take_attempt() {
     rollback_attempt || cleanup_failed=1
     TRANSACTION_CLEANING=0
     trap - EXIT
+    [ "$cleanup_failed" -eq 0 ] || exit 1
     [ "$TRANSACTION_PENDING_SIGNAL" -eq 0 ] || exit "$TRANSACTION_PENDING_SIGNAL"
     trap - INT TERM HUP
-    [ "$cleanup_failed" -eq 0 ] || status=1
     return "$status"
   }
   trap unwind EXIT
@@ -496,6 +512,7 @@ acquire_attempt() {
     rollback_attempt || cleanup_failed=1
     TRANSACTION_CLEANING=0
     trap - EXIT
+    [ "$cleanup_failed" -eq 0 ] || exit 1
     exit "$TRANSACTION_PENDING_SIGNAL"
   }
   arm_transaction_signals() {
@@ -515,8 +532,8 @@ acquire_attempt() {
     rollback_attempt || cleanup_failed=1
     TRANSACTION_CLEANING=0
     trap - EXIT
+    [ "$cleanup_failed" -eq 0 ] || exit 1
     [ "$TRANSACTION_PENDING_SIGNAL" -eq 0 ] || exit "$TRANSACTION_PENDING_SIGNAL"
-    [ "$cleanup_failed" -eq 0 ] || status=1
     exit "$status"
   }
   finish_attempt() {
@@ -525,9 +542,9 @@ acquire_attempt() {
     rollback_attempt || cleanup_failed=1
     TRANSACTION_CLEANING=0
     trap - EXIT
+    [ "$cleanup_failed" -eq 0 ] || exit 1
     [ "$TRANSACTION_PENDING_SIGNAL" -eq 0 ] || exit "$TRANSACTION_PENDING_SIGNAL"
     trap - INT TERM HUP
-    [ "$cleanup_failed" -eq 0 ] || status=1
     return "$status"
   }
   trap unwind EXIT
@@ -657,14 +674,14 @@ cmd_return_build() {
 # Preserve the mkdir verdict through a signal before the shell can set its
 # ownership flag. Only new transactions use this; legacy take is unchanged.
 transaction_mkdir() {
-  local TAKE_SIGNAL=0 rc=0
-  trap 'TAKE_SIGNAL=130' INT
-  trap 'TAKE_SIGNAL=143' TERM
-  trap 'TAKE_SIGNAL=129' HUP
+  local rc=0
+  trap '[ "$TRANSACTION_PENDING_SIGNAL" -ne 0 ] || TRANSACTION_PENDING_SIGNAL=130' INT
+  trap '[ "$TRANSACTION_PENDING_SIGNAL" -ne 0 ] || TRANSACTION_PENDING_SIGNAL=143' TERM
+  trap '[ "$TRANSACTION_PENDING_SIGNAL" -ne 0 ] || TRANSACTION_PENDING_SIGNAL=129' HUP
   (trap '' INT TERM HUP; mkdir "$1" 2>/dev/null) || rc=$?
   [ "$rc" -ne 0 ] || TAKE_CREATED=1
   arm_transaction_signals
-  [ "$TAKE_SIGNAL" -eq 0 ] || transaction_signal "$TAKE_SIGNAL"
+  [ "$TRANSACTION_PENDING_SIGNAL" -eq 0 ] || transaction_signal "$TRANSACTION_PENDING_SIGNAL"
   return "$rc"
 }
 

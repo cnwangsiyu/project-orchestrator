@@ -34,10 +34,12 @@ const env = { ...process.env, PATH: `${mocks}:${process.env.PATH}`, RES_DIR: sta
 let count = 0;
 const eq = (actual, expected, message) => { assert.deepEqual(actual, expected, message); count++; };
 const ok = (value, message) => { assert.ok(value, message); count++; };
+// Recovery needs multiple gate samples, a retry and the post-take diagnostic.
+const recoveryTimeout = '0.5';
 const run = (args, extra = {}, script = res) => {
   // Allow the bounded retry, gate probes and v1.4's 2s post-take diagnostic.
-  // Controller timeout and the suite's 300s aggregate guard remain unchanged.
-  const r = spawnSync(script, args, { env: { ...env, ...extra }, encoding: 'utf8', timeout: 20000 });
+  // Resource timeouts are independent of these subprocess/suite watchdogs.
+  const r = spawnSync(script, args, { env: { ...env, ...extra }, encoding: 'utf8', timeout: 60000 });
   if (r.error) throw r.error;
   return { code: r.status, text: `${r.stdout}${r.stderr}` };
 };
@@ -107,7 +109,7 @@ fs.writeFileSync(path.join(mocks, 'vm_stat'), '#!/bin/sh\nprintf "%s\\n" "$RES_T
 for (const dimension of ['load', 'level']) {
   fs.writeFileSync(path.join(root, 'load'), dimension === 'load' ? '9\n' : '8\n');
   fs.writeFileSync(path.join(root, 'level'), dimension === 'level' ? '49\n' : '50\n');
-  const child = spawn(res, ['wait', ...takeArgs(), '--timeout', '0.1'], { env: { ...env, RES_TEST_METRICS: '0' } });
+  const child = spawn(res, ['wait', ...takeArgs(), '--timeout', recoveryTimeout], { env: { ...env, RES_TEST_METRICS: '0' } });
   let output = '', timer;
   const retried = new Promise((resolve) => {
     const capture = (b) => { output += b; if (output.includes('retry in 1s')) resolve(); };
@@ -119,7 +121,7 @@ for (const dimension of ['load', 'level']) {
     await Promise.race([retried, completion.then(([code]) => {
       throw Error(`waiter exited ${code} before retrying: ${output}`);
     }), new Promise((_, reject) => {
-      timer = setTimeout(() => reject(Error(`waiter did not retry: ${output}`)), 10000);
+      timer = setTimeout(() => reject(Error(`waiter did not retry: ${output}`)), 30000);
     })]);
     eq(fs.existsSync(lock()), false);
     fs.writeFileSync(path.join(root, dimension), dimension === 'load' ? '8\n' : '50\n');
@@ -142,8 +144,8 @@ case "$*" in
   *) exit 1 ;;
 esac
 `, { mode: 0o755 });
-const race = wait({ RES_TEST_METRICS: '0' }, '0.1');
-eq(race.code, 0); ok(race.text.includes('retry in 1s')); release();
+const race = wait({ RES_TEST_METRICS: '0' }, recoveryTimeout);
+eq(race.code, 0, race.text); ok(race.text.includes('retry in 1s')); release();
 
 // STALE visibility never mutates. Reclaim requires an OPEN lane and age strictly >600s.
 const dead = 2147483647;
@@ -175,9 +177,16 @@ const threeHeld = run(['heavy-check', '--pid', String(process.ppid)], { RES_TEST
 eq(threeHeld.code, 0); ok(threeHeld.text.includes('limit=20 lanes_held=3')); release();
 const laneInfo = (id) => fs.readFileSync(path.join(lock(id), 'info'), 'utf8');
 const held1 = laneInfo('heavy-lane-1'), held2 = laneInfo('heavy-lane-2');
-const wrapper = (extra = {}) => spawnSync('/bin/bash', [path.resolve(base, '../../heavy-build.sh'), '/bin/sh', '-c', 'exit 7'], {
-  env: { ...env, RES_COMMAND: res, HEAVY_BUILD_BY: 'wrapper', HEAVY_BUILD_PROJECT: 'scratch',
-    HEAVY_BUILD_TASK: 'lane3', HEAVY_BUILD_TIMEOUT: '0', HEAVY_BUILD_LANE: '', ...extra }, encoding: 'utf8', timeout: 20000 });
+const wrapper = (extra = {}) => {
+  const started = Date.now();
+  const r = spawnSync('/bin/bash', [path.resolve(base, '../../heavy-build.sh'), '/bin/sh', '-c', 'exit 7'], {
+    env: { ...env, RES_COMMAND: res, HEAVY_BUILD_BY: 'wrapper', HEAVY_BUILD_PROJECT: 'scratch',
+      HEAVY_BUILD_TASK: 'lane3', HEAVY_BUILD_TIMEOUT: '0', HEAVY_BUILD_LANE: '', ...extra }, encoding: 'utf8', timeout: 60000 });
+  fs.appendFileSync(path.join(root, 'wrapper-results.jsonl'), JSON.stringify({ extra, elapsed: Date.now() - started,
+    status: r.status, signal: r.signal, error: r.error?.message, stdout: r.stdout, stderr: r.stderr }) + '\n');
+  if (r.error) throw r.error;
+  return r;
+};
 const wrapped = wrapper(); eq(wrapped.status, 7, wrapped.stderr);
 ok(wrapped.stdout.includes('took heavy-lane-3'));
 eq(fs.existsSync(lock()), false); eq(fs.existsSync(lock('heavy-build')), false);
@@ -216,7 +225,7 @@ for (const source of [res, baseline]) {
 }
 const fallback = spawn('/bin/bash', [path.resolve(base, '../../heavy-build.sh'), '/bin/sh', '-c', 'exit 7'], {
   env: { ...env, RES_DIR: rollout, RES_COMMAND: res, HEAVY_BUILD_BY: 'wrapper', HEAVY_BUILD_PROJECT: 'scratch',
-    HEAVY_BUILD_TASK: 'rollout', HEAVY_BUILD_TIMEOUT: '0.2', HEAVY_BUILD_LANE: '' } });
+    HEAVY_BUILD_TASK: 'rollout', HEAVY_BUILD_TIMEOUT: recoveryTimeout, HEAVY_BUILD_LANE: '' } });
 let fallbackOutput = '', fallbackTimer;
 const fallbackReady = new Promise((resolve) => {
   const capture = (b) => { fallbackOutput += b; if (fallbackOutput.includes('continuing bounded waits on lanes 1/2')) resolve(); };
@@ -225,7 +234,7 @@ const fallbackReady = new Promise((resolve) => {
 const fallbackDone = once(fallback, 'close');
 try {
   await Promise.race([fallbackReady, fallbackDone.then(([code]) => { throw Error(`fallback exited ${code}: ${fallbackOutput}`); }),
-    new Promise((_, reject) => { fallbackTimer = setTimeout(() => reject(Error('fallback did not reach normal-lane wait')), 10000); })]);
+    new Promise((_, reject) => { fallbackTimer = setTimeout(() => reject(Error('fallback did not reach normal-lane wait')), 30000); })]);
   ok(!fs.existsSync(path.join(rollout, 'locks/heavy-build.d')));
   eq(run(['return', 'heavy-lane-2', '--by', 'rollout-owner'], { RES_DIR: rollout }).code, 0);
   eq((await fallbackDone)[0], 7, fallbackOutput); ok(fallbackOutput.includes('took heavy-lane-2'));

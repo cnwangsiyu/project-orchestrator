@@ -48,10 +48,50 @@ fs.writeFileSync(path.join(mocks, 'sleep'), `#!/bin/sh
 if [ "\${FAIL_ON_SLEEP:-0}" = 1 ]; then touch "$RES_TEST_ROOT/build/unexpected-sleep"; exit 97; fi
 exec /bin/sleep "$@"
 `, { mode: 0o755 });
+fs.writeFileSync(path.join(mocks, 'rm'), `#!/bin/bash
+if [ "\${FAIL_ON_ROLLBACK:-0}" = 1 ] && [[ "$*" = *'/heavy-'*'.d' ]]; then
+  echo 'fixture: rollback removal failed' >&2
+  exit 1
+fi
+if [ "\${REPLACE_AFTER_ROLLBACK:-0}" = 1 ] && [[ "$*" = *'/heavy-build.d' ]] && [ ! -f "$RES_DIR/rollback-wait-sent" ]; then
+  target="\${!#}"
+  /bin/rm "$@" || exit $?
+  /bin/mkdir "$target" || exit $?
+  printf 'by\\t%s\\nproject\\tscratch\\ntask\\tother\\nfor\\treacquired slot\\npid\\t1\\nhost\\tfixture\\nstart\\t1\\n' "\${ROLLBACK_REPLACEMENT_BY:-replacement}" > "$target/info"
+  if [ "\${INTERRUPT_ROLLBACK_WAIT:-0}" = 1 ]; then
+    touch "$RES_DIR/rollback-wait-sent"
+    kill -s "$RACE_SIGNAL" "$ROLLBACK_CONTROLLER_PID"
+  fi
+  exit 0
+fi
+exec /bin/rm "$@"
+`, { mode: 0o755 });
 const signalDriver = path.join(root, 'signal-driver.sh');
 fs.writeFileSync(signalDriver, `set -T
 hit=0
 target_command="$1"
+export ROLLBACK_CONTROLLER_PID="$$"
+pause_rollback_verdict() {
+  [ "$RACE_STAGE" = rollback_wait_verdict ] && [ "$BASH_SUBSHELL" -eq 0 ] || return 0
+  case "\${FUNCNAME[*]}" in *protected_rollback_created*) ;; *) return 0 ;; esac
+  case "$1" in 'kill -0 '* ) /bin/sleep 2 ;; esac
+}
+inject_rollback_startup() {
+  local cmd="$1" starts=0 group_signal=
+  case "$RACE_STAGE" in rollback_startup|rollback_restart) ;; *) return 0 ;; esac
+  [ "$BASH_SUBSHELL" -eq 1 ] && [ "$cmd" = "trap '' INT TERM HUP" ] || return 0
+  case "\${FUNCNAME[*]}" in *protected_rollback_created*) ;; *) return 0 ;; esac
+  [ ! -f "$RES_DIR/rollback-startups" ] || read -r starts < "$RES_DIR/rollback-startups"
+  starts=$((starts + 1))
+  printf '%s\\n' "$starts" > "$RES_DIR/rollback-startups"
+  case "$starts" in
+    1) group_signal="\${RACE_GROUP_SIGNAL:-$RACE_SIGNAL}" ;;
+    2) [ "$RACE_STAGE" != rollback_restart ] || group_signal=SIGHUP ;;
+  esac
+  [ -n "$group_signal" ] || return 0
+  printf 'rollback-child-startup=%s\\n' "$starts"
+  kill -s "$group_signal" -- "-$$"
+}
 inject_signal() {
   local cmd="$1"
   [ "$hit" -eq 0 ] || return 0
@@ -61,18 +101,26 @@ inject_signal() {
     slot_transfer) [ "$cmd" = 'build_created="$TAKE_CREATED"' ] ;;
     lane_transfer) [ "$cmd" = 'lane_created="$TAKE_CREATED"' ] ;;
     wait_mkdir) [ "$target_command" = wait ] && [ "$cmd" = 'TAKE_CREATED=1' ] ;;
+    mkdir_repeat) [ "$cmd" = 'TAKE_CREATED=1' ] ;;
     wait_after_take) [ "$cmd" = 'CHECK_FRESH="$TAKE_CREATED"' ] ;;
     diagnostic) [ "$cmd" = 'sleep 2' ] ;;
     result) [[ "$cmd" = printf*build-lane* || "$cmd" = printf*lane=* ]] ;;
     commit) [ "$cmd" = 'TRANSACTION_COMMITTED=1' ] ;;
     final_exit) [ "$cmd" = 'exit 0' ] && [ "\${TRANSACTION_COMMITTED:-0}" -eq 1 ] ;;
     rollback) [ "\${TRANSACTION_CLEANING:-0}" -eq 1 ] && [ "$cmd" = 'protected_rollback_created heavy-build "$BY"' ] ;;
+    rollback_restart) [ "\${TRANSACTION_CLEANING:-0}" -eq 1 ] && [ "$cmd" = 'protected_rollback_created heavy-build "$BY"' ] ;;
+    rollback_failure) [ "$cmd" = 'TRANSACTION_COMMITTED=1' ] ;;
     *) return 0 ;;
   esac || return 0
   hit=1
   kill -s "$RACE_SIGNAL" "$$"
+  [ "$RACE_STAGE" != mkdir_repeat ] || kill -s "$RACE_SECOND_SIGNAL" "$$"
 }
-trap 'inject_signal "$BASH_COMMAND"' DEBUG
+if [ "$RACE_STAGE" = rollback_wait_verdict ]; then
+  trap 'pause_rollback_verdict "$BASH_COMMAND"' DEBUG
+else
+  trap 'inject_rollback_startup "$BASH_COMMAND"; inject_signal "$BASH_COMMAND"' DEBUG
+fi
 source "$RES_SOURCE" "$@"
 `, { mode: 0o755 });
 const env = { ...process.env, RES_DIR: state, PATH: `${mocks}:${process.env.PATH}`,
@@ -82,8 +130,10 @@ const env = { ...process.env, RES_DIR: state, PATH: `${mocks}:${process.env.PATH
 let count = 0;
 const eq = (a, b, message) => { assert.deepEqual(a, b, message); count++; };
 const ok = (a, message) => { assert.ok(a, message); count++; };
+// Allow the owner return plus another gate/acquisition round trip on busy hosts.
+const recoveryTimeout = '0.5';
 const run = (args, extra = {}, exe = res) => {
-  const r = spawnSync(exe, args, { env: { ...env, ...extra }, encoding: 'utf8', timeout: 15000 });
+  const r = spawnSync(exe, args, { env: { ...env, ...extra }, encoding: 'utf8', timeout: 60000 });
   if (r.error) throw r.error;
   return { code: r.status, out: r.stdout, err: r.stderr, text: `${r.stdout}${r.stderr}` };
 };
@@ -111,7 +161,7 @@ function start(exe, argv, extra = {}) {
   children.add(child); return child;
 }
 async function until(predicate, message, child) {
-  const deadline = Date.now() + 10000;
+  const deadline = Date.now() + 30000;
   while (!predicate()) {
     if (Date.now() >= deadline || (child && !children.has(child))) throw Error(`${message}: ${child?.text ?? ''}`);
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -123,7 +173,7 @@ async function stop(child, signal = 'SIGTERM', group = true) {
   let timer;
   try {
     return await Promise.race([child.done, new Promise((_, reject) => {
-      timer = setTimeout(() => reject(Error(`child did not stop: ${child.text}`)), 10000);
+      timer = setTimeout(() => reject(Error(`child did not stop: ${child.text}`)), 60000);
     })]);
   } finally { clearTimeout(timer); }
 }
@@ -196,13 +246,13 @@ try {
   }
   // Observe a waiting builder, then release the first pair. No hold while waiting.
   eq(run(['take-build', ...args('first')]).code, 0);
-  const follower = start(res, ['wait-build', ...args('second'), '--timeout', '0.1']);
+  const follower = start(res, ['wait-build', ...args('second'), '--timeout', recoveryTimeout]);
   await until(() => follower.text.includes('retry in 1s'), 'second builder did not retry', follower);
   eq(field('heavy-build', 'by'), 'first'); eq(field('heavy-lane-1', 'by'), 'first');
   pairRelease('first'); eq((await follower.done).code, 0); pairRelease('second'); eq(held(), []);
   // A lane-only legacy caller wins after the builder's free-lane precheck.
   // The partial slot must be returned, and retry must retain the task metadata.
-  const laneRace = start(res, ['wait-build', ...args(), '--lane', 'heavy-lane-1', '--timeout', '0.2'], { RACE_LANE: '1' });
+  const laneRace = start(res, ['wait-build', ...args(), '--lane', 'heavy-lane-1', '--timeout', recoveryTimeout], { RACE_LANE: '1' });
   await until(() => fs.existsSync(path.join(root, 'lane-race')), 'missing lane contention witness', laneRace);
   occupy('heavy-lane-1'); fs.writeFileSync(path.join(root, 'lane-race-release'), 'release\n');
   await until(() => laneRace.text.includes('retry in 1s'), 'partial pair was not rolled back', laneRace);
@@ -225,10 +275,10 @@ try {
   // Every handoff gap in all four acquisition commands is cancellation-safe.
   const signalCodes = { SIGTERM: 143, SIGINT: 130, SIGHUP: 129 };
   const interruptionCases = [
-    ['take-build', ['slot_mkdir', 'slot_transfer', 'lane_mkdir', 'lane_transfer', 'diagnostic', 'result', 'commit', 'final_exit', 'rollback']],
-    ['wait-build', ['slot_mkdir', 'slot_transfer', 'lane_mkdir', 'lane_transfer', 'diagnostic', 'result', 'commit', 'final_exit', 'rollback']],
-    ['wait-lane', ['lane_mkdir', 'lane_transfer', 'diagnostic', 'result', 'commit', 'final_exit']],
-    ['wait', ['wait_mkdir', 'wait_after_take', 'diagnostic', 'commit', 'final_exit']],
+    ['take-build', ['slot_mkdir', 'slot_transfer', 'lane_mkdir', 'lane_transfer', 'mkdir_repeat', 'diagnostic', 'result', 'commit', 'final_exit', 'rollback', 'rollback_startup', 'rollback_restart', 'rollback_failure']],
+    ['wait-build', ['slot_mkdir', 'slot_transfer', 'lane_mkdir', 'lane_transfer', 'mkdir_repeat', 'diagnostic', 'result', 'commit', 'final_exit', 'rollback', 'rollback_startup', 'rollback_restart', 'rollback_failure']],
+    ['wait-lane', ['lane_mkdir', 'lane_transfer', 'mkdir_repeat', 'diagnostic', 'result', 'commit', 'final_exit', 'rollback_failure']],
+    ['wait', ['wait_mkdir', 'wait_after_take', 'mkdir_repeat', 'diagnostic', 'commit', 'final_exit', 'rollback_failure']],
   ];
   const interruptionJobs = [];
   let interruptionIndex = 0;
@@ -241,11 +291,17 @@ try {
       const argv = command === 'wait' ? [command, 'heavy-build', ...args(), ...explicitPid, '--timeout', '0']
         : [command, ...args(), ...explicitPid, ...(command === 'take-build' ? [] : ['--timeout', '0'])];
       const child = start('/bin/bash', [signalDriver, ...argv], { RES_DIR: caseState, RACE_STAGE: stage, RACE_SIGNAL: signal,
-        SELF_RACE_KEY: caseKey, SELF_RACE_LANE: stage === 'rollback' ? '1' : '0' });
+        RACE_GROUP_SIGNAL: stage === 'rollback_restart' ? 'SIGTERM' : signal,
+        RACE_SECOND_SIGNAL: signal === 'SIGHUP' ? 'SIGTERM' : 'SIGHUP',
+        FAIL_ON_ROLLBACK: stage === 'rollback_failure' ? '1' : '0',
+        SELF_RACE_KEY: caseKey, SELF_RACE_LANE: ['rollback', 'rollback_startup', 'rollback_restart'].includes(stage) ? '1' : '0' });
       let timer, interrupted;
       try {
-        interrupted = await Promise.race([child.exited, new Promise((_, reject) => {
-          timer = setTimeout(() => reject(Error(`${command} ${stage} ${signal} exceeded 20s: ${child.text}`)), 20000);
+        // Error probes have no blocking descendants; drain their diagnostic
+        // before checking it instead of racing stderr against the exit event.
+        const completion = stage === 'rollback_failure' ? child.done : child.exited;
+        interrupted = await Promise.race([completion, new Promise((_, reject) => {
+          timer = setTimeout(() => reject(Error(`${command} ${stage} ${signal} exceeded 60s: ${child.text}`)), 60000);
         })]);
       } catch (error) {
         try { await stop(child); } catch {}
@@ -254,19 +310,73 @@ try {
       // Exit is authoritative for the controller. Do not let a late mock or
       // cleanup descendant holding a copied stdio fd turn this into a clock test.
       children.delete(child); child.stdout.destroy(); child.stderr.destroy();
-      eq(interrupted.code, expected, `${command} ${stage} ${signal}: ${child.text}`);
+      eq(interrupted.code, stage === 'rollback_failure' ? 1 : expected, `${command} ${stage} ${signal}: ${child.text}`);
       const caseHeld = ids.filter((id) => fs.existsSync(path.join(caseState, 'locks', `${id}.d`)));
-      if (stage === 'rollback') {
+      if (stage === 'rollback_failure') {
+        eq(caseHeld, command === 'wait-lane' ? ['heavy-lane-1'] : command === 'wait' ? ['heavy-build'] : ['heavy-build', 'heavy-lane-1']);
+        ok(child.text.includes('rollback removal failed'), 'real cleanup error is not hidden by cancellation');
+        fs.rmSync(path.join(caseState, 'locks'), { recursive: true });
+      } else if (['rollback', 'rollback_startup', 'rollback_restart'].includes(stage)) {
         eq(caseHeld, ['heavy-lane-1'], `${command} ${stage} ${signal}`);
         const blockerInfo = fs.readFileSync(path.join(caseState, 'locks/heavy-lane-1.d/info'), 'utf8');
-        eq(blockerInfo.match(/^by\t(.*)$/m)?.[1], 'blocker');
+        eq(blockerInfo, 'by\tblocker\nproject\tscratch\ntask\tother\nfor\trollback fixture\npid\t1\nhost\tfixture\nstart\t1\n');
       } else eq(caseHeld, [], `${command} ${stage} ${signal}`);
+      if (['rollback_startup', 'rollback_restart'].includes(stage)) {
+        const startups = Number(fs.readFileSync(path.join(caseState, 'rollback-startups'), 'utf8'));
+        eq(startups, stage === 'rollback_restart' ? 3 : (signal === 'SIGINT' ? 1 : 2),
+          `${command} ${stage} ${signal}: helper restarts before release`);
+        const returns = fs.readFileSync(path.join(caseState, 'log.tsv'), 'utf8').trim().split('\n')
+          .map((line) => line.split('\t')).filter((row) => row[1] === 'return').map((row) => row[2]);
+        eq(returns, ['heavy-build'], 'release once before cancelled exit');
+      }
     });
   }
   // Isolated states make cases independent; bounded parallel batches keep the
   // exhaustive matrix comfortably inside the per-suite deadline on busy hosts.
   for (let i = 0; i < interruptionJobs.length; i += 8)
     await Promise.all(interruptionJobs.slice(i, i + 8).map((job) => job()));
+  // Pinning the removed directory's identity must also support relative state
+  // roots, and must not confuse a replacement holder with an unreleased hold.
+  for (const replacement of [false, true]) {
+    const caseKey = replacement ? 'replacement' : 'relative', caseState = path.join(root, caseKey);
+    fs.mkdirSync(path.join(caseState, 'locks'), { recursive: true });
+    fs.writeFileSync(path.join(caseState, 'resources.tsv'), registry);
+    const cancelled = run([signalDriver, 'take-build', ...args()], {
+      RES_DIR: replacement ? caseState : path.relative(process.cwd(), caseState),
+      RACE_STAGE: 'rollback', RACE_SIGNAL: 'SIGTERM', SELF_RACE_LANE: '1', SELF_RACE_KEY: caseKey,
+      REPLACE_AFTER_ROLLBACK: replacement ? '1' : '0',
+    }, '/bin/bash');
+    eq(cancelled.code, 143, cancelled.text);
+    eq(ids.filter((id) => fs.existsSync(path.join(caseState, 'locks', `${id}.d`))),
+      replacement ? ['heavy-build', 'heavy-lane-1'] : ['heavy-lane-1']);
+    if (replacement) eq(fs.readFileSync(path.join(caseState, 'locks/heavy-build.d/info'), 'utf8'),
+      'by\treplacement\nproject\tscratch\ntask\tother\nfor\treacquired slot\npid\t1\nhost\tfixture\nstart\t1\n');
+    const returns = fs.readFileSync(path.join(caseState, 'log.tsv'), 'utf8').trim().split('\n')
+      .map((line) => line.split('\t')).filter((row) => row[1] === 'return').map((row) => row[2]);
+    eq(returns, ['heavy-build']);
+  }
+  // An interrupted wait is not a failed helper: cleanup may finish and a new
+  // holder acquire the path before the parent checks child liveness.
+  for (const command of ['take-build', 'wait-build']) for (const [signal, expected] of Object.entries(signalCodes))
+    for (const replacementBy of ['replacement', 'builder']) {
+      const caseKey = `wait-verdict-${command}-${signal}-${replacementBy}`, caseState = path.join(root, caseKey);
+      fs.mkdirSync(path.join(caseState, 'locks'), { recursive: true });
+      fs.writeFileSync(path.join(caseState, 'resources.tsv'), registry);
+      const child = start('/bin/bash', [signalDriver, command, ...args(), '--lane', 'heavy-lane-1',
+        ...(command === 'wait-build' ? ['--timeout', '0'] : [])], {
+        RES_DIR: caseState, RACE_STAGE: 'rollback_wait_verdict', RACE_SIGNAL: signal,
+        SELF_RACE_LANE: '1', SELF_RACE_KEY: caseKey, REPLACE_AFTER_ROLLBACK: '1',
+        INTERRUPT_ROLLBACK_WAIT: '1', ROLLBACK_REPLACEMENT_BY: replacementBy,
+      });
+      eq((await child.done).code, expected, `${command} completed rollback ${signal}: ${child.text}`);
+      eq(ids.filter((id) => fs.existsSync(path.join(caseState, 'locks', `${id}.d`))), ['heavy-build', 'heavy-lane-1']);
+      eq(fs.readFileSync(path.join(caseState, 'locks/heavy-build.d/info'), 'utf8'),
+        `by\t${replacementBy}\nproject\tscratch\ntask\tother\nfor\treacquired slot\npid\t1\nhost\tfixture\nstart\t1\n`);
+      eq(fs.existsSync(path.join(caseState, 'rollback-wait-sent')), true, 'signal interrupted the parent wait');
+      const returns = fs.readFileSync(path.join(caseState, 'log.tsv'), 'utf8').trim().split('\n')
+        .map((line) => line.split('\t')).filter((row) => row[1] === 'return').map((row) => row[2]);
+      eq(returns, ['heavy-build'], 'the replacement holder is never returned');
+    }
   // An interrupted idempotent wait must not return the caller's older hold.
   const idemWaitArgs = ['--by', 'wait-idem', '--project', 'scratch', '--for', 'idempotence', '--task', 'T87', '--pid', String(process.pid)];
   eq(run(['take', 'heavy-build', ...idemWaitArgs]).code, 0);
