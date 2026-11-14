@@ -1005,6 +1005,10 @@ for (const [sc, args] of ERRORS) {
   const quota = { daily: { 'gpt-6.1-sol': bucket(100), 'gpt-6-astra': bucket(20) }, weekly: null };
   const qh = fs.mkdtempSync(path.join(tmp, 'trae-quota-'));
   const data = { claude: cl(10, 120), codexAccounts: [acc('main', 20, 120), tr({ home: qh, quota })] };
+  // Priority alternatives beat this measured slow Sol lane. Depletion alone is no longer evidence of a wait.
+  fs.writeFileSync(path.join(qh, 'lane-state.json'), JSON.stringify({
+    'gpt-6.1-sol': { t: now, state: 'queued', position: 500, drainPerMin: 0.5 },
+  }));
   process.env.TRAE_PROBE = '0';
   const st = analyze(data);
   const lean = leanLines(st, data).join('\n');
@@ -1069,17 +1073,17 @@ for (const [sc, args] of ERRORS) {
     ['quota56Paused', ['implement'], 'deepseek-v4.1-flash'],
     ['quotaBoth', ['implement'], 'gpt-5.6-sol'],
     ['quotaBoth', ['implement', '--failures', '4'], 'opus'], // Availability fallbacks do not become retry rungs.
-    ['quotaBoth', ['implement-hard'], 'deepseek-v4.1-flash'],
+    ['quotaBoth', ['implement-hard'], 'gpt-6-astra'], // both hard buckets depleted: keep a hard model, never demote to 5.6/DeepSeek
     ['quotaBoth', ['lookup'], 'deepseek-v4.1-flash'],
     ['quotaBoth', ['extract'], 'deepseek-v4.1-flash'],
     ['quotaBoth', ['draft'], 'deepseek-v4.1-flash'],
-    ['quotaBoth', ['lookup', '--stakes', 'high'], 'deepseek-v4.1-flash'],
+    ['quotaBoth', ['lookup', '--stakes', 'high'], 'gpt-6-astra'], // hard tier keeps Sol/Astra on the low-priority lane
     // Light lookup (DeepSeek) escalates to Sol medium; Sol's bucket is depleted, so the comparable GPT with quota
     // (5.6-Sol) takes the escalation — company quota, not personal Sonnet and not another light model.
     ['quotaBoth', ['lookup', '--failures', '1'], 'gpt-5.6-sol'],
     ['quotaBoth', ['build-run'], 'gpt-5.6-sol'],
     ['quotaMissing', ['implement'], 'gpt-6.1-sol'],
-    ['quotaMissingModel', ['implement'], 'gpt-6.1-sol'],
+    ['quotaMissingModel', ['implement'], 'deepseek-v4.1-flash'], // fresh slow Sol telemetry beats an unknown bucket
     ['quotaUnknownAstra', ['implement'], 'deepseek-v4.1-flash'],
     ['quotaNoAstra', ['implement'], 'deepseek-v4.1-flash'],
     ['quotaPausedAstra', ['implement'], 'deepseek-v4.1-flash'],
@@ -1091,12 +1095,12 @@ for (const [sc, args] of ERRORS) {
     ['quotaFallbackBusy', ['implement', '--failures', '2'], 'gpt-6-astra'],
     ['quotaAllBusy', ['implement'], 'gpt-6.1-sol'],
     ['quotaTT', ['implement'], 'gpt-6.1-sol'], // healthy TTADK remains first
-    ['quotaExpiredSol', ['implement'], 'gpt-6.1-sol'],
+    ['quotaExpiredSol', ['implement'], 'deepseek-v4.1-flash'], // expiry does not erase fresh model queue evidence
     ['quotaExpiredAstra', ['implement'], 'deepseek-v4.1-flash'],
-    ['quotaExpiredFallback', ['implement'], 'deepseek-v4.1-flash'],
+    ['quotaExpiredFallback', ['implement'], 'gpt-6.1-sol'], // no 5.6 quota, DeepSeek expired: depleted Sol low-priority lane
   ]) {
     const r = route(sc, args);
-    cases.push([r.pick.model, want], [r.failures, args.includes('--failures') ? Number(args[args.indexOf('--failures') + 1]) : 0]);
+    cases.push([r.pick.model, want, `${sc} ${args.join(' ')} model`], [r.failures, args.includes('--failures') ? Number(args[args.indexOf('--failures') + 1]) : 0, `${sc} ${args.join(' ')} failures`]);
   }
   const idle = route('quotaAstra'), busy = route('quotaBusy'), missing = route('quotaMissing');
   cases.push(
@@ -1121,19 +1125,89 @@ for (const [sc, args] of ERRORS) {
     [note(route('quotaAstra', ['review', '--author', 'codex']), /second TRAE reviewer/), true],
     [route('quotaAstra', ['review', '--author', 'codex']).secondOpinion?.model, 'deepseek-v4.1-flash'],
   );
-  // Advice uses the chosen bucket, is inclusive at 80%, and never defers work or changes the pick.
+  // Advice never tells the user to wait for a reset: a company candidate that can start now is launched.
   for (const cat of ['build-run', 'review', 'review-high']) {
-    for (const [sc, expected] of [['quota80', true], ['quota79', false], ['quotaNoLimit', false], ['quotaMissing', false], ['quotaChosen80', true], ['quotaTT', true], ['quotaNoReset', true]]) {
+    for (const [sc] of [['quota80'], ['quota79'], ['quotaNoLimit'], ['quotaMissing'], ['quotaChosen80'], ['quotaTT'], ['quotaNoReset']]) {
       const r = route(sc, [cat]);
-      cases.push([note(r, /long builds\/large reviews:.*daily reset/), sc === 'quotaChosen80' && cat === 'review' ? false : expected, `${sc} ${cat}`], [r.deferred, null]);
+      cases.push([note(r, /long builds\/large reviews:.*daily reset/), false, `${sc} ${cat}`], [r.deferred, null, `${sc} ${cat} deferred`]);
     }
   }
   cases.push([note(route('quota80'), /long builds\/large reviews:/), false],
-    [note(route('quota80', ['build-run']), /quota resetTime.*TRAE normally 22:00 UTC, TTADK 16:00 UTC/), true],
-    [note(route('quotaNoReset', ['build-run']), /normally 22:00 UTC/), true]);
+    [note(route('quota80', ['build-run']), /quota resetTime.*TRAE normally 22:00 UTC, TTADK 16:00 UTC/), false],
+    [note(route('quotaNoReset', ['build-run']), /normally 22:00 UTC/), false]);
   const bad = cases.map(([got, want, label], i) => (got === want ? null : `${i} ${label ?? ''} (${got} != ${want})`)).filter((i) => i !== null);
   if (bad.length) fail++;
   console.log(`${bad.length ? 'FAIL' : 'ok  '} trae daily quota    ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
+}
+// ETA-based hard-lane choice (addendum, 2026-11-13 night): "depleted" alone says little, so compare expected completion
+// (start delay + work minutes × slowdown) across the hard lanes and a TTADK reset. A wait is only an explicit
+// scheduled dispatch; a resource-bound task never waits in a queue holding its lease/lock.
+{
+  const laneHome = (name, lanes) => {
+    const home = fs.mkdtempSync(path.join(tmp, `lane-${name}-`));
+    fs.writeFileSync(path.join(home, 'lane-state.json'), JSON.stringify(lanes));
+    return home;
+  };
+  const ttOut = (resetMin) => tt({ healthy: false, reason: 'its daily token quota is used up',
+    usage: { used: 100, limit: 100, utilization: 100, resetsAt: now + resetMin * 60000 } });
+  const laneTr = (name, lanes) => tr({ home: laneHome(name, lanes),
+    models: ['gpt-6.1-sol', 'gpt-6-astra', 'gpt-5.6-sol', 'deepseek-v4.1-flash'],
+    modelIds: Object.fromEntries(['gpt-6.1-sol', 'gpt-6-astra', 'gpt-5.6-sol', 'deepseek-v4.1-flash'].map((m) => [m, m])),
+    quota: { daily: { 'gpt-6.1-sol': { used: 100, limit: 100, remaining: 0, depleted: true, resetsAt: now + 6 * h },
+      'gpt-6-astra': { used: 100, limit: 100, remaining: 0, depleted: true, resetsAt: now + 6 * h } }, weekly: null } });
+  const lanes = (sol, astra) => ({ 'gpt-6.1-sol': { t: now, state: 'queued', ...sol },
+    'gpt-6-astra': { t: now, state: 'queued', ...astra } });
+  // Hopeless queue (≈0.5 positions/min) and TTADK resets in 40 min: an explicit scheduled dispatch.
+  S.etaDefer = { claude: cl(10, 120), codex: [acc('main', 20, 120), ttOut(40),
+    laneTr('defer', lanes({ position: 500, drainPerMin: 0.5 }, { position: 600, drainPerMin: 0.5 }))] };
+  // Sol progresses with no queue cycles: it can start now and beats the TTADK reset.
+  S.etaProgressing = { claude: cl(10, 120), codex: [acc('main', 20, 120), ttOut(540),
+    laneTr('progress', lanes({ position: null, drainPerMin: null, lastProgressAt: now - 60000, itemsPerMin: 1.2 },
+      { position: 600, drainPerMin: 0.2 }))] };
+  // TTADK resets in 20 min, but the TRAE lane can finish sooner: launch, do not hold.
+  S.etaResetSoon = { claude: cl(10, 120), codex: [acc('main', 20, 120), ttOut(20),
+    laneTr('soon', lanes({ position: null, drainPerMin: null, lastProgressAt: now - 60000 },
+      { position: 50, drainPerMin: 5 }))] };
+  const parse = (sc, args) => JSON.parse(run(sc, args));
+  const defer = parse('etaDefer', ['implement-hard']);
+  const progress = parse('etaProgressing', ['implement-hard']);
+  const soon = parse('etaResetSoon', ['implement-hard']);
+  const bound = parse('etaDefer', ['implement-hard', '--device-lease']);
+  const { laneEta, patienceMinutes } = await import('../lib/eta.mjs');
+  const queuedEta = (workMin, requests) => laneEta({ workMin, requests, bucketDepleted: true, position: 100, drainPerMin: 2 });
+  const lightQ = queuedEta(5, 10), hardQ = queuedEta(90, 120);
+  const checks = [
+    ['defer scheduled', !!defer.deferred, true],
+    ['defer pick null', defer.pick, null],
+    ['defer until ~40m', defer.deferUntil >= now + 39 * 60000 && defer.deferUntil <= now + 41 * 60000, true],
+    ['defer reason names TTADK reset', /TTADK .*after its reset is estimated/.test(defer.deferReason ?? ''), true],
+    ['defer tell is a scheduled dispatch', (defer.tellUser ?? []).some((s) => /scheduled dispatch.*record it in the ledger and set a timer/.test(s)), true],
+    ['defer eta rows include TTADK', (defer.eta ?? []).some((r) => r.account === 'ttadk'), true],
+    ['defer eta rows include both TRAE hard models', ['gpt-6.1-sol', 'gpt-6-astra'].every((m) => (defer.eta ?? []).some((r) => r.model === m && r.account === 'trae')), true],
+    ['progressing picks Sol', progress.pick?.model, 'gpt-6.1-sol'],
+    ['progressing no defer', progress.deferred, null],
+    ['progressing why names lane + telemetry', progress.why.some((s) => /low-priority lane \(bucket depleted\): slower .*progressing without queue cycles/.test(s)), true],
+    ['progressing patience set', typeof progress.queuePatienceMin === 'number' && progress.queuePatienceMin > 0, true],
+    ['progressing launch passes patience/alt', /--queue-patience-min \d+ --alt /.test(progress.pick.command), true],
+    ['reset-soon launches', soon.deferred, null],
+    ['reset-soon keeps the hard model', soon.pick?.model, 'gpt-6.1-sol'],
+    ['resource-bound no defer', bound.deferred, null],
+    ['resource-bound note', bound.notes.some((s) => /take the lease\/lock only after the first model response/.test(s)), true],
+    ['resource-bound hard pick', ['gpt-6.1-sol', 'gpt-6-astra'].includes(bound.pick?.model), true],
+    ['eta size: light beats a 10h reset', lightQ.completionMin < 10 * 60 + 5, true],
+    ['eta size: hard loses to a 10h reset', hardQ.completionMin > 10 * 60 + 90, true],
+    ['patience cap 30m', patienceMinutes({ now, ttadk: { usage: { resetsAt: now + 600 * 60000 } } }), 30],
+    ['patience quarter of a 40m reset', patienceMinutes({ now, ttadk: { usage: { resetsAt: now + 40 * 60000 } } }), 10],
+  ];
+  // --json purity: the whole stdout is one JSON document for a code category, not a substring.
+  const raw = run('etaProgressing', ['implement-hard']);
+  const trimmed = raw.trim();
+  checks.push(['json purity parses whole stdout', (() => { try { return !!JSON.parse(trimmed).pick; } catch { return false; } })(), true]);
+  checks.push(['json purity is one line', trimmed.split('\n').length, 1]);
+  checks.push(['json purity braces', trimmed.startsWith('{') && trimmed.endsWith('}'), true]);
+  const bad = checks.map(([label, got, want], i) => (JSON.stringify(got) === JSON.stringify(want) ? null : `${i} ${label} (${JSON.stringify(got)} != ${JSON.stringify(want)})`)).filter(Boolean);
+  if (bad.length) fail++;
+  console.log(`${bad.length ? 'FAIL' : 'ok  '} ETA hard-lane choice ${checks.length} cases${bad.length ? ` — ${bad.join(', ')}` : ''}`);
 }
 // Approved nightly decision 2026-11-10-1: an idle weekly deadline can move without a card redemption.
 // Exercise the real review-data CLI on quota history, with all external reads isolated from live accounts.

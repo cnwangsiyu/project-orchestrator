@@ -517,7 +517,12 @@ effort, Codex account and launch command from
     the user (go on on personal quota, or wait).
   - Never hold or postpone work on your own (user, 2026-11-09: "不要擅自决定去暂缓一些工作"), low-stakes
     work included: when route.mjs prints "needs the user's OK", ask; when it DEFERs (nothing can run it
-    now), tell the user and ask how to proceed.
+    now), tell the user and ask how to proceed. Waiting for a quota reset is a hold: the only allowed wait is
+    an explicit `deferUntil` scheduled dispatch — record it in the ledger, set a timer and keep dispatching other
+    work; never wait while a same-tier company lane can finish earlier, and never hold a queued low-priority turn
+    past its `queue-too-slow` deadline.
+    The patience handoff prints once and exits 7 within three seconds after requesting interruption. If stderr
+    reports `queue-cancel-unconfirmed`, check the original turn before dispatching a replacement.
   - TTADK is not unlimited (measured 2026-11-08): about 500M tokens a day per user, input + output with
     cached input counted in full, shared by all models (plus an hourly cap); it resets at 16:00 UTC.
     When it runs out (`quota-exhausted:` from codex-worker; quota.mjs shows TTADK paused until the

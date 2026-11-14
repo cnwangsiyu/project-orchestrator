@@ -25,7 +25,10 @@
 //
 // `start` and `turn` follow the turn until it ends: every notification is appended to --log as JSONL, the first stdout
 // line is `thread=<id> turn=<id>`, and the process exits 0 on completed, 1 on failed/interrupted, 4 when the turn has
-// been silent for --stall-min minutes (default 30; the turn keeps running — re-attach with `wait`). On exit it prints
+// been silent for --stall-min minutes (default 30; the turn keeps running — re-attach with `wait`), and 7 when
+// --queue-patience-min M is set and the live queue drain predicts a start later than M (the turn is interrupted and
+// `queue-too-slow: ... re-route: <alt>` is printed, so the orchestrator re-routes instead of holding a queued turn).
+// On exit it prints
 // `turn <status>`, the token usage and `final: <first line of the final message>`, and writes the whole final message
 // to --out. Run them as a harness background task so their exit notifies the orchestrator. `wait` re-attaches to a
 // thread's running turn (e.g. after the orchestrator restarted) and exits the same way, at once if the turn already
@@ -105,6 +108,12 @@ if (opts.sandbox !== undefined && !SANDBOX_POLICY[opts.sandbox]) die(`unknown --
 if (opts.network === true) opts.network = 'on';
 if (opts.network !== undefined && !['on', 'off'].includes(opts.network)) die('--network takes on or off');
 if (opts.network !== undefined && opts.sandbox !== 'workspace-write') die('--network goes with --sandbox workspace-write');
+// Optimistic-launch patience (addendum, 2026-11-13 night): route.mjs passes the deadline it computed from the faster
+// account's reset and the alternative to take. Without a usable queue drain the worker cannot predict a start, so it
+// keeps waiting; with one, it stops the queued turn and exits 7 so the orchestrator re-routes.
+const PATIENCE_MIN = opts['queue-patience-min'] === undefined ? null : Number(opts['queue-patience-min']);
+if (PATIENCE_MIN != null && (!Number.isFinite(PATIENCE_MIN) || PATIENCE_MIN <= 0)) die('--queue-patience-min takes a positive number of minutes');
+const QUEUE_ALT = typeof opts.alt === 'string' ? opts.alt : null;
 if (cmd === 'start') auditLaunch({ name: opts.name, account: account ?? 'main', model: opts.model,
   sandbox: opts.sandbox, userOK: opts['user-ok'] });
 // Codex's own default for workspace-write network, so an explicit turn-level policy doesn't silently change it.
@@ -498,12 +507,25 @@ if (cmd === 'list') setTimeout(() => die(`hub list probe timed out (${hub}); tel
 let done = false, nextId = 0;
 const pending = new Map();
 const handlers = [];
+const cleanups = new Set();
+let exitCode = null;
 const logFile = opts.log ? path.resolve(opts.log) : null;
 const write = (obj) => ws.send(JSON.stringify(obj));
 const call = (method, params) => new Promise((resolve, reject) => {
   const id = ++nextId; pending.set(id, { resolve, reject }); write({ jsonrpc: '2.0', id, method, params });
 });
-const finish = (code) => { done = true; try { ws.close(); } catch {} process.exit(code); };
+const stopFollowing = () => {
+  handlers.length = 0;
+  for (const cleanup of cleanups) cleanup();
+  cleanups.clear();
+};
+const finish = (code) => {
+  done = true; stopFollowing();
+  ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null;
+  pending.clear();
+  try { ws.close(); } catch {}
+  process.exit(exitCode ?? code);
+};
 // Nobody is at the hub to answer a worker, so every server→client request gets a valid refusal. Approvals don't
 // arrive under approvalPolicy never; a question tells the worker to report it instead of waiting.
 const NO_USER = 'No user is available to answer in this session. Do not wait for one: finish what you can, then end '
@@ -539,8 +561,14 @@ const REPLIES = {
   'item/tool/call': () => ({ contentItems: [{ type: 'inputText', text: 'Not available in this session.' }], success: false }),
   'item/tool/requestUserInput': (p) => ({ answers: Object.fromEntries((p.questions ?? []).map((q) => [q.id, { answers: [NO_USER] }])) }),
 };
-ws.onclose = () => { if (!done) die(`hub connection closed (${hub}); is it running? (codex-worker hub)`); };
-ws.onerror = () => { if (!done) die(`cannot reach the hub at ${hub}; probe with codex-worker list --limit 1, start with codex-worker hub only if unreachable, and tell the global-rules owner`); };
+const connectionLost = (message) => {
+  if (exitCode != null) {
+    console.error('queue-cancel-unconfirmed: hub connection lost before interrupt acknowledgement; check the original turn before dispatching its replacement');
+    finish(exitCode);
+  } else if (!done) die(message);
+};
+ws.onclose = () => connectionLost(`hub connection closed (${hub}); is it running? (codex-worker hub)`);
+ws.onerror = () => connectionLost(`cannot reach the hub at ${hub}; probe with codex-worker list --limit 1, start with codex-worker hub only if unreachable, and tell the global-rules owner`);
 ws.onmessage = (ev) => {
   const line = String(ev.data);
   let m; try { m = JSON.parse(line); } catch { return; }
@@ -548,6 +576,7 @@ ws.onmessage = (ev) => {
     const p = pending.get(m.id); pending.delete(m.id);
     m.error ? p.reject(new Error(`${m.error.code}: ${m.error.message}`)) : p.resolve(m.result); return;
   }
+  if (done) return; // During cancellation only the interrupt RPC reply is still relevant.
   if (logFile) fs.appendFileSync(logFile, line + '\n');
   if (m.id !== undefined && m.method) {
     const reply = REPLIES[m.method];
@@ -637,8 +666,45 @@ const STALL_MIN = opts['stall-min'] === undefined ? 30 : Number(opts['stall-min'
 const follow = (threadId, turnId) => {
   console.log(`thread=${threadId} turn=${turnId}`);
   const recordQueue = PROF?.kind === 'trae' ? createQueueRecorder(PROF.home, opts.model ?? threadModel(PROF.home, threadId)) : null;
+  if (recordQueue) cleanups.add(() => recordQueue.stop());
   let final, usage, last = Date.now();
+  let runningSince = Date.now(), completedItems = 0;
   let queueSince = null, lastPrintedQueue = null, queuePrinted = null;
+  let patienceSamples = [];
+  // Drain from the last 10 minutes of queue/status positions. A start is only predicted once two samples span at least
+  // two minutes and the position actually fell; a stalled or rising queue is not guessed at (the worker keeps waiting).
+  const checkPatience = (t, pos) => {
+    if (done || PATIENCE_MIN == null || pos == null || pos <= 0) return false;
+    // Frequent notifications must not evict the two-minute baseline from the bounded sample window.
+    if (!patienceSamples.length || t - patienceSamples.at(-1).t >= 10000) patienceSamples.push({ t, pos });
+    patienceSamples = patienceSamples.filter((s) => t - s.t <= 10 * 60000).slice(-30);
+    const first = patienceSamples[0], last = patienceSamples.at(-1);
+    const spanMin = (last.t - first.t) / 60000;
+    if (spanMin < 2 || last.pos >= first.pos) return;
+    const drain = (first.pos - last.pos) / spanMin;
+    if (!(drain > 0)) return;
+    const predicted = last.pos / drain;
+    if (predicted <= PATIENCE_MIN) return;
+    // Latch before printing or sending the RPC: further queue/completion notifications must not race this handoff.
+    done = true; exitCode = 7; stopFollowing();
+    const alt = QUEUE_ALT ?? `route.mjs with --exclude-model ${opts.model ?? 'this model'} and the same --failures`;
+    const line = `queue-too-slow: position ${last.pos}, drain ${drain.toFixed(1)}/min, predicted start in ${Math.round(predicted)} min > patience ${PATIENCE_MIN} — re-route: ${alt}`;
+    try { fs.writeSync(1, `${line}\n`); } catch { console.log(line); }
+    if (opts.log) try { fs.appendFileSync(path.resolve(opts.log), JSON.stringify({ queueTooSlow: { position: last.pos, drainPerMin: drain,
+      predictedStartMin: Math.round(predicted), patienceMin: PATIENCE_MIN, alt, at: t } }) + '\n'); } catch {}
+    // Stop the queued turn cleanly before exiting so the provider does not keep it pending after the re-route.
+    // Keep the deadline referenced: a hub that never acknowledges cancellation must not leave the wrapper hanging.
+    const deadline = setTimeout(() => {
+      console.error('queue-cancel-unconfirmed: interrupt acknowledgement timed out; check the original turn before dispatching its replacement');
+      finish(7);
+    }, 3000);
+    cleanups.add(() => clearTimeout(deadline));
+    call('turn/interrupt', { threadId, turnId }).then(() => finish(7), () => {
+      console.error('queue-cancel-unconfirmed: interrupt failed; check the original turn before dispatching its replacement');
+      finish(7);
+    });
+    return true;
+  };
   const queueUpdate = (p) => {
     const t = Date.now(), state = String(p.state ?? 'queued');
     const pos = p.position != null && p.position !== '' && Number.isFinite(Number(p.position)) ? Number(p.position) : null;
@@ -646,6 +712,8 @@ const follow = (threadId, turnId) => {
     const queue = { state, position: pos, since: queueSince, turnId, at: t };
     if (PROF?.home) saveQueue(PROF.home, threadId, queue);
     recordQueue?.(p, t);
+    if (state === 'ready') { patienceSamples = []; runningSince = t; completedItems = 0; }
+    else { runningSince = null; completedItems = 0; if (checkPatience(t, pos)) return; }
     if (state === 'ready') {
       if (queueSince) console.log(`queue cleared after ${Math.max(1, Math.round((t - queueSince) / 60000))}m`);
       queueSince = null;
@@ -660,7 +728,9 @@ const follow = (threadId, turnId) => {
     queuePrinted = t;
     console.log(`queued: position ${pos ?? '?'} (${state})`);
   };
-  if (STALL_MIN > 0) setInterval(() => {
+  if (STALL_MIN > 0) {
+    const alarm = setInterval(() => {
+    if (done) return;
     const idle = (Date.now() - last) / 60000;
     if (idle < STALL_MIN) return;
     const line = `stalled: no events for ${idle < 1 ? `${Math.round(idle * 60)}s` : `${Math.round(idle)}m`} on turn ${turnId} (thread ${threadId}); the turn is still running on the hub — check status and sub-agent threads, then wait again, steer or interrupt`;
@@ -668,13 +738,21 @@ const follow = (threadId, turnId) => {
     if (opts.log) try { fs.appendFileSync(path.resolve(opts.log), JSON.stringify({ stalled: true, idleMin: Math.round(idle), at: Date.now() }) + '\n'); } catch {}
     if (PROF?.kind === 'trae') noteFailure(PROF.home, `stalled ${Math.round(idle)} min (queued for capacity?)`, Date.now(), opts.model ?? threadModel(PROF.home, threadId));
     finish(4);
-  }, Math.min(60000, Math.max(5000, STALL_MIN * 30000))).unref();
+    }, Math.min(60000, Math.max(5000, STALL_MIN * 30000)));
+    alarm.unref(); cleanups.add(() => clearInterval(alarm));
+  }
   handlers.push((m) => {
+    if (done) return;
     const p = m.params || {};
     if (p.threadId !== undefined && p.threadId !== threadId) return;
     if (p.turnId !== undefined && p.turnId !== turnId) return;
     // Only this turn's or thread's own events count as progress; account-wide updates (rate limits…) don't.
     if (p.turnId === turnId || p.threadId === threadId || p.turn?.id === turnId) last = Date.now();
+    if (m.method === 'item/completed' && runningSince != null) {
+      completedItems++;
+      recordQueue?.({ state: 'ready', position: null, progress: true,
+        itemsPerMin: completedItems / Math.max((Date.now() - runningSince) / 60000, 1 / 60) });
+    }
     if (m.method === 'item/completed' && p.item?.type === 'agentMessage' && p.item.text) final = p.item.text;
     else if (m.method === 'thread/tokenUsage/updated') usage = p.tokenUsage?.total;
     else if (m.method === 'queue/status' && (p.threadId === threadId || p.turnId === turnId)) queueUpdate(p);

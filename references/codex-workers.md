@@ -270,6 +270,15 @@ remain routing telemetry, not local spending/concurrency caps. Reports must name
   observation retains a position above 300 for 30 minutes even after a later ready event. Other threads' events are
   ignored. This is best-effort telemetry: it never holds a worker or reduces concurrency. `quota.mjs` reads it live,
   ignores observations older than 30 minutes, and appends it to each quota refresh snapshot with per-model CLI load.
+- **Queue patience handoff** (user, 2026-11-13). `codex-worker start|turn` accepts `--queue-patience-min <M>` and
+  `--alt <command>`. The follower keeps the last 10 minutes of this thread's queue samples; once two samples span ≥2
+  minutes and the position fell, it predicts `position / drain`, and when the predicted start exceeds M minutes it prints
+  `queue-too-slow: position P, drain r/min, predicted start in X min > patience M — re-route: <alt>`, interrupts the turn
+  and exits 7 so the caller can run the `--alt` command instead of holding. The handoff and interrupt RPC occur once,
+  even if queue/completion notifications continue. Timers/listeners stop; an unresponsive interrupt exits within
+  three seconds with `queue-cancel-unconfirmed` on stderr. In that case check the original turn before replacing it.
+  `route.mjs` passes `min(30, 25% of minutes until the TTADK reset)`, including fractional minutes, for the affected
+  lane. Without the flag a queued worker waits as before. The alternative retains task tier, exclusions and failures.
 - **Per-model daily quota** (user-approved 2026-11-13). The hub answers the read-only `model/internalUsage/read` with
   `{dailyUsage:[{quotaKey, quotaLimit, quotaUsed, quotaRemaining, usagePercent, isDepleted, periodStart, resetTime}],
   usage:{usage_percent, quota_remaining, quota_limit, is_depleted, reset_time}}` — one independent daily (24 h) bucket per
@@ -280,12 +289,13 @@ remain routing telemetry, not local spending/concurrency caps. Reports must name
   sample time are unknown, even if resetTime is still in the future. Cached reads preserve the original timestamp.
   `quota.mjs` shows one row per model with a daily bucket plus the weekly row. A depleted bucket (`isDepleted`) moves only
   that model into TRAE's **low-priority queue** (`queue/status` `modelQuotaLowPriority: true`; requests then wait with
-  positions in the hundreds) until its reset. For new dispatches, `route.mjs` prefers GPT-5.6-Sol with quota left, then Astra,
-  then eligible company fallbacks (see model-routing.md, "Daily quota and queue choice"). Above ~300 for a depleted
-  model, consider `--exclude-model <that model>` with the same `--failures` on the next dispatch; non-depleted/unknown
-  buckets wait. Never interrupt an accepted queued turn or launch a duplicate. Keep parallel task concurrency unchanged.
-  Long builds/large reviews at ≥80% daily usage may start just after resetTime (TRAE normally 22:00 UTC; TTADK 16:00 UTC),
-  advisory only. `account/rateLimits/read` does not work for this login.
+  positions in the hundreds). For new dispatches compare completion within the task's tier (see model-routing.md,
+  "Difficulty-tiered company model choice"): hard work stays on Sol/Astra, normal work keeps its quota-bearing 5.6
+  order then bucket-free DeepSeek, and light work prefers bucket-free models. Per-model fresh queue/progress evidence
+  controls the estimate; depletion alone proves no delay. A faster reset produces an explicit ledger/timer dispatch,
+  and a launch with missing lane evidence carries queue patience. Never launch a duplicate of an accepted queued turn.
+  Keep parallel task concurrency unchanged. A bucket at ≥80% with priority quota left starts now unless fresh lane
+  congestion changes the completion estimate. `account/rateLimits/read` does not work for this login.
 - **Pause after failures** (`scripts/lib/trae-health.mjs`, user 2026-11-08). codex-worker records every failed or
   stalled TRAE turn and clears the record on a completed one. Failures count **per model family** (gpt, deepseek,
   gemini, seed…; 2026-11-10: TRAE restricted only GPT while the others kept working): a paused family's models drop out

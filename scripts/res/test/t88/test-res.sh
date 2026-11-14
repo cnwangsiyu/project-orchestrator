@@ -201,6 +201,13 @@ starting_changer=1
 (
   wait_for_retry
   "$RES" return heavy-lane-1 --by retry-fixture >"$ROOT/retry-return-lane.txt" 2>&1
+  # Keep the build occupied until the waiter observes the lower gate. Otherwise a slow lane-return command can
+  # overlap its next gate sample and the build release, turning this fixture into an acquisition race.
+  deadline=$((SECONDS + 10))
+  until grep -Fq 'load1m=15.00 limit=12 lanes_held=0' "$OUT"; do
+    [ "$SECONDS" -lt "$deadline" ] || exit 1
+    sleep 0.05
+  done
   "$RES" return heavy-build --by fixture-heavy-build >"$ROOT/retry-return-build.txt" 2>&1
 ) & changer=$!
 starting_changer=0

@@ -31,6 +31,10 @@ const run = (args, { models = ids, daily = depleted, company = false, traeHome =
   fs.writeFileSync(path.join(traeHome, 'queue-state.json'), JSON.stringify({
     gpt: { t: now, position: 0, state: 'ready' }, deepseek: { t: now, position: 0, state: 'ready' },
   }));
+  // A measured slow depleted Sol lane makes Astra the earliest hard candidate in these order/fit scenarios.
+  fs.writeFileSync(path.join(traeHome, 'lane-state.json'), JSON.stringify({
+    ...(daily?.[SOL]?.depleted ? { [SOL]: { t: now, state: 'queued', position: 500, drainPerMin: 0.5 } } : {}),
+  }));
   const personal = { name: 'main', home: path.join(tmp, 'main'), live: true, windows: [window], resets: { credits: [] } };
   const ttadk = { name: 'ttadk', kind: 'ttadk', home: path.join(tmp, 'ttadk'), healthy: true, live: true, seenAt: now,
     models: [SOL], windows: [], usage: { used: 90, limit: 100, resetsAt: now + 8 * h } };

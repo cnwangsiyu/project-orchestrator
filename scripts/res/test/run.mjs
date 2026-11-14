@@ -27,9 +27,12 @@ export function runResSuites() {
   for (const suite of suites) {
     const node = suite.endsWith('.mjs');
     const script = path.join(node ? base : tmp, suite);
+    // The legacy suite includes two complete CLI transcripts after its contract matrix. Under host load those
+    // shell invocations can exceed five minutes; retain a bounded harness without changing resource wait limits.
+    const timeout = suite === 't88/legacy/test-res.sh' ? 600000 : 300000;
     const r = spawnSync(node ? process.execPath : '/bin/bash', [script], {
       cwd: tmp, env: { ...env, RES_TEST_ROOT: tmp, RES_SOURCE: res },
-      encoding: 'utf8', timeout: 300000, maxBuffer: 8 * 2 ** 20 });
+      encoding: 'utf8', timeout, maxBuffer: 8 * 2 ** 20 });
     const output = `${r.stdout ?? ''}${r.stderr ?? ''}`;
     fs.writeFileSync(path.join(tmp, suite.replaceAll('/', '-') + '.log'), output, { mode: 0o600 });
     if (r.status !== 0 || r.error) throw Error(`${suite}: exit=${r.status}; ${r.error?.message ?? ''}\n${output.slice(-8000)}\nFixtures: ${tmp}`);

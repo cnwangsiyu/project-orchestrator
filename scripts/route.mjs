@@ -17,9 +17,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readState, analyze, leanLines, readProfiles, hours, fmt, withLock, SHARED, ROUTE_LOG, POLICY } from './lib/state.mjs';
+import { readState, analyze, leanLines, readProfiles, hours, fmt, withLock, SHARED, ROUTE_LOG, POLICY, dedupeOutcomes } from './lib/state.mjs';
 import { poolOf } from './lib/trae-health.mjs';
-import { balanceFactors, hasTraeDailyQuota, ttadkExpiringUnused, TTADK_EXPIRY_HINT } from './lib/company-load.mjs';
+import { balanceFactors, hasTraeDailyQuota, modelLoad, readLaneState, readQuotaHistory, ttadkExpiringUnused, TTADK_EXPIRY_HINT } from './lib/company-load.mjs';
+import { ETA, etaText, laneEta, patienceMinutes, requestsFor, ttadkEta, workMinutes } from './lib/eta.mjs';
 import { normalizeLadder } from './lib/model-ladder.mjs';
 import { loadDigest } from './lib/global-rules.mjs';
 
@@ -133,6 +134,12 @@ if (opts.table) {
   for (const [k, t] of Object.entries(TABLE)) console.log(`${k.padEnd(15)} ${t.kind.padEnd(13)} first ${label(t.first).padEnd(26)} alt ${(t.alt ? label(t.alt) : '—').padEnd(26)} then ${t.ladder.map(label).join(' → ') || '—'}${t.second ? `  (+ second opinion ${label(t.second)})` : ''}\n${''.padEnd(16)}${t.desc}`);
   process.exit(0);
 }
+// --json contract: stdout is exactly one JSON document. Redirect any helper/warning text that would otherwise precede
+// the result to stderr (errors stay visible), and write the document itself through the saved stdout writer.
+const jsonStdout = opts.json ? process.stdout.write.bind(process.stdout) : null;
+if (jsonStdout) process.stdout.write = (chunk, encoding, callback) => typeof encoding === 'function'
+  ? process.stderr.write(chunk, encoding)
+  : process.stderr.write(chunk, encoding, callback);
 const cat = pos[0];
 const T = TABLE[cat];
 if (!T) die(`unknown category ${cat ?? '(none)'}; one of: ${Object.keys(TABLE).join(', ')} (route --table)`);
@@ -279,6 +286,107 @@ const priorityAvailable = (id, account) => {
   if (!Object.hasOwn(account.quota.daily, id)) return !TRAE_BUCKETED.has(id);
   const q = account.quota.daily[id];
   return q?.depleted === false && (q.remaining > 0 || (q.used != null && q.limit > q.used));
+};
+// "Depleted" is not "unavailable" (user, 2026-11-13 night): TRAE still runs the model in its low-priority lane and
+// spends no high-priority quota. But whether that lane beats waiting for TTADK depends on the live queue, so compare
+// expected completion times instead of treating every depleted hard bucket as an automatic launch.
+let laneSeen = null, etaAccountSeen = null, etaRowsSeen = [], resolvingRung = false;
+let etaDefer = null, etaRows = [], currentRung = 0;
+const resourceBound = !!opts['device-lease'] || !!opts['shared-lock'];
+const ttadkResetHours = () => {
+  const reset = QX.ttadk?.usage?.resetsAt;
+  return reset && reset > Date.now() ? (reset - Date.now()) / 3600000 : null;
+};
+const laneOf = (model, account = TT) => (account?.kind === 'trae' ? readLaneState(account.home) : {})[String(model).toLowerCase()] ?? null;
+const progressingLane = (lane, now = Date.now()) => lane?.lastProgressAt != null && lane.position == null
+  && now >= lane.lastProgressAt && now - lane.lastProgressAt <= 30 * 60000;
+const lowPriorityWhy = (model, account = TT) => {
+  const lane = laneOf(model, account), pos = lane?.position ?? account.queue?.[poolOf(model)]?.position ?? null;
+  const resetH = ttadkResetHours();
+  const queueText = pos != null ? `recent queue position ${pos}` : 'recent queue position unknown';
+  const waitText = resetH != null ? `waiting ${hours(resetH)} for TTADK` : 'waiting for TTADK (reset time unknown)';
+  const progressing = progressingLane(lane);
+  return `TRAE ${model} low-priority lane (bucket depleted): slower (${queueText}), but runs now instead of ${waitText}`
+    + (progressing ? '; live telemetry shows it progressing without queue cycles' : '');
+};
+const outcomeHistory = () => {
+  try { return dedupeOutcomes(readQuotaHistory(ROUTE_LOG).filter((o) => o?.kind === 'outcome' && o.category)); } catch { return []; }
+};
+const laneCongested = (id, account = TT) => {
+  const lane = laneOf(id, account);
+  if (progressingLane(lane)) return false; // Another model's family queue must not override direct progress.
+  const load = modelLoad(account?.load, id);
+  const pos = lane ? lane.position : account?.queue?.[poolOf(id)]?.position ?? null;
+  return (load?.percent ?? 0) >= 60 || (pos != null && pos > 300);
+};
+// Compare company candidates for a hard rung by expected completion (addendum, 2026-11-13 night). Returns the best
+// available-now pick, or schedules an explicit deferUntil when waiting for TTADK beats every lane that can start now.
+const companyEtaChoice = (x, log, taskTier, account = TT) => {
+  const now = Date.now(), history = outcomeHistory(), requests = requestsFor(cat, taskTier);
+  const rows = [];
+  let candidates = tierModels(account, taskTier);
+  if (taskTier === 'normal') {
+    candidates = candidates.filter((id) => id === SOL || priorityAvailable(id, account));
+    // Retain the normal tier's quota-first order when those lanes are uncongested. ETA resolves queued lanes and
+    // resets within that policy; a depleted hard model does not consume an ordinary normal dispatch by default.
+    const priority = ['gpt-5.6-sol', 'gpt-5.6-terra'].find((id) => candidates.includes(id)
+      && priorityAvailable(id, account) && !laneCongested(id, account));
+    const fallback = candidates.find((id) => id === 'deepseek-v4.1-flash' && priorityAvailable(id, account) && !laneCongested(id, account));
+    if (priority || fallback) candidates = [priority ?? fallback];
+  }
+  // An explicit Astra retry stays on that quality rung; ETA never walks a retry sideways or down the ladder.
+  for (const id of currentRung > 0 && x.model === ASTRA ? candidates.filter((id) => id === ASTRA) : candidates) {
+    const depleted = account.quota?.daily?.[id]?.depleted === true, congested = laneCongested(id, account);
+    const unknownBucket = !priorityAvailable(id, account) && !depleted;
+    const lane = laneOf(id, account), load = modelLoad(account.load, id);
+    const workMin = workMinutes(cat, taskTier, history, companyPick(id, x.effort).effort);
+    const freshProgress = progressingLane(lane, now);
+    const e = laneEta({ workMin, requests, bucketDepleted: depleted || congested || unknownBucket, congested,
+      position: lane?.position ?? null, drainPerMin: lane?.drainPerMin ?? null,
+      progressing: freshProgress && !congested, unknown: !lane && (depleted || congested || unknownBucket) });
+    rows.push({ model: id, account: account.name, depleted, congested, noPrioritySpend: depleted || bucketFreeModels(account, taskTier).includes(id),
+      workMin, requests, lane, load, ...e });
+  }
+  const tt = QX.ttadk;
+  if (tt && !excluded.has(tt.name) && tt.models?.includes(SOL) && !modelExcluded(SOL, tt) && taskFits(tt)) {
+    const model = taskTier === 'light' ? tierModels(tt, taskTier)[0] ?? SOL : SOL;
+    const workMin = workMinutes(cat, taskTier, history, x.effort), estimate = ttadkEta({ account: tt, now, workMin });
+    if (estimate) rows.push({ model, account: tt.name, workMin, requests, noPrioritySpend: false, ...estimate });
+  }
+  if (!rows.length) return null;
+  const nowRows = rows.filter((r) => r.basis !== 'reset');
+  const queued = (r) => r.basis === 'queue' || r.unknown;
+  // A task that already holds a device lease or heavy-build lock must not wait in a queue holding it, so a candidate
+  // that can start now outranks a queued one for resource-bound work (the note below tells the worker when to take it).
+  const bestNow = nowRows.length ? [...nowRows].sort((a, b) =>
+    Number(resourceBound && queued(a)) - Number(resourceBound && queued(b))
+    || a.completionMin - b.completionMin
+    || Number(b.noPrioritySpend) - Number(a.noPrioritySpend)
+    || candidates.indexOf(a.model) - candidates.indexOf(b.model)
+    || Number(b.account === QX.ttadk?.name) - Number(a.account === QX.ttadk?.name))[0] : null;
+  const waitRow = rows.filter((r) => r.basis === 'reset')
+    .sort((a, b) => a.completionMin - b.completionMin)[0] ?? null;
+  if (resolvingRung) etaRowsSeen = rows;
+  if (waitRow && currentRung === 0 && failures === 0 && !background && !resourceBound
+    && (!bestNow || waitRow.completionMin < bestNow.completionMin)) {
+    etaDefer = { until: now + waitRow.startDelayMin * 60000, reason: `TTADK ${waitRow.model} after its reset is estimated at ${Math.round(waitRow.completionMin)} min, earlier than ${bestNow ? `TRAE ${bestNow.model} at ${Math.round(bestNow.completionMin)} min` : 'any lane that can start now'}`, runnerUp: bestNow, rows };
+    log(`scheduled dispatch: ${etaDefer.reason}; the orchestrator records it and sets a timer, no silent hold; company ETA: ${rows.map(etaText).join('; ')}`);
+    return x;
+  }
+  if (!bestNow) return null;
+  if (bestNow.account !== account.name) {
+    log(`company ETA: ${rows.map(etaText).join('; ')}; TTADK is earliest`);
+    return x;
+  }
+  if (account !== TT) etaAccountSeen = account;
+  if (bestNow.depleted || bestNow.congested || bestNow.unknown) {
+    laneSeen = { model: bestNow.model };
+    log(`${bestNow.depleted ? lowPriorityWhy(bestNow.model, account) : `TRAE ${bestNow.model} lane ${bestNow.unknown ? 'unknown; optimistic launch with bounded queue patience' : 'congested'}`}; company ETA: ${rows.map(etaText).join('; ')}`);
+  } else {
+    const sub = label(companyPick(bestNow.model, x.effort));
+    log(`${account.quota?.daily?.[x.model]?.depleted ? `TRAE ${x.model}'s daily high-priority bucket is depleted → ${sub} (comparable GPT with quota left)` : `TRAE ETA: ${sub} is the earliest ${taskTier} candidate`}; parallel task concurrency is unchanged; company ETA: ${rows.map(etaText).join('; ')}`);
+  }
+  return bestNow.model === x.model ? x : companyPick(bestNow.model, x.effort);
 };
 // A fallback of a different family from model x (a reviewer or a retry that doesn't share x's blind spots).
 const altOtherThan = (x) => ttAlts.find((a) => poolOf(a.model) !== poolOf(x?.model)) ?? null;
@@ -434,6 +542,7 @@ else if (codexOut && !QX.throttledOnly && stakes === 'low' && T.kind !== 'claude
   needsOK.push(`Codex is out (next free in ${QX.nextFree != null ? hours(QX.nextFree) : '?'}) and this is low-stakes: ask the user whether to run it now on Claude (this pick) or wait for Codex`);
 let m = null;
 let balance = null, balancedAccount = null;
+let lowPriorityPicks = [];
 
 // ---- 2. effort ----
 // Resolve effort and availability for every rung before selecting a retry; equal/lower actual steps are dropped.
@@ -487,15 +596,46 @@ const backgroundChoice = (x, log, taskTier) => {
 const quotaChoice = (x, log = (r) => why.push(r), taskTier = tier) => {
   // Adversarial picks are fixed by family and approval; quota substitution must never turn one into a GPT model.
   if (adversarial) return x;
+  if (resolvingRung && onTTADK(x) && TT.kind === 'ttadk' && taskTier === 'hard' && x.model === SOL && !background
+    && QX.trae?.usable && !excluded.has(QX.trae.name) && taskFits(QX.trae)
+    && tierModels(QX.trae, taskTier).some((id) => laneOf(id, QX.trae))) {
+    const choice = companyEtaChoice(x, log, taskTier, QX.trae);
+    if (choice) return choice;
+  }
   if (!onTTADK(x) || TT.kind !== 'trae') return x;
   if (backgroundLane) return backgroundChoice(x, log, taskTier);
+  if ((taskTier === 'hard' && (x.model === SOL || x.model === ASTRA))
+    || (hasTraeDailyQuota(TT.quota) && tierModels(TT, taskTier).some((id) => laneOf(id)
+      && (TT.quota?.daily?.[id]?.depleted === true || laneCongested(id))))) {
+    const choice = companyEtaChoice(x, log, taskTier);
+    if (choice) return choice;
+  }
   const free = bucketFreeModels(TT, taskTier);
   if (taskTier === 'light' && laneEligible && x.model !== ASTRA && free[0]) {
     const id = free[0];
     log(`light TRAE tier: ${id} has no daily bucket → no high-priority quota spent, no low-priority lane`);
     return id === x.model ? x : companyPick(id, x.effort);
   }
-  if (!TT.quota?.daily?.[x.model]?.depleted) return x;
+  const depleted = TT.quota?.daily?.[x.model]?.depleted === true;
+  if (!depleted) return x;
+  // NORMAL: quota-bearing 5.6 candidates first, then bucket-free DeepSeek, then a depleted 6.1-Sol low-priority lane.
+  if (taskTier === 'normal' && x.model === SOL) {
+    const normal = tierModels(TT, 'normal');
+    const priority = ['gpt-5.6-sol', 'gpt-5.6-terra'].find((id) => normal.includes(id) && priorityAvailable(id, TT));
+    const deepseek = normal.find((id) => id === 'deepseek-v4.1-flash' && priorityAvailable(id, TT));
+    // Image reading's tier list is Sol/Astra; Astra with priority quota beats a depleted Sol low-priority lane.
+    const other = normal.find((id) => id !== SOL && id !== 'gpt-5.6-sol' && id !== 'gpt-5.6-terra'
+      && id !== 'deepseek-v4.1-flash' && priorityAvailable(id, TT));
+    const id = priority ?? deepseek ?? other;
+    if (id) {
+      const sub = companyPick(id, x.effort);
+      log(`TRAE ${x.model}'s daily high-priority bucket is depleted → ${label(sub)} (${poolOf(id) === 'gpt' ? 'comparable GPT with quota left' : 'eligible company fallback'}); parallel task concurrency is unchanged`);
+      return sub;
+    }
+    laneSeen = { model: SOL };
+    log(lowPriorityWhy(SOL));
+    return x;
+  }
   const candidates = x.model === ASTRA ? [] : tierModels(TT, taskTier);
   const id = candidates.find((id) => id !== x.model && priorityAvailable(id, TT));
   const gpt = id && poolOf(id) === 'gpt';
@@ -533,6 +673,7 @@ const availabilityChoice = (x, taskTier, log) => {
 };
 const resolveRung = (raw, index) => {
   const messages = [], log = (s) => messages.push(s), taskTier = tierFor(index);
+  currentRung = index;
   let x = raw, transfer = null, factors = null;
   if (ttCapable && x.vendor === 'codex' && x.model === SOL && !ttHas(SOL)) x = availabilityChoice(x, taskTier, log);
   else if (onTTADK(x) && !ttHas(x.model) && (ttHas(SOL) || ttAlts.length)) {
@@ -540,10 +681,16 @@ const resolveRung = (raw, index) => {
     log(`${raw.model} isn't on ${TT.name} and the ChatGPT accounts are out → ${label(x)} on ${TT.name}`);
   }
   if (!x) return null;
+  const previousLane = laneSeen;
+  laneSeen = null; etaAccountSeen = null; etaRowsSeen = []; resolvingRung = true;
   x = tune(quotaChoice(x, log, taskTier), index, log);
+  resolvingRung = false;
+  if (etaAccountSeen) transfer = etaAccountSeen;
+  const lowPriority = laneSeen;
+  laneSeen = previousLane;
   // Resolve balancing before normalization too; keep its account and telemetry with this rung only.
   if (preferExpiringTtadk && onTTADK(x) && TT === QX.ttadk) log(TTADK_EXPIRY_HINT);
-  if (!adversarial && !background && !preferExpiringTtadk && onTTADK(x) && TT === QX.ttadk && QX.trae) {
+  if (!transfer && !adversarial && !background && !preferExpiringTtadk && onTTADK(x) && TT === QX.ttadk && QX.trae) {
     const free = x.model !== ASTRA ? bucketFreeModels(QX.trae, taskTier) : [];
     // Walk the tier in quality order, checking reserve and congestion for each candidate. A later explicit
     // Astra/other-family quality rung retains its model; balancing cannot turn a retry into a weaker rung.
@@ -582,7 +729,7 @@ const resolveRung = (raw, index) => {
     factors = { ...factors, tier: taskTier, reason, candidates: checked };
     if (reason) log(`stays on TTADK: ${reason}`);
   }
-  return { pick: x, raw, index, messages, transfer, balance: factors };
+  return { pick: x, raw, index, messages, transfer, balance: factors, lowPriority, eta: etaRowsSeen };
 };
 if (!deferred) {
   let firstOk = resolveRung(base[0], 0);
@@ -600,7 +747,8 @@ if (!deferred) {
   if (!ladder.length) deferred = `neither vendor has room for this now (claude ${QC.throttledUntil ? '5h-throttled' : QC.status}, codex ${codexOut ? (QX.throttledOnly ? 'paused' : 'out') : 'ok'})${retry(waits.length ? Math.min(...waits) : null)}`;
   else {
     const selected = ladder[Math.min(failures, ladder.length - 1)];
-    m = selected.pick; balance = selected.balance; balancedAccount = selected.transfer;
+    m = selected.pick; balance = selected.balance; balancedAccount = selected.transfer; etaRows = selected.eta ?? [];
+    if (selected.lowPriority && !lowPriorityPicks.some((l) => l.model === selected.lowPriority.model)) lowPriorityPicks.push(selected.lowPriority);
     why.push(...selected.messages);
     if (dropped.length) why.push(`normalized actual ladder: dropped ${dropped.map((r) => `${label(r.pick)} (${r.reason})`).join('; ')}`);
     if (failures) why.push(`escalated to step ${Math.min(failures, ladder.length - 1)} of ${ladder.length - 1} after ${failures} failure(s)`);
@@ -619,6 +767,13 @@ if (!deferred) {
     if (codexFails >= 2) tell.push(`Codex has fallen short on this task ${codexFails} times: tell the user what happened (model, effort, symptom)`);
     if (codexOut && !QX.throttledOnly && m?.vendor === 'claude' && T.kind !== 'claudeOnly') why.push('Codex is out: Claude takes this because it matters');
   }
+}
+// A wait is only ever an explicit scheduled dispatch (addendum, 2026-11-13 night): the ETA comparison found the
+// TTADK reset earlier than every lane that can start now. The orchestrator records it and sets a timer; nothing is held.
+if (etaDefer && failures === 0 && !background && !resourceBound) {
+  etaRows = etaDefer.rows;
+  deferred = etaDefer.reason;
+  m = null; balance = null; balancedAccount = null; lowPriorityPicks = [];
 }
 if (m) {
   // Check the actual pick, including a balancing substitution, before applying the service-code review guard.
@@ -676,7 +831,12 @@ if (adversarial && m) {
 }
 if (second) {
   const original = second;
+  const previousLane = laneSeen;
+  laneSeen = null;
   if (!adversarial) second = quotaChoice(second, (r) => why.push(`second opinion: ${r}`));
+  const secondLane = laneSeen;
+  laneSeen = previousLane;
+  if (secondLane && !lowPriorityPicks.some((l) => l.model === secondLane.model)) lowPriorityPicks.push(secondLane);
   if (second !== original && poolOf(second.model) === poolOf(m.model)) notes.push('quota substitution leaves the second opinion in the same model family; record this limitation and retain the GPT/Claude acceptance gate in references/review-rubric.md');
 }
 
@@ -739,11 +899,36 @@ if (!background && !opts.urgent && ttDevice && personalPicks.length) {
 // gate above does not fire) and when a standing exception would otherwise skip it.
 if (adversarial && m?.vendor === 'claude' && !opts.urgent && !needsOK.some((n) => n.startsWith('personal quota:')))
   needsOK.push('personal quota: no company non-GPT model can take this adversarial task — Claude Opus is the fallback. Ask the user before launching (go on now on personal quota, or wait for a company non-GPT model); never silently use personal quota and never substitute a GPT reviewer');
+// Optimistic-launch patience: a worker entering a low-priority lane gets a deadline derived from the faster account's
+// reset and an explicit alternative. codex-worker prints queue-too-slow and exits 7 when the live drain predicts a
+// later start, so the orchestrator can re-route instead of sitting in a queue for hours.
+const queuePatience = lowPriorityPicks.length ? patienceMinutes({ now: Date.now(), ttadk: QX.ttadk }) : null;
+const shellQuote = (value) => `'${String(value).replaceAll("'", "'\\''")}'`;
+const alternative = [...etaRows].filter((r) => !lowPriorityPicks.some((l) => l.model === r.model && r.account === QX.trae?.name))
+  .sort((a,b) => a.completionMin - b.completionMin)[0];
+// TTADK may continue on the same model after its reset. Exclude the slow account in that handoff, not the model
+// globally, or the proposed alternative would exclude its own Sol candidate.
+const alternativeOnTtadk = alternative?.account === QX.ttadk?.name;
+const altModels = [...new Set([...exModels, ...(alternativeOnTtadk ? [] : lowPriorityPicks.map((l) => l.model))])];
+const altAccounts = [...new Set([...excluded, ...(alternativeOnTtadk && QX.trae ? [QX.trae.name] : [])])];
+const reroute = `node ${shellQuote(`${SKILL}/scripts/route.mjs`)} ${cat} --failures ${failures} --stakes ${stakes}`
+  + (alternativeOnTtadk ? ' --fresh' : '')
+  + (impact ? ` --impact ${impact}` : '') + (security ? ' --security' : '') + (defensive ? ' --defensive' : '')
+  + ['device-lease','shared-lock','runs-tests','signing','auto-check','read-only','writes','no-local-build']
+    .filter((key) => opts[key]).map((key) => ` --${key}`).join('')
+  + ['project','name','cwd','task-dir','env','sandbox','author','against'].filter((key) => typeof opts[key] === 'string')
+    .map((key) => ` --${key} ${shellQuote(opts[key])}`).join('')
+  + (altModels.length ? ` --exclude-model ${shellQuote(altModels.join(','))}` : '')
+  + (altAccounts.length ? ` --exclude-account ${shellQuote(altAccounts.join(','))}` : '');
+const queueAlt = lowPriorityPicks.length ? (alternative?.basis === 'reset'
+  ? `record a scheduled dispatch at ${new Date(Date.now() + alternative.startDelayMin * 60000).toISOString()} and set a timer; then ${reroute}`
+  : reroute) : null;
 // One-shot execs get the same worker rules as hub threads; the digest is the single injection source.
 const digest = loadDigest();
 const credRule = `Global worker rules ${digest.version}\n${digest.worker}`;
 const execCred = ` -c 'developer_instructions=${JSON.stringify(credRule).replaceAll("'", "'\\''")}'`;
-const shellQuote = (value) => `'${String(value).replaceAll("'", "'\\''")}'`;
+const queueFlagsFor = (x) => queuePatience != null && lowPriorityPicks.some((l) => l.model === x.model)
+  ? ` --queue-patience-min ${queuePatience} --alt ${shellQuote(queueAlt)}` : '';
 const launchAudit = (x, an, launchSandbox) => `node ${shellQuote(`${SKILL}/scripts/launch-audit.mjs`)} --name ${shellQuote(name)} --vendor ${x.vendor} --account ${shellQuote(an)} --model ${shellQuote(x.model)}${x.vendor === 'codex' ? ` --sandbox ${shellQuote(launchSandbox)}` : ''}${typeof opts['user-ok'] === 'string' ? ` --user-ok ${shellQuote(opts['user-ok'])}` : ''} && `;
 const launch = (x, shape = T.shape, acct = pickAcct, launchSandbox = sandbox) => {
   if (x.vendor === 'claude') {
@@ -753,10 +938,11 @@ const launch = (x, shape = T.shape, acct = pickAcct, launchSandbox = sandbox) =>
   // TRAE CLI: `traecli exec` mirrors `codex exec` (its own home, ~/.trae); models go by TRAE's own ids.
   const traeProf = profiles[an]?.kind === 'trae' ? profiles[an] : QX.trae?.name === an ? QX.trae : null;
   if (traeProf) {
+    const queueFlags = queueFlagsFor(x);
     const id = traeProf.modelIds?.[x.model] ?? x.model;
     // Quota substitution can put Astra on a short row too; keep its queue/status visible through the hub.
-    if (shape === 'exec' && x.model !== ASTRA && !backgroundLane) return { launcher: 'traecli-exec', account: an, command: `${launchAudit(x, an, launchSandbox)}${traeProf.bin ?? 'traecli'} exec${inRepo === false ? ' --skip-git-repo-check' : ''} -C ${cwd} -s ${launchSandbox} -m ${id} -c model_reasoning_effort='"${x.effort}"'${execCred} --json -o ${taskDir}/codex-last.md ${prompt} < /dev/null > ${taskDir}/codex.jsonl 2>&1   (background task${inRepo === null ? '; add --skip-git-repo-check outside a repo' : ''})` };
-    return { launcher: 'codex-worker', account: an, command: `node ${SKILL}/scripts/codex-worker.mjs --account ${an} start --cwd ${cwd} --model ${id} --effort ${x.effort} --sandbox ${launchSandbox} --name ${name} --log ${taskDir}/codex.jsonl --out ${taskDir}/codex-last.md ${prompt}   (background task)` };
+    if (shape === 'exec' && x.model !== ASTRA && !backgroundLane && !queueFlags) return { launcher: 'traecli-exec', account: an, command: `${launchAudit(x, an, launchSandbox)}${traeProf.bin ?? 'traecli'} exec${inRepo === false ? ' --skip-git-repo-check' : ''} -C ${cwd} -s ${launchSandbox} -m ${id} -c model_reasoning_effort='"${x.effort}"'${execCred} --json -o ${taskDir}/codex-last.md ${prompt} < /dev/null > ${taskDir}/codex.jsonl 2>&1   (background task${inRepo === null ? '; add --skip-git-repo-check outside a repo' : ''})` };
+    return { launcher: 'codex-worker', account: an, command: `node ${SKILL}/scripts/codex-worker.mjs --account ${an} start --cwd ${cwd} --model ${id} --effort ${x.effort} --sandbox ${launchSandbox} --name ${name}${queueFlags} --log ${taskDir}/codex.jsonl --out ${taskDir}/codex-last.md ${prompt}   (background task)` };
   }
   // A TTADK codex exec bypasses codex-worker, so it brings the account's proxy up first (exit 6 when it can't).
   const proxyFirst = TT?.search && an === TT.name ? `node ${SKILL}/scripts/codex-worker.mjs --account ${an} proxy >/dev/null && ` : '';
@@ -813,16 +999,21 @@ if (ttadkRun && runCompany.kind === 'trae') {
   if (backgroundLane) notes.push('background: expect hours; each model request queues separately. Launch as a hub worker so queue/status shows; do not interrupt while queued: lines arrive. The orchestrator keeps dispatching other work meanwhile. TRAE assigns request priority from its quota state; this routing flag does not force a provider priority tier while high-priority quota remains.');
   // Astra on TRAE is slow but works (2026-11-13): keep it a hub worker so its queue/status lines are visible.
   if (m.model === ASTRA) notes.push('Astra on TRAE queues TRAE-wide (≈15 min seen 2026-11-13); launch it as a hub worker (codex-worker start), not traecli exec, so queue/status shows; the 30-min stall alarm doesn\'t fire while queue/status keeps arriving');
-  if (!backgroundLane) notes.push('hub queue position above ~300: if that model\'s daily bucket is depleted, re-routing is worth it for the next dispatch with --exclude-model <that model> and the same --failures; for non-depleted or unknown buckets let it wait. Accepted queued turns stay pending: do not interrupt or launch a duplicate; keep parallel task concurrency unchanged');
+  if (!backgroundLane) notes.push(`hub queue position above ~300: ${tier === 'hard' ? 'keep the hard model; the worker\'s queue-patience deadline re-routes it if the live drain predicts a start later than the alternative — do not demote hard work to a weaker model because of a depleted bucket' : `if that model's daily bucket is depleted, re-routing is worth it for the next dispatch with --exclude-model <that model> and the same --failures; for non-depleted or unknown buckets let it wait`}. Accepted queued turns stay pending: do not interrupt or launch a duplicate; keep parallel task concurrency unchanged`);
   const q = runCompany.quota?.daily?.[m.model];
-  if (q?.depleted && !backgroundLane) notes.push(`TRAE ${m.model}'s daily high-priority quota is used up${q.resetsAt ? ` until ${fmt(q.resetsAt)}` : ''}: requests queue in the low-priority lane. Above ~300, consider --exclude-model ${m.model} for the next dispatch (same --failures); keep any accepted queued turn pending`);
+  if (q?.depleted && !backgroundLane) notes.push(`TRAE ${m.model}'s daily high-priority quota is used up${q.resetsAt ? ` until ${fmt(q.resetsAt)}` : ''}: requests queue in the low-priority lane. ${tier === 'hard' ? 'Keep this hard model — do not demote hard work because of depletion; if its live drain predicts a start past the patience deadline, the worker reports queue-too-slow and the orchestrator re-routes' : `Above ~300, consider --exclude-model ${m.model} for the next dispatch (same --failures)`}; keep any accepted queued turn pending`);
+  if (lowPriorityPicks.length) notes.push(`TRAE low-priority or unknown lane (${lowPriorityPicks.map((l) => l.model).join(', ')}): launch as a hub worker (codex-worker start) so the queue position stays visible; do not interrupt while queued except for the queue-patience handoff. After TTADK or the daily bucket resets, an unfinished task may continue on the faster account if that is quicker, subject to the existing thread-continuation rule (same task, company account, no route escalation or exclusion; record outcome --actual and the ledger reason)`);
+  if (resourceBound) notes.push('resource-bound task (device lease or heavy-build lock): take the lease/lock only after the first model response — a queued low-priority turn must not hold a shared resource while it waits; if the worker reports queue-too-slow, release the hold before re-routing');
+  // The ETA comparison owns the wait decision (addendum, 2026-11-13 night): a reset is either an explicit scheduled
+  // dispatch (deferUntil, above) or it lost to a lane that can finish earlier. No separate "launching then is faster"
+  // advisory, because it could contradict the chosen estimate.
   notes.push('brief (TRAE): no ChatGPT browser here — playwright MCP is for public/local pages only; signed-in consoles require a browser-ready worker with console origins and a signed-in browser/account named in the brief; missing login means BLOCKED, never a Playwright sign-in workaround; git commits must carry no co-author or tool trailer');
   if (!runCompany.live && (T.shape !== 'exec' || backgroundLane)) notes.push(`TRAE hub may be unreachable: probe with node ${SKILL}/scripts/codex-worker.mjs --account ${runCompany.name} list --limit 1; start with codex-worker hub only if unreachable, then tell the global-rules owner`);
 }
 if (ttadkRun && ['build-run', 'review', 'review-high'].includes(cat)) {
   const q = runCompany.kind === 'trae' ? runCompany.quota?.daily?.[m.model] : runCompany.usage;
   const usedPercent = q?.utilization ?? (q?.used != null && q.limit > 0 ? 100 * q.used / q.limit : null);
-  if (usedPercent >= 80) notes.push(`long builds/large reviews: ${runCompany.name} ${m.model}'s daily bucket is ${Math.round(usedPercent)}% used; consider starting just after the daily reset ${q.resetsAt ? `at ${new Date(q.resetsAt).toISOString()} (quota resetTime)` : `(normally ${runCompany.kind === 'trae' ? '22:00' : '16:00'} UTC)`}; TRAE normally 22:00 UTC, TTADK 16:00 UTC. Advisory only: do not defer work or reduce parallel task concurrency automatically`);
+  if (usedPercent >= 80 && !q?.depleted && (runCompany.kind !== 'trae' || !laneCongested(m.model, runCompany))) notes.push(`long builds/large reviews: ${runCompany.name} ${m.model}'s daily bucket is ${Math.round(usedPercent)}% used but still has high-priority quota for this run${q.resetsAt ? ` (resets at ${new Date(q.resetsAt).toISOString()})` : ''}; start now — do not defer or hold for the reset`);
 }
 if (ttadkRun && m.model === 'gemini-3.1-pro-preview' && !backgroundLane) notes.push('Gemini-3.1-Pro ran past 40 minutes in 3 of 12 benchmark runs: if it shows no progress for 20 minutes, or runs past twice what the task should take, interrupt it and re-route with --exclude-model gemini (same --failures)');
 if (ttadkRun && isAlt(m)) notes.push(`brief (${m.model}): state the exact output format and the done check; it has no ChatGPT browser or image tools`);
@@ -846,14 +1037,18 @@ if (!QX.readable && m?.vendor === 'codex') notes.push('Codex usage unreadable; r
 const lands = (a) => !!a && !!redeemAcct && a.a.name === redeemAcct.a.name && !chatgptOpen.some((r) => r.a.name === a.a.name);
 const redeemFirst = ((m?.vendor === 'codex' && !ttadkRun && lands(pickAcct)) || (second?.vendor === 'codex' && lands(secondAcct)))
   ? `redeem a reset card on ${QX.redeem.a.name} first (with the user's OK; if declined, re-run with --no-redeem): ${QX.redeem.cp.line}` : null;
-// Deferred only when nothing can run it now; never silently (user, 2026-11-09).
-if (deferred && background) tell.push(`background task is queued for later (${deferred.split(' — ')[0]}): tell the user; continue dispatching other ready work, with no personal quota`);
+// Deferred only when nothing can run it now; never silently (user, 2026-11-09). A scheduled dispatch is the one
+// legitimate wait: it names the time, the reason and the runner-up, and the orchestrator records it and sets a timer.
+if (etaDefer) tell.push(`scheduled dispatch at ${new Date(etaDefer.until).toISOString()} (${etaDefer.reason}): record it in the ledger and set a timer; keep dispatching other ready work — this is an explicit scheduled dispatch, not a silent hold`);
+else if (deferred && background) tell.push(`background task is queued for later (${deferred.split(' — ')[0]}): tell the user; continue dispatching other ready work, with no personal quota`);
 else if (deferred) tell.push(`this can't run right now (${deferred.split(' — ')[0]}): tell the user and ask how to proceed — don't just hold it`);
 if (security && m && ((ttCapable && TT.kind === 'trae') || (companyOut && QX.trae?.usable && !excluded.has(QX.trae.name)))
   && QX.trae.models.some((x) => poolOf(x) === 'gpt' && !modelExcluded(x)))
   why.push(`security task: TRAE's GPT excluded (OpenAI policy restricted it after exploit-style reviews, 2026-11-10/11) → ${label(m)}${ttadkRun ? ` on ${TT.name}` : m.vendor === 'codex' && pickAcct ? ` on ${pickAcct.a.name}` : ''}`);
 const out = {
   category: cat, stakes, failures, security, adversarial, defensive, signing, background, tier, deferred,
+  deferUntil: etaDefer?.until ?? null, deferReason: etaDefer?.reason ?? null, deferRunnerUp: etaDefer?.runnerUp ?? null,
+  eta: etaRows, queuePatienceMin: queuePatience, queueAlt,
   pick: m ? { ...m, ...launch(m), sandbox: m.vendor === 'codex' ? sandbox : null } : null,
   secondOpinion: second ? { ...second, ...launch(second, second === T.second ? T.shape : 'worker', secondAcct, secondSandbox), sandbox: second.vendor === 'codex' ? secondSandbox : null } : null,
   needsUserOK: needsOK, tellUser: tell, why, notes, redeemFirst, balance, quota: leanLines(st, data),
@@ -868,7 +1063,7 @@ if (!opts.dry && process.env.ROUTE_LOG !== '0') {
     quota: { claude: QC.status, codexOut: QX.out, underused: QX.underused, frontLoad: QX.frontLoad, overspending: QX.overspending, redeemDue: !!QX.redeem } };
   try { fs.appendFileSync(ROUTE_LOG, JSON.stringify(rec) + '\n'); } catch {}
 }
-if (opts.json) { console.log(JSON.stringify(out)); process.exit(0); }
+if (opts.json) { jsonStdout(JSON.stringify(out) + '\n'); process.exit(0); }
 if (deferred) console.log(`DEFER ${cat}: ${deferred}`);
 else {
   console.log(`${cat} → ${label(m)}${out.pick.account ? ` on account ${out.pick.account}` : ''}${out.pick.sandbox ? `, sandbox ${out.pick.sandbox}` : ''}`);

@@ -189,6 +189,85 @@ globalThis.WebSocket = class {
     assert.equal(JSON.parse(fs.readFileSync(path.join(workerHome, 'queue-status.json'), 'utf8')).fixture.position, events.at(-1)[2]);
   }
   console.log('ok   real worker queue printing: cumulative 10% moves, pending state changes, minute throttle and ready/requeue');
+  // Optimistic-launch patience (addendum, 2026-11-13 night): a measured drain predicts a start later than the deadline
+  // passed by route.mjs, so the worker interrupts its queued turn, prints the re-route line and exits 7. No turn/completed
+  // is sent: the point is the clean stop, not a finished turn.
+  const patienceTransport = path.join(tmp, 'patience-transport.mjs');
+  fs.writeFileSync(patienceTransport, `
+import fs from 'node:fs';
+globalThis.WebSocket = class {
+  constructor() { setImmediate(() => this.onopen()); }
+  close() {}
+  send(raw) {
+    const m = JSON.parse(raw);
+    if (m.id == null) return;
+    if (m.method === 'turn/interrupt') {
+      fs.appendFileSync(process.env.FIXTURE_INTERRUPT_LOG, JSON.stringify(m.params)+'\\n');
+      if (process.env.FIXTURE_INTERRUPT_MODE === 'silent') return;
+      if (process.env.FIXTURE_INTERRUPT_MODE === 'close') { setTimeout(() => this.onclose(), 50); return; }
+      setTimeout(() => this.onmessage({data:JSON.stringify({id:m.id,
+        ...(process.env.FIXTURE_INTERRUPT_MODE === 'error' ? {error:{code:-1,message:'fixture cancel failure'}} : {result:{}})})}), 50);
+      return;
+    }
+    setImmediate(() => {
+      this.onmessage({data:JSON.stringify({id:m.id,result:{thread:{turns:[{id:'turn',status:'inProgress'}]}}})});
+      if (m.method !== 'thread/read') return;
+      setTimeout(() => {
+        const notify = (params) => this.onmessage({data:JSON.stringify({method:'queue/status',params})});
+        const base = Date.now(); let clock = base; Date.now = () => clock;
+        for (const [offset, state, position] of JSON.parse(process.env.FIXTURE_QUEUE_EVENTS || '[]')) {
+          clock = base + offset;
+          notify({threadId:'fixture',turnId:'turn',state,position});
+        }
+        if (process.env.FIXTURE_COMPLETE) this.onmessage({data:JSON.stringify({method:'turn/completed',
+          params:{threadId:'fixture',turnId:'turn',turn:{id:'turn',status:'completed',items:[{type:'agentMessage',text:'done'}]}}})});
+      }, 10);
+    });
+  }
+};
+`);
+  let tooSlow;
+  const interruptLog = path.join(tmp, 'interrupt-log.jsonl');
+  try {
+    tooSlow = exec(process.execPath, ['--import', patienceTransport, path.join(root, 'codex-worker.mjs'), '--account', 'trae',
+      'wait', '--thread', 'fixture', '--queue-patience-min', '5', '--alt', 'route.mjs --exclude-model gpt-6-astra'],
+    { env: { ...env, FIXTURE_INTERRUPT_LOG: interruptLog,
+      FIXTURE_QUEUE_EVENTS: JSON.stringify([[0, 'queued', 100], [120000, 'queued', 90], [180000, 'queued', 89], [240000, 'queued', 88]]) }, encoding: 'utf8', timeout: 5000 });
+  } catch (e) { tooSlow = e; }
+  assert.equal(tooSlow.status, 7);
+  assert.match(tooSlow.stdout, /queue-too-slow: position 90, drain 5\.0\/min, predicted start in 18 min > patience 5 — re-route: route\.mjs --exclude-model gpt-6-astra/);
+  assert.equal(tooSlow.stdout.match(/queue-too-slow:/g)?.length, 1);
+  assert.ok(!/turn completed|final:/.test(tooSlow.stdout), 'completion during cancellation cannot change the exit');
+  assert.deepEqual(fs.readFileSync(interruptLog, 'utf8').trim().split('\n').map(JSON.parse), [{threadId:'fixture',turnId:'turn'}]);
+  for (const mode of ['silent', 'error', 'close']) {
+    fs.writeFileSync(interruptLog, '');
+    const started = performance.now();
+    let result;
+    try { exec(process.execPath, ['--import', patienceTransport, path.join(root, 'codex-worker.mjs'), '--account', 'trae',
+      'wait', '--thread', 'fixture', '--queue-patience-min', '30', '--alt', 'schedule TTADK at its reset'],
+    {env:{...env, FIXTURE_INTERRUPT_LOG:interruptLog, FIXTURE_INTERRUPT_MODE:mode,
+      FIXTURE_QUEUE_EVENTS:JSON.stringify([[0,'queued',887],[120000,'queued',879],[180000,'queued',875],[240000,'queued',872]])},
+      encoding:'utf8',timeout:5000}); } catch (e) { result = e; }
+    assert.equal(result?.status, 7, mode);
+    assert.ok(performance.now() - started < 4500, `${mode}: wrapper must exit promptly without manual interruption`);
+    assert.equal(result.stdout.match(/queue-too-slow:/g)?.length, 1, mode);
+    assert.match(result.stderr, /queue-cancel-unconfirmed:/);
+    assert.equal(fs.readFileSync(interruptLog,'utf8').trim().split('\n').length,1, mode);
+  }
+  fs.writeFileSync(interruptLog,'');
+  let rapid;
+  try { exec(process.execPath,['--import',patienceTransport,path.join(root,'codex-worker.mjs'),'--account','trae',
+    'wait','--thread','fixture','--queue-patience-min','30'],{env:{...env,FIXTURE_INTERRUPT_LOG:interruptLog,
+      FIXTURE_QUEUE_EVENTS:JSON.stringify(Array.from({length:181},(_,i)=>[i*1000,'queued',887-i/15]))},encoding:'utf8',timeout:5000});
+  } catch(e) { rapid=e; }
+  assert.equal(rapid?.status,7,'frequent status notifications retain enough history to estimate drain');
+  assert.equal(rapid.stdout.match(/queue-too-slow:/g)?.length,1);
+  // A rising or stalled queue has no usable drain: the worker keeps waiting instead of inventing a prediction.
+  const stillQueued = exec(process.execPath, ['--import', patienceTransport, path.join(root, 'codex-worker.mjs'), '--account', 'trae',
+    'wait', '--thread', 'fixture', '--queue-patience-min', '5', '--alt', 'route.mjs --exclude-model gpt-6-astra'],
+  { env: { ...env, FIXTURE_QUEUE_EVENTS: JSON.stringify([[0, 'queued', 90], [120000, 'queued', 100]]) }, encoding: 'utf8', timeout: 5000 });
+  assert.ok(!/queue-too-slow/.test(stillQueued));
+  console.log('ok   real worker patience: measured drain past the deadline interrupts and exits 7; stalled/rising queues wait');
   console.log('\nall pass');
 } finally {
   childProcess.execFileSync = exec; syncBuiltinESMExports();

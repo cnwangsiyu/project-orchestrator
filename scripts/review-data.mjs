@@ -14,6 +14,7 @@ import { auditGlobalRules } from './lib/global-rules-audit.mjs';
 import { LOG as RESOURCE_LOG, readJsonl } from './lib/resource-data.mjs';
 import { review as resourceReview } from './resource-review.mjs';
 import { utilisationLines } from './lib/resource-utilisation.mjs';
+import { ETA, median } from './lib/eta.mjs';
 
 const argv = process.argv.slice(2);
 const opt = (k) => { const i = argv.indexOf(`--${k}`); return i < 0 ? null : argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[i + 1] : true; };
@@ -112,6 +113,16 @@ const background = (() => {
     totalMinutes, meanMinutes: minutes.length ? Math.round(totalMinutes / minutes.length * 10) / 10 : null };
 })();
 const routing = {
+  eta: {
+    constants: ETA,
+    byCategoryEffort: Object.fromEntries([...new Set(outs.map((o) => `${o.category}:${effectiveFirst(o)?.effort ?? '?'}`))]
+      .map((key) => {
+        const timed = outs.filter((o) => `${o.category}:${effectiveFirst(o)?.effort ?? '?'}` === key
+          && Number.isFinite(o.minutes) && o.minutes > 0);
+        return [key, { samples: timed.length, medianMinutes: median(timed.map((o) => o.minutes)),
+          usable: timed.length >= ETA.historyMin }];
+      })),
+  },
   decisions: routes.length,
   companyPolicies: { balanced: routes.filter((r) => r.balance?.selected).length, background: routes.filter((r) => r.background).length,
     decisions: routes.filter((r) => r.company || r.balance || r.background).map((r) => ({ t: r.t, project: r.project, name: r.name,
