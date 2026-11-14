@@ -166,10 +166,11 @@ async function sessionLiveness(file) {
   atomic(file, { ...identity, id: agent.id || identity.id, sessionId: agent.sessionId || identity.sessionId, pid: Number.isInteger(pid) && pid > 0 ? pid : null,
     observedAt: new Date().toISOString(), observedState: s || null });
   if (['failed', 'stopped', 'completed', 'done', 'exited', 'terminated'].includes(s)) return { state: 'failed', note: `Claude session ${s}，未写 delivery receipt` };
-  if (Number.isInteger(pid) && pid > 0) return alive(pid) ? null : { state: 'failed', note: `Claude session PID ${pid} 已退出，未写 delivery receipt` };
-  if (['running', 'working', 'active', 'busy', 'inProgress'].includes(s) || agent.running === true) return null;
+  // Logical inactivity wins over a live PID; callers allow only a bounded probe grace.
   if (s === 'blocked' || s === 'idle') return { state: 'blocked', note: `Claude session ${s}，未写 delivery receipt；需要 owner 检查` };
-  return { state: 'blocked', note: 'Claude session 未提供可验证的存活状态/PID' };
+  if (Number.isInteger(pid) && pid > 0 && !alive(pid)) return { state: 'failed', note: `Claude session PID ${pid} 已退出，未写 delivery receipt` };
+  if (['running', 'working', 'active', 'busy', 'inProgress'].includes(s) || (!s && agent.running === true)) return null;
+  return { state: 'blocked', note: 'Claude session 未提供可验证的工作状态；PID 存活不能证明进展' };
 }
 
 async function confirmSessionEnd(file) {

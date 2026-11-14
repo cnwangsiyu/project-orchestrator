@@ -100,6 +100,7 @@ const delayed = finisher && scenario === 'active-finisher';
 const missing = finisher && scenario === 'missing-finisher';
 const dead = finisher && ['dead-finisher', 'dead-finisher-pid', 'agents-hang', 'agents-error', 'agents-malformed'].includes(scenario) || review && scenario === 'dead-claude';
 const unknown = finisher && scenario === 'unknown-finisher';
+const liveInactive = finisher && ['live-pid-blocked-finisher', 'live-pid-idle-finisher', 'live-pid-unknown-finisher'].includes(scenario);
 const deadStatus = scenario === 'dead-status-sender' && name.includes('-failure-');
 if (delayed) {
   const code = 'const fs = require("node:fs"); for (const s of ["SIGTERM", "SIGALRM"]) process.on(s, () => { fs.writeFileSync(' + JSON.stringify(path.join(home, 'session-killed')) + ', s); process.exit(99); }); setTimeout(() => { fs.writeFileSync(' + JSON.stringify(match[1]) + ', JSON.stringify({delivery:"sent"})); }, 3500);';
@@ -109,8 +110,13 @@ if (delayed) {
 if (dead || deadStatus) session.state = 'failed';
 if (scenario === 'dead-finisher-pid' && finisher) { session.pid = 2147483647; session.state = 'working'; }
 if (unknown) delete session.state;
+if (liveInactive) {
+  session.pid = Number(process.env.FIXTURE_LIVE_PID);
+  session.state = scenario.split('-')[2];
+  session.running = true;
+}
 if (!missing) fs.writeFileSync(registry, JSON.stringify([...sessions().filter((s) => s.id !== session.id), session]));
-if (dead || deadStatus || delayed || missing || unknown) { console.log(JSON.stringify(session)); process.exit(0); }
+if (dead || deadStatus || delayed || missing || unknown || liveInactive) { console.log(JSON.stringify(session)); process.exit(0); }
 let existing = {}; try { existing = JSON.parse(fs.readFileSync(match[1], 'utf8')); } catch {}
 fs.writeFileSync(match[1], JSON.stringify({ ...existing, delivery: 'sent', sentAt: new Date().toISOString() }));
 console.log(JSON.stringify(session));
@@ -126,7 +132,8 @@ function fixture(scenario) {
   const dir = path.join(shared, 'routing-review'), run = path.join(dir, `${day}.run`);
   const env = { ...process.env, HOME: home, NIGHTLY_DIR: dir, NIGHTLY_DAY: day, NIGHTLY_MODE: 'auto', NIGHTLY_PERSONAL_OK: '0',
     NIGHTLY_EXCLUDE: '', NIGHTLY_EXCLUDE_MODEL: '', NIGHTLY_DEADLINE: '23:59', NIGHTLY_POLL_MS: '100',
-    NIGHTLY_PROBE_MS: '2000', NIGHTLY_RESULT_RETRIES: '2', NIGHTLY_LIVENESS_RETRIES: '3', NIGHTLY_RERUN: '0', FIXTURE_SCENARIO: scenario };
+    NIGHTLY_PROBE_MS: '2000', NIGHTLY_RESULT_RETRIES: '2', NIGHTLY_LIVENESS_RETRIES: '3', NIGHTLY_RERUN: '0',
+    FIXTURE_SCENARIO: scenario, FIXTURE_LIVE_PID: String(process.pid) };
   // Never allow a caller's live account registry/routing logs to leak into a fixture.
   delete env.CODEX_ACCOUNTS; delete env.ROUTE_LOG_FILE; delete env.CODEX_HOME; delete env.CODEX_HUB;
   const execute = (overrides = {}, args = []) => spawnSync('/bin/zsh', [script, ...args], { env: { ...env, ...overrides }, encoding: 'utf8', timeout: 30000 });
@@ -191,6 +198,30 @@ try {
   const lostNotice = json(path.join(lostHub.run, 'attempt-3/failure-status.json'));
   assert.equal(lostNotice.delivery, 'sent', JSON.stringify(lostNotice));
   console.log('PASS completed-result failures/hung followers stop bounded recovery; a dead turn cannot strand a live follower');
+
+  for (const scenario of ['live-pid-blocked-finisher', 'live-pid-idle-finisher', 'live-pid-unknown-finisher']) {
+    const f = fixture(scenario), r = f.execute();
+    assert.equal(r.error, undefined, scenario + ': must finish without the fixture timeout');
+    assert.equal(r.signal, null, scenario + ': must exit normally');
+    assert.equal(r.status, 1, scenario + r.stdout + r.stderr);
+    assert.equal(f.status().stage, 'notify'); assert.equal(f.status().state, 'blocked');
+    assert.equal(f.status().worker.state, 'done');
+    const attempt = path.join(f.run, 'attempt-1');
+    const identity = json(path.join(attempt, 'finisher.json'));
+    assert.equal(identity.pid, process.pid); assert.equal(identity.observedState, scenario.split('-')[2]);
+    const receipt = json(path.join(attempt, 'delivery.json'));
+    assert.equal(receipt.delivery, 'blocked'); assert.ok(receipt.note);
+    assert.equal(json(path.join(attempt, 'status.json')).state, 'blocked');
+    const notice = json(path.join(attempt, 'failure-status.json'));
+    assert.equal(notice.delivery, 'sent'); assert.match(notice.message, /卡在 notify.*blocked/);
+    assert.ok(!fs.existsSync(path.join(f.run, 'launcher.lock')));
+    assert.equal(f.count('start-count'), 1, 'no replacement review worker');
+    const probes = fs.readFileSync(path.join(f.home, 'claude.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+      .filter((a) => a[0] === 'agents').length;
+    assert.ok(probes >= 3 && probes < 19, 'bounded grace must stop before the reviewer\'s 19-check probe');
+    assert.doesNotThrow(() => process.kill(identity.pid, 0), 'the live session PID must not be killed');
+    console.log('PASS ' + scenario + ': status recorded, notification written, lock released, exit nonzero');
+  }
 
   for (const scenario of ['dead-finisher', 'dead-finisher-pid', 'missing-finisher', 'unknown-finisher', 'agents-hang', 'agents-error', 'agents-malformed']) {
     const f = fixture(scenario);
