@@ -9,8 +9,10 @@ project-orchestrator/references/res-contract.md. Install only after reviewed own
   resource while waiting for the other. Default lane order is 1, 2, then 3.
   `--lane heavy-lane-N` (wrapper: HEAVY_BUILD_LANE) pins without hold-and-wait.
 - SG packaging and heavy focused tests use `wait-lane`, selecting any free
-  admitted lane without taking heavy-build. Two normal heavy lanes; optional
-  lane 3 requires load1m <=8 AND available memory >=32 GiB at acquisition.
+  admitted lane without taking heavy-build. Repeating `wait-lane` with the
+  same holder name and PID returns that existing lane; it does not take two.
+  Two normal heavy lanes; optional lane 3 requires load1m <=8 AND available
+  memory >=32 GiB at acquisition.
 - Use ONE long-lived process for acquisition, build and return. Workers never
   take/wait for heavy locks in a standalone tool call: each call has a fresh
   shell whose $$ exits after the call, even if a later build remains alive.
@@ -23,7 +25,10 @@ project-orchestrator/references/res-contract.md. Install only after reviewed own
   STALE?(short-lived pid) and says "use scripts/heavy-build.sh …" for warned
   local dead holders, or a proven dead holder acquired within 5s. A synchronous
   take cannot predict a shell that exits only after it returns; early status
-  detects that usage error without mutating the hold. Fix the caller.
+  detects that usage error without mutating the hold. INT/TERM/HUP during
+  acquisition or the delayed check returns every freshly acquired hold before
+  exiting with the signal status; idempotent pre-existing holds stay. Fix the
+  caller.
 - `wait-build` / `wait-lane` require --timeout <non-negative minutes>; decimals
   and zero (one attempt) work, with 1/2/4/8/15s capped backoff. The timeout is
   for acquisition; a successful explicit-PID acquisition also has a 2s check.

@@ -19,7 +19,10 @@ fs.writeFileSync(path.join(mocks, 'uname'), '#!/bin/sh\necho Darwin\n', { mode: 
 fs.writeFileSync(path.join(mocks, 'date'), `#!/bin/bash
 if [ "\${BLOCK_ON_LANE:-0}" = 1 ] && [ -d "$RES_DIR/locks/heavy-lane-1.d" ] && [ ! -f "$RES_TEST_ROOT/build/mid-acquisition" ]; then
   touch "$RES_TEST_ROOT/build/mid-acquisition"
-  sleep 30
+  sleeper=''
+  trap 'trap "" INT TERM HUP; [ -z "$sleeper" ] || kill "$sleeper" 2>/dev/null; wait "$sleeper" 2>/dev/null; exit 143' INT TERM HUP
+  /bin/sleep 3 & sleeper=$!
+  wait "$sleeper"
 fi
 exec /bin/date "$@"
 `, { mode: 0o755 });
@@ -28,11 +31,49 @@ if [ "\${RACE_LANE:-0}" = 1 ] && [[ "$*" = *'/heavy-lane-1.d' ]] && [ ! -f "$RES
   touch "$RES_TEST_ROOT/build/lane-race"
   while [ ! -f "$RES_TEST_ROOT/build/lane-race-release" ]; do sleep 0.02; done
 fi
+if [ "\${SELF_RACE_LANE:-0}" = 1 ] && [[ "$*" = *'/heavy-lane-1.d' ]] && [ ! -f "$RES_TEST_ROOT/build/self-lane-race-\${SELF_RACE_KEY:-default}" ]; then
+  touch "$RES_TEST_ROOT/build/self-lane-race-\${SELF_RACE_KEY:-default}"
+  /bin/mkdir "$@" || exit $?
+  printf 'by\tblocker\nproject\tscratch\ntask\tother\nfor\trollback fixture\npid\t1\nhost\tfixture\nstart\t1\n' > "$1/info"
+  exit 1
+fi
 /bin/mkdir "$@" || exit $?
 if [ "\${BLOCK_ON_MKDIR:-0}" = 1 ] && [[ "$*" = *'/heavy-build.d' ]]; then
   touch "$RES_TEST_ROOT/build/mid-mkdir"
   sleep 0.5
 fi
+`, { mode: 0o755 });
+const unexpectedSleep = path.join(root, 'unexpected-sleep');
+fs.writeFileSync(path.join(mocks, 'sleep'), `#!/bin/sh
+if [ "\${FAIL_ON_SLEEP:-0}" = 1 ]; then touch "$RES_TEST_ROOT/build/unexpected-sleep"; exit 97; fi
+exec /bin/sleep "$@"
+`, { mode: 0o755 });
+const signalDriver = path.join(root, 'signal-driver.sh');
+fs.writeFileSync(signalDriver, `set -T
+hit=0
+target_command="$1"
+inject_signal() {
+  local cmd="$1"
+  [ "$hit" -eq 0 ] || return 0
+  case "$RACE_STAGE" in
+    slot_mkdir) [ "$cmd" = 'TAKE_CREATED=1' ] && [ "\${current_id:-}" = heavy-build ] ;;
+    lane_mkdir) [ "$cmd" = 'TAKE_CREATED=1' ] && [[ "\${current_id:-}" = heavy-lane-* ]] ;;
+    slot_transfer) [ "$cmd" = 'build_created="$TAKE_CREATED"' ] ;;
+    lane_transfer) [ "$cmd" = 'lane_created="$TAKE_CREATED"' ] ;;
+    wait_mkdir) [ "$target_command" = wait ] && [ "$cmd" = 'TAKE_CREATED=1' ] ;;
+    wait_after_take) [ "$cmd" = 'CHECK_FRESH="$TAKE_CREATED"' ] ;;
+    diagnostic) [ "$cmd" = 'sleep 2' ] ;;
+    result) [[ "$cmd" = printf*build-lane* || "$cmd" = printf*lane=* ]] ;;
+    commit) [ "$cmd" = 'TRANSACTION_COMMITTED=1' ] ;;
+    final_exit) [ "$cmd" = 'exit 0' ] && [ "\${TRANSACTION_COMMITTED:-0}" -eq 1 ] ;;
+    rollback) [ "\${TRANSACTION_CLEANING:-0}" -eq 1 ] && [ "$cmd" = 'protected_rollback_created heavy-build "$BY"' ] ;;
+    *) return 0 ;;
+  esac || return 0
+  hit=1
+  kill -s "$RACE_SIGNAL" "$$"
+}
+trap 'inject_signal "$BASH_COMMAND"' DEBUG
+source "$RES_SOURCE" "$@"
 `, { mode: 0o755 });
 const env = { ...process.env, RES_DIR: state, PATH: `${mocks}:${process.env.PATH}`,
   RES_TEST_METRICS: '1', RES_TEST_LOAD1M: '8', RES_TEST_MEMORYSTATUS_LEVEL: '50',
@@ -59,6 +100,10 @@ function start(exe, argv, extra = {}) {
   const child = spawn(exe, argv, { env: { ...env, ...extra }, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
   child.text = '';
   child.stdout.on('data', (b) => { child.text += b; }); child.stderr.on('data', (b) => { child.text += b; });
+  child.exited = new Promise((resolve, reject) => {
+    child.on('error', reject);
+    child.on('exit', (code, signal) => resolve({ code, signal }));
+  });
   child.done = new Promise((resolve, reject) => {
     child.on('error', reject);
     child.on('close', (code, signal) => { children.delete(child); resolve({ code, signal }); });
@@ -125,6 +170,13 @@ try {
   release('heavy-lane-3', 'builder');
   eq(run(['wait-lane', ...args(), '--timeout', '0'], { RES_TEST_LOAD1M: '9' }).code, 2);
   release('heavy-lane-1'); release('heavy-lane-2');
+  // Re-invoking wait-lane with the same holder identity is idempotent.
+  const laneHolder = ['--by', 'lane-idem', '--project', 'scratch', '--for', 'idempotence', '--task', 'T87', '--pid', String(process.pid)];
+  const laneFirst = run(['wait-lane', ...laneHolder, '--timeout', '0']); eq(laneFirst.code, 0, laneFirst.text);
+  const laneFirstInfo = info('heavy-lane-1');
+  const laneAgain = run(['wait-lane', ...laneHolder, '--timeout', '0']); eq(laneAgain.code, 0, laneAgain.text);
+  ok(laneAgain.out.includes('lane=heavy-lane-1')); eq(held(), ['heavy-lane-1']); eq(info('heavy-lane-1'), laneFirstInfo);
+  release('heavy-lane-1', 'lane-idem');
   // Bad metrics and overload fail closed; take-build retains nonblocking gate exit 5.
   eq(run(['take-build', ...args()], { RES_TEST_LOAD1M: 'bad' }).code, 1); eq(held(), []);
   eq(run(['take-build', ...args()], { RES_TEST_LOAD1M: '21' }).code, 5); eq(held(), []);
@@ -170,10 +222,67 @@ try {
     eq(held(), ['heavy-build', 'heavy-lane-1']);
     const stopped = await stop(mid, signal); ok([129, 130, 143].includes(stopped.code), mid.text); eq(held(), []);
   }
+  // Every handoff gap in all four acquisition commands is cancellation-safe.
+  const signalCodes = { SIGTERM: 143, SIGINT: 130, SIGHUP: 129 };
+  const interruptionCases = [
+    ['take-build', ['slot_mkdir', 'slot_transfer', 'lane_mkdir', 'lane_transfer', 'diagnostic', 'result', 'commit', 'final_exit', 'rollback']],
+    ['wait-build', ['slot_mkdir', 'slot_transfer', 'lane_mkdir', 'lane_transfer', 'diagnostic', 'result', 'commit', 'final_exit', 'rollback']],
+    ['wait-lane', ['lane_mkdir', 'lane_transfer', 'diagnostic', 'result', 'commit', 'final_exit']],
+    ['wait', ['wait_mkdir', 'wait_after_take', 'diagnostic', 'commit', 'final_exit']],
+  ];
+  const interruptionJobs = [];
+  let interruptionIndex = 0;
+  for (const [command, stages] of interruptionCases) for (const stage of stages) for (const [signal, expected] of Object.entries(signalCodes)) {
+    const caseKey = String(interruptionIndex++), caseState = path.join(root, 'signal-cases', caseKey);
+    fs.mkdirSync(path.join(caseState, 'locks'), { recursive: true });
+    fs.writeFileSync(path.join(caseState, 'resources.tsv'), registry);
+    interruptionJobs.push(async () => {
+      const explicitPid = stage === 'diagnostic' ? ['--pid', String(process.pid)] : [];
+      const argv = command === 'wait' ? [command, 'heavy-build', ...args(), ...explicitPid, '--timeout', '0']
+        : [command, ...args(), ...explicitPid, ...(command === 'take-build' ? [] : ['--timeout', '0'])];
+      const child = start('/bin/bash', [signalDriver, ...argv], { RES_DIR: caseState, RACE_STAGE: stage, RACE_SIGNAL: signal,
+        SELF_RACE_KEY: caseKey, SELF_RACE_LANE: stage === 'rollback' ? '1' : '0' });
+      let timer, interrupted;
+      try {
+        interrupted = await Promise.race([child.exited, new Promise((_, reject) => {
+          timer = setTimeout(() => reject(Error(`${command} ${stage} ${signal} exceeded 20s: ${child.text}`)), 20000);
+        })]);
+      } catch (error) {
+        try { await stop(child); } catch {}
+        throw error;
+      } finally { clearTimeout(timer); }
+      // Exit is authoritative for the controller. Do not let a late mock or
+      // cleanup descendant holding a copied stdio fd turn this into a clock test.
+      children.delete(child); child.stdout.destroy(); child.stderr.destroy();
+      eq(interrupted.code, expected, `${command} ${stage} ${signal}: ${child.text}`);
+      const caseHeld = ids.filter((id) => fs.existsSync(path.join(caseState, 'locks', `${id}.d`)));
+      if (stage === 'rollback') {
+        eq(caseHeld, ['heavy-lane-1'], `${command} ${stage} ${signal}`);
+        const blockerInfo = fs.readFileSync(path.join(caseState, 'locks/heavy-lane-1.d/info'), 'utf8');
+        eq(blockerInfo.match(/^by\t(.*)$/m)?.[1], 'blocker');
+      } else eq(caseHeld, [], `${command} ${stage} ${signal}`);
+    });
+  }
+  // Isolated states make cases independent; bounded parallel batches keep the
+  // exhaustive matrix comfortably inside the per-suite deadline on busy hosts.
+  for (let i = 0; i < interruptionJobs.length; i += 8)
+    await Promise.all(interruptionJobs.slice(i, i + 8).map((job) => job()));
+  // An interrupted idempotent wait must not return the caller's older hold.
+  const idemWaitArgs = ['--by', 'wait-idem', '--project', 'scratch', '--for', 'idempotence', '--task', 'T87', '--pid', String(process.pid)];
+  eq(run(['take', 'heavy-build', ...idemWaitArgs]).code, 0);
+  const idemWaitInfo = info('heavy-build');
+  for (const [signal, expected] of Object.entries(signalCodes)) {
+    const interrupted = run([signalDriver, 'wait', 'heavy-build', ...idemWaitArgs, '--timeout', '0'],
+      { RACE_STAGE: 'wait_after_take', RACE_SIGNAL: signal }, '/bin/bash');
+    eq(interrupted.code, expected, `idempotent wait ${signal}: ${interrupted.text}`);
+    eq(held(), ['heavy-build']); eq(info('heavy-build'), idemWaitInfo);
+  }
+  release('heavy-build', 'wait-idem');
   // PID that is dead at take time warns immediately without slowing plain take.
-  const dead = 2147483647, began = Date.now();
-  const deadTake = run(['take', 'heavy-build', ...args('old-account'), '--pid', String(dead)]);
-  eq(deadTake.code, 0); ok(Date.now() - began < 1500); ok(deadTake.err.includes('is not a long-lived process'));
+  const dead = 2147483647;
+  fs.rmSync(unexpectedSleep, { force: true });
+  const deadTake = run(['take', 'heavy-build', ...args('old-account'), '--pid', String(dead)], { FAIL_ON_SLEEP: '1' });
+  eq(deadTake.code, 0); eq(fs.existsSync(unexpectedSleep), false); ok(deadTake.err.includes('is not a long-lived process'));
   ok(deadTake.err.includes("pass the wrapper's $$")); eq(field('heavy-build', 'pid_warning'), 'short-lived pid');
   const statusBefore = info('heavy-build'), warned = run(['status', 'heavy-build']);
   ok(warned.text.includes('STALE?(short-lived pid)')); ok(warned.err.includes('use scripts/heavy-build.sh'));

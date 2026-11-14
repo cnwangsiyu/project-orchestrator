@@ -207,7 +207,7 @@ reclaim_stale_heavy() (
 
 cmd_wait() {
   local id="${1:-}"; shift || true; need_id "$id"
-  local timeout= args=() duration deadline remaining delay=1 rc reading ALLOW_PID=1 CHECK_FRESH
+  local timeout= args=() duration deadline remaining delay=1 rc reading ALLOW_PID=1
   while [ $# -gt 0 ]; do
     case "$1" in
       --timeout)
@@ -244,11 +244,7 @@ cmd_wait() {
         fi ;;
     esac
     if [ "$rc" -ne 5 ]; then
-      CHECK_FRESH=1; [ "$(field "$id" by)" != "$BY" ] || CHECK_FRESH=0
-      if (cmd_take "$id" ${args[@]+"${args[@]}"}); then
-        check_holder_after_take "$id"
-        return 0
-      else rc=$?; fi
+      if wait_take_attempt "$id" ${args[@]+"${args[@]}"}; then return 0; else rc=$?; fi
       [ "$rc" -eq 2 ] || { [ "$id" = heavy-lane-3 ] && [ "$rc" -eq 5 ]; } || return "$rc"
     fi
     remaining=$((deadline - SECONDS))
@@ -359,6 +355,100 @@ check_holder_after_take() {
   if pid_dead "$PID"; then warn_holder; mark_holder_warning "$@"; fi
 }
 
+# Rollback is run in a signal-shielded child: the controller records a pending
+# cancellation while the child and its rm/log helpers finish releasing the
+# proven-fresh directory. The wait loop survives an interrupted wait builtin.
+rollback_created_id() {
+  local id="$1" by="$2"
+  if [ -z "$(field "$id" by)" ]; then
+    rm -rf "$LOCKS/$id.d" || return 1
+    log return "$id" "$by" 'interrupted acquisition before metadata publication'
+  else
+    cmd_return "$id" --by "$by" >/dev/null
+  fi
+}
+
+protected_rollback_created() {
+  local id="$1" by="$2" child rc=0
+  (trap - EXIT; trap '' INT TERM HUP; rollback_created_id "$id" "$by") & child=$!
+  while :; do
+    if wait "$child"; then return 0; else rc=$?; fi
+    if kill -0 "$child" 2>/dev/null; then continue; fi
+    [ ! -d "$LOCKS/$id.d" ] && return 0
+    return "$rc"
+  done
+}
+
+# Legacy wait also owns a transaction from mkdir through the delayed PID
+# diagnostic. TAKE_CREATED distinguishes a fresh hold from an idempotent one.
+wait_take_attempt() {
+  local id="$1"; shift
+  local TAKE_CREATED=0 TAKE_TRANSACTION=1 CHECK_FRESH=0
+  local TRANSACTION_PENDING_SIGNAL=0 TRANSACTION_CLEANING=0 TRANSACTION_COMMITTED=0
+  local cleanup_failed=0 rc=0
+  local BY="$BY" PROJECT="$PROJECT" PURPOSE="$PURPOSE" TASK="$TASK" UNTIL="$UNTIL"
+  local NOTE="$NOTE" FORCE="$FORCE" OFFLINE="$OFFLINE" DEVICE="$DEVICE" POLICY="$POLICY"
+  local PID="$PID" PID_EXPLICIT="$PID_EXPLICIT"
+  rollback_attempt() {
+    [ "$TAKE_CREATED" -eq 1 ] || return 0
+    if protected_rollback_created "$id" "$BY"; then TAKE_CREATED=0; return 0; fi
+    [ ! -d "$LOCKS/$id.d" ] && TAKE_CREATED=0
+    return 1
+  }
+  transaction_signal() {
+    local code="$1"
+    [ "$TRANSACTION_PENDING_SIGNAL" -ne 0 ] || TRANSACTION_PENDING_SIGNAL="$code"
+    [ "$TRANSACTION_CLEANING" -eq 0 ] || return 0
+    TRANSACTION_CLEANING=1
+    rollback_attempt || cleanup_failed=1
+    TRANSACTION_CLEANING=0
+    trap - EXIT
+    exit "$TRANSACTION_PENDING_SIGNAL"
+  }
+  arm_transaction_signals() {
+    trap 'transaction_signal 130' INT
+    trap 'transaction_signal 143' TERM
+    trap 'transaction_signal 129' HUP
+  }
+  unwind() {
+    local status=$?
+    if [ "$TRANSACTION_COMMITTED" -eq 1 ] && [ "$status" -eq 0 ]; then
+      # Keep transaction_signal armed across the final trap removal/exit gap.
+      trap - EXIT
+      exit 0
+    fi
+    TRANSACTION_CLEANING=1
+    rollback_attempt || cleanup_failed=1
+    TRANSACTION_CLEANING=0
+    trap - EXIT
+    [ "$TRANSACTION_PENDING_SIGNAL" -eq 0 ] || exit "$TRANSACTION_PENDING_SIGNAL"
+    [ "$cleanup_failed" -eq 0 ] || status=1
+    exit "$status"
+  }
+  finish_attempt() {
+    local status="$1"
+    TRANSACTION_CLEANING=1
+    rollback_attempt || cleanup_failed=1
+    TRANSACTION_CLEANING=0
+    trap - EXIT
+    [ "$TRANSACTION_PENDING_SIGNAL" -eq 0 ] || exit "$TRANSACTION_PENDING_SIGNAL"
+    trap - INT TERM HUP
+    [ "$cleanup_failed" -eq 0 ] || status=1
+    return "$status"
+  }
+  trap unwind EXIT
+  arm_transaction_signals
+  if cmd_take "$id" "$@"; then :
+  else rc=$?; finish_attempt "$rc"; return $?; fi
+  CHECK_FRESH="$TAKE_CREATED"
+  check_holder_after_take "$id"
+  TRANSACTION_COMMITTED=1
+  # The signal handler still owns fresh rollback across this final EXIT-trap
+  # removal. A cancellation before process exit therefore cannot leak it.
+  trap - EXIT
+  exit 0
+}
+
 build_usage() {
   cat <<'EOF'
 res take-build --by <session> --project <slug> --for "<purpose>" [take options] [--lane heavy-lane-1|2|3]
@@ -376,46 +466,72 @@ EOF
 acquire_attempt() {
   local mode="$1" candidate="$2" build_created=0 lane_created=0
   local TAKE_CREATED=0 TAKE_TRANSACTION=1 current_id= rc=0 CHECK_FRESH=1
+  local TRANSACTION_PENDING_SIGNAL=0 TRANSACTION_CLEANING=0 TRANSACTION_COMMITTED=0
+  local cleanup_failed=0
   # Keep retry metadata intact when rollback invokes the normal return parser.
   local BY="$BY" PROJECT="$PROJECT" PURPOSE="$PURPOSE" TASK="$TASK" UNTIL="$UNTIL"
   local NOTE="$NOTE" FORCE="$FORCE" OFFLINE="$OFFLINE" DEVICE="$DEVICE" POLICY="$POLICY"
   local PID="$PID" PID_EXPLICIT="$PID_EXPLICIT"
-  unwind() {
-    local status=$?
-    trap - EXIT; trap '' INT TERM HUP
-    rollback_attempt || status=1
-    exit "$status"
-  }
   rollback_attempt() {
     local status=0
     if [ "$TAKE_CREATED" -eq 1 ]; then
       if [ "$current_id" = heavy-build ]; then build_created=1; else lane_created=1; fi
+      TAKE_CREATED=0
     fi
-    if [ "$lane_created" -eq 1 ]; then rollback_created "$candidate" || status=1; fi
-    if [ "$build_created" -eq 1 ]; then rollback_created heavy-build || status=1; fi
+    if [ "$lane_created" -eq 1 ]; then
+      if protected_rollback_created "$candidate" "$BY"; then lane_created=0
+      else [ ! -d "$LOCKS/$candidate.d" ] && lane_created=0; status=1; fi
+    fi
+    if [ "$build_created" -eq 1 ]; then
+      if protected_rollback_created heavy-build "$BY"; then build_created=0
+      else [ ! -d "$LOCKS/heavy-build.d" ] && build_created=0; status=1; fi
+    fi
     return "$status"
+  }
+  transaction_signal() {
+    local code="$1"
+    [ "$TRANSACTION_PENDING_SIGNAL" -ne 0 ] || TRANSACTION_PENDING_SIGNAL="$code"
+    [ "$TRANSACTION_CLEANING" -eq 0 ] || return 0
+    TRANSACTION_CLEANING=1
+    rollback_attempt || cleanup_failed=1
+    TRANSACTION_CLEANING=0
+    trap - EXIT
+    exit "$TRANSACTION_PENDING_SIGNAL"
+  }
+  arm_transaction_signals() {
+    trap 'transaction_signal 130' INT
+    trap 'transaction_signal 143' TERM
+    trap 'transaction_signal 129' HUP
+  }
+  unwind() {
+    local status=$?
+    if [ "$TRANSACTION_COMMITTED" -eq 1 ] && [ "$status" -eq 0 ]; then
+      # transaction_signal remains armed until exit, so cancellation cannot
+      # land after rollback protection has been removed.
+      trap - EXIT
+      exit 0
+    fi
+    TRANSACTION_CLEANING=1
+    rollback_attempt || cleanup_failed=1
+    TRANSACTION_CLEANING=0
+    trap - EXIT
+    [ "$TRANSACTION_PENDING_SIGNAL" -eq 0 ] || exit "$TRANSACTION_PENDING_SIGNAL"
+    [ "$cleanup_failed" -eq 0 ] || status=1
+    exit "$status"
   }
   finish_attempt() {
     local status="$1"
-    trap - EXIT; trap '' INT TERM HUP
-    [ "$status" -eq 0 ] || rollback_attempt || status=1
+    TRANSACTION_CLEANING=1
+    rollback_attempt || cleanup_failed=1
+    TRANSACTION_CLEANING=0
+    trap - EXIT
+    [ "$TRANSACTION_PENDING_SIGNAL" -eq 0 ] || exit "$TRANSACTION_PENDING_SIGNAL"
     trap - INT TERM HUP
+    [ "$cleanup_failed" -eq 0 ] || status=1
     return "$status"
   }
-  rollback_created() {
-    # A signal can interrupt write_info after mkdir, before any by field exists.
-    # TAKE_CREATED proves this attempt created it; do not use a force return.
-    if [ -z "$(field "$1" by)" ]; then
-      rm -rf "$LOCKS/$1.d" || return 1
-      log return "$1" "$BY" 'interrupted acquisition before metadata publication'
-    else
-      cmd_return "$1" --by "$BY" >/dev/null
-    fi
-  }
   trap unwind EXIT
-  trap 'exit 130' INT
-  trap 'exit 143' TERM
-  trap 'exit 129' HUP
+  arm_transaction_signals
   local options=(--by "$BY" --project "$PROJECT" --for "$PURPOSE" --task "$TASK" --until "$UNTIL" --pid "$PID")
   [ -z "$FORCE" ] || options+=(--force)
   if [ "$mode" = build ]; then
@@ -439,7 +555,9 @@ acquire_attempt() {
   fi
   if [ "$mode" = build ]; then printf 'build-lane=%s\n' "$candidate"
   else printf 'lane=%s\n' "$candidate"; fi
-  finish_attempt 0
+  TRANSACTION_COMMITTED=1
+  trap - EXIT
+  exit 0
 }
 
 cmd_acquire() {
@@ -475,6 +593,14 @@ cmd_acquire() {
   [ -z "$pin" ] || need_id "$pin"
   if [ "$mode" = build ] && [ "$(field heavy-build by)" = "$BY" ]; then
     die "build slot already held by you; return-build before a fresh acquisition (do not nest wrappers)"
+  fi
+  if [ "$mode" = lane ]; then
+    for candidate in heavy-lane-1 heavy-lane-2 heavy-lane-3; do
+      if [ "$(field "$candidate" by)" = "$BY" ] && [ "$(field "$candidate" pid)" = "$PID" ]; then
+        printf 'lane=%s\n' "$candidate"
+        return 0
+      fi
+    done
   fi
   duration=$(awk -v t="$timeout" 'BEGIN {s=t*60; printf "%.0f\n", int(s)+(s>int(s))}')
   deadline=$((SECONDS + duration))
@@ -537,10 +663,8 @@ transaction_mkdir() {
   trap 'TAKE_SIGNAL=129' HUP
   (trap '' INT TERM HUP; mkdir "$1" 2>/dev/null) || rc=$?
   [ "$rc" -ne 0 ] || TAKE_CREATED=1
-  trap 'exit 130' INT
-  trap 'exit 143' TERM
-  trap 'exit 129' HUP
-  [ "$TAKE_SIGNAL" -eq 0 ] || exit "$TAKE_SIGNAL"
+  arm_transaction_signals
+  [ "$TAKE_SIGNAL" -eq 0 ] || transaction_signal "$TAKE_SIGNAL"
   return "$rc"
 }
 
