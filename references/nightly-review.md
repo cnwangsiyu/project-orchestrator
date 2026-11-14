@@ -12,7 +12,11 @@ the review with `route.mjs analysis --stakes high` (logged as project `routing`,
 and runs it through **codex-worker's hub** on the account the route picks, with queue/status, the non-terminating stall
 alarm and normal failure re-routing. There is **no fixed review timeout** (user, 2026-11-14). A stalled/disconnected
 follower checks the accepted turn and reattaches with `wait`; an unknown acceptance/turn state is BLOCKED, never a
-duplicate launch. A real failure or missing report is re-routed, up to three attempts: an infrastructure miss excludes
+duplicate launch. While a follower is attached, independent hub status probes verify that its turn is still active.
+An `inProgress` turn can continue indefinitely; a `completed` turn is never labelled working, and result recovery is
+limited to three retries, then report/failed with worker/done and a failure notification. Only local observation/follower
+clients may be closed on a failed/unknown probe; no hub turn or real Claude session is interrupted by these budgets.
+A real failure or missing report is re-routed, up to three attempts: an infrastructure miss excludes
 that **model**, not the account; login/auth or account-wide quota/proxy failure excludes the account. TTADK rate limits
 retry once before account exclusion. The hub records provider failures with their concrete model, without a second
 blanket account failure record. Policy blocks stop for explicit adversarial routing, never an automatic GPT retry.
@@ -29,7 +33,13 @@ first attempt's evidence), worker log/final output, `report.md`, `notify.json` a
 same-day reruns never overwrite prior attempts; pre-migration day-level evidence is copied to `attempt-1/legacy/`.
 Validated outputs are published to `<date>.md` and `<date>.notify.json` for existing consumers. A previous day's
 worker/session is not stopped just because the calendar changed. After a launcher interruption, a known accepted hub
-thread is reattached; an unconfirmed Claude/startup session needs owner reconciliation before another launch.
+thread is reattached. The finisher's `finisher.json` (whole Claude review: `worker-session.json`) persists its launch name,
+session/job id, model/effort and observed liveness. `claude agents --json` verifies the exact session's active state or
+PID while waiting for a receipt. A dead/missing session records failed; unknown/blocked status records BLOCKED after
+three probes, releases the day lock and notifies. A still-working session is not killed because of elapsed time.
+Confirmed dead finishers can be retried in a new attempt without rerunning review/fixes; uncertain sessions are never
+duplicated. Failed/blocked runs also write/send an attempt-local `failure-status.json`, even if 05:00 was already notified.
+A dead failure-notification session is itself recorded as failed, never an infinite fallback loop.
 
 - **The worker** (the routed Codex model, e.g. `gpt-6.1-sol` xhigh on TTADK or TRAE; full access, network on):
   steps 1, 2, 3 and 5.
@@ -68,7 +78,8 @@ thread is reattached; an unconfirmed Claude/startup session needs owner reconcil
      After the checks and notifications succeed, run the brief's `ack --file <attempt>/delivery.json` command **before**
      waiting for optional user-decision cards. This is the delivery receipt, not merely a successful `claude --bg`
      launch. On failure/block write that file as `{"delivery":"failed","note":"<reason>"}`; do not acknowledge a
-     notification that was not sent. The launcher stays in notify/running until the receipt and exits nonzero on failure.
+     notification that was not sent. The launcher stays in notify/running only while that exact session is verified alive;
+     missing receipts from dead sessions and failed/unknown liveness checks exit nonzero with status and notification.
   4. Decisions (user, 2026-11-09: "每晚复盘如果有任何需要我决策的东西请用卡片弹窗问我，用中文"). If `decisions` is
      not empty: first send one PushNotification in Chinese (「夜间复盘有 N 个决定等你选择」), then ask them with
      AskUserQuestion — the card — in Chinese, at most 4 questions per card (several cards in a row if more), each
@@ -505,15 +516,23 @@ existing 03:07 agent pointed at the owner-integrated live checkout, not a tempor
 installed/restarted by these edits. cwd `_shared/routing-review/`; `launch.log` records stages and the final state.
 Exit 0 means a current-attempt report **and notification receipt** exist (dry mode: its nonempty final report);
 BLOCKED, failures, and missing reports exit nonzero. A successful background finisher launch is not completion.
+An already delivered day is an idempotent no-op: no second worker, finisher, notification or overwritten report.
+`NIGHTLY_RERUN=1` explicitly requests a fresh archived review after success (or exhausted completed-result recovery);
+it never authorizes personal quota or duplicates an active/unknown worker. Claim guards publish their PID atomically
+and safely recover dead claimants; an active claimant is never reclaimed. The shell retains its execute bit.
 
 **05:00 is a notification deadline, not termination.** `NIGHTLY_DEADLINE=HH:MM` overrides it in local time.
-The active launcher checks at that time; also install the independent checker below so exited, blocked, crashed or
+The active launcher arms its check only if that time is still ahead; a post-05:00 approval/recovery launch does not
+send a stale gather/running message or poison deadline dedup. Also install the independent checker below so exited, blocked, crashed or
 missing launches still deliver a status. It writes `<date>.run/deadline-status.md/.json` and sends, through the existing
 Claude PushNotification channel, either completed or 「夜间复盘未完成：卡在 <stage>，已做 <what>，worker 仍在运行/已失败（原因）」.
 `delivery=launched` is not a receipt: the status session writes `delivery=sent` only after PushNotification succeeds.
 Concurrent checks are deduplicated, launch failures remain recorded/retryable, and no checker cancels a worker or
 starts a personal-quota review. When a worker finishes later, the report and completion notifications are delivered
-then. Unacknowledged status/Claude sessions need owner reconciliation, not automatic duplicate sessions.
+then. Unacknowledged status/Claude sessions get the same bounded liveness probes, not a silent forever-wait or an
+automatic duplicate. Observer RPCs default to a 15s budget (`NIGHTLY_PROBE_MS`); `NIGHTLY_RESULT_RETRIES` and
+`NIGHTLY_LIVENESS_RETRIES` default to 3. These limits govern status clients, terminal result retrieval and uncertain
+observations, **not** a working review's wall time. Invalid/non-finite settings use the finite defaults.
 
 **Owner installs the checker** using `templates/launchd/com.user.routing-nightly-review-deadline.plist.in`:
 
