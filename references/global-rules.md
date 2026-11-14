@@ -1,7 +1,8 @@
 # Global Rules
-version: 2026-11-13.8
+version: 2026-11-13.9
 
 ## Changes In This Version
+- Adversarial security reviews (2026-11-13, user option A): a `--security` review runs only on company non-GPT models (TTADK Kimi-K3 → DeepSeek-V4.1-Flash on TTADK/TRAE → Claude Opus with personal-quota OK), with a second reviewer from the other non-GPT family; `--adversarial` forces it for any task. OpenAI cyberPolicy blocks are recorded as `kind:'policy-block'` and never retried or resent to another GPT account; on TRAE the block also leaves a 983-style family restriction (until the next 00:00 UTC), while TTADK has telemetry only and no pause.
 - Fix lane-3 same-holder re-take, legacy wrapper fallback and owner code/registry publication with rollback; detect res wait through any wrapper and synchronize test-holder lifetimes.
 - Approved utilisation: passive idle hints, expiring TTADK quota preference and nightly utilisation; CPU probe has an independent 4s budget, optional ccache stays UNKNOWN.
 - Global-rules owner takes over the whole res tool; v1.3 lane 3 is implemented here and staged pending owner switch, with load <=8 and avail >=32 GiB (2-3 lanes). Telemetry only observes it.
@@ -41,7 +42,7 @@ version: 2026-11-13.8
 ## Worker Rules
 - Never read, copy or load any login session or credential file (cookies, SSO/session tokens, CLI auth files such as bytedcli's, keychain items, .netrc, API keys), and never inject a session into a browser or tool to get past a login. Wherever a login or authorization is needed, stop and report BLOCKED with what needs signing in.
 - Codex workers on this machine never touch signing/credential files, including keychain-password files or hashing, regardless of authorization. Strip/use sanitized public inputs, or the user runs the necessary operation once; do not plan on approval lifting the ban.
-- Security follows context: attack-style findings/exploit material require a --security route, including implementation/fix work that reads them. Otherwise pass defensive requirements only; other security content still requires --security. No TRAE GPT on security decisions; don't bypass restrictions.
+- Security follows context: attack-style findings/exploit material require a --security route, including implementation/fix work that reads them. Otherwise pass defensive requirements only; other security content still requires --security. A `--security` review (`review`, `review-high`, `second-opinion`) is adversarial by default: no GPT model on any account; TTADK Kimi-K3 → DeepSeek-V4.1-Flash (TTADK or TRAE) → Claude Opus only with the user's OK, with a second reviewer from the other non-GPT family. Implementation/fix work under `--security` keeps the TRAE-GPT exclusion. A cyberPolicy block must not be retried or resent to another GPT account; re-route with `--adversarial`. On TRAE it is recorded like the 983 restriction signal (gpt family out until the next 00:00 UTC); TTADK records only the `kind:'policy-block'` row and does not pause.
 - Report the concrete model, effort and account (not merely TRAE); work only within the brief and sandbox. Missing login/access means BLOCKED, never a session transplant, login bypass or permission laundering.
 - Builds use the heavy-build wrapper or res take/return per the contract; timeout means report/queue, never bypass. Return resources/close owned children on every exit; never kill another task's processes.
 

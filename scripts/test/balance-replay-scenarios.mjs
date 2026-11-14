@@ -149,7 +149,9 @@ try {
     category: 'implement', stakes: 'normal', now }).eligible, false);
 
   // Replay each row with balancing factors. The fixture explicitly documents reconstructed missing candidate telemetry.
-  const stayed = new Set([18, 19, 20, 21, 22, 25, 26, 28, 38, 44, 48, 56, 57, 58]);
+  // Security reviews are adversarial and move to DeepSeek-V4.1-Flash on TRAE once TTADK is projected out;
+  // implement-hard --security (row 48) is not adversarial and still stays on TTADK.
+  const stayed = new Set([18, 19, 20, 21, 22, 25, 26, 28, 48, 56]);
   const before = { ttadk: 0, trae: 0, main: 0 }, after = { ...before }, replay = { ttadk: 0, trae: 0 };
   let changed = 0;
   const solReset = Date.parse('2026-11-13T22:00:00Z');
@@ -176,8 +178,8 @@ try {
     if (r.pick.account === 'trae') assert.ok(!daily[r.pick.model]?.depleted, `row ${row.row} must avoid a depleted foreground bucket`);
   }
   assert.deepEqual(before, { ttadk: 49, trae: 11, main: 2 });
-  assert.deepEqual(replay, { ttadk: 14, trae: 25 });
-  assert.deepEqual(after, { ttadk: 26, trae: 34, main: 2 }); assert.equal(changed, 23);
+  assert.deepEqual(replay, { ttadk: 10, trae: 29 });
+  assert.deepEqual(after, { ttadk: 22, trae: 38, main: 2 }); assert.equal(changed, 27);
   console.log(`PASS reconstructed evidence: 39 replayed rows -> ${replay.ttadk} TTADK / ${replay.trae} TRAE; 23 rows without snapshots retained; total ${after.ttadk} TTADK / ${after.trae} TRAE / ${after.main} personal; ${changed} transfers`);
   console.log('PASS queue independence, load fallback, tier walking, projection split, reserve/freshness, tool exclusions, rejection logs and burn boundaries');
 } finally { fs.rmSync(tmp, { recursive: true, force: true }); }

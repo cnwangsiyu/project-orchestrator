@@ -243,10 +243,12 @@ const CASES = [
   ['quiet', ['lookup'], 'codex gpt-6-luna low @main', 'credential clause'],
   ['ttOutTrae', ['analysis'], 'codex gpt-6.1-sol high @trae', 'credential clause'],
   // Security excludes TRAE GPT for this task; TTADK GPT and personal accounts are untouched (2026-11-12).
-  ['ttOutTrae', ['review-high', '--security'], 'codex gemini-3.1-pro-preview high @trae', 'describe defensive intent'],
+  // A security review is adversarial by default (2026-11-13): no GPT on any account, and with no company non-GPT
+  // model listed here the pick is Claude Opus behind the personal-quota gate.
+  ['ttOutTrae', ['review-high', '--security'], 'claude opus xhigh', 'describe defensive intent'],
   ['ttOutTrae', ['implement', '--impact', 'service', '--security'], 'codex gemini-3.1-pro-preview high @trae'],
-  ['ttAndTrae', ['review-high', '--security'], 'codex gpt-6.1-sol xhigh @ttadk', 'describe defensive intent'],
-  ['ttFresh', ['--security', 'review-high'], 'codex gpt-6.1-sol xhigh @ttadk'],
+  ['ttAndTrae', ['review-high', '--security'], 'claude opus xhigh', 'describe defensive intent'],
+  ['ttFresh', ['--security', 'review-high'], 'claude opus xhigh'],
   ['ttFresh', ['implement', '--impact', 'service', '--security'], 'codex gpt-6.1-sol high @ttadk'],
   ['fresh', ['review-high', '--security'], 'claude opus xhigh', 'describe defensive intent'],
   ['fresh', ['implement', '--impact', 'service', '--security'], 'codex gpt-6.1-sol xhigh @main'],
@@ -694,14 +696,15 @@ for (const [sc, args] of ERRORS) {
     [pk('traeNoGemPaused', ['implement', '--exclude-model', 'gpt']), 'sonnet medium @undefined'],
     [pk('traeNoGemPaused', ['implement']), 'gpt-6.1-sol high @trae'],
     // The task flag uses that same exclusion path, scoped to TRAE, with the normal fallback ladder and gates.
-    [pk('traeFull', ['review-high', '--security']), 'gemini-3.1-pro-preview high @trae'],
+    // Security reviews are adversarial by default: DeepSeek-V4.1-Flash is the only company non-GPT model here.
+    [pk('traeFull', ['review-high', '--security']), 'deepseek-v4.1-flash high @trae'],
     [pk('traeFull', ['implement', '--impact', 'service', '--security']), 'deepseek-v4.1-flash high @trae'],
     [pk('traeFull', ['implement', '--security', '--failures', '1']), 'gemini-3.1-pro-preview high @trae'],
     [pk('traeFull', ['implement', '--security', '--exclude-model', 'deepseek']), 'gemini-3.1-pro-preview high @trae'],
     [personal('traeFull', ['implement', '--security']), false],
     [o('traeFull', ['review-high', '--security']).security, true],
     [o('traeFull', ['review-high']).security, false],
-    [o('traeFull', ['review-high', '--security']).why.some((n) => /security task: TRAE's GPT excluded.*gemini-3\.1-pro-preview/.test(n)), true],
+    [o('traeFull', ['review-high', '--security']).why.some((n) => /adversarial: no GPT model on any account.*Kimi-K3, then DeepSeek/.test(n)), true],
     [o('ttAndTrae', ['review-high', '--security']).why.some((n) => /security task:/.test(n)), false],
     [hasNote('traeFull', ['implement', '--security'], /review required.*written by fallback model/), true],
     [hasNote('traeFull', ['review-high', '--security'], /brief: describe defensive intent and ask for findings with impact and fix; avoid requesting step-by-step exploit code/), true],
@@ -735,23 +738,25 @@ for (const [sc, args] of ERRORS) {
     [['second-opinion', '--against', 'codex'], 'opus high @undefined'],
   ]) {
     const personalPick = args[0] === 'second-opinion' ? claudePick : 'gpt-6.1-sol xhigh @main';
+    // A --security review is adversarial: with no company non-GPT model eligible it lands on Opus behind the gate.
+    const advPick = args[0] === 'second-opinion' ? 'opus high @undefined' : 'opus xhigh @undefined';
     for (const [sc, flags, want, gate] of [
-      ['traeReviewFull', ['--security', '--exclude-model', 'deepseek', '--dry'], 'gemini-3.1-pro-preview high @trae', false],
-      ['traeFull', ['--security', '--exclude-model', 'deepseek'], 'gemini-3.1-pro-preview high @trae', args[0] === 'review-high'], // personal Claude second opinion needs consent without company Sol
+      ['traeReviewFull', ['--security', '--exclude-model', 'deepseek', '--dry'], advPick, true],
+      ['traeFull', ['--security', '--exclude-model', 'deepseek'], advPick, true],
       ['traeReviewGptOut', ['--exclude-model', 'deepseek'], 'gemini-3.1-pro-preview high @trae', false],
       ['traeReviewFull', ['--exclude-model', 'gpt,deepseek'], 'gemini-3.1-pro-preview high @trae', false],
       // High-stakes/security review now excludes DeepSeek; the remaining ladder is Gemini then Claude.
       ['traeReviewGptOut', [], args[0] === 'review-high' ? 'gemini-3.1-pro-preview high @trae' : 'deepseek-v4.1-flash high @trae', false],
-      ['traeFull', ['--security', '--failures', '2'], args[0] === 'review' ? 'gemini-3.1-pro-preview high @trae' : 'opus xhigh @undefined', args[0] !== 'review'], // actual personal ladder fall-through
-      ['traeReviewFull', ['--security', '--exclude-model', 'deepseek,gemini'], personalPick, true],
-      ['traeReviewFull', ['--security', '--exclude-model', 'deepseek,gemini', '--urgent'], personalPick, false],
+      ['traeFull', ['--security', '--failures', '2'], advPick, true], // the adversarial ladder is DeepSeek → Claude
+      ['traeReviewFull', ['--security', '--exclude-model', 'deepseek,gemini'], advPick, true],
+      ['traeReviewFull', ['--security', '--exclude-model', 'deepseek,gemini', '--urgent'], advPick, false],
       ['traeReviewGptOut', ['--exclude-model', 'deepseek,gemini'], personalPick, true],
       ['traeReviewGptOut', ['--exclude-model', 'deepseek,gemini', '--urgent'], personalPick, false],
       ['traeReviewFull', ['--exclude-model', 'gpt,deepseek,gemini'], claudePick, true],
-      ['traeReviewChatOut', ['--security', '--exclude-model', 'deepseek,gemini'], claudePick, true],
+      ['traeReviewChatOut', ['--security', '--exclude-model', 'deepseek,gemini'], advPick, true],
       ['traeReviewFull', [], 'gpt-6.1-sol xhigh @trae', false],
       ['traeFull', [], args[0] === 'review' ? 'gpt-6.1-sol xhigh @trae' : claudePick, false],
-      ['ttFresh', ['--security', '--exclude-model', 'deepseek'], args[0] === 'review' ? 'gpt-6.1-sol xhigh @ttadk' : claudePick, false],
+      ['ttFresh', ['--security', '--exclude-model', 'deepseek'], advPick, true],
     ]) {
       const routeArgs = [...args, ...flags];
       const result = o(sc, routeArgs);
@@ -779,7 +784,8 @@ for (const [sc, args] of ERRORS) {
   for (const cat of ['implement', 'implement-hard', 'debug']) {
     cases.push([hasNote(o('traeGptOut', [cat]), /DeepSeek: read-only analysis and simple edits only; not full-package builds, auth\/storage reviews or acceptance.*--exclude-model deepseek/), true]);
   }
-  for (const args of [['build-run'], ['review-high'], ['review', '--impact', 'release'], ['review', '--stakes', 'high'], ['review', '--security']]) {
+  // Adversarial --security reviews are the approved DeepSeek exception; the non-adversarial sensitive rows keep it out.
+  for (const args of [['build-run'], ['review-high'], ['review', '--impact', 'release'], ['review', '--stakes', 'high']]) {
     for (const sc of ['traeFull', 'traeGptOut', 'traeNoGem']) for (const failures of [0, 1, 2, 3, 4, 5, 6]) {
       const r = o(sc, [...args, '--failures', String(failures)]);
       cases.push([r.pick?.model.startsWith('deepseek') ?? false, false], [r.secondOpinion?.model.startsWith('deepseek') ?? false, false]);
@@ -1249,8 +1255,15 @@ for (const [sc, args] of ERRORS) {
     assert.equal(r(['implement', '--background'], 'backgroundOnly').pick.model, FLASH);
     assert.equal(r(['lookup', '--background', '--security']).pick.model, FLASH);
     assert.equal(r(['lookup', '--background', '--security']).pick.account, 'trae');
-    for (const args of [['review', '--security'], ['review-high', '--security'], ['lookup', '--exclude-model', 'gpt,deepseek']]) {
+    for (const args of [['review', '--security'], ['review-high', '--security']]) {
       const o = r([...args, '--background'], 'backgroundOnly');
+      // Adversarial reviews use the company non-GPT model in the background lane too; no second family here.
+      assert.equal(o.pick.model, FLASH); assert.equal(o.pick.account, 'trae');
+      assert.equal(o.secondOpinion, null);
+      assert.ok(o.needsUserOK.some((n) => /^adversarial second reviewer:/.test(n)));
+    }
+    {
+      const o = r(['lookup', '--exclude-model', 'gpt,deepseek', '--background'], 'backgroundOnly');
       assert.equal(o.pick, null); assert.ok(o.deferred); assert.equal(o.secondOpinion, null);
       assert.ok(o.tellUser.some((n) => /queued for later/.test(n))); assert.deepEqual(o.needsUserOK, []);
     }
@@ -1339,7 +1352,11 @@ for (const [sc, args] of ERRORS) {
       assert.ok(!o.needsUserOK.some((n) => /personal quota/.test(n)));
     }
     scenario(active);
-    for (const args of [['review-high', '--security'], ['review', '--security'], ['image-read', '--security', '--exclude-model', SEED], ['analysis', '--security', '--exclude-model', FLASH]]) {
+    // Security reviews are adversarial: the company non-GPT model runs even in the background lane.
+    for (const args of [['review-high', '--security'], ['review', '--security']]) {
+      const o = r(args); assert.equal(o.pick.model, FLASH); assert.equal(o.pick.account, 'trae');
+    }
+    for (const args of [['image-read', '--security', '--exclude-model', SEED], ['analysis', '--security', '--exclude-model', FLASH]]) {
       const o = r(args); assert.equal(o.pick, null); assert.ok(o.tellUser.some((n) => /queued for later/.test(n)));
     }
     // Unknown quota retains the ordinary rung; an Astra rung keeps its tier even if Sol is depleted.
@@ -1416,7 +1433,9 @@ for (const [sc, args] of ERRORS) {
     assert.equal(r(['analysis', '--background', '--exclude-model', 'gpt']).pick.model, FLASH);
     for (const args of [['review', '--security'], ['review-high', '--security']]) {
       const o = r([...args, '--background'], { company: false });
-      assert.equal(o.pick, null); assert.ok(o.deferred); assert.deepEqual(o.needsUserOK, []);
+      // Adversarial reviews stay on the company non-GPT model; the missing second family is surfaced as a question.
+      assert.equal(o.pick.model, FLASH); assert.equal(o.pick.account, 'trae');
+      assert.ok(o.needsUserOK.some((n) => /^adversarial second reviewer:/.test(n)));
     }
     for (const daily of [null, {}, { [SOL]: null }, { [SOL]: { ...bucket(), resetsAt: now - 1 } }]) {
       assert.equal(r(['analysis', '--background'], { daily }).pick.model, SOL);
@@ -1528,6 +1547,77 @@ for (const [sc, args] of ERRORS) {
     assert.equal(r(['analysis'], { models, sampledAt: now - 29 * 60000, daily: { ...active, [SOL]: bucket(true) } }).pick.model, SOL56);
     console.log('ok   actual personal approval, one-model/excluded/depleted neighbours, background isolation, company effort floors and quota reading age');
   } catch (e) { fail++; console.log(`FAIL fix-round routing regressions: ${e.stack}`); }
+}
+// Adversarial security review (user decision 2026-11-13, option A): no GPT on any account. Exact order: TTADK
+// Kimi-K3 high -> DeepSeek-V4.1-Flash high on TTADK or TRAE -> Claude Opus behind the personal-quota gate; a second
+// reviewer always comes from the other non-GPT family, and one-family-only asks the user (Claude second or one reviewer).
+{
+  const KIMI = 'kimi-k3', FLASH = 'deepseek-v4.1-flash';
+  const out = { healthy: false, reason: 'its daily token quota is used up', quotaOut: { kind: 'daily', resetsAt: now + 10 * h } };
+  const kimiTt = (extra = {}) => tt({ models: ['gpt-6.1-sol', KIMI, FLASH], ...extra });
+  const dsTrae = (extra = {}) => tr({ models: ['gpt-6.1-sol', FLASH], modelIds: { 'gpt-6.1-sol': 'GPT-6.1-Sol', [FLASH]: 'DEEPSEEK-V4.1-FLASH' }, ...extra });
+  S.advBoth = { claude: cl(10, 120), codex: [acc('main', 20, 120), kimiTt()] };
+  S.advDsOnly = { claude: cl(10, 120), codex: [acc('main', 20, 120), tt({ models: ['gpt-6.1-sol', FLASH] })] };
+  S.advTtadkOut = { claude: cl(10, 120), codex: [acc('main', 20, 120), kimiTt(out), dsTrae()] };
+  // Kimi is named for TTADK only: a TRAE-listed Kimi must not jump ahead of DeepSeek.
+  S.advTraeKimi = { claude: cl(10, 120), codex: [acc('main', 20, 120), tt(out), tr({ models: ['gpt-6.1-sol', KIMI, FLASH], modelIds: {} })] };
+  S.advNone = { claude: cl(10, 120), codex: [acc('main', 20, 120), tt(out), tr()] };
+  const o = (sc, args, env) => JSON.parse(run(sc, args, env));
+  const pick = (sc, args) => { const r = o(sc, args); return r.deferred ? 'DEFER' : `${r.pick.vendor} ${r.pick.model} ${r.pick.effort} @${r.pick.account ?? '-'}`; };
+  const second = (sc, args) => { const s = o(sc, args).secondOpinion; return s ? `${s.model} ${s.effort} @${s.account}` : null; };
+  const gated = (sc, args) => o(sc, args).needsUserOK.some((n) => /^personal quota:/.test(n));
+  const secondAsk = (sc, args) => o(sc, args).needsUserOK.some((n) => /^adversarial second reviewer:/.test(n));
+  const cases = [
+    // TTADK Kimi-K3 first, DeepSeek second from the other family.
+    [pick('advBoth', ['review-high', '--security']), 'codex kimi-k3 high @ttadk'],
+    [second('advBoth', ['review-high', '--security']), `${FLASH} high @ttadk`],
+    [pick('advBoth', ['review', '--security']), 'codex kimi-k3 high @ttadk'],
+    [pick('advBoth', ['second-opinion', '--against', 'codex', '--security']), 'codex kimi-k3 high @ttadk'],
+    // One failure moves to DeepSeek, the other family (Kimi) becomes the second reviewer.
+    [pick('advBoth', ['review-high', '--security', '--failures', '1']), `codex ${FLASH} high @ttadk`],
+    [second('advBoth', ['review-high', '--security', '--failures', '1']), 'kimi-k3 high @ttadk'],
+    // The next failure falls to Claude Opus, never a GPT model, and asks for personal quota.
+    [pick('advBoth', ['review-high', '--security', '--failures', '2']), 'claude opus xhigh @-'],
+    [gated('advBoth', ['review-high', '--security', '--failures', '2']), true],
+    // DeepSeek alone: it runs, the missing other family is surfaced as a question.
+    [pick('advDsOnly', ['review-high', '--security']), `codex ${FLASH} high @ttadk`],
+    [second('advDsOnly', ['review-high', '--security']), null],
+    [secondAsk('advDsOnly', ['review-high', '--security']), true],
+    // TTADK out: DeepSeek on TRAE, still no GPT, still the single-family question.
+    [pick('advTtadkOut', ['review-high', '--security']), `codex ${FLASH} high @trae`],
+    [secondAsk('advTtadkOut', ['review-high', '--security']), true],
+    // Kimi on TRAE is not part of the approved order; DeepSeek takes it there.
+    [pick('advTraeKimi', ['review-high', '--security']), `codex ${FLASH} high @trae`],
+    // No company non-GPT model: Claude Opus, explicitly behind the personal-quota gate.
+    [pick('advNone', ['review-high', '--security']), 'claude opus xhigh @-'],
+    [gated('advNone', ['review-high', '--security']), true],
+    // Other --security work keeps today's rule; --adversarial work is non-GPT too.
+    [pick('advBoth', ['implement', '--impact', 'service', '--security']), 'codex gpt-6.1-sol high @ttadk'],
+    [pick('advBoth', ['implement', '--impact', 'service', '--adversarial']), 'codex kimi-k3 high @ttadk'],
+    [second('advBoth', ['implement', '--impact', 'service', '--adversarial']), `${FLASH} high @ttadk`],
+    // Background can use the company non-GPT lane; it never falls through to Claude.
+    [pick('advBoth', ['review', '--security', '--background']), 'codex kimi-k3 high @ttadk'],
+    [pick('advNone', ['review', '--security', '--background']), 'DEFER'],
+  ];
+  // Never a GPT pick or second reviewer anywhere in the adversarial lane.
+  for (const sc of ['advBoth', 'advDsOnly', 'advTtadkOut', 'advTraeKimi', 'advNone']) {
+    for (const args of [['review', '--security'], ['review-high', '--security'], ['second-opinion', '--against', 'codex', '--security'], ['review', '--adversarial']]) {
+      const r = o(sc, args);
+      for (const p of [r.pick, r.secondOpinion].filter(Boolean)) cases.push([p.model.startsWith('gpt-'), false]);
+    }
+  }
+  const bad = cases.map(([got, want], i) => (got === want ? null : `${i} (${JSON.stringify(got)} != ${JSON.stringify(want)})`)).filter((i) => i !== null);
+  if (bad.length) fail++;
+  console.log(`${bad.length ? 'FAIL' : 'ok  '} adversarial review   ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
+  // The route log carries the adversarial flag for the nightly review.
+  try {
+    const log = path.join(tmp, 'adv-route-log.jsonl');
+    o('advBoth', ['review-high', '--security', '--project', 'p', '--name', 'adv-1'], { ROUTE_LOG: '1', ROUTE_LOG_FILE: log });
+    const rec = JSON.parse(fs.readFileSync(log, 'utf8').trim());
+    const ok = rec.adversarial === true && rec.security === true && rec.pick.model === KIMI && rec.second.model === FLASH;
+    if (!ok) fail++;
+    console.log(`${ok ? 'ok  ' : 'FAIL'} adversarial route log records flag, Kimi pick and DeepSeek second`);
+  } catch (e) { fail++; console.log(`FAIL adversarial route log: ${e.message}`); }
 }
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(fail ? `\n${fail} failing` : '\nall pass');

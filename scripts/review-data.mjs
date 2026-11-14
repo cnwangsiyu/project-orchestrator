@@ -120,6 +120,13 @@ const routing = {
   byCategory: count(routes, (r) => r.category),
   byPick: count(routes.filter((r) => r.pick), (r) => `${r.pick.vendor}:${r.pick.model}:${r.pick.effort}`),
   byAccount: count(routes.filter((r) => r.pick?.account), (r) => r.pick.account),
+  // OpenAI cyberPolicy blocks (codex-worker kind:'policy-block', 2026-11-13): how often, and on which account/model.
+  // Repeated hits mean that model/account should not be used for attack-style reviews; route those with --adversarial.
+  policyBlocks: (() => {
+    const rows = all.filter((r) => r.kind === 'policy-block' && r.t >= since);
+    return { count: rows.length, byAccountModel: count(rows, (r) => `${r.account ?? '?'}:${r.model ?? '?'}`),
+      recent: rows.slice(-30).map((r) => ({ t: fmt(r.t), account: r.account, vendor: r.vendor, model: r.model })) };
+  })(),
   deferred: routes.filter((r) => r.deferred).map((r) => ({ t: fmt(r.t), project: r.project, category: r.category, why: r.deferred })),
   escalations: routes.filter((r) => r.failures > 0).map((r) => ({ t: fmt(r.t), project: r.project, name: r.name, category: r.category, failures: r.failures, pick: r.pick })),
   tellUser: routes.filter((r) => r.tell?.length).map((r) => ({ t: fmt(r.t), project: r.project, name: r.name, tell: r.tell })),

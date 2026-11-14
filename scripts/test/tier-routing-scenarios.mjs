@@ -86,9 +86,13 @@ try {
   }
   assert.equal(run(['lookup', '--security']).pick.model, FLASH);
   assert.equal(run(['implement', '--security']).pick.model, FLASH);
-  assert.ok(!run(['review-high', '--security']).pick?.model.startsWith('gpt-')
-    || run(['review-high', '--security']).pick.account !== 'trae');
-  assert.equal(run(['review-high', '--security', '--background']).pick, null);
+  // Security reviews are adversarial: no GPT on any account, DeepSeek-V4.1-Flash on TRAE when TTADK lists no Kimi.
+  for (const flags of [[], ['--background']]) {
+    const r = run(['review-high', '--security', ...flags]);
+    assert.equal(r.pick.model, FLASH); assert.equal(r.pick.account, 'trae');
+    assert.ok(!r.pick.model.startsWith('gpt-'));
+    assert.ok(r.why.join('\n').includes('adversarial: no GPT model on any account'));
+  }
   for (const args of [['image-read'], ['image-read', '--stakes', 'low'], ['image-read', '--background']]) {
     assert.ok([SOL, ASTRA, SEED].includes(run(args).pick.model));
     assert.equal(run([...args, '--security']).pick.model, SEED);

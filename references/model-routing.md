@@ -147,7 +147,8 @@ then DeepSeek-V4.1-Flash. Astra quality-ladder rungs are never substituted with 
 
 - TTADK can run the original pick and TRAE can run the target model under the existing exclusions and health rules
   (a TRAE substitution need not be listed on TTADK). Browser, desktop, image work and
-  `build-run` keep their existing preference. `--security` excludes TRAE GPT. Second opinions keep their original
+  `build-run` keep their existing preference. `--security` excludes TRAE GPT, and security reviews are adversarial
+  (no GPT anywhere; see "Adversarial security review"). Second opinions keep their original
   account/model and count; balancing never adds or removes a launch.
 - That TRAE model has a known, unexpired, non-depleted daily bucket with **at least 15% left**, reserved for urgent
   work and reviews. Exception: eligible tier candidates may be used when a known daily snapshot confirms no
@@ -206,7 +207,7 @@ prefers TRAE even while congested, using the same difficulty-tier table below (u
 
 All existing model exclusions and pauses apply. `--security` keeps TRAE GPT off; DeepSeek is ineligible for
 build-run and sensitive reviews/acceptance (use `--exclude-model deepseek` when an implementation brief includes
-those checks). `image-read` uses only its existing vision-capable GPT models or vision fallbacks: GPT-5.5/5.6-Terra
+those checks), except the adversarial security-review lane above, where DeepSeek is the approved company fallback. `image-read` uses only its existing vision-capable GPT models or vision fallbacks: GPT-5.5/5.6-Terra
 vision is untested, so neither is eligible; GPT-5.6-Sol quota substitution also leaves image reading unchanged.
 Browser/desktop, image generation,
 UI and build/device work retain their capability rules, and a device lease or shared lock excludes the background lane.
@@ -240,6 +241,24 @@ the nightly review compares dispatch reasons and recorded wall-clock time, inclu
     2026-11-10/11), including 5.6-Sol, 5.5 and 5.6-Terra. Implementation that reads attack-style findings or exploit
     steps also needs `--security` (VAK ruling, 2026-11-13). Defensive-only requirements with no attack description
     in the worker's context can avoid that flag; see SKILL.md, "Security follows the worker's context".
+
+    **Adversarial security review (user decision 2026-11-13, option A).** OpenAI's cyberPolicy failed a TTADK
+    gpt-6.1-sol `review-high --security` turn on 2026-11-13 (`codexErrorInfo=cyberPolicy`, "flagged for possible
+    cybersecurity risk … apply for Daybreak access"). A `review`, `review-high` or `second-opinion` routed with
+    `--security` is therefore **adversarial** by default; `--adversarial` forces the same lane for any task.
+    - Never a GPT model on any account (TTADK, TRAE or personal ChatGPT).
+    - Order: TTADK Kimi-K3 high → DeepSeek-V4.1-Flash high on TTADK or TRAE (the explicit, second-reviewer-bound
+      exception to the DeepSeek model-fit rule) → Claude Opus (xhigh for review/review-high, high otherwise), which
+      always carries a `personal quota:` `needsOK` — never silent.
+    - Always a second reviewer from the other non-GPT family (Kimi ↔ DeepSeek). If only one family is available,
+      say so and add `needsOK`: add Claude Opus as the second reviewer on personal quota, or accept one reviewer.
+    - Never retry a cyberPolicy-blocked thread or resend the same content to another GPT account. `codex-worker`
+      prints `security-policy-block:` and records `kind:'policy-block'` (account/model) for the nightly review on
+      both accounts. On TRAE the block also leaves the same family restriction as a 983 signal (the gpt family out
+      until the next 00:00 UTC, then probed); TTADK has telemetry only and no pause. Re-route with `--adversarial`.
+      The vendor's trusted-access programme is the user's/company's call.
+    Other `--security` work (implementation/fixes written as defensive requirements, executable acceptance tests)
+    keeps the rule above: no TRAE GPT; TTADK GPT allowed.
 
   - **Difficulty-tiered company model choice (user-approved 2026-11-13).** One `COMPANY_TIERS` table in `route.mjs`
     controls TRAE substitution when Sol is depleted, paused, excluded or absent, and balanced/background TRAE picks.
@@ -329,7 +348,8 @@ the nightly review compares dispatch reasons and recorded wall-clock time, inclu
     KWS tests/iOS acceptance, and fallback reviews missed reproduced P1s (though some read-only reviews found real P1s).
     DeepSeek is for read-only analysis and simple edits, not full-package builds, auth/storage reviews or acceptance.
     `build-run`, `review-high`, and release/high-stakes/security review rows exclude the DeepSeek family from company
-    fallbacks. For implement/implement-hard/debug whose brief needs those checks, use `--exclude-model deepseek`;
+    fallbacks; the adversarial security-review lane above is the one explicit exception (DeepSeek there is always paired
+    with a second reviewer from the other non-GPT family). For implement/implement-hard/debug whose brief needs those checks, use `--exclude-model deepseek`;
     the router cannot infer package/device acceptance from the category alone. Pass `--impact release` on release reviews.
 
     - **GPT out on the company account** (its `gpt` family paused or restricted, or `--exclude-model gpt`): DeepSeek-V4.1-Flash
@@ -421,7 +441,8 @@ the nightly review compares dispatch reasons and recorded wall-clock time, inclu
   it matters: agentic coding, debugging and frontend tasks tied at full marks; Sol had the best pure reasoning (12/12,
   with DeepSeek-V4.1-Flash), and public indexes put it clearly ahead (Artificial Analysis v5: Sol 55, GLM-5.3 and
   DeepSeek-V4.1-Flash 32; DeepSWE: Sol 75, Kimi-K3 and GLM-5.3 ~67). So Sol stays the default.
-  - **Kimi-K3** is the second reviewer of Codex-written code on TTADK (user, 2026-11-07): 100% recall on planted
+  - **Kimi-K3** is the second reviewer of Codex-written code on TTADK (user, 2026-11-07) and the first pick of the
+    adversarial security-review lane (TTADK only, 2026-11-13): 100% recall on planted
     defects (Sol 88%), misses not overlapping Sol's, no nitpicks. Its Chinese prose read most naturally (25/25 vs Sol
     24, one judge, one run) but it is slow (88–150s for a short essay): docs stay on Sol until the nightly review shows
     rework on Chinese docs.

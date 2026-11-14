@@ -44,7 +44,8 @@ import { fileURLToPath } from 'node:url';
 import { noteFailure, noteSuccess, rememberThreadModel, threadModel, probeResult, failureKind } from './lib/trae-health.mjs';
 import { createQueueRecorder } from './lib/company-load.mjs';
 import { saveQueue, readQueue } from './lib/worker-queue.mjs';
-import { loadDigest, auditLaunch } from './lib/global-rules.mjs';
+import { loadDigest, auditLaunch, rulesLog } from './lib/global-rules.mjs';
+import { isPolicyBlock, policyBlockRecord, appendPolicyBlock } from './lib/policy-block.mjs';
 import { runHubForeground, hubListReachable } from './lib/hub-foreground.mjs';
 // What a TRAE pause covers: one model family (route.mjs moves to the next family) or the whole account.
 const pausedWhat = (p) => (p.pool ? `TRAE's ${p.pool} models are paused` : 'TRAE is paused');
@@ -565,9 +566,21 @@ const currentTurn = async (threadId) => {
   return turns.filter((t) => t.status === 'inProgress').at(-1) ?? turns.at(-1);
 };
 const lastMessage = (items) => (items ?? []).filter((i) => i.type === 'agentMessage' && i.text).at(-1)?.text;
+// A cyberPolicy block is recorded for the nightly review as kind:'policy-block' on every account. TTADK stops there
+// (telemetry only, no pause); TRAE also writes its 983-style family restriction below (until the next 00:00 UTC).
+const recordPolicyBlock = (model, error) => {
+  try { appendPolicyBlock(rulesLog(), policyBlockRecord({ account, vendor: PROF?.kind === 'trae' ? 'trae' : 'codex', model, error })); } catch {}
+};
 // Prints the outcome and exits: status, usage, the final message's first line (whole message to --out).
 const report = async (threadId, turn, final, usage) => {
   console.log(`turn ${turn.status}${turn.error ? ' error=' + JSON.stringify(turn.error) : ''}`);
+  const policyBlock = isPolicyBlock(turn);
+  if (policyBlock) {
+    const model = opts.model ?? threadModel(PROF.home, threadId);
+    recordPolicyBlock(model, turn.error);
+    const action = policyBlockAction(PROF?.kind);
+    console.log(`security-policy-block: ${account ?? 'this account'}${model ? ` / ${model}` : ''} — OpenAI cyberPolicy flagged this turn for possible cybersecurity risk. Do not retry this thread or resend the same content to another GPT account; re-route with route.mjs ... --adversarial (company non-GPT models only, never a GPT reviewer). ${action.restrictFamily ? 'Recorded as a TRAE family restriction (like a 983 restriction) for the nightly review.' : 'Recorded for the nightly review; no model or account pause.'}`);
+  }
   // A rate-limited / concurrency failure (e.g. the TTADK gateway's QPM limit): retry once on the same account, then
   // re-route without it (user, 2026-11-07).
   // The TTADK token quota (daily / hourly, shared by all models) is used up: retrying or switching models can't help.
@@ -583,10 +596,18 @@ const report = async (threadId, turn, final, usage) => {
     console.log('browser-unavailable: the Chrome extension host is not connected (pgrep -f "ChatGPT for Chrome"). Make sure Chrome is running, wait a minute and retry once; if it fails again, re-route the task to a Claude worker (route.mjs browser --exclude-account ' + (account ?? '<account>') + ')');
   }
   // TRAE: every failed turn is recorded and every completed one clears the record; repeated or hard failures pause it.
+  // A cyberPolicy block is content policy, not an infrastructure failure. The kind:'policy-block' row above is logged
+  // on both accounts; on TRAE it also leaves the same family restriction as a 983 signal (until the next 00:00 UTC,
+  // then probed), while TTADK stays telemetry-only and never pauses.
   if (PROF?.kind === 'trae') {
     const model = opts.model ?? threadModel(PROF.home, threadId);
     if (turn.status === 'completed') noteSuccess(PROF.home, model);
-    else if (turn.status === 'failed') {
+    else if (turn.status === 'failed' && policyBlock) {
+      const p = notePolicyRestriction(PROF.home,
+        `cyberPolicy blocked this turn: ${JSON.stringify(turn.error ?? '').slice(0, 140)}`, Date.now(), model);
+      if (p) console.log(`trae-restricted: TRAE's ${p.pool} models are restricted until ${new Date(p.pausedUntil).toLocaleTimeString()} (${p.reason}); re-route this task with route.mjs ... --adversarial (it moves to the next non-GPT family)`);
+      else console.log('security-policy-block: no model is known for this thread, so no TRAE family restriction was written (the kind:policy-block row is still logged)');
+    } else if (turn.status === 'failed') {
       const p = noteFailure(PROF.home, JSON.stringify(turn.error ?? 'failed'), Date.now(), model);
       if (p?.modelPause) console.log(unavailableHint(p));
       else if (p) console.log(`trae-paused: ${pausedWhat(p)} until ${new Date(p.pausedUntil).toLocaleTimeString()} (${p.reason}); re-route this task with route.mjs ... ${p.pool ? `(it moves to the next model family; --exclude-model ${p.pool} for this task)` : `--exclude-account ${account}`}`);

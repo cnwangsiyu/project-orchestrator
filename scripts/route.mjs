@@ -95,13 +95,16 @@ const label = (m) => `${m.vendor === 'claude' ? `Claude ${m.model}` : isAlt(m) ?
 
 // ---- args ----
 // --apps a,b: the desktop apps (bundle ids) a computer-use worker may operate; others are declined.
-const BOOL = new Set(['auto-check', 'writes', 'read-only', 'fresh', 'json', 'table', 'no-redeem', 'dry', 'urgent', 'security', 'background', 'device-lease', 'shared-lock']);
+const BOOL = new Set(['auto-check', 'writes', 'read-only', 'fresh', 'json', 'table', 'no-redeem', 'dry', 'urgent', 'security', 'adversarial', 'background', 'device-lease', 'shared-lock']);
 // --urgent: run now even while TTADK is down for a fixable reason (that work would otherwise wait for the fix).
 // --exclude-account a,b: route around accounts that just failed (e.g. TTADK after a rate-limited retry or an auth error).
 // --exclude-model m,f: route around models (an id, or a family: gpt, deepseek, gemini…) that just failed for
 // infrastructure reasons (queue full, restricted, timed out) on the company account — not a --failures step; also how a
 // review of a fallback model's code keeps that model's family off the reviewer seat.
 // --security: security/attack-flavoured tasks exclude GPT only on TRAE; other accounts route normally.
+// --adversarial: attack-style reviews (and --adversarial work) run on company non-GPT models only, with a second
+// reviewer from the other non-GPT family; it implies --security. A review/review-high/second-opinion with --security
+// is adversarial by default (OpenAI's cyberPolicy blocked a GPT review on 2026-11-13; user decision, option A).
 // --background: nobody is waiting; prefer TRAE unless TTADK quota is expiring unused, never personal quota.
 // --device-lease / --shared-lock: the task holds a shared resource and cannot enter the balancing/background lane.
 // --origins p,q: extra sites (origins or host globs) a Codex browser worker may reach besides POLICY.browserOrigins.
@@ -150,7 +153,10 @@ const data = readState({ fresh: !!opts.fresh, profiles, registryError });
 const st = analyze(data);
 const { claude: QC, codex: QX } = st;
 const noRedeem = !!opts['no-redeem'];
-const security = !!opts.security;
+const security = !!opts.security || !!opts.adversarial;
+// Adversarial: attack-style material must never reach a GPT account. --adversarial always means it; a review routed
+// with --security is adversarial by default (other --security work keeps today's TRAE-only GPT exclusion).
+const adversarial = !!opts.adversarial || (security && ['review', 'review-high', 'second-opinion'].includes(cat));
 const background = !!opts.background;
 const tierFor = (f) => ['implement-hard', 'debug', 'science', 'review-high', 'design'].includes(cat) || stakes === 'high'
   || (f >= 1 && CODE.includes(cat)) ? 'hard'
@@ -163,9 +169,12 @@ const backgroundEligible = laneEligible || (cat === 'image-read' && !opts['devic
 const excluded = new Set((typeof opts['exclude-account'] === 'string' ? opts['exclude-account'] : '').split(',').map((x) => x.trim()).filter(Boolean));
 const exModels = new Set((typeof opts['exclude-model'] === 'string' ? opts['exclude-model'] : '').split(',').map((x) => x.trim().toLowerCase()).filter(Boolean));
 const modelExcluded = (model, account = null) => exModels.has(model) || exModels.has(poolOf(model))
+  || (adversarial && poolOf(model) === 'gpt')
   || (security && account?.kind === 'trae' && poolOf(model) === 'gpt');
-const deepseekUnfit = cat === 'build-run' || cat === 'review-high'
-  || (['review', 'second-opinion'].includes(cat) && (impact === 'release' || stakes === 'high' || security));
+// Adversarial reviews are the one approved exception to the DeepSeek model-fit rule: they run on DeepSeek only with
+// the second reviewer from the other non-GPT family. Build-run still cannot use DeepSeek.
+const deepseekUnfit = cat === 'build-run' || (!adversarial && (cat === 'review-high'
+  || (['review', 'second-opinion'].includes(cat) && (impact === 'release' || stakes === 'high' || security))));
 const tierModels = (account, taskTier = tier) => account?.kind === 'trae' ? (cat === 'image-read' ? [SOL, ASTRA] : COMPANY_TIERS[taskTier])
   .filter((id) => account.models.includes(id) && !modelExcluded(id, account)
     && !(deepseekUnfit && poolOf(id) === 'deepseek')) : [];
@@ -216,6 +225,28 @@ const priorityAvailable = (id, account) => {
 // A fallback of a different family from model x (a reviewer or a retry that doesn't share x's blind spots).
 const altOtherThan = (x) => ttAlts.find((a) => poolOf(a.model) !== poolOf(x?.model)) ?? null;
 const codexOut = chatgptOut && !ttModelsOK; // An account with only excluded or unsupported models can't take work.
+// ---- adversarial (attack-style) routing ----
+// User decision 2026-11-13 (option A): a GPT review of attack-style material hit OpenAI's cyberPolicy on TTADK; the
+// adversarial lane never uses a GPT model on any account. Order: TTADK Kimi-K3 (high) -> DeepSeek-V4.1-Flash on
+// TTADK or TRAE (high; the one approved exception to the DeepSeek model-fit rule, valid only with its second
+// reviewer) -> Claude Opus, which always asks for personal quota. The second reviewer comes from the other non-GPT
+// family (Kimi <-> DeepSeek); when only one family is available, say so and ask (Claude second, or one reviewer).
+const ADV_DEEPSEEK = 'deepseek-v4.1-flash';
+const advCompany = (model) => [QX.ttadk, QX.trae].find((a) => a?.usable && !excluded.has(a.name)
+  && a.models.includes(model) && !modelExcluded(model, a)) ?? null;
+// The user's order names Kimi-K3 on TTADK only; DeepSeek-V4.1-Flash may run on TTADK or TRAE.
+const advKimi = () => {
+  const a = QX.ttadk;
+  return a?.usable && !excluded.has(a.name) && a.models.includes(KIMI) && !modelExcluded(KIMI, a) ? X(KIMI, 'high') : null;
+};
+const advDeepseek = () => (advCompany(ADV_DEEPSEEK) ? X(ADV_DEEPSEEK, 'high') : null);
+const advClaude = () => C('opus', ['review', 'review-high'].includes(cat) ? 'xhigh' : 'high');
+const adversarialBase = () => {
+  const company = [advKimi(), advDeepseek()].filter(Boolean);
+  return company.length ? [...company, advClaude()] : [advClaude()];
+};
+// The other non-GPT family for a company pick, or null when only one family is available.
+const advSecondFor = (pick) => poolOf(pick?.model) === 'kimi' ? advDeepseek() : poolOf(pick?.model) === 'deepseek' ? advKimi() : null;
 const why = [], needsOK = [], tell = [], notes = [];
 const unknownCompanyState = QX.companyUnknown.length > 0 || !!QX.registryError;
 const unknownCompanyReason = QX.companyUnknown.map((a) => `${a.name}/${a.kind}`).join(', ') || QX.registryError;
@@ -228,8 +259,8 @@ const claudeAllowed = (kind) => {
   if (QC.status === 'near') return T.keepNear || stakes === 'high';
   return false; // over or unknown
 };
-const allowed = (x) => background ? x.vendor === 'codex' && !!TT && taskFits(TT) && ttHas(x.model)
-  : (x.vendor === 'claude' ? claudeAllowed(T.kind) : !modelExcluded(x.model) && (T.kind === 'browser' ? browserViaCodex : !codexOut));
+const allowed = (x) => background ? x.vendor === 'codex' && !!TT && taskFits(TT) && (ttHas(x.model) || (adversarial && !!advCompany(x.model)))
+  : (x.vendor === 'claude' ? claudeAllowed(T.kind) : !modelExcluded(x.model) && (T.kind === 'browser' ? browserViaCodex : (!codexOut || adversarial)));
 
 // ---- 1. vendor locks, quota moves and the escalation ladder ----
 // The usable ladder: the first pick (or its same-tier alternative when quota rules it out), then every later step the
@@ -245,6 +276,10 @@ else if (authorCodex && !(cat === 'review' && ttModelsOK)) {
   if (!ttAlts.length || ttHas(SOL)) why.push('Codex wrote it: Claude reviews first (Codex only when Claude has no room)');
 }
 else base = [T.first, ...T.ladder];
+if (adversarial) {
+  base = adversarialBase();
+  why.push('adversarial: no GPT model on any account; company non-GPT models first (Kimi-K3, then DeepSeek-V4.1-Flash), Claude only with the user\'s OK');
+}
 // Every task TTADK's GPT-6.1 Sol can handle goes to it first (user, 2026-11-07): Sol at the row's effort (at least
 // medium), one notch higher after a failure, then the row's own ladder. Not TTADK-capable: Claude-only rows, image
 // generation, and browser work while TTADK isn't browser-ready. Codex high-stakes reviews and second opinions keep
@@ -252,7 +287,7 @@ else base = [T.first, ...T.ladder];
 // research needs web search. Codex doesn't send its hosted web_search tool to the gateway, so TTADK searches only through
 // its local proxy (ttadk-setup sets it up: TT.search); without it research follows the earlier routing.
 const ttTaskOK = T.kind !== 'claudeOnly' && cat !== 'image-gen';
-const ttCapable = ttModelsOK && ttTaskOK && !(claudeReviewFirst && ttHas(SOL) && !background)
+const ttCapable = !adversarial && ttModelsOK && ttTaskOK && !(claudeReviewFirst && ttHas(SOL) && !background)
   && !(cat === 'research' && !TT.search) && !(T.kind === 'browser' && !ttBrowser);
 const ei = (e) => EFFORTS.indexOf(e);
 const maxE = (a, b) => (ei(a) >= ei(b) ? a : b);
@@ -377,6 +412,8 @@ const backgroundChoice = (x, log, taskTier) => {
 // Daily depletion affects new model choices, never account health, concurrency or an accepted queued turn.
 // Use a comparable GPT with confirmed quota left; an unknown bucket is not evidence of spare priority capacity.
 const quotaChoice = (x, log = (r) => why.push(r), taskTier = tier) => {
+  // Adversarial picks are fixed by family and approval; quota substitution must never turn one into a GPT model.
+  if (adversarial) return x;
   if (!onTTADK(x) || TT.kind !== 'trae') return x;
   if (backgroundLane) return backgroundChoice(x, log, taskTier);
   const free = bucketFreeModels(TT, taskTier);
@@ -430,7 +467,7 @@ const resolveRung = (raw, index) => {
   x = tune(quotaChoice(x, log, taskTier), index, log);
   // Resolve balancing before normalization too; keep its account and telemetry with this rung only.
   if (preferExpiringTtadk && onTTADK(x) && TT === QX.ttadk) log(TTADK_EXPIRY_HINT);
-  if (!background && !preferExpiringTtadk && onTTADK(x) && TT === QX.ttadk && QX.trae) {
+  if (!adversarial && !background && !preferExpiringTtadk && onTTADK(x) && TT === QX.ttadk && QX.trae) {
     const free = x.model !== ASTRA ? bucketFreeModels(QX.trae, taskTier) : [];
     // Walk the tier in quality order, checking reserve and congestion for each candidate. A later explicit
     // Astra/other-family quality rung retains its model; balancing cannot turn a retry into a weaker rung.
@@ -470,7 +507,7 @@ const resolveRung = (raw, index) => {
 };
 if (!deferred) {
   let firstOk = resolveRung(base[0], 0);
-  if (!firstOk || !allowed(firstOk.pick)) firstOk = T.alt && cat !== 'second-opinion' ? resolveRung(T.alt, 0) : null;
+  if (!firstOk || !allowed(firstOk.pick)) firstOk = !adversarial && T.alt && cat !== 'second-opinion' ? resolveRung(T.alt, 0) : null;
   const rows = [firstOk, ...base.slice(1).map((x, i) => resolveRung(x, i + 1))].filter((r) => r && allowed(r.pick));
   const gptOrder = [ASTRA, ...new Set(Object.values(COMPANY_TIERS).flat().filter((m) => m.startsWith('gpt-') && m !== ASTRA)), TERRA, LUNA];
   const { kept: ladder, dropped } = normalizeLadder(rows, base, gptOrder);
@@ -540,13 +577,27 @@ if (!second && m && cat === 'review' && authorCodex && onTTADK(m)) {
 // (release code, or service code at high stakes; user, 2026-11-07), and never on a TTADK device, whose quota is left
 // for the other device.
 let extraReview = false;
-if (!second && m && m.vendor === 'codex' && !ttDevice && QX.underused && ['implement-hard', 'debug', 'science'].includes(cat) && reviewKind) {
+if (!adversarial && !second && m && m.vendor === 'codex' && !ttDevice && QX.underused && ['implement-hard', 'debug', 'science'].includes(cat) && reviewKind) {
   second = X(SOL, 'xhigh'); extraReview = true;
   notes.push('extra independent Codex review of the result (Codex underused): run it after the worker reports, as a fresh read-only review');
 }
+// Adversarial: the second reviewer is always the other non-GPT family, never a GPT model. When only one company
+// non-GPT family exists, say so and ask (Claude second on personal quota, or accept one reviewer).
+if (adversarial && m) {
+  const family = poolOf(m.model);
+  second = m.vendor === 'claude' ? null : advSecondFor(m);
+  if (second) {
+    notes.push(`adversarial second reviewer: ${label(second)} from the other non-GPT family — run it as a separate read-only review, merge both reports and keep only P0/P1 items (references/review-rubric.md)`);
+  } else if (m.vendor === 'claude') {
+    notes.push('adversarial: no company non-GPT model can take this task, so it falls back to Claude Opus on personal quota; no second non-GPT reviewer exists for this pick — report that limitation');
+  } else {
+    notes.push(`adversarial: only the ${family} family is available among company non-GPT models; no second reviewer from the other family exists. Report the single-reviewer limitation; never add a GPT reviewer`);
+    needsOK.push(`adversarial second reviewer: only ${family} is available among company non-GPT models. Ask the user whether to add Claude Opus as the second reviewer (personal quota) or accept one reviewer; never add a GPT reviewer`);
+  }
+}
 if (second) {
   const original = second;
-  second = quotaChoice(second, (r) => why.push(`second opinion: ${r}`));
+  if (!adversarial) second = quotaChoice(second, (r) => why.push(`second opinion: ${r}`));
   if (second !== original && poolOf(second.model) === poolOf(m.model)) notes.push('quota substitution leaves the second opinion in the same model family; record this limitation and retain the GPT/Claude acceptance gate in references/review-rubric.md');
 }
 
@@ -572,8 +623,11 @@ let acct = (QX.pick && !excluded.has(QX.pick.a.name) ? QX.pick : chatgptOpen[0])
 // Browser work off the company account goes to a browser-ready ChatGPT account.
 if (T.kind === 'browser' && !ttBrowser && chatgptBrowser.length && !(acct && acct.a?.browser)) acct = chatgptBrowser[0];
 const chatgptAcct = acct;
-const ttadkRun = m && onTTADK(m);
-const runCompany = balancedAccount ?? TT;
+// An adversarial company pick runs on whichever company account lists that non-GPT model (TTADK or TRAE), so the
+// launcher and the company/personal gate see the real account even when the model is not on TT.
+const advAcct = adversarial && m?.vendor === 'codex' ? advCompany(m.model) : null;
+const ttadkRun = m && (onTTADK(m) || !!advAcct);
+const runCompany = advAcct ?? balancedAccount ?? TT;
 if (ttadkRun) acct = { a: { name: runCompany.name, live: runCompany.live } };
 else if (QX.rotate && m?.vendor === 'codex' && QX.rotate.every((r) => !excluded.has(r.a.name))) {
   const n = withLock(RR, () => { let c = 0; try { c = Number(fs.readFileSync(RR, 'utf8')) || 0; } catch {} if (!opts.dry) fs.writeFileSync(RR, String(c + 1)); return c; });
@@ -582,7 +636,9 @@ else if (QX.rotate && m?.vendor === 'codex' && QX.rotate.every((r) => !excluded.
 const pickAcct = acct;
 // The second opinion's account: the extra underused review on ChatGPT; any other Codex second opinion TTADK-first.
 // The second opinion's account: TTADK first for a Codex second opinion it can run; otherwise the ChatGPT account.
+const advSecondAcct = adversarial && second?.vendor === 'codex' ? advCompany(second.model) : null;
 const secondAcct = !second || second.vendor !== 'codex' ? null
+  : advSecondAcct ? { a: { name: advSecondAcct.name, live: advSecondAcct.live } }
   : !extraReview && onTTADK(second) && ttHas(second.model) ? { a: { name: TT.name, live: TT.live } } : ttadkRun ? chatgptAcct : pickAcct;
 // Company capacity does not authorize a ladder fall-through or a personal second opinion. Check actual accounts.
 const companyAccount = (a) => [QX.ttadk, QX.trae].some((c) => c && c.name === a?.a?.name);
@@ -595,6 +651,10 @@ if (!background && !opts.urgent && ttDevice && personalPicks.length) {
   const selected = personalPicks.map(({ x, account, secondary }) => `${secondary ? 'second opinion' : 'primary'} ${label(x)}${x.vendor === 'codex' ? ` on ${account?.a?.name ?? 'main'}` : ''}`).join('; ');
   needsOK.push(`personal quota: actual selected ${selected}.${unknownCompanyState ? ` company account state unknown (${unknownCompanyReason}).` : ''} Ask the user before launching, even if a company account still has eligible models — go on now on personal quota, or wait for a company account. One answer covers the fall-through/outage: "go on" → pass --urgent for this work; "wait" → hold it until then`);
 }
+// The adversarial Claude fallback is never silent, including on a device with no company account (where the generic
+// gate above does not fire) and when a standing exception would otherwise skip it.
+if (adversarial && m?.vendor === 'claude' && !opts.urgent && !needsOK.some((n) => n.startsWith('personal quota:')))
+  needsOK.push('personal quota: no company non-GPT model can take this adversarial task — Claude Opus is the fallback. Ask the user before launching (go on now on personal quota, or wait for a company non-GPT model); never silently use personal quota and never substitute a GPT reviewer');
 // One-shot execs get the same worker rules as hub threads; the digest is the single injection source.
 const digest = loadDigest();
 const credRule = `Global worker rules ${digest.version}\n${digest.worker}`;
@@ -624,7 +684,7 @@ const launch = (x, shape = T.shape, acct = pickAcct) => {
 };
 // The same quality gate for both vendors, so outcomes compare: code work gets an independent review before it's accepted.
 // Review only where a mistake is costly to undo; reviewers follow references/review-rubric.md (blocking issues only).
-if (m && reviewKind) notes.push(`review required (impact ${impact}${stakes === 'high' ? ', high stakes' : ''}${isAlt(m) ? `, written by fallback model ${m.model}` : ''}): after the worker reports, route.mjs ${reviewKind}${background ? ' --background' : ''} --author ${m.vendor}${isAlt(m) ? ` --exclude-model ${poolOf(m.model)}` : ''} --impact ${impact} --project ${typeof opts.project === 'string' ? opts.project : '<slug>'} --name ${name}-R; brief the reviewer with references/review-rubric.md (blocks only on P0/P1, at most 2 rounds); then record with scripts/outcome.mjs --reviewed`);
+if (m && reviewKind) notes.push(`review required (impact ${impact}${stakes === 'high' ? ', high stakes' : ''}${isAlt(m) ? `, written by fallback model ${m.model}` : ''}): after the worker reports, route.mjs ${reviewKind}${background ? ' --background' : ''}${adversarial ? ' --adversarial' : ''} --author ${m.vendor}${isAlt(m) ? ` --exclude-model ${poolOf(m.model)}` : ''} --impact ${impact} --project ${typeof opts.project === 'string' ? opts.project : '<slug>'} --name ${name}-R; brief the reviewer with references/review-rubric.md (blocks only on P0/P1, at most 2 rounds); then record with scripts/outcome.mjs --reviewed`);
 else if (m && CODE.includes(cat)) notes.push(`no review (impact ${impact}${impact === 'service' ? ', not high stakes' : ''}): accept on your own check (tests, build, acceptance), then record with scripts/outcome.mjs`);
 else if (m && cat !== 'review' && cat !== 'review-high' && cat !== 'second-opinion') notes.push('when the task ends: record it with scripts/outcome.mjs (pass | rework --rounds N | fail)');
 // Fixed safety clauses for anything that writes or touches devices (SKILL.md, "Give each worker a self-contained brief").
@@ -707,7 +767,7 @@ out.notes.push('launch audit: every launch must match a same-name/task-prefix ro
 // Every real routing decision is logged for the nightly review (--dry or ROUTE_LOG=0 to skip, e.g. for experiments).
 if (!opts.dry && process.env.ROUTE_LOG !== '0') {
   const rec = { t: Date.now(), project: typeof opts.project === 'string' ? opts.project : null, name: typeof opts.name === 'string' ? opts.name : null, category: cat, stakes, failures, impact, review: reviewKind, excluded: [...excluded], ttadk: !!ttadkRun, company: ttadkRun ? runCompany.name : null, balance,
-    autoCheck: !!opts['auto-check'], noRedeem, security, background, tier, deferred, pick: m ? { vendor: m.vendor, model: m.model, effort: m.effort, account: out.pick?.account ?? null } : null,
+    autoCheck: !!opts['auto-check'], noRedeem, security, adversarial, background, tier, deferred, pick: m ? { vendor: m.vendor, model: m.model, effort: m.effort, account: out.pick?.account ?? null } : null,
     second: second ? { vendor: second.vendor, model: second.model, effort: second.effort, account: out.secondOpinion?.account ?? null } : null, why, needsOK, tell,
     personalApproved: !!opts.urgent, approvalRef: typeof opts['user-ok'] === 'string' ? opts['user-ok'] : null,
     quota: { claude: QC.status, codexOut: QX.out, underused: QX.underused, frontLoad: QX.frontLoad, overspending: QX.overspending, redeemDue: !!QX.redeem } };
