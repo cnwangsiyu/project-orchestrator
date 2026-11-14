@@ -483,13 +483,14 @@ for (const [sc, args] of ERRORS) {
   const cases = [
     [maxGate('ttFresh', max), ['ttadk', 'max', false]],
     [maxGate('ttAndTrae', max), ['ttadk', 'max', false]],
-    // On TRAE a fallback family (Gemini in this fixture) sits between Sol xhigh and Sol max, so max is one step later.
-    [maxGate('ttOutTrae', max), ['trae', 'high', false]],
-    [maxGate('ttOutTrae', max2), ['trae', 'max', true]],
-    [maxGate('traeOnly', max2), ['trae', 'max', true]],
-    [maxGate('ttOutTrae', [...max2, '--urgent']), ['trae', 'max', true]],
+    // Hard work has no fallback-family rung (2026-11-13 rule: no DeepSeek or 5.6 for hard tasks), so Sol max comes
+    // one step earlier: Sol xhigh → Sol max → Astra.
+    [maxGate('ttOutTrae', max), ['trae', 'max', true]],
+    [maxGate('ttOutTrae', max2), ['trae', 'high', false]],
+    [maxGate('traeOnly', max2), ['trae', 'high', false]],
+    [maxGate('ttOutTrae', [...max2, '--urgent']), ['trae', 'high', false]],
     [maxGate('ttOutTrae', ['build-run', '--failures', '4']), ['trae', 'max', true]],
-    [maxGate('ttOutTrae', ['debug', '--impact', 'throwaway', '--failures', '3']), ['trae', 'max', true]],
+    [maxGate('ttOutTrae', ['debug', '--impact', 'throwaway', '--failures', '3']), ['trae', 'high', false]],
     [maxGate('ttOutTrae', ['implement-hard', '--impact', 'release']), ['trae', 'xhigh', false]],
     [maxGate('claudeOver', ['debug', '--impact', 'release', '--failures', '1']), ['main', 'max', true]],
   ];
@@ -704,23 +705,24 @@ for (const [sc, args] of ERRORS) {
     [gptStill, true], [acctFree, true], [gptCleared, true], [!!readPause(ah), true],
     [gptPause?.pausedUntil, reset.getTime()], [gptPause?.restricted, true],
     [/vendor's policy until 08:00 China time \(00:00 UTC\); probed then/.test(gptPause?.reason), true],
-    // GPT up: Sol, then a different family before Sol max, the second fallback after it, then Claude.
+    // Hard work (a code retry) is Sol/Astra only: Sol notches, then Astra, then personal Claude. No fallback family.
     [pk('traeFull', ['implement']), 'gpt-6.1-sol high @trae'],
-    [pk('traeFull', ['implement', '--failures', '2']), 'deepseek-v4.1-flash high @trae'],
-    [pk('traeFull', ['implement', '--failures', '3']), 'gpt-6.1-sol max @trae'],
-    [pk('traeFull', ['implement', '--failures', '4']), 'gemini-3.1-pro-preview high @trae'],
-    // GPT-6-Astra on the company account after Sol max and the fallbacks (live test 2026-11-13): company quota, no OK.
-    [pk('traeFull', ['implement', '--failures', '5']), 'gpt-6-astra high @trae'],
+    [pk('traeFull', ['implement', '--failures', '2']), 'gpt-6.1-sol max @trae'],
+    [pk('traeFull', ['implement', '--failures', '3']), 'gpt-6-astra high @trae'],
+    [pk('traeFull', ['implement', '--failures', '4']), 'opus high @undefined'],
+    // GPT-6-Astra on the company account after Sol max (live test 2026-11-13): company quota, no OK.
+    [pk('traeFull', ['implement', '--failures', '5']), 'opus high @undefined'],
     [pk('traeFull', ['implement', '--failures', '6']), 'opus high @undefined'],
     [o('traeFull', ['implement', '--failures', '5']).needsUserOK.some((n) => /Astra/.test(n)), false],
-    [hasNote('traeFull', ['implement', '--failures', '5'], /Astra on TRAE queues TRAE-wide/), true],
+    [hasNote('traeFull', ['implement', '--failures', '3'], /Astra on TRAE queues TRAE-wide/), true],
     // A ChatGPT-account Astra still asks first (5x Sol usage).
     [o('ttFresh', ['science', '--impact', 'service', '--failures', '2']).needsUserOK.includes('Astra (5x Sol usage)'), true],
     // A light lookup starts on TRAE's light list (DeepSeek) and escalates to Sol; the third retry is Sol xhigh.
     [pk('traeFull', ['lookup', '--failures', '3']), 'gpt-6.1-sol xhigh @trae'],
-    // GPT paused on TRAE: the fallbacks in order, no personal-quota question, then Claude.
+    // GPT paused on TRAE: normal work walks the fallbacks, no personal-quota question, then Claude. A hard retry
+    // (implement --failures 1) has no fallback family: it goes to Sol on the company ChatGPT account, then Claude.
     [pk('traeGptOut', ['implement']), 'deepseek-v4.1-flash high @trae'],
-    [pk('traeGptOut', ['implement', '--failures', '1']), 'gemini-3.1-pro-preview high @trae'],
+    [pk('traeGptOut', ['implement', '--failures', '1']), 'gpt-6.1-sol xhigh @main'],
     [pk('traeGptOut', ['implement', '--failures', '2']), 'opus high @undefined'],
     [pk('traeGptOut', ['implement', '--failures', '3']), 'opus high @undefined'],
     [personal('traeGptOut', ['implement']), false],
@@ -740,7 +742,7 @@ for (const [sc, args] of ERRORS) {
     // Security reviews are adversarial by default: DeepSeek-V4.1-Flash is the only company non-GPT model here.
     [pk('traeFull', ['review-high', '--security']), 'deepseek-v4.1-flash high @trae'],
     [pk('traeFull', ['implement', '--impact', 'service', '--security']), 'deepseek-v4.1-flash high @trae'],
-    [pk('traeFull', ['implement', '--security', '--failures', '1']), 'gemini-3.1-pro-preview high @trae'],
+    [pk('traeFull', ['implement', '--security', '--failures', '1']), 'gpt-6.1-sol xhigh @main'],
     [pk('traeFull', ['implement', '--security', '--exclude-model', 'deepseek']), 'gemini-3.1-pro-preview high @trae'],
     [personal('traeFull', ['implement', '--security']), false],
     [o('traeFull', ['review-high', '--security']).security, true],
@@ -757,10 +759,11 @@ for (const [sc, args] of ERRORS) {
     // A second free reviewer on TRAE comes from another family, not a fresh Sol.
     [o('traeFull', ['review', '--author', 'codex']).secondOpinion?.model, 'deepseek-v4.1-flash'],
     [hasNote('traeGptOut', ['review', '--author', 'codex'], /independent other-family GPT\/Claude reviewer/), true],
-    [hasNote('traeGptOut', ['review-high'], /independent other-family GPT\/Claude reviewer/), true],
+    // A hard review (review-high) has no fallback family: with GPT paused on TRAE it drops to Claude behind the gate.
+    [hasNote('traeGptOut', ['review-high'], /independent other-family GPT\/Claude reviewer/), false],
     [hasNote('traeGptOut', ['build-run'], /health thresholds.*rollback triggers.*stronger-model judgment/), true],
     [hasNote('traeGptOut', ['analysis'], /playwright MCP is for public\/local pages only.*missing login means BLOCKED/), true],
-    [hasNote('traeGptOut', ['implement', '--failures', '1'], /Gemini-3\.1-Pro ran past 40 minutes/), true],
+    [hasNote('traeFull', ['implement', '--exclude-model', 'gpt,deepseek'], /Gemini-3\.1-Pro ran past 40 minutes/), true],
     [hasNote('traeGptOut', ['implement'], /can't see images/), true], [hasNote('traeGptOut', ['image-read'], /can't see images/), false],
     // Every family out: personal quota, behind the user's OK.
     [personal('traeAllOut', ['implement']), true],
@@ -781,13 +784,16 @@ for (const [sc, args] of ERRORS) {
     const personalPick = args[0] === 'second-opinion' ? claudePick : 'gpt-6.1-sol xhigh @main';
     // A --security review is adversarial: with no company non-GPT model eligible it lands on Opus behind the gate.
     const advPick = args[0] === 'second-opinion' ? 'opus high @undefined' : 'opus xhigh @undefined';
+    // A hard review (review-high) uses Sol/Astra only; with those paused or excluded the rung drops to Claude behind
+    // the gate. Normal reviews keep the fallback ladder.
+    const hardRow = args[0] === 'review-high';
     for (const [sc, flags, want, gate] of [
       ['traeReviewFull', ['--security', '--exclude-model', 'deepseek', '--dry'], advPick, true],
       ['traeFull', ['--security', '--exclude-model', 'deepseek'], advPick, true],
-      ['traeReviewGptOut', ['--exclude-model', 'deepseek'], 'gemini-3.1-pro-preview high @trae', false],
-      ['traeReviewFull', ['--exclude-model', 'gpt,deepseek'], 'gemini-3.1-pro-preview high @trae', false],
-      // High-stakes/security review now excludes DeepSeek; the remaining ladder is Gemini then Claude.
-      ['traeReviewGptOut', [], args[0] === 'review-high' ? 'gemini-3.1-pro-preview high @trae' : 'deepseek-v4.1-flash high @trae', false],
+      ['traeReviewGptOut', ['--exclude-model', 'deepseek'], hardRow ? 'gpt-6.1-sol xhigh @main' : 'gemini-3.1-pro-preview high @trae', hardRow],
+      ['traeReviewFull', ['--exclude-model', 'gpt,deepseek'], hardRow ? 'opus xhigh @undefined' : 'gemini-3.1-pro-preview high @trae', hardRow],
+      // High-stakes reviews exclude DeepSeek; normal reviews keep Gemini then Claude, hard reviews are Sol/Astra only.
+      ['traeReviewGptOut', [], hardRow ? 'gpt-6.1-sol xhigh @main' : 'deepseek-v4.1-flash high @trae', hardRow],
       ['traeFull', ['--security', '--failures', '2'], advPick, true], // the adversarial ladder is DeepSeek → Claude
       ['traeReviewFull', ['--security', '--exclude-model', 'deepseek,gemini'], advPick, true],
       ['traeReviewFull', ['--security', '--exclude-model', 'deepseek,gemini', '--urgent'], advPick, false],
@@ -1031,6 +1037,8 @@ for (const [sc, args] of ERRORS) {
   scenario('quota56Depleted', { ...quota.daily, 'gpt-5.6-sol': bucket(100) });
   scenario('quota56Expired', { ...quota.daily, 'gpt-5.6-sol': bucket(10, { resetsAt: now - 1 }) });
   scenario('quotaBoth', { ...quota.daily, 'gpt-6-astra': bucket(100), 'gpt-5.6-sol': bucket(10) });
+  scenario('quotaHardUnknown', S.quotaBoth.codex.at(-1).quota.daily,
+    { home: fs.mkdtempSync(path.join(tmp, 'quota-hard-unknown-')) });
   scenario('quotaMissing', null);
   scenario('quotaMissingModel', { 'gpt-6-astra': bucket(100) });
   scenario('quotaUnknownAstra', { 'gpt-6.1-sol': bucket(100) });
@@ -1078,6 +1086,11 @@ for (const [sc, args] of ERRORS) {
     ['quotaBoth', ['extract'], 'deepseek-v4.1-flash'],
     ['quotaBoth', ['draft'], 'deepseek-v4.1-flash'],
     ['quotaBoth', ['lookup', '--stakes', 'high'], 'gpt-6-astra'], // hard tier keeps Sol/Astra on the low-priority lane
+    // Without lane evidence, tied hard ETAs retain main's Sol preference; measured slow Sol above prefers Astra.
+    ['quotaHardUnknown', ['implement-hard'], 'gpt-6.1-sol'],
+    ['quotaHardUnknown', ['lookup', '--stakes', 'high'], 'gpt-6.1-sol'],
+    ['quotaBoth', ['implement-hard', '--exclude-model', 'gpt-6-astra'], 'gpt-6.1-sol'],
+    ['quotaBoth', ['implement-hard', '--exclude-model', 'gpt-6.1-sol'], 'gpt-6-astra'],
     // Light lookup (DeepSeek) escalates to Sol medium; Sol's bucket is depleted, so the comparable GPT with quota
     // (5.6-Sol) takes the escalation — company quota, not personal Sonnet and not another light model.
     ['quotaBoth', ['lookup', '--failures', '1'], 'gpt-5.6-sol'],
@@ -1103,6 +1116,17 @@ for (const [sc, args] of ERRORS) {
     cases.push([r.pick.model, want, `${sc} ${args.join(' ')} model`], [r.failures, args.includes('--failures') ? Number(args[args.indexOf('--failures') + 1]) : 0, `${sc} ${args.join(' ')} failures`]);
   }
   const idle = route('quotaAstra'), busy = route('quotaBusy'), missing = route('quotaMissing');
+  for (const sc of ['quotaBoth', 'quotaHardUnknown']) {
+    for (const args of [['implement-hard'], ['debug'], ['science'], ['review-high'], ['design'], ['lookup', '--stakes', 'high']]) {
+      for (const flags of [[], ['--background']]) {
+        const r = route(sc, [...args, ...flags]);
+        const label = `${sc} ${[...args, ...flags].join(' ')}`;
+        cases.push([['gpt-6.1-sol', 'gpt-6-astra'].includes(r.pick?.model), true, `${label} hard floor`],
+          [r.pick?.account, 'trae', `${label} company lane`], [r.needsUserOK.length, 0, `${label} no personal quota`],
+          [(r.eta ?? []).every((row) => ['gpt-6.1-sol', 'gpt-6-astra'].includes(row.model)), true, `${label} ETA floor`]);
+      }
+    }
+  }
   cases.push(
     [route('quotaPreferred').pick.effort, idle.pick.effort],
     [route('quotaPreferred', ['implement', '--failures', '1']).pick.effort, 'xhigh'],
@@ -1580,8 +1604,8 @@ for (const [sc, args] of ERRORS) {
       assert.equal(r(args).pick.account, 'ttadk');
     // Astra escalation and the review count/account survive the new preferences. A light row first walks its light
     // list (Terra, 5.5, DeepSeek), then Sol's effort notches, and only then Astra — never sideways to a light model.
-    assert.equal(r(['implement', '--background', '--failures', '5'], { company: false }).pick.model, SOL);
-    assert.equal(r(['implement', '--background', '--failures', '6'], { company: false }).pick.model, ASTRA);
+    assert.equal(r(['implement', '--background', '--failures', '4'], { company: false }).pick.model, SOL);
+    assert.equal(r(['implement', '--background', '--failures', '5'], { company: false }).pick.model, ASTRA);
     const baselineReview = r(['review', '--author', 'codex'], { models: ids.filter((id) => ![GPT55, TERRA56].includes(id)) });
     const review = r(['review', '--author', 'codex']);
     assert.deepEqual(review.pick, baselineReview.pick); assert.deepEqual(review.secondOpinion, baselineReview.secondOpinion);
@@ -1649,8 +1673,10 @@ for (const [sc, args] of ERRORS) {
     // A personal second opinion is exempt with company Sol, but needs consent when only a fallback family can run.
     const design = r(['design'], { models: [SOL] });
     assert.equal(design.pick.account, 'trae'); assert.equal(design.secondOpinion.vendor, 'claude'); assert.ok(!gated(design));
+    // A hard design row (design is hard) has no fallback family: with only DeepSeek listed the pick itself drops to
+    // personal Claude behind the gate, never to DeepSeek.
     const fallbackDesign = r(['design'], { models: ['deepseek-v4.1-flash'] });
-    assert.equal(fallbackDesign.pick.account, 'trae'); assert.equal(fallbackDesign.secondOpinion.vendor, 'claude'); assert.ok(gated(fallbackDesign));
+    assert.equal(fallbackDesign.pick.vendor, 'claude'); assert.ok(gated(fallbackDesign));
     assert.ok(!gated(r(['design', '--urgent'], { models: ['deepseek-v4.1-flash'] })));
     for (const options of [{}, { models: [SOL], daily: depleted }, { models: allGPTs, daily: depleted }, { models: [GPT55], sampledAt: now - 31 * 60000 }]) {
       for (const flags of [[], ['--exclude-model', 'gpt'], ['--exclude-account', 'trae'], ['--security']]) {
@@ -1830,9 +1856,13 @@ for (const [sc, args] of ERRORS) {
     assert.equal(defaultAdversarial.adversarial, true);
     assert.equal(pick('ttFresh', ['review-high', '--security']), 'claude opus xhigh @-');
     assert.ok(defaultAdversarial.needsUserOK.some((n) => /^personal quota:/.test(n)));
-    // A defensive review still excludes TRAE GPT; with TTADK out the non-GPT TRAE family takes it.
+    // Defensive hard reviews still exclude TRAE GPT: with TTADK out, no eligible hard company model remains.
     const trae = o('ttOutTrae', ['review-high', '--security', '--defensive']);
-    assert.equal(trae.adversarial, false); assert.ok(!trae.pick.model.startsWith('gpt-')); assert.equal(trae.pick.account, 'trae');
+    assert.equal(trae.adversarial, false); assert.equal(trae.tier, 'hard');
+    assert.equal(pick('ttOutTrae', ['review-high', '--security', '--defensive']), 'claude opus xhigh @-');
+    assert.ok(trae.needsUserOK.some((n) => /^personal quota:/.test(n)));
+    // Normal defensive reviews may still use the eligible non-GPT TRAE fallback, never its excluded GPT family.
+    assert.equal(pick('ttOutTrae', ['review', '--security', '--defensive']), 'codex gemini-3.1-pro-preview high @trae');
     // review and second-opinion keep TTADK GPT on the ordinary security route.
     assert.equal(pick('ttFresh', ['review', '--security', '--defensive']), 'codex gpt-6.1-sol high @ttadk');
     assert.equal(pick('ttFresh', ['second-opinion', '--against', 'claude', '--security', '--defensive']), 'codex gpt-6.1-sol high @ttadk');

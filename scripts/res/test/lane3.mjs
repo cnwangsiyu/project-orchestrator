@@ -34,14 +34,16 @@ const env = { ...process.env, PATH: `${mocks}:${process.env.PATH}`, RES_DIR: sta
 let count = 0;
 const eq = (actual, expected, message) => { assert.deepEqual(actual, expected, message); count++; };
 const ok = (value, message) => { assert.ok(value, message); count++; };
-const run = (args, extra = {}, script = res, timeout = 10000) => {
+// Wait probes and wrappers must survive host load. Poll the intended output/condition with a shared deadline;
+// coupled success probes use the same internal budget so they cannot expire before the observer changes the gate.
+// Failure-timeout assertions and production wait limits stay the same.
+const PROBE_DEADLINE_MS = 120000;
+const PROBE_TIMEOUT_MIN = String(PROBE_DEADLINE_MS / 60000);
+const run = (args, extra = {}, script = res, timeout = PROBE_DEADLINE_MS) => {
   const r = spawnSync(script, args, { env: { ...env, ...extra }, encoding: 'utf8', timeout });
   if (r.error) throw r.error;
   return { code: r.status, text: `${r.stdout}${r.stderr}` };
 };
-// Race probes must survive host load. Wait for the intended output/condition with a generous deadline instead of
-// assuming a fixed 10-second budget for process startup and the 1-second retry backoff; assertions stay the same.
-const PROBE_DEADLINE_MS = 120000;
 const waitFor = (predicate, label) => {
   let timer = null, done = false;
   const promise = new Promise((resolve, reject) => {
@@ -56,10 +58,30 @@ const waitFor = (predicate, label) => {
   });
   return { promise, cancel: () => { done = true; if (timer) clearTimeout(timer); } };
 };
+const runProbe = async (script, args, extra = {}, label = path.basename(script)) => {
+  const child = spawn(script, args, { env: { ...env, ...extra } });
+  let stdout = '', stderr = '', result = null, error = null;
+  child.stdout.on('data', (b) => { stdout += b; }); child.stderr.on('data', (b) => { stderr += b; });
+  child.on('error', (e) => { error = e; });
+  const completion = new Promise((resolve) => child.once('close', (code) => {
+    result = { code, status: code, text: stdout + stderr, stdout, stderr }; resolve();
+  }));
+  const finished = waitFor(() => result !== null || error !== null, `${label} did not finish`);
+  try {
+    await finished.promise;
+    if (error) throw error;
+    return result;
+  } finally {
+    finished.cancel();
+    if (child.pid && child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
+    await completion;
+  }
+};
+const runWait = (args, extra = {}, script = res) => runProbe(script, args, extra, `${path.basename(script)} wait`);
 const takeArgs = (id = 'heavy-lane-3', by = 'lane3-test', pid = process.pid) =>
   [id, '--by', by, '--project', 'scratch', '--for', 'fixture', '--pid', String(pid)];
 const take = (extra = {}, id) => run(['take', ...takeArgs(id)], extra);
-const wait = (extra = {}, timeout = '0', id) => run(['wait', ...takeArgs(id), '--timeout', timeout], extra);
+const wait = (extra = {}, timeout = '0', id) => runWait(['wait', ...takeArgs(id), '--timeout', timeout], extra);
 const release = (id = 'heavy-lane-3', by = 'lane3-test') => eq(run(['return', id, '--by', by]).code, 0);
 const lock = (id = 'heavy-lane-3') => path.join(state, 'locks', `${id}.d`);
 const metadata = () => fs.readFileSync(path.join(lock(), 'info'), 'utf8');
@@ -74,16 +96,16 @@ for (const [load, ram, expected] of [['8', '68719476736', 'OPEN'], ['8.001', '68
   eq(take(extra).code, expected === 'OPEN' ? 0 : 5);
   eq(fs.existsSync(lock()), expected === 'OPEN');
   if (expected === 'OPEN') release();
-  eq(wait(extra).code, expected === 'OPEN' ? 0 : 2);
+  eq((await wait(extra)).code, expected === 'OPEN' ? 0 : 2);
   if (expected === 'OPEN') release();
   eq(fs.existsSync(lock()), false);
 }
 for (const extra of [{ RES_TEST_LOAD1M: '21' }, { RES_TEST_MEMORYSTATUS_LEVEL: '24' }]) {
-  eq(run(['heavy-check'], extra).code, 5); eq(take(extra).code, 5); eq(wait(extra).code, 2);
+  eq(run(['heavy-check'], extra).code, 5); eq(take(extra).code, 5); eq((await wait(extra)).code, 2);
   eq(fs.existsSync(lock()), false);
 }
 for (const extra of [{ RES_TEST_LOAD1M: 'bad' }, { RES_TEST_MEMORYSTATUS_LEVEL: 'bad' }]) {
-  eq(take(extra).code, 1); eq(wait(extra).code, 1); eq(fs.existsSync(lock()), false);
+  eq(take(extra).code, 1); eq((await wait(extra)).code, 1); eq(fs.existsSync(lock()), false);
 }
 // Same memory basis as v1.2: only an explicitly missing sysctl permits pages fallback.
 const pages32 = { RES_TEST_MEMORYSTATUS_LEVEL: 'missing',
@@ -102,10 +124,10 @@ for (const extra of [{ RES_TEST_LOAD1M: '9' }, { RES_TEST_MEMORYSTATUS_LEVEL: '4
 }
 ok(run(['status', 'heavy-lane-3']).text.includes('lane3-test (scratch)'));
 eq(run(['take', ...takeArgs('heavy-lane-3', 'other')]).code, 2);
-eq(wait({}, '0.02').code, 0); // Idempotent own hold is retained.
+eq((await wait({}, '0.02')).code, 0); // Idempotent own hold is retained.
 eq(metadata(), original); release();
 eq(run(['take', ...takeArgs('heavy-lane-3', 'other')]).code, 0);
-const timeoutStart = Date.now(); eq(wait({}, '0.02').code, 2);
+const timeoutStart = Date.now(); eq((await wait({}, '0.02')).code, 2);
 ok(Date.now() - timeoutStart >= 1000); ok(metadata().includes('by\tother\n')); release('heavy-lane-3', 'other');
 
 // Recovery uses real bounded wait/backoff and changes only scratch fixture readings.
@@ -122,7 +144,7 @@ fs.writeFileSync(path.join(mocks, 'vm_stat'), '#!/bin/sh\nprintf "%s\\n" "$RES_T
 for (const dimension of ['load', 'level']) {
   fs.writeFileSync(path.join(root, 'load'), dimension === 'load' ? '9\n' : '8\n');
   fs.writeFileSync(path.join(root, 'level'), dimension === 'level' ? '49\n' : '50\n');
-  const child = spawn(res, ['wait', ...takeArgs(), '--timeout', '0.1'], { env: { ...env, RES_TEST_METRICS: '0' } });
+  const child = spawn(res, ['wait', ...takeArgs(), '--timeout', PROBE_TIMEOUT_MIN], { env: { ...env, RES_TEST_METRICS: '0' } });
   let output = '';
   const retried = waitFor(() => output.includes('retry in 1s'), 'waiter did not retry');
   const capture = (b) => { output += b; };
@@ -154,7 +176,7 @@ case "$*" in
   *) exit 1 ;;
 esac
 `, { mode: 0o755 });
-const race = run(['wait', ...takeArgs(), '--timeout', '0.1'], { RES_TEST_METRICS: '0' }, res, PROBE_DEADLINE_MS);
+const race = await wait({ RES_TEST_METRICS: '0' }, PROBE_TIMEOUT_MIN);
 eq(race.code, 0); ok(race.text.includes('retry in 1s')); release();
 
 // STALE visibility never mutates. Reclaim requires an OPEN lane and age strictly >600s.
@@ -162,16 +184,16 @@ const dead = 2147483647;
 eq(run(['take', ...takeArgs('heavy-lane-3', 'old', dead)]).code, 0);
 changeInfo('start', 1794563400); const at600 = metadata();
 ok(run(['status', 'heavy-lane-3']).text.includes('STALE old')); eq(metadata(), at600);
-eq(wait().code, 2); eq(metadata(), at600);
+eq((await wait()).code, 2); eq(metadata(), at600);
 changeInfo('start', 1794563399); const stale = metadata();
-eq(wait({ RES_TEST_LOAD1M: '9' }).code, 2); eq(metadata(), stale);
-eq(wait().code, 0); ok(metadata().includes(`pid\t${process.pid}\n`));
+eq((await wait({ RES_TEST_LOAD1M: '9' })).code, 2); eq(metadata(), stale);
+eq((await wait()).code, 0); ok(metadata().includes(`pid\t${process.pid}\n`));
 ok(fs.readFileSync(path.join(state, 'log.tsv'), 'utf8').includes('\treclaim\theavy-lane-3\t')); release();
 for (const kind of ['remote', 'legacy']) {
   eq(run(['take', ...takeArgs('heavy-lane-3', 'old', dead)]).code, 0);
   changeInfo('start', 1794563399);
   if (kind === 'remote') changeInfo('host', 'scratch-remote'); else changeInfo('pid', '');
-  const before = metadata(); eq(wait().code, 2); eq(metadata(), before); release('heavy-lane-3', 'old');
+  const before = metadata(); eq((await wait()).code, 2); eq(metadata(), before); release('heavy-lane-3', 'old');
 }
 eq(take().code, 0);
 const other = run(['heavy-check', '--pid', String(process.ppid)], { RES_TEST_LOAD1M: '20' });
@@ -187,20 +209,20 @@ const threeHeld = run(['heavy-check', '--pid', String(process.ppid)], { RES_TEST
 eq(threeHeld.code, 0); ok(threeHeld.text.includes('limit=20 lanes_held=3')); release();
 const laneInfo = (id) => fs.readFileSync(path.join(lock(id), 'info'), 'utf8');
 const held1 = laneInfo('heavy-lane-1'), held2 = laneInfo('heavy-lane-2');
-const wrapper = (extra = {}) => spawnSync('/bin/bash', [path.resolve(base, '../../heavy-build.sh'), '/bin/sh', '-c', 'exit 7'], {
-  env: { ...env, RES_COMMAND: res, HEAVY_BUILD_BY: 'wrapper', HEAVY_BUILD_PROJECT: 'scratch',
-    HEAVY_BUILD_TASK: 'lane3', HEAVY_BUILD_TIMEOUT: '0', HEAVY_BUILD_LANE: '', ...extra }, encoding: 'utf8', timeout: 20000 });
-const wrapped = wrapper(); eq(wrapped.status, 7, wrapped.stderr);
+const wrapper = (extra = {}) => runProbe('/bin/bash', [path.resolve(base, '../../heavy-build.sh'), '/bin/sh', '-c', 'exit 7'],
+  { RES_COMMAND: res, HEAVY_BUILD_BY: 'wrapper', HEAVY_BUILD_PROJECT: 'scratch',
+    HEAVY_BUILD_TASK: 'lane3', HEAVY_BUILD_TIMEOUT: '0', HEAVY_BUILD_LANE: '', ...extra }, 'heavy-build wrapper');
+const wrapped = await wrapper(); eq(wrapped.status, 7, wrapped.stderr);
 ok(wrapped.stdout.includes('took heavy-lane-3'));
 eq(fs.existsSync(lock()), false); eq(fs.existsSync(lock('heavy-build')), false);
 eq(laneInfo('heavy-lane-1'), held1); eq(laneInfo('heavy-lane-2'), held2);
 const wrapperReturns = fs.readFileSync(path.join(state, 'log.tsv'), 'utf8').split('\n')
   .map((line) => line.split('\t')).filter((row) => row[1] === 'return' && row[3] === 'wrapper').map((row) => row[2]);
 eq(wrapperReturns, ['heavy-lane-3', 'heavy-build']);
-eq(wrapper({ RES_TEST_LOAD1M: '8.001' }).status, 2);
+eq((await wrapper({ RES_TEST_LOAD1M: '8.001' })).status, 2);
 eq(fs.existsSync(lock()), false); eq(fs.existsSync(lock('heavy-build')), false);
 eq(laneInfo('heavy-lane-1'), held1); eq(laneInfo('heavy-lane-2'), held2);
-eq(wrapper({ HEAVY_BUILD_LANE: 'heavy-lane-3' }).status, 7);
+eq((await wrapper({ HEAVY_BUILD_LANE: 'heavy-lane-3' })).status, 7);
 for (const id of ['heavy-lane-1', 'heavy-lane-2']) release(id);
 eq(take().code, 0);
 eq(run(['return', 'heavy-lane-3', '--by', 'lane3-test'], { RES_TEST_LOAD1M: '99', RES_TEST_MEMORYSTATUS_LEVEL: '0' }).code, 0);
@@ -220,7 +242,7 @@ for (const id of ['heavy-lane-1', 'heavy-lane-2'])
 const rolloutInfo = fs.readFileSync(path.join(rollout, 'locks/heavy-lane-1.d/info'), 'utf8');
 for (const source of [res, baseline]) {
   const started = Date.now();
-  const timedOut = wrapper({ RES_DIR: rollout, RES_COMMAND: source, HEAVY_BUILD_TIMEOUT: '0.02' });
+  const timedOut = await wrapper({ RES_DIR: rollout, RES_COMMAND: source, HEAVY_BUILD_TIMEOUT: '0.02' });
   eq(timedOut.status, 2, timedOut.stderr); ok(Date.now() - started >= 1000);
   ok(timedOut.stderr.includes('continuing bounded waits on lanes 1/2'));
   eq(fs.existsSync(path.join(rollout, 'locks/heavy-build.d')), false);
@@ -228,7 +250,7 @@ for (const source of [res, baseline]) {
 }
 const fallback = spawn('/bin/bash', [path.resolve(base, '../../heavy-build.sh'), '/bin/sh', '-c', 'exit 7'], {
   env: { ...env, RES_DIR: rollout, RES_COMMAND: res, HEAVY_BUILD_BY: 'wrapper', HEAVY_BUILD_PROJECT: 'scratch',
-    HEAVY_BUILD_TASK: 'rollout', HEAVY_BUILD_TIMEOUT: '0.2', HEAVY_BUILD_LANE: '' } });
+    HEAVY_BUILD_TASK: 'rollout', HEAVY_BUILD_TIMEOUT: PROBE_TIMEOUT_MIN, HEAVY_BUILD_LANE: '' } });
 let fallbackOutput = '';
 const fallbackReady = waitFor(() => fallbackOutput.includes('continuing bounded waits on lanes 1/2'),
   'fallback did not reach normal-lane wait');
@@ -247,20 +269,20 @@ try {
 eq(fs.existsSync(path.join(rollout, 'locks/heavy-build.d')), false);
 eq(fs.existsSync(path.join(rollout, 'locks/heavy-lane-2.d')), false);
 eq(fs.readFileSync(path.join(rollout, 'locks/heavy-lane-1.d/info'), 'utf8'), rolloutInfo);
-eq(wrapper({ RES_DIR: rollout, HEAVY_BUILD_LANE: 'heavy-lane-3' }).status, 1);
+eq((await wrapper({ RES_DIR: rollout, HEAVY_BUILD_LANE: 'heavy-lane-3' })).status, 1);
 eq(run(['take', ...takeArgs('heavy-lane-2', 'rollout-owner')], { RES_DIR: rollout }).code, 0);
 const errorRes = path.join(root, 'error-res');
 fs.writeFileSync(errorRes, `#!/bin/bash
 if [ "$1" = wait ] && [ "$2" = heavy-lane-3 ]; then echo 'res: cannot read lane-3 metrics' >&2; exit 1; fi
 exec "$RES_SOURCE" "$@"
 `, { mode: 0o755 });
-const failedGate = wrapper({ RES_DIR: rollout, RES_COMMAND: errorRes });
+const failedGate = await wrapper({ RES_DIR: rollout, RES_COMMAND: errorRes });
 eq(failedGate.status, 1); ok(!failedGate.stderr.includes('continuing bounded waits'));
 eq(fs.existsSync(path.join(rollout, 'locks/heavy-build.d')), false);
 for (const id of ['heavy-lane-1', 'heavy-lane-2'])
   eq(run(['return', id, '--by', 'rollout-owner'], { RES_DIR: rollout }).code, 0);
 eq(run(['--help']).text, run(['--help'], {}, baseline).text);
-const transcript = (script, name) => {
+const transcript = async (script, name) => {
   const dir = path.join(root, name); fs.mkdirSync(dir);
   fs.writeFileSync(path.join(dir, 'resources.tsv'), registry);
   const output = [];
@@ -270,12 +292,12 @@ const transcript = (script, name) => {
     ['status', 'checkout'], ['return', 'checkout', '--by', 'owner'], ['log', '3'], ['heavy-check'],
     ['wait', ...takeArgs('heavy-build'), '--timeout', '0'], ['return', 'heavy-build', '--by', 'lane3-test']];
   for (const args of commands) {
-    const r = run(args, { RES_DIR: dir }, script);
+    const r = args[0] === 'wait' ? await runWait(args, { RES_DIR: dir }, script) : run(args, { RES_DIR: dir }, script);
     output.push(`$ ${args.join(' ')}\n${r.text.replaceAll(dir, 'SCRATCH').replace(/ lane3=(OPEN|CLOSED)(?=\n|$)/g, '')}exit=${r.code}\n`);
   }
   return { output: output.join(''), dir };
 };
-const before = transcript(baseline, 'before'), after = transcript(res, 'after');
+const before = await transcript(baseline, 'before'), after = await transcript(res, 'after');
 fs.writeFileSync(path.join(root, 'compatibility-before.txt'), before.output);
 fs.writeFileSync(path.join(root, 'compatibility-after.txt'), after.output);
 eq(after.output, before.output);

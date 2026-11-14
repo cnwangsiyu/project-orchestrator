@@ -164,10 +164,14 @@ try {
   const ttMax = run(['implement', '--failures', '2'], { company: true, daily: null });
   assert.deepEqual([ttMax.pick.account, ttMax.pick.effort], ['ttadk', 'max']);
   assert.ok(!ttMax.needsUserOK.includes('max effort'));
-  // Kimi notes: name depleted skipped candidates; pin secondary substitution and the explicit Astra quality rung.
+  // Hard availability keeps depleted Astra rather than skipping it for a weaker family; normal availability still
+  // names skipped depleted candidates. Secondary substitution and explicit Astra quality rungs stay pinned.
   const skip = run(['debug', '--exclude-model', SOL], { daily: { ...active, [ASTRA]: bucket(true) } });
-  assert.equal(skip.pick.model, FLASH);
-  assert.ok(skip.why.some((s) => /skipped depleted priority buckets:.*gpt-6-astra/.test(s)));
+  assert.equal(skip.pick.model, ASTRA); assert.equal(skip.pick.account, 'trae'); assert.ok(!personalGate(skip));
+  assert.ok(skip.why.some((s) => /gpt-6-astra low-priority lane \(bucket depleted\)/.test(s)));
+  const normalSkip = run(['analysis', '--exclude-model', SOL], { daily: { ...active, [SOL56]: bucket(true) } });
+  assert.equal(normalSkip.pick.model, TERRA56);
+  assert.ok(normalSkip.why.some((s) => /skipped depleted priority buckets:.*gpt-5.6-sol/.test(s)));
   const second = run(['review-high', '--author', 'codex']);
   assert.equal(second.pick.vendor, 'claude'); assert.equal(second.secondOpinion.model, ASTRA);
   assert.equal(second.secondOpinion.account, 'trae');
@@ -241,10 +245,12 @@ try {
       const tierCandidates = r.tier === 'hard' ? [SOL, ASTRA] : r.tier === 'normal' ? [SOL, SOL56, TERRA56, FLASH] : [TERRA56, GPT55, FLASH];
       const deepseekFits = category !== 'review-high' && !(['review', 'second-opinion'].includes(category) && (security || args.includes('high')));
       const companyModels = category === 'image-read' ? [SOL, ASTRA, SEED]
+        : r.adversarial ? [FLASH]
+        : r.tier === 'hard' ? [SOL, ASTRA]
         : [SOL, ...tierCandidates.filter((m) => m !== FLASH || deepseekFits), ...(deepseekFits ? [FLASH] : [])];
       const traeAvailable = (config.models ?? ids).some((m) => companyModels.includes(m) && fits(m, 'trae'));
-      const ttAvailable = !!config.company && fits(SOL, 'ttadk');
-      const companyHasSol = ttAvailable || ((config.models ?? ids).includes(SOL) && fits(SOL, 'trae'));
+      const ttAvailable = !!config.company && !r.adversarial && fits(SOL, 'ttadk');
+      const companyHasSol = !r.adversarial && (ttAvailable || ((config.models ?? ids).includes(SOL) && fits(SOL, 'trae')));
       if (traeAvailable || ttAvailable) {
         for (const [pick, secondary] of [[p, false], [r.secondOpinion, true]]) {
           if (!pick) continue;

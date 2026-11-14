@@ -27,9 +27,9 @@ export function runResSuites() {
   for (const suite of suites) {
     const node = suite.endsWith('.mjs');
     const script = path.join(node ? base : tmp, suite);
-    // The legacy suite includes two complete CLI transcripts after its contract matrix. Under host load those
-    // shell invocations can exceed five minutes; retain a bounded harness without changing resource wait limits.
-    const timeout = suite === 't88/legacy/test-res.sh' ? 600000 : 300000;
+    // Legacy and lane-3 CLI transcripts plus bounded race probes can exceed five minutes under host load.
+    // Keep a finite harness budget without changing production resource wait limits.
+    const timeout = suite === 't88/legacy/test-res.sh' || suite === 'lane3.mjs' ? 600000 : 300000;
     const r = spawnSync(node ? process.execPath : '/bin/bash', [script], {
       cwd: tmp, env: { ...env, RES_TEST_ROOT: tmp, RES_SOURCE: res },
       encoding: 'utf8', timeout, maxBuffer: 8 * 2 ** 20 });

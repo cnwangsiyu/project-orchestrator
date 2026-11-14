@@ -237,10 +237,12 @@ const chatgptOut = QX.out || (noRedeem && !QX.pick && !!QX.redeem)
 // the same rules, before personal quota (user, 2026-11-08). TT is whichever company account takes Codex work now.
 const taskFits = (a) => T.kind !== 'claudeOnly' && cat !== 'image-gen'
   && !(cat === 'research' && !a.search) && !(T.kind === 'browser' && !a.browser);
+// Hard work never falls to a weaker fallback (user rule 2026-11-13, effective 2026-11-14): only Sol/Astra are eligible.
+// ETA chooses between their low-priority lanes and an explicit TTADK-reset dispatch; depletion is not unavailability.
 const routingModelFits = (model, account) => model === SOL || tierModels(account).includes(model)
   || (adversarial && model === KIMI && account?.kind === 'ttadk' && cat !== 'image-read')
-  || ALTS.some((a) => a.model === model && (cat === 'image-read' ? a.vision : !a.visionOnly)
-    && !(deepseekUnfit && poolOf(model) === 'deepseek'));
+  || ((tier !== 'hard' || adversarial) && ALTS.some((a) => a.model === model && (cat === 'image-read' ? a.vision : !a.visionOnly)
+    && !(deepseekUnfit && poolOf(model) === 'deepseek')));
 const expiringUnused = QX.ttadk?.usable && !excluded.has(QX.ttadk.name) && ttadkExpiringUnused(QX.ttadk);
 const preferExpiringTtadk = expiringUnused && (background && backgroundEligible || tier === 'light' && laneEligible);
 const companyOrder = background && backgroundEligible && !preferExpiringTtadk ? [QX.trae, QX.ttadk] : [QX.ttadk, QX.trae];
@@ -269,8 +271,11 @@ const ttTierModels = tierModels(TT);
 // but the ladder still escalates from the light first rung (TTADK's light list or TRAE's light tier). A light row whose
 // account lists no light model may still use a normal-tier model, so company quota is spent before personal quota.
 const ttLightTierModels = TT?.kind === 'ttadk' ? ttadkLightModels() : TT?.kind === 'trae' ? tierModels(TT, 'light') : [];
-const ttModelsOK = ttHas(SOL) || ttAlts.length > 0 || ttTierModels.length > 0
-  || (lightRow && (ttLightTierModels.length > 0 || tierModels(TT, 'normal').length > 0));
+// Hard work needs a hard-tier company model (Sol or Astra); fallback families are not company capacity for it.
+const ttModelsOK = tier === 'hard'
+  ? ttHas(SOL) || ttHas(ASTRA)
+  : ttHas(SOL) || ttAlts.length > 0 || ttTierModels.length > 0
+    || (lightRow && (ttLightTierModels.length > 0 || tierModels(TT, 'normal').length > 0));
 const companyPick = (id, effort) => X(id, ALTS.find((a) => a.model === id)?.effort ?? effort);
 // Light procedural work (test-env build-run, lookup/extract/draft, low stakes, background) starts on the company
 // account's light list instead of Sol medium: TTADK's gpt-5.6-terra/gpt-5.5, TRAE's light tier. A failure escalates to
@@ -441,7 +446,7 @@ const allowed = (x) => background ? x.vendor === 'codex' && !!TT && taskFits(TT)
 // quota allows. --failures N takes step N, so each failure moves up even when some steps are ruled out.
 let base;
 if (cat === 'second-opinion') {
-  base = opts.against === 'claude' ? [T.first, ...T.ladder] : [T.alt, C('opus', 'xhigh'), ...(TT && ttHas(SOL) ? [X(SOL, 'xhigh')] : ttAlts.slice(0, 1))];
+  base = opts.against === 'claude' ? [T.first, ...T.ladder] : [T.alt, C('opus', 'xhigh'), ...(TT && ttHas(SOL) ? [X(SOL, 'xhigh')] : tier === 'hard' ? [] : ttAlts.slice(0, 1))];
   why.push(`second opinion from the other vendor than ${opts.against}`);
 }
 else if (T.kind === 'browser' && !browserViaCodex) base = [T.alt, C('opus', 'high')];
@@ -503,9 +508,11 @@ if (ttCapable) {
   while (ei(rungs.at(-1).effort) < ei('xhigh')) rungs.push(notch(rungs.at(-1), +1));
   // After Sol xhigh has fallen short, a different model family before Sol max (its misses rarely overlap Sol's: Kimi,
   // 2026-11-07; DeepSeek, 2026-11-10), and the second fallback after Sol max — all before personal quota.
-  if (ttAlts[0]) rungs.push(ttAlts[0]);
+  // A different-family fallback between Sol xhigh and Sol max helps normal work; hard work never uses one (user rule
+  // 2026-11-13: no DeepSeek or 5.6 for hard tasks), so its ladder is Sol/Astra only.
+  if (tier !== 'hard' && ttAlts[0]) rungs.push(ttAlts[0]);
   if (!cheapRow) rungs.push(X(SOL, 'max'));
-  if (!cheapRow && ttAlts[1]) rungs.push(ttAlts[1]);
+  if (tier !== 'hard' && !cheapRow && ttAlts[1]) rungs.push(ttAlts[1]);
   // GPT-6-Astra on the company account after Sol max and the fallbacks (live test 2026-11-13: 4 parallel tiny tasks all
   // succeeded after ~13.5 min of TRAE-wide queueing); company quota, so no OK — the gate below covers ChatGPT only.
   if (!cheapRow && ttHas(ASTRA)) rungs.push(X(ASTRA, 'high'));
@@ -607,9 +614,13 @@ const quotaChoice = (x, log = (r) => why.push(r), taskTier = tier) => {
   }
   if (!onTTADK(x) || TT.kind !== 'trae') return x;
   if (backgroundLane) return backgroundChoice(x, log, taskTier);
-  if ((taskTier === 'hard' && (x.model === SOL || x.model === ASTRA))
-    || (hasTraeDailyQuota(TT.quota) && tierModels(TT, taskTier).some((id) => laneOf(id)
-      && (TT.quota?.daily?.[id]?.depleted === true || laneCongested(id))))) {
+  if (taskTier === 'hard') {
+    // ETA is the only foreground hard-lane selector. A leftover weaker retry rung is rejected by the final pick
+    // guard, not upgraded sideways here; neither path may enter the normal/light quota fallback below.
+    return x.model === SOL || x.model === ASTRA ? companyEtaChoice(x, log, taskTier) ?? x : x;
+  }
+  if (hasTraeDailyQuota(TT.quota) && tierModels(TT, taskTier).some((id) => laneOf(id)
+    && (TT.quota?.daily?.[id]?.depleted === true || laneCongested(id)))) {
     const choice = companyEtaChoice(x, log, taskTier);
     if (choice) return choice;
   }
@@ -642,7 +653,8 @@ const quotaChoice = (x, log = (r) => why.push(r), taskTier = tier) => {
   const candidates = x.model === ASTRA ? [] : tierModels(TT, taskTier);
   const id = candidates.find((id) => id !== x.model && priorityAvailable(id, TT));
   const gpt = id && poolOf(id) === 'gpt';
-  const sub = id ? companyPick(id, x.effort) : ttAlts.find((a) => a.model !== x.model && !TT.quota.daily[a.model]?.depleted);
+  const sub = id ? companyPick(id, x.effort)
+    : ttAlts.find((a) => a.model !== x.model && !TT.quota.daily[a.model]?.depleted);
   log(`TRAE ${x.model}'s daily high-priority bucket is depleted → ${sub ? `${label(sub)} (${gpt ? 'comparable GPT with quota left' : 'eligible company fallback'})` : 'keep the queued model: no eligible alternative with quota left'}; parallel task concurrency is unchanged`);
   return sub ?? x;
 };
@@ -662,9 +674,12 @@ const tune = (x, f, log) => {
 };
 const availabilityChoice = (x, taskTier, log) => {
   // A light row whose account lists no light model still uses the company's normal-tier model (a comparable GPT with
-  // quota) before personal quota; the light list stays first when it has a candidate.
+  // quota) before personal quota; the light list stays first when it has a candidate. Hard work substitutes only a
+  // hard-tier model (Sol/Astra): with neither available it drops to the next rung (Claude), never to DeepSeek or 5.6.
   const lightFallback = taskTier === 'light' ? tierModels(TT, 'normal') : [];
-  const ids = [...new Set([...tierModels(TT, taskTier), ...lightFallback, ...ttAlts.map((a) => a.model)])];
+  const hardModels = taskTier === 'hard' ? [SOL, ASTRA].filter((id) => ttHas(id)) : [];
+  const alts = taskTier === 'hard' ? [] : ttAlts.map((a) => a.model);
+  const ids = [...new Set([...hardModels, ...tierModels(TT, taskTier), ...lightFallback, ...alts])];
   const id = ids.find((id) => !TT.quota?.daily?.[id]?.depleted) ?? ids[0];
   if (!id) return null;
   const skipped = ids.filter((m) => m !== id && TT.quota?.daily?.[m]?.depleted);
@@ -679,9 +694,10 @@ const resolveRung = (raw, index) => {
   currentRung = index;
   let x = raw, transfer = null, factors = null;
   if (ttCapable && x.vendor === 'codex' && x.model === SOL && !ttHas(SOL)) x = availabilityChoice(x, taskTier, log);
-  else if (onTTADK(x) && !ttHas(x.model) && (ttHas(SOL) || ttAlts.length)) {
-    x = ttHas(SOL) ? notch(X(SOL, x.effort), 0) : ttAlts[0];
-    log(`${raw.model} isn't on ${TT.name} and the ChatGPT accounts are out → ${label(x)} on ${TT.name}`);
+  else if (onTTADK(x) && !ttHas(x.model) && (ttHas(SOL) || ttHas(ASTRA) || (taskTier !== 'hard' && ttAlts.length))) {
+    if (taskTier === 'hard') x = ttHas(ASTRA) ? notch(X(ASTRA, x.effort), 0) : ttHas(SOL) ? notch(X(SOL, x.effort), 0) : null;
+    else x = ttHas(SOL) ? notch(X(SOL, x.effort), 0) : ttAlts[0];
+    if (x) log(`${raw.model} isn't on ${TT.name} and the ChatGPT accounts are out → ${label(x)} on ${TT.name}`);
   }
   if (!x) return null;
   const previousLane = laneSeen;
@@ -759,9 +775,9 @@ if (!deferred) {
       needsOK.push(`escalation ladder exhausted after ${failures} failure(s): tell the user before trying again`);
       notes.push(`this retry is not stronger than the one that fell short: its only lever is the brief — put the failure's concrete findings (review items, failing test, symptom) in it`);
     }
-    if (tier === 'hard' && (balancedAccount ?? TT)?.kind === 'trae' && onTTADK(m)
-      && m.vendor === 'codex' && m.model.startsWith('gpt-') && ![SOL, ASTRA].includes(m.model)) {
-      deferred = 'no stronger eligible company rung for this hard retry; do not repeat a weaker GPT'; m = null;
+    if (!adversarial && tier === 'hard' && (balancedAccount ?? TT)?.kind === 'trae' && onTTADK(m)
+      && m.vendor === 'codex' && ![SOL, ASTRA].includes(m.model)) {
+      deferred = 'no stronger eligible company rung for this hard retry; do not repeat a weaker model (no DeepSeek or 5.6 for hard work)'; m = null;
     }
     if (failures >= 1 && CODE.includes(cat)) notes.push("if the last miss was spec/process, amend the brief's acceptance first and say what changed before dispatching this fix round (outcome --cause); do not repeat the same brief");
     if (failures >= 1 && CODE.includes(cat)) notes.push('rework thread rule (SKILL.md, 2026-11-13): may continue the original author thread only for this same-task fix round with useful context, company account (personal needs user OK), no route escalation or exclusion, and no depleted TRAE bucket with queue >300 while someone waits; otherwise use the route thread. Record outcome.mjs --actual and ledger: "continued original thread because ..."');
