@@ -148,6 +148,8 @@ signing or credential files. Unknown login/expiry is unknown, not healthy; missi
 - **Quota health:** inspect Claude all-model/Fable weekly projections, TRAE login/restriction recovery and Codex
   reset-card deadlines. Every reset-card redemption needs a fresh user OK, even after prior approvals. Company
   quota continues without asking; ask before personal quota or deferring runnable work. No LLM total-cost caps.
+- **Resident signing worker:** count its user-approved personal Claude usage separately from all other Claude work.
+  Use sanctioned worker/quota metadata only; never inspect signing, password, keychain or session files.
 - **Persistent orchestrator models:** model selection lives in `~/.claude/jobs/<id>/state.json` `respawnFlags`;
   a `/model` switch is lost on restart. VAK and routing stay on **Fable**; Webview and Lynx returned to **Opus on
   2026-11-11** because their Fable weekly projection exceeded budget. These are orchestrator choices, not worker defaults.
@@ -166,6 +168,12 @@ personal-quota launches without recorded user OK, TRAE GPT launches on security 
 `rules-ack` vs the digest version. Read the launcher-provided `orch-usage` flags/blockedMinutes alongside them
 for labour and foreground blocking. Launch records are attempts, not completion proof; legacy routes without
 launch evidence and missing remote ledgers stay unknown, never proven compliant or violated.
+
+Audit the resident Claude signing worker from its preregistration manifest, hashes-only PASS/FAIL reports and
+sanctioned worker metadata: only registered own test packages and the specified H6/debug credentials are in scope;
+any session/other keychain/production-release access, secret export/copy/print, richer report, or any other worker
+reading signing material is a violation. Out-of-scope requests must be BLOCKED with a user card. `review-data` has
+no trustworthy signing-material activity source, so keep its schema unchanged and report absent evidence as UNKNOWN.
 
 Compare the last three nightly reports. A rule broken on three nights needs a concrete tool-level enforcement
 proposal (evidence, owner, smallest effective gate and false-positive risk), not another repeated reminder.

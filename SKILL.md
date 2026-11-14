@@ -72,7 +72,7 @@ The versioned [global-rules digest](references/global-rules.md) is the single in
 - **Claude workers:** [launch](#claude-worker-settings) always uses Remote Control + explicit Bypass; [permissions](#permission-plan) use cards for what Bypass cannot pass, agents execute non-secret actions, only the user types secrets.
 - **TRAE:** [account rules](references/codex-workers.md#trae-cli-as-the-second-company-account-user-2026-11-08) separate restrictions from concurrency/quota, never reduce concurrency for queues, enforce only QPM/TPM limits for LLM use (no total-cost caps), and name the concrete worker model in reports.
 - **Work and quota:** [judgment](#judge-not-labour) stays with orchestrators, [independent tasks](#split-by-coupling) run in parallel while coupled work stays together; [quota](#route-every-task) never silently holds work, uses company quota without asking, personal quota after asking, reset cards only after a fresh OK every time.
-- **Signing/credentials:** [worker safety](#worker-credential-safety) forbids Codex workers on this machine from touching signing/credential files, including hashing, regardless of authorization; strip/use sanitized public inputs or have the user run it once.
+- **Signing/credentials:** [worker safety](#worker-credential-safety) forbids every Codex worker from touching signing/credential files. Only the resident Claude signing worker has the narrow, user-approved own-test-package exception; its personal quota and scope are audited separately.
 - **Orchestrator models:** [account/model health](references/nightly-review.md#account-and-model-health) records persistent `jobs/<id>/state.json` `respawnFlags`, VAK/routing on Fable, Webview/Lynx on Opus since 2026-11-11, and a user check on/after 2026-11-17 09:00 PST.
 - **Account reminders:** [nightly health](references/nightly-review.md#account-and-model-health) owns cards for company logins expiring within three days, TTADK SSO (2026-11-21 19:37 PST), TRAE login, Codex reset cards and Claude/Fable weekly projections; [`POLICY`](scripts/lib/state.mjs) supplies the 72-hour TTADK warning to `quota.mjs`.
 - **Rollout:** [policy notification](#global-rule-rollout) sends each change to all orchestrators: via the secretary for the mini group, directly to MacBook orchestrators.
@@ -214,7 +214,7 @@ close (user, 2026-11-04, after a worker overwrote a user header and another wipe
   --remove-existing-content, wiping app containers or Documents, erasing a simulator), or ask
   first."
 
-<a id="worker-credential-safety"></a>Every brief, whatever the task, also carries the credential clause (user-approved 2026-11-11, after a TRAE
+<a id="worker-credential-safety"></a>Every brief also carries the credential clause below; only the resident Claude signing worker's explicitly scoped brief replaces it with the narrow exception that follows (user-approved 2026-11-11, after a TRAE
 DeepSeek worker copied bytedcli's TikTok SSO session file into its automation browser to get past a console
 login; the user had to sign in again):
 - "Never read, copy or load any login session or credential file (cookies, SSO/session tokens, CLI auth
@@ -228,6 +228,15 @@ login; the user had to sign in again):
 - **Codex signing boundary on this machine** (user, 2026-11-13): never touch signing or credential files, including
   keychain-password files or hashing them, even with authorization. Design the task to strip those inputs/use a
   sanitized public version, or have the user run the necessary operation once. Never plan on approval lifting this ban.
+- **Only signing exception** (user-approved 2026-11-13): signing of **our own test packages** goes to the one resident
+  Claude signing worker set up by vesdk-mainline and shared with lynx-view, launched with Remote Control + Bypass on
+  separately counted, pre-approved personal Claude quota. It may sign only packages preregistered by manifest + hash:
+  iPhone test apps with the H6 keychain identity (if locked, it may read that one password file to unlock it), and
+  Android test APKs with the repo-committed debug keystore and debug passphrase in `build.gradle`. It never exports,
+  copies or prints a secret and reports only hashes plus PASS/FAIL; it never touches login sessions, other keychains,
+  or production/release packages. Anything outside this scope is BLOCKED with a user card. Every other Claude and
+  Codex worker keeps the baseline rule. During transition, the user may still run vesdk-mainline's existing one-shot
+  “sign everything” wrapper.
 
 **Prevent rework at the brief** (rework retro of 2026-11-06–10, 89 rework chains; user-approved 2026-11-10). Most
 rework came from unchecked premises, "done" proven on the wrong target, one shared rule re-implemented by several
