@@ -134,7 +134,7 @@ the code symlink via `ln -sfn` to a temporary name then `mv -f`, BEFORE the regi
 admit an ungated lane 3. Both entries are published before it returns; no separate manual registration step.
 They are not one filesystem transaction: the owner keeps callers quiescent throughout, and a failed publication
 automatically restores the registry before old code. The wrapper's missing-lane fallback also covers legacy installs.
-It checks held `locks/heavy-*.d` and any argv containing a res path/basename followed by `wait`, including
+It checks held `locks/heavy-*.d` and any argv containing a res path/basename followed by `wait`, `wait-build` or `wait-lane`, including
 env/nohup/quoted-shell wrappers, twice (before and after tests), refuses unreadable process data, and prints a
 quoted rollback command restoring the registry atomically BEFORE the code backup:
 
@@ -160,9 +160,22 @@ Here `\t` denotes TAB. Install the complete maintained take-time text from `scri
 not a delivery report: full-package slot plus lane, strict lane-3 gate, unchanged normal gate, wrapper PID,
 finite waits/backoff, reverse release on every exit, STALE >600s, memory basis and unchanged build budgets.
 
+v1.4 caller migration after the reviewed owner switch: the maintained `scripts/heavy-build.sh` already uses
+`wait-build`. Projects owning env full-package verify/build wrappers (`VESDK_RES_BIN`) and video-agent-kit
+full verify wrappers (`VAK_VERIFY_RES`) should replace separate slot-then-fixed-lane waits with
+`take-build`/`wait-build`; SG packaging and heavy focused-test wrappers should use `wait-lane` instead of
+hard-coded lanes. These caller families are identified by the ownership handover and the contract's public-entry
+compatibility notes; their source files live in the owning projects and are outside this edit-only worktree.
+The reported lynx-view T87 caller must re-invoke its build through the updated wrapper; other waiters still
+running old code need owner-coordinated re-invocation. Keep the public `_shared/res` path and existing overrides.
+Do not take a heavy lock in one worker tool call and build in another: use ONE long-lived wrapper process,
+or the long-lived build PID itself. Add a parent watch (`heavy-build.sh --watch-pid`) when worker death can
+outlive the command. A quota/account successor verifies the predecessor's project/task/local STALE PID,
+returns its lane then slot, then re-takes with its own holder; do not adopt the old metadata.
+
 Known pitfalls: old Bash waiters keep old code until re-invoked; macOS availability is memorystatus percent * RAM,
 not page/swap diagnostics (pages fallback only when the sysctl is explicitly missing). Bad metrics fail closed.
-STALE means local dead PID; wait alone can reclaim heavy holds at age **>600 seconds**, and lane 3 also needs its
+STALE means local dead PID; wait/wait-build/wait-lane alone can reclaim heavy holds at age **>600 seconds**, and lane 3 also needs its
 strict gate OPEN. PID reuse/legacy/remote metadata stay conservative. Same-by take never refreshes PID/start;
 lane-3 re-take of an existing same-holder hold returns 0 even when its gate is CLOSED, without acquiring anew.
 Normal take for old lanes still needs caller heavy-check; new lane-3 acquisitions enforce the stricter gate.
@@ -174,9 +187,9 @@ global enumeration. Owners may additionally use `RES_TEST_NATIVE_PS=1 node scrip
 process-table qualification where permitted; fixture success does not establish host-probe access. Suites are copied
 before running; lifecycle-only adaptations do not change the historical saved script/registry used by the 166-case
 legacy regression. Historical matched 166/267-version runs are described in the T89 handover, not claimed here.
-The full runner gives these four sequential res suites a 1200-second aggregate budget; each individual suite
+The full runner gives these five sequential res suites a 1200-second aggregate budget; each individual suite
 has a 300-second deadline. This accommodates their real bounded backoff, not a controller timeout exemption.
-New fixtures cover exact/rounded 8/32 boundaries, take/wait/recovery, STALE reclaim, optional-lane observation,
+New v1.4 fixtures replay pinned/default acquisition, pair contention, timeout, interruption during metadata publication, short-lived tool shells, PID warnings, worker watch and same-task account takeover. Existing fixtures cover exact/rounded 8/32 boundaries, take/wait/recovery, STALE reclaim, optional-lane observation,
 same-holder CLOSED-gate re-take, real wrapper missing-lane fallback/pinning/reverse release, wrapped waiter refusal,
 atomic registry publication/idempotence and owner install failure/backup/rollback in fake shared state.
 
@@ -184,7 +197,7 @@ atomic registry publication/idempotence and owner install failure/backup/rollbac
 Event IDs use journal inode/byte offset, so repeated tails are deduplicated. Purpose, return/reclaim notes and arbitrary
 command arguments are never persisted. STALE is established only for a dead recorded **local-host** PID with a complete
 process table and a start predating the process snapshot. Remote, legacy, reused-PID, denied or newly acquired locks
-remain unverified. Observed age >600s can mark reclaim eligibility, but **only res wait** may perform automatic reclamation.
+remain unverified. Observed age >600s can mark reclaim eligibility, but **only res waits** may perform automatic reclamation.
 
 Build matching uses the holder PID in the build's own wrapper ancestry, never equal session/project names alone.
 Full-package candidates require matching slot + lane; native/test heavy candidates require a lane. Diagnostics/device-only

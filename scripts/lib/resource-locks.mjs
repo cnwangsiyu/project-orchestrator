@@ -57,10 +57,11 @@ export function parseHeavyStatus(text, expected = BASE_HEAVY_IDS) {
     const [, id, rest] = m, freeRow = /^FREE(?:\s|$)/.test(rest), heldRow = rest.match(/^(.*?)\s+(\d{4}-\d{2}-\d{2} \d{2}:\d{2})(?:\s|$)/);
     if (!freeRow && !heldRow) { errors.push('unparseable heavy holder/start (content omitted)'); continue; }
     const who = freeRow ? 'FREE' : heldRow[1]; seen.add(id);
-    const stale = who.startsWith('STALE '), free = who === 'FREE';
+    const stalePrefix = /^STALE(?:\?\(short-lived pid\))? /;
+    const stale = stalePrefix.test(who), free = who === 'FREE';
     const since = heldRow?.[2] ?? null;
     locks.push({ id, state: free ? 'FREE' : stale ? 'STALE' : 'HELD', stale: free ? false : stale ? true : null,
-      ...(free ? { holder: null, project: null, task: null } : identity(who.replace(/^STALE /, ''))), since, startMs: null, pid: null, host: null });
+      ...(free ? { holder: null, project: null, task: null } : identity(who.replace(stalePrefix, ''))), since, startMs: null, pid: null, host: null });
   }
   for (const id of expected) if (!seen.has(id)) errors.push(`${id}: status unavailable, not FREE`);
   return { locks, complete: !errors.length, errors, source: 'captured res status; no live invocation' };
@@ -154,11 +155,14 @@ export function readLockJournal(shared = SHARED, maxBytes = 128 * 1024) {
 function waitCommand(cmd) {
   const tokens = [...cmd.matchAll(/"([^"\n]*)"|'([^'\n]*)'|([^\s]+)/g)].map((m) => m[1] ?? m[2] ?? m[3]);
   const i = tokens.findIndex((v) => path.basename(v) === 'res');
-  if (i < 0 || i > 1 || tokens[i + 1] !== 'wait' || !ALL_HEAVY_IDS.includes(tokens[i + 2])) return null;
+  if (i < 0 || i > 1) return null;
+  const command = tokens[i + 1];
+  if (!['wait', 'wait-build', 'wait-lane'].includes(command) ||
+      (command === 'wait' && !ALL_HEAVY_IDS.includes(tokens[i + 2]))) return null;
   if (i === 1 && !/^(?:bash|sh|zsh)$/.test(path.basename(tokens[0]))) return null;
-  const get = (key) => { const j = tokens.indexOf(key, i + 3); return j < 0 ? null : tokens[j + 1]; };
+  const get = (key) => { const j = tokens.indexOf(key, i + (command === 'wait' ? 3 : 2)); return j < 0 ? null : tokens[j + 1]; };
   const pid = Number(get('--pid')), timeout = get('--timeout');
-  return { resource: tokens[i + 2], holder: safeHolder(get('--by')), project: safeId(get('--project')), task: safeId(get('--task')),
+  return { resource: command === 'wait-build' ? 'heavy-build' : command === 'wait-lane' ? 'heavy-lane-any' : tokens[i + 2], holder: safeHolder(get('--by')), project: safeId(get('--project')), task: safeId(get('--task')),
     holderPid: Number.isSafeInteger(pid) && pid > 0 ? pid : null,
     timeoutMinutes: /^\d+(?:\.\d+)?$/.test(timeout ?? '') && finite(+timeout) ? +timeout : null };
 }

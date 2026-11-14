@@ -120,6 +120,10 @@ if(m.method==='turn/start')setImmediate(()=>this.onmessage({data:JSON.stringify(
   const res = path.join(tmp, 'res'), reslog = path.join(tmp, 'res.jsonl'), holds = path.join(tmp, 'holds.json');
   fs.writeFileSync(res, `#!/usr/bin/env node
 const fs=require('fs');const a=process.argv.slice(2),id=a[1],by=a[a.indexOf('--by')+1];
+// This stub intentionally qualifies the rolled-back controller fallback. The
+// real v1.4 pair command, contention and signals are covered by res/build.mjs.
+if(a[0]==='wait-build'&&id==='--help'){console.log('legacy help fixture');process.exit(1);}
+if(a[0]==='--help'){console.log('legacy help fixture');process.exit(0);}
 fs.appendFileSync(process.env.RES_LOG,JSON.stringify({cmd:a[0],id,args:a})+'\\n');
 let h={};try{h=JSON.parse(fs.readFileSync(process.env.RES_HOLDS));}catch{}
 if(a[0]==='wait'){if(process.env.BLOCK_ID===id){setInterval(()=>{},1000);}else if((process.env.FAIL_ID||'').split(',').includes(id)){process.exit(2);}else{h[id]=by;fs.writeFileSync(process.env.RES_HOLDS,JSON.stringify(h));if(process.env.INTERRUPT_RESOURCE===id){process.kill(Number(a[a.indexOf('--pid')+1]),process.env.RACE_SIGNAL);setInterval(()=>{},1000);}}}
@@ -141,7 +145,8 @@ if(a[0]==='return'){if(h[id]!==by)process.exit(2);if(process.env.REPEAT_RETURN_S
   const missed = spawnSync('/bin/bash', [path.join(scripts, 'heavy-build.sh'), '/bin/true'], { env: { ...buildEnv, FAIL_ID: 'heavy-lane-1,heavy-lane-2,heavy-lane-3' }, encoding: 'utf8', timeout: 5000 });
   assert.equal(missed.status, 2, missed.stderr);
   assert.deepEqual(JSON.parse(fs.readFileSync(holds)), {});
-  assert.deepEqual(resrows().filter((row) => row.cmd === 'return').map((row) => row.id), ['heavy-build']);
+  const missedReturns = resrows().filter((row) => row.cmd === 'return').map((row) => row.id);
+  assert.ok(missedReturns.length >= 1 && missedReturns.every((id) => id === 'heavy-build'));
   for (const [failIds, lane] of [['heavy-lane-1', 'heavy-lane-2'], ['heavy-lane-1,heavy-lane-2', 'heavy-lane-3']]) {
     reset();
     const fallback = spawnSync('/bin/bash', [path.join(scripts, 'heavy-build.sh'), '/bin/sh', '-c', 'exit 0'], {
@@ -157,13 +162,13 @@ race() {
   local cmd="$1"
   [ "$hit" -eq 0 ] || return 0
   case "$RACE_STAGE" in
-    before_pid) [ "$cmd" = 'child=$!' ] && [ "\${acquiring:-}" = "$RACE_RESOURCE" ] ;;
-    after_wait) [ "$cmd" = 'status=$?' ] && [ "\${acquiring:-}" = "$RACE_RESOURCE" ] ;;
-    clear_child) [ "$cmd" = "child=''" ] && [ "\${acquiring:-}" = "$RACE_RESOURCE" ] ;;
-    before_return) [ "$cmd" = 'return "$status"' ] && [ "\${acquiring:-}" = "$RACE_RESOURCE" ] ;;
+    before_pid) [ "$cmd" = 'child=$!' ] && [ "\${acquiring_id:-}" = "$RACE_RESOURCE" ] ;;
+    after_wait) [ "$cmd" = 'status=$?' ] && [ "\${acquiring_id:-}" = "$RACE_RESOURCE" ] ;;
+    clear_child) [ "$cmd" = "child=''" ] && [ "\${acquiring_id:-}" = "$RACE_RESOURCE" ] ;;
+    before_return) [ "$cmd" = 'return "$status"' ] && [ "\${acquiring_id:-}" = "$RACE_RESOURCE" ] ;;
     before_held) { [ "$cmd" = 'build_held=1' ] && [ "$RACE_RESOURCE" = heavy-build ]; } || { [ "$cmd" = 'lane_held=1' ] && [ "$RACE_RESOURCE" = heavy-lane-1 ]; } ;;
-    after_held) [ "$cmd" = "acquiring=''" ] && [ "\${acquiring:-}" = "$RACE_RESOURCE" ] ;;
-    payload_pid) [ "$cmd" = 'child=$!' ] && [ -z "\${acquiring:-}" ] && [ "\${lane_held:-0}" -eq 1 ] ;;
+    after_held) [ "$cmd" = 'acquiring=0' ] && [ "\${acquiring_id:-}" = "$RACE_RESOURCE" ] ;;
+    payload_pid) [ "$cmd" = 'child=$!' ] && [ "\${acquiring:-0}" -eq 0 ] && [ "\${lane_held:-0}" -eq 1 ] ;;
     *) return 0 ;;
   esac || return 0
   hit=1

@@ -21,7 +21,7 @@ export function runResSuites() {
     PATH: process.env.RES_TEST_NATIVE_PS === '1' ? process.env.PATH : `${bin}:${process.env.PATH}`,
     RES_DIR: path.join(tmp, 'unused'), RES_TEST_METRICS: '0',
     T88_RES: res, T86_RES: res, T83_RES: res };
-  const suites = ['t88/test-res.sh', 't88/memory/test-res.sh', 't88/legacy/test-res.sh', 'lane3.mjs'];
+  const suites = ['t88/test-res.sh', 't88/memory/test-res.sh', 't88/legacy/test-res.sh', 'lane3.mjs', 'build.mjs'];
   let assertions = 0;
   console.log(`Res PID table: ${process.env.RES_TEST_NATIVE_PS === '1' ? 'native ps' : 'scratch fixture (host ps not required)'}`);
   for (const suite of suites) {

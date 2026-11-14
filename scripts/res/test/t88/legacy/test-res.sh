@@ -174,7 +174,7 @@ release heavy-build
 new_hold heavy-build "$dead"
 cp "$RES_DIR/locks/heavy-build.d/info" "$FIXTURE_DIR/stale.info"
 expect 0 "$RES" status heavy-build
-contains 'STALE owner'
+contains 'STALE?(short-lived pid) owner'
 cmp "$FIXTURE_DIR/stale.info" "$RES_DIR/locks/heavy-build.d/info" || fail 'status mutated hold'
 pass 'status marks dead holder without mutation'
 expect 2 "$RES" wait heavy-build --by waiter --project test --for young --pid "$$" --timeout 0
@@ -232,7 +232,7 @@ new_hold tiktok_vesdk "$dead"
 change_info tiktok_vesdk start "$((epoch - 1000))"
 gate 99 0
 expect 0 "$RES" status tiktok_vesdk
-contains 'STALE owner'
+contains 'STALE?(short-lived pid) owner'
 expect 2 "$RES" wait tiktok_vesdk --by waiter --project test --for nonheavy --timeout 0
 absent 'headroom='
 expect 0 "$RES" return tiktok_vesdk --by waiter --force --note 'test forced return'

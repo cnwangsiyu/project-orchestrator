@@ -66,7 +66,7 @@ override dependencies/quota/leases or authorize new work. Keep ready/dispatched 
 User, 2026-11-13: the routing/global-rules orchestrator owns global policy here (「都交给他来负责，让他统一管理」); the secretary only relays, keeps ledgers and asks decision cards, never owns or changes policy.
 The versioned [global-rules digest](references/global-rules.md) is the single injection source. Read it at startup/resume/compact and after a change; write `rules-ack <version>` in your ledger. See [four-layer enforcement and opt-in hook/launchd installation](references/rules-enforcement.md).
 
-- **Resources:** [machine resources](references/resources.md) supplies five-minute sampling, nightly retro/guarded cleanup and detection of builds without holders; [shared `res`](#shared-resources), the [maintained lock contract](references/res-contract.md) and [build/cache discipline](#build-discipline) require the wrapper or explicit take/return, build-then-lane order, finite waits/gates, reverse release, incremental/cold acceptance builds and scoped ccache/Gradle caches (first cache use cold). Global-rules owns the whole tool since 2026-11-13; v1.3 lane 3 is pending its reviewed switch.
+- **Resources:** [machine resources](references/resources.md) supplies five-minute sampling, nightly retro/guarded cleanup and detection of builds without holders; [shared `res`](#shared-resources), the [maintained lock contract](references/res-contract.md) and [build/cache discipline](#build-discipline) require the wrapper or explicit take/return, atomic build-pair acquisition, finite waits/gates, reverse release, incremental/cold acceptance builds and scoped ccache/Gradle caches (first cache use cold). Global-rules owns the whole tool since 2026-11-13; v1.3 lane 3 is pending its reviewed switch.
 - **Disk:** [workspace retention](#workspace-retention) sets no worker space caps; auto-clean self-made build clones/templates/caches only when the data disk has <1 TB free; real workspaces/user data require a user card.
 - **Claude settings:** [documented settings](#claude-worker-settings) record `CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP=1`; idle-stop has no switch (pin or keep working), with no settings mutation.
 - **Claude workers:** [launch](#claude-worker-settings) always uses Remote Control + explicit Bypass; [permissions](#permission-plan) use cards for what Bypass cannot pass, agents execute non-secret actions, only the user types secrets.
@@ -563,22 +563,34 @@ and take-time notes at `~/.claude/orchestrator/_shared/notes/heavy-build.md`. Us
   macOS available memory
   is `kern.memorystatus_level / 100 * physical memory` (fallback/Linux details in the contract), not swap/page diagnostics.
 - **Build entry:** full-package briefs require [heavy-build.sh](scripts/heavy-build.sh) or explicit equivalent
-  `res` take/return; other heavy tasks use the lane-only protocol. The wrapper never installs tools or bypasses a
+  `take-build`/`wait-build` inside a wrapper; other heavy tasks use `wait-lane`. The wrapper never installs tools or bypasses a
   gate, preserves the command's exit status and terminates owned child groups before returning holds. Don't nest
   it or reuse an already-held heavy lock. The resource sampler independently detects builds without holders.
   By default it tries lanes 1, 2, then 3 and retries within the finite timeout; `HEAVY_BUILD_LANE` can pin 1/2/3.
   If optional lane 3 is unknown on a legacy installation, unpinned callers continue bounded waits on lanes 1/2;
   other errors still stop the wrapper. The owner installer publishes code plus the backed-up registry row under quiescence.
-- **Order and bounded waiting:** full-package runs take `heavy-build` first, then one lane; never hold a lane while
-  waiting for `heavy-build`. Use `res wait <id>` with the same holder/project/purpose/task/PID flags and always
+- **Order and bounded waiting:** full-package runs use `res take-build` or `res wait-build` for the slot plus any
+  free admitted lane together; never hold either while waiting for the other. Use `res wait-build` or `res wait-lane`
+  with the same holder/project/purpose/task/PID flags and always
   `--timeout <minutes>`; it backs off and enforces the heavy-* gate (0 taken, 2 timeout). Run waits in the background
   worker/wrapper, not the orchestrator's foreground. Timeout means report/queue, never bypass; prolonged overload
   goes to the user with readings to decide thresholds, never automatic threshold changes.
+- **One process and worker liveness:** workers never take/wait for heavy locks in a standalone tool call. Each call
+  has a fresh shell: its `$$` dies after that call, even if a later build is alive. Acquisition, build and return happen
+  in ONE long-lived process, via `scripts/heavy-build.sh <command...>` or a wrapper, or `--pid` names the long-lived
+  build process itself. Wrappers must exit when their worker dies: exit/signal traps plus parent watch. The build
+  wrapper’s optional `--watch-pid <pid>` terminates its owned command and releases holds when that worker disappears.
 - **Return and stale holds:** use the long-lived wrapper's `--pid $$` (default is caller PID, not `res` PID).
   Install `trap EXIT` before acquiring and `res return <id> --by <session>` only for acquired holds, in reverse order,
   on every exit, including failure to acquire the lane. `res status` shows PID/host/start and marks a local dead-PID
-  hold STALE; `res wait` reclaims STALE heavy-* holds older than 10 minutes and logs in `log.tsv`. Other confirmed
+  hold STALE; short-lived PID warnings display `STALE?(short-lived pid)` and the wrapper fix. Plain take stays fast;
+  fresh explicit-PID waits/build takes check once after 2 seconds. `res wait`/`wait-build`/`wait-lane` reclaim STALE
+  heavy-* holds older than 10 minutes and log in `log.tsv`. Other confirmed
   stale releases require `res return <id> --by <session> --force --note "<reason>"`; never force an active/unverified hold.
+- **Same-task takeover:** after a predecessor dies (including quota exhaustion), verify its project/task ID and
+  local dead PID, return its STALE lane then slot with the predecessor’s holder name (or coordinated force/note),
+  then re-take with the successor’s unique holder and long-lived PID. Never adopt the old PID/start metadata; a
+  matching task alone does not authorize return of an active/unverified hold.
 - **Approved build discipline:** compile **6**, link **1**, Xcode **`-jobs 6`**, Gradle **2 workers**. Build incrementally
   in a fixed per-base directory, with **one cold build before acceptance**; don't run a native build when native code
   didn't change. Fix rounds use affected tests only.

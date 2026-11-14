@@ -207,7 +207,7 @@ reclaim_stale_heavy() (
 
 cmd_wait() {
   local id="${1:-}"; shift || true; need_id "$id"
-  local timeout= args=() duration deadline remaining delay=1 rc reading ALLOW_PID=1
+  local timeout= args=() duration deadline remaining delay=1 rc reading ALLOW_PID=1 CHECK_FRESH
   while [ $# -gt 0 ]; do
     case "$1" in
       --timeout)
@@ -244,7 +244,11 @@ cmd_wait() {
         fi ;;
     esac
     if [ "$rc" -ne 5 ]; then
-      if (cmd_take "$id" ${args[@]+"${args[@]}"}); then return 0; else rc=$?; fi
+      CHECK_FRESH=1; [ "$(field "$id" by)" != "$BY" ] || CHECK_FRESH=0
+      if (cmd_take "$id" ${args[@]+"${args[@]}"}); then
+        check_holder_after_take "$id"
+        return 0
+      else rc=$?; fi
       [ "$rc" -eq 2 ] || { [ "$id" = heavy-lane-3 ] && [ "$rc" -eq 5 ]; } || return "$rc"
     fi
     remaining=$((deadline - SECONDS))
@@ -295,7 +299,7 @@ conn() {
 log() { printf '%s\t%s\t%s\t%s\t%s\n' "$(now)" "$1" "$2" "$3" "$4" >>"$LOG"; }
 
 parse() {
-  BY= PROJECT= PURPOSE= TASK= UNTIL= NOTE= FORCE= OFFLINE= DEVICE= POLICY= PID="$PPID"
+  BY= PROJECT= PURPOSE= TASK= UNTIL= NOTE= FORCE= OFFLINE= DEVICE= POLICY= PID="$PPID" PID_EXPLICIT=
   while [ $# -gt 0 ]; do
     case "$1" in
       --by) BY="$2"; shift 2 ;;
@@ -311,7 +315,7 @@ parse() {
       --pid)
         [ "${ALLOW_PID:-}" = 1 ] || die "unknown option '$1'"
         [ $# -ge 2 ] || die "--pid needs a value"
-        PID="$2"; shift 2 ;;
+        PID="$2"; PID_EXPLICIT=1; shift 2 ;;
       *) die "unknown option '$1'" ;;
     esac
   done
@@ -326,6 +330,225 @@ write_info() {
     "$BY" "$PROJECT" "$TASK" "$PURPOSE" "$1" "$UNTIL" "$PID" "$(local_host)" "$(date +%s)" >"$LOCKS/$2.d/info"
 }
 
+pid_dead() {
+  local rc=0
+  ps -p "$1" -o pid= >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 1 ]
+}
+
+warn_holder() {
+  echo "res: --pid $PID is not a long-lived process; pass the wrapper's \$\$; use scripts/heavy-build.sh <command...>" >&2
+}
+
+mark_holder_warning() {
+  local id
+  for id in "$@"; do
+    [ "$(field "$id" by)" = "$BY" ] && [ "$(field "$id" pid)" = "$PID" ] || continue
+    [ -n "$(field "$id" pid_warning)" ] || printf 'pid_warning\tshort-lived pid\n' >>"$LOCKS/$id.d/info"
+  done
+}
+
+# Only successful, fresh, explicit-PID waits/build takes get the delayed check.
+# Plain take remains fast. A later observational status catches an invoking
+# shell that exits only AFTER res returns (a synchronous check cannot predict it).
+check_holder_after_take() {
+  [ -n "$PID_EXPLICIT" ] || return 0
+  [ -z "$(field "$1" pid_warning)" ] || return 0
+  [ "${CHECK_FRESH:-1}" = 1 ] || return 0
+  sleep 2
+  if pid_dead "$PID"; then warn_holder; mark_holder_warning "$@"; fi
+}
+
+build_usage() {
+  cat <<'EOF'
+res take-build --by <session> --project <slug> --for "<purpose>" [take options] [--lane heavy-lane-1|2|3]
+res wait-build --by <session> --project <slug> --for "<purpose>" --timeout <minutes> [take options] [--lane <id>]
+res wait-lane --by <session> --project <slug> --for "<purpose>" --timeout <minutes> [take options]
+res return-build --by <session> [--pid <holder-pid>] [--note "<text>"]
+Build acquisition takes heavy-build and one free lane, or releases everything before retrying.
+Success prints build-lane=<id> (or lane=<id>); return-build releases owned lanes before the slot.
+EOF
+}
+
+# Each attempt is an unwindable transaction, never a wait with a partial hold.
+# Atomic mkdir still arbitrates against legacy take/wait callers. There is no
+# second coordination lock, stale mutex, or migration of the directory format.
+acquire_attempt() {
+  local mode="$1" candidate="$2" build_created=0 lane_created=0
+  local TAKE_CREATED=0 TAKE_TRANSACTION=1 current_id= rc=0 CHECK_FRESH=1
+  # Keep retry metadata intact when rollback invokes the normal return parser.
+  local BY="$BY" PROJECT="$PROJECT" PURPOSE="$PURPOSE" TASK="$TASK" UNTIL="$UNTIL"
+  local NOTE="$NOTE" FORCE="$FORCE" OFFLINE="$OFFLINE" DEVICE="$DEVICE" POLICY="$POLICY"
+  local PID="$PID" PID_EXPLICIT="$PID_EXPLICIT"
+  unwind() {
+    local status=$?
+    trap - EXIT; trap '' INT TERM HUP
+    rollback_attempt || status=1
+    exit "$status"
+  }
+  rollback_attempt() {
+    local status=0
+    if [ "$TAKE_CREATED" -eq 1 ]; then
+      if [ "$current_id" = heavy-build ]; then build_created=1; else lane_created=1; fi
+    fi
+    if [ "$lane_created" -eq 1 ]; then rollback_created "$candidate" || status=1; fi
+    if [ "$build_created" -eq 1 ]; then rollback_created heavy-build || status=1; fi
+    return "$status"
+  }
+  finish_attempt() {
+    local status="$1"
+    trap - EXIT; trap '' INT TERM HUP
+    [ "$status" -eq 0 ] || rollback_attempt || status=1
+    trap - INT TERM HUP
+    return "$status"
+  }
+  rollback_created() {
+    # A signal can interrupt write_info after mkdir, before any by field exists.
+    # TAKE_CREATED proves this attempt created it; do not use a force return.
+    if [ -z "$(field "$1" by)" ]; then
+      rm -rf "$LOCKS/$1.d" || return 1
+      log return "$1" "$BY" 'interrupted acquisition before metadata publication'
+    else
+      cmd_return "$1" --by "$BY" >/dev/null
+    fi
+  }
+  trap unwind EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
+  local options=(--by "$BY" --project "$PROJECT" --for "$PURPOSE" --task "$TASK" --until "$UNTIL" --pid "$PID")
+  [ -z "$FORCE" ] || options+=(--force)
+  if [ "$mode" = build ]; then
+    # Preexisting holds, including one's own, are never adopted or rolled back.
+    [ ! -d "$LOCKS/heavy-build.d" ] || { finish_attempt 2; return $?; }
+    current_id=heavy-build; TAKE_CREATED=0
+    if cmd_take heavy-build "${options[@]}"; then :
+    else rc=$?; finish_attempt "$rc"; return $?; fi
+    build_created="$TAKE_CREATED"; TAKE_CREATED=0
+  fi
+  [ ! -d "$LOCKS/$candidate.d" ] || { finish_attempt 2; return $?; }
+  current_id="$candidate"
+  if cmd_take "$candidate" "${options[@]}"; then :
+  else rc=$?; finish_attempt "$rc"; return $?; fi
+  lane_created="$TAKE_CREATED"; TAKE_CREATED=0
+  # The stable holder is validated after both locks are available, not while
+  # waiting for a lane. Signals during this check still unwind the entire pair.
+  if [ -n "$ACQUIRE_PID_EXPLICIT" ]; then
+    if [ "$mode" = build ]; then check_holder_after_take heavy-build "$candidate"
+    else check_holder_after_take "$candidate"; fi
+  fi
+  if [ "$mode" = build ]; then printf 'build-lane=%s\n' "$candidate"
+  else printf 'lane=%s\n' "$candidate"; fi
+  finish_attempt 0
+}
+
+cmd_acquire() {
+  local mode="$1" blocking="$2"; shift 2
+  if [ "${1:-}" = --help ]; then build_usage; return 0; fi
+  local timeout=0 timeout_seen= pin= args=() ALLOW_PID=1
+  local duration deadline remaining delay=1 rc reading candidate missing3=0 ACQUIRE_PID_EXPLICIT
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --timeout)
+        [ $# -ge 2 ] || die "--timeout needs minutes"
+        [ -z "$timeout_seen" ] || die "duplicate --timeout"
+        timeout="$2"; timeout_seen=1; shift 2 ;;
+      --lane)
+        [ "$mode" = build ] && [ $# -ge 2 ] || die "--lane is a build option and needs a value"
+        [ -z "$pin" ] || die "duplicate --lane"
+        pin="$2"; shift 2 ;;
+      --by|--project|--for|--task|--until|--pid)
+        [ $# -ge 2 ] || die "$1 needs a value"
+        args+=("$1" "$2"); shift 2 ;;
+      --force) args+=("$1"); shift ;;
+      *) die "unknown option '$1'" ;;
+    esac
+  done
+  [[ "$timeout" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "wait needs --timeout <non-negative minutes>"
+  [ "$blocking" = 0 ] || [ -n "$timeout_seen" ] || die "wait needs --timeout <non-negative minutes>"
+  [ "$blocking" = 1 ] || [ -z "$timeout_seen" ] || die "take-build does not accept --timeout; use wait-build"
+  [ -z "$pin" ] || [[ "$pin" =~ ^heavy-lane-[123]$ ]] || die "--lane must be heavy-lane-1, 2 or 3"
+  parse ${args[@]+"${args[@]}"}; validate_pid
+  ACQUIRE_PID_EXPLICIT="$PID_EXPLICIT"
+  [ -n "$BY" ] && [ -n "$PROJECT" ] && [ -n "$PURPOSE" ] || die "acquisition needs --by, --project and --for"
+  [ "$mode" != build ] || need_id heavy-build
+  [ -z "$pin" ] || need_id "$pin"
+  if [ "$mode" = build ] && [ "$(field heavy-build by)" = "$BY" ]; then
+    die "build slot already held by you; return-build before a fresh acquisition (do not nest wrappers)"
+  fi
+  duration=$(awk -v t="$timeout" 'BEGIN {s=t*60; printf "%.0f\n", int(s)+(s>int(s))}')
+  deadline=$((SECONDS + duration))
+  while :; do
+    rc=0
+    if reading=$(cmd_heavy_check --pid "$PID"); then
+      printf '%s\n' "$reading"
+      if [ "$mode" = build ] && [ "$blocking" = 1 ]; then reclaim_stale_heavy heavy-build "$BY" || true; fi
+      for candidate in ${pin:-heavy-lane-1 heavy-lane-2 heavy-lane-3}; do
+        if [ -z "$(reg_line "$candidate")" ]; then
+          if [ "$candidate" = heavy-lane-3 ]; then
+            if [ "$missing3" -eq 0 ]; then echo 'res: lane 3 is not registered; continuing bounded waits on lanes 1/2' >&2; fi
+            missing3=1; continue
+          fi
+          die "unknown resource '$candidate' (see: res status)"
+        fi
+        [ "$candidate" != heavy-lane-3 ] || lane3_open "$reading" || continue
+        if [ "$blocking" = 1 ]; then reclaim_stale_heavy "$candidate" "$BY" || true; fi
+        [ ! -d "$LOCKS/$candidate.d" ] || continue
+        if acquire_attempt "$mode" "$candidate"; then return 0; else rc=$?; fi
+        [ "$rc" -eq 2 ] || [ "$rc" -eq 5 ] || return "$rc"
+      done
+      rc=2
+    else
+      rc=$?; [ -z "$reading" ] || printf '%s\n' "$reading"
+      [ "$rc" -eq 5 ] || return "$rc"
+    fi
+    if [ "$blocking" = 0 ]; then return "$rc"; fi
+    remaining=$((deadline - SECONDS))
+    if [ "$remaining" -le 0 ]; then
+      echo "res: timed out waiting for '$mode' after $timeout minutes" >&2; return 2
+    fi
+    [ "$delay" -le "$remaining" ] || delay="$remaining"
+    echo "res: waiting for '$mode'; retry in ${delay}s" >&2
+    sleep "$delay"
+    delay=$((delay * 2)); [ "$delay" -le 15 ] || delay=15
+  done
+}
+
+cmd_return_build() {
+  local ALLOW_PID=1 id owner selected_pid options=(); parse "$@"
+  [ -n "$BY" ] || die "return-build needs --by"
+  [ -z "$PID_EXPLICIT" ] || validate_pid
+  [ -z "$FORCE$PROJECT$PURPOSE$TASK$UNTIL$OFFLINE$DEVICE$POLICY" ] || die "return-build accepts only --by, --pid and --note"
+  options=(--by "$BY" --note "$NOTE")
+  owner="$BY"; selected_pid="${PID_EXPLICIT:+$PID}"
+  for id in heavy-lane-3 heavy-lane-2 heavy-lane-1 heavy-build; do
+    [ "$(field "$id" by)" = "$owner" ] || continue
+    [ -z "$selected_pid" ] || [ "$(field "$id" pid)" = "$selected_pid" ] || continue
+    cmd_return "$id" "${options[@]}"
+  done
+}
+
+# Preserve the mkdir verdict through a signal before the shell can set its
+# ownership flag. Only new transactions use this; legacy take is unchanged.
+transaction_mkdir() {
+  local TAKE_SIGNAL=0 rc=0
+  trap 'TAKE_SIGNAL=130' INT
+  trap 'TAKE_SIGNAL=143' TERM
+  trap 'TAKE_SIGNAL=129' HUP
+  (trap '' INT TERM HUP; mkdir "$1" 2>/dev/null) || rc=$?
+  [ "$rc" -ne 0 ] || TAKE_CREATED=1
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
+  [ "$TAKE_SIGNAL" -eq 0 ] || exit "$TAKE_SIGNAL"
+  return "$rc"
+}
+
+take_mkdir() {
+  if [ "${TAKE_TRANSACTION:-0}" = 1 ]; then transaction_mkdir "$1"
+  else mkdir "$1" 2>/dev/null; fi
+}
+
 cmd_status() {
   [ -f "$REG" ] || die "no registry at $REG"
   # A status of one checkout needs no device probe. One awk renders everything: a fork per
@@ -334,7 +557,7 @@ cmd_status() {
   local infos=() t pid_snapshot=0; t=$(mktemp); printf '%s\n' "$DEVS" >"$t"
   ps -axo pid= >"$t.pids" 2>/dev/null && pid_snapshot=1
   for f in "$LOCKS"/*.d/info; do [ -f "$f" ] && infos+=("$f"); done
-  awk -F'\t' -v only="${1:-}" -v host="$(local_host)" -v pid_snapshot="$pid_snapshot" '
+  awk -F'\t' -v only="${1:-}" -v host="$(local_host)" -v pid_snapshot="$pid_snapshot" -v epoch="$(date +%s)" '
     function state(dev,   i, l) {
       if (dev == "-") return "-"
       for (i = 1; i <= nd; i++) if (index(D[i], dev " (")) {
@@ -355,13 +578,18 @@ cmd_status() {
         t = H[$1, "task"]; u = H[$1, "until"]
         holder = H[$1, "by"] " (" H[$1, "project"] (t != "" ? "/" t : "") ")"
         pid = H[$1, "pid"]
-        if (pid_snapshot && H[$1, "host"] == host && pid ~ /^[0-9]+$/ && pid + 0 > 0 && !(pid in P))
-          holder = "STALE " holder
+        if (pid_snapshot && H[$1, "host"] == host && pid ~ /^[0-9]+$/ && pid + 0 > 0 && !(pid in P)) {
+          start = H[$1, "start"]
+          short_pid = H[$1, "pid_warning"] != "" || (start ~ /^[0-9]+$/ && epoch >= start && epoch - start <= 5)
+          holder = (short_pid ? "STALE?(short-lived pid) " : "STALE ") holder
+          if (short_pid) fix = 1
+        }
         detail = H[$1, "since"] " → " (u != "" ? u : "?") " · " H[$1, "for"]
       } else { holder = "FREE"; detail = $5 }
       printf "%-16s %-9s %-9s %-12s %-34s %s\n", $1, $2, $3, state($4), holder, detail
     }
     END {
+      if (fix) print "res: short-lived holder PID; use scripts/heavy-build.sh <command...>; lock, build and return must share one long-lived process" > "/dev/stderr"
       if (only != "") exit
       for (i = 1; i <= nd; i++) {
         l = D[i]; id = ""
@@ -424,8 +652,10 @@ cmd_take() {
     [ "$link" = connected ] || { echo "res: '$id' is not connected ($link) — ask the user to plug in / unlock / trust it; --offline holds it anyway" >&2; exit 4; }
   fi
   mkdir -p "$LOCKS"
-  if mkdir "$LOCKS/$id.d" 2>/dev/null; then
-    write_info "$(now)" "$id"
+  if take_mkdir "$LOCKS/$id.d"; then
+    TAKE_CREATED=1
+    write_info "$(now)" "$id" || return $?
+    if [ -n "$PID_EXPLICIT" ] && pid_dead "$PID"; then warn_holder; mark_holder_warning "$id"; fi
     log take "$id" "$BY ($PROJECT${TASK:+/$TASK})" "$PURPOSE${UNTIL:+ · until $UNTIL}"
     echo "took $id"; show_notes "$id"
   elif [ "$(field "$id" by)" = "$BY" ]; then
@@ -433,7 +663,7 @@ cmd_take() {
   else
     echo "res: '$id' is held by $(field "$id" by) ($(field "$id" project)) since $(field "$id" since), until $(field "$id" until | sed 's/^$/?/') — $(field "$id" for)" >&2
     echo "res: message that session (SendMessage; for a codex:<thread> holder, its project's orchestrator) and wait; do not use the resource meanwhile" >&2
-    exit 2
+    return 2
   fi
 }
 
@@ -491,6 +721,10 @@ case "${1:-}" in
   status) shift; cmd_status "$@" ;;
   take) shift; cmd_take "$@" ;;
   wait) shift; cmd_wait "$@" ;;
+  take-build) shift; cmd_acquire build 0 "$@" ;;
+  wait-build) shift; cmd_acquire build 1 "$@" ;;
+  wait-lane) shift; cmd_acquire lane 1 "$@" ;;
+  return-build) shift; cmd_return_build "$@" ;;
   heavy-check) shift; cmd_heavy_check "$@" ;;
   extend) shift; cmd_extend "$@" ;;
   return) shift; cmd_return "$@" ;;

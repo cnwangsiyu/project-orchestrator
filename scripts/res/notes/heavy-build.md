@@ -1,81 +1,86 @@
-# Machine-Wide Heavy-Task Protocol (res Contract v1.3)
+# Machine-Wide Heavy-Task Protocol (res Contract v1.4)
 
 Owner: routing/global-rules orchestrator since 2026-11-13. Maintained contract:
-project-orchestrator/references/res-contract.md. Install only after reviewed v1.3 switch.
+project-orchestrator/references/res-contract.md. Install only after reviewed owner switch.
 
-- Full iOS/Android SDK+host-app builds hold `heavy-build` AND one of
-  `heavy-lane-1` / `heavy-lane-2` / `heavy-lane-3` for the entire run. SG packaging
-  and heavy focused tests hold one lane. At most one full build, two normal
-  heavy tasks, or three when lane 3 is admitted at load1m <=8 AND avail >=32 GiB.
-- ORDER: acquire `heavy-build` FIRST, then one lane; return lane FIRST, then
-  `heavy-build`. NEVER hold a lane while waiting for `heavy-build` (deadlock).
-- `res wait <id> --by <session> --project <slug> --for "<purpose>" --task <id>
-  --pid $$ --timeout <minutes>` retries with 1/2/4/8/15-second capped backoff.
-  For `heavy-*`, it waits while load1m exceeds the lane-aware limit OR
-  available memory < 16 GiB. With no other heavy lanes held, the load limit is
-  12; with one or more held, it is 20 (capped there, including two held lanes).
-  Count `heavy-lane-*` holds only, excluding STALE holds and those whose
-  recorded PID equals the caller's holder PID. Unverified legacy/remote holds
-  count unless their recorded PID equals that PID. Lane-3 holders count too;
-  the load gate does not override resource ownership.
-  Timeout is non-negative minutes (decimals allowed); zero makes one attempt.
-- `take` and `wait` accept `--pid <pid>` for the LONG-LIVED holder process.
-  Wrappers should pass `--pid $$`. Default is res's `$PPID` (the caller), NEVER
-  res's own short-lived PID. Do not name a transient launcher/subshell.
-- `res heavy-check [--pid <pid>]` prints load1m, limit, lanes_held, available
-  memory, memorystatus percentage, page headroom, and swap used:
-  0 OK, 5 overloaded, 1 metrics/usage error. The default PID is the caller's
-  (`res`'s `$PPID`); pass the same `--pid $$` as take/wait from wrappers.
-  Plain `take` remains nonblocking; callers MUST check first for heavy tasks.
-  Lane 3 additionally enforces load1m <=8 AND avail >=32 GiB inside take, using
-  unrounded readings and the same memory basis; CLOSED returns 5. Lane-3 wait
-  keeps waiting while CLOSED, including closure between check and take.
-  Output appends `lane3=OPEN|CLOSED`; OPEN does not mean the lane is unoccupied.
-  `wait` passes its selected holder PID to this same gate on every retry.
-  macOS available memory = macOS memorystatus level × RAM:
-  `kern.memorystatus_level / 100 * hw.memsize`. Only if that sysctl is missing,
-  fall back to (free + inactive + speculative) pages * page size. Page headroom
-  and swap used are diagnostics, not additional gates. Linux uses MemAvailable.
-- `take`: 0 acquired/already yours, 2 held, 3 policy, 4 disconnected, 5 lane-3 unavailable, 1 error.
-  `wait`: 0 acquired, 2 timeout (including overload), other errors propagate.
-- A take records PID, host, and epoch start (plus existing since/until fields).
-  `status` marks STALE when the recorded local-host PID is not alive; it never
-  reclaims. Legacy holds without PID/host and remote-host holds are unverified.
-  Only `wait` auto-reclaims STALE `heavy-*` holds older than 10 minutes and logs
-  `reclaim` / `auto-reclaim STALE`. Younger, live, non-heavy, legacy, and remote
-  holds remain untouched. Otherwise: `res return <id> --by <session> --force
-  --note "<why>"`. Never kill another session's processes.
-- Lane-3 STALE reclaim also needs its stricter gate OPEN; age must be >600s.
-  Return still works while CLOSED. No eviction when load/memory changes.
-  Old waiters retain old code until re-invoked by their owners; do not kill them.
-- Install an EXIT trap BEFORE acquisition; release on all failures/timeouts
-  and signals. `scripts/heavy-build.sh` tries lanes 1, 2, then 3 with bounded
-  retry; HEAVY_BUILD_LANE can explicitly pin 1/2/3. Example (fixed lane here):
+- Full iOS/Android SDK+host-app builds need the ONE `heavy-build` slot AND one
+  heavy lane for the whole run. `take-build` / `wait-build` acquire the pair
+  together or release partial acquisitions before retrying. NEVER hold either
+  resource while waiting for the other. Default lane order is 1, 2, then 3.
+  `--lane heavy-lane-N` (wrapper: HEAVY_BUILD_LANE) pins without hold-and-wait.
+- SG packaging and heavy focused tests use `wait-lane`, selecting any free
+  admitted lane without taking heavy-build. Two normal heavy lanes; optional
+  lane 3 requires load1m <=8 AND available memory >=32 GiB at acquisition.
+- Use ONE long-lived process for acquisition, build and return. Workers never
+  take/wait for heavy locks in a standalone tool call: each call has a fresh
+  shell whose $$ exits after the call, even if a later build remains alive.
+  Use scripts/heavy-build.sh <command...>, or take-build inside a wrapper, or
+  --pid naming the long-lived build itself. Wrappers should pass `--pid $$`.
+  Default PID is res's $PPID (the caller), never res's own short-lived PID.
+- Fresh takes warn for dead explicit PIDs without refusing. Plain take has no
+  delay; explicit-PID wait/take-build/wait-build/wait-lane check once after 2s
+  following acquisition, appending pid_warning if the PID dies. Status shows
+  STALE?(short-lived pid) and says "use scripts/heavy-build.sh …" for warned
+  local dead holders, or a proven dead holder acquired within 5s. A synchronous
+  take cannot predict a shell that exits only after it returns; early status
+  detects that usage error without mutating the hold. Fix the caller.
+- `wait-build` / `wait-lane` require --timeout <non-negative minutes>; decimals
+  and zero (one attempt) work, with 1/2/4/8/15s capped backoff. The timeout is
+  for acquisition; a successful explicit-PID acquisition also has a 2s check.
+  `take-build`: 0 pair acquired, 2 unavailable, 5 overloaded, 1 metrics/usage
+  error (policy codes propagate). `wait-*`: 0 acquired, 2 timeout; other errors
+  propagate. Legacy take/wait/return and their help remain compatible.
+- Heavy acquisition runs heavy-check with the selected holder PID every retry.
+  Normal gate: available memory >=16 GiB and load1m <=min(20,12+8*other lanes).
+  Count held heavy-lane-* only, excluding local proven STALE and matching
+  holder PID; legacy/remote holds count conservatively. Lane 3 enforces its
+  stricter 8/32 gate again at take time. OPEN does not mean FREE.
+  Plain take still needs caller heavy-check (lane-3 take also enforces 8/32).
+- macOS available memory = kern.memorystatus_level/100 * hw.memsize. Only an
+  explicitly missing sysctl permits (free+inactive+speculative) pages fallback.
+  Page headroom and swap are diagnostics; Linux uses MemAvailable. Metrics
+  failures stop admission. heavy-check: 0 OK, 5 overloaded, 1 metrics/error;
+  prints limit/lanes_held and appends lane3=OPEN|CLOSED, using unrounded gates.
+- Install EXIT/INT/TERM/HUP traps BEFORE acquisition. Return in reverse order:
+  lane then slot, via return-build --by <unique-run-holder> or normal returns.
+  The wrapper also passes --pid $$ on return-build to protect preexisting holds.
+  Do not nest wrappers, share a holder across runs, or adopt preexisting holds.
+  Signals during pair attempts unwind newly created holds. SIGKILL/crash uses
+  STALE recovery. Two mkdirs can be briefly visible during an in-flight attempt;
+  there is no backoff or lane wait with a partial hold and no extra mutex.
+- Wrappers MUST exit when their worker dies: traps plus a parent watch. Optional
+  heavy-build.sh --watch-pid <worker/follower/agent-shell PID> <command...>
+  terminates owned command descendants and returns holds on worker death,
+  including during acquisition. The holder remains the wrapper's $$.
+- STALE means a recorded local-host PID is proven dead; remote/legacy holds
+  are unverified. Only waits auto-reclaim heavy-* at age strictly >600s, with
+  lane 3 also requiring OPEN. pid_warning never relaxes that rule. No eviction
+  when load/memory changes; return still works when lane 3 is CLOSED.
+- Same-task successor after quota exhaustion/crash: verify predecessor's
+  project/task/local dead PID, return its STALE lane then slot with
+  res return <id> --by <predecessor-holder>, or coordinated --force --note
+  "same-task takeover <task-id> from <predecessor>"; then re-take with your own
+  unique holder/PID. A matching task alone never permits active/unverified
+  return. Never re-take idempotently with the predecessor's PID/start metadata.
+- Optional lane 3 missing: unpinned callers wait on lanes 1/2 within the same
+  timeout; an explicit missing lane-3 pin errors. A rolled-back controller's
+  exact legacy help response selects the wrapper's zero-timeout pair fallback;
+  it returns the slot before retry backoff. Other errors still stop admission.
+  Old waiters retain old code until their owners re-invoke them; never kill them.
 
 ```bash
-res="$HOME/.claude/orchestrator/_shared/res"
-by="<session>"; project="<slug>"; task="<id>"
-build_held=0; lane_held=0
-cleanup() {
-  if [ "$lane_held" = 1 ]; then "$res" return heavy-lane-1 --by "$by"; fi
-  if [ "$build_held" = 1 ]; then "$res" return heavy-build --by "$by"; fi
-}
-trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-trap 'exit 129' HUP
-"$res" wait heavy-build --by "$by" --project "$project" --for "full build" \
-  --task "$task" --pid $$ --timeout 60 || exit $?
-build_held=1
-"$res" wait heavy-lane-1 --by "$by" --project "$project" --for "full build" \
-  --task "$task" --pid $$ --timeout 60 || exit $?
-lane_held=1
-# Run the complete build/preflight/stage/acceptance here.
+# Keep this entire invocation in one tool call. The wrapper owns acquisition,
+# command lifetime, optional worker watch, and reverse release.
+HEAVY_BUILD_BY="<unique-session-task-run>" \
+HEAVY_BUILD_PROJECT="<slug>" HEAVY_BUILD_TASK="<task-id>" \
+HEAVY_BUILD_TIMEOUT=60 scripts/heavy-build.sh --watch-pid <long-lived-worker-pid> \
+  <complete-build-command...>
 ```
 
-- Compile 6 jobs; link 1; Xcode `-jobs 6`; Gradle 2 workers and Java heap 6 GiB.
-  Total test concurrency 6-8. Keep dirs fixed per base and build incrementally;
-  do one cold build before formal acceptance. Ninja `-j` must be configurable.
-- Regenerate Pods/headers only when inputs change; no native build without
-  native changes. No extra source copies for credential isolation: use
-  sanitized public inputs. Close browsers/child processes after tests.
+Compile 6 jobs; link 1; Xcode -jobs 6; Gradle 2 workers, Java heap 6 GiB.
+Test concurrency 6-8. Keep directories fixed per base and build incrementally;
+one cold build before formal acceptance. Ninja -j must be configurable.
+Regenerate Pods/headers only for changed inputs; no native rebuild without
+native changes. Use sanitized public inputs, no credential/session files or
+extra credential-isolation source copies. Close owned children after tests;
+never kill another session's processes. Timeout means report/queue, never bypass.
