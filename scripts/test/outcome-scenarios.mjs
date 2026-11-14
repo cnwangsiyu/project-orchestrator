@@ -81,6 +81,10 @@ try {
   append(route('balanced', { company: 'trae', pick: pick('trae'), balance: factors, why: ['balanced to TRAE: TTADK projected to run out'] }));
   append(route('not-balanced', { company: 'ttadk', balance: { ...factors, selected: false } }));
   append(route('old-balanced', { t: now - 30 * h, company: 'trae', balance: factors }));
+  // cyberPolicy blocks (codex-worker): counted per account/model in the window, ignored when old.
+  append({ kind: 'policy-block', t: now - h, account: 'ttadk', vendor: 'codex', model: 'gpt-6.1-sol', why: '{"codexErrorInfo":"cyberPolicy"}' });
+  append({ kind: 'policy-block', t: now - h, account: 'trae', vendor: 'trae', model: 'gpt-6.1-sol', why: 'flagged for possible cybersecurity risk' });
+  append({ kind: 'policy-block', t: now - 30 * h, account: 'ttadk', vendor: 'codex', model: 'gpt-6.1-sol', why: 'old' });
   const hour = Math.floor(now / h) * h - 2 * h;
   const snapshot = (t, used, load, position) => ({ t, ttadk: { name: 'ttadk', used, limit: 100, resetsAt: now + h },
     trae: { name: 'trae', daily: { 'gpt-6.1-sol': { used: 40, limit: 100, resetsAt: now + h } },
@@ -114,6 +118,9 @@ try {
   assert.equal(policy.decisions.length, 6); assert.ok(!policy.decisions.some((r) => r.name === 'old-balanced'));
   assert.deepEqual(policy.decisions.find((r) => r.name === 'balanced').balance, factors);
   assert.deepEqual(policy.decisions.find((r) => r.name === 'balanced').why, ['balanced to TRAE: TTADK projected to run out']);
+  assert.deepEqual(report.routing.policyBlocks.byAccountModel, { 'ttadk:gpt-6.1-sol': 1, 'trae:gpt-6.1-sol': 1 });
+  assert.equal(report.routing.policyBlocks.count, 2);
+  assert.equal(report.routing.policyBlocks.recent.length, 2);
   const hourly = report.quota.companyByHour, firstHour = new Date(hour).toISOString().slice(0, 13) + ':00:00Z';
   assert.equal(Object.keys(hourly).length, 2);
   assert.deepEqual(hourly[firstHour], observations.slice(0, 2));

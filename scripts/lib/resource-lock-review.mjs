@@ -49,18 +49,21 @@ export function reviewLockTiming(samples, { since, now, maxGapMs }) {
       holds.push(hold);
     } else if (exact) { hold.startLow = startLow; hold.startHigh = startLow; hold.leftCensored = false; hold.project ??= lock.project; hold.task ??= lock.task; hold.source = 'journal + metadata epoch start'; }
     hold.pid ??= lock.pid;
+    // Advisory purpose enum only (classified from the transient --for text; the raw text is never retained).
+    hold.purposeClass ??= lock.purposeClass ?? null;
     hold.firstObserved = Math.min(hold.firstObserved ?? s.t, s.t);
     hold.lastObserved = Math.max(hold.lastObserved ?? s.t, s.t);
   }
   const holdTimes = holds.filter((h) => (h.endHigh ?? h.lastObserved ?? h.startHigh ?? -Infinity) >= since).map((h) => {
     const lowerEnd = Math.max(h.endLow ?? -Infinity, h.lastObserved ?? -Infinity);
-    return { resource: h.resource, holder: h.holder, owner: who(h), pid: h.pid ?? null,
+    return { resource: h.resource, holder: h.holder, owner: who(h), pid: h.pid ?? null, purposeClass: h.purposeClass ?? null,
       startAt: finite(h.startLow) ? new Date(h.startLow).toISOString() : null,
       startPrecisionSeconds: finite(h.startHigh) && finite(h.startLow) ? (h.startHigh - h.startLow) / 1000 : null,
       endAt: finite(h.endLow) ? new Date(h.endLow).toISOString() : null, endReason: h.endReason ?? 'still observed held / release unknown',
       durationMinutesLower: finite(h.startHigh) && finite(lowerEnd) ? minutes(Math.max(0, lowerEnd - h.startHigh)) : 0,
       durationMinutesUpper: finite(h.startLow) && finite(h.endHigh) ? minutes(Math.max(0, h.endHigh - h.startLow)) : null,
       leftCensored: h.leftCensored, rightCensored: h.rightCensored, source: h.source, reclaimer: h.reclaimer ?? null,
+      firstObservedAt: finite(h.firstObserved) ? new Date(h.firstObserved).toISOString() : null,
       lastObservedAt: finite(h.lastObserved) ? new Date(h.lastObserved).toISOString() : null };
   });
 
@@ -78,7 +81,7 @@ export function reviewLockTiming(samples, { since, now, maxGapMs }) {
     const acquired = samples.find((s) => s.t >= w.lastObserved && s.t <= (w.disappearance ?? w.lastObserved) && s.heavyLocks?.locks?.some((l) => l.id === w.resource && l.pid === w.holderPid && sameHolder(w, l) && finite(l.startMs) && l.startMs >= w.lastObserved - 1000));
     const lock = acquired?.heavyLocks.locks.find((l) => l.id === w.resource && l.pid === w.holderPid && sameHolder(w, l));
     const end = lock?.startMs;
-    return { resource: w.resource, holder: w.holder, owner: who(w), pid: w.pid, holderPid: w.holderPid,
+    return { resource: w.resource, holder: w.holder, owner: who(w), pid: w.pid, holderPid: w.holderPid, purposeClass: w.purposeClass ?? null,
       startAt: finite(w.startMs) ? new Date(w.startMs).toISOString() : null,
       firstObservedAt: new Date(w.firstObserved).toISOString(), lastObservedAt: new Date(w.lastObserved).toISOString(), timeoutMinutes: w.timeoutMinutes,
       durationMinutesLower: finite(w.startMs) ? minutes(Math.max(0, (end ?? w.lastObserved) - w.startMs - 1000)) : 0,

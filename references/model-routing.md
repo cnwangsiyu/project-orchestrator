@@ -58,9 +58,10 @@ catches a miss, and how many times the task has fallen short. How the table was 
 - **Codex-only work:** every task whose output is an image — generating, editing, variants, icons, illustrations,
   mockup images (user, 2026-11-03). Luna `low` writes the prompt (the image tool makes the picture); Sol `medium` if an
   iteration needs more judgment.
-- **Cheap rows:** personal ChatGPT uses Luna for lookups and extraction, Terra for prose drafts. TTADK uses Sol.
-  Under known quota telemetry, light rows routed or balanced to TRAE prefer bucket-free GPT-5.6-Terra, then GPT-5.5,
-  then DeepSeek-V4.1-Flash, unless a hard-tier rule applies.
+- **Cheap rows:** personal ChatGPT uses Luna for lookups and extraction, Terra for prose drafts. TTADK light rows
+  start on GPT-5.6-Terra, then GPT-5.5, with 6.1-Sol medium as the failure escalation (test-environment `build-run`
+  is light too; a production release keeps Sol medium). Under known quota telemetry, light rows routed or balanced to
+  TRAE prefer bucket-free GPT-5.6-Terra, then GPT-5.5, then DeepSeek-V4.1-Flash, unless a hard-tier rule applies.
   The Claude alternatives are Haiku and Sonnet.
 - **Escalation order:** effort before model, and a vendor switch on a stalled debug for different blind spots. Fable
   and Astra come last and always need the user's OK.
@@ -147,7 +148,8 @@ then DeepSeek-V4.1-Flash. Astra quality-ladder rungs are never substituted with 
 
 - TTADK can run the original pick and TRAE can run the target model under the existing exclusions and health rules
   (a TRAE substitution need not be listed on TTADK). Browser, desktop, image work and
-  `build-run` keep their existing preference. `--security` excludes TRAE GPT. Second opinions keep their original
+  `build-run` keep their existing preference. `--security` excludes TRAE GPT, and security reviews are adversarial
+  (no GPT anywhere; see "Adversarial security review"). Second opinions keep their original
   account/model and count; balancing never adds or removes a launch.
 - That TRAE model has a known, unexpired, non-depleted daily bucket with **at least 15% left**, reserved for urgent
   work and reviews. Exception: eligible tier candidates may be used when a known daily snapshot confirms no
@@ -156,14 +158,28 @@ then DeepSeek-V4.1-Flash. Astra quality-ladder rungs are never substituted with 
   carry `sampledAt` and must be no more than 30 minutes old, matching load/queue freshness; missing/future/stale sample
   times make all daily entries unknown, regardless of reset time. Cache reads never refresh this timestamp.
 - Model load is **below 60%**, with **no family queue position above 300 in the last 30 minutes**. Load/queue readings
-  older than 30 minutes are ignored; missing or stale signals mean unknown, allowed only for the low-priority case below.
-- At least one factor applies: **low priority** (`--stakes low`, lookup/extract/draft, or `--impact throwaway`);
+  older than 30 minutes are ignored. A fresh load below 60% is sufficient when no fresh queue reading exists; queue
+  data vetoes the family only when a current/recent position exceeds 300. When a model has no fresh direct load,
+  use the busiest fresh reading in its family, then the busiest fresh account reading. Log which source was used.
+  With no fresh load at any of those levels, congestion is unknown, allowed only for the low-priority case below.
+- At least one factor applies: **light tier / low priority** (`--stakes low`, lookup/extract/draft, or `--impact throwaway`);
   **TTADK projected to run out before reset**; or **TRAE resets in under 6 hours** and its remaining share exceeds
   TTADK's remaining share. The projection uses same-account, same-limit/reset samples from the last 2 hours, spanning
   at least 10 minutes, with the latest reading at most 30 minutes old; missing data, zero burn or counter rollback
   without a usable new segment skips this factor.
 
-Every decision includes structured `balance` factors in the route log; a transfer adds a `balanced to TRAE:` why line.
+While TTADK is projected to run out before reset, every eligible normal/light dispatch moves to the first TRAE
+candidate that passes reserve and congestion: normal uses 6.1-Sol → 5.6-Sol → 5.6-Terra → DeepSeek-Flash; light
+uses 5.6-Terra → 5.5 → DeepSeek-Flash. Hard work uses only 6.1-Sol → Astra; if neither passes, it stays on TTADK.
+The candidate must also be listed, unpaused and allowed for the task. Without projected depletion, retain the
+light/low-priority and earlier-TRAE-expiry triggers. Explicit later Astra/other-family quality rungs retain their
+model so balancing does not downgrade an escalation. A light first rung transferred from TTADK Terra/5.5 walks the
+full TRAE light list, so a paused or congested TRAE Terra falls through to 5.5/Flash instead of blocking the transfer;
+retry rungs are never walked sideways.
+
+Every considered transfer includes structured `balance` factors in the route log, including tier and per-candidate
+rejection reasons, quota shares, congestion and load source. A transfer adds a `balanced to TRAE:` why line; a rejected
+transfer adds `stays on TTADK: <reason>`.
 Congestion blocks opportunistic transfers, never the existing fallback when TTADK is out. Accepted queued turns keep
 waiting. Company balancing needs no quota approval; personal-quota gates and the existing TRAE `max`-effort gate remain.
 There is no concurrency cap or change to launch counts.
@@ -194,7 +210,7 @@ prefers TRAE even while congested, using the same difficulty-tier table below (u
 
 All existing model exclusions and pauses apply. `--security` keeps TRAE GPT off; DeepSeek is ineligible for
 build-run and sensitive reviews/acceptance (use `--exclude-model deepseek` when an implementation brief includes
-those checks). `image-read` uses only its existing vision-capable GPT models or vision fallbacks: GPT-5.5/5.6-Terra
+those checks), except the adversarial security-review lane above, where DeepSeek is the approved company fallback. `image-read` uses only its existing vision-capable GPT models or vision fallbacks: GPT-5.5/5.6-Terra
 vision is untested, so neither is eligible; GPT-5.6-Sol quota substitution also leaves image reading unchanged.
 Browser/desktop, image generation,
 UI and build/device work retain their capability rules, and a device lease or shared lock excludes the background lane.
@@ -229,6 +245,24 @@ the nightly review compares dispatch reasons and recorded wall-clock time, inclu
     steps also needs `--security` (VAK ruling, 2026-11-13). Defensive-only requirements with no attack description
     in the worker's context can avoid that flag; see SKILL.md, "Security follows the worker's context".
 
+    **Adversarial security review (user decision 2026-11-13, option A).** OpenAI's cyberPolicy failed a TTADK
+    gpt-6.1-sol `review-high --security` turn on 2026-11-13 (`codexErrorInfo=cyberPolicy`, "flagged for possible
+    cybersecurity risk … apply for Daybreak access"). A `review`, `review-high` or `second-opinion` routed with
+    `--security` is therefore **adversarial** by default; `--adversarial` forces the same lane for any task.
+    - Never a GPT model on any account (TTADK, TRAE or personal ChatGPT).
+    - Order: TTADK Kimi-K3 high → DeepSeek-V4.1-Flash high on TTADK or TRAE (the explicit, second-reviewer-bound
+      exception to the DeepSeek model-fit rule) → Claude Opus (xhigh for review/review-high, high otherwise), which
+      always carries a `personal quota:` `needsOK` — never silent.
+    - Always a second reviewer from the other non-GPT family (Kimi ↔ DeepSeek). If only one family is available,
+      say so and add `needsOK`: add Claude Opus as the second reviewer on personal quota, or accept one reviewer.
+    - Never retry a cyberPolicy-blocked thread or resend the same content to another GPT account. `codex-worker`
+      prints `security-policy-block:` and records `kind:'policy-block'` (account/model) for the nightly review on
+      both accounts. On TRAE the block also leaves the same family restriction as a 983 signal (the gpt family out
+      until the next 00:00 UTC, then probed); TTADK has telemetry only and no pause. Re-route with `--adversarial`.
+      The vendor's trusted-access programme is the user's/company's call.
+    Other `--security` work (implementation/fixes written as defensive requirements, executable acceptance tests)
+    keeps the rule above: no TRAE GPT; TTADK GPT allowed.
+
   - **Difficulty-tiered company model choice (user-approved 2026-11-13).** One `COMPANY_TIERS` table in `route.mjs`
     controls TRAE substitution when Sol is depleted, paused, excluded or absent, and balanced/background TRAE picks.
     Hard rules take precedence over light rules:
@@ -240,8 +274,9 @@ the nightly review compares dispatch reasons and recorded wall-clock time, inclu
     | Light | `lookup`, `extract`, `draft`; or low stakes; or `--background`, unless a hard rule applies | GPT-5.6-Terra → GPT-5.5 → DeepSeek-V4.1-Flash |
 
     Light work on TRAE prefers bucket-free models even with Sol quota left. Normal/light substitution never uses Astra;
-    hard substitution never uses 5.6-Sol, 5.6-Terra or 5.5. A failed CODE task's GPT substitution uses the hard tier,
-    never a weaker GPT. Tier candidates are **availability substitutions for the current attempt, not retry rungs**:
+    hard substitution never uses 5.6-Sol, 5.6-Terra, 5.5, DeepSeek, Gemini or Seed — only Sol/Astra, otherwise the
+    rung drops to personal Claude behind the gate. A failed CODE task's GPT substitution uses the hard tier, never a
+    weaker GPT. Tier candidates are **availability substitutions for the current attempt, not retry rungs**:
     pick the first usable candidate, then increase its effort before existing stronger quality steps. A ladder's
     initial attempt uses its original tier; later CODE rungs use hard, so `--failures` cannot reinterpret earlier picks.
     Company model/account eligibility always uses the current tier after failures/stakes; an initial normal/light
@@ -317,7 +352,8 @@ the nightly review compares dispatch reasons and recorded wall-clock time, inclu
     KWS tests/iOS acceptance, and fallback reviews missed reproduced P1s (though some read-only reviews found real P1s).
     DeepSeek is for read-only analysis and simple edits, not full-package builds, auth/storage reviews or acceptance.
     `build-run`, `review-high`, and release/high-stakes/security review rows exclude the DeepSeek family from company
-    fallbacks. For implement/implement-hard/debug whose brief needs those checks, use `--exclude-model deepseek`;
+    fallbacks; the adversarial security-review lane above is the one explicit exception (DeepSeek there is always paired
+    with a second reviewer from the other non-GPT family). For implement/implement-hard/debug whose brief needs those checks, use `--exclude-model deepseek`;
     the router cannot infer package/device acceptance from the category alone. Pass `--impact release` on release reviews.
 
     - **GPT out on the company account** (its `gpt` family paused or restricted, or `--exclude-model gpt`): DeepSeek-V4.1-Flash
@@ -329,11 +365,12 @@ the nightly review compares dispatch reasons and recorded wall-clock time, inclu
       them as `image-read`; audio and video have no TRAE model and stay on Claude/ChatGPT. Both DeepSeek models said they
       can't see images (2026-11-10). A DeepSeek pick prints a note: a task that depends on screenshots is re-routed with
       `--exclude-model deepseek`.
-    - **GPT up, Sol falls short**: Sol at the row's effort → … → Sol xhigh → DeepSeek-V4.1-Flash (a different family:
-      its misses rarely overlap Sol's) → Sol max → GPT-6-Astra high on the company account (no OK:
-      company quota; live test 2026-11-13) → the row's Claude steps. The cheap rows (lookup, extract, draft, browser,
-      computer-use) skip Sol max, the second fallback and Astra in the quality ladder; only hard-tier or vision
-      substitution can choose Astra before dispatch. All fallback steps respect the model-fit exclusions above.
+    - **GPT up, Sol falls short**: normal work goes Sol at the row's effort → … → Sol xhigh → DeepSeek-V4.1-Flash (a
+      different family: its misses rarely overlap Sol's) → Sol max → GPT-6-Astra high on the company account (no OK:
+      company quota; live test 2026-11-13) → the row's Claude steps. Hard work skips the fallback family: Sol notches
+      → Sol max → Astra high → the row's Claude steps behind the personal-quota gate. The cheap rows (lookup, extract,
+      draft, browser, computer-use) skip Sol max, the second fallback and Astra in the quality ladder; only hard-tier
+      or vision substitution can choose Astra before dispatch. All fallback steps respect the model-fit exclusions above.
     - **Quality guard**: service code a fallback model wrote gets the routine review (normally only release code or high
       stakes do), and every review of fallback-written code runs with `--exclude-model <its family>`, so a different
       family reviews it. A second free reviewer on TRAE (no Kimi there) is a fallback model of another family, not a
@@ -372,8 +409,8 @@ the nightly review compares dispatch reasons and recorded wall-clock time, inclu
       failure still climbs to `xhigh` and `max`. Release and service work keep their effort;
     - after a failure Sol climbs every notch to `xhigh`, then `max` (no OK needed on TTADK; lookup, extract, draft
       and browser stop at `xhigh`), then the company fallback models and GPT-6-Astra high on TRAE (company quota, no OK),
-      before the row's personal-quota steps: e.g. implement-hard Sol xhigh → DeepSeek-V4.1-Flash → Sol max →
-      Astra high on TRAE → Opus xhigh; science Sol xhigh → Sol max → Astra high on TRAE →
+      before the row's personal-quota steps. Hard work has no fallback-family rung: e.g. implement-hard Sol xhigh →
+      Sol max → Astra high on TRAE → Opus xhigh; science Sol xhigh → Sol max → Astra high on TRAE →
       Astra (ChatGPT, needs an OK; dropped when ChatGPT is out);
     - a routine review of Codex-written code runs on TTADK (`review --author codex`): a fresh Sol xhigh reviewer plus
       a second free one with a different focus (failure paths, concurrency, edge cases, tests). High-stakes review
@@ -409,7 +446,8 @@ the nightly review compares dispatch reasons and recorded wall-clock time, inclu
   it matters: agentic coding, debugging and frontend tasks tied at full marks; Sol had the best pure reasoning (12/12,
   with DeepSeek-V4.1-Flash), and public indexes put it clearly ahead (Artificial Analysis v5: Sol 55, GLM-5.3 and
   DeepSeek-V4.1-Flash 32; DeepSWE: Sol 75, Kimi-K3 and GLM-5.3 ~67). So Sol stays the default.
-  - **Kimi-K3** is the second reviewer of Codex-written code on TTADK (user, 2026-11-07): 100% recall on planted
+  - **Kimi-K3** is the second reviewer of Codex-written code on TTADK (user, 2026-11-07) and the first pick of the
+    adversarial security-review lane (TTADK only, 2026-11-13): 100% recall on planted
     defects (Sol 88%), misses not overlapping Sol's, no nitpicks. Its Chinese prose read most naturally (25/25 vs Sol
     24, one judge, one run) but it is slow (88–150s for a short essay): docs stay on Sol until the nightly review shows
     rework on Chinese docs.

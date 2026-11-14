@@ -86,17 +86,25 @@ try {
   }
   assert.equal(run(['lookup', '--security']).pick.model, FLASH);
   assert.equal(run(['implement', '--security']).pick.model, FLASH);
-  assert.ok(!run(['review-high', '--security']).pick?.model.startsWith('gpt-')
-    || run(['review-high', '--security']).pick.account !== 'trae');
-  assert.equal(run(['review-high', '--security', '--background']).pick, null);
+  // Security reviews are adversarial: no GPT on any account, DeepSeek-V4.1-Flash on TRAE when TTADK lists no Kimi.
+  for (const flags of [[], ['--background']]) {
+    const r = run(['review-high', '--security', ...flags]);
+    assert.equal(r.pick.model, FLASH); assert.equal(r.pick.account, 'trae');
+    assert.ok(!r.pick.model.startsWith('gpt-'));
+    assert.ok(r.why.join('\n').includes('adversarial: no GPT model on any account'));
+  }
   for (const args of [['image-read'], ['image-read', '--stakes', 'low'], ['image-read', '--background']]) {
     assert.ok([SOL, ASTRA, SEED].includes(run(args).pick.model));
     assert.equal(run([...args, '--security']).pick.model, SEED);
   }
-  for (const args of [['lookup'], ['analysis'], ['implement'], ['debug'], ['image-read']]) {
-    for (const flags of [[], ['--background']]) {
-      const r = run([...args, ...flags], { daily: null }); assert.equal(r.pick.model, SOL);
-    }
+  // Light rows (lookup/extract/draft, background ordinary work) start on the light list even with unknown quota;
+  // normal/hard rows keep Sol (debug stays hard under --background).
+  for (const [args, plain, background] of [
+    [['lookup'], TERRA56, TERRA56], [['analysis'], SOL, TERRA56], [['implement'], SOL, TERRA56],
+    [['debug'], SOL, SOL], [['image-read'], SOL, SOL],
+  ]) {
+    assert.equal(run(args, { daily: null }).pick.model, plain, `${args.join(' ')} plain`);
+    assert.equal(run([...args, '--background'], { daily: null }).pick.model, background, `${args.join(' ')} background`);
   }
   const paused = path.join(tmp, 'paused'); fs.mkdirSync(paused);
   noteFailure(paused, `-32600: model \`${SOL}\` is unavailable because its metadata could not be resolved`, now, SOL);
@@ -152,10 +160,11 @@ try {
   const ttMax = run(['implement', '--failures', '2'], { company: true, daily: null });
   assert.deepEqual([ttMax.pick.account, ttMax.pick.effort], ['ttadk', 'max']);
   assert.ok(!ttMax.needsUserOK.includes('max effort'));
-  // Kimi notes: name depleted skipped candidates; pin secondary substitution and the explicit Astra quality rung.
+  // Hard-tier depletion keeps queued Astra, not Flash; pin secondary substitution and the explicit quality rung.
   const skip = run(['debug', '--exclude-model', SOL], { daily: { ...active, [ASTRA]: bucket(true) } });
-  assert.equal(skip.pick.model, FLASH);
-  assert.ok(skip.why.some((s) => /skipped depleted priority buckets:.*gpt-6-astra/.test(s)));
+  assert.equal(skip.tier, 'hard');
+  assert.deepEqual([skip.pick.model, skip.pick.effort, skip.pick.account], [ASTRA, 'xhigh', 'trae']);
+  assert.ok(skip.why.some((s) => /keep the queued hard-tier model: no weaker substitution/.test(s)));
   const second = run(['review-high', '--author', 'codex']);
   assert.equal(second.pick.vendor, 'claude'); assert.equal(second.secondOpinion.model, ASTRA);
   assert.equal(second.secondOpinion.account, 'trae');

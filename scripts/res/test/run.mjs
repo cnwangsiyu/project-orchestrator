@@ -29,9 +29,10 @@ export function runResSuites() {
     const script = path.join(node ? base : tmp, suite);
     const r = spawnSync(node ? process.execPath : '/bin/bash', [script], {
       cwd: tmp, env: { ...env, RES_TEST_ROOT: tmp, RES_SOURCE: res },
-      // v1.4 adds real 2s holder diagnostics and the interruption matrix. This
-      // aggregate watchdog is separate from each unchanged resource timeout.
-      encoding: 'utf8', timeout: 600000, maxBuffer: 8 * 2 ** 20 });
+      // The expanded v1.4 signal matrix plus sequential replacement-verdict
+      // probes can exceed 10m under load. Individual probes/resource waits stay
+      // bounded independently; only this build-suite aggregate gets 20m.
+      encoding: 'utf8', timeout: suite === 'build.mjs' ? 1200000 : 600000, maxBuffer: 8 * 2 ** 20 });
     const output = `${r.stdout ?? ''}${r.stderr ?? ''}`;
     fs.writeFileSync(path.join(tmp, suite.replaceAll('/', '-') + '.log'), output, { mode: 0o600 });
     if (r.status !== 0 || r.error) throw Error(`${suite}: exit=${r.status}; ${r.error?.message ?? ''}\n${output.slice(-8000)}\nFixtures: ${tmp}`);

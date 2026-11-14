@@ -300,6 +300,11 @@ remain routing telemetry, not local spending/concurrency caps. Reports must name
   - vendor restriction — `Model access temporarily restricted` / `access restricted` or code 983: pause that family
     until the next 00:00 UTC strictly after the failure (08:00 China time; user, 2026-11-12). TRAE's FAQ specifies this
     recovery time; the 11-10..12 retro found every block lifted just after 00:00 UTC and every earlier 30-minute probe failed;
+  - OpenAI cyberPolicy block — `codexErrorInfo=cyberPolicy` / "flagged for possible cybersecurity risk" (2026-11-13):
+    on TRAE it is recorded like the 983 restriction above (family out until the next 00:00 UTC, then probed) and printed
+    as `trae-restricted:`; `codex-worker` also appends `kind:'policy-block'` to the route log for the nightly review on
+    both accounts. TTADK writes only that policy-block row and never pauses. Never retry the thread or resend the content
+    to another GPT account; re-route with `--adversarial`;
   - other hard failures — quota used up, banned, 403 Forbidden: a family's pause is 30 minutes, then a recovery probe;
     whole-account pauses back off 30, 60, 120, at most 240 minutes while they keep coming without a success.
     codex-worker prints `trae-paused:` when it pauses.

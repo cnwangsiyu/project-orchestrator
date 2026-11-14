@@ -13,7 +13,7 @@ Resources in `res` (~/.claude/orchestrator/_shared/res):
 Definitions:
 - Full-package build = a full iOS or Android SDK+host-app build: an env verify run (preflight, stage, compile, acceptance), an xcodebuild of the app, a Gradle assemble with native compile. Needs `heavy-build` AND one lane, held for the whole run.
 - Heavy task = full-package build, SG packaging, a heavy focused test that compiles native code or runs many processes for a sustained period. Needs one lane.
-- NOT heavy: host unit tests that don't run a full native compile, single-TU compiles, doc/analysis work, device sessions without builds.
+- NOT heavy: host unit tests that don't run a full native compile, single-TU compiles, doc/analysis work, device sessions without builds. PPE/staging/TCE/BITS/SCM deploys, remote/cloud pipelines, CI runs, `build-run --env test` procedural deploys and shared remote/CI entry scripts are also NOT heavy: they never take `heavy-build`, a lane or `--shared-lock`, and stay unthrottled (local `res` locks/verify throttles live only in local-only wrappers; `route.mjs --no-local-build` marks the remote case).
 
 Commands (existing single-resource semantics unchanged except the documented PID diagnostics):
 - Full build, one attempt: `res take-build --by <session> --project <slug> --for "<purpose>" --task <id> [--pid <pid>] [--lane heavy-lane-1|heavy-lane-2|heavy-lane-3]` → 0 pair acquired, 2 unavailable, 5 overloaded, 1 usage/metrics error.

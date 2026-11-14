@@ -13,9 +13,9 @@ const suites = fs.readdirSync(base).filter((f) => f.endsWith('.mjs') && f !== pa
 suites.push({ name: 'cleanup-python', exe: 'python3', args: ['-m', 'unittest', 'discover', '-s', 'scripts/resource-cleanup', '-p', 'test*.py', '-v'] });
 let failed = 0;
 for (const suite of suites) {
-  // Five res suites each have a 10m aggregate watchdog, including real holder
-  // diagnostics/backoff; leave room for all five plus fixture setup/teardown.
-  const timeout = suite.name === 'res-scenarios.mjs' ? 3300000 : 300000;
+  // Four res suites have 10m aggregate watchdogs; the expanded build/signal
+  // suite has 20m. Leave another 5m for fixture setup/teardown.
+  const timeout = suite.name === 'res-scenarios.mjs' ? 3900000 : 300000;
   const r = spawnSync(suite.exe, suite.args, { cwd: root, env, encoding: 'utf8', timeout, maxBuffer: 16 * 2 ** 20 });
   const output = `${r.stdout ?? ''}${r.stderr ?? ''}${r.error ? '\n' + r.error.message : ''}`;
   fs.writeFileSync(path.join(tmp, `${suite.name}.log`), output, { mode: 0o600 });

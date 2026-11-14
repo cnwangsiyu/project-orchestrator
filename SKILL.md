@@ -72,7 +72,7 @@ The versioned [global-rules digest](references/global-rules.md) is the single in
 - **Claude workers:** [launch](#claude-worker-settings) always uses Remote Control + explicit Bypass; [permissions](#permission-plan) use cards for what Bypass cannot pass, agents execute non-secret actions, only the user types secrets.
 - **TRAE:** [account rules](references/codex-workers.md#trae-cli-as-the-second-company-account-user-2026-11-08) separate restrictions from concurrency/quota, never reduce concurrency for queues, enforce only QPM/TPM limits for LLM use (no total-cost caps), and name the concrete worker model in reports.
 - **Work and quota:** [judgment](#judge-not-labour) stays with orchestrators, [independent tasks](#split-by-coupling) run in parallel while coupled work stays together; [quota](#route-every-task) never silently holds work, uses company quota without asking, personal quota after asking, reset cards only after a fresh OK every time.
-- **Signing/credentials:** [worker safety](#worker-credential-safety) forbids Codex workers on this machine from touching signing/credential files, including hashing, regardless of authorization; strip/use sanitized public inputs or have the user run it once.
+- **Signing/credentials:** [worker safety](#worker-credential-safety) forbids every Codex worker from touching signing/credential files. Only the resident Claude signing worker has the narrow, user-approved own-test-package exception; its personal quota and scope are audited separately.
 - **Orchestrator models:** [account/model health](references/nightly-review.md#account-and-model-health) records persistent `jobs/<id>/state.json` `respawnFlags`, VAK/routing on Fable, Webview/Lynx on Opus since 2026-11-11, and a user check on/after 2026-11-17 09:00 PST.
 - **Account reminders:** [nightly health](references/nightly-review.md#account-and-model-health) owns cards for company logins expiring within three days, TTADK SSO (2026-11-21 19:37 PST), TRAE login, Codex reset cards and Claude/Fable weekly projections; [`POLICY`](scripts/lib/state.mjs) supplies the 72-hour TTADK warning to `quota.mjs`.
 - **Rollout:** [policy notification](#global-rule-rollout) sends each change to all orchestrators: via the secretary for the mini group, directly to MacBook orchestrators.
@@ -214,7 +214,7 @@ close (user, 2026-11-04, after a worker overwrote a user header and another wipe
   --remove-existing-content, wiping app containers or Documents, erasing a simulator), or ask
   first."
 
-<a id="worker-credential-safety"></a>Every brief, whatever the task, also carries the credential clause (user-approved 2026-11-11, after a TRAE
+<a id="worker-credential-safety"></a>Every brief also carries the credential clause below; only the resident Claude signing worker's explicitly scoped brief replaces it with the narrow exception that follows (user-approved 2026-11-11, after a TRAE
 DeepSeek worker copied bytedcli's TikTok SSO session file into its automation browser to get past a console
 login; the user had to sign in again):
 - "Never read, copy or load any login session or credential file (cookies, SSO/session tokens, CLI auth
@@ -228,6 +228,15 @@ login; the user had to sign in again):
 - **Codex signing boundary on this machine** (user, 2026-11-13): never touch signing or credential files, including
   keychain-password files or hashing them, even with authorization. Design the task to strip those inputs/use a
   sanitized public version, or have the user run the necessary operation once. Never plan on approval lifting this ban.
+- **Only signing exception** (user-approved 2026-11-13): signing of **our own test packages** goes to the one resident
+  Claude signing worker set up by vesdk-mainline and shared with lynx-view, launched with Remote Control + Bypass on
+  separately counted, pre-approved personal Claude quota. It may sign only packages preregistered by manifest + hash:
+  iPhone test apps with the H6 keychain identity (if locked, it may read that one password file to unlock it), and
+  Android test APKs with the repo-committed debug keystore and debug passphrase in `build.gradle`. It never exports,
+  copies or prints a secret and reports only hashes plus PASS/FAIL; it never touches login sessions, other keychains,
+  or production/release packages. Anything outside this scope is BLOCKED with a user card. Every other Claude and
+  Codex worker keeps the baseline rule. During transition, the user may still run vesdk-mainline's existing one-shot
+  “sign everything” wrapper.
 
 **Prevent rework at the brief** (rework retro of 2026-11-06–10, 89 rework chains; user-approved 2026-11-10). Most
 rework came from unchecked premises, "done" proven on the wrong target, one shared rule re-implemented by several
@@ -273,8 +282,10 @@ workers, and patching after a second same-kind defect.
   it is the same task's fix round and the retained context helps; the thread is on a company account (a personal-account
   thread needs the user's OK); this round is not a route escalation in model, effort or family. If the route calls for
   stronger effort/model (e.g. `--failures >=2` to `xhigh`/`max`), another family or Astra, switch to the route's thread.
-  No exclusion may be violated: `--security` forbids every TRAE GPT thread; DeepSeek threads cannot do builds, sensitive
-  reviews or acceptance; paused or unavailable models cannot be continued. If the TRAE model's bucket is depleted and
+  No exclusion may be violated: `--security` forbids every TRAE GPT thread, and a security review is adversarial
+  (no GPT model on any account); DeepSeek threads cannot do builds, sensitive
+  reviews or acceptance (the adversarial review lane is the explicit exception, always with its second reviewer); paused
+  or unavailable models cannot be continued. If the TRAE model's bucket is depleted and
   its queue is above 300 while someone is waiting, take the route's thread instead. Record the actual model, effort and
   account with `outcome.mjs --actual vendor:model:effort@account`, plus a ledger line
   `continued original thread because ...` naming the reason and the eligibility checks. This exception is for same-task
@@ -284,6 +295,21 @@ workers, and patching after a second same-kind defect.
   as `--security` too. Alternatively, rewrite the findings as defensive requirements only, e.g. "token validation rejects
   tampered signatures" or "hidden items return 404", with no attack description or original attack-style findings in
   the worker's context; then those findings alone do not require `--security`. Other security-flavoured content still does.
+- **Adversarial security reviews** (user decision 2026-11-13, option A). OpenAI's cyberPolicy blocked a TTADK
+  gpt-6.1-sol `review-high --security` turn on 2026-11-13 ("flagged for possible cybersecurity risk … apply for
+  Daybreak access"). A `review`, `review-high` or `second-opinion` routed with `--security` is therefore adversarial by
+  default, and `--adversarial` forces the lane for any task:
+  - never a GPT model on any account; order TTADK Kimi-K3 high → DeepSeek-V4.1-Flash high on TTADK or TRAE (the
+    approved DeepSeek model-fit exception) → Claude Opus (xhigh for review/review-high, high otherwise) behind a
+    `personal quota:` `needsOK`;
+  - always a second reviewer from the other non-GPT family (Kimi ↔ DeepSeek); with only one family available, report
+    it and ask (Claude second on personal quota, or accept one reviewer);
+  - never retry a cyberPolicy-blocked thread or resend the same content to another GPT account. `codex-worker` prints
+    `security-policy-block:` and records `kind:'policy-block'` (account/model) for the nightly review on both accounts;
+    on TRAE it also leaves the same family restriction as a 983 signal (gpt out until the next 00:00 UTC, then probed),
+    while TTADK has telemetry only and no pause. Re-route with `--adversarial`. The vendor's trusted-access programme
+    is the user's/company's call.
+  Implementation/fix work under `--security` keeps the existing rule: no TRAE GPT; TTADK GPT allowed.
 - **Long device or sampling matrices: qualify first.** Run a pilot with one minimal sample per gate at real rates,
   disk, timeouts and SDK events; run the full matrix only once it passes. Device leases, deadlines, disconnects,
   settings restore and the device's return are handled by you or a host-side script, not left to the worker's final
@@ -367,10 +393,19 @@ effort, Codex account and launch command from
     `--task-dir`, `--name` so the printed command is ready to run;
   - for code work, `--impact release|service|throwaway` (see "Review only what is costly to
     undo"); route.mjs refuses code work without it;
+  - `--env test|prod` (default `prod`) and `--no-local-build` for `build-run`: `--env test` marks a
+    PPE/staging/dev procedural deploy and gives it the light tier on both company accounts (TTADK
+    5.6-Terra/5.5, TRAE light list). Production (`--impact release` without `--env test`) and high
+    stakes keep Sol medium with the pinned health/rollback criteria. A failed light run escalates to
+    Sol medium — never sideways to another light model. `--no-local-build` marks a remote/CI run, so
+    no local heavy-build/lane lock or verify throttle applies;
   - `--security` for security/attack-flavoured work (vulnerability/exploit hunting, auth/session/credential handling,
     bypass, forgery/replay, path traversal, DoS or security review): exclude TRAE's GPT, then route normally
     (user, 2026-11-12: "这种类型的任务排除掉 trae gpt 之后再按照路由规则来走就行吧，不需要写死一个路由"). This includes
-    implementation that reads attack-style findings; see "Security follows the worker's context" above. Every TRAE GPT
+    implementation that reads attack-style findings; see "Security follows the worker's context" above. A `review`,
+    `review-high` or `second-opinion` with `--security` is adversarial instead: no GPT on any account, company non-GPT
+    models with a second reviewer, Claude only after asking (see "Adversarial security reviews"). `--adversarial`
+    forces that lane for any task. Every TRAE GPT
     here is an OpenAI model under the same vendor policy as 6.1-Sol (restrictions on 2026-11-10/11), not a policy workaround;
   - `--background` only when nobody is waiting and there is no deadline or near-term dependency: nightly cleanups,
     doc refreshes, exploratory analysis and benchmark batches. On TRAE, ordinary background work is light: prefer
@@ -382,7 +417,8 @@ effort, Codex account and launch command from
     even with a future bucket reset. Cache reads preserve the original sample time.
     `why` identifies the step and whether high-priority quota is spent; an Astra escalation keeps its tier.
     Model-fit and `--security` exclusions still apply: image reading needs a vision model, and DeepSeek cannot
-    replace builds or sensitive reviews/acceptance. Expect hours (each request queues separately); launch as a hub
+    replace builds or sensitive reviews/acceptance (except the adversarial security-review lane, which pairs it with
+    the other non-GPT family). Expect hours (each request queues separately); launch as a hub
     worker, keep it pending while `queued:` lines arrive, and dispatch other work meanwhile. TRAE determines request
     priority: `--background` cannot force a model with daily quota left into low priority, so the normal-pick fallback
     can spend that quota. Browser/desktop/image-generation, UI and build/device work keep their capability routing; tasks holding
@@ -427,7 +463,10 @@ effort, Codex account and launch command from
     fallbacks only when both are unusable; normal uses Sol → 5.6-Sol → 5.6-Terra → Flash; light (lookup/extract/draft,
     low stakes or `--background`, unless hard) uses 5.6-Terra → 5.5 → Flash. Astra is reserved for hard substitutions;
     hard never substitutes 5.6-Sol/Terra/5.5. The same table governs balancing/background choices. Unknown quota changes
-    nothing; exclusions and vision rules still apply. TTADK retains its own model picks/catalog.
+    nothing; exclusions and vision rules still apply. TTADK keeps its own catalog: normal/hard work starts at 6.1-Sol;
+    a light row starts at 5.6-Terra → 5.5 (6.1-Sol medium as the failure escalation, then the usual Sol ladder).
+    When a light first rung is balanced to TRAE, the full TRAE light list is walked (Terra → 5.5 → Flash), so one
+    paused/busy model does not block the transfer; later quality rungs keep their model.
     Candidates are availability replacements, never retry rungs. Resolve and normalize the whole actual ladder before
     taking `--failures N`: drop equal/lower effort on a previously tried model and any weaker GPT; retain only stronger
     effort/model/family or the row's existing stronger steps. A retained same-model max step still needs its OK unless
@@ -549,7 +588,12 @@ and take-time notes at `~/.claude/orchestrator/_shared/notes/heavy-build.md`. Us
   The routing/global-rules owner maintains enforcement in `scripts/res/res`; until its reviewed switch use
   the installed lanes only. Telemetry may observe optional lane 3, but never implements or admits it.
   Host unit tests without a full native build, single-TU compiles, analysis/docs and build-free device sessions are
-  not heavy. These caps never lower model-worker concurrency; keep independent ready work running.
+  not heavy. **Remote work is never heavy:** PPE/staging/TCE/BITS/SCM deploys, cloud/remote pipelines, CI runs and
+  `build-run --env test` procedural deploys never take `heavy-build`, a lane, or `--shared-lock`. Pass
+  `--no-local-build` on the route for such a run; it also skips the local heavy-build note. Shared remote/CI entry
+  scripts stay unthrottled — a local `res` lock or `verify-throttle` belongs in a local-only wrapper, never in the
+  shared entry (route.mjs's `--no-local-build` / `--env test` record the distinction).
+  These caps never lower model-worker concurrency; keep independent ready work running.
 - **Take and gate:** `res take <id> --by <session> --project <slug> --for "<purpose>" --task <task-id> --pid $$`
   returns 0 taken, 2 busy. Plain `take` must first pass `res heavy-check` (0 OK, 5 overloaded; invalid/unreadable
   metrics return 1, no acquisition). User-approved entry load (2026-11-13, secretary option A):

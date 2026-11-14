@@ -86,6 +86,16 @@ and long multiprocess focused tests need a lane only. Host unit tests without a 
 docs/analysis and device-only work are exempt. Acquire slot before lane, release in reverse on every exit (`trap EXIT`),
 use bounded `res wait --timeout`, and pass the long-lived wrapper PID rather than a short-lived res process PID.
 
+**Scope is local heavy compute only.** PPE/staging/TCE/BITS/SCM deploys, remote/cloud pipelines, CI runs and
+`build-run --env test` procedural deploys are not heavy: they never take the slot or a lane, never pass `--shared-lock`,
+and shared remote/CI entry scripts stay unthrottled. A local `res` lock or `verify-throttle` belongs in a local-only
+wrapper, never in the shared entry; `route.mjs --no-local-build` marks the remote case. Lock `--for` purposes are
+classified transiently into `deploy`/`build`/null for review; the raw purpose text is never persisted or printed.
+
+User approved **2-3 heavy lanes on 2026-11-13**; v1.3 implements the optional third `heavy-lane-3` in this repository
+(see Res Ownership), admitted only at load1m <=8 AND available memory >=32 GiB per take attempt and released like every
+lane. The normal v1.2 gates and single package slot stay unchanged.
+
 Sampler/review recognize lane 3 only if present in registry/lease/status/journal/wait data; absence on v1.2
 is not incomplete. `thirdLaneOnly` identifies observations whose only physical capacity is the optional lane,
 excluding them from normal 12/20/16 tuning comparisons. A recorded controller `lane3=CLOSED` means that extra
@@ -193,6 +203,7 @@ New v1.4 fixtures replay pinned/default acquisition, pair contention, timeout, i
 same-holder CLOSED-gate re-take, real wrapper missing-lane fallback/pinning/reverse release, wrapped waiter refusal,
 atomic registry publication/idempotence and owner install failure/backup/rollback in fake shared state.
 
+
 `heavyLocks` includes an equivalent status snapshot, bounded 128 KiB `log.tsv` tail and observed `res wait` processes.
 Event IDs use journal inode/byte offset, so repeated tails are deduplicated. Purpose, return/reclaim notes and arbitrary
 command arguments are never persisted. STALE is established only for a dead recorded **local-host** PID with a complete
@@ -296,6 +307,13 @@ They also include wait/hold bounds, STALE observations/periods, persistent build
 authoritative gate coverage/overload periods, approved **12/20 lane-aware** entry comparisons (memory 16 GiB), shared ccache rates, and hub
 outage observations/periods. Hub durations require two complete adjacent probes with common missing ports; a single
 missing-listener sample is flagged but has no invented duration. Onset/recovery is bounded by probes, not exact.
+
+Two advisory misuse checks use only persisted enum/timing data: `lock_taken_without_local_heavy_work` and
+`lock_wait_without_local_heavy_work` flag a hold/wait whose classified purpose is `deploy`, lasts >=1 minute, and whose
+complete process samples show no matched local heavy root for that holder/owner. Remote-entry findings flag scanned
+project scripts (bounded, fail-open; `.git`/dependencies skipped) that combine CI/remote markers with a local `res`
+lock or `verify-throttle`. Both are advisory: never reclaim a lock, kill a process or change admission from them; verify
+the brief/wrapper with the owner.
 
 `utilisation` includes CPU hours idle >50% with explicitly ready tasks, authoritative combined-gate hours, memory
 mean/min/max available GiB and pressure hours, per-lane/aggregate occupancy, queue wall-hours and task-hours,
