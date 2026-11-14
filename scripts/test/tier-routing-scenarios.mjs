@@ -97,10 +97,14 @@ try {
     assert.ok([SOL, ASTRA, SEED].includes(run(args).pick.model));
     assert.equal(run([...args, '--security']).pick.model, SEED);
   }
-  for (const args of [['lookup'], ['analysis'], ['implement'], ['debug'], ['image-read']]) {
-    for (const flags of [[], ['--background']]) {
-      const r = run([...args, ...flags], { daily: null }); assert.equal(r.pick.model, SOL);
-    }
+  // Light rows (lookup/extract/draft, background ordinary work) start on the light list even with unknown quota;
+  // normal/hard rows keep Sol (debug stays hard under --background).
+  for (const [args, plain, background] of [
+    [['lookup'], TERRA56, TERRA56], [['analysis'], SOL, TERRA56], [['implement'], SOL, TERRA56],
+    [['debug'], SOL, SOL], [['image-read'], SOL, SOL],
+  ]) {
+    assert.equal(run(args, { daily: null }).pick.model, plain, `${args.join(' ')} plain`);
+    assert.equal(run([...args, '--background'], { daily: null }).pick.model, background, `${args.join(' ')} background`);
   }
   const paused = path.join(tmp, 'paused'); fs.mkdirSync(paused);
   noteFailure(paused, `-32600: model \`${SOL}\` is unavailable because its metadata could not be resolved`, now, SOL);

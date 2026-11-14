@@ -4,6 +4,7 @@
 //   route <category> [--stakes low|normal|high] [--auto-check] [--failures N] [--writes | --read-only]
 //                    [--against claude|codex] [--no-redeem] [--project SLUG] [--dry]
 //                    [--impact release|service|throwaway]   (required for implement, implement-hard, debug, science)
+//                    [--env test|prod] [--no-local-build]   (procedural deploys: test env implies the light tier)
 //                    [--exclude-account a,b] [--exclude-model m,family] [--origins p,q] [--mode <orchestrator mode for Codex sandbox>] [--cwd DIR] [--task-dir DIR]
 //                    [--name NAME] [--fresh] [--json] [--security] [--background]
 //   route --table          (the routing table: categories, first pick, alternative, escalation ladder)
@@ -33,6 +34,9 @@ const COMPANY_TIERS = Object.freeze({
   light: ['gpt-5.6-terra', 'gpt-5.5', 'deepseek-v4.1-flash'],
 });
 const TRAE_BUCKETED = new Set([SOL, ASTRA, 'gpt-5.6-sol']);
+// TTADK's light list (user, 2026-11-13): the gateway's lightest capable models first, 6.1-Sol only as the
+// escalation/fallback step. Hard and normal work on TTADK still starts at 6.1-Sol.
+const TTADK_LIGHT = ['gpt-5.6-terra', 'gpt-5.5', SOL];
 const KIMI = 'kimi-k3'; // TTADK only: a different model family, best planted-bug recall (2026-11-07 tests)
 // Fallback models on a company account, in order, for when its GPT-6.1-Sol is unavailable (paused, restricted, excluded)
 // and as a different-family step after Sol has fallen short (user, 2026-11-10: "某个模型失败的话还有的备选"; keep
@@ -95,7 +99,7 @@ const label = (m) => `${m.vendor === 'claude' ? `Claude ${m.model}` : isAlt(m) ?
 
 // ---- args ----
 // --apps a,b: the desktop apps (bundle ids) a computer-use worker may operate; others are declined.
-const BOOL = new Set(['auto-check', 'writes', 'read-only', 'fresh', 'json', 'table', 'no-redeem', 'dry', 'urgent', 'security', 'adversarial', 'background', 'device-lease', 'shared-lock']);
+const BOOL = new Set(['auto-check', 'writes', 'read-only', 'fresh', 'json', 'table', 'no-redeem', 'dry', 'urgent', 'security', 'adversarial', 'background', 'device-lease', 'shared-lock', 'no-local-build']);
 // --urgent: run now even while TTADK is down for a fixable reason (that work would otherwise wait for the fix).
 // --exclude-account a,b: route around accounts that just failed (e.g. TTADK after a rate-limited retry or an auth error).
 // --exclude-model m,f: route around models (an id, or a family: gpt, deepseek, gemini…) that just failed for
@@ -124,6 +128,10 @@ const T = TABLE[cat];
 if (!T) die(`unknown category ${cat ?? '(none)'}; one of: ${Object.keys(TABLE).join(', ')} (route --table)`);
 const stakes = opts.stakes ?? 'normal';
 if (!['low', 'normal', 'high'].includes(stakes)) die(`--stakes takes low, normal or high, not ${stakes}`);
+// --env test: PPE/staging/dev deploys and smoke runs against a test environment (light procedural work).
+// Production stays --env prod / the default. The flag is meaningful for build-run; it never downgrades code work.
+const env = opts.env === undefined ? 'prod' : opts.env;
+if (!['test', 'prod'].includes(env)) die(`--env takes test or prod, not ${opts.env}`);
 const failures = opts.failures === undefined ? 0 : Number(opts.failures);
 if (!Number.isInteger(failures) || failures < 0) die(`--failures takes a whole number ≥ 0, not ${opts.failures}`);
 if (cat === 'second-opinion' && !['claude', 'codex'].includes(opts.against)) die('second-opinion needs --against claude|codex (the vendor whose conclusion is checked)');
@@ -158,9 +166,16 @@ const security = !!opts.security || !!opts.adversarial;
 // with --security is adversarial by default (other --security work keeps today's TRAE-only GPT exclusion).
 const adversarial = !!opts.adversarial || (security && ['review', 'review-high', 'second-opinion'].includes(cat));
 const background = !!opts.background;
+// A production release/deploy keeps 6.1-Sol medium and the pinned health/rollback brief: build-run --impact release
+// outside --env test, or high stakes. A test-environment build-run (PPE/staging/dev) is procedural and light.
+const productionBuild = cat === 'build-run' && ((impact === 'release' && env !== 'test') || stakes === 'high');
+const lightRow = ['lookup', 'extract', 'draft'].includes(cat) || stakes === 'low' || background
+  || (env === 'test' && cat === 'build-run');
 const tierFor = (f) => ['implement-hard', 'debug', 'science', 'review-high', 'design'].includes(cat) || stakes === 'high'
   || (f >= 1 && CODE.includes(cat)) ? 'hard'
-  : ['lookup', 'extract', 'draft'].includes(cat) || stakes === 'low' || background ? 'light' : 'normal';
+  : productionBuild ? 'normal'
+  : f >= 1 && lightRow ? 'normal'
+  : lightRow ? 'light' : 'normal';
 const tier = tierFor(failures);
 const laneEligible = T.kind !== 'browser' && T.kind !== 'claudeOnly'
   && !['build-run', 'image-gen', 'image-read'].includes(cat) && !opts['device-lease'] && !opts['shared-lock'];
@@ -175,9 +190,12 @@ const modelExcluded = (model, account = null) => exModels.has(model) || exModels
 // the second reviewer from the other non-GPT family. Build-run still cannot use DeepSeek.
 const deepseekUnfit = cat === 'build-run' || (!adversarial && (cat === 'review-high'
   || (['review', 'second-opinion'].includes(cat) && (impact === 'release' || stakes === 'high' || security))));
-const tierModels = (account, taskTier = tier) => account?.kind === 'trae' ? (cat === 'image-read' ? [SOL, ASTRA] : COMPANY_TIERS[taskTier])
-  .filter((id) => account.models.includes(id) && !modelExcluded(id, account)
+const tierModels = (account, taskTier = tier) => {
+  const list = account?.kind === 'trae' ? (cat === 'image-read' ? [SOL, ASTRA] : COMPANY_TIERS[taskTier])
+    : account?.kind === 'ttadk' && taskTier === 'light' ? (cat === 'image-read' ? [SOL, ASTRA] : TTADK_LIGHT) : null;
+  return list ? list.filter((id) => account.models.includes(id) && !modelExcluded(id, account)
     && !(deepseekUnfit && poolOf(id) === 'deepseek')) : [];
+};
 const bucketFreeModels = (account, taskTier = tier) => account?.kind === 'trae' && hasTraeDailyQuota(account.quota) && cat !== 'image-read'
   ? tierModels(account, taskTier).filter((id) => !TRAE_BUCKETED.has(id) && !Object.hasOwn(account.quota.daily, id)) : [];
 // ChatGPT accounts (the quota-managed ones): out when every open account is spent/excluded and no card is due.
@@ -203,6 +221,8 @@ const backgroundLane = background && backgroundEligible && TT?.kind === 'trae';
 // no underused/front-load/expiring effort raises and no extra quota-spending reviews. Without TTADK nothing changes.
 const ttDevice = !!QX.ttadk || !!QX.trae || QX.companyAccounts.length > 0 || !!QX.registryError;
 const ttHas = (model) => !!TT && TT.models.includes(model) && !modelExcluded(model, TT);
+// Light work may run on TTADK's lightest listed model even when its account-level Sol is absent/excluded.
+const ttadkLightModels = () => TT?.kind === 'ttadk' ? TTADK_LIGHT.filter((id) => ttHas(id)) : [];
 // Browser, frontend-visual and desktop-app work runs on a Codex worker when a Codex account can drive Chrome and the
 // desktop: the company account first (TTADK with browser-setup), else a browser-ready ChatGPT account (2026-11-10: on a
 // device without TTADK, e.g. the MacBook, this used to go to Claude even though its Codex accounts can do it); else Claude.
@@ -214,8 +234,25 @@ const browserViaCodex = T.kind === 'browser' && (ttBrowser || chatgptBrowser.len
 const ttAlts = ALTS.filter((a) => ttHas(a.model) && (cat === 'image-read' ? a.vision : !a.visionOnly)
   && !(deepseekUnfit && poolOf(a.model) === 'deepseek')).map((a) => X(a.model, a.effort));
 const ttTierModels = tierModels(TT);
-const ttModelsOK = ttHas(SOL) || ttAlts.length > 0 || ttTierModels.length > 0;
+// A light row stays company-capable on a retry even when the account lists only light models: the retry tier is normal,
+// but the ladder still escalates from the light first rung (TTADK's light list or TRAE's light tier). A light row whose
+// account lists no light model may still use a normal-tier model, so company quota is spent before personal quota.
+const ttLightTierModels = TT?.kind === 'ttadk' ? ttadkLightModels() : TT?.kind === 'trae' ? tierModels(TT, 'light') : [];
+const ttModelsOK = ttHas(SOL) || ttAlts.length > 0 || ttTierModels.length > 0
+  || (lightRow && (ttLightTierModels.length > 0 || tierModels(TT, 'normal').length > 0));
 const companyPick = (id, effort) => X(id, ALTS.find((a) => a.model === id)?.effort ?? effort);
+// Light procedural work (test-env build-run, lookup/extract/draft, low stakes, background) starts on the company
+// account's light list instead of Sol medium: TTADK's gpt-5.6-terra/gpt-5.5, TRAE's light tier. A failure escalates to
+// Sol medium (the ladder below then climbs as usual); it never steps sideways onto another light model.
+const ttLightPick = () => {
+  if (!TT) return null;
+  // Image reading needs a vision model; the light lists don't carry one (the image-read override is Sol/Astra), so keep
+  // its existing routing rather than starting on a non-vision light model or on Astra.
+  if (cat === 'image-read') return null;
+  if (TT.kind === 'trae') { const id = tierModels(TT, 'light')[0]; return id ? companyPick(id, 'medium') : null; }
+  const id = ttadkLightModels()[0];
+  return id ? X(id, 'medium') : null;
+};
 const priorityAvailable = (id, account) => {
   if (!hasTraeDailyQuota(account.quota)) return false;
   if (!Object.hasOwn(account.quota.daily, id)) return !TRAE_BUCKETED.has(id);
@@ -313,9 +350,16 @@ if (ttCapable) {
   // - then every Sol notch up to xhigh, and on to max (no OK needed on TTADK) except for the cheap rows;
   // - then the row's own steps, minus Codex steps no stronger than what TTADK already tried (no Luna, Terra or a weaker
   //   Sol); Astra (ChatGPT, needs an OK) stays after Sol max, and when the ChatGPT accounts are out it is dropped.
-  const e0 = X(SOL, companyEffort);
+  // The ladder's first rung uses the first-attempt tier, not the retry tier: after a light failure the ladder still
+  // starts light and the next rung (index 1) is the Sol medium escalation.
+  const lightPick = tierFor(0) === 'light' ? ttLightPick() : null;
+  const e0 = lightPick ?? X(SOL, companyEffort);
   const cheapRow = ['lookup', 'extract', 'draft', 'browser', 'computer-use'].includes(cat); // browser/desktop misses are UI trouble, not depth
   const rungs = [e0];
+  // A light first rung that isn't Sol escalates to Sol medium before the usual Sol ladder: the retry costs more, it
+  // doesn't try a second light model sideways. Only when the company account can actually run Sol — otherwise the
+  // notches below keep the light pick's own model and a higher effort is the next rung, never an unlisted Sol.
+  if (lightPick && lightPick.model !== SOL && ttHas(SOL)) rungs.push(X(SOL, 'medium'));
   while (ei(rungs.at(-1).effort) < ei('xhigh')) rungs.push(notch(rungs.at(-1), +1));
   // After Sol xhigh has fallen short, a different model family before Sol max (its misses rarely overlap Sol's: Kimi,
   // 2026-11-07; DeepSeek, 2026-11-10), and the second fallback after Sol max — all before personal quota.
@@ -445,7 +489,10 @@ const tune = (x, f, log) => {
   return x;
 };
 const availabilityChoice = (x, taskTier, log) => {
-  const ids = [...new Set([...tierModels(TT, taskTier), ...ttAlts.map((a) => a.model)])];
+  // A light row whose account lists no light model still uses the company's normal-tier model (a comparable GPT with
+  // quota) before personal quota; the light list stays first when it has a candidate.
+  const lightFallback = taskTier === 'light' ? tierModels(TT, 'normal') : [];
+  const ids = [...new Set([...tierModels(TT, taskTier), ...lightFallback, ...ttAlts.map((a) => a.model)])];
   const id = ids.find((id) => !TT.quota?.daily?.[id]?.depleted) ?? ids[0];
   if (!id) return null;
   const skipped = ids.filter((m) => m !== id && TT.quota?.daily?.[m]?.depleted);
@@ -471,7 +518,10 @@ const resolveRung = (raw, index) => {
     const free = x.model !== ASTRA ? bucketFreeModels(QX.trae, taskTier) : [];
     // Walk the tier in quality order, checking reserve and congestion for each candidate. A later explicit
     // Astra/other-family quality rung retains its model; balancing cannot turn a retry into a weaker rung.
-    const candidates = x.model === SOL ? COMPANY_TIERS[taskTier] : [x.model];
+    // A light first rung (TTADK Terra/5.5) walks the light tier too, so a paused/busy TRAE Terra doesn't block the
+    // balance transfer while TRAE 5.5 or DeepSeek would pass. Only index 0: an escalation rung is never walked sideways.
+    const lightStart = index === 0 && taskTier === 'light' && TTADK_LIGHT.includes(x.model);
+    const candidates = x.model === SOL || lightStart ? COMPANY_TIERS[taskTier] : [x.model];
     const checked = [];
     for (const model of candidates) {
       factors = balanceFactors({ ttadk: QX.ttadk, trae: QX.trae, model, category: cat, stakes, impact, tier: taskTier, allowBucketFree: free.includes(model) });
@@ -696,11 +746,15 @@ if (m && ['implement', 'implement-hard', 'debug'].includes(cat)) notes.push('Dee
 if (m?.model === 'deepseek-v4.1-flash' || second?.model === 'deepseek-v4.1-flash') notes.push("DeepSeek-V4.1-Flash can't emit one very large file in a single turn (output limit) — not for tasks that generate a large file in one go; split the work or exclude deepseek");
 // user-approved 2026-11-11 retro: W291-R0 review misses and ppe2a's unnecessary rollback.
 if (isAlt(m) && ['review', 'review-high'].includes(cat)) notes.push('release/high-stakes acceptance also requires an independent other-family GPT/Claude reviewer and the failure probes in references/review-rubric.md; if unavailable, report BLOCKED');
-if (m && cat === 'build-run') notes.push('deploy/release brief: pin baseline/control probes, health thresholds, sample intervals and observation window, rollback triggers and exact prior artifact/config restore steps before acting; a fallback model follows these only — unexpected evidence needs stronger-model judgment, stop and report rather than invent a rollback condition');
+if (m && cat === 'build-run' && (productionBuild || (env !== 'test' && stakes !== 'low'))) notes.push('deploy/release brief: pin baseline/control probes, health thresholds, sample intervals and observation window, rollback triggers and exact prior artifact/config restore steps before acting; a fallback model follows these only — unexpected evidence needs stronger-model judgment, stop and report rather than invent a rollback condition');
+else if (m && cat === 'build-run') notes.push('test-environment build-run (PPE/staging/dev, procedural, light tier): follow the written steps, report the exact commands and the observed result, and stop on unexpected errors; still pin the health checks and the exact restore steps in the brief, but a failed test deploy is retried once or reported, not treated as an incident — a production release brief (baseline probes, rollback triggers, observation window) is not required; pass --impact release without --env test for that');
 if (m && writes) notes.push('brief: include the safety clauses — never overwrite, delete or move files outside the task\'s scope (user files, uncommitted changes, shared headers/configs); restore anything touched by mistake byte-for-byte and report it');
 if (m && ['build-run', 'implement', 'implement-hard', 'debug', 'ui-browser', 'computer-use'].includes(cat)) notes.push('brief: on devices and simulators, back up app data before any destructive step (reinstall with --remove-existing-content, wiping app containers or Documents, erasing simulators), or ask first');
 if (m && ['build-run', 'ui-browser', 'computer-use'].includes(cat)) notes.push('before builds/device runs: inspect finished-task process trees, but cleanup requires references/resources.md\'s guarded executor, continuous idle evidence, live-session/lease protections and every orchestrator\'s release; PPID=1 or age alone is not permission to kill. Device lease: at most 2 h, then return the device and report; brief preflight: device connected, unlocked, app data backed up');
-if (m && ['build-run', 'implement', 'implement-hard', 'debug', 'ui-browser'].includes(cat)) notes.push('build brief: full-package builds must use scripts/heavy-build.sh or equivalent res take/return per references/res-contract.md: heavy-build first, then a lane; reverse return on every exit. Two normal lanes; v1.3 adds lane 3 only after reviewed owner switch, at load1m <=8 AND available memory >=32 GiB at take time (2-3 lanes with load). Wrapper tries lanes 1/2/3, HEAVY_BUILD_LANE pins one. Normal gate remains min(20, 12 + 8 * other lanes), memory >=16 GiB; STALE and caller-owned locks excluded, lane-3 holders counted. Bounded waits and authoritative heavy-check limit/lanes_held, appended lane3=OPEN|CLOSED; OPEN is not FREE. UNKNOWN blocks admission, timeout means report/queue, never bypass. Other heavy tasks take one lane. Compile 6/link 1, Xcode -jobs 6, Gradle 2 workers; fixed per-base incremental builds, one cold acceptance build, affected fix tests and scoped ccache/Gradle caches (first use cold). Not a model-worker concurrency cap; global-rules owns res, telemetry never reclaims locks/restarts hubs.');
+if (m && (opts['no-local-build'] || env === 'test') && ['build-run', 'implement', 'implement-hard', 'debug', 'ui-browser'].includes(cat)) notes.push(opts['no-local-build']
+  ? 'remote/CI build (--no-local-build): no local heavy-build/lane lock and no local verify throttle — do not take res locks or pass --shared-lock for this run; the shared remote entry script stays unthrottled and only local-only wrappers throttle'
+  : 'test-environment run (--env test): no heavy-build/lane lock and no local verify throttle — this task does not compile locally; do not take res locks or pass --shared-lock for a PPE/staging/TCE/BITS/SCM deploy or smoke check, and shared remote/CI entry scripts stay unthrottled');
+else if (m && ['build-run', 'implement', 'implement-hard', 'debug', 'ui-browser'].includes(cat)) notes.push('build brief: full-package builds must use scripts/heavy-build.sh or equivalent res take/return per references/res-contract.md: heavy-build first, then a lane; reverse return on every exit. Two normal lanes; v1.3 adds lane 3 only after reviewed owner switch, at load1m <=8 AND available memory >=32 GiB at take time (2-3 lanes with load). Wrapper tries lanes 1/2/3, HEAVY_BUILD_LANE pins one. Normal gate remains min(20, 12 + 8 * other lanes), memory >=16 GiB; STALE and caller-owned locks excluded, lane-3 holders counted. Bounded waits and authoritative heavy-check limit/lanes_held, appended lane3=OPEN|CLOSED; OPEN is not FREE. UNKNOWN blocks admission, timeout means report/queue, never bypass. Other heavy tasks take one lane. Heavy-build/lane locks are only for genuine local heavy compute: PPE/staging/TCE/BITS/SCM/remote pipeline deploys and CI runs never take one, never pass --shared-lock, and shared remote/CI entry scripts stay unthrottled — local lock/verify throttling lives only in local-only wrappers (--no-local-build when this run is remote). Compile 6/link 1, Xcode -jobs 6, Gradle 2 workers; fixed per-base incremental builds, one cold acceptance build, affected fix tests and scoped ccache/Gradle caches (first use cold). Not a model-worker concurrency cap; global-rules owns res, telemetry never reclaims locks/restarts hubs.');
 // Claude browser workers can reach the user's signed-in Chrome; a worker that can't find it must not hand the clicking back
 // to the orchestrator (nightly review 11-05: W258 blocked on "can't see local browser 1e7c2b37", the user then chose
 // "orchestrator does the console", and that orchestrator made 510 browser calls in 24h).
@@ -767,7 +821,7 @@ out.notes.push('launch audit: every launch must match a same-name/task-prefix ro
 // Every real routing decision is logged for the nightly review (--dry or ROUTE_LOG=0 to skip, e.g. for experiments).
 if (!opts.dry && process.env.ROUTE_LOG !== '0') {
   const rec = { t: Date.now(), project: typeof opts.project === 'string' ? opts.project : null, name: typeof opts.name === 'string' ? opts.name : null, category: cat, stakes, failures, impact, review: reviewKind, excluded: [...excluded], ttadk: !!ttadkRun, company: ttadkRun ? runCompany.name : null, balance,
-    autoCheck: !!opts['auto-check'], noRedeem, security, adversarial, background, tier, deferred, pick: m ? { vendor: m.vendor, model: m.model, effort: m.effort, account: out.pick?.account ?? null } : null,
+    autoCheck: !!opts['auto-check'], noRedeem, security, adversarial, background, tier, deferred, env, noLocalBuild: !!opts['no-local-build'], pick: m ? { vendor: m.vendor, model: m.model, effort: m.effort, account: out.pick?.account ?? null } : null,
     second: second ? { vendor: second.vendor, model: second.model, effort: second.effort, account: out.secondOpinion?.account ?? null } : null, why, needsOK, tell,
     personalApproved: !!opts.urgent, approvalRef: typeof opts['user-ok'] === 'string' ? opts['user-ok'] : null,
     quota: { claude: QC.status, codexOut: QX.out, underused: QX.underused, frontLoad: QX.frontLoad, overspending: QX.overspending, redeemDue: !!QX.redeem } };

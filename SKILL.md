@@ -384,6 +384,12 @@ effort, Codex account and launch command from
     `--task-dir`, `--name` so the printed command is ready to run;
   - for code work, `--impact release|service|throwaway` (see "Review only what is costly to
     undo"); route.mjs refuses code work without it;
+  - `--env test|prod` (default `prod`) and `--no-local-build` for `build-run`: `--env test` marks a
+    PPE/staging/dev procedural deploy and gives it the light tier on both company accounts (TTADK
+    5.6-Terra/5.5, TRAE light list). Production (`--impact release` without `--env test`) and high
+    stakes keep Sol medium with the pinned health/rollback criteria. A failed light run escalates to
+    Sol medium — never sideways to another light model. `--no-local-build` marks a remote/CI run, so
+    no local heavy-build/lane lock or verify throttle applies;
   - `--security` for security/attack-flavoured work (vulnerability/exploit hunting, auth/session/credential handling,
     bypass, forgery/replay, path traversal, DoS or security review): exclude TRAE's GPT, then route normally
     (user, 2026-11-12: "这种类型的任务排除掉 trae gpt 之后再按照路由规则来走就行吧，不需要写死一个路由"). This includes
@@ -448,7 +454,10 @@ effort, Codex account and launch command from
     fallbacks only when both are unusable; normal uses Sol → 5.6-Sol → 5.6-Terra → Flash; light (lookup/extract/draft,
     low stakes or `--background`, unless hard) uses 5.6-Terra → 5.5 → Flash. Astra is reserved for hard substitutions;
     hard never substitutes 5.6-Sol/Terra/5.5. The same table governs balancing/background choices. Unknown quota changes
-    nothing; exclusions and vision rules still apply. TTADK retains its own model picks/catalog.
+    nothing; exclusions and vision rules still apply. TTADK keeps its own catalog: normal/hard work starts at 6.1-Sol;
+    a light row starts at 5.6-Terra → 5.5 (6.1-Sol medium as the failure escalation, then the usual Sol ladder).
+    When a light first rung is balanced to TRAE, the full TRAE light list is walked (Terra → 5.5 → Flash), so one
+    paused/busy model does not block the transfer; later quality rungs keep their model.
     Candidates are availability replacements, never retry rungs. Resolve and normalize the whole actual ladder before
     taking `--failures N`: drop equal/lower effort on a previously tried model and any weaker GPT; retain only stronger
     effort/model/family or the row's existing stronger steps. A retained same-model max step still needs its OK unless
@@ -570,7 +579,12 @@ and take-time notes at `~/.claude/orchestrator/_shared/notes/heavy-build.md`. Us
   The routing/global-rules owner maintains enforcement in `scripts/res/res`; until its reviewed switch use
   the installed lanes only. Telemetry may observe optional lane 3, but never implements or admits it.
   Host unit tests without a full native build, single-TU compiles, analysis/docs and build-free device sessions are
-  not heavy. These caps never lower model-worker concurrency; keep independent ready work running.
+  not heavy. **Remote work is never heavy:** PPE/staging/TCE/BITS/SCM deploys, cloud/remote pipelines, CI runs and
+  `build-run --env test` procedural deploys never take `heavy-build`, a lane, or `--shared-lock`. Pass
+  `--no-local-build` on the route for such a run; it also skips the local heavy-build note. Shared remote/CI entry
+  scripts stay unthrottled — a local `res` lock or `verify-throttle` belongs in a local-only wrapper, never in the
+  shared entry (route.mjs's `--no-local-build` / `--env test` record the distinction).
+  These caps never lower model-worker concurrency; keep independent ready work running.
 - **Take and gate:** `res take <id> --by <session> --project <slug> --for "<purpose>" --task <task-id> --pid $$`
   returns 0 taken, 2 busy. Plain `take` must first pass `res heavy-check` (0 OK, 5 overloaded; invalid/unreadable
   metrics return 1, no acquisition). User-approved entry load (2026-11-13, secretary option A):

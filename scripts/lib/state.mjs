@@ -782,7 +782,7 @@ export const analyze = (data) => {
   // TTADK: preferred for Codex work whenever it is healthy (user, 2026-11-07).
   const tt = (data.codexAccounts ?? []).find((a) => a.kind === 'ttadk') ?? null;
   // No concurrency cap (user, 2026-11-07): a rate-limited run is retried once on TTADK, then re-routed without it.
-  const ttadk = tt ? { name: tt.name, home: tt.home, healthy: !!tt.healthy, reason: tt.reason, quotaOut: tt.quotaOut ?? null, live: !!tt.live, active: tt.active ?? 0,
+  const ttadk = tt ? { name: tt.name, kind: 'ttadk', home: tt.home, healthy: !!tt.healthy, reason: tt.reason, quotaOut: tt.quotaOut ?? null, live: !!tt.live, active: tt.active ?? 0,
     models: tt.models ?? [], browser: !!tt.browser, chromePlugin: tt.chromePlugin ?? null, search: !!tt.search, searchLive: !!tt.searchLive, ssoLeftH: tt.ssoExpiresAt ? (tt.ssoExpiresAt - now) / 3600000 : null,
     usage: tt.usage ?? null, usageError: tt.usageError ?? null,
     burn: ttadkBurn(readQuotaHistory(QUOTA_LOG), tt, tt.seenAt ?? data.checkedAt) } : null;

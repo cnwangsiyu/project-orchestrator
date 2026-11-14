@@ -22,6 +22,15 @@ export const commandName = (cmd = '') => {
   const name = path.basename(cmd.trim().split(/\s+/)[0] || 'unknown');
   return /^[a-zA-Z0-9._+-]{1,80}$/.test(name) ? name : 'unknown';
 };
+// Transient purpose classification for lock holds/waits: only this enum may leave the function, never the raw --for text.
+// Deploy markers win over build markers, because a remote/CI build is exactly the case that must not hold a local lane.
+const DEPLOY_PURPOSE = /\b(?:ppe|tce|bits|scm|deploy|deployment|release|publish|rollout|canary|staging|pipeline|ci|cd)\b|\bremote[\s-]+build\b|(?:^|\s)ppe\d|上线|发布|部署|灰度|流水线/i;
+const LOCAL_BUILD_PURPOSE = /\b(?:build|compile|compiling|xcodebuild|gradle|assemble|bundle|link|linking|archive|ccache|cmake|ninja|test|tests)\b|打包|编译|构建|链接/i;
+export function classifyPurpose(text) {
+  if (typeof text !== 'string' || !text.trim()) return null;
+  const s = text.slice(0, 2000);
+  return DEPLOY_PURPOSE.test(s) ? 'deploy' : LOCAL_BUILD_PURPOSE.test(s) ? 'build' : null;
+}
 export function readLeases(shared = SHARED) {
   const held = [], errors = []; let registered = [];
   try {
@@ -31,6 +40,8 @@ export function readLeases(shared = SHARED) {
       const id = safeId(name.slice(0, -2)); if (!id) throw Error('invalid resource lock id');
       const data = Object.fromEntries(smallText(path.join(shared, 'locks', name, 'info'), 16384).split('\n').filter((s) => s.includes('\t')).map((s) => { const i = s.indexOf('\t'); return [s.slice(0, i), s.slice(i + 1)]; }));
       held.push({ id, kind: resources.get(id) ?? 'unknown', holder: safeHolder(data.by), project: safeId(data.project), task: safeId(data.task),
+        // Advisory only: classify the transient purpose here and keep the enum, so raw --for text never reaches reports.
+        purposeClass: classifyPurpose(data.for),
         pid: /^[1-9]\d*$/.test(data.pid ?? '') && Number.isSafeInteger(Number(data.pid)) ? Number(data.pid) : null,
         host: safeId(data.host), startMs: /^\d+$/.test(data.start ?? '') && Number.isSafeInteger(Number(data.start) * 1000) && Number(data.start) > 0 ? Number(data.start) * 1000 : null,
         since: /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(data.since ?? '') ? data.since : null });

@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { GIB, LOG, SHARED, readJsonl, TERMINAL } from './lib/resource-data.mjs';
+import { GIB, LOG, SHARED, readJsonl, readRegistry, TERMINAL, unsafeFile } from './lib/resource-data.mjs';
 import { assessThresholds, inspectLockInterval, reviewLockTiming } from './lib/resource-lock-review.mjs';
 import { reviewExtras } from './lib/resource-extras.mjs';
 import { laneAdmission } from './lib/resource-locks.mjs';
@@ -10,7 +10,44 @@ import { resourceUtilisation, utilisationLines } from './lib/resource-utilisatio
 
 const finite = (x) => typeof x === 'number' && Number.isFinite(x);
 const ownerKey = (o) => o?.project ? `${o.project}/${o.task ?? '(project only)'}` : '(unknown)';
-export function review(input, { hours = 24, now = Date.now(), maxGapMs = 600000, loadGate = 12, loadGateWithOneHeavyTask = 20, memoryGateGiB = 16, approvedRanges = null, approvalEvidence = null, quotaRecords = [] } = {}) {
+// Advisory remote-entry check: a script shared with CI/remote deploys must stay unthrottled. Local res locks and verify
+// throttles belong in a local-only wrapper. Matches markers, never the file content in the output.
+const REMOTE_ENTRY_MARKER = /\b(?:github_actions|gitlab_ci|jenkins|circleci|buildkite|ci|cd|scm|bits|tce|ppe|pipeline|remote[\s-]+build|deploy|release)\b/i;
+const LOCAL_THROTTLE = /(?:\bres\s+(?:wait|take|heavy-check)\b|\bverify-throttle\b|\bheavy-build\.sh\b|\b--shared-lock\b)/i;
+export function reviewRemoteEntryScripts(entries) {
+  const findings = [];
+  for (const entry of entries ?? []) {
+    if (!entry || typeof entry.path !== 'string' || typeof entry.text !== 'string') continue;
+    const remote = REMOTE_ENTRY_MARKER.test(entry.text), throttle = LOCAL_THROTTLE.test(entry.text);
+    if (remote && throttle) findings.push({ path: entry.path,
+      evidence: 'mentions a remote/CI entry and also takes a local lock or verify throttle; keep the shared entry unthrottled and move local locks into a local-only wrapper (advisory)' });
+  }
+  return findings;
+}
+// Bounded, fail-open collection of likely entry scripts for the nightly advisory check. Skips symlinks, VCS/dependency
+// trees and credential-like paths; reads only small script/YAML files.
+export function collectEntryScripts(roots, { maxFiles = 300, maxBytes = 64 * 1024, maxDepth = 3 } = {}) {
+  const entries = [], seen = new Set(), skip = new Set(['.git', 'node_modules', '.cache', 'vendor', '.venv', 'build', 'DerivedData']);
+  const visit = (dir, depth) => {
+    if (entries.length >= maxFiles || depth > maxDepth) return;
+    let names; try { names = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const d of names) {
+      if (entries.length >= maxFiles) return;
+      const full = path.join(dir, d.name);
+      if (d.isSymbolicLink()) continue;
+      if (d.isDirectory()) { if (!skip.has(d.name)) visit(full, depth + 1); continue; }
+      if (!d.isFile() || !/\.(?:sh|bash|zsh|mjs|cjs|js|py|ya?ml)$/i.test(d.name) || unsafeFile(full)) continue;
+      let real; try { real = fs.realpathSync(full); } catch { continue; }
+      if (seen.has(real) || unsafeFile(real)) continue;
+      try { const s = fs.statSync(real); if (!s.isFile() || s.size > maxBytes) continue; } catch { continue; }
+      seen.add(real);
+      try { entries.push({ path: real, text: fs.readFileSync(real, 'utf8') }); } catch { /* fail open */ }
+    }
+  };
+  for (const root of roots ?? []) if (typeof root === 'string' && root.startsWith('/')) visit(root, 0);
+  return entries;
+}
+export function review(input, { hours = 24, now = Date.now(), maxGapMs = 600000, loadGate = 12, loadGateWithOneHeavyTask = 20, memoryGateGiB = 16, approvedRanges = null, approvalEvidence = null, quotaRecords = [], remoteEntryScripts = [] } = {}) {
   const since = now - hours * 3600000, samples = [...new Map(input.filter((s) => s.schema === 1 && finite(s.t) && s.t >= since - maxGapMs && s.t <= now).map((s) => [`${s.host}/${s.t}`, s])).values()].sort((a, b) => a.t - b.t);
   const hosts = new Set(samples.map((s) => s.host));
   if (hosts.size > 1) return { hours, coverage: { observedMinutes: 0, reason: 'mixed hosts refused; review each machine separately' }, badCases: [], resourceShares: [], suggestions: [] };
@@ -74,7 +111,37 @@ export function review(input, { hours = 24, now = Date.now(), maxGapMs = 600000,
       if (p.kind === 'simulator') record('simulator_left_running', p.id, a, b.t, `PID ${p.pid}; running service is not proof of an unused booted simulator; report only`, [key]);
     }
   }
-  const limits = { idle_worker: 120, possible_orphan_tree: 120, suspected_hung_chrome: 60, simulator_left_running: 120 };
+  const lockTiming = reviewLockTiming(samples, { since, now, maxGapMs });
+  // Advisory only: a deploy/remote purpose must not take or wait for a local heavy lock. Flag only when the interval has
+  // complete process samples and no matched local heavy root for that holder/owner; never permission to reclaim or kill.
+  const localHeavyIn = (from, to, pid, owner) => {
+    const rows = samples.filter((s) => s.processComplete && s.t >= from && s.t <= to);
+    if (!rows.length) return null;
+    return rows.some((s) => (s.heavyRoots ?? []).some((p) => {
+      const m = p.buildLock?.state === 'MATCHED' ? p.buildLock : p.laneLock?.state === 'MATCHED' ? p.laneLock : null;
+      return !!m && ((pid != null && m.holderPid === pid) || (!!owner && ownerKey(p.owner) === owner));
+    }));
+  };
+  const boundsOf = (row) => {
+    const from = Date.parse(row.startAt ?? row.firstObservedAt ?? ''), to = Date.parse(row.endAt ?? row.lastObservedAt ?? '');
+    return Number.isFinite(from) && Number.isFinite(to) && to > from ? { from, to } : null;
+  };
+  for (const h of lockTiming.holdTimes) {
+    if (h.purposeClass !== 'deploy') continue;
+    const b = boundsOf(h); if (!b || b.to < since) continue;
+    if (localHeavyIn(b.from, b.to, h.pid, h.owner) !== false) continue;
+    record('lock_taken_without_local_heavy_work', `${h.resource}/${h.pid ?? 'unknown'}`, { t: b.from }, b.to,
+      `purpose classified deploy/remote; hold ${((b.to - b.from) / 60000).toFixed(1)} min; complete process samples show no matched local heavy root for ${h.owner}. Advisory: verify the brief before asking the holder to return the lock`, [h.owner]);
+  }
+  for (const w of lockTiming.waitTimes) {
+    if (w.purposeClass !== 'deploy') continue;
+    const b = boundsOf(w); if (!b || b.to < since) continue;
+    if (localHeavyIn(b.from, b.to, w.holderPid, w.owner) !== false) continue;
+    record('lock_wait_without_local_heavy_work', `${w.resource}/${w.pid ?? 'unknown'}`, { t: b.from }, b.to,
+      `purpose classified deploy/remote; waited ${((b.to - b.from) / 60000).toFixed(1)} min; complete process samples show no matched local heavy root for ${w.owner}. Advisory: verify the wrapper; a remote/CI entry must not throttle on a local lock`, [w.owner]);
+  }
+  const limits = { idle_worker: 120, possible_orphan_tree: 120, suspected_hung_chrome: 60, simulator_left_running: 120,
+    lock_taken_without_local_heavy_work: 0, lock_wait_without_local_heavy_work: 0 };
   const extras = reviewExtras(samples, { since, maxGapMs, record });
   const badCases = [...series.values()].flat().filter((c) => c.minutes >= (limits[c.type] ?? 0)).sort((a, b) => a.start - b.start).map((c) => ({ ...c, startAt: new Date(c.start).toISOString(), endAt: new Date(c.end).toISOString(), minutes: +c.minutes.toFixed(2) }));
   const allShares = [...shares.values()], totalCpu = allShares.reduce((n, s) => n + s.cpuSeconds, 0), totalRss = allShares.reduce((n, s) => n + s.rssByteSeconds, 0);
@@ -86,6 +153,9 @@ export function review(input, { hours = 24, now = Date.now(), maxGapMs = 600000,
   if (has('overlapping_package_builds') || has('overlapping_heavy_workloads')) suggestions.push('Audit wrapper adoption of the ONE machine-wide heavy-build slot and 2-3 provisioned heavy-task lanes; lane 3 requires its stricter take-time gate. Do not kill competing builds.');
   if (has('heavy_build_without_lock')) suggestions.push('Fix matching-wrapper heavy-build/lane adoption before blaming thresholds; verify workload exemptions with the exact owner.');
   if (has('stale_heavy_lock')) suggestions.push('Ask the recorded holder/controller owner to inspect STALE PID holds; only res wait may reclaim eligible >600s holds. Review never returns/reclaims locks.');
+  if (has('lock_taken_without_local_heavy_work') || has('lock_wait_without_local_heavy_work')) suggestions.push('A deploy/remote purpose took or waited for a local heavy-build/lane lock without local compiler work: move the lock into the local-only wrapper (or pass --no-local-build), keep shared remote/CI entry scripts unthrottled, and confirm with the holder. Advisory only; never reclaim the lock from the review.');
+  const remoteEntryFindings = reviewRemoteEntryScripts(remoteEntryScripts);
+  if (remoteEntryFindings.length) suggestions.push('Shared remote/CI entry scripts also take a local lock or verify throttle: split them — keep the shared entry unthrottled and put local locks in a local-only wrapper; confirm each path with its owner.');
   if (has('hub_outage') || has('hub_partial_outage') || extras.hubs.outageObservations.length) suggestions.push('Report hub listener outages to the routing/global-rules owner with probe time/ports. Daemon restart causality and application health need owner confirmation; never auto-restart hubs here.');
   if (has('contention') || has('swap_growth')) suggestions.push('Keep package builds serial; compare compiler/test fan-out and JVM limits before reducing concurrency or tightening gates.');
   if (has('underuse')) suggestions.push('Dispatch ready lightweight work while heavy work waits; compare admission estimates with the installed heavy-check before proposing a small gate change.');
@@ -98,7 +168,8 @@ export function review(input, { hours = 24, now = Date.now(), maxGapMs = 600000,
     utilisation: { ...resourceUtilisation(samples, { since, now, maxGapMs, quotaRecords }), meanCpuIdlePct: counters.cpuMinutes ? +(counters.cpuIdleMinutes / counters.cpuMinutes * 100).toFixed(2) : null, contentionMinutes: observedMs ? counters.contentionMinutes : null, underuseMinutes: counters.cpuMinutes ? counters.underuseMinutes : null, possibleUnderuseMinutes: counters.cpuMinutes ? counters.possibleUnderuseMinutes : null },
     diskTrend: firstDisk && lastDisk && lastDisk.t > firstDisk.t ? { startAt: firstDisk.at, endAt: lastDisk.at, freeBytesStart: firstDisk.disk.freeBytes, freeBytesEnd: lastDisk.disk.freeBytes, changeBytes: lastDisk.disk.freeBytes - firstDisk.disk.freeBytes } : null,
     resourceShares, resourceShareNote: 'CPU share is cumulative process CPU deltas; RSS share is sampled RSS*time (shared pages double-count), not ownership of physical RAM.', badCases, suggestions,
-    heavyLocks: reviewLockTiming(samples, { since, now, maxGapMs }),
+    heavyLocks: lockTiming,
+    remoteEntry: { scripts: (remoteEntryScripts ?? []).length, findings: remoteEntryFindings },
     ...extras,
     heavyGate: { loadGate, loadGateWithOneHeavyTask, memoryGateGiB, controllerRollout: 'v1.2 live per T88 contract; verify sampled output', authoritativeMinutes: lockStats.gateMinutes,
       overloadedMinutes: lockStats.gateMinutes ? lockStats.overloadedMinutes : null,
@@ -113,8 +184,9 @@ export function formatReview(r) {
   lines.push(`Approved limit=min(20, 12 + 8 * lanes held by others), STALE/own excluded; memory >=16 GiB. res v1.2 live per T88 contract; overload analysis uses each sample's limit and authoritative verdict. Observed controller: overloaded=${r.heavyGate?.overloadedMinutes ?? 'UNKNOWN'} min; open=${r.heavyGate?.openMinutes ?? 'UNKNOWN'} min; authoritative=${r.coverage.heavyGateMinutes ?? 0} min, locks=${r.coverage.heavyLockMinutes ?? 0} min.`);
   for (const entry of r.tuning?.controllerMismatchObservations ?? []) lines.push(`Gate rollout mismatch: ${entry.at}; other lanes=${entry.otherLanes}, approved gate=${entry.loadGate}, observed gate=${entry.observedLoadGate}; caller PID=${entry.callerPid ?? 'observer'}. Approved reading=${entry.approvedReading}, controller reading=${entry.observedReading}; notify res owner, never bypass.`);
   const bounds = (v) => `${v.durationMinutesLower ?? 0}..${v.durationMinutesUpper ?? 'UNKNOWN'} min`;
-  for (const h of r.heavyLocks?.holdTimes ?? []) lines.push(`Lock hold ${h.resource}: holder=${h.holder ?? 'unknown'}, owner=${h.owner}, start=${h.startAt ?? 'UNKNOWN'}, end=${h.endAt ?? h.lastObservedAt ?? 'UNKNOWN'}, duration=${bounds(h)}, censored=${h.leftCensored}/${h.rightCensored}; ${h.source}; ${h.endReason}`);
-  for (const w of r.heavyLocks?.waitTimes ?? []) lines.push(`Lock wait ${w.resource}: holder=${w.holder ?? 'unknown'}, owner=${w.owner}, PID=${w.pid}, start=${w.startAt ?? 'UNKNOWN'}, last=${w.lastObservedAt}, duration=${bounds(w)}, timeout=${w.timeoutMinutes ?? 'UNKNOWN'} min; ${w.outcome}`);
+  for (const h of r.heavyLocks?.holdTimes ?? []) lines.push(`Lock hold ${h.resource}: holder=${h.holder ?? 'unknown'}, owner=${h.owner}, purpose=${h.purposeClass ?? 'unknown'}, start=${h.startAt ?? 'UNKNOWN'}, end=${h.endAt ?? h.lastObservedAt ?? 'UNKNOWN'}, duration=${bounds(h)}, censored=${h.leftCensored}/${h.rightCensored}; ${h.source}; ${h.endReason}`);
+  for (const w of r.heavyLocks?.waitTimes ?? []) lines.push(`Lock wait ${w.resource}: holder=${w.holder ?? 'unknown'}, owner=${w.owner}, purpose=${w.purposeClass ?? 'unknown'}, PID=${w.pid}, start=${w.startAt ?? 'UNKNOWN'}, last=${w.lastObservedAt}, duration=${bounds(w)}, timeout=${w.timeoutMinutes ?? 'UNKNOWN'} min; ${w.outcome}`);
+  for (const f of r.remoteEntry?.findings ?? []) lines.push(`Remote-entry advisory: ${f.path}; ${f.evidence}`);
   for (const l of r.heavyLocks?.staleLocks ?? []) lines.push(`STALE observation: ${l.at}, ${l.resource}, holder=${l.holder ?? 'unknown'}, owner=${l.owner}, PID=${l.pid}, age=${l.ageSeconds ?? 'UNKNOWN'}s`);
   lines.push(r.heavyLocks?.note ?? 'Lock timings UNKNOWN: no contract observations.');
   lines.push(`Hub ports 47321-47324: observed=${r.hubs?.observedMinutes ?? 0} min; all missing=${r.hubs?.allMissingMinutes ?? 'UNKNOWN'} min; partial=${r.hubs?.partialMissingMinutes ?? 'UNKNOWN'} min.`);
@@ -160,7 +232,12 @@ async function main() {
   const policy = JSON.parse(fs.readFileSync(new URL('./resource-policy.json', import.meta.url), 'utf8'));
   const quotaFile = path.join(SHARED, 'quota-log.jsonl');
   const quotaRead = stdin || explicitInput ? { rows: [], errors: [] } : await readJsonl([quotaFile], Date.now() - (hours + 24) * 3600000);
-  const r = review(rows, { ...policy, hours, quotaRecords: quotaRead.rows }); r.readErrors = errors; r.quotaReadErrors = quotaRead.errors;
+  let entryScripts = [];
+  try {
+    const registry = await readRegistry();
+    entryScripts = collectEntryScripts([...new Set([...registry.projects.map((p) => p.dir), ...registry.tasks.flatMap((t) => t.paths)])]);
+  } catch { entryScripts = []; }
+  const r = review(rows, { ...policy, hours, quotaRecords: quotaRead.rows, remoteEntryScripts: entryScripts }); r.readErrors = errors; r.quotaReadErrors = quotaRead.errors;
   console.log(json ? JSON.stringify(r, null, 2) : formatReview(r) + (errors.length ? `\nRead errors: ${errors.join('; ')}` : ''));
   if (!r.coverage.observedMinutes || errors.length) process.exitCode = 2;
 }

@@ -207,6 +207,12 @@ Keep 12/20/16 and the ONE package slot. Telemetry only observes, never implement
   strict/loose/conflicting/insufficient assessment. `res status` is parsed from captures; live status writes temporary
   files, so the sampler uses read-only registry/metadata/PID observations. Minute journal timestamps cannot give exact
   holds, and the live journal has no wait starts/timeouts; sampled waits are not a complete queue history. Never reclaim.
+- Include the two advisory misuse checks: `lock_taken_without_local_heavy_work` / `lock_wait_without_local_heavy_work`
+  (deploy-classified purpose, >=1 minute, complete process samples and no matched local heavy root for the holder/owner)
+  and remote-entry scripts that combine CI/remote markers with a local `res` lock or `verify-throttle`. Report them as
+  advisory leads with owner/path/time; never reclaim a lock, kill a process or bypass admission from them. Remind workers
+  that PPE/staging/TCE/BITS/SCM deploys, remote pipelines and CI runs never take a heavy-build/lane lock or `--shared-lock`,
+  and shared remote/CI entry scripts stay unthrottled.
 - Report hub ports 47321-47324 and all/partial listener outages, including isolated observations with duration UNKNOWN.
   Include supervisor BACKOFF/BLOCKED state, retry/failure counts and 8 MiB log-size/rotation checks; persistent faults
   go to the global-rules owner for repair, never silent restart loops or credential workarounds.

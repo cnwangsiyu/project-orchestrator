@@ -58,9 +58,10 @@ catches a miss, and how many times the task has fallen short. How the table was 
 - **Codex-only work:** every task whose output is an image — generating, editing, variants, icons, illustrations,
   mockup images (user, 2026-11-03). Luna `low` writes the prompt (the image tool makes the picture); Sol `medium` if an
   iteration needs more judgment.
-- **Cheap rows:** personal ChatGPT uses Luna for lookups and extraction, Terra for prose drafts. TTADK uses Sol.
-  Under known quota telemetry, light rows routed or balanced to TRAE prefer bucket-free GPT-5.6-Terra, then GPT-5.5,
-  then DeepSeek-V4.1-Flash, unless a hard-tier rule applies.
+- **Cheap rows:** personal ChatGPT uses Luna for lookups and extraction, Terra for prose drafts. TTADK light rows
+  start on GPT-5.6-Terra, then GPT-5.5, with 6.1-Sol medium as the failure escalation (test-environment `build-run`
+  is light too; a production release keeps Sol medium). Under known quota telemetry, light rows routed or balanced to
+  TRAE prefer bucket-free GPT-5.6-Terra, then GPT-5.5, then DeepSeek-V4.1-Flash, unless a hard-tier rule applies.
   The Claude alternatives are Haiku and Sonnet.
 - **Escalation order:** effort before model, and a vendor switch on a stalled debug for different blind spots. Fable
   and Astra come last and always need the user's OK.
@@ -172,7 +173,9 @@ candidate that passes reserve and congestion: normal uses 6.1-Sol → 5.6-Sol �
 uses 5.6-Terra → 5.5 → DeepSeek-Flash. Hard work uses only 6.1-Sol → Astra; if neither passes, it stays on TTADK.
 The candidate must also be listed, unpaused and allowed for the task. Without projected depletion, retain the
 light/low-priority and earlier-TRAE-expiry triggers. Explicit later Astra/other-family quality rungs retain their
-model so balancing does not downgrade an escalation.
+model so balancing does not downgrade an escalation. A light first rung transferred from TTADK Terra/5.5 walks the
+full TRAE light list, so a paused or congested TRAE Terra falls through to 5.5/Flash instead of blocking the transfer;
+retry rungs are never walked sideways.
 
 Every considered transfer includes structured `balance` factors in the route log, including tier and per-candidate
 rejection reasons, quota shares, congestion and load source. A transfer adds a `balanced to TRAE:` why line; a rejected

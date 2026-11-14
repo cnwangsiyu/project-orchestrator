@@ -118,7 +118,7 @@ const CASES = [
   ['quiet', ['docs'], 'claude sonnet medium', '!review'],
   // TTADK preferred when healthy (user, 2026-11-07); no quota notches on it; fallback via --exclude-account or ill health.
   ['ttFresh', ['implement'], 'codex gpt-6.1-sol high @ttadk', 'retry it once'],
-  ['ttFresh', ['lookup'], 'codex gpt-6.1-sol medium @ttadk'],
+  ['ttFresh', ['lookup'], 'codex gpt-5.6-terra medium @ttadk'], // light row: TTADK's light list starts at 5.6-Terra
   // Everything TTADK Sol can handle goes there first (user, 2026-11-07), Claude-strength rows included.
   ['ttFresh', ['docs'], 'codex gpt-6.1-sol high @ttadk'], // judgment rows start at high on TTADK (free)
   ['ttFresh', ['design'], 'codex gpt-6.1-sol xhigh @ttadk'], // the higher of Opus high and its Sol alternative (xhigh)
@@ -181,7 +181,7 @@ const CASES = [
   ['traeBrowserB', ['implement'], 'codex gpt-6.1-sol high @trae'],
   ['ttAndTrae', ['implement', '--exclude-account', 'ttadk'], 'codex gpt-6.1-sol high @trae'],
   ['ttAndTrae', ['implement', '--exclude-account', 'ttadk,trae'], 'codex gpt-6.1-sol high @main'],
-  ['ttChatOut', ['lookup'], 'codex gpt-6.1-sol medium @ttadk'],
+  ['ttChatOut', ['lookup'], 'codex gpt-5.6-terra medium @ttadk'], // light row: light list, not Sol
   ['ttChatOut', ['image-gen'], 'DEFER'],
   // Browser work: TTADK Codex when it is browser-ready, else Claude.
   ['ttFresh', ['browser'], 'codex gpt-6.1-sol medium @ttadk', 'Chrome must be running'],
@@ -210,8 +210,10 @@ const CASES = [
   ['ttClaudeOver', ['research'], 'codex gpt-6.1-sol medium @main'],
   ['ttFresh', ['image-read'], 'codex gpt-6.1-sol high @ttadk', 'no web search'],
   // TTADK ladders never step back to a weaker Codex model or effort.
-  ['ttFresh', ['lookup', '--failures', '2'], 'codex gpt-6.1-sol xhigh @ttadk'], // cheap rows climb to xhigh, not max
-  ['ttFresh', ['lookup', '--failures', '3'], 'claude sonnet medium'],
+  // A light first rung (5.6-Terra) is rung 0, so the Sol escalation starts at medium on failure 1.
+  ['ttFresh', ['lookup', '--failures', '2'], 'codex gpt-6.1-sol high @ttadk'], // cheap rows climb to xhigh, not max
+  ['ttFresh', ['lookup', '--failures', '3'], 'codex gpt-6.1-sol xhigh @ttadk'],
+  ['ttFresh', ['lookup', '--failures', '4'], 'claude sonnet medium'],
   ['ttChatOut', ['debug', '--impact', 'service', '--failures', '1'], 'codex gpt-6.1-sol max @ttadk'],
   ['ttChatOut', ['debug', '--impact', 'service', '--failures', '2'], 'claude opus xhigh'],
   ['ttChatOut', ['debug', '--impact', 'service', '--failures', '3'], 'claude fable high'],
@@ -224,7 +226,7 @@ const CASES = [
   ['ttFresh', ['debug', '--impact', 'service', '--auto-check', '--failures', '1'], 'codex gpt-6.1-sol max @ttadk'],
   ['ttFresh', ['implement', '--impact', 'service', '--stakes', 'high'], 'codex gpt-6.1-sol xhigh @ttadk'],
   ['ttFresh', ['implement', '--impact', 'service', '--stakes', 'high', '--failures', '1'], 'codex gpt-6.1-sol max @ttadk'],
-  ['ttFresh', ['lookup', '--stakes', 'low'], 'codex gpt-6.1-sol medium @ttadk'],
+  ['ttFresh', ['lookup', '--stakes', 'low'], 'codex gpt-5.6-terra medium @ttadk'], // low stakes stays light
   // A Codex-written change is reviewed by Claude first.
   ['ttFresh', ['review', '--author', 'codex'], 'codex gpt-6.1-sol xhigh @ttadk', 'second TTADK reviewer'],
   ['ttKimi', ['review', '--author', 'codex'], 'codex gpt-6.1-sol xhigh @ttadk', 'Kimi-K3, a different model family'],
@@ -676,7 +678,8 @@ for (const [sc, args] of ERRORS) {
     [hasNote('traeFull', ['implement', '--failures', '5'], /Astra on TRAE queues TRAE-wide/), true],
     // A ChatGPT-account Astra still asks first (5x Sol usage).
     [o('ttFresh', ['science', '--impact', 'service', '--failures', '2']).needsUserOK.includes('Astra (5x Sol usage)'), true],
-    [pk('traeFull', ['lookup', '--failures', '3']), 'deepseek-v4.1-flash high @trae'],
+    // A light lookup starts on TRAE's light list (DeepSeek) and escalates to Sol; the third retry is Sol xhigh.
+    [pk('traeFull', ['lookup', '--failures', '3']), 'gpt-6.1-sol xhigh @trae'],
     // GPT paused on TRAE: the fallbacks in order, no personal-quota question, then Claude.
     [pk('traeGptOut', ['implement']), 'deepseek-v4.1-flash high @trae'],
     [pk('traeGptOut', ['implement', '--failures', '1']), 'gemini-3.1-pro-preview high @trae'],
@@ -1025,7 +1028,9 @@ for (const [sc, args] of ERRORS) {
     ['quotaBoth', ['extract'], 'deepseek-v4.1-flash'],
     ['quotaBoth', ['draft'], 'deepseek-v4.1-flash'],
     ['quotaBoth', ['lookup', '--stakes', 'high'], 'deepseek-v4.1-flash'],
-    ['quotaBoth', ['lookup', '--failures', '1'], 'sonnet'],
+    // Light lookup (DeepSeek) escalates to Sol medium; Sol's bucket is depleted, so the comparable GPT with quota
+    // (5.6-Sol) takes the escalation — company quota, not personal Sonnet and not another light model.
+    ['quotaBoth', ['lookup', '--failures', '1'], 'gpt-5.6-sol'],
     ['quotaBoth', ['build-run'], 'gpt-5.6-sol'],
     ['quotaMissing', ['implement'], 'gpt-6.1-sol'],
     ['quotaMissingModel', ['implement'], 'gpt-6.1-sol'],
@@ -1313,16 +1318,18 @@ for (const [sc, args] of ERRORS) {
     [{ [SOL]: bucket(true), [ASTRA]: bucket(true) }, ['analysis', '--exclude-model', SOL], FLASH, 2],
     [active, ['analysis'], FLASH, 2],
     [active, ['analysis', '--exclude-model', FLASH], SOL, 3],
-    [{ ...active, [FLASH]: bucket() }, ['analysis'], SOL, 3],
-    [{ ...active, [FLASH]: { used: null, limit: null, remaining: null, depleted: false, resetsAt: null }, [PRO]: bucket() }, ['analysis'], SOL, 3],
-    [{ ...active, [FLASH]: bucket(), [PRO]: bucket() }, ['analysis'], SOL, 3],
+    // Light background work starts on the light list even when its bucket is known/bucketed or quota is unknown; it
+    // does not detour to Sol first (the difficulty policy makes ordinary background analysis a light row).
+    [{ ...active, [FLASH]: bucket() }, ['analysis'], FLASH, 3],
+    [{ ...active, [FLASH]: { used: null, limit: null, remaining: null, depleted: false, resetsAt: null }, [PRO]: bucket() }, ['analysis'], FLASH, 3],
+    [{ ...active, [FLASH]: bucket(), [PRO]: bucket() }, ['analysis'], FLASH, 3],
     [active, ['analysis', '--exclude-model', 'deepseek'], SOL, 3],
     [active, ['review-high'], SOL, 3],
     [active, ['review', '--impact', 'release'], SOL, 3],
     [active, ['second-opinion', '--against', 'claude', '--stakes', 'high'], SOL, 3],
-    [null, ['analysis'], SOL, 3],
-    [{}, ['analysis'], SOL, 3],
-    [undefined, ['analysis'], SOL, 3],
+    [null, ['analysis'], FLASH, 3],
+    [{}, ['analysis'], FLASH, 3],
+    [undefined, ['analysis'], FLASH, 3],
     [{ [SOL]: bucket(true), [ASTRA]: bucket(true) }, ['analysis', '--security'], FLASH, 2],
     [{ ...active, [FLASH]: bucket(), [PRO]: bucket() }, ['analysis', '--security'], FLASH, 3],
     [null, ['analysis', '--security'], FLASH, 3],
@@ -1336,8 +1343,8 @@ for (const [sc, args] of ERRORS) {
     [null, ['image-read', '--security'], SEED, 3],
     [active, ['image-read', '--exclude-model', SEED], SOL, 3],
     [{ ...active, [SOL]: expired(true) }, ['analysis'], FLASH, 2],
-    [{ [SOL]: expired(true), [ASTRA]: expired(true) }, ['analysis'], SOL, 3],
-    [{ ...active, [FLASH]: expired(), [PRO]: bucket() }, ['analysis'], SOL, 3],
+    [{ [SOL]: expired(true), [ASTRA]: expired(true) }, ['analysis'], FLASH, 3],
+    [{ ...active, [FLASH]: expired(), [PRO]: bucket() }, ['analysis'], FLASH, 3],
   ];
   try {
     for (const [daily, args, model, step, models = ids] of cases) {
@@ -1438,9 +1445,10 @@ for (const [sc, args] of ERRORS) {
       assert.ok(o.needsUserOK.some((n) => /^adversarial second reviewer:/.test(n)));
     }
     for (const daily of [null, {}, { [SOL]: null }, { [SOL]: { ...bucket(), resetsAt: now - 1 } }]) {
-      assert.equal(r(['analysis', '--background'], { daily }).pick.model, SOL);
+      // Light background work starts on the light list even when quota is unknown: no evidence to prefer Sol's bucket.
+      assert.equal(r(['analysis', '--background'], { daily }).pick.model, TERRA56);
       assert.equal(r(['lookup'], { daily }).pick.account, 'ttadk');
-      assert.equal(r(['lookup'], { daily, company: false }).pick.model, SOL);
+      assert.equal(r(['lookup'], { daily, company: false }).pick.model, TERRA56);
     }
     // Non-cheap foreground work and vision/capability routes are unchanged.
     assert.equal(r(['analysis', '--stakes', 'low']).pick.model, TERRA56);
@@ -1450,8 +1458,10 @@ for (const [sc, args] of ERRORS) {
     assert.equal(r(['image-read'], { company: false, daily: { ...active, [SOL]: bucket(true) } }).pick.model, ASTRA);
     for (const args of [['build-run', '--background'], ['browser', '--background'], ['lookup', '--shared-lock'], ['lookup', '--background', '--device-lease']])
       assert.equal(r(args).pick.account, 'ttadk');
-    // Astra escalation and the review count/account survive the new preferences.
-    assert.equal(r(['implement', '--background', '--failures', '5'], { company: false }).pick.model, ASTRA);
+    // Astra escalation and the review count/account survive the new preferences. A light row first walks its light
+    // list (Terra, 5.5, DeepSeek), then Sol's effort notches, and only then Astra — never sideways to a light model.
+    assert.equal(r(['implement', '--background', '--failures', '5'], { company: false }).pick.model, SOL);
+    assert.equal(r(['implement', '--background', '--failures', '6'], { company: false }).pick.model, ASTRA);
     const baselineReview = r(['review', '--author', 'codex'], { models: ids.filter((id) => ![GPT55, TERRA56].includes(id)) });
     const review = r(['review', '--author', 'codex']);
     assert.deepEqual(review.pick, baselineReview.pick); assert.deepEqual(review.secondOpinion, baselineReview.secondOpinion);
@@ -1489,7 +1499,9 @@ for (const [sc, args] of ERRORS) {
     const repro = r(['lookup', '--failures', '3']);
     assert.equal(repro.pick.vendor, 'claude'); assert.equal(repro.pick.model, 'sonnet'); assert.ok(gated(repro));
     assert.ok(!gated(r(['lookup']))); assert.ok(!gated(r(['lookup', '--failures', '3', '--urgent'])));
-    for (const [model, failures] of [[GPT55, 3], [TERRA56, 3], [SOL, 3], [ASTRA, 1], [SOL56, 1]]) {
+    // Company GPTs keep their effort rungs before any personal fall-through; a light row whose account only lists a
+    // normal-tier company model still walks that model's rungs first (never sideways to another light model).
+    for (const [model, failures] of [[GPT55, 3], [TERRA56, 3], [SOL, 3], [ASTRA, 1], [SOL56, 3]]) {
       const o = r(['lookup', '--failures', String(failures)], { models: [model] });
       assert.ok(o.pick); assert.ok(o.pick.vendor === 'claude' || o.pick.account === 'main'); assert.ok(gated(o), model);
     }
@@ -1504,7 +1516,10 @@ for (const [sc, args] of ERRORS) {
     assert.ok(gated(r(['lookup', '--failures', '3'], { models: [SOL], daily: depleted })));
     assert.ok(!gated(r(['lookup'], { models: [SOL], daily: depleted }))); // accepted depleted company pick stays queued
     const allGPTs = [SOL, ASTRA, SOL56, GPT55, TERRA56];
-    assert.ok(gated(r(['lookup', '--failures', '3'], { models: allGPTs, daily: depleted })));
+    // A light row keeps walking its company ladder (light picks, then Sol notches) while rungs remain, so a depleted
+    // rung stays queued on the company account instead of spending personal quota early; the last rung still gates.
+    assert.ok(!gated(r(['lookup', '--failures', '3'], { models: allGPTs, daily: depleted })));
+    assert.ok(gated(r(['lookup', '--failures', '5'], { models: allGPTs, daily: depleted })));
     assert.ok(gated(r(['lookup', '--exclude-model', 'gpt'], { models: allGPTs })));
     assert.ok(!gated(r(['lookup', '--failures', '1'], { company: true }))); // healthy TTADK still handles the rung
     for (const args of [['image-gen'], ['claude-tools'], ['browser'], ['computer-use']])
@@ -1536,10 +1551,11 @@ for (const [sc, args] of ERRORS) {
       if (hard) assert.ok(r([...args, '--background']).deferred, 'hard work cannot use GPT-5.5');
     }
     // A future reset cannot make an old or missing reading current; state-cache checkedAt is not the quota sample.
+    // With no current bucket reading, a light row starts on the light list (no evidence to prefer Sol's bucket).
     const models = [SOL, ASTRA, SOL56, GPT55, TERRA56];
     for (const sampledAt of [null, now - 31 * 60000, now - 48 * h, now + h]) {
-      assert.equal(r(['analysis', '--background'], { models, sampledAt }).pick.model, SOL);
-      assert.equal(r(['lookup'], { models, sampledAt }).pick.model, SOL);
+      assert.equal(r(['analysis', '--background'], { models, sampledAt }).pick.model, TERRA56);
+      assert.equal(r(['lookup'], { models, sampledAt }).pick.model, TERRA56);
       assert.equal(r(['lookup'], { models, sampledAt, company: true }).pick.account, 'ttadk');
       assert.equal(r(['analysis'], { models, sampledAt, daily: { ...active, [SOL]: bucket(true) } }).pick.model, SOL);
     }
