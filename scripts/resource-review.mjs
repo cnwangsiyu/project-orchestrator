@@ -11,14 +11,22 @@ import { resourceUtilisation, utilisationLines } from './lib/resource-utilisatio
 const finite = (x) => typeof x === 'number' && Number.isFinite(x);
 const ownerKey = (o) => o?.project ? `${o.project}/${o.task ?? '(project only)'}` : '(unknown)';
 // Advisory remote-entry check: a script shared with CI/remote deploys must stay unthrottled. Local res locks and verify
-// throttles belong in a local-only wrapper. Matches markers, never the file content in the output.
-const REMOTE_ENTRY_MARKER = /\b(?:github_actions|gitlab_ci|jenkins|circleci|buildkite|ci|cd|scm|bits|tce|ppe|pipeline|remote[\s-]+build|deploy|release)\b/i;
+// throttles belong in a local-only wrapper. Matches markers, never the file content in the output. Only a specific
+// remote/CI signal counts: bare `cd`, bare `ci` and generic `release` wording are ordinary shell/script text; matching
+// them used to flag any local script that merely changed directory or mentioned a release build next to heavy-build.sh.
+const REMOTE_ENTRY_MARKER = new RegExp([
+  '\\b(?:github_actions|gitlab_ci|jenkins|circleci|buildkite)\\b',
+  '\\bci\\b\\s*[:=]', '\\$\\{?ci\\}?\\b', '\\.github/workflows\\b', '\\.gitlab-ci\\b', '\\bjenkinsfile\\b',
+  '\\b(?:scm|bits|tce|ppe)\\b', '\\bpipeline\\b', '\\bremote[\\s-]+build\\b', '\\bdeploy\\b',
+].join('|'), 'i');
+// A workflow/CI config file is itself a remote entry even when its body only runs the build script.
+const REMOTE_ENTRY_PATH = /(?:\.github[\\/]workflows[\\/]|\.gitlab-ci|(?:^|[\\/])jenkinsfile$)/i;
 const LOCAL_THROTTLE = /(?:\bres\s+(?:wait|take|heavy-check)\b|\bverify-throttle\b|\bheavy-build\.sh\b|\b--shared-lock\b)/i;
 export function reviewRemoteEntryScripts(entries) {
   const findings = [];
   for (const entry of entries ?? []) {
     if (!entry || typeof entry.path !== 'string' || typeof entry.text !== 'string') continue;
-    const remote = REMOTE_ENTRY_MARKER.test(entry.text), throttle = LOCAL_THROTTLE.test(entry.text);
+    const remote = REMOTE_ENTRY_MARKER.test(entry.text) || REMOTE_ENTRY_PATH.test(entry.path), throttle = LOCAL_THROTTLE.test(entry.text);
     if (remote && throttle) findings.push({ path: entry.path,
       evidence: 'mentions a remote/CI entry and also takes a local lock or verify throttle; keep the shared entry unthrottled and move local locks into a local-only wrapper (advisory)' });
   }

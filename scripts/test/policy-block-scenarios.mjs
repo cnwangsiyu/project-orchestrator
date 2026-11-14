@@ -5,12 +5,15 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { isPolicyBlock, policyBlockRecord, appendPolicyBlock, POLICY_BLOCK_RE, policyBlockAction } from '../lib/policy-block.mjs';
 import { noteFailure, notePolicyRestriction, readPoolPauses } from '../lib/trae-health.mjs';
 
 let fail = 0;
 const check = (label, fn) => { try { fn(); console.log(`ok   ${label}`); } catch (e) { fail++; console.log(`FAIL ${label}: ${e.message}`); } };
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'policy-block-test-'));
+const scripts = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const turn = (status, error) => ({ status, error });
 
 check('classifies codexErrorInfo=cyberPolicy and the vendor message, only on failed turns', () => {
@@ -78,6 +81,62 @@ check('the policy restriction matches the 983 record and scopes to the model fam
   const noModelHome = path.join(tmp, 'nomodel'); fs.mkdirSync(noModelHome);
   assert.equal(notePolicyRestriction(noModelHome, 'cyberPolicy', t, null), null);
   assert.equal(fs.existsSync(path.join(noModelHome, 'worker-health.json')), false);
+});
+
+check('real codex-worker report path finishes policy blocks with and without --account', () => {
+  const transport = path.join(tmp, 'policy-transport.mjs');
+  fs.writeFileSync(transport, `
+globalThis.WebSocket = class {
+  constructor() { setImmediate(() => this.onopen()); }
+  close() {}
+  send(raw) {
+    const message = JSON.parse(raw);
+    if (message.id == null) return;
+    setImmediate(() => {
+      const result = message.method === 'thread/read'
+        ? {thread:{turns:[{id:'blocked-turn',status:'inProgress'}]}} : {};
+      this.onmessage({data:JSON.stringify({id:message.id,result})});
+      if (message.method === 'thread/read' && !this.completed) {
+        this.completed = true;
+        setTimeout(() => this.onmessage({data:JSON.stringify({method:'turn/completed',params:{
+          threadId:'fixture',turnId:'blocked-turn',turn:{id:'blocked-turn',status:'failed',error:{codexErrorInfo:'cyberPolicy'}}
+        }})}), 10);
+      }
+    });
+  }
+};
+`);
+  const profiles = path.join(tmp, 'worker-accounts.json');
+  const traeHome = path.join(tmp, 'worker-trae'); fs.mkdirSync(traeHome);
+  fs.writeFileSync(path.join(traeHome, 'thread-models.json'), JSON.stringify({ fixture: 'GPT-6.1-Sol' }));
+  fs.writeFileSync(profiles, JSON.stringify({ trae: { kind: 'trae', home: traeHome, hub: 'ws://127.0.0.1:1' } }));
+  const worker = path.join(scripts, 'codex-worker.mjs');
+  const runWorker = (args, log) => spawnSync(process.execPath, ['--import', transport, worker, ...args, 'wait', '--thread', 'fixture'], {
+    encoding: 'utf8', timeout: 60000, env: { ...process.env, CODEX_ACCOUNTS: profiles, CODEX_HOME: path.join(tmp, 'worker-main'),
+      CODEX_HUB: 'ws://127.0.0.1:1', ROUTE_LOG_FILE: log },
+  });
+  const withoutAccountLog = path.join(tmp, 'without-account.jsonl');
+  const withoutAccount = runWorker([], withoutAccountLog);
+  assert.equal(withoutAccount.error, undefined);
+  assert.equal(withoutAccount.status, 1, withoutAccount.stderr || withoutAccount.stdout);
+  assert.match(withoutAccount.stdout, /turn failed error=.*cyberPolicy/);
+  assert.match(withoutAccount.stdout, /security-policy-block: this account.*Do not retry this thread.*--adversarial/);
+  assert.doesNotMatch(`${withoutAccount.stdout}${withoutAccount.stderr}`, /ReferenceError|TypeError|unhandled/i);
+  const withoutRows = fs.readFileSync(withoutAccountLog, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(withoutRows.length, 1); assert.equal(withoutRows[0].kind, 'policy-block');
+  assert.equal(withoutRows[0].account, null); assert.equal(withoutRows[0].model, null);
+
+  const withAccountLog = path.join(tmp, 'with-account.jsonl');
+  const withAccount = runWorker(['--account', 'trae'], withAccountLog);
+  assert.equal(withAccount.error, undefined);
+  assert.equal(withAccount.status, 1, withAccount.stderr || withAccount.stdout);
+  assert.match(withAccount.stdout, /security-policy-block: trae \/ GPT-6\.1-Sol/);
+  assert.match(withAccount.stdout, /trae-restricted: TRAE's gpt models are restricted until/);
+  assert.doesNotMatch(`${withAccount.stdout}${withAccount.stderr}`, /ReferenceError|TypeError|unhandled/i);
+  const withRows = fs.readFileSync(withAccountLog, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(withRows.length, 1); assert.equal(withRows[0].vendor, 'trae'); assert.equal(withRows[0].model, 'GPT-6.1-Sol');
+  const health = JSON.parse(fs.readFileSync(path.join(traeHome, 'worker-health.json'), 'utf8'));
+  assert.equal(health.pools.gpt.restricted, true);
 });
 
 fs.rmSync(tmp, { recursive: true, force: true });

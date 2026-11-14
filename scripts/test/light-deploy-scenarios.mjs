@@ -80,6 +80,14 @@ try {
   assert.equal(sideways.pick.model, SOL56, 'normal-tier fallback, not a light model');
   assert.ok(![TERRA56, GPT55].includes(sideways.pick.model));
 
+  // A TTADK light failure has one explicit retry: Sol medium. Even when TRAE's Sol/Sol56 buckets are depleted and
+  // its Terra bucket is free, balancing must not walk the normal tier sideways and turn that retry back into Terra.
+  const depletedSolRungs = { ...active, [SOL]: bucket(true), [SOL56]: bucket(true) };
+  const pinnedRetry = run(['lookup', '--failures', '1'], { company: true,
+    traeModels: [SOL, SOL56, TERRA56, GPT55, FLASH], daily: depletedSolRungs, historyUsed: 50 });
+  assert.deepEqual([pinnedRetry.pick.account, pinnedRetry.pick.model, pinnedRetry.pick.effort], ['ttadk', SOL, 'medium']);
+  assert.ok(!pinnedRetry.why.some((line) => line.includes('balanced to TRAE')));
+
   // Balancing a TTADK light first rung walks the full TRAE light list: paused TRAE Terra falls through to 5.5.
   // (lookup is lane-eligible; build-run keeps its no-transfer preference.)
   const paused = path.join(tmp, 'paused'); fs.mkdirSync(paused);
@@ -100,6 +108,18 @@ try {
   const remote = run(['build-run', '--impact', 'release', '--no-local-build']);
   assert.ok(remote.notes.some((n) => n.startsWith('remote/CI build (--no-local-build)')));
   assert.ok(!remote.notes.some((n) => n.startsWith('build brief: full-package builds must use')));
+
+  // --env test suppresses heavy locks only for the procedural build-run category. Local compile categories retain the
+  // heavy-build brief; --no-local-build is the explicit way to mark those runs remote.
+  for (const args of [['implement', '--impact', 'service'], ['implement-hard', '--impact', 'service'],
+    ['debug', '--impact', 'service'], ['ui-browser']]) {
+    const localTest = run([...args, '--env', 'test']);
+    assert.ok(localTest.notes.some((n) => n.startsWith('build brief: full-package builds must use')), args.join(' '));
+    assert.ok(!localTest.notes.some((n) => n.startsWith('test-environment run (--env test)')), args.join(' '));
+    const remoteTest = run([...args, '--env', 'test', '--no-local-build']);
+    assert.ok(remoteTest.notes.some((n) => n.startsWith('remote/CI build (--no-local-build)')), args.join(' '));
+    assert.ok(!remoteTest.notes.some((n) => n.startsWith('build brief: full-package builds must use')), args.join(' '));
+  }
 
   // A local production build keeps the heavy-build brief.
   assert.ok(prod.notes.some((n) => n.startsWith('build brief: full-package builds must use')));

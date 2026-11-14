@@ -92,8 +92,10 @@ const TABLE = {
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 const floorOf = (m) => (m.model === SOL || m.model === ASTRA || m.model === TERRA ? 'medium' : 'low'); // Sol low is weak at code
 const notch = (m, d, cap = 'xhigh') => {
+  // A notch is a different rung, so an escalation pin on the source rung does not carry over.
+  const { pinned, ...rest } = m;
   const i = EFFORTS.indexOf(m.effort), lo = EFFORTS.indexOf(floorOf(m)), hi = Math.max(EFFORTS.indexOf(cap), i);
-  return { ...m, effort: EFFORTS[Math.min(hi, Math.max(lo, i + d))] };
+  return { ...rest, effort: EFFORTS[Math.min(hi, Math.max(lo, i + d))] };
 };
 const label = (m) => `${m.vendor === 'claude' ? `Claude ${m.model}` : isAlt(m) ? m.model : `Codex ${m.model}`} ${m.effort}`;
 
@@ -269,12 +271,15 @@ const codexOut = chatgptOut && !ttModelsOK; // An account with only excluded or 
 // reviewer) -> Claude Opus, which always asks for personal quota. The second reviewer comes from the other non-GPT
 // family (Kimi <-> DeepSeek); when only one family is available, say so and ask (Claude second, or one reviewer).
 const ADV_DEEPSEEK = 'deepseek-v4.1-flash';
+const adversarialModelFits = (model, account) => taskFits(account) && cat !== 'image-gen'
+  && (cat !== 'image-read' || ALTS.some((a) => a.model === model && a.vision));
 const advCompany = (model) => [QX.ttadk, QX.trae].find((a) => a?.usable && !excluded.has(a.name)
-  && a.models.includes(model) && !modelExcluded(model, a)) ?? null;
+  && a.models.includes(model) && !modelExcluded(model, a) && adversarialModelFits(model, a)) ?? null;
 // The user's order names Kimi-K3 on TTADK only; DeepSeek-V4.1-Flash may run on TTADK or TRAE.
 const advKimi = () => {
   const a = QX.ttadk;
-  return a?.usable && !excluded.has(a.name) && a.models.includes(KIMI) && !modelExcluded(KIMI, a) ? X(KIMI, 'high') : null;
+  return a?.usable && !excluded.has(a.name) && a.models.includes(KIMI) && !modelExcluded(KIMI, a)
+    && adversarialModelFits(KIMI, a) ? X(KIMI, 'high') : null;
 };
 const advDeepseek = () => (advCompany(ADV_DEEPSEEK) ? X(ADV_DEEPSEEK, 'high') : null);
 const advClaude = () => C('opus', ['review', 'review-high'].includes(cat) ? 'xhigh' : 'high');
@@ -359,7 +364,7 @@ if (ttCapable) {
   // A light first rung that isn't Sol escalates to Sol medium before the usual Sol ladder: the retry costs more, it
   // doesn't try a second light model sideways. Only when the company account can actually run Sol — otherwise the
   // notches below keep the light pick's own model and a higher effort is the next rung, never an unlisted Sol.
-  if (lightPick && lightPick.model !== SOL && ttHas(SOL)) rungs.push(X(SOL, 'medium'));
+  if (lightPick && lightPick.model !== SOL && ttHas(SOL)) rungs.push({ ...X(SOL, 'medium'), pinned: true });
   while (ei(rungs.at(-1).effort) < ei('xhigh')) rungs.push(notch(rungs.at(-1), +1));
   // After Sol xhigh has fallen short, a different model family before Sol max (its misses rarely overlap Sol's: Kimi,
   // 2026-11-07; DeepSeek, 2026-11-10), and the second fallback after Sol max — all before personal quota.
@@ -521,7 +526,7 @@ const resolveRung = (raw, index) => {
     // A light first rung (TTADK Terra/5.5) walks the light tier too, so a paused/busy TRAE Terra doesn't block the
     // balance transfer while TRAE 5.5 or DeepSeek would pass. Only index 0: an escalation rung is never walked sideways.
     const lightStart = index === 0 && taskTier === 'light' && TTADK_LIGHT.includes(x.model);
-    const candidates = x.model === SOL || lightStart ? COMPANY_TIERS[taskTier] : [x.model];
+    const candidates = !x.pinned && (x.model === SOL || lightStart) ? COMPANY_TIERS[taskTier] : [x.model];
     const checked = [];
     for (const model of candidates) {
       factors = balanceFactors({ ttadk: QX.ttadk, trae: QX.trae, model, category: cat, stakes, impact, tier: taskTier, allowBucketFree: free.includes(model) });
@@ -751,7 +756,7 @@ else if (m && cat === 'build-run') notes.push('test-environment build-run (PPE/s
 if (m && writes) notes.push('brief: include the safety clauses — never overwrite, delete or move files outside the task\'s scope (user files, uncommitted changes, shared headers/configs); restore anything touched by mistake byte-for-byte and report it');
 if (m && ['build-run', 'implement', 'implement-hard', 'debug', 'ui-browser', 'computer-use'].includes(cat)) notes.push('brief: on devices and simulators, back up app data before any destructive step (reinstall with --remove-existing-content, wiping app containers or Documents, erasing simulators), or ask first');
 if (m && ['build-run', 'ui-browser', 'computer-use'].includes(cat)) notes.push('before builds/device runs: inspect finished-task process trees, but cleanup requires references/resources.md\'s guarded executor, continuous idle evidence, live-session/lease protections and every orchestrator\'s release; PPID=1 or age alone is not permission to kill. Device lease: at most 2 h, then return the device and report; brief preflight: device connected, unlocked, app data backed up');
-if (m && (opts['no-local-build'] || env === 'test') && ['build-run', 'implement', 'implement-hard', 'debug', 'ui-browser'].includes(cat)) notes.push(opts['no-local-build']
+if (m && (opts['no-local-build'] || (env === 'test' && cat === 'build-run')) && ['build-run', 'implement', 'implement-hard', 'debug', 'ui-browser'].includes(cat)) notes.push(opts['no-local-build']
   ? 'remote/CI build (--no-local-build): no local heavy-build/lane lock and no local verify throttle — do not take res locks or pass --shared-lock for this run; the shared remote entry script stays unthrottled and only local-only wrappers throttle'
   : 'test-environment run (--env test): no heavy-build/lane lock and no local verify throttle — this task does not compile locally; do not take res locks or pass --shared-lock for a PPE/staging/TCE/BITS/SCM deploy or smoke check, and shared remote/CI entry scripts stay unthrottled');
 else if (m && ['build-run', 'implement', 'implement-hard', 'debug', 'ui-browser'].includes(cat)) notes.push('build brief: full-package builds must use scripts/heavy-build.sh or equivalent res take/return per references/res-contract.md: heavy-build first, then a lane; reverse return on every exit. Two normal lanes; v1.3 adds lane 3 only after reviewed owner switch, at load1m <=8 AND available memory >=32 GiB at take time (2-3 lanes with load). Wrapper tries lanes 1/2/3, HEAVY_BUILD_LANE pins one. Normal gate remains min(20, 12 + 8 * other lanes), memory >=16 GiB; STALE and caller-owned locks excluded, lane-3 holders counted. Bounded waits and authoritative heavy-check limit/lanes_held, appended lane3=OPEN|CLOSED; OPEN is not FREE. UNKNOWN blocks admission, timeout means report/queue, never bypass. Other heavy tasks take one lane. Heavy-build/lane locks are only for genuine local heavy compute: PPE/staging/TCE/BITS/SCM/remote pipeline deploys and CI runs never take one, never pass --shared-lock, and shared remote/CI entry scripts stay unthrottled — local lock/verify throttling lives only in local-only wrappers (--no-local-build when this run is remote). Compile 6/link 1, Xcode -jobs 6, Gradle 2 workers; fixed per-base incremental builds, one cold acceptance build, affected fix tests and scoped ccache/Gradle caches (first use cold). Not a model-worker concurrency cap; global-rules owns res, telemetry never reclaims locks/restarts hubs.');

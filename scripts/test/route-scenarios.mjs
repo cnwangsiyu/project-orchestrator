@@ -1575,6 +1575,7 @@ for (const [sc, args] of ERRORS) {
   S.advBoth = { claude: cl(10, 120), codex: [acc('main', 20, 120), kimiTt()] };
   S.advDsOnly = { claude: cl(10, 120), codex: [acc('main', 20, 120), tt({ models: ['gpt-6.1-sol', FLASH] })] };
   S.advTtadkOut = { claude: cl(10, 120), codex: [acc('main', 20, 120), kimiTt(out), dsTrae()] };
+  S.advSearch = { claude: cl(10, 120), codex: [acc('main', 20, 120), kimiTt({ search: true, searchLive: true })] };
   // Kimi is named for TTADK only: a TRAE-listed Kimi must not jump ahead of DeepSeek.
   S.advTraeKimi = { claude: cl(10, 120), codex: [acc('main', 20, 120), tt(out), tr({ models: ['gpt-6.1-sol', KIMI, FLASH], modelIds: {} })] };
   S.advNone = { claude: cl(10, 120), codex: [acc('main', 20, 120), tt(out), tr()] };
@@ -1611,13 +1612,24 @@ for (const [sc, args] of ERRORS) {
     [pick('advBoth', ['implement', '--impact', 'service', '--security']), 'codex gpt-6.1-sol high @ttadk'],
     [pick('advBoth', ['implement', '--impact', 'service', '--adversarial']), 'codex kimi-k3 high @ttadk'],
     [second('advBoth', ['implement', '--impact', 'service', '--adversarial']), `${FLASH} high @ttadk`],
+    // Company adversarial picks must fit the task. Neither approved company family generates or reads images, and a
+    // TTADK account without its search proxy cannot research, so those use the Claude-only adversarial fallback.
+    [pick('advBoth', ['image-gen', '--adversarial']), 'claude opus high @-'],
+    [pick('advBoth', ['image-read', '--adversarial']), 'claude opus high @-'],
+    [pick('advBoth', ['research', '--adversarial']), 'claude opus high @-'],
+    [pick('advBoth', ['claude-tools', '--adversarial']), 'claude opus high @-'],
+    [gated('advBoth', ['image-read', '--adversarial']), true],
+    // The same research task remains on company quota when the selected account really has search capability.
+    [pick('advSearch', ['research', '--adversarial']), 'codex kimi-k3 high @ttadk'],
+    [pick('advTtadkOut', ['research', '--adversarial']), `codex ${FLASH} high @trae`],
     // Background can use the company non-GPT lane; it never falls through to Claude.
     [pick('advBoth', ['review', '--security', '--background']), 'codex kimi-k3 high @ttadk'],
     [pick('advNone', ['review', '--security', '--background']), 'DEFER'],
   ];
   // Never a GPT pick or second reviewer anywhere in the adversarial lane.
   for (const sc of ['advBoth', 'advDsOnly', 'advTtadkOut', 'advTraeKimi', 'advNone']) {
-    for (const args of [['review', '--security'], ['review-high', '--security'], ['second-opinion', '--against', 'codex', '--security'], ['review', '--adversarial']]) {
+    for (const args of [['review', '--security'], ['review-high', '--security'], ['second-opinion', '--against', 'codex', '--security'],
+      ['review', '--adversarial'], ['image-gen', '--adversarial'], ['image-read', '--adversarial'], ['research', '--adversarial']]) {
       const r = o(sc, args);
       for (const p of [r.pick, r.secondOpinion].filter(Boolean)) cases.push([p.model.startsWith('gpt-'), false]);
     }

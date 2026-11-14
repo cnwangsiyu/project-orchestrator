@@ -41,11 +41,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { noteFailure, noteSuccess, rememberThreadModel, threadModel, probeResult, failureKind } from './lib/trae-health.mjs';
+import { noteFailure, noteSuccess, notePolicyRestriction, rememberThreadModel, threadModel, probeResult, failureKind } from './lib/trae-health.mjs';
 import { createQueueRecorder } from './lib/company-load.mjs';
 import { saveQueue, readQueue } from './lib/worker-queue.mjs';
 import { loadDigest, auditLaunch, rulesLog } from './lib/global-rules.mjs';
-import { isPolicyBlock, policyBlockRecord, appendPolicyBlock } from './lib/policy-block.mjs';
+import { isPolicyBlock, policyBlockRecord, appendPolicyBlock, policyBlockAction } from './lib/policy-block.mjs';
 import { runHubForeground, hubListReachable } from './lib/hub-foreground.mjs';
 // What a TRAE pause covers: one model family (route.mjs moves to the next family) or the whole account.
 const pausedWhat = (p) => (p.pool ? `TRAE's ${p.pool} models are paused` : 'TRAE is paused');
@@ -576,7 +576,8 @@ const report = async (threadId, turn, final, usage) => {
   console.log(`turn ${turn.status}${turn.error ? ' error=' + JSON.stringify(turn.error) : ''}`);
   const policyBlock = isPolicyBlock(turn);
   if (policyBlock) {
-    const model = opts.model ?? threadModel(PROF.home, threadId);
+    // Without --account there is no profile home: the block is still printed and logged with model=null.
+    const model = opts.model ?? (PROF?.home ? threadModel(PROF.home, threadId) : null);
     recordPolicyBlock(model, turn.error);
     const action = policyBlockAction(PROF?.kind);
     console.log(`security-policy-block: ${account ?? 'this account'}${model ? ` / ${model}` : ''} — OpenAI cyberPolicy flagged this turn for possible cybersecurity risk. Do not retry this thread or resend the same content to another GPT account; re-route with route.mjs ... --adversarial (company non-GPT models only, never a GPT reviewer). ${action.restrictFamily ? 'Recorded as a TRAE family restriction (like a 983 restriction) for the nightly review.' : 'Recorded for the nightly review; no model or account pause.'}`);
@@ -676,7 +677,10 @@ const follow = (threadId, turnId) => {
     if (m.method === 'item/completed' && p.item?.type === 'agentMessage' && p.item.text) final = p.item.text;
     else if (m.method === 'thread/tokenUsage/updated') usage = p.tokenUsage?.total;
     else if (m.method === 'queue/status' && (p.threadId === threadId || p.turnId === turnId)) queueUpdate(p);
-    else if (m.method === 'turn/completed' && (p.turn?.id ?? p.turnId) === turnId) report(threadId, p.turn ?? { id: turnId, status: 'completed' }, final, usage);
+    else if (m.method === 'turn/completed' && (p.turn?.id ?? p.turnId) === turnId) report(threadId, p.turn ?? { id: turnId, status: 'completed' }, final, usage)
+      // report() is async and this handler cannot await it: an unexpected throw must still end the follower normally
+      // (status 1) instead of leaving it to the 30-minute stall alarm with the policy guidance unprinted.
+      .catch((e) => { console.error(`codex-worker: report failed: ${e?.stack ?? e}`); finish(1); });
   });
 };
 
