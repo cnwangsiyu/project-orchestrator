@@ -831,8 +831,16 @@ for (const [sc, args] of ERRORS) {
     const r = o('ttFresh', [cat]);
     cases.push([hasNote(r, /guarded executor.*continuous idle evidence.*every orchestrator's release/), true],
       [hasNote(r, /at most 3 concurrent heavy builds unless the ledger sets N otherwise/), false],
-      [hasNote(r, /at most 2 h, then return the device and report.*device connected, unlocked, app data backed up/), true]);
+      [hasNote(r, /at most 2 h, then return the device and report.*device connected, unlocked, app data backed up/), true],
+      [hasNote(r, /iphone8, iphone11 and s21.*Allow\/Authorize\/Trust\/OK.*no per-prompt approval or button whitelist/), true],
+      [hasNote(r, /personal iPhone 15 Pro Max \(policy=never\).*device not registered in res/), true],
+      [hasNote(r, /Codex refuses an allowed device prompt.*re-route that step to Claude instead of asking the user to tap it/), true]);
   }
+  const leased = o('ttFresh', ['lookup', '--device-lease']);
+  cases.push([hasNote(leased, /iphone8, iphone11 and s21.*camera, microphone, photos, notifications, local network, tracking, developer trust, USB debugging and install confirmations/), true],
+    [hasNote(leased, /Take\/return through res.*lease <=2 h.*back up app data.*never enter personal-account credentials, passwords or verification codes.*no purchases/), true]);
+  const ordinary = o('ttFresh', ['lookup']);
+  cases.push([hasNote(ordinary, /registered shared test phones iphone8/), false]);
   cases.push([hasNote(o('traeFull', ['implement', '--impact', 'release']), /route\.mjs review --author codex --impact release/), true]);
   const bad = cases.map(([got, want], i) => (got === want ? null : `${i} (${got})`)).filter((i) => i !== null);
   if (bad.length) fail++;

@@ -214,6 +214,14 @@ close (user, 2026-11-04, after a worker overwrote a user header and another wipe
 - "On devices and simulators, back up app data before any destructive step (reinstalling with
   --remove-existing-content, wiping app containers or Documents, erasing a simulator), or ask
   first."
+- "On the registered shared test phones iphone8, iphone11 and s21, freely tap Allow/Authorize/Trust/OK for OUR OWN
+  apps and system dialogs those apps trigger—camera, microphone, photos, notifications, local network, tracking,
+  developer trust, USB debugging and install confirmations—without per-prompt approval or button whitelists. Never
+  operate the personal iPhone 15 Pro Max (`policy=never`) or any device not registered in `res`. Take/return through
+  `res`, lease for at most 2 h and return when done; back up app data before destructive reinstall/wipe/erase; never
+  enter personal-account credentials, passwords or verification codes, and make no purchases. If Codex refuses an
+  allowed device prompt, re-route that step to Claude instead of asking the user to tap it. Browser safety for
+  irreversible web actions is unchanged."
 
 <a id="worker-credential-safety"></a>Every brief, whatever the task, carries these two adjacent credential/signing clauses (the first is the
 user-approved 2026-11-11 rule after a TRAE
@@ -237,9 +245,9 @@ login; the user had to sign in again; the second is the user's 2026-11-13 test-s
   One-shot `codex exec` / `traecli exec` launches must carry both clauses in developer instructions too.
 - **Test signing route** (user, 2026-11-13): pass `--signing`; it forces full access and makes the scoped rule the first
   route note. The brief names the registered manifest/hash and designated identity. Afterwards scan worker logs only,
-  mask any hits, and verify the receipt and keychain re-locking. The resident Claude `vesdk-signer` worker
-  (`~/.claude/orchestrator/_shared/user-signing/SIGNER-CHARTER.md`) remains an optional personal-quota alternative;
-  any routed full-access worker may sign within this scope when its brief says so.
+  mask any hits, and verify the receipt and keychain re-locking. Routed full-access workers are the standard signing
+  path. The resident Claude `vesdk-signer` worker (`~/.claude/orchestrator/_shared/user-signing/SIGNER-CHARTER.md`)
+  is transitional and will be retired after a routed Codex worker signs a real batch; it is not an optional alternative.
 
 **Prevent rework at the brief** (rework retro of 2026-11-06–10, 89 rework chains; user-approved 2026-11-10). Most
 rework came from unchecked premises, "done" proven on the wrong target, one shared rule re-implemented by several
@@ -623,6 +631,11 @@ and take-time notes at `~/.claude/orchestrator/_shared/notes/heavy-build.md`. Us
   quota unused at reset, queue hours and top idleness causes. Read idle hints on every wake as above.
 - Device leases last at most **2 h**, then the worker returns the device and reports results/remaining work. Put the
   preflight in the brief: device connected, unlocked, app data backed up; include the return command and deadline.
+- The registered shared test phones are **iphone8, iphone11 and s21**. They are pre-authorized for ordinary
+  permission/trust/install dialogs from our own apps; the personal iPhone 15 Pro Max (`policy=never`) and every
+  unregistered device are forbidden. This device-dialog authorization does not authorize credentials, verification
+  codes, purchases, destructive operations without backup, or irreversible browser actions. A Codex refusal is
+  re-routed to Claude, never handed to the user as a tap request.
 
 <a id="shared-resources"></a>**Hold shared resources through the shared table, not through another orchestrator.** Devices and
 checkouts that several projects use are listed in `~/.claude/orchestrator/_shared/resources.tsv`,
