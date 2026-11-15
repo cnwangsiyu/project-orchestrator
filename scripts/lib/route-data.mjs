@@ -11,6 +11,7 @@ import { dedupeOutcomes } from './pipeline/outcomes.mjs';
 import { personalBudget } from './pipeline/quota.mjs';
 import { modelLoad } from './company-load.mjs';
 import { readRoutingAccount, readRoutingClaude, traeBrowserReady } from './state.mjs';
+import { routePure } from './pipeline/index.mjs';
 import { modelPreference, policyEffort } from './pipeline/policy.mjs';
 import { readLeases } from './resource-data.mjs';
 import { readRoutingObservations, saveRoutingObservations } from './routing-observations.mjs';
@@ -44,7 +45,7 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
   // A frozen clock or supplied snapshot is an offline replay; never query the
   // host for it. Live decisions refresh each account independently. In particular
   // a cached hub-down reading is checked again even inside the cache TTL.
-  const live = env.ROUTE_NOW === undefined && !env.ROUTE_SNAPSHOT_FILE;
+  const live = !parsed.flags.dry && env.ROUTE_NOW === undefined && !env.ROUTE_SNAPSHOT_FILE;
   if(live) saveRoutingObservations(cachePath,data);
   if (live && !registryInvalid) for (const a of accounts) {
     const p = profiles[a.name], at = a.seenAt ?? data.checkedAt;
@@ -79,6 +80,10 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
   if (live) now=Math.max(now,Date.now()); // refreshed samples precede the live decision
   const rows = lines(routeLog), quotaHistory = lines(env.QUOTA_LOG_FILE || path.join(shared, 'quota-log.jsonl'));
   const outcomes=dedupeOutcomes(rows.filter(r=>r.kind==='outcome'&&r.t<=now));
+  const projectProfiles = read(path.join(root,'references/project-risk-profiles.json'),{});
+  const projectConfig = projectProfiles[parsed.project] ?? {};
+  const cachedAt = data.checkedAt ?? (env.ROUTE_SNAPSHOT_FILE ? read(env.ROUTE_SNAPSHOT_FILE)?.decisionAt : undefined);
+  const cacheAgeMs = nonnegative(cachedAt) && cachedAt <= now ? now - cachedAt : null;
   const flags = parsed.flags, id = flags.name ?? parsed.taskId, role = parsed.role;
   const attempts = [];
   const injectedSnapshot=env.ROUTE_SNAPSHOT_FILE ? read(env.ROUTE_SNAPSHOT_FILE) : null;
@@ -111,13 +116,13 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
     const actual=object(prior)?{...prior,accountId:prior.accountId??prior.account??r.accountId??r.account
       ??(vendor==='claude'||familyOf(prior.modelId??prior.model)==='claude'?'claude':vendor==='codex'?'main':undefined)}:prior;
     attempts.push({...r,id:r.id??`metadata-${attempts.length}`,taskId:r.taskId??id,role:r.role??role,actual,
-      failureKind:r.failureKind??(parsed.failures?'quality':'infra')});
+      failureKind:r.failureKind??(parsed.failures?parsed.failureKind:'infra')});
   };
   if (flags.actual) for (const tuple of flags.actual.split(',')) {
     const m = /^(codex|claude):([\w.-]+):(low|medium|high|xhigh|max)(?:@([\w.-]+))?$/.exec(tuple);
     if (!m) throw Error('--actual takes vendor:model:effort[@account] (comma-separated launch order)');
     addActual({ model: m[2], effort: m[3], account: m[4] ?? null, accountStatus:m[4]?'KNOWN':'UNKNOWN' },
-      { source:'explicit-actual', failureKind: parsed.failures ? 'quality' : 'infra' });
+      { source:'explicit-actual', failureKind: parsed.failures ? parsed.failureKind : 'infra' });
   }
   if (retryHistory && flags['previous-attempt'] && !flags.actual) {
     const dir = path.resolve(flags['task-dir'] ?? '.'), file = path.resolve(dir, flags['previous-attempt']);
@@ -164,21 +169,55 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
         state:'cancelled-no-work',usefulWork:false,cancellationEvidenceId:r.cancellationEvidenceId,
         failureKind:r.reason==='policy-block'?'policy-block':'infra'});
   }
+  if (flags['failure-kind'] && !flags.actual && attempts.length && parsed.autoRerouteDepth === 0) {
+    attempts.at(-1).failureKind = parsed.failureKind;
+    if (parsed.failures && parsed.failureKind === 'tool' && ['completed','succeeded'].includes(attempts.at(-1).state)) attempts.at(-1).state='failed';
+  }
   let retryAssumption = missingTerminalActual ? 'A finished attempt had no confirmed actual tuple; using the next available recorded retry baseline.' : null;
-  if (retryHistory && !attempts.length) {
+  if (retryHistory && !attempts.length && parsed.failureKind !== 'tool') {
     const deviceAccounts=env.ROUTE_SNAPSHOT_FILE?array(injectedSnapshot?.accounts):accounts;
     const a = deviceAccounts.some(a=>['trae','ttadk'].includes(a.kind)) && !['image-gen','claude-tools','computer-use'].includes(parsed.category) ? {kind:'trae'} : {kind:'chatgpt'}, initial = createTaskSpec({...parsed, flags:{...flags,failures:'0'}, failures:0, previousAttempts:[]});
     const model = modelPreference(initial,a)[0], effort = policyEffort(initial,{family:familyOf(model),modelId:model},a,{accounts:[]});
-    addActual({model,effort,account:familyOf(model)==='claude'?'claude':a.kind==='trae'?'assumed-company':'assumed-personal'}, {id:'assumed-first-rung',failureKind:parsed.failures?'quality':'infra',assumed:true});
+    addActual({model,effort,account:familyOf(model)==='claude'?'claude':a.kind==='trae'?'assumed-company':'assumed-personal'}, {id:'assumed-first-rung',failureKind:parsed.failures?parsed.failureKind:'infra',assumed:true});
     retryAssumption = `No actual launch history found; assumed first category ladder rung ${model}/${effort} for --failures ${parsed.failures}.`;
   }
   const writes = parsed.writes || !!flags.signing;
   const sandbox = flags.sandbox ?? (writes ? 'danger-full-access' : parsed.runsTests ? 'workspace-write' : 'read-only');
-  const task = createTaskSpec({ ...parsed, taskId: id, writes, sandbox, sandboxCeiling: 'danger-full-access', previousAttempts: attempts,
+  let task = createTaskSpec({ ...parsed, taskId: id, writes, sandbox, sandboxCeiling: 'danger-full-access', previousAttempts: attempts,
     flags:{...flags,...(flags.cwd?{cwd:path.resolve(flags.cwd)}:{}),...(flags['task-dir']?{'task-dir':path.resolve(flags['task-dir'])}:{})},
-    allowedOrigins: ['browser', 'ui-browser'].includes(parsed.category) ? [...BROWSER_ORIGINS, ...(parsed.category === 'ui-browser' ? ['localhost', '127.0.0.1'] : []), ...parsed.allowedOrigins] : parsed.allowedOrigins,
+    projectProfiles,
+    allowedOrigins: ['browser', 'ui-browser'].includes(parsed.category) ? [...BROWSER_ORIGINS, ...array(projectConfig.browserOrigins), ...(parsed.category === 'ui-browser' ? ['localhost', '127.0.0.1'] : []), ...parsed.allowedOrigins] : parsed.allowedOrigins,
     floor: { profileIds: [], previousAttemptIds: [], relationVersion: VERSION, historyStatus: attempts.length || !parsed.failures ? 'KNOWN' : 'UNKNOWN' } });
-  if (env.ROUTE_SNAPSHOT_FILE) return { task, snapshot: createSnapshot(injectedSnapshot, { now }), data, profiles, routeLog, now, root, retryAssumption };
+  const finish = snapshot => {
+    const unknownToolChannels = attempts.filter(a=>a.failureKind==='tool' && !snapshot.accounts.some(p=>p.id===a.actual?.accountId));
+    if(retryHistory && unknownToolChannels.length && ['browser','ui-browser','computer-use'].includes(task.category)) {
+      const baseline = createTaskSpec({...task,previousAttempts:attempts.filter(a=>!unknownToolChannels.includes(a)),failures:0,
+        flags:{...task.flags,failures:'0'},floor:{...task.floor,historyStatus:'KNOWN'}});
+      const first=routePure(baseline,snapshot), candidate=(first.primary??first.primaryProposal)?.candidate;
+      if(candidate) {
+        const channel=snapshot.accounts.find(p=>p.id===candidate.accountId)?.kind;
+        for(const a of unknownToolChannels) Object.assign(a,{browserChannel:channel,assumedChannel:true});
+        task=createTaskSpec({...task,previousAttempts:attempts});
+        retryAssumption=`Prior actual browser account is unknown; assumed failed ${channel} channel from the cached initial route, preserving the supplied model/effort floor.`;
+      }
+    }
+    if (retryHistory && !attempts.length && parsed.failureKind === 'tool') {
+      const inferred = [];
+      for (let i=0; i<parsed.failures; i++) {
+        const baseline = createTaskSpec({...task, failures:0, previousAttempts:inferred, flags:{...task.flags, failures:'0'},
+          floor:{...task.floor, historyStatus:'KNOWN'}});
+        const plan = routePure(baseline, snapshot), candidate = (plan.primary ?? plan.primaryProposal)?.candidate;
+        if (!candidate) break;
+        inferred.push({id:`assumed-tool-channel-${i}`,taskId:id,role,state:'failed',actualStatus:'KNOWN',assumed:true,
+          actual:{accountId:candidate.accountId,modelId:candidate.modelId,effort:candidate.effort},failureKind:'tool'});
+      }
+      task = createTaskSpec({...task,previousAttempts:inferred,floor:{...task.floor,historyStatus:inferred.length?'KNOWN':'UNKNOWN'}});
+      retryAssumption = `No actual launch history found; assumed ${inferred.length} failed browser channel(s) from the cached initial route for --failures ${parsed.failures}.`;
+    }
+    return {task,snapshot,data,profiles,routeLog,now,root,retryAssumption,cacheAgeMs,refreshRequired:live&&!!flags.fresh,
+      trustedCwd: flags['trusted-cwd'] ? path.resolve(flags['trusted-cwd']) : projectConfig.root ?? projectConfig.projectRoot ?? null};
+  };
+  if (env.ROUTE_SNAPSHOT_FILE) return finish(createSnapshot(injectedSnapshot, { now }));
   const at = data?.checkedAt, globalStamp = (value, sampledAt = at, maxAgeMs = 600000) => ({ status: 'KNOWN', value, sampledAt, receivedAt: now, maxAgeMs, source: 'public-status-cache' });
   const baseCaps = (vision = true) => ({ search: true, browser: vision, 'signed-in-browser': vision, 'desktop-tool': vision, vision, 'image-generation': true, 'claude-tools': true });
   const models = new Map(), normalized = [], lanes = [], health = [];
@@ -253,11 +292,11 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
     resources: { held:false, ownedReturned:true, registeredResources:readLeases(shared).registered,
       signingRegistry:fs.existsSync(path.join(shared,'user-signing/registry.json'))&&fs.existsSync(path.join(shared,'user-signing/identities.json')) },
     dependencies:[], approvals: array(read(env.ROUTE_APPROVAL_FILE || path.join(shared,'route-approvals.json'),[])),
-    projectProfiles:read(path.join(root,'references/project-risk-profiles.json'),{}), reviewHistory:rows.filter((r)=>
+    projectProfiles, reviewHistory:rows.filter((r)=>
       (r.kind==='route'||!r.kind)&&r.pick&&r.executable!==false&&!r.deferred&&(r.executable===true||!r.needsOK?.length))
       .flatMap((r)=>[r,...(r.second&&r.secondExecutable!==false?[{...r,category:'second-opinion',role:'second'}]:[])]),
     outcomes:outcomes.map((r)=>({...r,modelId:r.actual?.[0]?.model??r.first?.model})),
     etaHistory:outcomes.map((r)=>({attemptId:`${r.name}-${r.t}`,category:r.category,modelId:r.actual?.[0]?.model??r.first?.model,
       accountId:r.actual?.[0]?.account??r.first?.account,effort:r.actual?.[0]?.effort??r.first?.effort,minutes:r.minutes,cause:r.cause})) });
-  return { task, snapshot, data, profiles, routeLog, now, root, retryAssumption, refreshRequired: !!flags.fresh };
+  return finish(snapshot);
 }

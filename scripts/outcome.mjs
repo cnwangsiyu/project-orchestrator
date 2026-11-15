@@ -32,7 +32,8 @@ let actual = opts.actual?.map((v) => {
 });
 // Metadata-only appends/corrections keep the existing result and all omitted fields.
 if(opts['review-result']!==undefined&&!['blocking','none'].includes(opts['review-result']))die('--review-result takes blocking or none');
-const metadataOnly = opts.result === undefined && (!!actual || !!opts.correct || opts['review-result']!==undefined);
+if(opts['failure-kind']!==undefined&&!['tool','quality','infra'].includes(opts['failure-kind']))die('--failure-kind takes tool, quality or infra');
+const metadataOnly = opts.result === undefined && (!!actual || !!opts.correct || opts['review-result']!==undefined || opts['failure-kind']!==undefined);
 if (!metadataOnly && !['pass', 'rework', 'fail'].includes(opts.result)) die('--result takes pass, rework or fail');
 if (opts.rounds === true) die('--rounds takes a whole number ≥ 0 or null');
 const rounds = opts.rounds === undefined ? (opts.result === 'pass' ? 0 : null) : opts.rounds === 'null' ? null : Number(opts.rounds);
@@ -72,6 +73,7 @@ const first = mine[0]?.pick ?? null, last = mine.at(-1)?.pick ?? null;
 let rec = {
   t: Date.now(), kind: 'outcome', project: opts.project, name: opts.name, result: opts.result, rounds, minutes, cause, retries, scopeChanges,
   reviewed: !!opts.reviewed,reviewResult:opts['review-result']??null, note: typeof opts.note === 'string' ? opts.note : null,
+  failureKind:opts['failure-kind']??mine.at(-1)?.failureKind??'quality',
   category: mine[0]?.category ?? null, impact: mine[0]?.impact ?? null, first, accepted: opts.result === 'fail' ? null : last, decisions: mine.length,
   ...(actual ? { actual } : {}), automaticReroutes: hops.length,
 };
@@ -82,8 +84,8 @@ if ((opts.correct || metadataOnly) && !prior.some((r) => !r.correction)) die(`${
 if (opts.correct || metadataOnly) {
   rec = { t: rec.t, kind: 'outcome', project: opts.project, name: opts.name,
     ...(opts.correct ? { correction: true } : {}), ...(!metadataOnly ? { result: opts.result, rounds } : {}) };
-  const fields = { rounds, cause, retries, 'scope-changes': scopeChanges, minutes, reviewed: !!opts.reviewed,reviewResult:opts['review-result']??null, note: opts.note, actual, 'review-result':opts['review-result'] };
-  for (const [flag, value] of Object.entries(fields)) if (opts[flag] !== undefined) rec[flag==='review-result'?'reviewResult':flag === 'scope-changes' ? 'scopeChanges' : flag] = value;
+  const fields = { 'failure-kind':opts['failure-kind'], rounds, cause, retries, 'scope-changes': scopeChanges, minutes, reviewed: !!opts.reviewed,reviewResult:opts['review-result']??null, note: opts.note, actual, 'review-result':opts['review-result'] };
+  for (const [flag, value] of Object.entries(fields)) if (opts[flag] !== undefined) rec[flag==='failure-kind'?'failureKind':flag==='review-result'?'reviewResult':flag === 'scope-changes' ? 'scopeChanges' : flag] = value;
 }
 if (opts.correct) console.error(`outcome: appending correction for ${opts.name}; supplied fields override the aggregate, including lower or null rounds; existing lines stay intact`);
 else if (metadataOnly) console.error(`outcome: appending metadata for ${opts.name}; existing result and omitted fields stay intact`);

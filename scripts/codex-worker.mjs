@@ -85,7 +85,7 @@ const account = ai >= 0 ? argv.splice(ai, 2)[1] : ['note', 'ask'].includes(argv[
 const earlyOpts = {};
 for (let i = 1; i < argv.length; i++) if (argv[i].startsWith('--')) {
   const key = argv[i].slice(2);
-  earlyOpts[key] = key === 'background' || (key === 'require-model' && !['on', 'off'].includes(argv[i + 1]))
+  earlyOpts[key] = key === 'background' || key === 'no-browser-preflight' || (key === 'require-model' && !['on', 'off'].includes(argv[i + 1]))
     || argv[i + 1] === undefined || argv[i + 1].startsWith('--') ? true : argv[++i];
 }
 if (argv[0] === 'turn' && typeof earlyOpts.thread === 'string') {
@@ -132,7 +132,8 @@ const ensureSearchProxy = async (prof) => {
 const [cmd, ...rest] = argv;
 const opts = { ...earlyOpts }; const pos = [];
 for (let i = 0; i < rest.length; i++) {
-  if (rest[i] === '--background') opts.background = true;
+  if (rest[i] === '--no-browser-preflight') opts['no-browser-preflight'] = true;
+  else if (rest[i] === '--background') opts.background = true;
   else if (rest[i] === '--require-model' && !['on', 'off'].includes(rest[i + 1])) opts['require-model'] = true;
   else if (rest[i].startsWith('--')) opts[rest[i].slice(2)] = rest[i + 1]?.startsWith('--') || rest[i + 1] === undefined ? true : rest[++i];
   else pos.push(rest[i]);
@@ -174,6 +175,7 @@ if (cmd === 'watch' || cmd === 'mine') {
     try { process.exit(await watch(owner)); } catch (e) { die(e.message, 1); }
   }
   const current = inbox(readEvents(), owner, readAck(owner));
+  for (const row of current.unresolved) console.log(`unresolved owner ${row.ownerOriginal}: ${row.ownerResolution} (${row.ownerMatches?.join(', ')||'no full owner in events'}) event=${row.id}`);
   for (const row of current.pending) console.log(eventLine(row));
   const pendingIds = new Set(current.pending.map((row) => row.id));
   for (const row of openQuestions(readEvents(), { owner })) if (!pendingIds.has(row.id)) console.log(eventLine(row));
@@ -608,7 +610,7 @@ const TRAE_PLAYWRIGHT_ARGS = TRAE_EXTENSION_BROWSER ? [path.join(path.dirname(fi
 const TRAE_PLAYWRIGHT_SERVER = TRAE_EXTENSION_BROWSER ? { command: process.execPath, args: TRAE_PLAYWRIGHT_ARGS,
   startup_timeout_sec: 120, default_tools_approval_mode: 'approve' } : null;
 if (TRAE_BROWSER_REQUEST && !TRAE_EXTENSION_BROWSER)
-  die(`TRAE signed-in Chrome needs the Playwright Extension token file: ${PLAYWRIGHT_EXTENSION_TOKEN_FILE}`, 1);
+  die('BLOCKED browser preflight: Playwright Extension pairing file is missing. Pair the extension in Chrome and configure PLAYWRIGHT_EXTENSION_TOKEN_FILE.', 1);
 const originAllowed = (origin) => {
   let host = ''; try { host = new URL(origin).hostname; } catch { return false; }
   return BU_ORIGINS.some((p) => p === '*' || p === origin || (p.startsWith('*.') ? host === p.slice(2) || host.endsWith(p.slice(1)) : host === p));
@@ -636,7 +638,63 @@ const appOlderThanExtension = () => {
       : null;
   } catch { return null; }
 };
-if (PROF?.kind !== 'trae' && BU_ORIGINS.length && (cmd === 'start' || cmd === 'turn')) { const old = appOlderThanExtension(); if (old) die(`browser-version-mismatch: ${old}`, 7); }
+const findChromePlugin = () => {
+      const bundledFirst = path.join(os.homedir(), '.codex', '.tmp', 'bundled-marketplaces', 'openai-bundled', 'plugins', 'chrome');
+      if (fs.existsSync(path.join(bundledFirst, 'scripts', 'browser-client.mjs'))) return bundledFirst;
+      if (PROF?.chromePlugin && fs.existsSync(path.join(PROF.chromePlugin, 'scripts', 'browser-client.mjs'))) return PROF.chromePlugin;
+      const home = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+      for (const d of [path.join(home, 'plugins', 'cache'), path.join(os.homedir(), '.codex', 'plugins', 'cache')]) {
+        try { for (const m of fs.readdirSync(d)) for (const v of ['latest', ...fs.readdirSync(path.join(d, m, 'chrome')).sort().reverse()])
+          if (fs.existsSync(path.join(d, m, 'chrome', v, 'scripts', 'browser-client.mjs'))) return path.join(d, m, 'chrome', v); } catch {}
+      }
+      const bundled = path.join(os.homedir(), '.codex', '.tmp', 'bundled-marketplaces', 'openai-bundled', 'plugins', 'chrome');
+      return fs.existsSync(path.join(bundled, 'scripts', 'browser-client.mjs')) ? bundled : null;
+};
+// Preflight uses only the installed runtime's public protocol, never pairing/auth contents.
+const extensionConnect = () => new Promise(resolve => {
+  const child = spawn(process.execPath, TRAE_PLAYWRIGHT_ARGS, {stdio:['pipe','pipe','ignore'],detached:process.platform!=='win32'});
+  let done=false, buffered='';
+  const kill = signal => {try {if(process.platform==='win32') child.kill(signal);else process.kill(-child.pid,signal);} catch {}};
+  const finish = ok => {
+    if(done) return; done=true; clearTimeout(timer); child.stdin.end(); kill('SIGTERM');
+    const force=setTimeout(()=>kill('SIGKILL'),300);
+    child.once('close',()=>{clearTimeout(force);resolve(ok);});
+    if(child.exitCode!==null) {clearTimeout(force);resolve(ok);}
+  };
+  const timer=setTimeout(()=>finish(false),3500);
+  const send = value => {if(!done) child.stdin.write(JSON.stringify(value)+'\n');};
+  child.stdin.on('error',()=>finish(false)); child.on('error',()=>finish(false));
+  child.on('exit',()=>{if(!done) finish(false);});
+  child.stdout.on('data',chunk=>{
+    if(done) return; buffered+=chunk;
+    if(buffered.length>1024*1024) return finish(false);
+    let end;
+    while((end=buffered.indexOf('\n'))>=0) {
+      const line=buffered.slice(0,end);buffered=buffered.slice(end+1);
+      let message;try {message=JSON.parse(line);} catch {continue;}
+      if(message.id===1) {
+        if(message.error) return finish(false);
+        send({jsonrpc:'2.0',method:'notifications/initialized'});
+        // Listing tabs proves the extension is connected without reading page contents or opening a tab.
+        send({jsonrpc:'2.0',id:2,method:'tools/call',params:{name:'browser_tabs',arguments:{action:'list'}}});
+      } else if(message.id===2) finish(!message.error&&message.result?.isError!==true);
+    }
+  });
+  send({jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:'2024-11-05',capabilities:{},clientInfo:{name:'browser-preflight',version:'1'}}});
+});
+const browserPreflight = async () => {
+  if(opts['no-browser-preflight'] || !BU_ORIGINS.length || !['start','turn'].includes(cmd)) return;
+  // Only checks this client can make truthfully. The launcher runs in the orchestrator's process context, which on this
+  // Mac cannot read Chrome's profile (macOS privacy), while the hub that spawns the browser tools can — a client-side
+  // extension probe reported a working TRAE Playwright lane as unreachable (live test 2026-11-15). So: is Chrome
+  // running at all, and (TRAE) is the pairing token file there (the pairing-file check above). Everything deeper is
+  // reported by the worker's own first browser call.
+  let chrome = false;
+  try { execFileSync('pgrep', ['-x', 'Google Chrome'], { timeout: 1500, stdio: 'ignore' }); chrome = true; } catch {}
+  if (!chrome) die('BLOCKED browser preflight: Google Chrome is not running on this machine. Start Chrome (signed-in profile), then retry; for a tool failure re-route with --failure-kind tool --failures 1.', 1);
+};
+await browserPreflight();
+if (!opts['no-browser-preflight'] && PROF?.kind !== 'trae' && BU_ORIGINS.length && (cmd === 'start' || cmd === 'turn')) { const old = appOlderThanExtension(); if (old) die(`BLOCKED browser preflight: browser-version-mismatch: ${old}`, 7); }
 if (CU_APPS.length && (cmd === 'start' || cmd === 'turn') && screenLocked()) die("the screen is locked: Computer Use sees no windows while the Mac is locked (the ChatGPT app's Locked use is reserved to its own turns). Unlock it, or keep it unlocked while computer-use workers run.", 5);
 const hub = process.env.CODEX_HUB || 'ws://127.0.0.1:47321';
 const ready = () => fetch(hub.replace(/^ws/, 'http') + '/readyz', { signal: AbortSignal.timeout(2000) }).then((r) => r.ok, () => false);
@@ -1160,18 +1218,6 @@ try {
     // The chrome plugin must match the installed ChatGPT app, whose node_repl and browser service it talks to: the copy the
     // app unpacks itself (bundled-marketplaces) comes first; a cached "latest" can be newer than an old app (2026-11-10:
     // app 26.1007 on the MacBook — tabs opened, then every page call failed with "reading 'timeoutMs'").
-    const findChromePlugin = () => {
-      const bundledFirst = path.join(os.homedir(), '.codex', '.tmp', 'bundled-marketplaces', 'openai-bundled', 'plugins', 'chrome');
-      if (fs.existsSync(path.join(bundledFirst, 'scripts', 'browser-client.mjs'))) return bundledFirst;
-      if (PROF?.chromePlugin && fs.existsSync(path.join(PROF.chromePlugin, 'scripts', 'browser-client.mjs'))) return PROF.chromePlugin;
-      const home = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
-      for (const d of [path.join(home, 'plugins', 'cache'), path.join(os.homedir(), '.codex', 'plugins', 'cache')]) {
-        try { for (const m of fs.readdirSync(d)) for (const v of ['latest', ...fs.readdirSync(path.join(d, m, 'chrome')).sort().reverse()])
-          if (fs.existsSync(path.join(d, m, 'chrome', v, 'scripts', 'browser-client.mjs'))) return path.join(d, m, 'chrome', v); } catch {}
-      }
-      const bundled = path.join(os.homedir(), '.codex', '.tmp', 'bundled-marketplaces', 'openai-bundled', 'plugins', 'chrome');
-      return fs.existsSync(path.join(bundled, 'scripts', 'browser-client.mjs')) ? bundled : null;
-    };
     const chromePlugin = browserThread && !TRAE_EXTENSION_BROWSER ? findChromePlugin() : null;
     const browserHowTo = !browserThread ? null : TRAE_EXTENSION_BROWSER ? [
       'Browser access in this TRAE thread goes through the Playwright MCP server connected to the user\'s Chrome by the Playwright Extension.',
