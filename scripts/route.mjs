@@ -916,7 +916,7 @@ else if (QX.rotate && m?.vendor === 'codex' && QX.rotate.every((r) => !excluded.
 const pickAcct = acct;
 if (m && ['browser', 'ui-browser'].includes(cat) && ttadkRun && runCompany?.kind === 'trae') {
   why.push("TRAE via Playwright extension in the user's Chrome");
-  notes.push("TRAE browser path: use Playwright MCP browser_* tools in the user's Chrome. Playwright's allowed/blocked origins are convenience guardrails, not a security boundary and do not stop redirects; the task brief is the scope boundary.");
+  notes.push("TRAE browser path: use Playwright MCP browser_* tools in the user's Chrome. The allowed-sites list is stated to the worker but not enforced technically on TRAE (no per-site approvals as on TTADK): name the exact sites and the read/write scope in the brief, and keep irreversible actions behind the user's confirmation.");
 }
 // The second opinion's account: the extra underused review on ChatGPT; any other Codex second opinion TTADK-first.
 // The second opinion's account: TTADK first for a Codex second opinion it can run; otherwise the ChatGPT account.

@@ -298,7 +298,7 @@ for (const [sc, args, want, note] of CASES) {
     const trae = JSON.parse(run('ttOutTrae', ['browser', '--origins', 'example.com'], env));
     assert.equal(trae.pick.account, 'trae'); assert.equal(trae.pick.launcher, 'codex-worker');
     assert.ok(trae.why.some((s) => /TRAE via Playwright extension in the user's Chrome/.test(s)));
-    assert.ok(trae.notes.some((s) => /not a security boundary.*do not stop redirects/.test(s)));
+    assert.ok(trae.notes.some((s) => /not enforced technically on TRAE/.test(s)));
     assert.match(trae.pick.command, /--browser-origins/); assert.match(trae.pick.command, /example\.com/);
     const beforePersonal = JSON.parse(run('traeBrowserB', ['browser'], env));
     assert.equal(beforePersonal.pick.account, 'trae');

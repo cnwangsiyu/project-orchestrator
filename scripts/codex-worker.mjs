@@ -518,7 +518,10 @@ const playwrightAllowedOrigins = (origins) => [...new Set(origins.flatMap((entry
 // child's environment only. (An `env_vars` pass-through would need the token in the hub's own environment, which a hub
 // started earlier does not have and which every worker shell would inherit — live test 2026-11-14.)
 const TRAE_PLAYWRIGHT_ARGS = TRAE_EXTENSION_BROWSER ? [path.join(path.dirname(fileURLToPath(import.meta.url)), 'playwright-extension-mcp.mjs'),
-  '--profile-dir-name', CHROME_PROFILE_DIR, '--allowed-origins', playwrightAllowedOrigins(BU_ORIGINS).join(';')] : null;
+  '--profile-dir-name', CHROME_PROFILE_DIR] : null;
+// No --allowed-origins (live test 2026-11-14): @playwright/mcp 0.0.85 accepts only full origins or wildcard ports, not
+// host globs like *.larkoffice.com, and the filter applies to every request a page makes, so a signed-in Lark page failed
+// with net::ERR_BLOCKED_BY_CLIENT. Scope is stated in the worker's instructions and the brief instead.
 const TRAE_PLAYWRIGHT_SERVER = TRAE_EXTENSION_BROWSER ? { command: process.execPath, args: TRAE_PLAYWRIGHT_ARGS,
   startup_timeout_sec: 120, default_tools_approval_mode: 'approve' } : null;
 if (TRAE_BROWSER_REQUEST && !TRAE_EXTENSION_BROWSER)
@@ -985,7 +988,7 @@ try {
     const browserHowTo = !browserThread ? null : TRAE_EXTENSION_BROWSER ? [
       'Browser access in this TRAE thread goes through the Playwright MCP server connected to the user\'s Chrome by the Playwright Extension.',
       'Use the Playwright MCP tools: browser_navigate, browser_snapshot, browser_click, browser_type, browser_fill_form, browser_take_screenshot, and the other browser_* tools exposed by that server.',
-      `Work only within the task brief and these configured origins: ${BU_ORIGINS.join(', ')}. Playwright's origin filter is a convenience guard, not a security boundary and does not stop redirects.`,
+      `Navigate only to sites the task brief needs, and only within these allowed sites (host patterns): ${BU_ORIGINS.join(', ')}. Nothing enforces this list technically: if the task seems to need another site, or a page redirects you outside it, stop and report BLOCKED with the URL instead of continuing. Never open the user's other tabs, mail, chats or personal pages.`,
       'Do not look for any other browser runtime, Chrome plugin, or Claude Code browser skill: they do not exist in this TRAE thread. If the extension or browser is unreachable, report BLOCKED with the exact Playwright error. "Extension connection timeout" means the extension/pairing or the TRAE hub\'s Chrome-profile access needs repair; the verified token flow does not show a manual approval dialog.',
     ].join('\n') : [
       'Browser and desktop access in this thread goes through the node_repl MCP server and its `js` tool (look for a tool from the node_repl server; in code mode call it from your exec script).',

@@ -522,8 +522,9 @@ the nightly review compares dispatch reasons and recorded wall-clock time, inclu
   exists; then to a browser-ready ChatGPT account (personal quota, needs the user's OK); finally to Claude Sonnet
   `medium` (personal Claude quota, needs the user's OK). Re-run `route.mjs` whenever an account becomes unavailable
   instead of choosing a fallback by hand.
-  `--browser-origins` drives both the OpenAI approval path and TRAE's per-thread Playwright `--allowed-origins`.
-  Playwright's origin list is not a security boundary and does not stop redirects; the task brief remains authoritative.
+  `--browser-origins` drives the OpenAI per-site approval path on TTADK/ChatGPT; on TRAE the same list is only stated
+  to the worker (Playwright cannot express host globs and would block page subrequests), so it is not enforced there and
+  the task brief remains authoritative.
   Model/effort retries do not override the account order, and `ui-browser` retains its hard effort floor for writes.
   - Historical measurement (2026-11-07): TTADK and Claude did the same read/interaction tasks, and Claude was 3–10x
     faster in that sample. This is observability history, not a reason to bypass the routing order or its approval gate.

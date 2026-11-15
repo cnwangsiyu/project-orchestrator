@@ -51,10 +51,9 @@ try {
   assert.equal(server.command, process.execPath);
   assert.match(server.args[0], /scripts\/playwright-extension-mcp\.mjs$/);
   assert.deepEqual(server.args.slice(1, 3), ['--profile-dir-name', 'Profile 1']);
-  assert.equal(server.args[3], '--allowed-origins');
-  const origins = server.args[4].split(';');
-  for (const expected of ['https://example.com', 'http://*.bytedance.net:*', 'https://*.bytedance.net:*',
-    'http://bytedance.net:*', 'https://bytedance.net:*', 'http://localhost:*', 'https://localhost:*']) assert.ok(origins.includes(expected), expected);
+  assert.equal(server.args.length, 3, 'no --allowed-origins: Playwright cannot express host globs and blocks page subrequests');
+  const howToScope = start.developerInstructions;
+  for (const expected of ['https://example.com/path', '*.bytedance.net', 'localhost']) assert.ok(howToScope.includes(expected), expected);
   assert.equal(server.env_vars, undefined, 'the token must not depend on the hub environment');
   assert.equal(server.env, undefined);
   assert.equal(start.approvalsReviewer, undefined);

@@ -404,7 +404,7 @@ new machine, set up the matching bridge for each account as described here.
 ### Playwright Extension browser threads on TRAE
 
 For a TRAE `start`/`turn` with `--browser-origins`, codex-worker injects a per-thread `mcp_servers.playwright` override:
-`npx -y @playwright/mcp@latest --extension --profile-dir-name 'Profile 1' --allowed-origins '<semicolon-list>'`.
+our launcher running `npx -y @playwright/mcp@latest --extension --profile-dir-name 'Profile 1'`. No `--allowed-origins` is passed: Playwright's list takes only full origins or wildcard ports (no host globs such as `*.larkoffice.com`) and filters every request a page makes, so signed-in pages fail with `net::ERR_BLOCKED_BY_CLIENT` (live test 2026-11-14).
 `--chrome-profile-dir` changes the profile. The per-thread server is our launcher `scripts/playwright-extension-mcp.mjs` (run with node), which reads the token file itself and passes the token to `@playwright/mcp` only through that child's environment. The token is never in the hub's environment (every worker shell inherits that), on argv, in TOML or in logs, so adding or replacing the token needs no hub restart. The persistent
 headless `[mcp_servers.playwright]` written by `trae-setup` is unchanged and remains the non-browser default.
 
@@ -413,8 +413,7 @@ The worker uses Playwright MCP's `browser_navigate`, `browser_snapshot`, `browse
 Claude browser skills. If the extension/browser is unreachable it reports BLOCKED with the exact Playwright error;
 `Extension connection timeout` means the extension/pairing or the TRAE hub's Chrome-profile access needs repair; the
 verified token flow does not show a manual approval dialog. The ChatGPT-app
-version-mismatch guard does not apply to this bridge. Playwright allowed/blocked origins are convenience guardrails,
-not a security boundary and do not stop redirects; the task brief is the scope boundary.
+version-mismatch guard does not apply to this bridge. The `--browser-origins` list is given to the worker as the set of sites it may visit; nothing enforces it technically on TRAE (unlike the per-site approvals on TTADK/ChatGPT), so the task brief is the scope boundary and the worker reports BLOCKED when a task or redirect leaves the list.
 
 Live verification on this Mac (2026-11-14): `--extension --profile-dir-name 'Profile 1'` with the token in the named
 environment variable connected without an approval dialog while the screen was locked. `browser_navigate` reached
