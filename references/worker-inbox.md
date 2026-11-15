@@ -13,6 +13,8 @@ Workers can notify or ask their launching orchestrator without ending a turn. Th
 | `codex-worker ask [--timeout-min N] [--default "<next action>"] "<question>"` | Records a `question` with a short ID and waits; answer on stdout, exit 0. Default timeout: 20 minutes. |
 | Ask timeout with default | Default on stdout, exit 3; proceed as stated. |
 | Ask timeout without default | `no answer` on stdout, exit 4; worker ends its turn BLOCKED. |
+| Restricted ask without timely streamed output | Emits a marker and exits 6, with the exact `ask --await ID` command on stderr; run that command to keep waiting. |
+| `codex-worker ask --await ID` | Reads the existing question/reply; answer exits 0, original deadline/default exits 3 or 4. No new question or shared write. |
 | `codex-worker reply --thread ID [--account NAME] [--question ID] "<answer>"` | Answers the newest open question, or the specified open ID; exit 0. No open question falls back to steer and prints that fact, with steer's normal exit status. |
 
 Use ask only when a decision is absent from the brief and changes the next action; state a default.
@@ -28,20 +30,53 @@ At start, once the hub assigns a thread ID, the launcher resumes that thread wit
 CODEX_WORKER_OWNER, CODEX_WORKER_NAME and RULES_SHARED. Continuations refresh this config and
 developer instructions. These values identify only this worker, not the shared hub's environment.
 The launcher always also writes a small public context file at
-`<shared>/worker-context/<account>/<thread>.json` and supplies the thread/account, exact script path,
-and RULES_SHARED in developer instructions. Note/ask use the environment automatically, or explicit
-`--thread ID --account NAME` if it is absent. Owner/name come from the launching context file, not
-from the calling shell's orchestrator identity. If thread/resume rejects config/instructions, the
-identity text is included in the turn input so the explicit fallback remains usable. Shared files
-must be readable/writable within the worker's existing sandbox; no sandbox permission is widened.
+`<shared>/worker-context/<account>/<thread>.json`, with cwd, startedAt, current turn, run ID and owner.
+Start/turn refresh it; follow/wait attach it to the actual running turn. Developer instructions
+include ready-to-run explicit commands with the exact script path and RULES_SHARED.
+When flags and CODEX_WORKER_THREAD are absent, bare note/ask scan these public context files.
+Candidates must have a cwd equal to, above or below the calling directory, and a running turn in
+the event records matching their account/thread/run ID. One candidate is selected; several select
+the newest startedAt/t; stderr says which thread/account was chosen. Sibling/unrelated directories
+and completed contexts are excluded. No candidate exits 2 and names both explicit command forms;
+the malformed-ID diagnostic is reserved for malformed supplied IDs. An explicit account limits
+discovery to that account. Owner/name always come from the launching context, not the caller's
+orchestrator identity. If thread/resume rejects config/instructions, the identity text is also
+included in the turn input. Environment propagation is an optimization, not a requirement.
+
+Note/ask first try the normal event append. On EACCES, EPERM or EROFS they emit one
+`@@codex-worker-talkback <JSON>` line on stdout. The outside-sandbox start/turn/wait follower accepts
+it only from command output on its exact account/thread/turn and supplies the launching owner/name.
+It records the same message/question events, with the same note limits and question deadline.
+Stable request IDs deduplicate streamed and completed output. The worker never changes sandbox
+permissions or needs to write a shared reply file.
+
+The follower consumes `item/commandExecution/outputDelta` chunks, including fragmented marker
+lines, and `item/completed` commandExecution aggregatedOutput (or TRAE rawOutput.stdout).
+Wait also consumes retained command output in the running turn's items. A restricted ask reads
+the events file for up to two seconds to see its relayed question, then keeps reading its reply.
+If no streamed record is visible, it exits 6 so the completed command output can deliver the
+marker; the worker runs the exact printed `ask --await ID` command. That command only reads the
+original question and reply; it preserves the original deadline/default and never asks twice.
+The marker line precedes any eventual answer on the initial restricted command's stdout;
+the --await command prints only the answer/default (or `no answer`). Reads of public context,
+event and reply files must be allowed by the existing sandbox. Other write errors remain errors.
 
 Verified offline on 2026-11-15: the installed Codex and TRAE `app-server generate-json-schema`
 commands expose config and developerInstructions on thread/start and thread/resume, but no env
 field on thread/start or turn/start. Both CLIs' help names shell_environment_policy. TTADK homes
 use the Codex executable in this launcher; ChatGPT homes use the same Codex app-server path.
-Fake-hub scenarios verify the identity config, context and fallback for TRAE, TTADK and ChatGPT,
-including continuations and rejected config. Actual environment inheritance through a live worker
-shell remains to be checked on TRAE by the owner; schema support alone does not prove it.
+Both schemas expose `item/commandExecution/outputDelta` with threadId/turnId/itemId/delta, and
+completed commandExecution aggregatedOutput. TRAE also exposes rawOutput.stdout/stderr.
+The current TRAE worker's public notification log also contains live commandExecution outputDelta
+events with exactly those four fields. This verifies the partial-output contract on that worker;
+end-to-end marker delivery from an actually restricted TRAE shell still needs the owner's check.
+Real /usr/bin/env subprocesses under the fake hub test applied shell_environment_policy.set for
+Codex/ChatGPT and TTADK fixtures, and an ignored policy for the TRAE regression fixture. These prove
+the fixture's apply/ignore behavior, not any live hub's environment implementation. Real note/ask
+subprocesses with injected EACCES/EPERM/EROFS verify streamed relay and the completed-output/await
+path without widening read-only/workspace-write policies. The reported live TRAE check lacked
+identity variables, while explicit commands worked. Live restricted TRAE and personal Codex
+verification belongs to the owner; discovery and output relay handle absent environment variables.
 
 Replies are atomically written to `<shared>/worker-replies/<account>/<thread>/<question-id>.json`
 and recorded as `answered` events under the existing event lock. A repeated writer cannot replace
@@ -59,7 +94,7 @@ is one line, with control characters flattened:
 
 ```text
 worker W notes [risk]: discovered risk
-worker W asks (id …): decision? — default: keep baseline — timeout 20m; answer with codex-worker reply --thread … --account … --question … "<text>"
+worker W asks (id …): decision? — default: keep baseline — timeout 20m; answer with codex-worker reply --owner … --thread … --account … --question … "<text>"
 ```
 
 Keep --out separate from files the worker is asked to write: it is the final-message destination.

@@ -198,7 +198,6 @@ fs.open = (file, ...args) => String(file).endsWith('worker-events.jsonl') ? new 
   const old = record('old-owner', 'finished', 'old-event', { launcher: {} });
   const oldAudit = auditWorkerEvents([{ ...old, t: 1 }, { ...old, id: 'launch', event: 'running', t: Date.now() }], Date.now() - 1000);
   assert.equal(oldAudit[0].totalUnacknowledged, 1); assert.equal(oldAudit[0].unacknowledged, 0); assert.equal(oldAudit[0].launchesWithoutIdentity, 1);
-  await import('./worker-talkback-scenarios.mjs');
   console.log(`PASS worker inbox: durable exits, owners, watch/ack, Stop/SessionStart, loop guard, malformed/torn input, SIGTERM/hub mine, exec errors, audit; hook ${blocked.ms.toFixed(1)}ms`);
 } finally {
   for (const child of children) child.kill('SIGTERM');

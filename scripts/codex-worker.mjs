@@ -51,19 +51,19 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { randomUUID } from 'node:crypto';
 import { shellQuote } from './lib/pipeline/presentation.mjs';
+import { runWorkerTalkback, createTalkbackRelay } from './lib/worker-talkback.mjs';
 import { noteFailure, noteSuccess, notePolicyRestriction, rememberThreadModel, threadModel, probeResult, failureKind } from './lib/trae-health.mjs';
 import { createQueueRecorder } from './lib/company-load.mjs';
 import { saveQueue, readQueue } from './lib/worker-queue.mjs';
-import { loadDigest, auditLaunch, rulesLog } from './lib/global-rules.mjs';
+import { loadDigest, auditLaunch, rulesLog, rulesShared } from './lib/global-rules.mjs';
 import { isPolicyBlock, policyBlockRecord, appendPolicyBlock, policyBlockAction } from './lib/policy-block.mjs';
 import { runHubForeground, hubListReachable } from './lib/hub-foreground.mjs';
 import { parseRouteArgs, routeFlag, rerouteWorker, turnHasWork } from './lib/worker-reroute.mjs';
 import { inheritedLaunch, saveLaunch, recordLaunchModel } from './lib/worker-launch.mjs';
 import { modelFamily, modelObservation, rolloutTurnModel } from './lib/worker-model.mjs';
 import { lifecycle, resolveOwner, validOwner, inbox, readEvents, readAck, eventLine, watch, signalExit, appendEvent,
-  saveWorkerContext, workerContext, replyFile, openQuestions, appendNote, answerQuestion } from './lib/worker-events.mjs';
+  saveWorkerContext, workerContext, openQuestions, answerQuestion } from './lib/worker-events.mjs';
 // What a TRAE pause covers: one model family (route.mjs moves to the next family) or the whole account.
 const pausedWhat = (p) => (p.pool ? `TRAE's ${p.pool} models are paused` : 'TRAE is paused');
 // A model TRAE no longer resolves (2026-11-13: it dropped Gemini): that model alone is out of routing for 6 h.
@@ -78,6 +78,7 @@ const writeAccounts = (reg) => {
   const t = `${ACCOUNTS}.${process.pid}`; fs.writeFileSync(t, JSON.stringify(reg, null, 1)); fs.renameSync(t, ACCOUNTS);
 };
 const argv = process.argv.slice(2);
+const followerStartedAt = Date.now();
 const ai = argv.indexOf('--account');
 const account = ai >= 0 ? argv.splice(ai, 2)[1] : ['note', 'ask'].includes(argv[0]) ? process.env.CODEX_WORKER_ACCOUNT || null : null;
 // Register before validation, hub connection or RPC: every attempted follower gets an exit record.
@@ -147,36 +148,11 @@ if (opts.owner !== undefined && !validOwner(opts.owner)) die('--owner needs a pu
 if (!cmd) die('usage: codex-worker [--account NAME] hub|start|turn|wait|steer|interrupt|status|list|quota|usage|reset-credits|reset-credit-use|accounts|account-add ...');
 if (cmd === 'note' || cmd === 'ask') {
   try {
-    const thread = opts.thread ?? process.env.CODEX_WORKER_THREAD;
-    const metadata = workerContext(account ?? 'main', thread);
-    if (!text.trim()) die(`${cmd} needs text`);
-    if (cmd === 'note') {
-      const kind = opts.kind ?? 'info';
-      if (!['progress', 'risk', 'scope', 'info'].includes(kind)) die('--kind takes progress, risk, scope or info');
-      const row = appendNote(metadata, kind, text);
-      console.log(`note recorded${row.wake ? '' : ' (wake-up suppressed: hourly or length limit)'}`);
-      process.exit(0);
-    }
-    const timeoutMin = Number(opts['timeout-min'] ?? 20);
-    if (!Number.isFinite(timeoutMin) || timeoutMin <= 0) die('--timeout-min takes a positive number');
-    if (opts.default !== undefined && typeof opts.default !== 'string') die('--default needs text');
-    const questionId = randomUUID().replaceAll('-', '').slice(0, 16);
-    const row = appendEvent({ ...metadata, event: 'question', questionId, text, timeoutMin,
-      expiresAt: Date.now() + timeoutMin * 60000, ...(opts.default !== undefined ? { default: opts.default } : {}) });
-    process.stderr.write(`question ${questionId}: waiting up to ${timeoutMin}m\n`);
-    const file = replyFile(metadata.account, thread, questionId);
-    for (;;) {
-      let answer; try { answer = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { if (e.code !== 'ENOENT') throw e; }
-      if (answer && answer.account === metadata.account && answer.thread === thread && answer.questionId === questionId
-        && answer.owner === metadata.owner && typeof answer.text === 'string' && answer.t <= row.expiresAt) {
-        console.log(answer.text); process.exit(0);
-      }
-      if (Date.now() >= row.expiresAt) {
-        console.log(opts.default ?? 'no answer'); process.exit(opts.default !== undefined ? 3 : 4);
-      }
-      await new Promise((resolve) => setTimeout(resolve, Math.min(100, row.expiresAt - Date.now())));
-    }
-  } catch (e) { die(e.message, 1); }
+    process.exit(await runWorkerTalkback({ cmd, opts, text, account, cwd: process.cwd(),
+      output: (line) => new Promise((resolve, reject) => process.stdout.write(line + '\n', (e) => e ? reject(e) : resolve())),
+      report: (line) => process.stderr.write(line + '\n'),
+      awaitCommand: (metadata, id) => `RULES_SHARED=${shellQuote(path.resolve(rulesShared()))} ${shellQuote(process.execPath)} ${shellQuote(fileURLToPath(import.meta.url))} --account ${metadata.account} ask --thread ${metadata.thread} --await ${id}` }));
+  } catch (e) { die(e.message, e.exitCode ?? 1); }
 }
 if (cmd === 'reply') {
   if (!opts.thread || !text.trim()) die('reply needs --thread and text');
@@ -263,17 +239,20 @@ const auditStart = (model=opts.model,sandbox=opts.sandbox) => {
 };
 const talkbackContext = (thread) => {
   const state = tracker.metadata();
-  const metadata = { account: account ?? 'main', thread, owner: tracker.owner, name: state.name,
-    runId: state.runId, model: state.model, effort: state.effort };
+  const prior = workerContext(account ?? 'main', thread, true);
+  const metadata = { account: account ?? 'main', thread, owner: tracker.owner, name: opts.name ?? prior?.name ?? state.name,
+    runId: state.runId, model: state.model, effort: state.effort, turn: state.turn ?? null,
+    cwd: path.resolve(opts.cwd ?? prior?.cwd ?? process.cwd()), startedAt: followerStartedAt };
   const file = saveWorkerContext(metadata);
   const env = { CODEX_WORKER_THREAD: thread, CODEX_WORKER_ACCOUNT: metadata.account,
     CODEX_WORKER_OWNER: metadata.owner ?? '', CODEX_WORKER_NAME: String(metadata.name), RULES_SHARED: path.dirname(path.dirname(path.dirname(file))) };
-  return { config: { shell_environment_policy: { set: env } }, instructions:
+  return { metadata, config: { shell_environment_policy: { set: env } }, instructions:
     `Worker talkback identity: thread=${thread} account=${metadata.account} owner=${metadata.owner ?? 'unknown'}. Public context: ${file}.\n`
-    // Exact commands with the identity baked in: TRAE does not pass per-thread environment to the worker's shell
-    // (live check 2026-11-15), so the worker must never have to discover its own thread id.
-    + `To send the orchestrator a note without stopping: RULES_SHARED=${shellQuote(env.RULES_SHARED)} ${shellQuote(process.execPath)} ${shellQuote(fileURLToPath(import.meta.url))} --account ${metadata.account} note --thread ${thread} --kind risk|scope|progress|info "<text>"\n`
-    + `To ask the orchestrator and wait for the answer: RULES_SHARED=${shellQuote(env.RULES_SHARED)} ${shellQuote(process.execPath)} ${shellQuote(fileURLToPath(import.meta.url))} --account ${metadata.account} ask --thread ${thread} --timeout-min 20 --default "<what you will do if nobody answers>" "<question>" (prints the answer; exit 3 = no answer, proceed with your default; exit 4 = no answer and no default).\n`
+    // Keep ready-to-run explicit commands; bare commands also resolve the running
+    // context by cwd when the hub does not pass per-thread shell environment.
+    + `To send the orchestrator a note without stopping (kinds: risk, scope, progress, info):\nRULES_SHARED=${shellQuote(env.RULES_SHARED)} ${shellQuote(process.execPath)} ${shellQuote(fileURLToPath(import.meta.url))} --account ${metadata.account} note --thread ${thread} --kind info "<text>"\n`
+    + `To ask the orchestrator and wait for the answer (exit 3 = timeout, proceed with default; exit 4 = timeout without default):\nRULES_SHARED=${shellQuote(env.RULES_SHARED)} ${shellQuote(process.execPath)} ${shellQuote(fileURLToPath(import.meta.url))} --account ${metadata.account} ask --thread ${thread} --timeout-min 20 --default "<what you will do if nobody answers>" "<question>"\n`
+    + 'In read-only/workspace-write, denied shared writes are relayed through your command output without widening the sandbox. If ask exits 6, run the exact ask --await <id> command printed on stderr; it only reads, preserves the original question/default/deadline and does not ask again.\n'
     + 'Use ask only for a decision the brief does not settle that changes your next action; state --default. Use note for a discovered risk, scope change or milestone the orchestrator needs before completion, never routine progress. A blocker needing the user still ends the turn BLOCKED.' };
 };
 // Check metadata only: --out is a final-message destination, sometimes also mistakenly
@@ -1001,7 +980,7 @@ const report = async (threadId, turn, final, usage) => {
 // one line a minute), and the wait's length once it clears. `status --thread` reads the last state from the file.
 const LONG_COMMAND_MAX_MIN = Number(process.env.CODEX_WORKER_LONG_COMMAND_MAX_MIN ?? 240);
 const runningCommands = new Set(); let quietNoted = false;
-const follow = (threadId, turnId) => {
+const follow = (threadId, turnId, items = []) => {
   clearTimeout(setupAlarm);
   handlers.push((m) => {
     const p = m.params ?? {}, item = p.item;
@@ -1011,6 +990,10 @@ const follow = (threadId, turnId) => {
   });
   activeTurn = { threadId, turnId };
   tracker?.update({ thread: threadId, turn: turnId, model: opts.model ?? null, mayRun: true });
+  const context = talkbackContext(threadId);
+  const relay = createTalkbackRelay({ ...context.metadata, turn: turnId }, (line) => console.error(line));
+  handlers.push(relay);
+  for (const item of items) relay({ method: 'item/completed', params: { threadId, turnId, item } });
   recordModelEvidence(threadId, turnId);
   console.log(`thread=${threadId} turn=${turnId}`);
   const recordQueue = ['trae','ttadk'].includes(PROF?.kind) ? createQueueRecorder(PROF.home, opts.model ?? threadModel(PROF.home, threadId)) : null;
@@ -1249,7 +1232,7 @@ try {
     sessionPath = resumed?.thread?.path ?? null;
     const t = await currentTurn(opts.thread);
     if (!t) die('thread has no turns', 3);
-    if (t.status === 'inProgress') { markOutputStart(); follow(opts.thread, t.id); }
+    if (t.status === 'inProgress') { markOutputStart(); follow(opts.thread, t.id, t.items); }
     else { console.log(`thread=${opts.thread} turn=${t.id}`); await report(opts.thread, t); }
   } else if (cmd === 'steer' || cmd === 'reply') {
     if (!opts.thread || !text) die('steer needs --thread and a message');

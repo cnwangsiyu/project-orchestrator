@@ -215,6 +215,7 @@ export function presentRoute(plan, view, context) {
   }
   notes.push(`launch as a background task (run_in_background) - never detach with & inside another command. Every launch must be tracked or covered by an armed codex-worker watch --owner ${owner??'<session-id>'}; re-arm after every wake and handle finished workers first.`);
   notes.push('brief: workers use codex-worker ask only for an unsettled decision that changes their next action, with --default; note is for a discovered risk, scope change or milestone needed before completion, never routine progress. Answer promptly with codex-worker reply; after the question timeout the worker uses its default, or ends BLOCKED without one.');
+  notes.push('brief: bare note/ask discover the newest running worker context matching cwd if thread flags/environment are absent. In restricted sandboxes denied shared writes relay through command output; if ask exits 6, the worker runs its printed ask --await ID command to read the original reply, without repeating the question or widening the sandbox.');
   notes.push('brief: keep --out separate from any file the worker is asked to write; --out receives the final message and can overwrite that deliverable.');
   notes.push('launch audit: every launch must match its route/actual task identity; --user-ok is only a reference to a real scoped decision, never inferred from urgency.');
   const profile=snapshot.projectProfiles?.[t.project]; if(profile) notes.push(`project profile ${profile.profile}${profile.landingGate ? `; landing gate: ${profile.landingGate}` : ''}`);

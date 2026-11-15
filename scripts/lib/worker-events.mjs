@@ -50,7 +50,7 @@ const acknowledged = (row, ack) => (Number.isSafeInteger(row.seq) && row.seq <= 
 const nextAck = (ack, rows, transaction = ack.transaction) => {
   const t = Date.now(), delivered = Object.fromEntries(Object.entries(ack.delivered).filter(([, receipt]) => receipt?.t >= t - RETENTION_MS).slice(-ACK_RECEIPTS));
   for (const row of rows) delivered[row.id] = { t, seq: row.seq, name: row.name, event: row.event, outFile: row.outFile,
-    finalLine: row.finalLine ?? '', runId: row.runId, account: row.account, thread: row.thread,
+    finalLine: row.finalLine ?? '', runId: row.runId, owner: row.owner, account: row.account, thread: row.thread,
     kind: row.kind, text: row.text, questionId: row.questionId, timeoutMin: row.timeoutMin, default: row.default };
   return { owner: ack.owner, transaction: transaction ?? null,
     highWater: rows.reduce((high, row) => Math.max(high, row.seq ?? 0), ack.highWater ?? 0),
@@ -249,7 +249,7 @@ export const saveWorkerContext = (metadata) => {
 export const workerContext = (account, thread, optional = false) => {
   const record = JSON.parse(readText(contextFile(account, thread)) || 'null');
   if (!record && optional) return null;
-  if (!record || record.account !== account || record.thread !== thread || !validOwner(record.owner))
+  if (!record || record.account !== account || record.thread !== thread || !optional && !validOwner(record.owner))
     throw Error('no launching owner in worker context; use the account/thread supplied by the launcher');
   return record;
 };
@@ -265,11 +265,22 @@ export const openQuestions = (rows, { owner, account, thread, now = Date.now() }
     && (thread === undefined || row.thread === thread) && !answered.has(JSON.stringify([row.account, row.thread, row.questionId])))
     .sort((a, b) => a.seq - b.seq);
 };
-export const appendNote = (metadata, kind, text) => withEventLock(() => {
+const noteLocked = (metadata, kind, text) => {
   const count = readEvents().filter((row) => row.event === 'message' && row.account === metadata.account
     && row.thread === metadata.thread && row.t > Date.now() - 3600000 && row.wake !== false).length;
   return appendLocked({ ...metadata, event: 'message', kind, text: text.slice(0, 500),
     truncated: text.length > 500, wake: count < 6 && text.length <= 500 });
+};
+export const appendNote = (metadata, kind, text) => withEventLock(() => noteLocked(metadata, kind, text));
+export const appendTalkback = (metadata, request) => withEventLock(() => {
+  const prior = readEvents().find((row) => row.account === metadata.account && row.thread === metadata.thread
+    && row.talkbackId === request.id && ['message', 'question'].includes(row.event));
+  if (prior) return prior;
+  const fields = { ...metadata, talkbackId: request.id };
+  return request.type === 'message' ? noteLocked(fields, request.kind, request.text)
+    : appendLocked({ ...fields, event: 'question', questionId: request.id, text: request.text,
+      timeoutMin: request.timeoutMin, expiresAt: request.expiresAt,
+      ...(request.default !== undefined ? { default: request.default } : {}) });
 });
 export const answerQuestion = ({ owner, account, thread, questionId, text }) => withEventLock(() => {
   publicPair(account, thread);

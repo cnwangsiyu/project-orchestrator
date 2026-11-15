@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Included by worker-inbox-scenarios: temporary homes and fake hub only.
+// Temporary homes and fake hub only; run independently from worker-inbox.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -155,12 +155,12 @@ try {
   const legacy = run(['reply', '--thread', 'legacy-thread', 'Continue']);
   assert.equal(legacy.status, 0, legacy.stderr); assert.match(legacy.stdout, /falling back to steer/);
 
-  const held = launch('trae', 'held-thread', 'held-owner', { hold: true, commandRunning: true, fastStall: true }, ['--stall-min', '0.001']);
+  const held = launch('trae', 'held-thread', 'held-owner', { hold: true, commandRunning: true, stallProbe: true }, ['--stall-min', '1']);
   const follower = start(held.args, held.extra);
   await until(() => follower.output().includes('thread=held-thread'), 'held follower started');
+  await until(() => follower.output().includes('quiet:'), 'deterministic stalled-command probe ran');
   const heldAsk = start(['ask', '--thread', 'held-thread', '--account', 'trae', '--timeout-min', '1', '--default', 'Keep baseline', 'Need decision']);
   await until(() => openQuestions(readEvents(), { owner: 'held-owner' }).length === 1, 'held question');
-  await new Promise((r) => setTimeout(r, 300));
   assert.ok(follower.child.exitCode === null, 'running ask shell is not stalled');
   assert.equal(inbox(readEvents(), 'held-owner', readAck('held-owner')).running.length, 1, 'talkback never settles the running turn');
   assert.equal(run(['reply', '--account', 'trae', '--thread', 'held-thread', 'Continue']).status, 0);
@@ -175,7 +175,8 @@ try {
   assert.match(fs.readFileSync(out, 'utf8'), /DONE fixture/);
   const clean = launch('chatgpt', 'clean-thread', 'clean-owner', {}, ['--out', out]);
   assert.doesNotMatch(run(clean.args, clean.extra).stderr, /output-conflict:/);
-  console.log('PASS worker talkback: identity/config for TRAE, TTADK, ChatGPT; owner isolation, notes/limits/compaction, hook lines, ask/reply/timeouts, steer fallback, command stall guard, BC-44');
+  await import('./worker-talkback-relay-scenarios.mjs');
+  console.log('PASS worker talkback: identity/config for TRAE, TTADK, ChatGPT; owner isolation, notes/limits/compaction, hook lines, ask/reply/timeouts, steer fallback, deterministic command stall guard, BC-44');
 } finally {
   const exits = [...children].map((child) => new Promise((resolve) => { child.once('close', resolve); child.kill('SIGTERM'); }));
   await Promise.all(exits);
