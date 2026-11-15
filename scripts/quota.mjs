@@ -21,9 +21,11 @@ const running = await runningWorkers({ profiles });
 if (args.includes('--running')) {
   if (args.includes('--json')) console.log(JSON.stringify(running));
   else {
+    const localTime = new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+    const checkedAt = Date.now();
     for (const [account, threads] of Object.entries(running.byAccount)) {
       console.log(`${account}: ${threads.length} turns running`);
-      for (const row of threads) console.log(`  ${row.thread} owner=${row.owner ?? '?'} model=${row.model ?? '?'} started=${new Date(row.startedAt).toISOString()} last-activity=${new Date(row.lastActivityAt).toISOString()}`);
+      for (const row of threads) console.log(`  ${row.thread}${row.name ? ` name=${row.name}` : ''} owner=${row.owner ?? '?'} model=${row.model ?? '?'} started=${localTime.format(row.startedAt)}; last activity ${Math.max(0, Math.floor((checkedAt - row.lastActivityAt) / 60000))} min ago (${localTime.format(row.lastActivityAt)})`);
     }
     for (const row of running.unresolved) console.log(`UNKNOWN ${row.account}/${row.thread}: ${row.reason}`);
   }
