@@ -51,9 +51,9 @@ contradictions remain authoritative. Full rejected predicates stay in trace;
 the human blocked explanation names one candidate and one concrete blocker.
 Automatic no-work reroutes retain cancellation receipts, owner and lane exclusions.
 
-Browser order is TTADK, TRAE Playwright Extension, browser-ready personal ChatGPT
+Browser order is observed free TRAE Playwright Extension, TTADK, browser-ready personal ChatGPT
 (ask), then Claude in Chrome (ask). Desktop order is TTADK then browser-ready
-personal ChatGPT; personal quota asks only on devices with company accounts.
+personal ChatGPT (ask on company devices); ordinary Claude always asks.
 No TRAE or Claude desktop path. Capability intersection
 and target scopes remain mandatory. Optional review budget excess adds
 "over review budget — prefer accepting on tests" and never blocks dispatch.
@@ -62,7 +62,7 @@ and target scopes remain mandatory. Optional review budget excess adds
 needsUserOK/tellUser/why/notes, ETA, defer and queue fields, including tracked
 launches and owner-scoped worker watches. `renderPlan(plan)` exposes the pure
 plan envelope for validation tests. Preaction resource gates and post-write
-acceptance reviews remain obligations of the owning orchestrator.
+acceptance reviews remain obligations of the owning orchestrator. Mandatory review uses only explicit --review-class A–D and --review-reason; class A release reaches external users and cannot be rolled back within hours. Local data reads/writes are not release; irreversible data operations use C. At most two rounds per scope; per-project targets and no-review/default settings come from project-risk-profiles.json.
 
 The acquisition adapter refreshes stale/missing/negative account status through
 normal authenticated read-only commands. Successful hub usage is transport

@@ -48,6 +48,29 @@ try {
     assert.equal(rows(path.join(f.dir,'worker-events.jsonl')).at(-1).event,'failed');assert.match(fs.readFileSync(log,'utf8'),/skip-git-repo-check/);
     assert.ok(!fs.existsSync(out));
   });
+  check('main c702ec4: accepted one-shot exit zero without output still fails',()=>{
+    const f=fixture('accepted-no-output','chatgpt'),out=path.join(f.dir,'missing.out');
+    const r=spawnSync('/bin/sh',[path.join(scripts,'run-tracked.sh'),'--name','accepted-no-output','--owner','guard-owner','--account','fixture',
+      '--model','gpt-6.1-sol','--out',out,'--',process.execPath,'-e',
+      'console.log(JSON.stringify({type:"thread.started",thread_id:"accepted-thread"}));'],{env:f.env,encoding:'utf8',timeout:5000});
+    assert.equal(r.status,1);assert.equal(rows(path.join(f.dir,'worker-events.jsonl')).at(-1).event,'failed');assert.ok(!fs.existsSync(out));
+  });
+  check('company unavailability is scoped for TTADK and TRAE; resume injects current digest',()=>{
+    for(const kind of ['ttadk','trae']) {
+      const f=fixture(`company-unavailable-${kind}`,kind);
+      const r=run(f,'start',{failure:'model gpt-6.1-sol unavailable because metadata could not be resolved'});
+      assert.equal(r.status,1,r.stderr+r.stdout);{const health=JSON.parse(fs.readFileSync(path.join(f.accountHome,'worker-health.json'),'utf8'));assert.ok(health.modelPauses['gpt-6.1-sol']);assert.ok(!health.pools?.gpt,'ordinary unavailable is not a family restriction');}
+    }
+    const r=run(fixture('resume-current-digest'),'turn');const resume=r.calls.find(c=>c.method==='thread/resume');
+    assert.match(resume.params.developerInstructions,/no sub-agents/);assert.match(resume.params.developerInstructions,/dependencies and build tools/);
+  });
+  check('TTADK setup accepts a fresh qualified catalog without Sol',()=>{
+    const f=fixture('setup-no-sol','ttadk'),preload=path.join(f.dir,'setup-preload.mjs');
+    fs.writeFileSync(preload,`import cp from 'node:child_process';import {syncBuiltinESMExports} from 'node:module';cp.execFileSync=(bin,args)=>{if(bin==='/bin/zsh')return '/fixture/ttadk\\n';if(bin==='/fixture/ttadk'&&args[0]==='auth')return JSON.stringify({providers:[{provider:'sso',status:'active'}]});if(bin==='/fixture/ttadk'&&args[0]==='models')return JSON.stringify([{id:'gpt-5.6-terra',availableAgents:['codex']}]);throw Error('fixture forbids external subprocess: '+bin);};syncBuiltinESMExports();`);
+    const r=spawnSync(process.execPath,['--import',preload,path.join(scripts,'codex-worker.mjs'),'ttadk-setup','--name','gateway','--home',f.accountHome,'--port','49901'],{env:f.env,encoding:'utf8',timeout:5000});
+    assert.equal(r.status,0,r.stderr+r.stdout);assert.match(fs.readFileSync(path.join(f.accountHome,'config.toml'),'utf8'),/model = "gpt-5.6-terra"/);
+    assert.deepEqual(JSON.parse(fs.readFileSync(f.env.CODEX_ACCOUNTS,'utf8')).gateway.models,['gpt-5.6-terra']);
+  });
   check('read-only network access stays read-only in the actual start request',()=>{
     const r=run(fixture('readonly-network'),'start',{},['--network','on']);assert.equal(r.status,0,r.stderr);
     assert.equal(r.calls.find(c=>c.method==='thread/start').params.sandbox,'read-only');

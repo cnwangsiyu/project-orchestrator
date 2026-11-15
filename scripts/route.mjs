@@ -14,7 +14,7 @@ const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 try {
   const task = parseTaskSpec(process.argv.slice(2), taskContext());
   if (task.kind === 'table') {
-    const table = task.categories.map(category => ({ category, engine: 'candidate-pipeline', note: 'Effective tuple depends on capabilities, actual floor, scoped approval and ETA.' }));
+    const table = task.categories.map(category => ({ category, engine: 'candidate-pipeline', note: ['implement','implement-hard','debug','science'].includes(category)?'Requires --impact service|throwaway|release. Release is strictly class A: external version that cannot roll back within hours; local data reads/writes are not release, irreversible data operations use review-class C.':'Effective tuple depends on capabilities, actual floor, scoped approval and ETA.' }));
     console.log(process.argv.includes('--json') ? JSON.stringify(table) : table.map(r => `${r.category}  ${r.note}`).join('\n'));
   } else {
     if (task.flags.owner !== undefined && !validOwner(task.flags.owner)) throw Error('--owner needs a public session ID');
@@ -45,7 +45,7 @@ try {
         excludedLanes:plan.task.exclusions.filter(e=>e.accountId).map(e=>`${e.accountId}:${e.value}`),ttadk:!!out.pick?.company,
         pick:tuple(out.pick),second:tuple(out.secondOpinion),secondExecutable:!!out.secondOpinion?.command,why:out.why,needsOK:out.needsUserOK,tell:out.tellUser,
         personalApproved:out.executable&&!!out.pick&&!out.pick.company,approvalRef:task.flags['user-ok']??null,
-        reviewOverride:task.flags['review-override']??null,reviewRequired:task.flags['review-required']??null,profileOverride:task.flags['profile-override']??null,
+        reviewClass:plan.task.reviewClass,reviewReason:plan.task.reviewReason,reviewScope:plan.task.reviewScope,reviewOverride:task.flags['review-override']??null,reviewRequired:task.flags['review-required']??null,profileOverride:task.flags['profile-override']??null,
         company:out.pick?.company?out.pick.account:null,owner:owner??null,quota:out.quotaSummary,balance:out.balance};
       try { fs.mkdirSync(path.dirname(context.routeLog),{recursive:true}); fs.appendFileSync(context.routeLog,JSON.stringify(rec)+'\n'); }
       catch(e) { console.error(`route log write failed: ${e.code??e.message}`); }

@@ -19,7 +19,7 @@ the model inside a pool, quota decides the pool.
 | Codex **Sol 6.1** | 1 | Near Astra at ~1/5 the usage (AA index: `high` 50 at $0.59/task, `xhigh` 52 at $0.76; Opus `high` 52 at $3.46); 500K context | The coding workhorse: implementation, build/test/deploy runs, debugging, code review, log analysis | `low` effort for any coding (TB4 31%) |
 | Codex **Astra** | 5 (10x on cached input) | Frontier, +2–5 points over Sol; best on Terminal-Bench-Science (64.6%) | Escalation after Sol `xhigh` failed; a strongest-GPT second opinion; numerical or scientific work Sol couldn't crack | Default anything; small tasks (it over-tests and asks questions) |
 | Codex **Terra 6.1** | 0.5 | Writing and visual understanding; not a coding model (TB4 32% at `medium`) | Bulk prose drafts, translation, reading screenshots or images, writing when Claude has no spare | Coding; computer use (the Codex CLI can't do computer use at all) |
-| Codex **Luna** | 0.05 | Extraction, classification, structured summaries; very weak at coding (TB4 13% at `max`) | Bulk extraction or classification, quick lookups, image generation (the image tool does the work) | Any code change or code reasoning |
+| Codex **Luna** (`gpt-6-luna`, personal ChatGPT) | 0.05 | Extraction and classification; very weak at coding (TB4 13% at `max`) | Personal lookup/extract; image-gen starts at low because the image tool does the work (standing permission, no question) | Any code change or code reasoning |
 
 On personal ChatGPT accounts, don't pick `gpt-6-sol` or `gpt-5.6-*` (older at the same or higher cost); the approved
 TRAE choices below are a separate company-quota policy. Don't pick Codex `ultra` (fans out its own sub-agents
@@ -45,7 +45,7 @@ preserves known free capacity. ETA compares model-specific drain/progress and
 known TTADK resets. Fresh positive queue position with zero drain, or waiting
 without progress, is STALLED with no finite ETA and ranks after runnable lanes.
 Only absent/stale telemetry uses the optimistic unknown fallback. A reset decision includes deferUntil, an owner and ledger/timer
-instructions. Low-priority lanes carry bounded queue patience. No resource is
+instructions. Queued, unknown or delayed company lanes on either provider carry bounded queue patience and qualified company alternatives. No resource is
 held while waiting for a model response or an automatic replacement.
 
 Retries use the actual prior tuple (`--actual vendor:model:effort[@account]`, or
@@ -61,8 +61,7 @@ company-only, owner-preserving, and capped at two.
 Personal quota asks first on devices with a registered TTADK or TRAE account.
 Without company accounts, personal ChatGPT is the default lane with standing
 permission; eligible accounts with deadlines within 48 hours rotate under the
-CLI counter, otherwise the earliest deadline wins. --urgent --user-ok <reference> records one user yes
-and produces a command; image generation and Claude-only tools retain standing
+CLI counter, otherwise the earliest deadline wins. Ordinary Claude still asks. `--urgent --user-ok <reference>` only references a real matching scoped approval; it does not establish one; image generation and Claude-only tools retain standing
 permission. Astra on personal ChatGPT always needs its own scoped OK, including
 on devices without company accounts. A runnable non-Astra escalation wins and
 identifies Astra as a gated alternative; qualified TRAE Astra stays ungated.
@@ -71,25 +70,11 @@ model/effort floor. Max effort outside company accounts (TTADK and TRAE), Fable 
 authorization. An eligible company primary launches while a gated personal
 second reviewer awaits the user's answer before acceptance.
 
-Review policy: at most two rounds per task/branch; `--review-override "reason"`
-permits one more and is logged. Re-reviews inspect only blocked findings. Routine
-reviews have one reviewer. Adversarial, review-high and release reviews require
-independent families; adversarial reviews require two non-GPT families. Missing
-required reviewers remain an acceptance obligation and do not hold the company primary.
-Fallback-written service code only needs review for release/high stakes,
-build/acceptance involvement, or recent same-model/category failure. Optional
-reviews above 10% of rolling 24-hour dispatches overall or per project warn
-"over review budget — prefer accepting on tests"; dispatch and required reviews continue.
+Review policy: Mandatory review is ONLY explicit --review-class A|B|C|D plus --review-reason: A a version that reaches external users and cannot be rolled back within hours; B login/auth/permission/signing logic; C irreversible data operations or billing/quota accounting; D a named adversarial review. High stakes, installation and fallback authorship alone do not qualify. Use `--review-reason` and optional stable `--review-scope`. Without a class, review-high downgrades with a note. Release impact is class A only; profiles without external release normalize other release requests to service. Internal-demo never blocks explicit classes or requires profile-override. Routine work uses tests, or one optional ordinary review when tests cannot cover it. Classified adversarial/review-high/release reviews require independent families; adversarial uses two non-GPT families. Required seconds are acceptance obligations and do not hold a runnable company primary.
 
-| Project | Profile | Landing gate |
-|---|---|---|
-| video-agent | internal-demo: ordinary executable acceptance; no default security/adversarial/review-high or second review | Package tests + typecheck + SG prepare; full verify for wide changes or once/day main |
-| Other | Existing required-review rules | Existing build discipline |
+At most two rounds per task/branch scope; no --review-override escape. Re-reviews check blocked findings. Targets: video-agent 10%, vesdk-mainline/webview 20%; aggregate share is observational. Optional excess warns and still dispatches; mandatory reviews remain. Outcome recording accepts `--review-result blocking|none`; interim notes `review: blocking found` / `review: none` are recognized. Unknown yield remains UNKNOWN.
 
-Profiles live in `references/project-risk-profiles.json`; explicit security/high
-review requests on internal-demo explain the acceptance route and
-`--profile-override "reason"`. Revisit when external users, real user data or
-scale arrive. Credential/device/lock rules and production release approval remain.
+Profiles live in `references/project-risk-profiles.json`. Video-agent uses package tests/typecheck/SG prepare and has no external release by default; SSO/employee admission, real deletion/retention and quota charging/refunds use explicit B/C, future production release A. Vesdk-mainline target 20% covers explicitly classified shipped mainline, concurrency/locks, signing and pre-merge review. Credential/device/lock and production approval rules remain.
 
 The API and acquisition boundary are documented in `scripts/lib/pipeline/README.md`.
 There is no legacy mode, shadow runner or per-category switch.
@@ -104,11 +89,7 @@ TRAE foreground tier lists are:
 | Normal | GPT-6.1-Sol, GPT-5.6-Sol, GPT-5.6-Terra, DeepSeek-V4.1-Flash |
 | Hard | GPT-6.1-Sol, GPT-6-Astra |
 
-Within a normal/light ladder, uncongested models with priority quota left rank
-ahead of depleted lanes, even when a depleted lane reports immediate progress.
-Light work stays on its light ladder while a qualified light lane is usable;
-it does not climb to Sol because Sol happens to be free. Depleted lanes remain
-available when no ladder model has usable priority quota. Hard work never demotes.
+Walk the tier ladder in quality order across all company accounts. Select the first model with a free lane; depleted-but-ready/progressing low-priority lanes count. For that model, free TRAE wins unless TTADK has the expiring-quota preference; if TRAE is congested/queued/stalled, use free TTADK for that same model before stepping down. Priority quota is at most a same-model lane tie-break, never a reason to downgrade Sol to Flash. Light work stays on its qualified light ladder; hard work never demotes. TRAE Gemini and `gpt-5.6-luna` are excluded; personal ChatGPT `gpt-6-luna` remains the first lookup/extract/image-gen choice; TTADK fresh catalog and historical model evidence remain.
 
 Vision uses its separate qualified catalog. DeepSeek is unsuitable for full builds,
 executable/auth/storage acceptance or a large file in one output. Seed is vision
@@ -130,7 +111,7 @@ switching to missing/stalled telemetry at the same floor.
 Fresh reserve/burn observations still explain company capacity. An available
 TTADK lane wins when TRAE cannot demonstrate immediate uncongested capacity. TTADK reset within four hours with projected burn below 70%
 prefers TTADK so its quota does not expire unused. Only truly absent or stale lane
-telemetry is UNKNOWN; it does not prove the lane is free.
+telemetry is UNKNOWN; it does not prove the lane is free. TRAE expiry is model-bucket-specific, with its own fresh reset/usage evidence and unit, independent of TTADK share, and only ranks within the chosen quality model.
 
 Personal windows retain reserve/deadline and effort policy. Reset redemption is
 an independent scoped action followed by refreshed quota and a new plan; a reset
@@ -144,8 +125,7 @@ admission. Follow [resources.md](resources.md) and the injected worker digest fo
 res v1.5, one-process build wrappers, registered devices and restoration. Acquire
 holds after the first model response and return them before a replacement.
 
-Registered own-test signing uses ordinary full-access Codex-family company
-workers and the existing package registry and identity allowlist. The resident
+Registered own-test signing uses ordinary full-access Codex-family workers, with company quota first and personal quota subject to its existing scoped gates. They check the existing package registry and identity allowlist. The resident
 Claude signer is retired. All workers use installed, signed-in tools without
 opening credential or session files.
 
@@ -158,8 +138,7 @@ Current acquisition refreshes individual stale/negative account readings through
 authenticated read-only status commands; it never exports credentials or clears
 restriction generations. No runnable company lane waits for a future quota
 reset. Browser and ui-browser prefer observed free TRAE Playwright capacity, then
-usable TTADK → browser-ready personal ChatGPT → Claude in Chrome. Personal quota asks only on devices with company
-accounts. Desktop: TTADK → browser-ready ChatGPT. --signing uses ordinary full-access Codex company workers for registered
+usable TTADK → browser-ready personal ChatGPT → Claude in Chrome. Personal ChatGPT asks on company devices; ordinary Claude asks on every device. Desktop: TTADK → browser-ready personal ChatGPT (ask), never TRAE/Claude. --signing uses ordinary full-access Codex-family workers subject to quota gates for registered
 own-test packages and allowlisted identities; the resident Claude signer is retired.
 
 Main's browser bridge configures Playwright per thread for TRAE start and turn,
@@ -197,6 +176,10 @@ Launch audits compare the project/name and routed seat (including second reviewe
 against account/model/effort/sandbox on start and continuation. Mismatches emit one
 warning, a `launch-mismatch` row, and nightly audit evidence. Only a company pick
 replaced by personal quota without a user reference on its routed decision blocks
-launch. References are free text recorded verbatim, not verified consent. Nightly
+launch. References are recorded verbatim and must match a stored scoped approval; urgency alone never authorizes personal quota. Nightly
 review launches the router's executable command/seat and records blocked plans;
 it cannot supply its own personal-quota override.
+
+Release impact means class A only: a version reaches external users and cannot be rolled back within hours. Reading/writing local or user data is not release; real irreversible data operations are class C. Personal/family apps, internal demos and PPE/test packages, or features that only read existing data are not release.
+
+Project review defaults: `references/project-risk-profiles.json` has a `default` entry for new projects and named `profiles`. To disable optional review for a selected project, add `"<project-slug>": {"profile": "no-review"}`. To make it the new-project default, change `default.profile` to `no-review`. User decisions 2026-11-15 assign evelyns-world and acq (“evelyn 和获客都免审查吧”), and autotrader for now (“autotrader 也先免审查”). acq is its only key. New-project default remains standard; revisit autotrader when the user says. No-review projects print “no review (project profile no-review): accept on tests/build” and nightly reports counts without a review-share target. Such a project prints no review requirement or reviewer without an explicit A–D class and reason; a direct unclassified review request reports PROJECT_NO_REVIEW. Explicit user-requested classes override it.

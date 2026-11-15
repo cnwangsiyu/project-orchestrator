@@ -23,8 +23,10 @@ try {
   const digestText = fs.readFileSync(path.join(path.dirname(root), 'references/global-rules.md'), 'utf8');
   assert.equal(digestText.match(/^version:/gm)?.length, 1, 'integration must publish one digest version');
   assert.equal(digestText.match(/^## Changes In This Version$/gm)?.length, 1);
-  assert.match(digestText, /Resources \(2026-11-14\): stage res v1\.4/);
-  assert.match(digestText, /Nightly delivery \(2026-11-14\): no fixed working-worker kill\/timeout/);
+  assert.ok(digestText.split('\n').length<=61,'digest line budget');
+  assert.equal(digestText.match(/^- Day 3 /gm)?.length,1);
+  assert.match(digestText,/quality first across company accounts/);
+  assert.match(digestText,/without a fixed working-worker wall timeout/);
   assert.match(digest.worker, /take-build\/wait-build inside ONE long-lived wrapper.*local heavy compute/);
   assert.match(digest.worker, /elapsed and predicted-start deadlines.*exclude only the slow account\/model lane/);
   const loginAt = digest.worker.indexOf('Forbidden for every worker: never read, copy, load or inject LOGIN material');
@@ -84,9 +86,14 @@ try {
   assert.equal(route(['implement', '--impact', 'service', '--sandbox', 'read-only']).pick.sandbox, 'read-only');
   const signing = route(['review', '--signing', '--sandbox', 'read-only']);
   assert.equal(signing.blocked,true); assert.equal(signing.pick,null);
-  assert.ok(signing.plan.reasons.some(r=>r.code==='SIGNING_COMPANY_FULL_ACCESS_REQUIRED'));
+  assert.ok(signing.plan.reasons.some(r=>r.code==='SIGNING_FULL_ACCESS_REQUIRED'));
   console.log('ok   Codex writers default full; reviewers stay read-only; tests and explicit overrides stay narrower');
 
+  for(const args of [['implement','--impact','service'],['build-run'],['debug','--impact','service'],['ui-browser']]) {
+    assert.match(route(args).notes.join('\n'),/dependencies and build tools.*without.*(?:card|ask|question)/i);
+  }
+  assert.match(digest.worker,/dependencies and build tools.*without a card or question/i);
+  assert.match(digest.text,/Mandatory review is ONLY explicit/);
   const buildNote = route(['build-run']).notes.find((n) => n.startsWith('build brief:'));
   assert.match(buildNote, /ONE-process wrapper around res take-build\/wait-build\/return-build.*res v1\.5/);
   assert.match(buildNote, /holding neither resource while waiting for the other/);
@@ -112,6 +119,10 @@ try {
     const shown = execFileSync(process.execPath, [path.join(root, 'quota.mjs')], { env, encoding: 'utf8' });
     assert.equal(shown.includes('lean: TTADK SSO expires in '), expected, `quota CLI notice at ${left} hours`);
   }
+  const traeOnly={...data(),codexAccounts:[{...main,windows:[{...window,used:99}]},{name:'trae',kind:'trae',home:tmp,live:true,healthy:true,models:['gpt-6.1-sol'],quota:{sampledAt:now,daily:{}}}]};
+  const lean=leanLines(analyze(traeOnly),traeOnly).join(' ');
+  assert.match(lean,/this company device/);assert.match(lean,/qualified company work continues/);
+  assert.doesNotMatch(lean,/add.*second.opinion|at stronger settings|codex out on every account|route as if Codex has room/);
   console.log('ok   SSO warning includes 72h boundary and reaches quota.mjs before the two-day deadline');
   console.log('\nall pass');
 } finally {

@@ -38,7 +38,7 @@ try {
     if(o.pick.vendor==='codex') assert.match(o.why.join('\n'),new RegExp(`no company account on this device: personal ChatGPT account ${o.pick.account} is the default lane`));
     if(category==='browser') assert.ok(base.codexAccounts.find(a=>a.name===o.pick.account).browser);
     if(category==='draft') assert.equal(o.pick.model,'gpt-6.1-terra');
-    if(category==='review-high') assert.ok(o.secondOpinion.command,'no-company second reviewer has standing permission');
+    if(category==='review-high') {assert.equal(o.category,'review');assert.equal(o.secondOpinion,null,'unclassified review is ordinary');}
     console.log(`PASS no-company ${category}: ${o.pick.model} ${o.pick.effort} @${o.pick.account??'claude'}`);
   }
   fs.writeFileSync(env.ROUTE_RR,'0');
@@ -50,7 +50,7 @@ try {
   const unready=copy();unready.codexAccounts[1].browser=false;
   assert.equal(cli(['browser'],unready).pick.account,'main','rotation cannot select a browser-unready account');
   unready.codexAccounts[0].browser=false;
-  const fallback=cli(['browser'],unready);assert.equal(fallback.pick.vendor,'claude');assert.ok(fallback.pick.command);assert.equal(fallback.needsUserOK.length,0);
+  const fallback=cli(['browser'],unready);assert.equal(fallback.pick.vendor,'claude');assert.equal(fallback.pick.command,null);assert.ok(fallback.needsUserOK.some(w=>/personal quota/.test(w)));assert.ok(fallback.needsUserOK.length>0);
   const broken=copy();broken.codexAccounts[1].live=false;
   assert.equal(cli(['implement'],broken).pick.account,'main','an unhealthy peer is skipped');
   for(const a of broken.codexAccounts) {a.live=false;a.browser=false;}
@@ -91,7 +91,7 @@ try {
     models:[SOL],reason:'daily token quota used up',usage:{used:100,limit:100,resetsAt:now+h}});
   const onCompanyDevice=cli([...astraArgs,'--urgent','--user-ok','personal-yes'],companyOut);
   assert.equal(onCompanyDevice.kind,'blocked');assert.equal(onCompanyDevice.pick.model,ASTRA);assert.equal(onCompanyDevice.pick.command,null);
-  assert.deepEqual(onCompanyDevice.needsUserOK,[`use GPT-6-Astra on personal account ${onCompanyDevice.pick.account}?`]);
+  assert.ok(onCompanyDevice.needsUserOK.includes(`use GPT-6-Astra on personal account ${onCompanyDevice.pick.account}?`));assert.ok(onCompanyDevice.plan.gates.some(g=>g.kind==='personal-quota'));assert.ok(onCompanyDevice.plan.gates.some(g=>g.kind==='astra'));
   const solArgs=['implement-hard','--impact','throwaway','--writes','--failures','1','--actual',`codex:${SOL}:high@alt`];
   const sol=cli(solArgs);assert.equal(sol.kind,'launch');assert.equal(sol.pick.model,SOL);assert.equal(sol.pick.effort,'xhigh');
   assert.ok(sol.pick.command);assert.equal(sol.needsUserOK.length,0);assert.match(sol.why.join('\n'),/Astra .*gated alternative/);
@@ -115,7 +115,7 @@ try {
     assert.throws(()=>cli(['implement-hard','--actual',actual]),e=>e.status===2);
   console.log('PASS BC-31 personal Astra scoped OK on both device types, ready Sol preferred with gated alternative, TRAE Astra ungated, account-less/mixed actual floors');
 
-  const nameArgs=['--project','route-regression','--name','BC-29'];
+  const nameArgs=['--project','route-regression','--name','BC-29','--review-class','B','--review-reason','user asked permission review'];
   const decision=cli(['analysis',...nameArgs],base,false);assert.equal(decision.kind,'launch');
   const review=cli(['review-high','--impact','service','--runs-tests',...nameArgs]);
   assert.equal(review.kind,'launch');assert.equal(review.failures,0);assert.equal(review.plan.task.previousAttempts.length,0);

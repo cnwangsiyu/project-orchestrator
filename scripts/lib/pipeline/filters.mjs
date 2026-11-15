@@ -1,3 +1,4 @@
+import {mandatoryReview} from '../review-policy-data.mjs';
 import { VERSION, EFFORTS, array, company, companyDevice, known, modelId, familyOf, isReview, adversarial, result, reason, fingerprint, stable } from './common.mjs';
 import { candidateParts } from './candidates.mjs';
 import { modelPreference, policyEffort } from './policy.mjs';
@@ -11,7 +12,7 @@ export function approvalScope(t, c, action) {
     efforts: [c.effort], artifactHash: t.artifactRevision, origins: t.allowedOrigins, apps: t.allowedApps, allowPersonalWithCompany: false };
 }
 export function matchingApproval(t, s, c, action, bypass = false) {
-  if (action === 'personal-quota' && (['image-gen','claude-tools'].includes(t.category) || (t.flags.urgent && t.flags['user-ok']))) return true;
+  if (action === 'personal-quota' && (['image-gen','claude-tools'].includes(t.category))) return true;
   return s.approvals.find((a) => t.approvalRefs.includes(a.id) && !a.revoked && !(action === 'reset-redemption' && a.consumed)
     && a.grantedAt <= s.decisionAt && s.decisionAt < a.expiresAt && a.scopes.some((p) => p.taskId === t.taskId && p.constraintHash === t.constraintHash
       && p.roles.includes(t.role) && p.action === action && p.accounts.includes(c.accountId) && p.models.includes(c.modelId) && p.efforts.includes(c.effort)
@@ -131,6 +132,7 @@ export function pContent(t, s, c) {
   return pass('pContent');
 }
 export function pModelFit(t, s, c) {
+  if(c.modelId==='gpt-5.6-luna'||candidateParts(s,c).account.kind==='trae'&&c.modelId.startsWith('gemini')) return deny('pModelFit','MODEL_RETIRED','This model is retired from current routing; historical tuples remain valid history.',c);
   if (c.family === 'deepseek' && !adversarial(t) && isReview(t) && (t.stakes === 'high' || t.impact === 'release' || t.contentLabels.includes('defensive-confirmation'))) return deny('pModelFit', 'MODEL_FIT_SENSITIVE_REVIEW', 'Sensitive reviews require an established strong reviewer family.', c);
   if (c.family === 'kimi' && candidateParts(s, c).account?.kind !== 'ttadk') return deny('pModelFit', 'KIMI_TTADK_ONLY', 'The established Kimi route is TTADK only.', c);
   if (c.family === 'deepseek' && (t.category === 'build-run' || t.runsTests || ['fullPackageBuild', 'executableAcceptance', 'authAcceptance', 'storageAcceptance'].some((k) => t.requirements[k])))
@@ -143,8 +145,8 @@ export function pModelFit(t, s, c) {
 export function pSigning(t, s, c) {
   if (!t.flags.signing) return pass('pSigning');
   const a = candidateParts(s,c).account;
-  if (!company(a) || c.family === 'claude' || t.sandbox !== 'danger-full-access')
-    return deny('pSigning','SIGNING_COMPANY_FULL_ACCESS_REQUIRED','Registered own-test signing uses an ordinary full-access Codex-family company worker.',c);
+  if (c.family === 'claude' || t.sandbox !== 'danger-full-access')
+    return deny('pSigning','SIGNING_FULL_ACCESS_REQUIRED','Registered own-test signing uses an ordinary full-access Codex-family worker; quota permission follows its actual account.',c);
   // --signing declares the registered own-test workflow. The worker must check
   // its public package registry and identity allowlist at action time; routing
   // never opens signing material or invents a new manifest prerequisite.
@@ -162,7 +164,7 @@ export function pDevice(t, s, c) {
 export function pScopedApproval(t, s, c, context = {}) {
   const a = candidateParts(s, c).account;
   const requirements = [];
-  if (companyDevice(s) && !company(a)) requirements.push(['personal-quota', 'PERSONAL_QUOTA_OK_REQUIRED', 'Current scoped personal-quota approval is required.', context.companyEligible || context.companyUnknown]);
+  if (!company(a) && (a.kind==='claude'||companyDevice(s))) requirements.push(['personal-quota', 'PERSONAL_QUOTA_OK_REQUIRED', 'Current scoped personal-quota approval is required.', context.companyEligible || context.companyUnknown]);
   if (c.modelId==='gpt-6-astra' && a?.kind==='chatgpt') requirements.push(['astra','PERSONAL_ASTRA_OK_REQUIRED',`use GPT-6-Astra on personal account ${a.id}?`]);
   if (c.effort === 'max' && !company(a)) requirements.push(['max-effort', 'MAX_EFFORT_OK_REQUIRED', 'Max effort on a personal account requires its own scoped approval.']);
   if (c.modelId === 'fable') requirements.push(['fable', 'FABLE_OK_REQUIRED', 'Fable requires a separate scoped decision.']);
@@ -175,7 +177,7 @@ export function pScopedApproval(t, s, c, context = {}) {
   return pass('pScopedApproval');
 }
 export function pBackground(t, s, c) {
-  return t.background && !company(candidateParts(s, c).account) ? deny('pBackground', 'BACKGROUND_PERSONAL_FORBIDDEN', 'Background roles never use personal quota.', c) : pass('pBackground');
+  return pass('pBackground'); // Personal background work uses the same scoped/standing quota permission as foreground work.
 }
 export function pResourceScope(t, s, c) {
   const resources = known(s.resources);
@@ -188,8 +190,7 @@ export function pResourceScope(t, s, c) {
   return pass('pResourceScope');
 }
 export function needsReviewer(t, s) {
-  if(s?.projectProfiles?.[t.project]?.profile==='internal-demo'&&!t.flags['profile-override']) return false;
-  return t.role === 'primary' && (adversarial(t) && isReview(t) || t.category === 'review-high'
+  return mandatoryReview(t)&&t.role === 'primary' && (t.reviewClass==='D' && isReview(t) || t.category === 'review-high'
     || isReview(t) && t.impact === 'release');
 }
 export function pReviewerSet(t, s, c, context = {}) {

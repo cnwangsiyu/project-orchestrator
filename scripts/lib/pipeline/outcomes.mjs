@@ -1,6 +1,6 @@
 // Pure outcome aggregation for the routing snapshot. Mirrors the existing ledger contract.
 const bare = (project,name) => name.startsWith(`${project}-`) ? name.slice(project.length+1) : name;
-export const OUTCOME_OVERRIDES = ['result', 'rounds', 'cause', 'retries', 'scopeChanges', 'minutes', 'note', 'reviewed', 'actual'];
+export const OUTCOME_OVERRIDES = ['result', 'rounds', 'cause', 'retries', 'scopeChanges', 'minutes', 'note', 'reviewed', 'actual', 'reviewResult'];
 export const dedupeOutcomes = (records) => {
   const by = new Map(), corrections = new Map();
   for (const o of [...records].sort((a, b) => a.t - b.t)) {

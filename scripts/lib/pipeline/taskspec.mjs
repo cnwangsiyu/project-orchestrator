@@ -1,3 +1,4 @@
+import {REVIEW_CLASSES,projectReviewPolicy} from '../review-policy-data.mjs';
 import { VERSION, array, object, idOK, modelId, unique, clone, freeze, fingerprint, isReview, compare, stable } from './common.mjs';
 
 export const CATEGORIES = Object.freeze(['lookup', 'extract', 'analysis', 'research', 'implement', 'implement-hard', 'ui-browser',
@@ -6,7 +7,7 @@ const BOOLEANS = new Set(['auto-check', 'writes', 'read-only', 'runs-tests', 'si
   'urgent', 'security', 'adversarial', 'defensive', 'background', 'device-lease', 'shared-lock', 'no-local-build', 'worker', 'installed']);
 const VALUES = new Set(['stakes', 'failures', 'against', 'author', 'impact', 'env', 'exclude-account', 'exclude-model', 'origins', 'mode',
   'sandbox', 'cwd', 'task-dir', 'name', 'project', 'apps', 'user-ok', 'auto-reroute-depth', 'previous-attempt', 'execution', 'actual',
-  'owner', 'exclude-lane', 'review-override', 'review-required', 'profile-override', 'artifact-ref', 'network']);
+  'owner', 'exclude-lane', 'review-override', 'review-required', 'profile-override', 'artifact-ref', 'network', 'review-class', 'review-reason', 'review-scope']);
 const CODE = new Set(['implement', 'implement-hard', 'debug', 'science']);
 export class TaskInputError extends Error {
   constructor(code, message) { super(message); this.name = 'TaskInputError'; this.code = code; this.exitCode = 2; }
@@ -49,7 +50,12 @@ export function parseTaskSpec(argv, context = {}) {
 }
 export function createTaskSpec(input) {
   if (!object(input) || !CATEGORIES.includes(input.category)) fail('INVALID_CATEGORY', 'Unknown task category.');
-  const f = clone(input.flags ?? {}), cat = input.category;
+  const f = clone(input.flags ?? {}); let cat = input.category; const policyNotes=[];
+  const reviewClass=f['review-class']??input.reviewClass??null,reviewReason=f['review-reason']??input.reviewReason??null;
+  if(reviewClass!==null&&!REVIEW_CLASSES.includes(reviewClass)) fail('INVALID_REVIEW_CLASS','review-class takes A, B, C or D.');
+  if(reviewClass&&(!validText(reviewReason)||!reviewReason.trim()))fail('REVIEW_REASON_REQUIRED','review-class needs --review-reason with its A–D basis.');
+  if(f['review-required']&&!reviewClass)policyNotes.push('review-required does not establish mandatory review: provide review-class A–D and review-reason.');
+  if(cat==='review-high'&&!reviewClass){cat='review';policyNotes.push('review-high without review-class A–D: using an ordinary optional review.');}
   for (const k of ['writes', 'runsTests', 'background', 'ownTestApp']) if (input[k] !== undefined && typeof input[k] !== 'boolean') fail('INVALID_TASK_SHAPE', `${k} must be boolean.`);
   if (input.requirements !== undefined && !object(input.requirements)) fail('INVALID_TASK_SHAPE', 'Requirements must be a record.');
   if (input.previousAttempts !== undefined && (!Array.isArray(input.previousAttempts) || input.previousAttempts.some((a) => !object(a)))) fail('INVALID_HISTORY', 'Previous attempts must be sanitized records.');
@@ -65,25 +71,28 @@ export function createTaskSpec(input) {
     fail('INVALID_ACTUAL','actual takes vendor:model:effort[@account] (comma-separated launch order).');
   const enumValue = (key, fallback, choices) => {
     const v = f[key] ?? input[key] ?? fallback;
-    if (!choices.includes(v)) fail('INVALID_ENUM', `Invalid ${key}.`);
+    if (!choices.includes(v)) fail('INVALID_ENUM', key==='impact'?'impact takes service|throwaway|release; release is ONLY class A: an externally released version that cannot be rolled back within hours. Local data reads/writes are not release; irreversible data operations use --review-class C.':`Invalid ${key}.`);
     return v;
   };
   const integer = (key, field, max = Number.MAX_SAFE_INTEGER) => {
     const raw = f[key] ?? input[field] ?? 0;
-    if (!/^(0|[1-9]\d*)$/.test(String(raw)) || !Number.isSafeInteger(Number(raw)) || Number(raw) > max) fail('INVALID_NUMBER', `Invalid ${key}.`);
+    if (!/^(0|[1-9]\d*)$/.test(String(raw)) || !Number.isSafeInteger(Number(raw)) || Number(raw) > max) fail('INVALID_NUMBER', key==='impact'?'impact takes service|throwaway|release; release is ONLY class A: an externally released version that cannot be rolled back within hours. Local data reads/writes are not release; irreversible data operations use --review-class C.':`Invalid ${key}.`);
     return Number(raw);
   };
   const stakes = enumValue('stakes', 'normal', ['low', 'normal', 'high']);
-  const impact = enumValue('impact', null, [null, 'release', 'service', 'throwaway']);
+  let impact = enumValue('impact', null, [null, 'release', 'service', 'throwaway']);
+  const project=f.project??input.project??'UNKNOWN', profile=projectReviewPolicy(project,input.projectProfiles??{});
+  if(impact==='release'&&reviewClass!=='A'){impact='service';policyNotes.push(profile.externalRelease?'impact release requires review-class A; treating as service.':'Project has no external release: treating impact release as service unless review-class A is given.');}
   const env = enumValue('env', 'prod', ['test', 'prod']);
   if(f.network!==undefined&&!['on','off'].includes(f.network)) fail('INVALID_ENUM','network takes on or off.');
   let failures = integer('failures', 'failures');
   const autoRerouteDepth = integer('auto-reroute-depth', 'autoRerouteDepth', 2);
-  if (CODE.has(cat) && !impact) fail('IMPACT_REQUIRED', 'Code tasks require impact.');
+  if (CODE.has(cat) && !impact) fail('IMPACT_REQUIRED', 'Code tasks require --impact service|throwaway|release. Release is ONLY class A: an externally released version that cannot be rolled back within hours, declared with --review-class A and --review-reason. Local data reads/writes are not release; real irreversible data operations use class C. Personal/family apps, internal demos, PPE/test environments, test packages and features only reading existing data are not release.');
   for (const k of ['author', 'against']) if (f[k] !== undefined && !['claude', 'codex'].includes(f[k])) fail('INVALID_ENUM', `Invalid ${k}.`);
   if (cat === 'second-opinion' && !f.against && !input.againstAttemptId) fail('AGAINST_REQUIRED', 'Second opinions require an against identity.');
   if (f.author && !['review', 'review-high'].includes(cat)) fail('AUTHOR_CATEGORY', 'Author is only valid for review.');
   if ((f.writes && f['read-only']) || (f.signing && f['read-only'])) fail('CONFLICTING_FLAGS', 'Conflicting read/write declarations.');
+  if (reviewClass==='D'&&f.defensive)fail('CONFLICTING_CONTENT','Review class D is adversarial and cannot be defensive.');
   if (f.defensive && (!f.security || !isReview({ category: cat }) || f.adversarial)) fail('CONFLICTING_CONTENT', 'Defensive scope requires a security review without adversarial scope.');
   let execution = enumValue('execution', 'UNKNOWN', ['UNKNOWN', 'local-heavy', 'local-light', 'remote']);
   if (f['no-local-build']) {
@@ -115,7 +124,7 @@ export function createTaskSpec(input) {
     if (a?.failureKind === 'policy-block') labels.add('policy-blocked');
   }
   if (f.security) labels.add('security');
-  if (f.adversarial) labels.add('adversarial');
+  if (f.adversarial||reviewClass==='D') labels.add('adversarial');
   if (f.defensive) labels.add('defensive-confirmation');
   if (labels.has('adversarial') || labels.has('policy-blocked') || labels.has('attack-material')) { labels.add('adversarial'); labels.add('security'); labels.delete('defensive-confirmation'); }
   if (labels.has('security') && isReview({ category: cat }) && !labels.has('defensive-confirmation')) labels.add('adversarial');
@@ -144,7 +153,7 @@ export function createTaskSpec(input) {
   if (!idOK(taskId) || !idOK(requestId)) fail('TASK_ID_REQUIRED', 'Inject stable taskId and requestId before planning.');
   const task = { schemaVersion: VERSION, taskId, requestId, project: f.project ?? input.project ?? 'UNKNOWN', owner: f.owner ?? input.owner ?? 'UNKNOWN', category: cat,
     role: input.role ?? 'primary', parentTaskId: input.parentTaskId ?? null, briefHash: input.briefHash ?? 'UNKNOWN', flags: f,
-    tier, stakes, impact, env, execution, writes, runsTests: f['runs-tests'] ?? input.runsTests ?? false, background,
+    reviewClass,reviewReason,reviewScope:f['review-scope']??input.reviewScope??null,policyNotes:unique([...array(input.policyNotes),...policyNotes]), tier, stakes, impact, env, execution, writes, runsTests: f['runs-tests'] ?? input.runsTests ?? false, background,
     contentLabels: unique([...labels]), capabilitiesNeeded: unique([...caps]), exclusions: unique(exclusions.map(stable)).map(JSON.parse),
     failures, previousAttempts: attempts.sort((a, b) => compare(String(a?.id), String(b?.id))),
     floor: clone(input.floor ?? { profileIds: [], previousAttemptIds: [], relationVersion: VERSION, historyStatus: failures || autoRerouteDepth || f['previous-attempt'] ? 'UNKNOWN' : 'KNOWN' }),
@@ -167,7 +176,7 @@ export function createTaskSpec(input) {
 export function deriveReview(task, { role = 'second', authorAttemptId = null, artifactRevision = task.artifactRevision } = {}) {
   const flags = { ...task.flags, 'read-only': true };
   for (const k of ['writes', 'signing', 'runs-tests', 'author', 'against', 'apps', 'origins', 'failures', 'previous-attempt', 'actual', 'auto-reroute-depth']) delete flags[k];
-  return createTaskSpec({ ...task, category: task.tier === 'hard' ? 'review-high' : 'review', flags, role, writes: false, runsTests: false,
+  return createTaskSpec({ ...task, category: task.category==='review-high'||['A','D'].includes(task.reviewClass)?'review-high':'review', flags, role, writes: false, runsTests: false,
     previousAttempts: [], failures: 0, autoRerouteDepth: 0, floor: { profileIds: [], previousAttemptIds: [], relationVersion: task.floor.relationVersion, historyStatus: 'KNOWN' },
     authorAttemptId, againstAttemptId: null, artifactRevision, selectionCause: 'initial', qualityEscalation: null });
 }

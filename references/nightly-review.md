@@ -100,7 +100,7 @@ These are the user's decisions (2026-10-30 to 2026-11-03):
 - **One routing mode, auto.** Routing is computed by the scripts. The orchestrator judges only the category, the
   stakes, whether an automatic check exists, and the failure count.
 - **Artifact/Docs tools and peer negotiation run on Claude** (`claude-tools`). Browser work, frontend visual checks and
-  desktop apps are not in this lock: they go to TTADK Codex when browser-ready (rules below).
+  desktop apps are not in this lock: browser/ui-browser prefer free ready TRAE Playwright, then TTADK; desktop uses TTADK then personal ChatGPT ask, never TRAE/terminal Claude.
 - **Every task whose output is an image runs on Codex.**
 - **Codex quota is use-it-or-lose-it.** Spend every account's week by its reset; everything either vendor can do
   goes to Codex first.
@@ -109,13 +109,12 @@ These are the user's decisions (2026-10-30 to 2026-11-03):
 - **Reset cards: quota first, then cards.**
   - Suggest one only at ≥99%, or before a card expires.
   - Every redemption needs the user's explicit yes, every time. Never redeem a card yourself.
-- **Fable, Astra on personal quota, `max` effort (off TTADK; on TTADK it needs no OK, user 2026-11-07) and an exhausted ladder need
+- **Fable, Astra on personal quota, `max` effort outside company accounts (TTADK and TRAE max is ungated) and an exhausted ladder need
   the user's OK.**
 - **Codex accounts and browser (2026-11-07):**
-  - Company accounts precede personal quota: TTADK first, then TRAE. The approved company balancing and explicit
-    `--background` exceptions may prefer TRAE while TTADK is healthy; tune only within the bounds below.
+  - Company accounts precede personal quota. Walk quality order across accounts; for the chosen model prefer observed free TRAE, including depleted lanes, except TTADK expiry or required capabilities. Never downgrade to spend a bucket.
   - TTADK has no concurrency cap: retry a rate-limited run once, then re-route without it.
-  - Browser work goes to a browser-ready Codex account (TTADK first, else a ChatGPT account), else to Claude.
+  - Browser/ui-browser: ready free TRAE Playwright → TTADK → personal ChatGPT ask → Claude ask. Computer-use: TTADK → personal ChatGPT ask, never TRAE/terminal Claude.
   - On a TTADK device, leave the ChatGPT and Claude quota for the user's other device (no TTADK there): don't add
     rules that spend it for its own sake there, and don't flag unspent ChatGPT quota or lapsed cards on a TTADK device
     as waste (user, 2026-11-07).
@@ -125,7 +124,7 @@ These are the user's decisions (2026-10-30 to 2026-11-03):
     TTADK's quota is daily (~500M tokens), so throwaway code work starts at Sol `high` on the company accounts; a
     failure still climbs to `xhigh` and `max`.
   - Desktop apps (`computer-use`) go to TTADK Codex when browser-ready (user, 2026-11-07): a terminal Claude worker has
-    no desktop computer-use tool (ledger 10-31), so Claude there is only a fallback that may report BLOCKED.
+    no desktop computer-use tool (ledger 10-31), so terminal Claude is never a desktop fallback.
 - **Permissions (2026-11-05; tightened 2026-11-13):** Claude workers use Remote Control and explicit Bypass;
   only actions Bypass cannot pass need authorization cards. Login material and login bypasses remain forbidden for
   every worker. `--signing` is the sole scoped exception: a full-access worker may sign our own registry-listed test
@@ -174,7 +173,7 @@ These are the user's decisions (2026-10-30 to 2026-11-03):
     model.
 
   Delegate wide reads to a background worker routed with `route.mjs extract --project routing-review` (a
-  Codex run: Luna on ChatGPT, Sol on TTADK), not a subagent.
+  Codex run using the actual routed model on a capable account), not a subagent.
 - **Model news:** WebFetch the official pages directly. Use at most about 10 fetches, with no search fan-out.
   - Anthropic: platform.claude.com/docs/en/about-claude/models/overview and /pricing, anthropic.com/news.
   - OpenAI: learn.chatgpt.com/docs/models.md, /pricing.md, /changelog.
@@ -200,9 +199,7 @@ is unknown, not healthy; missing sign-in means BLOCKED.
 - **Quota health:** inspect Claude all-model/Fable weekly projections, TRAE login/restriction recovery and Codex
   reset-card deadlines. Every reset-card redemption needs a fresh user OK, even after prior approvals. Company
   quota continues without asking; ask before personal quota or deferring runnable work. No LLM total-cost caps.
-- **Signing audit:** count the transitional `vesdk-signer` worker's user-approved personal Claude usage separately
-  from all other Claude work. Use sanctioned worker/quota metadata only; never inspect signing, password, keychain or
-  session files.
+- **Signing audit:** the resident vesdk-signer is retired. Audit ordinary routed --signing workers, registered package metadata, allowlisted identity and receipt/log evidence; company first, personal workers retain quota approvals. Never inspect designated signing inputs or session files.
 - **Persistent orchestrator models:** model selection lives in `~/.claude/jobs/<id>/state.json` `respawnFlags`;
   a `/model` switch is lost on restart. VAK and routing stay on **Fable**; Webview and Lynx returned to **Opus on
   2026-11-11** because their Fable weekly projection exceeded budget. These are orchestrator choices, not worker defaults.
@@ -248,26 +245,9 @@ owner. Opt-in KeepAlive templates/commands are in `rules-enforcement.md`; this r
 
 ### Review share (审查占比; user, 2026-11-14)
 
-Read `reviews.rolling24h` and `reviews.rolling7d`; the budget is **≤10% of all dispatches**, both overall and per
-project over the rolling 24 hours, with the seven-day/project-day trend reported for context. Send the user **two or
-three lines every night**: overall 24h/7d share; projects over 10% and their `tasksAtLeast3`; second-reviewer,
-re-review and P0/P1-yield counts (including `UNKNOWN`, never folded into “none”). Put each project's own numbers and
-over-reviewed task names in that orchestrator's `notify.json.actions`; do not send it other projects' raw task details.
+Read `reviews.rolling24h` and `reviews.rolling7d`; report overall share as observation and compare each project to its configured target (video-agent 10%, vesdk-mainline/webview 20%). In two or three nightly lines report per-project dispatch/review/mandatory counts, targets, overBudget, second/re-review counts and blocking/known/blockingRatePct yield; UNKNOWN is never none. Send each orchestrator only its project task names and actions. Projects on no-review (evelyns-world, acq and autotrader for now) are excluded from the review-share target; report their dispatch/review counts only (`noReviewProjects`), without budget warnings.
 
-When a project is over 10%, tune only within the approved policy and in this order:
-
-1. Enforce the two-round cap and make re-reviews check only previously blocked findings.
-2. Drop second reviewers except adversarial, `review-high`/release-impact, and the documented fallback-first-reviewer
-   case on release/high-stakes work.
-3. Batch small related changes in one task family under one review instead of reviewing each change separately.
-4. For optional-review categories/models with at least 10 recorded rounds and no P0/P1 yield, remove the optional
-   review; `UNKNOWN` rounds are not “no finding” evidence.
-5. Prefer executable-test acceptance for service-impact code where the policy permits it.
-
-Never cut release-impact/high-stakes reviews, adversarial security reviews, or reviews of anything installed on the
-user's machine to hit 10%. If `requiredReviewSharePct` alone is over 10% for a project, report the exact dispatch and
-required-review counts and create a Chinese user decision card: raise that project's review budget, or narrow what
-counts as high-stakes. Until the user decides, keep every required review.
+Mandatory review is ONLY explicit --review-class A|B|C|D plus --review-reason: A a version that reaches external users and cannot be rolled back within hours; B login/auth/permission/signing logic; C irreversible data operations or billing/quota accounting; D a named adversarial review. High stakes, installation and fallback authorship alone do not qualify. Use the shared project-risk config and explicit class/reason evidence. Preserve mandatory review even when its share exceeds target; propose a budget/scope decision with exact counts instead. Enforce the hard two-round scope cap, remove second reviewers outside classified adversarial/review-high/release, batch related changes and prefer tests for optional work. `--review-result blocking|none` overrides note heuristics; interim phrases are supported. No profile exemption blocks explicit A–D.
 
 For `quota.traeReconciliation`, report each complete reset window's model, units, public-list token cost,
 `dollarsPerUnit`, `coveragePct`, and quota/session span coverage. This is reconciliation evidence, not billing truth:
@@ -362,7 +342,7 @@ Keep 12/20/16 and the ONE package slot. Telemetry only observes, never implement
   - For code quality, use `reviewedReleaseByVendor`: reviewed `release` work is the only work every vendor is judged
     on the same way.
   - Check `byImpact` too. A run of `service`/`throwaway` failures that a review would have caught suggests moving
-    that kind of work to `release`. Review rounds that block on trivia suggest tightening `review-rubric.md`. Change a row only when its numbers hold over several tasks; one task is an
+    that kind of work to an explicit A–D class when its trigger is supported. Review rounds that block on trivia suggest tightening `review-rubric.md`. Change a row only when its numbers hold over several tasks; one task is an
   anecdote. When `missing` lists tasks without an outcome, remind their orchestrator to record them.
 - **Rework causes (rework retro 2026-11-10):** `outcomes.byCause` splits rework by cause; `byVendor`, `byModel`,
   `traeVsCodex` and `reviewedReleaseByVendor` count `code` rework only. Remind orchestrators of `reworkWithoutCause`
@@ -411,7 +391,7 @@ Keep 12/20/16 and the ONE package slot. Telemetry only observes, never implement
 
 `outcomes.fallbackModels` in review-data: how often the company account's fallback models (DeepSeek-V4.1-Flash,
 Gemini-3.1-Pro when listed, vision-only Seed-Evolving; references/model-routing.md, "Fallback models on the company account") ran, why
-(`gpt-out` or `after-sol-fell-short`), how their tasks ended, and the extra reviews of their service code. Read it with
+(`gpt-out` or `after-sol-fell-short`), how their tasks ended, and any explicitly classified review of their code. Read it with
 `--hours 168` too, since a day holds few. Reorder existing eligible fallbacks directly when the evidence is clear,
 under the tuning bounds below. Changes to quality gates or removal of a family still need a decision card, for example:
 - extra reviews that keep passing clean (say 10+ with nothing caught) → review only the weaker fallback, or drop the
@@ -428,15 +408,8 @@ normal/light substitutions. Our mid-size benchmarks do not separate GPT quality;
 
 Every night review the policies added on 2026-11-13 against both the day's data and the week's trend:
 
-- Company balancing currently keeps a 15% TRAE reserve, requires load <60% and no queue position >300 within
-  30 minutes, and considers quota expiry <6 hours and TTADK burn projected before reset. Read the actual factors
-  too: unknown telemetry has limited eligibility, and expiry balancing compares remaining quota shares.
-- Check TRAE's quota-aware model choice (a depleted bucket → comparable Astra quota, then eligible fallbacks),
-  the explicit `--background` lane, DeepSeek model-fit limits for build/device and high-stakes or security reviews,
-  the `--security` exclusion of TRAE GPT, Seed-Evolving's vision-only role, and Astra's later company escalation rung.
-  Background means nobody is waiting, with no deadline or near-term dependency; it never spends personal quota.
-  Keep queued hub workers pending while queue/status arrives. TRAE controls priority, so `--background` cannot
-  guarantee that high-priority quota stays untouched before depletion.
+- Company choice walks quality order, then free TRAE for the candidate model (fresh load <60%, no queue/stall, ready lane), including depleted-but-free lanes and browser/ui-browser. Congested/queued/stalled or unknown TRAE does not displace free TTADK; TTADK reset <4h with projected burn <70% prefers TTADK. TRAE priority expiry is model-bucket-specific and independent of TTADK remaining share; report reset and units. Reserve/transfer factors are observations, not vetoes.
+- Background keeps its quality floor and capability locks, with the same personal-quota gates; no-company personal ChatGPT may run and approved personal options precede DEFER. Every DEFER carries the user question. Keep DeepSeek execution limits, Seed vision-only, TTADK catalog, TRAE GPT security exclusion and provider-specific restrictions.
 - Read `quota.companyByHour` and, where needed, the adjacent records in `quota-log.jsonl`: TTADK/TRAE quota over
   the day, TRAE load percentages and queue positions by hour, how often TTADK ran out and when, and the last
   observed unused TRAE buckets before each reset. Count depletion episodes, not every depleted snapshot; report
@@ -450,8 +423,7 @@ Every night review the policies added on 2026-11-13 against both the day's data 
   security, model-fit, device-lease/shared-lock exclusions and quality gates. Use small steps, compare similar tasks,
   and state in both the commit and report the old/new setting, evidence, number of days/tasks, and expected effect.
 - If the evidence is thin, conflicting or unclear, or the change crosses those bounds, retain the current policy
-  and raise a Chinese decision card with options, the data behind each and a recommendation. Examples: automatically
-  sending normal-stakes work to low priority without an explicit `--background` brief, spending personal quota,
+  and raise a Chinese decision card with options, the data behind each and a recommendation. Examples: changing the quality ladder or the observed free-lane policy, spending personal quota,
   dropping a model family, or changing quality gates. Apply the answer through "Decisions for the user" below.
 
 ## 3. Change (small, evidenced, tested)
@@ -466,8 +438,7 @@ Every night review the policies added on 2026-11-13 against both the day's data 
 - **Edit:**
   - the table in `scripts/route.mjs`;
   - `POLICY` in `scripts/lib/state.mjs`;
-  - company balancing thresholds in `BALANCE` / `balanceFactors` in `scripts/lib/company-load.mjs`, within the tuning
-    bounds above; the corresponding eligibility, quota-choice and fallback rules in `scripts/route.mjs`;
+  - policy thresholds in `scripts/lib/pipeline/estimate.mjs` and shared ETA constants, within explicitly approved tuning bounds; legacy `balanceFactors` is observational and cannot veto the quality-first chooser;
   - the rationale in `references/model-routing.md`;
   - other docs only where they describe what changed.
   - `scripts/resource-policy.json`, only within evidenced user-approved ranges above; telemetry/cleanup code or changing
@@ -613,3 +584,7 @@ use a separate `NIGHTLY_DIR` for dry tests. `NIGHTLY_DAY=YYYY-MM-DD` selects art
 turn newly gathered data into a historical snapshot. `NIGHTLY_EXCLUDE` and `NIGHTLY_EXCLUDE_MODEL` supply explicit
 account/model exclusions. The fixture harness in `scripts/test/nightly-review-scenarios.mjs` runs no live workers,
 sessions, notification tools or credential reads; `node scripts/test/run-all.mjs` includes it.
+
+Dependency installation needs no decision card: Project dependencies and build tools fetched through normal package managers and registries (npm/pnpm/yarn, pip/uv, gradle/maven, CocoaPods/SPM, cargo, go modules, brew formulae, and SDK/toolchain components the build asks for) are installed directly into the task workspace or user-level caches, without a card or question. No secrets/credentials, production changes without a card, unapproved personal quota, or system security changes; a required login the worker lacks is BLOCKED.
+
+Release impact means class A only: a version reaches external users and cannot be rolled back within hours. Reading/writing local or user data is not release; real irreversible data operations are class C. Personal/family apps, internal demos and PPE/test packages, or features that only read existing data are not release.

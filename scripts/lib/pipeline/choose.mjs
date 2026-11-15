@@ -12,58 +12,35 @@ export function orderCandidates(task, snapshot, rows) {
   let cohort = rows.filter(({ candidate: c }) => EFFORTS.indexOf(c.effort) === minimum.get(stageKey(c)));
   const stalled = (r) => r.estimate.stalled || r.reviewers?.some(s=>s.estimate.stalled);
   if(cohort.some(r=>!stalled(r))) cohort=cohort.filter(r=>!stalled(r));
-  // Quota preference stays within the task's qualified ladder. A free depleted
-  // Sol lane does not promote light work while light models can serve it.
-  if(task.tier!=='hard' && !adversarial(task) && task.category!=='image-read' && !task.previousAttempts.length) {
-    for(const account of snapshot.accounts.filter(a=>a.kind==='trae')) {
-      const ladder=TIERS[task.tier];
-      const inLadder=r=>r.candidate.accountId===account.id && ladder.includes(r.candidate.modelId);
-      const usable=cohort.filter(r=>inLadder(r)&&!r.estimate.capacityReset&&!stalled(r));
-      if(task.tier==='light' && usable.length)
-        cohort=cohort.filter(r=>r.candidate.accountId!==account.id||inLadder(r));
-      const priority=usable.some(r=>candidateParts(snapshot,r.candidate).lane.mode==='priority'
-        && r.estimate.balance?.congestion!=='high');
-      if(priority) cohort=cohort.filter(r=>r.candidate.accountId!==account.id
-        ||candidateParts(snapshot,r.candidate).lane.mode!=='low-priority');
-    }
+  const backgroundChoice=task.background&&!['browser','ui-browser','computer-use','build-run'].includes(task.category);
+  const parts=r=>candidateParts(snapshot,r.candidate);
+  const ready=r=>!stalled(r)&&!r.estimate.capacityReset&&r.estimate.startDelayMin===0
+    &&(parts(r).account.kind!=='trae'||r.estimate.balance?.freeNow===true);
+  // Quality precedes quota: a lower free bucket never displaces free Sol.
+  // Exclusions, capabilities and actual retry floors already bounded these rows.
+  const companyRows=cohort.filter(r=>company(parts(r).account));
+  const ladder=adversarial(task)?['kimi-k3','deepseek-v4.1-flash','opus']
+    :task.category==='image-read'?['gpt-6.1-sol','gpt-6-astra','gemini-3.1-pro-preview','seed-evolving']
+    :[...TIERS[task.tier],...companyRows.flatMap(r=>modelPreference(task,parts(r).account))];
+  const models=[...new Set(ladder)];
+  const first=models.find(id=>companyRows.some(r=>r.candidate.modelId===id&&ready(r)));
+  if(first) {
+    const same=companyRows.filter(r=>r.candidate.modelId===first&&ready(r));
+    const expiringTT=same.filter(r=>parts(r).account.kind==='ttadk'&&r.estimate.expiryOpportunity===true);
+    const freeTrae=same.filter(r=>parts(r).account.kind==='trae');
+    const chosen=expiringTT.length?expiringTT:freeTrae.length?freeTrae:same;
+    cohort=cohort.filter(r=>!company(parts(r).account)||chosen.includes(r));
+  } else if(cohort.some(r=>!company(parts(r).account)&&r.ok===true&&ready(r))) {
+    cohort=cohort.filter(r=>!company(parts(r).account)&&r.ok===true&&ready(r));
+  } else if(companyRows.length) {
+    const fallback=models.find(id=>companyRows.some(r=>r.candidate.modelId===id));
+    if(fallback) cohort=cohort.filter(r=>!company(parts(r).account)||r.candidate.modelId===fallback);
   }
-  // Apply the adversarial family ladder before company-lane preference so free
-  // Flash cannot displace qualified Kimi; compare free capacity within that rung.
-  if (adversarial(task) && cohort.length) {
-    const lock = (r) => ['kimi-k3', 'deepseek-v4.1-flash', 'opus'].indexOf(r.candidate.modelId);
-    const first = Math.min(...cohort.map(lock));
-    cohort = cohort.filter((r) => lock(r) === first);
+  if(adversarial(task)&&cohort.length) {
+    const rank=r=>['kimi-k3','deepseek-v4.1-flash','opus'].indexOf(r.candidate.modelId);
+    const first=Math.min(...cohort.map(rank));cohort=cohort.filter(r=>rank(r)===first);
   }
-  if(['browser','ui-browser'].includes(task.category))
-    cohort=cohort.filter(r=>candidateParts(snapshot,r.candidate).account.kind!=='trae'||r.estimate.balance?.freeNow);
-  const backgroundChoice=task.background&&!['browser','ui-browser','computer-use','build-run'].includes(task.category)&&!task.flags['shared-lock']&&!task.flags['device-lease'];
-  const ttReady=cohort.some((r)=>candidateParts(snapshot,r.candidate).account.kind==='ttadk'&&!r.estimate.capacityReset&&r.estimate.startDelayMin===0);
-  const ttExpiry=cohort.some(r=>candidateParts(snapshot,r.candidate).account.kind==='ttadk'&&r.estimate.expiryOpportunity===true);
-  if(ttReady&&!backgroundChoice) {
-    // Admission already enforces capabilities, resource rules and retry floors.
-    // Prefer demonstrated immediate TRAE capacity, including depleted buckets,
-    // to preserve TTADK's daily quota. Unknown telemetry is not proof of a free lane.
-    const free=cohort.filter(r=>!task.flags['shared-lock']&&!task.flags['device-lease']&&candidateParts(snapshot,r.candidate).account.kind==='trae'&&r.estimate.balance?.freeNow
-      &&(task.tier!=='light'||TIERS.light.includes(r.candidate.modelId)));
-    if(ttExpiry) cohort=cohort.filter(r=>candidateParts(snapshot,r.candidate).account.kind!=='trae');
-    else if(free.length) cohort=cohort.filter(r=>!company(candidateParts(snapshot,r.candidate).account)||free.includes(r));
-    else cohort=cohort.filter(r=>candidateParts(snapshot,r.candidate).account.kind!=='trae');
-  }
-  // Normal work retains its established quota order. Within that order, measured
-  // congestion can prefer the next available lane; hard work compares Sol/Astra.
-  if(task.tier==='normal'&&task.category!=='image-read'&&!task.previousAttempts.length&&!adversarial(task)) {
-    const preferred=new Map();
-    for(const account of snapshot.accounts.filter((a)=>a.kind==='trae')) {
-      const rr=cohort.filter((r)=>r.candidate.accountId===account.id), sol=rr.find((r)=>r.candidate.modelId==='gpt-6.1-sol');
-      const unqueued=(r)=>r.estimate.basis!=='queue'&&r.estimate.confidence!=='UNKNOWN'&&r.estimate.balance?.congestion!=='high';
-      const alt=['gpt-5.6-sol','gpt-5.6-terra','deepseek-v4.1-flash'].map((id)=>rr.find((r)=>r.candidate.modelId===id
-        && ['priority','bucket-free'].includes(candidateParts(snapshot,r.candidate).lane.mode)&&unqueued(r))).find(Boolean);
-      if(sol&&candidateParts(snapshot,sol.candidate).lane.mode!=='low-priority'&&unqueued(sol)) preferred.set(account.id,sol.candidate.modelId);
-      else if(alt) preferred.set(account.id,alt.candidate.modelId);
-    }
-    cohort=cohort.filter((r)=>!preferred.has(r.candidate.accountId)||preferred.get(r.candidate.accountId)===r.candidate.modelId);
-  }
-  const companyClass = (r) => company(candidateParts(snapshot,r.candidate).account) || (!isReview(task) && matchingApproval(task,snapshot,r.candidate,'personal-quota',true)) ? 0 : 1;
+  const companyClass = (r) => company(candidateParts(snapshot,r.candidate).account) || (companyDevice(snapshot) && !isReview(task) && matchingApproval(task,snapshot,r.candidate,'personal-quota',true)) ? 0 : 1;
   if (cohort.some((r) => companyClass(r) === 0)) cohort = cohort.filter((r) => companyClass(r) === 0);
   if (['browser','ui-browser','computer-use'].includes(task.category) && cohort.length) {
     const order=r=>{const k=candidateParts(snapshot,r.candidate).account.kind;return k==='ttadk'?0:k==='trae'?1:k==='claude'?3:2;};
@@ -102,7 +79,7 @@ export function orderCandidates(task, snapshot, rows) {
     const retainedMax=task.previousAttempts.some(a=>a.actual?.modelId===c.modelId&&a.actual?.effort==='xhigh')&&c.effort==='max';
     const common = [stalled(r)?1:0, lock, companyClass(r), task.previousAttempts.length&&e.confidence==='UNKNOWN'&&!retainedMax?1:0];
     const scheduling = backgroundChoice ? [quotaClass, ...cost, e.expiryOpportunity === true ? 0 : 1, e.completionMin]
-      : [e.completionMin, e.noPrioritySpend === true ? 0 : 1, e.expiryOpportunity === true ? 0 : 1, ...cost];
+      : [e.expiryOpportunity === true ? 0 : 1,e.completionMin, e.noPrioritySpend === true ? 0 : 1, ...cost];
     const account=candidateParts(snapshot,c).account, preference=modelPreference(task,account), pref=preference.indexOf(c.modelId);
     const accountOrder=account.kind==='ttadk'?0:account.kind==='trae'?1:2;
     const deviceLane=noCompany?[pref<0?preference.length:pref,

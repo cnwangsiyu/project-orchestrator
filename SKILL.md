@@ -160,9 +160,7 @@ subagent — even for lookups, sweeps and research. Subagents run inside your se
 counts against the Claude budget that keeps the orchestrators alive, they can't run on Codex quota
 that would otherwise expire, and their results land in your context. Use a subagent only when a
 worker can't do the job — e.g. an answer you need inline within seconds to make the very next
-decision, and only on the routed (cheap) model. Codex workers are
-allowed to use their own sub-agents (verified 2026-11-04; user: allowed, the worker decides);
-briefs neither ask for nor restrict them (`references/codex-workers.md`).
+decision, and only on the routed (cheap) model. Workers do the work themselves: no sub-agents, delegation to another model, or requests to switch model/account. Launcher and resume instructions carry the current digest. The 2026-11-04 capability experiment is historical evidence only.
 
 **Keep durable state in a ledger, not in memory.** Use
 `~/.claude/orchestrator/<project>/ledger.md`, plus a `tasks/<id>/` folder per task for its brief
@@ -353,28 +351,14 @@ workers, and patching after a second same-kind defect.
   settings restore and the device's return are handled by you or a host-side script, not left to the worker's final
   report.
 
-**Review only what is costly to undo, and record how each task ended** (user, 2026-11-04).
-- Code work (`implement`, `implement-hard`, `debug`, `science`) declares `--impact`. Ask: can a
-  mistake be undone within hours by redeploying or rolling back, without lasting damage?
-  - `release` — no. Examples: app/SDK code that ships in a release (e.g. mobile C++), published
-    libraries, data migrations or bulk data changes, contracts that released clients depend on,
-    auth/privacy/billing. Always reviewed.
-  - `service` — yes. Examples: ordinary live-service changes, internal tools and services.
-    Reviewed only with `--stakes high`.
-  - `throwaway` — demos, prototypes, experiments, test scripts. Never reviewed.
-- The decision is the same whichever vendor wrote the code. `route.mjs` prints the review
-  command (`review`, or `review-high` for high stakes) when one is due.
-- The reviewer follows `references/review-rubric.md`:
-  - only P0/P1 issues block (real failures, crashes, data loss, security, a broken release or
-    compatibility);
-  - at most 3 non-blocking notes, and no style or "consider" comments;
-  - a re-review only checks the blocked findings;
-  - at most 2 rounds, then you decide or ask the user.
-- For a fallback model's release/high-stakes review, put the extra reviewer gate and failure probes from the rubric in
-  the brief (user-approved 2026-11-11 retro; W291-R0's Gemini LAND missed reproduced P1s).
-- Work without a review is accepted on your own check: tests, build, acceptance.
+**Review only what is costly to undo, and record how each task ended** (user, 2026-11-15).
+- Mandatory review is ONLY explicit --review-class A|B|C|D plus --review-reason: A a version that reaches external users and cannot be rolled back within hours; B login/auth/permission/signing logic; C irreversible data operations or billing/quota accounting; D a named adversarial review. High stakes, installation and fallback authorship alone do not qualify.
+- `review-high` without a class becomes ordinary review with a note. `--impact release` requires class A; PPE, test environments, internal demos and trace/test packages are at most service. On a profile without external release it prints a note and uses service unless class A is explicit.
+- Ordinary work is accepted on executable tests; use one optional ordinary review when tests cannot cover it. An explicit class is never blocked by an internal-demo profile.
+- All writing categories carrying a class get the applicable preaction/acceptance review, independent of author vendor. A/C and registered signing actions require the artifact review before acting. Second reviewers only apply to classified adversarial/review-high/release reviews.
+- Follow `references/review-rubric.md`: P0/P1 only block, at most three non-blocking notes, re-review only blocked findings, and at most two rounds per task/branch scope. A new override reason cannot permit round three. Targets: video-agent 10%, vesdk-mainline/webview 20%; targets warn, never suppress mandatory reviews.
 - When a task is finally accepted or given up, record it once:
-  `node <this skill>/scripts/outcome.mjs --project <slug> --name <task> --result pass|rework|fail [--rounds N] [--cause code|spec|process|infra|scope] [--retries N] [--scope-changes N] [--minutes M] [--reviewed] [--note "…"] [--correct] [--actual vendor:model:effort@account ...]`.
+  `node <this skill>/scripts/outcome.mjs --project <slug> --name <task> --result pass|rework|fail [--rounds N] [--cause code|spec|process|infra|scope] [--retries N] [--scope-changes N] [--minutes M] [--reviewed] [--review-result blocking|none] [--note "…"] [--correct] [--actual vendor:model:effort@account ...]`.
   - Keep the kinds of extra work apart (rework retro 2026-11-10): `--cause` is the main cause of the fix rounds (`code`
     the worker's code, `spec` a brief/spec gap, `process` review/acceptance/dispatch, `infra` tools/devices/platform,
     `scope` a changed requirement); `--retries N` counts re-runs for infrastructure (quota, queue, device, signing,
@@ -432,8 +416,7 @@ effort, Codex account and launch command from
     Codex-family sandbox. Use `--signing` only for our own registry-listed test packages; it forces full access and
     injects the scoped signing and audit notes. `--mode` remains accepted for compatibility but no longer selects the
     sandbox. Pass `--cwd`, `--task-dir`, `--name` so the printed command is ready to run;
-  - for code work, `--impact release|service|throwaway` (see "Review only what is costly to
-    undo"); route.mjs refuses code work without it;
+  - Code work requires `--impact service|throwaway|release`. Release is strictly class A: reaches an externally released version and cannot be rolled back within hours; declare `--review-class A --review-reason`. Reading/writing local or user data is not release. Real irreversible data operations are class C (`--review-class C`). Personal/family apps, internal demos, PPE/test environments, test packages, and features that only read existing data are not release; ordinary reversible features are service.
   - `--env test|prod` (default `prod`) and `--no-local-build` for `build-run`: `--env test` marks a
     PPE/staging/dev procedural deploy and gives it the light tier on both company accounts (TTADK
     5.6-Terra/5.5, TRAE light list). Production (`--impact release` without `--env test`) and high
@@ -452,8 +435,7 @@ effort, Codex account and launch command from
     here is an OpenAI model under the same vendor policy as 6.1-Sol (restrictions on 2026-11-10/11), not a policy workaround;
   - `--background` only when nobody is waiting and there is no deadline or near-term dependency: nightly cleanups,
     doc refreshes, exploratory analysis and benchmark batches. On TRAE, ordinary background work is light: prefer
-    bucket-free GPT-5.6-Terra, then GPT-5.5, then DeepSeek-V4.1-Flash (no daily high-priority spend and no low-priority
-    lane). Hard categories, high stakes and failed CODE tasks remain hard: Sol, then Astra only if Sol is unusable,
+    GPT-5.6-Terra, then GPT-5.5, then DeepSeek-V4.1-Flash in quality order; depleted but free lanes count. Hard categories, high stakes and failed CODE tasks remain hard: Sol, then Astra only if Sol is unusable,
     never weaker GPTs. Image reading keeps depleted Sol/Astra, then bucket-free Seed-Evolving, then its normal vision
     pick. No quota information keeps the normal pick. See the approved tier table in references/model-routing.md.
     Daily snapshots need a `sampledAt` reading no more than 30 minutes old; missing/future/stale readings are unknown,
@@ -464,9 +446,8 @@ effort, Codex account and launch command from
     the other non-GPT family). Expect hours (each request queues separately); launch as a hub
     worker, keep it pending while `queued:` lines arrive, and dispatch other work meanwhile. TRAE determines request
     priority: `--background` cannot force a model with daily quota left into low priority, so the normal-pick fallback
-    can spend that quota. Browser/desktop/image-generation, UI and build/device work keep their capability routing; tasks holding
-    a device lease or shared lock (`--device-lease` / `--shared-lock`) cannot enter this lane or company balancing.
-    Background work never uses personal quota: if no company model fits, tell the user it is queued for later.
+    can spend that quota. Browser/desktop/image-generation, UI and build/device work keep their capability routing; tasks requiring a device lease or shared lock acquire it only after the first model response; actual capability and resource gates still apply.
+    Background uses the same personal-quota rules as foreground. Offer a ready personal lane for approval if needed; DEFER only if no company or approved personal lane can start, with a user question.
     Routes record `background: true`; the nightly `background` summary counts tasks and recorded `--minutes`
     wall-clock time, including queues. Cheap rows (`lookup`, `extract`, `draft`) routed or balanced to TRAE also prefer
     GPT-5.6-Terra, then GPT-5.5, then Flash under known quota telemetry; congestion still blocks opportunistic balancing.
@@ -498,9 +479,8 @@ effort, Codex account and launch command from
     --model <model>`, so work moves on instead of failing task by task.
   - Fallback models (user, 2026-11-10): when the company account's GPT is out, route.mjs uses DeepSeek-V4.1-Flash,
     then Gemini-3.1-Pro if listed (gone from TRAE on 2026-11-13), before any personal quota; DeepSeek-V4-Pro is removed.
-    When Sol falls short, a different family
-    runs before Sol max. Apply the model-fit exclusions and daily-quota choices in references/model-routing.md.
-    Their service code gets a review by another family. An infrastructure miss (timeout, queue-full rejection,
+    When Sol falls short, preserve the actual quality floor; a retained same-model max step may run on either company account without a quota question. Apply the model-fit exclusions and daily-quota choices in references/model-routing.md.
+    Their code retains executable acceptance requirements; mandatory review comes only from an explicit A–D class. An infrastructure miss (timeout, queue-full rejection,
     restricted) on one task: re-route with `--exclude-model <model or family>`, same `--failures`
     (references/model-routing.md, "Fallback models on the company account").
   - Difficulty-tiered TRAE substitutions (user-approved 2026-11-13): hard (`implement-hard`, `debug`, `science`,
@@ -508,7 +488,7 @@ effort, Codex account and launch command from
     fallbacks only when both are unusable; normal uses Sol → 5.6-Sol → 5.6-Terra → Flash; light (lookup/extract/draft,
     low stakes or `--background`, unless hard) uses 5.6-Terra → 5.5 → Flash. Astra is reserved for hard substitutions;
     hard never substitutes 5.6-Sol/Terra/5.5. The same table governs balancing/background choices. Unknown quota changes
-    nothing; exclusions and vision rules still apply. TTADK keeps its own catalog: normal/hard work starts at 6.1-Sol;
+    nothing; exclusions and vision rules still apply. Walk quality order across both company accounts, then prefer free TRAE for that model. TTADK keeps its fresh catalog: normal/hard work starts at 6.1-Sol;
     a light row starts at 5.6-Terra → 5.5 (6.1-Sol medium as the failure escalation, then the usual Sol ladder).
     When a light first rung is balanced to TRAE, the full TRAE light list is walked (Terra → 5.5 → Flash), so one
     paused/busy model does not block the transfer; later quality rungs keep their model.
@@ -518,7 +498,7 @@ effort, Codex account and launch command from
     the actual account is a company account (TTADK or TRAE).
     DeepSeek-V4.1-Flash can't emit one very large file in a single turn (output limit); not for generating a large file
     in one go: split the work or exclude deepseek.
-    GPT-5.6-Luna is not used (slowest, about 3x tokens). Evidence and bucket facts: references/model-routing.md.
+    Only TRAE GPT-5.6-Luna is unused (slow, about 3x tokens). Personal ChatGPT `gpt-6-luna` stays first for lookup (`low`), extract (`medium`) and image-gen (`low`, standing exception, no question). Evidence and bucket facts: references/model-routing.md.
   - Free TRAE first (user, 2026-11-15): when the qualifying candidate's own model load is below 60%,
     its lane can start now and no queue/stall is observed, prefer TRAE to save TTADK daily quota,
     including depleted low-priority lanes and ready Playwright browser/ui-browser work. Say
@@ -553,12 +533,7 @@ effort, Codex account and launch command from
     cached input counted in full, shared by all models (plus an hourly cap); it resets at 16:00 UTC.
     When it runs out (`quota-exhausted:` from codex-worker; quota.mjs shows TTADK paused until the
     reset), don't retry or switch models: its work goes to TRAE without asking.
-  - Company accounts (TTADK, TRAE) are used without asking; personal quota (ChatGPT accounts, Claude)
-    only after asking (user, 2026-11-09). On a company-account device, any actual personal primary or second-opinion
-    pick carries `personal quota:` approval, even if company capacity remains. Ask once: "go on" -> `--urgent` for
-    that work; "wait" -> hold it. High stakes ask too. Standing exceptions, no question: image generation,
-    Claude-only tools, and Claude review/second-opinion routing while company Sol
-    is eligible. `--background` never falls through to personal quota.
+  - Company accounts (TTADK, TRAE) run without asking. Ordinary Claude needs scoped personal-quota approval; no-company personal ChatGPT, image generation and Claude-only tools retain standing exceptions. `--urgent --user-ok` alone cannot authorize a run: store the matching task/role/account/model/effort approval. Background uses the same gates.
   - Because of that daily cap, throwaway code work starts at Sol `high` on the company accounts
     (TTADK, TRAE) instead of `xhigh`; a failure still climbs to `xhigh` and `max` (user, 2026-11-09).
   - Every TTADK worker can search the web through its local proxy, once `ttadk-setup` has set it
@@ -577,9 +552,9 @@ effort, Codex account and launch command from
 - **Follow its output:**
   - Launch with the printed command and say the one-line `why` to the user.
   - Ask the user first for anything under "needs the user's OK" (Fable, Astra, `max`, an exhausted
-    ladder, a card redemption).
-  - Start the printed second opinion too.
-  - On `DEFER`, park the task in the ledger and retry when the reason clears (it prints when).
+    ladder, a card redemption); company max does not need an OK.
+  - A second reviewer is printed only for class D adversarial reviews, review-high with a review class, or class A release reviews. Start that classified second reviewer when its gates allow; otherwise there is nothing to start.
+  - On `DEFER`, present its user question, record the explicit wait in the ledger and schedule its retry; no runnable authorized lane may be parked.
   - If the user declines a pending card redemption, re-run with `--no-redeem` for the fallback.
   - Say anything under "tell the user" right away.
   - Don't override the script by hand. If its pick is wrong for a whole kind of task, change the
@@ -598,8 +573,7 @@ effort, Codex account and launch command from
     own; user, 2026-11-03);
   - ask the user to log in an account;
   - restart a hub;
-  - while Codex is underused or front-loading, pull queued and deferred work forward and add
-    second-opinion reviews;
+  - while Codex is underused or front-loading, pull queued and deferred work forward without inventing second reviews to spend quota;
   - while Claude is over budget, keep the orchestrator itself lean: no subagents, fewer reads,
     short briefs.
 
@@ -771,7 +745,7 @@ route an action that was denied in one session through another.
    narrower Codex boundary. Full access may commit on the task branch only when the brief says so; never push to main,
    never force-push, and add no co-author/tool trailer. Claude workers always launch in Bypass. Ask authorization cards
    only for non-secret actions those modes cannot pass (deploys, DNS/certificates, external submissions, pushes).
-   Include this plan in the brief.
+   Never ask for project dependency/build-tool downloads through normal package managers or registries into task workspaces/user caches; login, secrets, production cards, personal-quota gates and system security boundaries still apply. Include this plan in the brief.
 2. **Ask, then let the agent execute.** A blocked Claude worker raises AskUserQuestion and retries after approval;
    don't hand non-secret actions to the user. A blocked Codex worker reports the exact step/error; arrange a card
    through Claude for an approvable non-secret action, never to evade its sandbox or a denial. If approval cannot
@@ -885,3 +859,9 @@ short, batch updates that arrive together, and reply in the user's language.
   `scripts/codex-worker.mjs` (the default: live steer, interrupt, re-attach) and `codex exec`;
   permissions; several accounts and reset cards; and what Codex can't do. Model, effort and
   account come from `scripts/route.mjs`.
+
+**Never ask for dependency installation** (user, 2026-11-15: “下载依赖这种事情不需要问我，直接下就好了”). Project dependencies and build tools fetched through normal package managers and registries (npm/pnpm/yarn, pip/uv, gradle/maven, CocoaPods/SPM, cargo, go modules, brew formulae, and SDK/toolchain components the build asks for) are installed directly into the task workspace or user-level caches, without a card or question. No secrets/credentials, production changes without a card, unapproved personal quota, or system security changes; a required login the worker lacks is BLOCKED.
+
+Release impact means class A only: a version reaches external users and cannot be rolled back within hours. Reading/writing local or user data is not release; real irreversible data operations are class C. Personal/family apps, internal demos and PPE/test packages, or features that only read existing data are not release.
+
+Project defaults are configured in `references/project-risk-profiles.json`: new projects retain the standard four-class policy. evelyns-world/acq and autotrader (for now) use the user-approved no-review profile: accept on tests/build and print no reviewer unless the user asks by explicit class/reason; nightly reports counts and excludes their review-share targets.

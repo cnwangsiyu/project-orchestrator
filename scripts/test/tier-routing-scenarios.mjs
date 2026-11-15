@@ -23,6 +23,7 @@ const window = { label: 'week', used: 10, resetsAt: now + 120 * h, windowMins: 1
 const home = path.join(tmp, 'trae'); fs.mkdirSync(home);
 const run = (args, { models = ids, daily = depleted, company = false, traeHome = home, claudeUsed = 10, sampledAt = now } = {}) => {
   const a = args.slice();
+  if(a[0]==='review-high')a.push('--review-class',a.includes('--security')?'D':'B','--review-reason','tier review classification');
   const failures=Number(a[a.indexOf('--failures')+1])||0;
   if(failures&&!a.includes('--actual')) {
     const fallback=a.includes(SOL)&&a.includes('--exclude-model');
@@ -133,12 +134,12 @@ try {
   assert.equal(retry.pick.effort, 'max'); assert.ok(!retry.needsUserOK.includes('max effort'));assert.ok(retry.pick.command);
   const noAstra = run(['debug'], { models: [SOL56, TERRA56, GPT55, PRO] });
   assert.ok(personalGate(noAstra));
-  for (const [args, model] of [[['lookup'], TERRA56], [['analysis'], SOL56], [['debug'], ASTRA]]) {
-    const r = run(args, { company: true }); assert.equal(r.pick.account, 'trae'); assert.equal(r.pick.model, model);
-    assert.equal(r.balance.selected, true); assert.ok(!personalGate(r));
+  for (const [args, model] of [[['lookup'], TERRA56], [['analysis'], SOL], [['debug'], SOL]]) {
+    const r = run(args, { company: true }); assert.equal(r.pick.account,args[0]==='lookup'?'trae':'ttadk'); assert.equal(r.pick.model, model);
+    if(args[0]==='lookup')assert.equal(r.balance.selected, true); assert.ok(!personalGate(r));
   }
   const balancedFallback = run(['implement', '--exclude-model', `${SOL56},${TERRA56}`], { company: true });
-  assert.equal(balancedFallback.pick.model, FLASH); assert.equal(balancedFallback.pick.effort, 'high');
+  assert.equal(balancedFallback.pick.model, SOL); assert.equal(balancedFallback.pick.effort, 'high');
   assert.ok(balancedFallback.notes.some(n=>/no review/.test(n)),'ordinary fallback service work uses executable acceptance');
   assert.equal(run(['debug'], { company: true, daily: null }).pick.account, 'ttadk');
   const onlyPro = run(['analysis'], { models: [PRO] }); assert.notEqual(onlyPro.pick.model, PRO); assert.ok(personalGate(onlyPro));
@@ -215,8 +216,7 @@ try {
       assert.notEqual(r.pick?.account, 'trae'); assert.ok(r.blocked);
       if(r.pick) assert.ok(personalGate(r));
       const background = run([...args, '--background'], config);
-      assert.equal(background.pick, null); assert.ok(background.deferred);
-      assert.ok(!personalGate(background));
+      assert.equal(background.kind,'blocked');assert.equal(background.pick.command,null);assert.ok(personalGate(background));
     }
   }
 

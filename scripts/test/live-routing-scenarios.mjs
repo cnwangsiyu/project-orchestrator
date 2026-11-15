@@ -13,12 +13,30 @@ const file = path.join(tmp,'snapshot.json');
 const env = {...process.env, HOME:tmp, RULES_SHARED:tmp, QUOTA_CACHE:path.join(tmp,'cache.json'),
   CODEX_ACCOUNTS:path.join(tmp,'accounts.json'), ROUTE_LOG:'0', ROUTE_NOW:String(captured.decisionAt),
   ROUTE_SNAPSHOT_FILE:file, ROUTE_LOG_FILE:path.join(tmp,'route-log.jsonl'), ROUTE_REQUEST_ID:'live-fixture'};
-const cli = (args, raw=captured) => {
+const cli = (args, raw=captured, approve=false) => {
+  if(approve) {const clean=args.slice(),at=clean.indexOf('--user-ok');if(at>=0)clean.splice(at,2);const offered=cli(clean,raw),yes=structuredClone(raw);yes.approvals=[{id:'fixture-approval',userDecisionRef:'synthetic-user-yes',revoked:false,grantedAt:captured.decisionAt-1000,expiresAt:captured.decisionAt+60000,scopes:offered.plan.gates.filter(g=>g.scope).map(g=>({...g.scope,allowPersonalWithCompany:true}))}];return cli([...clean,'--user-ok','fixture-approval'],yes);}
   fs.writeFileSync(file,JSON.stringify(raw));
   return JSON.parse(execFileSync(process.execPath,[route,...args,'--dry','--json'],{env,encoding:'utf8',maxBuffer:16<<20}));
 };
 const copy=()=>structuredClone(captured);
 try {
+  const quality=JSON.parse(fs.readFileSync(new URL('./fixtures/quality-first-2026-11-15.json',import.meta.url),'utf8'));
+  for(const args of [['analysis'],['research'],['implement','--impact','service'],['docs'],['review']]) {
+    const o=cli(args,quality);assert.equal(o.pick.model,'gpt-6.1-sol');assert.equal(o.pick.account,'trae',args.join(' '));
+  }
+  const hotSol=structuredClone(quality);hotSol.lanes.find(l=>l.accountId==='trae'&&l.modelId==='gpt-6.1-sol').loadPercent.value=70;
+  assert.equal(cli(['analysis'],hotSol).pick.account,'ttadk');assert.equal(cli(['analysis'],hotSol).pick.model,'gpt-6.1-sol');
+  for(const args of [['lookup'],['build-run','--env','test','--no-local-build'],['analysis','--background']]) {
+    const o=cli(args,quality);assert.equal(o.pick.model,'gpt-5.6-terra');assert.equal(o.pick.account,'ttadk');
+  }
+  const noTerra=structuredClone(quality);noTerra.accounts.find(a=>a.id==='ttadk').catalog.value=noTerra.accounts.find(a=>a.id==='ttadk').catalog.value.filter(m=>m!=='gpt-5.6-terra');
+  noTerra.lanes=noTerra.lanes.filter(l=>l.accountId!=='ttadk'||l.modelId!=='gpt-5.6-terra');
+  assert.equal(cli(['lookup'],noTerra).pick.model,'gpt-5.5');
+  const ownExpiry=structuredClone(quality);ownExpiry.accounts=ownExpiry.accounts.filter(a=>a.kind!=='ttadk');ownExpiry.lanes=ownExpiry.lanes.filter(l=>l.accountId!=='ttadk');
+  const qTrae=ownExpiry.accounts.find(a=>a.kind==='trae');qTrae.quota.push({bucketId:'gpt-5.6-terra',unit:'model-bucket',usage:{status:'KNOWN',value:{used:2,limit:80,resetsAt:quality.decisionAt+600000},sampledAt:quality.decisionAt,receivedAt:quality.decisionAt,maxAgeMs:1800000,source:'fixture'},priority:{status:'KNOWN',value:'available',sampledAt:quality.decisionAt,receivedAt:quality.decisionAt,maxAgeMs:1800000,source:'fixture'}});
+  const terraLane=ownExpiry.lanes.find(l=>l.modelId==='gpt-5.6-terra');terraLane.loadPercent.value=25;terraLane.mode='priority';terraLane.modeEvidence.value='priority';terraLane.bucketIds=['gpt-5.6-terra'];
+  const exp=cli(['analysis','--background'],ownExpiry);assert.equal(exp.pick.model,'gpt-5.6-terra');assert.equal(exp.plan.primary.estimate.expiryOpportunity,true);assert.equal(exp.plan.primary.estimate.expiryEvidence.unit,'model-bucket');assert.match(exp.why.join(' '),/priority bucket expiring unused/);
+  console.log('PASS day3 quality ladder precedes bucket priority on both company accounts and background work');
   for(const args of [['analysis'],['research'],['implement','--impact','service'],['docs'],['image-read'],['browser'],['ui-browser','--impact','service']]) {
     const o=cli(args,freeTrae);assert.equal(o.kind,'launch');assert.equal(o.pick.account,'trae',args.join(' '));
     assert.match(o.why.join('\n'),/TRAE lane free: saving TTADK quota/);
@@ -77,8 +95,8 @@ try {
   const personalOnly=copy();personalOnly.accounts=personalOnly.accounts.filter(a=>!['ttadk','trae'].includes(a.kind));
   personalOnly.lanes=personalOnly.lanes.filter(l=>personalOnly.accounts.some(a=>a.id===l.accountId));
   personalOnly.resources.value={held:false,ownedReturned:true,registeredResources:[],signingRegistry:false};
-  const personalReview=cli(['review-high'],personalOnly);assert.ok(personalReview.pick.command.includes('<workspace>'));
-  assert.ok(personalReview.secondOpinion.command.includes('<task dir>'));
+  const personalReview=cli(['review-high','--review-class','B','--review-reason','permission logic'],personalOnly);assert.ok(personalReview.pick.command.includes('<workspace>'));
+  assert.equal(personalReview.secondOpinion.command,null);assert.ok(personalReview.plan.gates.some(g=>g.kind==='personal-quota'),'Claude second still asks on a personal-only device');
   const noResources=cli(['implement','--impact','service'],personalOnly).notes.join('\n');
   assert.doesNotMatch(noResources,/A queued TRAE|on TTADK:|DeepSeek:|identities\.json|iphone8\/iphone11\/s21|registered shared test phones/);
   const registered=copy();registered.resources.value={held:false,ownedReturned:true,registeredResources:['iphone11'],signingRegistry:false};
@@ -92,7 +110,7 @@ try {
   for(const q of trae.quota) {assert.equal(q.usage.status,'KNOWN');assert.ok(q.usage.sampledAt<=captured.decisionAt,'refreshed samples cannot be future evidence');}
   assert.ok(captured.lanes.filter(l=>l.accountId==='trae').every(l=>l.mode!=='UNKNOWN'),'captured live quota must actually survive normalization');
   for(const args of [['lookup'],['analysis'],['research'],['implement','--impact','service'],
-    ['implement-hard','--impact','service'],['debug','--impact','release'],['review'],['review-high'],
+    ['implement-hard','--impact','service'],['debug','--impact','release'],['review'],['review-high','--review-class','B','--review-reason','permission logic'],
     ['design'],['docs'],['build-run','--signing','--impact','service'],['analysis','--background'],
     ['implement','--impact','service','--background'],['implement','--impact','service','--failures','1']]) {
     const o=cli(args);assert.equal(o.kind,'launch',args.join(' '));
@@ -105,7 +123,7 @@ try {
   assert.equal(security.pick.account,'trae');assert.equal(security.pick.model,'deepseek-v4.1-flash');
   for(const args of [['lookup'],['extract'],['draft'],['analysis'],['research'],['implement','--impact','service'],
     ['review'],['docs'],['build-run'],['build-run','--signing','--impact','service']]) {
-    const o=cli(args);assert.equal(o.pick.model,'gpt-5.6-terra',`priority ladder: ${args.join(' ')}`);
+    const o=cli(args);assert.equal(o.pick.model,['lookup','extract','draft'].includes(args[0])?'gpt-5.6-terra':'gpt-6.1-sol',`quality ladder: ${args.join(' ')}`);
   }
   for(const category of ['image-gen','claude-tools']) {
     const o=cli([category]);assert.ok(o.pick.command);assert.equal(o.needsUserOK.length,0);
@@ -124,7 +142,11 @@ try {
   assert.match(personal.notes.join('\n'),/browser its own tool lists; never put a Claude-in-Chrome deviceId/);
   assert.match(personal.notes.join('\n'),/saved browser permission.*cannot be continued.*new thread with --browser-origins/);
   assert.ok(['main','b'].includes(personal.pick.account));assert.ok(personal.needsUserOK.length);assert.equal(personal.pick.command,null);
-  assert.ok(cli(['computer-use','--apps','com.apple.calculator','--urgent','--user-ok','ledger:user-yes'],desktop).pick.command);
+  const approvedArgs=['computer-use','--apps','com.apple.calculator','--urgent'];
+  const offered=cli(approvedArgs,desktop),approvals=path.join(tmp,'personal-approval.json');
+  const approvedDesktop=structuredClone(desktop);approvedDesktop.approvals=[{id:'fixture-user-yes',userDecisionRef:'synthetic-user-yes',revoked:false,grantedAt:captured.decisionAt-1000,expiresAt:captured.decisionAt+60000,scopes:offered.plan.gates.filter(g=>g.scope).map(g=>({...g.scope,allowPersonalWithCompany:true}))}];
+  assert.ok(cli([...approvedArgs,'--user-ok','fixture-user-yes'],approvedDesktop).pick.command);
+
   const reachableTT=structuredClone(desktop), tt=reachableTT.accounts.find(a=>a.id==='ttadk');
   tt.auth.value=true;tt.transport.value=true;tt.providerDenied.value=true;
   for(const part of [tt,...reachableTT.lanes.filter(l=>l.accountId==='ttadk')]) part.capabilities['app:com.apple.calculator']=app;
@@ -132,7 +154,7 @@ try {
     const o=cli(args,reachableTT);assert.equal(o.kind,'blocked');assert.ok(['main','b'].includes(o.pick.account));
     assert.equal(o.deferred,null,'a future TTADK reset cannot hide the personal-now proposal');assert.equal(o.pick.command,null);
     assert.ok(o.needsUserOK.some(w=>/personal quota now, or wait until/.test(w)));
-    const yes=cli([...args,'--urgent','--user-ok','ledger:personal-now'],reachableTT);assert.ok(yes.pick.command);
+    const yes=cli([...args,'--urgent','--user-ok','ledger:personal-now'],reachableTT,true);assert.ok(yes.pick.command);
   }
   const browser=copy();browser.accounts.find(a=>a.id==='trae').capabilities.browser.value=true;
   browser.accounts.find(a=>a.id==='trae').capabilities['signed-in-browser'].value=true;
@@ -150,7 +172,7 @@ try {
     for(const lane of browser.lanes.filter(l=>l.accountId==='trae')) lane.capabilities[`origin:${host}`]=origin;
   }
   const browserPick=cli(['browser','--origins','https://example.test'],browser).pick;
-  assert.equal(browserPick.account,'trae');assert.equal(browserPick.model,'gpt-5.6-terra');
+  assert.equal(browserPick.account,'trae');assert.equal(browserPick.model,'gpt-6.1-sol');
   const broken=copy();broken.accounts.find(a=>a.id==='main').catalog.value={malformed:true};
   assert.equal(cli(['analysis'],broken).pick.account,'trae','malformed personal account cannot poison company state');
   const stale=copy();stale.accounts.find(a=>a.id==='main').auth.sampledAt-=3600000;

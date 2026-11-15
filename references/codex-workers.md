@@ -61,8 +61,8 @@ hub over WebSocket (`--account <name>`, default `main`), so the process that sta
 - **Stall alarm** (verified 2026-11-04). `start`, `turn` and `wait` exit with code **4** and print `stalled: …` when the
   turn has had no events of its own for `--stall-min` minutes (default 30; `0` turns it off).
   - The turn keeps running on the hub; the alarm only wakes you.
-  - A running shell command still produces events, but a worker waiting on its own sub-agents can be quiet that long.
-    So first check `status` and the worker's child threads (`parent_thread_id` under `<account home>/sessions/`).
+  - A running shell command can be quiet; inspect the actual turn and progress before declaring it stalled. Workers may not delegate.
+    First check `status` and this turn's tools/output/progress, then report to its owner.
   - Then re-attach with `wait` as a background task, or steer or interrupt the turn.
   - It exists because a worker once sat silent for 18h with nobody noticing (video-agent W222).
 - **Re-attach** after the orchestrator restarted (its background tasks, including the `start`/`turn` follower, are gone, but
@@ -123,17 +123,14 @@ card gains about `used + time-left/window − 1` windows:
 TTADK serves the company's model gateway, which includes GPT-6.1 Sol. It runs the same Codex binary, so `codex exec`,
 resume, the read-only sandbox and hub workers behave as with a ChatGPT account (verified 2026-11-06/07).
 
-**Why it's preferred:** usage goes to the company and counts toward the user's Devmind AI contribution, not to a
-ChatGPT plan. **Prefer it whenever it is healthy; fall back to the ChatGPT accounts when it isn't.** `route.mjs` does
-this.
+**Why it is a company lane:** usage counts toward the user's Devmind AI contribution. Route in quality order across company accounts, preferring free TRAE for that model; TTADK takes its capability-only work, congestion fallbacks and expiring quota. Personal quota stays behind its scoped gates.
 
 ### Setup on a new machine
 
 1. Install the CLI: `npm install -g @byted/ttadk@latest --registry=https://bnpm.byted.org`.
-2. Log in to SSO once. The user runs `! ttadk auth login sso`. The session lasts about two weeks; `quota.mjs` warns two
-   days before it ends.
+2. Log in to SSO once. The user runs `! ttadk auth login sso`. The session lasts about two weeks; `quota.mjs` warns 72 hours (three days) before it ends.
 3. Run `node <this skill>/scripts/codex-worker.mjs ttadk-setup`. It:
-   - checks `ttadk`, the SSO session and that the gateway lists `gpt-6.1-sol` for codex;
+   - checks `ttadk`, the SSO status and at least one usable qualified Codex model in the fresh catalog; Sol is preferred when listed, but its absence does not invalidate other usable models;
    - creates `~/.codex-ttadk` with the gateway provider config (auth through `ttadk get_params --sso sso`);
    - symlinks `AGENTS.md`, `skills` and `rules` from `~/.codex`;
    - registers account `ttadk` (kind `ttadk`) on the next hub port.
@@ -191,7 +188,7 @@ There is no concurrency cap (user, 2026-11-07):
   `<ttadk home>/quota-limit.json`; `quota.mjs` then shows TTADK paused until the reset, and `route.mjs` routes normal
   work that TTADK would take to personal quota behind a "needs the user's OK" gate: the orchestrator asks the user once
   whether to go on now or wait for the reset (user, 2026-11-08). "Go on": launch, and pass `--urgent` for TTADK's work
-  until the reset; "wait": hold it until then. Only `--urgent` (already approved) runs on personal quota without asking; high stakes ask too (user, 2026-11-09). `codex-worker` prints
+  until the reset; "wait": hold it until then. Only a matching stored scoped approval authorizes personal quota on a company device; urgency alone does not. High stakes ask too (user, 2026-11-09). `codex-worker` prints
   `quota-exhausted:` for such a failure: don't retry, and don't try another TTADK model. Usage dashboard:
   `https://gdp-portal.bytedance.net/llmbox/dashboard` (extra quota can be requested there; that is the user's call).
 - **Where the daily number comes from (user-approved 2026-11-13).** `quota.mjs` reads TTADK's own quota from
@@ -234,7 +231,7 @@ remain routing telemetry, not local spending/concurrency caps. Reports must name
 
 - **What it is.** TRAE CLI (`traecli` / `traex`) is the company's official agent CLI (the compliance FAQ lists it as
   cleared), a fork of Codex maintained by the TRAE team, with its own model pool, separate from TTADK's. Models include
-  GPT-6.1-Sol, GPT-6-Astra (often queued), GPT-5.6 Sol/Terra/Luna, Gemini 3.1 Pro, Seed, DeepSeek; no Opus on this
+  GPT-6.1-Sol, GPT-6-Astra (often queued), GPT-5.6 Sol/Terra, GPT-5.5, Seed and DeepSeek-V4.1-Flash; TRAE gpt-5.6-luna and Gemini are excluded; no Opus on this
   account, no Kimi.
 - **Same harness as Codex for GPT-6.1-Sol** (compared 2026-11-08): the same "You are Codex…" base prompt (about 28 lines
   differ, in the plugin/app section), the same tools (code mode, unified exec, freeform apply_patch, multi-agent v2, web
@@ -516,7 +513,7 @@ two personal steps need the user's OK; re-run route.mjs after an account failure
 
 ## Sub-agents inside a Codex worker (verified 2026-11-04, codex-cli 0.166)
 
-A Codex worker can spawn its own sub-agents: the `multi_agent` feature is stable and on (`codex features list`;
+Historical capability evidence only, not current permission. In the 2026-11-04 experiment a Codex worker could spawn its own sub-agents: the `multi_agent` feature is stable and on (`codex features list`;
 `multi_agent = true` in `~/.codex/config.toml`). Tested with `codex exec` and with a hub `codex-worker start`, both on
 Luna `low` with a read-only sandbox. In each run the worker spawned 2 sub-agents through `collaboration.spawn_agent`,
 and both returned the right file contents.
@@ -529,8 +526,7 @@ and both returned the right file contents.
   `"tool":"wait"`. The spawns themselves don't appear there. Each sub-agent is its own thread under
   `<account home>/sessions/`, with `parent_thread_id` set to the worker's thread.
 
-**Allowed; the worker decides** (user, 2026-11-04). Codex workers may use sub-agents. Whether to use them, how many,
-and for what is the worker's own call. Briefs don't ask for them, forbid them or prescribe how to use them.
+**Current rule (2026-11-15): workers do the work themselves, with no sub-agents or handing work/review to another model. They never ask to switch model/account or personal quota; report actual model/tool unavailability to the orchestrator. Starts, one-shot execs and resumes inject the latest worker digest.**
 
 ## Differences from Claude workers
 
@@ -555,11 +551,11 @@ and for what is the worker's own call. Briefs don't ask for them, forbid them or
 
 Codex has a built-in image tool (`image_gen.imagegen`; feature flag `image_generation`, stable and on by default; check with
 `codex features list`). Claude can't generate images, and the user prefers Codex for every image-producing task (2026-11-03), so they all go to
-Codex (`route.mjs image-gen`: Luna `low` first, Sol `medium` when iterating on a result needs judgment).
+Codex (`route.mjs image-gen`: personal gpt-6-luna `low` first (standing exception, no question), Sol `medium` when iteration needs judgment; the image tool determines image quality).
 
-- **Run** a short `codex exec` as a background task, Luna `low`, `-s workspace-write`, in the folder the image should land in:
+- **Run** a short `codex exec` as a background task, personal Luna (`gpt-6-luna`) `low`, `-s workspace-write`, in the folder the image should land in:
   `CODEX_HOME=<account home> codex exec [--skip-git-repo-check] -C <dir> -s workspace-write -m gpt-6-luna -c model_reasoning_effort='"low"' --json -o <dir>/codex-last.md "Generate one image with your image generation tool: <description, style, aspect>. Save it in the current directory as <name>.png and report the saved path." < /dev/null > <dir>/codex.jsonl 2>&1`
-  The model only phrases the prompt and copies the file, so Luna `low` is enough; the image quality comes from the image
+  The model only phrases the prompt and copies the file, so personal Luna `low` is enough; the image quality comes from the image
   tool, not the chat model. A test run (one 1254×1254 PNG, 1.5 MB) took about a minute and ~74K input (mostly cached) /
   ~300 output tokens.
 - **Where the image is:** the tool writes to `<account home>/generated_images/<thread id>/exec-<uuid>.png`; the copy into the
@@ -578,17 +574,15 @@ facts behind it (2026-11-03):
   Terra 0.5x, Luna 0.05x (0.1x cached). Fast costs 2.5x of included usage, Ultrafast 8x. There is no per-effort
   multiplier: higher effort just spends more tokens. Sol has no long-context surcharge in Codex.
 - **Efforts:** `low`, `medium`, `high`, `xhigh`, `max`, `ultra` (Luna stops at `max`); no `none` or `minimal` in the
-  CLI. Don't route to `ultra` (the router never does): it makes every turn fan out and multiplies usage. Sub-agents a
-  worker chooses to spawn are fine (see Sub-agents inside a Codex worker).
+  CLI. Don't route to `ultra` (the router never does): it makes every turn fan out and multiplies usage. Workers may not spawn sub-agents; the experiment below is historical only.
   Set the effort on every launch: the catalog default for Sol is `low` (weak for coding: Terminal-Bench 4 31%); the
   user's config sets `high`.
 - **Models:** `gpt-6.1-sol` is the workhorse and Codex's default (near Astra, 500K context); `gpt-6-astra` is the
   frontier model at 5x; `gpt-6.1-terra` is positioned for writing and visual understanding, not coding (its
-  computer-use strength is not what the Codex computer-use plugin relies on); `gpt-6-luna` is fast and cheap, for
-  extraction, classification, summaries and images, and should not write code. Don't pick `gpt-6-sol` or the
+  computer-use strength is not what the Codex computer-use plugin relies on); personal `gpt-6-luna` remains the first lookup (`low`), extract (`medium`) and image-generation (`low`) choice. Only TRAE `gpt-5.6-luna` is unused (slow, about 3x tokens). Don't pick `gpt-6-sol` or the
   `gpt-5.6-*` models on personal ChatGPT accounts: they're older at the same or higher cost. TRAE's approved company-quota
   choices are separate: hard work uses Sol then Astra; normal work uses Sol, 5.6-Sol, 5.6-Terra then Flash;
-  light/background work prefers bucket-free 5.6-Terra, 5.5 then Flash unless a hard rule applies
+  light/background work walks 5.6-Terra, 5.5 then Flash unless a hard rule applies
   (2026-11-13; references/model-routing.md). Same-task rework may reuse the author thread only under SKILL.md's
   "Rework thread choice" rule; record `outcome.mjs --actual` and the reason in the ledger.
 
@@ -608,3 +602,5 @@ re-route with `route.mjs <category> --failures <n+1>`, and note it in the ledger
 - stalls or unfinished runs.
 
 Include what happened (task, model, effort, symptom) and what you did about it. The user decides whether to keep using Codex.
+
+Company queue/unavailable handling applies to the actual TTADK or TRAE account/model lane: bounded patience, no-work cancellation, scoped exclusions and owner handoff. TRAE queue backoff and 983/cyberPolicy midnight restriction are provider-specific; TTADK records ordinary unavailable/policy evidence without that restriction. Never clear restriction/denial state merely to probe. Project dependencies and build tools fetched through normal package managers and registries (npm/pnpm/yarn, pip/uv, gradle/maven, CocoaPods/SPM, cargo, go modules, brew formulae, and SDK/toolchain components the build asks for) are installed directly into the task workspace or user-level caches, without a card or question. No secrets/credentials, production changes without a card, unapproved personal quota, or system security changes; a required login the worker lacks is BLOCKED.

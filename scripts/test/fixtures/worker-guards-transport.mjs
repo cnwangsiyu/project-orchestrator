@@ -23,7 +23,7 @@ globalThis.WebSocket = class {
         if (config.unrelatedChatter) this.chatter = setInterval(() => this.notify({ method: 'thread/tokenUsage/updated',
           params: { threadId: 'other-thread', turnId: 'other-turn', context: { model: 'DeepSeek-V4.1-Flash' } } }), 10);
         if (!config.quiet) this.notify({ method: 'turn/completed', params: { threadId: config.thread,
-          turn: { ...turn, status: 'completed', items: [{ type: 'agentMessage', text: 'DONE guard fixture' }] } } });
+          turn: config.failure?{...turn,status:'failed',error:{message:config.failure},items:[]}:{ ...turn, status: 'completed', items: [{ type: 'agentMessage', text: 'DONE guard fixture' }] } } });
       }, 10);
     });
   }

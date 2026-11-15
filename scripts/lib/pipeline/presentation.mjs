@@ -1,7 +1,10 @@
+import {DEPENDENCY_RULE} from '../dependency-policy.mjs';
 // Pure compatibility rendering. Receives paths, owner and digest from the CLI;
 // it never launches, reads metadata, or changes the selected tuple.
 import { company, companyDevice, known, adversarial, isReview } from './common.mjs';
 import { candidateParts } from './candidates.mjs';
+import {mandatoryReview,projectReviewPolicy} from '../review-policy-data.mjs';
+import { deriveReview } from './taskspec.mjs';
 import { reviewAfterWrite } from './review-policy.mjs';
 import { estimateCandidate } from './estimate.mjs';
 import { etaText } from '../eta.mjs';
@@ -18,7 +21,10 @@ export function presentRoute(plan, view, context) {
     (hasSigning||!line.startsWith('- Allowed with'))&&(phones.length||!line.startsWith('- On registered shared test phones'))
     &&(hasTrae||!line.startsWith('- A queued TRAE'))).map(line=>line.replaceAll('iphone8/iphone11/s21',phones.join('/'))).join('\n')};
   const t = plan.task, f = t.flags, seat = plan.primary ?? plan.primaryProposal, c = seat?.candidate;
-  const notes = [...view.notes], why = [], tellUser = [...view.tellUser], needsUserOK = [...view.needsOK];
+  const notes = [...view.notes,...(t.policyNotes??[])], why = [...(t.policyNotes??[])], tellUser = [...view.tellUser], needsUserOK = [...view.needsOK];
+  if(['implement','implement-hard','build-run','debug','ui-browser'].includes(t.category))notes.push(DEPENDENCY_RULE);
+  const noReview=projectReviewPolicy(t.project,snapshot.projectProfiles).profile==='no-review'&&!mandatoryReview(t);
+  if(noReview)notes.push('no review (project profile no-review): accept on tests/build');
   const unknownCompany=snapshot.accounts.filter(a=>company(a)&&(known(a.auth)!==true||known(a.transport)!==true));
   const quota=snapshot.accounts.map(a=>`${a.id}/${a.kind}: ${known(a.auth)===true&&known(a.transport)===true?'available status':'account state unknown or unavailable'}`);
   const personalAccounts=snapshot.accounts.filter(a=>!company(a)&&a.kind!=='claude');
@@ -41,12 +47,12 @@ export function presentRoute(plan, view, context) {
   const chosenBalance = seat?.estimate.balance;
   const walked = chosenBalance ? balanceCandidates.slice(0,balanceCandidates.findIndex(b=>b.model===c.modelId)+1) : balanceCandidates;
   const balance = balanceCandidates.length ? {...(chosenBalance ?? {}),selected:!!(chosenBalance?.freeNow||chosenBalance?.eligible),candidates:walked} : null;
-  if(seat?.estimate.expiryOpportunity) { const hint='TTADK quota expiring unused: good time for reviews, docs and exploratory work'; why.push(hint);quota.push(hint); }
+  if(seat?.estimate.expiryOpportunity) { const hint=candidateParts(snapshot,c).account.kind==='ttadk'?'TTADK quota expiring unused: good time for existing qualified work':`TRAE ${c.modelId} priority bucket expiring unused at ${new Date(seat.estimate.expiryEvidence.resetsAt).toISOString()}; quality order preserved`; why.push(hint);quota.push(hint); }
   if(chosenBalance?.freeNow) why.push(`TRAE lane free: saving TTADK quota; ${c.modelId} load ${chosenBalance.load.percent}%; no queue or stall observed.`);
-  else if(chosenBalance?.eligible) {why.push(`balanced to TRAE: ${chosenBalance.triggers.join('; ')}; ${Math.round(chosenBalance.remainingShare*100)}% left; ${c.modelId} load ${chosenBalance.load?.percent??'unknown'}%`);notes.push('balanced from TTADK after fresh reserve/load checks; task quality and review obligations are preserved.');}
+  else if(chosenBalance) why.push(`TRAE ${c.modelId}: bounded fallback; immediate uncongested capacity is unmeasured.`);
   if(c && candidateParts(snapshot,c).account.kind==='ttadk' && balanceCandidates.length) {
-    const relevant=balanceCandidates.find(b=>b.model===c.modelId)??balanceCandidates[0];
-    why.push(`stays on TTADK: ${relevant.model}: ${relevant.reasons.join('; ') || 'tool/resource scope or completion ETA retains this account'}`);
+    const relevant=balanceCandidates.find(b=>b.model===c.modelId);
+    why.push(relevant?`stays on TTADK: ${relevant.model}: ${relevant.queued?'queue observed':relevant.congestion==='high'?'model congested':!relevant.freeNow?'no demonstrated immediate uncongested TRAE lane':'TTADK quota expiry or required capability'}`:`stays on TTADK: ${c.modelId} has no qualified same-model TRAE lane for the required capability/catalog.`);
   }
   if(context.refreshRequired) notes.push('--fresh: account status refreshed through authenticated read-only interfaces.');
   const staleAccounts=snapshot.accounts.filter(a=>a.auth.source==='last-good-stale').map(a=>a.id);
@@ -58,6 +64,7 @@ export function presentRoute(plan, view, context) {
   for(const gate of plan.gates.filter((g)=>g.state==='needsOK')) {
     if(gate.kind==='personal-quota') needsUserOK.push(`personal quota: ${gate.scope?.accounts.join(',')??'reviewer'} needs the user's scoped OK${unknownCompany.length?`; company account state unknown or unavailable (${unknownCompany.map(a=>`${a.id}/${a.kind}`).join(', ')})`:''}`);
     if(gate.kind==='max-effort') needsUserOK.push('max effort');
+    if(gate.kind==='capacity-decision') needsUserOK.push(gate.reason.text);
   }
   const routeArgs = [t.category, ...Object.entries({...f, failures:t.failures, ...(owner?{owner}:{})}).filter(([k])=>!['json','table','dry'].includes(k)).flatMap(([k,v])=>[`--${k}`,...(v===true?[]:[String(v)])])];
   const estimatedRows = (plan.trace?.candidates ?? []).map((r) => r.predicates.some((p)=>p.reason?.code==='PROVIDER_QUOTA_DENIED')
@@ -65,12 +72,13 @@ export function presentRoute(plan, view, context) {
   const eta = estimatedRows.filter((r)=>r.predicates.every((p)=>p.ok || p.reason?.code==='PROVIDER_QUOTA_DENIED'))
     .filter((r)=>!seat || r.candidate.effort===seat.candidate.effort).map((r)=>({ ...r.estimate, model:r.candidate.modelId, account:r.candidate.accountId, effort:r.candidate.effort,
       unknown:r.estimate.confidence==='UNKNOWN', lane:{position:known(candidateParts(snapshot,r.candidate).lane.position),drainPerMin:known(candidateParts(snapshot,r.candidate).lane.drainPerMin)} }));
-  const low = c && candidateParts(snapshot,c).account.kind==='trae' && ['low-priority','UNKNOWN'].includes(candidateParts(snapshot,c).lane.mode);
-  const patience = low ? seat.estimate.patienceMin ?? 30 : null;
+  const low = c && company(candidateParts(snapshot,c).account) && (seat.estimate.patienceMin!==null);
+  let patience = low ? seat.estimate.patienceMin ?? 30 : null;
   const altRows = estimatedRows.filter((r)=>r.candidate.accountId!==c?.accountId || r.candidate.modelId!==c?.modelId)
-    .filter((r)=>r.candidate.effort===c?.effort && r.predicates.every((p)=>p.ok || p.reason?.code==='PROVIDER_QUOTA_DENIED'));
+    .filter((r)=>company(candidateParts(snapshot,r.candidate).account) && r.predicates.every((p)=>p.ok || p.reason?.code==='PROVIDER_QUOTA_DENIED'));
   const alternative = altRows.sort((a,b)=>Number(!!a.estimate.stalled)-Number(!!b.estimate.stalled)
     || (a.estimate.completionMin??Infinity)-(b.estimate.completionMin??Infinity))[0];
+  if(low&&alternative?.estimate.startDelayMin>0) patience=Math.min(patience,alternative.estimate.startDelayMin*.25);
   const altArgs = [...routeArgs];
   for(const key of ['--fresh','--exclude-lane']) { const i=altArgs.indexOf(key); if(i>=0) altArgs.splice(i,key==='--fresh'?1:2); }
   if(c) altArgs.push('--exclude-lane',[f['exclude-lane'],`${c.accountId}:${c.modelId}`].filter(Boolean).join(','));
@@ -84,7 +92,7 @@ export function presentRoute(plan, view, context) {
     const primary=s.role==='primary', suffix=primary?'':`-${s.role}`;
     const vendor=c.family==='claude'?'claude':'codex', an=c.accountId, name=`${task.flags.name??task.taskId}${suffix}`;
     const outputBase=`${taskDir}/codex${suffix}`;
-    const seatLow=a.kind==='trae'&&['low-priority','UNKNOWN'].includes(candidateParts(snapshot,c).lane.mode);
+    const seatLow=company(a)&&s.estimate.patienceMin!==null;
     const seatPatience=seatLow?s.estimate.patienceMin??30:null;
     const out={vendor,model:c.modelId,effort:c.effort,account:vendor==='claude'?undefined:an,company:company(a),sandbox:vendor==='claude'?null:task.sandbox,
       launcher:vendor==='claude'?'claude-bg':'codex-worker',command:null};
@@ -138,7 +146,7 @@ export function presentRoute(plan, view, context) {
     if(t.writes||['browser','computer-use'].includes(t.category)) notes.unshift("brief: include the safety clauses — never overwrite, delete or move files outside the task's scope (user files, uncommitted changes, shared headers/configs); restore anything touched by mistake byte-for-byte and report it");
     notes.push(`Global worker rules ${digest.version}: ${digest.worker}`);
     notes.push('brief: include the credential clause — never read, copy, load or inject LOGIN material, CLI auth files, sessions, cookies, keys or browser profiles. Use installed, already signed-in CLIs through normal commands; an authentication error is BLOCKED. '+
-      (hasSigning?'Registered own-test packages use ordinary full-access Codex company signing workers; identities.json and registry.json are read-only to workers, unlisted identities or packages are BLOCKED. ':'')+
+      (hasSigning?'Registered own-test packages use ordinary full-access Codex-family signing workers; identities.json and registry.json are read-only to workers, unlisted identities or packages are BLOCKED. ':'')+
       'never put internal code, logs or private material into public search queries.');
     if(t.writes) notes.push('back up app data before any destructive step; restore accidental out-of-scope changes byte-for-byte.');
     if(f['shared-lock']||f['device-lease']) notes.push('take the lease/lock only after the first model response; return every owned resource before a queue handoff.');
@@ -149,8 +157,8 @@ export function presentRoute(plan, view, context) {
     if(t.category==='image-read') notes.push('read the supplied image directly; no web search is needed for screenshot transcription.');
     if(t.sandbox==='danger-full-access') notes.push('full access: the worker may commit on its task branch if the brief says so; never push to main, never force-push; commits carry no co-author/tool trailer');
     if(t.runsTests&&!t.writes) notes.push('workspace-write only for test-generated files; the reviewer must not edit source code');
-    if(reviewAfterWrite(t,snapshot,c)) notes.push(`review required (impact ${t.impact}): after the worker reports, route.mjs ${t.stakes==='high'?'review-high':'review'} --author ${c.family==='claude'?'claude':'codex'}${['deepseek','gemini','seed'].includes(c.family)?` --exclude-model ${c.family}`:''}${t.contentLabels.includes('security')?' --security':''} --impact ${t.impact} --project ${t.project} --name ${f.name??t.taskId}-R; pin the actual author and artifact; blocks only on P0/P1, at most 2 rounds; then record with scripts/outcome.mjs --reviewed`);
-    else if(['implement','implement-hard','debug','science'].includes(t.category)) notes.push(`no review (impact ${t.impact}): accept on your own check (tests, build, acceptance), then record with scripts/outcome.mjs`);
+    if(reviewAfterWrite(t,snapshot,c)) notes.push(`review required (class ${t.reviewClass}, impact ${t.impact}): pin the artifact before its gated action/acceptance, route.mjs ${deriveReview(t).category} --review-class ${t.reviewClass} --review-reason ${shellQuote(t.reviewReason)} --review-scope ${shellQuote(t.reviewScope??t.flags.name??t.taskId)} --author ${c.family==='claude'?'claude':'codex'}${['deepseek','gemini','seed'].includes(c.family)?` --exclude-model ${c.family}`:''}${t.contentLabels.includes('security')?' --security':''} --impact ${t.impact} --project ${t.project} --name ${f.name??t.taskId}-R; pin the actual author and artifact; blocks only on P0/P1, at most 2 rounds; then record with scripts/outcome.mjs --reviewed`);
+    else if(!noReview&&['implement','implement-hard','debug','science'].includes(t.category)) notes.push(`no review (impact ${t.impact}): accept on your own check (tests, build, acceptance), then record with scripts/outcome.mjs`);
     if(isReview(t)) notes.push('re-reviews check only the previously blocked findings; at most two review rounds per task/branch. Batch related small changes; docs/rule-text-only fixes need owner diff verification, not another review round.');
   }
     if(['build-run','implement','implement-hard','debug','ui-browser'].includes(t.category)) {
@@ -194,10 +202,10 @@ export function presentRoute(plan, view, context) {
     const mode=candidateParts(snapshot,c).lane.mode;
     if(mode==='bucket-free') why.push(`${t.background?'background: ':''}${c.modelId} has no daily bucket; no high-priority quota spent; no low-priority lane (step 2)`);
     else if(t.background) why.push(`background: ${mode==='low-priority'?`${c.modelId} low-priority lane; no high-priority quota spent (step 1)`:`normal TRAE pick ${c.modelId}; may spend high-priority quota (step 3)`}`);
-    if(t.background) notes.push('Queued turns can expect hours when each model request queues separately; bounded queue patience and cancellation evidence control any replacement.');
+    if(t.background) notes.push('Background work uses the same quality ladder and quota permission; report a decision when no runnable authorized lane exists.');
   }
   if(plan.reviewers.length) notes.push('Reviewer seats use distinct worker names and output files. If a second reviewer cannot complete, return to the owner to replan the required set against the same artifact and independent families; do not reuse the primary reroute arguments.');
-  if(t.background&&!c) tellUser.push('queued for later: keep the company-only task pending and replan when qualified capacity is available.');
+  if(t.background&&!c) tellUser.push('No runnable authorized background lane: present the plan’s decision and keep dispatching independent work.');
   if(plan.kind==='blocked') why.unshift(...plan.reasons.map(r=>r.text));
   if(!why.length) why.push(...(plan.reasons??[plan.reason]).filter(Boolean).map((r)=>r.text));
   if(companyDevice(snapshot)&&(plan.kind==='defer' || (plan.kind==='blocked' && plan.gates.some(g=>g.kind==='personal-quota')))) {

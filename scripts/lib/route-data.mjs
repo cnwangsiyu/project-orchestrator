@@ -239,7 +239,7 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
       const direct = telemetry?.[m], directLoad = modelLoad(load,m,now);
       lanes.push({ id:`${name}:${m}:hub`, accountId:name, modelId:m, harness: isClaude?'claude-bg':'hub', efforts:declared(['low','medium','high','xhigh','max']),
         modeEvidence:stamp(mode,kind==='trae'?sample:at,1800000), selectable:true, capabilities:Object.fromEntries(Object.entries(caps).map(([k,v])=>[k,declared(v)])),
-        readyAt: kind !== 'trae' || mode === 'priority' || mode === 'bucket-free' ? stamp(now) : null,
+        readyAt: kind !== 'trae' || mode === 'priority' || mode === 'bucket-free' ? stamp(now) : direct?.state==='ready'&&direct?.position===0 ? stamp(direct.t,direct.t,1800000):null,
         position:stamp(direct?.position,direct?.t,1800000), drainPerMin:stamp(direct?.drainPerMin,direct?.t,1800000), progressAt:stamp(direct?.lastProgressAt,direct?.t,1800000),
         queueState:stamp(direct?.state,direct?.t,1800000),
         loadPercent:stamp(directLoad?.percent,directLoad?.t,1800000), loadSource: directLoad?.source??'UNKNOWN',

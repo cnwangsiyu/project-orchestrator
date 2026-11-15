@@ -42,6 +42,7 @@ const finish = async (code) => {
       }
     }
   } catch {} finally { if (outFd !== undefined) fs.closeSync(outFd); }
+  if(code===0&&opts.out&&outStamp()===beforeOut){code=1;console.error(`run-tracked: the command exited 0 but wrote nothing to ${opts.out}; treating as failed.${stderrTail.trim()?`\n${stderrTail.trim()}`:''}`);}
   const launchFailed=!accepted&&(code!==0||!!opts.out&&!final);
   if(launchFailed) {
     code=code||1;

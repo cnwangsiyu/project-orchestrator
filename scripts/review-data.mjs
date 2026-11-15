@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import {mandatoryReview,projectReviewPolicy,reviewYield} from './lib/review-policy-data.mjs';
 // review-data: the facts the nightly routing review starts from, for the last N hours (default 24).
 //
 //   review-data [--hours N] [--json] [--save-catalog]
@@ -30,15 +31,9 @@ const reviewBase = (r) => bareName(r.project ?? '', r.name ?? '')
   .replace(/-(?:re-?review|rereview)(?:-?\d+)?$/i, '')
   .replace(/-(?:review|r)(?:-?\d+)?$/i, '');
 const namedReReview = (name = '') => /-(?:re-?review|rereview)(?:-?\d+)?$|-(?:review|r)-?([2-9]\d*)$/i.test(name);
-const requiredReview = (r) => r.reviewRequired === true || r.requiredReview === true || r.adversarial === true
-  || r.category === 'review-high' || r.signing === true || r.installed === true || r.impact === 'release' || r.stakes === 'high';
-const yieldFrom = (values) => {
-  const structured = values.flatMap((v) => Array.isArray(v) ? v : []).map((v) => typeof v === 'string' ? v : `${v?.severity ?? ''} ${v?.priority ?? ''}`);
-  const text = values.filter((v) => typeof v === 'string').concat(structured).join('\n');
-  if (/\b(?:no|zero|0)\s+(?:new\s+)?p0(?:\s*\/\s*|\s+(?:or|and)\s+)p1\b|\bno\s+(?:blocking|p0\s*\/\s*p1)\s+findings?\b/i.test(text)) return 'none';
-  if (/\bP[01]\b/i.test(text)) return 'found-p0-p1';
-  return 'UNKNOWN';
-};
+const requiredReview=mandatoryReview;
+const yieldFrom=reviewYield;
+const reviewProfiles=JSON.parse(fs.readFileSync(new URL('../references/project-risk-profiles.json',import.meta.url),'utf8'));
 
 // ---- routing ----
 const all = lines(ROUTE_LOG);
@@ -138,13 +133,16 @@ const background = (() => {
 const reviewLaunches = (() => {
   const rows = all.filter(isRouteDecision).filter((r) => r.pick).sort((a, b) => a.t - b.t);
   const seen = new Map(), launches = [];
-  const outcomeEvidence = (r, base) => allOuts.filter((o) => o.project === r.project
-    && (bareName(o.project ?? '', o.name ?? '') === bareName(r.project ?? '', r.name ?? '') || reviewBase(o) === base));
+  const outcomeEvidence = (r, base) => {
+    const own=allOuts.filter(o=>o.project===r.project);
+    const exact=own.filter(o=>bareName(o.project??'',o.name??'')===bareName(r.project??'',r.name??''));
+    return exact.length?exact:own.filter(o=>!isReviewDecision(o)&&bareName(o.project??'',o.name??'')===base);
+  };
   for (const r of rows) {
     const base = reviewBase(r), key = `${r.project ?? '(none)'}/${base || r.name || '(unnamed)'}`;
     const primaryReview = isReviewDecision(r);
     const reReview = primaryReview && (namedReReview(r.name) || (seen.get(key) ?? 0) > 0);
-    const evidence = [r.reviewResult, r.reviewOutcome, r.findings, r.note, r.outcomeNote,
+    const evidence = [...outcomeEvidence(r,base).map(o=>o.reviewResult),r.reviewResult, r.reviewOutcome, r.findings, r.note, r.outcomeNote,
       ...outcomeEvidence(r, base).flatMap((o) => [o.note, o.notes, o.findings, o.reviewResult])];
     if (primaryReview) launches.push({ t: r.t, project: r.project ?? '(none)', task: key, category: r.category,
       secondReviewer: false, reReview, required: requiredReview(r), yield: yieldFrom(evidence) });
@@ -158,32 +156,33 @@ const reviewWindow = (windowSince) => {
   const decisions = all.filter((r) => r.t >= windowSince && isRouteDecision(r) && r.pick);
   const launches = reviewLaunches.filter((r) => r.t >= windowSince);
   const dispatches = decisions.length + decisions.filter((r) => r.second).length;
-  const summarize = (rs, ds) => {
+  const summarize = (rs, ds, targetPct=null) => {
     const byTask = count(rs, (r) => r.task);
     const found = rs.filter((r) => r.yield === 'found-p0-p1').length, none = rs.filter((r) => r.yield === 'none').length;
-    return { dispatches: ds, reviews: rs.length, reviewSharePct: pct(rs.length, ds), overBudget: ds > 0 && rs.length / ds > .1,
+    return { dispatches: ds, reviews: rs.length, reviewSharePct: pct(rs.length, ds), targetPct,targetExcluded:targetPct===null,overBudget:targetPct===null?null:ds>0&&rs.length/ds>targetPct/100,
       requiredReviews: rs.filter((r) => r.required).length, requiredReviewSharePct: pct(rs.filter((r) => r.required).length, ds),
       secondReviewers: rs.filter((r) => r.secondReviewer).length, secondReviewerSharePct: pct(rs.filter((r) => r.secondReviewer).length, rs.length),
       reReviews: rs.filter((r) => r.reReview).length, reReviewSharePct: pct(rs.filter((r) => r.reReview).length, rs.length),
       reviewsPerTask: byTask, tasksAtLeast3: Object.entries(byTask).filter(([, n]) => n >= 3).map(([task, reviews]) => ({ task, reviews })),
-      yield: { foundP0P1: found, none, unknown: rs.length - found - none } };
+      yield: { foundP0P1:found,blocking:found,none,unknown:rs.length-found-none,known:found+none,blockingRatePct:pct(found,found+none) } };
   };
   const projects = [...new Set(decisions.map((r) => r.project ?? '(none)').concat(launches.map((r) => r.project)))];
   const byProject = Object.fromEntries(projects.map((project) => {
     const pd = decisions.filter((r) => (r.project ?? '(none)') === project);
-    return [project, summarize(launches.filter((r) => r.project === project), pd.length + pd.filter((r) => r.second).length)];
+    return [project, summarize(launches.filter((r) => r.project === project), pd.length + pd.filter((r) => r.second).length,projectReviewPolicy(project,reviewProfiles).reviewTargetPct)];
   }));
   const dayKeys = [...new Set(decisions.map((r) => `${new Date(r.t).toISOString().slice(0, 10)}\0${r.project ?? '(none)'}`))];
   const byProjectDay = Object.fromEntries(dayKeys.map((key) => {
     const [day, project] = key.split('\0');
     const pd = decisions.filter((r) => new Date(r.t).toISOString().startsWith(day) && (r.project ?? '(none)') === project);
     const pr = launches.filter((r) => new Date(r.t).toISOString().startsWith(day) && r.project === project);
-    return [`${day}/${project}`, summarize(pr, pd.length + pd.filter((r) => r.second).length)];
+    return [`${day}/${project}`, summarize(pr, pd.length + pd.filter((r) => r.second).length,projectReviewPolicy(project,reviewProfiles).reviewTargetPct)];
   }));
-  return { ...summarize(launches, dispatches), byProject, byProjectDay };
+  const noReviewProjects=Object.fromEntries(projects.filter(project=>projectReviewPolicy(project,reviewProfiles).profile==='no-review').map(project=>[project,{dispatches:byProject[project].dispatches,reviews:byProject[project].reviews}]));
+  return { ...summarize(launches, dispatches), byProject, byProjectDay,noReviewProjects };
 };
 const reviewBudget = {
-  policyLimitPct: 10,
+  policyLimitPct:null,projectTargets:Object.fromEntries(Object.entries(reviewProfiles).filter(([p])=>!['default','profiles'].includes(p)).map(([p])=>[p,projectReviewPolicy(p,reviewProfiles).reviewTargetPct])),
   window: { hours: H, ...reviewWindow(since) },
   rolling24h: reviewWindow(Date.now() - 24 * 3600000),
   rolling7d: reviewWindow(Date.now() - 7 * 86400000),

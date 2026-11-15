@@ -24,8 +24,8 @@ const row = (minutes, project, name, category, extra = {}) => ({ t: now - minute
 const routes = [
   row(50, 'p', 'T1', 'implement'),
   row(40, 'p', 'T1-R', 'review', { second: { ...pick, model: 'kimi-k3' }, reviewResult: 'found P1', secondFindings: 'no P0/P1 findings' }),
-  row(30, 'p', 'T1-R2', 'review-high', { reviewResult: 'no P0/P1 findings' }),
-  row(20, 'p', 'T2', 'implement', { impact: 'release', second: { ...pick, model: 'gpt-6-astra' } }),
+  row(30, 'p', 'T1-R2', 'review-high', { reviewClass:'B',reviewReason:'authentication logic',reviewResult: 'no P0/P1 findings' }),
+  row(20, 'p', 'T2', 'implement', { reviewClass:'A',reviewReason:'irreversible release',impact: 'release', second: { ...pick, model: 'gpt-6-astra' } }),
   row(10, 'q', 'Q1', 'analysis'),
 ];
 fs.writeFileSync(routeLog, routes.map((r) => JSON.stringify(r)).join('\n') + '\n');
@@ -64,12 +64,26 @@ try {
   assert.deepEqual([p.dispatches, p.reviews, p.reviewSharePct], [6, 4, 66.7]);
   assert.deepEqual([p.secondReviewers, p.secondReviewerSharePct, p.reReviews, p.reReviewSharePct], [2, 50, 1, 25]);
   assert.deepEqual(p.tasksAtLeast3, [{ task: 'p/T1', reviews: 3 }]);
-  assert.deepEqual(p.yield, { foundP0P1: 1, none: 2, unknown: 1 });
+  assert.deepEqual(p.yield, { foundP0P1: 1, none: 2, unknown: 1, blocking:1,known:3,blockingRatePct:33.3 });
   assert.deepEqual([p.requiredReviews, p.requiredReviewSharePct], [2, 33.3]);
   assert.equal(json.reviews.rolling24h.byProject.q.reviewSharePct, 0);
   assert.ok(Object.keys(json.reviews.rolling7d.byProjectDay).some((k) => k.endsWith('/p')));
   console.log('PASS per-project/day review share, second/re-review shares, yield, required reviews and ≥3 flags');
 
+  execFileSync(process.execPath,[path.join(scripts,'outcome.mjs'),'--project','p','--name','T1-R','--result','pass','--review-result','none'],{env,encoding:'utf8',stdio:['ignore','pipe','pipe']});
+  let recorded=JSON.parse(execFileSync(process.execPath,[review,'--hours','24','--json'],{env,encoding:'utf8'}));
+  assert.equal(recorded.reviews.rolling24h.byProject.p.yield.blocking,0,'explicit outcome none overrides route P1 text');
+  execFileSync(process.execPath,[path.join(scripts,'outcome.mjs'),'--project','p','--name','T1-R','--review-result','blocking'],{env,encoding:'utf8',stdio:['ignore','pipe','pipe']});
+  recorded=JSON.parse(execFileSync(process.execPath,[review,'--hours','24','--json'],{env,encoding:'utf8'}));
+  assert.equal(recorded.reviews.rolling24h.byProject.p.yield.blocking,1);
+  const meta=fs.readFileSync(routeLog,'utf8').trim().split('\n').map(JSON.parse).at(-1);assert.equal(meta.kind,'outcome');assert.ok(!Object.hasOwn(meta,'result'),'metadata-only result preserves accepted outcome');
+  const targets=JSON.parse(fs.readFileSync(path.join(scripts,'../references/project-risk-profiles.json'),'utf8'));
+  assert.equal(targets['video-agent'].reviewTargetPct,10);assert.equal(targets['vesdk-mainline'].reviewTargetPct,20);
+  assert.equal(recorded.reviews.rolling24h.targetPct,null,'aggregate target is observational');
+  fs.appendFileSync(routeLog,['evelyns-world','acq','autotrader'].map(project=>JSON.stringify(row(5,project,'private-feature','implement'))).join('\n')+'\n');
+  recorded=JSON.parse(execFileSync(process.execPath,[review,'--hours','24','--json'],{env,encoding:'utf8'}));
+  for(const project of ['evelyns-world','acq','autotrader']) {const p=recorded.reviews.rolling24h.byProject[project];assert.equal(p.targetPct,null);assert.equal(p.overBudget,null);assert.equal(p.targetExcluded,true);assert.deepEqual(recorded.reviews.rolling24h.noReviewProjects[project],{dispatches:1,reviews:0});}
+  console.log('PASS explicit outcome yield/correction precedence and per-project targets');
   const windows = json.quota.traeReconciliation.windows;
   const byModel = (model) => windows.find((w) => w.model === model);
   assert.deepEqual([byModel('gpt-5.6-sol').publicListCostUsd, byModel('gpt-5.6-sol').dollarsPerUnit, byModel('gpt-5.6-sol').coveragePct], [80, 1, 100]);

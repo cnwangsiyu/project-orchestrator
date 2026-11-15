@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import {modelPreference} from './lib/pipeline/policy.mjs';
 // codex-worker: run and steer Codex workers through a shared Codex app-server ("hub") over WebSocket.
 //
 //   codex-worker [--account NAME] <command> …                             (any command, on that account's home and hub)
@@ -60,7 +61,7 @@ import { lifecycle, resolveOwner, validOwner, inbox, readEvents, readAck, eventL
 // What a TRAE pause covers: one model family (route.mjs moves to the next family) or the whole account.
 const pausedWhat = (p) => (p.pool ? `TRAE's ${p.pool} models are paused` : 'TRAE is paused');
 // A model TRAE no longer resolves (2026-11-13: it dropped Gemini): that model alone is out of routing for 6 h.
-const unavailableHint = (p) => `model-unavailable: ${p.model} isn't available on TRAE; re-route (route.mjs skips it now)`;
+const unavailableHint = (p) => `model-unavailable: ${p.model} isn't available on this company account; re-route (route.mjs skips it now)`;
 
 // --account NAME (anywhere on the line) picks a profile from the accounts file: its own CODEX_HOME, so its own login,
 // and its own hub. Without it: CODEX_HOME / CODEX_HUB from the environment, else ~/.codex and the default hub.
@@ -347,7 +348,9 @@ if (cmd === 'ttadk-setup') {
   if (sso?.status !== 'active') die('TTADK SSO is not logged in: ask the user to run `! ttadk auth login sso`', 1);
   let models = [];
   try { models = ((j) => (Array.isArray(j) ? j : j.models ?? []))(JSON.parse(execFileSync(ttadkBin, ['models', '-f', 'json'], { encoding: 'utf8', timeout: 60000, stdio: ['ignore', 'pipe', 'ignore'] }))).filter((m) => (m.availableAgents ?? []).includes('codex')).map((m) => m.id); } catch {}
-  if (!models.includes('gpt-6.1-sol')) die(`the TTADK gateway lists no gpt-6.1-sol for codex (models: ${models.join(', ') || 'none'})`, 1);
+  const qualified=new Set(['light','normal','hard'].flatMap(tier=>modelPreference({category:'analysis',tier,contentLabels:[]},{kind:'ttadk'})).concat(modelPreference({category:'image-read',tier:'normal',contentLabels:[]},{kind:'ttadk'}),['kimi-k3']));
+  const usable=models.filter(m=>qualified.has(m.toLowerCase()));if(!usable.length)die('the TTADK gateway lists no usable qualified Codex model',1);
+  const gatewayDefault=usable.includes('gpt-6.1-sol')?'gpt-6.1-sol':usable[0];
   const reg = readAccounts();
   reg.main ??= { home: path.join(os.homedir(), '.codex'), hub: 'ws://127.0.0.1:47321' };
   const home = path.resolve(typeof opts.home === 'string' ? opts.home : reg[name]?.home ?? path.join(os.homedir(), `.codex-${name}`));
@@ -363,7 +366,7 @@ if (cmd === 'ttadk-setup') {
     if (fs.existsSync(cfg)) fs.copyFileSync(cfg, `${cfg}.bak-ttadk-${Date.now()}`);
     const keep = fs.existsSync(cfg) ? fs.readFileSync(cfg, 'utf8') : '';
     fs.writeFileSync(cfg, `# TTADK company gateway (codex-worker ttadk-setup). Models: ${models.join(', ')}
-model = "gpt-6.1-sol"
+model = "${gatewayDefault}"
 model_provider = "ttadk_app"
 
 [model_providers.ttadk_app]
@@ -865,7 +868,7 @@ const report = async (threadId, turn, final, usage) => {
   // The Chrome extension's native host ("ChatGPT for Chrome") comes and goes; while it is down the browser runtime
   // says "Browser is not available: chrome" (seen 2026-11-07; back within a minute on its own).
   if (/Browser is not available: chrome/.test(JSON.stringify(turn.error ?? '') + (final ?? lastMessage(turn.items) ?? ''))) {
-    console.log('browser-unavailable: the Chrome extension host is not connected (pgrep -f "ChatGPT for Chrome"). Make sure Chrome is running, wait a minute and retry once; if it fails again, re-route the task to a Claude worker (route.mjs browser --exclude-account ' + (account ?? '<account>') + ')');
+    console.log('browser-unavailable: the Chrome extension host is not connected (pgrep -f "ChatGPT for Chrome"). Make sure Chrome is running, wait a minute and retry once; if it fails again, re-route after excluding this failed account/lane (route.mjs browser --exclude-account ' + (account ?? '<account>') + ')');
   }
   // TRAE: every failed turn is recorded and every completed one clears the record; repeated or hard failures pause it.
   // A cyberPolicy block is content policy, not an infrastructure failure. The kind:'policy-block' row above is logged
@@ -886,6 +889,7 @@ const report = async (threadId, turn, final, usage) => {
       else if (model) console.log(`trae-failed: a ${model} turn failed on TRAE (not paused yet); for an infrastructure error re-route this task with route.mjs ... --exclude-model ${model.toLowerCase()} (not a --failures step)`);
     }
   }
+  if(PROF?.kind==='ttadk'&&turn.status==='failed'&&!policyBlock&&failureKind(JSON.stringify(turn.error??''))==='unavailable'){const p=noteFailure(PROF.home,JSON.stringify(turn.error),Date.now(),opts.model??actualModel);if(p?.modelPause)console.log(unavailableHint(p));}
   if (usage) console.log(`usage (thread total) input=${usage.inputTokens} cached=${usage.cachedInputTokens} output=${usage.outputTokens}`);
   final ??= lastMessage(turn.items);
   if (!final) final = lastMessage((await readTurns(threadId).catch(() => [])).find((t) => t.id === turn.id)?.items);
@@ -897,7 +901,7 @@ const report = async (threadId, turn, final, usage) => {
     : turn.status === 'completed' ? 'finished' : 'failed', { thread: threadId, turn: turn.id, mayRun: false,
       finalLine: final?.split('\n').find((line) => line.trim()) ?? '' });
   const errorText = JSON.stringify(turn.error ?? '');
-  const infrastructureMiss = PROF?.kind === 'trae' && (failureKind(errorText) === 'unavailable' || /access (temporarily )?restricted|\b983\b/i.test(errorText));
+  const infrastructureMiss = (['trae','ttadk'].includes(PROF?.kind)&&failureKind(errorText)==='unavailable')||(PROF?.kind==='trae'&&/access (temporarily )?restricted|\b983\b/i.test(errorText));
   if (!(strictReviewModel && modelMismatch) && turn.status === 'failed' && ROUTE_ARGS && !BACKGROUND && !workStarted && !turnHasWork(turn) && !final
     && (infrastructureMiss || (policyBlock && (routeFlag(ROUTE_ARGS, 'security') || routeFlag(ROUTE_ARGS, 'adversarial'))))) {
     const observed = (await readTurns(threadId).catch(() => [])).find((t) => t.id === turn.id);
@@ -917,17 +921,25 @@ const report = async (threadId, turn, final, usage) => {
 // ({threadId, turnId, state, position, message}); they carry this thread's id, so they already count as progress below —
 // a worker printing `queued:` lines is waiting, not stalled. Print on a state change or a ≥10% position move (at most
 // one line a minute), and the wait's length once it clears. `status --thread` reads the last state from the file.
+const LONG_COMMAND_MAX_MIN = Number(process.env.CODEX_WORKER_LONG_COMMAND_MAX_MIN ?? 240);
+const runningCommands = new Set(); let quietNoted = false;
 const follow = (threadId, turnId) => {
   clearTimeout(setupAlarm);
+  handlers.push((m) => {
+    const p = m.params ?? {}, item = p.item;
+    if (p.threadId !== threadId || item?.type !== 'commandExecution' || !item.id) return;
+    if (m.method === 'item/started') runningCommands.add(item.id);
+    else if (m.method === 'item/completed') { runningCommands.delete(item.id); quietNoted = false; }
+  });
   activeTurn = { threadId, turnId };
   tracker?.update({ thread: threadId, turn: turnId, model: opts.model ?? null, mayRun: true });
   recordModelEvidence(threadId, turnId);
   console.log(`thread=${threadId} turn=${turnId}`);
-  const recordQueue = PROF?.kind === 'trae' ? createQueueRecorder(PROF.home, opts.model ?? threadModel(PROF.home, threadId)) : null;
+  const recordQueue = ['trae','ttadk'].includes(PROF?.kind) ? createQueueRecorder(PROF.home, opts.model ?? threadModel(PROF.home, threadId)) : null;
   if (recordQueue) cleanups.add(() => recordQueue.stop());
   let final, usage, last = Date.now();
   let runningSince = Date.now(), completedItems = 0;
-  let queueSince = null, queuePosition = null, lastPrintedQueue = null, queuePrinted = null;
+  let queueSince = PATIENCE_MIN!=null&&!BACKGROUND?Date.now():null, queuePosition = null, lastPrintedQueue = null, queuePrinted = null;
   let patienceSamples = [];
   let handingOff = false, reporting = false;
   // Use measured drain for an early decision, but never require drain to enforce the elapsed deadline.
@@ -991,7 +1003,7 @@ const follow = (threadId, turnId) => {
     const t = Date.now(), state = String(p.state ?? 'queued');
     const pos = p.position != null && p.position !== '' && Number.isFinite(Number(p.position)) ? Number(p.position) : null;
     queuePosition = pos;
-    if (state !== 'ready' && queueSince == null) queueSince = t;
+    if (state !== 'ready') queueSince = Math.min(queueSince ?? t,t);
     const queue = { state, position: pos, since: queueSince, turnId, at: t };
     if (PROF?.home) saveQueue(PROF.home, threadId, queue);
     recordQueue?.(p, t);
@@ -1025,10 +1037,17 @@ const follow = (threadId, turnId) => {
     }
     const idle = (Date.now() - last) / 60000;
     if (idle < STALL_MIN) return;
-    const line = `stalled: no events for ${idle < 1 ? `${Math.round(idle * 60)}s` : `${Math.round(idle)}m`} on turn ${turnId} (thread ${threadId}); the turn is still running on the hub — check status and sub-agent threads, then wait again, steer or interrupt`;
+    // A worker inside one long command (a build, a test run) emits no model events until it returns. That is work, not a
+    // stall: keep following (2026-11-15: a 30+ min test run was reported stalled and the final message was never written).
+    if (runningCommands.size && idle < LONG_COMMAND_MAX_MIN) {
+      if (!quietNoted) { quietNoted = true; console.log(`quiet: no events for ${Math.round(idle)}m while a command is still running on turn ${turnId}; still following (up to ${LONG_COMMAND_MAX_MIN}m)`); }
+      return;
+    }
+    const line = `stalled: no events for ${idle < 1 ? `${Math.round(idle * 60)}s` : `${Math.round(idle)}m`} on turn ${turnId} (thread ${threadId}); the turn is still running on the hub — check the actual turn and progress, then wait again, steer or interrupt; never delegate or request a model switch`;
     console.log(line);
     tracker?.result('stalled', { thread: threadId, turn: turnId, phase: 'follow', mayRun: true, finalLine: line });
     if (opts.log) try { fs.appendFileSync(path.resolve(opts.log), JSON.stringify({ stalled: true, idleMin: Math.round(idle), at: Date.now() }) + '\n'); } catch {}
+    recordQueue?.({state:'waiting',position:queuePosition,progress:false},Date.now());
     if (PROF?.kind === 'trae') noteFailure(PROF.home, `stalled ${Math.round(idle)} min (queued for capacity?)`, Date.now(), opts.model ?? threadModel(PROF.home, threadId));
     finish(4);
     }, Math.min(60000, Math.max(20, STALL_MIN * 30000)));
@@ -1127,7 +1146,8 @@ try {
   } else if (cmd === 'turn') {
     if (!opts.thread || !text) die('turn needs --thread and a prompt');
     const config = TRAE_EXTENSION_BROWSER ? { mcp_servers: { playwright: TRAE_PLAYWRIGHT_SERVER } } : undefined;
-    const resumed = await call('thread/resume', { threadId: opts.thread, model: opts.model, config }).catch(() => null);
+    const resumedDigest=loadDigest();
+    const resumed = await call('thread/resume', { threadId: opts.thread, model: opts.model, config,developerInstructions:`Global worker rules ${resumedDigest.version}\n${resumedDigest.worker}` }).catch(() => null);
     sessionPath = resumed?.thread?.path ?? null;
     auditStart(opts.model??resumed?.thread?.model,opts.sandbox??resumed?.thread?.sandbox??undefined);
     tracker?.set({ mayRun: true });
@@ -1226,7 +1246,7 @@ try {
   // record it here so routing skips just that model (lib/trae-health.mjs, 2026-11-13).
   const msg = String(e?.message ?? e);
   const policy = isPolicyBlock({ status: 'failed', error: msg });
-  const infrastructureMiss = PROF?.kind === 'trae' && (failureKind(msg) === 'unavailable' || /access (temporarily )?restricted|\b983\b/i.test(msg));
+  const infrastructureMiss = (['trae','ttadk'].includes(PROF?.kind)&&failureKind(msg)==='unavailable')||(PROF?.kind==='trae'&&/access (temporarily )?restricted|\b983\b/i.test(msg));
   if (infrastructureMiss && !policy) {
     const p = noteFailure(PROF.home, msg, Date.now(), opts.model ?? null);
     if (p?.modelPause) console.log(unavailableHint(p));

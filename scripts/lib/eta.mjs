@@ -41,6 +41,7 @@ export const laneEta = ({ workMin, requests, position = null, drainPerMin = null
   congested = false, progressing = false, state = null, unknown = false, startDelayMin = 0 }) => {
   if ((finite(position) && position > 0 && drainPerMin === 0) || (state === 'waiting' && !progressing))
     return { startDelayMin: null, slowdown: null, completionMin: null, unknown: false, stalled: true, basis: 'stalled' };
+  if(!congested&&position===0&&state==='ready') return {startDelayMin:0,slowdown:1,completionMin:workMin,unknown:false,basis:progressing?'progressing':'ready'};
   const queued = bucketDepleted || congested || state === 'queued' || state === 'waiting' || (finite(position) && position > 0);
   if (!queued || (progressing && !congested)) {
     return { startDelayMin, slowdown: 1, completionMin: startDelayMin + workMin, unknown, basis: progressing ? 'progressing' : 'available' };
@@ -69,8 +70,8 @@ export const ttadkEta = ({ account, now, workMin }) => {
   return null;
 };
 // Optimistic-launch patience: never longer than 30 min, and no longer than a quarter of the wait for the faster account.
-export const patienceMinutes = ({ now, ttadk }) => {
-  const reset = ttadk?.usage?.resetsAt;
+export const patienceMinutes = ({ now, nextAvailableAt, ttadk }) => {
+  const reset = nextAvailableAt ?? ttadk?.usage?.resetsAt;
   if (!finite(reset) || reset <= now) return ETA.patienceMaxMin;
   return Math.min(ETA.patienceMaxMin, ETA.patienceShare * (reset - now) / 60000);
 };

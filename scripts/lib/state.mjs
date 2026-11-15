@@ -610,7 +610,7 @@ export const outcomeOwns = (project, outcomeName, r) => {
 // or without the "<project>-" prefix) merge into one at the latest record's time: the latest result, note and accepted
 // pick; the most rounds any record gave; the first non-null first pick; reviewed if any record says so. `dupes` counts
 // normal records merged. Corrections are applied last in timestamp order, even when a normal record is newer.
-export const OUTCOME_OVERRIDES = ['result', 'rounds', 'cause', 'retries', 'scopeChanges', 'minutes', 'note', 'reviewed', 'actual'];
+export const OUTCOME_OVERRIDES = ['result', 'rounds', 'cause', 'retries', 'scopeChanges', 'minutes', 'note', 'reviewed', 'actual', 'reviewResult'];
 export const dedupeOutcomes = (records) => {
   const by = new Map(), corrections = new Map();
   for (const o of [...records].sort((a, b) => a.t - b.t)) {
@@ -883,18 +883,19 @@ export const leanLines = (st, data) => {
   const { claude: C, codex: X } = st, out = [];
   const multi = X.rows.length > 1, who = (r) => `${r.a.name}${r.a.email ? ` (${r.a.email})` : ''}`;
   if (X.companyUnknown.length || X.registryError) out.push(`company account state unknown (${X.companyUnknown.map((a) => `${a.name}/${a.kind}`).join(', ') || X.registryError}): check quota.mjs --fresh; personal quota needs the user's OK`);
-  if (st.stop) return [...out, 'stop: neither vendor\'s usage is readable — dispatch nothing quota-dependent; check `claude -p /usage` and the Codex hubs, tell the user'];
+  if (st.stop) return [...out, 'stop: neither vendor\'s usage is readable — report the account uncertainty and route any other authorized runnable lane; check `claude -p /usage` and the Codex hubs, tell the user'];
   for (const r of X.rows) {
     if (r.a.staleHub) out.push(`account ${r.a.name}: its login changed but its hub still runs the old account — restart that hub once no thread runs on it`);
     if (!r.a.live && r.a.loggedIn === false) out.push(`account ${r.a.name}: not logged in — ask the user to run \`! CODEX_HOME=${r.a.home} codex login\`, then start its hub: codex-worker.mjs --account ${r.a.name} hub`);
     else if (r.a.hubBroken) out.push(`account ${r.a.name}: hub answers but can't start threads (${r.a.hubBroken.why}) — restart it ${r.a.hubBroken.fix}`);
     else if (!r.a.live) out.push(`account ${r.a.name}: hub unreachable${r.a.windows ? ` (using its reading from ${fmtAgo(r.a.seenAt)})` : ''} — probe codex-worker.mjs --account ${r.a.name} list --limit 1; only if unreachable, start with codex-worker.mjs --account ${r.a.name} hub; tell the global-rules owner`);
   }
-  const T = X.ttadk;
+  const T = X.ttadk, companyDevice=!!(X.ttadk||X.trae||X.companyUnknown.length);
+  if(companyDevice)out.push('Company work follows the quality ladder across both accounts: prefer the same model on a free TRAE lane, then TTADK; expiring quota stays within that quality rung. Personal quota needs scoped approval; no extra reviews merely to spend quota.');
   if (T) {
     if (T.usable && ttadkExpiringUnused(T)) out.push(TTADK_EXPIRY_HINT);
     if (T.usable) {
-      out.push(`TTADK first by default: route.mjs balances eligible work to TRAE when daily reserve and load/queue permit; the ChatGPT accounts below take image generation${T.search ? '' : ' and web research (TTADK web search not set up: rerun ttadk-setup)'}, and work neither company account can take; ${T.active} TTADK turns running`);
+      out.push(`TTADK handles the qualifying model when TRAE is congested/queued or lacks its capability; the ChatGPT accounts below take image generation${T.search ? '' : ' and web research (TTADK web search not set up: rerun ttadk-setup)'}, and work neither company account can take; ${T.active} TTADK turns running`);
       out.push('TTADK device: leave the ChatGPT and Claude quota for the user\'s other device (no TTADK there) — spend it only on work TTADK can\'t do; no effort raises or extra reviews just to use quota (route.mjs applies this)');
     }
     else if (T.quotaOut && X.trae?.usable) out.push(`TTADK paused — ${T.reason}: nothing to fix; its work goes to TRAE meanwhile (see below)`);
@@ -909,46 +910,46 @@ export const leanLines = (st, data) => {
   }
   const TR = X.trae;
   if (TR) {
-    if (TR.usable && !T?.usable) out.push(`TRAE next: with TTADK ${T ? 'out' : 'absent'}, work TTADK would take runs on TRAE CLI (account ${TR.name}, GPT-6.1-Sol and eligible alternatives; route.mjs applies daily-quota and model-fit rules, with Seed-Evolving for image-read) before personal quota; web browser work is available only with the Playwright Extension token, while desktop apps and image generation stay off TRAE`);
-    else if (TR.usable) out.push(`TRAE CLI (account ${TR.name}) shares eligible work with TTADK under the daily-reserve and congestion rules, and remains its fallback before personal quota`);
+    if (TR.usable && !T?.usable) out.push(`TRAE available: with TTADK ${T ? 'out' : 'absent'}, work TTADK would take runs on TRAE CLI (account ${TR.name}, GPT-6.1-Sol and eligible alternatives; route.mjs applies daily-quota and model-fit rules, with Seed-Evolving for image-read) before personal quota; web browser work is available only with the Playwright Extension token, while desktop apps and image generation stay off TRAE`);
+    else if (TR.usable) out.push(`TRAE CLI (account ${TR.name}) shares eligible work with TTADK under the quality-first, free-lane and congestion rules, and remains its fallback before personal quota`);
     else out.push(`TRAE CLI unavailable — ${TR.reason}`);
     for (const [pool, r] of Object.entries(TR.poolPauses ?? {})) out.push(`TRAE ${pool} models ${r.pausedUntil > Date.now() ? `paused until ${fmt(r.pausedUntil)}, then probed` : 'being probed for recovery'} (${String(r.reason).slice(0, 120)}): route.mjs uses the next model family meanwhile`);
     // A model TRAE no longer resolves stays out for 6 h; its family-mates keep routing (2026-11-13: TRAE dropped Gemini).
     for (const [model, r] of Object.entries(TR.modelPauses ?? {})) out.push(`TRAE model ${model} unavailable since ${fmt(r.t)} (${String(r.reason).slice(0, 120)}); routing skips it`);
     // Daily depletion queues only this model; route.mjs can substitute an eligible model on new dispatches.
     for (const [model, q] of Object.entries(TR.quota?.daily ?? {})) if (q?.depleted)
-      out.push(`TRAE ${model}'s daily high-priority quota is used up${q.resetsAt ? ` until ${fmt(q.resetsAt)}` : ''}: its requests queue in the low-priority lane (long waits; queued: lines show the position)`);
+      out.push(`TRAE ${model}'s daily high-priority quota is used up${q.resetsAt ? ` until ${fmt(q.resetsAt)}` : ''}: its requests use low priority; depletion alone does not prove a queue, and fresh ready/progress telemetry can show immediate capacity`);
     if (TR.healthy && !TR.live) out.push(`TRAE hub down — probe codex-worker.mjs --account ${TR.name} list --limit 1; only if unreachable, start with codex-worker.mjs --account ${TR.name} hub; tell the global-rules owner (traecli exec runs don't need it)`);
   }
-  if (X.redeem && T) out.push(`reset card due${multi ? ` on ${who(X.redeem)}` : ''}: ${X.redeem.cp.line} — on this TTADK device ask the user only when route.mjs prints redeemFirst (ChatGPT-only work landing on that account); the other device spends that quota`);
+  if (X.redeem && companyDevice) out.push(`reset card due${multi ? ` on ${who(X.redeem)}` : ''}: ${X.redeem.cp.line} — on this company device ask the user only when route.mjs prints redeemFirst (ChatGPT-only work landing on that account); the other device spends that quota`);
   else if (X.redeem) out.push(`redeem a reset card${multi ? ` on ${who(X.redeem)}` : ''}: ${X.redeem.cp.line} — ask the user first, every time; only after a yes: `
     + `codex-worker.mjs --account ${X.redeem.a.name} reset-credit-use --key <new uuid>${X.redeem.cp.card ? ` --credit ${X.redeem.cp.card.id}` : ''}, then quota.mjs --fresh`);
-  if (X.rotate) out.push(`${X.ttadk?.usable ? 'ChatGPT-account work' : 'new Codex work'} → rotate across ${X.rotate.map((r) => r.a.name).join(', ')} (each must be spent within ${hours(Math.max(...X.rotate.map((r) => r.deadline)))}); route.mjs alternates per launch`);
-  else if (X.pick && multi) out.push(`${X.ttadk?.usable ? 'ChatGPT-account work (images, TTADK fallback)' : 'new Codex work'} → account ${who(X.pick)} (week ${X.pick.s?.used ?? '-'}%, its quota is lost first: ${hours(X.pick.deadline)})${X.pickStale ? ' — from a stale reading' : ''}`);
-  if (X.out && T?.usable) out.push('ChatGPT Codex accounts are out; Codex work continues on TTADK (models it lacks wait or go to Claude)');
-  else if (X.out && X.throttledOnly) out.push(`codex paused: 5h windows full, free in ${hours(X.nextFree)} — Claude takes it only while it has spare; otherwise wait`);
+  if (X.rotate) out.push(`${companyDevice ? 'approved ChatGPT-account work' : 'new Codex work'} → rotate across ${X.rotate.map((r) => r.a.name).join(', ')} (each must be spent within ${hours(Math.max(...X.rotate.map((r) => r.deadline)))}); route.mjs alternates per launch`);
+  else if (X.pick && multi) out.push(`${companyDevice ? 'approved ChatGPT-account work (images, company capability fallback)' : 'new Codex work'} → account ${who(X.pick)} (week ${X.pick.s?.used ?? '-'}%, its quota is lost first: ${hours(X.pick.deadline)})${X.pickStale ? ' — from a stale reading' : ''}`);
+  if (X.out && (T?.usable||TR?.usable)) out.push('Personal ChatGPT accounts are out; qualified company work continues through route.mjs on TTADK/TRAE; ask for any remaining personal option.');
+  else if (X.out && X.throttledOnly) out.push(`codex paused: 5h windows full, free in ${hours(X.nextFree)} — Claude takes it only while it has spare; otherwise request a capacity decision`);
   else if (X.out) out.push(`codex out on every account (next free in ${hours(X.nextFree)}): tell the user; ${C.status === 'over' || C.status === 'unknown'
-    ? 'Claude takes only Claude-only work that can\'t wait; the rest waits'
-    : `Claude takes what matters, within ${C.room}% of room (keeping ${C.reserve}% for the orchestrators); the rest waits`}`);
-  else if (!X.readable) out.push('codex usage unreadable: start the hubs (codex-worker.mjs --account <name> hub); until then route as if Codex has room and say so');
+    ? 'Claude takes only Claude-only work that can\'t wait; ask for a runnable personal option or a recorded capacity decision'
+    : `Claude takes what matters, within ${C.room}% of room (keeping ${C.reserve}% for the orchestrators); ask for a runnable personal option or a recorded capacity decision`}`);
+  else if (!X.readable) out.push('personal Codex usage unreadable: route any qualified company lane; report account uncertainty and probe the hubs, never assume usable personal capacity.');
   else out.push('codex first: everything either vendor can do runs on Codex');
   const cw = C.week;
   if (C.status === 'unknown') out.push('claude usage unreadable: no new Claude workers except Claude-only work; check `claude -p /usage`');
   else if (C.status === 'over') out.push(`claude over budget (week ${cw.used}%, projected ${cw.projected ?? '?'}% vs ${C.cap}% now, ${C.reserve}% kept for the orchestrators until the reset in ${hours(cw.left)}): no new Claude workers except Claude-only work that can't wait; Claude-strength work goes to Codex; keep the orchestrator lean`);
   else if (C.status === 'near') out.push(`claude near budget (projected ${cw.projected ?? cw.used}%, spare line ${C.spareLine}%, cap ${C.cap}%): Claude-only work, design and high-stakes calls; everything else on Codex`);
-  else out.push(T ? `claude has spare (projected ${cw.projected ?? cw.used}% ≤ ${C.spareLine}%), but on this TTADK device it takes only what TTADK can't do` : `claude has spare (projected ${cw.projected ?? cw.used}% ≤ ${C.spareLine}%): it also takes the work it is clearly better at`);
+  else out.push(companyDevice ? `claude has spare (projected ${cw.projected ?? cw.used}% ≤ ${C.spareLine}%), but on this company device it takes work neither company account can do, after scoped personal approval` : `claude has spare (projected ${cw.projected ?? cw.used}% ≤ ${C.spareLine}%): normal Claude work still needs a scoped personal-quota approval; claude-tools retains standing permission`);
   if (C.throttledUntil) out.push(`claude 5h window full: no new Claude workers until ${fmt(C.throttledUntil)}`);
   for (const r of X.throttled) out.push(`codex ${r.a.name} 5h window full until ${fmt(r.throttledUntil)}`);
-  if (X.underused && !T) out.push(X.frontLoad ? 'codex front-load (reset cards in hand): raise effort on Codex work one notch, add second-opinion reviews, pull queued work forward'
-    : 'codex underused: raise effort on Codex work one notch, add second-opinion reviews, pull queued work forward');
-  if (X.overspending) out.push('codex overspending: lower effort one notch where an automatic check catches misses; save Sol xhigh and Astra for what matters');
+  if (X.underused && !companyDevice) out.push(X.frontLoad ? 'codex front-load (reset cards in hand): raise effort on Codex work one notch, pull queued work forward'
+    : 'codex underused: raise effort on Codex work one notch, pull queued work forward');
+  if (X.overspending) out.push('personal ChatGPT overspending: lower effort one notch where an automatic check catches misses; save Sol xhigh and Astra for what matters');
   for (const r of X.rows) if (r.cp && r.cp !== X.redeem?.cp && (r.cp.deadlineH || r.cp.lapse || (r.spent && !r.cp.redeem)))
     out.push(`${multi ? `${r.a.name}: ` : ''}${r.cp.line}`);
   for (const r of X.rows) if (r.spent && r.cp?.redeem && X.redeem !== r)
     out.push(`${r.a.name}: spent; hold its card ${r.cp.txt} while another account has quota (quota first) — it gains ~${Math.round(r.cp.gain * 100)}% now, falling ~${Math.round(2400 / r.s.windowH)}%/day while held; redeem when the open accounts are spent${r.cp.expH != null && r.cp.expH < r.s.left ? ', or a day before it expires' : ''}`);
   if (C.avoidFable) out.push('Fable window nearly used: no Fable');
-  if (C.expiring && !T) out.push(`claude week resets in ${hours(cw.left)} with ${C.room}% spendable beyond the ${C.reserve}% reserve: stronger settings are fine on Claude`);
-  for (const r of X.rows) if (!T && r.s?.left != null && r.s.left < POLICY.expiringH && 100 - r.s.used >= POLICY.expiringRoom && !r.spent)
+  if (C.expiring && !companyDevice) out.push(`claude week resets in ${hours(cw.left)} with ${C.room}% spendable beyond the ${C.reserve}% reserve: stronger settings are fine on Claude`);
+  for (const r of X.rows) if (!companyDevice && r.s?.left != null && r.s.left < POLICY.expiringH && 100 - r.s.used >= POLICY.expiringRoom && !r.spent)
     out.push(`codex ${r.a.name} week resets in ${hours(r.s.left)} with ${100 - r.s.used}% left: put Codex work there now, at stronger settings`);
   return out;
 };

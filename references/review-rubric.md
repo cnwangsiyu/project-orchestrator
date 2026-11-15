@@ -1,18 +1,8 @@
 # Review rubric (for the reviewer's brief)
 
-Use this rubric for every independent review `route.mjs` asks for. A review is required for:
+Use this rubric for every independent review the router requests. Mandatory review is ONLY explicit --review-class A|B|C|D plus --review-reason: A a version that reaches external users and cannot be rolled back within hours; B login/auth/permission/signing logic; C irreversible data operations or billing/quota accounting; D a named adversarial review. High stakes, installation and fallback authorship alone do not qualify.
 
-- `--impact release`: a mistake that can't be undone within hours, such as app or SDK code that ships in a release, a
-  published library, a data migration or bulk data change, a contract that released clients depend on, or
-  auth/privacy/billing.
-- `--impact service --stakes high`.
-
-Demos, prototypes, experiments and test scripts (`throwaway`) don't get a review (user, 2026-11-04).
-Ordinary service changes are accepted on executable tests. Fallback-authored service
-code requires review only when the task involved builds/acceptance, or the same
-model/category recorded rework or failure in the last seven days. Release and
-high-stakes reviews remain required. Reviews of fallback-authored changes exclude
-that author's model family.
+Pass `--review-class` and `--review-reason`; an explicit class works on internal-demo without profile-override. Release means class A external irreversible release, not PPE/test/internal-demo/trace packages. Ordinary service, installed-tool and fallback-written changes use executable tests, or one optional ordinary review when tests cannot cover the behavior. Fallback reviews exclude the author family when applicable; capability/acceptance limits remain.
 
 Paste the next section into the reviewer's brief, or point the reviewer at this file and tell it to follow it.
 
@@ -61,32 +51,14 @@ nicer.
   notes elsewhere.
 - The review brief states what the reviewer judges against: the threat model, the production path (what ships and how
   it loads), which code is inert or default-off and which is live, and the P0/P1 bar for this change.
-- **Fallback reviewer gate** (user-approved 2026-11-11 retro; W291-R0's Gemini LAND missed storage/startup P1s): release
-  or high-stakes work reviewed by a fallback model also needs an independent reviewer of another family, with at least
-  one GPT/Claude review. Reconcile both reports and failure probes before acceptance; if unavailable, report BLOCKED.
+- **Independent reviewers:** only classified adversarial/review-high/release reviews require a second independent family. Adversarial uses two non-GPT families; do not add a contradictory GPT requirement. Pin the artifact and reconcile blocking findings before acceptance.
 - **Default-off / flag-guarded code gets at most 2 review rounds.** Then the orchestrator decides: merge with notes if
   no P0/P1 remains, or re-scope. A flag does not waive a concrete P0/P1 or the required ON/OFF acceptance proof; P2 alone
   never blocks or earns another round.
-- Two review rounds is the task/branch cap. The router blocks a third; choose
-  re-scoping or acceptance with recorded open items. `--review-override "reason"`
-  permits one additional round and is logged; that reason cannot be reused.
-- Routine reviews have one reviewer. Adversarial, review-high and release-impact
-  reviews require two independent families. Adversarial review uses two non-GPT
-  families, without an additional contradictory GPT requirement.
-- Optional reviews above a 10% rolling 24-hour share overall or per project
-  still dispatch and warn "over review budget — prefer accepting on tests".
-  `--review-required "reason"` records an explicit required review.
-  Release, high-stakes, adversarial and installed-machine reviews are never
-  suppressed to meet the budget.
-- Batch small rule/doc/flag changes into one branch per day and one review.
-  Docs/rule-text-only fixes get owner diff verification, with no re-review.
-  Route/worker/res/hook code gets one full review; use two different families
-  when changing personal-quota gates, credentials/signing, locks or installed
-  agents/hooks. At most one re-review checks only the blocked findings.
-- The video-agent internal-demo profile uses ordinary executable acceptance and
-  no default security/high/adversarial or second review. A user-requested security
-  review requires `--profile-override "reason"`. Its landing gate is package tests,
-  typecheck and SG prepare; full verify is for wide changes or once daily on main.
-  If round 2 still finds the same kind of defect, re-scope the work (SKILL.md, "Fix rounds") before another fix.
+- Two review rounds is a hard task/branch scope cap. `--review-scope` pins the identity; another reason or renamed review must not bypass it. After round two, report remaining findings and re-scope genuinely new work.
+- Optional share targets are video-agent 10%, vesdk-mainline/webview 20%; overall share is observational. Excess warns, never suppresses mandatory reviews. Batch related small changes; docs/rule-text-only fixes use owner diff verification. Installation, high effort, fallback authorship and budget spending cannot create a mandatory review.
+- Record `--review-result blocking|none` in outcome.mjs; interim notes `review: blocking found` / `review: none` work. Unknown yield stays UNKNOWN.
 - `MERGE` and `MERGE-WITH-NOTES` count as a `pass` in `outcome.mjs`. Only a `BLOCK` that led to a fix round counts
   as `rework`.
+
+Release impact means class A only: a version reaches external users and cannot be rolled back within hours. Reading/writing local or user data is not release; real irreversible data operations are class C. Personal/family apps, internal demos and PPE/test packages, or features that only read existing data are not release.

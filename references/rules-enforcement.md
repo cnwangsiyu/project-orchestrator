@@ -23,8 +23,7 @@ The official Claude hooks reference confirms `hookSpecificOutput.hookEventName="
 `additionalContext`; `session_title` is optional. Source: `https://code.claude.com/docs/en/hooks.md`.
 Local native CLI help, Claude Code 2.1.323, confirms `--bg` and `--append-system-prompt` are not print-only.
 Routed Claude workers use `--append-system-prompt "$(node <skill>/scripts/rules-worker-digest.mjs)"`;
-Codex threads and one-shot execs receive the same worker section as developer instructions. Existing resumed
-threads retain their earlier instructions: re-brief them with the current digest before continuing.
+Codex threads and one-shot execs receive the same worker section as developer instructions. Every start, one-shot exec and resumed thread receives the latest worker digest, including no delegation or requests to switch models.
 On each orchestrator wake, also `tail -n 20 ~/.claude/orchestrator/_shared/idle-hints.jsonl` when present and match
 its exact target/name. This passive file-delivery path is documented in SKILL.md; no Claude messaging session is needed
 and the hook does not auto-dispatch or change its bounded injection implementation.
@@ -46,8 +45,7 @@ No hook was installed by the inbox task.
 `codex-worker start` and routed Claude/one-shot launches check the last 24h of routing decisions for the same
 name or task-prefix. Missing decisions warn `unrouted-launch` and append `kind: unrouted`; attempted launches
 append `kind: launch` with actual account/model/vendor, timestamp and matched route timestamp. They don't block.
-Pass `--user-ok <actual-card-or-ledger-reference>` after a real user approval; `route --urgent` records the already
-approved personal-quota choice, not permission for reset cards or other gates. Missing evidence stays unknown.
+Pass `--user-ok <actual-card-or-ledger-reference>` after storing the matching scoped task/role/account/model/effort approval. Urgency/reference text alone is not consent; personal Astra/max/Fable/reset remain separate gates. Missing evidence stays unknown.
 `review-data.globalRules` reports unrouted launches, personal-quota launches without recorded OK, TRAE GPT on
 security routes, latest ledger acknowledgements vs the digest version, and pointers to orch-usage flags.
 
@@ -118,3 +116,7 @@ restart in approximately **35 seconds**. `com.user.resource-sample` is installed
 `com.user.resource-cleanup` at **04:30 local time**, with **`MINI_CLEANUP_MODE=dry`**. These are host installation
 facts from the brief, not live checks by this edit-only task. Reinstalling/reading settings or sign-in storage is out
 of scope. The lane-3 contract request is separate and must not be confused with these installed agents.
+
+## Never-Ask Dependency Installation
+
+Project dependencies and build tools fetched through normal package managers and registries (npm/pnpm/yarn, pip/uv, gradle/maven, CocoaPods/SPM, cargo, go modules, brew formulae, and SDK/toolchain components the build asks for) are installed directly into the task workspace or user-level caches, without a card or question. No secrets/credentials, production changes without a card, unapproved personal quota, or system security changes; a required login the worker lacks is BLOCKED.

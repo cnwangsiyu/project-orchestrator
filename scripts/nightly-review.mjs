@@ -296,7 +296,8 @@ function prompt(data) {
     `Read ${skill}/references/nightly-review.md and follow the worker part of "Who does what". ` +
     `The data is already gathered in ${data}: review-data-24h.txt, review-data-168h.txt, orch-usage-24h.txt. ` +
     `Machine resources: resource-review-24h.txt/.json, resource-review-96h.json, resource-now.json and adjacent .err files. ` +
-    `Missing/failed evidence is UNKNOWN. No process/file cleanup or agent installation. `;
+    `Missing/failed evidence is UNKNOWN. No process/file cleanup or agent installation. ` +
+    `Mandatory review only explicit A–D with a reason; two rounds per scope. Report review yield and share by project against the configured 10% video-agent / 20% vesdk-mainline targets; UNKNOWN is not none. Audit ordinary routed signing workers against registered metadata and receipts, never signing inputs. Workers do not delegate or request model/account changes. `;
   if (mode === 'dry') return instructions + 'DRY RUN: read-only; no edits, commits or pushes. Your final answer is the report.';
   return instructions + `For this attempt use ${attemptDir}/report.md and ${attemptDir}/notify.json, NOT the day-level output paths. ` +
     `Read prior attempts/drafts in ${runDir} before repeating work. Do not redo fixes already committed by a prior attempt. ` +

@@ -46,6 +46,17 @@ const attempt = (modelId = ASTRA, effort = 'xhigh', extra = {}) => ({ id: 'attem
 let fixed = 0;
 function test(name, fn) { try { fn(); fixed++; console.log(`PASS ${name}`); } catch (e) { e.message = `${name}: ${e.message}`; throw e; } }
 
+test('personal Luna image generation keeps its standing exception on a company device', () => {
+  const raw = fixture([['company-a','ttadk',[SOL]],['company-b','trae',[SOL]],['personal','chatgpt',['gpt-6-luna',SOL]]]);
+  for (const a of raw.accounts.filter(a=>a.kind!=='chatgpt')) a.capabilities['image-generation']=false;
+  for (const l of raw.lanes.filter(l=>l.accountId!=='personal')) l.capabilities['image-generation']=false;
+  raw.models.find(m=>m.id==='gpt-6-luna').efforts=['low','medium','high','xhigh','max'];
+  const p=run(task('image-gen'),raw), view=renderPlan(p,{snapshot:createSnapshot(raw),root:'/fixture'});
+  assert.equal(p.kind,'launch');assert.equal(p.primary.candidate.accountId,'personal');
+  assert.equal(p.primary.candidate.modelId,'gpt-6-luna');assert.equal(p.primary.candidate.effort,'low');
+  assert.deepEqual(view.needsUserOK,[]);assert.ok(view.pick.command);
+});
+
 test('B2 ordinary full-access company signing works on both roles', () => {
   for (const role of ['primary', 'second']) { const p = run(task('build-run', { flags: { signing: true }, role, sandbox:'danger-full-access',sandboxCeiling:'danger-full-access' }), fixture()); assert.equal(p.kind,'launch'); assert.equal(p.primary.candidate.accountId,'company-a'); }
 });
@@ -120,14 +131,14 @@ test('V13 DeepSeek build/acceptance and vision-only output fit', () => {
   noCommand(run(task(), fixture([['a', 'trae', ['seed-evolving']]])));
 });
 test('V14 adversarial excludes every GPT; ordinary policy code stays ordinary', () => {
-  for (const kind of ['ttadk', 'trae', 'chatgpt']) { const p = run(task('review', { flags: { security: true } }), fixture([['a', kind, [SOL]]])); noCommand(p); assert.ok(hasCode(p, 'ADVERSARIAL_GPT_FORBIDDEN')); }
+  for (const kind of ['ttadk', 'trae', 'chatgpt']) { const p = run(task('review', { flags: { security: true,'review-class':'D','review-reason':'named adversarial review' } }), fixture([['a', kind, [SOL]]])); noCommand(p); assert.ok(hasCode(p, 'ADVERSARIAL_GPT_FORBIDDEN')); }
   const raw = fixture([['a', 'ttadk', [SOL]]]); assert.equal(run(task('review'), raw).kind, 'launch');
   assert.equal(run(task('review', { flags: { security: true, defensive: true } }), raw).kind, 'launch');
 });
 test('V15 required release review preserves content, scopes and exclusions', () => {
-  const p = run(task('implement', { impact:'release', flags: { security: true }, allowedOrigins: ['https://example.test'] }), fixture([['a', 'ttadk', [SOL]]]));
+  const p = run(task('implement', { impact:'release', flags: { security: true,'review-class':'A','review-reason':'external irreversible release' }, allowedOrigins: ['https://example.test'] }), fixture([['a', 'ttadk', [SOL]]]));
   assert.equal(p.kind, 'launch'); assert.equal(p.followups.length, 1); assert.ok(p.followups[0].contentLabels.includes('adversarial'));
-  assert.deepEqual(p.followups[0].allowedOrigins, p.task.allowedOrigins); assert.ok(p.gates.some((g) => g.phase === 'acceptance'));
+  assert.deepEqual(p.followups[0].allowedOrigins, p.task.allowedOrigins); assert.ok(p.gates.some((g) => g.phase === 'preaction'));
 });
 test('real CLI uses the same immutable pipeline and never launches a blocked proposal', () => {
   const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'pipeline-cli-'));
@@ -142,7 +153,7 @@ test('real CLI uses the same immutable pipeline and never launches a blocked pro
     }
     const companyUnavailable=fixture([['p','chatgpt',[SOL]],['company','ttadk',[SOL]]]);companyUnavailable.accounts[1].auth=false;
     for(const [args,raw,code] of [
-      [['build-run','--signing','--sandbox','read-only'],fixture(),'SIGNING_COMPANY_FULL_ACCESS_REQUIRED'],
+      [['build-run','--signing','--sandbox','read-only'],fixture(),'SIGNING_FULL_ACCESS_REQUIRED'],
       [['computer-use'],fixture(),'APP_SCOPE_REQUIRED'],
       [['docs'],companyUnavailable,'PERSONAL_QUOTA_OK_REQUIRED']]) {
       const o=cli(args,raw);assert.equal(o.kind,'blocked');assert.equal(o.pick?.command??null,null);assert.ok(hasCode(o.plan,code));
@@ -172,7 +183,7 @@ test('actual health storage rejects old success and superseded probe claims', ()
   }finally{fs.rmSync(tmp,{recursive:true,force:true});}
 });
 test('V16 required two-family adversarial set and scarce reviewer gate', () => {
-  const t = task('review-high', { flags: { security: true }, artifactRevision: 'artifact-1' });
+  const t = task('review-high', { flags: { security: true,'review-class':'D','review-reason':'named adversarial review' }, artifactRevision: 'artifact-1' });
   const raw = fixture([['a', 'ttadk', [KIMI]], ['b', 'trae', [FLASH]]]);
   const p = run(t, raw); assert.equal(p.kind, 'launch'); assert.equal(p.primary.candidate.modelId, KIMI); assert.equal(p.reviewers[0].candidate.modelId, FLASH);
   assert.equal(p.gates.some((g) => /GPT\/Claude/.test(g.reason.text)), false);
@@ -209,9 +220,9 @@ test('V20 local test build keeps preaction gate; remote has none', () => {
   let p = run(task('build-run', { flags: { env: 'test' } }), raw); assert.equal(p.kind, 'launch'); assert.ok(p.gates.some((g) => g.kind === 'local-resource-admission'));
   p = run(task('build-run', { flags: { env: 'test', 'no-local-build': true } }), raw); assert.equal(p.kind, 'launch'); assert.ok(!p.gates.some((g) => g.kind === 'local-resource-admission'));
 });
-test('V21 background never personal even approved', () => {
+test('V21 background uses no-company standing personal permission and scoped approval', () => {
   const raw = fixture([['p', 'chatgpt', [SOL]]]); let t = task('analysis', { background: true }); t = approve(raw, t, candidate(createSnapshot(raw), 'p', SOL, 'medium'));
-  const p = run(t, raw); noCommand(p); assert.equal(p.kind, 'defer'); assert.equal(p.deferUntil, null);
+  const p = run(t, raw); assert.equal(p.kind,'launch');assert.equal(p.primary.candidate.accountId,'p');
 });
 test('V22 device registration, own-app scope and bounded lease', () => {
   const raw = fixture([['a', 'ttadk', [SOL]]]), t = task('build-run', { deviceId: 'test-phone', ownTestApp: true });
@@ -255,7 +266,7 @@ test('equal-quality company ETA and explicit personal bypass', () => {
 test('light zero-priority and background expiring TTADK policy', () => {
   const raw = fixture(); raw.lanes[1].mode = 'bucket-free'; raw.lanes[1].readyAt = NOW + 600000;
   assert.equal(run(task('lookup'), raw).primary.candidate.accountId, 'company-a'); // Foreground ETA retains the ready TTADK lane; Sol is not a light transfer candidate.
-  assert.equal(run(task('analysis', { background: true }), raw).primary.candidate.accountId, 'company-b');
+  assert.equal(run(task('analysis', { background: true }), raw).primary.candidate.accountId, 'company-a','ready company lane precedes delayed bucket-free lane');
   raw.accounts[0].quota = [{ bucketId: 'daily', unit: 'tokens', usage: { used: 10, limit: 100, resetsAt: NOW + 3600000 }, priority: 'available' }];
   raw.accounts[0].burn = { projectedAtReset: 40, resetsAt: NOW + 3600000 };
   assert.equal(run(task('analysis', { background: true }), raw).primary.candidate.accountId, 'company-a');
@@ -279,7 +290,7 @@ test('fresh stalled lanes rank after runnable lanes and never get an optimistic 
   const approved=approve(personal,task('debug'),candidate(createSnapshot(personal),'personal',SOL,'xhigh'),'personal-quota',true);
   assert.equal(run(approved,personal).primary.candidate.accountId,'personal','scoped runnable personal capacity also ranks before a stalled company lane');
 });
-test('normal and light ladders prefer usable priority over progressing depleted Sol', () => {
+test('normal and light ladders use demonstrated free capacity; unknown load gains no free-lane preference', () => {
   const terra='gpt-5.6-terra', sol56='gpt-5.6-sol';
   const raw=fixture([['company-b','trae',[SOL,sol56,terra]]]);
   Object.assign(raw.lanes[0],{mode:'low-priority',progressAt:NOW,state:'ready'});
@@ -370,7 +381,7 @@ test('fresh approval cannot authorize another task, changed scopes or a future r
   assert.deepEqual(missing.gates.map((g) => g.kind), ['personal-quota', 'max-effort']);
 });
 test('approved single-family exception is explicit; required reviewer is not silently dropped', () => {
-  const raw = fixture([['a', 'ttadk', [KIMI]]]); let t = task('review-high', { flags: { security: true }, artifactRevision: 'artifact-1' });
+  const raw = fixture([['a', 'ttadk', [KIMI]]]); let t = task('review-high', { flags: { security: true,'review-class':'D','review-reason':'named adversarial review' }, artifactRevision: 'artifact-1' });
   const c = candidate(createSnapshot(raw), 'a', KIMI, 'high'); t = approve(raw, t, c, 'scarce-reviewer');
   assert.equal(run(t, raw).kind, 'launch');
   const unapproved = createTaskSpec({ ...t, approvalRefs: [] });const pending=run(unapproved, raw);assert.equal(pending.kind,'launch');assert.ok(pending.gates.some(g=>g.phase==='acceptance'&&g.reason.code==='REVIEWER_PENDING'));
@@ -402,12 +413,12 @@ test('adversarial policy lock precedes light conservation and ETA', () => {
   sameRung.lanes[1].loadPercent=40;
   const free=run(task('review',{flags:{adversarial:true}}),sameRung);assert.equal(free.primary.candidate.accountId,'b');
 });
-test('ordinary release acceptance requires an independent strong reviewer family', () => {
-  const raw = fixture([['a', 'ttadk', [FLASH, 'gemini-3.1-pro-preview', SOL]]]);
-  const p = run(task('review', { impact: 'release', artifactRevision: 'artifact-1' }), raw);
-  assert.equal(p.kind, 'launch'); assert.equal(p.reviewers.length, 1);
-  assert.notEqual(p.reviewers[0].candidate.family, p.primary.candidate.family);
-  assert.ok([p.primary.candidate.family, p.reviewers[0].candidate.family].includes('gpt'));
+test('ordinary class-A release preserves the pending independent strong family obligation', () => {
+  const raw=fixture([['a','ttadk',[SOL]],['p','claude',['opus']]]);
+  const p=run(task('review',{flags:{'review-class':'A','review-reason':'external irreversible release'},impact:'release',artifactRevision:'artifact-1'}),raw);
+  assert.equal(p.kind,'launch');assert.equal(p.primary.candidate.family,'gpt');
+  assert.equal(p.reviewers.length,0);assert.equal(p.reviewerProposals[0].candidate.family,'claude');
+  assert.ok(p.gates.some(g=>g.kind==='independent-review'&&g.phase==='acceptance'));assert.ok(p.gates.some(g=>g.kind==='personal-quota'));
 });
 
 // Product oracle is deliberately separate from enumerateCandidates.

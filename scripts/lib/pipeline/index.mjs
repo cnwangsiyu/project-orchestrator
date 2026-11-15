@@ -30,7 +30,7 @@ const gatesOf = (rows) => dedupe(rows.flatMap((r) => r.predicates.flatMap((p) =>
 export function routePure(taskSpec, stateSnapshot, history = []) {
   const extra = array(history);
   const previousAttempts = dedupe([...array(taskSpec?.previousAttempts), ...extra]);
-  const task = createTaskSpec({ ...taskSpec, previousAttempts });
+  const task = createTaskSpec({ ...taskSpec, projectProfiles:stateSnapshot?.projectProfiles, previousAttempts });
   const snapshot = isNormalizedSnapshot(stateSnapshot) ? freeze(clone(stateSnapshot)) : createSnapshot(stateSnapshot);
   const reviewBlock = reviewDecision(task, snapshot);
   if (reviewBlock && reviewBlock.code !== 'REVIEW_BUDGET_WARNING') return makePlan('blocked', task, snapshot, { reasons: [reviewBlock], suggestions: [], gates: [{ id: reviewBlock.code,
@@ -85,6 +85,13 @@ export function routePure(taskSpec, stateSnapshot, history = []) {
   const trace = { candidates: assessment.rows.map((r) => ({ candidate: r.candidate, predicates: r.predicates, estimate: r.estimate })),
     ordering: ordered.rows.map((r) => ({ candidateId: r.candidate.id, terms: r.orderingTerms })), comparator: ordered.terms, diagnostics };
   const fields = { warnings: reviewBlock?.code === 'REVIEW_BUDGET_WARNING' ? [reviewBlock] : [], rejected: dedupe([...rejected, ...reviewerRejections]), trace };
+  if(!rankedNow.winner||rankedNow.winner.estimate.stalled) {
+    const personalRows=assessment.rows.filter(r=>!company(candidateParts(snapshot,r.candidate).account)&&!r.estimate.stalled
+      &&r.estimate.startDelayMin===0&&r.predicates.filter(p=>!p.ok).every(p=>p.gate));
+    const personal=orderCandidates(task,snapshot,personalRows).winner;
+    if(personal)return makePlan('blocked',task,snapshot,{...fields,primaryProposal:proposal(task,personal),gates:gatesOf([personal]),
+      suggestions:personalRows.map(r=>r.candidate),reasons:personal.predicates.filter(p=>!p.ok).map(p=>p.reason)});
+  }
   // Show the ready personal choice before scheduling a future company reset.
   // Its command remains gated until the orchestrator supplies the user's yes.
   if (ordered.winner?.estimate.capacityReset && !rankedNow.winner) {
@@ -98,7 +105,7 @@ export function routePure(taskSpec, stateSnapshot, history = []) {
   }
   if (ordered.winner?.estimate.capacityReset) return makePlan('defer', task, snapshot, { ...fields, deferUntil: ordered.winner.estimate.deferUntil,
     trigger: 'capacity-reset', reason: reason('choose', 'CAPACITY_RESET_REQUIRED', `No company lane can start now; company quota resets at ${new Date(ordered.winner.estimate.deferUntil).toISOString()}.`, [ordered.winner.candidate.id]),
-    runnerUp: rankedNow.winner?.candidate ?? null, gates: [], timerOwner: task.owner });
+    runnerUp: rankedNow.winner?.candidate ?? null, gates: [{id:`capacity:${task.taskId}`,kind:'capacity-decision',phase:'prelaunch',state:'needsOK',scope:null,reason:reason('choose','CAPACITY_DECISION','No authorized lane can start: choose whether to wait for capacity or change task scope.',[task.taskId]),evidenceIds:[]}], timerOwner: task.owner });
   const winner = rankedNow.winner;
   // Preserve the personal-device reset-card proposal when the default Codex
   // accounts are spent. A fresh decision and quota refresh precede any launch.
@@ -115,7 +122,7 @@ export function routePure(taskSpec, stateSnapshot, history = []) {
   if(winner && (winner.estimate.stalled || winner.reviewers.some(s=>s.estimate.stalled))) return makePlan('defer', task, snapshot, {
     ...fields, deferUntil:null, trigger:'lane-progress', reason:reason('choose','ETA_STALLED','The qualified lane/reviewer set is STALLED in fresh telemetry; wait for progress and replan before launching.',
       [winner.candidate.id,...winner.reviewers.filter(s=>s.estimate.stalled).map(s=>s.candidate.id)]),
-    runnerUp:null,gates:[],timerOwner:task.owner });
+    runnerUp:null,gates:[{id:`capacity:${task.taskId}`,kind:'capacity-decision',phase:'prelaunch',state:'needsOK',scope:null,reason:reason('choose','CAPACITY_DECISION','No authorized lane can start: choose whether to wait for lane progress or change scope.',[task.taskId]),evidenceIds:[]}],timerOwner:task.owner });
   if (winner) {
     if(!company(candidateParts(snapshot,winner.candidate).account)&&winner.candidate.modelId!=='gpt-6-astra') {
       const alternatives=assessment.rows.filter(r=>r.candidate.modelId==='gpt-6-astra'
@@ -128,7 +135,7 @@ export function routePure(taskSpec, stateSnapshot, history = []) {
     const followups = [], gates = [...gatesOf([winner]), ...winner.reviewerGates];
     if (reviewAfterWrite(task, snapshot, winner.candidate)) {
       followups.push(deriveReview(task, { role: 'followup', artifactRevision: task.artifactRevision }));
-      gates.push({ id: `review:${task.taskId}`, kind: 'artifact-review', phase: 'acceptance', state: 'wait', scope: null,
+      gates.push({ id: `review:${task.taskId}`, kind: 'artifact-review', phase: ['A','C'].includes(task.reviewClass)||task.flags.signing?'preaction':'acceptance', state: 'wait', scope: null,
         reason: reason('pReviewerSet', 'ARTIFACT_REVIEW_REQUIRED', 'After completion, pin the artifact and actual author; replan the inherited review task before acceptance.', [task.taskId]), evidenceIds: [] });
     }
     if (task.deviceId) gates.push({ id: `device:${task.taskId}`, kind: 'device-lease', phase: 'preaction', state: 'wait', scope: null,
@@ -142,7 +149,7 @@ export function routePure(taskSpec, stateSnapshot, history = []) {
   const capacityOnly = companyRows.some((r) => r.predicates.filter((p) => !p.ok).every((p) => p.reason.code === 'PROVIDER_QUOTA_DENIED'));
   if (task.background && (capacityOnly || (!companyRows.length && !assessment.companyUnknown))) return makePlan('defer', task, snapshot, {
     ...fields, deferUntil: null, trigger: 'company-capacity-change', reason: reason('pBackground', 'BACKGROUND_WAIT_COMPANY', 'No complete eligible company set is available.', [task.taskId]),
-    runnerUp: null, gates: [], timerOwner: task.owner });
+    runnerUp: null, gates: [{id:`capacity:${task.taskId}`,kind:'capacity-decision',phase:'prelaunch',state:'needsOK',scope:null,reason:reason('choose','CAPACITY_DECISION','No authorized lane can start: choose whether to wait for capacity or change task scope.',[task.taskId]),evidenceIds:[]}], timerOwner: task.owner });
   const gatedRows = assessment.rows.filter((r) => r.predicates.filter((p) => !p.ok).every((p) => p.gate));
   const proposed = orderCandidates(task, snapshot, gatedRows).winner;
   const validProposal=orderCandidates(task,snapshot,valid).winner;

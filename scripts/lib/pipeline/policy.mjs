@@ -21,6 +21,8 @@ export const PERSONAL = {
   'ui-browser':[[SOL,'high'],['sonnet','high'],['opus','high']],
   'computer-use':[[SOL,'medium']],
   'claude-tools':[['sonnet','medium'],['opus','high']],
+  // gpt-6-luna (personal ChatGPT) stays: the image tool does the work, so the cheapest model is right. Only TRAE's
+  // gpt-5.6-luna is retired (slow, ~3x tokens).
   'image-gen':[['gpt-6-luna','low'],[SOL,'medium']],
   'image-read':[['sonnet','medium'],['gpt-6.1-terra','medium'],['opus','high'],[SOL,'high']],
   'second-opinion':[[SOL,'high'],['opus','high']],
@@ -28,10 +30,9 @@ export const PERSONAL = {
 export function modelPreference(t,a) {
   if(adversarial(t)) return ['kimi-k3','deepseek-v4.1-flash','opus'];
   if(company(a)) {
-    if(t.category==='image-read') return [SOL,ASTRA,'gemini-3.1-pro-preview','seed-evolving'];
+    if(t.category==='image-read') return [SOL,ASTRA,...(a.kind==='ttadk'?['gemini-3.1-pro-preview']:[]),'seed-evolving'];
     if(t.tier==='hard') return TIERS.hard;
-    if(a.kind==='ttadk') return t.tier==='light'?['gpt-5.6-terra','gpt-5.5',SOL,'deepseek-v4.1-flash','gemini-3.1-pro-preview']:[SOL,'deepseek-v4.1-flash','gemini-3.1-pro-preview'];
-    return [...TIERS[t.tier],...(t.tier==='light'?[SOL,'gpt-5.6-sol']:[]),'gemini-3.1-pro-preview'];
+    return [...TIERS[t.tier],...(t.tier==='light'?[SOL,'gpt-5.6-sol']:[]),...(a.kind==='ttadk'?['gemini-3.1-pro-preview']:[])];
   }
   const preference=(PERSONAL[t.category]??[]).map(([m])=>m);
   if(a.kind==='claude'&&known(a.budget)?.status==='over'&&!['claude-tools','second-opinion','review'].includes(t.category)) return preference.filter(m=>!['haiku','sonnet'].includes(m));
