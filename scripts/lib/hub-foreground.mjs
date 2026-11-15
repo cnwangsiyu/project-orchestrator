@@ -17,7 +17,12 @@ export const runHubForeground = async ({ account, profile, hub, script, home, in
   const name = account ?? 'main';
   const log = (text, error = false) => writeHubLog(home, name, text + '\n', error);
   const children = new Set();
-  let stopped = false, failed = false, failureReason = 'START_FAILED';
+  let stopped = false, failed = false, failureReason = 'START_FAILED', hubChild = null, misses = 0;
+  // A slow `list` under host load is not a dead hub (2026-11-14: one missed 6 s probe killed the owned app-server and
+  // every running turn on it, 34 times in one evening on account b). The owned child's own exit is the failure signal;
+  // for a hub this supervisor does not own, require the HTTP health endpoint to fail too, several times in a row.
+  const hubHealth = String(hub ?? '').replace(/^ws/, 'http').replace(/\/$/, '') + '/healthz';
+  const standbyMisses = 6;
   let wake;
   const pause = () => new Promise((resolve) => {
     const timer = setTimeout(resolve, interval);
@@ -65,7 +70,7 @@ export const runHubForeground = async ({ account, profile, hub, script, home, in
     if (!reachable) {
       const env = { ...process.env };
       if (profile?.kind === 'trae') delete env.CODEX_HOME;
-      launch(profile?.kind === 'trae' ? profile.bin ?? 'traex' : 'codex', ['app-server', '--listen', hub], env);
+      hubChild = launch(profile?.kind === 'trae' ? profile.bin ?? 'traex' : 'codex', ['app-server', '--listen', hub], env);
       log(`hub recovered: ${name}; tell the global-rules owner`, true);
       let ready = false;
       for (let i = 0; i < 30 && !stopped && !failed; i++) {
@@ -82,7 +87,13 @@ export const runHubForeground = async ({ account, profile, hub, script, home, in
       await pause();
       if (stopped || failed) break;
       if (proxy && !(await health(proxy))) { failureReason = 'PROXY_UNREACHABLE'; throw Error('TTADK proxy became unreachable'); }
-      if (!probe()) { failureReason = 'HUB_UNREACHABLE'; throw Error('hub unreachable'); }
+      if (probe()) misses = 0;
+      else {
+        misses++;
+        const owned = hubChild && children.has(hubChild);
+        if (misses === 1 || misses % 30 === 0) log(`hub probe slow: ${name}, miss ${misses}${owned ? '; owned hub process is alive, not restarting' : ''}`, true);
+        if (!owned && !(await health(hubHealth)) && misses >= standbyMisses) { failureReason = 'HUB_UNREACHABLE'; throw Error('hub unreachable'); }
+      }
       if (!stable && Date.now() - healthyAt >= stableMs) {
         stable = true;
         writeHubState(home, name, { mode: 'HEALTHY', failures: 0, t: Date.now(), retryAt: null, reason: 'NONE' });
