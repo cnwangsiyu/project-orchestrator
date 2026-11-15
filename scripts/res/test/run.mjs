@@ -7,13 +7,14 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const SUITE_TIMEOUTS = {
-  't88/test-res.sh': 300000,
-  't88/memory/test-res.sh': 300000,
+  't88/test-res.sh': 600000,
+  't88/memory/test-res.sh': 600000,
   't88/legacy/test-res.sh': 600000,
   'lane3.mjs': 600000,
+  'build.mjs': 1200000,
 };
 // The outer runner must allow every bounded child plus fixture setup/logging overhead.
-export const RES_TEST_BUDGET_MS = Object.values(SUITE_TIMEOUTS).reduce((sum, timeout) => sum + timeout, 0) + 60000;
+export const RES_TEST_BUDGET_MS = Object.values(SUITE_TIMEOUTS).reduce((sum, timeout) => sum + timeout, 0) + 300000;
 
 export function runResSuites() {
   const base = path.dirname(fileURLToPath(import.meta.url));
@@ -35,8 +36,8 @@ export function runResSuites() {
   for (const [suite, timeout] of Object.entries(SUITE_TIMEOUTS)) {
     const node = suite.endsWith('.mjs');
     const script = path.join(node ? base : tmp, suite);
-    // Legacy and lane-3 CLI transcripts plus bounded race probes can exceed five minutes under host load.
-    // Keep a finite harness budget without changing production resource wait limits.
+    // v1.4 adds post-take diagnostics and a 20m build/signal matrix. These aggregate watchdogs do not change
+    // the independently bounded probes, resource waits or production admission gates.
     const r = spawnSync(node ? process.execPath : '/bin/bash', [script], {
       cwd: tmp, env: { ...env, RES_TEST_ROOT: tmp, RES_SOURCE: res },
       encoding: 'utf8', timeout, maxBuffer: 8 * 2 ** 20 });

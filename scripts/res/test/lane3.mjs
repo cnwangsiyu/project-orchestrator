@@ -36,7 +36,7 @@ const eq = (actual, expected, message) => { assert.deepEqual(actual, expected, m
 const ok = (value, message) => { assert.ok(value, message); count++; };
 // Wait probes and wrappers must survive host load. Poll the intended output/condition with a shared deadline;
 // coupled success probes use the same internal budget so they cannot expire before the observer changes the gate.
-// Failure-timeout assertions and production wait limits stay the same.
+// This also covers v1.4's post-take diagnostic; failure-timeout assertions and production limits stay the same.
 const PROBE_DEADLINE_MS = 120000;
 const PROBE_TIMEOUT_MIN = String(PROBE_DEADLINE_MS / 60000);
 const run = (args, extra = {}, script = res, timeout = PROBE_DEADLINE_MS) => {
@@ -177,13 +177,13 @@ case "$*" in
 esac
 `, { mode: 0o755 });
 const race = await wait({ RES_TEST_METRICS: '0' }, PROBE_TIMEOUT_MIN);
-eq(race.code, 0); ok(race.text.includes('retry in 1s')); release();
+eq(race.code, 0, race.text); ok(race.text.includes('retry in 1s')); release();
 
 // STALE visibility never mutates. Reclaim requires an OPEN lane and age strictly >600s.
 const dead = 2147483647;
 eq(run(['take', ...takeArgs('heavy-lane-3', 'old', dead)]).code, 0);
 changeInfo('start', 1794563400); const at600 = metadata();
-ok(run(['status', 'heavy-lane-3']).text.includes('STALE old')); eq(metadata(), at600);
+ok(run(['status', 'heavy-lane-3']).text.includes('STALE?(short-lived pid) old')); eq(metadata(), at600);
 eq((await wait()).code, 2); eq(metadata(), at600);
 changeInfo('start', 1794563399); const stale = metadata();
 eq((await wait({ RES_TEST_LOAD1M: '9' })).code, 2); eq(metadata(), stale);
@@ -209,9 +209,15 @@ const threeHeld = run(['heavy-check', '--pid', String(process.ppid)], { RES_TEST
 eq(threeHeld.code, 0); ok(threeHeld.text.includes('limit=20 lanes_held=3')); release();
 const laneInfo = (id) => fs.readFileSync(path.join(lock(id), 'info'), 'utf8');
 const held1 = laneInfo('heavy-lane-1'), held2 = laneInfo('heavy-lane-2');
-const wrapper = (extra = {}) => runProbe('/bin/bash', [path.resolve(base, '../../heavy-build.sh'), '/bin/sh', '-c', 'exit 7'],
-  { RES_COMMAND: res, HEAVY_BUILD_BY: 'wrapper', HEAVY_BUILD_PROJECT: 'scratch',
-    HEAVY_BUILD_TASK: 'lane3', HEAVY_BUILD_TIMEOUT: '0', HEAVY_BUILD_LANE: '', ...extra }, 'heavy-build wrapper');
+const wrapper = async (extra = {}) => {
+  const started = Date.now();
+  const r = await runProbe('/bin/bash', [path.resolve(base, '../../heavy-build.sh'), '/bin/sh', '-c', 'exit 7'],
+    { RES_COMMAND: res, HEAVY_BUILD_BY: 'wrapper', HEAVY_BUILD_PROJECT: 'scratch',
+      HEAVY_BUILD_TASK: 'lane3', HEAVY_BUILD_TIMEOUT: '0', HEAVY_BUILD_LANE: '', ...extra }, 'heavy-build wrapper');
+  fs.appendFileSync(path.join(root, 'wrapper-results.jsonl'), JSON.stringify({ extra, elapsed: Date.now() - started,
+    status: r.status, stdout: r.stdout, stderr: r.stderr }) + '\n');
+  return r;
+};
 const wrapped = await wrapper(); eq(wrapped.status, 7, wrapped.stderr);
 ok(wrapped.stdout.includes('took heavy-lane-3'));
 eq(fs.existsSync(lock()), false); eq(fs.existsSync(lock('heavy-build')), false);
@@ -259,7 +265,7 @@ fallback.stdout.on('data', captureFallback); fallback.stderr.on('data', captureF
 const fallbackDone = once(fallback, 'close');
 try {
   await Promise.race([fallbackReady.promise, fallbackDone.then(([code]) => { throw Error(`fallback exited ${code}: ${fallbackOutput}`); })]);
-  ok(fs.existsSync(path.join(rollout, 'locks/heavy-build.d')));
+  ok(!fs.existsSync(path.join(rollout, 'locks/heavy-build.d')));
   eq(run(['return', 'heavy-lane-2', '--by', 'rollout-owner'], { RES_DIR: rollout }).code, 0);
   eq((await fallbackDone)[0], 7, fallbackOutput); ok(fallbackOutput.includes('took heavy-lane-2'));
 } finally {
@@ -273,7 +279,7 @@ eq((await wrapper({ RES_DIR: rollout, HEAVY_BUILD_LANE: 'heavy-lane-3' })).statu
 eq(run(['take', ...takeArgs('heavy-lane-2', 'rollout-owner')], { RES_DIR: rollout }).code, 0);
 const errorRes = path.join(root, 'error-res');
 fs.writeFileSync(errorRes, `#!/bin/bash
-if [ "$1" = wait ] && [ "$2" = heavy-lane-3 ]; then echo 'res: cannot read lane-3 metrics' >&2; exit 1; fi
+if [ "$1" = wait-build ] && [ "\${2:-}" != --help ]; then echo 'res: cannot read lane-3 metrics' >&2; exit 1; fi
 exec "$RES_SOURCE" "$@"
 `, { mode: 0o755 });
 const failedGate = await wrapper({ RES_DIR: rollout, RES_COMMAND: errorRes });
@@ -361,7 +367,8 @@ fs.rmdirSync(path.join(installState, 'locks/heavy-lane-3.d'));
 eq(install([], { INSTALL_TEST_PS: '123 /bin/bash /scratch/res wait iphone11 --timeout 1' }).code, 2);
 for (const argv of ['env FOO=bar /scratch/res wait iphone11', 'nohup res wait heavy-build',
   "zsh -c '/scratch/res wait heavy-lane-3'", 'zsh -c \'exec env FOO=bar "/scratch/res" wait heavy-build\'',
-  '/safe/project/scripts/res/res wait heavy-build'])
+  '/safe/project/scripts/res/res wait heavy-build', 'nohup res wait-build --timeout 1',
+  'env FOO=bar /scratch/res wait-lane --timeout 1'])
   eq(install([], { INSTALL_TEST_PS: `123 ${argv}` }).code, 2, argv);
 eq(install([], { INSTALL_PS_EXIT: '1' }).code, 2);
 eq(install([], { INSTALL_TEST_EXIT: '1' }).code, 1);

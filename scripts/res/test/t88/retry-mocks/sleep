@@ -1,0 +1,11 @@
+#!/bin/bash
+# The lane-drop fixture must finish its return before the waiter's next sample.
+set -eu
+if [ "$#" -eq 1 ] && [ "$1" = 1 ]; then
+  deadline=$((SECONDS + 30))
+  while [ -d "$RES_DIR/locks/heavy-lane-1.d" ]; do
+    [ "$SECONDS" -lt "$deadline" ] || { echo 'fixture: lane return did not finish' >&2; exit 97; }
+    /bin/sleep 0.02
+  done
+fi
+exec /bin/sleep "$@"

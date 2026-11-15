@@ -187,15 +187,17 @@ pass 'wait keeps selected PID for acquisition'
 release heavy-build
 
 # Retry sampling tracks a new other lane, and lowers the limit when it leaves.
+# Leave time for an occupied-hold diagnostic and two gate samples on busy hosts.
 clear_holds
 : >"$OUT"
 starting_changer=1
 (
-  wait_for_retry
+  wait_for_output 'retry in 1s'
   "$RES" take heavy-lane-1 --by retry-fixture --project scratch --for retry --pid "$other_pid" >"$ROOT/retry-take.txt" 2>&1
 ) & changer=$!
 starting_changer=0
 expect 0 "$RES" wait heavy-build --by T88 --project scratch --for retry-lane-enters --pid "$$" --timeout 2
+contains 'retry in 1s'
 contains 'load1m=15.00 limit=12 lanes_held=0'
 contains 'load1m=15.00 limit=20 lanes_held=1'
 wait "$changer"
@@ -231,6 +233,7 @@ waiter=''
 [ "$changer_rc" -eq 0 ] || fail 'lane-change observer failed'
 [ "$wait_rc" -eq 143 ] || fail "expected observer-stopped waiter, got $wait_rc"
 pass 'observer stops owned waiter after the lane-aware closed gate is sampled with a free mutex'
+contains 'retry in 1s'
 contains 'load1m=15.00 limit=20 lanes_held=1'
 contains 'load1m=15.00 limit=12 lanes_held=0'
 [ ! -d "$RES_DIR/locks/heavy-build.d" ] || fail 'retry acquired build after threshold dropped'

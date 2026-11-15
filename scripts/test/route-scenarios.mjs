@@ -335,9 +335,10 @@ for (const [sc, args, want, note] of CASES) {
     assert.match(merged.pick.command, /--permission-mode bypassPermissions/); assert.match(merged.pick.command, /--remote-control/);
     for (const sc of ['ttFresh', 'ttOutTraeDown', 'fresh']) {
       const routed = JSON.parse(run(sc, ['build-run']));
-      assert.ok(routed.notes.some((s) => /heavy-build\.sh.*res take\/return.*heavy-build first/.test(s)));
+      assert.ok(routed.notes.some((s) => /heavy-build\.sh.*ONE-process wrapper.*res take-build\/wait-build\/return-build.*res v1\.4.*acquire heavy-build plus one free admitted lane together.*holding neither resource while waiting for the other/.test(s)));
+      assert.ok(routed.notes.some((s) => /only for genuine local heavy compute.*remote pipeline deploys and CI runs never take one.*--no-local-build/.test(s)));
       assert.ok(routed.notes.some((s) => /Normal gate remains min\(20, 12 \+ 8 \* other lanes\), memory >=16 GiB; STALE and caller-owned locks excluded/.test(s)));
-      assert.ok(routed.notes.some((s) => /lane 3 only after reviewed owner switch.*load1m <=8 AND available memory >=32 GiB.*lane3=OPEN\|CLOSED/.test(s)));
+      assert.ok(routed.notes.some((s) => /lane 3 is available only after reviewed owner switch.*load1m <=8 AND available memory >=32 GiB.*lane3=OPEN\|CLOSED/.test(s)));
       assert.ok(!routed.notes.some((s) => /at most 3 concurrent heavy builds/.test(s)));
     }
     for (const sc of ['unreadHub']) {

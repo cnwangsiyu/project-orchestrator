@@ -16,6 +16,13 @@ try {
   const { analyze, leanLines, POLICY, now } = await import('../lib/state.mjs');
   const { loadDigest } = await import('../lib/global-rules.mjs');
   const digest = loadDigest();
+  const digestText = fs.readFileSync(path.join(path.dirname(root), 'references/global-rules.md'), 'utf8');
+  assert.equal(digestText.match(/^version:/gm)?.length, 1, 'integration must publish one digest version');
+  assert.equal(digestText.match(/^## Changes In This Version$/gm)?.length, 1);
+  assert.match(digestText, /Resources \(2026-11-14\): stage res v1\.4/);
+  assert.match(digestText, /Nightly delivery \(2026-11-14\): no fixed working-worker kill\/timeout/);
+  assert.match(digest.worker, /take-build\/wait-build inside ONE long-lived wrapper.*local heavy compute/);
+  assert.match(digest.worker, /elapsed and predicted-start deadlines.*exclude only the slow account\/model lane/);
   const loginAt = digest.worker.indexOf('Forbidden for every worker: never read, copy, load or inject LOGIN material');
   const signingAt = digest.worker.indexOf("Allowed with the user's 2026-11-13 authorization: sign OUR OWN TEST packages");
   assert.ok(loginAt >= 0 && signingAt > loginAt, 'worker digest must contain adjacent login and test-signing rules');
@@ -77,6 +84,18 @@ try {
   assert.match(signing.notes[1], /scan worker logs only.*mask any hits/);
   console.log('ok   Codex writers default full; reviewers stay read-only; tests and explicit overrides stay narrower');
 
+  const buildNote = route(['build-run']).notes.find((n) => n.startsWith('build brief:'));
+  assert.match(buildNote, /ONE-process wrapper around res take-build\/wait-build\/return-build.*res v1\.4/);
+  assert.match(buildNote, /holding neither resource while waiting for the other/);
+  assert.match(buildNote, /Other heavy tasks use wait-lane.*only for genuine local heavy compute/);
+  assert.match(buildNote, /one long-lived process.*--watch-pid/);
+  for (const flags of [['--no-local-build'], ['--env', 'test']]) {
+    const notes = route(['build-run', ...flags]).notes;
+    assert.ok(!notes.some((n) => n.startsWith('build brief:')));
+    assert.ok(notes.some((n) => /no heavy-build\/lane lock|no local heavy-build\/lane lock/.test(n)));
+  }
+  console.log('ok   integrated digest and route notes retain v1.4 pair acquisition, local-only locks and reroute rules');
+
   const bans = [
     String.raw`\bCodex(?:[-\s]+family)?(?:\s+workers?)?\s+(?:must\s+)?(?:never|must\s+not|may\s+not|do(?:es)?\s+not|cannot|can't|(?:is|are)\s+(?:not\s+allowed|forbidden|prohibited)\s+to)\s+(?:sign\b|signs\b|(?:touch(?:es)?|access(?:es)?|read|handle)\s+(?:any\s+)?(?:signing|credential))`,
     String.raw`\b(?:forbids?|prohibits?|bans?)\b[^.;\n]{0,100}\bCodex\b[^.;\n]{0,100}\b(?:signing|credential)`,
@@ -84,6 +103,7 @@ try {
     String.raw`\bCodex\s+signing\s+request\s+is\s+BLOCKED\b`,
     String.raw`\bsigning\s+by\s+(?:any\s+)?Codex(?:\s+workers?)?\s+(?:is|remains)\s+(?:forbidden|prohibited|blocked)\b`,
     String.raw`\b(?:only|solely)\s+(?:the\s+)?resident\s+Claude\b[^.;\n]{0,120}\b(?:exception|may\s+sign)\b`,
+    String.raw`\bCodex(?:[-\s]+family)?(?:\s+workers?)?\s+(?:(?:is|are|remains?|remain)\s+)?(?:barred|banned|prohibited|forbidden)\s+from\s+(?:(?:all|any)\s+)?(?:signing|credential)`,
   ];
   const family = ['Co', 'dex'].join('');
   const bannedExamples = [
@@ -93,6 +113,7 @@ try {
     [family, 'worker', 'is', 'not', 'allowed', 'to', 'touch', 'signing', 'files'],
     ['Signing', 'by', family, 'workers', 'is', 'forbidden'],
     [family, 'never', 'signs'],
+    [family, 'remains', 'barred', 'from', 'all', 'signing', 'material'],
     ['regardless', 'of', 'approval'], ['regardless', 'of', 'authorization'],
     ['Machine', 'policy', 'forbids', 'every', family, 'worker', 'from', 'signing/credential', 'files'],
   ];

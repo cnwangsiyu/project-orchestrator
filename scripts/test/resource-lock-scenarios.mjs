@@ -98,6 +98,19 @@ try {
     const r = observeWaiters(rows, rows.map((p) => ({ ...p, id: String(p.pid) })), T);
     assert.equal(r.length, 1); assert.equal(r[0].holder, 'wrapper session'); assert.equal(r[0].startMs, T - 120000); assert.equal(r[0].timeoutMinutes, 20); assert.ok(!JSON.stringify(r).includes('PRIVATE'));
   });
+  await test('v1.4 pair/lane waiters retain sanitized purpose classification', () => {
+    for (const [command, resource, purpose, purposeClass] of [
+      ['wait-build', 'heavy-build', 'compile PRIVATE_BUILD', 'build'],
+      ['wait-lane', 'heavy-lane-any', 'deploy PRIVATE_DEPLOY', 'deploy'],
+    ]) {
+      const rows = [{ pid: 200, ppid: 100, elapsedSeconds: 120,
+        _command: `/bin/bash /safe/res ${command} --by wrapper --project p --task T1 --pid 100 --timeout 20 --for "${purpose}"` }];
+      const r = observeWaiters(rows, [{ ...rows[0], id: 'waiter' }], T);
+      assert.equal(r.length, 1); assert.equal(r[0].resource, resource);
+      assert.equal(r[0].purposeClass, purposeClass); assert.equal(r[0].holderPid, 100);
+      assert.equal(r[0].timeoutMinutes, 20); assert.ok(!JSON.stringify(r).includes('PRIVATE'));
+    }
+  });
   await test('journal hold durations are minute bounds, deduped across samples', () => {
     const events = [journalEvent('take', 'heavy-build', T), journalEvent('return', 'heavy-build', T + 600000)];
     const r = runReview([withEvents(0, events), withEvents(2, events)]);

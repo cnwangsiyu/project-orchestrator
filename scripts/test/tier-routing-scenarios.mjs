@@ -167,7 +167,9 @@ try {
   // Hard availability keeps depleted Astra rather than skipping it for a weaker family; normal availability still
   // names skipped depleted candidates. Secondary substitution and explicit Astra quality rungs stay pinned.
   const skip = run(['debug', '--exclude-model', SOL], { daily: { ...active, [ASTRA]: bucket(true) } });
-  assert.equal(skip.pick.model, ASTRA); assert.equal(skip.pick.account, 'trae'); assert.ok(!personalGate(skip));
+  assert.equal(skip.tier, 'hard');
+  assert.deepEqual([skip.pick.model, skip.pick.effort, skip.pick.account], [ASTRA, 'xhigh', 'trae']);
+  assert.ok(!personalGate(skip));
   assert.ok(skip.why.some((s) => /gpt-6-astra low-priority lane \(bucket depleted\)/.test(s)));
   const normalSkip = run(['analysis', '--exclude-model', SOL], { daily: { ...active, [SOL56]: bucket(true) } });
   assert.equal(normalSkip.pick.model, TERRA56);
