@@ -86,7 +86,11 @@ Watch blocks until new terminal events exist, pending work is acknowledged by an
 running set settles/becomes stale. It prints the events/receipts/status it knows and exits 0. An atomic per-owner
 claim allows only one watcher; duplicate invocations exit with an already-armed notice. Polls remember inode/offset,
 read only appended bytes, skip unchanged files, and prefilter other owners before parsing; rotation refreshes the cursor.
-Atomic per-owner acknowledgements precede output under a lock; an ordinary print failure rolls them back.
+Delivery is two-phase: persist an intent (timestamp, writer PID, token and at most 64 event IDs/sequences),
+write output outside the lock, then commit the acknowledgement only if that token still owns the transaction.
+Intent does not advance the committed high-water mark or receipts. A dead writer's intent is retryable immediately;
+a live writer's uncommitted intent is retryable after three seconds. A late writer cannot overwrite a newer commit.
+Print/commit failures retain pending work, and compaction preserves recoverable intents and their events.
 If acknowledgement is unavailable the watcher prints what it knows without acknowledging and exits, not loops.
 Hook/watcher redelivery is harmless: receipt sequences and event IDs make acknowledgement idempotent.
 On wake read outputs and handle finished workers first, then re-arm watch if workers remain.
@@ -132,9 +136,9 @@ Forked/cleared sessions receive their own owner bridge; explicitly reconcile the
 stdout pipe/file + Claude environment is only a warning heuristic, not proof of harness tracking. Without the
 documented Stop task registry, live watcher detection is also best-effort (heartbeat/PID).
 Hook timeouts, lock contention, disk failures, or missed orchestrator detection fail open. Acknowledged history growth
-does not permanently turn delivery off. A process crash/timeout between the durable acknowledgement and output
-can leave an acknowledgement without context delivery; ordinary print errors roll back, but this cross-process
-boundary cannot provide exactly-once delivery. Handling repeated event IDs must remain harmless.
-Event locks with a dead writer PID recover immediately; unmarked/ack locks recover after 30 seconds. No permanent daemon or guaranteed wake after process death
+does not permanently turn delivery off. A crash/timeout after intent persistence but before output/commit leaves
+the event pending for at-least-once redelivery. A crash after output but before commit can duplicate delivery;
+handling repeated event IDs must remain harmless. A completed stdout write is not proof the session integrated the result.
+Event/ack locks with a dead writer PID recover immediately; unmarked locks recover after 30 seconds. No permanent daemon or guaranteed wake after process death
 is claimed. The user still must arm the watcher as requested; the loop guard intentionally cannot force it forever.
 Unattended background time limits can stop a watcher; re-arm after that notification.

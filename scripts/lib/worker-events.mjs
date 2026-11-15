@@ -4,11 +4,12 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { StringDecoder } from 'node:string_decoder';
 import { rulesShared } from './global-rules.mjs';
-import { withLock, writeJson } from './shared-file.mjs';
+import { writeJson } from './shared-file.mjs';
 
 export const RETENTION_MS = 7 * 86400000;
 export const ROTATE_BYTES = 1024 * 1024;
 export const ACK_RECEIPTS = 64;
+export const TRANSACTION_RETRY_MS = 3000;
 const DEAD_FOLLOWER_GRACE_MS = 60000;
 export const eventFile = () => path.join(rulesShared(), 'worker-events.jsonl');
 const sequenceFile = () => path.join(rulesShared(), 'worker-events-state.json');
@@ -28,25 +29,32 @@ const parseRows = (text) => text.split('\n').flatMap((line) => {
 });
 const readText = (file) => { try { return fs.readFileSync(file, 'utf8'); } catch (e) { if (e.code === 'ENOENT') return ''; throw e; } };
 export const readEvents = () => parseRows(readText(eventFile()));
-const emptyAck = (owner) => ({ owner, highWater: 0, delivered: {} });
+const emptyAck = (owner) => ({ owner, highWater: 0, delivered: {}, transaction: null });
 const parseAck = (text, owner) => {
   try {
     const ack = JSON.parse(text);
     if (ack.owner !== owner) return emptyAck(owner);
-    return { owner, highWater: Number.isSafeInteger(ack.highWater) ? ack.highWater : 0,
+    const tx = ack.transaction;
+    const transaction = typeof tx?.token === 'string' && Number.isFinite(tx.t) && Array.isArray(tx.events)
+      ? { token: tx.token, t: tx.t, pid: tx.pid, events: tx.events.filter((row) => typeof row?.id === 'string').slice(0, ACK_RECEIPTS) } : null;
+    return { owner, highWater: Number.isSafeInteger(ack.highWater) ? ack.highWater : 0, transaction,
       delivered: ack.delivered && typeof ack.delivered === 'object' && !Array.isArray(ack.delivered) ? ack.delivered : {} };
   } catch { return emptyAck(owner); }
 };
 export const readAck = (owner) => parseAck(readText(ackFile(owner)), owner);
 const acknowledged = (row, ack) => (Number.isSafeInteger(row.seq) && row.seq <= (ack.highWater ?? 0))
   || Number.isFinite(row.ackAt) || Number.isFinite(ack.delivered?.[row.id]?.t);
-const nextAck = (ack, rows) => {
+const nextAck = (ack, rows, transaction = ack.transaction) => {
   const t = Date.now(), delivered = Object.fromEntries(Object.entries(ack.delivered).filter(([, receipt]) => receipt?.t >= t - RETENTION_MS).slice(-ACK_RECEIPTS));
   for (const row of rows) delivered[row.id] = { t, seq: row.seq, name: row.name, event: row.event, outFile: row.outFile,
     finalLine: row.finalLine ?? '', runId: row.runId };
-  return { owner: ack.owner, highWater: rows.reduce((high, row) => Math.max(high, row.seq ?? 0), ack.highWater ?? 0),
+  return { owner: ack.owner, transaction: transaction ?? null,
+    highWater: rows.reduce((high, row) => Math.max(high, row.seq ?? 0), ack.highWater ?? 0),
     delivered: Object.fromEntries(Object.entries(delivered).slice(-ACK_RECEIPTS)) };
 };
+const transactionActive = (ack) => ack.transaction && Date.now() - ack.transaction.t < TRANSACTION_RETRY_MS && live(ack.transaction.pid);
+const prepareTransaction = (ack, rows) => ({ ...nextAck(ack, []), transaction: { token: randomUUID(), t: Date.now(), pid: process.pid,
+  events: rows.map(({ id, seq }) => ({ id, seq })) } });
 
 export const launcherIdentity = (override, env = process.env, cwd = process.cwd()) => {
   const sessionId = [override, env.ORCHESTRATOR_OWNER, env.CLAUDE_SESSION_ID].find(validOwner) ?? null;
@@ -91,6 +99,36 @@ const atomicSync = (file, value) => {
   try { fd = fs.openSync(tmp, 'w', 0o600); fs.writeFileSync(fd, value); fs.fsyncSync(fd); fs.closeSync(fd); fd = undefined; fs.renameSync(tmp, file); }
   finally { if (fd !== undefined) fs.closeSync(fd); try { fs.unlinkSync(tmp); } catch {} }
 };
+const acquireAckLock = (owner) => {
+  const file = ackFile(owner), lock = `${file}.lock`, marker = path.join(lock, 'writer.json'), reaper = `${lock}.reap`;
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  try { fs.mkdirSync(lock); } catch (e) {
+    if (e.code !== 'EEXIST') throw e;
+    let reaping = false;
+    try {
+      try { if (Date.now() - fs.statSync(reaper).mtimeMs > 30000) fs.rmdirSync(reaper); } catch {}
+      fs.mkdirSync(reaper); reaping = true;
+      let writer; try { writer = JSON.parse(readText(marker)); } catch {}
+      if ((Number.isInteger(writer?.pid) && !live(writer.pid))
+        || (!writer && Date.now() - fs.statSync(lock).mtimeMs > 30000)) {
+        try { fs.unlinkSync(marker); } catch {} fs.rmdirSync(lock);
+      }
+    } catch {} finally { if (reaping) try { fs.rmdirSync(reaper); } catch {} }
+    try { fs.mkdirSync(lock); } catch (error) { if (error.code === 'EEXIST') return null; throw error; }
+  }
+  const identity = fs.statSync(lock), token = randomUUID();
+  const release = () => {
+    try { const current = fs.statSync(lock);
+      if (current.dev === identity.dev && current.ino === identity.ino) {
+        fs.unlinkSync(marker); fs.rmdirSync(lock);
+      } } catch {}
+    process.removeListener('exit', release);
+  };
+  try { fs.writeFileSync(marker, JSON.stringify({ pid: process.pid, token }), { mode: 0o600 }); }
+  catch (e) { try { fs.unlinkSync(marker); } catch {} try { fs.rmdirSync(lock); } catch {} throw e; }
+  process.once('exit', release);
+  return release;
+};
 const historyFiles = () => { try { return fs.readdirSync(historyDir()).filter((name) => name.endsWith('.jsonl')).map((name) => path.join(historyDir(), name)); } catch { return []; } };
 const auditRows = () => {
   const unique = new Map();
@@ -127,11 +165,13 @@ const compactLocked = (state, now = Date.now()) => {
   if (migrating) atomicSync(eventFile(), rows.map((row) => JSON.stringify(row)).join('\n') + '\n');
   const keep = new Set(rows.slice(-64).map((row) => row.id));
   for (const owner of new Set(rows.map((row) => row.owner))) {
-    const file = validOwner(owner) ? ackFile(owner) : null, lock = file ? `${file}.lock` : null;
-    let locked = false;
+    const file = validOwner(owner) ? ackFile(owner) : null;
+    let release;
     try {
-      // A print transaction may still roll back its ack. Never archive/prune that owner's rows while it holds the lock.
-      if (lock) { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.mkdirSync(lock); locked = true; }
+      if (file) {
+        release = acquireAckLock(owner);
+        if (!release) { for (const row of rows.filter((row) => row.owner === owner)) keep.add(row.id); continue; }
+      }
       const ack = file ? readAck(owner) : emptyAck(owner), snapshot = inbox(rows, owner, ack, now);
       const runningIds = new Set(snapshot.running.map((row) => row.id));
       for (const row of rows.filter((row) => row.owner === owner && (row.event === 'running' || row.mayRun) && !runningIds.has(row.id))) {
@@ -149,10 +189,7 @@ const compactLocked = (state, now = Date.now()) => {
         }
         atomicSync(file, JSON.stringify(next));
       }
-    } catch (e) {
-      if (e.code !== 'EEXIST') throw e;
-      for (const row of rows.filter((row) => row.owner === owner)) keep.add(row.id);
-    } finally { if (locked) fs.rmdirSync(lock); }
+    } finally { release?.(); }
   }
   const removed = rows.filter((row) => !keep.has(row.id));
   if (removed.length) atomicSync(path.join(historyDir(), `${now}-${randomUUID()}.jsonl`), removed.map((row) => JSON.stringify(row)).join('\n') + '\n');
@@ -206,20 +243,39 @@ const appendReceiptSync = (entry) => {
   fs.appendFileSync(file, JSON.stringify(entry) + '\n', { mode: 0o600 });
 };
 
-// Persist before blocking output; ordinary print failures roll back, and duplicate delivery is harmless.
+// Intent never advances the acknowledgement. Output runs outside the lock; stale intents can be retried.
 export const deliver = (owner, print) => {
   let own = readEvents().filter((row) => row.owner === owner);
   if (own.some((row) => !Number.isSafeInteger(row.seq))) {
     compactWorkerEvents(Date.now(), { wait: false }); own = readEvents().filter((row) => row.owner === owner);
   }
-  return withLock(ackFile(owner), () => {
-    const ack = readAck(owner), rows = inbox(own, owner, ack).pending;
-    if (!rows.length) return [];
-    const next = nextAck(ack, rows); atomicSync(ackFile(owner), JSON.stringify(next));
-    try { print(rows); } catch (e) { atomicSync(ackFile(owner), JSON.stringify(ack)); throw e; }
-    try { appendReceiptSync(receipt(owner, rows, next)); } catch {}
-    return rows;
-  });
+  const delivered = [], file = ackFile(owner);
+  for (;;) {
+    let prepared, rows;
+    const release = acquireAckLock(owner); if (!release) return delivered;
+    try {
+      const ack = readAck(owner);
+      if (transactionActive(ack)) return delivered;
+      rows = inbox(own, owner, ack).pending.slice(0, ACK_RECEIPTS);
+      if (!rows.length) return delivered;
+      prepared = prepareTransaction(ack, rows); atomicSync(file, JSON.stringify(prepared));
+    } finally { release(); }
+    try { print(rows); } catch (e) {
+      const abort = acquireAckLock(owner);
+      if (abort) try {
+        const ack = readAck(owner);
+        if (ack.transaction?.token === prepared.transaction.token) atomicSync(file, JSON.stringify({ ...ack, transaction: null }));
+      } finally { abort(); }
+      throw e;
+    }
+    delivered.push(...rows);
+    const commit = acquireAckLock(owner); if (!commit) return delivered;
+    try {
+      const ack = readAck(owner); if (ack.transaction?.token !== prepared.transaction.token) return delivered;
+      const next = nextAck(ack, rows, null); atomicSync(file, JSON.stringify(next));
+      try { appendReceiptSync(receipt(owner, rows, next)); } catch {}
+    } finally { commit(); }
+  }
 };
 
 // One cursor per watcher; unchanged polls perform only stat, not open/read/JSON.parse.
@@ -295,30 +351,42 @@ export const deliverAsync = async (owner, print, limit = 10, { rows: knownRows }
     compactWorkerEvents(Date.now(), { wait: false });
     const tail = createEventTail(owner); await tail.read(); own = tail.rows();
   }
-  const file = ackFile(owner), lock = `${file}.lock`;
-  await fsp.mkdir(path.dirname(file), { recursive: true });
-  try { if (Date.now() - (await fsp.stat(lock)).mtimeMs > 30000) await fsp.rmdir(lock); } catch {}
-  try { await fsp.mkdir(lock); } catch { return { delivered: [], pending: null, running: null, failed: true }; }
-  const identity = fs.statSync(lock);
-  // A hook's hard deadline exits the process without unwinding asynchronous finally blocks.
-  const releaseOnExit = () => {
-    try { const current = fs.statSync(lock);
-      if (current.dev === identity.dev && current.ino === identity.ino) fs.rmdirSync(lock); } catch {}
-  };
-  process.once('exit', releaseOnExit);
-  try {
-    const ack = await readAckAsync(owner);
-    const snapshot = inbox(own, owner, ack), rows = snapshot.pending.slice(0, limit);
-    if (!rows.length) {
-      if (Object.keys(ack.delivered).length > ACK_RECEIPTS) await atomicAsync(file, JSON.stringify(nextAck(ack, [])));
-      return { delivered: [], ...snapshot, ack };
+  const file = ackFile(owner), delivered = [];
+  let snapshot;
+  while (delivered.length < limit) {
+    let prepared, rows;
+    const release = acquireAckLock(owner);
+    if (!release) return { delivered, pending: snapshot?.pending ?? null, running: snapshot?.running ?? null, failed: true };
+    try {
+      const ack = await readAckAsync(owner), current = inbox(own, owner, ack); snapshot ??= current;
+      if (transactionActive(ack)) return { delivered, ...snapshot, ack, failed: true };
+      rows = current.pending.slice(0, Math.min(ACK_RECEIPTS, limit - delivered.length));
+      if (!rows.length) {
+        if (ack.transaction || Object.keys(ack.delivered).length > ACK_RECEIPTS) await atomicAsync(file, JSON.stringify(nextAck(ack, [], null)));
+        return { delivered, ...snapshot, ack };
+      }
+      prepared = prepareTransaction(ack, rows); await atomicAsync(file, JSON.stringify(prepared));
+    } finally { release(); }
+    try { await print(rows); } catch (e) {
+      const abort = acquireAckLock(owner);
+      if (abort) try {
+        const ack = await readAckAsync(owner);
+        if (ack.transaction?.token === prepared.transaction.token) await atomicAsync(file, JSON.stringify({ ...ack, transaction: null }));
+      } finally { abort(); }
+      throw e;
     }
-    const next = nextAck(ack, rows); await atomicAsync(file, JSON.stringify(next));
-    try { await print(rows); } catch (e) { await atomicAsync(file, JSON.stringify(ack)); throw e; }
-    // Audit telemetry cannot invalidate a successfully persisted delivery acknowledgement.
-    try { appendReceiptSync(receipt(owner, rows, next)); } catch {}
-    return { delivered: rows, ...snapshot, ack: next };
-  } finally { releaseOnExit(); process.removeListener('exit', releaseOnExit); }
+    delivered.push(...rows);
+    const commit = acquireAckLock(owner);
+    if (!commit) return { delivered, ...snapshot, failed: true };
+    try {
+      const ack = await readAckAsync(owner);
+      if (ack.transaction?.token !== prepared.transaction.token) return { delivered, ...snapshot, ack };
+      const next = nextAck(ack, rows, null); await atomicAsync(file, JSON.stringify(next));
+      try { appendReceiptSync(receipt(owner, rows, next)); } catch {}
+      if (delivered.length >= limit) return { delivered, ...snapshot, ack: next };
+    } finally { commit(); }
+  }
+  return { delivered, ...snapshot };
 };
 
 const watcherState = (owner) => { try { return JSON.parse(readText(path.join(watcherFile(owner), 'watcher.json'))); } catch { return null; } };
