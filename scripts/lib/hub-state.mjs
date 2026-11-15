@@ -1,5 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { rulesShared } from './global-rules.mjs';
+import { notifyMonitorFailure } from './monitor-notify.mjs';
 
 export const HUB_LOG_LIMIT = 8 * 2 ** 20;
 export const hubDirectory = (home) => path.join(home, '.claude/orchestrator/_shared/hub-launchd');
@@ -30,6 +32,60 @@ export function writeHubState(home, account, row) {
     fs.writeFileSync(tmp, JSON.stringify(row), { flag: 'wx', mode: 0o600 });
     fs.renameSync(tmp, file);
   } finally { try { fs.unlinkSync(tmp); } catch {} }
+  if (row.mode !== 'HEALTHY' && hubDirectory(home) === path.join(rulesShared(), 'hub-launchd')) {
+    try { notifyMonitorFailure(`hub/${account}/${row.reason}`, { event: row.mode === 'BLOCKED' ? 'failed' : 'stalled' }); }
+    catch { process.stderr.write('hub monitoring event NOT RECORDED\n'); }
+  }
+}
+
+// A small transport probe avoids the expensive thread/list endpoint. Only local, registered endpoints are probed.
+export async function hubRPC(url, method = null, params = {}, timeoutMs = 1200) {
+  const endpoint = new URL(url);
+  if (!['ws:', 'wss:'].includes(endpoint.protocol) || !['127.0.0.1', 'localhost', '[::1]'].includes(endpoint.hostname)
+    || endpoint.username || endpoint.password) throw Error('hub endpoint must be local');
+  return new Promise((resolve, reject) => {
+    const socket = new WebSocket(endpoint), timer = setTimeout(() => finish(Error('hub probe timeout')), timeoutMs);
+    let settled = false;
+    function finish(error, result) {
+      if (settled) return;
+      settled = true; clearTimeout(timer); socket.close();
+      error ? reject(error) : resolve(result);
+    }
+    socket.addEventListener('error', () => finish(Error('hub probe unavailable')));
+    socket.addEventListener('close', () => finish(Error('hub probe closed')));
+    socket.addEventListener('open', () => socket.send(JSON.stringify({ id: 1, method: 'initialize',
+      params: { clientInfo: { name: 'quota-monitor', version: '1' } } })));
+    socket.addEventListener('message', message => {
+      let row; try { row = JSON.parse(String(message.data)); } catch { return; }
+      if (![1, 2].includes(row.id)) return;
+      if (row.error) { finish(Error('hub RPC unavailable')); return; }
+      if (row.id === 1 && method) {
+        socket.send(JSON.stringify({ method: 'initialized', params: {} }));
+        socket.send(JSON.stringify({ id: 2, method, params }));
+      } else finish(null, row.result);
+    });
+  });
+}
+
+export async function probeHub({ home, account, hub, timeoutMs = 1200, health, probe } = {}) {
+  let supervisor = null;
+  try { supervisor = readHubState(home, account); } catch {}
+  let endpoint;
+  try {
+    const url = new URL(hub);
+    if (!['ws:', 'wss:'].includes(url.protocol) || !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)
+      || url.username || url.password) throw Error('non-local hub');
+    url.protocol = url.protocol === 'wss:' ? 'https:' : 'http:';
+    url.pathname = `${url.pathname.replace(/\/$/, '')}/healthz`; endpoint = String(url);
+  } catch { return { account, state: 'down', supervisor, health: false, probe: false, reason: 'hub endpoint unavailable' }; }
+  const [http, rpc] = await Promise.allSettled([
+    health ? health(endpoint) : fetch(endpoint, { signal: AbortSignal.timeout(timeoutMs) }).then(r => r.ok),
+    probe ? probe() : hubRPC(hub, null, {}, timeoutMs),
+  ]);
+  const healthy = http.status === 'fulfilled' && http.value === true, reachable = rpc.status === 'fulfilled' && rpc.value !== false;
+  const state = reachable ? 'up' : healthy ? 'slow-probe' : 'down';
+  return { account, state, supervisor, health: healthy, probe: reachable,
+    reason: state === 'down' && supervisor?.mode === 'HEALTHY' ? 'supervisor says HEALTHY; current probes failed' : null };
 }
 
 export function writeHubLog(home, account, chunk, error = false, limit = HUB_LOG_LIMIT) {

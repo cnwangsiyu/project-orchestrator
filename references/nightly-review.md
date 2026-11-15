@@ -151,7 +151,7 @@ These are the user's decisions (2026-10-30 to 2026-11-03):
     balance factors; `background` counts distinct tasks and their recorded wall-clock time;
   - `routing.signing`: every `--signing` route with project, task, pick and sandbox for the signing audit below;
   - `reviews`: rolling 24-hour and 7-day review-budget statistics, plus UTC project-days. A primary review, re-review,
-    second-opinion and each embedded second reviewer are separate launches/dispatches. Read review share, reviews per
+    second-opinion and each embedded second reviewer are separate planned dispatches. Read review share, reviews per
     task (`tasksAtLeast3`), second-reviewer share, re-review share, required-review share and explicit P0/P1 yield;
     `UNKNOWN` means the review outcome/notes did not say whether it found P0/P1, not that it found none;
   - `quota.companyByHour`: company quota snapshots grouped by UTC hour, including TRAE load by model and queue
@@ -213,6 +213,12 @@ Look for evidence in the data, not hunches. Typical findings:
 
 ### Global Rule Compliance (User, 2026-11-13)
 
+Read `review-data.globalRules` for the day and week, including `launchMismatches` after the day-2 launch cross-check.
+Report `residents.missing` and `overdueQuestions` (unanswered questions older than their timeout) alongside inbox
+identity uncertainty. Unreadable ledgers are UNKNOWN. Historical unrouted launches can be attributed with
+`node scripts/launch-audit.mjs --attribute EXACT_NAME --owner FULL_SESSION_ID --note "reason"`; this appends attribution
+metadata and preserves the original launch and its unrouted violation. An attribution never manufactures a route or approval.
+
 Read `review-data.globalRules` for the day and week. Report violations **per orchestrator**: unrouted launches,
 personal-quota launches without recorded user OK, TRAE GPT launches on security routes, and missing/stale
 `rules-ack` vs the digest version. Read the launcher-provided `orch-usage` flags/blockedMinutes alongside them
@@ -227,6 +233,9 @@ The receipt's identity must match `user-signing/identities.json`, including its 
 scope (H6/iPhone 8; cosign DH59R4RNRY/profile 3JVMQQBHUR/iPhone 11, valid to 2027-09; repo Android debug).
 Only orchestrators write registry entries; signing workers must not change registry.json or identities.json.
 Workers needing new entries report BLOCKED; new identities require a new user approval card and allowlist entry.
+Use `node scripts/nightly-review.mjs scan-log --file /absolute/worker.log` for the password-style scan;
+it returns masked findings with line numbers. Ignore status text `PASS:`, shell variable references such as
+`$SIGNING_PASS`/`${SIGNING_PASS}`, and redaction placeholders such as `[REDACTED]`, `<redacted>` or `*****`.
 Scan worker logs only for password-like strings and mask every hit in review output. A hit, missing receipt,
 unregistered id, unlisted identity, worker-written registry/allowlist, production/release package, other keychain, or missing re-lock evidence is a violation and user card;
 never inspect or reproduce the suspected secret to confirm it. Absent evidence is UNKNOWN, never assumed compliant.
@@ -245,7 +254,7 @@ owner. Opt-in KeepAlive templates/commands are in `rules-enforcement.md`; this r
 
 ### Review share (审查占比; user, 2026-11-14)
 
-Read `reviews.rolling24h` and `reviews.rolling7d`; report overall share as observation and compare each project to its configured target (video-agent 10%, vesdk-mainline/webview 20%). In two or three nightly lines report per-project dispatch/review/mandatory counts, targets, overBudget, second/re-review counts and blocking/known/blockingRatePct yield; UNKNOWN is never none. Send each orchestrator only its project task names and actions. Projects on no-review (evelyns-world, acq and autotrader for now) are excluded from the review-share target; report their dispatch/review counts only (`noReviewProjects`), without budget warnings.
+Read `reviews.rolling24h` and `reviews.rolling7d`; these count route decisions/planned dispatches, not proven launches. Report overall share as observation and compare each project to its configured target (video-agent 10%, vesdk-mainline/webview 20%). In two or three nightly lines report per-project dispatch/review/mandatory counts, targets, overBudget, second/re-review counts and blocking/known/blockingRatePct yield; UNKNOWN is never none. Send each orchestrator only its project task names and actions. Projects on no-review (evelyns-world, acq and autotrader for now) are excluded from the review-share target; report their dispatch/review counts only (`noReviewProjects`), without budget warnings.
 
 Mandatory review is ONLY explicit --review-class A|B|C|D plus --review-reason: A a version that reaches external users and cannot be rolled back within hours; B login/auth/permission/signing logic; C irreversible data operations or billing/quota accounting; D a named adversarial review. High stakes, installation and fallback authorship alone do not qualify. Use the shared project-risk config and explicit class/reason evidence. Preserve mandatory review even when its share exceeds target; propose a budget/scope decision with exact counts instead. Enforce the hard two-round scope cap, remove second reviewers outside classified adversarial/review-high/release, batch related changes and prefer tests for optional work. `--review-result blocking|none` overrides note heuristics; interim phrases are supported. No profile exemption blocks explicit A–D.
 
@@ -588,3 +597,10 @@ sessions, notification tools or credential reads; `node scripts/test/run-all.mjs
 Dependency installation needs no decision card: Project dependencies and build tools fetched through normal package managers and registries (npm/pnpm/yarn, pip/uv, gradle/maven, CocoaPods/SPM, cargo, go modules, brew formulae, and SDK/toolchain components the build asks for) are installed directly into the task workspace or user-level caches, without a card or question. No secrets/credentials, production changes without a card, unapproved personal quota, or system security changes; a required login the worker lacks is BLOCKED.
 
 Release impact means class A only: a version reaches external users and cannot be rolled back within hours. Reading/writing local or user data is not release; real irreversible data operations are class C. Personal/family apps, internal demos and PPE/test packages, or features that only read existing data are not release.
+
+
+For outcome windows, use `completedAt`; `correctedAt` dates a correction and does not move the completed task into a
+new day. Model/vendor statistics expose `nonCodeRework` separately from code rework and first-pass success. Quota
+snapshots use capture end time (`t`), retain their capture start (`captureStartedAt`) and preserve raw reset-window
+counters. `orch-usage.blockedMinutes` is the interval union of foreground waits; `blockedCallMinutes` is their sum.
+Use the union to describe elapsed blocked time and the sum only for call-duration accounting.

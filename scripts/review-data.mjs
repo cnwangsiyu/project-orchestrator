@@ -12,13 +12,14 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { execFileSync } from 'node:child_process';
 import { SHARED, ROUTE_LOG, QUOTA_LOG, readState, analyze, leanLines, fmt, outcomeOwns, isReviewDecision, dedupeOutcomes, codexCatalog, readProfiles, compareHarness, harnessDrift, modelView, effectiveFirst, OUTCOME_OVERRIDES } from './lib/state.mjs';
-import { loadDigest, isRouteDecision } from './lib/global-rules.mjs';
+import { loadDigest, isRouteDecision, rulesShared } from './lib/global-rules.mjs';
 import { auditGlobalRules } from './lib/global-rules-audit.mjs';
 import { LOG as RESOURCE_LOG, readJsonl } from './lib/resource-data.mjs';
 import { review as resourceReview } from './resource-review.mjs';
 import { utilisationLines } from './lib/resource-utilisation.mjs';
 import { ETA, median } from './lib/eta.mjs';
-import { auditWorkerEvents } from './lib/worker-events.mjs';
+import { checkResidents } from './resident-check.mjs';
+import { auditWorkerEvents, readEvents } from './lib/worker-events.mjs';
 
 const argv = process.argv.slice(2);
 const opt = (k) => { const i = argv.indexOf(`--${k}`); return i < 0 ? null : argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[i + 1] : true; };
@@ -43,7 +44,7 @@ const routes = all.filter((r) => r.t >= since && isRouteDecision(r));
 // A task counts once: normal records merge, then explicit corrections override supplied fields.
 const allOuts = dedupeOutcomes(all.filter((r) => r.kind === 'outcome'))
   .map((o) => (o.result === 'pass' && o.rounds > 0 ? { ...o, result: 'rework' } : o));
-const outs = allOuts.filter((r) => r.t >= since);
+const outs = allOuts.filter((r) => (r.completedAt ?? r.t) >= since);
 const mouts = outs.map(modelView);
 const correctedValues = (o) => Object.fromEntries(OUTCOME_OVERRIDES.filter((f) => Object.hasOwn(o, f)).map((f) => [f, o[f]]));
 const samePick = (a, b) => ['vendor', 'model', 'effort', 'account'].every((f) => (a?.[f] ?? null) === (b?.[f] ?? null));
@@ -51,20 +52,20 @@ const agg = (key, list = outs) => {
   const m = {};
   for (const o of list) {
     const k = key(o); if (!k) continue;
-    const a = (m[k] ??= { tasks: 0, pass: 0, rework: 0, fail: 0, reviewed: 0, rounds: [], minutes: [] });
-    a.tasks++; a[o.result]++; if (o.reviewed) a.reviewed++;
+    const a = (m[k] ??= { tasks: 0, pass: 0, rework: 0, nonCodeRework: 0, fail: 0, reviewed: 0, rounds: [], minutes: [] });
+    a.tasks++; a[o.nonCodeRework ? 'nonCodeRework' : o.result]++; if (o.reviewed) a.reviewed++;
     if (o.rounds != null) a.rounds.push(o.rounds); if (o.minutes != null) a.minutes.push(o.minutes);
   }
   const mean = (xs) => (xs.length ? Math.round((xs.reduce((s, x) => s + x, 0) / xs.length) * 10) / 10 : null);
-  return Object.fromEntries(Object.entries(m).map(([k, a]) => [k, { tasks: a.tasks, firstPass: `${a.pass}/${a.tasks}`, rework: a.rework, fail: a.fail,
+  return Object.fromEntries(Object.entries(m).map(([k, a]) => [k, { tasks: a.tasks, firstPass: `${a.pass}/${a.tasks}`, rework: a.rework, nonCodeRework: a.nonCodeRework, fail: a.fail,
     reviewed: a.reviewed, meanRounds: mean(a.rounds), meanMinutes: mean(a.minutes) }]));
 };
 const outcomes = {
   recorded: outs.length,
   // Tasks with more than one outcome record (merged above): remind their orchestrator to record each task once, at close.
   duplicates: outs.filter((o) => o.dupes > 1).map((o) => `${o.project}/${o.name} ×${o.dupes}`),
-  corrected: outs.filter((o) => o.corrected).map((o) => ({ task: `${o.project}/${o.name}`, from: o.correctionFrom, to: correctedValues(o) })),
-  corrections: outs.reduce((n, o) => n + (o.corrections ?? 0), 0),
+  corrected: allOuts.filter(o => o.correctedAt >= since).map((o) => ({ task: `${o.project}/${o.name}`, completedAt: o.completedAt, correctedAt: o.correctedAt, from: o.correctionFrom, to: correctedValues(o) })),
+  corrections: all.filter(o => o.kind === 'outcome' && o.correction && o.t >= since).length,
   actualMismatches: outs.filter((o) => o.actual?.length && !samePick(o.first, effectiveFirst(o)))
     .map((o) => ({ task: `${o.project}/${o.name}`, joined: o.first ?? null, actual: effectiveFirst(o) })),
   // Per vendor/model: code rework only (modelView). Per category/impact/cause: all rework.
@@ -89,7 +90,7 @@ const outcomes = {
     const extra = fb.filter((r) => (r.why ?? []).some((w) => /is a fallback model: its service code gets a review/.test(w)));
     const ex = extra.map((r) => ({ task: `${r.project}/${r.name}`, model: r.pick.model, outcome: ended(r)?.result ?? '(none yet)', rounds: ended(r)?.rounds ?? null, cause: ended(r)?.cause ?? null, actual: ended(r)?.actual ?? null }));
     return {
-      launches: fb.length, byModel: count(fb, (r) => r.pick.model), byReason: count(fb, reason),
+      decisions: fb.length, byModel: count(fb, (r) => r.pick.model), byReason: count(fb, reason),
       outcomes: count(fb.map(ended).filter(Boolean), (o) => o.result),
       extraReviews: { count: extra.length, caught: ex.filter((e) => e.outcome === 'rework' || e.outcome === 'fail').length, clean: ex.filter((e) => e.outcome === 'pass').length, tasks: ex.slice(0, 30) },
       reviewSecondOpinions: count(routes.filter((r) => isReviewDecision(r) && r.pick?.model && !/^gpt-/.test(r.pick.model) && r.pick.vendor === 'codex'), (r) => r.pick.model),
@@ -186,7 +187,8 @@ const reviewBudget = {
   window: { hours: H, ...reviewWindow(since) },
   rolling24h: reviewWindow(Date.now() - 24 * 3600000),
   rolling7d: reviewWindow(Date.now() - 7 * 86400000),
-  note: 'Each primary, second reviewer and re-review launch is one dispatch. UTC project-days; UNKNOWN review yield means no explicit P0/P1 result was recorded.',
+  evidenceBasis: 'routing decisions (planned dispatches), not proven worker launches',
+  note: 'Each primary, second reviewer and re-review decision is one planned dispatch. UTC project-days; UNKNOWN review yield means no explicit P0/P1 result was recorded.',
 };
 const routing = {
   automaticReroutes: (() => {
@@ -419,7 +421,17 @@ const resourceRows = await readJsonl(resourceFiles, since - 600000);
 const resources = resourceReview(resourceRows.rows, { hours: H, quotaRecords: snaps });
 const utilisation = { ...resources.utilisation, coverage: resources.coverage, readErrors: resourceRows.errors };
 const workerInbox = auditWorkerEvents(undefined, since);
-const result = { hours: H, routing, reviews: reviewBudget, outcomes, background, quota, utilisation, now, catalog, globalRules, workerInbox };
+const eventHistory = path.join(rulesShared(), 'worker-event-history');
+let retained = [];
+try { retained = fs.readdirSync(eventHistory, { withFileTypes: true }).filter(entry => entry.isFile() && entry.name.endsWith('.jsonl'))
+  .flatMap(entry => lines(path.join(eventHistory, entry.name))); } catch {}
+const events = [...new Map([...retained, ...readEvents()].map(row => [row.id, row])).values()];
+const answered = new Set(events.filter(row => row.event === 'answered').map(row => `${row.account}/${row.thread}/${row.questionId}`));
+const overdueQuestions = events.filter(row => row.event === 'question' && row.expiresAt <= Date.now()
+  && !answered.has(`${row.account}/${row.thread}/${row.questionId}`)).map(row => ({ owner: row.owner, account: row.account,
+    thread: row.thread, name: row.name ?? null, questionId: row.questionId, askedAt: row.t, expiresAt: row.expiresAt, default: row.default ?? null }));
+const residents = checkResidents();
+const result = { overdueQuestions, residents, hours: H, routing, reviews: reviewBudget, outcomes, background, quota, utilisation, now, catalog, globalRules, workerInbox };
 // Exit only after the pipe has drained; process.exit right after console.log truncates piped output at ~64 KB.
 if (opt('json')) { await new Promise((done) => process.stdout.write(JSON.stringify(result, null, 1) + '\n', done)); process.exit(0); }
 const show = (title, v) => console.log(`\n## ${title}\n${typeof v === 'string' ? v : JSON.stringify(v, null, 1)}`);
@@ -434,3 +446,6 @@ show('now', now);
 show('model catalog', catalog);
 show('global rules', globalRules);
 show('worker inbox (delivery acknowledgement, not task acceptance)', workerInbox);
+
+show('questions older than their timeout (no recorded answer)', overdueQuestions);
+show('resident worker liveness', residents);

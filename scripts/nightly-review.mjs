@@ -6,6 +6,9 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
+import { passwordStyleFindings } from './lib/nightly-audit.mjs';
+import { unsafeFile } from './lib/resource-data.mjs';
+import { notifyMonitorFailure } from './lib/monitor-notify.mjs';
 
 const skill = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const script = path.join(skill, 'scripts/nightly-review.mjs');
@@ -285,7 +288,11 @@ async function gather() {
   ];
   for (const [name, args, out] of jobs) {
     const r = await command('node', [path.join(skill, 'scripts', name), ...args], { file: path.join(d, out), errFile: path.join(d, `${out}.err`) });
-    if (r.code) fs.appendFileSync(path.join(d, `${out}.err`), `UNKNOWN: exit ${r.code}\n`);
+    if (r.code) {
+      fs.appendFileSync(path.join(d, `${out}.err`), `UNKNOWN: exit ${r.code}\n`);
+      if (mode !== 'dry') try { notifyMonitorFailure(`nightly/gather/${name}`, { event: 'failed' }); }
+      catch { log(`monitoring event NOT RECORDED: ${name}`); }
+    }
   }
   update('gather', 'done', '路由和只读资源证据已采集；失败或缺失采样为 UNKNOWN');
   return d;
@@ -296,7 +303,7 @@ function prompt(data) {
     `Read ${skill}/references/nightly-review.md and follow the worker part of "Who does what". ` +
     `The data is already gathered in ${data}: review-data-24h.txt, review-data-168h.txt, orch-usage-24h.txt. ` +
     `Machine resources: resource-review-24h.txt/.json, resource-review-96h.json, resource-now.json and adjacent .err files. ` +
-    `Missing/failed evidence is UNKNOWN. No process/file cleanup or agent installation. ` +
+    `Missing/failed evidence is UNKNOWN. Include resident liveness, questions older than their timeout, and globalRules.launchMismatches from review-data. No process/file cleanup or agent installation. ` +
     `Mandatory review only explicit A–D with a reason; two rounds per scope. Report review yield and share by project against the configured 10% video-agent / 20% vesdk-mainline targets; UNKNOWN is not none. Audit ordinary routed signing workers against registered metadata and receipts, never signing inputs. Workers do not delegate or request model/account changes. `;
   if (mode === 'dry') return instructions + 'DRY RUN: read-only; no edits, commits or pushes. Your final answer is the report.';
   return instructions + `For this attempt use ${attemptDir}/report.md and ${attemptDir}/notify.json, NOT the day-level output paths. ` +
@@ -603,7 +610,13 @@ async function finishClaudeReview(sessionFile) {
 
 const [cmd, ...args] = process.argv.slice(2);
 const arg = (name) => args.includes(name) ? args[args.indexOf(name) + 1] : undefined;
-if (cmd === 'ack') {
+if (cmd === 'scan-log') {
+  const file = arg('--file');
+  if (!file || !path.isAbsolute(file) || !/\.(?:log|out|txt)$/.test(file) || unsafeFile(file) || unsafeFile(fs.realpathSync(file))) throw Error('scan-log requires a worker log path');
+  const stat = fs.lstatSync(file);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 16 * 2 ** 20) throw Error('worker log is unsafe or too large');
+  console.log(JSON.stringify({ findings: passwordStyleFindings(fs.readFileSync(file, 'utf8')) }));
+} else if (cmd === 'ack') {
   const file = arg('--file'); if (!file || !path.isAbsolute(file)) throw Error('ack requires --file ABSOLUTE_PATH');
   atomic(file, { ...read(file), delivery: 'sent', sentAt: new Date().toISOString() });
 } else if (cmd === 'progress') {

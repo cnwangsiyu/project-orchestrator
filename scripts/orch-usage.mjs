@@ -237,9 +237,9 @@ const analyse = async (file, jobDir, rulesOwner = false) => {
       const kb = sizeOf(b.content) / 1024;
       (kinds[p.kind] ??= { calls: 0, kb: 0 }).calls++; kinds[p.kind].kb += kb;
       big.push({ kb, kind: p.kind, desc: p.desc });
-      // Sum completed call durations, even when calls overlap; background launches don't hold the turn.
+      // Keep summed call time and wall-clock union distinct; foreground calls can overlap.
       const ms = t - p.timestamp;
-      if (p.foreground && ms > 120000) { blockedMs += ms; blocked.push({ ms, command: p.command }); }
+      if (p.foreground && ms > 120000) { blockedMs += ms; blocked.push({ ms, start: p.timestamp, end: t, command: p.command }); }
       pending.delete(b.tool_use_id);
     }
   }
@@ -248,7 +248,11 @@ const analyse = async (file, jobDir, rulesOwner = false) => {
   const sharedSkillEditedPaths = top(sharedSkillEdited).map(([path, calls]) => ({ path, calls }));
   const testBuildCommands = top(tests).map(([command, calls]) => ({ command, calls }));
   const minutes = (ms) => Number((ms / 60000).toFixed(2));
-  const blockedMinutes = minutes(blockedMs), blockingExamples = blocked.sort((a, b) => b.ms - a.ms).slice(0, 3).map((x) => ({ minutes: minutes(x.ms), command: x.command }));
+  let unionMs = 0, end = -Infinity;
+  for (const interval of [...blocked].sort((a, b) => a.start - b.start)) {
+    unionMs += Math.max(0, interval.end - Math.max(end, interval.start)); end = Math.max(end, interval.end);
+  }
+  const blockedCallMinutes = minutes(blockedMs), blockedMinutes = minutes(unionMs), blockingExamples = blocked.sort((a, b) => b.ms - a.ms).slice(0, 3).map((x) => ({ minutes: minutes(x.ms), command: x.command }));
   const flags = [];
   if (ownKB > LIMITS.ownKB * scale) flags.push(`${Math.round(ownKB)} KB of its own tool output (limit ${Math.round(LIMITS.ownKB * scale)})`);
   if (browserCalls > LIMITS.browserCalls * scale) flags.push(`${browserCalls} browser/computer-use calls — route that work to a worker`);
@@ -259,8 +263,8 @@ const analyse = async (file, jobDir, rulesOwner = false) => {
   if (sharedSkillEdits) flags.push(`edited the shared skill directly: ${sharedSkillEdits} calls (${sharedSkillEditedPaths.map((x) => `${x.calls} ${x.path}`).join('; ')}) - send the change to the global-rules orchestrator`);
   if (testsBuilds > LIMITS.testsBuilds * scale) flags.push(`runs tests/builds itself: ${testsBuilds} calls (${testBuildCommands.map((x) => `${x.calls} ${x.command}`).join('; ')}) - route that work as a task through route.mjs`);
   if (toolCalls > LIMITS.toolCalls * scale) flags.push(`many tool calls: ${toolCalls} (${top(tools).map(([name, calls]) => `${calls} ${name}`).join('; ')}) - route that work as a task through route.mjs`);
-  if (blockedMs / 60000 > LIMITS.blockedMinutes * scale) flags.push(`blocks in the foreground: ${blockedMinutes} min (${blockingExamples.map((x) => `${x.minutes} min ${x.command}`).join('; ')}) — run it in the background and dispatch other ready tasks meanwhile`);
-  return { ownKB: Math.round(ownKB), compactions, browserCalls, imageReads, sleepPolls, subagents, edits, sharedSkillEdits, testsBuilds, toolCalls, blockedMinutes, blockingExamples, editedPaths, sharedSkillEditedPaths, testBuildCommands, flags,
+  if (unionMs / 60000 > LIMITS.blockedMinutes * scale) flags.push(`blocks in the foreground: ${blockedMinutes} min (${blockingExamples.map((x) => `${x.minutes} min ${x.command}`).join('; ')}) — run it in the background and dispatch other ready tasks meanwhile`);
+  return { ownKB: Math.round(ownKB), compactions, browserCalls, imageReads, sleepPolls, subagents, edits, sharedSkillEdits, testsBuilds, toolCalls, blockedMinutes, blockedCallMinutes, blockingExamples, editedPaths, sharedSkillEditedPaths, testBuildCommands, flags,
     kinds: Object.fromEntries(Object.entries(kinds).sort((a, b) => b[1].kb - a[1].kb).slice(0, 10).map(([k, v]) => [k, { calls: v.calls, kb: Math.round(v.kb) }])),
     largest: big.sort((a, b) => b.kb - a.kb).slice(0, 5).map((x) => `${Math.round(x.kb)} KB ${x.kind} ${x.desc}`) };
 };
@@ -277,7 +281,7 @@ if (opt('json')) { console.log(JSON.stringify({ hours: H, limits: LIMITS, orches
 console.log(`orchestrator context use — last ${H}h (limits per 24h: ${JSON.stringify(LIMITS)})`);
 if (!results.length) console.log('(no local orchestrator sessions found)');
 for (const r of results) {
-  console.log(`\n== ${r.name} [${r.id}]${r.error ? `: ${r.error}` : `: own output ${r.ownKB} KB, compactions ${r.compactions}, browser ${r.browserCalls}, screenshots ${r.imageReads}, sleep-polls ${r.sleepPolls}, subagents ${r.subagents}, edits ${r.edits}, shared-skill edits ${r.sharedSkillEdits}, tests/builds ${r.testsBuilds}, tool calls ${r.toolCalls}, blocked ${r.blockedMinutes} min`}`);
+  console.log(`\n== ${r.name} [${r.id}]${r.error ? `: ${r.error}` : `: own output ${r.ownKB} KB, compactions ${r.compactions}, browser ${r.browserCalls}, screenshots ${r.imageReads}, sleep-polls ${r.sleepPolls}, subagents ${r.subagents}, edits ${r.edits}, shared-skill edits ${r.sharedSkillEdits}, tests/builds ${r.testsBuilds}, tool calls ${r.toolCalls}, blocked ${r.blockedMinutes} min (interval union; ${r.blockedCallMinutes} min summed calls)`}`);
   if (r.error) continue;
   for (const [k, v] of Object.entries(r.kinds)) console.log(`   ${String(v.kb).padStart(6)} KB ${String(v.calls).padStart(5)}  ${k}`);
   for (const l of r.largest) console.log(`   largest: ${l}`);

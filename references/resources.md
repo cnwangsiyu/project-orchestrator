@@ -489,3 +489,44 @@ Full host attribution, full-probe timing, actual message round trips, browser re
 scheduling require authorized host qualification. Unit tests do not substitute for those boundaries. Process identity
 check-to-signal and tree metadata check-to-delete still have small races; the design is conservative, not an OS-level
 atomic ownership guarantee.
+
+
+## Resident workers and monitoring delivery
+
+Register every long-running watcher in `<shared>/resident-workers.json` (a JSON array, at most 200 entries):
+
+```json
+[
+  {
+    "name": "autotrader-watch",
+    "owner": "FULL-ORCHESTRATOR-SESSION-ID",
+    "heartbeatFile": "/absolute/task/path/watch.heartbeat",
+    "maxAgeMinutes": 15,
+    "notify": "worker-event"
+  }
+]
+```
+
+The resident touches its own regular heartbeat file periodically. The checker reads file metadata only; it never
+reads the heartbeat contents or runs a command from the registry. Use a full owner session ID so inbox/watch can
+wake that orchestrator. `node scripts/resident-check.mjs --read-only --json` checks without writing. Normal execution
+appends one owner-addressed `stalled` event per outage. A healthy observation closes the incident; incident state
+persists in `<shared>/resident-check-state.json` beyond worker-event retention. Unreadable registry/heartbeat evidence
+is UNKNOWN. Missing registration is UNCONFIGURED, and nightly reports it without claiming a healthy resident.
+
+`templates/launchd/dev.project-orchestrator.resident-check.plist.in` is an uninstalled five-minute LaunchAgent template.
+Fill `__NODE__`, `__SKILL__`, and `__HOME__` with reviewed absolute paths, create its log directory, then have the owner
+install it through the existing launchd process. Template delivery does not install an agent or launch a resident.
+
+Configure host telemetry delivery in `<shared>/monitor-owner.json` as `{"owner":"FULL-ORCHESTRATOR-SESSION-ID"}`
+(or set `MONITOR_OWNER` for the monitor process). Sampler, lock telemetry, hub supervisor failures and resource
+freshness timeouts append `stalled`/`failed` worker events. Notifications are limited to one per owner and cause
+per six hours; logging continues during the cooldown. Without an owner the notification is UNKNOWN; the owner must
+configure delivery before relying on monitoring. Read-only sampling/review never writes notifications. Nightly gather
+reports failed collection to that owner independently of its report worker.
+
+`node scripts/quota.mjs --running` lists public worker-event evidence by account: thread, owner, model, first running
+event time and last activity time. It needs no codex-worker command. A live follower PID or a hub-confirmed running
+thread keeps a latest `running` event in the list; an unavailable confirmation is UNKNOWN. Normal quota output reports
+hub `up`, `slow-probe` (HTTP health succeeds but the transport probe times out), and `down`, alongside supervisor state.
+A successful hub recovery refreshes a cached unavailable reading. No monitor restarts a hub.

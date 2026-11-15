@@ -7,6 +7,7 @@ import { assessThresholds, inspectLockInterval, reviewLockTiming } from './lib/r
 import { reviewExtras } from './lib/resource-extras.mjs';
 import { laneAdmission } from './lib/resource-locks.mjs';
 import { resourceUtilisation, utilisationLines } from './lib/resource-utilisation.mjs';
+import { notifyMonitorFailure } from './lib/monitor-notify.mjs';
 
 const finite = (x) => typeof x === 'number' && Number.isFinite(x);
 const ownerKey = (o) => o?.project ? `${o.project}/${o.task ?? '(project only)'}` : '(unknown)';
@@ -216,13 +217,13 @@ export function formatReview(r) {
   return lines.join('\n');
 }
 async function main() {
-  const args = process.argv.slice(2); let hours = 24, file = LOG, stdin = false, json = false, explicitInput = false;
+  const args = process.argv.slice(2); let hours = 24, file = LOG, stdin = false, json = false, explicitInput = false, readOnly = false;
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--hours') hours = Number(args[++i]);
     else if (args[i] === '--input') { file = args[++i]; explicitInput = true; }
     else if (args[i] === '--stdin') stdin = true;
     else if (args[i] === '--json') json = true;
-    else if (args[i] === '--read-only') continue;
+    else if (args[i] === '--read-only') readOnly = true;
     else throw Error(`unknown option: ${args[i]}`);
   }
   if (!(hours > 0 && hours <= 336)) throw Error('--hours must be >0 and <=336');
@@ -246,7 +247,14 @@ async function main() {
     entryScripts = collectEntryScripts([...new Set([...registry.projects.map((p) => p.dir), ...registry.tasks.flatMap((t) => t.paths)])]);
   } catch { entryScripts = []; }
   const r = review(rows, { ...policy, hours, quotaRecords: quotaRead.rows, remoteEntryScripts: entryScripts }); r.readErrors = errors; r.quotaReadErrors = quotaRead.errors;
+  const latestAt = Math.max(0, ...rows.map(row => row.t).filter(Number.isFinite));
+  const fresh = latestAt > 0 && Date.now() - latestAt <= 600000;
+  r.freshness = { latestAt: latestAt || null, status: fresh ? 'FRESH' : 'UNKNOWN', timeoutMinutes: 10 };
+  if (!stdin && !explicitInput && !readOnly) {
+    if (!fresh) notifyMonitorFailure('resource-telemetry/freshness-timeout');
+    if (errors.length || quotaRead.errors.length) notifyMonitorFailure('resource-telemetry/read-failed', { event: 'failed' });
+  }
   console.log(json ? JSON.stringify(r, null, 2) : formatReview(r) + (errors.length ? `\nRead errors: ${errors.join('; ')}` : ''));
-  if (!r.coverage.observedMinutes || errors.length) process.exitCode = 2;
+  if (!r.coverage.observedMinutes || errors.length || (!stdin && !explicitInput && !fresh)) process.exitCode = 2;
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch((e) => { console.error(`BLOCKED: ${e.message}`); process.exitCode = 2; });
