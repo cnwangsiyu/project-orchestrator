@@ -98,7 +98,7 @@ export function presentRoute(plan, view, context) {
     const oneShot=['lookup','extract','draft','image-gen','second-opinion'].includes(task.category)&&!task.background&&!f.worker&&!low&&c.modelId!=='gpt-6-astra';
     if(oneShot) {
       const bin=a.kind==='trae'?(profiles[an]?.bin??'traecli'):'codex';
-      const inner=(a.kind==='ttadk'&&known(a.capabilities.search)?`${command(['node',`${root}/scripts/codex-worker.mjs`,'--account',an,'proxy'])} >/dev/null && `:'')+command([bin,'exec','-C',task.cwd,'-s',task.sandbox,'-m',launchModel,'-c',`model_reasoning_effort="${c.effort}"`,'-c',`developer_instructions=${JSON.stringify(`Global worker rules ${digest.version}\n${digest.worker}`)}`,'--json','-o',`${task.taskDir}/codex-last.md`,prompt]);
+      const inner=(a.kind==='ttadk'&&known(a.capabilities.search)?`${command(['node',`${root}/scripts/codex-worker.mjs`,'--account',an,'proxy'])} >/dev/null && `:'')+command([bin,'exec','--skip-git-repo-check','-C',task.cwd,'-s',task.sandbox,'-m',launchModel,'-c',`model_reasoning_effort="${c.effort}"`,'-c',`developer_instructions=${JSON.stringify(`Global worker rules ${digest.version}\n${digest.worker}`)}`,'--json','-o',`${task.taskDir}/codex-last.md`,prompt]);
       const accountEnv=profiles[an]?.home?`CODEX_HOME=${shellQuote(profiles[an].home)} `:'';
       out.launcher=a.kind==='trae'?'traecli-exec':'codex-exec';
       out.command=command(['sh',`${root}/scripts/run-tracked.sh`,'--name',name,'--account',an,'--model',c.modelId,'--effort',c.effort,'--cwd',task.cwd,

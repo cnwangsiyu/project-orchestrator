@@ -41,6 +41,14 @@ const finish = async (code) => {
       }
     }
   } catch {} finally { if (outFd !== undefined) fs.closeSync(outFd); }
+  // A one-shot run that exits 0 without writing its --out file did no work (2026-11-15: `codex exec` outside a git repo
+  // printed "Not inside a trusted directory…" and still exited 0). Report it as a failure and show why.
+  if (code === 0 && opts.out && outStamp() === beforeOut) {
+    let tail = '';
+    try { if (opts.log) tail = fs.readFileSync(opts.log, 'utf8').slice(-600).trim(); } catch {}
+    console.error(`run-tracked: the command exited 0 but wrote nothing to ${opts.out}; treating as failed.${tail ? `\nlast log lines:\n${tail}` : ''}`);
+    code = 1;
+  }
   tracker.result(/^(?:\S+\s+)?(?:BLOCKED|QUESTION)\b/.test(final) ? 'needs-user' : code === 0 ? 'finished' : 'failed',
     { finalLine: final.split('\n').find((line) => line.trim()) ?? '' });
   if (signalled) tracker.result('follower-ended', { signal: signalled, mayRun: false });
