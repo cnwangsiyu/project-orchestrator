@@ -1,9 +1,9 @@
-# Shared res contract (v1.4, 2026-11-13) - owner: routing/global-rules orchestrator; users: all projects
+# Shared res contract (v1.5, 2026-11-14) - owner: routing/global-rules orchestrator; users: all projects
 
 Maintained source: this project-orchestrator repository, `scripts/res/res`. Ownership of the entire
 tool (devices, checkouts, registry/notes, take/return/extend/add/note/log and heavy admission) transferred
 from vesdk-mainline to the global-rules owner on 2026-11-13. The unmodified v1.2 contract is preserved
-in `scripts/res/test/fixtures/contract-v1.2.md`. v1.4 is staged, not live until the owner's reviewed switch.
+in `scripts/res/test/fixtures/contract-v1.2.md`. v1.5 is staged, not live until the owner's reviewed switch.
 
 Resources in `res` (~/.claude/orchestrator/_shared/res):
 - `heavy-build` — the ONE machine-wide full-package build slot.
@@ -20,6 +20,8 @@ Commands (existing single-resource semantics unchanged except the documented PID
 - Full build, bounded: `res wait-build` with the same flags and required `--timeout <minutes>` → 0 acquired, 2 timeout; other errors propagate. Acquires `heavy-build` AND the first free admitted lane (1, 2, then optional 3), or holds neither before every retry. `--lane` pins a lane without hold-and-wait. Both commands run heavy-check with the selected holder PID; lane 3 also checks its stricter gate at acquisition.
 - Heavy task, any lane: `res wait-lane --by <session> --project <slug> --for "<purpose>" --task <id> [--pid <pid>] --timeout <minutes>` → selects 1, 2, then 3 if registered and OPEN, without taking `heavy-build`. Repeating it with the same `--by` and holder PID returns the caller's existing lane instead of consuming a second lane.
 - Pair release: `res return-build --by <session> [--pid <holder-pid>] [--note "<text>"]` → returns that unique holder’s lanes (3/2/1) before `heavy-build`; leaves other holders untouched. Optional --pid limits release to that recorded holder PID; the build wrapper uses this to protect preexisting same-name holds. The two normal returns also work. Use a unique `--by` for each run, never share it with concurrent heavy tasks or nest/adopt an existing build hold. Success ends with `build-lane=<id>` or `lane=<id>` so a wrapper can capture the selected lane. New command help: `res take-build --help` (legacy help remains byte-preserved).
+- Build-waiter fairness (v1.5): every blocking `wait-build` (including `take-build --wait` callers that map to it) publishes holder/project/task/PID/host/start plus a heartbeat refreshed on each poll. The record is removed on acquire, timeout, INT/TERM/HUP and ordinary exit. Records with a dead local PID or a heartbeat older than 45 seconds (about three maximum poll intervals) are ignored and cleaned. `res status` lists live waiting builds with holder, start time and current blocker (`gate`, `slot` or `lane`); the log records `waiter-start`, `waiter-acquire` and `waiter-timeout`.
+- Lane reservation (v1.5): when the oldest live build waiter has passed its gate recently and no unrelated established build holds `heavy-build`, another caller may not consume its last free admitted lane. The oldest waiter proceeds; younger build waiters yield FIFO. A plain lane `take` returns 2 with `reserved for waiting build <holder>; retry or use wait-lane`; bounded lane waits keep polling. A pinned waiter reserves only its pinned lane, and lane 3 counts only while OPEN. The post-mkdir check makes simultaneous takers conservative without a new coordination lock. A waiter gate-blocked on its last three polls stops reserving until it passes the gate again. This reservation never grants a lane, evicts a holder, changes load/memory admission, or causes the waiter to hold either half while waiting.
 - Try: `res take <id> --by <session> --project <slug> --for "<purpose>" --task <id> [--pid <pid>]` → 0 ok, 2 held (don't block).
 - Block: `res wait <id> --by <session> --project <slug> --for "<purpose>" --task <id> [--pid <pid>] --timeout <minutes>` → retries with backoff until taken (0) or timeout (2). For `heavy-*` ids, wait uses the same lane-aware gate as heavy-check with its selected holder PID on every retry; it keeps waiting while load1m exceeds the limit or available memory < 16 GiB.
 - Lane-aware load limit (unchanged from v1.2): count currently held `heavy-lane-*` directories, including lane 3, excluding STALE holds and holds whose recorded PID equals the caller's holder PID. Limit = `min(20, 12 + 8 * lanes_held)`: zero other holds allows load1m <=12; one or more allows <=20. Legacy/remote/incomplete holds remain counted unless their recorded PID equals that PID. `heavy-build` itself does not count. The gate never overrides an occupied lane.
@@ -42,9 +44,10 @@ Commands (existing single-resource semantics unchanged except the documented PID
 
 Default state remains `$HOME/.claude/orchestrator/_shared`; `RES_DIR` overrides it for isolated tests.
 `resources.tsv` remains five TAB-separated columns: id/kind/policy/device/description. `log.tsv`
-has no header and five columns: local minute timestamp/action/id/holder/note; actions are
-take/return/extend/add/note/reclaim. `locks/<id>.d` presence is the hold; `info` retains nine
+has no header and five columns: local minute timestamp/action/id/holder/note; actions include
+take/return/extend/add/note/reclaim and the three waiter lifecycle actions. `locks/<id>.d` presence is the hold; `info` retains nine
 TAB-separated keys in order: by/project/task/for/since/until/pid/host/start, with optional appended pid_warning. Healthy holds retain the exact original nine keys. No state migration.
+Live build-waiter records are private controller state under `build-waiters/waiter.*`; callers do not create or remove them.
 Status is observational, uses the same columns/notes, and does not reclaim. `until` is informational.
 PID reuse counts as alive in the controller; legacy/remote metadata is not automatically reclaimed.
 Same-by idempotent take never refreshes PID/start: a replacement process must return/re-take.
@@ -74,6 +77,7 @@ lanes 1/2 remain compatible and need not adopt lane 3. Timeout arguments stay fi
 and zero allowed); pass the same long-lived `--pid $$` to heavy-check, take and wait.
 
 The maintained `scripts/heavy-build.sh` uses `wait-build` for pair acquisition and reverse release.
+v1.5 requires no caller changes: existing build wrappers and finite timeouts automatically publish and clean their waiter record.
 `HEAVY_BUILD_LANE` explicitly pins a lane. If unpinned lane 3 is unknown on a legacy installation, the wrapper
 continues bounded waits on lanes 1/2 within the same timeout; on an exact legacy-help response from a rolled-back controller it uses zero-timeout slot/lane attempts, returning the slot before any backoff; unrelated errors still fail closed, and an explicit
 missing lane-3 pin remains an error. The installer backs up code/registry, stages an idempotent lane-3 row and
