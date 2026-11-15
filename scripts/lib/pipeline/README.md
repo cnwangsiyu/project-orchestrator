@@ -25,23 +25,32 @@ only qualified lane/reviewer set is stalled, defer until progress and replan.
 Missing/stale telemetry remains UNKNOWN and uses the bounded optimistic fallback.
 
 Company capacity is preferred; no runnable company work waits for a future reset.
-If no company lane can start, needsUserOK/tellUser ask whether to use personal
+On a device with a registered TTADK/TRAE account, if no company lane can start, needsUserOK/tellUser ask whether to use personal
 quota now or wait until the named reset/progress trigger. `--urgent --user-ok
 <reference>` records the user's answer and permits the personal command. Image
 generation and Claude-only tools retain standing permission. Max effort outside
 TTADK, Fable and reset redemption keep their separate decisions. Blocked
 proposals contain no executable commands; gated second reviewers do not stop
 an eligible company primary, and remain required before acceptance.
+On devices without company accounts, personal ChatGPT is the normal lane with
+standing permission. Eligible accounts with deadlines within 48 hours rotate;
+otherwise the earliest deadline wins. Nondry personal launches advance the CLI
+counter under a short lock. Max effort and reset redemption still ask separately.
 
 `--actual vendor:model:effort@account` supplies sanitized actual attempt evidence.
-Fallback lookup uses task-owned launch/reroute records by name/project, then the
-last named route decision. With no records, assume the category's first rung and
-say so in why. Known actual floors and contradictions remain authoritative.
+Inferred history applies only to `--failures > 0` and requires actual accepted or
+terminal launches of the same project, name and category. Route decisions,
+planned/dry/unlaunched records and outcomes alone never establish a floor. With
+no matching launch records, assume the category's first rung and say so in why.
+Explicit actuals apply even with zero failures. Known actual floors and
+contradictions remain authoritative. Full rejected predicates stay in trace;
+the human blocked explanation names one candidate and one concrete blocker.
 Automatic no-work reroutes retain cancellation receipts, owner and lane exclusions.
 
 Browser order is TTADK, TRAE Playwright Extension, browser-ready personal ChatGPT
 (ask), then Claude in Chrome (ask). Desktop order is TTADK then browser-ready
-personal ChatGPT (ask); no TRAE or Claude desktop path. Capability intersection
+personal ChatGPT; personal quota asks only on devices with company accounts.
+No TRAE or Claude desktop path. Capability intersection
 and target scopes remain mandatory. Optional review budget excess adds
 "over review budget — prefer accepting on tests" and never blocks dispatch.
 

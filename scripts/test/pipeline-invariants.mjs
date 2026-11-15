@@ -76,9 +76,10 @@ test('V07 browser account rotation cannot overwrite capability', () => {
   t = approve(raw, t, c); const p = run(t, raw); assert.equal(p.kind, 'launch'); assert.equal(p.primary.candidate.accountId, 'b');
   const broken = clone(p); broken.primary.argv[broken.primary.argv.indexOf('--account') + 1] = 'a'; assert.equal(validatePlan(broken, createSnapshot(raw)).ok, false);
 });
-test('V08 personal with no company needs per-task approval', () => {
-  const p = run(task('docs', { flags: { urgent: true, 'user-ok': 'old-outage' } }), fixture([['p', 'chatgpt', [SOL]]]));
+test('V08 personal with no company has standing permission', () => {
+  const p = run(task('docs'), fixture([['p', 'chatgpt', [SOL]]]));
   assert.equal(p.kind,'launch');
+  assert.ok(!p.gates.some(g=>g.kind==='personal-quota'));
 });
 test('V09 exact launch identity and fresh-state approval revocation', () => {
   const raw = fixture(), p = run(task(), raw), s = createSnapshot(raw);
@@ -126,10 +127,11 @@ test('real CLI uses the same immutable pipeline and never launches a blocked pro
       const raw=fixture(),o=cli(args,raw),p=routePure(o.plan.task,createSnapshot(raw));
       assert.equal(o.plan.planHash,p.planHash);assert.equal(o.kind,'launch');assert.ok(o.pick.command);assert.ok(o.why.length);
     }
+    const companyUnavailable=fixture([['p','chatgpt',[SOL]],['company','ttadk',[SOL]]]);companyUnavailable.accounts[1].auth=false;
     for(const [args,raw,code] of [
       [['build-run','--signing','--sandbox','read-only'],fixture(),'SIGNING_COMPANY_FULL_ACCESS_REQUIRED'],
       [['computer-use'],fixture(),'APP_SCOPE_REQUIRED'],
-      [['docs'],fixture([['p','chatgpt',[SOL]]]),'PERSONAL_QUOTA_OK_REQUIRED']]) {
+      [['docs'],companyUnavailable,'PERSONAL_QUOTA_OK_REQUIRED']]) {
       const o=cli(args,raw);assert.equal(o.kind,'blocked');assert.equal(o.pick?.command??null,null);assert.ok(hasCode(o.plan,code));
     }
     const retry=cli(['debug','--impact','service','--actual',`codex:${ASTRA}:xhigh@company-b`],fixture([['company-b','trae',[SOL,ASTRA]]]));
@@ -164,7 +166,8 @@ test('V16 required two-family adversarial set and scarce reviewer gate', () => {
   const pending = run(t, fixture([['a', 'ttadk', [KIMI]]])); assert.equal(pending.kind,'launch');assert.ok(pending.gates.some(g=>g.phase==='acceptance'&&g.reason.code==='REVIEWER_PENDING'));
 });
 test('V17 approval role/time/revocation/effort scope, separate max action', () => {
-  const raw = fixture([['p', 'chatgpt', [SOL]]]); let t = task(); const c = candidate(createSnapshot(raw), 'p', SOL, 'medium');
+  const raw = fixture([['p', 'chatgpt', [SOL]],['company','ttadk',[SOL]]]); raw.accounts[1].auth=false;
+  let t = task(); const c = candidate(createSnapshot(raw), 'p', SOL, 'medium');
   t = approve(raw, t, c); assert.equal(run(t, raw).kind, 'launch');
   for (const change of [(a) => a.revoked = true, (a) => a.expiresAt = NOW, (a) => a.grantedAt = NOW + 1,
     (a) => a.scopes[0].roles = ['second'], (a) => a.scopes[0].taskId = 'wrong', (a) => a.scopes[0].efforts = ['max']]) {
@@ -343,7 +346,8 @@ test('retained snapshot JSON replays exactly and real quality failures raise the
   assert.equal(task('implement', { previousAttempts: [attempt(SOL, 'high')] }).failures, 0);
 });
 test('fresh approval cannot authorize another task, changed scopes or a future reviewer', () => {
-  const raw = fixture([['p', 'chatgpt', [SOL]]]); let t = task('browser', { allowedOrigins: ['https://example.test'] });
+  const raw = fixture([['p', 'chatgpt', [SOL]],['company','ttadk',[SOL]]]); raw.accounts[1].auth=false;
+  let t = task('browser', { allowedOrigins: ['https://example.test'] });
   t = approve(raw, t, candidate(createSnapshot(raw), 'p', SOL, 'medium'));
   assert.equal(run(t, raw).kind, 'launch');
   for (const patch of [{ role: 'second' }, { taskId: 'new-task' }, { allowedOrigins: ['https://different.test'] }, { artifactRevision: 'different-artifact' }]) noCommand(run(createTaskSpec({ ...t, ...patch }), raw));
@@ -417,7 +421,8 @@ for (let seed = 1; seed <= seeds; seed++) {
     if (p.kind === 'launch') launches++;
     for (const seat of p.kind === 'launch' ? [p.primary, ...p.reviewers] : []) {
       const c = seat.candidate, a = raw.accounts.find((a) => a.id === c.accountId), st = seat.task;
-      assert.ok(['ttadk', 'trae'].includes(a.kind), 'no generated approvals: personal must never launch');
+      assert.ok(!raw.accounts.some(a=>['ttadk','trae'].includes(a.kind))||['ttadk','trae'].includes(a.kind),
+        'without approvals, personal launches require a device with no company account');
       if (st.contentLabels.includes('adversarial')) assert.notEqual(c.family, 'gpt');
       if (st.category === 'build-run' || st.requirements.executableAcceptance) assert.notEqual(c.family, 'deepseek');
       if (st.tier !== 'hard') assert.notEqual(c.modelId, ASTRA);

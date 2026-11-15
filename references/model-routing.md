@@ -51,11 +51,17 @@ held while waiting for a model response or an automatic replacement.
 Retries use the actual prior tuple (`--actual vendor:model:effort@account`, or
 sanitized task-owned attempt metadata), never a ladder rebuilt from the current
 catalog. Missing history falls back to the first category rung with an explicit
-why note, after task launch/reroute metadata and the last named route decision. Every replacement must satisfy all actual
+why note. Inferred history is used only with `--failures > 0`, and only actual
+accepted/terminal launches of the same project, name and category count. Route
+decisions and planned/dry/unlaunched records never establish a retry floor.
+Explicit `--actual` applies even at zero failures. Every replacement must satisfy all actual
 floors, exclusions and confirmed-cancellation requirements. Automatic hops are
 company-only, owner-preserving, and capped at two.
 
-Personal quota asks first. --urgent --user-ok <reference> records one user yes
+Personal quota asks first on devices with a registered TTADK or TRAE account.
+Without company accounts, personal ChatGPT is the default lane with standing
+permission; eligible accounts with deadlines within 48 hours rotate under the
+CLI counter, otherwise the earliest deadline wins. --urgent --user-ok <reference> records one user yes
 and produces a command; image generation and Claude-only tools retain standing
 permission. Max effort outside TTADK, Fable and reset redemption keep separate
 authorization. An eligible company primary launches while a gated personal
@@ -140,8 +146,8 @@ Current acquisition refreshes individual stale/negative account readings through
 authenticated read-only status commands; it never exports credentials or clears
 restriction generations. No runnable company lane waits for a future quota
 reset. Browser order: TTADK → TRAE Playwright Extension → browser-ready personal
-ChatGPT (ask) → Claude in Chrome (ask). Desktop: TTADK → browser-ready ChatGPT
-(ask). --signing uses ordinary full-access Codex company workers for registered
+ChatGPT → Claude in Chrome. Personal quota asks only on devices with company
+accounts. Desktop: TTADK → browser-ready ChatGPT. --signing uses ordinary full-access Codex company workers for registered
 own-test packages and allowlisted identities; the resident Claude signer is retired.
 
 Main's browser bridge configures Playwright per thread for TRAE start and turn,

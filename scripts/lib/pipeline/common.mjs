@@ -12,10 +12,12 @@ export const unique = (xs) => [...new Set(xs)].sort(compare);
 export const modelId = (id) => {
   const s = typeof id === 'string' ? id.toLowerCase() : '';
   return ({ sol: 'gpt-6.1-sol', astra: 'gpt-6-astra', '6.1-sol': 'gpt-6.1-sol', '6-astra': 'gpt-6-astra',
+    terra: 'gpt-6.1-terra', '6.1-terra': 'gpt-6.1-terra',
     'claude-opus': 'opus', 'claude-sonnet': 'sonnet', 'claude-haiku': 'haiku', 'claude-fable': 'fable' })[s] ?? s;
 };
 export const familyOf = (id) => /^(opus|sonnet|haiku|fable)$/.test(modelId(id)) ? 'claude' : modelId(id).split('-')[0];
 export const company = (a) => ['ttadk', 'trae'].includes(a?.kind);
+export const companyDevice = (s) => s.accounts.some(company);
 export const known = (o) => o?.status === 'KNOWN' ? o.value : null;
 export function clone(value, seen = new Set()) {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;

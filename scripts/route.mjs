@@ -3,7 +3,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseTaskSpec, routePure, renderPlan } from './lib/pipeline/index.mjs';
+import { parseTaskSpec, routePure, renderPlan, createSnapshot } from './lib/pipeline/index.mjs';
+import { companyDevice } from './lib/pipeline/common.mjs';
+import { withLock } from './lib/shared-file.mjs';
 import { acquireRoute, taskContext } from './lib/route-data.mjs';
 import { loadDigest } from './lib/global-rules.mjs';
 import { launcherIdentity, validOwner } from './lib/worker-events.mjs';
@@ -18,7 +20,19 @@ try {
     if (task.flags.owner !== undefined && !validOwner(task.flags.owner)) throw Error('--owner needs a public session ID');
     const owner = launcherIdentity(task.flags.owner).sessionId;
     const context = acquireRoute({...task,owner:owner??'UNKNOWN'}, {root});
-    const plan = routePure(context.task, context.snapshot);
+    // Acquire providers before taking the short account-selection lock. The
+    // pure snapshot carries the counter; only a nondry personal launch advances it.
+    const select = () => routePure(context.task, context.snapshot);
+    const rr = process.env.ROUTE_RR || path.join(process.env.RULES_SHARED || path.dirname(context.routeLog),'route-rotation.txt');
+    const plan = companyDevice(context.snapshot) ? select() : withLock(rr, () => {
+      let counter=context.snapshot.rotationState;
+      try { const n=Number(fs.readFileSync(rr,'utf8')); if(Number.isSafeInteger(n)&&n>=0) counter=n; } catch {}
+      context.snapshot=createSnapshot({...context.snapshot,rotationState:counter},{now:context.now});
+      const selected=select();
+      if(!task.flags.dry && selected.kind==='launch' && context.snapshot.accounts.some(a=>a.id===selected.primary.candidate.accountId&&a.kind==='chatgpt'))
+        fs.writeFileSync(rr,String((counter+1)%Number.MAX_SAFE_INTEGER));
+      return selected;
+    });
     const out = renderPlan(plan, {...context, owner, digest: loadDigest()});
     if (!task.flags.dry && process.env.ROUTE_LOG !== '0') {
       const tuple = p => p ? {vendor:p.vendor,model:p.model,effort:p.effort,account:p.account,sandbox:p.sandbox} : null;

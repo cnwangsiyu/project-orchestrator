@@ -489,7 +489,7 @@ for (const [sc, args, want] of [
 {
   try { fs.rmSync(path.join(tmp, 'rr.txt'), { force: true }); } catch {}
   const a = JSON.parse(run('cardDeadline', ['implement'])).pick?.account, b = JSON.parse(run('cardDeadline', ['implement'])).pick?.account;
-  const ok = a === 'b' && b === 'b'; // V24: pure observation never advances ambient rotation.
+  const ok = a === 'b' && b === 'main'; // BC-30: nondry personal dispatches advance the locked counter.
   if (!ok) fail++;
   console.log(`${ok ? 'ok  ' : 'FAIL'} cardDeadline        rotation                             ${a} then ${b}`);
 }
@@ -622,17 +622,17 @@ for (const [sc, args] of ERRORS) {
     [ok('ttAndTrae', ['implement', '--impact', 'service', '--exclude-account', 'ttadk']), false],
     [ok('ttAndTrae', ['implement', '--impact', 'service']), false], [ok('ttOutTrae', ['image-gen']), false],
     [ok('ttOutTraeDown', ['analysis', '--stakes', 'high']), true], [ok('ttOutTraeDown', ['analysis', '--urgent']), true],
-    [ok('traeOnly', ['implement', '--impact', 'service', '--exclude-account', 'trae']), true], [ok('fresh', ['implement', '--impact', 'service']), true]];
+    [ok('traeOnly', ['implement', '--impact', 'service', '--exclude-account', 'trae']), true], [ok('fresh', ['implement', '--impact', 'service']), false]];
   const bad = cases.map(([got, want], i) => (got === want ? null : i)).filter((i) => i !== null);
   if (bad.length) fail++;
   console.log(`${bad.length ? 'FAIL' : 'ok  '} personal-quota ask  ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
 }
-// No silent holds (user, 2026-11-09): what used to be deferred by policy now carries a needs-OK; --urgent skips it.
+// No silent holds: company-device personal fallbacks ask; personal-only devices have standing permission.
 {
   const ok = (sc, args) => JSON.parse(run(sc, args)).needsUserOK.length > 0;
-  const cases = [[ok('codexOut', ['lookup', '--stakes', 'low']), true], [ok('codexOutClaudeOver', ['implement', '--impact', 'service']), true],
-    [ok('codex5h', ['implement', '--impact', 'service']), true], [ok('ttUnhealthy', ['implement', '--impact', 'service']), true],
-    [ok('ttUnhealthy', ['implement', '--impact', 'service', '--urgent']), true], [ok('codexOut', ['lookup', '--stakes', 'low', '--urgent']), true]];
+  const cases = [[ok('codexOut', ['lookup', '--stakes', 'low']), false], [ok('codexOutClaudeOver', ['implement', '--impact', 'service']), false],
+    [ok('codex5h', ['implement', '--impact', 'service']), false], [ok('ttUnhealthy', ['implement', '--impact', 'service']), true],
+    [ok('ttUnhealthy', ['implement', '--impact', 'service', '--urgent']), true], [ok('codexOut', ['lookup', '--stakes', 'low', '--urgent']), false]];
   const bad = cases.map(([got, want], i) => (got === want ? null : i)).filter((i) => i !== null);
   if (bad.length) fail++;
   console.log(`${bad.length ? 'FAIL' : 'ok  '} no silent hold      ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
@@ -1037,7 +1037,7 @@ for (const [sc, args] of ERRORS) {
           assert.ok(exhausted.pick);assert.ok(!exhausted.plan.reasons?.some(r=>r.code==='PREVIOUS_ATTEMPT_UNKNOWN'));assert.ok(exhausted.why.some(w=>/assumed first/.test(w)));
           assert.deepEqual(exhausted.needsUserOK, JSON.parse(run('browserQuotaBaseline', exhaustedArgs)).needsUserOK);
           const background = JSON.parse(run('browserQuota', [...args, '--background']));
-          assert.equal(background.pick, null); assert.ok(background.deferred); assert.ok(background.tellUser.some(w=>/personal quota now, or wait|BACKGROUND_PERSONAL_FORBIDDEN/.test(w)));
+          assert.equal(background.pick, null); assert.ok(background.deferred); assert.ok(background.plan.rejected.some(p=>p.reason.code==='BACKGROUND_PERSONAL_FORBIDDEN'));
         }
       }
     }
@@ -1085,7 +1085,7 @@ for (const [sc, args] of ERRORS) {
   cases.push(
     [lean.includes("TRAE gpt-6.1-sol's daily high-priority quota is used up"), true],
     [ro.pick?.model, 'gpt-6-astra'], [ro.pick?.account, 'trae'],
-    [ro.why.some((n) => /company ETA:.*gpt-6-astra/.test(n)), true],
+    [ro.why.some((n) => /ETA:.*company.*gpt-6-astra/.test(n)), true],
     [ro.needsUserOK.length, 0], [ro.failures, 0],
   );
   const ids = ['gpt-6.1-sol', 'gpt-6-astra', 'gpt-5.6-sol', 'deepseek-v4.1-flash', 'deepseek-v4-pro'];
@@ -1488,7 +1488,8 @@ for (const [sc, args] of ERRORS) {
     for (const scenario of ['backgroundNoModels', 'ttOutTraeDown', 'fresh', 'unreadable']) {
       const o = r(['lookup', '--background', '--urgent'], scenario);
       assert.equal(o.pick, null); assert.equal(o.secondOpinion, null); assert.equal(o.redeemFirst, null);
-      assert.ok(o.tellUser.some((n) => /queued for later/.test(n)));if(o.kind==='defer') assert.ok(o.needsUserOK.some(n=>/personal quota now, or wait/.test(n)));
+      assert.ok(o.tellUser.some((n) => /queued for later/.test(n)));
+      if(o.kind==='defer') assert.equal(o.needsUserOK.some(n=>/personal quota now, or wait/.test(n)), S[scenario].codex.some(a=>['ttadk','trae'].includes(a.kind)));
     }
     for (const args of [['implement', '--failures', '20'], ['design'], ['review-high'], ['review', '--author', 'codex'], ['second-opinion', '--against', 'codex']]) {
       const o = r([...args, '--background']);

@@ -3,11 +3,11 @@ import { createSnapshot, isNormalizedSnapshot } from './snapshot.mjs';
 import { enumerateCandidates, candidateParts } from './candidates.mjs';
 import { evaluateCandidate, needsReviewer, pReviewerSet } from './filters.mjs';
 import { estimateCandidate } from './estimate.mjs';
-import { orderCandidates } from './choose.mjs';
+import { orderCandidates, prefersPersonalCodex } from './choose.mjs';
 import { makePlan } from './plan.mjs';
 import { validatePlan } from './validate.mjs';
 import { reviewDecision, reviewAfterWrite } from './review-policy.mjs';
-import { array, company, known, reason, fingerprint, compare, clone, freeze } from './common.mjs';
+import { array, company, companyDevice, known, reason, fingerprint, compare, clone, freeze } from './common.mjs';
 
 function assess(task, snapshot, context = {}) {
   const { candidates, diagnostics } = enumerateCandidates(task, snapshot);
@@ -93,12 +93,25 @@ export function routePure(taskSpec, stateSnapshot, history = []) {
     const personal=orderCandidates(task,snapshot,personalRows).winner;
     if(personal) return makePlan('blocked',task,snapshot,{...fields,primaryProposal:proposal(task,personal),
       gates:gatesOf([personal]),suggestions:personalRows.map(r=>r.candidate),
-      reasons:personal.predicates.filter(p=>!p.ok).map(p=>p.reason)});
+      reasons:personal.predicates.filter(p=>!p.ok).slice(0,1).map(p=>({...p.reason,
+        text:`${personal.candidate.modelId} ${personal.candidate.effort} on ${personal.candidate.accountId}: ${p.reason.text}`}))});
   }
   if (ordered.winner?.estimate.capacityReset) return makePlan('defer', task, snapshot, { ...fields, deferUntil: ordered.winner.estimate.deferUntil,
     trigger: 'capacity-reset', reason: reason('choose', 'CAPACITY_RESET_REQUIRED', `No company lane can start now; company quota resets at ${new Date(ordered.winner.estimate.deferUntil).toISOString()}.`, [ordered.winner.candidate.id]),
     runnerUp: rankedNow.winner?.candidate ?? null, gates: [], timerOwner: task.owner });
   const winner = rankedNow.winner;
+  // Preserve the personal-device reset-card proposal when the default Codex
+  // accounts are spent. A fresh decision and quota refresh precede any launch.
+  if(!companyDevice(snapshot)&&prefersPersonalCodex(task)&&winner
+    && candidateParts(snapshot,winner.candidate).account.kind==='claude') {
+    const cards=assessment.rows.filter(r=>candidateParts(snapshot,r.candidate).account.kind==='chatgpt'
+      && r.predicates.filter(p=>!p.ok).length===1
+      && r.predicates.some(p=>!p.ok&&p.reason.code==='RESET_REDEMPTION_OK_REQUIRED'));
+    const card=orderCandidates(task,snapshot,cards).winner;
+    if(card) return makePlan('blocked',task,snapshot,{...fields,primaryProposal:proposal(task,card),gates:gatesOf([card]),
+      suggestions:cards.map(r=>r.candidate),reasons:card.predicates.filter(p=>!p.ok).map(p=>({...p.reason,
+        text:`${card.candidate.modelId} ${card.candidate.effort} on ${card.candidate.accountId}: ${p.reason.text}`}))});
+  }
   if(winner && (winner.estimate.stalled || winner.reviewers.some(s=>s.estimate.stalled))) return makePlan('defer', task, snapshot, {
     ...fields, deferUntil:null, trigger:'lane-progress', reason:reason('choose','ETA_STALLED','The qualified lane/reviewer set is STALLED in fresh telemetry; wait for progress and replan before launching.',
       [winner.candidate.id,...winner.reviewers.filter(s=>s.estimate.stalled).map(s=>s.candidate.id)]),
@@ -123,10 +136,19 @@ export function routePure(taskSpec, stateSnapshot, history = []) {
     ...fields, deferUntil: null, trigger: 'company-capacity-change', reason: reason('pBackground', 'BACKGROUND_WAIT_COMPANY', 'No complete eligible company set is available.', [task.taskId]),
     runnerUp: null, gates: [], timerOwner: task.owner });
   const gatedRows = assessment.rows.filter((r) => r.predicates.filter((p) => !p.ok).every((p) => p.gate));
-  const reasons = [...new Map(fields.rejected.map((p)=>[`${p.reason.code}:${p.reason.text}`,p.reason])).values()];
-  if (!reasons.length) reasons.push(reason('enumerate', 'CAPACITY_UNRESOLVED', 'No declared eligible tuple; provide sanitized catalog/harness metadata.', []));
   const proposed = orderCandidates(task, snapshot, gatedRows).winner;
   const validProposal=orderCandidates(task,snapshot,valid).winner;
+  // Keep full predicate diagnostics in rejected/trace. Explain one obstruction
+  // on the closest qualified candidate, instead of unrelated rejected models.
+  const failuresOf=r=>r.predicates.filter(p=>!p.ok);
+  const qualified=assessment.rows.filter(r=>r.predicates.filter(p=>['pUserRules','pExclusions','pTierFloor','pModelFit','pContent'].includes(p.ruleId)).every(p=>p.ok));
+  const pool=qualified.length?qualified:assessment.rows;
+  const fewest=Math.min(...pool.map(r=>failuresOf(r).length));
+  const closest=orderCandidates(task,snapshot,pool.filter(r=>failuresOf(r).length===fewest)).winner;
+  const best=validProposal??proposed??closest;
+  const blocker=best && (failuresOf(best)[0] ?? fields.rejected.find(p=>p.candidateId===best.candidate.id));
+  const reasons = blocker ? [{...blocker.reason,text:`${best.candidate.modelId} ${best.candidate.effort} on ${best.candidate.accountId}: ${blocker.reason.text}`}] :
+    [reason('enumerate','CAPACITY_UNRESOLVED','No declared eligible tuple; provide sanitized catalog/harness metadata.',[])];
   const proposedSecond=gatedProposals.get((validProposal??proposed)?.candidate.family);
   const gates = validProposal ? dedupe(fields.rejected.filter((p)=>p.candidateId===validProposal.candidate.id&&p.ruleId==='pReviewerSet').flatMap((p)=>p.gates??(p.gate?[p.gate]:[])))
     : proposed ? gatesOf([proposed]) : [];

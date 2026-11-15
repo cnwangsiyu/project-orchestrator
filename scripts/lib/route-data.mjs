@@ -70,6 +70,13 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
   const outcomes=dedupeOutcomes(rows.filter(r=>r.kind==='outcome'&&r.t<=now));
   const flags = parsed.flags, id = flags.name ?? parsed.taskId, role = parsed.role;
   const attempts = [];
+  const injectedSnapshot=env.ROUTE_SNAPSHOT_FILE ? read(env.ROUTE_SNAPSHOT_FILE) : null;
+  const retryHistory = parsed.failures > 0;
+  const ownedDir = flags['task-dir'] ?? (flags.name && flags.project && !['.','..'].includes(flags.project) && /^[\w.-]+$/.test(flags.project)
+    ? path.join(shared,'..',flags.project,'tasks',id) : null);
+  const metadata = file => { try { return fs.lstatSync(file).isSymbolicLink() ? null : read(file); } catch { return null; } };
+  const sameTask = r => object(r) && r.project === parsed.project && r.category === parsed.category
+    && (r.taskId ?? r.name) === id && (r.role ?? 'primary') === role;
   const addActual = (actual, extra = {}) => {
     if (!actual) return;
     attempts.push({ id: `actual-${attempts.length}`, taskId: id, role, state: 'failed', actualStatus: 'KNOWN',
@@ -77,8 +84,10 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
   };
   let missingTerminalActual=false;
   const ingestAttempt = r => {
-    if (!object(r) || (r.taskId && r.taskId!==id) || (r.role??'primary')!==role || r.state==='planned') return;
+    if (!sameTask(r) || r.dry === true || r.launched === false || r.state==='planned') return;
     const terminal=['failed','completed','cancelled-no-work','cancelled','succeeded'].includes(r.state);
+    if ((!terminal && !['starting','queued','running','cancel-pending','UNKNOWN'].includes(r.state))
+      || (r.kind && !['attempt','launch','launch-model'].includes(r.kind)) || r.accepted===false) return;
     if(terminal && r.actualStatus!=='KNOWN') {
       // An unconfirmed actual from a finished attempt cannot block a count-only
       // retry. Continue the named-log/first-rung lookup; live UNKNOWN states stay.
@@ -96,7 +105,7 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
     if (!m) throw Error('--actual takes vendor:model:effort@account (comma-separated launch order)');
     addActual({ model: m[2], effort: m[3], account: m[4] }, { failureKind: parsed.failures ? 'quality' : 'infra' });
   }
-  if (flags['previous-attempt'] && !flags.actual) {
+  if (retryHistory && flags['previous-attempt'] && !flags.actual) {
     const dir = path.resolve(flags['task-dir'] ?? '.'), file = path.resolve(dir, flags['previous-attempt']);
     if (!file.startsWith(`${dir}${path.sep}`) || !['attempts.json', 'actual-attempts.json', 'launch.json'].includes(path.basename(file))) throw Error('--previous-attempt must name task-owned attempts.json, actual-attempts.json or launch.json');
     let cursor=file;
@@ -107,45 +116,46 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
     else if(object(recorded)&&('actualStatus' in recorded || 'state' in recorded)) ingestAttempt(recorded);
     else throw Error('--previous-attempt contains no attested actual attempts');
   }
-  if (!flags.actual && !attempts.length) {
-    const ownedDir = flags['task-dir'] ?? (flags.name && flags.project && !['.','..'].includes(flags.project) && /^[\w.-]+$/.test(flags.project)
-      ? path.join(shared,'..',flags.project,'tasks',id) : null);
-    const metadata = file => { try { return fs.lstatSync(file).isSymbolicLink() ? null : read(file); } catch { return null; } };
+  if (retryHistory && !flags.actual && !attempts.length) {
     if (ownedDir) {
       for (const file of ['actual-attempts.json','attempts.json','launch.json']) {
         const record=metadata(path.join(ownedDir,file));
         const rows=Array.isArray(record)?record:array(record?.attempts);
         rows.forEach(ingestAttempt);
-        if (!rows.length && record?.actualStatus==='KNOWN' && record.actual && (!record.taskId || record.taskId===id))
-          addActual(record.actual,{id:record.id??`launch-${file}`,taskId:id,role,state:record.state??'failed',failureKind:record.failureKind??(parsed.failures?'quality':'infra')});
-        if (!rows.length && record?.model && record?.effort) addActual(record,{failureKind:parsed.failures?'quality':'infra'});
+        if (!rows.length && record) ingestAttempt(record);
         if(attempts.length) break;
-      }
-      if (!attempts.length) {
-        const reroute=metadata(path.join(ownedDir,'reroute.json'));
-        if (reroute?.from?.model && reroute.from.effort) addActual(reroute.from, {
-          id:reroute.from.attemptId??`reroute-${reroute.depth}`,state:reroute.status==='routing'?'cancelled-no-work':'failed',usefulWork:false,
-          cancellationEvidenceId:reroute.cancellationEvidenceId??null,failureKind:reroute.reason==='policy-block'?'policy-block':'infra'});
       }
     }
   }
-  if (!flags.actual && !attempts.length) for (const row of [...rows.filter(r=>['attempt','launch','reroute'].includes(r.kind)&&r.t<=now),...outcomes].filter((r) => (!flags.project || r.project === parsed.project) && r.name === id)) {
-    if (row.kind==='launch' && (row.actual?.model || row.model || row.pick?.model)) { addActual(row.actual??row.pick??row,{id:row.id??`launch-${row.t}`,failureKind:parsed.failures?'quality':'infra'});continue; }
-    if (row.kind==='reroute' && row.from?.model) { addActual(row.from,{id:row.id??`reroute-${row.t}`,failureKind:'infra'});continue; }
-    if (row.kind === 'attempt' && row.actualStatus === 'KNOWN') attempts.push(row);
-    else for (const a of array(row.actual)) addActual(a, { id: `outcome-${row.t}-${attempts.length}`, failureKind: ['fail', 'rework'].includes(row.result) ? 'quality' : 'infra' });
+  if (retryHistory && !flags.actual && !attempts.length) {
+    // Pre-RPC launch audits, route decisions and outcomes alone cannot attest
+    // execution. Only scoped accepted/terminal actual-launch records qualify.
+    const launched = rows.filter(r=>sameTask(r) && r.t<=now && r.dry!==true && r.launched!==false
+      && (r.kind==='attempt' || (['launch-model','launch'].includes(r.kind) && r.accepted===true && r.thread && r.turn)));
+    const latest = new Map();
+    for (const row of launched) {
+      const key = row.id ?? (row.thread && row.turn ? `${row.account}:${row.thread}:${row.turn}` : `attempt-${row.t}`);
+      if (!latest.has(key) || latest.get(key).t <= row.t) latest.set(key,row);
+    }
+    for (const row of latest.values()) ingestAttempt({...row,id:row.id??`launch-${row.t}`});
   }
-  // Explicit actuals win; next use task-owned launch/reroute records, then
-  // named actual outcomes/attempts, and finally the named last route decision.
-  if (!attempts.length && flags.name) {
-    const last = rows.filter(r=>r.name===id && (!flags.project || r.project===parsed.project) && r.pick && r.t<=now).at(-1);
-    if(last) addActual(last.pick, {id:`route-${last.t}`,failureKind:parsed.failures?'quality':'infra'});
+  // Automatic no-work hops explicitly carry their actual tuple, including when
+  // failures=0. Rebind only the matching, task-scoped cancellation receipt.
+  if (flags.actual && parsed.autoRerouteDepth > 0 && ownedDir) {
+    const r = metadata(path.join(ownedDir,'reroute.json'));
+    if (sameTask(r) && r.depth === parsed.autoRerouteDepth && typeof r.cancellationEvidenceId==='string' && r.cancellationEvidenceId.length>0
+      && r.from && attempts.length===1
+      && attempts[0].actual.accountId===r.from.account && attempts[0].actual.modelId===modelId(r.from.model)
+      && attempts[0].actual.effort===r.from.effort) Object.assign(attempts[0],{
+        state:'cancelled-no-work',usefulWork:false,cancellationEvidenceId:r.cancellationEvidenceId,
+        failureKind:r.reason==='policy-block'?'policy-block':'infra'});
   }
   let retryAssumption = missingTerminalActual ? 'A finished attempt had no confirmed actual tuple; using the next available recorded retry baseline.' : null;
-  if ((parsed.failures || missingTerminalActual) && !attempts.length) {
-    const a = accounts.some(a=>['trae','ttadk'].includes(a.kind)) && !['image-gen','claude-tools','computer-use'].includes(parsed.category) ? {kind:'trae'} : {kind:'chatgpt'}, initial = createTaskSpec({...parsed, flags:{...flags,failures:'0'}, failures:0, previousAttempts:[]});
+  if (retryHistory && !attempts.length) {
+    const deviceAccounts=env.ROUTE_SNAPSHOT_FILE?array(injectedSnapshot?.accounts):accounts;
+    const a = deviceAccounts.some(a=>['trae','ttadk'].includes(a.kind)) && !['image-gen','claude-tools','computer-use'].includes(parsed.category) ? {kind:'trae'} : {kind:'chatgpt'}, initial = createTaskSpec({...parsed, flags:{...flags,failures:'0'}, failures:0, previousAttempts:[]});
     const model = modelPreference(initial,a)[0], effort = policyEffort(initial,{family:familyOf(model),modelId:model},a,{accounts:[]});
-    addActual({model,effort,account:'assumed-company'}, {id:'assumed-first-rung',failureKind:parsed.failures?'quality':'infra',assumed:true});
+    addActual({model,effort,account:familyOf(model)==='claude'?'claude':a.kind==='trae'?'assumed-company':'assumed-personal'}, {id:'assumed-first-rung',failureKind:parsed.failures?'quality':'infra',assumed:true});
     retryAssumption = `No actual launch history found; assumed first category ladder rung ${model}/${effort} for --failures ${parsed.failures}.`;
   }
   const writes = parsed.writes || !!flags.signing;
@@ -153,7 +163,7 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
   const task = createTaskSpec({ ...parsed, taskId: id, writes, sandbox, sandboxCeiling: 'danger-full-access', previousAttempts: attempts,
     allowedOrigins: ['browser', 'ui-browser'].includes(parsed.category) ? [...BROWSER_ORIGINS, ...(parsed.category === 'ui-browser' ? ['localhost', '127.0.0.1'] : []), ...parsed.allowedOrigins] : parsed.allowedOrigins,
     floor: { profileIds: [], previousAttemptIds: [], relationVersion: VERSION, historyStatus: attempts.length || !parsed.failures ? 'KNOWN' : 'UNKNOWN' } });
-  if (env.ROUTE_SNAPSHOT_FILE) return { task, snapshot: createSnapshot(read(env.ROUTE_SNAPSHOT_FILE), { now }), data, profiles, routeLog, now, root, retryAssumption };
+  if (env.ROUTE_SNAPSHOT_FILE) return { task, snapshot: createSnapshot(injectedSnapshot, { now }), data, profiles, routeLog, now, root, retryAssumption };
   const at = data?.checkedAt, globalStamp = (value, sampledAt = at, maxAgeMs = 600000) => ({ status: 'KNOWN', value, sampledAt, receivedAt: now, maxAgeMs, source: 'public-status-cache' });
   const baseCaps = (vision = true) => ({ search: true, browser: vision, 'signed-in-browser': vision, 'desktop-tool': vision, vision, 'image-generation': true, 'claude-tools': true });
   const models = new Map(), normalized = [], lanes = [], health = [];

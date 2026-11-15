@@ -1,7 +1,8 @@
-import { EFFORTS, company, adversarial, compare, freeze, stable, known, isReview } from './common.mjs';
+import { EFFORTS, company, companyDevice, adversarial, compare, freeze, stable, known, isReview } from './common.mjs';
 import { candidateParts } from './candidates.mjs';
 import { matchingApproval } from './filters.mjs';
 import { modelPreference, TIERS } from './policy.mjs';
+export const prefersPersonalCodex = task => ['lookup','extract','analysis','implement','implement-hard','debug','science','review','draft','build-run','image-gen','second-opinion'].includes(task.category);
 
 export function orderCandidates(task, snapshot, rows) {
   // Effort is an approved quality stage, not a speed/expiry bidding dimension.
@@ -64,6 +65,18 @@ export function orderCandidates(task, snapshot, rows) {
   }
   const spare=(r)=>{const a=candidateParts(snapshot,r.candidate).account,b=known(a.budget);return a.kind!=='claude'||tolerateClaude(task,b);};
   if(cohort.some(spare)) cohort=cohort.filter(spare);
+  const noCompany=!companyDevice(snapshot);
+  if(noCompany&&prefersPersonalCodex(task)&&cohort.some(r=>candidateParts(snapshot,r.candidate).account.kind==='chatgpt'))
+    cohort=cohort.filter(r=>candidateParts(snapshot,r.candidate).account.kind==='chatgpt');
+  // The legacy device lane spends accounts with deadlines <=48h in rotation;
+  // otherwise it uses the earliest deadline. The CLI owns the counter mutation.
+  const personalAccounts=[...new Set(cohort.filter(r=>candidateParts(snapshot,r.candidate).account.kind==='chatgpt').map(r=>r.candidate.accountId))]
+    .sort((a,b)=>compare(known(snapshot.accounts.find(r=>r.id===a).budget)?.deadline??Infinity,
+      known(snapshot.accounts.find(r=>r.id===b).budget)?.deadline??Infinity)||compare(a,b));
+  const expiring=personalAccounts.filter(id=>{const deadline=known(snapshot.accounts.find(a=>a.id===id).budget)?.deadline;return deadline!==null&&deadline!==undefined&&deadline<=48;});
+  const rotate=noCompany&&expiring.length>=2?expiring:[];
+  const rotationRank=id=>rotate.length?(rotate.indexOf(id)-(snapshot.rotationState%rotate.length)+rotate.length)%rotate.length:0;
+  if(rotate.length) cohort=cohort.filter(r=>candidateParts(snapshot,r.candidate).account.kind!=='chatgpt'||rotate.includes(r.candidate.accountId));
   const freeLight = !task.background && task.tier === 'light' && cohort.some((r) => company(candidateParts(snapshot, r.candidate).account) && r.estimate.noPrioritySpend === true);
   // Foreground light lists keep their category preference among qualified lanes.
   const costShape = (r) => r.estimate.costs.map((c) => [c.bucketId, c.unit]);
@@ -79,7 +92,9 @@ export function orderCandidates(task, snapshot, rows) {
       : [e.completionMin, e.noPrioritySpend === true ? 0 : 1, e.expiryOpportunity === true ? 0 : 1, ...cost];
     const account=candidateParts(snapshot,c).account, preference=modelPreference(task,account), pref=preference.indexOf(c.modelId);
     const accountOrder=account.kind==='ttadk'?0:account.kind==='trae'?1:2;
-    return [...common, ...(task.tier==='light'&&!task.background?[e.completionMin,pref < 0 ? preference.length : pref]:[]), ...scheduling, pref < 0 ? preference.length : pref, accountOrder, known(account.budget)?.deadline??Infinity, c.accountId, c.laneId, EFFORTS.indexOf(c.effort), c.id];
+    const deviceLane=noCompany?[pref<0?preference.length:pref,
+      account.kind==='chatgpt'?(rotate.length?rotationRank(c.accountId):known(account.budget)?.deadline??Infinity):0]:[0,0];
+    return [...common, ...deviceLane, ...(task.tier==='light'&&!task.background?[e.completionMin,pref < 0 ? preference.length : pref]:[]), ...scheduling, pref < 0 ? preference.length : pref, accountOrder, known(account.budget)?.deadline??Infinity, c.accountId, c.laneId, EFFORTS.indexOf(c.effort), c.id];
   };
   const decorated = cohort.map((r) => ({ ...r, orderingTerms: terms(r) }));
   decorated.sort((a, b) => {
@@ -87,7 +102,7 @@ export function orderCandidates(task, snapshot, rows) {
     return 0;
   });
   return freeze({ rows: decorated, winner: decorated[0] ?? null, runnerUp: decorated[1] ?? null,
-    terms: { costComparable, freeLight, policyLock: adversarial(task) ? 'kimi-deepseek-scoped-opus' : null, background: task.background } });
+    terms: { costComparable, freeLight, accountRotation:rotate, policyLock: adversarial(task) ? 'kimi-deepseek-scoped-opus' : null, background: task.background } });
 }
 export const choose = (task, snapshot, rows) => orderCandidates(task, snapshot, rows).winner;
 function tolerateClaude(t,b) { return !b||t.category==='claude-tools'||b.status==='spare'||b.status==='near'&&(t.category==='design'||t.stakes==='high'||t.category==='review-high'); }

@@ -1,0 +1,107 @@
+#!/usr/bin/env node
+// BC-29/30: public synthetic metadata, no provider/session/credential access.
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {execFileSync} from 'node:child_process';
+const route=new URL('../route.mjs',import.meta.url).pathname;
+const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'route-fix2-'));
+const now=1800000000000,h=3600000,SOL='gpt-6.1-sol',ASTRA='gpt-6-astra';
+const env={...process.env,HOME:tmp,RULES_SHARED:tmp,ROUTE_NOW:String(now),ROUTE_REQUEST_ID:'fix2',
+  CODEX_ACCOUNTS:path.join(tmp,'accounts.json'),QUOTA_CACHE:path.join(tmp,'quota.json'),
+  ROUTE_RR:path.join(tmp,'rotation'),ROUTE_LOG_FILE:path.join(tmp,'route.jsonl'),QUOTA_LOG_FILE:path.join(tmp,'quota-log.jsonl')};
+delete env.ROUTE_SNAPSHOT_FILE;
+const window=(used,left)=>({used,resetsAt:now+left*h,windowMins:10080});
+const account=(name,left)=>({name,kind:'chatgpt',home:path.join(tmp,name),live:true,healthy:true,browser:true,desktop:true,windows:[window(20,left)]});
+const base={checkedAt:now,codexAccounts:[account('main',24),account('alt',36)],claude:[window(10,120)]};
+const copy=()=>structuredClone(base);
+const cli=(args,raw=base,dry=true)=>{
+  if(['implement','implement-hard','debug','science'].includes(args[0])&&!args.includes('--impact')) args=[...args,'--impact','service'];
+  fs.writeFileSync(env.QUOTA_CACHE,JSON.stringify(raw));
+  fs.writeFileSync(env.CODEX_ACCOUNTS,JSON.stringify(Object.fromEntries(raw.codexAccounts.map(a=>[a.name,{kind:a.kind,home:a.home,browser:a.browser,desktop:a.desktop}]))));
+  return JSON.parse(execFileSync(process.execPath,[route,...args,...(dry?['--dry']:[]),'--json'],{env,encoding:'utf8',maxBuffer:16<<20}));
+};
+const checkFit=o=>{
+  for(const seat of [o.plan.primary,o.plan.primaryProposal,...o.plan.reviewers].filter(Boolean)) {
+    const row=o.plan.trace.candidates.find(r=>r.candidate.id===seat.candidate.id);
+    if(row) assert.ok(row.predicates.find(p=>p.ruleId==='pTierFloor').ok,`${seat.candidate.modelId} must fit its category`);
+  }
+};
+try {
+  for(const category of ['implement','implement-hard','review-high','research','analysis','draft','build-run','browser','image-gen','claude-tools']) {
+    const o=cli([category,'--impact','service']);
+    assert.equal(o.kind,'launch',`${category}: ${o.why}`);assert.ok(o.pick.command,category);
+    assert.equal(o.needsUserOK.length,0,category);checkFit(o);
+    assert.ok(!o.plan.gates.some(g=>g.kind==='personal-quota'),category);
+    assert.doesNotMatch(o.why.join('\n'),/company ETA|wait until company lane progress/);
+    if(o.pick.vendor==='codex') assert.match(o.why.join('\n'),new RegExp(`no company account on this device: personal ChatGPT account ${o.pick.account} is the default lane`));
+    if(category==='browser') assert.ok(base.codexAccounts.find(a=>a.name===o.pick.account).browser);
+    if(category==='draft') assert.equal(o.pick.model,'gpt-6.1-terra');
+    if(category==='review-high') assert.ok(o.secondOpinion.command,'no-company second reviewer has standing permission');
+    console.log(`PASS no-company ${category}: ${o.pick.model} ${o.pick.effort} @${o.pick.account??'claude'}`);
+  }
+  fs.writeFileSync(env.ROUTE_RR,'0');
+  const first=cli(['implement'],base,false),second=cli(['implement'],base,false),third=cli(['implement']);
+  assert.notEqual(first.pick.account,second.pick.account);assert.equal(first.pick.account,third.pick.account);
+  assert.equal(fs.readFileSync(env.ROUTE_RR,'utf8'),'2','dry observation never advances rotation');
+  const long=copy();long.codexAccounts[0].windows=[window(20,120)];long.codexAccounts[1].windows=[window(20,80)];
+  assert.equal(cli(['implement'],long).pick.account,'alt','outside rotation pool, earliest deadline wins');
+  const unready=copy();unready.codexAccounts[1].browser=false;
+  assert.equal(cli(['browser'],unready).pick.account,'main','rotation cannot select a browser-unready account');
+  unready.codexAccounts[0].browser=false;
+  const fallback=cli(['browser'],unready);assert.equal(fallback.pick.vendor,'claude');assert.ok(fallback.pick.command);assert.equal(fallback.needsUserOK.length,0);
+  const broken=copy();broken.codexAccounts[1].live=false;
+  assert.equal(cli(['implement'],broken).pick.account,'main','an unhealthy peer is skipped');
+  for(const a of broken.codexAccounts) {a.live=false;a.browser=false;}
+  const blocked=cli(['computer-use','--apps','com.example.calc'],broken);
+  assert.equal(blocked.kind,'blocked');assert.equal(blocked.pick,null);assert.equal(blocked.plan.reasons.length,1);
+  assert.match(blocked.why[0],/on (main|alt):/);assert.doesNotMatch(blocked.why.join('\n'),/CATEGORY_MODEL_FIT|ASTRA_SUBSTITUTION_HARD_ONLY|company lane progress/);
+  const spent=copy();spent.codexAccounts.forEach(a=>a.windows=[window(100,24)]);
+  const denied=cli(['image-gen'],spent);assert.equal(denied.kind,'blocked');assert.equal(denied.plan.reasons.length,1);
+  assert.match(denied.why[0],/Provider explicitly denied quota capacity/);assert.equal(denied.needsUserOK.length,0);
+  const cards=structuredClone(spent);cards.codexAccounts[0].resets={credits:[{id:'card-1',expiresAt:now+h}]};
+  const codexReset=cli(['implement'],cards);assert.equal(codexReset.kind,'blocked');assert.ok(codexReset.redeemFirst);
+  assert.ok(codexReset.plan.gates.some(g=>g.kind==='reset-redemption'));assert.equal(codexReset.pick.command,null);
+  assert.equal(cli(['implement','--no-redeem'],cards).pick.vendor,'claude');
+  const redeem=cli(['image-gen'],cards);assert.equal(redeem.kind,'blocked');assert.equal(redeem.pick.command,null);
+  assert.ok(redeem.plan.gates.some(g=>g.kind==='reset-redemption'));assert.ok(!redeem.plan.gates.some(g=>g.kind==='personal-quota'));
+  const noRedeem=cli(['image-gen','--no-redeem'],cards);assert.ok(!noRedeem.plan.gates.some(g=>g.kind==='reset-redemption'));
+  const max=cli(['implement','--actual',`codex:${SOL}:max@main`]);assert.equal(max.kind,'blocked');assert.equal(max.pick.command,null);
+  assert.ok(max.plan.gates.some(g=>g.kind==='max-effort'));assert.ok(!max.plan.gates.some(g=>g.kind==='personal-quota'));
+  console.log('PASS account rotation/deadlines, browser fallback, unhealthy/exhausted accounts, reset and max gates');
+
+  const nameArgs=['--project','route-regression','--name','BC-29'];
+  const decision=cli(['analysis',...nameArgs],base,false);assert.equal(decision.kind,'launch');
+  const review=cli(['review-high','--impact','service','--runs-tests',...nameArgs]);
+  assert.equal(review.kind,'launch');assert.equal(review.failures,0);assert.equal(review.plan.task.previousAttempts.length,0);
+  const scope={t:now-1000,name:'BC-29',project:'route-regression',category:'review-high',role:'primary'};
+  const launched={...scope,kind:'attempt',id:'accepted-astra',state:'failed',actualStatus:'KNOWN',
+    actual:{accountId:'main',modelId:ASTRA,effort:'xhigh'}};
+  const log=rows=>fs.writeFileSync(env.ROUTE_LOG_FILE,rows.map(r=>JSON.stringify(r)).join('\n')+'\n');
+  log([launched]);
+  assert.equal(cli(['review-high',...nameArgs,'--failures','0']).plan.task.previousAttempts.length,0,'no retry ignores even real same-task launches');
+  const real=cli(['review-high',...nameArgs,'--failures','1']);assert.equal(real.plan.task.previousAttempts[0].actual.modelId,ASTRA);
+  assert.ok(!real.pick||real.pick.model!==SOL,'actual Astra floor cannot demote');
+  for(const row of [{...launched,category:'analysis'},{...launched,project:'another'},{...launched,name:'another'},
+    {...launched,state:'planned'},{...launched,dry:true},{...launched,launched:false},
+    {...launched,state:undefined},{...launched,accepted:false},
+    {...scope,kind:'route',pick:{model:ASTRA,effort:'xhigh',account:'main'}},
+    {...scope,kind:'launch',model:ASTRA,effort:'xhigh',account:'main'},
+    {...scope,kind:'outcome',result:'fail',actual:[{model:ASTRA,effort:'xhigh',account:'main'}]}]) {
+    log([row]);const o=cli(['review-high',...nameArgs,'--failures','1']);
+    assert.equal(o.plan.task.previousAttempts[0].id,'assumed-first-rung');assert.match(o.why.join('\n'),/assumed first category ladder rung/);
+  }
+  const explicit=cli(['review-high',...nameArgs,'--actual',`codex:${ASTRA}:xhigh@main`]);
+  assert.equal(explicit.plan.task.previousAttempts[0].actual.modelId,ASTRA,'explicit actual applies even without failures');
+  const owned=path.join(tmp,'task');fs.mkdirSync(owned);
+  fs.writeFileSync(path.join(owned,'launch.json'),JSON.stringify({...launched,category:'analysis'}));
+  assert.equal(cli(['review-high',...nameArgs,'--task-dir',owned,'--failures','1']).plan.task.previousAttempts[0].id,'assumed-first-rung');
+  fs.writeFileSync(path.join(owned,'launch.json'),JSON.stringify(launched));
+  assert.equal(cli(['review-high',...nameArgs,'--task-dir',owned,'--failures','1']).plan.task.previousAttempts[0].actual.modelId,ASTRA);
+  log([{...launched,kind:'launch-model',id:undefined,thread:'thread-1',turn:'turn-1',account:'main',accepted:true,state:'running'},
+    {...launched,kind:'launch-model',id:undefined,thread:'thread-1',turn:'turn-1',account:'main',accepted:true,state:'completed',t:now-500}]);
+  const observed=cli(['review-high',...nameArgs,'--failures','1']);assert.equal(observed.plan.task.previousAttempts.length,1);
+  assert.equal(observed.plan.task.previousAttempts[0].state,'completed','terminal evidence replaces the running observation');
+  console.log('PASS BC-29 sequence, retry-only admission, exact launch scope, planned/dry/unlaunched rejection and explicit actual precedence');
+} finally {fs.rmSync(tmp,{recursive:true,force:true});}

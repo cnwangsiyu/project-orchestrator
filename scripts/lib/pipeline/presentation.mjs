@@ -1,6 +1,6 @@
 // Pure compatibility rendering. Receives paths, owner and digest from the CLI;
 // it never launches, reads metadata, or changes the selected tuple.
-import { company, known, adversarial, isReview } from './common.mjs';
+import { company, companyDevice, known, adversarial, isReview } from './common.mjs';
 import { candidateParts } from './candidates.mjs';
 import { reviewAfterWrite } from './review-policy.mjs';
 import { estimateCandidate } from './estimate.mjs';
@@ -13,7 +13,7 @@ export function presentRoute(plan, view, context) {
   const t = plan.task, f = t.flags, seat = plan.primary ?? plan.primaryProposal, c = seat?.candidate;
   const notes = [...view.notes], why = [], tellUser = [...view.tellUser], needsUserOK = [...view.needsOK];
   const unknownCompany=snapshot.accounts.filter(a=>company(a)&&(known(a.auth)!==true||known(a.transport)!==true));
-  const quota=snapshot.accounts.map(a=>`${a.id}/${a.kind}: ${known(a.auth)===true&&known(a.transport)===true?'available status':'company account state unknown or unavailable'}`);
+  const quota=snapshot.accounts.map(a=>`${a.id}/${a.kind}: ${known(a.auth)===true&&known(a.transport)===true?'available status':'account state unknown or unavailable'}`);
   const personalAccounts=snapshot.accounts.filter(a=>!company(a)&&a.kind!=='claude');
   const personalBudgets=personalAccounts.map(a=>known(a.budget)).filter(Boolean);
   const quotaSummary={claude:known(snapshot.accounts.find(a=>a.kind==='claude')?.budget)?.status??'UNKNOWN',
@@ -105,7 +105,10 @@ export function presentRoute(plan, view, context) {
     return out;
   };
   if(c) {
-    why.push(`company ETA: ${eta.length?eta.map(etaText).join('; '):`${c.modelId}@${c.accountId}, est. ${seat.estimate.completionMin} min`}; selected by policy, qualified floor and completion ETA`);
+    const account=candidateParts(snapshot,c).account;
+    if(!companyDevice(snapshot)&&account.kind==='chatgpt')
+      why.push(`no company account on this device: personal ChatGPT account ${account.id} is the default lane`);
+    why.push(`ETA: ${eta.length?eta.map(e=>`${company(snapshot.accounts.find(a=>a.id===e.account))?'company':'personal'} ${etaText(e)}`).join('; '):`${company(account)?'company':'personal'} ${c.modelId}@${c.accountId}, est. ${seat.estimate.completionMin} min`}; selected by policy, qualified floor and completion ETA`);
     if(adversarial(t)) why.push('adversarial: no GPT model on any account; Kimi-K3, DeepSeek-V4.1-Flash, then scoped Opus; two independent non-GPT families required.');
     if(candidateParts(snapshot,c).lane.mode==='low-priority') why.push(`TRAE ${c.modelId} low-priority lane (bucket depleted): provider capacity remains eligible with bounded queue patience.`);
     if(seat.estimate.basis==='progressing') why.push(`${c.modelId} low-priority lane (bucket depleted): slower bucket designation, but progressing without queue cycles in fresh per-model telemetry.`);
@@ -167,8 +170,9 @@ export function presentRoute(plan, view, context) {
   }
   if(plan.reviewers.length) notes.push('Reviewer seats use distinct worker names and output files. If a second reviewer cannot complete, return to the owner to replan the required set against the same artifact and independent families; do not reuse the primary reroute arguments.');
   if(t.background&&!c) tellUser.push('queued for later: keep the company-only task pending and replan when qualified capacity is available.');
-  if(!why.length) why.push(...(plan.reasons??[plan.reason]).filter(Boolean).map((r)=>`${r.code}: ${r.text}`));
-  if(plan.kind==='defer' || (plan.kind==='blocked' && plan.gates.some(g=>g.kind==='personal-quota'))) {
+  if(plan.kind==='blocked') why.unshift(...plan.reasons.map(r=>r.text));
+  if(!why.length) why.push(...(plan.reasons??[plan.reason]).filter(Boolean).map((r)=>r.text));
+  if(companyDevice(snapshot)&&(plan.kind==='defer' || (plan.kind==='blocked' && plan.gates.some(g=>g.kind==='personal-quota')))) {
     const reset=plan.deferUntil??Math.min(...snapshot.accounts.filter(company).map(a=>known(a.denialResetAt)).filter(at=>at>snapshot.decisionAt));
     const question=`No company lane can start now. Use personal quota now, or wait until ${Number.isFinite(reset)?new Date(reset).toISOString():'company lane progress'}?`;
     needsUserOK.push(question);tellUser.push(question);

@@ -42,6 +42,14 @@ try {
   for(const category of ['image-gen','claude-tools']) {
     const o=cli([category]);assert.ok(o.pick.command);assert.equal(o.needsUserOK.length,0);
   }
+  fs.writeFileSync(file,JSON.stringify(captured));
+  execFileSync(process.execPath,[route,'analysis','--project','route-regression','--name','BC-29','--json'],
+    {env:{...env,ROUTE_LOG:'1'},encoding:'utf8',maxBuffer:16<<20});
+  const recheck=cli(['review-high','--project','route-regression','--name','BC-29','--impact','service','--runs-tests']);
+  const freshReview=cli(['review-high','--project','route-regression','--name','BC-29-fresh','--impact','service','--runs-tests']);
+  assert.equal(recheck.kind,'launch');assert.equal(recheck.failures,0);assert.equal(recheck.plan.task.previousAttempts.length,0);
+  assert.equal(recheck.pick.model,freshReview.pick.model);assert.equal(recheck.pick.effort,freshReview.pick.effort);
+  assert.equal(recheck.pick.account,freshReview.pick.account);fs.rmSync(env.ROUTE_LOG_FILE);
   const desktop=copy(), app={status:'KNOWN',value:true,sampledAt:captured.decisionAt,receivedAt:captured.decisionAt,maxAgeMs:600000,source:'fixture'};
   for(const part of [...desktop.accounts,...desktop.lanes]) if(['main','b'].includes(part.accountId??part.id)) part.capabilities['app:com.apple.calculator']=app;
   const personal=cli(['computer-use','--apps','com.apple.calculator'],desktop);
@@ -81,30 +89,30 @@ try {
   const review=cli(['review','--project','fixture'],budget);assert.ok(review.pick.command);
   assert.match(review.tellUser.join('\n'),/over review budget — prefer accepting on tests/);
   const owned=path.join(tmp,'named-task');fs.mkdirSync(owned);
-  fs.writeFileSync(path.join(owned,'launch.json'),JSON.stringify({model:'gpt-6-astra',effort:'xhigh',account:'trae'}));
+  fs.writeFileSync(path.join(owned,'launch.json'),JSON.stringify({id:'owned-astra',taskId:'named-task',project:'fixture',category:'debug',role:'primary',state:'failed',actualStatus:'KNOWN',actual:{model:'gpt-6-astra',effort:'xhigh',account:'trae'}}));
   fs.writeFileSync(env.ROUTE_LOG_FILE,JSON.stringify({t:captured.decisionAt-1000,kind:'route',name:'named-task',project:'fixture',pick:{model:'gpt-6.1-sol',effort:'high',account:'trae'}})+'\n');
   const retryArgs=['debug','--impact','service','--failures','1','--name','named-task','--project','fixture','--task-dir',owned];
-  const ownedRetry=cli(retryArgs);assert.equal(ownedRetry.plan.task.previousAttempts[0].actual.modelId,'gpt-6-astra','task launch precedes last route');
+  const ownedRetry=cli(retryArgs);assert.equal(ownedRetry.plan.task.previousAttempts[0].actual.modelId,'gpt-6-astra','scoped actual launch precedes route decisions');
   const explicit=cli([...retryArgs,'--actual','codex:gpt-6.1-sol:high@trae']);
   assert.equal(explicit.plan.task.previousAttempts.length,1);assert.equal(explicit.plan.task.previousAttempts[0].actual.modelId,'gpt-6.1-sol','explicit actual wins');
   fs.rmSync(path.join(owned,'launch.json'));
-  const logged=cli(retryArgs);assert.equal(logged.plan.task.previousAttempts[0].actual.modelId,'gpt-6.1-sol','named last route is the final record fallback');
+  const logged=cli(retryArgs);assert.equal(logged.plan.task.previousAttempts[0].id,'assumed-first-rung','route decisions never establish an actual floor');
   fs.rmSync(env.ROUTE_LOG_FILE);
   const attempts=path.join(owned,'attempts.json');
-  fs.writeFileSync(attempts,JSON.stringify([{id:'finished',taskId:'named-task',role:'primary',state:'failed',actualStatus:'UNKNOWN',actual:null}]));
+  fs.writeFileSync(attempts,JSON.stringify([{id:'finished',taskId:'named-task',project:'fixture',category:'debug',role:'primary',state:'failed',actualStatus:'UNKNOWN',actual:null}]));
   const unknownRetry=cli([...retryArgs,'--previous-attempt','attempts.json']);
   assert.ok(!unknownRetry.plan.rejected.some(r=>r.reason.code==='PREVIOUS_ATTEMPT_UNKNOWN'));
   assert.match(unknownRetry.why.join('\n'),/assumed first category ladder rung/);
-  fs.writeFileSync(attempts,JSON.stringify([{id:'legacy-claude',taskId:'named-task',role:'primary',state:'failed',actualStatus:'KNOWN',actual:{vendor:'claude',model:'sonnet',effort:'medium'}}]));
+  fs.writeFileSync(attempts,JSON.stringify([{id:'legacy-claude',taskId:'named-task',project:'fixture',category:'claude-tools',role:'primary',state:'failed',actualStatus:'KNOWN',actual:{vendor:'claude',model:'sonnet',effort:'medium'}}]));
   const legacy=cli(['claude-tools','--name','named-task','--project','fixture','--task-dir',owned,'--previous-attempt','attempts.json','--failures','1']);
   assert.equal(legacy.plan.task.previousAttempts[0].actual.accountId,'claude');assert.ok(legacy.pick.command);
-  fs.writeFileSync(attempts,JSON.stringify([{id:'uncertain',taskId:'named-task',role:'primary',state:'UNKNOWN',actualStatus:'UNKNOWN',actual:null}]));
+  fs.writeFileSync(attempts,JSON.stringify([{id:'uncertain',taskId:'named-task',project:'fixture',category:'debug',role:'primary',state:'UNKNOWN',actualStatus:'UNKNOWN',actual:null}]));
   const liveUnknown=cli([...retryArgs,'--previous-attempt','attempts.json']);
   assert.equal(liveUnknown.kind,'blocked');assert.ok(liveUnknown.plan.rejected.some(r=>r.reason.code==='ATTEMPT_RECONCILIATION_REQUIRED'));
   fs.rmSync(attempts);
   fs.writeFileSync(env.ROUTE_LOG_FILE,JSON.stringify({t:captured.decisionAt-1000,kind:'route',name:'claude-retry',project:'fixture',pick:{vendor:'claude',model:'sonnet',effort:'medium'}})+'\n');
   const claudeRetry=cli(['claude-tools','--name','claude-retry','--project','fixture','--failures','1']);
-  assert.equal(claudeRetry.plan.task.previousAttempts[0].actual.accountId,'claude','legacy Claude decisions imply their global account');
+  assert.equal(claudeRetry.plan.task.previousAttempts[0].actual.accountId,'claude','missing Claude launch history assumes the Claude category first rung');
   assert.ok(claudeRetry.pick.command);assert.ok(!claudeRetry.plan.rejected.some(r=>r.reason.code==='PREVIOUS_ATTEMPT_UNKNOWN'));
   fs.rmSync(env.ROUTE_LOG_FILE);
   assert.ok(!fs.existsSync(env.ROUTE_LOG_FILE),'dry routing writes no dispatch log');

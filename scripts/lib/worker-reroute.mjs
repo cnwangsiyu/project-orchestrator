@@ -36,6 +36,8 @@ export const nextRouteArgs = (args, from, depth, policy = false, alternative = n
     next = setRouteFlag(next, key, excluded.length ? [...new Set(excluded)].join(',') : null);
   }
   next = setRouteFlag(next, 'auto-reroute-depth', depth + 1);
+  if (from.model && from.effort && from.account)
+    next = setRouteFlag(next, 'actual', `codex:${from.model}:${from.effort}@${from.account}`);
   next = setRouteFlag(next, 'worker', true);
   if (policy) { next = setRouteFlag(next, 'defensive', null); next = setRouteFlag(next, 'adversarial', true); }
   return next;
@@ -86,7 +88,8 @@ export const rerouteWorker = async ({ args, depth, from, reason, prompt, opts, p
     : path.join(path.resolve(opts.cwd ?? '.'), '.reroute', String(opts.name ?? 'worker').replace(/[^a-zA-Z0-9._-]/g, '_'));
   next=setRouteFlag(next,'task-dir',taskDir);
   const handover = `Previous attempt on ${from.model}@${from.account} was cancelled ${reason === 'queue-too-slow' ? `while queued at position ${from.position}` : `before work (${reason})`}; inspect git status/diff in the workspace before starting; continue, don't redo.\n\n${prompt}`;
-  const state = { t: Date.now(), name: opts.name, reason, from, cancellationEvidenceId:`cancelled-no-work:${randomUUID()}`, depth: depth + 1, routeArgs: next,
+  const state = { t: Date.now(), name: opts.name, project:routeFlag(args,'project') ?? 'general',category:args[0],role:'primary',
+    reason, from, cancellationEvidenceId:`cancelled-no-work:${randomUUID()}`, depth: depth + 1, routeArgs: next,
     alternative, status: 'routing', recovery: {
       instructions: 'The previous attempt ended before work. Re-run the recorded route command, then launch its pick.workerArgs with continuationPrompt. Do not resume the cancelled queued turn.',
       routeCommand: [process.execPath, path.join(scripts, 'route.mjs'), ...next, '--json'],

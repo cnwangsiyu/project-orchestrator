@@ -138,7 +138,8 @@ export function createSnapshot(raw, options = {}) {
     capabilityVersion: raw.capabilityVersion ?? VERSION, qualityRelationVersion: raw.qualityRelationVersion ?? VERSION,
     qualityRelations: rows(raw.qualityRelations ?? [], 'qualityRelations').map((r) => ({ from: r.from, to: r.to, version: r.version, evidenceId: r.evidenceId })),
     accounts, models, lanes, approvals, health,
-    resources: obs(raw.resources, 'resources', object), dependencies: obs(raw.dependencies, 'dependencies', strings), rotationState: 0,
+    resources: obs(raw.resources, 'resources', object), dependencies: obs(raw.dependencies, 'dependencies', strings),
+    rotationState: Number.isSafeInteger(raw.rotationState) && raw.rotationState >= 0 ? raw.rotationState : 0,
     etaHistory: rows(raw.etaHistory ?? [], 'etaHistory').filter((h) => idOK(h.attemptId) && nonnegative(h.minutes) && h.minutes > 0
       && (!h.sampledAt || h.sampledAt <= decisionAt)).map((h) => ({ attemptId: h.attemptId, category: h.category, modelId: modelId(h.modelId), accountId: h.accountId,
         effort: h.effort, minutes: h.minutes, cause: h.cause ?? null })).sort((a, b) => compare(a.attemptId, b.attemptId)),

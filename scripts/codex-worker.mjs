@@ -634,14 +634,19 @@ const strictReviewModel = opts['require-model'] === true || opts['require-model'
   || /(?:^|[-_.])(?:review|second-opinion)(?:$|[-_.])/i.test(String(opts.name ?? ''));
 const modelEvidence = () => ({ requestedModel: REQUESTED_MODEL, effectiveModel: opts.model ?? null,
   actualModel, actualModelSource, actualModelProvider, delegatedModels: [...delegatedModels], modelMismatch });
-const recordModelEvidence = (threadId, turnId) => {
+const recordModelEvidence = (threadId, turnId, state = 'running') => {
   const evidence = modelEvidence();
   tracker?.set(evidence);
   recordLaunchModel(account ?? 'main', threadId, turnId, evidence);
   try {
     fs.mkdirSync(path.dirname(rulesLog()), { recursive: true });
     fs.appendFileSync(rulesLog(), JSON.stringify({ kind: 'launch-model', t: Date.now(),
-      name: opts.name, account: account ?? 'main', thread: threadId, turn: turnId, ...evidence }) + '\n');
+      name: opts.name, project:ROUTE_ARGS ? routeFlag(ROUTE_ARGS,'project') ?? 'general' : launchDecision?.project,
+      category:ROUTE_ARGS?.[0] ?? launchDecision?.category, role:'primary',
+      account: account ?? 'main', thread: threadId, turn: turnId, accepted:!!threadId&&!!turnId,state,
+      actualStatus:actualModel ? 'KNOWN' : 'UNKNOWN',
+      actual:actualModel ? {accountId:account ?? 'main',modelId:actualModel,effort:opts.effort ?? 'medium'} : null,
+      ...evidence }) + '\n');
   } catch { console.error('launch-model: evidence not recorded'); }
 };
 const observeModel = (observation, threadId, turnId) => {
@@ -831,7 +836,7 @@ const report = async (threadId, turn, final, usage) => {
   const explicitStrict = opts['require-model'] === true || opts['require-model'] === 'on';
   const rejectedModel = strictReviewModel && (modelMismatch || (explicitStrict && (!actualModel || !REQUESTED_MODEL)));
   if (strictReviewModel && !rejectedModel && !actualModel) console.log(`actual-model: unknown (requested ${REQUESTED_MODEL ?? 'default'}; no execution evidence from this hub)`);
-  recordModelEvidence(threadId, turn.id);
+  recordModelEvidence(threadId, turn.id, turn.status==='completed'?'completed':'failed');
   if (rejectedModel) console.error(`review-model-rejected: requested ${REQUESTED_MODEL ?? 'default'}, actual ${actualModel ?? 'unknown'}, delegated ${delegatedModels.map((row) => row.model).join(', ') || 'none'}`);
   console.log(`turn ${turn.status}${turn.error ? ' error=' + JSON.stringify(turn.error) : ''}`);
   const policyBlock = isPolicyBlock(turn);
@@ -910,7 +915,7 @@ const follow = (threadId, turnId) => {
   clearTimeout(setupAlarm);
   activeTurn = { threadId, turnId };
   tracker?.update({ thread: threadId, turn: turnId, model: opts.model ?? null, mayRun: true });
-  recordLaunchModel(account ?? 'main', threadId, turnId, modelEvidence());
+  recordModelEvidence(threadId, turnId);
   console.log(`thread=${threadId} turn=${turnId}`);
   const recordQueue = PROF?.kind === 'trae' ? createQueueRecorder(PROF.home, opts.model ?? threadModel(PROF.home, threadId)) : null;
   if (recordQueue) cleanups.add(() => recordQueue.stop());
