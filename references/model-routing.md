@@ -43,18 +43,21 @@ catches a miss, and how many times the task has fallen short. How the table was 
   high-stakes review and design. On GDPval, Opus and Sonnet score ≈1845 against Astra's 1542. HLE with tools is
   Opus's best result, at 67.7%.
 - **Claude-only work (`claude-tools`):** Artifact/Docs tools and peer negotiation.
-- **Browser and desktop work:** `browser` (web pages in Chrome), `ui-browser` (frontend work with a visual check) and
-  `computer-use` (desktop apps; `--apps <bundle ids>`) go to a browser-ready Codex account — TTADK first, else a ChatGPT account (2026-11-10: a device without TTADK, like
-  the MacBook, used to send all of it to Claude) — else to Claude
-  (user, 2026-11-07). A terminal Claude worker can drive Chrome (Claude in Chrome) but has no desktop computer-use tool
+- **Browser and desktop work:** `browser` (web pages in Chrome) and `ui-browser` (frontend work with a visual check)
+  route **TTADK Codex → TRAE (Playwright extension, user's Chrome) → ChatGPT account → Claude**. TRAE is eligible only
+  while the user-pasted Playwright token file exists. The ChatGPT-account and Claude steps use personal quota and need
+  the user's OK. `computer-use` (desktop apps; `--apps <bundle ids>`) cannot use that web-only bridge and keeps
+  **TTADK → ChatGPT account (personal, needs OK) → Claude (personal, needs OK)**. Re-run `route.mjs` whenever a selected account becomes unavailable; never pick
+  the next account by hand. A terminal Claude worker can drive Chrome
+  (Claude in Chrome) but has no desktop computer-use tool
   (ledger 10-31), so for desktop apps the Claude fallback may only report BLOCKED. TTADK desktop work needs an unlocked
   screen.
   - A background Claude worker can drive the user's signed-in Chrome. Its brief names the Chrome by `deviceId`
     (recorded in the ledger once the user has picked it), and the worker calls `select_browser` with that id when
     several browsers are connected. A worker that still can't reach the browser reports BLOCKED with the tool's
     error. Clicking never falls back to the orchestrator: video-agent W258 did, and that orchestrator then made 510
-    browser calls in 24h (nightly review 2026-11-05). Headless Playwright suits pages that don't need the user's
-    sign-in, as W260 did.
+    browser calls in 24h (nightly review 2026-11-05). TRAE's Playwright Extension path reuses the user's signed-in
+    Chrome; its default headless Playwright still suits pages that do not need that sign-in.
 - **Codex-only work:** every task whose output is an image — generating, editing, variants, icons, illustrations,
   mockup images (user, 2026-11-03). Luna `low` writes the prompt (the image tool makes the picture); Sol `medium` if an
   iteration needs more judgment.
@@ -112,8 +115,9 @@ To change routing for a kind of task, edit the table in `route.mjs` and this rat
    - A required review is told who wrote the code (`--author`); a Codex-written change is reviewed by Claude first.
    - On a company-account device, gate the actual personal primary/second-opinion account with `personal quota:`, not
      only the absence of company capacity. A ladder fall-through still needs consent. `--urgent` records prior consent;
-     standing exceptions are image generation, Claude-only tools, browser/desktop work Claude takes, and Claude
-     review/second-opinion routing while company Sol is eligible. Background work never falls through to personal quota.
+     standing exceptions are image generation, Claude-only tools, and Claude review/second-opinion routing while company
+     Sol is eligible. Browser/ui-browser/computer-use personal fallbacks need consent. Background work never falls through
+     to personal quota.
 6. **Launch.**
    - The account is the one the quota state picks. When two or more accounts must each be spent within 48h, launches
      rotate across them.
@@ -474,9 +478,11 @@ the nightly review compares dispatch reasons and recorded wall-clock time, inclu
   - Image generation never runs on TTADK, its Sol fallback step included.
   - The extra Codex review added while ChatGPT Codex quota is underused runs on a ChatGPT account (its purpose is to
     spend that quota). Other Codex second opinions follow TTADK first.
-  - Not TTADK-capable, so routed as before: `claude-tools` (`browser`, `ui-browser` and `computer-use` go to TTADK once
-    `browser-setup` is done, user 2026-11-07), `image-gen` (no image tool
-    on the gateway), `research` on a TTADK account without its local proxy (Codex sends no search tool to the gateway;
+  - Capability-specific routing: `claude-tools` is truly Claude-only (Artifact/Docs tools and peer negotiation).
+    Browser work instead needs a browser-capable worker: `browser` and `ui-browser` go TTADK Codex → TRAE Playwright
+    Extension → personal browser-ready ChatGPT (needs OK) → Claude (needs OK); `computer-use` omits TRAE.
+    Other capability routes include `image-gen` (no image tool on the gateway) and `research` on a TTADK account
+    without its local proxy (Codex sends no search tool to the gateway;
     the proxy in `references/codex-workers.md` adds it for every TTADK worker),
     `second-opinion --against codex`, a high-stakes review of Codex-written code (Claude first), and `browser` before
     `browser-setup`. `image-read` works on the gateway.
@@ -511,10 +517,16 @@ the nightly review compares dispatch reasons and recorded wall-clock time, inclu
   `--exclude-account ttadk`. So is a run that fails for TTADK reasons.
 - **ChatGPT quota left unspent.** Preferring TTADK leaves more of the ChatGPT weeks unspent. The user chose this: on a
   TTADK device it is not waste, and the nightly review doesn't report it as such (hard rule, user 2026-11-07).
-- **Browser row.** `browser` (web pages in the user's signed-in Chrome) goes to TTADK Codex, Sol `medium`, through the
-  hub with `--browser-origins`, when the account is browser-ready (`browser-setup`). Otherwise it goes to Claude Sonnet
-  `medium` (Claude in Chrome). Its ladder runs Sol `high`, then Claude.
-  - Measured: the two do the same read and interaction tasks, but Claude was 3–10x faster per task.
+- **Browser row.** `browser` (web pages in the user's signed-in Chrome) goes to TTADK Codex, Sol `medium`, when TTADK is
+  browser-ready (`browser-setup`); otherwise to TRAE through the Playwright Extension when its user-pasted token file
+  exists; then to a browser-ready ChatGPT account (personal quota, needs the user's OK); finally to Claude Sonnet
+  `medium` (personal Claude quota, needs the user's OK). Re-run `route.mjs` whenever an account becomes unavailable
+  instead of choosing a fallback by hand.
+  `--browser-origins` drives both the OpenAI approval path and TRAE's per-thread Playwright `--allowed-origins`.
+  Playwright's origin list is not a security boundary and does not stop redirects; the task brief remains authoritative.
+  Model/effort retries do not override the account order, and `ui-browser` retains its hard effort floor for writes.
+  - Historical measurement (2026-11-07): TTADK and Claude did the same read/interaction tasks, and Claude was 3–10x
+    faster in that sample. This is observability history, not a reason to bypass the routing order or its approval gate.
   - Chrome must be running before either starts.
 
 ## Quota policy (user, 2026-11-03)

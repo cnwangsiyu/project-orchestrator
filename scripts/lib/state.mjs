@@ -371,7 +371,7 @@ export const traeQuota = (payload, sampledAt = Date.now()) => {
 // A TRAE CLI account (codex-worker trae-setup): the company's agent CLI with its own model pool, used after TTADK and
 // before personal quota (user, 2026-11-08). Healthy = the CLI present, logged in, a nonempty catalog, the hub sound.
 const readTrae = (name, prof) => {
-  const out = { name, kind: 'trae', home: prof.home, hub: prof.hub, browser: false, chromePlugin: null, models: prof.models ?? Object.keys(prof.modelIds ?? {}), modelIds: prof.modelIds ?? {},
+  const out = { name, kind: 'trae', home: prof.home, hub: prof.hub, browser: false, traeBrowser: traeBrowserReady(), chromePlugin: null, models: prof.models ?? Object.keys(prof.modelIds ?? {}), modelIds: prof.modelIds ?? {},
     windows: [], resets: null, healthy: false, reason: null, live: false, active: 0, email: null, search: true, searchLive: true,
     // Per-model daily buckets guide route.mjs model choice; they never pause the account or cap concurrency.
     quota: null, quotaError: null, load: {} };
@@ -423,6 +423,10 @@ export const codexBrowserReady = (home) => {
     return /^\[mcp_servers\.node_repl\]/m.test(toml) && /NODE_REPL_TRUSTED_SERVICES[^\n]*browser/.test(toml);
   } catch { return false; }
 };
+// TRAE cannot use the ChatGPT browser/desktop runtime. It can drive web pages in the user's Chrome through the
+// Playwright Extension bridge when the user-created pairing-token file exists. Capability detection never reads it.
+export const traeBrowserReady = () => fs.existsSync(process.env.PLAYWRIGHT_EXTENSION_TOKEN_FILE
+  || path.join(os.homedir(), '.trae', 'playwright-extension-token'));
 const chromePluginOf = (home) => {
   // The app's own unpacked copy first: it matches the app's node_repl (see codex-worker, findChromePlugin).
   for (const d of [path.join(os.homedir(), '.codex', '.tmp', 'bundled-marketplaces', 'openai-bundled', 'plugins'), path.join(home, 'plugins', 'cache')]) {
@@ -800,7 +804,7 @@ export const analyze = (data) => {
     models: (tr.models ?? []).filter((m) => !poolPauses[poolOf(m)] && !modelPauses[String(m).toLowerCase()]), poolPauses, modelPauses,
     quota: freshTraeQuota(tr.quota), quotaError: tr.quotaError ?? null,
     load: freshLoad(tr.load), queue: readQueueState(tr.home),
-    modelIds: tr.modelIds ?? {}, browser: false, chromePlugin: null, search: true, searchLive: true } : null;
+    modelIds: tr.modelIds ?? {}, browser: false, traeBrowser: traeBrowserReady(), chromePlugin: null, search: true, searchLive: true } : null;
   if (trae) trae.usable = trae.healthy && trae.models.length > 0;
   const rows = (data.codexAccounts ?? []).filter((a) => a.kind !== 'ttadk' && a.kind !== 'trae').map((a) => {
     const w = weekly(a.windows), s = winState(w, hist[`codex:${a.name}`]), w5 = shortWin(a.windows);
@@ -876,7 +880,7 @@ export const leanLines = (st, data) => {
   }
   const TR = X.trae;
   if (TR) {
-    if (TR.usable && !T?.usable) out.push(`TRAE next: with TTADK ${T ? 'out' : 'absent'}, work TTADK would take runs on TRAE CLI (account ${TR.name}, GPT-6.1-Sol and eligible alternatives; route.mjs applies daily-quota and model-fit rules, with Seed-Evolving for image-read) before personal quota; browser, desktop apps and images stay off TRAE`);
+    if (TR.usable && !T?.usable) out.push(`TRAE next: with TTADK ${T ? 'out' : 'absent'}, work TTADK would take runs on TRAE CLI (account ${TR.name}, GPT-6.1-Sol and eligible alternatives; route.mjs applies daily-quota and model-fit rules, with Seed-Evolving for image-read) before personal quota; web browser work is available only with the Playwright Extension token, while desktop apps and image generation stay off TRAE`);
     else if (TR.usable) out.push(`TRAE CLI (account ${TR.name}) shares eligible work with TTADK under the daily-reserve and congestion rules, and remains its fallback before personal quota`);
     else out.push(`TRAE CLI unavailable — ${TR.reason}`);
     for (const [pool, r] of Object.entries(TR.poolPauses ?? {})) out.push(`TRAE ${pool} models ${r.pausedUntil > Date.now() ? `paused until ${fmt(r.pausedUntil)}, then probed` : 'being probed for recovery'} (${String(r.reason).slice(0, 120)}): route.mjs uses the next model family meanwhile`);

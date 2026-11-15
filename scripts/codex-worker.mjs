@@ -6,7 +6,8 @@
 //   codex-worker hub                                                       (start the hub if it isn't up)
 //   codex-worker start  --cwd DIR --effort E --sandbox S [--network on|off] [--model M] [--name N] --log FILE [--out FILE]  "<prompt>"
 //   codex-worker turn   --thread ID --effort E --log FILE [--out FILE] [--model M] [--sandbox S [--network on|off]]      "<prompt>"
-//                       start/turn also take --browser-origins <origins/host globs> and --computer-use-apps <bundle ids>
+//                       start/turn also take --browser-origins <origins/host globs>, --chrome-profile-dir <name>
+//                       and --computer-use-apps <bundle ids>
 //   codex-worker browser-setup [--account NAME]                           (Chrome + Computer Use config for that home)
 //   codex-worker ttadk-setup [--name ttadk] [--home DIR] [--port N] [--search-port N]   (the TTADK gateway as an account)
 //   codex-worker [--account ttadk] proxy                                   (start/check TTADK's local proxy: web search)
@@ -494,6 +495,39 @@ if (cmd === 'account-add') {
 const CU_APPS = typeof opts['computer-use-apps'] === 'string' ? opts['computer-use-apps'].split(',').map((x) => x.trim()).filter(Boolean) : [];
 // --browser-origins: exact origins (https://x.y) or host globs (*.bytedance.net matches the host and its subdomains).
 const BU_ORIGINS = typeof opts['browser-origins'] === 'string' ? opts['browser-origins'].split(',').map((x) => x.trim()).filter(Boolean) : [];
+const PLAYWRIGHT_EXTENSION_TOKEN_FILE = process.env.PLAYWRIGHT_EXTENSION_TOKEN_FILE
+  || path.join(os.homedir(), '.trae', 'playwright-extension-token');
+const TRAE_BROWSER_REQUEST = PROF?.kind === 'trae' && BU_ORIGINS.length > 0 && (cmd === 'start' || cmd === 'turn');
+const TRAE_EXTENSION_BROWSER = TRAE_BROWSER_REQUEST && fs.existsSync(PLAYWRIGHT_EXTENSION_TOKEN_FILE);
+const CHROME_PROFILE_DIR = typeof opts['chrome-profile-dir'] === 'string' ? opts['chrome-profile-dir'].trim() : 'Profile 1';
+if (opts['chrome-profile-dir'] !== undefined && !CHROME_PROFILE_DIR) die('--chrome-profile-dir needs a non-empty Chrome profile directory name');
+// Playwright accepts URL-pattern-like origins separated by semicolons. Preserve explicit origins; for host globs add
+// both the wildcard and bare host because `*.example.com` does not cover example.com itself. Plain hosts use both
+// schemes and any port, which preserves localhost/dev-server routing without widening the host.
+const playwrightAllowedOrigins = (origins) => [...new Set(origins.flatMap((entry) => {
+  if (entry === '*') return ['*'];
+  try { const u = new URL(entry); return [`${u.protocol}//${u.host}`]; } catch {}
+  const host = entry.replace(/^\*\./, '');
+  if (!/^[a-zA-Z0-9.-]+(?::\d+)?$/.test(host)) return [entry, host].filter(Boolean);
+  const port = host.includes(':') ? '' : ':*';
+  return entry.startsWith('*.')
+    ? [`http://*.${host}${port}`, `https://*.${host}${port}`, `http://${host}${port}`, `https://${host}${port}`]
+    : [`http://${host}${port}`, `https://${host}${port}`];
+}))];
+const TRAE_PLAYWRIGHT_ARGS = TRAE_EXTENSION_BROWSER ? ['-y', '@playwright/mcp@latest', '--extension',
+  '--profile-dir-name', CHROME_PROFILE_DIR, '--allowed-origins', playwrightAllowedOrigins(BU_ORIGINS).join(';')] : null;
+// The token is user-pasted and is never put on argv, in config, or in output. `env_vars` is a name-only pass-through:
+// the Playwright child receives PLAYWRIGHT_MCP_EXTENSION_TOKEN from the TRAE app-server process environment.
+// The foreground hub path also loads it below so a newly started persistent TRAE hub can satisfy that reference.
+const loadPlaywrightExtensionToken = () => {
+  const token = fs.readFileSync(PLAYWRIGHT_EXTENSION_TOKEN_FILE, 'utf8').trim();
+  if (!token) die(`Playwright extension token file is empty: ${PLAYWRIGHT_EXTENSION_TOKEN_FILE}`, 1);
+  process.env.PLAYWRIGHT_MCP_EXTENSION_TOKEN = token;
+};
+if (TRAE_BROWSER_REQUEST && !TRAE_EXTENSION_BROWSER)
+  die(`TRAE signed-in Chrome needs the Playwright Extension token file: ${PLAYWRIGHT_EXTENSION_TOKEN_FILE}`, 1);
+if (TRAE_EXTENSION_BROWSER) loadPlaywrightExtensionToken();
+if (PROF?.kind === 'trae' && cmd === 'hub' && fs.existsSync(PLAYWRIGHT_EXTENSION_TOKEN_FILE)) loadPlaywrightExtensionToken();
 const originAllowed = (origin) => {
   let host = ''; try { host = new URL(origin).hostname; } catch { return false; }
   return BU_ORIGINS.some((p) => p === '*' || p === origin || (p.startsWith('*.') ? host === p.slice(2) || host.endsWith(p.slice(1)) : host === p));
@@ -521,7 +555,7 @@ const appOlderThanExtension = () => {
       : null;
   } catch { return null; }
 };
-if (BU_ORIGINS.length && (cmd === 'start' || cmd === 'turn')) { const old = appOlderThanExtension(); if (old) die(`browser-version-mismatch: ${old}`, 7); }
+if (PROF?.kind !== 'trae' && BU_ORIGINS.length && (cmd === 'start' || cmd === 'turn')) { const old = appOlderThanExtension(); if (old) die(`browser-version-mismatch: ${old}`, 7); }
 if (CU_APPS.length && (cmd === 'start' || cmd === 'turn') && screenLocked()) die("the screen is locked: Computer Use sees no windows while the Mac is locked (the ChatGPT app's Locked use is reserved to its own turns). Unlock it, or keep it unlocked while computer-use workers run.", 5);
 const hub = process.env.CODEX_HUB || 'ws://127.0.0.1:47321';
 const ready = () => fetch(hub.replace(/^ws/, 'http') + '/readyz', { signal: AbortSignal.timeout(2000) }).then((r) => r.ok, () => false);
@@ -952,18 +986,28 @@ try {
       const bundled = path.join(os.homedir(), '.codex', '.tmp', 'bundled-marketplaces', 'openai-bundled', 'plugins', 'chrome');
       return fs.existsSync(path.join(bundled, 'scripts', 'browser-client.mjs')) ? bundled : null;
     };
-    const chromePlugin = browserThread ? findChromePlugin() : null;
-    const browserHowTo = !browserThread ? null : [
+    const chromePlugin = browserThread && !TRAE_EXTENSION_BROWSER ? findChromePlugin() : null;
+    const browserHowTo = !browserThread ? null : TRAE_EXTENSION_BROWSER ? [
+      'Browser access in this TRAE thread goes through the Playwright MCP server connected to the user\'s Chrome by the Playwright Extension.',
+      'Use the Playwright MCP tools: browser_navigate, browser_snapshot, browser_click, browser_type, browser_fill_form, browser_take_screenshot, and the other browser_* tools exposed by that server.',
+      `Work only within the task brief and these configured origins: ${BU_ORIGINS.join(', ')}. Playwright's origin filter is a convenience guard, not a security boundary and does not stop redirects.`,
+      'Do not look for any other browser runtime, Chrome plugin, or Claude Code browser skill: they do not exist in this TRAE thread. If the extension or browser is unreachable, report BLOCKED with the exact Playwright error. "Extension connection timeout" means the extension/pairing or the TRAE hub\'s Chrome-profile access needs repair; the verified token flow does not show a manual approval dialog.',
+    ].join('\n') : [
       'Browser and desktop access in this thread goes through the node_repl MCP server and its `js` tool (look for a tool from the node_repl server; in code mode call it from your exec script).',
       BU_ORIGINS.length ? `For Chrome, start with exactly this in node_repl js: const { setupBrowserRuntime } = await import(${JSON.stringify(path.join(chromePlugin ?? '<chrome plugin root>', 'scripts', 'browser-client.mjs'))}); const agent = await setupBrowserRuntime(); const chrome = await agent.browsers.get("chrome"); nodeRepl.write(await chrome.documentation()); — then follow that documentation. Work only in tabs you create, close them when done, never touch the user's other tabs. Sites you may open: ${BU_ORIGINS.join(', ')}; others are declined.` : null,
       CU_APPS.length ? `For desktop apps, in node_repl js: globalThis.sky = (await import("@oai/sky")).sky; then follow its documentation. Apps you may use: ${CU_APPS.join(', ')}; others are declined.` : null,
       'Do not look for mcp__claude-in-chrome__* tools, ToolSearch, or skills written for Claude Code (chrome-browser, claude-in-chrome): they do not exist in this session. If node_repl or the browser is not reachable, report BLOCKED with the exact error.',
     ].filter(Boolean).join('\n');
+    const browserConfig = TRAE_EXTENSION_BROWSER ? { mcp_servers: { playwright: {
+      command: 'npx', args: TRAE_PLAYWRIGHT_ARGS, env_vars: ['PLAYWRIGHT_MCP_EXTENSION_TOKEN'],
+      startup_timeout_sec: 120, default_tools_approval_mode: 'approve',
+    } } } : browserThread ? { plugins: { 'unified-computer-use@openai-bundled': { enabled: false } } } : null;
     const digest = loadDigest();
     const th = await call('thread/start', {
       cwd: path.resolve(opts.cwd), model: opts.model, sandbox: opts.sandbox, approvalPolicy: APPROVAL_POLICY,
       developerInstructions: [browserHowTo, `Global worker rules ${digest.version}\n${digest.worker}`].filter(Boolean).join('\n'),
-      ...(browserThread ? { approvalsReviewer: 'user', config: { plugins: { 'unified-computer-use@openai-bundled': { enabled: false } } } } : {}),
+      ...(browserThread && !TRAE_EXTENSION_BROWSER ? { approvalsReviewer: 'user' } : {}),
+      ...(browserConfig ? { config: browserConfig } : {}),
     });
     const threadId = th.thread?.id ?? th.threadId;
     attemptThreadId = threadId;
@@ -977,7 +1021,11 @@ try {
     follow(threadId, ts.turn?.id ?? ts.turnId);
   } else if (cmd === 'turn') {
     if (!opts.thread || !text) die('turn needs --thread and a prompt');
-    await call('thread/resume', { threadId: opts.thread, model: opts.model }).catch(() => {});
+    const config = TRAE_EXTENSION_BROWSER ? { mcp_servers: { playwright: {
+      command: 'npx', args: TRAE_PLAYWRIGHT_ARGS, env_vars: ['PLAYWRIGHT_MCP_EXTENSION_TOKEN'],
+      startup_timeout_sec: 120, default_tools_approval_mode: 'approve',
+    } } } : undefined;
+    await call('thread/resume', { threadId: opts.thread, model: opts.model, config }).catch(() => {});
     tracker?.set({ mayRun: true });
     const ts = await call('turn/start', {
       threadId: opts.thread, input: textInput(text), effort: opts.effort, model: opts.model,

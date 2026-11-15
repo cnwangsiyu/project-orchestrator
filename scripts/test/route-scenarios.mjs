@@ -13,6 +13,7 @@ import { loadDigest } from '../lib/global-rules.mjs';
 
 const ROUTE = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'route.mjs');
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'route-test-'));
+const absentPlaywrightToken = path.join(tmp, 'no-playwright-extension-token');
 const now = Date.now(), h = 3600000, W = 10080;
 const wk = (used, leftH, label = 'week') => ({ label, used, resetsAt: now + leftH * h, windowMins: W, scoped: false });
 const cl = (used, leftH, fable = 0) => [wk(used, leftH, 'week (all models)'), { ...wk(fable, leftH, 'week (Fable)'), scoped: true }];
@@ -183,14 +184,15 @@ const CASES = [
   ['ttAndTrae', ['implement', '--exclude-account', 'ttadk,trae'], 'codex gpt-6.1-sol high @main'],
   ['ttChatOut', ['lookup'], 'codex gpt-5.6-terra medium @ttadk'], // light row: light list, not Sol
   ['ttChatOut', ['image-gen'], 'DEFER'],
-  // Browser work: TTADK Codex when it is browser-ready, else Claude.
+  // Browser order is TTADK Codex → token-ready TRAE → browser-ready personal ChatGPT → Claude.
+  // These baseline fixtures have no TRAE token, so their expected picks exercise the remaining rungs.
   ['ttFresh', ['browser'], 'codex gpt-6.1-sol medium @ttadk', 'Chrome must be running'],
   ['ttFresh', ['browser', '--failures', '2'], 'codex gpt-6.1-sol xhigh @ttadk'],
   ['ttFresh', ['browser', '--failures', '3'], 'claude sonnet medium'],
   ['ttNoBrowser', ['browser'], 'claude sonnet medium', 'never switch to another connected browser'],
   ['fresh', ['browser'], 'claude sonnet medium'],
   ['ttFresh', ['browser', '--exclude-account', 'ttadk'], 'claude sonnet medium'],
-  // ui-browser: TTADK when browser-ready (localhost reachable), else Claude Sonnet high as before.
+  // ui-browser uses the same browser order and keeps its hard effort floor for writes.
   ['ttFresh', ['ui-browser'], 'codex gpt-6.1-sol high @ttadk', 'Chrome must be running'],
   ['ttNoBrowser', ['ui-browser'], 'claude sonnet high'],
   ['ttFresh', ['ui-browser', '--exclude-account', 'ttadk'], 'claude sonnet high'],
@@ -265,7 +267,7 @@ const run = (sc, args0, overrides = {}) => {
   if (CODE.includes(args[0]) && !args.includes('--impact') && !args0.includes('__noimpact')) args = [...args, '--impact', 'service'];
   const cache = path.join(tmp, 'q.json');
   fs.writeFileSync(cache, JSON.stringify({ checkedAt: now, claude: S[sc].claude, codexAccounts: S[sc].codex, errors: {}, history: {} }));
-  const env = { ...process.env, QUOTA_CACHE: cache, CODEX_ACCOUNTS: path.join(tmp, 'none.json'), ROUTE_LOG: '0', QUOTA_LOG: '0', TRAE_PROBE: '0', ROUTE_RR: path.join(tmp, 'rr.txt'), QUOTA_LOG_FILE: path.join(tmp, 'empty-company-history'), ...overrides };
+  const env = { ...process.env, QUOTA_CACHE: cache, CODEX_ACCOUNTS: path.join(tmp, 'none.json'), ROUTE_LOG: '0', QUOTA_LOG: '0', TRAE_PROBE: '0', ROUTE_RR: path.join(tmp, 'rr.txt'), QUOTA_LOG_FILE: path.join(tmp, 'empty-company-history'), PLAYWRIGHT_EXTENSION_TOKEN_FILE: absentPlaywrightToken, ...overrides };
   return execFileSync(process.execPath, [ROUTE, ...args, '--json'], { encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'] });
 };
 // Optional 4th field: a substring the notes must contain ('!text': must not contain).
@@ -283,6 +285,36 @@ for (const [sc, args, want, note] of CASES) {
   const ok = got === want;
   if (!ok) fail++;
   console.log(`${ok ? 'ok  ' : 'FAIL'} ${sc.padEnd(19)} ${args.join(' ').padEnd(36)} ${ok ? got : `want "${want}", got "${got}"`}`);
+}
+// A user-pasted Playwright Extension token makes TRAE web-browser capable without making it desktop-capable.
+// Every subprocess gets an explicit fake path, so this suite never probes or reads the user's real token file.
+{
+  try {
+    const token = path.join(tmp, 'playwright-extension-token');
+    fs.writeFileSync(token, 'fixture-playwright-token-do-not-log\n', { mode: 0o600 });
+    const env = { PLAYWRIGHT_EXTENSION_TOKEN_FILE: token };
+    const ttFirst = JSON.parse(run('ttFresh', ['browser'], env));
+    assert.equal(ttFirst.pick.account, 'ttadk');
+    const trae = JSON.parse(run('ttOutTrae', ['browser', '--origins', 'example.com'], env));
+    assert.equal(trae.pick.account, 'trae'); assert.equal(trae.pick.launcher, 'codex-worker');
+    assert.ok(trae.why.some((s) => /TRAE via Playwright extension in the user's Chrome/.test(s)));
+    assert.ok(trae.notes.some((s) => /not a security boundary.*do not stop redirects/.test(s)));
+    assert.match(trae.pick.command, /--browser-origins/); assert.match(trae.pick.command, /example\.com/);
+    const beforePersonal = JSON.parse(run('traeBrowserB', ['browser'], env));
+    assert.equal(beforePersonal.pick.account, 'trae');
+    const ui = JSON.parse(run('ttOutTrae', ['ui-browser'], env));
+    assert.equal(ui.pick.account, 'trae'); assert.equal(ui.pick.effort, 'high');
+    const desktop = JSON.parse(run('traeBrowserB', ['computer-use', '--apps', 'com.apple.Notes'], env));
+    assert.equal(desktop.pick.account, 'b'); assert.notEqual(desktop.pick.account, 'trae');
+    assert.ok(desktop.needsUserOK.some((s) => /personal quota/.test(s)));
+    const noPersonalDesktop = JSON.parse(run('ttOutTrae', ['computer-use'], env));
+    assert.equal(noPersonalDesktop.pick.vendor, 'claude'); assert.ok(noPersonalDesktop.needsUserOK.some((s) => /personal quota/.test(s)));
+    const absent = JSON.parse(run('ttOutTrae', ['browser']));
+    assert.equal(absent.pick.vendor, 'claude'); assert.ok(absent.needsUserOK.some((s) => /personal quota/.test(s)));
+    const personal = JSON.parse(run('traeBrowserB', ['browser']));
+    assert.equal(personal.pick.account, 'b'); assert.ok(personal.needsUserOK.some((s) => /personal quota/.test(s)));
+    console.log('ok   TRAE Playwright browser capability: TTADK first, TRAE before personal/Claude, UI floor, token gate, computer-use exclusion');
+  } catch (e) { fail++; console.log(`FAIL TRAE Playwright browser capability: ${e.stack}`); }
 }
 // User decision 2026-11-13: Codex-family writers default to full access on every account. Reviewers remain read-only;
 // test-running reviews get workspace-write, and --sandbox is the only explicit narrower per-task override.
@@ -765,7 +797,7 @@ for (const [sc, args] of ERRORS) {
     // A hard review (review-high) has no fallback family: with GPT paused on TRAE it drops to Claude behind the gate.
     [hasNote('traeGptOut', ['review-high'], /independent other-family GPT\/Claude reviewer/), false],
     [hasNote('traeGptOut', ['build-run'], /health thresholds.*rollback triggers.*stronger-model judgment/), true],
-    [hasNote('traeGptOut', ['analysis'], /playwright MCP is for public\/local pages only.*missing login means BLOCKED/), true],
+    [hasNote('traeGptOut', ['analysis'], /default headless Playwright MCP is for public\/local pages only.*Missing login means BLOCKED/), true],
     [hasNote('traeFull', ['implement', '--exclude-model', 'gpt,deepseek'], /Gemini-3\.1-Pro ran past 40 minutes/), true],
     [hasNote('traeGptOut', ['implement'], /can't see images/), true], [hasNote('traeGptOut', ['image-read'], /can't see images/), false],
     // Every family out: personal quota, behind the user's OK.
@@ -1669,8 +1701,10 @@ for (const [sc, args] of ERRORS) {
     assert.ok(gated(r(['lookup', '--failures', '5'], { models: allGPTs, daily: depleted })));
     assert.ok(gated(r(['lookup', '--exclude-model', 'gpt'], { models: allGPTs })));
     assert.ok(!gated(r(['lookup', '--failures', '1'], { company: true }))); // healthy TTADK still handles the rung
-    for (const args of [['image-gen'], ['claude-tools'], ['browser'], ['computer-use']])
+    for (const args of [['image-gen'], ['claude-tools']])
       assert.ok(!gated(r(args)), `standing exception: ${args[0]}`);
+    for (const args of [['browser'], ['ui-browser'], ['computer-use']])
+      assert.ok(gated(r(args)), `browser-capability personal fallback: ${args[0]}`);
     assert.ok(!gated(r(['second-opinion', '--against', 'codex'], { models: [SOL] })));
     assert.ok(!gated(r(['review-high', '--author', 'codex'], { models: [SOL] })));
     // A personal second opinion is exempt with company Sol, but needs consent when only a fallback family can run.
