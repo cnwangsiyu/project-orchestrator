@@ -31,7 +31,25 @@ const parseRows = (text) => text.split('\n').flatMap((line) => {
     && (row.owner == null || validOwner(row.owner)) && ['running', 'finished', 'failed', 'stalled', 're-routed', 'needs-user', 'follower-ended', 'observed', 'message', 'question', 'answered'].includes(row.event) ? [row] : []; } catch { return []; }
 });
 const readText = (file) => { try { return fs.readFileSync(file, 'utf8'); } catch (e) { if (e.code === 'ENOENT') return ''; throw e; } };
-export const readEvents = () => parseRows(readText(eventFile()));
+const fullOwner = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+const shortOwner = value => typeof value === 'string' && !fullOwner(value) && /^[0-9a-f][0-9a-f-]{0,34}$/i.test(value);
+export const normalizeOwners = (rows, fullIds = rows.flatMap(row=>[row.owner,...(row.ownerMatches??[])]).filter(fullOwner)) => {
+  const ids=[...new Set(fullIds.filter(fullOwner))];
+  return rows.map(row=>{
+    const raw=row.ownerOriginal??row.owner;
+    if(!shortOwner(raw)) return row;
+    const matches=ids.filter(id=>id.toLowerCase().startsWith(raw.toLowerCase()));
+    return matches.length===1 ? {...row,owner:matches[0],ownerOriginal:raw,ownerResolution:'resolved'}
+      : {...row,owner:raw,ownerOriginal:raw,ownerResolution:matches.length?'ambiguous':'unmatched',ownerMatches:matches};
+  });
+};
+export const readEvents = () => normalizeOwners(parseRows(readText(eventFile())));
+const eventOwner = (owner, rows) => {
+  if(!shortOwner(owner)) return owner;
+  const ids=[...new Set(rows.flatMap(row=>[row.owner,...(row.ownerMatches??[])]).filter(fullOwner))];
+  const matches=ids.filter(id=>id.toLowerCase().startsWith(owner.toLowerCase()));
+  return matches.length===1?matches[0]:owner;
+};
 const emptyAck = (owner) => ({ owner, highWater: 0, delivered: {}, transaction: null });
 const parseAck = (text, owner) => {
   try {
@@ -44,7 +62,7 @@ const parseAck = (text, owner) => {
       delivered: ack.delivered && typeof ack.delivered === 'object' && !Array.isArray(ack.delivered) ? ack.delivered : {} };
   } catch { return emptyAck(owner); }
 };
-export const readAck = (owner) => parseAck(readText(ackFile(owner)), owner);
+export const readAck = (owner) => {if(shortOwner(owner)) owner=eventOwner(owner,readEvents());return parseAck(readText(ackFile(owner)),owner);};
 const acknowledged = (row, ack) => (Number.isSafeInteger(row.seq) && row.seq <= (ack.highWater ?? 0))
   || Number.isFinite(row.ackAt) || Number.isFinite(ack.delivered?.[row.id]?.t);
 const nextAck = (ack, rows, transaction = ack.transaction) => {
@@ -68,6 +86,11 @@ export const launcherIdentity = (override, env = process.env, cwd = process.cwd(
 };
 export const resolveOwner = (override, env = process.env) => {
   const launcher = launcherIdentity(override, env);
+  const raw = launcher.sessionId ?? (validOwner(launcher.jobId) ? launcher.jobId : null);
+  if (shortOwner(raw)) {
+    const matches=[...new Set(readEvents().map(row=>row.owner).filter(fullOwner))].filter(id=>id.toLowerCase().startsWith(raw.toLowerCase()));
+    if(matches.length===1) return matches[0];
+  }
   return launcher.sessionId ?? (validOwner(launcher.jobId) ? launcher.jobId : null);
 };
 
@@ -137,11 +160,15 @@ const historyFiles = () => { try { return fs.readdirSync(historyDir()).filter((n
 const auditRows = () => {
   const unique = new Map();
   for (const file of [...historyFiles(), eventFile()]) for (const row of parseRows(readText(file))) unique.set(row.id, row);
-  return [...unique.values()].sort((a, b) => (a.seq ?? a.t) - (b.seq ?? b.t));
+  return normalizeOwners([...unique.values()]).sort((a, b) => (a.seq ?? a.t) - (b.seq ?? b.t));
 };
 
 export const inbox = (rows, owner, ack = emptyAck(owner), now = Date.now()) => {
-  const own = rows.filter((row) => row.owner === owner), latest = new Map(), turns = new Map(), threads = new Map();
+  rows = normalizeOwners(rows);
+  const matches = [...new Set(rows.map(row=>row.owner).filter(fullOwner))].filter(id=>shortOwner(owner)&&id.toLowerCase().startsWith(owner.toLowerCase()));
+  if(matches.length===1) owner=matches[0];
+  const unresolved = rows.filter(row=>['ambiguous','unmatched'].includes(row.ownerResolution));
+  const own = rows.filter((row) => row.owner === owner && !['ambiguous','unmatched'].includes(row.ownerResolution)), latest = new Map(), turns = new Map(), threads = new Map();
   own.forEach((row, i) => {
     if (talkback(row)) return;
     latest.set(row.runId, { row, i });
@@ -156,7 +183,14 @@ export const inbox = (rows, owner, ack = emptyAck(owner), now = Date.now()) => {
       : row.thread ? threads.get(JSON.stringify([row.account, row.thread])) : undefined;
     return settled === undefined || settled < i;
   }).map(({ row }) => ({ ...row, stale: !live(row.pid) && now - row.t > DEAD_FOLLOWER_GRACE_MS }));
-  return { pending: own.filter((row) => notification(row) && !acknowledged(row, ack)), running };
+  const questionKey = row => JSON.stringify([row.account,row.thread,row.questionId]);
+  const answers = new Map(own.filter(row => row.event === 'answered').map(row => [questionKey(row),row]));
+  const pending = own.filter(row => notification(row) && !acknowledged(row,ack)).map(row => {
+    const answer = row.event === 'question' && answers.get(questionKey(row));
+    // Keep the question's delivery identity so the existing cursor delivers it once.
+    return answer ? {...row,event:'answered',questionText:row.text,text:answer.text,answeredAt:answer.answeredAt} : row;
+  });
+  return {pending,running,unresolved};
 };
 
 // The hot log retains pending events and latest live/uncertain state. Seven days of audit history live in rotations.
@@ -169,6 +203,14 @@ const compactLocked = (state, now = Date.now()) => {
   atomicSync(sequenceFile(), JSON.stringify({ ...state, nextSeq: seq }));
   if (migrating) atomicSync(eventFile(), rows.map((row) => JSON.stringify(row)).join('\n') + '\n');
   const keep = new Set(rows.slice(-64).map((row) => row.id));
+  // Unresolved owners remain visible until they can be resolved; retain one
+  // full UUID anchor per owner so later short-key completions have evidence.
+  const anchors=new Map();
+  for(const row of rows) {
+    if(['ambiguous','unmatched'].includes(row.ownerResolution)) keep.add(row.id);
+    if(fullOwner(row.owner)&&!row.ownerOriginal) anchors.set(row.owner,row.id);
+  }
+  for(const id of anchors.values()) keep.add(id);
   // Delivery acknowledgement does not close a question. Preserve it until reply/deadline;
   // hourly note accounting must survive compaction, including suppressed notes.
   for (const row of rows) if ((row.event === 'message' && row.t > now - 3600000)
@@ -308,6 +350,7 @@ const firstLine = (file) => {
   } catch { return ''; } finally { if (fd !== undefined) fs.closeSync(fd); }
 };
 export const eventLine = (row, message = row.finalLine ?? firstLine(row.outFile)) => {
+  if (row.event === 'answered') return `worker ${clean(row.name ?? row.thread)} answered: ${clean(row.questionText)} → ${clean(row.text)}`;
   if (row.event === 'message') return `worker ${clean(row.name ?? row.thread)} notes [${clean(row.kind)}]: ${clean(row.text)}`;
   if (row.event === 'question') return `worker ${clean(row.name ?? row.thread)} asks (id ${clean(row.questionId)}): ${clean(row.text)}`
     + `${row.default !== undefined ? ` — default: ${clean(row.default)}` : ''} — timeout ${row.timeoutMin}m; answer with codex-worker reply${row.owner ? ` --owner ${clean(row.owner)}` : ''} --thread ${clean(row.thread)} --account ${clean(row.account)} --question ${clean(row.questionId)} "<text>"`;
@@ -325,6 +368,7 @@ const appendReceiptSync = (entry) => {
 
 // Intent never advances the acknowledgement. Output runs outside the lock; stale intents can be retried.
 export const deliver = (owner, print) => {
+  if(shortOwner(owner)) owner=eventOwner(owner,readEvents());
   let own = readEvents().filter((row) => row.owner === owner);
   if (own.some((row) => !Number.isSafeInteger(row.seq))) {
     compactWorkerEvents(Date.now(), { wait: false }); own = readEvents().filter((row) => row.owner === owner);
@@ -360,15 +404,18 @@ export const deliver = (owner, print) => {
 
 // One cursor per watcher; unchanged polls perform only stat, not open/read/JSON.parse.
 export const createEventTail = (owner) => {
+  if(shortOwner(owner)) owner=eventOwner(owner,readEvents());
   let identity = null, offset = 0, rest = '', decoder = new StringDecoder('utf8');
+  const fullIds = new Set();
   const rows = new Map(), needle = `"owner":${JSON.stringify(owner)}`;
   const stats = { reads: 0, bytes: 0, parsed: 0 };
-  return { stats, rows: () => [...rows.values()].sort((a, b) => (a.seq ?? a.t) - (b.seq ?? b.t)),
+  return { stats, rows: () => normalizeOwners([...rows.values()], [...fullIds]).sort((a, b) => (a.seq ?? a.t) - (b.seq ?? b.t)),
     prune: (ack) => {
-      const own = [...rows.values()], snapshot = inbox(own, owner, ack), running = new Set(snapshot.running.map((row) => row.id));
+      const own = normalizeOwners([...rows.values()],[...fullIds]), snapshot = inbox(own, owner, ack), running = new Set(snapshot.running.map((row) => row.id));
       const keep = new Set([...snapshot.pending, ...snapshot.running].map((row) => row.id));
+      const unresolvedIds = new Set(snapshot.unresolved.map(row=>row.id));
       for (const [id, row] of rows) {
-        if (!keep.has(id)) rows.delete(id);
+        if (!keep.has(id) && !unresolvedIds.has(id)) rows.delete(id);
         else if (row.mayRun && !running.has(id)) rows.set(id, { ...row, mayRun: false, settled: true });
       }
     },
@@ -376,7 +423,7 @@ export const createEventTail = (owner) => {
       let stat; try { stat = await fsp.stat(eventFile()); } catch (e) { if (e.code === 'ENOENT') return []; throw e; }
       const key = `${stat.dev}:${stat.ino}`;
       if (identity !== key || stat.size < offset) {
-        identity = key; offset = 0; rest = ''; decoder = new StringDecoder('utf8'); rows.clear();
+        identity = key; offset = 0; rest = ''; decoder = new StringDecoder('utf8'); rows.clear(); fullIds.clear();
       }
       if (stat.size === offset) return [];
       let fd; const added = [];
@@ -394,9 +441,11 @@ export const createEventTail = (owner) => {
           while ((end = rest.indexOf('\n')) >= 0) {
             const line = rest.slice(0, end); rest = rest.slice(end + 1);
             // Compact-format streams can reject other owners before parsing. Legacy whitespace remains supported.
-            if (!line.includes(needle) && !line.includes('"owner" :') && !line.includes('"owner": ')) continue;
+            const rawOwner=line.match(/"owner"\s*:\s*"([^"]+)"/)?.[1];
+            if(fullOwner(rawOwner)) fullIds.add(rawOwner);
+            if (!line.includes(needle) && !shortOwner(rawOwner) && !line.includes('"owner" :') && !line.includes('"owner": ')) continue;
             stats.parsed++;
-            for (const row of parseRows(line)) if (row.owner === owner && !rows.has(row.id)) { rows.set(row.id, row); added.push(row); }
+            for (const row of parseRows(line)) if ((row.owner === owner || shortOwner(row.owner)) && !rows.has(row.id)) { rows.set(row.id, row); added.push(row); }
           }
         }
         return added;
@@ -408,6 +457,7 @@ const readAckAsync = async (owner) => {
   return parseAck(raw, owner);
 };
 export const readInboxAsync = async (owner) => {
+  if(shortOwner(owner)) owner=eventOwner(owner,readEvents());
   const tail = createEventTail(owner); await tail.read();
   return inbox(tail.rows(), owner, await readAckAsync(owner));
 };
@@ -424,6 +474,7 @@ const atomicAsync = async (file, value) => {
   }
 };
 export const deliverAsync = async (owner, print, limit = 10, { rows: knownRows } = {}) => {
+  if(shortOwner(owner)) owner=eventOwner(owner,readEvents());
   let own = knownRows;
   if (!own) { const tail = createEventTail(owner); await tail.read(); own = tail.rows(); }
   if (own.some((row) => !Number.isSafeInteger(row.seq))) {
@@ -477,6 +528,7 @@ export const hasWatcherAsync = async (owner) => {
 };
 export const watch = async (owner, print = (rows) => new Promise((resolve, reject) =>
   process.stdout.write(rows.map((row) => eventLine(row)).join('\n') + '\n', (error) => error ? reject(error) : resolve()))) => {
+  if(shortOwner(owner)) owner=eventOwner(owner,readEvents());
   if (!validOwner(owner)) throw Error('watch needs --owner <session-id> (or ORCHESTRATOR_OWNER)');
   // Capture acknowledgement state before publishing the live claim; a hook may deliver immediately after it sees us.
   const baseline = await readAckAsync(owner);
@@ -570,17 +622,18 @@ const readReceipts = (owner) => {
   return files.flatMap((name) => readText(path.join(dir, name)).split('\n').flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } }));
 };
 export const auditWorkerEvents = (rows = auditRows(), since = 0) => {
+  rows = normalizeOwners(rows);
   const owners = new Map();
   for (const row of rows) {
     const key = row.owner ?? '(unknown)';
-    if (!owners.has(key)) owners.set(key, { owner: key, launches: 0, launchesWithoutIdentity: 0, unacknowledged: 0,
+    if (!owners.has(key)) owners.set(key, { owner: key, ...(row.ownerResolution&&row.ownerResolution!=='resolved'?{ownerStatus:'UNKNOWN',unresolved:row.ownerResolution,ownerMatches:row.ownerMatches}:{}), launches: 0, launchesWithoutIdentity: 0, unacknowledged: 0,
       totalUnacknowledged: 0, acknowledgedCount: 0, latencyUnknown: 0, delays: [], runs: new Set(), ack: validOwner(row.owner) ? readAck(row.owner) : emptyAck(key),
       receipts: validOwner(row.owner) ? readReceipts(row.owner) : [] });
     const a = owners.get(key);
     if (row.event === 'running') {
       if (row.t >= since && !a.runs.has(row.runId)) { a.runs.add(row.runId); a.launches++; if (!row.launcher?.sessionId) a.launchesWithoutIdentity++; }
     } else if (notification(row)) {
-      const acked = acknowledged(row, a.ack);
+      const acked = !['ambiguous','unmatched'].includes(row.ownerResolution) && acknowledged(row, a.ack);
       if (!acked) a.totalUnacknowledged++;
       if (row.t < since) continue;
       if (!acked) a.unacknowledged++;

@@ -24,7 +24,7 @@ try {
     // pure snapshot carries the counter; only a nondry personal launch advances it.
     const select = () => routePure(context.task, context.snapshot);
     const rr = process.env.ROUTE_RR || path.join(process.env.RULES_SHARED || path.dirname(context.routeLog),'route-rotation.txt');
-    const plan = companyDevice(context.snapshot) ? select() : withLock(rr, () => {
+    const plan = companyDevice(context.snapshot) || task.flags.dry ? select() : withLock(rr, () => {
       let counter=context.snapshot.rotationState;
       try { const n=Number(fs.readFileSync(rr,'utf8')); if(Number.isSafeInteger(n)&&n>=0) counter=n; } catch {}
       context.snapshot=createSnapshot({...context.snapshot,rotationState:counter},{now:context.now});
@@ -37,7 +37,7 @@ try {
     if (!task.flags.dry && process.env.ROUTE_LOG !== '0') {
       const tuple = p => p ? {vendor:p.vendor,model:p.model,effort:p.effort,account:p.account,sandbox:p.sandbox,company:p.company} : null;
       const rec = {t:context.now,kind:'route',project:plan.task.project,name:plan.task.flags.name??plan.task.taskId,requestId:plan.task.requestId,
-        routeId:plan.routeId,planHash:plan.planHash,category:out.category,stakes:out.stakes,failures:out.failures,impact:plan.task.impact,
+        routeId:plan.routeId,planHash:plan.planHash,category:out.category,stakes:out.stakes,failures:out.failures,failureKind:out.failureKind,impact:plan.task.impact,
         review:plan.followups[0]?.category??null,security:out.security,adversarial:out.adversarial,defensive:out.defensive,signing:out.signing,
         background:out.background,tier:out.tier,deferred:out.deferred,kindResult:out.kind,executable:out.executable,env:plan.task.env,
         autoCheck:!!task.flags['auto-check'],runsTests:plan.task.runsTests,noLocalBuild:plan.task.execution==='remote',

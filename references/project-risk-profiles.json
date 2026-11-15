@@ -47,7 +47,16 @@
   "acq": {
     "profile": "no-review",
     "reason": "User decision 2026-11-15: \"evelyn 和获客都免审查吧\"",
-    "revisit": "When the user changes this decision."
+    "revisit": "When the user changes this decision.",
+    "browserOrigins": [
+      "instagram.com",
+      "*.instagram.com",
+      "youtube.com",
+      "*.youtube.com",
+      "facebook.com",
+      "*.facebook.com"
+    ],
+    "browserOriginsNote": "example, edit as needed"
   },
   "autotrader": {
     "profile": "no-review",

@@ -54,6 +54,7 @@ export function presentRoute(plan, view, context) {
     const relevant=balanceCandidates.find(b=>b.model===c.modelId);
     why.push(relevant?`stays on TTADK: ${relevant.model}: ${relevant.queued?'queue observed':relevant.congestion==='high'?'model congested':!relevant.freeNow?'no demonstrated immediate uncongested TRAE lane':'TTADK quota expiry or required capability'}`:`stays on TTADK: ${c.modelId} has no qualified same-model TRAE lane for the required capability/catalog.`);
   }
+  if(f.dry) notes.push(`--dry: cached snapshot only; no live refresh/probes. Cache age: ${context.cacheAgeMs===null||context.cacheAgeMs===undefined?'UNKNOWN':`${Math.round(context.cacheAgeMs/1000)} seconds`}.`);
   if(context.refreshRequired) notes.push('--fresh: account status refreshed through authenticated read-only interfaces.');
   const staleAccounts=snapshot.accounts.filter(a=>a.auth.source==='last-good-stale').map(a=>a.id);
   if(staleAccounts.length) why.push(`Status read incomplete: retained last-good stale observations for ${staleAccounts.join(', ')}; original sample ages and admission checks remain in force.`);
@@ -103,7 +104,10 @@ export function presentRoute(plan, view, context) {
     const audit=command(['node',`${root}/scripts/launch-audit.mjs`,'--name',name,'--project',task.project,'--role',s.role,'--vendor',vendor,'--account',an,'--model',c.modelId,
       '--effort',c.effort,'--sandbox',task.sandbox,'--routed-seat',JSON.stringify(routed),...(f['user-ok']?['--user-ok',f['user-ok']]:[])]);
     if(vendor==='claude') {
-      out.command=`${audit} && cd ${shellQuote(cwd)} && ${command(['claude','--bg','--remote-control','--permission-mode','bypassPermissions','-n',name,'--model',c.modelId,'--effort',c.effort,'--append-system-prompt',`Global worker rules ${digest.version}\n${digest.worker}`,prompt])}`;
+      const trustedCwd = context.trustedCwd ?? task.flags['trusted-cwd'] ?? cwd;
+      if (!task.flags['trusted-cwd'] && !context.trustedCwd) notes.push('Claude launch: no trusted project root configured; launch uses the working directory; verify it is trusted or pass --trusted-cwd with the trusted project root.');
+      const claudePrompt = `Working directory: ${cwd}. ${prompt}`;
+      out.command=`${audit} && cd ${shellQuote(trustedCwd)} && ${command(['claude','--bg','--remote-control','--permission-mode','bypassPermissions','-n',name,'--model',c.modelId,'--effort',c.effort,'--append-system-prompt',`Global worker rules ${digest.version}\n${digest.worker}`,claudePrompt])}`;
       return out;
     }
     const args=['--account',an,'start','--cwd',cwd,'--model',launchModel,'--effort',c.effort,'--sandbox',task.sandbox,'--name',name,
@@ -117,6 +121,7 @@ export function presentRoute(plan, view, context) {
     if(primary&&queueAlternative?.startDelayMin!==null && queueAlternative?.startDelayMin!==undefined) args.push('--queue-alt-start-min',String(queueAlternative.startDelayMin));
     if(task.category==='computer-use') args.push('--computer-use-apps',task.allowedApps.join(','));
     if(['browser','ui-browser'].includes(task.category)) args.push('--browser-origins',task.allowedOrigins.join(','));
+    if(task.flags['no-browser-preflight']) args.push('--no-browser-preflight');
     out.workerArgs=args;
     const oneShot=['lookup','extract','draft','image-gen','second-opinion'].includes(task.category)&&!task.background&&!f.worker&&!low&&c.modelId!=='gpt-6-astra';
     if(oneShot) {
@@ -165,6 +170,7 @@ export function presentRoute(plan, view, context) {
       if(t.execution==='remote') notes.push('remote/CI build (--no-local-build): no local heavy-build/lane lock and no local verify throttle — do not take res locks or pass --shared-lock; shared remote entry scripts stay unthrottled');
       else notes.push('build brief: full-package builds must use scripts/heavy-build.sh or an equivalent ONE-process wrapper around res take-build/wait-build/return-build (res v1.5): acquire heavy-build plus one free admitted lane together, holding neither resource while waiting for the other; live full-build waiters receive the next free lane in FIFO order, without reservations for dead, gate-blocked or foreign-held builds; reverse return on every exit. Normal gate remains min(20, 12 + 8 * other lanes), memory >=16 GiB; STALE and caller-owned locks excluded. lane 3 is available only after reviewed owner switch, at load1m <=8 AND available memory >=32 GiB; lane3=OPEN|CLOSED. UNKNOWN blocks admission; timeout means report/queue. Locks are only for genuine local heavy compute; remote pipeline deploys and CI runs never take one; use --no-local-build. One long-lived watched wrapper owns acquisition/build/return; never hold a device/build resource while queued.');
     }
+    notes.push('takeover/continuation and publish/build-run brief: carry the full checked checklist — exact commands, non-secret variables and expected artifacts. Never write "repeat the last steps".');
     if(t.category==='build-run') notes.push(t.env==='test'&&t.stakes!=='high'?'test-environment build-run: follow written steps and pinned health/restore checks; report unexpected errors. env=test does not prove the run is remote.':'deploy/release brief: pin baseline/control probes, health thresholds, sample intervals and observation window, rollback triggers and exact prior artifact/config restore steps before acting; unexpected evidence needs stronger-model judgment.');
     if(phones.length&&(['build-run','ui-browser','computer-use'].includes(t.category)||f['device-lease'])) notes.push(`registered shared test phones ${phones.join(', ')} are pre-authorized for OUR OWN apps: tap ordinary Allow/Authorize/Trust/OK dialogs without a new per-prompt card. Never operate personal iPhone 15 Pro Max or unregistered devices. Device lease: at most 2 h; back up app data before a destructive reinstall/wipe/erase; take the lease/lock only after the first model response.`);
     if(['browser','ui-browser'].includes(t.category)) notes.push('Chrome must be running before the worker starts; use the named signed-in browser and exact origins. Never switch to another connected browser or bypass a login. Public/local Playwright does not grant signed-in console access.');
@@ -196,6 +202,7 @@ export function presentRoute(plan, view, context) {
   if(['build-run','ui-browser','computer-use'].includes(t.category)||f['device-lease']) {
     notes.push("device work uses a guarded executor with continuous idle evidence and every orchestrator's release; lease at most 2 h, then return the device and report; device connected, unlocked, app data backed up.");
     if(phones.length) notes.push(`registered shared test phones ${phones.join(', ')}: ordinary Allow/Authorize/Trust/OK dialogs have no per-prompt approval or button whitelist; includes camera, microphone, photos, notifications, local network, tracking, developer trust, USB debugging and install confirmations. Never operate personal iPhone 15 Pro Max (policy=never) or a device not registered in res.`);
+    notes.push('iOS app-data backup: exclude iOS-protected Library/SplashBoard/; verify the backup is readable before any install. When save data matters, install over the top to preserve it; destructive reinstall/wipe/erase requires a verified backup.');
     notes.push('Take/return through res; lease <=2 h; back up app data before destructive operations; never enter personal-account credentials, passwords or verification codes; no purchases. If Codex refuses an allowed device prompt, re-route that step to Claude instead of asking the user to tap it.');
   }
   if(c&&candidateParts(snapshot,c).account.kind==='trae') {
@@ -220,7 +227,7 @@ export function presentRoute(plan, view, context) {
   notes.push('launch audit: every launch must match its route/actual task identity; --user-ok is only a reference to a real scoped decision, never inferred from urgency.');
   const profile=snapshot.projectProfiles?.[t.project]; if(profile) notes.push(`project profile ${profile.profile}${profile.landingGate ? `; landing gate: ${profile.landingGate}` : ''}`);
   const blocked=plan.kind==='blocked', pick=seat?launch(seat,plan.kind==='launch'):null;
-  return { category:t.category,stakes:t.stakes,failures:t.failures,security:t.contentLabels.includes('security'),adversarial:adversarial(t),defensive:!!f.defensive,signing:!!f.signing,
+  return { category:t.category,stakes:t.stakes,failures:t.failures,failureKind:t.failureKind,security:t.contentLabels.includes('security'),adversarial:adversarial(t),defensive:!!f.defensive,signing:!!f.signing,
     background:t.background,tier:t.tier,kind:plan.kind,blocked,executable:plan.kind==='launch',routeId:plan.routeId,planHash:plan.planHash,
     deferred:plan.kind==='defer'?plan.reason.text:(!pick&&blocked?plan.reasons.map((r)=>r.text).join('; '):null),
     deferUntil:plan.deferUntil??null,deferReason:plan.reason?.text??null,deferRunnerUp:plan.runnerUp?{model:plan.runnerUp.modelId,account:plan.runnerUp.accountId}:null,

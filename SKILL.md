@@ -409,7 +409,7 @@ effort, Codex account and launch command from
   - `--stakes low|normal|high` — what a wrong answer costs;
   - `--auto-check` when a test, build or exact acceptance check will catch a miss;
   - `--failures N`: how often this task has already visibly fallen short, counted per task and kept
-    in the ledger. Each failure moves it one step up the escalation ladder. Count one when a result
+    in the ledger. Use `--failure-kind quality|tool|infra` (default quality). Quality failures escalate; browser/desktop tool failures move to the next capable channel, using `--actual vendor:model:effort@account` when known. Infrastructure failures retain the floor and exclude the failed lane/account as appropriate. Count one when a result
     fails your verification, a worker stalls or reports something beyond its depth;
   - `--writes` / `--read-only`, `--against <vendor>` for a second opinion, `--runs-tests` when a non-writing worker
     needs workspace-write for test-generated files, and `--sandbox workspace-write|read-only` for an explicit narrower
@@ -419,8 +419,7 @@ effort, Codex account and launch command from
   - Code work requires `--impact service|throwaway|release`. Release is strictly class A: reaches an externally released version and cannot be rolled back within hours; declare `--review-class A --review-reason`. Reading/writing local or user data is not release. Real irreversible data operations are class C (`--review-class C`). Personal/family apps, internal demos, PPE/test environments, test packages, and features that only read existing data are not release; ordinary reversible features are service.
   - `--env test|prod` (default `prod`) and `--no-local-build` for `build-run`: `--env test` marks a
     PPE/staging/dev procedural deploy and gives it the light tier on both company accounts (TTADK
-    5.6-Terra/5.5, TRAE light list). Production (`--impact release` without `--env test`) and high
-    stakes keep Sol medium with the pinned health/rollback criteria. A failed light run escalates to
+    5.6-Terra/5.5, TRAE light list). A real external release (`--impact release --review-class A --review-reason …`) stays at least normal even with `--env test`, low stakes or background; high stakes remains hard. Device/test builds without class A are light with `--env test`. Environment does not identify execution location: local compilers/packaging require one watched wrapper with the applicable locks; remote pipelines and CI never take local heavy locks. A failed light run escalates to
     Sol medium — never sideways to another light model. `--no-local-build` marks a remote/CI run, so
     no local heavy-build/lane lock or verify throttle applies;
   - `--security` for security/attack-flavoured work (vulnerability/exploit hunting, auth/session/credential handling,
@@ -477,15 +476,14 @@ effort, Codex account and launch command from
     other hard failures such as quota: 30 min, then a probe;
     auth pauses the account); record traecli exec failures with `codex-worker.mjs --account trae note-failure
     --model <model>`, so work moves on instead of failing task by task.
-  - Fallback models (user, 2026-11-10): when the company account's GPT is out, route.mjs uses DeepSeek-V4.1-Flash,
+  - Normal/light fallback models (user, 2026-11-10): when the company account's GPT is out, route.mjs uses DeepSeek-V4.1-Flash,
     then Gemini-3.1-Pro if listed (gone from TRAE on 2026-11-13), before any personal quota; DeepSeek-V4-Pro is removed.
     When Sol falls short, preserve the actual quality floor; a retained same-model max step may run on either company account without a quota question. Apply the model-fit exclusions and daily-quota choices in references/model-routing.md.
     Their code retains executable acceptance requirements; mandatory review comes only from an explicit A–D class. An infrastructure miss (timeout, queue-full rejection,
     restricted) on one task: re-route with `--exclude-model <model or family>`, same `--failures`
-    (references/model-routing.md, "Fallback models on the company account").
+    (see [routing evidence](references/model-evidence.md)).
   - Difficulty-tiered TRAE substitutions (user-approved 2026-11-13): hard (`implement-hard`, `debug`, `science`,
-    `review-high`, `design`, or high stakes, or `--failures >= 1` on CODE rows) uses Sol → Astra → eligible existing
-    fallbacks only when both are unusable; normal uses Sol → 5.6-Sol → 5.6-Terra → Flash; light (lookup/extract/draft,
+    `review-high`, `design`, or high stakes, or `--failures >= 1` on CODE rows) uses Sol → Astra only; when both are unusable, personal strong-model alternatives retain their approval gates; normal uses Sol → 5.6-Sol → 5.6-Terra → Flash; light (lookup/extract/draft,
     low stakes or `--background`, unless hard) uses 5.6-Terra → 5.5 → Flash. Astra is reserved for hard substitutions;
     hard never substitutes 5.6-Sol/Terra/5.5. The same table governs balancing/background choices. Unknown quota changes
     nothing; exclusions and vision rules still apply. Walk quality order across both company accounts, then prefer free TRAE for that model. TTADK keeps its fresh catalog: normal/hard work starts at 6.1-Sol;
@@ -551,8 +549,7 @@ effort, Codex account and launch command from
     reviews and designs.
 - **Follow its output:**
   - Launch with the printed command and say the one-line `why` to the user.
-  - Ask the user first for anything under "needs the user's OK" (Fable, Astra, `max`, an exhausted
-    ladder, a card redemption); company max does not need an OK.
+  - Ask the user first for anything printed under "needs the user's OK": personal quota, personal ChatGPT Astra, personal `max`, Fable, or a reset-card redemption. Qualified company Astra and company `max` need no quota approval.
   - A second reviewer is printed only for class D adversarial reviews, review-high with a review class, or class A release reviews. Start that classified second reviewer when its gates allow; otherwise there is nothing to start.
   - On `DEFER`, present its user question, record the explicit wait in the ledger and schedule its retry; no runnable authorized lane may be parked.
   - If the user declines a pending card redemption, re-run with `--no-redeem` for the fallback.
@@ -624,10 +621,10 @@ and take-time notes at `~/.claude/orchestrator/_shared/notes/heavy-build.md`. Us
   the installed lanes only. Telemetry may observe optional lane 3, but never implements or admits it.
   Host unit tests without a full native build, single-TU compiles, analysis/docs and build-free device sessions are
   not heavy. **Remote work is never heavy:** PPE/staging/TCE/BITS/SCM deploys, cloud/remote pipelines, CI runs and
-  `build-run --env test` procedural deploys never take `heavy-build`, a lane, or `--shared-lock`. Pass
+  remote `build-run --no-local-build` procedural deploys never take `heavy-build`, a lane, or `--shared-lock`. Pass
   `--no-local-build` on the route for such a run; it also skips the local heavy-build note. Shared remote/CI entry
   scripts stay unthrottled — a local `res` lock or `verify-throttle` belongs in a local-only wrapper, never in the
-  shared entry (route.mjs's `--no-local-build` / `--env test` record the distinction).
+  shared entry (`--no-local-build` / `--execution remote` record execution location; `--env test` alone does not).
   These caps never lower model-worker concurrency; keep independent ready work running.
 - **Take and gate:** `res take <id> --by <session> --project <slug> --for "<purpose>" --task <task-id> --pid $$`
   returns 0 taken, 2 busy. Plain `take` must first pass `res heavy-check` (0 OK, 5 overloaded; invalid/unreadable
@@ -698,7 +695,7 @@ and take-time notes at `~/.claude/orchestrator/_shared/notes/heavy-build.md`. Us
   Include a two/three-line nightly utilisation summary: idle CPU with ready work, gate/memory time, lane occupancy,
   quota unused at reset, queue hours and top idleness causes. Read idle hints on every wake as above.
 - Device leases last at most **2 h**, then the worker returns the device and reports results/remaining work. Put the
-  preflight in the brief: device connected, unlocked, app data backed up; include the return command and deadline.
+  preflight in the brief: device connected, unlocked, app data backed up; include the return command and deadline. For iOS backups exclude protected `Library/SplashBoard/`, verify the backup is readable before any install, and install over the top when save data matters.
 - The registered shared test phones are **iphone8, iphone11 and s21**. They are pre-authorized for ordinary
   permission/trust/install dialogs from our own apps; the personal iPhone 15 Pro Max (`policy=never`) and every
   unregistered device are forbidden. This device-dialog authorization does not authorize credentials, verification
@@ -762,8 +759,8 @@ short, batch updates that arrive together, and reply in the user's language.
 
 - **Messaging tools** are deferred: load `SendMessage` and `ListAgents` with ToolSearch first. The
   header of `ListAgents` gives this session's own name — workers address their reports to it.
-- **Launch a worker** from its workspace:
-  `cd <workspace> && claude --bg --remote-control --permission-mode bypassPermissions -n <name> "<one line pointing at the brief>"`.
+- **Launch a worker** from the trusted project root (`--trusted-cwd`, otherwise the configured project root); put `Working directory: <workspace>` in its brief prompt:
+  `cd <trusted project root> && claude --bg --remote-control --permission-mode bypassPermissions -n <name> "Working directory: <workspace>. Read <task dir>/brief.md and follow it."`.
   It prints `backgrounded · <id> · <name>`. Always pass Remote Control and explicit **Bypass** (user, 2026-11-13):
   `route.mjs` no longer reads `settings.json` `defaultMode`; `--mode` is compatibility-only and does not change either
   worker family's permissions. Codex retains the sandbox selected from write/test intent or an explicit narrower
@@ -830,7 +827,7 @@ short, batch updates that arrive together, and reply in the user's language.
   back with its conversation, optionally on a different model and effort (verified on 2.1.302; it
   gets a new short id, so look it up again). Resume needs the full session id — the `sessionId`
   field of `claude agents --json --all`, or the `<id>.jsonl` name under
-  `~/.claude/projects/<cwd slug>/` — and should run from the worker's original workspace.
+  `~/.claude/projects/<cwd slug>/` — and should run from the trusted project root, with the worker's working directory stated in its brief.
   A background session keeps its own saved options: resuming it *with* new flags starts a **copy**
   (new id, same conversation, new settings) and leaves the original as it was; without flags the
   same command continues the original. The copy and the original then share the worker's name, so
@@ -865,3 +862,7 @@ short, batch updates that arrive together, and reply in the user's language.
 Release impact means class A only: a version reaches external users and cannot be rolled back within hours. Reading/writing local or user data is not release; real irreversible data operations are class C. Personal/family apps, internal demos and PPE/test packages, or features that only read existing data are not release.
 
 Project defaults are configured in `references/project-risk-profiles.json`: new projects retain the standard four-class policy. evelyns-world/acq and autotrader (for now) use the user-approved no-review profile: accept on tests/build and print no reviewer unless the user asks by explicit class/reason; nightly reports counts and excludes their review-share targets.
+
+Routing history, benchmark results, Kimi-K3 reviewer rationale, TRAE bucket observations and dated decisions are preserved in [model-evidence.md](references/model-evidence.md). Current selection rules are in [model-routing.md](references/model-routing.md).
+
+Takeover/continuation and publish/build-run briefs carry the full checked checklist: exact commands, non-secret variables and expected artifacts; never write "repeat the last steps". Browser turns run bounded extension/host preflight before the turn; `--no-browser-preflight` skips that check. Project `browserOrigins` are merged with the policy defaults and explicit `--origins`; acq is an example, edit as needed.
