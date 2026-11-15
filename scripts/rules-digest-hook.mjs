@@ -13,7 +13,7 @@ try {
   let raw = '';
   for await (const part of process.stdin) { raw += part; if (Buffer.byteLength(raw) > 65536) throw Error('input too large'); }
   const input = JSON.parse(raw);
-  if (!input || input.hook_event_name !== 'SessionStart' || !['startup', 'resume', 'compact'].includes(input.source)
+  if (!input || input.hook_event_name !== 'SessionStart' || !['startup', 'resume', 'compact', 'fork', 'clear'].includes(input.source)
     || typeof input.session_id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$/.test(input.session_id)
     || ['__versions', '__proto__', 'constructor', 'prototype'].includes(input.session_id)) process.exit(0);
   const file = path.join(rulesShared(), 'rules-seen.json');

@@ -72,13 +72,14 @@ try {
   const hookEvent = record('hook-owner', 'finished', 'hook-finished');
   const blocked = hookRun(input('hook-owner')); assert.equal(blocked.output.decision, 'block');
   assert.match(blocked.output.reason, /hook-finished.*read/); assert.ok(readAck('hook-owner').delivered[hookEvent.id]);
-  assert.ok(blocked.ms < 300, `hook: ${blocked.ms}ms`);
+  assert.ok(blocked.ms < 2000, `hook: ${blocked.ms}ms (settings timeout)`);
   assert.equal(hookRun(input('hook-owner')).output, null);
   record('running-owner', 'running', 'running-worker');
   assert.match(hookRun(input('running-owner')).output.reason, /arm the watcher:.*watch --owner running-owner/);
   assert.equal(hookRun(input('running-owner', { stop_hook_active: true })).output, null, 'block watcher request once');
   record('running-owner', 'finished', 'new-result');
-  assert.equal(hookRun(input('running-owner', { stop_hook_active: true })).output.decision, 'block', 'new completions still delivered');
+  assert.equal(hookRun(input('running-owner', { stop_hook_active: true })).output, null, 'new completions never bypass the stop-cycle guard');
+  hookRun(input('running-owner'));
   const armed = start(worker, ['watch', '--owner', 'running-owner']);
   await until(() => hasWatcher('running-owner'), 'second watcher armed');
   assert.equal(hookRun(input('running-owner')).output, null);
@@ -93,7 +94,7 @@ try {
   const idleStart = performance.now(), idleHook = start(hook, []);
   const idleResult = await idleHook.done;
   assert.equal(idleResult.code, 0); assert.equal(idleResult.stdout, ''); assert.equal(idleResult.stderr, '');
-  assert.ok(performance.now() - idleStart < 300, 'unterminated stdin is fail-open below 300ms');
+  assert.ok(performance.now() - idleStart < 2000, 'unterminated stdin is bounded by the settings timeout');
   const stalledIO = path.join(tmp, 'inbox-stalled-io.mjs');
   fs.writeFileSync(stalledIO, `import fs from 'node:fs/promises';
 const open = fs.open;
@@ -102,8 +103,8 @@ fs.open = (file, ...args) => String(file).endsWith('worker-events.jsonl') ? new 
   const stalledStart = performance.now();
   const ioResult = spawnSync(process.execPath, ['--import', stalledIO, hook], { env, input: JSON.stringify(input('stalled-io')), encoding: 'utf8', timeout: 1000 });
   assert.equal(ioResult.status, 0); assert.equal(ioResult.stdout, ''); assert.equal(ioResult.stderr, '');
-  assert.ok(performance.now() - stalledStart < 300, 'stalled event I/O is fail-open below 300ms');
-  fs.rmdirSync(`${ackFile('stalled-io')}.lock`);
+  assert.ok(performance.now() - stalledStart < 2000, 'stalled event I/O is bounded by the settings timeout');
+  assert.equal(fs.existsSync(`${ackFile('stalled-io')}.lock`), false, 'the hard deadline releases its acknowledgement lock');
   const bridgeFile = path.join(tmp, 'session-env');
   record('resume-owner', 'finished', 'resume-result');
   assert.match(hookRun(input('resume-owner', { hook_event_name: 'SessionStart', source: 'resume' }), { CLAUDE_ENV_FILE: bridgeFile }).output.hookSpecificOutput.additionalContext, /resume-result/);
@@ -119,12 +120,14 @@ fs.open = (file, ...args) => String(file).endsWith('worker-events.jsonl') ? new 
   assert.ok(Date.now() - recoveredAt < 300, 'a dead writer cannot suppress the next completion for the stale timeout');
   record('locked-owner', 'finished', 'locked');
   fs.mkdirSync(`${ackFile('locked-owner')}.lock`);
-  assert.ok(hookRun(input('locked-owner')).ms < 300); assert.equal(readAck('locked-owner').delivered.locked, undefined);
+  assert.equal(hookRun(input('locked-owner')).output, null); assert.equal(readAck('locked-owner').delivered.locked, undefined);
   fs.rmdirSync(`${ackFile('locked-owner')}.lock`);
   for (let i = 0; i < 12; i++) record('batch-owner', 'finished', `batch-${i}`);
   hookRun(input('batch-owner'));
   assert.equal(inbox(readEvents(), 'batch-owner', readAck('batch-owner')).pending.length, 2, 'acknowledge only the printed batch');
   hookRun(input('batch-owner', { stop_hook_active: true }));
+  assert.equal(inbox(readEvents(), 'batch-owner', readAck('batch-owner')).pending.length, 2, 'continuation leaves the remaining events pending');
+  hookRun(input('batch-owner'));
   assert.equal(inbox(readEvents(), 'batch-owner', readAck('batch-owner')).pending.length, 0);
   fs.writeFileSync(ackFile('malformed-ack-owner'), '{"owner":"malformed-ack-owner","delivered":null}');
   record('malformed-ack-owner', 'finished', 'malformed-ack');
@@ -139,9 +142,8 @@ fs.open = (file, ...args) => String(file).endsWith('worker-events.jsonl') ? new 
   record('race-owner', 'finished', 'race-event');
   await until(() => (raceA.output() + raceB.output()).includes('race-event'), 'one racing watcher delivered');
   await new Promise((r) => setTimeout(r, 180));
-  assert.equal((raceA.output() + raceB.output()).split('race-event').length - 1, 1, 'serialized delivery prevents duplicate concurrent print');
-  for (const r of [raceA, raceB]) if (r.child.exitCode === null) r.child.kill('SIGTERM');
-  await raceA.done; await raceB.done;
+  assert.equal((raceA.output() + raceB.output()).split('race-event').length - 1, 1, 'one claimed watcher delivers; the redundant watcher exits');
+  assert.equal((await raceA.done).code, 0); assert.equal((await raceB.done).code, 0);
 
   for (const command of ['start', 'turn', 'wait']) {
     const r = follow(`success-${command}`, command, command === 'wait' ? { status: 'completed' } : {});

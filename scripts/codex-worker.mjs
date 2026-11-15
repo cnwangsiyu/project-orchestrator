@@ -53,7 +53,7 @@ import { loadDigest, auditLaunch, rulesLog } from './lib/global-rules.mjs';
 import { isPolicyBlock, policyBlockRecord, appendPolicyBlock, policyBlockAction } from './lib/policy-block.mjs';
 import { runHubForeground, hubListReachable } from './lib/hub-foreground.mjs';
 import { parseRouteArgs, routeFlag, rerouteWorker, turnHasWork } from './lib/worker-reroute.mjs';
-import { lifecycle, resolveOwner, validOwner, inbox, readEvents, readAck, eventLine, watch, signalExit } from './lib/worker-events.mjs';
+import { lifecycle, resolveOwner, validOwner, inbox, readEvents, readAck, eventLine, watch, signalExit, appendEvent } from './lib/worker-events.mjs';
 // What a TRAE pause covers: one model family (route.mjs moves to the next family) or the whole account.
 const pausedWhat = (p) => (p.pool ? `TRAE's ${p.pool} models are paused` : 'TRAE is paused');
 // A model TRAE no longer resolves (2026-11-13: it dropped Gemini): that model alone is out of routing for 6 h.
@@ -139,11 +139,13 @@ if (cmd === 'watch' || cmd === 'mine') {
         const output = execFileSync(process.execPath, [...process.execArgv, fileURLToPath(import.meta.url), '--account', row.account,
           'status', '--thread', row.thread], { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] });
         observed = JSON.parse(output.trim()); status = observed.last?.status ?? 'unknown';
+        if (observed.last && ['completed', 'failed', 'interrupted'].includes(status)) appendEvent({ ...row, event: 'observed', mayRun: false,
+          turn: observed.last.id, status, stale: false, finalLine: `hub confirms ${status}; read the result or reattach with wait` });
       } catch {}
     } else {
       try { process.kill(row.pid, 0); status = 'running'; } catch {}
     }
-    console.log(`${row.name}\t${status === 'inProgress' ? 'running (hub)' : status}\t${row.outFile ?? '-'}\tthread=${row.thread ?? '-'} account=${row.account}`);
+    console.log(`${row.name}\t${status === 'inProgress' ? 'running (hub)' : status}${row.stale && status === 'unknown' ? ' (stale follower; hub status unconfirmed)' : ''}\t${row.outFile ?? '-'}\tthread=${row.thread ?? '-'} account=${row.account}`);
   }
   process.exit(0);
 }

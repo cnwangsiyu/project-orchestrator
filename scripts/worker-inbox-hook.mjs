@@ -8,7 +8,7 @@ import { validOwner, readInboxAsync, deliverAsync, hasWatcherAsync, eventLine } 
 
 process.on('uncaughtException', () => process.exit(0));
 process.on('unhandledRejection', () => process.exit(0));
-// Leave startup overhead below the 300 ms budget; stalled I/O cannot hold the session.
+// Bound work inside the process; the settings timeout also covers cold process startup.
 const deadline = setTimeout(() => process.exit(0), 220);
 const output = (value) => new Promise((resolve, reject) => process.stdout.write(JSON.stringify(value) + '\n',
   (error) => error ? reject(error) : resolve()));
@@ -17,11 +17,12 @@ try {
   for await (const part of process.stdin) { raw += part; if (Buffer.byteLength(raw) > 65536) throw Error('large input'); }
   const input = JSON.parse(raw);
   if (!input || !validOwner(input.session_id) || !['Stop', 'SessionStart'].includes(input.hook_event_name)
-    || (input.hook_event_name === 'SessionStart' && !['startup', 'resume', 'compact'].includes(input.source))) process.exit(0);
+    || (input.hook_event_name === 'SessionStart' && !['startup', 'resume', 'compact', 'fork', 'clear'].includes(input.source))) process.exit(0);
+  // A continuation never blocks again, even if new events arrived or the previous acknowledgement failed.
+  if (input.hook_event_name === 'Stop' && input.stop_hook_active === true) process.exit(0);
   let seen = {}; try { seen = JSON.parse(await readSmall(path.join(rulesShared(), 'rules-seen.json'), 4 * 1024 * 1024)); } catch {}
   if (!await orchestrator(input, seen ?? {})) process.exit(0);
   const owner = input.session_id, start = input.hook_event_name === 'SessionStart';
-  const budgets = { maxAckBytes: 4 * 1024 * 1024 };
   if (start && process.env.CLAUDE_ENV_FILE) {
     // Append only the public owner ID; never read or copy the environment file.
     await fs.appendFile(process.env.CLAUDE_ENV_FILE, `\nexport ORCHESTRATOR_OWNER='${owner}'\n`);
@@ -31,9 +32,10 @@ try {
       + '\nHandle finished workers first; then re-arm codex-worker watch as a run_in_background task if workers remain.';
     await output(start ? { hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: reason } }
       : { decision: 'block', reason });
-  }, 10, budgets);
+  }, 10);
+  if (delivery.failed) process.exit(0);
   if (delivery.delivered.length) process.exit(0);
-  const running = delivery.running ?? (await readInboxAsync(owner, budgets)).running;
+  const running = (delivery.running ?? (await readInboxAsync(owner)).running).filter((row) => !row.stale);
   const ownerPattern = owner.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const registered = !Array.isArray(input.background_tasks) || input.background_tasks.some((task) => task.type === 'shell'
     && typeof task.command === 'string' && /codex-worker\.mjs["']?\s+watch\b/.test(task.command)
