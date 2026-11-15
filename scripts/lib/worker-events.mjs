@@ -22,10 +22,13 @@ const receiptFile = (owner) => path.join(rulesShared(), 'worker-ack-history', `$
 const watcherFile = (owner) => path.join(rulesShared(), 'worker-watchers', `${ownerKey(owner)}.claim`);
 const clean = (value) => typeof value === 'string' ? value.replace(/[\r\n\t\x00-\x1f]/g, ' ').slice(0, 2000) : '-';
 const live = (pid) => { try { return Number.isInteger(pid) && pid > 0 && (process.kill(pid, 0), true); } catch (e) { return e.code === 'EPERM'; } };
-const notification = (row) => row.event !== 'running' && row.event !== 'observed';
+const talkback = (row) => ['message', 'question', 'answered'].includes(row.event);
+const terminal = (row) => !talkback(row) && row.event !== 'running';
+const notification = (row) => row.event !== 'running' && row.event !== 'observed' && row.event !== 'answered'
+  && !(row.event === 'message' && row.wake === false);
 const parseRows = (text) => text.split('\n').flatMap((line) => {
   try { const row = JSON.parse(line); return typeof row?.id === 'string' && typeof row.runId === 'string' && Number.isFinite(row.t)
-    && (row.owner == null || validOwner(row.owner)) && ['running', 'finished', 'failed', 'stalled', 're-routed', 'needs-user', 'follower-ended', 'observed'].includes(row.event) ? [row] : []; } catch { return []; }
+    && (row.owner == null || validOwner(row.owner)) && ['running', 'finished', 'failed', 'stalled', 're-routed', 'needs-user', 'follower-ended', 'observed', 'message', 'question', 'answered'].includes(row.event) ? [row] : []; } catch { return []; }
 });
 const readText = (file) => { try { return fs.readFileSync(file, 'utf8'); } catch (e) { if (e.code === 'ENOENT') return ''; throw e; } };
 export const readEvents = () => parseRows(readText(eventFile()));
@@ -47,7 +50,8 @@ const acknowledged = (row, ack) => (Number.isSafeInteger(row.seq) && row.seq <= 
 const nextAck = (ack, rows, transaction = ack.transaction) => {
   const t = Date.now(), delivered = Object.fromEntries(Object.entries(ack.delivered).filter(([, receipt]) => receipt?.t >= t - RETENTION_MS).slice(-ACK_RECEIPTS));
   for (const row of rows) delivered[row.id] = { t, seq: row.seq, name: row.name, event: row.event, outFile: row.outFile,
-    finalLine: row.finalLine ?? '', runId: row.runId };
+    finalLine: row.finalLine ?? '', runId: row.runId, account: row.account, thread: row.thread,
+    kind: row.kind, text: row.text, questionId: row.questionId, timeoutMin: row.timeoutMin, default: row.default };
   return { owner: ack.owner, transaction: transaction ?? null,
     highWater: rows.reduce((high, row) => Math.max(high, row.seq ?? 0), ack.highWater ?? 0),
     delivered: Object.fromEntries(Object.entries(delivered).slice(-ACK_RECEIPTS)) };
@@ -139,8 +143,9 @@ const auditRows = () => {
 export const inbox = (rows, owner, ack = emptyAck(owner), now = Date.now()) => {
   const own = rows.filter((row) => row.owner === owner), latest = new Map(), turns = new Map(), threads = new Map();
   own.forEach((row, i) => {
+    if (talkback(row)) return;
     latest.set(row.runId, { row, i });
-    if (row.thread && !row.mayRun && (notification(row) || row.event === 'observed')) {
+    if (row.thread && !row.mayRun && terminal(row)) {
       threads.set(JSON.stringify([row.account, row.thread]), i);
       if (row.turn) turns.set(JSON.stringify([row.account, row.thread, row.turn]), i);
     }
@@ -164,6 +169,10 @@ const compactLocked = (state, now = Date.now()) => {
   atomicSync(sequenceFile(), JSON.stringify({ ...state, nextSeq: seq }));
   if (migrating) atomicSync(eventFile(), rows.map((row) => JSON.stringify(row)).join('\n') + '\n');
   const keep = new Set(rows.slice(-64).map((row) => row.id));
+  // Delivery acknowledgement does not close a question. Preserve it until reply/deadline;
+  // hourly note accounting must survive compaction, including suppressed notes.
+  for (const row of rows) if ((row.event === 'message' && row.t > now - 3600000)
+    || (row.event === 'question' && row.expiresAt > now)) keep.add(row.id);
   for (const owner of new Set(rows.map((row) => row.owner))) {
     const file = validOwner(owner) ? ackFile(owner) : null;
     let release;
@@ -191,6 +200,8 @@ const compactLocked = (state, now = Date.now()) => {
       }
     } finally { release?.(); }
   }
+  const retainedQuestions = new Set(rows.filter((row) => row.event === 'question' && keep.has(row.id)).map((row) => row.questionId));
+  for (const row of rows) if (row.event === 'answered' && retainedQuestions.has(row.questionId)) keep.add(row.id);
   const removed = rows.filter((row) => !keep.has(row.id));
   if (removed.length) atomicSync(path.join(historyDir(), `${now}-${randomUUID()}.jsonl`), removed.map((row) => JSON.stringify(row)).join('\n') + '\n');
   if (rows.length) {
@@ -204,7 +215,7 @@ export const compactWorkerEvents = (now = Date.now(), { wait = true } = {}) => w
   let state = {}; try { state = JSON.parse(readText(sequenceFile())); } catch {}
   return compactLocked(state, now);
 }, wait);
-export const appendEvent = (row) => withEventLock(() => {
+const appendLocked = (row) => {
   let state = {}; try { state = JSON.parse(readText(sequenceFile())); } catch {}
   const size = fs.existsSync(eventFile()) ? fs.statSync(eventFile()).size : 0;
   if (state.version !== 2 || size - (state.compactedSize ?? 0) > ROTATE_BYTES || Date.now() - state.compactedAt > 60000)
@@ -220,6 +231,59 @@ export const appendEvent = (row) => withEventLock(() => {
     fs.writeFileSync(fd, `${n && last[0] !== 10 ? '\n' : ''}${JSON.stringify(record)}\n`); fs.fsyncSync(fd);
   } finally { fs.closeSync(fd); }
   return record;
+};
+export const appendEvent = (row) => withEventLock(() => appendLocked(row));
+
+const publicPair = (account, thread) => {
+  if (![account, thread].every(validOwner)) throw Error('invalid public account/thread identifier');
+};
+export const contextFile = (account, thread) => {
+  publicPair(account, thread);
+  return path.join(rulesShared(), 'worker-context', account, `${thread}.json`);
+};
+export const saveWorkerContext = (metadata) => {
+  const file = contextFile(metadata.account, metadata.thread);
+  atomicSync(file, JSON.stringify({ ...metadata, t: Date.now() }));
+  return file;
+};
+export const workerContext = (account, thread, optional = false) => {
+  const record = JSON.parse(readText(contextFile(account, thread)) || 'null');
+  if (!record && optional) return null;
+  if (!record || record.account !== account || record.thread !== thread || !validOwner(record.owner))
+    throw Error('no launching owner in worker context; use the account/thread supplied by the launcher');
+  return record;
+};
+export const replyFile = (account, thread, question) => {
+  publicPair(account, thread);
+  if (!validOwner(question)) throw Error('invalid question identifier');
+  return path.join(rulesShared(), 'worker-replies', account, thread, `${question}.json`);
+};
+export const openQuestions = (rows, { owner, account, thread, now = Date.now() } = {}) => {
+  const answered = new Set(rows.filter((row) => row.event === 'answered').map((row) => JSON.stringify([row.account, row.thread, row.questionId])));
+  return rows.filter((row) => row.event === 'question' && row.expiresAt > now
+    && (owner === undefined || row.owner === owner) && (account === undefined || row.account === account)
+    && (thread === undefined || row.thread === thread) && !answered.has(JSON.stringify([row.account, row.thread, row.questionId])))
+    .sort((a, b) => a.seq - b.seq);
+};
+export const appendNote = (metadata, kind, text) => withEventLock(() => {
+  const count = readEvents().filter((row) => row.event === 'message' && row.account === metadata.account
+    && row.thread === metadata.thread && row.t > Date.now() - 3600000 && row.wake !== false).length;
+  return appendLocked({ ...metadata, event: 'message', kind, text: text.slice(0, 500),
+    truncated: text.length > 500, wake: count < 6 && text.length <= 500 });
+});
+export const answerQuestion = ({ owner, account, thread, questionId, text }) => withEventLock(() => {
+  publicPair(account, thread);
+  const question = openQuestions(readEvents(), { owner, account, thread }).filter((row) => !questionId || row.questionId === questionId).at(-1);
+  if (!question) return null;
+  const file = replyFile(account, thread, question.questionId);
+  // Never replace an answer if a writer died between the file and event commits.
+  let answer; try { answer = JSON.parse(readText(file)); } catch {}
+  if (!answer) {
+    answer = { account, thread, questionId: question.questionId, owner: question.owner, text, t: Date.now() };
+    atomicSync(file, JSON.stringify(answer));
+  }
+  appendLocked({ ...question, event: 'answered', text: answer.text, answeredAt: answer.t });
+  return answer;
 });
 
 const firstLine = (file) => {
@@ -232,7 +296,12 @@ const firstLine = (file) => {
     return buf.subarray(0, n).toString('utf8').split('\n').find((line) => line.trim()) ?? '';
   } catch { return ''; } finally { if (fd !== undefined) fs.closeSync(fd); }
 };
-export const eventLine = (row, message = row.finalLine ?? firstLine(row.outFile)) => `${clean(row.name ?? row.thread)}\t${clean(row.event)}\t${clean(row.outFile)}\t${clean(message)}`;
+export const eventLine = (row, message = row.finalLine ?? firstLine(row.outFile)) => {
+  if (row.event === 'message') return `worker ${clean(row.name ?? row.thread)} notes [${clean(row.kind)}]: ${clean(row.text)}`;
+  if (row.event === 'question') return `worker ${clean(row.name ?? row.thread)} asks (id ${clean(row.questionId)}): ${clean(row.text)}`
+    + `${row.default !== undefined ? ` — default: ${clean(row.default)}` : ''} — timeout ${row.timeoutMin}m; answer with codex-worker reply${row.owner ? ` --owner ${clean(row.owner)}` : ''} --thread ${clean(row.thread)} --account ${clean(row.account)} --question ${clean(row.questionId)} "<text>"`;
+  return `${clean(row.name ?? row.thread)}\t${clean(row.event)}\t${clean(row.outFile)}\t${clean(message)}`;
+};
 const receipt = (owner, rows, ack) => ({ owner, t: Date.now(), from: rows.reduce((n, row) => Math.min(n, row.seq ?? Infinity), Infinity),
   through: ack.highWater, ids: rows.filter((row) => !row.seq).map((row) => row.id) });
 const appendReceiptSync = (entry) => {
@@ -468,6 +537,7 @@ export const lifecycle = (metadata) => {
   emit('running');
   const tracker = {
     owner, sessionId: launcher.sessionId,
+    metadata: () => ({ ...state }),
     set: (extra) => Object.assign(state, extra),
     update: (extra) => { Object.assign(state, extra); emit('running'); },
     result: (event, extra = {}) => { result = event; Object.assign(state, extra); },

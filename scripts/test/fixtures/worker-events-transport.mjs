@@ -11,6 +11,9 @@ globalThis.WebSocket = class {
     const m = JSON.parse(raw);
     if (m.id == null) return;
     if (config.rpc) fs.appendFileSync(config.rpc, JSON.stringify(m) + '\n');
+    if (config.rejectContext && m.method === 'thread/resume') {
+      setImmediate(() => this.onmessage?.({ data: JSON.stringify({ id: m.id, error: { message: 'fixture rejects thread config' } }) })); return;
+    }
     if (config.lostAtTurnStart && m.method === 'turn/start') { setImmediate(() => this.onclose?.()); return; }
     const turn = { id: config.turn ?? 'turn-fixture', status: config.status ?? 'inProgress', items: [] };
     const result = m.method === 'thread/start' ? { thread: { id: config.thread ?? 'thread-fixture' } }
@@ -18,9 +21,16 @@ globalThis.WebSocket = class {
     setImmediate(() => {
       this.onmessage?.({ data: JSON.stringify({ id: m.id, result }) });
       if (m.method !== 'turn/start') return;
-      if (config.hold) this.keepAlive = setInterval(() => {}, 1000);
-      else setTimeout(() => this.onmessage?.({ data: JSON.stringify({ method: 'turn/completed', params: { threadId: config.thread ?? 'thread-fixture',
-        turn: { ...turn, status: config.fail ? 'failed' : 'completed', items: [{ type: 'agentMessage', text: config.final ?? 'DONE fixture completed\nsecond line' }] } } }) }), 20);
+      if (config.hold) {
+        if (config.commandRunning) this.onmessage?.({ data: JSON.stringify({ method: 'item/started', params: {
+          threadId: config.thread ?? 'thread-fixture', turnId: turn.id, item: { id: 'ask-shell', type: 'commandExecution' } } }) });
+        this.keepAlive = setInterval(() => {}, 1000);
+      }
+      else setTimeout(() => {
+        if (config.writeOut) fs.writeFileSync(config.writeOut, 'worker deliverable\n');
+        this.onmessage?.({ data: JSON.stringify({ method: 'turn/completed', params: { threadId: config.thread ?? 'thread-fixture',
+        turn: { ...turn, status: config.fail ? 'failed' : 'completed', items: [{ type: 'agentMessage', text: config.final ?? 'DONE fixture completed\nsecond line' }] } } }) });
+      }, 20);
     });
   }
 };

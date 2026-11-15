@@ -1,6 +1,71 @@
-# Worker Completion Inbox
+# Worker Inbox: Completion And Mid-Turn Talkback
 
-Edit-only change, 2026-11-14. No settings, hooks, hubs, accounts or dependencies were installed.
+Edit-only change, updated 2026-11-15. No settings, hooks, hubs, accounts or dependencies were installed.
+
+## Mid-Turn Commands
+
+Workers can notify or ask their launching orchestrator without ending a turn. The commands reuse
+`worker-events.jsonl`, the owner inbox, watch, and Stop/SessionStart delivery; there is no new daemon.
+
+| Command | Result / exit |
+| --- | --- |
+| `codex-worker note [--kind progress\|risk\|scope\|info] "<text>"` | Records a `message` and returns 0; kind defaults to info. |
+| `codex-worker ask [--timeout-min N] [--default "<next action>"] "<question>"` | Records a `question` with a short ID and waits; answer on stdout, exit 0. Default timeout: 20 minutes. |
+| Ask timeout with default | Default on stdout, exit 3; proceed as stated. |
+| Ask timeout without default | `no answer` on stdout, exit 4; worker ends its turn BLOCKED. |
+| `codex-worker reply --thread ID [--account NAME] [--question ID] "<answer>"` | Answers the newest open question, or the specified open ID; exit 0. No open question falls back to steer and prints that fact, with steer's normal exit status. |
+
+Use ask only when a decision is absent from the brief and changes the next action; state a default.
+Use note for a discovered risk, a scope change, or a milestone the orchestrator needs before completion,
+never routine progress. A blocker that requires the user still ends the turn with BLOCKED. Orchestrators
+answer promptly with reply. A question past its timeout has already taken the worker's default, or the
+worker must end BLOCKED if none was provided; a later reply becomes steering if no open question exists.
+The current orchestrator owner, when supplied via --owner or the owner bridge, must match the launcher.
+If no owner bridge is set, an explicit thread/account uses the public launching context to select its owner.
+
+At start, once the hub assigns a thread ID, the launcher resumes that thread with
+`config.shell_environment_policy.set` containing CODEX_WORKER_THREAD, CODEX_WORKER_ACCOUNT,
+CODEX_WORKER_OWNER, CODEX_WORKER_NAME and RULES_SHARED. Continuations refresh this config and
+developer instructions. These values identify only this worker, not the shared hub's environment.
+The launcher always also writes a small public context file at
+`<shared>/worker-context/<account>/<thread>.json` and supplies the thread/account, exact script path,
+and RULES_SHARED in developer instructions. Note/ask use the environment automatically, or explicit
+`--thread ID --account NAME` if it is absent. Owner/name come from the launching context file, not
+from the calling shell's orchestrator identity. If thread/resume rejects config/instructions, the
+identity text is included in the turn input so the explicit fallback remains usable. Shared files
+must be readable/writable within the worker's existing sandbox; no sandbox permission is widened.
+
+Verified offline on 2026-11-15: the installed Codex and TRAE `app-server generate-json-schema`
+commands expose config and developerInstructions on thread/start and thread/resume, but no env
+field on thread/start or turn/start. Both CLIs' help names shell_environment_policy. TTADK homes
+use the Codex executable in this launcher; ChatGPT homes use the same Codex app-server path.
+Fake-hub scenarios verify the identity config, context and fallback for TRAE, TTADK and ChatGPT,
+including continuations and rejected config. Actual environment inheritance through a live worker
+shell remains to be checked on TRAE by the owner; schema support alone does not prove it.
+
+Replies are atomically written to `<shared>/worker-replies/<account>/<thread>/<question-id>.json`
+and recorded as `answered` events under the existing event lock. A repeated writer cannot replace
+an already written answer. Answer events are bookkeeping, not notifications. A question remains
+open after its notification is acknowledged until answer/deadline; compaction preserves these
+questions and their answer records. `mine` lists open questions even after inbox delivery.
+Ask is a running shell command and uses the existing running-command stall exemption.
+
+Notes allow at most six wake-ups per account/thread in a rolling hour, serialized under the event
+lock. Text is capped at 500 characters; excess notes, including overlength text, are recorded with
+`wake:false` (and truncation metadata when needed), and cannot wake watch or the hooks. Recent
+notes remain through compaction for correct hourly accounting. Questions always notify.
+Neither notes nor questions settle the running worker's lifecycle. Each hook/watcher notification
+is one line, with control characters flattened:
+
+```text
+worker W notes [risk]: discovered risk
+worker W asks (id …): decision? — default: keep baseline — timeout 20m; answer with codex-worker reply --thread … --account … --question … "<text>"
+```
+
+Keep --out separate from files the worker is asked to write: it is the final-message destination.
+BC-44 emits a single metadata-based warning before writing the final message if that destination
+was created or changed during the followed turn; it does not read the destination's contents.
+BC-45 omits the landing-gate phrase in route notes when the project profile has no landingGate.
 
 ## Official Contract And Verification
 
@@ -82,7 +147,7 @@ Record the owner alongside account/thread in the ledger. Run this as another tra
 node "$HOME/.agents/skills/project-orchestrator/scripts/codex-worker.mjs" watch --owner <session-id>
 ```
 
-Watch blocks until new terminal events exist, pending work is acknowledged by another deliverer, or its observed
+Watch blocks until new completion/message/question notifications exist, pending work is acknowledged by another deliverer, or its observed
 running set settles/becomes stale. It prints the events/receipts/status it knows and exits 0. An atomic per-owner
 claim allows only one watcher; duplicate invocations exit with an already-armed notice. Polls remember inode/offset,
 read only appended bytes, skip unchanged files, and prefilter other owners before parsing; rotation refreshes the cursor.

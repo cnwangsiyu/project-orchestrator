@@ -28,8 +28,9 @@ try {
     await fs.appendFile(process.env.CLAUDE_ENV_FILE, `\nexport ORCHESTRATOR_OWNER='${owner}'\n`);
   }
   const delivery = await deliverAsync(owner, async (rows) => {
-    const reason = rows.map((row) => `worker ${eventLine({ ...row, name: String(row.name ?? row.thread ?? '-').slice(0, 120), outFile: '' }, '').replaceAll('\t', ' ').trim()}: read ${JSON.stringify(String(row.outFile ?? row.logFile ?? 'the worker log').slice(0, 500))} and act`).join('\n')
-      + '\nHandle finished workers first; then re-arm codex-worker watch as a run_in_background task if workers remain.';
+    const reason = rows.map((row) => ['message', 'question'].includes(row.event) ? eventLine(row)
+      : `worker ${eventLine({ ...row, name: String(row.name ?? row.thread ?? '-').slice(0, 120), outFile: '' }, '').replaceAll('\t', ' ').trim()}: read ${JSON.stringify(String(row.outFile ?? row.logFile ?? 'the worker log').slice(0, 500))} and act`).join('\n')
+      + '\nAnswer open questions promptly with codex-worker reply; after its timeout the worker proceeds with its stated default (or ends BLOCKED without one). Handle finished workers first; then re-arm codex-worker watch as a run_in_background task if workers remain.';
     await output(start ? { hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: reason } }
       : { decision: 'block', reason });
   }, 10);

@@ -24,6 +24,8 @@ try {
   assert.equal(digestText.match(/^version:/gm)?.length, 1, 'integration must publish one digest version');
   assert.equal(digestText.match(/^## Changes In This Version$/gm)?.length, 1);
   assert.ok(digestText.split('\n').length<=61,'digest line budget');
+  assert.equal(digest.version, '2026-11-15.4');
+  assert.match(digest.worker, /Mid-turn talkback:.*ask --default.*never routine progress/);
   assert.equal(digestText.match(/^- Day 3 /gm)?.length,1);
   assert.match(digestText,/quality first across company accounts/);
   assert.match(digestText,/without a fixed working-worker wall timeout/);
@@ -88,6 +90,15 @@ try {
   assert.equal(signing.blocked,true); assert.equal(signing.pick,null);
   assert.ok(signing.plan.reasons.some(r=>r.code==='SIGNING_FULL_ACCESS_REQUIRED'));
   console.log('ok   Codex writers default full; reviewers stay read-only; tests and explicit overrides stay narrower');
+
+  for (const project of ['evelyns-world', 'acq', 'autotrader']) {
+    const notes = route(['implement', '--project', project, '--impact', 'service']).notes.join('\n');
+    assert.match(notes, /project profile no-review/);
+    assert.doesNotMatch(notes, /landing gate:/, 'BC-45 omits absent landing gate');
+    assert.match(notes, /keep --out separate from any file the worker is asked to write/);
+    assert.match(notes, /codex-worker ask.*Answer promptly with codex-worker reply/);
+  }
+  assert.match(route(['implement', '--project', 'video-agent', '--impact', 'service']).notes.join('\n'), /landing gate: changed-package tests/);
 
   for(const args of [['implement','--impact','service'],['build-run'],['debug','--impact','service'],['ui-browser']]) {
     assert.match(route(args).notes.join('\n'),/dependencies and build tools.*without.*(?:card|ask|question)/i);
