@@ -14,6 +14,8 @@ import { auditGlobalRules } from './lib/global-rules-audit.mjs';
 import { LOG as RESOURCE_LOG, readJsonl } from './lib/resource-data.mjs';
 import { review as resourceReview } from './resource-review.mjs';
 import { utilisationLines } from './lib/resource-utilisation.mjs';
+import { ETA, median } from './lib/eta.mjs';
+import { auditWorkerEvents } from './lib/worker-events.mjs';
 
 const argv = process.argv.slice(2);
 const opt = (k) => { const i = argv.indexOf(`--${k}`); return i < 0 ? null : argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[i + 1] : true; };
@@ -112,6 +114,31 @@ const background = (() => {
     totalMinutes, meanMinutes: minutes.length ? Math.round(totalMinutes / minutes.length * 10) / 10 : null };
 })();
 const routing = {
+  automaticReroutes: (() => {
+    const hops = all.filter((r) => r.kind === 'reroute' && r.automatic && r.t >= since);
+    const rows = hops.map((r) => {
+      const launch = all.find((l) => l.kind === 'launch' && l.t >= r.t && l.name === r.name
+        && l.account === r.to?.account && String(l.model).toLowerCase() === String(r.to?.model).toLowerCase());
+      const firstEvent = launch && all.find((l) => l.kind === 'reroute-progress' && l.hopAt === r.t);
+      const startMin = firstEvent ? Math.max(0, (firstEvent.t - r.t) / 60000) : null;
+      return { t: r.t, project: r.project, name: r.name, reason: r.reason, from: r.from, to: r.to,
+        waitedMin: r.from?.waitedMin ?? null, startMin, estimateMin: r.toStartEstimateMin ?? null,
+        faster: startMin != null && r.from?.predictedStartMin != null ? startMin < r.from.predictedStartMin : null };
+    });
+    return { count: rows.length, totalWaitedMin: rows.reduce((n, r) => n + (r.waitedMin ?? 0), 0),
+      faster: rows.filter((r) => r.faster === true).length, slower: rows.filter((r) => r.faster === false).length,
+      unknown: rows.filter((r) => r.faster == null).length, recent: rows.slice(-30) };
+  })(),
+  eta: {
+    constants: ETA,
+    byCategoryEffort: Object.fromEntries([...new Set(outs.map((o) => `${o.category}:${effectiveFirst(o)?.effort ?? '?'}`))]
+      .map((key) => {
+        const timed = outs.filter((o) => `${o.category}:${effectiveFirst(o)?.effort ?? '?'}` === key
+          && Number.isFinite(o.minutes) && o.minutes > 0);
+        return [key, { samples: timed.length, medianMinutes: median(timed.map((o) => o.minutes)),
+          usable: timed.length >= ETA.historyMin }];
+      })),
+  },
   decisions: routes.length,
   companyPolicies: { balanced: routes.filter((r) => r.balance?.selected).length, background: routes.filter((r) => r.background).length,
     decisions: routes.filter((r) => r.company || r.balance || r.background).map((r) => ({ t: r.t, project: r.project, name: r.name,
@@ -120,6 +147,8 @@ const routing = {
   byCategory: count(routes, (r) => r.category),
   byPick: count(routes.filter((r) => r.pick), (r) => `${r.pick.vendor}:${r.pick.model}:${r.pick.effort}`),
   byAccount: count(routes.filter((r) => r.pick?.account), (r) => r.pick.account),
+  signing: routes.filter((r) => r.signing).map((r) => ({ t: fmt(r.t), project: r.project, name: r.name,
+    category: r.category, pick: r.pick })),
   // OpenAI cyberPolicy blocks (codex-worker kind:'policy-block', 2026-11-13): how often, and on which account/model.
   // Repeated hits mean that model/account should not be used for attack-style reviews; route those with --adversarial.
   policyBlocks: (() => {
@@ -209,7 +238,8 @@ const resourceFiles = [RESOURCE_LOG, ...Array.from({ length: 6 }, (_, i) => `${R
 const resourceRows = await readJsonl(resourceFiles, since - 600000);
 const resources = resourceReview(resourceRows.rows, { hours: H, quotaRecords: snaps });
 const utilisation = { ...resources.utilisation, coverage: resources.coverage, readErrors: resourceRows.errors };
-const result = { hours: H, routing, outcomes, background, quota, utilisation, now, catalog, globalRules };
+const workerInbox = auditWorkerEvents(undefined, since);
+const result = { hours: H, routing, outcomes, background, quota, utilisation, now, catalog, globalRules, workerInbox };
 if (opt('json')) { console.log(JSON.stringify(result, null, 1)); process.exit(0); }
 const show = (title, v) => console.log(`\n## ${title}\n${typeof v === 'string' ? v : JSON.stringify(v, null, 1)}`);
 console.log(`# routing review data — last ${H}h (to ${fmt(Date.now())})`);
@@ -221,3 +251,4 @@ show('utilisation', utilisationLines(utilisation).join('\n'));
 show('now', now);
 show('model catalog', catalog);
 show('global rules', globalRules);
+show('worker inbox (delivery acknowledgement, not task acceptance)', workerInbox);

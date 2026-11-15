@@ -7,6 +7,10 @@ when the evidence is thin.
 
 ## Who does what
 
+`review-data.mjs` also emits `workerInbox`: per orchestrator p50/p90/max finish-to-delivery milliseconds,
+unacknowledged events (window and total pending), unknown latency count, seven-day audit retention, and launches without session identity. Treat unknown identity/latency
+as missing evidence, not zero delay; delivery acknowledgement is not result acceptance. See [worker inbox](worker-inbox.md).
+
 The review follows the routing policy like any other task (user, 2026-11-09): the launcher gathers the data, routes
 the review with `route.mjs analysis --stakes high` (logged as project `routing`, name `routing-nightly-review-<date>`),
 and runs it through **codex-worker's hub** on the account the route picks, with queue/status, the non-terminating stall
@@ -123,9 +127,10 @@ These are the user's decisions (2026-10-30 to 2026-11-03):
   - Desktop apps (`computer-use`) go to TTADK Codex when browser-ready (user, 2026-11-07): a terminal Claude worker has
     no desktop computer-use tool (ledger 10-31), so Claude there is only a fallback that may report BLOCKED.
 - **Permissions (2026-11-05; tightened 2026-11-13):** Claude workers use Remote Control and explicit Bypass;
-  only actions Bypass cannot pass need authorization cards. Agents execute non-secret actions after approval;
-  only the user types passwords/codes. Denials cannot be laundered, and Codex signing/credential files remain
-  forbidden even with authorization. See [permission plan](../SKILL.md#permission-plan).
+  only actions Bypass cannot pass need authorization cards. Login material and login bypasses remain forbidden for
+  every worker. `--signing` is the sole scoped exception: a full-access worker may sign our own registry-listed test
+  package with a designated identity, secret-safe stdin/file descriptors, a receipt and keychain re-locking. Production,
+  release, unregistered and other-keychain signing remains BLOCKED. See [permission plan](../SKILL.md#permission-plan).
 - **Git:** commit and push only `~/.agents/skills` changes, to `origin main`. Never force-push.
 
 ## 1. Gather (keep your own context small)
@@ -145,6 +150,7 @@ These are the user's decisions (2026-10-30 to 2026-11-03):
     `corrected` and `actualMismatches` before attributing outcomes to a model/account;
   - `routing.companyPolicies`: counts of balanced/background routing decisions and their named tasks, `why` and
     balance factors; `background` counts distinct tasks and their recorded wall-clock time;
+  - `routing.signing`: every `--signing` route with project, task, pick and sandbox for the signing audit below;
   - `quota.companyByHour`: company quota snapshots grouped by UTC hour, including TRAE load by model and queue
     positions by family. Keep sample timestamps; missing telemetry is unknown, not zero load or an empty queue.
 - **Hub probe:** on each account in `codex-accounts.json` whose hub is up, start one tiny thread
@@ -173,8 +179,10 @@ These are the user's decisions (2026-10-30 to 2026-11-03):
 ### Account and model health
 
 Owned by the routing/global-rules orchestrator (user, 2026-11-13), not the secretary. Include these checks every
-night even when routing policy did not change; use sanctioned account-status/expiry metadata, never read login,
-signing or credential files. Unknown login/expiry is unknown, not healthy; missing sign-in means BLOCKED.
+night even when routing policy did not change; use sanctioned account-status/expiry metadata, never read login
+material or signing secrets. The signing audit reads only registry metadata, receipts and worker logs, masks any
+password-like hit, and never opens the designated password file, keystore or keychain contents. Unknown login/expiry
+is unknown, not healthy; missing sign-in means BLOCKED.
 
 - **Company logins:** check TTADK SSO expiry and TRAE login state. When any company login expires within **3 days**,
   put a Chinese reminder/renewal card in `decisions` for the finisher to show the user; report already-expired or
@@ -186,8 +194,9 @@ signing or credential files. Unknown login/expiry is unknown, not healthy; missi
 - **Quota health:** inspect Claude all-model/Fable weekly projections, TRAE login/restriction recovery and Codex
   reset-card deadlines. Every reset-card redemption needs a fresh user OK, even after prior approvals. Company
   quota continues without asking; ask before personal quota or deferring runnable work. No LLM total-cost caps.
-- **Resident signing worker:** count its user-approved personal Claude usage separately from all other Claude work.
-  Use sanctioned worker/quota metadata only; never inspect signing, password, keychain or session files.
+- **Signing audit:** count the transitional `vesdk-signer` worker's user-approved personal Claude usage separately
+  from all other Claude work. Use sanctioned worker/quota metadata only; never inspect signing, password, keychain or
+  session files.
 - **Persistent orchestrator models:** model selection lives in `~/.claude/jobs/<id>/state.json` `respawnFlags`;
   a `/model` switch is lost on restart. VAK and routing stay on **Fable**; Webview and Lynx returned to **Opus on
   2026-11-11** because their Fable weekly projection exceeded budget. These are orchestrator choices, not worker defaults.
@@ -207,14 +216,22 @@ personal-quota launches without recorded user OK, TRAE GPT launches on security 
 for labour and foreground blocking. Launch records are attempts, not completion proof; legacy routes without
 launch evidence and missing remote ledgers stay unknown, never proven compliant or violated.
 
-Audit the resident Claude signing worker from its preregistration manifest, hashes-only PASS/FAIL reports and
-sanctioned worker metadata: only registered own test packages and the specified H6/debug credentials are in scope;
-any session/other keychain/production-release access, secret export/copy/print, richer report, or any other worker
-reading signing material is a violation. Out-of-scope requests must be BLOCKED with a user card. `review-data` has
-no trustworthy signing-material activity source, so keep its schema unchanged and report absent evidence as UNKNOWN.
+For every `review-data.routing.signing` row, audit only the registered metadata and task artifacts: the package id,
+manifest and hash were present in `user-signing/registry.json`; the route used full access and only a user-approved
+identity; a matching receipt exists under `user-signing/receipts/`; the worker report contains only PASS/FAIL,
+certificate fingerprint and hashes; and the signing keychain was re-locked unless another registered signing run was active.
+The receipt's identity must match `user-signing/identities.json`, including its dated user approval and device/profile
+scope (H6/iPhone 8; cosign DH59R4RNRY/profile 3JVMQQBHUR/iPhone 11, valid to 2027-09; repo Android debug).
+Only orchestrators write registry entries; signing workers must not change registry.json or identities.json.
+Workers needing new entries report BLOCKED; new identities require a new user approval card and allowlist entry.
+Scan worker logs only for password-like strings and mask every hit in review output. A hit, missing receipt,
+unregistered id, unlisted identity, worker-written registry/allowlist, production/release package, other keychain, or missing re-lock evidence is a violation and user card;
+never inspect or reproduce the suspected secret to confirm it. Absent evidence is UNKNOWN, never assumed compliant.
 
-Compare the last three nightly reports. A rule broken on three nights needs a concrete tool-level enforcement
-proposal (evidence, owner, smallest effective gate and false-positive risk), not another repeated reminder.
+Include `routing.automaticReroutes`: automatic hops, queue waits, and observed faster/slower/unknown replacement
+starts. Missing progress evidence remains UNKNOWN, never an assumed speedup. Compare the last three nightly reports.
+A rule broken on three nights needs a concrete tool-level enforcement proposal (evidence, owner, smallest effective
+gate and false-positive risk), not another repeated reminder.
 Use a Chinese decision card if approval or a hard-rule change is needed; never silently expand permissions or
 change thresholds. Push digest-version notes through the owner and require ledger `rules-ack <version>` from
 each recipient. Hook injection records are not acknowledgements.

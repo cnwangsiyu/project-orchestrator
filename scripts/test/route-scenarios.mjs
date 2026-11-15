@@ -255,7 +255,7 @@ const CASES = [
   ['fresh', ['review-high', '--security'], 'claude opus xhigh', 'describe defensive intent'],
   ['fresh', ['implement', '--impact', 'service', '--security'], 'codex gpt-6.1-sol xhigh @main'],
 ];
-const ERRORS = [['fresh', ['implement', '__noimpact']], ['fresh', ['implement', '--impact', 'prod']], ['fresh', ['implement', '--failures', '-1']], ['fresh', ['implement', '--stakes', 'hgih']], ['fresh', ['second-opinion']], ['fresh', ['nope']]];
+const ERRORS = [['fresh', ['implement', '__noimpact']], ['fresh', ['implement', '--impact', 'prod']], ['fresh', ['implement', '--failures', '-1']], ['fresh', ['implement', '--stakes', 'hgih']], ['fresh', ['implement', '--sandbox', 'danger-full-access']], ['fresh', ['second-opinion']], ['fresh', ['nope']], ['fresh', ['review', '--defensive']], ['fresh', ['implement', '--impact', 'service', '--security', '--defensive']], ['fresh', ['review-high', '--security', '--defensive', '--adversarial']], ['fresh', ['second-opinion', '--against', 'codex', '--defensive']]];
 
 let fail = 0;
 const CODE = ['implement', 'implement-hard', 'debug', 'science'];
@@ -266,7 +266,7 @@ const run = (sc, args0, overrides = {}) => {
   const cache = path.join(tmp, 'q.json');
   fs.writeFileSync(cache, JSON.stringify({ checkedAt: now, claude: S[sc].claude, codexAccounts: S[sc].codex, errors: {}, history: {} }));
   const env = { ...process.env, QUOTA_CACHE: cache, CODEX_ACCOUNTS: path.join(tmp, 'none.json'), ROUTE_LOG: '0', QUOTA_LOG: '0', TRAE_PROBE: '0', ROUTE_RR: path.join(tmp, 'rr.txt'), QUOTA_LOG_FILE: path.join(tmp, 'empty-company-history'), ...overrides };
-  return execFileSync(process.execPath, [ROUTE, ...args, '--mode', 'default', '--json'], { encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'] });
+  return execFileSync(process.execPath, [ROUTE, ...args, '--json'], { encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'] });
 };
 // Optional 4th field: a substring the notes must contain ('!text': must not contain).
 for (const [sc, args, want, note] of CASES) {
@@ -284,6 +284,44 @@ for (const [sc, args, want, note] of CASES) {
   if (!ok) fail++;
   console.log(`${ok ? 'ok  ' : 'FAIL'} ${sc.padEnd(19)} ${args.join(' ').padEnd(36)} ${ok ? got : `want "${want}", got "${got}"`}`);
 }
+// User decision 2026-11-13: Codex-family writers default to full access on every account. Reviewers remain read-only;
+// test-running reviews get workspace-write, and --sandbox is the only explicit narrower per-task override.
+{
+  try {
+    const routed = (sc, args) => JSON.parse(run(sc, args));
+    for (const [sc, account] of [['quiet', 'main'], ['ttFresh', 'ttadk'], ['ttOutTrae', 'trae']]) {
+      for (const mode of [[], ['--mode', 'default'], ['--mode', 'bypassPermissions']]) {
+        const writing = routed(sc, ['implement', '--impact', 'service', ...mode]);
+        assert.equal(writing.pick.account, account); assert.equal(writing.pick.sandbox, 'danger-full-access');
+        assert.match(writing.pick.command, /(?:--sandbox|-s) danger-full-access/);
+        assert.match(writing.notes[0], /never overwrite, delete or move files outside the task's scope/);
+        assert.ok(writing.notes.some((n) => /full access: the worker may commit on its task branch if the brief says so; never push to main, never force-push; commits carry no co-author\/tool trailer/.test(n)));
+        assert.ok(writing.notes.some((n) => /credential clause/.test(n)));
+        assert.ok(writing.notes.some((n) => /back up app data before any destructive step/.test(n)));
+        assert.ok(!writing.notes.some((n) => /workspace-write can't run git writes/.test(n)));
+      }
+      const review = routed(sc, ['review']);
+      assert.equal(review.pick.account, account); assert.equal(review.pick.sandbox, 'read-only');
+      assert.equal(routed(sc, ['review', '--runs-tests']).pick.sandbox, 'workspace-write');
+      const signing = routed(sc, ['review', '--signing', '--sandbox', 'read-only']);
+      assert.equal(signing.pick.account, account); assert.equal(signing.pick.sandbox, 'danger-full-access');
+      assert.equal(signing.signing, true);
+      assert.match(signing.notes[0], /OUR OWN TEST packages.*user-signing\/registry\.json/);
+      assert.match(signing.notes[1], /scan worker logs only.*mask any hits/);
+    }
+    const narrower = routed('quiet', ['implement', '--impact', 'service', '--sandbox', 'workspace-write']);
+    assert.equal(narrower.pick.sandbox, 'workspace-write'); assert.match(narrower.pick.command, /(?:--sandbox|-s) workspace-write/);
+    assert.equal(routed('quiet', ['implement', '--impact', 'service', '--sandbox', 'read-only']).pick.sandbox, 'read-only');
+    const testedReview = routed('ttFresh', ['review', '--runs-tests']);
+    assert.ok(testedReview.notes.some((n) => /workspace-write only for test-generated files; the reviewer must not edit/.test(n)));
+    const signingLog = path.join(tmp, 'signing-route-log.jsonl');
+    JSON.parse(run('quiet', ['review', '--signing', '--project', 'fixture', '--name', 'fixture-sign'],
+      { ROUTE_LOG: '1', ROUTE_LOG_FILE: signingLog }));
+    const signingRecord = JSON.parse(fs.readFileSync(signingLog, 'utf8').trim());
+    assert.equal(signingRecord.signing, true); assert.equal(signingRecord.pick.sandbox, 'danger-full-access');
+    console.log('ok   sandbox/signing defaults: main, TTADK and TRAE signing full; reviews read-only; test runs workspace-write');
+  } catch (e) { fail++; console.log(`FAIL sandbox defaults/overrides: ${e.stack}`); }
+}
 // Both sides of the global-rules/tier-routing merge must survive in commands, notes and route evidence.
 {
   try {
@@ -297,10 +335,10 @@ for (const [sc, args, want, note] of CASES) {
     assert.match(merged.pick.command, /--permission-mode bypassPermissions/); assert.match(merged.pick.command, /--remote-control/);
     for (const sc of ['ttFresh', 'ttOutTraeDown', 'fresh']) {
       const routed = JSON.parse(run(sc, ['build-run']));
-      assert.ok(routed.notes.some((s) => /heavy-build\.sh.*ONE-process wrapper.*res take-build\/wait-build\/return-build.*acquire heavy-build plus one lane together.*never hold the slot while waiting for a lane/.test(s)));
+      assert.ok(routed.notes.some((s) => /heavy-build\.sh.*ONE-process wrapper.*res take-build\/wait-build\/return-build.*res v1\.4.*acquire heavy-build plus one free admitted lane together.*holding neither resource while waiting for the other/.test(s)));
       assert.ok(routed.notes.some((s) => /only for genuine local heavy compute.*remote pipeline deploys and CI runs never take one.*--no-local-build/.test(s)));
       assert.ok(routed.notes.some((s) => /Normal gate remains min\(20, 12 \+ 8 \* other lanes\), memory >=16 GiB; STALE and caller-owned locks excluded/.test(s)));
-      assert.ok(routed.notes.some((s) => /lane 3 only after reviewed owner switch.*load1m <=8 AND available memory >=32 GiB.*lane3=OPEN\|CLOSED/.test(s)));
+      assert.ok(routed.notes.some((s) => /lane 3 is available only after reviewed owner switch.*load1m <=8 AND available memory >=32 GiB.*lane3=OPEN\|CLOSED/.test(s)));
       assert.ok(!routed.notes.some((s) => /at most 3 concurrent heavy builds/.test(s)));
     }
     for (const sc of ['unreadHub']) {
@@ -334,7 +372,9 @@ for (const [sc, args, want] of [
 for (const [sc, args] of [['quiet', ['lookup']], ['ttSearch', ['lookup']], ['ttOutTrae', ['lookup']], ['quiet', ['draft']], ['quiet', ['second-opinion', '--against', 'claude']]]) {
   let ok = false;
   try {
-    const command = JSON.parse(run(sc, args)).pick.command;
+    const printed = JSON.parse(run(sc, args)).pick.command;
+    const inner = printed.match(/-- sh -c (.*)   \(background task/);
+    const command = inner ? execFileSync('/bin/sh', ['-c', `printf '%s' ${inner[1]}`], { encoding: 'utf8' }) : printed;
     const quoted = command.match(/ -c ('developer_instructions=.*') --json/)[1];
     const config = execFileSync('/bin/sh', ['-c', `printf '%s' ${quoted}`], { encoding: 'utf8' });
     const rule = JSON.parse(config.slice('developer_instructions='.length));
@@ -429,7 +469,7 @@ for (const [sc, args] of ERRORS) {
   const exec = o('ttOutTrae', ['lookup']).pick?.command ?? '';
   const worker = o('ttOutTrae', ['implement', '--impact', 'service']).pick?.command ?? '';
   const cases = [[gate('ttOutTrae', ['analysis']), false], [gate('ttOutTraeDown', ['analysis']), true],
-    [/(?:^|&& )traecli exec .*-m GPT-6\.1-Sol /.test(exec), true], [/--account trae start .*--model GPT-6\.1-Sol /.test(worker), true],
+    [/(?:^|&& )(?:'\\'')?traecli(?:'\\'')? exec .*-m GPT-6\.1-Sol /.test(exec), true], [/--account trae start .*--model GPT-6\.1-Sol /.test(worker), true],
     [exec.includes('/scripts/launch-audit.mjs'), true]];
   const bad = cases.map(([got, want], i) => (got === want ? null : i)).filter((i) => i !== null);
   if (bad.length) fail++;
@@ -809,8 +849,16 @@ for (const [sc, args] of ERRORS) {
     const r = o('ttFresh', [cat]);
     cases.push([hasNote(r, /guarded executor.*continuous idle evidence.*every orchestrator's release/), true],
       [hasNote(r, /at most 3 concurrent heavy builds unless the ledger sets N otherwise/), false],
-      [hasNote(r, /at most 2 h, then return the device and report.*device connected, unlocked, app data backed up/), true]);
+      [hasNote(r, /at most 2 h, then return the device and report.*device connected, unlocked, app data backed up/), true],
+      [hasNote(r, /iphone8, iphone11 and s21.*Allow\/Authorize\/Trust\/OK.*no per-prompt approval or button whitelist/), true],
+      [hasNote(r, /personal iPhone 15 Pro Max \(policy=never\).*device not registered in res/), true],
+      [hasNote(r, /Codex refuses an allowed device prompt.*re-route that step to Claude instead of asking the user to tap it/), true]);
   }
+  const leased = o('ttFresh', ['lookup', '--device-lease']);
+  cases.push([hasNote(leased, /iphone8, iphone11 and s21.*camera, microphone, photos, notifications, local network, tracking, developer trust, USB debugging and install confirmations/), true],
+    [hasNote(leased, /Take\/return through res.*lease <=2 h.*back up app data.*never enter personal-account credentials, passwords or verification codes.*no purchases/), true]);
+  const ordinary = o('ttFresh', ['lookup']);
+  cases.push([hasNote(ordinary, /registered shared test phones iphone8/), false]);
   cases.push([hasNote(o('traeFull', ['implement', '--impact', 'release']), /route\.mjs review --author codex --impact release/), true]);
   const bad = cases.map(([got, want], i) => (got === want ? null : `${i} (${got})`)).filter((i) => i !== null);
   if (bad.length) fail++;
@@ -966,6 +1014,10 @@ for (const [sc, args] of ERRORS) {
   const quota = { daily: { 'gpt-6.1-sol': bucket(100), 'gpt-6-astra': bucket(20) }, weekly: null };
   const qh = fs.mkdtempSync(path.join(tmp, 'trae-quota-'));
   const data = { claude: cl(10, 120), codexAccounts: [acc('main', 20, 120), tr({ home: qh, quota })] };
+  // Priority alternatives beat this measured slow Sol lane. Depletion alone is no longer evidence of a wait.
+  fs.writeFileSync(path.join(qh, 'lane-state.json'), JSON.stringify({
+    'gpt-6.1-sol': { t: now, state: 'queued', position: 500, drainPerMin: 0.5 },
+  }));
   process.env.TRAE_PROBE = '0';
   const st = analyze(data);
   const lean = leanLines(st, data).join('\n');
@@ -988,6 +1040,8 @@ for (const [sc, args] of ERRORS) {
   scenario('quota56Depleted', { ...quota.daily, 'gpt-5.6-sol': bucket(100) });
   scenario('quota56Expired', { ...quota.daily, 'gpt-5.6-sol': bucket(10, { resetsAt: now - 1 }) });
   scenario('quotaBoth', { ...quota.daily, 'gpt-6-astra': bucket(100), 'gpt-5.6-sol': bucket(10) });
+  scenario('quotaHardUnknown', S.quotaBoth.codex.at(-1).quota.daily,
+    { home: fs.mkdtempSync(path.join(tmp, 'quota-hard-unknown-')) });
   scenario('quotaMissing', null);
   scenario('quotaMissingModel', { 'gpt-6-astra': bucket(100) });
   scenario('quotaUnknownAstra', { 'gpt-6.1-sol': bucket(100) });
@@ -1030,17 +1084,22 @@ for (const [sc, args] of ERRORS) {
     ['quota56Paused', ['implement'], 'deepseek-v4.1-flash'],
     ['quotaBoth', ['implement'], 'gpt-5.6-sol'],
     ['quotaBoth', ['implement', '--failures', '4'], 'opus'], // Availability fallbacks do not become retry rungs.
-    ['quotaBoth', ['implement-hard'], 'gpt-6.1-sol'],
+    ['quotaBoth', ['implement-hard'], 'gpt-6-astra'], // both hard buckets depleted: keep a hard model, never demote to 5.6/DeepSeek
     ['quotaBoth', ['lookup'], 'deepseek-v4.1-flash'],
     ['quotaBoth', ['extract'], 'deepseek-v4.1-flash'],
     ['quotaBoth', ['draft'], 'deepseek-v4.1-flash'],
-    ['quotaBoth', ['lookup', '--stakes', 'high'], 'gpt-6.1-sol'],
+    ['quotaBoth', ['lookup', '--stakes', 'high'], 'gpt-6-astra'], // hard tier keeps Sol/Astra on the low-priority lane
+    // Without lane evidence, tied hard ETAs retain main's Sol preference; measured slow Sol above prefers Astra.
+    ['quotaHardUnknown', ['implement-hard'], 'gpt-6.1-sol'],
+    ['quotaHardUnknown', ['lookup', '--stakes', 'high'], 'gpt-6.1-sol'],
+    ['quotaBoth', ['implement-hard', '--exclude-model', 'gpt-6-astra'], 'gpt-6.1-sol'],
+    ['quotaBoth', ['implement-hard', '--exclude-model', 'gpt-6.1-sol'], 'gpt-6-astra'],
     // Light lookup (DeepSeek) escalates to Sol medium; Sol's bucket is depleted, so the comparable GPT with quota
     // (5.6-Sol) takes the escalation — company quota, not personal Sonnet and not another light model.
     ['quotaBoth', ['lookup', '--failures', '1'], 'gpt-5.6-sol'],
     ['quotaBoth', ['build-run'], 'gpt-5.6-sol'],
     ['quotaMissing', ['implement'], 'gpt-6.1-sol'],
-    ['quotaMissingModel', ['implement'], 'gpt-6.1-sol'],
+    ['quotaMissingModel', ['implement'], 'deepseek-v4.1-flash'], // fresh slow Sol telemetry beats an unknown bucket
     ['quotaUnknownAstra', ['implement'], 'deepseek-v4.1-flash'],
     ['quotaNoAstra', ['implement'], 'deepseek-v4.1-flash'],
     ['quotaPausedAstra', ['implement'], 'deepseek-v4.1-flash'],
@@ -1052,14 +1111,25 @@ for (const [sc, args] of ERRORS) {
     ['quotaFallbackBusy', ['implement', '--failures', '2'], 'gpt-6-astra'],
     ['quotaAllBusy', ['implement'], 'gpt-6.1-sol'],
     ['quotaTT', ['implement'], 'gpt-6.1-sol'], // healthy TTADK remains first
-    ['quotaExpiredSol', ['implement'], 'gpt-6.1-sol'],
+    ['quotaExpiredSol', ['implement'], 'deepseek-v4.1-flash'], // expiry does not erase fresh model queue evidence
     ['quotaExpiredAstra', ['implement'], 'deepseek-v4.1-flash'],
-    ['quotaExpiredFallback', ['implement'], 'deepseek-v4.1-flash'],
+    ['quotaExpiredFallback', ['implement'], 'gpt-6.1-sol'], // no 5.6 quota, DeepSeek expired: depleted Sol low-priority lane
   ]) {
     const r = route(sc, args);
-    cases.push([r.pick.model, want], [r.failures, args.includes('--failures') ? Number(args[args.indexOf('--failures') + 1]) : 0]);
+    cases.push([r.pick.model, want, `${sc} ${args.join(' ')} model`], [r.failures, args.includes('--failures') ? Number(args[args.indexOf('--failures') + 1]) : 0, `${sc} ${args.join(' ')} failures`]);
   }
   const idle = route('quotaAstra'), busy = route('quotaBusy'), missing = route('quotaMissing');
+  for (const sc of ['quotaBoth', 'quotaHardUnknown']) {
+    for (const args of [['implement-hard'], ['debug'], ['science'], ['review-high'], ['design'], ['lookup', '--stakes', 'high']]) {
+      for (const flags of [[], ['--background']]) {
+        const r = route(sc, [...args, ...flags]);
+        const label = `${sc} ${[...args, ...flags].join(' ')}`;
+        cases.push([['gpt-6.1-sol', 'gpt-6-astra'].includes(r.pick?.model), true, `${label} hard floor`],
+          [r.pick?.account, 'trae', `${label} company lane`], [r.needsUserOK.length, 0, `${label} no personal quota`],
+          [(r.eta ?? []).every((row) => ['gpt-6.1-sol', 'gpt-6-astra'].includes(row.model)), true, `${label} ETA floor`]);
+      }
+    }
+  }
   cases.push(
     [route('quotaPreferred').pick.effort, idle.pick.effort],
     [route('quotaPreferred', ['implement', '--failures', '1']).pick.effort, 'xhigh'],
@@ -1082,19 +1152,89 @@ for (const [sc, args] of ERRORS) {
     [note(route('quotaAstra', ['review', '--author', 'codex']), /second TRAE reviewer/), true],
     [route('quotaAstra', ['review', '--author', 'codex']).secondOpinion?.model, 'deepseek-v4.1-flash'],
   );
-  // Advice uses the chosen bucket, is inclusive at 80%, and never defers work or changes the pick.
+  // Advice never tells the user to wait for a reset: a company candidate that can start now is launched.
   for (const cat of ['build-run', 'review', 'review-high']) {
-    for (const [sc, expected] of [['quota80', true], ['quota79', false], ['quotaNoLimit', false], ['quotaMissing', false], ['quotaChosen80', true], ['quotaTT', true], ['quotaNoReset', true]]) {
+    for (const [sc] of [['quota80'], ['quota79'], ['quotaNoLimit'], ['quotaMissing'], ['quotaChosen80'], ['quotaTT'], ['quotaNoReset']]) {
       const r = route(sc, [cat]);
-      cases.push([note(r, /long builds\/large reviews:.*daily reset/), sc === 'quotaChosen80' && cat === 'review' ? false : expected, `${sc} ${cat}`], [r.deferred, null]);
+      cases.push([note(r, /long builds\/large reviews:.*daily reset/), false, `${sc} ${cat}`], [r.deferred, null, `${sc} ${cat} deferred`]);
     }
   }
   cases.push([note(route('quota80'), /long builds\/large reviews:/), false],
-    [note(route('quota80', ['build-run']), /quota resetTime.*TRAE normally 22:00 UTC, TTADK 16:00 UTC/), true],
-    [note(route('quotaNoReset', ['build-run']), /normally 22:00 UTC/), true]);
+    [note(route('quota80', ['build-run']), /quota resetTime.*TRAE normally 22:00 UTC, TTADK 16:00 UTC/), false],
+    [note(route('quotaNoReset', ['build-run']), /normally 22:00 UTC/), false]);
   const bad = cases.map(([got, want, label], i) => (got === want ? null : `${i} ${label ?? ''} (${got} != ${want})`)).filter((i) => i !== null);
   if (bad.length) fail++;
   console.log(`${bad.length ? 'FAIL' : 'ok  '} trae daily quota    ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
+}
+// ETA-based hard-lane choice (addendum, 2026-11-13 night): "depleted" alone says little, so compare expected completion
+// (start delay + work minutes × slowdown) across the hard lanes and a TTADK reset. A wait is only an explicit
+// scheduled dispatch; a resource-bound task never waits in a queue holding its lease/lock.
+{
+  const laneHome = (name, lanes) => {
+    const home = fs.mkdtempSync(path.join(tmp, `lane-${name}-`));
+    fs.writeFileSync(path.join(home, 'lane-state.json'), JSON.stringify(lanes));
+    return home;
+  };
+  const ttOut = (resetMin) => tt({ healthy: false, reason: 'its daily token quota is used up',
+    usage: { used: 100, limit: 100, utilization: 100, resetsAt: now + resetMin * 60000 } });
+  const laneTr = (name, lanes) => tr({ home: laneHome(name, lanes),
+    models: ['gpt-6.1-sol', 'gpt-6-astra', 'gpt-5.6-sol', 'deepseek-v4.1-flash'],
+    modelIds: Object.fromEntries(['gpt-6.1-sol', 'gpt-6-astra', 'gpt-5.6-sol', 'deepseek-v4.1-flash'].map((m) => [m, m])),
+    quota: { daily: { 'gpt-6.1-sol': { used: 100, limit: 100, remaining: 0, depleted: true, resetsAt: now + 6 * h },
+      'gpt-6-astra': { used: 100, limit: 100, remaining: 0, depleted: true, resetsAt: now + 6 * h } }, weekly: null } });
+  const lanes = (sol, astra) => ({ 'gpt-6.1-sol': { t: now, state: 'queued', ...sol },
+    'gpt-6-astra': { t: now, state: 'queued', ...astra } });
+  // Hopeless queue (≈0.5 positions/min) and TTADK resets in 40 min: an explicit scheduled dispatch.
+  S.etaDefer = { claude: cl(10, 120), codex: [acc('main', 20, 120), ttOut(40),
+    laneTr('defer', lanes({ position: 500, drainPerMin: 0.5 }, { position: 600, drainPerMin: 0.5 }))] };
+  // Sol progresses with no queue cycles: it can start now and beats the TTADK reset.
+  S.etaProgressing = { claude: cl(10, 120), codex: [acc('main', 20, 120), ttOut(540),
+    laneTr('progress', lanes({ position: null, drainPerMin: null, lastProgressAt: now - 60000, itemsPerMin: 1.2 },
+      { position: 600, drainPerMin: 0.2 }))] };
+  // TTADK resets in 20 min, but the TRAE lane can finish sooner: launch, do not hold.
+  S.etaResetSoon = { claude: cl(10, 120), codex: [acc('main', 20, 120), ttOut(20),
+    laneTr('soon', lanes({ position: null, drainPerMin: null, lastProgressAt: now - 60000 },
+      { position: 50, drainPerMin: 5 }))] };
+  const parse = (sc, args) => JSON.parse(run(sc, args));
+  const defer = parse('etaDefer', ['implement-hard']);
+  const progress = parse('etaProgressing', ['implement-hard']);
+  const soon = parse('etaResetSoon', ['implement-hard']);
+  const bound = parse('etaDefer', ['implement-hard', '--device-lease']);
+  const { laneEta, patienceMinutes } = await import('../lib/eta.mjs');
+  const queuedEta = (workMin, requests) => laneEta({ workMin, requests, bucketDepleted: true, position: 100, drainPerMin: 2 });
+  const lightQ = queuedEta(5, 10), hardQ = queuedEta(90, 120);
+  const checks = [
+    ['defer scheduled', !!defer.deferred, true],
+    ['defer pick null', defer.pick, null],
+    ['defer until ~40m', defer.deferUntil >= now + 39 * 60000 && defer.deferUntil <= now + 41 * 60000, true],
+    ['defer reason names TTADK reset', /TTADK .*after its reset is estimated/.test(defer.deferReason ?? ''), true],
+    ['defer tell is a scheduled dispatch', (defer.tellUser ?? []).some((s) => /scheduled dispatch.*record it in the ledger and set a timer/.test(s)), true],
+    ['defer eta rows include TTADK', (defer.eta ?? []).some((r) => r.account === 'ttadk'), true],
+    ['defer eta rows include both TRAE hard models', ['gpt-6.1-sol', 'gpt-6-astra'].every((m) => (defer.eta ?? []).some((r) => r.model === m && r.account === 'trae')), true],
+    ['progressing picks Sol', progress.pick?.model, 'gpt-6.1-sol'],
+    ['progressing no defer', progress.deferred, null],
+    ['progressing why names lane + telemetry', progress.why.some((s) => /low-priority lane \(bucket depleted\): slower .*progressing without queue cycles/.test(s)), true],
+    ['progressing patience set', typeof progress.queuePatienceMin === 'number' && progress.queuePatienceMin > 0, true],
+    ['progressing launch passes patience/alt', /--queue-patience-min \d+ --alt /.test(progress.pick.command), true],
+    ['reset-soon launches', soon.deferred, null],
+    ['reset-soon keeps the hard model', soon.pick?.model, 'gpt-6.1-sol'],
+    ['resource-bound no defer', bound.deferred, null],
+    ['resource-bound note', bound.notes.some((s) => /take the lease\/lock only after the first model response/.test(s)), true],
+    ['resource-bound hard pick', ['gpt-6.1-sol', 'gpt-6-astra'].includes(bound.pick?.model), true],
+    ['eta size: light beats a 10h reset', lightQ.completionMin < 10 * 60 + 5, true],
+    ['eta size: hard loses to a 10h reset', hardQ.completionMin > 10 * 60 + 90, true],
+    ['patience cap 30m', patienceMinutes({ now, ttadk: { usage: { resetsAt: now + 600 * 60000 } } }), 30],
+    ['patience quarter of a 40m reset', patienceMinutes({ now, ttadk: { usage: { resetsAt: now + 40 * 60000 } } }), 10],
+  ];
+  // --json purity: the whole stdout is one JSON document for a code category, not a substring.
+  const raw = run('etaProgressing', ['implement-hard']);
+  const trimmed = raw.trim();
+  checks.push(['json purity parses whole stdout', (() => { try { return !!JSON.parse(trimmed).pick; } catch { return false; } })(), true]);
+  checks.push(['json purity is one line', trimmed.split('\n').length, 1]);
+  checks.push(['json purity braces', trimmed.startsWith('{') && trimmed.endsWith('}'), true]);
+  const bad = checks.map(([label, got, want], i) => (JSON.stringify(got) === JSON.stringify(want) ? null : `${i} ${label} (${JSON.stringify(got)} != ${JSON.stringify(want)})`)).filter(Boolean);
+  if (bad.length) fail++;
+  console.log(`${bad.length ? 'FAIL' : 'ok  '} ETA hard-lane choice ${checks.length} cases${bad.length ? ` — ${bad.join(', ')}` : ''}`);
 }
 // Approved nightly decision 2026-11-10-1: an idle weekly deadline can move without a card redemption.
 // Exercise the real review-data CLI on quota history, with all external reads isolated from live accounts.
@@ -1698,6 +1838,51 @@ for (const [sc, args] of ERRORS) {
     if (!ok) fail++;
     console.log(`${ok ? 'ok  ' : 'FAIL'} adversarial route log records flag, Kimi pick and DeepSeek second`);
   } catch (e) { fail++; console.log(`FAIL adversarial route log: ${e.message}`); }
+}
+// Defensive security confirmation (user ruling 2026-11-13): --defensive is valid only with --security on
+// review/review-high/second-opinion. It keeps ordinary security routing (TRAE GPT excluded, TTADK GPT allowed)
+// instead of the adversarial lane; without it, --security reviews stay adversarial. Invalid contexts are usage errors.
+{
+  const o = (sc, args, overrides) => JSON.parse(run(sc, args, overrides));
+  const pick = (sc, args) => { const r = o(sc, args); return r.deferred ? 'DEFER' : `${r.pick.vendor} ${r.pick.model} ${r.pick.effort} @${r.pick.account ?? '-'}`; };
+  try {
+    const tt = o('ttFresh', ['review-high', '--security', '--defensive']);
+    assert.equal(pick('ttFresh', ['review-high', '--security', '--defensive']), 'codex gpt-6.1-sol xhigh @ttadk');
+    assert.equal(tt.security, true); assert.equal(tt.defensive, true); assert.equal(tt.adversarial, false);
+    assert.ok(!tt.notes.some((n) => /adversarial second reviewer/.test(n)));
+    assert.ok(tt.notes.some((n) => /defensive confirmation \(--defensive\).*only the rule to hold and its acceptance conditions.*no bypass description/.test(n)));
+    assert.ok(tt.notes.some((n) => /cyber-policy block.*do not retry that thread.*do not resend it to any GPT account.*--adversarial.*Kimi-K3 plus a DeepSeek-V4\.1-Flash second reviewer/.test(n)));
+    assert.ok(tt.notes.some((n) => /whichever side reproduces it with an executable test/.test(n)));
+    assert.ok(tt.why.join(' ').includes('defensive confirmation'));
+    // Without --defensive the same row stays adversarial by default: no GPT, Claude behind the personal-quota gate.
+    const defaultAdversarial = o('ttFresh', ['review-high', '--security']);
+    assert.equal(defaultAdversarial.adversarial, true);
+    assert.equal(pick('ttFresh', ['review-high', '--security']), 'claude opus xhigh @-');
+    assert.ok(defaultAdversarial.needsUserOK.some((n) => /^personal quota:/.test(n)));
+    // Defensive hard reviews still exclude TRAE GPT: with TTADK out, no eligible hard company model remains.
+    const trae = o('ttOutTrae', ['review-high', '--security', '--defensive']);
+    assert.equal(trae.adversarial, false); assert.equal(trae.tier, 'hard');
+    assert.equal(pick('ttOutTrae', ['review-high', '--security', '--defensive']), 'claude opus xhigh @-');
+    assert.ok(trae.needsUserOK.some((n) => /^personal quota:/.test(n)));
+    // Normal defensive reviews may still use the eligible non-GPT TRAE fallback, never its excluded GPT family.
+    assert.equal(pick('ttOutTrae', ['review', '--security', '--defensive']), 'codex gemini-3.1-pro-preview high @trae');
+    // review and second-opinion keep TTADK GPT on the ordinary security route.
+    assert.equal(pick('ttFresh', ['review', '--security', '--defensive']), 'codex gpt-6.1-sol high @ttadk');
+    assert.equal(pick('ttFresh', ['second-opinion', '--against', 'claude', '--security', '--defensive']), 'codex gpt-6.1-sol high @ttadk');
+    // Other --security work is unchanged, and --adversarial work is untouched.
+    assert.equal(pick('ttFresh', ['implement', '--impact', 'service', '--security']), 'codex gpt-6.1-sol high @ttadk');
+    assert.equal(o('advBoth', ['review-high', '--security', '--defensive']).pick.model, 'gpt-6.1-sol');
+    console.log('ok   defensive security confirmation: non-adversarial routing, TRAE GPT excluded, notes and adversarial default preserved');
+  } catch (e) { fail++; console.log(`FAIL defensive security confirmation: ${e.stack}`); }
+  // The route log carries the flag for the nightly review.
+  try {
+    const log = path.join(tmp, 'def-route-log.jsonl');
+    o('ttFresh', ['review-high', '--security', '--defensive', '--project', 'p', '--name', 'def-1'], { ROUTE_LOG: '1', ROUTE_LOG_FILE: log });
+    const rec = JSON.parse(fs.readFileSync(log, 'utf8').trim());
+    const ok = rec.defensive === true && rec.security === true && rec.adversarial === false && rec.pick.model === 'gpt-6.1-sol';
+    if (!ok) fail++;
+    console.log(`${ok ? 'ok  ' : 'FAIL'} defensive route log records the flag, TTADK GPT and no adversarial lane`);
+  } catch (e) { fail++; console.log(`FAIL defensive route log: ${e.message}`); }
 }
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(fail ? `\n${fail} failing` : '\nall pass');

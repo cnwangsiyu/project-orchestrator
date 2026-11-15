@@ -23,6 +23,11 @@ The user talks only to the orchestrator; the work itself is done by **workers**,
 background sessions — Claude Code or Codex, as `scripts/route.mjs` picks — that the orchestrator
 launches, briefs, coordinates and integrates.
 
+Every worker launch must be a harness-tracked background task (`run_in_background`, never inner `&`) or covered
+by an armed owner-scoped `codex-worker watch`. On wake handle finished workers first, then re-arm watch if workers
+remain. The [worker inbox](references/worker-inbox.md) documents durable events, owner identity, `mine`, Stop/SessionStart
+hooks, owner-only installation and limits. Keep route.mjs's `run-tracked.sh` wrapper on exec commands.
+
 Projects are the unit of separation: each orchestrator conversation owns exactly one project and
 handles every task in it. Where this session happens to have started — which directory, which
 branch — is only a hint about the project, never a limit on it.
@@ -69,10 +74,10 @@ The versioned [global-rules digest](references/global-rules.md) is the single in
 - **Resources:** [machine resources](references/resources.md) supplies five-minute sampling, nightly retro/guarded cleanup and detection of builds without holders; [shared `res`](#shared-resources), the [maintained lock contract](references/res-contract.md) and [build/cache discipline](#build-discipline) require the wrapper or explicit take/return, atomic build-pair acquisition, finite waits/gates, reverse release, incremental/cold acceptance builds and scoped ccache/Gradle caches (first cache use cold). Global-rules owns the whole tool since 2026-11-13; v1.3 lane 3 is pending its reviewed switch.
 - **Disk:** [workspace retention](#workspace-retention) sets no worker space caps; auto-clean self-made build clones/templates/caches only when the data disk has <1 TB free; real workspaces/user data require a user card.
 - **Claude settings:** [documented settings](#claude-worker-settings) record `CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP=1`; idle-stop has no switch (pin or keep working), with no settings mutation.
-- **Claude workers:** [launch](#claude-worker-settings) always uses Remote Control + explicit Bypass; [permissions](#permission-plan) use cards for what Bypass cannot pass, agents execute non-secret actions, only the user types secrets.
+- **Worker permissions:** Codex-family writing workers default to full access; reviewers stay read-only unless `--runs-tests` gives them workspace-write, and `--sandbox workspace-write|read-only` is the per-task narrower override. [Claude launch](#claude-worker-settings) always uses Remote Control + explicit Bypass. [Permissions](#permission-plan) use cards for what those modes cannot pass; login secrets remain user-only, while a registered `--signing` run may pass its designated signing input only through stdin/file descriptors.
 - **TRAE:** [account rules](references/codex-workers.md#trae-cli-as-the-second-company-account-user-2026-11-08) separate restrictions from concurrency/quota, never reduce concurrency for queues, enforce only QPM/TPM limits for LLM use (no total-cost caps), and name the concrete worker model in reports.
 - **Work and quota:** [judgment](#judge-not-labour) stays with orchestrators, [independent tasks](#split-by-coupling) run in parallel while coupled work stays together; [quota](#route-every-task) never silently holds work, uses company quota without asking, personal quota after asking, reset cards only after a fresh OK every time.
-- **Signing/credentials:** [worker safety](#worker-credential-safety) forbids every Codex worker from touching signing/credential files. Only the resident Claude signing worker has the narrow, user-approved own-test-package exception; its personal quota and scope are audited separately.
+- **Signing/credentials:** [worker safety](#worker-credential-safety) forbids login material and login bypasses for every worker. Signing is limited to registry-listed own test packages with user-allowlisted identities, secret-safe input, receipts and keychain re-locking. Workers treat the registry and allowlist as read-only; everything outside that scope is BLOCKED.
 - **Orchestrator models:** [account/model health](references/nightly-review.md#account-and-model-health) records persistent `jobs/<id>/state.json` `respawnFlags`, VAK/routing on Fable, Webview/Lynx on Opus since 2026-11-11, and a user check on/after 2026-11-17 09:00 PST.
 - **Account reminders:** [nightly health](references/nightly-review.md#account-and-model-health) owns cards for company logins expiring within three days, TTADK SSO (2026-11-21 19:37 PST), TRAE login, Codex reset cards and Claude/Fable weekly projections; [`POLICY`](scripts/lib/state.mjs) supplies the 72-hour TTADK warning to `quota.mjs`.
 - **Rollout:** [policy notification](#global-rule-rollout) sends each change to all orchestrators: via the secretary for the mini group, directly to MacBook orchestrators.
@@ -194,11 +199,15 @@ Every code brief includes this short **Acceptance** block:
 - **Open questions:** resolved answers, or explicitly marked NOT-READY with an owner; resolve blockers before dispatch.
 
 Every **build brief** also includes (user, 2026-11-13): "Full-package builds use `scripts/heavy-build.sh <command...>`
-with holder/project/task/timeout set, or explicit equivalent `res` take/return. Build tasks must take/return required resources via
+with holder/project/task/timeout set, or an equivalent ONE-process wrapper around `res take-build`/`wait-build` and
+`return-build`. Acquire the slot and a free admitted lane together, holding neither while waiting for the other;
+other local heavy tasks use `wait-lane`. Build tasks must take/return required resources via
 `~/.claude/orchestrator/_shared/res`, following [build discipline](#build-discipline). Classify this run as full-package,
-other heavy or not heavy; name its lock IDs, exact take/wait/return commands, finite `--timeout <minutes>` and
+other heavy or not heavy; name its lock IDs, exact acquisition/return commands, finite `--timeout <minutes>` and
 long-lived wrapper `--pid $$`. Install `trap EXIT` cleanup before acquisition, release only acquired holds in reverse
-order on every exit (including a lane-acquisition timeout), and report/queue on timeout; never bypass the locks/gate."
+order on every exit (including an acquisition timeout), and report/queue on timeout; never bypass the locks/gate.
+Heavy locks are only for local heavy compute, never remote deploys or CI. Keep acquisition/build/return in that
+long-lived process; use `--watch-pid` when the wrapper must stop if its worker dies."
 Non-heavy builds need no heavy-* lock, but still follow applicable shared checkout/cache holds. Put approved build
 parallelism, the fixed per-base build directory, incremental/focused checks and cold acceptance build in the brief.
 
@@ -207,36 +216,52 @@ with its workspace/tools/access, and the scope does not conflict with sibling ta
 
 Every brief for work that writes or touches devices carries these safety clauses, word for word or
 close (user, 2026-11-04, after a worker overwrote a user header and another wiped test-app data):
+- For writing tasks, make the scope clause the first brief note; full access makes that boundary especially important.
 - "Never overwrite, delete or move files outside this task's scope: the user's files, uncommitted
   changes, shared headers or configs. If you touch one by mistake, restore it byte-for-byte and
   say so in the report."
 - "On devices and simulators, back up app data before any destructive step (reinstalling with
   --remove-existing-content, wiping app containers or Documents, erasing a simulator), or ask
   first."
+- "On the registered shared test phones iphone8, iphone11 and s21, freely tap Allow/Authorize/Trust/OK for OUR OWN
+  apps and system dialogs those apps trigger—camera, microphone, photos, notifications, local network, tracking,
+  developer trust, USB debugging and install confirmations—without per-prompt approval or button whitelists. Never
+  operate the personal iPhone 15 Pro Max (`policy=never`) or any device not registered in `res`. Take/return through
+  `res`, lease for at most 2 h and return when done; back up app data before destructive reinstall/wipe/erase; never
+  enter personal-account credentials, passwords or verification codes, and make no purchases. If Codex refuses an
+  allowed device prompt, re-route that step to Claude instead of asking the user to tap it. Browser safety for
+  irreversible web actions is unchanged."
 
-<a id="worker-credential-safety"></a>Every brief also carries the credential clause below; only the resident Claude signing worker's explicitly scoped brief replaces it with the narrow exception that follows (user-approved 2026-11-11, after a TRAE
+<a id="worker-credential-safety"></a>Every brief, whatever the task, carries these two adjacent credential/signing clauses (the first is the
+user-approved 2026-11-11 rule after a TRAE
 DeepSeek worker copied bytedcli's TikTok SSO session file into its automation browser to get past a console
-login; the user had to sign in again):
-- "Never read, copy or load any login session or credential file (cookies, SSO/session tokens, CLI auth
-  files such as bytedcli's, keychain items, .netrc, API keys), and never inject a session into a browser or
-  tool to get past a login. Wherever a login or authorization is needed, stop and report BLOCKED with what
-  needs signing in."
+login; the user had to sign in again; the second is the user's 2026-11-13 test-signing authorization):
+- "Forbidden for every worker: never read, copy, load or inject LOGIN material — login sessions, SSO/session
+  tokens, cookies, CLI auth files such as bytedcli's, API keys, .netrc, browser profiles, or other people's/other
+  apps' keychain items — and never use any way of getting past a login. Running an installed, already signed-in CLI (for example bytedcli) through its normal commands is allowed and expected; what is forbidden is reading, copying, exporting or injecting its auth files or session. Stop only when the command itself reports an authentication error. Where a login or authorization is needed,
+  stop and report BLOCKED with what needs signing in."
+- "Allowed: sign OUR OWN TEST packages only when they are registered by manifest and hash in
+  `~/.claude/orchestrator/_shared/user-signing/registry.json`, using only identities on the user-approved allowlist
+  `~/.claude/orchestrator/_shared/user-signing/identities.json` (maintained by the rules owner, each entry dated
+  with the user's approval): iOS H6 keychain identity for iPhone 8; iOS cosign team DH59R4RNRY development
+  certificate with provisioning profile 3JVMQQBHUR for iPhone 11, valid to 2027-09; Android repo-committed debug
+  keystore. Registry entries are written only by orchestrators; signing workers treat registry.json and
+  identities.json as read-only. A new identity needs a new user approval card and an allowlist entry; a worker
+  needing any new entry or an unlisted identity reports BLOCKED. If the H6 keychain is locked, pass only its
+  one designated password file through stdin,
+  never argv/env/logs. For Android test APKs use the repo's committed debug keystore and the debug passphrase from
+  `build.gradle`, passed through file descriptors such as apksigner `file:/dev/fd/N`, never argv. Never export, copy,
+  print or log a password or key; report only PASS/FAIL, certificate fingerprint and hashes; write a receipt under
+  `user-signing/receipts/`; re-lock the keychain unless another registered signing run is active; never sign
+  production/release packages or touch other keychains. Anything outside this scope is BLOCKED and needs a user card."
 - **Console access preflight** (user-approved 2026-11-11 retro; W291-L1c needed signed-in consoles on headless TRAE):
   name the console origins and already signed-in browser/account in the brief; route those steps as `browser` work.
   Headless Playwright is for public/local pages, never a substitute for that sign-in; missing access means BLOCKED.
-  One-shot `codex exec` / `traecli exec` launches must carry the credential clause in developer instructions too.
-- **Codex signing boundary on this machine** (user, 2026-11-13): never touch signing or credential files, including
-  keychain-password files or hashing them, even with authorization. Design the task to strip those inputs/use a
-  sanitized public version, or have the user run the necessary operation once. Never plan on approval lifting this ban.
-- **Only signing exception** (user-approved 2026-11-13): signing of **our own test packages** goes to the one resident
-  Claude signing worker set up by vesdk-mainline and shared with lynx-view, launched with Remote Control + Bypass on
-  separately counted, pre-approved personal Claude quota. It may sign only packages preregistered by manifest + hash:
-  iPhone test apps with the H6 keychain identity (if locked, it may read that one password file to unlock it), and
-  Android test APKs with the repo-committed debug keystore and debug passphrase in `build.gradle`. It never exports,
-  copies or prints a secret and reports only hashes plus PASS/FAIL; it never touches login sessions, other keychains,
-  or production/release packages. Anything outside this scope is BLOCKED with a user card. Every other Claude and
-  Codex worker keeps the baseline rule. During transition, the user may still run vesdk-mainline's existing one-shot
-  “sign everything” wrapper.
+  One-shot `codex exec` / `traecli exec` launches must carry both clauses in developer instructions too.
+- **Test signing route** (user, 2026-11-13): pass `--signing`; it forces full access and makes the scoped rule the first
+  route note. The brief names the registered manifest/hash and designated identity. Afterwards scan worker logs only,
+  mask any hits, and verify the receipt and keychain re-locking. Routed full-access workers may sign only within
+  the registered own-test-package scope when their brief says so. The allowlist and package registry remain read-only.
 
 **Prevent rework at the brief** (rework retro of 2026-11-06–10, 89 rework chains; user-approved 2026-11-10). Most
 rework came from unchecked premises, "done" proven on the wrong target, one shared rule re-implemented by several
@@ -246,8 +271,8 @@ workers, and patching after a second same-kind defect.
   sandbox can write its outputs (research that writes files is not `--read-only`); the tools it needs (browser, device
   channel, upload, unlocked screen); exact dependency caches; signing team/profile/key, bundle in use, permissions,
   runner support. Anything NOT-READY: fix it or ask the user first; don't launch into it. Stay within the permissions
-  you have: a missing credential or signing asset is one card to the user, never a worker workaround; for Codex use
-  the signing boundary above, not an authorization plan.
+  you have: missing login access or anything outside the registered test-signing scope is one card to the user, never
+  a worker workaround. A registered `--signing` task follows the scoped rule above.
 - <a id="done-on-target"></a>**"Done" is proven on the target artifact and entry, not on unit tests.** The brief's done-criteria name: (1) the
   acceptance identity — which server and session (server-side evidence), which build/version/SHA, which core is loaded;
   after switching endpoints, reconnect explicitly; (2) the production entry — the real package/loader path (e.g. a plain
@@ -295,6 +320,8 @@ workers, and patching after a second same-kind defect.
   as `--security` too. Alternatively, rewrite the findings as defensive requirements only, e.g. "token validation rejects
   tampered signatures" or "hidden items return 404", with no attack description or original attack-style findings in
   the worker's context; then those findings alone do not require `--security`. Other security-flavoured content still does.
+  A compliance confirmation or executable acceptance check written defensively is defensive work: with `--security` on a
+  review row it can carry `--defensive` and stay on TTADK GPT (see below).
 - **Adversarial security reviews** (user decision 2026-11-13, option A). OpenAI's cyberPolicy blocked a TTADK
   gpt-6.1-sol `review-high --security` turn on 2026-11-13 ("flagged for possible cybersecurity risk … apply for
   Daybreak access"). A `review`, `review-high` or `second-opinion` routed with `--security` is therefore adversarial by
@@ -309,6 +336,16 @@ workers, and patching after a second same-kind defect.
     on TRAE it also leaves the same family restriction as a 983 signal (gpt out until the next 00:00 UTC, then probed),
     while TTADK has telemetry only and no pause. Re-route with `--adversarial`. The vendor's trusted-access programme
     is the user's/company's call.
+- **Defensive security confirmation** (`--defensive`, user ruling 2026-11-13). On `review`, `review-high` or
+  `second-opinion` it is meaningful only together with `--security`; it marks the review as non-adversarial:
+  ordinary `--security` routing (TRAE GPT excluded, TTADK GPT allowed), never the adversarial lane. Without it,
+  `--security` reviews remain adversarial by default. `--adversarial` and `--defensive` together are a usage error.
+  - The brief states only the rule to hold and its acceptance conditions, with no bypass description, exploit steps or
+    attack reproduction; it verifies "should" behaviour with focused tests and closes earlier findings without
+    restating how to bypass.
+  - If a vendor cyber-policy block stops a turn: do not retry that thread and do not resend the content to any GPT
+    account. Re-route that part with `--adversarial` (Kimi-K3 plus a DeepSeek-V4.1-Flash second reviewer). Resolve any
+    disagreement by whichever side reproduces it with an executable test, and list the rest for the user.
   Implementation/fix work under `--security` keeps the existing rule: no TRAE GPT; TTADK GPT allowed.
 - **Long device or sampling matrices: qualify first.** Run a pilot with one minimal sample per gate at real rates,
   disk, timeouts and SDK events; run the full matrix only once it passes. Device leases, deadlines, disconnects,
@@ -389,8 +426,11 @@ effort, Codex account and launch command from
   - `--failures N`: how often this task has already visibly fallen short, counted per task and kept
     in the ledger. Each failure moves it one step up the escalation ladder. Count one when a result
     fails your verification, a worker stalls or reports something beyond its depth;
-  - `--writes` / `--read-only`, `--against <vendor>` for a second opinion, and `--mode`, `--cwd`,
-    `--task-dir`, `--name` so the printed command is ready to run;
+  - `--writes` / `--read-only`, `--against <vendor>` for a second opinion, `--runs-tests` when a non-writing worker
+    needs workspace-write for test-generated files, and `--sandbox workspace-write|read-only` for an explicit narrower
+    Codex-family sandbox. Use `--signing` only for our own registry-listed test packages; it forces full access and
+    injects the scoped signing and audit notes. `--mode` remains accepted for compatibility but no longer selects the
+    sandbox. Pass `--cwd`, `--task-dir`, `--name` so the printed command is ready to run;
   - for code work, `--impact release|service|throwaway` (see "Review only what is costly to
     undo"); route.mjs refuses code work without it;
   - `--env test|prod` (default `prod`) and `--no-local-build` for `build-run`: `--env test` marks a
@@ -405,7 +445,9 @@ effort, Codex account and launch command from
     implementation that reads attack-style findings; see "Security follows the worker's context" above. A `review`,
     `review-high` or `second-opinion` with `--security` is adversarial instead: no GPT on any account, company non-GPT
     models with a second reviewer, Claude only after asking (see "Adversarial security reviews"). `--adversarial`
-    forces that lane for any task. Every TRAE GPT
+    forces that lane for any task. `--defensive` is valid only with `--security` on review/review-high/second-opinion:
+    it keeps the ordinary security route (TRAE GPT excluded, TTADK GPT allowed) for a compliance confirmation instead
+    of the adversarial lane, and `--adversarial` + `--defensive` is a usage error. Every TRAE GPT
     here is an OpenAI model under the same vendor policy as 6.1-Sol (restrictions on 2026-11-10/11), not a policy workaround;
   - `--background` only when nobody is waiting and there is no deadline or near-term dependency: nightly cleanups,
     doc refreshes, exploratory analysis and benchmark batches. On TRAE, ordinary background work is light: prefer
@@ -489,7 +531,20 @@ effort, Codex account and launch command from
     the user (go on on personal quota, or wait).
   - Never hold or postpone work on your own (user, 2026-11-09: "不要擅自决定去暂缓一些工作"), low-stakes
     work included: when route.mjs prints "needs the user's OK", ask; when it DEFERs (nothing can run it
-    now), tell the user and ask how to proceed.
+    now), tell the user and ask how to proceed. Waiting for a quota reset is a hold: the only allowed wait is
+    an explicit `deferUntil` scheduled dispatch — record it in the ledger, set a timer and keep dispatching other
+    work; never wait while a same-tier company lane can finish earlier, and never hold a queued low-priority turn
+    past its `queue-too-slow` deadline.
+    Routed workers perform the handoff themselves: verify no work, confirm cancellation, re-route with the
+    original category/flags/exclusions and same failures, exclude the slow account/model lane, and follow a fresh company
+    hub worker with a continuation header. Maximum two automatic hops; no active or background handoff and
+    no personal quota/signing auto-launch. Exit 8 (`reroute-needs-user`) asks for approval; exit 9 persists
+    `reroute.json`/`deferUntil` for the orchestrator's timer; exit 10 reports the hop limit. Cancellation failures
+    exit 7 within three seconds with `queue-cancel-unconfirmed`, without launching a duplicate. Existing
+    wrapper holds must be returned by their owner on exit. Flat queues also expire by elapsed patience. Router
+    failures exit 7 with a `reroute.json` recovery command/continuation prompt; reroutes never force `--fresh`,
+    and account identity comes from public registry/hub metadata, never login files. Outcome reads hop records without manual `--actual`;
+    nightly review measures automatic waits and faster/slower/unknown starts. See references/codex-workers.md.
   - TTADK is not unlimited (measured 2026-11-08): about 500M tokens a day per user, input + output with
     cached input counted in full, shared by all models (plus an hourly cap); it resets at 16:00 UTC.
     When it runs out (`quota-exhausted:` from codex-worker; quota.mjs shows TTADK paused until the
@@ -650,7 +705,8 @@ and take-time notes at `~/.claude/orchestrator/_shared/notes/heavy-build.md`. Us
 - **Gradle pure builds:** public/sanitized inputs, task-private Gradle home; `--build-cache --daemon --max-workers=2`,
   `-Dorg.gradle.daemon.idletimeout=300000`, `-Dorg.gradle.jvmargs=-Xmx6g`. No daemon when process-exit credential
   isolation or signing/login material is involved. Omit routine clean/rerun/header regeneration; stop only the task's
-  own daemon when isolation requires it. These flags never authorize signing/credential access; use the enable snippets above.
+  own daemon when isolation requires it. These flags do not authorize login material or signing beyond a registered
+  `--signing` test package; use the enable snippets above.
 - [Machine resources](references/resources.md): a five-minute sampler and nightly retro attribute CPU/RSS, lock/wait/
   STALE/bypass evidence, authoritative heavy-check readings, shared ccache rates and hub listener outages to projects/tasks.
   Keep `resource-tasks.json` current for ready/queued/waiting work and exact worktree/worker mappings; shared-repo ownership
@@ -663,6 +719,11 @@ and take-time notes at `~/.claude/orchestrator/_shared/notes/heavy-build.md`. Us
   quota unused at reset, queue hours and top idleness causes. Read idle hints on every wake as above.
 - Device leases last at most **2 h**, then the worker returns the device and reports results/remaining work. Put the
   preflight in the brief: device connected, unlocked, app data backed up; include the return command and deadline.
+- The registered shared test phones are **iphone8, iphone11 and s21**. They are pre-authorized for ordinary
+  permission/trust/install dialogs from our own apps; the personal iPhone 15 Pro Max (`policy=never`) and every
+  unregistered device are forbidden. This device-dialog authorization does not authorize credentials, verification
+  codes, purchases, destructive operations without backup, or irreversible browser actions. A Codex refusal is
+  re-routed to Claude, never handed to the user as a tap request.
 
 <a id="shared-resources"></a>**Hold shared resources through the shared table, not through another orchestrator.** Devices and
 checkouts that several projects use are listed in `~/.claude/orchestrator/_shared/resources.tsv`,
@@ -699,15 +760,19 @@ only their own files — no `add -A`, stash or reset. Permission boundaries are 
 route an action that was denied in one session through another.
 
 <a id="permission-plan"></a>**Plan around permissions before you dispatch** (user, 2026-11-05; tightened 2026-11-13).
-1. **Predict the boundary.** Claude workers always launch in Bypass; ask authorization cards only for non-secret
-   actions Bypass cannot pass (deploys, DNS/certificates, external submissions, pushes). Include this plan in the brief.
+1. **Predict the boundary.** Codex-family writing workers launch with full access by default; non-writing workers stay
+   read-only, or workspace-write with `--runs-tests`. Use `--sandbox workspace-write|read-only` when one task needs a
+   narrower Codex boundary. Full access may commit on the task branch only when the brief says so; never push to main,
+   never force-push, and add no co-author/tool trailer. Claude workers always launch in Bypass. Ask authorization cards
+   only for non-secret actions those modes cannot pass (deploys, DNS/certificates, external submissions, pushes).
+   Include this plan in the brief.
 2. **Ask, then let the agent execute.** A blocked Claude worker raises AskUserQuestion and retries after approval;
    don't hand non-secret actions to the user. A blocked Codex worker reports the exact step/error; arrange a card
    through Claude for an approvable non-secret action, never to evade its sandbox or a denial. If approval cannot
    enable it, report BLOCKED and redesign rather than asking the user to perform the non-secret action.
-3. **Secrets and denials stay boundaries.** Only the user types passwords/codes. Never read/copy credentials or
-   transfer a denied action to launder permissions; a relay is not authorization. The Codex signing/credential ban
-   above cannot be lifted by a card: sanitized inputs or a one-time user operation are its explicit alternatives.
+3. **Secrets and denials stay boundaries.** Never read/copy login material or transfer a denied action to launder
+   permissions; a relay is not authorization. The only worker-handled secret input is within a registered `--signing`
+   test-package run, using stdin/file descriptors exactly as the scoped rule requires. Anything else remains BLOCKED.
 
 **Talk to the user when there is something to act on.** Finished work, a question that needs
 them, a failure, a cost they should know about. Lead with the outcome and the task id, keep it
@@ -720,8 +785,9 @@ short, batch updates that arrive together, and reply in the user's language.
 - **Launch a worker** from its workspace:
   `cd <workspace> && claude --bg --remote-control --permission-mode bypassPermissions -n <name> "<one line pointing at the brief>"`.
   It prints `backgrounded · <id> · <name>`. Always pass Remote Control and explicit **Bypass** (user, 2026-11-13):
-  `route.mjs` no longer reads `settings.json` `defaultMode`, and `--mode` affects only the Codex sandbox, not Claude
-  worker mode. Codex retains its own sandbox bound (see `references/codex-workers.md`). Prefix the name
+  `route.mjs` no longer reads `settings.json` `defaultMode`; `--mode` is compatibility-only and does not change either
+  worker family's permissions. Codex retains the sandbox selected from write/test intent or an explicit narrower
+  `--sandbox` override (see `references/codex-workers.md`). Prefix the name
   with the project slug so sessions from different projects stay apart in `claude agents`.
   Always pass the model and effort `route.mjs` printed (`--model opus|sonnet|haiku|fable`,
   `--effort low|medium|high|xhigh|max`) — otherwise the worker inherits yours. In the rare case a

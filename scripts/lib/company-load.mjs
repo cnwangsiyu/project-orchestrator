@@ -63,6 +63,48 @@ export const freshQueue = (rows, now = Date.now()) => Object.fromEntries(Object.
 }));
 export const readQueueState = (home, now = Date.now()) => home ? freshQueue(read(path.join(home, 'queue-state.json')), now) : {};
 
+// Per-model lane telemetry (2026-11-13 night): the family queue cannot say whether a depleted model is draining or
+// progressing, so record each model separately. `drainPerMin` comes from successive fresh positions; `lastProgressAt`
+// is set when a running worker completes items with no queue cycles (the live evidence that a depleted bucket can
+// still run at normal speed). Only compact numbers are kept.
+export const readLaneState = (home, now = Date.now()) => home ? Object.fromEntries(Object.entries(read(path.join(home, 'lane-state.json')))
+  .flatMap(([model, r]) => {
+    if (!idOK(model) || !r || typeof r !== 'object') return [];
+    const t = num(r.t), ageMin = age(t, now);
+    if (ageMin == null) return [];
+    return [[model.toLowerCase(), { t, ageMin, position: num(r.position), drainPerMin: num(r.drainPerMin),
+      lastProgressAt: num(r.lastProgressAt), itemsPerMin: num(r.itemsPerMin),
+      state: ['queued', 'waiting', 'ready'].includes(r.state) ? r.state : 'unknown' }]];
+  })) : {};
+const writeLaneState = (home, model, sample, now = Date.now()) => {
+  const file = path.join(home, 'lane-state.json'), lock = `${file}.lock`;
+  let held = false;
+  try {
+    try { fs.mkdirSync(lock); held = true; } catch {
+      try { if (now - fs.statSync(lock).mtimeMs > 30000) fs.rmdirSync(lock); } catch {}
+      return BALANCE.queueWriteMs;
+    }
+    const rows = readLaneState(home, now), prev = rows[model], t = num(sample.t) ?? now;
+    let drainPerMin = null;
+    if (prev && sample.position != null && prev.position != null && t > prev.t
+      && ['queued', 'waiting'].includes(prev.state)) {
+      const dt = (t - prev.t) / 60000, drop = prev.position - sample.position;
+      if (dt > 0 && drop >= 0) drainPerMin = drop / dt;
+    }
+    rows[model] = { t, position: num(sample.position), drainPerMin,
+      lastProgressAt: sample.progress ? t : sample.state === 'ready' ? prev?.lastProgressAt ?? null : null,
+      itemsPerMin: num(sample.itemsPerMin) ?? (sample.state === 'ready' ? prev?.itemsPerMin ?? null : null),
+      state: ['queued', 'waiting', 'ready'].includes(sample.state) ? sample.state : 'unknown' };
+    const clean = Object.fromEntries(Object.entries(rows).map(([k, v]) => [k, { t: v.t, position: v.position,
+      drainPerMin: v.drainPerMin, lastProgressAt: v.lastProgressAt, itemsPerMin: v.itemsPerMin, state: v.state }]));
+    const tmp = `${file}.${process.pid}`;
+    try { fs.writeFileSync(tmp, JSON.stringify(clean)); fs.renameSync(tmp, file); }
+    finally { try { fs.unlinkSync(tmp); } catch {} }
+    return 0;
+  } catch { return BALANCE.queueWriteMs; }
+  finally { if (held) try { fs.rmdirSync(lock); } catch {} }
+};
+
 // Nonblocking cross-process lock + atomic rename. A timer coalesces pending updates, with at most one shared-file
 // write per minute. Telemetry never delays a worker or changes the number of launches. Last sampled observation wins;
 // retain any sampled position >300 for 30 min even when a later event clears that queue.
@@ -91,21 +133,25 @@ export const writeQueueState = (home, family, pending, now = Date.now()) => {
   finally { if (held) try { fs.rmdirSync(lock); } catch {} }
 };
 export const createQueueRecorder = (home, model) => {
-  const family = poolOf(model);
-  let pending = null, timer = null;
+  const family = poolOf(model), key = String(model ?? '').toLowerCase();
+  let pending = null, timer = null, stopped = false;
   const flush = () => {
     timer = null;
     const delay = writeQueueState(home, family, pending);
     if (delay) { timer = setTimeout(flush, delay); timer.unref(); } else pending = null;
   };
-  return (event, t = Date.now()) => {
-    if (!home || !idOK(family)) return;
+  const record = (event, t = Date.now()) => {
+    if (stopped || !home || !idOK(family)) return;
     const position = num(event.position);
     const high = position > BALANCE.queuePosition ? { t, position } : pending?.high;
     pending = { t, position, state: event.state ?? 'queued', lowPriority: event.modelQuotaLowPriority ?? event.lowPriority ?? null,
       ...(high ? { high } : {}) };
     if (!timer) flush();
+    if (idOK(key)) writeLaneState(home, key, { t, position, state: event.state ?? 'queued',
+      progress: !!event.progress, itemsPerMin: event.itemsPerMin }, t);
   };
+  record.stop = () => { stopped = true; if (timer) clearTimeout(timer); timer = null; pending = null; };
+  return record;
 };
 
 const compactBucket = (q) => q ? { used: num(q.used), limit: num(q.limit), resetsAt: num(q.resetsAt),

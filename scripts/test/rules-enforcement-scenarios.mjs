@@ -37,7 +37,10 @@ async function waitForWrapper(predicate, child, message) {
 try {
   fs.mkdirSync(shared, { recursive: true }); fs.writeFileSync(log, '');
   const digest = loadDigest();
-  assert.ok(digest.text.split('\n').length <= 60);
+  assert.ok(digest.text.split('\n').length <= 63);
+  const workerLines = digest.worker.split('\n');
+  const loginRule = workerLines.findIndex((line) => line.includes('Forbidden for every worker: never read, copy, load or inject LOGIN material'));
+  assert.ok(loginRule >= 0); assert.match(workerLines[loginRule + 1], /Allowed with the user's 2026-11-13 authorization: sign OUR OWN TEST packages/);
   const invoke = (input, overrides = {}) => {
     const start = performance.now();
     const result = spawnSync(process.execPath, [path.join(scripts, 'rules-digest-hook.mjs')],
@@ -68,7 +71,7 @@ try {
   fs.writeFileSync(changed, fs.readFileSync(changed, 'utf8').replace(changedVersion, removedVersion).replace('- New version test rule.\n', ''));
   assert.match(invoke(event({ source: 'compact' }), { RULES_DIGEST: changed }).hookSpecificOutput.additionalContext,
     /Removed\/replaced:\n- New version test rule/);
-  for (const input of ['{broken', '{}', event({ source: 'clear' }), event({ session_id: '__proto__' })]) assert.equal(invoke(input), null);
+  for (const input of ['{broken', '{}', event({ source: 'invalid' }), event({ session_id: '__proto__' })]) assert.equal(invoke(input), null);
   assert.equal(invoke(event({ session_title: 'Fail 主对话' }), { RULES_DIGEST: path.join(tmp, 'missing') }), null);
   fs.mkdirSync(path.join(shared, 'rules-seen.json.lock'));
   assert.ok(invoke(event({ session_title: 'Contended 主对话', session_id: 's4' })));
@@ -100,8 +103,9 @@ fs.realpath=(file,...args)=>process.env.STALL_PHASE==='transcript'?stalled():rea
 
   const now = Date.now();
   append({ t: now - 1000, project: 'p', name: 'T1', category: 'implement', pick: { vendor: 'codex', model: 'gpt-6.1-sol', account: 'ttadk' } });
-  cli('launch-audit.mjs', ['--name', 'p-T1-fix1', '--account', 'ttadk', '--model', 'gpt-6.1-sol', '--vendor', 'codex']);
+  cli('launch-audit.mjs', ['--name', 'p-T1-fix1', '--account', 'ttadk', '--model', 'gpt-6.1-sol', '--vendor', 'codex', '--sandbox', 'read-only']);
   assert.equal(rows().at(-1).routeAt, now - 1000);
+  assert.equal(rows().at(-1).sandbox, 'read-only');
   assert.equal(rows().filter((row) => row.kind === 'unrouted').length, 0);
   const missing = spawnSync(process.execPath, [path.join(scripts, 'launch-audit.mjs'), '--name', 'T10', '--account', 'main', '--model', 'gpt-6.1-sol'], { env, encoding: 'utf8' });
   assert.equal(missing.status, 0); assert.match(missing.stderr, /unrouted-launch/);
@@ -123,6 +127,7 @@ if(m.method==='turn/start')setImmediate(()=>this.onmessage({data:JSON.stringify(
   { env: { ...env, CODEX_ACCOUNTS: profiles, CAPTURE: captured }, encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'] });
   assert.equal(JSON.parse(fs.readFileSync(captured)).developerInstructions, `Global worker rules ${digest.version}\n${digest.worker}`);
   assert.equal(rows().at(-1).kind, 'launch'); assert.equal(rows().at(-1).account, 'main');
+  assert.equal(rows().at(-1).sandbox, 'read-only');
   console.log('ok   real codex-worker start injects the single-source worker digest and records launch evidence');
   const probeBin = path.join(tmp, 'probe-bin'), spawned = path.join(tmp, 'unexpected-hub-spawn');
   fs.mkdirSync(probeBin);

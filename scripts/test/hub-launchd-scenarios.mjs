@@ -67,6 +67,15 @@ script:${JSON.stringify(worker)},home:process.env.HOME,interval:30,...JSON.parse
     for (let i = 0; i < 100 && !fs.existsSync(file) && run.child.exitCode === null; i++) await tick(20);
     assert.ok(fs.existsSync(file), run.error()); await tick(100);
   };
+  const waitLog = async (account, error, offset, text, run) => {
+    const file = path.join(hubDirectory(tmp), `${account}${error ? '.err' : ''}.log`);
+    const observed = () => {
+      try { return fs.readFileSync(file, 'utf8').slice(offset).includes(text); } catch { return false; }
+    };
+    const deadline = Date.now() + 10000;
+    while (!observed() && run.child.exitCode === null && run.child.signalCode === null && Date.now() < deadline) await tick(20);
+    assert.ok(observed(), `supervisor did not report ${text}: ${run.error()}`);
+  };
   reset();
   let run = start('main'); await waitFile(marker, run);
   const hubPid = Number(fs.readFileSync(marker, 'utf8'));
@@ -75,7 +84,7 @@ script:${JSON.stringify(worker)},home:process.env.HOME,interval:30,...JSON.parse
   console.log('ok   unreachable hub starts as an owned foreground child and stops with its supervisor');
 
   reset(); fs.writeFileSync(marker, 'external');
-  run = start('b'); await tick(250);
+  run = start('b'); await waitLog('b', false, 0, 'standby; reachable hub retained', run);
   assert.equal(run.child.exitCode, null); assert.ok(!fs.existsSync(starts));
   run.child.kill('SIGTERM'); assert.equal((await run.exited)[0], 0);
   assert.equal(fs.readFileSync(marker, 'utf8'), 'external');
@@ -117,7 +126,8 @@ script:${JSON.stringify(worker)},home:process.env.HOME,interval:30,...JSON.parse
     }
   }
   const blockedStarts = fs.readFileSync(starts, 'utf8');
-  run = start('main', {}, { HUB_FAIL: '1' }); await tick(300);
+  const blockedLogOffset = fs.readFileSync(path.join(hubDirectory(tmp), 'main.err.log'), 'utf8').length;
+  run = start('main', {}, { HUB_FAIL: '1' }); await waitLog('main', true, blockedLogOffset, 'hub BLOCKED: main;', run);
   assert.equal(run.child.exitCode, null); assert.equal(fs.readFileSync(starts, 'utf8'), blockedStarts);
   run.child.kill('SIGTERM'); assert.equal((await run.exited)[0], 0);
   console.log('ok   permanent failures persist exponential backoff then BLOCKED standby without a silent start loop');

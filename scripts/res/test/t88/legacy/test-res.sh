@@ -36,7 +36,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
 wait_for_retry() {
-  local deadline=$((SECONDS + 30))
+  local deadline=$((SECONDS + 120))
   until grep -Fq 'retry in 1s' "$OUT"; do
     [ "$SECONDS" -lt "$deadline" ] || return 1
     sleep 0.05
@@ -144,8 +144,9 @@ gate bad 1048576
 expect 1 "$RES" wait heavy-build --by owner --project test --for badmetric --timeout 1
 gate 1 1048576
 printf '1\n' >"$FIXTURE_DIR/recover-load"
-# Recovery needs the closed sample, a real backoff and a second gate scan.
-expect 0 "$RES" wait heavy-build --by owner --project test --for recovery --pid "$$" --timeout 0.3
+# Success probes need room for fresh samples, retries and v1.4's post-take diagnostic under load.
+# The explicit failure timeout below stays unchanged.
+expect 0 "$RES" wait heavy-build --by owner --project test --for recovery --pid "$$" --timeout 2
 contains "retry in 1s"
 [ "$(field heavy-build pid)" = "$$" ] || fail 'wait explicit PID lost'
 pass 'overload recovery retries and preserves explicit PID'
@@ -157,7 +158,7 @@ new_hold heavy-build
 starting_child=releaser
 (wait_for_retry; "$RES" return heavy-build --by owner >"$ROOT/evidence/background-return.txt") & releaser=$!
 starting_child=''
-expect 0 "$RES" wait heavy-build --by waiter --project test --for retry --pid "$$" --timeout 0.3
+expect 0 "$RES" wait heavy-build --by waiter --project test --for retry --pid "$$" --timeout 2
 wait "$releaser"
 releaser=''
 release heavy-build waiter

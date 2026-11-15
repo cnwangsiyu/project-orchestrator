@@ -139,7 +139,9 @@ TTADK is the default; eligible work can also use TRAE before TTADK runs out (use
 TTADK has about **500M tokens/day**, shared by its models, resetting at **16:00 UTC**. TRAE has independent daily
 high-priority buckets (currently Sol 80, Astra 58, 5.6-Sol 80 units), resetting at **22:00 UTC**, plus a 300-unit weekly
 pool. Depleting a model's daily bucket sends its requests to TRAE's shared low-priority queue. Every request queues
-separately, and both providers' unused daily quota expires. Queue positions 180–3124 have been observed in US
+separately, and both providers' unused daily quota expires. Depleted is not unavailable: the low-priority lane still
+runs the model, so route.mjs compares expected completion (the ETA rules under the daily-bucket section below) instead
+of demoting or waiting automatically. Queue positions 180–3124 have been observed in US
 evening/night (Beijing daytime); US daytime load has not yet been measured, so the clock alone never implies low load.
 
 For a primary task already routed to TTADK, keep its effort and transfer it to TRAE only when eligible. Sol picks
@@ -263,6 +265,17 @@ the nightly review compares dispatch reasons and recorded wall-clock time, inclu
     Other `--security` work (implementation/fixes written as defensive requirements, executable acceptance tests)
     keeps the rule above: no TRAE GPT; TTADK GPT allowed.
 
+    **Defensive confirmation (`--defensive`, user ruling 2026-11-13).** On `review`, `review-high` or
+    `second-opinion` it is meaningful only together with `--security`. Such a review is **not** adversarial: it follows
+    ordinary `--security` routing (TRAE GPT excluded, TTADK GPT allowed) and never enters the adversarial lane. Without
+    `--defensive`, `--security` reviews remain adversarial by default; `--adversarial` and `--defensive` together are a
+    usage error. A compliance confirmation or executable acceptance check is defensive work: its brief states only the
+    rule to hold and the acceptance conditions, with no bypass description, exploit steps or attack reproduction, and
+    verifies "should" behaviour with focused tests. If a vendor cyber-policy block stops a turn, do not retry that thread
+    and do not resend the content to any GPT account; re-route that part with `--adversarial` (Kimi-K3 plus a
+    DeepSeek-V4.1-Flash second reviewer). Resolve any disagreement by whichever side reproduces it with an executable
+    test, and list the rest for the user.
+
   - **Difficulty-tiered company model choice (user-approved 2026-11-13).** One `COMPANY_TIERS` table in `route.mjs`
     controls TRAE substitution when Sol is depleted, paused, excluded or absent, and balanced/background TRAE picks.
     Hard rules take precedence over light rules:
@@ -291,15 +304,53 @@ the nightly review compares dispatch reasons and recorded wall-clock time, inclu
     this does not introduce TRAE-only ids there.
     `--security`, vision/model-fit exclusions, pauses and actual-personal-pick approval gates still apply.
 
-    A depleted bucket uses the tier's next eligible model at the same GPT effort, with confirmed priority quota left
-    or known bucket-free capacity. Missing Sol/Astra/5.6-Sol entries are unknown, not bucket-free. Unknown quota leaves
-    the normal pick unchanged; if a depleted pick has no
-    eligible alternative, keep it queued. This changes model choice, never parallel task concurrency or account health.
-    Above ~300 in a depleted model's hub queue, re-routing is worth it for the next dispatch: `--exclude-model <that model>`
-    with the same `--failures`. Non-depleted/unknown buckets wait. Accepted queued turns stay pending under the rule below;
-    do not interrupt or launch duplicates. For long builds/large reviews at ≥80% daily usage, consider starting just after
-    the quota's resetTime (TRAE normally **22:00 UTC**, TTADK **16:00 UTC**); this is advice, never an automatic deferral.
+    A depleted bucket is **not** "unavailable": it runs in TRAE's low-priority lane and spends no high-priority
+    quota. Whether to launch there or wait for a reset is decided by expected completion, not by the word "depleted"
+    (user, 2026-11-13 night). For every candidate that passes the tier/quality/exclusion rules:
+    `completion = start_delay + work_minutes × slowdown`.
+    - `work_minutes` is the category/effort median from deduplicated, corrected outcomes when at least 3 timed rows exist, otherwise the
+      fallback table in `scripts/lib/eta.mjs` (`ETA.workMin`: light 5, normal 30, hard 90, review 25). `ETA.requests`
+      (light 10, normal 40, hard 120) counts the per-request re-queues in the low-priority lane.
+    - TTADK with quota: start 0; TTADK out: start = minutes until `resetsAt`.
+    - TRAE with bucket left and no fresh congestion: start 0. Depleted or congested: use that model's lane telemetry
+      from the last 30 minutes (`lane-state.json`: position, drain per minute from successive positions,
+      `lastProgressAt`, `itemsPerMin`). A worker progressing with no queue cycles is available now. Queued with
+      position P and drain r > 0 predicts `start = P/r` and `slowdown = 1 + (P/r × requests)/work_minutes` (1 when
+      `P/r` is under the 2-minute noise floor). Missing telemetry is optimistic: start 0, marked unknown.
+    - Choose the minimum completion; ties prefer the candidate that spends no high-priority quota, then the stronger
+      model. Hard work never demotes to 5.6/5.5/Terra/DeepSeek because of depletion.
+    - Waiting is legitimate only as an **explicit scheduled dispatch**: when the best completion belongs to an account
+      that is not available yet and finishes earlier than every lane that can start now, route.mjs emits
+      `deferUntil`, the reason and the runner-up, plus a `tell` line to record it in the ledger and set a timer. It
+      never defers when a same-tier candidate finishes earlier, never on a retry, and never for a resource-bound task.
+      A `--background` task follows the quota-preserving order above instead.
+    - Launches into a low-priority lane carry `--queue-patience-min M --alt "<alternative>"`, the alternative's
+      `--queue-alt-start-min` estimate, original `--route-args` and `--auto-reroute-depth` to codex-worker, with
+      M = `min(30 min, 25% of the time until the faster account resets)`. From the live queue drain the worker predicts
+      the start; if predicted start plus elapsed wait exceeds the earlier deadline/alternative, it checks for work,
+      confirms the queued turn is interrupted without progress, and re-routes itself with the same flags/failures,
+      the slow account/model lane excluded (`--exclude-lane`) and depth N+1. A structured `--queue-alternative`
+      keeps the same model on another account eligible. It follows a fresh company hub worker with the same brief and a
+      continuation header. Maximum two automatic hops; no active/background/personal/signing auto-launch.
+      Approval exits 8; deferral persists `reroute.json`/`deferUntil` and exits 9 for the orchestrator's timer; limit
+      exits 10. Unconfirmed cancellation exits 7 within three seconds, with no replacement. Legacy launches without
+      route args retain exit 7. Flat/unknown queues expire by elapsed patience using an independent alarm. Router
+      failures also exit 7 with persisted recovery argv/prompt; automatic reroutes remove `--fresh`, and identity
+      comes only from public registry/hub metadata. Outcome derives automatic actual chains from hop records;
+      nightly reports waits and observed faster/slower/unknown starts. See references/codex-workers.md.
+    - A task holding a device lease or heavy-build lock must not wait in a queue while holding it: route.mjs prefers a
+      candidate that can start now, never schedules a wait, and the note says to take the lease/lock only after the
+      first model response.
+    This changes model choice, never parallel task concurrency or account health. Accepted queued turns stay pending
+    under the rule below; do not interrupt or launch duplicates (the patience handoff is the one explicit stop).
     Explicit `--background` work instead follows the quota-preserving order in "Background work" above.
+
+    **ETA table refresh.** `scripts/review-data.mjs --json` reports `routing.eta`: the current constants and, per
+    category/effort, the sample count and median recorded `minutes`. Routing already uses that median once it has 3
+    timed rows; the nightly review changes the fallback table in `scripts/lib/eta.mjs` only when it is consistently far
+    from the medians. The minute and request-count tables are editable constants in `lib/eta.mjs`; no automatic
+    policy installation occurs. Family queue telemetry coalesces shared writes to once a minute; per-model position,
+    drain and completed-item throughput update atomically on observations. New queue cycles clear old progress/drain.
 
   - **Evidence behind the tiers (2026-11-13, public + our TRAE runs).** Public report:
     `~/.claude/jobs/9850afbb/tmp/task-pubbench/report.md`. Terminal-Bench 4.1, Codex `max`:

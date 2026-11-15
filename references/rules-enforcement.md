@@ -5,7 +5,7 @@ its `Worker Rules` section is extracted, not maintained as a second copy. Nothin
 
 ## Injection And Acknowledgement
 
-`rules-digest-hook.mjs` handles SessionStart startup/resume/compact. Detection uses `session_title` (or name/title
+`rules-digest-hook.mjs` handles SessionStart startup/resume/compact/fork/clear. Detection uses `session_title` (or name/title
 aliases) ending in 主对话 or matching `_shared/orchestrators.txt`, an already-recognized session id, the skill cwd,
 or a skill-load marker in the first/last 16 KiB of an allowed Claude `projects/*.jsonl` transcript. It does not read
 job/login/auth stores or run a CLI/network query. Use named orchestrators for reliable detection; a marker outside
@@ -33,10 +33,15 @@ Owner installation only: merge `templates/session-start-hook.json` into the exis
 without replacing other hooks/settings. Its exact fragment uses an absolute Node binary; adjust if Node moves:
 
 ```json
-{"hooks":{"SessionStart":[{"matcher":"startup|resume|compact","hooks":[{"type":"command","command":"/Users/bytedance/.nvm/versions/node/v22.17.0/bin/node \"$HOME/.agents/skills/project-orchestrator/scripts/rules-digest-hook.mjs\"","timeout":2}]}]}}
+{"hooks":{"SessionStart":[{"matcher":"startup|resume|compact|fork|clear","hooks":[{"type":"command","command":"/Users/bytedance/.nvm/versions/node/v22.17.0/bin/node \"$HOME/.agents/skills/project-orchestrator/scripts/rules-digest-hook.mjs\"","timeout":2}]}]}}
 ```
 
 ## Launch And Build Evidence
+
+Worker completion has a separate [durable owner inbox, tracked watcher and Stop enforcement](worker-inbox.md).
+The updated SessionStart template includes both digest and inbox hooks; merge it along with
+`templates/stop-hook.json` after owner review. The older digest-only fragment above is insufficient for the inbox.
+No hook was installed by the inbox task.
 
 `codex-worker start` and routed Claude/one-shot launches check the last 24h of routing decisions for the same
 name or task-prefix. Missing decisions warn `unrouted-launch` and append `kind: unrouted`; attempted launches
@@ -58,7 +63,15 @@ The wrapper holds heavy-build then the chosen lane, using gated finite res waits
 cleanup of owned process groups; never nest it or enter already holding heavy locks. Set lane 2 when appropriate.
 Other heavy tasks use lane-only res take/return. The [resource sampler](resources.md) independently detects builds
 without holders; denied probes remain UNKNOWN and telemetry never reclaims locks/restarts hubs. The wrapper doesn't enforce signing safety by sandboxing;
-the worker's credential-denying sandbox/brief remains mandatory.
+the injected adjacent login-material/test-signing rules and the brief remain mandatory. A signing task uses
+`--signing` (full access), a registry-listed manifest/hash and designated identity, secret-safe stdin/file descriptors,
+a receipt, masked log scan and keychain re-locking; everything outside that scope is BLOCKED. Identities must
+be on the user-approved `~/.claude/orchestrator/_shared/user-signing/identities.json` allowlist, maintained by
+the rules owner with dated user approval: H6 keychain identity (iPhone 8), cosign team DH59R4RNRY development
+certificate + profile 3JVMQQBHUR (iPhone 11, valid to 2027-09), or repo-committed Android debug keystore.
+Only orchestrators write registry.json entries; signing workers treat registry.json and identities.json as
+read-only. New identities need a new user approval card and an allowlist entry; workers needing a new entry
+or an unlisted identity report BLOCKED. Nightly receipts must match allowlisted identities and registered packages.
 
 ## Opt-In launchd Hubs
 

@@ -80,6 +80,7 @@ try {
     load: { percent: 35, t: now - h }, queue: { position: 250, t: now - h }, burn: { beforeReset: true, outAt: now + h } };
   append(route('balanced', { company: 'trae', pick: pick('trae'), balance: factors, why: ['balanced to TRAE: TTADK projected to run out'] }));
   append(route('not-balanced', { company: 'ttadk', balance: { ...factors, selected: false } }));
+  append(route('signing', { signing: true, pick: { ...pick('ttadk'), sandbox: 'danger-full-access' } }));
   append(route('old-balanced', { t: now - 30 * h, company: 'trae', balance: factors }));
   // cyberPolicy blocks (codex-worker): counted per account/model in the window, ignored when old.
   append({ kind: 'policy-block', t: now - h, account: 'ttadk', vendor: 'codex', model: 'gpt-6.1-sol', why: '{"codexErrorInfo":"cyberPolicy"}' });
@@ -112,6 +113,7 @@ try {
   assert.ok(out.traeVsCodex.mixed.some((o) => o.task === 'p/T37' && o.cause === 'infra'));
   assert.equal(out.traeVsCodex.rows.find((o) => o.key === 'gpt-6.1-sol').trae.tasks, 1);
   assert.deepEqual(report.background, { tasks: 3, completed: 2, timed: 2, totalMinutes: 1620, meanMinutes: 810 });
+  assert.deepEqual(report.routing.signing.map((r) => [r.name, r.pick.sandbox]), [['signing', 'danger-full-access']]);
   console.log('ok   review-data corrections, effective attribution, mixed harnesses and background wall-clock summary');
   const policy = report.routing.companyPolicies;
   assert.equal(policy.balanced, 1); assert.equal(policy.background, 4); // Dispatches include the review; background.tasks does not.

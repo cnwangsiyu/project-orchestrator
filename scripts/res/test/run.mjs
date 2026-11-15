@@ -6,6 +6,16 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
+const SUITE_TIMEOUTS = {
+  't88/test-res.sh': 600000,
+  't88/memory/test-res.sh': 600000,
+  't88/legacy/test-res.sh': 600000,
+  'lane3.mjs': 600000,
+  'build.mjs': 1200000,
+};
+// The outer runner must allow every bounded child plus fixture setup/logging overhead.
+export const RES_TEST_BUDGET_MS = Object.values(SUITE_TIMEOUTS).reduce((sum, timeout) => sum + timeout, 0) + 300000;
+
 export function runResSuites() {
   const base = path.dirname(fileURLToPath(import.meta.url));
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'res-tests-'));
@@ -21,18 +31,16 @@ export function runResSuites() {
     PATH: process.env.RES_TEST_NATIVE_PS === '1' ? process.env.PATH : `${bin}:${process.env.PATH}`,
     RES_DIR: path.join(tmp, 'unused'), RES_TEST_METRICS: '0',
     T88_RES: res, T86_RES: res, T83_RES: res };
-  const suites = ['t88/test-res.sh', 't88/memory/test-res.sh', 't88/legacy/test-res.sh', 'lane3.mjs', 'build.mjs'];
   let assertions = 0;
   console.log(`Res PID table: ${process.env.RES_TEST_NATIVE_PS === '1' ? 'native ps' : 'scratch fixture (host ps not required)'}`);
-  for (const suite of suites) {
+  for (const [suite, timeout] of Object.entries(SUITE_TIMEOUTS)) {
     const node = suite.endsWith('.mjs');
     const script = path.join(node ? base : tmp, suite);
+    // v1.4 adds post-take diagnostics and a 20m build/signal matrix. These aggregate watchdogs do not change
+    // the independently bounded probes, resource waits or production admission gates.
     const r = spawnSync(node ? process.execPath : '/bin/bash', [script], {
       cwd: tmp, env: { ...env, RES_TEST_ROOT: tmp, RES_SOURCE: res },
-      // The expanded v1.4 signal matrix plus sequential replacement-verdict
-      // probes can exceed 10m under load. Individual probes/resource waits stay
-      // bounded independently; only this build-suite aggregate gets 20m.
-      encoding: 'utf8', timeout: suite === 'build.mjs' ? 1200000 : 600000, maxBuffer: 8 * 2 ** 20 });
+      encoding: 'utf8', timeout, maxBuffer: 8 * 2 ** 20 });
     const output = `${r.stdout ?? ''}${r.stderr ?? ''}`;
     fs.writeFileSync(path.join(tmp, suite.replaceAll('/', '-') + '.log'), output, { mode: 0o600 });
     if (r.status !== 0 || r.error) throw Error(`${suite}: exit=${r.status}; ${r.error?.message ?? ''}\n${output.slice(-8000)}\nFixtures: ${tmp}`);

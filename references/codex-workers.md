@@ -6,6 +6,11 @@ Use this whenever `scripts/route.mjs` puts a task on Codex — mostly coding (im
 
 ## Launch, resume, follow
 
+Keep route.mjs's `run-tracked.sh` wrapper for one-shot execs; the raw examples below describe the underlying CLI,
+not a substitute for the durable launcher. Every worker is a tracked background task or covered by an armed
+owner watcher, never detached with `&`. See [worker inbox and owner identity](worker-inbox.md);
+on wake handle finished workers first and re-arm `codex-worker watch --owner <session-id>` if workers remain.
+
 - **Launch** from the worker's workspace as a harness background task (Bash with `run_in_background`):
   `CODEX_HOME=<account home> codex exec -C <workspace> -s <sandbox> -m <model> -c model_reasoning_effort='"<effort>"' --json -o <task dir>/codex-last.md "<one line pointing at the brief>" < /dev/null > <task dir>/codex.jsonl 2>&1`
   - `CODEX_HOME` picks the account (see Several Codex accounts); without it the run spends `main`.
@@ -42,10 +47,10 @@ hub over WebSocket (`--account <name>`, default `main`), so the process that sta
   starts it detached (log in `<account home>/hub.log`) so it outlives your session. Running workers die if the hub dies. `CODEX_HUB` overrides the URL. The hub has no
   authentication: any local process can start or steer a thread on it, so keep it on 127.0.0.1 and only on a machine you trust. (The managed daemon's unix socket speaks WebSocket too; Node's
   WebSocket can't dial a unix socket, hence the TCP hub.)
-- **After a re-login or plan change, restart that account's hub.** (To use another account, add it as a profile — see Several Codex accounts — rather than re-logging the main home.) It keeps the login it started with, so once `<account home>/auth.json`
-  changes, hub calls fail with `401 ... token_expired` (seen 2026-10-30 after the upgrade to Pro). Restart it only while no
+- **After a re-login or plan change, restart that account's hub.** (To use another account, add it as a profile — see Several Codex accounts — rather than re-logging the main home.) It keeps the login it started with; after a re-login,
+  hub calls can fail with `401 ... token_expired` (seen 2026-10-30 after the upgrade to Pro). Restart it only while no
   worker runs on it — `codex-worker.mjs --account <name> list` shows every thread `notLoaded` — by stopping that account's
-  `codex app-server --listen <its hub>` process and running `codex-worker.mjs --account <name> hub`; `quota.mjs` flags a hub whose login changed; otherwise tell the other orchestrators first. `codex exec` runs read the
+  `codex app-server --listen <its hub>` process and running `codex-worker.mjs --account <name> hub`; quota identity is public registry metadata plus the hub's usage account id. A missing hub leaves login/identity unknown; never inspect login files to diagnose it. Tell the other orchestrators first. `codex exec` runs read the
   login fresh and aren't affected.
 - **Start** a worker as a harness background task (its exit is the completion signal; it exits 0 on completed, 1 on
   failed/interrupted):
@@ -270,6 +275,33 @@ remain routing telemetry, not local spending/concurrency caps. Reports must name
   observation retains a position above 300 for 30 minutes even after a later ready event. Other threads' events are
   ignored. This is best-effort telemetry: it never holds a worker or reduces concurrency. `quota.mjs` reads it live,
   ignores observations older than 30 minutes, and appends it to each quota refresh snapshot with per-model CLI load.
+- **Automatic queue handoff** (user, 2026-11-14). `route.mjs` passes `--route-args '<JSON argv>'`,
+  `--auto-reroute-depth N` and, on slow/unknown lanes, `--queue-patience-min M --alt '<alternative>'`.
+  The worker compares elapsed wait with the patience deadline and `--queue-alt-start-min` alternative estimate,
+  whichever is earlier, using an independent alarm even when notifications stop or positions plateau. At least two
+  minutes of falling positions also permit an earlier predicted-start decision. The generic stall alarm defers to
+  queue patience and cannot cut off its cancellation. It checks
+  the turn for work, interrupts it once, and confirms it is interrupted
+  without progress before calling `route.mjs` with original flags, the same `--failures`, an `--exclude-lane account:model`
+  for the slow lane and depth N+1. `--queue-alternative` retains the structured route alternative, so TTADK may run
+  the same model after its reset. Reroutes remove `--fresh`; quota identity never parses credential files. It launches a fresh company hub thread with the same brief and a git status/diff
+  continuation header, follows that child, and returns its result to the original caller. Each hop prints
+  `rerouted: <from> (queued P, waited M min) → <to>` and logs a `kind:'reroute'` plus the child's launch.
+  Unavailable TRAE models at thread/turn start and first-request vendor restrictions (983) use the same guards.
+  Never hop after tools, reasoning, output or ready state; never hop background tasks; at most two automatic hops.
+  A held resource or unknown resource-bound metadata stops the handoff: the owning wrapper returns its holds
+  on exit, never another task's holds. Acquire device/build resources only after the first model response.
+  Cancellation/read failure stops within three seconds with `queue-cancel-unconfirmed`, exit 7, no replacement.
+  Router failure also exits 7 and persists `reroute.json` before routing, including cancelled thread/turn ids,
+  route argv and the continuation prompt for recovery; a followed child's later deferral record remains authoritative.
+  Approval/personal quota stops with `reroute-needs-user`, exit 8; deferral writes `reroute.json` with the full
+  route and `deferUntil`, exit 9, for the orchestrator's timer (no worker timer or long sleep); depth limit exits 10.
+  A policy block is never resent to GPT. Only an already `--security`/`--adversarial` route can auto-hop, with
+  `--adversarial` added and `--defensive` removed. Signing is never automatically launched by a Codex worker.
+  Legacy launches without route args keep exit 7 handoff behaviour. Outcome chains are derived from hop records;
+  nightly `routing.automaticReroutes` reports waits and observed faster/slower/unknown starts, not assumed speedups.
+  Required company second opinions are followed separately with their routed read-only sandbox and separate reports;
+  any personal secondary pick also stops the hop for approval, even when the original route carried `--urgent`.
 - **Per-model daily quota** (user-approved 2026-11-13). The hub answers the read-only `model/internalUsage/read` with
   `{dailyUsage:[{quotaKey, quotaLimit, quotaUsed, quotaRemaining, usagePercent, isDepleted, periodStart, resetTime}],
   usage:{usage_percent, quota_remaining, quota_limit, is_depleted, reset_time}}` — one independent daily (24 h) bucket per
@@ -280,12 +312,13 @@ remain routing telemetry, not local spending/concurrency caps. Reports must name
   sample time are unknown, even if resetTime is still in the future. Cached reads preserve the original timestamp.
   `quota.mjs` shows one row per model with a daily bucket plus the weekly row. A depleted bucket (`isDepleted`) moves only
   that model into TRAE's **low-priority queue** (`queue/status` `modelQuotaLowPriority: true`; requests then wait with
-  positions in the hundreds) until its reset. For new dispatches, `route.mjs` prefers GPT-5.6-Sol with quota left, then Astra,
-  then eligible company fallbacks (see model-routing.md, "Daily quota and queue choice"). Above ~300 for a depleted
-  model, consider `--exclude-model <that model>` with the same `--failures` on the next dispatch; non-depleted/unknown
-  buckets wait. Never interrupt an accepted queued turn or launch a duplicate. Keep parallel task concurrency unchanged.
-  Long builds/large reviews at ≥80% daily usage may start just after resetTime (TRAE normally 22:00 UTC; TTADK 16:00 UTC),
-  advisory only. `account/rateLimits/read` does not work for this login.
+  positions in the hundreds). For new dispatches compare completion within the task's tier (see model-routing.md,
+  "Difficulty-tiered company model choice"): hard work stays on Sol/Astra, normal work keeps its quota-bearing 5.6
+  order then bucket-free DeepSeek, and light work prefers bucket-free models. Per-model fresh queue/progress evidence
+  controls the estimate; depletion alone proves no delay. A faster reset produces an explicit ledger/timer dispatch,
+  and a launch with missing lane evidence carries queue patience. Never launch a duplicate of an accepted queued turn.
+  Keep parallel task concurrency unchanged. A bucket at ≥80% with priority quota left starts now unless fresh lane
+  congestion changes the completion estimate. `account/rateLimits/read` does not work for this login.
 - **Pause after failures** (`scripts/lib/trae-health.mjs`, user 2026-11-08). codex-worker records every failed or
   stalled TRAE turn and clears the record on a completed one. Failures count **per model family** (gpt, deepseek,
   gemini, seed…; 2026-11-10: TRAE restricted only GPT while the others kept working): a paused family's models drop out
@@ -442,11 +475,14 @@ account is browser-ready, and to Claude otherwise.
 ## Permissions and environment
 
 - The user's `~/.codex/config.toml` defaults to yolo (`approval_policy = "never"`, `sandbox_mode = "danger-full-access"`), which is the equivalent of bypass mode. On another machine, check it before assuming. The CLI flags are `-s read-only|workspace-write|danger-full-access` and `--dangerously-bypass-approvals-and-sandbox`.
-- **Never give a Codex worker more than the orchestrator has.** `danger-full-access` only when the orchestrator runs in bypass mode; otherwise `workspace-write` for writers. Claude workers separately always use explicit Bypass (user, 2026-11-13). For approvable non-secret actions (pushes, external posts, installs), arrange a user card and let an authorized agent execute, not the user; never evade a sandbox/denial. See [permission plan](../SKILL.md#permission-plan).
-- **Signing/credential files on this machine** (user, 2026-11-13): Codex never touches them, including keychain-password files or hashing, regardless of authorization. Use [sanitized/stripped inputs or a one-time user operation](../SKILL.md#worker-credential-safety), never an approval workaround.
-- **`workspace-write` can't run git writes** (verified 2026-10-30): Codex keeps every git metadata dir read-only in it — the worktree's `.git`, the main repo's `.git/worktrees/<name>`, even when added as a writable root — so `git add`, `commit`, `fetch` and `rebase` fail with "Operation not permitted". That is deliberate (a sandboxed write to `.git/hooks` or `.git/config` would run outside the sandbox at the next git command), so don't work around it. Brief such workers to edit only, leave the changes uncommitted and report the changed files and a commit message; then review the diff and commit yourself. If the diff touches hook scripts or their config (`.husky/`, `.pre-commit-config.yaml`, `core.hooksPath` targets, package scripts run by hooks), commit with `--no-verify` or ask the user, since your commit would run them unsandboxed. Its network follows `[sandbox_workspace_write] network_access` in `~/.codex/config.toml` (on in the user's config); `--network on|off` overrides it per worker or turn.
+- **Router default (user decision 2026-11-13):** writing workers on ChatGPT Codex, TTADK and TRAE use `danger-full-access`; `--mode` remains accepted but does not change that choice. A full-access worker may commit on its task branch only when the brief says so; never push to main, never force-push, and add no co-author/tool trailer. Claude workers separately always use explicit Bypass.
+- **Review/test boundary:** non-writing categories, including reviews, default to `read-only` so a reviewer cannot edit the code under review. Pass `--runs-tests` when that task must run suites that create temporary/build files; it selects `workspace-write`, never full access. Pass `--sandbox workspace-write|read-only` only as an explicit narrower override for one Codex-family task.
+- **Cards do not widen sandboxes.** For approvable non-secret actions (pushes, external posts, installs), arrange a user card and let an authorized agent execute, not the user; never evade a sandbox/denial. See [permission plan](../SKILL.md#permission-plan).
+- **Login material is forbidden for every worker:** never read, copy, load or inject login sessions, SSO/session tokens, cookies, CLI auth files such as bytedcli's, API keys, `.netrc`, browser profiles, or other people's/other apps' keychain items, and never use any way of getting past a login. Running an installed, already signed-in CLI (for example bytedcli) through its normal commands is allowed and expected; what is forbidden is reading, copying, exporting or injecting its auth files or session. Stop only when the command itself reports an authentication error. Missing login or authorization means BLOCKED with what needs signing in.
+- **Our own registered test packages may be signed** (user-authorized 2026-11-13): `--signing` retains the scoped signing note and full-access policy. Manifest and hash must be in `~/.claude/orchestrator/_shared/user-signing/registry.json`; identities must be on the user-approved `~/.claude/orchestrator/_shared/user-signing/identities.json` allowlist (rules owner maintains dated approvals): H6 keychain identity for iPhone 8; cosign team DH59R4RNRY development certificate + profile 3JVMQQBHUR for iPhone 11, valid to 2027-09; repo-committed Android debug keystore. Only orchestrators write registry entries; signing workers treat registry.json and identities.json as read-only. New identities require a new user approval card and allowlist entry; a worker needing a new entry or an unlisted identity reports BLOCKED. If H6 is locked, pass only its one designated password file through stdin, never argv/env/logs. Android's repo debug passphrase from build.gradle goes through file descriptors such as apksigner file:/dev/fd/N, never argv. Never export/copy/print/log passwords or keys; report PASS/FAIL, certificate fingerprint and hashes; write a receipt under user-signing/receipts/; re-lock the keychain unless another registered signing run is active; never sign production/release packages or touch other keychains. Anything outside scope is BLOCKED and needs a user card. A Codex worker never auto-launches a signing hop.
+- **A `workspace-write` override can't run git writes** (verified 2026-10-30): Codex keeps every git metadata dir read-only in it — the worktree's `.git`, the main repo's `.git/worktrees/<name>`, even when added as a writable root — so `git add`, `commit`, `fetch` and `rebase` fail with "Operation not permitted". That is deliberate (a sandboxed write to `.git/hooks` or `.git/config` would run outside the sandbox at the next git command), so don't work around it. Brief such workers to edit only, leave the changes uncommitted and report the changed files and a commit message; then review the diff and commit yourself. If the diff touches hook scripts or their config (`.husky/`, `.pre-commit-config.yaml`, `core.hooksPath` targets, package scripts run by hooks), commit with `--no-verify` or ask the user, since your commit would run them unsandboxed. Its network follows `[sandbox_workspace_write] network_access` in `~/.codex/config.toml` (on in the user's config); `--network on|off` overrides it per worker or turn.
 - **Quota**: `codex-worker.mjs [--account <name>] usage` prints a ChatGPT account's windows, reset cards and id as JSON (`quota` the windows only); `scripts/quota.mjs` combines every account with Claude's (see SKILL.md, routing). A TTADK account has no windows; `quota.mjs` reports its health instead (see TTADK above).
-- **Read-only tasks**: pass `-s read-only`, and say "read-only" in the brief.
+- **Read-only tasks**: the router passes `-s read-only` by default for non-writing categories; say "read-only" in the brief.
 - **Skills**: `~/.codex/skills` is symlinked to the same skills directory, so Codex sees most skills. Some can be disabled per skill in config.toml under `[[skills.config]] enabled = false`.
 - **Memory**: `~/.codex/AGENTS.md` bridges to Claude: it tells Codex to read `~/.claude/CLAUDE.md`, then the memory files a brief's "Relevant memory" section names, then the `memory/MEMORY.md` of the project its working directory maps to. That is only an instruction (in a 2026-10 sample, about 4 of 7 real worker runs read any Claude memory), so the brief's "Relevant memory" section, as SKILL.md describes, is what makes it reliable. Tested 2026-10-30 on Luna `low`: given only a list of memory paths, it answered without opening any file; told "before anything else, read each of these with a shell command; they are required input", it read them and `~/.claude/CLAUDE.md` and answered both questions correctly. What Codex learns goes to its own `~/.codex/memories/`, which Claude never reads; the report's "Durable lessons" section brings it back.
 - Codex has no Artifact or Claude Docs tools. Feishu work goes through `lark-cli`, which the lark skills document.

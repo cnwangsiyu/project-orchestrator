@@ -109,6 +109,15 @@ heavy-lane-* and heavy-check. This repository is the source of truth: `scripts/r
 owner installer under `scripts/res/`, maintained contract [res-contract.md](res-contract.md). Projects own
 their caller wrappers/PID/order/budget, not a second lock/controller. Device policies and existing state stay intact.
 
+The registered shared test phones **iphone8, iphone11 and s21** are authorized for our own app tests. While holding
+one through `res`, a worker may tap Allow/Authorize/Trust/OK on our app and system dialogs it triggers, including
+camera, microphone, photos, notifications, local network, tracking, developer trust, USB debugging and install
+confirmations, without per-prompt approval or a button whitelist. The personal iPhone 15 Pro Max is `policy=never`,
+and no worker may operate it or any device absent from the `res` registry. Leases are at most 2 h and must be returned;
+back up app data before destructive reinstall/wipe/erase; never enter personal-account credentials, passwords or
+verification codes, and make no purchases. If Codex refuses an allowed prompt, re-route that step to Claude rather
+than asking the user to tap it. Irreversible browser actions retain their separate approval rules.
+
 Imported from `/Users/bytedance/.agents/skills/project-orchestrator/scripts/res`, the target of
 `$HOME/.claude/orchestrator/_shared/res` per T89 handover. Source SHA-256 is
 `24516dbc39f6e7fb783f9f1f33648bb6247600b977a709f1055d2fa76342570a`, also matching T88 `stage/res`.

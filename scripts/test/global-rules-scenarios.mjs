@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -14,6 +14,22 @@ const originalHome = process.env.HOME;
 process.env.HOME = tmp;
 try {
   const { analyze, leanLines, POLICY, now } = await import('../lib/state.mjs');
+  const { loadDigest } = await import('../lib/global-rules.mjs');
+  const digest = loadDigest();
+  const digestText = fs.readFileSync(path.join(path.dirname(root), 'references/global-rules.md'), 'utf8');
+  assert.equal(digestText.match(/^version:/gm)?.length, 1, 'integration must publish one digest version');
+  assert.equal(digestText.match(/^## Changes In This Version$/gm)?.length, 1);
+  assert.match(digestText, /Resources \(2026-11-14\): stage res v1\.4/);
+  assert.match(digestText, /Nightly delivery \(2026-11-14\): no fixed working-worker kill\/timeout/);
+  assert.match(digest.worker, /take-build\/wait-build inside ONE long-lived wrapper.*local heavy compute/);
+  assert.match(digest.worker, /elapsed and predicted-start deadlines.*exclude only the slow account\/model lane/);
+  const loginAt = digest.worker.indexOf('Forbidden for every worker: never read, copy, load or inject LOGIN material');
+  const signingAt = digest.worker.indexOf("Allowed with the user's 2026-11-13 authorization: sign OUR OWN TEST packages");
+  assert.ok(loginAt >= 0 && signingAt > loginAt, 'worker digest must contain adjacent login and test-signing rules');
+  assert.match(digest.worker, /registered shared test phones iphone8\/iphone11\/s21.*freely tap Allow\/Authorize\/Trust\/OK/);
+  assert.match(digest.worker, /personal iPhone 15 Pro Max \(`policy=never`\).*device not registered in `res`/);
+  assert.match(digest.worker, /lease <=2 h.*back up app data.*never enter personal-account credentials\/passwords\/verification codes.*no purchases/);
+  assert.match(digest.worker, /Codex refuses an allowed prompt.*routes that step to Claude.*do not ask the user to tap it/);
   const h = 3600000;
   const window = { label: 'week (all models)', used: 10, resetsAt: now + 120 * h, windowMins: 10080, scoped: false };
   const main = { name: 'main', home: tmp, live: true, seenAt: now, windows: [window], resets: { count: 0, credits: [] } };
@@ -53,12 +69,61 @@ try {
   }
   console.log('ok   Claude primary/second-opinion launches use Remote Control and Bypass for every default/override');
 
-  for (const [mode, sandbox] of [[[], 'workspace-write'], [['--mode', 'default'], 'workspace-write'],
-    [['--mode', 'bypassPermissions'], 'danger-full-access']]) {
+  for (const [mode, sandbox] of [[[], 'danger-full-access'], [['--mode', 'default'], 'danger-full-access'],
+    [['--mode', 'acceptEdits'], 'danger-full-access'], [['--mode', 'bypassPermissions'], 'danger-full-access']]) {
     assert.ok(route(['implement', '--impact', 'service', ...mode]).pick.command.includes(` --sandbox ${sandbox} `));
     assert.ok(route(['implement', '--impact', 'service', '--read-only', ...mode]).pick.command.includes(' --sandbox read-only '));
   }
-  console.log('ok   explicit Claude Bypass does not widen the Codex sandbox');
+  assert.equal(route(['review']).pick.sandbox, 'read-only');
+  assert.equal(route(['review', '--runs-tests']).pick.sandbox, 'workspace-write');
+  assert.equal(route(['implement', '--impact', 'service', '--sandbox', 'workspace-write']).pick.sandbox, 'workspace-write');
+  assert.equal(route(['implement', '--impact', 'service', '--sandbox', 'read-only']).pick.sandbox, 'read-only');
+  const signing = route(['review', '--signing', '--sandbox', 'read-only']);
+  assert.equal(signing.pick.sandbox, 'danger-full-access');
+  assert.match(signing.notes[0], /OUR OWN TEST packages.*user-signing\/registry\.json/);
+  assert.match(signing.notes[1], /scan worker logs only.*mask any hits/);
+  console.log('ok   Codex writers default full; reviewers stay read-only; tests and explicit overrides stay narrower');
+
+  const buildNote = route(['build-run']).notes.find((n) => n.startsWith('build brief:'));
+  assert.match(buildNote, /ONE-process wrapper around res take-build\/wait-build\/return-build.*res v1\.4/);
+  assert.match(buildNote, /holding neither resource while waiting for the other/);
+  assert.match(buildNote, /Other heavy tasks use wait-lane.*only for genuine local heavy compute/);
+  assert.match(buildNote, /one long-lived process.*--watch-pid/);
+  for (const flags of [['--no-local-build'], ['--env', 'test']]) {
+    const notes = route(['build-run', ...flags]).notes;
+    assert.ok(!notes.some((n) => n.startsWith('build brief:')));
+    assert.ok(notes.some((n) => /no heavy-build\/lane lock|no local heavy-build\/lane lock/.test(n)));
+  }
+  console.log('ok   integrated digest and route notes retain v1.4 pair acquisition, local-only locks and reroute rules');
+
+  const bans = [
+    String.raw`\bCodex(?:[-\s]+family)?(?:\s+workers?)?\s+(?:must\s+)?(?:never|must\s+not|may\s+not|do(?:es)?\s+not|cannot|can't|(?:is|are)\s+(?:not\s+allowed|forbidden|prohibited)\s+to)\s+(?:sign\b|signs\b|(?:touch(?:es)?|access(?:es)?|read|handle)\s+(?:any\s+)?(?:signing|credential))`,
+    String.raw`\b(?:forbids?|prohibits?|bans?)\b[^.;\n]{0,100}\bCodex\b[^.;\n]{0,100}\b(?:signing|credential)`,
+    String.raw`\bregardless\s+of\s+(?:authorization|approval)\b`,
+    String.raw`\bCodex\s+signing\s+request\s+is\s+BLOCKED\b`,
+    String.raw`\bsigning\s+by\s+(?:any\s+)?Codex(?:\s+workers?)?\s+(?:is|remains)\s+(?:forbidden|prohibited|blocked)\b`,
+    String.raw`\b(?:only|solely)\s+(?:the\s+)?resident\s+Claude\b[^.;\n]{0,120}\b(?:exception|may\s+sign)\b`,
+    String.raw`\bCodex(?:[-\s]+family)?(?:\s+workers?)?\s+(?:(?:is|are|remains?|remain)\s+)?(?:barred|banned|prohibited|forbidden)\s+from\s+(?:(?:all|any)\s+)?(?:signing|credential)`,
+  ];
+  const family = ['Co', 'dex'].join('');
+  const bannedExamples = [
+    [family, 'workers', 'never', 'touch', 'signing/credential', 'files'],
+    [family, 'workers', 'do', 'not', 'sign'],
+    [family, 'workers', 'must', 'not', 'sign'],
+    [family, 'worker', 'is', 'not', 'allowed', 'to', 'touch', 'signing', 'files'],
+    ['Signing', 'by', family, 'workers', 'is', 'forbidden'],
+    [family, 'never', 'signs'],
+    [family, 'remains', 'barred', 'from', 'all', 'signing', 'material'],
+    ['regardless', 'of', 'approval'], ['regardless', 'of', 'authorization'],
+    ['Machine', 'policy', 'forbids', 'every', family, 'worker', 'from', 'signing/credential', 'files'],
+  ];
+  for (const words of bannedExamples) assert.ok(bans.some((p) => new RegExp(p, 'i').test(words.join(' '))));
+  assert.ok(!bans.some((p) => new RegExp(p, 'i').test(['A Codex worker', 'never auto-launches a signing hop'].join(' '))));
+  for (const text of [digest.worker, ...signing.notes]) assert.ok(!bans.some((p) => new RegExp(p, 'i').test(text)));
+  const scan = spawnSync('rg', ['-n', '-i', '--multiline', ...bans.flatMap((p) => ['-e', p]),
+    path.join(path.dirname(root), 'SKILL.md'), path.join(path.dirname(root), 'references'), root], { encoding: 'utf8' });
+  assert.equal(scan.status, 1, scan.stdout || scan.stderr || `rg exited ${scan.status}`);
+  console.log('ok   scoped signing rule replaces every unconditional authorization prohibition');
 
   assert.equal(POLICY.ttadkSsoWarnH, 72);
   for (const [left, expected] of [[73, false], [72, true], [71, true], [55, true], [48, true], [24, true]]) {

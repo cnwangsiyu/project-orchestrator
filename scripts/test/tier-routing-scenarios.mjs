@@ -31,6 +31,10 @@ const run = (args, { models = ids, daily = depleted, company = false, traeHome =
   fs.writeFileSync(path.join(traeHome, 'queue-state.json'), JSON.stringify({
     gpt: { t: now, position: 0, state: 'ready' }, deepseek: { t: now, position: 0, state: 'ready' },
   }));
+  // A measured slow depleted Sol lane makes Astra the earliest hard candidate in these order/fit scenarios.
+  fs.writeFileSync(path.join(traeHome, 'lane-state.json'), JSON.stringify({
+    ...(daily?.[SOL]?.depleted ? { [SOL]: { t: now, state: 'queued', position: 500, drainPerMin: 0.5 } } : {}),
+  }));
   const personal = { name: 'main', home: path.join(tmp, 'main'), live: true, windows: [window], resets: { credits: [] } };
   const ttadk = { name: 'ttadk', kind: 'ttadk', home: path.join(tmp, 'ttadk'), healthy: true, live: true, seenAt: now,
     models: [SOL], windows: [], usage: { used: 90, limit: 100, resetsAt: now + 8 * h } };
@@ -160,11 +164,16 @@ try {
   const ttMax = run(['implement', '--failures', '2'], { company: true, daily: null });
   assert.deepEqual([ttMax.pick.account, ttMax.pick.effort], ['ttadk', 'max']);
   assert.ok(!ttMax.needsUserOK.includes('max effort'));
-  // Hard-tier depletion keeps queued Astra, not Flash; pin secondary substitution and the explicit quality rung.
+  // Hard availability keeps depleted Astra rather than skipping it for a weaker family; normal availability still
+  // names skipped depleted candidates. Secondary substitution and explicit Astra quality rungs stay pinned.
   const skip = run(['debug', '--exclude-model', SOL], { daily: { ...active, [ASTRA]: bucket(true) } });
   assert.equal(skip.tier, 'hard');
   assert.deepEqual([skip.pick.model, skip.pick.effort, skip.pick.account], [ASTRA, 'xhigh', 'trae']);
-  assert.ok(skip.why.some((s) => /keep the queued hard-tier model: no weaker substitution/.test(s)));
+  assert.ok(!personalGate(skip));
+  assert.ok(skip.why.some((s) => /gpt-6-astra low-priority lane \(bucket depleted\)/.test(s)));
+  const normalSkip = run(['analysis', '--exclude-model', SOL], { daily: { ...active, [SOL56]: bucket(true) } });
+  assert.equal(normalSkip.pick.model, TERRA56);
+  assert.ok(normalSkip.why.some((s) => /skipped depleted priority buckets:.*gpt-5.6-sol/.test(s)));
   const second = run(['review-high', '--author', 'codex']);
   assert.equal(second.pick.vendor, 'claude'); assert.equal(second.secondOpinion.model, ASTRA);
   assert.equal(second.secondOpinion.account, 'trae');
@@ -238,10 +247,12 @@ try {
       const tierCandidates = r.tier === 'hard' ? [SOL, ASTRA] : r.tier === 'normal' ? [SOL, SOL56, TERRA56, FLASH] : [TERRA56, GPT55, FLASH];
       const deepseekFits = category !== 'review-high' && !(['review', 'second-opinion'].includes(category) && (security || args.includes('high')));
       const companyModels = category === 'image-read' ? [SOL, ASTRA, SEED]
+        : r.adversarial ? [FLASH]
+        : r.tier === 'hard' ? [SOL, ASTRA]
         : [SOL, ...tierCandidates.filter((m) => m !== FLASH || deepseekFits), ...(deepseekFits ? [FLASH] : [])];
       const traeAvailable = (config.models ?? ids).some((m) => companyModels.includes(m) && fits(m, 'trae'));
-      const ttAvailable = !!config.company && fits(SOL, 'ttadk');
-      const companyHasSol = ttAvailable || ((config.models ?? ids).includes(SOL) && fits(SOL, 'trae'));
+      const ttAvailable = !!config.company && !r.adversarial && fits(SOL, 'ttadk');
+      const companyHasSol = !r.adversarial && (ttAvailable || ((config.models ?? ids).includes(SOL) && fits(SOL, 'trae')));
       if (traeAvailable || ttAvailable) {
         for (const [pick, secondary] of [[p, false], [r.secondOpinion, true]]) {
           if (!pick) continue;
