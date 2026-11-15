@@ -1,0 +1,224 @@
+import { VERSION, EFFORTS, array, company, known, modelId, familyOf, isReview, adversarial, result, reason, fingerprint, stable } from './common.mjs';
+import { candidateParts } from './candidates.mjs';
+
+const pass = (id) => result(id);
+const deny = (id, code, text, c, extra) => result(id, code, text, [c.id], extra);
+const effortIndex = (e) => EFFORTS.indexOf(e);
+const sameSet = (a, b) => stable([...a].sort()) === stable([...b].sort());
+export function approvalScope(t, c, action) {
+  return { taskId: t.taskId, constraintHash: t.constraintHash, roles: [t.role], action, accounts: [c.accountId], models: [c.modelId],
+    efforts: [c.effort], artifactHash: t.artifactRevision, origins: t.allowedOrigins, apps: t.allowedApps, allowPersonalWithCompany: false };
+}
+export function matchingApproval(t, s, c, action, bypass = false) {
+  return s.approvals.find((a) => t.approvalRefs.includes(a.id) && !a.revoked && !(action === 'reset-redemption' && a.consumed)
+    && a.grantedAt <= s.decisionAt && s.decisionAt < a.expiresAt && a.scopes.some((p) => p.taskId === t.taskId && p.constraintHash === t.constraintHash
+      && p.roles.includes(t.role) && p.action === action && p.accounts.includes(c.accountId) && p.models.includes(c.modelId) && p.efforts.includes(c.effort)
+      && p.artifactHash === t.artifactRevision && sameSet(p.origins, t.allowedOrigins) && sameSet(p.apps, t.allowedApps) && (!bypass || p.allowPersonalWithCompany)));
+}
+export function approvalGate(t, c, action, code, text, phase = 'prelaunch') {
+  const r = reason('pScopedApproval', code, text, [c.id]);
+  const scope = approvalScope(t, c, action);
+  return { id: `gate:${fingerprint([scope, code])}`, kind: action, phase, state: 'needsOK', scope, reason: r, evidenceIds: [] };
+}
+export function pUserRules(t, s, c) {
+  if (t.sandboxCeiling === 'read-only' && (t.sandbox !== 'read-only' || t.writes)) return deny('pUserRules', 'SANDBOX_CEILING', 'Task exceeds the parent workspace ceiling.', c);
+  if (t.requirements.credentialAccess) return deny('pUserRules', 'CREDENTIAL_ACCESS_FORBIDDEN', 'Credential/session access is not available to this pipeline.', c);
+  return pass('pUserRules');
+}
+export function pExclusions(t, s, c) {
+  const { account } = candidateParts(s, c);
+  const excluded = t.exclusions.some((e) => (!e.companyOnly || company(account)) && (e.accountId === null || !e.accountId || e.accountId === c.accountId)
+    && (e.scope === 'account' ? e.value === c.accountId : e.scope === 'family' ? e.value === c.family : modelId(e.value) === c.modelId));
+  return excluded ? deny('pExclusions', 'EXCLUDED', 'Candidate matches an explicit exclusion.', c) : pass('pExclusions');
+}
+export function pAvailable(t, s, c) {
+  const { account: a, model: m, lane: l } = candidateParts(s, c);
+  if (!a || !m || !l || !known(a.catalog)?.includes(c.modelId) || !m.efforts.includes(c.effort) || !known(l.efforts)?.includes(c.effort)
+    || l.accountId !== a.id || l.modelId !== m.id || l.harness !== c.harness || l.harness === 'UNKNOWN'
+    || c.family !== m.family || c.qualityProfileId !== m.qualityProfiles[c.effort])
+    return deny('pAvailable', 'CATALOG_UNSUPPORTED', 'The exact model, effort and harness must be declared.', c);
+  if (!l.selectable && !l.evidenced) return deny('pAvailable', 'LANE_NOT_EVIDENCED', 'Provider-assigned lanes need current evidence; they cannot be forced.', c);
+  if (known(a.auth) !== true) return deny('pAvailable', 'AUTH_UNKNOWN_OR_DENIED', 'Fresh positive authentication status is required.', c);
+  if (known(a.transport) !== true) return deny('pAvailable', 'TRANSPORT_UNKNOWN_OR_DENIED', 'Fresh positive transport/supervisor status is required.', c);
+  if (known(a.health) !== true) return deny('pAvailable', 'HEALTH_UNKNOWN', 'Health status is unknown.', c);
+  if (s.health.some((h) => h.accountId === a.id && (!h.modelId || h.modelId === m.id) && (!h.family || h.family === c.family)
+    && (h.restricted || h.recovery === 'awaiting-probe'))) return deny('pAvailable', 'ACTIVE_RESTRICTION', 'Restriction generation requires explicit matching recovery.', c);
+  // Q1/Q2: only explicit provider denial is authoritative. Dashboard disagreement
+  // and undocumented weekly semantics affect uncertainty, not account admission.
+  if (known(a.providerDenied) === true) return deny('pAvailable', 'PROVIDER_QUOTA_DENIED', 'Provider explicitly denied quota capacity.', c,
+    { reconsiderAt: known(a.denialResetAt) > s.decisionAt ? known(a.denialResetAt) : null });
+  return pass('pAvailable');
+}
+export function pCapabilities(t, s, c) {
+  const { account: a, model: m, lane: l } = candidateParts(s, c);
+  for (const cap of t.capabilitiesNeeded) if ([a, m, l].some((part) => known(part?.capabilities?.[cap]) !== true))
+    return deny('pCapabilities', `CAPABILITY_${cap.toUpperCase().replaceAll('-', '_')}`, `Missing positive ${cap} evidence in the model/account/harness intersection.`, c);
+  if (t.category === 'computer-use' && !t.allowedApps.length) return deny('pCapabilities', 'APP_SCOPE_REQUIRED', 'Desktop work requires explicit app scope.', c);
+  if (['browser', 'ui-browser'].includes(t.category) && !t.allowedOrigins.length) return deny('pCapabilities', 'ORIGIN_SCOPE_REQUIRED', 'Browser work requires explicit origin scope.', c);
+  for (const scope of [...t.allowedApps.map((v) => `app:${v}`), ...t.allowedOrigins.map((v) => `origin:${v}`)])
+    if ([a, l].some((part) => known(part?.capabilities?.[scope]) !== true)) return deny('pCapabilities', 'CAPABILITY_SCOPE', `Exact target access is missing: ${scope}.`, c);
+  return pass('pCapabilities');
+}
+export function minimumEffort(t, c) {
+  if (c.family === 'deepseek' || c.family === 'kimi') return 'high';
+  if (t.tier === 'hard') return adversarial(t) && isReview(t) ? 'high' : 'xhigh';
+  if (t.category === 'review' || t.category === 'second-opinion' || (t.writes && ['implement', 'ui-browser'].includes(t.category))) return 'high';
+  if (c.modelId === 'gpt-6.1-sol' || t.tier === 'normal') return 'medium';
+  return t.category === 'lookup' || t.category === 'image-gen' ? 'low' : 'medium';
+}
+export function pTierFloor(t, s, c) {
+  const astra = c.modelId === 'gpt-6-astra';
+  const explicitEscalation = t.selectionCause === 'quality-escalation' && t.qualityEscalation?.modelId === c.modelId
+    && t.qualityEscalation?.policyVersion === s.policyVersion && !!t.qualityEscalation?.evidenceId;
+  if (astra && t.tier !== 'hard' && !explicitEscalation) return deny('pTierFloor', 'ASTRA_SUBSTITUTION_HARD_ONLY', 'Astra substitutions are reserved for hard tasks.', c);
+  const hardNonGPT = adversarial(t) && isReview(t) && !t.writes && !t.runsTests && ['kimi', 'deepseek'].includes(c.family);
+  if (t.tier === 'hard' && !['gpt-6.1-sol', 'gpt-6-astra', 'opus', 'fable'].includes(c.modelId) && !hardNonGPT)
+    return deny('pTierFloor', 'TIER_QUALITY_FLOOR', 'Candidate is outside the established hard-task floor.', c);
+  if (t.tier !== 'hard' && !['gpt-6.1-sol', 'gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.5', 'gpt-6.1-terra', 'gpt-6-luna',
+    'gpt-5.6-luna', 'kimi-k3', 'deepseek-v4.1-flash', 'gemini-3.1-pro-preview', 'seed-evolving', 'opus', 'sonnet', 'haiku', 'fable'].includes(c.modelId))
+    return deny('pTierFloor', 'TIER_QUALITY_FLOOR', 'Model has no established category qualification.', c);
+  if (effortIndex(c.effort) < effortIndex(minimumEffort(t, c))) return deny('pTierFloor', 'TIER_EFFORT_FLOOR', 'Effort is below the category/model floor.', c);
+  return pass('pTierFloor');
+}
+// Partial relation only: no cross-family leaderboard. Explicit versioned edges
+// are injected policy, distinct from admissibility for a task category.
+export function dominates(c, previous, s) {
+  const id = modelId(previous.modelId ?? previous.model), effort = previous.effort;
+  if (!EFFORTS.includes(effort) || !id) return false;
+  if (id === c.modelId) return effortIndex(c.effort) >= effortIndex(effort);
+  if (id === 'gpt-6-astra' && c.family === 'gpt') return false;
+  if (id === 'gpt-6.1-sol' && c.family === 'gpt' && c.modelId !== 'gpt-6-astra') return false;
+  if (id === 'gpt-6.1-sol' && c.modelId === 'gpt-6-astra') return effortIndex(c.effort) >= effortIndex(effort);
+  const from = `${id}:${effort}`, to = c.qualityProfileId;
+  const seen = new Set([from]), pending = [from];
+  while (pending.length) {
+    const current = pending.shift();
+    for (const edge of s.qualityRelations.filter((e) => e.from === current && e.version === s.qualityRelationVersion && e.evidenceId)) {
+      if (edge.to === to) return true;
+      if (!seen.has(edge.to)) { seen.add(edge.to); pending.push(edge.to); }
+    }
+  }
+  return false;
+}
+export function pPreviousFloor(t, s, c) {
+  const attempts = t.previousAttempts;
+  const relevant = attempts.filter((a) => a?.taskId === t.taskId && (a.role ?? 'primary') === t.role && a.state !== 'planned');
+  if (relevant.some((a) => !a.id || !a.actual?.accountId)) return deny('pPreviousFloor', 'PREVIOUS_ATTEMPT_UNKNOWN', 'Prior attempt identity and actual account must be attested.', c);
+  if ((t.failures > 0 || t.autoRerouteDepth > 0 || array(t.floor.previousAttemptIds).length > 0) && !relevant.length)
+    return deny('pPreviousFloor', 'PREVIOUS_ATTEMPT_UNKNOWN', 'Retry requires sanitized actual-attempt evidence.', c);
+  if (t.floor.relationVersion !== s.qualityRelationVersion && relevant.length) return deny('pPreviousFloor', 'QUALITY_RELATION_UNKNOWN', 'The pinned quality relation is unavailable.', c);
+  if (array(t.floor.previousAttemptIds).some((id) => !relevant.some((a) => a.id === id)) || relevant.some((a) => a.actualStatus !== 'KNOWN' || !a.actual))
+    return deny('pPreviousFloor', 'PREVIOUS_ATTEMPT_UNKNOWN', 'An actual prior tuple is unknown.', c);
+  for (const a of relevant) {
+    if (!dominates(c, a.actual, s)) return deny('pPreviousFloor', 'RETRY_BELOW_ACTUAL_FLOOR', 'Candidate does not dominate every real prior attempt.', c);
+    if (['quality', 'spec', 'process'].includes(a.failureKind) && modelId(a.actual.modelId ?? a.actual.model) === c.modelId && a.actual.effort === c.effort
+      && !matchingApproval(t, s, c, 'retry-same-floor')) return deny('pPreviousFloor', 'QUALITY_REPEAT_REQUIRES_DECISION', 'Repeating an exhausted quality step requires an explicit task decision.', c);
+  }
+  for (const profile of array(t.floor.profileIds)) {
+    const at = profile.lastIndexOf(':');
+    if (!dominates(c, { modelId: profile.slice(0, at), effort: profile.slice(at + 1) }, s)) return deny('pPreviousFloor', 'RETRY_BELOW_ACTUAL_FLOOR', 'An explicit quality floor is not met.', c);
+  }
+  return pass('pPreviousFloor');
+}
+export function pContent(t, s, c) {
+  if (adversarial(t) && c.family === 'gpt') return deny('pContent', 'ADVERSARIAL_GPT_FORBIDDEN', 'Adversarial/policy-blocked content excludes GPT on every account.', c);
+  if (t.contentLabels.includes('security') && candidateParts(s, c).account?.kind === 'trae' && c.family === 'gpt')
+    return deny('pContent', 'SECURITY_TRAE_GPT_FORBIDDEN', 'Security content excludes TRAE GPT.', c);
+  return pass('pContent');
+}
+export function pModelFit(t, s, c) {
+  if (c.family === 'kimi' && candidateParts(s, c).account?.kind !== 'ttadk') return deny('pModelFit', 'KIMI_TTADK_ONLY', 'The established Kimi route is TTADK only.', c);
+  if (c.family === 'deepseek' && (t.category === 'build-run' || t.runsTests || ['fullPackageBuild', 'executableAcceptance', 'authAcceptance', 'storageAcceptance'].some((k) => t.requirements[k])))
+    return deny('pModelFit', 'MODEL_FIT_BUILD_ACCEPTANCE', 'DeepSeek cannot perform build or executable/auth/storage acceptance.', c);
+  if ((c.family === 'seed' || candidateParts(s, c).model?.visionOnly) && t.category !== 'image-read') return deny('pModelFit', 'MODEL_FIT_VISION_ONLY', 'Vision-only models are not general fallbacks.', c);
+  if (t.requirements.largeSingleOutput && (c.family === 'deepseek' || known(candidateParts(s, c).model?.largeOutput) !== true)) return deny('pModelFit', 'MODEL_FIT_LARGE_OUTPUT', 'Large single-output support is required.', c);
+  if (adversarial(t) && !['kimi-k3', 'deepseek-v4.1-flash', 'opus'].includes(c.modelId)) return deny('pModelFit', 'ADVERSARIAL_FAMILY_ORDER', 'Adversarial policy permits Kimi-K3, DeepSeek Flash, then scoped Opus.', c);
+  return pass('pModelFit');
+}
+export function pSigning(t, s, c) {
+  if (!t.flags.signing) return pass('pSigning');
+  const a = candidateParts(s, c).account, manifest = known(s.resources)?.signingManifests?.[t.signingManifestRef];
+  if (a?.workerClass !== 'resident-claude-signer' || a.kind !== 'claude' || c.family !== 'claude') return deny('pSigning', 'SIGNING_WORKER_FORBIDDEN', 'Only the attested resident Claude signer can sign its preregistered test package.', c);
+  if (!t.ownTestApp || !manifest || manifest.taskId !== t.taskId || manifest.artifactHash !== t.artifactRevision || !manifest.preregistered
+    || !['H6-iphone-test', 'repo-debug-android'].includes(manifest.identity)) return deny('pSigning', 'SIGNING_SCOPE_FORBIDDEN', 'The narrow own-test-package manifest is missing.', c);
+  return pass('pSigning');
+}
+export function pDevice(t, s, c) {
+  if (!t.deviceId && !t.flags['device-lease']) return pass('pDevice');
+  const device = known(s.resources)?.devices?.[t.deviceId];
+  if (!device?.registered || device.personal || !t.ownTestApp || !device.ownTestApp) return deny('pDevice', 'DEVICE_FORBIDDEN', 'Only registered permitted own-test-app devices are allowed.', c);
+  const { account: a, lane: l } = candidateParts(s, c);
+  if ([a, l].some((p) => known(p?.capabilities?.[`device:${t.deviceId}`]) !== true)) return deny('pDevice', 'CAPABILITY_DEVICE', 'Device tool access is missing.', c);
+  if (device.leaseMinutes > 120 || device.leaseMinutes <= 0 || !Number.isFinite(device.leaseMinutes)) return deny('pDevice', 'DEVICE_LEASE_PROTOCOL', 'Device leases must be bounded to two hours.', c);
+  return pass('pDevice');
+}
+export function pScopedApproval(t, s, c, context = {}) {
+  const a = candidateParts(s, c).account;
+  const requirements = [];
+  if (!company(a)) requirements.push(['personal-quota', 'PERSONAL_QUOTA_OK_REQUIRED', 'Current scoped personal-quota approval is required.', context.companyEligible || context.companyUnknown]);
+  if (c.effort === 'max' && a?.kind !== 'ttadk') requirements.push(['max-effort', 'MAX_EFFORT_OK_REQUIRED', 'Max effort requires its own scoped approval.']);
+  if (c.modelId === 'fable') requirements.push(['fable', 'FABLE_OK_REQUIRED', 'Fable requires a separate scoped decision.']);
+  if (t.requirements.resetRedemption) requirements.push(['reset-redemption', 'RESET_REDEMPTION_OK_REQUIRED', 'Each reset redemption needs unused scoped approval.']);
+  const missing = requirements.filter(([action, , , bypass]) => !matchingApproval(t, s, c, action, bypass));
+  if (missing.length) {
+    const gates = missing.map(([action, code, text]) => approvalGate(t, c, action, code, text));
+    return deny('pScopedApproval', missing[0][1], missing[0][2], c, { gate: gates[0], gates });
+  }
+  return pass('pScopedApproval');
+}
+export function pBackground(t, s, c) {
+  return t.background && !company(candidateParts(s, c).account) ? deny('pBackground', 'BACKGROUND_PERSONAL_FORBIDDEN', 'Background roles never use personal quota.', c) : pass('pBackground');
+}
+export function pResourceScope(t, s, c) {
+  const resources = known(s.resources);
+  if (t.execution === 'remote' && (t.flags['shared-lock'] || t.requirements.localLock)) return deny('pResourceScope', 'REMOTE_LOCAL_LOCK_FORBIDDEN', 'Remote/CI work cannot acquire local build resources.', c);
+  if (t.autoRerouteDepth > 0 && (!resources || resources.held === true || resources.ownedReturned !== true)) return deny('pResourceScope', 'RESOURCE_HOP_BLOCKED', 'A hop requires confirmed return of all owned resources.', c);
+  if (t.execution !== 'remote' && (t.execution === 'local-heavy' || t.category === 'build-run' || t.requirements.fullPackageBuild)) {
+    const r = reason('pResourceScope', 'LOCAL_WRAPPER_REQUIRED', 'Acquire local compute only after the first response, in one watched wrapper; controller UNKNOWN/timeout blocks the action.', [c.id]);
+    return result('pResourceScope', null, '', [], { gate: { id: `local:${t.taskId}:${t.role}`, kind: 'local-resource-admission', phase: 'preaction', state: 'wait', scope: null, reason: r, evidenceIds: [] } });
+  }
+  return pass('pResourceScope');
+}
+export function needsReviewer(t) {
+  return t.role === 'primary' && (adversarial(t) && isReview(t) || ['review-high', 'design'].includes(t.category)
+    || isReview(t) && (t.stakes === 'high' || t.impact === 'release' || t.flags.author === 'codex'));
+}
+export function pReviewerSet(t, s, c, context = {}) {
+  const author = t.previousAttempts.find((a) => a.id === (t.authorAttemptId ?? t.againstAttemptId)) ?? context.author;
+  if ((t.authorAttemptId || t.againstAttemptId || t.flags.author || t.flags.against) && (!author?.actual || author.actualStatus !== 'KNOWN'))
+    return deny('pReviewerSet', 'AUTHOR_ATTEMPT_UNKNOWN', 'Independent review needs the attested author/against attempt.', c);
+  if (author?.actual && (author.id === context.attemptId || familyOf(author.actual.modelId ?? author.actual.model) === c.family))
+    return deny('pReviewerSet', 'REVIEWER_NOT_INDEPENDENT', 'Reviewer must be a fresh attempt from another family.', c);
+  if (context.primary && c.family === context.primary.family) return deny('pReviewerSet', 'REVIEWER_NOT_INDEPENDENT', 'The second reviewer must use another family.', c);
+  if ((t.flags.author === 'claude' || t.flags.against === 'claude') && c.family === 'claude') return deny('pReviewerSet', 'REVIEWER_VENDOR_CONFLICT', 'Review must respect the explicit other-vendor constraint.', c);
+  if ((t.flags.author === 'codex' || t.flags.against === 'codex') && c.family === 'gpt' && !t.authorAttemptId && !t.againstAttemptId)
+    return deny('pReviewerSet', 'AUTHOR_ATTEMPT_UNKNOWN', 'Vendor prose is insufficient to identify the actual author attempt.', c);
+  if (context.primary && !adversarial(t) && !['gpt', 'claude'].includes(c.family) && !['gpt', 'claude'].includes(context.primary.family))
+    return deny('pReviewerSet', 'REVIEWER_STRONG_FAMILY_REQUIRED', 'Ordinary acceptance needs an independent GPT/Claude reviewer.', c);
+  if (context.reviewers !== undefined && needsReviewer(t)) {
+    if (!t.artifactRevision) return deny('pReviewerSet', 'REVIEW_ARTIFACT_REQUIRED', 'Pin the reviewed artifact before launching the reviewer set.', c);
+    if (!context.reviewers.length && !matchingApproval(t, s, c, 'scarce-reviewer')) return deny('pReviewerSet', 'REVIEWER_SET_REQUIRED', 'Required independent reviewer is unavailable.', c,
+      { gate: approvalGate(t, c, 'scarce-reviewer', 'REVIEWER_SET_REQUIRED', 'Choose a scoped scarce-reviewer alternative.') });
+    if (context.reviewers.some((r) => r.candidate.family === c.family || r.task.artifactRevision !== t.artifactRevision
+      || (adversarial(t) && r.candidate.family === 'gpt'))) return deny('pReviewerSet', 'REVIEWER_NOT_INDEPENDENT', 'Reviewer set violates family or artifact requirements.', c);
+  }
+  return pass('pReviewerSet');
+}
+export function pLaunchMatches(t, s, c, context = {}) {
+  if (s.policyVersion !== VERSION || s.qualityRelationVersion !== t.floor.relationVersion) return deny('pLaunchMatches', 'POLICY_VERSION_MISMATCH', 'Plan policy/relation version must be pinned and supported.', c);
+  const live = t.previousAttempts.some((a) => a.taskId === t.taskId && (a.role ?? 'primary') === t.role
+    && ['starting', 'queued', 'running', 'cancel-pending', 'UNKNOWN'].includes(a.state));
+  if (live) return deny('pLaunchMatches', 'ATTEMPT_RECONCILIATION_REQUIRED', 'A live or uncertain accepted attempt prevents duplicate dispatch.', c);
+  if (t.autoRerouteDepth > 0) {
+    const prior = t.previousAttempts.filter((a) => a.taskId === t.taskId && (a.role ?? 'primary') === t.role);
+    if (t.autoRerouteDepth >= 2 || t.background || t.flags.signing || !company(candidateParts(s, c).account)) return deny('pLaunchMatches', 'AUTO_REROUTE_FORBIDDEN', 'Automatic hop limit or task scope forbids replacement.', c);
+    if (!prior.length || prior.some((a) => a.state !== 'cancelled-no-work' || a.usefulWork !== false || !a.cancellationEvidenceId))
+      return deny('pLaunchMatches', 'CANCELLATION_UNCONFIRMED', 'Automatic replacement requires terminal no-work cancellation evidence.', c);
+  }
+  if (context.proposed && ['accountId', 'modelId', 'effort', 'laneId', 'harness'].some((k) => context.proposed[k] !== c[k]))
+    return deny('pLaunchMatches', 'LAUNCH_TUPLE_MISMATCH', 'Proposed tuple does not match the validated seat.', c);
+  return pass('pLaunchMatches');
+}
+export const PREDICATES = Object.freeze([pUserRules, pExclusions, pAvailable, pCapabilities, pTierFloor, pPreviousFloor, pContent, pModelFit,
+  pSigning, pDevice, pScopedApproval, pBackground, pResourceScope, pReviewerSet, pLaunchMatches]);
+export const evaluateCandidate = (t, s, c, context = {}) => PREDICATES.map((predicate) => ({ ...predicate(t, s, c, context), candidateId: c.id }));

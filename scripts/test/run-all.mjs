@@ -10,6 +10,9 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'project-orchestrator-tests-')
 const home = path.join(tmp, 'fixture-home'); fs.mkdirSync(home, { recursive: true });
 const env = { ...process.env, HOME: home, TMPDIR: tmp, TMP: tmp, TEMP: tmp, PYTHONDONTWRITEBYTECODE: '1' };
 const suites = fs.readdirSync(base).filter((f) => f.endsWith('.mjs') && f !== path.basename(fileURLToPath(import.meta.url))).sort().map((f) => ({ name: f, exe: process.execPath, args: [path.join(base, f)] }));
+// pipeline-invariants.mjs is intentionally auto-discovered with the other suites.
+// Fail visibly if a partial checkout accidentally omits the pure pipeline tests.
+if (!suites.some((s) => s.name === 'pipeline-invariants.mjs')) throw Error('pipeline invariant suite is missing');
 suites.push({ name: 'cleanup-python', exe: 'python3', args: ['-m', 'unittest', 'discover', '-s', 'scripts/resource-cleanup', '-p', 'test*.py', '-v'] });
 let failed = 0;
 for (const suite of suites) {

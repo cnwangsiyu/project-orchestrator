@@ -1,0 +1,156 @@
+import { VERSION, array, object, idOK, modelId, unique, clone, freeze, fingerprint, isReview, compare } from './common.mjs';
+
+export const CATEGORIES = Object.freeze(['lookup', 'extract', 'analysis', 'research', 'implement', 'implement-hard', 'ui-browser',
+  'debug', 'review', 'review-high', 'design', 'docs', 'draft', 'build-run', 'browser', 'computer-use', 'claude-tools', 'science', 'image-gen', 'image-read', 'second-opinion']);
+const BOOLEANS = new Set(['auto-check', 'writes', 'read-only', 'runs-tests', 'signing', 'fresh', 'json', 'table', 'no-redeem', 'dry',
+  'urgent', 'security', 'adversarial', 'defensive', 'background', 'device-lease', 'shared-lock', 'no-local-build', 'worker']);
+const VALUES = new Set(['stakes', 'failures', 'against', 'author', 'impact', 'env', 'exclude-account', 'exclude-model', 'origins', 'mode',
+  'sandbox', 'cwd', 'task-dir', 'name', 'project', 'apps', 'user-ok', 'auto-reroute-depth', 'previous-attempt', 'execution']);
+const CODE = new Set(['implement', 'implement-hard', 'debug', 'science']);
+export class TaskInputError extends Error {
+  constructor(code, message) { super(message); this.name = 'TaskInputError'; this.code = code; this.exitCode = 2; }
+}
+const fail = (code, text) => { throw new TaskInputError(code, text); };
+const list = (x) => x === undefined ? [] : String(x).split(',').map((s) => s.trim());
+const validText = (x) => typeof x === 'string' && x.length > 0 && !/[\u0000-\u001f\u007f]/.test(x);
+const origins = (xs) => unique(xs.map((s) => {
+  if (!validText(s) || /[?@#\\]/.test(s)) fail('INVALID_ORIGIN', 'Origins must contain only a host or HTTP(S) origin.');
+  if (/^https?:\/\//i.test(s)) {
+    let u; try { u = new URL(s); } catch { fail('INVALID_ORIGIN', 'Invalid origin.'); }
+    if (u.pathname !== '/' || u.username || u.password || !u.hostname) fail('INVALID_ORIGIN', 'Origin paths and credentials are not allowed.');
+    return u.origin;
+  }
+  if (!/^(\*\.)?[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::\d+)?$/i.test(s) || s.includes('..')) fail('INVALID_ORIGIN', 'Invalid host.');
+  return s.toLowerCase();
+}));
+export function parseTaskSpec(argv, context = {}) {
+  if (!Array.isArray(argv) || argv.some((x) => !validText(x))) fail('INVALID_ARGV', 'Arguments must be nonempty strings without control characters.');
+  const flags = {}, pos = [];
+  for (let i = 0; i < argv.length; i++) {
+    const v = argv[i];
+    if (!v.startsWith('-')) { pos.push(v); continue; }
+    if (!v.startsWith('--') || v.includes('=')) fail('UNKNOWN_OPTION', `Unsupported option: ${v}`);
+    const k = v.slice(2);
+    if (!BOOLEANS.has(k) && !VALUES.has(k)) fail('UNKNOWN_OPTION', `Unknown option: ${v}`);
+    if (Object.hasOwn(flags, k)) fail('REPEATED_OPTION', `Repeated option: ${v}`);
+    if (BOOLEANS.has(k)) flags[k] = true;
+    else {
+      if (!argv[i + 1] || argv[i + 1].startsWith('-')) fail('MISSING_OPTION_VALUE', `Missing value: ${v}`);
+      flags[k] = argv[++i];
+    }
+  }
+  if (flags.table) {
+    if (pos.length || Object.keys(flags).some((k) => !['table', 'json'].includes(k))) fail('TABLE_CONFLICT', '--table is standalone.');
+    return freeze({ schemaVersion: VERSION, kind: 'table', categories: [...CATEGORIES] });
+  }
+  if (pos.length !== 1 || !CATEGORIES.includes(pos[0])) fail('INVALID_CATEGORY', 'Exactly one known category is required.');
+  return createTaskSpec({ ...context, category: pos[0], flags });
+}
+export function createTaskSpec(input) {
+  if (!object(input) || !CATEGORIES.includes(input.category)) fail('INVALID_CATEGORY', 'Unknown task category.');
+  const f = clone(input.flags ?? {}), cat = input.category;
+  for (const k of ['writes', 'runsTests', 'background', 'ownTestApp']) if (input[k] !== undefined && typeof input[k] !== 'boolean') fail('INVALID_TASK_SHAPE', `${k} must be boolean.`);
+  if (input.requirements !== undefined && !object(input.requirements)) fail('INVALID_TASK_SHAPE', 'Requirements must be a record.');
+  if (input.previousAttempts !== undefined && (!Array.isArray(input.previousAttempts) || input.previousAttempts.some((a) => !object(a)))) fail('INVALID_HISTORY', 'Previous attempts must be sanitized records.');
+  if (input.floor !== undefined && (!object(input.floor) || !Array.isArray(input.floor.profileIds) || !Array.isArray(input.floor.previousAttemptIds))) fail('INVALID_FLOOR', 'Quality floor requires profile and attempt lists.');
+  if (!object(f)) fail('INVALID_FLAGS', 'Flags must be a record.');
+  for (const [k, v] of Object.entries(f)) {
+    if ((!BOOLEANS.has(k) && !VALUES.has(k)) || (BOOLEANS.has(k) && typeof v !== 'boolean') || (VALUES.has(k) && !validText(String(v))))
+      fail('INVALID_FLAGS', `Invalid flag: ${k}`);
+  }
+  const enumValue = (key, fallback, choices) => {
+    const v = f[key] ?? input[key] ?? fallback;
+    if (!choices.includes(v)) fail('INVALID_ENUM', `Invalid ${key}.`);
+    return v;
+  };
+  const integer = (key, field, max = Number.MAX_SAFE_INTEGER) => {
+    const raw = f[key] ?? input[field] ?? 0;
+    if (!/^(0|[1-9]\d*)$/.test(String(raw)) || !Number.isSafeInteger(Number(raw)) || Number(raw) > max) fail('INVALID_NUMBER', `Invalid ${key}.`);
+    return Number(raw);
+  };
+  const stakes = enumValue('stakes', 'normal', ['low', 'normal', 'high']);
+  const impact = enumValue('impact', null, [null, 'release', 'service', 'throwaway']);
+  const env = enumValue('env', 'prod', ['test', 'prod']);
+  let failures = integer('failures', 'failures');
+  const autoRerouteDepth = integer('auto-reroute-depth', 'autoRerouteDepth', 2);
+  if (CODE.has(cat) && !impact) fail('IMPACT_REQUIRED', 'Code tasks require impact.');
+  for (const k of ['author', 'against']) if (f[k] !== undefined && !['claude', 'codex'].includes(f[k])) fail('INVALID_ENUM', `Invalid ${k}.`);
+  if (cat === 'second-opinion' && !f.against && !input.againstAttemptId) fail('AGAINST_REQUIRED', 'Second opinions require an against identity.');
+  if (f.author && !['review', 'review-high'].includes(cat)) fail('AUTHOR_CATEGORY', 'Author is only valid for review.');
+  if ((f.writes && f['read-only']) || (f.signing && f['read-only'])) fail('CONFLICTING_FLAGS', 'Conflicting read/write declarations.');
+  if (f.defensive && (!f.security || !isReview({ category: cat }) || f.adversarial)) fail('CONFLICTING_CONTENT', 'Defensive scope requires a security review without adversarial scope.');
+  let execution = enumValue('execution', 'UNKNOWN', ['UNKNOWN', 'local-heavy', 'local-light', 'remote']);
+  if (f['no-local-build']) {
+    if (execution !== 'UNKNOWN' && execution !== 'remote') fail('EXECUTION_CONFLICT', 'no-local-build conflicts with local execution.');
+    execution = 'remote';
+  }
+  if (execution === 'remote' && f['shared-lock']) fail('EXECUTION_CONFLICT', 'Remote work cannot acquire local shared locks.');
+  const sandbox = f.sandbox ?? input.sandbox ?? 'workspace-write', ceiling = input.sandboxCeiling ?? 'workspace-write';
+  if (![sandbox, ceiling].every((s) => ['workspace-write', 'read-only'].includes(s))) fail('INVALID_SANDBOX', 'Unsupported sandbox.');
+  if (ceiling === 'read-only' && sandbox !== 'read-only') fail('SANDBOX_CEILING', 'Requested sandbox exceeds parent ceiling.');
+  const apps = unique(input.allowedApps ?? list(f.apps));
+  if (apps.some((s) => !/^[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)+$/.test(s))) fail('INVALID_APP', 'Apps must be bundle IDs.');
+  if (f.apps && cat !== 'computer-use') fail('APPS_CATEGORY', 'Apps scope is for computer-use.');
+  if (f.origins && !['browser', 'ui-browser'].includes(cat)) fail('ORIGINS_CATEGORY', 'Origins scope is for browser tasks.');
+  const allowedOrigins = origins(input.allowedOrigins ?? list(f.origins));
+  const attempts = clone(array(input.previousAttempts));
+  for (const a of attempts) if (object(a.actual)) {
+    a.actual.modelId = modelId(a.actual.modelId ?? a.actual.model); delete a.actual.model;
+  }
+  const failedActualIds = new Set(attempts.filter((a) => a.taskId === (input.taskId ?? f.name) && (a.role ?? 'primary') === (input.role ?? 'primary')
+    && a.state !== 'planned' && a.actualStatus === 'KNOWN' && a.actual && ['quality', 'spec', 'process'].includes(a.failureKind)).map((a) => a.id));
+  failures = Math.max(failures, failedActualIds.size);
+  const labels = new Set(array(input.contentLabels));
+  for (const a of attempts) {
+    for (const label of array(a?.contentLabels)) labels.add(label);
+    if (a?.failureKind === 'policy-block') labels.add('policy-blocked');
+  }
+  if (f.security) labels.add('security');
+  if (f.adversarial) labels.add('adversarial');
+  if (f.defensive) labels.add('defensive-confirmation');
+  if (labels.has('adversarial') || labels.has('policy-blocked') || labels.has('attack-material')) { labels.add('adversarial'); labels.add('security'); labels.delete('defensive-confirmation'); }
+  if (labels.has('security') && isReview({ category: cat }) && !labels.has('defensive-confirmation')) labels.add('adversarial');
+  if (!labels.size) labels.add('ordinary');
+  if ([...labels].some((x) => !['ordinary', 'security', 'attack-material', 'adversarial', 'defensive-confirmation', 'policy-blocked'].includes(x))) fail('INVALID_CONTENT', 'Unknown content label.');
+  if (labels.size > 1) labels.delete('ordinary');
+  const writes = f['read-only'] ? false : (f.writes ?? input.writes ?? ['implement', 'implement-hard', 'debug', 'science', 'docs', 'draft', 'ui-browser', 'build-run', 'computer-use', 'claude-tools', 'image-gen'].includes(cat));
+  const background = f.background ?? input.background ?? false;
+  const tier = ['implement-hard', 'debug', 'science', 'review-high', 'design'].includes(cat) || stakes === 'high' || (CODE.has(cat) && failures > 0) ? 'hard'
+    : cat === 'build-run' && env === 'prod' ? 'normal'
+      : ['lookup', 'extract', 'draft'].includes(cat) || stakes === 'low' || background || (cat === 'build-run' && env === 'test') ? 'light' : 'normal';
+  const caps = new Set(array(input.capabilitiesNeeded));
+  for (const c of ({ research: ['search'], browser: ['browser', 'signed-in-browser', 'vision'], 'ui-browser': ['browser', 'vision'],
+    'computer-use': ['desktop-tool', 'vision'], 'image-read': ['vision'], 'image-gen': ['image-generation'], 'claude-tools': ['claude-tools'] })[cat] ?? []) caps.add(c);
+  const exclusions = [...clone(array(input.exclusions)), ...list(f['exclude-account']).map((value) => ({ scope: 'account', accountId: null, value, cause: 'explicit' })),
+    ...list(f['exclude-model']).map((value) => ({ scope: ['gpt', 'deepseek', 'kimi', 'claude', 'seed', 'gemini'].includes(value.toLowerCase()) ? 'family' : 'model',
+      accountId: null, value: modelId(value), companyOnly: true, cause: 'legacy-exclude-model' }))];
+  for (const e of exclusions) if (!object(e) || !['account', 'account-model', 'model', 'family'].includes(e.scope) || !idOK(e.value)) fail('INVALID_EXCLUSION', 'Invalid exclusion scope.');
+  const taskId = input.taskId ?? f.name, requestId = input.requestId;
+  if (!idOK(taskId) || !idOK(requestId)) fail('TASK_ID_REQUIRED', 'Inject stable taskId and requestId before planning.');
+  const task = { schemaVersion: VERSION, taskId, requestId, project: f.project ?? input.project ?? 'UNKNOWN', owner: input.owner ?? 'UNKNOWN', category: cat,
+    role: input.role ?? 'primary', parentTaskId: input.parentTaskId ?? null, briefHash: input.briefHash ?? 'UNKNOWN', flags: f,
+    tier, stakes, impact, env, execution, writes, runsTests: f['runs-tests'] ?? input.runsTests ?? false, background,
+    contentLabels: unique([...labels]), capabilitiesNeeded: unique([...caps]), exclusions: unique(exclusions.map((e) => JSON.stringify(e))).map(JSON.parse),
+    failures, previousAttempts: attempts.sort((a, b) => compare(String(a?.id), String(b?.id))),
+    floor: clone(input.floor ?? { profileIds: [], previousAttemptIds: [], relationVersion: VERSION, historyStatus: failures || autoRerouteDepth || f['previous-attempt'] ? 'UNKNOWN' : 'KNOWN' }),
+    authorAttemptId: input.authorAttemptId ?? null, againstAttemptId: input.againstAttemptId ?? null,
+    cwd: f.cwd ?? input.cwd ?? '.', taskDir: f['task-dir'] ?? input.taskDir ?? '.', sandbox, sandboxCeiling: ceiling,
+    allowedOrigins, allowedApps: apps, deviceId: input.deviceId ?? null, ownTestApp: input.ownTestApp === true,
+    signingManifestRef: input.signingManifestRef ?? null, approvalRefs: unique([...array(input.approvalRefs), ...list(f['user-ok'])]),
+    autoRerouteDepth, notifyBy: input.notifyBy ?? null, timezone: input.timezone ?? 'America/Los_Angeles',
+    artifactRevision: input.artifactRevision ?? null, requirements: clone(input.requirements ?? {}), selectionCause: input.selectionCause ?? (attempts.length ? 'infra-reroute' : 'initial'),
+    qualityEscalation: clone(input.qualityEscalation ?? null), warnings: f.mode ? ['MODE_DEPRECATED'] : [] };
+  if (f['previous-attempt'] && !attempts.length) task.floor.previousAttemptIds = unique([...task.floor.previousAttemptIds, f['previous-attempt']]);
+  if (!['primary', 'second', 'followup', 'finisher'].includes(task.role)) fail('INVALID_ROLE', 'Unknown task role.');
+  // Derive from constraints, never accept a caller-supplied hash as authority.
+  const { requestId: ignored, previousAttempts: prior, approvalRefs: refs, warnings, ...constraints } = task;
+  task.constraintHash = fingerprint(constraints);
+  return freeze(task);
+}
+export function deriveReview(task, { role = 'second', authorAttemptId = null, artifactRevision = task.artifactRevision } = {}) {
+  const flags = { ...task.flags, 'read-only': true };
+  for (const k of ['writes', 'signing', 'runs-tests', 'author', 'against', 'apps', 'origins', 'failures', 'previous-attempt', 'auto-reroute-depth']) delete flags[k];
+  return createTaskSpec({ ...task, category: task.tier === 'hard' ? 'review-high' : 'review', flags, role, writes: false, runsTests: false,
+    previousAttempts: [], failures: 0, autoRerouteDepth: 0, floor: { profileIds: [], previousAttemptIds: [], relationVersion: task.floor.relationVersion, historyStatus: 'KNOWN' },
+    authorAttemptId, againstAttemptId: null, artifactRevision, selectionCause: 'initial', qualityEscalation: null });
+}
