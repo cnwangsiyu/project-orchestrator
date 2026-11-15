@@ -361,9 +361,19 @@ regression() (
 )
 regression "$BASELINE" "$ROOT/regression-before" "$ROOT/evidence/regression-before.txt"
 regression "$RES" "$ROOT/regression-after" "$ROOT/evidence/regression-after.txt"
-sed "s|$ROOT/regression-before|REGRESSION|g" "$ROOT/evidence/regression-before.txt" >"$ROOT/evidence/regression-before.normalized.txt"
-sed "s|$ROOT/regression-after|REGRESSION|g" "$ROOT/evidence/regression-after.txt" >"$ROOT/evidence/regression-after.normalized.txt"
-for file in resources.tsv log.tsv original-fields.txt notes/open-checkout.md; do
+# v1.6 appends only these documented device-client diagnostics to device take
+# notes. Compare the legacy content independently; followups.mjs verifies the
+# suffix, its privacy and its best-effort behavior. Frozen backup code stays intact.
+normalize_device_evidence() {
+  sed -E 's/ · adb_device_lines=(unknown|[0-9]+) device_clients=(none|unknown|[0-9]+:(adb|devicectl)(,[0-9]+:(adb|devicectl))*)$//'
+}
+normalize_device_evidence <"$ROOT/regression-before/log.tsv" >"$ROOT/evidence/log-before.normalized.tsv"
+normalize_device_evidence <"$ROOT/regression-after/log.tsv" >"$ROOT/evidence/log-after.normalized.tsv"
+cmp "$ROOT/evidence/log-before.normalized.tsv" "$ROOT/evidence/log-after.normalized.tsv" || fail 'regression changed legacy log fields'
+pass 'legacy log fields unchanged except v1.6 device-client suffix'
+sed "s|$ROOT/regression-before|REGRESSION|g" "$ROOT/evidence/regression-before.txt" | normalize_device_evidence >"$ROOT/evidence/regression-before.normalized.txt"
+sed "s|$ROOT/regression-after|REGRESSION|g" "$ROOT/evidence/regression-after.txt" | normalize_device_evidence >"$ROOT/evidence/regression-after.normalized.txt"
+for file in resources.tsv original-fields.txt notes/open-checkout.md; do
   cmp "$ROOT/regression-before/$file" "$ROOT/regression-after/$file" || fail "regression changed $file"
   pass "legacy $file unchanged"
 done

@@ -299,7 +299,7 @@ const transcript = async (script, name) => {
     ['wait', ...takeArgs('heavy-build'), '--timeout', '0'], ['return', 'heavy-build', '--by', 'lane3-test']];
   for (const args of commands) {
     const r = args[0] === 'wait' ? await runWait(args, { RES_DIR: dir }, script) : run(args, { RES_DIR: dir }, script);
-    output.push(`$ ${args.join(' ')}\n${r.text.replaceAll(dir, 'SCRATCH').replace(/ lane3=(OPEN|CLOSED)(?=\n|$)/g, '')}exit=${r.code}\n`);
+    output.push(`$ ${args.join(' ')}\n${r.text.replaceAll(dir, 'SCRATCH').replace(/^thresholds .*\n/gm, '').replace(/ lane3=(OPEN|CLOSED)(?=\n|$)/g, '')}exit=${r.code}\n`);
   }
   return { output: output.join(''), dir };
 };
@@ -313,7 +313,7 @@ fs.writeFileSync(path.join(root, 'compatibility.diff'), '');
 
 // Sampler keeps the suffix authoritative (rounded 8/32 may still be CLOSED).
 const sampleText = run(['heavy-check']).text;
-eq(parseHeavyCheck(sampleText).controllerPolicy, 'v1.3-lane-aware');
+eq(parseHeavyCheck(sampleText).controllerPolicy, 'v1.6-machine-gates');
 eq(parseHeavyCheck(sampleText.replace('lane3=OPEN', 'lane3=CLOSED')).lane3, 'CLOSED');
 eq(parseHeavyCheck(sampleText.replace('lane3=OPEN', 'lane3=bad')).state, 'UNKNOWN');
 const statusText = ALL_HEAVY_IDS.map((id) => `${id} slot open - FREE description`).join('\n');

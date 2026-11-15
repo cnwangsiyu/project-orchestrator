@@ -1,4 +1,4 @@
-# Machine-Wide Heavy-Task Protocol (res Contract v1.4)
+# Machine-Wide Heavy-Task Protocol (current res contract)
 
 Owner: routing/global-rules orchestrator since 2026-11-13. Maintained contract:
 project-orchestrator/references/res-contract.md. Install only after reviewed owner switch.
@@ -11,8 +11,12 @@ project-orchestrator/references/res-contract.md. Install only after reviewed own
 - SG packaging and heavy focused tests use `wait-lane`, selecting any free
   admitted lane without taking heavy-build. Repeating `wait-lane` with the
   same holder name and PID returns that existing lane; it does not take two.
-  Two normal heavy lanes; optional lane 3 requires load1m <=8 AND available
-  memory >=32 GiB at acquisition.
+  Two normal heavy lanes; optional lane 3 defaults to load1m <=8 AND available
+  memory >=32 GiB at acquisition. Active values come from heavy-check.
+- `wait-lane` publishes a live heartbeat record, shown by res status. While a
+  ready waiter from another project exists, a project holding a lane yields
+  additional lanes. Eligible lane waiters proceed FIFO; gate-blocked waiters
+  stop reserving after three polls. Blocking builds retain their priority.
 - Use ONE long-lived process for acquisition, build and return. Workers never
   take/wait for heavy locks in a standalone tool call: each call has a fresh
   shell whose $$ exits after the call, even if a later build remains alive.
@@ -36,11 +40,16 @@ project-orchestrator/references/res-contract.md. Install only after reviewed own
   error (policy codes propagate). `wait-*`: 0 acquired, 2 timeout; other errors
   propagate. Legacy take/wait/return and their help remain compatible.
 - Heavy acquisition runs heavy-check with the selected holder PID every retry.
-  Normal gate: available memory >=16 GiB and load1m <=min(20,12+8*other lanes).
+  Default normal gate: available memory >=16 GiB and load1m <=min(20,12+8*other lanes).
   Count held heavy-lane-* only, excluding local proven STALE and matching
   holder PID; legacy/remote holds count conservatively. Lane 3 enforces its
-  stricter 8/32 gate again at take time. OPEN does not mean FREE.
-  Plain take still needs caller heavy-check (lane-3 take also enforces 8/32).
+  stricter configured gate again at take time. OPEN does not mean FREE.
+  Plain take still needs caller heavy-check (lane-3 take also enforces its gate).
+- Optional RES_DIR/machine.conf overrides LOAD_LIMIT, LOAD_LIMIT_WITH_LANES,
+  MIN_AVAIL_GIB, LANE3_LOAD and LANE3_AVAIL_GIB as validated KEY=value data.
+  heavy-check prints all active values and defaults/machine.conf source.
+  Consult references/res-contract.md for ranges. The controller never creates
+  the file; absent configuration keeps the original thresholds.
 - macOS available memory = kern.memorystatus_level/100 * hw.memsize. Only an
   explicitly missing sysctl permits (free+inactive+speculative) pages fallback.
   Page headroom and swap are diagnostics; Linux uses MemAvailable. Metrics

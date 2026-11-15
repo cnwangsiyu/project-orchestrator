@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { GIB, LOG, SHARED, readJsonl, readRegistry, TERMINAL, unsafeFile } from './lib/resource-data.mjs';
 import { assessThresholds, inspectLockInterval, reviewLockTiming } from './lib/resource-lock-review.mjs';
 import { reviewExtras } from './lib/resource-extras.mjs';
-import { laneAdmission } from './lib/resource-locks.mjs';
+import { RES_CONTRACT_VERSION, laneAdmission } from './lib/resource-locks.mjs';
 import { resourceUtilisation, utilisationLines } from './lib/resource-utilisation.mjs';
 
 const finite = (x) => typeof x === 'number' && Number.isFinite(x);
@@ -179,7 +179,7 @@ export function review(input, { hours = 24, now = Date.now(), maxGapMs = 600000,
     heavyLocks: lockTiming,
     remoteEntry: { scripts: (remoteEntryScripts ?? []).length, findings: remoteEntryFindings },
     ...extras,
-    heavyGate: { loadGate, loadGateWithOneHeavyTask, memoryGateGiB, controllerRollout: 'v1.2 live per T88 contract; verify sampled output', authoritativeMinutes: lockStats.gateMinutes,
+    heavyGate: { loadGate, loadGateWithOneHeavyTask, memoryGateGiB, controllerRollout: `source contract v${RES_CONTRACT_VERSION}; installed rollout requires sampled evidence`, authoritativeMinutes: lockStats.gateMinutes,
       overloadedMinutes: lockStats.gateMinutes ? lockStats.overloadedMinutes : null,
       openMinutes: lockStats.gateMinutes ? lockStats.gateMinutes - lockStats.overloadedMinutes : null,
       unknownMinutes: (observedMs / 60000) - lockStats.gateMinutes,
@@ -189,10 +189,10 @@ export function review(input, { hours = 24, now = Date.now(), maxGapMs = 600000,
 export function formatReview(r) {
   const lines = [`# Machine resources: last ${r.hours}h`, `Coverage: ${r.coverage.observedMinutes} observed minutes; ${r.coverage.samples ?? 0} samples; CPU=${r.coverage.cpuMinutes ?? 0} min, processes=${r.coverage.processMinutes ?? 0} min. Missing data is UNKNOWN.`, `CPU idle: ${r.utilisation?.meanCpuIdlePct ?? 'UNKNOWN'}%; contention: ${r.utilisation?.contentionMinutes ?? 'UNKNOWN'} min.`, ''];
   lines.push(...utilisationLines(r.utilisation), '');
-  lines.push(`Approved limit=min(20, 12 + 8 * lanes held by others), STALE/own excluded; memory >=16 GiB. res v1.2 live per T88 contract; overload analysis uses each sample's limit and authoritative verdict. Observed controller: overloaded=${r.heavyGate?.overloadedMinutes ?? 'UNKNOWN'} min; open=${r.heavyGate?.openMinutes ?? 'UNKNOWN'} min; authoritative=${r.coverage.heavyGateMinutes ?? 0} min, locks=${r.coverage.heavyLockMinutes ?? 0} min.`);
+  lines.push(`Approved default limit=min(20, 12 + 8 * lanes held by others), STALE/own excluded; memory >=16 GiB. Source contract v${RES_CONTRACT_VERSION}; installed rollout requires sampled evidence; overload analysis uses each sample's limit and authoritative verdict. Observed controller: overloaded=${r.heavyGate?.overloadedMinutes ?? 'UNKNOWN'} min; open=${r.heavyGate?.openMinutes ?? 'UNKNOWN'} min; authoritative=${r.coverage.heavyGateMinutes ?? 0} min, locks=${r.coverage.heavyLockMinutes ?? 0} min.`);
   for (const entry of r.tuning?.controllerMismatchObservations ?? []) lines.push(`Gate rollout mismatch: ${entry.at}; other lanes=${entry.otherLanes}, approved gate=${entry.loadGate}, observed gate=${entry.observedLoadGate}; caller PID=${entry.callerPid ?? 'observer'}. Approved reading=${entry.approvedReading}, controller reading=${entry.observedReading}; notify res owner, never bypass.`);
   const bounds = (v) => `${v.durationMinutesLower ?? 0}..${v.durationMinutesUpper ?? 'UNKNOWN'} min`;
-  for (const h of r.heavyLocks?.holdTimes ?? []) lines.push(`Lock hold ${h.resource}: holder=${h.holder ?? 'unknown'}, owner=${h.owner}, purpose=${h.purposeClass ?? 'unknown'}, start=${h.startAt ?? 'UNKNOWN'}, end=${h.endAt ?? h.lastObservedAt ?? 'UNKNOWN'}, duration=${bounds(h)}, censored=${h.leftCensored}/${h.rightCensored}; ${h.source}; ${h.endReason}`);
+  for (const h of r.heavyLocks?.holdTimes ?? []) lines.push(`Lock hold ${h.resource}: holder=${h.holder ?? 'unknown'}, owner=${h.owner}, purpose=${h.purposeClass ?? 'unknown'}, start=${h.startAt ?? 'UNKNOWN'}, end=${h.endAt ?? h.lastObservedAt ?? 'UNKNOWN'}, duration=${h.validity === 'INVALID' ? 'INVALID' : bounds(h)}, censored=${h.leftCensored}/${h.rightCensored}; ${h.source}; ${h.endReason}${h.validity === 'INVALID' ? `; INVALID: ${h.invalidReason}` : ''}`);
   for (const w of r.heavyLocks?.waitTimes ?? []) lines.push(`Lock wait ${w.resource}: holder=${w.holder ?? 'unknown'}, owner=${w.owner}, purpose=${w.purposeClass ?? 'unknown'}, PID=${w.pid}, start=${w.startAt ?? 'UNKNOWN'}, last=${w.lastObservedAt}, duration=${bounds(w)}, timeout=${w.timeoutMinutes ?? 'UNKNOWN'} min; ${w.outcome}`);
   for (const f of r.remoteEntry?.findings ?? []) lines.push(`Remote-entry advisory: ${f.path}; ${f.evidence}`);
   for (const l of r.heavyLocks?.staleLocks ?? []) lines.push(`STALE observation: ${l.at}, ${l.resource}, holder=${l.holder ?? 'unknown'}, owner=${l.owner}, PID=${l.pid}, age=${l.ageSeconds ?? 'UNKNOWN'}s`);

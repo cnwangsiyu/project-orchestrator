@@ -1,14 +1,26 @@
-# Shared res contract (v1.5, 2026-11-14) - owner: routing/global-rules orchestrator; users: all projects
+# Shared res contract (v1.6, 2026-11-15) - owner: routing/global-rules orchestrator; users: all projects
 
 Maintained source: this project-orchestrator repository, `scripts/res/res`. Ownership of the entire
 tool (devices, checkouts, registry/notes, take/return/extend/add/note/log and heavy admission) transferred
 from vesdk-mainline to the global-rules owner on 2026-11-13. The unmodified v1.2 contract is preserved
-in `scripts/res/test/fixtures/contract-v1.2.md`. v1.5 is staged, not live until the owner's reviewed switch.
+in `scripts/res/test/fixtures/contract-v1.2.md`. v1.6 is staged, not live until the owner's reviewed switch.
+
+## Changes in v1.6
+
+Lane waits publish the same heartbeat and cleanup records as build waits. While another project
+has a live, ready lane waiter, a project holding a lane cannot take an additional one. Eligible
+lane waiters proceed FIFO; capped projects yield queue position, and three gate-blocked polls
+suspend priority until the next passing poll. Build waiters retain v1.5 priority. Status lists
+waiting lanes. Machine gates accept validated optional `machine.conf` overrides. Device holds
+and take logs retain adb line counts and adb/devicectl process identities. Review timing rejects
+older released episodes when a later held snapshot reuses a name/PID, and marks inconsistent
+release/acquisition bounds INVALID with unknown durations. Review version labels come from this
+source contract; they do not establish the installed version.
 
 Resources in `res` (~/.claude/orchestrator/_shared/res):
 - `heavy-build` — the ONE machine-wide full-package build slot.
 - `heavy-lane-1`, `heavy-lane-2` - the two normal heavy-task lanes.
-- `heavy-lane-3` - optional third heavy-task lane; admission requires load1m <=8 AND available memory >=32 GiB at take time. Capacity floats between two and three lanes, not an automatic tuning range for load/memory.
+- `heavy-lane-3` - optional third heavy-task lane; default admission requires load1m <=8 AND available memory >=32 GiB at take time (see machine overrides below). Capacity floats between two and three lanes, not an automatic tuning range for load/memory.
 
 Definitions:
 - Full-package build = a full iOS or Android SDK+host-app build: an env verify run (preflight, stage, compile, acceptance), an xcodebuild of the app, a Gradle assemble with native compile. Needs `heavy-build` AND one lane, held for the whole run.
@@ -22,11 +34,13 @@ Commands (existing single-resource semantics unchanged except the documented PID
 - Pair release: `res return-build --by <session> [--pid <holder-pid>] [--note "<text>"]` → returns that unique holder’s lanes (3/2/1) before `heavy-build`; leaves other holders untouched. Optional --pid limits release to that recorded holder PID; the build wrapper uses this to protect preexisting same-name holds. The two normal returns also work. Use a unique `--by` for each run, never share it with concurrent heavy tasks or nest/adopt an existing build hold. Success ends with `build-lane=<id>` or `lane=<id>` so a wrapper can capture the selected lane. New command help: `res take-build --help` (legacy help remains byte-preserved).
 - Build-waiter fairness (v1.5): every blocking `wait-build` (including `take-build --wait` callers that map to it) publishes holder/project/task/PID/host/start plus a heartbeat refreshed on each poll. The record is removed on acquire, timeout, INT/TERM/HUP and ordinary exit. Records with a dead local PID or a heartbeat older than 45 seconds (about three maximum poll intervals) are ignored and cleaned. `res status` lists live waiting builds with holder, start time and current blocker (`gate`, `slot` or `lane`); the log records `waiter-start`, `waiter-acquire` and `waiter-timeout`.
 - Lane reservation (v1.5): when the oldest live build waiter has passed its gate recently and no unrelated established build holds `heavy-build`, another caller may not consume its last free admitted lane. The oldest waiter proceeds; younger build waiters yield FIFO. A plain lane `take` returns 2 with `reserved for waiting build <holder>; retry or use wait-lane`; bounded lane waits keep polling. A pinned waiter reserves only its pinned lane, and lane 3 counts only while OPEN. The post-mkdir check makes simultaneous takers conservative without a new coordination lock. A waiter gate-blocked on its last three polls stops reserving until it passes the gate again. This reservation never grants a lane, evicts a holder, changes load/memory admission, or causes the waiter to hold either half while waiting.
+- Lane-waiter fairness (v1.6): blocking `wait-lane` publishes the same fields and lifecycle under `lane-waiters/waiter.*`, with resource `heavy-lane-any` in waiter logs. Dead local PIDs or >45s heartbeat expiry remove priority. Among gate-ready waiters, another waiting project caps a project already holding a non-STALE lane at one lane. A capped waiter yields FIFO position to eligible projects; it cannot deadlock their queue. A plain additional-lane take returns 2 with a project-priority explanation, and waits poll until eligible. Younger lane waiters yield to the oldest eligible waiter; other callers reserve its last free admitted lane. Build-waiter reservation is checked first, and the oldest ready blocking build waiter keeps priority over the lane queue. No live ready waiter means no cap or reservation; `res status` lists waiting lanes, including their blocker. Publication precedes the project check to cover concurrent takers. Reservations never acquire or evict a hold.
 - Try: `res take <id> --by <session> --project <slug> --for "<purpose>" --task <id> [--pid <pid>]` → 0 ok, 2 held (don't block).
-- Block: `res wait <id> --by <session> --project <slug> --for "<purpose>" --task <id> [--pid <pid>] --timeout <minutes>` → retries with backoff until taken (0) or timeout (2). For `heavy-*` ids, wait uses the same lane-aware gate as heavy-check with its selected holder PID on every retry; it keeps waiting while load1m exceeds the limit or available memory < 16 GiB.
-- Lane-aware load limit (unchanged from v1.2): count currently held `heavy-lane-*` directories, including lane 3, excluding STALE holds and holds whose recorded PID equals the caller's holder PID. Limit = `min(20, 12 + 8 * lanes_held)`: zero other holds allows load1m <=12; one or more allows <=20. Legacy/remote/incomplete holds remain counted unless their recorded PID equals that PID. `heavy-build` itself does not count. The gate never overrides an occupied lane.
+- Block: `res wait <id> --by <session> --project <slug> --for "<purpose>" --task <id> [--pid <pid>] --timeout <minutes>` → retries with backoff until taken (0) or timeout (2). For `heavy-*` ids, wait uses the same lane-aware gate as heavy-check with its selected holder PID on every retry; it keeps waiting while load1m exceeds the active limit or available memory is below the configured minimum (default 16 GiB).
+- Lane-aware load limit (defaults unchanged from v1.2): count currently held `heavy-lane-*` directories, including lane 3, excluding STALE holds and holds whose recorded PID equals the caller's holder PID. With no other holds use LOAD_LIMIT (default 12); with one or more use LOAD_LIMIT_WITH_LANES (default 20). Legacy/remote/incomplete holds remain counted unless their recorded PID equals that PID. `heavy-build` itself does not count. The gate never overrides an occupied lane.
 - Gate only: `res heavy-check [--pid <pid>]` → 0 ok, 5 overloaded, 1 metrics/usage error; prints `load1m=... limit=... lanes_held=... avail=...GiB`, memorystatus percentage, page headroom, swap used, and `gate=OK|OVERLOADED`. Default PID is the caller's (`res`'s `$PPID`); wrappers pass the same `--pid $$` as take/wait. Callers using plain `take` must run this check themselves first.
 - Available memory = macOS memorystatus level × RAM (`kern.memorystatus_level / 100 * hw.memsize`). Only if the memorystatus sysctl is missing, use (free + inactive + speculative) pages * page size. Page headroom and swap usage are diagnostics, not extra gates. Linux still uses MemAvailable. Invalid/unreadable metrics return 1 without acquiring a hold.
+- Machine thresholds (v1.6): optional `$RES_DIR/machine.conf` is plain `KEY=value` data, with blank lines, whole-line `#` comments and surrounding whitespace allowed. Supported keys/defaults are `LOAD_LIMIT=12`, `LOAD_LIMIT_WITH_LANES=20`, `MIN_AVAIL_GIB=16`, `LANE3_LOAD=8`, `LANE3_AVAIL_GIB=32`. Partial overrides keep remaining defaults. Values are positive decimals: load at most 1024, GiB at most 65536. Held-load limit must be at least idle-load limit; lane 3 load at most idle-load limit and memory at least normal memory. Duplicate/unknown keys, unreadable files and invalid values return 1. The controller never creates this file. Each heavy-check reads it anew and prints `thresholds source=defaults|machine.conf` and all five active values before the existing metrics line; telemetry accepts both formats. Configured thresholds govern both normal and lane-3 admission using unrounded metrics on Darwin and Linux. Defaults retain 12/20/16 and 8/32 when the file is absent.
 - v1.3 appends `lane3=OPEN|CLOSED` AFTER `gate=...` in Darwin and Linux heavy-check output; all previous fields and ordering remain unchanged. It describes lane-3 admission, NOT ownership/free status. An occupied lane can still report OPEN. A normal gate can be OK while lane3 is CLOSED. Both comparisons use unrounded metrics, so a displayed 8.00/32.00 can still be CLOSED. Old fixed-12 and v1.2 output remain accepted by the sampler with `lane3:null` (unknown, never OPEN).
 - Lane-3 `take` checks this stricter gate itself and returns 5 when unavailable (1 for invalid/unreadable metrics). Lanes 1/2 and other resources retain their existing plain-take semantics. Lane-3 `wait` rechecks on every retry and before acquisition, treating a CLOSED lane like overload until bounded timeout (2), including if the gate closes between its check and take. Reclamation is allowed only with the lane's admission gate OPEN and age strictly >600 seconds. No existing holder is evicted if load/memory later changes; return works normally under a CLOSED gate.
 - Release: `res return <id> --by <session>` on every exit path. Use a shell `trap 'res return …' EXIT`.
@@ -46,8 +60,8 @@ Default state remains `$HOME/.claude/orchestrator/_shared`; `RES_DIR` overrides 
 `resources.tsv` remains five TAB-separated columns: id/kind/policy/device/description. `log.tsv`
 has no header and five columns: local minute timestamp/action/id/holder/note; actions include
 take/return/extend/add/note/reclaim and the three waiter lifecycle actions. `locks/<id>.d` presence is the hold; `info` retains nine
-TAB-separated keys in order: by/project/task/for/since/until/pid/host/start, with optional appended pid_warning. Healthy holds retain the exact original nine keys. No state migration.
-Live build-waiter records are private controller state under `build-waiters/waiter.*`; callers do not create or remove them.
+TAB-separated keys in order: by/project/task/for/since/until/pid/host/start, with optional appended pid_warning. Healthy non-device holds retain the exact original nine keys. Device holds append `adb_device_lines` (all stdout lines from `adb devices -l`, including its header and blank lines) and `device_clients` (comma-separated `PID:adb`/`PID:devicectl`, or `none`/`unknown`); the take log carries the same values. Snapshot failures never fail the take. Device serials/details and process arguments are discarded; idempotent takes retain the original evidence. No state migration.
+Live waiter records are private controller state under `build-waiters/waiter.*` and `lane-waiters/waiter.*`; callers do not create or remove them.
 Status is observational, uses the same columns/notes, and does not reclaim. `until` is informational.
 PID reuse counts as alive in the controller; legacy/remote metadata is not automatically reclaimed.
 Same-by idempotent take never refreshes PID/start: a replacement process must return/re-take.
@@ -77,7 +91,7 @@ lanes 1/2 remain compatible and need not adopt lane 3. Timeout arguments stay fi
 and zero allowed); pass the same long-lived `--pid $$` to heavy-check, take and wait.
 
 The maintained `scripts/heavy-build.sh` uses `wait-build` for pair acquisition and reverse release.
-v1.5 requires no caller changes: existing build wrappers and finite timeouts automatically publish and clean their waiter record.
+v1.6 requires no caller changes: existing build/lane wrappers and finite timeouts automatically publish and clean their waiter record.
 `HEAVY_BUILD_LANE` explicitly pins a lane. If unpinned lane 3 is unknown on a legacy installation, the wrapper
 continues bounded waits on lanes 1/2 within the same timeout; on an exact legacy-help response from a rolled-back controller it uses zero-timeout slot/lane attempts, returning the slot before any backoff; unrelated errors still fail closed, and an explicit
 missing lane-3 pin remains an error. The installer backs up code/registry, stages an idempotent lane-3 row and
@@ -88,6 +102,8 @@ admit a registered, ungated lane 3. These two filesystem entries are not a singl
 
 Telemetry recognizes an optional third lane only when observed; its absence does not make v1.2 incomplete.
 `thirdLaneOnly` observations are excluded from normal-gate tuning because 8/32 admission is a distinct context.
+Explicit machine.conf observations likewise stay outside default-gate tuning; their captured active
+limits and memory minimum govern reader comparisons and gate diagnostics.
 A captured `lane3=OPEN|CLOSED` is authoritative; legacy observations without that suffix never establish
 lane-3 permission. Passive idle hints, quota-expiry preferences and utilisation reports cannot acquire,
-release or modify locks, and do not change this contract's single package slot or normal 12/20/16 gates.
+release or modify locks, and do not change this contract's single package slot or configured machine gates.

@@ -3,6 +3,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { GIB, SHARED, safeHolder, safeId, unsafeFile, category, classifyPurpose, commandName } from './resource-data.mjs';
 
+export const RES_CONTRACT_VERSION = (() => {
+  try { return fs.readFileSync(new URL('../../references/res-contract.md', import.meta.url), 'utf8').match(/^# Shared res contract \(v([^,]+),/m)?.[1] ?? 'UNKNOWN'; }
+  catch { return 'UNKNOWN'; }
+})();
+
 export const BASE_HEAVY_IDS = ['heavy-build', 'heavy-lane-1', 'heavy-lane-2'];
 export const HEAVY_IDS = BASE_HEAVY_IDS;
 export const ALL_HEAVY_IDS = [...BASE_HEAVY_IDS, 'heavy-lane-3'];
@@ -73,13 +78,26 @@ export function parseHeavyCheck(text, exitCode = 0) {
   if (![0, 5].includes(exitCode)) return unknown('heavy-check metrics unavailable (output omitted)');
   const number = '(\\d+(?:\\.\\d+)?)';
   let source = String(text).trim(), loadGate = 12, lanesHeld = null;
+  let thresholds = null;
+  if (source.startsWith('thresholds ')) {
+    const header = source.match(/^thresholds source=(defaults|machine\.conf) LOAD_LIMIT=(\S+) LOAD_LIMIT_WITH_LANES=(\S+) MIN_AVAIL_GIB=(\S+) LANE3_LOAD=(\S+) LANE3_AVAIL_GIB=(\S+)\n/);
+    if (!header) return unknown('invalid machine threshold header');
+    const keys = ['LOAD_LIMIT', 'LOAD_LIMIT_WITH_LANES', 'MIN_AVAIL_GIB', 'LANE3_LOAD', 'LANE3_AVAIL_GIB'];
+    thresholds = Object.fromEntries(keys.map((key, i) => [key, Number(header[i + 2])]));
+    if (keys.some((key, i) => !/^\d+(?:\.\d+)?$/.test(header[i + 2]) || !finite(thresholds[key]) || thresholds[key] <= 0 || thresholds[key] > (key.endsWith('GIB') ? 65536 : 1024)) ||
+      thresholds.LOAD_LIMIT_WITH_LANES < thresholds.LOAD_LIMIT || thresholds.LANE3_LOAD > thresholds.LOAD_LIMIT || thresholds.LANE3_AVAIL_GIB < thresholds.MIN_AVAIL_GIB) return unknown('invalid machine threshold ranges');
+    if (header[1] === 'defaults' && keys.some((key, i) => thresholds[key] !== [12, 20, 16, 8, 32][i])) return unknown('invalid default threshold values');
+    thresholds.source = header[1];
+    source = source.slice(header[0].length);
+  }
   const lane3Match = source.match(/ lane3=(OPEN|CLOSED)$/);
   const lane3 = lane3Match?.[1] ?? null;
   if (lane3Match) source = source.slice(0, lane3Match.index);
-  const v12 = source.match(new RegExp(`^load1m=${number} limit=(\\d+) lanes_held=(\\d+) (.*)$`));
+  const v12 = source.match(new RegExp(`^load1m=${number} limit=${number} lanes_held=(\\d+) (.*)$`));
   if (v12) {
     loadGate = +v12[2]; lanesHeld = +v12[3];
-    if (heavyLoadLimit(lanesHeld) === null || loadGate !== heavyLoadLimit(lanesHeld)) return unknown('invalid v1.2 lane/limit reading');
+    const expectedLimit = thresholds ? lanesHeld === 0 ? thresholds.LOAD_LIMIT : thresholds.LOAD_LIMIT_WITH_LANES : heavyLoadLimit(lanesHeld);
+    if (heavyLoadLimit(lanesHeld) === null || loadGate !== expectedLimit) return unknown('invalid lane/limit reading');
     source = `load1m=${v12[1]} ${v12[4]}`;
     const linuxV12 = source.match(new RegExp(`^load1m=${number} avail=${number}GiB headroom=${number} GiB gate=(OK|OVERLOADED)$`));
     if (linuxV12) {
@@ -99,9 +117,9 @@ export function parseHeavyCheck(text, exitCode = 0) {
     availableBasis: darwin ? level !== undefined ? 'memorystatus-level' : 'pages-fallback (sysctl explicitly missing)' : 'Linux MemAvailable',
     memorystatusPct: level === undefined ? null : +level, pageHeadroomBytes: darwin ? +m[4] * GIB : null,
     swapUsedBytes: darwin ? +m[5] * GIB : null, limit: loadGate, lanes_held: lanesHeld,
-    loadGate, lanesHeld, lane3, memoryGateGiB: 16,
-    controllerPolicy: lane3 && v12 ? 'v1.3-lane-aware' : v12 ? 'v1.2-lane-aware' : 'legacy-fixed-12',
-    note: 'Controller state is authoritative; printed readings are rounded to 0.01, so do not recompute boundary verdicts.' };
+    loadGate, lanesHeld, lane3, memoryGateGiB: thresholds?.MIN_AVAIL_GIB ?? 16, thresholds,
+    controllerPolicy: thresholds && v12 ? 'v1.6-machine-gates' : lane3 && v12 ? 'v1.3-lane-aware' : v12 ? 'v1.2-lane-aware' : 'legacy-fixed-12',
+    note: 'Controller state is authoritative; printed load/memory readings are rounded to 0.01, so do not recompute boundary verdicts.' };
 }
 
 export function lockSnapshot(leases, rows, { host, psStartedAt, now, processComplete }) {

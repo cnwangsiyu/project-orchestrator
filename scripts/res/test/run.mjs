@@ -12,6 +12,8 @@ const SUITE_TIMEOUTS = {
   't88/legacy/test-res.sh': 600000,
   'lane3.mjs': 600000,
   'fairness.mjs': 600000,
+  'lanes.mjs': 600000,
+  'followups.mjs': 600000,
   'build.mjs': 1200000,
 };
 // The outer runner must allow every bounded child plus fixture setup/logging overhead.

@@ -15,6 +15,7 @@ LOCKS="$RES_DIR/locks"
 LOG="$RES_DIR/log.tsv"
 NOTES="$RES_DIR/notes"
 WAITERS="$RES_DIR/build-waiters"
+LANE_WAITERS="$RES_DIR/lane-waiters"
 WAITER_STALE_SECONDS=45
 
 usage() {
@@ -82,8 +83,45 @@ heavy_lanes_held() {
   printf '%s\n' "$held"
 }
 
+# Configuration is data, never shell code. Unknown/duplicate keys and malformed
+# values fail closed; an absent file retains the original admission thresholds.
+machine_thresholds() {
+  LOAD_LIMIT=12 LOAD_LIMIT_WITH_LANES=20 MIN_AVAIL_GIB=16 LANE3_LOAD=8 LANE3_AVAIL_GIB=32
+  THRESHOLDS_SOURCE=defaults
+  [ -e "$RES_DIR/machine.conf" ] || return 0
+  local values key value
+  values=$(awk '
+    /^[[:space:]]*(#|$)/ { next }
+    {
+      if (split($0, parts, "=") != 2) exit 1
+      key=parts[1]; value=parts[2]
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+      if (key !~ /^(LOAD_LIMIT|LOAD_LIMIT_WITH_LANES|MIN_AVAIL_GIB|LANE3_LOAD|LANE3_AVAIL_GIB)$/ || seen[key]++) exit 1
+      if (value !~ /^[0-9]+([.][0-9]+)?$/ || value + 0 <= 0) exit 1
+      max = key ~ /GIB$/ ? 65536 : 1024
+      if (value + 0 > max) exit 1
+      print key "\t" value
+    }' "$RES_DIR/machine.conf") || die "invalid machine.conf (unique known KEY=value; load >0..1024, GiB >0..65536)"
+  while IFS=$'\t' read -r key value; do
+    [ -n "$key" ] || continue
+    case "$key" in
+      LOAD_LIMIT) LOAD_LIMIT="$value" ;;
+      LOAD_LIMIT_WITH_LANES) LOAD_LIMIT_WITH_LANES="$value" ;;
+      MIN_AVAIL_GIB) MIN_AVAIL_GIB="$value" ;;
+      LANE3_LOAD) LANE3_LOAD="$value" ;;
+      LANE3_AVAIL_GIB) LANE3_AVAIL_GIB="$value" ;;
+    esac
+  done <<<"$values"
+  awk -v empty="$LOAD_LIMIT" -v held="$LOAD_LIMIT_WITH_LANES" -v mem="$MIN_AVAIL_GIB" \
+    -v third="$LANE3_LOAD" -v thirdmem="$LANE3_AVAIL_GIB" \
+    'BEGIN { exit !(held >= empty && third <= empty && thirdmem >= mem) }' || die "invalid machine.conf (held load >= idle load; lane 3 load <= idle load and memory >= normal memory)"
+  THRESHOLDS_SOURCE=machine.conf
+}
+
 cmd_heavy_check() {
-  local PID="$PPID" lanes_held limit=12
+  local PID="$PPID" lanes_held limit
+  local LOAD_LIMIT LOAD_LIMIT_WITH_LANES MIN_AVAIL_GIB LANE3_LOAD LANE3_AVAIL_GIB THRESHOLDS_SOURCE
   while [ $# -gt 0 ]; do
     case "$1" in
       --pid)
@@ -93,8 +131,12 @@ cmd_heavy_check() {
     esac
   done
   validate_pid
+  machine_thresholds
   lanes_held=$(heavy_lanes_held "$PID")
-  [ "$lanes_held" -eq 0 ] || limit=20
+  limit="$LOAD_LIMIT"
+  [ "$lanes_held" -eq 0 ] || limit="$LOAD_LIMIT_WITH_LANES"
+  printf 'thresholds source=%s LOAD_LIMIT=%s LOAD_LIMIT_WITH_LANES=%s MIN_AVAIL_GIB=%s LANE3_LOAD=%s LANE3_AVAIL_GIB=%s\n' \
+    "$THRESHOLDS_SOURCE" "$LOAD_LIMIT" "$LOAD_LIMIT_WITH_LANES" "$MIN_AVAIL_GIB" "$LANE3_LOAD" "$LANE3_AVAIL_GIB"
   local load headroom platform pages_reading pages_headroom memorystatus memsize swap_reading swap_used
   local has_memorystatus=1 test_dir live_dir
   platform=$(uname -s)
@@ -151,14 +193,15 @@ cmd_heavy_check() {
         END { if (!found) exit 1 }') || die "cannot read swap usage"
       awk -v load="$load" -v pages="$pages_headroom" -v level="$memorystatus" \
         -v has_level="$has_memorystatus" -v ram="$memsize" -v swap="$swap_used" \
-        -v limit="$limit" -v lanes="$lanes_held" 'BEGIN {
+        -v limit="$limit" -v lanes="$lanes_held" -v min_gib="$MIN_AVAIL_GIB" \
+        -v third_load="$LANE3_LOAD" -v third_gib="$LANE3_AVAIL_GIB" 'BEGIN {
         if (load !~ /^[0-9]+([.][0-9]+)?$/ || pages !~ /^[0-9]+$/ || swap !~ /^[0-9]+$/) exit 1
         if (has_level && (level !~ /^[0-9]+$/ || level > 100 || ram !~ /^[0-9]+$/ || ram <= 0)) exit 1
         gib = (has_level ? level / 100 * ram : pages) / 1073741824
-        overloaded = load > limit || gib < 16
-        lane3 = load <= 8 && gib >= 32 ? "OPEN" : "CLOSED"
+        overloaded = load > limit || gib < min_gib
+        lane3 = load <= third_load && gib >= third_gib ? "OPEN" : "CLOSED"
         source = has_level ? sprintf("memorystatus %d%%", level) : "memorystatus unavailable; pages fallback"
-        printf "load1m=%.2f limit=%d lanes_held=%d avail=%.2fGiB (%s) pages_headroom=%.2fGiB swap_used=%.2fGiB gate=%s lane3=%s\n", \
+        printf "load1m=%.2f limit=%s lanes_held=%d avail=%.2fGiB (%s) pages_headroom=%.2fGiB swap_used=%.2fGiB gate=%s lane3=%s\n", \
           load, limit, lanes, gib, source, pages / 1073741824, swap / 1073741824, overloaded ? "OVERLOADED" : "OK", \
           lane3
         exit overloaded ? 5 : 0
@@ -172,12 +215,13 @@ cmd_heavy_check() {
       ;;
     *) die "heavy-check is unsupported on this OS" ;;
   esac
-  awk -v load="$load" -v bytes="$headroom" -v limit="$limit" -v lanes="$lanes_held" 'BEGIN {
+  awk -v load="$load" -v bytes="$headroom" -v limit="$limit" -v lanes="$lanes_held" \
+    -v min_gib="$MIN_AVAIL_GIB" -v third_load="$LANE3_LOAD" -v third_gib="$LANE3_AVAIL_GIB" 'BEGIN {
     if (load !~ /^[0-9]+([.][0-9]+)?$/ || bytes !~ /^[0-9]+$/) exit 1
     gib = bytes / 1073741824
-    overloaded = load > limit || gib < 16
-    lane3 = load <= 8 && gib >= 32 ? "OPEN" : "CLOSED"
-    printf "load1m=%.2f limit=%d lanes_held=%d avail=%.2fGiB headroom=%.2f GiB gate=%s lane3=%s\n", \
+    overloaded = load > limit || gib < min_gib
+    lane3 = load <= third_load && gib >= third_gib ? "OPEN" : "CLOSED"
+    printf "load1m=%.2f limit=%s lanes_held=%d avail=%.2fGiB headroom=%.2f GiB gate=%s lane3=%s\n", \
       load, limit, lanes, gib, gib, overloaded ? "OVERLOADED" : "OK", lane3
     exit overloaded ? 5 : 0
   }'
@@ -316,18 +360,18 @@ waiter_live() {
 }
 
 cleanup_build_waiters() {
-  local dir
-  [ -d "$WAITERS" ] || return 0
-  for dir in "$WAITERS"/waiter.*; do
+  local dir root="${1:-$WAITERS}"
+  [ -d "$root" ] || return 0
+  for dir in "$root"/waiter.*; do
     [ -d "$dir" ] || continue
     waiter_live "$dir" || rm -rf "$dir"
   done
 }
 
 oldest_build_waiter() {
-  local dir order streak
-  cleanup_build_waiters
-  for dir in "$WAITERS"/waiter.*; do
+  local dir order streak root="${1:-$WAITERS}"
+  cleanup_build_waiters "$root"
+  for dir in "$root"/waiter.*; do
     [ -d "$dir" ] || continue
     streak=$(waiter_field "$dir" gate_streak)
     case "$streak" in ''|*[!0-9]*) streak=0 ;; esac
@@ -358,7 +402,7 @@ lane_reserved_for_waiter() {
   case "$candidate" in heavy-lane-[123]) ;; *) return 1 ;; esac
   waiter=$(oldest_build_waiter); [ -n "$waiter" ] || return 1
   holder=$(waiter_field "$waiter" holder); pin=$(waiter_field "$waiter" lane); lane3=$(waiter_field "$waiter" lane3)
-  if [ -n "${BUILD_WAITER_DIR:-}" ] && [ "$holder" = "$BY" ] && [ "$(waiter_field "$waiter" pid)" = "$PID" ]; then
+  if [ "${WAITER_RESOURCE:-}" = heavy-build ] && [ -n "${BUILD_WAITER_DIR:-}" ] && [ "$holder" = "$BY" ] && [ "$(waiter_field "$waiter" pid)" = "$PID" ]; then
     return 1
   fi
   if [ -d "$LOCKS/heavy-build.d" ] && ! hold_stale heavy-build; then
@@ -378,6 +422,84 @@ lane_reserved_for_waiter() {
   return 0
 }
 
+# The build queue keeps v1.5 priority. Lane waiters add a project cap while
+# another project is ready, and reserve the last admitted lane for their head.
+# Metadata is published before this check so simultaneous takers see each
+# other's project; losing attempts unwind their own newly-created directory.
+project_holds_lane() {
+  local project="$1" candidate="${2:-}" lane
+  for lane in "$LOCKS"/heavy-lane-*.d; do
+    [ -d "$lane" ] || continue
+    lane="${lane##*/}"; lane="${lane%.d}"
+    [ "$lane" != "$candidate" ] || continue
+    [ "$(field "$lane" project)" = "$project" ] || continue
+    hold_stale "$lane" && continue
+    return 0
+  done
+  return 1
+}
+
+ready_lane_waiters() {
+  local dir streak
+  cleanup_build_waiters "$LANE_WAITERS"
+  for dir in "$LANE_WAITERS"/waiter.*; do
+    [ -d "$dir" ] || continue
+    streak=$(waiter_field "$dir" gate_streak)
+    case "$streak" in ''|*[!0-9]*) streak=0 ;; esac
+    [ "$streak" -lt 3 ] || continue
+    printf '%s\t%s\n' "$(waiter_field "$dir" order)" "$dir"
+  done | LC_ALL=C sort -t $'\t' -k1,1 -k2,2 | cut -f2-
+}
+
+oldest_lane_waiter() {
+  local ready="$1" candidate="$2" dir other project capped
+  while IFS= read -r dir; do
+    [ -n "$dir" ] || continue
+    project=$(waiter_field "$dir" project); capped=0
+    if project_holds_lane "$project" "$candidate"; then
+      while IFS= read -r other; do
+        [ -n "$other" ] || continue
+        [ "$(waiter_field "$other" project)" = "$project" ] || { capped=1; break; }
+      done <<<"$ready"
+    fi
+    [ "$capped" -eq 1 ] || { printf '%s\n' "$dir"; return 0; }
+  done <<<"$ready"
+}
+
+lane_waiter_blocks() {
+  local candidate="$1" oldest dir lane free=0 eligible=0
+  local ready
+  case "$candidate" in heavy-lane-[123]) ;; *) return 1 ;; esac
+  ready=$(ready_lane_waiters)
+  [ -n "$ready" ] || return 1
+  if [ "${WAITER_RESOURCE:-}" = heavy-build ] && [ -n "${BUILD_WAITER_DIR:-}" ] && \
+    [ "$BUILD_WAITER_DIR" = "$(oldest_build_waiter)" ]; then return 1; fi
+  if project_holds_lane "$PROJECT" "$candidate"; then
+    while IFS= read -r dir; do
+      [ -n "$dir" ] || continue
+      [ "$(waiter_field "$dir" project)" != "$PROJECT" ] || continue
+      RESERVED_MESSAGE="project '$PROJECT' already holds a lane; waiting project $(waiter_field "$dir" project) has priority; retry or use wait-lane"
+      return 0
+    done <<<"$ready"
+  fi
+  oldest=$(oldest_lane_waiter "$ready" "$candidate")
+  [ -n "$oldest" ] || return 1
+  if [ "${WAITER_RESOURCE:-}" = heavy-lane-any ] && [ -n "${BUILD_WAITER_DIR:-}" ]; then
+    [ "$BUILD_WAITER_DIR" != "$oldest" ] || return 1
+    RESERVED_MESSAGE="reserved for waiting lane $(waiter_field "$oldest" holder) (FIFO); retry or use wait-lane"
+    return 0
+  fi
+  for lane in heavy-lane-1 heavy-lane-2 heavy-lane-3; do
+    [ -n "$(reg_line "$lane")" ] || continue
+    [ "$lane" != heavy-lane-3 ] || [ "$(waiter_field "$oldest" lane3)" = OPEN ] || continue
+    if [ "$lane" = "$candidate" ]; then eligible=1; continue; fi
+    [ -d "$LOCKS/$lane.d" ] || free=$((free + 1))
+  done
+  [ "$eligible" -eq 1 ] && [ "$free" -eq 0 ] || return 1
+  RESERVED_MESSAGE="reserved for waiting lane $(waiter_field "$oldest" holder); retry or use wait-lane"
+  return 0
+}
+
 write_build_waiter() {
   local blocked="$1" lane3="$2" tmp="$BUILD_WAITER_DIR/info.$$"
   printf 'holder\t%s\nproject\t%s\ntask\t%s\npid\t%s\nhost\t%s\nsince\t%s\nstart\t%s\norder\t%s\nheartbeat\t%s\nblocked\t%s\ngate_streak\t%s\nlane\t%s\nlane3\t%s\n' \
@@ -388,9 +510,9 @@ write_build_waiter() {
 }
 
 start_build_waiter() {
-  local published suffix
-  mkdir -p "$WAITERS"
-  BUILD_WAITER_DIR=$(mktemp -d "$WAITERS/.staging.XXXXXX")
+  local published suffix root="${WAITER_ROOT:-$WAITERS}"
+  mkdir -p "$root"
+  BUILD_WAITER_DIR=$(mktemp -d "$root/.staging.XXXXXX")
   BUILD_WAITER_HOST=$(local_host); BUILD_WAITER_SINCE=$(now); BUILD_WAITER_START=$(date +%s)
   if command -v python3 >/dev/null 2>&1; then
     BUILD_WAITER_ORDER=$(python3 -c 'import time; print(f"{time.time_ns():020d}")')
@@ -400,11 +522,11 @@ start_build_waiter() {
   BUILD_WAITER_GATE_STREAK=0
   write_build_waiter starting CLOSED
   arm_build_waiter_cleanup
-  suffix="${BUILD_WAITER_DIR##*.staging.}"; published="$WAITERS/waiter.$suffix"
+  suffix="${BUILD_WAITER_DIR##*.staging.}"; published="$root/waiter.$suffix"
   BUILD_WAITER_STAGING="$BUILD_WAITER_DIR"; BUILD_WAITER_DIR="$published"
   mv "$BUILD_WAITER_STAGING" "$BUILD_WAITER_DIR"
   BUILD_WAITER_STAGING=
-  log waiter-start heavy-build "$BY ($PROJECT${TASK:+/$TASK})" "pid=$PID"
+  log waiter-start "${WAITER_RESOURCE:-heavy-build}" "$BY ($PROJECT${TASK:+/$TASK})" "pid=$PID"
 }
 
 update_build_waiter() {
@@ -431,19 +553,19 @@ arm_build_waiter_cleanup() {
 finish_build_waiter() {
   local outcome="$1" note="$2"
   [ -n "${BUILD_WAITER_DIR:-}" ] || return 0
-  log "waiter-$outcome" heavy-build "$BY ($PROJECT${TASK:+/$TASK})" "$note"
+  log "waiter-$outcome" "${WAITER_RESOURCE:-heavy-build}" "$BY ($PROJECT${TASK:+/$TASK})" "$note"
   cleanup_build_waiter
 }
 
 show_build_waiters() {
-  local dir found=0
-  cleanup_build_waiters
-  for dir in "$WAITERS"/waiter.*; do [ -d "$dir" ] && found=1; done
+  local dir found=0 root="${1:-$WAITERS}" label="${2:-builds}"
+  cleanup_build_waiters "$root"
+  for dir in "$root"/waiter.*; do [ -d "$dir" ] && found=1; done
   [ "$found" -eq 1 ] || return 0
   echo
-  echo 'Waiting builds:'
+  echo "Waiting $label:"
   printf '%-24s %-24s %-16s %s\n' HOLDER PROJECT/TASK SINCE BLOCKED
-  for dir in "$WAITERS"/waiter.*; do
+  for dir in "$root"/waiter.*; do
     [ -d "$dir" ] || continue
     printf '%s\t%s\n' "$(waiter_field "$dir" order)" "$dir"
   done | LC_ALL=C sort -t $'\t' -k1,1 | while IFS=$'\t' read -r _ dir; do
@@ -487,6 +609,21 @@ write_info() {
     "$BY" "$PROJECT" "$TASK" "$PURPOSE" "$1" "$UNTIL" "$PID" "$(local_host)" "$(date +%s)" >"$LOCKS/$2.d/info"
 }
 
+# Retain counts and process identities only, never device serials/details or
+# process arguments. Missing adb/ps is evidence unavailable, not a take error.
+device_clients() {
+  local count=unknown clients=unknown
+  count=$(adb devices -l 2>/dev/null | awk 'END { print NR+0 }') || count=unknown
+  clients=$(ps -axo pid=,comm= 2>/dev/null | awk '
+    {
+      pid=$1; name=$0; sub(/^[[:space:]]*[0-9]+[[:space:]]+/, "", name); sub(/^.*\//, "", name)
+      if (pid ~ /^[0-9]+$/ && name ~ /^(adb|devicectl)$/) {
+        result=result (result ? "," : "") pid ":" name
+      }
+    }
+    END { print result ? result : "none" }') || clients=unknown
+  printf 'adb_device_lines\t%s\ndevice_clients\t%s\n' "$count" "$clients"
+}
 pid_dead() {
   local rc=0
   ps -p "$1" -o pid= >/dev/null 2>&1 || rc=$?
@@ -740,7 +877,7 @@ acquire_attempt() {
   if [ "$mode" = build ]; then printf 'build-lane=%s\n' "$candidate"
   else printf 'lane=%s\n' "$candidate"; fi
   TRANSACTION_COMMITTED=1
-  if [ "$mode" = build ]; then finish_build_waiter acquire "lane=$candidate"; fi
+  finish_build_waiter acquire "lane=$candidate"
   trap - EXIT
   exit 0
 }
@@ -752,6 +889,8 @@ cmd_acquire() {
   local duration deadline remaining delay=1 rc reading candidate missing3=0 ACQUIRE_PID_EXPLICIT
   local BUILD_WAITER_DIR= BUILD_WAITER_STAGING= BUILD_WAITER_HOST= BUILD_WAITER_SINCE= BUILD_WAITER_START=
   local BUILD_WAITER_ORDER= BUILD_WAITER_GATE_STREAK=0 lane3_state=CLOSED block_reason
+  local WAITER_ROOT="$WAITERS" WAITER_RESOURCE=heavy-build
+  if [ "$mode" = lane ]; then WAITER_ROOT="$LANE_WAITERS"; WAITER_RESOURCE=heavy-lane-any; fi
   while [ $# -gt 0 ]; do
     case "$1" in
       --timeout)
@@ -791,7 +930,7 @@ cmd_acquire() {
   fi
   duration=$(awk -v t="$timeout" 'BEGIN {s=t*60; printf "%.0f\n", int(s)+(s>int(s))}')
   deadline=$((SECONDS + duration))
-  if [ "$mode" = build ] && [ "$blocking" = 1 ]; then
+  if [ "$blocking" = 1 ]; then
     start_build_waiter
     arm_build_waiter_cleanup
   fi
@@ -801,6 +940,7 @@ cmd_acquire() {
       printf '%s\n' "$reading"
       lane3_state=CLOSED; lane3_open "$reading" && lane3_state=OPEN
       BUILD_WAITER_GATE_STREAK=0
+      update_build_waiter lane "$lane3_state"
       if [ "$mode" = build ] && [ "$blocking" = 1 ]; then reclaim_stale_heavy heavy-build "$BY" || true; fi
       for candidate in ${pin:-heavy-lane-1 heavy-lane-2 heavy-lane-3}; do
         if [ -z "$(reg_line "$candidate")" ]; then
@@ -829,7 +969,7 @@ cmd_acquire() {
     if [ "$blocking" = 0 ]; then return "$rc"; fi
     remaining=$((deadline - SECONDS))
     if [ "$remaining" -le 0 ]; then
-      if [ "$mode" = build ]; then finish_build_waiter timeout "after $timeout minutes"; fi
+      finish_build_waiter timeout "after $timeout minutes"
       echo "res: timed out waiting for '$mode' after $timeout minutes" >&2; return 2
     fi
     [ "$delay" -le "$remaining" ] || delay="$remaining"
@@ -925,6 +1065,7 @@ cmd_status() {
   ' reg="$REG" devs="$t" pids="$t.pids" "$t" "$t.pids" ${infos[@]+"${infos[@]}"} "$REG"
   rm -f "$t" "$t.pids"
   if [ -z "${1:-}" ] || [ "${1:-}" = heavy-build ]; then show_build_waiters; fi
+  case "${1:-}" in ''|heavy-*) show_build_waiters "$LANE_WAITERS" lanes ;; esac
   [ -z "${1:-}" ] || show_notes "$1"
 }
 
@@ -966,7 +1107,7 @@ cmd_take() {
     fi
     if ! lane3_open "$reading"; then
       printf '%s\n' "$reading"
-      echo "res: heavy-lane-3 unavailable (requires load1m <= 8 and available memory >= 32 GiB)" >&2
+      echo "res: heavy-lane-3 unavailable (see active LANE3_LOAD and LANE3_AVAIL_GIB thresholds above)" >&2
       return 5
     fi
   fi
@@ -978,18 +1119,28 @@ cmd_take() {
   mkdir -p "$LOCKS"
   if take_mkdir "$LOCKS/$id.d"; then
     TAKE_CREATED=1
+    write_info "$(now)" "$id" || return $?
+    local RESERVED_MESSAGE=
     if lane_reserved_for_waiter "$id"; then
-      echo "res: '$id' is reserved for waiting build $RESERVED_WAITER_HOLDER; retry or use wait-lane" >&2
+      RESERVED_MESSAGE="reserved for waiting build $RESERVED_WAITER_HOLDER; retry or use wait-lane"
+    elif lane_waiter_blocks "$id"; then :; fi
+    if [ -n "$RESERVED_MESSAGE" ]; then
+      echo "res: '$id': $RESERVED_MESSAGE" >&2
       if [ "${TAKE_TRANSACTION:-0}" = 1 ]; then
         return 2
       fi
-      rmdir "$LOCKS/$id.d" || die "failed to yield '$id' to waiting build $RESERVED_WAITER_HOLDER"
+      protected_rollback_created "$id" "$BY" || die "failed to yield '$id' to waiter"
       TAKE_CREATED=0
       return 2
     fi
-    write_info "$(now)" "$id" || return $?
     if [ -n "$PID_EXPLICIT" ] && pid_dead "$PID"; then warn_holder; mark_holder_warning "$id"; fi
-    log take "$id" "$BY ($PROJECT${TASK:+/$TASK})" "$PURPOSE${UNTIL:+ · until $UNTIL}"
+    local device_evidence= device_log=
+    if [ "$dev" != - ]; then
+      device_evidence=$(device_clients) || device_evidence=$'adb_device_lines\tunknown\ndevice_clients\tunknown'
+      printf '%s\n' "$device_evidence" >>"$LOCKS/$id.d/info" || true
+      device_log=" · $(printf '%s\n' "$device_evidence" | awk -F'\t' '{printf "%s%s=%s", (NR>1 ? " " : ""), $1, $2}')" || device_log=' · device_clients=unknown'
+    fi
+    log take "$id" "$BY ($PROJECT${TASK:+/$TASK})" "$PURPOSE${UNTIL:+ · until $UNTIL}$device_log"
     echo "took $id"; show_notes "$id"
   elif [ "$(field "$id" by)" = "$BY" ]; then
     echo "already held by you: $id"; show_notes "$id"

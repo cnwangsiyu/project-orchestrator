@@ -1,10 +1,12 @@
-import { ALL_HEAVY_IDS, heavyCheckLanes, heavyCheckLimit, laneAdmission } from './resource-locks.mjs';
+import { ALL_HEAVY_IDS, RES_CONTRACT_VERSION, heavyCheckLanes, heavyCheckLimit, laneAdmission } from './resource-locks.mjs';
 import { GIB } from './resource-data.mjs';
 
 const finite = (v) => typeof v === 'number' && Number.isFinite(v);
 const who = (v) => v?.project ? `${v.project}/${v.task ?? '(project only)'}` : '(unknown)';
 const sameHolder = (a, b) => !!a.holder && a.holder === b.holder && (!a.project || !b.project || a.project === b.project) && (!a.task || !b.task || a.task === b.task);
 const minutes = (n) => finite(n) ? +(n / 60000).toFixed(2) : null;
+const observedLimits = (gate, fallback) => gate?.thresholds
+  ? { empty: gate.thresholds.LOAD_LIMIT, one: gate.thresholds.LOAD_LIMIT_WITH_LANES } : fallback;
 
 export function reviewLockTiming(samples, { since, now, maxGapMs }) {
   const events = [...new Map(samples.flatMap((s) => s.heavyLocks?.journal?.events ?? []).filter((e) => ALL_HEAVY_IDS.includes(e.resource) && finite(e.t) && e.t <= now && typeof e.eventId === 'string').map((e) => [e.eventId, e])).values()];
@@ -37,6 +39,10 @@ export function reviewLockTiming(samples, { since, now, maxGapMs }) {
     const startLow = exact ? lock.startMs : null;
     let hold = holds.find((h) => {
       if (h.resource !== lock.id || !sameHolder(h, lock)) return false;
+      if (h.pid && lock.pid && h.pid !== lock.pid) return false;
+      // A held snapshot after the release's entire precision window belongs
+      // to another episode, even if the holder reused the same name or PID.
+      if (finite(h.endHigh) && s.t >= h.endHigh) return false;
       if (!exact) return h.rightCensored && !finite(h.endHigh);
       if (!finite(h.startLow)) return h.leftCensored && finite(h.endHigh) && lock.startMs <= h.endHigh && s.t <= h.endHigh;
       const startMatches = lock.startMs >= h.startLow && (lock.startMs < h.startHigh || h.startHigh === h.startLow && lock.startMs === h.startLow);
@@ -56,13 +62,20 @@ export function reviewLockTiming(samples, { since, now, maxGapMs }) {
   }
   const holdTimes = holds.filter((h) => (h.endHigh ?? h.lastObserved ?? h.startHigh ?? -Infinity) >= since).map((h) => {
     const lowerEnd = Math.max(h.endLow ?? -Infinity, h.lastObserved ?? -Infinity);
+    const superseded = finite(h.endHigh) && finite(h.startHigh) && holds.some((other) => other !== h &&
+      other.resource === h.resource && sameHolder(h, other) && finite(other.startLow) &&
+      other.startLow >= h.startHigh && other.startLow > h.startLow && other.startLow < h.endHigh && finite(other.firstObserved) && other.firstObserved < h.endHigh);
+    const invalid = superseded || finite(h.endLow) && finite(h.startLow) && h.endLow < h.startLow;
     return { resource: h.resource, holder: h.holder, owner: who(h), pid: h.pid ?? null, purposeClass: h.purposeClass ?? null,
+      validity: invalid ? 'INVALID' : 'VALID', invalidReason: superseded ? 'same-name release follows a newer observed acquisition; older take cannot be paired' : invalid ? 'release precedes acquisition; same-name episode pairing is ambiguous' : null,
       startAt: finite(h.startLow) ? new Date(h.startLow).toISOString() : null,
       startPrecisionSeconds: finite(h.startHigh) && finite(h.startLow) ? (h.startHigh - h.startLow) / 1000 : null,
-      endAt: finite(h.endLow) ? new Date(h.endLow).toISOString() : null, endReason: h.endReason ?? 'still observed held / release unknown',
-      durationMinutesLower: finite(h.startHigh) && finite(lowerEnd) ? minutes(Math.max(0, lowerEnd - h.startHigh)) : 0,
-      durationMinutesUpper: finite(h.startLow) && finite(h.endHigh) ? minutes(Math.max(0, h.endHigh - h.startLow)) : null,
-      leftCensored: h.leftCensored, rightCensored: h.rightCensored, source: h.source, reclaimer: h.reclaimer ?? null,
+      endAt: !superseded && finite(h.endLow) ? new Date(h.endLow).toISOString() : null,
+      rejectedEndAt: superseded ? new Date(h.endLow).toISOString() : null,
+      endReason: superseded ? 'release rejected; newer episode observed' : h.endReason ?? 'still observed held / release unknown',
+      durationMinutesLower: invalid ? null : finite(h.startHigh) && finite(lowerEnd) ? minutes(Math.max(0, lowerEnd - h.startHigh)) : 0,
+      durationMinutesUpper: !invalid && finite(h.startLow) && finite(h.endHigh) ? minutes(Math.max(0, h.endHigh - h.startLow)) : null,
+      leftCensored: h.leftCensored, rightCensored: superseded || h.rightCensored, source: h.source, reclaimer: h.reclaimer ?? null,
       firstObservedAt: finite(h.firstObserved) ? new Date(h.firstObserved).toISOString() : null,
       lastObservedAt: finite(h.lastObserved) ? new Date(h.lastObserved).toISOString() : null };
   });
@@ -106,7 +119,7 @@ export function inspectLockInterval(a, b, { span, record, loadGate = 12, loadGat
     if (gate.state === 'OVERLOADED') {
       result.overloadedMinutes = span / 60000;
       record('admission_gate_closed', `host/limit-${sampleLimit}/lanes-${sampleLanes}`, a, b.t,
-        `observed res heavy-check: load=${gate.load1m}, available=${(gate.availableBytes / GIB).toFixed(2)} GiB (${gate.availableBasis}); limit=${sampleLimit ?? 'UNKNOWN'}, lanes_held=${sampleLanes ?? 'UNKNOWN'}, memory=${memoryGateGiB} GiB; approved limit=min(20, 12 + 8 * lanes held by others); controller=${gate.controllerPolicy ?? 'UNKNOWN'}; transitions may occur between probes`, [...new Set((a.heavyRoots ?? []).map((p) => who(p.owner)))]);
+        `observed res heavy-check: load=${gate.load1m}, available=${(gate.availableBytes / GIB).toFixed(2)} GiB (${gate.availableBasis}); limit=${sampleLimit ?? 'UNKNOWN'}, lanes_held=${sampleLanes ?? 'UNKNOWN'}, memory=${gate.memoryGateGiB ?? memoryGateGiB} GiB; thresholds=${gate.thresholds?.source ?? 'legacy defaults'}; controller=${gate.controllerPolicy ?? 'UNKNOWN'}; transitions may occur between probes`, [...new Set((a.heavyRoots ?? []).map((p) => who(p.owner)))]);
     }
   }
   if (!a.heavyLocks?.complete || !b.heavyLocks?.complete) return result;
@@ -129,6 +142,9 @@ export function inspectLockInterval(a, b, { span, record, loadGate = 12, loadGat
     } else if (checks.every((key) => p[key]?.state === 'MATCHED' && q[key]?.state === 'MATCHED')) compliant.push(p);
   }
   if (bypass.length) result.bypassMinutes = span / 60000;
+  // Default 12/20/16 tuning evidence is not transferable to an explicitly
+  // configured machine. Still report authoritative gates, locks and bypasses.
+  if ([gate, nextGate].some((g) => g?.thresholds?.source === 'machine.conf')) return result;
   const contextMatches = (s) => {
     const waiters = s.heavyLocks.waiters ?? [];
     const callers = waiters.length ? waiters.map((w) => ({ pid: w.holderPid })) : [{}];
@@ -179,20 +195,22 @@ export function assessThresholds(samples, stats, { loadGate, loadGateWithOneHeav
   const entryObservations = samples.filter((s) => s.t >= since).flatMap((s) => {
     const callers = (s.heavyLocks?.waiters ?? []).length ? s.heavyLocks.waiters.map((w) => ({ pid: w.holderPid, holder: w.holder })) : [{}];
     return callers.map((caller) => {
-      const admission = laneAdmission(s.heavyLocks, caller, limits), gate = s.heavyGate;
+      const gate = s.heavyGate;
+      const admission = laneAdmission(s.heavyLocks, caller, observedLimits(gate, limits));
       const observedLimit = heavyCheckLimit(gate), observedLanes = heavyCheckLanes(gate);
       const comparable = admission.state === 'KNOWN' && !admission.thirdLaneOnly && gate?.authoritative;
       const sameContext = comparable && (observedLanes === null || observedLanes === admission.otherLanes);
       const matches = sameContext ? observedLimit === admission.loadGate : null;
-      const reading = comparable ? matches ? gate.state : gate.load1m > admission.loadGate || gate.availableBytes < memoryGateGiB * GIB ? 'OVERLOADED' : 'OK' : 'UNKNOWN';
+      const reading = comparable ? matches ? gate.state : gate.load1m > admission.loadGate || gate.availableBytes < (gate.memoryGateGiB ?? memoryGateGiB) * GIB ? 'OVERLOADED' : 'OK' : 'UNKNOWN';
       return { at: s.at ?? new Date(s.t).toISOString(), callerPid: caller.pid ?? null, ...admission,
         approvedReading: reading, observedReading: gate?.state ?? 'UNKNOWN', observedLoadGate: observedLimit,
         observedOtherLanes: observedLanes, controllerContextMatches: comparable ? sameContext : null,
-        controllerMatchesApprovedPolicy: matches };
+        controllerMatchesApprovedPolicy: matches, thresholds: gate?.thresholds ?? null };
     });
   });
   const compared = entryObservations.filter((entry) => entry.controllerMatchesApprovedPolicy !== null);
   const consistentPolicy = loadGate === 12 && loadGateWithOneHeavyTask === 20 && memoryGateGiB === 16
+    && !samples.some((s) => s.t >= since && s.heavyGate?.thresholds?.source === 'machine.conf')
     && compared.length > 0 && compared.every((entry) => entry.controllerMatchesApprovedPolicy);
   const candidateKey = compared.some((entry) => entry.otherLanes === 1) ? 'loadGateWithOneHeavyTask' : 'loadGate';
   const authorized = range(candidateKey) && datedApproval;
@@ -208,13 +226,13 @@ export function assessThresholds(samples, stats, { loadGate, loadGateWithOneHeav
   const askUser = !!candidate && (!authorized || !inside || !adequate);
   const action = eligible ? 'Nightly review may propose one gate change within approved ranges, with task comparison and rollback evidence. Shared controller owner must acknowledge/apply; sampler never changes enforcement.'
     : askUser ? 'Retain approved entry limits 12/20 and memory 16 GiB. Ask before further tuning; the shared res owner must acknowledge any new change.'
-      : 'Retain approved entry limits 12/20 and memory 16 GiB; missing data is not evidence of correct thresholds. Verify v1.2 adoption from captured output.';
+      : `Retain approved entry limits 12/20 and memory 16 GiB; missing data is not evidence of correct thresholds. Source contract v${RES_CONTRACT_VERSION}; verify installed admission from captured output.`;
   return { loadGate, loadGateWithOneHeavyTask, memoryGateGiB, heavyPackageSlots: 1, heavyTaskLanes: 3, heavyTaskLaneRange: [2, 3],
     lane3Gate: { load1mMax: 8, availableMemoryGiBMin: 32 }, approvedRanges, approvalEvidence, direction,
     entryObservations, controllerMismatchObservations: compared.filter((entry) => !entry.controllerMatchesApprovedPolicy),
     strictCandidateMinutes: stats.strictMinutes, looseCandidateMinutes: stats.looseMinutes, bypassCandidateMinutes: stats.bypassMinutes,
     comparableMinutes: stats.comparableMinutes, wellCoveredComparableDays: wellCoveredDays, automaticRangeAuthorized: authorized,
     observationPolicyMatchesController: consistentPolicy, consistentEstimator, consistentAdmissionContext, candidate, candidateKey, candidateWithinApprovedRanges: !!inside, nightlyAdjustmentEligible: eligible, askUser,
-    decisionCard: askUser ? `资源阈值复盘：已批准无其他重任务时 load ≤12，有一个时 ≤20；可用内存仍需 ≥16 GiB，排除 STALE 和自己的锁，T88 已报告 res v1.2 上线。观测到${direction === 'possibly-too-strict' ? '可能过严' : '可能过松'}的相关证据（${stats.strictMinutes || stats.looseMinutes} 分钟），但不能证明因果。进一步候选 ${candidateKey}=${candidate[candidateKey]}，内存保持 ${memoryGateGiB} GiB；可比且充分覆盖 ${wellCoveredDays} 天，锁绕过候选 ${stats.bypassMinutes} 分钟。是否授权试点及范围？未批准不改 12/20/16，由共享 res 负责人实施。` : null,
+    decisionCard: askUser ? `资源阈值复盘：已批准无其他重任务时 load ≤12，有一个时 ≤20；可用内存仍需 ≥16 GiB，排除 STALE 和自己的锁，源合约 v${RES_CONTRACT_VERSION}；安装版本以采样为准。观测到${direction === 'possibly-too-strict' ? '可能过严' : '可能过松'}的相关证据（${stats.strictMinutes || stats.looseMinutes} 分钟），但不能证明因果。进一步候选 ${candidateKey}=${candidate[candidateKey]}，内存保持 ${memoryGateGiB} GiB；可比且充分覆盖 ${wellCoveredDays} 天，锁绕过候选 ${stats.bypassMinutes} 分钟。是否授权试点及范围？未批准不改 12/20/16，由共享 res 负责人实施。` : null,
     note: 'Candidates are correlated diagnostic steps, not proven optimal settings. Change one gate at a time, compare like tasks and wall/wait times. Bypasses, estimator drift and thin/conflicting coverage disqualify automatic tuning.', action };
 }
