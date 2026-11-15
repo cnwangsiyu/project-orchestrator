@@ -60,7 +60,7 @@ const ALTS = [{ model: 'deepseek-v4.1-flash', effort: 'high' }, { model: 'gemini
 const isAlt = (x) => x?.vendor === 'codex' && ALTS.some((a) => a.model === x.model);
 
 // The routing table (sources and rationale: references/model-routing.md).
-//   kind: claudeOnly (Claude tools: computer use, browser, Artifact/Docs, peer negotiation) | codexOnly (images) |
+//   kind: claudeOnly (Artifact/Docs and peer negotiation) | browser (web/desktop capability-routed) | codexOnly (images) |
 //         claudeBetter (Claude only while it has spare; design stays on Claude when near budget) | codexFirst
 //   shape: exec (one-shot: `codex exec` on Codex, a short background worker on Claude) | worker (steerable / long).
 //   Claude work always launches as a background worker, never an Agent subagent (user, 2026-11-03).
@@ -71,8 +71,8 @@ const TABLE = {
   research: { desc: 'web research and synthesis', kind: 'claudeBetter', shape: 'worker', writes: false, first: C('sonnet', 'medium'), alt: X(SOL, 'medium'), ladder: [C('opus', 'high')] },
   implement: { desc: 'well-scoped implementation (clear spec, a test or build checks it)', kind: 'codexFirst', shape: 'worker', writes: true, first: X(SOL, 'high'), alt: C('sonnet', 'medium'), ladder: [X(SOL, 'xhigh'), C('opus', 'high')] },
   'implement-hard': { desc: 'large, cross-module or threading implementation; refactor', kind: 'codexFirst', shape: 'worker', writes: true, first: X(SOL, 'xhigh'), alt: C('opus', 'high'), ladder: [C('opus', 'xhigh'), X(SOL, 'max')] },
-  // UI work with a visual check in Chrome (user, 2026-11-07): TTADK Codex when browser-ready (verified: it found every real
-  // defect on a planted page, with CSS causes), else Claude as before.
+  // UI work with a visual check in Chrome: TTADK when browser-ready, then TRAE through Playwright Extension, else the
+  // browser-ready personal/Claude paths. The high effort floor remains because this row writes UI code.
   'ui-browser': { desc: 'UI or frontend work that needs a browser or a visual check', kind: 'browser', shape: 'worker', writes: true, first: X(SOL, 'high'), alt: C('sonnet', 'high'), ladder: [C('opus', 'high')] },
   debug: { desc: 'debugging, root cause across components', kind: 'codexFirst', shape: 'worker', writes: true, first: X(SOL, 'xhigh'), alt: C('opus', 'high'), ladder: [C('opus', 'xhigh'), X(SOL, 'max'), C('fable', 'high'), X(ASTRA, 'xhigh')] },
   review: { desc: 'routine code review', kind: 'codexFirst', shape: 'worker', writes: false, first: X(SOL, 'high'), alt: C('sonnet', 'high'), ladder: [X(SOL, 'xhigh')] },
@@ -81,7 +81,7 @@ const TABLE = {
   docs: { desc: 'docs, reports, user-facing writing, Feishu docs', kind: 'claudeBetter', shape: 'worker', writes: true, first: C('sonnet', 'medium'), alt: X(SOL, 'medium'), ladder: [C('opus', 'medium')] },
   draft: { desc: 'bulk prose drafts or translation, reviewed afterwards', kind: 'codexFirst', shape: 'exec', writes: true, first: X(TERRA, 'medium'), alt: C('sonnet', 'low'), ladder: [X(SOL, 'medium')] },
   'build-run': { desc: 'long procedural build, deploy or device workflow (Codex: you broker device handoffs by steering)', kind: 'codexFirst', shape: 'worker', writes: true, first: X(SOL, 'medium'), alt: C('sonnet', 'medium'), ladder: [X(SOL, 'high'), C('opus', 'high')] },
-  // Web pages in the user's signed-in Chrome (user, 2026-11-07): TTADK Codex when it is set up for browser use, else Claude.
+  // Web pages in the user's signed-in Chrome: TTADK first, then TRAE through Playwright Extension, then personal/Claude.
   browser: { desc: "operating web pages in the user's signed-in Chrome: internal consoles, Feishu docs, dashboards, forms (not desktop apps)", kind: 'browser', shape: 'worker', writes: false, first: X(SOL, 'medium'), alt: C('sonnet', 'medium'), ladder: [X(SOL, 'high'), C('sonnet', 'medium'), C('opus', 'high')] },
   // Desktop apps (user, 2026-11-07): TTADK Codex through the ChatGPT app's computer-use plugin when browser-setup is done
   // (it also enables computer use) — a terminal Claude worker has no desktop computer-use tool (only Claude in Chrome).
@@ -246,8 +246,9 @@ const chatgptOut = QX.out || (noRedeem && !QX.pick && !!QX.redeem)
 // TTADK (company gateway): preferred for Codex work whenever it is healthy and not excluded (user, 2026-11-07). When it
 // isn't (its daily quota used up, down, or excluded), TRAE CLI — the second company account — takes the same work under
 // the same rules, before personal quota (user, 2026-11-08). TT is whichever company account takes Codex work now.
+const browserFits = (a) => cat === 'computer-use' ? !!a.browser : !!a.browser || (a.kind === 'trae' && !!a.traeBrowser);
 const taskFits = (a) => T.kind !== 'claudeOnly' && cat !== 'image-gen'
-  && !(cat === 'research' && !a.search) && !(T.kind === 'browser' && !a.browser);
+  && !(cat === 'research' && !a.search) && !(T.kind === 'browser' && !browserFits(a));
 // Hard work never falls to a weaker fallback (user rule 2026-11-13, effective 2026-11-14): only Sol/Astra are eligible.
 // ETA chooses between their low-priority lanes and an explicit TTADK-reset dispatch; depletion is not unavailability.
 const routingModelFits = (model, account) => model === SOL || tierModels(account).includes(model)
@@ -258,7 +259,8 @@ const expiringUnused = QX.ttadk?.usable && !excluded.has(QX.ttadk.name) && ttadk
 const preferExpiringTtadk = expiringUnused && (background && backgroundEligible || tier === 'light' && laneEligible);
 const companyOrder = background && backgroundEligible && !preferExpiringTtadk ? [QX.trae, QX.ttadk] : [QX.ttadk, QX.trae];
 const TT = companyOrder.find((a) => a?.usable && !excluded.has(a.name)
-  && (!background || taskFits(a)) && a.models.some((x) => !modelExcluded(x, a) && (!background || routingModelFits(x, a)))) ?? null;
+  && ((!background && T.kind !== 'browser') || taskFits(a))
+  && a.models.some((x) => !modelExcluded(x, a) && (!background || routingModelFits(x, a)))) ?? null;
 const backgroundLane = background && backgroundEligible && TT?.kind === 'trae';
 // A TTADK device (a TTADK account is set up here): TTADK always first, and the shared ChatGPT and Claude quota is left
 // for the user's other device, which has no TTADK (user, 2026-11-07). So no rule here spends quota for its own sake:
@@ -267,10 +269,9 @@ const ttDevice = !!QX.ttadk || !!QX.trae || QX.companyAccounts.length > 0 || !!Q
 const ttHas = (model) => !!TT && TT.models.includes(model) && !modelExcluded(model, TT);
 // Light work may run on TTADK's lightest listed model even when its account-level Sol is absent/excluded.
 const ttadkLightModels = () => TT?.kind === 'ttadk' ? TTADK_LIGHT.filter((id) => ttHas(id)) : [];
-// Browser, frontend-visual and desktop-app work runs on a Codex worker when a Codex account can drive Chrome and the
-// desktop: the company account first (TTADK with browser-setup), else a browser-ready ChatGPT account (2026-11-10: on a
-// device without TTADK, e.g. the MacBook, this used to go to Claude even though its Codex accounts can do it); else Claude.
-const ttBrowser = !!TT && !!TT.browser;
+// Browser/frontend work uses the first capable company path: TTADK's ChatGPT runtime, then TRAE's Playwright Extension
+// bridge. Desktop computer-use intentionally accepts only TTADK's ChatGPT runtime. Personal ChatGPT and Claude follow.
+const ttBrowser = !!TT && browserFits(TT);
 const chatgptBrowser = chatgptOpen.filter((r) => r.a.browser);
 const browserViaCodex = T.kind === 'browser' && (ttBrowser || chatgptBrowser.length > 0);
 // The fallback models the company account can run for this task, best first (ALTS): image-read takes the vision models,
@@ -472,7 +473,7 @@ if (adversarial) {
 }
 // Every task TTADK's GPT-6.1 Sol can handle goes to it first (user, 2026-11-07): Sol at the row's effort (at least
 // medium), one notch higher after a failure, then the row's own ladder. Not TTADK-capable: Claude-only rows, image
-// generation, and browser work while TTADK isn't browser-ready. Codex high-stakes reviews and second opinions keep
+// generation, and browser work while no company browser bridge is ready. Codex high-stakes reviews and second opinions keep
 // Claude first when company Sol is available; when Sol is unavailable, company fallback families go first.
 // research needs web search. Codex doesn't send its hosted web_search tool to the gateway, so TTADK searches only through
 // its local proxy (ttadk-setup sets it up: TT.search); without it research follows the earlier routing.
@@ -547,8 +548,9 @@ if (ttCapable) {
 // account can take now — TTADK and TRAE out, down or excluded — goes to personal quota only after the user's OK; high
 // stakes too (it used to skip the question). One answer covers the outage: after "go on" the orchestrator passes
 // --urgent until a company account is back; after "wait" it holds that work. Standing exceptions (the user's routing,
-// asked 2026-11-09: no question): image generation, Claude-only tools, browser/desktop work Claude takes, reviews whose
-// second opinion is Claude while company Sol is available. Company capacity means an eligible routing model, not
+// asked 2026-11-09: no question): image generation, Claude-only tools, and reviews whose second opinion is Claude while
+// company Sol is available. Browser/ui-browser/computer-use personal ChatGPT and Claude fallbacks require an explicit
+// OK (2026-11-14); re-run the router on account failure rather than choosing by hand. Company capacity means an eligible routing model, not
 // merely a healthy account that still lists an excluded or unsupported family.
 const companyOut = !ttModelsOK && ttDevice && ttTaskOK && T.kind !== 'browser';
 if (companyOut && !opts.urgent && QX.ttadk && !QX.ttadk.usable && !QX.ttadk.quotaOut && !excluded.has(QX.ttadk.name))
@@ -912,6 +914,10 @@ else if (QX.rotate && m?.vendor === 'codex' && QX.rotate.every((r) => !excluded.
   acct = QX.rotate[n % QX.rotate.length];
 }
 const pickAcct = acct;
+if (m && ['browser', 'ui-browser'].includes(cat) && ttadkRun && runCompany?.kind === 'trae') {
+  why.push("TRAE via Playwright extension in the user's Chrome");
+  notes.push("TRAE browser path: use Playwright MCP browser_* tools in the user's Chrome. The allowed-sites list is stated to the worker but not enforced technically on TRAE (no per-site approvals as on TTADK): name the exact sites and the read/write scope in the brief, and keep irreversible actions behind the user's confirmation.");
+}
 // The second opinion's account: the extra underused review on ChatGPT; any other Codex second opinion TTADK-first.
 // The second opinion's account: TTADK first for a Codex second opinion it can run; otherwise the ChatGPT account.
 const advSecondAcct = adversarial && second?.vendor === 'codex' ? advCompany(second.model) : null;
@@ -921,11 +927,11 @@ const secondAcct = !second || second.vendor !== 'codex' ? null
 // Company capacity does not authorize a ladder fall-through or a personal second opinion. Check actual accounts.
 const companyAccount = (a) => [QX.ttadk, QX.trae].some((c) => c && c.name === a?.a?.name);
 const personalException = (x, secondary) => cat === 'image-gen' || T.kind === 'claudeOnly'
-  || (x.vendor === 'claude' && (T.kind === 'browser' || (ttHas(SOL) && (secondary || claudeReviewFirst))));
+  || (x.vendor === 'claude' && ttHas(SOL) && (secondary || claudeReviewFirst));
 const personalPicks = [{ x: m, account: pickAcct, secondary: false }, { x: second, account: secondAcct, secondary: true }]
   .filter(({ x, account, secondary }) => x && (x.vendor === 'claude' || !companyAccount(account))
     && (unknownCompanyState || !personalException(x, secondary)));
-if (!background && !opts.urgent && ttDevice && personalPicks.length) {
+if (!background && !opts.urgent && (ttDevice || T.kind === 'browser') && personalPicks.length) {
   const selected = personalPicks.map(({ x, account, secondary }) => `${secondary ? 'second opinion' : 'primary'} ${label(x)}${x.vendor === 'codex' ? ` on ${account?.a?.name ?? 'main'}` : ''}`).join('; ');
   needsOK.push(`personal quota: actual selected ${selected}.${unknownCompanyState ? ` company account state unknown (${unknownCompanyReason}).` : ''} Ask the user before launching, even if a company account still has eligible models — go on now on personal quota, or wait for a company account. One answer covers the fall-through/outage: "go on" → pass --urgent for this work; "wait" → hold it until then`);
 }
@@ -1057,7 +1063,8 @@ if (ttadkRun && runCompany.kind === 'trae') {
   // The ETA comparison owns the wait decision (addendum, 2026-11-13 night): a reset is either an explicit scheduled
   // dispatch (deferUntil, above) or it lost to a lane that can finish earlier. No separate "launching then is faster"
   // advisory, because it could contradict the chosen estimate.
-  notes.push('brief (TRAE): no ChatGPT browser here — playwright MCP is for public/local pages only; signed-in consoles require a browser-ready worker with console origins and a signed-in browser/account named in the brief; missing login means BLOCKED, never a Playwright sign-in workaround; git commits must carry no co-author or tool trailer');
+  if (['browser', 'ui-browser'].includes(cat)) notes.push('brief (TRAE browser): the Playwright Extension connects to the user\'s already signed-in Chrome; use only the configured origins and never read browser profiles, cookies, storage or the pairing token. If the extension/browser is unreachable, report BLOCKED with the exact Playwright error; never attempt a sign-in workaround. Git commits must carry no co-author or tool trailer');
+  else notes.push('brief (TRAE): the default headless Playwright MCP is for public/local pages only; signed-in consoles require a routed browser task with console origins and an already signed-in browser/account named in the brief. Missing login means BLOCKED, never a Playwright sign-in workaround; git commits must carry no co-author or tool trailer');
   if (!runCompany.live && (T.shape !== 'exec' || backgroundLane)) notes.push(`TRAE hub may be unreachable: probe with node ${SKILL}/scripts/codex-worker.mjs --account ${runCompany.name} list --limit 1; start with codex-worker hub only if unreachable, then tell the global-rules owner`);
 }
 if (ttadkRun && ['build-run', 'review', 'review-high'].includes(cat)) {

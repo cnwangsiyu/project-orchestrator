@@ -115,10 +115,11 @@ that keeps the orchestrators alive.
   - That covers browser and console clicking, judging screenshots, reading source or logs,
     running tests or builds, device runs, and long CLI output.
   - Don't do it "just this once" yourself.
-  - Browser work goes to a `browser` worker (web pages) or a `ui-browser` worker (frontend work with a
-    visual check), both on a Codex worker when a Codex account is browser-ready (TTADK first, else a ChatGPT account), else Claude; desktop apps go to a
-    `computer-use` worker (a browser-ready Codex account, TTADK first; a terminal Claude worker has no desktop
-    computer-use tool). All of them can reach the user's Chrome. If that worker reports it can't reach the browser, fix the pairing; don't take
+  - Browser work goes to a `browser` worker (web pages) or a `ui-browser` worker (frontend work with a visual check):
+    TTADK Codex → TRAE (Playwright extension in the user's Chrome, when the token file exists) → browser-ready ChatGPT
+    account (personal, needs OK) → Claude (personal, needs OK). Desktop `computer-use` needs a browser-capable worker
+    and uses the same order without TRAE: TTADK → browser-ready personal ChatGPT (needs OK) → Claude (needs OK); a
+    terminal Claude worker has no desktop computer-use tool. If that worker reports it can't reach the browser, fix the pairing; don't take
     over the clicking. Coordinate authorization cards rather than doing the worker's action (see "Plan around permissions").
 - **Read reports through `node <this skill>/scripts/report-summary.mjs <task dir>`.** It prints the
   report's `## Summary` (and a Codex worker's final line), capped at 3 KB. Ask the worker for
@@ -478,10 +479,12 @@ effort, Codex account and launch command from
 
   When a task spans categories, split it or pick the row for its hardest part.
 - **The script computes the rest** from its table and the quota state in `scripts/lib/state.mjs`:
-  - Hard locks: Artifact/Docs tools and peer negotiation stay on Claude (`claude-tools`); browser
-    work, frontend visual checks and desktop apps (`browser`, `ui-browser`, `computer-use --apps
-    <bundle ids>`) go to a browser-ready Codex account (TTADK first, else a ChatGPT account; 2026-11-10), else to Claude; every task whose output is an image (generating, editing, variants, icons,
-    illustrations, mockup images) goes to Codex as `image-gen` (user, 2026-11-03).
+  - Capability locks: only Artifact/Docs tools and peer negotiation are Claude-only (`claude-tools`). Browser work and
+    frontend visual checks need a browser-capable worker and route TTADK Codex → TRAE (Playwright extension in the
+    user's Chrome, when the token file exists) → browser-ready ChatGPT (personal, needs OK) → Claude (personal, needs
+    OK). Desktop `computer-use --apps <bundle ids>` also needs a browser-capable worker and uses the same order without
+    TRAE. Separately, every task whose output is an image (generating, editing, variants, icons, illustrations, mockup
+    images) goes to Codex as `image-gen` (user, 2026-11-03).
   - Quota moves: Codex first for anything either vendor can do. Claude takes the work it is clearly
     better at only while it has spare.
   - Company accounts first: TTADK, then TRAE CLI (account `trae`, the company's official Codex-fork
@@ -553,15 +556,17 @@ effort, Codex account and launch command from
     only after asking (user, 2026-11-09). On a company-account device, any actual personal primary or second-opinion
     pick carries `personal quota:` approval, even if company capacity remains. Ask once: "go on" -> `--urgent` for
     that work; "wait" -> hold it. High stakes ask too. Standing exceptions, no question: image generation,
-    Claude-only tools, browser/desktop work Claude takes, and Claude review/second-opinion routing while company Sol
+    Claude-only tools, and Claude review/second-opinion routing while company Sol
     is eligible. `--background` never falls through to personal quota.
   - Because of that daily cap, throwaway code work starts at Sol `high` on the company accounts
     (TTADK, TRAE) instead of `xhigh`; a failure still climbs to `xhigh` and `max` (user, 2026-11-09).
   - Every TTADK worker can search the web through its local proxy, once `ttadk-setup` has set it
     up; briefs say search queries must not carry internal information.
-  - Browser work (`browser`: web pages in the user's Chrome) goes to TTADK Codex when that account
-    is browser-ready, else to a browser-ready ChatGPT Codex account, otherwise to Claude. Desktop apps (`computer-use`) too; Artifact/Docs and peer
-    negotiation stay on Claude (`claude-tools`). Setup for a new machine: `references/codex-workers.md`, "TTADK" and
+  - Browser work (`browser`/`ui-browser`: web pages in the user's Chrome) routes TTADK Codex → TRAE (Playwright
+    extension in the user's Chrome, when the token file exists) → browser-ready ChatGPT (personal, needs OK) → Claude
+    (personal, needs OK). Re-run route.mjs when an account becomes unavailable instead of choosing by hand. Desktop
+    `computer-use` stays without TRAE: TTADK → browser-ready personal ChatGPT (needs OK) → Claude (needs OK).
+    Artifact/Docs and peer negotiation stay on Claude (`claude-tools`). Setup for a new machine: `references/codex-workers.md`, "TTADK" and
     "Browser use on a Codex worker".
   - Effort notches: lower for an automatic check, higher for high stakes, higher while Codex is
     underused or front-loading its reset cards. On TTADK only the high-stakes one applies, and its
