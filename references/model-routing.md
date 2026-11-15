@@ -67,7 +67,7 @@ permission. Astra on personal ChatGPT always needs its own scoped OK, including
 on devices without company accounts. A runnable non-Astra escalation wins and
 identifies Astra as a gated alternative; qualified TRAE Astra stays ungated.
 Account-less explicit actuals keep the account UNKNOWN and retain the supplied
-model/effort floor. Max effort outside TTADK, Fable and reset redemption keep separate
+model/effort floor. Max effort outside company accounts (TTADK and TRAE), Fable and reset redemption keep separate
 authorization. An eligible company primary launches while a gated personal
 second reviewer awaits the user's answer before acceptance.
 
@@ -114,15 +114,23 @@ Vision uses its separate qualified catalog. DeepSeek is unsuitable for full buil
 executable/auth/storage acceptance or a large file in one output. Seed is vision
 only. Public catalog, account and harness capabilities must all support the task.
 
-An opportunistic transfer from a ready TTADK account needs a fresh TRAE reserve
-of at least 15% (or an explicitly free bucket), load below 60%, and family queue
-at most 300. Normal work requires fresh load; light/low/throwaway work may use an
-unknown load. Triggers are low-priority work, TTADK projected to run out before
-reset, or TRAE reset within six hours with a larger remaining share. Browser,
-desktop, device, local build and hard security work do not use this transfer rule.
-Measured per-model progress/drain remains the basis for ETA decisions. TTADK
-reset within four hours and projected use below 70% preserves its expiry priority.
-Unknown or depleted TRAE buckets remain bounded low-priority capacity when needed.
+An observed free TRAE lane takes precedence over TTADK for work that its actual
+model and harness can do, including browser/ui-browser on the ready Playwright
+lane and depleted-bucket low-priority work. The lane must start now, have a fresh
+load below 60% for that candidate model, and show no queue or stall. This preserves
+TTADK daily tokens for later and for capabilities unavailable on TRAE (desktop,
+Kimi and any browser tools absent from its harness). The explanation says
+"TRAE lane free: saving TTADK quota" and names the model whose load it quotes.
+Sibling/account loads do not establish that model's congestion. A queued, stalled
+or congested qualifying lane yields to usable TTADK. Hard floors, actual retry
+floors, capability and authorization gates still apply. A same-model Sol/max
+retry is ungated on both company accounts; prefer that retained effort step over
+switching to missing/stalled telemetry at the same floor.
+
+Fresh reserve/burn observations still explain company capacity. An available
+TTADK lane wins when TRAE cannot demonstrate immediate uncongested capacity. TTADK reset within four hours with projected burn below 70%
+prefers TTADK so its quota does not expire unused. Only truly absent or stale lane
+telemetry is UNKNOWN; it does not prove the lane is free.
 
 Personal windows retain reserve/deadline and effort policy. Reset redemption is
 an independent scoped action followed by refreshed quota and a new plan; a reset
@@ -149,8 +157,8 @@ without exporting tokens, reading credential files or clearing restrictions.
 Current acquisition refreshes individual stale/negative account readings through
 authenticated read-only status commands; it never exports credentials or clears
 restriction generations. No runnable company lane waits for a future quota
-reset. Browser order: TTADK → TRAE Playwright Extension → browser-ready personal
-ChatGPT → Claude in Chrome. Personal quota asks only on devices with company
+reset. Browser and ui-browser prefer observed free TRAE Playwright capacity, then
+usable TTADK → browser-ready personal ChatGPT → Claude in Chrome. Personal quota asks only on devices with company
 accounts. Desktop: TTADK → browser-ready ChatGPT. --signing uses ordinary full-access Codex company workers for registered
 own-test packages and allowlisted identities; the resident Claude signer is retired.
 
@@ -166,3 +174,29 @@ inherited: evidence. scripts/lib/worker-model.mjs records requested, effective
 and actual model provenance (actual-model:); reviewer model guards remain intact.
 The hub supervisor preserves a live hub after a slow probe, and generated launchd
 accounts retain their render-hub-launchd configuration.
+
+Printed commands use `<workspace>` and `<task dir>` unless `--cwd`/`--task-dir`
+provide absolute resolved paths. One-shot exec always includes
+`--skip-git-repo-check`; failed startup prints the stderr tail and records a failed
+worker event. `--network on|off` carries the requested access without widening
+filesystem permissions, including read-only workers. Device/account notes follow
+the resources registered here. Browser workers use the tools their own harness
+lists; Claude-in-Chrome device IDs belong only in Claude briefs. A thread whose
+saved permission denies the target site needs a new thread with
+`--browser-origins`.
+
+Failed or partial account reads retain independent public last-good readings in
+`quota.json.routing-last-good.json`, marked stale with the original sample time.
+Atomic replacement and a nonblocking merge lock preserve that file across partial
+or locked quota-cache writes. TTLs and current health/restriction gates still
+apply; fallback never renews an observation or clears a denial. Claude's declared
+harness catalog remains present when usage is UNKNOWN, so Claude-only work reports
+the account-state blocker. No last-good observation means UNKNOWN.
+
+Launch audits compare the project/name and routed seat (including second reviewer)
+against account/model/effort/sandbox on start and continuation. Mismatches emit one
+warning, a `launch-mismatch` row, and nightly audit evidence. Only a company pick
+replaced by personal quota without a user reference on its routed decision blocks
+launch. References are free text recorded verbatim, not verified consent. Nightly
+review launches the router's executable command/seat and records blocked plans;
+it cannot supply its own personal-quota override.

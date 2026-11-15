@@ -6,6 +6,8 @@ import os from 'node:os';
 import path from 'node:path';
 import childProcess from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
+import {readPause,readPoolPauses,readModelPauses,readHealthStatus,claimProbes} from '../lib/trae-health.mjs';
+import {readHubDiagnostics,writeHubState} from '../lib/hub-state.mjs';
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'company-read-'));
 const profiles = path.join(tmp, 'accounts.json'), cache = path.join(tmp, 'quota.json');
@@ -39,7 +41,7 @@ const stub = (bin, args) => {
     if (bin === traeBin && fault.startsWith('catalog:')) return JSON.stringify({ models: [{ id: fault.slice(8) }] });
   }
   if (args[0] === 'models') return args.includes('--json') ? JSON.stringify({ models: [{ id: SOL }] })
-    : JSON.stringify([{ id: SOL, availableAgents: ['codex'] }]);
+    : JSON.stringify([{ id: fault.startsWith('tt-catalog:')?fault.slice(11):SOL, availableAgents: ['codex'] }]);
   if (args.includes('usage')) {
     if (fault === 'malformed') return 'truncated usage JSON';
     throw Object.assign(Error('fixture usage failure'), { code: fault === 'timeouts' ? 'ETIMEDOUT' : 'EIO' });
@@ -59,6 +61,17 @@ const checkCompany = (p) => {
 fs.existsSync = checkCompany;
 syncBuiltinESMExports();
 try {
+  const healthHome=path.join(tmp,'health-reader');fs.mkdirSync(healthHome);
+  assert.equal(readHealthStatus(healthHome),'UNKNOWN');assert.equal(readPause(healthHome).status,'UNKNOWN');
+  for(const bad of ['null','[]','{"pools":{"gpt":null}}','{"modelPauses":null}']) {
+    fs.writeFileSync(path.join(healthHome,'worker-health.json'),bad);
+    assert.equal(readPause(healthHome).status,'UNKNOWN');assert.deepEqual(readPoolPauses(healthHome),{});assert.deepEqual(readModelPauses(healthHome),{});
+    assert.deepEqual(claimProbes(healthHome),[]);assert.equal(fs.readFileSync(path.join(healthHome,'worker-health.json'),'utf8'),bad);
+  }
+  let diagnostic=readHubDiagnostics(healthHome,['ttadk']);assert.equal(diagnostic.complete,false);assert.match(diagnostic.errors.join(' '),/supervisor state UNKNOWN/);
+  writeHubState(healthHome,'ttadk',{mode:'HEALTHY',failures:0,t:Date.now(),retryAt:null,reason:'HEALTHY'});
+  assert.equal(readHubDiagnostics(healthHome,['ttadk']).complete,true);
+  console.log('ok   null/absent health readers return UNKNOWN; corrupt ledgers are preserved; missing supervisor state is incomplete');
   fs.writeFileSync(profiles, JSON.stringify(registry));
   const { readState, analyze, readProfiles } = await import('../lib/state.mjs');
   fs.renameSync = (src, dst) => {
@@ -142,6 +155,12 @@ try {
   }
   fault = '';
   console.log('ok   live-read catalogs with only a tier model remain healthy; routing owns model eligibility');
+  fault='tt-catalog:deepseek-v4.1-flash';
+  const qualifiedTT=readState({fresh:true});assert.equal(qualifiedTT.codexAccounts.find(a=>a.kind==='ttadk').healthy,true);
+  assert.deepEqual(qualifiedTT.codexAccounts.find(a=>a.kind==='ttadk').models,['deepseek-v4.1-flash']);
+  fault='tt-catalog:unqualified-model';assert.equal(readState({fresh:true}).codexAccounts.find(a=>a.kind==='ttadk').healthy,false);
+  fault='';
+  console.log('ok   TTADK remains healthy without Sol when its catalog contains another usable qualified model');
 
   // Real router and quota entry points, with all provider I/O stubbed before they import state.mjs.
   const preload = path.join(tmp, 'preload.mjs');
@@ -158,6 +177,7 @@ fs.existsSync = ${checkCompany.toString()};
 syncBuiltinESMExports();
 `);
   const route = (args, state = missing, mode = 'unknown-both', registryText = JSON.stringify(registry)) => {
+    fs.rmSync(`${cache}.routing-last-good.json`,{force:true}); // independent fixture, no retained reading
     fs.writeFileSync(profiles, registryText);
     fs.writeFileSync(cache, typeof state === 'string' ? state : JSON.stringify(state));
     const env = { ...process.env, HOME: tmp, COMPANY_READ_FAULT: mode, ROUTE_LOG: '0', ROUTE_RR: path.join(tmp, 'rr'),
@@ -194,6 +214,57 @@ syncBuiltinESMExports();
   const corruptRegistry=route(['analysis'],repairedState,'','{"ttadk":');
   assert.equal(corruptRegistry.blocked,true); assert.ok(!corruptRegistry.pick?.command);
   console.log('ok   router uses public cache, blocks unknown transport/corrupt registry, and requires scoped personal approval');
+
+  const {acquireRoute}=await import('../lib/route-data.mjs');
+  const {parseTaskSpec,routePure}=await import('../lib/pipeline/index.mjs');
+  const safeDir=path.join(tmp,'last-good');fs.mkdirSync(safeDir);
+  const safeCache=path.join(safeDir,'quota.json'),safeRegistry=path.join(safeDir,'accounts.json'),at=Date.now();
+  fs.writeFileSync(safeRegistry,JSON.stringify({ttadk:{kind:'ttadk',home:safeDir,browser:true,models:[SOL]}}));
+  const good={checkedAt:at,claude:[{used:10,windowMins:10080,resetsAt:at+7*86400000}],codexAccounts:[
+    {name:'ttadk',kind:'ttadk',home:safeDir,models:[SOL],healthy:true,live:true,browser:true,windows:[],seenAt:at,
+      usage:{used:20000000,limit:500000000,resetsAt:at+12*3600000}}]};
+  fs.writeFileSync(safeCache,JSON.stringify(good));
+  const safeEnv={RULES_SHARED:safeDir,CODEX_ACCOUNTS:safeRegistry,QUOTA_CACHE:safeCache,ROUTE_LOG_FILE:path.join(safeDir,'routes.jsonl')};
+  const acquire=(args,readAccount=()=>({name:'ttadk',kind:'ttadk',healthy:false,live:false,models:[],statusReadFailed:true}))=>acquireRoute(parseTaskSpec(args,{taskId:'fixture',requestId:'last-good-fixture'}),{env:safeEnv,root:new URL('../../',import.meta.url).pathname,
+    readAccount,
+    readClaude:()=>{throw Error('fixture timed-out usage');}});
+  acquire(['computer-use','--apps','com.apple.calculator']); // remembers the good public reading
+  const statusOnly=()=>({...good.codexAccounts[0],usage:null});
+  const positive=acquire(['analysis','--fresh'],statusOnly);
+  assert.equal(positive.snapshot.accounts.find(a=>a.id==='ttadk').quota[0].usage.sampledAt,at,'auth-only refresh cannot renew retained quota');
+  fs.writeFileSync(safeCache,'{"checkedAt":');fs.mkdirSync(`${safeCache}.lock`);
+  try {
+    const retained=acquire(['computer-use','--apps','com.apple.calculator','--fresh']);
+    const chosen=routePure(retained.task,retained.snapshot);
+    assert.equal(chosen.kind,'launch');assert.equal(chosen.primary.candidate.accountId,'ttadk');
+    assert.equal(retained.snapshot.accounts.find(a=>a.id==='ttadk').auth.source,'last-good-stale');
+    assert.equal(retained.snapshot.accounts.find(a=>a.id==='ttadk').auth.sampledAt,positive.snapshot.accounts.find(a=>a.id==='ttadk').auth.sampledAt);
+    const claude=acquire(['claude-tools','--fresh']);assert.equal(routePure(claude.task,claude.snapshot).kind,'launch');
+    assert.equal(claude.snapshot.accounts.find(a=>a.id==='claude').auth.sampledAt,at);
+    fs.writeFileSync(path.join(safeDir,'quota-limit.json'),JSON.stringify({kind:'daily',resetsAt:at+3600000}));
+    const denied=acquire(['computer-use','--apps','com.apple.calculator','--fresh']);
+    assert.equal(denied.snapshot.accounts.find(a=>a.id==='ttadk').providerDenied.value,true,'fallback cannot hide a newer provider denial');
+    assert.notEqual(routePure(denied.task,denied.snapshot).kind,'launch');fs.rmSync(path.join(safeDir,'quota-limit.json'));
+    assert.equal(fs.readFileSync(safeCache,'utf8'),'{"checkedAt":','routing never rewrites a locked/truncated quota cache');
+  } finally {fs.rmdirSync(`${safeCache}.lock`);}
+  fs.writeFileSync(safeCache,JSON.stringify({...good,claude:null,codexAccounts:[]}));
+  const partial=acquire(['computer-use','--apps','com.apple.calculator']);
+  assert.equal(routePure(partial.task,partial.snapshot).kind,'launch');
+  const backupFile=`${safeCache}.routing-last-good.json`,old=JSON.parse(fs.readFileSync(backupFile));
+  old.codexAccounts[0].seenAt=at-11*60000;old.codexAccounts[0].usageSeenAt=at-11*60000;old.claudeSeenAt=at-11*60000;old.checkedAt=at-11*60000;
+  fs.writeFileSync(backupFile,JSON.stringify(old));
+  const aged=acquire(['claude-tools','--fresh']);assert.equal(aged.snapshot.accounts.find(a=>a.id==='claude').auth.status,'UNKNOWN');
+  assert.equal(routePure(aged.task,aged.snapshot).kind,'blocked','last-good fallback never renews expired authentication');
+  const freshAuth=acquire(['analysis','--fresh'],statusOnly),freshTT=freshAuth.snapshot.accounts.find(a=>a.id==='ttadk');
+  assert.equal(freshTT.auth.status,'KNOWN');assert.equal(freshTT.quota[0].usage.status,'UNKNOWN');
+  fs.rmSync(`${safeCache}.routing-last-good.json`);
+  const unknownClaude=acquire(['claude-tools','--fresh']);
+  assert.equal(unknownClaude.snapshot.accounts.find(a=>a.id==='claude').auth.status,'UNKNOWN');
+  assert.equal(unknownClaude.snapshot.accounts.find(a=>a.id==='ttadk').auth.status,'UNKNOWN');
+  assert.ok(unknownClaude.snapshot.lanes.some(l=>l.accountId==='ttadk'),'declared TTADK harness remains present while its account state is UNKNOWN');
+  const unresolved=routePure(unknownClaude.task,unknownClaude.snapshot);assert.equal(unresolved.kind,'blocked');
+  assert.match(unresolved.reasons[0].text,/on claude:.*authentication/);
+  console.log('ok   BC-38 truncated/locked/partial cache and failed probes retain last-good account readings with original age; absent Claude remains capable UNKNOWN');
 
   fs.writeFileSync(profiles, JSON.stringify(registry));
   fault = 'registry-lock'; fs.mkdirSync(`${profiles}.lock`);

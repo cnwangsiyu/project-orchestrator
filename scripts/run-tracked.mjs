@@ -12,7 +12,7 @@ const tracker = lifecycle({ owner: opts.owner, name: opts.name ?? 'exec', accoun
 if (sep < 0 || !args[sep + 1]) { console.error('run-tracked: expected options -- command [args...]'); process.exit(2); }
 const outStamp = () => { try { const s = fs.statSync(opts.out, { bigint: true }); return `${s.ino}:${s.mtimeNs}:${s.size}`; } catch { return null; } };
 const beforeOut = outStamp();
-let child, logFd, signalled = null, ending = false, watchdog;
+let child, logFd, signalled = null, ending = false, watchdog, drainTimer, stderrTail='', stdoutPending='', accepted=false;
 const signalOwned = (signal) => {
   try { if (process.platform === 'win32') child?.kill(signal); else if (child?.pid) process.kill(-child.pid, signal); } catch {}
 };
@@ -20,6 +20,7 @@ const finish = async (code) => {
   if (ending) return;
   ending = true;
   clearTimeout(watchdog);
+  clearTimeout(drainTimer);
   signalOwned('SIGTERM');
   if (process.platform !== 'win32' && child?.pid) {
     const until = Date.now() + 500;
@@ -41,7 +42,12 @@ const finish = async (code) => {
       }
     }
   } catch {} finally { if (outFd !== undefined) fs.closeSync(outFd); }
-  tracker.result(/^(?:\S+\s+)?(?:BLOCKED|QUESTION)\b/.test(final) ? 'needs-user' : code === 0 ? 'finished' : 'failed',
+  const launchFailed=!accepted&&(code!==0||!!opts.out&&!final);
+  if(launchFailed) {
+    code=code||1;
+    console.error(`run-tracked: launch failed before producing a thread/turn (exit ${code})${stderrTail.trim()?`\n${stderrTail.trim()}`:''}`);
+  }
+  tracker.result(launchFailed?'failed':/^(?:\S+\s+)?(?:BLOCKED|QUESTION)\b/.test(final) ? 'needs-user' : code === 0 ? 'finished' : 'failed',
     { finalLine: final.split('\n').find((line) => line.trim()) ?? '' });
   if (signalled) tracker.result('follower-ended', { signal: signalled, mayRun: false });
   process.exit(code);
@@ -50,7 +56,16 @@ try {
   if (opts.log) { fs.mkdirSync(path.dirname(path.resolve(opts.log)), { recursive: true }); logFd = fs.openSync(opts.log, 'w', 0o600); }
   // A private process group is cleanup ownership, not a daemon: no unref, and the wrapper stays attached.
   child = spawn(args[sep + 1], args.slice(sep + 2), { cwd: opts.cwd, detached: process.platform !== 'win32',
-    stdio: ['ignore', logFd ?? 'inherit', logFd ?? 'inherit'] });
+    stdio: ['ignore', 'pipe', 'pipe'] });
+  child.stdout.on('data',chunk=>{
+    if(logFd!==undefined) fs.writeSync(logFd,chunk); else process.stdout.write(chunk);
+    stdoutPending=(stdoutPending+chunk.toString()).slice(-65536);
+    const lines=stdoutPending.split('\n');stdoutPending=lines.pop();
+    for(const line of lines) { if(/^thread=\S+ turn=\S+/.test(line)) accepted=true;
+      try { const r=JSON.parse(line);if((r.thread_id||r.threadId||r.turn_id||r.turnId)&&/thread|turn/.test(r.type??r.method??'')) accepted=true; } catch {} }
+  });
+  child.stderr.on('data',chunk=>{stderrTail=(stderrTail+chunk.toString()).slice(-4096);if(logFd!==undefined)fs.writeSync(logFd,chunk);else process.stderr.write(chunk);});
+  child.once('exit',(code,signal)=>{signalOwned('SIGTERM');drainTimer=setTimeout(()=>finish(code??signalExit(signal)),1000);});
   for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, () => {
     signalled = signal;
     signalOwned(signal);

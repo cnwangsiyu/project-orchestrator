@@ -39,6 +39,50 @@ const delegated = (model, params = {}) => ({ method: 'item/completed', params: {
   item: { type: 'collabAgentToolCall', senderThreadId: 'guard-thread', receiverThreadIds: ['child-thread'],
     model, reasoningEffort: 'high' }, ...params } });
 try {
+  check('BC-35 one-shot startup failure surfaces stderr and records a failed worker',()=>{
+    const f=fixture('one-shot-failure','chatgpt'),out=path.join(f.dir,'start.out'),log=path.join(f.dir,'start.log');
+    const r=spawnSync('/bin/sh',[path.join(scripts,'run-tracked.sh'),'--name','one-shot-failure','--owner','guard-owner','--account','fixture',
+      '--model','gpt-6.1-sol','--log',log,'--out',out,'--',process.execPath,'-e',
+      'console.error("Not inside a trusted directory and --skip-git-repo-check was not specified");process.exit(9)'],{env:f.env,encoding:'utf8',timeout:5000});
+    assert.equal(r.status,9);assert.match(r.stderr,/launch failed before producing a thread\/turn/);assert.match(r.stderr,/Not inside a trusted directory/);
+    assert.equal(rows(path.join(f.dir,'worker-events.jsonl')).at(-1).event,'failed');assert.match(fs.readFileSync(log,'utf8'),/skip-git-repo-check/);
+    assert.ok(!fs.existsSync(out));
+  });
+  check('read-only network access stays read-only in the actual start request',()=>{
+    const r=run(fixture('readonly-network'),'start',{},['--network','on']);assert.equal(r.status,0,r.stderr);
+    assert.equal(r.calls.find(c=>c.method==='thread/start').params.sandbox,'read-only');
+    assert.deepEqual(r.calls.find(c=>c.method==='turn/start').params.sandboxPolicy,{type:'readOnly',networkAccess:true});
+  });
+  check('launch mismatch warns for model, effort and wider sandbox without holding company work',()=>{
+    const f=fixture('launch-warning');
+    fs.writeFileSync(f.log,JSON.stringify({t:Date.now()-1000,kind:'route',name:'launch-warning',project:'guards',category:'analysis',
+      pick:{vendor:'codex',account:'fixture',company:true,model:'gpt-6.1-sol',effort:'medium',sandbox:'read-only'}})+'\n');
+    const r=run(f,'start',{},['--name','launch-warning','--project','guards','--model','deepseek-v4.1-flash','--sandbox','danger-full-access']);
+    assert.equal(r.status,0,r.stderr);assert.equal(r.stderr.split('\n').filter(x=>x.startsWith('launch-mismatch:')).length,1);
+    const mismatch=r.records.find(x=>x.kind==='launch-mismatch');assert.ok(mismatch.modelFamilyChanged);assert.ok(mismatch.widerSandbox);
+    assert.deepEqual(mismatch.differences.map(x=>x.field),['model','effort','sandbox']);
+  });
+  check('company route on a personal start blocks until the route records a free-text approval',()=>{
+    const f=fixture('personal-replacement','chatgpt'),record={t:Date.now()-1000,kind:'route',name:'personal-replacement',project:'guards',category:'analysis',
+      pick:{vendor:'codex',account:'trae',company:true,model:'gpt-6.1-sol',effort:'high',sandbox:'read-only'}};
+    fs.writeFileSync(f.log,JSON.stringify(record)+'\n');
+    let r=run(f,'start',{},['--name','personal-replacement','--project','guards','--user-ok','not-on-route']);
+    assert.equal(r.status,1,r.stderr);assert.ok(!r.calls.some(c=>c.method==='turn/start'));assert.match(r.stderr,/re-route or pass the approval recorded/);
+    assert.equal(r.events.at(-1).event,'failed');
+    const ref="Owner recorded yes for alt; user's review on 2026-11-15";
+    fs.appendFileSync(f.log,JSON.stringify({...record,t:Date.now()-10,approvalRef:ref})+'\n');
+    r=run(f,'start',{},['--name','personal-replacement','--project','guards']);assert.equal(r.status,0,r.stderr);
+    assert.equal(r.records.findLast(x=>x.kind==='launch').userOK,ref);
+  });
+  check('continuation cross-check blocks a personal turn on a saved company seat',()=>{
+    const f=fixture('turn-mismatch'),name='turn-mismatch';
+    fs.writeFileSync(f.log,JSON.stringify({t:Date.now()-1000,kind:'route',name,project:'guards',category:'analysis',
+      pick:{vendor:'codex',account:'fixture',company:true,model:'gpt-6.1-sol',effort:'high',sandbox:'read-only'}})+'\n');
+    let r=run(f,'start',{},['--name',name,'--project','guards']);assert.equal(r.status,0,r.stderr);
+    const profiles=JSON.parse(fs.readFileSync(f.env.CODEX_ACCOUNTS,'utf8'));profiles.fixture.kind='chatgpt';fs.writeFileSync(f.env.CODEX_ACCOUNTS,JSON.stringify(profiles));
+    r=run(f,'turn');assert.equal(r.status,1,r.stderr);assert.ok(!r.calls.slice(-2).some(c=>c.method==='turn/start'));
+    assert.ok(r.records.some(x=>x.kind==='launch-mismatch'&&x.blocked));
+  });
   for (const [cmd, hang] of [['start', 'websocket/open'], ['start', 'initialize'], ['start', 'thread/start'],
     ['turn', 'thread/resume'], ['start', 'turn/start'], ['turn', 'turn/start'], ['wait', 'thread/resume']]) {
     check(`${cmd} deadline covers ${hang}`, () => {

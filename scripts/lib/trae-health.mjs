@@ -55,16 +55,24 @@ export const failureKind = (why) => {
   return AUTH.test(w) ? 'auth' : HARD.test(w) || RESTRICTED.test(w) ? 'hard' : UNAVAILABLE.test(w) ? 'unavailable' : 'transient';
 };
 const file = (home) => path.join(home, 'worker-health.json');
-const read = (home) => { try { return JSON.parse(fs.readFileSync(file(home), 'utf8')); } catch { return { failures: [] }; } };
+const object=r=>r!==null&&typeof r==='object'&&!Array.isArray(r);
+const unknown=missing=>({status:'UNKNOWN',missing,failures:[],pools:{},modelPauses:{},reason:'worker health record UNKNOWN'});
+const read = (home) => { try {
+  const r=JSON.parse(fs.readFileSync(file(home),'utf8'));
+  if(!object(r)||(r.failures!==undefined&&(!Array.isArray(r.failures)||r.failures.some(f=>!object(f))))
+    ||['pools','modelPauses'].some(k=>r[k]!==undefined&&(!object(r[k])||Object.values(r[k]).some(p=>!object(p))))) return unknown(false);
+  return r;
+} catch(e) {return unknown(e.code==='ENOENT');} };
+export const readHealthStatus = home => read(home).status==='UNKNOWN'?'UNKNOWN':'KNOWN';
 const write = (home, rec) => writeJson(file(home), rec);
 const update = (home, fn, fallback = null) => {
-  try { return withLock(file(home), () => fn(read(home))); } catch { return fallback; }
+  try { return withLock(file(home), () => {const r=read(home);return r.status==='UNKNOWN'&&!r.missing?fallback:fn(r.status==='UNKNOWN'?{failures:[]}:r);}); } catch { return fallback; }
 };
 
 // Pure: the pause these failures call for at time now, or null. streak = pauses already in a row without a success.
 // A model-unavailable failure never pauses the account or a family (noteFailure pauses the model itself instead).
 export const pauseDecision = (failures, now = Date.now(), streak = 0) => {
-  const recent = (failures ?? []).filter((f) => now - f.t <= WINDOW_MIN * 60000 && failureKind(f.why) !== 'unavailable');
+  const recent = (Array.isArray(failures)?failures:[]).filter((f) => object(f)&&Number.isFinite(f.t)&&now - f.t <= WINDOW_MIN * 60000 && failureKind(f.why) !== 'unavailable');
   if (!recent.length) return null;
   const last = recent.reduce((a, f) => (f.t > a.t ? f : a));
   const serious = recent.filter((f) => failureKind(f.why) !== 'transient').reduce((a, f) => (!a || f.t > a.t ? f : a), null);
@@ -155,7 +163,7 @@ export const noteSuccess = (home, model = null) => update(home, (rec) => {
     pools: {}, modelPauses: {},
     ...(Object.keys(pools).length ? { pools } : {}), ...(Object.keys(pauses).length ? { modelPauses: pauses } : {}) });
 });
-export const readPause = (home, now = Date.now()) => { const r = read(home); return r.pausedUntil && r.pausedUntil > now ? r : null; };
+export const readPause = (home, now = Date.now()) => { const r = read(home); return r.status==='UNKNOWN'?r:r.pausedUntil && r.pausedUntil > now ? r : null; };
 // The models TRAE no longer resolves, still out of routing now: {<model id>: record}.
 export const readModelPauses = (home, now = Date.now()) =>
   Object.fromEntries(Object.entries(read(home).modelPauses ?? {}).filter(([, r]) => r?.pausedUntil && r.pausedUntil > now));

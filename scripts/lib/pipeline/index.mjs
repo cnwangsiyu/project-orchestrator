@@ -149,7 +149,7 @@ export function routePure(taskSpec, stateSnapshot, history = []) {
   // Keep full predicate diagnostics in rejected/trace. Explain one obstruction
   // on the closest qualified candidate, instead of unrelated rejected models.
   const failuresOf=r=>r.predicates.filter(p=>!p.ok);
-  const qualified=assessment.rows.filter(r=>r.predicates.filter(p=>['pUserRules','pExclusions','pTierFloor','pModelFit','pContent'].includes(p.ruleId)).every(p=>p.ok));
+  const qualified=assessment.rows.filter(r=>r.predicates.filter(p=>['pUserRules','pExclusions','pTierFloor','pModelFit','pContent','pCapabilities'].includes(p.ruleId)).every(p=>p.ok));
   const pool=qualified.length?qualified:assessment.rows;
   const fewest=Math.min(...pool.map(r=>failuresOf(r).length));
   const closest=orderCandidates(task,snapshot,pool.filter(r=>failuresOf(r).length===fewest)).winner;

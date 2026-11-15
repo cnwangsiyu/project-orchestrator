@@ -6,6 +6,7 @@ import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { readPause, readPoolPauses, readModelPauses, liftAuthPause, poolOf, claimProbes } from './trae-health.mjs';
+import { modelPreference } from './pipeline/policy.mjs';
 import { BALANCE, readTraeModels, freshLoad, readQueueState, companySnapshot, readQuotaHistory, ttadkBurn, freshTraeQuota, ttadkExpiringUnused, TTADK_EXPIRY_HINT } from './company-load.mjs';
 import { withLock, writeJson as atomicJson } from './shared-file.mjs';
 export { withLock } from './shared-file.mjs';
@@ -305,19 +306,23 @@ const readTtadk = (name, prof, { routing = false } = {}) => {
   if (!bin) { out.reason = 'ttadk CLI not found (npm install -g @byted/ttadk@latest --registry=https://bnpm.byted.org, then codex-worker ttadk-setup)'; return out; }
   try {
     const st = JSON.parse(execFileSync(bin, ['auth', 'status', '-f', 'json'], { encoding: 'utf8', timeout: 30000, stdio: ['ignore', 'pipe', 'ignore'] }));
+    if(!Array.isArray(st?.providers)||st.providers.some(p=>!p||typeof p.provider!=='string')) throw Error('incomplete TTADK auth status');
     const sso = (st.providers ?? []).find((x) => x.provider === 'sso');
     out.email = st.account ?? out.email;
     out.ssoExpiresAt = sso?.expiresAt ? Date.parse(sso.expiresAt) : null;
     if (sso?.status !== 'active' || (out.ssoExpiresAt && out.ssoExpiresAt <= now)) { out.reason = 'TTADK SSO not logged in or expired (the user runs `! ttadk auth login sso`)'; return out; }
-  } catch (e) { out.reason = `ttadk auth status failed: ${String(e.message).split('\n')[0]}`; return out; }
+  } catch (e) { out.statusReadFailed=true; out.reason = `ttadk auth status failed: ${String(e.message).split('\n')[0]}`; return out; }
   // The dashboard's own number, read best-effort; a failure is recorded and changes nothing else.
   try { if (!routing) { const q = readTtadkUsage(bin); out.usage = q.usage; out.usageError = q.usageError; } } catch { out.usageError = 'quota read failed'; }
   try {
     const mj = JSON.parse(execFileSync(bin, ['models', '-f', 'json'], { encoding: 'utf8', timeout: 60000, stdio: ['ignore', 'pipe', 'ignore'] }));
-    const ms = Array.isArray(mj) ? mj : mj.models ?? []; // {tool, count, models: [...]}
+    const ms = Array.isArray(mj) ? mj : mj?.models;
+    if(!Array.isArray(ms)||ms.some(m=>!m||typeof m.id!=='string')) throw Error('incomplete TTADK catalog');
     out.models = ms.filter((m) => (m.availableAgents ?? []).includes('codex') && m.realtimeHealth?.tier !== 'unhealthy').map((m) => m.id);
-  } catch {}
-  if (!out.models.includes('gpt-6.1-sol')) { out.reason = 'the TTADK gateway lists no healthy gpt-6.1-sol for codex'; return out; }
+  } catch { out.statusReadFailed=true; }
+  const qualified=new Set(['light','normal','hard'].flatMap(tier=>modelPreference({category:'analysis',tier,contentLabels:[]},{kind:'ttadk'}))
+    .concat(modelPreference({category:'image-read',tier:'normal',contentLabels:[]},{kind:'ttadk'}),['kimi-k3']));
+  if (!out.models.some(id=>qualified.has(String(id).toLowerCase()))) { out.reason = 'the TTADK gateway lists no usable qualified Codex model'; return out; }
   out.healthy = true;
   // Token quota used up (the proxy records it; see ttadk-search-proxy.mjs): unusable until the reset, for every model.
   try {
@@ -335,7 +340,7 @@ const readTtadk = (name, prof, { routing = false } = {}) => {
     const list = execFileSync(process.execPath, [WORKER, '--account', name, 'list', '--limit', routing ? '3' : '60'], { encoding: 'utf8', timeout: 30000, stdio: ['ignore', 'pipe', 'pipe'] });
     out.live = true;
     out.active = list.split('\n').filter((l) => l.split('\t')[2] === 'active').length;
-  } catch { if (!routing) out.live = false; }
+  } catch { if (!routing) out.live = false; if(routing&&!out.live) out.statusReadFailed=true; }
   const broken = out.live ? hubBroken(name, prof) : null;
   if (broken) { out.healthy = false; out.hubBroken = broken; out.reason = `its hub answers but can't start threads (${broken.why}); restart it ${broken.fix}`; }
   if (out.search) {
@@ -382,7 +387,7 @@ const readTrae = (name, prof, { routing = false } = {}) => {
   const bin = prof.bin && fs.existsSync(prof.bin) ? prof.bin : null;
   if (!bin) { out.reason = 'TRAE CLI not found (install it, then codex-worker trae-setup)'; return out; }
   let status = '';
-  try { status = execFileSync('/bin/sh', ['-c', '"$0" login status 2>&1', bin], { encoding: 'utf8', timeout: 30000 }); } catch (e) { status = String(e.stdout ?? ''); } // it prints to stderr
+  try { status = execFileSync('/bin/sh', ['-c', '"$0" login status 2>&1', bin], { encoding: 'utf8', timeout: 30000 }); } catch (e) { status = String(e.stdout ?? ''); if(!/logged in/i.test(status)||/not logged in/i.test(status)) out.statusReadFailed=true; } // it prints to stderr
   if (!/logged in/i.test(status) || /not logged in/i.test(status)) { out.reason = 'TRAE CLI not logged in (run `traecli login --git-code`, or the user runs `! traecli login --sso`)'; return out; }
   if (!routing) liftAuthPause(prof.home); // routing observations cannot clear restrictions
   // Its own daily buckets and weekly pool, read best-effort; a failure is recorded and changes nothing else.
@@ -409,7 +414,9 @@ const readTrae = (name, prof, { routing = false } = {}) => {
   out.healthy = true;
   // Paused after repeated or hard worker failures (lib/trae-health.mjs): unavailable until the pause ends.
   const pause = readPause(prof.home);
-  if (pause) { out.healthy = false; out.paused = pause; out.reason = `paused until ${fmt(pause.pausedUntil)} after worker failures (${pause.reason})`; }
+  out.healthState=pause?.status==='UNKNOWN'?'UNKNOWN':'KNOWN';
+  if (pause?.status==='UNKNOWN'&&!pause.missing) {out.healthy=false;out.reason=pause.reason;}
+  else if (pause&&pause.status!=='UNKNOWN') { out.healthy = false; out.paused = pause; out.reason = `paused until ${fmt(pause.pausedUntil)} after worker failures (${pause.reason})`; }
   try {
     if (routing && out.live) {
       const broken=hubBroken(name,prof);
@@ -819,7 +826,9 @@ export const analyze = (data) => {
   // A model TRAE no longer resolves is out of .models on its own, its family-mates untouched (lib/trae-health.mjs).
   const modelPauses = tr?.home ? readModelPauses(tr.home) : {};
   const acctPause = tr?.home ? readPause(tr.home) : null;
-  const trae = tr ? { name: tr.name, kind: 'trae', home: tr.home, healthy: !!tr.healthy && !acctPause, reason: acctPause ? `paused until ${new Date(acctPause.pausedUntil).toLocaleTimeString()} after worker failures (${acctPause.reason})` : tr.reason,
+  const blockedHealth=acctPause&&(acctPause.status!=='UNKNOWN'||!acctPause.missing);
+  const trae = tr ? { name: tr.name, kind: 'trae', home: tr.home, healthy: !!tr.healthy && !blockedHealth,
+    healthState:acctPause?.status==='UNKNOWN'?'UNKNOWN':'KNOWN',reason:blockedHealth ? acctPause.status==='UNKNOWN'?acctPause.reason:`paused until ${new Date(acctPause.pausedUntil).toLocaleTimeString()} after worker failures (${acctPause.reason})` : tr.reason,
     live: !!tr.live, active: tr.active ?? 0, allModels: tr.models ?? [],
     models: (tr.models ?? []).filter((m) => !poolPauses[poolOf(m)] && !modelPauses[String(m).toLowerCase()]), poolPauses, modelPauses,
     quota: freshTraeQuota(tr.quota), quotaError: tr.quotaError ?? null,

@@ -14,6 +14,7 @@ const day = '2026-11-14';
 const homes = [];
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 const json = (f) => JSON.parse(fs.readFileSync(f, 'utf8'));
+const shellQuote=s=>"'"+String(s).replaceAll("'","'\\''")+"'";
 
 const shim = `#!${process.execPath}
 import fs from 'node:fs';
@@ -21,19 +22,27 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 const args = process.argv.slice(2), home = process.env.HOME, scenario = process.env.FIXTURE_SCENARIO;
 const value = (key) => args[args.indexOf(key) + 1];
+const q = ${shellQuote.toString()};
 const count = (name) => { const f = path.join(home, name); let n = 0; try { n = Number(fs.readFileSync(f)); } catch {} fs.writeFileSync(f, String(++n)); return n; };
 fs.appendFileSync(path.join(home, 'calls.jsonl'), JSON.stringify(args) + '\\n');
 if (args[0]?.endsWith('/nightly-review.mjs')) {
   const r = spawnSync(${JSON.stringify(process.execPath)}, args, { stdio: 'inherit' }); process.exit(r.status ?? 1);
 }
 if (args[0]?.endsWith('/route.mjs')) {
-  if (args[1] === 'claude-tools') console.log(JSON.stringify({ pick: { vendor: 'claude', model: 'sonnet', effort: 'medium' } }));
-  else if (scenario === 'deferred') console.log(JSON.stringify({ deferred: 'company accounts unavailable' }));
-  else {
-    const account = scenario === 'personal' ? 'personal' : scenario.startsWith('ttadk') ? 'ttadk' : 'trae';
-    console.log(JSON.stringify({ pick: { vendor: 'codex', model: args.includes('--exclude-model') ? 'second-model' : 'first-model', effort: 'high', account },
-      needsUserOK: scenario === 'gate' ? ['approval required'] : [] }));
-  }
+  if (args[1] !== 'claude-tools' && scenario === 'deferred') {console.log(JSON.stringify({kind:'defer',deferred:'company accounts unavailable'}));process.exit(0);}
+  const vendor=args[1]==='claude-tools'||process.env.NIGHTLY_MODE==='claude'?'claude':'codex';
+  const account=vendor==='claude'?'claude':['personal','standing-personal'].includes(scenario)?'personal':scenario.startsWith('ttadk')?'ttadk':'trae';
+  const model=vendor==='claude'?(args[1]==='claude-tools'?'sonnet':'opus'):args.includes('--exclude-model')?'second-model':scenario==='seat-shape'?'routed-model':'first-model';
+  const effort=vendor==='claude'?'medium':scenario==='seat-shape'?'medium':'high';
+  const sandbox=process.env.NIGHTLY_MODE==='dry'?'read-only':scenario==='seat-shape'?'workspace-write':'danger-full-access';
+  const taskDir=value('--task-dir'), name=value('--name');
+  const workerArgs=['--account',account,'start','--cwd',value('--cwd'),'--sandbox',sandbox,'--effort',effort,'--model',model,'--name',name,
+    '--fixture-routed','true','--log',path.join(taskDir,'codex.jsonl'),'--out',path.join(taskDir,'codex-last.md'),
+    ...(args.includes('--user-ok')?['--user-ok',value('--user-ok')]:[]),'Read '+path.join(taskDir,'brief.md')+' and follow it.'];
+  const launch=vendor==='claude'?['claude','--bg','--remote-control','--permission-mode','bypassPermissions','-n',name,'--model',model,'--effort',effort,
+    '--fixture-routed','--fixture-brief',path.join(taskDir,'brief.md'),'Read the fixture brief.']:['node',${JSON.stringify(path.join(root,'scripts/codex-worker.mjs'))},...workerArgs];
+  const needsUserOK=args[1]!=='claude-tools'&&(scenario==='gate'||(scenario==='personal'||process.env.NIGHTLY_MODE==='claude')&&!args.includes('--user-ok'))?['approval required']:[];
+  console.log(JSON.stringify({kind:needsUserOK.length||scenario==='kind-blocked'?'blocked':'launch',pick:{vendor,model,effort,account,sandbox,workerArgs,command:launch.map(q).join(' ')},needsUserOK}));
   process.exit(0);
 }
 if (!args[0]?.endsWith('/codex-worker.mjs')) { console.log('{}'); process.exit(0); }
@@ -90,7 +99,7 @@ if (args[0] === 'agents') {
   console.log(JSON.stringify(sessions())); process.exit(0);
 }
 if (scenario === 'notify-fail') process.exit(7);
-const prompt = args.at(-1), match = /ack --file '([^']+)'/.exec(prompt);
+const prompt = args.includes('--fixture-brief')?fs.readFileSync(args[args.indexOf('--fixture-brief')+1],'utf8'):args.at(-1), match = /ack --file '([^']+)'/.exec(prompt);
 if (!match) process.exit(9);
 const name = args[args.indexOf('-n') + 1];
 const session = { id: 'fixture-' + name, sessionId: 'session-' + name, name, state: 'completed' };
@@ -130,7 +139,7 @@ function fixture(scenario, fixtureDay = day) {
   const shared = path.join(home, '.claude/orchestrator/_shared'); fs.mkdirSync(shared, { recursive: true });
   fs.writeFileSync(path.join(shared, 'codex-accounts.json'), JSON.stringify({ trae: { kind: 'trae' }, ttadk: { kind: 'ttadk' }, personal: { kind: 'chatgpt' } }));
   const dir = path.join(shared, 'routing-review'), run = path.join(dir, `${fixtureDay}.run`);
-  const env = { ...process.env, HOME: home, NIGHTLY_DIR: dir, NIGHTLY_DAY: fixtureDay, NIGHTLY_MODE: 'auto', NIGHTLY_PERSONAL_OK: '0',
+  const env = { ...process.env, HOME: home, NIGHTLY_DIR: dir, NIGHTLY_DAY: fixtureDay, NIGHTLY_MODE: 'auto', NIGHTLY_PERSONAL_OK: '0', NIGHTLY_USER_OK:'',
     NIGHTLY_EXCLUDE: '', NIGHTLY_EXCLUDE_MODEL: '', NIGHTLY_DEADLINE: '23:59', NIGHTLY_POLL_MS: '100',
     NIGHTLY_PROBE_MS: '2000', NIGHTLY_RESULT_RETRIES: '2', NIGHTLY_LIVENESS_RETRIES: '3', NIGHTLY_RERUN: '0',
     FIXTURE_SCENARIO: scenario, FIXTURE_LIVE_PID: String(process.pid) };
@@ -170,8 +179,9 @@ try {
   assert.equal(fs.readFileSync(path.join(long.home, 'claude.jsonl'), 'utf8').trim().split('\n').map(JSON.parse).filter((a) => a.includes('--bg')).length, 2);
   const promptArgs = long.calls().find((a) => a[0]?.endsWith('/codex-worker.mjs') && a[3] === 'start');
   assert.ok(promptArgs.includes('--sandbox') && promptArgs.includes('danger-full-access'));
-  assert.match(promptArgs.join(' '), /report draft AND notify.json BEFORE optional deep dives/);
-  assert.match(promptArgs.join(' '), /Commit\/push fixes only AFTER/);
+  const routedBrief=fs.readFileSync(path.join(long.run,'attempt-1','brief.md'),'utf8');
+  assert.match(routedBrief, /report draft AND notify.json BEFORE optional deep dives/);
+  assert.match(routedBrief, /Commit\/push fixes only AFTER/);
   assert.match(fs.readFileSync(path.join(long.dir, 'launch.log'), 'utf8'), /final: finish\/done/);
   console.log('PASS long-running hub worker survives deadline, sends status and delivers late report/notification');
 
@@ -247,7 +257,7 @@ try {
   assert.ok(!fs.existsSync(path.join(aliveFinisher.home, 'session-killed')), 'working finisher survives beyond the RPC/result budgets');
   assert.ok(fs.readFileSync(path.join(aliveFinisher.home, 'claude.jsonl'), 'utf8').includes('["agents","--json"]'));
   const deadClaude = fixture('dead-claude');
-  assert.equal(deadClaude.execute({ NIGHTLY_MODE: 'claude', NIGHTLY_PERSONAL_OK: '1' }).status, 1);
+  assert.equal(deadClaude.execute({ NIGHTLY_MODE: 'claude', NIGHTLY_USER_OK: 'fixture:approved' }).status, 1);
   assert.equal(deadClaude.status().worker.state, 'failed');
   assert.equal(json(path.join(deadClaude.run, 'attempt-1/failure-status.json')).delivery, 'sent');
   const noNotice = fixture('dead-status-sender');
@@ -258,11 +268,11 @@ try {
 
   const afterDeadline = fixture('personal');
   assert.equal(afterDeadline.execute({ NIGHTLY_DEADLINE: '00:00' }).status, 1);
-  assert.equal(afterDeadline.execute({ NIGHTLY_PERSONAL_OK: '1', NIGHTLY_DEADLINE: '00:00' }).status, 0);
+  assert.equal(afterDeadline.execute({ NIGHTLY_USER_OK: 'fixture:approved', NIGHTLY_DEADLINE: '00:00' }).status, 0);
   assert.ok(!fs.existsSync(path.join(afterDeadline.run, 'deadline-status.json')), 'post-deadline recovery must not poison the deadline dedup');
   const afterCalls = fs.readFileSync(path.join(afterDeadline.home, 'claude.jsonl'), 'utf8').trim().split('\n').map(JSON.parse).filter((a) => a.includes('--bg'));
   assert.ok(afterCalls.every((a) => !a[a.indexOf('-n') + 1].includes('-status-')));
-  assert.equal(afterDeadline.execute({ NIGHTLY_PERSONAL_OK: '1', NIGHTLY_DEADLINE: '00:00' }).status, 0);
+  assert.equal(afterDeadline.execute({ NIGHTLY_USER_OK: 'fixture:approved', NIGHTLY_DEADLINE: '00:00' }).status, 0);
   assert.equal(afterDeadline.count('start-count'), 1);
   console.log('PASS successful same-day runs are idempotent and post-05:00 approval recovery sends no stale deadline status');
 
@@ -322,8 +332,17 @@ try {
   console.log('PASS TTADK rate limits retry once; account-wide quota failure uses account exclusion');
 
   const blocked = fixture('personal'); assert.equal(blocked.execute().status, 1);
+  const gatedOverride=fixture('gate');assert.equal(gatedOverride.execute({NIGHTLY_PERSONAL_OK:'1',NIGHTLY_USER_OK:'fixture:yes'}).status,1);
+  assert.equal(gatedOverride.count('start-count'),0,'neither legacy boolean nor reference overrides a blocked route');
+  const kindBlocked=fixture('kind-blocked');assert.equal(kindBlocked.execute().status,1);assert.equal(kindBlocked.count('start-count'),0);
+  const routed=fixture('seat-shape');assert.equal(routed.execute().status,0);
+  const start=routed.calls().find(a=>a[0]?.endsWith('/codex-worker.mjs')&&a[3]==='start');
+  assert.ok(start.includes('--fixture-routed'));assert.equal(start[start.indexOf('--sandbox')+1],'workspace-write');
+  assert.equal(start[start.indexOf('--model')+1],'routed-model');assert.equal(start[start.indexOf('--effort')+1],'medium');
+  const standing=fixture('standing-personal');assert.equal(standing.execute().status,0);assert.equal(standing.count('start-count'),1);
+  console.log('PASS nightly consumes the exact router command and tuple; blocked plans cannot be overridden; standing personal routes launch');
   assert.equal(blocked.execute({ NIGHTLY_DEADLINE: '00:00' }, ['--deadline-check']).status, 0);
-  assert.match(json(path.join(blocked.run, 'deadline-status.json')).message, /个人额度.*用户 OK/);
+  assert.match(json(path.join(blocked.run, 'deadline-status.json')).message, /路由未批准启动.*approval required/);
   const absent = fixture('absent'); assert.equal(absent.execute({ NIGHTLY_DEADLINE: '00:00' }, ['--deadline-check']).status, 0);
   assert.match(json(path.join(absent.run, 'deadline-status.json')).message, /未找到当日启动记录/);
   const future = new Date(); future.setDate(future.getDate() + 1);

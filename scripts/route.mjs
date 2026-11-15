@@ -35,7 +35,7 @@ try {
     });
     const out = renderPlan(plan, {...context, owner, digest: loadDigest()});
     if (!task.flags.dry && process.env.ROUTE_LOG !== '0') {
-      const tuple = p => p ? {vendor:p.vendor,model:p.model,effort:p.effort,account:p.account,sandbox:p.sandbox} : null;
+      const tuple = p => p ? {vendor:p.vendor,model:p.model,effort:p.effort,account:p.account,sandbox:p.sandbox,company:p.company} : null;
       const rec = {t:context.now,kind:'route',project:plan.task.project,name:plan.task.flags.name??plan.task.taskId,requestId:plan.task.requestId,
         routeId:plan.routeId,planHash:plan.planHash,category:out.category,stakes:out.stakes,failures:out.failures,impact:plan.task.impact,
         review:plan.followups[0]?.category??null,security:out.security,adversarial:out.adversarial,defensive:out.defensive,signing:out.signing,

@@ -187,8 +187,10 @@ test('V17 approval role/time/revocation/effort scope, separate max action', () =
     const copy = clone(raw); change(copy.approvals[0]); noCommand(run(t, copy));
   }
   const s = createSnapshot(fixture()), max = candidate(s, 'company-b', SOL, 'max');
-  assert.equal(pScopedApproval(task(), s, max).reason.code, 'MAX_EFFORT_OK_REQUIRED');
+  assert.equal(pScopedApproval(task(), s, max).ok, true);
   assert.equal(pScopedApproval(task(), s, candidate(s, 'company-a', SOL, 'max')).ok, true);
+  const personal=createSnapshot(fixture([['p','chatgpt',[SOL]]]));
+  assert.equal(pScopedApproval(task(),personal,candidate(personal,'p',SOL,'max')).reason.code,'MAX_EFFORT_OK_REQUIRED');
 });
 test('V18 old success does not clear a hard restriction generation', () => {
   const raw = fixture([['a', 'trae', [SOL]]]); raw.health = [{ accountId: 'a', family: 'gpt', restricted: true, until: NOW - 1, generation: 'g2', recovery: 'cleared', evidence: true,
@@ -394,6 +396,11 @@ test('canonical launch tuple rejects forged model family and constraint hashes',
 test('adversarial policy lock precedes light conservation and ETA', () => {
   const raw = fixture([['a', 'ttadk', [KIMI]], ['b', 'trae', [FLASH]]]); raw.lanes[0].readyAt = NOW + 600000; raw.lanes[1].mode = 'bucket-free';
   const p = run(task('lookup', { flags: { adversarial: true } }), raw); assert.equal(p.primary.candidate.modelId, KIMI);
+  const sameRung=fixture([['a','ttadk',[FLASH]],['b','trae',[FLASH]]]);
+  Object.assign(sameRung.lanes[1],{mode:'low-priority',progressAt:NOW,drainPerMin:5,queueState:'ready',loadPercent:70,loadSource:'model'});
+  const hot=run(task('review',{flags:{adversarial:true}}),sameRung);assert.equal(hot.primary.candidate.accountId,'a');
+  sameRung.lanes[1].loadPercent=40;
+  const free=run(task('review',{flags:{adversarial:true}}),sameRung);assert.equal(free.primary.candidate.accountId,'b');
 });
 test('ordinary release acceptance requires an independent strong reviewer family', () => {
   const raw = fixture([['a', 'ttadk', [FLASH, 'gemini-3.1-pro-preview', SOL]]]);

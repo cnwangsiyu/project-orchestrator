@@ -316,12 +316,20 @@ for (const [sc,args,oldWant,oldNote] of CASES) {
 // A user-pasted Playwright Extension token makes TRAE web-browser capable without making it desktop-capable.
 // Every subprocess gets an explicit fake path, so this suite never probes or reads the user's real token file.
 {
+  const browserStates=Object.fromEntries(['ttOutTrae','traeBrowserB','ttAndTrae'].map(sc=>[sc,structuredClone(S[sc])]));
   try {
     const token = path.join(tmp, 'playwright-extension-token');
     fs.writeFileSync(token, 'fixture-playwright-token-do-not-log\n', { mode: 0o600 });
     const env = { PLAYWRIGHT_EXTENSION_TOKEN_FILE: token };
+    for(const sc of ['ttOutTrae','traeBrowserB','ttAndTrae']) {
+      const a=S[sc].codex.find(a=>a.kind==='trae');
+      a.load={'gpt-6.1-sol':{percent:42,t:now}};
+      a.quota={sampledAt:now,daily:{'gpt-6.1-sol':{used:20,limit:80,depleted:false,resetsAt:now+h}}};
+    }
     const ttFirst = JSON.parse(run('ttFresh', ['browser'], env));
     assert.equal(ttFirst.pick.account, 'ttadk');
+    assert.equal(JSON.parse(run('ttAndTrae',['browser'],env)).pick.account,'trae');
+    assert.equal(JSON.parse(run('ttAndTrae',['ui-browser','--impact','service'],env)).pick.account,'trae');
     const trae = JSON.parse(run('ttOutTrae', ['browser', '--origins', 'example.com'], env));
     assert.equal(trae.pick.account, 'trae'); assert.equal(trae.pick.launcher, 'codex-worker');
     assert.ok(trae.why.some((s) => /TRAE via Playwright extension in the user's Chrome/.test(s)));
@@ -341,8 +349,9 @@ for (const [sc,args,oldWant,oldNote] of CASES) {
     assert.equal(absent.pick.vendor, 'claude'); assert.ok(absent.needsUserOK.some((s) => /personal quota/.test(s)));
     const personal = JSON.parse(run('traeBrowserB', ['browser']));
     assert.equal(personal.pick.account, 'b'); assert.ok(personal.needsUserOK.some((s) => /personal quota/.test(s)));
-    console.log('ok   TRAE Playwright browser capability: TTADK first, TRAE before personal/Claude, UI floor, token gate, computer-use exclusion');
+    console.log('ok   TRAE Playwright browser capability: observed free TRAE first, TTADK fallback, personal/Claude, UI floor, token gate, computer-use exclusion');
   } catch (e) { fail++; console.log(`FAIL TRAE Playwright browser capability: ${e.stack}`); }
+  finally {Object.assign(S,browserStates);}
 }
 // User decision 2026-11-13: Codex-family writers default to full access on every account. Reviewers remain read-only;
 // test-running reviews get workspace-write, and --sandbox is the only explicit narrower per-task override.
@@ -438,7 +447,8 @@ for (const [sc, args] of [['quiet', ['lookup']], ['ttSearch', ['lookup']], ['ttO
     const config = execFileSync('/bin/sh', ['-c', `printf '%s' ${quoted}`], { encoding: 'utf8' });
     const rule = JSON.parse(config.slice('developer_instructions='.length));
     const digest = loadDigest();
-    ok = rule === `Global worker rules ${digest.version}\n${digest.worker}`;
+    ok = rule.startsWith(`Global worker rules ${digest.version}\n`)&&rule.includes('never read, copy, load or inject LOGIN')
+      &&rule.split('\n').slice(1).every(line=>digest.worker.includes(line));
   } catch {}
   if (!ok) fail++;
   console.log(`${ok ? 'ok  ' : 'FAIL'} exec credential     ${sc} ${args.join(' ')}`);
@@ -534,8 +544,7 @@ for (const [sc, args] of ERRORS) {
   if (bad.length) fail++;
   console.log(`${bad.length ? 'FAIL' : 'ok  '} trae gate/launch    ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')} (exec: ${exec.slice(0, 90)})` : ''}`);
 }
-// Only TTADK has the max-effort exemption. The 2026-11-10 review found T39-m1a-device routed to TRAE/max with no gate.
-// Company-account selection must not extend TTADK's exemption to TRAE, including a TRAE-only device or --urgent.
+// Both company accounts have the max-effort exemption (user, 2026-11-15).
 {
   const maxGate = (sc, args) => {
     const o = JSON.parse(run(sc, args));
@@ -546,9 +555,9 @@ for (const [sc, args] of ERRORS) {
   const cases = [
     [maxGate('ttFresh',max),['ttadk','max',false]],
     [maxGate('ttAndTrae',max),['ttadk','max',false]],
-    [maxGate('ttOutTrae',max),['trae','max',true]],
-    [maxGate('traeOnly',max),['trae','max',true]],
-    [maxGate('ttOutTrae',[...max,'--urgent']),['trae','max',true]],
+    [maxGate('ttOutTrae',max),['trae','max',false]],
+    [maxGate('traeOnly',max),['trae','max',false]],
+    [maxGate('ttOutTrae',[...max,'--urgent']),['trae','max',false]],
     [maxGate('ttOutTrae',['implement-hard','--impact','release']),['trae','xhigh',false]],
   ];
   const bad = cases.map(([got, want], i) => (JSON.stringify(got) === JSON.stringify(want) ? null : i)).filter((i) => i !== null);
@@ -907,12 +916,12 @@ for (const [sc, args] of ERRORS) {
     cases.push([hasNote(r, /guarded executor.*continuous idle evidence.*every orchestrator's release/), true],
       [hasNote(r, /at most 3 concurrent heavy builds unless the ledger sets N otherwise/), false],
       [hasNote(r, /at most 2 h, then return the device and report.*device connected, unlocked, app data backed up/), true],
-      [hasNote(r, /iphone8, iphone11 and s21.*Allow\/Authorize\/Trust\/OK.*no per-prompt approval or button whitelist/), true],
+      [hasNote(r, /iphone8, iphone11 and s21.*Allow\/Authorize\/Trust\/OK.*no per-prompt approval or button whitelist/), false],
       [hasNote(r, /personal iPhone 15 Pro Max \(policy=never\).*device not registered in res/), true],
       [hasNote(r, /Codex refuses an allowed device prompt.*re-route that step to Claude instead of asking the user to tap it/), true]);
   }
   const leased = o('ttFresh', ['lookup', '--device-lease']);
-  cases.push([hasNote(leased, /iphone8, iphone11 and s21.*camera, microphone, photos, notifications, local network, tracking, developer trust, USB debugging and install confirmations/), true],
+  cases.push([hasNote(leased, /iphone8, iphone11 and s21.*camera, microphone, photos, notifications, local network, tracking, developer trust, USB debugging and install confirmations/), false],
     [hasNote(leased, /Take\/return through res.*lease <=2 h.*back up app data.*never enter personal-account credentials, passwords or verification codes.*no purchases/), true]);
   const ordinary = o('ttFresh', ['lookup']);
   cases.push([hasNote(ordinary, /^registered shared test phones iphone8/), false]);
@@ -1199,7 +1208,7 @@ for (const [sc, args] of ERRORS) {
     [route('quotaPreferred', ['lookup']).pick?.command.includes('-m DEEPSEEK-V4.1-FLASH'), true],
     [route('quotaPreferred', ['implement', '--failures', '1']).notes.some((n) => /rework thread rule.*continued original thread because/.test(n)), true],
     [route('quotaPreferred').notes.some((n) => /rework thread rule/.test(n)), false],
-    [JSON.stringify(busy.pick), JSON.stringify(idle.pick)], [JSON.stringify(busy.needsUserOK), JSON.stringify(idle.needsUserOK)],
+    [JSON.stringify([busy.pick.model,busy.pick.effort,busy.pick.account,busy.pick.sandbox]), JSON.stringify([idle.pick.model,idle.pick.effort,idle.pick.account,idle.pick.sandbox])], [JSON.stringify(busy.needsUserOK), JSON.stringify(idle.needsUserOK)],
     [busy.deferred, null], [note(busy, /parallel task concurrency unchanged/), true],
     [missing.why.some((n) => /bucket is depleted/.test(n)), false],
     [route('quotaExpiredSol').why.some((n) => /bucket is depleted/.test(n)), false],
@@ -1347,7 +1356,7 @@ for (const [sc, args] of ERRORS) {
   const usage = (used = 40, resetsAt = now + 8 * h) => ({ used, limit: 100, resetsAt });
   const bucket = (used = 38, extra = {}) => ({ ...usage(used), depleted: false, ...extra });
   const load = (percent = 35, t = now) => ({ [SOL]: { percent, t } });
-  const queue = (position = 100, t = now, extra = {}) => ({ gpt: { t, position, state: 'queued', lowPriority: false, ...extra } });
+  const queue = (position = 0, t = now, extra = {}) => ({ gpt: { t, position, state: position>0?'queued':'ready', lowPriority: false, ...extra } });
   const scenario = (key, trExtra = {}, ttExtra = {}) => {
     S[key] = { claude: cl(10, 120), codex: [acc('main', 20, 120), tt({ search: true, usage: usage(), seenAt: now, ...ttExtra }),
       tr({ home, load: load(), quota: { daily: { [SOL]: bucket() } }, ...trExtra })] };
@@ -1380,25 +1389,26 @@ for (const [sc, args] of ERRORS) {
   const account = (key, args, q, env) => r(key, args, q, env).pick?.account;
   for (const args of [['lookup'], ['extract'], ['draft'], ['analysis', '--stakes', 'low'], ['implement', '--impact', 'throwaway']])
     cases.push([account('balanced', args), args[0] === 'implement' ? 'trae' : 'ttadk']);
-  for (const key of ['balancedBelow', 'balancedDepleted', 'balancedNoBucket', 'balancedOldBucket', 'balancedNoLimit', 'balancedHot', 'balancedDown'])
+  for (const key of ['balancedDepleted', 'balancedNoBucket', 'balancedOldBucket', 'balancedNoLimit', 'balancedHot', 'balancedDown'])
     cases.push([account(key), 'ttadk']);
-  for (const key of ['balancedReserve', 'balancedCool', 'balancedBusy', 'balancedNoLoad', 'balancedOldLoad'])
+  for (const key of ['balancedNoLoad','balancedOldLoad']) cases.push([account(key),'ttadk']);
+  for (const key of ['balancedBelow', 'balancedReserve', 'balancedCool', 'balancedBusy'])
     cases.push([account(key), 'trae']);
   for (const args of [['analysis'], ['implement'], ['review'], ['build-run', '--stakes', 'low'], ['browser'], ['ui-browser'], ['computer-use','--apps','com.apple.Notes'], ['image-read', '--stakes', 'low'], ['lookup', '--security'], ['lookup', '--exclude-account', 'trae']])
-    cases.push([account('balanced', args), 'ttadk']);
+    cases.push([account('balanced', args), ['analysis','implement','review','build-run'].includes(args[0])?'trae':'ttadk']);
   cases.push([r('balanced', ['image-gen']).pick?.account, 'main']);
-  cases.push([account('balanced', ['implement', '--impact', 'throwaway'], queue(300)), 'trae'], [account('balanced', ['implement', '--impact', 'throwaway'], queue(301)), 'ttadk']);
+  cases.push([account('balanced', ['implement', '--impact', 'throwaway'], queue(300)), 'ttadk'], [account('balanced', ['implement', '--impact', 'throwaway'], queue(301)), 'ttadk']);
   cases.push([account('balanced', ['implement', '--impact', 'throwaway'], queue(301, now - 31 * min)), 'trae'], [account('balanced', ['implement', '--impact', 'throwaway'], {}), 'trae']);
   cases.push([account('balanced', ['implement', '--impact', 'throwaway'], queue(1, now, { high: { t: now - 10 * min, position: 3100 } })), 'ttadk']);
-  cases.push([account('balanced', ['implement', '--impact', 'throwaway'], queue(1, now, { high: { t: now - 31 * min, position: 3100 } })), 'trae']);
+  cases.push([account('balanced', ['implement', '--impact', 'throwaway'], queue(1, now, { high: { t: now - 31 * min, position: 3100 } })), 'ttadk']);
   // Family isolation: other families' queues never count against GPT.
   cases.push([account('balanced', ['implement', '--impact', 'throwaway'], { ...queue(), deepseek: { t: now, position: 5000, state: 'queued' } }), 'trae']);
-  cases.push([account('balancedExpires', ['analysis']), 'trae'], [account('balancedLater', ['analysis']), 'ttadk'],
-    [account('balancedLessLeft', ['analysis']), 'ttadk'], [account('balancedExpires', ['analysis'], {}), 'trae']);
+  cases.push([account('balancedExpires', ['analysis']), 'trae'], [account('balancedLater', ['analysis']), 'trae'],
+    [account('balancedLessLeft', ['analysis']), 'trae'], [account('balancedExpires', ['analysis'], {}), 'trae']);
   const env = { QUOTA_LOG_FILE: history };
   const projected = r('balanced', ['implement'], queue(), env);
   cases.push([projected.pick?.account, 'trae'], [projected.balance?.burn?.beforeReset, true],
-    [projected.why.some((s) => /balanced to TRAE:.*TTADK projected to run out.*62% left.*load 35%/.test(s)), true],
+    [projected.why.some((s) => /TRAE lane free: saving TTADK quota.*gpt-6.1-sol load 35%/.test(s)), true],
     [account('balancedNoLoad', ['implement'], queue(), env), 'ttadk'], [account('balanced', ['implement'], {}, env), 'trae'],
     [account('balanced', ['implement'], queue(400), env), 'ttadk'], [account('balancedOut', ['implement'], queue(400)), 'trae']);
   // Balancing transfers the current rung; it never substitutes an excluded/paused model or changes review count.
@@ -1412,7 +1422,7 @@ for (const [sc, args] of ERRORS) {
   cases.push([idle.pick?.account, busy.pick?.account], [idle.pick?.effort, busy.pick?.effort], [idle.deferred, null],
     [idle.needsUserOK.length, 0], [review.pick?.model, 'gemini-3.1-pro-preview'], [review.secondOpinion?.account, undefined],
     [r('balanced', ['review', '--author', 'codex']).secondOpinion?.model, review.secondOpinion?.model],
-    [idle.notes.some((s) => /balanced from TTADK/.test(s)), true]);
+    [idle.why.some((s) => /TRAE lane free: saving TTADK quota/.test(s)), true]);
   // Exact time/share boundaries and synthetic burn-rate failures.
   const ttAccount = { name: 'ttadk', usage: usage() };
   const factors = (q) => balanceFactors({ ttadk: ttAccount, trae: { quota: { sampledAt: now, daily: { [SOL]: q } }, load: load(), queue: queue() },
@@ -1463,7 +1473,7 @@ for (const [sc, args] of ERRORS) {
     assert.equal(gemini.kind, 'blocked'); assert.equal(gemini.pick,null);
     assert.ok(gemini.notes.some((n) => /list --limit 1.*only if unreachable.*global-rules owner/.test(n)));
     assert.ok(!gemini.notes.some((n) => /twice what the task should take|codex exec still works/.test(n)));
-    assert.equal(r(['implement'], 'backgroundOnly').pick?.model, SOL); // Hot inherited load has no measured wait; equal unknown ETAs retain the normal Sol preference.
+    assert.equal(r(['implement'], 'backgroundOnly').pick?.model, FLASH); // Sol's hot load does not establish Flash congestion; its free bucket remains usable when TTADK is out.
     assert.equal(r(['implement', '--background'], 'backgroundOnly').pick?.model, FLASH);
     assert.equal(r(['lookup', '--background', '--security']).pick?.model, FLASH);
     assert.equal(r(['lookup', '--background', '--security']).pick?.account, 'trae');
@@ -1493,7 +1503,7 @@ for (const [sc, args] of ERRORS) {
     }
     for (const args of [['implement', '--failures', '20'], ['design'], ['review-high'], ['review', '--author', 'codex'], ['second-opinion', '--against', 'codex']]) {
       const o = r([...args, '--background']);
-      for (const p of [o.pick, o.secondOpinion].filter(Boolean)) { assert.equal(p.vendor, 'codex'); assert.equal(p.account, 'trae'); }
+      for (const p of [o.pick, o.secondOpinion].filter(Boolean)) { assert.equal(p.vendor, 'codex'); assert.ok(['trae','ttadk'].includes(p.account)); }
       assert.ok(!o.needsUserOK.some((n) => /personal quota/.test(n)));
     }
     const log = path.join(home, 'routes.jsonl');
@@ -1601,11 +1611,11 @@ for (const [sc, args] of ERRORS) {
   const home = fs.mkdtempSync(path.join(tmp, 'bucket-free-gpt-'));
   const bucket = (depleted = false) => ({ used: depleted ? 80 : 20, limit: 80, remaining: depleted ? 0 : 60, depleted, resetsAt: now + h });
   const active = { [SOL]: bucket(), [ASTRA]: bucket(), [SOL56]: bucket() };
-  const r = (args, { daily = active, models = ids, company = true, queue = 100, extra = {}, env = {} } = {}) => {
+  const r = (args, { daily = active, models = ids, company = true, queue = 0, extra = {}, env = {} } = {}) => {
     const trae = tr({ home, models, modelIds: Object.fromEntries(ids.map((id) => [id, id.toUpperCase()])),
-      quota: daily === null ? null : { daily }, ...extra });
+      quota: daily === null ? null : { daily },load:Object.fromEntries(ids.map(id=>[id,{percent:35,t:now}])), ...extra });
     fs.writeFileSync(path.join(trae.home, 'queue-state.json'), JSON.stringify({
-      gpt: { t: now, position: queue, state: 'queued' }, deepseek: { t: now, position: queue, state: 'queued' },
+      gpt: { t: now, position: queue, state: queue>0?'queued':'ready' }, deepseek: { t: now, position: queue, state: queue>0?'queued':'ready' },
     }));
     S.bucketFreeGPT = { claude: cl(10, 120), codex: [acc('main', 20, 120), ...(company ? [tt({ models: [SOL] })] : []), trae] };
     return JSON.parse(run('bucketFreeGPT', args, env));
@@ -1664,14 +1674,15 @@ for (const [sc, args] of ERRORS) {
     assert.equal(r(['image-read', '--background'], { daily: { ...active, [SOL]: bucket(true) } }).pick?.model, SOL);
     assert.equal(r(['image-read'], { company: false, daily: { ...active, [SOL]: bucket(true) } }).pick?.model, SOL); // Depletion without measured delay keeps the first qualified vision model.
     for (const args of [['build-run', '--background'], ['browser', '--background'], ['lookup', '--shared-lock'], ['lookup', '--background', '--device-lease']])
-      if(args.includes('--device-lease')) assert.equal(r(args).blocked,true); else assert.equal(r(args).pick?.account, 'ttadk');
+      if(args.includes('--device-lease')) assert.equal(r(args).blocked,true); else assert.equal(r(args).pick?.account, args[0]==='build-run'?'trae':'ttadk',args.join(' '));
     // Astra escalation and the review count/account survive the new preferences. A light row first walks its light
     // list (Terra, 5.5, DeepSeek), then Sol's effort notches, and only then Astra — never sideways to a light model.
     assert.ok(r(['implement','--background','--failures','4'],{company:false}).pick?.company);
     assert.ok(r(['implement','--background','--failures','5'],{company:false}).pick?.company);
     const baselineReview = r(['review', '--author', 'codex'], { models: ids.filter((id) => ![GPT55, TERRA56].includes(id)) });
     const review = r(['review', '--author', 'codex']);
-    assert.deepEqual(review.pick, baselineReview.pick); assert.deepEqual(review.secondOpinion, baselineReview.secondOpinion);
+    const tuple=p=>p?[p.vendor,p.model,p.effort,p.account,p.sandbox]:null;
+    assert.deepEqual(tuple(review.pick),tuple(baselineReview.pick)); assert.deepEqual(tuple(review.secondOpinion),tuple(baselineReview.secondOpinion));
     const pausedHome = fs.mkdtempSync(path.join(tmp, 'bucket-free-paused-'));
     const { noteFailure } = await import('../lib/trae-health.mjs');
     noteFailure(pausedHome, '-32600: model `gpt-5.6-terra` is unavailable because its metadata could not be resolved', now, TERRA56);

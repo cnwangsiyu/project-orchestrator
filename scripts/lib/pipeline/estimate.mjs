@@ -13,7 +13,7 @@ export function estimateCandidate(task, snapshot, candidate, { capacityReset = f
   const ready = known(l.readyAt), position = known(l.position), drainPerMin = known(l.drainPerMin);
   const progressing = known(l.progressAt) !== null;
   // Direct progress wins over coarse congested-sibling/account load evidence.
-  const load = known(l.loadPercent), congested = (load !== null && load >= 60 && (!progressing || l.loadSource === 'model'))
+  const load = l.loadSource === 'model' ? known(l.loadPercent) : null, congested = (load !== null && load >= 60)
     || (position !== null && position > 300);
   const resetAt = known(a.denialResetAt);
   const raw = capacityReset ? ttadkEta({ account: { usable: false, quotaOut: { resetsAt: resetAt } }, now, workMin })
@@ -47,11 +47,14 @@ export function estimateCandidate(task, snapshot, candidate, { capacityReset = f
   const projectedOut=!!(tq&&tb&&tb.resetsAt===tq.resetsAt&&tb.projectedAtReset>=tq.limit);
   const expiresSoon=remainingShare!==null&&ttShare!==null&&dq.resetsAt-now<6*3600000&&remainingShare>ttShare;
   const triggers=[lowTask&&'low-priority task',projectedOut&&'TTADK projected to run out',expiresSoon&&'TRAE daily quota expires soon'].filter(Boolean);
+  const queued=position>0||['queued','waiting'].includes(known(l.queueState))
+    ||!progressing&&(fq?.position>0||['queued','waiting'].includes(fq?.state));
+  const freeNow=!capacityReset&&!stalled&&!familyCongested&&!raw?.unknown&&raw?.startDelayMin===0&&load!==null&&load<60&&!queued;
   const balance=a.kind==='trae'?{model:candidate.modelId,family:candidate.family,bucketFree:l.mode==='bucket-free',reserveOK,remainingShare,ttadkRemainingShare:ttShare,
-    load:load===null?null:{percent:load,source:l.loadSource},queue:fq,congestion:congested||familyCongested?'high':load!==null?'low':'unknown',congestionOK,
+    load:load===null?null:{percent:load,source:l.loadSource},queue:fq,queued,freeNow,congestion:congested||familyCongested?'high':load!==null?'low':'unknown',congestionOK,
     burn:tb?{...tb,beforeReset:projectedOut}:null,
     projectedOut,expiresSoon,triggers,eligible:reserveOK&&congestionOK&&triggers.length>0,reasons:[!reserveOK&&(l.mode==='low-priority'?'daily bucket depleted':'daily quota unknown (missing, stale or expired) or below 15% reserve'),
-      stalled&&'lane stalled in fresh telemetry',familyCongested&&'family queue above 300',load>=60&&`load ${load}% is at least 60`,!congestionOK&&load===null&&'no fresh load reading',!triggers.length&&'no balancing trigger'].filter(Boolean)}:null;
+      stalled&&'lane stalled in fresh telemetry',queued&&'queue observed',familyCongested&&'family queue above 300',load>=60&&`${candidate.modelId} load ${load}% is at least 60`,!congestionOK&&load===null&&`${candidate.modelId} has no fresh model load reading`,!triggers.length&&'no balancing trigger'].filter(Boolean)}:null;
   return freeze({ candidateId: candidate.id, startDelayMin: unknown ? null : raw.startDelayMin,
     completionMin: stalled ? null : raw?.completionMin ?? workMin, stalled, basis: raw?.basis ?? 'unknown', confidence: stalled ? 'STALLED' : unknown ? 'UNKNOWN'
       : rows.length >= ETA.historyMin && !uncertainty.some((r) => r.code === 'WORK_COHORT_FALLBACK') ? 'measured' : 'fallback',

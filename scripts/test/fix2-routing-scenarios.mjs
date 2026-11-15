@@ -98,7 +98,7 @@ try {
   const mini=copy();mini.codexAccounts=[{name:'trae',kind:'trae',home:path.join(tmp,'trae'),live:true,healthy:true,models:[SOL,ASTRA],windows:[],
     quota:{sampledAt:now,daily:Object.fromEntries([SOL,ASTRA].map(model=>[model,{used:20,limit:100,remaining:80,depleted:false,resetsAt:now+h}]))}}];
   const companyAstra=cli(['implement-hard','--impact','throwaway','--writes','--failures','1','--actual',`codex:${SOL}:xhigh@trae`],mini);
-  assert.equal(companyAstra.kind,'launch');assert.equal(companyAstra.pick.model,ASTRA);assert.equal(companyAstra.pick.account,'trae');
+  assert.equal(companyAstra.kind,'launch');assert.equal(companyAstra.pick.model,SOL);assert.equal(companyAstra.pick.effort,'max');assert.equal(companyAstra.pick.account,'trae');
   assert.ok(companyAstra.pick.command);assert.equal(companyAstra.needsUserOK.length,0);
   const accountless=cli(['implement-hard','--impact','throwaway','--writes','--failures','1','--actual',`codex:${SOL}:xhigh`]);
   assert.equal(accountless.kind,'blocked');assert.equal(accountless.pick.model,ASTRA);

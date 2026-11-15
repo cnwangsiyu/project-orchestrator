@@ -144,11 +144,10 @@ this.
 
 - **Models:** the gateway's codex list is `ttadk models -f json` (agents including `codex`). As of 2026-11 it has
   `gpt-6.1-sol` and `gpt-5.6-terra`, but no Luna, Astra or GPT-6.1 Terra. The image tool isn't served either.
-- **Routing:** every task TTADK's Sol can handle runs there first (user, 2026-11-07), as Sol at the row's effort (at
-  least `medium`), one notch higher after a failure when that is below `max`. Claude-only rows, image generation (its
-  Sol fallback step included), `research` on an account without the proxy below, second opinions and reviews of
-  Codex's work, and browser work before `browser-setup` follow the earlier routing (`references/model-routing.md`).
-  On a TTADK device the ChatGPT and Claude quota is left for the user's other device.
+- **Routing:** company work prefers an observed free TRAE lane (candidate model load <60%, no queue/stall),
+  then TTADK. TTADK's expiring unused quota retains preference; capability/retry floors and personal-quota
+  approvals remain. Browser/ui-browser require the ready TRAE Playwright bridge for that first step;
+  computer-use uses TTADK → browser-ready personal ChatGPT (needs OK), with no TRAE/Claude desktop path.
 - **Web search, through a local proxy (verified 2026-11-07).** Image input works on the gateway as is; web search
   needs this setup. Every TTADK worker gets it, as on ChatGPT accounts and Claude Code, where it is on by default.
   - *Why:* Codex sends its hosted `web_search` tool only to OpenAI's own provider; to TTADK it sends none ("NO WEB
@@ -224,7 +223,7 @@ engineering work. Ask the user before sending other companies' or personal data 
 
 ## TRAE CLI as the second company account (user, 2026-11-08)
 
-Order for Codex work: **TTADK first, then TRAE CLI, then personal quota** (ChatGPT accounts / Claude). `route.mjs` picks
+Order for Codex work: **observed free TRAE lane first, then TTADK, then eligible TRAE fallback, then personal quota** (ChatGPT accounts / Claude). `route.mjs` picks
 TRAE whenever TTADK is out (daily quota used up, down, or `--exclude-account ttadk`) and TRAE is healthy; the OK gate for
 personal quota needs approval based on the actual primary/second-opinion account, including ladder fall-throughs
 while a company account remains usable (`--urgent` and standing exceptions apply). The user chose not to cap TRAE usage.
@@ -396,9 +395,9 @@ machine that runs browser workers.
   extension 1.26.1102 (MacBook, 2026-11-10) connected and opened tabs, then every page call failed with "Cannot read
   properties of undefined (reading 'timeoutMs')"; updating the app and restarting Chrome fixed it. codex-worker checks
   this before a browser thread starts and exits 7 with `browser-version-mismatch:` — ask the user to update the app.
-`route.mjs` sends browser and ui-browser work to TTADK when it is browser-ready, then to TRAE when the Playwright token
-file exists, then to a browser-ready personal ChatGPT account (needs the user's OK), else personal Claude (also needs
-the user's OK). `computer-use` never uses TRAE: it keeps TTADK → personal ChatGPT (needs OK) → Claude (needs OK). On a
+`route.mjs` sends browser and ui-browser work to TRAE when the Playwright token
+file exists and the qualifying model can start now at load <60% without a queue/stall, then to browser-ready TTADK, then to a browser-ready personal ChatGPT account (needs the user's OK), else personal Claude (also needs
+the user's OK). `computer-use` never uses TRAE: it keeps TTADK → personal ChatGPT (needs OK). On a
 new machine, set up the matching bridge for each account as described here.
 
 ### Playwright Extension browser threads on TRAE
@@ -422,8 +421,8 @@ to the Chrome profile directory; an ordinary sandboxed test shell does not.
 
 A non-TRAE Codex worker can operate the user's signed-in Chrome through the ChatGPT app's **Chrome plugin**. It can also operate
 desktop apps through the **computer-use plugin**. Both use the local pieces the ChatGPT desktop app uses, and both work
-with any model provider, TTADK included. Routing (user, 2026-11-07): the `browser` row goes to TTADK Codex when that
-account is browser-ready, then TRAE Playwright Extension, a browser-ready personal ChatGPT account, and Claude. The
+with any model provider, TTADK included. Routing (user, 2026-11-15): `browser` and `ui-browser` go to an observed free TRAE
+Playwright lane (token present, candidate model load <60%, no queue/stall), then browser-ready TTADK Codex, a browser-ready personal ChatGPT account, and Claude. The
 two personal steps need the user's OK; re-run route.mjs after an account failure instead of choosing one by hand.
 
 ### Prerequisites (once per machine)
@@ -546,8 +545,8 @@ and for what is the worker's own call. Briefs don't ask for them, forbid them or
   - device holds through `res` (Codex can run the script), taken as `--by codex:<thread id>`;
   - where to write the report, and to start its final message with `[<id>] DONE | QUESTION | BLOCKED | FAILED`. A question
     ends the run; resume it with the answer.
-- **Keep on Claude workers**: anything that needs Artifact/Docs tools (browser/frontend work follows TTADK → TRAE
-  Playwright Extension → personal ChatGPT → Claude; desktop omits TRAE), or a worker that must negotiate
+- **Keep on Claude workers**: anything that needs Artifact/Docs tools (browser/frontend work follows free TRAE
+  Playwright Extension → TTADK → personal ChatGPT → Claude; desktop uses TTADK → personal ChatGPT), or a worker that must negotiate
   with peers itself. Device runs that share phones mid-run can go to a hub-started Codex worker: steer it with handoffs. It
   can't negotiate with peers, so you broker.
 - **Verify before reporting.** Spot-check the cited file:line and commits, as for any worker.

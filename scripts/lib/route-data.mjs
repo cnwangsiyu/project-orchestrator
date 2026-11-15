@@ -12,6 +12,8 @@ import { personalBudget } from './pipeline/quota.mjs';
 import { modelLoad } from './company-load.mjs';
 import { readRoutingAccount, readRoutingClaude, traeBrowserReady } from './state.mjs';
 import { modelPreference, policyEffort } from './pipeline/policy.mjs';
+import { readLeases } from './resource-data.mjs';
+import { readRoutingObservations, saveRoutingObservations } from './routing-observations.mjs';
 
 const read = (file, fallback = null) => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; } };
 const lines = (file) => { try { return fs.readFileSync(file, 'utf8').split('\n').flatMap((l) => { try { const r = JSON.parse(l); return object(r) ? [r] : []; } catch { return []; } }); } catch { return []; } };
@@ -24,7 +26,7 @@ export const BROWSER_ORIGINS = ['*.bytedance.net', '*.byted.org', '*.larkoffice.
 export function taskContext(env = process.env) {
   return { taskId: 'unnamed-task', requestId: env.ROUTE_REQUEST_ID || randomUUID(), sandboxCeiling: 'danger-full-access' };
 }
-export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE_NOW ?? Date.now()), root } = {}) {
+export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE_NOW ?? Date.now()), root, readAccount = readRoutingAccount, readClaude = readRoutingClaude } = {}) {
   if (!nonnegative(now)) throw Error('ROUTE_NOW must be a finite epoch timestamp');
   const shared = env.RULES_SHARED || path.join(os.homedir(), '.claude/orchestrator/_shared');
   const cachePath = env.QUOTA_CACHE || path.join(shared, 'quota.json'), routeLog = env.ROUTE_LOG_FILE || path.join(shared, 'route-log.jsonl');
@@ -33,7 +35,7 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
   try { registry=JSON.parse(fs.readFileSync(registryPath,'utf8')); registryInvalid=!object(registry); }
   catch(e) { registryInvalid=e.code!=='ENOENT'; registry={}; }
   const collectedFrom = now;
-  const cached = read(cachePath, {});
+  const cached = readRoutingObservations(cachePath,now);
   const data = object(cached) ? {...cached} : {};
   const invalidProfiles = new Set(Object.entries(object(registry)?registry:{}).filter(([,p])=>!object(p)).map(([name])=>name));
   const profiles = object(registry) ? {...registry} : {}, accounts = array(data?.codexAccounts).filter(object).map((a) => ({ ...a }));
@@ -43,6 +45,7 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
   // host for it. Live decisions refresh each account independently. In particular
   // a cached hub-down reading is checked again even inside the cache TTL.
   const live = env.ROUTE_NOW === undefined && !env.ROUTE_SNAPSHOT_FILE;
+  if(live) saveRoutingObservations(cachePath,data);
   if (live && !registryInvalid) for (const a of accounts) {
     const p = profiles[a.name], at = a.seenAt ?? data.checkedAt;
     if (!object(p)) continue;
@@ -50,21 +53,29 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
     const deniedUntilReset=a.kind==='ttadk' && reset>now && (!!a.quotaOut || /quota|daily token/i.test(a.reason??''));
     if ((parsed.flags.fresh || !deniedUntilReset) && (parsed.flags.fresh || a.stateUnknown || a.live !== true || !nonnegative(at) || now-at > 600000)) {
       try {
-        const observed = readRoutingAccount(a.name, p);
-        Object.assign(a, observed, { seenAt: Date.now(), stateUnknown:observed.stateUnknown===true, transport: observed.live === true, statusSource: 'authenticated-status' });
+        const observed = readAccount(a.name, p);
+        if(!object(observed)||observed.stateUnknown||observed.statusReadFailed) throw Error('account status read incomplete');
+        Object.assign(a, observed, { seenAt: Date.now(), stateUnknown:observed.stateUnknown===true, transport: observed.live === true, statusSource: 'authenticated-status', observationStale:false });
         if (observed.quota === null && object(cached?.codexAccounts?.find(r=>r.name===a.name)?.quota))
           a.quota = cached.codexAccounts.find(r=>r.name===a.name).quota;
-        if (a.kind === 'ttadk' && !observed.usage) a.usage = cached?.codexAccounts?.find(r=>r.name===a.name)?.usage;
+        if (a.kind === 'ttadk' && !observed.usage) {
+          const previous=cached?.codexAccounts?.find(r=>r.name===a.name);
+          a.usage = previous?.usage;a.usageSeenAt=previous?.usageSeenAt??data.checkedAt;
+        } else if(a.kind==='ttadk') a.usageSeenAt=a.seenAt;
         profiles[a.name] = {...p, modelIds: observed.modelIds ?? p.modelIds};
-      } catch { a.transport = false; a.statusSource = 'status-query-failed'; }
+      } catch { a.statusSource = 'last-good-stale'; a.observationStale=true; }
     }
   }
   // Capability detection checks only whether the configured pairing file exists;
   // it neither reads pairing material nor queries a provider, including fixtures.
   for(const a of accounts) if(a.kind==='trae') a.traeBrowser=traeBrowserReady();
   if (live && (parsed.flags.fresh || !Array.isArray(data.claude) || now-data.checkedAt > 600000)) {
-    try { data.claude = readRoutingClaude(); data.claudeSeenAt = Date.now(); } catch { /* degrade Claude alone */ }
+    try { const observed=readClaude(); if(!Array.isArray(observed)||!observed.length) throw Error('Claude usage incomplete');
+      data.claude = observed; data.claudeSeenAt = Date.now(); data.claudeObservationStale=false;
+    } catch { data.claudeObservationStale=true; }
   }
+  data.codexAccounts=accounts;
+  if(live) saveRoutingObservations(cachePath,data);
   if (live) now=Math.max(now,Date.now()); // refreshed samples precede the live decision
   const rows = lines(routeLog), quotaHistory = lines(env.QUOTA_LOG_FILE || path.join(shared, 'quota-log.jsonl'));
   const outcomes=dedupeOutcomes(rows.filter(r=>r.kind==='outcome'&&r.t<=now));
@@ -164,6 +175,7 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
   const writes = parsed.writes || !!flags.signing;
   const sandbox = flags.sandbox ?? (writes ? 'danger-full-access' : parsed.runsTests ? 'workspace-write' : 'read-only');
   const task = createTaskSpec({ ...parsed, taskId: id, writes, sandbox, sandboxCeiling: 'danger-full-access', previousAttempts: attempts,
+    flags:{...flags,...(flags.cwd?{cwd:path.resolve(flags.cwd)}:{}),...(flags['task-dir']?{'task-dir':path.resolve(flags['task-dir'])}:{})},
     allowedOrigins: ['browser', 'ui-browser'].includes(parsed.category) ? [...BROWSER_ORIGINS, ...(parsed.category === 'ui-browser' ? ['localhost', '127.0.0.1'] : []), ...parsed.allowedOrigins] : parsed.allowedOrigins,
     floor: { profileIds: [], previousAttemptIds: [], relationVersion: VERSION, historyStatus: attempts.length || !parsed.failures ? 'KNOWN' : 'UNKNOWN' } });
   if (env.ROUTE_SNAPSHOT_FILE) return { task, snapshot: createSnapshot(injectedSnapshot, { now }), data, profiles, routeLog, now, root, retryAssumption };
@@ -172,14 +184,17 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
   const models = new Map(), normalized = [], lanes = [], health = [];
   const add = (a, isClaude = false) => {
     const accountAt = isClaude ? data.claudeSeenAt ?? at : a.seenAt ?? at;
-    const stamp = (value, sampledAt = accountAt, maxAgeMs = 600000) => globalStamp(value,sampledAt,maxAgeMs);
+    const stamp = (value, sampledAt = accountAt, maxAgeMs = 600000) => ({...globalStamp(value,sampledAt,maxAgeMs),
+      source:(isClaude?data.claudeObservationStale:a.observationStale)?'last-good-stale':'public-status-cache'});
     const kind = isClaude ? 'claude' : a.kind ?? 'chatgpt', name = isClaude ? 'claude' : a.name, company = ['ttadk', 'trae'].includes(kind);
-    const catalog = isClaude ? ['haiku', 'sonnet', 'opus', 'fable'] : array(a.models ?? (company ? [] : DEFAULT_MODELS)).map(modelId);
     const profile = profiles[name] ?? a, home = profile.home ?? a.home;
+    const profileCatalog=company&&a.models===undefined&&(Array.isArray(profile.models)||object(profile.modelIds));
+    const catalog = isClaude ? ['haiku', 'sonnet', 'opus', 'fable'] : array(a.models ?? (profileCatalog?profile.models??Object.keys(profile.modelIds):company ? [] : DEFAULT_MODELS)).map(modelId);
     const healthRaw = home ? readHealth(path.join(home, 'worker-health.json')) : {}, h=object(healthRaw)?healthRaw:{};
     const unknownHealth = !object(healthRaw) || (h.pools !== undefined && !object(h.pools)) || (h.modelPauses !== undefined && !object(h.modelPauses))
       || Object.values(h.pools??{}).some((r)=>!object(r)) || Object.values(h.modelPauses??{}).some((r)=>!object(r));
-    const quotaDenied = !!(a.quotaOut && (!a.quotaOut.resetsAt || a.quotaOut.resetsAt>now)) || (!a.healthy && /quota|daily token/i.test(a.reason ?? ''));
+    const currentLimit=kind==='ttadk'&&home?read(path.join(home,'quota-limit.json')):null;
+    const quotaDenied = currentLimit?.resetsAt>now || !!(a.quotaOut && (!a.quotaOut.resetsAt || a.quotaOut.resetsAt>now)) || (!a.healthy && /quota|daily token/i.test(a.reason ?? ''));
     const windows = array(isClaude ? data.claude : a.windows), badWindows = (isClaude ? data.claude : a.windows) !== undefined
       && (!Array.isArray(isClaude ? data.claude : a.windows) || windows.some((w)=>!object(w)));
     const spent = windows.some((w) => object(w)&&!w.scoped && (w.used >= 99 || (w.windowMins < 1440 && w.used >= 95)) && (!w.resetsAt || w.resetsAt > now));
@@ -191,17 +206,18 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
     for (const origin of task.allowedOrigins) caps[`origin:${origin}`] = browser || a.publicBrowser === true;
     for (const app of task.allowedApps) caps[`app:${app}`] = desktop;
     const quota = [];
-    if (kind === 'ttadk') quota.push({ bucketId: 'ttadk-daily', unit: 'tokens', usage: stamp(a.usage), priority: stamp('available') });
+    if (kind === 'ttadk') quota.push({ bucketId: 'ttadk-daily', unit: 'tokens', usage: stamp(a.usage,a.usageSeenAt??accountAt), priority: stamp('available') });
     if (kind === 'trae') for (const [m, q] of Object.entries(object(a.quota?.daily) ? a.quota.daily : {})) quota.push({ bucketId: modelId(m), unit: 'model-bucket',
       usage: stamp(q, a.quota.sampledAt, 1800000), priority: stamp(q?.depleted ? 'depleted' : 'available', a.quota.sampledAt, 1800000) });
     let burn = null;
     const prior = quotaHistory.filter((r) => r.t < at && r.t >= now - 7200000 && r.ttadk?.name === name && r.ttadk?.resetsAt === a.usage?.resetsAt).sort((a,b) => a.t-b.t)[0];
     if (prior && a.usage && at - prior.t >= 600000 && a.usage.used >= prior.ttadk.used) burn = { resetsAt: a.usage.resetsAt,
       projectedAtReset: a.usage.used + (a.usage.used - prior.ttadk.used) / (at - prior.t) * (a.usage.resetsAt - at) };
-    normalized.push({ id: name, kind, catalog: stamp(catalog), auth: stamp((registryInvalid||invalidProfiles.has(name))&&!isClaude?null:a.auth ?? (isClaude ? !!data.claude : company ? !a.stateUnknown && (a.healthy || quotaDenied) : a.live === true)),
-      transport: stamp(a.transport ?? (isClaude ? !!data.claude : a.live ?? (company ? a.healthy || quotaDenied : null))), health: stamp(!unknownHealth && !badWindows),
-      capabilities: Object.fromEntries(Object.entries(caps).map(([k,v]) => [k,stamp(v)])), quota, burn: stamp(burn),
-      providerDenied: stamp(quotaDenied || (!company && spent)), denialResetAt: stamp(a.quotaOut?.resetsAt ?? a.usage?.resetsAt ?? windows.find((w) => w?.used >= 95)?.resetsAt),
+    const declared=(value)=>isClaude||profileCatalog?{...globalStamp(value,now),source:'declared-harness'}:stamp(value);
+    normalized.push({ id: name, kind, catalog: declared(catalog), auth: stamp(((registryInvalid||invalidProfiles.has(name))&&!isClaude||a.stateUnknown)?null:a.auth ?? (isClaude ? Array.isArray(data.claude)?true:null : company ? a.healthy || quotaDenied : a.live === true)),
+      transport: stamp(a.stateUnknown?null:a.transport ?? (isClaude ? Array.isArray(data.claude)?true:null : a.live ?? (company ? a.healthy || quotaDenied : null))), health: declared(!unknownHealth && !badWindows),
+      capabilities: Object.fromEntries(Object.entries(caps).map(([k,v]) => [k,declared(v)])), quota, burn: stamp(burn),
+      providerDenied: currentLimit?.resetsAt>now?globalStamp(true,now):stamp(quotaDenied || (!company && spent)), denialResetAt: stamp(currentLimit?.resetsAt ?? a.quotaOut?.resetsAt ?? a.usage?.resetsAt ?? windows.find((w) => w?.used >= 95)?.resetsAt),
       resets: a.resets, workerClass: a.workerClass,
       budget:stamp(personalBudget(windows,a.resets,data.history?.[isClaude?'claude':`codex:${name}`],now,isClaude)) });
     const appendPause = (r, extra = {}) => {
@@ -221,8 +237,8 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
         || (freshQuota && object(a.quota?.daily) && Object.values(a.quota.daily).some(b=>object(b)&&nonnegative(b.used)&&typeof b.limit==='number'&&b.limit>0&&b.resetsAt>now) && !Object.hasOwn(a.quota.daily,m) && !['gpt-6.1-sol','gpt-6-astra','gpt-5.6-sol'].includes(m));
       const mode = kind !== 'trae' ? 'standard' : freshQuota && object(q) && nonnegative(q.used) && typeof q.limit==='number' && q.limit>0 && q.resetsAt>now ? (q.depleted ? 'low-priority' : 'priority') : explicitFree ? 'bucket-free' : 'UNKNOWN';
       const direct = telemetry?.[m], directLoad = modelLoad(load,m,now);
-      lanes.push({ id:`${name}:${m}:hub`, accountId:name, modelId:m, harness: isClaude?'claude-bg':'hub', efforts:stamp(['low','medium','high','xhigh','max']),
-        modeEvidence:stamp(mode,kind==='trae'?sample:at,1800000), selectable:true, capabilities:Object.fromEntries(Object.entries(caps).map(([k,v])=>[k,stamp(v)])),
+      lanes.push({ id:`${name}:${m}:hub`, accountId:name, modelId:m, harness: isClaude?'claude-bg':'hub', efforts:declared(['low','medium','high','xhigh','max']),
+        modeEvidence:stamp(mode,kind==='trae'?sample:at,1800000), selectable:true, capabilities:Object.fromEntries(Object.entries(caps).map(([k,v])=>[k,declared(v)])),
         readyAt: kind !== 'trae' || mode === 'priority' || mode === 'bucket-free' ? stamp(now) : null,
         position:stamp(direct?.position,direct?.t,1800000), drainPerMin:stamp(direct?.drainPerMin,direct?.t,1800000), progressAt:stamp(direct?.lastProgressAt,direct?.t,1800000),
         queueState:stamp(direct?.state,direct?.t,1800000),
@@ -230,11 +246,13 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
         familyQueue:stamp(familyQueue?.[family],familyQueue?.[family]?.t,1800000) });
     }
   };
-  accounts.forEach((a)=>add(a)); if (data?.claude) add({},true);
+  accounts.forEach((a)=>add(a)); add({},true);
   const snapshot = createSnapshot({ schemaVersion:VERSION, collectedFrom, collectedThrough:now, decisionAt:now, accounts:normalized, models:[...models.values()], lanes, health,
     qualityRelations:['gpt-6-luna','gpt-6.1-terra','gpt-5.6-terra','gpt-5.5','gpt-5.6-sol'].flatMap((from)=>['low','medium','high','xhigh','max'].flatMap((e,i,efforts)=>
       efforts.slice(i).map((to)=>({from:`${from}:${e}`,to:`gpt-6.1-sol:${to}`,version:VERSION,evidenceId:'policy-light-to-sol'})))),
-    resources: { held:false, ownedReturned:true }, dependencies:[], approvals: array(read(env.ROUTE_APPROVAL_FILE || path.join(shared,'route-approvals.json'),[])),
+    resources: { held:false, ownedReturned:true, registeredResources:readLeases(shared).registered,
+      signingRegistry:fs.existsSync(path.join(shared,'user-signing/registry.json'))&&fs.existsSync(path.join(shared,'user-signing/identities.json')) },
+    dependencies:[], approvals: array(read(env.ROUTE_APPROVAL_FILE || path.join(shared,'route-approvals.json'),[])),
     projectProfiles:read(path.join(root,'references/project-risk-profiles.json'),{}), reviewHistory:rows.filter((r)=>
       (r.kind==='route'||!r.kind)&&r.pick&&r.executable!==false&&!r.deferred&&(r.executable===true||!r.needsOK?.length))
       .flatMap((r)=>[r,...(r.second&&r.secondExecutable!==false?[{...r,category:'second-opinion',role:'second'}]:[])]),

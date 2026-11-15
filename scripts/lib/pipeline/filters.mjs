@@ -164,7 +164,7 @@ export function pScopedApproval(t, s, c, context = {}) {
   const requirements = [];
   if (companyDevice(s) && !company(a)) requirements.push(['personal-quota', 'PERSONAL_QUOTA_OK_REQUIRED', 'Current scoped personal-quota approval is required.', context.companyEligible || context.companyUnknown]);
   if (c.modelId==='gpt-6-astra' && a?.kind==='chatgpt') requirements.push(['astra','PERSONAL_ASTRA_OK_REQUIRED',`use GPT-6-Astra on personal account ${a.id}?`]);
-  if (c.effort === 'max' && a?.kind !== 'ttadk') requirements.push(['max-effort', 'MAX_EFFORT_OK_REQUIRED', 'Max effort requires its own scoped approval.']);
+  if (c.effort === 'max' && !company(a)) requirements.push(['max-effort', 'MAX_EFFORT_OK_REQUIRED', 'Max effort on a personal account requires its own scoped approval.']);
   if (c.modelId === 'fable') requirements.push(['fable', 'FABLE_OK_REQUIRED', 'Fable requires a separate scoped decision.']);
   if (t.requirements.resetRedemption) requirements.push(['reset-redemption', 'RESET_REDEMPTION_OK_REQUIRED', 'Each reset redemption needs unused scoped approval.']);
   const missing = requirements.filter(([action, , , bypass]) => !matchingApproval(t, s, c, action, bypass));

@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 const route = new URL('../route.mjs', import.meta.url).pathname;
 const captured = JSON.parse(fs.readFileSync(new URL('./fixtures/live-routing-2026-11-15.json', import.meta.url),'utf8'));
+const freeTrae = JSON.parse(fs.readFileSync(new URL('./fixtures/free-trae-fresh-ttadk-2026-11-15.json', import.meta.url),'utf8'));
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(),'live-routing-fixture-'));
 const file = path.join(tmp,'snapshot.json');
 const env = {...process.env, HOME:tmp, RULES_SHARED:tmp, QUOTA_CACHE:path.join(tmp,'cache.json'),
@@ -18,6 +19,73 @@ const cli = (args, raw=captured) => {
 };
 const copy=()=>structuredClone(captured);
 try {
+  for(const args of [['analysis'],['research'],['implement','--impact','service'],['docs'],['image-read'],['browser'],['ui-browser','--impact','service']]) {
+    const o=cli(args,freeTrae);assert.equal(o.kind,'launch');assert.equal(o.pick.account,'trae',args.join(' '));
+    assert.match(o.why.join('\n'),/TRAE lane free: saving TTADK quota/);
+    if(['browser','ui-browser'].includes(args[0])) {assert.equal(o.pick.model,'gpt-6.1-sol');assert.match(o.why.join('\n'),/gpt-6.1-sol load 42%/);assert.doesNotMatch(o.why.join('\n'),/load 70%/);}
+    for(const variant of ['hot','queued','stalled']) {
+      const x=structuredClone(freeTrae);
+      for(const l of x.lanes.filter(l=>l.accountId==='trae')) {
+        if(variant==='hot') l.loadPercent.value=70;
+        else {l.position.value=181;l.queueState.value='waiting';l.familyQueue.value.position=181;
+          if(variant==='stalled') {l.drainPerMin.value=0;l.progressAt.value=null;}}
+      }
+      assert.equal(cli(args,x).pick.account,'ttadk',`${variant}: ${args.join(' ')}`);
+    }
+  }
+  const expiry=structuredClone(freeTrae),ett=expiry.accounts.find(a=>a.id==='ttadk');
+  ett.quota[0].usage.value.resetsAt=captured.decisionAt+3*3600000;
+  ett.burn.value={resetsAt:ett.quota[0].usage.value.resetsAt,projectedAtReset:50000000};
+  assert.equal(cli(['analysis'],expiry).pick.account,'ttadk');
+  assert.equal(cli(['computer-use','--apps','com.apple.calculator'],freeTrae).pick.account,'ttadk');
+  const maxArgs=['debug','--impact','service','--failures','1','--actual','codex:gpt-6.1-sol:xhigh@trae'];
+  const siblingQueue=structuredClone(freeTrae);
+  for(const l of siblingQueue.lanes.filter(l=>l.accountId==='trae'&&l.modelId.startsWith('gpt'))) {
+    l.familyQueue.value={position:181,state:'waiting',t:captured.decisionAt};
+    if(l.modelId==='gpt-6-astra') {l.position.value=181;l.drainPerMin.value=0;l.progressAt.value=null;l.queueState.value='waiting';}
+  }
+  const ownFree=cli(maxArgs,siblingQueue);assert.equal(ownFree.pick.account,'trae');assert.equal(ownFree.pick.model,'gpt-6.1-sol');
+  assert.match(ownFree.why.join('\n'),/gpt-6.1-sol load 42%/,'a sibling Astra queue cannot override direct free Sol progress');
+  const max=cli(maxArgs,freeTrae);assert.equal(max.pick.account,'trae');assert.equal(max.pick.model,'gpt-6.1-sol');assert.equal(max.pick.effort,'max');
+  assert.ok(!max.plan.trace.candidates.filter(r=>['trae','ttadk'].includes(r.candidate.accountId)&&r.candidate.modelId==='gpt-6.1-sol'&&r.candidate.effort==='max').some(r=>r.predicates.some(p=>p.reason?.code==='MAX_EFFORT_OK_REQUIRED')));
+  for(const bad of ['missing','stalled']) {
+    const x=structuredClone(freeTrae);
+    for(const l of x.lanes.filter(l=>l.accountId==='trae'&&l.modelId==='gpt-6-astra')) {
+      l.progressAt.value=null;l.readyAt.value=null;l.position.value=bad==='stalled'?181:null;l.drainPerMin.value=bad==='stalled'?0:null;l.queueState.value=bad==='stalled'?'waiting':null;
+    }
+    assert.equal(cli(maxArgs,x).pick.model,'gpt-6.1-sol');
+  }
+  console.log('PASS observed free TRAE saves fresh TTADK quota; own-model browser/ui-browser load, queue/stall/expiry/desktop exceptions; company Sol/max retry ungated');
+  const lookup=cli(['lookup']);assert.ok(lookup.pick.command.includes('--skip-git-repo-check'));
+  assert.ok(lookup.pick.command.includes('<workspace>'));assert.ok(lookup.pick.command.includes('<task dir>'));
+  const proxyState=structuredClone(freeTrae),proxyHome=path.join(tmp,'ttadk home');
+  for(const part of [...proxyState.accounts,...proxyState.lanes]) if((part.accountId??part.id)==='ttadk') part.capabilities.search.value=true;
+  fs.writeFileSync(env.CODEX_ACCOUNTS,JSON.stringify({ttadk:{kind:'ttadk',home:proxyHome}}));
+  const proxyCommand=cli(['lookup'],proxyState).pick.command;
+  const inner=execFileSync('/bin/sh',['-c',`printf '%s' ${proxyCommand.match(/-- sh -c (.*)$/)[1]}`],{encoding:'utf8'});
+  assert.match(inner,/proxy.*&& CODEX_HOME=.* codex exec/,'the selected home applies to exec after proxy setup');
+  fs.rmSync(env.CODEX_ACCOUNTS);
+  const hub=cli(['implement','--impact','service']);assert.equal(hub.pick.workerArgs[hub.pick.workerArgs.indexOf('--cwd')+1],'<workspace>');
+  assert.equal(hub.pick.workerArgs[hub.pick.workerArgs.indexOf('--out')+1],'<task dir>/codex-last.md');
+  const cwd='scripts/..',taskDir=path.relative(process.cwd(),path.join(tmp,'task with spaces'));
+  const absolute=cli(['lookup','--cwd',cwd,'--task-dir',taskDir]);
+  assert.equal(absolute.plan.task.cwd,path.resolve(cwd));assert.equal(absolute.plan.task.taskDir,path.resolve(taskDir));
+  assert.ok(!absolute.pick.command.includes('<workspace>')&&!absolute.pick.command.includes('<task dir>'));
+  const net=cli(['lookup','--network','on']);assert.equal(net.pick.sandbox,'read-only');
+  assert.ok(net.pick.command.includes('.network.enabled=true'));assert.ok(net.pick.command.includes(':read-only'));
+  assert.ok(net.pick.command.includes('--skip-git-repo-check'));
+  const personalOnly=copy();personalOnly.accounts=personalOnly.accounts.filter(a=>!['ttadk','trae'].includes(a.kind));
+  personalOnly.lanes=personalOnly.lanes.filter(l=>personalOnly.accounts.some(a=>a.id===l.accountId));
+  personalOnly.resources.value={held:false,ownedReturned:true,registeredResources:[],signingRegistry:false};
+  const personalReview=cli(['review-high'],personalOnly);assert.ok(personalReview.pick.command.includes('<workspace>'));
+  assert.ok(personalReview.secondOpinion.command.includes('<task dir>'));
+  const noResources=cli(['implement','--impact','service'],personalOnly).notes.join('\n');
+  assert.doesNotMatch(noResources,/A queued TRAE|on TTADK:|DeepSeek:|identities\.json|iphone8\/iphone11\/s21|registered shared test phones/);
+  const registered=copy();registered.resources.value={held:false,ownedReturned:true,registeredResources:['iphone11'],signingRegistry:false};
+  const phoneNotes=cli(['build-run'],registered).notes.join('\n');assert.match(phoneNotes,/registered shared test phones iphone11/);
+  assert.doesNotMatch(phoneNotes,/registered shared test phones iphone8/);
+  registered.resources.value.signingRegistry=true;assert.match(cli(['analysis'],registered).notes.join('\n'),/identities\.json/);
+  console.log('PASS BC-35 placeholders/absolute paths, one-shot git check, read-only network, second-reviewer paths and device-specific notes');
   const trae=captured.accounts.find(a=>a.id==='trae');
   assert.equal(trae.auth.status,'KNOWN');assert.equal(trae.transport.value,true);
   assert.ok(trae.quota.length>0);
@@ -53,6 +121,8 @@ try {
   const desktop=copy(), app={status:'KNOWN',value:true,sampledAt:captured.decisionAt,receivedAt:captured.decisionAt,maxAgeMs:600000,source:'fixture'};
   for(const part of [...desktop.accounts,...desktop.lanes]) if(['main','b'].includes(part.accountId??part.id)) part.capabilities['app:com.apple.calculator']=app;
   const personal=cli(['computer-use','--apps','com.apple.calculator'],desktop);
+  assert.match(personal.notes.join('\n'),/browser its own tool lists; never put a Claude-in-Chrome deviceId/);
+  assert.match(personal.notes.join('\n'),/saved browser permission.*cannot be continued.*new thread with --browser-origins/);
   assert.ok(['main','b'].includes(personal.pick.account));assert.ok(personal.needsUserOK.length);assert.equal(personal.pick.command,null);
   assert.ok(cli(['computer-use','--apps','com.apple.calculator','--urgent','--user-ok','ledger:user-yes'],desktop).pick.command);
   const reachableTT=structuredClone(desktop), tt=reachableTT.accounts.find(a=>a.id==='ttadk');

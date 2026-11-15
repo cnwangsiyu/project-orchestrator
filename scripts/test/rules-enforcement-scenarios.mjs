@@ -123,7 +123,7 @@ setImmediate(()=>{this.onmessage({data:JSON.stringify({id:m.id,result:m.method==
 if(m.method==='turn/start')setImmediate(()=>this.onmessage({data:JSON.stringify({method:'turn/completed',params:{threadId:'fixture',turn:{id:'turn',status:'completed',items:[{type:'agentMessage',text:'DONE'}]}}})}));});}};`);
   const profiles = path.join(tmp, 'profiles.json'); fs.writeFileSync(profiles, JSON.stringify({ main: { home: tmp, hub: 'ws://127.0.0.1:1' } }));
   execFileSync(process.execPath, ['--import', transport, path.join(scripts, 'codex-worker.mjs'), '--account', 'main', 'start',
-    '--cwd', tmp, '--effort', 'high', '--sandbox', 'read-only', '--model', 'gpt-6.1-sol', '--name', 'p-T1', '--log', path.join(tmp, 'worker.jsonl'), 'reply DONE'],
+    '--cwd', tmp, '--effort', 'high', '--sandbox', 'read-only', '--model', 'gpt-6.1-sol', '--name', 'digest-fixture', '--log', path.join(tmp, 'worker.jsonl'), 'reply DONE'],
   { env: { ...env, CODEX_ACCOUNTS: profiles, CAPTURE: captured }, encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'] });
   assert.equal(JSON.parse(fs.readFileSync(captured)).developerInstructions, `Global worker rules ${digest.version}\n${digest.worker}`);
   const workerLaunch = rows().findLast((row) => row.kind === 'launch');
@@ -270,6 +270,22 @@ ${cleanupShield}`));
   append({ t: personal.t + 2, name: 'security', project: 'p', category: 'review', security: true,
     pick: { vendor: 'codex', account: 'trae', model: 'deepseek-v4.1-flash' } });
   cli('launch-audit.mjs', ['--name', 'security', '--vendor', 'codex', '--account', 'trae', '--model', 'GPT-6.1-Sol']);
+  append({t:Date.now()-10,kind:'route',name:'company-replacement',project:'p',category:'analysis',
+    pick:{vendor:'codex',account:'trae',company:true,model:'gpt-6.1-sol',effort:'high',sandbox:'read-only'}});
+  const unapproved=spawnSync(process.execPath,[path.join(scripts,'launch-audit.mjs'),'--name','company-replacement','--project','p',
+    '--vendor','codex','--account','main','--model','gpt-6.1-sol','--effort','high','--sandbox','read-only'],{env,encoding:'utf8'});
+  assert.equal(unapproved.status,1);assert.match(unapproved.stderr,/launch-mismatch/);
+  append({t:Date.now()-5,kind:'route',name:'approved-replacement',project:'p',category:'analysis',approvalRef:'owner yes: personal fallback',
+    pick:{vendor:'codex',account:'trae',company:true,model:'gpt-6.1-sol',effort:'high',sandbox:'read-only'}});
+  cli('launch-audit.mjs',['--name','approved-replacement','--project','p','--vendor','claude','--account','claude','--model','opus','--effort','medium','--sandbox','workspace-write']);
+  assert.equal(rows().at(-1).userOK,'owner yes: personal fallback');
+  append({t:Date.now()-4,kind:'route',name:'same-name',project:'other',category:'analysis',pick:{vendor:'codex',account:'trae',model:'gpt-6.1-sol'}});
+  append({t:Date.now()-3,kind:'route',name:'same-name',project:'p',category:'analysis',pick:{vendor:'codex',account:'ttadk',model:'gpt-6.1-sol'}});
+  cli('launch-audit.mjs',['--name','same-name','--project','other','--account','trae','--model','gpt-6.1-sol']);assert.equal(rows().at(-1).project,'other');
+  append({t:Date.now()-2,kind:'route',name:'two-seats',project:'p',category:'review-high',pick:{vendor:'codex',account:'trae',model:'gpt-6.1-sol'},
+    second:{vendor:'claude',account:'claude',model:'opus',effort:'high',sandbox:'read-only'}});
+  cli('launch-audit.mjs',['--name','two-seats-second','--project','p','--role','second','--vendor','claude','--account','claude','--model','opus','--effort','high','--sandbox','read-only']);
+  assert.equal(rows().at(-1).routed.model,'opus','second reviewer cross-checks its own seat');
   const bin = path.join(tmp, 'bin'); fs.mkdirSync(bin);
   fs.writeFileSync(path.join(bin, 'codex'), '#!/bin/sh\nprintf \'{"models":[]}\\n\'\n', { mode: 0o755 });
   fs.writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\nprintf \'fixture\\n\'\n', { mode: 0o755 });
@@ -280,13 +296,15 @@ ${cleanupShield}`));
   const report = JSON.parse(cli('review-data.mjs', ['--json'], { PATH: `${bin}:${process.env.PATH}`, CODEX_ACCOUNTS: profiles,
     QUOTA_CACHE: cache, QUOTA_LOG_FILE: path.join(tmp, 'empty-quota') }));
   assert.equal(fs.readFileSync(log, 'utf8'), before);
-  assert.equal(report.globalRules.unrouted.length, 2);
-  assert.deepEqual(report.globalRules.personalQuotaWithoutOK.map((row) => row.name), ['personal']);
+  assert.equal(report.globalRules.unrouted.length, 3); // includes the isolated digest-fixture launch
+  assert.deepEqual(report.globalRules.personalQuotaWithoutOK.map((row) => row.name), ['personal','company-replacement']);
   assert.deepEqual(report.globalRules.traeGPTOnSecurity.map((row) => row.name), ['security']);
   assert.equal(report.globalRules.acknowledgements[0].current, false);
   assert.ok(report.globalRules.byOrchestrator['Fixture 主对话'].length >= 3);
+  assert.ok(report.globalRules.launchMismatches.some(row=>row.name==='company-replacement'&&row.blocked));
+  assert.ok(report.globalRules.launchMismatches.some(row=>row.name==='approved-replacement'&&row.modelFamilyChanged&&row.widerSandbox));
   assert.equal(report.globalRules.orchUsage.script, 'scripts/orch-usage.mjs');
-  assert.equal(report.routing.decisions, rows().filter((row) => !row.kind && row.t > Date.now() - 86400000).length);
+  assert.equal(report.routing.decisions, rows().filter((row) => (!row.kind||row.kind==='route') && row.t > Date.now() - 86400000).length);
   console.log('ok   real review-data globalRules: actual launches/OK/security/ack/owner flags without counting events as decisions');
   console.log('\nall pass');
 } finally {

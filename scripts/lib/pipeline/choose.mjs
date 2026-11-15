@@ -27,16 +27,27 @@ export function orderCandidates(task, snapshot, rows) {
         ||candidateParts(snapshot,r.candidate).lane.mode!=='low-priority');
     }
   }
+  // Apply the adversarial family ladder before company-lane preference so free
+  // Flash cannot displace qualified Kimi; compare free capacity within that rung.
+  if (adversarial(task) && cohort.length) {
+    const lock = (r) => ['kimi-k3', 'deepseek-v4.1-flash', 'opus'].indexOf(r.candidate.modelId);
+    const first = Math.min(...cohort.map(lock));
+    cohort = cohort.filter((r) => lock(r) === first);
+  }
+  if(['browser','ui-browser'].includes(task.category))
+    cohort=cohort.filter(r=>candidateParts(snapshot,r.candidate).account.kind!=='trae'||r.estimate.balance?.freeNow);
   const backgroundChoice=task.background&&!['browser','ui-browser','computer-use','build-run'].includes(task.category)&&!task.flags['shared-lock']&&!task.flags['device-lease'];
   const ttReady=cohort.some((r)=>candidateParts(snapshot,r.candidate).account.kind==='ttadk'&&!r.estimate.capacityReset&&r.estimate.startDelayMin===0);
-  if(ttReady&&!backgroundChoice&&!adversarial(task)) {
-    const transferable=!['browser','ui-browser','computer-use','build-run','image-read','claude-tools','image-gen'].includes(task.category)
-      &&!task.flags['shared-lock']&&!task.flags['device-lease']&&!(task.tier==='hard'&&task.contentLabels.includes('security'))&&!task.previousAttempts.length
-      &&!cohort.some(r=>candidateParts(snapshot,r.candidate).account.kind==='ttadk'&&r.estimate.expiryOpportunity===true);
-    const measured=(r)=>r.estimate.basis==='progressing'||r.estimate.basis==='queue';
-    const eligible=cohort.filter((r)=>candidateParts(snapshot,r.candidate).account.kind==='trae'&&((transferable&&r.estimate.balance?.eligible&&TIERS[task.tier].includes(r.candidate.modelId))||measured(r)));
-    if(eligible.some((r)=>r.estimate.balance?.eligible)&&transferable) cohort=cohort.filter((r)=>!company(candidateParts(snapshot,r.candidate).account)||eligible.includes(r));
-    else cohort=cohort.filter((r)=>candidateParts(snapshot,r.candidate).account.kind!=='trae'||eligible.includes(r));
+  const ttExpiry=cohort.some(r=>candidateParts(snapshot,r.candidate).account.kind==='ttadk'&&r.estimate.expiryOpportunity===true);
+  if(ttReady&&!backgroundChoice) {
+    // Admission already enforces capabilities, resource rules and retry floors.
+    // Prefer demonstrated immediate TRAE capacity, including depleted buckets,
+    // to preserve TTADK's daily quota. Unknown telemetry is not proof of a free lane.
+    const free=cohort.filter(r=>!task.flags['shared-lock']&&!task.flags['device-lease']&&candidateParts(snapshot,r.candidate).account.kind==='trae'&&r.estimate.balance?.freeNow
+      &&(task.tier!=='light'||TIERS.light.includes(r.candidate.modelId)));
+    if(ttExpiry) cohort=cohort.filter(r=>candidateParts(snapshot,r.candidate).account.kind!=='trae');
+    else if(free.length) cohort=cohort.filter(r=>!company(candidateParts(snapshot,r.candidate).account)||free.includes(r));
+    else cohort=cohort.filter(r=>candidateParts(snapshot,r.candidate).account.kind!=='trae');
   }
   // Normal work retains its established quota order. Within that order, measured
   // congestion can prefer the next available lane; hard work compares Sol/Astra.
@@ -51,11 +62,6 @@ export function orderCandidates(task, snapshot, rows) {
       else if(alt) preferred.set(account.id,alt.candidate.modelId);
     }
     cohort=cohort.filter((r)=>!preferred.has(r.candidate.accountId)||preferred.get(r.candidate.accountId)===r.candidate.modelId);
-  }
-  if (adversarial(task) && cohort.length) {
-    const lock = (r) => ['kimi-k3', 'deepseek-v4.1-flash', 'opus'].indexOf(r.candidate.modelId);
-    const first = Math.min(...cohort.map(lock));
-    cohort = cohort.filter((r) => lock(r) === first);
   }
   const companyClass = (r) => company(candidateParts(snapshot,r.candidate).account) || (!isReview(task) && matchingApproval(task,snapshot,r.candidate,'personal-quota',true)) ? 0 : 1;
   if (cohort.some((r) => companyClass(r) === 0)) cohort = cohort.filter((r) => companyClass(r) === 0);
@@ -93,7 +99,8 @@ export function orderCandidates(task, snapshot, rows) {
     const lock = adversarial(task) ? ['kimi-k3', 'deepseek-v4.1-flash', 'opus'].indexOf(c.modelId) : 0;
     const quotaClass = e.expiryOpportunity === true ? 0 : e.noPrioritySpend === true ? 1 : 2;
     const cost = costComparable ? e.costs.map((c) => c.normalizedShare) : [];
-    const common = [stalled(r)?1:0, lock, companyClass(r)];
+    const retainedMax=task.previousAttempts.some(a=>a.actual?.modelId===c.modelId&&a.actual?.effort==='xhigh')&&c.effort==='max';
+    const common = [stalled(r)?1:0, lock, companyClass(r), task.previousAttempts.length&&e.confidence==='UNKNOWN'&&!retainedMax?1:0];
     const scheduling = backgroundChoice ? [quotaClass, ...cost, e.expiryOpportunity === true ? 0 : 1, e.completionMin]
       : [e.completionMin, e.noPrioritySpend === true ? 0 : 1, e.expiryOpportunity === true ? 0 : 1, ...cost];
     const account=candidateParts(snapshot,c).account, preference=modelPreference(task,account), pref=preference.indexOf(c.modelId);

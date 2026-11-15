@@ -130,7 +130,7 @@ try {
   assert.equal(run(['lookup'], { traeHome: paused }).pick.model, GPT55);
   const retry = run(['implement', '--failures', '2']);
   assert.equal(retry.pick.model, ASTRA); assert.ok(!retry.needsUserOK.includes('Astra (5x Sol usage)'));
-  assert.equal(retry.pick.effort, 'max'); assert.ok(retry.needsUserOK.includes('max effort'));
+  assert.equal(retry.pick.effort, 'max'); assert.ok(!retry.needsUserOK.includes('max effort'));assert.ok(retry.pick.command);
   const noAstra = run(['debug'], { models: [SOL56, TERRA56, GPT55, PRO] });
   assert.ok(personalGate(noAstra));
   for (const [args, model] of [[['lookup'], TERRA56], [['analysis'], SOL56], [['debug'], ASTRA]]) {
@@ -159,12 +159,12 @@ try {
   assert.deepEqual([next.pick.model, next.pick.effort], [SOL56, 'xhigh']);
   const sameModelMax = run([...unavailable, '--failures', '2'], { daily: active, models: ids.filter((id) => id !== FLASH) });
   assert.deepEqual([sameModelMax.pick.model, sameModelMax.pick.effort], [SOL56, 'max']);
-  assert.ok(sameModelMax.needsUserOK.includes('max effort'));
+  assert.ok(!sameModelMax.needsUserOK.includes('max effort'));assert.ok(sameModelMax.pick.command);
   // Sol review P1: a later lower-effort Astra must be removed after depleted-Sol promotion to Astra max.
   const debug = ['debug', '--impact', 'service'];
   const max = run([...debug, '--failures', '1']);
   assert.deepEqual([max.pick.model, max.pick.effort], [ASTRA, 'max']);
-  assert.ok(max.needsUserOK.includes('max effort'));
+  assert.ok(!max.needsUserOK.includes('max effort'));assert.ok(max.pick.command);
   for (const failures of [2, 3]) {
     const r = run([...debug, '--failures', String(failures)]);
     assert.ok(!r.pick || r.pick.model !== ASTRA || r.pick.effort === 'max');
@@ -293,7 +293,7 @@ try {
       assert.ok(e >= (seen.get(key) ?? -1), label);
       seen.set(key, e);
       if (rank >= 0) { assert.ok(rank >= topGPT, label); topGPT = Math.max(topGPT, rank); }
-      if (p.effort === 'max') assert.equal(r.needsUserOK.includes('max effort'), p.account !== 'ttadk', label);
+      if (p.effort === 'max') assert.equal(r.needsUserOK.includes('max effort'), !['ttadk','trae'].includes(p.account), label);
       previous = p;
     }
   }

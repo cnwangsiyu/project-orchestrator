@@ -116,9 +116,9 @@ that keeps the orchestrators alive.
     running tests or builds, device runs, and long CLI output.
   - Don't do it "just this once" yourself.
   - Browser work goes to a `browser` worker (web pages) or a `ui-browser` worker (frontend work with a visual check):
-    TTADK Codex → TRAE (Playwright extension in the user's Chrome, when the token file exists) → browser-ready ChatGPT
+    free TRAE Playwright lane (token present, candidate model load <60%, no queue/stall) → TTADK Codex → browser-ready ChatGPT
     account (personal, needs OK) → Claude (personal, needs OK). Desktop `computer-use` needs a browser-capable worker
-    and uses the same order without TRAE: TTADK → browser-ready personal ChatGPT (needs OK) → Claude (needs OK); a
+    and uses the same order without TRAE: TTADK → browser-ready personal ChatGPT (needs OK); a
     terminal Claude worker has no desktop computer-use tool. If that worker reports it can't reach the browser, fix the pairing; don't take
     over the clicking. Coordinate authorization cards rather than doing the worker's action (see "Plan around permissions").
 - **Read reports through `node <this skill>/scripts/report-summary.mjs <task dir>`.** It prints the
@@ -471,8 +471,8 @@ effort, Codex account and launch command from
     wall-clock time, including queues. Cheap rows (`lookup`, `extract`, `draft`) routed or balanced to TRAE also prefer
     GPT-5.6-Terra, then GPT-5.5, then Flash under known quota telemetry; congestion still blocks opportunistic balancing.
     These two models' vision is untested, so neither is used for `image-read`.
-    When TTADK reset is <4h away and its existing burn projection is <70% of its daily limit, eligible background
-    and light work prefer TTADK over TRAE: "TTADK quota expiring unused: good time for reviews, docs and exploratory work".
+    When TTADK reset is <4h away and its existing burn projection is <70% of its daily limit, eligible work
+    prefers TTADK over an otherwise free TRAE lane: "TTADK quota expiring unused: good time for reviews, docs and exploratory work".
     Missing/stale projection data changes nothing; model-fit, quality, resource and personal-quota rules stay intact.
   - always `--project <slug>`: every decision is logged to `_shared/route-log.jsonl` for the
     nightly review, which needs the project (use `--dry` only to try things out).
@@ -480,18 +480,18 @@ effort, Codex account and launch command from
   When a task spans categories, split it or pick the row for its hardest part.
 - **The script computes the rest** from its table and the quota state in `scripts/lib/state.mjs`:
   - Capability locks: only Artifact/Docs tools and peer negotiation are Claude-only (`claude-tools`). Browser work and
-    frontend visual checks need a browser-capable worker and route TTADK Codex → TRAE (Playwright extension in the
-    user's Chrome, when the token file exists) → browser-ready ChatGPT (personal, needs OK) → Claude (personal, needs
-    OK). Desktop `computer-use --apps <bundle ids>` also needs a browser-capable worker and uses the same order without
-    TRAE. Separately, every task whose output is an image (generating, editing, variants, icons, illustrations, mockup
+    frontend visual checks need a browser-capable worker and route free TRAE Playwright lane (token present, candidate model load <60%, no queue/stall) →
+    TTADK Codex → browser-ready ChatGPT (personal, needs OK) → Claude (personal, needs
+    OK). Desktop `computer-use --apps <bundle ids>` uses TTADK → browser-ready personal ChatGPT (needs OK);
+    TRAE and terminal Claude have no desktop path. Separately, every task whose output is an image (generating, editing, variants, icons, illustrations, mockup
     images) goes to Codex as `image-gen` (user, 2026-11-03).
   - Quota moves: Codex first for anything either vendor can do. Claude takes the work it is clearly
     better at only while it has spare.
-  - Company accounts first: TTADK, then TRAE CLI (account `trae`, the company's official Codex-fork
+  - Company accounts first: prefer an observed free TRAE lane, then TTADK, then TRAE CLI (account `trae`, the company's official Codex-fork
     CLI with its own model pool), then personal quota (user, 2026-11-08). route.mjs moves TTADK's work
     to TRAE when TTADK is out; the personal-quota OK gate follows the actual selected account, including a ladder
-    fall-through while a company account still has eligible models. TRAE has no
-    browser, desktop or image tools (references/codex-workers.md, "TRAE CLI"). Repeated TRAE failures
+    fall-through while a company account still has eligible models. TRAE has Playwright browser tools when paired, but no
+    desktop or image-generation tools (references/codex-workers.md, "TRAE CLI"). Repeated TRAE failures
     pause the failing model family (queue full: 5, then 10, 20, 30 min; vendor restriction: until next 00:00 UTC / 08:00 China time;
     other hard failures such as quota: 30 min, then a probe;
     auth pauses the account); record traecli exec failures with `codex-worker.mjs --account trae note-failure
@@ -515,19 +515,20 @@ effort, Codex account and launch command from
     Candidates are availability replacements, never retry rungs. Resolve and normalize the whole actual ladder before
     taking `--failures N`: drop equal/lower effort on a previously tried model and any weaker GPT; retain only stronger
     effort/model/family or the row's existing stronger steps. A retained same-model max step still needs its OK unless
-    the actual account is TTADK.
+    the actual account is a company account (TTADK or TRAE).
     DeepSeek-V4.1-Flash can't emit one very large file in a single turn (output limit); not for generating a large file
     in one go: split the work or exclude deepseek.
     GPT-5.6-Luna is not used (slowest, about 3x tokens). Evidence and bucket facts: references/model-routing.md.
-  - TTADK first (user, 2026-11-07): when the TTADK company gateway is healthy, every task its
-    GPT-6.1 Sol can handle runs there first, Claude-strength rows included. Exceptions are
-    Claude-only work, image generation, a second opinion on Codex's own work, and browser work
-    before `browser-setup`. Everything else follows the routing above; ChatGPT accounts are
-    used by their quota.
-  - TTADK is the company's quota and the rest is the user's own (user, 2026-11-07): spend TTADK
-    freely where it raises quality (higher efforts, Sol max without asking, free extra reviewers),
-    and personal quota only where TTADK can't do as well. On a TTADK device the ChatGPT and Claude
-    quota is left for the user's other device (no TTADK there).
+  - Free TRAE first (user, 2026-11-15): when the qualifying candidate's own model load is below 60%,
+    its lane can start now and no queue/stall is observed, prefer TRAE to save TTADK daily quota,
+    including depleted low-priority lanes and ready Playwright browser/ui-browser work. Say
+    "TRAE lane free: saving TTADK quota" and name the model in load explanations. TTADK takes
+    work when that lane is congested, queued/stalled, lacks a required capability, or its quota
+    would expire unused (reset <4h, projected burn <70%). Hard floors and all gates remain.
+  - Both TTADK and TRAE are company quota: use max effort without a separate OK on either.
+    Max effort outside company accounts still needs its own scoped approval. A retained same-model
+    max retry outranks switching to missing/stalled telemetry at the same floor. Personal quota
+    remains reserved for work the company accounts cannot do, subject to the existing approvals.
   - TTADK has no concurrency cap: a rate-limited run is retried once on TTADK, then re-routed
     with `--exclude-account ttadk`. TTADK down for a reason the user can fix (SSO, CLI, models):
     tell the user at once; its work goes to TRAE, and only when TRAE is out too does route.mjs ask
@@ -562,10 +563,10 @@ effort, Codex account and launch command from
     (TTADK, TRAE) instead of `xhigh`; a failure still climbs to `xhigh` and `max` (user, 2026-11-09).
   - Every TTADK worker can search the web through its local proxy, once `ttadk-setup` has set it
     up; briefs say search queries must not carry internal information.
-  - Browser work (`browser`/`ui-browser`: web pages in the user's Chrome) routes TTADK Codex → TRAE (Playwright
-    extension in the user's Chrome, when the token file exists) → browser-ready ChatGPT (personal, needs OK) → Claude
+  - Browser work (`browser`/`ui-browser`: web pages in the user's Chrome) routes free TRAE Playwright lane
+    (token present, candidate model load <60%, no queue/stall) → TTADK Codex → browser-ready ChatGPT (personal, needs OK) → Claude
     (personal, needs OK). Re-run route.mjs when an account becomes unavailable instead of choosing by hand. Desktop
-    `computer-use` stays without TRAE: TTADK → browser-ready personal ChatGPT (needs OK) → Claude (needs OK).
+    `computer-use` stays without TRAE: TTADK → browser-ready personal ChatGPT (needs OK).
     Artifact/Docs and peer negotiation stay on Claude (`claude-tools`). Setup for a new machine: `references/codex-workers.md`, "TTADK" and
     "Browser use on a Codex worker".
   - Effort notches: lower for an automatic check, higher for high stakes, higher while Codex is

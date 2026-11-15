@@ -1,24 +1,29 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { findDecision, isRouteDecision, nameMatches } from './global-rules.mjs';
+import { findDecision, isRouteDecision, nameMatches, routedSeat, compareLaunch } from './global-rules.mjs';
 
 export const auditGlobalRules = ({ records, version, since, profiles = {}, ledgerRoot }) => {
   const recent = records.filter((row) => row.t >= since && row.t <= Date.now());
   const launches = recent.filter((row) => row.kind === 'launch');
   const unrouted = recent.filter((row) => row.kind === 'unrouted');
+  const launchMismatches=recent.filter(row=>row.kind==='launch-mismatch');
   const personalQuotaWithoutOK = [], traeGPTOnSecurity = [];
   for (const launch of launches) {
     const route = Number.isFinite(launch.routeAt)
-      ? records.find((row) => isRouteDecision(row) && row.t === launch.routeAt && nameMatches(launch.name, row))
-      : findDecision(records, launch.name, launch.t);
-    if (!route) continue;
-    const recordedOK = launch.userOK || route.personalApproved || route.approvalRef || records.some((row) =>
-      row.kind === 'approval' && row.userOK === true && row.t <= launch.t && row.t >= route.t && nameMatches(launch.name, row));
-    const needsPersonal = (route.needsOK ?? []).some((line) => /^personal quota:/i.test(line));
+      ? records.find((row) => isRouteDecision(row) && row.t === launch.routeAt && nameMatches(launch.name, row)&&(!launch.project||row.project===launch.project))
+      : findDecision(records, launch.name, launch.t,launch.project??undefined);
+    const mismatch=compareLaunch(launch.routed??routedSeat(route,launch.name,launch.role),launch,profiles);
+    if(mismatch&&!launchMismatches.some(r=>r.auditId?r.auditId===launch.auditId:r.t===launch.t&&r.name===launch.name))
+      launchMismatches.push({...launch,kind:'launch-mismatch',...mismatch});
+    if (!route&&!launch.routed) continue;
+    const replacementOK=route?.approvalRef??launch.routeApprovalRef;
+    const recordedOK = mismatch?.companyToPersonal?replacementOK:launch.userOK || route?.personalApproved || route?.approvalRef || records.some((row) =>
+      row.kind === 'approval' && row.userOK === true && row.t <= launch.t && row.t >= route?.t && nameMatches(launch.name, row));
+    const needsPersonal = mismatch?.companyToPersonal||(route?.needsOK ?? []).some((line) => /^personal quota:/i.test(line));
     const company = launch.vendor !== 'claude' && (['ttadk', 'trae'].includes(launch.account)
       || ['ttadk', 'trae'].includes(profiles[launch.account]?.kind));
-    if (needsPersonal && !company && !recordedOK) personalQuotaWithoutOK.push({ ...launch, needsOK: route.needsOK });
-    if (route.security && (launch.account === 'trae' || profiles[launch.account]?.kind === 'trae')
+    if (needsPersonal && !company && !recordedOK) personalQuotaWithoutOK.push({ ...launch, needsOK: route?.needsOK });
+    if (route?.security && (launch.account === 'trae' || profiles[launch.account]?.kind === 'trae')
       && /^gpt[- ]/i.test(launch.model ?? '')) traeGPTOnSecurity.push({ ...launch, decisionModel: route.pick?.model });
   }
   const acknowledgements = [];
@@ -40,8 +45,9 @@ export const auditGlobalRules = ({ records, version, since, profiles = {}, ledge
   for (const row of unrouted) add(row, 'unrouted launch');
   for (const row of personalQuotaWithoutOK) add(row, 'personal quota without recorded user OK');
   for (const row of traeGPTOnSecurity) add(row, 'TRAE GPT launched on a security decision');
+  for (const row of launchMismatches) add(row,`launch mismatch: ${row.differences.map(d=>d.field).join(', ')}${row.blocked?' (blocked; missing recorded personal approval)':''}`);
   for (const row of acknowledgements.filter((ack) => !ack.current)) add(row, `rules-ack ${row.version ?? 'missing'} != ${version}`);
-  return { version, unrouted, personalQuotaWithoutOK, traeGPTOnSecurity, acknowledgements, byOrchestrator,
+  return { version, unrouted, personalQuotaWithoutOK, traeGPTOnSecurity, launchMismatches, acknowledgements, byOrchestrator,
     coverage: { launches: launches.length, decisionsWithoutLaunchEvidence: recent.filter((row) => isRouteDecision(row)
       && !launches.some((launch) => launch.routeAt === row.t)).length,
     note: 'Legacy decisions without launch records are unknown, not proven violations; approval references record user decisions, not automatic authorization.' },

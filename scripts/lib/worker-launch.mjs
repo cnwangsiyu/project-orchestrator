@@ -7,7 +7,7 @@ const keys = ['route-args', 'auto-reroute-depth', 'owner', 'name', 'cwd', 'log',
   'queue-patience-min', 'alt', 'queue-alternative', 'queue-alt-start-min', 'background', 'require-model',
   // Browser/desktop scope must survive a continuation: without it the hub answers every site approval with a decline
   // and the worker reports "The user declined approval" (VAK W304-queue-cancel-2, 2026-11-15).
-  'browser-origins', 'computer-use-apps', 'chrome-profile-dir'];
+  'browser-origins', 'computer-use-apps', 'chrome-profile-dir','project','role','routed-seat','sandbox','network'];
 const launchFile = (account, thread) => {
   if (![account, thread].every((v) => typeof v === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/.test(v)))
     throw Error('invalid public account/thread identifier');

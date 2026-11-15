@@ -6,7 +6,7 @@ const BOOLEANS = new Set(['auto-check', 'writes', 'read-only', 'runs-tests', 'si
   'urgent', 'security', 'adversarial', 'defensive', 'background', 'device-lease', 'shared-lock', 'no-local-build', 'worker', 'installed']);
 const VALUES = new Set(['stakes', 'failures', 'against', 'author', 'impact', 'env', 'exclude-account', 'exclude-model', 'origins', 'mode',
   'sandbox', 'cwd', 'task-dir', 'name', 'project', 'apps', 'user-ok', 'auto-reroute-depth', 'previous-attempt', 'execution', 'actual',
-  'owner', 'exclude-lane', 'review-override', 'review-required', 'profile-override', 'artifact-ref']);
+  'owner', 'exclude-lane', 'review-override', 'review-required', 'profile-override', 'artifact-ref', 'network']);
 const CODE = new Set(['implement', 'implement-hard', 'debug', 'science']);
 export class TaskInputError extends Error {
   constructor(code, message) { super(message); this.name = 'TaskInputError'; this.code = code; this.exitCode = 2; }
@@ -76,6 +76,7 @@ export function createTaskSpec(input) {
   const stakes = enumValue('stakes', 'normal', ['low', 'normal', 'high']);
   const impact = enumValue('impact', null, [null, 'release', 'service', 'throwaway']);
   const env = enumValue('env', 'prod', ['test', 'prod']);
+  if(f.network!==undefined&&!['on','off'].includes(f.network)) fail('INVALID_ENUM','network takes on or off.');
   let failures = integer('failures', 'failures');
   const autoRerouteDepth = integer('auto-reroute-depth', 'autoRerouteDepth', 2);
   if (CODE.has(cat) && !impact) fail('IMPACT_REQUIRED', 'Code tasks require impact.');
@@ -91,6 +92,7 @@ export function createTaskSpec(input) {
   }
   if (execution === 'remote' && f['shared-lock']) fail('EXECUTION_CONFLICT', 'Remote work cannot acquire local shared locks.');
   const sandbox = f.sandbox ?? input.sandbox ?? 'workspace-write', ceiling = input.sandboxCeiling ?? 'workspace-write';
+  if(f.network==='off'&&sandbox==='danger-full-access') fail('INVALID_NETWORK_SANDBOX','Network off requires a read-only or workspace-write sandbox.');
   if (![sandbox, ceiling].every((s) => ['danger-full-access', 'workspace-write', 'read-only'].includes(s))) fail('INVALID_SANDBOX', 'Unsupported sandbox.');
   if (f.sandbox && !['workspace-write', 'read-only'].includes(f.sandbox)) fail('INVALID_SANDBOX', 'Explicit sandbox only narrows the default.');
   if (ceiling === 'workspace-write' && sandbox === 'danger-full-access') fail('SANDBOX_CEILING', 'Requested sandbox exceeds parent ceiling.');

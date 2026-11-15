@@ -15,7 +15,7 @@ export function readHubState(home, account) {
     const stat = fs.lstatSync(file);
     if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 16384) throw Error('unsafe hub state');
     const row = JSON.parse(fs.readFileSync(file, 'utf8'));
-    if (!['HEALTHY', 'BACKOFF', 'BLOCKED'].includes(row.mode) || !Number.isSafeInteger(row.failures) || row.failures < 0
+    if (!row||typeof row!=='object'||Array.isArray(row)||!['HEALTHY', 'BACKOFF', 'BLOCKED'].includes(row.mode) || !Number.isSafeInteger(row.failures) || row.failures < 0
       || !Number.isFinite(row.t) || (row.retryAt !== null && !Number.isFinite(row.retryAt))
       || !/^[A-Z_]{1,80}$/.test(row.reason ?? '')) throw Error('invalid hub state');
     return { mode: row.mode, failures: row.failures, t: row.t, retryAt: row.retryAt, reason: row.reason };
@@ -62,7 +62,7 @@ export function readHubDiagnostics(home, accounts = ['ttadk', 'trae', 'main', 'b
   const errors = [];
   const entries = accounts.map((account) => {
     let state = null;
-    try { state = readHubState(home, account); } catch { errors.push(`${account}: supervisor state UNKNOWN`); }
+    try { state = readHubState(home, account);if(!state) errors.push(`${account}: supervisor state UNKNOWN (missing)`); } catch { errors.push(`${account}: supervisor state UNKNOWN`); }
     const logs = ['.log', '.err.log', '.log.1', '.err.log.1'].map((suffix) => {
       const file = path.join(hubDirectory(home), `${accountId(account)}${suffix}`);
       try {

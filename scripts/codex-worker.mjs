@@ -176,7 +176,8 @@ const SANDBOX_POLICY = { 'read-only': 'readOnly', 'workspace-write': 'workspaceW
 if (opts.sandbox !== undefined && !SANDBOX_POLICY[opts.sandbox]) die(`unknown --sandbox ${opts.sandbox}`);
 if (opts.network === true) opts.network = 'on';
 if (opts.network !== undefined && !['on', 'off'].includes(opts.network)) die('--network takes on or off');
-if (opts.network !== undefined && opts.sandbox !== 'workspace-write') die('--network goes with --sandbox workspace-write');
+if (opts.network !== undefined && !['workspace-write','read-only','danger-full-access'].includes(opts.sandbox)) die('--network needs an explicit sandbox');
+if(opts.network==='off'&&opts.sandbox==='danger-full-access') die('Network off requires a read-only or workspace-write sandbox');
 // Optimistic-launch patience (addendum, 2026-11-13 night): route.mjs passes the deadline it computed from the faster
 // account's reset and the alternative to take. Positive drain can trigger an early handoff; elapsed patience also
 // expires for flat/unknown queues, independently of notifications, after confirming no-progress cancellation.
@@ -199,8 +200,13 @@ const REROUTE_DEPTH = Number(opts['auto-reroute-depth'] ?? (ROUTE_ARGS && routeF
 if (!Number.isInteger(REROUTE_DEPTH) || REROUTE_DEPTH < 0) die('--auto-reroute-depth takes a whole number >= 0');
 tracker?.set({ routeArgs: ROUTE_ARGS, rerouteDepth: REROUTE_DEPTH });
 const BACKGROUND = !!opts.background || !!(ROUTE_ARGS && routeFlag(ROUTE_ARGS, 'background'));
-const launchDecision = cmd === 'start' ? auditLaunch({ name: opts.name, account: account ?? 'main', model: opts.model,
-  sandbox: opts.sandbox, userOK: opts['user-ok'] }) : null;
+let routedMetadata;try {routedMetadata=opts['routed-seat']?JSON.parse(opts['routed-seat']):undefined;} catch {die('--routed-seat needs JSON');}
+const auditStart = (model=opts.model,sandbox=opts.sandbox) => {
+  try {return auditLaunch({ name: opts.name, project:opts.project??(ROUTE_ARGS&&routeFlag(ROUTE_ARGS,'project'))??undefined,
+    account:account??'main',model,effort:opts.effort,sandbox,userOK:opts['user-ok'],role:opts.role,seat:routedMetadata});}
+  catch(e) {die(e.message,e.exitCode??1);}
+};
+const launchDecision = cmd === 'start' ? auditStart() : null;
 if (cmd === 'start') tracker?.warning();
 // Codex's own default for workspace-write network, so an explicit turn-level policy doesn't silently change it.
 const configNetwork = () => {
@@ -214,7 +220,7 @@ const configNetwork = () => {
 // a sandboxed write to .git/hooks or .git/config would run outside the sandbox at the next git command.
 const sandboxPolicy = (mode) => mode === 'workspace-write'
   ? { type: 'workspaceWrite', networkAccess: opts.network === undefined ? configNetwork() : opts.network === 'on' }
-  : { type: SANDBOX_POLICY[mode] };
+  : { type: SANDBOX_POLICY[mode], ...(mode==='read-only'&&opts.network!==undefined?{networkAccess:opts.network==='on'}:{}) };
 
 if (cmd === 'accounts') {
   const reg = readAccounts();
@@ -1123,6 +1129,7 @@ try {
     const config = TRAE_EXTENSION_BROWSER ? { mcp_servers: { playwright: TRAE_PLAYWRIGHT_SERVER } } : undefined;
     const resumed = await call('thread/resume', { threadId: opts.thread, model: opts.model, config }).catch(() => null);
     sessionPath = resumed?.thread?.path ?? null;
+    auditStart(opts.model??resumed?.thread?.model,opts.sandbox??resumed?.thread?.sandbox??undefined);
     tracker?.set({ mayRun: true });
     saveLaunch(account ?? 'main', opts.thread, { ...opts, 'auto-reroute-depth': REROUTE_DEPTH }, resolveOwner(opts.owner), modelEvidence());
     const ts = await call('turn/start', {

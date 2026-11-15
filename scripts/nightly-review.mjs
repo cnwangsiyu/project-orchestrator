@@ -15,7 +15,7 @@ const day = process.env.NIGHTLY_DAY || localDay();
 if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) throw Error('NIGHTLY_DAY must be YYYY-MM-DD');
 const runDir = path.join(dir, `${day}.run`);
 const mode = process.env.NIGHTLY_MODE || 'auto';
-const personalOK = process.env.NIGHTLY_PERSONAL_OK === '1';
+const userOK = process.env.NIGHTLY_USER_OK;
 const setting = (key, fallback, min) => { const n = Number(process.env[key]); return Number.isSafeInteger(n) && n > 0 ? Math.max(min, n) : fallback; };
 const pollMs = setting('NIGHTLY_POLL_MS', 5000, 50);
 const probeMs = setting('NIGHTLY_PROBE_MS', 15000, 100);
@@ -123,20 +123,26 @@ async function command(exe, args, { file, errFile, line, budgetMs, monitor } = {
   });
 }
 
-async function route(category, extra = [], name = `routing-nightly-review-${day}`) {
+async function route(category, extra = [], name = `routing-nightly-review-${day}`, taskDir=attemptDir||path.join(dir,'launches',name)) {
   const r = await command('node', [path.join(skill, 'scripts/route.mjs'), category, ...extra, '--json',
-    '--project', 'routing', '--name', name, '--cwd', dir]);
+    '--project', 'routing', '--name', name, '--cwd', dir,'--task-dir',taskDir,...(mode==='plan'?['--dry']:[])]);
   try { return r.code === 0 ? JSON.parse(r.stdout) : { deferred: r.text }; }
   catch { return { deferred: r.text || 'invalid route response' }; }
 }
 
-async function claude(name, prompt, pick, sessionFile) {
-  const r = pick ? { pick } : await route('claude-tools', [], name);
-  if (!r.pick || r.pick.vendor !== 'claude' || (r.needsUserOK || []).length) return { code: 1, text: 'notification route blocked' };
+const launchable = r => r?.kind==='launch'&&typeof r.pick?.command==='string'&&r.pick.command.trim()&&!(r.needsUserOK||[]).length
+  && ['codex','claude'].includes(r.pick.vendor)&&typeof r.pick.model==='string'&&typeof r.pick.effort==='string';
+const workerPath=(pick,key,fallback)=>{const args=pick.workerArgs,index=Array.isArray(args)?args.indexOf(`--${key}`):-1;return index>=0&&typeof args[index+1]==='string'?args[index+1]:fallback;};
+function brief(taskDir,text) {fs.mkdirSync(taskDir,{recursive:true});fs.writeFileSync(path.join(taskDir,'brief.md'),text+'\n');}
+async function claude(name, prompt, routed, sessionFile) {
+  const taskDir=routed?attemptDir:path.join(sessionFile?path.dirname(sessionFile):dir,`launch-${name}`);
+  const r = routed || await route('claude-tools', [], name,taskDir);
+  if (!launchable(r) || r.pick.vendor !== 'claude') return { code: 1, text: 'notification route blocked' };
+  brief(taskDir,prompt);
   if (sessionFile) atomic(sessionFile, { name, model: r.pick.model, effort: r.pick.effort, id: null, sessionId: null });
-  let misses = 0;
-  const result = await command('claude', ['--bg', '--remote-control', '--permission-mode', 'bypassPermissions', '-n', name,
-    '--model', r.pick.model, '--effort', r.pick.effort, prompt], { monitor: sessionFile && (async () => {
+  let misses = 0; const started=Date.now();
+  const result = await command('sh', ['-c',r.pick.command], { monitor: sessionFile && (async () => {
+      if(!read(sessionFile)?.id&&Date.now()-started<probeMs) return null;
       const failed = await sessionLiveness(sessionFile);
       if (!failed) { misses = 0; return null; }
       return ++misses >= livenessRetries ? failed : null;
@@ -315,15 +321,15 @@ async function workerStatus() {
 async function followWorker(pick, data, resume = false) {
   const w = path.join(skill, 'scripts/codex-worker.mjs');
   if (!resume) update('review', 'running', '证据已采集，启动 hub worker',
-    { account: pick.account || 'main', model: pick.model, effort: pick.effort, thread: null, turn: null, state: 'running' });
-  let args = resume ? [...workerArgs('wait'), '--thread', status.worker.thread] :
-    [...workerArgs('start'), '--cwd', dir, '--sandbox', mode === 'dry' ? 'read-only' : 'danger-full-access',
-      '--effort', pick.effort, '--model', pick.model, '--name', `routing-nightly-review-${day}-attempt-${status.attempt}`,
-      ...(personalOK ? ['--user-ok', 'NIGHTLY_PERSONAL_OK=1'] : []), prompt(data)];
+    { account: pick.account, model: pick.model, effort: pick.effort,sandbox:pick.sandbox, thread: null, turn: null, state: 'running',
+      out:workerPath(pick,'out',path.join(attemptDir,'codex-last.md')),
+      log:workerPath(pick,'log',path.join(attemptDir,'codex.jsonl')) });
+  if(!resume) brief(attemptDir,prompt(data));
+  let first=!resume,args=resume?[...workerArgs('wait'),'--thread',status.worker.thread]:null;
   let completedSince;
   for (;;) {
     const started = Date.now();
-    const r = await command('node', [w, ...args, '--log', path.join(attemptDir, 'worker.jsonl'), '--out', path.join(attemptDir, 'worker-final.md')],
+    const r = await command(first?'sh':'node', first?['-c',pick.command]:[w, ...args, '--log',status.worker.log||path.join(attemptDir,'worker.jsonl'), '--out',status.worker.out||path.join(attemptDir,'worker-final.md')],
       { file: path.join(attemptDir, 'worker-launch.log'), monitor: async (isOpen) => {
         if (!status.worker.thread) return Date.now() - started >= probeMs ? { state: 'blocked', note: 'hub 启动未返回 thread 身份；只关闭启动客户端，不重复提交' } : null;
         const remote = await workerStatus();
@@ -342,6 +348,9 @@ async function followWorker(pick, data, resume = false) {
         const ids = /^thread=(\S+) turn=(\S+)/.exec(line);
         if (ids) update(status.stage, 'running', status.note, { ...status.worker, thread: ids[1], turn: ids[2] });
       } });
+    first=false;
+    if(r.code===0&&status.worker.out&&nonempty(status.worker.out)&&status.worker.out!==path.join(attemptDir,'worker-final.md'))
+      fs.copyFileSync(status.worker.out,path.join(attemptDir,'worker-final.md'));
     progress();
     if (r.code === 0) { update('report', 'running', 'worker 已完成，校验报告和通知文件', { ...status.worker, state: 'done', resultPending: false }); return r; }
     if (r.observed?.state === 'blocked') {
@@ -520,19 +529,21 @@ async function review() {
       newAttempt();
       if (!data) data = await gather();
       else update('gather', 'done', `复用 ${data} 的证据；此前 attempt 已归档`);
-      const r = mode === 'claude' ? { pick: { vendor: 'claude', model: 'opus', effort: 'high' } } : await route('analysis',
-        ['--stakes', 'high', ...(excludeAccounts.length ? ['--exclude-account', excludeAccounts.join(',')] : []),
-          ...(excludeModels.length ? ['--exclude-model', excludeModels.join(',')] : []), ...(personalOK ? ['--urgent'] : [])]);
+      const forceClaude=mode==='claude'?['main',...Object.entries(read(process.env.CODEX_ACCOUNTS||path.join(os.homedir(),'.claude/orchestrator/_shared/codex-accounts.json'))||{})
+        .filter(([,p])=>p?.kind!=='claude').map(([name])=>name),...(read(process.env.QUOTA_CACHE||path.join(os.homedir(),'.claude/orchestrator/_shared/quota.json'))?.codexAccounts||[])
+        .filter(a=>a?.kind!=='claude').map(a=>a.name)]:[];
+      const r = await route('analysis',
+        ['--stakes', 'high',mode==='dry'?'--read-only':'--writes',
+          ...([...new Set([...excludeAccounts,...forceClaude])].length ? ['--exclude-account',[...new Set([...excludeAccounts,...forceClaude])].join(',')] : []),
+          ...(excludeModels.length ? ['--exclude-model', excludeModels.join(',')] : []), ...(userOK?['--urgent','--user-ok',userOK]:[])],
+        `routing-nightly-review-${day}-attempt-${status.attempt}`);
       atomic(path.join(attemptDir, 'route.json'), r);
       const pick = r.pick;
-      if (!pick) { update('review', 'blocked', `无可用路由：${r.deferred || 'no pick'}`); return 1; }
+      if (!launchable(r)) { update('review', 'blocked', `路由未批准启动：${r.deferred||r.needsUserOK?.join('; ')||r.kind||'no executable seat'}`,
+        pick?{account:pick.account||pick.vendor,model:pick.model,effort:pick.effort,sandbox:pick.sandbox,thread:null,state:'not-started'}:null);return 1; }
       const accountsFile = process.env.CODEX_ACCOUNTS || path.join(os.homedir(), '.claude/orchestrator/_shared/codex-accounts.json');
       const kind = read(accountsFile)?.[pick.account]?.kind;
       log(`route: ${pick.model} ${pick.effort} on ${pick.account || pick.vendor} (${kind || pick.vendor})`);
-      if ((!['ttadk', 'trae'].includes(kind) || (r.needsUserOK || []).length) && !personalOK) {
-        update('review', 'blocked', `仅个人额度/审批路由可用：${pick.model} ${pick.effort} on ${pick.account || pick.vendor}；需要用户 OK，不自动打开 ask session`,
-          { account: pick.account || pick.vendor, model: pick.model, effort: pick.effort, thread: null, state: 'not-started' }); return 1;
-      }
       if (pick.vendor === 'claude') {
         update('review', 'running', '个人额度已批准，启动完整 Claude 复盘',
           { account: 'claude', model: pick.model, effort: pick.effort, thread: null, state: 'running' });
@@ -540,7 +551,7 @@ async function review() {
         const sessionFile = path.join(attemptDir, 'worker-session.json');
         const launched = await claude(`routing-nightly-review-${day}-attempt-${status.attempt}`,
           prompt(data) + ` Do the finisher's part as well, including a Chinese completion PushNotification. After report/notify and notifications succeed run ${ackCommand(ack)}. ` +
-          `On failure write ${quote(ack)} as JSON {"delivery":"failed","note":"<reason>"}.`, pick, sessionFile);
+          `On failure write ${quote(ack)} as JSON {"delivery":"failed","note":"<reason>"}.`, r, sessionFile);
         if (launched.code && read(ack)?.delivery !== 'sent') {
           update('review', launched.observed?.state || 'failed', launched.observed?.note || launched.text,
             { ...status.worker, state: launched.observed?.state === 'blocked' ? 'unknown' : 'failed' }); return 1;

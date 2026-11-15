@@ -11,6 +11,9 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'global-rules-test-'));
+fs.mkdirSync(path.join(tmp,'user-signing'),{recursive:true});
+fs.writeFileSync(path.join(tmp,'user-signing/registry.json'),'{}');fs.writeFileSync(path.join(tmp,'user-signing/identities.json'),'{}');
+fs.writeFileSync(path.join(tmp,'resources.tsv'),'iphone8\tphone\t1\tdevice\niphone11\tphone\t1\tdevice\ns21\tphone\t1\tdevice\n');
 const originalHome = process.env.HOME;
 process.env.HOME = tmp;
 try {
@@ -37,7 +40,7 @@ try {
   const ttadk = { name: 'ttadk', kind: 'ttadk', home: tmp, live: true, healthy: true, active: 0,
     models: ['gpt-6.1-sol'], windows: [], resets: null, ssoExpiresAt: now + 240 * h };
   const cache = path.join(tmp, 'quota.json'), settings = path.join(tmp, '.claude', 'settings.json');
-  const env = { ...process.env, CODEX_ACCOUNTS: path.join(tmp, 'profiles.json'), QUOTA_CACHE: cache,
+  const env = { ...process.env,RULES_SHARED:tmp, CODEX_ACCOUNTS: path.join(tmp, 'profiles.json'), QUOTA_CACHE: cache,
     QUOTA_LOG: '0', ROUTE_LOG: '0', TRAE_PROBE: '0', ROUTE_RR: path.join(tmp, 'rotation'),
     ROUTE_NOW:String(now), ROUTE_LOG_FILE:path.join(tmp,'empty-routes'), QUOTA_LOG_FILE: path.join(tmp, 'empty-history') };
   fs.writeFileSync(env.CODEX_ACCOUNTS, JSON.stringify({ main: { home: tmp, hub: 'ws://127.0.0.1:1' } }));
