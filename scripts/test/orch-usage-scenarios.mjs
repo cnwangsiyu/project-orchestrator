@@ -46,23 +46,23 @@ try {
   assert.equal(edits.edits, 9); assert.equal(edits.toolCalls, entries.length); assert.equal(edits.ownKB, 0);
   assert.equal(edits.editedPaths.length, 5); assert.deepEqual(edits.editedPaths[0], { path: path.join(cwd, 'src/a.js'), calls: 2 });
   assert.ok(has(edits, 'edits source files itself')); assert.match(edits.flags.join('\n'), /src\/a\.js.*route\.mjs/);
-  assert.match(run(), /edits 9, tests\/builds 0, tool calls \d+/); assert.match(run(), /edited: 2 .*src\/a\.js/);
+  assert.match(run(), /edits 9, shared-skill edits 0, tests\/builds 0, tool calls \d+/); assert.match(run(), /edited: 2 .*src\/a\.js/);
   console.log('ok   source edits and bookkeeping');
 
   // Shell fixtures only describe writes; none of these command strings are executed.
-  const source = '/workspace/orch-usage-fixture', py = (s) => `python3 -I - <<'PY'\n${s}\nPY`;
+  const source = path.join(tmp, 'shell-repo'), py = (s) => `python3 -I - <<'PY'\n${s}\nPY`;
+  fs.mkdirSync(path.join(source, '.git'), { recursive: true });
   const shellWrites = [
     "sed -i '' 's/a/b/' src/a.js", "sed -i 's/a/b/' src/a.js", "sed -i.bak -e 's/a/b/' src/a.js", "sed --in-place 's/a/b/' src/a.js",
     "perl -pi -e 's/a/b/g' src/a.js", "perl -i.bak -pe 's/a/b/g' src/a.js", "sed -i '' 's/a/b/' 'src/with space.js'",
     py("open('src/a.py', 'w').write('code')"), py("p = 'src/a.py'\nopen(p, 'w').write('code')"),
     py("from pathlib import Path\nPath('src/a.py').write_text('code')"), py("p = Path('src/a.py')\np.write_bytes(b'code')"),
-    "python3 -c 'open(\"src/a.py\", \"a\").write(\"code\")'", py("open(path_from_args, 'w').write('code')"),
+    "python3 -c 'open(\"src/a.py\", \"a\").write(\"code\")'",
     'cat original.js > src/a.js', "cat <<'CODE' > src/a.js\ncode\nCODE", "printf '%s' 'code > comparison' > src/a.js",
     "printf 'code'>>src/a.js", 'tee src/a.js', "printf 'code' | tee -a src/a.js", "tee > src/a.js",
-    "P=src/a.js; sed -i '' 's/a/b/' \"$P\"", "cd /workspace/other && sed -i '' 's/a/b/' src/a.js",
+    "P=src/a.js; sed -i '' 's/a/b/' \"$P\"", `cd '${source}' && sed -i '' 's/a/b/' src/other.js`,
     "sed -i '' 's/a/b/' src/a.js; perl -pi -e 's/a/b/g' src/b.js",
     `python3 - src/a.py <<'PY'\nimport sys\np = sys.argv[1]\nopen(p, 'w').write('code')\nPY`,
-    py("open(os.path.join(root, 'src/a.py'), 'w').write('code')"), "cd $UNKNOWN_REPO && sed -i '' 's/a/b/' src/a.js",
   ];
   const ignoredWrites = [
     "sed -n '1,10p' src/a.js", "perl -pe 's/a/b/g' src/a.js", 'cat src/a.js', "printf '%s' 'code'",
@@ -82,7 +82,8 @@ try {
     `python3 - '${home}/.claude/memory/state.md' <<'PY'\nimport sys\np = sys.argv[1]\nopen(p, 'w').write('state')\nPY`,
     `P=~/.claude/memory/state.md; python3 - <<'PY'\nimport os\np = os.environ['P']\nopen(p, 'w').write('state')\nPY`,
     py("p = os.path.expanduser('~/.claude/memory/state.md')\nopen(p, 'w').write('state')"),
-    py("open(os.path.expanduser('~/.claude/memory/state.md'), 'w').write('state')"),
+    py("open(os.path.expanduser('~/.claude/memory/state.md'), 'w').write('state')"), py("open(path_from_args, 'w').write('code')"),
+    py("open(os.path.join(root, 'src/a.py'), 'w').write('code')"), "cd $UNKNOWN_REPO && sed -i '' 's/a/b/' src/a.js",
   ];
   for (const [commands, expected] of [[shellWrites, 1], [ignoredWrites, 0]]) for (const command of commands) {
     transcript([call('Bash', { command }, { cwd: source })]);
@@ -90,16 +91,20 @@ try {
   }
   const unknown = py("open(path_from_args, 'w').write('code')");
   transcript([call('Bash', { command: unknown }, { cwd: source })]);
-  assert.deepEqual(analyse().editedPaths, [{ path: unknown.slice(0, 60).replace(/\s+/g, ' '), calls: 1 }]);
+  assert.deepEqual(analyse().editedPaths, []);
   transcript(shellWrites.map((command) => call('Bash', { command }, { cwd: source })));
   const labour = analyse(); assert.equal(labour.edits, shellWrites.length); assert.ok(has(labour, 'edits source files itself'));
   assert.equal(labour.editedPaths[0].path, `${source}/src/a.js`);
   console.log('ok   shell edits, Python writes and output/bookkeeping exclusions');
 
-  // Discover .git entries without invoking git. Both worktree files and normal repo directories count below temp roots.
+  // Source must be in a project checkout outside ~/.claude. Job worktrees, memory, briefs and ledgers remain data even
+  // when a .git marker appears above them (the real false-positive paths from review-policy item 7).
   const job = path.join(home, '.claude', 'jobs', 'fixture'), work = path.join(job, 'tmp', 'po-wt-file'), repo = path.join(job, 'tmp', 'po-wt-dir');
+  const projectWork = path.join(tmp, 'project-worktree');
   fs.mkdirSync(path.join(work, 'scripts'), { recursive: true }); fs.mkdirSync(path.join(repo, '.git'), { recursive: true });
+  fs.mkdirSync(path.join(projectWork, 'scripts'), { recursive: true });
   fs.writeFileSync(path.join(work, '.git'), 'gitdir: /fixture/main/.git/worktrees/file\n');
+  fs.writeFileSync(path.join(projectWork, '.git'), 'gitdir: /fixture/main/.git/worktrees/project\n');
   const writesPath = (p) => `open('${p}', 'w').write('code')`;
   const cases = [
     ["J=$CLAUDE_JOB_DIR/tmp; cat > $J/mr-desc.md <<'DOC'\nbrief\nDOC", 0],
@@ -111,19 +116,20 @@ try {
     ["printf 'notes' > /workspace/orchestrator/tasks/threads.txt", 0],
     ["D=/workspace/.claude-data/orchestrator/tasks/T47; cat > $D/kws-merged-conclusion.md <<'DOC'\nnotes\nDOC", 0],
     ["cd /workspace/.claude-data/orchestrator/tasks; cat > tasks/$UNKNOWN/brief-resume.md <<'DOC'\nnotes\nDOC", 0],
-    [`cd /workspace/.claude-data/orchestrator/tasks; P='${work}/scripts/route.mjs'; sed -i '' 's/a/b/' "$P"`, 1, `${work}/scripts/route.mjs`],
-    [`cd '${work}' && ${py(writesPath('scripts/route.mjs'))}`, 1, `${work}/scripts/route.mjs`],
-    [`cd '${repo}' && ${py(writesPath('scripts/route.mjs'))}`, 1, `${repo}/scripts/route.mjs`],
-    [`R=$CLAUDE_JOB_DIR/tmp/po-wt-file; cd "$R" && ${py("p = 'scripts/route.mjs'\nopen(p, 'w').write('code')")}`, 1, `${work}/scripts/route.mjs`],
-    [`R=$CLAUDE_JOB_DIR/tmp/po-wt-file; P=$R/scripts/route.mjs; sed -i '' 's/a/b/' "$P"`, 1, `${work}/scripts/route.mjs`],
-    [`cd '${work}' && ${py("Path('scripts/route.mjs').write_text('code')")}`, 1, `${work}/scripts/route.mjs`],
-    [`cd '${work}' && ${py("p = os.path.join(os.getcwd(), 'scripts', 'route.mjs')\nopen(p, 'w').write('code')")}`, 1, `${work}/scripts/route.mjs`],
+    [`cd /workspace/.claude-data/orchestrator/tasks; P='${work}/scripts/route.mjs'; sed -i '' 's/a/b/' "$P"`, 0],
+    [`cd '${work}' && ${py(writesPath('scripts/route.mjs'))}`, 0],
+    [`cd '${repo}' && ${py(writesPath('scripts/route.mjs'))}`, 0],
+    [`R=$CLAUDE_JOB_DIR/tmp/po-wt-file; cd "$R" && ${py("p = 'scripts/route.mjs'\nopen(p, 'w').write('code')")}`, 0],
+    [`R=$CLAUDE_JOB_DIR/tmp/po-wt-file; P=$R/scripts/route.mjs; sed -i '' 's/a/b/' "$P"`, 0],
+    [`cd '${work}' && ${py("Path('scripts/route.mjs').write_text('code')")}`, 0],
+    [`cd '${work}' && ${py("p = os.path.join(os.getcwd(), 'scripts', 'route.mjs')\nopen(p, 'w').write('code')")}`, 0],
+    [`cd '${projectWork}' && ${py(writesPath('scripts/source.mjs'))}`, 1, `${projectWork}/scripts/source.mjs`],
     [`cd '${work}' && ${py(writesPath('orchestrator/tasks/plan.md'))}`, 0],
     [`cd '${work}' && printf 'notes' > .claude-data/threads.txt`, 0],
-    [`TMPDIR='${cwd}/scratch'; printf 'notes' > "$TMPDIR/state.md"`, 0],
-    [`TMPDIR='${cwd}'; printf 'notes' > "$TMPDIR/state.md"`, 0],
+    [`TMPDIR='${cwd}/scratch'; printf 'notes' > "$TMPDIR/state.md"`, 1, `${cwd}/scratch/state.md`],
+    [`TMPDIR='${cwd}'; printf 'notes' > "$TMPDIR/state.md"`, 1, `${cwd}/state.md`],
     [py(writesPath(path.join(tmp, 'plain-temp', 'source.mjs'))), 0],
-    [py("p = unknown_path()\nopen(p, 'w').write('code')"), 1],
+    [py("p = unknown_path()\nopen(p, 'w').write('code')"), 0],
   ];
   for (const [command, expected, editedPath] of cases) {
     transcript([call('Bash', { command }, { cwd: source })]);
@@ -131,16 +137,28 @@ try {
     if (editedPath) assert.deepEqual(r.editedPaths, [{ path: editedPath, calls: 1 }]);
   }
   const toolCases = [
-    [path.join(work, 'scripts', 'route.mjs'), 1], [path.join(repo, 'source.mjs'), 1], [path.join(job, 'tmp', 'notes.md'), 0],
+    [path.join(work, 'scripts', 'route.mjs'), 0], [path.join(repo, 'source.mjs'), 0], [path.join(projectWork, 'source.mjs'), 1], [path.join(job, 'tmp', 'notes.md'), 0],
     [path.join(work, 'orchestrator', 'plan.md'), 0], [path.join(work, '.claude-data', 'threads.txt'), 0],
     ['/workspace/.claude-data/orchestrator/tasks/T47/kws-merged-conclusion.md', 0], ['/workspace/orchestrator/tasks/plan.md', 0],
   ];
   for (const [file_path, expected] of toolCases) {
     transcript([call('Write', { file_path })]); assert.equal(analyse().edits, expected, file_path);
   }
-  transcript([call('Bash', { command: `cd '${work}' && ${py("p = 'orchestrator/plan.md'\nopen(p, 'w').write('notes')\np = 'scripts/route.mjs'\nopen(p, 'w').write('code')")}` })]);
-  assert.deepEqual(analyse().editedPaths, [{ path: `${work}/scripts/route.mjs`, calls: 1 }]);
-  console.log('ok   orchestrator data, temp worktrees and resolved shell/Python paths');
+  transcript([call('Bash', { command: `cd '${projectWork}' && ${py("p = 'orchestrator/plan.md'\nopen(p, 'w').write('notes')\np = 'scripts/source.mjs'\nopen(p, 'w').write('code')")}` })]);
+  assert.deepEqual(analyse().editedPaths, [{ path: `${projectWork}/scripts/source.mjs`, calls: 1 }]);
+  console.log('ok   project checkout boundary, orchestrator data and resolved shell/Python paths');
+
+  const sharedSkill = path.join(home, '.agents', 'skills', 'project-orchestrator');
+  fs.mkdirSync(path.join(sharedSkill, 'references'), { recursive: true });
+  transcript([call('Edit', { file_path: path.join(sharedSkill, 'references', 'nightly-review.md') }),
+    call('Write', { file_path: path.join(sharedSkill, 'SKILL.md') })]);
+  const direct = analyse();
+  assert.equal(direct.edits, 0); assert.equal(direct.sharedSkillEdits, 2);
+  assert.ok(has(direct, 'edited the shared skill directly')); assert.equal(direct.sharedSkillEditedPaths.length, 2);
+  const ownerDir = path.join(home, '.claude', 'orchestrator', 'global-rules'); fs.mkdirSync(ownerDir, { recursive: true });
+  fs.writeFileSync(path.join(ownerDir, 'ledger.md'), 'Orchestrator session: "Usage fixture \u4e3b\u5bf9\u8bdd"\n');
+  assert.equal(analyse().sharedSkillEdits, 0); assert.ok(!has(analyse(), 'edited the shared skill directly'));
+  console.log('ok   non-owner shared-skill edits reported separately; rules owner exempt');
 
   const builds = ['npm test', 'npm run build', 'pnpm test', 'pnpm build', 'pnpm run test', 'yarn test', 'yarn build', 'yarn run build',
     'node --test', 'pytest -q', 'go test ./...', 'cargo test', 'cargo build', 'xcodebuild -scheme App', 'gradle build', './gradlew test',

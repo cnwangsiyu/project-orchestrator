@@ -6,7 +6,9 @@
 // Sections: routing decisions (route-log.jsonl), quota and reset-card waste (quota-log.jsonl), the current lean, and the
 // model catalog compared with the last saved snapshot (--save-catalog stores today's as the new baseline).
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import readline from 'node:readline';
 import { execFileSync } from 'node:child_process';
 import { SHARED, ROUTE_LOG, QUOTA_LOG, readState, analyze, leanLines, fmt, outcomeOwns, isReviewDecision, dedupeOutcomes, codexCatalog, readProfiles, compareHarness, harnessDrift, modelView, effectiveFirst, OUTCOME_OVERRIDES } from './lib/state.mjs';
 import { loadDigest, isRouteDecision } from './lib/global-rules.mjs';
@@ -21,6 +23,21 @@ const opt = (k) => { const i = argv.indexOf(`--${k}`); return i < 0 ? null : arg
 const H = Number(opt('hours') ?? 24), since = Date.now() - H * 3600000;
 const lines = (f) => { try { return fs.readFileSync(f, 'utf8').split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean); } catch { return []; } };
 const count = (xs, key) => xs.reduce((m, x) => { const k = key(x); m[k] = (m[k] ?? 0) + 1; return m; }, {});
+const pct = (n, d) => d ? Math.round(n / d * 1000) / 10 : null;
+const bareName = (project, name = '') => name.startsWith(`${project}-`) ? name.slice(project.length + 1) : name;
+const reviewBase = (r) => bareName(r.project ?? '', r.name ?? '')
+  .replace(/-(?:re-?review|rereview)(?:-?\d+)?$/i, '')
+  .replace(/-(?:review|r)(?:-?\d+)?$/i, '');
+const namedReReview = (name = '') => /-(?:re-?review|rereview)(?:-?\d+)?$|-(?:review|r)-?([2-9]\d*)$/i.test(name);
+const requiredReview = (r) => r.reviewRequired === true || r.requiredReview === true || r.adversarial === true
+  || r.category === 'review-high' || r.signing === true || r.installed === true || r.impact === 'release' || r.stakes === 'high';
+const yieldFrom = (values) => {
+  const structured = values.flatMap((v) => Array.isArray(v) ? v : []).map((v) => typeof v === 'string' ? v : `${v?.severity ?? ''} ${v?.priority ?? ''}`);
+  const text = values.filter((v) => typeof v === 'string').concat(structured).join('\n');
+  if (/\b(?:no|zero|0)\s+(?:new\s+)?p0(?:\s*\/\s*|\s+(?:or|and)\s+)p1\b|\bno\s+(?:blocking|p0\s*\/\s*p1)\s+findings?\b/i.test(text)) return 'none';
+  if (/\bP[01]\b/i.test(text)) return 'found-p0-p1';
+  return 'UNKNOWN';
+};
 
 // ---- routing ----
 const all = lines(ROUTE_LOG);
@@ -28,7 +45,9 @@ const routes = all.filter((r) => r.t >= since && isRouteDecision(r));
 // Outcomes (outcome.mjs): first-pass rate, rework rounds and time per vendor / model / category of the first attempt.
 // Older records said `pass` with fix rounds; outcome.mjs now records those as rework, so read them the same way.
 // A task counts once: normal records merge, then explicit corrections override supplied fields.
-const outs = dedupeOutcomes(all.filter((r) => r.kind === 'outcome')).filter((r) => r.t >= since).map((o) => (o.result === 'pass' && o.rounds > 0 ? { ...o, result: 'rework' } : o));
+const allOuts = dedupeOutcomes(all.filter((r) => r.kind === 'outcome'))
+  .map((o) => (o.result === 'pass' && o.rounds > 0 ? { ...o, result: 'rework' } : o));
+const outs = allOuts.filter((r) => r.t >= since);
 const mouts = outs.map(modelView);
 const correctedValues = (o) => Object.fromEntries(OUTCOME_OVERRIDES.filter((f) => Object.hasOwn(o, f)).map((f) => [f, o[f]]));
 const samePick = (a, b) => ['vendor', 'model', 'effort', 'account'].every((f) => (a?.[f] ?? null) === (b?.[f] ?? null));
@@ -112,6 +131,63 @@ const background = (() => {
   return { tasks: rows.length, completed: rows.filter((r) => r.result).length, timed: minutes.length,
     totalMinutes, meanMinutes: minutes.length ? Math.round(totalMinutes / minutes.length * 10) / 10 : null };
 })();
+// Review launches are dispatches, including an embedded second reviewer. A route with a primary plus `second` is two
+// dispatches and two review launches when the primary itself is a review. Re-review is a round property, so both
+// reviewers in that later round carry it; a second reviewer does not manufacture an extra round.
+const reviewLaunches = (() => {
+  const rows = all.filter(isRouteDecision).filter((r) => r.pick).sort((a, b) => a.t - b.t);
+  const seen = new Map(), launches = [];
+  const outcomeEvidence = (r, base) => allOuts.filter((o) => o.project === r.project
+    && (bareName(o.project ?? '', o.name ?? '') === bareName(r.project ?? '', r.name ?? '') || reviewBase(o) === base));
+  for (const r of rows) {
+    const base = reviewBase(r), key = `${r.project ?? '(none)'}/${base || r.name || '(unnamed)'}`;
+    const primaryReview = isReviewDecision(r);
+    const reReview = primaryReview && (namedReReview(r.name) || (seen.get(key) ?? 0) > 0);
+    const evidence = [r.reviewResult, r.reviewOutcome, r.findings, r.note, r.outcomeNote,
+      ...outcomeEvidence(r, base).flatMap((o) => [o.note, o.notes, o.findings, o.reviewResult])];
+    if (primaryReview) launches.push({ t: r.t, project: r.project ?? '(none)', task: key, category: r.category,
+      secondReviewer: false, reReview, required: requiredReview(r), yield: yieldFrom(evidence) });
+    if (r.second) launches.push({ t: r.t, project: r.project ?? '(none)', task: key, category: r.category,
+      secondReviewer: true, reReview, required: requiredReview(r), yield: yieldFrom([r.secondReviewResult, r.secondFindings]) });
+    if (primaryReview) seen.set(key, (seen.get(key) ?? 0) + 1);
+  }
+  return launches;
+})();
+const reviewWindow = (windowSince) => {
+  const decisions = all.filter((r) => r.t >= windowSince && isRouteDecision(r) && r.pick);
+  const launches = reviewLaunches.filter((r) => r.t >= windowSince);
+  const dispatches = decisions.length + decisions.filter((r) => r.second).length;
+  const summarize = (rs, ds) => {
+    const byTask = count(rs, (r) => r.task);
+    const found = rs.filter((r) => r.yield === 'found-p0-p1').length, none = rs.filter((r) => r.yield === 'none').length;
+    return { dispatches: ds, reviews: rs.length, reviewSharePct: pct(rs.length, ds), overBudget: ds > 0 && rs.length / ds > .1,
+      requiredReviews: rs.filter((r) => r.required).length, requiredReviewSharePct: pct(rs.filter((r) => r.required).length, ds),
+      secondReviewers: rs.filter((r) => r.secondReviewer).length, secondReviewerSharePct: pct(rs.filter((r) => r.secondReviewer).length, rs.length),
+      reReviews: rs.filter((r) => r.reReview).length, reReviewSharePct: pct(rs.filter((r) => r.reReview).length, rs.length),
+      reviewsPerTask: byTask, tasksAtLeast3: Object.entries(byTask).filter(([, n]) => n >= 3).map(([task, reviews]) => ({ task, reviews })),
+      yield: { foundP0P1: found, none, unknown: rs.length - found - none } };
+  };
+  const projects = [...new Set(decisions.map((r) => r.project ?? '(none)').concat(launches.map((r) => r.project)))];
+  const byProject = Object.fromEntries(projects.map((project) => {
+    const pd = decisions.filter((r) => (r.project ?? '(none)') === project);
+    return [project, summarize(launches.filter((r) => r.project === project), pd.length + pd.filter((r) => r.second).length)];
+  }));
+  const dayKeys = [...new Set(decisions.map((r) => `${new Date(r.t).toISOString().slice(0, 10)}\0${r.project ?? '(none)'}`))];
+  const byProjectDay = Object.fromEntries(dayKeys.map((key) => {
+    const [day, project] = key.split('\0');
+    const pd = decisions.filter((r) => new Date(r.t).toISOString().startsWith(day) && (r.project ?? '(none)') === project);
+    const pr = launches.filter((r) => new Date(r.t).toISOString().startsWith(day) && r.project === project);
+    return [`${day}/${project}`, summarize(pr, pd.length + pd.filter((r) => r.second).length)];
+  }));
+  return { ...summarize(launches, dispatches), byProject, byProjectDay };
+};
+const reviewBudget = {
+  policyLimitPct: 10,
+  window: { hours: H, ...reviewWindow(since) },
+  rolling24h: reviewWindow(Date.now() - 24 * 3600000),
+  rolling7d: reviewWindow(Date.now() - 7 * 86400000),
+  note: 'Each primary, second reviewer and re-review launch is one dispatch. UTC project-days; UNKNOWN review yield means no explicit P0/P1 result was recorded.',
+};
 const routing = {
   automaticReroutes: (() => {
     const hops = all.filter((r) => r.kind === 'reroute' && r.automatic && r.t >= since);
@@ -205,6 +281,111 @@ const quota = { snapshots: snaps.filter((s) => s.t >= since).length, resets, car
     (by[hour] ??= []).push({ t: s.t, ttadk: s.ttadk ?? null, trae: s.trae ?? null }); return by;
   }, {}) };
 
+// Standard public API prices per 1M tokens, captured from developers.openai.com/api/docs/pricing on 2026-11-14.
+// TRAE units are not dollars; pricing the observed session tokens merely lets the nightly review reconcile whether a
+// reset window looks dollar-like and how much of it the retained session telemetry can explain.
+const TRAE_PUBLIC_PRICES = {
+  'gpt-6-astra': { input: 10, cachedInput: 1, output: 50 },
+  'gpt-6.1-sol': { input: 2, cachedInput: .1, output: 10 },
+  'gpt-5.6-sol': { input: 4, cachedInput: .4, output: 20 },
+};
+const canonicalModel = (model) => String(model ?? '').trim().toLowerCase();
+const tokenNumbers = (u) => u && ({ input: Number(u.input_tokens ?? u.inputTokens ?? 0),
+  cached: Number(u.cached_input_tokens ?? u.cachedInputTokens ?? 0), output: Number(u.output_tokens ?? u.outputTokens ?? 0) });
+const validTokens = (u) => u && [u.input, u.cached, u.output].every((n) => Number.isFinite(n) && n >= 0);
+const traeSessionFiles = (root, cutoff) => {
+  const out = [], stack = [root];
+  while (stack.length && out.length < 20000) {
+    const dir = stack.pop(); let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+    for (const e of entries) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) stack.push(p);
+      else if (e.isFile() && e.name.endsWith('.jsonl')) {
+        try { if (fs.statSync(p).mtimeMs >= cutoff) out.push(p); } catch {}
+      }
+    }
+  }
+  return out;
+};
+const readTraeTokenEvents = async (root, cutoff) => {
+  const events = [], errors = [];
+  const files = traeSessionFiles(root, cutoff);
+  for (const file of files) {
+    let model = null, prev = { input: 0, cached: 0, output: 0 };
+    try {
+      const rl = readline.createInterface({ input: fs.createReadStream(file), crlfDelay: Infinity });
+      for await (const line of rl) {
+        if (!/token|turn_context|contextUsage/.test(line)) continue;
+        let row; try { row = JSON.parse(line); } catch { continue; }
+        const p = row.payload ?? {}, params = row.params ?? {};
+        model = canonicalModel(p.model ?? p.context?.model ?? params.context?.contextUsage?.model ?? model);
+        const raw = p.type === 'token_count' ? p.info?.total_token_usage : params.tokenUsage?.total;
+        const total = tokenNumbers(raw);
+        if (!validTokens(total) || !model) continue;
+        const sampled = params.context?.contextUsage?.sampledAt;
+        const t = Number.isFinite(Number(sampled)) ? Number(sampled) * 1000 : Date.parse(row.timestamp ?? '');
+        const reset = total.input < prev.input || total.cached < prev.cached || total.output < prev.output;
+        const from = reset ? { input: 0, cached: 0, output: 0 } : prev;
+        const delta = { input: total.input - from.input, cached: total.cached - from.cached, output: total.output - from.output };
+        prev = total;
+        if (Number.isFinite(t) && t >= cutoff && delta.input + delta.output > 0) events.push({ t, model, ...delta });
+      }
+    } catch (e) { errors.push(`${path.basename(file)}: ${String(e.message).split('\n')[0]}`); }
+  }
+  return { events, files: files.length, errors: errors.slice(0, 20) };
+};
+const traeReconciliation = async () => {
+  const readings = [];
+  for (const s of snaps) {
+    const daily = s.trae?.daily ?? s.trae?.quota?.daily;
+    if (!daily || typeof daily !== 'object') continue;
+    for (const [rawModel, q] of Object.entries(daily)) {
+      let reset = Number(q?.resetsAt ?? q?.resetTime); if (reset > 0 && reset < 1e12) reset *= 1000;
+      const used = Number(q?.used ?? q?.quotaUsed), sampledAt = Number(s.trae?.sampledAt ?? s.t);
+      if (!Number.isFinite(reset) || !Number.isFinite(used) || !Number.isFinite(sampledAt)) continue;
+      readings.push({ model: canonicalModel(rawModel), reset, used, t: sampledAt });
+    }
+  }
+  if (!readings.length) return { windows: [], status: 'UNKNOWN', reason: 'no TRAE per-model quota readings', prices: TRAE_PUBLIC_PRICES };
+  const earliest = Math.min(...readings.map((r) => r.reset - 86400000), since) - 3600000;
+  const profiles = readProfiles(), traeHome = profiles.trae?.home ?? path.join(os.homedir(), '.trae', 'cli');
+  const sessionRoot = process.env.TRAE_SESSIONS_DIR || path.join(traeHome, 'sessions');
+  const telemetry = await readTraeTokenEvents(sessionRoot, earliest);
+  const groups = new Map();
+  for (const r of readings) (groups.get(`${r.model}\0${r.reset}`) ?? (groups.set(`${r.model}\0${r.reset}`, []), groups.get(`${r.model}\0${r.reset}`))).push(r);
+  const windows = [];
+  for (const rs of groups.values()) {
+    rs.sort((a, b) => a.t - b.t);
+    const model = rs[0].model, resetAt = rs[0].reset, startAt = resetAt - 86400000;
+    if (resetAt < since || startAt > Date.now()) continue;
+    const endAt = Math.min(resetAt, Date.now()), duration = Math.max(1, endAt - startAt);
+    const units = Math.max(...rs.map((r) => r.used));
+    const tokenRows = telemetry.events.filter((e) => e.model === model && e.t >= startAt && e.t <= endAt);
+    const tokens = tokenRows.reduce((a, e) => ({ input: a.input + e.input, cached: a.cached + e.cached, output: a.output + e.output }), { input: 0, cached: 0, output: 0 });
+    const price = TRAE_PUBLIC_PRICES[model];
+    const uncached = Math.max(0, tokens.input - tokens.cached);
+    const dollars = price && tokenRows.length ? (uncached * price.input + tokens.cached * price.cachedInput + tokens.output * price.output) / 1e6 : null;
+    const ratio = dollars != null && units > 0 ? dollars / units : null;
+    const quotaSpan = Math.max(0, Math.min(endAt, rs.at(-1).t) - Math.max(startAt, rs[0].t));
+    const allWindowEvents = telemetry.events.filter((e) => e.t >= startAt && e.t <= endAt);
+    const sessionSpan = allWindowEvents.length > 1 ? Math.max(...allWindowEvents.map((e) => e.t)) - Math.min(...allWindowEvents.map((e) => e.t)) : 0;
+    windows.push({ model, startAt, resetAt, complete: resetAt <= Date.now(), unitsUsed: units,
+      tokens, publicListCostUsd: dollars == null ? null : Math.round(dollars * 100) / 100,
+      dollarsPerUnit: ratio == null ? null : Math.round(ratio * 1000) / 1000,
+      coveragePct: ratio == null ? null : Math.round(Math.min(1, ratio) * 1000) / 10,
+      quotaLogSpanPct: Math.round(Math.min(1, quotaSpan / duration) * 1000) / 10,
+      sessionTelemetrySpanPct: Math.round(Math.min(1, sessionSpan / duration) * 1000) / 10,
+      status: units > 0 && price && tokenRows.length ? 'MEASURED' : 'UNKNOWN',
+      reason: units <= 0 ? 'no bucket units used' : !price ? 'no public list price for this model' : !tokenRows.length ? 'no matching TRAE token telemetry' : null });
+  }
+  return { windows: windows.sort((a, b) => a.resetAt - b.resetAt || a.model.localeCompare(b.model)),
+    status: windows.some((w) => w.status === 'MEASURED') ? 'MEASURED' : 'UNKNOWN', sessionFiles: telemetry.files,
+    readErrors: telemetry.errors, prices: TRAE_PUBLIC_PRICES,
+    note: 'Coverage is public-list dollars explained per bucket unit, capped at 100%; it is not proof that a TRAE unit equals $1. Span percentages show retained telemetry coverage. Missing quota, price or tokens is UNKNOWN.' };
+};
+quota.traeReconciliation = await traeReconciliation();
+
 // ---- now ----
 const data = readState();
 const st = analyze(data);
@@ -237,11 +418,12 @@ const resourceFiles = [RESOURCE_LOG, ...Array.from({ length: 6 }, (_, i) => `${R
 const resourceRows = await readJsonl(resourceFiles, since - 600000);
 const resources = resourceReview(resourceRows.rows, { hours: H, quotaRecords: snaps });
 const utilisation = { ...resources.utilisation, coverage: resources.coverage, readErrors: resourceRows.errors };
-const result = { hours: H, routing, outcomes, background, quota, utilisation, now, catalog, globalRules };
+const result = { hours: H, routing, reviews: reviewBudget, outcomes, background, quota, utilisation, now, catalog, globalRules };
 if (opt('json')) { console.log(JSON.stringify(result, null, 1)); process.exit(0); }
 const show = (title, v) => console.log(`\n## ${title}\n${typeof v === 'string' ? v : JSON.stringify(v, null, 1)}`);
 console.log(`# routing review data — last ${H}h (to ${fmt(Date.now())})`);
 show('routing', routing);
+show('review budget', reviewBudget);
 show('outcomes (first attempt\'s vendor/model/category)', outcomes);
 show('background tasks (wall-clock minutes, including queues)', background);
 show('quota and cards', quota);

@@ -1,0 +1,87 @@
+#!/usr/bin/env node
+// Review-budget and TRAE points↔tokens telemetry against isolated route/quota/session fixtures.
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+
+const scripts = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const review = path.join(scripts, 'review-data.mjs');
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'review-data-test-'));
+const home = path.join(tmp, 'home'), bin = path.join(tmp, 'bin'), sessions = path.join(tmp, 'sessions');
+const routeLog = path.join(tmp, 'routes.jsonl'), quotaLog = path.join(tmp, 'quota.jsonl'), cache = path.join(tmp, 'cache.json');
+const now = Date.now(), h = 3600000, reset = now + h, start = reset - 24 * h;
+for (const dir of [home, bin, sessions]) fs.mkdirSync(dir, { recursive: true });
+fs.writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\nprintf "fixture\\n"\n', { mode: 0o755 });
+fs.writeFileSync(path.join(bin, 'codex'), '#!/bin/sh\nprintf \'{"models":[]}\\n\'\n', { mode: 0o755 });
+fs.writeFileSync(cache, JSON.stringify({ checkedAt: now, claude: null, codexAccounts: [], errors: {}, history: {} }));
+fs.writeFileSync(path.join(tmp, 'profiles.json'), '{}');
+
+const pick = { vendor: 'codex', model: 'gpt-6.1-sol', effort: 'high', account: 'ttadk' };
+const row = (minutes, project, name, category, extra = {}) => ({ t: now - minutes * 60000, project, name, category, pick, ...extra });
+const routes = [
+  row(50, 'p', 'T1', 'implement'),
+  row(40, 'p', 'T1-R', 'review', { second: { ...pick, model: 'kimi-k3' }, reviewResult: 'found P1', secondFindings: 'no P0/P1 findings' }),
+  row(30, 'p', 'T1-R2', 'review-high', { reviewResult: 'no P0/P1 findings' }),
+  row(20, 'p', 'T2', 'implement', { impact: 'release', second: { ...pick, model: 'gpt-6-astra' } }),
+  row(10, 'q', 'Q1', 'analysis'),
+];
+fs.writeFileSync(routeLog, routes.map((r) => JSON.stringify(r)).join('\n') + '\n');
+
+const daily = (used) => ({
+  'gpt-5.6-sol': { used, limit: 80, resetsAt: reset },
+  'gpt-6-astra': { used: used ? 58 : 0, limit: 58, resetsAt: reset },
+  'gpt-6.1-sol': { used, limit: 80, resetsAt: reset },
+});
+const quotaRows = [
+  { t: start + 10 * 60000, trae: { sampledAt: start + 10 * 60000, daily: daily(0) } },
+  { t: now, trae: { sampledAt: now, daily: daily(80) } },
+];
+fs.writeFileSync(quotaLog, quotaRows.map((r) => JSON.stringify(r)).join('\n') + '\n');
+
+const session = (file, model, input) => {
+  const half = Math.floor(input / 2);
+  const rows = [
+    { timestamp: new Date(start + 20 * 60000).toISOString(), type: 'turn_context', payload: { model } },
+    { timestamp: new Date(start + 30 * 60000).toISOString(), type: 'event_msg', payload: { type: 'token_count', info: { total_token_usage: { input_tokens: half, cached_input_tokens: 0, output_tokens: 0 } } } },
+    { timestamp: new Date(now - 10 * 60000).toISOString(), type: 'event_msg', payload: { type: 'token_count', info: { total_token_usage: { input_tokens: input, cached_input_tokens: 0, output_tokens: 0 } } } },
+  ];
+  fs.writeFileSync(path.join(sessions, file), rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
+};
+session('sol56.jsonl', 'GPT-5.6-Sol', 20_000_000); // $80 at the public $4/M input price.
+session('astra.jsonl', 'GPT-6-Astra', 5_800_000); // $58 at the public $10/M input price.
+
+const env = { ...process.env, HOME: home, PATH: `${bin}:${process.env.PATH}`, ROUTE_LOG_FILE: routeLog,
+  QUOTA_LOG_FILE: quotaLog, QUOTA_CACHE: cache, CODEX_ACCOUNTS: path.join(tmp, 'profiles.json'),
+  TRAE_SESSIONS_DIR: sessions, RESOURCE_LOG_FILE: path.join(tmp, 'no-resources.jsonl'), RULES_LEDGER_ROOT: path.join(tmp, 'no-ledgers'),
+  ROUTE_LOG: '0', QUOTA_LOG: '0', TRAE_PROBE: '0' };
+
+try {
+  const json = JSON.parse(execFileSync(process.execPath, [review, '--hours', '168', '--json'], { env, encoding: 'utf8' }));
+  const p = json.reviews.rolling24h.byProject.p;
+  assert.deepEqual([p.dispatches, p.reviews, p.reviewSharePct], [6, 4, 66.7]);
+  assert.deepEqual([p.secondReviewers, p.secondReviewerSharePct, p.reReviews, p.reReviewSharePct], [2, 50, 1, 25]);
+  assert.deepEqual(p.tasksAtLeast3, [{ task: 'p/T1', reviews: 3 }]);
+  assert.deepEqual(p.yield, { foundP0P1: 1, none: 2, unknown: 1 });
+  assert.deepEqual([p.requiredReviews, p.requiredReviewSharePct], [2, 33.3]);
+  assert.equal(json.reviews.rolling24h.byProject.q.reviewSharePct, 0);
+  assert.ok(Object.keys(json.reviews.rolling7d.byProjectDay).some((k) => k.endsWith('/p')));
+  console.log('PASS per-project/day review share, second/re-review shares, yield, required reviews and ≥3 flags');
+
+  const windows = json.quota.traeReconciliation.windows;
+  const byModel = (model) => windows.find((w) => w.model === model);
+  assert.deepEqual([byModel('gpt-5.6-sol').publicListCostUsd, byModel('gpt-5.6-sol').dollarsPerUnit, byModel('gpt-5.6-sol').coveragePct], [80, 1, 100]);
+  assert.deepEqual([byModel('gpt-6-astra').publicListCostUsd, byModel('gpt-6-astra').dollarsPerUnit, byModel('gpt-6-astra').coveragePct], [58, 1, 100]);
+  assert.equal(byModel('gpt-6.1-sol').status, 'UNKNOWN'); assert.equal(byModel('gpt-6.1-sol').coveragePct, null);
+  assert.ok(byModel('gpt-5.6-sol').quotaLogSpanPct > 90); assert.ok(byModel('gpt-5.6-sol').sessionTelemetrySpanPct > 90);
+  console.log('PASS TRAE reset-window units, token pricing, ratio, coverage and UNKNOWN gaps');
+
+  const text = execFileSync(process.execPath, [review, '--hours', '24'], { env, encoding: 'utf8' });
+  assert.match(text, /## review budget/); assert.match(text, /traeReconciliation/);
+  console.log('PASS review-data text and JSON expose review budget and reconciliation');
+  console.log('\nall pass');
+} finally {
+  fs.rmSync(tmp, { recursive: true, force: true });
+}
