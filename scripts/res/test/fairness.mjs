@@ -2,6 +2,7 @@
 // Deterministic build-waiter fairness scenarios; all state is scratch-owned.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 
@@ -17,6 +18,16 @@ fs.writeFileSync(path.join(mocks, 'uname'), '#!/bin/sh\necho Darwin\n', { mode: 
 for (const command of ['idevice_id', 'adb', 'xcrun'])
   fs.writeFileSync(path.join(mocks, command), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
 fs.writeFileSync(path.join(mocks, 'sleep'), '#!/bin/sh\nexec /bin/sleep 0.05\n', { mode: 0o755 });
+fs.writeFileSync(path.join(mocks, 'mktemp'), `#!/bin/bash
+if [ "\${PAUSE_WAITER_MKTEMP:-0}" = 1 ] && [[ "$*" = *'/build-waiters/.staging.'* ]]; then
+  target=$(/usr/bin/mktemp "$@") || exit $?
+  touch "${root}/staging-created"
+  while [ ! -f "${root}/release-staging" ]; do /bin/sleep 0.02; done
+  printf '%s\\n' "$target"
+  exit 0
+fi
+exec /usr/bin/mktemp "$@"
+`, { mode: 0o755 });
 fs.writeFileSync(path.join(mocks, 'ps'), `#!/bin/bash
 if [ "$1" = -p ]; then kill -0 "$2" 2>/dev/null || exit 1; echo "$2"; exit 0; fi
 if [ "$*" = '-axo pid=' ]; then
@@ -38,6 +49,8 @@ const argv = (by, purpose = 'fairness') => ['--by', by, '--project', 'scratch', 
 const lock = (id) => path.join(state, 'locks', `${id}.d`);
 const waiters = () => fs.existsSync(path.join(state, 'build-waiters'))
   ? fs.readdirSync(path.join(state, 'build-waiters')).filter((name) => name.startsWith('waiter.')) : [];
+const stagedWaiters = () => fs.existsSync(path.join(state, 'build-waiters'))
+  ? fs.readdirSync(path.join(state, 'build-waiters')).filter((name) => name.startsWith('.staging.')) : [];
 const field = (id, key) => {
   const file = path.join(lock(id), 'info');
   if (!fs.existsSync(file)) return undefined;
@@ -81,12 +94,23 @@ async function stop(child, signal) {
 function take(id, by) { const r = run(['take', id, ...argv(by)]); eq(r.code, 0, r.text); }
 function release(id, by) { eq(run(['return', id, '--by', by]).code, 0); }
 function releaseBuild(by) { eq(run(['return-build', '--by', by]).code, 0); }
-function manualWaiter(name, { holder, pid, heartbeat, order = '00000000000000000001', gate = 0 }) {
+function manualWaiter(name, { holder, pid, heartbeat, host = os.hostname(), order = '00000000000000000001', gate = 0 }) {
   const dir = path.join(state, 'build-waiters', `waiter.${name}`); fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, 'info'), `holder\t${holder}\nproject\tscratch\ntask\t${holder}\npid\t${pid}\nhost\tfixture\nsince\tnow\nstart\t1\norder\t${order}\nheartbeat\t${heartbeat}\nblocked\tlane\ngate_streak\t${gate}\nlane\t\nlane3\tCLOSED\n`);
+  fs.writeFileSync(path.join(dir, 'info'), `holder\t${holder}\nproject\tscratch\ntask\t${holder}\npid\t${pid}\nhost\t${host}\nsince\tnow\nstart\t1\norder\t${order}\nheartbeat\t${heartbeat}\nblocked\tlane\ngate_streak\t${gate}\nlane\t\nlane3\tCLOSED\n`);
 }
 
 try {
+  // A status cleanup during mktemp cannot see or remove an incomplete waiter.
+  take('heavy-lane-1', 'publish-1'); take('heavy-lane-2', 'publish-2');
+  const publishing = start(['wait-build', ...argv('publishing'), '--timeout', '1'], { PAUSE_WAITER_MKTEMP: '1' });
+  await until(() => fs.existsSync(path.join(root, 'staging-created')), 'waiter staging was not created', publishing);
+  const publishingStatus = run(['status', 'heavy-build']); eq(publishingStatus.code, 0, publishingStatus.text);
+  eq(waiters(), []); eq(stagedWaiters().length, 1);
+  fs.writeFileSync(path.join(root, 'release-staging'), 'release\n');
+  await until(() => waiters().length === 1 && publishing.text.includes('retry in'), 'staged waiter was not published', publishing);
+  eq(stagedWaiters(), []); eq((await stop(publishing, 'SIGTERM')).code, 143); eq(waiters(), []);
+  release('heavy-lane-1', 'publish-1'); release('heavy-lane-2', 'publish-2');
+
   // Reproduce lane churn: the first returned normal lane stays reserved and the
   // waiting build acquires it before another short lane-only task can retake it.
   take('heavy-lane-1', 'churn-1'); take('heavy-lane-2', 'churn-2');
@@ -112,6 +136,27 @@ try {
   manualWaiter('stale', { holder: 'stale', pid: process.pid, heartbeat: Math.floor(Date.now() / 1000) - 46 });
   const staleIgnored = run(['take', 'heavy-lane-1', ...argv('after-stale')]); eq(staleIgnored.code, 0, staleIgnored.text);
   eq(waiters(), []); release('heavy-lane-1', 'after-stale'); release('heavy-lane-2', 'occupied');
+
+  // A fresh remote-host waiter lives by heartbeat, never the local PID table.
+  take('heavy-lane-2', 'remote-occupied');
+  manualWaiter('remote', { holder: 'remote', pid: 2147483647, host: 'remote-host', heartbeat: Math.floor(Date.now() / 1000) });
+  const remoteReserved = run(['take', 'heavy-lane-1', ...argv('remote-contender')]);
+  eq(remoteReserved.code, 2); ok(remoteReserved.text.includes('reserved for waiting build remote'), remoteReserved.text);
+  eq(waiters(), ['waiter.remote']);
+  const remoteInfo = path.join(state, 'build-waiters', 'waiter.remote', 'info');
+  fs.writeFileSync(remoteInfo, fs.readFileSync(remoteInfo, 'utf8').replace(/^heartbeat\t.*$/m, `heartbeat\t${Math.floor(Date.now() / 1000) - 46}`));
+  const remoteExpired = run(['take', 'heavy-lane-1', ...argv('after-remote-expiry')]); eq(remoteExpired.code, 0, remoteExpired.text);
+  eq(waiters(), []); release('heavy-lane-1', 'after-remote-expiry'); release('heavy-lane-2', 'remote-occupied');
+
+  // An incomplete non-stale build hold suspends reservation by default.
+  take('heavy-lane-2', 'legacy-occupied');
+  manualWaiter('slot-blocked', { holder: 'slot-blocked', pid: process.pid, heartbeat: Math.floor(Date.now() / 1000) });
+  fs.mkdirSync(lock('heavy-build')); fs.writeFileSync(path.join(lock('heavy-build'), 'info'), 'by\tlegacy-build\n');
+  const besideLegacyBuild = run(['take', 'heavy-lane-1', ...argv('beside-legacy-build')]); eq(besideLegacyBuild.code, 0, besideLegacyBuild.text);
+  eq(waiters(), ['waiter.slot-blocked']);
+  release('heavy-lane-1', 'beside-legacy-build'); fs.rmSync(lock('heavy-build'), { recursive: true });
+  fs.rmSync(path.join(state, 'build-waiters', 'waiter.slot-blocked'), { recursive: true });
+  release('heavy-lane-2', 'legacy-occupied');
 
   // Three consecutive gate-blocked polls suspend reservation until the gate can pass.
   take('heavy-lane-2', 'gate-occupant');

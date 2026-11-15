@@ -299,13 +299,16 @@ log() { printf '%s\t%s\t%s\t%s\t%s\n' "$(now)" "$1" "$2" "$3" "$4" >>"$LOG"; }
 waiter_field() { awk -F'\t' -v k="$2" '$1==k{print $2}' "$1/info" 2>/dev/null || true; }
 
 waiter_live() {
-  local dir="$1" pid heartbeat current rc=0
+  local dir="$1" pid host heartbeat current rc=0
   [ -f "$dir/info" ] || return 1
-  pid=$(waiter_field "$dir" pid); heartbeat=$(waiter_field "$dir" heartbeat); current=$(date +%s)
-  case "$pid" in ''|*[!0-9]*|0) return 1 ;; esac
+  heartbeat=$(waiter_field "$dir" heartbeat); current=$(date +%s)
   case "$heartbeat" in ''|*[!0-9]*) return 1 ;; esac
   awk -v heartbeat="$heartbeat" -v current="$current" -v stale="$WAITER_STALE_SECONDS" \
     'BEGIN { exit !(current >= heartbeat && current - heartbeat <= stale) }' || return 1
+  host=$(waiter_field "$dir" host)
+  [ "$host" = "$(local_host)" ] || return 0
+  pid=$(waiter_field "$dir" pid)
+  case "$pid" in ''|*[!0-9]*|0) return 1 ;; esac
   ps -p "$pid" -o pid= >/dev/null 2>&1 || rc=$?
   # As with hold staleness, only ps exit 1 proves death. An unavailable probe
   # does not discard a fresh heartbeat.
@@ -362,9 +365,7 @@ lane_reserved_for_waiter() {
     build_holder=$(field heavy-build by); build_pid=$(field heavy-build pid)
     # A holder that still has a waiter record is an in-flight pair attempt,
     # not the established active build that suspends the reservation.
-    if [ -n "$build_holder" ] && [ -n "$build_pid" ]; then
-      holder_has_live_waiter "$build_holder" "$build_pid" || return 1
-    fi
+    holder_has_live_waiter "$build_holder" "$build_pid" || return 1
   fi
   for lane in ${pin:-heavy-lane-1 heavy-lane-2 heavy-lane-3}; do
     [ -n "$(reg_line "$lane")" ] || continue
@@ -387,8 +388,9 @@ write_build_waiter() {
 }
 
 start_build_waiter() {
+  local published suffix
   mkdir -p "$WAITERS"
-  BUILD_WAITER_DIR=$(mktemp -d "$WAITERS/waiter.XXXXXX")
+  BUILD_WAITER_DIR=$(mktemp -d "$WAITERS/.staging.XXXXXX")
   BUILD_WAITER_HOST=$(local_host); BUILD_WAITER_SINCE=$(now); BUILD_WAITER_START=$(date +%s)
   if command -v python3 >/dev/null 2>&1; then
     BUILD_WAITER_ORDER=$(python3 -c 'import time; print(f"{time.time_ns():020d}")')
@@ -398,6 +400,10 @@ start_build_waiter() {
   BUILD_WAITER_GATE_STREAK=0
   write_build_waiter starting CLOSED
   arm_build_waiter_cleanup
+  suffix="${BUILD_WAITER_DIR##*.staging.}"; published="$WAITERS/waiter.$suffix"
+  BUILD_WAITER_STAGING="$BUILD_WAITER_DIR"; BUILD_WAITER_DIR="$published"
+  mv "$BUILD_WAITER_STAGING" "$BUILD_WAITER_DIR"
+  BUILD_WAITER_STAGING=
   log waiter-start heavy-build "$BY ($PROJECT${TASK:+/$TASK})" "pid=$PID"
 }
 
@@ -408,9 +414,10 @@ update_build_waiter() {
 }
 
 cleanup_build_waiter() {
-  [ -n "${BUILD_WAITER_DIR:-}" ] || return 0
-  rm -rf "$BUILD_WAITER_DIR"
+  [ -z "${BUILD_WAITER_DIR:-}" ] || rm -rf "$BUILD_WAITER_DIR"
+  [ -z "${BUILD_WAITER_STAGING:-}" ] || rm -rf "$BUILD_WAITER_STAGING"
   BUILD_WAITER_DIR=
+  BUILD_WAITER_STAGING=
 }
 
 arm_build_waiter_cleanup() {
@@ -743,7 +750,7 @@ cmd_acquire() {
   if [ "${1:-}" = --help ]; then build_usage; return 0; fi
   local timeout=0 timeout_seen= pin= args=() ALLOW_PID=1
   local duration deadline remaining delay=1 rc reading candidate missing3=0 ACQUIRE_PID_EXPLICIT
-  local BUILD_WAITER_DIR= BUILD_WAITER_HOST= BUILD_WAITER_SINCE= BUILD_WAITER_START=
+  local BUILD_WAITER_DIR= BUILD_WAITER_STAGING= BUILD_WAITER_HOST= BUILD_WAITER_SINCE= BUILD_WAITER_START=
   local BUILD_WAITER_ORDER= BUILD_WAITER_GATE_STREAK=0 lane3_state=CLOSED block_reason
   while [ $# -gt 0 ]; do
     case "$1" in
