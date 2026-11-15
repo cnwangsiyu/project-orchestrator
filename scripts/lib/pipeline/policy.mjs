@@ -59,6 +59,6 @@ export function policyEffort(t,c,a,s) {
     else if(budget?.overspending&&t.flags['auto-check']&&t.stakes!=='high') notch(-1);
     if(!companyDevice&&c.family==='claude'&&budget?.expiring&&!cheap) notch(1);
   }
-  if(t.failures&&t.tier==='hard'&&c.family==='gpt'&&EFFORTS.indexOf(e)<3) e='xhigh';
+  if(t.qualityFailures&&t.tier==='hard'&&c.family==='gpt'&&EFFORTS.indexOf(e)<3) e='xhigh';
   return e;
 }

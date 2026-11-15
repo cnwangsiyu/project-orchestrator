@@ -30,6 +30,10 @@ export function pUserRules(t, s, c) {
 }
 export function pExclusions(t, s, c) {
   const { account } = candidateParts(s, c);
+  const toolChannelFailed = ['browser','ui-browser','computer-use'].includes(t.category) && t.previousAttempts.some(a =>
+    a.taskId === t.taskId && (a.role ?? 'primary') === t.role && ['failed','completed','succeeded'].includes(a.state) && a.failureKind === 'tool'
+    && a.actualStatus === 'KNOWN' && (a.browserChannel ?? s.accounts.find(p => p.id === a.actual?.accountId)?.kind) === account.kind);
+  if (toolChannelFailed) return deny('pExclusions', 'TOOL_CHANNEL_FAILED', 'Browser/desktop tool failure excludes this channel; select the next capable channel.', c);
   const excluded = t.exclusions.some((e) => (!e.companyOnly || company(account)) && (e.accountId === null || !e.accountId || e.accountId === c.accountId)
     && (e.scope === 'account' ? e.value === c.accountId : e.scope === 'family' ? e.value === c.family : modelId(e.value) === c.modelId));
   return excluded ? deny('pExclusions', 'EXCLUDED', 'Candidate matches an explicit exclusion.', c) : pass('pExclusions');
@@ -115,7 +119,10 @@ export function pPreviousFloor(t, s, c) {
   if (array(t.floor.previousAttemptIds).some((id) => !relevant.some((a) => a.id === id)) || relevant.some((a) => a.actualStatus !== 'KNOWN' || !a.actual))
     return deny('pPreviousFloor', 'PREVIOUS_ATTEMPT_UNKNOWN', 'An actual prior tuple is unknown.', c);
   for (const a of relevant) {
-    if (!dominates(c, a.actual, s)) return deny('pPreviousFloor', 'RETRY_BELOW_ACTUAL_FLOOR', 'Candidate does not dominate every real prior attempt.', c);
+    // A failed tool says nothing about answer quality across model families.
+    const toolSwitch = a.failureKind === 'tool' && ['browser','ui-browser','computer-use'].includes(t.category)
+      && c.family !== familyOf(a.actual.modelId ?? a.actual.model);
+    if (!toolSwitch && !dominates(c, a.actual, s)) return deny('pPreviousFloor', 'RETRY_BELOW_ACTUAL_FLOOR', 'Candidate does not dominate every real prior attempt.', c);
     if (['quality', 'spec', 'process'].includes(a.failureKind) && modelId(a.actual.modelId ?? a.actual.model) === c.modelId && a.actual.effort === c.effort
       && !matchingApproval(t, s, c, 'retry-same-floor')) return deny('pPreviousFloor', 'QUALITY_REPEAT_REQUIRES_DECISION', 'Repeating an exhausted quality step requires an explicit task decision.', c);
   }

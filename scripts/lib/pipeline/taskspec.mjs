@@ -4,10 +4,10 @@ import { VERSION, array, object, idOK, modelId, unique, clone, freeze, fingerpri
 export const CATEGORIES = Object.freeze(['lookup', 'extract', 'analysis', 'research', 'implement', 'implement-hard', 'ui-browser',
   'debug', 'review', 'review-high', 'design', 'docs', 'draft', 'build-run', 'browser', 'computer-use', 'claude-tools', 'science', 'image-gen', 'image-read', 'second-opinion']);
 const BOOLEANS = new Set(['auto-check', 'writes', 'read-only', 'runs-tests', 'signing', 'fresh', 'json', 'table', 'no-redeem', 'dry',
-  'urgent', 'security', 'adversarial', 'defensive', 'background', 'device-lease', 'shared-lock', 'no-local-build', 'worker', 'installed']);
+  'urgent', 'security', 'adversarial', 'defensive', 'background', 'device-lease', 'shared-lock', 'no-local-build', 'worker', 'installed', 'no-browser-preflight']);
 const VALUES = new Set(['stakes', 'failures', 'against', 'author', 'impact', 'env', 'exclude-account', 'exclude-model', 'origins', 'mode',
   'sandbox', 'cwd', 'task-dir', 'name', 'project', 'apps', 'user-ok', 'auto-reroute-depth', 'previous-attempt', 'execution', 'actual',
-  'owner', 'exclude-lane', 'review-override', 'review-required', 'profile-override', 'artifact-ref', 'network', 'review-class', 'review-reason', 'review-scope']);
+  'owner', 'failure-kind', 'trusted-cwd', 'exclude-lane', 'review-override', 'review-required', 'profile-override', 'artifact-ref', 'network', 'review-class', 'review-reason', 'review-scope']);
 const CODE = new Set(['implement', 'implement-hard', 'debug', 'science']);
 export class TaskInputError extends Error {
   constructor(code, message) { super(message); this.name = 'TaskInputError'; this.code = code; this.exitCode = 2; }
@@ -79,6 +79,7 @@ export function createTaskSpec(input) {
     if (!/^(0|[1-9]\d*)$/.test(String(raw)) || !Number.isSafeInteger(Number(raw)) || Number(raw) > max) fail('INVALID_NUMBER', key==='impact'?'impact takes service|throwaway|release; release is ONLY class A: an externally released version that cannot be rolled back within hours. Local data reads/writes are not release; irreversible data operations use --review-class C.':`Invalid ${key}.`);
     return Number(raw);
   };
+  const failureKind = enumValue('failure-kind', 'quality', ['tool', 'quality', 'infra']);
   const stakes = enumValue('stakes', 'normal', ['low', 'normal', 'high']);
   let impact = enumValue('impact', null, [null, 'release', 'service', 'throwaway']);
   const project=f.project??input.project??'UNKNOWN', profile=projectReviewPolicy(project,input.projectProfiles??{});
@@ -133,9 +134,10 @@ export function createTaskSpec(input) {
   if (labels.size > 1) labels.delete('ordinary');
   const writes = f['read-only'] ? false : (f.writes ?? input.writes ?? ['implement', 'implement-hard', 'debug', 'science', 'docs', 'draft', 'ui-browser', 'build-run', 'computer-use', 'claude-tools', 'image-gen'].includes(cat));
   const background = f.background ?? input.background ?? false;
-  const tier = ['implement-hard', 'debug', 'science', 'review-high', 'design'].includes(cat) || stakes === 'high' || (CODE.has(cat) && failures > 0) ? 'hard'
-    : failures > 0 ? 'normal'
-    : cat === 'build-run' && env === 'prod' ? 'normal'
+  const qualityFailures = failureKind === 'quality' ? failures : failedActualIds.size;
+  const tier = ['implement-hard', 'debug', 'science', 'review-high', 'design'].includes(cat) || stakes === 'high' || (CODE.has(cat) && qualityFailures > 0) ? 'hard'
+    : qualityFailures > 0 ? 'normal'
+    : cat === 'build-run' && (env === 'prod' || impact === 'release') ? 'normal'
       : ['lookup', 'extract', 'draft'].includes(cat) || stakes === 'low' || background || (cat === 'build-run' && env === 'test') ? 'light' : 'normal';
   const caps = new Set(array(input.capabilitiesNeeded));
   for (const c of ({ research: ['search'], browser: ['browser', 'signed-in-browser', 'vision'], 'ui-browser': ['browser', 'vision'],
@@ -155,7 +157,7 @@ export function createTaskSpec(input) {
     role: input.role ?? 'primary', parentTaskId: input.parentTaskId ?? null, briefHash: input.briefHash ?? 'UNKNOWN', flags: f,
     reviewClass,reviewReason,reviewScope:f['review-scope']??input.reviewScope??null,policyNotes:unique([...array(input.policyNotes),...policyNotes]), tier, stakes, impact, env, execution, writes, runsTests: f['runs-tests'] ?? input.runsTests ?? false, background,
     contentLabels: unique([...labels]), capabilitiesNeeded: unique([...caps]), exclusions: unique(exclusions.map(stable)).map(JSON.parse),
-    failures, previousAttempts: attempts.sort((a, b) => compare(String(a?.id), String(b?.id))),
+    failures, failureKind, qualityFailures, previousAttempts: attempts.sort((a, b) => compare(String(a?.id), String(b?.id))),
     floor: clone(input.floor ?? { profileIds: [], previousAttemptIds: [], relationVersion: VERSION, historyStatus: failures || autoRerouteDepth || f['previous-attempt'] ? 'UNKNOWN' : 'KNOWN' }),
     authorAttemptId: input.authorAttemptId ?? null, againstAttemptId: input.againstAttemptId ?? null,
     cwd: f.cwd ?? input.cwd ?? '.', taskDir: f['task-dir'] ?? input.taskDir ?? '.', sandbox, sandboxCeiling: ceiling,
@@ -175,7 +177,7 @@ export function createTaskSpec(input) {
 }
 export function deriveReview(task, { role = 'second', authorAttemptId = null, artifactRevision = task.artifactRevision } = {}) {
   const flags = { ...task.flags, 'read-only': true };
-  for (const k of ['writes', 'signing', 'runs-tests', 'author', 'against', 'apps', 'origins', 'failures', 'previous-attempt', 'actual', 'auto-reroute-depth']) delete flags[k];
+  for (const k of ['writes', 'signing', 'runs-tests', 'author', 'against', 'apps', 'origins', 'failures', 'previous-attempt', 'actual', 'auto-reroute-depth', 'failure-kind', 'no-browser-preflight']) delete flags[k];
   return createTaskSpec({ ...task, category: task.category==='review-high'||['A','D'].includes(task.reviewClass)?'review-high':'review', flags, role, writes: false, runsTests: false,
     previousAttempts: [], failures: 0, autoRerouteDepth: 0, floor: { profileIds: [], previousAttemptIds: [], relationVersion: task.floor.relationVersion, historyStatus: 'KNOWN' },
     authorAttemptId, againstAttemptId: null, artifactRevision, selectionCause: 'initial', qualityEscalation: null });

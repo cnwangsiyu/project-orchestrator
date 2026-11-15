@@ -277,6 +277,17 @@ const ttadkToken = (bin, kind) => {
   } catch { return null; }
 };
 // The dashboard's x-jwt-token first; LLMBox's own CLI auth (Authorization: Bearer at-<sso>) only if that is rejected.
+// Hub liveness is the app-server's own HTTP health endpoint. `list` walks the thread-history database and can take longer
+// than its probe budget on a busy account (2026-11-15: TTADK's 518 MB history made every probe time out, so routing
+// treated a healthy company account as unknown and asked for personal quota). `list` stays best-effort for the count.
+const hubHealthy = (hub) => {
+  if (process.env.HUB_HEALTH_PROBE === '0' || typeof hub !== 'string' || !/^ws:\/\//.test(hub)) return false;
+  try {
+    const code = execFileSync('/usr/bin/curl', ['-s', '-m', '3', '-o', '/dev/null', '-w', '%{http_code}', hub.replace(/^ws/, 'http').replace(/\/$/, '') + '/healthz'],
+      { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] });
+    return code.trim() === '200';
+  } catch { return false; }
+};
 const readTtadkUsage = (bin) => {
   const tries = [];
   const jwt = ttadkToken(bin, 'jwt');
@@ -334,6 +345,7 @@ const readTtadk = (name, prof, { routing = false } = {}) => {
     }
   } catch {}
   try {
+    if (hubHealthy(prof.hub)) out.live = true; // fast path; routing then skips the slow list below
     if (routing && out.live) {
       const broken=hubBroken(name,prof);
       return broken ? {...out,healthy:false,hubBroken:broken,reason:broken.why} : out;
@@ -341,7 +353,7 @@ const readTtadk = (name, prof, { routing = false } = {}) => {
     const list = execFileSync(process.execPath, [WORKER, '--account', name, 'list', '--limit', routing ? '3' : '60'], { encoding: 'utf8', timeout: 30000, stdio: ['ignore', 'pipe', 'pipe'] });
     out.live = true;
     out.active = list.split('\n').filter((l) => l.split('\t')[2] === 'active').length;
-  } catch { if (!routing) out.live = false; if(routing&&!out.live) out.statusReadFailed=true; }
+  } catch { if (!routing && !hubHealthy(prof.hub)) out.live = false; if(routing&&!out.live) out.statusReadFailed=true; }
   const broken = out.live ? hubBroken(name, prof) : null;
   if (broken) { out.healthy = false; out.hubBroken = broken; out.reason = `its hub answers but can't start threads (${broken.why}); restart it ${broken.fix}`; }
   if (out.search) {
@@ -419,6 +431,7 @@ const readTrae = (name, prof, { routing = false } = {}) => {
   if (pause?.status==='UNKNOWN'&&!pause.missing) {out.healthy=false;out.reason=pause.reason;}
   else if (pause&&pause.status!=='UNKNOWN') { out.healthy = false; out.paused = pause; out.reason = `paused until ${fmt(pause.pausedUntil)} after worker failures (${pause.reason})`; }
   try {
+    if (hubHealthy(prof.hub)) out.live = true; // fast path; routing then skips the slow list below
     if (routing && out.live) {
       const broken=hubBroken(name,prof);
       return broken ? {...out,healthy:false,hubBroken:broken,reason:broken.why} : out;
@@ -426,7 +439,7 @@ const readTrae = (name, prof, { routing = false } = {}) => {
     const list = execFileSync(process.execPath, [WORKER, '--account', name, 'list', '--limit', routing ? '3' : '60'], { encoding: 'utf8', timeout: 30000, stdio: ['ignore', 'pipe', 'pipe'] });
     out.live = true;
     out.active = list.split('\n').filter((l) => l.split('\t')[2] === 'active').length;
-  } catch { if (!routing) out.live = false; }
+  } catch { if (!routing && !hubHealthy(prof.hub)) out.live = false; }
   const broken = out.live ? hubBroken(name, prof) : null;
   if (broken) { out.healthy = false; out.hubBroken = broken; out.reason = `its hub answers but can't start threads (${broken.why}); restart it ${broken.fix}`; }
   return out;

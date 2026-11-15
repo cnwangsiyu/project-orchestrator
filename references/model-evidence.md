@@ -1,0 +1,629 @@
+# Model routing evidence and history
+
+Restored from `git show 12f5ed2:references/model-routing.md` for BC-39. Benchmarks and dated decisions are historical evidence, not fresh measurements. Policy passages marked **changed 2026-11-15** identify superseded behavior; [model-routing.md](model-routing.md) and the pipeline are authoritative.
+
+Why the router evolved, and the quota policy behind it. The script is the source of truth;
+this file is its rationale. Researched 2026-11-03 (Claude Code 2.1.317,
+codex-cli 0.166); re-check `claude --help`, `codex debug models` and the sources at the bottom when a model changes.
+
+## The lineup at a glance
+
+Relative cost is the output-token price normalized to Sol 6.1 = Sonnet 5.5 = 1 (Codex: plan credits; Claude: API
+price, since Anthropic publishes no plan multipliers). The two vendors are separate subscription pools: cost decides
+the model inside a pool, quota decides the pool.
+
+| Model | Rel. cost | Strength (public benchmarks) | Use for | Don't use for |
+|---|---|---|---|---|
+| Claude **Opus 5.5** | 2 | Top or tied on most coding (FrontierCode 54%, CursorBench 58%), knowledge work (GDPval 1846), HLE with tools 67.7%; `medium` is the sweet spot | Open-ended or ambiguous work, design, hard-debugging escalation, high-stakes review, analysis-heavy reports | Routine bulk work; `max` by default |
+| Claude **Sonnet 5.5** | 1 | Near Opus on well-scoped work: Terminal-Bench 4 70.6% (vendor), OSWorld 80%, GDPval 1844, SWE-bench Pro subset 87.6% at $0.11 per solved task | Well-specified coding, computer use, browser, docs and reports, Artifact/Docs work, research | `max` (costs as much as Opus `max`, scores lower); open-ended design |
+| Claude **Haiku 5.5** | 0.05 | Cheapest Claude; beats Luna on code (TB4 33–39%, FrontierCode 46%) | Lookups, file finding, summaries, polling (as a background worker) | Anything needing judgment |
+| Claude **Fable 5.1** | 5 | Long-horizon reasoning, but at or below Opus 5.5 on most coding benchmarks for ~3x the cost; its own weekly cap (≤50% of the week, and it also counts toward the all-models week) | Only after Opus `xhigh` visibly fell short, or the longest single-thread reasoning; tell the user first | Default anything |
+| Codex **Sol 6.1** | 1 | Near Astra at ~1/5 the usage (AA index: `high` 50 at $0.59/task, `xhigh` 52 at $0.76; Opus `high` 52 at $3.46); 500K context | The coding workhorse: implementation, build/test/deploy runs, debugging, code review, log analysis | `low` effort for any coding (TB4 31%) |
+| Codex **Astra** | 5 (10x on cached input) | Frontier, +2–5 points over Sol; best on Terminal-Bench-Science (64.6%) | Escalation after Sol `xhigh` failed; a strongest-GPT second opinion; numerical or scientific work Sol couldn't crack | Default anything; small tasks (it over-tests and asks questions) |
+| Codex **Terra 6.1** | 0.5 | Writing and visual understanding; not a coding model (TB4 32% at `medium`) | Bulk prose drafts, translation, reading screenshots or images, writing when Claude has no spare | Coding; computer use (the Codex CLI can't do computer use at all) |
+| Codex **Luna** | 0.05 | Extraction, classification, structured summaries; very weak at coding (TB4 13% at `max`) | Bulk extraction or classification, quick lookups, image generation (the image tool does the work) | Any code change or code reasoning |
+
+On personal ChatGPT accounts, don't pick `gpt-6-sol` or `gpt-5.6-*` (older at the same or higher cost); the approved
+TRAE choices below are a separate company-quota policy. Don't pick Codex `ultra` (fans out its own sub-agents
+and multiplies usage), the Fast/Ultrafast tiers (2.5x+ usage), or the alias `spark`.
+
+## The routing table lives in the script (historical)
+
+> **changed 2026-11-15:** Category ladders are now in `scripts/lib/pipeline/policy.mjs` and classification in `taskspec.mjs`, rather than a table in route.mjs. Hard substitutions retain Sol/Astra only. Current review requires explicit A–D, company Astra/max are ungated, and browser/desktop tool failures change channels. The table commentary below describes the old implementation; its benchmark rationale is preserved.
+
+`scripts/route.mjs` holds the table and applies it the same way every time. `route.mjs --table` prints it. Each row has
+three parts:
+
+- a first pick;
+- the other vendor's alternative;
+- an escalation ladder, plus a cross-vendor second opinion for high-stakes reviews and designs.
+
+The orchestrator supplies only the inputs a script can't judge: the category, the stakes, whether an automatic check
+catches a miss, and how many times the task has fallen short. How the table was chosen:
+
+- **Codex Sol is the coding default.** It runs implementation, debugging, review, analysis, build/deploy runs and
+  science. Its cost per solved task is a fraction of Opus's at about the same score.
+- **Claude takes the work it is clearly ahead on, while Claude has spare:** docs, research, image reading,
+  high-stakes review and design. On GDPval, Opus and Sonnet score ≈1845 against Astra's 1542. HLE with tools is
+  Opus's best result, at 67.7%.
+- **Claude-only work (`claude-tools`):** Artifact/Docs tools and peer negotiation.
+- **Browser and desktop work:** `browser` (web pages in Chrome) and `ui-browser` (frontend work with a visual check)
+  route **TTADK Codex → TRAE (Playwright extension, user's Chrome) → ChatGPT account → Claude**. TRAE is eligible only
+  while the user-pasted Playwright token file exists. The ChatGPT-account and Claude steps use personal quota and need
+  the user's OK. `computer-use` (desktop apps; `--apps <bundle ids>`) cannot use that web-only bridge and keeps
+  **TTADK → ChatGPT account (personal, needs OK) → Claude (personal, needs OK)**. Re-run `route.mjs` whenever a selected account becomes unavailable; never pick
+  the next account by hand. A terminal Claude worker can drive Chrome
+  (Claude in Chrome) but has no desktop computer-use tool
+  (ledger 10-31), so for desktop apps the Claude fallback may only report BLOCKED. TTADK desktop work needs an unlocked
+  screen.
+  - A background Claude worker can drive the user's signed-in Chrome. Its brief names the Chrome by `deviceId`
+    (recorded in the ledger once the user has picked it), and the worker calls `select_browser` with that id when
+    several browsers are connected. A worker that still can't reach the browser reports BLOCKED with the tool's
+    error. Clicking never falls back to the orchestrator: video-agent W258 did, and that orchestrator then made 510
+    browser calls in 24h (nightly review 2026-11-05). TRAE's Playwright Extension path reuses the user's signed-in
+    Chrome; its default headless Playwright still suits pages that do not need that sign-in.
+- **Codex-only work:** every task whose output is an image — generating, editing, variants, icons, illustrations,
+  mockup images (user, 2026-11-03). Luna `low` writes the prompt (the image tool makes the picture); Sol `medium` if an
+  iteration needs more judgment.
+- **Cheap rows:** personal ChatGPT uses Luna for lookups and extraction, Terra for prose drafts. TTADK light rows
+  start on GPT-5.6-Terra, then GPT-5.5, with 6.1-Sol medium as the failure escalation (test-environment `build-run`
+  is light too; a production release keeps Sol medium). Under known quota telemetry, light rows routed or balanced to
+  TRAE prefer bucket-free GPT-5.6-Terra, then GPT-5.5, then DeepSeek-V4.1-Flash, unless a hard-tier rule applies.
+  The Claude alternatives are Haiku and Sonnet.
+- **Escalation order:** effort before model, and a vendor switch on a stalled debug for different blind spots. Fable
+  and Astra come last and always need the user's OK.
+
+To change routing for a kind of task, edit the table in `route.mjs` and this rationale together.
+
+## What the router did, in order (historical)
+
+> **changed 2026-11-15:** The following ordered ladder, automatic review and quota gates describe the retired router. Current selection enumerates qualified tuples and preserves attested actual floors. Mandatory review requires explicit A–D with a reason; at most two rounds. Personal quota/Astra/max/Fable/redemption keep scoped gates; qualified company Astra/max do not ask. Sandbox follows write/test intent. `--urgent` alone is not approval. See [current routing](model-routing.md).
+
+### Retired sequence
+
+1. **Ladder.** `--failures N` moves N steps up the row's ladder. Past its end, the router asks for the user's OK.
+2. **Vendor.**
+   - Claude-only and Codex-only rows are locked.
+   - Other rows run on Claude only while Claude's budget allows: `claudeBetter` rows need `spare`; design, high-stakes
+     review, or any `--stakes high`, also stays on Claude at `near`.
+   - Codex is used unless every account is out.
+   - A disallowed first pick moves to the alternative before any failure, or to the next allowed ladder step after
+     failures. With neither available, the router prints `DEFER`.
+   - A Codex 5-hour pause moves work to Claude only while Claude has spare. A full Claude 5-hour window defers new
+     Claude work, Claude-only rows included, until it resets.
+   - When every Codex account is out, work goes to Claude within its budget; `--stakes low` work too, after the user's
+     OK (user, 2026-11-09: never hold work on our own). Over every budget line, route.mjs still picks a runnable model
+     and asks; it DEFERs only what nothing can run now, and then the user is told.
+3. **Effort**, one notch per rule:
+   - Lower with `--auto-check` (no failures, stakes not high).
+   - Higher for `--stakes high`; lower for `--stakes low`.
+   - Higher on Codex while it is underused or front-loading cards (lookups, extraction, drafts and images excepted).
+   - Lower on Codex while it is overspending and a check exists.
+   - Higher on Claude when its headroom expires within a day.
+   - Floors: Sol, Terra and Astra never go below `medium`. No notch raises past `xhigh`; only the ladder reaches `max`.
+   - Company GPT first picks share the same row-effort calculation with or without Sol: judgment rows are at least
+     `high`, Codex-authored reviews at least `xhigh`, with the alternate-Sol tier, high-stakes notch and throwaway cap retained.
+   - Fable is swapped for Opus `xhigh` while Fable's own window is ≥70%.
+   - A retry can come out identical to the attempt that failed: the Codex notch has already put the first pick at the
+     next step's effort, and Claude's budget rules out the Claude steps. In that case the router says so and adds a
+     note rather than calling it an escalation. The retry is no stronger, so put the failure's concrete findings in
+     its brief. Seen on 2026-11-03 in video-agent W228c: `implement --failures 2` ran the same Sol `xhigh` as the
+     first picks.
+4. **Review.** Code work must pass `--impact`.
+   - `release`: always reviewed (`review-high` when stakes are high).
+   - `service`: reviewed only at high stakes.
+   - `throwaway`: never reviewed.
+   - Reviewers follow `references/review-rubric.md` and block only on P0/P1.
+5. **Gates.** Fable, Astra, `max` effort (except on the actual TTADK account), an exhausted ladder and every card redemption need the
+   user's OK. TRAE keeps the `max` gate even with `--urgent`; only the personal-quota gate is covered by that flag. Two or more
+   Codex steps that fell short on one task print a "tell the user" line.
+   - Hard Codex code work (`implement-hard`, `debug`, `science`) gets an extra independent Codex review while Codex is
+     underused or front-loading, but only where the review policy wants a review anyway (release code, or service
+     code at high stakes; user, 2026-11-07), never on a review, and never on a TTADK device.
+   - A required review is told who wrote the code (`--author`); a Codex-written change is reviewed by Claude first.
+   - On a company-account device, gate the actual personal primary/second-opinion account with `personal quota:`, not
+     only the absence of company capacity. A ladder fall-through still needs consent. `--urgent` records prior consent;
+     standing exceptions are image generation, Claude-only tools, and Claude review/second-opinion routing while company
+     Sol is eligible. Browser/ui-browser/computer-use personal fallbacks need consent. Background work never falls through
+     to personal quota.
+6. **Launch.**
+   - The account is the one the quota state picks. When two or more accounts must each be spent within 48h, launches
+     rotate across them.
+   - The sandbox is `read-only` for read tasks. Writers get `danger-full-access` only when the orchestrator runs in
+     bypass mode, else `workspace-write`.
+   - The launcher is `codex exec` with that account's `CODEX_HOME` for one-shot rows, the hub `codex-worker` for
+     the rest, and a `claude --bg` worker for Claude (never an Agent subagent).
+
+## Claude models against Anthropic's selection guide (checked 2026-11-10)
+
+Source: https://claude.dev/blog/which-claude-model-should-you-build-with/ . What matches: code picks the model; the
+expensive model keeps its context for decisions and cheaper workers do the reading; effort before model; Sonnet for
+repeated well-defined agent work; Haiku for the simplest. Orchestrators run on Fable (user's choice: leading many
+workers, long unattended runs) at `medium` effort, set in each session's respawn flags.
+- The guide's "past `high`, try the next model up at a lower effort" (Fable `high` matched Opus `max` at about half the
+  cost per task) would turn the Opus `xhigh` steps into Fable steps. Not applied (user, 2026-11-10): the orchestrators
+  already use Fable's own weekly window (projected over 100% a day after moving them), and Fable needs the user's OK.
+  Revisit when the Fable window has room.
+
+## Load balancing between company accounts
+
+> **changed 2026-11-15:** The transfer triggers, reserve and family queue rules below are historical. The current pipeline walks quality order across both company accounts, prefers an observed free TRAE model at load <60% with no queue/stall, and retains the TTADK expiry exception. Cached unknowns have bounded estimates; stalled lanes defer. Company max is ungated. Bucket amounts, reset observations and measurements below remain dated evidence.
+
+TTADK is the default; eligible work can also use TRAE before TTADK runs out (user-approved 2026-11-13).
+TTADK has about **500M tokens/day**, shared by its models, resetting at **16:00 UTC**. TRAE has independent daily
+high-priority buckets (currently Sol 80, Astra 58, 5.6-Sol 80 units), resetting at **22:00 UTC**, plus a 300-unit weekly
+pool. Depleting a model's daily bucket sends its requests to TRAE's shared low-priority queue. Every request queues
+separately, and both providers' unused daily quota expires. Depleted is not unavailable: the low-priority lane still
+runs the model, so route.mjs compares expected completion (the ETA rules under the daily-bucket section below) instead
+of demoting or waiting automatically. Queue positions 180–3124 have been observed in US
+evening/night (Beijing daytime); US daytime load has not yet been measured, so the clock alone never implies low load.
+
+For a primary task already routed to TTADK, keep its effort and transfer it to TRAE only when eligible. Sol picks
+try the difficulty-tier candidates below in order; light work prefers bucket-free GPT-5.6-Terra, then GPT-5.5,
+then DeepSeek-V4.1-Flash. Astra quality-ladder rungs are never substituted with weaker GPTs.
+
+- TTADK can run the original pick and TRAE can run the target model under the existing exclusions and health rules
+  (a TRAE substitution need not be listed on TTADK). Browser, desktop, image work and
+  `build-run` keep their existing preference. `--security` excludes TRAE GPT, and security reviews are adversarial
+  (no GPT anywhere; see "Adversarial security review"). Second opinions keep their original
+  account/model and count; balancing never adds or removes a launch.
+- That TRAE model has a known, unexpired, non-depleted daily bucket with **at least 15% left**, reserved for urgent
+  work and reviews. Exception: eligible tier candidates may be used when a known daily snapshot confirms no
+  bucket for that model; no high-priority quota is spent and no depleted-bucket low-priority lane is entered.
+  A missing/empty daily snapshot or an expired/unknown entry is not proof that a model is bucket-free. Daily snapshots
+  carry `sampledAt` and must be no more than 30 minutes old, matching load/queue freshness; missing/future/stale sample
+  times make all daily entries unknown, regardless of reset time. Cache reads never refresh this timestamp.
+- Model load is **below 60%**, with **no family queue position above 300 in the last 30 minutes**. Load/queue readings
+  older than 30 minutes are ignored. A fresh load below 60% is sufficient when no fresh queue reading exists; queue
+  data vetoes the family only when a current/recent position exceeds 300. When a model has no fresh direct load,
+  use the busiest fresh reading in its family, then the busiest fresh account reading. Log which source was used.
+  With no fresh load at any of those levels, congestion is unknown, allowed only for the low-priority case below.
+- At least one factor applies: **light tier / low priority** (`--stakes low`, lookup/extract/draft, or `--impact throwaway`);
+  **TTADK projected to run out before reset**; or **TRAE resets in under 6 hours** and its remaining share exceeds
+  TTADK's remaining share. The projection uses same-account, same-limit/reset samples from the last 2 hours, spanning
+  at least 10 minutes, with the latest reading at most 30 minutes old; missing data, zero burn or counter rollback
+  without a usable new segment skips this factor.
+
+While TTADK is projected to run out before reset, every eligible normal/light dispatch moves to the first TRAE
+candidate that passes reserve and congestion: normal uses 6.1-Sol → 5.6-Sol → 5.6-Terra → DeepSeek-Flash; light
+uses 5.6-Terra → 5.5 → DeepSeek-Flash. Hard work uses only 6.1-Sol → Astra; if neither passes, it stays on TTADK.
+The candidate must also be listed, unpaused and allowed for the task. Without projected depletion, retain the
+light/low-priority and earlier-TRAE-expiry triggers. Explicit later Astra/other-family quality rungs retain their
+model so balancing does not downgrade an escalation. A light first rung transferred from TTADK Terra/5.5 walks the
+full TRAE light list, so a paused or congested TRAE Terra falls through to 5.5/Flash instead of blocking the transfer;
+retry rungs are never walked sideways.
+
+Every considered transfer includes structured `balance` factors in the route log, including tier and per-candidate
+rejection reasons, quota shares, congestion and load source. A transfer adds a `balanced to TRAE:` why line; a rejected
+transfer adds `stays on TTADK: <reason>`.
+Congestion blocks opportunistic transfers, never the existing fallback when TTADK is out. Accepted queued turns keep
+waiting. Company balancing needs no quota approval; personal-quota gates and the existing TRAE `max`-effort gate remain.
+There is no concurrency cap or change to launch counts.
+
+Each quota refresh appends compact `ttadk` usage/reset and `trae` daily/weekly/load/queue fields to `QUOTA_LOG`.
+`traecli models --json` supplies `_meta.trae.load.percent` with a best-effort 30-second timeout. Hub workers coalesce
+queue observations into `<trae home>/queue-state.json`, atomically at most once a minute across workers; records keep
+the latest family state and a recent high-position observation. `quota.mjs` displays fresh signals and their ages.
+All balancing thresholds live in `scripts/lib/company-load.mjs` (`BALANCE`). Revisit them after a few days of telemetry:
+the nightly review should read the quota log alongside worker queue-clear wait times and compare load, queue position
+and wait across US daytime and Beijing daytime. Until then, do not assume that time of day predicts congestion.
+
+### Background work: preserve high-priority quota
+
+> **changed 2026-11-15:** The current background policy preserves the quality order and uses the same personal quota gates as foreground work. Hard work remains Sol/Astra. The old automatic hold/no-personal passages below are historical, not current dispatch instructions.
+
+Pass `--background` only when nobody is waiting and there is no deadline or near-term dependency. Eligible work
+prefers TRAE even while congested, using the same difficulty-tier table below (user-approved 2026-11-13).
+`--background` makes ordinary work light, not hard categories, high stakes or a failed CODE task.
+
+1. Light work prefers bucket-free GPT-5.6-Terra, then GPT-5.5 (step 1), then DeepSeek-V4.1-Flash (step 2).
+   These spend no daily high-priority quota and do not enter the depleted-bucket low-priority lane.
+2. Hard work keeps Sol, then Astra only if Sol is unusable; no weaker GPT substitution. Quality-ladder Astra and
+   hard fallback rungs stay intact. An eligible depleted bucket may stay queued, spending no high-priority quota
+   (step 1). Astra's bucket is reserved for hard work, not normal/light background substitution.
+3. Without an eligible tier preference, keep the ordinary TRAE pick and report its actual quota/lane cost.
+   Missing, empty, stale or expired quota information changes no normal pick; it is not proof of bucket-free capacity.
+   `why` names the step and its cost. Image reading retains the vision-specific order: depleted Sol, then Astra,
+   then bucket-free Seed-Evolving, then the ordinary vision pick.
+
+All existing model exclusions and pauses apply. `--security` keeps TRAE GPT off; DeepSeek is ineligible for
+build-run and sensitive reviews/acceptance (use `--exclude-model deepseek` when an implementation brief includes
+those checks), except the adversarial security-review lane above, where DeepSeek is the approved company fallback. `image-read` uses only its existing vision-capable GPT models or vision fallbacks: GPT-5.5/5.6-Terra
+vision is untested, so neither is eligible; GPT-5.6-Sol quota substitution also leaves image reading unchanged.
+Browser/desktop, image generation,
+UI and build/device work retain their capability rules, and a device lease or shared lock excludes the background lane.
+Opportunistic company balancing still excludes image work; the explicit background lane permits image reading.
+
+TRAE decides request priority: the flag cannot force low priority while the chosen model has daily quota left.
+Expect hours because every request queues separately. Launch as a hub worker so queue/status shows, keep it pending
+while `queued:` lines arrive, and dispatch other work meanwhile. Background never spends personal quota: if no company
+model fits, tell the user it is queued for later. Quality gates remain in force. Routes record `background: true`;
+the nightly review compares dispatch reasons and recorded wall-clock time, including queue waits.
+
+## Codex accounts: TTADK first (user, 2026-11-07; historical preference)
+
+> **changed 2026-11-15:** Observed free TRAE precedes TTADK now, with the TTADK expiry exception. Browser order is free TRAE Playwright → TTADK → personal ChatGPT (ask) → Claude (ask); desktop supports TTADK/ChatGPT. TTADK health accepts any listed qualified model rather than requiring Sol. Company max/Astra are ungated. The account history and user decisions below explain how this evolved.
+
+- **TTADK first by default.** When the TTADK company gateway is healthy (CLI present, SSO
+  active, `gpt-6.1-sol` listed), rows start on TTADK `gpt-6.1-sol`, Claude-strength rows included (docs,
+  research, design, high-stakes review), subject to the company balancing rules above.
+  - **Then TRAE CLI (user, 2026-11-08).** When TTADK is out, the same rows run on TRAE CLI (account `trae`, GPT-6.1-Sol
+    with the official Codex prompt) with the same routing rows and efforts, before any personal quota; browser, desktop and image
+    work never go there. The `max` exemption stays on TTADK alone: the 2026-11-10 review found
+    `vesdk-mainline-T39-m1a-device` routed to TRAE/max after three failures with an empty `needsOK` list.
+    The router now distinguishes the selected company account for that gate. See codex-workers.md, "TRAE CLI as the second company account".
+
+    Security-task rule (user, 2026-11-12): the retro found three TRAE GPT restrictions, each immediately after an
+    exploit-style security review, rather than from volume or concurrency. Pass `--security` for vulnerability/exploit
+    hunting, auth/session/credential handling, bypass, forgery/replay, path traversal, DoS scenarios or security review.
+    It excludes the GPT family only on TRAE, then follows the normal routing, fallbacks and gates; TTADK GPT and personal
+    ChatGPT accounts stay unchanged. Briefs describe defensive intent and request findings with impact and fix, avoiding
+    requests for step-by-step exploit code.
+
+    This applies to all these OpenAI models under the same vendor policy as 6.1-Sol (GPT restrictions on
+    2026-11-10/11), including 5.6-Sol, 5.5 and 5.6-Terra. Implementation that reads attack-style findings or exploit
+    steps also needs `--security` (VAK ruling, 2026-11-13). Defensive-only requirements with no attack description
+    in the worker's context can avoid that flag; see SKILL.md, "Security follows the worker's context".
+
+    **Adversarial security review (user decision 2026-11-13, option A).** OpenAI's cyberPolicy failed a TTADK
+    gpt-6.1-sol `review-high --security` turn on 2026-11-13 (`codexErrorInfo=cyberPolicy`, "flagged for possible
+    cybersecurity risk … apply for Daybreak access"). A `review`, `review-high` or `second-opinion` routed with
+    `--security` is therefore **adversarial** by default; `--adversarial` forces the same lane for any task.
+    - Never a GPT model on any account (TTADK, TRAE or personal ChatGPT).
+    - Order: TTADK Kimi-K3 high → DeepSeek-V4.1-Flash high on TTADK or TRAE (the explicit, second-reviewer-bound
+      exception to the DeepSeek model-fit rule) → Claude Opus (xhigh for review/review-high, high otherwise), which
+      always carries a `personal quota:` `needsOK` — never silent.
+    - Always a second reviewer from the other non-GPT family (Kimi ↔ DeepSeek). If only one family is available,
+      say so and add `needsOK`: add Claude Opus as the second reviewer on personal quota, or accept one reviewer.
+    - Never retry a cyberPolicy-blocked thread or resend the same content to another GPT account. `codex-worker`
+      prints `security-policy-block:` and records `kind:'policy-block'` (account/model) for the nightly review on
+      both accounts. On TRAE the block also leaves the same family restriction as a 983 signal (the gpt family out
+      until the next 00:00 UTC, then probed); TTADK has telemetry only and no pause. Re-route with `--adversarial`.
+      The vendor's trusted-access programme is the user's/company's call.
+    Other `--security` work (implementation/fixes written as defensive requirements, executable acceptance tests)
+    keeps the rule above: no TRAE GPT; TTADK GPT allowed.
+
+    **Defensive confirmation (`--defensive`, user ruling 2026-11-13).** On `review`, `review-high` or
+    `second-opinion` it is meaningful only together with `--security`. Such a review is **not** adversarial: it follows
+    ordinary `--security` routing (TRAE GPT excluded, TTADK GPT allowed) and never enters the adversarial lane. Without
+    `--defensive`, `--security` reviews remain adversarial by default; `--adversarial` and `--defensive` together are a
+    usage error. A compliance confirmation or executable acceptance check is defensive work: its brief states only the
+    rule to hold and the acceptance conditions, with no bypass description, exploit steps or attack reproduction, and
+    verifies "should" behaviour with focused tests. If a vendor cyber-policy block stops a turn, do not retry that thread
+    and do not resend the content to any GPT account; re-route that part with `--adversarial` (Kimi-K3 plus a
+    DeepSeek-V4.1-Flash second reviewer). Resolve any disagreement by whichever side reproduces it with an executable
+    test, and list the rest for the user.
+
+  > **changed 2026-11-15:** Hard substitutions end at Sol/Astra; no weaker family is a hard fallback. Review-high without explicit A–D is ordinary optional review. Tier tables live in `scripts/lib/pipeline/policy.mjs`; retries use actual floors, not an indexed normalized ladder. The implementation description below is historical.
+
+  - **Difficulty-tiered company model choice (user-approved 2026-11-13).** One `COMPANY_TIERS` table in `route.mjs`
+    controls TRAE substitution when Sol is depleted, paused, excluded or absent, and balanced/background TRAE picks.
+    Hard rules take precedence over light rules:
+
+    | Tier | Task classification | Candidate order |
+    |---|---|---|
+    | Hard | `implement-hard`, `debug`, `science`, `review-high`, `design`; or high stakes; or `--failures >= 1` on CODE rows (`implement`, `implement-hard`, `debug`, `science`) | GPT-6.1-Sol → GPT-6-Astra → existing eligible fallbacks only if both are unusable |
+    | Normal | Everything else | GPT-6.1-Sol → GPT-5.6-Sol → GPT-5.6-Terra → DeepSeek-V4.1-Flash |
+    | Light | `lookup`, `extract`, `draft`; or low stakes; or `--background`, unless a hard rule applies | GPT-5.6-Terra → GPT-5.5 → DeepSeek-V4.1-Flash |
+
+    Light work on TRAE prefers bucket-free models even with Sol quota left. Normal/light substitution never uses Astra;
+    hard substitution never uses 5.6-Sol, 5.6-Terra, 5.5, DeepSeek, Gemini or Seed — only Sol/Astra, otherwise the
+    rung drops to personal Claude behind the gate. A failed CODE task's GPT substitution uses the hard tier, never a
+    weaker GPT. Tier candidates are **availability substitutions for the current attempt, not retry rungs**:
+    pick the first usable candidate, then increase its effort before existing stronger quality steps. A ladder's
+    initial attempt uses its original tier; later CODE rungs use hard, so `--failures` cannot reinterpret earlier picks.
+    Company model/account eligibility always uses the current tier after failures/stakes; an initial normal/light
+    CODE tier must not hide Astra from a hard retry, even with missing or stale quota telemetry.
+    Resolve availability, quota, effort and balancing for the whole ladder before indexing by failures. Normalize the
+    actual picks: drop equal/lower effort on any previously tried model, weaker GPTs, and earlier fallback stages
+    already bypassed by a stronger substitution. Existing independent-family/stronger row steps remain eligible.
+    Astra stays after Sol max in the nominal quality ladder, but an earlier Astra substitution removes its later
+    equal/lower-effort duplicates, never adding a downgrade. Exhaustion retains the last strongest eligible pick and
+    asks before another attempt. Same-model `max` rungs survive normalization and still require the user's OK on
+    TRAE/personal quota; only the actual TTADK account is exempt. TTADK retains its own model catalog and picks;
+    this does not introduce TRAE-only ids there.
+    `--security`, vision/model-fit exclusions, pauses and actual-personal-pick approval gates still apply.
+
+    A depleted bucket is **not** "unavailable": it runs in TRAE's low-priority lane and spends no high-priority
+    quota. Whether to launch there or wait for a reset is decided by expected completion, not by the word "depleted"
+    (user, 2026-11-13 night). For every candidate that passes the tier/quality/exclusion rules:
+    `completion = start_delay + work_minutes × slowdown`.
+    - `work_minutes` is the category/effort median from deduplicated, corrected outcomes when at least 3 timed rows exist, otherwise the
+      fallback table in `scripts/lib/eta.mjs` (`ETA.workMin`: light 5, normal 30, hard 90, review 25). `ETA.requests`
+      (light 10, normal 40, hard 120) counts the per-request re-queues in the low-priority lane.
+    - TTADK with quota: start 0; TTADK out: start = minutes until `resetsAt`.
+    - TRAE with bucket left and no fresh congestion: start 0. Depleted or congested: use that model's lane telemetry
+      from the last 30 minutes (`lane-state.json`: position, drain per minute from successive positions,
+      `lastProgressAt`, `itemsPerMin`). A worker progressing with no queue cycles is available now. Queued with
+      position P and drain r > 0 predicts `start = P/r` and `slowdown = 1 + (P/r × requests)/work_minutes` (1 when
+      `P/r` is under the 2-minute noise floor). Missing telemetry is optimistic: start 0, marked unknown.
+    - Choose the minimum completion; ties prefer the candidate that spends no high-priority quota, then the stronger
+      model. Hard work never demotes to 5.6/5.5/Terra/DeepSeek because of depletion.
+    - Waiting is legitimate only as an **explicit scheduled dispatch**: when the best completion belongs to an account
+      that is not available yet and finishes earlier than every lane that can start now, route.mjs emits
+      `deferUntil`, the reason and the runner-up, plus a `tell` line to record it in the ledger and set a timer. It
+      never defers when a same-tier candidate finishes earlier, never on a retry, and never for a resource-bound task.
+      A `--background` task follows the quota-preserving order above instead.
+    - Launches into a low-priority lane carry `--queue-patience-min M --alt "<alternative>"`, the alternative's
+      `--queue-alt-start-min` estimate, original `--route-args` and `--auto-reroute-depth` to codex-worker, with
+      M = `min(30 min, 25% of the time until the faster account resets)`. From the live queue drain the worker predicts
+      the start; if predicted start plus elapsed wait exceeds the earlier deadline/alternative, it checks for work,
+      confirms the queued turn is interrupted without progress, and re-routes itself with the same flags/failures,
+      the slow account/model lane excluded (`--exclude-lane`) and depth N+1. A structured `--queue-alternative`
+      keeps the same model on another account eligible. It follows a fresh company hub worker with the same brief and a
+      continuation header. Maximum two automatic hops; no active/background/personal/signing auto-launch.
+      Approval exits 8; deferral persists `reroute.json`/`deferUntil` and exits 9 for the orchestrator's timer; limit
+      exits 10. Unconfirmed cancellation exits 7 within three seconds, with no replacement. Legacy launches without
+      route args retain exit 7. Flat/unknown queues expire by elapsed patience using an independent alarm. Router
+      failures also exit 7 with persisted recovery argv/prompt; automatic reroutes remove `--fresh`, and identity
+      comes only from public registry/hub metadata. Outcome derives automatic actual chains from hop records;
+      nightly reports waits and observed faster/slower/unknown starts. See references/codex-workers.md.
+    - A task holding a device lease or heavy-build lock must not wait in a queue while holding it: route.mjs prefers a
+      candidate that can start now, never schedules a wait, and the note says to take the lease/lock only after the
+      first model response.
+    This changes model choice, never parallel task concurrency or account health. Accepted queued turns stay pending
+    under the rule below; do not interrupt or launch duplicates (the patience handoff is the one explicit stop).
+    Explicit `--background` work instead follows the quota-preserving order in "Background work" above.
+
+    **ETA table refresh.** `scripts/review-data.mjs --json` reports `routing.eta`: the current constants and, per
+    category/effort, the sample count and median recorded `minutes`. Routing already uses that median once it has 3
+    timed rows; the nightly review changes the fallback table in `scripts/lib/eta.mjs` only when it is consistently far
+    from the medians. The minute and request-count tables are editable constants in `lib/eta.mjs`; no automatic
+    policy installation occurs. Family queue telemetry coalesces shared writes to once a minute; per-model position,
+    drain and completed-item throughput update atomically on observations. New queue cycles clear old progress/drain.
+
+  - **Evidence behind the tiers (2026-11-13, public + our TRAE runs).** Public report:
+    `~/.claude/jobs/9850afbb/tmp/task-pubbench/report.md`. Terminal-Bench 4.1, Codex `max`:
+
+    | Model | Terminal-Bench 4.1 | Artificial Analysis coding agent index |
+    |---|---|---|
+    | GPT-6.1-Sol | 60.9 | 54.1 |
+    | GPT-6-Astra | 60.3 | 54.7 |
+    | GPT-6.1-Terra | 53.3 | 48.1; not on TRAE |
+    | GPT-5.6-Sol | 38.5 | Not supplied |
+    | DeepSeek-V4.1-Flash | 38.5 | About 47 |
+    | GPT-5.6-Terra | 21.5 | Not supplied |
+    | GPT-5.6-Luna | 17.6 | Not supplied; unused |
+    | DeepSeek-V4-Pro | 6.7 | Not supplied; removed from ALTS/fallback chains |
+
+    Astra is approximately 5x Sol's price. Public agentic results support Sol/Astra for hard work; our mid-size,
+    well-specified tasks **do not separate the GPTs on quality** (all about 0.97–1.0). Bench2 had 5 tasks, bench3
+    had 3 harder tasks, on TRAE on 2026-11-13:
+
+    | Model | Bench2 / bench3 time | Daily high-priority bucket |
+    |---|---|---|
+    | GPT-5.6-Terra | 119 s / 204 s; fastest | None |
+    | GPT-5.6-Sol | 202 s / 274 s | 80 units |
+    | GPT-5.5 | 203 s / 331 s; bench3 score 0.967 | None |
+    | GPT-6-Astra | 285 s reported | 58 units, reserved for hard work |
+    | GPT-6.1-Sol | Quality about 0.97–1.0 | 80 units |
+
+    DeepSeek-V4.1-Flash failed bench3 x3 twice with `model output limit exceeded: length` while producing one large
+    file in one go. It **can't emit one very large file in a single turn (output limit) — not for tasks that generate
+    a large file in one go; split the work or exclude deepseek**. The router prints this note for actual Flash picks.
+    GPT-5.6-Luna stays unused; GPT-6.1-Terra is only a public comparison, not a TRAE candidate. The nightly review
+    may reorder candidates within tiers using outcome data, within this approved policy; it cannot spend Astra on
+    light/normal substitutions or admit weaker GPTs to the hard tier.
+
+  - **Fallback models on the company account (user, 2026-11-10: when GPT is unavailable or fails, route by the
+    benchmark; keep quality, spend little personal quota).** `route.mjs` ALTS, from the 2026-11-10 benchmark on TRAE
+    (6 hard tasks — bug fixes with hidden tests, a security review, a planted-bug hunt — 12 runs per model; Sol effort
+    high, the others high):
+
+    | Model | Mean score | Median time | Notes |
+    |---|---|---|---|
+    | GPT-6.1-Sol (reference) | 0.95 | 227 s | review false positives |
+    | DeepSeek-V4.1-Flash | 0.97 | 344 s | missed one timing bug; 0 review false positives |
+    | Gemini-3.1-Pro | 0.99 | 715 s | 3 of 12 runs hit the 40-minute limit; reads images; gone from TRAE's model list 2026-11-13 |
+    | DeepSeek-V4-Pro | 0.94 | 659 s | historical result; removed from ALTS on 2026-11-13 |
+    | Seed-Evolving / Seed-2.1-Pro | 0.87 / 0.81 | 875 / 801 s | break output formats — kept out of the general chain; vision-only for `image-read` (2026-11-13) |
+    | Grok 4.7 via Cursor CLI | 0.50 | 2403 s | half the runs timed out or dropped — not used |
+
+    **Model fit (2026-11-13 retro):** T73b spent about 4 h on 24 builds, 19 failed; T63's fallback attempts still lacked
+    KWS tests/iOS acceptance, and fallback reviews missed reproduced P1s (though some read-only reviews found real P1s).
+    DeepSeek is for read-only analysis and simple edits, not full-package builds, auth/storage reviews or acceptance.
+    `build-run`, `review-high`, and release/high-stakes/security review rows exclude the DeepSeek family from company
+    fallbacks; the adversarial security-review lane above is the one explicit exception (DeepSeek there is always paired
+    with a second reviewer from the other non-GPT family). For implement/implement-hard/debug whose brief needs those checks, use `--exclude-model deepseek`;
+    the router cannot infer package/device acceptance from the category alone. Pass `--impact release` on release reviews.
+
+    - **GPT out on the company account** (its `gpt` family paused or restricted, or `--exclude-model gpt`): DeepSeek-V4.1-Flash
+      (Gemini-3.1-Pro is gone from TRAE's model list 2026-11-13), at high, then the row's Claude
+      steps, subject to the model-fit exclusions above. No question: it is company quota.
+      `image-read` uses Seed-Evolving only (its only vision row): live test 2026-11-13, it transcribed a small-text
+      screenshot exactly, using only its Read tool, where Sol and the old Gemini misread a digit, and it reads text PDFs.
+      It cannot perceive audio, video or image-only (scanned) PDFs: convert scanned PDF pages to images first and route
+      them as `image-read`; audio and video have no TRAE model and stay on Claude/ChatGPT. Both DeepSeek models said they
+      can't see images (2026-11-10). A DeepSeek pick prints a note: a task that depends on screenshots is re-routed with
+      `--exclude-model deepseek`.
+    - **GPT up, Sol falls short**: normal work goes Sol at the row's effort → … → Sol xhigh → DeepSeek-V4.1-Flash (a
+      different family: its misses rarely overlap Sol's) → Sol max → GPT-6-Astra high on the company account (no OK:
+      company quota; live test 2026-11-13) → the row's Claude steps. Hard work skips the fallback family: Sol notches
+      → Sol max → Astra high → the row's Claude steps behind the personal-quota gate. The cheap rows (lookup, extract,
+      draft, browser, computer-use) skip Sol max, the second fallback and Astra in the quality ladder; only hard-tier
+      or vision substitution can choose Astra before dispatch. All fallback steps respect the model-fit exclusions above.
+    - **Quality guard**: service code a fallback model wrote gets the routine review (normally only release code or high
+      stakes do), and every review of fallback-written code runs with `--exclude-model <its family>`, so a different
+      family reviews it. A second free reviewer on TRAE (no Kimi there) is a fallback model of another family, not a
+      fresh Sol; so is the stand-in when Claude has no room for a second opinion.
+    - **Release/high-stakes guard** (user-approved 2026-11-11 retro; W291-R0 Gemini LAND missed reproduced P1s):
+      fallback review alone is not acceptance; require the other-family GPT/Claude gate in review-rubric.md.
+      For deploy/release, fallback models execute only the brief's fixed health/rollback criteria; unexpected evidence
+      waits for stronger-model judgment (W291-L1-ppe2a's unnecessary rollback), not another fallback's discretion.
+    - **Infrastructure misses are not quality failures**: a request that fails with a timeout, queue-full error or
+      restriction is re-routed with `--exclude-model <model or family>` and the same `--failures`; `--failures` counts
+      quality misses.
+    - **An accepted queued TRAE turn stays pending.** A reported queue position is evidence of provider queueing,
+      not a failed turn; `modelQuotaLowPriority` alone describes scheduling priority. Keep its thread and turn and
+      follow completion notifications; do not
+      interrupt or launch a replacement merely because files stop changing or no local process is running. Likewise,
+      `inProgress` alone does not prove useful execution: report queued work separately from work making progress.
+      Dispatch other ready, independent tasks before waiting, and keep TRAE concurrency unchanged. The 2026-11-13
+      review found that interruptions of queued W291-C0, hidden-simple and W303 turns sent them to the back of the queue.
+    - **Recovery** (user, 2026-11-12): a vendor-restricted family waits until the next 00:00 UTC (08:00 China time),
+      then a one-line probe; if it fails, the next probe waits until the following 00:00 UTC. Other hard failures retain
+      30-minute probes (codex-workers.md, "Recovery probe"); real tasks keep going to the fallbacks meanwhile.
+    - Outcomes are logged per model and task tier (route log `pick.model`, `tier`), so the nightly review's model view
+      can reorder candidates within approved tiers and eligible ALTS once real tasks outnumber the benchmark.
+  - **TTADK's quota is daily, not unlimited** (about 500M tokens per user per day, shared by all models, resets 16:00
+    UTC; measured 2026-11-08). When it runs out, TTADK is paused until the reset; its normal work goes to TRAE,
+    then personal quota behind the user's OK (go on now, or wait for the reset; reaffirmed 2026-11-13), while only `--urgent`
+    (already approved) runs there without asking — high stakes ask too (user, 2026-11-09); see codex-workers.md, "Health and fallback".
+  - **Burn TTADK, not personal quota, without losing quality (user, 2026-11-07).** TTADK is the company's quota;
+    Claude and the ChatGPT accounts are the user's own. So on TTADK:
+    - the first effort is the higher of the row's first pick and its Sol alternative, at least `high` for docs,
+      research, image-read and analysis, `xhigh` for a review of Codex-written code, one notch up at high stakes;
+      `--auto-check` and low stakes don't lower it (that saves nothing on TTADK);
+    - except throwaway code work (`--impact throwaway`), which starts at most at Sol `high` on the company accounts
+      (user, 2026-11-09). TTADK's quota is daily: on 11-08 it ran out mid-afternoon and stopped six running tasks
+      across three projects, while throwaway work passed first time 15/17 that week. One notch up at high stakes; a
+      failure still climbs to `xhigh` and `max`. Release and service work keep their effort;
+    - after a failure Sol climbs every notch to `xhigh`, then `max` (no OK needed on TTADK; lookup, extract, draft
+      and browser stop at `xhigh`), then the company fallback models and GPT-6-Astra high on TRAE (company quota, no OK),
+      before the row's personal-quota steps. Hard work has no fallback-family rung: e.g. implement-hard Sol xhigh →
+      Sol max → Astra high on TRAE → Opus xhigh; science Sol xhigh → Sol max → Astra high on TRAE →
+      Astra (ChatGPT, needs an OK; dropped when ChatGPT is out);
+    - a routine review of Codex-written code runs on TTADK (`review --author codex`): a fresh Sol xhigh reviewer plus
+      a second free one with a different focus (failure paths, concurrency, edge cases, tests). High-stakes review
+      and design keep Claude in the pair;
+    - when Claude has no room for a cross-vendor second opinion, a fresh TTADK reviewer stands in instead of the
+      second opinion being dropped or deferred;
+    - TTADK down for a reason the user can fix (SSO, CLI, models): tell the user at once; work goes to TRAE, then
+      personal quota only after asking (user, 2026-11-13). Never hold runnable work on your own. A rate-limited run
+      still retries once, then re-routes.
+  - Image generation never runs on TTADK, its Sol fallback step included.
+  - The extra Codex review added while ChatGPT Codex quota is underused runs on a ChatGPT account (its purpose is to
+    spend that quota). Other Codex second opinions follow TTADK first.
+  - Capability-specific routing: `claude-tools` is truly Claude-only (Artifact/Docs tools and peer negotiation).
+    Browser work instead needs a browser-capable worker: `browser` and `ui-browser` go TTADK Codex → TRAE Playwright
+    Extension → personal browser-ready ChatGPT (needs OK) → Claude (needs OK); `computer-use` omits TRAE.
+    Other capability routes include `image-gen` (no image tool on the gateway) and `research` on a TTADK account
+    without its local proxy (Codex sends no search tool to the gateway;
+    the proxy in `references/codex-workers.md` adds it for every TTADK worker),
+    `second-opinion --against codex`, a high-stakes review of Codex-written code (Claude first), and `browser` before
+    `browser-setup`. `image-read` works on the gateway.
+  - Later ladder steps never step back: Codex steps no stronger than the Sol already tried (Luna, Terra, a weaker Sol)
+    are dropped; Astra on the company account comes after Sol max and the company fallbacks and needs no OK; a ChatGPT
+    Astra stays after Sol max on that account, needs an OK, and is dropped when those accounts are out.
+  - **A TTADK device saves the rest (user, 2026-11-07).** The user's other device has no TTADK and uses the shared
+    ChatGPT and Claude quota, so on a device with a TTADK account nothing spends that quota for its own sake: no
+    underused, front-load or expiring-week effort raises, no extra quota-spending reviews, and Claude takes only
+    what TTADK can't do. Reset-card prompts appear only when ChatGPT-only work lands on that account. Cards may lapse
+    on this device; that is accepted (TTADK always first).
+  - Cross-vendor pairs stay cross-vendor: with Sol first, the second opinion is Claude.
+  - Trade-off accepted by the user: on knowledge-work benchmarks (GDPval), Claude scores well above GPT. The nightly
+    review compares outcomes per category and flags a category that gets worse.
+- **No quota notches on TTADK.** Quota-driven effort notches (underused, front-load, overspending) apply only to
+  ChatGPT accounts, and the auto-check and low-stakes notches don't apply on TTADK either. TTADK has no windows.
+> **changed 2026-11-15:** The aliases and expired-model reports below are dated measurements. Current account catalogs decide availability; GPT-5.5 is again eligible for light work. TRAE Gemini and GPT-5.6-Luna are retired; personal GPT-6-Luna remains the cheap image-gen/lookup/extract model. Optional second reviewers follow current review classes, not automatic Codex authorship. Kimi's measured recall and independent misses still explain why it leads the adversarial lane.
+
+- **TTADK's other models (tested 2026-11-07, ~110 runs on TTADK, plus public data).** None beats Sol on quality where
+  it matters: agentic coding, debugging and frontend tasks tied at full marks; Sol had the best pure reasoning (12/12,
+  with DeepSeek-V4.1-Flash), and public indexes put it clearly ahead (Artificial Analysis v5: Sol 55, GLM-5.3 and
+  DeepSeek-V4.1-Flash 32; DeepSWE: Sol 75, Kimi-K3 and GLM-5.3 ~67). So Sol stays the default.
+  - **Kimi-K3** is the second reviewer of Codex-written code on TTADK (user, 2026-11-07) and the first pick of the
+    adversarial security-review lane (TTADK only, 2026-11-13): 100% recall on planted
+    defects (Sol 88%), misses not overlapping Sol's, no nitpicks. Its Chinese prose read most naturally (25/25 vs Sol
+    24, one judge, one run) but it is slow (88–150s for a short essay): docs stay on Sol until the nightly review shows
+    rework on Chinese docs.
+  - GPT-5.6-Terra and DeepSeek-V4.1-Flash are faster (Terra 510s vs Sol 858s over seven Codex tasks; Flash 200+
+    tokens/s) but each slipped on spec-following or reasoning; not used by default.
+  - Gateway aliases: `deepseek-v4-pro-0813` and `deepseek-v4-flash-0731` currently resolve to deepseek-v4.1-flash;
+    `auto` is glm-5 (slow, timed out once); `auto-max` is gpt-5.4; `gpt-5.5` is expired. GLM-5.3 drove the desktop's
+    Safari through osascript during a Codex task: don't route agentic work to it.
+- **No concurrency cap on TTADK.** A rate-limited run is retried once on TTADK, then re-routed with
+  `--exclude-account ttadk`. So is a run that fails for TTADK reasons.
+- **ChatGPT quota left unspent.** Preferring TTADK leaves more of the ChatGPT weeks unspent. The user chose this: on a
+  TTADK device it is not waste, and the nightly review doesn't report it as such (hard rule, user 2026-11-07).
+> **changed 2026-11-15:** The following TTADK-first browser order is historical. Current order is observed free TRAE Playwright, TTADK, personal ChatGPT with approval, Claude with approval; tool failures move channels.
+
+- **Browser row.** `browser` (web pages in the user's signed-in Chrome) goes to TTADK Codex, Sol `medium`, when TTADK is
+  browser-ready (`browser-setup`); otherwise to TRAE through the Playwright Extension when its user-pasted token file
+  exists; then to a browser-ready ChatGPT account (personal quota, needs the user's OK); finally to Claude Sonnet
+  `medium` (personal Claude quota, needs the user's OK). Re-run `route.mjs` whenever an account becomes unavailable
+  instead of choosing a fallback by hand.
+  `--browser-origins` drives the OpenAI per-site approval path on TTADK/ChatGPT; on TRAE the same list is only stated
+  to the worker (Playwright cannot express host globs and would block page subrequests), so it is not enforced there and
+  the task brief remains authoritative.
+  Model/effort retries do not override the account order, and `ui-browser` retains its hard effort floor for writes.
+  - Historical measurement (2026-11-07): TTADK and Claude did the same read/interaction tasks, and Claude was 3–10x
+    faster in that sample. This is observability history, not a reason to bypass the routing order or its approval gate.
+  - Chrome must be running before either starts.
+
+## Quota policy (user, 2026-11-03)
+
+> **changed 2026-11-15:** The budget measurements and dated decisions below are preserved. Current gates use scoped approvals; company work never waits merely to hoard future quota. Follow the current pipeline rather than retired ladder/effort instructions.
+
+All thresholds live in `POLICY` in `scripts/lib/state.mjs`.
+
+- **Codex is use-it-or-lose-it.** Spend every account's week by its reset.
+- **Claude never runs out before Codex.** Claude runs the orchestrators, so it keeps a reserve for them until the
+  reset. Its budget moves with the clock (user, 2026-11-03), so a week about to reset isn't hoarded. With L the share
+  of the week still left:
+  - **reserve** = the orchestrators' burn until the reset: about 2.9% of the week per day
+    (`QUOTA_CLAUDE_ORCH_PER_DAY`), at least 2%. That is ≈20% with a full week left and ≈3% with a day left.
+  - **cap** = 100 − 5 − 15·L. Claude never plans to finish the week above this. The 15·L term is the projection's
+    uncertainty and vanishes at the reset: 80% with a full week ahead, 95% at the reset.
+  - **spare line** = cap − 20·L: 60% with a full week ahead, converging on the cap at the reset.
+  - **room** = what Claude workers may still spend now: min(95 − reserve, cap) − used.
+
+  The projection is the share used at the reset at the current burn rate, so a fast burn early in the week trips the
+  cap, while 85% used with 2h left and a slow burn reads as spare.
+- **Reset cards come last.**
+
+Only the weekly window sets budgets, deadlines and card math; a 5-hour window just pauses work until it resets.
+Projections use the recent burn rate (readings spanning ≥3h of the last 24h in the same window). Without that history
+they use the window average, with its first tenth floored.
+
+In the nightly quota history, an early card restart requires a forward weekly deadline change and an unexpired
+card disappearing from that account's snapshots. An idle account's future deadline can move while usage stays at
+0% and its cards stay the same (b on 2026-11-10); that is neither a redemption nor lost quota. Natural resets remain
+reported once the old deadline is reached, and backward deadline corrections are not resets. This reporting fix
+implements approved decision `2026-11-10-1`; it does not authorize any card redemption.
+
+`quota.mjs` lean lines and what the orchestrator does about each:
+
+| Lean line | Condition | Do |
+|---|---|---|
+| `TTADK first` | a healthy TTADK account | The router sends everything TTADK's Sol can handle there. |
+| `TTADK device` | a TTADK account is set up | Leave ChatGPT and Claude quota for the other device; no spending for its own sake. |
+| `codex first` | always, unless Codex is out | The router already sends shared work to Codex. |
+| `claude has spare` | projected at reset ≤ the spare line (60% a week out, ≈95% at the reset) | Claude also takes the work it's clearly better at. |
+| `claude near budget` | projected between the spare line and the cap | Claude takes Claude-only work, design and high-stakes calls. |
+| `claude over budget` | projected above the cap (80% a week out, 95% at the reset), or no room left after the reserve | No new Claude workers except Claude-only work that can't wait. Keep the orchestrator lean: no subagents, fewer reads, short briefs. |
+| `claude usage unreadable` | no reading | Claude-only work only. Check `claude -p /usage`. |
+| `new Codex work → account X` / `rotate across …` | several accounts | The router uses the open account whose quota is lost first (its reset, or an earlier card expiry; a tie goes to a live hub), or rotates when several must be spent within 48h. |
+| `codex front-load` / `codex underused` | the account new Codex work lands on holds cards, or — after the first tenth of its week, or with a card deadline — isn't on course for 100% by its deadline | Pull queued and deferred work forward. Add second-opinion reviews. The router raises Codex effort. |
+| `codex overspending` | one account left, no cards, projected >115% | The router lowers effort where a check exists. Save Sol `xhigh` and Astra for what matters. |
+| `redeem a reset card` | every account ≥99%, or a card expires within the hour (or within a day on a spent account) and still gains | Ask the user every time — never redeem on your own (user, 2026-11-03) — and only after an explicit yes run the printed `reset-credit-use … --credit <id>` and `quota.mjs --fresh`. If declined, route with `--no-redeem`. |
+| `X: spent; hold its card` | a spent account's card while another account has quota | Nothing yet: quota first. Redeem when the open accounts are spent, or a day before the card expires. |
+| card with a deadline | a card expires before its account's week resets | Spend that account to 99% by then and redeem. Below the printed break-even, let it lapse. |
+| `codex paused` | every open account's 5-hour window is full | Use eligible company capacity; personal quota needs approval. If nothing can run, tell the user rather than silently waiting (2026-11-13). |
+| `codex out on every account` | weeks spent, no card worth redeeming | Tell the user. Claude takes what matters within its room. |
+| `account X: not logged in` / `hub unreachable` / `login changed` | — | Ask the user for `! CODEX_HOME=… codex login`. Start the hub with `codex-worker.mjs --account X hub`, or restart it once no thread runs on it. |
+| `stop` | neither vendor readable | The router defers everything. Check both, tell the user. |
+| `expiring` lines, Fable line | a week resets within a day with ≥25% spendable; Fable window ≥70% | The router already adjusts effort and avoids Fable. Pull queued work forward. |
+
+Card math: redeeming at usage u with d hours of a T-hour week left gains about u + d/T − 1 weeks:
+
+- a full new week,
+- minus the unused share forfeited,
+- minus the delay to the next natural reset, since the clock restarts.
+
+At u ≈ 100% the gain is d/T, so a week spent early in its cycle and then redeemed gains the most. That's why Codex is
+front-loaded while cards are in hand.
+
+## Sources (2026-11-03)
+
+- Claude: platform.claude.com/docs/en/about-claude/pricing, …/models/overview,
+  …/models/optimizing-for-cost-and-intelligence, …/build-with-claude/effort; anthropic.com/claude-opus-5-5,
+  /claude-sonnet-5-5, /claude-haiku-5-5, /claude-fable-and-mythos-5-1; code.claude.com/docs/en/model-config;
+  support.claude.com articles 11647753 and 15424964.
+- OpenAI: developers.openai.com/api/docs/pricing.md and /models/<id>.md; learn.chatgpt.com/docs/pricing.md, /models.md,
+  /agent-configuration/speed.md, /changelog.
+- Independent: artificialanalysis.ai (Intelligence Index, Terminal-Bench 4.0, FrontierCode 2.0, AutomationBench, cost
+  per task at each effort); vals.ai comparisons.
+- Caveats: vendor and independent numbers disagree in places (Sonnet 5.5 on Terminal-Bench is 70.6% per the vendor but
+  44% at `high` on AA; AA's Fable row is labeled "with fallback"). OpenAI's own launch benchmarks weren't reachable.
+  Anthropic publishes no per-model plan multipliers; Codex credits per MTok are Astra 5x, Sol 1x, Terra 0.5x and
+  Luna 0.05x of Sol (cached input: Astra 10x, Luna 0.1x).

@@ -28,7 +28,11 @@ const m=JSON.parse(raw);if(m.id==null)return;fs.appendFileSync(process.env.CAPTU
 const result=m.method==='thread/start'?{thread:{id:'fixture-thread'}}:m.method==='turn/start'?{turn:{id:'fixture-turn'}}:{};
 setImmediate(()=>{this.onmessage?.({data:JSON.stringify({id:m.id,result})});if(m.method==='turn/start')setImmediate(()=>this.onmessage?.({data:JSON.stringify({method:'turn/completed',params:{threadId:'fixture-thread',turn:{id:'fixture-turn',status:'completed',items:[{type:'agentMessage',text:'DONE fixture'}]}}})}));});}};
 `);
-const baseEnv = { ...process.env, HOME: home, CODEX_ACCOUNTS: profiles, PLAYWRIGHT_EXTENSION_TOKEN_FILE: tokenFile,
+const fakeBin=path.join(tmp,'bin');fs.mkdirSync(fakeBin);
+fs.writeFileSync(path.join(fakeBin,'npx'), `#!${process.execPath}
+let rest='';process.stdin.on('data',chunk=>{rest+=chunk;let end;while((end=rest.indexOf('\\n'))>=0){const m=JSON.parse(rest.slice(0,end));rest=rest.slice(end+1);if(m.id&&process.env.PREFLIGHT_MODE!=='hang')process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result:m.id===2?{isError:process.env.PREFLIGHT_MODE==='fail',content:[]}:{protocolVersion:'2024-11-05',capabilities:{},serverInfo:{name:'fixture',version:'1'}}})+'\\n');}});
+`,{mode:0o755});
+const baseEnv = { ...process.env, RULES_SHARED:tmp, PATH:`${fakeBin}:${process.env.PATH}`, HOME: home, CODEX_ACCOUNTS: profiles, PLAYWRIGHT_EXTENSION_TOKEN_FILE: tokenFile,
   ROUTE_LOG_FILE: path.join(tmp, 'route-log.jsonl'), ORCHESTRATOR_WORKER_EVENTS: path.join(tmp, 'worker-events.jsonl') };
 const run = (capture, args) => {
   fs.writeFileSync(capture, '');
@@ -80,4 +84,26 @@ try {
   console.log('ok   non-browser TRAE start leaves the persistent headless Playwright default untouched');
 } catch (e) { fail++; console.log(`FAIL non-browser TRAE start: ${e.stack}`); }
 
+try {
+  const capture=path.join(tmp,'blocked-rpc.jsonl');
+  const args=['--import',transport,worker,'--account','trae','start','--cwd',tmp,'--effort','high','--sandbox','read-only','--model','gpt-6.1-sol','--browser-origins','example.com','reply DONE'];
+  // Client-side preflight is "Chrome is running" + the pairing file; a fake pgrep makes it deterministic.
+  const fakeBin=path.join(tmp,'fake-bin');fs.mkdirSync(fakeBin,{recursive:true});
+  fs.writeFileSync(path.join(fakeBin,'pgrep'),`#!${process.execPath}\nprocess.exit(process.env.CHROME_DOWN==='1'?1:0);\n`,{mode:0o755});
+  const withBin={...baseEnv,PATH:`${fakeBin}:${process.env.PATH}`};
+  {
+    fs.writeFileSync(capture,'');const began=Date.now();
+    const r=spawnSync(process.execPath,args,{env:{...withBin,CAPTURE:capture,CHROME_DOWN:'1'},encoding:'utf8',timeout:7000});
+    assert.equal(r.status,1,r.stderr);assert.equal((r.stderr.match(/BLOCKED/g)||[]).length,1);assert.match(r.stderr,/Google Chrome is not running/);
+    assert.equal(fs.readFileSync(capture,'utf8'),'','no hub RPC on failed preflight');assert.ok(Date.now()-began<5000);
+    fs.writeFileSync(capture,'');
+    const ok=spawnSync(process.execPath,args,{env:{...withBin,CAPTURE:capture},encoding:'utf8',timeout:7000});
+    assert.equal(ok.status,0,ok.stderr);assert.match(fs.readFileSync(capture,'utf8'),/thread\/start/);
+  }
+  const skip=spawnSync(process.execPath,[...args.slice(0,-1),'--no-browser-preflight',args.at(-1)],{env:{...withBin,CAPTURE:capture,CHROME_DOWN:'1'},encoding:'utf8',timeout:5000});
+  assert.equal(skip.status,0,skip.stderr);assert.match(fs.readFileSync(capture,'utf8'),/thread\/start/);
+  fs.writeFileSync(capture,'');const missing=spawnSync(process.execPath,args,{env:{...baseEnv,CAPTURE:capture,PLAYWRIGHT_EXTENSION_TOKEN_FILE:path.join(tmp,'missing')},encoding:'utf8',timeout:5000});
+  assert.equal(missing.status,1);assert.match(missing.stderr,/BLOCKED browser preflight.*pairing file is missing/);assert.equal(fs.readFileSync(capture,'utf8'),'');
+  console.log('ok   TRAE preflight: Chrome down or missing pairing blocks once before RPC; explicit skip launches');
+} catch(e){fail++;console.log(`FAIL browser preflight: ${e.stack}`);}
 process.exitCode = fail ? 1 : 0;
