@@ -48,7 +48,7 @@ Only absent/stale telemetry uses the optimistic unknown fallback. A reset decisi
 instructions. Low-priority lanes carry bounded queue patience. No resource is
 held while waiting for a model response or an automatic replacement.
 
-Retries use the actual prior tuple (`--actual vendor:model:effort@account`, or
+Retries use the actual prior tuple (`--actual vendor:model:effort[@account]`, or
 sanitized task-owned attempt metadata), never a ladder rebuilt from the current
 catalog. Missing history falls back to the first category rung with an explicit
 why note. Inferred history is used only with `--failures > 0`, and only actual
@@ -63,7 +63,11 @@ Without company accounts, personal ChatGPT is the default lane with standing
 permission; eligible accounts with deadlines within 48 hours rotate under the
 CLI counter, otherwise the earliest deadline wins. --urgent --user-ok <reference> records one user yes
 and produces a command; image generation and Claude-only tools retain standing
-permission. Max effort outside TTADK, Fable and reset redemption keep separate
+permission. Astra on personal ChatGPT always needs its own scoped OK, including
+on devices without company accounts. A runnable non-Astra escalation wins and
+identifies Astra as a gated alternative; qualified TRAE Astra stays ungated.
+Account-less explicit actuals keep the account UNKNOWN and retain the supplied
+model/effort floor. Max effort outside TTADK, Fable and reset redemption keep separate
 authorization. An eligible company primary launches while a gated personal
 second reviewer awaits the user's answer before acceptance.
 

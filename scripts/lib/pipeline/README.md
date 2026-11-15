@@ -29,7 +29,7 @@ On a device with a registered TTADK/TRAE account, if no company lane can start, 
 quota now or wait until the named reset/progress trigger. `--urgent --user-ok
 <reference>` records the user's answer and permits the personal command. Image
 generation and Claude-only tools retain standing permission. Max effort outside
-TTADK, Fable and reset redemption keep their separate decisions. Blocked
+TTADK, personal ChatGPT Astra, Fable and reset redemption keep their separate decisions. Blocked
 proposals contain no executable commands; gated second reviewers do not stop
 an eligible company primary, and remain required before acceptance.
 On devices without company accounts, personal ChatGPT is the normal lane with
@@ -37,7 +37,11 @@ standing permission. Eligible accounts with deadlines within 48 hours rotate;
 otherwise the earliest deadline wins. Nondry personal launches advance the CLI
 counter under a short lock. Max effort and reset redemption still ask separately.
 
-`--actual vendor:model:effort@account` supplies sanitized actual attempt evidence.
+`--actual vendor:model:effort[@account]` supplies sanitized actual attempt evidence.
+An omitted account stays UNKNOWN while its explicit model/effort floor remains
+binding. Personal Astra needs its own scoped OK on every device; runnable
+non-Astra escalations launch first and identify Astra as a gated alternative.
+TRAE Astra remains ungated for qualified hard work.
 Inferred history applies only to `--failures > 0` and requires actual accepted or
 terminal launches of the same project, name and category. Route decisions,
 planned/dry/unlaunched records and outcomes alone never establish a floor. With

@@ -61,8 +61,8 @@ export function createTaskSpec(input) {
   }
   if (f.name !== undefined && !idOK(f.name)) fail('INVALID_NAME','Name must be a public task ID without parent traversal.');
   if (f.actual !== undefined && (typeof f.actual !== 'string' || f.actual.split(',').some(tuple=>
-    !/^(codex|claude):([\w.-]+):(low|medium|high|xhigh|max)@([\w.-]+)$/.test(tuple))))
-    fail('INVALID_ACTUAL','actual takes vendor:model:effort@account (comma-separated launch order).');
+    !/^(codex|claude):([\w.-]+):(low|medium|high|xhigh|max)(?:@([\w.-]+))?$/.test(tuple))))
+    fail('INVALID_ACTUAL','actual takes vendor:model:effort[@account] (comma-separated launch order).');
   const enumValue = (key, fallback, choices) => {
     const v = f[key] ?? input[key] ?? fallback;
     if (!choices.includes(v)) fail('INVALID_ENUM', `Invalid ${key}.`);

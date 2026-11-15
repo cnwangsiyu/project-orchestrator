@@ -42,6 +42,8 @@ export function presentRoute(plan, view, context) {
   }
   if(context.refreshRequired) notes.push('--fresh: account status refreshed through authenticated read-only interfaces.');
   if(context.retryAssumption) why.push(context.retryAssumption);
+  if(t.previousAttempts.some(a=>a.source==='explicit-actual'&&a.actual?.accountStatus==='UNKNOWN'))
+    why.push('Prior actual account is unknown; retaining the supplied model/effort floor.');
   for(const warning of plan.warnings??[]) { why.push(warning.text);tellUser.push(warning.text); }
   for(const gate of plan.gates.filter((g)=>g.state==='needsOK')) {
     if(gate.kind==='personal-quota') needsUserOK.push(`personal quota: ${gate.scope?.accounts.join(',')??'reviewer'} needs the user's scoped OK${unknownCompany.length?`; company account state unknown or unavailable (${unknownCompany.map(a=>`${a.id}/${a.kind}`).join(', ')})`:''}`);

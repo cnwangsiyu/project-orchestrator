@@ -105,7 +105,9 @@ export function dominates(c, previous, s) {
 export function pPreviousFloor(t, s, c) {
   const attempts = t.previousAttempts;
   const relevant = attempts.filter((a) => a?.taskId === t.taskId && (a.role ?? 'primary') === t.role && a.state !== 'planned');
-  if (relevant.some((a) => !a.id || !a.actual?.accountId)) return deny('pPreviousFloor', 'PREVIOUS_ATTEMPT_UNKNOWN', 'Prior attempt identity and actual account must be attested.', c);
+  const accountlessActual=a=>a.source==='explicit-actual'&&a.actualStatus==='KNOWN'&&a.actual?.accountStatus==='UNKNOWN'
+    && a.actual.accountId===null && modelId(a.actual.modelId??a.actual.model) && EFFORTS.includes(a.actual.effort);
+  if (relevant.some((a) => !a.id || (!a.actual?.accountId&&!accountlessActual(a)))) return deny('pPreviousFloor', 'PREVIOUS_ATTEMPT_UNKNOWN', 'Prior attempt identity and actual account must be attested, or an explicit account-less model/effort floor supplied.', c);
   if ((t.autoRerouteDepth > 0 || array(t.floor.previousAttemptIds).length > 0) && !relevant.length)
     return deny('pPreviousFloor', 'PREVIOUS_ATTEMPT_UNKNOWN', 'Retry requires sanitized actual-attempt evidence.', c);
   if (t.floor.relationVersion !== s.qualityRelationVersion && relevant.length) return deny('pPreviousFloor', 'QUALITY_RELATION_UNKNOWN', 'The pinned quality relation is unavailable.', c);
@@ -161,6 +163,7 @@ export function pScopedApproval(t, s, c, context = {}) {
   const a = candidateParts(s, c).account;
   const requirements = [];
   if (companyDevice(s) && !company(a)) requirements.push(['personal-quota', 'PERSONAL_QUOTA_OK_REQUIRED', 'Current scoped personal-quota approval is required.', context.companyEligible || context.companyUnknown]);
+  if (c.modelId==='gpt-6-astra' && a?.kind==='chatgpt') requirements.push(['astra','PERSONAL_ASTRA_OK_REQUIRED',`use GPT-6-Astra on personal account ${a.id}?`]);
   if (c.effort === 'max' && a?.kind !== 'ttadk') requirements.push(['max-effort', 'MAX_EFFORT_OK_REQUIRED', 'Max effort requires its own scoped approval.']);
   if (c.modelId === 'fable') requirements.push(['fable', 'FABLE_OK_REQUIRED', 'Fable requires a separate scoped decision.']);
   if (t.requirements.resetRedemption) requirements.push(['reset-redemption', 'RESET_REDEMPTION_OK_REQUIRED', 'Each reset redemption needs unused scoped approval.']);

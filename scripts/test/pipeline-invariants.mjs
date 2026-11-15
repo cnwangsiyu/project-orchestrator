@@ -81,6 +81,19 @@ test('V08 personal with no company has standing permission', () => {
   assert.equal(p.kind,'launch');
   assert.ok(!p.gates.some(g=>g.kind==='personal-quota'));
 });
+test('BC-31 personal Astra requires its own approval; company Astra does not', () => {
+  const raw=fixture([['p','chatgpt',[SOL,ASTRA]]]), t=task('implement-hard');
+  const s=createSnapshot(raw), c=candidate(s,'p',ASTRA,'xhigh');
+  assert.equal(pScopedApproval(t,s,c).reason.code,'PERSONAL_ASTRA_OK_REQUIRED');
+  const approved=approve(raw,t,c,'astra');assert.equal(pScopedApproval(approved,createSnapshot(raw),c).ok,true);
+  const max=candidate(s,'p',ASTRA,'max');assert.deepEqual(pScopedApproval(t,s,max).gates.map(g=>g.kind),['astra','max-effort']);
+  const companyRaw=fixture([['p','chatgpt',[ASTRA]],['company','trae',[ASTRA]]]), companySnapshot=createSnapshot(companyRaw);
+  assert.ok(pScopedApproval(t,companySnapshot,candidate(companySnapshot,'p',ASTRA,'xhigh')).gates.some(g=>g.kind==='astra'));
+  assert.equal(pScopedApproval(t,companySnapshot,candidate(companySnapshot,'company',ASTRA,'xhigh')).ok,true);
+  const prior=attempt(SOL,'high',{source:'explicit-actual',actual:{accountId:null,accountStatus:'UNKNOWN',modelId:SOL,effort:'high'}});
+  assert.equal(run(task('implement-hard',{failures:1,previousAttempts:[prior]}),raw).kind,'launch');
+  delete prior.source;noCommand(run(task('implement-hard',{failures:1,previousAttempts:[prior]}),raw));
+});
 test('V09 exact launch identity and fresh-state approval revocation', () => {
   const raw = fixture(), p = run(task(), raw), s = createSnapshot(raw);
   assert.equal(validatePlan(p, s).ok, true);
@@ -423,6 +436,7 @@ for (let seed = 1; seed <= seeds; seed++) {
       const c = seat.candidate, a = raw.accounts.find((a) => a.id === c.accountId), st = seat.task;
       assert.ok(!raw.accounts.some(a=>['ttadk','trae'].includes(a.kind))||['ttadk','trae'].includes(a.kind),
         'without approvals, personal launches require a device with no company account');
+      if(a.kind==='chatgpt') assert.notEqual(c.modelId,ASTRA,'personal Astra never launches without its own scoped approval');
       if (st.contentLabels.includes('adversarial')) assert.notEqual(c.family, 'gpt');
       if (st.category === 'build-run' || st.requirements.executableAcceptance) assert.notEqual(c.family, 'deepseek');
       if (st.tier !== 'hard') assert.notEqual(c.modelId, ASTRA);

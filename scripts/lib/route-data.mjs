@@ -79,8 +79,10 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
     && (r.taskId ?? r.name) === id && (r.role ?? 'primary') === role;
   const addActual = (actual, extra = {}) => {
     if (!actual) return;
+    const accountId=Object.hasOwn(actual,'account') ? actual.account : actual.accountId
+      ?? (actual.vendor==='claude' || familyOf(actual.modelId??actual.model)==='claude' ? 'claude' : actual.vendor==='codex' ? 'main' : undefined);
     attempts.push({ id: `actual-${attempts.length}`, taskId: id, role, state: 'failed', actualStatus: 'KNOWN',
-      actual: { accountId: actual.accountId ?? actual.account ?? (actual.vendor==='claude' || familyOf(actual.modelId??actual.model)==='claude' ? 'claude' : actual.vendor==='codex' ? 'main' : undefined), modelId: modelId(actual.modelId ?? actual.model), effort: actual.effort }, failureKind: 'infra', ...extra });
+      actual: { accountId, ...(actual.accountStatus?{accountStatus:actual.accountStatus}:{}), modelId: modelId(actual.modelId ?? actual.model), effort: actual.effort }, failureKind: 'infra', ...extra });
   };
   let missingTerminalActual=false;
   const ingestAttempt = r => {
@@ -101,9 +103,10 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
       failureKind:r.failureKind??(parsed.failures?'quality':'infra')});
   };
   if (flags.actual) for (const tuple of flags.actual.split(',')) {
-    const m = /^(codex|claude):([\w.-]+):(low|medium|high|xhigh|max)@([\w.-]+)$/.exec(tuple);
-    if (!m) throw Error('--actual takes vendor:model:effort@account (comma-separated launch order)');
-    addActual({ model: m[2], effort: m[3], account: m[4] }, { failureKind: parsed.failures ? 'quality' : 'infra' });
+    const m = /^(codex|claude):([\w.-]+):(low|medium|high|xhigh|max)(?:@([\w.-]+))?$/.exec(tuple);
+    if (!m) throw Error('--actual takes vendor:model:effort[@account] (comma-separated launch order)');
+    addActual({ model: m[2], effort: m[3], account: m[4] ?? null, accountStatus:m[4]?'KNOWN':'UNKNOWN' },
+      { source:'explicit-actual', failureKind: parsed.failures ? 'quality' : 'infra' });
   }
   if (retryHistory && flags['previous-attempt'] && !flags.actual) {
     const dir = path.resolve(flags['task-dir'] ?? '.'), file = path.resolve(dir, flags['previous-attempt']);

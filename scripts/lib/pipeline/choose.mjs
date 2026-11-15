@@ -68,6 +68,12 @@ export function orderCandidates(task, snapshot, rows) {
   const noCompany=!companyDevice(snapshot);
   if(noCompany&&prefersPersonalCodex(task)&&cohort.some(r=>candidateParts(snapshot,r.candidate).account.kind==='chatgpt'))
     cohort=cohort.filter(r=>candidateParts(snapshot,r.candidate).account.kind==='chatgpt');
+  // When every candidate needs approval, offer the personal Astra escalation
+  // before a Sol/max decision. Runnable alternatives were selected separately.
+  const astraOffers=cohort.filter(r=>r.candidate.modelId==='gpt-6-astra'&&candidateParts(snapshot,r.candidate).account.kind==='chatgpt'
+    && r.predicates?.some(p=>!p.ok&&p.gates?.some(g=>g.kind==='astra'))
+    && r.predicates.filter(p=>!p.ok).every(p=>p.gates?.every(g=>['astra','personal-quota'].includes(g.kind))));
+  if(task.previousAttempts.length&&astraOffers.length&&cohort.every(r=>r.predicates?.some(p=>!p.ok))) cohort=astraOffers;
   // The legacy device lane spends accounts with deadlines <=48h in rotation;
   // otherwise it uses the earliest deadline. The CLI owns the counter mutation.
   const personalAccounts=[...new Set(cohort.filter(r=>candidateParts(snapshot,r.candidate).account.kind==='chatgpt').map(r=>r.candidate.accountId))]

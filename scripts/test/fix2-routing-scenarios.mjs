@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// BC-29/30: public synthetic metadata, no provider/session/credential access.
+// BC-29/30/31: public synthetic metadata, no provider/session/credential access.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -70,6 +70,50 @@ try {
   const max=cli(['implement','--actual',`codex:${SOL}:max@main`]);assert.equal(max.kind,'blocked');assert.equal(max.pick.command,null);
   assert.ok(max.plan.gates.some(g=>g.kind==='max-effort'));assert.ok(!max.plan.gates.some(g=>g.kind==='personal-quota'));
   console.log('PASS account rotation/deadlines, browser fallback, unhealthy/exhausted accounts, reset and max gates');
+
+  const astraArgs=['implement-hard','--impact','throwaway','--writes','--failures','1',
+    '--actual',`codex:${SOL}:xhigh@alt`,'--project','acq','--name','probe2'];
+  const astra=cli(astraArgs);assert.equal(astra.kind,'blocked');assert.equal(astra.pick.model,ASTRA);
+  assert.equal(astra.pick.command,null);assert.deepEqual(astra.needsUserOK,[`use GPT-6-Astra on personal account ${astra.pick.account}?`]);
+  assert.ok(astra.plan.gates.some(g=>g.kind==='astra'));assert.ok(!astra.plan.gates.some(g=>g.kind==='max-effort'));
+  const request=cli([...astraArgs,'--urgent']);
+  const approval=path.join(tmp,'astra-approvals.json');env.ROUTE_APPROVAL_FILE=approval;
+  const astraScope=request.plan.gates.find(g=>g.kind==='astra').scope;
+  const approve=scope=>fs.writeFileSync(approval,JSON.stringify([{id:'astra-yes',userDecisionRef:'synthetic-astra-yes',
+    grantedAt:now-1000,expiresAt:now+60000,revoked:false,scopes:[scope]}]));
+  approve({...astraScope,action:'personal-quota'});
+  assert.equal(cli([...astraArgs,'--urgent','--user-ok','astra-yes']).pick.command,null,'personal quota approval cannot authorize Astra');
+  approve(astraScope);
+  const yes=cli([...astraArgs,'--urgent','--user-ok','astra-yes']);assert.equal(yes.kind,'launch');assert.equal(yes.pick.model,ASTRA);
+  assert.ok(yes.pick.command);assert.equal(yes.needsUserOK.length,0);
+  delete env.ROUTE_APPROVAL_FILE;
+  const companyOut=copy();companyOut.codexAccounts.push({name:'ttadk',kind:'ttadk',home:path.join(tmp,'ttadk'),live:true,healthy:false,
+    models:[SOL],reason:'daily token quota used up',usage:{used:100,limit:100,resetsAt:now+h}});
+  const onCompanyDevice=cli([...astraArgs,'--urgent','--user-ok','personal-yes'],companyOut);
+  assert.equal(onCompanyDevice.kind,'blocked');assert.equal(onCompanyDevice.pick.model,ASTRA);assert.equal(onCompanyDevice.pick.command,null);
+  assert.deepEqual(onCompanyDevice.needsUserOK,[`use GPT-6-Astra on personal account ${onCompanyDevice.pick.account}?`]);
+  const solArgs=['implement-hard','--impact','throwaway','--writes','--failures','1','--actual',`codex:${SOL}:high@alt`];
+  const sol=cli(solArgs);assert.equal(sol.kind,'launch');assert.equal(sol.pick.model,SOL);assert.equal(sol.pick.effort,'xhigh');
+  assert.ok(sol.pick.command);assert.equal(sol.needsUserOK.length,0);assert.match(sol.why.join('\n'),/Astra .*gated alternative/);
+  const mini=copy();mini.codexAccounts=[{name:'trae',kind:'trae',home:path.join(tmp,'trae'),live:true,healthy:true,models:[SOL,ASTRA],windows:[],
+    quota:{sampledAt:now,daily:Object.fromEntries([SOL,ASTRA].map(model=>[model,{used:20,limit:100,remaining:80,depleted:false,resetsAt:now+h}]))}}];
+  const companyAstra=cli(['implement-hard','--impact','throwaway','--writes','--failures','1','--actual',`codex:${SOL}:xhigh@trae`],mini);
+  assert.equal(companyAstra.kind,'launch');assert.equal(companyAstra.pick.model,ASTRA);assert.equal(companyAstra.pick.account,'trae');
+  assert.ok(companyAstra.pick.command);assert.equal(companyAstra.needsUserOK.length,0);
+  const accountless=cli(['implement-hard','--impact','throwaway','--writes','--failures','1','--actual',`codex:${SOL}:xhigh`]);
+  assert.equal(accountless.kind,'blocked');assert.equal(accountless.pick.model,ASTRA);
+  assert.equal(accountless.plan.task.previousAttempts[0].actual.accountId,null);
+  assert.equal(accountless.plan.task.previousAttempts[0].actual.accountStatus,'UNKNOWN');
+  assert.ok(!accountless.plan.rejected.some(p=>p.reason.code==='PREVIOUS_ATTEMPT_UNKNOWN'));
+  assert.match(accountless.why.join('\n'),/actual account is unknown/);
+  const noAccountSol=cli(['implement-hard','--failures','1','--actual',`codex:${SOL}:high`]);
+  assert.equal(noAccountSol.kind,'launch');assert.equal(noAccountSol.pick.model,SOL);assert.equal(noAccountSol.pick.effort,'xhigh');
+  const mixed=cli(['implement-hard','--failures','1','--actual',`codex:${SOL}:high,codex:${SOL}:high@alt`]);
+  assert.equal(mixed.plan.task.previousAttempts.length,2);assert.equal(mixed.plan.task.previousAttempts[0].actual.accountId,null);
+  assert.equal(mixed.plan.task.previousAttempts[1].actual.accountId,'alt');
+  for(const actual of [`codex:${SOL}:high@`,`codex:${SOL}:high@@alt`,`codex:${SOL}:ultra`])
+    assert.throws(()=>cli(['implement-hard','--actual',actual]),e=>e.status===2);
+  console.log('PASS BC-31 personal Astra scoped OK on both device types, ready Sol preferred with gated alternative, TRAE Astra ungated, account-less/mixed actual floors');
 
   const nameArgs=['--project','route-regression','--name','BC-29'];
   const decision=cli(['analysis',...nameArgs],base,false);assert.equal(decision.kind,'launch');
