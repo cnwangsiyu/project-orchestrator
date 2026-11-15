@@ -14,6 +14,8 @@ REG="$RES_DIR/resources.tsv"
 LOCKS="$RES_DIR/locks"
 LOG="$RES_DIR/log.tsv"
 NOTES="$RES_DIR/notes"
+WAITERS="$RES_DIR/build-waiters"
+WAITER_STALE_SECONDS=45
 
 usage() {
   cat <<'EOF'
@@ -294,6 +296,165 @@ conn() {
 }
 log() { printf '%s\t%s\t%s\t%s\t%s\n' "$(now)" "$1" "$2" "$3" "$4" >>"$LOG"; }
 
+waiter_field() { awk -F'\t' -v k="$2" '$1==k{print $2}' "$1/info" 2>/dev/null || true; }
+
+waiter_live() {
+  local dir="$1" pid host heartbeat current rc=0
+  [ -f "$dir/info" ] || return 1
+  heartbeat=$(waiter_field "$dir" heartbeat); current=$(date +%s)
+  case "$heartbeat" in ''|*[!0-9]*) return 1 ;; esac
+  awk -v heartbeat="$heartbeat" -v current="$current" -v stale="$WAITER_STALE_SECONDS" \
+    'BEGIN { exit !(current >= heartbeat && current - heartbeat <= stale) }' || return 1
+  host=$(waiter_field "$dir" host)
+  [ "$host" = "$(local_host)" ] || return 0
+  pid=$(waiter_field "$dir" pid)
+  case "$pid" in ''|*[!0-9]*|0) return 1 ;; esac
+  ps -p "$pid" -o pid= >/dev/null 2>&1 || rc=$?
+  # As with hold staleness, only ps exit 1 proves death. An unavailable probe
+  # does not discard a fresh heartbeat.
+  [ "$rc" -eq 0 ] || [ "$rc" -ne 1 ]
+}
+
+cleanup_build_waiters() {
+  local dir
+  [ -d "$WAITERS" ] || return 0
+  for dir in "$WAITERS"/waiter.*; do
+    [ -d "$dir" ] || continue
+    waiter_live "$dir" || rm -rf "$dir"
+  done
+}
+
+oldest_build_waiter() {
+  local dir order streak
+  cleanup_build_waiters
+  for dir in "$WAITERS"/waiter.*; do
+    [ -d "$dir" ] || continue
+    streak=$(waiter_field "$dir" gate_streak)
+    case "$streak" in ''|*[!0-9]*) streak=0 ;; esac
+    [ "$streak" -lt 3 ] || continue
+    order=$(waiter_field "$dir" order)
+    [ -n "$order" ] || order=$(waiter_field "$dir" start)
+    printf '%s\t%s\n' "$order" "$dir"
+  done | LC_ALL=C sort -t $'\t' -k1,1 -k2,2 | head -1 | cut -f2-
+}
+
+holder_has_live_waiter() {
+  local holder="$1" pid="$2" dir
+  cleanup_build_waiters
+  for dir in "$WAITERS"/waiter.*; do
+    [ -d "$dir" ] || continue
+    [ "$(waiter_field "$dir" holder)" = "$holder" ] || continue
+    [ "$(waiter_field "$dir" pid)" = "$pid" ] || continue
+    return 0
+  done
+  return 1
+}
+
+# Return success only when this newly-created lane must be yielded. Checking
+# after atomic mkdir makes concurrent non-waiters conservative: at least one
+# of them rolls back rather than jointly consuming the last admitted lane.
+lane_reserved_for_waiter() {
+  local candidate="$1" waiter holder pin lane3 build_holder build_pid lane free=0 eligible=0
+  case "$candidate" in heavy-lane-[123]) ;; *) return 1 ;; esac
+  waiter=$(oldest_build_waiter); [ -n "$waiter" ] || return 1
+  holder=$(waiter_field "$waiter" holder); pin=$(waiter_field "$waiter" lane); lane3=$(waiter_field "$waiter" lane3)
+  if [ -n "${BUILD_WAITER_DIR:-}" ] && [ "$holder" = "$BY" ] && [ "$(waiter_field "$waiter" pid)" = "$PID" ]; then
+    return 1
+  fi
+  if [ -d "$LOCKS/heavy-build.d" ] && ! hold_stale heavy-build; then
+    build_holder=$(field heavy-build by); build_pid=$(field heavy-build pid)
+    # A holder that still has a waiter record is an in-flight pair attempt,
+    # not the established active build that suspends the reservation.
+    holder_has_live_waiter "$build_holder" "$build_pid" || return 1
+  fi
+  for lane in ${pin:-heavy-lane-1 heavy-lane-2 heavy-lane-3}; do
+    [ -n "$(reg_line "$lane")" ] || continue
+    [ "$lane" != heavy-lane-3 ] || [ "$lane3" = OPEN ] || continue
+    if [ "$lane" = "$candidate" ]; then eligible=1; continue; fi
+    [ -d "$LOCKS/$lane.d" ] || free=$((free + 1))
+  done
+  [ "$eligible" -eq 1 ] && [ "$free" -eq 0 ] || return 1
+  RESERVED_WAITER_HOLDER="$holder"
+  return 0
+}
+
+write_build_waiter() {
+  local blocked="$1" lane3="$2" tmp="$BUILD_WAITER_DIR/info.$$"
+  printf 'holder\t%s\nproject\t%s\ntask\t%s\npid\t%s\nhost\t%s\nsince\t%s\nstart\t%s\norder\t%s\nheartbeat\t%s\nblocked\t%s\ngate_streak\t%s\nlane\t%s\nlane3\t%s\n' \
+    "$BY" "$PROJECT" "$TASK" "$PID" "$BUILD_WAITER_HOST" "$BUILD_WAITER_SINCE" \
+    "$BUILD_WAITER_START" "$BUILD_WAITER_ORDER" "$(date +%s)" "$blocked" \
+    "$BUILD_WAITER_GATE_STREAK" "$pin" "$lane3" >"$tmp"
+  mv "$tmp" "$BUILD_WAITER_DIR/info"
+}
+
+start_build_waiter() {
+  local published suffix
+  mkdir -p "$WAITERS"
+  BUILD_WAITER_DIR=$(mktemp -d "$WAITERS/.staging.XXXXXX")
+  BUILD_WAITER_HOST=$(local_host); BUILD_WAITER_SINCE=$(now); BUILD_WAITER_START=$(date +%s)
+  if command -v python3 >/dev/null 2>&1; then
+    BUILD_WAITER_ORDER=$(python3 -c 'import time; print(f"{time.time_ns():020d}")')
+  else
+    BUILD_WAITER_ORDER=$(printf '%010d-%010d' "$BUILD_WAITER_START" "$$")
+  fi
+  BUILD_WAITER_GATE_STREAK=0
+  write_build_waiter starting CLOSED
+  arm_build_waiter_cleanup
+  suffix="${BUILD_WAITER_DIR##*.staging.}"; published="$WAITERS/waiter.$suffix"
+  BUILD_WAITER_STAGING="$BUILD_WAITER_DIR"; BUILD_WAITER_DIR="$published"
+  mv "$BUILD_WAITER_STAGING" "$BUILD_WAITER_DIR"
+  BUILD_WAITER_STAGING=
+  log waiter-start heavy-build "$BY ($PROJECT${TASK:+/$TASK})" "pid=$PID"
+}
+
+update_build_waiter() {
+  local blocked="$1" lane3="$2"
+  [ -n "${BUILD_WAITER_DIR:-}" ] && [ -d "$BUILD_WAITER_DIR" ] || return 0
+  write_build_waiter "$blocked" "$lane3"
+}
+
+cleanup_build_waiter() {
+  [ -z "${BUILD_WAITER_DIR:-}" ] || rm -rf "$BUILD_WAITER_DIR"
+  [ -z "${BUILD_WAITER_STAGING:-}" ] || rm -rf "$BUILD_WAITER_STAGING"
+  BUILD_WAITER_DIR=
+  BUILD_WAITER_STAGING=
+}
+
+arm_build_waiter_cleanup() {
+  [ -n "${BUILD_WAITER_DIR:-}" ] || return 0
+  trap 'cleanup_build_waiter' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
+}
+
+finish_build_waiter() {
+  local outcome="$1" note="$2"
+  [ -n "${BUILD_WAITER_DIR:-}" ] || return 0
+  log "waiter-$outcome" heavy-build "$BY ($PROJECT${TASK:+/$TASK})" "$note"
+  cleanup_build_waiter
+}
+
+show_build_waiters() {
+  local dir found=0
+  cleanup_build_waiters
+  for dir in "$WAITERS"/waiter.*; do [ -d "$dir" ] && found=1; done
+  [ "$found" -eq 1 ] || return 0
+  echo
+  echo 'Waiting builds:'
+  printf '%-24s %-24s %-16s %s\n' HOLDER PROJECT/TASK SINCE BLOCKED
+  for dir in "$WAITERS"/waiter.*; do
+    [ -d "$dir" ] || continue
+    printf '%s\t%s\n' "$(waiter_field "$dir" order)" "$dir"
+  done | LC_ALL=C sort -t $'\t' -k1,1 | while IFS=$'\t' read -r _ dir; do
+    printf '%-24s %-24s %-16s %s\n' \
+      "$(waiter_field "$dir" holder)" \
+      "$(waiter_field "$dir" project)/$(waiter_field "$dir" task)" \
+      "$(waiter_field "$dir" since)" \
+      "$(waiter_field "$dir" blocked)"
+  done
+}
+
 parse() {
   BY= PROJECT= PURPOSE= TASK= UNTIL= NOTE= FORCE= OFFLINE= DEVICE= POLICY= PID="$PPID" PID_EXPLICIT=
   while [ $# -gt 0 ]; do
@@ -417,6 +578,7 @@ wait_take_attempt() {
     TRANSACTION_CLEANING=1
     rollback_attempt || cleanup_failed=1
     TRANSACTION_CLEANING=0
+    cleanup_build_waiter
     trap - EXIT
     [ "$cleanup_failed" -eq 0 ] || exit 1
     exit "$TRANSACTION_PENDING_SIGNAL"
@@ -436,6 +598,7 @@ wait_take_attempt() {
     TRANSACTION_CLEANING=1
     rollback_attempt || cleanup_failed=1
     TRANSACTION_CLEANING=0
+    cleanup_build_waiter
     trap - EXIT
     [ "$cleanup_failed" -eq 0 ] || exit 1
     [ "$TRANSACTION_PENDING_SIGNAL" -eq 0 ] || exit "$TRANSACTION_PENDING_SIGNAL"
@@ -468,6 +631,7 @@ wait_take_attempt() {
 build_usage() {
   cat <<'EOF'
 res take-build --by <session> --project <slug> --for "<purpose>" [take options] [--lane heavy-lane-1|2|3]
+res take-build --wait --by <session> --project <slug> --for "<purpose>" --timeout <minutes> [take options]
 res wait-build --by <session> --project <slug> --for "<purpose>" --timeout <minutes> [take options] [--lane <id>]
 res wait-lane --by <session> --project <slug> --for "<purpose>" --timeout <minutes> [take options]
 res return-build --by <session> [--pid <holder-pid>] [--note "<text>"]
@@ -511,6 +675,7 @@ acquire_attempt() {
     TRANSACTION_CLEANING=1
     rollback_attempt || cleanup_failed=1
     TRANSACTION_CLEANING=0
+    cleanup_build_waiter
     trap - EXIT
     [ "$cleanup_failed" -eq 0 ] || exit 1
     exit "$TRANSACTION_PENDING_SIGNAL"
@@ -531,6 +696,7 @@ acquire_attempt() {
     TRANSACTION_CLEANING=1
     rollback_attempt || cleanup_failed=1
     TRANSACTION_CLEANING=0
+    cleanup_build_waiter
     trap - EXIT
     [ "$cleanup_failed" -eq 0 ] || exit 1
     [ "$TRANSACTION_PENDING_SIGNAL" -eq 0 ] || exit "$TRANSACTION_PENDING_SIGNAL"
@@ -545,6 +711,7 @@ acquire_attempt() {
     [ "$cleanup_failed" -eq 0 ] || exit 1
     [ "$TRANSACTION_PENDING_SIGNAL" -eq 0 ] || exit "$TRANSACTION_PENDING_SIGNAL"
     trap - INT TERM HUP
+    arm_build_waiter_cleanup
     return "$status"
   }
   trap unwind EXIT
@@ -573,6 +740,7 @@ acquire_attempt() {
   if [ "$mode" = build ]; then printf 'build-lane=%s\n' "$candidate"
   else printf 'lane=%s\n' "$candidate"; fi
   TRANSACTION_COMMITTED=1
+  if [ "$mode" = build ]; then finish_build_waiter acquire "lane=$candidate"; fi
   trap - EXIT
   exit 0
 }
@@ -582,6 +750,8 @@ cmd_acquire() {
   if [ "${1:-}" = --help ]; then build_usage; return 0; fi
   local timeout=0 timeout_seen= pin= args=() ALLOW_PID=1
   local duration deadline remaining delay=1 rc reading candidate missing3=0 ACQUIRE_PID_EXPLICIT
+  local BUILD_WAITER_DIR= BUILD_WAITER_STAGING= BUILD_WAITER_HOST= BUILD_WAITER_SINCE= BUILD_WAITER_START=
+  local BUILD_WAITER_ORDER= BUILD_WAITER_GATE_STREAK=0 lane3_state=CLOSED block_reason
   while [ $# -gt 0 ]; do
     case "$1" in
       --timeout)
@@ -621,10 +791,16 @@ cmd_acquire() {
   fi
   duration=$(awk -v t="$timeout" 'BEGIN {s=t*60; printf "%.0f\n", int(s)+(s>int(s))}')
   deadline=$((SECONDS + duration))
+  if [ "$mode" = build ] && [ "$blocking" = 1 ]; then
+    start_build_waiter
+    arm_build_waiter_cleanup
+  fi
   while :; do
     rc=0
     if reading=$(cmd_heavy_check --pid "$PID"); then
       printf '%s\n' "$reading"
+      lane3_state=CLOSED; lane3_open "$reading" && lane3_state=OPEN
+      BUILD_WAITER_GATE_STREAK=0
       if [ "$mode" = build ] && [ "$blocking" = 1 ]; then reclaim_stale_heavy heavy-build "$BY" || true; fi
       for candidate in ${pin:-heavy-lane-1 heavy-lane-2 heavy-lane-3}; do
         if [ -z "$(reg_line "$candidate")" ]; then
@@ -641,13 +817,19 @@ cmd_acquire() {
         [ "$rc" -eq 2 ] || [ "$rc" -eq 5 ] || return "$rc"
       done
       rc=2
+      block_reason=lane
+      if [ "$mode" = build ] && [ -d "$LOCKS/heavy-build.d" ]; then block_reason=slot; fi
+      update_build_waiter "$block_reason" "$lane3_state"
     else
       rc=$?; [ -z "$reading" ] || printf '%s\n' "$reading"
       [ "$rc" -eq 5 ] || return "$rc"
+      BUILD_WAITER_GATE_STREAK=$((BUILD_WAITER_GATE_STREAK + 1))
+      update_build_waiter gate CLOSED
     fi
     if [ "$blocking" = 0 ]; then return "$rc"; fi
     remaining=$((deadline - SECONDS))
     if [ "$remaining" -le 0 ]; then
+      if [ "$mode" = build ]; then finish_build_waiter timeout "after $timeout minutes"; fi
       echo "res: timed out waiting for '$mode' after $timeout minutes" >&2; return 2
     fi
     [ "$delay" -le "$remaining" ] || delay="$remaining"
@@ -742,6 +924,7 @@ cmd_status() {
     }
   ' reg="$REG" devs="$t" pids="$t.pids" "$t" "$t.pids" ${infos[@]+"${infos[@]}"} "$REG"
   rm -f "$t" "$t.pids"
+  if [ -z "${1:-}" ] || [ "${1:-}" = heavy-build ]; then show_build_waiters; fi
   [ -z "${1:-}" ] || show_notes "$1"
 }
 
@@ -795,6 +978,15 @@ cmd_take() {
   mkdir -p "$LOCKS"
   if take_mkdir "$LOCKS/$id.d"; then
     TAKE_CREATED=1
+    if lane_reserved_for_waiter "$id"; then
+      echo "res: '$id' is reserved for waiting build $RESERVED_WAITER_HOLDER; retry or use wait-lane" >&2
+      if [ "${TAKE_TRANSACTION:-0}" = 1 ]; then
+        return 2
+      fi
+      rmdir "$LOCKS/$id.d" || die "failed to yield '$id' to waiting build $RESERVED_WAITER_HOLDER"
+      TAKE_CREATED=0
+      return 2
+    fi
     write_info "$(now)" "$id" || return $?
     if [ -n "$PID_EXPLICIT" ] && pid_dead "$PID"; then warn_holder; mark_holder_warning "$id"; fi
     log take "$id" "$BY ($PROJECT${TASK:+/$TASK})" "$PURPOSE${UNTIL:+ · until $UNTIL}"
@@ -862,7 +1054,10 @@ case "${1:-}" in
   status) shift; cmd_status "$@" ;;
   take) shift; cmd_take "$@" ;;
   wait) shift; cmd_wait "$@" ;;
-  take-build) shift; cmd_acquire build 0 "$@" ;;
+  take-build)
+    shift
+    if [ "${1:-}" = --wait ]; then shift; cmd_acquire build 1 "$@"
+    else cmd_acquire build 0 "$@"; fi ;;
   wait-build) shift; cmd_acquire build 1 "$@" ;;
   wait-lane) shift; cmd_acquire lane 1 "$@" ;;
   return-build) shift; cmd_return_build "$@" ;;

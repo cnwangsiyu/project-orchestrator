@@ -184,7 +184,7 @@ const wrapped = (command = ['/bin/sh', '-c', 'exit 7'], extra = {}) => start('/b
 try {
   // Pinned incident: lane 2 belongs to another task; no build hold during backoff.
   occupy('heavy-lane-2'); const originalLane2 = info('heavy-lane-2');
-  const pinned = start(res, ['wait-build', ...args(), '--lane', 'heavy-lane-2', '--timeout', '0.1']);
+  const pinned = start(res, ['wait-build', ...args(), '--lane', 'heavy-lane-2', '--timeout', recoveryTimeout]);
   await until(() => pinned.text.includes('retry in 1s'), 'pinned build did not retry', pinned);
   eq(held(), ['heavy-lane-2']);
   eq(run(['take', 'heavy-build', ...args('unrelated')]).code, 0); release('heavy-build', 'unrelated');
@@ -197,7 +197,7 @@ try {
   const journal = fs.readFileSync(path.join(state, 'log.tsv'), 'utf8').trim().split('\n').map((s) => s.split('\t'));
   eq(journal.filter((r) => r[1] === 'return' && r[3] === 'builder').map((r) => r[2]), ['heavy-lane-1', 'heavy-build']);
   // Wrapper pin preserves the same no-hold backoff; default reaches the free lane.
-  const pinWrapper = wrapped(undefined, { HEAVY_BUILD_LANE: 'heavy-lane-2', HEAVY_BUILD_TIMEOUT: '0.1' });
+  const pinWrapper = wrapped(undefined, { HEAVY_BUILD_LANE: 'heavy-lane-2', HEAVY_BUILD_TIMEOUT: recoveryTimeout });
   await until(() => pinWrapper.text.includes('retry in 1s'), 'wrapper pin did not retry', pinWrapper);
   eq(held(), ['heavy-lane-2']); eq((await pinWrapper.done).code, 2); eq(held(), ['heavy-lane-2']);
   const freeWrapper = wrapped(); eq((await freeWrapper.done).code, 7, freeWrapper.text);
@@ -250,14 +250,15 @@ try {
   await until(() => follower.text.includes('retry in 1s'), 'second builder did not retry', follower);
   eq(field('heavy-build', 'by'), 'first'); eq(field('heavy-lane-1', 'by'), 'first');
   pairRelease('first'); eq((await follower.done).code, 0); pairRelease('second'); eq(held(), []);
-  // A lane-only legacy caller wins after the builder's free-lane precheck.
-  // The partial slot must be returned, and retry must retain the task metadata.
+  // A lane-only caller arriving after the builder's free-lane precheck now
+  // yields the final admitted lane; the waiting builder completes directly.
   const laneRace = start(res, ['wait-build', ...args(), '--lane', 'heavy-lane-1', '--timeout', recoveryTimeout], { RACE_LANE: '1' });
   await until(() => fs.existsSync(path.join(root, 'lane-race')), 'missing lane contention witness', laneRace);
-  occupy('heavy-lane-1'); fs.writeFileSync(path.join(root, 'lane-race-release'), 'release\n');
-  await until(() => laneRace.text.includes('retry in 1s'), 'partial pair was not rolled back', laneRace);
-  eq(held(), ['heavy-lane-1']); eq(field('heavy-lane-1', 'by'), 'blocker');
-  release('heavy-lane-1'); eq((await laneRace.done).code, 0, laneRace.text);
+  const laneContender = run(['take', 'heavy-lane-1', ...args('blocker')]);
+  eq(laneContender.code, 2); ok(laneContender.text.includes('reserved for waiting build builder'), laneContender.text);
+  fs.writeFileSync(path.join(root, 'lane-race-release'), 'release\n');
+  eq((await laneRace.done).code, 0, laneRace.text);
+  eq(held(), ['heavy-build', 'heavy-lane-1']); eq(field('heavy-lane-1', 'by'), 'builder');
   eq(field('heavy-build', 'task'), 'T87'); eq(field('heavy-build', 'project'), 'scratch');
   pairRelease(); eq(held(), []);
   // Signal exactly after mkdir creates the slot, before the shell sees success.
@@ -267,7 +268,7 @@ try {
   // Stop inside lane metadata publication, after BOTH mkdirs, on every supported signal.
   for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
     fs.rmSync(path.join(root, 'mid-acquisition'), { force: true });
-    const mid = start(res, ['wait-build', ...args(), '--timeout', '0.1'], { BLOCK_ON_LANE: '1' });
+    const mid = start(res, ['wait-build', ...args(), '--timeout', recoveryTimeout], { BLOCK_ON_LANE: '1' });
     await until(() => fs.existsSync(path.join(root, 'mid-acquisition')), 'missing mid-acquisition witness', mid);
     eq(held(), ['heavy-build', 'heavy-lane-1']);
     const stopped = await stop(mid, signal); ok([129, 130, 143].includes(stopped.code), mid.text); eq(held(), []);
