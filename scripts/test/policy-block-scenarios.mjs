@@ -112,7 +112,7 @@ globalThis.WebSocket = class {
   fs.writeFileSync(profiles, JSON.stringify({ trae: { kind: 'trae', home: traeHome, hub: 'ws://127.0.0.1:1' } }));
   const worker = path.join(scripts, 'codex-worker.mjs');
   const runWorker = (args, log) => spawnSync(process.execPath, ['--import', transport, worker, ...args, 'wait', '--thread', 'fixture'], {
-    encoding: 'utf8', timeout: 60000, env: { ...process.env, CODEX_ACCOUNTS: profiles, CODEX_HOME: path.join(tmp, 'worker-main'),
+    encoding: 'utf8', timeout: 60000, env: { ...process.env, HOME: tmp, RULES_SHARED: tmp, CODEX_ACCOUNTS: profiles, CODEX_HOME: path.join(tmp, 'worker-main'),
       CODEX_HUB: 'ws://127.0.0.1:1', ROUTE_LOG_FILE: log },
   });
   const withoutAccountLog = path.join(tmp, 'without-account.jsonl');
@@ -123,8 +123,9 @@ globalThis.WebSocket = class {
   assert.match(withoutAccount.stdout, /security-policy-block: this account.*Do not retry this thread.*--adversarial/);
   assert.doesNotMatch(`${withoutAccount.stdout}${withoutAccount.stderr}`, /ReferenceError|TypeError|unhandled/i);
   const withoutRows = fs.readFileSync(withoutAccountLog, 'utf8').trim().split('\n').map(JSON.parse);
-  assert.equal(withoutRows.length, 1); assert.equal(withoutRows[0].kind, 'policy-block');
-  assert.equal(withoutRows[0].account, null); assert.equal(withoutRows[0].model, null);
+  const withoutPolicy = withoutRows.filter((row) => row.kind === 'policy-block');
+  assert.equal(withoutPolicy.length, 1); assert.equal(withoutPolicy[0].account, null); assert.equal(withoutPolicy[0].model, null);
+  assert.ok(withoutRows.some((row) => row.kind === 'launch-model' && row.actualModel === null));
 
   const withAccountLog = path.join(tmp, 'with-account.jsonl');
   const withAccount = runWorker(['--account', 'trae'], withAccountLog);
@@ -134,7 +135,9 @@ globalThis.WebSocket = class {
   assert.match(withAccount.stdout, /trae-restricted: TRAE's gpt models are restricted until/);
   assert.doesNotMatch(`${withAccount.stdout}${withAccount.stderr}`, /ReferenceError|TypeError|unhandled/i);
   const withRows = fs.readFileSync(withAccountLog, 'utf8').trim().split('\n').map(JSON.parse);
-  assert.equal(withRows.length, 1); assert.equal(withRows[0].vendor, 'trae'); assert.equal(withRows[0].model, 'GPT-6.1-Sol');
+  const withPolicy = withRows.filter((row) => row.kind === 'policy-block');
+  assert.equal(withPolicy.length, 1); assert.equal(withPolicy[0].vendor, 'trae'); assert.equal(withPolicy[0].model, 'GPT-6.1-Sol');
+  assert.ok(withRows.some((row) => row.kind === 'launch-model' && row.thread === 'fixture' && row.turn === 'blocked-turn'));
   const health = JSON.parse(fs.readFileSync(path.join(traeHome, 'worker-health.json'), 'utf8'));
   assert.equal(health.pools.gpt.restricted, true);
 });

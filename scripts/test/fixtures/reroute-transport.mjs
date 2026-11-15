@@ -52,6 +52,7 @@ globalThis.WebSocket = class {
       setTimeout(() => {
         const notify = (method, params) => this.onmessage?.({ data: JSON.stringify({ method, params: { threadId: 'fixture', turnId: 'turn', ...params } }) });
         if (!fail) {
+          notify('thread/tokenUsage/updated', { context: { model } });
           notify('item/started', { item: { type: 'agentMessage' } });
           notify('turn/completed', { turn: { id: 'turn', status: config.childFails ? 'failed' : 'completed',
             items: [{ type: 'agentMessage', text: 'DONE automatic replacement completed' }] } }); return;

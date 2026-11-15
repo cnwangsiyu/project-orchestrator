@@ -126,8 +126,9 @@ if(m.method==='turn/start')setImmediate(()=>this.onmessage({data:JSON.stringify(
     '--cwd', tmp, '--effort', 'high', '--sandbox', 'read-only', '--model', 'gpt-6.1-sol', '--name', 'p-T1', '--log', path.join(tmp, 'worker.jsonl'), 'reply DONE'],
   { env: { ...env, CODEX_ACCOUNTS: profiles, CAPTURE: captured }, encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'] });
   assert.equal(JSON.parse(fs.readFileSync(captured)).developerInstructions, `Global worker rules ${digest.version}\n${digest.worker}`);
-  assert.equal(rows().at(-1).kind, 'launch'); assert.equal(rows().at(-1).account, 'main');
-  assert.equal(rows().at(-1).sandbox, 'read-only');
+  const workerLaunch = rows().findLast((row) => row.kind === 'launch');
+  assert.equal(workerLaunch.account, 'main'); assert.equal(workerLaunch.sandbox, 'read-only');
+  assert.equal(rows().at(-1).kind, 'launch-model'); assert.equal(rows().at(-1).thread, 'fixture');
   console.log('ok   real codex-worker start injects the single-source worker digest and records launch evidence');
   const probeBin = path.join(tmp, 'probe-bin'), spawned = path.join(tmp, 'unexpected-hub-spawn');
   fs.mkdirSync(probeBin);

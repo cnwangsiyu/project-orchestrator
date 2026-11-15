@@ -54,6 +54,8 @@ import { loadDigest, auditLaunch, rulesLog } from './lib/global-rules.mjs';
 import { isPolicyBlock, policyBlockRecord, appendPolicyBlock, policyBlockAction } from './lib/policy-block.mjs';
 import { runHubForeground, hubListReachable } from './lib/hub-foreground.mjs';
 import { parseRouteArgs, routeFlag, rerouteWorker, turnHasWork } from './lib/worker-reroute.mjs';
+import { inheritedLaunch, saveLaunch, recordLaunchModel } from './lib/worker-launch.mjs';
+import { modelFamily, modelObservation, rolloutTurnModel } from './lib/worker-model.mjs';
 import { lifecycle, resolveOwner, validOwner, inbox, readEvents, readAck, eventLine, watch, signalExit, appendEvent } from './lib/worker-events.mjs';
 // What a TRAE pause covers: one model family (route.mjs moves to the next family) or the whole account.
 const pausedWhat = (p) => (p.pool ? `TRAE's ${p.pool} models are paused` : 'TRAE is paused');
@@ -74,7 +76,16 @@ const account = ai >= 0 ? argv.splice(ai, 2)[1] : null;
 // Register before validation, hub connection or RPC: every attempted follower gets an exit record.
 const earlyOpts = {};
 for (let i = 1; i < argv.length; i++) if (argv[i].startsWith('--')) {
-  earlyOpts[argv[i].slice(2)] = argv[i + 1] === undefined || argv[i + 1].startsWith('--') ? true : argv[++i];
+  const key = argv[i].slice(2);
+  earlyOpts[key] = key === 'background' || (key === 'require-model' && !['on', 'off'].includes(argv[i + 1]))
+    || argv[i + 1] === undefined || argv[i + 1].startsWith('--') ? true : argv[++i];
+}
+if (argv[0] === 'turn' && typeof earlyOpts.thread === 'string') {
+  try {
+    const inherited = inheritedLaunch(account ?? 'main', earlyOpts);
+    if (inherited === null) console.log(`inherited: no saved launch for ${account ?? 'main'}/${earlyOpts.thread}; provide --route-args once to seed it`);
+    else { Object.assign(earlyOpts, inherited); console.log(`inherited: ${JSON.stringify(inherited)}`); }
+  } catch (e) { process.stderr.write(`codex-worker: launch inheritance failed: ${e.message}\n`); process.exit(2); }
 }
 const tracker = ['start', 'turn', 'wait'].includes(argv[0]) ? lifecycle({ owner: earlyOpts.owner,
   name: earlyOpts.name ?? earlyOpts.thread ?? 'unnamed', thread: earlyOpts.thread ?? null,
@@ -111,15 +122,18 @@ const ensureSearchProxy = async (prof) => {
   return false;
 };
 const [cmd, ...rest] = argv;
-const opts = {}; const pos = [];
+const opts = { ...earlyOpts }; const pos = [];
 for (let i = 0; i < rest.length; i++) {
   if (rest[i] === '--background') opts.background = true;
+  else if (rest[i] === '--require-model' && !['on', 'off'].includes(rest[i + 1])) opts['require-model'] = true;
   else if (rest[i].startsWith('--')) opts[rest[i].slice(2)] = rest[i + 1]?.startsWith('--') || rest[i + 1] === undefined ? true : rest[++i];
   else pos.push(rest[i]);
 }
+const REQUESTED_MODEL = typeof opts.model === 'string' ? opts.model : null;
 // TRAE names its models in its own case (GPT-6.1-Sol); accept the router's lower-case ids too.
 if (PROF?.kind === 'trae' && typeof opts.model === 'string') opts.model = PROF.modelIds?.[opts.model.toLowerCase()] ?? opts.model;
-tracker?.set({ model: opts.model ?? null });
+tracker?.set({ model: opts.model ?? null, requestedModel: REQUESTED_MODEL, effectiveModel: opts.model ?? null,
+  actualModel: null, actualModelSource: null, delegatedModels: [] });
 const text = pos.join(' ');
 const die = (msg, code = 2) => { process.stderr.write(`codex-worker: ${msg}\n`); process.exit(code); };
 if (opts.owner !== undefined && !validOwner(opts.owner)) die('--owner needs a public session ID');
@@ -151,6 +165,12 @@ if (cmd === 'watch' || cmd === 'mine') {
   process.exit(0);
 }
 if ((cmd === 'start' || cmd === 'turn') && typeof opts.effort !== 'string') die(`${cmd} needs --effort (the catalog default may be low)`);
+const STALL_MIN = opts['stall-min'] === undefined ? 30 : Number(opts['stall-min']);
+// Connect/initialize/thread and turn start normally take seconds; five minutes covers a loaded host (T89 hung here for 7 h).
+const SETUP_MAX_SEC = Number(process.env.CODEX_WORKER_SETUP_MAX_SEC ?? 300);
+if (!Number.isFinite(STALL_MIN) || STALL_MIN < 0) die('--stall-min takes a number >= 0');
+const CONTROL_SEC = Number(opts['interrupt-timeout-sec'] ?? 30);
+if (!Number.isFinite(CONTROL_SEC) || CONTROL_SEC <= 0) die('--interrupt-timeout-sec takes a positive number');
 if (cmd === 'start' && typeof opts.sandbox !== 'string') die('start needs --sandbox (read-only | workspace-write | danger-full-access; never wider than the orchestrator)');
 const SANDBOX_POLICY = { 'read-only': 'readOnly', 'workspace-write': 'workspaceWrite', 'danger-full-access': 'dangerFullAccess' };
 if (opts.sandbox !== undefined && !SANDBOX_POLICY[opts.sandbox]) die(`unknown --sandbox ${opts.sandbox}`);
@@ -177,9 +197,10 @@ let ROUTE_ARGS;
 try { ROUTE_ARGS = parseRouteArgs(opts['route-args']); } catch (e) { die(e.message); }
 const REROUTE_DEPTH = Number(opts['auto-reroute-depth'] ?? (ROUTE_ARGS && routeFlag(ROUTE_ARGS, 'auto-reroute-depth')) ?? 0);
 if (!Number.isInteger(REROUTE_DEPTH) || REROUTE_DEPTH < 0) die('--auto-reroute-depth takes a whole number >= 0');
+tracker?.set({ routeArgs: ROUTE_ARGS, rerouteDepth: REROUTE_DEPTH });
 const BACKGROUND = !!opts.background || !!(ROUTE_ARGS && routeFlag(ROUTE_ARGS, 'background'));
-if (cmd === 'start') auditLaunch({ name: opts.name, account: account ?? 'main', model: opts.model,
-  sandbox: opts.sandbox, userOK: opts['user-ok'] });
+const launchDecision = cmd === 'start' ? auditLaunch({ name: opts.name, account: account ?? 'main', model: opts.model,
+  sandbox: opts.sandbox, userOK: opts['user-ok'] }) : null;
 if (cmd === 'start') tracker?.warning();
 // Codex's own default for workspace-write network, so an explicit turn-level policy doesn't silently change it.
 const configNetwork = () => {
@@ -606,6 +627,38 @@ const handlers = [];
 const cleanups = new Set();
 let exitCode = null;
 let activeTurn = null, attemptThreadId = null, workStarted = false, hopProgressRecorded = false;
+let sessionPath = null, actualModel = null, actualModelSource = null, actualModelProvider = null, modelMismatch = false;
+const delegatedModels = [], earlyNotifications = [];
+const strictReviewModel = opts['require-model'] === true || opts['require-model'] === 'on'
+  || ['review', 'review-high', 'second-opinion'].includes(ROUTE_ARGS?.[0] ?? launchDecision?.category)
+  || /(?:^|[-_.])(?:review|second-opinion)(?:$|[-_.])/i.test(String(opts.name ?? ''));
+const modelEvidence = () => ({ requestedModel: REQUESTED_MODEL, effectiveModel: opts.model ?? null,
+  actualModel, actualModelSource, actualModelProvider, delegatedModels: [...delegatedModels], modelMismatch });
+const recordModelEvidence = (threadId, turnId) => {
+  const evidence = modelEvidence();
+  tracker?.set(evidence);
+  recordLaunchModel(account ?? 'main', threadId, turnId, evidence);
+  try {
+    fs.mkdirSync(path.dirname(rulesLog()), { recursive: true });
+    fs.appendFileSync(rulesLog(), JSON.stringify({ kind: 'launch-model', t: Date.now(),
+      name: opts.name, account: account ?? 'main', thread: threadId, turn: turnId, ...evidence }) + '\n');
+  } catch { console.error('launch-model: evidence not recorded'); }
+};
+const observeModel = (observation, threadId, turnId) => {
+  if (!observation) return;
+  if (observation.scope === 'delegation') {
+    if (delegatedModels.some((row) => JSON.stringify(row) === JSON.stringify(observation))) return;
+    delegatedModels.push(observation);
+  } else {
+    if (actualModel === observation.model && actualModelSource === observation.source) return;
+    actualModel = observation.model; actualModelSource = observation.source;
+    actualModelProvider = observation.provider ?? null;
+  }
+  modelMismatch ||= !!REQUESTED_MODEL && modelFamily(observation.model) !== modelFamily(REQUESTED_MODEL);
+  const prefix = observation.scope === 'delegation' ? 'delegated-model' : 'actual-model';
+  console.log(`${prefix}: ${observation.model} (requested ${REQUESTED_MODEL ?? 'default'}; source ${observation.source})`);
+  recordModelEvidence(threadId, turnId);
+};
 const markWorkStarted = () => {
   workStarted = true;
   if (!hopProgressRecorded && opts['reroute-hop-at']) {
@@ -615,9 +668,35 @@ const markWorkStarted = () => {
   }
 };
 const logFile = opts.log ? path.resolve(opts.log) : null;
+let setupPhase = 'websocket/open';
+const setupStarted = Date.now();
+const controlCommand = ['interrupt', 'steer', 'status'].includes(cmd);
+// One total setup deadline, including the wait before follow() can install its idle guard.
+// Expiry detaches observation; an accepted request may still be running at the hub.
+const setupMs = controlCommand ? CONTROL_SEC * 1000
+  : ['start', 'turn', 'wait'].includes(cmd) && STALL_MIN > 0 ? Math.min(STALL_MIN * 60000, SETUP_MAX_SEC * 1000) : 0;
+const setupAlarm = setupMs ? setTimeout(() => {
+  const thread = attemptThreadId ?? opts.thread ?? null;
+  const line = `${controlCommand ? `${cmd}-timeout` : 'stalled'}: setup deadline after ${Math.round((Date.now() - setupStarted) / 1000)}s; waiting for ${setupPhase}; thread=${thread ?? '?'}; hub state/cancellation unconfirmed`;
+  fs.writeSync(controlCommand ? 2 : 1, line + '\n');
+  const stalled = tracker ?? lifecycle({ owner: opts.owner, name: opts.name ?? thread ?? cmd,
+    account: account ?? 'main', thread, model: opts.model ?? null });
+  stalled.result('stalled', { phase: setupPhase, thread, mayRun: !!thread, finalLine: line });
+  if (logFile) try { fs.appendFileSync(logFile, JSON.stringify({ stalled: true, phase: setupPhase,
+    threadId: thread, at: Date.now(), mayRun: !!thread }) + '\n'); } catch {}
+  finish(controlCommand ? 7 : 4);
+}, setupMs) : null;
+cleanups.add(() => clearTimeout(setupAlarm));
+if (setupMs) {
+  const line = `connecting: ${cmd} thread=${opts.thread ?? 'new'}; setup deadline ${setupMs / 1000}s`;
+  if (controlCommand) console.error(line); else console.log(line);
+}
 const write = (obj) => ws.send(JSON.stringify(obj));
 const call = (method, params) => new Promise((resolve, reject) => {
-  const id = ++nextId; pending.set(id, { resolve, reject }); write({ jsonrpc: '2.0', id, method, params });
+  const id = ++nextId; setupPhase = method;
+  if (logFile) try { fs.appendFileSync(logFile, JSON.stringify({ rpc: 'sent', id, method,
+    threadId: params?.threadId ?? null, at: Date.now() }) + '\n'); } catch {}
+  pending.set(id, { resolve, reject, method }); write({ jsonrpc: '2.0', id, method, params });
 });
 const stopFollowing = () => {
   handlers.length = 0;
@@ -708,6 +787,8 @@ ws.onmessage = (ev) => {
   let m; try { m = JSON.parse(line); } catch { return; }
   if (m.id !== undefined && pending.has(m.id) && !m.method) {
     const p = pending.get(m.id); pending.delete(m.id);
+    if (logFile) try { fs.appendFileSync(logFile, JSON.stringify({ rpc: 'reply', id: m.id,
+      method: p.method, ok: !m.error, at: Date.now() }) + '\n'); } catch {}
     m.error ? p.reject(new Error(`${m.error.code}: ${m.error.message}`)) : p.resolve(m.result); return;
   }
   if (done) return; // During cancellation only the interrupt RPC reply is still relevant.
@@ -721,6 +802,8 @@ ws.onmessage = (ev) => {
   }
   if (!activeTurn && attemptThreadId && m.params?.threadId === attemptThreadId && m.method?.startsWith('item/')
     && m.params.item?.type !== 'userMessage') markWorkStarted();
+  if (!activeTurn && ['start', 'turn', 'wait'].includes(cmd)
+    && m.params?.threadId === (attemptThreadId ?? opts.thread) && earlyNotifications.length < 1000) earlyNotifications.push(m);
   for (const h of handlers) h(m);
 };
 await new Promise((resolve) => { ws.onopen = resolve; });
@@ -740,6 +823,15 @@ const recordPolicyBlock = (model, error) => {
 };
 // Prints the outcome and exits: status, usage, the final message's first line (whole message to --out).
 const report = async (threadId, turn, final, usage) => {
+  if (!actualModel || PROF?.kind === 'ttadk') observeModel(rolloutTurnModel(PROF?.home ?? process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex'),
+    sessionPath, threadId, turn.id), threadId, turn.id);
+  // A family mismatch (or a cross-family sub-agent) fails a review; missing evidence only warns, so a hub that exposes no
+  // model for its turns cannot turn every finished review into a failure. An explicit --require-model stays strict.
+  const explicitStrict = opts['require-model'] === true || opts['require-model'] === 'on';
+  const rejectedModel = strictReviewModel && (modelMismatch || (explicitStrict && (!actualModel || !REQUESTED_MODEL)));
+  if (strictReviewModel && !rejectedModel && !actualModel) console.log(`actual-model: unknown (requested ${REQUESTED_MODEL ?? 'default'}; no execution evidence from this hub)`);
+  recordModelEvidence(threadId, turn.id);
+  if (rejectedModel) console.error(`review-model-rejected: requested ${REQUESTED_MODEL ?? 'default'}, actual ${actualModel ?? 'unknown'}, delegated ${delegatedModels.map((row) => row.model).join(', ') || 'none'}`);
   console.log(`turn ${turn.status}${turn.error ? ' error=' + JSON.stringify(turn.error) : ''}`);
   const policyBlock = isPolicyBlock(turn);
   if (policyBlock) {
@@ -789,12 +881,12 @@ const report = async (threadId, turn, final, usage) => {
     if (opts.out) fs.writeFileSync(path.resolve(opts.out), final + '\n');
     console.log(`final: ${final.split('\n').find((l) => l.trim()) ?? ''}`);
   }
-  tracker?.result(/^(?:\S+\s+)?(?:BLOCKED|QUESTION)\b/.test(final?.trim() ?? '') ? 'needs-user'
+  tracker?.result(rejectedModel ? 'failed' : /^(?:\S+\s+)?(?:BLOCKED|QUESTION)\b/.test(final?.trim() ?? '') ? 'needs-user'
     : turn.status === 'completed' ? 'finished' : 'failed', { thread: threadId, turn: turn.id, mayRun: false,
       finalLine: final?.split('\n').find((line) => line.trim()) ?? '' });
   const errorText = JSON.stringify(turn.error ?? '');
   const infrastructureMiss = PROF?.kind === 'trae' && (failureKind(errorText) === 'unavailable' || /access (temporarily )?restricted|\b983\b/i.test(errorText));
-  if (turn.status === 'failed' && ROUTE_ARGS && !BACKGROUND && !workStarted && !turnHasWork(turn) && !final
+  if (!(strictReviewModel && modelMismatch) && turn.status === 'failed' && ROUTE_ARGS && !BACKGROUND && !workStarted && !turnHasWork(turn) && !final
     && (infrastructureMiss || (policyBlock && (routeFlag(ROUTE_ARGS, 'security') || routeFlag(ROUTE_ARGS, 'adversarial'))))) {
     const observed = (await readTurns(threadId).catch(() => [])).find((t) => t.id === turn.id);
     if (observed?.status === 'failed' && Array.isArray(observed.items) && !turnHasWork(observed) && !workStarted) {
@@ -803,20 +895,21 @@ const report = async (threadId, turn, final, usage) => {
     }
     console.log('reroute-skipped: failed turn has work or its no-progress terminal state is unconfirmed');
   }
-  finish(turn.status === 'completed' ? 0 : 1);
+  finish(rejectedModel ? 5 : turn.status === 'completed' ? 0 : 1);
 };
 // Stall alarm: no event for this turn in --stall-min minutes (default 30, 0 = off) ends the follower with exit 4 so the
 // orchestrator wakes up. The turn keeps running on the hub. A worker waiting on its own sub-agents can be quiet that long,
 // so check before acting: `status`, child threads (parent_thread_id) under <home>/sessions/, then `wait` again, steer
 // or interrupt.
-const STALL_MIN = opts['stall-min'] === undefined ? 30 : Number(opts['stall-min']);
 // TRAE's queue signal (2026-11-13): while a turn waits in TRAE's model queue the hub sends `queue/status` notifications
 // ({threadId, turnId, state, position, message}); they carry this thread's id, so they already count as progress below —
 // a worker printing `queued:` lines is waiting, not stalled. Print on a state change or a ≥10% position move (at most
 // one line a minute), and the wait's length once it clears. `status --thread` reads the last state from the file.
 const follow = (threadId, turnId) => {
+  clearTimeout(setupAlarm);
   activeTurn = { threadId, turnId };
   tracker?.update({ thread: threadId, turn: turnId, model: opts.model ?? null, mayRun: true });
+  recordLaunchModel(account ?? 'main', threadId, turnId, modelEvidence());
   console.log(`thread=${threadId} turn=${turnId}`);
   const recordQueue = PROF?.kind === 'trae' ? createQueueRecorder(PROF.home, opts.model ?? threadModel(PROF.home, threadId)) : null;
   if (recordQueue) cleanups.add(() => recordQueue.stop());
@@ -922,17 +1015,19 @@ const follow = (threadId, turnId) => {
     if (idle < STALL_MIN) return;
     const line = `stalled: no events for ${idle < 1 ? `${Math.round(idle * 60)}s` : `${Math.round(idle)}m`} on turn ${turnId} (thread ${threadId}); the turn is still running on the hub — check status and sub-agent threads, then wait again, steer or interrupt`;
     console.log(line);
+    tracker?.result('stalled', { thread: threadId, turn: turnId, phase: 'follow', mayRun: true, finalLine: line });
     if (opts.log) try { fs.appendFileSync(path.resolve(opts.log), JSON.stringify({ stalled: true, idleMin: Math.round(idle), at: Date.now() }) + '\n'); } catch {}
     if (PROF?.kind === 'trae') noteFailure(PROF.home, `stalled ${Math.round(idle)} min (queued for capacity?)`, Date.now(), opts.model ?? threadModel(PROF.home, threadId));
     finish(4);
-    }, Math.min(60000, Math.max(5000, STALL_MIN * 30000)));
-    alarm.unref(); cleanups.add(() => clearInterval(alarm));
+    }, Math.min(60000, Math.max(20, STALL_MIN * 30000)));
+    cleanups.add(() => clearInterval(alarm));
   }
   handlers.push((m) => {
     if (done) return;
     const p = m.params || {};
     if (p.threadId !== undefined && p.threadId !== threadId) return;
     if (p.turnId !== undefined && p.turnId !== turnId) return;
+    observeModel(modelObservation(m, threadId, turnId), threadId, turnId);
     if ((p.threadId === threadId || p.turnId === turnId) &&
       ((m.method.startsWith('item/') && p.item?.type !== 'userMessage')
         || (m.method === 'thread/tokenUsage/updated' && p.tokenUsage?.total?.outputTokens > 0))) markWorkStarted();
@@ -954,6 +1049,7 @@ const follow = (threadId, turnId) => {
       .catch((e) => { console.error(`codex-worker: report failed: ${e?.stack ?? e}`); finish(1); });
     }
   });
+  for (const message of earlyNotifications.splice(0)) for (const handler of handlers) handler(message);
 };
 
 try {
@@ -1006,7 +1102,9 @@ try {
     });
     const threadId = th.thread?.id ?? th.threadId;
     attemptThreadId = threadId;
+    sessionPath = th.thread?.path ?? null;
     tracker?.set({ thread: threadId, mayRun: true });
+    saveLaunch(account ?? 'main', threadId, { ...opts, 'auto-reroute-depth': REROUTE_DEPTH }, resolveOwner(opts.owner), modelEvidence());
     if (PROF?.kind === 'trae') rememberThreadModel(PROF.home, threadId, opts.model);
     if (opts.name) await call('thread/name/set', { threadId, name: opts.name }).catch(() => {});
     const ts = await call('turn/start', {
@@ -1017,8 +1115,10 @@ try {
   } else if (cmd === 'turn') {
     if (!opts.thread || !text) die('turn needs --thread and a prompt');
     const config = TRAE_EXTENSION_BROWSER ? { mcp_servers: { playwright: TRAE_PLAYWRIGHT_SERVER } } : undefined;
-    await call('thread/resume', { threadId: opts.thread, model: opts.model, config }).catch(() => {});
+    const resumed = await call('thread/resume', { threadId: opts.thread, model: opts.model, config }).catch(() => null);
+    sessionPath = resumed?.thread?.path ?? null;
     tracker?.set({ mayRun: true });
+    saveLaunch(account ?? 'main', opts.thread, { ...opts, 'auto-reroute-depth': REROUTE_DEPTH }, resolveOwner(opts.owner), modelEvidence());
     const ts = await call('turn/start', {
       threadId: opts.thread, input: textInput(text), effort: opts.effort, model: opts.model,
       sandboxPolicy: opts.sandbox && sandboxPolicy(opts.sandbox), approvalPolicy: CU_APPS.length || BU_ORIGINS.length ? APPROVAL_POLICY : undefined,
@@ -1027,7 +1127,8 @@ try {
     follow(opts.thread, ts.turn?.id ?? ts.turnId);
   } else if (cmd === 'wait') {
     if (!opts.thread) die('wait needs --thread');
-    await call('thread/resume', { threadId: opts.thread }).catch(() => {});
+    const resumed = await call('thread/resume', { threadId: opts.thread }).catch(() => null);
+    sessionPath = resumed?.thread?.path ?? null;
     const t = await currentTurn(opts.thread);
     if (!t) die('thread has no turns', 3);
     if (t.status === 'inProgress') follow(opts.thread, t.id);

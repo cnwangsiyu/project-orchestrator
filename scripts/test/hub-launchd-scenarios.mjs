@@ -32,6 +32,25 @@ try {
   assert.notEqual(refused.status, 0); assert.ok(!fs.existsSync(path.join(tmp, 'Library/LaunchAgents')));
   console.log('ok   four valid KeepAlive foreground account templates, explicit runtime paths, no automatic install');
 
+  const registry = path.join(tmp, 'registered-accounts.json'), registeredOut = path.join(tmp, 'registered-plists');
+  fs.writeFileSync(registry, JSON.stringify({ trae: {}, alt: {} }));
+  const render = (output, flags = []) => execFileSync(process.execPath, [path.join(root, 'render-hub-launchd.mjs'),
+    '--out', output, '--home', tmp, ...flags], { env: { ...process.env, HOME: tmp, CODEX_ACCOUNTS: registry }, encoding: 'utf8' });
+  render(registeredOut);
+  assert.deepEqual(fs.readdirSync(registeredOut).sort(), ['alt', 'trae'].map((a) => `dev.project-orchestrator.hub.${a}.plist`));
+  const altFile = path.join(registeredOut, 'dev.project-orchestrator.hub.alt.plist');
+  const altText = fs.readFileSync(altFile, 'utf8');
+  assert.ok(altText.includes('<string>--account</string><string>alt</string>'));
+  assert.ok(altText.includes('hub.alt</string>')); assert.ok(altText.includes('/alt.err.log'));
+  assert.ok(!/hub\.main|<string>main<\/string>|\/main\./.test(altText));
+  if (process.platform === 'darwin') execFileSync('plutil', ['-lint', altFile]);
+  const explicitOut = path.join(tmp, 'explicit-plists');
+  render(explicitOut, ['--accounts', 'b,alt,b']);
+  assert.deepEqual(fs.readdirSync(explicitOut).sort(), ['alt', 'b'].map((a) => `dev.project-orchestrator.hub.${a}.plist`));
+  fs.writeFileSync(registry, '{}');
+  const emptyOut = path.join(tmp, 'empty-plists'); render(emptyOut); assert.deepEqual(fs.readdirSync(emptyOut), []);
+  console.log('ok   registered alt account renders from generic template; explicit accounts override registry, duplicates collapse, empty registry stays empty');
+
   const bin = path.join(tmp, 'bin'); fs.mkdirSync(bin);
   const marker = path.join(tmp, 'hub-ready'), starts = path.join(tmp, 'starts.jsonl'), proxyPid = path.join(tmp, 'proxy-pid');
   const worker = path.join(tmp, 'codex-worker.mjs');

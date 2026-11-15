@@ -263,10 +263,14 @@ globalThis.WebSocket = class {
   assert.equal(rapid?.status,7,'frequent status notifications retain enough history to estimate drain');
   assert.equal(rapid.stdout.match(/queue-too-slow:/g)?.length,1);
   // A rising or stalled queue has no usable drain: the worker keeps waiting instead of inventing a prediction.
+  // End the synthetic turn explicitly: the referenced idle guard now keeps a quiet follower alive.
+  fs.writeFileSync(interruptLog, '');
   const stillQueued = exec(process.execPath, ['--import', patienceTransport, path.join(root, 'codex-worker.mjs'), '--account', 'trae',
     'wait', '--thread', 'fixture', '--queue-patience-min', '5', '--alt', 'route.mjs --exclude-model gpt-6-astra'],
-  { env: { ...env, FIXTURE_QUEUE_EVENTS: JSON.stringify([[0, 'queued', 90], [120000, 'queued', 100]]) }, encoding: 'utf8', timeout: 5000 });
+  { env: { ...env, FIXTURE_INTERRUPT_LOG: interruptLog, FIXTURE_COMPLETE: '1',
+    FIXTURE_QUEUE_EVENTS: JSON.stringify([[0, 'queued', 90], [120000, 'queued', 100]]) }, encoding: 'utf8', timeout: 5000 });
   assert.ok(!/queue-too-slow/.test(stillQueued));
+  assert.match(stillQueued, /turn completed/); assert.equal(fs.readFileSync(interruptLog, 'utf8'), '');
   console.log('ok   real worker patience: measured drain past the deadline interrupts and exits 7; stalled/rising queues wait');
   console.log('\nall pass');
 } finally {
