@@ -45,7 +45,9 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
   // A frozen clock or supplied snapshot is an offline replay; never query the
   // host for it. Live decisions refresh each account independently. In particular
   // a cached hub-down reading is checked again even inside the cache TTL.
-  const live = !parsed.flags.dry && env.ROUTE_NOW === undefined && !env.ROUTE_SNAPSHOT_FILE;
+  // --dry previews the real decision, so it reads state exactly like a real route (owner 2026-11-15: a preview that
+  // skips the refresh showed a stale blocked Claude lane that the real route would not). It only skips logging/rotation.
+  const live = env.ROUTE_NOW === undefined && !env.ROUTE_SNAPSHOT_FILE;
   if(live) saveRoutingObservations(cachePath,data);
   if (live && !registryInvalid) for (const a of accounts) {
     const p = profiles[a.name], at = a.seenAt ?? data.checkedAt;
