@@ -241,10 +241,17 @@ remain routing telemetry, not local spending/concurrency caps. Reports must name
   differ, in the plugin/app section), the same tools (code mode, unified exec, freeform apply_patch, multi-agent v2, web
   search). A 5-check test (fix + tests + AGENTS.md, web search, skills, image input, resume) passed on GPT-6.1-Sol and
   Gemini 3.1 Pro, and `traex app-server` worked unchanged as a codex-worker hub.
-- **Not on TRAE:** the ChatGPT Chrome / Computer Use plugins (its browser runtime finds no browser: the Chrome extension
-  side accepts only the OpenAI-signed Codex client, which we don't work around), and image generation. Browser, ui-browser,
-  computer-use and image work stay on TTADK / Claude / ChatGPT. A TRAE worker that needs a web page has the `playwright`
-  MCP server: a separate headless Chrome with no user sign-ins.
+- **Browser on TRAE uses a different bridge.** TRAE still cannot use the ChatGPT Chrome / Computer Use plugins (their
+  extension accepts only the OpenAI-signed Codex client, which we do not work around), so desktop `computer-use` and
+  image generation stay on TTADK / ChatGPT / Claude. For `browser` and `ui-browser`, TRAE can instead drive the user's
+  signed-in Chrome through Microsoft's Playwright Extension bridge when the user-pasted token file exists. Its normal
+  `playwright` MCP server remains a separate headless Chrome with no user sign-ins for non-browser work.
+- **Playwright Extension setup** (once per machine): install Chrome extension
+  `mmlmfjhmonkocbjadbfplnigmagldckm`, copy the token shown by the extension to
+  `~/.trae/playwright-extension-token`, and `chmod 600` that file. The token is created and pasted by the user; workers
+  and setup code never extract it from Chrome or a profile, and capability checks only test that the file exists.
+  `PLAYWRIGHT_EXTENSION_TOKEN_FILE` overrides the path for tests. Browser threads default to Chrome profile directory
+  `Profile 1`; route/launch code can override it with `--chrome-profile-dir <name>`.
 - **Setup** (once per machine): install (`sh -c "$(curl -fsSL https://code.byted.org/api/tos-proxy/download/traex_install.sh)"`),
   `traecli login --git-code` (no browser needed; `--sso` otherwise), then `codex-worker.mjs trae-setup` (registers
   account `trae`, hub port next free; writes into `~/.trae/traecli.toml`: `commit_attribution = ""`, `web_search = "live"`,
@@ -389,14 +396,35 @@ machine that runs browser workers.
   extension 1.26.1102 (MacBook, 2026-11-10) connected and opened tabs, then every page call failed with "Cannot read
   properties of undefined (reading 'timeoutMs')"; updating the app and restarting Chrome fixed it. codex-worker checks
   this before a browser thread starts and exits 7 with `browser-version-mismatch:` — ask the user to update the app.
-`route.mjs` sends browser, ui-browser and computer-use work to TTADK when it is browser-ready, else to a browser-ready
-ChatGPT account, else to Claude. On a new machine: install the ChatGPT app and its Chrome extension, then run
-`browser-setup` for every other account (`--account b`).
+`route.mjs` sends browser and ui-browser work to TTADK when it is browser-ready, then to TRAE when the Playwright token
+file exists, then to a browser-ready personal ChatGPT account (needs the user's OK), else personal Claude (also needs
+the user's OK). `computer-use` never uses TRAE: it keeps TTADK → personal ChatGPT (needs OK) → Claude (needs OK). On a
+new machine, set up the matching bridge for each account as described here.
 
-A Codex worker can operate the user's signed-in Chrome through the ChatGPT app's **Chrome plugin**. It can also operate
+### Playwright Extension browser threads on TRAE
+
+For a TRAE `start`/`turn` with `--browser-origins`, codex-worker injects a per-thread `mcp_servers.playwright` override:
+our launcher running `npx -y @playwright/mcp@latest --extension --profile-dir-name 'Profile 1'`. No `--allowed-origins` is passed: Playwright's list takes only full origins or wildcard ports (no host globs such as `*.larkoffice.com`) and filters every request a page makes, so signed-in pages fail with `net::ERR_BLOCKED_BY_CLIENT` (live test 2026-11-14).
+`--chrome-profile-dir` changes the profile. The per-thread server is our launcher `scripts/playwright-extension-mcp.mjs` (run with node), which reads the token file itself and passes the token to `@playwright/mcp` only through that child's environment. The token is never in the hub's environment (every worker shell inherits that), on argv, in TOML or in logs, so adding or replacing the token needs no hub restart. The persistent
+headless `[mcp_servers.playwright]` written by `trae-setup` is unchanged and remains the non-browser default.
+
+The worker uses Playwright MCP's `browser_navigate`, `browser_snapshot`, `browser_click`, `browser_type`,
+`browser_fill_form`, `browser_take_screenshot`, and other `browser_*` tools. It does not use the ChatGPT runtime or
+Claude browser skills. If the extension/browser is unreachable it reports BLOCKED with the exact Playwright error;
+`Extension connection timeout` means the extension/pairing or the TRAE hub's Chrome-profile access needs repair; the
+verified token flow does not show a manual approval dialog. The ChatGPT-app
+version-mismatch guard does not apply to this bridge. The `--browser-origins` list is given to the worker as the set of sites it may visit; nothing enforces it technically on TRAE (unlike the per-site approvals on TTADK/ChatGPT), so the task brief is the scope boundary and the worker reports BLOCKED when a task or redirect leaves the list.
+
+Live verification on this Mac (2026-11-14): `--extension --profile-dir-name 'Profile 1'` with the token in the named
+environment variable connected without an approval dialog while the screen was locked. `browser_navigate` reached
+example.com and the signed-in Lark Drive home. The MCP server must be spawned by the TRAE hub/thread, which has access
+to the Chrome profile directory; an ordinary sandboxed test shell does not.
+
+A non-TRAE Codex worker can operate the user's signed-in Chrome through the ChatGPT app's **Chrome plugin**. It can also operate
 desktop apps through the **computer-use plugin**. Both use the local pieces the ChatGPT desktop app uses, and both work
 with any model provider, TTADK included. Routing (user, 2026-11-07): the `browser` row goes to TTADK Codex when that
-account is browser-ready, and to Claude otherwise.
+account is browser-ready, then TRAE Playwright Extension, a browser-ready personal ChatGPT account, and Claude. The
+two personal steps need the user's OK; re-run route.mjs after an account failure instead of choosing one by hand.
 
 ### Prerequisites (once per machine)
 
@@ -518,8 +546,8 @@ and for what is the worker's own call. Briefs don't ask for them, forbid them or
   - device holds through `res` (Codex can run the script), taken as `--by codex:<thread id>`;
   - where to write the report, and to start its final message with `[<id>] DONE | QUESTION | BLOCKED | FAILED`. A question
     ends the run; resume it with the answer.
-- **Keep on Claude workers**: anything that needs Artifact/Docs tools (browser work, frontend checks and desktop apps go
-  to TTADK Codex once `browser-setup` is done), or a worker that must negotiate
+- **Keep on Claude workers**: anything that needs Artifact/Docs tools (browser/frontend work follows TTADK → TRAE
+  Playwright Extension → personal ChatGPT → Claude; desktop omits TRAE), or a worker that must negotiate
   with peers itself. Device runs that share phones mid-run can go to a hub-started Codex worker: steer it with handoffs. It
   can't negotiate with peers, so you broker.
 - **Verify before reporting.** Spot-check the cited file:line and commits, as for any worker.

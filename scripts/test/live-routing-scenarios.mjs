@@ -35,6 +35,10 @@ try {
   }
   const security=cli(['review','--security']);assert.equal(security.kind,'launch');
   assert.equal(security.pick.account,'trae');assert.equal(security.pick.model,'deepseek-v4.1-flash');
+  for(const args of [['lookup'],['extract'],['draft'],['analysis'],['research'],['implement','--impact','service'],
+    ['review'],['docs'],['build-run'],['build-run','--signing','--impact','service']]) {
+    const o=cli(args);assert.equal(o.pick.model,'gpt-5.6-terra',`priority ladder: ${args.join(' ')}`);
+  }
   for(const category of ['image-gen','claude-tools']) {
     const o=cli([category]);assert.ok(o.pick.command);assert.equal(o.needsUserOK.length,0);
   }
@@ -67,7 +71,8 @@ try {
     browser.accounts.find(a=>a.id==='trae').capabilities[`origin:${host}`]=origin;
     for(const lane of browser.lanes.filter(l=>l.accountId==='trae')) lane.capabilities[`origin:${host}`]=origin;
   }
-  assert.equal(cli(['browser','--origins','https://example.test'],browser).pick.account,'trae');
+  const browserPick=cli(['browser','--origins','https://example.test'],browser).pick;
+  assert.equal(browserPick.account,'trae');assert.equal(browserPick.model,'gpt-5.6-terra');
   const broken=copy();broken.accounts.find(a=>a.id==='main').catalog.value={malformed:true};
   assert.equal(cli(['analysis'],broken).pick.account,'trae','malformed personal account cannot poison company state');
   const stale=copy();stale.accounts.find(a=>a.id==='main').auth.sampledAt-=3600000;

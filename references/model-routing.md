@@ -94,6 +94,12 @@ TRAE foreground tier lists are:
 | Normal | GPT-6.1-Sol, GPT-5.6-Sol, GPT-5.6-Terra, DeepSeek-V4.1-Flash |
 | Hard | GPT-6.1-Sol, GPT-6-Astra |
 
+Within a normal/light ladder, uncongested models with priority quota left rank
+ahead of depleted lanes, even when a depleted lane reports immediate progress.
+Light work stays on its light ladder while a qualified light lane is usable;
+it does not climb to Sol because Sol happens to be free. Depleted lanes remain
+available when no ladder model has usable priority quota. Hard work never demotes.
+
 Vision uses its separate qualified catalog. DeepSeek is unsuitable for full builds,
 executable/auth/storage acceptance or a large file in one output. Seed is vision
 only. Public catalog, account and harness capabilities must all support the task.
@@ -117,7 +123,7 @@ current authorization and the actual attempt floor.
 `--env test` describes the target, not execution location. Only an explicit remote
 execution scope (`--no-local-build` / `--execution remote`) removes local resource
 admission. Follow [resources.md](resources.md) and the injected worker digest for
-res v1.4, one-process build wrappers, registered devices and restoration. Acquire
+res v1.5, one-process build wrappers, registered devices and restoration. Acquire
 holds after the first model response and return them before a replacement.
 
 Registered own-test signing uses ordinary full-access Codex-family company
@@ -137,3 +143,16 @@ reset. Browser order: TTADK → TRAE Playwright Extension → browser-ready pers
 ChatGPT (ask) → Claude in Chrome (ask). Desktop: TTADK → browser-ready ChatGPT
 (ask). --signing uses ordinary full-access Codex company workers for registered
 own-test packages and allowlisted identities; the resident Claude signer is retired.
+
+Main's browser bridge configures Playwright per thread for TRAE start and turn,
+through scripts/playwright-extension-mcp.mjs. Only the launcher reads the pairing
+file. There is no --allowed-origins flag: allowed sites and read/write scope are
+stated to the worker and are not technically enforced on TRAE. Irreversible
+actions retain user confirmation. Desktop tasks never use TRAE or Claude.
+
+Launcher setup has a bounded deadline with connecting: output. Follow-up turns
+inherit saved launch context through scripts/lib/worker-launch.mjs and print
+inherited: evidence. scripts/lib/worker-model.mjs records requested, effective
+and actual model provenance (actual-model:); reviewer model guards remain intact.
+The hub supervisor preserves a live hub after a slow probe, and generated launchd
+accounts retain their render-hub-launchd configuration.

@@ -58,8 +58,10 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
         profiles[a.name] = {...p, modelIds: observed.modelIds ?? p.modelIds};
       } catch { a.transport = false; a.statusSource = 'status-query-failed'; }
     }
-    if (a.kind === 'trae') a.traeBrowser = traeBrowserReady();
   }
+  // Capability detection checks only whether the configured pairing file exists;
+  // it neither reads pairing material nor queries a provider, including fixtures.
+  for(const a of accounts) if(a.kind==='trae') a.traeBrowser=traeBrowserReady();
   if (live && (parsed.flags.fresh || !Array.isArray(data.claude) || now-data.checkedAt > 600000)) {
     try { data.claude = readRoutingClaude(); data.claudeSeenAt = Date.now(); } catch { /* degrade Claude alone */ }
   }

@@ -25,7 +25,7 @@ try {
   assert.match(digest.worker, /take-build\/wait-build inside ONE long-lived wrapper.*local heavy compute/);
   assert.match(digest.worker, /elapsed and predicted-start deadlines.*exclude only the slow account\/model lane/);
   const loginAt = digest.worker.indexOf('Forbidden for every worker: never read, copy, load or inject LOGIN material');
-  const signingAt = digest.worker.indexOf('Registered own-test signing uses');
+  const signingAt = digest.worker.indexOf("Allowed with the user's 2026-11-13 authorization: sign OUR OWN TEST packages");
   assert.ok(loginAt >= 0 && signingAt > loginAt, 'worker digest must contain adjacent login and test-signing rules');
   assert.match(digest.worker, /registered shared test phones iphone8\/iphone11\/s21.*freely tap Allow\/Authorize\/Trust\/OK/);
   assert.match(digest.worker, /personal iPhone 15 Pro Max \(`policy=never`\).*device not registered in `res`/);
@@ -85,7 +85,7 @@ try {
   console.log('ok   Codex writers default full; reviewers stay read-only; tests and explicit overrides stay narrower');
 
   const buildNote = route(['build-run']).notes.find((n) => n.startsWith('build brief:'));
-  assert.match(buildNote, /ONE-process wrapper around res take-build\/wait-build\/return-build.*res v1\.4/);
+  assert.match(buildNote, /ONE-process wrapper around res take-build\/wait-build\/return-build.*res v1\.5/);
   assert.match(buildNote, /holding neither resource while waiting for the other/);
   assert.match(buildNote, /only for genuine local heavy compute/);
   assert.match(buildNote, /long-lived watched wrapper/);
@@ -94,10 +94,10 @@ try {
     assert.ok(!notes.some((n) => n.startsWith('build brief:')));
     assert.ok(notes.some((n) => /no heavy-build\/lane lock|no local heavy-build\/lane lock/.test(n)));
   }
-  console.log('ok   integrated digest and route notes retain v1.4 pair acquisition, local-only locks and reroute rules');
+  console.log('ok   integrated digest and route notes retain v1.5 pair acquisition, local-only locks and reroute rules');
 
-  assert.match(digest.worker,/ordinary full-access Codex-family company workers/);
-  assert.match(digest.worker,/resident Claude signer is retired/);
+  assert.match(digest.worker,/Allowed with the user's 2026-11-13 authorization: sign OUR OWN TEST packages/);
+  assert.match(digest.text,/resident signing worker is retired/);
   assert.ok(route(['build-run','--env','test']).plan.gates.some(g=>g.kind==='local-resource-admission'));
 
   assert.equal(POLICY.ttadkSsoWarnH, 72);

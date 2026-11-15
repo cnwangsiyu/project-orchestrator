@@ -151,8 +151,14 @@ These are the user's decisions (2026-10-30 to 2026-11-03):
   - `routing.companyPolicies`: counts of balanced/background routing decisions and their named tasks, `why` and
     balance factors; `background` counts distinct tasks and their recorded wall-clock time;
   - `routing.signing`: every `--signing` route with project, task, pick and sandbox for the signing audit below;
+  - `reviews`: rolling 24-hour and 7-day review-budget statistics, plus UTC project-days. A primary review, re-review,
+    second-opinion and each embedded second reviewer are separate launches/dispatches. Read review share, reviews per
+    task (`tasksAtLeast3`), second-reviewer share, re-review share, required-review share and explicit P0/P1 yield;
+    `UNKNOWN` means the review outcome/notes did not say whether it found P0/P1, not that it found none;
   - `quota.companyByHour`: company quota snapshots grouped by UTC hour, including TRAE load by model and queue
-    positions by family. Keep sample timestamps; missing telemetry is unknown, not zero load or an empty queue.
+    positions by family. `quota.traeReconciliation` compares each model/reset window's bucket units with retained TRAE
+    session tokens at the dated public standard API prices and reports dollars-per-unit plus coverage. Keep sample
+    timestamps; missing quota, price or token telemetry is `UNKNOWN`, not zero load, an empty queue or a conversion.
 - **Hub probe:** on each account in `codex-accounts.json` whose hub is up, start one tiny thread
   (`codex-worker.mjs --account <name> start --cwd ~ --effort low --sandbox read-only --name hub-probe --log <tmp> "Reply OK"`)
   and check it answers. A failure that `quota.mjs` didn't flag is a bad case: restart that hub from `~` once no turn runs
@@ -239,6 +245,36 @@ each recipient. Hook injection records are not acknowledgements.
 For a reported unreachable hub, first probe `codex-worker --account <name> list --limit 1`; an empty successful
 list is reachable. Start with `codex-worker --account <name> hub` only if unreachable, and tell the global-rules
 owner. Opt-in KeepAlive templates/commands are in `rules-enforcement.md`; this review does not install them.
+
+### Review share (审查占比; user, 2026-11-14)
+
+Read `reviews.rolling24h` and `reviews.rolling7d`; the budget is **≤10% of all dispatches**, both overall and per
+project over the rolling 24 hours, with the seven-day/project-day trend reported for context. Send the user **two or
+three lines every night**: overall 24h/7d share; projects over 10% and their `tasksAtLeast3`; second-reviewer,
+re-review and P0/P1-yield counts (including `UNKNOWN`, never folded into “none”). Put each project's own numbers and
+over-reviewed task names in that orchestrator's `notify.json.actions`; do not send it other projects' raw task details.
+
+When a project is over 10%, tune only within the approved policy and in this order:
+
+1. Enforce the two-round cap and make re-reviews check only previously blocked findings.
+2. Drop second reviewers except adversarial, `review-high`/release-impact, and the documented fallback-first-reviewer
+   case on release/high-stakes work.
+3. Batch small related changes in one task family under one review instead of reviewing each change separately.
+4. For optional-review categories/models with at least 10 recorded rounds and no P0/P1 yield, remove the optional
+   review; `UNKNOWN` rounds are not “no finding” evidence.
+5. Prefer executable-test acceptance for service-impact code where the policy permits it.
+
+Never cut release-impact/high-stakes reviews, adversarial security reviews, or reviews of anything installed on the
+user's machine to hit 10%. If `requiredReviewSharePct` alone is over 10% for a project, report the exact dispatch and
+required-review counts and create a Chinese user decision card: raise that project's review budget, or narrow what
+counts as high-stakes. Until the user decides, keep every required review.
+
+For `quota.traeReconciliation`, report each complete reset window's model, units, public-list token cost,
+`dollarsPerUnit`, `coveragePct`, and quota/session span coverage. This is reconciliation evidence, not billing truth:
+TRAE units are not declared dollars, coverage is capped at 100%, partial retained sessions can only under-explain a
+bucket, and active/incomplete windows stay labeled as such. A missing side is `UNKNOWN`; do not extrapolate the ratio,
+combine models/windows, or tune quota/concurrency from it. A material ratio shift across multiple well-covered complete
+windows is a finding for the routing/global-rules owner to investigate, not an automatic policy change.
 
 ### Machine resources
 

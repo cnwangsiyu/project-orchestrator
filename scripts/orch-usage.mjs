@@ -16,6 +16,7 @@ import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 const argv = process.argv.slice(2);
 const opt = (k) => { const i = argv.indexOf(`--${k}`); return i < 0 ? null : argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[i + 1] : true; };
@@ -57,16 +58,36 @@ const testBuildCommand = (cmd) => {
   return commands.find((c) => /^\s*(?:(?:then|do|env|command|[A-Za-z_]\w*=[^\s;&|]+)\s+)*(?:[^\s;&|()]+\/)?(?:(?:npm|pnpm|yarn)\s+(?:--(?:prefix|dir|cwd)\s+\S+\s+|-C\s+\S+\s+|--[\w-]+(?:=\S+)?\s+)*(?:run\s+(?:--[\w-]+\s+)*)?(?:test|build)\b|node\s+(?:--test\b|(?:[^\s;&|]+\/)?route-scenarios\.mjs\b)|pytest\b|python3?\s+-m\s+pytest\b|go\s+(?:test|build)\b|cargo\s+(?:test|build)\b|xcodebuild\b|gradle\b|gradlew\b|make\b|cmake\s+--build\b|swift\s+(?:build|test)\b|bazel\b|ninja\b)/.test(c)) ?? '';
 };
 const editPath = (file, cwd) => file ? path.resolve(cwd || os.homedir(), file.replace(/^~(?=\/|$)/, os.homedir())) : '';
-const isDataPath = (file) => /\/(?:orchestrator|\.claude-data)\//.test('/' + file) || /^(?:brief|ledger)\.md$|\.ledger\.md$/.test(path.basename(file));
+const isDataPath = (file) => /\/(?:orchestrator|\.claude-data)(?:\/|$)/.test('/' + file)
+  || /\/\.claude\/.*\/memory(?:\/|$)/.test(file)
+  || /(?:^|[-_.])(?:brief|ledger)(?:[-_.]|$)/i.test(path.basename(file));
 const tempRoots = [...new Set([path.join(os.homedir(), '.claude'), '/tmp', '/private/tmp', '/var/tmp', os.tmpdir(), os.tmpdir().replace(/^\/var\//, '/private/var/')])];
 const under = (file, root) => file === root || file.startsWith(root + path.sep);
-const isBookkeeping = (file, roots = tempRoots) => {
-  if (isDataPath(file)) return true;
-  const root = roots.filter((r) => r && under(file, r)).sort((a, b) => b.length - a.length)[0];
-  if (!root) return false;
-  // A temp worktree is source, not a scratch file. Stop at the temp root; an enclosing repo must not exempt it.
-  for (let d = path.dirname(file); d !== root && under(d, root); d = path.dirname(d)) if (fs.existsSync(path.join(d, '.git'))) return false;
-  return true;
+const runtimeSkillRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const sharedSkillRoots = [...new Set([runtimeSkillRoot, path.join(os.homedir(), '.agents', 'skills', 'project-orchestrator')])];
+const checkoutCache = new Map();
+const checkoutRoot = (file) => {
+  let d = path.dirname(file), seen = [];
+  while (true) {
+    if (checkoutCache.has(d)) { const found = checkoutCache.get(d); for (const s of seen) checkoutCache.set(s, found); return found; }
+    seen.push(d);
+    try { if (fs.existsSync(path.join(d, '.git'))) { for (const s of seen) checkoutCache.set(s, d); return d; } } catch {}
+    const parent = path.dirname(d);
+    if (parent === d) { for (const s of seen) checkoutCache.set(s, null); return null; }
+    d = parent;
+  }
+};
+// Positive classification is deliberate: an edit counts as source labour only inside a project Git checkout. Shared
+// skill changes are kept separate, and ~/.claude/orchestrator data never becomes source merely because it sits below
+// a worktree marker.
+const editKind = (file) => {
+  if (!file || isDataPath(file)) return null;
+  if (sharedSkillRoots.some((root) => under(file, root))) return 'shared-skill';
+  if (under(file, path.join(os.homedir(), '.claude'))) return null;
+  const repo = checkoutRoot(file);
+  if (!repo || under(repo, path.join(os.homedir(), '.agents', 'skills'))) return null;
+  if (sharedSkillRoots.some((root) => under(root, repo) || under(repo, root))) return null;
+  return 'source';
 };
 const isShellOutput = (file) => /^\/dev\//.test(file) || /\.(log|out|jsonl)$/i.test(file);
 const splitExpr = (expr, op) => {
@@ -111,8 +132,7 @@ const shellEdits = (cmd, cwd, jobDir) => {
     // An unresolved subdirectory cannot move a literal relative path out of a known task-data directory.
     if (s && dir && !/^(?:[~/$`])/.test(s) && isDataPath(path.resolve(dir, s))) return;
     const file = resolve(s);
-    const roots = [...tempRoots, resolve(vars.CLAUDE_JOB_DIR), resolve(vars.TMPDIR)];
-    if (file ? !isBookkeeping(file, roots) && !isShellOutput(file) : true) files.add(file ?? cmd.slice(0, 60).replace(/\s+/g, ' '));
+    if (file && !isShellOutput(file) && editKind(file)) files.add(file);
   };
   const python = (args) => /^python\d*(?:\.\d+)?$/.test(path.basename(args[0] ?? ''));
   for (const c of shellCommands(cmd)) {
@@ -152,9 +172,13 @@ const top = (counts) => [...counts].sort((a, b) => b[1] - a[1]).slice(0, 5);
 
 // ---- find the orchestrators ----
 const ledgerNames = new Set();
+const rulesOwnerNames = new Set();
 const orchDir = path.join(os.homedir(), '.claude', 'orchestrator');
 for (const p of fs.existsSync(orchDir) ? fs.readdirSync(orchDir) : []) {
-  try { const m = fs.readFileSync(path.join(orchDir, p, 'ledger.md'), 'utf8').match(/Orchestrator session:\s*"([^"]+)"/); if (m) ledgerNames.add(m[1]); } catch {}
+  try {
+    const m = fs.readFileSync(path.join(orchDir, p, 'ledger.md'), 'utf8').match(/Orchestrator session:\s*"([^"]+)"/);
+    if (m) { ledgerNames.add(m[1]); if (p === 'global-rules') rulesOwnerNames.add(m[1]); }
+  } catch {}
 }
 let agents = [];
 try { agents = JSON.parse(execFileSync('claude', ['agents', '--json'], { encoding: 'utf8', timeout: 60000, stdio: ['ignore', 'pipe', 'ignore'] })); } catch {}
@@ -163,11 +187,17 @@ const orchs = agents.filter((a) => a.sessionId && (want ? a.id === want || a.nam
 const projects = path.join(os.homedir(), '.claude', 'projects');
 const findTranscript = (sid) => { for (const d of fs.readdirSync(projects)) { const f = path.join(projects, d, `${sid}.jsonl`); if (fs.existsSync(f)) return f; } return null; };
 
-const analyse = async (file, jobDir) => {
+const analyse = async (file, jobDir, rulesOwner = false) => {
   const pending = new Map(), kinds = {}, big = [], blocked = [];
-  const edited = new Map(), tests = new Map(), tools = new Map();
+  const edited = new Map(), sharedSkillEdited = new Map(), tests = new Map(), tools = new Map();
   let blockedMs = 0;
-  let compactions = 0, browserCalls = 0, imageReads = 0, sleepPolls = 0, subagents = 0, edits = 0, testsBuilds = 0, toolCalls = 0;
+  let compactions = 0, browserCalls = 0, imageReads = 0, sleepPolls = 0, subagents = 0, edits = 0, sharedSkillEdits = 0, testsBuilds = 0, toolCalls = 0;
+  const recordEdit = (p, increment = true) => {
+    const kind = editKind(p);
+    if (kind === 'source') { if (increment) edits++; edited.set(p, (edited.get(p) ?? 0) + 1); }
+    else if (kind === 'shared-skill' && !rulesOwner) { if (increment) sharedSkillEdits++; sharedSkillEdited.set(p, (sharedSkillEdited.get(p) ?? 0) + 1); }
+    return kind;
+  };
   const rl = readline.createInterface({ input: fs.createReadStream(file), crlfDelay: Infinity });
   for await (const line of rl) {
     let e; try { e = JSON.parse(line); } catch { continue; }
@@ -188,9 +218,13 @@ const analyse = async (file, jobDir) => {
         const test = testBuildCommand(c).replace(/\s+\d?>.*$/, '').replace(/\s+/g, ' ').trim().slice(0, 120);
         if (test) { testsBuilds++; tests.set(test, (tests.get(test) ?? 0) + 1); }
         const paths = shellEdits(c, e.cwd, jobDir);
-        if (paths.length) { edits++; for (const p of paths) edited.set(p, (edited.get(p) ?? 0) + 1); }
+        if (paths.length) {
+          const kinds = new Set(paths.map((p) => recordEdit(p, false)));
+          if (kinds.has('source')) edits++;
+          if (kinds.has('shared-skill') && !rulesOwner) sharedSkillEdits++;
+        }
       }
-      else if (['Edit', 'Write', 'NotebookEdit'].includes(b.name)) { desc = editPath(inp.file_path ?? inp.notebook_path, e.cwd); if (desc && !isBookkeeping(desc, [...tempRoots, jobDir])) { edits++; edited.set(desc, (edited.get(desc) ?? 0) + 1); } }
+      else if (['Edit', 'Write', 'NotebookEdit'].includes(b.name)) { desc = editPath(inp.file_path ?? inp.notebook_path, e.cwd); if (desc) recordEdit(desc); }
       else if (/claude-in-chrome|computer-use|Claude_Browser/.test(b.name)) { kind = 'browser/computer-use'; browserCalls++; desc = b.name.split('__').pop(); }
       else if (b.name === 'Read') { desc = inp.file_path ?? ''; if (/\.(png|jpe?g|gif|webp|heic)$/i.test(desc)) { kind = 'Read image'; imageReads++; } }
       else if (b.name === 'Agent' || b.name === 'Task') { kind = 'subagent'; subagents++; desc = String(inp.description ?? ''); }
@@ -210,7 +244,9 @@ const analyse = async (file, jobDir) => {
     }
   }
   const ownKB = Object.entries(kinds).filter(([k]) => !/^(SendMessage|ListAgents|shell: dispatch|shell: routing)/.test(k)).reduce((n, [, v]) => n + v.kb, 0);
-  const editedPaths = top(edited).map(([path, calls]) => ({ path, calls })), testBuildCommands = top(tests).map(([command, calls]) => ({ command, calls }));
+  const editedPaths = top(edited).map(([path, calls]) => ({ path, calls }));
+  const sharedSkillEditedPaths = top(sharedSkillEdited).map(([path, calls]) => ({ path, calls }));
+  const testBuildCommands = top(tests).map(([command, calls]) => ({ command, calls }));
   const minutes = (ms) => Number((ms / 60000).toFixed(2));
   const blockedMinutes = minutes(blockedMs), blockingExamples = blocked.sort((a, b) => b.ms - a.ms).slice(0, 3).map((x) => ({ minutes: minutes(x.ms), command: x.command }));
   const flags = [];
@@ -220,10 +256,11 @@ const analyse = async (file, jobDir) => {
   if (compactions >= LIMITS.compactions) flags.push(`${compactions} context compactions`);
   if (sleepPolls > LIMITS.sleepPolls * scale) flags.push(`${sleepPolls} sleep/poll loops — wait on notifications instead`);
   if (edits > LIMITS.edits * scale) flags.push(`edits source files itself: ${edits} calls (${editedPaths.map((x) => `${x.calls} ${x.path}`).join('; ')}) - route that work as a task through route.mjs`);
+  if (sharedSkillEdits) flags.push(`edited the shared skill directly: ${sharedSkillEdits} calls (${sharedSkillEditedPaths.map((x) => `${x.calls} ${x.path}`).join('; ')}) - send the change to the global-rules orchestrator`);
   if (testsBuilds > LIMITS.testsBuilds * scale) flags.push(`runs tests/builds itself: ${testsBuilds} calls (${testBuildCommands.map((x) => `${x.calls} ${x.command}`).join('; ')}) - route that work as a task through route.mjs`);
   if (toolCalls > LIMITS.toolCalls * scale) flags.push(`many tool calls: ${toolCalls} (${top(tools).map(([name, calls]) => `${calls} ${name}`).join('; ')}) - route that work as a task through route.mjs`);
   if (blockedMs / 60000 > LIMITS.blockedMinutes * scale) flags.push(`blocks in the foreground: ${blockedMinutes} min (${blockingExamples.map((x) => `${x.minutes} min ${x.command}`).join('; ')}) — run it in the background and dispatch other ready tasks meanwhile`);
-  return { ownKB: Math.round(ownKB), compactions, browserCalls, imageReads, sleepPolls, subagents, edits, testsBuilds, toolCalls, blockedMinutes, blockingExamples, editedPaths, testBuildCommands, flags,
+  return { ownKB: Math.round(ownKB), compactions, browserCalls, imageReads, sleepPolls, subagents, edits, sharedSkillEdits, testsBuilds, toolCalls, blockedMinutes, blockingExamples, editedPaths, sharedSkillEditedPaths, testBuildCommands, flags,
     kinds: Object.fromEntries(Object.entries(kinds).sort((a, b) => b[1].kb - a[1].kb).slice(0, 10).map(([k, v]) => [k, { calls: v.calls, kb: Math.round(v.kb) }])),
     largest: big.sort((a, b) => b.kb - a.kb).slice(0, 5).map((x) => `${Math.round(x.kb)} KB ${x.kind} ${x.desc}`) };
 };
@@ -232,17 +269,20 @@ const results = [];
 for (const a of orchs) {
   const f = findTranscript(a.sessionId);
   const jobDir = path.join(os.homedir(), '.claude', 'jobs', a.id ?? a.sessionId.slice(0, 8));
-  results.push({ name: a.name, id: a.id, ...(f ? await analyse(f, jobDir) : { error: 'transcript not found' }) });
+  const rulesOwner = rulesOwnerNames.has(a.name) || a.name === process.env.GLOBAL_RULES_ORCHESTRATOR_SESSION
+    || /global[- ]rules|routing.*(?:主对话|orchestrator)/i.test(a.name ?? '');
+  results.push({ name: a.name, id: a.id, ...(f ? await analyse(f, jobDir, rulesOwner) : { error: 'transcript not found' }) });
 }
 if (opt('json')) { console.log(JSON.stringify({ hours: H, limits: LIMITS, orchestrators: results }, null, 1)); process.exit(0); }
 console.log(`orchestrator context use — last ${H}h (limits per 24h: ${JSON.stringify(LIMITS)})`);
 if (!results.length) console.log('(no local orchestrator sessions found)');
 for (const r of results) {
-  console.log(`\n== ${r.name} [${r.id}]${r.error ? `: ${r.error}` : `: own output ${r.ownKB} KB, compactions ${r.compactions}, browser ${r.browserCalls}, screenshots ${r.imageReads}, sleep-polls ${r.sleepPolls}, subagents ${r.subagents}, edits ${r.edits}, tests/builds ${r.testsBuilds}, tool calls ${r.toolCalls}, blocked ${r.blockedMinutes} min`}`);
+  console.log(`\n== ${r.name} [${r.id}]${r.error ? `: ${r.error}` : `: own output ${r.ownKB} KB, compactions ${r.compactions}, browser ${r.browserCalls}, screenshots ${r.imageReads}, sleep-polls ${r.sleepPolls}, subagents ${r.subagents}, edits ${r.edits}, shared-skill edits ${r.sharedSkillEdits}, tests/builds ${r.testsBuilds}, tool calls ${r.toolCalls}, blocked ${r.blockedMinutes} min`}`);
   if (r.error) continue;
   for (const [k, v] of Object.entries(r.kinds)) console.log(`   ${String(v.kb).padStart(6)} KB ${String(v.calls).padStart(5)}  ${k}`);
   for (const l of r.largest) console.log(`   largest: ${l}`);
   for (const x of r.editedPaths) console.log(`   edited: ${x.calls} ${x.path}`);
+  for (const x of r.sharedSkillEditedPaths) console.log(`   edited shared skill: ${x.calls} ${x.path}`);
   for (const x of r.blockingExamples) console.log(`   blocked: ${x.minutes} min ${x.command}`);
   for (const f of r.flags) console.log(`   FLAG: ${f}`);
 }

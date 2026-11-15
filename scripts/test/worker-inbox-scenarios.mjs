@@ -163,7 +163,7 @@ fs.open = (file, ...args) => String(file).endsWith('worker-events.jsonl') ? new 
   const rpc = path.join(tmp, 'sigterm-rpc.jsonl');
   const sig = start('--import', [fixture, worker, 'start', '--owner', 'worker-owner', '--name', 'term', '--cwd', tmp,
     '--sandbox', 'read-only', '--effort', 'high', '--model', 'fixture', 'Follow the fixture brief.'], { WORKER_EVENTS_FIXTURE: JSON.stringify({ hold: true, rpc, thread: 'term-thread', turn: 'term-turn' }) });
-  await until(() => sig.output().includes('thread='), 'follower attached'); sig.child.kill('SIGTERM');
+  await until(() => sig.output().includes('thread=term-thread turn=term-turn'), 'follower attached'); sig.child.kill('SIGTERM');
   assert.equal((await sig.done).code, 143);
   const ended = readEvents().filter((row) => row.name === 'term').at(-1);
   assert.equal(ended.event, 'follower-ended'); assert.equal(ended.mayRun, true);

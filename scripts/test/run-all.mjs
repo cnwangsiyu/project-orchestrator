@@ -17,7 +17,7 @@ if (!suites.some((s) => s.name === 'pipeline-invariants.mjs')) throw Error('pipe
 suites.push({ name: 'cleanup-python', exe: 'python3', args: ['-m', 'unittest', 'discover', '-s', 'scripts/resource-cleanup', '-p', 'test*.py', '-v'] });
 let failed = 0;
 for (const suite of suites) {
-  // Five res suites run sequentially, including v1.4's build/signal matrix and real backoff.
+  // Six res suites run sequentially, including v1.5 fairness, the build/signal matrix and real backoff.
   const timeout = suite.name === 'res-scenarios.mjs' ? RES_TEST_BUDGET_MS : 300000;
   const r = spawnSync(suite.exe, suite.args, { cwd: root, env, encoding: 'utf8', timeout, maxBuffer: 16 * 2 ** 20 });
   const output = `${r.stdout ?? ''}${r.stderr ?? ''}${r.error ? '\n' + r.error.message : ''}`;

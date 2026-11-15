@@ -22,7 +22,7 @@ const run = (label, config = {}, flags = [], options = {}) => {
   const source = options.source ?? SOL;
   const ttHome = path.join(home, 'tt'); fs.mkdirSync(ttHome);
   fs.writeFileSync(profiles, JSON.stringify({ trae: { kind: 'trae', home: traeHome, hub: 'ws://127.0.0.1:1' },
-    ...(config.everyHop ? { peer:{kind:'trae',home:ttHome,hub:'ws://127.0.0.1:1'} } : {}),
+    ...(config.everyHop || options.peerReady ? { peer:{kind:'trae',home:ttHome,hub:'ws://127.0.0.1:1'} } : {}),
     ...(options.companyReviews || options.canonical ? { ttadk: { kind: 'ttadk', home: ttHome, hub: 'ws://127.0.0.1:1' } } : {}),
     ...(options.authGuard ? { main: { home: path.join(home, 'personal'), hub: 'ws://127.0.0.1:1',
       id: 'public-main-id', email: 'cached@example.com', plan: 'prolite' } } : {}) }));
@@ -33,7 +33,7 @@ const run = (label, config = {}, flags = [], options = {}) => {
     healthy: !!(options.companyReviews || options.ttReady), live: true, reason: options.companyReviews || options.ttReady ? null : 'its daily token quota is used up',
     windows: [], usage: { used: options.companyReviews || options.ttReady ? 10 : 100, limit: 100, resetsAt: now + 5 * min } };
   fs.writeFileSync(cache, JSON.stringify({ checkedAt: now - (options.expiredCache ? 20 * min : 0), claude: [{ label: 'week', used: 10, resetsAt: now + 120 * 60 * min, windowMins: 10080 }],
-    codexAccounts: [tt, tr, ...(config.everyHop ? [{...tt,name:'peer',kind:'trae',models:[ASTRA],healthy:true,live:true,reason:null,usage:{used:10,limit:100,resetsAt:now+3600000}}] : [])], errors: {}, history: {} }));
+    codexAccounts: [tt, tr, ...(config.everyHop || options.peerReady ? [{...tt,name:'peer',kind:'trae',models:[ASTRA],healthy:true,live:true,reason:null,usage:{used:10,limit:100,resetsAt:now+3600000}}] : [])], errors: {}, history: {} }));
   if (options.defer) fs.writeFileSync(path.join(traeHome, 'lane-state.json'), JSON.stringify({ [SOL]: { t: now - 3 * min, state: 'queued', position: 1000, drainPerMin: 0.01 } }));
   if (options.canonical) fs.writeFileSync(path.join(traeHome, 'lane-state.json'), JSON.stringify({
     [ASTRA]: { t: now - 3 * min, state: 'queued', position: 1000, drainPerMin: 0.01 } }));
@@ -65,6 +65,7 @@ const run = (label, config = {}, flags = [], options = {}) => {
     ...(options.canonical ? ['--queue-alternative', JSON.stringify({ model: SOL, account: 'ttadk', basis: 'reset',
       startDelayMin: 5, routeArgs: [...routeArgs, '--exclude-lane', `trae:${SOL}`] })] : []),
     '--log', path.join(task, 'worker.jsonl'), '--out', path.join(task, 'final.md'),
+    ...(options.requireModel ? ['--require-model'] : []),
     ...(options.workerBackground ? ['--background'] : []), 'Read brief.md and follow it.'],
   { env, encoding: 'utf8', timeout: 15000 });
   assert.equal(r.error, undefined, `${label}: ${r.error?.message}`);
@@ -95,6 +96,25 @@ try {
   const replacement = hopped.calls.find((c) => c.method === 'turn/start' && c.model !== SOL);
   assert.match(replacement.params.input[0].text, /inspect git status\/diff.*continue, don't redo/);
   assert.equal(hopped.calls.filter((c) => c.method === 'thread/start').length, 2, 'replacement gets a fresh thread');
+  const seed = run('continuation-seed', { progress: true, complete: true }, ['--exclude-model', 'gemini'], { depth: 1 });
+  const continued = spawnSync(process.execPath, ['--import', transport, path.join(scripts, 'codex-worker.mjs'), '--account', 'trae',
+    'turn', '--thread', 'fixture', '--model', SOL, '--effort', 'high', 'Continue the fixture brief.'],
+  { env: { ...seed.env, REROUTE_FIXTURE: JSON.stringify({ source: SOL, rpc: path.join(seed.dir, 'rpc.jsonl') }) }, encoding: 'utf8', timeout: 15000 });
+  assert.equal(continued.error, undefined); assert.equal(continued.status, 0, continued.stderr + continued.stdout);
+  assert.match(continued.stdout, /inherited:.*route-args.*reroute-owner/); assert.match(continued.stdout, /rerouted:/);
+  const continuedRows = fs.readFileSync(path.join(seed.dir, 'route.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const continuedHop = continuedRows.find((r) => r.kind === 'reroute'); assert.equal(continuedHop.depth, 2);
+  const continuationState = JSON.parse(fs.readFileSync(path.join(seed.task, 'reroute.json'), 'utf8'));
+  assert.equal(routeFlag(continuationState.routeArgs, 'failures'), '0');
+  assert.equal(routeFlag(continuationState.routeArgs, 'exclude-model'), 'gemini');
+  assert.equal(routeFlag(continuationState.routeArgs, 'exclude-account'), 'main,b');
+  assert.equal(routeFlag(continuationState.routeArgs, 'fresh'), null);
+  assert.match(fs.readFileSync(path.join(seed.task, 'final.md'), 'utf8'), /DONE automatic replacement/);
+  assert.ok(events(seed).every((row) => row.owner === 'reroute-owner'));
+  const requiredInfrastructure = run('required-infrastructure', { mode: 'restriction' }, [], { requireModel: true,peerReady:true });
+  assert.equal(requiredInfrastructure.status, 0, requiredInfrastructure.stderr + requiredInfrastructure.stdout);
+  assert.ok(requiredInfrastructure.rows.some((row) => row.kind === 'reroute'), 'missing execution evidence before work preserves infrastructure handoff');
+  assert.equal(requiredInfrastructure.calls.filter(c=>c.method==='thread/start')[1]?.params.model,ASTRA,'infrastructure replacement preserves the hard-family floor');
   const template = run('filled-template', {}, [], { template: true });
   assert.equal(template.status, 0, template.stderr + template.stdout);
   assert.ok(template.calls.filter((c) => c.method === 'thread/start').every((c) => c.params.cwd === template.dir));

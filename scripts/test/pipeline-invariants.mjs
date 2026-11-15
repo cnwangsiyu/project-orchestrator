@@ -261,6 +261,30 @@ test('fresh stalled lanes rank after runnable lanes and never get an optimistic 
   const approved=approve(personal,task('debug'),candidate(createSnapshot(personal),'personal',SOL,'xhigh'),'personal-quota',true);
   assert.equal(run(approved,personal).primary.candidate.accountId,'personal','scoped runnable personal capacity also ranks before a stalled company lane');
 });
+test('normal and light ladders prefer usable priority over progressing depleted Sol', () => {
+  const terra='gpt-5.6-terra', sol56='gpt-5.6-sol';
+  const raw=fixture([['company-b','trae',[SOL,sol56,terra]]]);
+  Object.assign(raw.lanes[0],{mode:'low-priority',progressAt:NOW,state:'ready'});
+  Object.assign(raw.lanes[1],{mode:'low-priority',progressAt:NOW,state:'ready'});
+  Object.assign(raw.lanes[2],{mode:'priority',loadPercent:20,loadSource:'model'});
+  for(const category of ['analysis','research','implement','docs','review','lookup','extract','draft','build-run','browser']) {
+    const p=run(task(category,category==='browser'?{allowedOrigins:['https://example.test']}:{}),raw);assert.equal(p.kind,'launch',category);
+    assert.equal(p.primary.candidate.modelId,terra,category);
+  }
+  const depleted=clone(raw);depleted.lanes[2].mode='low-priority';
+  assert.equal(run(task('analysis'),depleted).primary.candidate.modelId,SOL);
+  const congested=clone(raw);congested.lanes[2].loadPercent=70;
+  assert.equal(run(task('analysis'),congested).primary.candidate.modelId,SOL,'congested priority cannot displace a progressing lane');
+  const hard=fixture([['company-b','trae',[SOL,ASTRA,terra]]]);
+  Object.assign(hard.lanes[0],{mode:'low-priority',progressAt:NOW,state:'ready'});
+  assert.equal(run(task('debug'),hard).primary.candidate.modelId,SOL,'hard work never demotes to priority Terra');
+});
+test('light work keeps its ladder when depleted Sol would finish sooner', () => {
+  const raw=fixture([['company-b','trae',[SOL,'gpt-5.6-terra']]]);
+  Object.assign(raw.lanes[0],{mode:'low-priority',progressAt:NOW,state:'ready'});
+  Object.assign(raw.lanes[1],{mode:'priority',position:20,drainPerMin:4});
+  const p=run(task('lookup'),raw);assert.equal(p.primary.candidate.modelId,'gpt-5.6-terra');
+});
 test('runnable measured company queue beats reset; auth cannot project recovery', () => {
   const raw = fixture([['a', 'ttadk', [SOL]], ['b', 'trae', [SOL]]]); raw.accounts[0].providerDenied = true; raw.accounts[0].denialResetAt = NOW + 600000;
   Object.assign(raw.lanes[1], { mode: 'low-priority', position: 500, drainPerMin: 1 });

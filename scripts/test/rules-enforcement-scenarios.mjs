@@ -37,10 +37,10 @@ async function waitForWrapper(predicate, child, message) {
 try {
   fs.mkdirSync(shared, { recursive: true }); fs.writeFileSync(log, '');
   const digest = loadDigest();
-  assert.ok(digest.text.split('\n').length <= 80);
+  assert.ok(digest.text.split('\n').length <= 70);
   const workerLines = digest.worker.split('\n');
   const loginRule = workerLines.findIndex((line) => line.includes('Forbidden for every worker: never read, copy, load or inject LOGIN material'));
-  assert.ok(loginRule >= 0); assert.match(workerLines[loginRule + 1], /Registered own-test signing uses ordinary full-access Codex-family company workers.*resident Claude signer is retired/);
+  assert.ok(loginRule >= 0); assert.match(workerLines[loginRule + 1], /Allowed with the user's 2026-11-13 authorization: sign OUR OWN TEST packages.*registry.json.*identities.json/);
   const invoke = (input, overrides = {}) => {
     const start = performance.now();
     const result = spawnSync(process.execPath, [path.join(scripts, 'rules-digest-hook.mjs')],
@@ -126,8 +126,9 @@ if(m.method==='turn/start')setImmediate(()=>this.onmessage({data:JSON.stringify(
     '--cwd', tmp, '--effort', 'high', '--sandbox', 'read-only', '--model', 'gpt-6.1-sol', '--name', 'p-T1', '--log', path.join(tmp, 'worker.jsonl'), 'reply DONE'],
   { env: { ...env, CODEX_ACCOUNTS: profiles, CAPTURE: captured }, encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'] });
   assert.equal(JSON.parse(fs.readFileSync(captured)).developerInstructions, `Global worker rules ${digest.version}\n${digest.worker}`);
-  assert.equal(rows().at(-1).kind, 'launch'); assert.equal(rows().at(-1).account, 'main');
-  assert.equal(rows().at(-1).sandbox, 'read-only');
+  const workerLaunch = rows().findLast((row) => row.kind === 'launch');
+  assert.equal(workerLaunch.account, 'main'); assert.equal(workerLaunch.sandbox, 'read-only');
+  assert.equal(rows().at(-1).kind, 'launch-model'); assert.equal(rows().at(-1).thread, 'fixture');
   console.log('ok   real codex-worker start injects the single-source worker digest and records launch evidence');
   const probeBin = path.join(tmp, 'probe-bin'), spawned = path.join(tmp, 'unexpected-hub-spawn');
   fs.mkdirSync(probeBin);

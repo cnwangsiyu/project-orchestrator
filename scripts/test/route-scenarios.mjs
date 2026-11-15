@@ -14,6 +14,7 @@ import { loadDigest } from '../lib/global-rules.mjs';
 
 const ROUTE = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'route.mjs');
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'route-test-'));
+const absentPlaywrightToken = path.join(tmp, 'no-playwright-extension-token');
 const now = Date.now(), h = 3600000, W = 10080;
 const wk = (used, leftH, label = 'week') => ({ label, used, resetsAt: now + leftH * h, windowMins: W, scoped: false });
 const cl = (used, leftH, fable = 0) => [wk(used, leftH, 'week (all models)'), { ...wk(fable, leftH, 'week (Fable)'), scoped: true }];
@@ -184,14 +185,15 @@ const CASES = [
   ['ttAndTrae', ['implement', '--exclude-account', 'ttadk,trae'], 'codex gpt-6.1-sol high @main'],
   ['ttChatOut', ['lookup'], 'codex gpt-5.6-terra medium @ttadk'], // light row: light list, not Sol
   ['ttChatOut', ['image-gen'], 'DEFER'],
-  // Browser work: TTADK Codex when it is browser-ready, else Claude.
+  // Browser order is TTADK Codex → token-ready TRAE → browser-ready personal ChatGPT → Claude.
+  // These baseline fixtures have no TRAE token, so their expected picks exercise the remaining rungs.
   ['ttFresh', ['browser'], 'codex gpt-6.1-sol medium @ttadk', 'Chrome must be running'],
   ['ttFresh', ['browser', '--failures', '2'], 'codex gpt-6.1-sol xhigh @ttadk'],
   ['ttFresh', ['browser', '--failures', '3'], 'claude sonnet medium'],
   ['ttNoBrowser', ['browser'], 'claude sonnet medium', 'never switch to another connected browser'],
   ['fresh', ['browser'], 'claude sonnet medium'],
   ['ttFresh', ['browser', '--exclude-account', 'ttadk'], 'claude sonnet medium'],
-  // ui-browser: TTADK when browser-ready (localhost reachable), else Claude Sonnet high as before.
+  // ui-browser uses the same browser order and keeps its hard effort floor for writes.
   ['ttFresh', ['ui-browser'], 'codex gpt-6.1-sol high @ttadk', 'Chrome must be running'],
   ['ttNoBrowser', ['ui-browser'], 'claude sonnet high'],
   ['ttFresh', ['ui-browser', '--exclude-account', 'ttadk'], 'claude sonnet high'],
@@ -266,7 +268,7 @@ const run = (sc, args0, overrides = {}) => {
   if (CODE.includes(args[0]) && !args.includes('--impact') && !args0.includes('__noimpact')) args = [...args, '--impact', 'service'];
   const cache = path.join(tmp, 'q.json');
   fs.writeFileSync(cache, JSON.stringify({ checkedAt: now, claude: S[sc].claude, codexAccounts: S[sc].codex, errors: {}, history: {} }));
-  const env = { ...process.env, QUOTA_CACHE: cache, CODEX_ACCOUNTS: path.join(tmp, 'none.json'), ROUTE_LOG: '0', ROUTE_NOW: String(now), ROUTE_LOG_FILE: path.join(tmp, 'empty-route-history.jsonl'), QUOTA_LOG: '0', TRAE_PROBE: '0', ROUTE_RR: path.join(tmp, 'rr.txt'), QUOTA_LOG_FILE: path.join(tmp, 'empty-company-history'), ...overrides };
+  const env = { ...process.env, QUOTA_CACHE: cache, CODEX_ACCOUNTS: path.join(tmp, 'none.json'), ROUTE_LOG: '0', ROUTE_NOW: String(now), ROUTE_LOG_FILE: path.join(tmp, 'empty-route-history.jsonl'), QUOTA_LOG: '0', TRAE_PROBE: '0', ROUTE_RR: path.join(tmp, 'rr.txt'), QUOTA_LOG_FILE: path.join(tmp, 'empty-company-history'), PLAYWRIGHT_EXTENSION_TOKEN_FILE: absentPlaywrightToken, ...overrides };
   return routeFixture(ROUTE,[...args,'--artifact-ref','fixture-artifact','--json'],{env,dir:tmp,approve:overrides.TEST_APPROVE===true});
 };
 const expectationChanges=[];
@@ -310,6 +312,37 @@ for (const [sc,args,oldWant,oldNote] of CASES) {
   const ok = got === want;
   if (!ok) fail++;
   console.log(`${ok ? 'ok  ' : 'FAIL'} ${sc.padEnd(19)} ${args.join(' ').padEnd(36)} ${ok ? got : `want "${want}", got "${got}"`}`);
+}
+// A user-pasted Playwright Extension token makes TRAE web-browser capable without making it desktop-capable.
+// Every subprocess gets an explicit fake path, so this suite never probes or reads the user's real token file.
+{
+  try {
+    const token = path.join(tmp, 'playwright-extension-token');
+    fs.writeFileSync(token, 'fixture-playwright-token-do-not-log\n', { mode: 0o600 });
+    const env = { PLAYWRIGHT_EXTENSION_TOKEN_FILE: token };
+    const ttFirst = JSON.parse(run('ttFresh', ['browser'], env));
+    assert.equal(ttFirst.pick.account, 'ttadk');
+    const trae = JSON.parse(run('ttOutTrae', ['browser', '--origins', 'example.com'], env));
+    assert.equal(trae.pick.account, 'trae'); assert.equal(trae.pick.launcher, 'codex-worker');
+    assert.ok(trae.why.some((s) => /TRAE via Playwright extension in the user's Chrome/.test(s)));
+    assert.ok(trae.notes.some((s) => /not enforced technically on TRAE/.test(s)));
+    assert.match(trae.pick.command, /--browser-origins/); assert.match(trae.pick.command, /example\.com/);
+    const beforePersonal = JSON.parse(run('traeBrowserB', ['browser'], env));
+    assert.equal(beforePersonal.pick.account, 'trae');
+    const ui = JSON.parse(run('ttOutTrae', ['ui-browser'], env));
+    assert.equal(ui.pick.account, 'trae'); assert.equal(ui.pick.effort, 'high');
+    const desktop = JSON.parse(run('traeBrowserB', ['computer-use', '--apps', 'com.apple.Notes'], env));
+    assert.equal(desktop.pick.account, 'b'); assert.notEqual(desktop.pick.account, 'trae');
+    assert.ok(desktop.needsUserOK.some((s) => /personal quota/.test(s)));
+    S.noDesktopPath={...S.ttOutTrae,codex:S.ttOutTrae.codex.filter(a=>a.kind!=='ttadk')};
+    const noPersonalDesktop = JSON.parse(run('noDesktopPath', ['computer-use', '--apps', 'com.apple.Notes'], env));
+    assert.equal(noPersonalDesktop.pick, null); assert.equal(noPersonalDesktop.blocked, true); assert.ok(noPersonalDesktop.plan.rejected.some(p=>p.reason.code==='CAPABILITY_DESKTOP_TOOL'));
+    const absent = JSON.parse(run('ttOutTrae', ['browser']));
+    assert.equal(absent.pick.vendor, 'claude'); assert.ok(absent.needsUserOK.some((s) => /personal quota/.test(s)));
+    const personal = JSON.parse(run('traeBrowserB', ['browser']));
+    assert.equal(personal.pick.account, 'b'); assert.ok(personal.needsUserOK.some((s) => /personal quota/.test(s)));
+    console.log('ok   TRAE Playwright browser capability: TTADK first, TRAE before personal/Claude, UI floor, token gate, computer-use exclusion');
+  } catch (e) { fail++; console.log(`FAIL TRAE Playwright browser capability: ${e.stack}`); }
 }
 // User decision 2026-11-13: Codex-family writers default to full access on every account. Reviewers remain read-only;
 // test-running reviews get workspace-write, and --sandbox is the only explicit narrower per-task override.
@@ -360,7 +393,7 @@ for (const [sc,args,oldWant,oldNote] of CASES) {
     assert.ok(merged.pick?.command);
     for (const sc of ['ttFresh', 'ttOutTraeDown', 'fresh']) {
       const routed = JSON.parse(run(sc, ['build-run']));
-      assert.ok(routed.notes.some((s) => /heavy-build\.sh.*ONE-process wrapper.*res take-build\/wait-build\/return-build.*res v1\.4.*acquire heavy-build plus one free admitted lane together.*holding neither resource while waiting for the other/.test(s)));
+      assert.ok(routed.notes.some((s) => /heavy-build\.sh.*ONE-process wrapper.*res take-build\/wait-build\/return-build.*res v1\.5.*acquire heavy-build plus one free admitted lane together.*holding neither resource while waiting for the other/.test(s)));
       assert.ok(routed.notes.some((s) => /only for genuine local heavy compute.*remote pipeline deploys and CI runs never take one.*--no-local-build/.test(s)));
       assert.ok(routed.notes.some((s) => /Normal gate remains min\(20, 12 \+ 8 \* other lanes\), memory >=16 GiB; STALE and caller-owned locks excluded/.test(s)));
       assert.ok(routed.notes.some((s) => /lane 3 is available only after reviewed owner switch.*load1m <=8 AND available memory >=32 GiB.*lane3=OPEN\|CLOSED/.test(s)));
@@ -786,8 +819,8 @@ for (const [sc, args] of ERRORS) {
     // A hard review (review-high) has no fallback family: with GPT paused on TRAE it drops to Claude behind the gate.
     [hasNote('traeGptOut', ['review-high'], /independent other-family GPT\/Claude reviewer/), false],
     [hasNote('traeGptOut', ['build-run'], /health thresholds.*rollback triggers.*stronger-model judgment/), true],
-    [hasNote('traeGptOut', ['analysis'], /playwright MCP is for public\/local pages only.*missing login means BLOCKED/), true],
-    [hasNote('traeFull', ['implement', '--exclude-model', 'gpt,deepseek'], /Gemini-3\.1-Pro ran past 40 minutes/), false],
+    [hasNote('traeGptOut', ['analysis'], /default headless Playwright MCP is for public\/local pages only.*Missing login means BLOCKED/), true],
+    [hasNote('traeFull', ['implement', '--exclude-model', 'gpt,deepseek'], /Gemini-3\.1-Pro ran past 40 minutes/), true],
     [hasNote('traeGptOut', ['implement'], /can't see images/), true], [hasNote('traeGptOut', ['image-read'], /can't see images/), false],
     // Every family out: personal quota, behind the user's OK.
     [o('traeAllOut', ['implement']).kind, 'blocked'],

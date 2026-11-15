@@ -46,7 +46,7 @@ const run = (args, { t = now, daily = { [SOL]: bucket(0), [ASTRA]: bucket(.6), [
   fs.writeFileSync(cache, JSON.stringify({ checkedAt: t, claude: null, codexAccounts: [...(company ? [tt] : []), trae], errors: {}, history: {} }));
   const routeLog = path.join(tmp, 'routes.jsonl');
   const result = JSON.parse(execFileSync(process.execPath, ['--import', clock, path.join(root, 'route.mjs'), ...a, '--json', '--mode', 'default'], {
-    encoding: 'utf8', timeout: 5000, env: { ...process.env, BALANCE_FIXTURE_TIME: String(t), CODEX_ACCOUNTS: profiles,
+    encoding: 'utf8', timeout: 5000, env: { ...process.env, BALANCE_FIXTURE_TIME: String(t), ROUTE_NOW:String(t), CODEX_ACCOUNTS: profiles,
       QUOTA_CACHE: cache, QUOTA_LOG: '0', QUOTA_LOG_FILE: history, ROUTE_LOG: logged ? '1' : '0', ROUTE_LOG_FILE: routeLog,
       TRAE_PROBE: '0', RULES_SHARED: path.join(tmp, 'rules') },
   }));
@@ -112,7 +112,10 @@ try {
   const noHard = run(['implement-hard'], { daily: { ...fresh, [SOL]: bucket(0), [ASTRA]: bucket(.14) } });
   assert.equal(noHard.pick.account, 'ttadk'); assert.deepEqual(noHard.balance.candidates.map((c) => c.model), [SOL, ASTRA]);
   assert.match(noHard.why.join('\n'), /stays on TTADK: no hard-tier/);
-  assert.equal(run(['implement', '--failures', '1']).blocked,true,'retry needs actual evidence');
+  const countRetry=run(['implement','--failures','1']);
+  assert.equal(countRetry.blocked,false,'count-only retry uses the first-rung assumption');
+  assert.ok(countRetry.pick.company&&countRetry.pick.command);
+  assert.match(countRetry.why.join('\n'),/assumed first category ladder rung/);
 
   // Projection sends every eligible normal/light dispatch; when TTADK will last, only light/low/expiry triggers move it.
   for (const category of ['implement', 'analysis', 'review', 'research', 'docs', 'lookup', 'extract', 'draft']) {
@@ -134,7 +137,7 @@ try {
   assert.equal(run(['implement', '--security']).pick.model, FLASH);
   assert.equal(run(['implement', '--exclude-account', 'trae']).pick.account, 'ttadk');
   const fallback = run(['implement'], { company: false, queue: { gpt: { t: now, position: 5000 } } });
-  assert.equal(fallback.pick.account, 'trae'); assert.equal(fallback.pick.model, SOL56);
+  assert.equal(fallback.pick.account, 'trae'); assert.equal(fallback.pick.model, FLASH,'congested GPT priority is not usable priority');
   assert.equal(run(['implement'], { traeHealthy: false }).pick.account, 'ttadk');
 
   // Burn crosses the reset boundary only with sufficient recent observations in the same quota period.

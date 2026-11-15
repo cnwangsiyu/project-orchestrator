@@ -11,6 +11,21 @@ export function orderCandidates(task, snapshot, rows) {
   let cohort = rows.filter(({ candidate: c }) => EFFORTS.indexOf(c.effort) === minimum.get(stageKey(c)));
   const stalled = (r) => r.estimate.stalled || r.reviewers?.some(s=>s.estimate.stalled);
   if(cohort.some(r=>!stalled(r))) cohort=cohort.filter(r=>!stalled(r));
+  // Quota preference stays within the task's qualified ladder. A free depleted
+  // Sol lane does not promote light work while light models can serve it.
+  if(task.tier!=='hard' && !adversarial(task) && task.category!=='image-read' && !task.previousAttempts.length) {
+    for(const account of snapshot.accounts.filter(a=>a.kind==='trae')) {
+      const ladder=TIERS[task.tier];
+      const inLadder=r=>r.candidate.accountId===account.id && ladder.includes(r.candidate.modelId);
+      const usable=cohort.filter(r=>inLadder(r)&&!r.estimate.capacityReset&&!stalled(r));
+      if(task.tier==='light' && usable.length)
+        cohort=cohort.filter(r=>r.candidate.accountId!==account.id||inLadder(r));
+      const priority=usable.some(r=>candidateParts(snapshot,r.candidate).lane.mode==='priority'
+        && r.estimate.balance?.congestion!=='high');
+      if(priority) cohort=cohort.filter(r=>r.candidate.accountId!==account.id
+        ||candidateParts(snapshot,r.candidate).lane.mode!=='low-priority');
+    }
+  }
   const backgroundChoice=task.background&&!['browser','ui-browser','computer-use','build-run'].includes(task.category)&&!task.flags['shared-lock']&&!task.flags['device-lease'];
   const ttReady=cohort.some((r)=>candidateParts(snapshot,r.candidate).account.kind==='ttadk'&&!r.estimate.capacityReset&&r.estimate.startDelayMin===0);
   if(ttReady&&!backgroundChoice&&!adversarial(task)) {
@@ -28,11 +43,11 @@ export function orderCandidates(task, snapshot, rows) {
     const preferred=new Map();
     for(const account of snapshot.accounts.filter((a)=>a.kind==='trae')) {
       const rr=cohort.filter((r)=>r.candidate.accountId===account.id), sol=rr.find((r)=>r.candidate.modelId==='gpt-6.1-sol');
-      const unqueued=(r)=>!['queue'].includes(r.estimate.basis)&&r.estimate.confidence!=='UNKNOWN';
+      const unqueued=(r)=>r.estimate.basis!=='queue'&&r.estimate.confidence!=='UNKNOWN'&&r.estimate.balance?.congestion!=='high';
       const alt=['gpt-5.6-sol','gpt-5.6-terra','deepseek-v4.1-flash'].map((id)=>rr.find((r)=>r.candidate.modelId===id
         && ['priority','bucket-free'].includes(candidateParts(snapshot,r.candidate).lane.mode)&&unqueued(r))).find(Boolean);
-      if(sol&&candidateParts(snapshot,sol.candidate).lane.mode!=='low-priority'&&sol.estimate.basis!=='queue') preferred.set(account.id,sol.candidate.modelId);
-      else if(alt&&sol?.estimate.basis!=='progressing') preferred.set(account.id,alt.candidate.modelId);
+      if(sol&&candidateParts(snapshot,sol.candidate).lane.mode!=='low-priority'&&unqueued(sol)) preferred.set(account.id,sol.candidate.modelId);
+      else if(alt) preferred.set(account.id,alt.candidate.modelId);
     }
     cohort=cohort.filter((r)=>!preferred.has(r.candidate.accountId)||preferred.get(r.candidate.accountId)===r.candidate.modelId);
   }

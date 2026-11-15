@@ -122,15 +122,15 @@ fs.writeFileSync(match[1], JSON.stringify({ ...existing, delivery: 'sent', sentA
 console.log(JSON.stringify(session));
 `;
 
-function fixture(scenario) {
+function fixture(scenario, fixtureDay = day) {
   const home = fs.mkdtempSync(path.join(tmp, `${scenario}-`)); homes.push(home);
   const bin = path.join(home, '.local/bin'); fs.mkdirSync(bin, { recursive: true });
   fs.writeFileSync(path.join(bin, 'node'), shim, { mode: 0o755 });
   fs.writeFileSync(path.join(bin, 'claude'), claudeShim, { mode: 0o755 });
   const shared = path.join(home, '.claude/orchestrator/_shared'); fs.mkdirSync(shared, { recursive: true });
   fs.writeFileSync(path.join(shared, 'codex-accounts.json'), JSON.stringify({ trae: { kind: 'trae' }, ttadk: { kind: 'ttadk' }, personal: { kind: 'chatgpt' } }));
-  const dir = path.join(shared, 'routing-review'), run = path.join(dir, `${day}.run`);
-  const env = { ...process.env, HOME: home, NIGHTLY_DIR: dir, NIGHTLY_DAY: day, NIGHTLY_MODE: 'auto', NIGHTLY_PERSONAL_OK: '0',
+  const dir = path.join(shared, 'routing-review'), run = path.join(dir, `${fixtureDay}.run`);
+  const env = { ...process.env, HOME: home, NIGHTLY_DIR: dir, NIGHTLY_DAY: fixtureDay, NIGHTLY_MODE: 'auto', NIGHTLY_PERSONAL_OK: '0',
     NIGHTLY_EXCLUDE: '', NIGHTLY_EXCLUDE_MODEL: '', NIGHTLY_DEADLINE: '23:59', NIGHTLY_POLL_MS: '100',
     NIGHTLY_PROBE_MS: '2000', NIGHTLY_RESULT_RETRIES: '2', NIGHTLY_LIVENESS_RETRIES: '3', NIGHTLY_RERUN: '0',
     FIXTURE_SCENARIO: scenario, FIXTURE_LIVE_PID: String(process.pid) };
@@ -326,7 +326,9 @@ try {
   assert.match(json(path.join(blocked.run, 'deadline-status.json')).message, /个人额度.*用户 OK/);
   const absent = fixture('absent'); assert.equal(absent.execute({ NIGHTLY_DEADLINE: '00:00' }, ['--deadline-check']).status, 0);
   assert.match(json(path.join(absent.run, 'deadline-status.json')).message, /未找到当日启动记录/);
-  const early = fixture('early'); assert.equal(early.execute({}, ['--deadline-check']).status, 0);
+  const future = new Date(); future.setDate(future.getDate() + 1);
+  const futureDay = `${future.getFullYear()}-${String(future.getMonth()+1).padStart(2,'0')}-${String(future.getDate()).padStart(2,'0')}`;
+  const early = fixture('early',futureDay); assert.equal(early.execute({}, ['--deadline-check']).status, 0);
   assert.ok(!fs.existsSync(path.join(early.run, 'deadline-status.json')));
   console.log('PASS independent deadline check covers blocked/exited/missing launchers and obeys local deadline');
 
