@@ -405,10 +405,7 @@ new machine, set up the matching bridge for each account as described here.
 
 For a TRAE `start`/`turn` with `--browser-origins`, codex-worker injects a per-thread `mcp_servers.playwright` override:
 `npx -y @playwright/mcp@latest --extension --profile-dir-name 'Profile 1' --allowed-origins '<semicolon-list>'`.
-`--chrome-profile-dir` changes the profile. The token value is read at launch and supplied only as the child process's
-`PLAYWRIGHT_MCP_EXTENSION_TOKEN` environment variable; the per-thread entry contains only the name-only pass-through
-`env_vars = ["PLAYWRIGHT_MCP_EXTENSION_TOKEN"]`. The token is never put on argv, written into TOML, or logged. Restart
-the TRAE hub/supervisor after adding or replacing the token so its child environment contains it. The persistent
+`--chrome-profile-dir` changes the profile. The per-thread server is our launcher `scripts/playwright-extension-mcp.mjs` (run with node), which reads the token file itself and passes the token to `@playwright/mcp` only through that child's environment. The token is never in the hub's environment (every worker shell inherits that), on argv, in TOML or in logs, so adding or replacing the token needs no hub restart. The persistent
 headless `[mcp_servers.playwright]` written by `trae-setup` is unchanged and remains the non-browser default.
 
 The worker uses Playwright MCP's `browser_navigate`, `browser_snapshot`, `browser_click`, `browser_type`,

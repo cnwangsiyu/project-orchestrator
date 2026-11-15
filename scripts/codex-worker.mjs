@@ -514,20 +514,15 @@ const playwrightAllowedOrigins = (origins) => [...new Set(origins.flatMap((entry
     ? [`http://*.${host}${port}`, `https://*.${host}${port}`, `http://${host}${port}`, `https://${host}${port}`]
     : [`http://${host}${port}`, `https://${host}${port}`];
 }))];
-const TRAE_PLAYWRIGHT_ARGS = TRAE_EXTENSION_BROWSER ? ['-y', '@playwright/mcp@latest', '--extension',
+// The hub starts our small launcher, which reads the token file and passes the token to @playwright/mcp through that
+// child's environment only. (An `env_vars` pass-through would need the token in the hub's own environment, which a hub
+// started earlier does not have and which every worker shell would inherit — live test 2026-11-14.)
+const TRAE_PLAYWRIGHT_ARGS = TRAE_EXTENSION_BROWSER ? [path.join(path.dirname(fileURLToPath(import.meta.url)), 'playwright-extension-mcp.mjs'),
   '--profile-dir-name', CHROME_PROFILE_DIR, '--allowed-origins', playwrightAllowedOrigins(BU_ORIGINS).join(';')] : null;
-// The token is user-pasted and is never put on argv, in config, or in output. `env_vars` is a name-only pass-through:
-// the Playwright child receives PLAYWRIGHT_MCP_EXTENSION_TOKEN from the TRAE app-server process environment.
-// The foreground hub path also loads it below so a newly started persistent TRAE hub can satisfy that reference.
-const loadPlaywrightExtensionToken = () => {
-  const token = fs.readFileSync(PLAYWRIGHT_EXTENSION_TOKEN_FILE, 'utf8').trim();
-  if (!token) die(`Playwright extension token file is empty: ${PLAYWRIGHT_EXTENSION_TOKEN_FILE}`, 1);
-  process.env.PLAYWRIGHT_MCP_EXTENSION_TOKEN = token;
-};
+const TRAE_PLAYWRIGHT_SERVER = TRAE_EXTENSION_BROWSER ? { command: process.execPath, args: TRAE_PLAYWRIGHT_ARGS,
+  startup_timeout_sec: 120, default_tools_approval_mode: 'approve' } : null;
 if (TRAE_BROWSER_REQUEST && !TRAE_EXTENSION_BROWSER)
   die(`TRAE signed-in Chrome needs the Playwright Extension token file: ${PLAYWRIGHT_EXTENSION_TOKEN_FILE}`, 1);
-if (TRAE_EXTENSION_BROWSER) loadPlaywrightExtensionToken();
-if (PROF?.kind === 'trae' && cmd === 'hub' && fs.existsSync(PLAYWRIGHT_EXTENSION_TOKEN_FILE)) loadPlaywrightExtensionToken();
 const originAllowed = (origin) => {
   let host = ''; try { host = new URL(origin).hostname; } catch { return false; }
   return BU_ORIGINS.some((p) => p === '*' || p === origin || (p.startsWith('*.') ? host === p.slice(2) || host.endsWith(p.slice(1)) : host === p));
@@ -998,10 +993,7 @@ try {
       CU_APPS.length ? `For desktop apps, in node_repl js: globalThis.sky = (await import("@oai/sky")).sky; then follow its documentation. Apps you may use: ${CU_APPS.join(', ')}; others are declined.` : null,
       'Do not look for mcp__claude-in-chrome__* tools, ToolSearch, or skills written for Claude Code (chrome-browser, claude-in-chrome): they do not exist in this session. If node_repl or the browser is not reachable, report BLOCKED with the exact error.',
     ].filter(Boolean).join('\n');
-    const browserConfig = TRAE_EXTENSION_BROWSER ? { mcp_servers: { playwright: {
-      command: 'npx', args: TRAE_PLAYWRIGHT_ARGS, env_vars: ['PLAYWRIGHT_MCP_EXTENSION_TOKEN'],
-      startup_timeout_sec: 120, default_tools_approval_mode: 'approve',
-    } } } : browserThread ? { plugins: { 'unified-computer-use@openai-bundled': { enabled: false } } } : null;
+    const browserConfig = TRAE_EXTENSION_BROWSER ? { mcp_servers: { playwright: TRAE_PLAYWRIGHT_SERVER } } : browserThread ? { plugins: { 'unified-computer-use@openai-bundled': { enabled: false } } } : null;
     const digest = loadDigest();
     const th = await call('thread/start', {
       cwd: path.resolve(opts.cwd), model: opts.model, sandbox: opts.sandbox, approvalPolicy: APPROVAL_POLICY,
@@ -1021,10 +1013,7 @@ try {
     follow(threadId, ts.turn?.id ?? ts.turnId);
   } else if (cmd === 'turn') {
     if (!opts.thread || !text) die('turn needs --thread and a prompt');
-    const config = TRAE_EXTENSION_BROWSER ? { mcp_servers: { playwright: {
-      command: 'npx', args: TRAE_PLAYWRIGHT_ARGS, env_vars: ['PLAYWRIGHT_MCP_EXTENSION_TOKEN'],
-      startup_timeout_sec: 120, default_tools_approval_mode: 'approve',
-    } } } : undefined;
+    const config = TRAE_EXTENSION_BROWSER ? { mcp_servers: { playwright: TRAE_PLAYWRIGHT_SERVER } } : undefined;
     await call('thread/resume', { threadId: opts.thread, model: opts.model, config }).catch(() => {});
     tracker?.set({ mayRun: true });
     const ts = await call('turn/start', {

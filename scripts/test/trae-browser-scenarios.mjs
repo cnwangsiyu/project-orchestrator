@@ -47,13 +47,16 @@ try {
     '--model', 'gpt-6.1-sol', '--name', 'fixture-browser', '--log', path.join(tmp, 'browser-log.jsonl'),
     '--browser-origins', 'https://example.com/path,*.bytedance.net,localhost', 'reply DONE']);
   const server = start.config.mcp_servers.playwright;
-  assert.equal(server.command, 'npx');
-  assert.deepEqual(server.args.slice(0, 5), ['-y', '@playwright/mcp@latest', '--extension', '--profile-dir-name', 'Profile 1']);
-  assert.equal(server.args[5], '--allowed-origins');
-  const origins = server.args[6].split(';');
+  // The hub runs our launcher (node + playwright-extension-mcp.mjs); the launcher alone reads the token file.
+  assert.equal(server.command, process.execPath);
+  assert.match(server.args[0], /scripts\/playwright-extension-mcp\.mjs$/);
+  assert.deepEqual(server.args.slice(1, 3), ['--profile-dir-name', 'Profile 1']);
+  assert.equal(server.args[3], '--allowed-origins');
+  const origins = server.args[4].split(';');
   for (const expected of ['https://example.com', 'http://*.bytedance.net:*', 'https://*.bytedance.net:*',
     'http://bytedance.net:*', 'https://bytedance.net:*', 'http://localhost:*', 'https://localhost:*']) assert.ok(origins.includes(expected), expected);
-  assert.deepEqual(server.env_vars, ['PLAYWRIGHT_MCP_EXTENSION_TOKEN']);
+  assert.equal(server.env_vars, undefined, 'the token must not depend on the hub environment');
+  assert.equal(server.env, undefined);
   assert.equal(start.approvalsReviewer, undefined);
   const howTo = start.developerInstructions.split('\nGlobal worker rules ')[0];
   for (const tool of ['browser_navigate', 'browser_snapshot', 'browser_click', 'browser_type', 'browser_fill_form', 'browser_take_screenshot']) assert.match(howTo, new RegExp(tool));
@@ -64,7 +67,7 @@ try {
   assert.ok(!visible.includes(tokenValue), 'token value appeared in launcher output/config/log');
   assert.equal(fs.readFileSync(persistentFile, 'utf8'), persistent, 'persistent headless config changed');
   assert.equal(fs.statSync(tokenFile).mode & 0o777, 0o600);
-  console.log('ok   TRAE browser start uses per-thread extension Playwright, translated origins, name-only token env and TRAE-specific instructions');
+  console.log('ok   TRAE browser start uses per-thread extension Playwright, translated origins, launcher-read token file and TRAE-specific instructions');
 } catch (e) { fail++; console.log(`FAIL TRAE browser start: ${e.stack}`); }
 
 try {
