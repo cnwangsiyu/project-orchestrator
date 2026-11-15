@@ -688,7 +688,8 @@ const setupAlarm = setupMs ? setTimeout(() => {
 }, setupMs) : null;
 cleanups.add(() => clearTimeout(setupAlarm));
 if (setupMs) {
-  const line = `connecting: ${cmd} thread=${opts.thread ?? 'new'}; setup deadline ${setupMs / 1000}s`;
+  // No `thread=` token here: callers grep the first `thread=<id>` line of the output for the new thread id.
+  const line = `connecting: ${cmd} (${opts.thread ? 'existing thread' : 'new thread'}); setup deadline ${setupMs / 1000}s`;
   if (controlCommand) console.error(line); else console.log(line);
 }
 const write = (obj) => ws.send(JSON.stringify(obj));
