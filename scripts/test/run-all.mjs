@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { RES_TEST_BUDGET_MS } from '../res/test/run.mjs';
 const base = path.dirname(fileURLToPath(import.meta.url)), root = path.dirname(path.dirname(base));
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'project-orchestrator-tests-'));
 const home = path.join(tmp, 'fixture-home'); fs.mkdirSync(home, { recursive: true });
@@ -13,8 +14,8 @@ const suites = fs.readdirSync(base).filter((f) => f.endsWith('.mjs') && f !== pa
 suites.push({ name: 'cleanup-python', exe: 'python3', args: ['-m', 'unittest', 'discover', '-s', 'scripts/resource-cleanup', '-p', 'test*.py', '-v'] });
 let failed = 0;
 for (const suite of suites) {
-  // res-scenarios runs four bounded suites sequentially (including real backoff).
-  const timeout = suite.name === 'res-scenarios.mjs' ? 1200000 : 300000;
+  // Five res suites run sequentially, including v1.4's build/signal matrix and real backoff.
+  const timeout = suite.name === 'res-scenarios.mjs' ? RES_TEST_BUDGET_MS : 300000;
   const r = spawnSync(suite.exe, suite.args, { cwd: root, env, encoding: 'utf8', timeout, maxBuffer: 16 * 2 ** 20 });
   const output = `${r.stdout ?? ''}${r.stderr ?? ''}${r.error ? '\n' + r.error.message : ''}`;
   fs.writeFileSync(path.join(tmp, `${suite.name}.log`), output, { mode: 0o600 });

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>com.user.routing-nightly-review-deadline</string>
+<key>ProgramArguments</key><array>
+  <string>/bin/zsh</string><string>-l</string>
+  <string>__SKILL__/scripts/nightly-review.sh</string><string>--deadline-check</string>
+</array>
+<key>EnvironmentVariables</key><dict>
+  <key>NIGHTLY_DEADLINE</key><string>05:00</string>
+</dict>
+<key>StartCalendarInterval</key><dict><key>Hour</key><integer>5</integer><key>Minute</key><integer>0</integer></dict>
+<key>WorkingDirectory</key><string>__HOME__</string>
+<key>StandardOutPath</key><string>__HOME__/.claude/orchestrator/_shared/routing-review/deadline-launchd.out</string>
+<key>StandardErrorPath</key><string>__HOME__/.claude/orchestrator/_shared/routing-review/deadline-launchd.err</string>
+</dict></plist>

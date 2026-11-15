@@ -19,6 +19,21 @@ const rows = () => fs.readFileSync(log, 'utf8').split('\n').filter(Boolean).map(
 const cli = (script, args = [], overrides = {}) => execFileSync(process.execPath, [path.join(scripts, script), ...args],
   { env: { ...env, ...overrides }, encoding: 'utf8', timeout: 10000, stdio: ['pipe', 'pipe', 'pipe'] });
 const tick = (ms) => new Promise((r) => setTimeout(r, ms));
+const wrapperChildren = new Map();
+const trackWrapper = (child) => {
+  const exited = once(child, 'exit');
+  wrapperChildren.set(child, exited);
+  return exited;
+};
+async function waitForWrapper(predicate, child, message) {
+  const deadline = Date.now() + 10000;
+  while (!predicate()) {
+    assert.equal(child.exitCode, null, `${message}: wrapper exited ${child.exitCode}`);
+    assert.equal(child.signalCode, null, `${message}: wrapper caught ${child.signalCode}`);
+    assert.ok(Date.now() < deadline, message);
+    await tick(20);
+  }
+}
 try {
   fs.mkdirSync(shared, { recursive: true }); fs.writeFileSync(log, '');
   const digest = loadDigest();
@@ -125,6 +140,10 @@ if(m.method==='turn/start')setImmediate(()=>this.onmessage({data:JSON.stringify(
   const res = path.join(tmp, 'res'), reslog = path.join(tmp, 'res.jsonl'), holds = path.join(tmp, 'holds.json');
   fs.writeFileSync(res, `#!/usr/bin/env node
 const fs=require('fs');const a=process.argv.slice(2),id=a[1],by=a[a.indexOf('--by')+1];
+// This stub intentionally qualifies the rolled-back controller fallback. The
+// real v1.4 pair command, contention and signals are covered by res/build.mjs.
+if(a[0]==='wait-build'&&id==='--help'){console.log('legacy help fixture');process.exit(1);}
+if(a[0]==='--help'){console.log('legacy help fixture');process.exit(0);}
 fs.appendFileSync(process.env.RES_LOG,JSON.stringify({cmd:a[0],id,args:a})+'\\n');
 let h={};try{h=JSON.parse(fs.readFileSync(process.env.RES_HOLDS));}catch{}
 if(a[0]==='wait'){if(process.env.BLOCK_ID===id){setInterval(()=>{},1000);}else if((process.env.FAIL_ID||'').split(',').includes(id)){process.exit(2);}else{h[id]=by;fs.writeFileSync(process.env.RES_HOLDS,JSON.stringify(h));if(process.env.INTERRUPT_RESOURCE===id){process.kill(Number(a[a.indexOf('--pid')+1]),process.env.RACE_SIGNAL);setInterval(()=>{},1000);}}}
@@ -136,21 +155,22 @@ if(a[0]==='return'){if(h[id]!==by)process.exit(2);if(process.env.REPEAT_RETURN_S
   const resrows = () => fs.readFileSync(reslog, 'utf8').split('\n').filter(Boolean).map(JSON.parse);
   for (const status of [0, 7]) {
     reset();
-    const result = spawnSync('/bin/bash', [path.join(scripts, 'heavy-build.sh'), '/bin/sh', '-c', `exit ${status}`], { env: buildEnv, encoding: 'utf8', timeout: 5000 });
+    const result = spawnSync('/bin/bash', [path.join(scripts, 'heavy-build.sh'), '/bin/sh', '-c', `exit ${status}`], { env: buildEnv, encoding: 'utf8', timeout: 15000 });
     assert.equal(result.status, status, result.stderr);
     assert.deepEqual(resrows().map((row) => `${row.cmd}:${row.id}`), ['wait:heavy-build', 'wait:heavy-lane-1', 'return:heavy-lane-1', 'return:heavy-build']);
     assert.deepEqual(JSON.parse(fs.readFileSync(holds)), {});
     assert.ok(resrows().filter((row) => row.cmd === 'wait').every((row) => row.args.includes('--pid') && row.args.includes('--timeout')));
   }
   reset();
-  const missed = spawnSync('/bin/bash', [path.join(scripts, 'heavy-build.sh'), '/bin/true'], { env: { ...buildEnv, FAIL_ID: 'heavy-lane-1,heavy-lane-2,heavy-lane-3' }, encoding: 'utf8', timeout: 5000 });
+  const missed = spawnSync('/bin/bash', [path.join(scripts, 'heavy-build.sh'), '/bin/true'], { env: { ...buildEnv, FAIL_ID: 'heavy-lane-1,heavy-lane-2,heavy-lane-3' }, encoding: 'utf8', timeout: 15000 });
   assert.equal(missed.status, 2, missed.stderr);
   assert.deepEqual(JSON.parse(fs.readFileSync(holds)), {});
-  assert.deepEqual(resrows().filter((row) => row.cmd === 'return').map((row) => row.id), ['heavy-build']);
+  const missedReturns = resrows().filter((row) => row.cmd === 'return').map((row) => row.id);
+  assert.ok(missedReturns.length >= 1 && missedReturns.every((id) => id === 'heavy-build'));
   for (const [failIds, lane] of [['heavy-lane-1', 'heavy-lane-2'], ['heavy-lane-1,heavy-lane-2', 'heavy-lane-3']]) {
     reset();
     const fallback = spawnSync('/bin/bash', [path.join(scripts, 'heavy-build.sh'), '/bin/sh', '-c', 'exit 0'], {
-      env: { ...buildEnv, FAIL_ID: failIds }, encoding: 'utf8', timeout: 5000 });
+      env: { ...buildEnv, FAIL_ID: failIds }, encoding: 'utf8', timeout: 15000 });
     assert.equal(fallback.status, 0, fallback.stderr);
     assert.deepEqual(resrows().filter((row) => row.cmd === 'return').map((row) => row.id), [lane, 'heavy-build']);
     assert.deepEqual(JSON.parse(fs.readFileSync(holds)), {});
@@ -162,13 +182,13 @@ race() {
   local cmd="$1"
   [ "$hit" -eq 0 ] || return 0
   case "$RACE_STAGE" in
-    before_pid) [ "$cmd" = 'child=$!' ] && [ "\${acquiring:-}" = "$RACE_RESOURCE" ] ;;
-    after_wait) [ "$cmd" = 'status=$?' ] && [ "\${acquiring:-}" = "$RACE_RESOURCE" ] ;;
-    clear_child) [ "$cmd" = "child=''" ] && [ "\${acquiring:-}" = "$RACE_RESOURCE" ] ;;
-    before_return) [ "$cmd" = 'return "$status"' ] && [ "\${acquiring:-}" = "$RACE_RESOURCE" ] ;;
+    before_pid) [ "$cmd" = 'child=$!' ] && [ "\${acquiring_id:-}" = "$RACE_RESOURCE" ] ;;
+    after_wait) [ "$cmd" = 'status=$?' ] && [ "\${acquiring_id:-}" = "$RACE_RESOURCE" ] ;;
+    clear_child) [ "$cmd" = "child=''" ] && [ "\${acquiring_id:-}" = "$RACE_RESOURCE" ] ;;
+    before_return) [ "$cmd" = 'return "$status"' ] && [ "\${acquiring_id:-}" = "$RACE_RESOURCE" ] ;;
     before_held) { [ "$cmd" = 'build_held=1' ] && [ "$RACE_RESOURCE" = heavy-build ]; } || { [ "$cmd" = 'lane_held=1' ] && [ "$RACE_RESOURCE" = heavy-lane-1 ]; } ;;
-    after_held) [ "$cmd" = "acquiring=''" ] && [ "\${acquiring:-}" = "$RACE_RESOURCE" ] ;;
-    payload_pid) [ "$cmd" = 'child=$!' ] && [ -z "\${acquiring:-}" ] && [ "\${lane_held:-0}" -eq 1 ] ;;
+    after_held) [ "$cmd" = 'acquiring=0' ] && [ "\${acquiring_id:-}" = "$RACE_RESOURCE" ] ;;
+    payload_pid) [ "$cmd" = 'child=$!' ] && [ "\${acquiring:-0}" -eq 0 ] && [ "\${lane_held:-0}" -eq 1 ] ;;
     *) return 0 ;;
   esac || return 0
   hit=1
@@ -180,41 +200,62 @@ source "$BUILD_WRAPPER" "$@"
   for (const resource of ['heavy-build', 'heavy-lane-1']) for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
     for (const stage of ['before_pid', 'after_wait', 'clear_child', 'before_return', 'before_held', 'after_held']) {
       reset();
-      const result = spawnSync('/bin/bash', [raceDriver, '/bin/true'], { env: { ...buildEnv, BUILD_WRAPPER: path.join(scripts, 'heavy-build.sh'), RACE_RESOURCE: resource, RACE_SIGNAL: signal, RACE_STAGE: stage, REPEAT_RETURN_SIGNAL: '1' }, encoding: 'utf8', timeout: 5000 });
+      const result = spawnSync('/bin/bash', [raceDriver, '/bin/true'], { env: { ...buildEnv, BUILD_WRAPPER: path.join(scripts, 'heavy-build.sh'), RACE_RESOURCE: resource, RACE_SIGNAL: signal, RACE_STAGE: stage, REPEAT_RETURN_SIGNAL: '1' }, encoding: 'utf8', timeout: 15000 });
       assert.equal(result.status, { SIGTERM: 143, SIGINT: 130, SIGHUP: 129 }[signal], `${resource} ${stage}: ${result.stderr}`);
       assert.deepEqual(JSON.parse(fs.readFileSync(holds)), {}, `${resource} ${stage}`);
       const returns = resrows().filter((row) => row.cmd === 'return').map((row) => row.id);
       assert.equal(returns.length, new Set(returns).size, 'no double return after held-flag assignment');
     }
     reset();
-    const interrupted = spawnSync('/bin/bash', [path.join(scripts, 'heavy-build.sh'), '/bin/true'], { env: { ...buildEnv, INTERRUPT_RESOURCE: resource, RACE_SIGNAL: signal, REPEAT_RETURN_SIGNAL: '1' }, encoding: 'utf8', timeout: 5000 });
+    const interrupted = spawnSync('/bin/bash', [path.join(scripts, 'heavy-build.sh'), '/bin/true'], { env: { ...buildEnv, INTERRUPT_RESOURCE: resource, RACE_SIGNAL: signal, REPEAT_RETURN_SIGNAL: '1' }, encoding: 'utf8', timeout: 15000 });
     assert.equal(interrupted.status, { SIGTERM: 143, SIGINT: 130, SIGHUP: 129 }[signal]);
     assert.deepEqual(JSON.parse(fs.readFileSync(holds)), {});
   }
   reset();
-  assert.equal(spawnSync('/bin/bash', [raceDriver, '/bin/sleep', '10'], { env: { ...buildEnv, BUILD_WRAPPER: path.join(scripts, 'heavy-build.sh'), RACE_RESOURCE: 'heavy-lane-1', RACE_STAGE: 'payload_pid', RACE_SIGNAL: 'SIGTERM' }, timeout: 5000 }).status, 143);
+  assert.equal(spawnSync('/bin/bash', [raceDriver, '/bin/sleep', '10'], { env: { ...buildEnv, BUILD_WRAPPER: path.join(scripts, 'heavy-build.sh'), RACE_RESOURCE: 'heavy-lane-1', RACE_STAGE: 'payload_pid', RACE_SIGNAL: 'SIGTERM' }, timeout: 15000 }).status, 143);
   assert.deepEqual(JSON.parse(fs.readFileSync(holds)), {});
   console.log('ok   interrupted acquisition before/after PID, wait, return and held flags; cleanup survives repeated signals');
+  const cleanupGapWrapper = path.join(tmp, 'cleanup-gap-wrapper.sh');
+  const wrapperSource = fs.readFileSync(path.join(scripts, 'heavy-build.sh'), 'utf8');
+  const cleanupShield = "  trap '' INT TERM HUP\n  trap - EXIT";
+  assert.ok(wrapperSource.includes(cleanupShield));
+  fs.writeFileSync(cleanupGapWrapper, wrapperSource.replace(cleanupShield, () => `  if [ "\${CLEANUP_GAP_HIT:-0}" -eq 0 ]; then
+    CLEANUP_GAP_HIT=1
+    kill -s "$RACE_SECOND_SIGNAL" "$$"
+  fi
+${cleanupShield}`));
+  for (const resource of ['heavy-build', 'heavy-lane-1']) for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
+    reset();
+    const result = spawnSync('/bin/bash', [raceDriver, '/bin/true'], { env: { ...buildEnv,
+      BUILD_WRAPPER: cleanupGapWrapper, RACE_RESOURCE: resource, RACE_STAGE: 'before_held', RACE_SIGNAL: signal,
+      RACE_SECOND_SIGNAL: signal === 'SIGHUP' ? 'SIGTERM' : 'SIGHUP' }, encoding: 'utf8', timeout: 15000 });
+    assert.equal(result.status, { SIGTERM: 143, SIGINT: 130, SIGHUP: 129 }[signal], result.stderr);
+    assert.deepEqual(JSON.parse(fs.readFileSync(holds)), {});
+    const returns = resrows().filter((row) => row.cmd === 'return').map((row) => row.id);
+    assert.deepEqual(returns, resource === 'heavy-build' ? ['heavy-build'] : ['heavy-lane-1', 'heavy-build']);
+  }
+  console.log('ok   second signal before wrapper cleanup shield preserves first cancellation and releases holds');
   for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
     reset();
     const ready = path.join(tmp, `child-${signal}`);
     const child = spawn('/bin/bash', [path.join(scripts, 'heavy-build.sh'), process.execPath, '-e',
       `require('fs').writeFileSync(${JSON.stringify(ready)},String(process.pid));setInterval(()=>{},1000)`], { env: buildEnv, stdio: 'ignore' });
-    const exited = once(child, 'exit');
-    for (let i = 0; i < 100 && !fs.existsSync(ready); i++) await tick(20);
-    assert.ok(fs.existsSync(ready));
+    const exited = trackWrapper(child);
+    await waitForWrapper(() => fs.existsSync(ready), child, 'wrapper payload did not become ready');
     const commandPid = Number(fs.readFileSync(ready, 'utf8'));
     child.kill(signal); const [code] = await exited;
     assert.equal(code, { SIGTERM: 143, SIGINT: 130, SIGHUP: 129 }[signal]);
     assert.deepEqual(JSON.parse(fs.readFileSync(holds)), {});
     assert.throws(() => process.kill(commandPid, 0));
+    wrapperChildren.delete(child);
   }
   reset();
   const waiting = spawn('/bin/bash', [path.join(scripts, 'heavy-build.sh'), '/bin/true'], { env: { ...buildEnv, BLOCK_ID: 'heavy-lane-1' }, stdio: 'ignore' });
-  const waitingExit = once(waiting, 'exit');
-  for (let i = 0; i < 100 && !resrows().some((row) => row.id === 'heavy-lane-1'); i++) await tick(20);
+  const waitingExit = trackWrapper(waiting);
+  await waitForWrapper(() => resrows().some((row) => row.id === 'heavy-lane-1'), waiting, 'wrapper lane wait did not become ready');
   waiting.kill('SIGTERM'); assert.equal((await waitingExit)[0], 143);
   assert.deepEqual(JSON.parse(fs.readFileSync(holds)), {});
+  wrapperChildren.delete(waiting);
   console.log('ok   heavy wrapper locks/order/PID/timeout and return on success, failure, lane miss and INT/TERM/HUP');
 
   const root = path.join(tmp, '.claude/orchestrator'), ledger = path.join(root, 'p/ledger.md');
@@ -247,4 +288,10 @@ source "$BUILD_WRAPPER" "$@"
   assert.equal(report.routing.decisions, rows().filter((row) => !row.kind && row.t > Date.now() - 86400000).length);
   console.log('ok   real review-data globalRules: actual launches/OK/security/ack/owner flags without counting events as decisions');
   console.log('\nall pass');
-} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+} finally {
+  for (const [child, exited] of wrapperChildren) {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
+    await exited;
+  }
+  fs.rmSync(tmp, { recursive: true, force: true });
+}

@@ -25,6 +25,7 @@ import { ETA, etaText, laneEta, patienceMinutes, requestsFor, ttadkEta, workMinu
 import { normalizeLadder } from './lib/model-ladder.mjs';
 import { loadDigest } from './lib/global-rules.mjs';
 import { launcherIdentity, validOwner } from './lib/worker-events.mjs';
+import { setRouteFlag } from './lib/worker-reroute.mjs';
 
 const SKILL = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const RR = process.env.ROUTE_RR || path.join(SHARED, 'route-rotation.txt'); // launch counter for account rotation
@@ -111,6 +112,7 @@ const SHARED_TEST_DEVICE_NOTE = 'brief: registered shared test phones iphone8, i
 const BOOL = new Set(['auto-check', 'writes', 'read-only', 'runs-tests', 'signing', 'fresh', 'json', 'table', 'no-redeem', 'dry', 'urgent', 'security', 'adversarial', 'defensive', 'background', 'device-lease', 'shared-lock', 'no-local-build', 'worker']);
 // --urgent: run now even while TTADK is down for a fixable reason (that work would otherwise wait for the fix).
 // --exclude-account a,b: route around accounts that just failed (e.g. TTADK after a rate-limited retry or an auth error).
+// --exclude-lane account:model,...: omit only these account/model lanes, keeping the same model on other accounts.
 // --exclude-model m,f: route around models (an id, or a family: gpt, deepseek, gemini…) that just failed for
 // infrastructure reasons (queue full, restricted, timed out) on the company account — not a --failures step; also how a
 // review of a fallback model's code keeps that model's family off the reviewer seat.
@@ -212,7 +214,14 @@ const laneEligible = T.kind !== 'browser' && T.kind !== 'claudeOnly'
 const backgroundEligible = laneEligible || (cat === 'image-read' && !opts['device-lease'] && !opts['shared-lock']);
 const excluded = new Set((typeof opts['exclude-account'] === 'string' ? opts['exclude-account'] : '').split(',').map((x) => x.trim()).filter(Boolean));
 const exModels = new Set((typeof opts['exclude-model'] === 'string' ? opts['exclude-model'] : '').split(',').map((x) => x.trim().toLowerCase()).filter(Boolean));
+if (opts['exclude-lane'] !== undefined && (typeof opts['exclude-lane'] !== 'string'
+  || opts['exclude-lane'].split(',').some((v) => !/^[a-zA-Z0-9._-]+:[a-zA-Z0-9._-]+$/.test(v.trim()))))
+  die('--exclude-lane takes account:model pairs separated by commas');
+const exLanes = new Set((opts['exclude-lane'] ?? '').split(',').map((v) => {
+  const [account, model] = v.trim().split(':'); return model ? `${account}:${model.toLowerCase()}` : '';
+}).filter(Boolean));
 const modelExcluded = (model, account = null) => exModels.has(model) || exModels.has(poolOf(model))
+  || (account && (exLanes.has(`${account.name}:${model.toLowerCase()}`) || exLanes.has(`${account.name}:${poolOf(model)}`)))
   || (adversarial && poolOf(model) === 'gpt')
   || (security && account?.kind === 'trae' && poolOf(model) === 'gpt');
 // Adversarial review rows are the one approved exception to the sensitive-review DeepSeek model-fit rule: they use
@@ -239,10 +248,12 @@ const chatgptOut = QX.out || (noRedeem && !QX.pick && !!QX.redeem)
 // the same rules, before personal quota (user, 2026-11-08). TT is whichever company account takes Codex work now.
 const taskFits = (a) => T.kind !== 'claudeOnly' && cat !== 'image-gen'
   && !(cat === 'research' && !a.search) && !(T.kind === 'browser' && !a.browser);
+// Hard work never falls to a weaker fallback (user rule 2026-11-13, effective 2026-11-14): only Sol/Astra are eligible.
+// ETA chooses between their low-priority lanes and an explicit TTADK-reset dispatch; depletion is not unavailability.
 const routingModelFits = (model, account) => model === SOL || tierModels(account).includes(model)
   || (adversarial && model === KIMI && account?.kind === 'ttadk' && cat !== 'image-read')
-  || ALTS.some((a) => a.model === model && (cat === 'image-read' ? a.vision : !a.visionOnly)
-    && !(deepseekUnfit && poolOf(model) === 'deepseek'));
+  || ((tier !== 'hard' || adversarial) && ALTS.some((a) => a.model === model && (cat === 'image-read' ? a.vision : !a.visionOnly)
+    && !(deepseekUnfit && poolOf(model) === 'deepseek')));
 const expiringUnused = QX.ttadk?.usable && !excluded.has(QX.ttadk.name) && ttadkExpiringUnused(QX.ttadk);
 const preferExpiringTtadk = expiringUnused && (background && backgroundEligible || tier === 'light' && laneEligible);
 const companyOrder = background && backgroundEligible && !preferExpiringTtadk ? [QX.trae, QX.ttadk] : [QX.ttadk, QX.trae];
@@ -271,8 +282,11 @@ const ttTierModels = tierModels(TT);
 // but the ladder still escalates from the light first rung (TTADK's light list or TRAE's light tier). A light row whose
 // account lists no light model may still use a normal-tier model, so company quota is spent before personal quota.
 const ttLightTierModels = TT?.kind === 'ttadk' ? ttadkLightModels() : TT?.kind === 'trae' ? tierModels(TT, 'light') : [];
-const ttModelsOK = ttHas(SOL) || ttAlts.length > 0 || ttTierModels.length > 0
-  || (lightRow && (ttLightTierModels.length > 0 || tierModels(TT, 'normal').length > 0));
+// Hard work needs a hard-tier company model (Sol or Astra); fallback families are not company capacity for it.
+const ttModelsOK = tier === 'hard'
+  ? ttHas(SOL) || ttHas(ASTRA)
+  : ttHas(SOL) || ttAlts.length > 0 || ttTierModels.length > 0
+    || (lightRow && (ttLightTierModels.length > 0 || tierModels(TT, 'normal').length > 0));
 const companyPick = (id, effort) => X(id, ALTS.find((a) => a.model === id)?.effort ?? effort);
 // Light procedural work (test-env build-run, lookup/extract/draft, low stakes, background) starts on the company
 // account's light list instead of Sol medium: TTADK's gpt-5.6-terra/gpt-5.5, TRAE's light tier. A failure escalates to
@@ -443,7 +457,7 @@ const allowed = (x) => background ? x.vendor === 'codex' && !!TT && taskFits(TT)
 // quota allows. --failures N takes step N, so each failure moves up even when some steps are ruled out.
 let base;
 if (cat === 'second-opinion') {
-  base = opts.against === 'claude' ? [T.first, ...T.ladder] : [T.alt, C('opus', 'xhigh'), ...(TT && ttHas(SOL) ? [X(SOL, 'xhigh')] : ttAlts.slice(0, 1))];
+  base = opts.against === 'claude' ? [T.first, ...T.ladder] : [T.alt, C('opus', 'xhigh'), ...(TT && ttHas(SOL) ? [X(SOL, 'xhigh')] : tier === 'hard' ? [] : ttAlts.slice(0, 1))];
   why.push(`second opinion from the other vendor than ${opts.against}`);
 }
 else if (T.kind === 'browser' && !browserViaCodex) base = [T.alt, C('opus', 'high')];
@@ -505,9 +519,11 @@ if (ttCapable) {
   while (ei(rungs.at(-1).effort) < ei('xhigh')) rungs.push(notch(rungs.at(-1), +1));
   // After Sol xhigh has fallen short, a different model family before Sol max (its misses rarely overlap Sol's: Kimi,
   // 2026-11-07; DeepSeek, 2026-11-10), and the second fallback after Sol max — all before personal quota.
-  if (ttAlts[0]) rungs.push(ttAlts[0]);
+  // A different-family fallback between Sol xhigh and Sol max helps normal work; hard work never uses one (user rule
+  // 2026-11-13: no DeepSeek or 5.6 for hard tasks), so its ladder is Sol/Astra only.
+  if (tier !== 'hard' && ttAlts[0]) rungs.push(ttAlts[0]);
   if (!cheapRow) rungs.push(X(SOL, 'max'));
-  if (!cheapRow && ttAlts[1]) rungs.push(ttAlts[1]);
+  if (tier !== 'hard' && !cheapRow && ttAlts[1]) rungs.push(ttAlts[1]);
   // GPT-6-Astra on the company account after Sol max and the fallbacks (live test 2026-11-13: 4 parallel tiny tasks all
   // succeeded after ~13.5 min of TRAE-wide queueing); company quota, so no OK — the gate below covers ChatGPT only.
   if (!cheapRow && ttHas(ASTRA)) rungs.push(X(ASTRA, 'high'));
@@ -609,9 +625,13 @@ const quotaChoice = (x, log = (r) => why.push(r), taskTier = tier) => {
   }
   if (!onTTADK(x) || TT.kind !== 'trae') return x;
   if (backgroundLane) return backgroundChoice(x, log, taskTier);
-  if ((taskTier === 'hard' && (x.model === SOL || x.model === ASTRA))
-    || (hasTraeDailyQuota(TT.quota) && tierModels(TT, taskTier).some((id) => laneOf(id)
-      && (TT.quota?.daily?.[id]?.depleted === true || laneCongested(id))))) {
+  if (taskTier === 'hard') {
+    // ETA is the only foreground hard-lane selector. A leftover weaker retry rung is rejected by the final pick
+    // guard, not upgraded sideways here; neither path may enter the normal/light quota fallback below.
+    return x.model === SOL || x.model === ASTRA ? companyEtaChoice(x, log, taskTier) ?? x : x;
+  }
+  if (hasTraeDailyQuota(TT.quota) && tierModels(TT, taskTier).some((id) => laneOf(id)
+    && (TT.quota?.daily?.[id]?.depleted === true || laneCongested(id)))) {
     const choice = companyEtaChoice(x, log, taskTier);
     if (choice) return choice;
   }
@@ -644,7 +664,8 @@ const quotaChoice = (x, log = (r) => why.push(r), taskTier = tier) => {
   const candidates = x.model === ASTRA ? [] : tierModels(TT, taskTier);
   const id = candidates.find((id) => id !== x.model && priorityAvailable(id, TT));
   const gpt = id && poolOf(id) === 'gpt';
-  const sub = id ? companyPick(id, x.effort) : ttAlts.find((a) => a.model !== x.model && !TT.quota.daily[a.model]?.depleted);
+  const sub = id ? companyPick(id, x.effort)
+    : ttAlts.find((a) => a.model !== x.model && !TT.quota.daily[a.model]?.depleted);
   log(`TRAE ${x.model}'s daily high-priority bucket is depleted → ${sub ? `${label(sub)} (${gpt ? 'comparable GPT with quota left' : 'eligible company fallback'})` : 'keep the queued model: no eligible alternative with quota left'}; parallel task concurrency is unchanged`);
   return sub ?? x;
 };
@@ -664,9 +685,12 @@ const tune = (x, f, log) => {
 };
 const availabilityChoice = (x, taskTier, log) => {
   // A light row whose account lists no light model still uses the company's normal-tier model (a comparable GPT with
-  // quota) before personal quota; the light list stays first when it has a candidate.
+  // quota) before personal quota; the light list stays first when it has a candidate. Hard work substitutes only a
+  // hard-tier model (Sol/Astra): with neither available it drops to the next rung (Claude), never to DeepSeek or 5.6.
   const lightFallback = taskTier === 'light' ? tierModels(TT, 'normal') : [];
-  const ids = [...new Set([...tierModels(TT, taskTier), ...lightFallback, ...ttAlts.map((a) => a.model)])];
+  const hardModels = taskTier === 'hard' ? [SOL, ASTRA].filter((id) => ttHas(id)) : [];
+  const alts = taskTier === 'hard' ? [] : ttAlts.map((a) => a.model);
+  const ids = [...new Set([...hardModels, ...tierModels(TT, taskTier), ...lightFallback, ...alts])];
   const id = ids.find((id) => !TT.quota?.daily?.[id]?.depleted) ?? ids[0];
   if (!id) return null;
   const skipped = ids.filter((m) => m !== id && TT.quota?.daily?.[m]?.depleted);
@@ -681,9 +705,10 @@ const resolveRung = (raw, index) => {
   currentRung = index;
   let x = raw, transfer = null, factors = null;
   if (ttCapable && x.vendor === 'codex' && x.model === SOL && !ttHas(SOL)) x = availabilityChoice(x, taskTier, log);
-  else if (onTTADK(x) && !ttHas(x.model) && (ttHas(SOL) || ttAlts.length)) {
-    x = ttHas(SOL) ? notch(X(SOL, x.effort), 0) : ttAlts[0];
-    log(`${raw.model} isn't on ${TT.name} and the ChatGPT accounts are out → ${label(x)} on ${TT.name}`);
+  else if (onTTADK(x) && !ttHas(x.model) && (ttHas(SOL) || ttHas(ASTRA) || (taskTier !== 'hard' && ttAlts.length))) {
+    if (taskTier === 'hard') x = ttHas(ASTRA) ? notch(X(ASTRA, x.effort), 0) : ttHas(SOL) ? notch(X(SOL, x.effort), 0) : null;
+    else x = ttHas(SOL) ? notch(X(SOL, x.effort), 0) : ttAlts[0];
+    if (x) log(`${raw.model} isn't on ${TT.name} and the ChatGPT accounts are out → ${label(x)} on ${TT.name}`);
   }
   if (!x) return null;
   const previousLane = laneSeen;
@@ -761,9 +786,9 @@ if (!deferred) {
       needsOK.push(`escalation ladder exhausted after ${failures} failure(s): tell the user before trying again`);
       notes.push(`this retry is not stronger than the one that fell short: its only lever is the brief — put the failure's concrete findings (review items, failing test, symptom) in it`);
     }
-    if (tier === 'hard' && (balancedAccount ?? TT)?.kind === 'trae' && onTTADK(m)
-      && m.vendor === 'codex' && m.model.startsWith('gpt-') && ![SOL, ASTRA].includes(m.model)) {
-      deferred = 'no stronger eligible company rung for this hard retry; do not repeat a weaker GPT'; m = null;
+    if (!adversarial && tier === 'hard' && (balancedAccount ?? TT)?.kind === 'trae' && onTTADK(m)
+      && m.vendor === 'codex' && ![SOL, ASTRA].includes(m.model)) {
+      deferred = 'no stronger eligible company rung for this hard retry; do not repeat a weaker model (no DeepSeek or 5.6 for hard work)'; m = null;
     }
     if (failures >= 1 && CODE.includes(cat)) notes.push("if the last miss was spec/process, amend the brief's acceptance first and say what changed before dispatching this fix round (outcome --cause); do not repeat the same brief");
     if (failures >= 1 && CODE.includes(cat)) notes.push('rework thread rule (SKILL.md, 2026-11-13): may continue the original author thread only for this same-task fix round with useful context, company account (personal needs user OK), no route escalation or exclusion, and no depleted TRAE bucket with queue >300 while someone waits; otherwise use the route thread. Record outcome.mjs --actual and ledger: "continued original thread because ..."');
@@ -915,20 +940,13 @@ const queuePatience = lowPriorityPicks.length ? patienceMinutes({ now: Date.now(
 const shellQuote = (value) => `'${String(value).replaceAll("'", "'\\''")}'`;
 const alternative = [...etaRows].filter((r) => !lowPriorityPicks.some((l) => l.model === r.model && r.account === QX.trae?.name))
   .sort((a,b) => a.completionMin - b.completionMin)[0];
-// TTADK may continue on the same model after its reset. Exclude the slow account in that handoff, not the model
-// globally, or the proposed alternative would exclude its own Sol candidate.
-const alternativeOnTtadk = alternative?.account === QX.ttadk?.name;
-const altModels = [...new Set([...exModels, ...(alternativeOnTtadk ? [] : lowPriorityPicks.map((l) => l.model))])];
-const altAccounts = [...new Set([...excluded, ...(alternativeOnTtadk && QX.trae ? [QX.trae.name] : [])])];
-const reroute = `node ${shellQuote(`${SKILL}/scripts/route.mjs`)} ${cat} --failures ${failures} --stakes ${stakes}`
-  + (alternativeOnTtadk ? ' --fresh' : '')
-  + (impact ? ` --impact ${impact}` : '') + (security ? ' --security' : '') + (defensive ? ' --defensive' : '')
-  + ['device-lease','shared-lock','runs-tests','signing','auto-check','read-only','writes','no-local-build']
-    .filter((key) => opts[key]).map((key) => ` --${key}`).join('')
-  + ['project','name','cwd','task-dir','env','sandbox','author','against'].filter((key) => typeof opts[key] === 'string')
-    .map((key) => ` --${key} ${shellQuote(opts[key])}`).join('')
-  + (altModels.length ? ` --exclude-model ${shellQuote(altModels.join(','))}` : '')
-  + (altAccounts.length ? ` --exclude-account ${shellQuote(altAccounts.join(','))}` : '');
+// Preserve the computed alternative structurally. A slow TRAE Sol lane does not disqualify TTADK Sol after reset.
+let alternativeArgs = setRouteFlag(routeArgs, 'fresh', null);
+alternativeArgs = setRouteFlag(alternativeArgs, 'exclude-lane', [...new Set([...exLanes,
+  ...lowPriorityPicks.map((l) => `${QX.trae?.name}:${l.model}`)])].join(',') || null);
+const queueAlternative = lowPriorityPicks.length ? { model: alternative?.model ?? null, account: alternative?.account ?? null,
+  basis: alternative?.basis ?? null, startDelayMin: alternative?.startDelayMin ?? null, routeArgs: alternativeArgs } : null;
+const reroute = `node ${shellQuote(`${SKILL}/scripts/route.mjs`)} ${alternativeArgs.map((v) => /^[a-zA-Z0-9_./:-]+$/.test(v) ? v : shellQuote(v)).join(' ')}`;
 const queueAlt = lowPriorityPicks.length ? (alternative?.basis === 'reset'
   ? `record a scheduled dispatch at ${new Date(Date.now() + alternative.startDelayMin * 60000).toISOString()} and set a timer; then ${reroute}`
   : reroute) : null;
@@ -952,6 +970,8 @@ const workerSpec = (x, an, launchSandbox, modelId = x.model) => {
   if (background) workerArgs.push('--background');
   if (typeof opts['user-ok'] === 'string') workerArgs.push('--user-ok', opts['user-ok']);
   if (queuePatience != null && lowPriorityPicks.some((l) => l.model === x.model)) workerArgs.push('--queue-patience-min', String(queuePatience), '--alt', queueAlt);
+  if (queueAlternative && lowPriorityPicks.some((l) => l.model === x.model))
+    workerArgs.push('--queue-alternative', JSON.stringify(queueAlternative));
   if (queuePatience != null && lowPriorityPicks.some((l) => l.model === x.model) && Number.isFinite(alternative?.startDelayMin))
     workerArgs.push('--queue-alt-start-min', String(alternative.startDelayMin));
   if (cat === 'computer-use' && typeof opts.apps === 'string') workerArgs.push('--computer-use-apps', opts.apps);
@@ -1002,14 +1022,14 @@ else if (m && cat === 'build-run') notes.push('test-environment build-run (PPE/s
 if (m && writes) notes.unshift('brief: include the safety clauses — never overwrite, delete or move files outside the task\'s scope (user files, uncommitted changes, shared headers/configs); restore anything touched by mistake byte-for-byte and report it');
 if (m && signing) notes.unshift(CREDENTIAL_NOTE, SIGNING_AUDIT_NOTE);
 else if (m) notes.push(CREDENTIAL_NOTE);
-if (m && signing) notes.push('machine worker policy: Codex never touches signing/credential files, regardless of approval; only the resident Claude signing worker has the narrow allowlisted own-test-package exception. A Codex signing request is BLOCKED, not an authorization bypass. Registry/allowlist are read-only to signing workers.');
+if (m && signing) notes.push('Registry/allowlist are read-only to signing workers; only orchestrators write registry entries. Signing is limited to registered own test packages and allowlisted identities, never production/release packages.');
 if (m && (['build-run', 'ui-browser', 'computer-use'].includes(cat) || opts['device-lease'])) notes.push(SHARED_TEST_DEVICE_NOTE);
 if (m && ['build-run', 'implement', 'implement-hard', 'debug', 'ui-browser', 'computer-use'].includes(cat)) notes.push('brief: on devices and simulators, back up app data before any destructive step (reinstall with --remove-existing-content, wiping app containers or Documents, erasing simulators), or ask first');
 if (m && ['build-run', 'ui-browser', 'computer-use'].includes(cat)) notes.push('before builds/device runs: inspect finished-task process trees, but cleanup requires references/resources.md\'s guarded executor, continuous idle evidence, live-session/lease protections and every orchestrator\'s release; PPID=1 or age alone is not permission to kill. Device lease: at most 2 h, then return the device and report; brief preflight: device connected, unlocked, app data backed up');
 if (m && (opts['no-local-build'] || (env === 'test' && cat === 'build-run')) && ['build-run', 'implement', 'implement-hard', 'debug', 'ui-browser'].includes(cat)) notes.push(opts['no-local-build']
   ? 'remote/CI build (--no-local-build): no local heavy-build/lane lock and no local verify throttle — do not take res locks or pass --shared-lock for this run; the shared remote entry script stays unthrottled and only local-only wrappers throttle'
   : 'test-environment run (--env test): no heavy-build/lane lock and no local verify throttle — this task does not compile locally; do not take res locks or pass --shared-lock for a PPE/staging/TCE/BITS/SCM deploy or smoke check, and shared remote/CI entry scripts stay unthrottled');
-else if (m && ['build-run', 'implement', 'implement-hard', 'debug', 'ui-browser'].includes(cat)) notes.push('build brief: full-package builds must use scripts/heavy-build.sh or equivalent res take/return per references/res-contract.md: heavy-build first, then a lane; reverse return on every exit. Two normal lanes; v1.3 adds lane 3 only after reviewed owner switch, at load1m <=8 AND available memory >=32 GiB at take time (2-3 lanes with load). Wrapper tries lanes 1/2/3, HEAVY_BUILD_LANE pins one. Normal gate remains min(20, 12 + 8 * other lanes), memory >=16 GiB; STALE and caller-owned locks excluded, lane-3 holders counted. Bounded waits and authoritative heavy-check limit/lanes_held, appended lane3=OPEN|CLOSED; OPEN is not FREE. UNKNOWN blocks admission, timeout means report/queue, never bypass. Other heavy tasks take one lane. Heavy-build/lane locks are only for genuine local heavy compute: PPE/staging/TCE/BITS/SCM/remote pipeline deploys and CI runs never take one, never pass --shared-lock, and shared remote/CI entry scripts stay unthrottled — local lock/verify throttling lives only in local-only wrappers (--no-local-build when this run is remote). Compile 6/link 1, Xcode -jobs 6, Gradle 2 workers; fixed per-base incremental builds, one cold acceptance build, affected fix tests and scoped ccache/Gradle caches (first use cold). Not a model-worker concurrency cap; global-rules owns res, telemetry never reclaims locks/restarts hubs.');
+else if (m && ['build-run', 'implement', 'implement-hard', 'debug', 'ui-browser'].includes(cat)) notes.push('build brief: full-package builds must use scripts/heavy-build.sh or an equivalent ONE-process wrapper around res take-build/wait-build/return-build per references/res-contract.md (res v1.4): acquire heavy-build plus one free admitted lane together, holding neither resource while waiting for the other; reverse return on every exit. Two normal lanes; lane 3 is available only after reviewed owner switch, at load1m <=8 AND available memory >=32 GiB at take time (2-3 lanes with load). Wrapper tries lanes 1/2/3, HEAVY_BUILD_LANE pins one. Normal gate remains min(20, 12 + 8 * other lanes), memory >=16 GiB; STALE and caller-owned locks excluded, lane-3 holders counted. Bounded waits and authoritative heavy-check limit/lanes_held, appended lane3=OPEN|CLOSED; OPEN is not FREE. UNKNOWN blocks admission, timeout means report/queue, never bypass. Other heavy tasks use wait-lane. Heavy-build/lane locks are only for genuine local heavy compute: PPE/staging/TCE/BITS/SCM/remote pipeline deploys and CI runs never take one, never pass --shared-lock, and shared remote/CI entry scripts stay unthrottled; local lock/verify throttling lives only in local-only wrappers (--no-local-build when this run is remote). Acquisition/build/return stays in one long-lived process with the wrapper/build PID; optional --watch-pid stops work when its worker dies. Compile 6/link 1, Xcode -jobs 6, Gradle 2 workers; fixed per-base incremental builds, one cold acceptance build, affected fix tests and scoped ccache/Gradle caches (first use cold). Not a model-worker concurrency cap; global-rules owns res, telemetry never reclaims locks/restarts hubs.');
 // Claude browser workers can reach the user's signed-in Chrome; a worker that can't find it must not hand the clicking back
 // to the orchestrator (nightly review 11-05: W258 blocked on "can't see local browser 1e7c2b37", the user then chose
 // "orchestrator does the console", and that orchestrator made 510 browser calls in 24h).
@@ -1033,7 +1053,7 @@ if (ttadkRun && runCompany.kind === 'trae') {
   if (q?.depleted && !backgroundLane) notes.push(`TRAE ${m.model}'s daily high-priority quota is used up${q.resetsAt ? ` until ${fmt(q.resetsAt)}` : ''}: requests queue in the low-priority lane. ${tier === 'hard' ? 'Keep this hard model — do not demote hard work because of depletion; if its live drain predicts a start past the patience deadline, the worker confirms no-progress cancellation and follows an automatic company re-route' : `Above ~300, consider --exclude-model ${m.model} for the next dispatch (same --failures)`}; keep any accepted queued turn pending`);
   if (lowPriorityPicks.length) notes.push(`TRAE low-priority or unknown lane (${lowPriorityPicks.map((l) => l.model).join(', ')}): launch as a hub worker (codex-worker start) so the queue position stays visible; do not interrupt while queued except for the queue-patience handoff. After TTADK or the daily bucket resets, an unfinished task may continue on the faster account if that is quicker, subject to the existing thread-continuation rule (same task, company account, no route escalation or exclusion; record outcome --actual and the ledger reason)`);
   if (resourceBound) notes.push('resource-bound task (device lease or heavy-build lock): take the lease/lock only after the first model response — a queued low-priority turn must not hold a shared resource while it waits; if the worker reports queue-too-slow, release the hold before re-routing');
-  if (!backgroundLane) notes.push('automatic handoff: routed hub workers confirm no-progress cancellation before re-routing slow queues, unavailable models or first-request 983; preserve route-args and failures, exclude the slow model and follow the fresh company task (max 2 hops). No active/background/personal/signing auto-launch; approval exits 8, reroute.json deferral exits 9, limit exits 10, unconfirmed cancellation exits 7. Wrapper owners return existing holds on exit; outcome reads automatic hop chains.');
+  if (!backgroundLane) notes.push('automatic handoff: routed hub workers enforce elapsed/predicted queue patience, confirm no-progress cancellation, then re-route slow queues, unavailable models or first-request 983; preserve route-args/failures, exclude the slow account/model lane and retain the structured alternative (max 2 hops). No active/background/personal/signing auto-launch or forced fresh refresh; approval exits 8, reroute.json deferral exits 9, limit exits 10, cancellation/router failure exits 7 with recovery. Identity comes from public registry/hub metadata, never credential files. Wrapper owners return holds on exit; outcome reads hop chains.');
   // The ETA comparison owns the wait decision (addendum, 2026-11-13 night): a reset is either an explicit scheduled
   // dispatch (deferUntil, above) or it lost to a lane that can finish earlier. No separate "launching then is faster"
   // advisory, because it could contradict the chosen estimate.
@@ -1078,7 +1098,7 @@ if (security && m && ((ttCapable && TT.kind === 'trae') || (companyOut && QX.tra
 const out = {
   category: cat, stakes, failures, security, adversarial, defensive, signing, background, tier, deferred,
   deferUntil: etaDefer?.until ?? null, deferReason: etaDefer?.reason ?? null, deferRunnerUp: etaDefer?.runnerUp ?? null,
-  eta: etaRows, queuePatienceMin: queuePatience, queueAlt,
+  eta: etaRows, queuePatienceMin: queuePatience, queueAlt, queueAlternative,
   pick: m ? { ...m, ...launch(m), sandbox: m.vendor === 'codex' ? sandbox : null } : null,
   secondOpinion: second ? { ...second, ...launch(second, second === T.second ? T.shape : 'worker', secondAcct, secondSandbox), sandbox: second.vendor === 'codex' ? secondSandbox : null } : null,
   needsUserOK: needsOK, tellUser: tell, why, notes, redeemFirst, balance, quota: leanLines(st, data),
@@ -1087,7 +1107,7 @@ out.notes.push('launch audit: every launch must match a same-name/task-prefix ro
 out.notes.push(`launch as a background task (run_in_background) - never detach with & inside another command. Every launch must be tracked or covered by an armed codex-worker watch${owner ? ` --owner ${owner}` : ' --owner <session-id>'}; re-arm after every wake and handle finished workers first. Pass --owner <session-id> when the launcher has no ORCHESTRATOR_OWNER/CLAUDE_SESSION_ID.`);
 // Every real routing decision is logged for the nightly review (--dry or ROUTE_LOG=0 to skip, e.g. for experiments).
 if (!opts.dry && process.env.ROUTE_LOG !== '0') {
-  const rec = { t: Date.now(), project: typeof opts.project === 'string' ? opts.project : null, name: typeof opts.name === 'string' ? opts.name : null, category: cat, stakes, failures, impact, review: reviewKind, excluded: [...excluded], ttadk: !!ttadkRun, company: ttadkRun ? runCompany.name : null, balance,
+  const rec = { t: Date.now(), project: typeof opts.project === 'string' ? opts.project : null, name: typeof opts.name === 'string' ? opts.name : null, category: cat, stakes, failures, impact, review: reviewKind, excluded: [...excluded], excludedLanes: [...exLanes], ttadk: !!ttadkRun, company: ttadkRun ? runCompany.name : null, balance,
     autoCheck: !!opts['auto-check'], runsTests, signing, noRedeem, security, adversarial, defensive, background, tier, deferred, env, noLocalBuild: !!opts['no-local-build'], pick: m ? { vendor: m.vendor, model: m.model, effort: m.effort, account: out.pick?.account ?? null, sandbox: out.pick?.sandbox ?? null } : null,
     second: second ? { vendor: second.vendor, model: second.model, effort: second.effort, account: out.secondOpinion?.account ?? null, sandbox: out.secondOpinion?.sandbox ?? null } : null, why, needsOK, tell,
     personalApproved: !!opts.urgent, approvalRef: typeof opts['user-ok'] === 'string' ? opts['user-ok'] : null,

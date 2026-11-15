@@ -71,13 +71,13 @@ override dependencies/quota/leases or authorize new work. Keep ready/dispatched 
 User, 2026-11-13: the routing/global-rules orchestrator owns global policy here (「都交给他来负责，让他统一管理」); the secretary only relays, keeps ledgers and asks decision cards, never owns or changes policy.
 The versioned [global-rules digest](references/global-rules.md) is the single injection source. Read it at startup/resume/compact and after a change; write `rules-ack <version>` in your ledger. See [four-layer enforcement and opt-in hook/launchd installation](references/rules-enforcement.md).
 
-- **Resources:** [machine resources](references/resources.md) supplies five-minute sampling, nightly retro/guarded cleanup and detection of builds without holders; [shared `res`](#shared-resources), the [maintained lock contract](references/res-contract.md) and [build/cache discipline](#build-discipline) require the wrapper or explicit take/return, build-then-lane order, finite waits/gates, reverse release, incremental/cold acceptance builds and scoped ccache/Gradle caches (first cache use cold). Global-rules owns the whole tool since 2026-11-13; v1.3 lane 3 is pending its reviewed switch.
+- **Resources:** [machine resources](references/resources.md) supplies five-minute sampling, nightly retro/guarded cleanup and detection of builds without holders; [shared `res`](#shared-resources), the [maintained lock contract](references/res-contract.md) and [build/cache discipline](#build-discipline) require the wrapper or explicit take/return, atomic build-pair acquisition, finite waits/gates, reverse release, incremental/cold acceptance builds and scoped ccache/Gradle caches (first cache use cold). Global-rules owns the whole tool since 2026-11-13; v1.3 lane 3 is pending its reviewed switch.
 - **Disk:** [workspace retention](#workspace-retention) sets no worker space caps; auto-clean self-made build clones/templates/caches only when the data disk has <1 TB free; real workspaces/user data require a user card.
 - **Claude settings:** [documented settings](#claude-worker-settings) record `CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP=1`; idle-stop has no switch (pin or keep working), with no settings mutation.
 - **Worker permissions:** Codex-family writing workers default to full access; reviewers stay read-only unless `--runs-tests` gives them workspace-write, and `--sandbox workspace-write|read-only` is the per-task narrower override. [Claude launch](#claude-worker-settings) always uses Remote Control + explicit Bypass. [Permissions](#permission-plan) use cards for what those modes cannot pass; login secrets remain user-only, while a registered `--signing` run may pass its designated signing input only through stdin/file descriptors.
 - **TRAE:** [account rules](references/codex-workers.md#trae-cli-as-the-second-company-account-user-2026-11-08) separate restrictions from concurrency/quota, never reduce concurrency for queues, enforce only QPM/TPM limits for LLM use (no total-cost caps), and name the concrete worker model in reports.
 - **Work and quota:** [judgment](#judge-not-labour) stays with orchestrators, [independent tasks](#split-by-coupling) run in parallel while coupled work stays together; [quota](#route-every-task) never silently holds work, uses company quota without asking, personal quota after asking, reset cards only after a fresh OK every time.
-- **Signing/credentials:** [worker safety](#worker-credential-safety) forbids login material and login bypasses for every worker. Machine policy forbids every Codex worker from signing/credential files, regardless of approval; only the resident Claude signing worker has the narrow allowlisted own-test-package exception, with secret-safe input, receipts and keychain re-locking. Everything else is BLOCKED.
+- **Signing/credentials:** [worker safety](#worker-credential-safety) forbids login material and login bypasses for every worker. Signing is limited to registry-listed own test packages with user-allowlisted identities, secret-safe input, receipts and keychain re-locking. Workers treat the registry and allowlist as read-only; everything outside that scope is BLOCKED.
 - **Orchestrator models:** [account/model health](references/nightly-review.md#account-and-model-health) records persistent `jobs/<id>/state.json` `respawnFlags`, VAK/routing on Fable, Webview/Lynx on Opus since 2026-11-11, and a user check on/after 2026-11-17 09:00 PST.
 - **Account reminders:** [nightly health](references/nightly-review.md#account-and-model-health) owns cards for company logins expiring within three days, TTADK SSO (2026-11-21 19:37 PST), TRAE login, Codex reset cards and Claude/Fable weekly projections; [`POLICY`](scripts/lib/state.mjs) supplies the 72-hour TTADK warning to `quota.mjs`.
 - **Rollout:** [policy notification](#global-rule-rollout) sends each change to all orchestrators: via the secretary for the mini group, directly to MacBook orchestrators.
@@ -199,11 +199,15 @@ Every code brief includes this short **Acceptance** block:
 - **Open questions:** resolved answers, or explicitly marked NOT-READY with an owner; resolve blockers before dispatch.
 
 Every **build brief** also includes (user, 2026-11-13): "Full-package builds use `scripts/heavy-build.sh <command...>`
-with holder/project/task/timeout set, or explicit equivalent `res` take/return. Build tasks must take/return required resources via
+with holder/project/task/timeout set, or an equivalent ONE-process wrapper around `res take-build`/`wait-build` and
+`return-build`. Acquire the slot and a free admitted lane together, holding neither while waiting for the other;
+other local heavy tasks use `wait-lane`. Build tasks must take/return required resources via
 `~/.claude/orchestrator/_shared/res`, following [build discipline](#build-discipline). Classify this run as full-package,
-other heavy or not heavy; name its lock IDs, exact take/wait/return commands, finite `--timeout <minutes>` and
+other heavy or not heavy; name its lock IDs, exact acquisition/return commands, finite `--timeout <minutes>` and
 long-lived wrapper `--pid $$`. Install `trap EXIT` cleanup before acquisition, release only acquired holds in reverse
-order on every exit (including a lane-acquisition timeout), and report/queue on timeout; never bypass the locks/gate."
+order on every exit (including an acquisition timeout), and report/queue on timeout; never bypass the locks/gate.
+Heavy locks are only for local heavy compute, never remote deploys or CI. Keep acquisition/build/return in that
+long-lived process; use `--watch-pid` when the wrapper must stop if its worker dies."
 Non-heavy builds need no heavy-* lock, but still follow applicable shared checkout/cache holds. Put approved build
 parallelism, the fixed per-base build directory, incremental/focused checks and cold acceptance build in the brief.
 
@@ -256,9 +260,8 @@ login; the user had to sign in again; the second is the user's 2026-11-13 test-s
   One-shot `codex exec` / `traecli exec` launches must carry both clauses in developer instructions too.
 - **Test signing route** (user, 2026-11-13): pass `--signing`; it forces full access and makes the scoped rule the first
   route note. The brief names the registered manifest/hash and designated identity. Afterwards scan worker logs only,
-  mask any hits, and verify the receipt and keychain re-locking. Full access is not a credential authorization bypass:
-  Codex workers never touch signing/credential files regardless of approval. Only the resident Claude
-  `vesdk-signer` worker has the machine-policy exception; its allowlist and package registry remain read-only.
+  mask any hits, and verify the receipt and keychain re-locking. Routed full-access workers may sign only within
+  the registered own-test-package scope when their brief says so. The allowlist and package registry remain read-only.
 
 **Prevent rework at the brief** (rework retro of 2026-11-06–10, 89 rework chains; user-approved 2026-11-10). Most
 rework came from unchecked premises, "done" proven on the wrong target, one shared rule re-implemented by several
@@ -533,12 +536,14 @@ effort, Codex account and launch command from
     work; never wait while a same-tier company lane can finish earlier, and never hold a queued low-priority turn
     past its `queue-too-slow` deadline.
     Routed workers perform the handoff themselves: verify no work, confirm cancellation, re-route with the
-    original category/flags/exclusions and same failures, exclude the slow model, and follow a fresh company
+    original category/flags/exclusions and same failures, exclude the slow account/model lane, and follow a fresh company
     hub worker with a continuation header. Maximum two automatic hops; no active or background handoff and
     no personal quota/signing auto-launch. Exit 8 (`reroute-needs-user`) asks for approval; exit 9 persists
     `reroute.json`/`deferUntil` for the orchestrator's timer; exit 10 reports the hop limit. Cancellation failures
     exit 7 within three seconds with `queue-cancel-unconfirmed`, without launching a duplicate. Existing
-    wrapper holds must be returned by their owner on exit. Outcome reads hop records without manual `--actual`;
+    wrapper holds must be returned by their owner on exit. Flat queues also expire by elapsed patience. Router
+    failures exit 7 with a `reroute.json` recovery command/continuation prompt; reroutes never force `--fresh`,
+    and account identity comes from public registry/hub metadata, never login files. Outcome reads hop records without manual `--actual`;
     nightly review measures automatic waits and faster/slower/unknown starts. See references/codex-workers.md.
   - TTADK is not unlimited (measured 2026-11-08): about 500M tokens a day per user, input + output with
     cached input counted in full, shared by all models (plus an hourly cap); it resets at 16:00 UTC.
@@ -657,22 +662,34 @@ and take-time notes at `~/.claude/orchestrator/_shared/notes/heavy-build.md`. Us
   macOS available memory
   is `kern.memorystatus_level / 100 * physical memory` (fallback/Linux details in the contract), not swap/page diagnostics.
 - **Build entry:** full-package briefs require [heavy-build.sh](scripts/heavy-build.sh) or explicit equivalent
-  `res` take/return; other heavy tasks use the lane-only protocol. The wrapper never installs tools or bypasses a
+  `take-build`/`wait-build` inside a wrapper; other heavy tasks use `wait-lane`. The wrapper never installs tools or bypasses a
   gate, preserves the command's exit status and terminates owned child groups before returning holds. Don't nest
   it or reuse an already-held heavy lock. The resource sampler independently detects builds without holders.
   By default it tries lanes 1, 2, then 3 and retries within the finite timeout; `HEAVY_BUILD_LANE` can pin 1/2/3.
   If optional lane 3 is unknown on a legacy installation, unpinned callers continue bounded waits on lanes 1/2;
   other errors still stop the wrapper. The owner installer publishes code plus the backed-up registry row under quiescence.
-- **Order and bounded waiting:** full-package runs take `heavy-build` first, then one lane; never hold a lane while
-  waiting for `heavy-build`. Use `res wait <id>` with the same holder/project/purpose/task/PID flags and always
+- **Order and bounded waiting:** full-package runs use `res take-build` or `res wait-build` for the slot plus any
+  free admitted lane together; never hold either while waiting for the other. Use `res wait-build` or `res wait-lane`
+  with the same holder/project/purpose/task/PID flags and always
   `--timeout <minutes>`; it backs off and enforces the heavy-* gate (0 taken, 2 timeout). Run waits in the background
   worker/wrapper, not the orchestrator's foreground. Timeout means report/queue, never bypass; prolonged overload
   goes to the user with readings to decide thresholds, never automatic threshold changes.
+- **One process and worker liveness:** workers never take/wait for heavy locks in a standalone tool call. Each call
+  has a fresh shell: its `$$` dies after that call, even if a later build is alive. Acquisition, build and return happen
+  in ONE long-lived process, via `scripts/heavy-build.sh <command...>` or a wrapper, or `--pid` names the long-lived
+  build process itself. Wrappers must exit when their worker dies: exit/signal traps plus parent watch. The build
+  wrapper’s optional `--watch-pid <pid>` terminates its owned command and releases holds when that worker disappears.
 - **Return and stale holds:** use the long-lived wrapper's `--pid $$` (default is caller PID, not `res` PID).
   Install `trap EXIT` before acquiring and `res return <id> --by <session>` only for acquired holds, in reverse order,
   on every exit, including failure to acquire the lane. `res status` shows PID/host/start and marks a local dead-PID
-  hold STALE; `res wait` reclaims STALE heavy-* holds older than 10 minutes and logs in `log.tsv`. Other confirmed
+  hold STALE; short-lived PID warnings display `STALE?(short-lived pid)` and the wrapper fix. Plain take stays fast;
+  fresh explicit-PID waits/build takes check once after 2 seconds. `res wait`/`wait-build`/`wait-lane` reclaim STALE
+  heavy-* holds older than 10 minutes and log in `log.tsv`. Other confirmed
   stale releases require `res return <id> --by <session> --force --note "<reason>"`; never force an active/unverified hold.
+- **Same-task takeover:** after a predecessor dies (including quota exhaustion), verify its project/task ID and
+  local dead PID, return its STALE lane then slot with the predecessor’s holder name (or coordinated force/note),
+  then re-take with the successor’s unique holder and long-lived PID. Never adopt the old PID/start metadata; a
+  matching task alone does not authorize return of an active/unverified hold.
 - **Approved build discipline:** compile **6**, link **1**, Xcode **`-jobs 6`**, Gradle **2 workers**. Build incrementally
   in a fixed per-base directory, with **one cold build before acceptance**; don't run a native build when native code
   didn't change. Fix rounds use affected tests only.

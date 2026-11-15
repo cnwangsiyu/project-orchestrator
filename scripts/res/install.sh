@@ -37,7 +37,7 @@ quiescent() {
   processes=$(ps -axo pid=,args=) || { echo 'BLOCKED: cannot inspect res waiters' >&2; return 2; }
   waiters=$(printf '%s\n' "$processes" | awk '
     { gsub(/["\047]/, "")
-      for (i=2; i<NF; i++) if ($i ~ /(^|\/)res$/ && $(i+1) == "wait") {print $1; break} }')
+      for (i=2; i<NF; i++) if ($i ~ /(^|\/)res$/ && $(i+1) ~ /^(wait|wait-build|wait-lane)$/) {print $1; break} }')
   if [ -n "$waiters" ] && [ "$force" -ne 1 ]; then
     echo 'BLOCKED: res wait is running; ask its owner to re-invoke it after the switch (or use --force)' >&2
     return 2

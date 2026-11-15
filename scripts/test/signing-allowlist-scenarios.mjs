@@ -15,9 +15,9 @@ for (const file of ['SKILL.md', 'references/global-rules.md', 'references/codex-
   assert.ok(/[Ww]orker.*new entr.*BLOCKED/s.test(text), `${file}: new entry blocked`);
 }
 const digest = loadDigest();
-assert.equal(digest.version, '2026-11-13.14', 'the follow-ups do not bump the version');
+assert.equal(digest.version, '2026-11-14.2', 'signing scope survives the single combined integration bump');
 for (const section of [digest.worker, digest.text.split('## Orchestrator Rules')[1].split('## Worker Rules')[0]]) {
   for (const text of ['identities.json', 'registry.json', 'DH59R4RNRY', '3JVMQQBHUR', 'read-only', 'BLOCKED']) assert.ok(section.includes(text));
 }
 assert.match(digest.text, /Signing allowlist \(2026-11-14\)/);
-console.log('PASS signing allowlist: approved identity/device/profile scope, dated approval, owner-only registry, worker read-only, audit and unchanged digest version');
+console.log('PASS signing allowlist: approved identity/device/profile scope, dated approval, owner-only registry, worker read-only, audit and combined integration version');

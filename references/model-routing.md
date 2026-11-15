@@ -287,8 +287,9 @@ the nightly review compares dispatch reasons and recorded wall-clock time, inclu
     | Light | `lookup`, `extract`, `draft`; or low stakes; or `--background`, unless a hard rule applies | GPT-5.6-Terra → GPT-5.5 → DeepSeek-V4.1-Flash |
 
     Light work on TRAE prefers bucket-free models even with Sol quota left. Normal/light substitution never uses Astra;
-    hard substitution never uses 5.6-Sol, 5.6-Terra or 5.5. A failed CODE task's GPT substitution uses the hard tier,
-    never a weaker GPT. Tier candidates are **availability substitutions for the current attempt, not retry rungs**:
+    hard substitution never uses 5.6-Sol, 5.6-Terra, 5.5, DeepSeek, Gemini or Seed — only Sol/Astra, otherwise the
+    rung drops to personal Claude behind the gate. A failed CODE task's GPT substitution uses the hard tier, never a
+    weaker GPT. Tier candidates are **availability substitutions for the current attempt, not retry rungs**:
     pick the first usable candidate, then increase its effort before existing stronger quality steps. A ladder's
     initial attempt uses its original tier; later CODE rungs use hard, so `--failures` cannot reinterpret earlier picks.
     Company model/account eligibility always uses the current tier after failures/stakes; an initial normal/light
@@ -328,11 +329,14 @@ the nightly review compares dispatch reasons and recorded wall-clock time, inclu
       M = `min(30 min, 25% of the time until the faster account resets)`. From the live queue drain the worker predicts
       the start; if predicted start plus elapsed wait exceeds the earlier deadline/alternative, it checks for work,
       confirms the queued turn is interrupted without progress, and re-routes itself with the same flags/failures,
-      the slow model excluded and depth N+1. It follows a fresh company hub worker with the same brief and a
+      the slow account/model lane excluded (`--exclude-lane`) and depth N+1. A structured `--queue-alternative`
+      keeps the same model on another account eligible. It follows a fresh company hub worker with the same brief and a
       continuation header. Maximum two automatic hops; no active/background/personal/signing auto-launch.
       Approval exits 8; deferral persists `reroute.json`/`deferUntil` and exits 9 for the orchestrator's timer; limit
       exits 10. Unconfirmed cancellation exits 7 within three seconds, with no replacement. Legacy launches without
-      route args retain exit 7. Unknown drain keeps waiting. Outcome derives automatic actual chains from hop records;
+      route args retain exit 7. Flat/unknown queues expire by elapsed patience using an independent alarm. Router
+      failures also exit 7 with persisted recovery argv/prompt; automatic reroutes remove `--fresh`, and identity
+      comes only from public registry/hub metadata. Outcome derives automatic actual chains from hop records;
       nightly reports waits and observed faster/slower/unknown starts. See references/codex-workers.md.
     - A task holding a device lease or heavy-build lock must not wait in a queue while holding it: route.mjs prefers a
       candidate that can start now, never schedules a wait, and the note says to take the lease/lock only after the
@@ -412,11 +416,12 @@ the nightly review compares dispatch reasons and recorded wall-clock time, inclu
       them as `image-read`; audio and video have no TRAE model and stay on Claude/ChatGPT. Both DeepSeek models said they
       can't see images (2026-11-10). A DeepSeek pick prints a note: a task that depends on screenshots is re-routed with
       `--exclude-model deepseek`.
-    - **GPT up, Sol falls short**: Sol at the row's effort → … → Sol xhigh → DeepSeek-V4.1-Flash (a different family:
-      its misses rarely overlap Sol's) → Sol max → GPT-6-Astra high on the company account (no OK:
-      company quota; live test 2026-11-13) → the row's Claude steps. The cheap rows (lookup, extract, draft, browser,
-      computer-use) skip Sol max, the second fallback and Astra in the quality ladder; only hard-tier or vision
-      substitution can choose Astra before dispatch. All fallback steps respect the model-fit exclusions above.
+    - **GPT up, Sol falls short**: normal work goes Sol at the row's effort → … → Sol xhigh → DeepSeek-V4.1-Flash (a
+      different family: its misses rarely overlap Sol's) → Sol max → GPT-6-Astra high on the company account (no OK:
+      company quota; live test 2026-11-13) → the row's Claude steps. Hard work skips the fallback family: Sol notches
+      → Sol max → Astra high → the row's Claude steps behind the personal-quota gate. The cheap rows (lookup, extract,
+      draft, browser, computer-use) skip Sol max, the second fallback and Astra in the quality ladder; only hard-tier
+      or vision substitution can choose Astra before dispatch. All fallback steps respect the model-fit exclusions above.
     - **Quality guard**: service code a fallback model wrote gets the routine review (normally only release code or high
       stakes do), and every review of fallback-written code runs with `--exclude-model <its family>`, so a different
       family reviews it. A second free reviewer on TRAE (no Kimi there) is a fallback model of another family, not a
@@ -455,8 +460,8 @@ the nightly review compares dispatch reasons and recorded wall-clock time, inclu
       failure still climbs to `xhigh` and `max`. Release and service work keep their effort;
     - after a failure Sol climbs every notch to `xhigh`, then `max` (no OK needed on TTADK; lookup, extract, draft
       and browser stop at `xhigh`), then the company fallback models and GPT-6-Astra high on TRAE (company quota, no OK),
-      before the row's personal-quota steps: e.g. implement-hard Sol xhigh → DeepSeek-V4.1-Flash → Sol max →
-      Astra high on TRAE → Opus xhigh; science Sol xhigh → Sol max → Astra high on TRAE →
+      before the row's personal-quota steps. Hard work has no fallback-family rung: e.g. implement-hard Sol xhigh →
+      Sol max → Astra high on TRAE → Opus xhigh; science Sol xhigh → Sol max → Astra high on TRAE →
       Astra (ChatGPT, needs an OK; dropped when ChatGPT is out);
     - a routine review of Codex-written code runs on TTADK (`review --author codex`): a fresh Sol xhigh reviewer plus
       a second free one with a different focus (failure paths, concurrency, edge cases, tests). High-stakes review

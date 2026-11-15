@@ -13,22 +13,51 @@ as missing evidence, not zero delay; delivery acknowledgement is not result acce
 
 The review follows the routing policy like any other task (user, 2026-11-09): the launcher gathers the data, routes
 the review with `route.mjs analysis --stakes high` (logged as project `routing`, name `routing-nightly-review-<date>`),
-and runs it as a one-shot **worker** on the account the route picks — TTADK first, then TRAE CLI. A worker that fails
-or leaves no report is re-routed without its account (up to three tries). A short **Claude finisher** (`route.mjs
-claude-tools`) checks the result and does what only Claude can. When the route lands on personal quota (a ChatGPT
-account, or a whole Claude review), a short Claude session first asks the user with a Chinese card — run now on
-personal quota, or skip tonight — and re-runs the launcher after a yes; a whole Claude review does both parts below.
+and runs it through **codex-worker's hub** on the account the route picks, with queue/status, the non-terminating stall
+alarm and normal failure re-routing. There is **no fixed review timeout** (user, 2026-11-14). A stalled/disconnected
+follower checks the accepted turn and reattaches with `wait`; an unknown acceptance/turn state is BLOCKED, never a
+duplicate launch. While a follower is attached, independent hub status probes verify that its turn is still active.
+An `inProgress` turn can continue indefinitely; a `completed` turn is never labelled working, and result recovery is
+limited to three retries, then report/failed with worker/done and a failure notification. Only local observation/follower
+clients may be closed on a failed/unknown probe; no hub turn or real Claude session is interrupted by these budgets.
+A real failure or missing report is re-routed, up to three attempts: an infrastructure miss excludes
+that **model**, not the account; login/auth or account-wide quota/proxy failure excludes the account. TTADK rate limits
+retry once before account exclusion. The hub records provider failures with their concrete model, without a second
+blanket account failure record. Policy blocks stop for explicit adversarial routing, never an automatic GPT retry.
+A short **Claude finisher** (`route.mjs claude-tools`) checks the result and does what only Claude can. A personal-quota
+or other user-approval gate leaves a durable BLOCKED status, exits nonzero and is included in the deadline notification.
+The launcher does **not** open automatic personal-quota ask sessions. Only after the user's explicit OK may the owner
+rerun with `NIGHTLY_PERSONAL_OK=1`; an approved whole Claude review does both parts below.
 `NIGHTLY_MODE=plan scripts/nightly-review.sh` prints the decisions without running anything.
+
+The day's run directory is `<date>.run/`. Its atomic `status.json` records `stage` (gather/review/report/notify/finish),
+`state` (running/done/failed/blocked), `t`, `attempt`, worker thread/turn/account/model/effort/state and a short Chinese
+progress note. Each attempt has its own `attempt-N/` with status/history, route decision, data (or a reference to the
+first attempt's evidence), worker log/final output, `report.md`, `notify.json` and notification receipt. Retries and
+same-day reruns never overwrite prior attempts; pre-migration day-level evidence is copied to `attempt-1/legacy/`.
+Validated outputs are published to `<date>.md` and `<date>.notify.json` for existing consumers. A previous day's
+worker/session is not stopped just because the calendar changed. After a launcher interruption, a known accepted hub
+thread is reattached. The finisher's `finisher.json` (whole Claude review: `worker-session.json`) persists its launch name,
+session/job id, model/effort and observed liveness. `claude agents --json` verifies the exact session's active state or
+PID while waiting for a receipt. A dead/missing session records failed; unknown/blocked status records BLOCKED after
+three probes, releases the day lock and notifies. A still-working session is not killed because of elapsed time.
+Confirmed dead finishers can be retried in a new attempt without rerunning review/fixes; uncertain sessions are never
+duplicated. Failed/blocked runs also write/send an attempt-local `failure-status.json`, even if 05:00 was already notified.
+A dead failure-notification session is itself recorded as failed, never an infinite fallback loop.
 
 - **The worker** (the routed Codex model, e.g. `gpt-6.1-sol` xhigh on TTADK or TRAE; full access, network on):
   steps 1, 2, 3 and 5.
-  - The launcher has already run `review-data` (24h, 168h) and `orch-usage` into `<date>.data/`; read those files
+  - The launcher has already run `review-data` (24h, 168h) and `orch-usage` into the attempt's `data/`; read those files
     instead of running the scripts. It also gathered `resource-review-24h.txt/.json`, `resource-review-96h.json` and a
     read-only `resource-now.json`; resource failures/coverage gaps are UNKNOWN, not empty or healthy.
   - Model news: use web search and fetch the official pages yourself (the same pages and limits as in step 1).
   - Step 3 as written: worktree, edits, `route-scenarios.mjs` must print `all pass` before any commit, push, fast-forward,
     `--save-catalog`. Edit only the files step 3 names; anything else goes to proposals.
-  - Don't message anyone (Codex can't reach the sessions). Instead write `<date>.notify.json`:
+  - **Delivery first:** write the report draft and `notify.json` before optional deep dives. Commit/push fixes only
+    after the report draft exists. Keep the files current; report progress with the launcher's supplied `progress`
+    command after useful milestones, switching to `report` when drafting. Use the attempt paths in the brief, not
+    the compatibility day-level paths; the launcher publishes them after a completed turn.
+  - Don't message anyone (Codex can't reach the sessions). Instead write the attempt's `notify.json`:
     `{"changed": bool, "commits": ["<sha> <subject>", …], "remotePull": bool, "message": "<the step-4 message>",
     "actions": [{"orchestrator": "<ledger Orchestrator session name>", "text": "<what it has to act on>"}],
     "proposals": bool, "decisions": [<decision>, …]}`. Write it even when nothing changed (`"changed": false`).
@@ -41,11 +70,20 @@ personal quota, or skip tonight — and re-runs the launcher after a yes; a whol
 - **The finisher** (Claude Sonnet medium, bypass): only the checks and step 4.
   1. Read the report and `notify.json`. Check that each listed commit is on `origin/main` in both repos and that the
      live checkouts are at it; run `node scripts/test/route-scenarios.mjs` once.
+     The brief's attempt paths override the day-level paths below: keep report edits and `decisions.json` inside that
+     attempt, so a waiting card cannot modify a later rerun's report. The launcher publishes the report at delivery;
+     later user answers remain durably in the originating attempt.
   2. Read tonight's diff (`git show` of the listed commits) against the hard rules above. If a commit breaks one, revert
      it (`git revert`, push both repos, fast-forward), and move it to proposals in the report.
   3. Step 4: build the recipient list by name as described there (ledgers, `claude agents --json`, the roster file) and send the message (with the pull line for
      remote orchestrators when `remotePull` is true), plus each action to its orchestrator. Nothing to send when
      `changed` is false and `actions` is empty.
+     Always send the user a short Chinese completion PushNotification pointing at the report, even with no changes.
+     After the checks and notifications succeed, run the brief's `ack --file <attempt>/delivery.json` command **before**
+     waiting for optional user-decision cards. This is the delivery receipt, not merely a successful `claude --bg`
+     launch. On failure/block write that file as `{"delivery":"failed","note":"<reason>"}`; do not acknowledge a
+     notification that was not sent. The launcher stays in notify/running only while that exact session is verified alive;
+     missing receipts from dead sessions and failed/unknown liveness checks exit nonzero with status and notification.
   4. Decisions (user, 2026-11-09: "每晚复盘如果有任何需要我决策的东西请用卡片弹窗问我，用中文"). If `decisions` is
      not empty: first send one PushNotification in Chinese (「夜间复盘有 N 个决定等你选择」), then ask them with
      AskUserQuestion — the card — in Chinese, at most 4 questions per card (several cards in a row if more), each
@@ -464,13 +502,16 @@ outside it do. Do not treat an unanswered card as approval; keep the existing po
 
 - **Approved decisions are implemented by the next night's review**, in step 3 under the same rules (worktree, tests,
   commit), unless the user had the routing session do it sooner. The worker reads every
-  `routing-review/*.decisions.json` entry with `status: "approved"` and `done: null`, implements it, and records the
+  legacy `routing-review/*.decisions.json` and new `routing-review/<date>.run/attempt-*/decisions.json` entries with
+  `status: "approved"` and `done: null`, implements them, and records the
   commit in `done` (it may edit those files for that). The user's approval covers the files the decision needs, beyond the files step 3 normally allows; it still needs `all pass` before the commit. A declined proposal is not proposed again without new evidence.
-  A question with no answer by the next run (the launcher stops the finisher) is asked again, once more.
+  A question with no answer by the next run stays with its active finisher, not a duplicate card. If the owner confirms
+  that session ended without an answer, ask again once more; never stop an unfinished session based on its date.
 
 ## 5. Report
 
 - Write `~/.claude/orchestrator/_shared/routing-review/<date>.md` with these sections:
+  Use the attempt's `report.md` instead when the launcher supplies it; the launcher publishes the compatibility path.
   - the data summary;
   - findings;
   - changes, with commits;
@@ -481,19 +522,58 @@ outside it do. Do not treat an unanswered card as approval; keep the existing po
   - which orchestrators were notified.
 - If there are proposals for the user: a Claude-only review asks them as Chinese cards (finisher step 4); otherwise
   send one PushNotification that points at the report.
-- Then end your turn. The next night's launcher stops this session.
+- Then end your turn. Later launchers do not stop unfinished review/decision sessions.
 
 ## Schedule (this machine)
 
-`~/Library/LaunchAgents/com.user.routing-nightly-review.plist` runs `scripts/nightly-review.sh` daily at 03:07, on the
-machine the orchestrators run on (the Mac mini since 2026-11-07). The script stops earlier review sessions, then (see
-"Who does what") routes and runs the worker (`<date>.worker.jsonl`, up to 40 min per try) and starts the finisher
-`routing-nightly-review-<date>-finish` (route.mjs `claude-tools`, bypass); on personal quota it starts
-`routing-nightly-review-<date>-ask` (the Chinese card) first. cwd `_shared/routing-review/`; log `_shared/routing-review/launch.log`.
-`NIGHTLY_MODE=plan` prints the routing only; `NIGHTLY_MODE=claude` forces a whole Claude review (after the card);
-`NIGHTLY_MODE=dry` runs the worker read-only and stops (a test).
+`~/Library/LaunchAgents/com.user.routing-nightly-review.plist` runs `scripts/nightly-review.sh` daily at **03:07 local**,
+on the machine the orchestrators run on (the Mac mini since 2026-11-07). The shell entrypoint delegates to
+`scripts/nightly-review.mjs`; workers use the account's existing hub, not direct exec or an alarm wrapper. Keep the
+existing 03:07 agent pointed at the owner-integrated live checkout, not a temporary task worktree. No service is
+installed/restarted by these edits. cwd `_shared/routing-review/`; `launch.log` records stages and the final state.
+Exit 0 means a current-attempt report **and notification receipt** exist (dry mode: its nonempty final report);
+BLOCKED, failures, and missing reports exit nonzero. A successful background finisher launch is not completion.
+An already delivered day is an idempotent no-op: no second worker, finisher, notification or overwritten report.
+`NIGHTLY_RERUN=1` explicitly requests a fresh archived review after success (or exhausted completed-result recovery);
+it never authorizes personal quota or duplicates an active/unknown worker. Claim guards publish their PID atomically
+and safely recover dead claimants; an active claimant is never reclaimed. The shell retains its execute bit.
 
-- **Install or reload:** `launchctl bootstrap gui/$(id -u) <plist>`, or `launchctl kickstart -k gui/$(id -u)/com.user.routing-nightly-review`
-  to run it now.
-- **Remove:** `launchctl bootout gui/$(id -u)/com.user.routing-nightly-review`.
-- A Mac that is asleep at 03:07 runs the job when it wakes.
+**05:00 is a notification deadline, not termination.** `NIGHTLY_DEADLINE=HH:MM` overrides it in local time.
+The active launcher arms its check only if that time is still ahead; a post-05:00 approval/recovery launch does not
+send a stale gather/running message or poison deadline dedup. Also install the independent checker below so exited, blocked, crashed or
+missing launches still deliver a status. It writes `<date>.run/deadline-status.md/.json` and sends, through the existing
+Claude PushNotification channel, either completed or 「夜间复盘未完成：卡在 <stage>，已做 <what>，worker 仍在运行/已失败（原因）」.
+`delivery=launched` is not a receipt: the status session writes `delivery=sent` only after PushNotification succeeds.
+Concurrent checks are deduplicated, launch failures remain recorded/retryable, and no checker cancels a worker or
+starts a personal-quota review. When a worker finishes later, the report and completion notifications are delivered
+then. Unacknowledged status/Claude sessions get the same bounded liveness probes, not a silent forever-wait or an
+automatic duplicate. Observer RPCs default to a 15s budget (`NIGHTLY_PROBE_MS`); `NIGHTLY_RESULT_RETRIES` and
+`NIGHTLY_LIVENESS_RETRIES` default to 3. These limits govern status clients, terminal result retrieval and uncertain
+observations, **not** a working review's wall time. Invalid/non-finite settings use the finite defaults.
+
+**Owner installs the checker** using `templates/launchd/com.user.routing-nightly-review-deadline.plist.in`:
+
+```zsh
+SKILL="$HOME/.agents/skills/project-orchestrator"  # the integrated live checkout
+PLIST="$HOME/Library/LaunchAgents/com.user.routing-nightly-review-deadline.plist"
+mkdir -p "$HOME/Library/LaunchAgents" "$HOME/.claude/orchestrator/_shared/routing-review"
+sed -e "s|__HOME__|$HOME|g" -e "s|__SKILL__|$SKILL|g" \
+  "$SKILL/templates/launchd/com.user.routing-nightly-review-deadline.plist.in" > "$PLIST"
+plutil -lint "$PLIST"
+launchctl bootstrap "gui/$(id -u)" "$PLIST"
+launchctl print "gui/$(id -u)/com.user.routing-nightly-review-deadline"
+```
+
+For an already installed **checker only**, `launchctl bootout gui/$(id -u)/com.user.routing-nightly-review-deadline`
+before bootstrapping the new template. If changing `NIGHTLY_DEADLINE`, change the checker's `Hour`/`Minute` and its
+environment value to match, and set the same value on the 03:07 agent. An asleep/offline Mac can only notify on wake;
+missing notification access is a recorded failure, never permission to bypass login. To check now (after the deadline):
+`/bin/zsh -l "$SKILL/scripts/nightly-review.sh" --deadline-check`. Do not use `kickstart -k` or bootout on an active
+review launcher to enforce the deadline. Install/start idle agents only; the larger shared LaunchPlan refactor is deferred.
+
+`NIGHTLY_MODE=plan` prints routes only (no data/model/route log). `NIGHTLY_MODE=claude` requests a whole Claude review
+only with prior personal-quota OK. `NIGHTLY_MODE=dry` uses a read-only hub worker and no finisher/deadline notification;
+use a separate `NIGHTLY_DIR` for dry tests. `NIGHTLY_DAY=YYYY-MM-DD` selects artifact ownership/reattachment; it does not
+turn newly gathered data into a historical snapshot. `NIGHTLY_EXCLUDE` and `NIGHTLY_EXCLUDE_MODEL` supply explicit
+account/model exclusions. The fixture harness in `scripts/test/nightly-review-scenarios.mjs` runs no live workers,
+sessions, notification tools or credential reads; `node scripts/test/run-all.mjs` includes it.
