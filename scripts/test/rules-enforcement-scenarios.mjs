@@ -71,7 +71,7 @@ try {
   fs.writeFileSync(changed, fs.readFileSync(changed, 'utf8').replace(changedVersion, removedVersion).replace('- New version test rule.\n', ''));
   assert.match(invoke(event({ source: 'compact' }), { RULES_DIGEST: changed }).hookSpecificOutput.additionalContext,
     /Removed\/replaced:\n- New version test rule/);
-  for (const input of ['{broken', '{}', event({ source: 'clear' }), event({ session_id: '__proto__' })]) assert.equal(invoke(input), null);
+  for (const input of ['{broken', '{}', event({ source: 'invalid' }), event({ session_id: '__proto__' })]) assert.equal(invoke(input), null);
   assert.equal(invoke(event({ session_title: 'Fail 主对话' }), { RULES_DIGEST: path.join(tmp, 'missing') }), null);
   fs.mkdirSync(path.join(shared, 'rules-seen.json.lock'));
   assert.ok(invoke(event({ session_title: 'Contended 主对话', session_id: 's4' })));

@@ -5,7 +5,7 @@ its `Worker Rules` section is extracted, not maintained as a second copy. Nothin
 
 ## Injection And Acknowledgement
 
-`rules-digest-hook.mjs` handles SessionStart startup/resume/compact. Detection uses `session_title` (or name/title
+`rules-digest-hook.mjs` handles SessionStart startup/resume/compact/fork/clear. Detection uses `session_title` (or name/title
 aliases) ending in 主对话 or matching `_shared/orchestrators.txt`, an already-recognized session id, the skill cwd,
 or a skill-load marker in the first/last 16 KiB of an allowed Claude `projects/*.jsonl` transcript. It does not read
 job/login/auth stores or run a CLI/network query. Use named orchestrators for reliable detection; a marker outside
@@ -33,10 +33,15 @@ Owner installation only: merge `templates/session-start-hook.json` into the exis
 without replacing other hooks/settings. Its exact fragment uses an absolute Node binary; adjust if Node moves:
 
 ```json
-{"hooks":{"SessionStart":[{"matcher":"startup|resume|compact","hooks":[{"type":"command","command":"/Users/bytedance/.nvm/versions/node/v22.17.0/bin/node \"$HOME/.agents/skills/project-orchestrator/scripts/rules-digest-hook.mjs\"","timeout":2}]}]}}
+{"hooks":{"SessionStart":[{"matcher":"startup|resume|compact|fork|clear","hooks":[{"type":"command","command":"/Users/bytedance/.nvm/versions/node/v22.17.0/bin/node \"$HOME/.agents/skills/project-orchestrator/scripts/rules-digest-hook.mjs\"","timeout":2}]}]}}
 ```
 
 ## Launch And Build Evidence
+
+Worker completion has a separate [durable owner inbox, tracked watcher and Stop enforcement](worker-inbox.md).
+The updated SessionStart template includes both digest and inbox hooks; merge it along with
+`templates/stop-hook.json` after owner review. The older digest-only fragment above is insufficient for the inbox.
+No hook was installed by the inbox task.
 
 `codex-worker start` and routed Claude/one-shot launches check the last 24h of routing decisions for the same
 name or task-prefix. Missing decisions warn `unrouted-launch` and append `kind: unrouted`; attempted launches

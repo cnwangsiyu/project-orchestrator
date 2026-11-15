@@ -55,6 +55,7 @@ const run = (label, config = {}, flags = [], options = {}) => {
   if (options.template) for (const key of ['cwd', 'task-dir']) routeArgs = setRouteFlag(routeArgs, key, null);
   const r = spawnSync(process.execPath, ['--import', transport, path.join(scripts, 'codex-worker.mjs'), '--account', 'trae',
     'start', '--cwd', dir, '--model', source, '--effort', 'high', '--sandbox', 'workspace-write', '--name', label,
+    '--owner', 'reroute-owner',
     '--route-args', JSON.stringify(routeArgs), '--auto-reroute-depth', String(options.depth ?? 0), '--queue-patience-min', String(options.patience ?? 5),
     ...(options.stallMin === undefined ? [] : ['--stall-min', String(options.stallMin)]),
     ...(options.altStart === undefined ? [] : ['--queue-alt-start-min', String(options.altStart)]),
@@ -82,6 +83,12 @@ try {
   assert.equal(hopped.calls.filter((c) => c.method === 'turn/interrupt').length, 1);
   const hop = hopped.rows.find((r) => r.kind === 'reroute'); assert.ok(hop.automatic); assert.equal(hop.from.model, SOL);
   assert.ok(hopped.rows.some((r) => r.kind === 'launch' && r.model === hop.to.model));
+  const events = (r) => fs.readFileSync(path.join(r.dir, 'worker-events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.ok(events(hopped).some((row) => row.event === 're-routed'));
+  assert.ok(events(hopped).some((row) => row.event === 'finished'));
+  assert.ok(events(hopped).every((row) => row.owner === 'reroute-owner'), 'automatic hops inherit the launcher owner');
+  for (const id of new Set(events(hopped).map((row) => row.runId)))
+    assert.equal(events(hopped).filter((row) => row.runId === id && row.event !== 'running').length, 1);
   const replacement = hopped.calls.find((c) => c.method === 'turn/start' && c.model !== SOL);
   assert.match(replacement.params.input[0].text, /inspect git status\/diff.*continue, don't redo/);
   assert.equal(hopped.calls.filter((c) => c.method === 'thread/start').length, 2, 'replacement gets a fresh thread');
@@ -150,14 +157,17 @@ try {
   const needsOK = run('needs-ok', {}, [], { noModels: true });
   assert.equal(needsOK.status, 8, needsOK.stderr + needsOK.stdout); assert.match(needsOK.stdout, /reroute-needs-user:/);
   assert.equal(needsOK.calls.filter((c) => c.method === 'thread/start').length, 1);
+  assert.equal(events(needsOK).at(-1).event, 'needs-user');
   const urgent = run('urgent-personal', {}, ['--urgent'], { noModels: true });
   assert.equal(urgent.status, 8); assert.equal(urgent.calls.filter((c) => c.method === 'thread/start').length, 1);
   const signing = run('no-signing-hop', {}, ['--signing']);
   assert.equal(signing.status, 8); assert.equal(signing.calls.filter((c) => c.method === 'thread/start').length, 1);
   const defer = run('deferred', {}, [], { defer: true, source: ASTRA });
   assert.equal(defer.status, 9, defer.stderr + defer.stdout);
+  assert.equal(events(defer).at(-1).event, 'needs-user');
   assert.ok(JSON.parse(fs.readFileSync(path.join(defer.task, 'reroute.json'))).route.deferUntil);
   const limited = run('depth-limit', {}, [], { depth: 2 }); assert.equal(limited.status, 10);
+  assert.equal(events(limited).at(-1).event, 'failed');
   assert.ok(!limited.rows.some((r) => r.kind === 'reroute'));
   const two = run('two-hops', { everyHop: true, mode: 'unavailable' });
   assert.equal(two.status, 10, two.stderr + two.stdout); assert.equal(two.rows.filter((r) => r.kind === 'reroute').length, 2);
@@ -175,6 +185,7 @@ try {
   for (const cancel of ['silent', 'unconfirmed']) {
     const r = run(`cancel-${cancel}`, { cancel }); assert.equal(r.status, 7, r.stderr + r.stdout);
     assert.match(r.stderr, /queue-cancel-unconfirmed/); assert.ok(!r.rows.some((r) => r.kind === 'reroute'));
+    assert.equal(events(r).at(-1).event, 'failed');
   }
   const held = run('held-wrapper', {}, ['--shared-lock'], { hold: true });
   assert.equal(held.status, 7); assert.match(held.stdout, /owning wrapper/);

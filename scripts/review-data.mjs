@@ -17,6 +17,7 @@ import { LOG as RESOURCE_LOG, readJsonl } from './lib/resource-data.mjs';
 import { review as resourceReview } from './resource-review.mjs';
 import { utilisationLines } from './lib/resource-utilisation.mjs';
 import { ETA, median } from './lib/eta.mjs';
+import { auditWorkerEvents } from './lib/worker-events.mjs';
 
 const argv = process.argv.slice(2);
 const opt = (k) => { const i = argv.indexOf(`--${k}`); return i < 0 ? null : argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[i + 1] : true; };
@@ -418,7 +419,8 @@ const resourceFiles = [RESOURCE_LOG, ...Array.from({ length: 6 }, (_, i) => `${R
 const resourceRows = await readJsonl(resourceFiles, since - 600000);
 const resources = resourceReview(resourceRows.rows, { hours: H, quotaRecords: snaps });
 const utilisation = { ...resources.utilisation, coverage: resources.coverage, readErrors: resourceRows.errors };
-const result = { hours: H, routing, reviews: reviewBudget, outcomes, background, quota, utilisation, now, catalog, globalRules };
+const workerInbox = auditWorkerEvents(undefined, since);
+const result = { hours: H, routing, reviews: reviewBudget, outcomes, background, quota, utilisation, now, catalog, globalRules, workerInbox };
 if (opt('json')) { console.log(JSON.stringify(result, null, 1)); process.exit(0); }
 const show = (title, v) => console.log(`\n## ${title}\n${typeof v === 'string' ? v : JSON.stringify(v, null, 1)}`);
 console.log(`# routing review data — last ${H}h (to ${fmt(Date.now())})`);
@@ -431,3 +433,4 @@ show('utilisation', utilisationLines(utilisation).join('\n'));
 show('now', now);
 show('model catalog', catalog);
 show('global rules', globalRules);
+show('worker inbox (delivery acknowledgement, not task acceptance)', workerInbox);

@@ -372,7 +372,9 @@ for (const [sc, args, want] of [
 for (const [sc, args] of [['quiet', ['lookup']], ['ttSearch', ['lookup']], ['ttOutTrae', ['lookup']], ['quiet', ['draft']], ['quiet', ['second-opinion', '--against', 'claude']]]) {
   let ok = false;
   try {
-    const command = JSON.parse(run(sc, args)).pick.command;
+    const printed = JSON.parse(run(sc, args)).pick.command;
+    const inner = printed.match(/-- sh -c (.*)   \(background task/);
+    const command = inner ? execFileSync('/bin/sh', ['-c', `printf '%s' ${inner[1]}`], { encoding: 'utf8' }) : printed;
     const quoted = command.match(/ -c ('developer_instructions=.*') --json/)[1];
     const config = execFileSync('/bin/sh', ['-c', `printf '%s' ${quoted}`], { encoding: 'utf8' });
     const rule = JSON.parse(config.slice('developer_instructions='.length));
@@ -467,7 +469,7 @@ for (const [sc, args] of ERRORS) {
   const exec = o('ttOutTrae', ['lookup']).pick?.command ?? '';
   const worker = o('ttOutTrae', ['implement', '--impact', 'service']).pick?.command ?? '';
   const cases = [[gate('ttOutTrae', ['analysis']), false], [gate('ttOutTraeDown', ['analysis']), true],
-    [/(?:^|&& )traecli exec .*-m GPT-6\.1-Sol /.test(exec), true], [/--account trae start .*--model GPT-6\.1-Sol /.test(worker), true],
+    [/(?:^|&& )(?:'\\'')?traecli(?:'\\'')? exec .*-m GPT-6\.1-Sol /.test(exec), true], [/--account trae start .*--model GPT-6\.1-Sol /.test(worker), true],
     [exec.includes('/scripts/launch-audit.mjs'), true]];
   const bad = cases.map(([got, want], i) => (got === want ? null : i)).filter((i) => i !== null);
   if (bad.length) fail++;

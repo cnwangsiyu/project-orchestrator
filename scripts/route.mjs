@@ -24,6 +24,7 @@ import { balanceFactors, hasTraeDailyQuota, modelLoad, readLaneState, readQuotaH
 import { ETA, etaText, laneEta, patienceMinutes, requestsFor, ttadkEta, workMinutes } from './lib/eta.mjs';
 import { normalizeLadder } from './lib/model-ladder.mjs';
 import { loadDigest } from './lib/global-rules.mjs';
+import { launcherIdentity, validOwner } from './lib/worker-events.mjs';
 import { setRouteFlag } from './lib/worker-reroute.mjs';
 
 const SKILL = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -100,7 +101,7 @@ const notch = (m, d, cap = 'xhigh') => {
   return { ...m, effort: EFFORTS[Math.min(hi, Math.max(lo, i + d))] };
 };
 const label = (m) => `${m.vendor === 'claude' ? `Claude ${m.model}` : isAlt(m) ? m.model : `Codex ${m.model}`} ${m.effort}`;
-const LOGIN_MATERIAL_RULE = `forbidden for every worker: never read, copy, load or inject LOGIN material — login sessions, SSO/session tokens, cookies, CLI auth files (for example bytedcli's), API keys, .netrc, browser profiles, or other people's/other apps' keychain items — and never use any way of getting past a login. Where a login or authorization is needed, stop and report BLOCKED with what needs signing in`;
+const LOGIN_MATERIAL_RULE = `forbidden for every worker: never read, copy, load or inject LOGIN material — login sessions, SSO/session tokens, cookies, CLI auth files (for example bytedcli's), API keys, .netrc, browser profiles, or other people's/other apps' keychain items — and never use any way of getting past a login. Running an installed, already signed-in CLI (for example bytedcli) through its normal commands is allowed and expected; what is forbidden is reading, copying, exporting or injecting its auth files or session. Stop only when the command itself reports an authentication error. Where a login or authorization is needed, stop and report BLOCKED with what needs signing in`;
 const TEST_SIGNING_RULE = `allowed with the user's 2026-11-13 authorization: sign OUR OWN TEST packages only when registered by manifest and hash in ~/.claude/orchestrator/_shared/user-signing/registry.json, using only identities on the user-approved allowlist ~/.claude/orchestrator/_shared/user-signing/identities.json (maintained by the rules owner; each entry dated with the user's approval): iOS H6 keychain identity for iPhone 8; iOS cosign team DH59R4RNRY development certificate + provisioning profile 3JVMQQBHUR for iPhone 11, valid to 2027-09; Android debug keystore committed in the repo. Only orchestrators write registry.json entries; signing workers treat registry.json and identities.json as read-only. A new identity requires a new user approval card and an allowlist entry; a worker needing a new entry or an unlisted identity reports BLOCKED. If the H6 keychain is locked, pass only its one designated password file via stdin, never argv/env/logs. Android's repo debug passphrase from build.gradle goes through file descriptors such as apksigner file:/dev/fd/N, never argv. Never export, copy, print or log passwords or keys; report only PASS/FAIL, certificate fingerprint and hashes; write a receipt under user-signing/receipts/; re-lock the keychain unless another registered signing run is active; never sign production/release packages or touch other keychains. Anything outside this scope is BLOCKED and needs a user card`;
 const CREDENTIAL_NOTE = `brief: include the credential clause (two adjacent parts) — 1. ${LOGIN_MATERIAL_RULE}. 2. ${TEST_SIGNING_RULE}.`;
 const SIGNING_AUDIT_NOTE = 'after the worker finishes: scan worker logs only for password-like strings, mask any hits in all output, and verify registered package ids only, a receipt under user-signing/receipts/, and keychain re-locking when no other registered signing run is active';
@@ -133,6 +134,7 @@ for (let i = 0; i < argv.length; i++) {
   opts[k] = BOOL.has(k) || argv[i + 1] === undefined || argv[i + 1].startsWith('--') ? true : argv[++i];
 }
 const die = (msg) => { console.error(`route: ${msg}`); process.exit(2); };
+if (opts.owner !== undefined && !validOwner(opts.owner)) die('--owner needs a public session ID');
 if (opts.table) {
   for (const [k, t] of Object.entries(TABLE)) console.log(`${k.padEnd(15)} ${t.kind.padEnd(13)} first ${label(t.first).padEnd(26)} alt ${(t.alt ? label(t.alt) : '—').padEnd(26)} then ${t.ladder.map(label).join(' → ') || '—'}${t.second ? `  (+ second opinion ${label(t.second)})` : ''}\n${''.padEnd(16)}${t.desc}`);
   process.exit(0);
@@ -881,6 +883,8 @@ const sandbox = signing ? 'danger-full-access' : sandboxOverride ?? (writes ? 'd
 const secondSandbox = sandboxOverride ?? (!writes && runsTests ? 'workspace-write' : 'read-only');
 const cwd = typeof opts.cwd === 'string' ? opts.cwd : '<workspace>', taskDir = typeof opts['task-dir'] === 'string' ? opts['task-dir'] : '<task dir>';
 const name = typeof opts.name === 'string' ? opts.name : '<project>-<task>';
+const owner = launcherIdentity(opts.owner).sessionId;
+if (owner) opts.owner = owner;
 const routeArgs = [cat, ...Object.entries({ ...opts, failures }).filter(([k]) => !['json', 'dry', 'table'].includes(k))
   .flatMap(([k, v]) => [`--${k}`, ...(v === true ? [] : [String(v)])])];
 const prompt = `"Read ${taskDir}/brief.md and follow it."`;
@@ -953,10 +957,16 @@ const execCred = ` -c 'developer_instructions=${JSON.stringify(credRule).replace
 const queueFlagsFor = (x) => queuePatience != null && lowPriorityPicks.some((l) => l.model === x.model)
   ? ` --queue-patience-min ${queuePatience} --alt ${shellQuote(queueAlt)}` : '';
 const launchAudit = (x, an, launchSandbox) => `node ${shellQuote(`${SKILL}/scripts/launch-audit.mjs`)} --name ${shellQuote(name)} --vendor ${x.vendor} --account ${shellQuote(an)} --model ${shellQuote(x.model)}${x.vendor === 'codex' ? ` --sandbox ${shellQuote(launchSandbox)}` : ''}${typeof opts['user-ok'] === 'string' ? ` --user-ok ${shellQuote(opts['user-ok'])}` : ''} && `;
+const trackedExec = (x, an, launchSandbox, command) => {
+  const args = ['--name', name, '--account', an, '--model', x.model, '--effort', x.effort, '--cwd', cwd,
+    '--out', `${taskDir}/codex-last.md`, '--log', `${taskDir}/codex.jsonl`, ...(owner ? ['--owner', owner] : [])];
+  return `sh ${shellQuote(`${SKILL}/scripts/run-tracked.sh`)} ${args.map(shellQuote).join(' ')} -- sh -c ${shellQuote(launchAudit(x, an, launchSandbox) + command)}   (background task${inRepo === null ? '; add --skip-git-repo-check outside a repo' : ''})`;
+};
 const workerSpec = (x, an, launchSandbox, modelId = x.model) => {
   const workerArgs = ['--account', an, 'start', '--cwd', cwd, '--model', modelId, '--effort', x.effort,
     '--sandbox', launchSandbox, '--name', name, '--route-args', JSON.stringify(routeArgs),
     '--auto-reroute-depth', String(autoRerouteDepth), '--log', `${taskDir}/codex.jsonl`, '--out', `${taskDir}/codex-last.md`];
+  if (owner) workerArgs.push('--owner', owner);
   if (background) workerArgs.push('--background');
   if (typeof opts['user-ok'] === 'string') workerArgs.push('--user-ok', opts['user-ok']);
   if (queuePatience != null && lowPriorityPicks.some((l) => l.model === x.model)) workerArgs.push('--queue-patience-min', String(queuePatience), '--alt', queueAlt);
@@ -982,12 +992,12 @@ const launch = (x, shape = T.shape, acct = pickAcct, launchSandbox = sandbox) =>
     const queueFlags = queueFlagsFor(x);
     const id = traeProf.modelIds?.[x.model] ?? x.model;
     // Quota substitution can put Astra on a short row too; keep its queue/status visible through the hub.
-    if (shape === 'exec' && x.model !== ASTRA && !backgroundLane && !queueFlags) return { launcher: 'traecli-exec', account: an, command: `${launchAudit(x, an, launchSandbox)}${traeProf.bin ?? 'traecli'} exec${inRepo === false ? ' --skip-git-repo-check' : ''} -C ${cwd} -s ${launchSandbox} -m ${id} -c model_reasoning_effort='"${x.effort}"'${execCred} --json -o ${taskDir}/codex-last.md ${prompt} < /dev/null > ${taskDir}/codex.jsonl 2>&1   (background task${inRepo === null ? '; add --skip-git-repo-check outside a repo' : ''})` };
+    if (shape === 'exec' && x.model !== ASTRA && !backgroundLane && !queueFlags) return { launcher: 'traecli-exec', account: an, command: trackedExec(x, an, launchSandbox, `${shellQuote(traeProf.bin ?? 'traecli')} exec${inRepo === false ? ' --skip-git-repo-check' : ''} -C ${shellQuote(cwd)} -s ${launchSandbox} -m ${id} -c model_reasoning_effort='"${x.effort}"'${execCred} --json -o ${shellQuote(`${taskDir}/codex-last.md`)} ${prompt}`) };
     return workerSpec(x, an, launchSandbox, id);
   }
   // A TTADK codex exec bypasses codex-worker, so it brings the account's proxy up first (exit 6 when it can't).
   const proxyFirst = TT?.search && an === TT.name ? `node ${SKILL}/scripts/codex-worker.mjs --account ${an} proxy >/dev/null && ` : '';
-  if (shape === 'exec') return { launcher: 'codex-exec', account: an, command: `${launchAudit(x, an, launchSandbox)}${proxyFirst}CODEX_HOME=${home} codex exec${inRepo === false ? ' --skip-git-repo-check' : ''} -C ${cwd} -s ${launchSandbox} -m ${x.model} -c model_reasoning_effort='"${x.effort}"'${execCred} --json -o ${taskDir}/codex-last.md ${prompt} < /dev/null > ${taskDir}/codex.jsonl 2>&1   (background task${inRepo === null ? '; add --skip-git-repo-check outside a repo' : ''})` };
+  if (shape === 'exec') return { launcher: 'codex-exec', account: an, command: trackedExec(x, an, launchSandbox, `${proxyFirst}CODEX_HOME=${home} codex exec${inRepo === false ? ' --skip-git-repo-check' : ''} -C ${shellQuote(cwd)} -s ${launchSandbox} -m ${x.model} -c model_reasoning_effort='"${x.effort}"'${execCred} --json -o ${shellQuote(`${taskDir}/codex-last.md`)} ${prompt}`) };
   return workerSpec(x, an, launchSandbox);
 };
 // The same quality gate for both vendors, so outcomes compare: code work gets an independent review before it's accepted.
@@ -1094,6 +1104,7 @@ const out = {
   needsUserOK: needsOK, tellUser: tell, why, notes, redeemFirst, balance, quota: leanLines(st, data),
 };
 out.notes.push('launch audit: every launch must match a same-name/task-prefix route decision in the last 24h; unrouted-launch warns and logs without blocking. Record actual user approval with --user-ok <card/ledger-reference>, never invent it. Claude/one-shot launches run launch-audit; hub start checks directly.');
+out.notes.push(`launch as a background task (run_in_background) - never detach with & inside another command. Every launch must be tracked or covered by an armed codex-worker watch${owner ? ` --owner ${owner}` : ' --owner <session-id>'}; re-arm after every wake and handle finished workers first. Pass --owner <session-id> when the launcher has no ORCHESTRATOR_OWNER/CLAUDE_SESSION_ID.`);
 // Every real routing decision is logged for the nightly review (--dry or ROUTE_LOG=0 to skip, e.g. for experiments).
 if (!opts.dry && process.env.ROUTE_LOG !== '0') {
   const rec = { t: Date.now(), project: typeof opts.project === 'string' ? opts.project : null, name: typeof opts.name === 'string' ? opts.name : null, category: cat, stakes, failures, impact, review: reviewKind, excluded: [...excluded], excludedLanes: [...exLanes], ttadk: !!ttadkRun, company: ttadkRun ? runCompany.name : null, balance,

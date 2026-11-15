@@ -57,19 +57,21 @@ const runNode = (script, args, { capture = false, timeout = 0 } = {}) => new Pro
   let stdout = '', signal = null;
   child.stdout?.on('data', (chunk) => { stdout += chunk; if (stdout.length > 4 * 2 ** 20) child.kill('SIGTERM'); });
   const forward = (s) => { signal = s; child.kill(s); };
-  const onInt = () => forward('SIGINT'), onTerm = () => forward('SIGTERM');
+  const onInt = () => forward('SIGINT'), onTerm = () => forward('SIGTERM'), onHup = () => forward('SIGHUP');
   process.once('SIGINT', onInt); process.once('SIGTERM', onTerm);
+  process.once('SIGHUP', onHup);
   const timer = timeout ? setTimeout(() => forward('SIGTERM'), timeout) : null;
-  const cleanup = () => { clearTimeout(timer); process.removeListener('SIGINT', onInt); process.removeListener('SIGTERM', onTerm); };
+  const cleanup = () => { clearTimeout(timer); process.removeListener('SIGINT', onInt); process.removeListener('SIGTERM', onTerm); process.removeListener('SIGHUP', onHup); };
   child.on('error', (e) => { cleanup(); reject(e); });
-  child.on('close', (code, s) => { cleanup(); resolve({ code: code ?? ((s ?? signal) === 'SIGINT' ? 130 : 143), stdout }); });
+  child.on('close', (code, s) => { cleanup(); resolve({ code: code ?? ((s ?? signal) === 'SIGINT' ? 130 : (s ?? signal) === 'SIGHUP' ? 129 : 143), stdout }); });
 });
 
 // Only a confirmed, never-started turn reaches this entry point. Never use a shell or a detached launch.
-export const rerouteWorker = async ({ args, depth, from, reason, prompt, opts, policy = false }) => {
+export const rerouteWorker = async ({ args, depth, from, reason, prompt, opts, policy = false, onHandoff = () => {} }) => {
   if (!args || routeFlag(args, 'background') || opts.background) return REROUTE_EXIT.stopped;
   if (typeof opts.cwd === 'string') args = setRouteFlag(args, 'cwd', path.resolve(opts.cwd));
   if (typeof opts.name === 'string') args = setRouteFlag(args, 'name', opts.name);
+  if (typeof opts.owner === 'string') args = setRouteFlag(args, 'owner', opts.owner);
   if ((!routeFlag(args, 'task-dir') || routeFlag(args, 'task-dir') === '<task dir>') && typeof opts.log === 'string')
     args = setRouteFlag(args, 'task-dir', path.dirname(path.resolve(opts.log)));
   if (depth >= 2) { console.log('reroute-depth-limit: at most 2 automatic re-routes per task'); return REROUTE_EXIT.limit; }
@@ -135,10 +137,11 @@ export const rerouteWorker = async ({ args, depth, from, reason, prompt, opts, p
     from, to, reason, category: route.category, depth: depth + 1, toStartEstimateMin: route.eta?.find((r) => r.model === pick.model && r.account === pick.account)?.startDelayMin ?? null };
   fs.mkdirSync(path.dirname(rulesLog()), { recursive: true });
   fs.appendFileSync(rulesLog(), JSON.stringify(record) + '\n');
+  onHandoff();
   console.log(`rerouted: ${from.model}@${from.account} (queued ${from.position ?? '?'}, waited ${Number(from.waitedMin ?? 0).toFixed(1)} min) → ${to.model}@${to.account}`);
   const childArgs = [...pick.workerArgs];
   childArgs.push('--reroute-hop-at', String(record.t));
-  for (const key of ['log', 'out', 'stall-min', 'network', 'sandbox', 'browser-origins', 'computer-use-apps']) {
+  for (const key of ['owner', 'log', 'out', 'stall-min', 'network', 'sandbox', 'browser-origins', 'computer-use-apps']) {
     if (typeof opts[key] === 'string') {
       const i = childArgs.indexOf(`--${key}`);
       if (i >= 0) childArgs.splice(i, 2);
