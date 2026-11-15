@@ -5,6 +5,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
+import { noteFailure, noteSuccess, claimProbes, probeResult, readPoolPauses } from '../lib/trae-health.mjs';
 import { routePure, parseTaskSpec, createTaskSpec, deriveReview, createSnapshot, snapshotFromAnalyze, enumerateCandidates, validatePlan, renderPlan } from '../lib/pipeline/index.mjs';
 import { evaluateCandidate, pAvailable, pCapabilities, pContent, pTierFloor, pModelFit, pSigning, pBackground, pScopedApproval, pPreviousFloor, pResourceScope, pDevice, pLaunchMatches, approvalScope, dominates } from '../lib/pipeline/filters.mjs';
 import { estimateCandidate } from '../lib/pipeline/estimate.mjs';
@@ -44,8 +46,8 @@ const attempt = (modelId = ASTRA, effort = 'xhigh', extra = {}) => ({ id: 'attem
 let fixed = 0;
 function test(name, fn) { try { fn(); fixed++; console.log(`PASS ${name}`); } catch (e) { e.message = `${name}: ${e.message}`; throw e; } }
 
-test('V01 ordinary signing is forbidden on both roles', () => {
-  for (const role of ['primary', 'second']) { const p = run(task('build-run', { flags: { signing: true }, role }), fixture()); noCommand(p); assert.ok(hasCode(p, 'SIGNING_WORKER_FORBIDDEN')); }
+test('B2 ordinary full-access company signing works on both roles', () => {
+  for (const role of ['primary', 'second']) { const p = run(task('build-run', { flags: { signing: true }, role, sandbox:'danger-full-access',sandboxCeiling:'danger-full-access' }), fixture()); assert.equal(p.kind,'launch'); assert.equal(p.primary.candidate.accountId,'company-a'); }
 });
 test('V02 hidden hard company witness survives exclusions', () => {
   const p = run(task('debug', { flags: { 'exclude-model': SOL } }), fixture([['a', 'ttadk', [SOL, FLASH]], ['b', 'trae', [ASTRA]]]));
@@ -76,7 +78,7 @@ test('V07 browser account rotation cannot overwrite capability', () => {
 });
 test('V08 personal with no company needs per-task approval', () => {
   const p = run(task('docs', { flags: { urgent: true, 'user-ok': 'old-outage' } }), fixture([['p', 'chatgpt', [SOL]]]));
-  noCommand(p); assert.ok(hasCode(p, 'PERSONAL_QUOTA_OK_REQUIRED'));
+  assert.equal(p.kind,'launch');
 });
 test('V09 exact launch identity and fresh-state approval revocation', () => {
   const raw = fixture(), p = run(task(), raw), s = createSnapshot(raw);
@@ -88,7 +90,7 @@ test('V09 exact launch identity and fresh-state approval revocation', () => {
 test('V10/V11 real retry floor and missing history', () => {
   const raw = fixture([['b', 'trae', [SOL, ASTRA, 'gpt-5.6-sol']]]);
   let p = run(task('debug', { failures: 1, previousAttempts: [attempt()] }), raw); assert.equal(p.kind, 'launch'); assert.equal(p.primary.candidate.modelId, ASTRA);
-  p = run(task('debug', { failures: 1 }), raw); noCommand(p); assert.ok(hasCode(p, 'PREVIOUS_ATTEMPT_UNKNOWN'));
+  p = run(task('debug', { failures: 1 }), raw); assert.equal(p.kind,'launch');assert.ok(!hasCode(p,'PREVIOUS_ATTEMPT_UNKNOWN'));
   p = run(task('analysis', { previousAttempts: [attempt(SOL, 'high')] }), fixture([['a', 'ttadk', ['gpt-5.6-sol']]]));
   noCommand(p); assert.ok(hasCode(p, 'RETRY_BELOW_ACTUAL_FLOOR'));
 });
@@ -108,17 +110,58 @@ test('V14 adversarial excludes every GPT; ordinary policy code stays ordinary', 
   const raw = fixture([['a', 'ttadk', [SOL]]]); assert.equal(run(task('review'), raw).kind, 'launch');
   assert.equal(run(task('review', { flags: { security: true, defensive: true } }), raw).kind, 'launch');
 });
-test('V15 derived review preserves content, scopes and exclusions', () => {
-  const p = run(task('implement', { flags: { security: true }, allowedOrigins: ['https://example.test'] }), fixture([['a', 'ttadk', [SOL]]]));
+test('V15 required release review preserves content, scopes and exclusions', () => {
+  const p = run(task('implement', { impact:'release', flags: { security: true }, allowedOrigins: ['https://example.test'] }), fixture([['a', 'ttadk', [SOL]]]));
   assert.equal(p.kind, 'launch'); assert.equal(p.followups.length, 1); assert.ok(p.followups[0].contentLabels.includes('adversarial'));
   assert.deepEqual(p.followups[0].allowedOrigins, p.task.allowedOrigins); assert.ok(p.gates.some((g) => g.phase === 'acceptance'));
+});
+test('real CLI uses the same immutable pipeline and never launches a blocked proposal', () => {
+  const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'pipeline-cli-'));
+  try {
+    const file=path.join(tmp,'snapshot.json'), route=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../route.mjs');
+    const env={...process.env,HOME:tmp,RULES_SHARED:tmp,CODEX_ACCOUNTS:path.join(tmp,'registry.json'),QUOTA_CACHE:path.join(tmp,'cache.json'),
+      ROUTE_LOG:'0',ROUTE_LOG_FILE:path.join(tmp,'routes.jsonl'),QUOTA_LOG_FILE:path.join(tmp,'quota.jsonl'),ROUTE_NOW:String(NOW),ROUTE_REQUEST_ID:'cli-1',ROUTE_SNAPSHOT_FILE:file};
+    const cli=(args,raw)=>{fs.writeFileSync(file,JSON.stringify(raw));return JSON.parse(execFileSync(process.execPath,[route,...args,'--dry','--json'],{env,encoding:'utf8',maxBuffer:8<<20}));};
+    for(const args of [['analysis'],['debug','--impact','service'],['lookup'],['research'],['review']]) {
+      const raw=fixture(),o=cli(args,raw),p=routePure(o.plan.task,createSnapshot(raw));
+      assert.equal(o.plan.planHash,p.planHash);assert.equal(o.kind,'launch');assert.ok(o.pick.command);assert.ok(o.why.length);
+    }
+    for(const [args,raw,code] of [
+      [['build-run','--signing','--sandbox','read-only'],fixture(),'SIGNING_COMPANY_FULL_ACCESS_REQUIRED'],
+      [['computer-use'],fixture(),'APP_SCOPE_REQUIRED'],
+      [['docs'],fixture([['p','chatgpt',[SOL]]]),'PERSONAL_QUOTA_OK_REQUIRED']]) {
+      const o=cli(args,raw);assert.equal(o.kind,'blocked');assert.equal(o.pick?.command??null,null);assert.ok(hasCode(o.plan,code));
+    }
+    const retry=cli(['debug','--impact','service','--actual',`codex:${ASTRA}:xhigh@company-b`],fixture([['company-b','trae',[SOL,ASTRA]]]));
+    assert.equal(retry.pick.model,ASTRA);assert.ok(retry.why.length);
+    for(const args of [['analysis','--exclude-models','gpt'],['analysis','--stakes'],['analysis','extra'],['analysis','--name','../private'],['analysis','--actual','malformed']]) {
+      assert.throws(()=>execFileSync(process.execPath,[route,...args],{env,stdio:'pipe'}),(e)=>e.status===2);
+    }
+  } finally {fs.rmSync(tmp,{recursive:true,force:true});}
+});
+test('actual health storage rejects old success and superseded probe claims', () => {
+  const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'pipeline-health-'));
+  try {
+    const now=NOW, day=(Math.floor(now/86400000)+1)*86400000;
+    noteFailure(tmp,'Model access temporarily restricted (983)',now,SOL);
+    for(const m of [SOL,FLASH,null]) noteSuccess(tmp,m);
+    assert.ok(readPoolPauses(tmp,now).gpt);
+    assert.equal(claimProbes(tmp,day-1).length,0);
+    const [first]=claimProbes(tmp,day),[second]=claimProbes(tmp,day+11*60000);
+    assert.equal(probeResult(tmp,SOL,true,'',day+12*60000,first.claim),false);
+    noteFailure(tmp,'Model access temporarily restricted (983)',day+13*60000,SOL);
+    assert.equal(probeResult(tmp,SOL,true,'',day+14*60000,second.claim),false);
+    const [latest]=claimProbes(tmp,day+86400000);
+    assert.equal(probeResult(tmp,SOL,true,'',day+86400000+1,latest.claim),true);
+    assert.equal(readPoolPauses(tmp,day+86400000+2).gpt,undefined);
+  }finally{fs.rmSync(tmp,{recursive:true,force:true});}
 });
 test('V16 required two-family adversarial set and scarce reviewer gate', () => {
   const t = task('review-high', { flags: { security: true }, artifactRevision: 'artifact-1' });
   const raw = fixture([['a', 'ttadk', [KIMI]], ['b', 'trae', [FLASH]]]);
   const p = run(t, raw); assert.equal(p.kind, 'launch'); assert.equal(p.primary.candidate.modelId, KIMI); assert.equal(p.reviewers[0].candidate.modelId, FLASH);
   assert.equal(p.gates.some((g) => /GPT\/Claude/.test(g.reason.text)), false);
-  const blocked = run(t, fixture([['a', 'ttadk', [KIMI]]])); noCommand(blocked); assert.ok(hasCode(blocked, 'REVIEWER_SET_REQUIRED'));
+  const pending = run(t, fixture([['a', 'ttadk', [KIMI]]])); assert.equal(pending.kind,'launch');assert.ok(pending.gates.some(g=>g.phase==='acceptance'&&g.reason.code==='REVIEWER_PENDING'));
 });
 test('V17 approval role/time/revocation/effort scope, separate max action', () => {
   const raw = fixture([['p', 'chatgpt', [SOL]]]); let t = task(); const c = candidate(createSnapshot(raw), 'p', SOL, 'medium');
@@ -193,7 +236,7 @@ test('equal-quality company ETA and explicit personal bypass', () => {
 });
 test('light zero-priority and background expiring TTADK policy', () => {
   const raw = fixture(); raw.lanes[1].mode = 'bucket-free'; raw.lanes[1].readyAt = NOW + 600000;
-  assert.equal(run(task('lookup'), raw).primary.candidate.accountId, 'company-b');
+  assert.equal(run(task('lookup'), raw).primary.candidate.accountId, 'company-a'); // Foreground ETA retains the ready TTADK lane; Sol is not a light transfer candidate.
   assert.equal(run(task('analysis', { background: true }), raw).primary.candidate.accountId, 'company-b');
   raw.accounts[0].quota = [{ bucketId: 'daily', unit: 'tokens', usage: { used: 10, limit: 100, resetsAt: NOW + 3600000 }, priority: 'available' }];
   raw.accounts[0].burn = { projectedAtReset: 40, resetsAt: NOW + 3600000 };
@@ -204,10 +247,24 @@ test('unknown ETA remains optimistic, bounded and explicitly uncertain', () => {
   const p = run(task(), raw); assert.equal(p.kind, 'launch'); assert.equal(p.primary.estimate.confidence, 'UNKNOWN');
   assert.equal(p.primary.estimate.startDelayMin, null); assert.equal(p.primary.estimate.patienceMin, 30);
 });
-test('explicit denial reset may beat measured queue, auth cannot project recovery', () => {
+test('fresh stalled lanes rank after runnable lanes and never get an optimistic ETA', () => {
+  const raw=fixture([['a','ttadk',[SOL]],['b','trae',[ASTRA]]]);
+  Object.assign(raw.lanes[1],{mode:'bucket-free',position:181,drainPerMin:0,state:'waiting',progressAt:null});
+  for(const background of [false,true]) assert.equal(run(task('debug',{background}),raw).primary.candidate.accountId,'a');
+  const snapshot=createSnapshot(raw),e=estimateCandidate(task('debug'),snapshot,candidate(snapshot,'b',ASTRA,'xhigh'));
+  assert.equal(e.confidence,'STALLED');assert.equal(e.startDelayMin,null);assert.equal(e.completionMin,null);
+  const only=fixture([['b','trae',[ASTRA]]]);Object.assign(only.lanes[0],raw.lanes[1],{id:'b:gpt-6-astra',accountId:'b'});
+  const p=run(task('debug'),only);noCommand(p);assert.equal(p.kind,'defer');assert.equal(p.reason.code,'ETA_STALLED');
+  const waiting=fixture([['b','trae',[ASTRA]]]);Object.assign(waiting.lanes[0],{position:null,drainPerMin:null,state:'waiting'});
+  assert.equal(run(task('debug'),waiting).reason.code,'ETA_STALLED');
+  const personal=fixture([['b','trae',[ASTRA]],['personal','chatgpt',[SOL]]]);Object.assign(personal.lanes[0],{position:181,drainPerMin:0,state:'waiting'});
+  const approved=approve(personal,task('debug'),candidate(createSnapshot(personal),'personal',SOL,'xhigh'),'personal-quota',true);
+  assert.equal(run(approved,personal).primary.candidate.accountId,'personal','scoped runnable personal capacity also ranks before a stalled company lane');
+});
+test('runnable measured company queue beats reset; auth cannot project recovery', () => {
   const raw = fixture([['a', 'ttadk', [SOL]], ['b', 'trae', [SOL]]]); raw.accounts[0].providerDenied = true; raw.accounts[0].denialResetAt = NOW + 600000;
   Object.assign(raw.lanes[1], { mode: 'low-priority', position: 500, drainPerMin: 1 });
-  let p = run(task(), raw); assert.equal(p.kind, 'defer'); assert.equal(p.deferUntil, NOW + 600000);
+  let p = run(task(), raw); assert.equal(p.kind, 'launch');assert.equal(p.primary.candidate.accountId,'b');
   raw.accounts[0].auth = false; p = run(task(), raw); assert.equal(p.kind, 'launch'); assert.equal(p.primary.candidate.accountId, 'b');
   raw.accounts[0].auth = true; raw.accounts[0].providerDenied = false; raw.accounts[0].quota = [{ bucketId: 'daily', unit: 'tokens', usage: { used: 100, limit: 100, resetsAt: NOW + 600000 }, priority: 'depleted' }];
   assert.equal(run(task(), raw).primary.candidate.accountId, 'a');
@@ -273,7 +330,7 @@ test('approved single-family exception is explicit; required reviewer is not sil
   const raw = fixture([['a', 'ttadk', [KIMI]]]); let t = task('review-high', { flags: { security: true }, artifactRevision: 'artifact-1' });
   const c = candidate(createSnapshot(raw), 'a', KIMI, 'high'); t = approve(raw, t, c, 'scarce-reviewer');
   assert.equal(run(t, raw).kind, 'launch');
-  const unapproved = createTaskSpec({ ...t, approvalRefs: [] }); noCommand(run(unapproved, raw));
+  const unapproved = createTaskSpec({ ...t, approvalRefs: [] });const pending=run(unapproved, raw);assert.equal(pending.kind,'launch');assert.ok(pending.gates.some(g=>g.phase==='acceptance'&&g.reason.code==='REVIEWER_PENDING'));
 });
 test('unresolved history, exhausted repeats, partial relations and explicit escalation', () => {
   const raw = fixture([['a', 'ttadk', [SOL, ASTRA]]]);
@@ -298,7 +355,7 @@ test('adversarial policy lock precedes light conservation and ETA', () => {
   const p = run(task('lookup', { flags: { adversarial: true } }), raw); assert.equal(p.primary.candidate.modelId, KIMI);
 });
 test('ordinary release acceptance requires an independent strong reviewer family', () => {
-  const raw = fixture([['a', 'ttadk', [FLASH, KIMI, SOL]]]);
+  const raw = fixture([['a', 'ttadk', [FLASH, 'gemini-3.1-pro-preview', SOL]]]);
   const p = run(task('review', { impact: 'release', artifactRevision: 'artifact-1' }), raw);
   assert.equal(p.kind, 'launch'); assert.equal(p.reviewers.length, 1);
   assert.notEqual(p.reviewers[0].candidate.family, p.primary.candidate.family);

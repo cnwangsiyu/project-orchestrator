@@ -395,8 +395,8 @@ if (cmd === 'probe') {
   } catch (e) { out = String(e.stdout ?? '') + String(e.stderr ?? e.message); }
   fs.rmSync(dir, { recursive: true, force: true });
   const why = ok ? '' : (/"message":"([^"]{1,200})/.exec(out)?.[1] ?? out.trim().split('\n').at(-1) ?? 'failed').slice(0, 200);
-  probeResult(PROF.home, opts.model, ok, why);
-  console.log(ok ? `probe ok: ${opts.model} answers again; its family is back in routing` : `probe failed: ${opts.model} — ${why}`);
+  const applied=probeResult(PROF.home, opts.model, ok, why, Date.now(), opts['probe-claim']);
+  console.log(!applied ? `probe ignored: ${opts.model}; claim is missing or superseded` : ok ? `probe ok: ${opts.model} answers again; its family is back in routing` : `probe failed: ${opts.model} — ${why}`);
   process.exit(ok ? 0 : 1);
 }
 if (cmd === 'note-failure') {
@@ -494,6 +494,37 @@ if (cmd === 'account-add') {
 const CU_APPS = typeof opts['computer-use-apps'] === 'string' ? opts['computer-use-apps'].split(',').map((x) => x.trim()).filter(Boolean) : [];
 // --browser-origins: exact origins (https://x.y) or host globs (*.bytedance.net matches the host and its subdomains).
 const BU_ORIGINS = typeof opts['browser-origins'] === 'string' ? opts['browser-origins'].split(',').map((x) => x.trim()).filter(Boolean) : [];
+const PLAYWRIGHT_EXTENSION_TOKEN_FILE = process.env.PLAYWRIGHT_EXTENSION_TOKEN_FILE
+  || path.join(os.homedir(), '.trae', 'playwright-extension-token');
+const TRAE_BROWSER_REQUEST = PROF?.kind === 'trae' && BU_ORIGINS.length > 0 && (cmd === 'start' || cmd === 'turn');
+const TRAE_EXTENSION_BROWSER = TRAE_BROWSER_REQUEST && fs.existsSync(PLAYWRIGHT_EXTENSION_TOKEN_FILE);
+const CHROME_PROFILE_DIR = typeof opts['chrome-profile-dir'] === 'string' ? opts['chrome-profile-dir'].trim() : 'Profile 1';
+if (opts['chrome-profile-dir'] !== undefined && !CHROME_PROFILE_DIR) die('--chrome-profile-dir needs a non-empty Chrome profile directory name');
+// Playwright accepts URL-pattern-like origins separated by semicolons. Preserve explicit origins; for host globs add
+// both the wildcard and bare host because `*.example.com` does not cover example.com itself. Plain hosts use both
+// schemes and any port, which preserves localhost/dev-server routing without widening the host.
+const playwrightAllowedOrigins = (origins) => [...new Set(origins.flatMap((entry) => {
+  if (entry === '*') return ['*'];
+  try { const u = new URL(entry); return [`${u.protocol}//${u.host}`]; } catch {}
+  const host = entry.replace(/^\*\./, '');
+  if (!/^[a-zA-Z0-9.-]+(?::\d+)?$/.test(host)) return [entry, host].filter(Boolean);
+  const port = host.includes(':') ? '' : ':*';
+  return entry.startsWith('*.')
+    ? [`http://*.${host}${port}`, `https://*.${host}${port}`, `http://${host}${port}`, `https://${host}${port}`]
+    : [`http://${host}${port}`, `https://${host}${port}`];
+}))];
+// The hub starts our small launcher, which reads the token file and passes the token to @playwright/mcp through that
+// child's environment only. (An `env_vars` pass-through would need the token in the hub's own environment, which a hub
+// started earlier does not have and which every worker shell would inherit — live test 2026-11-14.)
+const TRAE_PLAYWRIGHT_ARGS = TRAE_EXTENSION_BROWSER ? [path.join(path.dirname(fileURLToPath(import.meta.url)), 'playwright-extension-mcp.mjs'),
+  '--profile-dir-name', CHROME_PROFILE_DIR] : null;
+// No --allowed-origins (live test 2026-11-14): @playwright/mcp 0.0.85 accepts only full origins or wildcard ports, not
+// host globs like *.larkoffice.com, and the filter applies to every request a page makes, so a signed-in Lark page failed
+// with net::ERR_BLOCKED_BY_CLIENT. Scope is stated in the worker's instructions and the brief instead.
+const TRAE_PLAYWRIGHT_SERVER = TRAE_EXTENSION_BROWSER ? { command: process.execPath, args: TRAE_PLAYWRIGHT_ARGS,
+  startup_timeout_sec: 120, default_tools_approval_mode: 'approve' } : null;
+if (TRAE_BROWSER_REQUEST && !TRAE_EXTENSION_BROWSER)
+  die(`TRAE signed-in Chrome needs the Playwright Extension token file: ${PLAYWRIGHT_EXTENSION_TOKEN_FILE}`, 1);
 const originAllowed = (origin) => {
   let host = ''; try { host = new URL(origin).hostname; } catch { return false; }
   return BU_ORIGINS.some((p) => p === '*' || p === origin || (p.startsWith('*.') ? host === p.slice(2) || host.endsWith(p.slice(1)) : host === p));
@@ -952,18 +983,25 @@ try {
       const bundled = path.join(os.homedir(), '.codex', '.tmp', 'bundled-marketplaces', 'openai-bundled', 'plugins', 'chrome');
       return fs.existsSync(path.join(bundled, 'scripts', 'browser-client.mjs')) ? bundled : null;
     };
-    const chromePlugin = browserThread ? findChromePlugin() : null;
-    const browserHowTo = !browserThread ? null : [
+    const chromePlugin = browserThread && !TRAE_EXTENSION_BROWSER ? findChromePlugin() : null;
+    const browserHowTo = !browserThread ? null : TRAE_EXTENSION_BROWSER ? [
+      'Browser access in this TRAE thread goes through the Playwright MCP server connected to the user\'s Chrome by the Playwright Extension.',
+      'Use the Playwright MCP tools: browser_navigate, browser_snapshot, browser_click, browser_type, browser_fill_form, browser_take_screenshot, and the other browser_* tools exposed by that server.',
+      `Navigate only to sites the task brief needs, and only within these allowed sites (host patterns): ${BU_ORIGINS.join(', ')}. Nothing enforces this list technically: if the task seems to need another site, or a page redirects you outside it, stop and report BLOCKED with the URL instead of continuing. Never open the user's other tabs, mail, chats or personal pages.`,
+      'Do not look for any other browser runtime, Chrome plugin, or Claude Code browser skill: they do not exist in this TRAE thread. If the extension or browser is unreachable, report BLOCKED with the exact Playwright error. "Extension connection timeout" means the extension/pairing or the TRAE hub\'s Chrome-profile access needs repair; the verified token flow does not show a manual approval dialog.',
+    ].join('\n') : [
       'Browser and desktop access in this thread goes through the node_repl MCP server and its `js` tool (look for a tool from the node_repl server; in code mode call it from your exec script).',
       BU_ORIGINS.length ? `For Chrome, start with exactly this in node_repl js: const { setupBrowserRuntime } = await import(${JSON.stringify(path.join(chromePlugin ?? '<chrome plugin root>', 'scripts', 'browser-client.mjs'))}); const agent = await setupBrowserRuntime(); const chrome = await agent.browsers.get("chrome"); nodeRepl.write(await chrome.documentation()); — then follow that documentation. Work only in tabs you create, close them when done, never touch the user's other tabs. Sites you may open: ${BU_ORIGINS.join(', ')}; others are declined.` : null,
       CU_APPS.length ? `For desktop apps, in node_repl js: globalThis.sky = (await import("@oai/sky")).sky; then follow its documentation. Apps you may use: ${CU_APPS.join(', ')}; others are declined.` : null,
       'Do not look for mcp__claude-in-chrome__* tools, ToolSearch, or skills written for Claude Code (chrome-browser, claude-in-chrome): they do not exist in this session. If node_repl or the browser is not reachable, report BLOCKED with the exact error.',
     ].filter(Boolean).join('\n');
+    const browserConfig = TRAE_EXTENSION_BROWSER ? { mcp_servers: { playwright: TRAE_PLAYWRIGHT_SERVER } } : browserThread ? { plugins: { 'unified-computer-use@openai-bundled': { enabled: false } } } : null;
     const digest = loadDigest();
     const th = await call('thread/start', {
       cwd: path.resolve(opts.cwd), model: opts.model, sandbox: opts.sandbox, approvalPolicy: APPROVAL_POLICY,
       developerInstructions: [browserHowTo, `Global worker rules ${digest.version}\n${digest.worker}`].filter(Boolean).join('\n'),
-      ...(browserThread ? { approvalsReviewer: 'user', config: { plugins: { 'unified-computer-use@openai-bundled': { enabled: false } } } } : {}),
+      ...(browserThread && !TRAE_EXTENSION_BROWSER ? { approvalsReviewer: 'user' } : {}),
+      ...(browserConfig ? { config: browserConfig } : {}),
     });
     const threadId = th.thread?.id ?? th.threadId;
     attemptThreadId = threadId;
@@ -977,7 +1015,8 @@ try {
     follow(threadId, ts.turn?.id ?? ts.turnId);
   } else if (cmd === 'turn') {
     if (!opts.thread || !text) die('turn needs --thread and a prompt');
-    await call('thread/resume', { threadId: opts.thread, model: opts.model }).catch(() => {});
+    const config = TRAE_EXTENSION_BROWSER ? { mcp_servers: { playwright: TRAE_PLAYWRIGHT_SERVER } } : undefined;
+    await call('thread/resume', { threadId: opts.thread, model: opts.model, config }).catch(() => {});
     tracker?.set({ mayRun: true });
     const ts = await call('turn/start', {
       threadId: opts.thread, input: textInput(text), effort: opts.effort, model: opts.model,

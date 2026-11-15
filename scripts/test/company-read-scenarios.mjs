@@ -165,36 +165,35 @@ syncBuiltinESMExports();
     return JSON.parse(exec(process.execPath, ['--import', preload, new URL('../route.mjs', import.meta.url).pathname,
       ...args, '--json', '--dry', '--mode', 'default'], { env, encoding: 'utf8', timeout: 10000 }));
   };
-  const gate = (o) => o.needsUserOK.some((n) => /^personal quota:.*company account state unknown/.test(n));
-  for (const args of [['analysis'], ['analysis', '--stakes', 'high'], ['image-gen'], ['claude-tools'], ['browser']]) {
-    const o = route(args);
-    assert.ok(o.pick, args.join(' ')); assert.ok(gate(o), args.join(' '));
-    assert.ok(o.tellUser.some((n) => /check quota\.mjs --fresh/.test(n)));
-    assert.ok(o.quota.some((n) => /company account state unknown/.test(n)));
+  const gate = (o) => o.needsUserOK.some((n) => /^personal quota:/.test(n));
+  for (const args of [['analysis'], ['analysis','--stakes','high'], ['image-gen'], ['claude-tools'], ['browser']]) {
+    const o=route(args);
+    if(args[0]==='claude-tools') { assert.equal(o.blocked,false);assert.ok(o.pick.command);assert.ok(!gate(o)); }
+    else {assert.equal(o.blocked,true,args.join(' '));assert.ok(!o.pick?.command);if(o.pick) assert.ok(gate(o));}
   }
-  const urgent = route(['analysis', '--urgent']);
-  assert.ok(urgent.pick); assert.equal(gate(urgent), false);
-  assert.ok(urgent.tellUser.some((n) => /quota\.mjs/.test(n)));
-  const company = route(['analysis'], missing, 'unknown-ttadk');
-  assert.equal(company.pick.account, 'trae'); assert.equal(gate(company), false);
-  const second = route(['design'], missing, 'unknown-ttadk');
-  assert.equal(second.pick.account, 'trae'); assert.equal(second.secondOpinion.vendor, 'claude');
-  assert.ok(gate(second), 'unknown company state also gates a personal second opinion beside a company primary');
-  for (const name of ['ttadk', 'trae']) {
-    const single = route(['analysis'], missing, 'unknown-both', JSON.stringify({ [name]: registry[name] }));
-    assert.ok(gate(single));
-    assert.ok(single.needsUserOK.some((n) => n.includes(`${name}/${registry[name].kind}`)));
+  const staleClaude=route(['claude-tools'],{...missing,checkedAt:Date.now()-11*60000});
+  assert.equal(staleClaude.blocked,false,'stale Claude status must refresh before the ten-minute admission TTL');
+  assert.ok(staleClaude.pick.command);assert.ok(!gate(staleClaude));
+  const urgent=route(['analysis','--urgent']);
+  assert.equal(urgent.blocked,true); assert.ok(!urgent.pick?.command);
+  // The router consumes public cache evidence. It never obtains credentials or
+  // turns --fresh/urgency into provider access or a scoped personal decision.
+  for(const mode of ['','unknown-ttadk','unknown-both']) {
+    const o=route(['analysis','--fresh'],missing,mode);
+    assert.ok(o.notes.some(n=>n.startsWith('--fresh:')));
+    if(mode==='unknown-both') assert.equal(o.blocked,true);else {assert.equal(o.blocked,false);assert.ok(['ttadk','trae'].includes(o.pick.account));}
   }
-  const repaired = route(['analysis'], missing, '');
-  assert.equal(repaired.pick.account, 'ttadk'); assert.equal(gate(repaired), false);
-  assert.ok(gate(route(['analysis'], '{"checkedAt":')));
-  assert.equal(route(['analysis'], '{"checkedAt":', '').pick.account, 'ttadk');
-  assert.ok(gate(route(['analysis'], missing, '', '{"ttadk":')));
-  const corruptWithCache = route(['analysis'], recovered, '', '{"ttadk":');
-  assert.ok(gate(corruptWithCache), 'a corrupt registry must not launch cached TTADK using the default personal home');
-  assert.notEqual(corruptWithCache.pick.account, 'ttadk');
-  assert.ok(gate(route(['analysis'], { ...missing, codexAccounts: null })));
-  console.log('ok   real routing gates every unknown-state personal pick, honors --urgent, and prefers recovered/known company accounts');
+  const repairedState={...recovered,checkedAt:Date.now(),codexAccounts:recovered.codexAccounts.map(a=>({...a,live:true,healthy:true}))};
+  const repaired=route(['analysis'],repairedState,'');
+  assert.equal(repaired.pick.account,'ttadk'); assert.equal(repaired.blocked,false); assert.equal(gate(repaired),false);
+  const design=route(['design'],repairedState,'');
+  assert.equal(design.secondOpinion,null,'ordinary design no longer adds a reviewer');
+  for(const broken of ['{"checkedAt":',{...missing,codexAccounts:null}]) {
+    const o=route(['analysis'],broken,''); assert.equal(o.blocked,false);assert.equal(o.pick.account,'ttadk');
+  }
+  const corruptRegistry=route(['analysis'],repairedState,'','{"ttadk":');
+  assert.equal(corruptRegistry.blocked,true); assert.ok(!corruptRegistry.pick?.command);
+  console.log('ok   router uses public cache, blocks unknown transport/corrupt registry, and requires scoped personal approval');
 
   fs.writeFileSync(profiles, JSON.stringify(registry));
   fault = 'registry-lock'; fs.mkdirSync(`${profiles}.lock`);

@@ -20,6 +20,7 @@ const home = path.join(tmp, 'trae'); fs.mkdirSync(home);
 const run = (args, { ttadkModels = [SOL, TERRA56, GPT55], traeModels = null, daily = active, company = true,
   traeHome = home, ttadkUsed = 10, historyUsed = null, claudeUsed = 10 } = {}) => {
   const a = args.slice();
+  if(Number(a[a.indexOf('--failures')+1])>0&&!a.includes('--actual')) a.push('--actual',`codex:${TERRA56}:medium@${company?'ttadk':'trae'}`);
   const trae = traeModels && { name: 'trae', kind: 'trae', home: traeHome, healthy: true, live: true, search: true, searchLive: true,
     models: traeModels, modelIds: Object.fromEntries(traeModels.map((id) => [id, id.toUpperCase()])), windows: [],
     load: Object.fromEntries(traeModels.map((id) => [id, { t: now, percent: 10 }])),
@@ -29,7 +30,7 @@ const run = (args, { ttadkModels = [SOL, TERRA56, GPT55], traeModels = null, dai
   }));
   const personal = { name: 'main', home: path.join(tmp, 'main'), live: true, windows: [window], resets: { credits: [] } };
   const ttadk = company && { name: 'ttadk', kind: 'ttadk', home: path.join(tmp, 'ttadk'), healthy: true, live: true, seenAt: now,
-    models: ttadkModels, windows: [], usage: { used: ttadkUsed, limit: 100, resetsAt: now + 8 * h } };
+    models: ttadkModels, browser:true, windows: [], usage: { used: ttadkUsed, limit: 100, resetsAt: now + 8 * h } };
   const history = path.join(tmp, 'history.jsonl');
   fs.writeFileSync(history, historyUsed == null ? '' : `${JSON.stringify({ t: now - h, ttadk: { name: 'ttadk', used: historyUsed, limit: 100, resetsAt: now + 8 * h } })}\n`);
   const cache = path.join(tmp, 'quota.json');
@@ -37,7 +38,7 @@ const run = (args, { ttadkModels = [SOL, TERRA56, GPT55], traeModels = null, dai
     codexAccounts: [personal, ...(ttadk ? [ttadk] : []), ...(trae ? [trae] : [])], errors: {}, history: {} }));
   return JSON.parse(execFileSync(process.execPath, [path.join(root, 'route.mjs'), ...a, '--mode', 'default', '--json'], {
     encoding: 'utf8', env: { ...process.env, CODEX_ACCOUNTS: path.join(tmp, 'none.json'), QUOTA_CACHE: cache,
-      QUOTA_LOG: '0', ROUTE_LOG: '0', TRAE_PROBE: '0', QUOTA_LOG_FILE: history },
+      QUOTA_LOG: '0', ROUTE_LOG: '0', ROUTE_NOW:String(now), ROUTE_LOG_FILE:path.join(tmp,'empty-routes.jsonl'), TRAE_PROBE: '0', QUOTA_LOG_FILE: history },
   }));
 };
 try {
@@ -47,9 +48,9 @@ try {
   assert.deepEqual([testBuild.pick.account, testBuild.pick.model, testBuild.pick.effort], ['ttadk', TERRA56, 'medium']);
   assert.ok(!testBuild.notes.some((n) => n.startsWith('deploy/release brief')));
   assert.ok(testBuild.notes.some((n) => n.startsWith('test-environment build-run')));
-  // A test-env deploy is remote/procedural: no local heavy-build wrapper hint, explicit no-lock note.
-  assert.ok(!testBuild.notes.some((n) => n.startsWith('build brief: full-package builds must use')));
-  assert.ok(testBuild.notes.some((n) => n.startsWith('test-environment run (--env test): no heavy-build/lane lock')));
+  // V20: environment is not execution location. Only --no-local-build proves remote.
+  assert.ok(testBuild.notes.some((n) => n.startsWith('build brief: full-package builds must use')));
+  assert.ok(testBuild.plan.gates.some((g)=>g.kind==='local-resource-admission'));
 
   // A failed light run escalates to Sol medium, not to another light model.
   const testRetry = run(['build-run', '--env', 'test', '--failures', '1']);
@@ -77,7 +78,7 @@ try {
   const depletedSol = { ...active, [SOL]: bucket(true) };
   const sideways = run(['build-run', '--env', 'test', '--failures', '1'], { company: false, daily: depletedSol, traeModels: [SOL, SOL56, TERRA56, GPT55, FLASH] });
   assert.equal(sideways.tier, 'normal');
-  assert.equal(sideways.pick.model, SOL56, 'normal-tier fallback, not a light model');
+  assert.equal(sideways.pick.model, SOL, 'retry keeps the approved Terra-to-Sol escalation');
   assert.ok(![TERRA56, GPT55].includes(sideways.pick.model));
 
   // A TTADK light failure has one explicit retry: Sol medium. Even when TRAE's Sol/Sol56 buckets are depleted and

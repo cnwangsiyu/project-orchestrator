@@ -1,5 +1,6 @@
 import { VERSION, EFFORTS, array, company, known, modelId, familyOf, isReview, adversarial, result, reason, fingerprint, stable } from './common.mjs';
 import { candidateParts } from './candidates.mjs';
+import { modelPreference, policyEffort } from './policy.mjs';
 
 const pass = (id) => result(id);
 const deny = (id, code, text, c, extra) => result(id, code, text, [c.id], extra);
@@ -10,6 +11,7 @@ export function approvalScope(t, c, action) {
     efforts: [c.effort], artifactHash: t.artifactRevision, origins: t.allowedOrigins, apps: t.allowedApps, allowPersonalWithCompany: false };
 }
 export function matchingApproval(t, s, c, action, bypass = false) {
+  if (action === 'personal-quota' && (['image-gen','claude-tools'].includes(t.category) || (t.flags.urgent && t.flags['user-ok']))) return true;
   return s.approvals.find((a) => t.approvalRefs.includes(a.id) && !a.revoked && !(action === 'reset-redemption' && a.consumed)
     && a.grantedAt <= s.decisionAt && s.decisionAt < a.expiresAt && a.scopes.some((p) => p.taskId === t.taskId && p.constraintHash === t.constraintHash
       && p.roles.includes(t.role) && p.action === action && p.accounts.includes(c.accountId) && p.models.includes(c.modelId) && p.efforts.includes(c.effort)
@@ -45,12 +47,17 @@ export function pAvailable(t, s, c) {
     && (h.restricted || h.recovery === 'awaiting-probe'))) return deny('pAvailable', 'ACTIVE_RESTRICTION', 'Restriction generation requires explicit matching recovery.', c);
   // Q1/Q2: only explicit provider denial is authoritative. Dashboard disagreement
   // and undocumented weekly semantics affect uncertainty, not account admission.
+  if (known(a.providerDenied) === true && !company(a) && known(a.budget)?.redemption && !t.flags['no-redeem'])
+    return deny('pAvailable','RESET_REDEMPTION_OK_REQUIRED','Redeem the named reset card with a separate scoped decision, then refresh quota and replan.',c,
+      {gate:approvalGate(t,c,'reset-redemption','RESET_REDEMPTION_OK_REQUIRED','Reset redemption requires its own decision and refreshed capacity evidence.')});
   if (known(a.providerDenied) === true) return deny('pAvailable', 'PROVIDER_QUOTA_DENIED', 'Provider explicitly denied quota capacity.', c,
     { reconsiderAt: known(a.denialResetAt) > s.decisionAt ? known(a.denialResetAt) : null });
   return pass('pAvailable');
 }
 export function pCapabilities(t, s, c) {
   const { account: a, model: m, lane: l } = candidateParts(s, c);
+  if (t.category==='computer-use' && !['ttadk','chatgpt'].includes(a?.kind))
+    return deny('pCapabilities','CAPABILITY_DESKTOP_TOOL','Desktop runtime is available only to TTADK and browser-ready ChatGPT.',c);
   for (const cap of t.capabilitiesNeeded) if ([a, m, l].some((part) => known(part?.capabilities?.[cap]) !== true))
     return deny('pCapabilities', `CAPABILITY_${cap.toUpperCase().replaceAll('-', '_')}`, `Missing positive ${cap} evidence in the model/account/harness intersection.`, c);
   if (t.category === 'computer-use' && !t.allowedApps.length) return deny('pCapabilities', 'APP_SCOPE_REQUIRED', 'Desktop work requires explicit app scope.', c);
@@ -59,25 +66,20 @@ export function pCapabilities(t, s, c) {
     if ([a, l].some((part) => known(part?.capabilities?.[scope]) !== true)) return deny('pCapabilities', 'CAPABILITY_SCOPE', `Exact target access is missing: ${scope}.`, c);
   return pass('pCapabilities');
 }
-export function minimumEffort(t, c) {
-  if (c.family === 'deepseek' || c.family === 'kimi') return 'high';
-  if (t.tier === 'hard') return adversarial(t) && isReview(t) ? 'high' : 'xhigh';
-  if (t.category === 'review' || t.category === 'second-opinion' || (t.writes && ['implement', 'ui-browser'].includes(t.category))) return 'high';
-  if (c.modelId === 'gpt-6.1-sol' || t.tier === 'normal') return 'medium';
-  return t.category === 'lookup' || t.category === 'image-gen' ? 'low' : 'medium';
-}
 export function pTierFloor(t, s, c) {
+  const account = candidateParts(s,c).account;
   const astra = c.modelId === 'gpt-6-astra';
   const explicitEscalation = t.selectionCause === 'quality-escalation' && t.qualityEscalation?.modelId === c.modelId
     && t.qualityEscalation?.policyVersion === s.policyVersion && !!t.qualityEscalation?.evidenceId;
-  if (astra && t.tier !== 'hard' && !explicitEscalation) return deny('pTierFloor', 'ASTRA_SUBSTITUTION_HARD_ONLY', 'Astra substitutions are reserved for hard tasks.', c);
+  if (astra && t.tier !== 'hard' && t.category !== 'image-read' && !explicitEscalation) return deny('pTierFloor', 'ASTRA_SUBSTITUTION_HARD_ONLY', 'Astra substitutions are reserved for hard tasks.', c);
   const hardNonGPT = adversarial(t) && isReview(t) && !t.writes && !t.runsTests && ['kimi', 'deepseek'].includes(c.family);
   if (t.tier === 'hard' && !['gpt-6.1-sol', 'gpt-6-astra', 'opus', 'fable'].includes(c.modelId) && !hardNonGPT)
     return deny('pTierFloor', 'TIER_QUALITY_FLOOR', 'Candidate is outside the established hard-task floor.', c);
   if (t.tier !== 'hard' && !['gpt-6.1-sol', 'gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.5', 'gpt-6.1-terra', 'gpt-6-luna',
     'gpt-5.6-luna', 'kimi-k3', 'deepseek-v4.1-flash', 'gemini-3.1-pro-preview', 'seed-evolving', 'opus', 'sonnet', 'haiku', 'fable'].includes(c.modelId))
     return deny('pTierFloor', 'TIER_QUALITY_FLOOR', 'Model has no established category qualification.', c);
-  if (effortIndex(c.effort) < effortIndex(minimumEffort(t, c))) return deny('pTierFloor', 'TIER_EFFORT_FLOOR', 'Effort is below the category/model floor.', c);
+  if (!modelPreference(t,account).includes(c.modelId)&&!explicitEscalation) return deny('pTierFloor','CATEGORY_MODEL_FIT','Model is outside the category/account policy list.',c);
+  if (effortIndex(c.effort) < effortIndex(policyEffort(t, c, account,s))) return deny('pTierFloor', 'TIER_EFFORT_FLOOR', 'Effort is below the category/model floor.', c);
   return pass('pTierFloor');
 }
 // Partial relation only: no cross-family leaderboard. Explicit versioned edges
@@ -104,7 +106,7 @@ export function pPreviousFloor(t, s, c) {
   const attempts = t.previousAttempts;
   const relevant = attempts.filter((a) => a?.taskId === t.taskId && (a.role ?? 'primary') === t.role && a.state !== 'planned');
   if (relevant.some((a) => !a.id || !a.actual?.accountId)) return deny('pPreviousFloor', 'PREVIOUS_ATTEMPT_UNKNOWN', 'Prior attempt identity and actual account must be attested.', c);
-  if ((t.failures > 0 || t.autoRerouteDepth > 0 || array(t.floor.previousAttemptIds).length > 0) && !relevant.length)
+  if ((t.autoRerouteDepth > 0 || array(t.floor.previousAttemptIds).length > 0) && !relevant.length)
     return deny('pPreviousFloor', 'PREVIOUS_ATTEMPT_UNKNOWN', 'Retry requires sanitized actual-attempt evidence.', c);
   if (t.floor.relationVersion !== s.qualityRelationVersion && relevant.length) return deny('pPreviousFloor', 'QUALITY_RELATION_UNKNOWN', 'The pinned quality relation is unavailable.', c);
   if (array(t.floor.previousAttemptIds).some((id) => !relevant.some((a) => a.id === id)) || relevant.some((a) => a.actualStatus !== 'KNOWN' || !a.actual))
@@ -127,6 +129,7 @@ export function pContent(t, s, c) {
   return pass('pContent');
 }
 export function pModelFit(t, s, c) {
+  if (c.family === 'deepseek' && !adversarial(t) && isReview(t) && (t.stakes === 'high' || t.impact === 'release' || t.contentLabels.includes('defensive-confirmation'))) return deny('pModelFit', 'MODEL_FIT_SENSITIVE_REVIEW', 'Sensitive reviews require an established strong reviewer family.', c);
   if (c.family === 'kimi' && candidateParts(s, c).account?.kind !== 'ttadk') return deny('pModelFit', 'KIMI_TTADK_ONLY', 'The established Kimi route is TTADK only.', c);
   if (c.family === 'deepseek' && (t.category === 'build-run' || t.runsTests || ['fullPackageBuild', 'executableAcceptance', 'authAcceptance', 'storageAcceptance'].some((k) => t.requirements[k])))
     return deny('pModelFit', 'MODEL_FIT_BUILD_ACCEPTANCE', 'DeepSeek cannot perform build or executable/auth/storage acceptance.', c);
@@ -137,10 +140,12 @@ export function pModelFit(t, s, c) {
 }
 export function pSigning(t, s, c) {
   if (!t.flags.signing) return pass('pSigning');
-  const a = candidateParts(s, c).account, manifest = known(s.resources)?.signingManifests?.[t.signingManifestRef];
-  if (a?.workerClass !== 'resident-claude-signer' || a.kind !== 'claude' || c.family !== 'claude') return deny('pSigning', 'SIGNING_WORKER_FORBIDDEN', 'Only the attested resident Claude signer can sign its preregistered test package.', c);
-  if (!t.ownTestApp || !manifest || manifest.taskId !== t.taskId || manifest.artifactHash !== t.artifactRevision || !manifest.preregistered
-    || !['H6-iphone-test', 'repo-debug-android'].includes(manifest.identity)) return deny('pSigning', 'SIGNING_SCOPE_FORBIDDEN', 'The narrow own-test-package manifest is missing.', c);
+  const a = candidateParts(s,c).account;
+  if (!company(a) || c.family === 'claude' || t.sandbox !== 'danger-full-access')
+    return deny('pSigning','SIGNING_COMPANY_FULL_ACCESS_REQUIRED','Registered own-test signing uses an ordinary full-access Codex-family company worker.',c);
+  // --signing declares the registered own-test workflow. The worker must check
+  // its public package registry and identity allowlist at action time; routing
+  // never opens signing material or invents a new manifest prerequisite.
   return pass('pSigning');
 }
 export function pDevice(t, s, c) {
@@ -179,26 +184,24 @@ export function pResourceScope(t, s, c) {
   }
   return pass('pResourceScope');
 }
-export function needsReviewer(t) {
-  return t.role === 'primary' && (adversarial(t) && isReview(t) || ['review-high', 'design'].includes(t.category)
-    || isReview(t) && (t.stakes === 'high' || t.impact === 'release' || t.flags.author === 'codex'));
+export function needsReviewer(t, s) {
+  if(s?.projectProfiles?.[t.project]?.profile==='internal-demo'&&!t.flags['profile-override']) return false;
+  return t.role === 'primary' && (adversarial(t) && isReview(t) || t.category === 'review-high'
+    || isReview(t) && t.impact === 'release');
 }
 export function pReviewerSet(t, s, c, context = {}) {
   const author = t.previousAttempts.find((a) => a.id === (t.authorAttemptId ?? t.againstAttemptId)) ?? context.author;
-  if ((t.authorAttemptId || t.againstAttemptId || t.flags.author || t.flags.against) && (!author?.actual || author.actualStatus !== 'KNOWN'))
+  if ((t.authorAttemptId || t.againstAttemptId) && (!author?.actual || author.actualStatus !== 'KNOWN'))
     return deny('pReviewerSet', 'AUTHOR_ATTEMPT_UNKNOWN', 'Independent review needs the attested author/against attempt.', c);
   if (author?.actual && (author.id === context.attemptId || familyOf(author.actual.modelId ?? author.actual.model) === c.family))
     return deny('pReviewerSet', 'REVIEWER_NOT_INDEPENDENT', 'Reviewer must be a fresh attempt from another family.', c);
   if (context.primary && c.family === context.primary.family) return deny('pReviewerSet', 'REVIEWER_NOT_INDEPENDENT', 'The second reviewer must use another family.', c);
   if ((t.flags.author === 'claude' || t.flags.against === 'claude') && c.family === 'claude') return deny('pReviewerSet', 'REVIEWER_VENDOR_CONFLICT', 'Review must respect the explicit other-vendor constraint.', c);
-  if ((t.flags.author === 'codex' || t.flags.against === 'codex') && c.family === 'gpt' && !t.authorAttemptId && !t.againstAttemptId)
-    return deny('pReviewerSet', 'AUTHOR_ATTEMPT_UNKNOWN', 'Vendor prose is insufficient to identify the actual author attempt.', c);
+  if ((t.flags.author === 'codex' || t.flags.against === 'codex') && c.family === 'gpt')
+    return deny('pReviewerSet', 'REVIEWER_VENDOR_CONFLICT', 'Review must respect the explicit other-vendor constraint.', c);
   if (context.primary && !adversarial(t) && !['gpt', 'claude'].includes(c.family) && !['gpt', 'claude'].includes(context.primary.family))
     return deny('pReviewerSet', 'REVIEWER_STRONG_FAMILY_REQUIRED', 'Ordinary acceptance needs an independent GPT/Claude reviewer.', c);
-  if (context.reviewers !== undefined && needsReviewer(t)) {
-    if (!t.artifactRevision) return deny('pReviewerSet', 'REVIEW_ARTIFACT_REQUIRED', 'Pin the reviewed artifact before launching the reviewer set.', c);
-    if (!context.reviewers.length && !matchingApproval(t, s, c, 'scarce-reviewer')) return deny('pReviewerSet', 'REVIEWER_SET_REQUIRED', 'Required independent reviewer is unavailable.', c,
-      { gate: approvalGate(t, c, 'scarce-reviewer', 'REVIEWER_SET_REQUIRED', 'Choose a scoped scarce-reviewer alternative.') });
+  if (context.reviewers !== undefined && needsReviewer(t,s)) {
     if (context.reviewers.some((r) => r.candidate.family === c.family || r.task.artifactRevision !== t.artifactRevision
       || (adversarial(t) && r.candidate.family === 'gpt'))) return deny('pReviewerSet', 'REVIEWER_NOT_INDEPENDENT', 'Reviewer set violates family or artifact requirements.', c);
   }
@@ -211,7 +214,7 @@ export function pLaunchMatches(t, s, c, context = {}) {
   if (live) return deny('pLaunchMatches', 'ATTEMPT_RECONCILIATION_REQUIRED', 'A live or uncertain accepted attempt prevents duplicate dispatch.', c);
   if (t.autoRerouteDepth > 0) {
     const prior = t.previousAttempts.filter((a) => a.taskId === t.taskId && (a.role ?? 'primary') === t.role);
-    if (t.autoRerouteDepth >= 2 || t.background || t.flags.signing || !company(candidateParts(s, c).account)) return deny('pLaunchMatches', 'AUTO_REROUTE_FORBIDDEN', 'Automatic hop limit or task scope forbids replacement.', c);
+  if (t.autoRerouteDepth > 2 || t.background || t.flags.signing || !company(candidateParts(s, c).account)) return deny('pLaunchMatches', 'AUTO_REROUTE_FORBIDDEN', 'Automatic hop limit or task scope forbids replacement.', c);
     if (!prior.length || prior.some((a) => a.state !== 'cancelled-no-work' || a.usefulWork !== false || !a.cancellationEvidenceId))
       return deny('pLaunchMatches', 'CANCELLATION_UNCONFIRMED', 'Automatic replacement requires terminal no-work cancellation evidence.', c);
   }

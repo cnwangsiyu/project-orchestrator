@@ -36,9 +36,12 @@ export const requestsFor = (category, taskTier) => (['review', 'review-high', 's
 //                             slowdown = 1 when that is under the per-request noise floor, else
 //                             1 + (position/r * requests) / workMin   (each request waits the same start delay)
 //   no usable telemetry    -> optimistic 0/1 with unknown:true; the worker's patience deadline covers a slow lane
+//   fresh zero-drain queue or waiting without progress -> stalled, with no finite ETA
 export const laneEta = ({ workMin, requests, position = null, drainPerMin = null, bucketDepleted = false,
-  congested = false, progressing = false, unknown = false, startDelayMin = 0 }) => {
-  const queued = bucketDepleted || congested;
+  congested = false, progressing = false, state = null, unknown = false, startDelayMin = 0 }) => {
+  if ((finite(position) && position > 0 && drainPerMin === 0) || (state === 'waiting' && !progressing))
+    return { startDelayMin: null, slowdown: null, completionMin: null, unknown: false, stalled: true, basis: 'stalled' };
+  const queued = bucketDepleted || congested || state === 'queued' || state === 'waiting' || (finite(position) && position > 0);
   if (!queued || (progressing && !congested)) {
     return { startDelayMin, slowdown: 1, completionMin: startDelayMin + workMin, unknown, basis: progressing ? 'progressing' : 'available' };
   }
@@ -73,6 +76,7 @@ export const patienceMinutes = ({ now, ttadk }) => {
 };
 // Human-readable estimate for `why`: "6.1-Sol@trae now, est. 95 min; TTADK in 9.2h → est. 10.7h".
 export const etaText = (row) => {
+  if (row.stalled || row.basis === 'stalled') return `${row.model}@${row.account} STALLED (fresh waiting/zero-drain telemetry; awaiting progress)`;
   const start = row.startDelayMin >= 1 ? `in ${Math.round(row.startDelayMin)} min` : 'now';
   const total = row.completionMin >= 90 ? `${(row.completionMin / 60).toFixed(1)}h` : `${Math.round(row.completionMin)} min`;
   const queue = row.basis === 'queue' ? ` queued ${row.lane.position}, drain ${row.lane.drainPerMin.toFixed(2)}/min` : '';

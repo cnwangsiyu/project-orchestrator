@@ -1,6 +1,6 @@
 import { VERSION, EFFORTS, array, object, idOK, modelId, familyOf, compare, unique, nonnegative, finite, clone, freeze, fingerprint, reason } from './common.mjs';
 
-export const FRESHNESS = freeze({ cacheMs: 600000, telemetryMs: 1800000 });
+export const FRESHNESS = freeze({ cacheMs: 600000, telemetryMs: 1800000, quotaMs: 1800000 });
 // A frozen object alone is not proof that the normalization boundary ran.
 // This also accepts retained JSON snapshots without changing their diagnostics.
 export function isNormalizedSnapshot(s) {
@@ -79,8 +79,8 @@ export function createSnapshot(raw, options = {}) {
     const catalog = obs(a.catalog, `${prefix}.catalog`, strings);
     if (catalog.value) catalog.value = unique(catalog.value.map(modelId));
     const quota = rows(a.quota ?? [], `${prefix}.quota`).map((q) => ({ bucketId: q.bucketId, unit: q.unit,
-      authoritative: q.authoritative === true, usage: obs(q.usage, `${prefix}.quota.${q.bucketId}.usage`, usageOK),
-      priority: obs(q.priority, `${prefix}.quota.${q.bucketId}.priority`, (v) => ['available', 'depleted', 'bucket-free'].includes(v)) })).sort((a, b) => compare(a.bucketId, b.bucketId));
+      authoritative: q.authoritative === true, usage: obs(q.usage, `${prefix}.quota.${q.bucketId}.usage`, usageOK, FRESHNESS.quotaMs),
+      priority: obs(q.priority, `${prefix}.quota.${q.bucketId}.priority`, (v) => ['available', 'depleted', 'bucket-free'].includes(v), FRESHNESS.quotaMs) })).sort((a, b) => compare(a.bucketId, b.bucketId));
     // Optional legacy cards/windows cannot erase independently good auth/catalog.
     for (const key of ['resets', 'windows']) if (a[key] !== undefined) {
       const good = key === 'resets' ? object(a.resets) && Array.isArray(a.resets.credits) && nonnegative(a.resets.count)
@@ -92,15 +92,16 @@ export function createSnapshot(raw, options = {}) {
       company: ['ttadk', 'trae'].includes(a.kind), auth: obs(a.auth, `${prefix}.auth`, bool), transport: obs(a.transport, `${prefix}.transport`, bool),
       health: obs(a.health ?? (Array.isArray(raw.health) && raw.health.every((h) => object(h) && idOK(h.accountId) && typeof h.restricted === 'boolean') ? true : undefined), `${prefix}.health`, bool), catalog,
       capabilities: caps(a.capabilities, `${prefix}.capabilities`), quota,
-      workerClass: a.workerClass === 'resident-claude-signer' && a.kind === 'claude' ? a.workerClass : 'ordinary',
+      workerClass: 'ordinary',
       providerDenied: obs(a.providerDenied, `${prefix}.providerDenied`, bool),
       denialResetAt: obs(a.denialResetAt, `${prefix}.denialResetAt`, nonnegative),
       burn: obs(a.burn, `${prefix}.burn`, (v) => object(v) && nonnegative(v.projectedAtReset) && nonnegative(v.resetsAt), FRESHNESS.telemetryMs),
+      budget: obs(a.budget, `${prefix}.budget`, object),
     };
   }), 'accounts');
   const lanes = byId(rows(raw.lanes, 'lanes').map((l) => {
     const prefix = `lanes.${l.id}`;
-    const modeEvidence = obs(l.modeEvidence ?? l.mode, `${prefix}.mode`, (m) => ['standard', 'priority', 'low-priority', 'bucket-free'].includes(m));
+    const modeEvidence = obs(l.modeEvidence ?? l.mode, `${prefix}.mode`, (m) => ['standard', 'priority', 'low-priority', 'bucket-free'].includes(m), FRESHNESS.quotaMs);
     return { id: l.id, accountId: l.accountId, modelId: modelId(l.modelId), harness: idOK(l.harness) ? l.harness : 'UNKNOWN',
       efforts: obs(l.efforts, `${prefix}.efforts`, (x) => strings(x) && x.every((e) => EFFORTS.includes(e))),
       mode: modeEvidence.value ?? 'UNKNOWN', modeEvidence, selectable: l.selectable === true, evidenced: l.evidenced === true,
@@ -108,9 +109,11 @@ export function createSnapshot(raw, options = {}) {
       capabilities: caps(l.capabilities, `${prefix}.capabilities`),
       position: obs(l.position, `${prefix}.position`, nonnegative, FRESHNESS.telemetryMs),
       drainPerMin: obs(l.drainPerMin, `${prefix}.drainPerMin`, nonnegative, FRESHNESS.telemetryMs),
+      queueState: obs(l.queueState ?? l.state, `${prefix}.queueState`, (v) => ['queued', 'waiting', 'ready'].includes(v), FRESHNESS.telemetryMs),
       progressAt: obs(l.progressAt, `${prefix}.progressAt`, (v) => nonnegative(v) && v <= decisionAt && decisionAt - v <= FRESHNESS.telemetryMs, FRESHNESS.telemetryMs),
       loadPercent: obs(l.loadPercent, `${prefix}.loadPercent`, (v) => nonnegative(v) && v <= 100, FRESHNESS.telemetryMs),
       loadSource: ['model', 'family', 'account'].includes(l.loadSource) ? l.loadSource : 'UNKNOWN',
+      familyQueue:obs(l.familyQueue,`${prefix}.familyQueue`,object,FRESHNESS.telemetryMs),
       bucketIds: unique(array(l.bucketIds).filter(idOK)), costs: rows(l.costs ?? [], `${prefix}.costs`).map((c) => ({
         bucketId: c.bucketId, unit: c.unit, amount: nonnegative(c.amount) ? c.amount : null,
         normalizedShare: obs(c.normalizedShare, `${prefix}.costs.${c.bucketId}`, nonnegative).value, prioritySpend: typeof c.prioritySpend === 'boolean' ? c.prioritySpend : null,
@@ -139,6 +142,9 @@ export function createSnapshot(raw, options = {}) {
     etaHistory: rows(raw.etaHistory ?? [], 'etaHistory').filter((h) => idOK(h.attemptId) && nonnegative(h.minutes) && h.minutes > 0
       && (!h.sampledAt || h.sampledAt <= decisionAt)).map((h) => ({ attemptId: h.attemptId, category: h.category, modelId: modelId(h.modelId), accountId: h.accountId,
         effort: h.effort, minutes: h.minutes, cause: h.cause ?? null })).sort((a, b) => compare(a.attemptId, b.attemptId)),
+    reviewHistory: rows(raw.reviewHistory ?? [], 'reviewHistory').map((r) => ({ t: r.t, project: r.project, name: r.name, category: r.category, role: r.role ?? 'primary', reviewOverride:r.reviewOverride??null, requestId:r.requestId??null })),
+    outcomes: rows(raw.outcomes ?? [], 'outcomes').map((r) => ({ t: r.t, category: r.category, modelId: modelId(r.modelId), result: r.result })),
+    projectProfiles: clone(object(raw.projectProfiles) ? raw.projectProfiles : {}),
     diagnostics: diagnostics.sort((a, b) => compare(`${a.subjects}:${a.code}`, `${b.subjects}:${b.code}`)) };
   snapshot.contentHash = fingerprint(snapshot); snapshot.id = `snapshot:${snapshot.contentHash}`;
   return freeze(snapshot);
@@ -191,6 +197,7 @@ export function snapshotFromAnalyze(analyzed, metadata = {}) {
     return { ...l,
       ...(l.position === undefined && direct ? { position: stamp(direct.position, direct.t, FRESHNESS.telemetryMs) } : {}),
       ...(l.drainPerMin === undefined && direct ? { drainPerMin: stamp(direct.drainPerMin, direct.t, FRESHNESS.telemetryMs) } : {}),
+      ...(l.queueState === undefined && direct ? { queueState: stamp(direct.state, direct.t, FRESHNESS.telemetryMs) } : {}),
       ...(l.progressAt === undefined && direct ? { progressAt: stamp(direct.lastProgressAt, direct.t, FRESHNESS.telemetryMs) } : {}),
       ...(l.loadPercent === undefined && load ? { loadPercent: stamp(load.percent, load.t, FRESHNESS.telemetryMs), loadSource: 'model' } : {}),
     };

@@ -19,7 +19,7 @@ const profiles = path.join(tmp, 'profiles.json'); fs.writeFileSync(profiles, '{}
 const bin = path.join(tmp, 'bin'); fs.mkdirSync(bin);
 for (const cli of ['codex', 'claude']) fs.writeFileSync(path.join(bin, cli), '#!/bin/sh\nprintf \'{"models":[]}\\n\'\n', {mode:0o755});
 const env = {...process.env, HOME:home, PATH:`${bin}:${process.env.PATH}`, CODEX_ACCOUNTS:profiles,
-  QUOTA_CACHE:cache, ROUTE_LOG:'0', ROUTE_LOG_FILE:outcomes, QUOTA_LOG:'0', QUOTA_LOG_FILE:path.join(tmp,'no-quota-history'),
+  QUOTA_CACHE:cache, ROUTE_NOW:String(now), ROUTE_LOG:'0', ROUTE_LOG_FILE:outcomes, QUOTA_LOG:'0', QUOTA_LOG_FILE:path.join(tmp,'no-quota-history'),
   TRAE_PROBE:'0', ROUTE_RR:path.join(tmp,'rotation')};
 const bucket = (depleted=true) => ({depleted, used:depleted?80:1, limit:80, remaining:depleted?0:79, resetsAt:now+360*min});
 const lane = (position, drainPerMin, extra={}) => ({t:now, state:'queued', position, drainPerMin, ...extra});
@@ -66,30 +66,57 @@ try {
   assert.equal(r.pick.model,ASTRA,'measured delay beats default model strength');
   assert.ok(r.why.some((s)=>/queued 20, drain 20.00\/min/.test(s)));
   r = route({lanes:{[SOL]:lane(10,5),[ASTRA]:lane(20,5)},resetMin:240});
-  assert.equal(r.pick,null,'even a two-minute improvement schedules the faster reset');
-  assert.equal(r.deferRunnerUp.model,SOL); assert.ok(r.deferUntil>now);
-  assert.ok(r.tellUser.some((s)=>/record it in the ledger and set a timer/.test(s)));
+  assert.equal(r.pick.account,'trae','runnable company work launches even if a reset projects earlier completion');
+  assert.equal(r.deferUntil,null); assert.ok(r.pick.command);
+  assert.equal(r.kind,'launch');assert.ok(r.pick.command);
   const stale = {[SOL]:lane(500,0.5,{t:now-31*min}),[ASTRA]:lane(500,0.5,{t:now+min})};
   r = route({lanes:stale,resetMin:40});
   assert.equal(r.pick.model,SOL); assert.equal(r.deferred,null,'stale/future lanes cannot force a scheduled wait');
+  // Fresh stuck telemetry is positive evidence, even at a queue position below 300.
+  const stuck=lane(181,0,{state:'waiting',lastProgressAt:null});
+  r=route({lanes:{[ASTRA]:stuck,[SOL]:lane(null,null,{state:'ready',lastProgressAt:now})}});
+  assert.equal(r.pick.model,SOL,'a progressing lane beats a fresh zero-drain queue');
+  const stalled=r.eta.find(x=>x.model===ASTRA&&x.account==='trae');
+  assert.equal(stalled.confidence,'STALLED');assert.equal(stalled.startDelayMin,null);assert.equal(stalled.completionMin,null);
+  assert.equal(stalled.unknown,false);assert.match(r.why.join(' '),/gpt-6-astra@trae STALLED/);
+  assert.doesNotMatch(r.why.join(' '),/gpt-6-astra@trae now/);
+  r=route({ttAvailable:true,lanes:{[SOL]:stuck,[ASTRA]:stuck}});
+  assert.equal(r.pick.account,'ttadk','ready company capacity beats every stalled lane');
+  r=route({lanes:{[SOL]:stuck,[ASTRA]:stuck},resetMin:40});
+  assert.equal(r.kind,'defer');assert.equal(r.deferUntil,now+40*min,'a known reset beats stalled lanes');
+  r=route({lanes:{[ASTRA]:stuck},args:['debug','--failures','1','--actual',`codex:${ASTRA}:high@trae`]});
+  assert.equal(r.kind,'defer');assert.equal(r.plan.reason.code,'ETA_STALLED');assert.equal(r.pick,null,'no downgrade or optimistic launch when the only floor-safe lane is stalled');
+  r=route({lanes:{[ASTRA]:{...stuck,t:now-31*min}}});
+  const expired=r.eta.find(x=>x.model===ASTRA&&x.account==='trae');
+  assert.equal(expired.confidence,'UNKNOWN');assert.equal(expired.stalled,false,'stale stuck telemetry is unknown');
+  r=route({daily:{[SOL]:bucket(),[ASTRA]:{...bucket(),resetsAt:now-1}},
+    lanes:{[ASTRA]:lane(18,6),[SOL]:lane(null,null,{state:'ready',lastProgressAt:now})}});
+  const moving=r.eta.find(x=>x.model===ASTRA&&x.account==='trae');
+  assert.equal(moving.basis,'queue');assert.equal(moving.startDelayMin,3);assert.equal(moving.unknown,false,'fresh positive drain remains measured when quota metadata expires');
+  for(const data of [{position:181,drainPerMin:0},{state:'waiting'}]) {
+    const e=laneEta({workMin:90,requests:120,...data});
+    assert.equal(e.basis,'stalled');assert.equal(e.unknown,false);assert.equal(e.completionMin,null);
+  }
+  assert.equal(laneEta({workMin:90,requests:120,bucketDepleted:true,unknown:true}).basis,'unknown');
   r = route({lanes:{[SOL]:lane(500,0.5),[ASTRA]:lane(null,null,{state:'ready',lastProgressAt:now})},args:['implement-hard','--shared-lock']});
   assert.equal(r.pick.model,ASTRA,'resource work prefers a model progressing now');
   assert.ok(r.notes.some((s)=>/take the lease\/lock only after the first model response/.test(s)));
   // Same moderately queued lane: a small task beats the reset, a large one is scheduled for it.
-  const slow = {[SOL]:lane(100,2),[ASTRA]:lane(100,2),'gpt-5.6-terra':lane(100,2),'gpt-5.5':lane(100,2),'deepseek-v4.1-flash':lane(100,2)};
+  const slow = {[SOL]:lane(100,2),[ASTRA]:lane(100,2),'gpt-5.6-sol':lane(100,2),'gpt-5.6-terra':lane(100,2),'gpt-5.5':lane(100,2),'deepseek-v4.1-flash':lane(100,2)};
   r = route({lanes:slow,resetMin:600,args:['lookup']});
   assert.equal(r.pick.model,'gpt-5.6-terra'); assert.equal(r.deferred,null);
-  r = route({lanes:slow,resetMin:600}); assert.equal(r.pick,null); assert.ok(r.deferUntil);
+  r = route({lanes:slow,resetMin:600}); assert.equal(r.pick.account,'trae');assert.equal(r.deferUntil,null);
   r = route({args:['implement'], daily:{[SOL]:bucket(),[ASTRA]:bucket(),'gpt-5.6-sol':bucket(false)},
     lanes:{'gpt-5.6-sol':lane(500,0.5)}});
   assert.equal(r.pick.model,'gpt-5.6-terra','fresh congestion on an alternative is considered even without Sol telemetry');
-  r = route({args:['implement','--failures','1']});
+  r = route({args:['implement','--failures','1','--actual',`codex:${SOL}:high@trae`]});
   assert.equal(r.deferred,null,'retry dispatches are not held for reset');
   assert.ok(r.eta.filter((x)=>x.account==='trae').every((x)=>[SOL,ASTRA].includes(x.model)&&x.requests===120&&x.workMin===90),
     'retry estimates and alternatives belong to the selected hard rung');
   for (const category of ['implement-hard','debug','science','design','review-high']) {
     r = route({args:[category]}); assert.ok([SOL,ASTRA].includes(r.pick.model));
-    assert.ok(!r.needsUserOK.some((s)=>s.startsWith('personal quota:')),category);
+    if(category==='review-high') {assert.equal(r.blocked,false);assert.ok(r.needsUserOK.some(s=>s.startsWith('personal quota:')),'required second needs scoped consent');}
+    else assert.ok(!r.needsUserOK.some((s)=>s.startsWith('personal quota:')),category);
   }
   assert.equal(laneEta({workMin:90,requests:120,bucketDepleted:true,position:100,drainPerMin:0.01}).startDelayMin,10000);
   assert.equal(patienceMinutes({now,ttadk:{usage:{resetsAt:now+2*min}}}),0.5);

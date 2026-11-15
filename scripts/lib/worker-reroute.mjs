@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { rulesLog } from './global-rules.mjs';
 import { readLeases } from './resource-data.mjs';
@@ -79,12 +80,13 @@ export const rerouteWorker = async ({ args, depth, from, reason, prompt, opts, p
   const held = heldTaskResources(args, opts.name);
   if (held) { console.log(`reroute-blocked: ${held}`); return REROUTE_EXIT.stopped; }
   const alternative = reason === 'queue-too-slow' ? opts.queueAlternative : null;
-  const next = nextRouteArgs(args, from, depth, policy, alternative);
+  let next = nextRouteArgs(args, from, depth, policy, alternative);
   const scripts = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   const taskDir = typeof routeFlag(args, 'task-dir') === 'string' ? routeFlag(args, 'task-dir')
     : path.join(path.resolve(opts.cwd ?? '.'), '.reroute', String(opts.name ?? 'worker').replace(/[^a-zA-Z0-9._-]/g, '_'));
+  next=setRouteFlag(next,'task-dir',taskDir);
   const handover = `Previous attempt on ${from.model}@${from.account} was cancelled ${reason === 'queue-too-slow' ? `while queued at position ${from.position}` : `before work (${reason})`}; inspect git status/diff in the workspace before starting; continue, don't redo.\n\n${prompt}`;
-  const state = { t: Date.now(), name: opts.name, reason, from, depth: depth + 1, routeArgs: next,
+  const state = { t: Date.now(), name: opts.name, reason, from, cancellationEvidenceId:`cancelled-no-work:${randomUUID()}`, depth: depth + 1, routeArgs: next,
     alternative, status: 'routing', recovery: {
       instructions: 'The previous attempt ended before work. Re-run the recorded route command, then launch its pick.workerArgs with continuationPrompt. Do not resume the cancelled queued turn.',
       routeCommand: [process.execPath, path.join(scripts, 'route.mjs'), ...next, '--json'],
@@ -116,7 +118,7 @@ export const rerouteWorker = async ({ args, depth, from, reason, prompt, opts, p
     console.log(`reroute-failed: ${e.message}; recovery: ${path.join(taskDir, 'reroute.json')}`);
     return REROUTE_EXIT.stopped;
   }
-  if (route.needsUserOK?.length || route.redeemFirst) {
+  if (route.blocked || route.needsUserOK?.length || route.redeemFirst) {
     state.status = 'needs-user'; state.exitCode = REROUTE_EXIT.needsUser; persist();
     console.log(`reroute-needs-user: ${JSON.stringify(route)}`); return REROUTE_EXIT.needsUser;
   }

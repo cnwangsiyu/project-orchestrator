@@ -293,7 +293,7 @@ const readTtadkUsage = (bin) => {
 };
 // A TTADK (company gateway) account has no ChatGPT rate-limit windows: what matters is whether it works right now — the
 // ttadk CLI present, its SSO session active, the gateway listing the models, the hub up — and how many turns it runs.
-const readTtadk = (name, prof) => {
+const readTtadk = (name, prof, { routing = false } = {}) => {
   const out = { name, kind: 'ttadk', home: prof.home, hub: prof.hub, browser: !!prof.browser, chromePlugin: prof.chromePlugin ?? null,
     models: prof.models ?? [], windows: [], resets: null, healthy: false, reason: null, live: false, active: 0, ssoExpiresAt: null, email: prof.email ?? null,
     // Web search through the local proxy every TTADK call goes through (codex-worker starts it on demand); searchLive:
@@ -311,7 +311,7 @@ const readTtadk = (name, prof) => {
     if (sso?.status !== 'active' || (out.ssoExpiresAt && out.ssoExpiresAt <= now)) { out.reason = 'TTADK SSO not logged in or expired (the user runs `! ttadk auth login sso`)'; return out; }
   } catch (e) { out.reason = `ttadk auth status failed: ${String(e.message).split('\n')[0]}`; return out; }
   // The dashboard's own number, read best-effort; a failure is recorded and changes nothing else.
-  try { const q = readTtadkUsage(bin); out.usage = q.usage; out.usageError = q.usageError; } catch { out.usageError = 'quota read failed'; }
+  try { if (!routing) { const q = readTtadkUsage(bin); out.usage = q.usage; out.usageError = q.usageError; } } catch { out.usageError = 'quota read failed'; }
   try {
     const mj = JSON.parse(execFileSync(bin, ['models', '-f', 'json'], { encoding: 'utf8', timeout: 60000, stdio: ['ignore', 'pipe', 'ignore'] }));
     const ms = Array.isArray(mj) ? mj : mj.models ?? []; // {tool, count, models: [...]}
@@ -328,10 +328,14 @@ const readTtadk = (name, prof) => {
     }
   } catch {}
   try {
-    const list = execFileSync(process.execPath, [WORKER, '--account', name, 'list', '--limit', '60'], { encoding: 'utf8', timeout: 30000, stdio: ['ignore', 'pipe', 'pipe'] });
+    if (routing && out.live) {
+      const broken=hubBroken(name,prof);
+      return broken ? {...out,healthy:false,hubBroken:broken,reason:broken.why} : out;
+    } // usage already proved the hub transport
+    const list = execFileSync(process.execPath, [WORKER, '--account', name, 'list', '--limit', routing ? '3' : '60'], { encoding: 'utf8', timeout: 30000, stdio: ['ignore', 'pipe', 'pipe'] });
     out.live = true;
     out.active = list.split('\n').filter((l) => l.split('\t')[2] === 'active').length;
-  } catch { out.live = false; }
+  } catch { if (!routing) out.live = false; }
   const broken = out.live ? hubBroken(name, prof) : null;
   if (broken) { out.healthy = false; out.hubBroken = broken; out.reason = `its hub answers but can't start threads (${broken.why}); restart it ${broken.fix}`; }
   if (out.search) {
@@ -370,7 +374,7 @@ export const traeQuota = (payload, sampledAt = Date.now()) => {
 };
 // A TRAE CLI account (codex-worker trae-setup): the company's agent CLI with its own model pool, used after TTADK and
 // before personal quota (user, 2026-11-08). Healthy = the CLI present, logged in, a nonempty catalog, the hub sound.
-const readTrae = (name, prof) => {
+const readTrae = (name, prof, { routing = false } = {}) => {
   const out = { name, kind: 'trae', home: prof.home, hub: prof.hub, browser: false, chromePlugin: null, models: prof.models ?? Object.keys(prof.modelIds ?? {}), modelIds: prof.modelIds ?? {},
     windows: [], resets: null, healthy: false, reason: null, live: false, active: 0, email: null, search: true, searchLive: true,
     // Per-model daily buckets guide route.mjs model choice; they never pause the account or cap concurrency.
@@ -380,10 +384,11 @@ const readTrae = (name, prof) => {
   let status = '';
   try { status = execFileSync('/bin/sh', ['-c', '"$0" login status 2>&1', bin], { encoding: 'utf8', timeout: 30000 }); } catch (e) { status = String(e.stdout ?? ''); } // it prints to stderr
   if (!/logged in/i.test(status) || /not logged in/i.test(status)) { out.reason = 'TRAE CLI not logged in (run `traecli login --git-code`, or the user runs `! traecli login --sso`)'; return out; }
-  liftAuthPause(prof.home); // logged in again: an auth pause is over
+  if (!routing) liftAuthPause(prof.home); // routing observations cannot clear restrictions
   // Its own daily buckets and weekly pool, read best-effort; a failure is recorded and changes nothing else.
   try {
     const u = JSON.parse(execFileSync(process.execPath, [WORKER, '--account', name, 'usage'], { encoding: 'utf8', timeout: 30000, stdio: ['ignore', 'pipe', 'pipe'] }));
+    if (routing) out.live = true;
     out.quota = traeQuota(u);
     if (!out.quota) out.quotaError = 'TRAE usage listed no daily bucket or weekly pool';
   } catch (e) { out.quota = null; out.quotaError = `TRAE usage read failed (${String(e.stderr || e.message).trim().split('\n')[0]})`; }
@@ -406,10 +411,14 @@ const readTrae = (name, prof) => {
   const pause = readPause(prof.home);
   if (pause) { out.healthy = false; out.paused = pause; out.reason = `paused until ${fmt(pause.pausedUntil)} after worker failures (${pause.reason})`; }
   try {
-    const list = execFileSync(process.execPath, [WORKER, '--account', name, 'list', '--limit', '60'], { encoding: 'utf8', timeout: 30000, stdio: ['ignore', 'pipe', 'pipe'] });
+    if (routing && out.live) {
+      const broken=hubBroken(name,prof);
+      return broken ? {...out,healthy:false,hubBroken:broken,reason:broken.why} : out;
+    } // usage already proved the hub transport
+    const list = execFileSync(process.execPath, [WORKER, '--account', name, 'list', '--limit', routing ? '3' : '60'], { encoding: 'utf8', timeout: 30000, stdio: ['ignore', 'pipe', 'pipe'] });
     out.live = true;
     out.active = list.split('\n').filter((l) => l.split('\t')[2] === 'active').length;
-  } catch { out.live = false; }
+  } catch { if (!routing) out.live = false; }
   const broken = out.live ? hubBroken(name, prof) : null;
   if (broken) { out.healthy = false; out.hubBroken = broken; out.reason = `its hub answers but can't start threads (${broken.why}); restart it ${broken.fix}`; }
   return out;
@@ -434,6 +443,19 @@ const chromePluginOf = (home) => {
   }
   return null;
 };
+// Router acquisition uses normal authenticated status interfaces only. It does
+// not export a token, lift restrictions, claim probes or persist profile changes.
+export const readRoutingAccount = (name, prof) => {
+  if (prof.kind === 'trae') return readTrae(name, prof, { routing: true });
+  if (prof.kind === 'ttadk') return readTtadk(name, prof, { routing: true });
+  const u = parseUsage(JSON.parse(execFileSync(process.execPath, [WORKER, '--account', name, 'usage'],
+    { encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'ignore'] })));
+  const broken = hubBroken(name, prof);
+  return { ...prof, ...u, name, live: !broken, healthy: !broken, auth: true, hubBroken: broken };
+};
+export const readRoutingClaude = readClaude;
+export const traeBrowserReady = () => fs.existsSync(process.env.PLAYWRIGHT_EXTENSION_TOKEN_FILE
+  || path.join(os.homedir(), '.trae', 'playwright-extension-token'));
 const companyProfiles = (reg) => Object.entries(reg).filter(([, p]) => p.kind === 'ttadk' || p.kind === 'trae')
   .map(([name, p]) => ({ name, kind: p.kind }));
 const unknownCompany = (name, prof, error) => ({ name, kind: prof.kind, home: prof.home, hub: prof.hub,
@@ -789,7 +811,7 @@ export const analyze = (data) => {
   // A family whose hard pause has ended gets a recovery probe in the background (lib/trae-health.mjs); it stays out of
   // routing until the probe succeeds. TRAE_PROBE=0 turns this off (tests).
   if (tr?.home && tr.healthy && process.env.TRAE_PROBE !== '0') for (const d of claimProbes(tr.home)) {
-    try { spawn(process.execPath, [WORKER, '--account', tr.name, 'probe', '--model', d.model], { detached: true, stdio: 'ignore', cwd: os.homedir() }).unref(); } catch {}
+    try { spawn(process.execPath, [WORKER, '--account', tr.name, 'probe', '--model', d.model, '--probe-claim', d.claim], { detached: true, stdio: 'ignore', cwd: os.homedir() }).unref(); } catch {}
   }
   const poolPauses = tr?.home ? readPoolPauses(tr.home) : {};
   // A model TRAE no longer resolves is out of .models on its own, its family-mates untouched (lib/trae-health.mjs).

@@ -1,4 +1,5 @@
 import { VERSION, fingerprint, freeze, clone, unique, stable } from './common.mjs';
+import { presentRoute } from './presentation.mjs';
 
 export function planFingerprint(plan) {
   const copy = clone(plan); delete copy.planHash;
@@ -36,7 +37,7 @@ export function seatArgv(plan, seat) {
     ...(t.contentLabels.includes('security') ? ['--security'] : []), ...(t.contentLabels.includes('adversarial') ? ['--adversarial'] : [])];
 }
 const quote = (s) => `'${s.replaceAll("'", "'\\''")}'`;
-export function renderPlan(plan) {
+export function renderPlan(plan, context = null) {
   const notes = [], needsOK = [], tellUser = [];
   for (const gate of plan.gates) {
     if (gate.state === 'needsOK') needsOK.push(gate.reason.text);
@@ -49,6 +50,7 @@ export function renderPlan(plan) {
     if (e.patienceMin !== null) notes.push(`Queue patience: ${e.patienceMin} min; cancel/reconcile before any replacement.`);
   } else if (plan.kind === 'defer') tellUser.push(`${plan.reason.text} Owner ${plan.task.owner} must record a ${plan.trigger} wake and replan.`);
   else tellUser.push(...plan.reasons.map((r) => `${r.code}: ${r.text}`));
-  return freeze({ notes: unique(notes), needsOK: unique(needsOK), tellUser: unique(tellUser), command: plan.kind === 'launch' ? plan.primary.argv.map(quote).join(' ') : null });
+  const view = { notes: unique(notes), needsOK: unique(needsOK), tellUser: unique(tellUser), command: plan.kind === 'launch' ? plan.primary.argv.map(quote).join(' ') : null };
+  return freeze(context ? presentRoute(plan, view, context) : view);
 }
 export const argvMatches = (plan, seat) => stable(seat.argv) === stable(seatArgv(plan, seat));

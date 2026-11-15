@@ -1,0 +1,63 @@
+// Category qualification and preferences, shared by admission and ordering.
+import { EFFORTS, company, adversarial, known } from './common.mjs';
+export const SOL='gpt-6.1-sol', ASTRA='gpt-6-astra';
+export const TIERS = {hard:[SOL,ASTRA],normal:[SOL,'gpt-5.6-sol','gpt-5.6-terra','deepseek-v4.1-flash'],light:['gpt-5.6-terra','gpt-5.5','deepseek-v4.1-flash']};
+export const PERSONAL = {
+  lookup:[['gpt-6-luna','low'],['haiku','low'],[SOL,'medium']],
+  extract:[['gpt-6-luna','medium'],['haiku','medium'],[SOL,'medium']],
+  analysis:[[SOL,'medium'],['sonnet','medium'],['opus','high']],
+  research:[['sonnet','medium'],[SOL,'medium'],['opus','high']],
+  implement:[[SOL,'high'],['sonnet','medium'],['opus','high']],
+  'implement-hard':[[SOL,'xhigh'],['opus','high'],[ASTRA,'xhigh']],
+  debug:[[SOL,'xhigh'],['opus','high'],['fable','high'],[ASTRA,'xhigh']],
+  science:[[SOL,'xhigh'],['opus','xhigh'],[ASTRA,'high']],
+  review:[[SOL,'high'],['sonnet','high'],['opus','xhigh']],
+  'review-high':[['opus','xhigh'],[SOL,'xhigh'],[ASTRA,'high']],
+  design:[['opus','high'],[SOL,'xhigh']],
+  docs:[['sonnet','medium'],[SOL,'medium'],['opus','medium']],
+  draft:[['gpt-6.1-terra','medium'],['sonnet','low'],[SOL,'medium']],
+  'build-run':[[SOL,'medium'],['sonnet','medium'],['opus','high']],
+  browser:[[SOL,'medium'],['sonnet','medium'],['opus','high']],
+  'ui-browser':[[SOL,'high'],['sonnet','high'],['opus','high']],
+  'computer-use':[[SOL,'medium']],
+  'claude-tools':[['sonnet','medium'],['opus','high']],
+  'image-gen':[['gpt-6-luna','low'],[SOL,'medium']],
+  'image-read':[['sonnet','medium'],['gpt-6.1-terra','medium'],['opus','high'],[SOL,'high']],
+  'second-opinion':[[SOL,'high'],['opus','high']],
+};
+export function modelPreference(t,a) {
+  if(adversarial(t)) return ['kimi-k3','deepseek-v4.1-flash','opus'];
+  if(company(a)) {
+    if(t.category==='image-read') return [SOL,ASTRA,'gemini-3.1-pro-preview','seed-evolving'];
+    if(t.tier==='hard') return TIERS.hard;
+    if(a.kind==='ttadk') return t.tier==='light'?['gpt-5.6-terra','gpt-5.5',SOL,'deepseek-v4.1-flash','gemini-3.1-pro-preview']:[SOL,'deepseek-v4.1-flash','gemini-3.1-pro-preview'];
+    return [...TIERS[t.tier],...(t.tier==='light'?[SOL,'gpt-5.6-sol']:[]),'gemini-3.1-pro-preview'];
+  }
+  const preference=(PERSONAL[t.category]??[]).map(([m])=>m);
+  if(a.kind==='claude'&&known(a.budget)?.status==='over'&&!['claude-tools','second-opinion','review'].includes(t.category)) return preference.filter(m=>!['haiku','sonnet'].includes(m));
+  return preference;
+}
+export function policyEffort(t,c,a,s) {
+  if(['deepseek','kimi','gemini'].includes(c.family)) return 'high';
+  if(c.family==='seed') return 'medium';
+  if(adversarial(t)) return ['review','review-high'].includes(t.category)?'xhigh':'high';
+  let e=(PERSONAL[t.category]??[]).find(([m])=>m===c.modelId)?.[1]??(t.tier==='hard'?'xhigh':'medium');
+  if(company(a)) {
+    e=t.tier==='light'&&t.category!=='image-read'?'medium':(PERSONAL[t.category]??[]).find(([m])=>m===SOL)?.[1]??'medium';
+    if(['docs','research','image-read','analysis'].includes(t.category)&&t.tier!=='light') e='high';
+    if(t.flags.author==='codex') e='xhigh';
+    if(t.impact==='throwaway'&&EFFORTS.indexOf(e)>2&&!t.failures) e='high';
+  }
+  if(t.stakes==='high') e=EFFORTS[Math.min(3,EFFORTS.indexOf(e)+1)];
+  if(!company(a)) {
+    const floor=c.family==='gpt'&&c.modelId!=='gpt-6-luna'?1:0;
+    const notch=(d)=>{ e=EFFORTS[Math.max(floor,Math.min(3,EFFORTS.indexOf(e)+d))]; };
+    if(!t.failures&&t.stakes!=='high'&&(t.flags['auto-check']||t.stakes==='low')) notch(-1);
+    const budget=known(a.budget), companyDevice=s.accounts.some(company), cheap=['lookup','extract','image-gen','draft'].includes(t.category);
+    if(!companyDevice&&budget?.underused&&!cheap&&c.family==='gpt') notch(1);
+    else if(budget?.overspending&&t.flags['auto-check']&&t.stakes!=='high') notch(-1);
+    if(!companyDevice&&c.family==='claude'&&budget?.expiring&&!cheap) notch(1);
+  }
+  if(t.failures&&t.tier==='hard'&&c.family==='gpt'&&EFFORTS.indexOf(e)<3) e='xhigh';
+  return e;
+}

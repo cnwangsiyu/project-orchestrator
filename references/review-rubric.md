@@ -8,7 +8,11 @@ Use this rubric for every independent review `route.mjs` asks for. A review is r
 - `--impact service --stakes high`.
 
 Demos, prototypes, experiments and test scripts (`throwaway`) don't get a review (user, 2026-11-04).
-Ordinary service changes (`service`) get one only when fallback-authored (model-routing.md, "Quality guard").
+Ordinary service changes are accepted on executable tests. Fallback-authored service
+code requires review only when the task involved builds/acceptance, or the same
+model/category recorded rework or failure in the last seven days. Release and
+high-stakes reviews remain required. Reviews of fallback-authored changes exclude
+that author's model family.
 
 Paste the next section into the reviewer's brief, or point the reviewer at this file and tell it to follow it.
 
@@ -63,8 +67,26 @@ nicer.
 - **Default-off / flag-guarded code gets at most 2 review rounds.** Then the orchestrator decides: merge with notes if
   no P0/P1 remains, or re-scope. A flag does not waive a concrete P0/P1 or the required ON/OFF acceptance proof; P2 alone
   never blocks or earns another round.
-- For other code, after 2 review rounds, stop. You decide whether one more fix is clearly worth it, or take it to the
-  user. Never loop.
+- Two review rounds is the task/branch cap. The router blocks a third; choose
+  re-scoping or acceptance with recorded open items. `--review-override "reason"`
+  permits one additional round and is logged; that reason cannot be reused.
+- Routine reviews have one reviewer. Adversarial, review-high and release-impact
+  reviews require two independent families. Adversarial review uses two non-GPT
+  families, without an additional contradictory GPT requirement.
+- Optional reviews above a 10% rolling 24-hour share overall or per project
+  still dispatch and warn "over review budget — prefer accepting on tests".
+  `--review-required "reason"` records an explicit required review.
+  Release, high-stakes, adversarial and installed-machine reviews are never
+  suppressed to meet the budget.
+- Batch small rule/doc/flag changes into one branch per day and one review.
+  Docs/rule-text-only fixes get owner diff verification, with no re-review.
+  Route/worker/res/hook code gets one full review; use two different families
+  when changing personal-quota gates, credentials/signing, locks or installed
+  agents/hooks. At most one re-review checks only the blocked findings.
+- The video-agent internal-demo profile uses ordinary executable acceptance and
+  no default security/high/adversarial or second review. A user-requested security
+  review requires `--profile-override "reason"`. Its landing gate is package tests,
+  typecheck and SG prepare; full verify is for wide changes or once daily on main.
   If round 2 still finds the same kind of defect, re-scope the work (SKILL.md, "Fix rounds") before another fix.
 - `MERGE` and `MERGE-WITH-NOTES` count as a `pass` in `outcome.mjs`. Only a `BLOCK` that led to a fix round counts
   as `rework`.

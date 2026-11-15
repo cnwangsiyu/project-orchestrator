@@ -1,11 +1,12 @@
-import { VERSION, array, object, idOK, modelId, unique, clone, freeze, fingerprint, isReview, compare } from './common.mjs';
+import { VERSION, array, object, idOK, modelId, unique, clone, freeze, fingerprint, isReview, compare, stable } from './common.mjs';
 
 export const CATEGORIES = Object.freeze(['lookup', 'extract', 'analysis', 'research', 'implement', 'implement-hard', 'ui-browser',
   'debug', 'review', 'review-high', 'design', 'docs', 'draft', 'build-run', 'browser', 'computer-use', 'claude-tools', 'science', 'image-gen', 'image-read', 'second-opinion']);
 const BOOLEANS = new Set(['auto-check', 'writes', 'read-only', 'runs-tests', 'signing', 'fresh', 'json', 'table', 'no-redeem', 'dry',
-  'urgent', 'security', 'adversarial', 'defensive', 'background', 'device-lease', 'shared-lock', 'no-local-build', 'worker']);
+  'urgent', 'security', 'adversarial', 'defensive', 'background', 'device-lease', 'shared-lock', 'no-local-build', 'worker', 'installed']);
 const VALUES = new Set(['stakes', 'failures', 'against', 'author', 'impact', 'env', 'exclude-account', 'exclude-model', 'origins', 'mode',
-  'sandbox', 'cwd', 'task-dir', 'name', 'project', 'apps', 'user-ok', 'auto-reroute-depth', 'previous-attempt', 'execution']);
+  'sandbox', 'cwd', 'task-dir', 'name', 'project', 'apps', 'user-ok', 'auto-reroute-depth', 'previous-attempt', 'execution', 'actual',
+  'owner', 'exclude-lane', 'review-override', 'review-required', 'profile-override', 'artifact-ref']);
 const CODE = new Set(['implement', 'implement-hard', 'debug', 'science']);
 export class TaskInputError extends Error {
   constructor(code, message) { super(message); this.name = 'TaskInputError'; this.code = code; this.exitCode = 2; }
@@ -58,6 +59,10 @@ export function createTaskSpec(input) {
     if ((!BOOLEANS.has(k) && !VALUES.has(k)) || (BOOLEANS.has(k) && typeof v !== 'boolean') || (VALUES.has(k) && !validText(String(v))))
       fail('INVALID_FLAGS', `Invalid flag: ${k}`);
   }
+  if (f.name !== undefined && !idOK(f.name)) fail('INVALID_NAME','Name must be a public task ID without parent traversal.');
+  if (f.actual !== undefined && (typeof f.actual !== 'string' || f.actual.split(',').some(tuple=>
+    !/^(codex|claude):([\w.-]+):(low|medium|high|xhigh|max)@([\w.-]+)$/.test(tuple))))
+    fail('INVALID_ACTUAL','actual takes vendor:model:effort@account (comma-separated launch order).');
   const enumValue = (key, fallback, choices) => {
     const v = f[key] ?? input[key] ?? fallback;
     if (!choices.includes(v)) fail('INVALID_ENUM', `Invalid ${key}.`);
@@ -86,7 +91,9 @@ export function createTaskSpec(input) {
   }
   if (execution === 'remote' && f['shared-lock']) fail('EXECUTION_CONFLICT', 'Remote work cannot acquire local shared locks.');
   const sandbox = f.sandbox ?? input.sandbox ?? 'workspace-write', ceiling = input.sandboxCeiling ?? 'workspace-write';
-  if (![sandbox, ceiling].every((s) => ['workspace-write', 'read-only'].includes(s))) fail('INVALID_SANDBOX', 'Unsupported sandbox.');
+  if (![sandbox, ceiling].every((s) => ['danger-full-access', 'workspace-write', 'read-only'].includes(s))) fail('INVALID_SANDBOX', 'Unsupported sandbox.');
+  if (f.sandbox && !['workspace-write', 'read-only'].includes(f.sandbox)) fail('INVALID_SANDBOX', 'Explicit sandbox only narrows the default.');
+  if (ceiling === 'workspace-write' && sandbox === 'danger-full-access') fail('SANDBOX_CEILING', 'Requested sandbox exceeds parent ceiling.');
   if (ceiling === 'read-only' && sandbox !== 'read-only') fail('SANDBOX_CEILING', 'Requested sandbox exceeds parent ceiling.');
   const apps = unique(input.allowedApps ?? list(f.apps));
   if (apps.some((s) => !/^[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)+$/.test(s))) fail('INVALID_APP', 'Apps must be bundle IDs.');
@@ -116,6 +123,7 @@ export function createTaskSpec(input) {
   const writes = f['read-only'] ? false : (f.writes ?? input.writes ?? ['implement', 'implement-hard', 'debug', 'science', 'docs', 'draft', 'ui-browser', 'build-run', 'computer-use', 'claude-tools', 'image-gen'].includes(cat));
   const background = f.background ?? input.background ?? false;
   const tier = ['implement-hard', 'debug', 'science', 'review-high', 'design'].includes(cat) || stakes === 'high' || (CODE.has(cat) && failures > 0) ? 'hard'
+    : failures > 0 ? 'normal'
     : cat === 'build-run' && env === 'prod' ? 'normal'
       : ['lookup', 'extract', 'draft'].includes(cat) || stakes === 'low' || background || (cat === 'build-run' && env === 'test') ? 'light' : 'normal';
   const caps = new Set(array(input.capabilitiesNeeded));
@@ -124,13 +132,18 @@ export function createTaskSpec(input) {
   const exclusions = [...clone(array(input.exclusions)), ...list(f['exclude-account']).map((value) => ({ scope: 'account', accountId: null, value, cause: 'explicit' })),
     ...list(f['exclude-model']).map((value) => ({ scope: ['gpt', 'deepseek', 'kimi', 'claude', 'seed', 'gemini'].includes(value.toLowerCase()) ? 'family' : 'model',
       accountId: null, value: modelId(value), companyOnly: true, cause: 'legacy-exclude-model' }))];
+  for (const value of list(f['exclude-lane'])) {
+    const [accountId, model, ...rest] = value.split(':');
+    if (!idOK(accountId) || !idOK(model) || rest.length) fail('INVALID_EXCLUSION', '--exclude-lane takes account:model pairs.');
+    exclusions.push({ scope: ['gpt', 'deepseek', 'kimi', 'claude', 'seed', 'gemini'].includes(model) ? 'family' : 'account-model', accountId, value: modelId(model), cause: 'infrastructure' });
+  }
   for (const e of exclusions) if (!object(e) || !['account', 'account-model', 'model', 'family'].includes(e.scope) || !idOK(e.value)) fail('INVALID_EXCLUSION', 'Invalid exclusion scope.');
   const taskId = input.taskId ?? f.name, requestId = input.requestId;
   if (!idOK(taskId) || !idOK(requestId)) fail('TASK_ID_REQUIRED', 'Inject stable taskId and requestId before planning.');
-  const task = { schemaVersion: VERSION, taskId, requestId, project: f.project ?? input.project ?? 'UNKNOWN', owner: input.owner ?? 'UNKNOWN', category: cat,
+  const task = { schemaVersion: VERSION, taskId, requestId, project: f.project ?? input.project ?? 'UNKNOWN', owner: f.owner ?? input.owner ?? 'UNKNOWN', category: cat,
     role: input.role ?? 'primary', parentTaskId: input.parentTaskId ?? null, briefHash: input.briefHash ?? 'UNKNOWN', flags: f,
     tier, stakes, impact, env, execution, writes, runsTests: f['runs-tests'] ?? input.runsTests ?? false, background,
-    contentLabels: unique([...labels]), capabilitiesNeeded: unique([...caps]), exclusions: unique(exclusions.map((e) => JSON.stringify(e))).map(JSON.parse),
+    contentLabels: unique([...labels]), capabilitiesNeeded: unique([...caps]), exclusions: unique(exclusions.map(stable)).map(JSON.parse),
     failures, previousAttempts: attempts.sort((a, b) => compare(String(a?.id), String(b?.id))),
     floor: clone(input.floor ?? { profileIds: [], previousAttemptIds: [], relationVersion: VERSION, historyStatus: failures || autoRerouteDepth || f['previous-attempt'] ? 'UNKNOWN' : 'KNOWN' }),
     authorAttemptId: input.authorAttemptId ?? null, againstAttemptId: input.againstAttemptId ?? null,
@@ -138,18 +151,20 @@ export function createTaskSpec(input) {
     allowedOrigins, allowedApps: apps, deviceId: input.deviceId ?? null, ownTestApp: input.ownTestApp === true,
     signingManifestRef: input.signingManifestRef ?? null, approvalRefs: unique([...array(input.approvalRefs), ...list(f['user-ok'])]),
     autoRerouteDepth, notifyBy: input.notifyBy ?? null, timezone: input.timezone ?? 'America/Los_Angeles',
-    artifactRevision: input.artifactRevision ?? null, requirements: clone(input.requirements ?? {}), selectionCause: input.selectionCause ?? (attempts.length ? 'infra-reroute' : 'initial'),
+    artifactRevision: f['artifact-ref'] ?? input.artifactRevision ?? null, requirements: clone({...input.requirements,...(f.installed?{installedOnMachine:true}:{})}), selectionCause: input.selectionCause ?? (attempts.length ? 'infra-reroute' : 'initial'),
     qualityEscalation: clone(input.qualityEscalation ?? null), warnings: f.mode ? ['MODE_DEPRECATED'] : [] };
   if (f['previous-attempt'] && !attempts.length) task.floor.previousAttemptIds = unique([...task.floor.previousAttemptIds, f['previous-attempt']]);
   if (!['primary', 'second', 'followup', 'finisher'].includes(task.role)) fail('INVALID_ROLE', 'Unknown task role.');
   // Derive from constraints, never accept a caller-supplied hash as authority.
   const { requestId: ignored, previousAttempts: prior, approvalRefs: refs, warnings, ...constraints } = task;
+  constraints.flags={...constraints.flags};
+  for(const k of ['user-ok','json','dry','table','fresh','mode']) delete constraints.flags[k];
   task.constraintHash = fingerprint(constraints);
   return freeze(task);
 }
 export function deriveReview(task, { role = 'second', authorAttemptId = null, artifactRevision = task.artifactRevision } = {}) {
   const flags = { ...task.flags, 'read-only': true };
-  for (const k of ['writes', 'signing', 'runs-tests', 'author', 'against', 'apps', 'origins', 'failures', 'previous-attempt', 'auto-reroute-depth']) delete flags[k];
+  for (const k of ['writes', 'signing', 'runs-tests', 'author', 'against', 'apps', 'origins', 'failures', 'previous-attempt', 'actual', 'auto-reroute-depth']) delete flags[k];
   return createTaskSpec({ ...task, category: task.tier === 'hard' ? 'review-high' : 'review', flags, role, writes: false, runsTests: false,
     previousAttempts: [], failures: 0, autoRerouteDepth: 0, floor: { profileIds: [], previousAttemptIds: [], relationVersion: task.floor.relationVersion, historyStatus: 'KNOWN' },
     authorAttemptId, againstAttemptId: null, artifactRevision, selectionCause: 'initial', qualityEscalation: null });

@@ -37,7 +37,7 @@ const run = (args, { t = now, daily = { [SOL]: bucket(0), [ASTRA]: bucket(.6), [
   fs.writeFileSync(history, JSON.stringify({ t: stamp - span * min,
     ttadk: { name: 'ttadk', ...usage, used: used - rate * span / 60 } }) + '\n');
   const tt = { name: 'ttadk', kind: 'ttadk', home: path.join(tmp, 'ttadk'), healthy: true, live: true,
-    browser: true, search: true, searchLive: true, models: [SOL], windows: [], seenAt: stamp, usage };
+    browser: true, desktop:true, search: true, searchLive: true, models: [SOL], windows: [], seenAt: stamp, usage };
   const trae = { name: 'trae', kind: 'trae', home: traeHome, healthy: traeHealthy, live: true, search: true,
     models, modelIds: Object.fromEntries(models.map((id) => [id, id.toUpperCase()])), windows: [],
     load: loads, quota: daily === null ? null : { sampledAt, daily } };
@@ -112,7 +112,7 @@ try {
   const noHard = run(['implement-hard'], { daily: { ...fresh, [SOL]: bucket(0), [ASTRA]: bucket(.14) } });
   assert.equal(noHard.pick.account, 'ttadk'); assert.deepEqual(noHard.balance.candidates.map((c) => c.model), [SOL, ASTRA]);
   assert.match(noHard.why.join('\n'), /stays on TTADK: no hard-tier/);
-  assert.equal(run(['implement', '--failures', '1']).pick.model, ASTRA);
+  assert.equal(run(['implement', '--failures', '1']).blocked,true,'retry needs actual evidence');
 
   // Projection sends every eligible normal/light dispatch; when TTADK will last, only light/low/expiry triggers move it.
   for (const category of ['implement', 'analysis', 'review', 'research', 'docs', 'lookup', 'extract', 'draft']) {
@@ -120,14 +120,16 @@ try {
     assert.ok(r.balance.projectedOut); assert.ok(!r.needsUserOK.some((s) => /^personal quota:/.test(s)));
     const lasts = run([category], { projected: false });
     assert.equal(lasts.pick.account, ['lookup', 'extract', 'draft'].includes(category) ? 'trae' : 'ttadk', category);
-    if (lasts.pick.account === 'ttadk') assert.match(lasts.why.join('\n'), /stays on TTADK: no balancing trigger/);
+    if (lasts.pick.account === 'ttadk') assert.match(lasts.why.join('\n'), /stays on TTADK:.*no balancing trigger/);
   }
   assert.equal(run(['analysis', '--impact', 'throwaway'], { projected: false }).pick.account, 'trae');
   assert.equal(run(['analysis'], { projected: false, daily: { ...fresh, [SOL]: bucket(.99, now, now + 5 * h) } }).pick.account, 'trae');
   for (const category of ['implement-hard', 'debug', 'science', 'design', 'review-high']) assert.equal(run([category]).pick.model, ASTRA);
-  for (const args of [['browser'], ['ui-browser'], ['computer-use'], ['build-run'], ['image-read'],
+  for (const args of [['browser'], ['ui-browser'], ['computer-use','--apps','com.example.calc'], ['build-run'], ['image-read'],
     ['implement', '--device-lease'], ['implement', '--shared-lock'], ['implement-hard', '--security']]) {
-    assert.equal(run(args).pick.account, 'ttadk', args.join(' '));
+    const r=run(args);
+    if(args.includes('--device-lease')) assert.equal(r.blocked,true);
+    else assert.equal(r.pick.account, 'ttadk', args.join(' '));
   }
   assert.equal(run(['implement', '--security']).pick.model, FLASH);
   assert.equal(run(['implement', '--exclude-account', 'trae']).pick.account, 'ttadk');

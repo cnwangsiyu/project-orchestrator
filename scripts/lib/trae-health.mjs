@@ -35,6 +35,7 @@
 //   <trae home>/thread-models.json  {"<thread id>":"<model>"}  (so a later turn or wait on a thread knows its model)
 import fs from 'node:fs';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { withLock, writeJson } from './shared-file.mjs';
 
 export const WINDOW_MIN = 15, HARD_MIN = 30, BACKOFF_MIN = [5, 10, 20, 30];
@@ -98,6 +99,7 @@ const step = (rec, why, now) => {
 const restrictionRecord = (prev, why, now, model) => ({
   ...step(prev, why, now), failures: [], kind: 'hard', restricted: true, pausedUntil: nextUtcMidnight(now),
   reason: `${String(why).slice(0, 180)}; ${RESTRICTED_REASON}`, model: model ?? prev.model ?? null, probingAt: null,
+  generation: randomUUID(), probeClaim: null,
 });
 // A cyberPolicy block on TRAE is recorded through this same restriction path (family only, until the next 00:00 UTC).
 // TTADK never calls it: there a policy block is route-log telemetry only, with no pause. Without a model there is no
@@ -139,17 +141,18 @@ export const noteFailure = (home, why, now = Date.now(), model = null) => update
   if (RESTRICTED.test(why ?? '')) pr = restrictionRecord(prev, why, now, model);
   else if (pr.kind === 'hard' && pr.pausedUntil > now && pr !== prev && pr.failures.length === 0)
     pr = { ...pr, restricted: false, pausedUntil: now + PROBE_EVERY_MIN * 60000, reason: String(pr.reason).replace(/\(paused \d+ min\)$/, `(paused ${PROBE_EVERY_MIN} min, then probed)`) };
-  pr = { ...pr, model: model ?? prev.model ?? null, probingAt: null };
+  pr = { ...pr, model: model ?? prev.model ?? null, probingAt: null, generation: randomUUID(), probeClaim: null };
   write(home, { ...rec, failures: rec.failures ?? [], pools: { ...(rec.pools ?? {}), [pool]: pr } });
   return pr.pausedUntil && pr.pausedUntil > now ? { ...pr, pool } : null;
 });
-// A completed turn clears its family's record and the account's, plus that model's own unavailable pause;
-// without a model, everything.
+// Ordinary success is not recovery evidence for a hard restriction. An older
+// turn may finish after a restriction was recorded. Only its claimed probe clears it.
 export const noteSuccess = (home, model = null) => update(home, (rec) => {
   const pool = poolOf(model);
-  const pools = pool ? Object.fromEntries(Object.entries(rec.pools ?? {}).filter(([k]) => k !== pool)) : {};
-  const pauses = model ? Object.fromEntries(Object.entries(rec.modelPauses ?? {}).filter(([k]) => k !== String(model).toLowerCase())) : {};
-  write(home, { failures: [], pausedUntil: null, reason: null, kind: null, streak: 0,
+  const pools = Object.fromEntries(Object.entries(rec.pools ?? {}).filter(([k,r]) => !pool || k !== pool || r?.kind === 'hard'));
+  const pauses = rec.modelPauses ?? {};
+  write(home, { ...(rec.kind === 'hard' || rec.kind === 'auth' ? rec : { failures: [], pausedUntil: null, reason: null, kind: null, streak: 0 }),
+    pools: {}, modelPauses: {},
     ...(Object.keys(pools).length ? { pools } : {}), ...(Object.keys(pauses).length ? { modelPauses: pauses } : {}) });
 });
 export const readPause = (home, now = Date.now()) => { const r = read(home); return r.pausedUntil && r.pausedUntil > now ? r : null; };
@@ -165,22 +168,28 @@ export const readPoolPauses = (home, now = Date.now()) =>
 export const claimProbes = (home, now = Date.now()) => update(home, (rec) => {
   const due = [];
   for (const [pool, r] of Object.entries(rec.pools ?? {}))
-    if (awaitingProbe(r, now) && r.model && !(r.probingAt && now - r.probingAt < PROBE_STALE_MIN * 60000)) { due.push({ pool, model: r.model }); rec.pools[pool] = { ...r, probingAt: now }; }
+    if (awaitingProbe(r, now) && r.model && !(r.probingAt && now - r.probingAt < PROBE_STALE_MIN * 60000)) {
+      const generation=r.generation??randomUUID(), claim=randomUUID();
+      due.push({pool,model:r.model,generation,claim}); rec.pools[pool]={...r,generation,probingAt:now,probeClaim:claim};
+    }
   if (due.length) write(home, rec);
   return due;
 }, []);
 // A probe's result: success clears the family; a failed restriction probe waits for the next UTC midnight,
 // other hard failures another PROBE_EVERY_MIN minutes. Recognize restrictions in older records' reason text too.
-export const probeResult = (home, model, ok, why = '', now = Date.now()) => update(home, (rec) => {
+export const probeResult = (home, model, ok, why = '', now = Date.now(), claim = null) => update(home, (rec) => {
   const pool = poolOf(model);
   if (!pool || !rec.pools?.[pool]) return;
+  const r=rec.pools[pool];
+  if (!claim || claim!==r.probeClaim || !(r.probingAt>=r.pausedUntil) || now<r.probingAt) return false;
   if (ok) delete rec.pools[pool];
   else {
     const restricted = !!rec.pools[pool].restricted || RESTRICTED.test(rec.pools[pool].reason ?? '') || RESTRICTED.test(why);
-    rec.pools[pool] = { ...rec.pools[pool], failures: [], restricted, pausedUntil: restricted ? nextUtcMidnight(now) : now + PROBE_EVERY_MIN * 60000, probingAt: null, kind: 'hard',
+    rec.pools[pool] = { ...rec.pools[pool], generation:randomUUID(), probeClaim:null, failures: [], restricted, pausedUntil: restricted ? nextUtcMidnight(now) : now + PROBE_EVERY_MIN * 60000, probingAt: null, kind: 'hard',
       reason: `recovery probe failed (${String(why).slice(0, 160)}); ${restricted ? RESTRICTED_REASON : `next probe in ${PROBE_EVERY_MIN} min`}` };
   }
   write(home, rec);
+  return true;
 });
 // An auth pause ends once the CLI is logged in again (quota.mjs calls this after a good `login status`).
 export const liftAuthPause = (home) => update(home, (r) => { if (r.kind === 'auth') write(home, { ...r, pausedUntil: null, reason: null, kind: null }); });
@@ -188,9 +197,11 @@ export const liftAuthPause = (home) => update(home, (r) => { if (r.kind === 'aut
 const tmFile = (home) => path.join(home, 'thread-models.json');
 export const rememberThreadModel = (home, threadId, model) => {
   if (!threadId || !model) return;
+  try { return withLock(tmFile(home), () => {
   let m = {}; try { m = JSON.parse(fs.readFileSync(tmFile(home), 'utf8')); } catch {}
   m[threadId] = model;
   const keep = Object.fromEntries(Object.entries(m).slice(-500));
-  try { const t = `${tmFile(home)}.${process.pid}`; fs.writeFileSync(t, JSON.stringify(keep)); fs.renameSync(t, tmFile(home)); } catch {}
+  writeJson(tmFile(home), keep);
+  }); } catch {}
 };
 export const threadModel = (home, threadId) => { try { return JSON.parse(fs.readFileSync(tmFile(home), 'utf8'))[threadId] ?? null; } catch { return null; } };

@@ -22,6 +22,7 @@ const run = (label, config = {}, flags = [], options = {}) => {
   const source = options.source ?? SOL;
   const ttHome = path.join(home, 'tt'); fs.mkdirSync(ttHome);
   fs.writeFileSync(profiles, JSON.stringify({ trae: { kind: 'trae', home: traeHome, hub: 'ws://127.0.0.1:1' },
+    ...(config.everyHop ? { peer:{kind:'trae',home:ttHome,hub:'ws://127.0.0.1:1'} } : {}),
     ...(options.companyReviews || options.canonical ? { ttadk: { kind: 'ttadk', home: ttHome, hub: 'ws://127.0.0.1:1' } } : {}),
     ...(options.authGuard ? { main: { home: path.join(home, 'personal'), hub: 'ws://127.0.0.1:1',
       id: 'public-main-id', email: 'cached@example.com', plan: 'prolite' } } : {}) }));
@@ -32,7 +33,7 @@ const run = (label, config = {}, flags = [], options = {}) => {
     healthy: !!(options.companyReviews || options.ttReady), live: true, reason: options.companyReviews || options.ttReady ? null : 'its daily token quota is used up',
     windows: [], usage: { used: options.companyReviews || options.ttReady ? 10 : 100, limit: 100, resetsAt: now + 5 * min } };
   fs.writeFileSync(cache, JSON.stringify({ checkedAt: now - (options.expiredCache ? 20 * min : 0), claude: [{ label: 'week', used: 10, resetsAt: now + 120 * 60 * min, windowMins: 10080 }],
-    codexAccounts: [tt, tr], errors: {}, history: {} }));
+    codexAccounts: [tt, tr, ...(config.everyHop ? [{...tt,name:'peer',kind:'trae',models:[ASTRA],healthy:true,live:true,reason:null,usage:{used:10,limit:100,resetsAt:now+3600000}}] : [])], errors: {}, history: {} }));
   if (options.defer) fs.writeFileSync(path.join(traeHome, 'lane-state.json'), JSON.stringify({ [SOL]: { t: now - 3 * min, state: 'queued', position: 1000, drainPerMin: 0.01 } }));
   if (options.canonical) fs.writeFileSync(path.join(traeHome, 'lane-state.json'), JSON.stringify({
     [ASTRA]: { t: now - 3 * min, state: 'queued', position: 1000, drainPerMin: 0.01 } }));
@@ -50,7 +51,9 @@ const run = (label, config = {}, flags = [], options = {}) => {
     ROUTE_LOG_FILE: log, RULES_SHARED: dir, QUOTA_LOG: '0', TRAE_PROBE: '0', ROUTE_RR: path.join(dir, 'rotation'),
     REROUTE_FIXTURE: JSON.stringify({ source, rpc, ...(options.authGuard ? { authGuard: guard } : {}), ...config }),
     ...(options.authGuard ? { NODE_OPTIONS: `--import=${transport}` } : {}) };
-  let routeArgs = [options.defer || options.canonical ? 'implement-hard' : 'analysis', ...(options.defer || options.canonical ? ['--impact', 'service'] : []), '--project', 'reroute', '--name', label, '--cwd', dir, '--task-dir', task,
+  // The accepted Sol attempt sets a real quality floor. A hard task can move to
+  // company Astra; ordinary analysis cannot silently fall to 5.6-Sol or Flash.
+  let routeArgs = ['implement-hard', '--impact', 'service', '--project', 'reroute', '--name', label, '--cwd', dir, '--task-dir', task,
     '--failures', '0', '--exclude-account', 'main,b', ...flags];
   if (options.template) for (const key of ['cwd', 'task-dir']) routeArgs = setRouteFlag(routeArgs, key, null);
   const r = spawnSync(process.execPath, ['--import', transport, path.join(scripts, 'codex-worker.mjs'), '--account', 'trae',
@@ -111,12 +114,12 @@ try {
   assert.equal(coinciding.rows.filter((r) => r.kind === 'reroute').length, 1, 'the stall alarm must not terminate a queued patience handoff');
   assert.doesNotMatch(coinciding.stdout, /stalled:/);
   const canonical = run('ttadk-sol-reset', {}, [], { canonical: true });
-  assert.equal(canonical.status, 9, canonical.stderr + canonical.stdout);
+  assert.equal(canonical.status, 0, canonical.stderr + canonical.stdout);
   const scheduled = JSON.parse(fs.readFileSync(path.join(canonical.task, 'reroute.json')));
-  assert.ok(scheduled.route.deferUntil > now); assert.equal(scheduled.alternative.account, 'ttadk');
+  assert.equal(scheduled.route.deferUntil,null);assert.equal(scheduled.route.pick.account,'trae');assert.equal(scheduled.route.pick.model,ASTRA);
   assert.ok(scheduled.route.eta.some((r) => r.account === 'ttadk' && r.model === SOL));
   assert.ok(!routeFlag(scheduled.routeArgs, 'exclude-model')); assert.equal(routeFlag(scheduled.routeArgs, 'exclude-lane'), `trae:${SOL}`);
-  assert.equal(canonical.calls.filter((c) => c.method === 'thread/start').length, 1, 'never launches the slower Astra lane');
+  assert.equal(canonical.calls.filter((c) => c.method === 'thread/start').length, 2, 'launches a runnable company alternative instead of waiting for reset');
   const sameModel = run('same-model-other-account', {}, [], { canonical: true, ttReady: true });
   assert.equal(sameModel.status, 0, sameModel.stderr + sameModel.stdout);
   assert.deepEqual(sameModel.calls.filter((c) => c.method === 'thread/start').map((c) => [c.account, c.model]),
@@ -129,7 +132,7 @@ try {
   assert.ok(guardRows.some((r) => r.kind === 'guard-active' && r.pid !== guardRows[0].pid));
   assert.ok(!guardRows.some((r) => r.kind === 'auth-read'), 'neither the worker nor its router/refresh children open credential files');
   const refreshed = JSON.parse(fs.readFileSync(guarded.cache));
-  assert.equal(refreshed.codexAccounts.find((r) => r.name === 'main').email, 'cached@example.com');
+  assert.equal(refreshed.codexAccounts.some((r)=>r.name==='main'),false,'routing does not rewrite the public cache from the registry');
   for (const routeFailure of [2, 143, 'json']) {
     const failed = run(`router-failed-${routeFailure}`, { routeFailure }, [], { staleRecovery: routeFailure === 2 });
     assert.equal(failed.status, 7, failed.stderr + failed.stdout);
@@ -151,8 +154,11 @@ try {
   const review = JSON.parse(execFileSync(process.execPath, [path.join(scripts, 'review-data.mjs'), '--json'], { env: hopped.env, encoding: 'utf8' }));
   assert.equal(review.routing.automaticReroutes.count, 1); assert.equal(review.routing.automaticReroutes.faster, 1);
   for (const mode of ['unavailable', 'unavailable-turn', 'restriction', 'restriction-start']) {
-    const r = run(mode, { mode }); assert.equal(r.status, 0, r.stderr + r.stdout);
-    assert.equal(r.rows.filter((r) => r.kind === 'reroute').length, 1);
+    const r = run(mode, { mode });
+    const restricted=mode.startsWith('restriction');
+    assert.equal(r.status, restricted?8:0);
+    assert.equal(r.rows.filter((r) => r.kind === 'reroute').length, restricted?0:1);
+    if(restricted) assert.equal(r.calls.filter(c=>c.method==='thread/start').length,1);
   }
   const needsOK = run('needs-ok', {}, [], { noModels: true });
   assert.equal(needsOK.status, 8, needsOK.stderr + needsOK.stdout); assert.match(needsOK.stdout, /reroute-needs-user:/);
@@ -163,9 +169,9 @@ try {
   const signing = run('no-signing-hop', {}, ['--signing']);
   assert.equal(signing.status, 8); assert.equal(signing.calls.filter((c) => c.method === 'thread/start').length, 1);
   const defer = run('deferred', {}, [], { defer: true, source: ASTRA });
-  assert.equal(defer.status, 9, defer.stderr + defer.stdout);
+  assert.equal(defer.status, 8, defer.stderr + defer.stdout);
   assert.equal(events(defer).at(-1).event, 'needs-user');
-  assert.ok(JSON.parse(fs.readFileSync(path.join(defer.task, 'reroute.json'))).route.deferUntil);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(defer.task, 'reroute.json'))).route.blocked,true,'Astra cannot defer down to Sol');
   const limited = run('depth-limit', {}, [], { depth: 2 }); assert.equal(limited.status, 10);
   assert.equal(events(limited).at(-1).event, 'failed');
   assert.ok(!limited.rows.some((r) => r.kind === 'reroute'));
@@ -196,11 +202,11 @@ try {
   assert.equal(policy.status, 8, policy.stderr + policy.stdout); assert.match(policy.stdout, /reroute-needs-user:/);
   assert.ok(!policy.calls.some((c) => c.method === 'thread/start' && c.model !== SOL), 'required second opinion approval prevents launch');
   const companyPolicy = run('company-policy', { mode: 'policy' }, ['--security'], { companyReviews: true });
-  assert.equal(companyPolicy.status, 0, companyPolicy.stderr + companyPolicy.stdout);
-  assert.deepEqual(companyPolicy.calls.filter((c) => c.method === 'thread/start').map((c) => c.model), [SOL, 'kimi-k3', 'deepseek-v4.1-flash']);
-  assert.ok(fs.existsSync(path.join(companyPolicy.task, 'reroute-review-1.md')), 'required company second opinion is followed separately');
+  assert.equal(companyPolicy.status, 8, companyPolicy.stderr + companyPolicy.stdout);
+  assert.deepEqual(companyPolicy.calls.filter((c) => c.method === 'thread/start').map((c) => c.model), [SOL],'policy block never launders a GPT attempt into an unproven cross-family quality hop');
+  assert.ok(!fs.existsSync(path.join(companyPolicy.task, 'reroute-review-1.md')));
   const startPolicy = run('start-policy', { mode: 'policy-start' }, ['--security'], { companyReviews: true });
-  assert.equal(startPolicy.status, 0, startPolicy.stderr + startPolicy.stdout);
+  assert.equal(startPolicy.status, 8, startPolicy.stderr + startPolicy.stdout);
   assert.ok(startPolicy.rows.some((r) => r.kind === 'policy-block'));
   const failedChild = run('failed-child', { childFails: true }); assert.equal(failedChild.status, 1, 'original caller receives child failure');
   console.log('PASS automatic reroutes: queue completion, unavailable/restriction, approval, deferral, depth, work/background guards, cancellation, resource ownership, policy, logs/outcome/nightly');
