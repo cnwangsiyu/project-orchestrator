@@ -421,7 +421,8 @@ const resources = resourceReview(resourceRows.rows, { hours: H, quotaRecords: sn
 const utilisation = { ...resources.utilisation, coverage: resources.coverage, readErrors: resourceRows.errors };
 const workerInbox = auditWorkerEvents(undefined, since);
 const result = { hours: H, routing, reviews: reviewBudget, outcomes, background, quota, utilisation, now, catalog, globalRules, workerInbox };
-if (opt('json')) { console.log(JSON.stringify(result, null, 1)); process.exit(0); }
+// Exit only after the pipe has drained; process.exit right after console.log truncates piped output at ~64 KB.
+if (opt('json')) { await new Promise((done) => process.stdout.write(JSON.stringify(result, null, 1) + '\n', done)); process.exit(0); }
 const show = (title, v) => console.log(`\n## ${title}\n${typeof v === 'string' ? v : JSON.stringify(v, null, 1)}`);
 console.log(`# routing review data — last ${H}h (to ${fmt(Date.now())})`);
 show('routing', routing);
