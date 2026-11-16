@@ -105,6 +105,23 @@ try {
   const younger = start('wait-lane', 'younger-B', 'B'); eq(await younger.done, 0);
   eq(holder('heavy-lane-2'), 'younger-B'); release('heavy-lane-2', 'younger-B'); fs.rmSync(capped, { recursive: true }); release('heavy-lane-1', 'cap-anchor');
 
+  // Review #1: A and B already hold lanes. Returning C's lane must let the
+  // oldest ready waiter use it, even while B's younger waiter also waits.
+  take('heavy-lane-1', 'cycle-A1', 'A'); take('heavy-lane-2', 'cycle-B1', 'B'); take('heavy-lane-3', 'cycle-C1', 'C');
+  const cycleA = path.join(root, 'cycle-A-paused'), cycleB = path.join(root, 'cycle-B-paused');
+  const cycleRetry = path.join(root, 'cycle-younger-paused');
+  const a2 = start('wait-lane', 'cycle-A2', 'A', { PAUSE_MARK: cycleA });
+  await until(() => fs.existsSync(cycleA), a2);
+  const b2 = start('wait-lane', 'cycle-B2', 'B', { PAUSE_MARK: cycleB, PAUSE_ON_SECOND: cycleRetry });
+  await until(() => fs.existsSync(cycleB), b2);
+  release('heavy-lane-3', 'cycle-C1'); fs.writeFileSync(`${cycleB}.release`, 'go');
+  await until(() => fs.existsSync(cycleRetry), b2);
+  ok(b2.text.includes('FIFO')); eq(fs.existsSync(lock('heavy-lane-3')), false);
+  fs.writeFileSync(`${cycleA}.release`, 'go'); eq(await a2.done, 0); eq(holder('heavy-lane-3'), 'cycle-A2');
+  eq(holder('heavy-lane-1'), 'cycle-A1'); eq(holder('heavy-lane-2'), 'cycle-B1');
+  fs.writeFileSync(`${cycleRetry}.release`, 'go'); await stop(b2);
+  release('heavy-lane-3', 'cycle-A2'); release('heavy-lane-1', 'cycle-A1'); release('heavy-lane-2', 'cycle-B1'); eq(waiterDirs(), []);
+
   // FIFO even when the younger waiter runs first after a return.
   for (const [id, by] of [['heavy-lane-1', 'F1'], ['heavy-lane-2', 'F2'], ['heavy-lane-3', 'F3']]) take(id, by, 'F');
   const firstPause = path.join(root, 'first-paused');
@@ -127,7 +144,8 @@ try {
   const gated = start('wait-lane', 'gated-live', 'B', { RES_TEST_LOAD1M: '21' });
   await until(() => waiterDirs().some((dir) => Number(field(path.join(dir, 'info'), 'gate_streak')) >= 3), gated);
   take('heavy-lane-2', 'gate-pass'); release('heavy-lane-2', 'gate-pass');
-  fs.writeFileSync(path.join(state, 'machine.conf'), 'LOAD_LIMIT=30\nLOAD_LIMIT_WITH_LANES=30\n');
+  fs.writeFileSync(path.join(state, 'machine.conf.next'), 'LOAD_LIMIT=30\nLOAD_LIMIT_WITH_LANES=30\n');
+  fs.renameSync(path.join(state, 'machine.conf.next'), path.join(state, 'machine.conf'));
   eq(await gated.done, 0); eq(waiterDirs(), []); eq(holder('heavy-lane-2'), 'gated-live'); release('heavy-lane-2', 'gated-live');
   fs.rmSync(path.join(state, 'machine.conf'));
   release('heavy-lane-1', 'gate-anchor');

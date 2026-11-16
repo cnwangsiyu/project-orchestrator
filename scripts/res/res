@@ -88,9 +88,36 @@ heavy_lanes_held() {
 machine_thresholds() {
   LOAD_LIMIT=12 LOAD_LIMIT_WITH_LANES=20 MIN_AVAIL_GIB=16 LANE3_LOAD=8 LANE3_AVAIL_GIB=32
   THRESHOLDS_SOURCE=defaults
-  [ -e "$RES_DIR/machine.conf" ] || return 0
-  local values key value
-  values=$(awk '
+  local conf="$RES_DIR/machine.conf" content values key value
+  if [ ! -e "$conf" ]; then
+    [ ! -L "$conf" ] || die "machine.conf is a dangling symlink"
+    return 0
+  fi
+  [ -f "$conf" ] && [ -r "$conf" ] || die "machine.conf must be a readable regular file"
+  # Open nonblocking and inspect that descriptor, so a path replacement cannot
+  # turn the reader into a FIFO wait. Only a complete, unchanged snapshot applies.
+  content=$(python3 - "$conf" <<'PY'
+import os, stat, sys
+try:
+    fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NONBLOCK)
+    with os.fdopen(fd, 'rb') as stream:
+        before = os.fstat(stream.fileno())
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError('machine.conf must be a readable regular file')
+        data = stream.read(before.st_size + 1)
+        after = os.fstat(stream.fileno())
+    stamp = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+    if stamp(before) != stamp(after) or len(data) != before.st_size:
+        raise ValueError('machine.conf changed during the read')
+    if not data or not data.endswith(b'\n'):
+        raise ValueError('incomplete machine.conf (final record needs a newline)')
+    sys.stdout.write(data.decode('utf-8'))
+except (OSError, UnicodeError, ValueError) as error:
+    print('res: ' + (str(error) if isinstance(error, ValueError) else 'cannot read regular machine.conf'), file=sys.stderr)
+    sys.exit(1)
+PY
+  ) || die "machine.conf overrides not applied; defaults retained; publish complete configuration using temp + rename to keep the previous file active"
+  values=$(printf '%s\n' "$content" | awk '
     /^[[:space:]]*(#|$)/ { next }
     {
       if (split($0, parts, "=") != 2) exit 1
@@ -102,7 +129,7 @@ machine_thresholds() {
       max = key ~ /GIB$/ ? 65536 : 1024
       if (value + 0 > max) exit 1
       print key "\t" value
-    }' "$RES_DIR/machine.conf") || die "invalid machine.conf (unique known KEY=value; load >0..1024, GiB >0..65536)"
+    }') || die "invalid machine.conf (unique known KEY=value; load >0..1024, GiB >0..65536)"
   while IFS=$'\t' read -r key value; do
     [ -n "$key" ] || continue
     case "$key" in
@@ -459,7 +486,9 @@ oldest_lane_waiter() {
     if project_holds_lane "$project" "$candidate"; then
       while IFS= read -r other; do
         [ -n "$other" ] || continue
-        [ "$(waiter_field "$other" project)" = "$project" ] || { capped=1; break; }
+        [ "$(waiter_field "$other" project)" != "$project" ] || continue
+        project_holds_lane "$(waiter_field "$other" project)" "$candidate" && continue
+        capped=1; break
       done <<<"$ready"
     fi
     [ "$capped" -eq 1 ] || { printf '%s\n' "$dir"; return 0; }
@@ -478,6 +507,7 @@ lane_waiter_blocks() {
     while IFS= read -r dir; do
       [ -n "$dir" ] || continue
       [ "$(waiter_field "$dir" project)" != "$PROJECT" ] || continue
+      project_holds_lane "$(waiter_field "$dir" project)" "$candidate" && continue
       RESERVED_MESSAGE="project '$PROJECT' already holds a lane; waiting project $(waiter_field "$dir" project) has priority; retry or use wait-lane"
       return 0
     done <<<"$ready"
@@ -612,17 +642,52 @@ write_info() {
 # Retain counts and process identities only, never device serials/details or
 # process arguments. Missing adb/ps is evidence unavailable, not a take error.
 device_clients() {
-  local count=unknown clients=unknown
-  count=$(adb devices -l 2>/dev/null | awk 'END { print NR+0 }') || count=unknown
-  clients=$(ps -axo pid=,comm= 2>/dev/null | awk '
-    {
-      pid=$1; name=$0; sub(/^[[:space:]]*[0-9]+[[:space:]]+/, "", name); sub(/^.*\//, "", name)
-      if (pid ~ /^[0-9]+$/ && name ~ /^(adb|devicectl)$/) {
-        result=result (result ? "," : "") pid ":" name
-      }
-    }
-    END { print result ? result : "none" }') || clients=unknown
-  printf 'adb_device_lines\t%s\ndevice_clients\t%s\n' "$count" "$clients"
+  python3 - "$PID_EXPLICIT" "$PID" <<'PY'
+import os, signal, subprocess, sys
+def cancelled(signum, frame):
+    raise SystemExit(128 + signum)
+for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+    signal.signal(signum, cancelled)
+def probe(args):
+    try:
+        child = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError:
+        return None, None
+    completed = False
+    try:
+        output, _ = child.communicate(timeout=2)
+        completed = True
+        return output, child.returncode
+    except subprocess.TimeoutExpired:
+        return None, None
+    finally:
+        if not completed:
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            child.communicate()
+adb, adb_status = probe(['adb', 'devices', '-l'])
+processes, ps_status = probe(['ps', '-axo', 'pid=,comm='])
+if adb_status != 0:
+    adb = None
+if ps_status != 0:
+    processes = None
+pid_status = None
+if sys.argv[1]:
+    _, pid_status = probe(['ps', '-p', sys.argv[2], '-o', 'pid='])
+clients = []
+if processes is not None:
+    for line in processes.decode('utf-8', errors='replace').splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) == 2 and parts[0].isdigit():
+            name = os.path.basename(parts[1])
+            if name in ('adb', 'devicectl'):
+                clients.append(parts[0] + ':' + name)
+print('adb_device_lines\t' + ('unknown' if adb is None else str(len(adb.splitlines()))))
+print('device_clients\t' + ('unknown' if processes is None else ','.join(clients) or 'none'))
+sys.exit(10 if pid_status == 1 else 0)
+PY
 }
 pid_dead() {
   local rc=0
@@ -1092,6 +1157,7 @@ cmd_take() {
     never) echo "res: '$id' is off limits (policy never): $(reg_line "$id" | cut -f5)" >&2; exit 3 ;;
     ask-user) [ -n "$FORCE" ] || { echo "res: '$id' needs the user's OK first (policy ask-user); once given, retry with --force" >&2; exit 3; } ;;
   esac
+  case "$id" in heavy-*) (machine_thresholds) || return $? ;; esac
   if [ "$id" = heavy-lane-3 ]; then
     if [ "$(field "$id" by)" = "$BY" ]; then
       echo "already held by you: $id"; show_notes "$id"
@@ -1116,6 +1182,18 @@ cmd_take() {
     [ "$link" = connected ] || { DEVS=; probe; link=$(conn "$dev"); }
     [ "$link" = connected ] || { echo "res: '$id' is not connected ($link) — ask the user to plug in / unlock / trust it; --offline holds it anyway" >&2; exit 4; }
   fi
+  local device_evidence=$'adb_device_lines\tunknown\ndevice_clients\tunknown'
+  local device_log= device_pid_dead=0 device_probe_rc=0
+  if [ "$dev" != - ] && [ ! -d "$LOCKS/$id.d" ]; then
+    # Finish both bounded probes before creating a lease. A hung probe can
+    # produce unknown evidence, but cannot strand half-published ownership.
+    device_evidence=$(device_clients 2>/dev/null) || device_probe_rc=$?
+    case "$device_probe_rc" in
+      0) ;;
+      10) device_pid_dead=1 ;;
+      *) device_evidence=$'adb_device_lines\tunknown\ndevice_clients\tunknown' ;;
+    esac
+  fi
   mkdir -p "$LOCKS"
   if take_mkdir "$LOCKS/$id.d"; then
     TAKE_CREATED=1
@@ -1133,10 +1211,12 @@ cmd_take() {
       TAKE_CREATED=0
       return 2
     fi
-    if [ -n "$PID_EXPLICIT" ] && pid_dead "$PID"; then warn_holder; mark_holder_warning "$id"; fi
-    local device_evidence= device_log=
+    if [ -n "$PID_EXPLICIT" ]; then
+      if { [ "$dev" != - ] && [ "$device_pid_dead" = 1 ]; } || { [ "$dev" = - ] && pid_dead "$PID"; }; then
+        warn_holder; mark_holder_warning "$id"
+      fi
+    fi
     if [ "$dev" != - ]; then
-      device_evidence=$(device_clients) || device_evidence=$'adb_device_lines\tunknown\ndevice_clients\tunknown'
       printf '%s\n' "$device_evidence" >>"$LOCKS/$id.d/info" || true
       device_log=" · $(printf '%s\n' "$device_evidence" | awk -F'\t' '{printf "%s%s=%s", (NR>1 ? " " : ""), $1, $2}')" || device_log=' · device_clients=unknown'
     fi

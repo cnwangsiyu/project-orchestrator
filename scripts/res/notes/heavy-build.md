@@ -14,7 +14,7 @@ project-orchestrator/references/res-contract.md. Install only after reviewed own
   Two normal heavy lanes; optional lane 3 defaults to load1m <=8 AND available
   memory >=32 GiB at acquisition. Active values come from heavy-check.
 - `wait-lane` publishes a live heartbeat record, shown by res status. While a
-  ready waiter from another project exists, a project holding a lane yields
+  ready waiter from another project with no lane exists, a project holding a lane yields
   additional lanes. Eligible lane waiters proceed FIFO; gate-blocked waiters
   stop reserving after three polls. Blocking builds retain their priority.
 - Use ONE long-lived process for acquisition, build and return. Workers never
@@ -48,7 +48,9 @@ project-orchestrator/references/res-contract.md. Install only after reviewed own
 - Optional RES_DIR/machine.conf overrides LOAD_LIMIT, LOAD_LIMIT_WITH_LANES,
   MIN_AVAIL_GIB, LANE3_LOAD and LANE3_AVAIL_GIB as validated KEY=value data.
   heavy-check prints all active values and defaults/machine.conf source.
-  Consult references/res-contract.md for ranges. The controller never creates
+  Publish a complete newline-terminated file using temp + rename; never edit
+  machine.conf in place. Invalid paths and incomplete/changing reads fail with
+  exit 1 before overrides apply. Reads use Python 3. Consult references/res-contract.md for ranges. The controller never creates
   the file; absent configuration keeps the original thresholds.
 - macOS available memory = kern.memorystatus_level/100 * hw.memsize. Only an
   explicitly missing sysctl permits (free+inactive+speculative) pages fallback.

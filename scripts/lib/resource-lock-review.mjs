@@ -64,10 +64,10 @@ export function reviewLockTiming(samples, { since, now, maxGapMs }) {
     const lowerEnd = Math.max(h.endLow ?? -Infinity, h.lastObserved ?? -Infinity);
     const superseded = finite(h.endHigh) && finite(h.startHigh) && holds.some((other) => other !== h &&
       other.resource === h.resource && sameHolder(h, other) && finite(other.startLow) &&
-      other.startLow >= h.startHigh && other.startLow > h.startLow && other.startLow < h.endHigh && finite(other.firstObserved) && other.firstObserved < h.endHigh);
-    const invalid = superseded || finite(h.endLow) && finite(h.startLow) && h.endLow < h.startLow;
+      other.startLow >= h.startHigh && other.startLow > h.startLow && other.startLow < h.endLow && finite(other.firstObserved) && other.firstObserved < h.endHigh);
+    const invalid = superseded || finite(h.endHigh) && finite(h.startLow) && h.endHigh <= h.startLow;
     return { resource: h.resource, holder: h.holder, owner: who(h), pid: h.pid ?? null, purposeClass: h.purposeClass ?? null,
-      validity: invalid ? 'INVALID' : 'VALID', invalidReason: superseded ? 'same-name release follows a newer observed acquisition; older take cannot be paired' : invalid ? 'release precedes acquisition; same-name episode pairing is ambiguous' : null,
+      validity: invalid ? 'INVALID' : 'VALID', invalidReason: superseded ? 'same-name release follows a newer observed acquisition; older take cannot be paired' : invalid ? 'release window precedes acquisition; same-name episode pairing is ambiguous' : null,
       startAt: finite(h.startLow) ? new Date(h.startLow).toISOString() : null,
       startPrecisionSeconds: finite(h.startHigh) && finite(h.startLow) ? (h.startHigh - h.startLow) / 1000 : null,
       endAt: !superseded && finite(h.endLow) ? new Date(h.endLow).toISOString() : null,
