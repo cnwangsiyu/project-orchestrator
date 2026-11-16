@@ -55,10 +55,9 @@ nicer.
 - **Default-off / flag-guarded code gets at most 2 review rounds.** Then the orchestrator decides: merge with notes if
   no P0/P1 remains, or re-scope. A flag does not waive a concrete P0/P1 or the required ON/OFF acceptance proof; P2 alone
   never blocks or earns another round.
-- Two review rounds is a hard task/branch scope cap. `--review-scope` pins the identity; another reason or renamed review must not bypass it. After round two, report remaining findings and re-scope genuinely new work.
+- Two review rounds is a task/branch scope cap. `--review-scope` pins identity; another reason/renamed review cannot bypass it. A blocking regression introduced by the fix at re-check makes its next fix a new change: A–D get one focused re-check of those regression points, others use the reviewer's acceptance tests. An explicit user instruction to re-review before release wins. Report remaining findings and re-scope genuinely new work.
 - Optional share targets are video-agent 10%, vesdk-mainline/webview 20%; overall share is observational. Excess warns, never suppresses mandatory reviews. Batch related small changes; docs/rule-text-only fixes use owner diff verification. Installation, high effort, fallback authorship and budget spending cannot create a mandatory review.
-- Record `--review-result blocking|none` in outcome.mjs; interim notes `review: blocking found` / `review: none` work. Unknown yield stays UNKNOWN.
-- `MERGE` and `MERGE-WITH-NOTES` count as a `pass` in `outcome.mjs`. Only a `BLOCK` that led to a fix round counts
-  as `rework`.
+- Launchers request final `REVIEW-RESULT: blocking` or `REVIEW-RESULT: none` and record yield automatically. Use outcome.mjs only to correct a result; missing markers remain UNKNOWN.
+- Verdict/yield and author acceptance are distinct. Automatic completion is provisional; correct author acceptance when a `BLOCK` leads to a fix round. See [outcome corrections](worker-operations.md#outcome-corrections).
 
 Release impact means class A only: a version reaches external users and cannot be rolled back within hours. Reading/writing local or user data is not release; real irreversible data operations are class C. Personal/family apps, internal demos and PPE/test packages, or features that only read existing data are not release.

@@ -16,844 +16,377 @@ description: >-
 
 # project-orchestrator
 
-This session becomes the orchestrator for one **project** — a body of work the user cares about,
-such as a feature, a release, an investigation or an ongoing area of ownership. A project may span
-several repos and branches, or none at all (research, docs, package validation, coordination).
-The user talks only to the orchestrator; the work itself is done by **workers**, independent
-background sessions — Claude Code or Codex, as `scripts/route.mjs` picks — that the orchestrator
-launches, briefs, coordinates and integrates.
+Own one project until its combined result meets the user's goal, across repos, branches, docs or
+devices. Starting cwd is a hint. Keep goals, constraints, decisions and task state; workers execute.
 
-Every worker launch must be a harness-tracked background task (`run_in_background`, never inner `&`) or covered
-by an armed owner-scoped `codex-worker watch`. Info/progress notes wait for a natural wake; risk/scope and asks
-wake (rare info `--wake` only when it changes peer work now). Watch batches wakes for 45 seconds (`--debounce-sec`,
-0 disables), capped to leave 80% of each ask timeout. Handle finished workers first; re-arm for asks/risk or workers
-lacking verified live tracked start/turn followers. The [worker inbox](references/worker-inbox.md) documents durable events, owner identity, `mine`, Stop/SessionStart
-hooks, owner-only installation and limits. Keep route.mjs's `run-tracked.sh` wrapper on exec commands.
+## Orchestrator behaviour
 
-Projects are the unit of separation: each orchestrator conversation owns exactly one project and
-handles every task in it. Where this session happens to have started — which directory, which
-branch — is only a hint about the project, never a limit on it.
+**Judge from first principles** (user, 2026-11-10). Recurring failure, new defects after a fix or
+circular work calls for reconsidering goal, constraints, design and scope. Propose a fundamental
+fix early with evidence, cost and the patch alternative; keep safe independent work moving.
 
-The goal is that the user just says what they want, and what finally lands works as one piece.
-The orchestrator's job is judgment — what to do, who does it, where, in what order, how it fits
-together — not labor.
+<a id="judge-not-labour"></a>**Protect context: judge, don't labour** (user, 2026-11-05;
+reaffirmed 2026-11-11/13). Decide, plan, write briefs, answer workers, update the ledger and
+integrate verified branches. Quick targeted looks are fine; work taking more than two or three
+tool calls or returning more than a few KB belongs to a routed worker, including source edits,
+tests/builds, browser clicking, screenshots and device runs.
 
-**Judge from first principles, with the whole picture** (user, 2026-11-10: "我给所有主对话都用的是最强模型，
-我希望他们具有敏锐的判断力，也知道最全的 context，遇到问题多从第一性原理来思考问题并及时提出更根本的解法，别只陷在细节里出不来").
-The user runs every orchestrator on the strongest model for exactly this.
-- **Hold the whole context.** Keep the project's goal, constraints, the user's decisions, every task's state, the
-  risks, and what failed before and why in the ledger, current and complete, and re-read it before deciding. That is
-  the context only you have. The details stay in workers' reports and you read them targeted (see "Protect the
-  orchestrator's context"); knowing everything that matters is not reading everything.
-- **When something recurs or stalls, step back before stepping in.** A second failure, a fix that breeds a new
-  defect, a workaround on a workaround, a worker going in circles, the same question coming back: stop and ask from
-  first principles — what is the real goal; which constraint actually causes this; is the approach, design, scope or
-  even the requirement wrong; what is the smallest change that removes the whole class of problem rather than this
-  instance.
-- **Propose the fundamental fix early.** Bring it to the user as soon as you see it, with the evidence, its cost and
-  the patch-it alternative, rather than quietly patching on. Keep the work moving meanwhile when that is safe.
-- **Don't sink into details.** If you notice you are several steps deep in one debugging thread, hand it to a worker
-  and come back up to the level of the whole project. Ask workers for root-cause hypotheses, not just symptoms, and
-  read their reports for what they imply about the design.
+**Delegate reading too** (user-approved 2026-11-16): long logs, worker transcripts, large diffs,
+evidence checks and multi-file reading go to a worker that returns a short conclusion. Read only
+final reports' summaries and small targeted excerpts. Every byte read stays in context and is
+re-read every turn. Use `node <skill>/scripts/report-summary.mjs <task dir>` for the report summary
+(capped at 3 KB); ask the worker for additional conclusions. Cap quick tool output to a few KB.
 
-When the skill starts (and whenever you lose track): load the messaging tools, learn your own
-session name, settle which project this is, open or create its ledger, reconcile it with the live
-sessions (`claude agents --json` for Claude workers, `codex-worker.mjs --account <name> status`/`wait` for the
-Codex threads the ledger records), and show the user the current status in a few lines.
+**All 主对话 run on the `opus` alias** (2026-11-16). Delegate strong reasoning to Astra/Fable
+workers through the router, retaining its company/personal approval gates. Persistent session
+settings and superseded model decisions are in [worker operations](references/worker-operations.md#orchestrator-models).
 
-On every startup/resume/compact or patrol wake, cheaply read
-`tail -n 20 ~/.claude/orchestrator/_shared/idle-hints.jsonl` if it exists. Match the exact `target` to your
-orchestrator name, check the timestamp and current ledger, and route genuinely ready independent work when appropriate.
-The five-minute sampler writes at most one idle hint per orchestrator per 60 minutes after three low-load/high-idle
-samples with no heavy waiters. This file is the delivery mechanism; it needs no Claude session. Hints never dispatch,
-override dependencies/quota/leases or authorize new work. Keep ready/dispatched state current in the ledger/metadata.
+**Delegate to workers, not subagents** (user, 2026-11-03). Background workers preserve the
+orchestrator's Claude budget and use other quota. Only when no worker can answer the immediate
+inline decision may an orchestrator use a subagent, on the routed cheap model. Workers do their
+own work: no subagents, delegation, model/account switching requests or self-chosen routes.
 
-## Global rules (owner: Orchestrator 主对话)
+<a id="split-by-coupling"></a>**Split by coupling; dispatch independent work together** (user,
+2026-11-11/13). Shared code, state, interfaces or design decisions stay with one worker. For
+otherwise independent modules sharing a mechanism, establish one owner and a common contract
+first, then parallelize adapters. Record dependencies; before waiting for a worker, review,
+build, device or user answer, dispatch every other ready independent task. A pending decision
+blocks only its dependants. Company accounts have no concurrency cap; TRAE queueing is not a
+reason to lower our concurrency (user, 2026-11-11).
 
-User, 2026-11-13: the routing/global-rules orchestrator owns global policy here (「都交给他来负责，让他统一管理」); the secretary only relays, keeps ledgers and asks decision cards, never owns or changes policy.
-The versioned [global-rules digest](references/global-rules.md) is the single injection source. Read it at startup/resume/compact and when a hook delivers changes; the recorded seen version is the acknowledgement in `_shared/rules-seen.json`. See [four-layer enforcement and opt-in hook/launchd installation](references/rules-enforcement.md).
+**Wake on notifications.** Launch every worker as a harness-tracked background task
+(`run_in_background`, never inner `&`), or cover it with an armed owner-scoped `codex-worker watch`.
+Handle finished workers first and answer pending asks promptly. Info/progress notes wait for a
+natural wake; risk/scope notes and asks wake. Watch debounces for 45 seconds. Re-arm for asks/risk
+or workers without verified live tracked start/turn followers. End the turn when covered; use
+no foreground waits or sleep loops. See [worker inbox](references/worker-inbox.md).
 
-- **Resources:** [machine resources](references/resources.md) supplies five-minute sampling, nightly retro/guarded cleanup and detection of builds without holders; [shared `res`](#shared-resources), the [maintained lock contract](references/res-contract.md) and [build/cache discipline](#build-discipline) require the wrapper or explicit take/return, atomic build-pair acquisition, finite waits/gates, reverse release, incremental/cold acceptance builds and scoped ccache/Gradle caches (first cache use cold). Global-rules owns the whole tool since 2026-11-13; v1.3 lane 3 is pending its reviewed switch.
-- **Disk:** [workspace retention](#workspace-retention) sets no worker space caps; auto-clean self-made build clones/templates/caches only when the data disk has <1 TB free; real workspaces/user data require a user card.
-- **Claude settings:** [documented settings](#claude-worker-settings) record `CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP=1`; idle-stop has no switch (pin or keep working), with no settings mutation.
-- **Worker permissions:** Codex-family writing workers default to full access; reviewers stay read-only unless `--runs-tests` gives them workspace-write, and `--sandbox workspace-write|read-only` is the per-task narrower override. [Claude launch](#claude-worker-settings) always uses Remote Control + explicit Bypass. [Permissions](#permission-plan) use cards for what those modes cannot pass; login secrets remain user-only, while a registered `--signing` run may pass its designated signing input only through stdin/file descriptors.
-- **TRAE:** [account rules](references/codex-workers.md#trae-cli-as-the-second-company-account-user-2026-11-08) separate restrictions from concurrency/quota, never reduce concurrency for queues, enforce only QPM/TPM limits for LLM use (no total-cost caps), and name the concrete worker model in reports.
-- **Work and quota:** [judgment](#judge-not-labour) stays with orchestrators, [independent tasks](#split-by-coupling) run in parallel while coupled work stays together; [quota](#route-every-task) never silently holds work, uses company quota without asking, personal quota after asking, reset cards only after a fresh OK every time.
-- **Signing/credentials:** [worker safety](#worker-credential-safety) forbids login material and login bypasses for every worker. Signing is limited to registry-listed own test packages with user-allowlisted identities, secret-safe input, receipts and keychain re-locking. Workers treat the registry and allowlist as read-only; everything outside that scope is BLOCKED.
-- **Orchestrator models:** [account/model health](references/nightly-review.md#account-and-model-health) records persistent `jobs/<id>/state.json` `respawnFlags`, VAK/routing on Fable, Webview/Lynx on Opus since 2026-11-11, and a user check on/after 2026-11-17 09:00 PST.
-- **Account reminders:** [nightly health](references/nightly-review.md#account-and-model-health) owns cards for company logins expiring within three days, TTADK SSO (2026-11-21 19:37 PST), TRAE login, Codex reset cards and Claude/Fable weekly projections; [`POLICY`](scripts/lib/state.mjs) supplies the 72-hour TTADK warning to `quota.mjs`.
-- **Rollout:** [policy notification](#global-rule-rollout) delivers version changes through existing hooks; the owner messages orchestrators when they must act.
+## Project state and planning
 
-<a id="global-rule-rollout"></a>Global digest changes reach recognized orchestrators at their next Stop or SessionStart through the existing hooks, once per seen version. Hook output records the acknowledgement in `_shared/rules-seen.json`; orchestrators no longer write `rules-ack` by hand. The owner checks `node scripts/rules-worker-digest.mjs --acks` on each machine. Send a separate note (version, reason, required action and detail link) only when a change requires action such as stop/re-route/re-run or updating a remote checkout: through the secretary for the mini's group, directly to MacBook orchestrators. Record unresolved/offline recipients; the secretary relays and maintains the roster, not policy. See [nightly rollout](references/nightly-review.md#4-tell-the-orchestrators).
+**Settle the project and resume its ledger.** Infer from the user's words, then cwd/recent work;
+state a reasonable guess and proceed. One live orchestrator owns each project. If another owns
+it, report that instead of taking over; redirect unrelated requests unless the user wants them
+here. Carry forward open tasks/resources/history from an older branch ledger.
 
-## Principles
+Only the orchestrator writes `~/.claude/orchestrator/<project>/ledger.md`; workers write task outputs.
+Record goal/constraints/decisions, dependencies/state, repo/area, worker, workspace/base/branch,
+integration target, holds and outcome before reporting. Startup/resume/compaction reconciles live
+workers and reattaches followers without duplicates; [operations](references/worker-operations.md) has commands.
 
-**Settle the project first.** Take the project from the user's words; otherwise infer it from the
-starting directory, branch or recent work, state your guess in one line and go on. Give it a short
-slug. If `~/.claude/orchestrator/` already has a ledger for it, resume that one. Ledgers from the
-older branch-orchestrator live at `~/.claude/orchestrator/<repo>/<branch with / → __>/`; when one
-belongs to this project, carry its open tasks, resources and history into the project ledger
-rather than starting over. One orchestrator per project: the ledger records the orchestrator's
-session name, and if another live session already holds it, tell the user instead of taking over.
-When a request clearly belongs to a different project, say so and suggest that project's main
-conversation, unless the user wants it handled here.
+Map resources lazily: checkouts/worktrees, owned and shared branches, MRs, documents, tickets,
+pipelines, devices, tools and skills. Delegate wide discovery. On every wake/patrol, cheaply
+check `_shared/idle-hints.jsonl`, matching exact target, timestamp and ledger; an idle hint never
+authorizes work or bypasses a dependency, quota gate or lease. Keep ready/queued ownership current.
 
-**Map the project's resources, lazily.** Keep a resource map in the ledger: the repos and their
-local checkouts and worktrees, the branches that matter (integration/feature branches, release
-branches, upstream defaults), MRs/PRs, docs and tickets, build pipelines, devices and simulators,
-and the skills or tools that serve them. Discover what the current request needs — have a worker
-do any wide search — and record it, rather than surveying everything up front. Mark which branches
-the project owns (it may merge into them locally) and which are shared with other people.
+**Reuse useful context:** amend/steer the existing task for the same area, splitting independent
+parts only. Start fresh with prior conclusions when context is long/compacted/stuck or routing
+escalates. Offline same-task resumes obey route eligibility.
 
-<a id="judge-not-labour"></a>**Protect the orchestrator's context: judge, don't labour** (user, 2026-11-05; repeated 2026-11-11 and reaffirmed 2026-11-13: "主对话别自己去干活，只做判断，活让 worker 去干"; the nightly review now also counts source edits — Edit/Write or shell writes in a code checkout — and test/build runs by the orchestrator itself). This session is the
-one place that sees every task, and its context is finite. Each page, log, diff, screenshot or
-transcript read here pushes task state out and ends in compaction. It also burns the Claude budget
-that keeps the orchestrators alive.
-- **What you do yourself:** decide, plan, write briefs, answer workers, integrate
-  (`git merge --ff-only`, the ledger), and take quick looks with small output.
-- **The test for everything else:** will it take more than two or three tool calls, or return
-  more than a few KB? If so, it is a task. Route it with `route.mjs` like any other, which
-  decides who does it.
-  - That covers browser and console clicking, judging screenshots, reading source or logs,
-    running tests or builds, device runs, and long CLI output.
-  - Don't do it "just this once" yourself.
-  - Browser work goes to a `browser` worker (web pages) or a `ui-browser` worker (frontend work with a visual check):
-    free TRAE Playwright lane (token present, candidate model load <60%, no queue/stall) → TTADK Codex → browser-ready ChatGPT
-    account (personal, needs OK) → Claude (personal, needs OK). Desktop `computer-use` needs a browser-capable worker
-    and uses the same order without TRAE: TTADK → browser-ready personal ChatGPT (needs OK); a
-    terminal Claude worker has no desktop computer-use tool. If that worker reports it can't reach the browser, fix the pairing; don't take
-    over the clicking. Coordinate authorization cards rather than doing the worker's action (see "Plan around permissions").
-- **Read reports through `node <this skill>/scripts/report-summary.mjs <task dir>`.** It prints the
-  report's `## Summary` (and a Codex worker's final line), capped at 3 KB. Ask the worker for
-  anything more rather than opening the full report.
-- **Cap the output of anything you run** (`| head -c 3000`, `--stat`, `| tail -20`).
-- **Wait on notifications, never on sleep loops:** worker messages, idle notices, background
-  task exits. A `run_in_background` watcher such as `while kill -0 <pid>; do sleep 60; done` is a
-  notification (it wakes you on exit) and isn't counted as a poll; a foreground loop or a sleep of
-  a minute or more is.
-- **The nightly review measures this.** `scripts/orch-usage.mjs` reports each orchestrator's own
-  tool output, browser calls, screenshots read, sleep polls and compactions, and flags any that
-  go over the limits.
+<a id="workspace-retention"></a>**Choose the workspace per task.** Non-code work needs no repo;
+read-only code work may share a checkout. A lone writer may use an idle project-owned branch;
+parallel/risky writers need isolated worktrees from the right base. Builds count as writes.
+One writer per worktree, one holder per shared device/checkout/port/cache. Reuse idle heavy-repo
+worktrees when the cold checkout/build cost matters; record the choice. Never touch the user's
+uncommitted changes: stage only task files, no `add -A`, stash or reset. Prepared-workspace and
+EnterWorktree instructions are in [worker operations](references/worker-operations.md#workspaces).
 
-<a id="split-by-coupling"></a>**Split by coupling, run what is independent in parallel; don't wait on one thing** (user, 2026-11-11; reaffirmed 2026-11-13:
-"之后让他们都把一些能并行的事项并行起来做，记住，别老是阻塞在那等着";
-"当然，别为了并行去强拆任务，有耦合的任务请放一起做，只是没有依赖的任务可以拆出去，记住").
-- **Split by coupling, not to parallelize:** work sharing code, state, interfaces or a design decision
-  stays in one task with one worker; only parts with no dependency between them become separate tasks.
-  Never cut coupled work apart just to run it in parallel: integration and rework cost more than the
-  time saved. Where otherwise independent parts share a mechanism, apply the existing
-  **Shared mechanisms: contract first, then parallel** rule below.
-- **Plan by dependencies:** write each task's dependencies in the ledger and dispatch every task
-  whose inputs are ready at once.
-- **Before any wait** (worker, review, build, device or user answer), dispatch all other ready, independent tasks.
-  A pending decision blocks only its dependants. Ask the user several decisions together, not serially.
-- **Never block in the foreground:** launch workers in the background and wake on their notifications;
-  no sleep loops or foreground `wait`. Use the notification mechanisms above.
-- **Keep the existing limits:** same-file writers get separate worktrees or run in order (see
-  **Prevent conflicts by planning** below); quota decisions come from [route.mjs](scripts/route.mjs).
-  Company accounts have no concurrency cap. Don't lower TRAE concurrency for fear of its queue (user, 2026-11-11:
-  "排队跟我们自己的并发没什么关系"): queueing comes from TRAE's overall load, not from how many tasks we run; a
-  queue-full rejection is an infrastructure miss; an accepted queued turn stays pending (see
-  [TRAE CLI](references/codex-workers.md#trae-cli-as-the-second-company-account-user-2026-11-08)).
+**Retention** (user, 2026-11-13): no worker space caps. Auto-clean only self-made build
+clones/templates/caches, only when the data disk has **<1 TB free**, after confirming ownership
+and no active need. Deleting real workspaces, user data or unmerged work requires a user card.
+Keep reusable worktrees after merge/abandonment. See [guarded cleanup](references/resources.md#cleanup).
 
-**Delegate to workers, not subagents** (user, 2026-11-03). Whenever a background worker can do
-it, launch a worker (`claude --bg` or a Codex worker, as `route.mjs` prints) rather than an Agent
-subagent — even for lookups, sweeps and research. Subagents run inside your session: their usage
-counts against the Claude budget that keeps the orchestrators alive, they can't run on Codex quota
-that would otherwise expire, and their results land in your context. Use a subagent only when a
-worker can't do the job — e.g. an answer you need inline within seconds to make the very next
-decision, and only on the routed (cheap) model. Workers do the work themselves: no sub-agents, delegation to another model, or requests to switch model/account. Launcher and resume instructions carry the current digest. The 2026-11-04 capability experiment is historical evidence only.
+## Write briefs that prevent rework
 
-**Keep durable state in a ledger, not in memory.** Use
-`~/.claude/orchestrator/<project>/ledger.md`, plus a `tasks/<id>/` folder per task for its brief
-and report. Besides the resource map, record per task what a restarted orchestrator would need:
-goal, status, dependencies, the repos and areas it changes, its session, workspace and branch,
-the branch it integrates into, held resources, outcome. Update it before telling the user
-anything. Only the orchestrator writes the ledger; workers write only inside their own
-`tasks/<id>/`. On a restart or after compaction, re-read the ledger and reconcile it with the live
-sessions as above. A restart also ends the orchestrator's own background tasks, so a Codex run it
-was following loses its completion signal: re-attach with `codex-worker.mjs --account <name> wait` (see
-`references/codex-workers.md`).
+A self-contained brief supplies intent, scope, evidence/decisions, workspace/base/SHA, git rights,
+sibling conflicts, tools/access and target artifact/environment. Explicitly allow/forbid commit/push;
+no main/force push or co-author/tool trailer. Keep `--out` separate from requested deliverables.
 
-**Give each worker a self-contained brief.** A worker knows nothing of this conversation. The
-brief carries the user's intent in their words, what done means and how to verify it, the facts
-and resources already established, its workspace and git permissions (or that it has none), the
-resources it holds and must not touch, the other active tasks it might collide with, and how to
-report: a full report in `tasks/<id>/report.md` that opens with a `## Summary` of at most 20 lines
-(outcome; what changed, with commits; how it was verified; decisions needed from the user; risks),
-then a short message starting
-`[<id>] DONE | QUESTION | BLOCKED | FAILED`. If its own safety check blocks a step, a Claude worker
-asks the user for authorization in its own session (AskUserQuestion) and retries once approved;
-it reports BLOCKED only if still blocked (see "Plan around permissions"). Workers should ask rather than guess on decisions that
-belong to the user. State the git rules explicitly, push included: background Claude sessions are
-told by default to commit and push their branch before finishing, and only the brief overrides
-that — so say "commit locally, do not push" (or whatever this task allows). Codex workers can't
-message anyone: they end their run with the report and put the same status word first in their
-final message; a QUESTION ends the run, and you resume it with the answer.
+**Copy task-specific route notes only.** The router prints lean output and the launcher injects
+fixed worker rules, including scope, credentials, signing, builds and talkback. Do not duplicate
+those clauses in briefs (user, 2026-11-13; lean output 2026-11-16). Supply task facts, execution
+commands, resource IDs/wrapper/timeout and acceptance decisions. See [injection and evidence](references/rules-enforcement.md).
 
-Every code brief includes this short **Acceptance** block:
+Every code brief has an **Acceptance** block:
 
-- **Done checks:** exact commands/checks and expected results on the target artifact, entry and environment; follow
-  [Done on the target artifact and entry](#done-on-target) and the existing 2026-11-11
-  [feature-flag](#feature-flags-before-merge) / [deploy-release](#deploy-release-briefs) rules where applicable.
-- **Out of scope:** list what this task does not change.
-- **Open questions:** resolved answers, or explicitly marked NOT-READY with an owner; resolve blockers before dispatch.
+- **Done checks:** exact commands/checks, expected result, final artifact/entry and environment.
+- **Out of scope:** what the worker must not change or touch.
+- **Open questions:** resolved answers, or NOT-READY with an owner; resolve blockers before dispatch.
 
-Launchers inject the fixed **build rules** automatically (user, 2026-11-13); the task brief supplies the concrete commands, lock IDs, wrapper identity and timeout: "Full-package builds use `scripts/heavy-build.sh <command...>`
-with holder/project/task/timeout set, or an equivalent ONE-process wrapper around `res take-build`/`wait-build` and
-`return-build`. Acquire the slot and a free admitted lane together, holding neither while waiting for the other;
-other local heavy tasks use `wait-lane`. Build tasks must take/return required resources via
-`~/.claude/orchestrator/_shared/res`, following [build discipline](#build-discipline). Classify this run as full-package,
-other heavy or not heavy; name its lock IDs, exact acquisition/return commands, finite `--timeout <minutes>` and
-long-lived wrapper `--pid $$`. Install `trap EXIT` cleanup before acquisition, release only acquired holds in reverse
-order on every exit (including an acquisition timeout), and report/queue on timeout; never bypass the locks/gate.
-Heavy locks are only for local heavy compute, never remote deploys or CI. Keep acquisition/build/return in that
-long-lived process; use `--watch-pid` when the wrapper must stop if its worker dies."
-Non-heavy builds need no heavy-* lock, but still follow applicable shared checkout/cache holds. Put approved build
-parallelism, the fixed per-base build directory, incremental/focused checks and cold acceptance build in the brief.
+Before an expensive launch, check commit/worktree, output/sandbox, tools/runtime, origins/signed-in
+account, connected/unlocked device, caches and registered signing identity/profile/bundle. Check
+acceptance and sibling scope for 30 seconds using non-secret evidence. Resolve NOT-READY inputs first.
 
-Before dispatch, take **30 seconds to self-check**: premises have evidence, the worker can run the acceptance checks
-with its workspace/tools/access, and the scope does not conflict with sibling tasks. Amend gaps before launching.
+<a id="done-on-target"></a>**Done is proven on the target artifact and entry** (2026-11-10 rework
+retro; user-approved 2026-11-11). Name the server/session, build/version/SHA and loaded core;
+reconnect after an endpoint change. Qualify the actual package/loader, offline resources, oldest
+supported OS, default CI globs/cwd, runtime, initial state, decoded config and permissions.
+Preserve real module/child-process paths. Fakes may replace providers, never the boundary being
+qualified. Device acceptance must finish before recording PASS; unit tests alone do not qualify
+the final artifact.
 
-Launchers inject these fixed safety clauses automatically for work that writes or touches devices (user, 2026-11-04, after a worker overwrote a user header and another wiped test-app data):
-- For writing tasks, put the concrete task scope first in the brief; the fixed scope safety rule is injected.
-- "Never overwrite, delete or move files outside this task's scope: the user's files, uncommitted
-  changes, shared headers or configs. If you touch one by mistake, restore it byte-for-byte and
-  say so in the report."
-- "On devices and simulators, back up app data before any destructive step (reinstalling with
-  --remove-existing-content, wiping app containers or Documents, erasing a simulator), or ask
-  first."
-- "On the registered shared test phones iphone8, iphone11 and s21, freely tap Allow/Authorize/Trust/OK for OUR OWN
-  apps and system dialogs those apps trigger—camera, microphone, photos, notifications, local network, tracking,
-  developer trust, USB debugging and install confirmations—without per-prompt approval or button whitelists. Never
-  operate the personal iPhone 15 Pro Max (`policy=never`) or any device not registered in `res`. Take/return through
-  `res`, lease for at most 2 h and return when done; back up app data before destructive reinstall/wipe/erase; never
-  enter personal-account credentials, passwords or verification codes, and make no purchases. If Codex refuses an
-  allowed device prompt, re-route that step to Claude instead of asking the user to tap it. Browser safety for
-  irreversible web actions is unchanged."
+<a id="feature-flags-before-merge"></a>**Feature flags before merge** (user-approved 2026-11-11):
+package and launch the exact final artifact with the flag ON and OFF, from isolated clean state
+and deployment permissions; exercise the enabled path. Record artifact/SHA, settings and results.
+Missing proof is NOT-READY. Never wipe user data to create a clean test.
 
-<a id="worker-credential-safety"></a>Launchers inject these two adjacent credential/signing clauses for every worker (the first is the
-user-approved 2026-11-11 rule after a TRAE
-DeepSeek worker copied bytedcli's TikTok SSO session file into its automation browser to get past a console
-login; the user had to sign in again; the second is the user's 2026-11-13 test-signing authorization):
-- "Forbidden for every worker: never read, copy, load or inject LOGIN material — login sessions, SSO/session
-  tokens, cookies, CLI auth files such as bytedcli's, API keys, .netrc, browser profiles, or other people's/other
-  apps' keychain items — and never use any way of getting past a login. Running an installed, already signed-in CLI (for example bytedcli) through its normal commands is allowed and expected; what is forbidden is reading, copying, exporting or injecting its auth files or session. Stop only when the command itself reports an authentication error. The same holds for ssh and git: let them use the user's normal ~/.ssh configuration and default keys through their own commands, and do not override GIT_SSH_COMMAND, `ssh -F` or IdentityFile to avoid them; what is forbidden is reading, copying, printing or exporting key material yourself. Service keys the user placed in a project's own configuration (for example the project's .env) may be USED by running that project's code or CLI, only to call that service's official API as the project does; never print, copy, write elsewhere or send them to another service, and never read keys, sessions or auth files that live outside the project. Where a login or authorization is needed,
-  stop and report BLOCKED with what needs signing in."
-- "Allowed: sign OUR OWN TEST packages only when they are registered by manifest and hash in
-  `~/.claude/orchestrator/_shared/user-signing/registry.json`, using only identities on the user-approved allowlist
-  `~/.claude/orchestrator/_shared/user-signing/identities.json` (maintained by the rules owner, each entry dated
-  with the user's approval): iOS H6 keychain identity for iPhone 8; iOS cosign team DH59R4RNRY development
-  certificate with provisioning profile 3JVMQQBHUR for iPhone 11, valid to 2027-09; Android repo-committed debug
-  keystore. Registry entries are written only by orchestrators; signing workers treat registry.json and
-  identities.json as read-only. A new identity needs a new user approval card and an allowlist entry; a worker
-  needing any new entry or an unlisted identity reports BLOCKED. If the H6 keychain is locked, pass only its
-  one designated password file through stdin,
-  never argv/env/logs. For Android test APKs use the repo's committed debug keystore and the debug passphrase from
-  `build.gradle`, passed through file descriptors such as apksigner `file:/dev/fd/N`, never argv. Never export, copy,
-  print or log a password or key; report only PASS/FAIL, certificate fingerprint and hashes; write a receipt under
-  `user-signing/receipts/`; re-lock the keychain unless another registered signing run is active; never sign
-  production/release packages or touch other keychains. Anything outside this scope is BLOCKED and needs a user card."
-- **Console access preflight** (user-approved 2026-11-11 retro; W291-L1c needed signed-in consoles on headless TRAE):
-  name the console origins and already signed-in browser/account in the brief; route those steps as `browser` work.
-  Headless Playwright is for public/local pages, never a substitute for that sign-in; missing access means BLOCKED.
-  One-shot `codex exec` / `traecli exec` launches must carry both clauses in developer instructions too.
-- **Test signing route** (user, 2026-11-13): pass `--signing`; it forces full access and makes the scoped rule the first
-  route note. The brief names the registered manifest/hash and designated identity. Afterwards scan worker logs only,
-  mask any hits, and verify the receipt and keychain re-locking. Routed full-access workers may sign only within
-  the registered own-test-package scope when their brief says so. The allowlist and package registry remain read-only.
+<a id="deploy-release-briefs"></a>**Deploy/release briefs** (user-approved 2026-11-11): before
+mutation, pin baseline/control probes, health thresholds, sampling intervals/window, rollback
+triggers and exact prior artifact/config restore steps. A fallback follows those criteria;
+unexpected evidence needs stronger judgment, never an invented rollback condition.
+Takeover/continuation and publish/build-run briefs carry the full checked checklist: exact
+commands, non-secret variables and expected artifacts; never say "repeat the last steps".
 
-**Prevent rework at the brief** (rework retro of 2026-11-06–10, 89 rework chains; user-approved 2026-11-10). Most
-rework came from unchecked premises, "done" proven on the wrong target, one shared rule re-implemented by several
-workers, and patching after a second same-kind defect.
-- **Preflight before an expensive launch** (devices, signing, deploys, long matrices, research that writes files): for
-  each premise, give evidence or mark it NOT-READY in the brief — the real commit/worktree path; that the worker's
-  sandbox can write its outputs (research that writes files is not `--read-only`); the tools it needs (browser, device
-  channel, upload, unlocked screen); exact dependency caches; signing team/profile/key, bundle in use, permissions,
-  runner support. Anything NOT-READY: fix it or ask the user first; don't launch into it. Stay within the permissions
-  you have: missing login access or anything outside the registered test-signing scope is one card to the user, never
-  a worker workaround. A registered `--signing` task follows the scoped rule above.
-- <a id="done-on-target"></a>**"Done" is proven on the target artifact and entry, not on unit tests.** The brief's done-criteria name: (1) the
-  acceptance identity — which server and session (server-side evidence), which build/version/SHA, which core is loaded;
-  after switching endpoints, reconnect explicitly; (2) the production entry — the real package/loader path (e.g. a plain
-  `node` import, the final bundle, offline resources, the oldest supported OS) and the default CI test globs and cwd;
-  (3) the deployment's environment/runtime, initial state, decoded config and permissions, with real module/child-process
-  paths intact (user-approved 2026-11-11 retro; W291-L1g smokes bypassed an unpackaged worker); fakes may replace external
-  providers, never the boundary being qualified; (4) device acceptance runs to the end before anything is recorded as passed.
-- <a id="feature-flags-before-merge"></a>**Feature flags before merge** (user-approved 2026-11-11 retro; W291-L1 landed OFF/build checks but could not activate):
-  the brief requires package-and-launch proof with the flag ON and OFF on the exact final artifact, from a clean initial
-  state (empty data dir, fresh instance/config with deployment permissions); exercise the enabled path, not just readiness.
-  Record artifact/SHA, settings and outcomes; missing proof is NOT-READY, not done. Use isolated state, never wipe user data.
-- <a id="deploy-release-briefs"></a>**Deploy/release briefs** (user-approved 2026-11-11 retro; W291-L1-ppe2a mistook normal WS/mediaScope for a crash loop):
-  before any mutation, pin baseline/control probes, health checks with thresholds, sample intervals and observation window,
-  rollback triggers and exact steps to restore the prior artifact/config. A fallback model follows those criteria only;
-  an unknown signal or judgment outside them means stop and report facts, never invent a rollback condition.
-- **Shared mechanisms: contract first, then parallel.** When a state, authorization, lifetime or recovery rule is used
-  by several modules or languages, first one task (one owner) writes the contract — a state table and cross-language
-  fixtures, e.g. the atomic `admit → await → effect/commit` semantics — then the module tasks adapt to it in parallel.
-  Every task that adds state or side effects gets an executable failure contract in its brief: what happens on success,
-  partial failure, cancel, retry, duplicate, restart, revoke and timeout; side effects at most once; what old output is
-  kept.
-- **Fix rounds.** When a miss is `spec` or `process` (`outcome --cause`), first amend the brief's Acceptance block and
-  say what changed; do not dispatch another attempt with the same brief. Every fix brief asks for three kinds of test:
-  the original failure reproduced, the fix passing, and
-  the neighbouring old behaviour unchanged (not only the case the reviewer named). Run affected tests only in fix
-  rounds (user, 2026-11-13), not the full matrix; the target-artifact acceptance gate still applies. If the second fix of a task brings a
-  new defect of the same kind, stop patching: find whether it is a shared contract, the interface layout or a too-wide
-  patch, then simplify or split the work (a `design` route can review the approach). `route.mjs` reminds you from
-  `--failures 2` on code work. A round limit triggers this re-scoping; it never stands in for correctness.
-- <a id="rework-thread-rule"></a>**Rework thread choice** (VAK rulings, user-approved 2026-11-13). Route the fix round first.
-  You may continue the original author's thread instead of the route's fresh thread only when all of these hold:
-  it is the same task's fix round and the retained context helps; the thread is on a company account (a personal-account
-  thread needs the user's OK); this round is not a route escalation in model, effort or family. If the route calls for
-  stronger effort/model (e.g. `--failures >=2` to `xhigh`/`max`), another family or Astra, switch to the route's thread.
-  No exclusion may be violated: `--security` forbids every TRAE GPT thread, and a security review is adversarial
-  (no GPT model on any account); DeepSeek threads cannot do builds, sensitive
-  reviews or acceptance (the adversarial review lane is the explicit exception, always with its second reviewer); paused
-  or unavailable models cannot be continued. If the TRAE model's bucket is depleted and
-  its queue is above 300 while someone is waiting, take the route's thread instead. The launcher records actual model, effort and
-  account evidence automatically; correct it with `outcome.mjs --actual` only if needed. Keep a ledger line
-  `continued original thread because ...` naming the reason and the eligibility checks. This exception is for same-task
-  rework, not unrelated new tasks or independent reviewers.
-- **Security follows the worker's context** (VAK ruling, user-approved 2026-11-13). An implementation/fix round that
-  reads attack-style review findings (forged tokens, bypass, replay, still-readable-after-hide) or exploit steps counts
-  as `--security` too. Alternatively, rewrite the findings as defensive requirements only, e.g. "token validation rejects
-  tampered signatures" or "hidden items return 404", with no attack description or original attack-style findings in
-  the worker's context; then those findings alone do not require `--security`. Other security-flavoured content still does.
-  A compliance confirmation or executable acceptance check written defensively is defensive work: with `--security` on a
-  review row it can carry `--defensive` and stay on TTADK GPT (see below).
-- **Adversarial security reviews** (user decision 2026-11-13, option A). OpenAI's cyberPolicy blocked a TTADK
-  gpt-6.1-sol `review-high --security` turn on 2026-11-13 ("flagged for possible cybersecurity risk … apply for
-  Daybreak access"). A `review`, `review-high` or `second-opinion` routed with `--security` is therefore adversarial by
-  default, and `--adversarial` forces the lane for any task:
-  - never a GPT model on any account; order TTADK Kimi-K3 high → DeepSeek-V4.1-Flash high on TTADK or TRAE (the
-    approved DeepSeek model-fit exception) → Claude Opus (xhigh for review/review-high, high otherwise) behind a
-    `personal quota:` `needsOK`;
-  - always a second reviewer from the other non-GPT family (Kimi ↔ DeepSeek); with only one family available, report
-    it and ask (Claude second on personal quota, or accept one reviewer);
-  - never retry a cyberPolicy-blocked thread or resend the same content to another GPT account. `codex-worker` prints
-    `security-policy-block:` and records `kind:'policy-block'` (account/model) for the nightly review on both accounts;
-    on TRAE it also leaves the same family restriction as a 983 signal (gpt out until the next 00:00 UTC, then probed),
-    while TTADK has telemetry only and no pause. Re-route with `--adversarial`. The vendor's trusted-access programme
-    is the user's/company's call.
-- **Defensive security confirmation** (`--defensive`, user ruling 2026-11-13). On `review`, `review-high` or
-  `second-opinion` it is meaningful only together with `--security`; it marks the review as non-adversarial:
-  ordinary `--security` routing (TRAE GPT excluded, TTADK GPT allowed), never the adversarial lane. Without it,
-  `--security` reviews remain adversarial by default. `--adversarial` and `--defensive` together are a usage error.
-  - The brief states only the rule to hold and its acceptance conditions, with no bypass description, exploit steps or
-    attack reproduction; it verifies "should" behaviour with focused tests and closes earlier findings without
-    restating how to bypass.
-  - If a vendor cyber-policy block stops a turn: do not retry that thread and do not resend the content to any GPT
-    account. Re-route that part with `--adversarial` (Kimi-K3 plus a DeepSeek-V4.1-Flash second reviewer). Resolve any
-    disagreement by whichever side reproduces it with an executable test, and list the rest for the user.
-  Implementation/fix work under `--security` keeps the existing rule: no TRAE GPT; TTADK GPT allowed.
-- **Long device or sampling matrices: qualify first.** Run a pilot with one minimal sample per gate at real rates,
-  disk, timeouts and SDK events; run the full matrix only once it passes. Device leases, deadlines, disconnects,
-  settings restore and the device's return are handled by you or a host-side script, not left to the worker's final
-  report.
+**Shared mechanisms:** one owner defines a state table and common fixtures before parallel
+adapters. Any state/side-effect change needs an executable failure contract for success, partial
+failure, cancel, retry, duplicate, restart, revoke and timeout; effects at most once and preserved
+old output are explicit. Pilot long device/sampling matrices with one minimal sample per gate
+at real rates, disk/timeouts and SDK events before a full run. A host-side owner/script manages
+leases, deadlines, disconnects, settings restoration and return; do not rely on the final report.
 
-**Review only what is costly to undo, and record how each task ended** (user, 2026-11-15).
-- Mandatory review is ONLY explicit --review-class A|B|C|D plus --review-reason: A a version that reaches external users and cannot be rolled back within hours; B login/auth/permission/signing logic; C irreversible data operations or billing/quota accounting; D a named adversarial review. High stakes, installation and fallback authorship alone do not qualify.
-- `review-high` without a class becomes ordinary review with a note. `--impact release` requires class A; PPE, test environments, internal demos and trace/test packages are at most service. On a profile without external release it prints a note and uses service unless class A is explicit.
-- Ordinary work is accepted on executable tests; use one optional ordinary review when tests cannot cover it. An explicit class is never blocked by an internal-demo profile.
-- All writing categories carrying a class get the applicable preaction/acceptance review, independent of author vendor. A/C and registered signing actions require the artifact review before acting. Second reviewers only apply to classified adversarial/review-high/release reviews.
-- Follow `references/review-rubric.md`: P0/P1 only block, at most three non-blocking notes, re-review only blocked findings, and at most two rounds per task/branch scope. A new override reason cannot permit round three. Targets: video-agent 10%, vesdk-mainline/webview 20%; targets warn, never suppress mandatory reviews.
-- Routed workers automatically append provisional `auto: true` outcomes when their follower ends: exit 0 is
-  `pass`, launcher/hub failure is `fail` with cause `infra`, and BLOCKED/FAILED/needs-user reports remain unresolved.
-  A continuation after a provisional pass adds a rework round. Elapsed minutes include the first launch and queue wait.
-  Review seats end with exactly `REVIEW-RESULT: blocking` or `REVIEW-RESULT: none`; missing markers stay UNKNOWN.
-  Seat results feed review statistics separately from the author's task outcome.
-- Use `outcome.mjs` only when judgement corrects the automatic result: acceptance found a problem, rework cause,
-  scope change, user cancellation, or acceptance after your own check. For example:
-  `node <this skill>/scripts/outcome.mjs --project <slug> --name <task> --correct --result rework --rounds 1 --cause code`.
-  Manual fields always override automatic records, even newer continuations. `--correct` also overrides previous
-  manual fields (including lower/null rounds); omitted fields inherit. Keep log lines intact.
-  `--cause code|spec|process|infra|scope`, `--retries N`, `--scope-changes N` distinguish fixes, infrastructure retries
-  and changed requirements. `--reviewed` records independent acceptance. Use `--review-result blocking|none` to correct
-  a review seat's yield. Repeat `--actual vendor:model:effort@account` in launch order only to correct model evidence;
-  the launcher normally records execution evidence itself. Missing actual evidence remains UNKNOWN.
-  Nightly data shows auto/manual coverage and derives task statistics once per name after these precedence rules.
+**Memory:** quote indispensable preferences/pitfalls/decisions and explicitly require selected
+absolute-path inputs; workers may not load your memory. Ask for durable lessons; preserve supported
+ones under the memory policy. [Operations](references/worker-operations.md#brief-inputs-and-reports) has the format.
 
-**Carry memory across sessions yourself.** A worker loads, at best, the memory of the project its
-working directory maps to — never this conversation's own memory, and a Codex worker reads even
-that only if it chooses to. So give every brief a "Relevant memory" section: the memories that
-bear on this task (the user's working preferences, pitfalls, decisions). Quote inline what the
-worker must not miss; list the rest as absolute paths under an explicit order — "before anything
-else, read each of these with a shell command; they are required input". A bare list of paths is
-not enough: light workers answer without opening them. Pick what matters; don't dump the whole
-index. In the other direction, ask each worker for a "Durable lessons"
-section in its report — facts, pitfalls or user corrections worth keeping beyond this task — and
-save the ones that hold up to your memory, so later workers get them through their briefs.
+**Report:** `report.md` opens with <=20-line `## Summary` (outcome, change/commits, checks, decisions,
+risks); final starts `[<id>] DONE | QUESTION | BLOCKED | FAILED` with actual model/effort/account.
+Ask has an unsettled next-action decision/default; notes only risk/scope/decisions/landed commits/
+peer-work findings. Relay blockers through the secretary; [talkback](references/worker-inbox.md) has mechanics.
 
-**Fit capability to the task — through the router.** Cheap workers pay off on routine, independent or
-bulky work (polling, collecting data, summaries, sweeps too large for one context). A hard, tightly
-coupled chain of reasoning — root-cause hunts across components, device experiments, design,
-anything costly to get wrong — goes to one strong worker rather than being split thin. That split
-is your call. The model and effort for each piece come from the router below.
+## Routing judgment and quota
 
-<a id="route-every-task"></a>**Route every task with `scripts/route.mjs`; judge only what it can't** (user, 2026-11-03; work/quota rules reaffirmed 2026-11-13). Every new
-worker, subagent, side task, escalation and amendment that changes the work gets its vendor, model,
-effort, Codex account and launch command from
-`node <this skill>/scripts/route.mjs <category> [flags]`, so the policy is the same every time.
-- **Your judgment is the input:**
-  - the category: one row of `route.mjs --table`;
-  - `--stakes low|normal|high` — what a wrong answer costs;
-  - `--auto-check` when a test, build or exact acceptance check will catch a miss;
-  - `--failures N`: how often this task has already visibly fallen short, counted per task and kept
-    in the ledger. Use `--failure-kind quality|tool|infra` (default quality). Quality failures escalate; browser/desktop tool failures move to the next capable channel, using `--actual vendor:model:effort@account` when known. Infrastructure failures retain the floor and exclude the failed lane/account as appropriate. Count one when a result
-    fails your verification, a worker stalls or reports something beyond its depth;
-  - `--writes` / `--read-only`, `--against <vendor>` for a second opinion, `--runs-tests` when a non-writing worker
-    needs workspace-write for test-generated files, and `--sandbox workspace-write|read-only` for an explicit narrower
-    Codex-family sandbox. Use `--signing` only for our own registry-listed test packages; it forces full access and
-    injects the scoped signing and audit notes. `--mode` remains accepted for compatibility but no longer selects the
-    sandbox. Pass `--cwd`, `--task-dir`, `--name` so the printed command is ready to run;
-  - Code work requires `--impact service|throwaway|release`. Release is strictly class A: reaches an externally released version and cannot be rolled back within hours; declare `--review-class A --review-reason`. Reading/writing local or user data is not release. Real irreversible data operations are class C (`--review-class C`). Personal/family apps, internal demos, PPE/test environments, test packages, and features that only read existing data are not release; ordinary reversible features are service.
-  - `--env test|prod` (default `prod`) and `--no-local-build` for `build-run`: `--env test` marks a
-    PPE/staging/dev procedural deploy and gives it the light tier on both company accounts (TTADK
-    5.6-Terra/5.5, TRAE light list). A real external release (`--impact release --review-class A --review-reason …`) stays at least normal even with `--env test`, low stakes or background; high stakes remains hard. Device/test builds without class A are light with `--env test`. Environment does not identify execution location: local compilers/packaging require one watched wrapper with the applicable locks; remote pipelines and CI never take local heavy locks. A failed light run escalates to
-    Sol medium — never sideways to another light model. `--no-local-build` marks a remote/CI run, so
-    no local heavy-build/lane lock or verify throttle applies;
-  - `--security` for security/attack-flavoured work (vulnerability/exploit hunting, auth/session/credential handling,
-    bypass, forgery/replay, path traversal, DoS or security review): exclude TRAE's GPT, then route normally
-    (user, 2026-11-12: "这种类型的任务排除掉 trae gpt 之后再按照路由规则来走就行吧，不需要写死一个路由"). This includes
-    implementation that reads attack-style findings; see "Security follows the worker's context" above. A `review`,
-    `review-high` or `second-opinion` with `--security` is adversarial instead: no GPT on any account, company non-GPT
-    models with a second reviewer, Claude only after asking (see "Adversarial security reviews"). `--adversarial`
-    forces that lane for any task. `--defensive` is valid only with `--security` on review/review-high/second-opinion:
-    it keeps the ordinary security route (TRAE GPT excluded, TTADK GPT allowed) for a compliance confirmation instead
-    of the adversarial lane, and `--adversarial` + `--defensive` is a usage error. Every TRAE GPT
-    here is an OpenAI model under the same vendor policy as 6.1-Sol (restrictions on 2026-11-10/11), not a policy workaround;
-  - `--background` only when nobody is waiting and there is no deadline or near-term dependency: nightly cleanups,
-    doc refreshes, exploratory analysis and benchmark batches. On TRAE, ordinary background work is light: prefer
-    GPT-5.6-Terra, then GPT-5.5, then DeepSeek-V4.1-Flash in quality order; depleted but free lanes count. Hard categories, high stakes and failed CODE tasks remain hard: Sol, then Astra only if Sol is unusable,
-    never weaker GPTs. Image reading keeps depleted Sol/Astra, then bucket-free Seed-Evolving, then its normal vision
-    pick. No quota information keeps the normal pick. See the approved tier table in references/model-routing.md.
-    Daily snapshots need a `sampledAt` reading no more than 30 minutes old; missing/future/stale readings are unknown,
-    even with a future bucket reset. Cache reads preserve the original sample time.
-    `why` identifies the step and whether high-priority quota is spent; an Astra escalation keeps its tier.
-    Model-fit and `--security` exclusions still apply: image reading needs a vision model, and DeepSeek cannot
-    replace builds or sensitive reviews/acceptance (except the adversarial security-review lane, which pairs it with
-    the other non-GPT family). Expect hours (each request queues separately); launch as a hub
-    worker, keep it pending while `queued:` lines arrive, and dispatch other work meanwhile. TRAE determines request
-    priority: `--background` cannot force a model with daily quota left into low priority, so the normal-pick fallback
-    can spend that quota. Browser/desktop/image-generation, UI and build/device work keep their capability routing; tasks requiring a device lease or shared lock acquire it only after the first model response; actual capability and resource gates still apply.
-    Background uses the same personal-quota rules as foreground. Offer a ready personal lane for approval if needed; DEFER only if no company or approved personal lane can start, with a user question.
-    Routes record `background: true`; the nightly `background` summary counts tasks and recorded `--minutes`
-    wall-clock time, including queues. Cheap rows (`lookup`, `extract`, `draft`) routed or balanced to TRAE also prefer
-    GPT-5.6-Terra, then GPT-5.5, then Flash under known quota telemetry; congestion still blocks opportunistic balancing.
-    These two models' vision is untested, so neither is used for `image-read`.
-    When TTADK reset is <4h away and its existing burn projection is <70% of its daily limit, eligible work
-    prefers TTADK over an otherwise free TRAE lane: "TTADK quota expiring unused: good time for reviews, docs and exploratory work".
-    Missing/stale projection data changes nothing; model-fit, quality, resource and personal-quota rules stay intact.
-  - always `--project <slug>`: every decision is logged to `_shared/route-log.jsonl` for the
-    nightly review, which needs the project (use `--dry` only to try things out).
+<a id="route-every-task"></a>**Route every task** (user, 2026-11-03). New workers, inline exceptions,
+escalations and scope-changing amendments use `scripts/route.mjs`; launch its executable command,
+not a hand-selected model or a `--dry` preview. A task spanning categories is split by dependency
+or uses its hardest category. Assign one strong worker to tightly coupled root-cause, design or
+scientific reasoning; routine collection/summaries belong to cheap workers.
 
-  When a task spans categories, split it or pick the row for its hardest part.
-- **The script computes the rest** from its table and the quota state in `scripts/lib/state.mjs`:
-  - Capability locks: only Artifact/Docs tools and peer negotiation are Claude-only (`claude-tools`). Browser work and
-    frontend visual checks need a browser-capable worker and route free TRAE Playwright lane (token present, candidate model load <60%, no queue/stall) →
-    TTADK Codex → browser-ready ChatGPT (personal, needs OK) → Claude (personal, needs
-    OK). Desktop `computer-use --apps <bundle ids>` uses TTADK → browser-ready personal ChatGPT (needs OK);
-    TRAE and terminal Claude have no desktop path. Separately, every task whose output is an image (generating, editing, variants, icons, illustrations, mockup
-    images) goes to Codex as `image-gen` (user, 2026-11-03).
-  - Quota moves: Codex first for anything either vendor can do. Claude takes the work it is clearly
-    better at only while it has spare.
-  - Company accounts first: prefer an observed free TRAE lane, then TTADK, then TRAE CLI (account `trae`, the company's official Codex-fork
-    CLI with its own model pool), then personal quota (user, 2026-11-08). route.mjs moves TTADK's work
-    to TRAE when TTADK is out; the personal-quota OK gate follows the actual selected account, including a ladder
-    fall-through while a company account still has eligible models. TRAE has Playwright browser tools when paired, but no
-    desktop or image-generation tools (references/codex-workers.md, "TRAE CLI"). Repeated TRAE failures
-    pause the failing model family (queue full: 5, then 10, 20, 30 min; vendor restriction: until next 00:00 UTC / 08:00 China time;
-    other hard failures such as quota: 30 min, then a probe;
-    auth pauses the account); record traecli exec failures with `codex-worker.mjs --account trae note-failure
-    --model <model>`, so work moves on instead of failing task by task.
-  - Normal/light fallback models (user, 2026-11-10): when the company account's GPT is out, route.mjs uses DeepSeek-V4.1-Flash,
-    then Gemini-3.1-Pro if listed (gone from TRAE on 2026-11-13), before any personal quota; DeepSeek-V4-Pro is removed.
-    When Sol falls short, preserve the actual quality floor; a retained same-model max step may run on either company account without a quota question. Apply the model-fit exclusions and daily-quota choices in references/model-routing.md.
-    Their code retains executable acceptance requirements; mandatory review comes only from an explicit A–D class. An infrastructure miss (timeout, queue-full rejection,
-    restricted) on one task: re-route with `--exclude-model <model or family>`, same `--failures`
-    (see [routing evidence](references/model-evidence.md)).
-  - Difficulty-tiered TRAE substitutions (user-approved 2026-11-13): hard (`implement-hard`, `debug`, `science`,
-    `review-high`, `design`, or high stakes, or `--failures >= 1` on CODE rows) uses Sol → Astra only; when both are unusable, personal strong-model alternatives retain their approval gates; normal uses Sol → 5.6-Sol → 5.6-Terra → Flash; light (lookup/extract/draft,
-    low stakes or `--background`, unless hard) uses 5.6-Terra → 5.5 → Flash. Astra is reserved for hard substitutions;
-    hard never substitutes 5.6-Sol/Terra/5.5. The same table governs balancing/background choices. Unknown quota changes
-    nothing; exclusions and vision rules still apply. Walk quality order across both company accounts, then prefer free TRAE for that model. TTADK keeps its fresh catalog: normal/hard work starts at 6.1-Sol;
-    a light row starts at 5.6-Terra → 5.5 (6.1-Sol medium as the failure escalation, then the usual Sol ladder).
-    When a light first rung is balanced to TRAE, the full TRAE light list is walked (Terra → 5.5 → Flash), so one
-    paused/busy model does not block the transfer; later quality rungs keep their model.
-    Candidates are availability replacements, never retry rungs. Resolve and normalize the whole actual ladder before
-    taking `--failures N`: drop equal/lower effort on a previously tried model and any weaker GPT; retain only stronger
-    effort/model/family or the row's existing stronger steps. A retained same-model max step still needs its OK unless
-    the actual account is a company account (TTADK or TRAE).
-    DeepSeek-V4.1-Flash can't emit one very large file in a single turn (output limit); not for generating a large file
-    in one go: split the work or exclude deepseek.
-    Only TRAE GPT-5.6-Luna is unused (slow, about 3x tokens). Personal ChatGPT `gpt-6-luna` stays first for lookup (`low`), extract (`medium`) and image-gen (`low`, standing exception, no question). Evidence and bucket facts: references/model-routing.md.
-  - Free TRAE first (user, 2026-11-15): when the qualifying candidate's own model load is below 60%,
-    its lane can start now and no queue/stall is observed, prefer TRAE to save TTADK daily quota,
-    including depleted low-priority lanes and ready Playwright browser/ui-browser work. Say
-    "TRAE lane free: saving TTADK quota" and name the model in load explanations. TTADK takes
-    work when that lane is congested, queued/stalled, lacks a required capability, or its quota
-    would expire unused (reset <4h, projected burn <70%). Hard floors and all gates remain.
-  - Both TTADK and TRAE are company quota: use max effort without a separate OK on either.
-    Max effort outside company accounts still needs its own scoped approval. A retained same-model
-    max retry outranks switching to missing/stalled telemetry at the same floor. Personal quota
-    remains reserved for work the company accounts cannot do, subject to the existing approvals.
-  - TTADK has no concurrency cap: a rate-limited run is retried once on TTADK, then re-routed
-    with `--exclude-account ttadk`. TTADK down for a reason the user can fix (SSO, CLI, models):
-    tell the user at once; its work goes to TRAE, and only when TRAE is out too does route.mjs ask
-    the user (go on on personal quota, or wait).
-  - Never hold or postpone work on your own (user, 2026-11-09: "不要擅自决定去暂缓一些工作"), low-stakes
-    work included: when route.mjs prints "needs the user's OK", ask; when it DEFERs (nothing can run it
-    now), tell the user and ask how to proceed. Waiting for a quota reset is a hold: the only allowed wait is
-    an explicit `deferUntil` scheduled dispatch — record it in the ledger, set a timer and keep dispatching other
-    work; never wait while a same-tier company lane can finish earlier, and never hold a queued low-priority turn
-    past its `queue-too-slow` deadline.
-    Routed workers perform the handoff themselves: verify no work, confirm cancellation, re-route with the
-    original category/flags/exclusions and same failures, exclude the slow account/model lane, and follow a fresh company
-    hub worker with a continuation header. Maximum two automatic hops; no active or background handoff and
-    no personal quota/signing auto-launch. Exit 8 (`reroute-needs-user`) asks for approval; exit 9 persists
-    `reroute.json`/`deferUntil` for the orchestrator's timer; exit 10 reports the hop limit. Cancellation failures
-    exit 7 within three seconds with `queue-cancel-unconfirmed`, without launching a duplicate. Existing
-    wrapper holds must be returned by their owner on exit. Flat queues also expire by elapsed patience. Router
-    failures exit 7 with a `reroute.json` recovery command/continuation prompt; reroutes never force `--fresh`,
-    and account identity comes from public registry/hub metadata, never login files. Outcome reads hop records without manual `--actual`;
-    nightly review measures automatic waits and faster/slower/unknown starts. See references/codex-workers.md.
-  - TTADK is not unlimited (measured 2026-11-08): about 500M tokens a day per user, input + output with
-    cached input counted in full, shared by all models (plus an hourly cap); it resets at 16:00 UTC.
-    When it runs out (`quota-exhausted:` from codex-worker; quota.mjs shows TTADK paused until the
-    reset), don't retry or switch models: its work goes to TRAE without asking.
-  - Company accounts (TTADK, TRAE) run without asking. Ordinary Claude needs scoped personal-quota approval; no-company personal ChatGPT, image generation and Claude-only tools retain standing exceptions. `--urgent --user-ok` alone cannot authorize a run: store the matching task/role/account/model/effort approval. Background uses the same gates.
-  - Because of that daily cap, throwaway code work starts at Sol `high` on the company accounts
-    (TTADK, TRAE) instead of `xhigh`; a failure still climbs to `xhigh` and `max` (user, 2026-11-09).
-  - Every TTADK worker can search the web through its local proxy, once `ttadk-setup` has set it
-    up; briefs say search queries must not carry internal information.
-  - Browser work (`browser`/`ui-browser`: web pages in the user's Chrome) routes free TRAE Playwright lane
-    (token present, candidate model load <60%, no queue/stall) → TTADK Codex → browser-ready ChatGPT (personal, needs OK) → Claude
-    (personal, needs OK). Re-run route.mjs when an account becomes unavailable instead of choosing by hand. Desktop
-    `computer-use` stays without TRAE: TTADK → browser-ready personal ChatGPT (needs OK).
-    Artifact/Docs and peer negotiation stay on Claude (`claude-tools`). Setup for a new machine: `references/codex-workers.md`, "TTADK" and
-    "Browser use on a Codex worker".
-  - Effort notches: lower for an automatic check, higher for high stakes, higher while Codex is
-    underused or front-loading its reset cards. On TTADK only the high-stakes one applies, and its
-    ladder climbs Sol to xhigh and max before any personal-quota step.
-  - The escalation ladder, the Codex account, the sandbox, and a cross-vendor second opinion for
-    reviews and designs.
-- **Follow its output:**
-  - Launch with the printed command and say the one-line `why` to the user.
-  - Ask the user first for anything printed under "needs the user's OK": personal quota, personal ChatGPT Astra, personal `max`, Fable, or a reset-card redemption. Qualified company Astra and company `max` need no quota approval.
-  - A second reviewer is printed only for class D adversarial reviews, review-high with a review class, or class A release reviews. Start that classified second reviewer when its gates allow; otherwise there is nothing to start.
-  - On `DEFER`, present its user question, record the explicit wait in the ledger and schedule its retry; no runnable authorized lane may be parked.
-  - If the user declines a pending card redemption, re-run with `--no-redeem` for the fallback.
-  - Say anything under "tell the user" right away.
-  - Don't override the script by hand. If its pick is wrong for a whole kind of task, change the
-    table in `route.mjs` (and `references/model-routing.md`) instead, so the change sticks, and run
-    `node <this skill>/scripts/test/route-scenarios.mjs` before committing.
-- **The nightly review tunes the policy.** Every night around 03:07 a session named
-  `routing-nightly-review-<date>` reviews the day's routing, quota and card waste, bad cases and
-  model news (`references/nightly-review.md`), adjusts the table and thresholds within the user's
-  hard rules, and messages each orchestrator what changed. Treat its messages as the user's
-  delegated policy updates: follow them from your next dispatch. Put the bad cases it should see
-  in your ledger (failures, escalations, the user's complaints about a model).
-- **Act on the quota lean.** Run `node <this skill>/scripts/quota.mjs` when you plan a batch of
-  work, and at least every half hour while work is queued. Its `lean:` lines are the
-  account-level actions only you can take:
-  - redeem a reset card — only after asking the user each time and getting a yes (never on your
-    own; user, 2026-11-03);
-  - ask the user to log in an account;
-  - restart a hub;
-  - while Codex is underused or front-loading, pull queued and deferred work forward without inventing second reviews to spend quota;
-  - while Claude is over budget, keep the orchestrator itself lean: no subagents, fewer reads,
-    short briefs.
+Choose the facts the script cannot infer:
 
-  Its rules, from goals the user set on 2026-11-03:
-  - Codex is use-it-or-lose-it: spend every account's week by its reset.
-  - Claude runs the orchestrators, so it never runs out before Codex. Its budget moves with the
-    clock: a reserve for the orchestrators until the reset, and caps that loosen as the reset nears
-    so a week about to reset isn't hoarded.
-  - Reset cards come last: at 99%, or just before a card expires.
+| Input | Orchestrator decision |
+|---|---|
+| Category/tier | Use `route.mjs --table`; describe the hardest reasoning/capability needed. Hard work stays strong; normal/light follow the qualified lists. |
+| Stakes / auto-check | Cost of a wrong result; whether executable acceptance catches a miss. |
+| Failures / actual | Count visible misses per task; distinguish quality, tool and infrastructure failures. Preserve actual model/effort/account evidence and existing exclusions. |
+| Write/test intent | Writer vs reviewer; tests may need workspace-write for generated files only. Supply an explicit narrower sandbox when appropriate. |
+| Impact | `service`, `throwaway` or `release`; release is class A only. Local data reads/writes are not release; irreversible data operations use C. |
+| Environment / location | Test vs production does not imply local vs remote. Remote/CI uses `--no-local-build`; local heavy compute uses the shared wrapper. |
+| Content / capability | Security context, defensive/adversarial review, registered test signing, browser origins or desktop apps; see boundaries below. |
+| Background | Only when nobody waits and there is no deadline/near-term dependency. Same quality, resource and quota gates apply. |
+| Identity / approval | Project, task name, cwd/task directory, owner; a real scoped user approval reference where required. |
 
-  `references/model-routing.md` explains each line and the benchmarks behind the table.
-- Follow `references/codex-workers.md` for launching, permissions and verifying Codex workers. Tell
-  the user promptly if Codex keeps falling short.
+Use [worker operations](references/worker-operations.md) for flags, `--verbose` for diagnostics, [model routing](references/model-routing.md)
+for computed floors/ETA/seats and [model evidence](references/model-evidence.md) for history. Never override picks.
 
-**Route new work to whoever already holds its context.** Before planning a new request, compare
-it with the open and recently finished tasks. If it extends, fixes or touches the same area as an
-existing task, amend that task — append it to the brief and message the worker — because the
-worker already has the context and a second session in the same area is a conflict waiting to
-happen. Split a request that is only partly related. Start a fresh task when the work is
-independent, or when the old worker's context has become a liability (very long, compacted,
-stuck); point the new brief at the old report.
+**Follow the result:** launch runnable authorized work; convey `why` and `tellUser` promptly.
+Ask through the secretary for each `needsUserOK`; a gated second reviewer need not hold a runnable
+company primary, but acceptance waits for the required reviewer set. On DEFER, present the
+question, record explicit `deferUntil`/owner in the ledger and schedule a retry while other work
+continues. Never silently hold low-stakes/background work or wait for reset while an authorized
+same-tier company lane can finish earlier (user, 2026-11-09/13).
 
-<a id="workspace-retention"></a>**Fit the workspace to the task.** Decide per task, not per project. Work that touches no code
-runs anywhere, e.g. the project folder under `~/.claude/orchestrator/<project>/`. Read-only code
-work can share an existing checkout. A lone writer may commit straight to a project-owned branch in
-an idle checkout. Parallel or risky writers get their own worktree, created on demand in the right
-repo and cut from the right base — the project branch, a release branch, or the upstream default,
-whatever the task calls for (see Mechanics for where and how). One writer per worktree. Builds count as writes. Devices, simulators,
-ports and shared caches have a single holder at a time. In heavy repos a new worktree costs a big
-checkout and a cold build, so reuse idle ones or run tasks one after another — say so when you
-choose. Record every worktree you create and keep reusable ones after merge/abandonment under the disk rule:
-no worker space caps (user, 2026-11-13). Auto-clean only self-made build clones/templates/caches, and only when the
-data disk has **<1 TB free**; confirm ownership and that no active task needs them. Deleting real workspaces or user data
-always needs the user's decision card, regardless of free space.
+**Quota decisions stay with the user.** Company quota (TTADK/TRAE) and company max/qualified Astra
+need no question. Personal quota asks first on company devices; no-company personal ChatGPT,
+image-gen and Claude-only tools retain standing exceptions. Personal Astra, personal max, Fable
+and every reset redemption have separate scoped gates. `--urgent --user-ok` alone is not consent;
+store the matching task/role/account/model/effort approval. If redemption is declined, reroute
+with `--no-redeem`. Never invent a review, downgrade quality or invent new work to spend quota.
 
-<a id="build-discipline"></a>**Build and device environment discipline** (user-approved; heavy-build lock live 2026-11-13,
-vesdk-mainline T83 Part A; global-rules owner since 2026-11-13): follow the [maintained lock contract](references/res-contract.md)
-and take-time notes at `~/.claude/orchestrator/_shared/notes/heavy-build.md`. Use the live shared `res`, not a private lock.
+Quota goals (user, 2026-11-03): use Codex's week before reset, reserve Claude for orchestrators so
+it never runs out first, loosen reserves near reset, redeem cards last (99% or impending expiry),
+and ask freshly every time. Check `quota.mjs` for batch planning and at least every half hour
+while work is queued; act on login/reset/ready-work suggestions within authority. Keep Claude
+context lean. Account expiry/budget projections belong to the owner/nightly process.
 
-- Before builds/device runs, inspect orphaned build/test trees using task ownership and recent activity. Cleanup uses
-  [resources.md](references/resources.md#cleanup)'s guarded executor only: terminal owner, continuous idle evidence,
-  live-session/lease protections and every orchestrator's release. PPID=1 or process age alone is never permission to kill.
-- **Scope and slots:** full-package builds (env verify, app `xcodebuild`, Gradle assemble with native) hold
-  `heavy-build` plus one lane for the whole run: one full-package build and two normal heavy lanes.
-  After the reviewed v1.3 switch, `heavy-lane-3` admits a third task only at load1m <=8 AND available memory >=32 GiB.
-  SG packaging, native-compiling or long multi-process focused tests need one lane.
-  The routing/global-rules owner maintains enforcement in `scripts/res/res`; until its reviewed switch use
-  the installed lanes only. Telemetry may observe optional lane 3, but never implements or admits it.
-  Host unit tests without a full native build, single-TU compiles, analysis/docs and build-free device sessions are
-  not heavy. **Remote work is never heavy:** PPE/staging/TCE/BITS/SCM deploys, cloud/remote pipelines, CI runs and
-  remote `build-run --no-local-build` procedural deploys never take `heavy-build`, a lane, or `--shared-lock`. Pass
-  `--no-local-build` on the route for such a run; it also skips the local heavy-build note. Shared remote/CI entry
-  scripts stay unthrottled — a local `res` lock or `verify-throttle` belongs in a local-only wrapper, never in the
-  shared entry (`--no-local-build` / `--execution remote` record execution location; `--env test` alone does not).
-  These caps never lower model-worker concurrency; keep independent ready work running.
-- **Take and gate:** `res take <id> --by <session> --project <slug> --for "<purpose>" --task <task-id> --pid $$`
-  returns 0 taken, 2 busy. Plain `take` must first pass `res heavy-check` (0 OK, 5 overloaded; invalid/unreadable
-  metrics return 1, no acquisition). User-approved entry load (2026-11-13, secretary option A):
-  **limit = 12 + 8 * lanes held by others, capped at 20** (12 with none, 20 with one or more).
-  STALE and caller-owned locks do not count; two occupied lanes leave no capacity on the existing two-lane contract.
-  After owner rollout, only lane 3 adds capacity under its stricter 8/32 gate; its holders count like any other lane.
-  Normal-lane memory remains
-  **>=16 GiB**. T88 reports shared `res` v1.2 live (2026-11-13): `heavy-check` prints `limit`/`lanes_held`;
-  verify sampled output and report legacy/policy mismatches to its owner, never bypass the live gate.
-  v1.3 appends `lane3=OPEN|CLOSED` and enforces its stricter gate in lane-3 take/wait; OPEN is not ownership.
-  macOS available memory
-  is `kern.memorystatus_level / 100 * physical memory` (fallback/Linux details in the contract), not swap/page diagnostics.
-- **Build entry:** full-package briefs require [heavy-build.sh](scripts/heavy-build.sh) or explicit equivalent
-  `take-build`/`wait-build` inside a wrapper; other heavy tasks use `wait-lane`. The wrapper never installs tools or bypasses a
-  gate, preserves the command's exit status and terminates owned child groups before returning holds. Don't nest
-  it or reuse an already-held heavy lock. The resource sampler independently detects builds without holders.
-  By default it tries lanes 1, 2, then 3 and retries within the finite timeout; `HEAVY_BUILD_LANE` can pin 1/2/3.
-  If optional lane 3 is unknown on a legacy installation, unpinned callers continue bounded waits on lanes 1/2;
-  other errors still stop the wrapper. The owner installer publishes code plus the backed-up registry row under quiescence.
-- **Order and bounded waiting:** full-package runs use `res take-build` or `res wait-build` for the slot plus any
-  free admitted lane together; never hold either while waiting for the other. Use `res wait-build` or `res wait-lane`
-  with the same holder/project/purpose/task/PID flags and always
-  `--timeout <minutes>`; it backs off and enforces the heavy-* gate (0 taken, 2 timeout). Run waits in the background
-  worker/wrapper, not the orchestrator's foreground. Timeout means report/queue, never bypass; prolonged overload
-  goes to the user with readings to decide thresholds, never automatic threshold changes.
-- **One process and worker liveness:** workers never take/wait for heavy locks in a standalone tool call. Each call
-  has a fresh shell: its `$$` dies after that call, even if a later build is alive. Acquisition, build and return happen
-  in ONE long-lived process, via `scripts/heavy-build.sh <command...>` or a wrapper, or `--pid` names the long-lived
-  build process itself. Wrappers must exit when their worker dies: exit/signal traps plus parent watch. The build
-  wrapper’s optional `--watch-pid <pid>` terminates its owned command and releases holds when that worker disappears.
-- **Return and stale holds:** use the long-lived wrapper's `--pid $$` (default is caller PID, not `res` PID).
-  Install `trap EXIT` before acquiring and `res return <id> --by <session>` only for acquired holds, in reverse order,
-  on every exit, including failure to acquire the lane. `res status` shows PID/host/start and marks a local dead-PID
-  hold STALE; short-lived PID warnings display `STALE?(short-lived pid)` and the wrapper fix. Plain take stays fast;
-  fresh explicit-PID waits/build takes check once after 2 seconds. `res wait`/`wait-build`/`wait-lane` reclaim STALE
-  heavy-* holds older than 10 minutes and log in `log.tsv`. Other confirmed
-  stale releases require `res return <id> --by <session> --force --note "<reason>"`; never force an active/unverified hold.
-- **Same-task takeover:** after a predecessor dies (including quota exhaustion), verify its project/task ID and
-  local dead PID, return its STALE lane then slot with the predecessor’s holder name (or coordinated force/note),
-  then re-take with the successor’s unique holder and long-lived PID. Never adopt the old PID/start metadata; a
-  matching task alone does not authorize return of an active/unverified hold.
-- **Approved build discipline:** compile **6**, link **1**, Xcode **`-jobs 6`**, Gradle **2 workers**. Build incrementally
-  in a fixed per-base directory, with **one cold build before acceptance**; don't run a native build when native code
-  didn't change. Fix rounds use affected tests only.
-  Auto-clean self-made clones/templates only when the data disk has **<1 TB free**; follow [workspace retention](#workspace-retention)
-  for all deletion boundaries.
-- **ccache (T83 Part B, 2026-11-13):** Android NDK and host CMake **Ninja/Makefiles** use both
-  `CMAKE_C_COMPILER_LAUNCHER`/`CMAKE_CXX_COMPILER_LAUNCHER=/opt/homebrew/bin/ccache`; not the Xcode generator.
-  Shared `CCACHE_DIR=$HOME/.vesdk-dev/ccache`, `CCACHE_CONFIGPATH=$CCACHE_DIR/ccache.conf`: max_size=96G,
-  base_dir=/Users/bytedance, hash_dir=false, compiler_check=content. Grant writes only to the approved cache path
-  or use task-scratch cache data with shared config, never broad HOME access. No shared-counter clearing or sloppiness;
-  keep mutable build trees separate and verify generated compiler commands. Only the SDK native graph is validated,
-  not full APK/Gradle acceptance; **first real use is cold**. See [enable snippets/scope limits](/Users/bytedance/code/.claude-data/orchestrator/vesdk-mainline/tasks/T83/enable-build-cache.md).
-- **Gradle pure builds:** public/sanitized inputs, task-private Gradle home; `--build-cache --daemon --max-workers=2`,
-  `-Dorg.gradle.daemon.idletimeout=300000`, `-Dorg.gradle.jvmargs=-Xmx6g`. No daemon when process-exit credential
-  isolation or signing/login material is involved. Omit routine clean/rerun/header regeneration; stop only the task's
-  own daemon when isolation requires it. These flags do not authorize login material or signing beyond a registered
-  `--signing` test package; use the enable snippets above.
-- [Machine resources](references/resources.md): a five-minute sampler and nightly retro attribute CPU/RSS, lock/wait/
-  STALE/bypass evidence, authoritative heavy-check readings, shared ccache rates and hub listener outages to projects/tasks.
-  Keep `resource-tasks.json` current for ready/queued/waiting work and exact worktree/worker mappings; shared-repo ownership
-  stays ambiguous without task evidence. Send each project its cases; tune only within evidenced, dated user-approved
-  ranges, otherwise ask Chinese cards. Missing probes are UNKNOWN, never zero/healthy; telemetry never reclaims locks
-  or restarts hubs. Cleanup is separate at 04:30, dry by default. Templates are not installed automatically; the
-  orchestrator must validate one complete unsandboxed host sample before installation. Never directly kill live
-  orchestrators/workers or user apps; use the guarded cleanup and disk rules.
-  Include a two/three-line nightly utilisation summary: idle CPU with ready work, gate/memory time, lane occupancy,
-  quota unused at reset, queue hours and top idleness causes. Read idle hints on every wake as above.
-- Device leases last at most **2 h**, then the worker returns the device and reports results/remaining work. Put the
-  preflight in the brief: device connected, unlocked, app data backed up; include the return command and deadline. For iOS backups exclude protected `Library/SplashBoard/`, verify the backup is readable before any install, and install over the top when save data matters.
-- The registered shared test phones are **iphone8, iphone11 and s21**. They are pre-authorized for ordinary
-  permission/trust/install dialogs from our own apps; the personal iPhone 15 Pro Max (`policy=never`) and every
-  unregistered device are forbidden. This device-dialog authorization does not authorize credentials, verification
-  codes, purchases, destructive operations without backup, or irreversible browser actions. A Codex refusal is
-  re-routed to Claude, never handed to the user as a tap request.
+Router-owned free-TRAE/expiring-TTADK preference and Astra-first hard trial (2026-11-16; revisit
+2026-11-23 success/rework) remain. Queueing alone is not stalled; confirmed no-progress cancellation
+allows bounded company handoff. Never replace active/background turns, duplicate unconfirmed turns,
+hold resources while queued or auto-launch personal/signing. Follow printed recovery/gates;
+[codex workers](references/codex-workers.md) has details. TRAE throughput: QPM/TPM, no total-cost caps.
 
-<a id="shared-resources"></a>**Hold shared resources through the shared table, not through another orchestrator.** Devices and
-checkouts that several projects use are listed in `~/.claude/orchestrator/_shared/resources.tsv`,
-and every hold on them goes through `~/.claude/orchestrator/_shared/res` (see Mechanics), so any
-project can see who has what without asking. Check `res status` before planning work that needs
-one. The session that actually uses the resource — usually the worker — takes it right before use
-and returns it right after; put the exact commands in its brief. If it is held, message the holder
-and wait; never use a held resource. Schedule devices **short/urgent first, long/low-priority later** (user, 2026-11-13);
-unresolved priority clashes between projects go to the user. A resource
-only this project uses stays in the ledger; add newly shared ones to the registry.
+<a id="rework-thread-rule"></a>**Route the fix round before reusing its author** (user-approved
+2026-11-13). Continue only the same task when retained context helps, the thread is a company
+thread (personal needs OK), and the route does not escalate model, effort or family. Preserve
+all exclusions, capabilities and actual floors; no paused/unavailable model. DeepSeek cannot
+perform builds or sensitive acceptance/reviews except its paired adversarial-review exception.
+A depleted TRAE bucket with queue >300 while someone waits uses the new route. Record why the
+original thread was eligible; actual execution evidence is automatic, corrected only if wrong.
+This exception never applies to unrelated work or independent reviewer seats.
 
-**Prevent conflicts by planning, and fix the rest early.** Know what each task will change (ask the
-worker to report its intended scope first when you can't tell). Run disjoint tasks in parallel;
-sequence or merge tasks that hit the same files or hot spots such as project/build files and
-lockfiles; land interface changes — including across repos — before the work that depends on them.
-Integrate one task at a time in dependency order. After every change to a branch others build on,
-tell the affected workers what moved — especially semantic changes that git won't flag — so they
-rebase early. The task integrating later resolves conflicts, knowing both intents; when the intents
-truly clash, the user decides. A multi-task goal is delivered only after the combined result passes
-a verification run.
+**Fix causes, not only findings.** Correct automatic outcomes when acceptance exposes a miss.
+For spec/process rework, amend Acceptance before another attempt. Require original failure
+reproduced, fix passing and neighboring old behavior preserved. Fix rounds run affected tests
+only (user, 2026-11-13), with target-artifact acceptance retained. If a second fix creates a new
+same-kind defect, stop patching and simplify/re-scope the shared contract, interface or patch.
+A round cap triggers judgment, never substitutes for correctness.
 
-**Merge locally into project branches on your own authority; ask before anything else.** The user
-pre-approved merging verified task branches into branches the ledger marks as project-owned: have
-the worker rebase onto the target tip and re-verify, then fast-forward (`git merge --ff-only`),
-which can't lose work and fails safely. Run it in the checkout that has the target branch checked
-out (git refuses to move a branch checked out elsewhere); if that checkout has uncommitted changes
-that the merge would touch, ask the user instead of working around them. Then stop the worker and clean up what was merged
-under [workspace retention](#workspace-retention) (`git branch -d`, approved `git worktree remove` without `--force`; keep reusable worktrees).
-Merging into shared branches, pushing, opening or updating MRs/PRs, posting externally, force
-operations, and deleting unmerged work need the user's say-so.
+## Acceptance and review classes
 
-**Never touch the user's uncommitted changes.** In any checkout the user works in, writers stage
-only their own files — no `add -A`, stash or reset. Permission boundaries are per session: never
-route an action that was denied in one session through another.
+Review costly-to-undo work under an explicit `--review-class A|B|C|D` and `--review-reason`
+(user, 2026-11-15). High stakes, installation or fallback authorship alone do not create a class.
 
-<a id="permission-plan"></a>**Plan around permissions before you dispatch** (user, 2026-11-05; tightened 2026-11-13).
-1. **Predict the boundary.** Codex-family writing workers launch with full access by default; non-writing workers stay
-   read-only, or workspace-write with `--runs-tests`. Use `--sandbox workspace-write|read-only` when one task needs a
-   narrower Codex boundary. Full access may commit on the task branch only when the brief says so; never push to main,
-   never force-push, and add no co-author/tool trailer. Claude workers always launch in Bypass. Ask authorization cards
-   only for non-secret actions those modes cannot pass (deploys, DNS/certificates, external submissions, pushes).
-   Never ask for project dependency/build-tool downloads through normal package managers or registries into task workspaces/user caches; login, secrets, production cards, personal-quota gates and system security boundaries still apply. Include this plan in the brief.
-2. **Ask, then let the agent execute.** A blocked Claude worker raises AskUserQuestion and retries after approval;
-   don't hand non-secret actions to the user. A blocked Codex worker reports the exact step/error; arrange a card
-   through Claude for an approvable non-secret action, never to evade its sandbox or a denial. If approval cannot
-   enable it, report BLOCKED and redesign rather than asking the user to perform the non-secret action.
-3. **Secrets and denials stay boundaries.** Never read/copy login material or transfer a denied action to launder
-   permissions; a relay is not authorization. The only worker-handled secret input is within a registered `--signing`
-   test-package run, using stdin/file descriptors exactly as the scoped rule requires. Anything else remains BLOCKED.
+| Class | Qualification |
+|---|---|
+| A | External version that cannot roll back within hours; `--impact release` requires A. |
+| B | Login/auth/permission/signing logic. |
+| C | Irreversible data operations or billing/quota accounting. |
+| D | Named adversarial review. |
 
-**Talk to the user when there is something to act on.** Finished work, a question that needs
-them, a failure, a cost they should know about. Lead with the outcome and the task id, keep it
-short, batch updates that arrive together, and reply in the user's language.
+Ordinary work is accepted on executable checks, with one optional ordinary review when those
+cannot cover it. PPE/test/internal-demo/trace packages are at most service. Explicit classes
+override profile defaults; `review-high` without a class becomes ordinary review. Classified
+writers receive applicable preaction/acceptance review; A/C and registered signing actions need
+artifact review before acting. Classified adversarial/review-high/release reviews require
+independent families; use distinct seats/output files on the same frozen artifact. If a required
+second cannot finish, replan that set against the same artifact/families, never reuse the primary's
+reroute arguments or silently accept an incomplete set.
 
-## Mechanics (verified on Claude Code 2.1.302)
+Follow [review rubric](references/review-rubric.md): concrete P0/P1 only block, at most three P2
+notes; frozen SHA/base and no concurrent writer. Re-review only blocked findings and touched
+neighboring paths. At most two rounds per task/branch scope; no renamed review/override escape.
+If the fix introduces a blocking regression at re-check, treat its next fix as a new change:
+A–D receive one focused re-check of those regression points, others use the reviewer's acceptance
+tests. A user's explicit pre-release re-review instruction wins. Default-off code still needs
+ON/OFF proof; no P0/P1 is waived. Batch related small changes; docs/rule-text-only fixes use owner
+diff verification.
 
-- **Messaging tools** are deferred: load `SendMessage` and `ListAgents` with ToolSearch first. The
-  header of `ListAgents` gives this session's own name — workers address their reports to it.
-- **Launch a worker** from the trusted project root (`--trusted-cwd`, otherwise the configured project root); put `Working directory: <workspace>` in its brief prompt:
-  `cd <trusted project root> && claude --bg --remote-control --permission-mode bypassPermissions -n <name> "Working directory: <workspace>. Read <task dir>/brief.md and follow it."`.
-  It prints `backgrounded · <id> · <name>`. Always pass Remote Control and explicit **Bypass** (user, 2026-11-13):
-  `route.mjs` no longer reads `settings.json` `defaultMode`; `--mode` is compatibility-only and does not change either
-  worker family's permissions. Codex retains the sandbox selected from write/test intent or an explicit narrower
-  `--sandbox` override (see `references/codex-workers.md`). Prefix the name
-  with the project slug so sessions from different projects stay apart in `claude agents`.
-  Always pass the model and effort `route.mjs` printed (`--model opus|sonnet|haiku|fable`,
-  `--effort low|medium|high|xhigh|max`) — otherwise the worker inherits yours. In the rare case a
-  subagent is unavoidable (see "Delegate to workers"), pass it the routed `model`; otherwise it runs
-  on yours.
-  To change them for a worker's next task, stop it and resume it with the new flags (see
-  Lifecycle); a message cannot change a running session's model or effort.
-  Routed Claude launches append the worker section of [the digest](references/global-rules.md) with
-  `--append-system-prompt "$(node <skill>/scripts/rules-worker-digest.mjs)"` (CLI help verified on 2.1.323).
-  They run `launch-audit.mjs`; Codex hub start checks directly. A missing same-name/task-prefix route in the last
-  24h warns `unrouted-launch` and records telemetry, never blocks. Record actual approval with `--user-ok <card/ledger-ref>`;
-  never invent an OK. Copy only task-specific route notes into the brief; fixed worker rules are injected automatically. `--verbose` shows fixed diagnostics, and `--json` separates `notes` from `fixedNotes`; see [installation/evidence limits](references/rules-enforcement.md).
-- <a id="claude-worker-settings"></a>**Claude worker settings** (user, 2026-11-13; document only):
-  `~/.claude/settings.json` has `env.CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP=1`, so background shells aren't
-  stopped under memory pressure. Session idle-stop has no switch: pin the session or keep working. Do not change
-  settings as part of this rule. Use the explicit Remote Control/Bypass launch above, not the user's default mode.
-- **Tell workers how to treat EnterWorktree.** Background sessions are told by default to isolate
-  themselves before their first edit, and their edits may be refused in a checkout outside
-  `.claude/worktrees/` until they do. A new worktree from `EnterWorktree(name=…)` would branch off
-  the remote default branch instead of the workspace you prepared, so the brief says: "Your
-  workspace is `<path>`, already prepared. Never create a worktree; if you are asked to isolate,
-  call `EnterWorktree(path=\"<path>\")`; if that fails, continue in place." Workers with no repo
-  workspace skip it.
-- **Shared resources:** `res status`; `res take <id> --by <session name> --project <slug>
-  --for "<purpose>" [--task <id>] [--until <when>] [--pid <holder pid>]` (exit 2 = held by someone else, 3 = policy
-  `never`, or `ask-user` without the user's OK — then retry with `--force`; 4 = device not
-  connected); `res extend <id> --by <name> --until <when>`; `res return <id> --by <name>`. A hold
-  whose holder session is gone may be reclaimed with `res return <id> --by <name> --force --note
-  "<why>"`; heavy-* holds instead follow the [PID/host, timeout and stale rules](#build-discipline), not session presence.
-  `res log` shows history. A Codex worker takes holds as `--by codex:<thread id>`; it
-  can't receive messages, so whoever needs its resource asks that worker's orchestrator (the
-  `--project` column), which relays by steering. `status` shows each device's live link (usbmux / devicectl / adb), so a
-  FREE but unplugged device is visible; `take --offline` books one ahead of a plug-in. A hold
-  survives unplugging: a worker whose held device drops reports BLOCKED (the user must re-plug,
-  unlock or re-trust it) and keeps the hold rather than returning it.
-  `status` also lists connected physical devices that are not registered yet. A new device is
-  registered with `res add <id> --device <udid|serial> --for "<what it is>"`, whose default policy
-  `ask-user` keeps it unusable until the user says it may be shared (then `--force` on take, or
-  edit its policy in the registry to `open`); never guess that a new phone is shareable.
-- **Resource notes:** pitfalls of one device or checkout (model/OS quirks and their workarounds)
-  go in `_shared/notes/<id>.md` via `res note <id> --by <name> --note "<pitfall; workaround>"`,
-  not in a project ledger, since every project using it needs them. `res take` and
-  `res status <id>` print the notes; workers record what they discover and say if it is unconfirmed.
-  The maintained Bash script is `scripts/res/res`; after the owner's reviewed switch it is symlinked as `_shared/res`.
-  Ownership, tests, switch and rollback are in [resources.md](references/resources.md#res-ownership).
-- **Create worktrees yourself** with `git -C <repo> worktree add -b <branch> <path> <base>`, with
-  `<path>` under `<repo>/.claude/worktrees/` (where background sessions accept edits; reuse the
-  repo's existing location if it already keeps worktrees elsewhere and workers edit there fine),
-  following the repo's branch naming. If the main checkout's `git status` then lists `.claude/`,
-  add `.claude/worktrees/` to `<repo>/.git/info/exclude` (not to the tracked `.gitignore`).
-  `claude --worktree` branches from the remote default branch,
-  not from the base you chose.
-- **Notifications:** `SendMessage(to=<worker>, message="", notify_when_idle=true)` subscribes to
-  one notice when the worker next goes idle; renew it while the task is open. Worker messages and
-  idle notices wake the orchestrator, so end the turn instead of waiting.
-- **Lifecycle:** `claude agents --json` lists live sessions (`--all` also lists finished ones;
-  read fields defensively, since some entries lack `status`); `claude logs <id>` shows recent output
-  (last resort); `claude stop <id>` stops a worker but keeps its conversation;
-  `claude --bg --remote-control --permission-mode bypassPermissions --resume <session id> [--model …] [--effort …] "<prompt>"` brings a stopped one
-  back with its conversation, optionally on a different model and effort (verified on 2.1.302; it
-  gets a new short id, so look it up again). Resume needs the full session id — the `sessionId`
-  field of `claude agents --json --all`, or the `<id>.jsonl` name under
-  `~/.claude/projects/<cwd slug>/` — and should run from the trusted project root, with the worker's working directory stated in its brief.
-  A background session keeps its own saved options: resuming it *with* new flags starts a **copy**
-  (new id, same conversation, new settings) and leaves the original as it was; without flags the
-  same command continues the original. The copy and the original then share the worker's name, so
-  address the live one as `name [ref]` from `ListAgents`, and stop or remove the stale one.
-  `claude rm <id>` deletes the session and possibly its worktree, so use it only once the work is
-  merged or abandoned and any workspace deletion satisfies [workspace retention](#workspace-retention).
-- **A worker went offline? Resume it, don't replace it.** For same-task rework, first apply the
-  [rework thread choice](#rework-thread-rule) above; it overrides context reuse when routing requires a switch.
-  Background workers can drop out (for
-  example when the orchestrator's own session restarts): they vanish from `claude agents` and
-  `ListAgents` shows them only as offline Remote Control rows. When the next task belongs to such a
-  worker, resume the original session so its context survives, instead of spawning a fresh worker
-  with a re-written brief. If `claude agents --json --all` doesn't list it, its full id is the
-  `sessionId` in `~/.claude/jobs/<short id>/state.json` (the short id is the one `--bg` printed;
-  the job's `cwd` is there too). Resume from that `cwd`, and in the prompt include anything that
-  changed meanwhile (moved worktrees, new main, the new task). If a replacement worker already
-  started on the same work, stop it first, and tell the resumed worker to re-read any shared state
-  (a doc, a branch) the replacement may have touched. Afterwards, address the resumed worker as
-  `name [ref]` from `ListAgents`, because the offline row keeps the same name.
-- **Split research into small tasks.** WebSearch has a per-session budget (200 calls shared by the
-  session and all its subagents, refilling ~100/hour); one worker fanning out to many subagents
-  exhausts it mid-task. Give each research topic its own worker session with a short question list,
-  tell workers not to fan out search subagents, and have them WebFetch known official URLs instead of
-  searching for them.
-- **Codex workers.** For workers on the Codex CLI, follow `references/codex-workers.md`. It covers
-  `scripts/codex-worker.mjs` (the default: live steer, interrupt, re-attach) and `codex exec`;
-  permissions; several accounts and reset cards; and what Codex can't do. Model, effort and
-  account come from `scripts/route.mjs`.
+Project defaults in `references/project-risk-profiles.json`: new projects remain standard;
+video-agent internal-demo accepts package tests/typecheck/SG prepare, with full verify for wide
+changes or once/day main, and target 10%; vesdk-mainline/webview target 20%. Targets warn, never
+suppress mandatory reviews. User 2026-11-15: evelyns-world/acq and autotrader **for now** use
+no-review, accept tests/build and have no optional reviewer/share target unless explicitly
+classified. Revisit autotrader only when the user says.
 
-**Never ask for dependency installation** (user, 2026-11-15: “下载依赖这种事情不需要问我，直接下就好了”). Project dependencies and build tools fetched through normal package managers and registries (npm/pnpm/yarn, pip/uv, gradle/maven, CocoaPods/SPM, cargo, go modules, brew formulae, and SDK/toolchain components the build asks for) are installed directly into the task workspace or user-level caches, without a card or question. No secrets/credentials, production changes without a card, unapproved personal quota, or system security changes; a required login the worker lacks is BLOCKED.
+**Outcomes and review results are recorded automatically.** A provisional pass is execution
+evidence, not target acceptance. BLOCKED/FAILED/needs-user stays unresolved; absent actual model
+or review markers is UNKNOWN. Launchers request `REVIEW-RESULT: blocking|none` and record reviewer
+yield separately. Use `outcome.mjs` **only to correct** acceptance, cause, scope/cancellation,
+rounds, actual model or reviewer yield; do not manually re-register each completion. See
+[record correction](references/worker-operations.md#outcome-corrections).
 
-Release impact means class A only: a version reaches external users and cannot be rolled back within hours. Reading/writing local or user data is not release; real irreversible data operations are class C. Personal/family apps, internal demos and PPE/test packages, or features that only read existing data are not release.
+## Safety and reserved decisions
 
-Project defaults are configured in `references/project-risk-profiles.json`: new projects retain the standard four-class policy. evelyns-world/acq and autotrader (for now) use the user-approved no-review profile: accept on tests/build and print no reviewer unless the user asks by explicit class/reason; nightly reports counts and excludes their review-share targets.
+<a id="permission-plan"></a>**Predict permission boundaries before dispatch** (user,
+2026-11-05/13). Codex-family writers default to full access; reviewers are read-only, with
+`--runs-tests` allowing only generated files in workspace-write. Claude workers use explicit
+Remote Control/Bypass. Full access is not external-action approval. Dependencies/build tools
+from normal package managers/registries install into task workspaces/user caches directly,
+without a card (user, 2026-11-15). Login, secrets, production mutations, unapproved personal quota
+and system security boundaries remain.
 
-Routing history, benchmark results, Kimi-K3 reviewer rationale, TRAE bucket observations and dated decisions are preserved in [model-evidence.md](references/model-evidence.md). Current selection rules are in [model-routing.md](references/model-routing.md).
+**The secretary is the single outlet for user cards** (2026-11-16) and answers status from tools/
+ledgers. Relay exact worker action/error/scope/evidence; after approval the worker retries. If it
+cannot, report BLOCKED/redesign, never hand non-secret work to the user or launder a denial. Where
+no secretary group exists, communicate directly. Prior explicit authorization avoids repeated asks.
 
-Takeover/continuation and publish/build-run briefs carry the full checked checklist: exact commands, non-secret variables and expected artifacts; never write "repeat the last steps". Browser turns run bounded extension/host preflight before the turn; `--no-browser-preflight` skips that check. Project `browserOrigins` are merged with the policy defaults and explicit `--origins`; acq is an example, edit as needed.
+<a id="worker-credential-safety"></a>**Credentials are boundaries.** No worker may read/copy/load/
+inject login sessions, tokens, cookies, CLI auth files, .netrc, browser profiles, outside-project
+API keys or other keychain items, or bypass a login/denial. Installed signed-in CLI commands and
+normal ssh/git config/default keys are allowed; do not override GIT_SSH_COMMAND, ssh -F or
+IdentityFile. Project service keys may be used by running project code for that service's
+official API only; never print/copy/export/relocate key material. Missing login/access is BLOCKED,
+never a session transplant or permission laundering through another worker. Never put internal
+code, logs or private material into public search queries. Full injected wording lives in
+[the digest](references/global-rules.md#worker-rules).
+
+**Own-test signing** (user, 2026-11-13): only manifest/hash-registered packages in
+`~/.claude/orchestrator/_shared/user-signing/registry.json` and identities on the dated user-approved
+`identities.json` allowlist: H6/iPhone 8; cosign team DH59R4RNRY development certificate and
+profile 3JVMQQBHUR/iPhone 11, valid to 2027-09; repo Android debug keystore. Only orchestrators write registry entries; signing workers treat both files as read-only. New identities require a
+new user approval card and allowlist entry. Workers needing new entries or unlisted identities
+report BLOCKED. Route `--signing`, naming existing manifest/hash and identity; never production/
+release signing or other keychains. Designated H6 input uses stdin and Android debug input file
+descriptors, never argv/env/logs. Verify receipts, masked worker-log scans and keychain re-locking
+unless another registered signing run is active. The resident signing worker is retired.
+
+**Browser/desktop:** brief exact origins/scope, signed-in browser/account or permitted apps/unlocked
+screen. Use that worker's tools; headless public/local access cannot substitute console login;
+Claude Chrome IDs belong only to Claude. TRAE origins are brief-scoped, not enforced technically.
+Irreversible actions need confirmation; saved site denials need a new authorized thread. Missing
+tool/vision/browser/login is BLOCKED with exact error, never own clicking or login workaround.
+[Browser workers](references/codex-workers.md#browser-use-and-computer-use-on-a-codex-worker-verified-2026-11-07) has execution details.
+
+**Security labels follow context** (user, 2026-11-12/13). Ordinary routing-code/rule-text work
+remains ordinary. Security/attack findings or exploit material require `--security`, including fixes
+reading them. Alternatively pass defensive requirements/acceptance only; other security content
+still needs the label. TRAE GPT is excluded for security content. Security review/review-high/
+second-opinion is adversarial by default: no GPT account, Kimi ↔ DeepSeek independent reviewers,
+Claude Opus only with personal OK; `--adversarial` forces this lane. Review-only `--defensive`
+requires `--security`, rule/acceptance without bypass description, and allows TTADK GPT while
+excluding TRAE GPT. Never combine defensive/adversarial. A cyberPolicy block forbids thread/GPT
+retries: reroute that part with both non-GPT reviewers, including defensive confirmations. Resolve
+disagreement by executable evidence; unresolved points/trusted vendor access go to the user.
+[Digest](references/global-rules.md#worker-rules) and [model routing](references/model-routing.md) hold exact paths.
+
+<a id="shared-resources"></a>**Shared resources use shared `res`**, not private controllers or
+another orchestrator's memory. Schedule short/urgent device work before long/low-priority work
+(user, 2026-11-13); unresolved cross-project priorities go to the user. The actual user/worker
+takes a lease only after the first model response and immediately before use, returns it after,
+and never uses another holder's resource. Register newly shared resources only under owner/user
+authority; never guess that a connected phone is shareable. Resource pitfalls belong in shared
+notes with confirmation state. [res contract](references/res-contract.md) has command semantics.
+
+<a id="build-discipline"></a>**Local build/device decisions:** classify full-package vs other
+heavy vs non-heavy and name execution location. Local full-package work uses one watched
+`scripts/heavy-build.sh` or equivalent atomic take-build/wait-build wrapper; other local heavy
+work uses wait-lane. Acquire/compute/return in one long-lived process, never standalone shell
+holds or hold-and-wait, with finite timeout and owned reverse cleanup. Remote pipelines/CI
+never take local heavy locks or verify throttles; shared remote entries stay unthrottled.
+Use live admitted lanes/gates, not a staged version claim. UNKNOWN blocks admission; timeout
+means report/queue, never bypass/tune thresholds. Same-task successor verifies a local dead
+predecessor and its ownership before returning/re-taking; never kill another task's processes.
+
+Incremental fixed-base builds, cold acceptance, affected tests/no unnecessary native rebuild,
+parallelism/cache scope and gates: [resources](references/resources.md#build-and-cache-execution).
+Guarded cleanup requires continuous idle evidence, lease/live protections and all owners' release,
+never PPID/age alone. Telemetry never reclaims/restarts/tunes or treats missing as healthy; validate
+complete unsandboxed host evidence before installation. Hub `list --limit 1` distinguishes unreachable
+from empty; only the former needs owner recovery, never duplicate workers.
+
+Only registered shared test phones **iphone8/iphone11/s21** may be used; never personal iPhone 15
+Pro Max (`policy=never`) or unregistered devices. Our own apps' permission/trust/install dialogs
+are authorized without per-prompt cards/button whitelists; no personal credentials/verification
+codes or purchases. Lease <=2 h; device connected/unlocked; readable app-data backup before
+any destructive reinstall/wipe/erase (devices and simulators). For iOS exclude protected
+`Library/SplashBoard/`, verify before any install and install over the top when save data matters.
+A Codex refusal of an allowed prompt routes that step to Claude, never a user tap request.
+Disconnect handling preserves ownership within the lease deadline; longer access needs renewal.
+
+## Integration, communication and policy ownership
+
+Integrate one task at a time in dependency order. Land interface changes before dependants and
+notify affected workers about changed semantics/tips so they rebase early. The later task resolves
+conflicts knowing both intents; genuine intent clashes go to the user. Deliver multi-task work
+only after combined verification by a worker.
+
+**Local project-owned merges are pre-approved.** Have the worker rebase onto the actual target
+tip and re-verify; fast-forward in the checkout owning that branch. If uncommitted user changes
+would be touched, ask instead of stashing/resetting. Delete only merged branches safely and
+apply retention authority to worktree removal, never `--force`. Shared-branch merges, pushes,
+MR/PR creation/updates, external posting, force operations and unmerged deletion require existing
+explicit authorization or a user decision. Stop completed workers after releasing owned resources.
+
+**Report actionable outcomes:** task/outcome first, short/batched in the user's language; include
+failures, decisions and cost. Bad cases (user, 2026-11-14) in routing/quota/queues/res/hubs/reviews/
+rules/signing/devices/browser/nightly/docs go to global-rules 主对话 with actual vs expected,
+log path and workaround; keep authorized work moving.
+
+<a id="global-rule-rollout"></a>**Global policy belongs to the routing/global-rules 主对话**
+(user, 2026-11-13), including `res`. The secretary only relays/keeps ledgers and cards. Read the
+versioned [digest](references/global-rules.md) at startup/resume/compact and hook-delivered changes.
+Hooks deliver and acknowledge changes in `_shared/rules-seen.json`; no manual `rules-ack`.
+The owner checks acknowledgements and sends extra action/link notes only for required stop,
+reroute, rerun or remote-checkout changes. Record offline/unresolved recipients. Owner-controlled
+hook/hub/policy installation is distinct from ordinary dependency installation.
+
+Nightly policy updates apply next dispatch within dated user-approved ranges; other changes need
+Chinese cards. Record bad cases/complaints/failures. Utilization reports: 2–3 lines on idle CPU/
+ready work, gates/memory/lanes, reset waste and queue causes. Expiring company login (<=3 days),
+TRAE state, resets and Claude/Fable projections remain owner reminders; dates and procedure live
+in [nightly review](references/nightly-review.md), whose older model assignments are superseded.
+
+## References: load only what the task needs
+
+Use the links beside each decision. [Worker operations](references/worker-operations.md) holds
+launch/resume/workspace/correction mechanics; [skill slimming inventory](references/skill-slim-inventory.md)
+records keep/move/delete choices and every original user-attribution/safety rule's destination.
+Checkout updates use [skill autoupdate](references/skill-autoupdate.md).
