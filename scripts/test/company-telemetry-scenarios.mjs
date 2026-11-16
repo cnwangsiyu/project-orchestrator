@@ -12,6 +12,8 @@ import { BALANCE, parseTraeModels, readTraeModels, freshLoad, freshQueue, readQu
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'company-telemetry-'));
+// Isolate the shared state: the worker CLI below must never write fixture events into the real owner inbox.
+process.env.RULES_SHARED = path.join(tmp, 'shared'); fs.mkdirSync(process.env.RULES_SHARED, { recursive: true });
 const now = Date.now(), min = 60000, SOL = 'gpt-6.1-sol';
 const catalog = { models: [{ id: 'GPT-6.1-Sol', _meta: { trae: { load: { percent: 35 } } }, message: 'discard-me' },
   { slug: 'DeepSeek-V4.1-Flash', _meta: { trae: { load: { percent: '59' } } } },
