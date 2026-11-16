@@ -7,6 +7,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { loadDigest } from '../lib/global-rules.mjs';
+import { inbox } from '../lib/worker-events.mjs';
 import { WORKER_NOTES } from '../lib/fixed-worker-notes.mjs';
 import { modelFamily, modelObservation, rolloutTurnModel } from '../lib/worker-model.mjs';
 
@@ -130,13 +131,45 @@ try {
       const f = fixture(`control-${cmd}-${hang.replaceAll('/', '-')}`);
       const r = run(f, cmd, { hang }, ['--interrupt-timeout-sec', '0.18']);
       assert.equal(r.status, 7, r.stderr + r.stdout); assert.ok(r.stderr.includes(`waiting for ${hang}`));
-      assert.equal(r.events.at(-1).event, 'stalled'); assert.equal(r.events.at(-1).exit, 7);
+      assert.deepEqual(r.events, [], 'control commands never write caller-owned run events');
     });
   }
   for (const unrelatedChatter of [false, true]) check(`zero own events stalls with unrelated chatter=${unrelatedChatter}`, () => {
     const r = run(fixture(`idle-${unrelatedChatter}`), 'start', { quiet: true, unrelatedChatter }, ['--stall-min', '0.003']);
     assert.equal(r.status, 4, r.stderr + r.stdout); assert.match(r.stdout, /stalled: no events/);
     assert.equal(r.events.at(-1).phase, 'follow'); assert.equal(r.events.at(-1).mayRun, true);
+  });
+  for (const listData of [[], [{ id: 'guard-thread', status: { type: 'idle' } }],
+    [{ id: 'guard-thread', status: { type: 'active' } }], [{ id: 'guard-thread' }]]) {
+    check(`setup settlement: ${JSON.stringify(listData)}`, () => {
+      const f = fixture(`settlement-${passed}`), r = run(f, 'turn', { hang: 'thread/resume', listData }, ['--stall-min', '0.003', '--owner', 'setup-owner']);
+      assert.equal(r.status, 4, r.stderr);
+      const settled = !listData.length || listData[0].status?.type === 'idle';
+      assert.equal(r.events.at(-1).settled === true, settled);
+      assert.equal(r.events.at(-1).mayRun, !settled);
+      assert.equal(inbox(r.events, 'setup-owner').running.length, settled ? 0 : 1, 'mine no longer sees a settled setup as unknown');
+    });
+  }
+  check('large rollout and cumulative token guards refuse before contacting hub', () => {
+    const f = fixture('large-rollout'), dir = path.join(f.accountHome, 'cli/sessions/2020/01/01');
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'rollout-old-guard-thread.jsonl');
+    fs.writeFileSync(file, ''); fs.truncateSync(file, 6 * 1024 * 1024);
+    const route = ['implement', '--project', 'guards', '--name', 'large', '--impact', 'service', '--failure-kind', 'quality'];
+    let r = run(f, 'turn', {}, ['--route-args', JSON.stringify(route)]);
+    assert.equal(r.status, 9); assert.match(r.stderr, /fresh thread with a handoff brief/);
+    assert.match(r.stderr, /'--project' 'guards'.*'--failure-kind' 'infra'/); assert.deepEqual(r.calls, []);
+    assert.equal(r.events.at(-1).settled, true);
+    r = run(f, 'turn', {}, ['--force-large']); assert.equal(r.status, 0, r.stderr);
+    r = run(f, 'turn', {}, ['--max-rollout-mb', '7']); assert.equal(r.status, 0, r.stderr);
+    fs.writeFileSync(file, JSON.stringify({ payload: { info: { total_token_usage: { input_tokens: 20000001 } } } }) + '\n');
+    const before = rows(f.rpc).length;
+    r = run(f, 'turn'); assert.equal(r.status, 9); assert.equal(r.calls.length, before);
+    r = run(f, 'turn', {}, ['--max-input-tokens', '21000000']); assert.equal(r.status, 0, r.stderr);
+    f.env.CODEX_WORKER_MAX_INPUT_TOKENS = '10';
+    r = run(f, 'turn'); assert.equal(r.status, 9);
+    f.env.CODEX_WORKER_MAX_INPUT_TOKENS = '21000000'; f.env.CODEX_WORKER_MAX_ROLLOUT_MB = '.00001';
+    r = run(f, 'turn'); assert.equal(r.status, 9);
   });
   check('status preserves JSON stdout', () => {
     const r = run(fixture('status-json'), 'status'); assert.equal(r.status, 0, r.stderr);

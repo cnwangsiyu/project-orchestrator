@@ -3,31 +3,32 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { orchestrator } from './lib/hook-context.mjs';
-import { validRulesSession, readSeen, withRulesDelivery, hookOutput } from './lib/rules-delivery.mjs';
+import { validRulesSession, readSeen, withRulesDelivery, hookOutput, cleanupRulesDelivery } from './lib/rules-delivery.mjs';
 import { validOwner, readInboxAsync, deliverAsync, hasWatcherAsync, eventLine, followerAlive } from './lib/worker-events.mjs';
 
-// Registry membership proves harness tracking; the event PID separately proves follower liveness.
-const flag = (command, name) => {
-  const match = command.match(new RegExp(`--${name}(?:=|\\s+)(?:"([^"\\n]*)"|'([^'\\n]*)'|([^\\s;&|)]+))`));
-  return match ? match[1] ?? match[2] ?? match[3] : null;
-};
-const covered = (row, tasks, owner) => followerAlive(row) && Array.isArray(tasks) && tasks.some((task) => {
-  if (typeof task?.command !== 'string' || task.status && !['running', 'in_progress'].includes(task.status)) return false;
-  const command = task.command;
-  const launch = command.match(/codex-worker(?:\.mjs)?["']?\s+(?:--\S+\s+\S+\s+)*(start|turn)\b/);
-  if (!launch || row.followerCommand !== launch[1] || /(?:^|[\s;])nohup\b|(?<![>&\d])&(?![&>])/.test(command)) return false;
-  const explicitOwner = flag(command, 'owner');
-  if (explicitOwner ? explicitOwner !== owner : row.launcher?.sessionId !== owner) return false;
-  if ((flag(command, 'account') ?? 'main') !== row.account) return false;
-  if (task.pid !== undefined && task.pid !== row.pid) return false;
-  if (launch[1] === 'turn') return flag(command, 'thread') === row.thread;
-  return flag(command, 'name') === row.name;
-});
+// Correlate the follower's public launch record with its registered background task.
+// Commands may be wrappers and cannot prove who started a follower.
+const covered = (row, tasks, owner) => followerAlive(row) && row.thread
+  && ['start', 'turn'].includes(row.followerCommand) && row.launcher?.sessionId === owner
+  && Array.isArray(tasks) && tasks.some((task) => {
+    if (!task || typeof task !== 'object') return false;
+    if (task.status && !['running', 'in_progress'].includes(task.status)) return false;
+    if (typeof task.command === 'string' && /(?:^|[\s;])nohup\b|(?<![>&\d])&(?![&>])/.test(task.command)) return false;
+    const taskId = row.launcher?.env?.CLAUDE_CODE_TASK_ID;
+    const idMatches = taskId && [task.id, task.task_id, task.taskId].includes(taskId);
+    const pidMatches = Number.isInteger(task.pid) && task.pid > 0
+      && [row.pid, row.parentPid, ...(Array.isArray(row.ancestorPids) ? row.ancestorPids : [])].includes(task.pid);
+    // An explicitly supplied PID must agree even if an ID also matches.
+    return (idMatches || pidMatches) && (task.pid === undefined || pidMatches);
+  });
 
 process.on('uncaughtException', () => process.exit(0));
 process.on('unhandledRejection', () => process.exit(0));
 // Bound work inside the process; the settings timeout also covers cold process startup.
-const deadline = setTimeout(() => process.exit(0), 220);
+const deadline = setTimeout(async () => {
+  await Promise.race([cleanupRulesDelivery(), new Promise(resolve => setTimeout(resolve, 40))]);
+  process.exit(0);
+}, 220);
 try {
   let raw = '';
   for await (const part of process.stdin) { raw += part; if (Buffer.byteLength(raw) > 65536) throw Error('large input'); }

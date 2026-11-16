@@ -14,7 +14,7 @@ import { loadDigest } from '../lib/global-rules.mjs';
 const scripts = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rules-enforcement-'));
 const shared = path.join(tmp, '.claude/orchestrator/_shared'), log = path.join(shared, 'route-log.jsonl');
-const env = { ...process.env, HOME: tmp, RULES_SHARED: shared, ROUTE_LOG_FILE: log, TRAE_PROBE: '0', QUOTA_LOG: '0' };
+const env = { ...process.env, NODE_OPTIONS: `--import=${path.join(scripts, 'test/fixtures/hook-autoupdate.mjs')}`, HOME: tmp, RULES_SHARED: shared, ROUTE_LOG_FILE: log, TRAE_PROBE: '0', QUOTA_LOG: '0' };
 const append = (row) => fs.appendFileSync(log, JSON.stringify(row) + '\n');
 const rows = () => fs.readFileSync(log, 'utf8').split('\n').filter(Boolean).map(JSON.parse);
 const cli = (script, args = [], overrides = {}) => execFileSync(process.execPath, [path.join(scripts, script), ...args],
@@ -45,8 +45,8 @@ try {
   const invoke = (input, overrides = {}) => {
     const start = performance.now();
     const result = spawnSync(process.execPath, [path.join(scripts, 'rules-digest-hook.mjs')],
-      { env: { ...env, ...overrides }, input: typeof input === 'string' ? input : JSON.stringify(input), encoding: 'utf8', timeout: 1000 });
-    assert.equal(result.status, 0); assert.ok(performance.now() - start < 300, 'hook must complete under 300ms');
+      { env: { ...env, ...overrides }, input: typeof input === 'string' ? input : JSON.stringify(input), encoding: 'utf8', timeout: 2000 });
+    assert.equal(result.status, 0); assert.ok(performance.now() - start < 1100, 'hook must complete within about 1s (700ms self-deadline plus startup)');
     assert.equal(result.stderr, ''); return result.stdout.trim() ? JSON.parse(result.stdout) : null;
   };
   const event = (extra = {}) => ({ hook_event_name: 'SessionStart', source: 'startup', session_id: 's1', cwd: tmp, ...extra });
@@ -78,7 +78,7 @@ try {
   assert.equal(invoke(event({ session_title: 'Contended 主对话', session_id: 's4' })), null);
   assert.equal(JSON.parse(fs.readFileSync(path.join(shared, 'rules-seen.json'))).s4, undefined);
   fs.rmdirSync(path.join(shared, 'rules-seen.json.lock'));
-  console.log('ok   hook identity, roster/transcript, versions, fail-open parsing/contention and <300ms');
+  console.log('ok   hook identity, roster/transcript, versions, fail-open parsing/contention and bounded SessionStart wall time');
 
   const stalledIO = path.join(tmp, 'stalled-io.mjs');
   fs.writeFileSync(stalledIO, `import fs from 'node:fs/promises';

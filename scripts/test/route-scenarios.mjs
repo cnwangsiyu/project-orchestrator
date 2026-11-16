@@ -916,7 +916,7 @@ for (const [sc, args] of ERRORS) {
   }
   cases.push([hasNote(o('traeFull', ['analysis', '--failures', '1']), /last miss was spec\/process/), false]);
   for (const cat of ['implement', 'implement-hard', 'debug']) {
-    cases.push([hasNote(o('traeGptOut', [cat]), /DeepSeek: read-only analysis and simple edits only; not full-package builds, auth\/storage reviews or acceptance.*--exclude-model deepseek/), true]);
+    cases.push([hasNote(o('traeGptOut', [cat]), /DeepSeek: read-only analysis and simple edits only; not full-package builds, auth\/storage reviews or acceptance.*--exclude-model deepseek/), cat === 'implement', `${cat}: limits only for selected/listed DeepSeek`]);
   }
   // Adversarial --security reviews are the approved DeepSeek exception; the non-adversarial sensitive rows keep it out.
   for (const args of [['build-run'], ['review-high'], ['review', '--impact', 'release'], ['review', '--stakes', 'high']]) {

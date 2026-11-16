@@ -45,25 +45,25 @@ try {
   assert.equal(r.pick.model,SOL); assert.equal(r.deferred,null); assert.equal(r.queuePatienceMin,30);
   assert.match(r.pick.command,/--queue-patience-min/); assert.match(r.queueAlt,/--failures 0.*--exclude-lane/);
   assert.equal(r.queueAlternative.routeArgs.includes('--fresh'),false);
-  assert.ok(r.why.some((s)=>/company ETA:/.test(s)));
+  assert.ok(r.why.some((s)=>/ETA: company/.test(s)));
   assert.ok(!r.needsUserOK.some((s)=>s.startsWith('personal quota:')));
   r = route({lanes:{[ASTRA]:lane(500,0.5)}});
   assert.match(r.queueAlt,/scheduled dispatch.*--exclude-lane trae:gpt-6.1-sol/);
   assert.equal(r.queueAlternative.account,'ttadk'); assert.equal(r.queueAlternative.model,SOL);
   assert.ok(!r.queueAlt.includes("--exclude-model 'gpt-6.1-sol'"),'TTADK handoff must keep the same model eligible');
   r = route({daily:{[SOL]:bucket(),[ASTRA]:bucket(false)},lanes:{[SOL]:lane(null,null,{state:'ready',lastProgressAt:now-29*min,itemsPerMin:2})}});
-  assert.equal(r.pick.model,SOL,'equal completion spends no priority quota before considering strength');
+  assert.equal(r.pick.model,ASTRA,'free hard Astra precedes Sol even when Sol spends no priority quota');
   assert.equal(r.eta.find((x)=>x.model===SOL&&x.account==='trae').basis,'progressing');
   r = route({familyQueue:{gpt:{t:now,state:'queued',position:537}},
     lanes:{[SOL]:lane(null,null,{state:'ready',lastProgressAt:now,itemsPerMin:2}),[ASTRA]:lane(537,0.7)}});
   assert.equal(r.eta.find((x)=>x.model===SOL&&x.account==='trae').basis,'progressing',
     'Astra family queue cannot hide fresh Sol progress');
   r = route({ttAvailable:true,lanes:{[SOL]:lane(null,null,{state:'ready',lastProgressAt:now})}});
-  assert.equal(r.pick.account,'trae','available TTADK still compares against a no-priority-spend progressing lane');
+  assert.equal(r.pick.account,'ttadk','free TTADK Astra precedes free TRAE Sol in the hard ladder');
   r = route({ttAvailable:true,lanes:{[SOL]:lane(500,0.5),[ASTRA]:lane(500,0.5)}});
   assert.equal(r.pick.account,'ttadk','available TTADK beats measured queued lanes');
   r = route({lanes:{[SOL]:lane(10,1),[ASTRA]:lane(20,20)},resetMin:100});
-  assert.equal(r.pick.model,ASTRA,'measured delay beats default model strength');
+  assert.equal(r.pick.model,SOL,'free TTADK Sol precedes measured queued TRAE Astra');
   assert.ok(r.why.some((s)=>/queued 20, drain 20.00\/min/.test(s)));
   r = route({lanes:{[SOL]:lane(10,5),[ASTRA]:lane(20,5)},resetMin:240});
   assert.equal(r.pick.account,'trae','runnable company work launches even if a reset projects earlier completion');
@@ -83,7 +83,7 @@ try {
   r=route({ttAvailable:true,lanes:{[SOL]:stuck,[ASTRA]:stuck}});
   assert.equal(r.pick.account,'ttadk','ready company capacity beats every stalled lane');
   r=route({lanes:{[SOL]:stuck,[ASTRA]:stuck},resetMin:40});
-  assert.equal(r.kind,'defer');assert.equal(r.deferUntil,now+40*min,'a known reset beats stalled lanes');
+  assert.equal(r.kind,'blocked');assert.equal(r.deferUntil,null,'ready personal proposal requires a decision before a company reset wait');
   r=route({lanes:{[ASTRA]:stuck},args:['debug','--failures','1','--actual',`codex:${ASTRA}:high@trae`]});
   assert.equal(r.kind,'defer');assert.equal(r.plan.reason.code,'ETA_STALLED');assert.equal(r.pick,null,'no downgrade or optimistic launch when the only floor-safe lane is stalled');
   r=route({lanes:{[ASTRA]:{...stuck,t:now-31*min}}});
@@ -99,23 +99,23 @@ try {
   }
   assert.equal(laneEta({workMin:90,requests:120,bucketDepleted:true,unknown:true}).basis,'unknown');
   r = route({lanes:{[SOL]:lane(500,0.5),[ASTRA]:lane(null,null,{state:'ready',lastProgressAt:now})},args:['implement-hard','--shared-lock']});
-  assert.equal(r.pick.model,ASTRA,'resource work prefers a model progressing now');
+  assert.equal(r.pick.model,SOL,'free TTADK Sol precedes Astra without fresh model load or unused units');
   assert.ok([...r.notes,...r.fixedNotes].some((s)=>/take the lease\/lock only after the first model response/.test(s)));
   // Same moderately queued lane: a small task beats the reset, a large one is scheduled for it.
   const slow = {[SOL]:lane(100,2),[ASTRA]:lane(100,2),'gpt-5.6-sol':lane(100,2),'gpt-5.6-terra':lane(100,2),'gpt-5.5':lane(100,2),'deepseek-v4.1-flash':lane(100,2)};
   r = route({lanes:slow,resetMin:600,args:['lookup']});
-  assert.equal(r.pick.model,'gpt-5.6-terra'); assert.equal(r.deferred,null);
+  assert.equal(r.pick.model,'gpt-5.6-terra'); assert.equal(r.deferred,null,'the qualified light ladder remains unchanged');
   r = route({lanes:slow,resetMin:600}); assert.equal(r.pick.account,'trae');assert.equal(r.deferUntil,null);
   r = route({args:['implement'], daily:{[SOL]:bucket(),[ASTRA]:bucket(),'gpt-5.6-sol':bucket(false)},
     lanes:{'gpt-5.6-sol':lane(500,0.5)}});
-  assert.equal(r.pick.model,'gpt-5.6-terra','fresh congestion on an alternative is considered even without Sol telemetry');
+  assert.equal(r.pick.model,SOL,'free same-model TTADK keeps quality before queued TRAE alternatives');
   r = route({args:['implement','--failures','1','--actual',`codex:${SOL}:high@trae`]});
   assert.equal(r.deferred,null,'retry dispatches are not held for reset');
   assert.ok(r.eta.filter((x)=>x.account==='trae').every((x)=>[SOL,ASTRA].includes(x.model)&&x.requests===120&&x.workMin===90),
     'retry estimates and alternatives belong to the selected hard rung');
   for (const category of ['implement-hard','debug','science','design','review-high']) {
-    r = route({args:[category]}); assert.ok([SOL,ASTRA].includes(r.pick.model));
-    if(category==='review-high') {assert.equal(r.blocked,false);assert.ok(r.needsUserOK.some(s=>s.startsWith('personal quota:')),'required second needs scoped consent');}
+    r = route({args:category==='review-high'?[category,'--review-class','A','--review-reason','fixture independent reviewer set']:[category]}); assert.ok([SOL,ASTRA].includes(r.pick.model));
+    if(category==='review-high') {assert.equal(r.blocked,false);assert.ok(r.secondOpinion || r.plan.gates.some(g=>g.kind==='independent-review'),'explicit class A retains the independent second or its acceptance gate');}
     else assert.ok(!r.needsUserOK.some((s)=>s.startsWith('personal quota:')),category);
   }
   assert.equal(laneEta({workMin:90,requests:120,bucketDepleted:true,position:100,drainPerMin:0.01}).startDelayMin,10000);

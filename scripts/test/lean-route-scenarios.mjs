@@ -25,6 +25,18 @@ try {
   assert.match(output,/slow tests for this project/);assert.match(output,/landing gate:/);
   assert.ok(route.fixedNotes.includes(WORKER_NOTES.localBuild));assert.ok(!route.notes.includes(WORKER_NOTES.localBuild));
   assert.match(verbose,/fixedNotes: build brief:/);assert.ok(verbose.length>output.length);
+  const noDeepSeek = JSON.parse(cli([...args, '--exclude-model', 'deepseek', '--json']));
+  assert.ok(!noDeepSeek.notes.some(note => note.startsWith('DeepSeek:')), 'catalog presence alone cannot emit DeepSeek limits');
+  const deepSeek = JSON.parse(cli(['implement', '--read-only', '--impact', 'service', '--exclude-model', 'gpt,seed,gemini', '--json']));
+  assert.match(deepSeek.pick.model, /^deepseek/);
+  assert.ok(deepSeek.notes.some(note => note.startsWith('DeepSeek:')), 'chosen DeepSeek receives its limits');
+  const timed = structuredClone(raw);
+  timed.etaHistory = [0, 1, 2].map(i => ({ category: 'implement', effort: 'high', minutes: 21.582291666666666,
+    modelId: 'gpt-6.1-sol', accountId: 'trae', attemptId: `timing-${i}`, cause: 'pass' }));
+  fs.writeFileSync(snapshot, JSON.stringify(timed));
+  const timedOutput = cli(args);
+  assert.match(timedOutput, /~22 min/); assert.doesNotMatch(timedOutput, /21\.582/);
+  fs.writeFileSync(snapshot, JSON.stringify(raw));
   const normalize=pick=>JSON.parse(JSON.stringify(pick).replace(/route:[a-f0-9]+/g,'route:fixture'));
   assert.deepEqual(normalize(JSON.parse(cli([...args,'--verbose','--json'])).pick),normalize(route.pick),'verbose preserves launch arguments and chosen tuple apart from the output-flag fingerprint');
   const phones=structuredClone(raw);phones.resources.value.registeredResources=['iphone11'];

@@ -95,19 +95,27 @@ try {
   assert.match(hookRun(input('running-owner', { background_tasks: [] })).output.reason, /watcher claim live; background tasks 0 listed, 0 run a watcher/);
   armed.child.kill('SIGTERM'); assert.equal((await armed.done).code, 143); assert.equal(hasWatcher('running-owner'), false);
   // Live followers cover completion notifications only when their tracked launches match every worker.
-  record('followers-owner', 'running', 'live-start', { thread: 'start-thread', pid: process.pid, followerCommand: 'start' });
-  record('followers-owner', 'running', 'live-turn', { thread: 'turn-thread', pid: process.pid, followerCommand: 'turn' });
+  record('followers-owner', 'running', 'live-start', { thread: 'start-thread', pid: process.pid, followerCommand: 'start', launcher: { sessionId: 'followers-owner', env: { CLAUDE_CODE_TASK_ID: 'start-task' } } });
+  record('followers-owner', 'running', 'live-turn', { thread: 'turn-thread', pid: process.pid, followerCommand: 'turn', launcher: { sessionId: 'followers-owner', env: { CLAUDE_CODE_TASK_ID: 'turn-task' } } });
   const followers = [
-    { command: `node "${worker}" --account fixture start --owner followers-owner --name live-start`, pid: process.pid },
-    { command: `node "${worker}" --account fixture turn --owner followers-owner --thread turn-thread`, pid: process.pid }
+    { command: `node "${worker}" --account fixture start --owner followers-owner --name live-start`, id: 'start-task' },
+    { command: `node "${worker}" --account fixture turn --owner followers-owner --thread turn-thread`, id: 'turn-task' }
   ];
   assert.equal(hookRun(input('followers-owner', { background_tasks: followers })).output, null);
   assert.match(hookRun(input('followers-owner', { background_tasks: followers.slice(0, 1) })).output.reason, /live-turn.*no matching tracked/);
   assert.match(hookRun(input('followers-owner')).output.reason, /live-start.*background_tasks missing/);
   for (const change of [{ pid: 2147483647 }, { status: 'completed' }, { command: followers[0].command + ' &' },
-    { command: followers[0].command.replace('followers-owner', 'other-owner') }]) {
+    { id: 'another-project-task' }]) {
     assert.match(hookRun(input('followers-owner', { background_tasks: [{ ...followers[0], ...change }, followers[1]] })).output.reason, /live-start/);
   }
+  assert.equal(hookRun(input('followers-owner', { background_tasks: [
+    { id: 'start-task', command: 'bash /fixture/task/launch.sh', status: 'running' },
+    { id: 'turn-task', command: `node ${worker} --account trae turn --thread turn-thread`, status: 'running' }
+  ] })).output, null, 'wrappers and direct turns use recorded task identity');
+  assert.match(hookRun(input('followers-owner', { background_tasks: [
+    { command: followers[0].command }, followers[1]
+  ] })).output.reason, /live-start/, 'matching command text without task identity cannot prove coverage');
+  assert.match(hookRun(input('followers-owner', { background_tasks: [null, followers[1]] })).output.reason, /live-start/, 'malformed registry entries cannot establish follower coverage');
   const question = record('followers-owner', 'question', 'live-start', { thread: 'start-thread', questionId: 'open-choice',
     timeoutMin: 20, expiresAt: Date.now() + 1200000, text: 'Which choice?' });
   deliver('followers-owner', () => {}); // Acknowledgement does not answer an ask.
