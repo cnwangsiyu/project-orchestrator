@@ -82,14 +82,27 @@ try {
   assert.equal(run(['note', '--thread', 'fallback-thread', '--account', 'trae', 'Explicit identity']).status, 0);
 
   // Two watchers, two owners: only the launcher gets the talkback wake-up.
-  const a = start(['watch', '--owner', 'trae-owner']), b = start(['watch', '--owner', 'ttadk-owner']);
+  const a = start(['watch', '--debounce-sec', '0', '--owner', 'trae-owner']), b = start(['watch', '--debounce-sec', '0', '--owner', 'ttadk-owner']);
   await until(() => hasWatcher('trae-owner') && hasWatcher('ttadk-owner'), 'watchers armed');
   assert.equal(run(['note', '--kind', 'scope', 'Need scope decision'], identities.ttadk).status, 0);
   const awake = await b.done; assert.equal(awake.code, 0); assert.match(awake.stdout, /^worker ttadk-thread notes \[scope\]: Need scope decision\n$/);
   await new Promise((r) => setTimeout(r, 200)); assert.equal(a.output(), '');
   assert.equal(run(['note', '--kind', 'info', 'Owner A milestone'], identities.trae).status, 0);
+  assert.equal(run(['note', '--kind', 'progress', 'Peer milestone'], identities.trae).status, 0);
+  compactWorkerEvents();
+  await new Promise((r) => setTimeout(r, 250)); assert.equal(a.output(), '', 'info never wakes watch');
+  const deferredContext = hook('trae-owner', 'SessionStart').hookSpecificOutput.additionalContext;
+  assert.match(deferredContext, /Owner A milestone/); assert.match(deferredContext, /Peer milestone/);
+  await new Promise((r) => setTimeout(r, 250)); assert.equal(a.output(), '', 'info receipt never wakes watch');
+  assert.equal(run(['note', '--wake', '--kind', 'info', 'Changes peer work now'], identities.trae).status, 0);
   assert.equal((await a.done).code, 0);
   assert.equal(hook('ttadk-owner'), null, 'already delivered note never reappears');
+
+  deliver('fallback-owner', () => {});
+  const riskWatch = start(['watch', '--debounce-sec', '0', '--owner', 'fallback-owner']);
+  await until(() => hasWatcher('fallback-owner'), 'risk watcher armed');
+  assert.equal(run(['note', '--account', 'trae', '--thread', 'fallback-thread', '--kind', 'risk', 'Risk needs action']).status, 0);
+  assert.match((await riskWatch.done).stdout, /notes \[risk\]: Risk needs action/);
 
   // Six per rolling hour, retained across compaction; excess is still recorded.
   for (let i = 0; i < 6; i++) assert.equal(run(['note', '--kind', 'risk', `risk-${i}`], identities.chatgpt).status, 0);
@@ -98,15 +111,16 @@ try {
   assert.equal(notes.at(-1).wake, false); // first identity-test note used one of the six slots
   const reason = hook('chatgpt-owner').reason;
   assert.match(reason, /worker chatgpt-thread notes \[risk\]: risk-0/);
-  assert.doesNotMatch(reason, /risk-5/);
+  assert.match(reason, /risk-5/, 'rate-limited notes are delivered on the next natural wake');
   assert.equal(hook('chatgpt-owner'), null);
   compactWorkerEvents();
-  assert.match(run(['note', 'still suppressed'], identities.chatgpt).stdout, /suppressed/);
-  assert.equal(hook('chatgpt-owner'), null);
+  assert.match(run(['note', 'still suppressed'], identities.chatgpt).stdout, /next natural wake/);
+  assert.match(hook('chatgpt-owner').reason, /still suppressed/);
   assert.equal(run(['note', '--kind', 'risk', 'x'.repeat(501)], identities.trae).status, 0);
   const long = readEvents().filter((row) => row.event === 'message').at(-1);
   assert.equal(long.text.length, 500); assert.equal(long.wake, false); assert.equal(long.truncated, true);
 
+  hook('trae-owner');
   const asking = start(['ask', '--default', 'Keep the baseline', 'Which baseline?'], identities.chatgpt);
   await until(() => openQuestions(readEvents(), { owner: 'chatgpt-owner' }).length === 1, 'question recorded');
   const question = openQuestions(readEvents(), { owner: 'chatgpt-owner' })[0];

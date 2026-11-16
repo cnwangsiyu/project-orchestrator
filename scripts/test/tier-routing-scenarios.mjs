@@ -2,6 +2,7 @@
 // Difficulty policy against synthetic catalogs, quota and pauses only; never contact a provider.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { parseRouteJSON } from './helpers/route-fixture.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -51,7 +52,7 @@ const run = (args, { models = ids, daily = depleted, company = false, traeHome =
   const cache = path.join(tmp, 'quota.json');
   fs.writeFileSync(cache, JSON.stringify({ checkedAt: now, claude: [{ ...window, used: claudeUsed, label: 'week (all models)' }],
     codexAccounts: [personal, ...(company ? [ttadk] : []), trae], errors: {}, history: {} }));
-  return JSON.parse(execFileSync(process.execPath, [path.join(root, 'route.mjs'), ...a, '--mode', 'default', '--json'], {
+  return parseRouteJSON(execFileSync(process.execPath, [path.join(root, 'route.mjs'), ...a, '--mode', 'default', '--json'], {
     encoding: 'utf8', env: { ...process.env, CODEX_ACCOUNTS: path.join(tmp, 'none.json'), QUOTA_CACHE: cache,
       QUOTA_LOG: '0', ROUTE_LOG: '0', ROUTE_NOW: String(now), ROUTE_LOG_FILE: path.join(tmp, 'empty-route-history.jsonl'), TRAE_PROBE: '0', QUOTA_LOG_FILE: history },
   }));
@@ -140,7 +141,7 @@ try {
   }
   const balancedFallback = run(['implement', '--exclude-model', `${SOL56},${TERRA56}`], { company: true });
   assert.equal(balancedFallback.pick.model, SOL); assert.equal(balancedFallback.pick.effort, 'high');
-  assert.ok(balancedFallback.notes.some(n=>/no review/.test(n)),'ordinary fallback service work uses executable acceptance');
+  assert.ok(balancedFallback.allNotes.some(n=>/no review/.test(n)),'ordinary fallback service work uses executable acceptance');
   assert.equal(run(['debug'], { company: true, daily: null }).pick.account, 'ttadk');
   const onlyPro = run(['analysis'], { models: [PRO] }); assert.notEqual(onlyPro.pick.model, PRO); assert.ok(personalGate(onlyPro));
   for (const cat of ['lookup', 'extract', 'draft', 'analysis', 'implement', 'debug', 'science', 'review', 'review-high', 'design']) {
@@ -152,7 +153,7 @@ try {
       }
     }
   }
-  assert.ok(run(['analysis', '--exclude-model', 'gpt']).notes.some((n) => /can't emit one very large file in a single turn \(output limit\).*split the work or exclude deepseek/.test(n)));
+  assert.ok(run(['analysis', '--exclude-model', 'gpt']).allNotes.some((n) => /can't emit one very large file in a single turn \(output limit\).*split the work or exclude deepseek/.test(n)));
   // Sol review P1: normal-tier availability candidates must not become a weaker-GPT retry ladder.
   const unavailable = ['analysis', '--exclude-model', SOL];
   const first = run(unavailable, { daily: active }), next = run([...unavailable, '--failures', '1'], { daily: active });

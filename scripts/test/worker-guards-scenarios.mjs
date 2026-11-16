@@ -6,6 +6,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { loadDigest } from '../lib/global-rules.mjs';
+import { WORKER_NOTES } from '../lib/fixed-worker-notes.mjs';
 import { modelFamily, modelObservation, rolloutTurnModel } from '../lib/worker-model.mjs';
 
 const scripts = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -62,6 +64,9 @@ try {
       assert.equal(r.status,1,r.stderr+r.stdout);{const health=JSON.parse(fs.readFileSync(path.join(f.accountHome,'worker-health.json'),'utf8'));assert.ok(health.modelPauses['gpt-6.1-sol']);assert.ok(!health.pools?.gpt,'ordinary unavailable is not a family restriction');}
     }
     const r=run(fixture('resume-current-digest'),'turn');const resume=r.calls.find(c=>c.method==='thread/resume');
+    assert.ok(resume.params.developerInstructions.includes(loadDigest().worker));
+    for(const clause of Object.values(WORKER_NOTES)) assert.ok(resume.params.developerInstructions.includes(clause),clause);
+    assert.match(resume.params.developerInstructions,/never overwrite, delete or move files outside the task's scope.*restore.*byte-for-byte/);
     assert.match(resume.params.developerInstructions,/no sub-agents/);assert.match(resume.params.developerInstructions,/dependencies and build tools/);
   });
   check('TTADK setup accepts a fresh qualified catalog without Sol',()=>{

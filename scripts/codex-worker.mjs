@@ -17,12 +17,12 @@ import {modelPreference} from './lib/pipeline/policy.mjs';
 //   codex-worker --account trae probe --model M                          (recovery probe of a paused model family; lib/state.mjs starts it)
 //   codex-worker wait   --thread ID [--log FILE] [--out FILE]            (start/turn/wait take --stall-min M, default 30)
 //   codex-worker steer  --thread ID                                                                     "<message>"
-//   codex-worker note [--kind progress|risk|scope|info] "<text>"         (worker: notify without ending the turn)
+//   codex-worker note [--kind progress|risk|scope|info] [--wake] "<text>"         (worker: notify without ending the turn)
 //   codex-worker ask [--timeout-min N] [--default TEXT] "<question>"    (worker: wait for an orchestrator answer)
 //   codex-worker reply --thread ID [--question ID] "<text>"            (orchestrator: answer, or fall back to steer)
 //   codex-worker interrupt --thread ID
 //   codex-worker status --thread ID
-//   codex-worker mine | watch [--owner SESSION_ID]                      (owner-scoped durable inbox; watch is a tracked background task)
+//   codex-worker mine | watch [--owner SESSION_ID] [--debounce-sec N]                      (owner-scoped durable inbox; watch is a tracked background task)
 //   codex-worker list   [--cwd DIR] [--search TEXT] [--limit N]
 //   codex-worker quota                                                     (the account's rate-limit windows, JSON)
 //   codex-worker usage                                                     (account id, windows and reset cards, JSON; TRAE: daily buckets + weekly pool)
@@ -56,7 +56,7 @@ import { runWorkerTalkback, createTalkbackRelay } from './lib/worker-talkback.mj
 import { noteFailure, noteSuccess, notePolicyRestriction, rememberThreadModel, threadModel, probeResult, failureKind } from './lib/trae-health.mjs';
 import { createQueueRecorder } from './lib/company-load.mjs';
 import { saveQueue, readQueue } from './lib/worker-queue.mjs';
-import { loadDigest, auditLaunch, rulesLog, rulesShared } from './lib/global-rules.mjs';
+import { loadDigest, workerInstructions, auditLaunch, rulesLog, rulesShared } from './lib/global-rules.mjs';
 import { isPolicyBlock, policyBlockRecord, appendPolicyBlock, policyBlockAction } from './lib/policy-block.mjs';
 import { runHubForeground, hubListReachable } from './lib/hub-foreground.mjs';
 import { parseRouteArgs, routeFlag, rerouteWorker, turnHasWork } from './lib/worker-reroute.mjs';
@@ -96,7 +96,7 @@ if (argv[0] === 'turn' && typeof earlyOpts.thread === 'string') {
     else { Object.assign(earlyOpts, inherited); console.log(`inherited: ${JSON.stringify(inherited)}`); }
   } catch (e) { process.stderr.write(`codex-worker: launch inheritance failed: ${e.message}\n`); process.exit(2); }
 }
-const tracker = ['start', 'turn', 'wait'].includes(argv[0]) ? lifecycle({ owner: earlyOpts.owner,
+const tracker = ['start', 'turn', 'wait'].includes(argv[0]) ? lifecycle({ owner: earlyOpts.owner, followerCommand: argv[0],
   name: earlyOpts.name ?? earlyOpts.thread ?? 'unnamed', thread: earlyOpts.thread ?? null,
   account: account ?? 'main', model: earlyOpts.model ?? null, effort: earlyOpts.effort ?? null,
   mayRun: argv[0] === 'wait' && typeof earlyOpts.thread === 'string',
@@ -150,6 +150,7 @@ const [cmd, ...rest] = argv;
 const opts = { ...earlyOpts }; const pos = [];
 for (let i = 0; i < rest.length; i++) {
   if (rest[i] === '--no-browser-preflight') opts['no-browser-preflight'] = true;
+  else if (rest[i] === '--wake') opts.wake = true;
   else if (rest[i] === '--background') opts.background = true;
   else if (rest[i] === '--require-model' && !['on', 'off'].includes(rest[i + 1])) opts['require-model'] = true;
   else if (rest[i].startsWith('--')) opts[rest[i].slice(2)] = rest[i + 1]?.startsWith('--') || rest[i + 1] === undefined ? true : rest[++i];
@@ -195,7 +196,8 @@ if (cmd === 'watch' || cmd === 'mine') {
   const owner = resolveOwner(opts.owner);
   if (!validOwner(owner)) die(`${cmd} needs --owner <session-id> (or ORCHESTRATOR_OWNER)`);
   if (cmd === 'watch') {
-    try { process.exit(await watch(owner)); } catch (e) { die(e.message, 1); }
+    const debounceSec = opts['debounce-sec'] === undefined ? 45 : typeof opts['debounce-sec'] === 'string' ? Number(opts['debounce-sec']) : NaN;
+    try { process.exit(await watch(owner, undefined, { debounceSec })); } catch (e) { die(e.message, 1); }
   }
   const current = inbox(readEvents(), owner, readAck(owner));
   for (const row of current.unresolved) console.log(`unresolved owner ${row.ownerOriginal}: ${row.ownerResolution} (${row.ownerMatches?.join(', ')||'no full owner in events'}) event=${row.id}`);
@@ -281,7 +283,7 @@ const talkbackContext = (thread) => {
     + `To send the orchestrator a note without stopping (kinds: risk, scope, progress, info):\nRULES_SHARED=${shellQuote(env.RULES_SHARED)} ${shellQuote(process.execPath)} ${shellQuote(fileURLToPath(import.meta.url))} --account ${metadata.account} note --thread ${thread} --kind info "<text>"\n`
     + `To ask the orchestrator and wait for the answer (exit 3 = timeout, proceed with default; exit 4 = timeout without default):\nRULES_SHARED=${shellQuote(env.RULES_SHARED)} ${shellQuote(process.execPath)} ${shellQuote(fileURLToPath(import.meta.url))} --account ${metadata.account} ask --thread ${thread} --timeout-min 20 --default "<what you will do if nobody answers>" "<question>"\n`
     + 'In read-only/workspace-write, denied shared writes are relayed through your command output without widening the sandbox. If ask exits 6, run the exact ask --await <id> command printed on stderr; it only reads, preserves the original question/default/deadline and does not ask again.\n'
-    + 'Use ask only for a decision the brief does not settle that changes your next action; state --default. Use note only for a risk, a scope change, a decision you made, a landed commit, or a finding that changes someone else\'s work, never routine progress, tool hiccups (probe timeouts, missing metadata) or status. A blocker needing the user still ends the turn BLOCKED.' };
+    + 'Use ask only for a decision the brief does not settle that changes your next action; state --default. Use note only for a risk, a scope change, a decision you made, a landed commit, or a finding that changes someone else\'s work, never routine progress, tool hiccups (probe timeouts, missing metadata) or status. Info/progress notes are delivered on the next natural wake; risk/scope notes and asks wake. Use note --wake only when it changes someone else\'s work now. A blocker needing the user still ends the turn BLOCKED.' };
 };
 // Check metadata only: --out is a final-message destination, sometimes also mistakenly
 // named as a worker deliverable. Never inspect the contents to decide whether it changed.
@@ -1264,7 +1266,7 @@ try {
     const digest = loadDigest();
     const th = await call('thread/start', {
       cwd: path.resolve(opts.cwd), model: opts.model, sandbox: opts.sandbox, approvalPolicy: APPROVAL_POLICY,
-      developerInstructions: [browserHowTo, `Global worker rules ${digest.version}\n${digest.worker}`, reviewHowTo].filter(Boolean).join('\n'),
+      developerInstructions: [browserHowTo, workerInstructions(digest), reviewHowTo].filter(Boolean).join('\n'),
       ...(browserThread && !TRAE_EXTENSION_BROWSER ? { approvalsReviewer: 'user' } : {}),
       ...(browserConfig ? { config: browserConfig } : {}),
     });
@@ -1276,7 +1278,7 @@ try {
     if (PROF?.kind === 'trae') rememberThreadModel(PROF.home, threadId, opts.model);
     if (opts.name) await call('thread/name/set', { threadId, name: opts.name }).catch(() => {});
     const talkback = talkbackContext(threadId);
-    const instructions = [browserHowTo, `Global worker rules ${digest.version}\n${digest.worker}`, talkback.instructions, reviewHowTo].filter(Boolean).join('\n');
+    const instructions = [browserHowTo, workerInstructions(digest), talkback.instructions, reviewHowTo].filter(Boolean).join('\n');
     const configured = await call('thread/resume', { threadId, config: { ...browserConfig, ...talkback.config }, developerInstructions: instructions }).catch(() => null);
     markOutputStart();
     const ts = await call('turn/start', {
@@ -1290,7 +1292,7 @@ try {
     const config = { ...talkback.config, ...(TRAE_EXTENSION_BROWSER ? { mcp_servers: { playwright: TRAE_PLAYWRIGHT_SERVER } } : {}) };
     const resumedDigest=loadDigest();
     const resumed = await call('thread/resume', { threadId: opts.thread, model: opts.model, config,
-      developerInstructions:[`Global worker rules ${resumedDigest.version}\n${resumedDigest.worker}`, talkback.instructions, reviewHowTo].filter(Boolean).join('\n') }).catch(() => null);
+      developerInstructions:[workerInstructions(resumedDigest), talkback.instructions, reviewHowTo].filter(Boolean).join('\n') }).catch(() => null);
     sessionPath = resumed?.thread?.path ?? null;
     auditStart(opts.model??resumed?.thread?.model,opts.sandbox??resumed?.thread?.sandbox??undefined,{thread:opts.thread,name:resumed?.thread?.name??undefined});
     tracker?.set({ mayRun: true });

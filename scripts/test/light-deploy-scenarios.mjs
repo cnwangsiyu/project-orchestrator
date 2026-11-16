@@ -2,6 +2,7 @@
 // Light/procedural deploy tier and escalation against synthetic catalogs and quota only; never contact a provider.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { parseRouteJSON } from './helpers/route-fixture.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -36,7 +37,7 @@ const run = (args, { ttadkModels = [SOL, TERRA56, GPT55], traeModels = null, dai
   const cache = path.join(tmp, 'quota.json');
   fs.writeFileSync(cache, JSON.stringify({ checkedAt: now, claude: [{ ...window, used: claudeUsed, label: 'week (all models)' }],
     codexAccounts: [personal, ...(ttadk ? [ttadk] : []), ...(trae ? [trae] : [])], errors: {}, history: {} }));
-  return JSON.parse(execFileSync(process.execPath, [path.join(root, 'route.mjs'), ...a, '--mode', 'default', '--json'], {
+  return parseRouteJSON(execFileSync(process.execPath, [path.join(root, 'route.mjs'), ...a, '--mode', 'default', '--json'], {
     encoding: 'utf8', env: { ...process.env, CODEX_ACCOUNTS: path.join(tmp, 'none.json'), QUOTA_CACHE: cache,
       QUOTA_LOG: '0', ROUTE_LOG: '0', ROUTE_NOW:String(now), ROUTE_LOG_FILE:path.join(tmp,'empty-routes.jsonl'), TRAE_PROBE: '0', QUOTA_LOG_FILE: history },
   }));
@@ -46,10 +47,10 @@ try {
   const testBuild = run(['build-run', '--env', 'test']);
   assert.equal(testBuild.tier, 'light');
   assert.deepEqual([testBuild.pick.account, testBuild.pick.model, testBuild.pick.effort], ['ttadk', TERRA56, 'medium']);
-  assert.ok(!testBuild.notes.some((n) => n.startsWith('deploy/release brief')));
-  assert.ok(testBuild.notes.some((n) => n.startsWith('test-environment build-run')));
+  assert.ok(!testBuild.allNotes.some((n) => n.startsWith('deploy/release brief')));
+  assert.ok(testBuild.allNotes.some((n) => n.startsWith('test-environment build-run')));
   // V20: environment is not execution location. Only --no-local-build proves remote.
-  assert.ok(testBuild.notes.some((n) => n.startsWith('build brief: full-package builds must use')));
+  assert.ok(testBuild.allNotes.some((n) => n.startsWith('build brief: full-package builds must use')));
   assert.ok(testBuild.plan.gates.some((g)=>g.kind==='local-resource-admission'));
 
   // A failed light run escalates to Sol medium, not to another light model.
@@ -61,12 +62,12 @@ try {
   const prod = run(['build-run', '--impact', 'release']);
   assert.equal(prod.tier, 'normal');
   assert.deepEqual([prod.pick.account, prod.pick.model, prod.pick.effort], ['ttadk', SOL, 'medium']);
-  assert.ok(prod.notes.some((n) => n.startsWith('deploy/release brief')));
+  assert.ok(prod.allNotes.some((n) => n.startsWith('deploy/release brief')));
 
   // --env test with high stakes stays production-grade.
   const high = run(['build-run', '--env', 'test', '--stakes', 'high']);
   assert.equal(high.tier, 'hard');
-  assert.ok(high.notes.some((n) => n.startsWith('deploy/release brief')));
+  assert.ok(high.allNotes.some((n) => n.startsWith('deploy/release brief')));
 
   // TRAE-only light pick uses its own light list (no Sol-first detour) and still escalates to Sol.
   const traeLight = run(['build-run', '--env', 'test'], { company: false, traeModels: [SOL, TERRA56, GPT55, FLASH] });
@@ -107,23 +108,23 @@ try {
 
   // --no-local-build marks a remote run: no local heavy-build brief, explicit remote note.
   const remote = run(['build-run', '--impact', 'release', '--no-local-build']);
-  assert.ok(remote.notes.some((n) => n.startsWith('remote/CI build (--no-local-build)')));
-  assert.ok(!remote.notes.some((n) => n.startsWith('build brief: full-package builds must use')));
+  assert.ok(remote.allNotes.some((n) => n.startsWith('remote/CI build (--no-local-build)')));
+  assert.ok(!remote.allNotes.some((n) => n.startsWith('build brief: full-package builds must use')));
 
   // --env test suppresses heavy locks only for the procedural build-run category. Local compile categories retain the
   // heavy-build brief; --no-local-build is the explicit way to mark those runs remote.
   for (const args of [['implement', '--impact', 'service'], ['implement-hard', '--impact', 'service'],
     ['debug', '--impact', 'service'], ['ui-browser']]) {
     const localTest = run([...args, '--env', 'test']);
-    assert.ok(localTest.notes.some((n) => n.startsWith('build brief: full-package builds must use')), args.join(' '));
-    assert.ok(!localTest.notes.some((n) => n.startsWith('test-environment run (--env test)')), args.join(' '));
+    assert.ok(localTest.allNotes.some((n) => n.startsWith('build brief: full-package builds must use')), args.join(' '));
+    assert.ok(!localTest.allNotes.some((n) => n.startsWith('test-environment run (--env test)')), args.join(' '));
     const remoteTest = run([...args, '--env', 'test', '--no-local-build']);
-    assert.ok(remoteTest.notes.some((n) => n.startsWith('remote/CI build (--no-local-build)')), args.join(' '));
-    assert.ok(!remoteTest.notes.some((n) => n.startsWith('build brief: full-package builds must use')), args.join(' '));
+    assert.ok(remoteTest.allNotes.some((n) => n.startsWith('remote/CI build (--no-local-build)')), args.join(' '));
+    assert.ok(!remoteTest.allNotes.some((n) => n.startsWith('build brief: full-package builds must use')), args.join(' '));
   }
 
   // A local production build keeps the heavy-build brief.
-  assert.ok(prod.notes.some((n) => n.startsWith('build brief: full-package builds must use')));
+  assert.ok(prod.allNotes.some((n) => n.startsWith('build brief: full-package builds must use')));
   console.log('light-deploy scenarios: ok');
 } finally {
   fs.rmSync(tmp, { recursive: true, force: true });

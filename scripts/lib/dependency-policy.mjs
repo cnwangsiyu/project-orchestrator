@@ -1,1 +1,3 @@
-export const DEPENDENCY_RULE='Project dependencies and build tools fetched through the project\'s normal package managers and registries (npm/pnpm/yarn, pip/uv, gradle/maven, CocoaPods/SPM, cargo, go modules, brew formulae, SDK/toolchain components the build asks for) are installed directly into the task workspace or user-level caches without a card or question. No secrets or credentials, production changes without a card, personal quota without approval, or changes to system security settings. A download needing a login the worker lacks is BLOCKED as usual.';
+// Compatibility export; dependency policy comes from the worker digest.
+import { loadDigest } from './global-rules.mjs';
+export const DEPENDENCY_RULE = loadDigest().worker.split('\n').find(line => line.startsWith('- Project dependencies'));

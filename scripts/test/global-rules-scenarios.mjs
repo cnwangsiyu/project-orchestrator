@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { routeFixture } from './helpers/route-fixture.mjs';
+import { routeFixture, parseRouteJSON } from './helpers/route-fixture.mjs';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -24,7 +24,7 @@ try {
   assert.equal(digestText.match(/^version:/gm)?.length, 1, 'integration must publish one digest version');
   assert.equal(digestText.match(/^## Changes In This Version$/gm)?.length, 1);
   assert.ok(digestText.split('\n').length<=61,'digest line budget');
-  assert.equal(digest.version, '2026-11-16.1');
+  assert.equal(digest.version, '2026-11-16.4');
   assert.match(digest.worker, /Mid-turn talkback:.*ask --default.*never routine progress/);
   assert.equal(digestText.match(/^- Day 3 /gm)?.length,1);
   assert.match(digestText,/quality first across company accounts/);
@@ -53,7 +53,7 @@ try {
     codexAccounts: [main, { ...ttadk, ssoExpiresAt: now + left * h }], errors: {}, history: {} });
   const route = (args) => {
     fs.writeFileSync(cache, JSON.stringify(data()));
-    return JSON.parse(routeFixture(path.join(root, 'route.mjs'), [...args,
+    return parseRouteJSON(routeFixture(path.join(root, 'route.mjs'), [...args,
       '--cwd', tmp, '--task-dir', tmp, '--name', 'fixture', '--dry', '--json'], { env, dir:tmp, approve:true }));
   };
   const claudeLaunch = (pick) => {
@@ -92,26 +92,26 @@ try {
   console.log('ok   Codex writers default full; reviewers stay read-only; tests and explicit overrides stay narrower');
 
   for (const project of ['evelyns-world', 'acq', 'autotrader']) {
-    const notes = route(['implement', '--project', project, '--impact', 'service']).notes.join('\n');
+    const notes = route(['implement', '--project', project, '--impact', 'service']).allNotes.join('\n');
     assert.match(notes, /project profile no-review/);
     assert.doesNotMatch(notes, /landing gate:/, 'BC-45 omits absent landing gate');
     assert.match(notes, /keep --out separate from any file the worker is asked to write/);
     assert.match(notes, /codex-worker ask.*Answer promptly with codex-worker reply/);
   }
-  assert.match(route(['implement', '--project', 'video-agent', '--impact', 'service']).notes.join('\n'), /landing gate: changed-package tests/);
+  assert.match(route(['implement', '--project', 'video-agent', '--impact', 'service']).allNotes.join('\n'), /landing gate: changed-package tests/);
 
   for(const args of [['implement','--impact','service'],['build-run'],['debug','--impact','service'],['ui-browser']]) {
-    assert.match(route(args).notes.join('\n'),/dependencies and build tools.*without.*(?:card|ask|question)/i);
+    assert.match(route(args).allNotes.join('\n'),/dependencies and build tools.*without.*(?:card|ask|question)/i);
   }
   assert.match(digest.worker,/dependencies and build tools.*without a card or question/i);
   assert.match(digest.text,/Mandatory review is ONLY explicit/);
-  const buildNote = route(['build-run']).notes.find((n) => n.startsWith('build brief:'));
+  const buildNote = route(['build-run']).allNotes.find((n) => n.startsWith('build brief:'));
   assert.match(buildNote, /ONE-process wrapper around res take-build\/wait-build\/return-build.*res v1\.5/);
   assert.match(buildNote, /holding neither resource while waiting for the other/);
   assert.match(buildNote, /only for genuine local heavy compute/);
   assert.match(buildNote, /long-lived watched wrapper/);
   for (const flags of [['--no-local-build']]) {
-    const notes = route(['build-run', ...flags]).notes;
+    const notes = route(['build-run', ...flags]).allNotes;
     assert.ok(!notes.some((n) => n.startsWith('build brief:')));
     assert.ok(notes.some((n) => /no heavy-build\/lane lock|no local heavy-build\/lane lock/.test(n)));
   }

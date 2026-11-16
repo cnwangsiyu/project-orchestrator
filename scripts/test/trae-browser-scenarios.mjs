@@ -78,7 +78,8 @@ try {
   const { result, rpc, start } = run(capture, ['start', '--cwd', tmp, '--effort', 'high', '--sandbox', 'read-only',
     '--model', 'gpt-6.1-sol', '--name', 'fixture-plain', '--log', path.join(tmp, 'plain-log.jsonl'), 'reply DONE']);
   assert.equal(start.config, undefined);
-  assert.doesNotMatch(start.developerInstructions, /Playwright Extension|browser_navigate|node_repl/);
+  assert.doesNotMatch(start.developerInstructions.split('Global worker rules ')[0], /Playwright Extension|browser_navigate|node_repl/);
+  assert.match(start.developerInstructions,/For TRAE signed-in browser tasks:.*configured origins/);
   assert.equal(fs.readFileSync(persistentFile, 'utf8'), persistent);
   assert.ok(![result.stdout, result.stderr, JSON.stringify(rpc)].join('\n').includes(tokenValue));
   console.log('ok   non-browser TRAE start leaves the persistent headless Playwright default untouched');

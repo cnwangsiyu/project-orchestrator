@@ -24,3 +24,8 @@ export function routeFixture(route, args, {env, dir, approve = false, ...options
   if(process.env.DEBUG_FIXTURE&&JSON.parse(result).blocked) console.error(JSON.stringify(JSON.parse(result).plan.reasons));
   return result;
 }
+
+// Legacy note assertions inspect both buckets; production briefs use only notes.
+export const parseRouteJSON = (text) => JSON.parse(text, (key, value) =>
+  value && Array.isArray(value.notes) && Array.isArray(value.fixedNotes)
+    ? { ...value, allNotes: [...value.fixedNotes, ...value.notes] } : value);

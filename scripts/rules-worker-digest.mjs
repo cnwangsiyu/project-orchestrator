@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-import { loadDigest } from './lib/global-rules.mjs';
-const digest = loadDigest();
+import { workerInstructions, loadDigest } from './lib/global-rules.mjs';
 if (process.argv.includes('--acks')) {
+  const digest = loadDigest();
   const { rulesAcknowledgements } = await import('./lib/rules-acknowledgements.mjs');
   const rows = rulesAcknowledgements({ version: digest.version, ledgerRoot: process.env.RULES_LEDGER_ROOT });
   if (process.argv.includes('--json')) console.log(JSON.stringify(rows));
@@ -11,4 +11,7 @@ if (process.argv.includes('--acks')) {
       [row.project, row.title ?? row.orchestrator].filter(Boolean).join(' / '), row.version ?? 'UNKNOWN',
       Number.isFinite(row.at) ? new Date(row.at).toISOString() : 'UNKNOWN', row.source].join('\t'));
   }
-} else console.log(`Global worker rules ${digest.version}\n${digest.worker}`);
+} else {
+  const instructions = workerInstructions();
+  console.log(process.argv.includes('--config') ? `developer_instructions=${JSON.stringify(instructions)}` : instructions);
+}

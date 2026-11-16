@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 // Public observations captured on the live machine. No credentials or provider calls.
 import fs from 'node:fs';
+import { parseRouteJSON } from './helpers/route-fixture.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 const route = new URL('../route.mjs', import.meta.url).pathname;
-const captured = JSON.parse(fs.readFileSync(new URL('./fixtures/live-routing-2026-11-15.json', import.meta.url),'utf8'));
-const freeTrae = JSON.parse(fs.readFileSync(new URL('./fixtures/free-trae-fresh-ttadk-2026-11-15.json', import.meta.url),'utf8'));
+const captured = parseRouteJSON(fs.readFileSync(new URL('./fixtures/live-routing-2026-11-15.json', import.meta.url),'utf8'));
+const freeTrae = parseRouteJSON(fs.readFileSync(new URL('./fixtures/free-trae-fresh-ttadk-2026-11-15.json', import.meta.url),'utf8'));
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(),'live-routing-fixture-'));
 const file = path.join(tmp,'snapshot.json');
 const env = {...process.env, HOME:tmp, RULES_SHARED:tmp, QUOTA_CACHE:path.join(tmp,'cache.json'),
@@ -16,11 +17,11 @@ const env = {...process.env, HOME:tmp, RULES_SHARED:tmp, QUOTA_CACHE:path.join(t
 const cli = (args, raw=captured, approve=false) => {
   if(approve) {const clean=args.slice(),at=clean.indexOf('--user-ok');if(at>=0)clean.splice(at,2);const offered=cli(clean,raw),yes=structuredClone(raw);yes.approvals=[{id:'fixture-approval',userDecisionRef:'synthetic-user-yes',revoked:false,grantedAt:captured.decisionAt-1000,expiresAt:captured.decisionAt+60000,scopes:offered.plan.gates.filter(g=>g.scope).map(g=>({...g.scope,allowPersonalWithCompany:true}))}];return cli([...clean,'--user-ok','fixture-approval'],yes);}
   fs.writeFileSync(file,JSON.stringify(raw));
-  return JSON.parse(execFileSync(process.execPath,[route,...args,'--dry','--json'],{env,encoding:'utf8',maxBuffer:16<<20}));
+  return parseRouteJSON(execFileSync(process.execPath,[route,...args,'--dry','--json'],{env,encoding:'utf8',maxBuffer:16<<20}));
 };
 const copy=()=>structuredClone(captured);
 try {
-  const quality=JSON.parse(fs.readFileSync(new URL('./fixtures/quality-first-2026-11-15.json',import.meta.url),'utf8'));
+  const quality=parseRouteJSON(fs.readFileSync(new URL('./fixtures/quality-first-2026-11-15.json',import.meta.url),'utf8'));
   for(const args of [['analysis'],['research'],['implement','--impact','service'],['docs'],['review']]) {
     const o=cli(args,quality);assert.equal(o.pick.model,'gpt-6.1-sol');assert.equal(o.pick.account,'trae',args.join(' '));
   }
@@ -97,12 +98,12 @@ try {
   personalOnly.resources.value={held:false,ownedReturned:true,registeredResources:[],signingRegistry:false};
   const personalReview=cli(['review-high','--review-class','B','--review-reason','permission logic'],personalOnly);assert.ok(personalReview.pick.command.includes('<workspace>'));
   assert.equal(personalReview.secondOpinion.command,null);assert.ok(personalReview.plan.gates.some(g=>g.kind==='personal-quota'),'Claude second still asks on a personal-only device');
-  const noResources=cli(['implement','--impact','service'],personalOnly).notes.join('\n');
+  const noResources=cli(['implement','--impact','service'],personalOnly).allNotes.join('\n');
   assert.doesNotMatch(noResources,/A queued TRAE|on TTADK:|DeepSeek:|identities\.json|iphone8\/iphone11\/s21|registered shared test phones/);
   const registered=copy();registered.resources.value={held:false,ownedReturned:true,registeredResources:['iphone11'],signingRegistry:false};
-  const phoneNotes=cli(['build-run'],registered).notes.join('\n');assert.match(phoneNotes,/registered shared test phones iphone11/);
+  const phoneNotes=cli(['build-run'],registered).allNotes.join('\n');assert.match(phoneNotes,/registered shared test phones iphone11/);
   assert.doesNotMatch(phoneNotes,/registered shared test phones iphone8/);
-  registered.resources.value.signingRegistry=true;assert.match(cli(['analysis'],registered).notes.join('\n'),/identities\.json/);
+  registered.resources.value.signingRegistry=true;assert.match(cli(['analysis'],registered).allNotes.join('\n'),/identities\.json/);
   console.log('PASS BC-35 placeholders/absolute paths, one-shot git check, read-only network, second-reviewer paths and device-specific notes');
   const trae=captured.accounts.find(a=>a.id==='trae');
   assert.equal(trae.auth.status,'KNOWN');assert.equal(trae.transport.value,true);
@@ -139,8 +140,8 @@ try {
   const desktop=copy(), app={status:'KNOWN',value:true,sampledAt:captured.decisionAt,receivedAt:captured.decisionAt,maxAgeMs:600000,source:'fixture'};
   for(const part of [...desktop.accounts,...desktop.lanes]) if(['main','b'].includes(part.accountId??part.id)) part.capabilities['app:com.apple.calculator']=app;
   const personal=cli(['computer-use','--apps','com.apple.calculator'],desktop);
-  assert.match(personal.notes.join('\n'),/browser its own tool lists; never put a Claude-in-Chrome deviceId/);
-  assert.match(personal.notes.join('\n'),/saved browser permission.*cannot be continued.*new thread with --browser-origins/);
+  assert.match(personal.allNotes.join('\n'),/browser its own tool lists; never put a Claude-in-Chrome deviceId/);
+  assert.match(personal.allNotes.join('\n'),/saved browser permission.*cannot be continued.*new thread with --browser-origins/);
   assert.ok(['main','b'].includes(personal.pick.account));assert.ok(personal.needsUserOK.length);assert.equal(personal.pick.command,null);
   const approvedArgs=['computer-use','--apps','com.apple.calculator','--urgent'];
   const offered=cli(approvedArgs,desktop),approvals=path.join(tmp,'personal-approval.json');
@@ -216,7 +217,7 @@ try {
     {name:'broken',kind:'ttadk',home:corruptHome,models:['gpt-6.1-sol'],healthy:true,live:true,windows:[]},
     {name:'peer',kind:'ttadk',home:clearHome,models:['gpt-6.1-sol'],healthy:true,live:true,windows:[]}]}));
   const offline={...env,QUOTA_CACHE:cache};delete offline.ROUTE_SNAPSHOT_FILE;
-  const healthyPeer=JSON.parse(execFileSync(process.execPath,[route,'analysis','--dry','--json'],{env:offline,encoding:'utf8'}));
+  const healthyPeer=parseRouteJSON(execFileSync(process.execPath,[route,'analysis','--dry','--json'],{env:offline,encoding:'utf8'}));
   assert.equal(healthyPeer.kind,'launch');assert.equal(healthyPeer.pick.account,'peer','corrupt health data degrades only its account');
   assert.ok(healthyPeer.plan.rejected.some(r=>r.reason.code==='HEALTH_UNKNOWN'));
   console.log('PASS live captured CLI: company parity, signing, retry fallback, pending second, standing exceptions, user yes, browser order, account isolation and budget warning');

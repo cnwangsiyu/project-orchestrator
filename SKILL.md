@@ -24,8 +24,10 @@ background sessions — Claude Code or Codex, as `scripts/route.mjs` picks — t
 launches, briefs, coordinates and integrates.
 
 Every worker launch must be a harness-tracked background task (`run_in_background`, never inner `&`) or covered
-by an armed owner-scoped `codex-worker watch`. On wake handle finished workers first, then re-arm watch if workers
-remain. The [worker inbox](references/worker-inbox.md) documents durable events, owner identity, `mine`, Stop/SessionStart
+by an armed owner-scoped `codex-worker watch`. Info/progress notes wait for a natural wake; risk/scope and asks
+wake (rare info `--wake` only when it changes peer work now). Watch batches wakes for 45 seconds (`--debounce-sec`,
+0 disables), capped to leave 80% of each ask timeout. Handle finished workers first; re-arm for asks/risk or workers
+lacking verified live tracked start/turn followers. The [worker inbox](references/worker-inbox.md) documents durable events, owner identity, `mine`, Stop/SessionStart
 hooks, owner-only installation and limits. Keep route.mjs's `run-tracked.sh` wrapper on exec commands.
 
 Projects are the unit of separation: each orchestrator conversation owns exactly one project and
@@ -197,7 +199,7 @@ Every code brief includes this short **Acceptance** block:
 - **Out of scope:** list what this task does not change.
 - **Open questions:** resolved answers, or explicitly marked NOT-READY with an owner; resolve blockers before dispatch.
 
-Every **build brief** also includes (user, 2026-11-13): "Full-package builds use `scripts/heavy-build.sh <command...>`
+Launchers inject the fixed **build rules** automatically (user, 2026-11-13); the task brief supplies the concrete commands, lock IDs, wrapper identity and timeout: "Full-package builds use `scripts/heavy-build.sh <command...>`
 with holder/project/task/timeout set, or an equivalent ONE-process wrapper around `res take-build`/`wait-build` and
 `return-build`. Acquire the slot and a free admitted lane together, holding neither while waiting for the other;
 other local heavy tasks use `wait-lane`. Build tasks must take/return required resources via
@@ -213,9 +215,8 @@ parallelism, the fixed per-base build directory, incremental/focused checks and 
 Before dispatch, take **30 seconds to self-check**: premises have evidence, the worker can run the acceptance checks
 with its workspace/tools/access, and the scope does not conflict with sibling tasks. Amend gaps before launching.
 
-Every brief for work that writes or touches devices carries these safety clauses, word for word or
-close (user, 2026-11-04, after a worker overwrote a user header and another wiped test-app data):
-- For writing tasks, make the scope clause the first brief note; full access makes that boundary especially important.
+Launchers inject these fixed safety clauses automatically for work that writes or touches devices (user, 2026-11-04, after a worker overwrote a user header and another wiped test-app data):
+- For writing tasks, put the concrete task scope first in the brief; the fixed scope safety rule is injected.
 - "Never overwrite, delete or move files outside this task's scope: the user's files, uncommitted
   changes, shared headers or configs. If you touch one by mistake, restore it byte-for-byte and
   say so in the report."
@@ -231,7 +232,7 @@ close (user, 2026-11-04, after a worker overwrote a user header and another wipe
   allowed device prompt, re-route that step to Claude instead of asking the user to tap it. Browser safety for
   irreversible web actions is unchanged."
 
-<a id="worker-credential-safety"></a>Every brief, whatever the task, carries these two adjacent credential/signing clauses (the first is the
+<a id="worker-credential-safety"></a>Launchers inject these two adjacent credential/signing clauses for every worker (the first is the
 user-approved 2026-11-11 rule after a TRAE
 DeepSeek worker copied bytedcli's TikTok SSO session file into its automation browser to get past a console
 login; the user had to sign in again; the second is the user's 2026-11-13 test-signing authorization):
@@ -766,7 +767,7 @@ short, batch updates that arrive together, and reply in the user's language.
   `--append-system-prompt "$(node <skill>/scripts/rules-worker-digest.mjs)"` (CLI help verified on 2.1.323).
   They run `launch-audit.mjs`; Codex hub start checks directly. A missing same-name/task-prefix route in the last
   24h warns `unrouted-launch` and records telemetry, never blocks. Record actual approval with `--user-ok <card/ledger-ref>`;
-  never invent an OK. Every worker brief also points to the digest; see [installation/evidence limits](references/rules-enforcement.md).
+  never invent an OK. Copy only task-specific route notes into the brief; fixed worker rules are injected automatically. `--verbose` shows fixed diagnostics, and `--json` separates `notes` from `fixedNotes`; see [installation/evidence limits](references/rules-enforcement.md).
 - <a id="claude-worker-settings"></a>**Claude worker settings** (user, 2026-11-13; document only):
   `~/.claude/settings.json` has `env.CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP=1`, so background shells aren't
   stopped under memory pressure. Session idle-stop has no switch: pin the session or keep working. Do not change

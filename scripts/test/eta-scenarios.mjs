@@ -100,7 +100,7 @@ try {
   assert.equal(laneEta({workMin:90,requests:120,bucketDepleted:true,unknown:true}).basis,'unknown');
   r = route({lanes:{[SOL]:lane(500,0.5),[ASTRA]:lane(null,null,{state:'ready',lastProgressAt:now})},args:['implement-hard','--shared-lock']});
   assert.equal(r.pick.model,ASTRA,'resource work prefers a model progressing now');
-  assert.ok(r.notes.some((s)=>/take the lease\/lock only after the first model response/.test(s)));
+  assert.ok([...r.notes,...r.fixedNotes].some((s)=>/take the lease\/lock only after the first model response/.test(s)));
   // Same moderately queued lane: a small task beats the reset, a large one is scheduled for it.
   const slow = {[SOL]:lane(100,2),[ASTRA]:lane(100,2),'gpt-5.6-sol':lane(100,2),'gpt-5.6-terra':lane(100,2),'gpt-5.5':lane(100,2),'deepseek-v4.1-flash':lane(100,2)};
   r = route({lanes:slow,resetMin:600,args:['lookup']});

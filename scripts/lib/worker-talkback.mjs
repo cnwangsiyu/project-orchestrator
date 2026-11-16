@@ -85,7 +85,8 @@ export const runWorkerTalkback = async ({ cmd, opts, text, account, cwd, output,
   if (!text.trim()) fail(`${cmd} needs text`);
   const request = { version: 1, account: metadata.account, thread: metadata.thread, id: randomUUID().replaceAll('-', '').slice(0, 16), text };
   if (cmd === 'note') {
-    request.type = 'message'; request.kind = opts.kind ?? 'info';
+    request.type = 'message'; request.kind = opts.kind ?? 'info'; request.wake = opts.wake === true;
+    if (opts.wake !== undefined && opts.wake !== true) fail('--wake is a flag');
     if (!['progress', 'risk', 'scope', 'info'].includes(request.kind)) fail('--kind takes progress, risk, scope or info');
   } else {
     request.type = 'question'; request.timeoutMin = Number(opts['timeout-min'] ?? 20);
@@ -108,7 +109,7 @@ export const runWorkerTalkback = async ({ cmd, opts, text, account, cwd, output,
       return 6;
     }
   }
-  if (cmd === 'note') { await output(`note recorded${row.wake ? '' : ' (wake-up suppressed: hourly or length limit)'}`); return 0; }
+  if (cmd === 'note') { await output(`note recorded${row.wake ? '' : ' (delivered on the next natural wake)'}`); return 0; }
   report(`question ${request.id}: waiting up to ${request.timeoutMin}m`);
   return waitForAnswer(metadata, row, output);
 };
@@ -122,7 +123,8 @@ export const createTalkbackRelay = (metadata, report = () => {}) => {
     let request; try { request = JSON.parse(raw.slice(TALKBACK_MARKER.length)); } catch { return; }
     if (request.version !== 1 || request.account !== metadata.account || request.thread !== metadata.thread
       || !validOwner(request.id) || typeof request.text !== 'string') return;
-    if (request.type === 'message' && !['progress', 'risk', 'scope', 'info'].includes(request.kind)) return;
+    if (request.type === 'message' && (!['progress', 'risk', 'scope', 'info'].includes(request.kind)
+      || request.wake !== undefined && typeof request.wake !== 'boolean')) return;
     if (request.type === 'question' && (!Number.isFinite(request.timeoutMin) || request.timeoutMin <= 0
       || !Number.isFinite(request.expiresAt) || request.default !== undefined && typeof request.default !== 'string')) return;
     if (!['message', 'question'].includes(request.type)) return;
