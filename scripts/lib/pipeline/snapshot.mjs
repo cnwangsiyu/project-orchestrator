@@ -114,6 +114,8 @@ export function createSnapshot(raw, options = {}) {
       loadPercent: obs(l.loadPercent, `${prefix}.loadPercent`, (v) => nonnegative(v) && v <= 100, FRESHNESS.telemetryMs),
       loadSource: ['model', 'family', 'account'].includes(l.loadSource) ? l.loadSource : 'UNKNOWN',
       familyQueue:obs(l.familyQueue,`${prefix}.familyQueue`,object,FRESHNESS.telemetryMs),
+      recentQueue:obs(l.recentQueue,`${prefix}.recentQueue`,v=>object(v)&&typeof v.blocked==='boolean',FRESHNESS.telemetryMs),
+      ...(l.hubHealthy===undefined?{}:{hubHealthy:obs(l.hubHealthy,`${prefix}.hubHealthy`,bool,FRESHNESS.cacheMs)}),
       bucketIds: unique(array(l.bucketIds).filter(idOK)), costs: rows(l.costs ?? [], `${prefix}.costs`).map((c) => ({
         bucketId: c.bucketId, unit: c.unit, amount: nonnegative(c.amount) ? c.amount : null,
         normalizedShare: obs(c.normalizedShare, `${prefix}.costs.${c.bucketId}`, nonnegative).value, prioritySpend: typeof c.prioritySpend === 'boolean' ? c.prioritySpend : null,

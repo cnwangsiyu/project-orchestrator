@@ -1,6 +1,8 @@
 // TRAE CLI health from what its workers hit (user, 2026-11-08): quota.mjs only sees that the CLI is logged in and lists
 // its models, not that its gateway keeps failing. codex-worker records each failed or stalled TRAE turn here, and any
-// completed turn clears the record (and the pause). While paused, quota.mjs reports TRAE unavailable, so route.mjs stops
+// completed turn clears normal failure/backoff state. Compact Astra queue signals
+// survive other-model success and clear on Astra success or after 30 minutes.
+// While paused, quota.mjs reports TRAE unavailable, so route.mjs stops
 // sending it work (TTADK if usable, else the personal-quota OK gate) instead of every task failing once first.
 //
 // Pauses by kind (user, 2026-11-08: 30 minutes for a passing queue overflow was too long):
@@ -37,6 +39,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { withLock, writeJson } from './shared-file.mjs';
+import { modelId } from './pipeline/common.mjs';
 
 export const WINDOW_MIN = 15, HARD_MIN = 30, BACKOFF_MIN = [5, 10, 20, 30];
 // Whole-account hard failures back off 30, 60, 120, 240 minutes; family pauses use the recovery schedule below.
@@ -54,6 +57,7 @@ export const failureKind = (why) => {
   const w = why ?? '';
   return AUTH.test(w) ? 'auth' : HARD.test(w) || RESTRICTED.test(w) ? 'hard' : UNAVAILABLE.test(w) ? 'unavailable' : 'transient';
 };
+export const isQueueOrStall = why => /\b(?:queu(?:e(?:d|s|ing)?|ing)|stall(?:s|ed|ing)?|waiting without progress)\b/i.test(String(why??'').replaceAll('_',' '));
 const file = (home) => path.join(home, 'worker-health.json');
 const object=r=>r!==null&&typeof r==='object'&&!Array.isArray(r);
 const unknown=missing=>({status:'UNKNOWN',missing,failures:[],pools:{},modelPauses:{},reason:'worker health record UNKNOWN'});
@@ -92,14 +96,19 @@ export const poolOf = (model) => {
   return f ? f[1] : m || null;
 };
 // One record (the account's, or one family's) after a failure at time now.
-const step = (rec, why, now) => {
+const step = (rec, why, now, model = null) => {
   const wasPaused = rec.pausedUntil && rec.pausedUntil > now;
-  const failures = [...(rec.failures ?? []), { t: now, why: String(why ?? 'failed').slice(0, 300) }].slice(-20);
+  const failures = [...(rec.failures ?? []), { t: now, why: String(why ?? 'failed').slice(0, 300), ...(model?{model}:{}) }].slice(-20);
+  // Keep only compact Astra queue/stall evidence when backoff resets failures.
+  const queueSignals=[...(Array.isArray(rec.queueSignals)?rec.queueSignals:[]),
+    ...(modelId(model)==='gpt-6-astra'&&isQueueOrStall(why)?[{t:now,model:'gpt-6-astra'}]:[])]
+    .filter(f=>object(f)&&Number.isFinite(f.t)&&f.t<=now&&now-f.t<=30*60000).slice(-20);
   // The backoff starts over when the last pause ended more than an hour ago.
   const streak = rec.pausedUntil && now - rec.pausedUntil > 60 * 60000 ? 0 : rec.streak ?? 0;
   const p = wasPaused ? null : pauseDecision(failures, now, streak);
   // A new pause starts the next backoff step and clears the failures that caused it.
-  return p ? { failures: [], pausedUntil: p.pausedUntil, reason: p.reason, kind: p.kind, streak: streak + 1 } : { ...rec, failures };
+  return p ? { failures: [], pausedUntil: p.pausedUntil, reason: p.reason, kind: p.kind, streak: streak + 1, queueSignals }
+    : { ...rec, failures, queueSignals };
 };
 // The family record a vendor restriction leaves (983, or an OpenAI cyberPolicy block on TRAE, 2026-11-13): paused
 // until the next 00:00 UTC, then a recovery probe. One shape for both signals so review-data/quota.mjs see the same
@@ -143,7 +152,7 @@ export const noteFailure = (home, why, now = Date.now(), model = null) => update
     return out.pausedUntil && out.pausedUntil > now ? out : null;
   }
   const prev = rec.pools?.[pool] ?? { failures: [] };
-  let pr = step(prev, why, now);
+  let pr = step(prev, why, now, model);
   // Vendor restrictions have a known daily reset; retain the type when a later probe fails for another reason.
   // A restriction also replaces an already-active short pause from a different failure.
   if (RESTRICTED.test(why ?? '')) pr = restrictionRecord(prev, why, now, model);
@@ -155,12 +164,15 @@ export const noteFailure = (home, why, now = Date.now(), model = null) => update
 });
 // Ordinary success is not recovery evidence for a hard restriction. An older
 // turn may finish after a restriction was recorded. Only its claimed probe clears it.
-export const noteSuccess = (home, model = null) => update(home, (rec) => {
+export const noteSuccess = (home, model = null, now = Date.now()) => update(home, (rec) => {
   const pool = poolOf(model);
   const pools = Object.fromEntries(Object.entries(rec.pools ?? {}).filter(([k,r]) => !pool || k !== pool || r?.kind === 'hard'));
   const pauses = rec.modelPauses ?? {};
+  const queueSignals=modelId(model)==='gpt-6-astra'?[]:[...(Array.isArray(rec.queueSignals)?rec.queueSignals:[]),
+    ...Object.values(rec.pools??{}).flatMap(r=>Array.isArray(r.queueSignals)?r.queueSignals:[])]
+    .filter(f=>object(f)&&Number.isFinite(f.t)&&f.t<=now&&now-f.t<=30*60000).slice(-20);
   write(home, { ...(rec.kind === 'hard' || rec.kind === 'auth' ? rec : { failures: [], pausedUntil: null, reason: null, kind: null, streak: 0 }),
-    pools: {}, modelPauses: {},
+    pools: {}, modelPauses: {}, queueSignals,
     ...(Object.keys(pools).length ? { pools } : {}), ...(Object.keys(pauses).length ? { modelPauses: pauses } : {}) });
 });
 export const readPause = (home, now = Date.now()) => { const r = read(home); return r.status==='UNKNOWN'?r:r.pausedUntil && r.pausedUntil > now ? r : null; };

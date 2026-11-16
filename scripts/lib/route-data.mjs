@@ -10,6 +10,7 @@ import { modelId, familyOf, object, array, nonnegative, VERSION } from './pipeli
 import { dedupeOutcomes } from './pipeline/outcomes.mjs';
 import { personalBudget } from './pipeline/quota.mjs';
 import { modelLoad } from './company-load.mjs';
+import { isQueueOrStall } from './trae-health.mjs';
 import { readRoutingAccount, readRoutingClaude, traeBrowserReady } from './state.mjs';
 import { routePure } from './pipeline/index.mjs';
 import { modelPreference, policyEffort } from './pipeline/policy.mjs';
@@ -22,6 +23,34 @@ const lines = (file) => { try { return fs.readFileSync(file, 'utf8').split('\n')
 // cannot assert that restrictions are clear.
 const readHealth = file => { try { return JSON.parse(fs.readFileSync(file,'utf8')); }
   catch(e) { return e.code==='ENOENT'?{}:null; } };
+// Public turn metadata only: no worker prompts, login/session files or provider calls.
+const recentAstraQueue = (home, health, now) => {
+  const queues=home?readHealth(path.join(home,'queue-status.json')):{}, models=home?readHealth(path.join(home,'thread-models.json')):{};
+  const lanes=home?readHealth(path.join(home,'lane-state.json')):{}, families=home?readHealth(path.join(home,'queue-state.json')):{};
+  const sources=[], times=[], fresh=t=>nonnegative(t)&&t<=now&&now-t<=1800000;
+  if(![queues,models,lanes,families].every(object)) return {value:{blocked:true,sources:['unreadable recent-turn queue metadata']},sampledAt:now};
+  for(const [thread,q] of Object.entries(queues)) if(object(q)&&fresh(q.at??q.t)
+    &&modelId(q.modelId??q.model??models[thread])==='gpt-6-astra'
+    &&(q.position>0||['queued','waiting','stalled'].includes(q.state)||q.stalled===true)) {
+    sources.push('queue-status'); times.push(q.at??q.t);
+  }
+  for(const r of [health,...Object.values(object(health?.pools)?health.pools:{})]) if(object(r)) {
+    const at=r.lastFailureAt??r.t??r.pausedUntil;
+    if(r.queueSignals===undefined&&fresh(at)&&modelId(r.model)==='gpt-6-astra'&&isQueueOrStall(r.reason)) {
+      sources.push('worker-health'); times.push(at);
+    }
+    if(r.queueSignals!==undefined&&!Array.isArray(r.queueSignals)) return {value:{blocked:true,sources:['unreadable recent-turn health metadata']},sampledAt:now};
+    for(const f of array(r.queueSignals)) if(object(f)&&fresh(f.t)&&modelId(f.model)==='gpt-6-astra') {
+      sources.push('worker-health'); times.push(f.t);
+    }
+    if(r.failures!==undefined&&!Array.isArray(r.failures)) return {value:{blocked:true,sources:['unreadable recent-turn health metadata']},sampledAt:now};
+    for(const f of array(r.failures)) if(object(f)&&fresh(f.t)&&modelId(f.modelId??f.model??r.model)==='gpt-6-astra'
+      &&(isQueueOrStall(f.why)||f.stalled===true)) {
+      sources.push('worker-health'); times.push(f.t);
+    }
+  }
+  return {value:{blocked:times.length>0,sources:[...new Set(sources)]},sampledAt:times.length?Math.max(...times):now};
+};
 const DEFAULT_MODELS = ['gpt-6-luna', 'gpt-6.1-sol', 'gpt-6-astra', 'gpt-6.1-terra'];
 export const BROWSER_ORIGINS = ['*.bytedance.net', '*.byted.org', '*.larkoffice.com', '*.feishu.cn', '*.tiktok-row.net', '*.byteintl.net', '*.bytedance.com'];
 export function taskContext(env = process.env) {
@@ -271,6 +300,7 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
     appendPause(h); for (const [family,r] of Object.entries(object(h?.pools) ? h.pools : {})) appendPause(r,{family});
     for (const [m,r] of Object.entries(object(h?.modelPauses) ? h.modelPauses : {})) if (r?.pausedUntil > now) appendPause(r,{modelId:modelId(m)});
     const telemetry = home ? read(path.join(home,'lane-state.json'),{}) : {}, familyQueue=home?read(path.join(home,'queue-state.json'),{}):{}, load = object(a.load) ? a.load : {};
+    const astraRecent=kind==='trae'&&catalog.includes('gpt-6-astra')?recentAstraQueue(home,h,now):null;
     for (const m of catalog) {
       const family = familyOf(m), vision = !['deepseek','kimi'].includes(family), modelCaps = baseCaps(vision);
       models.set(m, { id:m, efforts: ['low','medium','high','xhigh','max'], capabilities:modelCaps, largeOutput: family !== 'deepseek' });
@@ -285,6 +315,7 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
         readyAt: kind !== 'trae' || mode === 'priority' || mode === 'bucket-free' ? stamp(now) : direct?.state==='ready'&&direct?.position===0 ? stamp(direct.t,direct.t,1800000):null,
         position:stamp(direct?.position,direct?.t,1800000), drainPerMin:stamp(direct?.drainPerMin,direct?.t,1800000), progressAt:stamp(direct?.lastProgressAt,direct?.t,1800000),
         queueState:stamp(direct?.state,direct?.t,1800000),
+        ...(m==='gpt-6-astra'&&astraRecent?{recentQueue:stamp(astraRecent.value,astraRecent.sampledAt,1800000),hubHealthy:stamp(a.healthy)}:{}),
         loadPercent:stamp(directLoad?.percent,directLoad?.t,1800000), loadSource: directLoad?.source??'UNKNOWN',
         familyQueue:stamp(familyQueue?.[family],familyQueue?.[family]?.t,1800000) });
     }

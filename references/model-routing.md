@@ -92,8 +92,14 @@ TRAE foreground tier lists are:
 Walk the tier ladder in quality order across all company accounts. Select the first model with a free lane; depleted-but-ready/progressing low-priority lanes count. For that model, free TRAE wins unless TTADK has the expiring-quota preference; if TRAE is congested/queued/stalled, use free TTADK for that same model before stepping down. Priority quota is at most a same-model lane tie-break, never a reason to downgrade Sol to Flash. Light work stays on its qualified light ladder; hard work never demotes. TRAE Gemini and `gpt-5.6-luna` are excluded; personal ChatGPT `gpt-6-luna` remains the first lookup/extract/image-gen choice; TTADK fresh catalog and historical model evidence remain.
 
 Trial from **2026-11-16**, revisit **2026-11-23** with hard-tier first-pass success
-and rework/fix rounds by model. Start hard tasks on company GPT-6-Astra only when
-its lane can start now with fresh model load <60% and no queue/stall. If Astra is
+and rework/fix rounds by model. Start hard tasks on company GPT-6-Astra when
+its lane can start now with fresh model load <60% and no queue/stall. TRAE does
+not normally publish Astra load: for Astra only, fresh daily units remaining,
+a healthy hub and no fresh queue/stall evidence in lane/family telemetry or
+recent Astra turns qualify instead. Recent queue-status and worker-health records
+retain model attribution; Sol success does not clear an Astra queue signal.
+Without published load, depleted, stale or missing Astra units do not qualify.
+The why line names the units/no-queue evidence instead of quoting a sibling load. If Astra is
 congested, queued or stalled (including a depleted daily bucket's low-priority
 lane), try free Sol on TRAE, then TTADK under the existing same-model expiry rule.
 Depletion alone does not exclude a free lane. If neither model is observed free,
@@ -118,7 +124,7 @@ only. Public catalog, account and harness capabilities must all support the task
 An observed free TRAE lane takes precedence over TTADK for work that its actual
 model and harness can do, including browser/ui-browser on the ready Playwright
 lane and depleted-bucket low-priority work. The lane must start now, have a fresh
-load below 60% for that candidate model, and show no queue or stall. This preserves
+load below 60% for that candidate model (or Astra's units/no-queue evidence above), and show no queue or stall. This preserves
 TTADK daily tokens for later and for capabilities unavailable on TRAE (desktop,
 Kimi and any browser tools absent from its harness). The explanation says
 "TRAE lane free: saving TTADK quota" and names the model whose load it quotes.

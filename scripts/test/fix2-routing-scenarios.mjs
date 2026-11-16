@@ -96,6 +96,7 @@ try {
   const sol=cli(solArgs);assert.equal(sol.kind,'launch');assert.equal(sol.pick.model,SOL);assert.equal(sol.pick.effort,'xhigh');
   assert.ok(sol.pick.command);assert.equal(sol.needsUserOK.length,0);assert.match(sol.why.join('\n'),/Astra .*gated alternative/);
   const mini=copy();mini.codexAccounts=[{name:'trae',kind:'trae',home:path.join(tmp,'trae'),live:true,healthy:true,models:[SOL,ASTRA],windows:[],
+    load:{[SOL]:{percent:25,t:now}}, // Retained Sol/max wins when Sol's lane is actually observed free.
     quota:{sampledAt:now,daily:Object.fromEntries([SOL,ASTRA].map(model=>[model,{used:20,limit:100,remaining:80,depleted:false,resetsAt:now+h}]))}}];
   const companyAstra=cli(['implement-hard','--impact','throwaway','--writes','--failures','1','--actual',`codex:${SOL}:xhigh@trae`],mini);
   assert.equal(companyAstra.kind,'launch');assert.equal(companyAstra.pick.model,SOL);assert.equal(companyAstra.pick.effort,'max');assert.equal(companyAstra.pick.account,'trae');

@@ -1111,7 +1111,7 @@ for (const [sc, args] of ERRORS) {
   const ro = JSON.parse(run('traeQuota', ['implement', '--stakes', 'high']));
   cases.push(
     [lean.includes("TRAE gpt-6.1-sol's daily high-priority quota is used up"), true],
-    [ro.pick?.model, 'gpt-6.1-sol'], [ro.pick?.account, 'trae'],
+    [ro.pick?.model, 'gpt-6-astra'], [ro.pick?.account, 'trae'],
     [ro.why.some((n) => /ETA:.*company.*gpt-6-astra/.test(n)), true],
     [ro.needsUserOK.length, 0], [ro.failures, 0],
   );
@@ -1204,7 +1204,10 @@ for (const [sc, args] of ERRORS) {
     if(args.includes('--failures')&&Number(args[args.indexOf('--failures')+1])>0) {
       cases.push([!!r.pick&&!r.plan.reasons?.some(p=>p.code==='PREVIOUS_ATTEMPT_UNKNOWN'),true,`${sc} first-rung fallback retry`]); continue;
     }
-    const qualityWant=!args.includes('--security')&&!args.includes('gpt')&&!args.includes('gpt-6.1-sol')&&(args.includes('high')||args[0]!=='lookup'&&args[0]!=='extract'&&args[0]!=='draft')?'gpt-6.1-sol':want;
+    // Fresh Astra units supply its missing-load readiness; do not overwrite that
+    // explicit hard/vision expectation with the legacy unmeasured Sol fallback.
+    const astraUnitsReady=sc==='quotaPreferred'&&want==='gpt-6-astra';
+    const qualityWant=!astraUnitsReady&&!args.includes('--security')&&!args.includes('gpt')&&!args.includes('gpt-6.1-sol')&&(args.includes('high')||args[0]!=='lookup'&&args[0]!=='extract'&&args[0]!=='draft')?'gpt-6.1-sol':want;
     cases.push([r.pick?.model, qualityWant, `${sc} ${args.join(' ')} quality-first model`], [r.failures, args.includes('--failures') ? Number(args[args.indexOf('--failures') + 1]) : 0, `${sc} ${args.join(' ')} failures`]);
   }
   const idle = route('quotaAstra'), busy = route('quotaBusy'), missing = route('quotaMissing');
@@ -1562,14 +1565,14 @@ for (const [sc, args] of ERRORS) {
     [active, ['analysis', '--exclude-model', 'deepseek'], SOL, 3],
     [active, ['review-high'], SOL, 3],
     [active, ['review', '--impact', 'release'], SOL, 3],
-    [active, ['second-opinion', '--against', 'claude', '--stakes', 'high'], SOL, 3],
+    [active, ['second-opinion', '--against', 'claude', '--stakes', 'high'], ASTRA, 3],
     [null, ['analysis'], FLASH, 3],
     [{}, ['analysis'], FLASH, 3],
     [undefined, ['analysis'], FLASH, 3],
     [{ [SOL]: bucket(true), [ASTRA]: bucket(true) }, ['analysis', '--security'], FLASH, 2],
     [{ ...active, [FLASH]: bucket(), [PRO]: bucket() }, ['analysis', '--security'], FLASH, 3],
     [null, ['analysis', '--security'], FLASH, 3],
-    [{ ...active, [SOL]: bucket(true) }, ['image-read'], SOL, 1],
+    [{ ...active, [SOL]: bucket(true) }, ['image-read'], ASTRA, 3],
     [{ ...active, [ASTRA]: bucket(true) }, ['image-read'], SOL, 3],
     [active, ['image-read'], SOL, 3],
     [{ ...active, [SOL]: bucket(true) }, ['image-read', '--security'], SEED, 2],
@@ -1584,7 +1587,7 @@ for (const [sc, args] of ERRORS) {
   ];
   try {
     for (const [daily, args, model, step, models = ids] of cases) {
-      scenario(daily, models);
+      scenario(daily, models, args[0]==='image-read'?{load:{[SOL]:{percent:35,t:now}}}:{});
       const o = r(args);
       if(['review-high'].includes(args[0])||args.includes('release')) {assert.ok(o.pick);assert.equal(o.kind,'launch');assert.ok(o.plan.gates.some(g=>g.phase==='acceptance'),JSON.stringify({args,category:o.category,cls:o.plan.task.reviewClass,impact:o.plan.task.impact,gates:o.plan.gates}));continue;}
       assert.equal(o.pick?.model, model, `${args.join(' ')} step ${step}`);

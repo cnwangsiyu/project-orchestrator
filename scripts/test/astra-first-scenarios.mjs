@@ -59,8 +59,9 @@ try {
   assert.equal(pick(hard, base, ASTRA, 'trae').plan.primary.estimate.noPrioritySpend, true);
   for (const s0 of [base, fresh]) for (const state of ['hot', 'queued', 'stalled', 'waiting', 'unknown']) {
     const s = structuredClone(s0); unavailable(s, ASTRA, state);
-    pick(hard, s, SOL, 'trae');
-    unavailable(s, SOL, 'hot'); pick(hard, s, SOL, 'ttadk');
+    const quotaOnly=s0===fresh&&state==='unknown';
+    pick(hard, s, quotaOnly?ASTRA:SOL, 'trae');
+    unavailable(s, SOL, 'hot'); pick(hard, s, quotaOnly?ASTRA:SOL, quotaOnly?'trae':'ttadk');
   }
   const exclusion = copy(); pick([...hard, '--exclude-model', ASTRA], exclusion, SOL, 'trae');
   const incapable = copy(); lane(incapable, ASTRA).capabilities.search.value = false;
@@ -84,6 +85,7 @@ try {
   for (const a of unknown.accounts) a.catalog.value = a.id === 'trae' ? [ASTRA] : ['opus'];
   unknown.lanes = unknown.lanes.filter(l => l.accountId === 'trae' && l.modelId === ASTRA || l.accountId === 'claude' && l.modelId === 'opus');
   bucket(unknown, ASTRA).usage.value.resetsAt = now + 12 * 3600000;
+  bucket(unknown, ASTRA).usage.sampledAt = now - 30 * 60000 - 1;
   unavailable(unknown, ASTRA, 'unknown'); lane(unknown, 'opus', 'claude').readyAt.value = null;
   const unknownDecision = cli(['design', '--urgent'], unknown);
   const unknownScopes = unknownDecision.plan.trace.candidates.flatMap(r => r.predicates.flatMap(p => p.gates ?? []))

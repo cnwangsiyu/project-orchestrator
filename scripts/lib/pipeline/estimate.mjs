@@ -17,10 +17,23 @@ export function estimateCandidate(task, snapshot, candidate, { capacityReset = f
   // Direct progress wins over coarse congested-sibling/account load evidence.
   const load = l.loadSource === 'model' ? known(l.loadPercent) : null, congested = (load !== null && load >= 60)
     || (position !== null && position > 300);
+  const dq=known(a.quota.find(q=>q.bucketId===candidate.modelId)?.usage), fq=known(l.familyQueue);
+  const familyCongested=!directClear&&(fq?.position>300||(fq?.high?.position>300&&fq.high.t<=now&&now-fq.high.t<=1800000));
+  const queued=position>0||['queued','waiting'].includes(known(l.queueState))
+    ||!directClear&&(fq?.position>0||['queued','waiting'].includes(fq?.state));
+  const recentAstraQueue=a.kind==='trae'&&candidate.modelId==='gpt-6-astra'&&known(l.recentQueue)?.blocked===true;
+  // Astra's catalog commonly omits load. Fresh unused units and a healthy hub,
+  // with no lane/family/recent-turn queue signal, supply its alternative evidence.
+  const astraNoLoad=!!(a.kind==='trae'&&candidate.modelId==='gpt-6-astra'&&load===null
+    &&known(a.auth)===true&&known(a.transport)===true&&known(a.health)===true
+    &&(l.hubHealthy?known(l.hubHealthy)===true:known(a.health)===true)
+    &&dq&&dq.resetsAt>now&&dq.used<dq.limit&&dq.depleted!==true
+    &&(dq.remaining==null||typeof dq.remaining==='number'&&dq.remaining>0)
+    &&!queued&&!familyCongested&&!recentAstraQueue);
   const resetAt = known(a.denialResetAt);
   const raw = capacityReset ? ttadkEta({ account: { usable: false, quotaOut: { resetsAt: resetAt } }, now, workMin })
-    : laneEta({ workMin, requests, position, drainPerMin, state: known(l.queueState), bucketDepleted: l.mode === 'low-priority', congested, progressing,
-      unknown: ready === null && !directClear && !(position !== null && drainPerMin > 0), startDelayMin: ready === null ? 0 : Math.max(0, (ready - now) / 60000) });
+    : laneEta({ workMin, requests, position, drainPerMin, state: known(l.queueState), bucketDepleted: l.mode === 'low-priority'&&!astraNoLoad, congested, progressing,
+      unknown: ready === null && !directClear && !(position !== null && drainPerMin > 0) && !astraNoLoad, startDelayMin: ready === null ? 0 : Math.max(0, (ready - now) / 60000) });
   const stalled = raw?.stalled === true;
   const unknown = !stalled && (!raw || raw.unknown);
   const uncertainty = [];
@@ -40,26 +53,26 @@ export function estimateCandidate(task, snapshot, candidate, { capacityReset = f
     uncertainty.push(reason('estimate', 'DASHBOARD_PROVIDER_DISAGREEMENT', 'Dashboard depletion is not authoritative provider denial.', [a.id]));
   const nextReset = snapshot.accounts.filter(a=>company(a)&&known(a.auth)===true&&known(a.transport)===true&&known(a.catalog)?.some(id=>modelPreference(task,a).includes(id))&&task.capabilitiesNeeded.every(cap=>known(a.capabilities?.[cap])===true)).map(a=>known(a.denialResetAt)).filter((v) => v > now).sort((a, b) => a - b)[0];
   const tt=snapshot.accounts.find((a)=>a.kind==='ttadk'), tq=tt?.quota.map((q)=>known(q.usage)).find(Boolean), tb=known(tt?.burn);
-  const dq=known(a.quota.find((q)=>q.bucketId===candidate.modelId)?.usage), remainingShare=dq&&dq.resetsAt>now?Math.max(0,(dq.limit-dq.used)/dq.limit):null;
-  const ttShare=tq&&tq.resetsAt>now?(tq.limit-tq.used)/tq.limit:null, fq=known(l.familyQueue);
-  const familyCongested=!directClear&&(fq?.position>300||(fq?.high?.position>300&&fq.high.t<=now&&now-fq.high.t<=1800000));
+  const remainingShare=dq&&dq.resetsAt>now?Math.max(0,(dq.limit-dq.used)/dq.limit):null;
+  const ttShare=tq&&tq.resetsAt>now?(tq.limit-tq.used)/tq.limit:null;
   const lowTask=task.tier==='light'||task.stakes==='low'||task.impact==='throwaway';
   const reserveOK=l.mode==='bucket-free'||l.mode==='priority'&&remainingShare>=.15;
-  const congestionOK=!stalled&&!congested&&!familyCongested&&(load!==null||lowTask);
+  const congestionOK=!stalled&&!congested&&!familyCongested&&!recentAstraQueue&&(load!==null||lowTask||astraNoLoad);
   const projectedOut=!!(tq&&tb&&tb.resetsAt===tq.resetsAt&&tb.projectedAtReset>=tq.limit);
   const expiresSoon=remainingShare!==null&&ttShare!==null&&dq.resetsAt-now<6*3600000&&remainingShare>ttShare;
   const triggers=[lowTask&&'low-priority task',projectedOut&&'TTADK projected to run out',expiresSoon&&'TRAE daily quota expires soon'].filter(Boolean);
-  const queued=position>0||['queued','waiting'].includes(known(l.queueState))
-    ||!directClear&&(fq?.position>0||['queued','waiting'].includes(fq?.state));
   const traeExpiry=a.kind==='trae'&&l.mode==='priority'&&dq&&dq.limit>0&&dq.used<dq.limit&&dq.resetsAt>now&&dq.resetsAt-now<6*3600000;
   const expiryOpportunity=a.kind==='ttadk'?ttExpiryOpportunity:a.kind==='trae'?!!traeExpiry:null;
   const expiryEvidence=expiryOpportunity?{modelId:candidate.modelId,bucketId:a.kind==='ttadk'?'ttadk-daily':candidate.modelId,unit:a.kind==='ttadk'?'tokens':'model-bucket',resetsAt:(a.kind==='ttadk'?q:dq).resetsAt,used:(a.kind==='ttadk'?q:dq).used,limit:(a.kind==='ttadk'?q:dq).limit}:null;
-  const freeNow=!capacityReset&&!stalled&&!familyCongested&&!raw?.unknown&&raw?.startDelayMin===0&&load!==null&&load<60&&!queued;
+  const freeNow=!capacityReset&&!stalled&&!familyCongested&&!recentAstraQueue&&!raw?.unknown&&raw?.startDelayMin===0
+    &&(load!==null&&load<60||astraNoLoad)&&!queued;
   const balance=a.kind==='trae'?{model:candidate.modelId,family:candidate.family,bucketFree:l.mode==='bucket-free',reserveOK,remainingShare,ttadkRemainingShare:ttShare,
-    load:load===null?null:{percent:load,source:l.loadSource},queue:fq,queued,freeNow,congestion:congested||familyCongested?'high':load!==null?'low':'unknown',congestionOK,
+    load:load===null?null:{percent:load,source:l.loadSource},queue:fq,queued,freeNow,
+    astraUnitsEvidence:astraNoLoad?{used:dq.used,limit:dq.limit}:null,
+    congestion:congested||familyCongested?'high':load!==null||astraNoLoad?'low':'unknown',congestionOK,
     burn:tb?{...tb,beforeReset:projectedOut}:null,
     projectedOut,expiresSoon,triggers,eligible:reserveOK&&congestionOK&&triggers.length>0,reasons:[!reserveOK&&(l.mode==='low-priority'?'daily bucket depleted':'daily quota unknown (missing, stale or expired) or below 15% reserve'),
-      stalled&&'lane stalled in fresh telemetry',queued&&'queue observed',familyCongested&&'family queue above 300',load>=60&&`${candidate.modelId} load ${load}% is at least 60`,!congestionOK&&load===null&&`${candidate.modelId} has no fresh model load reading`,!triggers.length&&'no balancing trigger'].filter(Boolean)}:null;
+      stalled&&'lane stalled in fresh telemetry',queued&&'queue observed',recentAstraQueue&&'recent Astra queue or stall observed',familyCongested&&'family queue above 300',load>=60&&`${candidate.modelId} load ${load}% is at least 60`,!congestionOK&&load===null&&`${candidate.modelId} has no fresh model load reading`,!triggers.length&&'no balancing trigger'].filter(Boolean)}:null;
   return freeze({ candidateId: candidate.id, startDelayMin: unknown ? null : raw.startDelayMin,
     completionMin: stalled ? null : raw?.completionMin ?? workMin, stalled, basis: raw?.basis ?? 'unknown', confidence: stalled ? 'STALLED' : unknown ? 'UNKNOWN'
       : rows.length >= ETA.historyMin && !uncertainty.some((r) => r.code === 'WORK_COHORT_FALLBACK') ? 'measured' : 'fallback',

@@ -48,7 +48,9 @@ export function presentRoute(plan, view, context) {
   const walked = chosenBalance ? balanceCandidates.slice(0,balanceCandidates.findIndex(b=>b.model===c.modelId)+1) : balanceCandidates;
   const balance = balanceCandidates.length ? {...(chosenBalance ?? {}),selected:!!(chosenBalance?.freeNow||chosenBalance?.eligible),candidates:walked} : null;
   if(seat?.estimate.expiryOpportunity) { const hint=candidateParts(snapshot,c).account.kind==='ttadk'?'TTADK quota expiring unused: good time for existing qualified work':`TRAE ${c.modelId} priority bucket expiring unused at ${new Date(seat.estimate.expiryEvidence.resetsAt).toISOString()}; quality order preserved`; why.push(hint);quota.push(hint); }
-  if(chosenBalance?.freeNow) why.push(`TRAE lane free: saving TTADK quota; ${c.modelId} load ${chosenBalance.load.percent}%; no queue or stall observed.`);
+  if(chosenBalance?.freeNow) why.push(chosenBalance.astraUnitsEvidence
+    ? `TRAE lane free: saving TTADK quota; Astra load not published; units ${chosenBalance.astraUnitsEvidence.used}/${chosenBalance.astraUnitsEvidence.limit} used; no queue observed; no recent Astra stall; TRAE hub healthy.`
+    : `TRAE lane free: saving TTADK quota; ${c.modelId} load ${chosenBalance.load.percent}%; no queue or stall observed.`);
   else if(chosenBalance) why.push(`TRAE ${c.modelId}: bounded fallback; immediate uncongested capacity is unmeasured.`);
   if(c && candidateParts(snapshot,c).account.kind==='ttadk' && balanceCandidates.length) {
     const relevant=balanceCandidates.find(b=>b.model===c.modelId);
