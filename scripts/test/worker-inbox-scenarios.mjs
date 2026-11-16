@@ -86,6 +86,13 @@ try {
   assert.match(hookRun(input('running-owner', { background_tasks: [] })).output.reason, /arm the watcher/, 'an untracked live watcher is not enough when the registry is available');
   assert.equal(hookRun(input('running-owner', { background_tasks: [{ type: 'shell', command: `node '${worker}' watch --owner 'running-owner'` }] })).output, null);
   assert.match(hookRun(input('running-owner', { background_tasks: [{ type: 'shell', command: `node '${worker}' watch --owner running-owner-other` }] })).output.reason, /arm the watcher/);
+  // BC-56: the node path, the task type label and an env-supplied owner must not hide an armed watcher; the block says which check failed.
+  for (const task of [{ type: 'local_bash', command: `/usr/local/Cellar/node/26.12.0/bin/node "${worker}" watch --owner running-owner 2>&1` },
+    { type: 'shell', command: `cd /tmp && node ${worker} --account trae watch --owner=running-owner` },
+    { command: `ORCHESTRATOR_OWNER=running-owner node ${worker} watch` },
+    { type: 'shell', command: `node ${worker} watch --owner running-owner; echo "watch exit $?"` }])
+    assert.equal(hookRun(input('running-owner', { background_tasks: [task] })).output, null, task.command);
+  assert.match(hookRun(input('running-owner', { background_tasks: [] })).output.reason, /watcher claim live; background tasks 0 listed, 0 run a watcher/);
   armed.child.kill('SIGTERM'); assert.equal((await armed.done).code, 143); assert.equal(hasWatcher('running-owner'), false);
   record('regular-owner', 'finished', 'not-an-orchestrator');
   assert.equal(hookRun(input('regular-owner', { session_title: 'worker' })).output, null);

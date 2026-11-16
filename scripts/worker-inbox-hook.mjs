@@ -38,12 +38,17 @@ try {
   if (delivery.delivered.length) process.exit(0);
   const running = (delivery.running ?? (await readInboxAsync(owner)).running).filter((row) => !row.stale);
   const ownerPattern = owner.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const registered = !Array.isArray(input.background_tasks) || input.background_tasks.some((task) => task.type === 'shell'
-    && typeof task.command === 'string' && /codex-worker\.mjs["']?\s+watch\b/.test(task.command)
-    && new RegExp(`--owner\\s+(?:'${ownerPattern}'|"${ownerPattern}"|${ownerPattern})(?=\\s|$)`).test(task.command));
-  if (!running.length || (registered && await hasWatcherAsync(owner))) process.exit(0);
+  // Any registered task whose command runs this owner's watcher counts, whatever the task type label or node path; a watcher
+  // armed without --owner takes the owner from ORCHESTRATOR_OWNER, so the live claim (checked below) identifies it.
+  const watchTasks = Array.isArray(input.background_tasks) ? input.background_tasks.filter((task) => typeof task?.command === 'string'
+    && /codex-worker(?:\.mjs)?["']?\s+(?:--\S+\s+\S+\s+)*watch\b/.test(task.command)) : null;
+  const registered = !watchTasks || watchTasks.some((task) => !/--owner\b/.test(task.command)
+    || new RegExp(`--owner[\\s=]+(?:'${ownerPattern}'|"${ownerPattern}"|${ownerPattern})(?=[\\s;&|)]|$)`).test(task.command));
+  const claimed = await hasWatcherAsync(owner);
+  if (!running.length || (registered && claimed)) process.exit(0);
+  const why = `watcher claim ${claimed ? 'live' : 'absent or stale'}; background tasks ${watchTasks ? `${input.background_tasks.length} listed, ${watchTasks.length} run a watcher, owner ${registered ? 'matched' : 'not matched'}` : 'not listed'}`;
   const script = path.join(path.dirname(fileURLToPath(import.meta.url)), 'codex-worker.mjs');
-  const reason = `arm the watcher: run ${JSON.stringify(process.execPath)} ${JSON.stringify(script)} watch --owner ${owner} as a background task (run_in_background), never detach with &. ${running.length} worker(s) may still be running; reconcile with codex-worker mine --owner ${owner}.`;
+  const reason = `arm the watcher: run ${JSON.stringify(process.execPath)} ${JSON.stringify(script)} watch --owner ${owner} as a background task (run_in_background), never detach with &. ${running.length} worker(s) may still be running; reconcile with codex-worker mine --owner ${owner}. (${why})`;
   if (start) await output({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: reason } });
   else if (input.stop_hook_active !== true) await output({ decision: 'block', reason });
 } catch {} finally { clearTimeout(deadline); }

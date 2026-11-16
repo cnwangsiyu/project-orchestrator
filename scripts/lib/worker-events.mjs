@@ -526,7 +526,7 @@ const watcherState = (owner) => { try { return JSON.parse(readText(path.join(wat
 export const hasWatcher = (owner) => { if (!validOwner(owner)) return false; const w = watcherState(owner); return live(w?.pid) && Date.now() - w.t < 15000; };
 export const hasWatcherAsync = async (owner) => {
   try { const w = JSON.parse(await fsp.readFile(path.join(watcherFile(owner), 'watcher.json'), 'utf8'));
-    return w.owner === owner && live(w.pid) && Date.now() - w.t < 15000; } catch { return false; }
+    return w.owner === owner && live(w.pid) && Date.now() - w.t < 45000; } catch { return false; }
 };
 export const watch = async (owner, print = (rows) => new Promise((resolve, reject) =>
   process.stdout.write(rows.map((row) => eventLine(row)).join('\n') + '\n', (error) => error ? reject(error) : resolve()))) => {
