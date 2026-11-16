@@ -25,7 +25,7 @@ if (fs.existsSync(last)) out.push(`final: ${(fs.readFileSync(last, 'utf8').split
 if (!fs.existsSync(report)) out.push(`(no report at ${report})`);
 else {
   const text = fs.readFileSync(report, 'utf8');
-  const m = text.match(/^#{1,3}\s*(Summary|摘要|Summary for (the )?orchestrator)\b.*$([\s\S]*?)(?=^#{1,3}\s|\Z)/im);
+  const m = text.match(/^#{1,3}\s*(Summary|摘要|Summary for (the )?orchestrator)\b.*$([\s\S]*?)(?=^#{1,3}\s|(?![\s\S]))/im);
   if (m) out.push(m[0].trim());
   else out.push(`(no "## Summary" section — first lines; ask the worker to add one)\n${text.split('\n').slice(0, 15).join('\n')}`);
 }

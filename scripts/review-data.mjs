@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import { execFileSync } from 'node:child_process';
-import { SHARED, ROUTE_LOG, QUOTA_LOG, readState, analyze, leanLines, fmt, outcomeOwns, isReviewDecision, dedupeOutcomes, codexCatalog, readProfiles, compareHarness, harnessDrift, modelView, effectiveFirst, OUTCOME_OVERRIDES } from './lib/state.mjs';
+import { CACHE, SHARED, ROUTE_LOG, QUOTA_LOG, readState, analyze, leanLines, fmt, outcomeOwns, isReviewDecision, dedupeOutcomes, codexCatalog, readProfiles, compareHarness, harnessDrift, modelView, effectiveFirst, OUTCOME_OVERRIDES } from './lib/state.mjs';
 import { loadDigest, isRouteDecision, rulesShared } from './lib/global-rules.mjs';
 import { auditGlobalRules } from './lib/global-rules-audit.mjs';
 import { LOG as RESOURCE_LOG, readJsonl } from './lib/resource-data.mjs';
@@ -19,7 +19,7 @@ import { review as resourceReview } from './resource-review.mjs';
 import { utilisationLines } from './lib/resource-utilisation.mjs';
 import { ETA, median } from './lib/eta.mjs';
 import { checkResidents } from './resident-check.mjs';
-import { auditWorkerEvents, readEvents } from './lib/worker-events.mjs';
+import { auditWorkerEvents, readEvents, eventFile } from './lib/worker-events.mjs';
 
 const argv = process.argv.slice(2);
 const opt = (k) => { const i = argv.indexOf(`--${k}`); return i < 0 ? null : argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[i + 1] : true; };
@@ -398,7 +398,8 @@ const traeReconciliation = async () => {
 quota.traeReconciliation = await traeReconciliation();
 
 // ---- now ----
-const data = readState();
+const data = opt('cached') ? (() => { try { return JSON.parse(fs.readFileSync(CACHE, 'utf8')); } catch { return { claude: null, codexAccounts: [], errors: {}, history: {} }; } })() : readState();
+data.codexAccounts ??= [];
 const st = analyze(data);
 const now = { lean: leanLines(st, data), claude: st.claude.status, codex: st.codex.rows.map((r) => ({ name: r.a.name, live: r.a.live, week: r.s?.used ?? null, resetsIn: r.s?.left != null ? `${Math.round(r.s.left)}h` : null, cards: r.a.resets?.count ?? null })) };
 
@@ -440,7 +441,27 @@ const overdueQuestions = events.filter(row => row.event === 'question' && row.ex
   && !answered.has(`${row.account}/${row.thread}/${row.questionId}`)).map(row => ({ owner: row.owner, account: row.account,
     thread: row.thread, name: row.name ?? null, questionId: row.questionId, askedAt: row.t, expiresAt: row.expiresAt, default: row.default ?? null }));
 const residents = checkResidents();
-const result = { overdueQuestions, residents, hours: H, routing, reviews: reviewBudget, outcomes, background, quota, utilisation, now, catalog, globalRules, workerInbox };
+// A completed task without an outcome stays in the denominator. Follower-ended/stalled is not completion.
+const terminalEvents = events.filter(row => ['finished', 'failed'].includes(row.event) && !row.mayRun && row.t >= since).map(row => {
+  // Older lifecycle events omitted project/category. Attribute only an unambiguous recorded route name.
+  const matching = all.filter(r => isRouteDecision(r) && r.project && (!row.project || row.project === r.project) && r.name && row.name
+    && bareName(r.project, row.name) === bareName(r.project, r.name) && r.t <= row.t);
+  const projects = [...new Set(matching.map(r => r.project))];
+  const route = projects.length === 1 ? matching.sort((a, b) => a.t - b.t).at(-1) : null;
+  return {...row, project: row.project ?? route?.project, category: row.category ?? route?.category};
+});
+const terminal = [...new Map(terminalEvents.filter(row => row.project && row.name && !isReviewDecision(row))
+  .map(row => [`${row.project}/${bareName(row.project, row.name).replace(/-(fix|r)\d+$/, '')}`, row])).values()];
+outcomes.autoCoverage = {
+  completed: fs.existsSync(eventFile()) || retained.length ? terminal.length : null,
+  autoCompleted: terminal.filter(row => all.some(o => o.kind === 'outcome' && o.auto === true && outcomeOwns(o.project, o.name, row))).length,
+  unknownTerminalIdentity: terminalEvents.filter(row => !row.project || !row.name).length,
+  basis: 'named finished/failed worker-event tasks in the window; missing terminal identity is UNKNOWN'
+};
+const companyHealth = data.codexAccounts.filter(a => ['ttadk', 'trae'].includes(a.kind)).map(a => ({ name: a.name, kind: a.kind,
+  sampledAt: data.checkedAt, healthy: a.healthy ?? null, ssoExpiresAt: a.ssoExpiresAt ?? null, quotaExpiresAt: a.quotaExpiresAt ?? null }));
+const digestChangedAt = (() => { try { return fs.statSync(process.env.RULES_DIGEST || new URL('../references/global-rules.md', import.meta.url)).mtimeMs; } catch { return null; } })();
+const result = { collectedAt: Date.now(), digestChangedAt, companyHealth, overdueQuestions, residents, hours: H, routing, reviews: reviewBudget, outcomes, background, quota, utilisation, now, catalog, globalRules, workerInbox };
 // Exit only after the pipe has drained; process.exit right after console.log truncates piped output at ~64 KB.
 if (opt('json')) { await new Promise((done) => process.stdout.write(JSON.stringify(result, null, 1) + '\n', done)); process.exit(0); }
 const show = (title, v) => console.log(`\n## ${title}\n${typeof v === 'string' ? v : JSON.stringify(v, null, 1)}`);

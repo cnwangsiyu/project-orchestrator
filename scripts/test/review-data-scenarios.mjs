@@ -114,6 +114,20 @@ try {
   assert.match(statistics.reviews.evidenceBasis, /routing decisions/);
   console.log('PASS completion windows, non-code rework, overdue questions and missing resident registration');
 
+  const completed = ['auto-task', 'missing-task', 'review-R'].map((name, i) => ({id: `done-${i}`, runId: `run-${i}`, owner: 'owner',
+    event: 'finished', t: now - 1000, project: 'p', name, category: name === 'review-R' ? 'review' : 'implement'}));
+  fs.writeFileSync(path.join(eventShared, 'worker-events.jsonl'), [...completed,
+    {id: 'unknown-done', runId: 'unknown-run', owner: 'owner', event: 'finished', t: now - 1000},
+    {id: 'still-running', runId: 'active-run', owner: 'owner', event: 'failed', mayRun: true, project: 'p', name: 'active', t: now - 1000}].map(JSON.stringify).join('\n') + '\n');
+  fs.appendFileSync(routeLog, JSON.stringify({kind: 'outcome', project: 'p', name: 'auto-task', t: now - 1000, auto: true, result: 'pass', first: pick}) + '\n');
+  fs.appendFileSync(routeLog, JSON.stringify({kind: 'outcome', project: 'p', name: 'auto-task', t: now, correction: true, result: 'rework', rounds: 1, first: pick}) + '\n');
+  const beforeCache = fs.readFileSync(cache, 'utf8');
+  const machine = JSON.parse(execFileSync(process.execPath, [review, '--hours', '24', '--json', '--cached'], {env: {...env, RULES_SHARED: eventShared}, encoding: 'utf8'}));
+  assert.deepEqual([machine.outcomes.autoCoverage.completed, machine.outcomes.autoCoverage.autoCompleted, machine.outcomes.autoCoverage.unknownTerminalIdentity], [2, 1, 1]);
+  assert.equal(fs.readFileSync(cache, 'utf8'), beforeCache, 'cached collection never refreshes or rewrites public quota state');
+  assert.ok(Number.isFinite(machine.collectedAt)); assert.ok(Number.isFinite(machine.digestChangedAt));
+  console.log('PASS terminal-task denominator retains missing outcomes, excludes reviews/active turns, preserves cached state');
+
   console.log('\nall pass');
 } finally {
   fs.rmSync(tmp, { recursive: true, force: true });

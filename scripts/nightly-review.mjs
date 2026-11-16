@@ -8,7 +8,9 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { passwordStyleFindings } from './lib/nightly-audit.mjs';
 import { unsafeFile } from './lib/resource-data.mjs';
-import { notifyMonitorFailure } from './lib/monitor-notify.mjs';
+import { computeNightly, nightlyBrief, nightlyReport, metricTable } from './lib/nightly-metrics.mjs';
+import { nightlyRecipients, deliveryPlan, deliverNightly } from './lib/nightly-delivery.mjs';
+import { rulesAcknowledgements } from './lib/rules-acknowledgements.mjs';
 
 const skill = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const script = path.join(skill, 'scripts/nightly-review.mjs');
@@ -208,26 +210,30 @@ function statusMessage(s) {
   return `夜间复盘未完成：卡在 ${s?.stage || 'gather'}，已做 ${s?.completed || s?.note || '未找到当日启动记录'}，${worker}（${s?.state || 'blocked'}：${s?.note || '无启动记录'}）。`;
 }
 
+async function recipients(data = path.join(attemptDir || runDir, 'data')) {
+  const review = read(path.join(data, 'review-data-24h.json')) ?? { globalRules: { acknowledgements: rulesAcknowledgements() } };
+  const current = rulesAcknowledgements();
+  const names = new Set(current.map(a => a.orchestrator));
+  review.globalRules ??= {};
+  review.globalRules.acknowledgements = [...current, ...(review.globalRules.acknowledgements ?? []).filter(a => !names.has(a.orchestrator))];
+  const rosterFile = path.join(data, 'roster.txt');
+  let roster = ''; try { roster = fs.readFileSync(fs.existsSync(rosterFile) ? rosterFile : path.join(process.env.RULES_SHARED || path.dirname(dir), 'orchestrators.txt'), 'utf8'); } catch {}
+  let agents = read(path.join(data, 'agents.json'));
+  const r = await command('claude', ['agents', '--json'], { budgetMs: probeMs });
+  try { if (r.code === 0) agents = JSON.parse(r.stdout); } catch {}
+  return nightlyRecipients(review, agents, roster);
+}
+
 async function deliverStatus(file, message, name) {
   if (read(file)?.delivery === 'sent') return 0;
-  const sessionFile = `${file}.session.json`;
-  const existing = read(file);
-  if (!existing || !['pending', 'launched'].includes(existing.delivery) || !read(sessionFile)) {
-    const n = (existing?.sendAttempt || 0) + 1;
-    atomic(file, { ...existing, t: new Date().toISOString(), message, delivery: 'pending', sendAttempt: n });
-    const r = await claude(`${name}-${n}`,
-      `只做通知，不复盘、不启新 worker、不询问个人额度。先用 PushNotification 向用户发送以下中文状态：${message}\n` +
-      `成功发送后运行 ${ackCommand(file)}，然后结束。未发送成功不要写 ack。`, null, sessionFile);
-    if (r.code && read(file)?.delivery !== 'sent') {
-      atomic(file, { ...read(file), delivery: r.observed?.state || 'failed', note: r.observed?.note || r.text });
-      return 1;
-    }
-    const latest = read(file);
-    if (latest?.delivery !== 'sent') atomic(file, { ...latest, delivery: 'launched' });
-  }
-  const failed = await waitDelivery(file, sessionFile);
-  log(`status notification ${read(file)?.delivery}: ${failed?.note || message}`);
-  return failed ? 1 : 0;
+  const rows = await recipients();
+  const owner = rows.find(r => ['routing', 'orchestrator'].includes(r.project)) ?? rows.find(r => /全局规则/.test(r.name ?? ''));
+  const plan = { messages: owner?.owner ? [{ owner: owner.owner, recipient: owner.name, text: message }] : [],
+    unresolved: owner?.owner ? [] : [{ text: message, recipient: 'routing owner' }] };
+  atomic(`${file}.outbox.json`, plan);
+  const receipt = await deliverNightly(plan, { day: `${day}/${name}`, outFile: `${file}.outbox.json` });
+  atomic(file, { ...receipt, message });
+  return receipt.delivery === 'sent' ? 0 : 1;
 }
 
 // A separate launchd invocation can deliver even if the launcher has exited/crashed.
@@ -241,7 +247,7 @@ async function deadlineCheck() {
   if (!claimLock(claim)) { log('deadline check BLOCKED: another checker owns delivery (or owner is unknown)'); return 1; }
   try {
     const s = read(path.join(runDir, 'status.json'));
-    if (s?.mode === 'dry') { log('deadline check: dry run, no notification'); return 0; }
+    if (s?.mode === 'dry' || s?.stage === 'finish' && s?.state === 'done') { log('deadline check: completed/dry run, no notification'); return 0; }
     const message = statusMessage(s);
     if (!existing || !['pending', 'launched'].includes(existing.delivery)) atomic(file, {
       ...existing, t: new Date().toISOString(), stage: s?.stage || 'gather', state: s?.state || 'blocked',
@@ -278,9 +284,9 @@ async function gather() {
   const d = path.join(attemptDir, 'data'); fs.mkdirSync(d);
   update('gather', 'running', '采集路由和资源证据');
   const jobs = [
-    ['review-data.mjs', ['--hours', '24'], 'review-data-24h.txt'],
-    ['review-data.mjs', ['--hours', '168'], 'review-data-168h.txt'],
-    ['orch-usage.mjs', ['--hours', '24'], 'orch-usage-24h.txt'],
+    ['review-data.mjs', ['--hours', '24', '--json', '--cached'], 'review-data-24h.json'],
+    ['review-data.mjs', ['--hours', '168', '--json', '--cached'], 'review-data-168h.json'],
+    ['orch-usage.mjs', ['--hours', '24', '--json'], 'orch-usage-24h.json'],
     ['resource-review.mjs', ['--hours', '24'], 'resource-review-24h.txt'],
     ['resource-review.mjs', ['--hours', '24', '--json'], 'resource-review-24h.json'],
     ['resource-review.mjs', ['--hours', '96', '--json'], 'resource-review-96h.json'],
@@ -290,28 +296,35 @@ async function gather() {
     const r = await command('node', [path.join(skill, 'scripts', name), ...args], { file: path.join(d, out), errFile: path.join(d, `${out}.err`) });
     if (r.code) {
       fs.appendFileSync(path.join(d, `${out}.err`), `UNKNOWN: exit ${r.code}\n`);
-      if (mode !== 'dry') try { notifyMonitorFailure(`nightly/gather/${name}`, { event: 'failed' }); }
-      catch { log(`monitoring event NOT RECORDED: ${name}`); }
     }
   }
+  await command('claude', ['agents', '--json'], { file: path.join(d, 'agents.json'), errFile: path.join(d, 'agents.err'), budgetMs: probeMs });
+  let roster = ''; try { roster = fs.readFileSync(path.join(process.env.RULES_SHARED || path.dirname(dir), 'orchestrators.txt'), 'utf8'); } catch {}
+  fs.writeFileSync(path.join(d, 'roster.txt'), roster);
   update('gather', 'done', '路由和只读资源证据已采集；失败或缺失采样为 UNKNOWN');
   return d;
 }
 
+function compute(data) {
+  const previousDay = new Date(`${day}T12:00:00`); previousDay.setDate(previousDay.getDate() - 1);
+  const result = computeNightly({ day, review: read(path.join(data, 'review-data-24h.json')),
+    resources: read(path.join(data, 'resource-review-24h.json')),
+    usage: read(path.join(data, 'orch-usage-24h.json')),
+    now: read(path.join(data, 'review-data-24h.json'))?.collectedAt ?? Date.now(),
+    previousUnknownClasses: read(path.join(dir, `${localDay(previousDay)}.metrics.json`))?.unknownClasses ?? [],
+    evidence: { review: path.join(data, 'review-data-24h.json'), resources: path.join(data, 'resource-review-24h.json'),
+      weekly: path.join(data, 'review-data-168h.json'), usage: path.join(data, 'orch-usage-24h.json'), resourceHistory: path.join(data, 'resource-review-96h.json') } });
+  atomic(path.join(attemptDir, 'metrics.json'), result);
+  atomic(path.join(dir, `${day}.metrics.json`), result);
+  fs.writeFileSync(path.join(attemptDir, 'script-report.md'), nightlyReport(result));
+  fs.copyFileSync(path.join(attemptDir, 'script-report.md'), path.join(dir, `${day}.md`));
+  process.stdout.write(metricTable(result) + '\n');
+  return result;
+}
+
 function prompt(data) {
-  const instructions = `You are the worker of the nightly routing review for the 24 hours ending ${new Date().toString()}. ` +
-    `Read ${skill}/references/nightly-review.md and follow the worker part of "Who does what". ` +
-    `The data is already gathered in ${data}: review-data-24h.txt, review-data-168h.txt, orch-usage-24h.txt. ` +
-    `Machine resources: resource-review-24h.txt/.json, resource-review-96h.json, resource-now.json and adjacent .err files. ` +
-    `Missing/failed evidence is UNKNOWN. Include resident liveness, questions older than their timeout, and globalRules.launchMismatches from review-data. No process/file cleanup or agent installation. ` +
-    `Mandatory review only explicit A–D with a reason; two rounds per scope. Report review yield and share by project against the configured 10% video-agent / 20% vesdk-mainline targets; UNKNOWN is not none. Audit ordinary routed signing workers against registered metadata and receipts, never signing inputs. Workers do not delegate or request model/account changes. `;
-  if (mode === 'dry') return instructions + 'DRY RUN: read-only; no edits, commits or pushes. Your final answer is the report.';
-  return instructions + `For this attempt use ${attemptDir}/report.md and ${attemptDir}/notify.json, NOT the day-level output paths. ` +
-    `Read prior attempts/drafts in ${runDir} before repeating work. Do not redo fixes already committed by a prior attempt. ` +
-    `Write the report draft AND notify.json BEFORE optional deep dives. Commit/push fixes only AFTER the report draft exists. ` +
-    `Record progress after each useful milestone with node ${quote(script)} progress --attempt-dir ${quote(attemptDir)} ` +
-    `--stage review --note '<short Chinese progress>'; use --stage report when drafting. ` +
-    `Keep both files up to date, and leave notifications to the finisher.`;
+  const result = read(path.join(attemptDir, 'metrics.json')) ?? compute(data);
+  return nightlyBrief(result, attemptDir);
 }
 
 const workerArgs = (commandName) => ['--account', status.worker.account, commandName];
@@ -332,7 +345,7 @@ async function followWorker(pick, data, resume = false, taskNotes = []) {
     { account: pick.account, model: pick.model, effort: pick.effort,sandbox:pick.sandbox, thread: null, turn: null, state: 'running',
       out:workerPath(pick,'out',path.join(attemptDir,'codex-last.md')),
       log:workerPath(pick,'log',path.join(attemptDir,'codex.jsonl')) });
-  if(!resume) brief(attemptDir,[prompt(data),...taskNotes].join('\n'));
+  if(!resume) brief(attemptDir,prompt(data));
   let first=!resume,args=resume?[...workerArgs('wait'),'--thread',status.worker.thread]:null;
   let completedSince;
   for (;;) {
@@ -422,37 +435,51 @@ async function waitDelivery(file, sessionFile) {
   }
 }
 
-async function finish(resume = false) {
-  if (mode === 'dry') {
-    if (!nonempty(path.join(attemptDir, 'worker-final.md'))) { update('report', 'failed', 'worker 未产生 dry 报告'); return 1; }
-    update('finish', 'done', 'dry 报告已交付；未启动 finisher'); return 0;
-  }
-  if (!reportReady()) { update('report', 'failed', 'worker 未产生 report.md / 有效 notify.json'); return 1; }
-  const ack = path.join(attemptDir, 'delivery.json');
-  const sessionFile = path.join(attemptDir, 'finisher.json');
-  if (!resume) {
-    update('report', 'done', '报告和 notify.json 已写入归档 attempt');
-    fs.copyFileSync(path.join(attemptDir, 'report.md'), path.join(dir, `${day}.md`));
-    fs.copyFileSync(path.join(attemptDir, 'notify.json'), path.join(dir, `${day}.notify.json`));
-    update('notify', 'running', '报告已产生，等待 finisher 通知回执');
-    const r = await claude(`routing-nightly-review-${day}-finish-${status.attempt}`,
-      `Finish the nightly routing review for ${day}: read ${skill}/references/nightly-review.md, "Who does what" (finisher) ` +
-      `and "Decisions for the user", then ${attemptDir}/report.md and ${attemptDir}/notify.json. Follow the checks and notify orchestrators. ` +
-      `Keep all edits and optional decisions in this attempt (${attemptDir}/report.md and ${attemptDir}/decisions.json), never another attempt's files. ` +
-      `Send a Chinese PushNotification to the user even with no changes: 「夜间复盘已完成：${day}，报告 ${dir}/${day}.md」。` +
-      `After checks and notifications succeed, run ${ackCommand(ack)} BEFORE waiting for optional decision cards. ` +
-      `If blocked/failed, write ${quote(ack)} as JSON {"delivery":"failed","note":"<reason>"} instead. ` +
-      `Never claim completion without delivering notifications. Do not stop any earlier sessions.`, null, sessionFile);
-    if (r.code && read(ack)?.delivery !== 'sent') {
-      update('notify', r.observed?.state || 'failed', r.observed?.note || `finisher launcher exit ${r.code}: ${r.text}`); return 1;
+async function relaySecretary(message) {
+  const ack = path.join(attemptDir, 'secretary-relay.json');
+  const identity = path.join(attemptDir, 'secretary-relay-session.json');
+  if (read(ack)?.delivery === 'sent') return;
+  if (read(identity)) {
+    const ended = await confirmSessionEnd(identity);
+    if (!ended || ended.state === 'blocked') {
+      const failed = await waitDelivery(ack, identity);
+      if (failed) throw Error(failed.note);
+      return;
     }
   }
-  if (resume && !read(sessionFile)) atomic(sessionFile, { name: `routing-nightly-review-${day}-finish-${status.attempt}` });
-  const failed = await waitDelivery(ack, sessionFile);
-  if (failed) { update('notify', failed.state, failed.note); return 1; }
-  fs.copyFileSync(path.join(attemptDir, 'report.md'), path.join(dir, `${day}.md`));
-  update('notify', 'done', 'finisher 通知已确认');
-  update('finish', 'done', '报告和通知已交付；用户决定卡片独立等待'); return 0;
+  atomic(ack, { delivery: 'pending' });
+  const r = await claude(`routing-nightly-review-${day}-secretary-${status.attempt}`,
+    `Only relay the following single message to the secretary named ${message.recipient} through SendMessage. No review, edits, notification broadcast or user cards. Do not wait for decisions. After sending, run ${ackCommand(ack)}.\n${message.text}`, null, identity);
+  if (r.code && read(ack)?.delivery !== 'sent') throw Error(r.observed?.note || 'secretary relay failed');
+  const failed = await waitDelivery(ack, identity);
+  if (failed) throw Error(failed.note);
+}
+
+async function finish() {
+  const result = read(path.join(attemptDir, 'metrics.json'));
+  if (!result) { update('report', 'failed', 'missing deterministic metrics'); return 1; }
+  const analysisFile = path.join(attemptDir, 'report.md');
+  if (result.needsModel && mode !== 'dry' && !reportReady()) { update('report', 'failed', 'worker 未产生 report.md / 有效 notify.json'); return 1; }
+  const analysis = result.needsModel ? (mode === 'dry' ? fs.readFileSync(path.join(attemptDir, 'worker-final.md'), 'utf8') : fs.readFileSync(analysisFile, 'utf8')) : '';
+  const report = nightlyReport(result, analysis);
+  fs.writeFileSync(path.join(attemptDir, 'published-report.md'), report);
+  fs.writeFileSync(path.join(dir, `${day}.md`), report);
+  const notify = result.needsModel && mode !== 'dry' ? read(path.join(attemptDir, 'notify.json')) : { actions: [], decisions: [] };
+  atomic(path.join(dir, `${day}.notify.json`), notify);
+  if (mode === 'dry' || !result.needsModel) {
+    atomic(path.join(attemptDir, 'delivery.json'), { delivery: 'sent', sent: [], note: 'script-only/dry report; no messages' });
+    update('finish', 'done', '脚本表格已交付；无通知或 finisher'); return 0;
+  }
+  update('notify', 'running', '直接投递 worker-event inbox；决定交秘书');
+  const rows = await recipients(path.dirname(result.metrics[0]?.evidence?.[0]?.split('#')[0] ?? path.join(attemptDir, 'data/review-data-24h.json')));
+  const outbox = path.join(attemptDir, 'outbox.json');
+  const plan = deliveryPlan(result, notify, rows, path.join(dir, `${day}.md`));
+  atomic(outbox, plan);
+  const receipt = await deliverNightly(plan, { day, outFile: outbox, relaySecretary });
+  atomic(path.join(attemptDir, 'delivery.json'), receipt);
+  if (receipt.delivery !== 'sent') { update('notify', 'blocked', receipt.note); return 1; }
+  fs.appendFileSync(path.join(dir, `${day}.md`), `\nDelivery: ${receipt.sent.map(r => `${r.recipient}: ${r.delivery} (unconfirmed)`).join('; ') || 'no messages'}.\n`);
+  update('finish', 'done', '报告和 inbox 已交付；秘书独立出卡'); return 0;
 }
 
 function newAttempt() {
@@ -476,7 +503,7 @@ async function review() {
   if (mode === 'plan') {
     process.env.ROUTE_LOG = '0';
     log(`plan: review ${JSON.stringify(await route('analysis', ['--stakes', 'high']))}`);
-    log(`plan: finisher ${JSON.stringify(await route('claude-tools'))}`); return 0;
+    log('plan: model only for triggered findings or Monday; direct inbox delivery, secretary relay only if needed'); return 0;
   }
   fs.mkdirSync(runDir, { recursive: true });
   const lock = path.join(runDir, 'launcher.lock');
@@ -497,18 +524,7 @@ async function review() {
     const pending = previous && ((previous.worker && ['running', 'unknown'].includes(previous.worker.state)) ||
       (['running', 'blocked'].includes(previous.state) && ['report', 'notify'].includes(previous.stage)));
     if (pending && previous.mode && previous.mode !== mode) { log('BLOCKED: cannot change mode of an unfinished attempt'); return 1; }
-    if (previous?.stage === 'notify' && previous.state === 'failed' && previous.worker?.state === 'done') {
-      const source = path.join(runDir, `attempt-${previous.attempt}`);
-      const sessionFile = path.join(source, 'finisher.json');
-      if (read(sessionFile)) {
-        const ended = await confirmSessionEnd(sessionFile);
-        if (!ended || ended.state === 'blocked') return await finish(true);
-      }
-      newAttempt();
-      for (const name of ['report.md', 'notify.json']) fs.copyFileSync(path.join(source, name), path.join(attemptDir, name));
-      update('report', 'done', `复用 ${source} 的报告；只重试通知，不重复复盘/fixes`, previous.worker);
-      return await finish();
-    }
+    if (previous?.stage === 'notify' && ['failed', 'blocked', 'running'].includes(previous.state)) return await finish();
     if (previous?.worker?.state === 'done' && previous.state === 'running' && previous.stage === 'report') {
       attemptDir = path.join(runDir, `attempt-${previous.attempt}`); status = previous;
       if (previous.worker.resultPending) {
@@ -532,11 +548,14 @@ async function review() {
     }
     const excludeAccounts = (process.env.NIGHTLY_EXCLUDE || '').split(',').filter(Boolean);
     const excludeModels = (process.env.NIGHTLY_EXCLUDE_MODEL || '').split(',').filter(Boolean);
-    let data, rateRetry = false;
+    let data, computed, rateRetry = false;
     for (let i = 0; i < 3; i++) {
       newAttempt();
       if (!data) data = await gather();
       else update('gather', 'done', `复用 ${data} 的证据；此前 attempt 已归档`);
+      computed ??= compute(data);
+      atomic(path.join(attemptDir, 'metrics.json'), computed);
+      if (!computed.needsModel) return await finish();
       const forceClaude=mode==='claude'?['main',...Object.entries(read(process.env.CODEX_ACCOUNTS||path.join(os.homedir(),'.claude/orchestrator/_shared/codex-accounts.json'))||{})
         .filter(([,p])=>p?.kind!=='claude').map(([name])=>name),...(read(process.env.QUOTA_CACHE||path.join(os.homedir(),'.claude/orchestrator/_shared/quota.json'))?.codexAccounts||[])
         .filter(a=>a?.kind!=='claude').map(a=>a.name)]:[];
@@ -553,12 +572,12 @@ async function review() {
       const kind = read(accountsFile)?.[pick.account]?.kind;
       log(`route: ${pick.model} ${pick.effort} on ${pick.account || pick.vendor} (${kind || pick.vendor})`);
       if (pick.vendor === 'claude') {
-        update('review', 'running', '个人额度已批准，启动完整 Claude 复盘',
+        update('review', 'running', '启动条件满足；路由批准的 Claude 分析',
           { account: 'claude', model: pick.model, effort: pick.effort, thread: null, state: 'running' });
-        const ack = path.join(attemptDir, 'delivery.json');
+        const ack = path.join(attemptDir, 'analysis-delivery.json');
         const sessionFile = path.join(attemptDir, 'worker-session.json');
         const launched = await claude(`routing-nightly-review-${day}-attempt-${status.attempt}`,
-          prompt(data) + ` Do the finisher's part as well, including a Chinese completion PushNotification. After report/notify and notifications succeed run ${ackCommand(ack)}. ` +
+          prompt(data) + ` After analysis/notify artifacts exist run ${ackCommand(ack)}. No messages or user cards. ` +
           `On failure write ${quote(ack)} as JSON {"delivery":"failed","note":"<reason>"}.`, r, sessionFile);
         if (launched.code && read(ack)?.delivery !== 'sent') {
           update('review', launched.observed?.state || 'failed', launched.observed?.note || launched.text,
@@ -592,20 +611,19 @@ async function review() {
           `routing-nightly-review-${day}-attempt-${status.attempt}-failure`);
       } catch (e) { log(`failure notification blocked: ${e.message}`); }
     }
-    log(`final: ${status?.stage || 'gather'}/${status?.state || 'blocked'}; report=${attemptDir ? reportReady() : false}`);
+    log(`final: ${status?.stage || 'gather'}/${status?.state || 'blocked'}; report=${attemptDir ? nonempty(path.join(attemptDir, 'published-report.md')) || reportReady() : false}`);
     fs.rmSync(lock, { recursive: true });
   }
 }
 
 async function finishClaudeReview(sessionFile) {
-  const failed = await waitDelivery(path.join(attemptDir, 'delivery.json'), sessionFile);
+  const failed = await waitDelivery(path.join(attemptDir, 'analysis-delivery.json'), sessionFile);
   if (failed || !reportReady()) {
-    update(failed ? 'review' : 'report', failed?.state || 'failed', failed?.note || 'Claude 未产生报告',
+    update(failed ? 'review' : 'report', failed?.state || 'failed', failed?.note || 'Claude 未产生分析',
       { ...status.worker, state: failed?.state === 'blocked' ? 'unknown' : 'failed' }); return 1;
   }
-  fs.copyFileSync(path.join(attemptDir, 'report.md'), path.join(dir, `${day}.md`));
-  fs.copyFileSync(path.join(attemptDir, 'notify.json'), path.join(dir, `${day}.notify.json`));
-  update('finish', 'done', 'Claude 报告和通知已交付', { ...status.worker, state: 'done' }); return 0;
+  update('report', 'done', 'Claude analysis ready', { ...status.worker, state: 'done' });
+  return await finish();
 }
 
 const [cmd, ...args] = process.argv.slice(2);

@@ -38,7 +38,9 @@ else console.log('{}');
   fs.writeFileSync(path.join(bin, 'node'), node, { mode: 0o755 });
   fs.writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\n[ "$1" = agents ] || exit 99\nprintf "[]\\n"\n', { mode: 0o755 });
   fs.writeFileSync(path.join(bin, 'codex'), '#!/bin/sh\nprintf "%s\\n" "$*" > "$HOME/worker-args.txt"\nprintf "{}\\n"\n', { mode: 0o755 });
-  const run = spawnSync('/bin/zsh', [path.join(skill, 'scripts/nightly-review.sh')], { env: { ...process.env, HOME: tmp, NIGHTLY_MODE: 'dry', NIGHTLY_PERSONAL_OK: '0' }, encoding: 'utf8', timeout: 15000 });
+  const run = spawnSync('/bin/zsh', [path.join(skill, 'scripts/nightly-review.sh')], { env: { ...process.env, HOME: tmp,
+    RULES_SHARED: shared, NIGHTLY_DIR: path.join(shared, 'routing-review'), NIGHTLY_DAY: '2026-11-17',
+    NIGHTLY_MODE: 'dry', NIGHTLY_PERSONAL_OK: '0' }, encoding: 'utf8', timeout: 15000 });
   assert.equal(run.status, 0, run.stdout + run.stderr);
   const review = path.join(shared, 'routing-review');
   const day = fs.readdirSync(review).find((s) => s.endsWith('.run'));
@@ -49,7 +51,12 @@ else console.log('{}');
   assert.equal(JSON.parse(fs.readFileSync(path.join(data, 'resource-now.json'), 'utf8')).complete, false);
   assert.match(fs.readFileSync(path.join(data, 'resource-now.json.err'), 'utf8'), /UNKNOWN/);
   assert.match(fs.readFileSync(path.join(tmp, 'worker-args.txt'), 'utf8'), /--sandbox read-only/);
-  assert.match(fs.readFileSync(path.join(review, day, 'attempt-1/brief.md'), 'utf8'), /Machine resources:/);
+  const metrics = JSON.parse(fs.readFileSync(path.join(review, day, 'attempt-1/metrics.json'), 'utf8'));
+  assert.deepEqual(metrics.findings.map(f => f.id), ['new-unknown-classes']);
+  assert.ok(metrics.unknownClasses.includes('resource-over-gate-hours'));
+  const brief = fs.readFileSync(path.join(review, day, 'attempt-1/brief.md'), 'utf8');
+  assert.match(brief, /"id": "new-unknown-classes"/);
+  assert.match(brief, /resource-review-24h\.json#utilisation/);
   assert.ok(!fs.existsSync(path.join(tmp, 'Library/LaunchAgents')));
   const calls = fs.readFileSync(path.join(tmp, 'calls.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   assert.equal(calls.filter((a) => a[0]?.endsWith('/resource-sample.mjs')).length, 1);

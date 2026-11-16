@@ -1,0 +1,17 @@
+{
+  "reviewTargetPct": { "default": 10, "video-agent": 10, "vesdk-mainline": 20 },
+  "unroutedMax": 3,
+  "mismatchesMax": 5,
+  "missingPersonalApprovalMax": 0,
+  "inboxP90MinutesMax": 30,
+  "staleRulesHoursMax": 24,
+  "overGateHoursMax": 0,
+  "expiryWarningHours": 72,
+  "autoOutcomeCoveragePctMin": 80,
+  "resourceCoveragePctMin": 80,
+  "overdueQuestionsMax": 0,
+  "catalogChangesMax": 0,
+  "orchestratorUsage": { "ownKB": 500, "browserCalls": 20, "imageReads": 10, "compactions": 1, "sleepPolls": 10, "edits": 5, "testsBuilds": 3, "toolCalls": 500, "blockedMinutes": 30 },
+  "newUnknownClassesMax": 0,
+  "weeklyDay": 1
+}
