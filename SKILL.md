@@ -24,8 +24,10 @@ background sessions — Claude Code or Codex, as `scripts/route.mjs` picks — t
 launches, briefs, coordinates and integrates.
 
 Every worker launch must be a harness-tracked background task (`run_in_background`, never inner `&`) or covered
-by an armed owner-scoped `codex-worker watch`. On wake handle finished workers first, then re-arm watch if workers
-remain. The [worker inbox](references/worker-inbox.md) documents durable events, owner identity, `mine`, Stop/SessionStart
+by an armed owner-scoped `codex-worker watch`. Info/progress notes wait for a natural wake; risk/scope and asks
+wake (rare info `--wake` only when it changes peer work now). Watch batches wakes for 45 seconds (`--debounce-sec`,
+0 disables), capped to leave 80% of each ask timeout. Handle finished workers first; re-arm for asks/risk or workers
+lacking verified live tracked start/turn followers. The [worker inbox](references/worker-inbox.md) documents durable events, owner identity, `mine`, Stop/SessionStart
 hooks, owner-only installation and limits. Keep route.mjs's `run-tracked.sh` wrapper on exec commands.
 
 Projects are the unit of separation: each orchestrator conversation owns exactly one project and

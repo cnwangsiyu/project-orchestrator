@@ -56,7 +56,7 @@ try {
   assert.equal(resolveOwner(null, { CLAUDE_JOB_DIR: '/tmp/jobs/job-fallback' }), 'job-fallback');
   assert.deepEqual(launcherIdentity(null, { API_KEY: 'do-not-record', CLAUDECODE: '1' }).env, { CLAUDECODE: '1' });
   fs.writeFileSync(path.join(tmp, 'final.md'), 'DONE first final line\nsecond line\n');
-  const waiting = start(worker, ['watch', '--owner', 'owner-A']);
+  const waiting = start(worker, ['watch', '--debounce-sec', '0', '--owner', 'owner-A']);
   await until(() => hasWatcher('owner-A'), 'watch armed');
   record('owner-B', 'finished', 'B');
   await new Promise((r) => setTimeout(r, 220)); assert.equal(waiting.output(), '', 'watch blocks, owner B does not wake A');
@@ -80,7 +80,7 @@ try {
   record('running-owner', 'finished', 'new-result');
   assert.equal(hookRun(input('running-owner', { stop_hook_active: true })).output, null, 'new completions never bypass the stop-cycle guard');
   hookRun(input('running-owner'));
-  const armed = start(worker, ['watch', '--owner', 'running-owner']);
+  const armed = start(worker, ['watch', '--debounce-sec', '0', '--owner', 'running-owner']);
   await until(() => hasWatcher('running-owner'), 'second watcher armed');
   assert.equal(hookRun(input('running-owner')).output, null);
   assert.match(hookRun(input('running-owner', { background_tasks: [] })).output.reason, /arm the watcher/, 'an untracked live watcher is not enough when the registry is available');
@@ -94,6 +94,71 @@ try {
     assert.equal(hookRun(input('running-owner', { background_tasks: [task] })).output, null, task.command);
   assert.match(hookRun(input('running-owner', { background_tasks: [] })).output.reason, /watcher claim live; background tasks 0 listed, 0 run a watcher/);
   armed.child.kill('SIGTERM'); assert.equal((await armed.done).code, 143); assert.equal(hasWatcher('running-owner'), false);
+  // Live followers cover completion notifications only when their tracked launches match every worker.
+  record('followers-owner', 'running', 'live-start', { thread: 'start-thread', pid: process.pid, followerCommand: 'start' });
+  record('followers-owner', 'running', 'live-turn', { thread: 'turn-thread', pid: process.pid, followerCommand: 'turn' });
+  const followers = [
+    { command: `node "${worker}" --account fixture start --owner followers-owner --name live-start`, pid: process.pid },
+    { command: `node "${worker}" --account fixture turn --owner followers-owner --thread turn-thread`, pid: process.pid }
+  ];
+  assert.equal(hookRun(input('followers-owner', { background_tasks: followers })).output, null);
+  assert.match(hookRun(input('followers-owner', { background_tasks: followers.slice(0, 1) })).output.reason, /live-turn.*no matching tracked/);
+  assert.match(hookRun(input('followers-owner')).output.reason, /live-start.*background_tasks missing/);
+  for (const change of [{ pid: 2147483647 }, { status: 'completed' }, { command: followers[0].command + ' &' },
+    { command: followers[0].command.replace('followers-owner', 'other-owner') }]) {
+    assert.match(hookRun(input('followers-owner', { background_tasks: [{ ...followers[0], ...change }, followers[1]] })).output.reason, /live-start/);
+  }
+  const question = record('followers-owner', 'question', 'live-start', { thread: 'start-thread', questionId: 'open-choice',
+    timeoutMin: 20, expiresAt: Date.now() + 1200000, text: 'Which choice?' });
+  deliver('followers-owner', () => {}); // Acknowledgement does not answer an ask.
+  assert.match(hookRun(input('followers-owner', { background_tasks: followers })).output.reason, /live-start.*open ask open-choice/);
+  record('followers-owner', 'answered', 'live-start', { thread: 'start-thread', questionId: question.questionId, text: 'Proceed' });
+  assert.equal(hookRun(input('followers-owner', { background_tasks: followers })).output, null);
+
+  // One process exit batches three completions; default notes join the batch without triggering it.
+  const burst = start(worker, ['watch', '--owner', 'burst-owner', '--debounce-sec', '0.8']);
+  await until(() => hasWatcher('burst-owner'), 'burst watcher armed');
+  record('burst-owner', 'message', 'info-peer', { kind: 'info', text: 'Deferred finding', wake: false });
+  await new Promise((r) => setTimeout(r, 200)); assert.equal(burst.output(), '');
+  const burstAt = Date.now();
+  record('burst-owner', 'finished', 'finish-one');
+  await new Promise((r) => setTimeout(r, 180));
+  record('burst-owner', 'finished', 'finish-two');
+  await new Promise((r) => setTimeout(r, 180));
+  record('burst-owner', 'finished', 'finish-three');
+  assert.equal(burst.output(), '', 'watch stays alive during the debounce');
+  const burstResult = await burst.done;
+  assert.equal(burstResult.code, 0); assert.ok(Date.now() - burstAt >= 800);
+  assert.equal(burstResult.stdout.trim().split('\n').length, 4);
+  for (const name of ['finish-one', 'finish-two', 'finish-three', 'Deferred finding']) assert.ok(burstResult.stdout.includes(name));
+  assert.equal(inbox(readEvents(), 'burst-owner', readAck('burst-owner')).pending.length, 0);
+
+  // A short ask arriving after a risk caps the existing window to leave 80% of its timeout.
+  const shortAskWatch = start(worker, ['watch', '--owner', 'short-ask-owner', '--debounce-sec', '45']);
+  await until(() => hasWatcher('short-ask-owner'), 'short ask watcher armed');
+  record('short-ask-owner', 'message', 'risk-worker', { kind: 'risk', wake: true, text: 'Decision now' });
+  await new Promise((r) => setTimeout(r, 200));
+  const shortAsk = record('short-ask-owner', 'question', 'asking-worker', { thread: 'asking-thread', questionId: 'short-choice',
+    timeoutMin: 0.05, expiresAt: Date.now() + 3000, text: 'Short choice?', default: 'Continue' });
+  const askResult = await shortAskWatch.done;
+  assert.equal(askResult.code, 0); assert.match(askResult.stdout, /Short choice/); assert.match(askResult.stdout, /Decision now/);
+  assert.ok(Date.now() <= shortAsk.expiresAt - 2400 + 150, 'short ask keeps at least 80% of timeout, within scheduler tolerance');
+  const legacyAskWatch = start(worker, ['watch', '--owner', 'legacy-ask-owner', '--debounce-sec', '45']);
+  await until(() => hasWatcher('legacy-ask-owner'), 'legacy ask watcher armed');
+  record('legacy-ask-owner', 'question', 'legacy-asking-worker', { questionId: 'legacy-choice', text: 'Legacy ask', expiresAt: Date.now() + 3000 });
+  const legacyAt = Date.now();
+  assert.match((await legacyAskWatch.done).stdout, /Legacy ask/);
+  assert.ok(Date.now() - legacyAt < 1500, 'missing deadline metadata flushes rather than stranding the watcher');
+  const immediateAt = Date.now();
+  record('immediate-owner', 'finished', 'immediate-finish');
+  const immediate = await start(worker, ['watch', '--owner', 'immediate-owner', '--debounce-sec', '0']).done;
+  assert.match(immediate.stdout, /immediate-finish/); assert.ok(Date.now() - immediateAt < 1500);
+  const missingDebounce = await start(worker, ['watch', '--owner', 'invalid-owner', '--debounce-sec']).done;
+  assert.equal(missingDebounce.code, 1); assert.match(missingDebounce.stderr, /nonnegative finite/);
+  for (const bad of ['-1', 'NaN', 'Infinity']) {
+    const invalid = await start(worker, ['watch', '--owner', 'invalid-owner', '--debounce-sec', bad]).done;
+    assert.equal(invalid.code, 1); assert.match(invalid.stderr, /nonnegative finite/);
+  }
   record('regular-owner', 'finished', 'not-an-orchestrator');
   assert.equal(hookRun(input('regular-owner', { session_title: 'worker' })).output, null);
   assert.equal(inbox(readEvents(), 'regular-owner', readAck('regular-owner')).pending.length, 1);
@@ -144,7 +209,7 @@ fs.open = (file, ...args) => String(file).endsWith('worker-events.jsonl') ? new 
     `import { appendEvent } from ${JSON.stringify(writerModule)}; for (let i=0;i<4;i++) appendEvent({owner:'concurrent-owner',runId:'${n}-'+i,event:'finished',name:'concurrent'});`]));
   for (const writer of writers) assert.equal((await writer.done).code, 0);
   assert.equal(inbox(readEvents(), 'concurrent-owner', readAck('concurrent-owner')).pending.length, 20);
-  const raceA = start(worker, ['watch', '--owner', 'race-owner']), raceB = start(worker, ['watch', '--owner', 'race-owner']);
+  const raceA = start(worker, ['watch', '--debounce-sec', '0', '--owner', 'race-owner']), raceB = start(worker, ['watch', '--debounce-sec', '0', '--owner', 'race-owner']);
   await until(() => hasWatcher('race-owner'), 'racing watchers armed');
   record('race-owner', 'finished', 'race-event');
   await until(() => (raceA.output() + raceB.output()).includes('race-event'), 'one racing watcher delivered');
