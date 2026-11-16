@@ -1,9 +1,21 @@
-# Shared res contract (v1.6, 2026-11-15) - owner: routing/global-rules orchestrator; users: all projects
+# Shared res contract (v1.7, 2026-11-16) - owner: routing/global-rules orchestrator; users: all projects
 
 Maintained source: this project-orchestrator repository, `scripts/res/res`. Ownership of the entire
 tool (devices, checkouts, registry/notes, take/return/extend/add/note/log and heavy admission) transferred
 from vesdk-mainline to the global-rules owner on 2026-11-13. The unmodified v1.2 contract is preserved
-in `scripts/res/test/fixtures/contract-v1.2.md`. v1.6 is staged, not live until the owner's reviewed switch.
+in `scripts/res/test/fixtures/contract-v1.2.md`. v1.7 is staged, not live until the owner's reviewed switch.
+
+## Changes in v1.7
+
+Fresh build/lane transactions cannot adopt a pre-existing hold, including a concurrent wrapper's
+same-name hold that appears after the free-directory precheck. They return unavailable or keep waiting,
+and roll back only their newly created resources. Same-`--by` single-resource take/wait idempotence
+is unchanged, as is `wait-lane` reuse with the same `--by` and holder PID. Holder names remain opaque,
+exact strings; no prefix or project/task comparison establishes ownership. Existing-hold diagnostics
+from `take` and the same-name build-slot guard name the recorded holder, PID and since time instead
+of calling the hold "yours". A shared `--by`
+alone cannot identify a wrapper: keep using unique names per run and PID-scoped `return-build` cleanup.
+Admission, FIFO, release authorization and the strictly >600-second dead-local-PID reclaim rule are unchanged.
 
 ## Changes in v1.6
 

@@ -53,10 +53,33 @@ const release = (id, by) => eq(run(['return', id, '--by', by]).code, 0);
 const children = new Set();
 function start(command, by, project, extra = {}) {
   const child = spawn(process.env.RES_SOURCE, [command, ...args(by, project), '--timeout', '1'], { env: { ...env, ...extra }, stdio: ['ignore', 'pipe', 'pipe'] });
+  return track(child);
+}
+function track(child) {
   child.text = ''; child.stdout.on('data', (b) => { child.text += b; }); child.stderr.on('data', (b) => { child.text += b; });
   child.done = new Promise((resolve, reject) => { child.on('error', reject); child.on('close', (code) => { children.delete(child); resolve(code); }); });
   children.add(child); return child;
 }
+const raceDriver = path.join(root, 'same-name-race.sh');
+fs.writeFileSync(raceDriver, `set -T
+paused=0
+pause_attempt() {
+  local id=
+  [ "$paused" = 0 ] || return 0
+  case "\${FUNCNAME[*]}" in *acquire_attempt*) ;; *) return 0 ;; esac
+  case "$1" in
+    'cmd_take "$candidate" "\${options[@]}"') id="$candidate" ;;
+    'cmd_take heavy-build "\${options[@]}"') id=heavy-build ;;
+    *) return 0 ;;
+  esac
+  [ "$id" = "$RACE_RESOURCE" ] || return 0
+  paused=1
+  touch "$PAUSE_ATTEMPT"
+  while [ ! -f "$PAUSE_ATTEMPT.release" ]; do /bin/sleep 0.02; done
+}
+trap 'pause_attempt "$BASH_COMMAND"' DEBUG
+source "$RES_SOURCE" "$@" --pid "$$"
+`, { mode: 0o755 });
 async function until(predicate, child) {
   const deadline = Date.now() + 60000;
   while (!predicate()) {
@@ -72,6 +95,63 @@ function manual(name, project, { gate = 0, pid = process.pid, heartbeat = Math.f
 }
 
 try {
+  // A same-name hold arriving after the free precheck must never be adopted.
+  // Inject the competing wrapper's published metadata at that exact window.
+  for (const command of ['take-build', 'wait-build', 'wait-lane']) {
+    for (const id of ['heavy-lane-1', 'heavy-lane-3', ...(command === 'wait-lane' ? [] : ['heavy-build'])]) {
+      const occupied = command === 'wait-lane' ? ['heavy-lane-1', 'heavy-lane-2', 'heavy-lane-3'].filter((lane) => lane !== id) : [];
+      for (const lane of occupied) take(lane, `anchor-${lane}`, 'A');
+      const pause = path.join(root, `${command}-${id}-paused`);
+      const argv = [command, ...args('W327-cjk-font', 'A')];
+      if (command !== 'wait-lane' && id !== 'heavy-build') argv.push('--lane', id);
+      if (command !== 'take-build') argv.push('--timeout', '0');
+      const racing = track(spawn('/bin/bash', [raceDriver, ...argv], {
+        env: { ...env, RACE_RESOURCE: id, PAUSE_ATTEMPT: pause }, stdio: ['ignore', 'pipe', 'pipe'],
+      }));
+      await until(() => fs.existsSync(pause), racing);
+      fs.mkdirSync(lock(id));
+      const competingInfo = `by\tW327-cjk-font\nproject\tA\ntask\tW327\nfor\tother concurrent wrapper\nsince\t2026-11-16 00:20\nuntil\t\npid\t${process.pid}\nhost\t${os.hostname()}\nstart\t${Math.floor(Date.now() / 1000)}\n`;
+      fs.writeFileSync(path.join(lock(id), 'info'), competingInfo);
+      fs.writeFileSync(`${pause}.release`, 'go');
+      eq(await racing.done, 2, racing.text);
+      ok(racing.text.includes(`is held by W327-cjk-font (pid=${process.pid}, since=2026-11-16 00:20)`), racing.text);
+      ok(!racing.text.includes('already held by you'), racing.text);
+      eq(fs.readFileSync(path.join(lock(id), 'info'), 'utf8'), competingInfo);
+      eq(fs.readdirSync(path.join(state, 'locks')).filter((name) => name.endsWith('.d')).sort(), [id, ...occupied].map((name) => `${name}.d`).sort());
+      eq(waiterDirs(), []); eq(waiterDirs('build'), []);
+      // A losing wrapper's PID-scoped cleanup cannot return the winning hold.
+      eq(run(['return-build', '--by', 'W327-cjk-font', '--pid', String(racing.pid)]).code, 0);
+      eq(fs.readFileSync(path.join(lock(id), 'info'), 'utf8'), competingInfo);
+      release(id, 'W327-cjk-font');
+      for (const lane of occupied) release(lane, `anchor-${lane}`);
+    }
+  }
+
+  // Plain take retains opaque-name idempotence, but identifies the recorded
+  // holder even when a replacement caller supplies a different PID/project/task.
+  for (const [id, by] of [['heavy-lane-1', 'W327-cjk-font'], ['heavy-lane-3', 'codex:thread-id'], ['heavy-build', 'trae:T102-01a1d8c6'], ['heavy-lane-2', '0']]) {
+    take(id, by, 'A');
+    const file = path.join(lock(id), 'info'), before = fs.readFileSync(file, 'utf8');
+    const again = run(['take', id, ...args(by, 'changed'), '--task', 'changed', '--pid', '2147483647'], { RES_TEST_LOAD1M: '21' });
+    eq(again.code, 0, again.text);
+    ok(again.text.includes(`already held: ${id} by ${by} (pid=${process.pid}, since=${field(file, 'since')})`), again.text);
+    ok(!again.text.includes('held by you')); eq(fs.readFileSync(file, 'utf8'), before);
+    const waited = run(['wait', id, ...args(by, 'changed'), '--task', 'changed', '--pid', '2147483647', '--timeout', '0']);
+    eq(waited.code, 0, waited.text);
+    ok(waited.text.includes(`already held: ${id} by ${by} (pid=${process.pid}, since=`), waited.text);
+    eq(fs.readFileSync(file, 'utf8'), before);
+    const other = run(['take', id, ...args('w325-demo-speed', 'A')]);
+    eq(other.code, 2, other.text); ok(other.text.includes(`is held by ${by} (pid=${process.pid}, since=`));
+    ok(!other.text.includes('held by you')); eq(fs.readFileSync(file, 'utf8'), before);
+    eq(run(['return', id, '--by', 'w325-demo-speed']).code, 1); eq(fs.readFileSync(file, 'utf8'), before);
+    if (id === 'heavy-build') {
+      const nested = run(['take-build', ...args(by, 'A')]);
+      eq(nested.code, 1); ok(nested.text.includes(`build slot is held by ${by} (pid=${process.pid}, since=`));
+      eq(fs.readFileSync(file, 'utf8'), before);
+    }
+    release(id, by);
+  }
+
   // With no waiter a single project may use all lanes, including the optional one.
   for (const [id, by] of [['heavy-lane-1', 'A1'], ['heavy-lane-2', 'A2'], ['heavy-lane-3', 'A3']]) take(id, by);
   const pause = path.join(root, 'B-paused');

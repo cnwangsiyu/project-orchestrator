@@ -337,6 +337,7 @@ regression() (
   run add 'bad/id' --device - --for invalid
   run take new-checkout --by owner --project test --for policy
   run take new-checkout --by owner --project test --for approved --force
+  if [ "$script" = "$RES" ]; then cp "$RES_DIR/locks/new-checkout.d/info" "$ROOT/evidence/held-checkout.info"; fi
   run take new-checkout --by other --project test --for held --force
   run extend new-checkout --by other --until tomorrow
   run extend new-checkout --by owner --until tomorrow
@@ -346,7 +347,9 @@ regression() (
   run return new-checkout --by owner
   run note open-checkout --by owner --note 'pitfall and workaround'
   run take open-checkout --by owner --project test --for 'take with note'
+  if [ "$script" = "$RES" ]; then cp "$RES_DIR/locks/open-checkout.d/info" "$ROOT/evidence/idempotent-before.info"; fi
   run take open-checkout --by owner --project changed --for changed
+  if [ "$script" = "$RES" ]; then cp "$RES_DIR/locks/open-checkout.d/info" "$ROOT/evidence/idempotent-after.info"; fi
   run status open-checkout
   head -6 "$RES_DIR/locks/open-checkout.d/info" >"$RES_DIR/original-fields.txt"
   run return open-checkout --by owner --note done
@@ -371,14 +374,29 @@ normalize_device_evidence <"$ROOT/regression-before/log.tsv" >"$ROOT/evidence/lo
 normalize_device_evidence <"$ROOT/regression-after/log.tsv" >"$ROOT/evidence/log-after.normalized.tsv"
 cmp "$ROOT/evidence/log-before.normalized.tsv" "$ROOT/evidence/log-after.normalized.tsv" || fail 'regression changed legacy log fields'
 pass 'legacy log fields unchanged except v1.6 device-client suffix'
-sed "s|$ROOT/regression-before|REGRESSION|g" "$ROOT/evidence/regression-before.txt" | normalize_device_evidence >"$ROOT/evidence/regression-before.normalized.txt"
-sed "s|$ROOT/regression-after|REGRESSION|g" "$ROOT/evidence/regression-after.txt" | normalize_device_evidence >"$ROOT/evidence/regression-after.normalized.txt"
+# v1.7 changes only these two holder-message shapes in this transcript. Check
+# the recorded identity exactly before normalizing their documented diagnostics.
+recorded_pid=$(awk -F '\t' '$1 == "pid" {print $2}' "$ROOT/evidence/held-checkout.info")
+recorded_since=$(awk -F '\t' '$1 == "since" {print $2}' "$ROOT/evidence/held-checkout.info")
+contains "res: 'new-checkout' is held by owner (pid=$recorded_pid, since=$recorded_since) (test)," "$ROOT/evidence/regression-after.txt"
+recorded_pid=$(awk -F '\t' '$1 == "pid" {print $2}' "$ROOT/evidence/idempotent-before.info")
+recorded_since=$(awk -F '\t' '$1 == "since" {print $2}' "$ROOT/evidence/idempotent-before.info")
+contains "already held: open-checkout by owner (pid=$recorded_pid, since=$recorded_since)" "$ROOT/evidence/regression-after.txt"
+cmp "$ROOT/evidence/idempotent-before.info" "$ROOT/evidence/idempotent-after.info" || fail 'idempotent checkout take changed metadata'
+pass 'idempotent checkout take preserves all metadata'
+normalize_holder_evidence() {
+  sed -E \
+    -e "s/^(res: 'new-checkout' is held by owner) \(pid=[0-9]+, since=([^)]*)\) \(test\), until/\1 (test) since \2, until/" \
+    -e 's/^already held: open-checkout by owner \(pid=[0-9]+, since=[^)]*\)$/already held by you: open-checkout/'
+}
+sed "s|$ROOT/regression-before|REGRESSION|g" "$ROOT/evidence/regression-before.txt" | normalize_device_evidence | normalize_holder_evidence >"$ROOT/evidence/regression-before.normalized.txt"
+sed "s|$ROOT/regression-after|REGRESSION|g" "$ROOT/evidence/regression-after.txt" | normalize_device_evidence | normalize_holder_evidence >"$ROOT/evidence/regression-after.normalized.txt"
 for file in resources.tsv original-fields.txt notes/open-checkout.md; do
   cmp "$ROOT/regression-before/$file" "$ROOT/regression-after/$file" || fail "regression changed $file"
   pass "legacy $file unchanged"
 done
 diff -u "$ROOT/evidence/regression-before.normalized.txt" "$ROOT/evidence/regression-after.normalized.txt" || fail 'legacy output/exit behavior changed'
-pass '27-command legacy transcript (stdout/stderr/exits) unchanged'
+pass '27-command legacy transcript unchanged except verified v1.7 holder diagnostics'
 expect 3 "$RES" wait iphone15pm --by owner --project test --for never --offline --timeout 0
 expect 4 "$RES" wait iphone11 --by owner --project test --for disconnected --timeout 0
 expect 1 "$RES" return heavy-build --by owner --pid "$$"

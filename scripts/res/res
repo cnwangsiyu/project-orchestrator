@@ -338,6 +338,16 @@ need_id() {
   [ -n "$(reg_line "$1")" ] || die "unknown resource '$1' (see: res status)"
 }
 field() { awk -F'\t' -v k="$2" '$1==k{print $2}' "$LOCKS/$1.d/info" 2>/dev/null || true; }
+holder_details() {
+  local details
+  details=$(awk -F'\t' '
+    $1 == "by" { holder = $2 }
+    $1 == "pid" { pid = $2 }
+    $1 == "since" { since = $2 }
+    END { printf "%s (pid=%s, since=%s)", (holder != "" ? holder : "?"), (pid != "" ? pid : "?"), (since != "" ? since : "?") }
+  ' "$LOCKS/$1.d/info" 2>/dev/null) || { printf 'unknown holder (metadata unavailable)'; return 0; }
+  printf '%s' "$details"
+}
 # Live link of a device: connected | <devicectl state> | not seen. One probe per run.
 # usbmux comes first: devicectl shows iOS < 17 devices only by ECID. The three sources run in
 # parallel; idevice_id (libimobiledevice) is preferred over pymobiledevice3, which is ~1 s slower.
@@ -847,7 +857,7 @@ EOF
 # second coordination lock, stale mutex, or migration of the directory format.
 acquire_attempt() {
   local mode="$1" candidate="$2" build_created=0 lane_created=0
-  local TAKE_CREATED=0 TAKE_TRANSACTION=1 current_id= rc=0 CHECK_FRESH=1
+  local TAKE_CREATED=0 TAKE_TRANSACTION=1 TAKE_FRESH_ONLY=1 current_id= rc=0 CHECK_FRESH=1
   local TRANSACTION_PENDING_SIGNAL=0 TRANSACTION_CLEANING=0 TRANSACTION_COMMITTED=0
   local cleanup_failed=0
   # Keep retry metadata intact when rollback invokes the normal return parser.
@@ -983,7 +993,7 @@ cmd_acquire() {
   [ "$mode" != build ] || need_id heavy-build
   [ -z "$pin" ] || need_id "$pin"
   if [ "$mode" = build ] && [ "$(field heavy-build by)" = "$BY" ]; then
-    die "build slot already held by you; return-build before a fresh acquisition (do not nest wrappers)"
+    die "build slot is held by $(holder_details heavy-build); return-build before a fresh acquisition (do not nest wrappers)"
   fi
   if [ "$mode" = lane ]; then
     for candidate in heavy-lane-1 heavy-lane-2 heavy-lane-3; do
@@ -1159,8 +1169,8 @@ cmd_take() {
   esac
   case "$id" in heavy-*) (machine_thresholds) || return $? ;; esac
   if [ "$id" = heavy-lane-3 ]; then
-    if [ "$(field "$id" by)" = "$BY" ]; then
-      echo "already held by you: $id"; show_notes "$id"
+    if [ "${TAKE_FRESH_ONLY:-0}" != 1 ] && [ "$(field "$id" by)" = "$BY" ]; then
+      echo "already held: $id by $(holder_details "$id")"; show_notes "$id"
       return 0
     fi
     local reading rc=0
@@ -1222,10 +1232,12 @@ cmd_take() {
     fi
     log take "$id" "$BY ($PROJECT${TASK:+/$TASK})" "$PURPOSE${UNTIL:+ · until $UNTIL}$device_log"
     echo "took $id"; show_notes "$id"
-  elif [ "$(field "$id" by)" = "$BY" ]; then
-    echo "already held by you: $id"; show_notes "$id"
+  # A concurrent same-name wrapper may win after the transaction's precheck.
+  # Single-resource take/wait may reuse a hold; build/lane acquisition must own mkdir.
+  elif [ "${TAKE_FRESH_ONLY:-0}" != 1 ] && [ "$(field "$id" by)" = "$BY" ]; then
+    echo "already held: $id by $(holder_details "$id")"; show_notes "$id"
   else
-    echo "res: '$id' is held by $(field "$id" by) ($(field "$id" project)) since $(field "$id" since), until $(field "$id" until | sed 's/^$/?/') — $(field "$id" for)" >&2
+    echo "res: '$id' is held by $(holder_details "$id") ($(field "$id" project)), until $(field "$id" until | sed 's/^$/?/') — $(field "$id" for)" >&2
     echo "res: message that session (SendMessage; for a codex:<thread> holder, its project's orchestrator) and wait; do not use the resource meanwhile" >&2
     return 2
   fi

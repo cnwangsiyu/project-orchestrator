@@ -306,7 +306,13 @@ const transcript = async (script, name) => {
 const before = await transcript(baseline, 'before'), after = await transcript(res, 'after');
 fs.writeFileSync(path.join(root, 'compatibility-before.txt'), before.output);
 fs.writeFileSync(path.join(root, 'compatibility-after.txt'), after.output);
-eq(after.output, before.output);
+// Verify v1.7's holder/PID/since diagnostic, then allow only that known prefix
+// change. The remaining transcript, exit codes, registry and logs still match.
+const legacyHeld = before.output.match(/^res: 'checkout' is held by owner \(scratch\) since ([^,\n]+), until /m);
+ok(legacyHeld, 'legacy held-checkout diagnostic missing');
+const holderPrefix = `res: 'checkout' is held by owner (pid=${process.pid}, since=${legacyHeld[1]}) (scratch), until `;
+ok(after.output.includes(holderPrefix), 'v1.7 held-checkout identity differs');
+eq(after.output.replace(holderPrefix, legacyHeld[0]), before.output);
 for (const file of ['resources.tsv', 'log.tsv', 'notes/checkout.md'])
   eq(fs.readFileSync(path.join(after.dir, file), 'utf8'), fs.readFileSync(path.join(before.dir, file), 'utf8'));
 fs.writeFileSync(path.join(root, 'compatibility.diff'), '');
