@@ -19,7 +19,7 @@ Workers can notify or ask their launching orchestrator without ending a turn. Th
 
 Use ask only when a decision is absent from the brief and changes the next action; state a default.
 Use note for a discovered risk, a scope change, or a milestone the orchestrator needs before completion,
-never routine progress. A blocker that requires the user still ends the turn with BLOCKED. Orchestrators
+never routine progress, tool hiccups (probe timeouts, missing metadata) or status: notes are for risks, scope changes, decisions made, landed commits and findings that change someone else's work. A blocker that requires the user still ends the turn with BLOCKED. Orchestrators
 answer promptly with reply. A question past its timeout has already taken the worker's default, or the
 worker must end BLOCKED if none was provided; a later reply becomes steering if no open question exists.
 The current orchestrator owner, when supplied via --owner or the owner bridge, must match the launcher.
