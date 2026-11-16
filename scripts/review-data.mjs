@@ -34,6 +34,8 @@ const reviewBase = (r) => bareName(r.project ?? '', r.name ?? '')
 const namedReReview = (name = '') => /-(?:re-?review|rereview)(?:-?\d+)?$|-(?:review|r)-?([2-9]\d*)$/i.test(name);
 const requiredReview=mandatoryReview;
 const yieldFrom=reviewYield;
+const recordedYield = (outcomes, evidence) => outcomes.some(o => o.autoRecords > 0)
+  && !outcomes.some(o => ['blocking', 'none'].includes(o.reviewResult)) ? 'UNKNOWN' : yieldFrom(evidence);
 const reviewProfiles=JSON.parse(fs.readFileSync(new URL('../references/project-risk-profiles.json',import.meta.url),'utf8'));
 
 // ---- routing ----
@@ -44,7 +46,8 @@ const routes = all.filter((r) => r.t >= since && isRouteDecision(r));
 // A task counts once: normal records merge, then explicit corrections override supplied fields.
 const allOuts = dedupeOutcomes(all.filter((r) => r.kind === 'outcome'))
   .map((o) => (o.result === 'pass' && o.rounds > 0 ? { ...o, result: 'rework' } : o));
-const outs = allOuts.filter((r) => (r.completedAt ?? r.t) >= since);
+const recentOuts = allOuts.filter((r) => (r.completedAt ?? r.t) >= since);
+const outs = recentOuts.filter(r => !isReviewDecision(r));
 const mouts = outs.map(modelView);
 const correctedValues = (o) => Object.fromEntries(OUTCOME_OVERRIDES.filter((f) => Object.hasOwn(o, f)).map((f) => [f, o[f]]));
 const samePick = (a, b) => ['vendor', 'model', 'effort', 'account'].every((f) => (a?.[f] ?? null) === (b?.[f] ?? null));
@@ -62,7 +65,10 @@ const agg = (key, list = outs) => {
 };
 const outcomes = {
   recorded: outs.length,
-  // Tasks with more than one outcome record (merged above): remind their orchestrator to record each task once, at close.
+  coverage: { auto: recentOuts.filter(o => o.auto === true).length, manual: recentOuts.filter(o => o.auto !== true).length,
+    autoRecords: all.filter(o => o.kind === 'outcome' && o.auto === true && o.t >= since).length,
+    manualRecords: all.filter(o => o.kind === 'outcome' && o.auto !== true && o.t >= since).length },
+  // Multiple records are expected for automatic continuations and manual corrections; tasks still count once.
   duplicates: outs.filter((o) => o.dupes > 1).map((o) => `${o.project}/${o.name} ×${o.dupes}`),
   corrected: allOuts.filter(o => o.correctedAt >= since).map((o) => ({ task: `${o.project}/${o.name}`, completedAt: o.completedAt, correctedAt: o.correctedAt, from: o.correctionFrom, to: correctedValues(o) })),
   corrections: all.filter(o => o.kind === 'outcome' && o.correction && o.t >= since).length,
@@ -143,12 +149,15 @@ const reviewLaunches = (() => {
     const base = reviewBase(r), key = `${r.project ?? '(none)'}/${base || r.name || '(unnamed)'}`;
     const primaryReview = isReviewDecision(r);
     const reReview = primaryReview && (namedReReview(r.name) || (seen.get(key) ?? 0) > 0);
-    const evidence = [...outcomeEvidence(r,base).map(o=>o.reviewResult),r.reviewResult, r.reviewOutcome, r.findings, r.note, r.outcomeNote,
-      ...outcomeEvidence(r, base).flatMap((o) => [o.note, o.notes, o.findings, o.reviewResult])];
+    const seatOutcomes = outcomeEvidence(r, base).filter(o => o.role !== 'second');
+    const evidence = [...seatOutcomes.map(o=>o.reviewResult),r.reviewResult, r.reviewOutcome, r.findings, r.note, r.outcomeNote,
+      ...seatOutcomes.filter(o => o.auto !== true).flatMap((o) => [o.note, o.notes, o.findings, o.reviewResult])];
+    const secondOutcomes = allOuts.filter(o => o.project === r.project
+      && bareName(o.project, o.name) === `${bareName(r.project ?? '', r.name ?? '')}-second`);
     if (primaryReview) launches.push({ t: r.t, project: r.project ?? '(none)', task: key, category: r.category,
-      secondReviewer: false, reReview, required: requiredReview(r), yield: yieldFrom(evidence) });
+      secondReviewer: false, reReview, required: requiredReview(r), yield: recordedYield(seatOutcomes, evidence) });
     if (r.second) launches.push({ t: r.t, project: r.project ?? '(none)', task: key, category: r.category,
-      secondReviewer: true, reReview, required: requiredReview(r), yield: yieldFrom([r.secondReviewResult, r.secondFindings]) });
+      secondReviewer: true, reReview, required: requiredReview(r), yield: recordedYield(secondOutcomes, [...secondOutcomes.map(o => o.reviewResult), r.secondReviewResult, r.secondFindings]) });
     if (primaryReview) seen.set(key, (seen.get(key) ?? 0) + 1);
   }
   return launches;
