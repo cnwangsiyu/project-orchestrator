@@ -1,8 +1,7 @@
-import fs from 'node:fs';
-import path from 'node:path';
 import { findDecision, isRouteDecision, nameMatches, routedSeat, compareLaunch } from './global-rules.mjs';
+import { rulesAcknowledgements } from './rules-acknowledgements.mjs';
 
-export const auditGlobalRules = ({ records, version, since, profiles = {}, ledgerRoot }) => {
+export const auditGlobalRules = ({ records, version, since, profiles = {}, ledgerRoot, shared }) => {
   const recent = records.filter((row) => row.t >= since && row.t <= Date.now());
   const launches = recent.filter((row) => row.kind === 'launch');
   const attributions = records.filter(row => row.kind === 'launch-attribution');
@@ -31,28 +30,10 @@ export const auditGlobalRules = ({ records, version, since, profiles = {}, ledge
     if (route?.security && (launch.account === 'trae' || profiles[launch.account]?.kind === 'trae')
       && /^gpt[- ]/i.test(launch.model ?? '')) traeGPTOnSecurity.push({ ...launch, decisionModel: route.pick?.model });
   }
-  const acknowledgements = [];
-  try { for (const entry of fs.readdirSync(ledgerRoot, { withFileTypes: true })) {
-    if (entry.name === '_shared' || (!entry.isDirectory() && !entry.isSymbolicLink())) continue;
-    if (entry.isSymbolicLink()) {
-      try { if (!fs.statSync(path.join(ledgerRoot, entry.name)).isDirectory()) continue; }
-      catch { acknowledgements.push({ project: entry.name, orchestrator: entry.name, version: null, current: null,
-        status: 'UNKNOWN', ledger: path.join(ledgerRoot, entry.name, 'ledger.md') }); continue; }
-    }
-    const file = path.join(ledgerRoot, entry.name, 'ledger.md');
-    let text; try { text = fs.readFileSync(file, 'utf8'); } catch {
-      acknowledgements.push({ project: entry.name, orchestrator: entry.name, version: null, current: null,
-        status: 'UNKNOWN', ledger: file }); continue;
-    }
-    const plain = text.replaceAll('**', '').replaceAll('`', '');
-    const orchestrator = plain.match(/^\s*(?:[-*+]\s+)?(?:\*\*)?Orchestrator session:\s*(?:\*\*)?\s*(.+)$/mi)?.[1]?.trim().replace(/^"|"$/g, '') ?? entry.name;
-    const ack = [...plain.matchAll(/\brules-ack(?:\*\*)?\s*:?[ \t]*(?:`)?(\d{4}-\d{2}-\d{2}\.\d+)\b/g)].at(-1)?.[1] ?? null;
-    acknowledgements.push({ project: entry.name, orchestrator, version: ack, current: ack === version, status: 'KNOWN', ledger: file });
-  } } catch { acknowledgements.push({ project: '(ledger root)', orchestrator: '(unknown owner)', version: null,
-    current: null, status: 'UNKNOWN', ledger: ledgerRoot }); }
+  const acknowledgements = rulesAcknowledgements({ version, ledgerRoot, shared });
   const byOrchestrator = {};
   const add = (row, violation) => {
-    const owner = row.attributedOwner ?? acknowledgements.find((ack) => ack.project === row.project
+    const owner = row.attributedOwner ?? row.orchestrator ?? acknowledgements.find((ack) => ack.project === row.project
       || (!row.project && typeof row.name === 'string' && row.name.startsWith(`${ack.project}-`)))?.orchestrator
       ?? row.project ?? '(unknown owner)';
     (byOrchestrator[owner] ??= []).push({ violation, name: row.name ?? null, account: row.account ?? null, model: row.model ?? null });
@@ -62,7 +43,7 @@ export const auditGlobalRules = ({ records, version, since, profiles = {}, ledge
   for (const row of traeGPTOnSecurity) add(row, 'TRAE GPT launched on a security decision');
   for (const row of launchMismatches) add(row,`launch mismatch: ${row.differences.map(d=>d.field).join(', ')}${row.blocked?' (blocked; missing recorded personal approval)':''}`);
   for (const row of acknowledgements.filter((ack) => ack.current === false)) add(row, `rules-ack ${row.version ?? 'missing'} != ${version}`);
-  for (const row of acknowledgements.filter(ack => ack.status === 'UNKNOWN')) add(row, 'rules-ack UNKNOWN: ledger unreadable');
+  for (const row of acknowledgements.filter(ack => ack.status === 'UNKNOWN')) add(row, 'rules-ack UNKNOWN: acknowledgement unavailable');
   return { version, unrouted, personalQuotaWithoutOK, traeGPTOnSecurity, launchMismatches, acknowledgements, byOrchestrator,
     coverage: { launches: launches.length, decisionsWithoutLaunchEvidence: recent.filter((row) => isRouteDecision(row)
       && !launches.some((launch) => launch.routeAt === row.t)).length,

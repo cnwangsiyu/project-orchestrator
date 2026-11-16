@@ -5,19 +5,32 @@ its `Worker Rules` section is extracted, not maintained as a second copy. Nothin
 
 ## Injection And Acknowledgement
 
-`rules-digest-hook.mjs` handles SessionStart startup/resume/compact/fork/clear. Detection uses `session_title` (or name/title
-aliases) ending in 主对话 or matching `_shared/orchestrators.txt`, an already-recognized session id, the skill cwd,
-or a skill-load marker in the first/last 16 KiB of an allowed Claude `projects/*.jsonl` transcript. It does not read
-job/login/auth stores or run a CLI/network query. Use named orchestrators for reliable detection; a marker outside
-the bounded transcript windows can be missed on a first injection, and a skill-maintenance session in the skill
-cwd can also match. Cached recognition survives compaction; explicit names/roster remain preferred.
+`rules-digest-hook.mjs` handles SessionStart startup/resume/compact/fork/clear. The existing
+`worker-inbox-hook.mjs` delivers mid-session version changes at Stop or SessionStart, combining pending inbox
+items and rule changes into one block reason. `stop_hook_active` skips all continuation delivery.
+Both reuse `lib/rules-delivery.mjs` and the same orchestrator detection: title/name aliases ending in 主对话,
+`_shared/orchestrators.txt`, cached recognition, the skill cwd, or a skill-load marker in the first/last 16 KiB
+of an allowed Claude `projects/*.jsonl` transcript. Explicit agent/worker identity and exact session matches in
+public `_shared/worker-context/<account>/<thread>.json` exclude workers before those hints. No login/auth stores
+or network queries are read. Prefer named orchestrators; bounded transcript windows can miss a first marker.
 
-Input errors, missing files, contention and write failures are fail-open (exit 0). A hard 700 ms timer bounds stdin
-and all asynchronous filesystem operations, including stalled reads and atomic writes; the template timeout is 2s.
-Reads are bounded and the seen-state lock is nonblocking. `rules-seen.json` atomically records session
-versions and eight recent version snapshots; older comparisons request a full re-read. It records injection,
-NOT acknowledgement. After a version change each orchestrator writes `rules-ack <version>` in its ledger.
-The owner pushes change notes via the secretary for the mini group and directly to MacBook orchestrators.
+The first digest injection contains all rules; subsequent versions deliver only added/changed and removed/replaced
+bullet lines since the seen snapshot. Unchanged rules are omitted. An unchanged SessionStart digest hook only
+reports no changes. Snapshot absence, corrupt seen state, invalid input, I/O failures and lock contention fail open
+(exit 0); they never reset the saved acknowledgement. Hard timers bound all asynchronous I/O: 700 ms for the digest
+hook and 220 ms for the inbox hook, within the existing two-second settings timeouts (and five-second Stop budget).
+
+`_shared/rules-seen.json` is the acknowledgement file, keyed by session id with `host`, `title`, optional `project`,
+`version`, `at` (epoch milliseconds) and cached `orchestrator` recognition. A nonblocking lock serializes merged
+updates. State is staged before output and atomically renamed after successful stdout delivery; a crash or failed
+commit leaves the version eligible for retry. Exit cleanup removes owned temporary files/locks. Keep at most 128
+recent sessions, eight recent snapshots plus snapshots still referenced by those sessions, bounded to 4 MiB.
+Recording the seen version IS acknowledgement; orchestrators no longer write ledger `rules-ack` lines by hand.
+`node scripts/rules-worker-digest.mjs --acks` prints session, host, project/title, version and time (`--json` also
+available). Nightly audits prefer these hook receipts, accepting legacy ledger `rules-ack` records as fallback;
+roster-only sessions and missing evidence remain UNKNOWN. Run the listing on each machine: shared files are local,
+so remote acknowledgements are not inferred. The owner sends separate messages only for required actions such as
+stop/re-route/re-run or a remote checkout update; no settings edits or new hook entries are needed for delivery.
 
 The official Claude hooks reference confirms `hookSpecificOutput.hookEventName="SessionStart"` and
 `additionalContext`; `session_title` is optional. Source: `https://code.claude.com/docs/en/hooks.md`.
@@ -47,7 +60,7 @@ name or task-prefix. Missing decisions warn `unrouted-launch` and append `kind: 
 append `kind: launch` with actual account/model/vendor, timestamp and matched route timestamp. They don't block.
 Pass `--user-ok <actual-card-or-ledger-reference>` after storing the matching scoped task/role/account/model/effort approval. Urgency/reference text alone is not consent; personal Astra/max/Fable/reset remain separate gates. Missing evidence stays unknown.
 `review-data.globalRules` reports unrouted launches, personal-quota launches without recorded OK, TRAE GPT on
-security routes, latest ledger acknowledgements vs the digest version, and pointers to orch-usage flags.
+security routes, shared seen-version acknowledgements (legacy ledger fallback) vs the digest version, and pointers to orch-usage flags.
 
 Full-package build briefs use the wrapper or explicit equivalent res protocol:
 

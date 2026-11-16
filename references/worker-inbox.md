@@ -200,7 +200,7 @@ An acknowledgement means delivered to context, not that the orchestrator read/in
 The Stop hook checks `stop_hook_active` before delivery or any block. It blocks at most once per stop cycle,
 on up to ten pending events or to arm a missing watcher; a continuation leaves newly arrived/remaining events pending.
 Acknowledgement write failure or contention is silent and never falls through to a watcher block.
-It shares the digest hook's orchestrator detection.
+It shares the digest hook's orchestrator detection and delivers pending global-rule changes in the same block reason; successful output records the seen-version acknowledgement in `_shared/rules-seen.json`.
 SessionStart delivers the same inbox as additionalContext and restores the public owner bridge.
 Async disk operations have a 220 ms internal fail-open deadline; cold Node startup is outside that budget and
 is covered by the two-second settings timeout, not a guaranteed sub-300 ms wall time.

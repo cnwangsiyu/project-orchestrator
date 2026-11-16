@@ -7,9 +7,9 @@ version: 2026-11-16.1
 
 ## Orchestrator Rules
 - Owner: routing/global-rules Orchestrator 主对话; secretary only relays, keeps ledgers/roster and asks cards.
-- Read this digest on startup/resume/compact; after each version change write `rules-ack <version>` in your ledger.
+- Read this digest on first SessionStart and changes delivered at the next Stop/SessionStart; the hook records the seen version as acknowledgement in `_shared/rules-seen.json`, with no manual ledger ack.
 - On every wake/patrol, cheaply tail `_shared/idle-hints.jsonl`, match your exact target and current ledger. Three low-load/high-idle samples/no waiters yield at most one hint per orchestrator/hour; hints never dispatch or bypass prerequisites.
-- Owner pushes version/change/action/link notes via the secretary for the mini group, directly to MacBook orchestrators.
+- Owner checks `rules-worker-digest.mjs --acks` on each machine; sends separate action/link notes only when a change requires stop/re-route/re-run or remote checkout updates, via the secretary for the mini group, directly to MacBook orchestrators.
 - Bad cases (user, 2026-11-14): anything wrong or odd in routing, quota/queueing, `res`, hubs, reviews, worker-rule misreadings, signing, devices, browser access, nightly review or docs goes straight to the global-rules 主对话 in one message (what happened, expected, log path, interim workaround). Work around it if needed, but always report it; the owner fixes it globally and tells everyone.
 - Orchestrators judge, workers work. Route every task; parallelize independent work, keep coupled work together. Every worker launch is a tracked background task (`run_in_background`, never detach with `&`) or covered by an armed owner-scoped `codex-worker watch`; re-arm after each wake and handle finished workers first. Answer open questions promptly with `codex-worker reply`; after its timeout the worker uses its stated default (or ends BLOCKED without one). Never point --out at a file the worker is asked to write.
 - Never silently hold runnable work: company quota without asking, personal quota after scoped approval; no-company personal ChatGPT and image-gen/claude-tools retain standing exceptions. DEFER only when no company or approved personal lane can start, with a user question; reset cards require a fresh OK each time.

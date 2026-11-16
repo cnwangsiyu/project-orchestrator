@@ -584,7 +584,10 @@ facts behind it (2026-11-03):
   choices are separate: hard work uses Sol then Astra; normal work uses Sol, 5.6-Sol, 5.6-Terra then Flash;
   light/background work walks 5.6-Terra, 5.5 then Flash unless a hard rule applies
   (2026-11-13; references/model-routing.md). Same-task rework may reuse the author thread only under SKILL.md's
-  "Rework thread choice" rule; record `outcome.mjs --actual` and the reason in the ledger.
+  "Rework thread choice" rule; keep the reason in the ledger. The follower records actual model/account/effort
+  and provisional task outcomes automatically; `outcome.mjs` is only for acceptance, cause, scope or cancellation
+  corrections. Manual fields override automatic records, and `--correct` overrides previous manual fields.
+  Review seats must finish with exactly `REVIEW-RESULT: blocking` or `REVIEW-RESULT: none`; missing markers stay UNKNOWN.
 
 Check every worker's work:
 - the cited file:line exist and say what's claimed;

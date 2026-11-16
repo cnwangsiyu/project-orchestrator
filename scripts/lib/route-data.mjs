@@ -81,7 +81,8 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
   if(live) saveRoutingObservations(cachePath,data);
   if (live) now=Math.max(now,Date.now()); // refreshed samples precede the live decision
   const rows = lines(routeLog), quotaHistory = lines(env.QUOTA_LOG_FILE || path.join(shared, 'quota-log.jsonl'));
-  const outcomes=dedupeOutcomes(rows.filter(r=>r.kind==='outcome'&&r.t<=now));
+  const outcomes=dedupeOutcomes(rows.filter(r=>r.kind==='outcome'&&r.t<=now))
+    .filter(r=>!r.reviewRun && r.role !== 'second' && !['review','review-high','adversarial','second-opinion'].includes(r.category));
   const projectProfiles = read(path.join(root,'references/project-risk-profiles.json'),{});
   const projectConfig = projectProfiles[parsed.project] ?? {};
   const cachedAt = data.checkedAt ?? (env.ROUTE_SNAPSHOT_FILE ? read(env.ROUTE_SNAPSHOT_FILE)?.decisionAt : undefined);

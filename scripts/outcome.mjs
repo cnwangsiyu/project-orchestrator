@@ -5,7 +5,9 @@
 //           [--retries N] [--scope-changes N] [--minutes M] [--reviewed] [--review-result blocking|none] [--note "..."]
 //           [--correct] [--actual vendor:model:effort@account ...]
 //
-// Call it once per task when it is finally accepted or given up (not per round):
+// Routed followers record provisional auto:true outcomes on completion. Use this CLI only for judgement/corrections:
+// manual fields always override automatic records, even newer ones; --correct also overrides prior manual fields.
+// Call it when acceptance/rework cause, scope changes or user cancellation differ from the automatic result:
 //   pass   — accepted at its first check with no fix round (a review verdict of MERGE or MERGE-WITH-NOTES is a pass;
 //            P2 notes are not rework)
 //   rework — accepted after N fix rounds (--rounds N, counting every vendor's rounds)
@@ -89,7 +91,7 @@ if (opts.correct || metadataOnly) {
 }
 if (opts.correct) console.error(`outcome: appending correction for ${opts.name}; supplied fields override the aggregate, including lower or null rounds; existing lines stay intact`);
 else if (metadataOnly) console.error(`outcome: appending metadata for ${opts.name}; existing result and omitted fields stay intact`);
-else if (prior.length) console.error(`outcome: ${opts.name} already has ${prior.length} outcome record(s); normal records keep the most rounds and cannot override a correction. Use --correct to fix recorded fields.`);
+else if (prior.length) console.error(`outcome: ${opts.name} already has ${prior.length} outcome record(s); manual fields override automatic records. Manual duplicates keep the most rounds and cannot override a correction. Use --correct to fix recorded fields.`);
 fs.appendFileSync(ROUTE_LOG, JSON.stringify(rec) + '\n');
 const effective = dedupeOutcomes([...prior, rec])[0], ranFirst = effectiveFirst(effective), ranLast = effectiveAccepted(effective);
 console.log(`${opts.correct ? 'corrected' : 'recorded'} ${opts.project}/${opts.name}: ${effective.result}${effective.rounds ? ` after ${effective.rounds} round(s)` : ''}${effective.cause ? ` (${effective.cause})` : ''}${effective.retries ? `, ${effective.retries} infra re-run(s)` : ''}${effective.scopeChanges ? `, ${effective.scopeChanges} scope change(s)` : ''}`
