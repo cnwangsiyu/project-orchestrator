@@ -239,9 +239,10 @@ remain routing telemetry, not local spending/concurrency caps. Reports must name
   Gemini 3.1 Pro, and `traex app-server` worked unchanged as a codex-worker hub.
 - **Browser on TRAE uses a different bridge.** TRAE still cannot use the ChatGPT Chrome / Computer Use plugins (their
   extension accepts only the OpenAI-signed Codex client, which we do not work around), so desktop `computer-use` and
-  image generation stay on TTADK / ChatGPT / Claude. For `browser` and `ui-browser`, TRAE can instead drive the user's
-  signed-in Chrome through Microsoft's Playwright Extension bridge when the user-pasted token file exists. Its normal
-  `playwright` MCP server remains a separate headless Chrome with no user sign-ins for non-browser work.
+  image generation stay on TTADK / ChatGPT / Claude. For `browser`, TRAE can drive the user's
+  signed-in Chrome through Microsoft's Playwright Extension bridge when the user-pasted token file exists.
+  `ui-browser` uses headless isolated Chrome for public/local UI checks. Other TRAE threads disable Playwright unless
+  the launch explicitly requests a browser with `--browser-origins`.
 - **Playwright Extension setup** (once per machine): install Chrome extension
   `mmlmfjhmonkocbjadbfplnigmagldckm`, copy the token shown by the extension to
   `~/.trae/playwright-extension-token`, and `chmod 600` that file. The token is created and pasted by the user; workers
@@ -251,9 +252,13 @@ remain routing telemetry, not local spending/concurrency caps. Reports must name
 - **Setup** (once per machine): install (`sh -c "$(curl -fsSL https://code.byted.org/api/tos-proxy/download/traex_install.sh)"`),
   `traecli login --git-code` (no browser needed; `--sso` otherwise), then `codex-worker.mjs trae-setup` (registers
   account `trae`, hub port next free; writes into `~/.trae/traecli.toml`: `commit_attribution = ""`, `web_search = "live"`,
-  the playwright MCP server, network in workspace-write, `hatch-pet` off as on the main home; installs the same
+  network in workspace-write, `hatch-pet` off as on the main home; installs the same
   document plugins as the other accounts: documents, pdf, spreadsheets, presentations, template-creator, visualize) and
   `codex-worker.mjs --account trae hub` (starts `traex app-server`). Rerun `trae-setup` after a ChatGPT app update.
+  Setup omits the global headless Playwright block by default. `trae-setup --headless-playwright` opts into it for
+  direct CLI use. To remove the block written by earlier setup versions from an existing `~/.trae/traecli.toml`, rerun
+  `codex-worker.mjs trae-setup --no-headless-playwright` (default setup also removes it). Setup backs up the config
+  first and removes only its marked Playwright block; independently configured servers are preserved.
 - **Same skills and instructions as the other Codex workers** (checked 2026-11-08): TRAE reads `~/.agents/skills`
   itself, and after `trae-setup` the skill list matches a TTADK worker's except TRAE's own two company plugins
   (`traex-guide`, `ai-contribution`, kept). Like every Codex worker it has no global AGENTS.md or Claude memory: the
@@ -399,10 +404,26 @@ new machine, set up the matching bridge for each account as described here.
 
 ### Playwright Extension browser threads on TRAE
 
-For a TRAE `start`/`turn` with `--browser-origins`, codex-worker injects a per-thread `mcp_servers.playwright` override:
+For a TRAE `browser` route or a launch with `--browser-origins` outside `ui-browser`, codex-worker injects a per-thread `mcp_servers.playwright` override:
 our launcher running `npx -y @playwright/mcp@latest --extension --profile-dir-name 'Profile 1'`. No `--allowed-origins` is passed: Playwright's list takes only full origins or wildcard ports (no host globs such as `*.larkoffice.com`) and filters every request a page makes, so signed-in pages fail with `net::ERR_BLOCKED_BY_CLIENT` (live test 2026-11-14).
-`--chrome-profile-dir` changes the profile. The per-thread server is our launcher `scripts/playwright-extension-mcp.mjs` (run with node), which reads the token file itself and passes the token to `@playwright/mcp` only through that child's environment. The token is never in the hub's environment (every worker shell inherits that), on argv, in TOML or in logs, so adding or replacing the token needs no hub restart. The persistent
-headless `[mcp_servers.playwright]` written by `trae-setup` is unchanged and remains the non-browser default.
+`--chrome-profile-dir` changes the profile. The per-thread server is our launcher `scripts/playwright-extension-mcp.mjs` (run with node), which reads the token file itself and passes the token to `@playwright/mcp` only through that child's environment. The token is never in the hub's environment (every worker shell inherits that), on argv, in TOML or in logs, so adding or replacing the token needs no hub restart.
+
+For `ui-browser`, the per-thread server instead runs `npx -y @playwright/mcp@latest --browser chrome --headless --isolated`.
+It needs no running signed-in Chrome or extension token. Other TRAE starts and resumes pass `enabled: false` for
+`mcp_servers.playwright`, so an existing global headless block does not start a server for those threads. Browser modes
+pass `enabled: true`, including when a global server is disabled. Every override includes a command and arguments:
+TRAE rejects a disabled entry without a transport when no global Playwright server exists. The saved launch's route
+arguments or routed-seat category and browser flags determine the same mode on subsequent `turn` calls.
+
+Configuration evidence (TRAE CLI 0.214.1, 2026-11-16): in a throwaway `HOME`/`TRAE_HOME`/`CODEX_HOME`,
+`traex mcp get playwright --json` reported `enabled: true` for a configured fixture command;
+`traex mcp get playwright --json -c mcp_servers.playwright.enabled=false` reported `enabled: false` and retained its
+transport. The installed CLI's `app-server generate-json-schema --out <fixture-dir>` exposes arbitrary `config`
+objects in both `ThreadStartParams` and `ThreadResumeParams`. Launcher fixtures verify the override on both RPCs.
+An isolated Codex CLI 0.167.0 app-server control with a fixture MCP command reported `runtimeStatus: disabled` and zero fixture
+server starts for `thread/start` with `config.mcp_servers.playwright.enabled: false`; enabling it launched the fixture.
+An isolated TRAE app-server `thread/start` probe stopped at `No Trae auth token available for Trae model fetch`;
+no real hub or credentials were used, so live TRAE process suppression has not been measured in this change.
 
 The worker uses Playwright MCP's `browser_navigate`, `browser_snapshot`, `browser_click`, `browser_type`,
 `browser_fill_form`, `browser_take_screenshot`, and other `browser_*` tools. It does not use the ChatGPT runtime or

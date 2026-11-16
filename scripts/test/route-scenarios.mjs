@@ -1961,6 +1961,7 @@ for (const [sc, args] of ERRORS) {
   } catch (e) { fail++; console.log(`FAIL defensive route log: ${e.message}`); }
 }
 fs.rmSync(tmp, { recursive: true, force: true });
-fs.writeFileSync(process.env.ROUTE_EXPECTATION_REPORT??'/private/tmp/swap-route-expectation-changes.json',JSON.stringify(expectationChanges,null,2));
+// Reports are opt-in so fixture runs do not overwrite another task's temporary report.
+if(process.env.ROUTE_EXPECTATION_REPORT)fs.writeFileSync(process.env.ROUTE_EXPECTATION_REPORT,JSON.stringify(expectationChanges,null,2));
 console.log(fail ? `\n${fail} failing` : '\nall pass');
 process.exit(fail ? 1 : 0);

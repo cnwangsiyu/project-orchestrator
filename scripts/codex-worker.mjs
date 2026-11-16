@@ -12,7 +12,7 @@ import {modelPreference} from './lib/pipeline/policy.mjs';
 //   codex-worker browser-setup [--account NAME]                           (Chrome + Computer Use config for that home)
 //   codex-worker ttadk-setup [--name ttadk] [--home DIR] [--port N] [--search-port N]   (the TTADK gateway as an account)
 //   codex-worker [--account ttadk] proxy                                   (start/check TTADK's local proxy: web search)
-//   codex-worker trae-setup [--name trae] [--port N]                      (TRAE CLI as an account: its app-server is the hub)
+//   codex-worker trae-setup [--name trae] [--port N] [--headless-playwright | --no-headless-playwright]
 //   codex-worker --account trae note-failure [--model M] "<error>"        (record a failed traecli exec run; see lib/trae-health.mjs)
 //   codex-worker --account trae probe --model M                          (recovery probe of a paused model family; lib/state.mjs starts it)
 //   codex-worker wait   --thread ID [--log FILE] [--out FILE]            (start/turn/wait take --stall-min M, default 30)
@@ -87,7 +87,7 @@ const account = ai >= 0 ? argv.splice(ai, 2)[1] : ['note', 'ask'].includes(argv[
 const earlyOpts = {};
 for (let i = 1; i < argv.length; i++) if (argv[i].startsWith('--')) {
   const key = argv[i].slice(2);
-  earlyOpts[key] = key === 'force-large' || key === 'background' || key === 'no-browser-preflight' || (key === 'require-model' && !['on', 'off'].includes(argv[i + 1]))
+  earlyOpts[key] = key === 'force-large' || key === 'background' || key === 'no-browser-preflight' || key === 'headless-playwright' || key === 'no-headless-playwright' || (key === 'require-model' && !['on', 'off'].includes(argv[i + 1]))
     || argv[i + 1] === undefined || argv[i + 1].startsWith('--') ? true : argv[++i];
 }
 if (argv[0] === 'turn' && typeof earlyOpts.thread === 'string') {
@@ -162,6 +162,7 @@ const [cmd, ...rest] = argv;
 const opts = { ...earlyOpts }; const pos = [];
 for (let i = 0; i < rest.length; i++) {
   if (rest[i] === '--no-browser-preflight') opts['no-browser-preflight'] = true;
+  else if (rest[i] === '--headless-playwright' || rest[i] === '--no-headless-playwright') opts[rest[i].slice(2)] = true;
   else if (rest[i] === '--wake') opts.wake = true;
   else if (rest[i] === '--force-large') opts['force-large'] = true;
   else if (rest[i] === '--background') opts.background = true;
@@ -520,8 +521,8 @@ ${keep ? `\n# --- previous config ---\n${keep}` : ''}`);
 // official agent CLI, a fork of Codex: `traex app-server` speaks the hub protocol, `traecli exec` mirrors `codex exec`,
 // and its GPT-6.1-Sol gets the official Codex prompt and tools (compared 2026-11-08). Its model pool is separate from
 // TTADK's. It has no ChatGPT browser/computer-use (the Chrome extension accepts only the OpenAI-signed client) and no
-// image generation; it gets Playwright MCP for its own headless Chrome. This writes into ~/.trae/traecli.toml: commits
-// without TRAE's co-author line, live web search, the playwright MCP server, and network in workspace-write (as TTADK);
+// image generation; the launcher configures Playwright per thread. Setup writes into ~/.trae/traecli.toml: commits
+// without TRAE's co-author line, live web search, optional global Playwright, and network in workspace-write (as TTADK);
 // then registers the account.
 // A traecli exec run bypasses this script: the orchestrator records its failure here (route.mjs says so).
 // Recovery probe (lib/trae-health.mjs): one tiny read-only turn on the paused family's model via traecli exec.
@@ -548,6 +549,7 @@ if (cmd === 'note-failure') {
   process.exit(0);
 }
 if (cmd === 'trae-setup') {
+  if (opts['headless-playwright'] && opts['no-headless-playwright']) die('choose --headless-playwright or --no-headless-playwright');
   const name = typeof opts.name === 'string' ? opts.name : 'trae';
   let bin = '';
   try { bin = execFileSync('/bin/zsh', ['-lc', 'command -v traex || ls ~/.local/bin/traex'], { encoding: 'utf8' }).trim().split('\n')[0]; } catch {}
@@ -563,13 +565,15 @@ if (cmd === 'trae-setup') {
   const strip = (t, a, b) => { const i = t.indexOf(a); if (i < 0) return t; const j = t.indexOf(b, i); return t.slice(0, i) + (j >= 0 ? t.slice(j + b.length).replace(/^\n/, '') : ''); };
   const TA = '# --- worker settings (codex-worker trae-setup) ---', TB = '# --- end worker settings ---';
   const MA = '# --- playwright MCP (codex-worker trae-setup) ---', MB = '# --- end playwright MCP ---';
-  toml = strip(strip(toml, TA, TB), MA, MB);
+  const WA = '# --- worker tools (codex-worker trae-setup) ---', WB = '# --- end worker tools ---';
+  toml = strip(strip(strip(toml, TA, TB), MA, MB), WA, WB);
   // Top-level keys must come before every [table].
   toml = `${TA}\ncommit_attribution = ""\nweb_search = "live"\n${TB}\n${toml}`;
   // hatch-pet (a Codex pet toy in the shared skills dir) is off on the main home too.
   const pet = path.join(os.homedir(), '.agents', 'skills', 'hatch-pet', 'SKILL.md');
   const petOff = fs.existsSync(pet) ? `\n[[skills.config]]\npath = "${pet}"\nenabled = false\n` : '';
-  toml = `${toml.replace(/\n*$/, '\n')}\n${MA}${petOff}\n[mcp_servers.playwright]\ncommand = "npx"\nargs = ["-y", "@playwright/mcp@latest", "--browser", "chrome", "--headless", "--isolated"]\nstartup_timeout_sec = 120\ndefault_tools_approval_mode = "approve"\n\n[sandbox_workspace_write]\nnetwork_access = true\n${MB}\n`;
+  toml = `${toml.replace(/\n*$/, '\n')}\n${WA}${petOff}\n[sandbox_workspace_write]\nnetwork_access = true\n${WB}\n`;
+  if (opts['headless-playwright']) toml += `\n${MA}\n[mcp_servers.playwright]\ncommand = "npx"\nargs = ["-y", "@playwright/mcp@latest", "--browser", "chrome", "--headless", "--isolated"]\nstartup_timeout_sec = 120\ndefault_tools_approval_mode = "approve"\n${MB}\n`;
   if (fs.existsSync(cfg)) fs.copyFileSync(cfg, `${cfg}.bak-worker-${Date.now()}`);
   fs.writeFileSync(cfg, toml);
   // The document plugins the other Codex accounts have (browser-setup): skills plus the primary runtime's shared
@@ -595,7 +599,7 @@ if (cmd === 'trae-setup') {
   reg[name] = { ...(reg[name] ?? {}), home, hub: `ws://127.0.0.1:${port}`, kind: 'trae', bin, models: Object.keys(modelIds), modelIds, search: true };
   writeAccounts(reg);
   console.log(`TRAE account ${name}: hub ws://127.0.0.1:${port} (traex app-server); models: ${ids.join(', ')}`);
-  console.log(`config: ${cfg} (no co-author line, live web search, playwright MCP, network in workspace-write, hatch-pet off)`);
+  console.log(`config: ${cfg} (no co-author line, live web search, ${opts['headless-playwright'] ? 'global headless Playwright opted in' : 'Playwright configured per thread'}, network in workspace-write, hatch-pet off)`);
   console.log(`plugins: ${plugins.join(', ') || 'none'}${missing.length ? `; NOT installed: ${missing.join('; ')}` : ''}`);
   console.log(`start its hub:   node ${process.argv[1]} --account ${name} hub`);
   process.exit(0);
@@ -637,7 +641,10 @@ const CU_APPS = typeof opts['computer-use-apps'] === 'string' ? opts['computer-u
 const BU_ORIGINS = typeof opts['browser-origins'] === 'string' ? opts['browser-origins'].split(',').map((x) => x.trim()).filter(Boolean) : [];
 const PLAYWRIGHT_EXTENSION_TOKEN_FILE = process.env.PLAYWRIGHT_EXTENSION_TOKEN_FILE
   || path.join(os.homedir(), '.trae', 'playwright-extension-token');
-const TRAE_BROWSER_REQUEST = PROF?.kind === 'trae' && BU_ORIGINS.length > 0 && (cmd === 'start' || cmd === 'turn');
+const ROUTE_CATEGORY = ROUTE_ARGS?.[0] ?? routedMetadata?.category;
+const TRAE_HEADLESS_BROWSER = PROF?.kind === 'trae' && ROUTE_CATEGORY === 'ui-browser' && ['start', 'turn'].includes(cmd);
+const TRAE_BROWSER_REQUEST = PROF?.kind === 'trae' && !TRAE_HEADLESS_BROWSER && (BU_ORIGINS.length > 0 || ROUTE_CATEGORY === 'browser') && ['start', 'turn'].includes(cmd);
+if (TRAE_BROWSER_REQUEST && !BU_ORIGINS.length) die('TRAE browser threads need --browser-origins to scope signed-in Chrome access', 1);
 const TRAE_EXTENSION_BROWSER = TRAE_BROWSER_REQUEST && fs.existsSync(PLAYWRIGHT_EXTENSION_TOKEN_FILE);
 const CHROME_PROFILE_DIR = typeof opts['chrome-profile-dir'] === 'string' ? opts['chrome-profile-dir'].trim() : 'Profile 1';
 if (opts['chrome-profile-dir'] !== undefined && !CHROME_PROFILE_DIR) die('--chrome-profile-dir needs a non-empty Chrome profile directory name');
@@ -662,8 +669,12 @@ const TRAE_PLAYWRIGHT_ARGS = TRAE_EXTENSION_BROWSER ? [path.join(path.dirname(fi
 // No --allowed-origins (live test 2026-11-14): @playwright/mcp 0.0.85 accepts only full origins or wildcard ports, not
 // host globs like *.larkoffice.com, and the filter applies to every request a page makes, so a signed-in Lark page failed
 // with net::ERR_BLOCKED_BY_CLIENT. Scope is stated in the worker's instructions and the brief instead.
-const TRAE_PLAYWRIGHT_SERVER = TRAE_EXTENSION_BROWSER ? { command: process.execPath, args: TRAE_PLAYWRIGHT_ARGS,
+// A transport is required even with enabled=false (TRAE CLI 0.214.1), including on fresh homes without a global server.
+const TRAE_PLAYWRIGHT_SERVER = PROF?.kind === 'trae' ? { enabled: TRAE_EXTENSION_BROWSER || TRAE_HEADLESS_BROWSER,
+  command: TRAE_EXTENSION_BROWSER ? process.execPath : 'npx',
+  args: TRAE_EXTENSION_BROWSER ? TRAE_PLAYWRIGHT_ARGS : ['-y', '@playwright/mcp@latest', '--browser', 'chrome', '--headless', '--isolated'],
   startup_timeout_sec: 120, default_tools_approval_mode: 'approve' } : null;
+const TRAE_MCP_CONFIG = TRAE_PLAYWRIGHT_SERVER ? { mcp_servers: { playwright: TRAE_PLAYWRIGHT_SERVER } } : null;
 if (TRAE_BROWSER_REQUEST && !TRAE_EXTENSION_BROWSER)
   die('BLOCKED browser preflight: Playwright Extension pairing file is missing. Pair the extension in Chrome and configure PLAYWRIGHT_EXTENSION_TOKEN_FILE.', 1);
 const originAllowed = (origin) => {
@@ -738,7 +749,7 @@ const extensionConnect = () => new Promise(resolve => {
   send({jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:'2024-11-05',capabilities:{},clientInfo:{name:'browser-preflight',version:'1'}}});
 });
 const browserPreflight = async () => {
-  if(opts['no-browser-preflight'] || !BU_ORIGINS.length || !['start','turn'].includes(cmd)) return;
+  if(opts['no-browser-preflight'] || TRAE_HEADLESS_BROWSER || !BU_ORIGINS.length || !['start','turn'].includes(cmd)) return;
   // Only checks this client can make truthfully. The launcher runs in the orchestrator's process context, which on this
   // Mac cannot read Chrome's profile (macOS privacy), while the hub that spawns the browser tools can — a client-side
   // extension probe reported a working TRAE Playwright lane as unreachable (live test 2026-11-15). So: is Chrome
@@ -1291,14 +1302,17 @@ try {
     // approvals itself. So these threads turn that plugin off (node_repl + the chrome plugin remain, the path verified on
     // TTADK and b) and route approvals to this client, which answers them from --browser-origins / --computer-use-apps.
     // Per thread only: the app keeps using its plugin. (A dotted "plugins.…" key doesn't take effect; the nested form does.)
-    const browserThread = CU_APPS.length > 0 || BU_ORIGINS.length > 0;
+    const browserThread = CU_APPS.length > 0 || BU_ORIGINS.length > 0 || TRAE_HEADLESS_BROWSER;
     // How to reach Chrome and the desktop, told to the worker directly (2026-11-10: a MacBook worker followed a Claude
     // skill, looked for mcp__claude-in-chrome__* tools that a Codex session doesn't have, and stopped).
     // The chrome plugin must match the installed ChatGPT app, whose node_repl and browser service it talks to: the copy the
     // app unpacks itself (bundled-marketplaces) comes first; a cached "latest" can be newer than an old app (2026-11-10:
     // app 26.1007 on the MacBook — tabs opened, then every page call failed with "reading 'timeoutMs'").
-    const chromePlugin = browserThread && !TRAE_EXTENSION_BROWSER ? findChromePlugin() : null;
-    const browserHowTo = !browserThread ? null : TRAE_EXTENSION_BROWSER ? [
+    const chromePlugin = browserThread && !TRAE_EXTENSION_BROWSER && !TRAE_HEADLESS_BROWSER ? findChromePlugin() : null;
+    const browserHowTo = !browserThread ? null : TRAE_HEADLESS_BROWSER ? [
+      'Use Playwright MCP browser_* tools with headless isolated Chrome for public/local UI checks. This browser has no user sign-ins.',
+      `Visit only the public/local sites in the task brief${BU_ORIGINS.length ? ` within these allowed sites: ${BU_ORIGINS.join(', ')}` : ''}. Report BLOCKED if the task requires a signed-in console.`,
+    ].join('\n') : TRAE_EXTENSION_BROWSER ? [
       'Browser access in this TRAE thread goes through the Playwright MCP server connected to the user\'s Chrome by the Playwright Extension.',
       'Use the Playwright MCP tools: browser_navigate, browser_snapshot, browser_click, browser_type, browser_fill_form, browser_take_screenshot, and the other browser_* tools exposed by that server.',
       `Navigate only to sites the task brief needs, and only within these allowed sites (host patterns): ${BU_ORIGINS.join(', ')}. Nothing enforces this list technically: if the task seems to need another site, or a page redirects you outside it, stop and report BLOCKED with the URL instead of continuing. Never open the user's other tabs, mail, chats or personal pages.`,
@@ -1309,12 +1323,13 @@ try {
       CU_APPS.length ? `For desktop apps, in node_repl js: globalThis.sky = (await import("@oai/sky")).sky; then follow its documentation. Apps you may use: ${CU_APPS.join(', ')}; others are declined.` : null,
       'Do not look for mcp__claude-in-chrome__* tools, ToolSearch, or skills written for Claude Code (chrome-browser, claude-in-chrome): they do not exist in this session. If node_repl or the browser is not reachable, report BLOCKED with the exact error.',
     ].filter(Boolean).join('\n');
-    const browserConfig = TRAE_EXTENSION_BROWSER ? { mcp_servers: { playwright: TRAE_PLAYWRIGHT_SERVER } } : browserThread ? { plugins: { 'unified-computer-use@openai-bundled': { enabled: false } } } : null;
+    const browserConfig = browserThread && !TRAE_EXTENSION_BROWSER && !TRAE_HEADLESS_BROWSER
+      ? { ...TRAE_MCP_CONFIG, plugins: { 'unified-computer-use@openai-bundled': { enabled: false } } } : TRAE_MCP_CONFIG;
     const digest = loadDigest();
     const th = await call('thread/start', {
       cwd: path.resolve(opts.cwd), model: opts.model, sandbox: opts.sandbox, approvalPolicy: APPROVAL_POLICY,
       developerInstructions: [browserHowTo, workerInstructions(digest), reviewHowTo].filter(Boolean).join('\n'),
-      ...(browserThread && !TRAE_EXTENSION_BROWSER ? { approvalsReviewer: 'user' } : {}),
+      ...(browserThread && !TRAE_EXTENSION_BROWSER && !TRAE_HEADLESS_BROWSER ? { approvalsReviewer: 'user' } : {}),
       ...(browserConfig ? { config: browserConfig } : {}),
     });
     const threadId = th.thread?.id ?? th.threadId;
@@ -1336,7 +1351,7 @@ try {
   } else if (cmd === 'turn') {
     if (!opts.thread || !text) die('turn needs --thread and a prompt');
     const talkback = talkbackContext(opts.thread);
-    const config = { ...talkback.config, ...(TRAE_EXTENSION_BROWSER ? { mcp_servers: { playwright: TRAE_PLAYWRIGHT_SERVER } } : {}) };
+    const config = { ...talkback.config, ...TRAE_MCP_CONFIG };
     const resumedDigest=loadDigest();
     const resumed = await call('thread/resume', { threadId: opts.thread, model: opts.model, config,
       developerInstructions:[workerInstructions(resumedDigest), talkback.instructions, reviewHowTo].filter(Boolean).join('\n') }).catch(() => null);
