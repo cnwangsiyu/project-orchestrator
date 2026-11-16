@@ -53,7 +53,8 @@ try {
     if (task.flags.json) console.log(JSON.stringify(out));
     else {
       console.log(`${out.kind.toUpperCase()} ${out.category}${out.pick?` → ${out.pick.model} ${out.pick.effort} on ${out.pick.account??'claude'}`:''}`);
-      if(out.pick?.command) console.log(`  launch: ${out.pick.command}`);
+      // A --dry preview records no route decision: launching from it is an unrouted launch (Lynx T90, 2026-11-15).
+      if(out.pick?.command) console.log(task.flags.dry ? `  launch (PREVIEW ONLY, not a route: run again without --dry and launch from that output): ${out.pick.command}` : `  launch: ${out.pick.command}`);
       if(out.secondOpinion) console.log(`  + second opinion: ${out.secondOpinion.model} ${out.secondOpinion.effort} on ${out.secondOpinion.account??'claude'}${out.secondOpinion.command?` — ${out.secondOpinion.command}`:' (blocked)'}`);
       if(out.redeemFirst) console.log(`  first: ${JSON.stringify(out.redeemFirst)}`);
       for(const key of ['why','needsUserOK','tellUser','notes']) for(const line of out[key]) console.log(`  ${key}: ${line}`);

@@ -54,7 +54,7 @@ export function presentRoute(plan, view, context) {
     const relevant=balanceCandidates.find(b=>b.model===c.modelId);
     why.push(relevant?`stays on TTADK: ${relevant.model}: ${relevant.queued?'queue observed':relevant.congestion==='high'?'model congested':!relevant.freeNow?'no demonstrated immediate uncongested TRAE lane':'TTADK quota expiry or required capability'}`:`stays on TTADK: ${c.modelId} has no qualified same-model TRAE lane for the required capability/catalog.`);
   }
-  if(f.dry) notes.push(`--dry: cached snapshot only; no live refresh/probes. Cache age: ${context.cacheAgeMs===null||context.cacheAgeMs===undefined?'UNKNOWN':`${Math.round(context.cacheAgeMs/1000)} seconds`}.`);
+  if(f.dry) notes.push(`--dry: preview only — no route decision is recorded, so do not launch from this output; run again without --dry. State is read as a real route would read it. Cache age: ${context.cacheAgeMs===null||context.cacheAgeMs===undefined?'UNKNOWN':`${Math.round(context.cacheAgeMs/1000)} seconds`}.`);
   if(context.refreshRequired) notes.push('--fresh: account status refreshed through authenticated read-only interfaces.');
   const staleAccounts=snapshot.accounts.filter(a=>a.auth.source==='last-good-stale').map(a=>a.id);
   if(staleAccounts.length) why.push(`Status read incomplete: retained last-good stale observations for ${staleAccounts.join(', ')}; original sample ages and admission checks remain in force.`);
