@@ -16,6 +16,7 @@ try {
   if (!input || input.hook_event_name !== 'SessionStart' || !['startup', 'resume', 'compact', 'fork', 'clear'].includes(input.source)
     || typeof input.session_id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$/.test(input.session_id)
     || ['__versions', '__proto__', 'constructor', 'prototype'].includes(input.session_id)) process.exit(0);
+  await import('./skill-autoupdate.mjs').then(m => m.autoupdate()).catch(() => {});
   const file = path.join(rulesShared(), 'rules-seen.json');
   let seen;
   try { seen = JSON.parse(await readSmall(file, 4 * 1024 * 1024)); } catch { seen = {}; }
