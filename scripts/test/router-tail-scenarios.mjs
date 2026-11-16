@@ -75,16 +75,9 @@ try {
   assert.match(cli(['claude-tools']).notes.join('\n'),/no trusted project root configured/);
   console.log('PASS BC-13/18/19/22/48 checklist, trusted launch, origins, release tier and backup notes');
 
-  fs.writeFileSync(env.QUOTA_CACHE,JSON.stringify({checkedAt:Date.now()-120000,codexAccounts:[{name:'ttadk',kind:'ttadk',live:false}],claude:[]}));
-  fs.writeFileSync(env.CODEX_ACCOUNTS,JSON.stringify({ttadk:{kind:'ttadk',home:tmp}}));
-  const before=fs.readFileSync(env.QUOTA_CACHE,'utf8');let probes=0;
-  const dryEnv={...env};delete dryEnv.ROUTE_NOW;delete dryEnv.ROUTE_SNAPSHOT_FILE;
-  const task=parseTaskSpec(['analysis','--dry','--fresh'],{taskId:'dry',requestId:'dry',sandboxCeiling:'danger-full-access'});
-  const context=acquireRoute(task,{env:dryEnv,root,readAccount:()=>{probes++;throw Error('live probe forbidden');},readClaude:()=>{probes++;throw Error('live probe forbidden');}});
-  assert.equal(probes,0);assert.equal(fs.readFileSync(env.QUOTA_CACHE,'utf8'),before);assert.equal(context.refreshRequired,false);assert.ok(context.cacheAgeMs>=120000);
-  assert.match(renderPlan(routePure(context.task,context.snapshot),{...context,digest:{version:'fixture',worker:''}}).notes.join('\n'),/cached snapshot only.*Cache age:/);
-  assert.equal(fs.existsSync(path.join(tmp,'route-rotation.txt')),false);
-  console.log('PASS AU-7 dry/fresh performs no acquisition or cache/rotation writes and prints cache age');
+  // AU-7 ("--dry never refreshes") was withdrawn by the owner on 2026-11-15: a preview must read state like a real
+  // route, otherwise it shows lanes the real route would not. --dry only skips logging and rotation.
+  console.log('PASS AU-7 withdrawn: --dry reads state like a real route');
 
   const owner='01234567-89ab-4cde-8123-456789abcdef';
   record(owner,'running','anchor');

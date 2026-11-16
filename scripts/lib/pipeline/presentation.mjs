@@ -150,7 +150,7 @@ export function presentRoute(plan, view, context) {
     if(['browser','ui-browser'].includes(t.category)&&c.family==='claude') notes.push('Claude in Chrome: select_browser, then work only in task-created tabs; never switch to another connected browser.');
     if(t.writes||['browser','computer-use'].includes(t.category)) notes.unshift("brief: include the safety clauses — never overwrite, delete or move files outside the task's scope (user files, uncommitted changes, shared headers/configs); restore anything touched by mistake byte-for-byte and report it");
     notes.push(`Global worker rules ${digest.version}: ${digest.worker}`);
-    notes.push('brief: include the credential clause — never read, copy, load or inject LOGIN material, CLI auth files, sessions, cookies, keys or browser profiles. Use installed, already signed-in CLIs through normal commands; an authentication error is BLOCKED. '+
+    notes.push('brief: include the credential clause — never read, copy, load or inject LOGIN material, CLI auth files, sessions, cookies, keys or browser profiles. Use installed, already signed-in CLIs through normal commands, and let ssh/git use the normal ~/.ssh config and default keys (never override GIT_SSH_COMMAND/-F/IdentityFile to avoid them); an authentication error is BLOCKED. '+
       (hasSigning?'Registered own-test packages use ordinary full-access Codex-family signing workers; identities.json and registry.json are read-only to workers, unlisted identities or packages are BLOCKED. ':'')+
       'never put internal code, logs or private material into public search queries.');
     if(t.writes) notes.push('back up app data before any destructive step; restore accidental out-of-scope changes byte-for-byte.');

@@ -56,7 +56,9 @@
       "facebook.com",
       "*.facebook.com"
     ],
-    "browserOriginsNote": "example, edit as needed"
+    "browserOriginsNote": "example, edit as needed",
+    "root": "/Volumes/Code",
+    "rootNote": "Trusted Claude launch directory on the MacBook (reported by the acq orchestrator 2026-11-15); route.mjs starts Claude workers from here."
   },
   "autotrader": {
     "profile": "no-review",

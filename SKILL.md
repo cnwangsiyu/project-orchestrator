@@ -237,7 +237,7 @@ DeepSeek worker copied bytedcli's TikTok SSO session file into its automation br
 login; the user had to sign in again; the second is the user's 2026-11-13 test-signing authorization):
 - "Forbidden for every worker: never read, copy, load or inject LOGIN material — login sessions, SSO/session
   tokens, cookies, CLI auth files such as bytedcli's, API keys, .netrc, browser profiles, or other people's/other
-  apps' keychain items — and never use any way of getting past a login. Running an installed, already signed-in CLI (for example bytedcli) through its normal commands is allowed and expected; what is forbidden is reading, copying, exporting or injecting its auth files or session. Stop only when the command itself reports an authentication error. Where a login or authorization is needed,
+  apps' keychain items — and never use any way of getting past a login. Running an installed, already signed-in CLI (for example bytedcli) through its normal commands is allowed and expected; what is forbidden is reading, copying, exporting or injecting its auth files or session. Stop only when the command itself reports an authentication error. The same holds for ssh and git: let them use the user's normal ~/.ssh configuration and default keys through their own commands, and do not override GIT_SSH_COMMAND, `ssh -F` or IdentityFile to avoid them; what is forbidden is reading, copying, printing or exporting key material yourself. Where a login or authorization is needed,
   stop and report BLOCKED with what needs signing in."
 - "Allowed: sign OUR OWN TEST packages only when they are registered by manifest and hash in
   `~/.claude/orchestrator/_shared/user-signing/registry.json`, using only identities on the user-approved allowlist
