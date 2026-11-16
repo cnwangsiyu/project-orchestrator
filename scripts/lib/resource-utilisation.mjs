@@ -6,7 +6,10 @@ const validBucket = (q) => q && finite(q.used) && q.used >= 0 && finite(q.limit)
 
 export function quotaUtilisation(records, { since = -Infinity, now = Date.now(), maxResetDistanceMs = 1800000 } = {}) {
   const buckets = new Map(), resets = [];
-  for (const s of [...records].filter((s) => finite(s.t) && s.t <= now).sort((a, b) => a.t - b.t)) {
+  // Older captures stamped the request start, before their TRAE reading. Preserve those reset samples too.
+  const captures = records.map(s => ({ ...s, t: finite(s.t)
+    ? Math.max(s.t, finite(s.trae?.sampledAt) ? s.trae.sampledAt : s.t) : s.t }));
+  for (const s of captures.filter((s) => finite(s.t) && s.t <= now).sort((a, b) => a.t - b.t)) {
     const entries = [];
     if (s.ttadk?.name) entries.push({ vendor: 'ttadk', account: s.ttadk.name, model: null, q: s.ttadk, sampledAt: s.t });
     if (s.trae?.name) for (const [model, q] of Object.entries(s.trae.daily ?? {}))

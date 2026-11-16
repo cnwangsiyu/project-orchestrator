@@ -9,6 +9,7 @@ import { readPause, readPoolPauses, readModelPauses, liftAuthPause, poolOf, clai
 import { modelPreference } from './pipeline/policy.mjs';
 import { BALANCE, readTraeModels, freshLoad, readQueueState, companySnapshot, readQuotaHistory, ttadkBurn, freshTraeQuota, ttadkExpiringUnused, TTADK_EXPIRY_HINT } from './company-load.mjs';
 import { withLock, writeJson as atomicJson } from './shared-file.mjs';
+import { readHubState } from './hub-state.mjs';
 export { withLock } from './shared-file.mjs';
 
 export const now = Date.now();
@@ -545,7 +546,7 @@ export const isReviewDecision = (r) => ['review', 'review-high', 'second-opinion
 const bare = (project, name) => (name.startsWith(`${project}-`) ? name.slice(project.length + 1) : name);
 // Model comparisons count code rework only: rework whose recorded cause is spec, process, infra or scope is not the
 // model's (rework retro 2026-11-10, user-approved). Records without a cause (older ones) count as before.
-export const modelView = (o) => (o.result === 'rework' && o.cause && o.cause !== 'code' ? { ...o, result: 'pass', rounds: 0 } : o);
+export const modelView = (o) => (o.result === 'rework' && o.cause && o.cause !== 'code' ? { ...o, nonCodeRework: true, rounds: null } : o);
 export const effectiveFirst = (o) => o.actual?.[0] ?? o.first;
 export const effectiveAccepted = (o) => o.actual?.at(-1) ?? o.accepted;
 // ---- TRAE CLI vs native Codex (user, 2026-11-08: measure whether TRAE's Codex fork does worse with the same model) ----
@@ -568,7 +569,7 @@ export const fisherExact = (a, b, c, d) => {
 // Compare outcomes of the same model on TRAE vs native Codex, by first attempt: per model, and per model + category.
 // Only like-for-like rows are compared (same model, same category); a verdict needs at least MIN tasks on each side.
 export const compareHarness = (outs, profiles = {}, MIN = 8) => {
-  const cell = () => ({ tasks: 0, pass: 0, rework: 0, fail: 0, rounds: [], minutes: [] });
+  const cell = () => ({ tasks: 0, pass: 0, rework: 0, nonCodeRework: 0, fail: 0, rounds: [], minutes: [] });
   const groups = {}, mixed = [];
   for (const o of outs) {
     const sequence = o.actual ?? [o.first];
@@ -581,18 +582,19 @@ export const compareHarness = (outs, profiles = {}, MIN = 8) => {
     if (h !== 'trae' && h !== 'codex') continue;
     for (const key of [first.model, `${first.model} / ${o.category ?? '?'}`]) {
       const g = (groups[key] ??= { trae: cell(), codex: cell() })[h];
-      g.tasks++; g[o.result]++;
+      g.tasks++; g[o.nonCodeRework ? 'nonCodeRework' : o.result]++;
       if (o.rounds != null) g.rounds.push(o.rounds); if (o.minutes != null) g.minutes.push(o.minutes);
     }
   }
   const mean = (xs) => (xs.length ? Math.round((xs.reduce((s, x) => s + x, 0) / xs.length) * 10) / 10 : null);
-  const side = (c) => ({ tasks: c.tasks, firstPass: c.tasks ? `${c.pass}/${c.tasks} (${Math.round((100 * c.pass) / c.tasks)}%)` : '-', fail: c.fail, meanRounds: mean(c.rounds), meanMinutes: mean(c.minutes) });
+  const side = (c) => ({ tasks: c.tasks, nonCodeRework: c.nonCodeRework, firstPass: c.tasks ? `${c.pass}/${c.tasks} (${Math.round((100 * c.pass) / c.tasks)}%)` : '-', fail: c.fail, meanRounds: mean(c.rounds), meanMinutes: mean(c.minutes) });
   const rows = [];
   for (const [key, g] of Object.entries(groups)) {
     if (!g.trae.tasks || !g.codex.tasks) continue;
-    const p = fisherExact(g.trae.pass, g.trae.tasks - g.trae.pass, g.codex.pass, g.codex.tasks - g.codex.pass);
-    const enough = g.trae.tasks >= MIN && g.codex.tasks >= MIN;
-    const tr = g.trae.pass / g.trae.tasks, cr = g.codex.pass / g.codex.tasks;
+    const tn = g.trae.tasks - g.trae.nonCodeRework, cn = g.codex.tasks - g.codex.nonCodeRework;
+    const p = fisherExact(g.trae.pass, tn - g.trae.pass, g.codex.pass, cn - g.codex.pass);
+    const enough = tn >= MIN && cn >= MIN;
+    const tr = g.trae.pass / tn, cr = g.codex.pass / cn;
     const verdict = !enough ? `too few tasks (need ${MIN} on each side)` : p < 0.05 ? (tr < cr ? 'TRAE significantly worse' : 'TRAE significantly better') : 'no significant difference';
     rows.push({ key, trae: side(g.trae), codex: side(g.codex), p: Math.round(p * 1000) / 1000, verdict });
   }
@@ -634,9 +636,9 @@ export const dedupeOutcomes = (records) => {
       continue;
     }
     const p = by.get(k);
-    if (!p) { by.set(k, { ...o, dupes: 1 }); continue; }
+    if (!p) { by.set(k, { ...o, completedAt: o.completedAt ?? o.t, dupes: 1 }); continue; }
     const rounds = [p.rounds, o.rounds].filter((x) => x != null);
-    by.set(k, { ...p, ...o, rounds: rounds.length ? Math.max(...rounds) : null, minutes: o.minutes ?? p.minutes,
+    by.set(k, { ...p, ...o, completedAt: o.completedAt ?? (o.result ? o.t : p.completedAt), rounds: rounds.length ? Math.max(...rounds) : null, minutes: o.minutes ?? p.minutes,
       first: p.first ?? o.first, category: p.category ?? o.category, impact: p.impact ?? o.impact, reviewed: !!(p.reviewed || o.reviewed), dupes: p.dupes + 1 });
   }
   for (const [k, cs] of corrections) {
@@ -645,7 +647,6 @@ export const dedupeOutcomes = (records) => {
     o.correctionFrom = Object.fromEntries(OUTCOME_OVERRIDES.filter((f) => Object.hasOwn(o, f)).map((f) => [f, o[f]]));
     for (const c of cs) for (const f of OUTCOME_OVERRIDES) if (Object.hasOwn(c, f)) o[f] = c[f];
     o.corrected = true; o.correctedAt = cs.at(-1).t; o.corrections = cs.length;
-    o.t = Math.max(o.t, o.correctedAt);
   }
   return [...by.values()];
 };
@@ -668,7 +669,12 @@ export const readState = ({ fresh = false, profiles, registryError = null } = {}
     .filter((a) => a.kind === 'ttadk' || a.kind === 'trae').map((a) => [a.name, a]))) : companyProfiles(profiles);
   const missingBefore = companyUnknown(data, registered).length > 0;
   const failed = data && (data.errors?.claude || data.errors?.codex);
-  if (fresh || !data || registryError || missingBefore || now - data.checkedAt > TTL_MS || (failed && now - data.checkedAt > 2 * 60000)) {
+  const hubRecovered = data && (data.codexAccounts ?? []).some(account => {
+    if (account.live) return false;
+    try { const supervisor = readHubState(os.homedir(), account.name);
+      return supervisor?.mode === 'HEALTHY' && supervisor.t > data.checkedAt; } catch { return false; }
+  });
+  if (fresh || hubRecovered || !data || registryError || missingBefore || now - data.checkedAt > TTL_MS || (failed && now - data.checkedAt > 2 * 60000)) {
     const prev = data;
     const refresh = () => {
       const next = { checkedAt: now, claude: null, codexAccounts: [], errors: {}, history: prev?.history ?? {}, companyAccounts: registered };
@@ -693,10 +699,12 @@ export const readState = ({ fresh = false, profiles, registryError = null } = {}
     data = refresh();
     // A missing cached reading already triggered its one fresh retry. Retry a newly failed fresh reading once too.
     if (!missingBefore && companyUnknown(data, registered).length) data = refresh();
+    const capturedAt = Date.now();
+    data.checkedAt = capturedAt;
     const push = (key, w) => {
       if (!w) return;
       const h = (data.history[key] ?? []).filter((x) => now - x.t < 48 * 3600000);
-      h.push({ t: now, used: w.used, resetsAt: w.resetsAt });
+      h.push({ t: capturedAt, used: w.used, resetsAt: w.resetsAt });
       data.history[key] = h;
     };
     push('claude', weekly(data.claude));
@@ -706,7 +714,7 @@ export const readState = ({ fresh = false, profiles, registryError = null } = {}
     // Append a compact snapshot for the nightly review: weekly usage, resets and cards per vendor/account.
     if (process.env.QUOTA_LOG !== '0') {
       const wk = (ws) => { const w = weekly(ws); return w ? { used: w.used, resetsAt: w.resetsAt } : null; };
-      const snap = { t: now, ...companySnapshot(data.codexAccounts), claude: wk(data.claude), codex: (data.codexAccounts ?? []).filter((a) => a.live).map((a) => ({ name: a.name, ...wk(a.windows), cards: (a.resets?.credits ?? []).map((c) => ({ id: c.id, expiresAt: c.expiresAt })), cardCount: a.resets?.count ?? null })) };
+      const snap = { t: capturedAt, captureStartedAt: now, ...companySnapshot(data.codexAccounts, capturedAt), claude: wk(data.claude), codex: (data.codexAccounts ?? []).filter((a) => a.live).map((a) => ({ name: a.name, ...wk(a.windows), cards: (a.resets?.credits ?? []).map((c) => ({ id: c.id, expiresAt: c.expiresAt })), cardCount: a.resets?.count ?? null })) };
       try { fs.appendFileSync(QUOTA_LOG, JSON.stringify(snap) + '\n'); } catch {}
     }
   }

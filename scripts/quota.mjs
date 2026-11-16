@@ -9,10 +9,42 @@
 // daily number comes from the LLMBox dashboard API, read best-effort in lib/state.mjs. The lean
 // lines come from lib/state.mjs, where all quota policy lives. Readings are cached for 10 minutes in
 // ~/.claude/orchestrator/_shared/quota.json and shared by every orchestrator; --fresh re-reads everything.
-import { readState, analyze, leanLines, winState, weekly, fmt, fmtAgo, POLICY } from './lib/state.mjs';
+import os from 'node:os';
+import { readState, readProfiles, analyze, leanLines, winState, weekly, fmt, fmtAgo, POLICY } from './lib/state.mjs';
+import { probeHub } from './lib/hub-state.mjs';
+import { runningWorkers } from './lib/running-workers.mjs';
+import { notifyMonitorFailure } from './lib/monitor-notify.mjs';
 
 const args = process.argv.slice(2);
-const data = readState({ fresh: args.includes('--fresh') });
+let profiles = {}; try { profiles = readProfiles(); } catch {}
+const running = await runningWorkers({ profiles });
+if (args.includes('--running')) {
+  if (args.includes('--json')) console.log(JSON.stringify(running));
+  else {
+    const localTime = new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+    const checkedAt = Date.now();
+    for (const [account, threads] of Object.entries(running.byAccount)) {
+      console.log(`${account}: ${threads.length} turns running`);
+      for (const row of threads) console.log(`  ${row.thread}${row.name ? ` name=${row.name}` : ''} owner=${row.owner ?? '?'} model=${row.model ?? '?'} started=${localTime.format(row.startedAt)}; last activity ${Math.max(0, Math.floor((checkedAt - row.lastActivityAt) / 60000))} min ago (${localTime.format(row.lastActivityAt)})`);
+    }
+    for (const row of running.unresolved) console.log(`UNKNOWN ${row.account}/${row.thread}: ${row.reason}`);
+  }
+  process.exit(0);
+}
+const hubCheckedAt = Date.now();
+const hubs = await Promise.all(Object.entries(profiles).map(([account, profile]) => probeHub({ home: os.homedir(), account, hub: profile.hub })));
+for (const hub of hubs.filter(h => h.state !== 'up')) try {
+  const result = notifyMonitorFailure(`hub/${hub.account}/${hub.state}`, { event: hub.state === 'down' ? 'failed' : 'stalled' });
+  if (result.unknown) console.error(`Monitoring notification UNKNOWN: ${result.unknown}`);
+} catch { console.error(`Monitoring event NOT RECORDED: hub/${hub.account}`); }
+let data = readState({ fresh: args.includes('--fresh') });
+if (data.checkedAt < hubCheckedAt && hubs.some(hub => hub.state === 'up' && data.codexAccounts?.some(a => a.name === hub.account && !a.live)))
+  data = readState({ fresh: true });
+data = { ...data, codexAccounts: data.codexAccounts?.map(account => {
+  const hub = hubs.find(h => h.account === account.name);
+  return { ...account, usageLive: account.live, hubState: hub?.state ?? (account.live ? 'up' : 'down'),
+    live: hub ? hub.state !== 'down' : account.live, active: running.byAccount[account.name]?.length ?? 0 };
+}) };
 const st = analyze(data);
 const lean = leanLines(st, data);
 // Tokens as the dashboard shows them: 185M / 500M.
@@ -26,9 +58,9 @@ const fmtTokens = (n) => {
 if (args.includes('--json')) {
   const { codex, claude } = st;
   console.log(JSON.stringify({
-    checkedAt: new Date(data.checkedAt).toISOString(), errors: data.errors, stop: st.stop, policy: POLICY,
+    checkedAt: new Date(data.checkedAt).toISOString(), errors: data.errors, stop: st.stop, policy: POLICY, hubs, running,
     claude: { ...claude, windows: data.claude },
-    codex: codex.rows.map((r) => ({ name: r.a.name, email: r.a.email ?? null, live: r.a.live, plan: r.a.plan ?? null, week: r.s, spent: r.spent, throttledUntil: r.throttledUntil, unconstrained: r.unconstrained, resets: r.a.resets, cardPlan: r.cp })),
+    codex: codex.rows.map((r) => ({ name: r.a.name, email: r.a.email ?? null, live: r.a.live, usageLive: r.a.usageLive, plan: r.a.plan ?? null, week: r.s, spent: r.spent, throttledUntil: r.throttledUntil, unconstrained: r.unconstrained, resets: r.a.resets, cardPlan: r.cp })),
     codexPick: codex.pick?.a.name ?? null, redeem: codex.redeem ? { account: codex.redeem.a.name, card: codex.redeem.cp.card?.id ?? null } : null,
     codexOut: codex.out, underused: codex.underused, frontLoad: codex.frontLoad, overspending: codex.overspending, lean,
     ttadk: codex.ttadk ? { name: codex.ttadk.name, healthy: codex.ttadk.healthy, reason: codex.ttadk.reason, quotaOut: codex.ttadk.quotaOut,
@@ -45,23 +77,25 @@ console.log(`quota (read ${fmt(data.checkedAt)}, ${Math.round((Date.now() - data
 const cw = weekly(data.claude);
 for (const w of data.claude ?? []) row('claude', '', w, w === cw ? st.claude.week : winState(w, null));
 if (!data.claude) console.log(`  claude unavailable: ${data.errors.claude ?? 'unknown error'}`);
+for (const hub of hubs) console.log(`  hub    ${hub.account}: ${hub.state}; supervisor=${hub.supervisor?.mode ?? 'UNKNOWN'}; ${running.byAccount[hub.account]?.length ?? 0} turns running`);
+for (const row of running.unresolved) console.log(`  running UNKNOWN ${row.account}/${row.thread}: ${row.reason}`);
 for (const r of st.codex.rows) {
   const tag = `${r.a.name}${r.a.email ? ` ${r.a.email}` : ''} `;
   if (!r.a.windows) { console.log(`  codex  ${tag}unavailable (${r.a.error ?? '?'})`); continue; }
   if (r.unconstrained) console.log(`  codex  ${tag}no limit windows (unconstrained)`);
   const ww = weekly(r.a.windows);
-  for (const w of r.a.windows) row('codex', tag, w, w === ww ? r.s : null, r.a.live ? '' : `  [from ${fmtAgo(r.a.seenAt)}]`);
+  for (const w of r.a.windows) row('codex', tag, w, w === ww ? r.s : null, r.a.usageLive ? '' : `  [usage reading from ${fmtAgo(r.a.seenAt)}]`);
   if (r.a.resets) console.log(`  codex  ${tag}reset cards: ${r.a.resets.count}${r.a.resets.credits.length ? ` (expire ${r.a.resets.credits.map((c) => fmt(c.expiresAt)).join(', ')})` : ''}`);
 }
 if (!data.codexAccounts) console.log(`  codex  unavailable: ${data.errors.codex ?? 'unknown error'}`);
 const TTA = st.codex.ttadk;
-if (TTA) console.log(`  codex  ${TTA.name} (TTADK gateway): ${TTA.healthy ? 'healthy' : `unavailable — ${TTA.reason}`}; hub ${TTA.live ? 'up' : 'down'}; ${TTA.active} turns running; browser ${TTA.browser ? 'ready' : 'not set up'}; web search ${TTA.search ? (TTA.searchLive ? 'ready (proxy up)' : 'ready (proxy starts on demand)') : 'not set up (rerun ttadk-setup)'}${TTA.ssoLeftH != null ? `; SSO ${Math.round(TTA.ssoLeftH)}h left` : ''}; models ${TTA.models.join(', ')}`);
+if (TTA) console.log(`  codex  ${TTA.name} (TTADK gateway): ${TTA.healthy ? 'healthy' : `unavailable — ${TTA.reason}`}; hub ${hubs.find(h => h.account === TTA.name)?.state ?? (TTA.live ? 'up' : 'down')}; ${TTA.active} turns running; browser ${TTA.browser ? 'ready' : 'not set up'}; web search ${TTA.search ? (TTA.searchLive ? 'ready (proxy up)' : 'ready (proxy starts on demand)') : 'not set up (rerun ttadk-setup)'}${TTA.ssoLeftH != null ? `; SSO ${Math.round(TTA.ssoLeftH)}h left` : ''}; models ${TTA.models.join(', ')}`);
 // TTADK's own daily quota (LLMBox dashboard API), when the token read worked; the lean warns at 80%.
 const TU = TTA?.usage;
 if (TU?.utilization != null) console.log(`  ttadk  ${'day'.padEnd(34)}${String(Math.round(TU.utilization)).padStart(3)}% used (${fmtTokens(TU.used)} / ${fmtTokens(TU.limit)})  resets ${fmt(TU.resetsAt)}`);
 else if (TTA?.usageError) console.log(`  ttadk  ${'day'.padEnd(34)}usage unavailable — ${TTA.usageError}`);
 const TRA = st.codex.trae;
-if (TRA) console.log(`  codex  ${TRA.name} (TRAE CLI, company balancing/fallback): ${TRA.healthy ? 'healthy' : `unavailable — ${TRA.reason}`}; hub ${TRA.live ? 'up' : 'down'}; ${TRA.active} turns running; models ${TRA.models.join(', ')}`);
+if (TRA) console.log(`  codex  ${TRA.name} (TRAE CLI, company balancing/fallback): ${TRA.healthy ? 'healthy' : `unavailable — ${TRA.reason}`}; hub ${hubs.find(h => h.account === TRA.name)?.state ?? (TRA.live ? 'up' : 'down')}; ${TRA.active} turns running; models ${TRA.models.join(', ')}`);
 // TRAE's own quota (user-approved 2026-11-13): one daily bucket per model, plus the weekly pool. A depleted bucket only
 // puts that model in TRAE's low-priority queue; it changes no routing.
 const TRQ = TRA?.quota;

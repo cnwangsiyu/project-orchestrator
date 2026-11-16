@@ -198,14 +198,14 @@ try {
     result(call('Read'), ''), invalidResult, result(invalidResult, '', { timestamp: 'invalid' }), invalidUse,
     result(invalidUse, '', { timestamp: new Date(now).toISOString() })]);
   const blockingUsage = analyse();
-  assert.equal(blockingUsage.blockedMinutes, 34); assert.equal(blockingUsage.ownKB, 0);
+  assert.equal(blockingUsage.blockedMinutes, 12); assert.equal(blockingUsage.blockedCallMinutes, 34); assert.equal(blockingUsage.ownKB, 0);
   assert.deepEqual(blockingUsage.blockingExamples, [
     { minutes: 12, command: longCommand.replace(/\s+/g, ' ').slice(0, 60) },
     { minutes: 9, command: 'node scripts/route.mjs implement' }, { minutes: 6, command: 'Read source.js' }]);
-  assert.ok(has(blockingUsage, 'blocks in the foreground'));
-  assert.match(blockingUsage.flags.join('\n'), /blocks in the foreground: 34 min \(12 min .*; 9 min .*; 6 min Read source\.js\) — run it in the background and dispatch other ready tasks meanwhile/);
-  assert.match(run(), /tool calls \d+, blocked 34 min/); assert.match(run(), /blocked: 12 min inspect /);
-  assert.ok(has(analyse(12), 'blocks in the foreground')); assert.ok(!has(analyse(48), 'blocks in the foreground'));
+  assert.ok(!has(blockingUsage, 'blocks in the foreground'));
+  assert.equal(blockingUsage.blockedCallMinutes, 34, 'sum still describes all overlapping call durations');
+  assert.match(run(), /tool calls \d+, blocked 12 min/); assert.match(run(), /blocked: 12 min inspect /);
+  assert.ok(!has(analyse(12), 'blocks in the foreground')); assert.ok(!has(analyse(48), 'blocks in the foreground'));
   assert.equal(json().limits.blockedMinutes, 30);
   console.log('ok   foreground blocking, background exclusions, pairing and top three examples');
 
@@ -219,8 +219,8 @@ try {
   assert.equal(analyse(48).blockedMinutes, 55);
   transcript([...blockingBoundary, ...timed('Bash', { command: 'short operation' }, 2),
     ...timed('Read', { file_path: 'just-over.js' }, 2.01)]);
-  const overBlocking = analyse(); assert.equal(overBlocking.blockedMinutes, 32.01);
-  assert.ok(has(overBlocking, 'blocks in the foreground')); assert.equal(overBlocking.blockingExamples.length, 2);
+  const overBlocking = analyse(); assert.equal(overBlocking.blockedMinutes, 30); assert.equal(overBlocking.blockedCallMinutes, 32.01);
+  assert.ok(!has(overBlocking, 'blocks in the foreground')); assert.equal(overBlocking.blockingExamples.length, 2);
   transcript([call('Read')]);
   assert.equal(analyse().blockedMinutes, 0); assert.deepEqual(analyse().blockingExamples, []);
   console.log('ok   blocking duration boundaries, scaled limits and incomplete/missing timestamps');

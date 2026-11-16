@@ -143,11 +143,12 @@ try {
   const route = (args) => { const r = spawnSync(process.execPath, [path.join(root, 'route.mjs'), ...args, '--json'], { env: fixtureEnv, encoding: 'utf8', timeout: 5000 }); assert.equal(r.status, 0, r.stderr); return JSON.parse(r.stdout); };
   writeCache();
   for (const args of [['analysis', '--background'], ['lookup'], ['review', '--background']]) {
-    const r = route(args); assert.equal(r.pick.account, 'ttadk'); assert.ok(r.why.includes(TTADK_EXPIRY_HINT)); assert.ok(r.quota.includes(TTADK_EXPIRY_HINT));
+    const r = route(args); assert.equal(r.pick.account, 'ttadk'); assert.ok(r.why.some(line => /^TTADK quota expiring unused:/.test(line))); assert.ok(r.quota.some(line => /^TTADK quota expiring unused:/.test(line)));
   }
   assert.equal(route(['analysis', '--background', '--exclude-account', 'ttadk']).pick.account, 'trae');
   fs.writeFileSync(historyFile, '');
-  const missing = route(['analysis', '--background']); assert.equal(missing.pick.account, 'trae'); assert.ok(!missing.why.includes(TTADK_EXPIRY_HINT));
+  // Missing telemetry removes the expiry hint; current scheduling still chooses the qualified account.
+  const missing = route(['analysis', '--background']); assert.ok(!missing.why.some(line => /^TTADK quota expiring unused:/.test(line)));
   fs.writeFileSync(historyFile, history.map((s) => JSON.stringify(s) + '\n').join(''));
   writeCache({ ...ttadk, healthy: false }); assert.equal(route(['analysis', '--background']).pick.account, 'trae');
   writeCache();
@@ -160,6 +161,8 @@ try {
     trae: { name: 'trae', sampledAt: rollover + min, daily: { [SOL]: { used: 0, limit: 80, resetsAt: rollover + 24 * h } } } }];
   const qr = quotaUtilisation([...quotaRows, quotaRows[1]], { since: now - h, now });
   assert.equal(qr.ttadk.tokensUnusedAtReset, 75); assert.equal(qr.trae.highPriorityUnitsUnusedAtResetByModel[SOL], 77); assert.equal(qr.ttadk.resets.length, 1);
+  const legacyCapture = structuredClone(quotaRows); legacyCapture[0].t -= 5000; legacyCapture[1].t -= 5000;
+  assert.equal(quotaUtilisation(legacyCapture, { since: now - h, now }).trae.highPriorityUnitsUnusedAtResetByModel[SOL], 77, 'readings captured after the old start timestamp survive reset analysis');
   const staleQuota = structuredClone(quotaRows); staleQuota[0].t = rollover - h; staleQuota[0].trae.sampledAt = staleQuota[0].t;
   assert.equal(quotaUtilisation(staleQuota, { since: now - 2 * h, now }).ttadk.tokensUnusedAtReset, null);
   assert.equal(quotaUtilisation([], { since: now - h, now }).ttadk.tokensUnusedAtReset, null);

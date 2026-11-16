@@ -12,6 +12,7 @@ import { lockSnapshot, matchBuildLock, observeWaiters, parseHeavyCheck, parseHea
 import { parseCcacheStats, parseHubListeners } from './lib/resource-extras.mjs';
 import { readHubDiagnostics } from './lib/hub-state.mjs';
 import { writeIdleHints } from './resource-idle-hint.mjs';
+import { notifyMonitorFailure } from './lib/monitor-notify.mjs';
 const exec = promisify(execFile);
 export async function collect({ registry = null, budgetMs = 1750, cpuBudgetMs = 4000, probe = null, leases = null, journal = null, shared = SHARED, statusText = null } = {}) {
   const start = performance.now(), psStartedAt = Date.now(), errors = [];
@@ -179,12 +180,19 @@ export function appendSample(sample, file = LOG, { maxBytes = 50 * 2 ** 20, arch
     fs.appendFileSync(file, line, { mode: 0o600 }); fs.chmodSync(file, 0o600);
   } finally { fs.closeSync(fd); fs.unlinkSync(lock); }
 }
+export function notifySampleFailures(sample, options = {}) {
+  const causes = (sample.failedProbes ?? []).map(label => `sampler/${label.replace(/[^A-Za-z0-9_-]/g, '-')}`);
+  if (!sample.heavyLocks?.complete || !sample.heavyLocks?.journal?.complete) causes.push('lock-telemetry/incomplete');
+  if (!sample.hubSupervisors?.complete) causes.push('hub/supervisor-unknown');
+  return [...new Set(causes)].map(cause => ({ cause, ...notifyMonitorFailure(cause, options) }));
+}
 async function main() {
   const args = process.argv.slice(2), allowed = new Set(['--read-only', '--dry-run', '--json']);
   for (const arg of args) if (!allowed.has(arg)) throw Error(`unknown option: ${arg}`);
   const sample = await collect(), readOnly = args.includes('--read-only') || args.includes('--dry-run');
   if (!readOnly) {
     appendSample(sample);
+    for (const result of notifySampleFailures(sample)) if (result.unknown) console.error(`Monitoring notification UNKNOWN: ${result.unknown}`);
     try { writeIdleHints({ print: (line) => console.error(line) }); }
     catch (e) { console.error(`Idle hints UNKNOWN: ${e.message}`); }
   }
@@ -193,4 +201,8 @@ async function main() {
   if (sample.failedProbes.length) console.error(`Failed probes (UNKNOWN): ${sample.failedProbes.join(', ')}`);
   if (!sample.complete) process.exitCode = 2;
 }
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch((e) => { console.error(`BLOCKED: ${e.message}`); process.exitCode = 2; });
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch((e) => {
+  console.error(`BLOCKED: ${e.message}`);
+  if (!process.argv.some(arg => ['--read-only', '--dry-run'].includes(arg))) try { notifyMonitorFailure('sampler/failed', { event: 'failed' }); } catch { console.error('Monitoring event NOT RECORDED'); }
+  process.exitCode = 2;
+});

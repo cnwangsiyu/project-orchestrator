@@ -95,6 +95,25 @@ try {
   const text = execFileSync(process.execPath, [review, '--hours', '24'], { env, encoding: 'utf8' });
   assert.match(text, /## review budget/); assert.match(text, /traeReconciliation/);
   console.log('PASS review-data text and JSON expose review budget and reconciliation');
+
+  const old = { kind: 'outcome', project: 'p', name: 'old-finished', t: now - 30 * h, result: 'rework', cause: 'spec', rounds: 2, first: pick };
+  const recent = { kind: 'outcome', project: 'p', name: 'non-code', t: now - h, result: 'rework', cause: 'infra', rounds: 2, first: pick };
+  fs.appendFileSync(routeLog, [old, { ...old, t: now, correction: true, note: 'Corrected after completion' }, recent].map(JSON.stringify).join('\n') + '\n');
+  const eventShared = path.join(home, '.claude/orchestrator/_shared'); fs.mkdirSync(eventShared, { recursive: true });
+  const question = { id: 'question', runId: 'question-run', event: 'question', owner: 'owner', account: 'trae', thread: 'thread', questionId: 'q', t: now - h, expiresAt: now - 20 * 60000, default: 'continue' };
+  fs.mkdirSync(path.join(eventShared, 'worker-event-history'));
+  fs.writeFileSync(path.join(eventShared, 'worker-event-history/questions.jsonl'), JSON.stringify(question) + '\n');
+  fs.writeFileSync(path.join(eventShared, 'worker-events.jsonl'), '');
+  const statistics = JSON.parse(execFileSync(process.execPath, [review, '--hours', '24', '--json'], { env: { ...env, RULES_SHARED: eventShared }, encoding: 'utf8' }));
+  assert.ok(!statistics.outcomes.byCause.spec, 'a correction does not move old completion into the current report window');
+  assert.equal(statistics.outcomes.byVendor.codex.nonCodeRework, 1);
+  assert.equal(statistics.outcomes.byVendor.codex.firstPass, '0/1');
+  assert.equal(statistics.outcomes.corrected.find(r => r.task.endsWith('/old-finished')).completedAt, old.t);
+  assert.equal(statistics.overdueQuestions.length, 1); assert.equal(statistics.overdueQuestions[0].questionId, 'q');
+  assert.equal(statistics.residents.status, 'UNCONFIGURED');
+  assert.match(statistics.reviews.evidenceBasis, /routing decisions/);
+  console.log('PASS completion windows, non-code rework, overdue questions and missing resident registration');
+
   console.log('\nall pass');
 } finally {
   fs.rmSync(tmp, { recursive: true, force: true });

@@ -669,18 +669,30 @@ for (const [sc, args] of ERRORS) {
   if (bad.length) fail++;
   console.log(`${bad.length ? 'FAIL' : 'ok  '} hub panic window    ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
 }
-// Outcome causes (rework retro 2026-11-10): model comparisons count code rework only; route.mjs tells the orchestrator
-// to re-scope instead of patching again from the second failure of code work.
+// AU-6: non-code rework stays separate from first-pass success and model code-rework rounds.
+// Unknown causes retain legacy code-rework treatment; retry guidance is unchanged.
 {
   const { modelView, dedupeOutcomes } = await import('../lib/state.mjs');
-  const r = (cause) => modelView({ result: 'rework', rounds: 2, cause }).result;
+  const view = (outcome) => {
+    const row = modelView(outcome);
+    return { result: row.result, nonCodeRework: row.nonCodeRework === true, rounds: row.rounds };
+  };
+  const r = (cause) => view({ result: 'rework', rounds: 2, cause });
+  const codeRework = { result: 'rework', nonCodeRework: false, rounds: 2 };
+  const nonCodeRework = { result: 'rework', nonCodeRework: true, rounds: null };
   const note = (args) => JSON.parse(run('fresh', args)).notes.some((n) => /new defect of the same kind/.test(n));
-  const cases = [[r('code'), 'rework'], [r(undefined), 'rework'], [r('infra'), 'pass'], [r('spec'), 'pass'], [r('scope'), 'pass'],
+  const corrected = dedupeOutcomes([{ t: 1, project: 'p', name: 'cause', result: 'rework', rounds: 2, cause: 'code' },
+    { t: 2, project: 'p', name: 'cause', correction: true, cause: 'infra' }])[0];
+  const cases = [[r('code'), codeRework], [r(undefined), codeRework],
+    [r('infra'), nonCodeRework], // #2: infrastructure rework is not first-pass success.
+    [r('spec'), nonCodeRework], // #3: specification rework is not first-pass success.
+    [r('scope'), nonCodeRework], // #4: scope rework is not first-pass success.
     [note(['implement', '--impact', 'service', '--failures', '2']), true], [note(['implement', '--impact', 'service', '--failures', '1']), false],
     [note(['research', '--failures', '2']), false],
-    [modelView(dedupeOutcomes([{ t: 1, project: 'p', name: 'cause', result: 'rework', rounds: 2, cause: 'code' },
-      { t: 2, project: 'p', name: 'cause', correction: true, cause: 'infra' }])[0]).result, 'pass']];
-  const bad = cases.map(([got, want], i) => (got === want ? null : i)).filter((i) => i !== null);
+    // #8: correcting the cause reclassifies rework without moving its completion date.
+    [{ ...view(corrected), completedAt: corrected.completedAt, correctedAt: corrected.correctedAt, t: corrected.t },
+      { ...nonCodeRework, completedAt: 1, correctedAt: 2, t: 1 }]];
+  const bad = cases.flatMap(([got, want], i) => { try { assert.deepEqual(got, want); return []; } catch { return [i]; } });
   if (bad.length) fail++;
   console.log(`${bad.length ? 'FAIL' : 'ok  '} rework causes       ${cases.length} cases${bad.length ? ` — failing #${bad.join(', #')}` : ''}`);
 }

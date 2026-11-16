@@ -19,7 +19,13 @@ const args = process.argv.slice(2);
 fs.appendFileSync(process.env.HOME + '/calls.jsonl', JSON.stringify(args) + '\\n');
 if (args[0] === '-e') { const r = spawnSync(${JSON.stringify(process.execPath)}, args, { stdio: 'inherit' }); process.exit(r.status ?? 2); }
 if (args[0]?.endsWith('/nightly-review.mjs')) { const r = spawnSync(${JSON.stringify(process.execPath)}, args, { stdio: 'inherit' }); process.exit(r.status ?? 2); }
-if (args[0]?.endsWith('/route.mjs')) console.log(JSON.stringify({ pick: { vendor: 'codex', model: 'fixture-model', effort: 'high', account: 'fixture' } }));
+if (args[0]?.endsWith('/route.mjs')) {
+  const taskDir = args[args.indexOf('--task-dir') + 1];
+  const workerArgs = ['--account', 'fixture', 'start', '--sandbox', 'read-only', '--out', taskDir + '/codex-last.md'];
+  const command = ['node', args[0].replace('/route.mjs', '/codex-worker.mjs'), ...workerArgs]
+    .map(value => "'" + value.replaceAll("'", "'\\\\''") + "'").join(' ');
+  console.log(JSON.stringify({ kind: 'launch', needsUserOK: [], pick: { vendor: 'codex', model: 'fixture-model', effort: 'high', account: 'fixture', sandbox: 'read-only', workerArgs, command } }));
+}
 else if (args[0]?.endsWith('/codex-worker.mjs')) {
   fs.writeFileSync(process.env.HOME + '/worker-args.txt', args.join(' '));
   fs.writeFileSync(args[args.indexOf('--out') + 1], 'fixture dry report');
@@ -33,7 +39,7 @@ else console.log('{}');
   fs.writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\n[ "$1" = agents ] || exit 99\nprintf "[]\\n"\n', { mode: 0o755 });
   fs.writeFileSync(path.join(bin, 'codex'), '#!/bin/sh\nprintf "%s\\n" "$*" > "$HOME/worker-args.txt"\nprintf "{}\\n"\n', { mode: 0o755 });
   const run = spawnSync('/bin/zsh', [path.join(skill, 'scripts/nightly-review.sh')], { env: { ...process.env, HOME: tmp, NIGHTLY_MODE: 'dry', NIGHTLY_PERSONAL_OK: '0' }, encoding: 'utf8', timeout: 15000 });
-  assert.equal(run.status, 0, run.stderr);
+  assert.equal(run.status, 0, run.stdout + run.stderr);
   const review = path.join(shared, 'routing-review');
   const day = fs.readdirSync(review).find((s) => s.endsWith('.run'));
   const data = path.join(review, day, 'attempt-1/data');
@@ -43,7 +49,7 @@ else console.log('{}');
   assert.equal(JSON.parse(fs.readFileSync(path.join(data, 'resource-now.json'), 'utf8')).complete, false);
   assert.match(fs.readFileSync(path.join(data, 'resource-now.json.err'), 'utf8'), /UNKNOWN/);
   assert.match(fs.readFileSync(path.join(tmp, 'worker-args.txt'), 'utf8'), /--sandbox read-only/);
-  assert.match(fs.readFileSync(path.join(tmp, 'worker-args.txt'), 'utf8'), /Machine resources:/);
+  assert.match(fs.readFileSync(path.join(review, day, 'attempt-1/brief.md'), 'utf8'), /Machine resources:/);
   assert.ok(!fs.existsSync(path.join(tmp, 'Library/LaunchAgents')));
   const calls = fs.readFileSync(path.join(tmp, 'calls.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   assert.equal(calls.filter((a) => a[0]?.endsWith('/resource-sample.mjs')).length, 1);
