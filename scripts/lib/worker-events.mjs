@@ -164,7 +164,9 @@ const auditRows = () => {
 };
 
 export const inbox = (rows, owner, ack = emptyAck(owner), now = Date.now()) => {
-  rows = normalizeOwners(rows);
+  // The asking session's own full id also resolves short owners: a session that always launches with its 8-character id
+  // never writes the full id into the events, and its rows would stay unmatched for ever.
+  rows = normalizeOwners(rows, [...rows.flatMap(row=>[row.owner,...(row.ownerMatches??[])]), owner]);
   const matches = [...new Set(rows.map(row=>row.owner).filter(fullOwner))].filter(id=>shortOwner(owner)&&id.toLowerCase().startsWith(owner.toLowerCase()));
   if(matches.length===1) owner=matches[0];
   const unresolved = rows.filter(row=>['ambiguous','unmatched'].includes(row.ownerResolution));
