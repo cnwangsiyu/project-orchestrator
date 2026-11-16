@@ -8,7 +8,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { loadDigest } from '../lib/global-rules.mjs';
 import { inbox } from '../lib/worker-events.mjs';
-import { WORKER_NOTES } from '../lib/fixed-worker-notes.mjs';
+import { WORKER_NOTES, FF_MAIN_WORKER_NOTE } from '../lib/fixed-worker-notes.mjs';
 import { modelFamily, modelObservation, rolloutTurnModel } from '../lib/worker-model.mjs';
 
 const scripts = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -200,6 +200,28 @@ try {
   check('legacy continuation has no invented routing context', () => {
     const r = run(fixture('legacy'), 'turn'); assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /inherited: no saved launch/); assert.equal(r.events.at(-1).routeArgs, null);
+  });
+  check('project landing permission is injected for starts and inherited turns only when opted in', () => {
+    for (const kind of ['trae', 'ttadk']) for (const project of ['video-agent', 'guards', null]) {
+      const f = fixture(`landing-${kind}-${project ?? 'none'}`, kind);
+      const route = ['implement', '--impact', 'service', ...(project ? ['--project', project] : [])];
+      let r = run(f, 'start', {}, ['--route-args', JSON.stringify(route)]);
+      assert.equal(r.status, 0, r.stderr);
+      const start = r.calls.find((c) => c.method === 'thread/start').params.developerInstructions;
+      r = run(f, 'turn'); assert.equal(r.status, 0, r.stderr);
+      const resume = r.calls.filter((c) => c.method === 'thread/resume').at(-1).params.developerInstructions;
+      for (const instructions of [start, resume]) {
+        if (project === 'video-agent') {
+          assert.ok(instructions.includes(FF_MAIN_WORKER_NOTE));
+          assert.doesNotMatch(instructions, /never push to main/);
+          assert.equal(instructions.replace(FF_MAIN_WORKER_NOTE, WORKER_NOTES.commits).includes(loadDigest().worker), true);
+        } else {
+          assert.ok(instructions.includes(WORKER_NOTES.commits));
+          assert.ok(!instructions.includes(FF_MAIN_WORKER_NOTE));
+        }
+      }
+      assert.deepEqual(r.events.at(-1).routeArgs, route, 'project permission does not alter route args');
+    }
   });
   check('inherited queue cancellation still enforces two-hop limit', () => {
     const f = fixture('inherited-queue');

@@ -5,26 +5,12 @@ import { fileURLToPath } from 'node:url';
 import { orchestrator } from './lib/hook-context.mjs';
 import { validRulesSession, readSeen, withRulesDelivery, hookOutput, cleanupRulesDelivery } from './lib/rules-delivery.mjs';
 import { validOwner, readInboxAsync, deliverAsync, hasWatcherAsync, eventLine, followerAlive } from './lib/worker-events.mjs';
-
-// Correlate the follower's public launch record with its registered background task.
-// Commands may be wrappers and cannot prove who started a follower.
-const covered = (row, tasks, owner) => followerAlive(row) && row.thread
-  && ['start', 'turn'].includes(row.followerCommand) && row.launcher?.sessionId === owner
-  && Array.isArray(tasks) && tasks.some((task) => {
-    if (!task || typeof task !== 'object') return false;
-    if (task.status && !['running', 'in_progress'].includes(task.status)) return false;
-    if (typeof task.command === 'string' && /(?:^|[\s;])nohup\b|(?<![>&\d])&(?![&>])/.test(task.command)) return false;
-    const taskId = row.launcher?.env?.CLAUDE_CODE_TASK_ID;
-    const idMatches = taskId && [task.id, task.task_id, task.taskId].includes(taskId);
-    const pidMatches = Number.isInteger(task.pid) && task.pid > 0
-      && [row.pid, row.parentPid, ...(Array.isArray(row.ancestorPids) ? row.ancestorPids : [])].includes(task.pid);
-    // An explicitly supplied PID must agree even if an ID also matches.
-    return (idMatches || pidMatches) && (task.pid === undefined || pidMatches);
-  });
+import { captureStopTasks, stopBackgroundState } from './lib/worker-background.mjs';
 
 process.on('uncaughtException', () => process.exit(0));
 process.on('unhandledRejection', () => process.exit(0));
 // Bound work inside the process; the settings timeout also covers cold process startup.
+const deadlineAt = Date.now() + 220;
 const deadline = setTimeout(async () => {
   await Promise.race([cleanupRulesDelivery(), new Promise(resolve => setTimeout(resolve, 40))]);
   process.exit(0);
@@ -35,30 +21,40 @@ try {
   const input = JSON.parse(raw);
   if (!input || !validOwner(input.session_id) || !validRulesSession(input.session_id) || !['Stop', 'SessionStart'].includes(input.hook_event_name)
     || (input.hook_event_name === 'SessionStart' && !['startup', 'resume', 'compact', 'fork', 'clear'].includes(input.source))) process.exit(0);
-  // A continuation never blocks again, even if new events arrived or the previous acknowledgement failed.
-  if (input.hook_event_name === 'Stop' && input.stop_hook_active === true) process.exit(0);
+  await captureStopTasks(input).catch(() => {});
   const seen = await readSeen();
   if (!await orchestrator(input, seen)) process.exit(0);
   const owner = input.session_id, start = input.hook_event_name === 'SessionStart';
+  // A continuation never blocks or acknowledges again. Remember the registry so the next Stop can recognise a reported exit.
+  if (!start && input.stop_hook_active === true) {
+    await stopBackgroundState(owner, input.background_tasks, await readInboxAsync(owner), { ancestryDeadline: deadlineAt - 80 });
+    process.exit(0);
+  }
   if (start && process.env.CLAUDE_ENV_FILE) {
     // Append only the public owner ID; never read or copy the environment file.
     await fs.appendFile(process.env.CLAUDE_ENV_FILE, `\nexport ORCHESTRATOR_OWNER='${owner}'\n`);
   }
   await withRulesDelivery(input, seen, {}, async (rules) => {
+    const snapshot = await readInboxAsync(owner);
+    const background = start ? { covered: new Set(), suppressed: new Set() }
+      : await stopBackgroundState(owner, input.background_tasks, snapshot, { ancestryDeadline: deadlineAt - 80 });
     const output = async (reason) => {
       await hookOutput(start ? { hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: reason } }
         : { decision: 'block', reason });
       if (rules) rules.delivered = true;
     };
+    let visible = false;
     const delivery = await deliverAsync(owner, async (rows) => {
+      rows = rows.filter((row) => !background.suppressed.has(row.id));
+      if (!rows.length) return;
+      visible = true;
       const reason = rows.map((row) => ['message', 'question', 'answered'].includes(row.event) ? eventLine(row)
         : `worker ${eventLine({ ...row, name: String(row.name ?? row.thread ?? '-').slice(0, 120), outFile: '' }, '').replaceAll('\t', ' ').trim()}: read ${JSON.stringify(String(row.outFile ?? row.logFile ?? 'the worker log').slice(0, 500))} and act`).join('\n')
         + '\nAnswer open questions promptly with codex-worker reply; after its timeout the worker proceeds with its stated default (or ends BLOCKED without one). Handle finished workers first; use codex-worker watch as a run_in_background task for asks/risk notes; live tracked start/turn followers cover completion wakes.';
       await output([reason, rules?.reason].filter(Boolean).join('\n\n'));
     }, 10);
-    if (delivery.failed || delivery.delivered.length) return;
+    if (delivery.failed || visible) return;
     if (rules) { await output(rules.reason); return; }
-    const snapshot = await readInboxAsync(owner);
     const running = snapshot.running.filter((row) => !row.stale);
     const questions = snapshot.questions;
     const ownerPattern = owner.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -71,7 +67,7 @@ try {
     const claimed = await hasWatcherAsync(owner);
     if (!running.length || (registered && claimed)) return;
     const open = questions.filter((ask) => running.some((row) => row.account === ask.account && row.thread === ask.thread));
-    const uncovered = running.filter((row) => !covered(row, input.background_tasks, owner));
+    const uncovered = running.filter((row) => !background.covered.has(row.runId));
     if (!open.length && !uncovered.length) return;
     const workers = [...new Set([...uncovered.map((row) => `${row.name ?? row.thread ?? row.runId} (account=${row.account}, thread=${row.thread ?? '-'}: ${!Array.isArray(input.background_tasks) ? 'background_tasks missing; tracked launch cannot be verified' : !followerAlive(row) ? 'follower PID not live' : 'no matching tracked start/turn follower'})`),
       ...open.map((ask) => `${ask.name ?? ask.thread} (account=${ask.account}, thread=${ask.thread}: open ask ${ask.questionId})`)])].join('; ');

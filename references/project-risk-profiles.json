@@ -18,6 +18,8 @@
   },
   "video-agent": {
     "profile": "internal-demo",
+    "workerLanding": "ff-main",
+    "workerLandingNote": "VAK orchestrator report 2026-11-16: user's iterate-fast decision permits workers to land a plain fast-forward to main after the project landing gate passes.",
     "landingGate": "changed-package tests + typecheck + SG prepare; full verify for wide changes or once daily on main",
     "revisit": "external users, real user data, or increased scale",
     "reviewTargetPct": 10,

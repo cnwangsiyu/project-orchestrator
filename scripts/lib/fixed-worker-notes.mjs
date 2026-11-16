@@ -38,7 +38,8 @@ export const WORKER_NOTES = Object.freeze({
   launch: 'launch as a background task (run_in_background) - never detach with & inside another command. Every launch must be tracked or covered by an armed codex-worker watch; re-arm after every wake and handle finished workers first.',
   audit: 'launch audit: every launch must match its route/actual task identity; --user-ok is only a reference to a real scoped decision, never inferred from urgency.',
 });
-export const fixedWorkerInstructions = () => [
+export const FF_MAIN_WORKER_NOTE = "full access: you may land your verified work yourself as a plain fast-forward push to main after the project's landing gate passes; never force-push, never create merge commits on main, never push other branches' work; commits carry no co-author/tool trailer";
+export const fixedWorkerInstructions = ({ workerLanding } = {}) => [
   '- For interpreting routed impact: ' + WORKER_NOTES.routeImpact,
   '- For interpreting the routed tuple: ' + WORKER_NOTES.routeTuple,
   '- For unknown or unreachable hubs: ' + WORKER_NOTES.hub,
@@ -47,7 +48,7 @@ export const fixedWorkerInstructions = () => [
   '- When acquiring a lease or lock: ' + WORKER_NOTES.lease,
   '- When using TTADK web search: ' + WORKER_NOTES.search,
   '- For image-read tasks: ' + WORKER_NOTES.image,
-  '- For full-access workers: ' + WORKER_NOTES.commits,
+  '- For full-access workers: ' + (workerLanding === 'ff-main' ? FF_MAIN_WORKER_NOTE : WORKER_NOTES.commits),
   '- For reviewers running tests without write intent: ' + WORKER_NOTES.reviewTests,
   '- For review tasks: ' + WORKER_NOTES.rereview,
   '- For remote or CI builds: ' + WORKER_NOTES.remoteBuild,

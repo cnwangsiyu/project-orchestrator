@@ -7,6 +7,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { appendEvent, eventFile, ackFile, readEvents, readAck, inbox, deliver, hasWatcher, auditWorkerEvents,
   launcherIdentity, resolveOwner } from '../lib/worker-events.mjs';
+import { matchingBackgroundTask } from '../lib/worker-background.mjs';
 
 const scripts = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'worker-inbox-'));
@@ -17,6 +18,11 @@ const env = { ...process.env, HOME: tmp, RULES_SHARED: tmp, CODEX_ACCOUNTS: prof
   CLAUDE_SESSION_ID: '', CLAUDE_JOB_DIR: '', CLAUDECODE: '', WORKER_EVENTS_FIXTURE: '{}' };
 const worker = path.join(scripts, 'codex-worker.mjs'), hook = path.join(scripts, 'worker-inbox-hook.mjs');
 const fixture = path.join(scripts, 'test/fixtures/worker-events-transport.mjs');
+// Functional checks do not race the host's ps/IO scheduling; the idle and stalled-IO probes below use the real budget.
+const functionalClock = path.join(tmp, 'hook-functional-clock.mjs');
+fs.writeFileSync(functionalClock, `const timeout = globalThis.setTimeout;
+globalThis.setTimeout = (fn, ms, ...args) => timeout(fn, ms === 220 ? 10000 : ms, ...args);
+`);
 const children = new Set();
 const start = (script, args, extra = {}) => {
   const child = spawn(process.execPath, [script, ...args], { env: { ...env, ...extra }, stdio: ['pipe', 'pipe', 'pipe'] });
@@ -33,7 +39,7 @@ const record = (owner, event, name, extra = {}) => appendEvent({ owner, runId: n
   exit: event === 'running' ? null : 0, outFile: path.join(tmp, 'final.md'), logFile: null, launcher: { sessionId: owner, jobId: null, cwd: tmp }, ...extra });
 const hookRun = (input, extra = {}) => {
   const time = performance.now();
-  const r = spawnSync(process.execPath, [hook], { env: { ...env, ...extra }, input: typeof input === 'string' ? input : JSON.stringify(input), encoding: 'utf8', timeout: 1000 });
+  const r = spawnSync(process.execPath, ['--import', functionalClock, hook], { env: { ...env, ...extra }, input: typeof input === 'string' ? input : JSON.stringify(input), encoding: 'utf8', timeout: 15000 });
   assert.equal(r.status, 0, r.stderr); assert.equal(r.stderr, '');
   return { output: r.stdout ? JSON.parse(r.stdout) : null, ms: performance.now() - time };
 };
@@ -116,6 +122,107 @@ try {
     { command: followers[0].command }, followers[1]
   ] })).output.reason, /live-start/, 'matching command text without task identity cannot prove coverage');
   assert.match(hookRun(input('followers-owner', { background_tasks: [null, followers[1]] })).output.reason, /live-start/, 'malformed registry entries cannot establish follower coverage');
+  const wrapper = record('wrapper-owner', 'running', 'wrapper-worker', { thread: 'wrapper-thread', pid: process.pid,
+    followerCommand: 'start', outFile: '/x/task-foo/report.md', logFile: '/x/task-foo/worker.jsonl' });
+  assert.equal(hookRun(input('wrapper-owner', { background_tasks: [{ command: 'bash /x/task-foo/launch.sh' }] })).output, null,
+    'command-only background task is matched to the recorded task directory');
+  assert.ok(await matchingBackgroundTask(wrapper, [{ command: 'bash /x/task-foo/launch.sh; echo finished' }], 'wrapper-owner'),
+    'a shell separator after the wrapper path preserves coverage');
+  const launchDirRow = { ...wrapper, outFile: null, logFile: null, launcher: { sessionId: 'wrapper-owner', taskDir: '/x/task-foo' } };
+  assert.ok(await matchingBackgroundTask(launchDirRow, [{ command: 'bash /x/task-foo/launch.sh' }], 'wrapper-owner'), 'explicit launch-record task directory covers its wrapper');
+  assert.ok(await matchingBackgroundTask({ ...launchDirRow, ancestorPids: {} }, [{ command: 'bash /x/task-foo/launch.sh' }], 'wrapper-owner'),
+    'malformed optional ancestry does not prevent matching the recorded task path');
+  assert.ok(await matchingBackgroundTask(launchDirRow, [{ command: 'bash /x/task-foo/scripts/run.sh' }], 'wrapper-owner'),
+    'an explicitly recorded task directory covers its nested wrapper');
+  assert.equal(await matchingBackgroundTask(wrapper, [{ command: 'bash /x/task-foo/task-other/launch.sh' }], 'wrapper-owner'), null,
+    'an inferred output directory cannot cover another nested task');
+  assert.match(hookRun(input('wrapper-owner', { background_tasks: [{ command: 'bash /x/task-foobar/launch.sh' }] })).output.reason, /arm the watcher/,
+    'a task directory prefix does not cover another task');
+  assert.match(hookRun(input('wrapper-owner', { background_tasks: [{ command: 'bash /x/task-foo/launch.sh', status: 'completed' }] })).output.reason, /arm the watcher/);
+  const directTurn = record('direct-owner', 'running', 'direct-worker', { thread: 'direct-thread', pid: process.pid,
+    followerCommand: 'turn', outFile: null });
+  assert.equal(hookRun(input('direct-owner', { background_tasks: [{ unknown_type: 'shell', command: `node ${worker} turn --thread direct-thread` }] })).output, null);
+  assert.match(hookRun(input('direct-owner', { background_tasks: [{ command: `node ${worker} turn --thread direct-thread-other` }] })).output.reason, /arm the watcher/);
+  // Exercise live ps ancestry without recorded ancestorPids or a matching output directory.
+  const nested = start(path.join(scripts, 'test/fixtures/worker-background-child.mjs'), []);
+  await until(() => nested.output().includes('ready'), 'nested follower ready');
+  const childPid = Number(nested.output().trim().split(' ')[1]);
+  const ancestorRow = { ...wrapper, pid: childPid, parentPid: undefined, ancestorPids: [], outFile: null, logFile: null };
+  assert.ok(await matchingBackgroundTask(ancestorRow, [{ id: String(nested.child.pid) }], 'wrapper-owner', { ancestryTimeoutMs: 3000 }), 'numeric task id matches live process ancestry');
+  assert.ok(await matchingBackgroundTask(ancestorRow, [{ command: `${process.execPath} ${path.join(scripts, 'test/fixtures/worker-background-child.mjs')}` }], 'wrapper-owner', { ancestryTimeoutMs: 3000 }),
+    'registered wrapper command matches live parent command');
+  nested.child.kill('SIGTERM'); await nested.done;
+
+  const capture = path.join(tmp, 'hook-capture/last-stop.json');
+  assert.equal(fs.existsSync(capture), false, 'capture is off by default');
+  hookRun(input('capture-owner', { background_tasks: [{ id: 'public-id', command: 'x'.repeat(400), status: 'running',
+    task_description: 'public description', unrelated: 'not captured', nested: { command: 'not captured' } }] }), { ORCH_HOOK_CAPTURE: '1' });
+  assert.deepEqual(JSON.parse(fs.readFileSync(capture, 'utf8')), [{ id: 'public-id', command: 'x'.repeat(300), status: 'running', task_description: 'public description' }]);
+  assert.equal(fs.statSync(capture).mode & 0o777, 0o600);
+
+  for (const status of ['completed', 'finished']) {
+    const owner = `reported-${status}`;
+    const row = record(owner, 'finished', 'already-reported', { thread: `${owner}-thread`, followerCommand: 'turn', pid: 2147483647,
+      launcher: { sessionId: owner, env: { CLAUDE_CODE_TASK_ID: 'reported-task' } } });
+    assert.equal(hookRun(input(owner, { background_tasks: [{ id: 'reported-task', command: 'bash /x/launch.sh', status }] })).output, null);
+    assert.equal(inbox(readEvents(), owner, readAck(owner)).pending.length, 0, 'reported completion is durably acknowledged');
+    assert.ok(readAck(owner).delivered[row.id]);
+  }
+  for (const current of [true, false]) {
+    const owner = `continued-report-${current}`, task = { id: 'current-task', command: 'bash /x/task-continued/launch.sh', status: 'running' };
+    const live = record(owner, 'running', 'continued-result', { thread: 'continued-thread', followerCommand: 'turn', pid: process.pid,
+      outFile: '/x/task-continued/report.md', logFile: '/x/task-continued/worker.jsonl' });
+    assert.equal(hookRun(input(owner, { background_tasks: [task] })).output, null);
+    record(owner, 'finished', 'continued-result', { ...live, event: 'finished', pid: 2147483647, exit: 0 });
+    const result = hookRun(input(owner, { background_tasks: [{ ...task, id: current ? 'current-task' : 'previous-task', status: 'completed' }] })).output;
+    if (current) assert.equal(result, null, 'a verified live registration matches completion even without a launcher task-id env');
+    else assert.match(result.reason, /continued-result.*read/, 'an older completed task with the same command cannot acknowledge the new turn');
+  }
+  const goneOwner = 'gone-owner', goneTask = { id: 'gone-task', command: 'bash /x/task-gone/launch.sh', status: 'running' };
+  const gone = record(goneOwner, 'running', 'gone-worker', { thread: 'gone-thread', followerCommand: 'start', pid: process.pid,
+    launcher: { sessionId: goneOwner, env: { CLAUDE_CODE_TASK_ID: 'gone-task' } } });
+  assert.equal(hookRun(input(goneOwner, { background_tasks: [goneTask] })).output, null);
+  const finish = record(goneOwner, 'finished', 'gone-worker', { ...gone, id: undefined, seq: undefined, t: Date.now() - 100,
+    event: 'finished', pid: 2147483647, exit: 0 });
+  // A continuation Stop saw the clean exit while the task was still listed, without delivering or acknowledging again.
+  assert.equal(hookRun(input(goneOwner, { stop_hook_active: true, background_tasks: [goneTask] })).output, null);
+  assert.equal(inbox(readEvents(), goneOwner, readAck(goneOwner)).pending.length, 1);
+  assert.equal(hookRun(input(goneOwner, { background_tasks: [] })).output, null);
+  assert.ok(readAck(goneOwner).delivered[finish.id]);
+  const freshOwner = 'fresh-exit-owner';
+  const fresh = record(freshOwner, 'running', 'fresh-exit-worker', { thread: 'fresh-thread', followerCommand: 'start', pid: process.pid,
+    launcher: { sessionId: freshOwner, env: { CLAUDE_CODE_TASK_ID: 'fresh-task' } } });
+  assert.equal(hookRun(input(freshOwner, { background_tasks: [{ id: 'fresh-task', status: 'running' }] })).output, null);
+  record(freshOwner, 'finished', 'fresh-exit-worker', { ...fresh, event: 'finished', pid: 2147483647, exit: 0 });
+  assert.match(hookRun(input(freshOwner, { background_tasks: [] })).output.reason, /fresh-exit-worker.*read/,
+    'an exit after the previous Stop cannot be silently acknowledged merely because its task disappeared');
+  const mixedOwner = 'mixed-finish-owner';
+  record(mixedOwner, 'finished', 'reported-result', { thread: 'reported-thread', followerCommand: 'start', pid: 2147483647,
+    launcher: { sessionId: mixedOwner, env: { CLAUDE_CODE_TASK_ID: 'mixed-task' } } });
+  record(mixedOwner, 'finished', 'unknown-result');
+  const mixedOutput = hookRun(input(mixedOwner, { background_tasks: [{ id: 'mixed-task', status: 'completed' }] })).output;
+  assert.match(mixedOutput.reason, /unknown-result.*read/);
+  assert.doesNotMatch(mixedOutput.reason, /reported-result/);
+  assert.equal(inbox(readEvents(), mixedOwner, readAck(mixedOwner)).pending.length, 0, 'mixed batches commit both reported and newly delivered results');
+  const malformedOwner = 'malformed-stop-state';
+  const malformed = record(malformedOwner, 'finished', 'malformed-state-result', { thread: 'malformed-thread', followerCommand: 'turn', pid: 2147483647 });
+  fs.writeFileSync(path.join(tmp, 'worker-stop-state', path.basename(ackFile(malformedOwner))),
+    JSON.stringify({ stopAt: Date.now() + 1000, registrations: { [malformed.runId]: 'invalid registration' } }));
+  assert.match(hookRun(input(malformedOwner, { background_tasks: [] })).output.reason, /malformed-state-result.*read/,
+    'invalid saved registrations never silently acknowledge a completion');
+  for (const [label, tasks, changes] of [
+    ['unknown-registry', undefined, {}], ['unmatched-task', [{ id: 'other', status: 'completed' }], {}],
+    ['still-running', [{ id: 'reported-task', status: 'running' }], {}],
+    ['command-only-report', [{ command: `node ${worker} turn --thread uncertain-thread`, status: 'completed' }], {}],
+    ['uncertain-exit', [{ id: 'reported-task', status: 'completed' }], { mayRun: true }],
+    ['failed-exit', [{ id: 'reported-task', status: 'completed' }], { exit: 1 }],
+  ]) {
+    const owner = `uncertain-${label}`;
+    record(owner, 'finished', label, { thread: 'uncertain-thread', followerCommand: 'turn', pid: 2147483647,
+      launcher: { sessionId: owner, env: { CLAUDE_CODE_TASK_ID: 'reported-task' } }, ...changes });
+    assert.match(hookRun(input(owner, { background_tasks: tasks })).output.reason, new RegExp(`${label}.*read`), 'uncertain completions must be delivered');
+  }
+  console.log('PASS wrapper paths, command-only turns, live ancestry, opt-in capture and reported/uncertain completion acknowledgements');
   const question = record('followers-owner', 'question', 'live-start', { thread: 'start-thread', questionId: 'open-choice',
     timeoutMin: 20, expiresAt: Date.now() + 1200000, text: 'Which choice?' });
   deliver('followers-owner', () => {}); // Acknowledgement does not answer an ask.

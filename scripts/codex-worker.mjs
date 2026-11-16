@@ -288,6 +288,9 @@ if (!Number.isInteger(REROUTE_DEPTH) || REROUTE_DEPTH < 0) die('--auto-reroute-d
 tracker?.set({ routeArgs: ROUTE_ARGS, rerouteDepth: REROUTE_DEPTH });
 const BACKGROUND = !!opts.background || !!(ROUTE_ARGS && routeFlag(ROUTE_ARGS, 'background'));
 let routedMetadata;try {routedMetadata=opts['routed-seat']?JSON.parse(opts['routed-seat']):undefined;} catch {die('--routed-seat needs JSON');}
+const projectWorkerInstructions = (digest) => workerInstructions(digest, {
+  project: opts.project ?? (ROUTE_ARGS && routeFlag(ROUTE_ARGS, 'project')) ?? routedMetadata?.project,
+});
 const auditStart = (model=opts.model,sandbox=opts.sandbox,continued) => {
   try {return auditLaunch({ name: opts.name??continued?.name, continuation:continued?.thread, project:opts.project??(ROUTE_ARGS&&routeFlag(ROUTE_ARGS,'project'))??undefined,
     account:account??'main',model,effort:opts.effort,sandbox,userOK:opts['user-ok'],role:opts.role,seat:routedMetadata});}
@@ -1328,7 +1331,7 @@ try {
     const digest = loadDigest();
     const th = await call('thread/start', {
       cwd: path.resolve(opts.cwd), model: opts.model, sandbox: opts.sandbox, approvalPolicy: APPROVAL_POLICY,
-      developerInstructions: [browserHowTo, workerInstructions(digest), reviewHowTo].filter(Boolean).join('\n'),
+      developerInstructions: [browserHowTo, projectWorkerInstructions(digest), reviewHowTo].filter(Boolean).join('\n'),
       ...(browserThread && !TRAE_EXTENSION_BROWSER && !TRAE_HEADLESS_BROWSER ? { approvalsReviewer: 'user' } : {}),
       ...(browserConfig ? { config: browserConfig } : {}),
     });
@@ -1340,7 +1343,7 @@ try {
     if (PROF?.kind === 'trae') rememberThreadModel(PROF.home, threadId, opts.model);
     if (opts.name) await call('thread/name/set', { threadId, name: opts.name }).catch(() => {});
     const talkback = talkbackContext(threadId);
-    const instructions = [browserHowTo, workerInstructions(digest), talkback.instructions, reviewHowTo].filter(Boolean).join('\n');
+    const instructions = [browserHowTo, projectWorkerInstructions(digest), talkback.instructions, reviewHowTo].filter(Boolean).join('\n');
     const configured = await call('thread/resume', { threadId, config: { ...browserConfig, ...talkback.config }, developerInstructions: instructions }).catch(() => null);
     markOutputStart();
     const ts = await call('turn/start', {
@@ -1354,7 +1357,7 @@ try {
     const config = { ...talkback.config, ...TRAE_MCP_CONFIG };
     const resumedDigest=loadDigest();
     const resumed = await call('thread/resume', { threadId: opts.thread, model: opts.model, config,
-      developerInstructions:[workerInstructions(resumedDigest), talkback.instructions, reviewHowTo].filter(Boolean).join('\n') }).catch(() => null);
+      developerInstructions:[projectWorkerInstructions(resumedDigest), talkback.instructions, reviewHowTo].filter(Boolean).join('\n') }).catch(() => null);
     sessionPath = resumed?.thread?.path ?? null;
     auditStart(opts.model??resumed?.thread?.model,opts.sandbox??resumed?.thread?.sandbox??undefined,{thread:opts.thread,name:resumed?.thread?.name??undefined});
     tracker?.set({ mayRun: true });
