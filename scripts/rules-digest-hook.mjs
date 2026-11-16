@@ -12,7 +12,6 @@ try {
   const input = JSON.parse(raw);
   if (!input || input.hook_event_name !== 'SessionStart' || !['startup', 'resume', 'compact', 'fork', 'clear'].includes(input.source)
     || !validRulesSession(input.session_id)) process.exit(0);
-  await import('./skill-autoupdate.mjs').then(m => m.autoupdate()).catch(() => {});
   const seen = await readSeen();
   if (!await orchestrator(input, seen)) process.exit(0);
   await withRulesDelivery(input, seen, { initial: true }, async (rules) => {
