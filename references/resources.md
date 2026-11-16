@@ -6,6 +6,21 @@ separately coordinated cleanup at 04:30 local time. The two new launchd files ar
 No sampler/review command runs a model, signals a process,
 probes a device, changes a lease or reads authentication storage.
 
+## Contents
+
+- [Sampling](#sampling)
+- [Heavy lock contract](#heavy-lock-contract)
+- [Res ownership](#res-ownership)
+- [Cache scope](#cache-scope)
+- [Ownership and task state](#ownership-and-task-state)
+- [Live idle hints](#live-idle-hints)
+- [Review and retention](#review-and-retention)
+- [Cleanup](#cleanup)
+- [Privacy and installation](#privacy-and-installation)
+- [Installed state](#installed-state)
+- [Resident workers and monitoring delivery](#resident-workers-and-monitoring-delivery)
+- [Build and cache execution](#build-and-cache-execution)
+
 ## Sampling
 
 `node scripts/resource-sample.mjs --read-only --json` prints one JSON record without writing anything. Normal mode
@@ -83,11 +98,12 @@ holders count in the unchanged min(20, 12 + 8 * other lanes) normal gate; normal
 Full iOS/Android SDK + host package
 work holds the slot and a lane throughout preflight/staging/build/acceptance. SG packaging, sustained native compilation
 and long multiprocess focused tests need a lane only. Host unit tests without a full native build, single-TU compilation,
-docs/analysis and device-only work are exempt. Acquire slot before lane, release in reverse on every exit (`trap EXIT`),
-use bounded `res wait --timeout`, and pass the long-lived wrapper PID rather than a short-lived res process PID.
+docs/analysis and device-only work are exempt. Full builds acquire slot plus a free admitted lane together through
+`take-build`/`wait-build`, holding neither while waiting. Other heavy work uses `wait-lane`; release owned holds
+in reverse on every exit. Use one watched long-lived wrapper with finite timeout, never a standalone shell PID.
 
 **Scope is local heavy compute only.** PPE/staging/TCE/BITS/SCM deploys, remote/cloud pipelines, CI runs and
-`build-run --env test` procedural deploys are not heavy: they never take the slot or a lane, never pass `--shared-lock`,
+explicit remote/CI procedural deploys are not heavy (`--env test` alone does not establish location): they never take the slot or a lane, never pass `--shared-lock`,
 and shared remote/CI entry scripts stay unthrottled. A local `res` lock or `verify-throttle` belongs in a local-only
 wrapper, never in the shared entry; `route.mjs --no-local-build` marks the remote case. Lock `--for` purposes are
 classified transiently into `deploy`/`build`/null for review; the raw purpose text is never persisted or printed.
@@ -530,3 +546,49 @@ event time and last activity time. It needs no codex-worker command. A live foll
 thread keeps a latest `running` event in the list; an unavailable confirmation is UNKNOWN. Normal quota output reports
 hub `up`, `slow-probe` (HTTP health succeeds but the transport probe times out), and `down`, alongside supervisor state.
 A successful hub recovery refreshes a cached unavailable reading. No monitor restarts a hub.
+
+## Build and cache execution
+
+Moved from SKILL.md (2026-11-16). The installed shared `res` and [maintained contract](res-contract.md)
+are authoritative; staged v1.7 source is not evidence of a live owner switch. Run
+`res take-build --help` for controller flags. heavy-build.sh has no help flag: set HEAVY_BUILD_BY
+(unique holder), HEAVY_BUILD_PROJECT, HEAVY_BUILD_TASK and finite HEAVY_BUILD_TIMEOUT (minutes), then
+run `scripts/heavy-build.sh [--watch-pid <worker PID>] [--] <command...>`. Optional RES_COMMAND selects
+the shared entry and HEAVY_BUILD_LANE pins heavy-lane-1/2/3; neither grants a lock. Default gates remain
+min(20, 12 + 8 * other lanes), available memory >=16 GiB; lane 3 only after a reviewed switch, at
+load1m <=8 AND memory >=32 GiB. UNKNOWN blocks; captured controller verdicts govern rounded readings.
+
+Full local packages use one watched `heavy-build.sh` or equivalent process for atomic pair acquisition,
+compute, owned-child cleanup and reverse return. Other local heavy work uses wait-lane. Install exit/
+signal cleanup before acquisition, use a unique holder and long-lived PID, finite timeout and worker
+liveness watch. Do not nest wrappers/adopt existing holds. Timeout means queue/report, never bypass.
+A same-task successor verifies predecessor project/task, local host and dead PID, returns its STALE
+lane then slot under coordinated ownership and re-takes with its own identity/PID. Never reclaim an
+active/unverified hold or kill another task's process. Detailed release/reclaim semantics are in the contract.
+
+Approved build discipline (user, 2026-11-13): compile 6, link 1, Xcode `-jobs 6`, Gradle 2 workers.
+Use fixed per-base incremental directories, one cold build before acceptance, affected tests in fixes,
+no native rebuild without native changes. No worker disk caps; self-made clone/template/cache cleanup
+only below 1 TB free on the data disk, with no active need. Real workspace/user-data deletion needs a card.
+
+T83 Part B ccache scope: Android NDK and host CMake Ninja/Makefiles only, not the Xcode generator. Set
+both `CMAKE_C_COMPILER_LAUNCHER` and `CMAKE_CXX_COMPILER_LAUNCHER` to `/opt/homebrew/bin/ccache`.
+Shared `CCACHE_DIR=$HOME/.vesdk-dev/ccache`, `CCACHE_CONFIGPATH=$CCACHE_DIR/ccache.conf`; max_size=96G,
+base_dir=/Users/bytedance, hash_dir=false, compiler_check=content. Allow only approved cache-path
+writes or task-scratch data with the shared config, no broad HOME grant, shared-counter reset or
+sloppiness. Separate mutable build trees and verify generated compiler commands. Only SDK native
+graph acceptance was validated, not full APK/Gradle; first real cache use is cold. Existing enable
+notes: `/Users/bytedance/code/.claude-data/orchestrator/vesdk-mainline/tasks/T83/enable-build-cache.md`.
+
+Gradle public/sanitized pure builds use a task-private Gradle home, `--build-cache --daemon --max-workers=2`,
+`-Dorg.gradle.daemon.idletimeout=300000`, `-Dorg.gradle.jvmargs=-Xmx6g`. No daemon where process-exit
+credential isolation or signing/login material is involved. Omit routine clean/rerun/header regeneration;
+stop only the task's own daemon. Cache flags never authorize secrets or signing beyond registered tests.
+
+Devices: put connection/unlocked state, backup, exact take/return and <=2 h deadline in the brief.
+Readable app-data backup precedes destructive reinstall/wipe/erase for phones and simulators; iOS
+excludes protected `Library/SplashBoard/`, verifies backup before any install, and installs over the
+top when saves matter. Only registered iphone8/iphone11/s21; never personal iPhone 15 Pro Max or
+unregistered devices. Own-app permission/trust/install prompts are pre-authorized, no credentials/
+verification codes/purchases. A Codex refusal of an allowed prompt routes that step to Claude.
+Disconnects retain ownership while BLOCKED within the lease deadline, not an unlimited reservation.
