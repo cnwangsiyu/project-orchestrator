@@ -221,7 +221,7 @@ metadata and preserves the original launch and its unrouted violation. An attrib
 
 Read `review-data.globalRules` for the day and week. Report violations **per orchestrator**: unrouted launches,
 personal-quota launches without recorded user OK, TRAE GPT launches on security routes, and missing/stale
-`rules-ack` vs the digest version. Read the launcher-provided `orch-usage` flags/blockedMinutes alongside them
+automatic seen-version acknowledgements in `_shared/rules-seen.json` vs the digest version (legacy ledger `rules-ack` is a fallback). Read the launcher-provided `orch-usage` flags/blockedMinutes alongside them
 for labour and foreground blocking. Launch records are attempts, not completion proof; legacy routes without
 launch evidence and missing remote ledgers stay unknown, never proven compliant or violated.
 
@@ -245,8 +245,8 @@ starts. Missing progress evidence remains UNKNOWN, never an assumed speedup. Com
 A rule broken on three nights needs a concrete tool-level enforcement proposal (evidence, owner, smallest effective
 gate and false-positive risk), not another repeated reminder.
 Use a Chinese decision card if approval or a hard-rule change is needed; never silently expand permissions or
-change thresholds. Push digest-version notes through the owner and require ledger `rules-ack <version>` from
-each recipient. Hook injection records are not acknowledgements.
+change thresholds. Hooks record seen versions as acknowledgements; no manual ledger `rules-ack` is required.
+The owner checks `node scripts/rules-worker-digest.mjs --acks` on each machine and messages only required actions.
 
 For a reported unreachable hub, first probe `codex-worker --account <name> list --limit 1`; an empty successful
 list is reachable. Start with `codex-worker --account <name> hub` only if unreachable, and tell the global-rules
@@ -473,12 +473,14 @@ Every night review the policies added on 2026-11-13 against both the day's data 
 
 ## 4. Tell the orchestrators
 
-Do this only when something changed, or an orchestrator has to act (missing `--project`, a pending card decision to
-put to the user).
+Send a separate message only when an orchestrator has to act (stop/re-route/re-run, update a remote checkout,
+missing `--project`, or a pending card decision to put to the user). Routine digest-version changes arrive once
+at the next Stop/SessionStart; hook-recorded seen versions are acknowledgements. Check
+`node scripts/rules-worker-digest.mjs --acks` on each machine; no manual ledger ack is required.
 
 - **Owner and delivery (user, 2026-11-13):** the routing/global-rules orchestrator owns rollout for every global
-  rule change, not just nightly routing edits. Send a short policy note through the secretary for the mini's
-  group; notify MacBook orchestrators directly. The secretary only relays, keeps ledgers/roster and asks cards.
+  rule change, not just nightly routing edits. Existing hooks deliver version changes; send required action notes
+  through the secretary for the mini's group and notify MacBook orchestrators directly. The secretary only relays, keeps ledgers/roster and asks cards.
 - **Recipients:** every orchestrator, local or remote (user, 2026-11-03). Build the list by name; don't rely on a
   `ListAgents` listing, which is truncated when there are many sessions (2026-11-08: 95 rows hidden, orchestrators
   possibly missed). The list is the union of:

@@ -35,6 +35,20 @@ const transcriptHint = async (file) => {
 };
 
 export const orchestrator = async (input, seen) => {
+  // Explicit worker metadata wins over a shared skill cwd, transcript marker or cached recognition.
+  if (input.agent_id || process.env.CODEX_WORKER_THREAD === input.session_id) return false;
+  const root = path.join(rulesShared(), 'worker-context');
+  let accounts = []; try { accounts = await fs.readdir(root); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+  if (accounts.length > 64) throw Error('worker context account limit exceeded');
+  for (const account of accounts.filter((name) => /^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$/.test(name))) {
+    const file = path.join(root, account, `${input.session_id}.json`), raw = await readSmall(file);
+    if (!raw) {
+      try { await fs.lstat(file); } catch (e) { if (e.code === 'ENOENT') continue; throw e; }
+      throw Error('unreadable public worker context');
+    }
+    const worker = JSON.parse(raw);
+    if (worker?.thread === input.session_id && worker.account === account && worker.owner) return false;
+  }
   if (seen[input.session_id]?.orchestrator) return true;
   const title = input.session_title ?? input.session_name ?? input.title ?? input.name;
   if (typeof title === 'string' && /主对话$/.test(title.trim())) return true;

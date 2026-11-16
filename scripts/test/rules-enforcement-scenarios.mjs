@@ -74,7 +74,7 @@ try {
   for (const input of ['{broken', '{}', event({ source: 'invalid' }), event({ session_id: '__proto__' })]) assert.equal(invoke(input), null);
   assert.equal(invoke(event({ session_title: 'Fail 主对话' }), { RULES_DIGEST: path.join(tmp, 'missing') }), null);
   fs.mkdirSync(path.join(shared, 'rules-seen.json.lock'));
-  assert.ok(invoke(event({ session_title: 'Contended 主对话', session_id: 's4' })));
+  assert.equal(invoke(event({ session_title: 'Contended 主对话', session_id: 's4' })), null);
   assert.equal(JSON.parse(fs.readFileSync(path.join(shared, 'rules-seen.json'))).s4, undefined);
   fs.rmdirSync(path.join(shared, 'rules-seen.json.lock'));
   console.log('ok   hook identity, roster/transcript, versions, fail-open parsing/contention and <300ms');
