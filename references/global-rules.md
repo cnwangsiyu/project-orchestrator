@@ -1,5 +1,5 @@
 # Global Rules
-version: 2026-11-16.4
+version: 2026-11-16.5
 
 ## Changes In This Version
 - 2026-11-16.1: worker notes are only for a risk, scope change, decision made, landed commit or finding that changes someone else's work (no tool hiccups or status); projects may list slow tests that run only when their code is touched and never inside a heavy lane; a read-only start warns when the prompt asks for an output file other than --out. Credential-rule clarifications (2026-11-15.6, user decision on keys): service keys the user placed in a project's own configuration may be used by running the project's code for that service's official API; ssh and git use the user's normal ~/.ssh config and default keys through their own commands (no GIT_SSH_COMMAND/-F/IdentityFile overrides). Printing, copying, relocating or exporting any key material, and reading keys/sessions/auth files outside the project, stay forbidden. res v1.6: lane fairness between projects, per-machine gate thresholds, device lease evidence.
