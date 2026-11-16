@@ -310,8 +310,8 @@ workers, and patching after a second same-kind defect.
   (no GPT model on any account); DeepSeek threads cannot do builds, sensitive
   reviews or acceptance (the adversarial review lane is the explicit exception, always with its second reviewer); paused
   or unavailable models cannot be continued. If the TRAE model's bucket is depleted and
-  its queue is above 300 while someone is waiting, take the route's thread instead. Record the actual model, effort and
-  account with `outcome.mjs --actual vendor:model:effort@account`, plus a ledger line
+  its queue is above 300 while someone is waiting, take the route's thread instead. The launcher records actual model, effort and
+  account evidence automatically; correct it with `outcome.mjs --actual` only if needed. Keep a ledger line
   `continued original thread because ...` naming the reason and the eligibility checks. This exception is for same-task
   rework, not unrelated new tasks or independent reviewers.
 - **Security follows the worker's context** (VAK ruling, user-approved 2026-11-13). An implementation/fix round that
@@ -357,31 +357,21 @@ workers, and patching after a second same-kind defect.
 - Ordinary work is accepted on executable tests; use one optional ordinary review when tests cannot cover it. An explicit class is never blocked by an internal-demo profile.
 - All writing categories carrying a class get the applicable preaction/acceptance review, independent of author vendor. A/C and registered signing actions require the artifact review before acting. Second reviewers only apply to classified adversarial/review-high/release reviews.
 - Follow `references/review-rubric.md`: P0/P1 only block, at most three non-blocking notes, re-review only blocked findings, and at most two rounds per task/branch scope. A new override reason cannot permit round three. Targets: video-agent 10%, vesdk-mainline/webview 20%; targets warn, never suppress mandatory reviews.
-- When a task is finally accepted or given up, record it once:
-  `node <this skill>/scripts/outcome.mjs --project <slug> --name <task> --result pass|rework|fail [--rounds N] [--cause code|spec|process|infra|scope] [--retries N] [--scope-changes N] [--minutes M] [--reviewed] [--review-result blocking|none] [--note "…"] [--correct] [--actual vendor:model:effort@account ...]`.
-  - Keep the kinds of extra work apart (rework retro 2026-11-10): `--cause` is the main cause of the fix rounds (`code`
-    the worker's code, `spec` a brief/spec gap, `process` review/acceptance/dispatch, `infra` tools/devices/platform,
-    `scope` a changed requirement); `--retries N` counts re-runs for infrastructure (quota, queue, device, signing,
-    hub), which are not rework; `--scope-changes N` counts requirement changes. The nightly review compares models and
-    accounts on `code` rework only. Record only after the task's acceptance has really run.
-  - Use the same `--name` you passed to `route.mjs`, and name fix rounds `<task>-fix1`, `<task>-fix2`…
-    A review run (`<task>-R`) gets no outcome of its own: its verdict goes into the task's record.
-  - `pass` means accepted at its first check, with no fix round (a review verdict of MERGE or
-    MERGE-WITH-NOTES is a pass). Any fix round makes it `rework --rounds N`, counting every round
-    on any vendor; `outcome.mjs` records `pass --rounds N` (N ≥ 1) as rework. Add `--reviewed` when a
-    review judged it.
-  - Once per task: normal duplicate records keep the latest result, most rounds and any reviewed flag.
-    To fix an existing outcome, append `--correct`: supplied fields override the aggregate, including
-    `--rounds 0` or `--rounds null`; omitted metadata inherits. Corrections apply in timestamp order after
-    all normal records, so later duplicates cannot restore old round counts. Never edit or delete log lines.
-    The nightly review lists `corrected` before/after values and counts `corrections` separately from duplicates.
-  - When the launch differs from the joined route pick, repeat `--actual vendor:model:effort@account` in launch
-    order (also allowed with `--correct`). On an existing outcome, `--actual` without `--result` appends only
-    metadata and preserves its result. The first/last actual attempts take precedence for attribution;
-    old records still use the joined first/accepted pick. The nightly review lists `actualMismatches` and
-    excludes mixed harnesses or non-Codex sequences from TRAE-vs-Codex rows, listing them under `mixed`.
-  - The nightly review turns these records into first-pass rates, rework rounds and times per
-    vendor, model and category. That is the evidence for changing the routing table.
+- Routed workers automatically append provisional `auto: true` outcomes when their follower ends: exit 0 is
+  `pass`, launcher/hub failure is `fail` with cause `infra`, and BLOCKED/FAILED/needs-user reports remain unresolved.
+  A continuation after a provisional pass adds a rework round. Elapsed minutes include the first launch and queue wait.
+  Review seats end with exactly `REVIEW-RESULT: blocking` or `REVIEW-RESULT: none`; missing markers stay UNKNOWN.
+  Seat results feed review statistics separately from the author's task outcome.
+- Use `outcome.mjs` only when judgement corrects the automatic result: acceptance found a problem, rework cause,
+  scope change, user cancellation, or acceptance after your own check. For example:
+  `node <this skill>/scripts/outcome.mjs --project <slug> --name <task> --correct --result rework --rounds 1 --cause code`.
+  Manual fields always override automatic records, even newer continuations. `--correct` also overrides previous
+  manual fields (including lower/null rounds); omitted fields inherit. Keep log lines intact.
+  `--cause code|spec|process|infra|scope`, `--retries N`, `--scope-changes N` distinguish fixes, infrastructure retries
+  and changed requirements. `--reviewed` records independent acceptance. Use `--review-result blocking|none` to correct
+  a review seat's yield. Repeat `--actual vendor:model:effort@account` in launch order only to correct model evidence;
+  the launcher normally records execution evidence itself. Missing actual evidence remains UNKNOWN.
+  Nightly data shows auto/manual coverage and derives task statistics once per name after these precedence rules.
 
 **Carry memory across sessions yourself.** A worker loads, at best, the memory of the project its
 working directory maps to — never this conversation's own memory, and a Codex worker reads even
