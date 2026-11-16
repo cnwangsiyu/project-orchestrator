@@ -53,7 +53,9 @@ export function compareLaunch(expected, actual, profiles={}) {
     modelFamilyChanged:!!expected.model&&!!actual.model&&family(expected.model)!==family(actual.model),
     widerSandbox:levels.includes(actual.sandbox)&&levels.includes(expected.sandbox)&&levels.indexOf(actual.sandbox)>levels.indexOf(expected.sandbox)}:null;
 }
-export const auditLaunch = ({ name, project, account, model, effort, vendor = 'codex', sandbox, userOK, role='primary', seat, time = Date.now(), log = rulesLog() }) => {
+// `continuation` (a thread id) marks a further turn on an already launched thread: it is recorded as a launch but is not a new,
+// unrouted launch (its routing was decided when the thread started).
+export const auditLaunch = ({ name, project, account, model, effort, vendor = 'codex', sandbox, userOK, role='primary', seat, continuation, time = Date.now(), log = rulesLog() }) => {
   let profiles={};try { profiles=JSON.parse(fs.readFileSync(process.env.CODEX_ACCOUNTS||path.join(rulesShared(),'codex-accounts.json'),'utf8'))??{}; } catch {}
   const decision = findDecision(readRecords(log), name, time, project);
   const supplied=seat&&seat.name===name&&(project===undefined||seat.project===project)?seat:null;
@@ -68,11 +70,11 @@ export const auditLaunch = ({ name, project, account, model, effort, vendor = 'c
   const mismatch=compareLaunch(expected,base,profiles);
   const blocked=!!mismatch?.companyToPersonal&&!(typeof approvalRef==='string'&&approvalRef.trim());
   if(mismatch) process.stderr.write(`launch-mismatch: ${name??'(unnamed)'} ${mismatch.differences.map(d=>`${d.field} ${d.routed} -> ${d.actual}`).join('; ')}${blocked?'; re-route or pass the approval recorded on the route decision':''}\n`);
-  if (!expected) process.stderr.write(`unrouted-launch: ${name ?? '(unnamed)'} ${account ?? '?'} ${model ?? '?'}; route it first\n`);
+  if (!expected && !continuation) process.stderr.write(`unrouted-launch: ${name ?? '(unnamed)'} ${account ?? '?'} ${model ?? '?'}; route it first\n`);
   try {
     fs.mkdirSync(path.dirname(log), { recursive: true });
-    const rows = [...(!expected ? [{ kind: 'unrouted', ...base }] : []),
-      ...(mismatch?[{kind:'launch-mismatch',...base,...mismatch,blocked}]:[]),{ kind: 'launch', ...base,blocked }];
+    const rows = [...(!expected && !continuation ? [{ kind: 'unrouted', ...base }] : []),
+      ...(mismatch?[{kind:'launch-mismatch',...base,...mismatch,blocked}]:[]),{ kind: 'launch', ...base,blocked,...(continuation?{continuation}:{}) }];
     fs.appendFileSync(log, rows.map((row) => JSON.stringify(row)).join('\n') + '\n');
   } catch { process.stderr.write('launch-audit: route log unavailable; launch evidence not recorded\n'); }
   if(blocked) throw Object.assign(Error('Personal account replaces a company route without a recorded --user-ok reference; re-route or pass the approval recorded on the route decision.'),{code:'PERSONAL_ROUTE_APPROVAL_REQUIRED',exitCode:1});

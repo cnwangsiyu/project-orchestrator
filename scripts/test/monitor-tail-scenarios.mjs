@@ -21,7 +21,7 @@ try {
   const { notifyMonitorFailure } = await import('../lib/monitor-notify.mjs');
   const { notifySampleFailures } = await import('../resource-sample.mjs');
   const { probeHub, writeHubState } = await import('../lib/hub-state.mjs');
-  const { runningWorkers } = await import('../lib/running-workers.mjs');
+  const { runningWorkers, sessionActivity } = await import('../lib/running-workers.mjs');
   const { auditGlobalRules } = await import('../lib/global-rules-audit.mjs');
   const { auditLaunch } = await import('../lib/global-rules.mjs');
   const { dedupeOutcomes, modelView } = await import('../lib/state.mjs');
@@ -83,6 +83,23 @@ try {
   assert.equal(running.threads.length, 2); assert.equal(running.unresolved.length, 1);
   assert.equal(running.byAccount.trae[0].startedAt, now - 3 * minute);
   assert.equal(running.byAccount.trae[0].lastActivityAt, now);
+  // BC-50: a long command writes no worker events; the hub session file's mtime is the activity signal.
+  const sessHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sess-')), sessDir = path.join(sessHome, 'cli', 'sessions', '2026', '11', '15');
+  fs.mkdirSync(sessDir, { recursive: true }); const sessFile = path.join(sessDir, 'rollout-2026-11-15T13-49-01-quiet.jsonl');
+  fs.writeFileSync(sessFile, '{}\n'); fs.writeFileSync(`${sessFile}.lock`, '');
+  const quiet = await runningWorkers({ rows: [{ account: 'trae', thread: 'quiet', runId: 'q1', t: now - 50 * minute, event: 'running', pid: 1 }],
+    profiles: { trae: { home: sessHome } }, alive: () => true });
+  assert.ok(quiet.threads[0].lastActivityAt >= fs.statSync(sessFile).mtimeMs - 1 && quiet.threads[0].lastActivityAt > now - 50 * minute);
+  assert.equal(sessionActivity(sessHome, 'absent'), null);
+  // A further turn on an existing thread is a launch record, never a new unrouted launch; the audit CLI records nothing without a name.
+  const contLog = path.join(sessHome, 'route-log.jsonl');
+  auditLaunch({ name: undefined, account: 'trae', model: 'gpt-6.1-sol', continuation: 'thread-1', log: contLog });
+  const contRows = fs.readFileSync(contLog, 'utf8').trim().split('\n').map(l => JSON.parse(l));
+  assert.deepEqual(contRows.map(r => r.kind), ['launch']); assert.equal(contRows[0].continuation, 'thread-1');
+  auditLaunch({ name: 'fresh', account: 'trae', model: 'gpt-6.1-sol', log: contLog });
+  assert.ok(fs.readFileSync(contLog, 'utf8').includes('"kind":"unrouted"'));
+  const bare = spawnSync(process.execPath, [path.join(scripts, 'launch-audit.mjs'), '--help'], { env: { ...process.env, ROUTE_LOG_FILE: path.join(sessHome, 'bare.jsonl') }, encoding: 'utf8' });
+  assert.equal(bare.status, 1); assert.equal(fs.existsSync(path.join(sessHome, 'bare.jsonl')), false);
   appendEvent({ runId: 'cli-running', event: 'running', account: 'trae', thread: 'cli-thread', pid: process.pid, owner: 'owner-full', model: 'GPT-6.1-Sol' });
   fs.writeFileSync(path.join(shared, 'codex-accounts.json'), JSON.stringify({ trae: { hub: 'ws://127.0.0.1:1' } }));
   const shown = JSON.parse(execFileSync(process.execPath, [path.join(scripts, 'quota.mjs'), '--running', '--json'], { env: process.env, encoding: 'utf8' }));

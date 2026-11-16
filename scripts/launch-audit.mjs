@@ -20,6 +20,7 @@ try {
     if (rows.length) fs.appendFileSync(file, rows.map(row => JSON.stringify(row)).join('\n') + '\n');
     console.log(JSON.stringify({ attributed: rows.length, name: opts.attribute, owner: opts.owner }));
   } else {
+  if (!opts.name) throw Error('needs --name (nothing recorded); usage: --name <worker> --account <a> --model <m> [--project --effort --vendor --sandbox --role --routed-seat], or --attribute <name> --owner <id> --note <text>');
   let seat;try {seat=opts['routed-seat']?JSON.parse(opts['routed-seat']):undefined;} catch {console.error('launch-audit: routed seat metadata invalid');}
   auditLaunch({ name: opts.name, project:opts.project, account: opts.account, model: opts.model, effort:opts.effort,vendor: opts.vendor,
     sandbox: opts.sandbox, userOK: opts['user-ok'],role:opts.role,seat });

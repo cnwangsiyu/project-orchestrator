@@ -234,8 +234,8 @@ if (!Number.isInteger(REROUTE_DEPTH) || REROUTE_DEPTH < 0) die('--auto-reroute-d
 tracker?.set({ routeArgs: ROUTE_ARGS, rerouteDepth: REROUTE_DEPTH });
 const BACKGROUND = !!opts.background || !!(ROUTE_ARGS && routeFlag(ROUTE_ARGS, 'background'));
 let routedMetadata;try {routedMetadata=opts['routed-seat']?JSON.parse(opts['routed-seat']):undefined;} catch {die('--routed-seat needs JSON');}
-const auditStart = (model=opts.model,sandbox=opts.sandbox) => {
-  try {return auditLaunch({ name: opts.name, project:opts.project??(ROUTE_ARGS&&routeFlag(ROUTE_ARGS,'project'))??undefined,
+const auditStart = (model=opts.model,sandbox=opts.sandbox,continued) => {
+  try {return auditLaunch({ name: opts.name??continued?.name, continuation:continued?.thread, project:opts.project??(ROUTE_ARGS&&routeFlag(ROUTE_ARGS,'project'))??undefined,
     account:account??'main',model,effort:opts.effort,sandbox,userOK:opts['user-ok'],role:opts.role,seat:routedMetadata});}
   catch(e) {die(e.message,e.exitCode??1);}
 };
@@ -1262,7 +1262,7 @@ try {
     const resumed = await call('thread/resume', { threadId: opts.thread, model: opts.model, config,
       developerInstructions:`Global worker rules ${resumedDigest.version}\n${resumedDigest.worker}\n${talkback.instructions}` }).catch(() => null);
     sessionPath = resumed?.thread?.path ?? null;
-    auditStart(opts.model??resumed?.thread?.model,opts.sandbox??resumed?.thread?.sandbox??undefined);
+    auditStart(opts.model??resumed?.thread?.model,opts.sandbox??resumed?.thread?.sandbox??undefined,{thread:opts.thread,name:resumed?.thread?.name??undefined});
     tracker?.set({ mayRun: true });
     saveLaunch(account ?? 'main', opts.thread, { ...opts, 'auto-reroute-depth': REROUTE_DEPTH }, resolveOwner(opts.owner), modelEvidence());
     markOutputStart();
