@@ -41,7 +41,12 @@
         ]
       }
     ],
-    "slowTestsNote": "Reported by the VAK orchestrator 2026-11-16 (BC-59); it appends new entries through the rules owner."
+    "slowTestsNote": "Reported by the VAK orchestrator 2026-11-16 (BC-59); it appends new entries through the rules owner.",
+    "browserOrigins": [
+      "tiktok-row.org",
+      "*.tiktok-row.org"
+    ],
+    "browserOriginsNote": "VAK's own PPE product domains (vak-demo-ppe*.tiktok-row.org), reported by the VAK orchestrator 2026-11-16"
   },
   "vesdk-mainline": {
     "profile": "sdk-mainline",
