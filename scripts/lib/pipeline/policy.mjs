@@ -1,7 +1,16 @@
 // Category qualification and preferences, shared by admission and ordering.
-import { EFFORTS, company, adversarial, known } from './common.mjs';
+import { EFFORTS, company, adversarial, known, modelId } from './common.mjs';
 export const SOL='gpt-6.1-sol', ASTRA='gpt-6-astra';
-export const TIERS = {hard:[SOL,ASTRA],normal:[SOL,'gpt-5.6-sol','gpt-5.6-terra','deepseek-v4.1-flash'],light:['gpt-5.6-terra','gpt-5.5','deepseek-v4.1-flash']};
+// Company hard-tier trial: 2026-11-16 through the 2026-11-23 review.
+export const TIERS = {hard:[ASTRA,SOL],normal:[SOL,'gpt-5.6-sol','gpt-5.6-terra','deepseek-v4.1-flash'],light:['gpt-5.6-terra','gpt-5.5','deepseek-v4.1-flash']};
+export function hardPreference(t) {
+  // Retain Sol's effort escalation (including company max) after a Sol attempt.
+  // Astra actuals still forbid Sol through pPreviousFloor; preference is not a floor.
+  const attempts=t.previousAttempts.filter(a=>a?.taskId===t.taskId&&(a.role??'primary')===t.role&&a.state!=='planned'&&a.actualStatus==='KNOWN');
+  const used=id=>attempts.some(a=>modelId(a.actual?.modelId??a.actual?.model)===id);
+  return used(SOL)&&!used(ASTRA)
+    ? [SOL,ASTRA] : TIERS.hard;
+}
 export const PERSONAL = {
   lookup:[['gpt-6-luna','low'],['haiku','low'],[SOL,'medium']],
   extract:[['gpt-6-luna','medium'],['haiku','medium'],[SOL,'medium']],
@@ -31,7 +40,10 @@ export function modelPreference(t,a) {
   if(adversarial(t)) return ['kimi-k3','deepseek-v4.1-flash','opus'];
   if(company(a)) {
     if(t.category==='image-read') return [SOL,ASTRA,...(a.kind==='ttadk'?['gemini-3.1-pro-preview']:[]),'seed-evolving'];
-    if(t.tier==='hard') return TIERS.hard;
+    // An account-less company baseline cannot attest a prior Astra run. Keep the
+    // existing Sol assumption for count-only retries; declared Astra catalogs use
+    // the trial preference and choose.mjs still checks whether the lane is free.
+    if(t.tier==='hard') return known(a.catalog)?.includes(ASTRA)?hardPreference(t):[SOL,ASTRA];
     return [...TIERS[t.tier],...(t.tier==='light'?[SOL,'gpt-5.6-sol']:[]),...(a.kind==='ttadk'?['gemini-3.1-pro-preview']:[])];
   }
   const preference=(PERSONAL[t.category]??[]).map(([m])=>m);
