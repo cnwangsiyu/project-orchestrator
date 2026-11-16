@@ -61,6 +61,7 @@ import { isPolicyBlock, policyBlockRecord, appendPolicyBlock, policyBlockAction 
 import { runHubForeground, hubListReachable } from './lib/hub-foreground.mjs';
 import { parseRouteArgs, routeFlag, rerouteWorker, turnHasWork } from './lib/worker-reroute.mjs';
 import { inheritedLaunch, saveLaunch, recordLaunchModel } from './lib/worker-launch.mjs';
+import { recordWorkerOutcome, reviewSeat, reviewInstructions } from './lib/worker-outcome.mjs';
 import { modelFamily, modelObservation, rolloutTurnModel } from './lib/worker-model.mjs';
 import { lifecycle, resolveOwner, validOwner, inbox, readEvents, readAck, eventLine, watch, signalExit, appendEvent,
   saveWorkerContext, workerContext, openQuestions, answerQuestion } from './lib/worker-events.mjs';
@@ -101,6 +102,22 @@ const tracker = ['start', 'turn', 'wait'].includes(argv[0]) ? lifecycle({ owner:
   mayRun: argv[0] === 'wait' && typeof earlyOpts.thread === 'string',
   outFile: typeof earlyOpts.out === 'string' ? path.resolve(earlyOpts.out) : null,
   logFile: typeof earlyOpts.log === 'string' ? path.resolve(earlyOpts.log) : null }) : null;
+// Exit also covers validation/RPC failures before report(). Never read a stale --out file.
+let outcomeTurn = null, outcomeFinal = '', outcomeSkip = false;
+if (tracker) process.on('exit', (exit) => {
+  try {
+    const state = tracker.metadata();
+    const saved = state.thread ? inheritedLaunch(account ?? 'main', { thread: state.thread }) ?? {} : {};
+    const options = { ...saved, ...earlyOpts };
+    const args = parseRouteArgs(options['route-args']);
+    const seat = options['routed-seat'] ? JSON.parse(options['routed-seat']) : {};
+    recordWorkerOutcome({ project: options.project ?? routeFlag(args ?? [], 'project') ?? seat.project,
+      name: options.name ?? seat.name, category: args?.[0] ?? seat.category, role: options.role ?? seat.role,
+      account: account ?? 'main', model: state.model, effort: state.effort, actualModel: state.actualModel,
+      startedAt: followerStartedAt, command: argv[0], thread: state.thread, turn: outcomeTurn?.id ?? state.turn,
+      exit, final: outcomeFinal, terminal: !!outcomeTurn, skip: outcomeSkip || state.signal });
+  } catch (e) { process.stderr.write(`auto-outcome: NOT RECORDED: ${e.message}\n`); }
+});
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) if (tracker) process.once(signal, () => {
   tracker.signal(signal);
   if (!process.listenerCount(signal)) process.exit(signalExit(signal));
@@ -272,6 +289,8 @@ let outBaseline;
 const outputStat = () => { try { const s = fs.statSync(path.resolve(opts.out)); return [s.dev, s.ino, s.size, s.mtimeMs, s.ctimeMs].join(':'); } catch { return null; } };
 const markOutputStart = () => { if (opts.out) outBaseline = outputStat(); };
 const launchDecision = cmd === 'start' ? auditStart() : null;
+const reviewHowTo = reviewSeat({ category: ROUTE_ARGS?.[0] ?? routedMetadata?.category ?? launchDecision?.category,
+  role: opts.role ?? routedMetadata?.role, name: opts.name }) ? reviewInstructions : null;
 if (cmd === 'start') tracker?.warning();
 // Codex's own default for workspace-write network, so an explicit turn-level policy doesn't silently change it.
 const configNetwork = () => {
@@ -851,6 +870,7 @@ const detachHub = () => {
   pending.clear(); try { ws.close(); } catch {}
 };
 const autoReroute = async (reason, queue = {}, policy = false) => {
+  outcomeSkip = true; // The successor follower owns the final task outcome.
   tracker?.result('re-routed', { reason, mayRun: false, finalLine: '' });
   const cancelledTurn = activeTurn;
   detachHub(); exitCode = null;
@@ -1013,6 +1033,7 @@ const report = async (threadId, turn, final, usage) => {
   if (usage) console.log(`usage (thread total) input=${usage.inputTokens} cached=${usage.cachedInputTokens} output=${usage.outputTokens}`);
   final ??= lastMessage(turn.items);
   if (!final) final = lastMessage((await readTurns(threadId).catch(() => [])).find((t) => t.id === turn.id)?.items);
+  outcomeTurn = turn; outcomeFinal = final ?? '';
   if (final) {
     if (opts.out) {
       if (outBaseline !== undefined && outputStat() !== outBaseline)
@@ -1243,7 +1264,7 @@ try {
     const digest = loadDigest();
     const th = await call('thread/start', {
       cwd: path.resolve(opts.cwd), model: opts.model, sandbox: opts.sandbox, approvalPolicy: APPROVAL_POLICY,
-      developerInstructions: [browserHowTo, `Global worker rules ${digest.version}\n${digest.worker}`].filter(Boolean).join('\n'),
+      developerInstructions: [browserHowTo, `Global worker rules ${digest.version}\n${digest.worker}`, reviewHowTo].filter(Boolean).join('\n'),
       ...(browserThread && !TRAE_EXTENSION_BROWSER ? { approvalsReviewer: 'user' } : {}),
       ...(browserConfig ? { config: browserConfig } : {}),
     });
@@ -1255,7 +1276,7 @@ try {
     if (PROF?.kind === 'trae') rememberThreadModel(PROF.home, threadId, opts.model);
     if (opts.name) await call('thread/name/set', { threadId, name: opts.name }).catch(() => {});
     const talkback = talkbackContext(threadId);
-    const instructions = [browserHowTo, `Global worker rules ${digest.version}\n${digest.worker}`, talkback.instructions].filter(Boolean).join('\n');
+    const instructions = [browserHowTo, `Global worker rules ${digest.version}\n${digest.worker}`, talkback.instructions, reviewHowTo].filter(Boolean).join('\n');
     const configured = await call('thread/resume', { threadId, config: { ...browserConfig, ...talkback.config }, developerInstructions: instructions }).catch(() => null);
     markOutputStart();
     const ts = await call('turn/start', {
@@ -1269,7 +1290,7 @@ try {
     const config = { ...talkback.config, ...(TRAE_EXTENSION_BROWSER ? { mcp_servers: { playwright: TRAE_PLAYWRIGHT_SERVER } } : {}) };
     const resumedDigest=loadDigest();
     const resumed = await call('thread/resume', { threadId: opts.thread, model: opts.model, config,
-      developerInstructions:`Global worker rules ${resumedDigest.version}\n${resumedDigest.worker}\n${talkback.instructions}` }).catch(() => null);
+      developerInstructions:[`Global worker rules ${resumedDigest.version}\n${resumedDigest.worker}`, talkback.instructions, reviewHowTo].filter(Boolean).join('\n') }).catch(() => null);
     sessionPath = resumed?.thread?.path ?? null;
     auditStart(opts.model??resumed?.thread?.model,opts.sandbox??resumed?.thread?.sandbox??undefined,{thread:opts.thread,name:resumed?.thread?.name??undefined});
     tracker?.set({ mayRun: true });

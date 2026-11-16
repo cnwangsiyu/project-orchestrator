@@ -17,7 +17,7 @@ the model inside a pool, quota decides the pool.
 | Claude **Haiku 5.5** | 0.05 | Cheapest Claude; beats Luna on code (TB4 33–39%, FrontierCode 46%) | Lookups, file finding, summaries, polling (as a background worker) | Anything needing judgment |
 | Claude **Fable 5.1** | 5 | Long-horizon reasoning, but at or below Opus 5.5 on most coding benchmarks for ~3x the cost; its own weekly cap (≤50% of the week, and it also counts toward the all-models week) | Only after Opus `xhigh` visibly fell short, or the longest single-thread reasoning; tell the user first | Default anything |
 | Codex **Sol 6.1** | 1 | Near Astra at ~1/5 the usage (AA index: `high` 50 at $0.59/task, `xhigh` 52 at $0.76; Opus `high` 52 at $3.46); 500K context | The coding workhorse: implementation, build/test/deploy runs, debugging, code review, log analysis | `low` effort for any coding (TB4 31%) |
-| Codex **Astra** | 5 (10x on cached input) | Frontier, +2–5 points over Sol; best on Terminal-Bench-Science (64.6%) | Escalation after Sol `xhigh` failed; a strongest-GPT second opinion; numerical or scientific work Sol couldn't crack | Default anything; small tasks (it over-tests and asks questions) |
+| Codex **Astra** | 5 (10x on cached input) | Frontier, +2–5 points over Sol; best on Terminal-Bench-Science (64.6%) | Hard work on a free company lane (2026-11-16 trial); escalation after Sol; a strongest-GPT second opinion; numerical or scientific work | Personal default without scoped OK; small tasks (it over-tests and asks questions) |
 | Codex **Terra 6.1** | 0.5 | Writing and visual understanding; not a coding model (TB4 32% at `medium`) | Bulk prose drafts, translation, reading screenshots or images, writing when Claude has no spare | Coding; desktop work (Terra is not qualified for the supported TTADK/ChatGPT runtime) |
 | Codex **Luna** (`gpt-6-luna`, personal ChatGPT) | 0.05 | Extraction and classification; very weak at coding (TB4 13% at `max`) | Personal lookup/extract; image-gen starts at low because the image tool does the work (standing permission, no question) | Any code change or code reasoning |
 
@@ -87,9 +87,29 @@ TRAE foreground tier lists are:
 |---|---|
 | Light | GPT-5.6-Terra, GPT-5.5, DeepSeek-V4.1-Flash |
 | Normal | GPT-6.1-Sol, GPT-5.6-Sol, GPT-5.6-Terra, DeepSeek-V4.1-Flash |
-| Hard | GPT-6.1-Sol, GPT-6-Astra |
+| Hard | GPT-6-Astra on a free company lane, then GPT-6.1-Sol |
 
 Walk the tier ladder in quality order across all company accounts. Select the first model with a free lane; depleted-but-ready/progressing low-priority lanes count. For that model, free TRAE wins unless TTADK has the expiring-quota preference; if TRAE is congested/queued/stalled, use free TTADK for that same model before stepping down. Priority quota is at most a same-model lane tie-break, never a reason to downgrade Sol to Flash. Light work stays on its qualified light ladder; hard work never demotes. TRAE Gemini and `gpt-5.6-luna` are excluded; personal ChatGPT `gpt-6-luna` remains the first lookup/extract/image-gen choice; TTADK fresh catalog and historical model evidence remain.
+
+Trial from **2026-11-16**, revisit **2026-11-23** with hard-tier first-pass success
+and rework/fix rounds by model. Start hard tasks on company GPT-6-Astra only when
+its lane can start now with fresh model load <60% and no queue/stall. If Astra is
+congested, queued or stalled (including a depleted daily bucket's low-priority
+lane), try free Sol on TRAE, then TTADK under the existing same-model expiry rule.
+Depletion alone does not exclude a free lane. If neither model is observed free,
+retain the existing Sol fallback, ETA and personal approval behavior. The trial
+leaves normal/light tiers, image-read, adversarial and capability rules unchanged.
+
+Retries retain every actual model/effort floor. After Sol fails, prefer its next
+effort on a free company lane, including ungated `max`, then qualified Astra at
+an effort meeting the Sol floor. After Astra fails, increase Astra effort
+(`high` → `xhigh` → `max`); Sol cannot satisfy an actual Astra floor. Exhausted
+Astra `max` cannot restart on Sol or repeat its quality step automatically.
+Personal Astra and personal `max` still need independent scoped approvals.
+Count-only retries without actual history retain the pre-trial Sol category/effort
+assumption; the trial never invents an earlier Astra attempt from today's catalog.
+The retained Sol preference uses known actuals for the same task and role;
+planned records and attempts from another task or role do not change it.
 
 Vision uses its separate qualified catalog. DeepSeek is unsuitable for full builds,
 executable/auth/storage acceptance or a large file in one output. Seed is vision

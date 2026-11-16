@@ -69,7 +69,7 @@ override dependencies/quota/leases or authorize new work. Keep ready/dispatched 
 ## Global rules (owner: Orchestrator 主对话)
 
 User, 2026-11-13: the routing/global-rules orchestrator owns global policy here (「都交给他来负责，让他统一管理」); the secretary only relays, keeps ledgers and asks decision cards, never owns or changes policy.
-The versioned [global-rules digest](references/global-rules.md) is the single injection source. Read it at startup/resume/compact and after a change; write `rules-ack <version>` in your ledger. See [four-layer enforcement and opt-in hook/launchd installation](references/rules-enforcement.md).
+The versioned [global-rules digest](references/global-rules.md) is the single injection source. Read it at startup/resume/compact and when a hook delivers changes; the recorded seen version is the acknowledgement in `_shared/rules-seen.json`. See [four-layer enforcement and opt-in hook/launchd installation](references/rules-enforcement.md).
 
 - **Resources:** [machine resources](references/resources.md) supplies five-minute sampling, nightly retro/guarded cleanup and detection of builds without holders; [shared `res`](#shared-resources), the [maintained lock contract](references/res-contract.md) and [build/cache discipline](#build-discipline) require the wrapper or explicit take/return, atomic build-pair acquisition, finite waits/gates, reverse release, incremental/cold acceptance builds and scoped ccache/Gradle caches (first cache use cold). Global-rules owns the whole tool since 2026-11-13; v1.3 lane 3 is pending its reviewed switch.
 - **Disk:** [workspace retention](#workspace-retention) sets no worker space caps; auto-clean self-made build clones/templates/caches only when the data disk has <1 TB free; real workspaces/user data require a user card.
@@ -80,9 +80,9 @@ The versioned [global-rules digest](references/global-rules.md) is the single in
 - **Signing/credentials:** [worker safety](#worker-credential-safety) forbids login material and login bypasses for every worker. Signing is limited to registry-listed own test packages with user-allowlisted identities, secret-safe input, receipts and keychain re-locking. Workers treat the registry and allowlist as read-only; everything outside that scope is BLOCKED.
 - **Orchestrator models:** [account/model health](references/nightly-review.md#account-and-model-health) records persistent `jobs/<id>/state.json` `respawnFlags`, VAK/routing on Fable, Webview/Lynx on Opus since 2026-11-11, and a user check on/after 2026-11-17 09:00 PST.
 - **Account reminders:** [nightly health](references/nightly-review.md#account-and-model-health) owns cards for company logins expiring within three days, TTADK SSO (2026-11-21 19:37 PST), TRAE login, Codex reset cards and Claude/Fable weekly projections; [`POLICY`](scripts/lib/state.mjs) supplies the 72-hour TTADK warning to `quota.mjs`.
-- **Rollout:** [policy notification](#global-rule-rollout) sends each change to all orchestrators: via the secretary for the mini group, directly to MacBook orchestrators.
+- **Rollout:** [policy notification](#global-rule-rollout) delivers version changes through existing hooks; the owner messages orchestrators when they must act.
 
-<a id="global-rule-rollout"></a>Whenever a global rule/digest version changes, its owner sends a short note (version, changes, reason, required action and detail link) to all orchestrators: through the secretary for the mini's group, directly to MacBook orchestrators. Each recipient writes `rules-ack <version>` in its ledger; the owner checks acknowledgements, not just send receipts. Record delivery/offline recipients; the secretary relays and maintains the roster, not policy. See [nightly rollout](references/nightly-review.md#4-tell-the-orchestrators).
+<a id="global-rule-rollout"></a>Global digest changes reach recognized orchestrators at their next Stop or SessionStart through the existing hooks, once per seen version. Hook output records the acknowledgement in `_shared/rules-seen.json`; orchestrators no longer write `rules-ack` by hand. The owner checks `node scripts/rules-worker-digest.mjs --acks` on each machine. Send a separate note (version, reason, required action and detail link) only when a change requires action such as stop/re-route/re-run or updating a remote checkout: through the secretary for the mini's group, directly to MacBook orchestrators. Record unresolved/offline recipients; the secretary relays and maintains the roster, not policy. See [nightly rollout](references/nightly-review.md#4-tell-the-orchestrators).
 
 ## Principles
 
@@ -310,8 +310,8 @@ workers, and patching after a second same-kind defect.
   (no GPT model on any account); DeepSeek threads cannot do builds, sensitive
   reviews or acceptance (the adversarial review lane is the explicit exception, always with its second reviewer); paused
   or unavailable models cannot be continued. If the TRAE model's bucket is depleted and
-  its queue is above 300 while someone is waiting, take the route's thread instead. Record the actual model, effort and
-  account with `outcome.mjs --actual vendor:model:effort@account`, plus a ledger line
+  its queue is above 300 while someone is waiting, take the route's thread instead. The launcher records actual model, effort and
+  account evidence automatically; correct it with `outcome.mjs --actual` only if needed. Keep a ledger line
   `continued original thread because ...` naming the reason and the eligibility checks. This exception is for same-task
   rework, not unrelated new tasks or independent reviewers.
 - **Security follows the worker's context** (VAK ruling, user-approved 2026-11-13). An implementation/fix round that
@@ -357,31 +357,21 @@ workers, and patching after a second same-kind defect.
 - Ordinary work is accepted on executable tests; use one optional ordinary review when tests cannot cover it. An explicit class is never blocked by an internal-demo profile.
 - All writing categories carrying a class get the applicable preaction/acceptance review, independent of author vendor. A/C and registered signing actions require the artifact review before acting. Second reviewers only apply to classified adversarial/review-high/release reviews.
 - Follow `references/review-rubric.md`: P0/P1 only block, at most three non-blocking notes, re-review only blocked findings, and at most two rounds per task/branch scope. A new override reason cannot permit round three. Targets: video-agent 10%, vesdk-mainline/webview 20%; targets warn, never suppress mandatory reviews.
-- When a task is finally accepted or given up, record it once:
-  `node <this skill>/scripts/outcome.mjs --project <slug> --name <task> --result pass|rework|fail [--rounds N] [--cause code|spec|process|infra|scope] [--retries N] [--scope-changes N] [--minutes M] [--reviewed] [--review-result blocking|none] [--note "…"] [--correct] [--actual vendor:model:effort@account ...]`.
-  - Keep the kinds of extra work apart (rework retro 2026-11-10): `--cause` is the main cause of the fix rounds (`code`
-    the worker's code, `spec` a brief/spec gap, `process` review/acceptance/dispatch, `infra` tools/devices/platform,
-    `scope` a changed requirement); `--retries N` counts re-runs for infrastructure (quota, queue, device, signing,
-    hub), which are not rework; `--scope-changes N` counts requirement changes. The nightly review compares models and
-    accounts on `code` rework only. Record only after the task's acceptance has really run.
-  - Use the same `--name` you passed to `route.mjs`, and name fix rounds `<task>-fix1`, `<task>-fix2`…
-    A review run (`<task>-R`) gets no outcome of its own: its verdict goes into the task's record.
-  - `pass` means accepted at its first check, with no fix round (a review verdict of MERGE or
-    MERGE-WITH-NOTES is a pass). Any fix round makes it `rework --rounds N`, counting every round
-    on any vendor; `outcome.mjs` records `pass --rounds N` (N ≥ 1) as rework. Add `--reviewed` when a
-    review judged it.
-  - Once per task: normal duplicate records keep the latest result, most rounds and any reviewed flag.
-    To fix an existing outcome, append `--correct`: supplied fields override the aggregate, including
-    `--rounds 0` or `--rounds null`; omitted metadata inherits. Corrections apply in timestamp order after
-    all normal records, so later duplicates cannot restore old round counts. Never edit or delete log lines.
-    The nightly review lists `corrected` before/after values and counts `corrections` separately from duplicates.
-  - When the launch differs from the joined route pick, repeat `--actual vendor:model:effort@account` in launch
-    order (also allowed with `--correct`). On an existing outcome, `--actual` without `--result` appends only
-    metadata and preserves its result. The first/last actual attempts take precedence for attribution;
-    old records still use the joined first/accepted pick. The nightly review lists `actualMismatches` and
-    excludes mixed harnesses or non-Codex sequences from TRAE-vs-Codex rows, listing them under `mixed`.
-  - The nightly review turns these records into first-pass rates, rework rounds and times per
-    vendor, model and category. That is the evidence for changing the routing table.
+- Routed workers automatically append provisional `auto: true` outcomes when their follower ends: exit 0 is
+  `pass`, launcher/hub failure is `fail` with cause `infra`, and BLOCKED/FAILED/needs-user reports remain unresolved.
+  A continuation after a provisional pass adds a rework round. Elapsed minutes include the first launch and queue wait.
+  Review seats end with exactly `REVIEW-RESULT: blocking` or `REVIEW-RESULT: none`; missing markers stay UNKNOWN.
+  Seat results feed review statistics separately from the author's task outcome.
+- Use `outcome.mjs` only when judgement corrects the automatic result: acceptance found a problem, rework cause,
+  scope change, user cancellation, or acceptance after your own check. For example:
+  `node <this skill>/scripts/outcome.mjs --project <slug> --name <task> --correct --result rework --rounds 1 --cause code`.
+  Manual fields always override automatic records, even newer continuations. `--correct` also overrides previous
+  manual fields (including lower/null rounds); omitted fields inherit. Keep log lines intact.
+  `--cause code|spec|process|infra|scope`, `--retries N`, `--scope-changes N` distinguish fixes, infrastructure retries
+  and changed requirements. `--reviewed` records independent acceptance. Use `--review-result blocking|none` to correct
+  a review seat's yield. Repeat `--actual vendor:model:effort@account` in launch order only to correct model evidence;
+  the launcher normally records execution evidence itself. Missing actual evidence remains UNKNOWN.
+  Nightly data shows auto/manual coverage and derives task statistics once per name after these precedence rules.
 
 **Carry memory across sessions yourself.** A worker loads, at best, the memory of the project its
 working directory maps to — never this conversation's own memory, and a Codex worker reads even
