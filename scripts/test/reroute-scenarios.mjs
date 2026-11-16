@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { loadDigest } from '../lib/global-rules.mjs';
 import { nextRouteArgs, parseRouteArgs, routeFlag, setRouteFlag } from '../lib/worker-reroute.mjs';
 
 const scripts = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -96,6 +97,8 @@ try {
   const replacement = hopped.calls.find((c) => c.method === 'turn/start' && c.model !== SOL);
   assert.match(replacement.params.input[0].text, /inspect git status\/diff.*continue, don't redo/);
   assert.equal(hopped.calls.filter((c) => c.method === 'thread/start').length, 2, 'replacement gets a fresh thread');
+  for(const call of hopped.calls.filter(c=>c.method==='thread/start'||c.method==='thread/resume'))
+    assert.ok(call.params.developerInstructions.includes(loadDigest().worker),'every automatic hop receives all fixed rules');
   const seed = run('continuation-seed', { progress: true, complete: true }, ['--exclude-model', 'gemini'], { depth: 1 });
   const continued = spawnSync(process.execPath, ['--import', transport, path.join(scripts, 'codex-worker.mjs'), '--account', 'trae',
     'turn', '--thread', 'fixture', '--model', SOL, '--effort', 'high', 'Continue the fixture brief.'],

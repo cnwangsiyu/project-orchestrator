@@ -2,6 +2,7 @@
 // All observations, extension hosts and event journals are private fixtures.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { parseRouteJSON } from './helpers/route-fixture.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import {spawn,spawnSync} from 'node:child_process';
@@ -12,7 +13,7 @@ import {appendEvent,readEvents,inbox,readAck,deliver,deliverAsync,readInboxAsync
 const root=new URL('../../',import.meta.url).pathname;
 const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'router-tail-'));
 const oldShared=process.env.RULES_SHARED;process.env.RULES_SHARED=tmp;
-const snapshot=JSON.parse(fs.readFileSync(new URL('./fixtures/free-trae-fresh-ttadk-2026-11-15.json',import.meta.url),'utf8'));
+const snapshot=parseRouteJSON(fs.readFileSync(new URL('./fixtures/free-trae-fresh-ttadk-2026-11-15.json',import.meta.url),'utf8'));
 for(const part of [...snapshot.accounts,...snapshot.lanes]) {
   part.capabilities['app:com.apple.calculator']={status:'KNOWN',value:true,sampledAt:snapshot.decisionAt,receivedAt:snapshot.decisionAt,maxAgeMs:600000,source:'fixture'};
   for(const scope of ['*.bytedance.net','*.byted.org','*.larkoffice.com','*.feishu.cn','*.tiktok-row.net','*.byteintl.net','*.bytedance.com','localhost','127.0.0.1'])
@@ -23,7 +24,7 @@ const env={...process.env,HOME:tmp,RULES_SHARED:tmp,CODEX_ACCOUNTS:path.join(tmp
   ROUTE_LOG_FILE:path.join(tmp,'routes.jsonl'),ROUTE_NOW:String(snapshot.decisionAt),ROUTE_SNAPSHOT_FILE:file,ROUTE_REQUEST_ID:'tail-fixture'};
 const cli=(args,extra={})=>{
   const r=spawnSync(process.execPath,[path.join(root,'scripts/route.mjs'),...args,'--dry','--json'],{env:{...env,...extra},encoding:'utf8',timeout:10000,maxBuffer:16<<20});
-  assert.equal(r.status,0,r.stderr);return JSON.parse(r.stdout);
+  assert.equal(r.status,0,r.stderr);return parseRouteJSON(r.stdout);
 };
 const record=(owner,event,name,extra={})=>appendEvent({owner,event,name,runId:name,account:'fixture',thread:'fixture-thread',...extra});
 try {
@@ -59,8 +60,8 @@ try {
   console.log('PASS BC-24 tool failures switch browser/desktop channels, quality escalates and infra retains effort');
 
   const logged=spawnSync(process.execPath,[path.join(root,'scripts/route.mjs'),'browser','--name','logged-tool','--project','fixture','--failures','1','--failure-kind','tool','--actual','codex:gpt-6.1-sol:medium@trae','--json'],{env:{...env,ROUTE_LOG:'1'},encoding:'utf8',timeout:10000,maxBuffer:16<<20});
-  assert.equal(logged.status,0,logged.stderr);assert.equal(JSON.parse(fs.readFileSync(env.ROUTE_LOG_FILE,'utf8').trim().split('\n').at(-1)).failureKind,'tool');
-  const outcome=spawnSync(process.execPath,[path.join(root,'scripts/outcome.mjs'),'--project','fixture','--name','logged-tool','--result','fail','--failure-kind','tool'],{env,encoding:'utf8',timeout:5000});assert.equal(outcome.status,0,outcome.stderr);assert.equal(JSON.parse(fs.readFileSync(env.ROUTE_LOG_FILE,'utf8').trim().split('\n').at(-1)).failureKind,'tool');
+  assert.equal(logged.status,0,logged.stderr);assert.equal(parseRouteJSON(fs.readFileSync(env.ROUTE_LOG_FILE,'utf8').trim().split('\n').at(-1)).failureKind,'tool');
+  const outcome=spawnSync(process.execPath,[path.join(root,'scripts/outcome.mjs'),'--project','fixture','--name','logged-tool','--result','fail','--failure-kind','tool'],{env,encoding:'utf8',timeout:5000});assert.equal(outcome.status,0,outcome.stderr);assert.equal(parseRouteJSON(fs.readFileSync(env.ROUTE_LOG_FILE,'utf8').trim().split('\n').at(-1)).failureKind,'tool');
   const origins=cli(['browser','--project','acq','--origins','example.com']);
   for(const host of ['instagram.com','*.instagram.com','youtube.com','*.youtube.com','facebook.com','*.facebook.com','*.bytedance.net','example.com'])assert.ok(origins.plan.task.allowedOrigins.includes(host));
   assert.equal(cli(['browser']).plan.task.allowedOrigins.includes('instagram.com'),false);
@@ -68,11 +69,11 @@ try {
     const r=cli(['build-run','--impact','release','--review-class','A','--review-reason','external irreversible release',...extra]);assert.notEqual(r.tier,'light');
   }
   assert.equal(cli(['build-run','--env','test']).tier,'light');
-  for(const args of [['build-run'],['browser','--failures','1'],['analysis','--failures','1']])assert.match(cli(args).notes.join('\n'),/full checked checklist.*non-secret variables.*expected artifacts/);
-  assert.match(cli(['build-run']).notes.join('\n'),/Library\/SplashBoard\/.*readable before any install.*over the top/);
+  for(const args of [['build-run'],['browser','--failures','1'],['analysis','--failures','1']])assert.match(cli(args).allNotes.join('\n'),/full checked checklist.*non-secret variables.*expected artifacts/);
+  assert.match(cli(['build-run']).allNotes.join('\n'),/Library\/SplashBoard\/.*readable before any install.*over the top/);
   const claude=cli(['claude-tools','--cwd','/fixture/work tree','--task-dir','/fixture/task dir','--trusted-cwd','/fixture/trusted root']);
   assert.match(claude.pick.command,/cd '\/fixture\/trusted root' && claude/);assert.match(claude.pick.command,/Working directory: \/fixture\/work tree/);
-  assert.match(cli(['claude-tools']).notes.join('\n'),/no trusted project root configured/);
+  assert.match(cli(['claude-tools']).allNotes.join('\n'),/no trusted project root configured/);
   console.log('PASS BC-13/18/19/22/48 checklist, trusted launch, origins, release tier and backup notes');
 
   // AU-7 ("--dry never refreshes") was withdrawn by the owner on 2026-11-15: a preview must read state like a real

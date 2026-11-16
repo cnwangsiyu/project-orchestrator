@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Real hook/launch/wrapper/review entry points; synthetic metadata and stub providers/res only.
 import fs from 'node:fs';
+import { WORKER_NOTES } from '../lib/fixed-worker-notes.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import assert from 'node:assert/strict';
@@ -126,6 +127,8 @@ if(m.method==='turn/start')setImmediate(()=>this.onmessage({data:JSON.stringify(
     '--cwd', tmp, '--effort', 'high', '--sandbox', 'read-only', '--model', 'gpt-6.1-sol', '--name', 'digest-fixture', '--log', path.join(tmp, 'worker.jsonl'), 'reply DONE'],
   { env: { ...env, CODEX_ACCOUNTS: profiles, CAPTURE: captured }, encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'] });
   assert.equal(JSON.parse(fs.readFileSync(captured)).developerInstructions, `Global worker rules ${digest.version}\n${digest.worker}`);
+  for(const clause of Object.values(WORKER_NOTES)) assert.ok(JSON.parse(fs.readFileSync(captured)).developerInstructions.includes(clause), clause);
+  assert.match(JSON.parse(fs.readFileSync(captured)).developerInstructions, /never overwrite, delete or move files outside the task's scope.*restore.*byte-for-byte/);
   const workerLaunch = rows().findLast((row) => row.kind === 'launch');
   assert.equal(workerLaunch.account, 'main'); assert.equal(workerLaunch.sandbox, 'read-only');
   assert.equal(rows().at(-1).kind, 'launch-model'); assert.equal(rows().at(-1).thread, 'fixture');

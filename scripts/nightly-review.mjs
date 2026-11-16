@@ -141,7 +141,7 @@ async function claude(name, prompt, routed, sessionFile) {
   const taskDir=routed?attemptDir:path.join(sessionFile?path.dirname(sessionFile):dir,`launch-${name}`);
   const r = routed || await route('claude-tools', [], name,taskDir);
   if (!launchable(r) || r.pick.vendor !== 'claude') return { code: 1, text: 'notification route blocked' };
-  brief(taskDir,prompt);
+  brief(taskDir,[prompt,...(r.notes??[])].join('\n'));
   if (sessionFile) atomic(sessionFile, { name, model: r.pick.model, effort: r.pick.effort, id: null, sessionId: null });
   let misses = 0; const started=Date.now();
   const result = await command('sh', ['-c',r.pick.command], { monitor: sessionFile && (async () => {
@@ -326,13 +326,13 @@ async function workerStatus() {
   } catch { return null; }
 }
 
-async function followWorker(pick, data, resume = false) {
+async function followWorker(pick, data, resume = false, taskNotes = []) {
   const w = path.join(skill, 'scripts/codex-worker.mjs');
   if (!resume) update('review', 'running', '证据已采集，启动 hub worker',
     { account: pick.account, model: pick.model, effort: pick.effort,sandbox:pick.sandbox, thread: null, turn: null, state: 'running',
       out:workerPath(pick,'out',path.join(attemptDir,'codex-last.md')),
       log:workerPath(pick,'log',path.join(attemptDir,'codex.jsonl')) });
-  if(!resume) brief(attemptDir,prompt(data));
+  if(!resume) brief(attemptDir,[prompt(data),...taskNotes].join('\n'));
   let first=!resume,args=resume?[...workerArgs('wait'),'--thread',status.worker.thread]:null;
   let completedSince;
   for (;;) {
@@ -566,7 +566,7 @@ async function review() {
         }
         return await finishClaudeReview(sessionFile);
       }
-      const result = await followWorker(pick, data);
+      const result = await followWorker(pick, data, false, r.notes??[]);
       if (result.blocked || result.terminal) return 1;
       if (!result.code && (mode === 'dry' || reportReady())) return await finish();
       if (!result.code) update('report', 'failed', 'worker 完成但未产生报告/notify');

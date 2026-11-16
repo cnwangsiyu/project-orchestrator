@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseTaskSpec, routePure, renderPlan, createSnapshot } from './lib/pipeline/index.mjs';
+import { WORKER_NOTES } from './lib/fixed-worker-notes.mjs';
 import { companyDevice } from './lib/pipeline/common.mjs';
 import { withLock } from './lib/shared-file.mjs';
 import { acquireRoute, taskContext } from './lib/route-data.mjs';
@@ -14,7 +15,7 @@ const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 try {
   const task = parseTaskSpec(process.argv.slice(2), taskContext());
   if (task.kind === 'table') {
-    const table = task.categories.map(category => ({ category, engine: 'candidate-pipeline', note: ['implement','implement-hard','debug','science'].includes(category)?'Requires --impact service|throwaway|release. Release is strictly class A: external version that cannot roll back within hours; local data reads/writes are not release, irreversible data operations use review-class C.':'Effective tuple depends on capabilities, actual floor, scoped approval and ETA.' }));
+    const table = task.categories.map(category => ({ category, engine: 'candidate-pipeline', note: ['implement','implement-hard','debug','science'].includes(category)?WORKER_NOTES.routeImpact:WORKER_NOTES.routeTuple }));
     console.log(process.argv.includes('--json') ? JSON.stringify(table) : table.map(r => `${r.category}  ${r.note}`).join('\n'));
   } else {
     if (task.flags.owner !== undefined && !validOwner(task.flags.owner)) throw Error('--owner needs a public session ID');
@@ -57,7 +58,12 @@ try {
       if(out.pick?.command) console.log(task.flags.dry ? `  launch (PREVIEW ONLY, not a route: run again without --dry and launch from that output): ${out.pick.command}` : `  launch: ${out.pick.command}`);
       if(out.secondOpinion) console.log(`  + second opinion: ${out.secondOpinion.model} ${out.secondOpinion.effort} on ${out.secondOpinion.account??'claude'}${out.secondOpinion.command?` — ${out.secondOpinion.command}`:' (blocked)'}`);
       if(out.redeemFirst) console.log(`  first: ${JSON.stringify(out.redeemFirst)}`);
-      for(const key of ['why','needsUserOK','tellUser','notes']) for(const line of out[key]) console.log(`  ${key}: ${line}`);
+      console.log(`  worker rules ${out.workerRulesVersion} are injected by the launcher; do not copy them into the brief`);
+      for (const key of ['why','needsUserOK','tellUser','notes',...(task.flags.verbose?['fixedNotes']:[])]) {
+        const lines = !task.flags.verbose && key==='why' ? out.shortWhy
+          : !task.flags.verbose && key==='notes' ? [...new Set(out.shortNotes)] : out[key];
+        for (const line of lines) console.log(`  ${key}: ${line}`);
+      }
     }
   }
 } catch(error) {

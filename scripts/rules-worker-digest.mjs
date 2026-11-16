@@ -1,4 +1,4 @@
 #!/usr/bin/env node
-import { loadDigest } from './lib/global-rules.mjs';
-const digest = loadDigest();
-console.log(`Global worker rules ${digest.version}\n${digest.worker}`);
+import { workerInstructions } from './lib/global-rules.mjs';
+const instructions = workerInstructions();
+console.log(process.argv.includes('--config') ? `developer_instructions=${JSON.stringify(instructions)}` : instructions);

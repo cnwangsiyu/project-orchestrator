@@ -1,4 +1,4 @@
-import {DEPENDENCY_RULE} from '../dependency-policy.mjs';
+import { WORKER_NOTES } from '../fixed-worker-notes.mjs';
 // Pure compatibility rendering. Receives paths, owner and digest from the CLI;
 // it never launches, reads metadata, or changes the selected tuple.
 import { company, companyDevice, known, adversarial, isReview } from './common.mjs';
@@ -17,12 +17,13 @@ export function presentRoute(plan, view, context) {
   const hasDeepSeek=snapshot.accounts.some(a=>(known(a.catalog)||[]).some(m=>m.startsWith('deepseek')));
   const phones=['iphone8','iphone11','s21'].filter(id=>(resources.registeredResources??[]).includes(id)||resources.devices?.[id]?.registered);
   const hasSigning=resources.signingRegistry===true;
-  const digest={...sourceDigest,worker:sourceDigest.worker.split('\n').filter(line=>
+  const digest={...sourceDigest,worker:(sourceDigest.coreWorker??sourceDigest.worker).split('\n').filter(line=>
     (hasSigning||!line.startsWith('- Allowed with'))&&(phones.length||!line.startsWith('- On registered shared test phones'))
     &&(hasTrae||!line.startsWith('- A queued TRAE'))).map(line=>line.replaceAll('iphone8/iphone11/s21',phones.join('/'))).join('\n')};
   const t = plan.task, f = t.flags, seat = plan.primary ?? plan.primaryProposal, c = seat?.candidate;
+  const fixedNotes = [];
   const notes = [...view.notes,...(t.policyNotes??[])], why = [...(t.policyNotes??[])], tellUser = [...view.tellUser], needsUserOK = [...view.needsOK];
-  if(['implement','implement-hard','build-run','debug','ui-browser'].includes(t.category))notes.push(DEPENDENCY_RULE);
+  if(['implement','implement-hard','build-run','debug','ui-browser'].includes(t.category))fixedNotes.push(sourceDigest.worker.split('\n').find(line=>line.startsWith('- Project dependencies'))??'');
   const noReview=projectReviewPolicy(t.project,snapshot.projectProfiles).profile==='no-review'&&!mandatoryReview(t);
   if(noReview)notes.push('no review (project profile no-review): accept on tests/build');
   const unknownCompany=snapshot.accounts.filter(a=>company(a)&&(known(a.auth)!==true||known(a.transport)!==true));
@@ -67,7 +68,7 @@ export function presentRoute(plan, view, context) {
     if(gate.kind==='max-effort') needsUserOK.push('max effort');
     if(gate.kind==='capacity-decision') needsUserOK.push(gate.reason.text);
   }
-  const routeArgs = [t.category, ...Object.entries({...f, failures:t.failures, ...(owner?{owner}:{})}).filter(([k])=>!['json','table','dry'].includes(k)).flatMap(([k,v])=>[`--${k}`,...(v===true?[]:[String(v)])])];
+  const routeArgs = [t.category, ...Object.entries({...f, failures:t.failures, ...(owner?{owner}:{})}).filter(([k])=>!['json','table','dry','verbose'].includes(k)).flatMap(([k,v])=>[`--${k}`,...(v===true?[]:[String(v)])])];
   const estimatedRows = (plan.trace?.candidates ?? []).map((r) => r.predicates.some((p)=>p.reason?.code==='PROVIDER_QUOTA_DENIED')
     ? {...r, estimate:estimateCandidate(t,snapshot,r.candidate,{capacityReset:true})} : r);
   const eta = estimatedRows.filter((r)=>r.predicates.every((p)=>p.ok || p.reason?.code==='PROVIDER_QUOTA_DENIED'))
@@ -107,7 +108,7 @@ export function presentRoute(plan, view, context) {
       const trustedCwd = context.trustedCwd ?? task.flags['trusted-cwd'] ?? cwd;
       if (!task.flags['trusted-cwd'] && !context.trustedCwd) notes.push('Claude launch: no trusted project root configured; launch uses the working directory; verify it is trusted or pass --trusted-cwd with the trusted project root.');
       const claudePrompt = `Working directory: ${cwd}. ${prompt}`;
-      out.command=`${audit} && cd ${shellQuote(trustedCwd)} && ${command(['claude','--bg','--remote-control','--permission-mode','bypassPermissions','-n',name,'--model',c.modelId,'--effort',c.effort,'--append-system-prompt',`Global worker rules ${digest.version}\n${digest.worker}`,claudePrompt])}`;
+      out.command=`${audit} && cd ${shellQuote(trustedCwd)} && ${command(['claude','--bg','--remote-control','--permission-mode','bypassPermissions','-n',name,'--model',c.modelId,'--effort',c.effort])} --append-system-prompt "$(node ${shellQuote(`${root}/scripts/rules-worker-digest.mjs`)})" ${shellQuote(claudePrompt)}`;
       return out;
     }
     const args=['--account',an,'start','--cwd',cwd,'--model',launchModel,'--effort',c.effort,'--sandbox',task.sandbox,'--name',name,
@@ -132,7 +133,7 @@ export function presentRoute(plan, view, context) {
       const accountEnv=profiles[an]?.home?`CODEX_HOME=${shellQuote(profiles[an].home)} `:'';
       const inner=(a.kind==='ttadk'&&known(a.capabilities.search)?`${command(['node',`${root}/scripts/codex-worker.mjs`,'--account',an,'proxy'])} >/dev/null && `:'')+accountEnv+command([bin,'exec','--skip-git-repo-check','-C',cwd,...sandboxArgs,'-m',launchModel,'-c',`model_reasoning_effort="${c.effort}"`,
         ...(task.flags.network&&task.sandbox==='workspace-write'?['-c',`sandbox_workspace_write.network_access=${task.flags.network==='on'}`]:[]),
-        '-c',`developer_instructions=${JSON.stringify(`Global worker rules ${digest.version}\n${digest.worker}`)}`,'--json','-o',`${taskDir}/codex${suffix}-last.md`,prompt]);
+        ])+` -c "$(node ${shellQuote(`${root}/scripts/rules-worker-digest.mjs`)} --config)" `+command(['--json','-o',`${taskDir}/codex${suffix}-last.md`,prompt]);
       out.launcher=a.kind==='trae'?'traecli-exec':'codex-exec';
       out.command=command(['sh',`${root}/scripts/run-tracked.sh`,'--name',name,'--account',an,'--model',c.modelId,'--effort',c.effort,'--cwd',cwd,
         '--out',`${taskDir}/codex${suffix}-last.md`,'--log',`${taskDir}/codex${suffix}.jsonl`,...(owner?['--owner',owner]:[]),'--','sh','-c',`${audit} && ${inner}`]);
@@ -147,50 +148,49 @@ export function presentRoute(plan, view, context) {
     if(adversarial(t)) why.push('adversarial: no GPT model on any account; Kimi-K3, DeepSeek-V4.1-Flash, then scoped Opus; two independent non-GPT families required.');
     if(candidateParts(snapshot,c).lane.mode==='low-priority') why.push(`TRAE ${c.modelId} low-priority lane (bucket depleted): provider capacity remains eligible with bounded queue patience.`);
     if(seat.estimate.basis==='progressing') why.push(`${c.modelId} low-priority lane (bucket depleted): slower bucket designation, but progressing without queue cycles in fresh per-model telemetry.`);
-    if(['browser','ui-browser'].includes(t.category)&&c.family==='claude') notes.push('Claude in Chrome: select_browser, then work only in task-created tabs; never switch to another connected browser.');
-    if(t.writes||['browser','computer-use'].includes(t.category)) notes.unshift("brief: include the safety clauses — never overwrite, delete or move files outside the task's scope (user files, uncommitted changes, shared headers/configs); restore anything touched by mistake byte-for-byte and report it");
+    if(['browser','ui-browser'].includes(t.category)&&c.family==='claude') fixedNotes.push(WORKER_NOTES.claudeBrowser);
+    if(t.writes||['browser','computer-use'].includes(t.category)) fixedNotes.unshift(sourceDigest.worker.split('\n').find(line=>line.startsWith('- Scope safety:'))??'');
     if(t.writes&&context.slowTests?.length) notes.push('brief: slow tests for this project — run each ONLY when the listed code is touched, never inside a heavy lane, and report "<file> not run: untouched code" otherwise: '+context.slowTests.map(x=>`${x.file} (${x.cost}; run when touching ${[].concat(x.runWhen??[]).join(', ')})`).join(' | '));
-    notes.push(`Global worker rules ${digest.version}: ${digest.worker}`);
-    notes.push('brief: include the credential clause — never read, copy, load or inject LOGIN material, CLI auth files, sessions, cookies, keys or browser profiles. Use installed, already signed-in CLIs through normal commands, and let ssh/git use the normal ~/.ssh config and default keys (never override GIT_SSH_COMMAND/-F/IdentityFile to avoid them); service keys the user put in the project config may be used by running the project code for the official API of that service, never printed, copied or sent elsewhere; an authentication error is BLOCKED. '+
-      (hasSigning?'Registered own-test packages use ordinary full-access Codex-family signing workers; identities.json and registry.json are read-only to workers, unlisted identities or packages are BLOCKED. ':'')+
-      'never put internal code, logs or private material into public search queries.');
-    if(t.writes) notes.push('back up app data before any destructive step; restore accidental out-of-scope changes byte-for-byte.');
-    if(f['shared-lock']||f['device-lease']) notes.push('take the lease/lock only after the first model response; return every owned resource before a queue handoff.');
+    fixedNotes.push(`Global worker rules ${digest.version}: ${digest.worker}`);
+    fixedNotes.push(sourceDigest.worker.split('\n').find(line=>line.startsWith('- Forbidden for every worker:'))??'');
+    if(t.writes) fixedNotes.push(WORKER_NOTES.backup);
+    if(f['shared-lock']||f['device-lease']) fixedNotes.push(WORKER_NOTES.lease);
     if(hasDeepSeek&&['implement','implement-hard','debug'].includes(t.category)) notes.push('DeepSeek: read-only analysis and simple edits only; not full-package builds, auth/storage reviews or acceptance — re-route with --exclude-model deepseek if the brief needs those checks.');
     if(c.family==='deepseek') notes.push("DeepSeek can't emit one very large file in a single turn (output limit); split the work or exclude deepseek. Build and executable acceptance must use a capable finisher; this model can't see images.");
     if(c.family==='gemini'&&company(candidateParts(snapshot,c).account)&&!t.background) notes.push('Gemini-3.1-Pro ran past 40 minutes in 3 of 12 benchmark runs: if it shows no progress for 20 minutes, or runs past twice what the task should take, interrupt it and re-route with --exclude-model gemini (same --failures)');
-    if(candidateParts(snapshot,c).account.kind==='ttadk'&&known(candidateParts(snapshot,c).account.capabilities.search)) notes.push('web search: use the local proxy; never put internal code or private logs into public queries.');
-    if(t.category==='image-read') notes.push('read the supplied image directly; no web search is needed for screenshot transcription.');
-    if(t.sandbox==='danger-full-access') notes.push('full access: the worker may commit on its task branch if the brief says so; never push to main, never force-push; commits carry no co-author/tool trailer');
-    if(t.runsTests&&!t.writes) notes.push('workspace-write only for test-generated files; the reviewer must not edit source code');
+    if(candidateParts(snapshot,c).account.kind==='ttadk'&&known(candidateParts(snapshot,c).account.capabilities.search)) fixedNotes.push(WORKER_NOTES.search);
+    if(t.category==='image-read') fixedNotes.push(WORKER_NOTES.image);
+    if(t.sandbox==='danger-full-access') fixedNotes.push(WORKER_NOTES.commits);
+    if(t.runsTests&&!t.writes) fixedNotes.push(WORKER_NOTES.reviewTests);
     if(reviewAfterWrite(t,snapshot,c)) notes.push(`review required (class ${t.reviewClass}, impact ${t.impact}): pin the artifact before its gated action/acceptance, route.mjs ${deriveReview(t).category} --review-class ${t.reviewClass} --review-reason ${shellQuote(t.reviewReason)} --review-scope ${shellQuote(t.reviewScope??t.flags.name??t.taskId)} --author ${c.family==='claude'?'claude':'codex'}${['deepseek','gemini','seed'].includes(c.family)?` --exclude-model ${c.family}`:''}${t.contentLabels.includes('security')?' --security':''} --impact ${t.impact} --project ${t.project} --name ${f.name??t.taskId}-R; pin the actual author and artifact; blocks only on P0/P1, at most 2 rounds; then record with scripts/outcome.mjs --reviewed`);
     else if(!noReview&&['implement','implement-hard','debug','science'].includes(t.category)) notes.push(`no review (impact ${t.impact}): accept on your own check (tests, build, acceptance), then record with scripts/outcome.mjs`);
-    if(isReview(t)) notes.push('re-reviews check only the previously blocked findings; at most two review rounds per task/branch. Batch related small changes; docs/rule-text-only fixes need owner diff verification, not another review round.');
+    if(isReview(t)) fixedNotes.push(WORKER_NOTES.rereview);
   }
     if(['build-run','implement','implement-hard','debug','ui-browser'].includes(t.category)) {
-      if(t.execution==='remote') notes.push('remote/CI build (--no-local-build): no local heavy-build/lane lock and no local verify throttle — do not take res locks or pass --shared-lock; shared remote entry scripts stay unthrottled');
-      else notes.push('build brief: full-package builds must use scripts/heavy-build.sh or an equivalent ONE-process wrapper around res take-build/wait-build/return-build (res v1.5): acquire heavy-build plus one free admitted lane together, holding neither resource while waiting for the other; live full-build waiters receive the next free lane in FIFO order, without reservations for dead, gate-blocked or foreign-held builds; reverse return on every exit. Normal gate remains min(20, 12 + 8 * other lanes), memory >=16 GiB; STALE and caller-owned locks excluded. lane 3 is available only after reviewed owner switch, at load1m <=8 AND available memory >=32 GiB; lane3=OPEN|CLOSED. UNKNOWN blocks admission; timeout means report/queue. Locks are only for genuine local heavy compute; remote pipeline deploys and CI runs never take one; use --no-local-build. One long-lived watched wrapper owns acquisition/build/return; never hold a device/build resource while queued.');
+      if(t.execution==='remote') { notes.push('build execution: remote/CI; no local resource locks.'); fixedNotes.push(WORKER_NOTES.remoteBuild); }
+      else { notes.push('build execution: local; use the injected build/resource rules for heavy compute.'); fixedNotes.push(WORKER_NOTES.localBuild); }
     }
-    notes.push('takeover/continuation and publish/build-run brief: carry the full checked checklist — exact commands, non-secret variables and expected artifacts. Never write "repeat the last steps".');
-    if(t.category==='build-run') notes.push(t.env==='test'&&t.stakes!=='high'?'test-environment build-run: follow written steps and pinned health/restore checks; report unexpected errors. env=test does not prove the run is remote.':'deploy/release brief: pin baseline/control probes, health thresholds, sample intervals and observation window, rollback triggers and exact prior artifact/config restore steps before acting; unexpected evidence needs stronger-model judgment.');
-    if(phones.length&&(['build-run','ui-browser','computer-use'].includes(t.category)||f['device-lease'])) notes.push(`registered shared test phones ${phones.join(', ')} are pre-authorized for OUR OWN apps: tap ordinary Allow/Authorize/Trust/OK dialogs without a new per-prompt card. Never operate personal iPhone 15 Pro Max or unregistered devices. Device lease: at most 2 h; back up app data before a destructive reinstall/wipe/erase; take the lease/lock only after the first model response.`);
-    if(['browser','ui-browser'].includes(t.category)) notes.push('Chrome must be running before the worker starts; use the named signed-in browser and exact origins. Never switch to another connected browser or bypass a login. Public/local Playwright does not grant signed-in console access.');
-    if(t.category==='computer-use') notes.push('Computer Use via node_repl: operate only the specified apps; the screen must stay unlocked. Missing desktop tool or vision is BLOCKED.');
+    fixedNotes.push(WORKER_NOTES.checklist);
+    if(t.category==='build-run') { fixedNotes.push(t.env==='test'&&t.stakes!=='high'?WORKER_NOTES.testBuild:WORKER_NOTES.deployBuild); notes.push(`build-run environment: ${t.env}, stakes: ${t.stakes}; pin the task's health and restore checklist.`); }
+    if(phones.length&&(['build-run','ui-browser','computer-use'].includes(t.category)||f['device-lease'])) fixedNotes.push(`registered shared test phones ${phones.join(', ')} are pre-authorized for OUR OWN apps: tap ordinary Allow/Authorize/Trust/OK dialogs without a new per-prompt card. Never operate personal iPhone 15 Pro Max or unregistered devices. Device lease: at most 2 h; back up app data before a destructive reinstall/wipe/erase; take the lease/lock only after the first model response.`);
+    if(['browser','ui-browser'].includes(t.category)) fixedNotes.push(WORKER_NOTES.browser);
+    if(t.category==='computer-use') fixedNotes.push(WORKER_NOTES.desktop);
     if(['browser','ui-browser','computer-use'].includes(t.category)) {
-      notes.push('a Codex or TRAE browser worker uses the browser its own tool lists; never put a Claude-in-Chrome deviceId in its brief (that id is only for Claude workers)');
-      notes.push('A thread whose saved browser permission says "declined approval" or "saved permission … denies access" cannot be continued for that site; start a new thread with --browser-origins.');
+      fixedNotes.push(WORKER_NOTES.browserIdentity);
+      fixedNotes.push(WORKER_NOTES.browserDenial);
     }
-    if(t.contentLabels.includes('security')) notes.push('brief: describe defensive intent and ask for findings with impact and fix; avoid requesting step-by-step exploit code. A policy block must never be retried on any GPT account.');
-    if(f.defensive) { why.push('defensive confirmation: preserve ordinary security routing'); notes.push('defensive confirmation (--defensive): give only the rule to hold and its acceptance conditions; no bypass description. On a cyber-policy block, do not retry that thread and do not resend it to any GPT account; re-route with --adversarial for Kimi-K3 plus a DeepSeek-V4.1-Flash second reviewer. Resolve disagreements by whichever side reproduces it with an executable test.'); }
+    if(t.contentLabels.includes('security')) fixedNotes.push(WORKER_NOTES.security);
+    if(f.defensive) { why.push('defensive confirmation: preserve ordinary security routing'); fixedNotes.push(WORKER_NOTES.defensive); }
   if(c) {
-    if(candidateParts(snapshot,c).account.kind==='ttadk') notes.push('on TTADK: if rate-limited, retry it once; on repeated infrastructure failure re-route with --exclude-account and preserve the actual attempt floor.');
+    if(candidateParts(snapshot,c).account.kind==='ttadk') fixedNotes.push(WORKER_NOTES.ttadk);
     if(candidateParts(snapshot,c).account.kind==='trae') {
-      notes.push('on TRAE CLI: provider-assigned low-priority/depleted lanes remain capacity. Launch queued work through the hub; queue patience confirms no-work cancellation before a company replacement. Keep the real model/effort floor, owner and max 2 hops; parallel task concurrency unchanged.');
+      fixedNotes.push(WORKER_NOTES.trae);
       if(['browser','ui-browser'].includes(t.category)) {
         why.push("TRAE via Playwright extension in the user's Chrome");
-        notes.push("TRAE browser path: use Playwright MCP browser_* tools in the user's Chrome. The allowed-sites list is stated to the worker but not enforced technically on TRAE (no per-site approvals as on TTADK): name the exact sites and the read/write scope in the brief, and keep irreversible actions behind the user's confirmation.");
-        notes.push("brief (TRAE browser): the Playwright Extension connects to the user's already signed-in Chrome; use only the configured origins and never read browser profiles, cookies, storage or the pairing token. If the extension/browser is unreachable, report BLOCKED with the exact Playwright error; never attempt a sign-in workaround. Git commits must carry no co-author or tool trailer");
-      } else notes.push("brief (TRAE): the default headless Playwright MCP is for public/local pages only; signed-in consoles require a routed browser task with console origins and an already signed-in browser/account named in the brief. Missing login means BLOCKED, never a Playwright sign-in workaround; git commits must carry no co-author or tool trailer");
+        fixedNotes.push(WORKER_NOTES.traeScope);
+        notes.push(`browser origins: ${t.allowedOrigins.join(', ')}; name the task's read/write scope in the brief.`);
+        fixedNotes.push(WORKER_NOTES.traeBrowser);
+      } else fixedNotes.push(WORKER_NOTES.traePublic);
     }
     if(t.failures>=2&&['implement','implement-hard','debug','science'].includes(t.category)) notes.push('a new defect of the same kind means stop patching: analyze the contract/interface, then reset acceptance checks.');
   if(t.failures&&['implement','implement-hard','debug','science'].includes(t.category)) notes.push("if the last miss was spec/process, amend the brief's acceptance first and say what changed; record outcome --actual. A repeated defect needs contract/interface analysis, not another unchanged patch.");
@@ -198,21 +198,22 @@ export function presentRoute(plan, view, context) {
   if(t.failures>=2&&['implement','implement-hard','debug','science'].includes(t.category)) notes.push('a new defect of the same kind means stop patching: analyze the contract/interface, then reset acceptance checks.');
   if(t.failures&&['implement','implement-hard','debug','science'].includes(t.category)) notes.push("rework thread rule: use the actual accepted attempt floor. May continue the original author thread only for a same-task fix with useful context and no escalation/exclusion; record outcome.mjs --actual and ledger: continued original thread because ...");
   if(t.failures&&['implement','implement-hard','debug','science'].includes(t.category)) notes.push("if the last miss was spec/process, amend the brief's acceptance first; record what changed before another attempt.");
-  if(snapshot.accounts.some(a=>known(a.transport)!==true)||!c) notes.push('hub check: list --limit 1; only if unreachable report to the global-rules owner; never restart shared hubs without ownership.');
+  if(snapshot.accounts.some(a=>known(a.transport)!==true)||!c) { fixedNotes.push(WORKER_NOTES.hub); notes.push(`hub check required: ${snapshot.accounts.filter(a=>known(a.transport)!==true).map(a=>a.id).join(', ')||'no executable lane'}; follow the injected probe/ownership rule.`); }
   if(hasDeepSeek&&['implement','implement-hard','debug'].includes(t.category)&&!c) notes.push('DeepSeek: read-only analysis and simple edits only; not full-package builds, auth/storage reviews or acceptance; use --exclude-model deepseek for those checks.');
   if(['build-run','ui-browser','computer-use'].includes(t.category)||f['device-lease']) {
-    notes.push("device work uses a guarded executor with continuous idle evidence and every orchestrator's release; lease at most 2 h, then return the device and report; device connected, unlocked, app data backed up.");
-    if(phones.length) notes.push(`registered shared test phones ${phones.join(', ')}: ordinary Allow/Authorize/Trust/OK dialogs have no per-prompt approval or button whitelist; includes camera, microphone, photos, notifications, local network, tracking, developer trust, USB debugging and install confirmations. Never operate personal iPhone 15 Pro Max (policy=never) or a device not registered in res.`);
-    notes.push('iOS app-data backup: exclude iOS-protected Library/SplashBoard/; verify the backup is readable before any install. When save data matters, install over the top to preserve it; destructive reinstall/wipe/erase requires a verified backup.');
-    notes.push('Take/return through res; lease <=2 h; back up app data before destructive operations; never enter personal-account credentials, passwords or verification codes; no purchases. If Codex refuses an allowed device prompt, re-route that step to Claude instead of asking the user to tap it.');
+    fixedNotes.push(WORKER_NOTES.device);
+    if(phones.length) fixedNotes.push(`registered shared test phones ${phones.join(', ')}: ordinary Allow/Authorize/Trust/OK dialogs have no per-prompt approval or button whitelist; includes camera, microphone, photos, notifications, local network, tracking, developer trust, USB debugging and install confirmations. Never operate personal iPhone 15 Pro Max (policy=never) or a device not registered in res.`);
+    if(phones.length) notes.push(`registered shared test phones: ${phones.join(', ')}.`);
+    fixedNotes.push(WORKER_NOTES.iosBackup);
+    fixedNotes.push(WORKER_NOTES.deviceSafety);
   }
   if(c&&candidateParts(snapshot,c).account.kind==='trae') {
     const mode=candidateParts(snapshot,c).lane.mode;
     if(mode==='bucket-free') why.push(`${t.background?'background: ':''}${c.modelId} has no daily bucket; no high-priority quota spent; no low-priority lane (step 2)`);
     else if(t.background) why.push(`background: ${mode==='low-priority'?`${c.modelId} low-priority lane; no high-priority quota spent (step 1)`:`normal TRAE pick ${c.modelId}; may spend high-priority quota (step 3)`}`);
-    if(t.background) notes.push('Background work uses the same quality ladder and quota permission; report a decision when no runnable authorized lane exists.');
+    if(t.background) fixedNotes.push(WORKER_NOTES.background);
   }
-  if(plan.reviewers.length) notes.push('Reviewer seats use distinct worker names and output files. If a second reviewer cannot complete, return to the owner to replan the required set against the same artifact and independent families; do not reuse the primary reroute arguments.');
+  if(plan.reviewers.length) fixedNotes.push(WORKER_NOTES.reviewers);
   if(t.background&&!c) tellUser.push('No runnable authorized background lane: present the plan’s decision and keep dispatching independent work.');
   if(plan.kind==='blocked') why.unshift(...plan.reasons.map(r=>r.text));
   if(!why.length) why.push(...(plan.reasons??[plan.reason]).filter(Boolean).map((r)=>r.text));
@@ -221,18 +222,35 @@ export function presentRoute(plan, view, context) {
     const question=`No company lane can start now. Use personal quota now, or wait until ${Number.isFinite(reset)?new Date(reset).toISOString():'company lane progress'}?`;
     needsUserOK.push(question);tellUser.push(question);
   }
-  notes.push(`launch as a background task (run_in_background) - never detach with & inside another command. Every launch must be tracked or covered by an armed codex-worker watch --owner ${owner??'<session-id>'}; re-arm after every wake and handle finished workers first.`);
-  notes.push('brief: workers use codex-worker ask only for an unsettled decision that changes their next action, with --default; note is for a discovered risk, scope change or milestone needed before completion, never routine progress. Answer promptly with codex-worker reply; after the question timeout the worker uses its default, or ends BLOCKED without one.');
-  notes.push('brief: bare note/ask discover the newest running worker context matching cwd if thread flags/environment are absent. In restricted sandboxes denied shared writes relay through command output; if ask exits 6, the worker runs its printed ask --await ID command to read the original reply, without repeating the question or widening the sandbox.');
-  notes.push('brief: keep --out separate from any file the worker is asked to write; --out receives the final message and can overwrite that deliverable.');
-  notes.push('launch audit: every launch must match its route/actual task identity; --user-ok is only a reference to a real scoped decision, never inferred from urgency.');
+  fixedNotes.push(`${WORKER_NOTES.launch} Owner: ${owner??'<session-id>'}.`);
+  fixedNotes.push(WORKER_NOTES.talkback);
+  fixedNotes.push(WORKER_NOTES.talkbackIdentity);
+  fixedNotes.push(WORKER_NOTES.output);
+  fixedNotes.push(WORKER_NOTES.audit);
   const profile=snapshot.projectProfiles?.[t.project]; if(profile) notes.push(`project profile ${profile.profile}${profile.landingGate ? `; landing gate: ${profile.landingGate}` : ''}`);
   const blocked=plan.kind==='blocked', pick=seat?launch(seat,plan.kind==='launch'):null;
+  // JSON retains full diagnostics; text repeats only the choice and task context.
+  const shortWhy = [...new Set(why.map(line => {
+    if (c && line.startsWith('ETA:'))
+      return `ETA: ${c.modelId}@${c.accountId}, est. ${seat.estimate.completionMin} min (${seat.estimate.basis}); policy choice; alternatives: --json/--verbose.`;
+    if (c && line.includes('low-priority lane (bucket depleted)'))
+      return `${c.modelId}: low-priority capacity; ${seat.estimate.basis==='progressing'?'fresh progress observed':'bounded queue patience'}.`;
+    return line;
+  }))];
+  const shortNotes = notes.map(line => {
+    if (line.startsWith('--dry:'))
+      return `--dry: preview only; rerun without --dry before launching. Cache age: ${context.cacheAgeMs==null?'UNKNOWN':Math.round(context.cacheAgeMs/1000)+' seconds'}.`;
+    if (line.startsWith('brief: slow tests for this project'))
+      return `slow tests for this project: only for touched code, outside heavy lanes; otherwise report skipped: ${context.slowTests.map(x=>`${x.file} (${x.cost}; touches ${[].concat(x.runWhen??[]).join(', ')})`).join(' | ')}`;
+    if (line.startsWith('registered shared test phones'))
+      return `registered shared test phones ${phones.join(', ')}; permission and backup rules injected.`;
+    return line;
+  });
   return { category:t.category,stakes:t.stakes,failures:t.failures,failureKind:t.failureKind,security:t.contentLabels.includes('security'),adversarial:adversarial(t),defensive:!!f.defensive,signing:!!f.signing,
     background:t.background,tier:t.tier,kind:plan.kind,blocked,executable:plan.kind==='launch',routeId:plan.routeId,planHash:plan.planHash,
     deferred:plan.kind==='defer'?plan.reason.text:(!pick&&blocked?plan.reasons.map((r)=>r.text).join('; '):null),
     deferUntil:plan.deferUntil??null,deferReason:plan.reason?.text??null,deferRunnerUp:plan.runnerUp?{model:plan.runnerUp.modelId,account:plan.runnerUp.accountId}:null,
     eta,queuePatienceMin:patience,queueAlt,queueAlternative,pick,secondOpinion:plan.reviewers[0]?launch(plan.reviewers[0],plan.kind==='launch'):plan.reviewerProposals?.[0]?launch(plan.reviewerProposals[0],false):null,
-    needsUserOK:[...new Set(needsUserOK)],tellUser:[...new Set(tellUser)],why,notes,
+    needsUserOK:[...new Set(needsUserOK)],tellUser:[...new Set(tellUser)],why,shortWhy,notes,shortNotes,fixedNotes,workerRulesVersion:sourceDigest.version,
     redeemFirst:c?known(candidateParts(snapshot,c).account.budget)?.redemption??null:null,balance,quota,quotaSummary,plan };
 }

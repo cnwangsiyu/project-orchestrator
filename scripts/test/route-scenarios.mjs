@@ -9,7 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { routeFixture } from './helpers/route-fixture.mjs';
+import { routeFixture, parseRouteJSON } from './helpers/route-fixture.mjs';
 import { loadDigest } from '../lib/global-rules.mjs';
 
 const ROUTE = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'route.mjs');
@@ -239,14 +239,14 @@ const CASES = [
   ['ttClaudeOver', ['second-opinion', '--against', 'codex'], 'codex gpt-6.1-sol xhigh @ttadk'],
   ['ttClaudeOver', ['design'], 'codex gpt-6.1-sol xhigh @ttadk', 'stands in'],
   ['ttFresh', ['review', '--author', 'claude'], 'codex gpt-6.1-sol high @ttadk'],
-  ['ttFresh', ['browser'], 'codex gpt-6.1-sol medium @ttadk', 'safety clause'],
+  ['ttFresh', ['browser'], 'codex gpt-6.1-sol medium @ttadk', 'Scope safety'],
   // Browser workers get the Chrome pairing clause; code work doesn't (nightly review 2026-11-05: video-agent W258).
   ['claudeOver', ['computer-use'], 'claude sonnet medium', 'select_browser'],
   ['fresh', ['ui-browser'], 'claude sonnet high', 'select_browser'],
   ['fresh', ['implement', '--auto-check'], 'codex gpt-6.1-sol high @main', '!select_browser'],
   // Credential clause in every brief (user-approved 2026-11-11).
-  ['quiet', ['lookup'], 'codex gpt-6-luna low @main', 'credential clause'],
-  ['ttOutTrae', ['analysis'], 'codex gpt-6.1-sol high @trae', 'credential clause'],
+  ['quiet', ['lookup'], 'codex gpt-6-luna low @main', 'Forbidden for every worker'],
+  ['ttOutTrae', ['analysis'], 'codex gpt-6.1-sol high @trae', 'Forbidden for every worker'],
   // Security excludes TRAE GPT for this task; TTADK GPT and personal accounts are untouched (2026-11-12).
   // A security review is adversarial by default (2026-11-13): no GPT on any account, and with no company non-GPT
   // model listed here the pick is Claude Opus behind the personal-quota gate.
@@ -300,7 +300,7 @@ for (const [sc,args,oldWant,oldNote] of CASES) {
   try { fs.rmSync(path.join(tmp, 'rr.txt'), { force: true }); } catch {}
   let got;
   try {
-    const o = JSON.parse(run(sc, args));
+    const o = parseRouteJSON(run(sc, args));
     if(want==='RETRY') {
       assert.ok(o.pick||o.plan.rejected.some(r=>r.reason.code==='PROVIDER_QUOTA_DENIED'),'retry has a proposal or explicit quota denial');
       assert.ok(o.why.some(w=>/assumed first category ladder rung/.test(w)));
@@ -310,7 +310,7 @@ for (const [sc,args,oldWant,oldNote] of CASES) {
     if(want==='PERSONAL') {assert.ok(o.pick&&!o.pick.company);assert.equal(o.kind,'blocked');assert.equal(o.deferred,null);assert.equal(o.pick.command,null);assert.ok(o.needsUserOK.some(w=>/personal quota/.test(w)));}
     got = want==='PERSONAL'?'PERSONAL':want==='RETRY'?'RETRY':want==='BLOCKED'&&o.blocked ? 'BLOCKED' : o.deferred ? 'DEFER' : `${o.pick.vendor} ${o.pick?.model} ${o.pick?.effort}${o.pick?.account ? ` @${o.pick?.account}` : ''}`;
     if (note) {
-      const has = (o.notes || []).some((x) => x.includes(note.replace(/^!/, '')));
+      const has = (o.allNotes || []).some((x) => x.includes(note.replace(/^!/, '')));
       if (has === note.startsWith('!')) got += ` (notes ${note.startsWith('!') ? 'contain' : 'lack'} "${note.replace(/^!/, '')}")`;
     }
   } catch (e) { got = `ERROR ${String(e.stderr || e.message).split('\n')[0]}`; }
@@ -331,28 +331,28 @@ for (const [sc,args,oldWant,oldNote] of CASES) {
       a.load={'gpt-6.1-sol':{percent:42,t:now}};
       a.quota={sampledAt:now,daily:{'gpt-6.1-sol':{used:20,limit:80,depleted:false,resetsAt:now+h}}};
     }
-    const ttFirst = JSON.parse(run('ttFresh', ['browser'], env));
+    const ttFirst = parseRouteJSON(run('ttFresh', ['browser'], env));
     assert.equal(ttFirst.pick.account, 'ttadk');
-    assert.equal(JSON.parse(run('ttAndTrae',['browser'],env)).pick.account,'trae');
-    assert.equal(JSON.parse(run('ttAndTrae',['ui-browser','--impact','service'],env)).pick.account,'trae');
-    const trae = JSON.parse(run('ttOutTrae', ['browser', '--origins', 'example.com'], env));
+    assert.equal(parseRouteJSON(run('ttAndTrae',['browser'],env)).pick.account,'trae');
+    assert.equal(parseRouteJSON(run('ttAndTrae',['ui-browser','--impact','service'],env)).pick.account,'trae');
+    const trae = parseRouteJSON(run('ttOutTrae', ['browser', '--origins', 'example.com'], env));
     assert.equal(trae.pick.account, 'trae'); assert.equal(trae.pick.launcher, 'codex-worker');
     assert.ok(trae.why.some((s) => /TRAE via Playwright extension in the user's Chrome/.test(s)));
-    assert.ok(trae.notes.some((s) => /not enforced technically on TRAE/.test(s)));
+    assert.ok(trae.allNotes.some((s) => /not enforced technically on TRAE/.test(s)));
     assert.match(trae.pick.command, /--browser-origins/); assert.match(trae.pick.command, /example\.com/);
-    const beforePersonal = JSON.parse(run('traeBrowserB', ['browser'], env));
+    const beforePersonal = parseRouteJSON(run('traeBrowserB', ['browser'], env));
     assert.equal(beforePersonal.pick.account, 'trae');
-    const ui = JSON.parse(run('ttOutTrae', ['ui-browser'], env));
+    const ui = parseRouteJSON(run('ttOutTrae', ['ui-browser'], env));
     assert.equal(ui.pick.account, 'trae'); assert.equal(ui.pick.effort, 'high');
-    const desktop = JSON.parse(run('traeBrowserB', ['computer-use', '--apps', 'com.apple.Notes'], env));
+    const desktop = parseRouteJSON(run('traeBrowserB', ['computer-use', '--apps', 'com.apple.Notes'], env));
     assert.equal(desktop.pick.account, 'b'); assert.notEqual(desktop.pick.account, 'trae');
     assert.ok(desktop.needsUserOK.some((s) => /personal quota/.test(s)));
     S.noDesktopPath={...S.ttOutTrae,codex:S.ttOutTrae.codex.filter(a=>a.kind!=='ttadk')};
-    const noPersonalDesktop = JSON.parse(run('noDesktopPath', ['computer-use', '--apps', 'com.apple.Notes'], env));
+    const noPersonalDesktop = parseRouteJSON(run('noDesktopPath', ['computer-use', '--apps', 'com.apple.Notes'], env));
     assert.equal(noPersonalDesktop.pick, null); assert.equal(noPersonalDesktop.blocked, true); assert.ok(noPersonalDesktop.plan.rejected.some(p=>p.reason.code==='CAPABILITY_DESKTOP_TOOL'));
-    const absent = JSON.parse(run('ttOutTrae', ['browser']));
+    const absent = parseRouteJSON(run('ttOutTrae', ['browser']));
     assert.equal(absent.pick.vendor, 'claude'); assert.ok(absent.needsUserOK.some((s) => /personal quota/.test(s)));
-    const personal = JSON.parse(run('traeBrowserB', ['browser']));
+    const personal = parseRouteJSON(run('traeBrowserB', ['browser']));
     assert.equal(personal.pick.account, 'b'); assert.ok(personal.needsUserOK.some((s) => /personal quota/.test(s)));
     console.log('ok   TRAE Playwright browser capability: observed free TRAE first, TTADK fallback, personal/Claude, UI floor, token gate, computer-use exclusion');
   } catch (e) { fail++; console.log(`FAIL TRAE Playwright browser capability: ${e.stack}`); }
@@ -362,17 +362,17 @@ for (const [sc,args,oldWant,oldNote] of CASES) {
 // test-running reviews get workspace-write, and --sandbox is the only explicit narrower per-task override.
 {
   try {
-    const routed = (sc, args) => JSON.parse(run(sc, args));
+    const routed = (sc, args) => parseRouteJSON(run(sc, args));
     for (const [sc, account] of [['quiet', 'main'], ['ttFresh', 'ttadk'], ['ttOutTrae', 'trae']]) {
       for (const mode of [[], ['--mode', 'default'], ['--mode', 'bypassPermissions']]) {
         const writing = routed(sc, ['implement', '--impact', 'service', ...mode]);
         assert.equal(writing.pick?.account, account); assert.equal(writing.pick.sandbox, 'danger-full-access');
         assert.match(writing.pick?.command, /(?:--sandbox|-s) danger-full-access/);
-        assert.match(writing.notes[0], /never overwrite, delete or move files outside the task's scope/);
-        assert.ok(writing.notes.some((n) => /full access: the worker may commit on its task branch if the brief says so; never push to main, never force-push; commits carry no co-author\/tool trailer/.test(n)));
-        assert.ok(writing.notes.some((n) => /credential clause/.test(n)));
-        assert.ok(writing.notes.some((n) => /back up app data before any destructive step/.test(n)));
-        assert.ok(!writing.notes.some((n) => /workspace-write can't run git writes/.test(n)));
+        assert.match(writing.allNotes[0], /never overwrite, delete or move files outside the task's scope/);
+        assert.ok(writing.allNotes.some((n) => /full access: the worker may commit on its task branch if the brief says so; never push to main, never force-push; commits carry no co-author\/tool trailer/.test(n)));
+        assert.ok(writing.allNotes.some((n) => /Forbidden for every worker/.test(n)));
+        assert.ok(writing.allNotes.some((n) => /back up app data before any destructive step/.test(n)));
+        assert.ok(!writing.allNotes.some((n) => /workspace-write can't run git writes/.test(n)));
       }
       const review = routed(sc, ['review']);
       assert.equal(review.pick?.account, account); assert.equal(review.pick.sandbox, 'read-only');
@@ -386,11 +386,11 @@ for (const [sc,args,oldWant,oldNote] of CASES) {
     assert.equal(narrower.pick.sandbox, 'workspace-write'); assert.match(narrower.pick?.command, /(?:--sandbox|-s) workspace-write/);
     assert.equal(routed('quiet', ['implement', '--impact', 'service', '--sandbox', 'read-only']).pick.sandbox, 'read-only');
     const testedReview = routed('ttFresh', ['review', '--runs-tests']);
-    assert.ok(testedReview.notes.some((n) => /workspace-write only for test-generated files; the reviewer must not edit/.test(n)));
+    assert.ok(testedReview.allNotes.some((n) => /workspace-write only for test-generated files; the reviewer must not edit/.test(n)));
     const signingLog = path.join(tmp, 'signing-route-log.jsonl');
-    JSON.parse(run('quiet', ['review', '--signing', '--project', 'fixture', '--name', 'fixture-sign'],
+    parseRouteJSON(run('quiet', ['review', '--signing', '--project', 'fixture', '--name', 'fixture-sign'],
       { ROUTE_LOG: '1', ROUTE_LOG_FILE: signingLog }));
-    const signingRecord = JSON.parse(fs.readFileSync(signingLog, 'utf8').trim());
+    const signingRecord = parseRouteJSON(fs.readFileSync(signingLog, 'utf8').trim());
     assert.equal(signingRecord.signing, true); assert.equal(signingRecord.pick.account,'main'); assert.equal(signingRecord.executable,true);
     console.log('ok   sandbox/signing defaults: main, TTADK and TRAE signing full; reviews read-only; test runs workspace-write');
   } catch (e) { fail++; console.log(`FAIL sandbox defaults/overrides: ${e.stack}`); }
@@ -399,23 +399,23 @@ for (const [sc,args,oldWant,oldNote] of CASES) {
 {
   try {
     const log = path.join(tmp, 'merged-route-log.jsonl');
-    const merged = JSON.parse(run('ttFresh', ['review-high', '--author', 'codex', '--project', 'fixture', '--name', 'fixture-T1', '--urgent', '--user-ok', 'ledger:fixture/card-1'], { ROUTE_LOG: '1', ROUTE_LOG_FILE: log }));
-    const rec = JSON.parse(fs.readFileSync(log, 'utf8').trim());
+    const merged = parseRouteJSON(run('ttFresh', ['review-high', '--author', 'codex', '--project', 'fixture', '--name', 'fixture-T1', '--urgent', '--user-ok', 'ledger:fixture/card-1'], { ROUTE_LOG: '1', ROUTE_LOG_FILE: log }));
+    const rec = parseRouteJSON(fs.readFileSync(log, 'utf8').trim());
     assert.equal(rec.tier, 'hard'); assert.equal(rec.tier, merged.tier);
     assert.equal(rec.second?.account, merged.secondOpinion?.account);
     assert.equal(rec.personalApproved, true); assert.equal(merged.blocked,false); assert.equal(rec.approvalRef, 'fixture-approval');
     assert.ok(merged.pick?.command);
     for (const sc of ['ttFresh', 'ttOutTraeDown', 'fresh']) {
-      const routed = JSON.parse(run(sc, ['build-run']));
-      assert.ok(routed.notes.some((s) => /heavy-build\.sh.*ONE-process wrapper.*res take-build\/wait-build\/return-build.*res v1\.5.*acquire heavy-build plus one free admitted lane together.*holding neither resource while waiting for the other/.test(s)));
-      assert.ok(routed.notes.some((s) => /only for genuine local heavy compute.*remote pipeline deploys and CI runs never take one.*--no-local-build/.test(s)));
-      assert.ok(routed.notes.some((s) => /Normal gate remains min\(20, 12 \+ 8 \* other lanes\), memory >=16 GiB; STALE and caller-owned locks excluded/.test(s)));
-      assert.ok(routed.notes.some((s) => /lane 3 is available only after reviewed owner switch.*load1m <=8 AND available memory >=32 GiB.*lane3=OPEN\|CLOSED/.test(s)));
-      assert.ok(!routed.notes.some((s) => /at most 3 concurrent heavy builds/.test(s)));
+      const routed = parseRouteJSON(run(sc, ['build-run']));
+      assert.ok(routed.allNotes.some((s) => /heavy-build\.sh.*ONE-process wrapper.*res take-build\/wait-build\/return-build.*res v1\.5.*acquire heavy-build plus one free admitted lane together.*holding neither resource while waiting for the other/.test(s)));
+      assert.ok(routed.allNotes.some((s) => /only for genuine local heavy compute.*remote pipeline deploys and CI runs never take one.*--no-local-build/.test(s)));
+      assert.ok(routed.allNotes.some((s) => /Normal gate remains min\(20, 12 \+ 8 \* other lanes\), memory >=16 GiB; STALE and caller-owned locks excluded/.test(s)));
+      assert.ok(routed.allNotes.some((s) => /lane 3 is available only after reviewed owner switch.*load1m <=8 AND available memory >=32 GiB.*lane3=OPEN\|CLOSED/.test(s)));
+      assert.ok(!routed.allNotes.some((s) => /at most 3 concurrent heavy builds/.test(s)));
     }
     for (const sc of ['unreadHub']) {
-      const routed = JSON.parse(run(sc, ['analysis']));
-      assert.ok(routed.notes.some((s) => /list --limit 1.*only if unreachable.*global-rules owner/.test(s)));
+      const routed = parseRouteJSON(run(sc, ['analysis']));
+      assert.ok(routed.allNotes.some((s) => /list --limit 1.*only if unreachable.*global-rules owner/.test(s)));
     }
     console.log('ok   merged tier routing, worker digest, approvals and resource/hub notes');
   } catch (e) { fail++; console.log(`FAIL merged tier/global rules: ${e.message}`); }
@@ -435,7 +435,7 @@ for (const [sc, args, want] of [
   ['ttFresh', ['implement-hard', '--impact', 'release', '--exclude-account', 'ttadk'], 'none'],
 ]) {
   let got;
-  try { got = JSON.parse(run(sc, args)).secondOpinion?.account ?? 'none'; } catch (e) { got = `ERROR ${String(e.stderr || e.message).split('\n')[0]}`; }
+  try { got = parseRouteJSON(run(sc, args)).secondOpinion?.account ?? 'none'; } catch (e) { got = `ERROR ${String(e.stderr || e.message).split('\n')[0]}`; }
   const ok = got === want;
   if (!ok) fail++;
   console.log(`${ok ? 'ok  ' : 'FAIL'} ${sc.padEnd(19)} ${(args.join(' ') + ' (2nd account)').padEnd(36)} ${ok ? got : `want "${want}", got "${got}"`}`);
@@ -444,13 +444,13 @@ for (const [sc, args, want] of [
 for (const [sc, args] of [['quiet', ['lookup']], ['ttSearch', ['lookup']], ['ttOutTrae', ['lookup']], ['quiet', ['draft']], ['quiet', ['second-opinion', '--against', 'claude']]]) {
   let ok = false;
   try {
-    const printed = JSON.parse(run(sc,args,{TEST_APPROVE:true})).pick?.command;
-    if(!printed.includes('-- sh -c')) {assert.ok(JSON.parse(run(sc,args,{TEST_APPROVE:true})).notes.some(n=>n===`Global worker rules ${loadDigest().version}: ${loadDigest().worker}`));ok=true;continue;}
+    const printed = parseRouteJSON(run(sc,args,{TEST_APPROVE:true})).pick?.command;
+    if(!printed.includes('-- sh -c')) {assert.ok(parseRouteJSON(run(sc,args,{TEST_APPROVE:true})).allNotes.some(n=>n===`Global worker rules ${loadDigest().version}: ${loadDigest().coreWorker}`));ok=true;continue;}
     const inner = printed.match(/-- sh -c (.*)$/);
     const command = inner ? execFileSync('/bin/sh', ['-c', `printf '%s' ${inner[1]}`], { encoding: 'utf8' }) : printed;
-    const quoted = command.match(/ -c ('developer_instructions=.*') --json/)[1];
+    const quoted = command.match(/ -c ("\$\(node .*? --config\)") --json/)[1];
     const config = execFileSync('/bin/sh', ['-c', `printf '%s' ${quoted}`], { encoding: 'utf8' });
-    const rule = JSON.parse(config.slice('developer_instructions='.length));
+    const rule = parseRouteJSON(config.slice('developer_instructions='.length));
     const digest = loadDigest();
     ok = rule.startsWith(`Global worker rules ${digest.version}\n`)&&rule.includes('never read, copy, load or inject LOGIN')
       &&rule.split('\n').slice(1).every(line=>digest.worker.includes(line));
@@ -466,7 +466,7 @@ for (const [sc, args, want] of [
   ['fresh', ['lookup'], false],
 ]) {
   let got;
-  try { got = /--account ttadk proxy >\/dev\/null && /.test(JSON.parse(run(sc, args)).pick?.command ?? ''); } catch (e) { got = `ERROR ${String(e.stderr || e.message).split('\n')[0]}`; }
+  try { got = /--account ttadk proxy >\/dev\/null && /.test(parseRouteJSON(run(sc, args)).pick?.command ?? ''); } catch (e) { got = `ERROR ${String(e.stderr || e.message).split('\n')[0]}`; }
   const ok = got === want;
   if (!ok) fail++;
   console.log(`${ok ? 'ok  ' : 'FAIL'} ${sc.padEnd(19)} ${(args.join(' ') + ' (proxy first)').padEnd(36)} ${ok ? got : `want ${want}, got ${got}`}`);
@@ -474,7 +474,7 @@ for (const [sc, args, want] of [
 // The second reviewer of Codex-written code is Kimi-K3 on TTADK when the gateway lists it, else Sol.
 for (const [sc, want] of [['ttKimi', 'none'], ['ttFresh', 'none']]) {
   let got;
-  try { const so = JSON.parse(run(sc, ['review', '--author', 'codex'])).secondOpinion; got = so ? `${so.model} ${so.effort} @${so.account}` : 'none'; } catch (e) { got = 'ERROR'; }
+  try { const so = parseRouteJSON(run(sc, ['review', '--author', 'codex'])).secondOpinion; got = so ? `${so.model} ${so.effort} @${so.account}` : 'none'; } catch (e) { got = 'ERROR'; }
   const ok = got === want;
   if (!ok) fail++;
   console.log(`${ok ? 'ok  ' : 'FAIL'} ${sc.padEnd(19)} ${'review --author codex (2nd)'.padEnd(36)} ${ok ? got : `want "${want}", got "${got}"`}`);
@@ -482,7 +482,7 @@ for (const [sc, want] of [['ttKimi', 'none'], ['ttFresh', 'none']]) {
 // computer-use passes the allowed apps to the worker.
 {
   let got;
-  try { got = JSON.parse(run('ttFresh', ['computer-use', '--apps', 'com.apple.calculator,com.apple.Notes'])).pick?.command ?? ''; } catch (e) { got = 'ERROR'; }
+  try { got = parseRouteJSON(run('ttFresh', ['computer-use', '--apps', 'com.apple.calculator,com.apple.Notes'])).pick?.command ?? ''; } catch (e) { got = 'ERROR'; }
   const ok = got.includes("--computer-use-apps 'com.apple.Notes,com.apple.calculator'");
   if (!ok) fail++;
   console.log(`${ok ? 'ok  ' : 'FAIL'} ttFresh             computer-use --apps (command)        ${ok ? 'has --computer-use-apps' : got.slice(0, 120)}`);
@@ -495,7 +495,7 @@ for (const [sc, args, want] of [
   ['bothSpent', ['implement', '--impact', 'service'], true],
 ]) {
   let got;
-  try { const o = JSON.parse(run(sc, args)); got = !!o.redeemFirst; } catch (e) { got = `ERROR ${String(e.stderr || e.message).split('\n')[0]}`; }
+  try { const o = parseRouteJSON(run(sc, args)); got = !!o.redeemFirst; } catch (e) { got = `ERROR ${String(e.stderr || e.message).split('\n')[0]}`; }
   const ok = got === want;
   if (!ok) fail++;
   console.log(`${ok ? 'ok  ' : 'FAIL'} ${sc.padEnd(19)} ${(args.join(' ') + ' (redeem)').padEnd(36)} ${ok ? got : `want ${want}, got ${got}`}`);
@@ -503,7 +503,7 @@ for (const [sc, args, want] of [
 // Rotation: two accounts with deadlines inside 48h alternate across launches.
 {
   try { fs.rmSync(path.join(tmp, 'rr.txt'), { force: true }); } catch {}
-  const a = JSON.parse(run('cardDeadline', ['implement'])).pick?.account, b = JSON.parse(run('cardDeadline', ['implement'])).pick?.account;
+  const a = parseRouteJSON(run('cardDeadline', ['implement'])).pick?.account, b = parseRouteJSON(run('cardDeadline', ['implement'])).pick?.account;
   const ok = a === 'b' && b === 'main'; // BC-30: nondry personal dispatches advance the locked counter.
   if (!ok) fail++;
   console.log(`${ok ? 'ok  ' : 'FAIL'} cardDeadline        rotation                             ${a} then ${b}`);
@@ -529,7 +529,7 @@ for (const [sc, args] of ERRORS) {
 }
 // TTADK quota used up (no TRAE): personal quota needs the user's OK, high stakes too (user, 2026-11-09); --urgent doesn't.
 {
-  const gate = (args) => JSON.parse(run('ttQuotaOut', args)).needsUserOK.some((n) => /^personal quota:/.test(n));
+  const gate = (args) => parseRouteJSON(run('ttQuotaOut', args)).needsUserOK.some((n) => /^personal quota:/.test(n));
   const cases = [[gate(['analysis']), true], [gate(['implement', '--impact', 'service']), true], [gate(['analysis', '--urgent']), true], [gate(['implement', '--impact', 'service', '--stakes', 'high']), true]];
   const bad = cases.map(([got, want], i) => (got === want ? null : i)).filter((i) => i !== null);
   if (bad.length) fail++;
@@ -538,7 +538,7 @@ for (const [sc, args] of ERRORS) {
 // TRAE: no personal-quota gate while it can take TTADK's work; the gate returns when both company accounts are out; TRAE launches use
 // its own model ids and traecli for exec.
 {
-  const o = (sc, args) => JSON.parse(run(sc, args));
+  const o = (sc, args) => parseRouteJSON(run(sc, args));
   const gate = (sc, args) => o(sc, args).needsUserOK.some((n) => /^personal quota:/.test(n));
   const exec = o('ttOutTrae', ['lookup']).pick?.command ?? '';
   const worker = o('ttOutTrae', ['implement', '--impact', 'service']).pick?.command ?? '';
@@ -552,7 +552,7 @@ for (const [sc, args] of ERRORS) {
 // Both company accounts have the max-effort exemption (user, 2026-11-15).
 {
   const maxGate = (sc, args) => {
-    const o = JSON.parse(run(sc, args));
+    const o = parseRouteJSON(run(sc, args));
     return [o.pick?.account, o.pick?.effort, o.needsUserOK.includes('max effort')];
   };
   // Explicit actuals test the max exemption independently of history fallback.
@@ -631,7 +631,7 @@ for (const [sc, args] of ERRORS) {
 // Personal quota only after asking (user, 2026-11-09): company accounts excluded by the orchestrator, or a TRAE-only
 // device with TRAE down, still ask; image generation (a standing exception) and company work don't.
 {
-  const ok = (sc, args) => JSON.parse(run(sc, args)).needsUserOK.some((n) => /^personal quota:/.test(n));
+  const ok = (sc, args) => parseRouteJSON(run(sc, args)).needsUserOK.some((n) => /^personal quota:/.test(n));
   const cases = [[ok('ttAndTrae', ['implement', '--impact', 'service', '--exclude-account', 'ttadk,trae']), true],
     [ok('ttAndTrae', ['implement', '--impact', 'service', '--exclude-account', 'ttadk']), false],
     [ok('ttAndTrae', ['implement', '--impact', 'service']), false], [ok('ttOutTrae', ['image-gen']), false],
@@ -643,7 +643,7 @@ for (const [sc, args] of ERRORS) {
 }
 // No silent holds: company-device personal fallbacks ask; personal-only devices have standing permission.
 {
-  const ok = (sc, args) => JSON.parse(run(sc, args)).needsUserOK.length > 0;
+  const ok = (sc, args) => parseRouteJSON(run(sc, args)).needsUserOK.length > 0;
   const cases = [[ok('codexOut', ['lookup', '--stakes', 'low']), true], [ok('codexOutClaudeOver', ['implement', '--impact', 'service']), true],
     [ok('codex5h', ['implement', '--impact', 'service']), true], [ok('ttUnhealthy', ['implement', '--impact', 'service']), true],
     [ok('ttUnhealthy', ['implement', '--impact', 'service', '--urgent']), true], [ok('codexOut', ['lookup', '--stakes', 'low', '--urgent']), true]];
@@ -680,7 +680,7 @@ for (const [sc, args] of ERRORS) {
   const r = (cause) => view({ result: 'rework', rounds: 2, cause });
   const codeRework = { result: 'rework', nonCodeRework: false, rounds: 2 };
   const nonCodeRework = { result: 'rework', nonCodeRework: true, rounds: null };
-  const note = (args) => JSON.parse(run('fresh', args)).notes.some((n) => /new defect of the same kind/.test(n));
+  const note = (args) => parseRouteJSON(run('fresh', args)).allNotes.some((n) => /new defect of the same kind/.test(n));
   const corrected = dedupeOutcomes([{ t: 1, project: 'p', name: 'cause', result: 'rework', rounds: 2, cause: 'code' },
     { t: 2, project: 'p', name: 'cause', correction: true, cause: 'infra' }])[0];
   const cases = [[r('code'), codeRework], [r(undefined), codeRework],
@@ -773,9 +773,9 @@ for (const [sc, args] of ERRORS) {
   S.traeAllOut = { claude: cl(10, 120), codex: [acc('main', 20, 120), tt(out), full(allHome)] };
   S.traeNoGem = { claude: cl(10, 120), codex: [acc('main', 20, 120), tt(out), noGem(noGemHome)] };
   S.traeNoGemPaused = { claude: cl(10, 120), codex: [acc('main', 20, 120), tt(out), noGem(mpHome)] };
-  const o = (sc, args) => JSON.parse(run(sc, args));
+  const o = (sc, args) => parseRouteJSON(run(sc, args));
   const pk = (sc, args) => { const r = o(sc,args);if(args.includes('--failures')) {assert.ok(!r.plan.reasons?.some(p=>p.code==='PREVIOUS_ATTEMPT_UNKNOWN'));return 'RETRY';} return r.deferred ? 'DEFER' : `${r.pick?.model} ${r.pick?.effort} @${r.pick?.account}`; };
-  const hasNote = (sc, args, re) => o(sc, args).notes.some((n) => re.test(n));
+  const hasNote = (sc, args, re) => o(sc, args).allNotes.some((n) => re.test(n));
   const personal = (sc, args) => o(sc, args).needsUserOK.some((n) => /^personal quota:/.test(n));
   // trae-health: a restriction on one family pauses that family only; a success elsewhere leaves it paused; auth pauses all.
   const hh = fs.mkdtempSync(path.join(tmp, 'trae-h-'));
@@ -833,7 +833,7 @@ for (const [sc, args] of ERRORS) {
     [o('traeFull', ['review-high', '--security']).why.some((n) => /adversarial: no GPT model on any account.*Kimi-K3, DeepSeek/.test(n)), true],
     [o('ttAndTrae', ['review-high', '--security']).why.some((n) => /security task:/.test(n)), false],
     [hasNote('traeFull', ['implement', '--security'], /no review/), true],
-    [hasNote('traeFull', ['review-high', '--security'], /brief: describe defensive intent and ask for findings with impact and fix; avoid requesting step-by-step exploit code/), true],
+    [hasNote('traeFull', ['review-high', '--security'], /describe defensive intent and ask for findings with impact and fix; avoid requesting step-by-step exploit code/), true],
     [hasNote('fresh', ['review-high'], /describe defensive intent/), false],
     // Fallback-written service code gets a review that keeps its family off the reviewer seat.
     [hasNote('traeGptOut', ['implement', '--impact', 'service'], /route\.mjs review --author codex --exclude-model deepseek/), false],
@@ -908,8 +908,8 @@ for (const [sc, args] of ERRORS) {
 }
 // Task-duration retro: brief amendments, model fit and build/device advice without new required flags.
 {
-  const o = (sc, args) => JSON.parse(run(sc, args));
-  const hasNote = (r, re) => r.notes.some((n) => re.test(n));
+  const o = (sc, args) => parseRouteJSON(run(sc, args));
+  const hasNote = (r, re) => r.allNotes.some((n) => re.test(n));
   const cases = [];
   for (const cat of CODE) for (const failures of [0, 1, 2]) {
     cases.push([hasNote(o('traeFull', [cat, '--failures', String(failures)]), /if the last miss was spec\/process, amend the brief's acceptance first/), failures >= 1]);
@@ -935,7 +935,7 @@ for (const [sc, args] of ERRORS) {
       [hasNote(r, /at most 3 concurrent heavy builds unless the ledger sets N otherwise/), false],
       [hasNote(r, /at most 2 h, then return the device and report.*device connected, unlocked, app data backed up/), true],
       [hasNote(r, /iphone8, iphone11 and s21.*Allow\/Authorize\/Trust\/OK.*no per-prompt approval or button whitelist/), false],
-      [hasNote(r, /personal iPhone 15 Pro Max \(policy=never\).*device not registered in res/), true],
+      [/personal iPhone 15 Pro Max \(`policy=never`\).*device not registered in `res`/.test(loadDigest().worker), true],
       [hasNote(r, /Codex refuses an allowed device prompt.*re-route that step to Claude instead of asking the user to tap it/), true]);
   }
   const leased = o('ttFresh', ['lookup', '--device-lease']);
@@ -1053,17 +1053,17 @@ for (const [sc, args] of ERRORS) {
         S.browserQuotaBaseline = { ...S.browserQuota, codex: [...personal, ...company, { ...trae, quota: null }] };
         for (const cat of ['browser', 'ui-browser', 'computer-use']) {
           const args = [cat, ...(cat === 'computer-use' ? ['--apps', 'com.apple.Notes'] : ['--origins', 'example.com'])];
-          const baseline = JSON.parse(run('browserQuotaBaseline', args)), routed = JSON.parse(run('browserQuota', args));
+          const baseline = parseRouteJSON(run('browserQuotaBaseline', args)), routed = parseRouteJSON(run('browserQuota', args));
           if(company.some(a=>a.quotaOut)) {assert.equal(routed.kind,'blocked');assert.equal(baseline.kind,'blocked');assert.equal(routed.deferred,null);assert.equal(routed.pick?.account,'b');}
           assert.equal(routed.pick?.model, SOL); assert.equal(routed.pick?.account, 'b');
           assert.deepEqual(routed.pick, baseline.pick); assert.deepEqual(routed.needsUserOK, baseline.needsUserOK);
           assert.equal(routed.balance?.selected ?? false, false);
           assert.ok(!routed.why.some((s) => /bucket is depleted|background:|balanced to TRAE/.test(s)));
           const exhaustedArgs = [...args, '--failures', '20'];
-          const exhausted = JSON.parse(run('browserQuota', exhaustedArgs));
+          const exhausted = parseRouteJSON(run('browserQuota', exhaustedArgs));
           assert.ok(exhausted.pick);assert.ok(!exhausted.plan.reasons?.some(r=>r.code==='PREVIOUS_ATTEMPT_UNKNOWN'));assert.ok(exhausted.why.some(w=>/assumed first/.test(w)));
-          assert.deepEqual(exhausted.needsUserOK, JSON.parse(run('browserQuotaBaseline', exhaustedArgs)).needsUserOK);
-          const background = JSON.parse(run('browserQuota', [...args, '--background']));
+          assert.deepEqual(exhausted.needsUserOK, parseRouteJSON(run('browserQuotaBaseline', exhaustedArgs)).needsUserOK);
+          const background = parseRouteJSON(run('browserQuota', [...args, '--background']));
           assert.equal(background.kind,'blocked');assert.equal(background.pick.account,'b');assert.equal(background.pick.command,null);assert.ok(background.plan.gates.some(g=>g.kind==='personal-quota'));
         }
       }
@@ -1108,7 +1108,7 @@ for (const [sc, args] of ERRORS) {
   const lean = leanLines(st, data).join('\n');
   delete process.env.TRAE_PROBE;
   S.traeQuota = { claude: cl(10, 120), codex: [acc('main', 20, 120), tr({ home: qh, quota })] };
-  const ro = JSON.parse(run('traeQuota', ['implement', '--stakes', 'high']));
+  const ro = parseRouteJSON(run('traeQuota', ['implement', '--stakes', 'high']));
   cases.push(
     [lean.includes("TRAE gpt-6.1-sol's daily high-priority quota is used up"), true],
     [ro.pick?.model, 'gpt-6.1-sol'], [ro.pick?.account, 'trae'],
@@ -1151,8 +1151,8 @@ for (const [sc, args] of ERRORS) {
   noteFailure(paused56Home, '-32600: model `gpt-5.6-sol` is unavailable because its metadata could not be resolved', now, 'gpt-5.6-sol');
   scenario('quota56Paused', S.quotaPreferred.codex.at(-1).quota.daily, { home: paused56Home });
   S.quotaTT = { ...S.quotaAstra, codex: [tt({ usage: { used: 80, limit: 100, utilization: 80, resetsAt: now + 6 * h } }), ...S.quotaAstra.codex] };
-  const route = (sc, args = ['implement']) => JSON.parse(run(sc, args));
-  const note = (r, re) => r.notes.some((n) => re.test(n));
+  const route = (sc, args = ['implement']) => parseRouteJSON(run(sc, args));
+  const note = (r, re) => r.allNotes.some((n) => re.test(n));
   for (const [sc, args, want] of [
     ['quotaAstra', ['implement'], 'deepseek-v4.1-flash'],
     ['quotaPreferred', ['implement'], 'gpt-5.6-sol'],
@@ -1225,8 +1225,8 @@ for (const [sc, args] of ERRORS) {
     [route('quotaPreferred', ['implement', '--failures', '1']).blocked, false],
     [route('quotaPreferred').pick?.command.includes('--model GPT-6.1-SOL'), true],
     [route('quotaPreferred', ['lookup']).pick?.command.includes('-m DEEPSEEK-V4.1-FLASH'), true],
-    [route('quotaPreferred', ['implement', '--failures', '1']).notes.some((n) => /rework thread rule.*continued original thread because/.test(n)), true],
-    [route('quotaPreferred').notes.some((n) => /rework thread rule/.test(n)), false],
+    [route('quotaPreferred', ['implement', '--failures', '1']).allNotes.some((n) => /rework thread rule.*continued original thread because/.test(n)), true],
+    [route('quotaPreferred').allNotes.some((n) => /rework thread rule/.test(n)), false],
     [JSON.stringify([busy.pick.model,busy.pick.effort,busy.pick.account,busy.pick.sandbox]), JSON.stringify([idle.pick.model,idle.pick.effort,idle.pick.account,idle.pick.sandbox])], [JSON.stringify(busy.needsUserOK), JSON.stringify(idle.needsUserOK)],
     [busy.deferred, null], [note(busy, /parallel task concurrency unchanged/), true],
     [missing.why.some((n) => /bucket is depleted/.test(n)), false],
@@ -1285,7 +1285,7 @@ for (const [sc, args] of ERRORS) {
   S.etaResetSoon = { claude: cl(10, 120), codex: [acc('main', 20, 120), ttOut(20),
     laneTr('soon', lanes({ position: null, drainPerMin: null, lastProgressAt: now - 60000 },
       { position: 50, drainPerMin: 5 }))] };
-  const parse = (sc, args) => JSON.parse(run(sc, args));
+  const parse = (sc, args) => parseRouteJSON(run(sc, args));
   const defer = parse('etaDefer', ['implement-hard']);
   const progress = parse('etaProgressing', ['implement-hard']);
   const soon = parse('etaResetSoon', ['implement-hard']);
@@ -1307,7 +1307,7 @@ for (const [sc, args] of ERRORS) {
     ['reset-soon launches', soon.deferred, null],
     ['reset-soon keeps the hard model', soon.pick?.model, 'gpt-6.1-sol'],
     ['resource-bound no defer', bound.deferred, null],
-    ['resource-bound note', bound.notes.some((s) => /take the lease\/lock only after the first model response/.test(s)), true],
+    ['resource-bound note', bound.allNotes.some((s) => /take the lease\/lock only after the first model response/.test(s)), true],
     ['resource-bound hard pick', ['gpt-6.1-sol', 'gpt-6-astra'].includes(bound.pick?.model), true],
     ['eta size: light beats a 10h reset', lightQ.completionMin < 10 * 60 + 5, true],
     ['eta size: hard loses to a 10h reset', hardQ.completionMin > 10 * 60 + 90, true],
@@ -1317,7 +1317,7 @@ for (const [sc, args] of ERRORS) {
   // --json purity: the whole stdout is one JSON document for a code category, not a substring.
   const raw = run('etaProgressing', ['implement-hard']);
   const trimmed = raw.trim();
-  checks.push(['json purity parses whole stdout', (() => { try { return !!JSON.parse(trimmed).pick; } catch { return false; } })(), true]);
+  checks.push(['json purity parses whole stdout', (() => { try { return !!parseRouteJSON(trimmed).pick; } catch { return false; } })(), true]);
   checks.push(['json purity is one line', trimmed.split('\n').length, 1]);
   checks.push(['json purity braces', trimmed.startsWith('{') && trimmed.endsWith('}'), true]);
   const bad = checks.map(([label, got, want], i) => (JSON.stringify(got) === JSON.stringify(want) ? null : `${i} ${label} (${JSON.stringify(got)} != ${JSON.stringify(want)})`)).filter(Boolean);
@@ -1352,7 +1352,7 @@ for (const [sc, args] of ERRORS) {
   const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, QUOTA_CACHE: cache, CODEX_ACCOUNTS: profiles,
     ROUTE_LOG_FILE: path.join(tmp, 'empty-route-log'), QUOTA_LOG_FILE: history, ROUTE_LOG: '0', QUOTA_LOG: '0', TRAE_PROBE: '0' };
   const review = path.join(path.dirname(ROUTE), 'review-data.mjs');
-  const q = JSON.parse(execFileSync(process.execPath, [review, '--hours', '24', '--json'], { encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'] })).quota;
+  const q = parseRouteJSON(execFileSync(process.execPath, [review, '--hours', '24', '--json'], { encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'] })).quota;
   const reset = (who) => q.resets.find((r) => r.who === who);
   const cases = [
     [q.resets.length, 4], [reset('claude')?.kind, 'natural reset'], [reset('claude')?.unused, 1],
@@ -1402,7 +1402,7 @@ for (const [sc, args] of ERRORS) {
   fs.writeFileSync(history, samples.map((r) => JSON.stringify(r)).join('\n') + '\nnot-json\n');
   const r = (key = 'balanced', args = ['implement', '--impact', 'throwaway'], q = queue(), env = {}) => {
     fs.writeFileSync(path.join(home, 'queue-state.json'), JSON.stringify(q));
-    return JSON.parse(run(key, args, env));
+    return parseRouteJSON(run(key, args, env));
   };
   const cases = [];
   const account = (key, args, q, env) => r(key, args, q, env).pick?.account;
@@ -1458,7 +1458,7 @@ for (const [sc, args] of ERRORS) {
     [burn(samples.map((s) => ({ ...s, ttadk: { ...s.ttadk, used: 90 } }))), null]);
   const log = path.join(home, 'route-log.jsonl');
   r('balanced', ['implement'], queue(), { ...env, ROUTE_LOG: '1', ROUTE_LOG_FILE: log });
-  const logged = JSON.parse(fs.readFileSync(log, 'utf8').trim());
+  const logged = parseRouteJSON(fs.readFileSync(log, 'utf8').trim());
   cases.push([logged.company, 'trae'], [logged.balance.selected, true], [logged.balance.load.percent, 35], [logged.balance?.burn?.beforeReset, true]);
   const bad = cases.map(([got, want], i) => JSON.stringify(got) === JSON.stringify(want) ? null : `${i + 1}: ${JSON.stringify(got)} != ${JSON.stringify(want)}`).filter(Boolean);
   if (bad.length) fail++;
@@ -1476,22 +1476,22 @@ for (const [sc, args] of ERRORS) {
   S.backgroundOnly = { ...S.background, codex: [acc('main', 20, 120), trae] };
   S.backgroundNoModels = { ...S.background, codex: [acc('main', 20, 120), tr({ home, models: ['seed-evolving'] })] };
   S.backgroundGemini = { ...S.background, codex: [tr({ home, live: false, models: ['gemini-3.1-pro-preview'] })] };
-  const r = (args, scenario = 'background', env) => JSON.parse(run(scenario, args, env));
+  const r = (args, scenario = 'background', env) => parseRouteJSON(run(scenario, args, env));
   try {
     for (const args of [['lookup'], ['analysis'], ['implement'], ['docs'], ['research']]) {
       const o = r([...args, '--background']);
       assert.equal(o.pick?.account,args[0]==='research'?'trae':'ttadk'); assert.equal(o.pick?.model,args[0]==='research'?FLASH:'gpt-5.6-terra');
       assert.equal(o.pick?.launcher, 'codex-worker'); assert.equal(o.background, true);
       assert.ok(!o.why.some(n=>/TRAE lane free/.test(n)),'missing Flash load cannot displace ready TTADK');
-      assert.ok(o.notes.some((n)=>/dependencies and build tools|launch as a background task/.test(n)));
-      assert.ok(!o.notes.some((n) => /Above ~300, consider|hub queue position above ~300/.test(n)));
+      assert.ok(o.allNotes.some((n)=>/dependencies and build tools|launch as a background task/.test(n)));
+      assert.ok(!o.allNotes.some((n) => /Above ~300, consider|hub queue position above ~300/.test(n)));
     }
     assert.equal(r(['lookup']).pick?.account, 'ttadk'); // Missing Flash load falls back to the hot account; foreground balancing is vetoed.
     assert.equal(r(['--background', 'lookup']).pick?.account, 'ttadk');
     const gemini = r(['lookup', '--background'], 'backgroundGemini');
     assert.equal(gemini.kind,'blocked');assert.equal(gemini.pick.command,null);assert.ok(!gemini.pick.company);assert.ok(gemini.plan.gates.some(g=>g.kind==='personal-quota'));
-    assert.ok(gemini.notes.some((n) => /list --limit 1.*only if unreachable.*global-rules owner/.test(n)));
-    assert.ok(!gemini.notes.some((n) => /twice what the task should take|codex exec still works/.test(n)));
+    assert.ok(gemini.allNotes.some((n) => /list --limit 1.*only if unreachable.*global-rules owner/.test(n)));
+    assert.ok(!gemini.allNotes.some((n) => /twice what the task should take|codex exec still works/.test(n)));
     assert.equal(r(['implement'], 'backgroundOnly').pick?.model, SOL); // Sol's hot load does not establish Flash congestion; its free bucket remains usable when TTADK is out.
     assert.equal(r(['implement', '--background'], 'backgroundOnly').pick?.model, FLASH);
     assert.equal(r(['lookup','--background','--security']).pick?.model,'gpt-5.6-terra');
@@ -1527,7 +1527,7 @@ for (const [sc, args] of ERRORS) {
     }
     const log = path.join(home, 'routes.jsonl');
     r(['lookup', '--background', '--project', 'p', '--name', 'nightly'], 'background', { ROUTE_LOG: '1', ROUTE_LOG_FILE: log });
-    const logged = JSON.parse(fs.readFileSync(log, 'utf8'));
+    const logged = parseRouteJSON(fs.readFileSync(log, 'utf8'));
     assert.equal(logged.background, true); assert.equal(logged.pick?.account, 'ttadk');
     console.log('ok   background lane: depletion, congestion, security, exclusions, launch, log and company-only escalation');
   } catch (e) { fail++; console.log(`FAIL background lane: ${e.stack}`); }
@@ -1544,7 +1544,7 @@ for (const [sc, args] of ERRORS) {
     S.backgroundOrder = { claude: cl(10, 120), codex: [acc('main', 20, 120), tr({ home, models,
       modelIds: Object.fromEntries(models.map((id) => [id, id])), quota: daily === null ? null : { daily }, ...extra })] };
   };
-  const r = (args = ['analysis']) => JSON.parse(run('backgroundOrder', [...args, '--background']));
+  const r = (args = ['analysis']) => parseRouteJSON(run('backgroundOrder', [...args, '--background']));
   const cases = [
     [{ ...active, [SOL]: bucket(true) }, ['analysis'], FLASH, 2],
     [{ ...active, [ASTRA]: bucket(true) }, ['analysis'], FLASH, 2],
@@ -1609,7 +1609,7 @@ for (const [sc, args] of ERRORS) {
     scenario({ ...active, [SOL]: bucket(true) });assert.ok(r(args).pick);assert.ok(!r(args).plan.reasons?.some(p=>p.code==='PREVIOUS_ATTEMPT_UNKNOWN'));
     // Fallback service code still requires review; sensitive acceptance keeps the stronger family.
     scenario(active);
-    assert.ok(r(['implement']).notes.some((n) => /no review/.test(n)));
+    assert.ok(r(['implement']).allNotes.some((n) => /no review/.test(n)));
     const reviewed = r(['review', '--author', 'codex', '--impact', 'release']);
     assert.ok(!reviewed.pick?.model.startsWith('deepseek'));
     assert.ok(!reviewed.secondOpinion?.model.startsWith('deepseek'));
@@ -1637,7 +1637,7 @@ for (const [sc, args] of ERRORS) {
       gpt: { t: now, position: queue, state: queue>0?'queued':'ready' }, deepseek: { t: now, position: queue, state: queue>0?'queued':'ready' },
     }));
     S.bucketFreeGPT = { claude: cl(10, 120), codex: [acc('main', 20, 120), ...(company ? [tt({ models: [SOL] })] : []), trae] };
-    return JSON.parse(run('bucketFreeGPT', args, env));
+    return parseRouteJSON(run('bucketFreeGPT', args, env));
   };
   try {
     for (const cat of ['lookup', 'extract', 'draft']) {
@@ -1712,7 +1712,7 @@ for (const [sc, args] of ERRORS) {
     assert.equal(r(['lookup'], { extra: { home: pausedHome } }).pick?.model, FLASH);
     const log = path.join(home, 'routes.jsonl');
     r(['lookup', '--project', 'p', '--name', 'free-gpt'], { env: { ROUTE_LOG: '1', ROUTE_LOG_FILE: log } });
-    const logged = JSON.parse(fs.readFileSync(log, 'utf8').trim());
+    const logged = parseRouteJSON(fs.readFileSync(log, 'utf8').trim());
     assert.equal(logged.company, 'trae'); assert.equal(logged.pick?.model, TERRA56); assert.equal(logged.balance.bucketFree, true);
     console.log('ok   bucket-free TRAE GPT: cheap/background preference, quota, mapping, security, vision, balancing, tiers and pauses');
   } catch (e) { fail++; console.log(`FAIL bucket-free TRAE GPT: ${e.stack}`); }
@@ -1726,7 +1726,7 @@ for (const [sc, args] of ERRORS) {
   const r = (args, { models = [GPT55], daily = active, sampledAt = now, company = false } = {}) => {
     S.actualPersonalQuota = { claude: cl(10, 120), codex: [acc('main', 20, 120), ...(company ? [tt()] : []),
       tr({ home, models, quota: { daily, sampledAt } })] };
-    return JSON.parse(run('actualPersonalQuota', args));
+    return parseRouteJSON(run('actualPersonalQuota', args));
   };
   const gated = (o) => o.needsUserOK.some((n) => n.startsWith('personal quota:'));
   try {
@@ -1802,7 +1802,7 @@ for (const [sc, args] of ERRORS) {
   // Kimi is named for TTADK only: a TRAE-listed Kimi must not jump ahead of DeepSeek.
   S.advTraeKimi = { claude: cl(10, 120), codex: [acc('main', 20, 120), tt(out), tr({ models: ['gpt-6.1-sol', KIMI, FLASH], modelIds: {} })] };
   S.advNone = { claude: cl(10, 120), codex: [acc('main', 20, 120), tt(out), tr()] };
-  const o = (sc, args, env) => JSON.parse(run(sc, args, env));
+  const o = (sc, args, env) => parseRouteJSON(run(sc, args, env));
   const pick = (sc, args) => { const r = o(sc, args); return r.deferred ? 'DEFER' : `${r.pick.vendor} ${r.pick?.model} ${r.pick?.effort} @${r.pick?.account ?? '-'}`; };
   const second = (sc, args) => { const s = o(sc, args).secondOpinion; return s ? `${s.model} ${s.effort} @${s.account}` : null; };
   const gated = (sc, args) => o(sc, args).needsUserOK.some((n) => /^personal quota:/.test(n));
@@ -1906,7 +1906,7 @@ for (const [sc, args] of ERRORS) {
   try {
     const log = path.join(tmp, 'adv-route-log.jsonl');
     o('advBoth', ['review-high', '--security', '--project', 'p', '--name', 'adv-1'], { ROUTE_LOG: '1', ROUTE_LOG_FILE: log });
-    const rec = JSON.parse(fs.readFileSync(log, 'utf8').trim());
+    const rec = parseRouteJSON(fs.readFileSync(log, 'utf8').trim());
     const ok = rec.adversarial === true && rec.security === true && rec.pick?.model === KIMI && rec.second.model === FLASH;
     if (!ok) fail++;
     console.log(`${ok ? 'ok  ' : 'FAIL'} adversarial route log records flag, Kimi pick and DeepSeek second`);
@@ -1916,16 +1916,16 @@ for (const [sc, args] of ERRORS) {
 // review/review-high/second-opinion. It keeps ordinary security routing (TRAE GPT excluded, TTADK GPT allowed)
 // instead of the adversarial lane; without it, --security reviews stay adversarial. Invalid contexts are usage errors.
 {
-  const o = (sc, args, overrides) => JSON.parse(run(sc, args, overrides));
+  const o = (sc, args, overrides) => parseRouteJSON(run(sc, args, overrides));
   const pick = (sc, args) => { const r = o(sc, args); return r.deferred ? 'DEFER' : `${r.pick.vendor} ${r.pick?.model} ${r.pick?.effort} @${r.pick?.account ?? '-'}`; };
   try {
     const tt = o('ttFresh', ['review-high', '--security', '--defensive']);
     assert.equal(pick('ttFresh', ['review-high', '--security', '--defensive']), 'codex gpt-6.1-sol xhigh @ttadk');
     assert.equal(tt.security, true); assert.equal(tt.defensive, true); assert.equal(tt.adversarial, false);
-    assert.ok(!tt.notes.some((n) => /adversarial second reviewer/.test(n)));
-    assert.ok(tt.notes.some((n) => /defensive confirmation \(--defensive\).*only the rule to hold and its acceptance conditions.*no bypass description/.test(n)));
-    assert.ok(tt.notes.some((n) => /cyber-policy block.*do not retry that thread.*do not resend it to any GPT account.*--adversarial.*Kimi-K3 plus a DeepSeek-V4\.1-Flash second reviewer/.test(n)));
-    assert.ok(tt.notes.some((n) => /whichever side reproduces it with an executable test/.test(n)));
+    assert.ok(!tt.allNotes.some((n) => /adversarial second reviewer/.test(n)));
+    assert.ok(tt.allNotes.some((n) => /defensive confirmation \(--defensive\).*only the rule to hold and its acceptance conditions.*no bypass description/.test(n)));
+    assert.ok(tt.allNotes.some((n) => /cyber-policy block.*do not retry that thread.*do not resend it to any GPT account.*--adversarial.*Kimi-K3 plus a DeepSeek-V4\.1-Flash second reviewer/.test(n)));
+    assert.ok(tt.allNotes.some((n) => /whichever side reproduces it with an executable test/.test(n)));
     assert.ok(tt.why.join(' ').includes('defensive confirmation'));
     // Without --defensive the same row stays adversarial by default: no GPT, Claude behind the personal-quota gate.
     const defaultAdversarial = o('ttFresh', ['review-high', '--security']);
@@ -1951,7 +1951,7 @@ for (const [sc, args] of ERRORS) {
   try {
     const log = path.join(tmp, 'def-route-log.jsonl');
     o('ttFresh', ['review-high', '--security', '--defensive', '--project', 'p', '--name', 'def-1'], { ROUTE_LOG: '1', ROUTE_LOG_FILE: log });
-    const rec = JSON.parse(fs.readFileSync(log, 'utf8').trim());
+    const rec = parseRouteJSON(fs.readFileSync(log, 'utf8').trim());
     const ok = rec.defensive === true && rec.security === true && rec.adversarial === false && rec.pick?.model === 'gpt-6.1-sol';
     if (!ok) fail++;
     console.log(`${ok ? 'ok  ' : 'FAIL'} defensive route log records the flag, TTADK GPT and no adversarial lane`);

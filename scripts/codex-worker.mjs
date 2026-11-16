@@ -56,7 +56,7 @@ import { runWorkerTalkback, createTalkbackRelay } from './lib/worker-talkback.mj
 import { noteFailure, noteSuccess, notePolicyRestriction, rememberThreadModel, threadModel, probeResult, failureKind } from './lib/trae-health.mjs';
 import { createQueueRecorder } from './lib/company-load.mjs';
 import { saveQueue, readQueue } from './lib/worker-queue.mjs';
-import { loadDigest, auditLaunch, rulesLog, rulesShared } from './lib/global-rules.mjs';
+import { loadDigest, workerInstructions, auditLaunch, rulesLog, rulesShared } from './lib/global-rules.mjs';
 import { isPolicyBlock, policyBlockRecord, appendPolicyBlock, policyBlockAction } from './lib/policy-block.mjs';
 import { runHubForeground, hubListReachable } from './lib/hub-foreground.mjs';
 import { parseRouteArgs, routeFlag, rerouteWorker, turnHasWork } from './lib/worker-reroute.mjs';
@@ -1243,7 +1243,7 @@ try {
     const digest = loadDigest();
     const th = await call('thread/start', {
       cwd: path.resolve(opts.cwd), model: opts.model, sandbox: opts.sandbox, approvalPolicy: APPROVAL_POLICY,
-      developerInstructions: [browserHowTo, `Global worker rules ${digest.version}\n${digest.worker}`].filter(Boolean).join('\n'),
+      developerInstructions: [browserHowTo, workerInstructions(digest)].filter(Boolean).join('\n'),
       ...(browserThread && !TRAE_EXTENSION_BROWSER ? { approvalsReviewer: 'user' } : {}),
       ...(browserConfig ? { config: browserConfig } : {}),
     });
@@ -1255,7 +1255,7 @@ try {
     if (PROF?.kind === 'trae') rememberThreadModel(PROF.home, threadId, opts.model);
     if (opts.name) await call('thread/name/set', { threadId, name: opts.name }).catch(() => {});
     const talkback = talkbackContext(threadId);
-    const instructions = [browserHowTo, `Global worker rules ${digest.version}\n${digest.worker}`, talkback.instructions].filter(Boolean).join('\n');
+    const instructions = [browserHowTo, workerInstructions(digest), talkback.instructions].filter(Boolean).join('\n');
     const configured = await call('thread/resume', { threadId, config: { ...browserConfig, ...talkback.config }, developerInstructions: instructions }).catch(() => null);
     markOutputStart();
     const ts = await call('turn/start', {
@@ -1269,7 +1269,7 @@ try {
     const config = { ...talkback.config, ...(TRAE_EXTENSION_BROWSER ? { mcp_servers: { playwright: TRAE_PLAYWRIGHT_SERVER } } : {}) };
     const resumedDigest=loadDigest();
     const resumed = await call('thread/resume', { threadId: opts.thread, model: opts.model, config,
-      developerInstructions:`Global worker rules ${resumedDigest.version}\n${resumedDigest.worker}\n${talkback.instructions}` }).catch(() => null);
+      developerInstructions:`${workerInstructions(resumedDigest)}\n${talkback.instructions}` }).catch(() => null);
     sessionPath = resumed?.thread?.path ?? null;
     auditStart(opts.model??resumed?.thread?.model,opts.sandbox??resumed?.thread?.sandbox??undefined,{thread:opts.thread,name:resumed?.thread?.name??undefined});
     tracker?.set({ mayRun: true });
