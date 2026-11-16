@@ -144,6 +144,12 @@ if (PROF?.kind === 'trae' && typeof opts.model === 'string') opts.model = PROF.m
 tracker?.set({ model: opts.model ?? null, requestedModel: REQUESTED_MODEL, effectiveModel: opts.model ?? null,
   actualModel: null, actualModelSource: null, delegatedModels: [] });
 const text = pos.join(' ');
+// A read-only worker cannot create files: its deliverable is the final message (--out). Warn when the prompt asks for another file.
+if (cmd === 'start' && opts.sandbox === 'read-only') {
+  const named = [...new Set((text.match(/\b(?:write|save|create|put|output)\b[^.\n]{0,60}?\b([\w./-]+\.(?:md|txt|json|csv|html))\b/gi) ?? [])
+    .map(m => m.match(/([\w./-]+\.(?:md|txt|json|csv|html))\b$/i)?.[1]).filter(Boolean))].filter(f => !opts.out || path.basename(f) !== path.basename(String(opts.out)));
+  if (named.length) process.stderr.write(`read-only-output: the prompt asks for ${named.join(', ')} but a read-only worker cannot write files; its final message goes to --out. Reword the brief or start with a writable sandbox.\n`);
+}
 const die = (msg, code = 2) => { process.stderr.write(`codex-worker: ${msg}\n`); process.exit(code); };
 if (opts.owner !== undefined && !validOwner(opts.owner)) die('--owner needs a public session ID');
 if (!cmd) die('usage: codex-worker [--account NAME] hub|start|turn|wait|steer|interrupt|status|list|quota|usage|reset-credits|reset-credit-use|accounts|account-add ...');
@@ -255,7 +261,7 @@ const talkbackContext = (thread) => {
     + `To send the orchestrator a note without stopping (kinds: risk, scope, progress, info):\nRULES_SHARED=${shellQuote(env.RULES_SHARED)} ${shellQuote(process.execPath)} ${shellQuote(fileURLToPath(import.meta.url))} --account ${metadata.account} note --thread ${thread} --kind info "<text>"\n`
     + `To ask the orchestrator and wait for the answer (exit 3 = timeout, proceed with default; exit 4 = timeout without default):\nRULES_SHARED=${shellQuote(env.RULES_SHARED)} ${shellQuote(process.execPath)} ${shellQuote(fileURLToPath(import.meta.url))} --account ${metadata.account} ask --thread ${thread} --timeout-min 20 --default "<what you will do if nobody answers>" "<question>"\n`
     + 'In read-only/workspace-write, denied shared writes are relayed through your command output without widening the sandbox. If ask exits 6, run the exact ask --await <id> command printed on stderr; it only reads, preserves the original question/default/deadline and does not ask again.\n'
-    + 'Use ask only for a decision the brief does not settle that changes your next action; state --default. Use note for a discovered risk, scope change or milestone the orchestrator needs before completion, never routine progress. A blocker needing the user still ends the turn BLOCKED.' };
+    + 'Use ask only for a decision the brief does not settle that changes your next action; state --default. Use note only for a risk, a scope change, a decision you made, a landed commit, or a finding that changes someone else\'s work, never routine progress, tool hiccups (probe timeouts, missing metadata) or status. A blocker needing the user still ends the turn BLOCKED.' };
 };
 // Check metadata only: --out is a final-message destination, sometimes also mistakenly
 // named as a worker deliverable. Never inspect the contents to decide whether it changed.

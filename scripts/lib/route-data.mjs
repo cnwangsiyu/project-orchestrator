@@ -217,7 +217,8 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
       retryAssumption = `No actual launch history found; assumed ${inferred.length} failed browser channel(s) from the cached initial route for --failures ${parsed.failures}.`;
     }
     return {task,snapshot,data,profiles,routeLog,now,root,retryAssumption,cacheAgeMs,refreshRequired:live&&!!flags.fresh,
-      trustedCwd: flags['trusted-cwd'] ? path.resolve(flags['trusted-cwd']) : projectConfig.root ?? projectConfig.projectRoot ?? null};
+      trustedCwd: flags['trusted-cwd'] ? path.resolve(flags['trusted-cwd']) : projectConfig.root ?? projectConfig.projectRoot ?? null,
+      slowTests: Array.isArray(projectConfig.slowTests) ? projectConfig.slowTests : []};
   };
   if (env.ROUTE_SNAPSHOT_FILE) return finish(createSnapshot(injectedSnapshot, { now }));
   const at = data?.checkedAt, globalStamp = (value, sampledAt = at, maxAgeMs = 600000) => ({ status: 'KNOWN', value, sampledAt, receivedAt: now, maxAgeMs, source: 'public-status-cache' });

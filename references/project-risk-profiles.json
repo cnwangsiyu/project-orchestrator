@@ -26,7 +26,22 @@
       "B": "SSO admission/employee checks",
       "C": "real deletion/retention cleanup and quota charge/refund accounting",
       "A": "future external production release at scale"
-    }
+    },
+    "slowTests": [
+      {
+        "file": "apps/app-ui/test/send-lifecycle.test.ts",
+        "cost": "4 exhaustive cases, single core, about 35-40 min",
+        "runWhen": [
+          "apps/app-ui/src/agent/session.ts",
+          "apps/app-ui/src/tasks/send-outbox.ts",
+          "apps/app-ui/src/vibe/offline-send.ts",
+          "apps/app-ui/web/saved-record-owner.ts",
+          "apps/app-ui/src/host/bridge.ts",
+          "apps/app-ui/test/saved-request-*.ts"
+        ]
+      }
+    ],
+    "slowTestsNote": "Reported by the VAK orchestrator 2026-11-16 (BC-59); it appends new entries through the rules owner."
   },
   "vesdk-mainline": {
     "profile": "sdk-mainline",
