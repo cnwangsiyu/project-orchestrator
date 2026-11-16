@@ -118,6 +118,13 @@ export function pPreviousFloor(t, s, c) {
   if (t.floor.relationVersion !== s.qualityRelationVersion && relevant.length) return deny('pPreviousFloor', 'QUALITY_RELATION_UNKNOWN', 'The pinned quality relation is unavailable.', c);
   if (array(t.floor.previousAttemptIds).some((id) => !relevant.some((a) => a.id === id)) || relevant.some((a) => a.actualStatus !== 'KNOWN' || !a.actual))
     return deny('pPreviousFloor', 'PREVIOUS_ATTEMPT_UNKNOWN', 'An actual prior tuple is unknown.', c);
+  // Light quality failures promote to the Sol retry, even when a weaker normal
+  // model has a free lane. More effort on the failed light model is not this rung.
+  const lightRetry = ['lookup', 'extract', 'draft'].includes(t.category) || t.category === 'build-run' && t.env === 'test';
+  if (lightRetry && relevant.some(a => ['quality', 'spec', 'process'].includes(a.failureKind)
+    && ['gpt-5.6-terra', 'gpt-5.5'].includes(modelId(a.actual?.modelId)))
+    && c.family === 'gpt' && !['gpt-6.1-sol', 'gpt-6-astra'].includes(c.modelId))
+    return deny('pPreviousFloor', 'RETRY_LIGHT_REQUIRES_SOL', 'A failed light quality rung requires the Sol retry or a stronger model.', c);
   for (const a of relevant) {
     // A failed tool says nothing about answer quality across model families.
     const toolSwitch = a.failureKind === 'tool' && ['browser','ui-browser','computer-use'].includes(t.category)

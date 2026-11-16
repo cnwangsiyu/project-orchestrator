@@ -259,3 +259,5 @@ handling repeated event IDs must remain harmless. A completed stdout write is no
 Event/ack locks with a dead writer PID recover immediately; unmarked locks recover after 30 seconds. No permanent daemon or guaranteed wake after process death
 is claimed. The user still must arm the watcher as requested; the loop guard intentionally cannot force it forever.
 Unattended background time limits can stop a watcher; re-arm after that notification.
+
+Stop-hook follower coverage uses the live follower's public record: thread, launching owner, background task ID (`CLAUDE_CODE_TASK_ID`) or recorded process ancestry matched to the background registry. Wrapper commands such as `bash <task>/launch.sh` and direct `turn` commands count when that identity is established. Command text alone is insufficient; missing identity still blocks. A watcher silently skips events acknowledged by the Stop hook or another consumer, stays armed, and waits for a fresh undelivered event.

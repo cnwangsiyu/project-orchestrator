@@ -12,7 +12,7 @@ const scripts = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rules-auto-'));
 const shared = path.join(tmp, '_shared'), ledgerRoot = path.join(tmp, 'ledgers'), digestFile = path.join(tmp, 'digest.md');
 const stateFile = path.join(shared, 'rules-seen.json');
-const env = { ...process.env, HOME: tmp, RULES_SHARED: shared, RULES_DIGEST: digestFile, RULES_LEDGER_ROOT: ledgerRoot,
+const env = { ...process.env, NODE_OPTIONS: `--import=${path.join(scripts, 'test/fixtures/hook-autoupdate.mjs')}`, HOME: tmp, RULES_SHARED: shared, RULES_DIGEST: digestFile, RULES_LEDGER_ROOT: ledgerRoot,
   CODEX_WORKER_THREAD: '', CODEX_WORKER_ACCOUNT: '', CLAUDE_ENV_FILE: '' };
 const v1 = '2026-11-16.9', v2 = '2026-11-16.10', v3 = '2026-11-16.11';
 const digest = (version, extra = '') => `# Global Rules\nversion: ${version}\n\n## Changes In This Version\n- Prior change.\n\n## Orchestrator Rules\n- Unchanged orchestrator rule.\n\n## Worker Rules\n- Unchanged worker rule.\n${extra}\n## Details\nDetails link.\n`;

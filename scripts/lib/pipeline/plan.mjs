@@ -45,9 +45,9 @@ export function renderPlan(plan, context = null) {
   }
   if (plan.kind === 'launch') {
     const { candidate: c, estimate: e } = plan.primary;
-    notes.push(`${c.modelId}/${c.effort} on ${c.accountId}; estimated completion ${e.completionMin} min (${e.confidence}, ${e.basis}).`);
+    notes.push(`${c.modelId}/${c.effort} on ${c.accountId}; estimated completion ~${Math.round(e.completionMin)} min (${e.confidence}, ${e.basis}).`);
     notes.push(...e.uncertainty.map((r) => r.text));
-    if (e.patienceMin !== null) notes.push(`Queue patience: ${e.patienceMin} min; cancel/reconcile before any replacement.`);
+    if (e.patienceMin !== null) notes.push(`Queue patience: ${Math.round(e.patienceMin)} min; cancel/reconcile before any replacement.`);
   } else if (plan.kind === 'defer') tellUser.push(`${plan.reason.text} Owner ${plan.task.owner} must record a ${plan.trigger} wake and replan.`);
   else tellUser.push(...plan.reasons.map((r) => `${r.code}: ${r.text}`));
   const view = { notes: unique(notes), needsOK: unique(needsOK), tellUser: unique(tellUser), command: plan.kind === 'launch' ? plan.primary.argv.map(quote).join(' ') : null };

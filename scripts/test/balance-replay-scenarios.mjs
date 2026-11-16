@@ -42,6 +42,7 @@ const run = (args, { t = now, daily = { [SOL]: bucket(0), [ASTRA]: bucket(.6), [
     models, modelIds: Object.fromEntries(models.map((id) => [id, id.toUpperCase()])), windows: [],
     load: loads, quota: daily === null ? null : { sampledAt, daily } };
   fs.writeFileSync(path.join(traeHome, 'queue-state.json'), JSON.stringify(queue));
+  fs.writeFileSync(path.join(traeHome, 'lane-state.json'), JSON.stringify(queue.lanes ?? {}));
   const cache = path.join(tmp, 'cache.json');
   fs.writeFileSync(cache, JSON.stringify({ checkedAt: t, claude: null, codexAccounts: [...(company ? [tt] : []), trae], errors: {}, history: {} }));
   const routeLog = path.join(tmp, 'routes.jsonl');
@@ -55,14 +56,14 @@ const run = (args, { t = now, daily = { [SOL]: bucket(0), [ASTRA]: bucket(.6), [
 };
 
 try {
-  // Empty/stale queue data cannot block fresh low load; actual high positions still veto the family.
+  // Empty/stale queue data does not prove readiness; quality-first keeps free TTADK Sol.
   for (const queue of [{}, { gpt: { t: now - 31 * min, position: 9999 } }, { gpt: { t: now, state: 'waiting' } }]) {
     const r = run(['implement'], { queue });
-    assert.equal(r.pick.account, 'trae'); assert.equal(r.pick.model, SOL56);
-    assert.equal(r.balance.congestion, 'low');
+    assert.equal(r.pick.account, 'ttadk'); assert.equal(r.pick.model, SOL);
+    assert.equal(r.balance.selected, false, 'no downgrade to spend a fresher bucket');
   }
   const queued = run(['implement'], { queue: { gpt: { t: now, position: 301 } } });
-  assert.equal(queued.pick.model, FLASH); assert.equal(queued.balance.load.source, 'account');
+  assert.equal(queued.pick.model, SOL); assert.equal(queued.pick.account, 'ttadk', 'congested TRAE uses the same model on TTADK');
   for (const queue of [{ gpt: { t: now, position: 301 } },
     { gpt: { t: now, position: 0, state: 'ready', high: { t: now - 10 * min, position: 3100 } } }]) {
     const r = run(['implement-hard'], { queue, logged: true });
@@ -70,7 +71,7 @@ try {
     assert.ok(r.balance.candidates.every((c) => c.reasons.includes('family queue above 300')));
     assert.deepEqual(r.logged.balance.candidates, r.balance.candidates);
   }
-  assert.equal(run(['implement-hard'], { queue: { gpt: { t: now, position: 300 } } }).pick.model, ASTRA);
+  assert.equal(run(['implement-hard'], { queue: { gpt: { t: now, position: 300 } } }).pick.model, SOL);
 
   // Direct load takes precedence. Missing load falls back within the family, then across the account.
   const family = modelLoad({ [SOL]: load(24), [SOL56]: load(45), [FLASH]: load(59) }, ASTRA, now);
@@ -80,66 +81,74 @@ try {
   assert.equal(modelLoad({ [SOL]: load(90, now + 1) }, ASTRA, now), null);
   assert.equal(modelLoad({ [SOL]: load(90), [ASTRA]: load(24) }, ASTRA, now).percent, 24);
   const hard = run(['implement-hard']);
-  assert.equal(hard.pick.model, ASTRA); assert.equal(hard.balance.load.source, 'family');
-  assert.equal(run(['implement-hard'], { loads: { [SOL]: load(20), [SOL56]: load(60) } }).pick.account, 'ttadk');
-  assert.equal(run(['implement-hard'], { loads: {} }).pick.account, 'ttadk');
+  assert.equal(hard.pick.model, ASTRA); assert.equal(hard.balance.astraUnitsEvidence.used, 40, 'Astra uses its own units rather than sibling load');
+  assert.equal(run(['implement-hard'], { loads: { [SOL]: load(20), [SOL56]: load(60) } }).pick.account, 'trae');
+  assert.equal(run(['implement-hard'], { loads: {} }).pick.account, 'trae');
 
-  // Walk candidates in tier order after reserve, load, catalog, pause or exclusion misses.
-  assert.deepEqual(run(['implement']).balance.candidates.map((c) => c.model), [SOL, SOL56]);
+  // Walk diagnostics in tier order; same-model TTADK wins after TRAE readiness, catalog, pause or exclusion misses.
+  assert.deepEqual(run(['implement']).balance.candidates.map((c) => c.model), [SOL, SOL56, TERRA, FLASH]);
   const fresh = { [SOL]: bucket(.99), [ASTRA]: bucket(.6), [SOL56]: bucket(.94) };
   assert.equal(run(['implement'], { daily: fresh }).pick.model, SOL);
-  assert.equal(run(['implement'], { loads: { [SOL]: load(61), [SOL56]: load(35) }, daily: fresh }).pick.model, SOL56);
-  assert.equal(run(['implement'], { daily: { ...fresh, [SOL]: bucket(.149) } }).pick.model, SOL56);
+  assert.equal(run(['implement'], { loads: { [SOL]: load(61), [SOL56]: load(35) }, daily: fresh }).pick.model, SOL);
+  assert.equal(run(['implement'], { daily: { ...fresh, [SOL]: bucket(.149) } }).pick.model, SOL);
   assert.equal(run(['implement'], { daily: { ...fresh, [SOL]: bucket(.15) } }).pick.model, SOL);
-  assert.equal(run(['implement'], { daily: { ...fresh, [SOL]: bucket(.99, now, now) } }).pick.model, SOL56);
+  assert.equal(run(['implement'], { daily: { ...fresh, [SOL]: bucket(.99, now, now) } }).pick.model, SOL);
   assert.equal(run(['implement'], { daily: { ...fresh, [SOL]: bucket(.99, now, now + h) }, sampledAt: now - 30 * min }).pick.model, SOL);
   const stale = run(['implement'], { daily: fresh, sampledAt: now - 30 * min - 1 });
   assert.equal(stale.pick.account, 'ttadk'); assert.ok(stale.balance.candidates.every((c) => !c.reserveOK));
   assert.ok(stale.balance.candidates[0].reasons.some((s) => /stale/.test(s)));
-  assert.equal(run(['implement', '--exclude-model', SOL56]).pick.model, TERRA);
-  assert.equal(run(['implement', '--exclude-model', `${SOL56},${TERRA}`]).pick.model, FLASH);
-  assert.equal(run(['implement'], { models: ids.filter((id) => id !== SOL56) }).pick.model, TERRA);
+  assert.equal(run(['implement', '--exclude-model', SOL56]).pick.model, SOL);
+  assert.equal(run(['implement', '--exclude-model', `${SOL56},${TERRA}`]).pick.model, SOL);
+  assert.equal(run(['implement'], { models: ids.filter((id) => id !== SOL56) }).pick.model, SOL);
   const paused = path.join(tmp, 'paused'); fs.mkdirSync(paused);
   noteFailure(paused, `-32600: model \`${SOL56}\` is unavailable because its metadata could not be resolved`, now, SOL56);
   const pausePick = run(['implement'], { traeHome: paused });
-  assert.equal(pausePick.pick.model, TERRA); assert.ok(pausePick.balance.candidates[1].reasons.includes('model paused'));
-  assert.equal(run(['lookup'], { daily: fresh }).pick.model, TERRA);
-  assert.equal(run(['lookup'], { daily: { ...fresh, [TERRA]: bucket(.75) } }).pick.model, TERRA);
-  assert.equal(run(['lookup', '--exclude-model', TERRA]).pick.model, GPT55);
-  assert.equal(run(['lookup', '--exclude-model', `${TERRA},${GPT55}`]).pick.model, FLASH);
-  assert.equal(run(['lookup'], { daily: { ...fresh, [TERRA]: bucket(.14) } }).pick.model, GPT55);
-  assert.equal(run(['lookup'], { models: [SOL, ASTRA], daily: fresh }).pick.account, 'ttadk');
+  assert.equal(pausePick.pick.model, SOL); assert.ok(pausePick.balance.candidates[1].reasons.includes('model paused'));
+  assert.equal(run(['lookup'], { daily: fresh }).pick.model, SOL);
+  assert.equal(run(['lookup'], { daily: { ...fresh, [TERRA]: bucket(.75) } }).pick.model, SOL);
+  assert.equal(run(['lookup', '--exclude-model', TERRA]).pick.model, SOL);
+  assert.equal(run(['lookup', '--exclude-model', `${TERRA},${GPT55}`]).pick.model, SOL);
+  assert.equal(run(['lookup'], { daily: { ...fresh, [TERRA]: bucket(.14) } }).pick.model, SOL);
+  assert.equal(run(['lookup'], { models: [SOL, ASTRA], daily: fresh }).pick.account, 'trae');
   const noHard = run(['implement-hard'], { daily: { ...fresh, [SOL]: bucket(0), [ASTRA]: bucket(.14) } });
-  assert.equal(noHard.pick.account, 'ttadk'); assert.deepEqual(noHard.balance.candidates.map((c) => c.model), [SOL, ASTRA]);
-  assert.match(noHard.why.join('\n'), /stays on TTADK: no hard-tier/);
+  assert.equal(noHard.pick.account, 'trae'); assert.deepEqual(noHard.balance.candidates.map((c) => c.model), [ASTRA]);
+  assert.match(noHard.why.join('\n'), /Astra load not published; units 86\/100/);
   const countRetry=run(['implement','--failures','1']);
   assert.equal(countRetry.blocked,false,'count-only retry uses the first-rung assumption');
   assert.ok(countRetry.pick.company&&countRetry.pick.command);
   assert.match(countRetry.why.join('\n'),/assumed first category ladder rung/);
 
-  // Projection sends every eligible normal/light dispatch; when TTADK will last, only light/low/expiry triggers move it.
+  // Burn projection alone never steps down the quality ladder; unknown TRAE readiness keeps TTADK Sol.
   for (const category of ['implement', 'analysis', 'review', 'research', 'docs', 'lookup', 'extract', 'draft']) {
-    const r = run([category]); assert.equal(r.pick.account, 'trae', category);
-    assert.ok(r.balance.projectedOut); assert.ok(!r.needsUserOK.some((s) => /^personal quota:/.test(s)));
+    const r = run([category]); assert.equal(r.pick.account, 'ttadk', category);
+    assert.equal(r.balance.selected, false, 'projection does not establish free capacity'); assert.ok(!r.needsUserOK.some((s) => /^personal quota:/.test(s)));
     const lasts = run([category], { projected: false });
-    assert.equal(lasts.pick.account, ['lookup', 'extract', 'draft'].includes(category) ? 'trae' : 'ttadk', category);
-    if (lasts.pick.account === 'ttadk') assert.match(lasts.why.join('\n'), /stays on TTADK:.*no balancing trigger/);
+    assert.equal(lasts.pick.account, 'ttadk', category);
+    if (lasts.pick.account === 'ttadk') assert.match(lasts.why.join('\n'), /stays on TTADK:.*no demonstrated immediate uncongested TRAE lane/);
   }
-  assert.equal(run(['analysis', '--impact', 'throwaway'], { projected: false }).pick.account, 'trae');
+  assert.equal(run(['analysis', '--impact', 'throwaway'], { projected: false }).pick.account, 'ttadk');
   assert.equal(run(['analysis'], { projected: false, daily: { ...fresh, [SOL]: bucket(.99, now, now + 5 * h) } }).pick.account, 'trae');
-  for (const category of ['implement-hard', 'debug', 'science', 'design', 'review-high']) assert.equal(run([category]).pick.model, ASTRA);
+  for (const category of ['implement-hard', 'debug', 'science', 'design', 'review-high']) assert.equal(run([category]).pick.model, category === 'review-high' ? SOL : ASTRA);
   for (const args of [['browser'], ['ui-browser'], ['computer-use','--apps','com.example.calc'], ['build-run'], ['image-read'],
     ['implement', '--device-lease'], ['implement', '--shared-lock'], ['implement-hard', '--security']]) {
     const r=run(args);
     if(args.includes('--device-lease')) assert.equal(r.blocked,true);
     else assert.equal(r.pick.account, 'ttadk', args.join(' '));
   }
-  assert.equal(run(['implement', '--security']).pick.model, FLASH);
+  assert.equal(run(['implement', '--security']).pick.model, SOL);
   assert.equal(run(['implement', '--exclude-account', 'trae']).pick.account, 'ttadk');
   const fallback = run(['implement'], { company: false, queue: { gpt: { t: now, position: 5000 } } });
-  assert.equal(fallback.pick.account, 'trae'); assert.equal(fallback.pick.model, FLASH,'congested GPT priority is not usable priority');
+  assert.equal(fallback.pick.account, 'trae'); assert.equal(fallback.pick.model, SOL,'unknown fallback capacity cannot prove that a lower model is free');
   assert.equal(run(['implement'], { traeHealthy: false }).pick.account, 'ttadk');
 
+  const readyQueue = { gpt: { t: now, state: 'ready', position: 0 }, lanes: { [SOL]: { t: now, state: 'ready', position: 0 } } };
+  const readySol = run(['implement'], { queue: readyQueue });
+  assert.deepEqual([readySol.pick.account, readySol.pick.model], ['trae', SOL]);
+  assert.equal(readySol.balance.freeNow, true, 'fresh direct load plus ready state qualifies depleted Sol');
+  for (const excluded of [SOL56, `${SOL56},${TERRA}`, SOL]) {
+    const pick = run(['implement', '--exclude-model', excluded], { queue: readyQueue });
+    assert.ok(!excluded.split(',').includes(pick.pick.model), 'exclusion safety survives quality-first routing');
+  }
   // Burn crosses the reset boundary only with sufficient recent observations in the same quota period.
   const usage = { used: 330e6, limit: 500e6, resetsAt: now + 18 * h }, account = { name: 'ttadk', usage };
   const sample = (t, used, extra = {}) => ({ t, ttadk: { name: 'ttadk', ...usage, used, ...extra } });
@@ -153,10 +162,10 @@ try {
   assert.equal(balanceFactors({ ttadk: account, model: SOL, trae: { quota: { sampledAt: now, daily: fresh }, load: { [SOL]: load(35) } },
     category: 'implement', stakes: 'normal', now }).eligible, false);
 
-  // Replay each row with balancing factors. The fixture explicitly documents reconstructed missing candidate telemetry.
-  // Security reviews are adversarial and move to DeepSeek-V4.1-Flash on TRAE once TTADK is projected out;
-  // implement-hard --security (row 48) is not adversarial and still stays on TTADK.
-  const stayed = new Set([18, 19, 20, 21, 22, 25, 26, 28, 48, 56]);
+  // Replay reconstructed historical observations under current quality and readiness policy.
+  // Missing per-model readiness cannot establish a free normal lane. Hard Astra can
+  // use its own fresh units; review content and capability filters still apply.
+  const stayed = new Set([18, 20, 21, 22, 25, 26, 27, 28, 30, 33, 34, 35, 37, 39, 40, 42, 43, 48, 50, 51, 53, 55, 56, 59]);
   const before = { ttadk: 0, trae: 0, main: 0 }, after = { ...before }, replay = { ttadk: 0, trae: 0 };
   let changed = 0;
   const solReset = Date.parse('2026-11-13T22:00:00Z');
@@ -180,11 +189,11 @@ try {
     assert.equal(r.pick.account, expected, `evidence row ${row.row}`);
     replay[r.pick.account]++; after[r.pick.account]++;
     if (r.pick.account !== row.account) changed++;
-    if (r.pick.account === 'trae') assert.ok(!daily[r.pick.model]?.depleted, `row ${row.row} must avoid a depleted foreground bucket`);
+    if (r.pick.account === 'trae') assert.ok(!daily[r.pick.model]?.depleted || r.balance.freeNow || r.queuePatienceMin !== null, `row ${row.row} must prove free capacity or bound queue patience`);
   }
   assert.deepEqual(before, { ttadk: 49, trae: 11, main: 2 });
-  assert.deepEqual(replay, { ttadk: 10, trae: 29 });
-  assert.deepEqual(after, { ttadk: 22, trae: 38, main: 2 }); assert.equal(changed, 27);
+  assert.deepEqual(replay, { ttadk: 24, trae: 15 });
+  assert.deepEqual(after, { ttadk: 36, trae: 24, main: 2 }); assert.equal(changed, 13);
   console.log(`PASS reconstructed evidence: 39 replayed rows -> ${replay.ttadk} TTADK / ${replay.trae} TRAE; 23 rows without snapshots retained; total ${after.ttadk} TTADK / ${after.trae} TRAE / ${after.main} personal; ${changed} transfers`);
   console.log('PASS queue independence, load fallback, tier walking, projection split, reserve/freshness, tool exclusions, rejection logs and burn boundaries');
 } finally { fs.rmSync(tmp, { recursive: true, force: true }); }

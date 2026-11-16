@@ -62,6 +62,7 @@ import { runHubForeground, hubListReachable } from './lib/hub-foreground.mjs';
 import { parseRouteArgs, routeFlag, rerouteWorker, turnHasWork } from './lib/worker-reroute.mjs';
 import { inheritedLaunch, saveLaunch, recordLaunchModel } from './lib/worker-launch.mjs';
 import { recordWorkerOutcome, reviewSeat, reviewInstructions } from './lib/worker-outcome.mjs';
+import { sizeLimits, threadSize, freshThreadRoute } from './lib/worker-thread-size.mjs';
 import { modelFamily, modelObservation, rolloutTurnModel } from './lib/worker-model.mjs';
 import { lifecycle, resolveOwner, validOwner, inbox, readEvents, readAck, eventLine, watch, signalExit, appendEvent,
   saveWorkerContext, workerContext, openQuestions, answerQuestion } from './lib/worker-events.mjs';
@@ -86,7 +87,7 @@ const account = ai >= 0 ? argv.splice(ai, 2)[1] : ['note', 'ask'].includes(argv[
 const earlyOpts = {};
 for (let i = 1; i < argv.length; i++) if (argv[i].startsWith('--')) {
   const key = argv[i].slice(2);
-  earlyOpts[key] = key === 'background' || key === 'no-browser-preflight' || (key === 'require-model' && !['on', 'off'].includes(argv[i + 1]))
+  earlyOpts[key] = key === 'force-large' || key === 'background' || key === 'no-browser-preflight' || (key === 'require-model' && !['on', 'off'].includes(argv[i + 1]))
     || argv[i + 1] === undefined || argv[i + 1].startsWith('--') ? true : argv[++i];
 }
 if (argv[0] === 'turn' && typeof earlyOpts.thread === 'string') {
@@ -102,6 +103,17 @@ const tracker = ['start', 'turn', 'wait'].includes(argv[0]) ? lifecycle({ owner:
   mayRun: argv[0] === 'wait' && typeof earlyOpts.thread === 'string',
   outFile: typeof earlyOpts.out === 'string' ? path.resolve(earlyOpts.out) : null,
   logFile: typeof earlyOpts.log === 'string' ? path.resolve(earlyOpts.log) : null }) : null;
+if (tracker) {
+  const ancestors = [process.ppid];
+  try {
+    const parents = new Map(execFileSync('/bin/ps', ['-axo', 'pid=,ppid='], { encoding: 'utf8', timeout: 300 })
+      .trim().split('\n').map(line => line.trim().split(/\s+/).map(Number)));
+    for (let pid = process.ppid; ancestors.length < 32 && parents.get(pid) > 1;) {
+      pid = parents.get(pid); if (ancestors.includes(pid)) break; ancestors.push(pid);
+    }
+  } catch {}
+  tracker.set({ ancestorPids: ancestors });
+}
 // Exit also covers validation/RPC failures before report(). Never read a stale --out file.
 let outcomeTurn = null, outcomeFinal = '', outcomeSkip = false;
 if (tracker) process.on('exit', (exit) => {
@@ -151,6 +163,7 @@ const opts = { ...earlyOpts }; const pos = [];
 for (let i = 0; i < rest.length; i++) {
   if (rest[i] === '--no-browser-preflight') opts['no-browser-preflight'] = true;
   else if (rest[i] === '--wake') opts.wake = true;
+  else if (rest[i] === '--force-large') opts['force-large'] = true;
   else if (rest[i] === '--background') opts.background = true;
   else if (rest[i] === '--require-model' && !['on', 'off'].includes(rest[i + 1])) opts['require-model'] = true;
   else if (rest[i].startsWith('--')) opts[rest[i].slice(2)] = rest[i + 1]?.startsWith('--') || rest[i + 1] === undefined ? true : rest[++i];
@@ -169,6 +182,18 @@ if (cmd === 'start' && opts.sandbox === 'read-only') {
   if (named.length) process.stderr.write(`read-only-output: the prompt asks for ${named.join(', ')} but a read-only worker cannot write files; its final message goes to --out. Reword the brief or start with a writable sandbox.\n`);
 }
 const die = (msg, code = 2) => { process.stderr.write(`codex-worker: ${msg}\n`); process.exit(code); };
+if (cmd === 'turn' && opts.thread && !opts['force-large']) {
+  let limits;
+  try { limits = sizeLimits(opts); } catch (e) { die(e.message, 2); }
+  const size = await threadSize(PROF?.home ?? process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex'), opts.thread);
+  if (size.bytes > limits.bytes || size.inputTokens > limits.tokens) {
+    const args = parseRouteArgs(opts['route-args']);
+    const command = freshThreadRoute(args, path.dirname(fileURLToPath(import.meta.url)));
+    const line = `large-thread: ${opts.thread}: ${(size.bytes / 1024 / 1024).toFixed(2)} MB rollout, ${size.inputTokens} cumulative input tokens; start a fresh thread with a handoff brief. Route with the same arguments and --failure-kind infra:\n${command}${args ? '' : '\nNo saved --route-args: add the original route arguments to this command.'}\nUse --force-large only to bypass this guard.`;
+    tracker?.result('needs-user', { settled: true, mayRun: false, phase: 'thread-size', finalLine: line });
+    die(line, 9);
+  }
+}
 if (opts.owner !== undefined && !validOwner(opts.owner)) die('--owner needs a public session ID');
 if (!cmd) die('usage: codex-worker [--account NAME] hub|start|turn|wait|steer|interrupt|status|list|quota|usage|reset-credits|reset-credit-use|accounts|account-add ...');
 if (cmd === 'note' || cmd === 'ask') {
@@ -834,12 +859,12 @@ const setupAlarm = setupMs ? setTimeout(() => {
   const thread = attemptThreadId ?? opts.thread ?? null;
   const line = `${controlCommand ? `${cmd}-timeout` : 'stalled'}: setup deadline after ${Math.round((Date.now() - setupStarted) / 1000)}s; waiting for ${setupPhase}; thread=${thread ?? '?'}; hub state/cancellation unconfirmed`;
   fs.writeSync(controlCommand ? 2 : 1, line + '\n');
-  const stalled = tracker ?? lifecycle({ owner: opts.owner, name: opts.name ?? thread ?? cmd,
-    account: account ?? 'main', thread, model: opts.model ?? null });
-  stalled.result('stalled', { phase: setupPhase, thread, mayRun: !!thread, finalLine: line });
+  tracker?.result('stalled', { phase: setupPhase, thread, mayRun: !!thread, finalLine: line });
   if (logFile) try { fs.appendFileSync(logFile, JSON.stringify({ stalled: true, phase: setupPhase,
     threadId: thread, at: Date.now(), mayRun: !!thread }) + '\n'); } catch {}
-  finish(controlCommand ? 7 : 4);
+  if (tracker && ['start', 'turn'].includes(cmd) && thread) {
+    settleSetup(thread).finally(() => finish(controlCommand ? 7 : 4));
+  } else finish(controlCommand ? 7 : 4);
 }, setupMs) : null;
 cleanups.add(() => clearTimeout(setupAlarm));
 if (setupMs) {
@@ -854,6 +879,28 @@ const call = (method, params) => new Promise((resolve, reject) => {
     threadId: params?.threadId ?? null, at: Date.now() }) + '\n'); } catch {}
   pending.set(id, { resolve, reject, method }); write({ jsonrpc: '2.0', id, method, params });
 });
+const settleSetup = async (thread) => {
+  const phase = setupPhase;
+  let timer;
+  try {
+    const listed = await Promise.race([ (async () => {
+      let cursor;
+      for (let page = 0; page < 100; page++) {
+        const result = await call('thread/list', { limit: 100, cursor });
+        if (!Array.isArray(result.data)) return null;
+        const found = result.data.find(row => row.id === thread);
+        if (found) return typeof found.status?.type === 'string' ? found.status.type : null;
+        if (!result.nextCursor) return 'absent';
+        cursor = result.nextCursor;
+      }
+      return null;
+    })(), new Promise(resolve => { timer = setTimeout(() => resolve(null), 500); }) ]);
+    if (listed && ['absent', 'idle', 'notLoaded', 'completed', 'failed', 'interrupted'].includes(listed)) {
+      tracker?.set({ settled: true, mayRun: false, phase, setupSettlement: listed });
+    }
+  } catch { /* No hub confirmation means the original run may still be active. */ }
+  finally { clearTimeout(timer); setupPhase = phase; }
+};
 const stopFollowing = () => {
   handlers.length = 0;
   for (const cleanup of cleanups) cleanup();

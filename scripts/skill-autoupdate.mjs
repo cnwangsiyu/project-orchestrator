@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 // SessionStart does local work only; a detached copy performs the network fetch.
 import fs from 'node:fs/promises';
-import { openSync, closeSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -119,7 +118,7 @@ async function apply(shared, checkout, info, state, end) {
 async function launchFetch(shared, checkout, info, state, owner) {
   const f = files(shared, checkout);
   await write(f.state, { ...state, lastFetch: Date.now(), fetch: { status: 'running' } });
-  const fd = openSync(f.fetchLog, 'w', 0o600);
+  const log = await fs.open(f.fetchLog, 'w', 0o600), fd = log.fd;
   let child;
   try {
     child = spawn(process.execPath, [script, '--fetch', checkout, shared, info.remote, info.ref, owner.token],
@@ -132,7 +131,7 @@ async function launchFetch(shared, checkout, info, state, owner) {
     if (child?.pid && child.exitCode === null && child.signalCode === null) { try { process.kill(-child.pid, 'SIGTERM'); } catch {} }
     child?.unref();
     throw error;
-  } finally { closeSync(fd); }
+  } finally { await log.close(); }
 }
 async function fetchWorker(checkout, shared, remote, ref, token) {
   const f = files(shared, checkout);
@@ -229,7 +228,7 @@ async function updatePass({ budgetMs = 5000, status = false } = {}) {
 export async function autoupdate({ budgetMs = 180 } = {}) {
   const shared = sharedDir();
   await fs.mkdir(path.join(shared, 'autoupdate'), { recursive: true });
-  const fd = openSync(path.join(shared, 'autoupdate/coordinator.log'), 'w', 0o600);
+  const log = await fs.open(path.join(shared, 'autoupdate/coordinator.log'), 'w', 0o600), fd = log.fd;
   try {
     const child = spawn(process.execPath, [script, '--run'], { detached: true, env: gitEnv, stdio: ['ignore', fd, fd] });
     await new Promise(resolve => {
@@ -238,10 +237,13 @@ export async function autoupdate({ budgetMs = 180 } = {}) {
       child.once('exit', () => { clearTimeout(timer); resolve(); });
     });
     child.unref();
-  } finally { closeSync(fd); }
+  } finally { await log.close(); }
 }
 
-if (process.argv[1] && await fs.realpath(process.argv[1]).catch(() => '') === script) {
+// Imports must not await filesystem I/O before the caller can arm its deadline.
+// Installed/symlinked copies retain this basename; only direct CLI execution needs canonicalization.
+if (path.basename(process.argv[1] ?? '') === path.basename(script)
+  && await fs.realpath(process.argv[1]).catch(() => '') === script) {
   try {
     if (process.argv[2] === '--fetch') await fetchWorker(...process.argv.slice(3));
     else for (const row of await updatePass({ status: process.argv.includes('--status'), budgetMs: process.argv.includes('--run') ? 30000 : 5000 })) console.log(JSON.stringify(row));

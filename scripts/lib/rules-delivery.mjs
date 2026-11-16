@@ -1,10 +1,12 @@
 import fs from 'node:fs/promises';
-import syncFS from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { parseDigest, rulesShared, SKILL_ROOT } from './global-rules.mjs';
 import { readSmall } from './hook-context.mjs';
 
+const activeCleanups = new Set();
+// Deadline handlers get a bounded opportunity to release owned locks asynchronously.
+export const cleanupRulesDelivery = () => Promise.allSettled([...activeCleanups].map(cleanup => cleanup()));
 export const SEEN_LIMIT = 4 * 1024 * 1024;
 export const validRulesSession = (id) => typeof id === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$/.test(id)
   && !['__versions', '__proto__', 'constructor', 'prototype'].includes(id);
@@ -66,12 +68,15 @@ export const withRulesDelivery = async (input, seen, { initial = false } = {}, a
   if (previous?.version && compareVersion(previous.version, digest.version) >= 0) return action(null);
   const file = seenFile(), lock = `${file}.lock`, tmp = `${file}.${process.pid}`;
   let locked = false;
-  const cleanup = () => { try { syncFS.unlinkSync(tmp); } catch {} if (locked) { try { syncFS.rmdirSync(lock); } catch {} } };
+  let cleaning;
+  const cleanup = () => cleaning ??= (async () => {
+    await fs.unlink(tmp).catch(() => {}); if (locked) await fs.rmdir(lock).catch(() => {});
+  })();
+  activeCleanups.add(cleanup);
   try {
     await fs.mkdir(path.dirname(file), { recursive: true });
     try { if (Date.now() - (await fs.stat(lock)).mtimeMs > 30000) await fs.rmdir(lock); } catch {}
     await fs.mkdir(lock); locked = true;
-    process.once('exit', cleanup);
     seen = await readSeen();
     const current = seen[input.session_id];
     if (current?.version && compareVersion(current.version, digest.version) >= 0) return await action(null);
@@ -85,7 +90,7 @@ export const withRulesDelivery = async (input, seen, { initial = false } = {}, a
     if (rules.delivered) await fs.rename(tmp, file);
     return result;
   } finally {
-    cleanup(); process.removeListener('exit', cleanup);
+    await cleanup(); activeCleanups.delete(cleanup);
   }
 };
 

@@ -14,7 +14,6 @@ const command = (args) => args.map(shellQuote).join(' ');
 export function presentRoute(plan, view, context) {
   const { snapshot, root, owner, profiles = {}, digest:sourceDigest = { version:'UNKNOWN',worker:'' } } = context;
   const resources=known(snapshot.resources)??{}, hasTrae=snapshot.accounts.some(a=>a.kind==='trae');
-  const hasDeepSeek=snapshot.accounts.some(a=>(known(a.catalog)||[]).some(m=>m.startsWith('deepseek')));
   const phones=['iphone8','iphone11','s21'].filter(id=>(resources.registeredResources??[]).includes(id)||resources.devices?.[id]?.registered);
   const hasSigning=resources.signingRegistry===true;
   const digest={...sourceDigest,worker:(sourceDigest.coreWorker??sourceDigest.worker).split('\n').filter(line=>
@@ -88,6 +87,10 @@ export function presentRoute(plan, view, context) {
   if(c) altArgs.push('--exclude-lane',[f['exclude-lane'],`${c.accountId}:${c.modelId}`].filter(Boolean).join(','));
   const queueAlternative = low ? { model:alternative?.candidate.modelId??null,account:alternative?.candidate.accountId??null,
     basis:alternative?.estimate.basis??null,startDelayMin:alternative?.estimate.startDelayMin??null,routeArgs:altArgs } : null;
+  const listedCandidates = [c, ...(plan.reviewers ?? []).map(row => row.candidate),
+    ...(plan.reviewerProposals ?? []).map(row => row.candidate), ...(plan.suggestions ?? []),
+    ...(plan.gatedAlternatives ?? []).map(row => row.candidate), ...(low ? [alternative?.candidate] : [])];
+  const hasDeepSeek = listedCandidates.some(candidate => candidate?.family === 'deepseek');
   const queueAlt = low ? `${alternative?.estimate.capacityReset ? 'scheduled dispatch: ' : ''}${command(['node',`${root}/scripts/route.mjs`,...altArgs])}` : null;
   const launch = (s, executable) => {
     const c=s.candidate, task=s.task, a=candidateParts(snapshot,c).account;
@@ -146,7 +149,7 @@ export function presentRoute(plan, view, context) {
     const account=candidateParts(snapshot,c).account;
     if(!companyDevice(snapshot)&&account.kind==='chatgpt')
       why.push(`no company account on this device: personal ChatGPT account ${account.id} is the default lane`);
-    why.push(`ETA: ${eta.length?eta.map(e=>`${company(snapshot.accounts.find(a=>a.id===e.account))?'company':'personal'} ${etaText(e)}`).join('; '):`${company(account)?'company':'personal'} ${c.modelId}@${c.accountId}, est. ${seat.estimate.completionMin} min`}; selected by policy, qualified floor and completion ETA`);
+    why.push(`ETA: ${eta.length?eta.map(e=>`${company(snapshot.accounts.find(a=>a.id===e.account))?'company':'personal'} ${etaText(e)}`).join('; '):`${company(account)?'company':'personal'} ${c.modelId}@${c.accountId}, est. ~${Math.round(seat.estimate.completionMin)} min`}; selected by policy, qualified floor and completion ETA`);
     if(adversarial(t)) why.push('adversarial: no GPT model on any account; Kimi-K3, DeepSeek-V4.1-Flash, then scoped Opus; two independent non-GPT families required.');
     if(candidateParts(snapshot,c).lane.mode==='low-priority') why.push(`TRAE ${c.modelId} low-priority lane (bucket depleted): provider capacity remains eligible with bounded queue patience.`);
     if(seat.estimate.basis==='progressing') why.push(`${c.modelId} low-priority lane (bucket depleted): slower bucket designation, but progressing without queue cycles in fresh per-model telemetry.`);
@@ -234,7 +237,7 @@ export function presentRoute(plan, view, context) {
   // JSON retains full diagnostics; text repeats only the choice and task context.
   const shortWhy = [...new Set(why.map(line => {
     if (c && line.startsWith('ETA:'))
-      return `ETA: ${c.modelId}@${c.accountId}, est. ${seat.estimate.completionMin} min (${seat.estimate.basis}); policy choice; alternatives: --json/--verbose.`;
+      return `ETA: ${c.modelId}@${c.accountId}, est. ~${Math.round(seat.estimate.completionMin)} min (${seat.estimate.basis}); policy choice; alternatives: --json/--verbose.`;
     if (c && line.includes('low-priority lane (bucket depleted)'))
       return `${c.modelId}: low-priority capacity; ${seat.estimate.basis==='progressing'?'fresh progress observed':'bounded queue patience'}.`;
     return line;

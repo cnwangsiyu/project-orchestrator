@@ -534,8 +534,6 @@ export const watch = async (owner, print = (rows) => new Promise((resolve, rejec
   if (!Number.isFinite(debounceSec) || debounceSec < 0) throw Error('--debounce-sec takes a nonnegative finite number');
   if(shortOwner(owner)) owner=eventOwner(owner,readEvents());
   if (!validOwner(owner)) throw Error('watch needs --owner <session-id> (or ORCHESTRATOR_OWNER)');
-  // Capture acknowledgement state before publishing the live claim; a hook may deliver immediately after it sees us.
-  const baseline = await readAckAsync(owner);
   const claim = watcherFile(owner), file = path.join(claim, 'watcher.json'), token = randomUUID();
   fs.mkdirSync(path.dirname(claim), { recursive: true });
   try { fs.mkdirSync(claim); } catch {
@@ -557,7 +555,6 @@ export const watch = async (owner, print = (rows) => new Promise((resolve, rejec
   const stop = () => { stopped = true; }, interrupt = () => { exit = 130; stop(); }, hangup = () => { exit = 129; stop(); };
   process.once('SIGTERM', stop); process.once('SIGINT', interrupt); process.once('SIGHUP', hangup);
   let timer, flushAt;
-  const collected = new Map();
   try {
     heartbeat();
     timer = setInterval(() => { try { heartbeat(); } catch { exit = 1; stop(); } }, 5000);
@@ -566,27 +563,24 @@ export const watch = async (owner, print = (rows) => new Promise((resolve, rejec
       await tail.read();
       const ack = await readAckAsync(owner), own = tail.rows(), snapshot = inbox(own, owner, ack);
       for (const row of snapshot.running.filter((row) => !row.stale)) waitingRuns.add(row.runId);
-      const receipts = Object.entries(ack.delivered).filter(([id, row]) => !baseline.delivered[id]
-        && (row.seq ?? 0) > baseline.highWater).map(([id, row]) => ({ ...row, id, acknowledgedElsewhere: true }));
-      const triggers = [...snapshot.pending, ...receipts].filter(waking);
+      // A hook's successful delivery owns the wake. Forget its settled runs silently.
+      for (const row of own) if (terminal(row) && acknowledged(row, ack)) waitingRuns.delete(row.runId);
+      const triggers = snapshot.pending.filter(waking);
       if (triggers.length && flushAt === undefined) flushAt = Date.now() + debounceSec * 1000;
       if (flushAt !== undefined) {
-        for (const row of [...snapshot.pending, ...receipts]) collected.set(row.id, row);
         // Reserve 80% of each ask's original timeout, including asks arriving late in this batch.
         for (const row of [...snapshot.questions, ...snapshot.pending.filter((row) => row.event === 'question')]) {
           const reserveAt = row.expiresAt - row.timeoutMin * 60000 * 0.8;
           flushAt = Math.min(flushAt, Number.isFinite(reserveAt) ? reserveAt : Date.now());
         }
         if (Date.now() >= flushAt) {
-          const printed = new Set();
+          let delivered = false, printError;
           try { await deliverAsync(owner, async (rows) => {
-            await print(rows); for (const row of rows) printed.add(row.id);
+            try { await print(rows); delivered = true; } catch (e) { printError = e; throw e; }
           }, Number.MAX_SAFE_INTEGER, { rows: own }); }
-          catch {}
-          const remaining = [...collected.values()].filter((row) => !printed.has(row.id));
-          if (remaining.length) await print(remaining.map((row) => ({ ...row,
-            finalLine: `${row.finalLine ?? ''} (${row.acknowledgedElsewhere ? 'acknowledged elsewhere' : 'delivered elsewhere or acknowledgement unavailable'})` })));
-          return 0;
+          catch { if (printError) throw printError; /* Retry an unavailable acknowledgement transaction. */ }
+          if (delivered) return 0;
+          flushAt = undefined;
         }
       } else if (waitingRuns.size && !snapshot.running.some((row) => !row.stale && waitingRuns.has(row.runId))) {
         await print([{ name: owner, event: 'workers-no-longer-running', finalLine: 'observed completion or stale/dead follower; reconcile with mine' }]);
@@ -607,7 +601,7 @@ export const watch = async (owner, print = (rows) => new Promise((resolve, rejec
 export const lifecycle = (metadata) => {
   const launcher = launcherIdentity(metadata.owner), owner = resolveOwner(metadata.owner);
   const state = { name: null, thread: null, account: 'main', model: null, exit: null, outFile: null, logFile: null, finalLine: '',
-    ...metadata, launcher, owner, runId: randomUUID(), pid: process.pid };
+    ...metadata, launcher, owner, runId: randomUUID(), pid: process.pid, parentPid: process.ppid };
   let ended = false, result = null, mayRun = false;
   const emit = (event, extra = {}) => { try { return appendEvent({ ...state, event, ...extra }); }
     catch (e) { process.stderr.write(`worker-events: NOT RECORDED: ${e.message}\n`); return null; } };
@@ -620,7 +614,7 @@ export const lifecycle = (metadata) => {
     result: (event, extra = {}) => { result = event; Object.assign(state, extra); },
     end: (code) => { if (ended) return; ended = true;
       emit(result ?? (code === 0 ? 'finished' : code === 4 ? 'stalled' : code === 8 || code === 9 ? 'needs-user' : 'failed'),
-        { exit: code, mayRun: mayRun || !!state.mayRun || code === 4 }); },
+        { exit: code, mayRun: !state.settled && (mayRun || !!state.mayRun || code === 4) }); },
     signal: (signal) => { result = 'follower-ended'; mayRun = !!state.thread; Object.assign(state, { signal }); },
     warning: () => {
       let hint = false; try { const s = fs.fstatSync(1); hint = (s.isFIFO() || s.isFile()) && !!process.env.CLAUDECODE && !!owner; } catch {}

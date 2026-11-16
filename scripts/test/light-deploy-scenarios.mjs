@@ -90,21 +90,20 @@ try {
   assert.deepEqual([pinnedRetry.pick.account, pinnedRetry.pick.model, pinnedRetry.pick.effort], ['ttadk', SOL, 'medium']);
   assert.ok(!pinnedRetry.why.some((line) => line.includes('balanced to TRAE')));
 
-  // Balancing a TTADK light first rung walks the full TRAE light list: paused TRAE Terra falls through to 5.5.
-  // (lookup is lane-eligible; build-run keeps its no-transfer preference.)
+  // Quality order crosses accounts: paused TRAE Terra uses free TTADK Terra before TRAE 5.5.
   const paused = path.join(tmp, 'paused'); fs.mkdirSync(paused);
   noteFailure(paused, `-32600: model \`${TERRA56}\` is unavailable because its metadata could not be resolved`, now, TERRA56);
   const balanced = run(['lookup'], { company: true, traeModels: [SOL, TERRA56, GPT55, FLASH], traeHome: paused, historyUsed: 50 });
-  assert.deepEqual([balanced.tier, balanced.pick.account, balanced.pick.model, balanced.pick.effort], ['light', 'trae', GPT55, 'medium']);
-  assert.equal(balanced.balance?.selected, true);
+  assert.deepEqual([balanced.tier, balanced.pick.account, balanced.pick.model, balanced.pick.effort], ['light', 'ttadk', TERRA56, 'medium']);
+  assert.equal(balanced.balance?.selected, false, 'free TTADK Terra wins before stepping down to TRAE 5.5');
 
   // Without a balance trigger the light pick stays on TTADK.
   const stays = run(['lookup'], { company: true, traeModels: null });
   assert.deepEqual([stays.pick.account, stays.pick.model], ['ttadk', TERRA56]);
 
-  // A test-env build-run keeps its existing no-transfer preference (build-run is not lane-eligible).
+  // Free TRAE wins for the same light model, including procedural build-run.
   const buildStays = run(['build-run', '--env', 'test'], { company: true, traeModels: [SOL, TERRA56, GPT55, FLASH], historyUsed: 50 });
-  assert.deepEqual([buildStays.pick.account, buildStays.pick.model], ['ttadk', TERRA56]);
+  assert.deepEqual([buildStays.pick.account, buildStays.pick.model], ['trae', TERRA56]);
 
   // --no-local-build marks a remote run: no local heavy-build brief, explicit remote note.
   const remote = run(['build-run', '--impact', 'release', '--no-local-build']);
