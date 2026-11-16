@@ -191,11 +191,14 @@ if (cmd === 'watch' || cmd === 'mine') {
     if (row.thread) {
       try {
         const output = execFileSync(process.execPath, [...process.execArgv, fileURLToPath(import.meta.url), '--account', row.account,
-          'status', '--thread', row.thread], { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] });
+          'status', '--thread', row.thread], { encoding: 'utf8', timeout: Number(process.env.MINE_STATUS_TIMEOUT_MS ?? 15000), stdio: ['ignore', 'pipe', 'ignore'] });
         observed = JSON.parse(output.trim()); status = observed.last?.status ?? 'unknown';
         if (observed.last && ['completed', 'failed', 'interrupted'].includes(status)) appendEvent({ ...row, event: 'observed', mayRun: false,
           turn: observed.last.id, status, stale: false, finalLine: `hub confirms ${status}; read the result or reattach with wait` });
-      } catch {}
+      } catch {
+        // A slow hub read (long threads on a large history) is not "unknown" while this worker's follower is alive.
+        try { if (Number.isSafeInteger(row.pid) && row.pid > 0) { process.kill(row.pid, 0); status = 'running (follower alive; hub read slow)'; } } catch {}
+      }
     } else {
       try { process.kill(row.pid, 0); status = 'running'; } catch {}
     }
