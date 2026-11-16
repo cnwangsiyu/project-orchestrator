@@ -1664,7 +1664,7 @@ for (const [sc, args] of ERRORS) {
       assert.ok(!o.why.some(n=>/TRAE lane free/.test(n)),'unknown model load is a bounded fallback, not observed free capacity');
       assert.ok(!o.needsUserOK.some((n) => /personal quota/.test(n)));
     }
-    assert.equal(r(['design','--background']).pick.model,SOL); assert.equal(r(['review-high','--background']).pick.account,'trae');
+    assert.equal(r(['design','--background']).pick.model,ASTRA); assert.equal(r(['review-high','--background']).pick.account,'trae');
     assert.equal(r(['analysis', '--background'], { daily: { ...active, [SOL]: bucket(true), [ASTRA]: bucket(true) } }).pick?.model, TERRA56);
     const cheap = r(['analysis', '--background', '--exclude-model', TERRA56]);
     assert.equal(cheap.pick?.model, GPT55); assert.ok(cheap.pick?.command.includes('--model GPT-5.5'));

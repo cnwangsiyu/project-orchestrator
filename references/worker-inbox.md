@@ -9,7 +9,7 @@ Workers can notify or ask their launching orchestrator without ending a turn. Th
 
 | Command | Result / exit |
 | --- | --- |
-| `codex-worker note [--kind progress\|risk\|scope\|info] "<text>"` | Records a `message` and returns 0; kind defaults to info. |
+| `codex-worker note [--kind progress\|risk\|scope\|info] [--wake] "<text>"` | Records a `message` and returns 0; info/progress wait for a natural wake, risk/scope wake, `--wake` requests an immediate wake (subject to debounce). |
 | `codex-worker ask [--timeout-min N] [--default "<next action>"] "<question>"` | Records a `question` with a short ID and waits; answer on stdout, exit 0. Default timeout: 20 minutes. |
 | Ask timeout with default | Default on stdout, exit 3; proceed as stated. |
 | Ask timeout without default | `no answer` on stdout, exit 4; worker ends its turn BLOCKED. |
@@ -18,9 +18,11 @@ Workers can notify or ask their launching orchestrator without ending a turn. Th
 | `codex-worker reply --thread ID [--account NAME] [--question ID] "<answer>"` | Answers the newest open question, or the specified open ID; exit 0. No open question falls back to steer and prints that fact, with steer's normal exit status. |
 
 Use ask only when a decision is absent from the brief and changes the next action; state a default.
-Use note for a discovered risk, a scope change, or a milestone the orchestrator needs before completion,
-never routine progress, tool hiccups (probe timeouts, missing metadata) or status: notes are for risks, scope changes, decisions made, landed commits and findings that change someone else's work. A blocker that requires the user still ends the turn with BLOCKED. Orchestrators
-answer promptly with reply. A question past its timeout has already taken the worker's default, or the
+Use note only for risks, scope changes, decisions made, landed commits and findings that change someone else's
+work, never routine progress, tool hiccups (probe timeouts, missing metadata) or status. Info/progress notes are
+recorded for the next natural wake (worker exit, ask, risk, peer message or user turn); they do not end watch.
+Risk/scope notes and asks wake. Use `note --wake` for info/progress only when it changes someone else's work now.
+A blocker that requires the user still ends the turn with BLOCKED. Orchestrators answer promptly with reply. A question past its timeout has already taken the worker's default, or the
 worker must end BLOCKED if none was provided; a later reply becomes steering if no open question exists.
 The current orchestrator owner, when supplied via --owner or the owner bridge, must match the launcher.
 If no owner bridge is set, an explicit thread/account uses the public launching context to select its owner.
@@ -85,10 +87,11 @@ open after its notification is acknowledged until answer/deadline; compaction pr
 questions and their answer records. `mine` lists open questions even after inbox delivery.
 Ask is a running shell command and uses the existing running-command stall exemption.
 
-Notes allow at most six wake-ups per account/thread in a rolling hour, serialized under the event
-lock. Text is capped at 500 characters; excess notes, including overlength text, are recorded with
-`wake:false` (and truncation metadata when needed), and cannot wake watch or the hooks. Recent
-notes remain through compaction for correct hourly accounting. Questions always notify.
+Notes allow at most six requested wake-ups per account/thread in a rolling hour, serialized under the event
+lock; deferred info/progress notes consume no wake budget. Text is capped at 500 characters. Default deferred
+notes and excess/overlength wake requests are recorded with `wake:false` (and truncation metadata when needed).
+All recorded notes remain deliverable through the next inbox/hook or waking batch; only eligible waking notes
+end watch. Recent notes remain through compaction for hourly accounting. Questions always wake.
 Neither notes nor questions settle the running worker's lifecycle. Each hook/watcher notification
 is one line, with control characters flattened:
 
@@ -130,7 +133,9 @@ The Stop table says: `"block" prevents Claude from stopping`. Stop does not run 
 `stop_hook_active` guards continuation loops. SessionStart covers startup/resume/compact/fork/clear.
 The documented environment bridge is `CLAUDE_ENV_FILE`; the inbox hook appends only a public
 `ORCHESTRATOR_OWNER` export, never reads that file. Current Stop inputs may expose `background_tasks`;
-when present, watcher enforcement checks that registry as well as a live heartbeat/PID.
+when present, watcher enforcement checks that registry as well as a live heartbeat/PID. A registry entry for
+each running worker's start/turn plus a live follower PID can cover completion wakes without a watcher. Missing
+registry data cannot prove tracking and keeps the block; a live PID alone is insufficient.
 
 The Bash reference explicitly exposes `run_in_background: true`. The headless guide confirms:
 "Claude then takes one more turn with the outcome."
@@ -176,14 +181,20 @@ Exec child commands have a private, supervised process group (no unref): signals
 with bounded TERM/KILL fallback, not a detached daemon or another task's children.
 
 Launch every worker with Bash `run_in_background: true`, never `(command &)` or `nohup` inside a foreground call.
-Record the owner alongside account/thread in the ledger. Run this as another tracked background task:
+Record the owner alongside account/thread in the ledger. For asks/risk notes or workers without verified live
+tracked start/turn followers, run this as another tracked background task:
 
 ```bash
 node "$HOME/.agents/skills/project-orchestrator/scripts/codex-worker.mjs" watch --owner <session-id>
 ```
 
-Watch blocks until new completion/message/question notifications exist, pending work is acknowledged by another deliverer, or its observed
-running set settles/becomes stale. It prints the events/receipts/status it knows and exits 0. An atomic per-owner
+Watch blocks until a completion/failure, ask, eligible risk/scope or explicit `note --wake` arrives, a waking
+event is acknowledged elsewhere, or its observed running set settles/becomes stale. Deferred notes and their
+acknowledgements do not end watch. The first waking event starts a 45-second collection window;
+`--debounce-sec N` changes it and `--debounce-sec 0` disables it. Late events join the same exit printout,
+including deferred notes. Each open ask caps the window at its deadline minus 80% of its original timeout,
+so a short or already urgent ask flushes promptly. The window never extends on later events.
+Watch prints the combined events/receipts/status and exits 0; a background task wakes Claude only on exit. An atomic per-owner
 claim allows only one watcher; duplicate invocations exit with an already-armed notice. Polls remember inode/offset,
 read only appended bytes, skip unchanged files, and prefilter other owners before parsing; rotation refreshes the cursor.
 Delivery is two-phase: persist an intent (timestamp, writer PID, token and at most 64 event IDs/sequences),
@@ -193,14 +204,20 @@ a live writer's uncommitted intent is retryable after three seconds. A late writ
 Print/commit failures retain pending work, and compaction preserves recoverable intents and their events.
 If acknowledgement is unavailable the watcher prints what it knows without acknowledging and exits, not loops.
 Hook/watcher redelivery is harmless: receipt sequences and event IDs make acknowledgement idempotent.
-On wake read outputs and handle finished workers first, then re-arm watch if workers remain.
+On wake read outputs and handle finished workers first. Re-arm watch for asks/risk notes or workers lacking
+verified live tracked start/turn followers; completion coverage itself does not deliver mid-turn risks.
 `mine --owner <session-id>` prints pending deliveries and hub-confirmed running/unknown statuses without acknowledging.
 An acknowledgement means delivered to context, not that the orchestrator read/integrated/accepted the result.
 
 The Stop hook checks `stop_hook_active` before delivery or any block. It blocks at most once per stop cycle,
 on up to ten pending events or to arm a missing watcher; a continuation leaves newly arrived/remaining events pending.
+With no pending deliveries, Stop permits completion-only coverage when every running worker has a matching
+registered background start/turn and live follower PID, and none has an open ask (even if that ask was already
+acknowledged). Matching uses owner/account plus start name or turn thread, command kind and task PID when supplied;
+completed entries and detached commands do not count. Missing registry data, unmatched launches or dead follower
+PIDs keep the watcher block. The reason names each uncovered worker and every worker with an open ask.
 Acknowledgement write failure or contention is silent and never falls through to a watcher block.
-It shares the digest hook's orchestrator detection.
+It shares the digest hook's orchestrator detection and delivers pending global-rule changes in the same block reason; successful output records the seen-version acknowledgement in `_shared/rules-seen.json`.
 SessionStart delivers the same inbox as additionalContext and restores the public owner bridge.
 Async disk operations have a 220 ms internal fail-open deadline; cold Node startup is outside that budget and
 is covered by the two-second settings timeout, not a guaranteed sub-300 ms wall time.

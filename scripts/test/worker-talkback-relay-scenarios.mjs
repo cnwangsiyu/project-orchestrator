@@ -141,6 +141,17 @@ try {
   const notes = readEvents().filter((row) => row.event === 'message' && row.thread === metadata.thread);
   assert.equal(notes.filter((row) => row.wake).length, 6); assert.equal(notes.length, 8);
 
+  for (const wake of [false, true]) {
+    const id = `info-wake-${wake}`;
+    relay(delta(metadata.thread, metadata.turn, TALKBACK_MARKER + JSON.stringify({ ...request, id, kind: 'info', wake }) + '\n'));
+    // This thread exhausted its limit above, so use a fresh fixture context for explicit wake.
+    const fresh = seed(`wake-thread-${wake}`, project, 4), freshRelay = createTalkbackRelay(fresh);
+    freshRelay({ method: 'item/completed', params: { threadId: fresh.thread, turnId: fresh.turn,
+      item: { type: 'commandExecution', id, aggregatedOutput: TALKBACK_MARKER + JSON.stringify({ ...request,
+        account: fresh.account, thread: fresh.thread, id, kind: 'info', wake }) } } });
+    assert.equal(readEvents().find((row) => row.thread === fresh.thread && row.talkbackId === id).wake, wake);
+  }
+
   // Reattached wait followers also relay markers retained in the current turn's items.
   const waitThread = 'wait-thread', waitOwner = 'wait-owner', waitId = 'wait-question';
   const waitMarker = TALKBACK_MARKER + JSON.stringify({ version: 1, type: 'question', id: waitId, account: 'alt', thread: waitThread,

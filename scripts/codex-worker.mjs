@@ -17,12 +17,12 @@ import {modelPreference} from './lib/pipeline/policy.mjs';
 //   codex-worker --account trae probe --model M                          (recovery probe of a paused model family; lib/state.mjs starts it)
 //   codex-worker wait   --thread ID [--log FILE] [--out FILE]            (start/turn/wait take --stall-min M, default 30)
 //   codex-worker steer  --thread ID                                                                     "<message>"
-//   codex-worker note [--kind progress|risk|scope|info] "<text>"         (worker: notify without ending the turn)
+//   codex-worker note [--kind progress|risk|scope|info] [--wake] "<text>"         (worker: notify without ending the turn)
 //   codex-worker ask [--timeout-min N] [--default TEXT] "<question>"    (worker: wait for an orchestrator answer)
 //   codex-worker reply --thread ID [--question ID] "<text>"            (orchestrator: answer, or fall back to steer)
 //   codex-worker interrupt --thread ID
 //   codex-worker status --thread ID
-//   codex-worker mine | watch [--owner SESSION_ID]                      (owner-scoped durable inbox; watch is a tracked background task)
+//   codex-worker mine | watch [--owner SESSION_ID] [--debounce-sec N]                      (owner-scoped durable inbox; watch is a tracked background task)
 //   codex-worker list   [--cwd DIR] [--search TEXT] [--limit N]
 //   codex-worker quota                                                     (the account's rate-limit windows, JSON)
 //   codex-worker usage                                                     (account id, windows and reset cards, JSON; TRAE: daily buckets + weekly pool)
@@ -61,6 +61,7 @@ import { isPolicyBlock, policyBlockRecord, appendPolicyBlock, policyBlockAction 
 import { runHubForeground, hubListReachable } from './lib/hub-foreground.mjs';
 import { parseRouteArgs, routeFlag, rerouteWorker, turnHasWork } from './lib/worker-reroute.mjs';
 import { inheritedLaunch, saveLaunch, recordLaunchModel } from './lib/worker-launch.mjs';
+import { recordWorkerOutcome, reviewSeat, reviewInstructions } from './lib/worker-outcome.mjs';
 import { modelFamily, modelObservation, rolloutTurnModel } from './lib/worker-model.mjs';
 import { lifecycle, resolveOwner, validOwner, inbox, readEvents, readAck, eventLine, watch, signalExit, appendEvent,
   saveWorkerContext, workerContext, openQuestions, answerQuestion } from './lib/worker-events.mjs';
@@ -95,12 +96,28 @@ if (argv[0] === 'turn' && typeof earlyOpts.thread === 'string') {
     else { Object.assign(earlyOpts, inherited); console.log(`inherited: ${JSON.stringify(inherited)}`); }
   } catch (e) { process.stderr.write(`codex-worker: launch inheritance failed: ${e.message}\n`); process.exit(2); }
 }
-const tracker = ['start', 'turn', 'wait'].includes(argv[0]) ? lifecycle({ owner: earlyOpts.owner,
+const tracker = ['start', 'turn', 'wait'].includes(argv[0]) ? lifecycle({ owner: earlyOpts.owner, followerCommand: argv[0],
   name: earlyOpts.name ?? earlyOpts.thread ?? 'unnamed', thread: earlyOpts.thread ?? null,
   account: account ?? 'main', model: earlyOpts.model ?? null, effort: earlyOpts.effort ?? null,
   mayRun: argv[0] === 'wait' && typeof earlyOpts.thread === 'string',
   outFile: typeof earlyOpts.out === 'string' ? path.resolve(earlyOpts.out) : null,
   logFile: typeof earlyOpts.log === 'string' ? path.resolve(earlyOpts.log) : null }) : null;
+// Exit also covers validation/RPC failures before report(). Never read a stale --out file.
+let outcomeTurn = null, outcomeFinal = '', outcomeSkip = false;
+if (tracker) process.on('exit', (exit) => {
+  try {
+    const state = tracker.metadata();
+    const saved = state.thread ? inheritedLaunch(account ?? 'main', { thread: state.thread }) ?? {} : {};
+    const options = { ...saved, ...earlyOpts };
+    const args = parseRouteArgs(options['route-args']);
+    const seat = options['routed-seat'] ? JSON.parse(options['routed-seat']) : {};
+    recordWorkerOutcome({ project: options.project ?? routeFlag(args ?? [], 'project') ?? seat.project,
+      name: options.name ?? seat.name, category: args?.[0] ?? seat.category, role: options.role ?? seat.role,
+      account: account ?? 'main', model: state.model, effort: state.effort, actualModel: state.actualModel,
+      startedAt: followerStartedAt, command: argv[0], thread: state.thread, turn: outcomeTurn?.id ?? state.turn,
+      exit, final: outcomeFinal, terminal: !!outcomeTurn, skip: outcomeSkip || state.signal });
+  } catch (e) { process.stderr.write(`auto-outcome: NOT RECORDED: ${e.message}\n`); }
+});
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) if (tracker) process.once(signal, () => {
   tracker.signal(signal);
   if (!process.listenerCount(signal)) process.exit(signalExit(signal));
@@ -133,6 +150,7 @@ const [cmd, ...rest] = argv;
 const opts = { ...earlyOpts }; const pos = [];
 for (let i = 0; i < rest.length; i++) {
   if (rest[i] === '--no-browser-preflight') opts['no-browser-preflight'] = true;
+  else if (rest[i] === '--wake') opts.wake = true;
   else if (rest[i] === '--background') opts.background = true;
   else if (rest[i] === '--require-model' && !['on', 'off'].includes(rest[i + 1])) opts['require-model'] = true;
   else if (rest[i].startsWith('--')) opts[rest[i].slice(2)] = rest[i + 1]?.startsWith('--') || rest[i + 1] === undefined ? true : rest[++i];
@@ -178,7 +196,8 @@ if (cmd === 'watch' || cmd === 'mine') {
   const owner = resolveOwner(opts.owner);
   if (!validOwner(owner)) die(`${cmd} needs --owner <session-id> (or ORCHESTRATOR_OWNER)`);
   if (cmd === 'watch') {
-    try { process.exit(await watch(owner)); } catch (e) { die(e.message, 1); }
+    const debounceSec = opts['debounce-sec'] === undefined ? 45 : typeof opts['debounce-sec'] === 'string' ? Number(opts['debounce-sec']) : NaN;
+    try { process.exit(await watch(owner, undefined, { debounceSec })); } catch (e) { die(e.message, 1); }
   }
   const current = inbox(readEvents(), owner, readAck(owner));
   for (const row of current.unresolved) console.log(`unresolved owner ${row.ownerOriginal}: ${row.ownerResolution} (${row.ownerMatches?.join(', ')||'no full owner in events'}) event=${row.id}`);
@@ -264,7 +283,7 @@ const talkbackContext = (thread) => {
     + `To send the orchestrator a note without stopping (kinds: risk, scope, progress, info):\nRULES_SHARED=${shellQuote(env.RULES_SHARED)} ${shellQuote(process.execPath)} ${shellQuote(fileURLToPath(import.meta.url))} --account ${metadata.account} note --thread ${thread} --kind info "<text>"\n`
     + `To ask the orchestrator and wait for the answer (exit 3 = timeout, proceed with default; exit 4 = timeout without default):\nRULES_SHARED=${shellQuote(env.RULES_SHARED)} ${shellQuote(process.execPath)} ${shellQuote(fileURLToPath(import.meta.url))} --account ${metadata.account} ask --thread ${thread} --timeout-min 20 --default "<what you will do if nobody answers>" "<question>"\n`
     + 'In read-only/workspace-write, denied shared writes are relayed through your command output without widening the sandbox. If ask exits 6, run the exact ask --await <id> command printed on stderr; it only reads, preserves the original question/default/deadline and does not ask again.\n'
-    + 'Use ask only for a decision the brief does not settle that changes your next action; state --default. Use note only for a risk, a scope change, a decision you made, a landed commit, or a finding that changes someone else\'s work, never routine progress, tool hiccups (probe timeouts, missing metadata) or status. A blocker needing the user still ends the turn BLOCKED.' };
+    + 'Use ask only for a decision the brief does not settle that changes your next action; state --default. Use note only for a risk, a scope change, a decision you made, a landed commit, or a finding that changes someone else\'s work, never routine progress, tool hiccups (probe timeouts, missing metadata) or status. Info/progress notes are delivered on the next natural wake; risk/scope notes and asks wake. Use note --wake only when it changes someone else\'s work now. A blocker needing the user still ends the turn BLOCKED.' };
 };
 // Check metadata only: --out is a final-message destination, sometimes also mistakenly
 // named as a worker deliverable. Never inspect the contents to decide whether it changed.
@@ -272,6 +291,8 @@ let outBaseline;
 const outputStat = () => { try { const s = fs.statSync(path.resolve(opts.out)); return [s.dev, s.ino, s.size, s.mtimeMs, s.ctimeMs].join(':'); } catch { return null; } };
 const markOutputStart = () => { if (opts.out) outBaseline = outputStat(); };
 const launchDecision = cmd === 'start' ? auditStart() : null;
+const reviewHowTo = reviewSeat({ category: ROUTE_ARGS?.[0] ?? routedMetadata?.category ?? launchDecision?.category,
+  role: opts.role ?? routedMetadata?.role, name: opts.name }) ? reviewInstructions : null;
 if (cmd === 'start') tracker?.warning();
 // Codex's own default for workspace-write network, so an explicit turn-level policy doesn't silently change it.
 const configNetwork = () => {
@@ -851,6 +872,7 @@ const detachHub = () => {
   pending.clear(); try { ws.close(); } catch {}
 };
 const autoReroute = async (reason, queue = {}, policy = false) => {
+  outcomeSkip = true; // The successor follower owns the final task outcome.
   tracker?.result('re-routed', { reason, mayRun: false, finalLine: '' });
   const cancelledTurn = activeTurn;
   detachHub(); exitCode = null;
@@ -1013,6 +1035,7 @@ const report = async (threadId, turn, final, usage) => {
   if (usage) console.log(`usage (thread total) input=${usage.inputTokens} cached=${usage.cachedInputTokens} output=${usage.outputTokens}`);
   final ??= lastMessage(turn.items);
   if (!final) final = lastMessage((await readTurns(threadId).catch(() => [])).find((t) => t.id === turn.id)?.items);
+  outcomeTurn = turn; outcomeFinal = final ?? '';
   if (final) {
     if (opts.out) {
       if (outBaseline !== undefined && outputStat() !== outBaseline)
@@ -1243,7 +1266,7 @@ try {
     const digest = loadDigest();
     const th = await call('thread/start', {
       cwd: path.resolve(opts.cwd), model: opts.model, sandbox: opts.sandbox, approvalPolicy: APPROVAL_POLICY,
-      developerInstructions: [browserHowTo, workerInstructions(digest)].filter(Boolean).join('\n'),
+      developerInstructions: [browserHowTo, workerInstructions(digest), reviewHowTo].filter(Boolean).join('\n'),
       ...(browserThread && !TRAE_EXTENSION_BROWSER ? { approvalsReviewer: 'user' } : {}),
       ...(browserConfig ? { config: browserConfig } : {}),
     });
@@ -1255,7 +1278,7 @@ try {
     if (PROF?.kind === 'trae') rememberThreadModel(PROF.home, threadId, opts.model);
     if (opts.name) await call('thread/name/set', { threadId, name: opts.name }).catch(() => {});
     const talkback = talkbackContext(threadId);
-    const instructions = [browserHowTo, workerInstructions(digest), talkback.instructions].filter(Boolean).join('\n');
+    const instructions = [browserHowTo, workerInstructions(digest), talkback.instructions, reviewHowTo].filter(Boolean).join('\n');
     const configured = await call('thread/resume', { threadId, config: { ...browserConfig, ...talkback.config }, developerInstructions: instructions }).catch(() => null);
     markOutputStart();
     const ts = await call('turn/start', {
@@ -1269,7 +1292,7 @@ try {
     const config = { ...talkback.config, ...(TRAE_EXTENSION_BROWSER ? { mcp_servers: { playwright: TRAE_PLAYWRIGHT_SERVER } } : {}) };
     const resumedDigest=loadDigest();
     const resumed = await call('thread/resume', { threadId: opts.thread, model: opts.model, config,
-      developerInstructions:`${workerInstructions(resumedDigest)}\n${talkback.instructions}` }).catch(() => null);
+      developerInstructions:[workerInstructions(resumedDigest), talkback.instructions, reviewHowTo].filter(Boolean).join('\n') }).catch(() => null);
     sessionPath = resumed?.thread?.path ?? null;
     auditStart(opts.model??resumed?.thread?.model,opts.sandbox??resumed?.thread?.sandbox??undefined,{thread:opts.thread,name:resumed?.thread?.name??undefined});
     tracker?.set({ mayRun: true });

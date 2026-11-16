@@ -135,8 +135,8 @@ try {
   assert.equal(retry.pick.effort, 'max'); assert.ok(!retry.needsUserOK.includes('max effort'));assert.ok(retry.pick.command);
   const noAstra = run(['debug'], { models: [SOL56, TERRA56, GPT55, PRO] });
   assert.ok(personalGate(noAstra));
-  for (const [args, model] of [[['lookup'], TERRA56], [['analysis'], SOL], [['debug'], SOL]]) {
-    const r = run(args, { company: true }); assert.equal(r.pick.account,args[0]==='lookup'?'trae':'ttadk'); assert.equal(r.pick.model, model);
+  for (const [args, model] of [[['lookup'], TERRA56], [['analysis'], SOL], [['debug'], ASTRA]]) {
+    const r = run(args, { company: true }); assert.equal(r.pick.account,args[0]==='analysis'?'ttadk':'trae'); assert.equal(r.pick.model, model);
     if(args[0]==='lookup')assert.equal(r.balance.selected, true); assert.ok(!personalGate(r));
   }
   const balancedFallback = run(['implement', '--exclude-model', `${SOL56},${TERRA56}`], { company: true });

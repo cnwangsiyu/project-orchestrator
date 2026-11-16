@@ -47,7 +47,7 @@ const until = async (test, label) => {
   while (!test()) { if (Date.now() >= end) throw Error(`timeout: ${label}`); await new Promise((r) => setTimeout(r, 20)); }
 };
 const startWatch = (owner, extra = {}) => {
-  const child = spawn(process.execPath, [worker, 'watch', '--owner', owner], { env: { ...env, ...extra }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, [worker, 'watch', '--debounce-sec', '0', '--owner', owner], { env: { ...env, ...extra }, stdio: ['ignore', 'pipe', 'pipe'] });
   children.add(child); let stdout = '', stderr = '';
   child.stdout.on('data', (b) => { stdout += b; }); child.stderr.on('data', (b) => { stderr += b; });
   const done = new Promise((resolve) => {
@@ -248,7 +248,7 @@ globalThis.setTimeout = (fn, ms, ...args) => {
   const recoveredWatch = startWatch('stale-claim'); await until(() => hasWatcher('stale-claim'), 'dead claim and stale reaper recovered');
   record('stale-claim'); assert.equal((await recoveredWatch.done).code, 0); assert.equal(fs.existsSync(staleClaim), false);
   record('watch-print-error');
-  await assert.rejects(watch('watch-print-error', () => { throw Error('watch print failed'); }), /watch print failed/);
+  await assert.rejects(watch('watch-print-error', () => { throw Error('watch print failed'); }, { debounceSec: 0 }), /watch print failed/);
   assert.equal(fs.existsSync(claimFor('watch-print-error')), false, 'watch error releases its claim');
   assert.equal(inbox(readEvents(), 'watch-print-error', readAck('watch-print-error')).pending.length, 1);
   const heartbeatWrite = fs.writeFileSync;

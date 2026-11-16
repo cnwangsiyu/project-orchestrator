@@ -537,10 +537,10 @@ const readCodexAll = (reg, errors) => {
 const TTL_MS = 10 * 60 * 1000;
 export const CACHE = process.env.QUOTA_CACHE || path.join(SHARED, 'quota.json');
 export const QUOTA_LOG = process.env.QUOTA_LOG_FILE || path.join(SHARED, 'quota-log.jsonl');
-export const ROUTE_LOG = process.env.ROUTE_LOG_FILE || path.join(SHARED, 'route-log.jsonl');
+export const ROUTE_LOG = process.env.ROUTE_LOG_FILE || path.join(process.env.RULES_SHARED || SHARED, 'route-log.jsonl');
 // Outcome ↔ routing-decision join, shared by outcome.mjs and review-data.mjs so both read the log the same way.
-// Reviews (NAME-R, review / second-opinion rows) are checks of a task, not attempts at it: they get no outcome of their own.
-export const isReviewDecision = (r) => ['review', 'review-high', 'second-opinion'].includes(r.category) || /-R\d*$/.test(r.name ?? '');
+// Reviews (NAME-R, review / second-opinion rows) are checks of a task, not attempts at it: their own automatic seat records carry review yield and are excluded from author metrics.
+export const isReviewDecision = (r) => ['review', 'review-high', 'adversarial', 'second-opinion'].includes(r.category) || r.reviewRun === true || r.role === 'second' || /-R\d*$/.test(r.name ?? '');
 // Names are compared without a leading "<project>-" (orchestrators write both T17 and lynx-view-T17). A decision belongs to
 // an outcome when its name is the outcome's name or derives from it (NAME-fix1, NAME-r2, NAME-<subtask>).
 const bare = (project, name) => (name.startsWith(`${project}-`) ? name.slice(project.length + 1) : name);
@@ -620,36 +620,8 @@ export const outcomeOwns = (project, outcomeName, r) => {
   const o = bare(project, outcomeName), d = bare(project, r.name);
   return d === o || d.startsWith(`${o}-`);
 };
-// One outcome per task (nightly review 2026-11-09: 11 tasks in a week had 2–3 records; review-data counted each, and
-// the lynx re-records of 11-06 said 0 rounds after first records with 1–2). Records of the same project and name (with
-// or without the "<project>-" prefix) merge into one at the latest record's time: the latest result, note and accepted
-// pick; the most rounds any record gave; the first non-null first pick; reviewed if any record says so. `dupes` counts
-// normal records merged. Corrections are applied last in timestamp order, even when a normal record is newer.
-export const OUTCOME_OVERRIDES = ['result', 'rounds', 'cause', 'retries', 'scopeChanges', 'minutes', 'note', 'reviewed', 'actual', 'reviewResult'];
-export const dedupeOutcomes = (records) => {
-  const by = new Map(), corrections = new Map();
-  for (const o of [...records].sort((a, b) => a.t - b.t)) {
-    const k = `${o.project}\u0000${o.project && o.name ? bare(o.project, o.name) : o.name}`;
-    if (o.correction) {
-      if (!corrections.has(k)) corrections.set(k, []);
-      corrections.get(k).push(o);
-      continue;
-    }
-    const p = by.get(k);
-    if (!p) { by.set(k, { ...o, completedAt: o.completedAt ?? o.t, dupes: 1 }); continue; }
-    const rounds = [p.rounds, o.rounds].filter((x) => x != null);
-    by.set(k, { ...p, ...o, completedAt: o.completedAt ?? (o.result ? o.t : p.completedAt), rounds: rounds.length ? Math.max(...rounds) : null, minutes: o.minutes ?? p.minutes,
-      first: p.first ?? o.first, category: p.category ?? o.category, impact: p.impact ?? o.impact, reviewed: !!(p.reviewed || o.reviewed), dupes: p.dupes + 1 });
-  }
-  for (const [k, cs] of corrections) {
-    const o = by.get(k);
-    if (!o) continue; // A correction cannot create a task; the CLI rejects these too.
-    o.correctionFrom = Object.fromEntries(OUTCOME_OVERRIDES.filter((f) => Object.hasOwn(o, f)).map((f) => [f, o[f]]));
-    for (const c of cs) for (const f of OUTCOME_OVERRIDES) if (Object.hasOwn(c, f)) o[f] = c[f];
-    o.corrected = true; o.correctedAt = cs.at(-1).t; o.corrections = cs.length;
-  }
-  return [...by.values()];
-};
+// Automatic records are provisional; manual fields and explicit corrections take precedence.
+export { OUTCOME_OVERRIDES, dedupeOutcomes } from './pipeline/outcomes.mjs';
 export const readState = ({ fresh = false, profiles, registryError = null } = {}) => {
   let data = readJson(CACHE, null);
   const object = (v) => v && typeof v === 'object' && !Array.isArray(v);

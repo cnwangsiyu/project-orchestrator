@@ -24,8 +24,9 @@ const clean = (value) => typeof value === 'string' ? value.replace(/[\r\n\t\x00-
 const live = (pid) => { try { return Number.isInteger(pid) && pid > 0 && (process.kill(pid, 0), true); } catch (e) { return e.code === 'EPERM'; } };
 const talkback = (row) => ['message', 'question', 'answered'].includes(row.event);
 const terminal = (row) => !talkback(row) && row.event !== 'running';
-const notification = (row) => row.event !== 'running' && row.event !== 'observed' && row.event !== 'answered'
-  && !(row.event === 'message' && row.wake === false);
+const notification = (row) => row.event !== 'running' && row.event !== 'observed' && row.event !== 'answered';
+const waking = (row) => notification(row) && (row.event !== 'message' || row.wake !== false);
+export const followerAlive = (row) => live(row.pid);
 const parseRows = (text) => text.split('\n').flatMap((line) => {
   try { const row = JSON.parse(line); return typeof row?.id === 'string' && typeof row.runId === 'string' && Number.isFinite(row.t)
     && (row.owner == null || validOwner(row.owner)) && ['running', 'finished', 'failed', 'stalled', 're-routed', 'needs-user', 'follower-ended', 'observed', 'message', 'question', 'answered'].includes(row.event) ? [row] : []; } catch { return []; }
@@ -69,7 +70,7 @@ const nextAck = (ack, rows, transaction = ack.transaction) => {
   const t = Date.now(), delivered = Object.fromEntries(Object.entries(ack.delivered).filter(([, receipt]) => receipt?.t >= t - RETENTION_MS).slice(-ACK_RECEIPTS));
   for (const row of rows) delivered[row.id] = { t, seq: row.seq, name: row.name, event: row.event, outFile: row.outFile,
     finalLine: row.finalLine ?? '', runId: row.runId, owner: row.owner, account: row.account, thread: row.thread,
-    kind: row.kind, text: row.text, questionId: row.questionId, timeoutMin: row.timeoutMin, default: row.default };
+    kind: row.kind, text: row.text, wake: row.wake, questionId: row.questionId, timeoutMin: row.timeoutMin, expiresAt: row.expiresAt, questionText: row.questionText, default: row.default };
   return { owner: ack.owner, transaction: transaction ?? null,
     highWater: rows.reduce((high, row) => Math.max(high, row.seq ?? 0), ack.highWater ?? 0),
     delivered: Object.fromEntries(Object.entries(delivered).slice(-ACK_RECEIPTS)) };
@@ -192,7 +193,7 @@ export const inbox = (rows, owner, ack = emptyAck(owner), now = Date.now()) => {
     // Keep the question's delivery identity so the existing cursor delivers it once.
     return answer ? {...row,event:'answered',questionText:row.text,text:answer.text,answeredAt:answer.answeredAt} : row;
   });
-  return {pending,running,unresolved};
+  return {pending,running,unresolved,questions: openQuestions(own, { owner, now })};
 };
 
 // The hot log retains pending events and latest live/uncertain state. Seven days of audit history live in rotations.
@@ -309,19 +310,19 @@ export const openQuestions = (rows, { owner, account, thread, now = Date.now() }
     && (thread === undefined || row.thread === thread) && !answered.has(JSON.stringify([row.account, row.thread, row.questionId])))
     .sort((a, b) => a.seq - b.seq);
 };
-const noteLocked = (metadata, kind, text) => {
+const noteLocked = (metadata, kind, text, wake = false) => {
   const count = readEvents().filter((row) => row.event === 'message' && row.account === metadata.account
     && row.thread === metadata.thread && row.t > Date.now() - 3600000 && row.wake !== false).length;
   return appendLocked({ ...metadata, event: 'message', kind, text: text.slice(0, 500),
-    truncated: text.length > 500, wake: count < 6 && text.length <= 500 });
+    truncated: text.length > 500, wake: (wake || ['risk', 'scope'].includes(kind)) && count < 6 && text.length <= 500 });
 };
-export const appendNote = (metadata, kind, text) => withEventLock(() => noteLocked(metadata, kind, text));
+export const appendNote = (metadata, kind, text, wake = false) => withEventLock(() => noteLocked(metadata, kind, text, wake));
 export const appendTalkback = (metadata, request) => withEventLock(() => {
   const prior = readEvents().find((row) => row.account === metadata.account && row.thread === metadata.thread
     && row.talkbackId === request.id && ['message', 'question'].includes(row.event));
   if (prior) return prior;
   const fields = { ...metadata, talkbackId: request.id };
-  return request.type === 'message' ? noteLocked(fields, request.kind, request.text)
+  return request.type === 'message' ? noteLocked(fields, request.kind, request.text, request.wake === true)
     : appendLocked({ ...fields, event: 'question', questionId: request.id, text: request.text,
       timeoutMin: request.timeoutMin, expiresAt: request.expiresAt,
       ...(request.default !== undefined ? { default: request.default } : {}) });
@@ -414,7 +415,7 @@ export const createEventTail = (owner) => {
   return { stats, rows: () => normalizeOwners([...rows.values()], [...fullIds]).sort((a, b) => (a.seq ?? a.t) - (b.seq ?? b.t)),
     prune: (ack) => {
       const own = normalizeOwners([...rows.values()],[...fullIds]), snapshot = inbox(own, owner, ack), running = new Set(snapshot.running.map((row) => row.id));
-      const keep = new Set([...snapshot.pending, ...snapshot.running].map((row) => row.id));
+      const keep = new Set([...snapshot.pending, ...snapshot.running, ...snapshot.questions].map((row) => row.id));
       const unresolvedIds = new Set(snapshot.unresolved.map(row=>row.id));
       for (const [id, row] of rows) {
         if (!keep.has(id) && !unresolvedIds.has(id)) rows.delete(id);
@@ -529,7 +530,8 @@ export const hasWatcherAsync = async (owner) => {
     return w.owner === owner && live(w.pid) && Date.now() - w.t < 45000; } catch { return false; }
 };
 export const watch = async (owner, print = (rows) => new Promise((resolve, reject) =>
-  process.stdout.write(rows.map((row) => eventLine(row)).join('\n') + '\n', (error) => error ? reject(error) : resolve()))) => {
+  process.stdout.write(rows.map((row) => eventLine(row)).join('\n') + '\n', (error) => error ? reject(error) : resolve())), { debounceSec = 45 } = {}) => {
+  if (!Number.isFinite(debounceSec) || debounceSec < 0) throw Error('--debounce-sec takes a nonnegative finite number');
   if(shortOwner(owner)) owner=eventOwner(owner,readEvents());
   if (!validOwner(owner)) throw Error('watch needs --owner <session-id> (or ORCHESTRATOR_OWNER)');
   // Capture acknowledgement state before publishing the live claim; a hook may deliver immediately after it sees us.
@@ -554,7 +556,8 @@ export const watch = async (owner, print = (rows) => new Promise((resolve, rejec
   let stopped = false, exit = 143;
   const stop = () => { stopped = true; }, interrupt = () => { exit = 130; stop(); }, hangup = () => { exit = 129; stop(); };
   process.once('SIGTERM', stop); process.once('SIGINT', interrupt); process.once('SIGHUP', hangup);
-  let timer;
+  let timer, flushAt;
+  const collected = new Map();
   try {
     heartbeat();
     timer = setInterval(() => { try { heartbeat(); } catch { exit = 1; stop(); } }, 5000);
@@ -563,25 +566,34 @@ export const watch = async (owner, print = (rows) => new Promise((resolve, rejec
       await tail.read();
       const ack = await readAckAsync(owner), own = tail.rows(), snapshot = inbox(own, owner, ack);
       for (const row of snapshot.running.filter((row) => !row.stale)) waitingRuns.add(row.runId);
-      const advanced = ack.highWater > baseline.highWater || Object.keys(ack.delivered).some((id) => !baseline.delivered[id]);
-      if (snapshot.pending.length) {
-        let result;
-        try { result = await deliverAsync(owner, print, Number.MAX_SAFE_INTEGER, { rows: own }); }
-        catch { result = { delivered: [] }; }
-        if (!result.delivered.length) await print(snapshot.pending.map((row) => ({ ...row, finalLine: `${row.finalLine ?? ''} (delivered elsewhere or acknowledgement unavailable)` })));
-        return 0;
-      }
-      if (advanced) {
-        const receipts = Object.values(ack.delivered).filter((row) => (row.seq ?? 0) > baseline.highWater);
-        await print(receipts.length ? receipts.map((row) => ({ ...row, finalLine: `${row.finalLine ?? ''} (acknowledged elsewhere)` }))
-          : [{ name: owner, event: 'acknowledged-elsewhere', finalLine: `through sequence ${ack.highWater}` }]); return 0;
-      }
-      if (waitingRuns.size && !snapshot.running.some((row) => !row.stale && waitingRuns.has(row.runId))) {
+      const receipts = Object.entries(ack.delivered).filter(([id, row]) => !baseline.delivered[id]
+        && (row.seq ?? 0) > baseline.highWater).map(([id, row]) => ({ ...row, id, acknowledgedElsewhere: true }));
+      const triggers = [...snapshot.pending, ...receipts].filter(waking);
+      if (triggers.length && flushAt === undefined) flushAt = Date.now() + debounceSec * 1000;
+      if (flushAt !== undefined) {
+        for (const row of [...snapshot.pending, ...receipts]) collected.set(row.id, row);
+        // Reserve 80% of each ask's original timeout, including asks arriving late in this batch.
+        for (const row of [...snapshot.questions, ...snapshot.pending.filter((row) => row.event === 'question')]) {
+          const reserveAt = row.expiresAt - row.timeoutMin * 60000 * 0.8;
+          flushAt = Math.min(flushAt, Number.isFinite(reserveAt) ? reserveAt : Date.now());
+        }
+        if (Date.now() >= flushAt) {
+          const printed = new Set();
+          try { await deliverAsync(owner, async (rows) => {
+            await print(rows); for (const row of rows) printed.add(row.id);
+          }, Number.MAX_SAFE_INTEGER, { rows: own }); }
+          catch {}
+          const remaining = [...collected.values()].filter((row) => !printed.has(row.id));
+          if (remaining.length) await print(remaining.map((row) => ({ ...row,
+            finalLine: `${row.finalLine ?? ''} (${row.acknowledgedElsewhere ? 'acknowledged elsewhere' : 'delivered elsewhere or acknowledgement unavailable'})` })));
+          return 0;
+        }
+      } else if (waitingRuns.size && !snapshot.running.some((row) => !row.stale && waitingRuns.has(row.runId))) {
         await print([{ name: owner, event: 'workers-no-longer-running', finalLine: 'observed completion or stale/dead follower; reconcile with mine' }]);
         return 0;
       }
       tail.prune(ack);
-      await new Promise((resolve) => setTimeout(resolve, 150));
+      await new Promise((resolve) => setTimeout(resolve, Math.max(1, Math.min(150, flushAt === undefined ? 150 : flushAt - Date.now()))));
     }
   } finally {
     clearInterval(timer); process.removeListener('SIGTERM', stop); process.removeListener('SIGINT', interrupt); process.removeListener('SIGHUP', hangup);
