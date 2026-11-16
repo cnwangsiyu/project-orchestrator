@@ -42,7 +42,9 @@
   "evelyns-world": {
     "profile": "no-review",
     "reason": "User decision 2026-11-15: \"evelyn 和获客都免审查吧\"",
-    "revisit": "When the user changes this decision."
+    "revisit": "When the user changes this decision.",
+    "root": "/Volumes/Code/Evelyn's World",
+    "rootNote": "Trusted Claude launch directory on the MacBook (evelyns-world orchestrator, 2026-11-15); worktrees under its .claude/worktrees/."
   },
   "acq": {
     "profile": "no-review",
@@ -63,6 +65,8 @@
   "autotrader": {
     "profile": "no-review",
     "reason": "User decision 2026-11-15: \"autotrader 也先免审查\"",
-    "revisit": "When the user changes this decision; autotrader is exempt for now."
+    "revisit": "When the user changes this decision; autotrader is exempt for now.",
+    "root": "/Volumes/Code/AutoTrader",
+    "rootNote": "Trusted Claude launch directory on the MacBook (autotrader orchestrator, 2026-11-15); task worktrees under /Volumes/Code/AutoTrader-wt/<task>."
   }
 }
