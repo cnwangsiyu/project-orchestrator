@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { readEvents } from './worker-events.mjs';
 import { runningWorkers } from './running-workers.mjs';
+import { acquireLock } from './shared-file.mjs';
 import { orchRoot, sharedDir, projectDir, publicId, iso, timeOf, oneLine, maskSecrets, readJson, readText,
   jsonLines, atomicJson, appendLogLocked, withLock } from './task-storage.mjs';
 
@@ -15,12 +16,25 @@ export const readBoard = project => {
   if (board.schemaVersion !== BOARD_VERSION || board.project !== project || !Array.isArray(board.tasks)) throw Error('unsupported or invalid board');
   return board;
 };
-export const mutateBoard = (project, fn) => withLock(boardFile(project), () => {
+export const visibleBoard = board => ({ ...board, tasks: board.tasks.filter(task => !task.aliasOf) });
+export const mutateBoard = (project, fn, options = { timeoutMs: 1800, retryMs: 20 }) => withLock(boardFile(project), () => {
   const board = readBoard(project), before = JSON.stringify(board);
   const result = fn(board);
   if (JSON.stringify(board) !== before) { board.updatedAt = iso(Date.now()); atomicJson(boardFile(project), board); }
   return result ?? board;
-});
+}, options);
+const authored = task => Boolean(task.orchestratorUpdatedAt);
+const canonicalTask = (board, id) => {
+  const seen = new Set();
+  let task = board.tasks.find(row => row.id === id);
+  while (task?.aliasOf) {
+    if (seen.has(task.id)) throw Error('cyclic task alias');
+    seen.add(task.id);
+    task = board.tasks.find(row => row.id === task.aliasOf);
+    if (!task) throw Error('missing alias target');
+  }
+  return task;
+};
 const newTask = (id, title = id, now = Date.now()) => ({ id: publicId(id, 'task'), title: oneLine(title, 500), state: 'queued',
   next: '', blocker: '', deps: [], deadline: null, note: '', updatedAt: iso(now), orchestratorUpdatedAt: null,
   stateUpdatedAt: null, stateSource: null, auto: { workers: [], updatedAt: null } });
@@ -37,6 +51,8 @@ export const setTask = (project, id, fields, now = Date.now()) => {
   if (fields.deps !== undefined && (!Array.isArray(fields.deps) || fields.deps.some(dep => { publicId(dep, 'dependency'); return dep === id; }))) throw Error('invalid dependencies');
   if (fields.deadline && (!/^\d{4}-\d\d-\d\dT/.test(fields.deadline) || !Number.isFinite(Date.parse(fields.deadline)))) throw Error('deadline needs an ISO timestamp');
   return mutateBoard(project, board => {
+    const alias = board.tasks.find(row => row.id === id);
+    if (alias?.aliasOf) throw Error(`${id} is an alias; use board.mjs set ${canonicalTask(board, id).id} instead`);
     const task = ensureTask(board, id);
     for (const [key, value] of Object.entries(fields)) task[key] = typeof value === 'string' ? maskSecrets(value) : value;
     task.orchestratorUpdatedAt = task.updatedAt = iso(now);
@@ -50,21 +66,57 @@ export const setTask = (project, id, fields, now = Date.now()) => {
 export const linkTask = (project, id, thread, account) => {
   publicId(id, 'task'); publicId(thread, 'thread'); if (account) publicId(account, 'account');
   return mutateBoard(project, board => {
-    const task = ensureTask(board, id);
+    const task = canonicalTask(board, id) ?? ensureTask(board, id);
+    const moved = [];
     // A manual link supersedes inferred names, and a thread cannot belong to two rows.
     for (const row of board.tasks) {
+      const matches = worker => worker.thread === thread && (!account || !worker.account || worker.account === account);
+      const workers = row.auto.workers.filter(matches);
+      const linked = row.links?.some(matches);
       row.links = (row.links ?? []).filter(link => link.thread !== thread || account && link.account && link.account !== account);
-      if (row !== task) row.auto.workers = row.auto.workers.filter(worker => worker.thread !== thread || account && worker.account !== account);
+      if (row !== task) {
+        task.auto.workers.push(...workers);
+        row.auto.workers = row.auto.workers.filter(worker => !matches(worker));
+        if ((workers.length || linked) && !row.auto.workers.length && !row.links.length) moved.push(row);
+      }
     }
+    for (const row of moved) {
+      if (authored(row)) row.aliasOf = task.id;
+      else board.tasks = board.tasks.filter(other => other !== row);
+    }
+    for (const row of board.tasks) if (moved.some(source => source.id === row.aliasOf)) row.aliasOf = task.id;
+    task.auto.workers = [...new Map(task.auto.workers.map(worker => [workerKey(worker), worker])).values()];
+    task.auto.updatedAt = task.auto.workers.length ? iso(Math.max(...task.auto.workers.map(worker => timeOf(worker.updatedAt)))) : null;
     task.links.push({ thread, ...(account ? { account } : {}) });
     task.orchestratorUpdatedAt = task.updatedAt = iso(Date.now());
+    return task;
+  });
+};
+export const removeTask = async (project, id, { force = false, facts, now = Date.now() } = {}) => {
+  publicId(id, 'task');
+  facts ??= await workerFacts();
+  return mutateBoard(project, board => {
+    const task = board.tasks.find(row => row.id === id);
+    if (!task) throw Error(`no task: ${id}`);
+    if (!authored(task)) throw Error('remove requires an orchestrator-owned row (use set first)');
+    const attached = worker => task.auto.workers.some(row => workerKey(row) === workerKey(worker)
+      || row.runId && row.runId === worker.runId) || task.links?.some(link => link.thread === worker.thread && (!link.account || link.account === worker.account));
+    const latest = new Map();
+    for (const event of [...facts.events].sort((a, b) => a.t - b.t || (a.seq ?? 0) - (b.seq ?? 0)))
+      if (stateEvent(event.event)) latest.set(workerKey(event), event);
+    const live = facts.live.threads.some(attached) || [...latest.values()].some(event => event.event === 'running' && attached(event));
+    if (!force && live) throw Error('live worker attached; use --force to remove');
+    const removed = board.tasks.filter(row => row === task || row.aliasOf === id);
+    appendLogLocked(archiveFile(project), removed.map(row => ({ schemaVersion: BOARD_VERSION, action: 'remove', archivedAt: iso(now), project, task: row })));
+    board.tasks = board.tasks.filter(row => !removed.includes(row));
     return task;
   });
 };
 export const archiveTasks = (project, days, now = Date.now()) => {
   if (!Number.isFinite(days) || days < 0) throw Error('done-older-than needs nonnegative days');
   return mutateBoard(project, board => {
-    const archived = board.tasks.filter(task => task.state === 'done' && timeOf(task.stateUpdatedAt ?? task.updatedAt) < now - days * 86400000);
+    const done = board.tasks.filter(task => !task.aliasOf && task.state === 'done' && timeOf(task.stateUpdatedAt ?? task.updatedAt) < now - days * 86400000);
+    const archived = board.tasks.filter(task => done.includes(task) || done.some(target => task.aliasOf === target.id));
     if (archived.length) {
       const prior = jsonLines(readText(archiveFile(project)));
       const pending = archived.filter(task => !prior.some(row => row.task.id === task.id && row.task.updatedAt === task.updatedAt));
@@ -163,7 +215,7 @@ export const workerFacts = async ({ launches = readLaunches(), events = readEven
   const live = await runningWorkers({ rows: events, profiles, knownThread: async () => { throw Error('passive board: no hub probe'); } });
   return { launches, events, live };
 };
-export const refreshBoard = async (project, { thread, account, facts, now = Date.now() } = {}) => {
+const refreshOnce = async (project, { thread, account, facts, now = Date.now() } = {}) => {
   facts ??= await workerFacts();
   project = resolveProject(project, facts.launches);
   const groups = new Map(), launchMap = new Map(facts.launches.map(launch => [workerKey(launch), launch]));
@@ -176,8 +228,10 @@ export const refreshBoard = async (project, { thread, account, facts, now = Date
   for (const launch of facts.launches) if ((!thread || launch.thread === thread) && (!account || launch.account === account)) {
     if (!groups.has(workerKey(launch))) groups.set(workerKey(launch), []);
   }
-  return mutateBoard(project, board => {
-    const archived = new Map(jsonLines(readText(archiveFile(project))).map(row => [row.task.id, timeOf(row.archivedAt)]));
+  const update = board => {
+    const history = jsonLines(readText(archiveFile(project)));
+    const archived = new Map(history.map(row => [row.task.id, timeOf(row.archivedAt)]));
+    const removed = history.filter(row => row.action === 'remove');
     for (const [key, events] of groups) {
       const launch = launchMap.get(key), defaults = launch?.defaults ?? {}, latest = events.at(-1);
       const base = latest ?? launch; if (!base) continue;
@@ -186,17 +240,23 @@ export const refreshBoard = async (project, { thread, account, facts, now = Date
       const owner = latest?.owner ?? defaults.owner;
       const inferredProject = launchProject(launch) ?? [...events].reverse().find(event => event.project)?.project ?? projectForOwner(owner, facts.launches);
       if (!manual && !existing && inferredProject !== project) continue;
-      const id = manual?.id ?? defaults.task ?? latest?.task ?? existing?.id ?? defaults.name ?? latest?.name;
+      const inferredId = manual?.id ?? defaults.task ?? latest?.task ?? existing?.id ?? defaults.name ?? latest?.name;
+      const id = canonicalTask(board, inferredId)?.id ?? inferredId;
       if (!id) continue;
       publicId(id, 'task');
       const stateRows = events.filter(event => stateEvent(event.event)), stateRow = stateRows.at(-1);
       const eventAt = stateRow?.t ?? launch?.t ?? 0;
       if (!existing && !manual && archived.has(id) && eventAt <= archived.get(id)) continue;
+      if (!existing && !manual && removed.some(row => eventAt <= timeOf(row.archivedAt)
+        && (row.task.auto.workers.some(worker => workerKey(worker) === key || base.runId && worker.runId === base.runId)
+          || row.task.links?.some(link => link.thread === base.thread && (!link.account || link.account === base.account))))) continue;
+      // Do not seed a migration with old completions, even if later notes were appended.
+      const live = facts.live.threads.find(worker => worker.account === base.account && worker.thread === base.thread);
+      if (!existing && !manual && !live && ['finished', 'failed'].includes(stateRow?.event) && eventAt < now - 86400000) continue;
       const task = ensureTask(board, id, defaults.name ?? latest?.name ?? id, eventAt || now);
       // Collapse the provisional start row into its final account/thread identity.
       const prior = task.auto.workers.find(worker => workerKey(worker) === key || base.runId && worker.runId === base.runId);
       if (prior?.eventAt > eventAt) continue;
-      const live = facts.live.threads.find(worker => worker.account === base.account && worker.thread === base.thread);
       const runId = stateRow?.runId ?? base.runId ?? prior?.runId ?? null;
       const sameRun = !prior?.runId || !runId || prior.runId === runId;
       const starts = [events.find(event => event.event === 'running' && event.runId === runId)?.t,
@@ -243,6 +303,7 @@ export const refreshBoard = async (project, { thread, account, facts, now = Date
       task.updatedAt = iso(Math.max(timeOf(task.orchestratorUpdatedAt), timeOf(task.auto.updatedAt)));
     }
     for (const task of board.tasks) {
+      if (task.aliasOf) continue;
       const workers = task.auto.workers.filter(worker => worker.state !== 'rerouted'), recent = [...workers].sort((a, b) => b.eventAt - a.eventAt)[0];
       if (task.state === 'waiting-user' && task.queueWait) continue;
       if (!recent || recent.eventAt <= timeOf(task.stateUpdatedAt)) continue;
@@ -259,5 +320,51 @@ export const refreshBoard = async (project, { thread, account, facts, now = Date
       } else if (task.blocker.startsWith('worker ')) task.blocker = '';
     }
     return board;
-  });
+  };
+  // Rollout/result I/O and parsing must never hold the board lock. Compare-and-swap
+  // against a fresh snapshot so concurrent set/link/remove edits are not overwritten.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const snapshot = readBoard(project), before = JSON.stringify(snapshot);
+    const candidate = update(structuredClone(snapshot));
+    const release = acquireLock(boardFile(project), { timeoutMs: 0 });
+    if (!release) return readBoard(project);
+    try {
+      const current = readBoard(project);
+      if (JSON.stringify(current) !== before) continue;
+      if (JSON.stringify(candidate) !== before) {
+        candidate.updatedAt = iso(now); atomicJson(boardFile(project), candidate);
+      }
+      return candidate;
+    } finally { release(); }
+  }
+  return readBoard(project);
+};
+export const refreshBoard = async (project, options = {}) => {
+  project = resolveProject(project, options.facts?.launches);
+  const marker = `${boardFile(project)}.refresh`, pending = `${marker}.pending`;
+  let release = acquireLock(marker, { timeoutMs: 0, ownerPid: true });
+  if (!release) {
+    fs.writeFileSync(pending, '');
+    // Close the final-check/release race: either the owner sees pending, or we take over.
+    release = acquireLock(marker, { timeoutMs: 0, ownerPid: true });
+    if (!release && !options.nonBlocking) {
+      const until = Date.now() + 5000;
+      while (!release && Date.now() < until) {
+        await new Promise(resolve => setTimeout(resolve, 20));
+        release = acquireLock(marker, { timeoutMs: 0, ownerPid: true });
+      }
+    }
+    if (!release) return readBoard(project);
+  }
+  let board;
+  let nextOptions = options;
+  try {
+    do {
+      try { fs.unlinkSync(pending); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+      board = await refreshOnce(project, nextOptions);
+      nextOptions = { ...options, thread: undefined, account: undefined };
+    } while (fs.existsSync(pending));
+  } finally { release(); }
+  if (fs.existsSync(pending)) return refreshBoard(project, nextOptions);
+  return board;
 };

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { workerFacts, refreshBoard, boardProjects, launchProject } from './task-board.mjs';
+import { workerFacts, refreshBoard, visibleBoard, boardProjects, launchProject } from './task-board.mjs';
 import { readQueue, queueOpen } from './user-queue.mjs';
 import { sharedDir, iso, timeOf, oneLine } from './task-storage.mjs';
 
@@ -37,7 +37,7 @@ export const resourceStatus = project => {
 export const statusMismatches = ({ board, live, queue, now = Date.now() }) => {
   const mismatches = [], linked = worker => board.tasks.some(task => task.auto.workers.some(row => row.account === worker.account && row.thread === worker.thread)
     || task.links?.some(link => link.thread === worker.thread && (!link.account || link.account === worker.account)));
-  for (const task of board.tasks) {
+  for (const task of board.tasks.filter(task => !task.aliasOf)) {
     const hasLive = task.auto.workers.some(worker => live.some(row => row.thread === worker.thread && row.account === worker.account));
     const lastActivity = Math.max(timeOf(task.stateUpdatedAt ?? task.updatedAt), ...task.auto.workers.map(worker => timeOf(worker.lastActivityAt)));
     if (task.state === 'running' && !hasLive && now - lastActivity > 30 * 60000)
@@ -55,7 +55,7 @@ export const statusMismatches = ({ board, live, queue, now = Date.now() }) => {
 };
 export const projectStatus = async (project, { facts, queue = readQueue(), resources, now = Date.now() } = {}) => {
   facts ??= await workerFacts();
-  const board = await refreshBoard(project, { facts, now });
+  const board = visibleBoard(await refreshBoard(project, { facts, now }));
   const launches = new Map(facts.launches.map(launch => [JSON.stringify([launch.account, launch.thread]), launch]));
   const belongs = worker => launchProject(launches.get(JSON.stringify([worker.account, worker.thread]))) === project
     || facts.events.some(event => event.thread === worker.thread && event.account === worker.account && event.project === project)

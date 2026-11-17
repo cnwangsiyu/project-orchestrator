@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { boardFile, readBoard, setTask, linkTask, archiveTasks, refreshBoard, resolveProject, rolloutFields, resultFields,
+import { boardFile, readBoard, setTask, linkTask, removeTask, archiveTasks, refreshBoard, resolveProject, rolloutFields, resultFields,
   workerFacts } from '../lib/task-board.mjs';
 import { addQuestion, updateQuestion, readQueue, queueFile, deliverAnswers } from '../lib/user-queue.mjs';
 import { projectStatus, statusMismatches, parseResourceHolds } from '../lib/task-status.mjs';
@@ -130,7 +130,29 @@ try {
   linkTask('gamma', 'manual-task', 'fallback-thread');
   await refreshBoard('gamma', { facts: facts([fallback], [fallbackEvent]) });
   assert.equal(taskOf('gamma', 'manual-task').auto.workers[0].thread, 'fallback-thread');
-  assert.equal(taskOf('gamma', 'fallback-exact').auto.workers.length, 0);
+  assert.equal(taskOf('gamma', 'fallback-exact'), undefined, 'empty auto row is removed on link');
+  await refreshBoard('gamma', { facts: facts([fallback], [fallbackEvent]) });
+  assert.equal(taskOf('gamma', 'fallback-exact'), undefined, 'linked thread never recreates its inferred row');
+  const kept = launch('aliases', undefined, 'authored-worker', 'authored-thread', now);
+  const keptEvent = event('aliases', 'authored-worker', 'authored-thread', 'running', now);
+  await refreshBoard('aliases', { facts: facts([kept], [keptEvent]), now });
+  setTask('aliases', 'authored-worker', { next: 'keep this context', note: 'owned' }, now + 1);
+  linkTask('aliases', 'target', 'authored-thread', 'fixture');
+  assert.equal(taskOf('aliases', 'authored-worker').aliasOf, 'target');
+  assert.equal(taskOf('aliases', 'authored-worker').note, 'owned');
+  assert.equal(taskOf('aliases', 'target').auto.workers[0].thread, 'authored-thread', 'link moves cached facts immediately');
+  assert.throws(() => setTask('aliases', 'authored-worker', { state: 'done' }), /use board.mjs set target/);
+  assert.deepEqual(JSON.parse(cli('board.mjs', ['show', '--project', 'aliases', '--json'])).tasks.map(row => row.id), ['target']);
+  assert.deepEqual(JSON.parse(cli('status.mjs', ['--project', 'aliases', '--json'])).board.tasks.map(row => row.id), ['target']);
+  linkTask('aliases', 'new-target', 'authored-thread', 'fixture');
+  assert.equal(taskOf('aliases', 'authored-worker').aliasOf, 'new-target', 'alias chains flatten on relink');
+  const aliasPage = await projectStatus('aliases', { facts: facts([kept], [keptEvent]), queue: [], resources: { state: 'KNOWN', holds: [] }, now });
+  assert.deepEqual(aliasPage.board.tasks.map(row => row.id), ['new-target']);
+  assert.equal(aliasPage.mismatches.length, 0);
+  setTask('aliases', 'new-target', { state: 'done' }, now + 2);
+  assert.deepEqual(new Set(archiveTasks('aliases', 0, now + 3).map(row => row.id)), new Set(['authored-worker', 'target', 'new-target']));
+  await refreshBoard('aliases', { facts: facts([kept], [keptEvent]), now: now + 4 });
+  assert.equal(readBoard('aliases').tasks.length, 0, 'archival leaves no dangling aliases or resurrected workers');
   assert.equal(resolveProject(undefined, [l1, fallback]), 'gamma');
   assert.equal(resolveProject('alpha', [l1, fallback]), 'alpha');
   process.env.ORCHESTRATOR_PROJECT = 'env-project'; assert.equal(resolveProject(undefined, []), 'env-project'); process.env.ORCHESTRATOR_PROJECT = '';
@@ -138,6 +160,43 @@ try {
   assert.equal(inheritedLaunch('fixture', { thread: 'inherit-thread' }).task, 'explicit-task');
   assert.equal(parseTaskSpec(['implement', '--impact', 'service', '--project', 'gamma', '--task', 'explicit-task'], { taskId: 'route-task', requestId: 'request' }).flags.task, 'explicit-task');
   console.log('PASS exact-name fallback, manual links, owner/env project defaults, launch task inheritance, router task option');
+  const historical = [
+    ['old-finished', 'finished', old], ['old-failed', 'failed', old], ['recent-finished', 'finished', now - 1000],
+    ['recent-failed', 'failed', now - 1000], ['cutoff-finished', 'finished', now - 86400000], ['old-running', 'running', old],
+  ];
+  const historyLaunches = historical.map(([name, , time]) => launch('history', undefined, name, name, time));
+  const historyEvents = historical.map(([name, state, time]) => event('history', name, name, state, time));
+  historyEvents.push(event('history', 'old-finished', 'old-finished', 'message', now, { kind: 'info', text: 'late note' }));
+  await refreshBoard('history', { facts: facts(historyLaunches, historyEvents), now });
+  assert.equal(taskOf('history', 'old-finished'), undefined); assert.equal(taskOf('history', 'old-failed'), undefined);
+  assert.equal(taskOf('history', 'recent-finished').state, 'review'); assert.equal(taskOf('history', 'recent-failed').state, 'blocked');
+  assert.equal(taskOf('history', 'cutoff-finished').state, 'review'); assert.equal(taskOf('history', 'old-running').state, 'running');
+  await refreshBoard('history', { facts: facts(historyLaunches, historyEvents), now: now + 3 * 86400000 });
+  assert.equal(taskOf('history', 'recent-finished').state, 'review', 'existing rows are not retroactively discarded');
+  linkTask('history', 'explicit-history', 'old-finished');
+  await refreshBoard('history', { facts: facts(historyLaunches, historyEvents), now });
+  assert.equal(taskOf('history', 'explicit-history').state, 'review', 'explicit links can import old workers');
+  console.log('PASS 24h history cutoff, late notes, recent failure/completion, live rows, repeat refresh and explicit link');
+
+  setTask('removal', 'mistake', { next: 'wrong row' }, now);
+  assert.equal(JSON.parse(cli('board.mjs', ['remove', 'mistake', '--project', 'removal'])), 'mistake');
+  assert.equal(taskOf('removal', 'mistake'), undefined);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'removal/board-archive.jsonl'), 'utf8')).action, 'remove');
+  await assert.rejects(removeTask('removal', 'missing', { facts: facts([], []) }), /no task/);
+  const removalLaunch = launch('removal', undefined, 'inferred-mistake', 'removal-thread', now);
+  const removalEvent = event('removal', 'inferred-mistake', 'removal-thread', 'running', now);
+  const removalFacts = facts([removalLaunch], [removalEvent]);
+  await refreshBoard('removal', { facts: removalFacts, now });
+  await assert.rejects(removeTask('removal', 'inferred-mistake', { force: true, facts: removalFacts }), /orchestrator-owned/);
+  linkTask('removal', 'owned-mistake', 'removal-thread');
+  await assert.rejects(removeTask('removal', 'owned-mistake', { facts: removalFacts }), /live worker attached/);
+  await removeTask('removal', 'owned-mistake', { force: true, facts: removalFacts, now: now + 10 });
+  await refreshBoard('removal', { facts: removalFacts, now: now + 11 });
+  assert.equal(readBoard('removal').tasks.length, 0, 'force removal does not resurrect a linked worker under its inferred name');
+  const renewed = event('removal', 'inferred-mistake', 'removal-thread', 'running', now + 20);
+  await refreshBoard('removal', { facts: facts([removalLaunch], [removalEvent, renewed]), now: now + 21 });
+  assert.ok(taskOf('removal', 'inferred-mistake'), 'new lifecycle event can reopen a removed task');
+  console.log('PASS remove CLI/archive audit, ownership/live guard, force, linked-worker tombstone and reopen');
   const handoff1 = launch('handoff', 'H1', 'handoff-worker', 'handoff-old', now);
   const handoff2 = launch('handoff', 'H1', 'handoff-worker', 'handoff-new', now + 10);
   await refreshBoard('handoff', { facts: facts([handoff1, handoff2], [event('handoff', 'handoff-worker', 'handoff-old', 'running', now),

@@ -18,6 +18,13 @@ boards are isolated in its `projects/` child; when it ends in `_shared`, boards 
 Tests must set scratch paths and never use real hubs or live orchestrator/secretary data.
 
 Board writes use a directory lock plus a same-directory temporary file, fsync and rename.
+Orchestrator mutations (`set`, `link`, `remove`) wait at most 1.8 seconds for the board lock,
+then fail with `lock busy` rather than hanging. Refresh discovers workers and parses rollout/result
+files outside that lock, then attempts a non-blocking compare-and-swap. Concurrent mutations
+are preserved by recomputing from the latest board; a busy board defers facts to the next refresh.
+One project-scoped single-flight marker coalesces overlapping refreshes, with a pending follow-up
+for events that arrive during discovery. Stale locks recover after 30 seconds; refresh markers
+also check the owner PID so a slow, still-live refresh is never evicted.
 Queue and archive logs are logically append-only JSONL: locked atomic replacement preserves the
 entire prior log plus new events, so concurrent readers cannot see a partial append. Unknown
 board schema versions and malformed boards fail without overwriting data.
@@ -49,6 +56,8 @@ States: `queued|running|blocked|waiting-user|review|done|parked|cancelled`. Work
 last lifecycle fact, not the orchestrator's judgement. Internal `runId`, `eventAt`, `updatedAt`
 and `_rollout`/`_session`/`_result` cache fields retain merge identity, event precedence and mtime/size caches.
 Manual `links` hold `{thread, account?}`. All times except internal event milliseconds are ISO.
+An authored source row emptied by `link` retains `aliasOf: "target-task"` and its authored fields;
+aliases are omitted from `show` and `status`, including JSON output.
 
 Project defaults: explicit `--project`, then `ORCHESTRATOR_PROJECT`, then the project of the
 owner's latest saved worker launch (`ORCHESTRATOR_OWNER`/`CODEX_WORKER_OWNER`). If none resolves,
@@ -61,25 +70,45 @@ node scripts/board.mjs link T1 --project example --thread thread-id
 node scripts/board.mjs refresh --project example --thread thread-id
 node scripts/board.mjs set T1 --project example --state done
 node scripts/board.mjs archive --project example --done-older-than 7
+node scripts/board.mjs remove accidental-task --project example
 ```
 
 `set` never replaces auto fields. Omitting a field preserves it; `--deps ""` clears dependencies.
+`set` on an alias refuses the edit and prints a hint naming the canonical target.
+`link` moves the thread's cached worker entry immediately to the target and overrides inference
+on later refreshes. An emptied, purely automatic source row is deleted; an authored source row
+is retained as a hidden alias. Rows with other attached workers/links remain ordinary tasks.
+Relinking flattens aliases to the new target. A best-effort asynchronous refresh fills facts for
+a previously unseen thread without delaying `link`.
+`remove <task>` deletes an orchestrator-owned row created by mistake and records the complete row
+with `action: "remove"` in `board-archive.jsonl`. Purely automatic rows must first be adopted with
+`set`. A live attached worker requires `--force`; force removes the board row, not the worker.
+Aliases pointing to the removed task are also archived and deleted. Removal tombstones prevent
+old linked workers from reappearing under inferred names; newer lifecycle events or explicit
+`set`/`link` can reopen them.
 `archive` moves sufficiently old done rows into `board-archive.jsonl`; old worker events cannot
-resurrect them. A new launch/event after archival, or an explicit `set`, can reopen the task.
+resurrect them. Its aliases are archived too, preventing dangling targets. A new launch/event
+after archival, or an explicit `set`, can reopen the task.
 
 ## Automatic Worker Facts
 
 Use `codex-worker start/turn --task T1`; the task is saved in public launch metadata and inherited
 on continuation. `route.mjs --task T1` passes it to the worker. Without `--task`, the exact launch
 name is the task id. A worker start creates an unknown row with title=name and state=running.
-Manual links override inferred names.
+Manual links override inferred names. When creating/importing rows, refresh skips workers whose
+latest terminal lifecycle event is `finished`/`failed` more than 24 hours old, unless explicitly
+linked or observed live. Recent completions (including exactly 24 hours old) enter review;
+recent failures enter blocked. Later notes do not make an old completion recent. Existing rows
+are not retroactively removed when they age past the cutoff; live/running workers still import.
 
 Every event written by `codex-worker` requests a bounded, non-blocking refresh child, including
 start/turn, notes, asks and terminal events. Refresh failure never fails the worker. `show` and
-`status` see all latest facts even when refresh requests are coalesced for 500 ms off the setup
+`status` request latest facts even when refresh requests are coalesced for 500 ms off the setup
 critical path; terminal events and command exit flush pending requests immediately. Rerouted
 workers are inactive; a detached follower is UNKNOWN until new evidence arrives. `show` and
-`status` refresh first; rollout parsing reads at most 128 KiB and skips unchanged mtime/size.
+`status` refresh first, waiting up to five seconds for an overlapping refresh before falling back
+to the latest persisted board. Lifecycle children use non-blocking `refresh --background` and
+request a follow-up instead of waiting; rollout parsing reads at most 128 KiB and skips unchanged mtime/size.
 `currentStep` is a single line of at most 120 characters; password/token/secret/key/credential
 values are masked. Progress is the latest info/progress note. Final results use the worker's
 separate `--out`/`codex-last.md` summary, commit hash and pass/fail counts, when present.

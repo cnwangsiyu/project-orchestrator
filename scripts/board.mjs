@@ -1,14 +1,15 @@
 #!/usr/bin/env node
 import { pathToFileURL } from 'node:url';
 import { parseOptions, oneLine } from './lib/task-storage.mjs';
-import { resolveProject, setTask, linkTask, archiveTasks, refreshBoard } from './lib/task-board.mjs';
+import { resolveProject, setTask, linkTask, removeTask, archiveTasks, refreshBoard, visibleBoard } from './lib/task-board.mjs';
+import { requestBoardRefresh } from './lib/board-refresh.mjs';
 
 export async function main(argv = process.argv.slice(2)) {
-  if (argv.includes('--help') || argv.includes('-h')) { console.log('usage: board.mjs set <task> [--project p] [--title] [--state queued|running|blocked|waiting-user|review|done|parked|cancelled] [--next] [--blocker] [--deps a,b] [--deadline ISO] [--note]\n       board.mjs show [--project p] [--task t] [--json]\n       board.mjs link <task> --thread <id> [--account a] [--project p]\n       board.mjs archive --done-older-than <days> [--project p]\n       board.mjs refresh [--project p] [--thread t]\nOrchestrators write state/next/blocker; worker facts are filled automatically. See references/task-board.md.'); return 0; }
+  if (argv.includes('--help') || argv.includes('-h')) { console.log('usage: board.mjs set <task> [--project p] [--title] [--state queued|running|blocked|waiting-user|review|done|parked|cancelled] [--next] [--blocker] [--deps a,b] [--deadline ISO] [--note]\n       board.mjs show [--project p] [--task t] [--json]\n       board.mjs link <task> --thread <id> [--account a] [--project p]\n       board.mjs remove <task> [--force] [--project p]\n       board.mjs archive --done-older-than <days> [--project p]\n       board.mjs refresh [--project p] [--thread t]\nOrchestrators write state/next/blocker; worker facts are filled automatically. See references/task-board.md.'); return 0; }
   const { opts, pos } = parseOptions(argv, { values: ['project', 'task', 'title', 'state', 'next', 'blocker', 'deps', 'deadline', 'note',
-    'done-older-than', 'thread', 'account'], booleans: ['json'] });
+    'done-older-than', 'thread', 'account'], booleans: ['json', 'force', 'background'] });
   const [cmd, id, ...extra] = pos;
-  if (extra.length || !['set', 'show', 'archive', 'link', 'refresh'].includes(cmd)) throw Error('usage: board.mjs set|show|archive|link|refresh [task] [--project p]');
+  if (extra.length || !['set', 'show', 'archive', 'link', 'remove', 'refresh'].includes(cmd)) throw Error('usage: board.mjs set|show|archive|link|remove|refresh [task] [--project p]');
   const project = resolveProject(opts.project);
   if (cmd === 'set') {
     if (!id) throw Error('set needs a task');
@@ -19,14 +20,19 @@ export async function main(argv = process.argv.slice(2)) {
   if (cmd === 'link') {
     if (!id || !opts.thread) throw Error('link needs a task and --thread');
     linkTask(project, id, opts.thread, opts.account);
-    await refreshBoard(project, { thread: opts.thread, account: opts.account }); console.log(`linked ${id} to ${opts.thread}`); return;
+    requestBoardRefresh({ project });
+    console.log(`linked ${id} to ${opts.thread}`); return;
+  }
+  if (cmd === 'remove') {
+    if (!id) throw Error('remove needs a task');
+    console.log(JSON.stringify((await removeTask(project, id, { force: opts.force })).id)); return;
   }
   if (id) throw Error(`${cmd} takes no positional task; use --task`);
   if (cmd === 'archive') {
     if (opts['done-older-than'] === undefined || !opts['done-older-than'].trim()) throw Error('archive needs --done-older-than');
     console.log(JSON.stringify(archiveTasks(project, Number(opts['done-older-than'])).map(task => task.id))); return;
   }
-  const board = await refreshBoard(project, { thread: opts.thread, account: opts.account });
+  const board = visibleBoard(await refreshBoard(project, { thread: opts.thread, account: opts.account, nonBlocking: opts.background }));
   if (cmd === 'refresh') return;
   const tasks = opts.task ? board.tasks.filter(task => task.id === opts.task) : board.tasks;
   if (opts.json) console.log(JSON.stringify({ ...board, tasks }, null, 2));
