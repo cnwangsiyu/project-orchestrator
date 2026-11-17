@@ -26,6 +26,9 @@ try {
   assert.ok(digestText.split('\n').length<=61,'digest line budget');
   assert.equal(digest.version, '2026-11-16.11');
   assert.match(digest.worker, /Mid-turn talkback:.*ask --default.*never routine progress/);
+  assert.match(digest.worker, /Identity uses explicit flags, CODEX_WORKER_\*, runtime CODEX_THREAD_ID\/TRAECLI_THREAD_ID or exactly one running public context matching cwd; ambiguity exits 2/);
+  assert.match(digest.worker, /bare note\/ask use runtime CODEX_THREAD_ID or TRAECLI_THREAD_ID/);
+  assert.doesNotMatch(digest.worker, /newest running public context|discover the newest running/);
   assert.equal(digestText.match(/^- Day 3 /gm)?.length,1);
   assert.match(digestText,/quality first across company accounts/);
   assert.match(digestText,/without a fixed working-worker wall timeout/);

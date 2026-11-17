@@ -19,12 +19,13 @@ fs.writeFileSync(accounts, JSON.stringify(Object.fromEntries(['trae', 'ttadk', '
   { kind: name === 'alt' ? 'chatgpt' : name, home: path.join(tmp, name), hub: 'ws://127.0.0.1:1' }]))));
 const env = { ...process.env, HOME: tmp, RULES_SHARED: tmp, CODEX_ACCOUNTS: accounts, NODE_OPTIONS: '',
   ORCHESTRATOR_OWNER: '', CLAUDE_SESSION_ID: '', CLAUDE_JOB_DIR: '', CLAUDECODE: '',
-  CODEX_WORKER_THREAD: '', CODEX_WORKER_ACCOUNT: '', CODEX_WORKER_OWNER: '', CODEX_WORKER_NAME: '', WORKER_EVENTS_FIXTURE: '{}' };
+  CODEX_WORKER_THREAD: '', CODEX_WORKER_ACCOUNT: '', CODEX_WORKER_OWNER: '', CODEX_WORKER_NAME: '',
+  CODEX_THREAD_ID: '', TRAECLI_THREAD_ID: '', WORKER_EVENTS_FIXTURE: '{}' };
 const run = (args, extra = {}, cwd = project) => spawnSync(process.execPath, ['--import', fixture, worker, ...args],
   { env: { ...env, ...extra }, cwd, encoding: 'utf8', timeout: 8000 });
 const children = new Set();
-const start = (args, config = {}, cwd = project) => {
-  const processEnv = { ...env, WORKER_EVENTS_FIXTURE: JSON.stringify(config) };
+const start = (args, config = {}, cwd = project, extra = {}) => {
+  const processEnv = { ...env, ...extra, WORKER_EVENTS_FIXTURE: JSON.stringify(config) };
   const child = spawn(process.execPath, ['--import', fixture, worker, ...args], { env: processEnv, cwd, stdio: ['ignore', 'pipe', 'pipe'] });
   children.add(child); let stdout = '', stderr = '';
   child.stdout.on('data', (b) => stdout += b); child.stderr.on('data', (b) => stderr += b);
@@ -35,9 +36,9 @@ const until = async (fn, label) => {
   const deadline = Date.now() + 8000;
   while (!fn()) { if (Date.now() > deadline) throw Error(`timeout: ${label}`); await new Promise((r) => setTimeout(r, 30)); }
 };
-const seed = (thread, cwd, startedAt, event = 'running') => {
+const seed = (thread, cwd, startedAt, event = 'running', extra = {}) => {
   const metadata = { account: 'alt', thread, owner: '642e45a7-f078-50b2-8e47-185a17d3d0cf', name: thread, runId: `${thread}-run`,
-    turn: `${thread}-turn`, cwd, startedAt, pid: process.pid };
+    turn: `${thread}-turn`, cwd, startedAt, pid: process.pid, ...extra };
   saveWorkerContext(metadata); appendEvent({ ...metadata, event, mayRun: event === 'running' }); return metadata;
 };
 const rows = (file) => fs.readFileSync(file, 'utf8').trim().split('\n').map(JSON.parse);
@@ -51,15 +52,52 @@ try {
   assert.match(oneAsk.stderr, /using thread one-thread/);
   seed('unrelated-thread', other, 999);
   seed('completed-thread', project, 9999, 'finished');
-  const newest = seed('new-thread', childDir, 2);
-  const several = run(['note', 'bare newest']);
-  assert.equal(several.status, 0, several.stderr); assert.match(several.stderr, /using thread new-thread.*newest of 2/);
-  assert.equal(resolveTalkbackIdentity({ account: 'alt', cwd: project }).thread, newest.thread);
-  const ask = start(['ask', '--timeout-min', '1', '--default', 'banana', 'bare decision?']);
-  await until(() => openQuestions(readEvents(), { thread: newest.thread }).length === 1, 'bare discovered question');
-  const reply = run(['--account', 'alt', 'reply', '--thread', newest.thread, '--owner', newest.owner, 'pear']);
+  const newest = seed('new-thread', project, 2);
+  const beforeAmbiguous = readEvents();
+  for (const args of [['note', 'older worker without discriminator'], ['--account', 'alt', 'note', 'account alone is ambiguous'],
+    ['ask', '--default', 'banana', 'ambiguous decision?']]) {
+    const several = run(args);
+    assert.equal(several.status, 2, several.stderr);
+    assert.match(several.stderr, /identity ambiguous.*alt\/new-thread.*alt\/one-thread.*--account NAME note --thread ID.*--account NAME ask --thread ID/);
+  }
+  assert.deepEqual(readEvents(), beforeAmbiguous, 'ambiguity must not append notes or questions');
+  assert.throws(() => resolveTalkbackIdentity({ account: 'alt', cwd: project, env: {} }),
+    (error) => error.exitCode === 2 && /ambiguous/.test(error.message));
+  for (const variable of ['CODEX_THREAD_ID', 'TRAECLI_THREAD_ID']) {
+    const older = run(['note', '--kind', 'info', `older via ${variable}`], { [variable]: old.thread });
+    assert.equal(older.status, 0, older.stderr); assert.match(older.stderr, new RegExp(`using thread ${old.thread}.*via ${variable}`));
+    assert.equal(readEvents().filter((row) => row.event === 'message').at(-1).thread, old.thread, 'older worker never becomes the newer worker');
+  }
+  const ask = start(['ask', '--timeout-min', '1', '--default', 'banana', 'bare older decision?'], {}, project, { CODEX_THREAD_ID: old.thread });
+  await until(() => openQuestions(readEvents(), { thread: old.thread }).length === 1, 'runtime-discovered older question');
+  const reply = run(['--account', 'alt', 'reply', '--thread', old.thread, '--owner', old.owner, 'pear']);
   assert.equal(reply.status, 0, reply.stderr);
-  const result = await ask.done; assert.equal(result.code, 0); assert.equal(result.stdout, 'pear\n'); assert.match(result.stderr, /using thread new-thread/);
+  const result = await ask.done; assert.equal(result.code, 0); assert.equal(result.stdout, 'pear\n'); assert.match(result.stderr, /using thread one-thread/);
+  for (const [args, extra] of [
+    [['--account', 'alt', 'note', '--thread', old.thread, 'explicit wins'], { CODEX_THREAD_ID: '../malformed' }],
+    [['note', '--thread', old.thread, 'thread flag wins'], { CODEX_THREAD_ID: newest.thread }],
+    [['note', 'launcher env wins'], { CODEX_WORKER_ACCOUNT: 'alt', CODEX_WORKER_THREAD: old.thread, CODEX_THREAD_ID: newest.thread }],
+    [['--account', 'alt', 'note', 'account plus runtime'], { CODEX_THREAD_ID: old.thread }],
+    [['note', 'agreeing runtime IDs'], { CODEX_THREAD_ID: old.thread, TRAECLI_THREAD_ID: old.thread }],
+  ]) {
+    const r = run(args, extra); assert.equal(r.status, 0, r.stderr);
+    assert.equal(readEvents().filter((row) => row.event === 'message').at(-1).thread, old.thread);
+  }
+  for (const extra of [
+    { CODEX_THREAD_ID: 'missing-thread' }, { TRAECLI_THREAD_ID: 'completed-thread' },
+    { CODEX_THREAD_ID: '../malformed' }, { CODEX_THREAD_ID: old.thread, TRAECLI_THREAD_ID: newest.thread },
+  ]) {
+    const before = readEvents();
+    for (const cmd of ['note', 'ask']) {
+      const r = run([cmd, 'unresolved runtime identity'], extra, other);
+      assert.equal(r.status, 2, r.stderr); assert.match(r.stderr, /--account NAME.*--thread ID/);
+    }
+    assert.deepEqual(readEvents(), before, 'runtime ID failure never falls back to the unique unrelated cwd match');
+  }
+  seed(old.thread, project, 3, 'running', { account: 'ttadk', runId: 'ttadk-duplicate-run' });
+  const duplicate = run(['note', 'runtime ID exists on two accounts'], { CODEX_THREAD_ID: old.thread });
+  assert.equal(duplicate.status, 2, duplicate.stderr); assert.match(duplicate.stderr, /identity ambiguous.*alt\/one-thread.*ttadk\/one-thread/);
+  assert.equal(run(['--account', 'alt', 'note', 'account disambiguates'], { CODEX_THREAD_ID: old.thread }).status, 0);
   const empty = path.join(tmp, 'empty'); fs.mkdirSync(empty);
   const none = run(['note', 'no matching thread'], { RULES_SHARED: empty });
   assert.equal(none.status, 2); assert.match(none.stderr, /identity not found.*--account NAME.*--thread ID/);
@@ -75,7 +113,8 @@ try {
     const captureEnv = path.join(tmp, `${account}-env.txt`), thread = `env-${account}`, rpc = path.join(tmp, `${thread}-rpc.jsonl`);
     const r = run(['--account', account, 'start', '--cwd', project, '--sandbox', 'danger-full-access', '--owner', 'daab37a9-7727-55d2-8931-df08878ab2b6',
       '--effort', 'high', '--model', 'fixture', '--name', thread, 'Capture fixture environment.'],
-    { WORKER_EVENTS_FIXTURE: JSON.stringify({ thread, captureEnv, rpc, shellEnvMode: mode }) });
+    { WORKER_EVENTS_FIXTURE: JSON.stringify({ thread, captureEnv, rpc, shellEnvMode: mode,
+      runtimeThreadEnv: account === 'trae' ? 'TRAECLI_THREAD_ID' : 'CODEX_THREAD_ID' }) });
     assert.equal(r.status, 0, r.stderr + r.stdout + String(r.error ?? '') + String(r.signal ?? ''));
     const captured = fs.readFileSync(captureEnv, 'utf8');
     if (mode === 'apply') {
@@ -83,6 +122,7 @@ try {
       assert.match(captured, new RegExp(`CODEX_WORKER_ACCOUNT=${account}\\n`));
       assert.match(captured, /CODEX_WORKER_OWNER=daab37a9-7727-55d2-8931-df08878ab2b6\n/);
     } else assert.doesNotMatch(captured, /CODEX_WORKER_/);
+    assert.match(captured, new RegExp(`${account === 'trae' ? 'TRAECLI_THREAD_ID' : 'CODEX_THREAD_ID'}=${thread}\\n`));
     const context = JSON.parse(fs.readFileSync(path.join(tmp, 'worker-context', account, `${thread}.json`)));
     assert.equal(context.cwd, project); assert.equal(context.turn, 'turn-fixture'); assert.ok(Number.isFinite(context.startedAt));
     const oldStart = context.startedAt;
@@ -100,11 +140,18 @@ try {
   ]) {
     const thread = `restricted-${config.account}`, owner = randomUUID(), rpc = path.join(tmp, `${thread}-rpc.jsonl`);
     const shellResults = path.join(tmp, `${thread}-results.jsonl`);
+    // A newer worker of the same owner/account shares the exact cwd. Ignored
+    // launcher env must resolve the older shell via a native ID or explicit flags.
+    seed(`newer-${thread}`, project, Date.now() + 120000, 'running', { account: config.account, owner });
+    const native = config.account === 'alt' ? null : config.account === 'trae' ? 'TRAECLI_THREAD_ID' : 'CODEX_THREAD_ID';
+    const identity = native ? [] : ['--account', config.account];
+    const threadFlag = native ? [] : ['--thread', thread];
     const follower = start(['--account', config.account, 'start', '--cwd', project, '--sandbox', config.sandbox,
       '--owner', owner, '--name', thread, '--effort', 'high', '--model', 'fixture', 'Run restricted fixture.'],
-    { ...config, thread, rpc, shellResults, shellCwd: project, shellEnvMode: 'ignore', denyShared: true,
-      shellSequence: [['note', '--kind', 'risk', 'Restricted milestone'], ['ask', '--timeout-min', '1', '--default', 'banana', 'Restricted decision?'],
-        ...(!config.streamOutput ? [['ask', '--await', '@await-id']] : [])] });
+    { ...config, thread, rpc, shellResults, shellCwd: project, shellEnvMode: 'ignore', runtimeThreadEnv: native, denyShared: true,
+      shellSequence: [[...identity, 'note', ...threadFlag, '--kind', 'risk', 'Restricted milestone'],
+        [...identity, 'ask', ...threadFlag, '--timeout-min', '1', '--default', 'banana', 'Restricted decision?'],
+        ...(!config.streamOutput ? [[...identity, 'ask', ...threadFlag, '--await', '@await-id']] : [])] });
     await until(() => openQuestions(readEvents(), { owner }).length === 1, `relayed question ${config.account}`);
     const question = openQuestions(readEvents(), { owner })[0];
     assert.equal(question.thread, thread); assert.equal(question.default, 'banana');
@@ -116,7 +163,8 @@ try {
     assert.equal(commands[1].code, config.streamOutput ? 0 : 6);
     if (config.streamOutput) assert.match(commands[1].output, /pear\n/);
     else { assert.match(commands[1].output, /re-run .*ask --thread .*--await/); assert.equal(commands[2].code, 0); assert.match(commands[2].output, /pear\n/); }
-    const own = readEvents().filter((row) => row.owner === owner);
+    const own = readEvents().filter((row) => row.owner === owner && ['message', 'question'].includes(row.event));
+    assert.ok(own.every((row) => row.thread === thread && row.account === config.account), 'all relay events belong to the older shell, never the newer context');
     assert.equal(own.filter((row) => row.event === 'message').length, 1, 'delta plus completed output is delivered once');
     assert.equal(own.filter((row) => row.event === 'question').length, 1, 'await never creates a second question');
     assert.equal(rows(rpc).find((row) => row.method === 'thread/start').params.sandbox, config.sandbox);
@@ -161,7 +209,7 @@ try {
     items: [{ id: 'wait-command', type: 'commandExecution', aggregatedOutput: waitMarker }] });
   await until(() => openQuestions(readEvents(), { owner: waitOwner }).length === 1, 'wait relayed retained command output');
   waiting.child.kill('SIGTERM'); await waiting.done;
-  console.log('PASS talkback fixes: bare identity one/newest/none, context lifecycle, real env through fake hub, denied-write markers, streaming/await replies, scope/dedup/rate limit, wait reattachment');
+  console.log('PASS talkback fixes: native runtime older-worker identity, ambiguous/missing/conflicting IDs refuse, explicit/env precedence, context lifecycle, fake-hub native env, denied-write markers, streaming/await replies, scope/dedup/rate limit, wait reattachment');
 } finally {
   const exits = [...children].map((child) => new Promise((resolve) => { child.once('close', resolve); child.kill('SIGTERM'); }));
   await Promise.all(exits);

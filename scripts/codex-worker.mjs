@@ -320,8 +320,9 @@ const talkbackContext = (thread) => {
     CODEX_WORKER_OWNER: metadata.owner ?? '', CODEX_WORKER_NAME: String(metadata.name), RULES_SHARED: path.dirname(path.dirname(path.dirname(file))) };
   return { metadata, config: { shell_environment_policy: { set: env } }, instructions:
     `Worker talkback identity: thread=${thread} account=${metadata.account} owner=${metadata.owner ?? 'unknown'}. Public context: ${file}.\n`
-    // Keep ready-to-run explicit commands; bare commands also resolve the running
-    // context by cwd when the hub does not pass per-thread shell environment.
+    // Runtime thread IDs disambiguate bare commands when launcher env is ignored;
+    // explicit commands also work on runtimes that expose no thread discriminator.
+    + 'Bare note/ask use CODEX_THREAD_ID or TRAECLI_THREAD_ID if launcher environment is missing; otherwise cwd discovery requires exactly one running match. If identity is ambiguous or missing, use the explicit commands below, never another worker\'s identity.\n'
     + `To send the orchestrator a note without stopping (kinds: risk, scope, progress, info):\nRULES_SHARED=${shellQuote(env.RULES_SHARED)} ${shellQuote(process.execPath)} ${shellQuote(fileURLToPath(import.meta.url))} --account ${metadata.account} note --thread ${thread} --kind info "<text>"\n`
     + `To ask the orchestrator and wait for the answer (exit 3 = timeout, proceed with default; exit 4 = timeout without default):\nRULES_SHARED=${shellQuote(env.RULES_SHARED)} ${shellQuote(process.execPath)} ${shellQuote(fileURLToPath(import.meta.url))} --account ${metadata.account} ask --thread ${thread} --timeout-min 20 --default "<what you will do if nobody answers>" "<question>"\n`
     + 'In read-only/workspace-write, denied shared writes are relayed through your command output without widening the sandbox. If ask exits 6, run the exact ask --await <id> command printed on stderr; it only reads, preserves the original question/default/deadline and does not ask again.\n'
