@@ -14,6 +14,21 @@ export const parseResourceHolds = (text, project) => String(text).split('\n').fl
 export const resourceStatus = project => {
   const dir = process.env.RES_DIR || sharedDir();
   if (!fs.existsSync(path.join(dir, 'resources.tsv'))) return { state: 'UNKNOWN', holds: [], reason: 'res registry unavailable' };
+  // `res status` probes devices and can take >10 s; holders are plain lock files, so read them directly (BC-84).
+  const locks = path.join(dir, 'locks');
+  if (!process.env.RES_BIN && fs.existsSync(locks)) {
+    try {
+      const holds = fs.readdirSync(locks).filter(name => name.endsWith('.d')).flatMap(name => {
+        let info = ''; try { info = fs.readFileSync(path.join(locks, name, 'info'), 'utf8'); } catch { return []; }
+        const field = key => info.split('\n').find(line => line.startsWith(`${key}\t`))?.slice(key.length + 1) ?? '';
+        const holder = field('project');
+        if (project && holder !== project) return [];
+        const id = name.slice(0, -2);
+        return [{ id, project: holder, detail: oneLine(`${id} ${field('by')} (${holder}${field('task') ? `/${field('task')}` : ''}) ${field('since')} · ${field('for')}`, 500) }];
+      });
+      return { state: 'KNOWN', holds };
+    } catch { /* fall back to res status */ }
+  }
   const result = spawnSync(process.env.RES_BIN || fileURLToPath(new URL('../res/res', import.meta.url)), ['status'], {
     env: { ...process.env, RES_DIR: dir }, encoding: 'utf8', timeout: 3000, maxBuffer: 256 * 1024 });
   return result.status === 0 && !result.error ? { state: 'KNOWN', holds: parseResourceHolds(result.stdout, project) }
