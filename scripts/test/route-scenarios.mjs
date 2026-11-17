@@ -14,6 +14,8 @@ import { loadDigest } from '../lib/global-rules.mjs';
 
 const ROUTE = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'route.mjs');
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'route-test-'));
+// Legacy route expectations predate the standing personal-fallback policy; personal-fallback-scenarios covers it.
+if (!process.env.PERSONAL_FALLBACK_FILE) { process.env.PERSONAL_FALLBACK_FILE = path.join(tmp, 'personal-fallback-off.json'); fs.writeFileSync(process.env.PERSONAL_FALLBACK_FILE, '{"enabled":false}'); }
 const absentPlaywrightToken = path.join(tmp, 'no-playwright-extension-token');
 const now = Date.now(), h = 3600000, W = 10080;
 const wk = (used, leftH, label = 'week') => ({ label, used, resetsAt: now + leftH * h, windowMins: W, scoped: false });
