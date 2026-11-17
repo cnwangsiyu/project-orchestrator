@@ -107,7 +107,7 @@ try {
   console.log('PASS BC-10/17 three hub states and codex-worker-independent running thread listing');
 
   const root = path.join(tmp, 'ledgers'); fs.mkdirSync(root);
-  const version = '2026-11-16.10';
+  const version = '2026-11-16.12';
   for (const project of ['video-agent', 'webview', 'global-rules']) {
     const target = path.join(tmp, `project-${project}`); fs.mkdirSync(target);
     fs.writeFileSync(path.join(target, 'ledger.md'), `- **Orchestrator session**: "${project}-owner"\n- **rules-ack**: \`${version}\`\n`);
@@ -142,7 +142,7 @@ try {
   assert.equal(outcomes[0].completedAt, now - 30 * h); assert.equal(outcomes[0].correctedAt, now); assert.equal(outcomes[0].t, now - 30 * h);
   assert.equal(modelView(outcomes[0]).result, 'rework'); assert.equal(modelView(outcomes[0]).nonCodeRework, true);
   assert.equal(passwordStyleFindings('PASS: signed\npassword=$SIGNING_PASS\npassword="${SIGNING_PASS}"\npassword=[REDACTED]\npassword=<redacted>\npassphrase=*****').length, 0);
-  assert.deepEqual(passwordStyleFindings('password=fixture-sensitive-value'), [{ line: 1, field: 'password', value: '[MASKED]' }]);
+  assert.deepEqual(passwordStyleFindings('password=fixture-sensitive-value'), [{ line: 1, field: 'password' }]);
   const logFile = path.join(tmp, 'worker.log'); fs.writeFileSync(logFile, 'PASS: signed\npassword=$TEST_VARIABLE\npassword=[REDACTED]');
   const scan = execFileSync(process.execPath, [path.join(scripts, 'nightly-review.mjs'), 'scan-log', '--file', logFile], { env: { ...env, NIGHTLY_DIR: path.join(tmp, 'nightly') }, encoding: 'utf8' });
   assert.deepEqual(JSON.parse(scan), { findings: [] });

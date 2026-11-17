@@ -165,6 +165,9 @@ recipient identity leaves a durable blocked receipt. No launchd installation/cha
 
 ## Verification
 
+`node scripts/nightly-review.mjs scan-log --file /absolute/worker.log` reports secret-like field locations only; `.log`, `.out`, `.txt` and `.jsonl` are supported.
+Run `node scripts/nightly-review.mjs redact-log --file /absolute/worker.jsonl` after the worker's turn ended when a risk note says secrets were printed; it atomically masks values and prints counts only, refusing logs modified in the last 120 s unless `--force`.
+
 All validation uses isolated fixture HOME/shared directories, mocked CLIs and public test metadata. Never write
 the real shared directory or contact real hubs while developing this stage. Focused suites are
 `nightly-metrics-scenarios.mjs`, `nightly-review-scenarios.mjs` and `review-data-scenarios.mjs`; then run every

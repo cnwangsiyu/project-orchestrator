@@ -15,7 +15,7 @@ for (const file of ['SKILL.md', 'references/global-rules.md', 'references/codex-
   assert.ok(/[Ww]orker.*new entr.*BLOCKED/s.test(text), `${file}: new entry blocked`);
 }
 const digest = loadDigest();
-assert.equal(digest.version, '2026-11-16.10', 'signing scope survives the worker talkback digest bump');
+assert.equal(digest.version, '2026-11-16.12', 'signing scope survives the worker talkback digest bump');
 for (const section of [digest.worker, digest.text.split('## Orchestrator Rules')[1].split('## Worker Rules')[0]]) {
   for (const text of ['identities.json', 'registry.json', 'DH59R4RNRY', '3JVMQQBHUR', 'read-only', 'BLOCKED']) assert.ok(section.includes(text));
 }

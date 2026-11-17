@@ -107,7 +107,7 @@ export function createTaskSpec(input) {
   const sandbox = needsCli.length ? 'danger-full-access' : f.sandbox ?? input.sandbox ?? 'workspace-write', ceiling = input.sandboxCeiling ?? 'workspace-write';
   if(f.network==='off'&&sandbox==='danger-full-access') fail('INVALID_NETWORK_SANDBOX','Network off requires a read-only or workspace-write sandbox.');
   if (![sandbox, ceiling].every((s) => ['danger-full-access', 'workspace-write', 'read-only'].includes(s))) fail('INVALID_SANDBOX', 'Unsupported sandbox.');
-  if (f.sandbox && !['workspace-write', 'read-only'].includes(f.sandbox)) fail('INVALID_SANDBOX', 'Explicit sandbox only narrows the default.');
+  if (f.sandbox && !['workspace-write', 'read-only'].includes(f.sandbox)) fail('INVALID_SANDBOX', 'Explicit sandbox only narrows the default. For signed-in or network CLIs (bytedcli, lark-cli) add --needs-cli <names> instead: full-access sandbox, read-only by instruction.');
   if (ceiling === 'workspace-write' && sandbox === 'danger-full-access') fail('SANDBOX_CEILING', 'Requested sandbox exceeds parent ceiling.');
   if (ceiling === 'read-only' && sandbox !== 'read-only') fail('SANDBOX_CEILING', 'Requested sandbox exceeds parent ceiling.');
   const apps = unique(input.allowedApps ?? list(f.apps));

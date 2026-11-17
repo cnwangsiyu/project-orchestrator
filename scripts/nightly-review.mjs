@@ -6,7 +6,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
-import { passwordStyleFindings } from './lib/nightly-audit.mjs';
+import { scanLogFindings, maskLogText } from './lib/nightly-audit.mjs';
 import { unsafeFile } from './lib/resource-data.mjs';
 import { computeNightly, nightlyBrief, nightlyReport, metricTable } from './lib/nightly-metrics.mjs';
 import { nightlyRecipients, deliveryPlan, deliverNightly } from './lib/nightly-delivery.mjs';
@@ -642,12 +642,60 @@ async function finishClaudeReview(sessionFile) {
 
 const [cmd, ...args] = process.argv.slice(2);
 const arg = (name) => args.includes(name) ? args[args.indexOf(name) + 1] : undefined;
-if (cmd === 'scan-log') {
-  const file = arg('--file');
-  if (!file || !path.isAbsolute(file) || !/\.(?:log|out|txt)$/.test(file) || unsafeFile(file) || unsafeFile(fs.realpathSync(file))) throw Error('scan-log requires a worker log path');
+function checkedLogStat(file) {
+  if (!file || !path.isAbsolute(file) || !/\.(?:log|out|txt|jsonl)$/.test(file) || unsafeFile(file)) throw Error(`${cmd} requires --file <absolute worker log path (.log|.out|.txt|.jsonl)>`);
   const stat = fs.lstatSync(file);
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 16 * 2 ** 20) throw Error('worker log is unsafe or too large');
-  console.log(JSON.stringify({ findings: passwordStyleFindings(fs.readFileSync(file, 'utf8')) }));
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 256 * 2 ** 20 || unsafeFile(fs.realpathSync(file))) throw Error('worker log is unsafe or too large (limit 256 MiB)');
+  return stat;
+}
+
+const sameLog = (a, b) => a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mtimeMs === b.mtimeMs && a.ctimeMs === b.ctimeMs;
+
+function logCommand() {
+  const file = arg('--file'), stat = checkedLogStat(file);
+  if (cmd === 'redact-log' && !args.includes('--force') && Date.now() - stat.mtimeMs < 120000) throw Error('worker log was modified in the last 120 s; wait for the turn to end or use --force');
+  const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+  let text;
+  try {
+    if (!sameLog(stat, fs.fstatSync(fd))) throw Error('worker log changed before reading');
+    // Bound reads even if a writer appends after the size check.
+    const buffer = Buffer.alloc(stat.size + 1);
+    let bytes = 0;
+    while (bytes < buffer.length) {
+      const n = fs.readSync(fd, buffer, bytes, buffer.length - bytes, null);
+      if (!n) break;
+      bytes += n;
+    }
+    if (bytes !== stat.size || !sameLog(stat, fs.fstatSync(fd))) throw Error('worker log changed while reading');
+    text = buffer.subarray(0, bytes).toString('utf8');
+  } finally { fs.closeSync(fd); }
+  const options = { jsonl: file.endsWith('.jsonl') };
+  if (cmd === 'scan-log') return { findings: scanLogFindings(text, options) };
+  const result = maskLogText(text, options);
+  if (result.masked) {
+    const tmp = path.join(path.dirname(file), `.${path.basename(file)}.${randomUUID()}.tmp`);
+    let output, created = false;
+    try {
+      output = fs.openSync(tmp, 'wx', 0o600);
+      created = true;
+      fs.writeFileSync(output, result.text);
+      fs.fchmodSync(output, stat.mode & 0o777);
+      // Redaction must not make an already-idle log look like a running writer.
+      fs.futimesSync(output, stat.atime, stat.mtime);
+      fs.fsyncSync(output); fs.closeSync(output); output = undefined;
+      if (!sameLog(stat, checkedLogStat(file))) throw Error('worker log changed before replacement');
+      fs.renameSync(tmp, file);
+    } finally {
+      try { if (output !== undefined) fs.closeSync(output); }
+      finally { if (created) fs.rmSync(tmp, { force: true }); }
+    }
+  }
+  return { file, masked: result.masked, lines: result.lines };
+}
+
+if (cmd === 'scan-log' || cmd === 'redact-log') {
+  try { console.log(JSON.stringify(logCommand())); }
+  catch (e) { console.error(e.code ? 'worker log I/O failed' : e.message); process.exitCode = 1; }
 } else if (cmd === 'ack') {
   const file = arg('--file'); if (!file || !path.isAbsolute(file)) throw Error('ack requires --file ABSOLUTE_PATH');
   atomic(file, { ...read(file), delivery: 'sent', sentAt: new Date().toISOString() });
