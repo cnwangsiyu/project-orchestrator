@@ -131,7 +131,7 @@ try {
   const quiet = run('quiet-queue-deadline', { quiet: true }, [], { patience: 0.01 });
   assert.equal(quiet.status, 0, quiet.stderr + quiet.stdout);
   assert.equal(quiet.rows.filter((r) => r.kind === 'reroute').length, 1, 'elapsed alarm is independent of queue notifications');
-  const coinciding = run('queue-patience-before-stall', { quiet: true, quietKeepAliveMs: 8000 }, [], { patience: 0.075, stallMin: 0.001 });
+  const coinciding = run('queue-patience-before-stall', { quiet: true, quietKeepAliveMs: 8000, functionalSetupBudget: true }, [], { patience: 0.075, stallMin: 0.001 });
   assert.equal(coinciding.status, 0, coinciding.stderr + coinciding.stdout);
   assert.equal(coinciding.calls.filter((c) => c.method === 'turn/interrupt').length, 1);
   assert.equal(coinciding.rows.filter((r) => r.kind === 'reroute').length, 1, 'the stall alarm must not terminate a queued patience handoff');

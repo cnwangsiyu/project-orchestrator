@@ -1,6 +1,11 @@
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 const config = JSON.parse(process.env.REROUTE_FIXTURE);
+if (config.functionalSetupBudget) {
+  // This case tests the 60 ms follow stall against queue patience, not cold startup/fsync timing.
+  const timeout = globalThis.setTimeout;
+  globalThis.setTimeout = (fn, ms, ...args) => timeout(fn, ms === 60 ? 1000 : ms, ...args);
+}
 if (config.authGuard) {
   fs.appendFileSync(config.authGuard, JSON.stringify({ kind: 'guard-active', pid: process.pid }) + '\n');
   const guarded = (fn) => function (file, ...args) {

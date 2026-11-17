@@ -121,6 +121,7 @@ export function presentRoute(plan, view, context) {
     const args=['--account',an,'start','--cwd',cwd,'--model',launchModel,'--effort',c.effort,'--sandbox',task.sandbox,'--name',name,
       ...(primary?['--route-args',JSON.stringify(routeArgs),'--auto-reroute-depth',String(task.autoRerouteDepth)]:[]),'--log',`${outputBase}.jsonl`,'--out',`${outputBase}-last.md`];
     if(owner) args.push('--owner',owner);
+    if(f.task) args.push('--task',f.task);
     args.push('--project',task.project,'--role',s.role,'--routed-seat',JSON.stringify(routed));
     if(task.background) args.push('--background');
     if(f['user-ok']) args.push('--user-ok',f['user-ok']);

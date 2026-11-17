@@ -12,6 +12,8 @@ export const ACK_RECEIPTS = 64;
 export const TRANSACTION_RETRY_MS = 3000;
 const DEAD_FOLLOWER_GRACE_MS = 60000;
 export const eventFile = () => path.join(rulesShared(), 'worker-events.jsonl');
+let eventObserver = null;
+export const setEventObserver = observer => { eventObserver = observer; };
 const sequenceFile = () => path.join(rulesShared(), 'worker-events-state.json');
 const historyDir = () => path.join(rulesShared(), 'worker-event-history');
 export const validOwner = (value) => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/.test(value);
@@ -276,6 +278,7 @@ const appendLocked = (row) => {
     if (n) fs.readSync(fd, last, 0, 1, n - 1);
     fs.writeFileSync(fd, `${n && last[0] !== 10 ? '\n' : ''}${JSON.stringify(record)}\n`); fs.fsyncSync(fd);
   } finally { fs.closeSync(fd); }
+  try { eventObserver?.(record); } catch {}
   return record;
 };
 export const appendEvent = (row) => withEventLock(() => appendLocked(row));
