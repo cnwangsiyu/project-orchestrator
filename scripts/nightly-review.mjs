@@ -645,7 +645,7 @@ const arg = (name) => args.includes(name) ? args[args.indexOf(name) + 1] : undef
 function checkedLogStat(file) {
   if (!file || !path.isAbsolute(file) || !/\.(?:log|out|txt|jsonl)$/.test(file) || unsafeFile(file)) throw Error(`${cmd} requires a worker log path`);
   const stat = fs.lstatSync(file);
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 16 * 2 ** 20 || unsafeFile(fs.realpathSync(file))) throw Error('worker log is unsafe or too large');
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 256 * 2 ** 20 || unsafeFile(fs.realpathSync(file))) throw Error('worker log is unsafe or too large (limit 256 MiB)');
   return stat;
 }
 

@@ -145,7 +145,7 @@ try {
   const target = fixture('target.log', `password=${fake}`);
   const link = path.join(tmp, 'link.log'); fs.symlinkSync(target, link);
   const directory = path.join(tmp, 'directory.log'); fs.mkdirSync(directory);
-  const huge = fixture('huge.jsonl', ''); fs.truncateSync(huge, 16 * 2 ** 20 + 1);
+  const huge = fixture('huge.jsonl', ''); fs.truncateSync(huge, 256 * 2 ** 20 + 1);
   const unsafe = path.join(tmp, 'auth'); fs.mkdirSync(unsafe);
   const unsafeFile = path.join(unsafe, 'worker.log'); fs.writeFileSync(unsafeFile, `password=${fake}`);
   for (const file of [link, directory, huge, unsafeFile, path.join(tmp, 'missing.log'), 'relative.log', fixture('worker.md', `password=${fake}`)]) {
