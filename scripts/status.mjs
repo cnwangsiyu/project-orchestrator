@@ -6,6 +6,7 @@ import { readQueue } from './lib/user-queue.mjs';
 import { allStatusProjects, projectStatus, statusText, resourceStatus } from './lib/task-status.mjs';
 
 export async function main(argv = process.argv.slice(2)) {
+  if (argv.includes('--help') || argv.includes('-h')) { console.log("usage: status.mjs [--project p] [--json]\nAll boards (refreshed), live workers, open user-queue items, resource holds and mismatches. See references/task-board.md."); return 0; }
   const { opts, pos } = parseOptions(argv, { values: ['project'], booleans: ['json'] });
   if (pos.length) throw Error('usage: status.mjs [--project p] [--json]');
   const facts = await workerFacts(), queue = readQueue();

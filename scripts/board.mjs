@@ -4,6 +4,7 @@ import { parseOptions, oneLine } from './lib/task-storage.mjs';
 import { resolveProject, setTask, linkTask, archiveTasks, refreshBoard } from './lib/task-board.mjs';
 
 export async function main(argv = process.argv.slice(2)) {
+  if (argv.includes('--help') || argv.includes('-h')) { console.log('usage: board.mjs set <task> [--project p] [--title] [--state queued|running|blocked|waiting-user|review|done|parked|cancelled] [--next] [--blocker] [--deps a,b] [--deadline ISO] [--note]\n       board.mjs show [--project p] [--task t] [--json]\n       board.mjs link <task> --thread <id> [--account a] [--project p]\n       board.mjs archive --done-older-than <days> [--project p]\n       board.mjs refresh [--project p] [--thread t]\nOrchestrators write state/next/blocker; worker facts are filled automatically. See references/task-board.md.'); return 0; }
   const { opts, pos } = parseOptions(argv, { values: ['project', 'task', 'title', 'state', 'next', 'blocker', 'deps', 'deadline', 'note',
     'done-older-than', 'thread', 'account'], booleans: ['json'] });
   const [cmd, id, ...extra] = pos;

@@ -4,6 +4,7 @@ import { parseOptions, redact, oneLine } from './lib/task-storage.mjs';
 import { addQuestion, updateQuestion, readQueue, queueOpen } from './lib/user-queue.mjs';
 
 export function main(argv = process.argv.slice(2)) {
+  if (argv.includes('--help') || argv.includes('-h')) { console.log("usage: user-queue.mjs add --project p --question \"...\" --option A --option B [--recommended A] --default \"<if unanswered>\" --deadline ISO [--task t] [--raised-by <session id>]\n       user-queue.mjs list [--open|--all] [--project p] [--json]\n       user-queue.mjs card <id> | answer <id> --choice \"<user's words>\" [--note] | close <id>\nOrchestrators add; the secretary cards and records answers; answers reach the raiser at its next stop. See references/task-board.md."); return 0; }
   const { opts, pos } = parseOptions(argv, { values: ['project', 'question', 'option', 'recommended', 'default', 'deadline', 'task', 'raised-by', 'choice', 'note'],
     booleans: ['open', 'all', 'json'] });
   const [cmd, id, ...extra] = pos;
