@@ -8,7 +8,7 @@ import { modelId, company } from './pipeline/common.mjs';
 import { modelFamily } from './worker-model.mjs';
 
 export const SKILL_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-export const rulesShared = () => process.env.RULES_SHARED || path.join(os.homedir(), '.claude/orchestrator/_shared');
+export const rulesShared = () => process.env.RULES_SHARED || path.join(process.env.ORCH_ROOT || path.join(os.homedir(), '.claude/orchestrator'), '_shared');
 export const rulesLog = () => process.env.ROUTE_LOG_FILE || path.join(rulesShared(), 'route-log.jsonl');
 export const parseDigest = (source) => {
   const text = source.trim();

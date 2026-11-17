@@ -19,6 +19,9 @@ try {
   fs.writeFileSync(snapshot,JSON.stringify(raw));
   const args=['implement','--project','video-agent','--writes','--impact','service'];
   const output=cli(args), verbose=cli([...args,'--verbose']), route=JSON.parse(cli([...args,'--json']));
+  const boardRoute = JSON.parse(cli([...args, '--task', 'board-task', '--json']));
+  const taskFlag = boardRoute.pick.workerArgs.indexOf('--task');
+  assert.ok(taskFlag >= 0); assert.equal(boardRoute.pick.workerArgs[taskFlag + 1], 'board-task');
   assert.ok(Buffer.byteLength(output)<3584,`writes output ${Buffer.byteLength(output)} bytes`);
   assert.match(output,/worker rules .* are injected by the launcher; do not copy them into the brief/);
   assert.doesNotMatch(output,/Global worker rules .*:|credential clause|full-package builds must use|bare note\/ask/);

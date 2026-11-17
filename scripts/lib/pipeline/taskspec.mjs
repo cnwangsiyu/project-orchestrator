@@ -6,7 +6,7 @@ export const CATEGORIES = Object.freeze(['lookup', 'extract', 'analysis', 'resea
 const BOOLEANS = new Set(['auto-check', 'writes', 'read-only', 'runs-tests', 'signing', 'fresh', 'json', 'verbose', 'table', 'no-redeem', 'dry',
   'urgent', 'security', 'adversarial', 'defensive', 'background', 'device-lease', 'shared-lock', 'no-local-build', 'worker', 'installed', 'no-browser-preflight']);
 const VALUES = new Set(['stakes', 'failures', 'against', 'author', 'impact', 'env', 'exclude-account', 'exclude-model', 'origins', 'mode',
-  'sandbox', 'cwd', 'task-dir', 'name', 'project', 'apps', 'user-ok', 'auto-reroute-depth', 'previous-attempt', 'execution', 'actual',
+  'sandbox', 'cwd', 'task-dir', 'task', 'name', 'project', 'apps', 'user-ok', 'auto-reroute-depth', 'previous-attempt', 'execution', 'actual',
   'owner', 'failure-kind', 'trusted-cwd', 'exclude-lane', 'review-override', 'review-required', 'profile-override', 'artifact-ref', 'network', 'review-class', 'review-reason', 'review-scope', 'needs-cli']);
 const CODE = new Set(['implement', 'implement-hard', 'debug', 'science']);
 export class TaskInputError extends Error {
@@ -66,6 +66,7 @@ export function createTaskSpec(input) {
       fail('INVALID_FLAGS', `Invalid flag: ${k}`);
   }
   if (f.name !== undefined && !idOK(f.name)) fail('INVALID_NAME','Name must be a public task ID without parent traversal.');
+  if (f.task !== undefined && !idOK(f.task)) fail('INVALID_NAME','Task must be a public board task ID without parent traversal.');
   if (f.actual !== undefined && (typeof f.actual !== 'string' || f.actual.split(',').some(tuple=>
     !/^(codex|claude):([\w.-]+):(low|medium|high|xhigh|max)(?:@([\w.-]+))?$/.test(tuple))))
     fail('INVALID_ACTUAL','actual takes vendor:model:effort[@account] (comma-separated launch order).');

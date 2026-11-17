@@ -43,7 +43,8 @@ if (rounds !== null && (!Number.isInteger(rounds) || rounds < 0)) die('--rounds 
 if (opts.result === 'rework' && !rounds) die('rework needs --rounds N (N ≥ 1)');
 // A fix round means the first attempt was not accepted: `pass --rounds N` (N ≥ 1) is rework (nightly review 2026-11-06:
 // 10 of 22 records said pass with 1–7 rounds, which showed a 100% first-pass rate).
-if (opts.result === 'pass' && rounds) { console.error(`outcome: ${rounds} fix round(s) is rework, not pass — recording rework`); opts.result = 'rework'; }
+// Silent conversion misrecorded first-attempt passes when callers counted turns as rounds (BC-82): refuse instead.
+if (opts.result === 'pass' && rounds) die(`--rounds counts FIX rounds after a rejected first attempt, not turns. Accepted on the first attempt: --result pass with no --rounds (or --rounds 0). Needed ${rounds} fix round(s): --result rework --rounds ${rounds} --cause code|spec|process|infra|scope.`);
 // Kinds of extra work, kept apart so the nightly review compares models on code rework only (rework retro 2026-11-10,
 // user-approved): --retries N re-runs for infrastructure (quota, queue, device, signing, hub) — not rework; --cause is the
 // main cause of the fix rounds: code (the worker's code), spec (brief/spec gap), process (review/acceptance/dispatch),

@@ -26,6 +26,8 @@ globalThis.WebSocket = class {
     // to /usr/bin/env or a worker subprocess.
     const env = Object.fromEntries(['PATH', 'HOME', 'RULES_SHARED', 'CODEX_ACCOUNTS'].map((k) => [k, process.env[k]]).filter(([, v]) => v !== undefined));
     if (config.shellEnvMode !== 'ignore') Object.assign(env, this.threadConfig?.shell_environment_policy?.set ?? {});
+    // Runtime-owned IDs are independent of the launcher's shell env policy.
+    if (config.runtimeThreadEnv) env[config.runtimeThreadEnv] = config.thread;
     if (config.denyShared) Object.assign(env, { TALKBACK_DENY_SHARED: process.env.RULES_SHARED, TALKBACK_DENY_CODE: config.denyCode ?? 'EACCES' });
     return env;
   }

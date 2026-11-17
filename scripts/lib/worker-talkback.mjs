@@ -9,17 +9,25 @@ export const RELAY_WAIT_MS = 2000;
 const fail = (message) => { const error = Error(message); error.exitCode = 2; throw error; };
 const directory = (value) => { try { return fs.realpathSync(value); } catch { return path.resolve(value); } };
 const contains = (parent, child) => { const rel = path.relative(parent, child); return !rel || (!path.isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${path.sep}`)); };
+const explicitIdentity = 'use codex-worker.mjs --account NAME note --thread ID "<text>" or codex-worker.mjs --account NAME ask --thread ID "<question>" (use the launcher-supplied identity)';
 
-export const resolveTalkbackIdentity = ({ account, thread, cwd = process.cwd(), report = () => {} }) => {
+export const resolveTalkbackIdentity = ({ account, thread, cwd = process.cwd(), env = process.env, report = () => {} }) => {
   if (account != null && !validOwner(account) || thread != null && !validOwner(thread)) fail('invalid public account/thread identifier');
   if (thread && account) return workerContext(account, thread);
+  // Runtime shell IDs survive ignored launcher shell_environment_policy.set.
+  // Never fall back to another cwd match if a supplied runtime ID cannot resolve.
+  const runtimeIds = thread ? [] : ['CODEX_THREAD_ID', 'TRAECLI_THREAD_ID'].filter((name) => env[name]);
+  if (runtimeIds.some((name) => !validOwner(env[name]))) fail(`invalid public runtime thread identifier; ${explicitIdentity}`);
+  if (new Set(runtimeIds.map((name) => env[name])).size > 1)
+    fail(`talkback identity ambiguous: conflicting ${runtimeIds.map((name) => `${name}=${env[name]}`).join(', ')}; ${explicitIdentity}`);
+  const runtimeThread = runtimeIds.length ? env[runtimeIds[0]] : null;
   const contexts = [], root = path.join(rulesShared(), 'worker-context'), current = directory(cwd);
   let accounts = []; try { accounts = fs.readdirSync(root); } catch (e) { if (e.code !== 'ENOENT') throw e; }
   for (const name of accounts.filter((name) => validOwner(name) && (!account || name === account))) {
     let files = []; try { files = fs.readdirSync(path.join(root, name)); } catch { continue; }
     for (const file of files) {
       const id = file.endsWith('.json') ? file.slice(0, -5) : '';
-      if (!validOwner(id) || thread && thread !== id) continue;
+      if (!validOwner(id) || thread && thread !== id || runtimeThread && runtimeThread !== id) continue;
       let context; try { context = workerContext(name, id); } catch { continue; }
       if (thread) contexts.push(context);
       else if (typeof context.cwd === 'string') {
@@ -36,11 +44,12 @@ export const resolveTalkbackIdentity = ({ account, thread, cwd = process.cwd(), 
         running.add(JSON.stringify([row.account, row.thread, row.runId]));
     candidates = contexts.filter((c) => running.has(JSON.stringify([c.account, c.thread, c.runId])));
   }
-  candidates.sort((a, b) => (b.startedAt ?? b.t ?? 0) - (a.startedAt ?? a.t ?? 0) || (b.t ?? 0) - (a.t ?? 0)
-    || `${a.account}/${a.thread}`.localeCompare(`${b.account}/${b.thread}`));
-  if (!candidates.length) fail(`talkback identity not found for ${cwd}; use codex-worker.mjs --account NAME note --thread ID "<text>" or codex-worker.mjs --account NAME ask --thread ID "<question>" (use the launcher-supplied identity)`);
+  candidates.sort((a, b) => `${a.account}/${a.thread}`.localeCompare(`${b.account}/${b.thread}`));
+  if (!candidates.length) fail(`talkback identity not found for ${runtimeThread ? `${runtimeIds[0]}=${runtimeThread} at ` : ''}${cwd}; ${explicitIdentity}`);
+  if (candidates.length > 1)
+    fail(`talkback identity ambiguous for ${cwd}; matching contexts: ${candidates.map((c) => `${c.account}/${c.thread}`).join(', ')}; ${explicitIdentity}`);
   const chosen = candidates[0];
-  report(`talkback: using thread ${chosen.thread} (account ${chosen.account})${candidates.length > 1 ? `; newest of ${candidates.length} matching running contexts` : ''}`);
+  report(`talkback: using thread ${chosen.thread} (account ${chosen.account})${runtimeThread ? ` via ${runtimeIds[0]}` : ''}`);
   return chosen;
 };
 

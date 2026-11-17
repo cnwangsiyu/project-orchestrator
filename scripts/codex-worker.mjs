@@ -8,7 +8,7 @@ import {modelPreference} from './lib/pipeline/policy.mjs';
 //   codex-worker start  --cwd DIR --effort E --sandbox S [--network on|off] [--model M] [--name N] --log FILE [--out FILE]  "<prompt>"
 //   codex-worker turn   --thread ID --effort E --log FILE [--out FILE] [--model M] [--sandbox S [--network on|off]]      "<prompt>"
 //                       start/turn also take --browser-origins <origins/host globs>, --chrome-profile-dir <name>
-//                       and --computer-use-apps <bundle ids>
+//                       and --computer-use-apps <bundle ids>, --task <board task id> (defaults to --name)
 //   codex-worker browser-setup [--account NAME]                           (Chrome + Computer Use config for that home)
 //   codex-worker ttadk-setup [--name ttadk] [--home DIR] [--port N] [--search-port N]   (the TTADK gateway as an account)
 //   codex-worker [--account ttadk] proxy                                   (start/check TTADK's local proxy: web search)
@@ -66,8 +66,10 @@ import { sizeLimits, threadSize, freshThreadRoute } from './lib/worker-thread-si
 import { modelFamily, modelObservation, rolloutTurnModel } from './lib/worker-model.mjs';
 import { redactWorkerTurn, checkThreadIdle } from './lib/worker-redaction.mjs';
 import { maskPasswordStyleValues } from './lib/nightly-audit.mjs';
-import { lifecycle, resolveOwner, validOwner, inbox, readEvents, readAck, eventLine, watch, signalExit, appendEvent,
+import { requestBoardRefresh } from './lib/board-refresh.mjs';
+import { lifecycle, resolveOwner, validOwner, inbox, readEvents, readAck, eventLine, watch, signalExit, appendEvent, setEventObserver,
   saveWorkerContext, workerContext, openQuestions, answerQuestion } from './lib/worker-events.mjs';
+setEventObserver(requestBoardRefresh);
 // What a TRAE pause covers: one model family (route.mjs moves to the next family) or the whole account.
 const pausedWhat = (p) => (p.pool ? `TRAE's ${p.pool} models are paused` : 'TRAE is paused');
 // A model TRAE no longer resolves (2026-11-13: it dropped Gemini): that model alone is out of routing for 6 h.
@@ -103,7 +105,11 @@ if (argv[0] === 'turn' && typeof earlyOpts.thread === 'string') {
 let tracker = null;
 try {
   if (earlyOpts.owner !== undefined) earlyOpts.owner = resolveOwner(earlyOpts.owner);
+  let routeArgs = []; try { routeArgs = JSON.parse(earlyOpts['route-args'] ?? '[]'); } catch {}
+  let seat = {}; try { seat = JSON.parse(earlyOpts['routed-seat'] ?? '{}'); } catch {}
+  earlyOpts.project ??= routeFlag(routeArgs, 'project') ?? seat.project ?? process.env.ORCHESTRATOR_PROJECT;
   tracker = ['start', 'turn', 'wait'].includes(argv[0]) ? lifecycle({ owner: earlyOpts.owner, followerCommand: argv[0],
+    project: earlyOpts.project ?? null, task: earlyOpts.task ?? earlyOpts.name ?? null,
     name: earlyOpts.name ?? earlyOpts.thread ?? 'unnamed', thread: earlyOpts.thread ?? null,
     account: account ?? 'main', model: earlyOpts.model ?? null, effort: earlyOpts.effort ?? null,
     mayRun: argv[0] === 'wait' && typeof earlyOpts.thread === 'string',
@@ -190,7 +196,10 @@ if (cmd === 'start' && opts.sandbox === 'read-only') {
     .map(m => m.match(/([\w./-]+\.(?:md|txt|json|csv|html))\b$/i)?.[1]).filter(Boolean))].filter(f => !opts.out || path.basename(f) !== path.basename(String(opts.out)));
   if (named.length) process.stderr.write(`read-only-output: the prompt asks for ${named.join(', ')} but a read-only worker cannot write files; its final message goes to --out. Reword the brief or start with a writable sandbox.\n`);
 }
-const die = (msg, code = 2) => { process.stderr.write(`codex-worker: ${msg}\n`); process.exit(code); };
+const die = (msg, code = 2) => {
+  if (tracker && !tracker.metadata().reason) tracker.set({ reason: msg });
+  process.stderr.write(`codex-worker: ${msg}\n`); process.exit(code);
+};
 const largeThreadMessage = (thread, reason) => {
   const args = parseRouteArgs(opts['route-args']);
   const command = freshThreadRoute(args, path.dirname(fileURLToPath(import.meta.url)));
@@ -315,6 +324,7 @@ const talkbackContext = (thread) => {
   const state = tracker.metadata();
   const prior = workerContext(account ?? 'main', thread, true);
   const metadata = { account: account ?? 'main', thread, owner: tracker.owner, name: opts.name ?? prior?.name ?? state.name,
+    project: opts.project ?? prior?.project ?? state.project, task: opts.task ?? prior?.task ?? state.task,
     runId: state.runId, model: state.model, effort: state.effort, turn: state.turn ?? null,
     cwd: path.resolve(opts.cwd ?? prior?.cwd ?? process.cwd()), startedAt: followerStartedAt };
   const file = saveWorkerContext(metadata);
@@ -322,8 +332,9 @@ const talkbackContext = (thread) => {
     CODEX_WORKER_OWNER: metadata.owner ?? '', CODEX_WORKER_NAME: String(metadata.name), RULES_SHARED: path.dirname(path.dirname(path.dirname(file))) };
   return { metadata, config: { shell_environment_policy: { set: env } }, instructions:
     `Worker talkback identity: thread=${thread} account=${metadata.account} owner=${metadata.owner ?? 'unknown'}. Public context: ${file}.\n`
-    // Keep ready-to-run explicit commands; bare commands also resolve the running
-    // context by cwd when the hub does not pass per-thread shell environment.
+    // Runtime thread IDs disambiguate bare commands when launcher env is ignored;
+    // explicit commands also work on runtimes that expose no thread discriminator.
+    + 'Bare note/ask use CODEX_THREAD_ID or TRAECLI_THREAD_ID if launcher environment is missing; otherwise cwd discovery requires exactly one running match. If identity is ambiguous or missing, use the explicit commands below, never another worker\'s identity.\n'
     + `To send the orchestrator a note without stopping (kinds: risk, scope, progress, info):\nRULES_SHARED=${shellQuote(env.RULES_SHARED)} ${shellQuote(process.execPath)} ${shellQuote(fileURLToPath(import.meta.url))} --account ${metadata.account} note --thread ${thread} --kind info "<text>"\n`
     + `To ask the orchestrator and wait for the answer (exit 3 = timeout, proceed with default; exit 4 = timeout without default):\nRULES_SHARED=${shellQuote(env.RULES_SHARED)} ${shellQuote(process.execPath)} ${shellQuote(fileURLToPath(import.meta.url))} --account ${metadata.account} ask --thread ${thread} --timeout-min 20 --default "<what you will do if nobody answers>" "<question>"\n`
     + 'In read-only/workspace-write, denied shared writes are relayed through your command output without widening the sandbox. If ask exits 6, run the exact ask --await <id> command printed on stderr; it only reads, preserves the original question/default/deadline and does not ask again.\n'
@@ -1157,6 +1168,7 @@ const report = async (threadId, turn, final, usage) => {
   await redactEndedTurn(threadId);
   tracker?.result(rejectedModel ? 'failed' : /^(?:\S+\s+)?(?:BLOCKED|QUESTION)\b/.test(final?.trim() ?? '') ? 'needs-user'
     : turn.status === 'completed' ? 'finished' : 'failed', { thread: threadId, turn: turn.id, mayRun: false,
+      reason: rejectedModel ? 'review model rejected' : turn.status === 'completed' ? null : JSON.stringify(turn.error ?? turn.status),
       finalLine: maskPasswordStyleValues(final?.split('\n').find((line) => line.trim()) ?? '').text });
   const infrastructureMiss = (['trae','ttadk'].includes(PROF?.kind)&&failureKind(errorText)==='unavailable')||(PROF?.kind==='trae'&&/access (temporarily )?restricted|\b983\b/i.test(errorText));
   if (!(strictReviewModel && modelMismatch) && turn.status === 'failed' && ROUTE_ARGS && !BACKGROUND && !workStarted && !turnHasWork(turn) && !final
@@ -1387,8 +1399,8 @@ try {
     const threadId = th.thread?.id ?? th.threadId;
     attemptThreadId = threadId;
     sessionPath = th.thread?.path ?? null;
-    tracker?.set({ thread: threadId, mayRun: true });
-    saveLaunch(account ?? 'main', threadId, { ...opts, 'auto-reroute-depth': REROUTE_DEPTH }, resolveOwner(opts.owner), modelEvidence());
+    tracker?.set({ thread: threadId, mayRun: true, rolloutFile: sessionPath });
+    saveLaunch(account ?? 'main', threadId, { ...opts, 'auto-reroute-depth': REROUTE_DEPTH }, resolveOwner(opts.owner), { ...modelEvidence(), rolloutFile: sessionPath });
     if (PROF?.kind === 'trae') rememberThreadModel(PROF.home, threadId, opts.model);
     if (opts.name) await call('thread/name/set', { threadId, name: opts.name }).catch(() => {});
     const talkback = talkbackContext(threadId);
@@ -1409,8 +1421,8 @@ try {
       developerInstructions:[projectWorkerInstructions(resumedDigest), talkback.instructions, reviewHowTo].filter(Boolean).join('\n') }).catch(resumeFallback);
     sessionPath = resumed?.thread?.path ?? null;
     auditStart(opts.model??resumed?.thread?.model,opts.sandbox??resumed?.thread?.sandbox??undefined,{thread:opts.thread,name:resumed?.thread?.name??undefined});
-    tracker?.set({ mayRun: true });
-    saveLaunch(account ?? 'main', opts.thread, { ...opts, 'auto-reroute-depth': REROUTE_DEPTH }, resolveOwner(opts.owner), modelEvidence());
+    tracker?.set({ mayRun: true, rolloutFile: sessionPath });
+    saveLaunch(account ?? 'main', opts.thread, { ...opts, 'auto-reroute-depth': REROUTE_DEPTH }, resolveOwner(opts.owner), { ...modelEvidence(), rolloutFile: sessionPath });
     markOutputStart();
     const ts = await call('turn/start', {
       threadId: opts.thread, input: textInput(resumed ? text : `${talkback.instructions}\n\n${text}`), effort: opts.effort, model: opts.model,
