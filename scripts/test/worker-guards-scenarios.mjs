@@ -10,6 +10,7 @@ import { loadDigest } from '../lib/global-rules.mjs';
 import { inbox } from '../lib/worker-events.mjs';
 import { WORKER_NOTES, FF_MAIN_WORKER_NOTE } from '../lib/fixed-worker-notes.mjs';
 import { modelFamily, modelObservation, rolloutTurnModel } from '../lib/worker-model.mjs';
+import { failureKind, pauseDecision, noteFailure } from '../lib/trae-health.mjs';
 
 const scripts = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'worker-guards-'));
@@ -27,7 +28,7 @@ const fixture = (label, kind = 'trae') => {
     CLAUDE_SESSION_ID: '', CLAUDE_JOB_DIR: '', CLAUDECODE: '' } };
 };
 const run = (f, cmd = 'start', config = {}, flags = []) => {
-  const r = spawnSync(process.execPath, ['--import', transport, path.join(scripts, 'codex-worker.mjs'), '--account', 'fixture', cmd,
+  const r = spawnSync(process.execPath, ['--import', transport, path.join(scripts, 'codex-worker.mjs'), '--account', f.account ?? 'fixture', cmd,
     ...(cmd === 'start' ? ['--cwd', f.dir, '--sandbox', 'read-only'] : ['--thread', 'guard-thread']),
     ...(['start', 'turn'].includes(cmd) ? ['--effort', 'high', '--model', 'gpt-6.1-sol'] : []),
     ...flags, ...(['start', 'turn', 'steer'].includes(cmd) ? ['Follow the synthetic brief.'] : [])],
@@ -170,6 +171,99 @@ try {
     r = run(f, 'turn'); assert.equal(r.status, 9);
     f.env.CODEX_WORKER_MAX_INPUT_TOKENS = '21000000'; f.env.CODEX_WORKER_MAX_ROLLOUT_MB = '.00001';
     r = run(f, 'turn'); assert.equal(r.status, 9);
+  });
+  check('BC-75 request buffer errors are thread-too-large, never account/model health failures', () => {
+    const f = fixture('request-buffer-health', 'ttadk'), now = Date.now();
+    for (const error of ['-4399: upstream rejected request', '{"code":-4399}', 'exceeded request buffer limit while retrying upstream',
+      'EXCEEDED REQUEST BUFFER LIMIT; model gpt-6.1-sol unavailable; 429 rate limit']) {
+      assert.equal(failureKind(error), 'thread-too-large');
+      assert.equal(pauseDecision([{ t: now, why: error }, { t: now, why: error }], now), null);
+      assert.equal(pauseDecision([{ t: now, why: error }, { t: now, why: 'gateway timeout' }], now), null);
+      assert.equal(noteFailure(f.accountHome, error, now, 'gpt-6.1-sol'), null);
+      assert.ok(!fs.existsSync(path.join(f.accountHome, 'worker-health.json')));
+    }
+    for (const [error, kind] of [['-43990: gateway error', 'transient'], ['4399: gateway error', 'transient'],
+      ['request queue size is exceed', 'transient'], ['429 too many requests', 'transient'], ['401 Unauthorized', 'auth'],
+      ['403 Forbidden: quota exceeded', 'hard'], ['model gpt-6.1-sol unavailable', 'unavailable']]) assert.equal(failureKind(error), kind);
+    const file = path.join(f.accountHome, 'worker-health.json'), prior = '{"failures":[{"t":1,"why":"gateway timeout"}]}\n';
+    fs.writeFileSync(file, prior);
+    noteFailure(f.accountHome, '-4399: upstream rejected request', now, 'gpt-6.1-sol');
+    assert.equal(fs.readFileSync(file, 'utf8'), prior);
+  });
+  for (const kind of ['ttadk', 'trae']) for (const cmd of ['start', 'turn']) {
+    check(`BC-75 ${kind} ${cmd} terminal buffer failure persists and refuses the next turn`, () => {
+      const f = fixture(`request-buffer-terminal-${kind}-${cmd}`, kind);
+      const route = ['implement', '--project', 'guards', '--name', 'buffer', '--impact', 'service', '--failure-kind', 'quality'];
+      const error = cmd === 'start' ? { code: -4399, message: 'upstream rejected request' }
+        : { message: 'exceeded request buffer limit while retrying upstream; model gpt-6.1-sol unavailable; 429 rate limit' };
+      const r = run(f, cmd, { failure: error, status: 'failed', hang: 'thread/read' }, ['--route-args', JSON.stringify(route), '--auto-reroute-depth', '2']);
+      assert.equal(r.status, 9, r.stderr + r.stdout);
+      assert.match(r.stderr, /large-thread: guard-thread: provider request buffer exceeded on \d{4}-/);
+      assert.match(r.stderr, /'--project' 'guards'.*'--failure-kind' 'infra'/);
+      assert.doesNotMatch(r.stdout, /rate-limited:|trae-failed:|trae-paused:|model-unavailable:|rerout/);
+      assert.equal(r.calls.filter(c => c.method === 'turn/start').length, 1);
+      assert.ok(!r.calls.some(c => c.method === 'thread/read'), 'buffer rejection must not await a recovery read');
+      assert.ok(!r.records.some(row => row.kind === 'reroute'));
+      assert.ok(!fs.existsSync(path.join(f.accountHome, 'worker-health.json')));
+      const launch = path.join(f.dir, 'worker-launches/fixture/guard-thread.json');
+      const saved = JSON.parse(fs.readFileSync(launch, 'utf8'));
+      assert.equal(saved.defaults['route-args'], JSON.stringify(route));
+      assert.ok(Number.isFinite(saved.requestBufferExceededAt));
+      assert.equal(r.events.at(-1).event, 'needs-user');
+      assert.equal(r.events.at(-1).reason, 'thread-too-large');
+      assert.equal(r.events.at(-1).phase, 'thread-size');
+      assert.equal(r.events.at(-1).settled, true); assert.equal(r.events.at(-1).mayRun, false);
+      let next = run(f, 'turn');
+      assert.equal(next.status, 9, next.stderr + next.stdout); assert.deepEqual(next.calls, r.calls);
+      assert.ok(next.stderr.includes(new Date(saved.requestBufferExceededAt).toISOString()));
+      assert.match(next.stderr, /'--project' 'guards'.*'--failure-kind' 'infra'/);
+      next = run(f, 'turn', {}, ['--force-large']);
+      assert.equal(next.status, 0, next.stderr + next.stdout);
+      assert.equal(next.calls.filter(c => c.method === 'turn/start').length, 2);
+      assert.equal(JSON.parse(fs.readFileSync(launch, 'utf8')).requestBufferExceededAt, saved.requestBufferExceededAt);
+      next = run(f, 'turn', { failure: error }, ['--force-large']);
+      assert.equal(next.status, 9, next.stderr + next.stdout);
+      assert.equal(JSON.parse(fs.readFileSync(launch, 'utf8')).requestBufferExceededAt, saved.requestBufferExceededAt);
+      const afterForce = next.calls;
+      next = run(f, 'turn', {}, ['--max-rollout-mb', '100', '--max-input-tokens', '100000000']);
+      assert.equal(next.status, 9); assert.deepEqual(next.calls, afterForce, 'larger local limits cannot bypass the provider marker');
+      next = run(f, 'turn', { thread: 'fresh-thread' }, ['--thread', 'fresh-thread']);
+      assert.equal(next.status, 0, next.stderr + next.stdout);
+      const profiles = JSON.parse(fs.readFileSync(f.env.CODEX_ACCOUNTS, 'utf8'));
+      profiles.other = profiles.fixture; fs.writeFileSync(f.env.CODEX_ACCOUNTS, JSON.stringify(profiles));
+      next = run({ ...f, account: 'other' }, 'turn'); assert.equal(next.status, 0, next.stderr + next.stdout);
+    });
+  }
+  for (const cmd of ['start', 'turn']) for (const method of ['turn/start', 'thread/resume']) {
+    check(`BC-75 ${cmd} RPC buffer failure at ${method} stops before retry/reroute`, () => {
+      const f = fixture(`request-buffer-rpc-${cmd}-${method.replace('/', '-')}`, 'ttadk');
+      const r = run(f, cmd, { rpcFailure: method, rpcError: { code: -4399, message: 'upstream rejected request' } },
+        ['--route-args', JSON.stringify(['implement', '--impact', 'service']), '--auto-reroute-depth', '2']);
+      assert.equal(r.status, 9, r.stderr + r.stdout); assert.match(r.stderr, /large-thread: guard-thread: provider request buffer exceeded/);
+      assert.equal(r.calls.filter(c => c.method === 'turn/start').length, method === 'turn/start' ? 1 : 0);
+      assert.ok(Number.isFinite(JSON.parse(fs.readFileSync(path.join(f.dir, 'worker-launches/fixture/guard-thread.json'), 'utf8')).requestBufferExceededAt));
+      assert.equal(r.events.at(-1).phase, 'thread-size');
+      const next = run(f, 'turn'); assert.equal(next.status, 9); assert.deepEqual(next.calls, r.calls);
+      assert.match(next.stderr, /'implement' '--impact' 'service' '--failure-kind' 'infra'/);
+    });
+  }
+  check('BC-75 buffer failure before thread creation prints guidance without inventing a thread marker', () => {
+    const f = fixture('request-buffer-thread-start', 'ttadk');
+    const r = run(f, 'start', { rpcFailure: 'thread/start', rpcError: { code: -4399, message: 'upstream rejected request' } });
+    assert.equal(r.status, 9, r.stderr + r.stdout); assert.match(r.stderr, /large-thread: <not created>.*fresh thread with a handoff brief/);
+    assert.match(r.stderr, /No saved --route-args/); assert.ok(!fs.existsSync(path.join(f.dir, 'worker-launches')));
+    assert.equal(r.events.at(-1).thread, null); assert.equal(run(f, 'turn').status, 0);
+  });
+  check('BC-75 buffer failure preserves partial final output and unrelated RPC errors retain their fallback', () => {
+    const f = fixture('request-buffer-partial', 'ttadk'), out = path.join(f.dir, 'final.md');
+    const r = run(f, 'turn', { failure: { code: -4399 }, failureItems: [{ type: 'agentMessage', text: 'Partial work completed.' }] }, ['--out', out]);
+    assert.equal(r.status, 9, r.stderr + r.stdout); assert.equal(fs.readFileSync(out, 'utf8'), 'Partial work completed.\n');
+    for (const cmd of ['start', 'turn']) {
+      const other = fixture(`ordinary-rpc-${cmd}`, 'ttadk');
+      assert.equal(run(other, cmd, { rpcFailure: 'turn/start' }).status, 1);
+      assert.equal(run(other, cmd, { rpcFailure: 'thread/resume' }).status, 0);
+      assert.ok(!JSON.parse(fs.readFileSync(path.join(other.dir, 'worker-launches/fixture/guard-thread.json'), 'utf8')).requestBufferExceededAt);
+    }
   });
   check('status preserves JSON stdout', () => {
     const r = run(fixture('status-json'), 'status'); assert.equal(r.status, 0, r.stderr);

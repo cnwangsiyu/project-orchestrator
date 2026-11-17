@@ -60,7 +60,7 @@ import { loadDigest, workerInstructions, auditLaunch, rulesLog, rulesShared } fr
 import { isPolicyBlock, policyBlockRecord, appendPolicyBlock, policyBlockAction } from './lib/policy-block.mjs';
 import { runHubForeground, hubListReachable } from './lib/hub-foreground.mjs';
 import { parseRouteArgs, routeFlag, rerouteWorker, turnHasWork } from './lib/worker-reroute.mjs';
-import { inheritedLaunch, saveLaunch, recordLaunchModel } from './lib/worker-launch.mjs';
+import { inheritedLaunch, saveLaunch, recordLaunchModel, readRequestBufferExceededAt, markRequestBufferExceeded } from './lib/worker-launch.mjs';
 import { recordWorkerOutcome, reviewSeat, reviewInstructions } from './lib/worker-outcome.mjs';
 import { sizeLimits, threadSize, freshThreadRoute } from './lib/worker-thread-size.mjs';
 import { modelFamily, modelObservation, rolloutTurnModel } from './lib/worker-model.mjs';
@@ -189,16 +189,21 @@ if (cmd === 'start' && opts.sandbox === 'read-only') {
   if (named.length) process.stderr.write(`read-only-output: the prompt asks for ${named.join(', ')} but a read-only worker cannot write files; its final message goes to --out. Reword the brief or start with a writable sandbox.\n`);
 }
 const die = (msg, code = 2) => { process.stderr.write(`codex-worker: ${msg}\n`); process.exit(code); };
+const largeThreadMessage = (thread, reason) => {
+  const args = parseRouteArgs(opts['route-args']);
+  const command = freshThreadRoute(args, path.dirname(fileURLToPath(import.meta.url)));
+  const line = `large-thread: ${thread ?? '<not created>'}: ${reason}; start a fresh thread with a handoff brief. Route with the same arguments and --failure-kind infra:\n${command}${args ? '' : '\nNo saved --route-args: add the original route arguments to this command.'}\nUse --force-large only to bypass this guard.`;
+  tracker?.result('needs-user', { thread: thread ?? null, settled: true, mayRun: false, phase: 'thread-size', reason: 'thread-too-large', finalLine: line });
+  return line;
+};
 if (cmd === 'turn' && opts.thread && !opts['force-large']) {
   let limits;
   try { limits = sizeLimits(opts); } catch (e) { die(e.message, 2); }
+  const exceededAt = readRequestBufferExceededAt(account ?? 'main', opts.thread);
+  if (exceededAt != null) die(largeThreadMessage(opts.thread, `provider request buffer exceeded on ${new Date(exceededAt).toISOString()}`), 9);
   const size = await threadSize(PROF?.home ?? process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex'), opts.thread);
   if (size.bytes > limits.bytes || size.inputTokens > limits.tokens) {
-    const args = parseRouteArgs(opts['route-args']);
-    const command = freshThreadRoute(args, path.dirname(fileURLToPath(import.meta.url)));
-    const line = `large-thread: ${opts.thread}: ${(size.bytes / 1024 / 1024).toFixed(2)} MB rollout, ${size.inputTokens} cumulative input tokens; start a fresh thread with a handoff brief. Route with the same arguments and --failure-kind infra:\n${command}${args ? '' : '\nNo saved --route-args: add the original route arguments to this command.'}\nUse --force-large only to bypass this guard.`;
-    tracker?.result('needs-user', { settled: true, mayRun: false, phase: 'thread-size', finalLine: line });
-    die(line, 9);
+    die(largeThreadMessage(opts.thread, `${(size.bytes / 1024 / 1024).toFixed(2)} MB rollout, ${size.inputTokens} cumulative input tokens`), 9);
   }
 }
 try { if (opts.owner !== undefined) opts.owner = resolveOwner(opts.owner); }
@@ -935,6 +940,15 @@ const finish = (code) => {
   try { ws.close(); } catch {}
   process.exit(exitCode ?? code);
 };
+const rejectRequestBuffer = (thread) => {
+  const at = thread ? markRequestBufferExceeded(account ?? 'main', thread, opts) : Date.now();
+  console.error(`codex-worker: ${largeThreadMessage(thread, `provider request buffer exceeded on ${new Date(at).toISOString()}`)}`);
+  finish(9);
+};
+const resumeFallback = (error) => {
+  if (failureKind(error?.message ?? String(error)) === 'thread-too-large') throw error;
+  return null;
+};
 const detachHub = () => {
   done = true; stopFollowing(); activeTurn = null;
   ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null;
@@ -1042,6 +1056,15 @@ const currentTurn = async (threadId) => {
   return turns.filter((t) => t.status === 'inProgress').at(-1) ?? turns.at(-1);
 };
 const lastMessage = (items) => (items ?? []).filter((i) => i.type === 'agentMessage' && i.text).at(-1)?.text;
+const printFinal = (final) => {
+  if (!final) return;
+  if (opts.out) {
+    if (outBaseline !== undefined && outputStat() !== outBaseline)
+      console.error('output-conflict: --out changed during the turn; it may be a worker-written file. Use a separate final-message destination.');
+    fs.writeFileSync(path.resolve(opts.out), final + '\n');
+  }
+  console.log(`final: ${final.split('\n').find((l) => l.trim()) ?? ''}`);
+};
 // A cyberPolicy block is recorded for the nightly review as kind:'policy-block' on every account. TTADK stops there
 // (telemetry only, no pause); TRAE also writes its 983-style family restriction below (until the next 00:00 UTC).
 const recordPolicyBlock = (model, error) => {
@@ -1059,6 +1082,13 @@ const report = async (threadId, turn, final, usage) => {
   recordModelEvidence(threadId, turn.id, turn.status==='completed'?'completed':'failed');
   if (rejectedModel) console.error(`review-model-rejected: requested ${REQUESTED_MODEL ?? 'default'}, actual ${actualModel ?? 'unknown'}, delegated ${delegatedModels.map((row) => row.model).join(', ') || 'none'}`);
   console.log(`turn ${turn.status}${turn.error ? ' error=' + JSON.stringify(turn.error) : ''}`);
+  const errorText = JSON.stringify(turn.error ?? '');
+  if (turn.status === 'failed' && failureKind(errorText) === 'thread-too-large') {
+    // Do not wait for another hub read while retry/reroute timers are still armed.
+    outcomeTurn = turn; outcomeFinal = final ?? lastMessage(turn.items) ?? '';
+    printFinal(outcomeFinal);
+    rejectRequestBuffer(threadId);
+  }
   const policyBlock = isPolicyBlock(turn);
   if (policyBlock) {
     // Without --account there is no profile home: the block is still printed and logged with model=null.
@@ -1105,18 +1135,10 @@ const report = async (threadId, turn, final, usage) => {
   final ??= lastMessage(turn.items);
   if (!final) final = lastMessage((await readTurns(threadId).catch(() => [])).find((t) => t.id === turn.id)?.items);
   outcomeTurn = turn; outcomeFinal = final ?? '';
-  if (final) {
-    if (opts.out) {
-      if (outBaseline !== undefined && outputStat() !== outBaseline)
-        console.error('output-conflict: --out changed during the turn; it may be a worker-written file. Use a separate final-message destination.');
-      fs.writeFileSync(path.resolve(opts.out), final + '\n');
-    }
-    console.log(`final: ${final.split('\n').find((l) => l.trim()) ?? ''}`);
-  }
+  printFinal(final);
   tracker?.result(rejectedModel ? 'failed' : /^(?:\S+\s+)?(?:BLOCKED|QUESTION)\b/.test(final?.trim() ?? '') ? 'needs-user'
     : turn.status === 'completed' ? 'finished' : 'failed', { thread: threadId, turn: turn.id, mayRun: false,
       finalLine: final?.split('\n').find((line) => line.trim()) ?? '' });
-  const errorText = JSON.stringify(turn.error ?? '');
   const infrastructureMiss = (['trae','ttadk'].includes(PROF?.kind)&&failureKind(errorText)==='unavailable')||(PROF?.kind==='trae'&&/access (temporarily )?restricted|\b983\b/i.test(errorText));
   if (!(strictReviewModel && modelMismatch) && turn.status === 'failed' && ROUTE_ARGS && !BACKGROUND && !workStarted && !turnHasWork(turn) && !final
     && (infrastructureMiss || (policyBlock && (routeFlag(ROUTE_ARGS, 'security') || routeFlag(ROUTE_ARGS, 'adversarial'))))) {
@@ -1352,7 +1374,7 @@ try {
     if (opts.name) await call('thread/name/set', { threadId, name: opts.name }).catch(() => {});
     const talkback = talkbackContext(threadId);
     const instructions = [browserHowTo, projectWorkerInstructions(digest), talkback.instructions, reviewHowTo].filter(Boolean).join('\n');
-    const configured = await call('thread/resume', { threadId, config: { ...browserConfig, ...talkback.config }, developerInstructions: instructions }).catch(() => null);
+    const configured = await call('thread/resume', { threadId, config: { ...browserConfig, ...talkback.config }, developerInstructions: instructions }).catch(resumeFallback);
     markOutputStart();
     const ts = await call('turn/start', {
       threadId, input: textInput(configured ? text : `${talkback.instructions}\n\n${text}`), effort: opts.effort, model: opts.model,
@@ -1365,7 +1387,7 @@ try {
     const config = { ...talkback.config, ...TRAE_MCP_CONFIG };
     const resumedDigest=loadDigest();
     const resumed = await call('thread/resume', { threadId: opts.thread, model: opts.model, config,
-      developerInstructions:[projectWorkerInstructions(resumedDigest), talkback.instructions, reviewHowTo].filter(Boolean).join('\n') }).catch(() => null);
+      developerInstructions:[projectWorkerInstructions(resumedDigest), talkback.instructions, reviewHowTo].filter(Boolean).join('\n') }).catch(resumeFallback);
     sessionPath = resumed?.thread?.path ?? null;
     auditStart(opts.model??resumed?.thread?.model,opts.sandbox??resumed?.thread?.sandbox??undefined,{thread:opts.thread,name:resumed?.thread?.name??undefined});
     tracker?.set({ mayRun: true });
@@ -1464,6 +1486,7 @@ try {
   // A TRAE model that no longer resolves fails at thread/start (before any turn), so the turn recorder never sees it:
   // record it here so routing skips just that model (lib/trae-health.mjs, 2026-11-13).
   const msg = String(e?.message ?? e);
+  if (['start', 'turn'].includes(cmd) && failureKind(msg) === 'thread-too-large') rejectRequestBuffer(attemptThreadId ?? opts.thread);
   const policy = isPolicyBlock({ status: 'failed', error: msg });
   const infrastructureMiss = (['trae','ttadk'].includes(PROF?.kind)&&failureKind(msg)==='unavailable')||(PROF?.kind==='trae'&&/access (temporarily )?restricted|\b983\b/i.test(msg));
   if (infrastructureMiss && !policy) {

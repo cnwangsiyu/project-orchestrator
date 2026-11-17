@@ -17,6 +17,12 @@ const readLaunch = (file) => {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
   catch (e) { if (e.code === 'ENOENT') return null; throw e; }
 };
+const launchDefaults = (opts, owner = opts.owner) => {
+  const defaults = Object.fromEntries(keys.filter((key) => opts[key] !== undefined).map((key) => [key,
+    ['cwd', 'log', 'out'].includes(key) ? path.resolve(opts[key]) : opts[key]]));
+  if (owner) defaults.owner = owner;
+  return defaults;
+};
 export const inheritedLaunch = (account, opts) => {
   const record = readLaunch(launchFile(account, opts.thread));
   if (!record) return null;
@@ -26,10 +32,23 @@ export const inheritedLaunch = (account, opts) => {
 };
 export const saveLaunch = (account, thread, opts, owner, evidence = {}) => {
   const file = launchFile(account, thread);
-  const defaults = Object.fromEntries(keys.filter((key) => opts[key] !== undefined).map((key) => [key,
-    ['cwd', 'log', 'out'].includes(key) ? path.resolve(opts[key]) : opts[key]]));
-  if (owner) defaults.owner = owner;
-  withLock(file, () => writeJson(file, { account, thread, t: Date.now(), defaults, ...evidence }));
+  const defaults = launchDefaults(opts, owner);
+  withLock(file, () => {
+    const record = readLaunch(file);
+    // --force-large permits a turn without clearing the provider's size evidence.
+    writeJson(file, { account, thread, t: Date.now(), defaults, ...evidence,
+      ...(record?.requestBufferExceededAt != null ? { requestBufferExceededAt: record.requestBufferExceededAt } : {}) });
+  });
+};
+export const readRequestBufferExceededAt = (account, thread) => readLaunch(launchFile(account, thread))?.requestBufferExceededAt ?? null;
+export const markRequestBufferExceeded = (account, thread, opts = {}, now = Date.now()) => {
+  const file = launchFile(account, thread);
+  return withLock(file, () => {
+    const record = readLaunch(file) ?? { account, thread, t: now, defaults: launchDefaults(opts) };
+    const at = record.requestBufferExceededAt ?? now;
+    writeJson(file, { ...record, requestBufferExceededAt: at });
+    return at;
+  });
 };
 export const recordLaunchModel = (account, thread, turn, evidence) => {
   const file = launchFile(account, thread);
