@@ -1,7 +1,9 @@
 import {mandatoryReview} from '../review-policy-data.mjs';
 import { VERSION, EFFORTS, array, company, companyDevice, known, modelId, familyOf, isReview, adversarial, result, reason, fingerprint, stable } from './common.mjs';
-import { candidateParts } from './candidates.mjs';
+import { candidateParts, enumerateCandidates } from './candidates.mjs';
 import { modelPreference, policyEffort } from './policy.mjs';
+import { estimateCandidate } from './estimate.mjs';
+import { standingPersonalFallback } from './personal-fallback.mjs';
 
 const pass = (id) => result(id);
 const deny = (id, code, text, c, extra) => result(id, code, text, [c.id], extra);
@@ -83,7 +85,7 @@ export function pTierFloor(t, s, c) {
   if (t.tier !== 'hard' && !['gpt-6.1-sol', 'gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.5', 'gpt-6.1-terra', 'gpt-6-luna',
     'gpt-5.6-luna', 'kimi-k3', 'deepseek-v4.1-flash', 'gemini-3.1-pro-preview', 'seed-evolving', 'opus', 'sonnet', 'haiku', 'fable'].includes(c.modelId))
     return deny('pTierFloor', 'TIER_QUALITY_FLOOR', 'Model has no established category qualification.', c);
-  if (!modelPreference(t,account).includes(c.modelId)&&!explicitEscalation) return deny('pTierFloor','CATEGORY_MODEL_FIT','Model is outside the category/account policy list.',c);
+  if (!modelPreference(t,account,s).includes(c.modelId)&&!explicitEscalation) return deny('pTierFloor','CATEGORY_MODEL_FIT','Model is outside the category/account policy list.',c);
   if (effortIndex(c.effort) < effortIndex(policyEffort(t, c, account,s))) return deny('pTierFloor', 'TIER_EFFORT_FLOOR', 'Effort is below the category/model floor.', c);
   return pass('pTierFloor');
 }
@@ -177,18 +179,21 @@ export function pDevice(t, s, c) {
 }
 export function pScopedApproval(t, s, c, context = {}) {
   const a = candidateParts(s, c).account;
+  const personalFallback = a.kind === 'chatgpt' && s.personalFallback?.enabled ? standingPersonalFallback(t, s, c,
+    context.companyRows ?? enumerateCandidates(t, s).candidates.filter(p => company(candidateParts(s, p).account))
+      .map(candidate => ({ candidate, predicates: evaluateCandidate(t, s, candidate, context), estimate: estimateCandidate(t, s, candidate) }))) : null;
   const requirements = [];
-  if (!company(a) && (a.kind==='claude'||companyDevice(s))) requirements.push(['personal-quota', 'PERSONAL_QUOTA_OK_REQUIRED', 'Current scoped personal-quota approval is required.', context.companyEligible || context.companyUnknown]);
-  if (c.modelId==='gpt-6-astra' && a?.kind==='chatgpt') requirements.push(['astra','PERSONAL_ASTRA_OK_REQUIRED',`use GPT-6-Astra on personal account ${a.id}?`]);
+  if (!company(a) && (a.kind==='claude'||companyDevice(s)) && !personalFallback?.quotaApproved) requirements.push(['personal-quota', 'PERSONAL_QUOTA_OK_REQUIRED', 'Current scoped personal-quota approval is required.', context.companyEligible || context.companyUnknown]);
+  if (c.modelId==='gpt-6-astra' && a?.kind==='chatgpt' && !personalFallback?.astraApprovalRef) requirements.push(['astra','PERSONAL_ASTRA_OK_REQUIRED',`use GPT-6-Astra on personal account ${a.id}?`]);
   if (c.effort === 'max' && !company(a)) requirements.push(['max-effort', 'MAX_EFFORT_OK_REQUIRED', 'Max effort on a personal account requires its own scoped approval.']);
   if (c.modelId === 'fable') requirements.push(['fable', 'FABLE_OK_REQUIRED', 'Fable requires a separate scoped decision.']);
   if (t.requirements.resetRedemption) requirements.push(['reset-redemption', 'RESET_REDEMPTION_OK_REQUIRED', 'Each reset redemption needs unused scoped approval.']);
   const missing = requirements.filter(([action, , , bypass]) => !matchingApproval(t, s, c, action, bypass));
   if (missing.length) {
     const gates = missing.map(([action, code, text]) => approvalGate(t, c, action, code, text));
-    return deny('pScopedApproval', missing[0][1], missing[0][2], c, { gate: gates[0], gates });
+    return deny('pScopedApproval', missing[0][1], missing[0][2], c, { gate: gates[0], gates, personalFallback });
   }
-  return pass('pScopedApproval');
+  return { ...pass('pScopedApproval'), personalFallback };
 }
 export function pBackground(t, s, c) {
   return pass('pBackground'); // Personal background work uses the same scoped/standing quota permission as foreground work.

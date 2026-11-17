@@ -1,4 +1,5 @@
 import { VERSION, EFFORTS, array, object, idOK, modelId, familyOf, compare, unique, nonnegative, finite, clone, freeze, fingerprint, reason } from './common.mjs';
+import { personalFallbackPolicy, fallbackUnavailable } from './personal-fallback.mjs';
 
 export const FRESHNESS = freeze({ cacheMs: 600000, telemetryMs: 1800000, quotaMs: 1800000 });
 // A frozen object alone is not proof that the normalization boundary ran.
@@ -94,6 +95,7 @@ export function createSnapshot(raw, options = {}) {
       capabilities: caps(a.capabilities, `${prefix}.capabilities`), quota,
       workerClass: 'ordinary',
       providerDenied: obs(a.providerDenied, `${prefix}.providerDenied`, bool),
+      fallbackUnavailable: fallbackUnavailable(a, decisionAt),
       denialResetAt: obs(a.denialResetAt, `${prefix}.denialResetAt`, nonnegative),
       burn: obs(a.burn, `${prefix}.burn`, (v) => object(v) && nonnegative(v.projectedAtReset) && nonnegative(v.resetsAt), FRESHNESS.telemetryMs),
       budget: obs(a.budget, `${prefix}.budget`, object),
@@ -140,6 +142,7 @@ export function createSnapshot(raw, options = {}) {
     capabilityVersion: raw.capabilityVersion ?? VERSION, qualityRelationVersion: raw.qualityRelationVersion ?? VERSION,
     qualityRelations: rows(raw.qualityRelations ?? [], 'qualityRelations').map((r) => ({ from: r.from, to: r.to, version: r.version, evidenceId: r.evidenceId })),
     accounts, models, lanes, approvals, health,
+    personalFallback: personalFallbackPolicy(raw.personalFallback, decisionAt),
     resources: obs(raw.resources, 'resources', object), dependencies: obs(raw.dependencies, 'dependencies', strings),
     rotationState: Number.isSafeInteger(raw.rotationState) && raw.rotationState >= 0 ? raw.rotationState : 0,
     etaHistory: rows(raw.etaHistory ?? [], 'etaHistory').filter((h) => idOK(h.attemptId) && nonnegative(h.minutes) && h.minutes > 0

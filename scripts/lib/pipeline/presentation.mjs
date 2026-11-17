@@ -22,6 +22,7 @@ export function presentRoute(plan, view, context) {
   const t = plan.task, f = t.flags, seat = plan.primary ?? plan.primaryProposal, c = seat?.candidate;
   const fixedNotes = [];
   const notes = [...view.notes,...(t.policyNotes??[])], why = [...(t.policyNotes??[])], tellUser = [...view.tellUser], needsUserOK = [...view.needsOK];
+  if (plan.kind === 'launch' && seat?.personalFallback) why.push(seat.personalFallback.text);
   if (t.needsCli.length) notes.push('signed-in CLIs need the full-access sandbox (keychain); stay read-only by instruction: queries only, no writes');
   else if (f['read-only']) notes.push('read-only sandbox: keychain-backed CLIs (lark-cli, bytedcli) will not work; add --needs-cli if the task must use them');
   if(['implement','implement-hard','build-run','debug','ui-browser'].includes(t.category))fixedNotes.push(sourceDigest.worker.split('\n').find(line=>line.startsWith('- Project dependencies'))??'');
@@ -104,11 +105,13 @@ export function presentRoute(plan, view, context) {
     const seatLow=company(a)&&s.estimate.patienceMin!==null;
     const seatPatience=seatLow?s.estimate.patienceMin??30:null;
     const out={vendor,model:c.modelId,effort:c.effort,account:vendor==='claude'?undefined:an,company:company(a),sandbox:vendor==='claude'?null:task.sandbox,
-      launcher:vendor==='claude'?'claude-bg':'codex-worker',command:null};
+      launcher:vendor==='claude'?'claude-bg':'codex-worker',command:null,
+      approvalRef:executable ? (s.personalFallback?.quotaApproved ? s.personalFallback.approvalRef : f['user-ok'] ?? null) : null,
+      astraApprovalRef: executable ? s.personalFallback?.astraApprovalRef ?? null : null};
     if(!executable) return out;
     const prompt=`${primary?'':`Act as the independent ${s.role} reviewer of artifact ${task.artifactRevision}. `}Read ${taskDir}/brief.md and follow it.`;
     const routed={name,project:task.project,category:task.category,role:s.role,account:an,model:c.modelId,effort:c.effort,sandbox:task.sandbox,
-      company:company(a),routeId:plan.routeId,approvalRef:f['user-ok']??null};
+      company:company(a),routeId:plan.routeId,approvalRef:out.approvalRef};
     const audit=command(['node',`${root}/scripts/launch-audit.mjs`,'--name',name,'--project',task.project,'--role',s.role,'--vendor',vendor,'--account',an,'--model',c.modelId,
       '--effort',c.effort,'--sandbox',task.sandbox,'--routed-seat',JSON.stringify(routed),...(f['user-ok']?['--user-ok',f['user-ok']]:[])]);
     if(vendor==='claude') {

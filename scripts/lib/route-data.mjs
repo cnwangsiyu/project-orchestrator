@@ -251,6 +251,8 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
       slowTests: Array.isArray(projectConfig.slowTests) ? projectConfig.slowTests : []};
   };
   if (env.ROUTE_SNAPSHOT_FILE) return finish(createSnapshot(injectedSnapshot, { now }));
+  const fallbackFile = env.PERSONAL_FALLBACK_FILE || path.join(shared, 'personal-fallback.json');
+  const personalFallback = read(fallbackFile, fs.existsSync(fallbackFile) ? null : read(path.join(root, 'references/personal-fallback.json')));
   const at = data?.checkedAt, globalStamp = (value, sampledAt = at, maxAgeMs = 600000) => ({ status: 'KNOWN', value, sampledAt, receivedAt: now, maxAgeMs, source: 'public-status-cache' });
   const baseCaps = (vision = true) => ({ search: true, browser: vision, 'signed-in-browser': vision, 'desktop-tool': vision, vision, 'image-generation': true, 'claude-tools': true });
   const models = new Map(), normalized = [], lanes = [], health = [];
@@ -327,7 +329,7 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
     resources: { held:false, ownedReturned:true, registeredResources:readLeases(shared).registered,
       signingRegistry:fs.existsSync(path.join(shared,'user-signing/registry.json'))&&fs.existsSync(path.join(shared,'user-signing/identities.json')) },
     dependencies:[], approvals: array(read(env.ROUTE_APPROVAL_FILE || path.join(shared,'route-approvals.json'),[])),
-    projectProfiles, reviewHistory:rows.filter((r)=>
+    personalFallback, projectProfiles, reviewHistory:rows.filter((r)=>
       (r.kind==='route'||!r.kind)&&r.pick&&r.executable!==false&&!r.deferred&&(r.executable===true||!r.needsOK?.length))
       .flatMap((r)=>[r,...(r.second&&r.secondExecutable!==false?[{...r,category:'second-opinion',role:'second'}]:[])]),
     outcomes:outcomes.map((r)=>({...r,modelId:r.actual?.[0]?.model??r.first?.model})),

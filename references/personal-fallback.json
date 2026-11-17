@@ -1,0 +1,11 @@
+{
+  "enabled": true,
+  "since": "2026-11-17",
+  "userDecisionRef": "standing:personal-fallback-2026-11-17",
+  "queueWaitMinutes": 5,
+  "allowHardPersonalAstra": true,
+  "hardAstraDecisionRef": "standing:hard-astra-2026-11-17",
+  "hardAstraDecision": "特别难的任务用 astra 也不用问我，直接用吧",
+  "decision": "公司额度用完 Trae 低优队列又需要排队比较久的时候都直接 fallback 到个人额度吧，不用问我了",
+  "queueDecision": "干脆 5 分钟就算久好了，最近 codex 余额有点多"
+}

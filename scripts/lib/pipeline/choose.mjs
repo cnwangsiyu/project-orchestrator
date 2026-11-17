@@ -10,6 +10,8 @@ export function orderCandidates(task, snapshot, rows) {
   const stageKey=(c)=>`${c.accountId}:${c.modelId}`;
   for (const { candidate: c } of rows) minimum.set(stageKey(c), Math.min(minimum.get(stageKey(c)) ?? Infinity, EFFORTS.indexOf(c.effort)));
   let cohort = rows.filter(({ candidate: c }) => EFFORTS.indexOf(c.effort) === minimum.get(stageKey(c)));
+  if (cohort.some(r => r.ok && r.predicates?.some(p => p.personalFallback) && r.estimate.startDelayMin === 0 && !r.estimate.stalled))
+    cohort = cohort.filter(r => !company(candidateParts(snapshot, r.candidate).account) || !candidateParts(snapshot, r.candidate).account.fallbackUnavailable);
   const stalled = (r) => r.estimate.stalled || r.reviewers?.some(s=>s.estimate.stalled);
   if(cohort.some(r=>!stalled(r))) cohort=cohort.filter(r=>!stalled(r));
   const backgroundChoice=task.background&&!['browser','ui-browser','computer-use','build-run'].includes(task.category);
@@ -45,6 +47,8 @@ export function orderCandidates(task, snapshot, rows) {
   }
   const companyClass = (r) => company(candidateParts(snapshot,r.candidate).account) || (companyDevice(snapshot) && !isReview(task) && matchingApproval(task,snapshot,r.candidate,'personal-quota',true)) ? 0 : 1;
   if (cohort.some((r) => companyClass(r) === 0)) cohort = cohort.filter((r) => companyClass(r) === 0);
+  const standingAstra = cohort.filter(r => r.ok && ready(r) && r.predicates?.some(p => p.personalFallback?.astraApprovalRef));
+  if (task.tier === 'hard' && standingAstra.length) cohort = cohort.filter(r => company(candidateParts(snapshot,r.candidate).account) || standingAstra.includes(r));
   if (['browser','ui-browser','computer-use'].includes(task.category) && cohort.length) {
     const order=r=>{const k=candidateParts(snapshot,r.candidate).account.kind;return k==='ttadk'?0:k==='trae'?1:k==='claude'?3:2;};
     const first=Math.min(...cohort.map(order)); cohort=cohort.filter(r=>order(r)===first);
@@ -86,7 +90,7 @@ export function orderCandidates(task, snapshot, rows) {
     const account=candidateParts(snapshot,c).account;
     const hardCompany=task.tier==='hard'&&!adversarial(task)&&task.category!=='image-read'&&company(account);
     // Without observed free capacity, preserve the pre-trial fallback tie-breaks.
-    const preference=hardCompany&&!first?[SOL,ASTRA]:modelPreference(task,account);
+    const preference=hardCompany&&!first?[SOL,ASTRA]:modelPreference(task,account,snapshot);
     // The free company model was selected above. Its new ladder index must not
     // accidentally promote an approved personal option over the company fallback.
     const pref=hardCompany&&c.modelId===first?0:preference.indexOf(c.modelId);

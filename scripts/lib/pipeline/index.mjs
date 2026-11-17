@@ -13,17 +13,19 @@ function assess(task, snapshot, context = {}) {
   const { candidates, diagnostics } = enumerateCandidates(task, snapshot);
   const companyUnknown = diagnostics.some((d) => snapshot.accounts.some((a) => company(a) && d.subjects.includes(a.id)))
     || snapshot.diagnostics.some((d) => ['accounts', 'models', 'lanes', 'schemaVersion'].some((p) => d.subjects.includes(p)));
-  const rows = candidates.map((candidate) => ({ candidate, predicates: evaluateCandidate(task, snapshot, candidate, context) }));
+  const rows = candidates.map((candidate) => ({ candidate, predicates: evaluateCandidate(task, snapshot, candidate, { ...context, companyRows: [] }),
+    estimate: estimateCandidate(task, snapshot, candidate) }));
   const companyEligible = rows.some((r) => company(candidateParts(snapshot, r.candidate).account) && r.predicates.every((p) => p.ok));
+  const companyRows = rows.filter(r => company(candidateParts(snapshot, r.candidate).account));
   for (const row of rows) {
-    row.predicates = evaluateCandidate(task, snapshot, row.candidate, { ...context, companyEligible, companyUnknown });
+    row.predicates = evaluateCandidate(task, snapshot, row.candidate, { ...context, companyEligible, companyUnknown, companyRows });
     row.ok = row.predicates.every((p) => p.ok);
-    row.estimate = estimateCandidate(task, snapshot, row.candidate);
   }
   return { rows, diagnostics, companyUnknown };
 }
 const dedupe = (xs) => [...new Map(xs.map((x) => [fingerprint(x), x])).values()].sort((a, b) => compare(fingerprint(a), fingerprint(b)));
-const proposal = (task, row) => ({ role: task.role, task, candidate: row.candidate, estimate: row.estimate, dependsOnRoles: [] });
+const proposal = (task, row) => ({ role: task.role, task, candidate: row.candidate, estimate: row.estimate,
+  personalFallback: row.predicates.find(p => p.ruleId === 'pScopedApproval')?.personalFallback ?? null, dependsOnRoles: [] });
 const gatesOf = (rows) => dedupe(rows.flatMap((r) => r.predicates.flatMap((p) => p.gates ?? (p.gate ? [p.gate] : []))));
 
 /** Pure selection only: no state reads, dispatch, logging, timers or lock claims. */

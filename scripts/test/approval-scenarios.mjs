@@ -8,13 +8,31 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 const dir = path.dirname(fileURLToPath(import.meta.url)), scripts = path.join(dir, '..');
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'approval-')), file = path.join(tmp, 'route-approvals.json');
-const env = { ...process.env, ROUTE_APPROVAL_FILE: file };
-const run = (script, args) => spawnSync(process.execPath, [path.join(scripts, script), ...args], { env, encoding: 'utf8', timeout: 120000 });
+const now = Date.now(), snapshot = path.join(tmp, 'snapshot.json'), registry = path.join(tmp, 'accounts.json');
+const sol = 'gpt-6.1-sol', efforts = ['medium', 'high', 'xhigh', 'max'];
+fs.writeFileSync(registry, '{}');
+fs.writeFileSync(snapshot, JSON.stringify({ schemaVersion: 'pipeline-v1', collectedFrom: now, collectedThrough: now, decisionAt: now,
+  personalFallback: null, approvals: [], health: [], resources: { held: false, ownedReturned: true }, dependencies: [],
+  accounts: [['ttadk', 'ttadk'], ['trae', 'trae'], ['main', 'chatgpt']].map(([id, kind]) => ({ id, kind, catalog: [sol],
+    auth: true, transport: true, health: true, providerDenied: kind !== 'chatgpt', denialResetAt: now + 3600000, capabilities: {}, quota: [] })),
+  models: [{ id: sol, efforts, capabilities: {}, largeOutput: true }],
+  lanes: ['ttadk', 'trae', 'main'].map(accountId => ({ id: `${accountId}:${sol}`, accountId, modelId: sol, harness: 'hub',
+    efforts, mode: 'standard', selectable: true, readyAt: now, capabilities: {} })) }));
+const env = { ...process.env, HOME: tmp, RULES_SHARED: tmp, CODEX_ACCOUNTS: registry, QUOTA_CACHE: path.join(tmp, 'quota.json'),
+  ROUTE_NOW: String(now), ROUTE_SNAPSHOT_FILE: snapshot, ROUTE_APPROVAL_FILE: file, ROUTE_LOG_FILE: path.join(tmp, 'routes.jsonl'),
+  QUOTA_LOG_FILE: path.join(tmp, 'quota-log.jsonl'), QUOTA_LOG: '0', TRAE_PROBE: '0' };
+const run = (script, args) => {
+  const raw = JSON.parse(fs.readFileSync(snapshot, 'utf8'));
+  raw.approvals = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : [];
+  raw.decisionAt = Date.now(); env.ROUTE_NOW = String(raw.decisionAt);
+  fs.writeFileSync(snapshot, JSON.stringify(raw));
+  return spawnSync(process.execPath, [path.join(scripts, script), ...args], { env, encoding: 'utf8', timeout: 120000 });
+};
 const A = ['implement', '--name', 'approval-probe', '--project', 'approval-test', '--cwd', tmp, '--task-dir', tmp, '--writes', '--impact', 'service',
-  '--exclude-account', 'ttadk,trae,b', '--failures', '1', '--failure-kind', 'infra'];
+  '--exclude-account', 'ttadk,trae,b'];
 try {
   const before = run('route.mjs', A).stdout.split('\n')[0];
-  if (!/^BLOCKED .* on main/.test(before)) { console.log(`SKIP route does not ask main for approval here: ${before}`); process.exit(0); }
+  assert.match(before, /^BLOCKED .* on main/);
   assert.equal(run('approval.mjs', ['add', '--account', 'main', '--ref', 'r1', '--until', new Date(Date.now() - 1000).toISOString(), '--', ...A]).status, 2, 'past --until refused');
   const add = run('approval.mjs', ['add', '--account', 'main', '--ref', 'test ref', '--until', new Date(Date.now() + 3600000).toISOString(), '--', ...A]);
   assert.equal(add.status, 0, add.stderr); const id = add.stdout.trim();

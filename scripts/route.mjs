@@ -45,7 +45,8 @@ try {
         noRedeem:!!task.flags['no-redeem'],excluded:plan.task.exclusions.filter(e=>e.scope==='account').map(e=>e.value),
         excludedLanes:plan.task.exclusions.filter(e=>e.accountId).map(e=>`${e.accountId}:${e.value}`),ttadk:!!out.pick?.company,
         pick:tuple(out.pick),second:tuple(out.secondOpinion),secondExecutable:!!out.secondOpinion?.command,why:out.why,needsOK:out.needsUserOK,tell:out.tellUser,
-        personalApproved:out.executable&&!!out.pick&&!out.pick.company,approvalRef:task.flags['user-ok']??null,
+        personalApproved:out.executable&&!!out.pick&&!out.pick.company,approvalRef:out.pick?.approvalRef??task.flags['user-ok']??null,
+        astraApprovalRef:out.pick?.astraApprovalRef??null,
         reviewClass:plan.task.reviewClass,reviewReason:plan.task.reviewReason,reviewScope:plan.task.reviewScope,reviewOverride:task.flags['review-override']??null,reviewRequired:task.flags['review-required']??null,profileOverride:task.flags['profile-override']??null,
         company:out.pick?.company?out.pick.account:null,owner:owner??null,quota:out.quotaSummary,balance:out.balance};
       try { fs.mkdirSync(path.dirname(context.routeLog),{recursive:true}); fs.appendFileSync(context.routeLog,JSON.stringify(rec)+'\n'); }

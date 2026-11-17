@@ -58,12 +58,39 @@ Explicit `--actual` applies even at zero failures. Every replacement must satisf
 floors, exclusions and confirmed-cancellation requirements. Automatic hops are
 company-only, owner-preserving, and capped at two.
 
-Personal quota asks first on devices with a registered TTADK or TRAE account.
+Personal quota asks first on devices with a registered TTADK or TRAE account,
+except the standing personal Codex fallback approved on 2026-11-17. Its visible
+default is `references/personal-fallback.json`; `_shared/personal-fallback.json`
+overrides it (`PERSONAL_FALLBACK_FILE` selects a fixture/alternate file). Set
+`enabled: false` to revoke it. The data records `userDecisionRef`, `since`,
+`enabled` and `queueWaitMinutes` (default **5 minutes**, user: “干脆 5 分钟就算久好了，最近 codex 余额有点多”).
+The quota gate passes when all qualified company options are exhausted, restricted
+or excluded after infrastructure failures, or the best company option is a TRAE low-priority lane with predicted
+start **over 5 minutes**, including a flat/stalled queue, and no faster company
+option exists. Company capacity available within the threshold still wins.
+Manual exclusions of healthy company accounts retain the scoped quota gate.
+UNKNOWN/stale status alone keeps the question; retained explicit exhaustion or
+restriction evidence can support fallback without freshening status or surviving
+a known quota reset. Ready/progressing depleted TRAE lanes remain company capacity.
+The same data records `allowHardPersonalAstra`, `hardAstraDecisionRef` and the
+user's decision “特别难的任务用 astra 也不用问我，直接用吧”. Personal Astra's gate
+passes for `tier === 'hard'` only while these fallback conditions hold, and the
+plan names the hard-tier Astra standing decision; qualified ready personal Astra
+is preferred for a hard-tier fallback. Normal-tier Astra still asks;
+company capacity within the threshold still wins. Set `allowHardPersonalAstra: false`
+to revoke just the Astra permission, or `enabled: false` to revoke the whole policy.
+Personal Claude/Fable, personal max, reset redemption and explicit
+review/security classes retain their separate gates. Fallback plans explain the
+company blockers/queue wait and record
+`approvalRef: standing:personal-fallback-2026-11-17`; launch-audit accepts the
+routed seat without `--user-ok`. Replay snapshots carry their own policy data.
 Without company accounts, personal ChatGPT is the default lane with standing
 permission; eligible accounts with deadlines within 48 hours rotate under the
 CLI counter, otherwise the earliest deadline wins. Ordinary Claude still asks. `--urgent --user-ok <reference>` only references a real matching scoped approval; it does not establish one; image generation and Claude-only tools retain standing
-permission. Astra on personal ChatGPT always needs its own scoped OK, including
-on devices without company accounts. A runnable non-Astra escalation wins and
+permission. Astra on personal ChatGPT needs its own scoped OK outside the enabled
+hard-tier standing fallback. Hard-tier Astra also has standing permission on a
+personal-only device; normal-tier Astra still asks there.
+A runnable non-Astra escalation wins and
 identifies Astra as a gated alternative; qualified TRAE Astra stays ungated.
 Account-less explicit actuals keep the account UNKNOWN and retain the supplied
 model/effort floor. Max effort outside company accounts (TTADK and TRAE), Fable and reset redemption keep separate
@@ -111,7 +138,7 @@ effort on a free company lane, including ungated `max`, then qualified Astra at
 an effort meeting the Sol floor. After Astra fails, increase Astra effort
 (`high` → `xhigh` → `max`); Sol cannot satisfy an actual Astra floor. Exhausted
 Astra `max` cannot restart on Sol or repeat its quality step automatically.
-Personal Astra and personal `max` still need independent scoped approvals.
+Personal Astra outside the hard-tier standing fallback and personal `max` still need independent scoped approvals.
 Count-only retries without actual history retain the pre-trial Sol category/effort
 assumption; the trial never invents an earlier Astra attempt from today's catalog.
 The retained Sol preference uses known actuals for the same task and role;
@@ -202,7 +229,8 @@ Launch audits compare the project/name and routed seat (including second reviewe
 against account/model/effort/sandbox on start and continuation. Mismatches emit one
 warning, a `launch-mismatch` row, and nightly audit evidence. Only a company pick
 replaced by personal quota without a user reference on its routed decision blocks
-launch. References are recorded verbatim and must match a stored scoped approval; urgency alone never authorizes personal quota. Nightly
+launch. References are recorded verbatim and identify a stored scoped approval or
+the router's applicable standing personal-fallback policy; urgency alone never authorizes personal quota. Nightly
 review launches the router's executable command/seat and records blocked plans;
 it cannot supply its own personal-quota override.
 

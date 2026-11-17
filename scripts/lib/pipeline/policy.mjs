@@ -36,7 +36,7 @@ export const PERSONAL = {
   'image-read':[['sonnet','medium'],['gpt-6.1-terra','medium'],['opus','high'],[SOL,'high']],
   'second-opinion':[[SOL,'high'],['opus','high']],
 };
-export function modelPreference(t,a) {
+export function modelPreference(t,a,s = null) {
   if(adversarial(t)) return ['kimi-k3','deepseek-v4.1-flash','opus'];
   if(company(a)) {
     if(t.category==='image-read') return [SOL,ASTRA,...(a.kind==='ttadk'?['gemini-3.1-pro-preview']:[]),'seed-evolving'];
@@ -47,6 +47,8 @@ export function modelPreference(t,a) {
     return [...TIERS[t.tier],...(t.tier==='light'?[SOL,'gpt-5.6-sol']:[]),...(a.kind==='ttadk'?['gemini-3.1-pro-preview']:[])];
   }
   const preference=(PERSONAL[t.category]??[]).map(([m])=>m);
+  if (a.kind === 'chatgpt' && t.tier === 'hard' && s?.personalFallback?.enabled && s.personalFallback.allowHardPersonalAstra
+    && !preference.includes(ASTRA)) preference.push(ASTRA);
   if(a.kind==='claude'&&known(a.budget)?.status==='over'&&!['claude-tools','second-opinion','review'].includes(t.category)) return preference.filter(m=>!['haiku','sonnet'].includes(m));
   return preference;
 }
