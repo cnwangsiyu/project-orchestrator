@@ -44,7 +44,7 @@ const delegated = (model, params = {}) => ({ method: 'item/completed', params: {
 try {
   check('BC-35 one-shot startup failure surfaces stderr and records a failed worker',()=>{
     const f=fixture('one-shot-failure','chatgpt'),out=path.join(f.dir,'start.out'),log=path.join(f.dir,'start.log');
-    const r=spawnSync('/bin/sh',[path.join(scripts,'run-tracked.sh'),'--name','one-shot-failure','--owner','guard-owner','--account','fixture',
+    const r=spawnSync('/bin/sh',[path.join(scripts,'run-tracked.sh'),'--name','one-shot-failure','--owner','053283ad-1bc8-5a31-ad44-d68e6b199eb6','--account','fixture',
       '--model','gpt-6.1-sol','--log',log,'--out',out,'--',process.execPath,'-e',
       'console.error("Not inside a trusted directory and --skip-git-repo-check was not specified");process.exit(9)'],{env:f.env,encoding:'utf8',timeout:5000});
     assert.equal(r.status,9);assert.match(r.stderr,/launch failed before producing a thread\/turn/);assert.match(r.stderr,/Not inside a trusted directory/);
@@ -53,7 +53,7 @@ try {
   });
   check('main c702ec4: accepted one-shot exit zero without output still fails',()=>{
     const f=fixture('accepted-no-output','chatgpt'),out=path.join(f.dir,'missing.out');
-    const r=spawnSync('/bin/sh',[path.join(scripts,'run-tracked.sh'),'--name','accepted-no-output','--owner','guard-owner','--account','fixture',
+    const r=spawnSync('/bin/sh',[path.join(scripts,'run-tracked.sh'),'--name','accepted-no-output','--owner','053283ad-1bc8-5a31-ad44-d68e6b199eb6','--account','fixture',
       '--model','gpt-6.1-sol','--out',out,'--',process.execPath,'-e',
       'console.log(JSON.stringify({type:"thread.started",thread_id:"accepted-thread"}));'],{env:f.env,encoding:'utf8',timeout:5000});
     assert.equal(r.status,1);assert.equal(rows(path.join(f.dir,'worker-events.jsonl')).at(-1).event,'failed');assert.ok(!fs.existsSync(out));
@@ -142,12 +142,12 @@ try {
   for (const listData of [[], [{ id: 'guard-thread', status: { type: 'idle' } }],
     [{ id: 'guard-thread', status: { type: 'active' } }], [{ id: 'guard-thread' }]]) {
     check(`setup settlement: ${JSON.stringify(listData)}`, () => {
-      const f = fixture(`settlement-${passed}`), r = run(f, 'turn', { hang: 'thread/resume', listData }, ['--stall-min', '0.003', '--owner', 'setup-owner']);
+      const f = fixture(`settlement-${passed}`), r = run(f, 'turn', { hang: 'thread/resume', listData }, ['--stall-min', '0.003', '--owner', '0ad99da2-c51e-56ce-9fb8-8a5d5919b31e']);
       assert.equal(r.status, 4, r.stderr);
       const settled = !listData.length || listData[0].status?.type === 'idle';
       assert.equal(r.events.at(-1).settled === true, settled);
       assert.equal(r.events.at(-1).mayRun, !settled);
-      assert.equal(inbox(r.events, 'setup-owner').running.length, settled ? 0 : 1, 'mine no longer sees a settled setup as unknown');
+      assert.equal(inbox(r.events, '0ad99da2-c51e-56ce-9fb8-8a5d5919b31e').running.length, settled ? 0 : 1, 'mine no longer sees a settled setup as unknown');
     });
   }
   check('large rollout and cumulative token guards refuse before contacting hub', () => {
@@ -178,21 +178,21 @@ try {
   check('continuation inherits ownership, routing, hop depth and absolute outputs; explicit flags win', () => {
     const f = fixture('inheritance'), log = path.join(f.dir, 'worker.jsonl'), out = path.join(f.dir, 'final.md');
     const route = ['analysis', '--failures', '2', '--exclude-account', 'main,b', '--exclude-model', 'gemini', '--auto-reroute-depth', '1'];
-    let r = run(f, 'start', {}, ['--route-args', JSON.stringify(route), '--owner', 'saved-owner', '--name', 'saved-name', '--log', log, '--out', out]);
+    let r = run(f, 'start', {}, ['--route-args', JSON.stringify(route), '--owner', '992e5f12-ce02-5dfc-a7c4-fc2141571136', '--name', 'saved-name', '--log', log, '--out', out]);
     assert.equal(r.status, 0, r.stderr);
     const file = path.join(f.dir, 'worker-launches/fixture/guard-thread.json');
     let saved = JSON.parse(fs.readFileSync(file, 'utf8'));
     assert.equal(saved.defaults['auto-reroute-depth'], 1);
     const startCount = r.events.length;
     r = run(f, 'turn', {}, ['--cwd', tmp]); assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stdout, /inherited:.*route-args.*saved-owner/);
-    const first = r.events[startCount]; assert.equal(first.owner, 'saved-owner'); assert.equal(first.name, 'saved-name');
+    assert.match(r.stdout, /inherited:.*route-args.*992e5f12-ce02-5dfc-a7c4-fc2141571136/);
+    const first = r.events[startCount]; assert.equal(first.owner, '992e5f12-ce02-5dfc-a7c4-fc2141571136'); assert.equal(first.name, 'saved-name');
     assert.equal(first.logFile, log); assert.equal(first.outFile, out);
     assert.deepEqual(r.events.at(-1).routeArgs, route); assert.equal(r.events.at(-1).rerouteDepth, 1);
     assert.match(fs.readFileSync(out, 'utf8'), /DONE guard fixture/);
     const override = ['analysis', '--failures', '0'];
-    r = run(f, 'turn', {}, ['--owner', 'explicit-owner', '--route-args', JSON.stringify(override), '--auto-reroute-depth', '2', '--out', path.join(f.dir, 'override.md')]);
-    assert.equal(r.status, 0, r.stderr); assert.equal(r.events.at(-1).owner, 'explicit-owner');
+    r = run(f, 'turn', {}, ['--owner', '53c2153d-01d9-58cb-8ce2-af1dcc0581be', '--route-args', JSON.stringify(override), '--auto-reroute-depth', '2', '--out', path.join(f.dir, 'override.md')]);
+    assert.equal(r.status, 0, r.stderr); assert.equal(r.events.at(-1).owner, '53c2153d-01d9-58cb-8ce2-af1dcc0581be');
     assert.deepEqual(r.events.at(-1).routeArgs, override); assert.equal(r.events.at(-1).rerouteDepth, 2);
     saved = JSON.parse(fs.readFileSync(file, 'utf8')); assert.equal(saved.defaults.out, path.join(f.dir, 'override.md'));
     assert.equal(saved.defaults.cwd, tmp); assert.equal(saved.defaults.log, log);
@@ -225,12 +225,12 @@ try {
   });
   check('inherited queue cancellation still enforces two-hop limit', () => {
     const f = fixture('inherited-queue');
-    let r = run(f, 'start', {}, ['--owner', 'queue-owner', '--route-args', JSON.stringify(['analysis', '--failures', '1', '--exclude-account', 'main,b']),
+    let r = run(f, 'start', {}, ['--owner', '6d7e64f9-44ee-59b9-9db9-22df760e91f3', '--route-args', JSON.stringify(['analysis', '--failures', '1', '--exclude-account', 'main,b']),
       '--auto-reroute-depth', '2', '--queue-patience-min', '0.0001']);
     assert.equal(r.status, 0, r.stderr);
     r = run(f, 'turn', { quiet: true, messages: [{ method: 'queue/status', params: { threadId: 'guard-thread', turnId: 'guard-turn', state: 'queued', position: 100 } }] });
     assert.equal(r.status, 10, r.stderr + r.stdout); assert.match(r.stdout, /reroute-depth-limit/);
-    assert.ok(r.calls.some((call) => call.method === 'turn/interrupt')); assert.equal(r.events.at(-1).owner, 'queue-owner');
+    assert.ok(r.calls.some((call) => call.method === 'turn/interrupt')); assert.equal(r.events.at(-1).owner, '6d7e64f9-44ee-59b9-9db9-22df760e91f3');
     assert.ok(!r.records.some((row) => row.kind === 'reroute'));
   });
   check('own model evidence ignores unrelated threads, turns and child senders', () => {

@@ -80,19 +80,20 @@ const prepareTransaction = (ack, rows) => ({ ...nextAck(ack, []), transaction: {
   events: rows.map(({ id, seq }) => ({ id, seq })) } });
 
 export const launcherIdentity = (override, env = process.env, cwd = process.cwd()) => {
-  const sessionId = [override, env.ORCHESTRATOR_OWNER, env.CLAUDE_SESSION_ID].find(validOwner) ?? null;
+  const sessionId = resolveOwner(override, env);
   const jobId = typeof env.CLAUDE_JOB_DIR === 'string' ? path.basename(env.CLAUDE_JOB_DIR) : null;
   return { sessionId, jobId, cwd, env: Object.fromEntries(['CLAUDE_SESSION_ID', 'CLAUDE_JOB_DIR', 'CLAUDECODE', 'CLAUDE_CODE_TASK_ID']
     .filter((key) => typeof env[key] === 'string').map((key) => [key, env[key]])) };
 };
 export const resolveOwner = (override, env = process.env) => {
-  const launcher = launcherIdentity(override, env);
-  const raw = launcher.sessionId ?? (validOwner(launcher.jobId) ? launcher.jobId : null);
-  if (shortOwner(raw)) {
-    const matches=[...new Set(readEvents().map(row=>row.owner).filter(fullOwner))].filter(id=>id.toLowerCase().startsWith(raw.toLowerCase()));
-    if(matches.length===1) return matches[0];
-  }
-  return launcher.sessionId ?? (validOwner(launcher.jobId) ? launcher.jobId : null);
+  // No reliable Claude Bash session-ID variable is documented; SessionStart
+  // exports the hook's full session_id through ORCHESTRATOR_OWNER instead.
+  const raw = override ?? (env.ORCHESTRATOR_OWNER || null);
+  if (raw === null || fullOwner(raw)) return raw;
+  if (typeof raw === 'string' && raw.length && fullOwner(env.ORCHESTRATOR_OWNER)
+    && env.ORCHESTRATOR_OWNER.toLowerCase().startsWith(raw.toLowerCase())) return env.ORCHESTRATOR_OWNER;
+  const error = Error('pass the full session id (or omit --owner to use ORCHESTRATOR_OWNER)');
+  error.exitCode = 2; throw error;
 };
 
 const withEventLock = (fn, wait = true) => {
@@ -529,6 +530,10 @@ export const hasWatcherAsync = async (owner) => {
   try { const w = JSON.parse(await fsp.readFile(path.join(watcherFile(owner), 'watcher.json'), 'utf8'));
     return w.owner === owner && live(w.pid) && Date.now() - w.t < 45000; } catch { return false; }
 };
+export const watchDeadline = (flushAt, questions, now = Date.now()) => questions.reduce((deadline, row) => {
+  const reserveAt = row.expiresAt - row.timeoutMin * 60000 * 0.8;
+  return Math.min(deadline, Number.isFinite(reserveAt) ? reserveAt : now);
+}, flushAt);
 export const watch = async (owner, print = (rows) => new Promise((resolve, reject) =>
   process.stdout.write(rows.map((row) => eventLine(row)).join('\n') + '\n', (error) => error ? reject(error) : resolve())), { debounceSec = 45 } = {}) => {
   if (!Number.isFinite(debounceSec) || debounceSec < 0) throw Error('--debounce-sec takes a nonnegative finite number');
@@ -569,10 +574,7 @@ export const watch = async (owner, print = (rows) => new Promise((resolve, rejec
       if (triggers.length && flushAt === undefined) flushAt = Date.now() + debounceSec * 1000;
       if (flushAt !== undefined) {
         // Reserve 80% of each ask's original timeout, including asks arriving late in this batch.
-        for (const row of [...snapshot.questions, ...snapshot.pending.filter((row) => row.event === 'question')]) {
-          const reserveAt = row.expiresAt - row.timeoutMin * 60000 * 0.8;
-          flushAt = Math.min(flushAt, Number.isFinite(reserveAt) ? reserveAt : Date.now());
-        }
+        flushAt = watchDeadline(flushAt, [...snapshot.questions, ...snapshot.pending.filter((row) => row.event === 'question')]);
         if (Date.now() >= flushAt) {
           let delivered = false, printError;
           try { await deliverAsync(owner, async (rows) => {

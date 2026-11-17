@@ -91,6 +91,25 @@ try {
   assert.ok(signing.plan.reasons.some(r=>r.code==='SIGNING_FULL_ACCESS_REQUIRED'));
   console.log('ok   Codex writers default full; reviewers stay read-only; tests and explicit overrides stay narrower');
 
+  const cliNote = 'signed-in CLIs need the full-access sandbox (keychain); stay read-only by instruction: queries only, no writes';
+  const sandboxNote = 'read-only sandbox: keychain-backed CLIs (lark-cli, bytedcli) will not work; add --needs-cli if the task must use them';
+  for (const extra of [[], ['--sandbox', 'read-only'], ['--sandbox', 'workspace-write'], ['--runs-tests']]) {
+    const cli = route(['analysis', '--read-only', '--needs-cli', 'lark,bytedcli', ...extra]);
+    assert.equal(cli.pick.sandbox, 'danger-full-access');
+    assert.ok(cli.pick.command.includes(' --sandbox danger-full-access '));
+    assert.deepEqual(cli.plan.task.needsCli, ['bytedcli', 'lark']);
+    assert.equal(cli.plan.task.writes, false);
+    assert.equal(cli.plan.task.readOnlyByInstruction, true);
+    assert.equal(cli.notes.filter(note => note === cliNote).length, 1);
+    assert.ok(!cli.notes.includes(sandboxNote));
+  }
+  const query = route(['analysis', '--read-only']);
+  assert.equal(query.pick.sandbox, 'read-only');
+  assert.equal(query.plan.task.readOnlyByInstruction, false);
+  assert.deepEqual(query.plan.task.needsCli, []);
+  assert.equal(query.notes.filter(note => note === sandboxNote).length, 1);
+  console.log('ok   BC-72 CLI queries use full access with read-only intent; ordinary read-only routes explain keychain limits');
+
   for (const project of ['evelyns-world', 'acq', 'autotrader']) {
     const notes = route(['implement', '--project', project, '--impact', 'service']).allNotes.join('\n');
     assert.match(notes, /project profile no-review/);

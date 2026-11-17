@@ -59,7 +59,7 @@ const run = (label, config = {}, flags = [], options = {}) => {
   if (options.template) for (const key of ['cwd', 'task-dir']) routeArgs = setRouteFlag(routeArgs, key, null);
   const r = spawnSync(process.execPath, ['--import', transport, path.join(scripts, 'codex-worker.mjs'), '--account', 'trae',
     'start', '--cwd', dir, '--model', source, '--effort', 'high', '--sandbox', 'workspace-write', '--name', label,
-    '--owner', 'reroute-owner',
+    '--owner', 'c2987dae-1fac-5a84-a312-a29117f1b8c7',
     '--route-args', JSON.stringify(routeArgs), '--auto-reroute-depth', String(options.depth ?? 0), '--queue-patience-min', String(options.patience ?? 5),
     ...(options.stallMin === undefined ? [] : ['--stall-min', String(options.stallMin)]),
     ...(options.altStart === undefined ? [] : ['--queue-alt-start-min', String(options.altStart)]),
@@ -91,7 +91,7 @@ try {
   const events = (r) => fs.readFileSync(path.join(r.dir, 'worker-events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   assert.ok(events(hopped).some((row) => row.event === 're-routed'));
   assert.ok(events(hopped).some((row) => row.event === 'finished'));
-  assert.ok(events(hopped).every((row) => row.owner === 'reroute-owner'), 'automatic hops inherit the launcher owner');
+  assert.ok(events(hopped).every((row) => row.owner === 'c2987dae-1fac-5a84-a312-a29117f1b8c7'), 'automatic hops inherit the launcher owner');
   for (const id of new Set(events(hopped).map((row) => row.runId)))
     assert.equal(events(hopped).filter((row) => row.runId === id && row.event !== 'running').length, 1);
   const replacement = hopped.calls.find((c) => c.method === 'turn/start' && c.model !== SOL);
@@ -104,7 +104,7 @@ try {
     'turn', '--thread', 'fixture', '--model', SOL, '--effort', 'high', 'Continue the fixture brief.'],
   { env: { ...seed.env, REROUTE_FIXTURE: JSON.stringify({ source: SOL, rpc: path.join(seed.dir, 'rpc.jsonl') }) }, encoding: 'utf8', timeout: 15000 });
   assert.equal(continued.error, undefined); assert.equal(continued.status, 0, continued.stderr + continued.stdout);
-  assert.match(continued.stdout, /inherited:.*route-args.*reroute-owner/); assert.match(continued.stdout, /rerouted:/);
+  assert.match(continued.stdout, /inherited:.*route-args.*c2987dae-1fac-5a84-a312-a29117f1b8c7/); assert.match(continued.stdout, /rerouted:/);
   const continuedRows = fs.readFileSync(path.join(seed.dir, 'route.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   const continuedHop = continuedRows.find((r) => r.kind === 'reroute'); assert.equal(continuedHop.depth, 2);
   const continuationState = JSON.parse(fs.readFileSync(path.join(seed.task, 'reroute.json'), 'utf8'));
@@ -113,7 +113,7 @@ try {
   assert.equal(routeFlag(continuationState.routeArgs, 'exclude-account'), 'main,b');
   assert.equal(routeFlag(continuationState.routeArgs, 'fresh'), null);
   assert.match(fs.readFileSync(path.join(seed.task, 'final.md'), 'utf8'), /DONE automatic replacement/);
-  assert.ok(events(seed).every((row) => row.owner === 'reroute-owner'));
+  assert.ok(events(seed).every((row) => row.owner === 'c2987dae-1fac-5a84-a312-a29117f1b8c7'));
   const requiredInfrastructure = run('required-infrastructure', { mode: 'restriction' }, [], { requireModel: true,peerReady:true });
   assert.equal(requiredInfrastructure.status, 0, requiredInfrastructure.stderr + requiredInfrastructure.stdout);
   assert.ok(requiredInfrastructure.rows.some((row) => row.kind === 'reroute'), 'missing execution evidence before work preserves infrastructure handoff');

@@ -7,7 +7,7 @@ const BOOLEANS = new Set(['auto-check', 'writes', 'read-only', 'runs-tests', 'si
   'urgent', 'security', 'adversarial', 'defensive', 'background', 'device-lease', 'shared-lock', 'no-local-build', 'worker', 'installed', 'no-browser-preflight']);
 const VALUES = new Set(['stakes', 'failures', 'against', 'author', 'impact', 'env', 'exclude-account', 'exclude-model', 'origins', 'mode',
   'sandbox', 'cwd', 'task-dir', 'name', 'project', 'apps', 'user-ok', 'auto-reroute-depth', 'previous-attempt', 'execution', 'actual',
-  'owner', 'failure-kind', 'trusted-cwd', 'exclude-lane', 'review-override', 'review-required', 'profile-override', 'artifact-ref', 'network', 'review-class', 'review-reason', 'review-scope']);
+  'owner', 'failure-kind', 'trusted-cwd', 'exclude-lane', 'review-override', 'review-required', 'profile-override', 'artifact-ref', 'network', 'review-class', 'review-reason', 'review-scope', 'needs-cli']);
 const CODE = new Set(['implement', 'implement-hard', 'debug', 'science']);
 export class TaskInputError extends Error {
   constructor(code, message) { super(message); this.name = 'TaskInputError'; this.code = code; this.exitCode = 2; }
@@ -101,7 +101,9 @@ export function createTaskSpec(input) {
     execution = 'remote';
   }
   if (execution === 'remote' && f['shared-lock']) fail('EXECUTION_CONFLICT', 'Remote work cannot acquire local shared locks.');
-  const sandbox = f.sandbox ?? input.sandbox ?? 'workspace-write', ceiling = input.sandboxCeiling ?? 'workspace-write';
+  const needsCli = unique(list(f['needs-cli']));
+  if (needsCli.some(cli => !/^[a-z][a-z0-9-]*$/.test(cli))) fail('INVALID_CLI', 'needs-cli takes comma-separated CLI names, e.g. lark,bytedcli.');
+  const sandbox = needsCli.length ? 'danger-full-access' : f.sandbox ?? input.sandbox ?? 'workspace-write', ceiling = input.sandboxCeiling ?? 'workspace-write';
   if(f.network==='off'&&sandbox==='danger-full-access') fail('INVALID_NETWORK_SANDBOX','Network off requires a read-only or workspace-write sandbox.');
   if (![sandbox, ceiling].every((s) => ['danger-full-access', 'workspace-write', 'read-only'].includes(s))) fail('INVALID_SANDBOX', 'Unsupported sandbox.');
   if (f.sandbox && !['workspace-write', 'read-only'].includes(f.sandbox)) fail('INVALID_SANDBOX', 'Explicit sandbox only narrows the default.');
@@ -161,6 +163,7 @@ export function createTaskSpec(input) {
     floor: clone(input.floor ?? { profileIds: [], previousAttemptIds: [], relationVersion: VERSION, historyStatus: failures || autoRerouteDepth || f['previous-attempt'] ? 'UNKNOWN' : 'KNOWN' }),
     authorAttemptId: input.authorAttemptId ?? null, againstAttemptId: input.againstAttemptId ?? null,
     cwd: f.cwd ?? input.cwd ?? '.', taskDir: f['task-dir'] ?? input.taskDir ?? '.', sandbox, sandboxCeiling: ceiling,
+    needsCli, readOnlyByInstruction: needsCli.length > 0 && !writes,
     allowedOrigins, allowedApps: apps, deviceId: input.deviceId ?? null, ownTestApp: input.ownTestApp === true,
     signingManifestRef: input.signingManifestRef ?? null, approvalRefs: unique([...array(input.approvalRefs), ...list(f['user-ok'])]),
     autoRerouteDepth, notifyBy: input.notifyBy ?? null, timezone: input.timezone ?? 'America/Los_Angeles',

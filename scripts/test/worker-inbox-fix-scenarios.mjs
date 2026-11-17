@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Review reproductions: fixtures only, no real hubs/accounts/credentials.
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
@@ -90,7 +91,7 @@ fs.rename = async (...args) => {
   await assert.rejects(deliverAsync(printFailure, async () => { throw Error('closed output'); }), /closed output/);
   assert.equal(inbox(readEvents(), printFailure, readAck(printFailure)).pending.length, 1, 'a failed print rolls back its acknowledgement');
   const rollbackOwner = 'compaction-rollback', rollbackEvent = record(rollbackOwner);
-  for (let i = 0; i < 70; i++) record('rollback-padding', 'finished', { runId: `padding-${i}` });
+  for (let i = 0; i < 70; i++) record('aaeff94d-6fb9-545f-99f4-4ea427d14759', 'finished', { runId: `padding-${i}` });
   await assert.rejects(deliverAsync(rollbackOwner, async () => {
     compactWorkerEvents();
     assert.ok(readEvents().some((row) => row.id === rollbackEvent.id), 'compaction cannot prune an in-flight acknowledgement');
@@ -194,22 +195,22 @@ fs.rename = async (...args) => {
   const historyAck = Object.fromEntries(historyRows.map((row) => [row.id, { t: historyNow, event: row.event }]));
   fs.writeFileSync(ackFile(historyOwner), JSON.stringify({ owner: historyOwner, delivered: historyAck }));
   fs.appendFileSync(eventFile(), historyRows.map(JSON.stringify).join('\n') + '\n');
-  const oldPending = record('old-pending', 'finished', { t: historyNow - RETENTION_MS * 2 });
-  record('live-old', 'running', { pid: process.pid });
-  fs.writeFileSync(eventFile(), readEvents().map((row) => row.id === oldPending.id || row.owner === 'live-old'
+  const oldPending = record('ae0e4330-ad0f-5c40-a955-8e7f6e761699', 'finished', { t: historyNow - RETENTION_MS * 2 });
+  record('f5eef68b-5444-54a3-8900-ddba26e9643a', 'running', { pid: process.pid });
+  fs.writeFileSync(eventFile(), readEvents().map((row) => row.id === oldPending.id || row.owner === 'f5eef68b-5444-54a3-8900-ddba26e9643a'
     ? { ...row, t: historyNow - RETENTION_MS * 2 } : row).map(JSON.stringify).join('\n') + '\n');
   compactWorkerEvents();
   assert.ok(fs.statSync(eventFile()).size < ROTATE_BYTES, 'acknowledged history is off the hot path');
   assert.ok(readAck(historyOwner).highWater >= historyRows.at(-1).seq);
   assert.ok(Object.keys(readAck(historyOwner).delivered).length <= ACK_RECEIPTS);
-  assert.ok(inbox(readEvents(), 'old-pending', readAck('old-pending')).pending.some((row) => row.id === oldPending.id));
-  assert.equal(inbox(readEvents(), 'live-old').running.length, 1);
+  assert.ok(inbox(readEvents(), 'ae0e4330-ad0f-5c40-a955-8e7f6e761699', readAck('ae0e4330-ad0f-5c40-a955-8e7f6e761699')).pending.some((row) => row.id === oldPending.id));
+  assert.equal(inbox(readEvents(), 'f5eef68b-5444-54a3-8900-ddba26e9643a').running.length, 1);
   const summary = auditWorkerEvents(undefined, historyNow - 10000).find((row) => row.owner === historyOwner);
   assert.equal(summary.acknowledged, historyRows.length, 'rotation preserves the seven-day audit window');
   assert.equal(summary.finishToAckMs.max, 1000);
   compactWorkerEvents(historyNow + RETENTION_MS * 2);
   assert.equal(fs.readdirSync(path.join(tmp, 'worker-event-history')).filter((name) => Number(name.split('-')[0]) < historyNow + RETENTION_MS).length, 0);
-  assert.ok(inbox(readEvents(), 'old-pending').pending.length, 'retention never removes unacknowledged work');
+  assert.ok(inbox(readEvents(), 'ae0e4330-ad0f-5c40-a955-8e7f6e761699').pending.length, 'retention never removes unacknowledged work');
   console.log('PASS >4MiB legacy acknowledgements, bounded high-water state, rotation, pending/live preservation and audit retention');
 
   const pausedPoll = path.join(tmp, 'watch-poll-gate.mjs');
@@ -223,101 +224,101 @@ globalThis.setTimeout = (fn, ms, ...args) => {
 };
 `);
   const hookPoll = path.join(tmp, 'hook-poll'), hookGate = path.join(tmp, 'hook-gate');
-  const watcher = startWatch('hook-wins', { NODE_OPTIONS: `--import ${pausedPoll}`, WATCH_POLL_RECEIPT: hookPoll, WATCH_POLL_GATE: hookGate });
-  await until(() => hasWatcher('hook-wins'), 'watcher armed');
+  const watcher = startWatch('ce93a00c-fe96-5da9-b331-d30abff4e609', { NODE_OPTIONS: `--import ${pausedPoll}`, WATCH_POLL_RECEIPT: hookPoll, WATCH_POLL_GATE: hookGate });
+  await until(() => hasWatcher('ce93a00c-fe96-5da9-b331-d30abff4e609'), 'watcher armed');
   await until(() => fs.existsSync(hookPoll), 'watcher parked before the race');
-  record('hook-wins'); assertBlock(hookRun('hook-wins'), 'hook wins gated watcher race');
+  record('ce93a00c-fe96-5da9-b331-d30abff4e609'); assertBlock(hookRun('ce93a00c-fe96-5da9-b331-d30abff4e609'), 'hook wins gated watcher race');
   fs.writeFileSync(hookGate, 'released');
   await new Promise(resolve => setTimeout(resolve, 250));
-  assert.equal(hasWatcher('hook-wins'), true, 'acknowledged events leave the watcher armed');
-  record('hook-wins', 'finished', { runId: 'later-result', finalLine: 'fresh result' });
+  assert.equal(hasWatcher('ce93a00c-fe96-5da9-b331-d30abff4e609'), true, 'acknowledged events leave the watcher armed');
+  record('ce93a00c-fe96-5da9-b331-d30abff4e609', 'finished', { runId: 'later-result', finalLine: 'fresh result' });
   const woke = await watcher.done;
   assert.equal(woke.code, 0, woke.stderr); assert.match(woke.stdout, /fresh result/);
   assert.doesNotMatch(woke.stdout, /acknowledged elsewhere|DONE review fixture/);
-  assert.equal(hasWatcher('hook-wins'), false);
-  const faultWatch = startWatch('watch-ack-failure', { NODE_OPTIONS: `--import ${fault}`, ACK_FAULT: 'ENOSPC' });
-  await until(() => hasWatcher('watch-ack-failure'), 'ack failure watcher armed');
-  record('watch-ack-failure');
+  assert.equal(hasWatcher('ce93a00c-fe96-5da9-b331-d30abff4e609'), false);
+  const faultWatch = startWatch('0d6c193c-4bc7-52b8-bdcd-062eba5e803a', { NODE_OPTIONS: `--import ${fault}`, ACK_FAULT: 'ENOSPC' });
+  await until(() => hasWatcher('0d6c193c-4bc7-52b8-bdcd-062eba5e803a'), 'ack failure watcher armed');
+  record('0d6c193c-4bc7-52b8-bdcd-062eba5e803a');
   await new Promise(resolve => setTimeout(resolve, 250));
-  assert.equal(hasWatcher('watch-ack-failure'), true, 'failed acknowledgement leaves watcher armed for retry');
+  assert.equal(hasWatcher('0d6c193c-4bc7-52b8-bdcd-062eba5e803a'), true, 'failed acknowledgement leaves watcher armed for retry');
   faultWatch.child.kill('SIGTERM');
   const faultWake = await faultWatch.done;
   assert.equal(faultWake.code, 143, faultWake.stderr); assert.equal(faultWake.stdout, '');
-  assert.equal(inbox(readEvents(), 'watch-ack-failure', readAck('watch-ack-failure')).pending.length, 1, 'a failed watcher ack retains pending delivery');
-  const first = startWatch('singleton'); await until(() => hasWatcher('singleton'), 'singleton armed');
-  const duplicate = await startWatch('singleton').done; assert.equal(duplicate.code, 0); assert.match(duplicate.stdout, /already-armed/);
-  record('singleton'); assert.equal((await first.done).code, 0);
+  assert.equal(inbox(readEvents(), '0d6c193c-4bc7-52b8-bdcd-062eba5e803a', readAck('0d6c193c-4bc7-52b8-bdcd-062eba5e803a')).pending.length, 1, 'a failed watcher ack retains pending delivery');
+  const first = startWatch('9cf4c700-4a4a-5a50-b7d7-05e41544565f'); await until(() => hasWatcher('9cf4c700-4a4a-5a50-b7d7-05e41544565f'), '9cf4c700-4a4a-5a50-b7d7-05e41544565f armed');
+  const duplicate = await startWatch('9cf4c700-4a4a-5a50-b7d7-05e41544565f').done; assert.equal(duplicate.code, 0); assert.match(duplicate.stdout, /already-armed/);
+  record('9cf4c700-4a4a-5a50-b7d7-05e41544565f'); assert.equal((await first.done).code, 0);
   const claims = path.join(tmp, 'worker-watchers');
   const claimFor = (owner) => path.join(claims, path.basename(ackFile(owner), '.json') + '.claim');
-  const staleClaim = claimFor('stale-claim'); fs.mkdirSync(staleClaim);
-  fs.writeFileSync(path.join(staleClaim, 'watcher.json'), JSON.stringify({ owner: 'stale-claim', pid: 2147483647, t: Date.now() }));
+  const staleClaim = claimFor('b9dc006f-f03a-56e1-b228-432df3f73326'); fs.mkdirSync(staleClaim);
+  fs.writeFileSync(path.join(staleClaim, 'watcher.json'), JSON.stringify({ owner: 'b9dc006f-f03a-56e1-b228-432df3f73326', pid: 2147483647, t: Date.now() }));
   fs.mkdirSync(`${staleClaim}.reap`); fs.utimesSync(`${staleClaim}.reap`, new Date(0), new Date(0));
-  const recoveredWatch = startWatch('stale-claim'); await until(() => hasWatcher('stale-claim'), 'dead claim and stale reaper recovered');
-  record('stale-claim'); assert.equal((await recoveredWatch.done).code, 0); assert.equal(fs.existsSync(staleClaim), false);
-  record('watch-print-error');
-  await assert.rejects(watch('watch-print-error', () => { throw Error('watch print failed'); }, { debounceSec: 0 }), /watch print failed/);
-  assert.equal(fs.existsSync(claimFor('watch-print-error')), false, 'watch error releases its claim');
-  assert.equal(inbox(readEvents(), 'watch-print-error', readAck('watch-print-error')).pending.length, 1);
+  const recoveredWatch = startWatch('b9dc006f-f03a-56e1-b228-432df3f73326'); await until(() => hasWatcher('b9dc006f-f03a-56e1-b228-432df3f73326'), 'dead claim and stale reaper recovered');
+  record('b9dc006f-f03a-56e1-b228-432df3f73326'); assert.equal((await recoveredWatch.done).code, 0); assert.equal(fs.existsSync(staleClaim), false);
+  record('d23736c5-2ca5-5069-bed7-becd97015a5f');
+  await assert.rejects(watch('d23736c5-2ca5-5069-bed7-becd97015a5f', () => { throw Error('watch print failed'); }, { debounceSec: 0 }), /watch print failed/);
+  assert.equal(fs.existsSync(claimFor('d23736c5-2ca5-5069-bed7-becd97015a5f')), false, 'watch error releases its claim');
+  assert.equal(inbox(readEvents(), 'd23736c5-2ca5-5069-bed7-becd97015a5f', readAck('d23736c5-2ca5-5069-bed7-becd97015a5f')).pending.length, 1);
   const heartbeatWrite = fs.writeFileSync;
   fs.writeFileSync = (file, ...args) => {
-    if (String(file).includes(claimFor('watch-heartbeat-error'))) throw Object.assign(Error('claim ENOSPC'), { code: 'ENOSPC' });
+    if (String(file).includes(claimFor('c54d5a30-7c94-5c75-923b-f7319c92cf57'))) throw Object.assign(Error('claim ENOSPC'), { code: 'ENOSPC' });
     return heartbeatWrite(file, ...args);
   };
-  try { await assert.rejects(watch('watch-heartbeat-error'), /claim ENOSPC/); }
+  try { await assert.rejects(watch('c54d5a30-7c94-5c75-923b-f7319c92cf57'), /claim ENOSPC/); }
   finally { fs.writeFileSync = heartbeatWrite; }
-  assert.equal(fs.existsSync(claimFor('watch-heartbeat-error')), false, 'failed first heartbeat releases its claim');
+  assert.equal(fs.existsSync(claimFor('c54d5a30-7c94-5c75-923b-f7319c92cf57')), false, 'failed first heartbeat releases its claim');
 
-  const tail = createEventTail('incremental-owner'); await tail.read();
+  const tail = createEventTail('81b0fadb-8fd0-5c01-bfdb-451360fe8ef9'); await tail.read();
   const initial = { ...tail.stats };
   for (let i = 0; i < 30; i++) await tail.read();
   assert.deepEqual(tail.stats, initial, 'unchanged polls do not reread or reparse history');
-  const added = record('incremental-owner'); await tail.read();
+  const added = record('81b0fadb-8fd0-5c01-bfdb-451360fe8ef9'); await tail.read();
   assert.deepEqual(tail.rows().map((row) => row.id), [added.id]);
   assert.ok(tail.stats.bytes - initial.bytes < 4096, 'only the appended bytes were read');
-  record('unrelated-owner'); await tail.read(); assert.equal(tail.stats.parsed, initial.parsed + 1, 'other owners are prefiltered before JSON.parse');
+  record('732baf83-8227-59c7-8cf2-f3a3a85211cb'); await tail.read(); assert.equal(tail.stats.parsed, initial.parsed + 1, 'other owners are prefiltered before JSON.parse');
   compactWorkerEvents(); await tail.read(); assert.equal(tail.rows().filter((row) => row.id === added.id).length, 1, 'rotation does not duplicate a cursor event');
-  const rotationTail = createEventTail('rotation-settlement');
-  const unresolved = record('rotation-settlement', 'failed', { mayRun: true, thread: 'rotation-thread' }); await rotationTail.read();
-  record('rotation-settlement', 'observed', { runId: 'rotation-proof', thread: 'rotation-thread', mayRun: false });
-  for (let i = 0; i < 70; i++) record('rotation-padding', 'finished', { runId: `rotation-padding-${i}` });
+  const rotationTail = createEventTail('cb16d3d0-7108-5001-be3f-bf1a628e81eb');
+  const unresolved = record('cb16d3d0-7108-5001-be3f-bf1a628e81eb', 'failed', { mayRun: true, thread: 'rotation-thread' }); await rotationTail.read();
+  record('cb16d3d0-7108-5001-be3f-bf1a628e81eb', 'observed', { runId: 'rotation-proof', thread: 'rotation-thread', mayRun: false });
+  for (let i = 0; i < 70; i++) record('ea86fb04-b807-5ca1-a1bc-64d756be8723', 'finished', { runId: `ea86fb04-b807-5ca1-a1bc-64d756be8723-${i}` });
   compactWorkerEvents(); await rotationTail.read();
   assert.equal(rotationTail.rows().find((row) => row.id === unresolved.id).settled, true, 'rotation refreshes cached state for the same event ID');
-  assert.equal(inbox(rotationTail.rows(), 'rotation-settlement').running.length, 0, 'a retained pending hint stays settled after its proof is archived');
+  assert.equal(inbox(rotationTail.rows(), 'cb16d3d0-7108-5001-be3f-bf1a628e81eb').running.length, 0, 'a retained pending hint stays settled after its proof is archived');
   const retiringReceipt = path.join(tmp, 'retiring-poll'), retiringGate = path.join(tmp, 'retiring-gate');
-  const retiringWatch = startWatch('retiring-worker', { NODE_OPTIONS: `--import ${pausedPoll}`,
+  const retiringWatch = startWatch('f23152d7-e271-5618-9686-716a27572852', { NODE_OPTIONS: `--import ${pausedPoll}`,
     WATCH_POLL_RECEIPT: retiringReceipt, WATCH_POLL_GATE: retiringGate });
-  record('retiring-worker', 'running', { thread: 'retiring-thread', pid: process.pid });
-  await until(() => hasWatcher('retiring-worker'), 'running watcher armed');
+  record('f23152d7-e271-5618-9686-716a27572852', 'running', { thread: 'retiring-thread', pid: process.pid });
+  await until(() => hasWatcher('f23152d7-e271-5618-9686-716a27572852'), 'running watcher armed');
   await until(() => fs.existsSync(retiringReceipt), 'watcher observed its running set');
-  record('retiring-worker', 'observed', { runId: 'retiring-proof', thread: 'retiring-thread', mayRun: false });
+  record('f23152d7-e271-5618-9686-716a27572852', 'observed', { runId: 'retiring-proof', thread: 'retiring-thread', mayRun: false });
   fs.writeFileSync(retiringGate, 'released');
   const retired = await retiringWatch.done; assert.equal(retired.code, 0); assert.match(retired.stdout, /workers-no-longer-running/);
   console.log('PASS hook/watcher acknowledgement race exits, singleton claims, incremental offsets, unchanged polls, owner prefilter and rotation');
 
   const invokeWorker = (args, config) => spawnSync(process.execPath, ['--import', transport, worker, ...args],
     { env: { ...env, WORKER_EVENTS_FIXTURE: JSON.stringify(config) }, encoding: 'utf8', timeout: 15000 });
-  const lost = invokeWorker(['start', '--owner', 'lost-owner', '--name', 'lost', '--cwd', tmp, '--sandbox', 'read-only', '--effort', 'high', 'fixture'],
+  const lost = invokeWorker(['start', '--owner', '7bef4f73-d37d-5025-b238-980dd81876ae', '--name', 'lost', '--cwd', tmp, '--sandbox', 'read-only', '--effort', 'high', 'fixture'],
     { lostAtTurnStart: true, thread: 'lost-thread' });
-  assert.equal(lost.status, 2); assert.equal(inbox(readEvents(), 'lost-owner').running.length, 1);
-  const recovery = invokeWorker(['wait', '--owner', 'lost-owner', '--thread', 'lost-thread'], { status: 'completed', turn: 'recovered-turn' });
+  assert.equal(lost.status, 2); assert.equal(inbox(readEvents(), '7bef4f73-d37d-5025-b238-980dd81876ae').running.length, 1);
+  const recovery = invokeWorker(['wait', '--owner', '7bef4f73-d37d-5025-b238-980dd81876ae', '--thread', 'lost-thread'], { status: 'completed', turn: 'recovered-turn' });
   assert.equal(recovery.status, 0, recovery.stderr);
-  assert.equal(inbox(readEvents(), 'lost-owner').running.length, 0, 'recovered completion settles a turn-less start hint');
-  hookRun('lost-owner'); assert.equal(hookRun('lost-owner'), null, 'completed recovered work needs no watcher');
-  record('orphan-owner', 'running', { pid: 2147483647, account: 'main', thread: 'orphan-thread', turn: 'orphan-turn' });
-  const orphanRows = readEvents().map((row) => row.owner === 'orphan-owner' ? { ...row, t: Date.now() - 120000 } : row);
+  assert.equal(inbox(readEvents(), '7bef4f73-d37d-5025-b238-980dd81876ae').running.length, 0, 'recovered completion settles a turn-less start hint');
+  hookRun('7bef4f73-d37d-5025-b238-980dd81876ae'); assert.equal(hookRun('7bef4f73-d37d-5025-b238-980dd81876ae'), null, 'completed recovered work needs no watcher');
+  record('5e36f8cf-2b52-5642-9abd-257c13e24236', 'running', { pid: 2147483647, account: 'main', thread: 'orphan-thread', turn: 'orphan-turn' });
+  const orphanRows = readEvents().map((row) => row.owner === '5e36f8cf-2b52-5642-9abd-257c13e24236' ? { ...row, t: Date.now() - 120000 } : row);
   fs.writeFileSync(eventFile(), orphanRows.map(JSON.stringify).join('\n') + '\n');
-  assert.equal(hookRun('orphan-owner'), null, 'dead followers past the grace interval cannot demand empty watchers forever');
-  const mine = invokeWorker(['mine', '--owner', 'orphan-owner'], { status: 'completed', turn: 'orphan-turn' });
+  assert.equal(hookRun('5e36f8cf-2b52-5642-9abd-257c13e24236'), null, 'dead followers past the grace interval cannot demand empty watchers forever');
+  const mine = invokeWorker(['mine', '--owner', '5e36f8cf-2b52-5642-9abd-257c13e24236'], { status: 'completed', turn: 'orphan-turn' });
   assert.equal(mine.status, 0, mine.stderr); assert.match(mine.stdout, /completed/);
-  assert.equal(inbox(readEvents(), 'orphan-owner').running.length, 0, 'mine persists authoritative terminal hub observations');
-  record('unknown-hub-owner', 'running', { pid: 2147483647, account: 'main', thread: 'unknown-thread', turn: 'unknown-turn' });
-  const unknown = invokeWorker(['mine', '--owner', 'unknown-hub-owner'], { status: 'unknown', turn: 'unknown-turn' });
+  assert.equal(inbox(readEvents(), '5e36f8cf-2b52-5642-9abd-257c13e24236').running.length, 0, 'mine persists authoritative terminal hub observations');
+  record('75ff2366-c2db-5c31-bce9-08250798f9bd', 'running', { pid: 2147483647, account: 'main', thread: 'unknown-thread', turn: 'unknown-turn' });
+  const unknown = invokeWorker(['mine', '--owner', '75ff2366-c2db-5c31-bce9-08250798f9bd'], { status: 'unknown', turn: 'unknown-turn' });
   assert.equal(unknown.status, 0, unknown.stderr); assert.match(unknown.stdout, /unknown/);
-  assert.equal(inbox(readEvents(), 'unknown-hub-owner').running.length, 1, 'an unknown status is not proof of settlement');
+  assert.equal(inbox(readEvents(), '75ff2366-c2db-5c31-bce9-08250798f9bd').running.length, 1, 'an unknown status is not proof of settlement');
   console.log('PASS lost turn/start reply plus recovery wait; dead follower grace and mine reconciliation');
 
   for (const source of ['fork', 'clear']) {
-    const owner = `${source}-owner`, bridge = path.join(tmp, `${source}-env`);
+    const owner = randomUUID(), bridge = path.join(tmp, `${source}-env`);
     hookRun(owner, { hook_event_name: 'SessionStart', source }, { env: { CLAUDE_ENV_FILE: bridge } });
     assert.equal(fs.readFileSync(bridge, 'utf8'), `\nexport ORCHESTRATOR_OWNER='${owner}'\n`);
     const r = spawnSync(process.execPath, [worker, 'start', '--name', `${source}-worker`], { env: { ...env, ORCHESTRATOR_OWNER: owner }, encoding: 'utf8' });
@@ -337,16 +338,16 @@ globalThis.setTimeout = (fn, ms, ...args) => timeout(() => {
 fsp.open = (file, ...args) => process.env.DEADLINE_MODE !== 'ack' && String(file).endsWith('worker-events.jsonl') ? new Promise(()=>{}) : open(file, ...args);
 fsp.rename = (...args) => process.env.DEADLINE_MODE === 'ack' && String(args[1]).includes('/worker-acks/') ? new Promise(()=>{}) : rename(...args);
 `);
-  assert.equal(hookRun('deadline-owner', {}, { realDeadline: true, import: deadlineFixture, env: { DEADLINE_RECEIPT: deadlineReceipt } }), null);
+  assert.equal(hookRun('57b61426-4a83-57aa-896d-d605ed4de69a', {}, { realDeadline: true, import: deadlineFixture, env: { DEADLINE_RECEIPT: deadlineReceipt } }), null);
   assert.equal(JSON.parse(fs.readFileSync(deadlineReceipt, 'utf8')).budget, 220, 'assert the internal deadline, not cold Node startup wall time');
-  assert.equal(fs.existsSync(`${ackFile('deadline-owner')}.lock`), false, 'deadline cleanup does not leave acknowledgement contention behind');
-  record('deadline-ack-owner');
-  assert.equal(hookRun('deadline-ack-owner', {}, { realDeadline: true, import: deadlineFixture,
+  assert.equal(fs.existsSync(`${ackFile('57b61426-4a83-57aa-896d-d605ed4de69a')}.lock`), false, 'deadline cleanup does not leave acknowledgement contention behind');
+  record('d2e35220-67b1-51c3-aabd-e57b1ba32a5b');
+  assert.equal(hookRun('d2e35220-67b1-51c3-aabd-e57b1ba32a5b', {}, { realDeadline: true, import: deadlineFixture,
     env: { DEADLINE_RECEIPT: deadlineReceipt, DEADLINE_MODE: 'ack' } }), null);
-  assert.equal(inbox(readEvents(), 'deadline-ack-owner', readAck('deadline-ack-owner')).pending.length, 1);
-  assert.equal(fs.existsSync(`${ackFile('deadline-ack-owner')}.lock`), false, 'deadline during the ack transaction releases its lock');
-  assert.deepEqual(fs.readdirSync(path.dirname(ackFile('deadline-ack-owner')))
-    .filter((name) => name.startsWith(path.basename(ackFile('deadline-ack-owner')) + '.')), [], 'deadline removes its uncommitted acknowledgement temp file');
+  assert.equal(inbox(readEvents(), 'd2e35220-67b1-51c3-aabd-e57b1ba32a5b', readAck('d2e35220-67b1-51c3-aabd-e57b1ba32a5b')).pending.length, 1);
+  assert.equal(fs.existsSync(`${ackFile('d2e35220-67b1-51c3-aabd-e57b1ba32a5b')}.lock`), false, 'deadline during the ack transaction releases its lock');
+  assert.deepEqual(fs.readdirSync(path.dirname(ackFile('d2e35220-67b1-51c3-aabd-e57b1ba32a5b')))
+    .filter((name) => name.startsWith(path.basename(ackFile('d2e35220-67b1-51c3-aabd-e57b1ba32a5b')) + '.')), [], 'deadline removes its uncommitted acknowledgement temp file');
 
   const outputProbe = path.join(tmp, 'output-deadline-probe.mjs');
   fs.writeFileSync(outputProbe, `import fs from 'node:fs'; import fsp from 'node:fs/promises';
@@ -370,7 +371,7 @@ fsp.rename = async (from, to) => {
 if (process.env.PROBE_MODE === 'output') process.stdout.write = () => true;
 `);
   for (const mode of ['rename', 'output']) for (const receiver of ['Stop', 'watch']) {
-    const owner = `output-probe-${mode}-${receiver}`, row = record(owner);
+    const owner = randomUUID(), row = record(owner);
     const preparedFile = path.join(tmp, `${owner}-prepared`), deadlineFile = path.join(tmp, `${owner}-deadline`);
     assert.equal(hookRun(owner, {}, { realDeadline: true, import: outputProbe,
       env: { PROBE_ACK: ackFile(owner), PROBE_PREPARED: preparedFile, PROBE_DEADLINE: deadlineFile, PROBE_MODE: mode } }), null);

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { rulesShared } from './global-rules.mjs';
-import { validOwner, workerContext, readEvents, inbox, appendTalkback, replyFile } from './worker-events.mjs';
+import { validOwner, resolveOwner, workerContext, readEvents, inbox, appendTalkback, replyFile } from './worker-events.mjs';
 
 export const TALKBACK_MARKER = '@@codex-worker-talkback ';
 export const RELAY_WAIT_MS = 2000;
@@ -76,6 +76,8 @@ const waitForAnswer = async (metadata, question, output) => {
 
 export const runWorkerTalkback = async ({ cmd, opts, text, account, cwd, output, report, awaitCommand }) => {
   const metadata = resolveTalkbackIdentity({ account, thread: opts.thread ?? (process.env.CODEX_WORKER_THREAD || null), cwd, report });
+  metadata.owner = resolveOwner(metadata.owner);
+  if (opts.owner !== undefined && opts.owner !== metadata.owner) fail(`${cmd} belongs to a different launching owner`);
   if (cmd === 'ask' && opts.await !== undefined) {
     if (!validOwner(opts.await)) fail('--await needs a public question ID');
     const question = await waitForQuestion(metadata, opts.await);

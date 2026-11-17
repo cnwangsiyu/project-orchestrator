@@ -97,12 +97,18 @@ if (argv[0] === 'turn' && typeof earlyOpts.thread === 'string') {
     else { Object.assign(earlyOpts, inherited); console.log(`inherited: ${JSON.stringify(inherited)}`); }
   } catch (e) { process.stderr.write(`codex-worker: launch inheritance failed: ${e.message}\n`); process.exit(2); }
 }
-const tracker = ['start', 'turn', 'wait'].includes(argv[0]) ? lifecycle({ owner: earlyOpts.owner, followerCommand: argv[0],
-  name: earlyOpts.name ?? earlyOpts.thread ?? 'unnamed', thread: earlyOpts.thread ?? null,
-  account: account ?? 'main', model: earlyOpts.model ?? null, effort: earlyOpts.effort ?? null,
-  mayRun: argv[0] === 'wait' && typeof earlyOpts.thread === 'string',
-  outFile: typeof earlyOpts.out === 'string' ? path.resolve(earlyOpts.out) : null,
-  logFile: typeof earlyOpts.log === 'string' ? path.resolve(earlyOpts.log) : null }) : null;
+// Validate before lifecycle can append an event, including inherited turn owners.
+let tracker = null;
+try {
+  if (earlyOpts.owner !== undefined) earlyOpts.owner = resolveOwner(earlyOpts.owner);
+  tracker = ['start', 'turn', 'wait'].includes(argv[0]) ? lifecycle({ owner: earlyOpts.owner, followerCommand: argv[0],
+    name: earlyOpts.name ?? earlyOpts.thread ?? 'unnamed', thread: earlyOpts.thread ?? null,
+    account: account ?? 'main', model: earlyOpts.model ?? null, effort: earlyOpts.effort ?? null,
+    mayRun: argv[0] === 'wait' && typeof earlyOpts.thread === 'string',
+    outFile: typeof earlyOpts.out === 'string' ? path.resolve(earlyOpts.out) : null,
+    logFile: typeof earlyOpts.log === 'string' ? path.resolve(earlyOpts.log) : null }) : null;
+}
+catch (e) { process.stderr.write(`codex-worker: ${e.message}\n`); process.exit(e.exitCode ?? 2); }
 if (tracker) {
   const ancestors = [process.ppid];
   try {
@@ -195,7 +201,8 @@ if (cmd === 'turn' && opts.thread && !opts['force-large']) {
     die(line, 9);
   }
 }
-if (opts.owner !== undefined && !validOwner(opts.owner)) die('--owner needs a public session ID');
+try { if (opts.owner !== undefined) opts.owner = resolveOwner(opts.owner); }
+catch (e) { die(e.message, e.exitCode ?? 2); }
 if (!cmd) die('usage: codex-worker [--account NAME] hub|start|turn|wait|steer|interrupt|status|list|quota|usage|reset-credits|reset-credit-use|accounts|account-add ...');
 if (cmd === 'note' || cmd === 'ask') {
   try {
@@ -219,7 +226,8 @@ if (cmd === 'reply') {
   } catch (e) { die(e.message, 1); }
 }
 if (cmd === 'watch' || cmd === 'mine') {
-  const owner = resolveOwner(opts.owner);
+  let owner;
+  try { owner = resolveOwner(opts.owner); } catch (e) { die(e.message, e.exitCode ?? 2); }
   if (!validOwner(owner)) die(`${cmd} needs --owner <session-id> (or ORCHESTRATOR_OWNER)`);
   if (cmd === 'watch') {
     const debounceSec = opts['debounce-sec'] === undefined ? 45 : typeof opts['debounce-sec'] === 'string' ? Number(opts['debounce-sec']) : NaN;

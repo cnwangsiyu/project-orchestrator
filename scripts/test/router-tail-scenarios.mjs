@@ -91,7 +91,7 @@ try {
   assert.equal(deliver(owner,()=>{throw Error('duplicate delivery');}).length,0);
   const syncAlias=record('01234567','finished','sync-alias');deliver('01234567',()=>{});assert.ok(readAck(owner).delivered[syncAlias.id]);
   const asyncAlias=record('01234567','finished','async-alias');assert.ok((await readInboxAsync('01234567')).pending.some(r=>r.id===asyncAlias.id));await deliverAsync('01234567',async()=>{});assert.ok(readAck(owner).delivered[asyncAlias.id]);
-  const watcher=spawn(process.execPath,[path.join(root,'scripts/codex-worker.mjs'),'watch','--owner','01234567'],{env,stdio:['ignore','pipe','pipe']});
+  const watcher=spawn(process.execPath,[path.join(root,'scripts/codex-worker.mjs'),'watch','--owner','01234567'],{env:{...env,ORCHESTRATOR_OWNER:owner},stdio:['ignore','pipe','pipe']});
   let watchOutput='';watcher.stdout.on('data',b=>watchOutput+=b);const stopped=new Promise(resolve=>watcher.on('exit',resolve));
   try {const deadline=Date.now()+4000;while(!hasWatcher(owner)){if(Date.now()>deadline)throw Error('prefix watch did not arm');await new Promise(r=>setTimeout(r,25));}
     const watchAlias=record('01234567','finished','watch-alias');assert.equal(await stopped,0);assert.match(watchOutput,/watch-alias/);assert.ok(readAck(owner).delivered[watchAlias.id]);
@@ -101,7 +101,7 @@ try {
   record('01234567','finished','ambiguous');record('fedcba98','finished','unmatched');
   assert.equal(new Set(inbox(readEvents(),owner,readAck(owner)).unresolved.map(r=>r.owner)).size,2);
   const unresolved=auditWorkerEvents();assert.equal(unresolved.find(r=>r.owner==='01234567').unresolved,'ambiguous');assert.equal(unresolved.find(r=>r.owner==='fedcba98').unresolved,'unmatched');
-  const mine=spawnSync(process.execPath,[path.join(root,'scripts/codex-worker.mjs'),'mine','--owner','unrelated-owner'],{env:{...env,ROUTE_LOG:'0'},encoding:'utf8',timeout:5000});
+  const mine=spawnSync(process.execPath,[path.join(root,'scripts/codex-worker.mjs'),'mine','--owner','11111111-2222-4333-8444-555555555555'],{env:{...env,ROUTE_LOG:'0'},encoding:'utf8',timeout:5000});
   assert.equal(mine.status,0,mine.stderr);assert.match(mine.stdout,/unresolved owner 01234567: ambiguous/);assert.match(mine.stdout,/unresolved owner fedcba98: unmatched/);
   for(let i=0;i<70;i++)record('rotation-owner','finished',`rotation-${i}`);deliver('rotation-owner',()=>{});compactWorkerEvents();
   assert.ok(readEvents().some(r=>r.owner==='fedcba98'&&r.ownerResolution==='unmatched'),'compaction preserves unresolved events');

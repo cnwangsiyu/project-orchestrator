@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -35,7 +36,7 @@ const until = async (fn, label) => {
   while (!fn()) { if (Date.now() > deadline) throw Error(`timeout: ${label}`); await new Promise((r) => setTimeout(r, 30)); }
 };
 const seed = (thread, cwd, startedAt, event = 'running') => {
-  const metadata = { account: 'alt', thread, owner: 'discover-owner', name: thread, runId: `${thread}-run`,
+  const metadata = { account: 'alt', thread, owner: '642e45a7-f078-50b2-8e47-185a17d3d0cf', name: thread, runId: `${thread}-run`,
     turn: `${thread}-turn`, cwd, startedAt, pid: process.pid };
   saveWorkerContext(metadata); appendEvent({ ...metadata, event, mayRun: event === 'running' }); return metadata;
 };
@@ -72,7 +73,7 @@ try {
   // the test runner's environment. It is evidence for the fixture, not a live hub.
   for (const [account, mode] of [['alt', 'apply'], ['ttadk', 'apply'], ['trae', 'ignore']]) {
     const captureEnv = path.join(tmp, `${account}-env.txt`), thread = `env-${account}`, rpc = path.join(tmp, `${thread}-rpc.jsonl`);
-    const r = run(['--account', account, 'start', '--cwd', project, '--sandbox', 'danger-full-access', '--owner', 'env-owner',
+    const r = run(['--account', account, 'start', '--cwd', project, '--sandbox', 'danger-full-access', '--owner', 'daab37a9-7727-55d2-8931-df08878ab2b6',
       '--effort', 'high', '--model', 'fixture', '--name', thread, 'Capture fixture environment.'],
     { WORKER_EVENTS_FIXTURE: JSON.stringify({ thread, captureEnv, rpc, shellEnvMode: mode }) });
     assert.equal(r.status, 0, r.stderr + r.stdout + String(r.error ?? '') + String(r.signal ?? ''));
@@ -80,7 +81,7 @@ try {
     if (mode === 'apply') {
       assert.match(captured, new RegExp(`CODEX_WORKER_THREAD=${thread}\\n`));
       assert.match(captured, new RegExp(`CODEX_WORKER_ACCOUNT=${account}\\n`));
-      assert.match(captured, /CODEX_WORKER_OWNER=env-owner\n/);
+      assert.match(captured, /CODEX_WORKER_OWNER=daab37a9-7727-55d2-8931-df08878ab2b6\n/);
     } else assert.doesNotMatch(captured, /CODEX_WORKER_/);
     const context = JSON.parse(fs.readFileSync(path.join(tmp, 'worker-context', account, `${thread}.json`)));
     assert.equal(context.cwd, project); assert.equal(context.turn, 'turn-fixture'); assert.ok(Number.isFinite(context.startedAt));
@@ -97,7 +98,7 @@ try {
     { account: 'ttadk', sandbox: 'workspace-write', denyCode: 'EPERM', streamOutput: true },
     { account: 'alt', sandbox: 'read-only', denyCode: 'EROFS', streamOutput: false },
   ]) {
-    const thread = `restricted-${config.account}`, owner = `${thread}-owner`, rpc = path.join(tmp, `${thread}-rpc.jsonl`);
+    const thread = `restricted-${config.account}`, owner = randomUUID(), rpc = path.join(tmp, `${thread}-rpc.jsonl`);
     const shellResults = path.join(tmp, `${thread}-results.jsonl`);
     const follower = start(['--account', config.account, 'start', '--cwd', project, '--sandbox', config.sandbox,
       '--owner', owner, '--name', thread, '--effort', 'high', '--model', 'fixture', 'Run restricted fixture.'],
@@ -123,7 +124,7 @@ try {
 
   const metadata = seed('parser-thread', project, 3), relay = createTalkbackRelay(metadata);
   const request = { version: 1, type: 'message', account: metadata.account, thread: metadata.thread, id: 'parser-message',
-    kind: 'risk', text: 'Parser milestone', owner: 'other-owner' };
+    kind: 'risk', text: 'Parser milestone', owner: 'fe77cb4a-c107-5359-85e8-ec299a8079c6' };
   const marker = TALKBACK_MARKER + JSON.stringify(request) + '\n';
   const delta = (threadId, turnId, value) => ({ method: 'item/commandExecution/outputDelta', params: { threadId, turnId, itemId: 'parser-command', delta: value } });
   relay(delta('other-thread', metadata.turn, marker)); relay(delta(metadata.thread, 'old-turn', marker));
@@ -153,7 +154,7 @@ try {
   }
 
   // Reattached wait followers also relay markers retained in the current turn's items.
-  const waitThread = 'wait-thread', waitOwner = 'wait-owner', waitId = 'wait-question';
+  const waitThread = 'wait-thread', waitOwner = '93877d4c-b472-5c71-864f-94e29e3eb022', waitId = 'wait-question';
   const waitMarker = TALKBACK_MARKER + JSON.stringify({ version: 1, type: 'question', id: waitId, account: 'alt', thread: waitThread,
     text: 'Recovered question?', timeoutMin: 1, expiresAt: Date.now() + 60000, default: 'banana' }) + '\n';
   const waiting = start(['--account', 'alt', 'wait', '--thread', waitThread, '--owner', waitOwner], { thread: waitThread,
