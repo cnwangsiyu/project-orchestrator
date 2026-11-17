@@ -548,7 +548,7 @@ lane_waiter_blocks() {
 # Registry-driven remote pools never participate in the local heavy gate.
 pool_ids() {
   awk -F'\t' -v pool="$1" '
-    $2 != "remote" { next }
+    $2 != "remote" || $3 != "open" { next }
     pool ~ /-light$/ { if ($1 == pool || (index($1, pool "-") == 1 && substr($1, length(pool) + 2) ~ /^[0-9]+$/)) print $1; next }
     index($1, pool "-") == 1 && substr($1, length(pool) + 2) ~ /^[0-9]+$/ { print $1 }
   ' "$REG" | LC_ALL=C sort -u
