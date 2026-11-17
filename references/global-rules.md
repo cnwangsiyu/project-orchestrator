@@ -1,8 +1,8 @@
 # Global Rules
-version: 2026-11-16.12
+version: 2026-11-16.13
 
 ## Changes In This Version
-- 2026-11-16.12: task status lives on the project board (`board.mjs`; worker facts filled automatically) and user decisions in the shared queue (`user-queue.mjs`); ledgers keep resources, history and decisions only (references/task-board.md). Earlier today: secret masking incl. `.remoteX/` and `redact-log` (.11), devbox `res wait-pool` (.10).
+- 2026-11-16.13: bare worker note/ask find their own thread from the runtime thread id (CODEX_THREAD_ID/TRAECLI_THREAD_ID) and refuse when ambiguous, never guessing by cwd. 2026-11-16.12: task status lives on the project board (`board.mjs`) and user decisions in the shared queue (`user-queue.mjs`); ledgers keep resources, history and decisions only.
 - Day 3 (2026-11-15.4): worker mid-turn note/ask/reply through the owner inbox, distinct --out deliverables, omit absent landing gates; quality first across company accounts, free TRAE first for the chosen model including browser; company max ungated; explicit A–D review classes, two-round scope cap, per-project targets/yield; runnable authorized work never auto-parks; failed public state reads retain last-good ages; the resident signing worker is retired; ordinary routed signing workers replace it; workers never delegate or request model changes; dependency installation needs no question. Resource, cancellation, credential, device and signing safeguards remain.
 
 ## Orchestrator Rules
