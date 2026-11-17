@@ -148,6 +148,8 @@ export function createTaskSpec(input) {
   const exclusions = [...clone(array(input.exclusions)), ...list(f['exclude-account']).map((value) => ({ scope: 'account', accountId: null, value, cause: 'explicit' })),
     ...list(f['exclude-model']).map((value) => ({ scope: ['gpt', 'deepseek', 'kimi', 'claude', 'seed', 'gemini'].includes(value.toLowerCase()) ? 'family' : 'model',
       accountId: null, value: modelId(value), companyOnly: true, cause: 'legacy-exclude-model' }))];
+  // BC-92: TRAE workers have no session for the mini user's signed-in CLIs (bytedcli AUTH_SESSION_REQUIRED); ssh/git/curl work there.
+  if (needsCli.some((cli) => ['bytedcli', 'lark', 'lark-cli', 'bitscli'].includes(cli))) exclusions.push({ scope: 'account', accountId: null, value: 'trae', cause: 'signed-in-cli' });
   for (const value of list(f['exclude-lane'])) {
     const [accountId, model, ...rest] = value.split(':');
     if (!idOK(accountId) || !idOK(model) || rest.length) fail('INVALID_EXCLUSION', '--exclude-lane takes account:model pairs.');
