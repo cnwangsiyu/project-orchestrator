@@ -1,4 +1,5 @@
 # Nightly routing review
+Worker launchers automatically redact their log, final output and Codex rollout at each confirmed idle turn end (counts plus a non-waking info note); manual `redact-log` remains for other logs.
 
 The existing 03:07 local schedule runs `scripts/nightly-review.sh`. The launcher computes the daily numbers in
 code, compares them with explicit thresholds, and publishes the report before requesting model analysis.

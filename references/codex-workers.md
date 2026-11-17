@@ -10,6 +10,7 @@ Keep route.mjs's `run-tracked.sh` wrapper for one-shot execs; the raw examples b
 not a substitute for the durable launcher. Every worker is a tracked background task or covered by an armed
 owner watcher, never detached with `&`. See [worker inbox and owner identity](worker-inbox.md);
 on wake handle finished workers first and re-arm `codex-worker watch --owner <session-id>` if workers remain.
+Both launchers automatically redact `--log`, `--out` and the Codex rollout at turn end after hub-idle and two-second writer checks; counts and a non-waking info note are recorded, while manual `redact-log` remains available for other logs.
 
 - **Launch** from the worker's workspace as a harness background task (Bash with `run_in_background`):
   `CODEX_HOME=<account home> codex exec -C <workspace> -s <sandbox> -m <model> -c model_reasoning_effort='"<effort>"' --json -o <task dir>/codex-last.md "<one line pointing at the brief>" < /dev/null > <task dir>/codex.jsonl 2>&1`

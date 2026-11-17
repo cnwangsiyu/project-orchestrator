@@ -1,7 +1,36 @@
 const fields = 'password|passphrase|passwd|pwd|pass|token|secret|api[_-]?key|access[_-]?key|private[_-]?key|credentials?|auth|username';
 const quotedValue = String.raw`"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'`;
+const inlineQuotedValue = String.raw`"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'`;
 const bareValue = String.raw`\$\{[^}\r\n]*\}|<[^>\r\n]*>|\[[^\]\r\n]*\]|[^\s,;{}"'\[\]<>]+`;
-const assignments = new RegExp(String.raw`(?<![\w-])(["']?)(${fields})\1([\t ]*(?:[:=][\t ]*|[\t ]+))(${quotedValue}|${bareValue})`, 'gi');
+// A minus is a diff prefix only at the start of a line, not inside an ordinary word.
+const assignmentKey = String.raw`(?:(?<![\w.-])|(?<=^[+-]))(["']?)(${fields})\1`;
+const assignments = new RegExp(String.raw`${assignmentKey}([\t ]*[:=][\t ]*)(${quotedValue}|${bareValue})`, 'gim');
+const whitespaceAssignments = new RegExp(String.raw`${assignmentKey}([\t ]+)(${inlineQuotedValue}|${bareValue})`, 'gim');
+const properties = new RegExp(String.raw`^([+-]?[\t ]*)(["']?)([A-Za-z_][\w.-]*)\2([\t ]*[:=][\t ]*)(${quotedValue}|${bareValue})`, 'gm');
+// Source assignments are deliberately limited to complete string-literal values.
+const sourceAssignments = new RegExp(String.raw`(?<![\w.-])([A-Za-z_$][\w$]*)([\t ]*(?::[\t ]*[\w?.<>\[\]]+[\t ]*)?=[\t ]*@?)(${inlineQuotedValue})(?=[\t ]*(?:$|[;,)}\r\n]|//|/\*))`, 'gm');
+const sourceField = value => /(?:Password|Passphrase|Passwd|Token|Secret|ApiKey|AccessKey|PrivateKey|Credentials?|Auth|Key)$/.test(value)
+  || /(?:^|_)(?:password|passphrase|passwd|token|secret|api_key|access_key|private_key|credentials?|auth|key)$/i.test(value);
+const exactField = new RegExp(`^(?:${fields})$`, 'i');
+const propertyField = new RegExp(`(?:^|[._])(?:${fields})$`, 'i');
+const camelField = /(?:Password|Passphrase|Passwd|Token|Secret|ApiKey|AccessKey|PrivateKey|Credentials?|Auth)$/;
+// Punctuation around a word (or a hyphenated English phrase) is not token entropy.
+const tokenLikeValue = value => value.length >= 8 && !/[\s|]/.test(value) && /[\d\W_]/.test(value)
+  && !/^[^A-Za-z0-9]*[A-Za-z]+(?:[-'][A-Za-z]+)*[^A-Za-z0-9]*$/.test(value);
+const markdownRow = (text, index) => /^[\t ]*\|/.test(text.slice(text.lastIndexOf('\n', index - 1) + 1, index));
+const cellValue = raw => raw.split(/(?<!\\)\|/, 1)[0];
+
+function* boundedMatches(text, pattern, valueGroup = 4) {
+  const matcher = new RegExp(pattern.source, pattern.flags);
+  for (let match; (match = matcher.exec(text));) {
+    const raw = match[valueGroup], quoted = raw[0] === '"' || raw[0] === "'";
+    if (!quoted && markdownRow(text, match.index) && cellValue(raw).length !== raw.length) {
+      // Resume at the next cell instead of swallowing its independent assignments.
+      matcher.lastIndex = match.index + match[0].length - raw.length + cellValue(raw).length + 1;
+    }
+    yield match;
+  }
+}
 
 function credentialBlocks(text) {
   const stack = [], blocks = [];
@@ -23,13 +52,13 @@ function credentialBlocks(text) {
 
 // Only offsets and field names leave this private matcher, never suspected values.
 // HTTP auth headers: the whole header value (Cookie/Set-Cookie pairs, Authorization schemes) is secret.
-const headers = /(?<![\w-])(set-cookie|cookie|authorization|proxy-authorization|x-[\w-]*(?:token|api-key|auth)[\w-]*)([\t ]*:[\t ]*)([^\r\n"]+)/gi;
+const headers = /(?:(?<![\w-])|(?<=^[+-]))(set-cookie|cookie|authorization|proxy-authorization|x-[\w-]*(?:token|api-key|auth)[\w-]*)([\t ]*:[\t ]*)([^\r\n"]+)/gim;
 
 function visitSecrets(text, visit) {
   const hits = [];
   collectSecrets(text, (hit) => hits.push(hit));
-  for (const match of text.matchAll(headers)) {
-    const value = match[3].trimEnd();
+  for (const match of boundedMatches(text, headers, 3)) {
+    const value = (markdownRow(text, match.index) ? cellValue(match[3]) : match[3]).trimEnd();
     if (!value || /^(?:\[[^\]]*(?:redact|masked)[^\]]*\]|REDACTED|\*+)$/i.test(value)) continue;
     const start = match.index + match[1].length + match[2].length;
     hits.push({ line: 0, field: match[1].toLowerCase(), start, end: start + value.length });
@@ -46,16 +75,46 @@ function visitSecrets(text, visit) {
 function collectSecrets(text, visit) {
   const blocks = credentialBlocks(text);
   let line = 1, offset = 0, block = 0;
-  for (const match of text.matchAll(assignments)) {
+  const matches = [...boundedMatches(text, assignments), ...boundedMatches(text, whitespaceAssignments)]
+    .filter(match => {
+      if (/^@["']/.test(text.slice(match.index + match[0].length - match[4].length))) return false;
+      if (match[3].includes(':') || !sourceField(match[2]) || !/[a-z][A-Z]/.test(match[2])) return true;
+      const quoted = /^["']/.test(match[4]);
+      return quoted && !/^[\t ]*[+.([]/.test(text.slice(match.index + match[0].length));
+    });
+  for (const match of text.matchAll(properties)) {
+    if (exactField.test(match[3]) || !(propertyField.test(match[3]) || camelField.test(match[3]))) continue;
+    if (/^@["']/.test(text.slice(match.index + match[0].length - match[5].length))) continue;
+    // Camel-case source identifiers must not consume expression values as config text.
+    if (!match[3].includes('.') && !match[4].includes(':')) {
+      const quoted = /^["']/.test(match[5]);
+      if (!quoted && (camelField.test(match[3]) || /[.()]/.test(match[5])
+        || !tokenLikeValue(match[5]) && /^[\t ]*;/.test(text.slice(match.index + match[0].length)))) continue;
+      if (quoted && /^[\t ]*[+.([]/.test(text.slice(match.index + match[0].length))) continue;
+    }
+    matches.push({ index: match.index + match[1].length, 0: match[0].slice(match[1].length),
+      1: match[2], 2: match[3], 3: match[4], 4: match[5] });
+  }
+  for (const match of text.matchAll(sourceAssignments)) {
+    if (!sourceField(match[1])) continue;
+    matches.push({ index: match.index, 0: match[0], 1: '', 2: match[1], 3: match[2], 4: match[3] });
+  }
+  matches.sort((a, b) => a.index - b.index);
+  for (const match of matches) {
     for (; offset < match.index; offset++) if (text[offset] === '\n') line++;
-    const field = match[2].toLowerCase(), raw = match[4];
+    const field = match[2].toLowerCase(), originalRaw = match[4];
+    const table = markdownRow(text, match.index), whitespace = !/[:=]/.test(match[3]);
+    const quoted = originalRaw[0] === '"' || originalRaw[0] === "'";
+    // Markdown status cells are not password aliases, even when their details are quoted.
+    if (table && whitespace && match[2] === 'PASS') continue;
+    const raw = table && !quoted ? cellValue(originalRaw) : originalRaw;
     while (block < blocks.length && blocks[block][1] < match.index) block++;
     if (field === 'username' && !(blocks[block]?.[0] < match.index)) continue;
     if (field === 'pass' && !match[1] && match[3].trim() === ':') continue;
-    const quoted = raw[0] === '"' || raw[0] === "'";
     const value = quoted ? raw.slice(1, -1) : raw;
+    if (whitespace && !quoted && !tokenLikeValue(value)) continue;
     if (!value || /^\$(?:[A-Za-z_]\w*|\{[^}]+\})$/.test(value) || /^(?:<[^>]+>|\[[^\]]*(?:redact|masked)[^\]]*\]|\{[^}]*(?:redact|masked)[^}]*\}|REDACTED|\*+)$/i.test(value)) continue;
-    const start = match.index + match[0].length - raw.length + Number(quoted);
+    const start = match.index + match[0].length - originalRaw.length + Number(quoted);
     visit({ line, field, start, end: start + raw.length - 2 * Number(quoted) });
   }
 }

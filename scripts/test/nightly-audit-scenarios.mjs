@@ -63,6 +63,98 @@ try {
   assert.deepEqual(passwordStyleFindings(`password="${fake}\ncontinued"\nauth=${fake}`), [{ line: 1, field: 'password' }, { line: 3, field: 'auth' }]);
   console.log('PASS secret-key syntax, credential blocks, escaped values and false-positive exclusions');
 
+  for (const prefix of ['+', '-', ' ', '+  ', '-  ', '']) {
+    for (const key of ['password', 'api_key', 'signing.storePassword', 'MAVEN_PASSWORD', 'systemProp.http.proxyPassword']) {
+      for (const delimiter of ['=', ' = ', ': ']) {
+        const input = `${prefix}${key}${delimiter}${fake}`;
+        const result = maskPasswordStyleValues(input);
+        assert.deepEqual(result, { text: `${prefix}${key}${delimiter}[MASKED]`, masked: 1 });
+        assert.equal(maskPasswordStyleValues(result.text).masked, 0);
+        assert.equal(maskLogText(JSON.stringify({ output: input }), { jsonl: true }).masked, 1);
+      }
+    }
+  }
+  for (const input of ['the password field', 'pass: 3 tests', 'non-password=value', 'some-password=value',
+    'the-password field', 'xpassword=value', 'password_length=12', 'the signing.storePassword=value field']) {
+    assert.deepEqual(maskPasswordStyleValues(input), { text: input, masked: 0 });
+  }
+  console.log('PASS diff prefixes, dotted/camel/underscore properties, prose exclusions and idempotence');
+  assert.deepEqual(maskPasswordStyleValues(`build output password=${fake}; keep`), { text: 'build output password=[MASKED]; keep', masked: 1 });
+
+  for (const input of ['mask secret values in any config output', '| Unsigned graph assertion | PASS ...',
+    '| Unsigned graph assertion | PASS "all assertions passed" | preserve this tail |',
+    '| Unsigned graph assertion | PASS [all assertions passed] | preserve this tail |',
+    'secret assertion.', 'secret configuration!', 'secret error-prone', 'secret [completed]',
+    'password abc1234 tail', 'password longalphabeticword tail',
+    'credentials { mask secret values in any config output }']) {
+    assert.deepEqual(maskPasswordStyleValues(input), { text: input, masked: 0 });
+    assert.deepEqual(passwordStyleFindings(input), []);
+    const record = JSON.stringify({ output: input });
+    assert.deepEqual(maskLogText(record, { jsonl: true }), { text: record, masked: 0, lines: 1 });
+  }
+  for (const [input, expected] of [
+    ['password "x" keep the rest of this line', 'password "[MASKED]" keep the rest of this line'],
+    [`secret ${fake} keep the rest of this line`, 'secret [MASKED] keep the rest of this line'],
+    ['token abcd1234; keep', 'token [MASKED]; keep'],
+    ['token AbCd_Ef! keep', 'token [MASKED] keep'],
+    ['password=short keep', 'password=[MASKED] keep'],
+    ['secret: ordinary keep', 'secret: [MASKED] keep'],
+    ['accessKey: short keep', 'accessKey: [MASKED] keep'],
+    ['MY_ACCESS_KEY: short keep', 'MY_ACCESS_KEY: [MASKED] keep'],
+    ['MAVEN_PASSWORD=short', 'MAVEN_PASSWORD=[MASKED]'],
+    [`credentials { password ${fake}; label "keep" }`, 'credentials { password [MASKED]; label "keep" }'],
+    [`| secret ${fake}|unchanged column|`, '| secret [MASKED]|unchanged column|'],
+    [`| password=${fake}|unchanged column|`, '| password=[MASKED]|unchanged column|'],
+    [`| password "${fake}" | unchanged column |`, '| password "[MASKED]" | unchanged column |'],
+  ]) {
+    assert.deepEqual(maskPasswordStyleValues(input), { text: expected, masked: 1 });
+    assert.equal(maskPasswordStyleValues(expected).masked, 0);
+    assert.equal(JSON.parse(maskLogText(JSON.stringify({ output: input }), { jsonl: true }).text).output, expected);
+  }
+  const unclosedProse = 'secret "an unclosed quotation\npassword="' + fake + '" keep the tail';
+  assert.deepEqual(maskPasswordStyleValues(unclosedProse), {
+    text: 'secret "an unclosed quotation\npassword="[MASKED]" keep the tail', masked: 1,
+  });
+  const adjacentCells = `| password=${fake}|secret ${fake}|keep this column|`;
+  assert.deepEqual(maskPasswordStyleValues(adjacentCells), {
+    text: '| password=[MASKED]|secret [MASKED]|keep this column|', masked: 2,
+  });
+  const headerCell = '| Authorization: Bearer fake-bearer-123 | keep this column |';
+  assert.deepEqual(maskPasswordStyleValues(headerCell), {
+    text: '| Authorization: [MASKED] | keep this column |', masked: 1,
+  });
+  assert.equal(maskPasswordStyleValues(maskPasswordStyleValues(headerCell).text).masked, 0);
+  assert.deepEqual(maskPasswordStyleValues('| Cookie: fake-cookie-123|Authorization: Bearer fake-bearer-123|keep this column|'), {
+    text: '| Cookie: [MASKED]|Authorization: [MASKED]|keep this column|', masked: 2,
+  });
+  assert.deepEqual(maskPasswordStyleValues('-Authorization: Bearer fake-bearer-123\nnext line remains'), {
+    text: '-Authorization: [MASKED]\nnext line remains', masked: 1,
+  });
+  assert.deepEqual(maskPasswordStyleValues('not-authorization: ordinary value'), { text: 'not-authorization: ordinary value', masked: 0 });
+  console.log('PASS whitespace quoted/token-only values, prose/markdown preservation and exact trailing text');
+
+  for (const declaration of ['val', 'let', 'const', 'var', 'static final String', 'NSString *', '']) {
+    for (const key of ['appSecret', 'clientSecret', 'apiToken', 'MY_ACCESS_KEY', 'kAppKey', 'storePassword', 'SECRET_KEY', 'accessKey', 'client_secret', 'api_token']) {
+      for (const quote of ['"', "'", '@"']) {
+        const close = quote.at(-1);
+        const input = `${declaration} ${key} = ${quote}${fake}${close}; // preserve tail`;
+        const expected = `${declaration} ${key} = ${quote}[MASKED]${close}; // preserve tail`;
+        assert.deepEqual(maskPasswordStyleValues(input), { text: expected, masked: 1 });
+        assert.equal(maskPasswordStyleValues(expected).masked, 0);
+        assert.equal(JSON.parse(maskLogText(JSON.stringify({ output: input }), { jsonl: true }).text).output, expected);
+      }
+      for (const expression of ['getValue()', 'config.value', 'otherVariable', '"prefix" + otherVariable', '"prefix".trim()']) {
+        const input = `${declaration} ${key} = ${expression}; // preserve tail`;
+        assert.deepEqual(maskPasswordStyleValues(input), { text: input, masked: 0 });
+      }
+    }
+  }
+  for (const prefix of ['+', '-', ' ']) {
+    const input = `${prefix}  const clientSecret: string = "${fake}"; keep`;
+    assert.deepEqual(maskPasswordStyleValues(input), { text: `${prefix}  const clientSecret: string = "[MASKED]"; keep`, masked: 1 });
+  }
+  console.log('PASS source declarations, prefixed secret identifiers, ObjC literals, expression exclusion and JSONL');
+
   const records = [
     JSON.stringify({ type: 'tool_output', output: `build output\npassword = "${fake}"\napi_key: '${fake}'\nkeep this text`, number: 7 }),
     JSON.stringify({ nested: { array: [`token=${fake}`, { output: gradle }, 'ordinary text'] }, ok: true }),

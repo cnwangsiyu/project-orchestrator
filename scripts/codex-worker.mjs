@@ -64,6 +64,8 @@ import { inheritedLaunch, saveLaunch, recordLaunchModel, readRequestBufferExceed
 import { recordWorkerOutcome, reviewSeat, reviewInstructions } from './lib/worker-outcome.mjs';
 import { sizeLimits, threadSize, freshThreadRoute } from './lib/worker-thread-size.mjs';
 import { modelFamily, modelObservation, rolloutTurnModel } from './lib/worker-model.mjs';
+import { redactWorkerTurn, checkThreadIdle } from './lib/worker-redaction.mjs';
+import { maskPasswordStyleValues } from './lib/nightly-audit.mjs';
 import { lifecycle, resolveOwner, validOwner, inbox, readEvents, readAck, eventLine, watch, signalExit, appendEvent,
   saveWorkerContext, workerContext, openQuestions, answerQuestion } from './lib/worker-events.mjs';
 // What a TRAE pause covers: one model family (route.mjs moves to the next family) or the whole account.
@@ -900,11 +902,11 @@ if (setupMs) {
   if (controlCommand) console.error(line); else console.log(line);
 }
 const write = (obj) => ws.send(JSON.stringify(obj));
-const call = (method, params) => new Promise((resolve, reject) => {
+const call = (method, params, { audit = true } = {}) => new Promise((resolve, reject) => {
   const id = ++nextId; setupPhase = method;
-  if (logFile) try { fs.appendFileSync(logFile, JSON.stringify({ rpc: 'sent', id, method,
+  if (logFile && audit) try { fs.appendFileSync(logFile, JSON.stringify({ rpc: 'sent', id, method,
     threadId: params?.threadId ?? null, at: Date.now() }) + '\n'); } catch {}
-  pending.set(id, { resolve, reject, method }); write({ jsonrpc: '2.0', id, method, params });
+  pending.set(id, { resolve, reject, method, audit }); write({ jsonrpc: '2.0', id, method, params });
 });
 const settleSetup = async (thread) => {
   const phase = setupPhase;
@@ -933,17 +935,32 @@ const stopFollowing = () => {
   for (const cleanup of cleanups) cleanup();
   cleanups.clear();
 };
-const finish = (code) => {
+let redactionPromise, finishing = false, redactionStatusOnly = false;
+const redactEndedTurn = (thread = activeTurn?.threadId ?? attemptThreadId ?? opts.thread) => {
+  if (!tracker) return Promise.resolve();
   done = true; stopFollowing();
+  redactionPromise ??= redactWorkerTurn({ home: PROF?.home ?? process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex'),
+    thread, log: logFile, out: typeof opts.out === 'string' ? path.resolve(opts.out) : null, tracker,
+    checkIdle: () => checkThreadIdle((method, params) => call(method, params, { audit: false }), thread,
+      { statusOnly: redactionStatusOnly }) });
+  return redactionPromise;
+};
+const finish = async (code) => {
+  if (finishing) return;
+  finishing = true;
+  done = true; stopFollowing();
+  try { await redactEndedTurn(); } catch { console.error('redaction warning: turn-end redaction could not complete'); }
   ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null;
   pending.clear();
   try { ws.close(); } catch {}
   process.exit(exitCode ?? code);
 };
 const rejectRequestBuffer = (thread) => {
+  // Buffer rejection must not issue a recovery read of the oversized thread.
+  redactionStatusOnly = true;
   const at = thread ? markRequestBufferExceeded(account ?? 'main', thread, opts) : Date.now();
   console.error(`codex-worker: ${largeThreadMessage(thread, `provider request buffer exceeded on ${new Date(at).toISOString()}`)}`);
-  finish(9);
+  return finish(9);
 };
 const resumeFallback = (error) => {
   if (failureKind(error?.message ?? String(error)) === 'thread-too-large') throw error;
@@ -956,6 +973,7 @@ const detachHub = () => {
 };
 const autoReroute = async (reason, queue = {}, policy = false) => {
   outcomeSkip = true; // The successor follower owns the final task outcome.
+  await redactEndedTurn();
   tracker?.result('re-routed', { reason, mayRun: false, finalLine: '' });
   const cancelledTurn = activeTurn;
   detachHub(); exitCode = null;
@@ -968,8 +986,8 @@ const autoReroute = async (reason, queue = {}, policy = false) => {
       opts: { ...opts, owner: tracker?.sessionId ?? opts.owner }, policy, onHandoff: () => tracker?.end(0) });
     if (code === 8 || code === 9) tracker?.result('needs-user');
     else if (code !== 0) tracker?.result('failed');
-    finish(code);
-  } catch (e) { console.error(`reroute-failed: ${e.message}`); finish(7); }
+    await finish(code);
+  } catch (e) { console.error(`reroute-failed: ${e.message}`); await finish(7); }
 };
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, () => {
   if (!activeTurn || done) {
@@ -1027,7 +1045,7 @@ ws.onmessage = (ev) => {
   let m; try { m = JSON.parse(line); } catch { return; }
   if (m.id !== undefined && pending.has(m.id) && !m.method) {
     const p = pending.get(m.id); pending.delete(m.id);
-    if (logFile) try { fs.appendFileSync(logFile, JSON.stringify({ rpc: 'reply', id: m.id,
+    if (logFile && p.audit) try { fs.appendFileSync(logFile, JSON.stringify({ rpc: 'reply', id: m.id,
       method: p.method, ok: !m.error, at: Date.now() }) + '\n'); } catch {}
     m.error ? p.reject(new Error(`${m.error.code}: ${m.error.message}`)) : p.resolve(m.result); return;
   }
@@ -1063,7 +1081,7 @@ const printFinal = (final) => {
       console.error('output-conflict: --out changed during the turn; it may be a worker-written file. Use a separate final-message destination.');
     fs.writeFileSync(path.resolve(opts.out), final + '\n');
   }
-  console.log(`final: ${final.split('\n').find((l) => l.trim()) ?? ''}`);
+  console.log(`final: ${maskPasswordStyleValues(final.split('\n').find((l) => l.trim()) ?? '').text}`);
 };
 // A cyberPolicy block is recorded for the nightly review as kind:'policy-block' on every account. TTADK stops there
 // (telemetry only, no pause); TRAE also writes its 983-style family restriction below (until the next 00:00 UTC).
@@ -1087,7 +1105,7 @@ const report = async (threadId, turn, final, usage) => {
     // Do not wait for another hub read while retry/reroute timers are still armed.
     outcomeTurn = turn; outcomeFinal = final ?? lastMessage(turn.items) ?? '';
     printFinal(outcomeFinal);
-    rejectRequestBuffer(threadId);
+    return rejectRequestBuffer(threadId);
   }
   const policyBlock = isPolicyBlock(turn);
   if (policyBlock) {
@@ -1136,9 +1154,10 @@ const report = async (threadId, turn, final, usage) => {
   if (!final) final = lastMessage((await readTurns(threadId).catch(() => [])).find((t) => t.id === turn.id)?.items);
   outcomeTurn = turn; outcomeFinal = final ?? '';
   printFinal(final);
+  await redactEndedTurn(threadId);
   tracker?.result(rejectedModel ? 'failed' : /^(?:\S+\s+)?(?:BLOCKED|QUESTION)\b/.test(final?.trim() ?? '') ? 'needs-user'
     : turn.status === 'completed' ? 'finished' : 'failed', { thread: threadId, turn: turn.id, mayRun: false,
-      finalLine: final?.split('\n').find((line) => line.trim()) ?? '' });
+      finalLine: maskPasswordStyleValues(final?.split('\n').find((line) => line.trim()) ?? '').text });
   const infrastructureMiss = (['trae','ttadk'].includes(PROF?.kind)&&failureKind(errorText)==='unavailable')||(PROF?.kind==='trae'&&/access (temporarily )?restricted|\b983\b/i.test(errorText));
   if (!(strictReviewModel && modelMismatch) && turn.status === 'failed' && ROUTE_ARGS && !BACKGROUND && !workStarted && !turnHasWork(turn) && !final
     && (infrastructureMiss || (policyBlock && (routeFlag(ROUTE_ARGS, 'security') || routeFlag(ROUTE_ARGS, 'adversarial'))))) {
@@ -1149,7 +1168,7 @@ const report = async (threadId, turn, final, usage) => {
     }
     console.log('reroute-skipped: failed turn has work or its no-progress terminal state is unconfirmed');
   }
-  finish(rejectedModel ? 5 : turn.status === 'completed' ? 0 : 1);
+  await finish(rejectedModel ? 5 : turn.status === 'completed' ? 0 : 1);
 };
 // Stall alarm: no event for this turn in --stall-min minutes (default 30, 0 = off) ends the follower with exit 4 so the
 // orchestrator wakes up. The turn keeps running on the hub. A worker waiting on its own sub-agents can be quiet that long,
@@ -1486,7 +1505,7 @@ try {
   // A TRAE model that no longer resolves fails at thread/start (before any turn), so the turn recorder never sees it:
   // record it here so routing skips just that model (lib/trae-health.mjs, 2026-11-13).
   const msg = String(e?.message ?? e);
-  if (['start', 'turn'].includes(cmd) && failureKind(msg) === 'thread-too-large') rejectRequestBuffer(attemptThreadId ?? opts.thread);
+  if (['start', 'turn'].includes(cmd) && failureKind(msg) === 'thread-too-large') await rejectRequestBuffer(attemptThreadId ?? opts.thread);
   const policy = isPolicyBlock({ status: 'failed', error: msg });
   const infrastructureMiss = (['trae','ttadk'].includes(PROF?.kind)&&failureKind(msg)==='unavailable')||(PROF?.kind==='trae'&&/access (temporarily )?restricted|\b983\b/i.test(msg));
   if (infrastructureMiss && !policy) {
@@ -1506,5 +1525,6 @@ try {
       await autoReroute(policy ? 'policy-block' : failureKind(msg) === 'unavailable' ? 'model-unavailable' : 'vendor-restriction', {}, policy);
     else console.log('reroute-skipped: start failure left an active, progressed or unconfirmed turn');
   }
-  die(msg, 1);
+  process.stderr.write(`codex-worker: ${maskPasswordStyleValues(msg).text}\n`);
+  await finish(1);
 }

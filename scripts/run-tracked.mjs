@@ -1,8 +1,11 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { lifecycle, signalExit } from './lib/worker-events.mjs';
+import { redactWorkerTurn, hubThreadIdle } from './lib/worker-redaction.mjs';
+import { maskPasswordStyleValues } from './lib/nightly-audit.mjs';
 
 const args = process.argv.slice(2), sep = args.indexOf('--'), opts = {};
 for (let i = 0; i < (sep < 0 ? args.length : sep); i += 2) opts[args[i].replace(/^--/, '')] = args[i + 1];
@@ -13,6 +16,20 @@ if (sep < 0 || !args[sep + 1]) { console.error('run-tracked: expected options --
 const outStamp = () => { try { const s = fs.statSync(opts.out, { bigint: true }); return `${s.ino}:${s.mtimeNs}:${s.size}`; } catch { return null; } };
 const beforeOut = outStamp();
 let child, logFd, signalled = null, ending = false, watchdog, drainTimer, stderrTail='', stdoutPending='', accepted=false;
+let thread = opts.thread ?? null, turn = null;
+const stdoutLine = line => {
+  const pair = line.match(/^thread=(\S+) turn=(\S+)/);
+  if (pair) { thread = pair[1]; turn = pair[2]; accepted = true; }
+  try {
+    const row = JSON.parse(line);
+    if (/thread|turn/.test(row.type ?? row.method ?? '')) {
+      thread ??= row.thread_id ?? row.threadId ?? row.params?.threadId ?? null;
+      turn = row.turn_id ?? row.turnId ?? row.params?.turnId ?? row.params?.turn?.id ?? turn;
+      if (thread || turn) accepted = true;
+    }
+  } catch {}
+  tracker.set({ thread, turn });
+};
 const signalOwned = (signal) => {
   try { if (process.platform === 'win32') child?.kill(signal); else if (child?.pid) process.kill(-child.pid, signal); } catch {}
 };
@@ -31,6 +48,8 @@ const finish = async (code) => {
     }
   }
   if (logFd !== undefined) { fs.closeSync(logFd); logFd = undefined; }
+  if (stdoutPending) stdoutLine(stdoutPending);
+  stderrTail = maskPasswordStyleValues(stderrTail).text;
   let final = '';
   let outFd;
   try {
@@ -48,6 +67,18 @@ const finish = async (code) => {
     code=code||1;
     console.error(`run-tracked: launch failed before producing a thread/turn (exit ${code})${stderrTail.trim()?`\n${stderrTail.trim()}`:''}`);
   }
+  try {
+    let profiles = {};
+    if (thread) try { profiles = JSON.parse(fs.readFileSync(process.env.CODEX_ACCOUNTS
+      ?? path.join(os.homedir(), '.claude/orchestrator/_shared/codex-accounts.json'), 'utf8')); } catch {}
+    const profile = profiles[opts.account ?? 'main'];
+    await redactWorkerTurn({ home: opts.home ?? profile?.home ?? process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex'),
+      thread, log: opts.log ? path.resolve(opts.log) : null, out: opts.out ? path.resolve(opts.out) : null, tracker,
+      checkIdle: () => hubThreadIdle(opts.hub ?? profile?.hub ?? process.env.CODEX_HUB ?? 'ws://127.0.0.1:47321', thread) });
+  } catch {
+    console.error('redaction warning: turn-end redaction could not complete');
+  }
+  final = maskPasswordStyleValues(final).text;
   tracker.result(launchFailed?'failed':/^(?:\S+\s+)?(?:BLOCKED|QUESTION)\b/.test(final) ? 'needs-user' : code === 0 ? 'finished' : 'failed',
     { finalLine: final.split('\n').find((line) => line.trim()) ?? '' });
   if (signalled) tracker.result('follower-ended', { signal: signalled, mayRun: false });
@@ -62,8 +93,7 @@ try {
     if(logFd!==undefined) fs.writeSync(logFd,chunk); else process.stdout.write(chunk);
     stdoutPending=(stdoutPending+chunk.toString()).slice(-65536);
     const lines=stdoutPending.split('\n');stdoutPending=lines.pop();
-    for(const line of lines) { if(/^thread=\S+ turn=\S+/.test(line)) accepted=true;
-      try { const r=JSON.parse(line);if((r.thread_id||r.threadId||r.turn_id||r.turnId)&&/thread|turn/.test(r.type??r.method??'')) accepted=true; } catch {} }
+    for(const line of lines) stdoutLine(line);
   });
   child.stderr.on('data',chunk=>{stderrTail=(stderrTail+chunk.toString()).slice(-4096);if(logFd!==undefined)fs.writeSync(logFd,chunk);else process.stderr.write(chunk);});
   child.once('exit',(code,signal)=>{signalOwned('SIGTERM');drainTimer=setTimeout(()=>finish(code??signalExit(signal)),1000);});
