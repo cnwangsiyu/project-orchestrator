@@ -114,6 +114,16 @@ try {
   const empty = fixture('empty.log', '');
   assert.deepEqual(success('redact-log', empty), { file: empty, masked: 0, lines: 0 });
   console.log('PASS plain-text formats, CRLF, no final newline, empty logs and original permissions');
+  {
+    const headers = 'HTTP/1.1 200\nset-cookie: __Host-vak=fake-cookie-1; Path=/; Secure\nCookie: a=fake-cookie-2; b=fake-cookie-3\nAuthorization: Bearer fake-bearer-4\nx-auth-token: fake-header-5\ncontent-type: text/html\n';
+    const result = maskPasswordStyleValues(headers);
+    assert.equal(result.masked, 4);
+    for (const fake of ['fake-cookie-1', 'fake-cookie-2', 'fake-cookie-3', 'fake-bearer-4', 'fake-header-5']) assert.ok(!result.text.includes(fake), fake);
+    assert.ok(result.text.includes('content-type: text/html'));
+    assert.equal(maskPasswordStyleValues(result.text).masked, 0);
+    assert.deepEqual(passwordStyleFindings(headers).map(f => f.field), ['set-cookie', 'cookie', 'authorization', 'x-auth-token']);
+  }
+  console.log('PASS HTTP Set-Cookie/Cookie/Authorization/x-*-token header values masked, idempotent');
 
   const recent = fixture('recent.log', `secret=${fake}\n`);
   fs.utimesSync(recent, new Date(), new Date());

@@ -643,7 +643,7 @@ async function finishClaudeReview(sessionFile) {
 const [cmd, ...args] = process.argv.slice(2);
 const arg = (name) => args.includes(name) ? args[args.indexOf(name) + 1] : undefined;
 function checkedLogStat(file) {
-  if (!file || !path.isAbsolute(file) || !/\.(?:log|out|txt|jsonl)$/.test(file) || unsafeFile(file)) throw Error(`${cmd} requires a worker log path`);
+  if (!file || !path.isAbsolute(file) || !/\.(?:log|out|txt|jsonl)$/.test(file) || unsafeFile(file)) throw Error(`${cmd} requires --file <absolute worker log path (.log|.out|.txt|.jsonl)>`);
   const stat = fs.lstatSync(file);
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 256 * 2 ** 20 || unsafeFile(fs.realpathSync(file))) throw Error('worker log is unsafe or too large (limit 256 MiB)');
   return stat;

@@ -22,7 +22,28 @@ function credentialBlocks(text) {
 }
 
 // Only offsets and field names leave this private matcher, never suspected values.
+// HTTP auth headers: the whole header value (Cookie/Set-Cookie pairs, Authorization schemes) is secret.
+const headers = /(?<![\w-])(set-cookie|cookie|authorization|proxy-authorization|x-[\w-]*(?:token|api-key|auth)[\w-]*)([\t ]*:[\t ]*)([^\r\n"]+)/gi;
+
 function visitSecrets(text, visit) {
+  const hits = [];
+  collectSecrets(text, (hit) => hits.push(hit));
+  for (const match of text.matchAll(headers)) {
+    const value = match[3].trimEnd();
+    if (!value || /^(?:\[[^\]]*(?:redact|masked)[^\]]*\]|REDACTED|\*+)$/i.test(value)) continue;
+    const start = match.index + match[1].length + match[2].length;
+    hits.push({ line: 0, field: match[1].toLowerCase(), start, end: start + value.length });
+  }
+  hits.sort((a, b) => a.start - b.start);
+  let line = 1, offset = 0, last = -1;
+  for (const hit of hits) {
+    if (hit.start < last) continue; // overlapping match already covered
+    for (; offset < hit.start; offset++) if (text[offset] === '\n') line++;
+    visit({ ...hit, line }); last = hit.end;
+  }
+}
+
+function collectSecrets(text, visit) {
   const blocks = credentialBlocks(text);
   let line = 1, offset = 0, block = 0;
   for (const match of text.matchAll(assignments)) {
