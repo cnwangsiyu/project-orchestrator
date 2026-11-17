@@ -51,11 +51,12 @@ const RESTRICTED = /access (temporarily )?restricted|\b983\b/i;
 const HARD = /quota|daily limit|banned|\bban\b|封禁|封号|forbidden|\b403\b/i;
 // Model-not-found errors: the model itself vanished or stopped resolving, so its family-mates are unaffected.
 const UNAVAILABLE = /is unavailable because its metadata could not be resolved|model\s+[`'"\w.-]*\s*(?:is\s+)?(?:not found|does not exist|unavailable|unsupported)|(?:-32600|code\s*-32600)[\s\S]*model|model[\s\S]*-32600/i;
+const REQUEST_BUFFER = /(?:^|[^\d])-4399(?!\d)|exceeded request buffer limit/i;
 const RESTRICTED_REASON = "restricted by the model vendor's policy until 08:00 China time (00:00 UTC); probed then";
 const nextUtcMidnight = (now) => (Math.floor(now / 86400000) + 1) * 86400000;
 export const failureKind = (why) => {
   const w = why ?? '';
-  return AUTH.test(w) ? 'auth' : HARD.test(w) || RESTRICTED.test(w) ? 'hard' : UNAVAILABLE.test(w) ? 'unavailable' : 'transient';
+  return REQUEST_BUFFER.test(w) ? 'thread-too-large' : AUTH.test(w) ? 'auth' : HARD.test(w) || RESTRICTED.test(w) ? 'hard' : UNAVAILABLE.test(w) ? 'unavailable' : 'transient';
 };
 export const isQueueOrStall = why => /\b(?:queu(?:e(?:d|s|ing)?|ing)|stall(?:s|ed|ing)?|waiting without progress)\b/i.test(String(why??'').replaceAll('_',' '));
 const file = (home) => path.join(home, 'worker-health.json');
@@ -75,8 +76,9 @@ const update = (home, fn, fallback = null) => {
 
 // Pure: the pause these failures call for at time now, or null. streak = pauses already in a row without a success.
 // A model-unavailable failure never pauses the account or a family (noteFailure pauses the model itself instead).
+// A request-buffer failure belongs to the thread, not the account or model.
 export const pauseDecision = (failures, now = Date.now(), streak = 0) => {
-  const recent = (Array.isArray(failures)?failures:[]).filter((f) => object(f)&&Number.isFinite(f.t)&&now - f.t <= WINDOW_MIN * 60000 && failureKind(f.why) !== 'unavailable');
+  const recent = (Array.isArray(failures)?failures:[]).filter((f) => object(f)&&Number.isFinite(f.t)&&now - f.t <= WINDOW_MIN * 60000 && !['unavailable', 'thread-too-large'].includes(failureKind(f.why)));
   if (!recent.length) return null;
   const last = recent.reduce((a, f) => (f.t > a.t ? f : a));
   const serious = recent.filter((f) => failureKind(f.why) !== 'transient').reduce((a, f) => (!a || f.t > a.t ? f : a), null);
@@ -134,7 +136,7 @@ export const notePolicyRestriction = (home, why, now = Date.now(), model = null)
 export const PROBE_EVERY_MIN = 30, PROBE_STALE_MIN = 10;
 // Returns the pause now in force for what failed (the account, or the model's family, with .pool set; a vanished model
 // gets its own pause with .modelPause set), or null.
-export const noteFailure = (home, why, now = Date.now(), model = null) => update(home, (rec) => {
+export const noteFailure = (home, why, now = Date.now(), model = null) => failureKind(why) === 'thread-too-large' ? null : update(home, (rec) => {
   const kind = failureKind(why);
   // A model TRAE can't resolve pauses that model alone — never its family or the account — for MODEL_PAUSE_H hours.
   if (kind === 'unavailable' && model) {

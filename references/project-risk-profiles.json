@@ -89,6 +89,29 @@
     "reason": "User decision 2026-11-15: \"autotrader 也先免审查\"",
     "revisit": "When the user changes this decision; autotrader is exempt for now.",
     "root": "/Volumes/Code/AutoTrader",
-    "rootNote": "Trusted Claude launch directory on the MacBook (autotrader orchestrator, 2026-11-15); task worktrees under /Volumes/Code/AutoTrader-wt/<task>."
+    "rootNote": "Trusted Claude launch directory on the MacBook (autotrader orchestrator, 2026-11-15); task worktrees under /Volumes/Code/AutoTrader-wt/<task>.",
+    "slowTests": [
+      {
+        "file": "scripts/replay_chaos.py (main offline replay group: 87 trading days, 13 faults; parameters in docs/replay-chaos-2026-11.md)",
+        "cost": "pure Python, ~580 s, ~515 MiB; no heavy lane",
+        "runWhen": [
+          "src/autotrader/paper.py",
+          "src/autotrader/engine.py",
+          "src/autotrader/daemon.py",
+          "scripts/replay_chaos.py"
+        ]
+      },
+      {
+        "file": "scripts/replay_chaos.py (disconnect group: 4 trading days)",
+        "cost": "pure Python, ~15 s, ~203 MiB",
+        "runWhen": [
+          "src/autotrader/paper.py",
+          "src/autotrader/engine.py",
+          "src/autotrader/daemon.py",
+          "scripts/replay_chaos.py"
+        ]
+      }
+    ],
+    "slowTestsNote": "Reported by the AutoTrader orchestrator 2026-11-16 (measured in T44, docs/replay-chaos-2026-11.md); default pytest (-m 'not integration', ~3-5 min) excludes them."
   }
 }

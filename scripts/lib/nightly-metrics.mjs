@@ -7,7 +7,64 @@ const round = v => finite(v) ? +v.toFixed(2) : null;
 const entries = v => Object.entries(v ?? {});
 const esc = v => String(v ?? 'UNKNOWN').replace(/[|\r\n]/g, ' ');
 
-export function computeNightly({ day, review, resources, usage, previousUnknownClasses = [], evidence = {}, config = thresholds, now = Date.now() }) {
+// Replay the full frozen history to recover holds/waits crossing the 24h boundary.
+export function resourceLogMetrics(logText, registryText, now = Date.now()) {
+  if (typeof logText !== 'string' || typeof registryText !== 'string') return null;
+  const span = 24 * 3600000, since = now - span;
+  const registryRows = registryText.split('\n').filter(l => l.trim() && !l.startsWith('#')).map(l => l.split('\t'));
+  if (registryRows.some(r => r.length < 4 || !r[0] || !r[1]) || new Set(registryRows.map(r => r[0])).size !== registryRows.length) return null;
+  const registry = new Map(registryRows.map(r => [r[0], r[1]]));
+  const active = new Map(), occupied = new Map([...registry.keys()].map(id => [id, 0])), projects = new Map(), pending = new Map(), waits = new Map();
+  let invalidLines = 0;
+  const rows = logText.split('\n').filter(l => l.trim() && !l.startsWith('#')).flatMap(line => {
+    const [time, event, resource, holder] = line.split('\t');
+    // res timestamps without an offset are in the collector machine's local timezone.
+    const t = Date.parse(time?.replace(' ', 'T'));
+    if (!finite(t) || !event || !resource || holder == null) { invalidLines++; return []; }
+    return t <= now ? [{ t, event, resource, holder }] : [];
+  }).sort((a, b) => a.t - b.t);
+  const close = (id, end) => {
+    const hold = active.get(id); if (!hold) return;
+    const ms = Math.max(0, end - Math.max(hold.t, since));
+    occupied.set(id, (occupied.get(id) ?? 0) + ms);
+    if (/^heavy-lane-[0-9]+$/.test(id)) projects.set(hold.project, (projects.get(hold.project) ?? 0) + ms);
+    active.delete(id);
+  };
+  for (const r of rows) {
+    const identity = /^(.*?) \(([^/()]+)(?:\/[^()]*)?\)$/.exec(r.holder);
+    const by = identity?.[1] ?? r.holder, project = identity?.[2] ?? 'UNKNOWN';
+    if (r.event === 'take') {
+      if (active.get(r.resource)?.by === by) continue;
+      close(r.resource, r.t); active.set(r.resource, { t: r.t, by, project });
+      if (!occupied.has(r.resource)) occupied.set(r.resource, 0);
+    } else if (r.event === 'return' || r.event === 'reclaim' || r.event === 'rollback') {
+      if (r.event !== 'return' || active.get(r.resource)?.by === by) close(r.resource, r.t);
+    }
+    if (r.resource !== 'heavy-lane-any' && r.resource !== 'devbox-cn-any') continue;
+    const key = `${r.resource}\t${r.holder}`;
+    // A new start supersedes an abandoned/signal-cancelled wait by this holder.
+    // Rejoin records leave that original start intact.
+    if (r.event === 'waiter-start') pending.set(key, r.t);
+    if (r.event === 'waiter-acquire' || r.event === 'waiter-timeout') {
+      const start = pending.get(key); pending.delete(key);
+      if (r.event === 'waiter-acquire' && start != null && r.t >= since) {
+        const list = waits.get(r.resource) ?? []; list.push((r.t - start) / 60000); waits.set(r.resource, list);
+      }
+    }
+  }
+  for (const id of active.keys()) close(id, now);
+  const queue = Object.fromEntries(['heavy-lane-any', 'devbox-cn-any'].map(id => {
+    const minutes = (waits.get(id) ?? []).sort((a, b) => a - b);
+    return [id, { count: minutes.length, p90Minutes: minutes.length ? minutes[Math.ceil(minutes.length * .9) - 1] : 0 }];
+  }));
+  const heavyPool = [...registry].filter(([id, kind]) => kind === 'remote' && /^devbox-cn-[0-9]+$/.test(id)).map(([id]) => id);
+  return { since, until: now, invalidLines,
+    occupancy: Object.fromEntries([...occupied].map(([id, ms]) => [id, { occupiedMinutes: ms / 60000, occupancyPct: ms / span * 100 }])),
+    queues: queue, devboxHeavyPool: { ids: heavyPool, occupancyPct: heavyPool.length ? heavyPool.reduce((n, id) => n + (occupied.get(id) ?? 0), 0) / (span * heavyPool.length) * 100 : null },
+    topMiniProjects: [...projects].filter(([, ms]) => ms > 0).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([project, ms]) => ({ project, occupiedMinutes: ms / 60000 })) };
+}
+
+export function computeNightly({ day, review, resources, usage, resourceLog, resourceRegistry, previousUnknownClasses = [], evidence = {}, config = thresholds, now = Date.now() }) {
   const metrics = [], findings = [], unknown = new Set();
   const pointer = (source, field) => `${evidence[source] ?? source}#${field}`;
   const add = (id, value, limit, source, field, { project = null, owner = null, comparison = 'observe', unknownClass = id } = {}) => {
@@ -78,6 +135,26 @@ export function computeNightly({ day, review, resources, usage, previousUnknownC
   add('resource-over-gate-hours', u?.cpu?.hoursOverGate ?? null, config.overGateHoursMax, 'resources', 'utilisation.cpu.hoursOverGate', { comparison: 'above' });
   add('resource-coverage-pct', resources?.coverage?.coveragePct ?? null, config.resourceCoveragePctMin, 'resources', 'coverage', { comparison: 'below' });
   for (const [field, value] of entries(resources?.coverage).filter(([k]) => /Minutes$/.test(k))) add(`coverage/${field}`, value, null, 'resources', `coverage.${field}`);
+  const resourceHistory = resourceLogMetrics(resourceLog, resourceRegistry, now);
+  const historyKnown = resourceHistory && resourceHistory.invalidLines === 0;
+  for (const [id, r] of entries(resourceHistory?.occupancy))
+    add(`resource-log-occupancy-pct/${id}`, historyKnown ? r.occupancyPct : null, null, 'resourceLog', `occupancy.${id}`, { unknownClass: 'resource-log' });
+  const laneP90 = historyKnown ? resourceHistory.queues['heavy-lane-any'].p90Minutes : null;
+  const devboxPct = historyKnown ? resourceHistory.devboxHeavyPool.occupancyPct : null;
+  add('lane-wait-p90-minutes', laneP90, config.laneWaitP90MinutesMax, 'resourceLog', 'queues.heavy-lane-any', { unknownClass: 'resource-log' });
+  add('devbox-wait-p90-minutes', historyKnown ? resourceHistory.queues['devbox-cn-any'].p90Minutes : null, null, 'resourceLog', 'queues.devbox-cn-any', { unknownClass: 'resource-log' });
+  add('devbox-heavy-pool-occupancy-pct', devboxPct, config.devboxIdlePctMin, 'resourceLog', 'devboxHeavyPool', { unknownClass: 'resource-log' });
+  if (laneP90 > (config.laneWaitP90MinutesMax ?? 15) && devboxPct != null && devboxPct < (config.devboxIdlePctMin ?? 50)) {
+    const top = resourceHistory.topMiniProjects;
+    const recommendation = 'Move portable (non-macOS) build/test/render steps to res wait-pool devbox-cn; remote steps take no mini locks or heavy-check. Keep macOS-only steps local.';
+    const finding = { id: 'lane-devbox-imbalance', class: 'lane-devbox-imbalance', scriptOnly: true,
+      value: `mini lane wait p90 ${round(laneP90)} min; devbox heavy-pool occupancy ${round(devboxPct)}%; top mini holders: ${top.map(p => `${p.project} (${round(p.occupiedMinutes)} lane-min)`).join(', ') || 'UNKNOWN'}; ${recommendation}`,
+      threshold: `p90 > ${config.laneWaitP90MinutesMax ?? 15} min AND occupancy < ${config.devboxIdlePctMin ?? 50}%`, comparison: 'combined', status: 'FINDING',
+      laneWaitP90Minutes: laneP90, devboxOccupancyPct: devboxPct,
+      evidence: [pointer('resourceLog', 'queues.heavy-lane-any'), pointer('resourceLog', 'topMiniProjects'), pointer('resourceRegistry', 'devboxHeavyPool')], recommendation,
+      items: top.map(p => ({ name: `${p.project} (${round(p.occupiedMinutes)} lane-min)`, project: p.project, owner: ownerFor(p.project) })) };
+    findings.push(finding); metrics.push(finding);
+  }
   const accounts = review?.companyHealth;
   if (!Array.isArray(accounts) || !accounts.length) unknown.add('company-expiry');
   for (const a of accounts ?? []) {
@@ -104,7 +181,7 @@ export function computeNightly({ day, review, resources, usage, previousUnknownC
   }
   const weekly = new Date(`${day}T12:00:00`).getDay() === config.weeklyDay;
   if (weekly) findings.push({ id: 'weekly-full-review', class: 'weekly', value: day, evidence: Object.values(evidence) });
-  return { schema: 1, day, collectedAt: now, metrics, findings, unknownClasses: [...unknown].sort(), newUnknownClasses, weekly, needsModel: findings.length > 0 };
+  return { schema: 1, day, collectedAt: now, metrics, findings, resourceHistory, unknownClasses: [...unknown].sort(), newUnknownClasses, weekly, needsModel: findings.some(f => !f.scriptOnly) };
 }
 
 export function metricTable(result) {
@@ -116,6 +193,7 @@ export function metricTable(result) {
 }
 
 export function nightlyBrief(result, attemptDir) {
+  result = { ...result, findings: result.findings.filter(f => !f.scriptOnly) };
   return `Nightly review ${result.day}. Analyze only the following triggered findings and their evidence paths. Explain causes and propose concrete owner actions. Missing evidence remains UNKNOWN. No source edits, commits, push, policy changes, cleanup, logins, messaging or delegation. Write a concise analysis to ${attemptDir}/report.md and ${attemptDir}/notify.json as {"actions":[{"orchestrator":"<exact name or owner>","findingIds":["<id>"],"text":"<action>"}],"decisions":[{"id":"<id>","question":"<Chinese question>","options":[{"label":"<label>","description":"<effect>"}],"recommended":0,"default":"不回答则保持现状"}]}. Weekly actions also require project and evidence fields identifying only that recipient's project and one of the weekly evidence paths. Decisions require 2–4 options, recommendation, and an explicit default. No action is authorized by a proposal.\n${JSON.stringify(result.findings, null, 2)}\n`;
 }
 

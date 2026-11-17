@@ -48,7 +48,8 @@ if (args[0]?.endsWith('/route.mjs')) {
 }
 if (args[0]?.endsWith('/review-data.mjs')) {
   const r = JSON.parse(fs.readFileSync(path.join(home, 'review-fixture.json'), 'utf8'));
-  if (scenario !== 'no-findings') r.globalRules.unrouted = Array.from({length: 4}, (_, i) => ({ project: 'p', name: 'task-' + i }));
+  if (scenario !== 'no-findings' && !scenario.startsWith('imbalance')) r.globalRules.unrouted = Array.from({length: 4}, (_, i) => ({ project: 'p', name: 'task-' + i }));
+  if (scenario === 'imbalance-unresolved') for (const a of r.globalRules.acknowledgements) a.session = null;
   console.log(JSON.stringify(r)); process.exit(0);
 }
 if (args[0]?.endsWith('/orch-usage.mjs')) { console.log('{"orchestrators":[]}'); process.exit(0); }
@@ -101,6 +102,7 @@ const registry = path.join(home, 'sessions.json');
 const sessions = () => { try { return JSON.parse(fs.readFileSync(registry, 'utf8')); } catch { return []; } };
 fs.appendFileSync(path.join(home, 'claude.jsonl'), JSON.stringify(args) + '\\n');
 if (args[0] === 'agents') {
+  if (scenario === 'imbalance-unresolved') { console.log('[]'); process.exit(0); }
   if (scenario === 'agents-hang') { process.on('SIGTERM', () => {}); setInterval(() => {}, 1000); await new Promise(() => {}); }
   if (scenario === 'agents-error') { console.error('fixture session service unavailable'); process.exit(2); }
   if (scenario === 'agents-malformed') { console.log('[null]'); process.exit(0); }
@@ -156,6 +158,10 @@ function fixture(scenario, fixtureDay = day) {
   fs.writeFileSync(path.join(bin, 'node'), shim, { mode: 0o755 });
   fs.writeFileSync(path.join(bin, 'claude'), claudeShim, { mode: 0o755 });
   const shared = path.join(home, '.claude/orchestrator/_shared'); fs.mkdirSync(shared, { recursive: true });
+  fs.writeFileSync(path.join(shared, 'resources.tsv'), 'devbox-cn-1\tremote\topen\t-\tfixture\nheavy-lane-1\tslot\topen\t-\tfixture\n');
+  const at = ms => new Date(Date.now() - ms).toISOString();
+  fs.writeFileSync(path.join(shared, 'log.tsv'), scenario.startsWith('imbalance') ?
+    `${at(3600000)}\ttake\theavy-lane-1\tw (p/task)\tfixture\n${at(1800000)}\twaiter-start\theavy-lane-any\tw (p/task)\tpid=1\n${at(60000)}\twaiter-acquire\theavy-lane-any\tw (p/task)\tlane=heavy-lane-1\n` : '');
   fs.writeFileSync(path.join(shared, 'codex-accounts.json'), JSON.stringify({ trae: { kind: 'trae' }, ttadk: { kind: 'ttadk' }, personal: { kind: 'chatgpt' } }));
   fs.writeFileSync(path.join(home, 'review-fixture.json'), JSON.stringify(cleanReview()));
   fs.writeFileSync(path.join(home, 'resource-fixture.json'), JSON.stringify(cleanResources()));
@@ -192,6 +198,25 @@ try {
   const completedCheck = quiet.execute({ NIGHTLY_DEADLINE: '00:00' }, ['--deadline-check']);
   assert.equal(completedCheck.status, 0); assert.ok(!fs.existsSync(path.join(quiet.run, 'deadline-status.json')));
   console.log('PASS no findings: script table only, no route, worker, finisher or messages');
+
+  const imbalance = fixture('imbalance'); const ir = imbalance.execute(); assert.equal(ir.status, 0, ir.stdout + ir.stderr);
+  const imbalanceMetrics = json(path.join(imbalance.run, 'attempt-1/metrics.json'));
+  assert.deepEqual(imbalanceMetrics.findings.map(f => f.id), ['lane-devbox-imbalance']);
+  assert.equal(imbalanceMetrics.needsModel, false); assert.equal(imbalance.count('start-count'), 0);
+  assert.equal(imbalance.calls().filter(a => a[0]?.endsWith('/route.mjs')).length, 0);
+  const imbalanceEvents = fs.readFileSync(path.join(imbalance.home, '.claude/orchestrator/_shared/worker-events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(imbalanceEvents.length, 1); assert.equal(imbalanceEvents[0].owner, 'p-session');
+  assert.match(imbalanceEvents[0].text, /portable \(non-macOS\).*wait-pool devbox-cn/);
+  assert.ok(fs.existsSync(path.join(imbalance.run, 'attempt-1/data/log.tsv')));
+  assert.match(fs.readFileSync(path.join(imbalance.dir, day + '.md'), 'utf8'), /model skipped/);
+  assert.equal(imbalance.execute().status, 0); assert.equal(imbalance.count('start-count'), 0);
+  console.log('PASS imbalance-only: frozen resource log, script finding and inbox delivery without any model route');
+  const unresolvedImbalance = fixture('imbalance-unresolved'); const ur = unresolvedImbalance.execute();
+  assert.equal(ur.status, 1, ur.stdout + ur.stderr); assert.equal(unresolvedImbalance.status().state, 'blocked');
+  assert.equal(unresolvedImbalance.calls().filter(a => a[0]?.endsWith('/route.mjs')).length, 0);
+  assert.equal(unresolvedImbalance.count('start-count'), 0);
+  assert.ok(!fs.existsSync(path.join(unresolvedImbalance.home, '.claude/orchestrator/_shared/worker-events.jsonl')));
+  console.log('PASS imbalance-only missing recipient: blocked evidence retained without a fallback model or guessed owner');
 
   const one = fixture('success'); const r = one.execute(); assert.equal(r.status, 0, r.stdout + r.stderr);
   const brief = fs.readFileSync(path.join(one.run, 'attempt-1/brief.md'), 'utf8');

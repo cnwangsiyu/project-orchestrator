@@ -4,6 +4,8 @@
   "mismatchesMax": 5,
   "missingPersonalApprovalMax": 0,
   "inboxP90MinutesMax": 30,
+  "laneWaitP90MinutesMax": 15,
+  "devboxIdlePctMin": 50,
   "staleRulesHoursMax": 24,
   "overGateHoursMax": 0,
   "expiryWarningHours": 72,

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { computeNightly, metricTable, nightlyBrief } from '../lib/nightly-metrics.mjs';
+import { computeNightly, resourceLogMetrics, thresholds, metricTable, nightlyBrief } from '../lib/nightly-metrics.mjs';
 import { nightlyRecipients, secretaryRecipient, deliveryPlan, decisionMessage, deliverNightly } from '../lib/nightly-delivery.mjs';
 import { appendEvent, readEvents, inbox, eventLine } from '../lib/worker-events.mjs';
 
@@ -22,7 +22,8 @@ const resources = {coverage: {coveragePct: 80}, utilisation: {
   cpu: {meanIdlePct: 50, hoursIdleAbove50WithReadyTasks: 0, hoursOverGate: 0}, memory: {meanAvailableGiB: 30, minAvailableGiB: 20, pressureHours: 0},
   heavyLanes: {occupancyPct: 50}, queue: {hours: 0}, quota: {ttadk: {tokensUnusedAtReset: 0}}}};
 const evidence = {review: '/fixtures/review.json', resources: '/fixtures/resources.json', weekly: '/fixtures/week.json'};
-const base = {day: '2026-11-17', review, resources, evidence, now};
+const registry = fs.readFileSync(new URL('./fixtures/nightly-resources.tsv', import.meta.url), 'utf8');
+const base = {day: '2026-11-17', review, resources, evidence, now, resourceLog: '', resourceRegistry: registry};
 const computed = computeNightly(base);
 assert.equal(computed.needsModel, false, JSON.stringify(computed.findings));
 assert.ok(metricTable(computed).split('\n').length <= 40);
@@ -63,6 +64,45 @@ assert.equal(metricTable(crowded).split('\n').length, 40);
 console.log('PASS new UNKNOWN classes trigger once, Monday exception, table always <=40 lines');
 
 const recipients = nightlyRecipients(review, [{name: '工作秘书 mini', sessionId: 'secretary-session', host: 'mini'}], 'Remote 主对话\n# comment');
+const historyLog = fs.readFileSync(new URL('./fixtures/nightly-resource-log.tsv', import.meta.url), 'utf8');
+const history = resourceLogMetrics(historyLog, registry, now);
+assert.equal(history.occupancy['heavy-lane-1'].occupancyPct, 50);
+assert.equal(history.occupancy['heavy-lane-2'].occupancyPct, 75);
+assert.equal(history.occupancy['devbox-cn-light'].occupancyPct, 100);
+assert.equal(history.devboxHeavyPool.occupancyPct, 6.25);
+assert.equal(resourceLogMetrics(historyLog.replace('\treturn\tdevbox-cn-1\td\t', '\treturn\tdevbox-cn-1\td (video-agent/remote)\t'), registry, now).devboxHeavyPool.occupancyPct, 6.25);
+const duplicateTake = '2026-11-16T12:00:00Z\ttake\tdevbox-cn-1\tx (routing/task)\tfixture\n' +
+  '2026-11-16T13:00:00Z\ttake\tdevbox-cn-1\tx (routing/task)\tduplicate\n' +
+  '2026-11-16T14:00:00Z\treclaim\tdevbox-cn-1\towner\tfixture\n';
+assert.equal(resourceLogMetrics(duplicateTake, registry, now).occupancy['devbox-cn-1'].occupiedMinutes, 120);
+assert.deepEqual(history.devboxHeavyPool.ids, ['devbox-cn-1', 'devbox-cn-2', 'devbox-cn-3', 'devbox-cn-4']);
+assert.deepEqual(history.queues['heavy-lane-any'], { count: 3, p90Minutes: 40 });
+assert.deepEqual(history.queues['devbox-cn-any'], { count: 1, p90Minutes: 4 });
+assert.deepEqual(history.topMiniProjects.map(p => p.project), ['routing', 'video-agent']);
+const imbalance = computeNightly({...base, resourceLog: historyLog});
+assert.deepEqual(imbalance.findings.map(f => f.id), ['lane-devbox-imbalance']);
+assert.equal(imbalance.needsModel, false);
+assert.doesNotMatch(nightlyBrief(imbalance, '/fixture'), /"id": "lane-devbox-imbalance"/);
+assert.match(imbalance.findings[0].value, /video-agent.*wait-pool devbox-cn/);
+const imbalancePlan = deliveryPlan(imbalance, {actions: [], decisions: []}, recipients, '/fixture/report');
+assert.deepEqual(imbalancePlan.messages.map(m => m.owner).sort(), ['routing-session', 'video-session']);
+assert.ok(imbalancePlan.messages.every(m => /portable \(non-macOS\).*wait-pool devbox-cn/.test(m.text)));
+assert.doesNotMatch(imbalancePlan.messages.find(m => m.owner === 'video-session').text, /routing \(/);
+assert.throws(() => deliveryPlan(imbalance, {actions: [{orchestrator: 'Video 主对话', findingIds: ['lane-devbox-imbalance'], text: 'model advice'}]}, recipients, '/fixture/report'), /owned/);
+for (const config of [{...thresholds, laneWaitP90MinutesMax: 40}, {...thresholds, devboxIdlePctMin: 6.25}])
+  assert.equal(computeNightly({...base, resourceLog: historyLog, config}).findings.length, 0, 'strict threshold boundaries');
+const busyLog = historyLog + '2026-11-16T12:00:00Z\ttake\tdevbox-cn-2\tbusy2 (routing/b2)\tfixture\n' +
+  '2026-11-16T12:00:00Z\ttake\tdevbox-cn-3\tbusy3 (routing/b3)\tfixture\n';
+assert.equal(computeNightly({...base, resourceLog: busyLog}).findings.length, 0, 'busy devbox does not trigger');
+assert.ok(computeNightly({...base, resourceLog: null}).unknownClasses.includes('resource-log'));
+assert.ok(computeNightly({...base, resourceLog: 'bad data\n'}).unknownClasses.includes('resource-log'));
+assert.equal(resourceLogMetrics(historyLog, 'malformed registry\n', now), null);
+const abandonedWait = '2026-11-16T12:00:00Z\twaiter-start\theavy-lane-any\tw (routing/task)\tpid=1\n' +
+  '2026-11-16T14:00:00Z\twaiter-start\theavy-lane-any\tw (routing/task)\tpid=2\n' +
+  '2026-11-16T14:02:00Z\twaiter-acquire\theavy-lane-any\tw (routing/task)\tlane=heavy-lane-1\n';
+assert.equal(resourceLogMetrics(abandonedWait, registry, now).queues['heavy-lane-any'].p90Minutes, 2);
+assert.equal(resourceLogMetrics(historyLog, registry + 'devbox-cn-5\tremote\topen\t-\tfixture\n', now).devboxHeavyPool.occupancyPct, 5);
+console.log('PASS resource log replay: crossing/open holds, repeated waits/rejoin, dynamic pool, strict imbalance thresholds and script-only owned delivery');
 const refreshed = nightlyRecipients(review, [{name: 'Video 主对话', sessionId: 'new-video-session'},
   {name: '工作秘书 mini', sessionId: 'secretary-session'}, {name: 'routing-nightly-secretary-relay', sessionId: 'relay-worker'}]);
 assert.equal(refreshed.find(r => r.project === 'video-agent').owner, 'new-video-session');

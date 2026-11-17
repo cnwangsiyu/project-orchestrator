@@ -13,6 +13,7 @@ const SUITE_TIMEOUTS = {
   'lane3.mjs': 600000,
   'fairness.mjs': 600000,
   'lanes.mjs': 600000,
+  'pools.mjs': 600000,
   'followups.mjs': 600000,
   'build.mjs': 1200000,
 };
@@ -20,6 +21,8 @@ const SUITE_TIMEOUTS = {
 export const RES_TEST_BUDGET_MS = Object.values(SUITE_TIMEOUTS).reduce((sum, timeout) => sum + timeout, 0) + 300000;
 
 export function runResSuites() {
+  const selected = process.env.RES_TEST_SUITE;
+  if (selected && !Object.hasOwn(SUITE_TIMEOUTS, selected)) throw Error(`unknown res suite: ${selected}`);
   const base = path.dirname(fileURLToPath(import.meta.url));
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'res-tests-'));
   const home = path.join(tmp, 'home');
@@ -37,13 +40,14 @@ export function runResSuites() {
   let assertions = 0;
   console.log(`Res PID table: ${process.env.RES_TEST_NATIVE_PS === '1' ? 'native ps' : 'scratch fixture (host ps not required)'}`);
   for (const [suite, timeout] of Object.entries(SUITE_TIMEOUTS)) {
+    if (selected && selected !== suite) continue;
     const node = suite.endsWith('.mjs');
     const script = path.join(node ? base : tmp, suite);
-    // v1.4 adds post-take diagnostics and a 20m build/signal matrix. These aggregate watchdogs do not change
-    // the independently bounded probes, resource waits or production admission gates.
+    // Slow/load-sensitive runs may select one suite and disable only its outer
+    // watchdog; independently bounded probes/waits retain their normal limits.
     const r = spawnSync(node ? process.execPath : '/bin/bash', [script], {
       cwd: tmp, env: { ...env, RES_TEST_ROOT: tmp, RES_SOURCE: res },
-      encoding: 'utf8', timeout, maxBuffer: 8 * 2 ** 20 });
+      encoding: 'utf8', timeout: process.env.RES_TEST_NO_WATCHDOG === '1' ? undefined : timeout, maxBuffer: 8 * 2 ** 20 });
     const output = `${r.stdout ?? ''}${r.stderr ?? ''}`;
     fs.writeFileSync(path.join(tmp, suite.replaceAll('/', '-') + '.log'), output, { mode: 0o600 });
     if (r.status !== 0 || r.error) throw Error(`${suite}: exit=${r.status}; ${r.error?.message ?? ''}\n${output.slice(-8000)}\nFixtures: ${tmp}`);
