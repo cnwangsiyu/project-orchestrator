@@ -1,8 +1,8 @@
 # Global Rules
-version: 2026-11-17.1
+version: 2026-11-17.2
 
 ## Changes In This Version
-- 2026-11-17.1: the launcher masks secret-like values in the task log, --out and the Codex rollout automatically at every turn end (counts arrive as an info note); keep secret values out of output when reading ANY file (config, generated tool dirs, source code, diffs). 2026-11-16.13: bare note/ask use the runtime thread id, never guess by cwd.
+- 2026-11-17.2: record a personal-quota OK the user actually gave with `node scripts/approval.mjs add --account <acct> --ref "<user words/relay ref>" --until <ISO> -- <same route.mjs args>`, then route with the printed `--user-ok <id>`; never hand-edit route-approvals.json (`approval.mjs list|revoke`). 2026-11-17.1: automatic turn-end secret masking; mask secrets when reading any file.
 - Day 3 (2026-11-15.4): worker mid-turn note/ask/reply through the owner inbox, distinct --out deliverables, omit absent landing gates; quality first across company accounts, free TRAE first for the chosen model including browser; company max ungated; explicit A–D review classes, two-round scope cap, per-project targets/yield; runnable authorized work never auto-parks; failed public state reads retain last-good ages; the resident signing worker is retired; ordinary routed signing workers replace it; workers never delegate or request model changes; dependency installation needs no question. Resource, cancellation, credential, device and signing safeguards remain.
 
 ## Orchestrator Rules
