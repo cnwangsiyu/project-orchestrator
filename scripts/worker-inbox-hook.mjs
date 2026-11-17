@@ -6,6 +6,8 @@ import { orchestrator } from './lib/hook-context.mjs';
 import { validRulesSession, readSeen, withRulesDelivery, hookOutput, cleanupRulesDelivery } from './lib/rules-delivery.mjs';
 import { validOwner, readInboxAsync, deliverAsync, hasWatcherAsync, eventLine, followerAlive } from './lib/worker-events.mjs';
 import { captureStopTasks, stopBackgroundState } from './lib/worker-background.mjs';
+import { deliverAnswers, answerLine } from './lib/user-queue.mjs';
+import { projectForOwner } from './lib/task-board.mjs';
 
 process.on('uncaughtException', () => process.exit(0));
 process.on('unhandledRejection', () => process.exit(0));
@@ -43,6 +45,13 @@ try {
         : { decision: 'block', reason });
       if (rules) rules.delivered = true;
     };
+    const outputWithAnswers = async (reason, onlyAnswers = false) => {
+      let printed = false;
+      await deliverAnswers({ owner, project: process.env.ORCHESTRATOR_PROJECT, projectOfOwner: () => projectForOwner(owner),
+        print: async items => { await output([reason, items.map(answerLine).join('\n'), rules?.reason].filter(Boolean).join('\n\n')); printed = true; } }).catch(() => {});
+      if (!printed && !onlyAnswers) { await output([reason, rules?.reason].filter(Boolean).join('\n\n')); printed = true; }
+      return printed;
+    };
     let visible = false;
     const delivery = await deliverAsync(owner, async (rows) => {
       rows = rows.filter((row) => !background.suppressed.has(row.id));
@@ -51,9 +60,10 @@ try {
       const reason = rows.map((row) => ['message', 'question', 'answered'].includes(row.event) ? eventLine(row)
         : `worker ${eventLine({ ...row, name: String(row.name ?? row.thread ?? '-').slice(0, 120), outFile: '' }, '').replaceAll('\t', ' ').trim()}: read ${JSON.stringify(String(row.outFile ?? row.logFile ?? 'the worker log').slice(0, 500))} and act`).join('\n')
         + '\nAnswer open questions promptly with codex-worker reply; after its timeout the worker proceeds with its stated default (or ends BLOCKED without one). Handle finished workers first; use codex-worker watch as a run_in_background task for asks/risk notes; live tracked start/turn followers cover completion wakes.';
-      await output([reason, rules?.reason].filter(Boolean).join('\n\n'));
+      await outputWithAnswers(reason);
     }, 10);
     if (delivery.failed || visible) return;
+    if (await outputWithAnswers('', true)) return;
     if (rules) { await output(rules.reason); return; }
     const running = snapshot.running.filter((row) => !row.stale);
     const questions = snapshot.questions;

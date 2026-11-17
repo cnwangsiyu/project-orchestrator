@@ -26,7 +26,7 @@ circular work calls for reconsidering goal, constraints, design and scope. Propo
 fix early with evidence, cost and the patch alternative; keep safe independent work moving.
 
 <a id="judge-not-labour"></a>**Protect context: judge, don't labour** (user, 2026-11-05;
-reaffirmed 2026-11-11/13). Decide, plan, write briefs, answer workers, update the ledger and
+reaffirmed 2026-11-11/13). Decide, plan, write briefs, answer workers, update the board and decision history, and
 integrate verified branches. Quick targeted looks are fine; work taking more than two or three
 tool calls or returning more than a few KB belongs to a routed worker, including source edits,
 tests/builds, browser clicking, screenshots and device runs.
@@ -68,10 +68,16 @@ state a reasonable guess and proceed. One live orchestrator owns each project. I
 it, report that instead of taking over; redirect unrelated requests unless the user wants them
 here. Carry forward open tasks/resources/history from an older branch ledger.
 
-Only the orchestrator writes `~/.claude/orchestrator/<project>/ledger.md`; workers write task outputs.
-Record goal/constraints/decisions, dependencies/state, repo/area, worker, workspace/base/branch,
-integration target, holds and outcome before reporting. Startup/resume/compaction reconciles live
+Only the orchestrator writes `~/.claude/orchestrator/<project>/ledger.md`; keep resource maps,
+history and decisions there, not current task status. Current tasks live only in `board.json`:
+tools record worker facts automatically; orchestrators set next/blocker/deps/deadline and state
+judgement with `scripts/board.mjs`. Startup/resume/compaction reconciles live
 workers and reattaches followers without duplicates; [operations](references/worker-operations.md) has commands.
+
+**One status source, one user queue.** Read [task board](references/task-board.md) for schema,
+commands and migration. Use `scripts/status.mjs` instead of copied task ledgers or status-only
+model turns. Raise user decisions with `scripts/user-queue.mjs`; the secretary cards/answers them,
+and the existing session hook delivers answers once. The secretary keeps only its unique ledger items.
 
 Map resources lazily: checkouts/worktrees, owned and shared branches, MRs, documents, tickets,
 pipelines, devices, tools and skills. Delegate wide discovery. On every wake/patrol, cheaply
@@ -273,8 +279,8 @@ from normal package managers/registries install into task workspaces/user caches
 without a card (user, 2026-11-15). Login, secrets, production mutations, unapproved personal quota
 and system security boundaries remain.
 
-**The secretary is the single outlet for user cards** (2026-11-16) and answers status from tools/
-ledgers. Relay exact worker action/error/scope/evidence; after approval the worker retries. If it
+**The secretary is the single outlet for user cards** (2026-11-16) and answers current status from
+boards/status tools, not copied ledgers. Relay exact worker action/error/scope/evidence; after approval the worker retries. If it
 cannot, report BLOCKED/redesign, never hand non-secret work to the user or launder a denial. Where
 no secretary group exists, communicate directly. Prior explicit authorization avoids repeated asks.
 

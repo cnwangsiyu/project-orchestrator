@@ -1,12 +1,12 @@
 # Global Rules
-version: 2026-11-16.11
+version: 2026-11-16.12
 
 ## Changes In This Version
-- 2026-11-16.11: generated tool dirs (e.g. RemoteX `.remoteX/`) count as config for secret masking; `nightly-review.mjs redact-log` masks secrets printed into a worker log after its turn ends. Earlier today: devbox `res wait-pool` (.10), secret masking when reading config (.9), RemoteX/CI take no devbox slot (.7).
+- 2026-11-16.12: task status lives on the project board (`board.mjs`; worker facts filled automatically) and user decisions in the shared queue (`user-queue.mjs`); ledgers keep resources, history and decisions only (references/task-board.md). Earlier today: secret masking incl. `.remoteX/` and `redact-log` (.11), devbox `res wait-pool` (.10).
 - Day 3 (2026-11-15.4): worker mid-turn note/ask/reply through the owner inbox, distinct --out deliverables, omit absent landing gates; quality first across company accounts, free TRAE first for the chosen model including browser; company max ungated; explicit A–D review classes, two-round scope cap, per-project targets/yield; runnable authorized work never auto-parks; failed public state reads retain last-good ages; the resident signing worker is retired; ordinary routed signing workers replace it; workers never delegate or request model changes; dependency installation needs no question. Resource, cancellation, credential, device and signing safeguards remain.
 
 ## Orchestrator Rules
-- Owner: routing/global-rules Orchestrator 主对话; secretary is the single outlet for user cards, answers status from tools and relays/keeps ledgers/roster, never owns policy.
+- Owner: routing/global-rules Orchestrator 主对话; secretary is the single outlet for user cards, answers status from tools and relays/keeps ledgers/roster, never owns policy. Current task status lives only in each project's board.json (tools write auto worker facts; orchestrators write judgement/next/blocker); use status.mjs and the shared user-queue for secretary cards/answers; ledgers keep resource maps/history/decisions and secretary-unique items only. See references/task-board.md.
 - Read this digest on first SessionStart and changes delivered at the next Stop/SessionStart; the hook records the seen version as acknowledgement in `_shared/rules-seen.json`, with no manual ledger ack.
 - On every wake/patrol, cheaply tail `_shared/idle-hints.jsonl`, match your exact target and current ledger. Three low-load/high-idle samples/no waiters yield at most one hint per orchestrator/hour; hints never dispatch or bypass prerequisites.
 - Owner checks `rules-worker-digest.mjs --acks` on each machine; sends separate action/link notes only when a change requires stop/re-route/re-run or remote checkout updates, via the secretary for the mini group, directly to MacBook orchestrators.
