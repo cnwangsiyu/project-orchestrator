@@ -9,7 +9,7 @@ const root = path.join(process.env.RES_TEST_ROOT, 'pools');
 const state = path.join(root, 'state'), mocks = path.join(root, 'mocks');
 fs.mkdirSync(path.join(state, 'locks'), { recursive: true }); fs.mkdirSync(mocks, { recursive: true });
 const row = (id, kind = 'remote') => `${id}\t${kind}\topen\t-\tfixture\n`;
-fs.writeFileSync(path.join(state, 'resources.tsv'), ['devbox-cn-1', 'devbox-cn-2', 'devbox-cn-3', 'devbox-cn-4', 'devbox-cn-light'].map(id => row(id)).join('') + row('devbox-cn-6', 'checkout') + row('devbox-cn-special'));
+fs.writeFileSync(path.join(state, 'resources.tsv'), ['devbox-cn-1', 'devbox-cn-2', 'devbox-cn-3', 'devbox-cn-4', 'devbox-cn-light', 'devbox-cn-light-2'].map(id => row(id)).join('') + row('devbox-cn-6', 'checkout') + row('devbox-cn-special'));
 for (const command of ['adb', 'idevice_id', 'xcrun']) fs.writeFileSync(path.join(mocks, command), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
 // Any accidental heavy-check must fail, even though remote capacity is free.
 fs.writeFileSync(path.join(mocks, 'uname'), '#!/bin/sh\nexit 99\n', { mode: 0o755 });
@@ -71,6 +71,9 @@ try {
   const lightExcluded = acquire('excluded'); eq(lightExcluded.code, 2, lightExcluded.text); eq(waiters(), []);
   eq(locks(), ['devbox-cn-1.d', 'devbox-cn-2.d', 'devbox-cn-3.d', 'devbox-cn-4.d']);
   const light = acquire('light', 'devbox-cn-light'); eq(light.code, 0); ok(light.text.includes('slot=devbox-cn-light')); release('devbox-cn-light', 'light');
+  const lightA = acquire('light-a', 'devbox-cn-light'); eq(lightA.code, 0); ok(/slot=devbox-cn-light\n/.test(lightA.text + '\n'));
+  const lightB = acquire('light-b', 'devbox-cn-light'); eq(lightB.code, 0, lightB.text); ok(lightB.text.includes('slot=devbox-cn-light-2'));
+  release('devbox-cn-light-2', 'light-b'); release('devbox-cn-light', 'light-a');
 
   const firstMark = path.join(root, 'first'), secondMark = path.join(root, 'second'), retryMark = path.join(root, 'retry');
   const first = start('first', { PAUSE_MARK: firstMark }); await until(() => fs.existsSync(firstMark), first);
