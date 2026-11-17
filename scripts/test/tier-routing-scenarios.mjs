@@ -8,6 +8,8 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { noteFailure } from '../lib/trae-health.mjs';
+// Legacy expectations predate the standing personal-fallback policy; personal-fallback-scenarios covers it.
+if (!process.env.PERSONAL_FALLBACK_FILE) { const f = (await import('node:path')).join((await import('node:os')).tmpdir(), `pf-off-${process.pid}.json`); (await import('node:fs')).writeFileSync(f, '{"enabled":false}'); process.env.PERSONAL_FALLBACK_FILE = f; }
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tier-routing-'));

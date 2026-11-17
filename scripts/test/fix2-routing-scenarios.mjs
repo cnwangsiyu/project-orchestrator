@@ -5,6 +5,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {execFileSync} from 'node:child_process';
+// Legacy expectations predate the standing personal-fallback policy; personal-fallback-scenarios covers it.
+if (!process.env.PERSONAL_FALLBACK_FILE) { const f = (await import('node:path')).join((await import('node:os')).tmpdir(), `pf-off-${process.pid}.json`); (await import('node:fs')).writeFileSync(f, '{"enabled":false}'); process.env.PERSONAL_FALLBACK_FILE = f; }
 const route=new URL('../route.mjs',import.meta.url).pathname;
 const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'route-fix2-'));
 const now=1800000000000,h=3600000,SOL='gpt-6.1-sol',ASTRA='gpt-6-astra';
