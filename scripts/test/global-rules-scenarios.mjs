@@ -24,7 +24,7 @@ try {
   assert.equal(digestText.match(/^version:/gm)?.length, 1, 'integration must publish one digest version');
   assert.equal(digestText.match(/^## Changes In This Version$/gm)?.length, 1);
   assert.ok(digestText.split('\n').length<=61,'digest line budget');
-  assert.equal(digest.version, '2026-11-16.6');
+  assert.equal(digest.version, '2026-11-16.7');
   assert.match(digest.worker, /Mid-turn talkback:.*ask --default.*never routine progress/);
   assert.equal(digestText.match(/^- Day 3 /gm)?.length,1);
   assert.match(digestText,/quality first across company accounts/);
