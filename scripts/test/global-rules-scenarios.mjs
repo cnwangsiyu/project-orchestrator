@@ -24,7 +24,7 @@ try {
   assert.equal(digestText.match(/^version:/gm)?.length, 1, 'integration must publish one digest version');
   assert.equal(digestText.match(/^## Changes In This Version$/gm)?.length, 1);
   assert.ok(digestText.split('\n').length<=61,'digest line budget');
-  assert.equal(digest.version, '2026-11-17.2');
+  assert.equal(digest.version, '2026-11-17.3');
   assert.match(digest.worker, /Mid-turn talkback:.*ask --default.*never routine progress/);
   assert.match(digest.worker, /Identity uses explicit flags, CODEX_WORKER_\*, runtime CODEX_THREAD_ID\/TRAECLI_THREAD_ID or exactly one running public context matching cwd; ambiguity exits 2/);
   assert.match(digest.worker, /bare note\/ask use runtime CODEX_THREAD_ID or TRAECLI_THREAD_ID/);
