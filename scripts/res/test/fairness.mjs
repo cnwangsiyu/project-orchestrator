@@ -190,6 +190,19 @@ try {
   await until(() => fs.existsSync(lock('heavy-build')) && field('heavy-build', 'by') === 'second', 'FIFO second did not acquire', second);
   eq((await second.done).code, 0); releaseBuild('second'); release('heavy-lane-2', 'fifo-2'); eq(waiters(), []);
 
+  // A live waiter whose record was swept (slow pass > heartbeat) re-publishes with its original order.
+  take('heavy-lane-1', 'rejoin-1'); take('heavy-lane-2', 'rejoin-2');
+  const rejoining = start(['wait-build', ...argv('rejoin'), '--timeout', '1']);
+  await until(() => waiters().length === 1 && rejoining.text.includes('retry in'), 'rejoin waiter missing', rejoining);
+  const swept = waiters()[0], order = waiterField(swept, 'order');
+  fs.rmSync(path.join(state, 'build-waiters', swept), { recursive: true, force: true });
+  await until(() => waiters().length === 1, 'swept waiter did not re-publish', rejoining);
+  eq(waiters()[0], swept); eq(waiterField(waiters()[0], 'order'), order);
+  await until(() => fs.readFileSync(path.join(state, 'log.tsv'), 'utf8').includes('\twaiter-rejoin\theavy-build\t'),
+    'waiter-rejoin not logged', rejoining);
+  eq((await stop(rejoining, 'SIGTERM')).code, 143); eq(waiters(), []);
+  release('heavy-lane-1', 'rejoin-1'); release('heavy-lane-2', 'rejoin-2');
+
   // INT, TERM and timeout all remove the published record.
   take('heavy-lane-1', 'signals-1'); take('heavy-lane-2', 'signals-2');
   for (const [signal, code] of [['SIGINT', 130], ['SIGTERM', 143]]) {

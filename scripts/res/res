@@ -570,8 +570,22 @@ start_build_waiter() {
 }
 
 update_build_waiter() {
-  local blocked="$1" lane3="$2"
-  [ -n "${BUILD_WAITER_DIR:-}" ] && [ -d "$BUILD_WAITER_DIR" ] || return 0
+  local blocked="$1" lane3="$2" staging published
+  [ -n "${BUILD_WAITER_DIR:-}" ] || return 0
+  if [ ! -d "$BUILD_WAITER_DIR" ]; then
+    # A slow loop pass (heavy-check under load) can outlive the heartbeat, and
+    # another res call then removes this live waiter. Re-publish it with the
+    # original order so it keeps its FIFO position instead of being orphaned.
+    published="$BUILD_WAITER_DIR"; staging="$(dirname "$published")/.staging.rejoin.$$"
+    rm -rf "$staging"; mkdir -p "$staging" || return 0
+    BUILD_WAITER_STAGING="$staging"; BUILD_WAITER_DIR="$staging"
+    write_build_waiter "$blocked" "$lane3"
+    BUILD_WAITER_DIR="$published"
+    if ! mv "$staging" "$published" 2>/dev/null; then rm -rf "$staging"; BUILD_WAITER_STAGING=; return 0; fi
+    BUILD_WAITER_STAGING=
+    log waiter-rejoin "${WAITER_RESOURCE:-heavy-build}" "$BY ($PROJECT${TASK:+/$TASK})" "pid=$PID"
+    return 0
+  fi
   write_build_waiter "$blocked" "$lane3"
 }
 
@@ -1011,6 +1025,8 @@ cmd_acquire() {
   fi
   while :; do
     rc=0
+    # Refresh (or re-publish) before heavy-check, which can be slow under load.
+    [ "$blocking" = 0 ] || update_build_waiter "${block_reason:-starting}" "${lane3_state:-CLOSED}"
     if reading=$(cmd_heavy_check --pid "$PID"); then
       printf '%s\n' "$reading"
       lane3_state=CLOSED; lane3_open "$reading" && lane3_state=OPEN
