@@ -12,6 +12,17 @@ import { loadDigest } from './lib/global-rules.mjs';
 import { launcherIdentity, validOwner } from './lib/worker-events.mjs';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+if (process.argv[2] === 'void') {
+  // Void a route decision that was never launched, so it does not count (e.g. as a review round).
+  const routeId = process.argv[3], i = process.argv.indexOf('--reason'), why = i > 0 ? process.argv[i + 1] : '';
+  if (!/^route:[0-9a-f]{8,}$/.test(routeId ?? '') || !why) { console.error('usage: route.mjs void <route:id> --reason "<why it was never launched>"'); process.exit(2); }
+  const shared = process.env.RULES_SHARED || path.join(process.env.HOME, '.claude/orchestrator/_shared');
+  const log = process.env.ROUTE_LOG_FILE || path.join(shared, 'route-log.jsonl');
+  const known = fs.readFileSync(log, 'utf8').split('\n').some((l) => l.includes(`"routeId":"${routeId}"`));
+  if (!known) { console.error(`route: unknown ${routeId}`); process.exit(1); }
+  fs.appendFileSync(log, JSON.stringify({ kind: 'void', routeId, reason: why, t: Date.now() }) + '\n');
+  console.log(`voided ${routeId}`); process.exit(0);
+}
 try {
   const task = parseTaskSpec(process.argv.slice(2), taskContext());
   if (task.kind === 'table') {

@@ -323,6 +323,8 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
     }
   };
   accounts.forEach((a)=>add(a)); add({},true);
+  // A route decision that was never launched can be voided by appending {kind:'void',routeId,reason} (route.mjs void).
+  const voidedRoutes=new Set(rows.filter((r)=>r.kind==='void'&&typeof r.routeId==='string').map((r)=>r.routeId));
   const snapshot = createSnapshot({ schemaVersion:VERSION, collectedFrom, collectedThrough:now, decisionAt:now, accounts:normalized, models:[...models.values()], lanes, health,
     qualityRelations:['gpt-6-luna','gpt-6.1-terra','gpt-5.6-terra','gpt-5.5','gpt-5.6-sol'].flatMap((from)=>['low','medium','high','xhigh','max'].flatMap((e,i,efforts)=>
       efforts.slice(i).map((to)=>({from:`${from}:${e}`,to:`gpt-6.1-sol:${to}`,version:VERSION,evidenceId:'policy-light-to-sol'})))),
@@ -330,7 +332,7 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
       signingRegistry:fs.existsSync(path.join(shared,'user-signing/registry.json'))&&fs.existsSync(path.join(shared,'user-signing/identities.json')) },
     dependencies:[], approvals: array(read(env.ROUTE_APPROVAL_FILE || path.join(shared,'route-approvals.json'),[])),
     personalFallback, projectProfiles, reviewHistory:rows.filter((r)=>
-      (r.kind==='route'||!r.kind)&&r.pick&&r.executable!==false&&!r.deferred&&(r.executable===true||!r.needsOK?.length))
+      !voidedRoutes.has(r.routeId)&&(r.kind==='route'||!r.kind)&&r.pick&&r.executable!==false&&!r.deferred&&(r.executable===true||!r.needsOK?.length))
       .flatMap((r)=>[r,...(r.second&&r.secondExecutable!==false?[{...r,category:'second-opinion',role:'second'}]:[])]),
     outcomes:outcomes.map((r)=>({...r,modelId:r.actual?.[0]?.model??r.first?.model})),
     etaHistory:outcomes.map((r)=>({attemptId:`${r.name}-${r.t}`,category:r.category,modelId:r.actual?.[0]?.model??r.first?.model,
