@@ -1,0 +1,9 @@
+heavy-lane-1	slot	open	-	fixture
+heavy-lane-2	slot	open	-	fixture
+heavy-lane-3	slot	open	-	fixture
+devbox-cn-1	remote	open	-	fixture
+devbox-cn-2	remote	open	-	fixture
+devbox-cn-3	remote	open	-	fixture
+devbox-cn-4	remote	open	-	fixture
+devbox-cn-light	remote	open	-	fixture
+devbox-cn-6	checkout	open	-	not remote

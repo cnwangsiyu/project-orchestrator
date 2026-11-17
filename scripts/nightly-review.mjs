@@ -27,6 +27,7 @@ const probeMs = setting('NIGHTLY_PROBE_MS', 15000, 100);
 const resultRetries = setting('NIGHTLY_RESULT_RETRIES', 3, 1);
 const livenessRetries = setting('NIGHTLY_LIVENESS_RETRIES', 3, 1);
 const read = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return null; } };
+const readText = (f) => { try { return fs.readFileSync(f, 'utf8'); } catch { return null; } };
 const nonempty = (f) => { try { return fs.statSync(f).size > 0; } catch { return false; } };
 const atomic = (f, o) => {
   fs.mkdirSync(path.dirname(f), { recursive: true });
@@ -299,6 +300,12 @@ async function gather() {
     }
   }
   await command('claude', ['agents', '--json'], { file: path.join(d, 'agents.json'), errFile: path.join(d, 'agents.err'), budgetMs: probeMs });
+  // Freeze the full log so pre-window takes and queue starts can be paired.
+  for (const name of ['log.tsv', 'resources.tsv']) {
+    const text = readText(path.join(process.env.RULES_SHARED || path.dirname(dir), name));
+    if (text != null) fs.writeFileSync(path.join(d, name), text);
+    else fs.writeFileSync(path.join(d, `${name}.err`), 'UNKNOWN: resource history unavailable\n');
+  }
   let roster = ''; try { roster = fs.readFileSync(path.join(process.env.RULES_SHARED || path.dirname(dir), 'orchestrators.txt'), 'utf8'); } catch {}
   fs.writeFileSync(path.join(d, 'roster.txt'), roster);
   update('gather', 'done', '路由和只读资源证据已采集；失败或缺失采样为 UNKNOWN');
@@ -310,9 +317,11 @@ function compute(data) {
   const result = computeNightly({ day, review: read(path.join(data, 'review-data-24h.json')),
     resources: read(path.join(data, 'resource-review-24h.json')),
     usage: read(path.join(data, 'orch-usage-24h.json')),
+    resourceLog: readText(path.join(data, 'log.tsv')), resourceRegistry: readText(path.join(data, 'resources.tsv')),
     now: read(path.join(data, 'review-data-24h.json'))?.collectedAt ?? Date.now(),
     previousUnknownClasses: read(path.join(dir, `${localDay(previousDay)}.metrics.json`))?.unknownClasses ?? [],
     evidence: { review: path.join(data, 'review-data-24h.json'), resources: path.join(data, 'resource-review-24h.json'),
+      resourceLog: path.join(data, 'log.tsv'), resourceRegistry: path.join(data, 'resources.tsv'),
       weekly: path.join(data, 'review-data-168h.json'), usage: path.join(data, 'orch-usage-24h.json'), resourceHistory: path.join(data, 'resource-review-96h.json') } });
   atomic(path.join(attemptDir, 'metrics.json'), result);
   atomic(path.join(dir, `${day}.metrics.json`), result);
@@ -466,7 +475,7 @@ async function finish() {
   fs.writeFileSync(path.join(dir, `${day}.md`), report);
   const notify = result.needsModel && mode !== 'dry' ? read(path.join(attemptDir, 'notify.json')) : { actions: [], decisions: [] };
   atomic(path.join(dir, `${day}.notify.json`), notify);
-  if (mode === 'dry' || !result.needsModel) {
+  if (mode === 'dry' || !result.findings.length) {
     atomic(path.join(attemptDir, 'delivery.json'), { delivery: 'sent', sent: [], note: 'script-only/dry report; no messages' });
     update('finish', 'done', '脚本表格已交付；无通知或 finisher'); return 0;
   }
@@ -503,7 +512,7 @@ async function review() {
   if (mode === 'plan') {
     process.env.ROUTE_LOG = '0';
     log(`plan: review ${JSON.stringify(await route('analysis', ['--stakes', 'high']))}`);
-    log('plan: model only for triggered findings or Monday; direct inbox delivery, secretary relay only if needed'); return 0;
+    log('plan: model only for model-requiring findings or Monday; script-only imbalance advice goes directly to inbox, secretary relay only if needed'); return 0;
   }
   fs.mkdirSync(runDir, { recursive: true });
   const lock = path.join(runDir, 'launcher.lock');
@@ -606,10 +615,15 @@ async function review() {
   } finally {
     clearTimeout(timer); clearInterval(progressTimer);
     if (mode !== 'dry' && attemptDir && ['failed', 'blocked'].includes(status?.state)) {
-      try {
-        await deliverStatus(path.join(attemptDir, 'failure-status.json'), statusMessage(status),
-          `routing-nightly-review-${day}-attempt-${status.attempt}-failure`);
-      } catch (e) { log(`failure notification blocked: ${e.message}`); }
+      const result = read(path.join(attemptDir, 'metrics.json'));
+      if (result && !result.needsModel && result.findings.some(f => f.scriptOnly)) {
+        log('script-only finding delivery blocked; retain status/report without a model relay');
+      } else {
+        try {
+          await deliverStatus(path.join(attemptDir, 'failure-status.json'), statusMessage(status),
+            `routing-nightly-review-${day}-attempt-${status.attempt}-failure`);
+        } catch (e) { log(`failure notification blocked: ${e.message}`); }
+      }
     }
     log(`final: ${status?.stage || 'gather'}/${status?.state || 'blocked'}; report=${attemptDir ? nonempty(path.join(attemptDir, 'published-report.md')) || reportReady() : false}`);
     fs.rmSync(lock, { recursive: true });

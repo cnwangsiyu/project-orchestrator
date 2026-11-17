@@ -1,0 +1,20 @@
+2026-11-16T10:00:00Z	take	heavy-lane-1	v (video-agent/build)	fixture
+2026-11-16T11:00:00Z	waiter-start	heavy-lane-any	old (video-agent/old)	pid=1
+2026-11-16T11:20:00Z	waiter-acquire	heavy-lane-any	old (video-agent/old)	lane=heavy-lane-1
+2026-11-16T11:40:00Z	waiter-start	heavy-lane-any	cross (video-agent/cross)	pid=2
+2026-11-16T12:00:00Z	take	devbox-cn-1	d (video-agent/remote)	fixture
+2026-11-16T12:00:00Z	take	devbox-cn-light	light (routing/check)	fixture
+2026-11-16T12:20:00Z	waiter-acquire	heavy-lane-any	cross (video-agent/cross)	lane=heavy-lane-1
+2026-11-16T13:00:00Z	waiter-start	heavy-lane-any	v (video-agent/build)	pid=1
+2026-11-16T13:05:00Z	waiter-rejoin	heavy-lane-any	v (video-agent/build)	pid=1
+2026-11-16T13:20:00Z	waiter-acquire	heavy-lane-any	v (video-agent/build)	lane=heavy-lane-1
+2026-11-16T14:00:00Z	waiter-start	heavy-lane-any	v (video-agent/build)	pid=1
+2026-11-16T14:02:00Z	waiter-acquire	heavy-lane-any	v (video-agent/build)	lane=heavy-lane-1
+2026-11-16T15:00:00Z	waiter-start	heavy-lane-any	timeout (routing/timed)	pid=3
+2026-11-16T16:00:00Z	waiter-timeout	heavy-lane-any	timeout (routing/timed)	after 60 minutes
+2026-11-16T17:00:00Z	waiter-start	devbox-cn-any	d (video-agent/remote)	pid=4
+2026-11-16T17:04:00Z	waiter-acquire	devbox-cn-any	d (video-agent/remote)	slot=devbox-cn-1
+2026-11-16T18:00:00Z	return	devbox-cn-1	d	fixture
+2026-11-16T18:00:00Z	take	heavy-lane-2	r (routing/test)	fixture
+2026-11-17T00:00:00Z	return	heavy-lane-1	v	fixture
+2026-11-17T13:00:00Z	return	heavy-lane-2	r	future evidence ignored

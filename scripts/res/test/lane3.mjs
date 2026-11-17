@@ -287,7 +287,11 @@ eq(failedGate.status, 1); ok(!failedGate.stderr.includes('continuing bounded wai
 eq(fs.existsSync(path.join(rollout, 'locks/heavy-build.d')), false);
 for (const id of ['heavy-lane-1', 'heavy-lane-2'])
   eq(run(['return', id, '--by', 'rollout-owner'], { RES_DIR: rollout }).code, 0);
-eq(run(['--help']).text, run(['--help'], {}, baseline).text);
+const currentHelp = run(['--help']).text;
+ok(currentHelp.includes('res wait-pool <prefix>'));
+// Permit only the new command block; all existing v1.2 help stays byte-identical.
+const withoutPoolHelp = text => text.replace(/^res wait-pool[^\n]*\n(?: +[^\n]*\n){3}/gm, '');
+eq(withoutPoolHelp(currentHelp), run(['--help'], {}, baseline).text);
 const transcript = async (script, name) => {
   const dir = path.join(root, name); fs.mkdirSync(dir);
   fs.writeFileSync(path.join(dir, 'resources.tsv'), registry);
@@ -312,7 +316,7 @@ const legacyHeld = before.output.match(/^res: 'checkout' is held by owner \(scra
 ok(legacyHeld, 'legacy held-checkout diagnostic missing');
 const holderPrefix = `res: 'checkout' is held by owner (pid=${process.pid}, since=${legacyHeld[1]}) (scratch), until `;
 ok(after.output.includes(holderPrefix), 'v1.7 held-checkout identity differs');
-eq(after.output.replace(holderPrefix, legacyHeld[0]), before.output);
+eq(withoutPoolHelp(after.output.replace(holderPrefix, legacyHeld[0])), before.output);
 for (const file of ['resources.tsv', 'log.tsv', 'notes/checkout.md'])
   eq(fs.readFileSync(path.join(after.dir, file), 'utf8'), fs.readFileSync(path.join(before.dir, file), 'utf8'));
 fs.writeFileSync(path.join(root, 'compatibility.diff'), '');
@@ -374,7 +378,8 @@ eq(install([], { INSTALL_TEST_PS: '123 /bin/bash /scratch/res wait iphone11 --ti
 for (const argv of ['env FOO=bar /scratch/res wait iphone11', 'nohup res wait heavy-build',
   "zsh -c '/scratch/res wait heavy-lane-3'", 'zsh -c \'exec env FOO=bar "/scratch/res" wait heavy-build\'',
   '/safe/project/scripts/res/res wait heavy-build', 'nohup res wait-build --timeout 1',
-  'env FOO=bar /scratch/res wait-lane --timeout 1'])
+  'env FOO=bar /scratch/res wait-lane --timeout 1',
+  'env FOO=bar /scratch/res wait-pool devbox-cn --timeout 1'])
   eq(install([], { INSTALL_TEST_PS: `123 ${argv}` }).code, 2, argv);
 eq(install([], { INSTALL_PS_EXIT: '1' }).code, 2);
 eq(install([], { INSTALL_TEST_EXIT: '1' }).code, 1);

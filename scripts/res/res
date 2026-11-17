@@ -16,6 +16,7 @@ LOG="$RES_DIR/log.tsv"
 NOTES="$RES_DIR/notes"
 WAITERS="$RES_DIR/build-waiters"
 LANE_WAITERS="$RES_DIR/lane-waiters"
+POOL_WAITERS="$RES_DIR/pool-waiters"
 WAITER_STALE_SECONDS=45
 
 usage() {
@@ -25,6 +26,10 @@ res take <id> --by <session> --project <slug> --for "<purpose>" [--task <id>] [-
 res wait <id> --by <session> --project <slug> --for "<purpose>" --timeout <minutes> [take options]
                                       retry held resources; heavy-* waits also enforce the gate
                                       --pid names the long-lived holder (default: caller PID)
+res wait-pool <prefix> --by <session> --project <slug> --for "<purpose>" --timeout <minutes> [take options]
+                                      FIFO wait for any remote <prefix>-<number>; prints slot=<id>
+                                      devbox-cn excludes light; devbox-cn-light selects only light
+                                      no mini locks or heavy-check; return the printed slot
 res heavy-check [--pid <pid>]         print lane-aware load limit and available memory; 5 if overloaded
 res extend <id> --by <session> --until <when>
 res return <id> --by <session> [--note "<text>"]
@@ -540,6 +545,32 @@ lane_waiter_blocks() {
   return 0
 }
 
+# Registry-driven remote pools never participate in the local heavy gate.
+pool_ids() {
+  awk -F'\t' -v pool="$1" '
+    $2 != "remote" { next }
+    pool ~ /-light$/ { if ($1 == pool) print $1; next }
+    index($1, pool "-") == 1 && substr($1, length(pool) + 2) ~ /^[0-9]+$/ { print $1 }
+  ' "$REG" | LC_ALL=C sort -u
+}
+
+pool_waiter_blocks() {
+  local candidate="$1" pool oldest root
+  case "$candidate" in
+    *-light) pool="$candidate" ;;
+    *-[0-9]*) pool="${candidate%-*}"; [[ "${candidate##*-}" =~ ^[0-9]+$ ]] || return 1 ;;
+    *) return 1 ;;
+  esac
+  root="$POOL_WAITERS/$pool"
+  [ -d "$root" ] || return 1
+  [ "$(reg_line "$candidate" | cut -f2)" = remote ] || return 1
+  oldest=$(oldest_build_waiter "$root")
+  [ -n "$oldest" ] || return 1
+  [ "${BUILD_WAITER_DIR:-}" != "$oldest" ] || return 1
+  RESERVED_MESSAGE="reserved for waiting pool $(waiter_field "$oldest" holder) (FIFO); retry or use wait-pool $pool"
+  return 0
+}
+
 write_build_waiter() {
   local blocked="$1" lane3="$2" tmp="$BUILD_WAITER_DIR/info.$$"
   printf 'holder\t%s\nproject\t%s\ntask\t%s\npid\t%s\nhost\t%s\nsince\t%s\nstart\t%s\norder\t%s\nheartbeat\t%s\nblocked\t%s\ngate_streak\t%s\nlane\t%s\nlane3\t%s\n' \
@@ -964,9 +995,11 @@ acquire_attempt() {
     else check_holder_after_take "$candidate"; fi
   fi
   if [ "$mode" = build ]; then printf 'build-lane=%s\n' "$candidate"
+  elif [ "$mode" = pool ]; then printf 'slot=%s\n' "$candidate"
   else printf 'lane=%s\n' "$candidate"; fi
   TRANSACTION_COMMITTED=1
-  finish_build_waiter acquire "lane=$candidate"
+  if [ "$mode" = pool ]; then finish_build_waiter acquire "slot=$candidate"
+  else finish_build_waiter acquire "lane=$candidate"; fi
   trap - EXIT
   exit 0
 }
@@ -1070,6 +1103,70 @@ cmd_acquire() {
   done
 }
 
+cmd_wait_pool() {
+  if [ "${1:-}" = --help ]; then usage; return 0; fi
+  local pool="${1:-}"; shift || true
+  pool="${pool%-}"
+  [[ "$pool" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || die "wait-pool needs a resource prefix (for example devbox-cn)"
+  local timeout= timeout_seen= args=() ALLOW_PID=1 pin= ACQUIRE_PID_EXPLICIT
+  local duration deadline remaining delay=1 candidate rc ids
+  local BUILD_WAITER_DIR= BUILD_WAITER_STAGING= BUILD_WAITER_HOST= BUILD_WAITER_SINCE= BUILD_WAITER_START=
+  local BUILD_WAITER_ORDER= BUILD_WAITER_GATE_STREAK=0
+  local WAITER_ROOT="$POOL_WAITERS/$pool" WAITER_RESOURCE="$pool-any"
+  case "$pool" in *-light) WAITER_RESOURCE="$pool" ;; esac
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --timeout)
+        [ $# -ge 2 ] || die "--timeout needs minutes"
+        [ -z "$timeout_seen" ] || die "duplicate --timeout"
+        timeout="$2"; timeout_seen=1; shift 2 ;;
+      --by|--project|--for|--task|--until|--pid)
+        [ $# -ge 2 ] || die "$1 needs a value"
+        args+=("$1" "$2"); shift 2 ;;
+      --force) args+=("$1"); shift ;;
+      *) die "unknown option '$1'" ;;
+    esac
+  done
+  [[ "$timeout" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "wait-pool needs --timeout <non-negative minutes>"
+  parse ${args[@]+"${args[@]}"}; validate_pid
+  ACQUIRE_PID_EXPLICIT="$PID_EXPLICIT"
+  [ -n "$BY" ] && [ -n "$PROJECT" ] && [ -n "$PURPOSE" ] || die "wait-pool needs --by, --project and --for"
+  ids=$(pool_ids "$pool")
+  [ -n "$ids" ] || die "no remote resources in pool '$pool'"
+  for candidate in $ids; do
+    if [ "$(field "$candidate" by)" = "$BY" ] && [ "$(field "$candidate" pid)" = "$PID" ] && \
+      [ "$(field "$candidate" host)" = "$(local_host)" ]; then
+      printf 'slot=%s\n' "$candidate"; return 0
+    fi
+  done
+  duration=$(awk -v t="$timeout" 'BEGIN {s=t*60; printf "%.0f\n", int(s)+(s>int(s))}')
+  deadline=$((SECONDS + duration))
+  start_build_waiter
+  while :; do
+    update_build_waiter slot CLOSED
+    if [ "$BUILD_WAITER_DIR" = "$(oldest_build_waiter "$WAITER_ROOT")" ]; then
+      # Refresh membership on every retry, including newly registered capacity.
+      ids=$(pool_ids "$pool")
+      for candidate in $ids; do
+        [ ! -d "$LOCKS/$candidate.d" ] || continue
+        if acquire_attempt pool "$candidate"; then return 0; else rc=$?; fi
+        [ "$rc" -eq 2 ] || return "$rc"
+      done
+    else
+      update_build_waiter FIFO CLOSED
+    fi
+    remaining=$((deadline - SECONDS))
+    if [ "$remaining" -le 0 ]; then
+      finish_build_waiter timeout "after $timeout minutes"
+      echo "res: timed out waiting for pool '$pool' after $timeout minutes" >&2; return 2
+    fi
+    [ "$delay" -le "$remaining" ] || delay="$remaining"
+    echo "res: waiting for pool '$pool' (FIFO); retry in ${delay}s" >&2
+    sleep "$delay"
+    delay=$((delay * 2)); [ "$delay" -le 15 ] || delay=15
+  done
+}
+
 cmd_return_build() {
   local ALLOW_PID=1 id owner selected_pid options=(); parse "$@"
   [ -n "$BY" ] || die "return-build needs --by"
@@ -1157,6 +1254,11 @@ cmd_status() {
   rm -f "$t" "$t.pids"
   if [ -z "${1:-}" ] || [ "${1:-}" = heavy-build ]; then show_build_waiters; fi
   case "${1:-}" in ''|heavy-*) show_build_waiters "$LANE_WAITERS" lanes ;; esac
+  local pool_root
+  for pool_root in "$POOL_WAITERS"/*; do
+    [ -d "$pool_root" ] || continue
+    case "${1:-}" in ''|"${pool_root##*/}"|"${pool_root##*/}"-*) show_build_waiters "$pool_root" "pool ${pool_root##*/}" ;; esac
+  done
   [ -z "${1:-}" ] || show_notes "$1"
 }
 
@@ -1227,7 +1329,8 @@ cmd_take() {
     local RESERVED_MESSAGE=
     if lane_reserved_for_waiter "$id"; then
       RESERVED_MESSAGE="reserved for waiting build $RESERVED_WAITER_HOLDER; retry or use wait-lane"
-    elif lane_waiter_blocks "$id"; then :; fi
+    elif lane_waiter_blocks "$id"; then :
+    elif pool_waiter_blocks "$id"; then :; fi
     if [ -n "$RESERVED_MESSAGE" ]; then
       echo "res: '$id': $RESERVED_MESSAGE" >&2
       if [ "${TAKE_TRANSACTION:-0}" = 1 ]; then
@@ -1319,6 +1422,7 @@ case "${1:-}" in
     else cmd_acquire build 0 "$@"; fi ;;
   wait-build) shift; cmd_acquire build 1 "$@" ;;
   wait-lane) shift; cmd_acquire lane 1 "$@" ;;
+  wait-pool) shift; cmd_wait_pool "$@" ;;
   return-build) shift; cmd_return_build "$@" ;;
   heavy-check) shift; cmd_heavy_check "$@" ;;
   extend) shift; cmd_extend "$@" ;;
