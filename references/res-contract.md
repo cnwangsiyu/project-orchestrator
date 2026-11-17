@@ -37,7 +37,7 @@ Resources in `res` (~/.claude/orchestrator/_shared/res):
 Definitions:
 - Full-package build = a full iOS or Android SDK+host-app build: an env verify run (preflight, stage, compile, acceptance), an xcodebuild of the app, a Gradle assemble with native compile. Needs `heavy-build` AND one lane, held for the whole run.
 - Heavy task = full-package build, SG packaging, a heavy focused test that compiles native code or runs many processes for a sustained period. Needs one lane.
-- Remote dev machines (user 2026-11-16, "开发机上不占用 mini 的资源"): a step that executes ON a devbox (render/export, Docker image build, SG image checks, slow suites) is NOT a mini heavy task: it never takes `heavy-build`, a `heavy-lane-*` or `--shared-lock`, and is not subject to `heavy-check`. The mini side (ssh, `git archive | ssh tar`, polling) is light. Devbox capacity is coordinated with machine-scoped `remote` resources shared by all projects: `devbox-cn-1`, `devbox-cn-2` (heavy, ~4 cores each on the 8-core/32 GiB CN-BOE devbox 10.37.121.175) and `devbox-cn-light` (checks under ~5 min). Use the single-resource commands: `res wait devbox-cn-1 --by <unique wrapper id> --project <slug> --for "<step>" --pid <long-lived wrapper pid> --timeout <min>` (try devbox-cn-2 too), hold only around the remote heavy step, then `res return`. The SG-BOE devbox (2 cores/4 GiB) has no slots: probes only. Access is the user's normal ssh (Kerberos); an ssh auth error is BLOCKED, workers never kinit. Only code and demo/synthetic media go to devboxes: no secrets, no user or colleague media.
+- Remote dev machines (user 2026-11-16, "开发机上不占用 mini 的资源"): a step that executes ON a devbox (render/export, Docker image build, SG image checks, slow suites) is NOT a mini heavy task: it never takes `heavy-build`, a `heavy-lane-*` or `--shared-lock`, and is not subject to `heavy-check`. The mini side (ssh, `git archive | ssh tar`, polling) is light. Devbox capacity is coordinated with machine-scoped `remote` resources shared by all projects. Use `res wait-pool devbox-cn --by <unique wrapper id> --project <slug> --task <task> --for "<step>" --pid <long-lived wrapper pid> --timeout <min>` for heavy steps. It selects any registered `remote` row named `devbox-cn-<number>` (including newly added slots), excluding light slots. Success prints `slot=<id>`: capture that ID, hold only around the remote step, then `res return <id> --by <unique wrapper id>`. Checks under ~5 min use `res wait-pool devbox-cn-light`, which selects `devbox-cn-light` or `devbox-cn-light-<n>`. Each pool has a FIFO queue shown by `res status`, with heartbeat/rejoin and cleanup on signals or timeout. Re-waiting with the same holder/PID/host returns its existing pool slot without changing the hold. A trailing hyphen in the prefix is optional and uses the same queue. No mini resource or heavy gate is acquired. Slots: devbox-cn-1..4 + devbox-cn-light on CN devbox 1 (10.37.121.175, 8 cores/32 GiB; one heavy e2e ≈ 2.5 cores/<3 GiB), devbox-cn-5..6 + devbox-cn-light-2 on CN devbox 2 (10.37.249.249, 8 cores/15 GiB). The SG-BOE devbox (2 cores/4 GiB) has no slots: probes only. Company remote build services (RemoteX), remote pipelines and CI run on their own capacity: no devbox slot and no mini lock (user 2026-11-16, "remoteX 构建也不需要占 devbox 槽位"); only compile steps that still run on the mini take heavy-build. Access is the user's normal ssh (Kerberos); an ssh auth error is BLOCKED, workers never kinit. Only code and demo/synthetic media go to devboxes: no secrets, no user or colleague media.
 - NOT heavy: host unit tests that don't run a full native compile, single-TU compiles, doc/analysis work, device sessions without builds. PPE/staging/TCE/BITS/SCM deploys, remote/cloud pipelines, CI runs, `build-run --env test` procedural deploys and shared remote/CI entry scripts are also NOT heavy: they never take `heavy-build`, a lane or `--shared-lock`, and stay unthrottled (local `res` locks/verify throttles live only in local-only wrappers; `route.mjs --no-local-build` marks the remote case).
 
 Commands (existing single-resource semantics unchanged except the documented PID diagnostics):
@@ -84,7 +84,7 @@ the gate; it does not acquire anew. New lane-3 acquisitions and bounded waits re
 Devices including iphone11/iphone8/s21 retain connection probes, `--offline`, ask-user/never policy,
 default ask-user registration, notes and force-return coordination. `add --device -` still creates a
 checkout, not a slot; the owner installs lane 3 via the reviewed registry row, not `res add`.
-Legacy CLI help, non-heavy command semantics and exit codes are unchanged (explicit dead-PID diagnostics also apply to take): 0 success, 2 held/timeout, 3 policy,
+Legacy CLI help remains unchanged apart from the new `wait-pool` block; non-heavy command semantics and exit codes are unchanged (explicit dead-PID diagnostics also apply to take): 0 success, 2 held/timeout, 3 policy,
 4 disconnected, 5 overload, 1 usage/metrics/other error. Tests never use live state or devices.
 
 ## Owner Switch
@@ -120,3 +120,11 @@ limits and memory minimum govern reader comparisons and gate diagnostics.
 A captured `lane3=OPEN|CLOSED` is authoritative; legacy observations without that suffix never establish
 lane-3 permission. Passive idle hints, quota-expiry preferences and utilisation reports cannot acquire,
 release or modify locks, and do not change this contract's single package slot or configured machine gates.
+
+## Fixture Tests
+
+`node scripts/res/test/run.mjs` runs the registered res suites with scratch HOME, registry and PID probes.
+Under load, run each suite separately, for example
+`RES_TEST_SUITE=pools.mjs RES_TEST_NO_WATCHDOG=1 node scripts/res/test/run.mjs`.
+The runner supplies `RES_TEST_ROOT` and `RES_SOURCE` to the individual suite and retains its logs;
+only the outer watchdog is disabled, not the command's bounded waits or production admission checks.

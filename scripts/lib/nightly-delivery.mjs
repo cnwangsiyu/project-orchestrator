@@ -60,13 +60,14 @@ export function deliveryPlan(result, notify, recipients, reportPath) {
         if (!own.has(key)) own.set(key, { r, names: [] });
         own.get(key).names.push(i.name ?? '(unnamed)');
       }
-      for (const { r, names } of own.values()) push(r, `${f.id}: ${names.length} own items (${names.join(', ')}); ${f.evidence.join(', ')}`, f.id);
+      const advice = f.id === 'lane-devbox-imbalance' ? `mini lane p90 ${f.laneWaitP90Minutes} min; devbox occupancy ${f.devboxOccupancyPct}%; ${f.recommendation}; ` : '';
+      for (const { r, names } of own.values()) push(r, `${f.id}: ${names.length} own items (${names.join(', ')}); ${advice}${f.evidence.join(', ')}`, f.id);
     } else push(resolve(f.owner) ?? resolve(f.project) ?? routing, `${f.id}: ${f.value}; threshold ${f.comparison ?? ''} ${f.threshold ?? ''}; ${f.evidence.join(', ')}`, f.id);
   }
   for (const a of notify.actions ?? []) {
     if (typeof a.text !== 'string' || !a.text.trim()) throw Error('model action requires concrete text');
     const recipient = resolve(a.orchestrator);
-    const ownedFindings = recipient ? result.findings.filter(f => f.class !== 'weekly' &&
+    const ownedFindings = recipient ? result.findings.filter(f => f.class !== 'weekly' && !f.scriptOnly &&
       (f.items?.length ? f.items.some(i => (resolve(i.owner) ?? resolve(i.project) ?? routing)?.owner === recipient.owner)
         : (resolve(f.owner) ?? resolve(f.project) ?? routing)?.owner === recipient.owner)) : [];
     const weekly = result.findings.find(f => f.id === 'weekly-full-review');

@@ -2,17 +2,17 @@
 
 The existing 03:07 local schedule runs `scripts/nightly-review.sh`. The launcher computes the daily numbers in
 code, compares them with explicit thresholds, and publishes the report before requesting model analysis.
-A model runs only for triggered findings or the Monday weekly review (user approved 2026-11-16). A quiet night
+A model runs only for model-requiring findings or the Monday weekly review (user approved 2026-11-16). The lane/devbox imbalance check and its inbox advice are script-only. A quiet night
 ends with the script table and no messages. No scheduler, launchd or settings change is part of this workflow.
 
 ## Stages and ownership
 
 1. **Collect:** gather `review-data.mjs --hours 24 --json --cached`, its 168-hour counterpart,
    `orch-usage.mjs --hours 24 --json`, the 24/96-hour resource reviews and the read-only resource snapshot.
-   Save local `claude agents --json` and the roster for recipient resolution. Every collector output/error is
+   Freeze the full resource `log.tsv` and `resources.tsv` read-only, including history before the 24h window so crossing holds/waits can be paired. Save local `claude agents --json` and the roster for recipient resolution. Every collector output/error is
    attempt-local. `--cached` consumes the public quota cache and never refreshes authentication or quota.
    Failed collectors and missing coverage remain UNKNOWN. Do not contact hubs to manufacture health evidence.
-2. **Compute:** `scripts/lib/nightly-metrics.mjs` consumes the frozen JSON, writes `metrics.json` and a compact
+2. **Compute:** `scripts/lib/nightly-metrics.mjs` consumes the frozen JSON and resource TSVs, writes `metrics.json` and a compact
    table of at most 40 lines, then writes `<date>.md` immediately. The full metric rows and evidence pointers
    remain in `<date>.metrics.json`, including rows omitted from the compact display.
 3. **Analyze when needed:** route `analysis --stakes high` through the ordinary router and its existing hub.
@@ -45,6 +45,7 @@ not automatic enforcement or permission to change another owner's work.
 | `mismatchesMax` | More than 5 in 24h | Actual launch versus routed tuple; retain historical evidence. |
 | `missingPersonalApprovalMax` | Any missing approval reference | A metadata finding, never proof that approval was absent outside the collected records. |
 | `inboxP90MinutesMax` | p90 above 30 minutes | Per-session delivery acknowledgement, not task acceptance. An empty known inbox has zero delay; missing latency/identity is UNKNOWN. |
+| `laneWaitP90MinutesMax`, `devboxIdlePctMin` | Mini lane p90 >15 min AND devbox heavy-pool occupancy <50% | Script-only `lane-devbox-imbalance` finding, delivered to the top five projects by mini lane-minutes. Suggest moving only portable (non-macOS) steps to `res wait-pool devbox-cn`; never move macOS-only work or reclaim holds. Despite its historical name, `devboxIdlePctMin` is the maximum occupied percentage for this check. |
 | `staleRulesHoursMax` | Current digest unacknowledged for more than 24h | Age starts at the later of the digest's source timestamp and the old acknowledgement; missing timestamp is UNKNOWN. |
 | `overGateHoursMax` | More than 0 hours | Sampled intervals with authoritative combined load/memory admission verdicts. No interpolation across gaps. |
 | `expiryWarningHours` | SSO or quota entitlement expiry within 72h | TTADK/TRAE public cached expiry metadata only, including already-expired access. Routine daily reset is replenishment and is reported separately. Missing expiry stays UNKNOWN. |
@@ -63,6 +64,16 @@ Quota reset estimates require near-reset observations; units, tokens, personal w
 separate. Review budget findings never authorize removing explicitly justified A–D protection. Review round caps,
 model/account eligibility, signing requirements and all other policy constraints remain in the current
 [global rules](global-rules.md), [model routing](model-routing.md) and [review rubric](review-rubric.md).
+
+Resource log metrics replay take/return pairs, reclaim/rollback ends and open holds to collection time,
+clipping occupancy to the last 24h. Occupancy is held time / 24h per resource; devbox pool occupancy is
+the capacity-weighted mean over registered `remote` `devbox-cn-<number>` rows, excluding light.
+Completed `waiter-start`/`waiter-acquire` waits ending in the window use their full duration and nearest-rank
+p90 for `heavy-lane-any` and `devbox-cn-any`; rejoin does not restart a wait and timeouts do not enter p90.
+Full computed history is in `metrics.json.resourceHistory`, with evidence pointers to the frozen TSVs.
+Missing/malformed history or no heavy pool remains UNKNOWN, not idle capacity. No model computes this
+check; an imbalance alone skips routing and still uses the ordinary owned inbox delivery path.
+If its recipient is unavailable, retain BLOCKED delivery evidence without a fallback model relay.
 
 ## Existing signing scope
 
