@@ -1149,8 +1149,10 @@ cmd_wait_pool() {
       ids=$(pool_ids "$pool")
       for candidate in $ids; do
         [ ! -d "$LOCKS/$candidate.d" ] || continue
+        # A member retired (policy never/ask-user) after membership was read is skipped, not fatal.
+        [ "$(reg_line "$candidate" | cut -f3)" = open ] || continue
         if acquire_attempt pool "$candidate"; then return 0; else rc=$?; fi
-        [ "$rc" -eq 2 ] || return "$rc"
+        [ "$rc" -eq 2 ] || [ "$rc" -eq 3 ] || return "$rc"
       done
     else
       update_build_waiter FIFO CLOSED
