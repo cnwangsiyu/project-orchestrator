@@ -20,7 +20,8 @@ fs.writeFileSync(profiles, JSON.stringify(Object.fromEntries(['trae', 'ttadk', '
   { kind, home: path.join(tmp, kind), hub: 'ws://127.0.0.1:1' }]))));
 const env = { ...process.env, HOME: tmp, CODEX_ACCOUNTS: profiles, RULES_SHARED: tmp, NODE_OPTIONS: '',
   ORCHESTRATOR_OWNER: '', CLAUDE_SESSION_ID: '', CLAUDE_JOB_DIR: '', CLAUDECODE: '',
-  CODEX_WORKER_THREAD: '', CODEX_WORKER_ACCOUNT: '', CODEX_WORKER_OWNER: '', CODEX_WORKER_NAME: '', WORKER_EVENTS_FIXTURE: '{}' };
+  CODEX_WORKER_THREAD: '', CODEX_WORKER_ACCOUNT: '', CODEX_WORKER_OWNER: '', CODEX_WORKER_NAME: '',
+  CODEX_THREAD_ID: '', TRAECLI_THREAD_ID: '', WORKER_EVENTS_FIXTURE: '{}' };
 const children = new Set();
 const run = (args, extra = {}) => spawnSync(process.execPath, ['--import', fixture, worker, ...args],
   { env: { ...env, ...extra }, encoding: 'utf8', timeout: 5000 });

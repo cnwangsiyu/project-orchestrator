@@ -35,10 +35,11 @@ The launcher always also writes a small public context file at
 `<shared>/worker-context/<account>/<thread>.json`, with cwd, startedAt, current turn, run ID and owner.
 Start/turn refresh it; follow/wait attach it to the actual running turn. Developer instructions
 include ready-to-run explicit commands with the exact script path and RULES_SHARED.
-When flags and CODEX_WORKER_THREAD are absent, bare note/ask scan these public context files.
+When flags and CODEX_WORKER_THREAD are absent, bare note/ask use runtime CODEX_THREAD_ID or TRAECLI_THREAD_ID to filter these public context files (an unmatched/conflicting runtime ID never falls back to cwd discovery).
 Candidates must have a cwd equal to, above or below the calling directory, and a running turn in
-the event records matching their account/thread/run ID. One candidate is selected; several select
-the newest startedAt/t; stderr says which thread/account was chosen. Sibling/unrelated directories
+the event records matching their account/thread/run ID. One candidate is selected; several exit 2,
+listing the candidates and explicit --account NAME note/ask --thread ID commands, never choosing
+the newest; stderr says which thread/account was chosen. Sibling/unrelated directories
 and completed contexts are excluded. No candidate exits 2 and names both explicit command forms;
 the malformed-ID diagnostic is reserved for malformed supplied IDs. An explicit account limits
 discovery to that account. Owner/name always come from the launching context, not the caller's
@@ -79,6 +80,13 @@ subprocesses with injected EACCES/EPERM/EROFS verify streamed relay and the comp
 path without widening read-only/workspace-write policies. The reported live TRAE check lacked
 identity variables, while explicit commands worked. Live restricted TRAE and personal Codex
 verification belongs to the owner; discovery and output relay handle absent environment variables.
+
+Verified offline on 2026-11-16 with `scripts/test/fixtures/runtime-thread-env-probe.mjs`: installed
+Codex 0.167.0 `exec_command` sets CODEX_THREAD_ID and TRAE 0.214.1 `Bash` sets TRAECLI_THREAD_ID to
+the exact app-server thread ID. Two threads on each single app-server shared one cwd and received
+different correct IDs with `shell_environment_policy.inherit=none` and no launcher variables.
+The probe uses a temporary home, stdio app-server and loopback fake Responses API, never real hubs
+or credentials. The shared app-server instance/cwd is not a per-thread discriminator; native IDs are.
 
 Replies are atomically written to `<shared>/worker-replies/<account>/<thread>/<question-id>.json`
 and recorded as `answered` events under the existing event lock. A repeated writer cannot replace
