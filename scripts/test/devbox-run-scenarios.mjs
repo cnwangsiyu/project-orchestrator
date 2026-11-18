@@ -729,7 +729,11 @@ async function scenarios() {
   }
   const artifact = fixture(); const a = await run(artifact, ['--artifact', 'build/*.txt'], 'mkdir -p build && echo evidence > build/result.txt'); ok(a);
   assert.equal(execFileSync('tar', ['-xOf', a.summary.shards[0].attempts[0].artifact, 'build/result.txt'], { encoding: 'utf8' }).trim(), 'evidence');
-  const failedArtifact = fixture({ badArtifact: true }); assert.equal((await run(failedArtifact, ['--artifact', '*.txt'])).code, 66); returned(failedArtifact);
+  let failedArtifact = fixture({ badArtifact: true }); assert.equal((await run(failedArtifact, ['--artifact', '*.txt'])).code, 66); returned(failedArtifact);
+  const left = await run(failedArtifact = fixture({ badArtifact: true }), ['--artifact', '*.txt', '--fetch-timeout', '30']);
+  assert.equal(left.code, 66); assert.match(left.stdout + left.stderr, /artifacts remain on devbox-cn-\d+/);
+  assert.deepEqual(left.summary.shards[0].attempts[0].artifactsLeft.patterns, ['*.txt']); returned(failedArtifact);
+  await assert.rejects(run(fixture(), ['--fetch-timeout', '0']).then(r => { if (r.code) throw Error('rejected'); }), /rejected/);
   const failure = fixture(); assert.equal((await run(failure, [], 'exit 9')).code, 9); returned(failure);
   console.log('PASS flaky exit policy/history, artifact contents, artifact and command failure release');
 

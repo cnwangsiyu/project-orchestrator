@@ -62,6 +62,7 @@ repositories remain on RemoteX / TT-VEIS, rather than these devbox worktrees.
 | `--units-file PATH` | One source-relative test file per line; units are balanced and invoked separately |
 | `--timeout MIN` | Positive minutes, at most 120, default 120; bounds each shard's queue, transfer and command together |
 | `--artifact GLOB` | Repeatable, workspace-relative files; fetched into one tar per shard attempt |
+| `--fetch-timeout MIN` | Artifact readback limit per shard attempt (default 15, max 120). On failure the summary records `artifactsLeft` (slot, host, workspace, patterns); the files stay on the slot until it is reused |
 | `--out DIR` | Logs and summary; defaults to a unique directory in the local temporary directory; refuses to overwrite a previous run |
 | `--env K=V` | Repeatable explicit command environment; credential-related and SSH/Git configuration variables are refused |
 | `--affinity KEY` | Defaults to repository identity + branch/ref |

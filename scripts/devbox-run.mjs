@@ -28,10 +28,10 @@ const sharedDir = () => process.env.RES_DIR || process.env.RULES_SHARED || path.
 const resCommand = () => process.env.RES_COMMAND || (fs.existsSync(path.join(sharedDir(), 'res')) ? path.join(sharedDir(), 'res') : 'res');
 
 export function parseArgs(args) {
-  const opts = { ref: 'HEAD', pool: 'devbox-cn', shards: 1, timeout: 120, artifacts: [], env: {}, days: 7, need: [], excludeSlot: [], excludeHost: [] };
+  const opts = { ref: 'HEAD', pool: 'devbox-cn', shards: 1, timeout: 120, fetchTimeout: 15, artifacts: [], env: {}, days: 7, need: [], excludeSlot: [], excludeHost: [] };
   if (args[0] === 'gc') { opts.gc = true; args = args.slice(1); }
   if (args[0] === 'prewarm') { opts.prewarm = true; opts.ref = 'main'; opts.task = 'prewarm'; args = args.slice(1); }
-  const names = new Map(['project', 'task', 'repo', 'ref', 'pool', 'shards', 'out', 'timeout', 'prefer-host', 'watch-pid', 'affinity', 'host', 'days', 'units-file', 'command'].map(n => [`--${n}`, n.replace(/-([a-z])/g, (_, c) => c.toUpperCase())]));
+  const names = new Map(['project', 'task', 'repo', 'ref', 'pool', 'shards', 'out', 'timeout', 'prefer-host', 'watch-pid', 'affinity', 'host', 'days', 'units-file', 'command', 'fetch-timeout'].map(n => [`--${n}`, n.replace(/-([a-z])/g, (_, c) => c.toUpperCase())]));
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === '--') { if (opts.command) throw Error('provide only one command'); opts.command = args.slice(i + 1).join(' '); break; }
@@ -68,6 +68,8 @@ export function parseArgs(args) {
   opts.shards = opts.shards === 'auto' ? 'auto' : Number(opts.shards); opts.timeout = Number(opts.timeout);
   if (opts.shards !== 'auto' && (!Number.isInteger(opts.shards) || opts.shards < 1 || opts.shards > 64)) throw Error('--shards must be auto or 1..64');
   if (!Number.isFinite(opts.timeout) || opts.timeout <= 0 || opts.timeout > 120) throw Error('--timeout must be >0 and <=120 minutes');
+  opts.fetchTimeout = Number(opts.fetchTimeout);
+  if (!Number.isFinite(opts.fetchTimeout) || opts.fetchTimeout <= 0 || opts.fetchTimeout > 120) throw Error('--fetch-timeout must be >0 and <=120 minutes');
   if (opts.watchPid && (!/^\d+$/.test(opts.watchPid) || Number(opts.watchPid) < 2)) throw Error('invalid --watch-pid');
   opts.repo = fs.realpathSync(opts.repo);
   if (opts.unitsFile) opts.unitsFile = path.resolve(opts.unitsFile);
@@ -1143,8 +1145,12 @@ async function shard(opts) {
           }
           if (clean && opts.artifacts.length) {
             const archive = path.join(opts.out, `shard-${opts.shard}-attempt-${attempts.length}.tar`);
-            const fetched = await ssh(row, 'artifacts', { ...data, patterns: opts.artifacts }, { outputFile: archive, cancellable: false, state, timeout: 60000 });
-            if (fetched.code) { attempt.artifactExit = fetched.code; attempt.exit ||= fetched.code; emit(`[shard ${opts.shard}] artifact fetch failed (${fetched.code})\n`); }
+            const fetched = await ssh(row, 'artifacts', { ...data, patterns: opts.artifacts }, { outputFile: archive, cancellable: false, state, timeout: opts.fetchTimeout * 60000 });
+            if (fetched.code) {
+              attempt.artifactExit = fetched.code; attempt.exit ||= fetched.code;
+              attempt.artifactsLeft = { slot: row.slot, host: row.host, workspace: data.workspace, patterns: opts.artifacts };
+              emit(`[shard ${opts.shard}] artifact fetch failed (${fetched.code}${fetched.code === 124 ? `, timed out after ${opts.fetchTimeout} min; raise --fetch-timeout` : ''}); command succeeded and artifacts remain on ${row.slot} (${row.host}) under ${data.workspace} matching ${opts.artifacts.join(' ')} until the slot is reused\n`);
+            }
             else attempt.artifact = archive;
           }
         }
@@ -1203,7 +1209,7 @@ async function main(args) {
   }
   const opts = parseArgs(args);
   if (opts.help) {
-    console.log('Usage: devbox-run.mjs [--project P] --task T --repo PATH [--ref COMMIT|HEAD|worktree] [--pool devbox-cn|devbox-cn-light] [--shards N|auto] [--units-file PATH] [--artifact GLOB]... [--out DIR] [--timeout MIN] [--env K=V]... [--rerun-on-fail] [--allow-flaky] [--affinity KEY] [--prefer-host IP] [--need CAP]... [--exclude-slot IDS] [--exclude-host IPS] [--submodules] [--watch-pid PID] -- COMMAND\n       devbox-run.mjs prewarm --project P --repo PATH [--ref main] --command COMMAND [--need CAP]...\n       devbox-run.mjs gc [--host IP] [--days N]\n       devbox-run.mjs stop --out DIR --run-id UUID\nCOMMAND supports {shard}, {shards} and {units}. Timeout includes queue/upload/run; cleanup follows. See references/devbox-run.md.');
+    console.log('Usage: devbox-run.mjs [--project P] --task T --repo PATH [--ref COMMIT|HEAD|worktree] [--pool devbox-cn|devbox-cn-light] [--shards N|auto] [--units-file PATH] [--artifact GLOB]... [--fetch-timeout MIN] [--out DIR] [--timeout MIN] [--env K=V]... [--rerun-on-fail] [--allow-flaky] [--affinity KEY] [--prefer-host IP] [--need CAP]... [--exclude-slot IDS] [--exclude-host IPS] [--submodules] [--watch-pid PID] -- COMMAND\n       devbox-run.mjs prewarm --project P --repo PATH [--ref main] --command COMMAND [--need CAP]...\n       devbox-run.mjs gc [--host IP] [--days N]\n       devbox-run.mjs stop --out DIR --run-id UUID\nCOMMAND supports {shard}, {shards} and {units}. Timeout includes queue/upload/run; cleanup follows. See references/devbox-run.md.');
     return 0;
   }
   if (opts.gc) {
