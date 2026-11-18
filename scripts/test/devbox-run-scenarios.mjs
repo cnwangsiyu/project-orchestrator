@@ -50,6 +50,9 @@ const flag=(args,name)=>args[args.indexOf(name)+1];
 const fakeRes = shimHeader + String.raw`
 (async()=>{
 const a=process.argv.slice(2), op=a[0], by=flag(a,'--by');
+if(c.noHelp&&(op==='help'||a.includes('--help'))){console.error('res: broken');process.exit(1);}
+if(c.liveHelp&&a.includes('--help')){console.error('res: wait-pool needs a resource prefix');process.exit(1);}
+if(c.liveHelp&&op==='help'){console.log('res wait-pool <prefix> --by S [--need <cap,cap>] [--prefer-host <ip>] [--prefer-slot <id>] [--exclude-slot <id,...>] [--exclude-host <ip,...>]');return;}
 if(a.includes('--help')) {console.log('res wait-pool'+(c.legacy?'':' --prefer-host IP --need CAP --exclude-slot IDS --exclude-host IPS'+(c.preferSlot?' --prefer-slot SLOT':'')));return;}
 const rows=fs.readFileSync(path.join(c.shared,'resources.tsv'),'utf8').trim().split('\n').map(l=>{const [slot,kind,policy,,desc]=l.split('\t');return {slot,kind,policy,host:desc.match(/@(\d+\.\d+\.\d+\.\d+)/)?.[1],caps:desc.match(/caps=([\w,-]+)/)?.[1].split(',')||[]};});
 if(op==='return'){
@@ -689,6 +692,13 @@ async function scenarios() {
   assert.ok(warm.events().filter(e => e.op === 'acquire-call').some(e => e.args[0] === 'take'));
   returned(warm); console.log('PASS incremental bundles, shared object store, warm worktrees/mtime, overlay removal, affinity, home-disk root');
 
+  {
+    const f = fixture({ liveHelp: true }); const r = await run(f, ['--need', 'node,vesdk-android', '--exclude-host', '192.0.2.9']); ok(r);
+    assert.ok(f.events().some(e => e.op === 'acquire-call' && e.args.includes('--need') && e.args.includes('--exclude-host')), 'flags read from `res help` when `wait-pool --help` is rejected');
+    const g = fixture({ noHelp: true }); const bad = await run(g, ['--need', 'node']);
+    assert.equal(bad.code, 2, 'failed flag probe fails closed');
+    assert.ok(!g.events().some(e => e.op === 'acquire-call'), 'no slot acquired when the flag probe fails');
+  }
   for (const legacy of [false, true]) {
     const f = fixture({ legacy }); const r = await run(f, ['--need', 'node,vesdk-android']); ok(r);
     assert.equal(r.summary.shards[0].host, '192.0.2.2');

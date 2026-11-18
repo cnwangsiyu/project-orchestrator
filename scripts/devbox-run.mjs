@@ -1254,12 +1254,20 @@ async function main(args) {
     opts.shards = plan.count;
     if (opts.prewarm || requestedShards === 'auto') console.log(`shards=${opts.shards} strategy=${plan.strategy}${!opts.shards ? ' (no idle eligible hosts)' : ''}`);
     if (state.cancel) return state.cancel;
-    const help = await execute(resCommand(), ['wait-pool', '--help'], { state });
-    opts.preferSupported = /--prefer-host\b/.test(help.stdout + help.stderr);
-    opts.excludeSlotSupported = (help.stdout + help.stderr).includes('--exclude-slot');
-    opts.excludeHostSupported = (help.stdout + help.stderr).includes('--exclude-host');
-    opts.needSupported = /--need\b/.test(help.stdout + help.stderr);
-    opts.preferSlotSupported = /--prefer-slot\b/.test(help.stdout + help.stderr);
+    // Probe both `res help` (lists wait-pool flags without a prefix) and the legacy `wait-pool --help`.
+    const helps = await Promise.all([['help'], ['wait-pool', '--help']].map(args => execute(resCommand(), args, { state })));
+    // Only successful probes count; a failed probe (for example live res rejecting `wait-pool --help`)
+    // must never look like a legacy res and silently drop --need/--exclude-* placement constraints.
+    const helpText = helps.filter(help => help.code === 0).map(help => `${help.stdout}${help.stderr}`).join('\n');
+    if (!helpText) {
+      console.error('devbox-run: could not read res flags (`res help` and `res wait-pool --help` both failed); refusing to place shards without --need/--exclude-* constraints');
+      return 2;
+    }
+    opts.preferSupported = /--prefer-host\b/.test(helpText);
+    opts.excludeSlotSupported = helpText.includes('--exclude-slot');
+    opts.excludeHostSupported = helpText.includes('--exclude-host');
+    opts.needSupported = /--need\b/.test(helpText);
+    opts.preferSlotSupported = /--prefer-slot\b/.test(helpText);
     const shards = await Promise.all(Array.from({ length: opts.shards }, (_, index) => new Promise(resolve => {
       const child = fork(script, ['--internal-shard'], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
       const signalChild = ownChild(child); workers.add(signalChild); let result;
