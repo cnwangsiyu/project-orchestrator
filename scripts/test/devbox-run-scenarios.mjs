@@ -6,9 +6,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { parseArgs, readRegistry, remoteScripts, storeIdentity } from '../devbox-run.mjs';
+import { parseArgs, readRegistry, remoteScripts, storeIdentity, makeBundle } from '../devbox-run.mjs';
 
 import { makeSubmoduleFixture } from './devbox-submodule-fixture.mjs';
+import { transferFindings } from '../lib/devbox-transfer-check.mjs';
 
 const script = fileURLToPath(new URL('../devbox-run.mjs', import.meta.url));
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'devbox-scenarios-'));
@@ -35,7 +36,7 @@ function fixture(options = {}) {
   fs.writeFileSync(path.join(bin, 'res'), `#!${process.execPath}\n${fakeRes}`, { mode: 0o755 });
   fs.writeFileSync(path.join(bin, 'ssh'), `#!${process.execPath}\n${fakeSsh}`, { mode: 0o755 });
   fs.writeFileSync(path.join(bin, 'docker'), `#!${process.execPath}\n${shimHeader}\nif(process.argv.slice(2).join(' ')!=='image prune --force')process.exit(9);event('docker-prune');`, { mode: 0o755 });
-  const env = { ...process.env, PATH: `${bin}:${path.dirname(process.execPath)}:${process.env.PATH}`, RES_DIR: shared, RULES_SHARED: shared, RES_COMMAND: 'res', DEVBOX_FIXTURE: path.join(dir, 'config.json') };
+  const env = { ...process.env, PATH: `${bin}:${path.dirname(process.execPath)}:${process.env.PATH}`, RES_DIR: shared, RULES_SHARED: shared, DEVBOX_CACHE_DIR: shared, RES_COMMAND: 'res', DEVBOX_FIXTURE: path.join(dir, 'config.json') };
   return { dir, repo, shared, env, config, events: () => fs.existsSync(path.join(dir, 'events.jsonl')) ? fs.readFileSync(path.join(dir, 'events.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : [] };
 }
 
@@ -54,10 +55,11 @@ const rows=fs.readFileSync(path.join(c.shared,'resources.tsv'),'utf8').trim().sp
 if(op==='return'){
  const lock=path.join(c.shared,'locks',a[1]+'.d');
  if(fs.existsSync(lock)){const info=fs.readFileSync(path.join(lock,'info'),'utf8');if(!info.includes('by\t'+by+'\n'))process.exit(9);fs.rmSync(lock,{recursive:true});}
- event('return',{slot:a[1],by});return;
+ event('return',{slot:a[1],by});console.log('return '+a[1]);console.log('ack returned');return;
 }
 if(!['take','wait','wait-pool'].includes(op))process.exit(9);
 event('acquire-call',{args:a,pid:flag(a,'--pid')});
+if(c.acquireProgress&&op==='wait-pool'){console.log('waiter-start pool='+a[1]);console.error('rollback/return previous attempt');console.log('ack waiting');const until=Date.now()+120000;while(!fs.existsSync(path.join(c.dir,'progress-observed'))){if(Date.now()>until)process.exit(9);await sleep(50);}}
 let ids=rows.filter(r=>r.policy==='open'&&(op==='wait-pool'?(a[1].endsWith('light')?/^devbox-cn-light(?:-\d+)?$/.test(r.slot):/^devbox-cn-\d+$/.test(r.slot)):r.slot===a[1]));
 for (const [opt,field] of [['--exclude-slot','slot'],['--exclude-host','host']]) if(a.includes(opt))ids=ids.filter(r=>!flag(a,opt).split(',').includes(r[field]));
 if(a.includes('--need'))ids=ids.filter(r=>flag(a,'--need').split(',').every(cap=>r.caps.includes(cap)));
@@ -136,15 +138,18 @@ process.exit(await new Promise(r=>child.on('exit',code=>r(code??143))));
 
 async function run(f, extra = [], command = 'echo {shard}/{shards}', signalWhen, onSignal = child => child.kill('SIGTERM')) {
   const out = path.join(f.dir, `out-${Date.now()}-${Math.random().toString(16).slice(2)}`);
-  const args = extra[0] === 'gc' ? extra : ['--project', 'fixture', '--task', 'scenario', '--repo', f.repo, '--out', out, '--timeout', '1', ...extra, '--', command];
+  const timeout = process.env.DEVBOX_TEST_TIMEOUT_MIN || '1';
+  const watchdogMs = Number(process.env.DEVBOX_TEST_WATCHDOG_MS || 90000);
+  assert.ok(Number.isFinite(watchdogMs) && watchdogMs >= 1000 && watchdogMs <= 600000, 'bounded fixture watchdog');
+  const args = extra[0] === 'gc' ? extra : ['--project', 'fixture', '--task', 'scenario', '--repo', f.repo, '--out', out, '--timeout', timeout, ...extra, '--', command];
   const child = spawn(process.execPath, [script, ...args], { env: f.env, stdio: ['ignore', 'pipe', 'pipe'] });
   let stdout = '', stderr = ''; child.stdout.on('data', b => { stdout += b; }); child.stderr.on('data', b => { stderr += b; });
   let finished = false;
   const closed = new Promise(resolve => child.on('close', code => { finished = true; resolve(code); }));
-  let watchdog = setTimeout(() => child.kill('SIGKILL'), 90000), code;
+  let watchdog = setTimeout(() => child.kill('SIGKILL'), watchdogMs), code;
   try {
     if (signalWhen) {
-      const deadline = Date.now() + 60000;
+      const deadline = Date.now() + Math.max(60000, watchdogMs - 1000);
       while (!signalWhen(f.events())) { assert.ok(!finished && Date.now() < deadline, `fixture did not reach signal point: ${stdout}${stderr}`); await sleep(25); }
       onSignal(child, out);
     }
@@ -163,6 +168,173 @@ function workspace(f, host = '192.0.2.1', slot = 'devbox-cn-1') {
   const cache = JSON.parse(fs.readFileSync(path.join(f.shared, 'devbox-hosts.json')));
   const dir = path.join(cache[host].root, 'wt/fixture');
   return path.join(dir, fs.readdirSync(dir)[0], slot);
+}
+
+async function packedModuleRecovery() {
+  const f = fixture(), pinned = makeSubmoduleFixture(path.join(f.dir, 'packed-module'));
+  const engine = path.join(pinned.repo, 'engine');
+  const oid = git(engine, 'rev-parse', 'HEAD:version');
+  const config = '{"version":"public"}\n';
+  fs.writeFileSync(path.join(engine, 'public.json'), config); git(engine, 'add', '.'); git(engine, 'commit', '-qm', 'public module config');
+  const configOid = git(engine, 'rev-parse', 'HEAD:public.json'), pin = git(engine, 'rev-parse', 'HEAD');
+  fs.writeFileSync(path.join(pinned.repo, 'donor-blob'), 'local-engine');
+  fs.writeFileSync(path.join(pinned.repo, 'donor-json'), config);
+  git(pinned.repo, 'add', '.'); git(pinned.repo, 'commit', '-qm', 'retain module blobs');
+  git(pinned.repo, 'repack', '-ad'); git(pinned.repo, 'prune-packed');
+  const sourceObjects = git(pinned.repo, 'rev-parse', '--path-format=absolute', '--git-path', 'objects');
+  assert.ok(!fs.existsSync(path.join(sourceObjects, oid.slice(0, 2), oid.slice(2))), 'donor blob is packed');
+  const moduleObjects = git(engine, 'rev-parse', '--path-format=absolute', '--git-path', 'objects');
+  fs.unlinkSync(path.join(moduleObjects, oid.slice(0, 2), oid.slice(2)));
+  fs.unlinkSync(path.join(moduleObjects, configOid.slice(0, 2), configOid.slice(2)));
+  assert.throws(() => git(engine, 'cat-file', '-e', oid));
+  assert.equal(git(pinned.repo, 'cat-file', '-t', oid), 'blob');
+  const exportRepo = path.join(f.dir, 'broken-export.git'); fs.mkdirSync(exportRepo); git(exportRepo, 'init', '--bare');
+  fs.writeFileSync(path.join(exportRepo, 'objects/info/alternates'), moduleObjects + '\n');
+  git(exportRepo, 'update-ref', 'refs/heads/export', pin);
+  await assert.rejects(makeBundle({ exportRepo, temp: f.dir, commit: pin, sourceRepo: engine }, [], { cancel: 0, children: new Set(), values: [] }), error => {
+    assert.match(error.message, /full bundle failed.*unable to read/s);
+    assert.ok([oid, configOid].some(oid => error.message.includes(oid)));
+    assert.equal(error.bundleDiagnostics.sourceRepo, engine);
+    assert.ok(error.bundleDiagnostics.command.includes('bundle'));
+    assert.equal(error.bundleDiagnostics.alternates[0].entries[0], moduleObjects);
+    assert.ok(error.bundleDiagnostics.gitPath); assert.ok(error.bundleDiagnostics.env);
+    return true;
+  });
+  const altFile = path.join(moduleObjects, 'info/alternates');
+  const before = fs.existsSync(altFile) ? fs.readFileSync(altFile) : null;
+  const result = await run(f, ['--repo', pinned.repo, '--submodules'], 'test "$(cat engine/version)" = local-engine && test -f engine/public.json && test "$(cat engine/nested/payload)" = leaf');
+  ok(result); returned(f);
+  assert.deepEqual(fs.existsSync(altFile) ? fs.readFileSync(altFile) : null, before, 'source alternates are untouched');
+  assert.throws(() => git(engine, 'cat-file', '-e', oid), 'source module remains unrepaired');
+  console.log('PASS packed superproject blobs repair staged submodule bundles only; failure command/env/alternates diagnostics');
+}
+
+async function credentialScenarios() {
+  const fake = 'fixtureValue123', fakeAccess = 'AKIA' + '0'.repeat(16);
+  for (const key of ['ACCESS_KEY', 'SCRECT_KEY', 'SECRET_VALUE', 'NEXUS_LOGIN', 'MAGIC_WORD', 'MY_PRIVATE', 'MY_PWD', 'AUTH_VALUE', 'CREDENTIAL_VALUE']) {
+    assert.ok(transferFindings(`${key}=${fake}`).some(hit => hit.key === key));
+    assert.deepEqual(transferFindings(`${key}=\u0024{ENV}`), []);
+    assert.deepEqual(transferFindings(`${key}=true`), []);
+    assert.deepEqual(transferFindings(`${key}=https://example.invalid/public`), []);
+  }
+  assert.deepEqual(transferFindings('keyAlias="publicAlias123"'), []);
+  assert.deepEqual(transferFindings('signing.keyAlias = "publicAlias123"', { dsl: true }), []);
+  assert.deepEqual(transferFindings('ACCESS_KEY = "prefix" + System.getenv("ENV")', { dsl: true }), []);
+  assert.deepEqual(transferFindings('SECRET_VALUE = config.value', { dsl: true }), []);
+  assert.deepEqual(transferFindings('credentials(PasswordCredentials::class)', { dsl: true }), []);
+  assert.ok(transferFindings('ACCESS_KEY = """fixtureValue123"""', { dsl: true }).some(hit => hit.key === 'ACCESS_KEY'));
+  assert.ok(transferFindings('mapOf("SCRECT_KEY" to "fixtureValue123")', { dsl: true }).some(hit => hit.key === 'SCRECT_KEY'));
+  assert.deepEqual(transferFindings('{"auth": {"TOKEN": "\u0024{ENV}"}, "keyAlias": "publicAlias123"}'), []);
+  assert.ok(transferFindings(`SCRECT_KEY.set("${fake}")`, { dsl: true }).some(hit => hit.key === 'SCRECT_KEY'));
+  const cases = [
+    ['gradle.properties', `ACCESS_KEY=${fake}\nSCRECT_KEY=${fake}\nNEXUS_LOGIN=${fake}\n`, 'ACCESS_KEY'],
+    ['settings.yaml', `nested:\n  MAGIC_WORD: ${fake}\n`, 'MAGIC_WORD'],
+    ['settings.json', JSON.stringify({ nested: { ACCESS_KEY: fake } }), 'ACCESS_KEY'],
+    ['build.gradle.kts', `credentials { password("${fake}") }`, 'password'],
+    ['settings.toml', `PRIVATE_VALUE = "${fake}"`, 'PRIVATE_VALUE'],
+    ['settings.cfg', `payload=-----BEGIN RSA PRIVATE KEY-----\n${fake}\n-----END RSA PRIVATE KEY-----`, 'PRIVATE_KEY_BLOCK'],
+    ['settings.ini', `value=${fakeAccess}`, 'AKIA_ACCESS_KEY'],
+    ['settings.plist', `<plist><dict><key>SCRECT_KEY</key><string>${fake}</string></dict></plist>`, 'SCRECT_KEY'],
+  ];
+  for (const [name, text, key] of cases) {
+    const f = fixture(); fs.writeFileSync(path.join(f.repo, name), text);
+    const r = await run(f, ['--ref', 'worktree']);
+    assert.equal(r.code, 1); assert.ok(r.stderr.includes(name)); assert.match(r.stderr, /count=\d+/);
+    assert.ok(r.stderr.toLowerCase().includes(key.toLowerCase()));
+    assert.ok(r.stderr.includes('source-only export') && r.stderr.includes('references/devbox-run.md'));
+    assert.ok(!r.stderr.includes(fake) && !r.stdout.includes(fake) && !r.stderr.includes(fakeAccess));
+    assert.deepEqual(f.events(), [], 'gate precedes every SSH/res operation');
+  }
+  const historical = fixture();
+  const privateSource = fixture(), privatePath = path.join(privateSource.repo, '.aws');
+  fs.mkdirSync(privatePath); fs.writeFileSync(path.join(privatePath, 'config.json'), '{}');
+  git(privateSource.repo, 'add', '.'); git(privateSource.repo, 'commit', '-qm', 'synthetic private path');
+  const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
+  const contentRead = path.join(privateSource.dir, 'content-read');
+  fs.writeFileSync(path.join(privateSource.dir, 'bin/git'), `#!/usr/bin/env python3
+import os, sys
+if 'cat-file' in sys.argv and 'blob' in sys.argv:
+    open(${JSON.stringify(contentRead)}, 'w').close()
+os.execv(${JSON.stringify(realGit)}, ['git', *sys.argv[1:]])
+`, { mode: 0o755 });
+  for (const deleted of [false, true]) {
+    if (deleted) { git(privateSource.repo, 'rm', '-r', '.aws'); git(privateSource.repo, 'commit', '-qm', 'remove private path'); }
+    const result = await run(privateSource);
+    assert.equal(result.code, 1); assert.match(result.stderr, /credential-related paths/);
+    assert.ok(!fs.existsSync(contentRead), 'private names/history refused before reading any blob');
+    assert.deepEqual(privateSource.events(), []);
+  }
+  fs.writeFileSync(path.join(historical.repo, 'config.yaml'), `ACCESS_KEY: ${fake}`);
+  git(historical.repo, 'add', '.'); git(historical.repo, 'commit', '-qm', 'history-only fixture');
+  git(historical.repo, 'rm', 'config.yaml'); git(historical.repo, 'commit', '-qm', 'remove config');
+  const old = await run(historical); assert.equal(old.code, 1); assert.ok(old.stderr.includes('config.yaml')); assert.ok(!old.stderr.includes(fake)); assert.deepEqual(historical.events(), []);
+  const staged = fixture();
+  fs.writeFileSync(path.join(staged.repo, 'project.conf'), `SCRECT_KEY=${fake}`); git(staged.repo, 'add', '.');
+  fs.writeFileSync(path.join(staged.repo, 'project.conf'), 'SCRECT_KEY=\n');
+  assert.equal((await run(staged, ['--ref', 'worktree'])).code, 1); assert.deepEqual(staged.events(), []);
+  const binary = fixture();
+  const plist = execFileSync('python3', ['-c', 'import plistlib,sys;sys.stdout.buffer.write(plistlib.dumps({"SCRECT_KEY":b"fixtureValue123"},fmt=plistlib.FMT_BINARY))']);
+  fs.writeFileSync(path.join(binary.repo, 'settings.plist'), plist); git(binary.repo, 'add', '.'); git(binary.repo, 'commit', '-qm', 'binary plist fixture');
+  const binaryRun = await run(binary); assert.equal(binaryRun.code, 1); assert.ok(binaryRun.stderr.includes('settings.plist') && binaryRun.stderr.includes('SCRECT_KEY')); assert.ok(!binaryRun.stderr.includes(fake)); assert.deepEqual(binary.events(), []);
+  const overlay = fixture(); fs.writeFileSync(path.join(overlay.repo, 'project.conf'), 'ACCESS_KEY=\n'); git(overlay.repo, 'add', '.'); git(overlay.repo, 'commit', '-qm', 'blank');
+  fs.writeFileSync(path.join(overlay.repo, 'project.conf'), `ACCESS_KEY=${fake}`);
+  assert.equal((await run(overlay, ['--ref', 'worktree'])).code, 1); assert.deepEqual(overlay.events(), []);
+  const negative = fixture();
+  fs.writeFileSync(path.join(negative.repo, 'gradle.properties'), 'ACCESS_KEY=\u0024{ENV}\nSCRECT_KEY=\nNEXUS_URL=https://example.invalid/public\nkeyAlias=publicAlias123\nPRIVATE_ENABLED=true\n');
+  fs.writeFileSync(path.join(negative.repo, 'build.gradle.kts'), 'val ACCESS_KEY = System.getenv("ENV")\nval SECRET_VALUE = config.value\nkeyAlias("publicAlias123")\n');
+  fs.writeFileSync(path.join(negative.repo, 'settings.json'), JSON.stringify({ ACCESS_KEY: '${ENV}', PRIVATE_ENABLED: true, NEXUS_URL: 'https://example.invalid/public', keyAlias: 'publicAlias123' }));
+  git(negative.repo, 'add', '.'); git(negative.repo, 'commit', '-qm', 'nonliteral/public fixture');
+  ok(await run(negative)); returned(negative);
+  const logged = fixture(); const logRun = await run(logged, [], `printf "SCRECT_KEY=${fake}\\nMY_PASS=${fake}\\nAUTH_VALUE=${fake}\\n${fakeAccess}\\n-----BEGIN RSA PRIVATE KEY-----\\n${fake}\\n-----END RSA PRIVATE KEY-----\\n"`); ok(logRun);
+  assert.ok(!logRun.stdout.includes(fake) && !logRun.stdout.includes(fakeAccess));
+  assert.ok(!fs.readFileSync(logRun.summary.shards[0].log, 'utf8').includes(fake)); returned(logged);
+  console.log('PASS hard pre-transfer properties/YAML/JSON/DSL/PEM/AKIA/plist gate, history/staged/overlay checks, references/public exclusions and value-free logs');
+}
+
+async function receiptScenarios() {
+  const f = fixture();
+  const registry = path.join(f.shared, 'resources.tsv');
+  fs.writeFileSync(registry, fs.readFileSync(registry, 'utf8').replaceAll('bob@192.0.2.2', 'alice@192.0.2.1'));
+  const command = 'test "$DEVBOX_RUN_RECEIPT" -ef "$PWD/.devbox-run.json" && test -f "$DEVBOX_RUN_RECEIPT" && test -z "$(git status --porcelain)"';
+  ok(await run(f, [], command));
+  const exclude = git(workspace(f), 'rev-parse', '--path-format=absolute', '--git-path', 'info/exclude');
+  fs.appendFileSync(exclude, '\n# preserve existing slot rules\nexisting-output/\n');
+  const before = fs.readFileSync(exclude);
+  ok(await run(f, ['--shards', '2', '--env', 'DEVBOX_RUN_RECEIPT=wrong'], command));
+  assert.deepEqual(fs.readFileSync(exclude), before, 'idempotent update preserves all existing exclude bytes');
+  assert.equal(fs.readFileSync(exclude, 'utf8').split('\n').filter(line => line === '/.devbox-run.json').length, 1);
+  assert.equal(git(workspace(f, '192.0.2.1', 'devbox-cn-2'), 'rev-parse', '--path-format=absolute', '--git-path', 'info/exclude'), exclude);
+  returned(f);
+  console.log('PASS clean git status with discoverable receipt, worktree-aware shared exclude, idempotence and existing-rule preservation');
+}
+
+async function resProgressScenarios() {
+  const f = fixture({ acquireProgress: true });
+  let observed = false;
+  const result = await run(f, [], 'true', () => {
+    const out = fs.readdirSync(f.dir).find(name => name.startsWith('out-'));
+    if (!out) return false;
+    const file = path.join(f.dir, out, 'shard-1-state.json');
+    if (!fs.existsSync(file)) return false;
+    return JSON.parse(fs.readFileSync(file)).resEvents?.some(event => event.kind === 'ack');
+  }, (child, out) => {
+    const state = JSON.parse(fs.readFileSync(path.join(out, 'shard-1-state.json')));
+    assert.equal(state.status, 'acquiring');
+    assert.ok(!f.events().some(event => event.op === 'take'), 'progress visible before acquisition/close');
+    for (const kind of ['waiter-start', 'rollback', 'ack']) assert.ok(state.resEvents.some(event => event.kind === kind));
+    assert.ok(state.resEvents.some(event => event.stream === 'stderr'));
+    assert.ok(state.resEvents.every(event => Number.isFinite(Date.parse(event.time))));
+    assert.match(fs.readFileSync(path.join(out, 'shard-1.log'), 'utf8'), /\[\d{4}-[^\]]+\] \[shard 1\] res wait-pool stdout: waiter-start/);
+    fs.writeFileSync(path.join(f.dir, 'progress-observed'), 'observed\n');
+    observed = true;
+  });
+  ok(result); returned(f); assert.ok(observed);
+  assert.equal(result.summary.shards[0].slot, 'devbox-cn-1', 'final stdout parsing remains unchanged');
+  const state = JSON.parse(fs.readFileSync(result.summary.shards[0].stateFile));
+  assert.equal(state.status, 'complete'); assert.equal(state.exit, 0);
+  assert.ok(state.resEvents.some(event => event.kind === 'slot'));
+  assert.ok(state.resEvents.some(event => event.operation === 'return'));
+  console.log('PASS live timestamped res stdout/stderr, waiter/rollback/ack/slot/return state and unchanged final slot parsing');
 }
 
 async function bundleRecovery() {
@@ -258,10 +430,12 @@ os.kill(pid,0)`;
 
 async function scenarios() {
   const only = process.env.DEVBOX_TEST_CASE;
-  if (only && !['bundle', 'ownership'].includes(only)) throw Error('unknown devbox fixture case');
-  if (!only || only === 'bundle') await bundleRecovery();
-  if (!only || only === 'ownership') await stopOwnership();
-  if (only) return;
+  const fixes = { credentials: credentialScenarios, 'packed-module': packedModuleRecovery, receipt: receiptScenarios, 'res-progress': resProgressScenarios };
+  if (only && !['baseline', 'bundle', 'ownership', ...Object.keys(fixes)].includes(only)) throw Error('unknown devbox fixture case');
+  for (const [name, scenario] of Object.entries(fixes)) if (!only || only === name) await scenario();
+  if (!only || only === 'baseline' || only === 'bundle') await bundleRecovery();
+  if (!only || only === 'baseline' || only === 'ownership') await stopOwnership();
+  if (only && only !== 'baseline') return;
   const roots = path.join(temp, 'root-probe'), data = path.join(roots, 'data00'), home = path.join(roots, 'home');
   fs.mkdirSync(data, { recursive: true }); fs.mkdirSync(home); fs.writeFileSync(path.join(roots, 'meminfo'), 'MemTotal: 33554432 kB\n');
   const probeSource = remoteScripts.probe.replace("pathlib.Path('/data00')", `pathlib.Path(${JSON.stringify(data)})`)
@@ -338,10 +512,9 @@ print(shell)`, JSON.stringify({ env, command: 'printf "%s:" "$BOOTSTRAP_VALUE"; 
     git(npm.repo, 'add', name);
     fs.writeFileSync(path.join(npm.repo, name), '# working copy is clean\n');
     const result = await run(npm, ['--ref', 'worktree']);
-    if (name === 'project.conf') ok(result); // npm-specific matching is limited to package manager configuration.
-    else {
+    {
       assert.equal(result.code, 1);
-      assert.ok(result.stderr.includes(name) && result.stderr.includes('_authToken') && !result.stderr.includes('synthetic-fixture-value'));
+      assert.ok(result.stderr.includes(name) && result.stderr.toLowerCase().includes('_authtoken') && !result.stderr.includes('synthetic-fixture-value'));
     }
     git(npm.repo, 'reset', '--hard', 'HEAD');
     if (name !== '.npmrc') fs.rmSync(path.join(npm.repo, name), {force:true});

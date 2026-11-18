@@ -71,6 +71,69 @@ cleanup failures. The overall exit is the first nonzero shard result in shard
 order, or the cancellation status. Command failures retain their exit codes;
 timeout is 124, SIGINT is 130 and SIGTERM is 143.
 
+Res acquisition and return stdout/stderr stream line by line with UTC timestamps
+into each shard log. `shard-k-state.json` is updated atomically during waits,
+including waiter-start, rollback/return, acknowledgement and reported-slot
+progress; it is finalized after cleanup. Summaries include `stateFile` and
+`resEvents` with operation, stream and time. Live state retains the first 10
+and newest 490 events (2,000 characters each); logs retain the complete stream.
+The final raw res stdout is still parsed after close, so progress/redaction
+does not change lease arbitration or slot ownership. This observability does
+not override the controller's current stale-waiter setting, including the
+`RES_WAITER_STALE_SECONDS=300` live hotfix.
+
+## Hard Pre-Transfer Gate
+
+Every project completes a local, fail-closed configuration scan
+before any SSH, lease acquisition, bundle upload, patch or untracked archive
+transfer. Recursive module snapshots must pass too. The scanner checks the
+selected commit's tree and all reachable configuration blobs in its history,
+including merge-parent changes and later-deleted files. This deliberately
+includes more history than an incremental warm transfer might need. Worktree
+runs additionally check staged blobs, changed working files and nonignored
+untracked files before constructing upload archives.
+
+Patterns include `*.properties`, `.env*`, `*.gradle`, `*.gradle.kts`,
+`*.yml`, `*.yaml`, `*.toml`, `*.ini`, `*.cfg`, `*.conf`, `*.json`, `*.plist`,
+`*.xcconfig`, and Groovy/Kotlin `*.groovy`, `*.kt`, `*.kts` source/DSL files.
+Binary plists are decoded locally. Configuration symlinks and unavailable
+blobs/parsers fail closed; they are not followed to another file. Module scans
+use the same ancestor-object fallback as export staging, without repairing
+source repositories. Known private paths and their history are rejected by
+filename before any configuration contents are read. The npm gates remain
+in force, so an allow entry cannot authorize private files or npm credentials.
+
+The transfer detector reuses the nightly audit's key/DSL detector and extends
+it for admission. Nonblank literal values under names containing `ACCESS`,
+`SECRET`, `SCRECT`, `KEY` (except `keyAlias`), `TOKEN`, `PASS`, `PWD`, `AUTH`,
+`CREDENTIAL`, `NEXUS`, `MAGIC`, or `PRIVATE` are refused. PEM private-key
+markers and AKIA-style access keys are also refused even without a matching
+field name. Blank values, environment references such as `${ENV}`, source
+variable/method references, booleans, nulls and public URLs are not credential
+literals. Wildcard names are intentionally conservative; a nonblank numeric
+credential literal is not automatically exempt.
+
+On refusal, diagnostics contain only **path, key name and count**, never the
+suspected value. Use a source-only export with these fields blanked. Blanking
+only the current tree is insufficient if the source history still contains
+credentials. Alternatively, the owner can document a proven non-secret with
+an exact repo-level allow entry below: `repoId` is the normalized-origin (or
+Git common-directory) identity from `storeIdentity(repo)` **without** a project
+override, `path` and `key` are exact, and `reason` records the proof. There is no
+CLI or environment bypass and no wildcard allow. Do not add credential values
+to the entry. No exceptions are currently approved.
+
+<!-- devbox-nonsecret-allow -->
+```json
+[]
+```
+<!-- /devbox-nonsecret-allow -->
+
+Runner output additionally masks these credential assignment families,
+multiline PEM private-key output and AKIA-style keys before streaming or
+writing shard logs. Commands must still never deliberately emit credentials;
+redaction cannot identify arbitrary unlabeled sensitive strings.
+
 A successful rerun sets `flaky: true` and appends project, task, command hash,
 shard, both hosts and time to `_shared/flaky-log.jsonl`. Without
 `--allow-flaky`, the original failure remains the exit status. Failure to fetch
@@ -109,6 +172,26 @@ repository references the source's objects without modifying its refs or
 copying its Git configuration. A per-repository remote flock serializes fetch,
 worktree changes and garbage collection. No remote Git login is needed.
 
+Temporary export alternates use canonical absolute paths. Recursive module
+exports also include their ancestor repositories' object directories: locally
+assembled module stores can have missing blobs that exist in a superproject's
+packed objects. This fallback changes staging only, not source alternates,
+refs or configuration, and exports only the selected commit's reachable graph.
+It does not fetch missing source objects or consult unrelated repositories.
+An object missing from all these stores remains a bundle failure.
+
+Bundle packing failures, including recovered attempts, report `bundleFailures`
+in the log and attempt summary; terminal errors also include `bundleDiagnostics`:
+source repository, exact Git argv and executable, working
+directory, relevant environment names (only allowlisted path/config values),
+and the export's recursively resolved alternates chain. Other Git environment
+values are omitted. This distinguishes a module-object failure from a
+superproject failure even after the top-level bundle already transferred.
+`node scripts/test/devbox-bundle-repro.mjs --repo PATH --ref COMMIT
+--parent-objects OBJECT_DIR --out SCRATCH_DIR` exercises the exact `makeBundle`
+path without modifying the source; it retains a scratch bundle and receipt.
+Use the normal local-heavy lane wrapper for a substantial packing probe.
+
 Checkout resets tracked files to the requested commit and removes only the
 previous overlay's uploaded untracked files. It leaves build outputs,
 `node_modules`, `.gradle`, and other generated files in place. It does not run
@@ -122,6 +205,14 @@ lowercase, without transport, user or trailing `.git`). With no origin it hashes
 the real path of the Git common directory. On a box with an older basename
 store, the runner records a matching store in place when it can verify shared
 history in the project namespace. Existing worktree links remain usable.
+
+The slot-root `.devbox-run.json` receipt remains readable by jobs via
+`DEVBOX_RUN_RECEIPT`. Checkout idempotently adds `/.devbox-run.json` to the file
+resolved by `git rev-parse --git-path info/exclude`, under the repository lock.
+Linked worktrees share that common-directory exclude; existing rules are
+preserved. The receipt therefore does not make `git status --porcelain` dirty
+and does not need a tracked `.gitignore` change. Its generated environment path
+takes precedence over a conflicting `--env` value.
 
 With `--submodules`, initialize the pinned repositories locally before running.
 The runner reads the gitlinks from the selected superproject commit and feeds
@@ -220,6 +311,19 @@ leases, registry mapping, capabilities on new and old controllers, shared
 objects, incremental transfer, mtimes, overlays, shared cache environment,
 affinity, upload and disk retries, artifacts, flaky bookkeeping, signal and
 timeout cleanup, interrupted acquisition recovery and leased GC.
+It also covers packed donor objects for incomplete modules, bundle diagnostics,
+pre-transfer credential admission, clean receipts and streamed lease progress.
+Set `DEVBOX_TEST_CASE=credentials|packed-module|receipt|res-progress|bundle|ownership|baseline`
+to rerun one focused case under local load.
+`baseline` runs the original runner scenarios without the new fix
+cases, including bundle recovery and process ownership.
+For a loaded mini, bounded test-only allowances are available:
+`DEVBOX_TEST_TIMEOUT_MIN=3 DEVBOX_TEST_WATCHDOG_MS=240000 node
+scripts/test/devbox-run-scenarios.mjs`. Default fixture budgets remain one
+minute and a 90-second outer watchdog (maximum configurable watchdog 10
+minutes). The explicit production-timeout and cancellation scenarios retain
+their own short deadlines. Report a normal-budget failure and rerun its named
+case alone before using longer startup allowances.
 
 For isolated tests, `RES_DIR` selects registry/state and `RES_COMMAND` selects
 the controller. Production defaults to the shared public entry; do not use a

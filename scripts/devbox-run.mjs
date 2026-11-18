@@ -83,11 +83,13 @@ export function readRegistry(dir, pool) {
 
 // Output is line-buffered so assignments split across SSH chunks are still masked.
 function lineSink(write, values = [], intercept) {
-  const decoder = new StringDecoder('utf8'); let pending = '', dropping = false;
+  const decoder = new StringDecoder('utf8'); let pending = '', dropping = false, privateBlock = false;
   const redact = line => {
+    if (/-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/.test(line)) privateBlock = true;
+    if (privateBlock) { if (/-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/.test(line)) privateBlock = false; return '[MASKED private key output]'; }
     for (const value of values.filter(Boolean).sort((a, b) => b.length - a.length)) line = line.replaceAll(value, '[MASKED]');
-    if (sensitive.test(line) && /[=:]|bearer\s/i.test(line)) return '[MASKED sensitive output]';
-    return line;
+    if ((sensitive.test(line) || /ACCESS|SCRECT|KEY(?!ALIAS)|PASS|PWD|AUTH|NEXUS|MAGIC|PRIVATE/i.test(line)) && /[=:]|bearer\s/i.test(line)) return '[MASKED sensitive output]';
+    return line.replace(/\bAKIA[A-Z0-9]{16}\b/g, '[MASKED access key]');
   };
   return {
     push(chunk) {
@@ -114,14 +116,14 @@ function ownChild(child) {
     && child.signalCode === null && child.kill(sig);
 }
 
-function execute(file, args, { input, inputFile, outputFile, onOutput, timeout = 60000, state, cancellable = true, rawCapture = !onOutput && !outputFile, interceptStderr } = {}) {
+function execute(file, args, { input, inputFile, outputFile, onOutput, timeout = 60000, state, cancellable = true, rawCapture = !onOutput && !outputFile, interceptStderr, interceptStdout, env = process.env } = {}) {
   return new Promise(resolve => {
-    const child = spawn(file, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(file, args, { stdio: ['pipe', 'pipe', 'pipe'], env });
     let stdout = '', stderr = '', timedOut = false, spawnError;
     const sink = outputFile ? fs.createWriteStream(outputFile, { mode: 0o600 }) : null;
     const rawDecoder = new StringDecoder('utf8');
-    const out = lineSink(text => { stdout = (stdout + text).slice(-2 * 1024 * 1024); onOutput?.(text); }, state?.values);
-    const err = lineSink(text => { stderr = (stderr + text).slice(-2 * 1024 * 1024); onOutput?.(text); }, state?.values, interceptStderr);
+    const out = lineSink(text => { if (!rawCapture) stdout = (stdout + text).slice(-2 * 1024 * 1024); onOutput?.(text, 'stdout'); }, state?.values, interceptStdout);
+    const err = lineSink(text => { stderr = (stderr + text).slice(-2 * 1024 * 1024); onOutput?.(text, 'stderr'); }, state?.values, interceptStderr);
     const signalChild = ownChild(child);
     if (state && cancellable) state.children.add(signalChild);
     let killTimer;
@@ -134,6 +136,7 @@ function execute(file, args, { input, inputFile, outputFile, onOutput, timeout =
       if (sink) sink.write(chunk);
       else if (rawCapture) {
         stdout += rawDecoder.write(chunk);
+        if (onOutput) out.push(chunk);
         if (stdout.length > 64 * 1024 * 1024) { spawnError = 'capture limit exceeded'; stop(); }
       } else out.push(chunk);
     });
@@ -256,6 +259,13 @@ with open(str(repo)+'.lock','a') as lock:
         ws.parent.mkdir(parents=True,exist_ok=True)
         subprocess.run(['git','--git-dir='+str(repo),'worktree','add','--detach',str(ws),d['commit']],check=True,stdout=subprocess.DEVNULL)
     meta.write_text(json.dumps({'slot':d['slot'],'repository':str(repo),'lastUsed':time.time(),'untracked':d['untracked']}))
+    exclude=pathlib.Path(subprocess.check_output(['git','-C',str(ws),'rev-parse','--path-format=absolute','--git-path','info/exclude'],text=True).strip())
+    exclude.parent.mkdir(parents=True,exist_ok=True)
+    previous=exclude.read_bytes() if exclude.exists() else b''
+    if b'/.devbox-run.json' not in previous.splitlines():
+        with exclude.open('ab') as out:
+            if previous and not previous.endswith(b'\\n'): out.write(b'\\n')
+            out.write(b'/.devbox-run.json\\n')
 for name in ['gradle','npm','pnpm','ccache','pip','toolchains']:
     (pathlib.Path(d['root'])/'shared'/name).mkdir(parents=True,exist_ok=True)
 `,
@@ -491,8 +501,10 @@ export async function storeIdentity(repo, project, state) {
   return 'id-' + createHash('sha256').update(identity).digest('hex');
 }
 
-async function snapshot(opts, temp, state, ancestors = new Set()) {
-  const git = async args => checked(await execute('git', ['-C', opts.repo, ...args], { state, rawCapture: true }), 'git snapshot');
+async function snapshot(opts, temp, state, ancestors = new Set(), parentObjects = []) {
+  const gitEnv = parentObjects.length ? { ...process.env, GIT_ALTERNATE_OBJECT_DIRECTORIES:
+    [process.env.GIT_ALTERNATE_OBJECT_DIRECTORIES, ...parentObjects.map(dir => JSON.stringify(dir))].filter(Boolean).join(path.delimiter) } : process.env;
+  const git = async args => checked(await execute('git', ['-C', opts.repo, ...args], { state, rawCapture: true, env: gitEnv }), 'git snapshot');
   const top = (await git(['rev-parse', '--show-toplevel'])).trim();
   if (fs.realpathSync(top) !== opts.repo) throw Error('--repo must be the repository root');
   const commit = (await git(['rev-parse', '--verify', '--end-of-options', `${opts.ref === 'worktree' ? 'HEAD' : opts.ref}^{commit}`])).trim();
@@ -511,22 +523,33 @@ async function snapshot(opts, temp, state, ancestors = new Set()) {
   files = [...new Set(files)];
   if (files.some(name => sensitiveFile.test(name))) throw Error('snapshot contains credential-related paths; use a source-only ref/worktree');
   if (untracked.some(name => path.basename(name).toLowerCase() === '.npmrc')) throw Error('untracked .npmrc refused');
+  if ((await git(['rev-list', '--full-history', '--max-count=1', commit, '--', ...privateHistoryPaths])).trim())
+    throw Error('bundle history contains credential-related paths; use a source-only history');
+  const transferChecker = fileURLToPath(new URL('./lib/devbox-transfer-check.mjs', import.meta.url));
+  const transferId = await storeIdentity(opts.repo, undefined, state);
+  const admission = await execute(process.execPath, [transferChecker, opts.repo, commit, opts.ref, transferId], { state, timeout: 300000, env: gitEnv });
+  if (admission.code) {
+    let findings; try { findings = JSON.parse(admission.stdout); } catch { findings = [{ path: '[source scan]', key: 'SCAN_UNAVAILABLE', count: 1 }]; }
+    throw Error('pre-transfer credential gate refused: ' + findings.map(hit => `${JSON.stringify(hit.path)} key=${hit.key} count=${hit.count}`).join('; ')
+      + '. Use a source-only export with those fields blanked, or a repo-level allow entry in references/devbox-run.md for proven non-secrets.');
+  }
   const checker = fileURLToPath(new URL('./lib/devbox-source-check.py', import.meta.url));
-  const verdict = await execute('python3', [checker, opts.repo, commit, opts.ref], { state, timeout: 300000 });
+  const verdict = await execute('python3', [checker, opts.repo, commit, opts.ref], { state, timeout: 300000, env: gitEnv });
   if (verdict.code && verdict.stdout.trim()) {
     const [file, key] = JSON.parse(verdict.stdout);
     throw Error('credential setting refused in ' + JSON.stringify(file) + ' (' + key + ')');
   }
   checked(verdict, 'source content check');
-  if ((await git(['rev-list', '--full-history', '--max-count=1', commit, '--', ...privateHistoryPaths])).trim())
-    throw Error('bundle history contains credential-related paths; use a source-only history');
   if ((await git(['rev-parse', '--is-shallow-repository'])).trim() === 'true')
     throw Error('a complete source history is required to create an incremental bundle');
   if (files.includes('.devbox-run.json')) throw Error('reserved runner manifest path in source');
   const exportRepo = path.join(temp, 'export.git');
   checked(await execute('git', ['init', '--bare', exportRepo], { state }), 'bundle staging repository');
-  const objects = (await git(['rev-parse', '--path-format=absolute', '--git-path', 'objects'])).trim();
-  fs.writeFileSync(path.join(exportRepo, 'objects/info/alternates'), `${objects}\n`);
+  const objects = fs.realpathSync((await git(['rev-parse', '--path-format=absolute', '--git-path', 'objects'])).trim());
+  const objectDirs = [...new Set([objects, ...parentObjects])];
+  // Some locally assembled module stores borrow blobs from their superproject.
+  // Make that fallback explicit in staging, never by repairing the source store.
+  fs.writeFileSync(path.join(exportRepo, 'objects/info/alternates'), `${objectDirs.join('\n')}\n`);
   checked(await execute('git', ['--git-dir', exportRepo, 'update-ref', 'refs/heads/export', commit], { state }), 'bundle export ref');
   let patchFile, extra;
   if (opts.ref === 'worktree') {
@@ -553,17 +576,41 @@ async function snapshot(opts, temp, state, ancestors = new Set()) {
         if (!name || !relative || relative.split('/').some(part => !part || ['.', '..', '.git'].includes(part))) throw Error('invalid pinned submodule path');
         const repo = path.join(opts.repo, relative);
         if (!fs.existsSync(repo) || fs.realpathSync(repo) !== repo || !fs.existsSync(path.join(repo, '.git'))) throw Error('initialize local submodule: ' + relative);
-        const child = await snapshot({ repo, ref, submodules: true }, fs.mkdtempSync(path.join(temp, 'mod-')), state, new Set([...ancestors, storeKey + commit]));
+        const child = await snapshot({ repo, ref, submodules: true }, fs.mkdtempSync(path.join(temp, 'mod-')), state, new Set([...ancestors, storeKey + commit]), objectDirs);
         const { modules: nested, ...transfer } = child;
         modules.push({ ...transfer, name, relative, parent: '' }, ...nested.map(m => ({ ...m, parent: path.posix.join(relative, m.parent) })));
       }
     }
   }
   const anchors = (await git(['rev-list', '--first-parent', '--max-count=64', commit])).trim().split('\n');
-  return { commit, anchors, storeKey, modules, untracked, exportRepo, patchFile, extra, temp };
+  return { commit, anchors, storeKey, modules, untracked, exportRepo, patchFile, extra, temp, sourceRepo: opts.repo };
 }
 
-async function makeBundle(snapshot, known, state) {
+function bundleDiagnostics(snapshot, args) {
+  const safeEnv = new Set(['TMPDIR', 'GIT_DIR', 'GIT_COMMON_DIR', 'GIT_WORK_TREE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG_COUNT']);
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key === 'TMPDIR' || key.startsWith('GIT_'))
+    .map(([key, value]) => [key, safeEnv.has(key) && !sensitive.test(value) ? value : '[set; value omitted]']));
+  const alternateFile = path.join(snapshot.exportRepo, 'objects/info/alternates');
+  const alternates = [];
+  const seen = new Set();
+  function inspect(file, depth = 0) {
+    if (seen.has(file) || depth > 8) return;
+    seen.add(file);
+    try {
+      const entries = fs.readFileSync(file, 'utf8').trim().split('\n').filter(Boolean);
+      alternates.push({ file, entries });
+      for (const entry of entries) inspect(path.join(path.resolve(path.dirname(path.dirname(file)), entry), 'info/alternates'), depth + 1);
+    } catch (error) { if (error.code !== 'ENOENT') alternates.push({ file, error: error.code }); }
+  }
+  inspect(alternateFile);
+  const gitPath = (process.env.PATH || '').split(path.delimiter).map(dir => path.join(dir, 'git')).find(file => {
+    try { fs.accessSync(file, fs.constants.X_OK); return true; } catch { return false; }
+  });
+  return { command: ['git', '--git-dir', snapshot.exportRepo, ...args], gitPath: gitPath || 'unresolved',
+    sourceRepo: snapshot.sourceRepo || null, cwd: process.cwd(), env, alternates };
+}
+
+export async function makeBundle(snapshot, known, state) {
   const git = args => execute('git', ['--git-dir', snapshot.exportRepo, ...args], { state, timeout: 300000 });
   const bases = [];
   for (const oid of new Set(known)) {
@@ -579,10 +626,20 @@ async function makeBundle(snapshot, known, state) {
   plans.push([]);
   for (const exclusions of plans) {
     const file = path.join(snapshot.temp, 'transfer-' + randomUUID() + '.bundle');
-    const result = await git(['bundle', 'create', file, 'refs/heads/export', ...exclusions]);
+    const args = ['bundle', 'create', file, 'refs/heads/export', ...exclusions];
+    const result = await git(args);
     if (!result.code) return file;
     fs.rmSync(file, { force: true });
-    if (state.cancel || !exclusions.length || result.code === 124) checked(result, exclusions.length ? 'incremental bundle' : 'full bundle');
+    const diagnostics = { ...bundleDiagnostics(snapshot, args), exit: result.code };
+    state.onBundleFailure?.(diagnostics);
+    if (state.cancel || !exclusions.length || result.code === 124) {
+      try { checked(result, exclusions.length ? 'incremental bundle' : 'full bundle'); }
+      catch (error) {
+        error.bundleDiagnostics = diagnostics;
+        error.message += '\nbundleDiagnostics=' + JSON.stringify(error.bundleDiagnostics);
+        throw error;
+      }
+    }
   }
 }
 
@@ -691,13 +748,37 @@ async function shard(opts) {
   const attempts = []; let firstFailure = 0, diskRetries = 0, reruns = 0, avoid;
   const failedSlots = new Set(), diskHosts = new Set();
   const remaining = () => Math.max(1, deadline - Date.now());
-  const runRes = (args, cleanup = false) => execute(resCommand(), args, { state, cancellable: !cleanup, timeout: cleanup ? 30000 : remaining() });
+  const stateFile = path.join(opts.out, `shard-${opts.shard}-state.json`);
+  const resEvents = [];
+  const runRes = (args, cleanup = false) => execute(resCommand(), args, {
+    state, cancellable: !cleanup, timeout: cleanup ? 30000 : remaining(), rawCapture: true,
+    interceptStdout: line => {
+      const slot = /^slot=(devbox-cn-(?:\d+|light(?:-\d+)?))$/.exec(line)?.[1];
+      if (slot) state.reportedSlot = slot;
+      return false;
+    },
+    onOutput: (text, stream) => {
+      const time = new Date().toISOString(), message = text.trimEnd();
+      const kind = /^slot=/.test(message) ? 'slot' : /\b(waiter-start|rollback|return|ack)\b/.exec(message)?.[1] || 'progress';
+      const event = { time, operation: args[0], stream, kind, message: message.slice(0, 2000) };
+      resEvents.push(event);
+      if (resEvents.length > 500) resEvents.splice(10, 1);
+      emit(`[${time}] [shard ${opts.shard}] res ${args[0]} ${stream}: ${message}\n`);
+      try {
+        writeJSON(stateFile, { shard: opts.shard, updatedAt: time, status: cleanup ? 'returning' : 'acquiring', reportedSlot: state.reportedSlot || null, resEvents });
+      } catch { state.stop(74); }
+    },
+  });
   async function release(slot) { checked(await runRes(['return', slot, '--by', by], true), `return ${slot}`); }
   try {
     while (!state.cancel) {
       const attempt = { slot: null, host: null, exit: 1, durationSec: 0, log, returned: false };
       const attemptStart = Date.now(); let row, data, prepared = false, launched = false, clean = true;
       attempts.push(attempt);
+      state.onBundleFailure = diagnostics => {
+        (attempt.bundleFailures ||= []).push(diagnostics);
+        emit(`[shard ${opts.shard}] bundleFailure=${JSON.stringify(diagnostics)}\n`);
+      };
       try {
         let rows = readRegistry(sharedDir(), opts.pool);
         if (!rows.length) throw Error('no open slots in pool');
@@ -803,12 +884,13 @@ async function shard(opts) {
         if (state.cancel) throw Object.assign(Error('cancelled'), { code: state.cancel });
         launched = true;
         const caches = { GRADLE_USER_HOME: `${root}/shared/gradle`, npm_config_cache: `${root}/shared/npm`, PNPM_STORE_DIR: `${root}/shared/pnpm`, CCACHE_DIR: `${root}/shared/ccache`, CCACHE_MAXSIZE: '20G', PIP_CACHE_DIR: `${root}/shared/pip`, DEVBOX_TOOLCHAINS: `${root}/shared/toolchains` };
-        const result = await ssh(row, 'run', { ...data, command, env: { ...caches, ...opts.env }, seconds: remaining() / 1000 }, { state, timeout: remaining() + 15000, onOutput: emit });
+        const result = await ssh(row, 'run', { ...data, command, env: { ...caches, ...opts.env, DEVBOX_RUN_RECEIPT: `${workspace}/.devbox-run.json` }, seconds: remaining() / 1000 }, { state, timeout: remaining() + 15000, onOutput: emit });
         attempt.exit = state.cancel || result.code;
         if (result.infraFailure) attempt.infraFailure = true;
         else if (/permission denied|gssapi|authentication failed/i.test(result.stderr)) attempt.authenticationBlocked = true;
       } catch (error) {
         attempt.exit = state.cancel || error.code || 1; attempt.error = error.message;
+        if (error.bundleDiagnostics) attempt.bundleDiagnostics = error.bundleDiagnostics;
         if (error.infraFailure) attempt.infraFailure = true;
         else if (/permission denied|gssapi|authentication failed/i.test(error.message)) attempt.authenticationBlocked = true;
         emit(`[shard ${opts.shard}] ${error.message}\n`);
@@ -848,7 +930,10 @@ async function shard(opts) {
     }
     const last = attempts.at(-1);
     const flaky = Boolean(firstFailure && last?.exit === 0);
-    return { shard: opts.shard, slot: last?.slot || null, host: last?.host || null, exit: state.cancel || (flaky && !opts.allowFlaky ? firstFailure : last?.exit ?? 1), flaky, durationSec: (Date.now() - started) / 1000, log, attempts };
+    let exit = state.cancel || (flaky && !opts.allowFlaky ? firstFailure : last?.exit ?? 1);
+    try { writeJSON(stateFile, { shard: opts.shard, updatedAt: new Date().toISOString(), status: 'complete', slot: last?.slot || null, exit, resEvents }); }
+    catch { state.stop(74); exit = state.cancel; }
+    return { shard: opts.shard, slot: last?.slot || null, host: last?.host || null, exit, flaky, stateFile, resEvents, durationSec: (Date.now() - started) / 1000, log, attempts };
   } finally { clearTimeout(timer); clearInterval(parentWatch); fs.closeSync(fd); }
 }
 
