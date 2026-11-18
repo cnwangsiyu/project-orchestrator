@@ -149,7 +149,7 @@ function checked(result, label) {
 function remoteCommand(operation, python, data) {
   return `# devbox-run:${operation}\npython3 -c ${quote(python)} ${quote(Buffer.from(JSON.stringify(data)).toString('base64'))}`;
 }
-const pythonHeader = 'import os, sys, json, base64, pathlib, time, signal\nd=json.loads(base64.b64decode(sys.argv[1]))\n';
+const pythonHeader = 'import os, sys, json, base64, pathlib, time, signal\n# Source-only worktrees: never run git-lfs smudge (the bare store has no remote; boxes differ in global git-lfs setup).\nos.environ.update({"GIT_LFS_SKIP_SMUDGE":"1","GIT_CONFIG_COUNT":"3","GIT_CONFIG_KEY_0":"filter.lfs.smudge","GIT_CONFIG_VALUE_0":"git-lfs smudge --skip -- %f","GIT_CONFIG_KEY_1":"filter.lfs.process","GIT_CONFIG_VALUE_1":"git-lfs filter-process --skip","GIT_CONFIG_KEY_2":"filter.lfs.required","GIT_CONFIG_VALUE_2":"false"})\nd=json.loads(base64.b64decode(sys.argv[1]))\n';
 
 export const remoteScripts = {
   probe: pythonHeader + `import subprocess, datetime, tempfile
