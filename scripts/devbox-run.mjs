@@ -631,7 +631,7 @@ async function ssh(row, operation, data, opts = {}) {
       ...opts, interceptStderr: line => { if (line === marker) { started = true; return true; } return false; },
     });
     const transient = result.code === 255 && !started && /Permission denied \(gssapi-with-mic\)|Connection closed\b/i.test(result.stderr);
-    if (opts.noRetry || operation === 'metrics' || !transient || (opts.state?.cancel && opts.cancellable !== false)) return result;
+    if (opts.noRetry || operation === 'metrics' || !transient || (opts.state?.cancel && opts.cancellable !== false)) return { ...result, sshStarted: started };
     if (retry === 3) return { ...result, infraFailure: true, stderr: `SSH establishment failed after 4 attempts: ${result.stderr}` };
     await pause(2000 + Math.floor(Math.random() * 8001));
   }
@@ -1231,10 +1231,11 @@ async function shard(opts) {
         const commandStart = Date.now();
         const result = await ssh(row, 'run', { ...data, command: job, cpus: attempt.cpus, env: { ...caches, ...opts.env, ...cpuEnvironment(attempt.cpus), DEVBOX_RUN_RECEIPT: `${workspace}/.devbox-run.json` }, seconds: remaining() / 1000 }, { state, timeout: remaining() + 15000, onOutput: emit });
         attempt.commandDurationSec = (Date.now() - commandStart) / 1000;
-        if (result.code === 255 && !/permission denied|gssapi|authentication failed/i.test(result.stderr)) attempt.sshDropped = true;
+        const loginFailure = result.code === 255 && !result.sshStarted && /permission denied|gssapi|authentication failed/i.test(result.stderr);
+        if (result.code === 255 && !loginFailure) attempt.sshDropped = true;
         attempt.exit = state.cancel || result.code;
         if (result.infraFailure) attempt.infraFailure = true;
-        else if (/permission denied|gssapi|authentication failed/i.test(result.stderr)) attempt.authenticationBlocked = true;
+        else if (loginFailure) attempt.authenticationBlocked = true;
       } catch (error) {
         attempt.exit = state.cancel || error.code || 1; attempt.error = error.message;
         if (error.bundleDiagnostics) attempt.bundleDiagnostics = error.bundleDiagnostics;

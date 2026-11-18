@@ -79,5 +79,5 @@ if acquire_attempt pool devbox-cn-29; then exit 0; else exit $?; fi
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  console.log(`ALL ${testPoolIdentity()} POOL IDENTITY ASSERTIONS PASSED`);
+  console.log(`ALL ${testPoolIdentity()} ASSERTIONS PASSED`);
 }
