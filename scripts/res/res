@@ -26,10 +26,17 @@ res take <id> --by <session> --project <slug> --for "<purpose>" [--task <id>] [-
 res wait <id> --by <session> --project <slug> --for "<purpose>" --timeout <minutes> [take options]
                                       retry held resources; heavy-* waits also enforce the gate
                                       --pid names the long-lived holder (default: caller PID)
-res wait-pool <prefix> --by <session> --project <slug> --for "<purpose>" --timeout <minutes> [take options]
+res wait-pool <prefix> --by <session> --project <slug> --for "<purpose>" --timeout <minutes> [--need <cap,cap>] [--prefer-host <ip>] [--prefer-slot <id>] [take options]
                                       FIFO wait for any remote <prefix>-<number>; prints slot=<id>
                                       devbox-cn excludes light; devbox-cn-light selects only light
                                       no mini locks or heavy-check; return the printed slot
+                                      skips quarantined boxes; prefer-host falls back immediately
+                                      need requires all caps; prefer-slot then its host precede fallback
+res box-health [--json]               show remote box health (no probes)
+res quarantine <host> --reason "..."  exclude a registered box until unquarantine
+res unquarantine <host>              clear quarantine and infrastructure failure history
+res report-infra <slot> --kind ssh|disk|upload
+                                      3 failures/30 min quarantine for 20 min; next failure repeats
 res heavy-check [--pid <pid>]         print lane-aware load limit and available memory; 5 if overloaded
 res extend <id> --by <session> --until <when>
 res return <id> --by <session> [--note "<text>"]
@@ -545,13 +552,111 @@ lane_waiter_blocks() {
   return 0
 }
 
-# Registry-driven remote pools never participate in the local heavy gate.
-pool_ids() {
-  awk -F'\t' -v pool="$1" '
-    $2 != "remote" || $3 != "open" { next }
-    pool ~ /-light$/ { if ($1 == pool || (index($1, pool "-") == 1 && substr($1, length(pool) + 2) ~ /^[0-9]+$/)) print $1; next }
-    index($1, pool "-") == 1 && substr($1, length(pool) + 2) ~ /^[0-9]+$/ { print $1 }
-  ' "$REG" | LC_ALL=C sort -u
+# Kept inline so the installed standalone res needs no companion deployment.
+# A kernel lock serializes writers; atomic replacement gives readers a whole snapshot.
+box_health() {
+  python3 - "$RES_DIR" "$@" <<'PY'
+import fcntl, json, math, os, re, sys, tempfile, time
+root, action, *args = sys.argv[1:]
+state_path = os.path.join(root, 'box-health.json')
+now = time.time()
+def host_of(description):
+    match = re.search(r'[A-Za-z0-9_.-]+@([A-Za-z0-9][A-Za-z0-9.-]*)', description)
+    return match.group(1).rstrip('.') if match else None
+def read_state():
+    try:
+        with open(state_path) as stream: state = json.load(stream)
+    except FileNotFoundError: return {}
+    if not isinstance(state, dict): raise ValueError('invalid box-health.json')
+    for host, value in state.items():
+        if not isinstance(value, dict): raise ValueError('invalid box health entry')
+        until = value.get('quarantinedUntil', 0)
+        if not isinstance(until, (int, float)) or not math.isfinite(until) or until < 0:
+            raise ValueError('invalid quarantine expiry')
+        for key in ('manual', 'autoQuarantined'):
+            if key in value and not isinstance(value[key], bool): raise ValueError('invalid quarantine flag')
+        if not isinstance(value.get('failures', []), list): raise ValueError('invalid failure history')
+        for failure in value.get('failures', []):
+            if not isinstance(failure, dict) or not isinstance(failure.get('at'), (int, float)) or not math.isfinite(failure['at']):
+                raise ValueError('invalid failure timestamp')
+    return state
+def quarantined(value):
+    return value.get('manual', False) or value.get('quarantinedUntil', 0) > now
+def display(state, hosts):
+    return {host: {**state.get(host, {}), 'quarantined': quarantined(state.get(host, {})),
+                   'failures30m': sum(now - 1800 <= f['at'] <= now for f in state.get(host, {}).get('failures', []))}
+            for host in sorted(hosts)}
+try:
+    with open(os.path.join(root, 'resources.tsv')) as stream:
+        rows = [line.rstrip('\n').split('\t') for line in stream if line.strip() and not line.startswith('#')]
+    remote = {r[0]: (r[2], host_of('\t'.join(r[4:]))) for r in rows if len(r) >= 5 and r[1] == 'remote'}
+    caps = {}
+    for row in rows:
+        if row[0] not in remote: continue
+        match = re.search(r'(?:^|\s)caps=([A-Za-z0-9_,.-]+)(?=\s|$)', '\t'.join(row[4:]))
+        caps[row[0]] = set(match.group(1).split(',')) if match else set()
+    hosts = {host for _, host in remote.values() if host}
+    if action in ('select', 'members'):
+        pool, prefer, preferred_slot, need = args
+        required = set(need.split(',')) if need else set()
+        state = read_state() if action == 'select' else {}
+        ids = [id for id, (policy, host) in remote.items() if policy == 'open'
+               and (re.fullmatch(re.escape(pool) + r'-[0-9]+', id) or pool.endswith('-light') and id == pool)
+               and required <= caps[id]]
+        if not ids:
+            raise ValueError(f"no open remote member of pool '{pool}' satisfies --need '{need or '(none)'}'")
+        ids = [id for id in ids if not quarantined(state.get(remote[id][1], {}))]
+        preferred_host = remote.get(preferred_slot, (None, None))[1]
+        print('\n'.join(sorted(ids, key=lambda id: (id != preferred_slot,
+              not preferred_host or remote[id][1] != preferred_host, remote[id][1] != prefer, id))))
+    elif action == 'check':
+        policy, host = remote.get(args[0], (None, None))
+        required = set(args[1].split(',')) if args[1] else set()
+        sys.exit(2 if policy != 'open' or not required <= caps.get(args[0], set()) or quarantined(read_state().get(host, {})) else 0)
+    elif action == 'show':
+        if args not in ([], ['--json']): raise ValueError('box-health accepts only --json')
+        state = read_state(); shown = display(state, hosts | set(state))
+        if args: print(json.dumps(shown, indent=2))
+        else:
+            for host, value in shown.items():
+                status = 'QUARANTINED' if value['quarantined'] else 'healthy'
+                until = 'manual' if value.get('manual') else value.get('quarantinedUntil', 0)
+                print(f"{host} {status} failures30m={value['failures30m']} until={until} reason={value.get('reason', '')}")
+    else:
+        if action == 'quarantine' and len(args) == 3 and args[1] == '--reason' and args[2].strip():
+            host, _, reason = args
+            if any(c in reason for c in '\r\n\t'): raise ValueError('reason must be one line')
+        elif action == 'unquarantine' and len(args) == 1: host = args[0]
+        elif action == 'report-infra' and len(args) == 3 and args[1] == '--kind' and args[2] in ('ssh', 'disk', 'upload'):
+            host = remote.get(args[0], (None, None))[1]
+        else: raise ValueError('expected quarantine <host> --reason text, unquarantine <host>, or report-infra <slot> --kind ssh|disk|upload')
+        if host not in hosts: raise ValueError('host must belong to a registered remote resource with user@host in its description')
+        with open(os.path.join(root, '.box-health.lock'), 'a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            now = time.time()
+            state = read_state(); value = state.setdefault(host, {})
+            if action == 'unquarantine': state[host] = {}
+            elif action == 'quarantine': value.update(manual=True, reason=reason)
+            else:
+                failures = [f for f in value.get('failures', []) if now - 1800 <= f['at'] <= now]
+                failures.append({'at': now, 'kind': args[2]}); value['failures'] = failures
+                if len(failures) >= 3 or value.get('autoQuarantined'):
+                    value.update(autoQuarantined=True, quarantinedUntil=now + 1200)
+                    if not value.get('manual'): value['reason'] = 'infrastructure failures: ' + args[2]
+            fd, tmp = tempfile.mkstemp(prefix='.box-health.', dir=root)
+            try:
+                with os.fdopen(fd, 'w') as stream:
+                    json.dump(state, stream, indent=2); stream.write('\n'); stream.flush(); os.fsync(stream.fileno())
+                os.replace(tmp, state_path)
+            finally:
+                if os.path.exists(tmp): os.unlink(tmp)
+            with open(os.path.join(root, 'log.tsv'), 'a') as stream:
+                stream.write(f"{time.strftime('%Y-%m-%d %H:%M')}\t{action}\t{host}\tres\t" +
+                             (args[2] if len(args) == 3 else 'cleared') + '\n')
+        print(json.dumps(display(state, [host])))
+except (OSError, ValueError, TypeError, KeyError) as error:
+    print('res: box health: ' + str(error), file=sys.stderr); sys.exit(1)
+PY
 }
 
 pool_waiter_blocks() {
@@ -1108,7 +1213,7 @@ cmd_wait_pool() {
   local pool="${1:-}"; shift || true
   pool="${pool%-}"
   [[ "$pool" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || die "wait-pool needs a resource prefix (for example devbox-cn)"
-  local timeout= timeout_seen= args=() ALLOW_PID=1 pin= ACQUIRE_PID_EXPLICIT
+  local timeout= timeout_seen= args=() ALLOW_PID=1 pin= ACQUIRE_PID_EXPLICIT prefer_host= prefer_slot= POOL_NEED= POOL_ACQUIRE=1
   local duration deadline remaining delay=1 candidate rc ids
   local BUILD_WAITER_DIR= BUILD_WAITER_STAGING= BUILD_WAITER_HOST= BUILD_WAITER_SINCE= BUILD_WAITER_START=
   local BUILD_WAITER_ORDER= BUILD_WAITER_GATE_STREAK=0
@@ -1116,6 +1221,18 @@ cmd_wait_pool() {
   case "$pool" in *-light) WAITER_RESOURCE="$pool" ;; esac
   while [ $# -gt 0 ]; do
     case "$1" in
+      --prefer-host)
+        [ $# -ge 2 ] && [ -n "$2" ] || die "--prefer-host needs a host"
+        [ -z "$prefer_host" ] || die "duplicate --prefer-host"
+        prefer_host="$2"; shift 2 ;;
+      --prefer-slot)
+        [ $# -ge 2 ] && [ -n "$2" ] || die "--prefer-slot needs a slot ID"
+        [ -z "$prefer_slot" ] || die "duplicate --prefer-slot"
+        prefer_slot="$2"; shift 2 ;;
+      --need)
+        [ $# -ge 2 ] && [[ "$2" =~ ^[A-Za-z0-9_.-]+(,[A-Za-z0-9_.-]+)*$ ]] || die "--need needs comma-separated capability names"
+        [ -z "$POOL_NEED" ] || die "duplicate --need"
+        POOL_NEED="$2"; shift 2 ;;
       --timeout)
         [ $# -ge 2 ] || die "--timeout needs minutes"
         [ -z "$timeout_seen" ] || die "duplicate --timeout"
@@ -1131,8 +1248,7 @@ cmd_wait_pool() {
   parse ${args[@]+"${args[@]}"}; validate_pid
   ACQUIRE_PID_EXPLICIT="$PID_EXPLICIT"
   [ -n "$BY" ] && [ -n "$PROJECT" ] && [ -n "$PURPOSE" ] || die "wait-pool needs --by, --project and --for"
-  ids=$(pool_ids "$pool")
-  [ -n "$ids" ] || die "no remote resources in pool '$pool'"
+  ids=$(box_health members "$pool" "$prefer_host" "$prefer_slot" "$POOL_NEED") || return $?
   for candidate in $ids; do
     if [ "$(field "$candidate" by)" = "$BY" ] && [ "$(field "$candidate" pid)" = "$PID" ] && \
       [ "$(field "$candidate" host)" = "$(local_host)" ]; then
@@ -1146,13 +1262,13 @@ cmd_wait_pool() {
     update_build_waiter slot CLOSED
     if [ "$BUILD_WAITER_DIR" = "$(oldest_build_waiter "$WAITER_ROOT")" ]; then
       # Refresh membership on every retry, including newly registered capacity.
-      ids=$(pool_ids "$pool")
+      ids=$(box_health select "$pool" "$prefer_host" "$prefer_slot" "$POOL_NEED") || { rc=$?; cleanup_build_waiter; return "$rc"; }
       for candidate in $ids; do
         [ ! -d "$LOCKS/$candidate.d" ] || continue
         # A member retired (policy never/ask-user) after membership was read is skipped, not fatal.
         [ "$(reg_line "$candidate" | cut -f3)" = open ] || continue
         if acquire_attempt pool "$candidate"; then return 0; else rc=$?; fi
-        [ "$rc" -eq 2 ] || [ "$rc" -eq 3 ] || return "$rc"
+        if [ "$rc" -ne 2 ] && [ "$rc" -ne 3 ]; then cleanup_build_waiter; return "$rc"; fi
       done
     else
       update_build_waiter FIFO CLOSED
@@ -1328,6 +1444,8 @@ cmd_take() {
   if take_mkdir "$LOCKS/$id.d"; then
     TAKE_CREATED=1
     write_info "$(now)" "$id" || return $?
+    # Recheck the health snapshot after mkdir; a losing pool transaction unwinds.
+    if [ "${POOL_ACQUIRE:-0}" = 1 ]; then box_health check "$id" "$POOL_NEED" || return $?; fi
     local RESERVED_MESSAGE=
     if lane_reserved_for_waiter "$id"; then
       RESERVED_MESSAGE="reserved for waiting build $RESERVED_WAITER_HOLDER; retry or use wait-lane"
@@ -1425,6 +1543,8 @@ case "${1:-}" in
   wait-build) shift; cmd_acquire build 1 "$@" ;;
   wait-lane) shift; cmd_acquire lane 1 "$@" ;;
   wait-pool) shift; cmd_wait_pool "$@" ;;
+  box-health) shift; box_health show "$@" ;;
+  quarantine|unquarantine|report-infra) box_health "$@" ;;
   return-build) shift; cmd_return_build "$@" ;;
   heavy-check) shift; cmd_heavy_check "$@" ;;
   extend) shift; cmd_extend "$@" ;;

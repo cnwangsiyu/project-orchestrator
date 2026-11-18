@@ -291,6 +291,8 @@ async function gather() {
     ['resource-review.mjs', ['--hours', '24'], 'resource-review-24h.txt'],
     ['resource-review.mjs', ['--hours', '24', '--json'], 'resource-review-24h.json'],
     ['resource-review.mjs', ['--hours', '96', '--json'], 'resource-review-96h.json'],
+    ['fleet-report.mjs', ['--hours', '24'], 'fleet-report-24h.txt'],
+    ['fleet-report.mjs', ['--hours', '24', '--json'], 'fleet-report-24h.json'],
     ['resource-sample.mjs', ['--read-only', '--json'], 'resource-now.json'],
   ];
   for (const [name, args, out] of jobs) {

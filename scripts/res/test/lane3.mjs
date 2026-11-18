@@ -290,7 +290,7 @@ for (const id of ['heavy-lane-1', 'heavy-lane-2'])
 const currentHelp = run(['--help']).text;
 ok(currentHelp.includes('res wait-pool <prefix>'));
 // Permit only the new command block; all existing v1.2 help stays byte-identical.
-const withoutPoolHelp = text => text.replace(/^res wait-pool[^\n]*\n(?: +[^\n]*\n){3}/gm, '');
+const withoutPoolHelp = text => text.replace(/^res wait-pool[\s\S]*?(?=^res heavy-check)/m, '');
 eq(withoutPoolHelp(currentHelp), run(['--help'], {}, baseline).text);
 const transcript = async (script, name) => {
   const dir = path.join(root, name); fs.mkdirSync(dir);

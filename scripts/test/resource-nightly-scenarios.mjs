@@ -48,6 +48,8 @@ else console.log('{}');
   assert.ok(fs.existsSync(path.join(data, 'resource-review-24h.txt')));
   assert.ok(fs.existsSync(path.join(data, 'resource-review-24h.json')));
   assert.ok(fs.existsSync(path.join(data, 'resource-review-96h.json')));
+  assert.ok(fs.existsSync(path.join(data, 'fleet-report-24h.txt')));
+  assert.ok(fs.existsSync(path.join(data, 'fleet-report-24h.json')));
   assert.equal(JSON.parse(fs.readFileSync(path.join(data, 'resource-now.json'), 'utf8')).complete, false);
   assert.match(fs.readFileSync(path.join(data, 'resource-now.json.err'), 'utf8'), /UNKNOWN/);
   assert.match(fs.readFileSync(path.join(tmp, 'worker-args.txt'), 'utf8'), /--sandbox read-only/);
@@ -61,5 +63,6 @@ else console.log('{}');
   const calls = fs.readFileSync(path.join(tmp, 'calls.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   assert.equal(calls.filter((a) => a[0]?.endsWith('/resource-sample.mjs')).length, 1);
   assert.equal(calls.filter((a) => a[0]?.endsWith('/resource-review.mjs')).length, 3);
+  assert.equal(calls.filter((a) => a[0]?.endsWith('/fleet-report.mjs')).length, 2);
   console.log('resource nightly launcher: read-only hooks, UNKNOWN propagation and dry worker all pass');
 } finally { fs.rmSync(tmp, { recursive: true, force: true }); }

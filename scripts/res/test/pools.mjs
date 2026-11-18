@@ -8,7 +8,11 @@ import { spawn, spawnSync } from 'node:child_process';
 const root = path.join(process.env.RES_TEST_ROOT, 'pools');
 const state = path.join(root, 'state'), mocks = path.join(root, 'mocks');
 fs.mkdirSync(path.join(state, 'locks'), { recursive: true }); fs.mkdirSync(mocks, { recursive: true });
-const row = (id, kind = 'remote') => `${id}\t${kind}\topen\t-\tfixture\n`;
+const hostA = '192.0.2.1', hostB = '192.0.2.2';
+const row = (id, kind = 'remote') => {
+  const first = ['devbox-cn-1', 'devbox-cn-2', 'devbox-cn-light'].includes(id);
+  return `${id}\t${kind}\topen\t-\tfixture runner@${first ? hostA : hostB} caps=node,${first ? 'android' : 'chromium'}\n`;
+};
 fs.writeFileSync(path.join(state, 'resources.tsv'), ['devbox-cn-1', 'devbox-cn-2', 'devbox-cn-3', 'devbox-cn-4', 'devbox-cn-light', 'devbox-cn-light-2'].map(id => row(id)).join('') + row('devbox-cn-6', 'checkout') + row('devbox-cn-special'));
 for (const command of ['adb', 'idevice_id', 'xcrun']) fs.writeFileSync(path.join(mocks, command), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
 // Any accidental heavy-check must fail, even though remote capacity is free.
@@ -114,6 +118,79 @@ try {
   eq(locks().filter(n => n.startsWith('heavy-')), []);
   for (const id of ['devbox-cn-1', 'devbox-cn-2', 'devbox-cn-3', 'devbox-cn-5']) release(id);
   release('devbox-cn-4', 'second');
+
+  const healthFile = path.join(state, 'box-health.json');
+  const health = () => JSON.parse(run(['box-health', '--json']).text);
+  const quarantine = host => eq(run(['quarantine', host, '--reason', 'fixture maintenance']).code, 0);
+  const clear = host => eq(run(['unquarantine', host]).code, 0);
+  const infra = (id, kind = 'ssh') => eq(run(['report-infra', id, '--kind', kind]).code, 0);
+  const expectSlot = (by, id, extra) => { const r = acquire(by, 'devbox-cn', extra); eq(r.code, 0, r.text); ok(r.text.includes(`slot=${id}\n`)); release(id, by); };
+  expectSlot('preferred-host', 'devbox-cn-3', ['--prefer-host', hostB]);
+  expectSlot('preferred-slot', 'devbox-cn-4', ['--prefer-slot', 'devbox-cn-4']);
+  take('devbox-cn-4');
+  expectSlot('preferred-slot-busy', 'devbox-cn-3', ['--prefer-slot', 'devbox-cn-4']);
+  expectSlot('slot-host-before-explicit-host', 'devbox-cn-3', ['--prefer-slot', 'devbox-cn-4', '--prefer-host', hostA]);
+  take('devbox-cn-3'); take('devbox-cn-5');
+  expectSlot('preferred-host-busy', 'devbox-cn-1', ['--prefer-host', hostB]);
+  expectSlot('preferred-slot-host-busy', 'devbox-cn-1', ['--prefer-slot', 'devbox-cn-4']);
+  for (const id of ['devbox-cn-3', 'devbox-cn-4', 'devbox-cn-5']) release(id);
+  expectSlot('all-caps', 'devbox-cn-3', ['--need', 'node,chromium', '--prefer-host', hostA]);
+  expectSlot('caps-before-slot', 'devbox-cn-1', ['--need', 'node,android', '--prefer-slot', 'devbox-cn-4']);
+  const impossible = acquire('impossible', 'devbox-cn', ['--need', 'android,chromium']);
+  eq(impossible.code, 1); ok(impossible.text.includes('no open remote member')); eq(waiters(), []);
+  eq(acquire('bad-caps', 'devbox-cn', ['--need', 'node,']).code, 1);
+  const registryFile = path.join(state, 'resources.tsv'), registry = fs.readFileSync(registryFile, 'utf8');
+  fs.writeFileSync(registryFile, registry.replace(row('devbox-cn-2'), row('devbox-cn-2').replace('caps=node,android', 'caps=node,vesdk-android')));
+  expectSlot('per-slot-caps', 'devbox-cn-2', ['--need', 'vesdk-android', '--prefer-slot', 'devbox-cn-1']);
+  fs.writeFileSync(registryFile, registry);
+  fs.appendFileSync(registryFile, 'devbox-cn-9\tremote\task-user\t-\tfixture runner@192.0.2.9 caps=unique\n');
+  eq(acquire('closed-caps', 'devbox-cn', ['--need', 'unique', '--force']).code, 1);
+  fs.writeFileSync(registryFile, registry);
+  const retained = acquire('retained-hold'); eq(retained.code, 0, retained.text);
+  quarantine(hostA);
+  const retainedAgain = acquire('retained-hold'); eq(retainedAgain.code, 0, retainedAgain.text); ok(retainedAgain.text.includes('slot=devbox-cn-1'));
+  release('devbox-cn-1', 'retained-hold');
+  expectSlot('quarantined-preference', 'devbox-cn-3', ['--prefer-host', hostA]);
+  const lightHealthy = acquire('healthy-light', 'devbox-cn-light', ['--prefer-host', hostA]);
+  eq(lightHealthy.code, 0, lightHealthy.text); ok(lightHealthy.text.includes('slot=devbox-cn-light-2')); release('devbox-cn-light-2', 'healthy-light');
+  eq(acquire('quarantined-caps', 'devbox-cn', ['--need', 'android']).code, 2);
+  for (const id of ['devbox-cn-3', 'devbox-cn-4', 'devbox-cn-5']) take(id);
+  const healthyFirstMark = path.join(root, 'healthy-first'), healthySecondMark = path.join(root, 'healthy-second'), healthyRetry = path.join(root, 'healthy-retry');
+  const healthyFirst = start('healthy-first', { PAUSE_MARK: healthyFirstMark }); await until(() => fs.existsSync(healthyFirstMark), healthyFirst);
+  const healthySecond = start('healthy-second', { PAUSE_MARK: healthySecondMark, SECOND_MARK: healthyRetry }); await until(() => fs.existsSync(healthySecondMark), healthySecond);
+  release('devbox-cn-3'); unblock(healthySecondMark); await until(() => fs.existsSync(healthyRetry), healthySecond);
+  eq(locks().includes('devbox-cn-3.d'), false); eq(locks().includes('devbox-cn-1.d'), false);
+  unblock(healthyFirstMark); eq(await healthyFirst.done, 0, healthyFirst.text); eq(owner('devbox-cn-3'), 'healthy-first');
+  release('devbox-cn-3', 'healthy-first'); unblock(healthyRetry); eq(await healthySecond.done, 0, healthySecond.text); eq(owner('devbox-cn-3'), 'healthy-second');
+  release('devbox-cn-3', 'healthy-second'); release('devbox-cn-4'); release('devbox-cn-5'); clear(hostA);
+  infra('devbox-cn-1'); infra('devbox-cn-2', 'disk'); eq(health()[hostA].quarantined, false);
+  infra('devbox-cn-light', 'upload'); eq(health()[hostA].quarantined, true); eq(health()[hostA].failures30m, 3);
+  expectSlot('auto-skip', 'devbox-cn-3', ['--prefer-host', hostA]);
+  let stored = JSON.parse(fs.readFileSync(healthFile, 'utf8'));
+  stored[hostA].quarantinedUntil = Date.now() / 1000 - 1;
+  for (const f of stored[hostA].failures) f.at -= 3600;
+  fs.writeFileSync(healthFile, JSON.stringify(stored));
+  eq(health()[hostA].quarantined, false);
+  expectSlot('expired-rejoin', 'devbox-cn-1', ['--prefer-host', hostA]);
+  infra('devbox-cn-2'); eq(health()[hostA].quarantined, true); eq(health()[hostA].failures30m, 1); clear(hostA);
+  infra('devbox-cn-1'); infra('devbox-cn-2');
+  stored = JSON.parse(fs.readFileSync(healthFile, 'utf8')); for (const f of stored[hostA].failures) f.at -= 1801;
+  fs.writeFileSync(healthFile, JSON.stringify(stored)); infra('devbox-cn-1'); eq(health()[hostA].quarantined, false); eq(health()[hostA].failures30m, 1); clear(hostA);
+  const concurrent = ['ssh', 'disk', 'upload'].map(kind => new Promise((resolve, reject) => {
+    const child = spawn(process.env.RES_SOURCE, ['report-infra', 'devbox-cn-1', '--kind', kind], { env, stdio: 'ignore' });
+    child.on('error', reject); child.on('close', resolve);
+  }));
+  eq(await Promise.all(concurrent), [0, 0, 0]); eq(health()[hostA].failures30m, 3); clear(hostA);
+  quarantine(hostA); quarantine(hostB); eq(acquire('all-unhealthy').code, 2); eq(waiters(), []); clear(hostA); clear(hostB);
+  eq(run(['report-infra', 'devbox-cn-1', '--kind', 'test']).code, 1);
+  eq(run(['quarantine', '192.0.2.99', '--reason', 'unknown']).code, 1);
+  // Failure after reservation must release both the tentative hold and waiter.
+  const python = spawnSync('python3', ['-c', 'import sys; print(sys.executable)'], { encoding: 'utf8' }).stdout.trim();
+  ok(path.isAbsolute(python));
+  fs.writeFileSync(path.join(mocks, 'python3'), `#!/bin/sh\n[ "$3" != check ] || exit 1\nexec '${python.replaceAll("'", "'\\''")}' "$@"\n`, { mode: 0o755 });
+  try { eq(acquire('health-read-failed-after-reservation').code, 1); eq(locks(), []); eq(waiters(), []); }
+  finally { fs.unlinkSync(path.join(mocks, 'python3')); }
+  fs.writeFileSync(healthFile, '{'); eq(acquire('malformed-health').code, 1); eq(locks(), []); eq(waiters(), []); fs.writeFileSync(healthFile, '{}');
   console.log(`ALL ${count} ASSERTIONS PASSED`);
 } finally {
   // Release fixture pause hooks before signalling their parents on failure.
