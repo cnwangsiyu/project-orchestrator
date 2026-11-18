@@ -74,7 +74,7 @@ import { maskPasswordStyleValues } from './lib/nightly-audit.mjs';
 import { canonicalPathOptions, canonicalBriefPrompt } from './lib/launch-paths.mjs';
 import { requestBoardRefresh } from './lib/board-refresh.mjs';
 import { lifecycle, resolveOwner, validOwner, inbox, readEvents, readAck, eventLine, watch, signalExit, appendEvent, setEventObserver,
-  saveWorkerContext, workerContext, openQuestions, answerQuestion, followerAlive } from './lib/worker-events.mjs';
+  saveWorkerContext, workerContext, answerQuestion, followerAlive } from './lib/worker-events.mjs';
 setEventObserver(requestBoardRefresh);
 // What a TRAE pause covers: one model family (route.mjs moves to the next family) or the whole account.
 const pausedWhat = (p) => (p.pool ? `TRAE's ${p.pool} models are paused` : 'TRAE is paused');
@@ -281,7 +281,7 @@ if (cmd === 'rules-push') {
   for (const row of current.unresolved) console.log(`unresolved owner ${row.ownerOriginal}: ${row.ownerResolution} (${row.ownerMatches?.join(', ')||'no full owner in events'}) event=${row.id}`);
   for (const row of current.pending) console.log(eventLine(row));
   const pendingIds = new Set(current.pending.map((row) => row.id));
-  for (const row of openQuestions(readEvents(), { owner })) if (!pendingIds.has(row.id)) console.log(eventLine(row));
+  for (const row of current.questions) if (!pendingIds.has(row.id)) console.log(eventLine(row));
   // Only query already-known threads; never start a hub or a replacement from mine.
   let rulesVersion, claude;
   try { rulesVersion = loadDigest().version; } catch {}
@@ -369,7 +369,7 @@ const talkbackContext = (thread) => {
     `Worker talkback identity: thread=${thread} account=${metadata.account} owner=${metadata.owner ?? 'unknown'}. Public context: ${file}.\n`
     // Runtime thread IDs disambiguate bare commands when launcher env is ignored;
     // explicit commands also work on runtimes that expose no thread discriminator.
-    + 'Bare note/ask use CODEX_THREAD_ID or TRAECLI_THREAD_ID if launcher environment is missing; otherwise cwd discovery requires exactly one running match. If identity is ambiguous or missing, use the explicit commands below, never another worker\'s identity.\n'
+    + 'Bare note/ask use CODEX_THREAD_ID or TRAECLI_THREAD_ID if launcher environment is missing; otherwise cwd discovery requires exactly one running match. Use the current account below even if a previous attempt used a different account. If identity is ambiguous or missing, use the explicit commands below, never another worker\'s identity.\n'
     + `To send the orchestrator a note without stopping (kinds: risk, scope, progress, info):\nRULES_SHARED=${shellQuote(env.RULES_SHARED)} ${shellQuote(process.execPath)} ${shellQuote(fileURLToPath(import.meta.url))} --account ${metadata.account} note --thread ${thread} --kind info "<text>"\n`
     + `To ask the orchestrator and wait for the answer (exit 3 = timeout, proceed with default; exit 4 = timeout without default):\nRULES_SHARED=${shellQuote(env.RULES_SHARED)} ${shellQuote(process.execPath)} ${shellQuote(fileURLToPath(import.meta.url))} --account ${metadata.account} ask --thread ${thread} --timeout-min 20 --default "<what you will do if nobody answers>" "<question>"\n`
     + 'In read-only/workspace-write, denied shared writes are relayed through your command output without widening the sandbox. If ask exits 6, run the exact ask --await <id> command printed on stderr; it only reads, preserves the original question/default/deadline and does not ask again.\n'

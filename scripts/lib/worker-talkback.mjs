@@ -13,7 +13,19 @@ const explicitIdentity = 'use codex-worker.mjs --account NAME note --thread ID "
 
 export const resolveTalkbackIdentity = ({ account, thread, cwd = process.cwd(), env = process.env, report = () => {} }) => {
   if (account != null && !validOwner(account) || thread != null && !validOwner(thread)) fail('invalid public account/thread identifier');
-  if (thread && account) return workerContext(account, thread);
+  if (thread && account) {
+    const exact = workerContext(account, thread, true);
+    if (exact && validOwner(exact.owner)) return exact;
+    const runtime = [env.CODEX_THREAD_ID, env.TRAECLI_THREAD_ID].filter(Boolean);
+    // A previous attempt can leave the wrong account in the worker's instructions.
+    // Correct an absent account/thread pair only for this exact native runtime thread.
+    if (!exact && runtime.length && runtime.every(id => id === thread)) {
+      const current = resolveTalkbackIdentity({ cwd, env });
+      report(`talkback: corrected account ${account} -> ${current.account} for runtime thread ${current.thread}`);
+      return current;
+    }
+    return workerContext(account, thread);
+  }
   // Runtime shell IDs survive ignored launcher shell_environment_policy.set.
   // Never fall back to another cwd match if a supplied runtime ID cannot resolve.
   const runtimeIds = thread ? [] : ['CODEX_THREAD_ID', 'TRAECLI_THREAD_ID'].filter((name) => env[name]);

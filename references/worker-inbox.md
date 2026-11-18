@@ -202,6 +202,13 @@ acknowledgements do not end watch. The first waking event starts a 45-second col
 `--debounce-sec N` changes it and `--debounce-sec 0` disables it. Late events join the same exit printout,
 including deferred notes. Each open ask caps the window at its deadline minus 80% of its original timeout,
 so a short or already urgent ask flushes promptly. The window never extends on later events.
+Use `codex-worker mine --owner <session-id>` to see unanswered asks and their UTC deadlines, including asks
+already announced. An armed watcher wakes for an unanswered ask halfway through its timeout and again five
+minutes before its deadline when those points fall inside the timeout. Re-arm on every wake. The reminders keep
+the same question ID and deadline. A reminder receipt prevents duplicate wakes when watch is re-armed.
+
+Use the account in the current launch instructions. If an explicit account/thread pair has no record and the
+thread matches the native runtime ID, talkback can recover the account from a unique running public context.
 Watch prints the combined events/receipts/status and exits 0; a background task wakes Claude only on exit. An atomic per-owner
 claim allows only one watcher; duplicate invocations exit with an already-armed notice. Polls remember inode/offset,
 read only appended bytes, skip unchanged files, and prefilter other owners before parsing; rotation refreshes the cursor.

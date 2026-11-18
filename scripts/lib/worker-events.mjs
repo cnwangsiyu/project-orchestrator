@@ -375,7 +375,9 @@ export const eventLine = (row, message = row.finalLine ?? firstLine(row.outFile)
   if (row.event === 'answered') return `worker ${clean(row.name ?? row.thread)} answered: ${clean(row.questionText)} → ${clean(row.text)}`;
   if (row.event === 'message') return `worker ${clean(row.name ?? row.thread)} notes [${clean(row.kind)}]: ${clean(row.text, row.kind === 'queue-stalled' ? Infinity : 2000)}`;
   if (row.event === 'question') return `worker ${clean(row.name ?? row.thread)} asks (id ${clean(row.questionId)}): ${clean(row.text)}`
-    + `${row.default !== undefined ? ` — default: ${clean(row.default)}` : ''} — timeout ${row.timeoutMin}m; answer with codex-worker reply${row.owner ? ` --owner ${clean(row.owner)}` : ''} --thread ${clean(row.thread)} --account ${clean(row.account)} --question ${clean(row.questionId)} "<text>"`;
+    + `${row.default !== undefined ? ` — default: ${clean(row.default)}` : ''} — timeout ${row.timeoutMin}m`
+    + `${Number.isFinite(row.expiresAt) && Number.isFinite(new Date(row.expiresAt).getTime()) ? `; deadline ${new Date(row.expiresAt).toISOString()}` : ''}`
+    + `${row.reminder ? `; reminder: ${row.reminder}` : ''}; answer with codex-worker reply${row.owner ? ` --owner ${clean(row.owner)}` : ''} --thread ${clean(row.thread)} --account ${clean(row.account)} --question ${clean(row.questionId)} "<text>"`;
   return `${clean(row.name ?? row.thread)}\t${clean(row.event)}\t${clean(row.outFile)}\t${clean(message)}`;
 };
 const receipt = (owner, rows, ack) => ({ owner, t: Date.now(), from: rows.reduce((n, row) => Math.min(n, row.seq ?? Infinity), Infinity),
@@ -553,6 +555,37 @@ export const watchDeadline = (flushAt, questions, now = Date.now()) => questions
   const reserveAt = row.expiresAt - row.timeoutMin * 60000 * 0.8;
   return Math.min(deadline, Number.isFinite(reserveAt) ? reserveAt : now);
 }, flushAt);
+const createQuestionReminders = (owner, print) => {
+  const file = path.join(path.dirname(ackFile(owner)), `${ownerKey(owner)}.reminders.json`);
+  let recorded;
+  return async (questions, ack, now = Date.now()) => {
+    const eligible = questions.filter(row => acknowledged(row, ack));
+    if (!eligible.length) return false;
+    if (!recorded) {
+      let saved;
+      try { saved = JSON.parse(readText(file)); } catch {}
+      recorded = saved && typeof saved === 'object' ? saved : {};
+    }
+    const due = [], updates = [];
+    for (const row of eligible) {
+      const duration = row.timeoutMin * 60000;
+      const stages = [
+        ['halfway', row.expiresAt - duration / 2, 'half of the timeout has elapsed'],
+        ['last-five', row.expiresAt - 300000, 'deadline is within five minutes'],
+      ].filter(([key, at]) => at > row.expiresAt - duration && at <= now && !recorded[row.id]?.[key])
+        .sort((a, b) => a[1] - b[1]);
+      if (!stages.length) continue;
+      due.push({ ...row, reminder: stages.at(-1)[2] });
+      updates.push([row.id, { ...recorded[row.id], expiresAt: row.expiresAt, ...Object.fromEntries(stages.map(([key]) => [key, true])) }]);
+    }
+    if (!due.length) return false;
+    await print(due);
+    const retained = Object.entries(recorded).filter(([, row]) => row?.expiresAt > now);
+    await atomicAsync(file, JSON.stringify(Object.fromEntries([...retained, ...updates])));
+    return true;
+  };
+};
+
 export const watch = async (owner, print = (rows) => new Promise((resolve, reject) =>
   process.stdout.write(rows.map((row) => eventLine(row)).join('\n') + '\n', (error) => error ? reject(error) : resolve())), { debounceSec = 45, queueMonitor, rulesPoll } = {}) => {
   if (!Number.isFinite(debounceSec) || debounceSec < 0) throw Error('--debounce-sec takes a nonnegative finite number');
@@ -574,7 +607,7 @@ export const watch = async (owner, print = (rows) => new Promise((resolve, rejec
     } catch { return 0; } finally { if (locked) try { fs.rmdirSync(reaper); } catch {} }
   }
   const heartbeat = () => writeJson(file, { owner, pid: process.pid, token, t: Date.now() });
-  const tail = createEventTail(owner), waitingRuns = new Set();
+  const tail = createEventTail(owner), waitingRuns = new Set(), remindQuestions = createQuestionReminders(owner, print);
   let stopped = false, exit = 143;
   const stop = () => { stopped = true; }, interrupt = () => { exit = 130; stop(); }, hangup = () => { exit = 129; stop(); };
   process.once('SIGTERM', stop); process.once('SIGINT', interrupt); process.once('SIGHUP', hangup);
@@ -620,7 +653,10 @@ export const watch = async (owner, print = (rows) => new Promise((resolve, rejec
           if (delivered) return 0;
           flushAt = undefined;
         }
-      } else if (waitingRuns.size && !snapshot.running.some((row) => !row.stale && waitingRuns.has(row.runId))) {
+      }
+      if (await remindQuestions(snapshot.questions, ack)) return 0;
+      if (flushAt === undefined && !snapshot.questions.length && waitingRuns.size
+        && !snapshot.running.some((row) => !row.stale && waitingRuns.has(row.runId))) {
         await print([{ name: owner, event: 'workers-no-longer-running', finalLine: 'observed completion or stale/dead follower; reconcile with mine' }]);
         return 0;
       }
