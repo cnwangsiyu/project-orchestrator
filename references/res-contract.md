@@ -1,9 +1,17 @@
-# Shared res contract (v1.8, 2026-11-18) - owner: routing/global-rules orchestrator; users: all projects
+# Shared res contract (v1.9, 2026-11-18) - owner: routing/global-rules orchestrator; users: all projects
 
 Maintained source: this project-orchestrator repository, `scripts/res/res`. Ownership of the entire
 tool (devices, checkouts, registry/notes, take/return/extend/add/note/log and heavy admission) transferred
 from vesdk-mainline to the global-rules owner on 2026-11-13. The unmodified v1.2 contract is preserved
-in `scripts/res/test/fixtures/contract-v1.2.md`. v1.8 is staged, not live until the owner's reviewed switch.
+in `scripts/res/test/fixtures/contract-v1.2.md`. v1.9 takes effect at the owner's reviewed switch.
+
+## Changes in v1.9
+
+- Enrolled CN hosts gate new numbered heavy and light slot claims using Linux's **5-minute load average** and `MemAvailable`. Admit if `load5 + reserved cores + task cores <= cores × load-per-core` and `MemAvailable - reserved GiB - task GiB >= memory floor`. A per-host guard shares the reservation budget between both pools and direct takes. Each admitted start reserves its estimated cost for five minutes, including starts that used static fallback and runs that have already returned. The registered open rows remain the hard cap.
+- Default `machine.conf` keys are `DEVBOX_LOAD_PER_CORE=1`, `DEVBOX_MIN_AVAIL_GIB=4`, `DEVBOX_HEAVY_CORES=3`, `DEVBOX_HEAVY_GIB=4`, `DEVBOX_LIGHT_CORES=1`, and `DEVBOX_LIGHT_GIB=2`. Append `.<host>` to any of these six keys for a per-host override, for example `DEVBOX_HEAVY_CORES.10.37.121.175=3`. Enable with `DEVBOX_DYNAMIC_ADMISSION=1` and `DEVBOX_DYNAMIC_HOSTS=10.37.121.175,10.199.23.45,10.199.23.46`. Set the switch to `0` to restore static admission immediately without evicting holders. Publish changes with a sibling temporary file and rename.
+- `res` reads `devbox-metrics/<host>.json` locally. Missing, invalid, future-dated or at least five-minute-old samples trigger static admission on that host. An open row tagged `dynamic-only` requires both enrollment and a fresh sample. The rollout marks `devbox-cn-3` and `devbox-cn-4` this way so CN1 keeps its two baseline heavy rows on fallback or shutdown. Back up `resources.tsv` to `resources.tsv.before-dynamic` before opening and tagging those rows. Install the controller before publishing the registry changes and coordinate old waiters before opening the floating rows.
+- On measured hosts, queued callers preserve headroom on each host an older compatible waiter can use. A FIFO head observed load-blocked for 20 minutes may bypass the load check for its one acquisition. It still needs available memory, an open compatible row, and all normal runner disk checks. Direct takes and younger waiters have no load override. Gate refusals from direct takes return 2 for load/memory and 3 for closed floating rows. Pool waits continue to their normal timeout or another eligible host.
+- `res status` shows each host's held/open row counts and `gate=OPEN|CLOSED` for heavy and light with the reason, load5, reserved cores/GiB and available memory. It reports actual holds even if the switch or metrics have since closed a floating row. `log.tsv` records `gate-admit` and `gate-deny` for evaluated dynamic decisions with the same readings and a reason, including `load-override` and static fallback. The runner collects the sample and checks disk space on the host.
 
 ## Changes in v1.8
 

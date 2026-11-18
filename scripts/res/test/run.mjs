@@ -15,6 +15,7 @@ const SUITE_TIMEOUTS = {
   'lanes.mjs': 600000,
   'pools.mjs': 600000,
   'pool-exec.mjs': 600000,
+  'devbox-admission.mjs': 600000,
   'followups.mjs': 600000,
   'mini-build.mjs': 600000,
   'build.mjs': 1200000,

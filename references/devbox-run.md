@@ -100,6 +100,18 @@ their assigned `units` and per-unit duration/exit receipts.
 
 ## CPU budgets and unit sharding
 
+On enrolled CN hosts the runner refreshes admission metrics before requesting a slot
+when the cached sample is over 60 seconds old. It checks again every minute while
+waiting and refreshes the selected host after a run with confirmed cleanup.
+The probe reads field 2 of Linux `/proc/loadavg` (the five-minute average), the
+CPU count and `MemAvailable`. Samples are atomically published to
+`<RES_DIR>/devbox-metrics/<host>.json` with a local Unix timestamp in seconds.
+The runner can still place work when the probe is unavailable. With no sample
+under five minutes old, `res` uses the baseline static rows and leaves
+`dynamic-only` rows closed. Existing workspace disk checks still run before the job.
+See [the res contract](res-contract.md#changes-in-v19) for host enrollment, reservations,
+status and rollback.
+
 Immediately before each command launch, the runner reads host cores from the
 mini's `devbox-hosts.json` and counts currently held registered heavy slots on
 that box. Proven dead local holder PIDs are excluded; incomplete or remote

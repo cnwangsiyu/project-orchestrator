@@ -286,6 +286,10 @@ function remoteCommand(operation, python, data) {
 const pythonHeader = 'import os, sys, json, base64, pathlib, time, signal\n# Source-only worktrees: never run git-lfs smudge (the bare store has no remote; boxes differ in global git-lfs setup).\nimport shutil as _sh\n_lfs=[("filter.lfs.smudge","git-lfs smudge --skip -- %f"),("filter.lfs.process","git-lfs filter-process --skip")] if _sh.which("git-lfs") else []\n_lfs.append(("filter.lfs.required","false"))\n_lfs.append(("core.hooksPath","/dev/null"))  # runner checkouts never run repo hooks (e.g. git-lfs post-checkout)\nos.environ.update({"GIT_LFS_SKIP_SMUDGE":"1","GIT_CONFIG_COUNT":str(len(_lfs))})\nif not _sh.which("git-lfs"): os.environ.update({"GIT_CONFIG_GLOBAL":"/dev/null","GIT_CONFIG_NOSYSTEM":"1"})  # no git-lfs: drop any global/system lfs driver; undefined filters are no-ops\nfor _i,(_k,_v) in enumerate(_lfs): os.environ["GIT_CONFIG_KEY_%d"%_i]=_k; os.environ["GIT_CONFIG_VALUE_%d"%_i]=_v\nd=json.loads(base64.b64decode(sys.argv[1]))\n';
 
 export const remoteScripts = {
+  metrics: pythonHeader + `load5=float(pathlib.Path('/proc/loadavg').read_text().split()[1])
+mem=next(int(line.split()[1])/1048576 for line in pathlib.Path('/proc/meminfo').read_text().splitlines() if line.startswith('MemAvailable:'))
+print(json.dumps({'cores':os.cpu_count(),'load5':load5,'memAvailableGiB':mem}))
+`,
   probe: pythonHeader + `import subprocess, datetime, tempfile
 data=pathlib.Path('/data00'); home=pathlib.Path(os.path.expanduser('~'))
 candidates=([data/'home'/d['user']/'devbox-run',data/d['user']/'devbox-run'] if data.is_dir() else [])+[home/'devbox-run']
@@ -612,7 +616,7 @@ async function ssh(row, operation, data, opts = {}) {
       ...opts, interceptStderr: line => { if (line === marker) { started = true; return true; } return false; },
     });
     const transient = result.code === 255 && !started && /Permission denied \(gssapi-with-mic\)|Connection closed\b/i.test(result.stderr);
-    if (!transient || (opts.state?.cancel && opts.cancellable !== false)) return result;
+    if (operation === 'metrics' || !transient || (opts.state?.cancel && opts.cancellable !== false)) return result;
     if (retry === 3) return { ...result, infraFailure: true, stderr: `SSH establishment failed after 4 attempts: ${result.stderr}` };
     await pause(2000 + Math.floor(Math.random() * 8001));
   }
@@ -819,12 +823,12 @@ export async function makeBundle(snapshot, known, state) {
 }
 
 // Local short critical sections merge shared JSON without losing another shard's host/key.
-async function withStateLock(file, operation) {
+async function withStateLock(file, operation, maxAttempts = 1500) {
   const lock = `${file}.lock`;
   for (let attempt = 0; ; attempt++) {
     try { fs.mkdirSync(lock); break; }
     catch (error) {
-      if (error.code !== 'EEXIST' || attempt === 1500) throw error;
+      if (error.code !== 'EEXIST' || attempt === maxAttempts) throw error;
       await pause(50);
     }
   }
@@ -836,6 +840,53 @@ async function mergeState(file, key, value) {
     let data = {}; try { data = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw error; }
     data[key] = value; writeJSON(file, data);
   });
+}
+
+function dynamicMetricHosts() {
+  try {
+    const fd = fs.openSync(path.join(sharedDir(), 'machine.conf'), fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+    let conf;
+    try {
+      if (!fs.fstatSync(fd).isFile()) return new Set();
+      conf = fs.readFileSync(fd, 'utf8');
+    } finally { fs.closeSync(fd); }
+    const values = key => [...conf.matchAll(new RegExp(`^[ \\t]*${key}[ \\t]*=[ \\t]*([^\\n]*)`, 'gm'))].map(match => match[1].trim());
+    const enabled = values('DEVBOX_DYNAMIC_ADMISSION'), hosts = values('DEVBOX_DYNAMIC_HOSTS');
+    return new Set(conf.endsWith('\n') && enabled.length === 1 && enabled[0] === '1' && hosts.length === 1 ? hosts[0].split(',') : []);
+  } catch { return new Set(); }
+}
+
+async function refreshHostMetrics(rows, state, { force = false, timeout = 15000 } = {}) {
+  if (state.cancel || timeout <= 0) return;
+  const enabled = dynamicMetricHosts();
+  const hosts = new Map(rows.filter(row => enabled.has(row.host)).map(row => [row.host, row]));
+  await Promise.all([...hosts].map(async ([host, row]) => {
+    const file = path.join(sharedDir(), 'devbox-metrics', `${host}.json`);
+    const requestedAt = Date.now() / 1000;
+    const valid = value => Number.isInteger(value?.cores) && value.cores > 0
+      && [value.load5, value.memAvailableGiB].every(item => Number.isFinite(item) && item >= 0);
+    const fresh = () => {
+      try {
+        const value = JSON.parse(fs.readFileSync(file, 'utf8'));
+        return valid(value) && Number.isFinite(value.at) && value.at <= Date.now() / 1000
+          && value.at >= requestedAt - (force ? 0 : 60);
+      } catch { return false; }
+    };
+    if (fresh()) return;
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      await withStateLock(file, async () => {
+        const at = Date.now() / 1000, remaining = timeout - (at - requestedAt) * 1000;
+        if (state.cancel || remaining <= 0 || fresh()) return;
+        const result = await ssh(row, 'metrics', {}, { state, timeout: remaining });
+        if (result.code) return;
+        const { cores, load5, memAvailableGiB } = JSON.parse(result.stdout);
+        if (valid({ cores, load5, memAvailableGiB })) writeJSON(file, { at, cores, load5, memAvailableGiB });
+      }, Math.floor(timeout / 50));
+    } catch {
+      // Admission handles an unavailable sample using the registered static slots.
+    }
+  }));
 }
 
 async function hostRoot(row, state) {
@@ -1015,10 +1066,13 @@ async function shard(opts) {
         const affinity = affinities[opts.affinity];
         const preferred = avoid ? (choices.find(item => item.host !== avoid.host) || choices[0]).host : opts.preferHost || affinity?.host;
         const common = ['--by', by, '--project', opts.project, '--task', opts.task, '--for', opts.task, '--pid', String(process.pid)];
-        const args = ['wait-pool', opts.pool, ...common, '--timeout', String(remaining() / 60000)];
         const skipSlots = new Set([...opts.excludeSlot, ...failedSlots]);
         const skipHosts = new Set([...opts.excludeHost, ...diskHosts]);
         if (avoid && choices.some(item => item.host !== avoid.host)) skipHosts.add(avoid.host);
+        const metricRows = choices.filter(item => !skipHosts.has(item.host));
+        const refresh = () => refreshHostMetrics(metricRows, state, { timeout: Math.min(15000, remaining()) });
+        await refresh();
+        const args = ['wait-pool', opts.pool, ...common, '--timeout', String(remaining() / 60000)];
         if (opts.excludeSlotSupported && skipSlots.size) args.push('--exclude-slot', [...skipSlots].join(','));
         if (opts.excludeHostSupported && skipHosts.size) args.push('--exclude-host', [...skipHosts].join(','));
         if (preferred && opts.preferSupported) args.push('--prefer-host', preferred);
@@ -1041,7 +1095,14 @@ async function shard(opts) {
           if (!take.code) { acquire = { ...take, stdout: `slot=${candidate.slot}\n` }; break; }
           if (take.code !== 2 && take.code !== 3) checked(take, 'affinity slot acquisition');
         }
-        acquire ||= await runRes(args);
+        if (!acquire) {
+          let refreshing;
+          const timer = setInterval(() => {
+            if (!refreshing) refreshing = refresh().finally(() => { refreshing = null; });
+          }, 60000);
+          try { acquire = await runRes(args); }
+          finally { clearInterval(timer); await refreshing; }
+        }
         const match = /^slot=(\S+)$/m.exec(acquire.stdout);
         if (match) attempt.slot = match[1];
         checked(acquire, 'slot acquisition');
@@ -1162,6 +1223,7 @@ async function shard(opts) {
         if (attempt.slot && clean) {
           try { await release(attempt.slot); attempt.returned = true; } catch (error) { attempt.exit ||= 70; attempt.returnError = error.message; emit(`[shard ${opts.shard}] BLOCKED: ${error.message}\n`); }
         }
+        if (launched && clean) await refreshHostMetrics([row], state, { force: true });
         // Interrupted res can acquire before publishing slot=. Recover only this PID/holder.
         if (!attempt.slot) {
           for (const member of runRows(opts)) {

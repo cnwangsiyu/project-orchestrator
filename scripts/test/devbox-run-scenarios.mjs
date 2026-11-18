@@ -111,6 +111,10 @@ if(op==='probe') {
  const root=path.join(c.dir,'remote',host,c.dataDisk===false?'home':'data00',d.user,'devbox-run');fs.mkdirSync(root,{recursive:true});
  console.log(JSON.stringify({root,user:d.user,fs:c.dataDisk===false?'/':'/data00',freeGiB:100,totalGiB:200,cores:8,memGiB:32,probedAt:new Date().toISOString()}));return;
 }
+if(op==='metrics') {
+ if(c.metricsUnavailable)process.exit(1);
+ console.log(JSON.stringify({cores:8,load5:2.5,memAvailableGiB:24}));return;
+}
 if(op==='bundle'&&c.uploadRetry&&!fs.existsSync(path.join(c.dir,'retried'))){fs.writeFileSync(path.join(c.dir,'retried'),'1');process.stdin.resume();await new Promise(r=>process.stdin.on('end',r));console.error(c.uploadRetry);process.exit(255);}
 if(op==='run') {
  fs.mkdirSync(d.control,{recursive:true});
@@ -591,9 +595,52 @@ os.kill(pid,0)`;
   console.log('PASS UUID stop targets its own run; stale remote ownership records preserve foreign process');
 }
 
+async function metricScenarios() {
+  const host = '192.0.2.1';
+  const load = path.join(temp, 'loadavg'), mem = path.join(temp, 'meminfo');
+  fs.writeFileSync(load, '99.00 2.50 1.00 1/1 1\n');
+  fs.writeFileSync(mem, 'MemTotal: 33554432 kB\nMemAvailable: 25165824 kB\n');
+  const metricsSource = remoteScripts.metrics.replace("'/proc/loadavg'", JSON.stringify(load))
+    .replace("'/proc/meminfo'", JSON.stringify(mem));
+  const actual = JSON.parse(execFileSync('python3', ['-c', metricsSource, 'e30='], { encoding: 'utf8' }));
+  assert.ok(actual.cores > 0);
+  assert.equal(actual.load5, 2.5);
+  assert.equal(actual.memAvailableGiB, 24);
+  const config = f => path.join(f.shared, 'machine.conf');
+  const setGate = (f, enabled) => fs.writeFileSync(config(f), `DEVBOX_DYNAMIC_ADMISSION=${enabled}\nDEVBOX_DYNAMIC_HOSTS=${host}\n`);
+  const f = fixture();
+  setGate(f, 1);
+  const file = path.join(f.shared, 'devbox-metrics', host + '.json');
+  fs.mkdirSync(path.dirname(file));
+  fs.writeFileSync(file, JSON.stringify({ at: Date.now() / 1000 - 61, cores: 8, load5: 0, memAvailableGiB: 24 }));
+  ok(await run(f));
+  const first = f.events().map(event => event.op);
+  assert.equal(first.filter(op => op === 'metrics').length, 2);
+  assert.ok(first.indexOf('metrics') < first.indexOf('acquire-call'));
+  assert.ok(first.lastIndexOf('metrics') > first.indexOf('group-gone'));
+  const sample = JSON.parse(fs.readFileSync(file));
+  assert.deepEqual({ ...sample, at: 0 }, { at: 0, cores: 8, load5: 2.5, memAvailableGiB: 24 });
+  assert.ok(Date.now() / 1000 - sample.at < 60);
+  ok(await run(f));
+  assert.equal(f.events().filter(event => event.op === 'metrics').length, 3, 'fresh sample only refreshes after the next run');
+  setGate(f, 0);
+  ok(await run(f));
+  assert.equal(f.events().filter(event => event.op === 'metrics').length, 3);
+  returned(f);
+
+  const unavailable = fixture({ metricsUnavailable: true, diskFailHost: host });
+  setGate(unavailable, 1);
+  const result = await run(unavailable); ok(result);
+  assert.equal(result.summary.shards[0].attempts[0].exit, 72);
+  assert.equal(result.summary.shards[0].host, '192.0.2.2');
+  assert.ok(!unavailable.events().some(event => event.op === 'run' && event.host === host && event.slot === 'devbox-cn-1'));
+  returned(unavailable);
+  console.log('PASS devbox metrics refresh, fresh-cache reuse, kill switch and disk guard on fallback');
+}
+
 async function scenarios() {
   const only = process.env.DEVBOX_TEST_CASE;
-  const perf = { credentials: credentialScenarios, 'packed-module': packedModuleRecovery, receipt: receiptScenarios, 'res-progress': resProgressScenarios, cpu: cpuScenarios, auto: autoScenarios, units: unitScenarios, prewarm: prewarmScenarios };
+  const perf = { credentials: credentialScenarios, 'packed-module': packedModuleRecovery, receipt: receiptScenarios, 'res-progress': resProgressScenarios, cpu: cpuScenarios, auto: autoScenarios, units: unitScenarios, prewarm: prewarmScenarios, metrics: metricScenarios };
   if (only && !['baseline', 'bundle', 'ownership', ...Object.keys(perf)].includes(only)) throw Error('unknown devbox fixture case');
   for (const [name, scenario] of Object.entries(perf)) if (!only || only === name) await scenario();
   if (!only || only === 'baseline' || only === 'bundle') await bundleRecovery();
