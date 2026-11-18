@@ -224,7 +224,7 @@ try {
   const gated = start('wait-lane', 'gated-live', 'B', { RES_TEST_LOAD1M: '21' });
   await until(() => waiterDirs().some((dir) => Number(field(path.join(dir, 'info'), 'gate_streak')) >= 3), gated);
   take('heavy-lane-2', 'gate-pass'); release('heavy-lane-2', 'gate-pass');
-  fs.writeFileSync(path.join(state, 'machine.conf.next'), 'LOAD_LIMIT=30\nLOAD_LIMIT_WITH_LANES=30\n');
+  fs.writeFileSync(path.join(state, 'machine.conf.next'), 'LOAD_LIMIT=30\nLOAD_LIMIT_WITH_LANES=30\nLANE_LOAD_PER_CORE=2.5\nBUILD_LOAD_PER_CORE=2.5\n');
   fs.renameSync(path.join(state, 'machine.conf.next'), path.join(state, 'machine.conf'));
   eq(await gated.done, 0); eq(waiterDirs(), []); eq(holder('heavy-lane-2'), 'gated-live'); release('heavy-lane-2', 'gated-live');
   fs.rmSync(path.join(state, 'machine.conf'));

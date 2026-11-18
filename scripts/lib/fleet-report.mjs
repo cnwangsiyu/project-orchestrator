@@ -26,6 +26,7 @@ function workHoursMs(start, end) {
 export function computeFleet({ log, registry, now = Date.now(), since = now - 24 * HOUR, holders = null, probes = null, health = null }) {
   if (!Number.isFinite(since) || !Number.isFinite(now) || since >= now) throw Error('report window must start before now');
   const warnings = [], resources = new Map(), active = new Map(), pending = new Map(), queues = new Map(), latestTake = new Map();
+  const buildDurations = { solo: [], concurrent: [] };
   const duration = now - since, workDuration = workHoursMs(since, now);
   for (const line of registry.split('\n').filter(l => l.trim() && !l.startsWith('#'))) {
     const [id, kind, policy, , ...description] = line.split('\t');
@@ -62,6 +63,14 @@ export function computeFleet({ log, registry, now = Date.now(), since = now - 24
       latestTake.set(e.holder, e);
     } else if (['return', 'reclaim', 'rollback'].includes(e.event)) {
       if (e.event !== 'return' || active.get(e.resource)?.by === by) close(e.resource, e.t);
+    }
+    if (e.event === 'return' && /^heavy-build(?:-[23])?$/.test(e.resource)) {
+      const mode = /(?:^|\s)build_mode=(solo|concurrent)(?:\s|$)/.exec(e.detail)?.[1];
+      const peak = Number(/(?:^|\s)peak_concurrent=(\d+)(?:\s|$)/.exec(e.detail)?.[1]);
+      const seconds = Number(/(?:^|\s)duration_seconds=(\d+)(?:\s|$)/.exec(e.detail)?.[1]);
+      if (mode && Number.isSafeInteger(peak) && peak > 0 && Number.isSafeInteger(seconds) && seconds >= 0 &&
+          (mode === 'solo' ? peak === 1 : peak > 1)) buildDurations[mode].push(seconds / 60);
+      else if (/build_mode=|peak_concurrent=|duration_seconds=/.test(e.detail)) warnings.push('Malformed build-duration telemetry skipped.');
     }
     const key = `${e.resource}\t${e.holder}`;
     if (e.event === 'waiter-start') pending.set(key, e.t);
@@ -118,7 +127,7 @@ export function computeFleet({ log, registry, now = Date.now(), since = now - 24
     timezone: 'work hours: PST (UTC-08:00); unzoned journal timestamps: local collector time',
     basis: 'Registered resources over the full window; box/totals capacity uses currently open slots. Slot-hours measure reservations, not CPU use. Mini totals exclude the overlapping heavy-build mutex.',
     warnings, resources: all.map(r => ({ ...summarize([r], r.id), kind: r.kind, policy: r.policy, box: r.box })),
-    boxes, totals, queues: queueRows, recommendations };
+    boxes, totals, queues: queueRows, buildDurations: { solo: waitStats(buildDurations.solo), concurrent: waitStats(buildDurations.concurrent) }, recommendations };
 }
 
 export function readFleet({ directory = process.env.RES_DIR || process.env.RULES_SHARED || path.join(os.homedir(), '.claude/orchestrator/_shared'), ...options } = {}) {
@@ -160,6 +169,8 @@ export function formatFleet(report) {
   }
   for (const group of Object.values(report.totals)) lines.push(`${group.id} total: ${group.busyHours}/${group.capacityHours} slot-hours busy (${number(group.busyPct)}%), ${group.takes} takes`);
   for (const queue of report.queues) lines.push(`${queue.id} queue: ${queue.count} acquisitions, wait p50/p90/max ${[queue.p50Minutes, queue.p90Minutes, queue.maxMinutes].map(number).join('/')} min`);
+  const duration = mode => `${mode} n=${report.buildDurations?.[mode]?.count ?? 0} p50/p90/max ${['p50Minutes', 'p90Minutes', 'maxMinutes'].map(key => number(report.buildDurations?.[mode]?.[key])).join('/')} min`;
+  lines.push(`Build durations: ${duration('solo')}; ${duration('concurrent')}`);
   lines.push(...report.recommendations.map(r => `Recommendation: ${r}`));
   return lines.join('\n');
 }

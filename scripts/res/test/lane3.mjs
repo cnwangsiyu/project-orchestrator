@@ -199,8 +199,10 @@ eq(take().code, 0);
 const other = run(['heavy-check', '--pid', String(process.ppid)], { RES_TEST_LOAD1M: '20' });
 eq(other.code, 0); ok(other.text.includes('limit=20 lanes_held=1')); ok(other.text.includes('lane3=CLOSED'));
 ok(run(['heavy-check', '--pid', String(process.pid)]).text.includes('limit=12 lanes_held=0')); release();
+// v1.8 applies the new load/memory admission gate to normal lanes too.
 for (const id of ['heavy-lane-1', 'heavy-lane-2']) {
-  eq(take({ RES_TEST_LOAD1M: '99', RES_TEST_MEMORYSTATUS_LEVEL: '0' }, id).code, 0); release(id);
+  eq(take({ RES_TEST_LOAD1M: '99', RES_TEST_MEMORYSTATUS_LEVEL: '0' }, id).code, 5);
+  eq(fs.existsSync(lock(id)), false);
 }
 // Real wrapper fallback reaches lane 3 without disturbing the two other holds.
 for (const id of ['heavy-lane-1', 'heavy-lane-2']) eq(take({}, id).code, 0);

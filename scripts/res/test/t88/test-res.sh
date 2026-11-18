@@ -7,7 +7,7 @@ ROOT=$(mktemp -d "$SOURCE/check.XXXXXX")
 export RES_DIR="$ROOT/scratch"
 mkdir -p "$RES_DIR/locks" "$RES_DIR/notes" "$ROOT/snapshots"
 printf 'heavy-build\tslot\topen\t-\tscratch build\nheavy-lane-1\tslot\topen\t-\tscratch lane\nheavy-lane-2\tslot\topen\t-\tscratch lane\n' >"$RES_DIR/resources.tsv"
-export RES_TEST_METRICS=1 RES_TEST_LOAD1M=11 RES_TEST_MEMORYSTATUS_LEVEL=37
+export RES_TEST_METRICS=1 RES_TEST_LOAD1M=11 RES_TEST_MEMORYSTATUS_LEVEL=37 RES_TEST_PHYSICAL_CORES=14
 export RES_TEST_MEMSIZE=68719476736 RES_TEST_SWAPUSAGE='used = 0M'
 export RES_TEST_VM_STAT=$'Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free: 1048576.\nPages inactive: 0.\nPages speculative: 0.'
 OUT="$ROOT/last-output.txt"
@@ -57,7 +57,7 @@ expect() {
   pass "exit $expected: $*"
 }
 contains() { grep -F -- "$1" "$OUT" >/dev/null || fail "missing $1"; pass "$1"; }
-hold() { expect 0 "$RES" take "$1" --by "fixture-$1" --project scratch --for fixture --pid "$2"; }
+hold() { expect 0 env RES_TEST_LOAD1M=8 RES_TEST_MEMORYSTATUS_LEVEL=37 "$RES" take "$1" --by "fixture-$1" --project scratch --for fixture --pid "$2"; }
 release() { expect 0 "$RES" return "$1" --by T88; }
 clear_holds() {
   rm -rf "$RES_DIR/locks"
@@ -78,7 +78,7 @@ unchanged() {
 touch "$RES_DIR/log.tsv"
 printf 'SCRATCH_ROOT=%s\nRES=%s\n' "$ROOT" "$RES"
 
-# 0/1/2 other lanes x load 11/15/21 x memory okay/low, through both interfaces.
+# Compare the legacy build gate and the dedicated lane gate under the same load.
 for held in 0 1 2; do
   clear_holds
   [ "$held" -lt 1 ] || hold heavy-lane-1 "$other_pid"
@@ -106,11 +106,16 @@ for held in 0 1 2; do
       for id in heavy-build heavy-lane-1 heavy-lane-2; do
         occupied=0
         [ ! -d "$RES_DIR/locks/$id.d" ] || occupied=1
+        wait_limit="$limit" wait_gate="$gate"
+        if [ "$id" != heavy-build ]; then
+          wait_limit=17.5 wait_gate=OK
+          if [ "$load" -gt 17 ]; then wait_gate=OVERLOADED; fi
+        fi
         expected=0
-        if [ "$gate_rc" = 5 ] || [ "$occupied" = 1 ]; then expected=2; fi
+        if [ "$wait_gate" = OVERLOADED ] || [ "$occupied" = 1 ]; then expected=2; fi
         expect "$expected" "$RES" wait "$id" --by T88 --project scratch --for matrix --pid "$$" --timeout 0
-        contains "load1m=$load.00 limit=$limit lanes_held=$held avail=${avail}GiB"
-        contains "gate=$gate"
+        contains "load1m=$load.00 limit=$wait_limit lanes_held=$held avail=${avail}GiB"
+        contains "gate=$wait_gate"
         if [ "$expected" = 0 ]; then
           [ -d "$RES_DIR/locks/$id.d" ] || fail "wait did not acquire $id"
           release "$id"
@@ -157,7 +162,7 @@ contains 'limit=12 lanes_held=0'
 unchanged
 RES_TEST_LOAD1M=11
 expect 2 "$RES" wait heavy-lane-1 --by T88 --project scratch --for young-stale --pid "$$" --timeout 0
-contains 'limit=12 lanes_held=0'
+contains 'limit=17.5 lanes_held=0'
 [ -d "$RES_DIR/locks/heavy-lane-1.d" ] || fail 'young stale hold was reclaimed'
 pass 'young STALE is ignored by gate but not reclaimed'
 hold heavy-lane-2 "$other_pid"

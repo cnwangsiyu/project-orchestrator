@@ -15,7 +15,8 @@ const registry = [
 const event = (time, action, id, holder = 'owner (project/task)', detail = '') => `2026-11-16T${time}:00-08:00\t${action}\t${id}\t${holder}\t${detail}`;
 const log = [event('08:00', 'take', 'heavy-lane-1'), event('11:00', 'return', 'heavy-lane-1', 'owner'),
   event('13:00', 'take', 'heavy-lane-2'), event('14:00', 'return', 'heavy-lane-2', 'owner'),
-  event('13:00', 'take', 'heavy-build'), event('14:00', 'return', 'heavy-build', 'owner'),
+  event('13:00', 'take', 'heavy-build'), event('14:00', 'return', 'heavy-build', 'owner', 'build_mode=solo peak_concurrent=1 duration_seconds=3600'),
+  event('14:00', 'take', 'heavy-build-2'), event('14:30', 'return', 'heavy-build-2', 'owner', 'build_mode=concurrent peak_concurrent=2 duration_seconds=1800'),
   event('08:00', 'take', 'devbox-cn-1'), event('10:00', 'take', 'devbox-cn-1'),
   event('11:00', 'reclaim', 'devbox-cn-1', 'reclaimer'),
   event('12:00', 'take', 'devbox-cn-2'), event('14:00', 'return', 'devbox-cn-2', 'wrong-owner'),
@@ -32,6 +33,8 @@ const report = computeFleet({ log, registry, since, now, probes });
 const resource = id => report.resources.find(r => r.id === id);
 assert.equal(resource('heavy-lane-1').busyHours, 2);
 assert.equal(resource('heavy-build').busyHours, 1);
+assert.deepEqual(report.buildDurations.solo, { count: 1, p50Minutes: 60, p90Minutes: 60, maxMinutes: 60 });
+assert.deepEqual(report.buildDurations.concurrent, { count: 1, p50Minutes: 30, p90Minutes: 30, maxMinutes: 30 });
 assert.equal(report.totals.mini.busyHours, 3);
 assert.equal(report.totals.mini.busyPct, 12.5);
 assert.equal(report.totals.devbox.slots, 3);
@@ -50,7 +53,7 @@ assert.deepEqual(report.boxes[0].waits, { count: 2, p50Minutes: 5, p90Minutes: 1
 assert.equal(resource('devbox-cn-2').waits.maxMinutes, 5);
 assert.ok(report.recommendations.some(s => s.includes('09:00–21:00 PST')));
 assert.ok(report.recommendations.some(s => s.includes('wait p90 30 min')));
-assert.match(formatFleet(report), /STALE/);
+assert.match(formatFleet(report), /STALE/); assert.match(formatFleet(report), /Build durations: solo n=1.*concurrent n=1/);
 assert.equal(fleetBoxLines(report).length, 3);
 
 // Split night/work occupancy: only the work-hour reservation enters the alert.

@@ -3,16 +3,20 @@
 Owner: routing/global-rules orchestrator since 2026-11-13. Maintained contract:
 project-orchestrator/references/res-contract.md. Install only after reviewed owner switch.
 
-- Full iOS/Android SDK+host-app builds need the ONE `heavy-build` slot AND one
-  heavy lane for the whole run. `take-build` / `wait-build` acquire the pair
+- Full iOS/Android SDK+host-app builds need one counted `heavy-build` hold AND
+  one heavy lane for the whole run. Default build capacity is two (configurable
+  1..3); res status shows k/N. `take-build` / `wait-build` acquire the pair
   together or release partial acquisitions before retrying. NEVER hold either
   resource while waiting for the other. Default lane order is 1, 2, then 3.
   `--lane heavy-lane-N` (wrapper: HEAVY_BUILD_LANE) pins without hold-and-wait.
+  Optional `--checkout <path|resource>` makes checkout identity explicit;
+  concurrent builds must have distinct resolved checkout/repository identities.
 - SG packaging and heavy focused tests use `wait-lane`, selecting any free
   admitted lane without taking heavy-build. Repeating `wait-lane` with the
   same holder name and PID returns that existing lane; it does not take two.
-  Two normal heavy lanes; optional lane 3 defaults to load1m <=8 AND available
-  memory >=32 GiB at acquisition. Active values come from heavy-check.
+  Normal lanes 1/2 default to load1m <=1.25 x physical cores and available
+  memory >=12 GiB. Optional lane 3 defaults to load1m <=8 AND available memory
+  >=32 GiB at acquisition. Active values come from heavy-check.
 - `wait-lane` publishes a live heartbeat record, shown by res status. While a
   ready waiter from another project with no lane exists, a project holding a lane yields
   additional lanes. Eligible lane waiters proceed FIFO; gate-blocked waiters
@@ -39,14 +43,22 @@ project-orchestrator/references/res-contract.md. Install only after reviewed own
   `take-build`: 0 pair acquired, 2 unavailable, 5 overloaded, 1 metrics/usage
   error (policy codes propagate). `wait-*`: 0 acquired, 2 timeout; other errors
   propagate. Legacy take/wait/return and their help remain compatible.
-- Heavy acquisition runs heavy-check with the selected holder PID every retry.
-  Default normal gate: available memory >=16 GiB and load1m <=min(20,12+8*other lanes).
+- Full-build acquisition retains the legacy heavy-check with the selected holder
+  PID every retry: available memory >=16 GiB and load1m <=min(20,12+8*other lanes).
   Count held heavy-lane-* only, excluding local proven STALE and matching
   holder PID; legacy/remote holds count conservatively. Lane 3 enforces its
   stricter configured gate again at take time. OPEN does not mean FREE.
   Plain take still needs caller heavy-check (lane-3 take also enforces its gate).
+- The first build also requires load1m <=1.5 x physical cores. Second/third
+  builds require load1m <=0.6 x cores, available memory >=24 GiB, spare configured
+  capacity and no checkout/repository conflict; unresolved legacy identity blocks
+  overlap. A FIFO head load-blocked for 20 minutes may bypass only the new first-
+  build/lane-1/2 gates, never legacy/concurrent/lane-3/metrics/ownership/FIFO checks.
 - Optional RES_DIR/machine.conf overrides LOAD_LIMIT, LOAD_LIMIT_WITH_LANES,
-  MIN_AVAIL_GIB, LANE3_LOAD and LANE3_AVAIL_GIB as validated KEY=value data.
+  MIN_AVAIL_GIB, LANE3_LOAD, LANE3_AVAIL_GIB, LANE_LOAD_PER_CORE,
+  LANE_MIN_AVAIL_GIB, BUILD_LOAD_PER_CORE, BUILD_MAX_CONCURRENCY,
+  BUILD_CONCURRENT_LOAD_PER_CORE, BUILD_CONCURRENT_MIN_AVAIL_GIB,
+  LOAD_OVERRIDE_MINUTES and LOAD_POLL_SECONDS as validated KEY=value data.
   heavy-check prints all active values and defaults/machine.conf source.
   Publish a complete newline-terminated file using temp + rename; never edit
   machine.conf in place. Invalid paths and incomplete/changing reads fail with
@@ -63,7 +75,8 @@ project-orchestrator/references/res-contract.md. Install only after reviewed own
   Do not nest wrappers, share a holder across runs, or adopt preexisting holds.
   Signals during pair attempts unwind newly created holds. SIGKILL/crash uses
   STALE recovery. Two mkdirs can be briefly visible during an in-flight attempt;
-  there is no backoff or lane wait with a partial hold and no extra mutex.
+  there is no backoff or lane wait with a partial hold. A private short-lived
+  build-admission lock serializes slot selection; it is not capacity.
 - Wrappers MUST exit when their worker dies: traps plus a parent watch. Optional
   heavy-build.sh --watch-pid <worker/follower/agent-shell PID> <command...>
   terminates owned command descendants and returns holds on worker death,

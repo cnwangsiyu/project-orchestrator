@@ -101,6 +101,9 @@ heavy_lanes_held() {
 # values fail closed; an absent file retains the original admission thresholds.
 machine_thresholds() {
   LOAD_LIMIT=12 LOAD_LIMIT_WITH_LANES=20 MIN_AVAIL_GIB=16 LANE3_LOAD=8 LANE3_AVAIL_GIB=32
+  LANE_LOAD_PER_CORE=1.25 LANE_MIN_AVAIL_GIB=12 BUILD_LOAD_PER_CORE=1.5
+  BUILD_MAX_CONCURRENCY=2 BUILD_CONCURRENT_LOAD_PER_CORE=0.6 BUILD_CONCURRENT_MIN_AVAIL_GIB=24
+  LOAD_OVERRIDE_MINUTES=20 LOAD_POLL_SECONDS=15
   THRESHOLDS_SOURCE=defaults
   local conf="$RES_DIR/machine.conf" content values key value
   if [ ! -e "$conf" ]; then
@@ -138,9 +141,10 @@ PY
       key=parts[1]; value=parts[2]
       gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
       gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
-      if (key !~ /^(LOAD_LIMIT|LOAD_LIMIT_WITH_LANES|MIN_AVAIL_GIB|LANE3_LOAD|LANE3_AVAIL_GIB)$/ || seen[key]++) exit 1
+      if (key !~ /^(LOAD_LIMIT|LOAD_LIMIT_WITH_LANES|MIN_AVAIL_GIB|LANE3_LOAD|LANE3_AVAIL_GIB|LANE_LOAD_PER_CORE|LANE_MIN_AVAIL_GIB|BUILD_LOAD_PER_CORE|BUILD_MAX_CONCURRENCY|BUILD_CONCURRENT_LOAD_PER_CORE|BUILD_CONCURRENT_MIN_AVAIL_GIB|LOAD_OVERRIDE_MINUTES|LOAD_POLL_SECONDS)$/ || seen[key]++) exit 1
       if (value !~ /^[0-9]+([.][0-9]+)?$/ || value + 0 <= 0) exit 1
-      max = key ~ /GIB$/ ? 65536 : 1024
+      if (key ~ /^(BUILD_MAX_CONCURRENCY|LOAD_POLL_SECONDS)$/ && value !~ /^[0-9]+$/) exit 1
+      max = key ~ /GIB$/ ? 65536 : (key == "LOAD_OVERRIDE_MINUTES" ? 1440 : 1024)
       if (value + 0 > max) exit 1
       print key "\t" value
     }') || die "invalid machine.conf (unique known KEY=value; load >0..1024, GiB >0..65536)"
@@ -152,22 +156,44 @@ PY
       MIN_AVAIL_GIB) MIN_AVAIL_GIB="$value" ;;
       LANE3_LOAD) LANE3_LOAD="$value" ;;
       LANE3_AVAIL_GIB) LANE3_AVAIL_GIB="$value" ;;
+      LANE_LOAD_PER_CORE) LANE_LOAD_PER_CORE="$value" ;;
+      LANE_MIN_AVAIL_GIB) LANE_MIN_AVAIL_GIB="$value" ;;
+      BUILD_LOAD_PER_CORE) BUILD_LOAD_PER_CORE="$value" ;;
+      BUILD_MAX_CONCURRENCY) BUILD_MAX_CONCURRENCY="$value" ;;
+      BUILD_CONCURRENT_LOAD_PER_CORE) BUILD_CONCURRENT_LOAD_PER_CORE="$value" ;;
+      BUILD_CONCURRENT_MIN_AVAIL_GIB) BUILD_CONCURRENT_MIN_AVAIL_GIB="$value" ;;
+      LOAD_OVERRIDE_MINUTES) LOAD_OVERRIDE_MINUTES="$value" ;;
+      LOAD_POLL_SECONDS) LOAD_POLL_SECONDS="$value" ;;
     esac
   done <<<"$values"
   awk -v empty="$LOAD_LIMIT" -v held="$LOAD_LIMIT_WITH_LANES" -v mem="$MIN_AVAIL_GIB" \
     -v third="$LANE3_LOAD" -v thirdmem="$LANE3_AVAIL_GIB" \
     'BEGIN { exit !(held >= empty && third <= empty && thirdmem >= mem) }' || die "invalid machine.conf (held load >= idle load; lane 3 load <= idle load and memory >= normal memory)"
+  awk -v lane="$LANE_LOAD_PER_CORE" -v build="$BUILD_LOAD_PER_CORE" \
+    -v concurrent="$BUILD_CONCURRENT_LOAD_PER_CORE" -v lane_mem="$LANE_MIN_AVAIL_GIB" \
+    -v concurrent_mem="$BUILD_CONCURRENT_MIN_AVAIL_GIB" -v override="$LOAD_OVERRIDE_MINUTES" \
+    -v poll="$LOAD_POLL_SECONDS" 'BEGIN {
+      exit !(concurrent <= lane && lane <= build && concurrent_mem >= lane_mem && override <= 1440 && poll >= 15 && poll <= 30)
+    }' || die "invalid machine.conf (concurrent load <= lane <= first-build load; concurrent memory >= lane memory; override <=1440 minutes; poll 15..30 seconds)"
+  [ "$BUILD_MAX_CONCURRENCY" -le 3 ] || die "invalid machine.conf (BUILD_MAX_CONCURRENCY must be 1..3)"
   THRESHOLDS_SOURCE=machine.conf
 }
 
 cmd_heavy_check() {
-  local PID="$PPID" lanes_held limit
+  local PID="$PPID" lanes_held limit admission=legacy override=0
   local LOAD_LIMIT LOAD_LIMIT_WITH_LANES MIN_AVAIL_GIB LANE3_LOAD LANE3_AVAIL_GIB THRESHOLDS_SOURCE
+  local LANE_LOAD_PER_CORE LANE_MIN_AVAIL_GIB BUILD_LOAD_PER_CORE BUILD_MAX_CONCURRENCY
+  local BUILD_CONCURRENT_LOAD_PER_CORE BUILD_CONCURRENT_MIN_AVAIL_GIB LOAD_OVERRIDE_MINUTES LOAD_POLL_SECONDS cores=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --pid)
         [ $# -ge 2 ] || die "--pid needs a value"
         PID="$2"; shift 2 ;;
+      --admission)
+        [ $# -ge 2 ] || die "--admission needs lane, build or build-concurrent"
+        case "$2" in lane|build|build-concurrent) admission="$2" ;; *) die "--admission needs lane, build or build-concurrent" ;; esac
+        shift 2 ;;
+      --load-override) override=1; shift ;;
       *) die "unknown option '$1'" ;;
     esac
   done
@@ -178,6 +204,11 @@ cmd_heavy_check() {
   [ "$lanes_held" -eq 0 ] || limit="$LOAD_LIMIT_WITH_LANES"
   printf 'thresholds source=%s LOAD_LIMIT=%s LOAD_LIMIT_WITH_LANES=%s MIN_AVAIL_GIB=%s LANE3_LOAD=%s LANE3_AVAIL_GIB=%s\n' \
     "$THRESHOLDS_SOURCE" "$LOAD_LIMIT" "$LOAD_LIMIT_WITH_LANES" "$MIN_AVAIL_GIB" "$LANE3_LOAD" "$LANE3_AVAIL_GIB"
+  if [ "$admission" != legacy ]; then
+    printf 'admission-policy LANE_LOAD_PER_CORE=%s LANE_MIN_AVAIL_GIB=%s BUILD_LOAD_PER_CORE=%s BUILD_MAX_CONCURRENCY=%s BUILD_CONCURRENT_LOAD_PER_CORE=%s BUILD_CONCURRENT_MIN_AVAIL_GIB=%s LOAD_OVERRIDE_MINUTES=%s LOAD_POLL_SECONDS=%s\n' \
+      "$LANE_LOAD_PER_CORE" "$LANE_MIN_AVAIL_GIB" "$BUILD_LOAD_PER_CORE" "$BUILD_MAX_CONCURRENCY" \
+      "$BUILD_CONCURRENT_LOAD_PER_CORE" "$BUILD_CONCURRENT_MIN_AVAIL_GIB" "$LOAD_OVERRIDE_MINUTES" "$LOAD_POLL_SECONDS"
+  fi
   local load headroom platform pages_reading pages_headroom memorystatus memsize swap_reading swap_used
   local has_memorystatus=1 test_dir live_dir
   platform=$(uname -s)
@@ -193,8 +224,10 @@ cmd_heavy_check() {
         memorystatus="${RES_TEST_MEMORYSTATUS_LEVEL-}"
         memsize="${RES_TEST_MEMSIZE-}"
         swap_reading="${RES_TEST_SWAPUSAGE-}"
+        [ "$admission" = legacy ] || cores="${RES_TEST_PHYSICAL_CORES:-14}"
         if [ "$memorystatus" = missing ]; then has_memorystatus=0; fi
       else
+        [ "$admission" = legacy ] || cores=$(LC_ALL=C sysctl -n hw.physicalcpu) || die "cannot read physical cores"
         load=$(LC_ALL=C sysctl -n vm.loadavg) || die "cannot read load1m"
         load=$(printf '%s\n' "$load" | awk '{print $2}')
         pages_reading=$(LC_ALL=C vm_stat) || die "cannot read memory headroom"
@@ -235,21 +268,54 @@ cmd_heavy_check() {
       awk -v load="$load" -v pages="$pages_headroom" -v level="$memorystatus" \
         -v has_level="$has_memorystatus" -v ram="$memsize" -v swap="$swap_used" \
         -v limit="$limit" -v lanes="$lanes_held" -v min_gib="$MIN_AVAIL_GIB" \
+        -v admission="$admission" -v cores="$cores" -v override="$override" \
+        -v lane_ratio="$LANE_LOAD_PER_CORE" -v lane_gib="$LANE_MIN_AVAIL_GIB" -v build_ratio="$BUILD_LOAD_PER_CORE" \
+        -v concurrent_ratio="$BUILD_CONCURRENT_LOAD_PER_CORE" -v concurrent_gib="$BUILD_CONCURRENT_MIN_AVAIL_GIB" \
+        -v poll="$LOAD_POLL_SECONDS" -v override_minutes="$LOAD_OVERRIDE_MINUTES" \
         -v third_load="$LANE3_LOAD" -v third_gib="$LANE3_AVAIL_GIB" 'BEGIN {
         if (load !~ /^[0-9]+([.][0-9]+)?$/ || pages !~ /^[0-9]+$/ || swap !~ /^[0-9]+$/) exit 1
         if (has_level && (level !~ /^[0-9]+$/ || level > 100 || ram !~ /^[0-9]+$/ || ram <= 0)) exit 1
+        if (admission != "legacy" && (cores !~ /^[0-9]+$/ || cores + 0 <= 0)) exit 1
+        if ((admission == "lane" || admission == "build-concurrent") && !has_level) exit 1
         gib = (has_level ? level / 100 * ram : pages) / 1073741824
-        overloaded = load > limit || gib < min_gib
+        legacy_bad = load > limit || gib < min_gib
+        new_bad = admission == "lane" ? load > cores * lane_ratio || gib < lane_gib : load > cores * build_ratio
+        if (admission == "build-concurrent") new_bad = load > cores * concurrent_ratio || gib < concurrent_gib
+        used = override && admission != "build-concurrent" && new_bad
+        overloaded = admission == "legacy" ? legacy_bad : admission == "lane" ? new_bad && !used : legacy_bad || (new_bad && !used)
+        blocked = admission ~ /^build/ && legacy_bad ? "gate" : overloaded ? "load" : "none"
+        if (admission == "lane") { limit = cores * lane_ratio; min_gib = lane_gib }
+        if (admission == "build" && cores * build_ratio < limit) limit = cores * build_ratio
+        if (admission == "build-concurrent") { if (cores * concurrent_ratio < limit) limit = cores * concurrent_ratio; if (concurrent_gib > min_gib) min_gib = concurrent_gib }
         lane3 = load <= third_load && gib >= third_gib ? "OPEN" : "CLOSED"
         source = has_level ? sprintf("memorystatus %d%%", level) : "memorystatus unavailable; pages fallback"
-        printf "load1m=%.2f limit=%s lanes_held=%d avail=%.2fGiB (%s) pages_headroom=%.2fGiB swap_used=%.2fGiB gate=%s lane3=%s\n", \
+        printf "load1m=%.2f limit=%s lanes_held=%d avail=%.2fGiB (%s) pages_headroom=%.2fGiB swap_used=%.2fGiB gate=%s lane3=%s", \
           load, limit, lanes, gib, source, pages / 1073741824, swap / 1073741824, overloaded ? "OVERLOADED" : "OK", \
           lane3
+        if (admission != "legacy") printf " admission=%s cores=%d min_avail_gib=%s load_override=%d blocked=%s poll_seconds=%s override_minutes=%s", \
+          admission, cores, min_gib, used, blocked, poll, override_minutes
+        printf "\n"
         exit overloaded ? 5 : 0
       }'
       return $?
       ;;
     Linux)
+      if [ "$admission" != legacy ]; then
+        if [ "${RES_TEST_METRICS:-0}" = 1 ]; then
+          test_dir=$(cd "$RES_DIR" && pwd -P) || die "test metrics need an existing scratch RES_DIR"
+          live_dir=$(cd "$HOME/.claude/orchestrator/_shared" && pwd -P) || die "cannot resolve live RES_DIR"
+          [ "$test_dir" != "$live_dir" ] || die "test metrics require a scratch RES_DIR"
+          cores="${RES_TEST_PHYSICAL_CORES:-14}"
+        else
+          cores=$(awk -F: '
+            function save() { if (socket != "" && core != "") seen[socket ":" core] = 1; socket = core = "" }
+            /^physical id/ { socket=$2; gsub(/ /, "", socket) }
+            /^core id/ { core=$2; gsub(/ /, "", core) }
+            /^$/ { save() }
+            END { save(); for (id in seen) n++; if (!n) exit 1; print n }
+          ' /proc/cpuinfo) || die "cannot read physical cores"
+        fi
+      fi
       load=$(awk '{print $1}' /proc/loadavg) || die "cannot read load1m"
       headroom=$(awk '/^MemAvailable:/ {printf "%.0f\n", $2 * 1024; found = 1}
         END {if (!found) exit 1}' /proc/meminfo) || die "cannot read memory headroom"
@@ -257,19 +323,35 @@ cmd_heavy_check() {
     *) die "heavy-check is unsupported on this OS" ;;
   esac
   awk -v load="$load" -v bytes="$headroom" -v limit="$limit" -v lanes="$lanes_held" \
+    -v admission="$admission" -v cores="$cores" -v override="$override" \
+    -v lane_ratio="$LANE_LOAD_PER_CORE" -v lane_gib="$LANE_MIN_AVAIL_GIB" -v build_ratio="$BUILD_LOAD_PER_CORE" \
+    -v concurrent_ratio="$BUILD_CONCURRENT_LOAD_PER_CORE" -v concurrent_gib="$BUILD_CONCURRENT_MIN_AVAIL_GIB" \
+    -v poll="$LOAD_POLL_SECONDS" -v override_minutes="$LOAD_OVERRIDE_MINUTES" \
     -v min_gib="$MIN_AVAIL_GIB" -v third_load="$LANE3_LOAD" -v third_gib="$LANE3_AVAIL_GIB" 'BEGIN {
     if (load !~ /^[0-9]+([.][0-9]+)?$/ || bytes !~ /^[0-9]+$/) exit 1
+    if (admission != "legacy" && (cores !~ /^[0-9]+$/ || cores + 0 <= 0)) exit 1
     gib = bytes / 1073741824
-    overloaded = load > limit || gib < min_gib
+    legacy_bad = load > limit || gib < min_gib
+    new_bad = admission == "lane" ? load > cores * lane_ratio || gib < lane_gib : load > cores * build_ratio
+    if (admission == "build-concurrent") new_bad = load > cores * concurrent_ratio || gib < concurrent_gib
+    used = override && admission != "build-concurrent" && new_bad
+    overloaded = admission == "legacy" ? legacy_bad : admission == "lane" ? new_bad && !used : legacy_bad || (new_bad && !used)
+    blocked = admission ~ /^build/ && legacy_bad ? "gate" : overloaded ? "load" : "none"
+    if (admission == "lane") { limit = cores * lane_ratio; min_gib = lane_gib }
+    if (admission == "build" && cores * build_ratio < limit) limit = cores * build_ratio
+    if (admission == "build-concurrent") { if (cores * concurrent_ratio < limit) limit = cores * concurrent_ratio; if (concurrent_gib > min_gib) min_gib = concurrent_gib }
     lane3 = load <= third_load && gib >= third_gib ? "OPEN" : "CLOSED"
-    printf "load1m=%.2f limit=%s lanes_held=%d avail=%.2fGiB headroom=%.2f GiB gate=%s lane3=%s\n", \
+    printf "load1m=%.2f limit=%s lanes_held=%d avail=%.2fGiB headroom=%.2f GiB gate=%s lane3=%s", \
       load, limit, lanes, gib, gib, overloaded ? "OVERLOADED" : "OK", lane3
+    if (admission != "legacy") printf " admission=%s cores=%d min_avail_gib=%s load_override=%d blocked=%s poll_seconds=%s override_minutes=%s", \
+      admission, cores, min_gib, used, blocked, poll, override_minutes
+    printf "\n"
     exit overloaded ? 5 : 0
   }'
 }
 
 # Use the unrounded controller verdict, never the rounded load/avail display.
-lane3_open() { [[ "$1" = *' lane3=OPEN' ]]; }
+lane3_open() { [[ "$1" = *' lane3=OPEN'* ]]; }
 
 # A PID dot lock serializes reclaimers and recovers dead reclaimers. Rename
 # before deleting so cleanup cannot remove a newly acquired hold's directory.
@@ -294,7 +376,7 @@ reclaim_stale_heavy() (
 
 cmd_wait() {
   local id="${1:-}"; shift || true; need_id "$id"
-  local timeout= args=() duration deadline remaining delay=1 rc reading ALLOW_PID=1
+  local timeout= args=() duration deadline remaining delay=1 rc reading load_poll ALLOW_PID=1
   while [ $# -gt 0 ]; do
     case "$1" in
       --timeout)
@@ -317,7 +399,11 @@ cmd_wait() {
     rc=0
     case "$id" in
       heavy-*)
-        if reading=$(cmd_heavy_check --pid "$PID"); then
+        local admission_args=()
+        case "$id" in
+          heavy-lane-1|heavy-lane-2) admission_args=(--admission lane) ;;
+        esac
+        if reading=$(cmd_heavy_check --pid "$PID" ${admission_args[@]+"${admission_args[@]}"}); then
           printf '%s\n' "$reading"
           if [ "$id" != heavy-lane-3 ] || lane3_open "$reading"; then
             reclaim_stale_heavy "$id" "$BY" || true
@@ -332,12 +418,16 @@ cmd_wait() {
     esac
     if [ "$rc" -ne 5 ]; then
       if wait_take_attempt "$id" ${args[@]+"${args[@]}"}; then return 0; else rc=$?; fi
-      [ "$rc" -eq 2 ] || { [ "$id" = heavy-lane-3 ] && [ "$rc" -eq 5 ]; } || return "$rc"
+      [ "$rc" -eq 2 ] || [ "$rc" -eq 5 ] || return "$rc"
     fi
     remaining=$((deadline - SECONDS))
     if [ "$remaining" -le 0 ]; then
       echo "res: timed out waiting for '$id' after $timeout minutes" >&2
       return 2
+    fi
+    if [ "$rc" -eq 5 ] && [[ "$id" =~ ^heavy-lane-[12]$ ]]; then
+      load_poll=$(reading_field "$reading" poll_seconds)
+      [ -z "$load_poll" ] || delay="$load_poll"
     fi
     [ "$delay" -le "$remaining" ] || delay="$remaining"
     echo "res: waiting for '$id'; retry in ${delay}s" >&2
@@ -426,6 +516,38 @@ waiter_is_current() {
     [ "$(waiter_field "$dir" host)" = "${BUILD_WAITER_HOST:-}" ]
 }
 
+oldest_live_waiter() {
+  local dir order root="${1:-$WAITERS}"
+  cleanup_build_waiters "$root"
+  for dir in "$root"/waiter.*; do
+    [ -d "$dir" ] || continue
+    order=$(waiter_field "$dir" order); [ -n "$order" ] || order=$(waiter_field "$dir" start)
+    printf '%s\t%s\n' "$order" "$dir"
+  done | LC_ALL=C sort -t $'\t' -k1,1 -k2,2 | head -1 | cut -f2-
+}
+
+reading_field() {
+  printf '%s\n' "$1" | awk -v key="$2" '{for (i=1; i<=NF; i++) if (index($i, key "=") == 1) {sub(/^[^=]*=/, "", $i); print $i; exit}}'
+}
+
+update_load_head() {
+  local blocked="$1" head=
+  if [ "$blocked" = load ]; then head=$(oldest_live_waiter "${WAITER_ROOT:-$WAITERS}"); fi
+  if [ -n "$head" ] && waiter_is_current "$head"; then
+    [ "${LOAD_HEAD_SINCE:-0}" != 0 ] || LOAD_HEAD_SINCE=$(date +%s)
+  else
+    LOAD_HEAD_SINCE=0
+  fi
+}
+
+head_load_override() {
+  [ -n "${BUILD_WAITER_DIR:-}" ] && [ "${LOAD_HEAD_SINCE:-0}" != 0 ] || return 1
+  local current head; current=$(date +%s); head=$(oldest_live_waiter "${WAITER_ROOT:-$WAITERS}")
+  waiter_is_current "$head" || return 1
+  awk -v current="$current" -v since="$LOAD_HEAD_SINCE" -v minutes="$1" \
+    'BEGIN { exit !(since ~ /^[0-9]+$/ && current >= since && current - since >= minutes * 60) }'
+}
+
 waiter_live() {
   local dir="$1" pid host heartbeat current rc=0
   [ -f "$dir/info" ] || return 1
@@ -484,19 +606,20 @@ holder_has_live_waiter() {
 # after atomic mkdir makes concurrent non-waiters conservative: at least one
 # of them rolls back rather than jointly consuming the last admitted lane.
 lane_reserved_for_waiter() {
-  local candidate="$1" waiter holder pin lane3 build_holder build_pid lane free=0 eligible=0
+  local candidate="$1" waiter holder pin lane3 build_id build_holder build_pid lane free=0 eligible=0
   case "$candidate" in heavy-lane-[123]) ;; *) return 1 ;; esac
   waiter=$(oldest_build_waiter); [ -n "$waiter" ] || return 1
   holder=$(waiter_field "$waiter" holder); pin=$(waiter_field "$waiter" lane); lane3=$(waiter_field "$waiter" lane3)
   if [ "${WAITER_RESOURCE:-}" = heavy-build ] && [ -n "${BUILD_WAITER_DIR:-}" ] && [ "$holder" = "$BY" ] && [ "$(waiter_field "$waiter" pid)" = "$PID" ]; then
     return 1
   fi
-  if [ -d "$LOCKS/heavy-build.d" ] && ! hold_stale heavy-build; then
-    build_holder=$(field heavy-build by); build_pid=$(field heavy-build pid)
+  for build_id in heavy-build heavy-build-2 heavy-build-3; do
+    [ -d "$LOCKS/$build_id.d" ] && ! hold_stale "$build_id" || continue
+    build_holder=$(field "$build_id" by); build_pid=$(field "$build_id" pid)
     # A holder that still has a waiter record is an in-flight pair attempt,
     # not the established active build that suspends the reservation.
     holder_has_live_waiter "$build_holder" "$build_pid" || return 1
-  fi
+  done
   for lane in ${pin:-heavy-lane-1 heavy-lane-2 heavy-lane-3}; do
     [ -n "$(reg_line "$lane")" ] || continue
     [ "$lane" != heavy-lane-3 ] || [ "$lane3" = OPEN ] || continue
@@ -715,10 +838,10 @@ pool_waiter_blocks() {
 
 write_build_waiter() {
   local blocked="$1" lane3="$2" tmp="$BUILD_WAITER_DIR/info.$$"
-  printf 'holder\t%s\nproject\t%s\ntask\t%s\npid\t%s\nhost\t%s\nsince\t%s\nstart\t%s\norder\t%s\nheartbeat\t%s\nblocked\t%s\ngate_streak\t%s\nlane\t%s\nlane3\t%s\n' \
+  printf 'holder\t%s\nproject\t%s\ntask\t%s\npid\t%s\nhost\t%s\nsince\t%s\nstart\t%s\norder\t%s\nheartbeat\t%s\nblocked\t%s\ngate_streak\t%s\nlane\t%s\nlane3\t%s\nhead_since\t%s\n' \
     "$BY" "$PROJECT" "$TASK" "$PID" "$BUILD_WAITER_HOST" "$BUILD_WAITER_SINCE" \
     "$BUILD_WAITER_START" "$BUILD_WAITER_ORDER" "$(date +%s)" "$blocked" \
-    "$BUILD_WAITER_GATE_STREAK" "$pin" "$lane3" >"$tmp"
+    "$BUILD_WAITER_GATE_STREAK" "$pin" "$lane3" "${LOAD_HEAD_SINCE:-0}" >"$tmp"
   mv "$tmp" "$BUILD_WAITER_DIR/info"
 }
 
@@ -731,12 +854,18 @@ next_waiter_order() {
 }
 
 start_build_waiter() {
-  local published suffix root="${WAITER_ROOT:-$WAITERS}"
+  local published suffix root="${WAITER_ROOT:-$WAITERS}" test_dir live_dir
   mkdir -p "$root"
   BUILD_WAITER_DIR=$(mktemp -d "$root/.staging.XXXXXX")
   BUILD_WAITER_HOST=$(local_host); BUILD_WAITER_SINCE=$(now); BUILD_WAITER_START=$(date +%s)
   BUILD_WAITER_ORDER=$(next_waiter_order)
   BUILD_WAITER_GATE_STREAK=0
+  if [ -n "${RES_TEST_LOAD_HEAD_SINCE:-}" ]; then
+    [ "${RES_TEST_METRICS:-0}" = 1 ] && [[ "$RES_TEST_LOAD_HEAD_SINCE" =~ ^[0-9]+$ ]] || die "test load-head age requires injected scratch metrics and an epoch"
+    test_dir=$(cd "$RES_DIR" && pwd -P); live_dir=$(cd "$HOME/.claude/orchestrator/_shared" && pwd -P)
+    [ "$test_dir" != "$live_dir" ] || die "test load-head age requires a scratch RES_DIR"
+    LOAD_HEAD_SINCE="$RES_TEST_LOAD_HEAD_SINCE"
+  fi
   write_build_waiter starting CLOSED
   arm_build_waiter_cleanup
   suffix="${BUILD_WAITER_DIR##*.staging.}"; published="$root/waiter.$suffix"
@@ -789,7 +918,7 @@ finish_build_waiter() {
 }
 
 show_build_waiters() {
-  local dir found=0 root="${1:-$WAITERS}" label="${2:-builds}"
+  local dir blocked found=0 root="${1:-$WAITERS}" label="${2:-builds}"
   cleanup_build_waiters "$root"
   for dir in "$root"/waiter.*; do [ -d "$dir" ] && found=1; done
   [ "$found" -eq 1 ] || return 0
@@ -800,11 +929,13 @@ show_build_waiters() {
     [ -d "$dir" ] || continue
     printf '%s\t%s\n' "$(waiter_field "$dir" order)" "$dir"
   done | LC_ALL=C sort -t $'\t' -k1,1 | while IFS=$'\t' read -r _ dir; do
+    blocked=$(waiter_field "$dir" blocked)
+    [ "$blocked" != load ] || blocked=blocked=load
     printf '%-24s %-24s %-16s %s\n' \
       "$(waiter_field "$dir" holder)" \
       "$(waiter_field "$dir" project)/$(waiter_field "$dir" task)" \
       "$(waiter_field "$dir" since)" \
-      "$(waiter_field "$dir" blocked)"
+      "$blocked"
   done
 }
 
@@ -1031,11 +1162,142 @@ wait_take_attempt() {
   exit 0
 }
 
+build_guard_start() {
+  [ "${BUILD_GUARD:-0}" = 0 ] || return 0
+  mkdir -p "$RES_DIR"
+  shlock -p "$$" -f "$RES_DIR/.build-admission.lock" 2>/dev/null || return 2
+  BUILD_GUARD=1
+}
+
+build_guard_end() {
+  [ "${BUILD_GUARD:-0}" = 1 ] || return 0
+  if [ "$(cat "$RES_DIR/.build-admission.lock" 2>/dev/null || true)" = "$$" ]; then
+    rm -f "$RES_DIR/.build-admission.lock"
+  fi
+  BUILD_GUARD=0
+}
+
+# Resolve a build's checkout identity without invoking git: owned checkout
+# locks, a canonical git common directory, then project are progressively less
+# precise. Existing holders without this metadata conservatively block overlap.
+build_slot_select() {
+  local LOAD_LIMIT LOAD_LIMIT_WITH_LANES MIN_AVAIL_GIB LANE3_LOAD LANE3_AVAIL_GIB THRESHOLDS_SOURCE
+  local LANE_LOAD_PER_CORE LANE_MIN_AVAIL_GIB BUILD_LOAD_PER_CORE BUILD_MAX_CONCURRENCY
+  local BUILD_CONCURRENT_LOAD_PER_CORE BUILD_CONCURRENT_MIN_AVAIL_GIB LOAD_OVERRIDE_MINUTES LOAD_POLL_SECONDS selection rc=0
+  machine_thresholds
+  selection=$(python3 - "$RES_DIR" "$LOCKS" "$BUILD_MAX_CONCURRENCY" "$BY" "$PID" "$PROJECT" "${CHECKOUT:-}" "$PWD" <<'PY'
+import json, os, sys
+root, locks, maximum, by, pid, project, explicit, cwd = sys.argv[1:]
+maximum = int(maximum)
+def hold(directory):
+    try:
+        with open(os.path.join(directory, 'info')) as stream:
+            return dict(line.rstrip('\n').split('\t', 1) for line in stream if '\t' in line)
+    except FileNotFoundError:
+        return {}
+def repo(path):
+    here = os.path.realpath(path)
+    if not os.path.isdir(here): return None
+    while True:
+        marker = os.path.join(here, '.git')
+        if os.path.isdir(marker): gitdir = marker
+        elif os.path.isfile(marker):
+            try:
+                text = open(marker).read().strip()
+            except OSError: return None
+            if not text.startswith('gitdir: '): return None
+            gitdir = os.path.realpath(os.path.join(here, text[8:]))
+        else:
+            parent = os.path.dirname(here)
+            if parent == here: return None
+            here = parent; continue
+        common = os.path.join(gitdir, 'commondir')
+        if os.path.isfile(common):
+            try: gitdir = os.path.realpath(os.path.join(gitdir, open(common).read().strip()))
+            except OSError: return None
+        return 'repo:' + os.path.realpath(gitdir)
+identities = set()
+rows = {}
+with open(os.path.join(root, 'resources.tsv')) as stream:
+    for line in stream:
+        if line.startswith('#') or not line.strip(): continue
+        row = line.rstrip('\n').split('\t', 4)
+        if len(row) == 5: rows[row[0]] = row
+for id, row in rows.items():
+    if row[1] != 'checkout': continue
+    value = hold(os.path.join(locks, id + '.d'))
+    if value.get('by') == by and value.get('pid') == pid: identities.add('lock:' + id)
+if explicit:
+    if explicit in rows and rows[explicit][1] == 'checkout': identities.add('lock:' + explicit)
+    else:
+        resolved = repo(explicit)
+        if resolved is None:
+            print('res: --checkout must name a registered checkout or a path inside a git checkout', file=sys.stderr); sys.exit(1)
+        identities.add(resolved)
+else:
+    resolved = repo(cwd)
+    if resolved is not None: identities.add(resolved)
+if not identities and project: identities.add('project:' + project)
+holds, free = [], None
+for number in range(1, 4):
+    id = 'heavy-build' if number == 1 else 'heavy-build-' + str(number)
+    directory = os.path.join(locks, id + '.d')
+    if not os.path.isdir(directory):
+        if number <= maximum and free is None: free = id
+        continue
+    value = hold(directory); holds.append((id, value))
+    if value.get('by') == by:
+        print("res: build slot is held by %s (pid=%s, since=%s); return-build before a fresh acquisition" %
+              (by, value.get('pid', '?'), value.get('since', '?')), file=sys.stderr); sys.exit(1)
+if free is None or len(holds) >= maximum:
+    print('res: heavy-build %d/%d holders; waiting for a slot' % (len(holds), maximum), file=sys.stderr); sys.exit(2)
+if holds:
+    for _, value in holds:
+        try:
+            existing = set(json.loads(value.get('checkouts', '')))
+        except (TypeError, ValueError): existing = set()
+        if not identities or not existing:
+            print('res: concurrent build checkout identity unresolved; waiting for solo admission', file=sys.stderr); sys.exit(2)
+        if identities & existing:
+            print('res: concurrent build checkout is already held by another heavy-build holder', file=sys.stderr); sys.exit(2)
+print(free + '\t' + str(len(holds)) + '\t' + json.dumps(sorted(identities), separators=(',', ':')))
+PY
+  ) || rc=$?
+  [ "$rc" -eq 0 ] || return "$rc"
+  IFS=$'\t' read -r BUILD_SLOT BUILD_ACTIVE_COUNT REQUEST_CHECKOUTS <<<"$selection"
+}
+
+build_mark_peak() {
+  python3 - "$LOCKS" "$1" <<'PY'
+import os, sys, tempfile
+root, current = sys.argv[1:]
+holds = []
+for id in ('heavy-build', 'heavy-build-2', 'heavy-build-3'):
+    directory = os.path.join(root, id + '.d')
+    try:
+        with open(os.path.join(directory, 'info')) as stream:
+            value = dict(line.rstrip('\n').split('\t', 1) for line in stream if '\t' in line)
+    except FileNotFoundError: continue
+    holds.append((id, directory, value))
+for id, directory, value in holds:
+    try: previous = int(value.get('peak_concurrent', '1'))
+    except ValueError: previous = 1
+    value['peak_concurrent'] = str(max(previous, len(holds)))
+    if id == current: value['build_committed'] = '1'
+    try:
+        fd, temporary = tempfile.mkstemp(prefix='.peak.', dir=directory)
+        with os.fdopen(fd, 'w') as stream:
+            for key, item in value.items(): stream.write(key + '\t' + item + '\n')
+        os.replace(temporary, os.path.join(directory, 'info'))
+    except FileNotFoundError: pass
+PY
+}
+
 build_usage() {
   cat <<'EOF'
-res take-build --by <session> --project <slug> --for "<purpose>" [take options] [--lane heavy-lane-1|2|3]
-res take-build --wait --by <session> --project <slug> --for "<purpose>" --timeout <minutes> [take options]
-res wait-build --by <session> --project <slug> --for "<purpose>" --timeout <minutes> [take options] [--lane <id>]
+res take-build --by <session> --project <slug> --for "<purpose>" [take options] [--lane heavy-lane-1|2|3] [--checkout <path|resource>]
+res take-build --wait --by <session> --project <slug> --for "<purpose>" --timeout <minutes> [take options] [--lane <id>] [--checkout <path|resource>]
+res wait-build --by <session> --project <slug> --for "<purpose>" --timeout <minutes> [take options] [--lane <id>] [--checkout <path|resource>]
 res wait-lane --by <session> --project <slug> --for "<purpose>" --timeout <minutes> [take options]
 res return-build --by <session> [--pid <holder-pid>] [--note "<text>"]
 Build acquisition takes heavy-build and one free lane, or releases everything before retrying.
@@ -1044,11 +1306,12 @@ EOF
 }
 
 # Each attempt is an unwindable transaction, never a wait with a partial hold.
-# Atomic mkdir still arbitrates against legacy take/wait callers. There is no
-# second coordination lock, stale mutex, or migration of the directory format.
+# Atomic mkdir still arbitrates against legacy take/wait callers. The private
+# build-admission lock serializes slot selection; it is not a capacity hold.
 acquire_attempt() {
-  local mode="$1" candidate="$2" build_created=0 lane_created=0
+  local mode="$1" candidate="$2" build_created=0 lane_created=0 build_id=
   local TAKE_CREATED=0 TAKE_TRANSACTION=1 TAKE_FRESH_ONLY=1 current_id= rc=0 CHECK_FRESH=1
+  local BUILD_SLOT= BUILD_ACTIVE_COUNT= REQUEST_CHECKOUTS= BUILD_SLOT_INTERNAL=0 BUILD_GUARD=0 LOAD_OVERRIDE_ACTIVE=0
   local TRANSACTION_PENDING_SIGNAL=0 TRANSACTION_CLEANING=0 TRANSACTION_COMMITTED=0
   local cleanup_failed=0
   ACQUIRE_ROLLED_BACK=0
@@ -1059,7 +1322,7 @@ acquire_attempt() {
   rollback_attempt() {
     local status=0
     if [ "$TAKE_CREATED" -eq 1 ]; then
-      if [ "$current_id" = heavy-build ]; then build_created=1; else lane_created=1; fi
+      if [ -n "$build_id" ] && [ "$current_id" = "$build_id" ]; then build_created=1; else lane_created=1; fi
       TAKE_CREATED=0
     fi
     if [ "$lane_created" -eq 1 ]; then
@@ -1068,8 +1331,9 @@ acquire_attempt() {
       else [ ! -d "$LOCKS/$candidate.d" ] && lane_created=0; status=1; fi
     fi
     if [ "$build_created" -eq 1 ]; then
-      if protected_rollback_created heavy-build "$BY"; then build_created=0
-      else [ ! -d "$LOCKS/heavy-build.d" ] && build_created=0; status=1; fi
+      if { [ "$build_id" = heavy-build ] && protected_rollback_created heavy-build "$BY"; } || \
+         { [ "$build_id" != heavy-build ] && protected_rollback_created "$build_id" "$BY"; }; then build_created=0
+      else [ ! -d "$LOCKS/$build_id.d" ] && build_created=0; status=1; fi
     fi
     return "$status"
   }
@@ -1080,6 +1344,7 @@ acquire_attempt() {
     TRANSACTION_CLEANING=1
     rollback_attempt || cleanup_failed=1
     TRANSACTION_CLEANING=0
+    build_guard_end
     cleanup_build_waiter
     trap - EXIT
     [ "$cleanup_failed" -eq 0 ] || exit 1
@@ -1101,6 +1366,7 @@ acquire_attempt() {
     TRANSACTION_CLEANING=1
     rollback_attempt || cleanup_failed=1
     TRANSACTION_CLEANING=0
+    build_guard_end
     cleanup_build_waiter
     trap - EXIT
     [ "$cleanup_failed" -eq 0 ] || exit 1
@@ -1112,6 +1378,7 @@ acquire_attempt() {
     TRANSACTION_CLEANING=1
     rollback_attempt || cleanup_failed=1
     TRANSACTION_CLEANING=0
+    build_guard_end
     trap - EXIT
     [ "$cleanup_failed" -eq 0 ] || exit 1
     [ "$TRANSACTION_PENDING_SIGNAL" -eq 0 ] || exit "$TRANSACTION_PENDING_SIGNAL"
@@ -1124,12 +1391,22 @@ acquire_attempt() {
   local options=(--by "$BY" --project "$PROJECT" --for "$PURPOSE" --task "$TASK" --until "$UNTIL" --pid "$PID")
   [ -z "$FORCE" ] || options+=(--force)
   if [ "$mode" = build ]; then
-    # Preexisting holds, including one's own, are never adopted or rolled back.
-    [ ! -d "$LOCKS/heavy-build.d" ] || { finish_attempt 2; return $?; }
-    current_id=heavy-build; TAKE_CREATED=0
-    if cmd_take heavy-build "${options[@]}"; then :
-    else rc=$?; finish_attempt "$rc"; return $?; fi
+    if ! build_guard_start; then finish_attempt 2; return $?; fi
+    if build_slot_select; then :
+    else rc=$?; [ "$rc" -ne 2 ] || ATTEMPT_BLOCK_REASON=slot; finish_attempt "$rc"; return $?; fi
+    if [ "$BUILD_ACTIVE_COUNT" -eq 0 ] && [ "${REQUEST_LOAD_OVERRIDE:-0}" = 1 ]; then LOAD_OVERRIDE_ACTIVE=1; fi
+    build_id="$BUILD_SLOT"; current_id="$build_id"; TAKE_CREATED=0
+    BUILD_SLOT_INTERNAL=1
+    if [ "$build_id" = heavy-build ]; then
+      if cmd_take heavy-build "${options[@]}"; then :
+      else rc=$?; [ "$rc" -ne 2 ] || ATTEMPT_BLOCK_REASON=slot; finish_attempt "$rc"; return $?; fi
+    else
+      if cmd_take "$build_id" "${options[@]}"; then :
+      else rc=$?; [ "$rc" -ne 2 ] || ATTEMPT_BLOCK_REASON=slot; finish_attempt "$rc"; return $?; fi
+    fi
     build_created="$TAKE_CREATED"; TAKE_CREATED=0
+    printf 'checkouts\t%s\nbuild_mode\t%s\npeak_concurrent\t%s\n' "$REQUEST_CHECKOUTS" \
+      "$([ "$BUILD_ACTIVE_COUNT" -eq 0 ] && printf solo || printf concurrent)" "$((BUILD_ACTIVE_COUNT + 1))" >>"$LOCKS/$build_id.d/info"
   fi
   [ ! -d "$LOCKS/$candidate.d" ] || { finish_attempt 2; return $?; }
   current_id="$candidate"
@@ -1139,14 +1416,20 @@ acquire_attempt() {
   # The stable holder is validated after both locks are available, not while
   # waiting for a lane. Signals during this check still unwind the entire pair.
   if [ -n "$ACQUIRE_PID_EXPLICIT" ]; then
-    if [ "$mode" = build ]; then check_holder_after_take heavy-build "$candidate"
+    if [ "$mode" = build ]; then check_holder_after_take "$build_id" "$candidate"
     else check_holder_after_take "$candidate"; fi
   fi
+  if [ "$mode" = build ]; then build_mark_peak "$build_id"; fi
   if [ "$mode" = build ]; then printf 'build-lane=%s\n' "$candidate"
   elif [ "$mode" = pool ]; then printf 'slot=%s\n' "$candidate"
   else printf 'lane=%s\n' "$candidate"; fi
   TRANSACTION_COMMITTED=1
+  if [ "$mode" = build ] && [ "${LOAD_OVERRIDE_ACTIVE:-0}" = 1 ]; then
+    log load-override "$build_id" "$BY ($PROJECT${TASK:+/$TASK})" "FIFO head exceeded ${OVERRIDE_MINUTES_ACTIVE:-20} minutes; existing build/lane-3 gates retained"
+  fi
+  build_guard_end
   if [ "$mode" = pool ]; then finish_build_waiter acquire "slot=$candidate"
+  elif [ "$mode" = build ]; then finish_build_waiter acquire "slot=$build_id lane=$candidate"
   else finish_build_waiter acquire "lane=$candidate"; fi
   trap - EXIT
   exit 0
@@ -1155,10 +1438,12 @@ acquire_attempt() {
 cmd_acquire() {
   local mode="$1" blocking="$2"; shift 2
   if [ "${1:-}" = --help ]; then build_usage; return 0; fi
-  local timeout=0 timeout_seen= pin= args=() ALLOW_PID=1
-  local duration deadline remaining delay=1 rc reading candidate missing3=0 ACQUIRE_PID_EXPLICIT
+  local timeout=0 timeout_seen= pin= args=() ALLOW_PID=1 CHECKOUT=
+  local duration deadline remaining delay=1 rc reading candidate missing3=0 ACQUIRE_PID_EXPLICIT can_attempt
   local BUILD_WAITER_DIR= BUILD_WAITER_STAGING= BUILD_WAITER_HOST= BUILD_WAITER_SINCE= BUILD_WAITER_START=
-  local BUILD_WAITER_ORDER= BUILD_WAITER_GATE_STREAK=0 lane3_state=CLOSED block_reason
+  local BUILD_WAITER_ORDER= BUILD_WAITER_GATE_STREAK=0 lane3_state=CLOSED block_reason LOAD_HEAD_SINCE=0
+  local REQUEST_LOAD_OVERRIDE=0 ATTEMPT_BLOCK_REASON= ATTEMPT_POLL_SECONDS= ATTEMPT_OVERRIDE_MINUTES=
+  local poll_seconds=15 override_minutes=20 OVERRIDE_MINUTES_ACTIVE=20
   local WAITER_ROOT="$WAITERS" WAITER_RESOURCE=heavy-build
   if [ "$mode" = lane ]; then WAITER_ROOT="$LANE_WAITERS"; WAITER_RESOURCE=heavy-lane-any; fi
   while [ $# -gt 0 ]; do
@@ -1171,6 +1456,10 @@ cmd_acquire() {
         [ "$mode" = build ] && [ $# -ge 2 ] || die "--lane is a build option and needs a value"
         [ -z "$pin" ] || die "duplicate --lane"
         pin="$2"; shift 2 ;;
+      --checkout)
+        [ "$mode" = build ] && [ $# -ge 2 ] || die "--checkout is a build option and needs a value"
+        [ -z "$CHECKOUT" ] || die "duplicate --checkout"
+        CHECKOUT="$2"; shift 2 ;;
       --by|--project|--for|--task|--until|--pid)
         [ $# -ge 2 ] || die "$1 needs a value"
         args+=("$1" "$2"); shift 2 ;;
@@ -1187,9 +1476,6 @@ cmd_acquire() {
   [ -n "$BY" ] && [ -n "$PROJECT" ] && [ -n "$PURPOSE" ] || die "acquisition needs --by, --project and --for"
   [ "$mode" != build ] || need_id heavy-build
   [ -z "$pin" ] || need_id "$pin"
-  if [ "$mode" = build ] && [ "$(field heavy-build by)" = "$BY" ]; then
-    die "build slot is held by $(holder_details heavy-build); return-build before a fresh acquisition (do not nest wrappers)"
-  fi
   if [ "$mode" = lane ]; then
     for candidate in heavy-lane-1 heavy-lane-2 heavy-lane-3; do
       if [ "$(field "$candidate" by)" = "$BY" ] && [ "$(field "$candidate" pid)" = "$PID" ]; then
@@ -1205,16 +1491,43 @@ cmd_acquire() {
     arm_build_waiter_cleanup
   fi
   while :; do
-    rc=0
+    rc=0; can_attempt=1; REQUEST_LOAD_OVERRIDE=0; ATTEMPT_BLOCK_REASON=; ATTEMPT_POLL_SECONDS=; ATTEMPT_OVERRIDE_MINUTES=
     # Refresh (or re-publish) before heavy-check, which can be slow under load.
     [ "$blocking" = 0 ] || update_build_waiter "${block_reason:-starting}" "${lane3_state:-CLOSED}"
-    if reading=$(cmd_heavy_check --pid "$PID"); then
+    if [ "$blocking" = 1 ] && [ "$mode" = build ] && ! waiter_is_current "$(oldest_live_waiter "$WAITERS")"; then
+      can_attempt=0; rc=2; block_reason=FIFO; update_load_head FIFO; update_build_waiter FIFO "$lane3_state"
+    fi
+    if [ "$can_attempt" = 1 ]; then
+      if [ "$mode" = lane ]; then
+        reading=$(cmd_heavy_check --pid "$PID" --admission lane) || rc=$?
+      else
+        reading=$(cmd_heavy_check --pid "$PID") || rc=$?
+      fi
+    fi
+    if [ "$can_attempt" = 1 ] && [ "$rc" -eq 0 ]; then
       printf '%s\n' "$reading"
       lane3_state=CLOSED; lane3_open "$reading" && lane3_state=OPEN
       BUILD_WAITER_GATE_STREAK=0
       update_build_waiter lane "$lane3_state"
-      if [ "$mode" = build ] && [ "$blocking" = 1 ]; then reclaim_stale_heavy heavy-build "$BY" || true; fi
-      for candidate in ${pin:-heavy-lane-1 heavy-lane-2 heavy-lane-3}; do
+      if [ "$mode" = build ] && [ "$blocking" = 1 ]; then
+        for candidate in heavy-build heavy-build-2 heavy-build-3; do reclaim_stale_heavy "$candidate" "$BY" || true; done
+      fi
+      if [ "$mode" = build ] && [ "$blocking" = 1 ] && head_load_override "$override_minutes"; then
+        REQUEST_LOAD_OVERRIDE=1; OVERRIDE_MINUTES_ACTIVE="$override_minutes"
+      fi
+      if [ "$mode" = build ] && [ "$pin" != heavy-lane-3 ]; then
+        local lane_args=(--pid "$PID" --admission lane)
+        [ "$REQUEST_LOAD_OVERRIDE" != 1 ] || lane_args+=(--load-override)
+        if reading=$(cmd_heavy_check "${lane_args[@]}"); then
+          printf '%s\n' "$reading"
+        else
+          rc=$?; [ -z "$reading" ] || printf '%s\n' "$reading"
+          ATTEMPT_BLOCK_REASON=$(reading_field "$reading" blocked)
+          ATTEMPT_POLL_SECONDS=$(reading_field "$reading" poll_seconds)
+          ATTEMPT_OVERRIDE_MINUTES=$(reading_field "$reading" override_minutes)
+        fi
+      fi
+      if [ "$rc" -eq 0 ]; then for candidate in ${pin:-heavy-lane-1 heavy-lane-2 heavy-lane-3}; do
         if [ -z "$(reg_line "$candidate")" ]; then
           if [ "$candidate" = heavy-lane-3 ]; then
             if [ "$missing3" -eq 0 ]; then echo 'res: lane 3 is not registered; continuing bounded waits on lanes 1/2' >&2; fi
@@ -1227,16 +1540,40 @@ cmd_acquire() {
         [ ! -d "$LOCKS/$candidate.d" ] || continue
         if acquire_attempt "$mode" "$candidate"; then return 0; else rc=$?; fi
         [ "$rc" -eq 2 ] || [ "$rc" -eq 5 ] || return "$rc"
-      done
-      rc=2
-      block_reason=lane
-      if [ "$mode" = build ] && [ -d "$LOCKS/heavy-build.d" ]; then block_reason=slot; fi
-      update_build_waiter "$block_reason" "$lane3_state"
-    else
-      rc=$?; [ -z "$reading" ] || printf '%s\n' "$reading"
+        if [ "$rc" -eq 5 ]; then break; fi
+        if [ "$mode" = build ] && [ "${ATTEMPT_BLOCK_REASON:-}" = slot ]; then break; fi
+      done; fi
+      if [ "$rc" -eq 5 ]; then
+        block_reason="${ATTEMPT_BLOCK_REASON:-load}"
+        case "$ATTEMPT_POLL_SECONDS" in ''|*[!0-9]*) ;; *) poll_seconds="$ATTEMPT_POLL_SECONDS" ;; esac
+        case "$ATTEMPT_OVERRIDE_MINUTES" in ''|*[!0-9.]*) ;; *) override_minutes="$ATTEMPT_OVERRIDE_MINUTES" ;; esac
+        BUILD_WAITER_GATE_STREAK=$((BUILD_WAITER_GATE_STREAK + 1))
+        if [ "$mode" = build ] && [ "$block_reason" = load ]; then update_load_head load
+        else update_load_head "$block_reason"; fi
+        update_build_waiter "$block_reason" "$lane3_state"
+        [ "$block_reason" != load ] || delay="$poll_seconds"
+      else
+        rc=2; block_reason=lane
+        if [ "$mode" = build ]; then
+          for candidate in heavy-build heavy-build-2 heavy-build-3; do
+            if [ -d "$LOCKS/$candidate.d" ]; then block_reason=slot; break; fi
+          done
+        fi
+        update_load_head "$block_reason"
+        update_build_waiter "$block_reason" "$lane3_state"
+      fi
+    elif [ "$can_attempt" = 1 ]; then
+      [ -z "$reading" ] || printf '%s\n' "$reading"
       [ "$rc" -eq 5 ] || return "$rc"
+      if [ "$mode" = lane ]; then
+        poll_seconds=$(reading_field "$reading" poll_seconds)
+      fi
       BUILD_WAITER_GATE_STREAK=$((BUILD_WAITER_GATE_STREAK + 1))
-      update_build_waiter gate CLOSED
+      block_reason="${ATTEMPT_BLOCK_REASON:-$([ "$mode" = build ] && printf gate || printf load)}"
+      if [ "$mode" = build ] && [ "$block_reason" = load ]; then update_load_head load
+      else update_load_head "$block_reason"; fi
+      update_build_waiter "$block_reason" "$lane3_state"
+      [ "$block_reason" != load ] || delay="$poll_seconds"
     fi
     if [ "$blocking" = 0 ]; then return "$rc"; fi
     remaining=$((deadline - SECONDS))
@@ -1351,7 +1688,7 @@ pool_controller() {
   local runner=
   if [ "${POOL_EXEC_CHILD:-0}" = 1 ]; then runner=exec; fi
   ${runner:+$runner} python3 - "$RES_DIR" "$@" "$BY" "$PROJECT" "$TASK" "$PURPOSE" "$PID" "$UNTIL" "${FORCE:-}" "${POOL_NEED:-}" "${prefer_host:-}" "${prefer_slot:-}" "${excluded_slots:-}" "${excluded_hosts:-}" "${WAITER_STALE_SECONDS}" "$$" "${POOL_EPISODE:-none}" <<'PY'
-import datetime, fcntl, hashlib, json, math, os, re, shutil, signal, socket, sys, time
+import datetime, fcntl, hashlib, json, math, os, re, shutil, signal, socket, stat, sys, time
 from contextlib import contextmanager
 root, action, request, timeout, delay, by, project, task, purpose, pid, until, force, need, prefer, preferred_slot, excluded_slots, excluded_hosts, stale, controller, generation = sys.argv[1:]
 pid = int(pid); stamp = time.time(); now = stamp; host = socket.gethostname()
@@ -1386,6 +1723,29 @@ def alive(value):
     except ProcessLookupError: return False
     except (ValueError, TypeError, OverflowError): return False
     except PermissionError: return True
+def print_build_capacity():
+    if request and request != 'heavy-build': return
+    count = sum(os.path.isdir(os.path.join(locks, name + '.d')) for name in ('heavy-build', 'heavy-build-2', 'heavy-build-3'))
+    limit = '2'
+    # Status reads just the display cap. Admission validates all thresholds.
+    try:
+        fd = os.open(os.path.join(root, 'machine.conf'), os.O_RDONLY | os.O_NONBLOCK)
+        with os.fdopen(fd, 'rb') as stream:
+            before = os.fstat(stream.fileno())
+            if not stat.S_ISREG(before.st_mode): raise ValueError('not regular')
+            data = stream.read(before.st_size + 1)
+            after = os.fstat(stream.fileno())
+        if len(data) != before.st_size or not data.endswith(b'\n') or before.st_mtime_ns != after.st_mtime_ns or before.st_ctime_ns != after.st_ctime_ns:
+            raise ValueError('incomplete configuration')
+        values = re.findall(rb'^[ \t]*BUILD_MAX_CONCURRENCY[ \t]*=([^\n]*)', data, re.M)
+        if values:
+            match = re.fullmatch(rb'0*([1-3])', values[0].strip())
+            limit = match[1].decode() if len(values) == 1 and match else '?'
+    except FileNotFoundError:
+        if os.path.lexists(os.path.join(root, 'machine.conf')): limit = '?'
+    except (OSError, ValueError):
+        limit = '?'
+    print('\nBuild capacity: heavy-build %d/%s' % (count, limit))
 def remove_waiter():
     if waiter and os.path.isdir(waiter): shutil.rmtree(waiter)
     if episode and os.path.isdir(episode): shutil.rmtree(episode)
@@ -1554,13 +1914,17 @@ try:
             print('Host ' + box + ' ' + score_line(value))
     if action == 'scores':
         print_scores()
+        print_build_capacity()
         committed = True; sys.exit(0)
     if action == 'status':
         print('%-16s %-9s %-9s %-12s %-34s %s' % ('ID', 'KIND', 'POLICY', 'LINK', 'HOLDER', 'SINCE → UNTIL / PURPOSE'))
         warn_short_pid = False
         for id, (kind, policy, device, description) in rows.items():
             if request and id != request: continue
-            value = info(os.path.join(locks, id + '.d'))
+            if id == 'heavy-build':
+                build_values = [info(os.path.join(locks, name + '.d')) for name in ('heavy-build', 'heavy-build-2', 'heavy-build-3')]
+                value = next((item for item in build_values if item), {})
+            else: value = info(os.path.join(locks, id + '.d'))
             holder = 'FREE'; detail = description
             if value:
                 holder = value.get('by', '?') + ' (' + value.get('project', '?') + ('/' + value['task'] if value.get('task') else '') + ')'
@@ -1575,6 +1939,7 @@ try:
         if warn_short_pid:
             print('res: short-lived holder PID; use scripts/heavy-build.sh <command...>; lock, build and return must share one long-lived process', file=sys.stderr)
         print_scores()
+        print_build_capacity()
         for category in ('build', 'lane', 'pool'):
             parent = os.path.join(root, category + '-waiters')
             if not os.path.isdir(parent): continue
@@ -1891,6 +2256,7 @@ cmd_wait_pool() {
 
 registry_record() {
   local wanted="$1" id
+  if [[ "$wanted" =~ ^heavy-build-[23]$ ]] && [ "${BUILD_SLOT_INTERNAL:-0}" = 1 ]; then wanted=heavy-build; fi
   REG_KIND= REG_POLICY= REG_DEVICE= REG_DESCRIPTION=
   while IFS=$'\t' read -r id REG_KIND REG_POLICY REG_DEVICE REG_DESCRIPTION; do
     [ "$id" != "$wanted" ] || return 0
@@ -1899,13 +2265,13 @@ registry_record() {
 }
 
 cmd_return_build() {
-  local ALLOW_PID=1 id owner selected_pid options=(); parse "$@"
+  local ALLOW_PID=1 id owner selected_pid options=() BUILD_SLOT_INTERNAL=1; parse "$@"
   [ -n "$BY" ] || die "return-build needs --by"
   [ -z "$PID_EXPLICIT" ] || validate_pid
   [ -z "$FORCE$PROJECT$PURPOSE$TASK$UNTIL$OFFLINE$DEVICE$POLICY" ] || die "return-build accepts only --by, --pid and --note"
   options=(--by "$BY" --note "$NOTE")
   owner="$BY"; selected_pid="${PID_EXPLICIT:+$PID}"
-  for id in heavy-lane-3 heavy-lane-2 heavy-lane-1 heavy-build; do
+  for id in heavy-lane-3 heavy-lane-2 heavy-lane-1 heavy-build-3 heavy-build-2 heavy-build; do
     [ "$(field "$id" by)" = "$owner" ] || continue
     [ -z "$selected_pid" ] || [ "$(field "$id" pid)" = "$selected_pid" ] || continue
     cmd_return "$id" "${options[@]}"
@@ -1964,7 +2330,7 @@ cmd_status() {
     }
     FILENAME == devs { D[++nd] = $0; next }
     FILENAME == pids { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0); P[$0] = 1; next }
-    FILENAME != reg { n = split(FILENAME, a, "/"); id = a[n-1]; sub(/\.d$/, "", id); H[id, $1] = $2; held[id] = 1; next }
+    FILENAME != reg { n = split(FILENAME, a, "/"); id = a[n-1]; sub(/\.d$/, "", id); if (id ~ /^heavy-build-[23]$/) id = "heavy-build"; H[id, $1] = $2; held[id] = 1; next }
     /^#/ || $1 == "" { next }
     { known[$4] = 1 }
     only != "" && $1 != only { next }
@@ -1998,6 +2364,7 @@ cmd_status() {
   ' reg="$REG" devs="$t" pids="$t.pids" "$t" "$t.pids" ${infos[@]+"${infos[@]}"} "$REG"
   rm -f "$t" "$t.pids"
   if [ -z "${1:-}" ]; then pool_report scores
+  elif [ "$1" = heavy-build ]; then pool_report scores "$1"
   elif registry_record "$1" && [ "$REG_KIND" = remote ]; then pool_report scores "$1"; fi
   if [ -z "${1:-}" ] || [ "${1:-}" = heavy-build ]; then show_build_waiters; fi
   case "${1:-}" in ''|heavy-*) show_build_waiters "$LANE_WAITERS" lanes ;; esac
@@ -2034,28 +2401,39 @@ cmd_take() {
     pool_controller take "$id" 0 0
     return $?
   fi
-  local policy dev link; policy=$(reg_line "$id" | cut -f3); dev=$(reg_line "$id" | cut -f4)
+  local policy="$REG_POLICY" dev="$REG_DEVICE" link
   case "$policy" in
-    never) echo "res: '$id' is off limits (policy never): $(reg_line "$id" | cut -f5)" >&2; exit 3 ;;
+    never) echo "res: '$id' is off limits (policy never): $REG_DESCRIPTION" >&2; exit 3 ;;
     ask-user) [ -n "$FORCE" ] || { echo "res: '$id' needs the user's OK first (policy ask-user); once given, retry with --force" >&2; exit 3; } ;;
   esac
   case "$id" in heavy-*) (machine_thresholds) || return $? ;; esac
-  if [ "$id" = heavy-lane-3 ]; then
+  case "$id" in heavy-*)
     if [ "${TAKE_FRESH_ONLY:-0}" != 1 ] && [ "$(field "$id" by)" = "$BY" ]; then
       echo "already held: $id by $(holder_details "$id")"; show_notes "$id"
       return 0
-    fi
-    local reading rc=0
-    reading=$(cmd_heavy_check --pid "$PID") || rc=$?
-    # Existing lanes keep their ungated plain-take behavior. Lane 3 cannot
-    # rely on a preceding caller check: its gate is mandatory at take time.
-    if [ "$rc" -ne 0 ]; then
-      [ -z "$reading" ] || printf '%s\n' "$reading"
-      return "$rc"
-    fi
-    if ! lane3_open "$reading"; then
-      printf '%s\n' "$reading"
+    fi ;;
+  esac
+  if [[ "$id" =~ ^heavy-lane-[123]$ ]] || { [[ "$id" =~ ^heavy-build(-[23])?$ ]] && [ "${BUILD_SLOT_INTERNAL:-0}" = 1 ]; }; then
+    local reading rc=0 admission=legacy check_args=(--pid "$PID")
+    case "$id" in
+      heavy-lane-1|heavy-lane-2)
+        admission=lane; check_args+=(--admission lane)
+        [ "${LOAD_OVERRIDE_ACTIVE:-0}" != 1 ] || check_args+=(--load-override) ;;
+      heavy-build|heavy-build-2|heavy-build-3)
+        if [ "${BUILD_ACTIVE_COUNT:-0}" -eq 0 ]; then admission=build
+        else admission=build-concurrent; fi
+        check_args+=(--admission "$admission")
+        [ "${LOAD_OVERRIDE_ACTIVE:-0}" != 1 ] || check_args+=(--load-override) ;;
+    esac
+    reading=$(cmd_heavy_check "${check_args[@]}") || rc=$?
+    [ -z "$reading" ] || printf '%s\n' "$reading"
+    ATTEMPT_BLOCK_REASON=$(reading_field "$reading" blocked)
+    ATTEMPT_POLL_SECONDS=$(reading_field "$reading" poll_seconds)
+    ATTEMPT_OVERRIDE_MINUTES=$(reading_field "$reading" override_minutes)
+    [ "$rc" -eq 0 ] || return "$rc"
+    if [ "$id" = heavy-lane-3 ] && ! lane3_open "$reading"; then
       echo "res: heavy-lane-3 unavailable (see active LANE3_LOAD and LANE3_AVAIL_GIB thresholds above)" >&2
+      ATTEMPT_BLOCK_REASON=load
       return 5
     fi
   fi
@@ -2145,14 +2523,29 @@ cmd_return() {
     return $?
   fi
   [ -d "$LOCKS/$id.d" ] || { echo "$id was not held"; return 0; }
-  local holder; holder=$(field "$id" by)
+  local holder owned_guard=0 build_detail= start peak duration mode; holder=$(field "$id" by)
+  case "$id" in heavy-build|heavy-build-2|heavy-build-3)
+    if [ "${BUILD_GUARD:-0}" != 1 ]; then
+      build_guard_start || { echo "res: build admission is changing; retry return-build" >&2; return 2; }
+      owned_guard=1
+    fi ;;
+  esac
   if [ "$holder" != "$BY" ]; then
     [ -n "$FORCE" ] && [ -n "$NOTE" ] || die "'$id' is held by $holder; only --force --note \"<why>\" may reclaim it"
     log reclaim "$id" "$BY" "from $holder: $NOTE"
   else
-    log return "$id" "$BY" "$NOTE"
+    if [[ "$id" =~ ^heavy-build(-[23])?$ ]] && [ "$(field "$id" build_committed)" = 1 ]; then
+      start=$(field "$id" start); peak=$(field "$id" peak_concurrent)
+      case "$start" in ''|*[!0-9]*) start=0 ;; esac
+      case "$peak" in ''|*[!0-9]*) peak=1 ;; esac
+      duration=$(( $(date +%s) - start )); [ "$duration" -ge 0 ] || duration=0
+      mode=solo; [ "$peak" -le 1 ] || mode=concurrent
+      build_detail="build_mode=$mode peak_concurrent=$peak duration_seconds=$duration"
+    fi
+    log return "$id" "$BY" "$NOTE${build_detail:+${NOTE:+ · }$build_detail}"
   fi
   rm -rf "$LOCKS/$id.d"
+  [ "$owned_guard" -eq 0 ] || build_guard_end
   echo "returned $id"
 }
 

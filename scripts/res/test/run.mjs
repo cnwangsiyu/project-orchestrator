@@ -16,6 +16,7 @@ const SUITE_TIMEOUTS = {
   'pools.mjs': 600000,
   'pool-exec.mjs': 600000,
   'followups.mjs': 600000,
+  'mini-build.mjs': 600000,
   'build.mjs': 1200000,
 };
 // The outer runner must allow every bounded child plus fixture setup/logging overhead.

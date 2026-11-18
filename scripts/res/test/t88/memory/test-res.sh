@@ -7,7 +7,7 @@ ROOT=$(mktemp -d "$SOURCE/check.XXXXXX")
 export RES_DIR="$ROOT/scratch"
 mkdir -p "$RES_DIR/locks" "$RES_DIR/notes"
 printf 'heavy-build\tslot\topen\t-\tscratch build\nheavy-lane-1\tslot\topen\t-\tscratch lane\nheavy-lane-2\tslot\topen\t-\tscratch lane\n' >"$RES_DIR/resources.tsv"
-export RES_TEST_METRICS=1 RES_TEST_LOAD1M=8 RES_TEST_MEMORYSTATUS_LEVEL=37
+export RES_TEST_METRICS=1 RES_TEST_LOAD1M=8 RES_TEST_MEMORYSTATUS_LEVEL=37 RES_TEST_PHYSICAL_CORES=14
 export RES_TEST_MEMSIZE=68719476736
 export RES_TEST_SWAPUSAGE='total = 36864.00M  used = 36273.62M  free = 590.38M  (encrypted)'
 OUT="$ROOT/last-output.txt"
@@ -116,18 +116,24 @@ done
 RES_TEST_SWAPUSAGE='used = 0M'
 expect 1 "$RES" heavy-check --unknown
 
-# All heavy waits use OS availability; plain take remains ungated.
+# Heavy waits use OS availability and each resource's threshold.
 RES_TEST_MEMORYSTATUS_LEVEL=37
 for id in heavy-build heavy-lane-1 heavy-lane-2; do
   expect 0 "$RES" wait "$id" --by T86 --project test --for available --pid "$$" --timeout 0
   [ -d "$RES_DIR/locks/$id.d" ] || fail "wait did not acquire $id"
   pass "$id acquired despite low pages"
   release "$id"
-  RES_TEST_MEMORYSTATUS_LEVEL=24
+  if [ "$id" = heavy-build ]; then
+    RES_TEST_MEMORYSTATUS_LEVEL=24
+    blocked_load=12.001
+  else
+    RES_TEST_MEMORYSTATUS_LEVEL=18
+    blocked_load=17.501
+  fi
   pages 2097152
   expect 2 "$RES" wait "$id" --by T86 --project test --for low --pid "$$" --timeout 0
   free_slot "$id"
-  RES_TEST_MEMORYSTATUS_LEVEL=37 RES_TEST_LOAD1M=12.001
+  RES_TEST_MEMORYSTATUS_LEVEL=37 RES_TEST_LOAD1M="$blocked_load"
   expect 2 "$RES" wait "$id" --by T86 --project test --for load --pid "$$" --timeout 0
   free_slot "$id"
   RES_TEST_LOAD1M=8 RES_TEST_MEMORYSTATUS_LEVEL=bad

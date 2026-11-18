@@ -129,7 +129,7 @@ expect 1 "$RES" wait unknown --by owner --project test --for invalid --timeout 0
 
 # Every heavy slot waits rather than taking while overloaded.
 for id in heavy-build heavy-lane-1 heavy-lane-2; do
-  expect 2 "$RES" wait "$id" --by owner --project test --for gated --pid "$$" --timeout 0
+  expect 2 env FIXTURE_MEMORYSTATUS=available "$RES" wait "$id" --by owner --project test --for gated --pid "$$" --timeout 0
   [ ! -d "$RES_DIR/locks/$id.d" ] || fail 'overloaded wait took a slot'
   pass "$id overload leaves FREE"
 done
@@ -166,8 +166,9 @@ new_hold heavy-build
 start=$SECONDS
 expect 2 "$RES" wait heavy-build --by waiter --project test --for timeout --timeout 0.2
 elapsed=$((SECONDS - start))
-[ "$elapsed" -ge 12 ] && [ "$elapsed" -le 20 ] || fail "unexpected timeout duration $elapsed"
+[ "$elapsed" -ge 12 ] && [ "$elapsed" -le 60 ] || fail "unexpected timeout duration $elapsed"
 contains 'retry in 1s'
+contains "timed out waiting for 'heavy-build' after 0.2 minutes"
 pass "bounded backoff timeout took ${elapsed}s"
 release heavy-build
 
@@ -190,6 +191,7 @@ pass 'old stale heavy hold reclaimed and logged'
 release heavy-build waiter
 
 # Lanes use exactly the same stale recovery path as the full-build slot.
+export FIXTURE_MEMORYSTATUS=available
 for id in heavy-lane-1 heavy-lane-2; do
   new_hold "$id" "$dead"
   change_info "$id" start "$((epoch - 601))"

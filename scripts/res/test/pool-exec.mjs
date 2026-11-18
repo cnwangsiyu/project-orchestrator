@@ -41,7 +41,10 @@ export function testPoolExec({ source = fileURLToPath(new URL('../res', import.m
   const repeated = run(['wait-pool', 'devbox-cn', ...args('head'), '--timeout', '0']);
   eq(repeated.status, 0, repeated.stderr); eq(repeated.stdout.includes('slot=devbox-cn-1'), true);
   const taken = run(['take', 'devbox-cn-2', ...args('direct')]); eq(taken.status, 0, taken.stderr);
+  fs.writeFileSync(path.join(state, 'machine.conf'), 'BUILD_MAX_CONCURRENCY=3\n');
   const status = run(['status']); eq(status.status, 0, status.stderr); eq(status.stdout.includes('head (fixture/fixture)'), true);
+  eq(status.stdout.includes('Host 192.0.2.1 heldSlots=2 cores=8'), true);
+  eq(status.stdout.includes('Build capacity: heavy-build 0/3'), true);
   const withNotes = run(['status', 'devbox-cn-1']); eq(withNotes.status, 0, withNotes.stderr); eq(withNotes.stdout.endsWith(notesBlock), true);
   const repeatTake = run(['take', 'devbox-cn-1', ...args('head')]); eq(repeatTake.status, 0, repeatTake.stderr); eq(repeatTake.stdout.endsWith(notesBlock), true);
   const refused = run(['take', 'devbox-cn-2', ...args('other')]); eq(refused.status, 2, refused.stderr);

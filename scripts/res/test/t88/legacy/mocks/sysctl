@@ -1,7 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 case "$*" in
+  '-n hw.physicalcpu') printf '14\n'; exit 0 ;;
+  '-n hw.memsize') printf '68719476736\n'; exit 0 ;;
   '-n kern.memorystatus_level')
+    if [ "${FIXTURE_MEMORYSTATUS:-}" = available ]; then printf '25\n'; exit 0; fi
     printf "sysctl: unknown oid 'kern.memorystatus_level'\n" >&2
     exit 1 ;;
   '-n vm.swapusage')
