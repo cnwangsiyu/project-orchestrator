@@ -160,6 +160,8 @@ export function maskPasswordStyleValues(text) {
   return { text: parts.join(''), masked };
 }
 
+const OPAQUE_KEYS = new Set(['encrypted_content']);
+
 function walkStrings(value, transform) {
   if (typeof value === 'string') return transform(value);
   const pending = [value];
@@ -167,6 +169,9 @@ function walkStrings(value, transform) {
     const object = pending.pop();
     if (!object || typeof object !== 'object') continue;
     for (const key of Object.keys(object)) {
+      // Opaque provider ciphertext (reasoning items) must stay byte-identical, or the
+      // thread can no longer be resumed (HTTP 400 invalid_encrypted_content, BC-109).
+      if (OPAQUE_KEYS.has(key)) continue;
       if (typeof object[key] === 'string') object[key] = transform(object[key]);
       else if (object[key] && typeof object[key] === 'object') pending.push(object[key]);
     }
