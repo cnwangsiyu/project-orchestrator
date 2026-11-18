@@ -2,5 +2,6 @@
 if [ "${1:-}" = +%s ]; then
   printf '%s\n' "$(<"$FIXTURE_DIR/epoch")"
 else
-  /bin/date -r "$(<"$FIXTURE_DIR/epoch")" "$@"
+  fixture_epoch=$(<"$FIXTURE_DIR/epoch")
+  /bin/date -r "$fixture_epoch" "$@" 2>/dev/null || /bin/date -d "@$fixture_epoch" "$@"
 fi
