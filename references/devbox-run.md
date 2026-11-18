@@ -121,7 +121,6 @@ Declare input availability instead of pinning a cache with host exclusions:
 ```sh
 node scripts/devbox-run.mjs --project vesdk --task android-verify --repo "$PWD" \
   --need vesdk-android --affinity vesdk-android-main --warm-cost 27m \
-  --input 'name=android-sdk,hash=none,rebuildable=yes,cost=45s,size=2' \
   -- './gradlew test'
 ```
 

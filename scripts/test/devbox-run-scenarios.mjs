@@ -724,6 +724,9 @@ async function inputScenarios() {
   assert.ok(!migrated.summary.shards[0].attempts[0].inputPlan.slots[migrated.summary.shards[0].slot].missing.some(name=>name.startsWith('warm.')),'legacy warm cache is verified before scoring');
   const second=await run(f,['--input',input],command);ok(second);assert.equal(second.summary.shards[0].attempts[0].seeds.length,0);returned(f);
   const pinned=await run(f,['--input',`name=asset,hash=${actual.hash},rebuildable=no,cost=0s,size=0.01`],command);ok(pinned);assert.equal(pinned.summary.shards[0].host,first.summary.shards[0].host);returned(f);
+  const aliasIndex=JSON.parse(fs.readFileSync(file));aliasIndex.inputs['alias+'+actual.hash]={...aliasIndex.inputs['asset+'+actual.hash]};fs.writeFileSync(file,JSON.stringify(aliasIndex));
+  const alias=await run(f,['--input',`name=alias,hash=${actual.hash},rebuildable=no,cost=0s,size=0.01`],command.replace('paths.asset','paths.alias'));ok(alias);returned(f);
+  assert.equal(alias.summary.shards[0].attempts[0].inputPaths.alias,receipt.inputPaths.asset,'registered paths are passed to the command');
   fs.unlinkSync(receipt.inputPaths.asset);
   const index=JSON.parse(fs.readFileSync(file));index.inputs['asset+'+actual.hash].verifiedAt-=301;fs.writeFileSync(file,JSON.stringify(index));
   const absent=await run(f,['--input',`name=asset,hash=${actual.hash},rebuildable=no,cost=0s,size=0.01`],command);

@@ -1121,7 +1121,7 @@ async function seedInputs(row,data,opts,attempt,state,emit,remaining) {
     const seed={name:input.name,key:inputKey(input),durationSec:(Date.now()-started)/1000,path:target};
     attempt.seeds.push(seed); emit(`[shard ${opts.shard}] seeded ${input.name}; hash verified\n`);
   }
-  const paths=Object.fromEntries(opts.inputs.map(input=>[input.name,inputPath(data.root,input)]));
+  const paths=Object.fromEntries(opts.inputs.map(input=>[input.name,index.inputs[inputKey(input)]?.path || inputPath(data.root,input)]));
   const inputMap=path.join(data.control,'inputs.json');
   checked(await ssh(row,'input-map',{...data,paths},{state,timeout:remaining()}),'input path map');
   attempt.inputPaths=paths; return inputMap;
