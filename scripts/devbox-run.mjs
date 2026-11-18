@@ -28,10 +28,11 @@ const resCommand = () => process.env.RES_COMMAND || (fs.existsSync(path.join(sha
 export function parseArgs(args) {
   const opts = { ref: 'HEAD', pool: 'devbox-cn', shards: 1, timeout: 120, artifacts: [], env: {}, days: 7, need: [], excludeSlot: [], excludeHost: [] };
   if (args[0] === 'gc') { opts.gc = true; args = args.slice(1); }
-  const names = new Map(['project', 'task', 'repo', 'ref', 'pool', 'shards', 'out', 'timeout', 'prefer-host', 'watch-pid', 'affinity', 'host', 'days'].map(n => [`--${n}`, n.replace(/-([a-z])/g, (_, c) => c.toUpperCase())]));
+  if (args[0] === 'prewarm') { opts.prewarm = true; opts.ref = 'main'; opts.task = 'prewarm'; args = args.slice(1); }
+  const names = new Map(['project', 'task', 'repo', 'ref', 'pool', 'shards', 'out', 'timeout', 'prefer-host', 'watch-pid', 'affinity', 'host', 'days', 'units-file', 'command'].map(n => [`--${n}`, n.replace(/-([a-z])/g, (_, c) => c.toUpperCase())]));
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
-    if (arg === '--') { opts.command = args.slice(i + 1).join(' '); break; }
+    if (arg === '--') { if (opts.command) throw Error('provide only one command'); opts.command = args.slice(i + 1).join(' '); break; }
     if (arg === '--help' || arg === '-h') return { help: true };
     if (arg === '--submodules') { opts.submodules = true; continue; }
     if (arg === '--rerun-on-fail') { opts.rerunOnFail = true; continue; }
@@ -39,6 +40,8 @@ export function parseArgs(args) {
     if (!names.has(arg) && !['--env', '--artifact', '--need', '--exclude-slot', '--exclude-host'].includes(arg)) throw Error(`unknown option ${arg}`);
     const value = args[++i];
     if (value === undefined || value === '--') throw Error(`missing value for ${arg}`);
+    if (arg === '--command' && !opts.prewarm) throw Error('--command is for prewarm; use -- COMMAND for runs');
+    if (opts.prewarm && ['--shards', '--units-file'].includes(arg)) throw Error('prewarm builds once per idle host, without unit sharding');
     if (['--need', '--exclude-host', '--exclude-slot'].includes(arg)) {
       const caps = value.split(',');
       if (caps.some(cap => !/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(cap))) throw Error('invalid capability');
@@ -56,20 +59,23 @@ export function parseArgs(args) {
   opts.days = Number(opts.days);
   if (!Number.isFinite(opts.days) || opts.days < 1) throw Error('--days must be at least 1');
   if (opts.gc) return opts;
+  if (opts.prewarm && !opts.project) throw Error('prewarm requires --project');
   for (const name of (opts.project === undefined ? ['task'] : ['project', 'task'])) if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,100}$/.test(opts[name] || '')) throw Error(`--${name} needs a simple identifier`);
   if (!opts.repo || !opts.command?.trim()) throw Error('--repo and a command after -- are required');
   if (!['devbox-cn', 'devbox-cn-light'].includes(opts.pool)) throw Error('unsupported pool');
-  opts.shards = Number(opts.shards); opts.timeout = Number(opts.timeout);
-  if (!Number.isInteger(opts.shards) || opts.shards < 1 || opts.shards > 64) throw Error('--shards must be 1..64');
+  opts.shards = opts.shards === 'auto' ? 'auto' : Number(opts.shards); opts.timeout = Number(opts.timeout);
+  if (opts.shards !== 'auto' && (!Number.isInteger(opts.shards) || opts.shards < 1 || opts.shards > 64)) throw Error('--shards must be auto or 1..64');
   if (!Number.isFinite(opts.timeout) || opts.timeout <= 0 || opts.timeout > 120) throw Error('--timeout must be >0 and <=120 minutes');
   if (opts.watchPid && (!/^\d+$/.test(opts.watchPid) || Number(opts.watchPid) < 2)) throw Error('invalid --watch-pid');
   opts.repo = fs.realpathSync(opts.repo);
+  if (opts.unitsFile) opts.unitsFile = path.resolve(opts.unitsFile);
+  if (opts.prewarm && opts.command.includes('{units}')) throw Error('prewarm does not support {units}');
   opts.repoName = path.basename(opts.repo).replace(/[^A-Za-z0-9_.-]/g, '_');
   opts.out = path.resolve(opts.out || path.join(os.tmpdir(), `devbox-run-output-${Date.now()}-${process.pid}`));
   return opts;
 }
 
-export function readRegistry(dir, pool) {
+function registryRows(dir) {
   const rows = fs.readFileSync(path.join(dir, 'resources.tsv'), 'utf8').trim().split('\n').map(line => {
     const [slot, kind, policy, , ...description] = line.split('\t');
     const addresses = [...description.join('\t').matchAll(/\b([A-Za-z_][A-Za-z0-9_.-]*)@((?:\d{1,3}\.){3}\d{1,3})\b/g)];
@@ -77,8 +83,112 @@ export function readRegistry(dir, pool) {
     const caps = /\bcaps=([A-Za-z0-9_,.-]+)/.exec(description.join(' '))?.[1].split(',') || [];
     return { slot, kind, policy, caps, ...(unique.length === 1 ? { user: addresses[0][1], host: addresses[0][2], target: unique[0] } : {}) };
   });
+  return rows;
+}
+
+export function readRegistry(dir, pool) {
   const pattern = pool === 'devbox-cn' ? /^devbox-cn-\d+$/ : /^devbox-cn-light(?:-\d+)?$/;
-  return rows.filter(row => row.kind === 'remote' && row.policy === 'open' && pattern.test(row.slot));
+  return registryRows(dir).filter(row => row.kind === 'remote' && row.policy === 'open' && pattern.test(row.slot));
+}
+
+const lockPath = (dir, slot) => path.join(dir, 'locks', `${slot}.d`);
+const freeSlot = (dir, row) => !fs.existsSync(lockPath(dir, row.slot));
+const eligibleSlot = (opts, row) => opts.need.every(cap => row.caps.includes(cap))
+  && !opts.excludeSlot.includes(row.slot) && !opts.excludeHost.includes(row.host);
+const runRows = opts => opts.prewarm
+  ? [...readRegistry(sharedDir(), 'devbox-cn'), ...readRegistry(sharedDir(), 'devbox-cn-light')]
+  : readRegistry(sharedDir(), opts.pool);
+
+function quarantinedHosts(dir) {
+  let health;
+  try { health = JSON.parse(fs.readFileSync(path.join(dir, 'box-health.json'), 'utf8')); }
+  catch (error) {
+    if (error.code === 'ENOENT') return new Set();
+    throw Error('invalid box-health.json for automatic placement');
+  }
+  if (!health || typeof health !== 'object' || Array.isArray(health)) throw Error('invalid box-health.json for automatic placement');
+  const blocked = new Set(), now = Date.now() / 1000;
+  for (const [host, entry] of Object.entries(health)) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)
+      || (entry.manual !== undefined && typeof entry.manual !== 'boolean')
+      || (entry.autoQuarantined !== undefined && typeof entry.autoQuarantined !== 'boolean')
+      || (entry.quarantinedUntil !== undefined && (!Number.isFinite(entry.quarantinedUntil) || entry.quarantinedUntil < 0))
+      || (entry.failures !== undefined && (!Array.isArray(entry.failures)
+        || entry.failures.some(failure => !failure || typeof failure !== 'object' || !Number.isFinite(failure.at)))))
+      throw Error('invalid box-health.json for automatic placement');
+    if (entry.manual || (entry.quarantinedUntil || 0) > now) blocked.add(host);
+  }
+  return blocked;
+}
+
+function heldSlots(dir, host, liveOnly = false) {
+  return registryRows(dir).filter(row => {
+    if (row.kind !== 'remote' || row.host !== host || !/^devbox-cn-(?:\d+|light(?:-\d+)?)$/.test(row.slot) || freeSlot(dir, row)) return false;
+    if (liveOnly) {
+      try {
+        const info = Object.fromEntries(fs.readFileSync(path.join(lockPath(dir, row.slot), 'info'), 'utf8').trim().split('\n').map(line => line.split('\t')));
+        if (info.host === os.hostname() && /^[1-9]\d*$/.test(info.pid || '')) {
+          try { process.kill(Number(info.pid), 0); } catch (error) { if (error.code === 'ESRCH') return false; }
+        }
+      } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    }
+    // Missing/remote PID metadata does not prove a hold dead.
+    return true;
+  });
+}
+
+export function cpuBudget(dir, host, hostCores) {
+  if (!Number.isInteger(hostCores) || hostCores < 1) throw Error(`missing valid core count for ${host}`);
+  const heavyHolders = heldSlots(dir, host, true).filter(row => /^devbox-cn-\d+$/.test(row.slot)).length;
+  return { cpus: Math.min(hostCores, Math.max(2, Math.floor(hostCores / Math.max(1, heavyHolders)))), hostCores, heavyHolders };
+}
+
+export function cpuEnvironment(cpus) {
+  return { DEVBOX_CPUS: String(cpus), MAKEFLAGS: `-j${cpus}`, CMAKE_BUILD_PARALLEL_LEVEL: String(cpus),
+    NODE_TEST_WORKERS: String(cpus), VITEST_MAX_THREADS: String(cpus), JEST_WORKERS: String(cpus), npm_config_jobs: String(cpus) };
+}
+
+export function parseUnits(text) {
+  const units = text.split(/\r?\n/).filter(line => line.trim());
+  if (!units.length) throw Error('unit list is empty');
+  if (units.some(unit => path.posix.isAbsolute(unit) || unit.includes('\0') || unit.split('/').some(part => !part || part === '..' || part === '.') || sensitiveFile.test(unit)))
+    throw Error('units must be source-only workspace-relative paths');
+  if (new Set(units).size !== units.length) throw Error('duplicate unit in list');
+  return units;
+}
+
+export function discoverUnits(files) {
+  return files.filter(file => /(?:^|\/)(?:__tests__\/.*\.(?:[cm]?[jt]sx?)|test_[^/]+\.py|[^/]+_test\.go|[^/]+Test\.(?:java|kt))$|\.(?:test|spec)\.[cm]?[jt]sx?$/.test(file)).sort();
+}
+
+export function assignUnits(units, shards, durations = {}) {
+  const balanced = units.every(unit => Number.isFinite(durations[unit]?.durationSec) && durations[unit].durationSec > 0);
+  const groups = Array.from({ length: shards }, () => []), loads = Array(shards).fill(0);
+  const ordered = balanced ? units.toSorted((a, b) => durations[b].durationSec - durations[a].durationSec) : units;
+  ordered.forEach((unit, index) => {
+    const shard = balanced ? loads.indexOf(Math.min(...loads)) : index % shards;
+    groups[shard].push(unit); loads[shard] += balanced ? durations[unit].durationSec : 0;
+  });
+  return { groups, loads, strategy: balanced ? 'longest-first' : 'round-robin' };
+}
+
+export function planShards(requested, freeSlots, units, history = {}, commandKey) {
+  const duration = units?.every(unit => history.units?.[unit]?.durationSec > 0)
+    ? units.reduce((total, unit) => total + history.units[unit].durationSec, 0) : history.commands?.[commandKey]?.durationSec;
+  let count = requested;
+  if (requested === 'auto') {
+    if (!freeSlots) throw Error('no free eligible slots for --shards auto; explicit N can queue');
+    count = Math.min(64, freeSlots, units?.length || 64, Number.isFinite(duration) ? Math.max(1, Math.floor(duration / 120)) : 1);
+    // Average time alone is insufficient when one long unit dominates.
+    while (units && count > 1) {
+      const plan = assignUnits(units, count, history.units);
+      if (plan.strategy !== 'longest-first' || Math.min(...plan.loads) >= 120) break;
+      count--;
+    }
+  }
+  if (units && count > units.length) throw Error('--shards exceeds the number of units');
+  return { count, expectedDurationSec: Number.isFinite(duration) ? duration : null,
+    ...(units ? assignUnits(units, count, history.units) : { groups: Array.from({ length: count }, () => null), strategy: 'command' }) };
 }
 
 // Output is line-buffered so assignments split across SSH chunks are still masked.
@@ -277,6 +387,32 @@ for meta in (root/'wt').glob('*/*/*/.devbox-run.json'):
         rows.append({'slot':row['slot'],'workspace':str(meta.parent),'repository':row['repository']})
 print(json.dumps(rows))
 `,
+  recent: pythonHeader + `root=pathlib.Path(d['root']); recent={}
+for meta in (root/'wt'/d['project']).glob('*/*/.devbox-run.json'):
+    if meta.is_symlink() or not meta.resolve().is_relative_to(root.resolve()): continue
+    row=json.loads(meta.read_text()); slot=row.get('slot')
+    if slot: recent[slot]=max(recent.get(slot,0),row.get('lastUsed',0))
+print(json.dumps(recent))
+`,
+  units: pythonHeader + `import subprocess, shlex
+ctl=pathlib.Path(d['control']); records=[]; result=0
+for unit in d['units']:
+    command=d['command'].replace('{units}',shlex.quote(unit)) if '{units}' in d['command'] else d['command']+' '+shlex.quote(unit)
+    start=time.monotonic()
+    code=subprocess.run(['bash','-c',command],stdin=subprocess.DEVNULL).returncode
+    code=code if code>=0 else 128-code
+    records.append({'unit':unit,'durationSec':time.monotonic()-start,'exit':code})
+    tmp=ctl/'units.tmp'; tmp.write_text(json.dumps({'run':ctl.name,'units':records})); tmp.replace(ctl/'units.json')
+    if code and not result: result=code
+sys.exit(result)
+`,
+  timings: pythonHeader + `ctl=pathlib.Path(d['control']); records={'units':[]}
+file=ctl/'units.json'
+if file.exists():
+    records=json.loads(file.read_text())
+    if records.get('run')!=ctl.name: raise RuntimeError('unit timing run mismatch')
+print(json.dumps(records))
+`,
   gc: pythonHeader + `import subprocess, fcntl, shutil
 root=pathlib.Path(d['root']); ws=pathlib.Path(d['workspace']); repo=pathlib.Path(d['repository'])
 before=os.statvfs(root); before=before.f_bavail*before.f_frsize
@@ -360,7 +496,8 @@ try:
     else:
         bootstrap='if [ -f "$HOME/devbox-env.sh" ]; then . "$HOME/devbox-env.sh"; else export PATH="$HOME/.local/node/bin:$HOME/.local/bin:$PATH"; fi'
         exports='; '.join('export '+key+'='+shlex.quote(value) for key,value in d['env'].items())
-        shell=bootstrap+'\\n'+exports+'\\n'+d['command']
+        parallel=('export GRADLE_OPTS="'+'\u0024{GRADLE_OPTS:+\u0024GRADLE_OPTS }-Dorg.gradle.workers.max='+str(d['cpus'])+'"') if d.get('cpus') else ''
+        shell=bootstrap+'\\n'+exports+'\\n'+parallel+'\\n'+d['command']
         proc=subprocess.Popen([shutil.which('bash'),'-lc',shell], start_new_session=True, cwd=d['workspace'], env={**os.environ,**d['env']}, stdin=subprocess.DEVNULL)
         leader_start=stat(proc.pid)[19]
         save('group.json',{'pid':proc.pid,'start':leader_start})
@@ -583,7 +720,12 @@ async function snapshot(opts, temp, state, ancestors = new Set(), parentObjects 
     }
   }
   const anchors = (await git(['rev-list', '--first-parent', '--max-count=64', commit])).trim().split('\n');
-  return { commit, anchors, storeKey, modules, untracked, exportRepo, patchFile, extra, temp, sourceRepo: opts.repo };
+  const transferFiles = new Set(files);
+  for (const mod of modules) {
+    if (!mod.parent) transferFiles.delete(mod.relative);
+    for (const file of mod.files) transferFiles.add(path.posix.join(mod.parent, mod.relative, file));
+  }
+  return { commit, anchors, storeKey, modules, untracked, files: [...transferFiles], exportRepo, patchFile, extra, temp, sourceRepo: opts.repo };
 }
 
 function bundleDiagnostics(snapshot, args) {
@@ -668,13 +810,60 @@ async function hostRoot(row, state) {
   return withStateLock(path.join(cacheDir(), `devbox-probe-${row.host}`), async () => {
   let cache = {}; try { cache = JSON.parse(fs.readFileSync(cacheFile, 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw error; }
   let entry = cache[row.host];
-  if (!entry?.root || entry.user !== row.user) {
+  if (!entry?.root || entry.user !== row.user || !Number.isInteger(entry.cores) || entry.cores < 1) {
     entry = JSON.parse(checked(await ssh(row, 'probe', { user: row.user }, { state }), 'root probe').trim());
     await mergeState(cacheFile, row.host, entry);
   }
   if (typeof entry.root !== 'string' || !entry.root.startsWith('/') || !entry.root.endsWith('/devbox-run') || entry.root.includes('\0') || entry.root.split('/').includes('..')) throw Error('invalid remote workspace root');
   return entry.root;
   });
+}
+
+function timingFile(repoId) { return path.join(cacheDir(), 'timings', `${repoId}.json`); }
+
+function readTimings(repoId) {
+  try { return JSON.parse(fs.readFileSync(timingFile(repoId), 'utf8')); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; return { version: 1, units: {}, commands: {} }; }
+}
+
+async function recordTimings(repoId, commandKey, shards) {
+  const file = timingFile(repoId);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  await withStateLock(file, () => {
+    const history = readTimings(repoId); history.units ||= {}; history.commands ||= {}; history.version = 1;
+    const update = (map, key, durationSec) => {
+      if (!Number.isFinite(durationSec) || durationSec <= 0) return;
+      const previous = map[key], samples = previous?.samples || 0;
+      map[key] = { durationSec: ((previous?.durationSec || 0) * samples + durationSec) / (samples + 1), samples: samples + 1, updatedAt: new Date().toISOString() };
+    };
+    for (const shard of shards) {
+      const units = new Map();
+      for (const attempt of shard.attempts || []) for (const record of attempt.unitTimings || []) {
+        if (!record.exit) units.set(record.unit, record.durationSec);
+      }
+      for (const [unit, duration] of units) update(history.units, unit, duration);
+    }
+    if (shards.length && shards.every(shard => !shard.exit && !shard.skipped)) {
+      update(history.commands, commandKey, shards.reduce((total, shard) => total + (shard.attempts.at(-1).commandDurationSec || 0), 0));
+    }
+    writeJSON(file, history);
+  });
+}
+
+async function planPrewarm(opts, state) {
+  const rows = runRows(opts).filter(row => eligibleSlot(opts, row));
+  if (rows.some(row => !row.target)) throw Error('open pool registry row lacks an unambiguous user@ip description');
+  if (!rows.length) throw Error('no open slot provides all required capabilities');
+  const plans = [], blocked = quarantinedHosts(sharedDir());
+  for (const [host, row] of new Map(rows.map(row => [row.host, row]))) {
+    if (state.cancel || blocked.has(host) || heldSlots(sharedDir(), host).length) continue;
+    const root = await hostRoot(row, state);
+    const recent = JSON.parse(checked(await ssh(row, 'recent', { root, project: opts.project }, { state }), 'prewarm slot history'));
+    const candidates = rows.filter(member => member.host === host && freeSlot(sharedDir(), member))
+      .sort((a, b) => Number(b.slot.includes('light')) - Number(a.slot.includes('light')) || (recent[b.slot] || 0) - (recent[a.slot] || 0) || a.slot.localeCompare(b.slot));
+    if (candidates.length && !heldSlots(sharedDir(), host).length && !quarantinedHosts(sharedDir()).has(host)) plans.push(candidates.map(member => member.slot));
+  }
+  return plans;
 }
 
 async function collectGarbage({ rows, days = 7, host, state, emit = text => process.stdout.write(text), skipSlot }) {
@@ -780,10 +969,9 @@ async function shard(opts) {
         emit(`[shard ${opts.shard}] bundleFailure=${JSON.stringify(diagnostics)}\n`);
       };
       try {
-        let rows = readRegistry(sharedDir(), opts.pool);
+        let rows = runRows(opts);
         if (!rows.length) throw Error('no open slots in pool');
-        const eligible = item => opts.need.every(cap => item.caps.includes(cap))
-          && !opts.excludeSlot.includes(item.slot) && !opts.excludeHost.includes(item.host);
+        const eligible = item => eligibleSlot(opts, item) && (!opts.prewarmSlots || opts.prewarmSlots.includes(item.slot));
         rows = rows.filter(eligible);
         if (!rows.length) throw Error('no open slot provides all required capabilities');
         // Bad descriptions must not cause a lease or an implicit local-user SSH login.
@@ -806,7 +994,16 @@ async function shard(opts) {
         if (warm && opts.preferSlotSupported) args.push('--prefer-slot', warm.slot);
         let acquire;
         const preferredSlots = opts.preferSlotSupported ? [] : warm ? [warm] : !opts.preferSupported ? choices.filter(item => item.host === preferred) : [];
-        if (!avoid) for (const candidate of preferredSlots) {
+        if (opts.prewarm) {
+          const candidates = opts.prewarmSlots.map(slot => choices.find(item => item.slot === slot)).filter(Boolean);
+          for (const candidate of candidates) {
+            if (quarantinedHosts(sharedDir()).has(candidate.host) || heldSlots(sharedDir(), candidate.host).length) break;
+            const take = await runRes(['take', candidate.slot, ...common]);
+            if (!take.code) { acquire = { ...take, stdout: `slot=${candidate.slot}\n` }; break; }
+            if (take.code !== 2 && take.code !== 3) checked(take, 'prewarm slot acquisition');
+          }
+          if (!acquire) { attempt.skipped = true; attempt.exit = 0; emit(`[shard ${opts.shard}] prewarm skipped: host is busy\n`); break; }
+        } else if (!avoid) for (const candidate of preferredSlots) {
           const take = await runRes(['take', candidate.slot, ...common]);
           if (!take.code) { acquire = { ...take, stdout: `slot=${candidate.slot}\n` }; break; }
           if (take.code !== 2 && take.code !== 3) checked(take, 'affinity slot acquisition');
@@ -816,11 +1013,12 @@ async function shard(opts) {
         if (match) attempt.slot = match[1];
         checked(acquire, 'slot acquisition');
         if (!attempt.slot) throw Error('res did not return slot=');
-        rows = readRegistry(sharedDir(), opts.pool);
+        rows = runRows(opts);
         row = rows.find(item => item.slot === attempt.slot);
         if (!row?.target) throw Error('acquired slot is no longer an open mapped pool member');
         if (!eligible(row) || !choices.some(item => item.slot === row.slot) || (avoid && choices.some(item => item.host !== avoid.host) && row.host === avoid.host)) {
           await release(row.slot); attempt.slot = null;
+          if (opts.prewarm) { attempt.returned = true; attempt.skipped = true; attempt.exit = 0; break; }
           // Old controllers have no preference/exclusion flag. Keep arbitration in res.
           row = choices.find(item => avoid && item.host !== avoid.host) || choices[0];
           const result = await runRes(['wait', row.slot, ...common, '--timeout', String(remaining() / 60000)]);
@@ -828,6 +1026,9 @@ async function shard(opts) {
           checked(result, 'alternate slot acquisition');
         }
         attempt.host = row.host;
+        if (opts.prewarm && (quarantinedHosts(sharedDir()).has(row.host) || heldSlots(sharedDir(), row.host).some(member => member.slot !== row.slot))) {
+          attempt.skipped = true; attempt.exit = 0; emit(`[shard ${opts.shard}] prewarm skipped: host became busy\n`); break;
+        }
         if (state.cancel) throw Object.assign(Error('cancelled'), { code: state.cancel });
         emit(`[shard ${opts.shard}] slot=${row.slot} host=${row.host}\n`);
         const root = await hostRoot(row, state);
@@ -882,9 +1083,16 @@ async function shard(opts) {
         }
         await mergeState(path.join(cacheDir(), 'devbox-affinity.json'), opts.affinity, { host: row.host, slot: row.slot, time: new Date().toISOString() });
         if (state.cancel) throw Object.assign(Error('cancelled'), { code: state.cancel });
+        const hosts = JSON.parse(fs.readFileSync(path.join(cacheDir(), 'devbox-hosts.json'), 'utf8'));
+        Object.assign(attempt, cpuBudget(sharedDir(), row.host, hosts[row.host]?.cores));
+        emit(`[shard ${opts.shard}] cpus=${attempt.cpus} cores=${attempt.hostCores} heavyHolders=${attempt.heavyHolders}\n`);
+        let job = opts.units ? remoteCommand('units', remoteScripts.units, { control: data.control, command, units: opts.units }) : command;
+        if (opts.prewarm) job = `nice -n 10 bash -c ${quote(job)}`;
         launched = true;
         const caches = { GRADLE_USER_HOME: `${root}/shared/gradle`, npm_config_cache: `${root}/shared/npm`, PNPM_STORE_DIR: `${root}/shared/pnpm`, CCACHE_DIR: `${root}/shared/ccache`, CCACHE_MAXSIZE: '20G', PIP_CACHE_DIR: `${root}/shared/pip`, DEVBOX_TOOLCHAINS: `${root}/shared/toolchains` };
-        const result = await ssh(row, 'run', { ...data, command, env: { ...caches, ...opts.env, DEVBOX_RUN_RECEIPT: `${workspace}/.devbox-run.json` }, seconds: remaining() / 1000 }, { state, timeout: remaining() + 15000, onOutput: emit });
+        const commandStart = Date.now();
+        const result = await ssh(row, 'run', { ...data, command: job, cpus: attempt.cpus, env: { ...caches, ...opts.env, ...cpuEnvironment(attempt.cpus), DEVBOX_RUN_RECEIPT: `${workspace}/.devbox-run.json` }, seconds: remaining() / 1000 }, { state, timeout: remaining() + 15000, onOutput: emit });
+        attempt.commandDurationSec = (Date.now() - commandStart) / 1000;
         attempt.exit = state.cancel || result.code;
         if (result.infraFailure) attempt.infraFailure = true;
         else if (/permission denied|gssapi|authentication failed/i.test(result.stderr)) attempt.authenticationBlocked = true;
@@ -899,6 +1107,14 @@ async function shard(opts) {
           const cleanup = await ssh(row, 'cleanup', { ...data, started: launched }, { cancellable: false, state, timeout: 35000 });
           clean = cleanup.code === 0 && cleanup.stdout.includes('group-gone');
           if (!clean) { attempt.cleanupUnconfirmed = true; attempt.exit ||= 70; emit(`[shard ${opts.shard}] BLOCKED: remote cleanup unconfirmed; retaining ${attempt.slot}\n`); }
+          if (clean && launched && opts.units) {
+            const timings = await ssh(row, 'timings', data, { cancellable: false, state, timeout: 30000 });
+            try {
+              attempt.unitTimings = JSON.parse(checked(timings, 'unit timing fetch')).units;
+              if (!Array.isArray(attempt.unitTimings)) throw Error('invalid unit timing records');
+              attempt.unitTimings = attempt.unitTimings.filter(record => opts.units.includes(record.unit));
+            } catch (error) { attempt.timingError = error.message; emit(`[shard ${opts.shard}] ${error.message}\n`); }
+          }
           if (clean && opts.artifacts.length) {
             const archive = path.join(opts.out, `shard-${opts.shard}-attempt-${attempts.length}.tar`);
             const fetched = await ssh(row, 'artifacts', { ...data, patterns: opts.artifacts }, { outputFile: archive, cancellable: false, state, timeout: 60000 });
@@ -911,7 +1127,7 @@ async function shard(opts) {
         }
         // Interrupted res can acquire before publishing slot=. Recover only this PID/holder.
         if (!attempt.slot) {
-          for (const member of readRegistry(sharedDir(), opts.pool)) {
+          for (const member of runRows(opts)) {
             const info = path.join(sharedDir(), 'locks', `${member.slot}.d`, 'info');
             try {
               const fields = Object.fromEntries(fs.readFileSync(info, 'utf8').trim().split('\n').map(line => line.split('\t')));
@@ -921,7 +1137,7 @@ async function shard(opts) {
         }
         attempt.durationSec = (Date.now() - attemptStart) / 1000;
       }
-      if (state.cancel || attempt.cleanupUnconfirmed || attempt.returnError || attempt.authenticationBlocked || attempt.infraFailure) break;
+      if (state.cancel || opts.prewarm || attempt.cleanupUnconfirmed || attempt.returnError || attempt.authenticationBlocked || attempt.infraFailure) break;
       if (attempt.diskGuard && diskRetries++ === 0) { diskHosts.add(row.host); avoid = row; continue; }
       if (attempt.exit && !attempt.diskGuard && opts.rerunOnFail && reruns++ === 0 && row) {
         firstFailure = attempt.exit; failedSlots.add(row.slot); avoid = row; continue;
@@ -933,7 +1149,8 @@ async function shard(opts) {
     let exit = state.cancel || (flaky && !opts.allowFlaky ? firstFailure : last?.exit ?? 1);
     try { writeJSON(stateFile, { shard: opts.shard, updatedAt: new Date().toISOString(), status: 'complete', slot: last?.slot || null, exit, resEvents }); }
     catch { state.stop(74); exit = state.cancel; }
-    return { shard: opts.shard, slot: last?.slot || null, host: last?.host || null, exit, flaky, stateFile, resEvents, durationSec: (Date.now() - started) / 1000, log, attempts };
+    return { shard: opts.shard, slot: last?.slot || null, host: last?.host || null, exit, flaky, stateFile, resEvents, ...(last?.skipped ? { skipped: true } : {}),
+      ...(opts.units ? { units: opts.units } : {}), durationSec: (Date.now() - started) / 1000, log, attempts };
   } finally { clearTimeout(timer); clearInterval(parentWatch); fs.closeSync(fd); }
 }
 
@@ -952,7 +1169,7 @@ async function main(args) {
   }
   const opts = parseArgs(args);
   if (opts.help) {
-    console.log('Usage: devbox-run.mjs [--project P] --task T --repo PATH [--ref COMMIT|HEAD|worktree] [--pool devbox-cn|devbox-cn-light] [--shards N] [--artifact GLOB]... [--out DIR] [--timeout MIN] [--env K=V]... [--rerun-on-fail] [--allow-flaky] [--affinity KEY] [--prefer-host IP] [--need CAP]... [--exclude-slot IDS] [--exclude-host IPS] [--submodules] [--watch-pid PID] -- COMMAND\n       devbox-run.mjs gc [--host IP] [--days N]\n       devbox-run.mjs stop --out DIR --run-id UUID\nCOMMAND supports {shard} and {shards}. Timeout includes queue/upload/run; cleanup follows. See references/devbox-run.md.');
+    console.log('Usage: devbox-run.mjs [--project P] --task T --repo PATH [--ref COMMIT|HEAD|worktree] [--pool devbox-cn|devbox-cn-light] [--shards N|auto] [--units-file PATH] [--artifact GLOB]... [--out DIR] [--timeout MIN] [--env K=V]... [--rerun-on-fail] [--allow-flaky] [--affinity KEY] [--prefer-host IP] [--need CAP]... [--exclude-slot IDS] [--exclude-host IPS] [--submodules] [--watch-pid PID] -- COMMAND\n       devbox-run.mjs prewarm --project P --repo PATH [--ref main] --command COMMAND [--need CAP]...\n       devbox-run.mjs gc [--host IP] [--days N]\n       devbox-run.mjs stop --out DIR --run-id UUID\nCOMMAND supports {shard}, {shards} and {units}. Timeout includes queue/upload/run; cleanup follows. See references/devbox-run.md.');
     return 0;
   }
   if (opts.gc) {
@@ -985,6 +1202,24 @@ async function main(args) {
   try {
     opts.snapshot = await snapshot(opts, temp, state);
     if (state.cancel) return state.cancel;
+    if (opts.unitsFile) opts.units = parseUnits(fs.readFileSync(opts.unitsFile, 'utf8'));
+    else if (opts.command.includes('{units}')) opts.units = parseUnits(discoverUnits(opts.snapshot.files).join('\n'));
+    if (opts.units?.some(unit => !opts.snapshot.files.includes(unit))) throw Error('unit is absent from the source snapshot');
+    delete opts.snapshot.files;
+    const commandKey = createHash('sha256').update(JSON.stringify([opts.command, opts.units || null, Boolean(opts.prewarm)])).digest('hex');
+    const prewarm = opts.prewarm ? await planPrewarm(opts, state) : null;
+    let plan;
+    if (opts.prewarm) plan = { count: prewarm.length, strategy: 'prewarm', groups: prewarm.map(() => null) };
+    else {
+      const rows = runRows(opts).filter(row => eligibleSlot(opts, row));
+      if (rows.some(row => !row.target)) throw Error('open pool registry row lacks an unambiguous user@ip description');
+      const blocked = opts.shards === 'auto' ? quarantinedHosts(sharedDir()) : new Set();
+      plan = planShards(opts.shards, rows.filter(row => freeSlot(sharedDir(), row) && !blocked.has(row.host)).length, opts.units, readTimings(opts.snapshot.storeKey), commandKey);
+    }
+    const requestedShards = opts.shards;
+    opts.shards = plan.count;
+    if (opts.prewarm || requestedShards === 'auto') console.log(`shards=${opts.shards} strategy=${plan.strategy}${!opts.shards ? ' (no idle eligible hosts)' : ''}`);
+    if (state.cancel) return state.cancel;
     const help = await execute(resCommand(), ['wait-pool', '--help'], { state });
     opts.preferSupported = /--prefer-host\b/.test(help.stdout + help.stderr);
     opts.excludeSlotSupported = (help.stdout + help.stderr).includes('--exclude-slot');
@@ -1001,11 +1236,14 @@ async function main(args) {
         workers.delete(signalChild);
         resolve(result || { shard: index + 1, slot: null, host: null, exit: code || (signal ? 143 : 1), error: 'shard process exited without cleanup report' });
       });
-      child.send({ ...opts, shard: index + 1, parentPid: process.pid });
+      child.send({ ...opts, units: plan.groups[index], ...(opts.prewarm ? { prewarmSlots: prewarm[index] } : {}), shard: index + 1, parentPid: process.pid });
       if (state.cancel) signalChild('SIGTERM');
     })));
-    const exit = state.cancel || shards.find(item => item.exit)?.exit || 0;
-    const summary = { runId, project: opts.project, task: opts.task, commit: opts.snapshot.commit, commandHash: createHash('sha256').update(opts.command).digest('hex'), time: new Date().toISOString(), exit, shards };
+    let exit = state.cancel || shards.find(item => item.exit)?.exit || 0;
+    const summary = { runId, project: opts.project, task: opts.task, commit: opts.snapshot.commit, commandHash: createHash('sha256').update(opts.command).digest('hex'),
+      time: new Date().toISOString(), exit, mode: opts.prewarm ? 'prewarm' : 'run', requestedShards, shardPlan: plan, shards };
+    try { await recordTimings(opts.snapshot.storeKey, commandKey, shards); }
+    catch (error) { summary.timingError = error.message; summary.exit = exit ||= 74; console.error(`timing history: ${error.message}`); }
     writeJSON(path.join(opts.out, 'summary.json'), summary);
     for (const item of shards.filter(item => item.flaky)) {
       fs.appendFileSync(path.join(cacheDir(), 'flaky-log.jsonl'), `${JSON.stringify({ project: opts.project, task: opts.task, commandHash: summary.commandHash, shard: item.shard, hosts: item.attempts.filter(a => !a.diskGuard).map(a => a.host), time: summary.time })}\n`, { mode: 0o600 });

@@ -18,6 +18,15 @@ node scripts/devbox-run.mjs \
   -- './gradlew test'
 
 node scripts/devbox-run.mjs gc --host 192.0.2.10 --days 7
+
+node scripts/devbox-run.mjs \
+  --project my-project --task tests --repo /absolute/path/to/repo \
+  --shards auto --units-file /tmp/test-files.txt --need node \
+  -- 'npm test -- {units}'
+
+node scripts/devbox-run.mjs prewarm \
+  --project my-project --repo /absolute/path/to/repo --ref main \
+  --need node --command 'npm ci && npm run build'
 ```
 
 VE/vesdk Android work must specify **`--need vesdk-android`**. The capability
@@ -49,7 +58,8 @@ repositories remain on RemoteX / TT-VEIS, rather than these devbox worktrees.
 | `--project`, `--task`, `--repo` | Task and repository root are required. An explicit project names the shared repository. |
 | `--ref HEAD\|worktree\|<commit-or-ref>` | Defaults to HEAD; worktree adds the tracked diff against HEAD and nonignored untracked files |
 | `--pool devbox-cn\|devbox-cn-light` | Heavy pool by default; light for checks under about five minutes |
-| `--shards N` | 1–64 independent shard holders |
+| `--shards N\|auto` | 1–64 independent shard holders; auto sizes from free eligible slots and duration history |
+| `--units-file PATH` | One source-relative test file per line; units are balanced and invoked separately |
 | `--timeout MIN` | Positive minutes, at most 120, default 120; bounds each shard's queue, transfer and command together |
 | `--artifact GLOB` | Repeatable, workspace-relative files; fetched into one tar per shard attempt |
 | `--out DIR` | Logs and summary; defaults to a unique directory in the local temporary directory; refuses to overwrite a previous run |
@@ -82,9 +92,71 @@ does not change lease arbitration or slot ownership. This observability does
 not override the controller's current stale-waiter setting, including the
 `RES_WAITER_STALE_SECONDS=300` live hotfix.
 
+The summary also includes `requestedShards`, `shardPlan` (count, assignment
+strategy and expected total command seconds), and the run mode. Attempts record
+`cpus`, `hostCores`, `heavyHolders` and `commandDurationSec`; unit runs include
+their assigned `units` and per-unit duration/exit receipts.
+
+## CPU budgets and unit sharding
+
+Immediately before each command launch, the runner reads host cores from the
+mini's `devbox-hosts.json` and counts currently held registered heavy slots on
+that box. Proven dead local holder PIDs are excluded; incomplete or remote
+holder metadata is counted conservatively. Light slots do not contribute to
+the denominator. The budget is
+`min(host_cores, max(2, floor(host_cores / max(1, heavy_holders))))`.
+Each retry recomputes it. A budget is a launch-time snapshot, not a dynamically
+changing limit when another job starts or finishes.
+
+Commands receive `DEVBOX_CPUS`, `MAKEFLAGS=-j$DEVBOX_CPUS`,
+`CMAKE_BUILD_PARALLEL_LEVEL`, `NODE_TEST_WORKERS`, `VITEST_MAX_THREADS`,
+`JEST_WORKERS`, and `npm_config_jobs`. The runner appends
+`-Dorg.gradle.workers.max=$DEVBOX_CPUS` to `GRADLE_OPTS` after the toolchain
+bootstrap and explicit environment, preserving any existing options. Generated
+CPU limits take precedence over conflicting `--env` values. Jobs with their
+own worker option should use the budget explicitly, for example
+`ninja -j"$DEVBOX_CPUS"` or `pytest -n "$DEVBOX_CPUS"`.
+
+`--shards auto` never launches more than the currently free eligible slots
+(capabilities, exclusions and current box quarantines apply), or more shards
+than units. With history,
+it targets at least 120 seconds per shard. For known unit timings it also
+reduces N when an uneven assignment would leave a shard below that target.
+Cold jobs use one shard. With zero free eligible slots it refuses rather than
+queueing; explicit N retains normal bounded queueing. A short job still needs
+one shard, and availability can change after planning.
+
+With `--units-file`, each nonblank line is an exact workspace-relative source
+file, including spaces if present. Duplicate paths, traversal, and files absent
+from the selected snapshot are refused. `{units}` without a list discovers
+conventional tracked JS/TS `.test`/`.spec` files and `__tests__` files,
+Python `test_*.py`, Go `*_test.go`, and Java/Kotlin `*Test` files; use a list for
+other layouts. Worktree mode also discovers uploaded overlay test files.
+With `--submodules`, transferred pinned module files are valid units and are
+included in discovery using their superproject-relative paths.
+
+Each unit invokes the Bash command separately, replacing `{units}` with one
+shell-quoted filename; without that placeholder the filename is appended.
+Use `{units}` for commands containing pipelines or multiple shell statements.
+Units within a shard run sequentially and remaining units run after a test
+failure, retaining the first nonzero exit. `{shard}` and `{shards}` still work.
+When all units have previous timings, longest-first greedy assignment puts the
+next longest unit on the least-loaded shard. Otherwise assignment is
+round-robin. Explicit N greater than the unit count is refused.
+
+After cleanup, the mini merges successful unit durations and successful-run
+aggregate command durations into `_shared/timings/<repo-id>.json`, with sample
+counts and UTC update times. The repository identity is shared across linked
+worktrees. Command history keys include the command and unit list, so unrelated
+lists do not share auto-sizing estimates. Unit durations include command
+startup overhead, but exclude source transfer and cleanup. Failed/cancelled
+units do not become successful duration samples. With `DEVBOX_CACHE_DIR`, all
+runner cache records, including timings, live there instead. Timing-fetch
+warnings appear in the attempt; failure to write local history is exit 74.
+
 ## Hard Pre-Transfer Gate
 
-Every project completes a local, fail-closed configuration scan
+Every project and prewarm run completes a local, fail-closed configuration scan
 before any SSH, lease acquisition, bundle upload, patch or untracked archive
 transfer. Recursive module snapshots must pass too. The scanner checks the
 selected commit's tree and all reachable configuration blobs in its history,
@@ -133,6 +205,26 @@ Runner output additionally masks these credential assignment families,
 multiline PEM private-key output and AKIA-style keys before streaming or
 writing shard logs. Commands must still never deliberately emit credentials;
 redaction cannot identify arbitrary unlabeled sensitive strings.
+
+## Nightly prewarm
+
+`prewarm --project P --repo PATH --ref main --command '<build cmd>' [--need CAP]`
+uses the same source checks, incremental store sync, persistent worktrees,
+space guards and supervised cleanup as a regular run. Its default ref is
+`main` and task is `prewarm`. It runs once per idle eligible CN box, preferring
+an eligible light slot and then the most recently used slot in that pool for
+the project. When no light slot has the required capabilities, it uses the
+most recently used eligible heavy slot. The build runs under `nice -n 10`.
+
+Prewarm uses only nonblocking `res take`, never `wait` or `wait-pool`. A held
+heavy or light slot makes the box busy; quarantined boxes are also skipped.
+It rechecks holder and quarantine state after taking its own slot
+and returns it without starting a command if another holder appeared. Busy
+boxes are skipped, and no idle eligible boxes is a successful no-op. It does
+not move a failed prewarm to another box, rerun it, or accept unit sharding.
+New arrivals can still start after the idle check; niceness limits interference.
+This command is intended for a nightly-review caller. The runner does not
+install or schedule a nightly job.
 
 A successful rerun sets `flaky: true` and appends project, task, command hash,
 shard, both hosts and time to `_shared/flaky-log.jsonl`. Without
@@ -312,10 +404,10 @@ objects, incremental transfer, mtimes, overlays, shared cache environment,
 affinity, upload and disk retries, artifacts, flaky bookkeeping, signal and
 timeout cleanup, interrupted acquisition recovery and leased GC.
 It also covers packed donor objects for incomplete modules, bundle diagnostics,
-pre-transfer credential admission, clean receipts and streamed lease progress.
-Set `DEVBOX_TEST_CASE=credentials|packed-module|receipt|res-progress|bundle|ownership|baseline`
+CPU budgets, auto sizing, unit assignments/timing history and idle prewarm.
+Set `DEVBOX_TEST_CASE=credentials|packed-module|receipt|res-progress|cpu|auto|units|prewarm|bundle|ownership|baseline`
 to rerun one focused case under local load.
-`baseline` runs the original runner scenarios without the new fix
+`baseline` runs the original runner scenarios without the new performance/gate
 cases, including bundle recovery and process ownership.
 For a loaded mini, bounded test-only allowances are available:
 `DEVBOX_TEST_TIMEOUT_MIN=3 DEVBOX_TEST_WATCHDOG_MS=240000 node

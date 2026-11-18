@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { parseArgs, readRegistry, remoteScripts, storeIdentity, makeBundle } from '../devbox-run.mjs';
+import { parseArgs, readRegistry, remoteScripts, storeIdentity, makeBundle, cpuBudget, cpuEnvironment, parseUnits, discoverUnits, assignUnits, planShards } from '../devbox-run.mjs';
 
 import { makeSubmoduleFixture } from './devbox-submodule-fixture.mjs';
 import { transferFindings } from '../lib/devbox-transfer-check.mjs';
@@ -70,6 +70,7 @@ const deadline=Date.now()+Number(a.includes('--timeout')?flag(a,'--timeout'):0)*
 do {
  for(const r of ids){const lock=path.join(c.shared,'locks',r.slot+'.d');try{fs.mkdirSync(lock);}catch(e){if(e.code==='EEXIST')continue;throw e;}
   fs.writeFileSync(path.join(lock,'info'),'by\t'+by+'\npid\t'+flag(a,'--pid')+'\n');event('take',{slot:r.slot,by,pid:Number(flag(a,'--pid'))});
+  if(c.prewarmBusyOnAcquire&&r.slot.includes('light')){const heavy=rows.find(x=>x.host===r.host&&/^devbox-cn-\d+$/.test(x.slot));const foreign=path.join(c.shared,'locks',heavy.slot+'.d');fs.mkdirSync(foreign);fs.writeFileSync(path.join(foreign,'info'),'by\tfixture-foreign\npid\t1\n');}
   if(c.cancelAcquire){process.kill(Number(flag(a,'--pid')),'SIGTERM');await sleep(100);process.exit(143);}
   if(op==='wait-pool')console.log('slot='+r.slot);return;
  }
@@ -87,7 +88,7 @@ if(!op)throw Error('unmarked SSH');
 if(!args.includes('BatchMode=yes')||!args.includes('ServerAliveInterval=15')||!args.includes('ServerAliveCountMax=4'))throw Error('missing SSH guard');
 if(!args.includes('ControlMaster=no')||!args.includes('ControlPath=none'))throw Error('SSH multiplexing must be disabled');
 let d={};if(op!=='upload')d=JSON.parse(Buffer.from(command.match(/'([A-Za-z0-9+/=]+)'$/)[1],'base64').toString());
-event(op,{host,target,slot:d.slot,workspace:d.workspace,control:d.control,env:op==='run'?d.env:undefined});
+event(op,{host,target,slot:d.slot,workspace:d.workspace,control:d.control,env:op==='run'?d.env:undefined,nice:op==='run'?d.command.startsWith('nice -n 10 bash -c'):undefined,cpus:d.cpus});
 if(c.authFailures){
  const file=path.join(c.dir,'auth-count');const count=fs.existsSync(file)?Number(fs.readFileSync(file)):0;
  if(count<c.authFailures){fs.writeFileSync(file,String(count+1));console.error(c.authMessage||'Permission denied (gssapi-with-mic)');process.exit(255);}
@@ -104,7 +105,7 @@ if(op==='run') {
  fs.mkdirSync(d.control,{recursive:true});
  if(fs.existsSync(path.join(d.control,'cancel'))){fs.writeFileSync(path.join(d.control,'done.json'),JSON.stringify({gone:true}));process.exit(143);}
  const attemptFile=path.join(c.dir,'run-count-'+host);const n=fs.existsSync(attemptFile)?Number(fs.readFileSync(attemptFile)):0;fs.writeFileSync(attemptFile,String(n+1));
- let cmd=d.command;
+ let cmd=(d.cpus?'export GRADLE_OPTS="'+'$'+'{GRADLE_OPTS:+'+'$'+'GRADLE_OPTS }-Dorg.gradle.workers.max='+d.cpus+'"; ':'')+d.command;
  if(c.failHost===host)cmd='exit 7';
  const child=cp.spawn('/bin/bash',['-c',cmd],{cwd:d.workspace,env:{...process.env,...d.env},detached:true,stdio:['ignore','inherit','inherit']});
  fs.writeFileSync(path.join(d.control,'group.json'),JSON.stringify({pid:child.pid}));
@@ -141,7 +142,9 @@ async function run(f, extra = [], command = 'echo {shard}/{shards}', signalWhen,
   const timeout = process.env.DEVBOX_TEST_TIMEOUT_MIN || '1';
   const watchdogMs = Number(process.env.DEVBOX_TEST_WATCHDOG_MS || 90000);
   assert.ok(Number.isFinite(watchdogMs) && watchdogMs >= 1000 && watchdogMs <= 600000, 'bounded fixture watchdog');
-  const args = extra[0] === 'gc' ? extra : ['--project', 'fixture', '--task', 'scenario', '--repo', f.repo, '--out', out, '--timeout', timeout, ...extra, '--', command];
+  const args = extra[0] === 'gc' ? extra : extra[0] === 'prewarm'
+    ? ['prewarm', '--project', 'fixture', '--repo', f.repo, '--ref', 'HEAD', '--out', out, '--timeout', timeout, ...extra.slice(1), '--command', command]
+    : ['--project', 'fixture', '--task', 'scenario', '--repo', f.repo, '--out', out, '--timeout', timeout, ...extra, '--', command];
   const child = spawn(process.execPath, [script, ...args], { env: f.env, stdio: ['ignore', 'pipe', 'pipe'] });
   let stdout = '', stderr = ''; child.stdout.on('data', b => { stdout += b; }); child.stderr.on('data', b => { stderr += b; });
   let finished = false;
@@ -168,6 +171,14 @@ function workspace(f, host = '192.0.2.1', slot = 'devbox-cn-1') {
   const cache = JSON.parse(fs.readFileSync(path.join(f.shared, 'devbox-hosts.json')));
   const dir = path.join(cache[host].root, 'wt/fixture');
   return path.join(dir, fs.readdirSync(dir)[0], slot);
+}
+
+function renderCommandShell(data) {
+  return execFileSync('python3', ['-c', `import ast,json,shlex,sys
+d=json.loads(sys.argv[1]); tree=ast.parse(sys.stdin.read())
+nodes=sorted([n for n in ast.walk(tree) if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id in ('bootstrap','exports','parallel','shell') for t in n.targets)],key=lambda n:n.lineno)
+exec(compile(ast.Module(body=nodes,type_ignores=[]),'bootstrap','exec'))
+print(shell)`, JSON.stringify(data)], { input: remoteScripts.run, encoding: 'utf8' });
 }
 
 async function packedModuleRecovery() {
@@ -202,11 +213,136 @@ async function packedModuleRecovery() {
   });
   const altFile = path.join(moduleObjects, 'info/alternates');
   const before = fs.existsSync(altFile) ? fs.readFileSync(altFile) : null;
-  const result = await run(f, ['--repo', pinned.repo, '--submodules'], 'test "$(cat engine/version)" = local-engine && test -f engine/public.json && test "$(cat engine/nested/payload)" = leaf');
+  const list = path.join(f.dir, 'module-units.txt'); fs.writeFileSync(list, 'engine/public.json\n');
+  const result = await run(f, ['--repo', pinned.repo, '--submodules', '--units-file', list], 'test "$(cat engine/version)" = local-engine && test -f {units} && test "$(cat engine/nested/payload)" = leaf');
   ok(result); returned(f);
   assert.deepEqual(fs.existsSync(altFile) ? fs.readFileSync(altFile) : null, before, 'source alternates are untouched');
   assert.throws(() => git(engine, 'cat-file', '-e', oid), 'source module remains unrepaired');
   console.log('PASS packed superproject blobs repair staged submodule bundles only; failure command/env/alternates diagnostics');
+}
+
+async function cpuScenarios() {
+  const f = fixture();
+  const registry = path.join(f.shared, 'resources.tsv');
+  fs.appendFileSync(registry, Array.from({ length: 5 }, (_, i) => `devbox-cn-${i + 5}\tremote\topen\t-\textra alice@192.0.2.1 caps=node\n`).join(''));
+  const hold = slot => { const dir = path.join(f.shared, 'locks', slot + '.d'); fs.mkdirSync(dir); fs.writeFileSync(path.join(dir, 'info'), 'by\tfixture-external\npid\t1\n'); return dir; };
+  const holds = ['devbox-cn-1', 'devbox-cn-5', 'devbox-cn-6', 'devbox-cn-7', 'devbox-cn-8'].map(hold);
+  holds.push(hold('devbox-cn-light'));
+  assert.equal(cpuBudget(f.shared, '192.0.2.1', 8).cpus, 2);
+  assert.equal(cpuBudget(f.shared, '192.0.2.1', 1).cpus, 1);
+  fs.writeFileSync(path.join(holds[0], 'info'), `by\tdead\npid\t536870911\nhost\t${os.hostname()}\n`);
+  assert.equal(cpuBudget(f.shared, '192.0.2.1', 8).heavyHolders, 4);
+  for (const dir of holds) fs.rmSync(dir, { recursive: true });
+  assert.equal(cpuBudget(f.shared, '192.0.2.1', 8).cpus, 8);
+  assert.throws(() => cpuBudget(f.shared, '192.0.2.1', undefined), /core count/);
+  const foreign = hold('devbox-cn-5');
+  const r = await run(f, ['--env', 'GRADLE_OPTS=-Xmx2g', '--env', 'MAKEFLAGS=-j99'], 'test "$DEVBOX_CPUS" = 4 && test "$MAKEFLAGS" = -j4 && test "$GRADLE_OPTS" = "-Xmx2g -Dorg.gradle.workers.max=4"'); ok(r);
+  assert.equal(r.summary.shards[0].attempts[0].heavyHolders, 2);
+  const event = f.events().find(e => e.op === 'run');
+  for (const [key, value] of Object.entries(cpuEnvironment(4))) assert.equal(event.env[key], value);
+  fs.rmSync(foreign, { recursive: true }); returned(f);
+  const home = path.join(f.dir, 'shell-home'); fs.mkdirSync(home);
+  fs.writeFileSync(path.join(home, 'devbox-env.sh'), 'export GRADLE_OPTS="-Xmx3g -Dexisting=true"\n');
+  const shell = renderCommandShell({ env: {}, cpus: 3, command: 'printf "%s" "$GRADLE_OPTS"' }).replaceAll('$HOME', home);
+  assert.equal(execFileSync('/bin/bash', ['-c', shell], { encoding: 'utf8' }), '-Xmx3g -Dexisting=true -Dorg.gradle.workers.max=3');
+  console.log('PASS launch-time CPU division, floor/cap, live holders, budget exports and preserved Gradle profile/explicit options');
+}
+
+async function autoScenarios() {
+  assert.equal(planShards('auto', 8).count, 1);
+  assert.equal(planShards('auto', 3, null, { commands: { job: { durationSec: 1000 } } }, 'job').count, 3);
+  assert.equal(planShards('auto', 8, null, { commands: { job: { durationSec: 359 } } }, 'job').count, 2);
+  assert.equal(planShards(4, 0).count, 4);
+  assert.throws(() => planShards('auto', 0), /no free eligible slots/);
+  const uneven = { units: { a: { durationSec: 560 }, b: { durationSec: 10 }, c: { durationSec: 10 }, d: { durationSec: 20 } } };
+  assert.equal(planShards('auto', 4, ['a', 'b', 'c', 'd'], uneven).count, 1);
+  const f = fixture(), cold = await run(f, ['--shards', 'auto']); ok(cold); assert.equal(cold.summary.shards.length, 1);
+  const id = await storeIdentity(f.repo, 'fixture'), file = path.join(f.shared, 'timings', id + '.json');
+  const history = JSON.parse(fs.readFileSync(file)); history.commands[Object.keys(history.commands)[0]].durationSec = 360;
+  fs.writeFileSync(file, JSON.stringify(history));
+  const warm = await run(f, ['--shards', 'auto']); ok(warm); assert.equal(warm.summary.shards.length, 2);
+  history.commands[Object.keys(history.commands)[0]].durationSec = 360; fs.writeFileSync(file, JSON.stringify(history));
+  const capable = await run(f, ['--shards', 'auto', '--need', 'vesdk-android']); ok(capable); assert.equal(capable.summary.shards.length, 1);
+  for (const slot of ['devbox-cn-1', 'devbox-cn-2']) fs.mkdirSync(path.join(f.shared, 'locks', slot + '.d'));
+  const busy = await run(f, ['--shards', 'auto']); assert.equal(busy.code, 1); assert.match(busy.stderr, /no free eligible slots/);
+  for (const slot of ['devbox-cn-1', 'devbox-cn-2']) fs.rmdirSync(path.join(f.shared, 'locks', slot + '.d'));
+  returned(f);
+  const healthFile = path.join(f.shared, 'box-health.json');
+  const before = f.events().length;
+  fs.writeFileSync(healthFile, JSON.stringify({ '192.0.2.1': { manual: true }, '192.0.2.2': { quarantinedUntil: Date.now() / 1000 + 60 } }));
+  const quarantined = await run(f, ['--shards', 'auto']); assert.equal(quarantined.code, 1); assert.match(quarantined.stderr, /no free eligible slots/);
+  assert.equal(f.events().length, before, 'automatic planning refuses quarantined capacity before SSH/acquisition');
+  fs.writeFileSync(healthFile, JSON.stringify({ '192.0.2.2': { quarantinedUntil: 1 } }));
+  fs.writeFileSync(file, JSON.stringify(history));
+  const expired = await run(f, ['--shards', 'auto']); ok(expired); assert.equal(expired.summary.shards.length, 2); returned(f);
+  fs.writeFileSync(healthFile, 'not-json');
+  const malformed = await run(f, ['--shards', 'auto']); assert.equal(malformed.code, 1); assert.match(malformed.stderr, /invalid box-health/);
+  fs.rmSync(healthFile); ok(await run(f, ['--shards', '2'])); returned(f);
+  console.log('PASS auto cold/history sizing, free/capability limits, two-minute target, skewed units, explicit N and busy refusal');
+}
+
+async function unitScenarios() {
+  const names = ['a.test.js', 'b.spec.mjs', 'dir/c.test.ts', "odd ' name.spec.js"];
+  const durations = Object.fromEntries(names.map((name, i) => [name, { durationSec: 9 - i }]));
+  assert.deepEqual(assignUnits(names, 2).groups, [[names[0], names[2]], [names[1], names[3]]]);
+  assert.deepEqual(assignUnits(names, 2, durations).groups, [[names[0], names[3]], [names[1], names[2]]]);
+  assert.equal(assignUnits(names, 2, { [names[0]]: durations[names[0]] }).strategy, 'round-robin');
+  assert.deepEqual(parseUnits('a.test.js\r\n\r\nb.spec.mjs\r\n'), names.slice(0, 2));
+  for (const text of ['', '../outside.js', '/absolute.js', 'a\na']) assert.throws(() => parseUnits(text));
+  assert.deepEqual(discoverUnits(['test_x.py', 'x_test.go', 'AppTest.kt', 'src/index.js', '__tests__/x.ts']), ['AppTest.kt', '__tests__/x.ts', 'test_x.py', 'x_test.go']);
+  assert.throws(() => planShards(5, 4, names), /number of units/);
+  const f = fixture();
+  for (const name of names) { fs.mkdirSync(path.dirname(path.join(f.repo, name)), { recursive: true }); fs.writeFileSync(path.join(f.repo, name), '// test fixture\n'); }
+  git(f.repo, 'add', '.'); git(f.repo, 'commit', '-qm', 'unit paths');
+  const list = path.join(f.dir, 'units.txt'); fs.writeFileSync(list, names.join('\n') + '\n');
+  const initial = await run(f, ['--shards', '2', '--units-file', list], 'test -f {units}; sleep .02'); ok(initial);
+  assert.equal(initial.summary.shardPlan.strategy, 'round-robin');
+  const id = await storeIdentity(f.repo, 'fixture'), file = path.join(f.shared, 'timings', id + '.json');
+  const history = JSON.parse(fs.readFileSync(file));
+  for (const name of names) { assert.ok(history.units[name].durationSec > 0); assert.equal(history.units[name].samples, 1); }
+  history.units = durations; fs.writeFileSync(file, JSON.stringify(history));
+  const balanced = await run(f, ['--shards', '2', '--units-file', list], 'test -f {units}'); ok(balanced);
+  assert.equal(balanced.summary.shardPlan.strategy, 'longest-first');
+  assert.deepEqual(balanced.summary.shards.map(shard => shard.units), [[names[0], names[3]], [names[1], names[2]]]);
+  const discovered = await run(f, [], 'test -f {units}'); ok(discovered); assert.equal(discovered.summary.shards[0].units.length, 4);
+  const appended = await run(f, ['--units-file', list], 'test -f'); ok(appended);
+  const failed = await run(f, ['--units-file', list], 'test {units} != a.test.js'); assert.equal(failed.code, 1);
+  assert.equal(failed.summary.shards[0].attempts[0].unitTimings.length, 4, 'run remaining units after a failure');
+  returned(f);
+  console.log('PASS unit lists/discovery, longest-first/round-robin, quoted paths, per-unit receipts/history, append mode and failure exit');
+}
+
+async function prewarmScenarios() {
+  const f = fixture(), r = await run(f, ['prewarm'], 'mkdir -p build; echo warmed > build/cache'); ok(r);
+  assert.equal(r.summary.mode, 'prewarm'); assert.equal(r.summary.shards.length, 2);
+  assert.deepEqual(r.summary.shards.map(shard => shard.slot).sort(), ['devbox-cn-light', 'devbox-cn-light-2']);
+  assert.ok(f.events().filter(e => e.op === 'run').every(e => e.nice === true));
+  assert.ok(f.events().filter(e => e.op === 'acquire-call').every(e => e.args[0] === 'take'));
+  returned(f);
+  const busy = path.join(f.shared, 'locks/devbox-cn-1.d'); fs.mkdirSync(busy); fs.writeFileSync(path.join(busy, 'info'), 'by\tforeign\npid\t1\n');
+  const eligible = await run(f, ['prewarm', '--need', 'vesdk-android']); ok(eligible); assert.equal(eligible.summary.shards.length, 1);
+  const otherBusy = path.join(f.shared, 'locks/devbox-cn-2.d'); fs.mkdirSync(otherBusy);
+  const none = await run(f, ['prewarm']); ok(none); assert.deepEqual(none.summary.shards, []);
+  fs.rmSync(busy, { recursive: true }); fs.rmdirSync(otherBusy); returned(f);
+  const registry = path.join(f.shared, 'resources.tsv');
+  fs.writeFileSync(registry, fs.readFileSync(registry, 'utf8').split('\n').filter(line => !line.startsWith('devbox-cn-light')).join('\n'));
+  fs.appendFileSync(registry, 'devbox-cn-5\tremote\topen\t-\textra alice@192.0.2.1 caps=node\n');
+  ok(await run(f, ['--exclude-slot', 'devbox-cn-1', '--exclude-host', '192.0.2.2'], 'mkdir -p build; echo mru > build/cache'));
+  const mru = await run(f, ['prewarm', '--exclude-host', '192.0.2.2'], 'test "$(cat build/cache)" = mru'); ok(mru);
+  assert.equal(mru.summary.shards[0].slot, 'devbox-cn-5'); returned(f);
+  assert.equal(parseArgs(['prewarm', '--project', 'p', '--repo', f.repo, '--command', 'true']).ref, 'main');
+  const race = fixture({ prewarmBusyOnAcquire: true }), skipped = await run(race, ['prewarm']); ok(skipped);
+  assert.ok(skipped.summary.shards.every(shard => shard.skipped));
+  assert.ok(!race.events().some(event => event.op === 'run'));
+  for (const slot of ['devbox-cn-1', 'devbox-cn-2']) fs.rmSync(path.join(race.shared, 'locks', slot + '.d'), { recursive: true });
+  returned(race);
+  const health = fixture(), healthFile = path.join(health.shared, 'box-health.json');
+  fs.writeFileSync(healthFile, JSON.stringify({ '192.0.2.1': { manual: true }, '192.0.2.2': { quarantinedUntil: Date.now() / 1000 + 60 } }));
+  const blocked = await run(health, ['prewarm']); ok(blocked); assert.deepEqual(blocked.summary.shards, []);
+  assert.ok(!health.events().some(event => ['probe', 'run', 'take'].includes(event.op)));
+  fs.writeFileSync(healthFile, JSON.stringify({ '192.0.2.1': { manual: true }, '192.0.2.2': { quarantinedUntil: 1 } }));
+  const expired = await run(health, ['prewarm']); ok(expired); assert.equal(expired.summary.shards.length, 1); returned(health);
+  console.log('PASS prewarm idle/capability filtering, light preference, nice, no queues, busy no-op, heavy MRU fallback and warm cache reuse');
 }
 
 async function credentialScenarios() {
@@ -430,9 +566,9 @@ os.kill(pid,0)`;
 
 async function scenarios() {
   const only = process.env.DEVBOX_TEST_CASE;
-  const fixes = { credentials: credentialScenarios, 'packed-module': packedModuleRecovery, receipt: receiptScenarios, 'res-progress': resProgressScenarios };
-  if (only && !['baseline', 'bundle', 'ownership', ...Object.keys(fixes)].includes(only)) throw Error('unknown devbox fixture case');
-  for (const [name, scenario] of Object.entries(fixes)) if (!only || only === name) await scenario();
+  const perf = { credentials: credentialScenarios, 'packed-module': packedModuleRecovery, receipt: receiptScenarios, 'res-progress': resProgressScenarios, cpu: cpuScenarios, auto: autoScenarios, units: unitScenarios, prewarm: prewarmScenarios };
+  if (only && !['baseline', 'bundle', 'ownership', ...Object.keys(perf)].includes(only)) throw Error('unknown devbox fixture case');
+  for (const [name, scenario] of Object.entries(perf)) if (!only || only === name) await scenario();
   if (!only || only === 'baseline' || only === 'bundle') await bundleRecovery();
   if (!only || only === 'baseline' || only === 'ownership') await stopOwnership();
   if (only && only !== 'baseline') return;
@@ -451,11 +587,7 @@ async function scenarios() {
 
   const bootstrapHome = path.join(temp, 'bootstrap'); fs.mkdirSync(path.join(bootstrapHome, '.local/node/bin'), { recursive: true });
   fs.writeFileSync(path.join(bootstrapHome, '.local/node/bin/node'), '#!/bin/sh\necho fixture-node\n', { mode: 0o755 });
-  const renderShell = env => execFileSync('python3', ['-c', `import ast,json,shlex,sys
-d=json.loads(sys.argv[1]); tree=ast.parse(sys.stdin.read())
-nodes=sorted([n for n in ast.walk(tree) if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id in ('bootstrap','exports','shell') for t in n.targets)],key=lambda n:n.lineno)
-exec(compile(ast.Module(body=nodes,type_ignores=[]),'bootstrap','exec'))
-print(shell)`, JSON.stringify({ env, command: 'printf "%s:" "$BOOTSTRAP_VALUE"; node' })], { input: remoteScripts.run, encoding: 'utf8' }).replaceAll('$HOME', bootstrapHome);
+  const renderShell = env => renderCommandShell({ env, command: 'printf "%s:" "$BOOTSTRAP_VALUE"; node' }).replaceAll('$HOME', bootstrapHome);
   assert.equal(execFileSync('/bin/bash', ['-c', renderShell({ BOOTSTRAP_VALUE: 'fallback' })], { encoding: 'utf8' }).trim(), 'fallback:fixture-node');
   fs.writeFileSync(path.join(bootstrapHome, 'devbox-env.sh'), `export PATH="${bootstrapHome}/.local/node/bin:$PATH"\nexport BOOTSTRAP_VALUE=profile\n`);
   assert.equal(execFileSync('/bin/bash', ['-c', renderShell({})], { encoding: 'utf8' }).trim(), 'profile:fixture-node');
