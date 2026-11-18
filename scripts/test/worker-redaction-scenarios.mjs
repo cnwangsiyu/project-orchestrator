@@ -29,6 +29,7 @@ const fixture = name => {
 const events = f => fs.readFileSync(path.join(f.shared, 'worker-events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
 const hub = (name, config = {}, command = 'start') => {
   const f = fixture(name);
+  if (config.output) fs.writeFileSync(f.rollout, JSON.stringify({ output: config.output }) + '\n');
   fs.writeFileSync(f.log, JSON.stringify({ output: `token=${fake}` }) + '\n');
   fs.writeFileSync(f.out, `secret=${fake}\n`);
   f.env.WORKER_REDACTION_FIXTURE = JSON.stringify({ thread: f.thread, rollout: f.rollout, ...config });
@@ -59,6 +60,12 @@ try {
     const { f, result } = hub(status, { status });
     verify(f, result, { log: 3, rollout: 1, out: 1 }, status === 'completed' ? 0 : 1, status === 'completed' ? 'finished' : 'failed');
   }
+  const dsl = hub('dsl-repository-credentials', {
+    output: `storePassword '${fake}'\nkeyPassword.set("${fake}")\nNEXUS_MAGIC_WORD=${fake}`,
+    message: `DONE fixture\nnexusMagicWordPwd("${fake}")\nREPO_USERNAME: ${fake}`,
+  });
+  verify(dsl.f, dsl.result, { log: 6, rollout: 3, out: 2 }, 0, 'finished');
+  console.log('PASS DSL and repository credentials masked across launcher log, rollout and final output');
   const waited = hub('stalled-then-ended', { idleStatus: 'completed' }, 'wait');
   verify(waited.f, waited.result, { log: 1, rollout: 1, out: 1 }, 0, 'finished');
   const interrupted = hub('signal', { signal: true });

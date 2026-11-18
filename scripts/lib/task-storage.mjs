@@ -4,6 +4,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { rulesShared } from './global-rules.mjs';
 import { withLock } from './shared-file.mjs';
+import { maskPasswordStyleValues } from './nightly-audit.mjs';
 
 export { withLock };
 export const orchRoot = () => process.env.ORCH_ROOT || (process.env.RULES_SHARED
@@ -17,9 +18,7 @@ export const publicId = (value, label = 'id') => {
 export const projectDir = project => path.join(orchRoot(), publicId(project, 'project'));
 export const iso = time => new Date(time).toISOString();
 export const timeOf = value => typeof value === 'number' ? value : Date.parse(value) || 0;
-export const maskSecrets = value => String(value ?? '').replace(
-  /(["']?[\w.-]*(?:password|passwd|token|secret|key|credential)[\w.-]*["']?\s*(?:=|:|\s)\s*)(?:"[^"\n]*"|'[^'\n]*'|[^\s,;]+)/gi,
-  '$1[MASKED]');
+export const maskSecrets = value => maskPasswordStyleValues(String(value ?? '')).text;
 export const oneLine = (value, limit = 120) => maskSecrets(value).replace(/[\r\n\t\x00-\x1f]/g, ' ').trim().slice(0, limit);
 export const redact = value => typeof value === 'string' ? maskSecrets(value) : Array.isArray(value) ? value.map(redact)
   : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redact(item)])) : value;

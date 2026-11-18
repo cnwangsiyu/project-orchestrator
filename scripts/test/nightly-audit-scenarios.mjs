@@ -7,6 +7,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { passwordStyleFindings, maskPasswordStyleValues, maskLogText } from '../lib/nightly-audit.mjs';
+import { maskSecrets } from '../lib/task-storage.mjs';
 
 const script = fileURLToPath(new URL('../nightly-review.mjs', import.meta.url));
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'nightly-audit-'));
@@ -48,7 +49,7 @@ try {
     }
   }
   const excluded = [
-    'PASS: signed', 'username "ordinary-user"', 'oauth=value', 'tokens=value', 'password_length=12',
+    'PASS: signed', 'username "ordinary-user"', 'ordinary=value', 'password_length=12',
     'password=', 'password=""', 'password=$TEST_PASSWORD', 'password="${TEST_PASSWORD}"',
     'token=${TEST_TOKEN}', 'secret=REDACTED', 'api_key=[REDACTED]', 'private-key=[MASKED]',
     'access-key=<placeholder>', 'credential={redacted}', 'auth="{already redacted}"', 'passphrase=***',
@@ -74,8 +75,8 @@ try {
       }
     }
   }
-  for (const input of ['the password field', 'pass: 3 tests', 'non-password=value', 'some-password=value',
-    'the-password field', 'xpassword=value', 'password_length=12', 'the signing.storePassword=value field']) {
+  for (const input of ['the password field', 'pass: 3 tests', 'the non-password=value field', 'the some-password=value field',
+    'the-password field', 'password_length=12', 'the signing.storePassword=value field']) {
     assert.deepEqual(maskPasswordStyleValues(input), { text: input, masked: 0 });
   }
   console.log('PASS diff prefixes, dotted/camel/underscore properties, prose exclusions and idempotence');
@@ -130,7 +131,7 @@ try {
   assert.deepEqual(maskPasswordStyleValues('-Authorization: Bearer fake-bearer-123\nnext line remains'), {
     text: '-Authorization: [MASKED]\nnext line remains', masked: 1,
   });
-  assert.deepEqual(maskPasswordStyleValues('not-authorization: ordinary value'), { text: 'not-authorization: ordinary value', masked: 0 });
+  assert.deepEqual(maskPasswordStyleValues('header not-authorization: ordinary value'), { text: 'header not-authorization: ordinary value', masked: 0 });
   console.log('PASS whitespace quoted/token-only values, prose/markdown preservation and exact trailing text');
 
   for (const declaration of ['val', 'let', 'const', 'var', 'static final String', 'NSString *', '']) {
@@ -154,6 +155,96 @@ try {
     assert.deepEqual(maskPasswordStyleValues(input), { text: `${prefix}  const clientSecret: string = "[MASKED]"; keep`, masked: 1 });
   }
   console.log('PASS source declarations, prefixed secret identifiers, ObjC literals, expression exclusion and JSONL');
+
+  const credentialNames = ['storePassword', 'keyPassword', 'password', 'passwd', 'secret', 'token', 'apiKey',
+    'NEXUS_MAGIC_WORD', 'NEXUS_MAGIC_WORD_LEGACY', 'nexusMagicWordPwd', 'nexusLogin', 'nExUsLoGiN',
+    'MY_MAGIC_WORD', 'repoCredential', 'mavenAuth', 'repoUser', 'mavenUsername', 'ARTIFACTORY_USER',
+    'nexusUsername', 'REPO_USERNAME', 'myPass', 'MY_PWD', 'mySecret', 'MY_TOKEN', 'myKey', 'keyAlias'];
+  const literalForms = [
+    value => ` '${value}'`, value => ` "${value}"`, value => `("${value}")`,
+    value => `('${value}')`, value => `.set("${value}")`, value => `.set('${value}')`,
+    value => ` = "${value}"`,
+  ];
+  for (const key of credentialNames) {
+    for (const form of literalForms) {
+      const input = `signingConfig { ${key}${form('fakeValue123')} } // keep tail`;
+      const expected = `signingConfig { ${key}${form('[MASKED]')} } // keep tail`;
+      assert.deepEqual(maskPasswordStyleValues(input), { text: expected, masked: 1 }, key);
+      assert.deepEqual(passwordStyleFindings(input), [{ line: 1, field: key.toLowerCase() }]);
+      assert.deepEqual(maskPasswordStyleValues(expected), { text: expected, masked: 0 });
+      assert.equal(maskSecrets(input), expected);
+      const record = JSON.stringify({ nested: [{ output: input }], number: 7, ok: true });
+      const masked = maskLogText(record, { jsonl: true });
+      assert.equal(masked.masked, 1);
+      assert.deepEqual(JSON.parse(masked.text), { nested: [{ output: expected }], number: 7, ok: true });
+    }
+  }
+  for (const key of credentialNames.filter(key => key !== 'keyAlias')) {
+    for (const prefix of ['', '  ', '+ ', '- ']) {
+      for (const separator of ['=', ': ', ' = ']) {
+        for (const quote of ['', '"', "'"]) {
+          const input = `${prefix}${key}${separator}${quote}fakeValue123${quote} # keep tail`;
+          const expected = `${prefix}${key}${separator}${quote}[MASKED]${quote} # keep tail`;
+          assert.deepEqual(maskPasswordStyleValues(input), { text: expected, masked: 1 }, key);
+          assert.equal(maskSecrets(input), expected);
+          assert.equal(maskPasswordStyleValues(expected).masked, 0);
+        }
+      }
+    }
+  }
+  // These former exact-name exclusions now match the requested properties wildcards.
+  for (const key of ['oauth', 'tokens', 'non-password', 'some-password', 'xpassword']) {
+    assert.deepEqual(maskPasswordStyleValues(`${key}=fakeValue123`), { text: `${key}=[MASKED]`, masked: 1 });
+  }
+  for (const prefix of ['', 'export ']) {
+    for (const key of ['NEXUS_MAGIC_WORD', 'nexusMagicWordPwd', 'maven.auth']) {
+      for (const value of ['fake.Value.123', 'fakeValue123!', 'fakeAlphabeticValue']) {
+        const input = `${prefix}${key}=${value}`;
+        assert.deepEqual(maskPasswordStyleValues(input), { text: `${prefix}${key}=[MASKED]`, masked: 1 });
+        assert.equal(maskSecrets(input), `${prefix}${key}=[MASKED]`);
+      }
+    }
+  }
+  for (const value of ['true', 'FALSE', '0', '12345', '-42', '3.14', '1e6', '0xff', '1.2.3',
+    'v1.2.3', '1.2.3-SNAPSHOT', 'https://repo.example.test/releases', 'file:///tmp/repo']) {
+    for (const key of credentialNames) {
+      for (const form of literalForms) {
+        const input = `${key}${form(value)}`;
+        assert.deepEqual(maskPasswordStyleValues(input), { text: input, masked: 0 }, `${key}: public value`);
+        assert.equal(maskSecrets(input), input);
+      }
+      const input = `${key}=${value}`;
+      assert.deepEqual(maskPasswordStyleValues(input), { text: input, masked: 0 });
+    }
+  }
+  const dslExcluded = [
+    'storePassword(System.getenv("TEST_PASSWORD"))', 'keyPassword(project.property("test.password"))',
+    'storePassword.set(otherVariable)', 'keyPassword(otherVariable)', 'password = System.getenv("TEST_PASSWORD")',
+    'password = project.property("test.password")', '"password": otherVariable',
+    'keyPassword = "prefix" + otherVariable', 'storePassword("prefix" + otherVariable)',
+    'storePassword.set("prefix".trim())', 'storePassword "prefix" + otherVariable',
+    'nexusMagicWordPwd = otherVariable;', 'nexusMagicWordPwd = config.value;', 'nexusMagicWordPwd(otherVariable)',
+    'password "$VAR"', 'keyPassword("${TEST_PASSWORD}")', 'NEXUS_MAGIC_WORD=${TEST_WORD}',
+    'nexusMagicWordPwd = "prefix-${TEST_WORD}"', 'keyPassword.set("[MASKED]")',
+    'storePassword("[REDACTED]")', 'keyAlias = "debug"', 'keyAlias("ordinaryAlias")',
+    'keyAlias "ordinary-alias"', 'keyAlias=fakeValue123', 'username=fakeValue123',
+    'USER_NAME=fakeValue123', 'app.username=fakeValue123', 'appUsername("fakeValue123")', 'setVersion("1.2.3")',
+    '"password": config.value',
+    'println("password is missing")', 'logger.info("password \'fakeValue123\'")',
+    'println("storePassword(\\"fakeValue123\\")")', '"password": "${TEST_PASSWORD}"',
+    '| result | PASS "all assertions passed" | keep this column |',
+  ];
+  for (const input of dslExcluded) {
+    assert.deepEqual(maskPasswordStyleValues(input), { text: input, masked: 0 }, 'DSL/reference exclusion');
+    assert.deepEqual(passwordStyleFindings(input), []);
+    assert.equal(maskSecrets(input), input);
+    const record = JSON.stringify({ output: input });
+    assert.equal(maskLogText(record, { jsonl: true }).text, record);
+  }
+  for (const input of ['--token fakeValue123', 'npm test --token fakeValue123']) {
+    assert.equal(maskSecrets(input), input.replace('fakeValue123', '[MASKED]'));
+  }
+  console.log('PASS Groovy/Kotlin DSL calls and repository properties, public values, references and shared task-storage masking');
 
   const records = [
     JSON.stringify({ type: 'tool_output', output: `build output\npassword = "${fake}"\napi_key: '${fake}'\nkeep this text`, number: 7 }),

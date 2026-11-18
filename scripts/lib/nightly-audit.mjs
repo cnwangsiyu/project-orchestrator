@@ -3,17 +3,28 @@ const quotedValue = String.raw`"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'`;
 const inlineQuotedValue = String.raw`"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'`;
 const bareValue = String.raw`\$\{[^}\r\n]*\}|<[^>\r\n]*>|\[[^\]\r\n]*\]|[^\s,;{}"'\[\]<>]+`;
 // A minus is a diff prefix only at the start of a line, not inside an ordinary word.
-const assignmentKey = String.raw`(?:(?<![\w.-])|(?<=^[+-]))(["']?)(${fields})\1`;
+const assignmentKey = String.raw`(?:(?<![\w.-])|(?<=^[+-])|(?<=^--)|(?<=[\t ]--))(["']?)(${fields})\1`;
 const assignments = new RegExp(String.raw`${assignmentKey}([\t ]*[:=][\t ]*)(${quotedValue}|${bareValue})`, 'gim');
 const whitespaceAssignments = new RegExp(String.raw`${assignmentKey}([\t ]+)(${inlineQuotedValue}|${bareValue})`, 'gim');
-const properties = new RegExp(String.raw`^([+-]?[\t ]*)(["']?)([A-Za-z_][\w.-]*)\2([\t ]*[:=][\t ]*)(${quotedValue}|${bareValue})`, 'gm');
+const properties = new RegExp(String.raw`^([+-]?[\t ]*(?:export[\t ]+)?)(["']?)([A-Za-z_][\w.-]*)\2([\t ]*[:=][\t ]*)(${quotedValue}|${bareValue})`, 'gm');
 // Source assignments are deliberately limited to complete string-literal values.
 const sourceAssignments = new RegExp(String.raw`(?<![\w.-])([A-Za-z_$][\w$]*)([\t ]*(?::[\t ]*[\w?.<>\[\]]+[\t ]*)?=[\t ]*@?)(${inlineQuotedValue})(?=[\t ]*(?:$|[;,)}\r\n]|//|/\*))`, 'gm');
+const dslCalls = new RegExp(String.raw`(?<![\w$-])([A-Za-z_$][\w$]*)([\t ]*(?:\.[\t ]*set[\t ]*)?\([\t ]*)(${inlineQuotedValue})(?=[\t ]*\))`, 'gm');
+const dslWhitespace = new RegExp(String.raw`(?<![\w$.-])([A-Za-z_$][\w$]*)([\t ]+)(${inlineQuotedValue})(?![\t ]*[+.([])`, 'gm');
 const sourceField = value => /(?:Password|Passphrase|Passwd|Token|Secret|ApiKey|AccessKey|PrivateKey|Credentials?|Auth|Key)$/.test(value)
   || /(?:^|_)(?:password|passphrase|passwd|token|secret|api_key|access_key|private_key|credentials?|auth|key)$/i.test(value);
 const exactField = new RegExp(`^(?:${fields})$`, 'i');
-const propertyField = new RegExp(`(?:^|[._])(?:${fields})$`, 'i');
-const camelField = /(?:Password|Passphrase|Passwd|Token|Secret|ApiKey|AccessKey|PrivateKey|Credentials?|Auth)$/;
+// Repository usernames need repository context; the other requested names are wildcards.
+const repositoryUser = value => /user(?:name)?/i.test(value) && /repo|maven|nexus|artifactory/i.test(value);
+const credentialField = value => !/^keyAlias$/i.test(value) && (
+  /^nexus/i.test(value) || /magic|credential|auth|pass|pwd|secret|token|key/i.test(value)
+  || repositoryUser(value));
+const publicValue = value => /^(?:true|false)$/i.test(value)
+  || /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?[fLdD]?$|^0[xob][\da-f]+$/i.test(value)
+  || /^v?\d+(?:[._-]\d+)+(?:[-+][\w.-]+)?$/i.test(value)
+  || /^(?:[a-z][a-z\d+.-]*:\/|\/\/)/i.test(value);
+const referenceValue = value => /(?<!\\)\$(?:[A-Za-z_]\w*|\{[^}]*\})/.test(value)
+  || /^(?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$][\w$]*\(/.test(value);
 // Punctuation around a word (or a hyphenated English phrase) is not token entropy.
 const tokenLikeValue = value => value.length >= 8 && !/[\s|]/.test(value) && /[\d\W_]/.test(value)
   && !/^[^A-Za-z0-9]*[A-Za-z]+(?:[-'][A-Za-z]+)*[^A-Za-z0-9]*$/.test(value);
@@ -63,7 +74,7 @@ function visitSecrets(text, visit) {
     const start = match.index + match[1].length + match[2].length;
     hits.push({ line: 0, field: match[1].toLowerCase(), start, end: start + value.length });
   }
-  hits.sort((a, b) => a.start - b.start);
+  hits.sort((a, b) => a.start - b.start || b.end - a.end);
   let line = 1, offset = 0, last = -1;
   for (const hit of hits) {
     if (hit.start < last) continue; // overlapping match already covered
@@ -74,6 +85,8 @@ function visitSecrets(text, visit) {
 
 function collectSecrets(text, visit) {
   const blocks = credentialBlocks(text);
+  const strings = [...text.matchAll(new RegExp(inlineQuotedValue, 'g'))];
+  let string = 0;
   let line = 1, offset = 0, block = 0;
   const matches = [...boundedMatches(text, assignments), ...boundedMatches(text, whitespaceAssignments)]
     .filter(match => {
@@ -83,28 +96,38 @@ function collectSecrets(text, visit) {
       return quoted && !/^[\t ]*[+.([]/.test(text.slice(match.index + match[0].length));
     });
   for (const match of text.matchAll(properties)) {
-    if (exactField.test(match[3]) || !(propertyField.test(match[3]) || camelField.test(match[3]))) continue;
+    if (!(exactField.test(match[3]) || credentialField(match[3]) || /^keyAlias$/i.test(match[3]))) continue;
+    if (/^keyAlias$/i.test(match[3]) && !/^["']/.test(match[5])) continue;
     if (/^@["']/.test(text.slice(match.index + match[0].length - match[5].length))) continue;
-    // Camel-case source identifiers must not consume expression values as config text.
+    // Preserve source references without treating punctuation in properties as an expression.
     if (!match[3].includes('.') && !match[4].includes(':')) {
       const quoted = /^["']/.test(match[5]);
-      if (!quoted && (camelField.test(match[3]) || /[.()]/.test(match[5])
-        || !tokenLikeValue(match[5]) && /^[\t ]*;/.test(text.slice(match.index + match[0].length)))) continue;
+      if (!quoted && (referenceValue(match[5]) || /^[A-Za-z_$][\w$]*(?:\.[\w$]+)*$/.test(match[5])
+        && /^[\t ]*;/.test(text.slice(match.index + match[0].length)))) continue;
       if (quoted && /^[\t ]*[+.([]/.test(text.slice(match.index + match[0].length))) continue;
     }
     matches.push({ index: match.index + match[1].length, 0: match[0].slice(match[1].length),
       1: match[2], 2: match[3], 3: match[4], 4: match[5] });
   }
   for (const match of text.matchAll(sourceAssignments)) {
-    if (!sourceField(match[1])) continue;
+    if (!(sourceField(match[1]) || credentialField(match[1]) || /^keyAlias$/i.test(match[1]))) continue;
     matches.push({ index: match.index, 0: match[0], 1: '', 2: match[1], 3: match[2], 4: match[3] });
+  }
+  for (const pattern of [dslCalls, dslWhitespace]) {
+    for (const match of text.matchAll(pattern)) {
+      if (!(exactField.test(match[1]) || sourceField(match[1]) || credentialField(match[1]) || /^keyAlias$/i.test(match[1]))) continue;
+      matches.push({ index: match.index, 0: match[0], 1: '', 2: match[1], 3: match[2], 4: match[3] });
+    }
   }
   matches.sort((a, b) => a.index - b.index);
   for (const match of matches) {
+    while (string < strings.length && strings[string].index + strings[string][0].length <= match.index) string++;
+    if (strings[string]?.index < match.index) continue; // A mention inside a log message is not source code.
     for (; offset < match.index; offset++) if (text[offset] === '\n') line++;
     const field = match[2].toLowerCase(), originalRaw = match[4];
     const table = markdownRow(text, match.index), whitespace = !/[:=]/.test(match[3]);
     const quoted = originalRaw[0] === '"' || originalRaw[0] === "'";
+    if (match[1] && match[3].includes(':') && !quoted && /^[A-Za-z_$][\w$]*(?:\.[\w$]+)*$/.test(originalRaw)) continue;
     // Markdown status cells are not password aliases, even when their details are quoted.
     if (table && whitespace && match[2] === 'PASS') continue;
     const raw = table && !quoted ? cellValue(originalRaw) : originalRaw;
@@ -113,7 +136,9 @@ function collectSecrets(text, visit) {
     if (field === 'pass' && !match[1] && match[3].trim() === ':') continue;
     const value = quoted ? raw.slice(1, -1) : raw;
     if (whitespace && !quoted && !tokenLikeValue(value)) continue;
-    if (!value || /^\$(?:[A-Za-z_]\w*|\{[^}]+\})$/.test(value) || /^(?:<[^>]+>|\[[^\]]*(?:redact|masked)[^\]]*\]|\{[^}]*(?:redact|masked)[^}]*\}|REDACTED|\*+)$/i.test(value)) continue;
+    if (!value || publicValue(value) || referenceValue(value)
+      || field === 'keyalias' && !tokenLikeValue(value)
+      || /^(?:<[^>]+>|\[[^\]]*(?:redact|masked)[^\]]*\]|\{[^}]*(?:redact|masked)[^}]*\}|REDACTED|\*+)$/i.test(value)) continue;
     const start = match.index + match[0].length - originalRaw.length + Number(quoted);
     visit({ line, field, start, end: start + raw.length - 2 * Number(quoted) });
   }

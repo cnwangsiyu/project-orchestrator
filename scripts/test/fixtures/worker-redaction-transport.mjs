@@ -23,7 +23,7 @@ globalThis.WebSocket = class {
       this.onmessage?.({ data: JSON.stringify({ id: request.id, result }) });
       if (request.method !== 'turn/start') return;
       this.onmessage?.({ data: JSON.stringify({ method: 'item/commandExecution/outputDelta',
-        params: { threadId: config.thread, turnId: 'redaction-turn', delta: 'password=fake-secret-123' } }) });
+        params: { threadId: config.thread, turnId: 'redaction-turn', delta: config.output ?? 'password=fake-secret-123' } }) });
       if (config.signal) {
         this.keepAlive = setInterval(() => {}, 1000);
         setTimeout(() => process.kill(process.pid, 'SIGTERM'), 20);
@@ -32,7 +32,7 @@ globalThis.WebSocket = class {
       setTimeout(() => {
         this.status = config.stillRunning ? 'inProgress' : config.status ?? 'completed';
         this.onmessage?.({ data: JSON.stringify({ method: 'turn/completed', params: { threadId: config.thread,
-          turn: { ...turn(), status: config.status ?? 'completed', items: [{ type: 'agentMessage', text: 'DONE fixture\nsecret=fake-secret-123' }] } } }) });
+          turn: { ...turn(), status: config.status ?? 'completed', items: [{ type: 'agentMessage', text: config.message ?? 'DONE fixture\nsecret=fake-secret-123' }] } } }) });
       }, 20);
     });
   }
