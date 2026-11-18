@@ -59,7 +59,10 @@ export function runResSuites() {
       encoding: 'utf8', timeout: process.env.RES_TEST_NO_WATCHDOG === '1' ? undefined : timeout, maxBuffer: 8 * 2 ** 20 });
     const output = `${r.stdout ?? ''}${r.stderr ?? ''}`;
     fs.writeFileSync(path.join(tmp, suite.replaceAll('/', '-') + '.log'), output, { mode: 0o600 });
-    if (r.status !== 0 || r.error) throw Error(`${suite}: exit=${r.status}; ${r.error?.message ?? ''}\n${output.slice(-8000)}\nFixtures: ${tmp}`);
+    if (r.status !== 0 || r.error) {
+      const diagnostic = output.length <= 8000 ? output : `${output.slice(0, 4000)}\n[output truncated]\n${output.slice(-4000)}`;
+      throw Error(`${suite}: exit=${r.status}; ${r.error?.message ?? ''}\n${diagnostic}\nFixtures: ${tmp}`);
+    }
     const count = Number(output.match(/ALL (\d+) ASSERTIONS PASSED/)?.[1]);
     if (!count) throw Error(`${suite}: assertion count missing; fixtures: ${tmp}`);
     assertions += count;

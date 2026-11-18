@@ -63,8 +63,10 @@ box_health() {
 ` : ''}
 if acquire_attempt pool devbox-cn-29; then exit 0; else exit $?; fi
 `;
-    const result = spawnSync('/bin/bash', ['-c', driver], {
-      env: { ...process.env, RES_DIR: state }, encoding: 'utf8', timeout: 120000,
+    // Linux limits each argv string to 128 KiB. Feed the actual controller
+    // through stdin so this fixture remains valid as the source grows.
+    const result = spawnSync('/bin/bash', ['-s'], {
+      input: driver, env: { ...process.env, RES_DIR: state }, encoding: 'utf8', timeout: 120000,
     });
     if (result.error) throw result.error;
     assert.equal(result.status, success ? 0 : 2, `${name}: ${result.stderr}`); count++;

@@ -145,8 +145,9 @@ try {
     ok(!other.text.includes('held by you')); eq(fs.readFileSync(file, 'utf8'), before);
     eq(run(['return', id, '--by', 'w325-demo-speed']).code, 1); eq(fs.readFileSync(file, 'utf8'), before);
     if (id === 'heavy-build') {
+      eq(fs.existsSync(path.join(state, '.build-admission.lock')), false, 'rejected return leaves no private admission guard');
       const nested = run(['take-build', ...args(by, 'A')]);
-      eq(nested.code, 1); ok(nested.text.includes(`build slot is held by ${by} (pid=${process.pid}, since=`));
+      eq(nested.code, 1, nested.text); ok(nested.text.includes(`build slot is held by ${by} (pid=${process.pid}, since=`));
       eq(fs.readFileSync(file, 'utf8'), before);
     }
     release(id, by);

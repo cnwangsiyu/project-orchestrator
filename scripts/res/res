@@ -3061,6 +3061,11 @@ cmd_return() {
   fi
   [ -d "$LOCKS/$id.d" ] || { echo "$id was not held"; return 0; }
   local holder owned_guard=0 build_detail= start peak duration mode; holder=$(field "$id" by)
+  # Reject an unauthorized return before taking the private build guard. A
+  # fatal ownership diagnostic has no transaction cleanup handler here.
+  if [ "$holder" != "$BY" ]; then
+    [ -n "$FORCE" ] && [ -n "$NOTE" ] || die "'$id' is held by $holder; only --force --note \"<why>\" may reclaim it"
+  fi
   case "$id" in heavy-build|heavy-build-2|heavy-build-3)
     if [ "${BUILD_GUARD:-0}" != 1 ]; then
       build_guard_start || { echo "res: build admission is changing; retry return-build" >&2; return 2; }
