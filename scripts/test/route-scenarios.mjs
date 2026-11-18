@@ -458,7 +458,7 @@ for (const [sc,args,oldWant,oldNote] of CASES) {
         assert.match(writing.allNotes[0], /never overwrite, delete or move files outside the task's scope/);
         assert.ok(writing.allNotes.some((n) => /full access: the worker may commit on its task branch if the brief says so; never push to main, never force-push; commits carry no co-author\/tool trailer/.test(n)));
         assert.ok(writing.allNotes.some((n) => /Forbidden for every worker/.test(n)));
-        assert.ok(writing.allNotes.some((n) => /back up app data before any destructive step/.test(n)));
+        assert.ok(writing.allNotes.some((n) => /follow the Device tasks rule for installs, wipes and backups/.test(n)));
         assert.ok(!writing.allNotes.some((n) => /workspace-write can't run git writes/.test(n)));
       }
       const review = routed(sc, ['review']);
@@ -535,8 +535,10 @@ for (const [sc, args] of [['quiet', ['lookup']], ['ttSearch', ['lookup']], ['ttO
     if(!printed.includes('-- sh -c')) {assert.ok(parseRouteJSON(run(sc,args,{TEST_APPROVE:true})).allNotes.some(n=>n===`Global worker rules ${loadDigest().version}: ${loadDigest().coreWorker}`));ok=true;continue;}
     const inner = printed.match(/-- sh -c (.*)$/);
     const command = inner ? execFileSync('/bin/sh', ['-c', `printf '%s' ${inner[1]}`], { encoding: 'utf8' }) : printed;
-    const quoted = command.match(/ -c ("\$\(node .*? --config\)") --json/)[1];
-    const config = execFileSync('/bin/sh', ['-c', `printf '%s' ${quoted}`], { encoding: 'utf8' });
+    assert.match(printed, /--inject-rules on /);
+    const quoted = command.match(/ -c ("\$ORCHESTRATOR_WORKER_RULES_CONFIG") --json/)[1];
+    const config = execFileSync(process.execPath, [path.join(path.dirname(ROUTE), 'run-tracked.mjs'), '--inject-rules', 'on',
+      '--', '/bin/sh', '-c', `printf '%s' ${quoted}`], { encoding: 'utf8', env: { ...process.env, RULES_SHARED: tmp, ORCHESTRATOR_OWNER: '' } });
     const rule = parseRouteJSON(config.slice('developer_instructions='.length));
     const digest = loadDigest();
     ok = rule.startsWith(`Global worker rules ${digest.version}\n`)&&rule.includes('never read, copy, load or inject LOGIN')
@@ -1020,14 +1022,14 @@ for (const [sc, args] of ERRORS) {
     const r = o('ttFresh', [cat]);
     cases.push([hasNote(r, /guarded executor.*continuous idle evidence.*every orchestrator's release/), true],
       [hasNote(r, /at most 3 concurrent heavy builds unless the ledger sets N otherwise/), false],
-      [hasNote(r, /at most 2 h, then return the device and report.*device connected, unlocked, app data backed up/), true],
+      [hasNote(r, /at most 2 h, then return the device and report.*device connected and unlocked/), true],
       [hasNote(r, /iphone8, iphone11 and s21.*Allow\/Authorize\/Trust\/OK.*no per-prompt approval or button whitelist/), false],
       [/personal iPhone 15 Pro Max \(`policy=never`\).*device not registered in `res`/.test(loadDigest().worker), true],
       [hasNote(r, /Codex refuses an allowed device prompt.*re-route that step to Claude instead of asking the user to tap it/), true]);
   }
   const leased = o('ttFresh', ['lookup', '--device-lease']);
   cases.push([hasNote(leased, /iphone8, iphone11 and s21.*camera, microphone, photos, notifications, local network, tracking, developer trust, USB debugging and install confirmations/), false],
-    [hasNote(leased, /Take\/return through res.*lease <=2 h.*back up app data.*never enter personal-account credentials, passwords or verification codes.*no purchases/), true]);
+    [hasNote(leased, /Take\/return through res.*lease <=2 h.*never enter personal-account credentials, passwords or verification codes.*no purchases/), true]);
   const ordinary = o('ttFresh', ['lookup']);
   cases.push([hasNote(ordinary, /^registered shared test phones iphone8/), false]);
   cases.push([hasNote(o('traeFull', ['implement', '--impact', 'release']), /route\.mjs review-high --review-class A/), true]);

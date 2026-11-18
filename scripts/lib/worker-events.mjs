@@ -202,7 +202,8 @@ export const inbox = (rows, owner, ack = emptyAck(owner), now = Date.now()) => {
     const settled = processWorker(row) ? undefined : row.turn ? turns.get(JSON.stringify([row.account, row.thread, row.turn]))
       : row.thread ? threads.get(JSON.stringify([row.account, row.thread])) : undefined;
     return settled === undefined || settled < i;
-  }).map(({ row }) => ({ ...row, stale: !live(row.pid) && (row.followerCommand === 'exec' || now - row.t > DEAD_FOLLOWER_GRACE_MS) }));
+  }).map(({ row }) => ({ ...row, stale: row.followerCommand === 'claude'
+    || !live(row.pid) && (row.followerCommand === 'exec' || now - row.t > DEAD_FOLLOWER_GRACE_MS) }));
   const questionKey = row => JSON.stringify([row.account,row.thread,row.questionId]);
   const answers = new Map(own.filter(row => row.event === 'answered').map(row => [questionKey(row),row]));
   const pending = own.filter(row => notification(row) && !acknowledged(row,ack)).map(row => {
@@ -553,7 +554,7 @@ export const watchDeadline = (flushAt, questions, now = Date.now()) => questions
   return Math.min(deadline, Number.isFinite(reserveAt) ? reserveAt : now);
 }, flushAt);
 export const watch = async (owner, print = (rows) => new Promise((resolve, reject) =>
-  process.stdout.write(rows.map((row) => eventLine(row)).join('\n') + '\n', (error) => error ? reject(error) : resolve())), { debounceSec = 45, queueMonitor } = {}) => {
+  process.stdout.write(rows.map((row) => eventLine(row)).join('\n') + '\n', (error) => error ? reject(error) : resolve())), { debounceSec = 45, queueMonitor, rulesPoll } = {}) => {
   if (!Number.isFinite(debounceSec) || debounceSec < 0) throw Error('--debounce-sec takes a nonnegative finite number');
   if(shortOwner(owner)) owner=eventOwner(owner,readEvents());
   if (!validOwner(owner)) throw Error('watch needs --owner <session-id> (or ORCHESTRATOR_OWNER)');
@@ -587,9 +588,13 @@ export const watch = async (owner, print = (rows) => new Promise((resolve, rejec
       let profiles = {}; try { profiles = readProfiles(); } catch {}
       queueMonitor = createQueueStallMonitor(owner, { profiles, emit: appendEvent });
     }
-    let queuePollAt = 0;
+    let queuePollAt = 0, rulesPollAt = 0;
     for (;;) {
       if (stopped) return exit;
+      if (rulesPoll && Date.now() >= rulesPollAt) {
+        await rulesPoll();
+        rulesPollAt = Date.now() + 1000;
+      }
       await tail.read();
       const ack = await readAckAsync(owner);
       if (Date.now() >= queuePollAt) {

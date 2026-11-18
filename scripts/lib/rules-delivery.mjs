@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { parseDigest, rulesShared, SKILL_ROOT } from './global-rules.mjs';
+import { parseDigest, rulesShared, digestFile } from './global-rules.mjs';
 import { readSmall } from './hook-context.mjs';
 
 const activeCleanups = new Set();
@@ -31,13 +31,14 @@ export const readSeen = async () => {
   try { await fs.lstat(file); } catch (e) { if (e.code === 'ENOENT') return {}; throw e; }
   throw Error('unreadable rules seen state');
 };
-const compareVersion = (a, b) => a.split('.')[0].localeCompare(b.split('.')[0])
+export const compareVersion = (a, b) => a.split('.')[0].localeCompare(b.split('.')[0])
   || Number(a.split('.')[1]) - Number(b.split('.')[1]);
+export const addedRuleLines = (lines, oldLines) => lines.filter((line) => line.startsWith('- ') && !oldLines.includes(line));
 export const changesSince = (digest, seen, previous) => {
   const lines = digest.text.split('\n');
   const oldLines = seen.__versions?.[previous.version];
   if (!Array.isArray(oldLines)) throw Error('previous rules snapshot unavailable');
-  const additions = lines.filter((line) => line.startsWith('- ') && !oldLines.includes(line));
+  const additions = addedRuleLines(lines, oldLines);
   const removals = oldLines.filter((line) => !lines.includes(line));
   const delta = [additions.length ? `Added/changed:\n${additions.join('\n')}` : '',
     removals.length ? `Removed/replaced:\n${removals.join('\n')}` : ''].filter(Boolean).join('\n');
@@ -64,7 +65,7 @@ const nextSeen = (seen, input, digest) => {
 export const withRulesDelivery = async (input, seen, { initial = false } = {}, action) => {
   const previous = seen[input.session_id];
   if (!previous && !initial) return action(null);
-  const digest = parseDigest(await readSmall(process.env.RULES_DIGEST || path.join(SKILL_ROOT, 'references/global-rules.md')));
+  const digest = parseDigest(await readSmall(digestFile()));
   if (previous?.version && compareVersion(previous.version, digest.version) >= 0) return action(null);
   const file = seenFile(), lock = `${file}.lock`, tmp = `${file}.${process.pid}`;
   let locked = false;
@@ -85,7 +86,7 @@ export const withRulesDelivery = async (input, seen, { initial = false } = {}, a
     if (Buffer.byteLength(data) > SEEN_LIMIT) throw Error('rules seen state too large');
     // Stage before output so write failures stay silent without advancing the seen version.
     await fs.writeFile(tmp, data, { mode: 0o600 });
-    const rules = { reason, delivered: false };
+    const rules = { digest, reason, delivered: false };
     const result = await action(rules);
     if (rules.delivered) await fs.rename(tmp, file);
     return result;

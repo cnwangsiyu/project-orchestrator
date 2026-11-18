@@ -25,6 +25,7 @@ import {mcpStartupMonitor} from './lib/mcp-startup.mjs';
 //   codex-worker interrupt --thread ID
 //   codex-worker status --thread ID
 //   codex-worker mine | watch [--owner SESSION_ID] [--debounce-sec N]                      (owner-scoped durable inbox; watch is a tracked background task)
+//   codex-worker rules-push [--owner SESSION_ID | --all]                                  (check running workers' digest versions)
 //   codex-worker list   [--cwd DIR] [--search TEXT] [--limit N]
 //   codex-worker quota                                                     (the account's rate-limit windows, JSON)
 //   codex-worker usage                                                     (account id, windows and reset cards, JSON; TRAE: daily buckets + weekly pool)
@@ -59,11 +60,12 @@ import { noteFailure, noteSuccess, notePolicyRestriction, rememberThreadModel, t
 import { createQueueRecorder } from './lib/company-load.mjs';
 import { saveQueue, readQueue } from './lib/worker-queue.mjs';
 import { loadDigest, workerInstructions, auditLaunch, rulesLog, rulesShared } from './lib/global-rules.mjs';
+import { activeClaudeWorkers, pushWorkerRules, rememberWorkerRules, workerRulesLabel } from './lib/worker-rules-push.mjs';
 import { isPolicyBlock, policyBlockRecord, appendPolicyBlock, policyBlockAction } from './lib/policy-block.mjs';
 import { runHubForeground, hubListReachable } from './lib/hub-foreground.mjs';
 import { readTurnState, reconcileTurnEvents } from './lib/worker-turn.mjs';
 import { parseRouteArgs, routeFlag, rerouteWorker, turnHasWork } from './lib/worker-reroute.mjs';
-import { inheritedLaunch, saveLaunch, recordLaunchModel, readRequestBufferExceededAt, markRequestBufferExceeded } from './lib/worker-launch.mjs';
+import { inheritedLaunch, savedLaunch, saveLaunch, recordLaunchModel, readRequestBufferExceededAt, markRequestBufferExceeded } from './lib/worker-launch.mjs';
 import { recordWorkerOutcome, reviewSeat, reviewInstructions } from './lib/worker-outcome.mjs';
 import { sizeLimits, threadSize, freshThreadRoute } from './lib/worker-thread-size.mjs';
 import { modelFamily, modelObservation, rolloutTurnModel } from './lib/worker-model.mjs';
@@ -247,13 +249,33 @@ if (cmd === 'reply') {
     console.log('no open question; falling back to steer');
   } catch (e) { die(e.message, 1); }
 }
-if (cmd === 'watch' || cmd === 'mine') {
+if (cmd === 'rules-push') {
+  if (opts.all && opts.owner !== undefined) die('rules-push takes --owner or --all');
+  try {
+    const owner = opts.all ? null : resolveOwner(opts.owner);
+    if (!opts.all && !validOwner(owner)) die('rules-push needs --owner <session-id> (or ORCHESTRATOR_OWNER) or --all');
+    const lines = await pushWorkerRules({ owner });
+    if (lines.length) await new Promise((resolve, reject) =>
+      process.stdout.write(lines.join('\n') + '\n', error => error ? reject(error) : resolve()));
+    process.exit(lines.some(line => line.startsWith('NOT DELIVERED')) ? 1 : 0);
+  } catch (e) { die(e.message, 1); }
+} else if (cmd === 'watch' || cmd === 'mine') {
   let owner;
   try { owner = resolveOwner(opts.owner); } catch (e) { die(e.message, e.exitCode ?? 2); }
   if (!validOwner(owner)) die(`${cmd} needs --owner <session-id> (or ORCHESTRATOR_OWNER)`);
   if (cmd === 'watch') {
     const debounceSec = opts['debounce-sec'] === undefined ? 45 : typeof opts['debounce-sec'] === 'string' ? Number(opts['debounce-sec']) : NaN;
-    try { process.exit(await watch(owner, undefined, { debounceSec })); } catch (e) { die(e.message, 1); }
+    let lastVersion;
+    const rulesPoll = async () => {
+      try {
+        const digest = loadDigest();
+        if (digest.version === lastVersion) return;
+        const lines = await pushWorkerRules({ owner, digest });
+        lastVersion = digest.version;
+        for (const line of lines) console.log(line);
+      } catch { console.error('NOT DELIVERED worker rules (digest or tracking state unavailable)'); }
+    };
+    try { process.exit(await watch(owner, undefined, { debounceSec, rulesPoll })); } catch (e) { die(e.message, 1); }
   }
   const events = reconcileTurnEvents(readEvents()), current = inbox(events, owner, readAck(owner));
   for (const row of current.unresolved) console.log(`unresolved owner ${row.ownerOriginal}: ${row.ownerResolution} (${row.ownerMatches?.join(', ')||'no full owner in events'}) event=${row.id}`);
@@ -261,9 +283,14 @@ if (cmd === 'watch' || cmd === 'mine') {
   const pendingIds = new Set(current.pending.map((row) => row.id));
   for (const row of openQuestions(readEvents(), { owner })) if (!pendingIds.has(row.id)) console.log(eventLine(row));
   // Only query already-known threads; never start a hub or a replacement from mine.
+  let rulesVersion, claude;
+  try { rulesVersion = loadDigest().version; } catch {}
   for (const row of current.running) {
     let status = 'unknown', observed = null;
-    if (row.followerCommand === 'exec' || !row.thread) {
+    if (row.followerCommand === 'claude') {
+      try { claude ??= activeClaudeWorkers(); if (!(await claude).has(row.thread)) continue; status = 'running (Claude)'; }
+      catch { status = 'unknown (Claude status unavailable)'; }
+    } else if (row.followerCommand === 'exec' || !row.thread) {
       status = followerAlive(row) ? 'running' : 'failed (exec follower exited)';
     } else if (row.thread) {
       try {
@@ -279,7 +306,7 @@ if (cmd === 'watch' || cmd === 'mine') {
       }
     }
     const startedAt = events.find(event => event.runId === row.runId && event.event === 'running')?.t ?? row.t;
-    console.log(`${row.name}\t${status === 'inProgress' ? 'running (hub)' : status}${row.stale && status === 'unknown' ? ' (stale follower; hub status unconfirmed)' : ''}\t${row.outFile ?? '-'}\tthread=${row.followerCommand === 'exec' ? 'exec' : row.thread ?? '-'} account=${row.account} model=${row.model ?? '?'} effort=${row.effort ?? '?'} project=${row.project ?? '?'} task=${row.task ?? row.name ?? '?'} owner=${row.owner} started=${new Date(startedAt).toISOString()}`);
+    console.log(`${row.name}\t${status === 'inProgress' ? 'running (hub)' : status}${row.stale && status === 'unknown' ? ' (stale follower; hub status unconfirmed)' : ''}\t${row.outFile ?? '-'}\tthread=${row.followerCommand === 'exec' ? 'exec' : row.thread ?? '-'} account=${row.account} model=${row.model ?? '?'} effort=${row.effort ?? '?'} project=${row.project ?? '?'} task=${row.task ?? row.name ?? '?'} owner=${row.owner} started=${new Date(startedAt).toISOString()} ${workerRulesLabel(row, rulesVersion)}`);
   }
   process.exit(0);
 }
@@ -1435,6 +1462,8 @@ try {
     const browserConfig = browserThread && !TRAE_EXTENSION_BROWSER && !TRAE_HEADLESS_BROWSER
       ? { ...TRAE_MCP_CONFIG, plugins: { 'unified-computer-use@openai-bundled': { enabled: false } } } : TRAE_MCP_CONFIG;
     const digest = loadDigest();
+    const rulesVersion = rememberWorkerRules(digest);
+    tracker?.set({ rulesVersion });
     const th = await call('thread/start', {
       cwd: path.resolve(opts.cwd), model: opts.model, sandbox: opts.sandbox, approvalPolicy: APPROVAL_POLICY,
       developerInstructions: [browserHowTo, projectWorkerInstructions(digest), reviewHowTo].filter(Boolean).join('\n'),
@@ -1445,7 +1474,7 @@ try {
     attemptThreadId = threadId;
     sessionPath = th.thread?.path ?? null;
     tracker?.set({ thread: threadId, mayRun: true, rolloutFile: sessionPath });
-    saveLaunch(account ?? 'main', threadId, { ...opts, 'auto-reroute-depth': REROUTE_DEPTH }, resolveOwner(opts.owner), { ...modelEvidence(), rolloutFile: sessionPath });
+    saveLaunch(account ?? 'main', threadId, { ...opts, 'auto-reroute-depth': REROUTE_DEPTH }, resolveOwner(opts.owner), { ...modelEvidence(), rolloutFile: sessionPath, rulesVersion });
     if (PROF?.kind === 'trae') rememberThreadModel(PROF.home, threadId, opts.model);
     if (opts.name) await call('thread/name/set', { threadId, name: opts.name }).catch(() => {});
     const talkback = talkbackContext(threadId);
@@ -1465,10 +1494,12 @@ try {
     const resumedDigest=loadDigest();
     const resumed = await call('thread/resume', { threadId: opts.thread, model: opts.model, config,
       developerInstructions:[projectWorkerInstructions(resumedDigest), talkback.instructions, reviewHowTo].filter(Boolean).join('\n') }).catch(resumeFallback);
+    const rulesVersion = resumed ? rememberWorkerRules(resumedDigest) : null;
+    tracker?.set({ rulesVersion });
     sessionPath = resumed?.thread?.path ?? null;
     auditStart(opts.model??resumed?.thread?.model,opts.sandbox??resumed?.thread?.sandbox??undefined,{thread:opts.thread,name:resumed?.thread?.name??undefined});
     tracker?.set({ mayRun: true, rolloutFile: sessionPath });
-    saveLaunch(account ?? 'main', opts.thread, { ...opts, 'auto-reroute-depth': REROUTE_DEPTH }, resolveOwner(opts.owner), { ...modelEvidence(), rolloutFile: sessionPath });
+    saveLaunch(account ?? 'main', opts.thread, { ...opts, 'auto-reroute-depth': REROUTE_DEPTH }, resolveOwner(opts.owner), { ...modelEvidence(), rolloutFile: sessionPath, rulesVersion });
     await waitBrowserTools(opts.thread);
     markOutputStart();
     const ts = await call('turn/start', {
@@ -1484,7 +1515,11 @@ try {
     const t = await currentTurn(opts.thread, resumed?.thread);
     if (!t) die('thread has no turns', 3);
     if (t.status === 'unknown') die(`turn ${t.id} is unconfirmed; no live follower or matching hub status`, 3);
-    if (t.status === 'inProgress') { markOutputStart(); follow(opts.thread, t.id, t.items); }
+    if (t.status === 'inProgress') {
+      const launch = savedLaunch(account ?? 'main', opts.thread);
+      if (launch?.turn === t.id) tracker?.set({ rulesVersion: launch.rulesVersion });
+      markOutputStart(); follow(opts.thread, t.id, t.items);
+    }
     else { console.log(`thread=${opts.thread} turn=${t.id}`); await report(opts.thread, t); }
   } else if (cmd === 'steer' || cmd === 'reply') {
     if (!opts.thread || !text) die('steer needs --thread and a message');

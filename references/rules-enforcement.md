@@ -19,6 +19,7 @@ bullet lines since the seen snapshot. Unchanged rules are omitted. An unchanged 
 reports no changes. Snapshot absence, corrupt seen state, invalid input, I/O failures and lock contention fail open
 (exit 0); they never reset the saved acknowledgement. Hard timers bound all asynchronous I/O: 700 ms for the digest
 hook and 220 ms for the inbox hook, within the existing two-second settings timeouts (and five-second Stop budget).
+On a digest change with tracked workers, either hook can use up to 1.6 seconds for the push and its output.
 
 `_shared/rules-seen.json` is the acknowledgement file, keyed by session id with `host`, `title`, optional `project`,
 `version`, `at` (epoch milliseconds) and cached `orchestrator` recognition. A nonblocking lock serializes merged
@@ -35,11 +36,25 @@ stop/re-route/re-run or a remote checkout update; no settings edits or new hook 
 The official Claude hooks reference confirms `hookSpecificOutput.hookEventName="SessionStart"` and
 `additionalContext`; `session_title` is optional. Source: `https://code.claude.com/docs/en/hooks.md`.
 Local native CLI help, Claude Code 2.1.323, confirms `--bg` and `--append-system-prompt` are not print-only.
-Routed Claude workers use `--append-system-prompt "$(node <skill>/scripts/rules-worker-digest.mjs)"`;
+Routed Claude workers receive `--append-system-prompt` from `launch-claude-worker.mjs`;
 Codex threads and one-shot execs receive the same worker section as developer instructions. Every start, one-shot exec and resumed thread receives the latest worker digest, including no delegation or requests to switch models.
 On each orchestrator wake, also `tail -n 20 ~/.claude/orchestrator/_shared/idle-hints.jsonl` when present and match
 its exact target/name. This passive file-delivery path is documented in SKILL.md; no Claude messaging session is needed
 and the hook does not auto-dispatch or change its bounded injection implementation.
+
+## Rules For Running Workers
+
+The first hook that sees a version change pushes worker-only added or changed sentences to the orchestrator's
+tracked hub turns. `codex-worker watch` pushes when it starts and checks the digest version every second. The hub
+only accepts the message for the specified running turn. Launch records and version snapshots provide the baseline,
+and a receipt advances the displayed version after the hub confirms the steer. A digest change that adds or changes
+no worker sentences advances the receipt without sending a message.
+
+Use `codex-worker mine --owner <session-id>` to see the recorded version and stale marks, and
+`codex-worker rules-push --owner <session-id>` to retry. `--all` checks tracked workers across owners on this
+machine. Failed or unsupported deliveries print `NOT DELIVERED` with the account and thread ID when available, and
+leave the version unchanged. The orchestrator must act on those lines. Tracked one-shot execs and Claude background
+sessions lack hub steer transport. A pre-upgrade worker with an unknown launch baseline needs owner follow-up.
 
 Owner installation only: merge `templates/session-start-hook.json` into the existing `~/.claude/settings.json`
 without replacing other hooks/settings. Its exact fragment uses an absolute Node binary; adjust if Node moves:

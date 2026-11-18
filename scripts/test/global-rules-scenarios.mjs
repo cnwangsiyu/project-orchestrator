@@ -24,7 +24,7 @@ try {
   assert.equal(digestText.match(/^version:/gm)?.length, 1, 'integration must publish one digest version');
   assert.equal(digestText.match(/^## Changes In This Version$/gm)?.length, 1);
   assert.ok(digestText.split('\n').length<=61,'digest line budget');
-  assert.equal(digest.version, '2026-11-18.11');
+  assert.equal(digest.version, '2026-11-18.12');
   assert.match(digest.worker,/Declare host-bound inputs with --input/);
   assert.match(digest.worker,/never edit a slot worktree in place/);
   assert.match(digest.worker, /--exclude-host.*--exclude-slot.*--prefer-slot.*--exclude-reason.*in their report.*Declare host-bound inputs with --input/);
@@ -48,7 +48,9 @@ try {
   assert.ok(loginAt >= 0 && signingAt > loginAt, 'worker digest must contain adjacent login and test-signing rules');
   assert.match(digest.worker, /registered shared test phones iphone8\/iphone11\/s21.*freely tap Allow\/Authorize\/Trust\/OK/);
   assert.match(digest.worker, /personal iPhone 15 Pro Max \(`policy=never`\).*device not registered in `res`/);
-  assert.match(digest.worker, /lease <=2 h.*back up app data.*never enter personal-account credentials\/passwords\/verification codes.*no purchases/);
+  assert.match(digest.worker, /lease <=2 h.*never enter personal-account credentials\/passwords\/verification codes.*no purchases/);
+  assert.match(digest.worker, /never make whole-container or device backups.*pymobiledevice3 apps pull.*devicectl device copy from.*idevicebackup2.*adb backup.*adb exec-out run-as.*use in-place installs/);
+  assert.match(digest.worker, /Pulling named test outputs.*card plus an APK\/IPA-only backup.*test harness.*removed or disabled/);
   assert.match(digest.worker, /Codex refuses an allowed prompt.*routes that step to Claude.*do not ask the user to tap it/);
   const h = 3600000;
   const window = { label: 'week (all models)', used: 10, resetsAt: now + 120 * h, windowMins: 10080, scoped: false };

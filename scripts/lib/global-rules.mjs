@@ -17,7 +17,8 @@ export const parseDigest = (source) => {
   if (!version || !worker) throw Error('global rules digest is missing version/worker rules');
   return { text, version, coreWorker:worker, worker: `${worker}\n${fixedWorkerInstructions()}` };
 };
-export const loadDigest = () => parseDigest(fs.readFileSync(process.env.RULES_DIGEST || path.join(SKILL_ROOT, 'references/global-rules.md'), 'utf8'));
+export const digestFile = () => path.resolve(process.env.RULES_DIGEST || path.join(SKILL_ROOT, 'references/global-rules.md'));
+export const loadDigest = () => parseDigest(fs.readFileSync(digestFile(), 'utf8'));
 export const workerInstructions = (digest = loadDigest(), { project } = {}) => {
   const profiles = JSON.parse(fs.readFileSync(path.join(SKILL_ROOT, 'references/project-risk-profiles.json'), 'utf8'));
   const worker = profiles[project]?.workerLanding === 'ff-main'

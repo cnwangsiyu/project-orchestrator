@@ -8,15 +8,18 @@ import { validOwner, readInboxAsync, deliverAsync, hasWatcherAsync, eventLine, f
 import { captureStopTasks, stopBackgroundState } from './lib/worker-background.mjs';
 import { deliverAnswers, answerLine } from './lib/user-queue.mjs';
 import { projectForOwner } from './lib/task-board.mjs';
+import { pushWorkerRules } from './lib/worker-rules-push.mjs';
 
 process.on('uncaughtException', () => process.exit(0));
 process.on('unhandledRejection', () => process.exit(0));
 // Bound work inside the process; the settings timeout also covers cold process startup.
-const deadlineAt = Date.now() + 220;
-const deadline = setTimeout(async () => {
+const startedAt = Date.now();
+let deadlineAt = startedAt + 220;
+const timeout = async () => {
   await Promise.race([cleanupRulesDelivery(), new Promise(resolve => setTimeout(resolve, 40))]);
   process.exit(0);
-}, 220);
+};
+let deadline = setTimeout(timeout, 220);
 try {
   let raw = '';
   for await (const part of process.stdin) { raw += part; if (Buffer.byteLength(raw) > 65536) throw Error('large input'); }
@@ -37,6 +40,15 @@ try {
     await fs.appendFile(process.env.CLAUDE_ENV_FILE, `\nexport ORCHESTRATOR_OWNER='${owner}'\n`);
   }
   await withRulesDelivery(input, seen, {}, async (rules) => {
+    let rulesReason = rules?.reason;
+    if (rules) {
+      const lines = await pushWorkerRules({ owner, digest: rules.digest, onWork: () => {
+        clearTimeout(deadline);
+        deadlineAt = startedAt + 1600;
+        deadline = setTimeout(timeout, Math.max(1, deadlineAt - Date.now()));
+      } }).catch(() => ['NOT DELIVERED worker rules (tracking state unavailable)']);
+      rulesReason = [rulesReason, ...lines].join('\n');
+    }
     const snapshot = await readInboxAsync(owner);
     const background = start ? { covered: new Set(), suppressed: new Set() }
       : await stopBackgroundState(owner, input.background_tasks, snapshot, { ancestryDeadline: deadlineAt - 80 });
@@ -48,8 +60,8 @@ try {
     const outputWithAnswers = async (reason, onlyAnswers = false) => {
       let printed = false;
       await deliverAnswers({ owner, project: process.env.ORCHESTRATOR_PROJECT, projectOfOwner: () => projectForOwner(owner),
-        print: async items => { await output([reason, items.map(answerLine).join('\n'), rules?.reason].filter(Boolean).join('\n\n')); printed = true; } }).catch(() => {});
-      if (!printed && !onlyAnswers) { await output([reason, rules?.reason].filter(Boolean).join('\n\n')); printed = true; }
+        print: async items => { await output([reason, items.map(answerLine).join('\n'), rulesReason].filter(Boolean).join('\n\n')); printed = true; } }).catch(() => {});
+      if (!printed && !onlyAnswers) { await output([reason, rulesReason].filter(Boolean).join('\n\n')); printed = true; }
       return printed;
     };
     let visible = false;
@@ -64,7 +76,7 @@ try {
     }, 10);
     if (delivery.failed || visible) return;
     if (await outputWithAnswers('', true)) return;
-    if (rules) { await output(rules.reason); return; }
+    if (rules) { await output(rulesReason); return; }
     const running = snapshot.running.filter((row) => !row.stale);
     const questions = snapshot.questions;
     const ownerPattern = owner.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

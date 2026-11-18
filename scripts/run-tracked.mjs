@@ -9,6 +9,7 @@ import { maskPasswordStyleValues } from './lib/nightly-audit.mjs';
 import { canonicalPathOptions, canonicalLaunchArgv } from './lib/launch-paths.mjs';
 import { requestBoardRefresh } from './lib/board-refresh.mjs';
 import { projectForOwner } from './lib/task-board.mjs';
+import { loadDigest, workerInstructions } from './lib/global-rules.mjs';
 
 const args = process.argv.slice(2), sep = args.indexOf('--'), opts = {};
 for (let i = 0; i < (sep < 0 ? args.length : sep); i += 2) opts[args[i].replace(/^--/, '')] = args[i + 1];
@@ -25,6 +26,7 @@ const beforeOut = outStamp();
 let child, logFd, signalled = null, ending = false, watchdog, drainTimer, stderrTail='', stdoutPending='', accepted=false;
 let thread = opts.thread ?? null, turn = null;
 const stdoutLine = line => {
+  const previousThread = thread;
   const pair = line.match(/^thread=(\S+) turn=(\S+)/);
   if (pair) { thread = pair[1]; turn = pair[2]; accepted = true; }
   try {
@@ -35,7 +37,8 @@ const stdoutLine = line => {
       if (thread || turn) accepted = true;
     }
   } catch {}
-  tracker.set({ thread, turn });
+  if (thread && thread !== previousThread) tracker.update({ thread, turn });
+  else tracker.set({ thread, turn });
 };
 const signalOwned = (signal) => {
   try { if (process.platform === 'win32') child?.kill(signal); else if (child?.pid) process.kill(-child.pid, signal); } catch {}
@@ -97,8 +100,14 @@ try {
   const command = args[sep + 1], commandArgs = args.slice(sep + 2);
   const cliPaths = /^(codex|traex|traecli)$/.test(path.basename(command))
     || /codex-worker\.mjs$/.test(commandArgs[0] ?? '');
+  let env = process.env;
+  if (opts['inject-rules'] === 'on') {
+    const digest = loadDigest();
+    tracker.update({ rulesVersion: digest.version });
+    env = { ...env, ORCHESTRATOR_WORKER_RULES_CONFIG: `developer_instructions=${JSON.stringify(workerInstructions(digest))}` };
+  }
   child = spawn(command, cliPaths ? canonicalLaunchArgv(commandArgs, opts.cwd) : commandArgs, { cwd: opts.cwd, detached: process.platform !== 'win32',
-    stdio: ['ignore', 'pipe', 'pipe'] });
+    env, stdio: ['ignore', 'pipe', 'pipe'] });
   child.stdout.on('data',chunk=>{
     if(logFd!==undefined) fs.writeSync(logFd,chunk); else process.stdout.write(chunk);
     stdoutPending=(stdoutPending+chunk.toString()).slice(-65536);

@@ -553,7 +553,11 @@ and both returned the right file contents.
   `"tool":"wait"`. The spawns themselves don't appear there. Each sub-agent is its own thread under
   `<account home>/sessions/`, with `parent_thread_id` set to the worker's thread.
 
-**Current rule (2026-11-15): workers do the work themselves, with no sub-agents or handing work/review to another model. They never ask to switch model/account or personal quota; report actual model/tool unavailability to the orchestrator. Starts, one-shot execs, resumes and automatic reroutes inject the latest worker digest plus the shared fixed operational clauses. Copy only task-specific route `notes` into briefs; `fixedNotes` in `--json` are diagnostics and need no copying. Default route text omits them; `--verbose` includes them. Claude launch commands load the same rules with `rules-worker-digest.mjs` and `--append-system-prompt`.**
+**Current rule (2026-11-18): workers do the work themselves, with no sub-agents or handing work/review to another model. They never ask to switch model/account or personal quota; report actual model/tool unavailability to the orchestrator. Starts, one-shot execs, resumes and automatic reroutes inject the latest worker digest plus the shared fixed operational clauses. Copy only task-specific route `notes` into briefs; `fixedNotes` in `--json` are diagnostics and need no copying. Default route text omits them; `--verbose` includes them. Claude launch commands inject the same rules with `--append-system-prompt`.**
+
+Stop and SessionStart hooks and `codex-worker watch` push worker digest changes to running hub turns.
+Use `codex-worker mine --owner <session-id>` to see running workers' versions and
+`codex-worker rules-push --owner <session-id>` to retry. Act on any `NOT DELIVERED` line.
 
 ## Differences from Claude workers
 

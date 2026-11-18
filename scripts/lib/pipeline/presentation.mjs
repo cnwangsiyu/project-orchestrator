@@ -130,7 +130,9 @@ export function presentRoute(plan, view, context) {
       const trustedCwd = context.trustedCwd ?? task.flags['trusted-cwd'] ?? cwd;
       if (!task.flags['trusted-cwd'] && !context.trustedCwd) notes.push('Claude launch: no trusted project root configured; launch uses the working directory; verify it is trusted or pass --trusted-cwd with the trusted project root.');
       const claudePrompt = `Working directory: ${cwd}. ${prompt}`;
-      out.command=`${audit} && cd ${shellQuote(trustedCwd)} && ${command(['claude','--bg','--remote-control','--permission-mode','bypassPermissions','-n',name,'--model',c.modelId,'--effort',c.effort])} --append-system-prompt "$(node ${shellQuote(`${root}/scripts/rules-worker-digest.mjs`)})" ${shellQuote(claudePrompt)}`;
+      const metadata = JSON.stringify({ name, model: c.modelId, effort: c.effort, project: task.project, owner });
+      out.command=`${audit} && cd ${shellQuote(trustedCwd)} && ${command(['node',`${root}/scripts/launch-claude-worker.mjs`,metadata,
+        'claude','--bg','--remote-control','--permission-mode','bypassPermissions','-n',name,'--model',c.modelId,'--effort',c.effort,claudePrompt])}`;
       return out;
     }
     const args=['--account',an,'start','--cwd',cwd,'--model',launchModel,'--effort',c.effort,'--sandbox',task.sandbox,'--name',name,
@@ -156,11 +158,11 @@ export function presentRoute(plan, view, context) {
       const accountEnv=profiles[an]?.home?`CODEX_HOME=${shellQuote(profiles[an].home)} `:'';
       const inner=(a.kind==='ttadk'&&known(a.capabilities.search)?`${command(['node',`${root}/scripts/codex-worker.mjs`,'--account',an,'proxy'])} >/dev/null && `:'')+accountEnv+command([bin,'exec','--skip-git-repo-check','-C',cwd,...sandboxArgs,'-m',launchModel,'-c',`model_reasoning_effort="${c.effort}"`,
         ...(task.flags.network&&task.sandbox==='workspace-write'?['-c',`sandbox_workspace_write.network_access=${task.flags.network==='on'}`]:[]),
-        ])+` -c "$(node ${shellQuote(`${root}/scripts/rules-worker-digest.mjs`)} --config)" `+command(['--json','-o',paths.out,prompt]);
+        ])+' -c "$ORCHESTRATOR_WORKER_RULES_CONFIG" '+command(['--json','-o',paths.out,prompt]);
       out.launcher=a.kind==='trae'?'traecli-exec':'codex-exec';
       out.command=command(['sh',`${root}/scripts/run-tracked.sh`,'--name',name,'--account',an,'--model',c.modelId,'--effort',c.effort,'--cwd',cwd,
         '--project',task.project,'--task',f.task??name,'--task-dir',taskDir,
-        '--out',paths.out,'--log',paths.log,...(owner?['--owner',owner]:[]),'--','sh','-c',`${audit} && ${inner}`]);
+        '--out',paths.out,'--log',paths.log,'--inject-rules','on',...(owner?['--owner',owner]:[]),'--','sh','-c',`${audit} && ${inner}`]);
     } else out.command=command(['node',`${root}/scripts/codex-worker.mjs`,...args,prompt]);
     return out;
   };

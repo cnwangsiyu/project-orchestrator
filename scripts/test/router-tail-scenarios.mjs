@@ -70,9 +70,10 @@ try {
   }
   assert.equal(cli(['build-run','--env','test']).tier,'light');
   for(const args of [['build-run'],['browser','--failures','1'],['analysis','--failures','1']])assert.match(cli(args).allNotes.join('\n'),/full checked checklist.*non-secret variables.*expected artifacts/);
-  assert.match(cli(['build-run']).allNotes.join('\n'),/Library\/SplashBoard\/.*readable before any install.*over the top/);
+  assert.match(cli(['build-run']).allNotes.join('\n'),/in-place install for apps that can hold login sessions.*APK\/IPA-only backup/);
   const claude=cli(['claude-tools','--cwd','/fixture/work tree','--task-dir','/fixture/task dir','--trusted-cwd','/fixture/trusted root']);
-  assert.match(claude.pick.command,/cd '\/fixture\/trusted root' && claude/);assert.match(claude.pick.command,/Working directory: \/fixture\/work tree/);
+  assert.match(claude.pick.command,/cd '\/fixture\/trusted root' && node .*\/launch-claude-worker\.mjs .*claude --bg/);
+  assert.match(claude.pick.command,/Working directory: \/fixture\/work tree/);
   assert.match(cli(['claude-tools']).allNotes.join('\n'),/no trusted project root configured/);
   console.log('PASS BC-13/18/19/22/48 checklist, trusted launch, origins, release tier and backup notes');
 
