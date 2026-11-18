@@ -315,12 +315,38 @@ objects are outside the snapshot. Attempt records include the superproject
 repository path and transferred bundle bytes (`submoduleBundleBytes` for modules,
 absent or zero on a warm run).
 
-A tracked registry-only `.npmrc` is accepted. Historical npm configurations and
-staged upload contents are checked for credential settings and token expansions
-before leasing. Refusals identify the path and setting. Other private-file path
-rules still apply. Set `DEVBOX_CACHE_DIR` to an existing private directory to
-keep the runner's host, affinity and flaky records there while using public res
-for leases.
+A tracked registry-only `.npmrc` is accepted. The selected tree plus staged,
+modified and untracked worktree configuration are checked for credential
+settings and token expansions before leasing. After target-store inspection,
+historical configuration scanning uses the same exclusions as the next bundle:
+only commits not reachable from the usable remote bases are checked. A first
+transfer has no base and scans the full history. If bundle packing falls back to
+fewer bases or a self-contained bundle, the scanner expands its history range
+before that attempt. No bundle bytes are uploaded until this check passes.
+
+Blob contents are read through one `git cat-file --batch` process per scan, with
+binary framing preserved for plist parsing. Zero-finding blob OIDs are appended
+to `<state>/scan-cache/<scanner-version>/<repo-id>.oids`; the version component
+invalidates old clean verdicts when rules change. Blobs with any finding remain
+uncached even when a repo-level nonsecret allow entry suppresses the refusal, so
+allow-list edits take effect without cache invalidation. Staged and worktree
+files retain their direct checks. Each scan keeps the 300-second hard limit; a
+timeout reports its last phase and discovered, processed and cached blob counts.
+Refusals and timeout diagnostics contain only paths, setting names and counts.
+Other private-file path rules still apply. Set `DEVBOX_CACHE_DIR` to an existing
+private directory to keep the runner's scan cache, host, affinity and flaky
+records there while using public res for leases.
+
+Machine-generated dependency manifests (`package-lock.json`,
+`npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml`, `Podfile.lock`,
+`Gemfile.lock`, `Cargo.lock`, `poetry.lock`, `gradle.lockfile` and
+`Package.resolved`) do not use credential-like key-name heuristics: dependency
+names such as `js-tokens` and `path-key` are not settings. They still reject
+private-key blocks, access-key and JWT shapes, registry URLs with embedded
+user/password credentials, and literal `_authToken`/`_auth` assignments. Valid
+JSON likewise applies key-name checks only to non-reference string values, and
+skips dependency maps and `node_modules/...` subtrees rather than interpreting
+package names or dependency paths as configuration keys.
 
 `_shared/devbox-affinity.json` remembers the last host and slot for each key.
 The runner passes the remembered eligible slot through `--prefer-slot` when
@@ -405,6 +431,10 @@ affinity, upload and disk retries, artifacts, flaky bookkeeping, signal and
 timeout cleanup, interrupted acquisition recovery and leased GC.
 It also covers packed donor objects for incomplete modules, bundle diagnostics,
 CPU budgets, auto sizing, unit assignments/timing history and idle prewarm.
+`node scripts/test/devbox-transfer-check-scenarios.mjs` focuses on batched blob
+framing (including binary plists), generated-lockfile/JSON false-positive and
+shape checks, clean-OID cache hits, repeated findings, incremental-base/full-
+history ranges and the cached no-`cat-file` timing path.
 Set `DEVBOX_TEST_CASE=credentials|packed-module|receipt|res-progress|cpu|auto|units|prewarm|bundle|ownership|baseline`
 to rerun one focused case under local load.
 `baseline` runs the original runner scenarios without the new performance/gate

@@ -638,6 +638,25 @@ export async function storeIdentity(repo, project, state) {
   return 'id-' + createHash('sha256').update(identity).digest('hex');
 }
 
+async function scanTransfer(snapshot, scope, bases, state, env = process.env) {
+  const transferChecker = fileURLToPath(new URL('./lib/devbox-transfer-check.mjs', import.meta.url));
+  const args = [transferChecker, '--repo', snapshot.sourceRepo, '--commit', snapshot.commit, '--mode', snapshot.mode,
+    '--repo-id', snapshot.scanId, '--scope', scope, '--cache-dir', cacheDir(), ...bases.flatMap(oid => ['--base', oid])];
+  const admission = await execute(process.execPath, args, { state, timeout: 300000, env });
+  if (!admission.code) return;
+  const progress = admission.stderr.match(/scanProgress phase=\S+ blobsDiscovered=\d+ blobsProcessed=\d+ cacheHits=\d+/g)?.at(-1);
+  if (admission.code === 124) {
+    const error = Error(`pre-transfer credential scan timed out after 300s${progress ? `: ${progress}` : ''}`);
+    error.code = 124; throw error;
+  }
+  let findings;
+  try { findings = JSON.parse(admission.stdout); }
+  catch { findings = [{ path: '[source scan]', key: 'SCAN_UNAVAILABLE', count: 1 }]; }
+  throw Error('pre-transfer credential gate refused: ' + findings.map(hit => `${JSON.stringify(hit.path)} key=${hit.key} count=${hit.count}`).join('; ')
+    + `${progress && findings.some(hit => hit.key === 'SCAN_UNAVAILABLE') ? ` (${progress})` : ''}`
+    + '. Use a source-only export with those fields blanked, or a repo-level allow entry in references/devbox-run.md for proven non-secrets.');
+}
+
 async function snapshot(opts, temp, state, ancestors = new Set(), parentObjects = []) {
   const gitEnv = parentObjects.length ? { ...process.env, GIT_ALTERNATE_OBJECT_DIRECTORIES:
     [process.env.GIT_ALTERNATE_OBJECT_DIRECTORIES, ...parentObjects.map(dir => JSON.stringify(dir))].filter(Boolean).join(path.delimiter) } : process.env;
@@ -662,14 +681,8 @@ async function snapshot(opts, temp, state, ancestors = new Set(), parentObjects 
   if (untracked.some(name => path.basename(name).toLowerCase() === '.npmrc')) throw Error('untracked .npmrc refused');
   if ((await git(['rev-list', '--full-history', '--max-count=1', commit, '--', ...privateHistoryPaths])).trim())
     throw Error('bundle history contains credential-related paths; use a source-only history');
-  const transferChecker = fileURLToPath(new URL('./lib/devbox-transfer-check.mjs', import.meta.url));
   const transferId = await storeIdentity(opts.repo, undefined, state);
-  const admission = await execute(process.execPath, [transferChecker, opts.repo, commit, opts.ref, transferId], { state, timeout: 300000, env: gitEnv });
-  if (admission.code) {
-    let findings; try { findings = JSON.parse(admission.stdout); } catch { findings = [{ path: '[source scan]', key: 'SCAN_UNAVAILABLE', count: 1 }]; }
-    throw Error('pre-transfer credential gate refused: ' + findings.map(hit => `${JSON.stringify(hit.path)} key=${hit.key} count=${hit.count}`).join('; ')
-      + '. Use a source-only export with those fields blanked, or a repo-level allow entry in references/devbox-run.md for proven non-secrets.');
-  }
+  await scanTransfer({ sourceRepo: opts.repo, commit, mode: opts.ref, scanId: transferId }, 'snapshot', [], state, gitEnv);
   const checker = fileURLToPath(new URL('./lib/devbox-source-check.py', import.meta.url));
   const verdict = await execute('python3', [checker, opts.repo, commit, opts.ref], { state, timeout: 300000, env: gitEnv });
   if (verdict.code && verdict.stdout.trim()) {
@@ -725,7 +738,8 @@ async function snapshot(opts, temp, state, ancestors = new Set(), parentObjects 
     if (!mod.parent) transferFiles.delete(mod.relative);
     for (const file of mod.files) transferFiles.add(path.posix.join(mod.parent, mod.relative, file));
   }
-  return { commit, anchors, storeKey, modules, untracked, files: [...transferFiles], exportRepo, patchFile, extra, temp, sourceRepo: opts.repo };
+  return { commit, anchors, storeKey, modules, untracked, files: [...transferFiles], exportRepo, patchFile, extra, temp,
+    sourceRepo: opts.repo, mode: opts.ref, scanId: transferId, parentObjects };
 }
 
 function bundleDiagnostics(snapshot, args) {
@@ -767,6 +781,11 @@ export async function makeBundle(snapshot, known, state) {
   if (bases.length > 1) plans.push(bases.slice(0, Math.floor(bases.length / 2)));
   plans.push([]);
   for (const exclusions of plans) {
+    if (snapshot.scanId) {
+      const scanEnv = snapshot.parentObjects?.length ? { ...process.env, GIT_ALTERNATE_OBJECT_DIRECTORIES:
+        [process.env.GIT_ALTERNATE_OBJECT_DIRECTORIES, ...snapshot.parentObjects.map(dir => JSON.stringify(dir))].filter(Boolean).join(path.delimiter) } : process.env;
+      await scanTransfer(snapshot, 'history', exclusions.map(oid => oid.slice(1)), state, scanEnv);
+    }
     const file = path.join(snapshot.temp, 'transfer-' + randomUUID() + '.bundle');
     const args = ['bundle', 'create', file, 'refs/heads/export', ...exclusions];
     const result = await git(args);

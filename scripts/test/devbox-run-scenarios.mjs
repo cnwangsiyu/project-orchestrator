@@ -403,7 +403,11 @@ os.execv(${JSON.stringify(realGit)}, ['git', *sys.argv[1:]])
   fs.writeFileSync(path.join(historical.repo, 'config.yaml'), `ACCESS_KEY: ${fake}`);
   git(historical.repo, 'add', '.'); git(historical.repo, 'commit', '-qm', 'history-only fixture');
   git(historical.repo, 'rm', 'config.yaml'); git(historical.repo, 'commit', '-qm', 'remove config');
-  const old = await run(historical); assert.equal(old.code, 1); assert.ok(old.stderr.includes('config.yaml')); assert.ok(!old.stderr.includes(fake)); assert.deepEqual(historical.events(), []);
+  const old = await run(historical), historicalOutput = old.stdout + old.stderr;
+  assert.equal(old.code, 1); assert.ok(historicalOutput.includes('config.yaml'), historicalOutput); assert.ok(!historicalOutput.includes(fake));
+  assert.ok(historical.events().some(event => event.op === 'take'));
+  assert.ok(!historical.events().some(event => ['bundle', 'run'].includes(event.op)), 'history gate still precedes transfer and execution');
+  returned(historical);
   const staged = fixture();
   fs.writeFileSync(path.join(staged.repo, 'project.conf'), `SCRECT_KEY=${fake}`); git(staged.repo, 'add', '.');
   fs.writeFileSync(path.join(staged.repo, 'project.conf'), 'SCRECT_KEY=\n');
