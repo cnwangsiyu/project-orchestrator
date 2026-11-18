@@ -233,10 +233,10 @@ machine_thresholds() {
   IFS="$unknown_ifs"
   if [ -n "${WAIT_CONFIG_FILE:-}" ]; then
     next="$WAIT_CONFIG_FILE.$$.$RANDOM.tmp"
-    (umask 077;
+    (umask 077; {
       for key in LOAD_LIMIT LOAD_LIMIT_WITH_LANES MIN_AVAIL_GIB LANE3_LOAD LANE3_AVAIL_GIB LANE_LOAD_PER_CORE LANE_MIN_AVAIL_GIB BUILD_LOAD_PER_CORE BUILD_MAX_CONCURRENCY BUILD_CONCURRENT_LOAD_PER_CORE BUILD_CONCURRENT_MIN_AVAIL_GIB LOAD_OVERRIDE_MINUTES LOAD_POLL_SECONDS HEAD_OVERRIDE_BASE_LOAD THRESHOLDS_SOURCE MACHINE_UNKNOWN_KEYS; do printf '%s\t%s\n' "$key" "${!key}"; done
       printf 'MACHINE_WARNED_KEYS\t%s\n' "$warned"
-    ) >"$next"
+    } >"$next")
     mv -f "$next" "$WAIT_CONFIG_FILE"
   fi
 }
