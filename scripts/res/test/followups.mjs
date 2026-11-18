@@ -19,7 +19,7 @@ fs.writeFileSync(path.join(mocks, 'awk'), `#!/bin/sh
 case "$*" in
   *' /proc/loadavg') echo "$RES_TEST_LOAD1M";;
   *' /proc/meminfo') echo "$RES_TEST_LINUX_AVAILABLE";;
-  *) exec /usr/bin/awk "$@";;
+  *) exec "${process.env.RES_TEST_AWK || "/usr/bin/awk"}" "$@";;
 esac
 `, { mode: 0o755 });
 fs.writeFileSync(path.join(mocks, 'adb'), `#!/bin/sh

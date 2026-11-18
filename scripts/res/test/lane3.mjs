@@ -24,7 +24,7 @@ fs.writeFileSync(path.join(mocks, 'awk'), `#!/bin/bash
 case "$*" in
   *'/proc/loadavg') printf '%s\\n' "$RES_TEST_LOAD1M" ;;
   *'/proc/meminfo') printf '%s\\n' "$RES_TEST_LINUX_BYTES" ;;
-  *) exec /usr/bin/awk "$@" ;;
+  *) exec "${process.env.RES_TEST_AWK || "/usr/bin/awk"}" "$@" ;;
 esac
 `, { mode: 0o755 });
 const env = { ...process.env, PATH: `${mocks}:${process.env.PATH}`, RES_DIR: state, FIXTURE_DIR: root,
@@ -96,7 +96,7 @@ for (const [load, ram, expected] of [['8', '68719476736', 'OPEN'], ['8.001', '68
   eq(take(extra).code, expected === 'OPEN' ? 0 : 5);
   eq(fs.existsSync(lock()), expected === 'OPEN');
   if (expected === 'OPEN') release();
-  eq((await wait(extra)).code, expected === 'OPEN' ? 0 : 2);
+  const waited=await wait(extra); eq(waited.code, expected === 'OPEN' ? 0 : 2, waited.text);
   if (expected === 'OPEN') release();
   eq(fs.existsSync(lock()), false);
 }
