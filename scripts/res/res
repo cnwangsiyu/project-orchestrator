@@ -17,7 +17,7 @@ NOTES="$RES_DIR/notes"
 WAITERS="$RES_DIR/build-waiters"
 LANE_WAITERS="$RES_DIR/lane-waiters"
 POOL_WAITERS="$RES_DIR/pool-waiters"
-WAITER_STALE_SECONDS=45
+WAITER_STALE_SECONDS="${RES_WAITER_STALE_SECONDS:-300}"  # 45 s expired the FIFO head during its own slow (ssh-probing) attempt under load (BC-103 hotfix)
 
 usage() {
   cat <<'EOF'
