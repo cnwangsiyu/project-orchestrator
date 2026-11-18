@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { policyModel } from './lib/pipeline/common.mjs';
 import {modelPreference} from './lib/pipeline/policy.mjs';
 import {mcpStartupMonitor} from './lib/mcp-startup.mjs';
 // codex-worker: run and steer Codex workers through a shared Codex app-server ("hub") over WebSocket.
@@ -490,7 +491,7 @@ if (cmd === 'ttadk-setup') {
   let models = [];
   try { models = ((j) => (Array.isArray(j) ? j : j.models ?? []))(JSON.parse(execFileSync(ttadkBin, ['models', '-f', 'json'], { encoding: 'utf8', timeout: 60000, stdio: ['ignore', 'pipe', 'ignore'] }))).filter((m) => (m.availableAgents ?? []).includes('codex')).map((m) => m.id); } catch {}
   const qualified=new Set(['light','normal','hard'].flatMap(tier=>modelPreference({category:'analysis',tier,contentLabels:[]},{kind:'ttadk'})).concat(modelPreference({category:'image-read',tier:'normal',contentLabels:[]},{kind:'ttadk'}),['kimi-k3']));
-  const usable=models.filter(m=>qualified.has(m.toLowerCase()));if(!usable.length)die('the TTADK gateway lists no usable qualified Codex model',1);
+  const usable=models.filter(m=>qualified.has(policyModel(m)));if(!usable.length)die('the TTADK gateway lists no usable qualified Codex model',1);
   const gatewayDefault=usable.includes('gpt-6.1-sol')?'gpt-6.1-sol':usable[0];
   const reg = readAccounts();
   reg.main ??= { home: path.join(os.homedir(), '.codex'), hub: 'ws://127.0.0.1:47321' };

@@ -1,7 +1,7 @@
 import { WORKER_NOTES } from '../fixed-worker-notes.mjs';
 // Pure compatibility rendering. Receives paths, owner and digest from the CLI;
 // it never launches, reads metadata, or changes the selected tuple.
-import { company, companyDevice, known, adversarial, isReview } from './common.mjs';
+import { policyModel, isAstra, company, companyDevice, known, adversarial, isReview } from './common.mjs';
 import { candidateParts } from './candidates.mjs';
 import {mandatoryReview,projectReviewPolicy} from '../review-policy-data.mjs';
 import { deriveReview } from './taskspec.mjs';
@@ -45,7 +45,7 @@ export function presentRoute(plan, view, context) {
   }])).values()].sort((a,b) => {
     const account = snapshot.accounts.find(a => a.kind === 'trae');
     const pref = modelPreference(t,account);
-    return pref.indexOf(a.model)-pref.indexOf(b.model);
+    return pref.indexOf(policyModel(a.model))-pref.indexOf(policyModel(b.model));
   });
   const chosenBalance = seat?.estimate.balance;
   const walked = chosenBalance ? balanceCandidates.slice(0,balanceCandidates.findIndex(b=>b.model===c.modelId)+1) : balanceCandidates;
@@ -135,7 +135,7 @@ export function presentRoute(plan, view, context) {
     if(['browser','ui-browser'].includes(task.category)) args.push('--browser-origins',task.allowedOrigins.join(','));
     if(task.flags['no-browser-preflight']) args.push('--no-browser-preflight');
     out.workerArgs=args;
-    const oneShot=['lookup','extract','draft','image-gen','second-opinion'].includes(task.category)&&!task.background&&!f.worker&&!low&&c.modelId!=='gpt-6-astra';
+    const oneShot=['lookup','extract','draft','image-gen','second-opinion'].includes(task.category)&&!task.background&&!f.worker&&!low&&!isAstra(c.modelId);
     if(oneShot) {
       const bin=a.kind==='trae'?(profiles[an]?.bin??'traecli'):'codex';
       const readOnlyNetwork=task.flags.network&&task.sandbox==='read-only', profile=`route_read_only_${plan.planHash}`;

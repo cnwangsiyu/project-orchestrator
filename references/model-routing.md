@@ -39,6 +39,10 @@ telemetry expire after 30 minutes; identity/catalog facts after 10 minutes.
 Malformed nested state becomes UNKNOWN for that account. Browser-ready TTADK and ChatGPT have the desktop runtime unless explicitly
 unavailable; TRAE and Claude have no desktop path. Missing tools or vision blocks.
 
+Each account uses the newest Astra version in its own catalog. Main and b currently list
+`gpt-6.2-astra`, TRAE lists `gpt-6-astra`, and TTADK has no Astra entry.
+Scoped Astra approvals and the hard-tier standing decision cover the family.
+
 Company accounts remain first. Hard work stays on qualified Sol/Astra (or the
 explicit adversarial non-GPT exception); light work uses the light list and
 preserves known free capacity. ETA compares model-specific drain/progress and
@@ -114,12 +118,12 @@ TRAE foreground tier lists are:
 |---|---|
 | Light | GPT-5.6-Terra, GPT-5.5, DeepSeek-V4.1-Flash |
 | Normal | GPT-6.1-Sol, GPT-5.6-Sol, GPT-5.6-Terra, DeepSeek-V4.1-Flash |
-| Hard | GPT-6-Astra on a free company lane, then GPT-6.1-Sol |
+| Hard | Astra on a free company lane, then GPT-6.1-Sol |
 
 Walk the tier ladder in quality order across all company accounts. Select the first model with a free lane; depleted-but-ready/progressing low-priority lanes count. For that model, free TRAE wins unless TTADK has the expiring-quota preference; if TRAE is congested/queued/stalled, use free TTADK for that same model before stepping down. Priority quota is at most a same-model lane tie-break, never a reason to downgrade Sol to Flash. Light work stays on its qualified light ladder; hard work never demotes. TRAE Gemini and `gpt-5.6-luna` are excluded; personal ChatGPT `gpt-6-luna` remains the first lookup/extract/image-gen choice; TTADK fresh catalog and historical model evidence remain.
 
 Trial from **2026-11-16**, revisit **2026-11-23** with hard-tier first-pass success
-and rework/fix rounds by model. Start hard tasks on company GPT-6-Astra when
+and rework/fix rounds by model. Start hard tasks on company Astra when
 its lane can start now with fresh model load <60% and no queue/stall. TRAE does
 not normally publish Astra load: for Astra only, fresh daily units remaining,
 a healthy hub and no fresh queue/stall evidence in lane/family telemetry or

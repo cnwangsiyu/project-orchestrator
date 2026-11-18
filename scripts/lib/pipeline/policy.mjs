@@ -1,13 +1,13 @@
 // Category qualification and preferences, shared by admission and ordering.
-import { EFFORTS, company, adversarial, known, modelId } from './common.mjs';
-export const SOL='gpt-6.1-sol', ASTRA='gpt-6-astra';
+import { EFFORTS, company, adversarial, known, policyModel, isAstra } from './common.mjs';
+export const SOL='gpt-6.1-sol', ASTRA='astra';
 // Company hard-tier trial: 2026-11-16 through the 2026-11-23 review.
 export const TIERS = {hard:[ASTRA,SOL],normal:[SOL,'gpt-5.6-sol','gpt-5.6-terra','deepseek-v4.1-flash'],light:['gpt-5.6-terra','gpt-5.5','deepseek-v4.1-flash']};
 export function hardPreference(t) {
   // Retain Sol's effort escalation (including company max) after a Sol attempt.
   // Astra actuals still forbid Sol through pPreviousFloor; preference is not a floor.
   const attempts=t.previousAttempts.filter(a=>a?.taskId===t.taskId&&(a.role??'primary')===t.role&&a.state!=='planned'&&a.actualStatus==='KNOWN');
-  const used=id=>attempts.some(a=>modelId(a.actual?.modelId??a.actual?.model)===id);
+  const used=id=>attempts.some(a=>policyModel(a.actual?.modelId??a.actual?.model)===id);
   return used(SOL)&&!used(ASTRA)
     ? [SOL,ASTRA] : TIERS.hard;
 }
@@ -43,7 +43,7 @@ export function modelPreference(t,a,s = null) {
     // An account-less company baseline cannot attest a prior Astra run. Keep the
     // existing Sol assumption for count-only retries; declared Astra catalogs use
     // the trial preference and choose.mjs still checks whether the lane is free.
-    if(t.tier==='hard') return known(a.catalog)?.includes(ASTRA)?hardPreference(t):[SOL,ASTRA];
+    if(t.tier==='hard') return known(a.catalog)?.some(isAstra)?hardPreference(t):[SOL,ASTRA];
     return [...TIERS[t.tier],...(t.tier==='light'?[SOL,'gpt-5.6-sol']:[]),...(a.kind==='ttadk'?['gemini-3.1-pro-preview']:[])];
   }
   const preference=(PERSONAL[t.category]??[]).map(([m])=>m);
@@ -56,7 +56,7 @@ export function policyEffort(t,c,a,s) {
   if(['deepseek','kimi','gemini'].includes(c.family)) return 'high';
   if(c.family==='seed') return 'medium';
   if(adversarial(t)) return ['review','review-high'].includes(t.category)?'xhigh':'high';
-  let e=(PERSONAL[t.category]??[]).find(([m])=>m===c.modelId)?.[1]??(t.tier==='hard'?'xhigh':'medium');
+  let e=(PERSONAL[t.category]??[]).find(([m])=>m===policyModel(c.modelId))?.[1]??(t.tier==='hard'?'xhigh':'medium');
   if(company(a)) {
     e=t.tier==='light'&&t.category!=='image-read'?'medium':(PERSONAL[t.category]??[]).find(([m])=>m===SOL)?.[1]??'medium';
     if(['docs','research','image-read','analysis'].includes(t.category)&&t.tier!=='light') e='high';

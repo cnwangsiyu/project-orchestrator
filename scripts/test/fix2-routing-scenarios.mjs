@@ -76,7 +76,7 @@ try {
   const astraArgs=['implement-hard','--impact','throwaway','--writes','--failures','1',
     '--actual',`codex:${SOL}:xhigh@alt`,'--project','acq','--name','probe2'];
   const astra=cli(astraArgs);assert.equal(astra.kind,'blocked');assert.equal(astra.pick.model,ASTRA);
-  assert.equal(astra.pick.command,null);assert.deepEqual(astra.needsUserOK,[`use GPT-6-Astra on personal account ${astra.pick.account}?`]);
+  assert.equal(astra.pick.command,null);assert.deepEqual(astra.needsUserOK,[`use ${ASTRA} on personal account ${astra.pick.account}?`]);
   assert.ok(astra.plan.gates.some(g=>g.kind==='astra'));assert.ok(!astra.plan.gates.some(g=>g.kind==='max-effort'));
   const request=cli([...astraArgs,'--urgent']);
   const approval=path.join(tmp,'astra-approvals.json');env.ROUTE_APPROVAL_FILE=approval;
@@ -93,10 +93,10 @@ try {
     models:[SOL],reason:'daily token quota used up',usage:{used:100,limit:100,resetsAt:now+h}});
   const onCompanyDevice=cli([...astraArgs,'--urgent','--user-ok','personal-yes'],companyOut);
   assert.equal(onCompanyDevice.kind,'blocked');assert.equal(onCompanyDevice.pick.model,ASTRA);assert.equal(onCompanyDevice.pick.command,null);
-  assert.ok(onCompanyDevice.needsUserOK.includes(`use GPT-6-Astra on personal account ${onCompanyDevice.pick.account}?`));assert.ok(onCompanyDevice.plan.gates.some(g=>g.kind==='personal-quota'));assert.ok(onCompanyDevice.plan.gates.some(g=>g.kind==='astra'));
+  assert.ok(onCompanyDevice.needsUserOK.includes(`use ${ASTRA} on personal account ${onCompanyDevice.pick.account}?`));assert.ok(onCompanyDevice.plan.gates.some(g=>g.kind==='personal-quota'));assert.ok(onCompanyDevice.plan.gates.some(g=>g.kind==='astra'));
   const solArgs=['implement-hard','--impact','throwaway','--writes','--failures','1','--actual',`codex:${SOL}:high@alt`];
   const sol=cli(solArgs);assert.equal(sol.kind,'launch');assert.equal(sol.pick.model,SOL);assert.equal(sol.pick.effort,'xhigh');
-  assert.ok(sol.pick.command);assert.equal(sol.needsUserOK.length,0);assert.match(sol.why.join('\n'),/Astra .*gated alternative/);
+  assert.ok(sol.pick.command);assert.equal(sol.needsUserOK.length,0);assert.match(sol.why.join('\n'),/gpt-6-astra .*gated alternative/);
   const mini=copy();mini.codexAccounts=[{name:'trae',kind:'trae',home:path.join(tmp,'trae'),live:true,healthy:true,models:[SOL,ASTRA],windows:[],
     load:{[SOL]:{percent:25,t:now}}, // Retained Sol/max wins when Sol's lane is actually observed free.
     quota:{sampledAt:now,daily:Object.fromEntries([SOL,ASTRA].map(model=>[model,{used:20,limit:100,remaining:80,depleted:false,resetsAt:now+h}]))}}];

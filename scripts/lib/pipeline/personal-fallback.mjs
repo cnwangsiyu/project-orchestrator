@@ -1,4 +1,4 @@
-import { array, object, finite, nonnegative, company, freeze, modelId } from './common.mjs';
+import { isAstra, array, object, finite, nonnegative, company, freeze, matchesModel } from './common.mjs';
 import { candidateParts } from './candidates.mjs';
 
 export function personalFallbackPolicy(raw, now) {
@@ -46,14 +46,14 @@ export function fallbackUnavailable(account, now) {
 
 function excludedAfterInfrastructure(task, candidate) {
   return task.exclusions.some(e => (!e.accountId || e.accountId === candidate.accountId)
-    && (e.scope === 'account' ? e.value === candidate.accountId : e.scope === 'family' ? e.value === candidate.family : modelId(e.value) === candidate.modelId)
+    && (e.scope === 'account' ? e.value === candidate.accountId : e.scope === 'family' ? e.value === candidate.family : matchesModel(e.value, candidate.modelId))
     && (e.cause === 'infrastructure' || task.previousAttempts.some(a => a.actual?.accountId === candidate.accountId
       && a.actualStatus === 'KNOWN' && a.failureKind === 'infra' && ['failed', 'cancelled-no-work'].includes(a.state))));
 }
 
 export function standingPersonalFallback(task, snapshot, candidate, rows) {
   const policy = snapshot.personalFallback, account = candidateParts(snapshot, candidate).account;
-  const astra = candidate.modelId === 'gpt-6-astra';
+  const astra = isAstra(candidate.modelId);
   if (!policy?.enabled || account?.kind !== 'chatgpt' || candidate.family !== 'gpt'
     || (astra && !(task.tier === 'hard' && policy.allowHardPersonalAstra))
     || (!astra && (candidate.effort === 'max' || task.requirements.resetRedemption)) || task.reviewClass

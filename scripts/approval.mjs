@@ -6,6 +6,7 @@
 // `add` runs route.mjs with the given args, takes the personal-quota gate scope for that account
 // from the plan, and appends an approval entry that expires at --until. It prints the id to pass
 // back to route.mjs as --user-ok. Only record approvals the user actually gave (verbatim ref).
+import { isAstra } from './lib/pipeline/common.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -54,7 +55,7 @@ if (!account || !ref || !Number.isFinite(until)) die('add needs --account, --ref
 if (until <= Date.now()) die('--until is in the past');
 const r = spawnSync(process.execPath, [path.join(here, 'route.mjs'), ...routeArgs.filter((a) => a !== '--json'), '--json'], { encoding: 'utf8', maxBuffer: 32 * 2 ** 20 });
 let plan; try { plan = JSON.parse(r.stdout).plan; } catch { die(`route.mjs did not return a plan: ${(r.stderr || r.stdout).slice(0, 400)}`, 1); }
-// --astra also records the personal GPT-6-Astra gate (only when the user's decision covers Astra).
+// --astra also records the personal Astra family gate (only when the user's decision covers Astra).
 const kinds = own.includes('--astra') ? ['personal-quota', 'astra'] : ['personal-quota'];
 const gates = (plan?.gates ?? []).filter((g) => kinds.includes(g.kind) && g.scope?.accounts?.includes(account));
 if (!gates.length) {
@@ -64,7 +65,9 @@ if (!gates.length) {
 }
 // allowPersonalWithCompany: the user chose this personal account explicitly; without it the gate
 // still blocks whenever company lane status is UNKNOWN or stale.
-const scopes = gates.map((g) => ({ ...g.scope, allowPersonalWithCompany: true }));
+const scopes = gates.map((g) => ({ ...g.scope,
+  models: own.includes('--astra') ? g.scope.models.map(id => isAstra(id) ? 'astra' : id) : g.scope.models,
+  allowPersonalWithCompany: true }));
 const taskId = scopes[0].taskId, id = idSafe(`user-${account}-${taskId}-${new Date(until).toISOString().slice(0, 13)}`);
 withLock(file, () => {
   const rows = read().filter((a) => a.id !== id);

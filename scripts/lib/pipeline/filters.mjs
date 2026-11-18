@@ -1,5 +1,5 @@
 import {mandatoryReview} from '../review-policy-data.mjs';
-import { VERSION, EFFORTS, array, company, companyDevice, known, modelId, familyOf, isReview, adversarial, result, reason, fingerprint, stable } from './common.mjs';
+import { policyModel, matchesModel, isAstra, newestAstra, VERSION, EFFORTS, array, company, companyDevice, known, modelId, familyOf, isReview, adversarial, result, reason, fingerprint, stable } from './common.mjs';
 import { candidateParts, enumerateCandidates } from './candidates.mjs';
 import { modelPreference, policyEffort } from './policy.mjs';
 import { estimateCandidate } from './estimate.mjs';
@@ -17,7 +17,9 @@ export function matchingApproval(t, s, c, action, bypass = false) {
   if (action === 'personal-quota' && (['image-gen','claude-tools'].includes(t.category))) return true;
   return s.approvals.find((a) => t.approvalRefs.includes(a.id) && !a.revoked && !(action === 'reset-redemption' && a.consumed)
     && a.grantedAt <= s.decisionAt && s.decisionAt < a.expiresAt && a.scopes.some((p) => p.taskId === t.taskId && p.constraintHash === t.constraintHash
-      && p.roles.includes(t.role) && p.action === action && p.accounts.includes(c.accountId) && p.models.includes(c.modelId) && p.efforts.includes(c.effort)
+      && p.roles.includes(t.role) && p.action === action && p.accounts.includes(c.accountId)
+      && p.models.some(id => matchesModel(id, c.modelId) || action === 'astra' && isAstra(id) && isAstra(c.modelId))
+      && p.efforts.includes(c.effort)
       && p.artifactHash === t.artifactRevision && sameSet(p.origins, t.allowedOrigins) && sameSet(p.apps, t.allowedApps) && (!bypass || p.allowPersonalWithCompany)));
 }
 export function approvalGate(t, c, action, code, text, phase = 'prelaunch') {
@@ -37,7 +39,7 @@ export function pExclusions(t, s, c) {
     && a.actualStatus === 'KNOWN' && (a.browserChannel ?? s.accounts.find(p => p.id === a.actual?.accountId)?.kind) === account.kind);
   if (toolChannelFailed) return deny('pExclusions', 'TOOL_CHANNEL_FAILED', 'Browser/desktop tool failure excludes this channel; select the next capable channel.', c);
   const excluded = t.exclusions.some((e) => (!e.companyOnly || company(account)) && (e.accountId === null || !e.accountId || e.accountId === c.accountId)
-    && (e.scope === 'account' ? e.value === c.accountId : e.scope === 'family' ? e.value === c.family : modelId(e.value) === c.modelId));
+    && (e.scope === 'account' ? e.value === c.accountId : e.scope === 'family' ? e.value === c.family : matchesModel(e.value, c.modelId)));
   return excluded ? deny('pExclusions', 'EXCLUDED', 'Candidate matches an explicit exclusion.', c) : pass('pExclusions');
 }
 export function pAvailable(t, s, c) {
@@ -75,17 +77,19 @@ export function pCapabilities(t, s, c) {
 }
 export function pTierFloor(t, s, c) {
   const account = candidateParts(s,c).account;
-  const astra = c.modelId === 'gpt-6-astra';
-  const explicitEscalation = t.selectionCause === 'quality-escalation' && t.qualityEscalation?.modelId === c.modelId
+  const astra = isAstra(c.modelId);
+  if (astra && c.modelId !== newestAstra(known(account?.catalog) ?? []))
+    return deny('pTierFloor', 'ASTRA_SUPERSEDED', 'A newer Astra is listed for this account.', c);
+  const explicitEscalation = t.selectionCause === 'quality-escalation' && matchesModel(t.qualityEscalation?.modelId, c.modelId)
     && t.qualityEscalation?.policyVersion === s.policyVersion && !!t.qualityEscalation?.evidenceId;
   if (astra && t.tier !== 'hard' && t.category !== 'image-read' && !explicitEscalation) return deny('pTierFloor', 'ASTRA_SUBSTITUTION_HARD_ONLY', 'Astra substitutions are reserved for hard tasks.', c);
   const hardNonGPT = adversarial(t) && isReview(t) && !t.writes && !t.runsTests && ['kimi', 'deepseek'].includes(c.family);
-  if (t.tier === 'hard' && !['gpt-6.1-sol', 'gpt-6-astra', 'opus', 'fable'].includes(c.modelId) && !hardNonGPT)
+  if (t.tier === 'hard' && !astra && !['gpt-6.1-sol', 'opus', 'fable'].includes(c.modelId) && !hardNonGPT)
     return deny('pTierFloor', 'TIER_QUALITY_FLOOR', 'Candidate is outside the established hard-task floor.', c);
-  if (t.tier !== 'hard' && !['gpt-6.1-sol', 'gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.5', 'gpt-6.1-terra', 'gpt-6-luna',
+  if (t.tier !== 'hard' && !astra && !['gpt-6.1-sol', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.5', 'gpt-6.1-terra', 'gpt-6-luna',
     'gpt-5.6-luna', 'kimi-k3', 'deepseek-v4.1-flash', 'gemini-3.1-pro-preview', 'seed-evolving', 'opus', 'sonnet', 'haiku', 'fable'].includes(c.modelId))
     return deny('pTierFloor', 'TIER_QUALITY_FLOOR', 'Model has no established category qualification.', c);
-  if (!modelPreference(t,account,s).includes(c.modelId)&&!explicitEscalation) return deny('pTierFloor','CATEGORY_MODEL_FIT','Model is outside the category/account policy list.',c);
+  if (!modelPreference(t,account,s).includes(policyModel(c.modelId))&&!explicitEscalation) return deny('pTierFloor','CATEGORY_MODEL_FIT','Model is outside the category/account policy list.',c);
   if (effortIndex(c.effort) < effortIndex(policyEffort(t, c, account,s))) return deny('pTierFloor', 'TIER_EFFORT_FLOOR', 'Effort is below the category/model floor.', c);
   return pass('pTierFloor');
 }
@@ -95,9 +99,10 @@ export function dominates(c, previous, s) {
   const id = modelId(previous.modelId ?? previous.model), effort = previous.effort;
   if (!EFFORTS.includes(effort) || !id) return false;
   if (id === c.modelId) return effortIndex(c.effort) >= effortIndex(effort);
-  if (id === 'gpt-6-astra' && c.family === 'gpt') return false;
-  if (id === 'gpt-6.1-sol' && c.family === 'gpt' && c.modelId !== 'gpt-6-astra') return false;
-  if (id === 'gpt-6.1-sol' && c.modelId === 'gpt-6-astra') return effortIndex(c.effort) >= effortIndex(effort);
+  if (isAstra(id) && c.family === 'gpt')
+    return isAstra(c.modelId) && newestAstra([id, c.modelId]) === c.modelId && effortIndex(c.effort) >= effortIndex(effort);
+  if (id === 'gpt-6.1-sol' && c.family === 'gpt' && !isAstra(c.modelId)) return false;
+  if (id === 'gpt-6.1-sol' && isAstra(c.modelId)) return effortIndex(c.effort) >= effortIndex(effort);
   const from = `${id}:${effort}`, to = c.qualityProfileId;
   const seen = new Set([from]), pending = [from];
   while (pending.length) {
@@ -125,14 +130,14 @@ export function pPreviousFloor(t, s, c) {
   const lightRetry = ['lookup', 'extract', 'draft'].includes(t.category) || t.category === 'build-run' && t.env === 'test';
   if (lightRetry && relevant.some(a => ['quality', 'spec', 'process'].includes(a.failureKind)
     && ['gpt-5.6-terra', 'gpt-5.5'].includes(modelId(a.actual?.modelId)))
-    && c.family === 'gpt' && !['gpt-6.1-sol', 'gpt-6-astra'].includes(c.modelId))
+    && c.family === 'gpt' && c.modelId !== 'gpt-6.1-sol' && !isAstra(c.modelId))
     return deny('pPreviousFloor', 'RETRY_LIGHT_REQUIRES_SOL', 'A failed light quality rung requires the Sol retry or a stronger model.', c);
   for (const a of relevant) {
     // A failed tool says nothing about answer quality across model families.
     const toolSwitch = a.failureKind === 'tool' && ['browser','ui-browser','computer-use'].includes(t.category)
       && c.family !== familyOf(a.actual.modelId ?? a.actual.model);
     if (!toolSwitch && !dominates(c, a.actual, s)) return deny('pPreviousFloor', 'RETRY_BELOW_ACTUAL_FLOOR', 'Candidate does not dominate every real prior attempt.', c);
-    if (['quality', 'spec', 'process'].includes(a.failureKind) && modelId(a.actual.modelId ?? a.actual.model) === c.modelId && a.actual.effort === c.effort
+    if (['quality', 'spec', 'process'].includes(a.failureKind) && policyModel(a.actual.modelId ?? a.actual.model) === policyModel(c.modelId) && a.actual.effort === c.effort
       && !matchingApproval(t, s, c, 'retry-same-floor')) return deny('pPreviousFloor', 'QUALITY_REPEAT_REQUIRES_DECISION', 'Repeating an exhausted quality step requires an explicit task decision.', c);
   }
   for (const profile of array(t.floor.profileIds)) {
@@ -184,7 +189,7 @@ export function pScopedApproval(t, s, c, context = {}) {
       .map(candidate => ({ candidate, predicates: evaluateCandidate(t, s, candidate, context), estimate: estimateCandidate(t, s, candidate) }))) : null;
   const requirements = [];
   if (!company(a) && (a.kind==='claude'||companyDevice(s)) && !personalFallback?.quotaApproved) requirements.push(['personal-quota', 'PERSONAL_QUOTA_OK_REQUIRED', 'Current scoped personal-quota approval is required.', context.companyEligible || context.companyUnknown]);
-  if (c.modelId==='gpt-6-astra' && a?.kind==='chatgpt' && !personalFallback?.astraApprovalRef) requirements.push(['astra','PERSONAL_ASTRA_OK_REQUIRED',`use GPT-6-Astra on personal account ${a.id}?`]);
+  if (isAstra(c.modelId) && a?.kind==='chatgpt' && !personalFallback?.astraApprovalRef) requirements.push(['astra','PERSONAL_ASTRA_OK_REQUIRED',`use ${c.modelId} on personal account ${a.id}?`]);
   if (c.effort === 'max' && !company(a)) requirements.push(['max-effort', 'MAX_EFFORT_OK_REQUIRED', 'Max effort on a personal account requires its own scoped approval.']);
   if (c.modelId === 'fable') requirements.push(['fable', 'FABLE_OK_REQUIRED', 'Fable requires a separate scoped decision.']);
   if (t.requirements.resetRedemption) requirements.push(['reset-redemption', 'RESET_REDEMPTION_OK_REQUIRED', 'Each reset redemption needs unused scoped approval.']);

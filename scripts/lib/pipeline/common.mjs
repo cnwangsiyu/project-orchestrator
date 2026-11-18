@@ -11,10 +11,20 @@ export const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
 export const unique = (xs) => [...new Set(xs)].sort(compare);
 export const modelId = (id) => {
   const s = typeof id === 'string' ? id.toLowerCase() : '';
-  return ({ sol: 'gpt-6.1-sol', astra: 'gpt-6-astra', '6.1-sol': 'gpt-6.1-sol', '6-astra': 'gpt-6-astra',
+  if (/^\d+(?:\.\d+)*-astra$/.test(s)) return `gpt-${s}`;
+  return ({ sol: 'gpt-6.1-sol', astra: 'gpt-6-astra', '6.1-sol': 'gpt-6.1-sol',
     terra: 'gpt-6.1-terra', '6.1-terra': 'gpt-6.1-terra',
     'claude-opus': 'opus', 'claude-sonnet': 'sonnet', 'claude-haiku': 'haiku', 'claude-fable': 'fable' })[s] ?? s;
 };
+// Policy compares Astra releases as one rung. Launches and telemetry keep exact IDs.
+export const isAstra = id => /^gpt-\d+(?:\.\d+)*-astra$/.test(modelId(id));
+export const policyModel = id => isAstra(id) ? 'astra' : modelId(id);
+const versions = new Intl.Collator('en', { numeric: true });
+export const newestAstra = catalog => catalog.filter(isAstra)
+  .sort((a, b) => versions.compare(modelId(b).split('-')[1], modelId(a).split('-')[1]))[0];
+// Keep an unversioned Astra selector broad and a versioned lane exclusion exact.
+export const modelSelector = id => typeof id === 'string' && id.toLowerCase() === 'astra' ? 'astra' : modelId(id);
+export const matchesModel = (selector, id) => selector === 'astra' ? isAstra(id) : modelId(selector) === id;
 export const familyOf = (id) => /^(opus|sonnet|haiku|fable)$/.test(modelId(id)) ? 'claude' : modelId(id).split('-')[0];
 export const company = (a) => ['ttadk', 'trae'].includes(a?.kind);
 export const companyDevice = (s) => s.accounts.some(company);

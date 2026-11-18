@@ -49,6 +49,16 @@ const check = (label, setup, expected = ASTRA, account = 'trae', args = []) => {
 };
 try {
   check('no load, fresh units, no queue');
+  const newer = 'gpt-6.2-astra';
+  const upgraded = tr => { tr.models.push(newer); tr.quota.daily[newer] = bucket(1); };
+  check('TRAE selects its newest listed Astra with fresh daily units', upgraded, newer);
+  const retry = check('quality retry on upgraded Astra advances effort', upgraded, newer, 'trae',
+    ['--failures', '1', '--actual', `codex:${ASTRA}:high@trae`]);
+  assert.equal(retry.pick.effort, 'xhigh');
+  check('unversioned Astra exclusion covers the upgraded TRAE lane', upgraded, SOL, 'trae', ['--exclude-model', 'astra']);
+  check('upgraded Astra retains queue evidence across Sol success', tr => {
+    upgraded(tr); noteFailure(home, 'stalled', now - minute, newer); noteSuccess(home, SOL, now);
+  }, SOL);
   check('one unit remaining still qualifies', tr => { tr.quota.daily[ASTRA] = bucket(57); });
   check('Sol retry uses free Astra when no Sol company lane is free', (tr, raw) => {
     delete tr.load[SOL]; raw.codexAccounts.find(a=>a.kind==='ttadk').healthy=false;

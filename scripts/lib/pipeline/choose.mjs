@@ -1,4 +1,4 @@
-import { EFFORTS, company, companyDevice, adversarial, compare, freeze, stable, known, isReview } from './common.mjs';
+import { policyModel, isAstra, EFFORTS, company, companyDevice, adversarial, compare, freeze, stable, known, isReview } from './common.mjs';
 import { candidateParts } from './candidates.mjs';
 import { matchingApproval } from './filters.mjs';
 import { modelPreference, hardPreference, TIERS, SOL, ASTRA } from './policy.mjs';
@@ -22,12 +22,12 @@ export function orderCandidates(task, snapshot, rows) {
   // Exclusions, capabilities and actual retry floors already bounded these rows.
   const companyRows=cohort.filter(r=>company(parts(r).account));
   const ladder=adversarial(task)?['kimi-k3','deepseek-v4.1-flash','opus']
-    :task.category==='image-read'?['gpt-6.1-sol','gpt-6-astra','gemini-3.1-pro-preview','seed-evolving']
+    :task.category==='image-read'?['gpt-6.1-sol',ASTRA,'gemini-3.1-pro-preview','seed-evolving']
     :[...(task.tier==='hard'?hardPreference(task):TIERS[task.tier]),...companyRows.flatMap(r=>modelPreference(task,parts(r).account))];
   const models=[...new Set(ladder)];
-  const first=models.find(id=>companyRows.some(r=>r.candidate.modelId===id&&ready(r)));
+  const first=models.find(id=>companyRows.some(r=>policyModel(r.candidate.modelId)===id&&ready(r)));
   if(first) {
-    const same=companyRows.filter(r=>r.candidate.modelId===first&&ready(r));
+    const same=companyRows.filter(r=>policyModel(r.candidate.modelId)===first&&ready(r));
     const expiringTT=same.filter(r=>parts(r).account.kind==='ttadk'&&r.estimate.expiryOpportunity===true);
     const freeTrae=same.filter(r=>parts(r).account.kind==='trae');
     const chosen=expiringTT.length?expiringTT:freeTrae.length?freeTrae:same;
@@ -38,8 +38,8 @@ export function orderCandidates(task, snapshot, rows) {
     // The Astra-first trial applies to free capacity. Keep Sol's existing fallback
     // when no qualified company lane is observed free; actual floors still apply.
     const fallbackModels=task.tier==='hard'&&!adversarial(task)&&task.category!=='image-read'?[SOL,ASTRA]:models;
-    const fallback=fallbackModels.find(id=>companyRows.some(r=>r.candidate.modelId===id));
-    if(fallback) cohort=cohort.filter(r=>!company(parts(r).account)||r.candidate.modelId===fallback);
+    const fallback=fallbackModels.find(id=>companyRows.some(r=>policyModel(r.candidate.modelId)===id));
+    if(fallback) cohort=cohort.filter(r=>!company(parts(r).account)||policyModel(r.candidate.modelId)===fallback);
   }
   if(adversarial(task)&&cohort.length) {
     const rank=r=>['kimi-k3','deepseek-v4.1-flash','opus'].indexOf(r.candidate.modelId);
@@ -60,7 +60,7 @@ export function orderCandidates(task, snapshot, rows) {
     cohort=cohort.filter(r=>candidateParts(snapshot,r.candidate).account.kind==='chatgpt');
   // When every candidate needs approval, offer the personal Astra escalation
   // before a Sol/max decision. Runnable alternatives were selected separately.
-  const astraOffers=cohort.filter(r=>r.candidate.modelId==='gpt-6-astra'&&candidateParts(snapshot,r.candidate).account.kind==='chatgpt'
+  const astraOffers=cohort.filter(r=>isAstra(r.candidate.modelId)&&candidateParts(snapshot,r.candidate).account.kind==='chatgpt'
     && r.predicates?.some(p=>!p.ok&&p.gates?.some(g=>g.kind==='astra'))
     && r.predicates.filter(p=>!p.ok).every(p=>p.gates?.every(g=>['astra','personal-quota'].includes(g.kind))));
   if(task.previousAttempts.length&&astraOffers.length&&cohort.every(r=>r.predicates?.some(p=>!p.ok))) cohort=astraOffers;
@@ -83,7 +83,7 @@ export function orderCandidates(task, snapshot, rows) {
     const lock = adversarial(task) ? ['kimi-k3', 'deepseek-v4.1-flash', 'opus'].indexOf(c.modelId) : 0;
     const quotaClass = e.expiryOpportunity === true ? 0 : e.noPrioritySpend === true ? 1 : 2;
     const cost = costComparable ? e.costs.map((c) => c.normalizedShare) : [];
-    const retainedMax=task.previousAttempts.some(a=>a.actual?.modelId===c.modelId&&a.actual?.effort==='xhigh')&&c.effort==='max';
+    const retainedMax=task.previousAttempts.some(a=>policyModel(a.actual?.modelId)===policyModel(c.modelId)&&a.actual?.effort==='xhigh')&&c.effort==='max';
     const common = [stalled(r)?1:0, lock, companyClass(r), task.previousAttempts.length&&e.confidence==='UNKNOWN'&&!retainedMax?1:0];
     const scheduling = backgroundChoice ? [quotaClass, ...cost, e.expiryOpportunity === true ? 0 : 1, e.completionMin]
       : [e.expiryOpportunity === true ? 0 : 1,e.completionMin, e.noPrioritySpend === true ? 0 : 1, ...cost];
@@ -93,7 +93,7 @@ export function orderCandidates(task, snapshot, rows) {
     const preference=hardCompany&&!first?[SOL,ASTRA]:modelPreference(task,account,snapshot);
     // The free company model was selected above. Its new ladder index must not
     // accidentally promote an approved personal option over the company fallback.
-    const pref=hardCompany&&c.modelId===first?0:preference.indexOf(c.modelId);
+    const pref=hardCompany&&policyModel(c.modelId)===first?0:preference.indexOf(policyModel(c.modelId));
     const accountOrder=account.kind==='ttadk'?0:account.kind==='trae'?1:2;
     const deviceLane=noCompany?[pref<0?preference.length:pref,
       account.kind==='chatgpt'?(rotate.length?rotationRank(c.accountId):known(account.budget)?.deadline??Infinity):0]:[0,0];

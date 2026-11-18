@@ -13,7 +13,7 @@ import { VERSION } from '../lib/pipeline/common.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'personal-fallback-'));
-const NOW = Date.now(), SOL = 'gpt-6.1-sol', ASTRA = 'gpt-6-astra';
+const NOW = Date.now(), SOL = 'gpt-6.1-sol', ASTRA = 'gpt-6.2-astra';
 const policy = JSON.parse(fs.readFileSync(path.join(root, 'references/personal-fallback.json'), 'utf8'));
 const ref = 'standing:personal-fallback-2026-11-17';
 const caps = { search: true, vision: true };
@@ -55,7 +55,7 @@ try {
     const raw = fixture(); deny(raw, 'ttadk'); deny(raw, 'trae'); launchesPersonal(raw);
   });
   check('hard task with company out launches personal Astra under standing permission', () => {
-    const raw = fixture([SOL, ASTRA]); deny(raw, 'ttadk'); deny(raw, 'trae');
+    const raw = fixture([SOL, 'gpt-6-astra', ASTRA]); deny(raw, 'ttadk'); deny(raw, 'trae');
     const { p, v } = launchesPersonal(raw, task({ category: 'implement-hard', impact: 'service' }));
     assert.equal(p.primary.candidate.modelId, ASTRA); assert.equal(p.task.tier, 'hard');
     assert.equal(v.pick.astraApprovalRef, 'standing:hard-astra-2026-11-17');
@@ -288,12 +288,23 @@ try {
     const registry = path.join(home, 'accounts.json'), cache = path.join(home, 'quota.json'); fs.writeFileSync(registry, '{}');
     fs.writeFileSync(cache, JSON.stringify({ checkedAt: NOW, codexAccounts: [
       { name: 'ttadk', kind: 'ttadk', live: true, healthy: false, home, models: [SOL], quotaOut: { resetsAt: NOW + 3600000 } },
-      { name: 'main', kind: 'chatgpt', live: true, home, models: [SOL], windows: [] }], claude: [] }));
+      { name: 'main', kind: 'chatgpt', live: true, home, windows: [] }], claude: [] }));
+    fs.writeFileSync(path.join(home, 'models_cache.json'), JSON.stringify({ models: [
+      { slug: ASTRA }, { slug: 'gpt-6-astra' }, { slug: 'gpt-7-astra', visibility: 'hide' },
+    ] }));
     const env = { RULES_SHARED: home, CODEX_ACCOUNTS: registry, QUOTA_CACHE: cache, ROUTE_NOW: String(NOW),
       ROUTE_LOG_FILE: path.join(home, 'routes.jsonl'), QUOTA_LOG_FILE: path.join(home, 'quota-log.jsonl') };
     const context = acquireRoute(task(), { env, now: NOW, root });
     assert.equal(context.snapshot.personalFallback.enabled, true); assert.equal(context.snapshot.personalFallback.queueWaitMinutes, 5);
     assert.equal(routePure(context.task, context.snapshot).kind, 'launch');
+    const hard = acquireRoute(task({ category: 'implement-hard', impact: 'service' }), { env, now: NOW, root });
+    const seat = routePure(hard.task, hard.snapshot).primary;
+    assert.deepEqual([seat.candidate.accountId, seat.candidate.modelId], ['main', ASTRA]);
+    fs.unlinkSync(path.join(home, 'models_cache.json'));
+    fs.writeFileSync(path.join(home, 'model-catalog.json'), JSON.stringify({ codex: [{ slug: ASTRA }] }));
+    const fromShared = acquireRoute(hard.task, { env, now: NOW, root });
+    assert.deepEqual(fromShared.snapshot.accounts.find(a => a.id === 'main').catalog.value.filter(id => id.endsWith('-astra')), [ASTRA]);
+    assert.ok(!fromShared.snapshot.accounts.find(a => a.id === 'ttadk').catalog.value.includes(ASTRA));
     fs.writeFileSync(path.join(home, 'personal-fallback.json'), JSON.stringify({ ...policy, enabled: false }));
     const disabled = acquireRoute(task(), { env, now: NOW, root }); assert.equal(disabled.snapshot.personalFallback.enabled, false);
     assert.equal(routePure(disabled.task, disabled.snapshot).kind, 'blocked');

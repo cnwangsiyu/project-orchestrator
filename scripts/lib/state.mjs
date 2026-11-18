@@ -1,5 +1,6 @@
 // state: read Claude's and every Codex account's usage, and derive the quota state that quota.mjs prints and route.mjs
 // routes on. All quota policy lives here (POLICY, analyze, leanLines), so both scripts and the docs agree.
+import { policyModel } from './pipeline/common.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -334,7 +335,7 @@ const readTtadk = (name, prof, { routing = false } = {}) => {
   } catch { out.catalogError = 'TTADK models read failed; retaining the registered catalog'; }
   const qualified=new Set(['light','normal','hard'].flatMap(tier=>modelPreference({category:'analysis',tier,contentLabels:[]},{kind:'ttadk'}))
     .concat(modelPreference({category:'image-read',tier:'normal',contentLabels:[]},{kind:'ttadk'}),['kimi-k3']));
-  if (!out.models.some(id=>qualified.has(String(id).toLowerCase()))) {
+  if (!out.models.some(id=>qualified.has(policyModel(id)))) {
     if (out.catalogError) out.statusReadFailed = true;
     out.reason = 'the TTADK gateway lists no usable qualified Codex model'; return out;
   }

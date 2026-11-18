@@ -600,7 +600,7 @@ facts behind it (2026-11-03):
   CLI. Don't route to `ultra` (the router never does): it makes every turn fan out and multiplies usage. Workers may not spawn sub-agents; the experiment below is historical only.
   Set the effort on every launch: the catalog default for Sol is `low` (weak for coding: Terminal-Bench 4 31%); the
   user's config sets `high`.
-- **Models:** `gpt-6.1-sol` is the workhorse and Codex's default (near Astra, 500K context); `gpt-6-astra` is the
+- **Models:** `gpt-6.1-sol` is the workhorse and Codex's default (near Astra, 500K context); the newest Astra listed by each account is its
   frontier model at 5x; `gpt-6.1-terra` is positioned for writing and visual understanding, not coding (its
   computer-use strength is not what the Codex computer-use plugin relies on); personal `gpt-6-luna` remains the first lookup (`low`), extract (`medium`) and image-generation (`low`) choice. Only TRAE `gpt-5.6-luna` is unused (slow, about 3x tokens). Don't pick `gpt-6-sol` or the
   `gpt-5.6-*` models on personal ChatGPT accounts: they're older at the same or higher cost. TRAE's approved company-quota

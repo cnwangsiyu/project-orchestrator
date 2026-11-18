@@ -6,7 +6,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createTaskSpec } from './pipeline/taskspec.mjs';
 import { createSnapshot } from './pipeline/snapshot.mjs';
-import { modelId, familyOf, object, array, nonnegative, VERSION } from './pipeline/common.mjs';
+import { isAstra, modelId, familyOf, object, array, nonnegative, VERSION } from './pipeline/common.mjs';
 import { dedupeOutcomes } from './pipeline/outcomes.mjs';
 import { personalBudget } from './pipeline/quota.mjs';
 import { modelLoad } from './company-load.mjs';
@@ -30,21 +30,21 @@ const recentAstraQueue = (home, health, now) => {
   const sources=[], times=[], fresh=t=>nonnegative(t)&&t<=now&&now-t<=1800000;
   if(![queues,models,lanes,families].every(object)) return {value:{blocked:true,sources:['unreadable recent-turn queue metadata']},sampledAt:now};
   for(const [thread,q] of Object.entries(queues)) if(object(q)&&fresh(q.at??q.t)
-    &&modelId(q.modelId??q.model??models[thread])==='gpt-6-astra'
+    &&isAstra(q.modelId??q.model??models[thread])
     &&(q.position>0||['queued','waiting','stalled'].includes(q.state)||q.stalled===true)) {
     sources.push('queue-status'); times.push(q.at??q.t);
   }
   for(const r of [health,...Object.values(object(health?.pools)?health.pools:{})]) if(object(r)) {
     const at=r.lastFailureAt??r.t??r.pausedUntil;
-    if(r.queueSignals===undefined&&fresh(at)&&modelId(r.model)==='gpt-6-astra'&&isQueueOrStall(r.reason)) {
+    if(r.queueSignals===undefined&&fresh(at)&&isAstra(r.model)&&isQueueOrStall(r.reason)) {
       sources.push('worker-health'); times.push(at);
     }
     if(r.queueSignals!==undefined&&!Array.isArray(r.queueSignals)) return {value:{blocked:true,sources:['unreadable recent-turn health metadata']},sampledAt:now};
-    for(const f of array(r.queueSignals)) if(object(f)&&fresh(f.t)&&modelId(f.model)==='gpt-6-astra') {
+    for(const f of array(r.queueSignals)) if(object(f)&&fresh(f.t)&&isAstra(f.model)) {
       sources.push('worker-health'); times.push(f.t);
     }
     if(r.failures!==undefined&&!Array.isArray(r.failures)) return {value:{blocked:true,sources:['unreadable recent-turn health metadata']},sampledAt:now};
-    for(const f of array(r.failures)) if(object(f)&&fresh(f.t)&&modelId(f.modelId??f.model??r.model)==='gpt-6-astra'
+    for(const f of array(r.failures)) if(object(f)&&fresh(f.t)&&isAstra(f.modelId??f.model??r.model)
       &&(isQueueOrStall(f.why)||f.stalled===true)) {
       sources.push('worker-health'); times.push(f.t);
     }
@@ -52,6 +52,18 @@ const recentAstraQueue = (home, health, now) => {
   return {value:{blocked:times.length>0,sources:[...new Set(sources)]},sampledAt:times.length?Math.max(...times):now};
 };
 const DEFAULT_MODELS = ['gpt-6-luna', 'gpt-6.1-sol', 'gpt-6-astra', 'gpt-6.1-terra'];
+function personalCatalog(name, home, shared, declared = DEFAULT_MODELS) {
+  const cache = home ? read(path.join(home, 'models_cache.json')) : null;
+  let entries = cache?.models ?? cache;
+  // The shared catalog is a snapshot of main only. Other accounts need their own evidence.
+  if (!Array.isArray(entries) && name === 'main') {
+    const sharedCatalog = read(path.join(shared, 'model-catalog.json'));
+    if (!sharedCatalog?.codexError) entries = sharedCatalog?.codex;
+  }
+  if (!Array.isArray(entries)) return array(declared);
+  const astra = entries.filter(m => m?.visibility !== 'hide' && isAstra(m?.slug)).map(m => m.slug);
+  return [...array(declared).filter(id => !isAstra(id)), ...astra];
+}
 export const BROWSER_ORIGINS = ['*.bytedance.net', '*.byted.org', '*.larkoffice.com', '*.feishu.cn', '*.tiktok-row.net', '*.byteintl.net', '*.bytedance.com'];
 export function taskContext(env = process.env) {
   return { taskId: 'unnamed-task', requestId: env.ROUTE_REQUEST_ID || randomUUID(), sandboxCeiling: 'danger-full-access' };
@@ -263,7 +275,9 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
     const kind = isClaude ? 'claude' : a.kind ?? 'chatgpt', name = isClaude ? 'claude' : a.name, company = ['ttadk', 'trae'].includes(kind);
     const profile = profiles[name] ?? a, home = profile.home ?? a.home;
     const profileCatalog=company&&a.models===undefined&&(Array.isArray(profile.models)||object(profile.modelIds));
-    const catalog = isClaude ? ['haiku', 'sonnet', 'opus', 'fable'] : array(a.models ?? (profileCatalog?profile.models??Object.keys(profile.modelIds):company ? [] : DEFAULT_MODELS)).map(modelId);
+    const catalog = (isClaude ? ['haiku', 'sonnet', 'opus', 'fable']
+      : company ? array(a.models ?? profile.models ?? Object.keys(profile.modelIds ?? {}))
+      : personalCatalog(name, home, shared, a.models ?? profile.models)).map(modelId);
     const healthRaw = home ? readHealth(path.join(home, 'worker-health.json')) : {}, h=object(healthRaw)?healthRaw:{};
     const unknownHealth = !object(healthRaw) || (h.pools !== undefined && !object(h.pools)) || (h.modelPauses !== undefined && !object(h.modelPauses))
       || Object.values(h.pools??{}).some((r)=>!object(r)) || Object.values(h.modelPauses??{}).some((r)=>!object(r));
@@ -302,14 +316,14 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
     appendPause(h); for (const [family,r] of Object.entries(object(h?.pools) ? h.pools : {})) appendPause(r,{family});
     for (const [m,r] of Object.entries(object(h?.modelPauses) ? h.modelPauses : {})) if (r?.pausedUntil > now) appendPause(r,{modelId:modelId(m)});
     const telemetry = home ? read(path.join(home,'lane-state.json'),{}) : {}, familyQueue=home?read(path.join(home,'queue-state.json'),{}):{}, load = object(a.load) ? a.load : {};
-    const astraRecent=kind==='trae'&&catalog.includes('gpt-6-astra')?recentAstraQueue(home,h,now):null;
+    const astraRecent=kind==='trae'&&catalog.some(isAstra)?recentAstraQueue(home,h,now):null;
     for (const m of catalog) {
       const family = familyOf(m), vision = !['deepseek','kimi'].includes(family), modelCaps = baseCaps(vision);
       models.set(m, { id:m, efforts: ['low','medium','high','xhigh','max'], capabilities:modelCaps, largeOutput: family !== 'deepseek' });
       const q = a.quota?.daily?.[m], sample = a.quota?.sampledAt;
       const freshQuota = nonnegative(sample) && sample <= now && now-sample <= 1800000 && (!q?.resetsAt || q.resetsAt>now);
       const explicitFree = (a.quotaKeys && Object.hasOwn(a.quotaKeys,m) && a.quotaKeys[m] === null)
-        || (freshQuota && object(a.quota?.daily) && Object.values(a.quota.daily).some(b=>object(b)&&nonnegative(b.used)&&typeof b.limit==='number'&&b.limit>0&&b.resetsAt>now) && !Object.hasOwn(a.quota.daily,m) && !['gpt-6.1-sol','gpt-6-astra','gpt-5.6-sol'].includes(m));
+        || (freshQuota && object(a.quota?.daily) && Object.values(a.quota.daily).some(b=>object(b)&&nonnegative(b.used)&&typeof b.limit==='number'&&b.limit>0&&b.resetsAt>now) && !Object.hasOwn(a.quota.daily,m) && !isAstra(m) && !['gpt-6.1-sol','gpt-5.6-sol'].includes(m));
       const mode = kind !== 'trae' ? 'standard' : freshQuota && object(q) && nonnegative(q.used) && typeof q.limit==='number' && q.limit>0 && q.resetsAt>now ? (q.depleted ? 'low-priority' : 'priority') : explicitFree ? 'bucket-free' : 'UNKNOWN';
       const direct = telemetry?.[m], directLoad = modelLoad(load,m,now);
       lanes.push({ id:`${name}:${m}:hub`, accountId:name, modelId:m, harness: isClaude?'claude-bg':'hub', efforts:declared(['low','medium','high','xhigh','max']),
@@ -317,7 +331,7 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
         readyAt: kind !== 'trae' || mode === 'priority' || mode === 'bucket-free' ? stamp(now) : direct?.state==='ready'&&direct?.position===0 ? stamp(direct.t,direct.t,1800000):null,
         position:stamp(direct?.position,direct?.t,1800000), drainPerMin:stamp(direct?.drainPerMin,direct?.t,1800000), progressAt:stamp(direct?.lastProgressAt,direct?.t,1800000),
         queueState:stamp(direct?.state,direct?.t,1800000),
-        ...(m==='gpt-6-astra'&&astraRecent?{recentQueue:stamp(astraRecent.value,astraRecent.sampledAt,1800000),hubHealthy:stamp(a.healthy)}:{}),
+        ...(isAstra(m)&&astraRecent?{recentQueue:stamp(astraRecent.value,astraRecent.sampledAt,1800000),hubHealthy:stamp(a.healthy)}:{}),
         loadPercent:stamp(directLoad?.percent,directLoad?.t,1800000), loadSource: directLoad?.source??'UNKNOWN',
         familyQueue:stamp(familyQueue?.[family],familyQueue?.[family]?.t,1800000) });
     }

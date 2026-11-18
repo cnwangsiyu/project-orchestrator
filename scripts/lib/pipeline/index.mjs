@@ -7,7 +7,7 @@ import { orderCandidates, prefersPersonalCodex } from './choose.mjs';
 import { makePlan } from './plan.mjs';
 import { validatePlan } from './validate.mjs';
 import { reviewDecision, reviewAfterWrite } from './review-policy.mjs';
-import { array, company, companyDevice, known, reason, fingerprint, compare, clone, freeze } from './common.mjs';
+import { isAstra, array, company, companyDevice, known, reason, fingerprint, compare, clone, freeze } from './common.mjs';
 
 function assess(task, snapshot, context = {}) {
   const { candidates, diagnostics } = enumerateCandidates(task, snapshot);
@@ -126,13 +126,13 @@ export function routePure(taskSpec, stateSnapshot, history = []) {
       [winner.candidate.id,...winner.reviewers.filter(s=>s.estimate.stalled).map(s=>s.candidate.id)]),
     runnerUp:null,gates:[{id:`capacity:${task.taskId}`,kind:'capacity-decision',phase:'prelaunch',state:'needsOK',scope:null,reason:reason('choose','CAPACITY_DECISION','No authorized lane can start: choose whether to wait for lane progress or change scope.',[task.taskId]),evidenceIds:[]}],timerOwner:task.owner });
   if (winner) {
-    if(!company(candidateParts(snapshot,winner.candidate).account)&&winner.candidate.modelId!=='gpt-6-astra') {
-      const alternatives=assessment.rows.filter(r=>r.candidate.modelId==='gpt-6-astra'
+    if(!company(candidateParts(snapshot,winner.candidate).account)&&!isAstra(winner.candidate.modelId)) {
+      const alternatives=assessment.rows.filter(r=>isAstra(r.candidate.modelId)
         && r.predicates.some(p=>!p.ok&&p.gates?.some(g=>g.kind==='astra'))
         && r.predicates.filter(p=>!p.ok).every(p=>p.gate));
       const astra=orderCandidates(task,snapshot,alternatives).winner;
       if(astra) fields.warnings.push(reason('pScopedApproval','PERSONAL_ASTRA_GATED_ALTERNATIVE',
-        `GPT-6-Astra ${astra.candidate.effort} on personal account ${astra.candidate.accountId} is a gated alternative requiring separate scoped OK.`,[astra.candidate.id]));
+        `${astra.candidate.modelId} ${astra.candidate.effort} on personal account ${astra.candidate.accountId} is a gated alternative requiring separate scoped OK.`,[astra.candidate.id]));
     }
     const followups = [], gates = [...gatesOf([winner]), ...winner.reviewerGates];
     if (reviewAfterWrite(task, snapshot, winner.candidate)) {

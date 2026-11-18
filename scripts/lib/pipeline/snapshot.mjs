@@ -1,4 +1,4 @@
-import { VERSION, EFFORTS, array, object, idOK, modelId, familyOf, compare, unique, nonnegative, finite, clone, freeze, fingerprint, reason } from './common.mjs';
+import { VERSION, EFFORTS, array, object, idOK, modelSelector, policyModel, stable, modelId, familyOf, compare, unique, nonnegative, finite, clone, freeze, fingerprint, reason } from './common.mjs';
 import { personalFallbackPolicy, fallbackUnavailable } from './personal-fallback.mjs';
 
 export const FRESHNESS = freeze({ cacheMs: 600000, telemetryMs: 1800000, quotaMs: 1800000 });
@@ -160,8 +160,15 @@ function cloneApproval(a) {
   const scopes = a.scopes.filter((s) => object(s) && idOK(s.taskId) && idOK(s.constraintHash) && typeof s.action === 'string'
     && ['roles', 'accounts', 'models', 'efforts', 'origins', 'apps'].every((k) => Array.isArray(s[k]) && s[k].every((v) => typeof v === 'string')))
     .map((s) => ({ taskId: s.taskId, constraintHash: s.constraintHash, action: s.action, roles: unique(s.roles), accounts: unique(s.accounts),
-      models: unique(s.models.map(modelId)), efforts: unique(s.efforts), artifactHash: s.artifactHash ?? null, origins: unique(s.origins), apps: unique(s.apps),
+      models: unique(s.models.map(modelSelector)), efforts: unique(s.efforts), artifactHash: s.artifactHash ?? null, origins: unique(s.origins), apps: unique(s.apps),
       allowPersonalWithCompany: s.allowPersonalWithCompany === true }));
+  // Older --astra records store identical quota and Astra scopes with a concrete
+  // version. Upgrade just that paired permission, preserving every other limit.
+  const astraScopes = new Set(scopes.filter(p => p.action === 'astra').map(stable));
+  for (const p of scopes) {
+    if (p.action === 'astra' || (p.action === 'personal-quota' && astraScopes.has(stable({ ...p, action: 'astra' }))))
+      p.models = unique(p.models.map(policyModel));
+  }
   return { id: a.id, userDecisionRef: a.userDecisionRef, grantedAt: a.grantedAt, expiresAt: a.expiresAt, revoked: a.revoked,
     consumed: a.consumed === true, scopes: scopes.sort((a, b) => compare(fingerprint(a), fingerprint(b))) };
 }

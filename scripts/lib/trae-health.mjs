@@ -42,7 +42,7 @@ import { execFileSync } from 'node:child_process';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { withLock, writeJson } from './shared-file.mjs';
-import { modelId } from './pipeline/common.mjs';
+import { isAstra, modelId } from './pipeline/common.mjs';
 
 export const WINDOW_MIN = 15, HARD_MIN = 30, BACKOFF_MIN = [5, 10, 20, 30];
 // Whole-account hard failures back off 30, 60, 120, 240 minutes; family pauses use the recovery schedule below.
@@ -119,7 +119,7 @@ const step = (rec, why, now, model = null) => {
   const failures = [...(rec.failures ?? []), { t: now, why: String(why ?? 'failed').slice(0, 300), ...(model?{model}:{}) }].slice(-20);
   // Keep only compact Astra queue/stall evidence when backoff resets failures.
   const queueSignals=[...(Array.isArray(rec.queueSignals)?rec.queueSignals:[]),
-    ...(modelId(model)==='gpt-6-astra'&&isQueueOrStall(why)?[{t:now,model:'gpt-6-astra'}]:[])]
+    ...(isAstra(model)&&isQueueOrStall(why)?[{t:now,model:modelId(model)}]:[])]
     .filter(f=>object(f)&&Number.isFinite(f.t)&&f.t<=now&&now-f.t<=30*60000).slice(-20);
   // The backoff starts over when the last pause ended more than an hour ago.
   const streak = rec.pausedUntil && now - rec.pausedUntil > 60 * 60000 ? 0 : rec.streak ?? 0;
@@ -186,7 +186,7 @@ export const noteSuccess = (home, model = null, now = Date.now()) => update(home
   const pool = poolOf(model);
   const pools = Object.fromEntries(Object.entries(rec.pools ?? {}).filter(([k,r]) => !pool || k !== pool || r?.kind === 'hard'));
   const pauses = rec.modelPauses ?? {};
-  const queueSignals=modelId(model)==='gpt-6-astra'?[]:[...(Array.isArray(rec.queueSignals)?rec.queueSignals:[]),
+  const queueSignals=isAstra(model)?[]:[...(Array.isArray(rec.queueSignals)?rec.queueSignals:[]),
     ...Object.values(rec.pools??{}).flatMap(r=>Array.isArray(r.queueSignals)?r.queueSignals:[])]
     .filter(f=>object(f)&&Number.isFinite(f.t)&&f.t<=now&&now-f.t<=30*60000).slice(-20);
   write(home, { ...(rec.kind === 'hard' || rec.kind === 'auth' ? rec : { failures: [], pausedUntil: null, reason: null, kind: null, streak: 0 }),

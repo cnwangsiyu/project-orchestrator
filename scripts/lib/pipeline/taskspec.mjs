@@ -1,5 +1,5 @@
 import {REVIEW_CLASSES,projectReviewPolicy} from '../review-policy-data.mjs';
-import { VERSION, array, object, idOK, modelId, unique, clone, freeze, fingerprint, isReview, compare, stable } from './common.mjs';
+import { VERSION, array, object, idOK, modelSelector, modelId, unique, clone, freeze, fingerprint, isReview, compare, stable } from './common.mjs';
 
 export const CATEGORIES = Object.freeze(['lookup', 'extract', 'analysis', 'research', 'implement', 'implement-hard', 'ui-browser',
   'debug', 'review', 'review-high', 'design', 'docs', 'draft', 'build-run', 'browser', 'computer-use', 'claude-tools', 'science', 'image-gen', 'image-read', 'second-opinion']);
@@ -147,11 +147,11 @@ export function createTaskSpec(input) {
     'computer-use': ['desktop-tool', 'vision'], 'image-read': ['vision'], 'image-gen': ['image-generation'], 'claude-tools': ['claude-tools'] })[cat] ?? []) caps.add(c);
   const exclusions = [...clone(array(input.exclusions)), ...list(f['exclude-account']).map((value) => ({ scope: 'account', accountId: null, value, cause: 'explicit' })),
     ...list(f['exclude-model']).map((value) => ({ scope: ['gpt', 'deepseek', 'kimi', 'claude', 'seed', 'gemini'].includes(value.toLowerCase()) ? 'family' : 'model',
-      accountId: null, value: modelId(value), companyOnly: true, cause: 'legacy-exclude-model' }))];
+      accountId: null, value: modelSelector(value), companyOnly: true, cause: 'legacy-exclude-model' }))];
   for (const value of list(f['exclude-lane'])) {
     const [accountId, model, ...rest] = value.split(':');
     if (!idOK(accountId) || !idOK(model) || rest.length) fail('INVALID_EXCLUSION', '--exclude-lane takes account:model pairs.');
-    exclusions.push({ scope: ['gpt', 'deepseek', 'kimi', 'claude', 'seed', 'gemini'].includes(model) ? 'family' : 'account-model', accountId, value: modelId(model), cause: 'infrastructure' });
+    exclusions.push({ scope: ['gpt', 'deepseek', 'kimi', 'claude', 'seed', 'gemini'].includes(model) ? 'family' : 'account-model', accountId, value: modelSelector(model), cause: 'infrastructure' });
   }
   for (const e of exclusions) if (!object(e) || !['account', 'account-model', 'model', 'family'].includes(e.scope) || !idOK(e.value)) fail('INVALID_EXCLUSION', 'Invalid exclusion scope.');
   const taskId = input.taskId ?? f.name, requestId = input.requestId;

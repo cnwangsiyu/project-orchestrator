@@ -42,5 +42,24 @@ try {
   assert.equal(run('approval.mjs', ['add', '--account', 'zz', '--ref', 'r', '--until', new Date(Date.now() + 3600000).toISOString(), '--', ...A]).status, 1, 'wrong account refused');
   assert.equal(run('approval.mjs', ['revoke', id]).status, 0);
   assert.match(run('route.mjs', [...A, '--user-ok', id]).stdout, /^BLOCKED /);
+  // An explicit --astra decision survives a model catalog upgrade on this account.
+  const raw = JSON.parse(fs.readFileSync(snapshot, 'utf8'));
+  const addModel = model => {
+    raw.accounts.find(a => a.id === 'main').catalog = [model];
+    raw.models.push({ ...raw.models[0], id: model });
+    raw.lanes.push({ ...raw.lanes.find(l => l.accountId === 'main'), modelId: model, id: `main:${model}` });
+    fs.writeFileSync(snapshot, JSON.stringify(raw));
+  };
+  const hard = ['implement-hard', ...A.slice(1)];
+  addModel('gpt-6-astra');
+  const approved = run('approval.mjs', ['add', '--astra', '--account', 'main', '--ref', 'astra-decision',
+    '--until', new Date(Date.now() + 3600000).toISOString(), '--', ...hard]);
+  assert.equal(approved.status, 0, approved.stderr);
+  addModel('gpt-6.2-astra');
+  assert.match(run('route.mjs', [...hard, '--user-ok', approved.stdout.trim()]).stdout, /^LAUNCH .*gpt-6\.2-astra .* on main/);
+  const legacy = JSON.parse(fs.readFileSync(file, 'utf8'));
+  for (const scope of legacy.find(a => a.id === approved.stdout.trim()).scopes) scope.models = ['gpt-6-astra'];
+  fs.writeFileSync(file, JSON.stringify(legacy));
+  assert.match(run('route.mjs', [...hard, '--user-ok', approved.stdout.trim()]).stdout, /^LAUNCH .*gpt-6\.2-astra .* on main/);
   console.log('PASS approval add from gate → LAUNCH, list, wrong account/past expiry refused, revoke blocks again');
 } finally { fs.rmSync(tmp, { recursive: true, force: true }); }

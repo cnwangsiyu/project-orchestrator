@@ -1,6 +1,6 @@
 import { workMinutes, requestsFor, laneEta, ttadkEta, patienceMinutes, ETA } from '../eta.mjs';
 import { known, freeze, reason } from './common.mjs';
-import { company } from './common.mjs';
+import { company, policyModel, isAstra } from './common.mjs';
 import { modelPreference } from './policy.mjs';
 import { candidateParts } from './candidates.mjs';
 
@@ -21,10 +21,10 @@ export function estimateCandidate(task, snapshot, candidate, { capacityReset = f
   const familyCongested=!directClear&&(fq?.position>300||(fq?.high?.position>300&&fq.high.t<=now&&now-fq.high.t<=1800000));
   const queued=position>0||['queued','waiting'].includes(known(l.queueState))
     ||!directClear&&(fq?.position>0||['queued','waiting'].includes(fq?.state));
-  const recentAstraQueue=a.kind==='trae'&&candidate.modelId==='gpt-6-astra'&&known(l.recentQueue)?.blocked===true;
+  const recentAstraQueue=a.kind==='trae'&&isAstra(candidate.modelId)&&known(l.recentQueue)?.blocked===true;
   // Astra's catalog commonly omits load. Fresh unused units and a healthy hub,
   // with no lane/family/recent-turn queue signal, supply its alternative evidence.
-  const astraNoLoad=!!(a.kind==='trae'&&candidate.modelId==='gpt-6-astra'&&load===null
+  const astraNoLoad=!!(a.kind==='trae'&&isAstra(candidate.modelId)&&load===null
     &&known(a.auth)===true&&known(a.transport)===true&&known(a.health)===true
     &&(l.hubHealthy?known(l.hubHealthy)===true:known(a.health)===true)
     &&dq&&dq.resetsAt>now&&dq.used<dq.limit&&dq.depleted!==true
@@ -51,7 +51,7 @@ export function estimateCandidate(task, snapshot, candidate, { capacityReset = f
   if (a.kind === 'trae') uncertainty.push(reason('estimate', 'TRAE_WEEKLY_SEMANTICS_UNKNOWN', 'Weekly pool admission semantics remain unverified.', [a.id]));
   if (a.kind === 'ttadk' && q?.used >= q?.limit && known(a.providerDenied) !== true)
     uncertainty.push(reason('estimate', 'DASHBOARD_PROVIDER_DISAGREEMENT', 'Dashboard depletion is not authoritative provider denial.', [a.id]));
-  const nextReset = snapshot.accounts.filter(a=>company(a)&&known(a.auth)===true&&known(a.transport)===true&&known(a.catalog)?.some(id=>modelPreference(task,a).includes(id))&&task.capabilitiesNeeded.every(cap=>known(a.capabilities?.[cap])===true)).map(a=>known(a.denialResetAt)).filter((v) => v > now).sort((a, b) => a - b)[0];
+  const nextReset = snapshot.accounts.filter(a=>company(a)&&known(a.auth)===true&&known(a.transport)===true&&known(a.catalog)?.some(id=>modelPreference(task,a).includes(policyModel(id)))&&task.capabilitiesNeeded.every(cap=>known(a.capabilities?.[cap])===true)).map(a=>known(a.denialResetAt)).filter((v) => v > now).sort((a, b) => a - b)[0];
   const tt=snapshot.accounts.find((a)=>a.kind==='ttadk'), tq=tt?.quota.map((q)=>known(q.usage)).find(Boolean), tb=known(tt?.burn);
   const remainingShare=dq&&dq.resetsAt>now?Math.max(0,(dq.limit-dq.used)/dq.limit):null;
   const ttShare=tq&&tq.resetsAt>now?(tq.limit-tq.used)/tq.limit:null;
