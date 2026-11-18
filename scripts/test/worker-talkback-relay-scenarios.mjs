@@ -10,7 +10,7 @@ import { createTalkbackRelay, TALKBACK_MARKER, resolveTalkbackIdentity } from '.
 
 const scripts = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const worker = path.join(scripts, 'codex-worker.mjs'), fixture = path.join(scripts, 'test/fixtures/worker-events-transport.mjs');
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'talkback-relay-')), previous = process.env.RULES_SHARED;
+const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'talkback-relay-'))), previous = process.env.RULES_SHARED;
 process.env.RULES_SHARED = tmp;
 const project = path.join(tmp, 'project'), childDir = path.join(project, 'sub'), other = path.join(tmp, 'other');
 for (const dir of [childDir, other]) fs.mkdirSync(dir, { recursive: true });
