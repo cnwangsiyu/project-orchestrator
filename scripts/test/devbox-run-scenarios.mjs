@@ -743,6 +743,9 @@ async function inputScenarios() {
   const directoryHash=await fingerprint(seedDir);
   const directoryRun=await run(directory,['--input',`name=directory,hash=${directoryHash.hash},rebuildable=yes,cost=1s,size=0.01,seed=${seedDir}`]);ok(directoryRun);returned(directory);
   assert.equal(directoryRun.summary.shards[0].attempts[0].seeds.length,1,'directory hashes use identical full-path ordering on sender and receiver');
+  const routed=fixture();routed.env.RES_COMMAND=f.env.RES_COMMAND;
+  const routedRepo=path.join(routed.dir,'.trae/worktrees/source');fs.mkdirSync(path.dirname(routedRepo),{recursive:true});fs.renameSync(routed.repo,routedRepo);routed.repo=routedRepo;
+  const routedSeed=await run(routed,['--input',`name=asset,hash=${actual.hash},rebuildable=yes,cost=1s,size=0.01,seed=source.txt`]);ok(routedSeed);returned(routed);
   const seedCommand=fixture();seedCommand.env.RES_COMMAND=f.env.RES_COMMAND;
   const badCommand=await run(seedCommand,['--input',`name=asset,hash=${actual.hash},rebuildable=yes,cost=1s,size=0.01,seed=cmd:printf wrong > "$DEVBOX_INPUT_PATH"`]);
   assert.notEqual(badCommand.code,0);assert.match(badCommand.stdout,/seed hash\/size mismatch/);returned(seedCommand);

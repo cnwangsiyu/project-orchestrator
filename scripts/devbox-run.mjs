@@ -1010,7 +1010,8 @@ async function prepareSeeds(opts, temp, state) {
     if (!fs.existsSync(local)) throw Error(`seed source missing for ${input.name}`);
     const files = [];
     const inspect = file => {
-      if (sensitiveFile.test(file) || /(?:^|\/)(?:cookies?|sessions?|login|\.npmrc|\.claude|\.trae|Library)(?:\/|$)/i.test(file)) throw Error(`private seed path refused for ${input.name}`);
+      const scopedPath=file===opts.repo || file.startsWith(opts.repo+path.sep) ? path.relative(opts.repo,file) : file;
+      if (sensitiveFile.test(file) || /(?:^|\/)(?:cookies?|sessions?|login|\.npmrc|\.claude|\.trae|Library)(?:\/|$)/i.test(scopedPath)) throw Error(`private seed path refused for ${input.name}`);
       const stat = fs.lstatSync(file);
       if (stat.isSymbolicLink() || (!stat.isFile() && !stat.isDirectory())) throw Error('seed symlink/special file refused');
       if (stat.isDirectory()) for (const name of fs.readdirSync(file)) inspect(path.join(file,name));
