@@ -1376,6 +1376,16 @@ def publish(directory, value):
 def log(event, resource, holder, detail=''):
     with open(journal, 'a') as stream:
         stream.write(datetime.datetime.now().strftime('%Y-%m-%d %H:%M') + '\t' + event + '\t' + resource + '\t' + holder + '\t' + detail + '\n')
+def print_notes(id):
+    notes = root + '/notes/' + id + '.md'
+    if os.path.isfile(notes) and os.path.getsize(notes) > 0:
+        sys.stdout.write('\n── notes for %s (%s) — read before use ──\n' % (id, notes))
+        with open(notes) as stream: sys.stdout.write(stream.read())
+    if id.startswith('heavy-') and id != 'heavy-build':
+        notes = root + '/notes/heavy-build.md'
+        if os.path.isfile(notes) and os.path.getsize(notes) > 0:
+            sys.stdout.write('\n── heavy-task protocol (%s) — read before use ──\n' % notes)
+            with open(notes) as stream: sys.stdout.write(stream.read())
 def alive(value):
     try: os.kill(int(value), 0); return True
     except ProcessLookupError: return False
@@ -1467,6 +1477,7 @@ try:
                     for value in sorted(values, key=lambda v: v.get('order', '')):
                         blocked = value.get('blocked', '?'); blocked = 'blocked=load' if blocked == 'load' else blocked
                         print('%-24s %-24s %-16s %s' % (value.get('holder', '?'), value.get('project', '?') + '/' + value.get('task', ''), value.get('since', '?'), blocked))
+        if request: print_notes(request)
         committed = True; sys.exit(0)
     def csv(value): return set(value.split(',')) if value else set()
     required, excluded, excluded_boxes = csv(need), csv(excluded_slots), csv(excluded_hosts)
@@ -1509,6 +1520,7 @@ try:
         hold = info(os.path.join(locks, request + '.d'))
         if hold.get('by') == by:
             print('already held: %s by %s (pid=%s, since=%s)' % (request, by, hold.get('pid', '?'), hold.get('since', '?')))
+            print_notes(request)
             committed = True; sys.exit(0)
         members = [request]
         if request.endswith('-light') or re.fullmatch(r'.+-[0-9]+', request):
@@ -1588,12 +1600,10 @@ try:
                 continue
             log('take', id, by + ' (' + project + ('/' + task if task else '') + ')', purpose + (' · until ' + until if until else ''))
             print('took ' + id)
+            print_notes(id)
             if action == 'wait':
                 log('waiter-acquire', request + '-any', by + ' (' + project + ('/' + task if task else '') + ')', 'slot=' + id)
                 remove_waiter(); print('slot=' + id)
-            notes = os.path.join(root, 'notes', id + '.md')
-            if os.path.isfile(notes):
-                with open(notes) as stream: print(stream.read())
             committed = True; sys.exit(0)
     if action == 'take':
         hold = info(os.path.join(locks, request + '.d'))

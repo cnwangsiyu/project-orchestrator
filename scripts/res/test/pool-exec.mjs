@@ -12,6 +12,8 @@ export function testPoolExec({ source = fileURLToPath(new URL('../res', import.m
   fs.mkdirSync(path.join(state, 'locks'), { recursive: true }); fs.mkdirSync(mocks, { recursive: true });
   fs.writeFileSync(path.join(state, 'resources.tsv'), Array.from({ length: 5 }, (_, n) =>
     `devbox-cn-${n + 1}\tremote\topen\t-\tfixture runner@192.0.2.1 caps=vak,chromium,docker prefer=chromium\n`).join(''));
+  const notes = path.join(state, 'notes'); fs.mkdirSync(notes);
+  fs.writeFileSync(path.join(notes, 'devbox-cn-1.md'), 'fixture note body\n');
   const commands = ['python3', 'awk', 'cut', 'hostname', 'date', 'ps', 'sleep', 'mkdir', 'mv', 'rm', 'mktemp', 'cat', 'sed', 'sort', 'head'];
   for (const command of commands) {
     const real = spawnSync('/bin/sh', ['-c', 'command -v "$1"', '-', command], { encoding: 'utf8' }).stdout.trim();
@@ -33,11 +35,15 @@ export function testPoolExec({ source = fileURLToPath(new URL('../res', import.m
   }
   const acquired = run(['wait-pool', 'devbox-cn', ...args('head'), '--need', 'vak,chromium,docker', '--prefer-host', '192.0.2.1', '--timeout', '0'], { RES_TEST_POOL_REJECT: 'expire' });
   eq(acquired.status, 0, acquired.stderr); eq(acquired.stdout.includes('slot=devbox-cn-1'), true);
+  const notesBlock = `\n── notes for devbox-cn-1 (${notes}/devbox-cn-1.md) — read before use ──\nfixture note body\n`;
+  eq(acquired.stdout, 'took devbox-cn-1\n' + notesBlock + 'slot=devbox-cn-1\n');
   eq(fs.readFileSync(path.join(state, 'log.tsv'), 'utf8').includes('\treturn\tdevbox-cn-1\thead\t'), false);
   const repeated = run(['wait-pool', 'devbox-cn', ...args('head'), '--timeout', '0']);
   eq(repeated.status, 0, repeated.stderr); eq(repeated.stdout.includes('slot=devbox-cn-1'), true);
   const taken = run(['take', 'devbox-cn-2', ...args('direct')]); eq(taken.status, 0, taken.stderr);
   const status = run(['status']); eq(status.status, 0, status.stderr); eq(status.stdout.includes('head (fixture/fixture)'), true);
+  const withNotes = run(['status', 'devbox-cn-1']); eq(withNotes.status, 0, withNotes.stderr); eq(withNotes.stdout.endsWith(notesBlock), true);
+  const repeatTake = run(['take', 'devbox-cn-1', ...args('head')]); eq(repeatTake.status, 0, repeatTake.stderr); eq(repeatTake.stdout.endsWith(notesBlock), true);
   const refused = run(['take', 'devbox-cn-2', ...args('other')]); eq(refused.status, 2, refused.stderr);
   fs.rmSync(path.join(state, 'locks/devbox-cn-1.d'), { recursive: true });
   fs.rmSync(path.join(state, 'locks/devbox-cn-2.d'), { recursive: true });
@@ -49,9 +55,15 @@ export function testPoolExec({ source = fileURLToPath(new URL('../res', import.m
   const queue = path.join(state, 'pool-waiters/devbox-cn'), older = path.join(queue, 'waiter.older');
   fs.mkdirSync(older, { recursive: true });
   fs.writeFileSync(path.join(older, 'info'), `holder\tolder\npid\t${process.pid}\nhost\t${os.hostname()}\nheartbeat\t${Math.floor(Date.now() / 1000)}\norder\t00000000000000000001\n`);
+  for (let n = 2; n <= 5; n++) fs.mkdirSync(path.join(state, `locks/devbox-cn-${n}.d`));
   const fifo = run(['wait-pool', 'devbox-cn', ...args('younger'), '--timeout', '0']); eq(fifo.status, 2, fifo.stderr);
-  eq(fs.readdirSync(path.join(state, 'locks')), []); eq(fs.existsSync(older), true);
+  eq(fs.readdirSync(path.join(state, 'locks')).sort(), [2, 3, 4, 5].map(n => `devbox-cn-${n}.d`)); eq(fs.existsSync(older), true);
   const jumped = run(['take', 'devbox-cn-3', ...args('jumper')]); eq(jumped.status, 2, jumped.stderr);
+  fs.writeFileSync(path.join(older, 'info'), fs.readFileSync(path.join(older, 'info'), 'utf8').replace(/^heartbeat\t.*$/m, `heartbeat\t${Math.floor(Date.now() / 1000) - 120}`));
+  const defaults = run(['wait-pool', 'devbox-cn', ...args('ttl-default'), '--timeout', '0'], { RES_WAITER_STALE_SECONDS: undefined });
+  eq(defaults.status, 2, defaults.stderr); eq(fs.existsSync(older), true);
+  const shortTTL = run(['wait-pool', 'devbox-cn', ...args('ttl-short'), '--timeout', '0'], { RES_WAITER_STALE_SECONDS: '45' });
+  eq(shortTTL.status, 0, shortTTL.stderr); eq(fs.existsSync(older), false);
   return count;
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) console.log(`ALL ${testPoolExec()} ASSERTIONS PASSED`);

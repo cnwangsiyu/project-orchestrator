@@ -14,6 +14,7 @@ const SUITE_TIMEOUTS = {
   'fairness.mjs': 600000,
   'lanes.mjs': 600000,
   'pools.mjs': 600000,
+  'pool-exec.mjs': 600000,
   'followups.mjs': 600000,
   'build.mjs': 1200000,
 };
@@ -36,6 +37,8 @@ export function runResSuites() {
   const env = { ...process.env, HOME: home, TMPDIR: tmp, TMP: tmp, TEMP: tmp,
     PATH: process.env.RES_TEST_NATIVE_PS === '1' ? process.env.PATH : `${bin}:${process.env.PATH}`,
     RES_DIR: path.join(tmp, 'unused'), RES_TEST_METRICS: '0',
+    // Historical expiry fixtures use 45s; pool-exec checks the production 300s default.
+    RES_WAITER_STALE_SECONDS: '45',
     T88_RES: res, T86_RES: res, T83_RES: res };
   let assertions = 0;
   console.log(`Res PID table: ${process.env.RES_TEST_NATIVE_PS === '1' ? 'native ps' : 'scratch fixture (host ps not required)'}`);
