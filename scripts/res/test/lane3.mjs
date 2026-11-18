@@ -291,8 +291,11 @@ for (const id of ['heavy-lane-1', 'heavy-lane-2'])
   eq(run(['return', id, '--by', 'rollout-owner'], { RES_DIR: rollout }).code, 0);
 const currentHelp = run(['--help']).text;
 ok(currentHelp.includes('res wait-pool <prefix>'));
-// Permit only the new command block; all existing v1.2 help stays byte-identical.
-const withoutPoolHelp = text => text.replace(/^res wait-pool[\s\S]*?(?=^res heavy-check)/m, '');
+// Normalize the added pool block and declared-input admission options; retain
+// the byte-for-byte baseline check for the remaining commands and diagnostics.
+const withoutPoolHelp = text => text.replace(/^res wait-pool[\s\S]*?(?=^res heavy-check)/m, '')
+  .replace(' [--pid <pid>] [--disk-gib <GiB>]\n', ' [--pid <pid>]\n')
+  .replace(' [--disk-gib <GiB>] [--disk-gib-file <JSON>] [--placement-file <JSON>] [--maintenance] [take options]\n', ' [take options]\n');
 eq(withoutPoolHelp(currentHelp), run(['--help'], {}, baseline).text);
 const transcript = async (script, name) => {
   const dir = path.join(root, name); fs.mkdirSync(dir);
