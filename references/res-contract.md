@@ -11,10 +11,10 @@ Unknown well-formed `KEY=value` records with keys matching
 `^[A-Z][A-Z0-9_]*(\.[A-Za-z0-9_.-]+)?$` are ignored; each running waiter warns once
 per key, naming no value. Malformed records, duplicate keys (including unknown
 keys) and invalid known values still fail closed for fresh admission commands.
-Once a build/lane/pool waiter has read a valid configuration, an invalid reload
+Once a legacy/build/lane/pool waiter has read a valid configuration, an invalid reload
 retains its last-good thresholds and FIFO order, emits one warning for that
 invalid interval, and retries on the next poll. Subsequent valid configuration
-updates apply normally. Build waiters retain a private numeric threshold snapshot;
+updates apply normally. Legacy and build waiters retain a private numeric threshold snapshot;
 pool waiters retain only known devbox settings in their existing episode record.
 Return operations remain available while configuration is invalid.
 

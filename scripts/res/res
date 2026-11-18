@@ -99,8 +99,8 @@ heavy_lanes_held() {
   printf '%s\n' "$held"
 }
 
-# Configuration is data, never shell code. Unknown/duplicate keys and malformed
-# values fail closed; an absent file retains the original admission thresholds.
+# Configuration is data, never shell code. Unknown well-formed keys are ignored;
+# fresh invalid reads fail closed and running waiters keep their last-good values.
 machine_thresholds_parse() {
   LOAD_LIMIT=12 LOAD_LIMIT_WITH_LANES=20 MIN_AVAIL_GIB=16 LANE3_LOAD=8 LANE3_AVAIL_GIB=32
   LANE_LOAD_PER_CORE=1.25 LANE_MIN_AVAIL_GIB=12 BUILD_LOAD_PER_CORE=1.5
@@ -467,6 +467,9 @@ cmd_wait() {
   validate_pid
   duration=$(awk -v t="$timeout" 'BEGIN {s=t*60; printf "%.0f\n", int(s)+(s>int(s))}')
   deadline=$((SECONDS + duration))
+  WAIT_CONFIG_FILE=$(mktemp "$RES_DIR/.wait-config.XXXXXX")
+  trap 'cleanup_build_waiter' EXIT
+  trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
   while :; do
     rc=0
     case "$id" in
@@ -485,17 +488,19 @@ cmd_wait() {
         else
           rc=$?
           [ -z "$reading" ] || printf '%s\n' "$reading"
-          [ "$rc" -eq 5 ] || return "$rc"
+          [ "$rc" -eq 5 ] || { cleanup_build_waiter; return "$rc"; }
         fi ;;
     esac
     if [ "$rc" -ne 5 ]; then
-      if wait_take_attempt "$id" ${args[@]+"${args[@]}"}; then return 0; else rc=$?; fi
-      [ "$rc" -eq 2 ] || [ "$rc" -eq 5 ] || return "$rc"
+      if wait_take_attempt "$id" ${args[@]+"${args[@]}"}; then cleanup_build_waiter; return 0; else rc=$?; fi
+      [ "$rc" -eq 2 ] || [ "$rc" -eq 5 ] || { cleanup_build_waiter; return "$rc"; }
+      trap 'cleanup_build_waiter' EXIT
+      trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
     fi
     remaining=$((deadline - SECONDS))
     if [ "$remaining" -le 0 ]; then
       echo "res: timed out waiting for '$id' after $timeout minutes" >&2
-      return 2
+      cleanup_build_waiter; return 2
     fi
     if [ "$rc" -eq 5 ] && [[ "$id" =~ ^heavy-lane-[12]$ ]]; then
       load_poll=$(reading_field "$reading" poll_seconds)
@@ -978,7 +983,7 @@ update_build_waiter() {
 }
 
 cleanup_build_waiter() {
-  [ -z "${WAIT_CONFIG_FILE:-}" ] || rm -f "$WAIT_CONFIG_FILE" "$WAIT_CONFIG_FILE.warn"
+  [ -z "${WAIT_CONFIG_FILE:-}" ] || rm -f "$WAIT_CONFIG_FILE" "$WAIT_CONFIG_FILE.warn" "$WAIT_CONFIG_FILE.devbox"
   WAIT_CONFIG_FILE=
   [ -z "${BUILD_WAITER_DIR:-}" ] || rm -rf "$BUILD_WAITER_DIR"
   [ -z "${BUILD_WAITER_STAGING:-}" ] || rm -rf "$BUILD_WAITER_STAGING"
@@ -1795,10 +1800,10 @@ cmd_wait_pool_legacy() {
 pool_controller() {
   local runner=
   if [ "${POOL_EXEC_CHILD:-0}" = 1 ]; then runner=exec; fi
-  ${runner:+$runner} python3 - "$RES_DIR" "$@" "$BY" "$PROJECT" "$TASK" "$PURPOSE" "$PID" "$UNTIL" "${FORCE:-}" "${POOL_NEED:-}" "${prefer_host:-}" "${prefer_slot:-}" "${excluded_slots:-}" "${excluded_hosts:-}" "${WAITER_STALE_SECONDS}" "$$" "${POOL_EPISODE:-none}" "${exclude_reason:-}" "${hard_slots:-}" "${hard_hosts:-}" "${DISK_GIB:-}" "${DISK_GIB_FILE:-}" "${PLACEMENT_FILE:-}" "${MAINTENANCE:-}" "${EXTRA_DISK_GIB:-0}" <<'PY'
+  ${runner:+$runner} python3 - "$RES_DIR" "$@" "$BY" "$PROJECT" "$TASK" "$PURPOSE" "$PID" "$UNTIL" "${FORCE:-}" "${POOL_NEED:-}" "${prefer_host:-}" "${prefer_slot:-}" "${excluded_slots:-}" "${excluded_hosts:-}" "${WAITER_STALE_SECONDS}" "$$" "${POOL_EPISODE:-none}" "${exclude_reason:-}" "${hard_slots:-}" "${hard_hosts:-}" "${DISK_GIB:-}" "${DISK_GIB_FILE:-}" "${PLACEMENT_FILE:-}" "${MAINTENANCE:-}" "${EXTRA_DISK_GIB:-0}" "${WAIT_CONFIG_FILE:+$WAIT_CONFIG_FILE.devbox}" <<'PY'
 import datetime, fcntl, hashlib, json, math, os, re, shutil, signal, socket, stat, sys, tempfile, time
 from contextlib import contextmanager
-root, action, request, timeout, delay, by, project, task, purpose, pid, until, force, need, prefer, preferred_slot, excluded_slots, excluded_hosts, stale, controller, generation, exclude_reason, hard_slots, hard_hosts, disk_gib, disk_gib_file, placement_file, maintenance, extra_disk_gib = sys.argv[1:]
+root, action, request, timeout, delay, by, project, task, purpose, pid, until, force, need, prefer, preferred_slot, excluded_slots, excluded_hosts, stale, controller, generation, exclude_reason, hard_slots, hard_hosts, disk_gib, disk_gib_file, placement_file, maintenance, extra_disk_gib, legacy_config_path = sys.argv[1:]
 pid = int(pid); stamp = time.time(); now = stamp; host = socket.gethostname()
 controller_key = hashlib.sha256(host.encode()).hexdigest() + '.' + controller + '.' + generation
 locks = os.path.join(root, 'locks'); journal = os.path.join(root, 'log.tsv')
@@ -1960,6 +1965,9 @@ try:
             if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode): raise ValueError('expected a regular file')
             return stream.read()
     config_record = info(os.path.join(root,'pool-waiters',request,'.episode.'+controller_key)) if action=='wait' else {}
+    if action=='take' and legacy_config_path:
+        try: config_record=json.loads(regular_text(legacy_config_path))
+        except FileNotFoundError: pass
     config_current_values = None
     config_unknown_warned = set(json.loads(config_record.get('ignored_config_keys','[]')))
     config_invalid_warned = config_record.get('config_invalid_warned')=='1'
@@ -2020,6 +2028,12 @@ try:
             if cached is None: raise ValueError('invalid machine.conf; no last-good thresholds')
             if not config_invalid_warned: print('res: warning: invalid machine.conf reload; keeping last-good thresholds and FIFO position',file=sys.stderr,flush=True)
             config_invalid_warned=True; values=cached; config_current_values=cached
+        if action=='take' and legacy_config_path:
+            record=dict(last_good_devbox_config=json.dumps(config_current_values,separators=(',',':')),
+                        ignored_config_keys=json.dumps(sorted(config_unknown_warned)),config_invalid_warned='1' if config_invalid_warned else '0')
+            temp=legacy_config_path+'.'+str(os.getpid())+'.tmp'
+            with open(temp,'w') as stream: json.dump(record,stream)
+            os.chmod(temp,0o600); os.replace(temp,legacy_config_path)
         reclaim = values.get('DEVBOX_LIGHT_STALE_RECLAIM') == '1'
         soft_minutes = values.get('DEVBOX_SOFT_EXCLUDE_MINUTES', 5)
         enrolled = values.get('DEVBOX_DYNAMIC_HOSTS', '').split(',') if values.get('DEVBOX_DYNAMIC_ADMISSION') == '1' else []

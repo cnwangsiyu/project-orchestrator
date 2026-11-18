@@ -45,6 +45,13 @@ try{
  fs.writeFileSync(path.join(root,'sleep.3.release'),'');eq(await build.done,0,build.output);
  eq((build.output.match(/ignoring unknown machine.conf key FUTURE_GATE.rule_one/g)||[]).length,1,'one warning per future key');
  ok(build.output.includes('LOAD_LIMIT=110'),'valid later configuration takes effect');eq(run(['return-build','--by','build-reload','--pid',String(process.pid)]).status,0);
+ config('LOAD_POLL_SECONDS=15\nFUTURE_GATE.rule_one=alpha\n');
+ const legacy=start(['wait','heavy-lane-1',...args('legacy-reload'),'--timeout','2'],{RES_TEST_LOAD1M:'100'});
+ await until(()=>fs.existsSync(path.join(root,'sleep.4')),legacy);config('LOAD_LIMIT=bad\n');fs.writeFileSync(path.join(root,'sleep.4.release'),'');
+ await until(()=>fs.existsSync(path.join(root,'sleep.5')),legacy);eq(legacy.code,undefined);
+ config('LANE_LOAD_PER_CORE=10\nBUILD_LOAD_PER_CORE=10\nFUTURE_GATE.rule_one=alpha\n');fs.writeFileSync(path.join(root,'sleep.5.release'),'');
+ eq(await legacy.done,0,legacy.output);eq((legacy.output.match(/invalid machine.conf reload/g)||[]).length,1);
+ eq(run(['return','heavy-lane-1','--by','legacy-reload']).status,0);
  const host='192.0.2.1';fs.writeFileSync(path.join(state,'devbox-metrics',host+'.json'),JSON.stringify({at:Date.now()/1000,cores:8,load5:99,memAvailableGiB:100,freeGiB:1000}));
  const poolConfig='DEVBOX_DYNAMIC_ADMISSION=1\nDEVBOX_DYNAMIC_HOSTS='+host+'\nFUTURE_GATE.rule_one=alpha\n';
  config(poolConfig);const first=path.join(root,'pool-first'),second=path.join(root,'pool-second');
