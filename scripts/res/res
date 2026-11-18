@@ -1443,17 +1443,23 @@ try:
         remote[id] = (policy, match.group(1).rstrip('.'), set(caps.group(1).split(',')) if caps else set(), set(prefs.group(1).split(',')) if prefs else set())
     if action == 'status':
         print('%-16s %-9s %-9s %-12s %-34s %s' % ('ID', 'KIND', 'POLICY', 'LINK', 'HOLDER', 'SINCE → UNTIL / PURPOSE'))
+        warn_short_pid = False
         for id, (kind, policy, device, description) in rows.items():
             if request and id != request: continue
             value = info(os.path.join(locks, id + '.d'))
             holder = 'FREE'; detail = description
             if value:
                 holder = value.get('by', '?') + ' (' + value.get('project', '?') + ('/' + value['task'] if value.get('task') else '') + ')'
-                if value.get('host') == host and not alive(value.get('pid')):
-                    short = value.get('pid_warning') or stamp - int(value.get('start', '0')) <= 5
+                observed_pid = value.get('pid', '')
+                if value.get('host') == host and observed_pid.isdecimal() and int(observed_pid) > 0 and not alive(observed_pid):
+                    start = value.get('start', '')
+                    short = bool(value.get('pid_warning')) or start.isdecimal() and 0 <= stamp - int(start) <= 5
+                    warn_short_pid |= short
                     holder = ('STALE?(short-lived pid) ' if short else 'STALE ') + holder
                 detail = value.get('since', '?') + ' → ' + (value.get('until') or '?') + ' · ' + value.get('for', '?')
             print('%-16s %-9s %-9s %-12s %-34s %s' % (id, kind, policy, '-', holder, detail))
+        if warn_short_pid:
+            print('res: short-lived holder PID; use scripts/heavy-build.sh <command...>; lock, build and return must share one long-lived process', file=sys.stderr)
         for category in ('build', 'lane', 'pool'):
             parent = os.path.join(root, category + '-waiters')
             if not os.path.isdir(parent): continue
