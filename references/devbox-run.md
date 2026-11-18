@@ -480,6 +480,12 @@ AmazingEngine. The setup script
 uses the BCE-carrying Bach
 `22.7.0.15-MT-debug` with `USE_BACH_SOURCE=0`.
 
+Blanking rules (2026-11-18, BC-141): the sanitizer and the recipe's own `credential-audit.py` match credential
+labels by word (password, token, secret, credential, auth, and access/secret/api/private key pairs), never by
+substring. Boolean, numeric and empty values, `ENABLE_`/`DISABLE_`/`IS_`/`USE_` switches and A/B experiment
+identifiers are kept and listed in `source-build-fields.json`. Value-shape detectors (private-key blocks, access-key
+ids, JWTs, URL credentials) are unchanged, and the devbox-run transfer gate still checks the export again.
+
 Prepare from a local vesdk branch name or full commit. The exporter creates
 a parentless Git snapshot and records the original commit in
 `source-provenance.json`. Prep generates the EffectSDK Android version metadata
