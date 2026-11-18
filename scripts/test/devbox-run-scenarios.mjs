@@ -738,12 +738,15 @@ async function hygieneScenarios() {
   f.repo=mods.repo;
   const first=await run(f,['--submodules'],mods.command);ok(first);
   const ws=workspace(f);
+  const oldMeta=JSON.parse(fs.readFileSync(path.join(ws,'.devbox-run.json'))); delete oldMeta.job;
+  fs.writeFileSync(path.join(ws,'.devbox-run.json'),JSON.stringify(oldMeta));
+  fs.writeFileSync(path.join(f.shared,'log.tsv'),'2026-11-18 00:00\ttake\tdevbox-cn-1\told-holder (legacy/project)\tfixture\n');
   fs.writeFileSync(path.join(ws,'engine/version'),'dirty engine');
   fs.writeFileSync(path.join(ws,'engine/nested/payload'),'dirty nested');
   fs.writeFileSync(path.join(ws,'engine/untracked'),'leftover');
   const second=await run(f,['--submodules'],mods.command);ok(second);returned(f);
   const hygiene=second.summary.shards[0].attempts[0].slotHygiene;
-  assert.equal(hygiene.previousJob,'fixture/scenario');
+  assert.equal(hygiene.previousJob,'legacy/project');
   assert.ok(hygiene.patches.some(item=>item.tree==='engine'));
   assert.ok(hygiene.patches.some(item=>item.tree==='engine/nested'));
   for(const item of hygiene.patches) assert.ok(fs.statSync(item.patch).size>0);

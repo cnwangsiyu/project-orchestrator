@@ -108,6 +108,16 @@ export function readRegistry(dir, pool) {
 }
 
 const lockPath = (dir, slot) => path.join(dir, 'locks', `${slot}.d`);
+function previousSlotJob(slot, by) {
+  try {
+    const lines=fs.readFileSync(path.join(sharedDir(),'log.tsv'),'utf8').trimEnd().split('\n');
+    for (const line of lines.reverse()) {
+      const [,action,id,holder]=line.split('\t');
+      if(action==='take' && id===slot && holder && !holder.startsWith(by+' ('))
+        return /\(([^()]*)\)$/.exec(holder)?.[1] || holder;
+    }
+  } catch(error) { if(error.code!=='ENOENT') throw error; }
+}
 const freeSlot = (dir, row) => !fs.existsSync(lockPath(dir, row.slot));
 const hasCapabilities = (opts, row) => opts.need.every(cap => row.caps.includes(cap));
 const eligibleSlot = (opts, row) => hasCapabilities(opts, row)
@@ -434,7 +444,7 @@ with open(str(repo)+'.lock','a') as lock:
                 os.chmod(patch,0o600); output.write(diff)
             saved.append({'tree':relative,'patch':str(patch)})
         if saved:
-            print(json.dumps({'previousJob':old.get('job','unknown (legacy slot receipt)'), 'patches':saved}))
+            print(json.dumps({'previousJob':d.get('previousJob') or old.get('job','unknown (legacy slot receipt)'), 'patches':saved}))
         for tree in reversed(trees[1:]):
             subprocess.run(['git','-C',str(tree),'reset','--hard','HEAD'],check=True,stdout=subprocess.DEVNULL)
             subprocess.run(['git','-C',str(tree),'clean','-ffd','-q'],check=True,stdout=subprocess.DEVNULL)
@@ -1403,7 +1413,7 @@ async function shard(opts) {
         const workspace = `${root}/wt/${opts.project}/${storeName}/${row.slot}`;
         const repository = `${root}/repos/${opts.project}/${storeName}`;
         attempt.repository = repository;
-        data = { root, workspace, repository, slot: row.slot, job: `${opts.project}/${opts.task}`, affinity:opts.affinity, control: `${root}/runs/${randomUUID()}`, commit: opts.snapshot.commit, untracked: opts.snapshot.untracked };
+        data = { root, workspace, repository, slot: row.slot, job: `${opts.project}/${opts.task}`, affinity:opts.affinity, previousJob:previousSlotJob(row.slot,by), control: `${root}/runs/${randomUUID()}`, commit: opts.snapshot.commit, untracked: opts.snapshot.untracked };
         let inspection = JSON.parse(checked(await ssh(row, 'inspect', data, { state, timeout: Math.min(60000, remaining()) }), 'workspace inspection'));
         if (inspection.free < 73 * GiB) {
           await collectGarbage({ rows: [...readRegistry(sharedDir(), 'devbox-cn'), ...readRegistry(sharedDir(), 'devbox-cn-light')], host: row.host, state, emit, skipSlot: row.slot });

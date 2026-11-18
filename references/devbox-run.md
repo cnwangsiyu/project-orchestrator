@@ -243,7 +243,7 @@ experiment through the snapshot. At reuse, tracked edits in every initialized
 submodule and the superproject are saved under `CONTROL/slot-edits/*.patch`
 before recursive `reset --hard` and `clean -ffd`. Ignored build caches survive.
 The summary/log records every patch path and the previous job from the slot
-receipt (legacy receipts explicitly say unknown). These patch files are not
+receipt or controller take journal (if both are unavailable, legacy slots explicitly say unknown). These patch files are not
 removed by slot reuse or this change's GC.
 
 ## CPU budgets and unit sharding
