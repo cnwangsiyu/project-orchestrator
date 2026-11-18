@@ -1567,7 +1567,7 @@ try:
                 observed_pid = value.get('pid', '')
                 if value.get('host') == host and observed_pid.isdecimal() and int(observed_pid) > 0 and not alive(observed_pid):
                     start = value.get('start', '')
-                    short = bool(value.get('pid_warning')) or start.isdecimal() and 0 <= stamp - int(start) <= 5
+                    short = bool(value.get('pid_warning')) or start.isdecimal() and 0 <= int(stamp) - int(start) <= 5
                     warn_short_pid |= short
                     holder = ('STALE?(short-lived pid) ' if short else 'STALE ') + holder
                 detail = value.get('since', '?') + ' → ' + (value.get('until') or '?') + ' · ' + value.get('for', '?')
