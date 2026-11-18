@@ -9,7 +9,7 @@ import { loadDigest } from '../lib/global-rules.mjs';
 import { nextRouteArgs, parseRouteArgs, routeFlag, setRouteFlag } from '../lib/worker-reroute.mjs';
 
 const scripts = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'automatic-reroute-'));
+const tmp = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'automatic-reroute-')));
 const SOL = 'gpt-6.1-sol', ASTRA = 'gpt-6-astra', now = Date.now(), min = 60000;
 const transport = path.join(scripts, 'test/fixtures/reroute-transport.mjs');
 const run = (label, config = {}, flags = [], options = {}) => {
@@ -208,7 +208,8 @@ try {
   }
   const backgroundLaunch = run('background-launch', { complete: true }, [], { workerBackground: true });
   assert.equal(backgroundLaunch.status, 0, backgroundLaunch.stderr + backgroundLaunch.stdout);
-  assert.equal(backgroundLaunch.calls.find((c) => c.method === 'turn/start').params.input[0].text, 'Read brief.md and follow it.');
+  assert.equal(backgroundLaunch.calls.find((c) => c.method === 'turn/start').params.input[0].text,
+    `Read ${backgroundLaunch.dir}/brief.md and follow it.`);
   assert.ok(!backgroundLaunch.calls.some((c) => c.method === 'turn/interrupt'));
   assert.ok(!backgroundLaunch.rows.some((r) => r.kind === 'reroute'));
   for (const cancel of ['silent', 'unconfirmed']) {

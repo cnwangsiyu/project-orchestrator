@@ -16,6 +16,7 @@ import { routePure } from './pipeline/index.mjs';
 import { modelPreference, policyEffort } from './pipeline/policy.mjs';
 import { readLeases } from './resource-data.mjs';
 import { readRoutingObservations, saveRoutingObservations } from './routing-observations.mjs';
+import { canonicalPathOptions, canonicalPath } from './launch-paths.mjs';
 
 const read = (file, fallback = null) => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; } };
 const lines = (file) => { try { return fs.readFileSync(file, 'utf8').split('\n').flatMap((l) => { try { const r = JSON.parse(l); return object(r) ? [r] : []; } catch { return []; } }); } catch { return []; } };
@@ -229,7 +230,7 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
   const writes = parsed.writes || !!flags.signing;
   const sandbox = flags.sandbox ?? (writes ? 'danger-full-access' : parsed.runsTests ? 'workspace-write' : 'read-only');
   let task = createTaskSpec({ ...parsed, taskId: id, writes, sandbox, sandboxCeiling: 'danger-full-access', previousAttempts: attempts,
-    flags:{...flags,...(flags.cwd?{cwd:path.resolve(flags.cwd)}:{}),...(flags['task-dir']?{'task-dir':path.resolve(flags['task-dir'])}:{})},
+    flags:canonicalPathOptions({...flags}),
     projectProfiles,
     allowedOrigins: ['browser', 'ui-browser'].includes(parsed.category) ? [...BROWSER_ORIGINS, ...array(projectConfig.browserOrigins), ...(parsed.category === 'ui-browser' ? ['localhost', '127.0.0.1'] : []), ...parsed.allowedOrigins] : parsed.allowedOrigins,
     floor: { profileIds: [], previousAttemptIds: [], relationVersion: VERSION, historyStatus: attempts.length || !parsed.failures ? 'KNOWN' : 'UNKNOWN' } });
@@ -260,7 +261,8 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
       retryAssumption = `No actual launch history found; assumed ${inferred.length} failed browser channel(s) from the cached initial route for --failures ${parsed.failures}.`;
     }
     return {task,snapshot,data,profiles,routeLog,now,root,retryAssumption,cacheAgeMs,refreshRequired:live&&!!flags.fresh,
-      trustedCwd: flags['trusted-cwd'] ? path.resolve(flags['trusted-cwd']) : projectConfig.root ?? projectConfig.projectRoot ?? null,
+      trustedCwd: (flags['trusted-cwd'] ?? projectConfig.root ?? projectConfig.projectRoot)
+        ? canonicalPath(flags['trusted-cwd'] ?? projectConfig.root ?? projectConfig.projectRoot) : null,
       slowTests: Array.isArray(projectConfig.slowTests) ? projectConfig.slowTests : []};
   };
   if (env.ROUTE_SNAPSHOT_FILE) return finish(createSnapshot(injectedSnapshot, { now }));

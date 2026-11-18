@@ -13,7 +13,7 @@ import { modelFamily, modelObservation, rolloutTurnModel } from '../lib/worker-m
 import { failureKind, pauseDecision, noteFailure } from '../lib/trae-health.mjs';
 
 const scripts = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'worker-guards-'));
+const tmp = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'worker-guards-')));
 const transport = path.join(scripts, 'test/fixtures/worker-guards-transport.mjs');
 let passed = 0;
 const rows = (file) => fs.existsSync(file) ? fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map(JSON.parse) : [];

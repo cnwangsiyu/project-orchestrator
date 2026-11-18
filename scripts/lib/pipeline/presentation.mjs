@@ -102,6 +102,7 @@ export function presentRoute(plan, view, context) {
     const primary=s.role==='primary', suffix=primary?'':`-${s.role}`;
     const vendor=c.family==='claude'?'claude':'codex', an=c.accountId, name=`${task.flags.name??task.taskId}${suffix}`;
     const outputBase=`${taskDir}/codex${suffix}`;
+    const paths=context.launchPaths?.[s.role]??{brief:`${taskDir}/brief.md`,out:`${outputBase}-last.md`,log:`${outputBase}.jsonl`};
     const seatLow=company(a)&&s.estimate.patienceMin!==null;
     const seatPatience=seatLow?s.estimate.patienceMin??30:null;
     const out={vendor,model:c.modelId,effort:c.effort,account:vendor==='claude'?undefined:an,company:company(a),sandbox:vendor==='claude'?null:task.sandbox,
@@ -109,7 +110,7 @@ export function presentRoute(plan, view, context) {
       approvalRef:executable ? (s.personalFallback?.quotaApproved ? s.personalFallback.approvalRef : f['user-ok'] ?? null) : null,
       astraApprovalRef: executable ? s.personalFallback?.astraApprovalRef ?? null : null};
     if(!executable) return out;
-    const prompt=`${primary?'':`Act as the independent ${s.role} reviewer of artifact ${task.artifactRevision}. `}Read ${taskDir}/brief.md and follow it.`;
+    const prompt=`${primary?'':`Act as the independent ${s.role} reviewer of artifact ${task.artifactRevision}. `}Read ${paths.brief} and follow it.`;
     const routed={name,project:task.project,category:task.category,role:s.role,account:an,model:c.modelId,effort:c.effort,sandbox:task.sandbox,
       company:company(a),routeId:plan.routeId,approvalRef:out.approvalRef};
     const audit=command(['node',`${root}/scripts/launch-audit.mjs`,'--name',name,'--project',task.project,'--role',s.role,'--vendor',vendor,'--account',an,'--model',c.modelId,
@@ -122,7 +123,7 @@ export function presentRoute(plan, view, context) {
       return out;
     }
     const args=['--account',an,'start','--cwd',cwd,'--model',launchModel,'--effort',c.effort,'--sandbox',task.sandbox,'--name',name,
-      ...(primary?['--route-args',JSON.stringify(routeArgs),'--auto-reroute-depth',String(task.autoRerouteDepth)]:[]),'--log',`${outputBase}.jsonl`,'--out',`${outputBase}-last.md`];
+      ...(primary?['--route-args',JSON.stringify(routeArgs),'--auto-reroute-depth',String(task.autoRerouteDepth)]:[]),'--log',paths.log,'--out',paths.out];
     if(owner) args.push('--owner',owner);
     if(f.task) args.push('--task',f.task);
     args.push('--project',task.project,'--role',s.role,'--routed-seat',JSON.stringify(routed));
@@ -144,10 +145,10 @@ export function presentRoute(plan, view, context) {
       const accountEnv=profiles[an]?.home?`CODEX_HOME=${shellQuote(profiles[an].home)} `:'';
       const inner=(a.kind==='ttadk'&&known(a.capabilities.search)?`${command(['node',`${root}/scripts/codex-worker.mjs`,'--account',an,'proxy'])} >/dev/null && `:'')+accountEnv+command([bin,'exec','--skip-git-repo-check','-C',cwd,...sandboxArgs,'-m',launchModel,'-c',`model_reasoning_effort="${c.effort}"`,
         ...(task.flags.network&&task.sandbox==='workspace-write'?['-c',`sandbox_workspace_write.network_access=${task.flags.network==='on'}`]:[]),
-        ])+` -c "$(node ${shellQuote(`${root}/scripts/rules-worker-digest.mjs`)} --config)" `+command(['--json','-o',`${taskDir}/codex${suffix}-last.md`,prompt]);
+        ])+` -c "$(node ${shellQuote(`${root}/scripts/rules-worker-digest.mjs`)} --config)" `+command(['--json','-o',paths.out,prompt]);
       out.launcher=a.kind==='trae'?'traecli-exec':'codex-exec';
       out.command=command(['sh',`${root}/scripts/run-tracked.sh`,'--name',name,'--account',an,'--model',c.modelId,'--effort',c.effort,'--cwd',cwd,
-        '--out',`${taskDir}/codex${suffix}-last.md`,'--log',`${taskDir}/codex${suffix}.jsonl`,...(owner?['--owner',owner]:[]),'--','sh','-c',`${audit} && ${inner}`]);
+        '--out',paths.out,'--log',paths.log,...(owner?['--owner',owner]:[]),'--','sh','-c',`${audit} && ${inner}`]);
     } else out.command=command(['node',`${root}/scripts/codex-worker.mjs`,...args,prompt]);
     return out;
   };

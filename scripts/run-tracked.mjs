@@ -6,9 +6,11 @@ import { spawn } from 'node:child_process';
 import { lifecycle, signalExit } from './lib/worker-events.mjs';
 import { redactWorkerTurn, hubThreadIdle } from './lib/worker-redaction.mjs';
 import { maskPasswordStyleValues } from './lib/nightly-audit.mjs';
+import { canonicalPathOptions, canonicalLaunchArgv } from './lib/launch-paths.mjs';
 
 const args = process.argv.slice(2), sep = args.indexOf('--'), opts = {};
 for (let i = 0; i < (sep < 0 ? args.length : sep); i += 2) opts[args[i].replace(/^--/, '')] = args[i + 1];
+canonicalPathOptions(opts);
 const tracker = lifecycle({ owner: opts.owner, name: opts.name ?? 'exec', account: opts.account ?? 'main', model: opts.model ?? null,
   effort: opts.effort ?? null,
   outFile: opts.out ? path.resolve(opts.out) : null, logFile: opts.log ? path.resolve(opts.log) : null });
@@ -87,7 +89,10 @@ const finish = async (code) => {
 try {
   if (opts.log) { fs.mkdirSync(path.dirname(path.resolve(opts.log)), { recursive: true }); logFd = fs.openSync(opts.log, 'w', 0o600); }
   // A private process group is cleanup ownership, not a daemon: no unref, and the wrapper stays attached.
-  child = spawn(args[sep + 1], args.slice(sep + 2), { cwd: opts.cwd, detached: process.platform !== 'win32',
+  const command = args[sep + 1], commandArgs = args.slice(sep + 2);
+  const cliPaths = /^(codex|traex|traecli)$/.test(path.basename(command))
+    || /codex-worker\.mjs$/.test(commandArgs[0] ?? '');
+  child = spawn(command, cliPaths ? canonicalLaunchArgv(commandArgs, opts.cwd) : commandArgs, { cwd: opts.cwd, detached: process.platform !== 'win32',
     stdio: ['ignore', 'pipe', 'pipe'] });
   child.stdout.on('data',chunk=>{
     if(logFd!==undefined) fs.writeSync(logFd,chunk); else process.stdout.write(chunk);

@@ -68,6 +68,7 @@ import { sizeLimits, threadSize, freshThreadRoute } from './lib/worker-thread-si
 import { modelFamily, modelObservation, rolloutTurnModel } from './lib/worker-model.mjs';
 import { redactWorkerTurn, checkThreadIdle } from './lib/worker-redaction.mjs';
 import { maskPasswordStyleValues } from './lib/nightly-audit.mjs';
+import { canonicalPathOptions, canonicalBriefPrompt } from './lib/launch-paths.mjs';
 import { requestBoardRefresh } from './lib/board-refresh.mjs';
 import { lifecycle, resolveOwner, validOwner, inbox, readEvents, readAck, eventLine, watch, signalExit, appendEvent, setEventObserver,
   saveWorkerContext, workerContext, openQuestions, answerQuestion } from './lib/worker-events.mjs';
@@ -106,6 +107,7 @@ if (argv[0] === 'turn' && typeof earlyOpts.thread === 'string') {
 // Validate before lifecycle can append an event, including inherited turn owners.
 let tracker = null;
 try {
+  canonicalPathOptions(earlyOpts);
   if (earlyOpts.owner !== undefined) earlyOpts.owner = resolveOwner(earlyOpts.owner);
   let routeArgs = []; try { routeArgs = JSON.parse(earlyOpts['route-args'] ?? '[]'); } catch {}
   let seat = {}; try { seat = JSON.parse(earlyOpts['routed-seat'] ?? '{}'); } catch {}
@@ -191,7 +193,8 @@ const REQUESTED_MODEL = typeof opts.model === 'string' ? opts.model : null;
 if (PROF?.kind === 'trae' && typeof opts.model === 'string') opts.model = PROF.modelIds?.[opts.model.toLowerCase()] ?? opts.model;
 tracker?.set({ model: opts.model ?? null, requestedModel: REQUESTED_MODEL, effectiveModel: opts.model ?? null,
   actualModel: null, actualModelSource: null, delegatedModels: [] });
-const text = pos.join(' ');
+try { canonicalPathOptions(opts); } catch (e) { process.stderr.write(`codex-worker: ${e.message}\n`); process.exit(2); }
+const text = ['start', 'turn'].includes(cmd) ? canonicalBriefPrompt(pos.join(' '), opts.cwd) : pos.join(' ');
 // A read-only worker cannot create files: its deliverable is the final message (--out). Warn when the prompt asks for another file.
 if (cmd === 'start' && opts.sandbox === 'read-only') {
   const named = [...new Set((text.match(/\b(?:write|save|create|put|output)\b[^.\n]{0,60}?\b([\w./-]+\.(?:md|txt|json|csv|html))\b/gi) ?? [])

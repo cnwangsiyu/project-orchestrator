@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { rulesShared } from './global-rules.mjs';
 import { withLock, writeJson } from './shared-file.mjs';
+import { canonicalPath } from './launch-paths.mjs';
 
 const keys = ['route-args', 'auto-reroute-depth', 'owner', 'name', 'cwd', 'log', 'out', 'stall-min',
   'queue-patience-min', 'alt', 'queue-alternative', 'queue-alt-start-min', 'background', 'require-model',
@@ -19,7 +20,7 @@ const readLaunch = (file) => {
 };
 const launchDefaults = (opts, owner = opts.owner) => {
   const defaults = Object.fromEntries(keys.filter((key) => opts[key] !== undefined).map((key) => [key,
-    ['cwd', 'log', 'out'].includes(key) ? path.resolve(opts[key]) : opts[key]]));
+    ['cwd', 'log', 'out'].includes(key) ? canonicalPath(opts[key]) : opts[key]]));
   if (owner) defaults.owner = owner;
   return defaults;
 };
