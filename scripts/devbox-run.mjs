@@ -104,6 +104,16 @@ function lineSink(write, values = [], intercept) {
   };
 }
 
+function ownChild(child) {
+  const pid = child.pid;
+  let active = true;
+  child.once('exit', () => { active = false; });
+  child.once('error', () => { if (!child.pid) active = false; });
+  // The ChildProcess handle is the per-spawn identity. Never reopen it by PID.
+  return sig => active && pid > 0 && child.pid === pid && child.exitCode === null
+    && child.signalCode === null && child.kill(sig);
+}
+
 function execute(file, args, { input, inputFile, outputFile, onOutput, timeout = 60000, state, cancellable = true, rawCapture = !onOutput && !outputFile, interceptStderr } = {}) {
   return new Promise(resolve => {
     const child = spawn(file, args, { stdio: ['pipe', 'pipe', 'pipe'] });
@@ -112,9 +122,10 @@ function execute(file, args, { input, inputFile, outputFile, onOutput, timeout =
     const rawDecoder = new StringDecoder('utf8');
     const out = lineSink(text => { stdout = (stdout + text).slice(-2 * 1024 * 1024); onOutput?.(text); }, state?.values);
     const err = lineSink(text => { stderr = (stderr + text).slice(-2 * 1024 * 1024); onOutput?.(text); }, state?.values, interceptStderr);
-    if (state && cancellable) state.children.add(child);
+    const signalChild = ownChild(child);
+    if (state && cancellable) state.children.add(signalChild);
     let killTimer;
-    const stop = () => { child.kill('SIGTERM'); killTimer ??= setTimeout(() => child.kill('SIGKILL'), 30000); };
+    const stop = () => { signalChild('SIGTERM'); killTimer ??= setTimeout(() => signalChild('SIGKILL'), 30000); };
     sink?.on('error', error => { spawnError = `output file ${error.code || 'write failure'}`; stop(); });
     const timer = setTimeout(() => { timedOut = true; stop(); }, timeout);
     let source;
@@ -130,7 +141,7 @@ function execute(file, args, { input, inputFile, outputFile, onOutput, timeout =
     child.on('error', error => { spawnError = error.code || 'spawn failed'; });
     child.on('close', async (code, signal) => {
       clearTimeout(timer); clearTimeout(killTimer); source?.destroy();
-      state?.children.delete(child); out.end(); err.end();
+      state?.children.delete(signalChild); out.end(); err.end();
       if (rawCapture) stdout += rawDecoder.end();
       if (sink) await new Promise(done => sink.end(done));
       resolve({ code: spawnError ? 1 : timedOut ? 124 : code ?? (signal === 'SIGTERM' ? 143 : 1), stdout, stderr: stderr || spawnError || '', error: spawnError });
@@ -300,49 +311,54 @@ def cancel(signum, frame):
 for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP): signal.signal(sig,cancel)
 libc=ctypes.CDLL(None, use_errno=True)
 if libc.prctl(36,1,0,0,0) != 0: raise OSError(ctypes.get_errno(),'subreaper unavailable')
-def identity(pid):
-    try: return pathlib.Path('/proc/'+str(pid)+'/stat').read_text().rsplit(')',1)[1].split()[19]
+run_id=ctl.name
+def stat(pid):
+    try: return pathlib.Path('/proc/'+str(pid)+'/stat').read_text().rsplit(')',1)[1].split()
+    except ProcessLookupError: return None
     except FileNotFoundError: return None
 def save(name, data):
-    tmp=ctl/(name+'.tmp'); tmp.write_text(json.dumps(data)); tmp.replace(ctl/name)
-save('owner.json',{'pid':os.getpid(),'start':identity(os.getpid())})
-proc=None; pgid=None; result=1; stopped=None; deadline=time.monotonic()+d['seconds']
+    tmp=ctl/(name+'.tmp'); tmp.write_text(json.dumps(dict(data,run=run_id))); tmp.replace(ctl/name)
+save('owner.json',{'pid':os.getpid(),'start':stat(os.getpid())[19]})
+proc=None; leader_start=None; result=1; deadline=time.monotonic()+d['seconds']
 def adopted():
-    try: ids=pathlib.Path('/proc/'+str(os.getpid())+'/task/'+str(os.getpid())+'/children').read_text().split()
-    except FileNotFoundError: return []
+    ids=pathlib.Path('/proc/'+str(os.getpid())+'/task/'+str(os.getpid())+'/children').read_text().split()
     return [int(pid) for pid in ids if not proc or int(pid)!=proc.pid]
 def reap():
     for pid in adopted():
         try: os.waitpid(pid,os.WNOHANG)
         except ChildProcessError: pass
-def group_exists():
-    if not pgid: return False
-    try: os.killpg(pgid,0); return True
-    except ProcessLookupError: return False
+def exited():
+    # Observe completion but keep the leader waitable until the LAST group signal.
+    # Its PID/PGID cannot be reused while our child remains unreaped.
+    return os.waitid(os.P_PID,proc.pid,os.WEXITED|os.WNOHANG|os.WNOWAIT)
+def signal_owned(pid,start,sig,group=False):
+    fields=stat(pid)
+    if not fields or fields[19]!=start or int(fields[1])!=os.getpid(): return
+    if group and int(fields[2])!=pid: return
+    try:
+        if group: os.killpg(pid,sig)
+        else: os.kill(pid,sig)
+    except ProcessLookupError: pass
 def stop_group(sig):
-    if proc and proc.poll() is None:
-        # Cover cancellation between fork and the setsid executable creating its group.
-        try: proc.send_signal(sig)
-        except ProcessLookupError: pass
-    if pgid:
-        try: os.killpg(pgid,sig)
-        except ProcessLookupError: pass
-    # Also stop descendants that detached from the original process group.
+    if proc: signal_owned(proc.pid,leader_start,sig,True)
+    # Detached descendants become our direct, waitable children on adoption.
     for pid in adopted():
-        try: os.kill(pid,sig)
-        except ProcessLookupError: pass
+        fields=stat(pid)
+        if fields: signal_owned(pid,fields[19],sig)
 try:
     if cancelled or (ctl/'cancel').exists(): result=143
     else:
         bootstrap='if [ -f "$HOME/devbox-env.sh" ]; then . "$HOME/devbox-env.sh"; else export PATH="$HOME/.local/node/bin:$HOME/.local/bin:$PATH"; fi'
         exports='; '.join('export '+key+'='+shlex.quote(value) for key,value in d['env'].items())
         shell=bootstrap+'\\n'+exports+'\\n'+d['command']
-        proc=subprocess.Popen([shutil.which('setsid'),shutil.which('bash'),'-lc',shell], cwd=d['workspace'], env={**os.environ,**d['env']}, stdin=subprocess.DEVNULL)
-        pgid=proc.pid
-        save('group.json',{'pid':pgid,'start':identity(pgid)})
+        proc=subprocess.Popen([shutil.which('bash'),'-lc',shell], start_new_session=True, cwd=d['workspace'], env={**os.environ,**d['env']}, stdin=subprocess.DEVNULL)
+        leader_start=stat(proc.pid)[19]
+        save('group.json',{'pid':proc.pid,'start':leader_start})
         while True:
-            reap(); code=proc.poll()
-            if code is not None: result=code if code>=0 else 128-code; break
+            reap(); status=exited()
+            if status:
+                result=status.si_status if status.si_code==os.CLD_EXITED else 128+status.si_status
+                break
             if cancelled or (ctl/'cancel').exists(): result=143; break
             if time.monotonic()>=deadline: result=124; break
             time.sleep(.05)
@@ -351,16 +367,23 @@ finally:
     limit=time.monotonic()+10
     while time.monotonic()<limit:
         reap()
-        if proc: proc.poll()
-        if (not proc or proc.poll() is not None) and not group_exists() and not adopted(): break
+        if (not proc or exited()) and not adopted(): break
         if time.monotonic()>limit-8: stop_group(signal.SIGKILL)
         time.sleep(.05)
     reap()
-    gone=(not proc or proc.poll() is not None) and not group_exists() and not adopted()
+    gone=(not proc or exited() is not None) and not adopted()
+    if gone and proc: proc.wait()
     save('done.json',{'gone':gone,'exit':result if gone else 70})
 sys.exit(result if gone else 70)
 `,
   cleanup: pythonHeader + `ctl=pathlib.Path(d['control']); ctl.mkdir(parents=True, exist_ok=True)
+run_id=ctl.name
+def read_own(file):
+    record=json.loads(file.read_text())
+    if record.get('run')!=run_id: sys.exit(70)
+    return record
+for file in ('owner.json','group.json','done.json'):
+    if (ctl/file).exists(): read_own(ctl/file)
 (ctl/'cancel').touch()
 def alive(record):
     try:
@@ -370,18 +393,22 @@ def alive(record):
 def group_gone():
     file=ctl/'group.json'
     if not file.exists(): return True
-    pgid=json.loads(file.read_text())['pid']
+    group=read_own(file); pgid=group['pid']
+    current=pathlib.Path('/proc/'+str(pgid)+'/stat')
+    try:
+        if current.read_text().rsplit(')',1)[1].split()[19]!=group['start']: return True
+    except FileNotFoundError: pass
     try: os.killpg(pgid,0); return False
     except ProcessLookupError: return True
 limit=time.monotonic()+20
 while time.monotonic()<limit:
     done=ctl/'done.json'; owner=ctl/'owner.json'
     if done.exists():
-        record=json.loads(done.read_text())
+        record=read_own(done)
         if record['gone'] and group_gone(): print('group-gone'); sys.exit(0)
         sys.exit(70)
     if owner.exists():
-        record=json.loads(owner.read_text())
+        record=read_own(owner)
         if not alive(record):
             # Never signal a possibly reused group without its owning supervisor.
             if group_gone(): print('group-gone'); sys.exit(0)
@@ -537,15 +564,26 @@ async function snapshot(opts, temp, state, ancestors = new Set()) {
 }
 
 async function makeBundle(snapshot, known, state) {
-  const exclusions = [];
-  for (const commit of [...new Set(known)]) {
-    if (!/^[a-f0-9]{40,64}$/.test(commit)) continue;
-    const exists = await execute('git', ['--git-dir', snapshot.exportRepo, 'cat-file', '-e', `${commit}^{commit}`], { state });
-    if (!exists.code) exclusions.push(`^${commit}`);
+  const git = args => execute('git', ['--git-dir', snapshot.exportRepo, ...args], { state, timeout: 300000 });
+  const bases = [];
+  for (const oid of new Set(known)) {
+    if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(oid)) continue;
+    if (state.cancel) throw Object.assign(Error('bundle cancelled'), { code: state.cancel });
+    if ((await git(['cat-file', '-e', oid + '^{commit}'])).code) continue;
+    if ((await git(['merge-base', '--is-ancestor', oid, snapshot.commit])).code === 0) bases.push('^' + oid);
   }
-  const bundle = path.join(snapshot.temp, `transfer-${process.pid}-${randomUUID()}.bundle`);
-  checked(await execute('git', ['--git-dir', snapshot.exportRepo, 'bundle', 'create', bundle, 'refs/heads/export', ...exclusions], { state, timeout: 300000 }), 'incremental bundle');
-  return bundle;
+  // A readable commit header does not guarantee pack-objects can walk its tree.
+  // Try fewer prerequisites, then a self-contained pack. Never retry cancellation.
+  const plans = bases.length ? [bases] : [];
+  if (bases.length > 1) plans.push(bases.slice(0, Math.floor(bases.length / 2)));
+  plans.push([]);
+  for (const exclusions of plans) {
+    const file = path.join(snapshot.temp, 'transfer-' + randomUUID() + '.bundle');
+    const result = await git(['bundle', 'create', file, 'refs/heads/export', ...exclusions]);
+    if (!result.code) return file;
+    fs.rmSync(file, { force: true });
+    if (state.cancel || !exclusions.length || result.code === 124) checked(result, exclusions.length ? 'incremental bundle' : 'full bundle');
+  }
 }
 
 // Local short critical sections merge shared JSON without losing another shard's host/key.
@@ -628,7 +666,7 @@ async function collectGarbage({ rows, days = 7, host, state, emit = text => proc
 
 function cancellationState(values = []) {
   const state = { children: new Set(), cancel: 0, values };
-  state.stop = code => { state.cancel ||= code; for (const child of state.children) child.kill('SIGTERM'); };
+  state.stop = code => { state.cancel ||= code; for (const signalChild of state.children) signalChild('SIGTERM'); };
   return state;
 }
 
@@ -815,9 +853,21 @@ async function shard(opts) {
 }
 
 async function main(args) {
+  if (args[0] === 'stop') {
+    const [, outFlag, out, idFlag, runId] = args;
+    if (args.length !== 5 || outFlag !== '--out' || idFlag !== '--run-id' || !/^[0-9a-f-]{36}$/.test(runId))
+      throw Error('usage: devbox-run.mjs stop --out DIR --run-id UUID');
+    if (JSON.parse(fs.readFileSync(path.join(out, 'run.json'), 'utf8')).runId !== runId)
+      throw Error('run identity mismatch');
+    // Even if DIR changes between check and write, a different run ignores this name.
+    try { fs.writeFileSync(path.join(out, 'stop-' + runId), '', { flag: 'wx', mode: 0o600 }); }
+    catch (error) { if (error.code !== 'EEXIST') throw error; }
+    console.log('stop requested for ' + runId);
+    return 0;
+  }
   const opts = parseArgs(args);
   if (opts.help) {
-    console.log('Usage: devbox-run.mjs [--project P] --task T --repo PATH [--ref COMMIT|HEAD|worktree] [--pool devbox-cn|devbox-cn-light] [--shards N] [--artifact GLOB]... [--out DIR] [--timeout MIN] [--env K=V]... [--rerun-on-fail] [--allow-flaky] [--affinity KEY] [--prefer-host IP] [--need CAP]... [--exclude-slot IDS] [--exclude-host IPS] [--submodules] [--watch-pid PID] -- COMMAND\n       devbox-run.mjs gc [--host IP] [--days N]\nCOMMAND supports {shard} and {shards}. Timeout includes queue/upload/run; cleanup follows. See references/devbox-run.md.');
+    console.log('Usage: devbox-run.mjs [--project P] --task T --repo PATH [--ref COMMIT|HEAD|worktree] [--pool devbox-cn|devbox-cn-light] [--shards N] [--artifact GLOB]... [--out DIR] [--timeout MIN] [--env K=V]... [--rerun-on-fail] [--allow-flaky] [--affinity KEY] [--prefer-host IP] [--need CAP]... [--exclude-slot IDS] [--exclude-host IPS] [--submodules] [--watch-pid PID] -- COMMAND\n       devbox-run.mjs gc [--host IP] [--days N]\n       devbox-run.mjs stop --out DIR --run-id UUID\nCOMMAND supports {shard} and {shards}. Timeout includes queue/upload/run; cleanup follows. See references/devbox-run.md.');
     return 0;
   }
   if (opts.gc) {
@@ -834,13 +884,19 @@ async function main(args) {
   }
   fs.mkdirSync(opts.out, { recursive: true });
   if (fs.existsSync(path.join(opts.out, 'summary.json')) || fs.readdirSync(opts.out).some(n => /^shard-\d/.test(n))) throw Error('--out already contains a devbox run');
+  const runId = randomUUID(), stopFile = path.join(opts.out, 'stop-' + runId);
+  fs.writeFileSync(path.join(opts.out, 'run.json'), JSON.stringify({ runId }) + '\n', { mode: 0o600, flag: 'wx' });
+  console.log('runId=' + runId);
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'devbox-run-'));
   const state = cancellationState(Object.values(opts.env));
   const workers = new Set();
-  const stop = code => { state.stop(code); for (const child of workers) child.kill('SIGTERM'); };
+  const stop = code => { state.stop(code); for (const signalChild of workers) signalChild('SIGTERM'); };
   for (const [signal, code] of Object.entries({ SIGINT: 130, SIGTERM: 143, SIGHUP: 129 })) process.on(signal, () => stop(code));
   const watchPid = Number(opts.watchPid || process.ppid);
-  const watch = setInterval(() => { try { process.kill(watchPid, 0); } catch { stop(143); } }, 1000);
+  const watch = setInterval(() => {
+    if (fs.existsSync(stopFile)) stop(143);
+    else try { process.kill(watchPid, 0); } catch { stop(143); }
+  }, 1000);
   try {
     opts.snapshot = await snapshot(opts, temp, state);
     if (state.cancel) return state.cancel;
@@ -852,19 +908,19 @@ async function main(args) {
     opts.preferSlotSupported = /--prefer-slot\b/.test(help.stdout + help.stderr);
     const shards = await Promise.all(Array.from({ length: opts.shards }, (_, index) => new Promise(resolve => {
       const child = fork(script, ['--internal-shard'], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
-      workers.add(child); let result;
+      const signalChild = ownChild(child); workers.add(signalChild); let result;
       child.stdout.pipe(process.stdout); child.stderr.pipe(process.stderr);
       child.on('message', message => { result = message; });
       child.on('error', () => {});
       child.on('exit', (code, signal) => {
-        workers.delete(child);
+        workers.delete(signalChild);
         resolve(result || { shard: index + 1, slot: null, host: null, exit: code || (signal ? 143 : 1), error: 'shard process exited without cleanup report' });
       });
       child.send({ ...opts, shard: index + 1, parentPid: process.pid });
-      if (state.cancel) child.kill('SIGTERM');
+      if (state.cancel) signalChild('SIGTERM');
     })));
     const exit = state.cancel || shards.find(item => item.exit)?.exit || 0;
-    const summary = { project: opts.project, task: opts.task, commit: opts.snapshot.commit, commandHash: createHash('sha256').update(opts.command).digest('hex'), time: new Date().toISOString(), exit, shards };
+    const summary = { runId, project: opts.project, task: opts.task, commit: opts.snapshot.commit, commandHash: createHash('sha256').update(opts.command).digest('hex'), time: new Date().toISOString(), exit, shards };
     writeJSON(path.join(opts.out, 'summary.json'), summary);
     for (const item of shards.filter(item => item.flaky)) {
       fs.appendFileSync(path.join(cacheDir(), 'flaky-log.jsonl'), `${JSON.stringify({ project: opts.project, task: opts.task, commandHash: summary.commandHash, shard: item.shard, hosts: item.attempts.filter(a => !a.diskGuard).map(a => a.host), time: summary.time })}\n`, { mode: 0o600 });

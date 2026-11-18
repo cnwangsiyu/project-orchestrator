@@ -2,7 +2,7 @@
 
 `scripts/devbox-run.mjs` runs Linux commands on registered, open CN devbox slots.
 It requires Node 22, Python 3, Git, tar and the user's working SSH command locally; boxes
-need Linux, Python 3.9 or later, Git, tar, Bash and util-linux `setsid`. It uses the public
+need Linux, Python 3.9 or later, Git, tar and Bash. It uses the public
 `~/.claude/orchestrator/_shared/res` controller, with no local build/lane locks.
 
 ```sh
@@ -101,8 +101,10 @@ data disk and never uses sudo. Its layout is:
 ```
 
 The first transfer sends a Git bundle of the requested commit and its history.
-Later transfers exclude commits reachable from the box's known refs; if the
-requested object is already present, no bundle is sent. A temporary local bare
+Later transfers use only locally readable ancestors of the requested commit as
+bundle prerequisites. If packing fails, the runner tries a smaller set when
+possible, then a self-contained bundle. When the requested object is already
+present, no bundle is sent. A temporary local bare
 repository references the source's objects without modifying its refs or
 copying its Git configuration. A per-repository remote flock serializes fetch,
 worktree changes and garbage collection. No remote Git login is needed.
@@ -168,7 +170,14 @@ all unused images. Shared caches and toolchains remain. The result prints the
 change in filesystem free space; concurrent activity can affect that number.
 Busy, retired, unregistered and approval-required slots are skipped.
 
-Every command runs via `setsid` in its own process group. A Linux subreaper
+A wrapper can cancel its run by saving the UUID printed as `runId=...` at
+launch and calling `node scripts/devbox-run.mjs stop --out DIR --run-id UUID`.
+The runner also writes the UUID to `DIR/run.json`. Use a fresh directory for each
+run. The stop command checks the receipt and writes a UUID-specific request.
+The wrapper should wait for the runner to finish cleanup and return its leases.
+Sending TERM to a PID recovered from an old file can stop a different task.
+
+Every command starts a new session and process group using `setsid(2)`. A Linux subreaper
 outside that group continuously reaps adopted children, records process
 identity, and enforces a remote deadline even when the local connection is
 lost. Signals, timeout and normal completion all stop remaining descendants.

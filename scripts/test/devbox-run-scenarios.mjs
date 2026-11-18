@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn, execFileSync } from 'node:child_process';
+import { spawn, spawnSync, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { parseArgs, readRegistry, remoteScripts, storeIdentity } from '../devbox-run.mjs';
 
@@ -119,8 +119,6 @@ if(op==='run') {
 if(op==='cleanup'){
  if(c.badCleanup)process.exit(70);
  fs.mkdirSync(d.control,{recursive:true});fs.writeFileSync(path.join(d.control,'cancel'),'');
- const group=path.join(d.control,'group.json');
- if(fs.existsSync(group)){const {pid}=JSON.parse(fs.readFileSync(group));try{process.kill(-pid,'SIGKILL')}catch{}}
  event('group-gone',{host});console.log('group-gone');return;
 }
 if(op==='artifacts'&&c.badArtifact)process.exit(66);
@@ -136,7 +134,7 @@ process.exit(await new Promise(r=>child.on('exit',code=>r(code??143))));
 })().catch(e=>{console.error(e.stack);process.exit(1)});
 `;
 
-async function run(f, extra = [], command = 'echo {shard}/{shards}', signalWhen) {
+async function run(f, extra = [], command = 'echo {shard}/{shards}', signalWhen, onSignal = child => child.kill('SIGTERM')) {
   const out = path.join(f.dir, `out-${Date.now()}-${Math.random().toString(16).slice(2)}`);
   const args = extra[0] === 'gc' ? extra : ['--project', 'fixture', '--task', 'scenario', '--repo', f.repo, '--out', out, '--timeout', '1', ...extra, '--', command];
   const child = spawn(process.execPath, [script, ...args], { env: f.env, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -148,7 +146,7 @@ async function run(f, extra = [], command = 'echo {shard}/{shards}', signalWhen)
     if (signalWhen) {
       const deadline = Date.now() + 60000;
       while (!signalWhen(f.events())) { assert.ok(!finished && Date.now() < deadline, `fixture did not reach signal point: ${stdout}${stderr}`); await sleep(25); }
-      child.kill('SIGTERM');
+      onSignal(child, out);
     }
     code = await closed;
   } finally { if (!finished) { child.kill('SIGTERM'); await closed; } clearTimeout(watchdog); }
@@ -167,7 +165,103 @@ function workspace(f, host = '192.0.2.1', slot = 'devbox-cn-1') {
   return path.join(dir, fs.readdirSync(dir)[0], slot);
 }
 
-try {
+async function bundleRecovery() {
+  const f = fixture(); const initial = await run(f); ok(initial);
+  const store = initial.summary.shards[0].attempts[0].repository;
+  const sibling = path.join(f.dir, 'sibling');
+  git(f.repo, 'clone', f.repo, sibling);
+  git(sibling, '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-m', 'foreign');
+  const foreign = git(sibling, 'rev-parse', 'HEAD');
+  git(store, 'fetch', sibling, 'HEAD:refs/heads/foreign');
+  assert.throws(() => git(f.repo, 'cat-file', '-e', foreign));
+  const realGit = execFileSync('which', ['git'], {encoding:'utf8'}).trim();
+  const trace = path.join(f.dir, 'bundle-plans');
+  fs.writeFileSync(path.join(f.dir, 'bin/git'), `#!/usr/bin/env python3
+import json, os, sys
+args=sys.argv[1:]
+if 'bundle' in args and 'create' in args:
+    bases=[x for x in args if x.startswith('^')]
+    with open(${JSON.stringify(trace)}, 'a') as f: print(json.dumps(bases),file=f)
+    if bases and os.getenv('FIXTURE_PACK_FAILURE'):
+        sys.exit('pack-objects died (fixture)')
+os.execv(${JSON.stringify(realGit)}, ['git', *args])
+`, {mode:0o755});
+  for (const name of ['next', 'last']) {
+    fs.writeFileSync(path.join(f.repo,'source.txt'), name); git(f.repo, 'commit', '-am', name);
+    if (name === 'last') {
+      f.env.FIXTURE_PACK_FAILURE = '1';
+      fs.writeFileSync(trace, '');
+    }
+    const head = git(f.repo,'rev-parse','HEAD');
+    ok(await run(f, [], `test "$(git rev-parse HEAD)" = ${head} && test "$(cat source.txt)" = ${name}`));
+    const plans = fs.readFileSync(trace,'utf8').trim().split('\n').map(JSON.parse);
+    assert.ok(plans.every(bases => !bases.includes('^'+foreign)));
+    assert.deepEqual(plans.map(bases => bases.length), name === 'last' ? [2,1,0] : [1]);
+  }
+  returned(f);
+  console.log('PASS foreign store commit skipped, verified bases reduced, full fallback checks out requested HEAD');
+}
+
+async function stopOwnership() {
+  const f = fixture(), other = spawn('sleep',['120'], {detached:true, stdio:'ignore'});
+  const closed = new Promise(resolve => other.once('exit', resolve));
+  try {
+    const r = await run(f, [], 'sleep 100', events => events.some(e => e.op === 'group'), (_, out) => {
+      const receipt = JSON.parse(fs.readFileSync(path.join(out,'run.json')));
+      const stale = 'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa';
+      const request = id => spawnSync(process.execPath,[script,'stop','--out',out,'--run-id',id]);
+      // A stale receipt from another run must not stop either the job or the foreign process.
+      assert.equal(request(stale).status, 1);
+      assert.ok(!fs.existsSync(path.join(out,'stop-'+receipt.runId)));
+      assert.equal(request(receipt.runId).status, 0);
+    });
+    assert.equal(r.code,143); returned(f);
+    const ctl = path.join(f.dir,'stale-control'); fs.mkdirSync(ctl);
+    const old = {pid:other.pid, start:'0', run:'previous-run'};
+    fs.writeFileSync(path.join(ctl,'owner.json'),JSON.stringify(old));
+    fs.writeFileSync(path.join(ctl,'group.json'),JSON.stringify(old));
+    const cleanup = () => spawnSync('python3',['-c',remoteScripts.cleanup,Buffer.from(JSON.stringify({control:ctl})).toString('base64')]);
+    assert.equal(cleanup().status,70); assert.ok(!fs.existsSync(path.join(ctl,'cancel')));
+    // Exercise the production signal gate with a real, live foreign process group.
+    // Supply synthetic /proc fields so the start-time/parent mismatch is deterministic on macOS too.
+    const verifyGate = `import ast,json,os,signal,sys
+tree=ast.parse(sys.stdin.read())
+node=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='signal_owned')
+exec(compile(ast.Module(body=[node],type_ignores=[]),'signal-gate','exec'))
+pid=int(sys.argv[1]); fields=['0']*20
+fields[1]=str(os.getpid()); fields[2]=str(pid); fields[19]='new-start'
+stat=lambda _: fields
+for group in (True,False):
+    signal_owned(pid,'stale-start',signal.SIGTERM,group)
+fields[1]='0'
+for group in (True,False):
+    signal_owned(pid,'new-start',signal.SIGTERM,group)
+os.kill(pid,0)`;
+    execFileSync('python3',['-c',verifyGate,String(other.pid)],{input:remoteScripts.run});
+    if (process.platform === 'linux') {
+      const active = path.join(f.dir,'linux-supervisor'); fs.mkdirSync(active);
+      const data = { control:active, workspace:f.dir, seconds:5, env:{},
+        command:'sleep 120 & echo $! > owned-background; exit 7' };
+      const result = spawnSync('python3',['-c',remoteScripts.run,Buffer.from(JSON.stringify(data)).toString('base64')],{timeout:20000});
+      assert.equal(result.status,7,result.stderr?.toString());
+      assert.equal(JSON.parse(fs.readFileSync(path.join(active,'done.json'))).gone,true);
+      assert.throws(() => process.kill(Number(fs.readFileSync(path.join(f.dir,'owned-background'))),0), /ESRCH/);
+      old.run = path.basename(ctl);
+      for (const file of ['owner.json','group.json']) fs.writeFileSync(path.join(ctl,file),JSON.stringify(old));
+      assert.equal(cleanup().status,0, 'reused group ID with a different start time');
+    }
+    const alive = await Promise.race([closed.then(() => false), sleep(100).then(() => true)]);
+    assert.equal(alive,true,'the foreign process survived both stop and cleanup');
+  } finally { other.kill('SIGTERM'); await closed; }
+  console.log('PASS UUID stop targets its own run; stale remote ownership records preserve foreign process');
+}
+
+async function scenarios() {
+  const only = process.env.DEVBOX_TEST_CASE;
+  if (only && !['bundle', 'ownership'].includes(only)) throw Error('unknown devbox fixture case');
+  if (!only || only === 'bundle') await bundleRecovery();
+  if (!only || only === 'ownership') await stopOwnership();
+  if (only) return;
   const roots = path.join(temp, 'root-probe'), data = path.join(roots, 'data00'), home = path.join(roots, 'home');
   fs.mkdirSync(data, { recursive: true }); fs.mkdirSync(home); fs.writeFileSync(path.join(roots, 'meminfo'), 'MemTotal: 33554432 kB\n');
   const probeSource = remoteScripts.probe.replace("pathlib.Path('/data00')", `pathlib.Path(${JSON.stringify(data)})`)
@@ -355,4 +449,6 @@ print(shell)`, JSON.stringify({ env, command: 'printf "%s:" "$BOOTSTRAP_VALUE"; 
   const started = fixture({ postStartFailure: true }); assert.equal((await run(started)).code, 255);
   assert.equal(started.events().filter(e => e.op === 'run').length, 1); returned(started);
   console.log('PASS jittered SSH establishment retries, bounded infra failure, no replay after remote start, no ControlMaster');
-} finally { fs.rmSync(temp, { recursive: true, force: true }); }
+}
+
+try { await scenarios(); } finally { fs.rmSync(temp, { recursive: true, force: true }); }
