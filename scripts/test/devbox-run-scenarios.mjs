@@ -64,7 +64,13 @@ if(op==='return'){
 }
 if(!['take','wait','wait-pool'].includes(op))process.exit(9);
 event('acquire-call',{args:a,pid:flag(a,'--pid')});
-if(c.acquireProgress&&op==='wait-pool'){console.log('waiter-start pool='+a[1]);console.error('rollback/return previous attempt');console.log('ack waiting');const until=Date.now()+120000;while(!fs.existsSync(path.join(c.dir,'progress-observed'))){if(Date.now()>until)process.exit(9);await sleep(50);}}
+if(c.acquireProgress&&op==='wait-pool'){
+ console.log('waiter-start pool='+a[1]);console.error('rollback/return previous attempt');
+ console.log('res: pass 1 started');console.error('res: pass 1 waiting');
+ console.error("res: syntax error near unexpected token ')'");
+ console.error('res: api_key=fixture-res-value');console.log('ack waiting');
+ const until=Date.now()+120000;while(!fs.existsSync(path.join(c.dir,'progress-observed'))){if(Date.now()>until)process.exit(9);await sleep(50);}
+}
 let ids=rows.filter(r=>r.policy==='open'&&(op==='wait-pool'?(a[1].endsWith('light')?/^devbox-cn-light(?:-\d+)?$/.test(r.slot):/^devbox-cn-\d+$/.test(r.slot)):r.slot===a[1]));
 for (const [opt,field] of [['--exclude-slot','slot'],['--exclude-host','host']]) if(a.includes(opt))ids=ids.filter(r=>!flag(a,opt).split(',').includes(r[field]));
 if(a.includes('--need'))ids=ids.filter(r=>flag(a,'--need').split(',').every(cap=>r.caps.includes(cap)));
@@ -456,7 +462,8 @@ async function receiptScenarios() {
 async function resProgressScenarios() {
   const f = fixture({ acquireProgress: true });
   let observed = false;
-  const result = await run(f, [], 'true', () => {
+  const result = await run(f, ['--env', 'N=1', '--env', 'LABEL=fixture-long-value'],
+    'printf "result: %s23 %s\\n" "$N" "$LABEL"; printf "MY_PASS=fixture-remote-value\\n"', () => {
     const out = fs.readdirSync(f.dir).find(name => name.startsWith('out-'));
     if (!out) return false;
     const file = path.join(f.dir, out, 'shard-1-state.json');
@@ -479,7 +486,18 @@ async function resProgressScenarios() {
   assert.equal(state.status, 'complete'); assert.equal(state.exit, 0);
   assert.ok(state.resEvents.some(event => event.kind === 'slot'));
   assert.ok(state.resEvents.some(event => event.operation === 'return'));
-  console.log('PASS live timestamped res stdout/stderr, waiter/rollback/ack/slot/return state and unchanged final slot parsing');
+  assert.ok(state.resEvents.some(event => event.stream === 'stdout' && event.message === 'res: pass 1 started'));
+  assert.ok(state.resEvents.some(event => event.stream === 'stderr' && event.message === 'res: pass 1 waiting'));
+  const log = fs.readFileSync(result.summary.shards[0].log, 'utf8');
+  for (const output of [result.stdout, log]) {
+    assert.match(output, /syntax error near unexpected token/);
+    assert.match(output, /slot=devbox-cn-1/);
+    assert.match(output, /result: 123 \[MASKED\]/);
+    assert.match(output, /\[MASKED sensitive output\]/);
+    assert.doesNotMatch(output, /fixture-(?:long|res|remote)-value/);
+  }
+  assert.doesNotMatch(JSON.stringify(state), /fixture-res-value/);
+  console.log('PASS live res diagnostics, slot parsing, short env values, and local and remote value masking');
 }
 
 async function bundleRecovery() {
@@ -614,7 +632,7 @@ async function scenarios() {
   assert.equal(rows.length, 2); assert.deepEqual(parseArgs(['--project', 'p', '--task', 't', '--repo', f.repo, '--need', 'node,vesdk-android', '--', 'true']).need, ['node', 'vesdk-android']);
   for (const [name, source] of Object.entries(remoteScripts)) execFileSync('python3', ['-c', 'import ast,sys;ast.parse(sys.stdin.read())'], { input: source });
   const r = await run(f, ['--shards', '2', '--env', 'BUILD_FLAG=1']); ok(r);
-  assert.match(r.stdout, /\[MASKED\]\/2/); assert.match(r.stdout, /2\/2/);
+  assert.match(r.stdout, /^1\/2$/m); assert.match(r.stdout, /^2\/2$/m);
   assert.equal(new Set(r.summary.shards.map(s => s.slot)).size, 2);
   assert.equal(new Set(f.events().filter(e => e.op === 'take').map(e => e.pid)).size, 2);
   for (const h of Object.values(JSON.parse(fs.readFileSync(path.join(f.shared, 'devbox-hosts.json'))))) { assert.equal(h.fs, '/data00'); assert.ok(h.probedAt); }

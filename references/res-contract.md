@@ -115,7 +115,8 @@ Branch -> all suites -> review -> owner switches -> dated digest notification an
 See [resources.md](resources.md#res-ownership) for source provenance, install/rollback and known pitfalls.
 Do not merge over or replace the currently installed symlink target before it has been backed up.
 Coordinate a quiescent switch; `--force` is an explicit owner override, never permission to kill waiters.
-Old waiters keep old Bash code until their owners re-invoke them.
+Stage the executable (or symlink) beside its destination and publish it by atomic rename. An in-place
+copy can make a running Bash waiter read new source after it has committed a slot.
 
 ## Caller Compatibility and Observation
 

@@ -2583,7 +2583,11 @@ case "${1:-}" in
     else cmd_acquire build 0 "$@"; fi ;;
   wait-build) shift; cmd_acquire build 1 "$@" ;;
   wait-lane) shift; cmd_acquire lane 1 "$@" ;;
-  wait-pool) shift; cmd_wait_pool "$@" ;;
+  wait-pool)
+    shift
+    cmd_wait_pool "$@"
+    # Bash can read more source after a long wait if the executable was overwritten.
+    exit 0 ;;
   box-health)
     shift
     [ "$#" -eq 0 ] || { [ "$#" -eq 1 ] && [ "$1" = --json ]; } || die 'box-health accepts only --json'

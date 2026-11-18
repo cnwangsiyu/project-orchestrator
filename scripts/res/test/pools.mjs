@@ -53,8 +53,8 @@ const take = (id, by = id) => { const r = run(['take', id, ...args(by)]); eq(r.c
 const release = (id, by = id) => eq(run(['return', id, '--by', by]).code, 0);
 const acquire = (by, pool = 'devbox-cn', extra = []) => run(['wait-pool', pool, ...args(by), '--timeout', '0', ...extra]);
 const children = new Set();
-function start(by, extra = {}) {
-  const child = spawn(process.env.RES_SOURCE, ['wait-pool', 'devbox-cn', ...args(by), '--timeout', '2'], { env: { ...env, ...extra }, stdio: ['ignore', 'pipe', 'pipe'] });
+function start(by, extra = {}, source = process.env.RES_SOURCE) {
+  const child = spawn(source, ['wait-pool', 'devbox-cn', ...args(by), '--timeout', '2'], { env: { ...env, ...extra }, stdio: ['ignore', 'pipe', 'pipe'] });
   child.text = ''; child.stdout.on('data', b => { child.text += b; }); child.stderr.on('data', b => { child.text += b; });
   child.done = new Promise((resolve, reject) => { child.on('error', reject); child.on('close', code => { children.delete(child); resolve(code); }); });
   children.add(child); return child;
@@ -119,8 +119,17 @@ try {
   const log = fs.readFileSync(path.join(state, 'log.tsv'), 'utf8');
   for (const event of ['start', 'acquire', 'timeout', 'rejoin']) ok(log.includes(`\twaiter-${event}\tdevbox-cn-any\t`));
   eq(locks().filter(n => n.startsWith('heavy-')), []);
+  const replacedRes = path.join(root, 'res-replaced'), replaceMark = path.join(root, 'replace');
+  fs.copyFileSync(process.env.RES_SOURCE, replacedRes);
+  const waitingDuringUpdate = start('during-update', { PAUSE_MARK: replaceMark }, replacedRes);
+  await until(() => fs.existsSync(replaceMark), waitingDuringUpdate);
+  // Simulate unexpected bytes at the old file offset after an in-place copy.
+  fs.appendFileSync(replacedRes, ')\n');
+  release('devbox-cn-4', 'second'); unblock(replaceMark);
+  eq(await waitingDuringUpdate.done, 0, waitingDuringUpdate.text);
+  ok(waitingDuringUpdate.text.includes('slot=devbox-cn-4'));
+  eq(owner('devbox-cn-4'), 'during-update'); release('devbox-cn-4', 'during-update');
   for (const id of ['devbox-cn-1', 'devbox-cn-2', 'devbox-cn-3', 'devbox-cn-5']) release(id);
-  release('devbox-cn-4', 'second');
 
   const healthFile = path.join(state, 'box-health.json');
   const health = () => JSON.parse(run(['box-health', '--json']).text);

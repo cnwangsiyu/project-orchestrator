@@ -196,14 +196,14 @@ export function planShards(requested, freeSlots, units, history = {}, commandKey
 }
 
 // Output is line-buffered so assignments split across SSH chunks are still masked.
-function lineSink(write, values = [], intercept) {
+function lineSink(write, values = [], intercept, strictOutput = true) {
   const decoder = new StringDecoder('utf8'); let pending = '', dropping = false, privateBlock = false;
   const redact = line => {
     if (/-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/.test(line)) privateBlock = true;
     if (privateBlock) { if (/-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/.test(line)) privateBlock = false; return '[MASKED private key output]'; }
-    for (const value of values.filter(Boolean).sort((a, b) => b.length - a.length)) line = line.replaceAll(value, '[MASKED]');
+    for (const value of values) line = line.replaceAll(value, '[MASKED]');
     line = maskLogText(line).text;
-    if ((sensitive.test(line) || /ACCESS|SCRECT|KEY(?!ALIAS)|PASS|PWD|AUTH|NEXUS|MAGIC|PRIVATE/i.test(line)) && /[=:]|bearer\s/i.test(line)) return '[MASKED sensitive output]';
+    if (strictOutput && (sensitive.test(line) || /ACCESS|SCRECT|KEY(?!ALIAS)|PASS|PWD|AUTH|NEXUS|MAGIC|PRIVATE/i.test(line)) && /[=:]|bearer\s/i.test(line)) return '[MASKED sensitive output]';
     return line.replace(/\bAKIA[A-Z0-9]{16}\b/g, '[MASKED access key]');
   };
   return {
@@ -231,14 +231,14 @@ function ownChild(child) {
     && child.signalCode === null && child.kill(sig);
 }
 
-function execute(file, args, { input, inputFile, outputFile, onOutput, timeout = 60000, state, cancellable = true, rawCapture = !onOutput && !outputFile, interceptStderr, interceptStdout, env = process.env } = {}) {
+function execute(file, args, { input, inputFile, outputFile, onOutput, timeout = 60000, state, cancellable = true, rawCapture = !onOutput && !outputFile, interceptStderr, interceptStdout, env = process.env, strictOutput = true } = {}) {
   return new Promise(resolve => {
     const child = spawn(file, args, { stdio: ['pipe', 'pipe', 'pipe'], env });
     let stdout = '', stderr = '', timedOut = false, spawnError;
     const sink = outputFile ? fs.createWriteStream(outputFile, { mode: 0o600 }) : null;
     const rawDecoder = new StringDecoder('utf8');
-    const out = lineSink(text => { if (!rawCapture) stdout = (stdout + text).slice(-2 * 1024 * 1024); onOutput?.(text, 'stdout'); }, state?.values, interceptStdout);
-    const err = lineSink(text => { stderr = (stderr + text).slice(-2 * 1024 * 1024); onOutput?.(text, 'stderr'); }, state?.values, interceptStderr);
+    const out = lineSink(text => { if (!rawCapture) stdout = (stdout + text).slice(-2 * 1024 * 1024); onOutput?.(text, 'stdout'); }, state?.values, interceptStdout, strictOutput);
+    const err = lineSink(text => { stderr = (stderr + text).slice(-2 * 1024 * 1024); onOutput?.(text, 'stderr'); }, state?.values, interceptStderr, strictOutput);
     const signalChild = ownChild(child);
     if (state && cancellable) state.children.add(signalChild);
     let killTimer;
@@ -268,6 +268,11 @@ function execute(file, args, { input, inputFile, outputFile, onOutput, timeout =
     else child.stdin.end(input);
     if (state?.cancel && cancellable) stop();
   });
+}
+
+function executeRes(args, options) {
+  // Local res diagnostics still get value masking, but keep their surrounding text.
+  return execute(resCommand(), args, { ...options, strictOutput: false });
 }
 
 function checked(result, label) {
@@ -907,12 +912,12 @@ async function collectGarbage({ rows, days = 7, host, state, emit = text => proc
       const member = rows.find(r => r.slot === item.slot && r.host === row.host);
       if (!member || item.slot === skipSlot || state.cancel) continue;
       const by = `devbox-gc-${process.pid}-${randomUUID()}`;
-      const take = await execute(resCommand(), ['take', member.slot, '--by', by, '--project', 'devbox-run', '--task', 'gc', '--for', 'expired worktree cleanup', '--pid', String(process.pid)], { state });
+      const take = await executeRes(['take', member.slot, '--by', by, '--project', 'devbox-run', '--task', 'gc', '--for', 'expired worktree cleanup', '--pid', String(process.pid)], { state });
       if (take.code === 2 || take.code === 3) continue;
       if (take.code) {
         try {
           const info = Object.fromEntries(fs.readFileSync(path.join(sharedDir(), 'locks', `${member.slot}.d/info`), 'utf8').trim().split('\n').map(line => line.split('\t')));
-          if (info.by === by && info.pid === String(process.pid)) checked(await execute(resCommand(), ['return', member.slot, '--by', by], { state, cancellable: false, timeout: 30000 }), 'interrupted GC return');
+          if (info.by === by && info.pid === String(process.pid)) checked(await executeRes(['return', member.slot, '--by', by], { state, cancellable: false, timeout: 30000 }), 'interrupted GC return');
         } catch (error) { if (error.code !== 'ENOENT') throw error; }
       }
       checked(take, 'GC slot acquisition');
@@ -930,7 +935,7 @@ async function collectGarbage({ rows, days = 7, host, state, emit = text => proc
         checked(result, 'GC');
         for (const line of result.stdout.split('\n')) { try { reclaimed += JSON.parse(line).reclaimedBytes || 0; } catch {} }
       } finally {
-        if (clean) checked(await execute(resCommand(), ['return', member.slot, '--by', by], { state, cancellable: false, timeout: 30000 }), 'GC slot return');
+        if (clean) checked(await executeRes(['return', member.slot, '--by', by], { state, cancellable: false, timeout: 30000 }), 'GC slot return');
       }
     }
   }
@@ -939,7 +944,7 @@ async function collectGarbage({ rows, days = 7, host, state, emit = text => proc
 }
 
 function cancellationState(values = []) {
-  const state = { children: new Set(), cancel: 0, values };
+  const state = { children: new Set(), cancel: 0, values: values.filter(value => value.length >= 6).sort((a, b) => b.length - a.length) };
   state.stop = code => { state.cancel ||= code; for (const signalChild of state.children) signalChild('SIGTERM'); };
   return state;
 }
@@ -967,7 +972,7 @@ async function shard(opts) {
   const remaining = () => Math.max(1, deadline - Date.now());
   const stateFile = path.join(opts.out, `shard-${opts.shard}-state.json`);
   const resEvents = [];
-  const runRes = (args, cleanup = false) => execute(resCommand(), args, {
+  const runRes = (args, cleanup = false) => executeRes(args, {
     state, cancellable: !cleanup, timeout: cleanup ? 30000 : remaining(), rawCapture: true,
     interceptStdout: line => {
       const slot = /^slot=(devbox-cn-(?:\d+|light(?:-\d+)?))$/.exec(line)?.[1];
@@ -1261,7 +1266,7 @@ async function main(args) {
     if (opts.prewarm || requestedShards === 'auto') console.log(`shards=${opts.shards} strategy=${plan.strategy}${!opts.shards ? ' (no idle eligible hosts)' : ''}`);
     if (state.cancel) return state.cancel;
     // Probe both `res help` (lists wait-pool flags without a prefix) and the legacy `wait-pool --help`.
-    const helps = await Promise.all([['help'], ['wait-pool', '--help']].map(args => execute(resCommand(), args, { state })));
+    const helps = await Promise.all([['help'], ['wait-pool', '--help']].map(args => executeRes(args, { state })));
     // Only successful probes count; a failed probe (for example live res rejecting `wait-pool --help`)
     // must never look like a legacy res and silently drop --need/--exclude-* placement constraints.
     const helpText = helps.filter(help => help.code === 0).map(help => `${help.stdout}${help.stderr}`).join('\n');
