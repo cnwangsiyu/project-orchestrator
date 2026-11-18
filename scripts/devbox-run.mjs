@@ -1093,7 +1093,10 @@ async function shard(opts) {
         if (!rows.length) throw Error('no open slot provides all required capabilities');
         // Bad descriptions must not cause a lease or an implicit local-user SSH login.
         if (rows.some(item => !item.target)) throw Error('open pool registry row lacks an unambiguous user@ip description');
-        const internalChoices = rows.filter(item => !failedSlots.has(item.slot) && !diskHosts.has(item.host));
+        const retryHosts = new Set(diskHosts);
+        const mayRetry = item => !failedSlots.has(item.slot) && !retryHosts.has(item.host);
+        if (avoid && rows.some(item => item.host !== avoid.host && callerAllows(item) && mayRetry(item))) retryHosts.add(avoid.host);
+        const internalChoices = rows.filter(mayRetry);
         const choices = internalChoices.filter(callerAllows);
         const possible = opts.splitExclusions && !opts.prewarm ? internalChoices : choices;
         if (!possible.length) throw Error('no open slot meets the requested placement constraints');
@@ -1109,11 +1112,11 @@ async function shard(opts) {
         const callerHosts = softExclusionsDropped ? [] : opts.excludeHost;
         if (opts.splitExclusions) {
           if (failedSlots.size) args.push('--hard-exclude-slot', [...failedSlots].join(','));
-          if (diskHosts.size) args.push('--hard-exclude-host', [...diskHosts].join(','));
+          if (retryHosts.size) args.push('--hard-exclude-host', [...retryHosts].join(','));
           if ((callerSlots.length || callerHosts.length) && opts.excludeReason) args.push('--exclude-reason', opts.excludeReason);
         }
         const skipSlots = opts.splitExclusions ? callerSlots : [...new Set([...callerSlots, ...failedSlots])];
-        const skipHosts = opts.splitExclusions ? callerHosts : [...new Set([...callerHosts, ...diskHosts])];
+        const skipHosts = opts.splitExclusions ? callerHosts : [...new Set([...callerHosts, ...retryHosts])];
         if (opts.excludeSlotSupported && skipSlots.length) args.push('--exclude-slot', skipSlots.join(','));
         if (opts.excludeHostSupported && skipHosts.length) args.push('--exclude-host', skipHosts.join(','));
         if (preferred && opts.preferSupported) args.push('--prefer-host', preferred);
