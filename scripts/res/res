@@ -143,7 +143,9 @@ PY
       gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
       gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
       # The remote pool controller owns these keys and validates them independently.
-      if (key ~ /^DEVBOX_(DYNAMIC_ADMISSION|DYNAMIC_HOSTS|LIGHT_STALE_RECLAIM|SOFT_EXCLUDE_MINUTES)$/ || key ~ /^DEVBOX_(LOAD_PER_CORE|MIN_AVAIL_GIB|HEAVY_CORES|HEAVY_GIB|LIGHT_CORES|LIGHT_GIB|HEAVY_DISK_GIB|LIGHT_DISK_GIB)(\.[A-Za-z0-9][A-Za-z0-9.-]*)?$/) next
+      if (key ~ /^DEVBOX_(DYNAMIC_ADMISSION|DYNAMIC_HOSTS|LIGHT_STALE_RECLAIM|SOFT_EXCLUDE_MINUTES)$/ ||
+          key ~ /^DEVBOX_(LOAD_PER_CORE|MIN_AVAIL_GIB|HEAVY_CORES|HEAVY_GIB|LIGHT_CORES|LIGHT_GIB|HEAVY_DISK_GIB|LIGHT_DISK_GIB)(\.[A-Za-z0-9][A-Za-z0-9.-]*)?$/ ||
+          key ~ /^DEVBOX_(HEAVY|LIGHT)_DISK_GIB\.project\.[A-Za-z0-9][A-Za-z0-9_.-]*$/) next
       if (key !~ /^(LOAD_LIMIT|LOAD_LIMIT_WITH_LANES|MIN_AVAIL_GIB|LANE3_LOAD|LANE3_AVAIL_GIB|LANE_LOAD_PER_CORE|LANE_MIN_AVAIL_GIB|BUILD_LOAD_PER_CORE|BUILD_MAX_CONCURRENCY|BUILD_CONCURRENT_LOAD_PER_CORE|BUILD_CONCURRENT_MIN_AVAIL_GIB|LOAD_OVERRIDE_MINUTES|LOAD_POLL_SECONDS)$/ || seen[key]++) exit 1
       if (value !~ /^[0-9]+([.][0-9]+)?$/ || value + 0 <= 0) exit 1
       if (key ~ /^(BUILD_MAX_CONCURRENCY|LOAD_POLL_SECONDS)$/ && value !~ /^[0-9]+$/) exit 1
@@ -1867,12 +1869,13 @@ try:
                     values[key] = value
                 else:
                     setting, _, suffix = key[7:].partition('.')
-                    valid_suffix = not suffix or re.fullmatch(host_pattern, suffix)
                     if setting == 'SOFT_EXCLUDE_MINUTES':
                         if suffix: return fallback
-                    elif setting not in defaults or not valid_suffix:
+                    elif setting not in defaults:
                         return fallback
-                    elif suffix.startswith('project.') and (not setting.endswith('_DISK_GIB') or not re.fullmatch(host_pattern, suffix[8:])):
+                    elif suffix.startswith('project.') and setting.endswith('_DISK_GIB'):
+                        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', suffix[8:]): return fallback
+                    elif suffix and not re.fullmatch(host_pattern, suffix):
                         return fallback
                     if not re.fullmatch(r'[0-9]+(?:\.[0-9]+)?', value) or not 0 < float(value) <= 65536: return fallback
                     values[key] = float(value)

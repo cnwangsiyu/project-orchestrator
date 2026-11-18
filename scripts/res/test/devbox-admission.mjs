@@ -142,6 +142,14 @@ try {
   eq(take(slot(1)).status, 0); release(slot(1));
   eq(take(slot(3)).status, 3);
   match(journal(), /gate-admit\tdevbox-cn-1[^\n]+reason=static-stale-or-missing-metrics/);
+  metrics(99, 0);
+  const samplePath = path.join(root, 'devbox-metrics', host + '.json');
+  const oldSample = JSON.parse(fs.readFileSync(samplePath, 'utf8'));
+  delete oldSample.freeGiB;
+  fs.writeFileSync(samplePath, JSON.stringify(oldSample));
+  eq(take(slot(3)).status, 3, 'legacy samples without free disk leave floating rows closed');
+  eq(take(slot(1)).status, 0, 'legacy samples use static baseline capacity'); release(slot(1));
+
   metrics(99, 0); config(0);
   eq(take(slot(1)).status, 0); release(slot(1));
   eq(take(slot(3)).status, 3);

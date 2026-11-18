@@ -50,7 +50,7 @@ const run = argv => {
   return { code: r.status, text: `${r.stdout}${r.stderr}` };
 };
 const take = (id, by = id) => { const r = run(['take', id, ...args(by)]); eq(r.code, 0, r.text); };
-const release = (id, by = id) => eq(run(['return', id, '--by', by]).code, 0);
+const release = (id, by = id) => { const r = run(['return', id, '--by', by]); eq(r.code, 0, r.text); };
 const acquire = (by, pool = 'devbox-cn', extra = []) => run(['wait-pool', pool, ...args(by), '--timeout', '0', ...extra]);
 const children = new Set();
 function start(by, extra = {}, source = process.env.RES_SOURCE) {
