@@ -164,8 +164,9 @@ try {
     assert.equal(openQuestions(readEvents(), { owner: '6d9f214e-0eaa-5187-8ade-d189301d4d00' }).length, 0);
   }
   const fallbackRpc = path.join(tmp, 'reply-fallback-rpc.jsonl');
+  // A new resumed turn must not reuse the already-completed launch's turn ID.
   const fallback = run(['reply', '--account', 'chatgpt', '--thread', 'chatgpt-thread', 'Continue with baseline'],
-    { WORKER_EVENTS_FIXTURE: JSON.stringify({ rpc: fallbackRpc }) });
+    { WORKER_EVENTS_FIXTURE: JSON.stringify({ rpc: fallbackRpc, turn: 'reply-fallback-turn' }) });
   assert.equal(fallback.status, 0, fallback.stderr); assert.match(fallback.stdout, /no open question; falling back to steer/);
   assert.ok(rpcRows(fallbackRpc).some((row) => row.method === 'turn/steer'));
   const legacy = run(['reply', '--thread', 'legacy-thread', 'Continue']);

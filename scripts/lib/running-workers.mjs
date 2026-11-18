@@ -1,4 +1,5 @@
-import { readEvents, processWorker, workerKey } from './worker-events.mjs';
+import { readEvents, processWorker, workerKey, workerRunStates } from './worker-events.mjs';
+import { readTurnState, reconcileTurnEvents } from './worker-turn.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { hubRPC } from './hub-state.mjs';
@@ -29,17 +30,21 @@ export async function runningWorkers({ rows = readEvents(), profiles = {}, alive
   activityOf = (account, thread) => sessionActivity(profiles[account]?.home, thread),
   knownThread = async (account, thread) => {
     if (!profiles[account]?.hub) throw Error('hub registration unavailable');
-    const result = await hubRPC(profiles[account].hub, 'thread/read', { threadId: thread, includeTurns: true });
-    return result?.thread?.turns?.at(-1)?.status === 'inProgress';
+    const result = await readTurnState({ account, thread, rows, alive: row => alive(row.pid),
+      readThread: threadId => hubRPC(profiles[account].hub, 'thread/read', { threadId, includeTurns: true }) });
+    return result.turn?.status === 'inProgress';
   } } = {}) {
+  rows = reconcileTurnEvents(rows, { alive: row => alive(row.pid) });
+  const ordered = [...rows].sort((a, b) => a.t - b.t || (a.seq ?? 0) - (b.seq ?? 0));
   const latestRuns = new Map(), latest = new Map(), starts = new Map(), activity = new Map();
-  for (const row of [...rows].sort((a, b) => a.t - b.t || (a.seq ?? 0) - (b.seq ?? 0))) {
+  for (const row of ordered) {
     if (!row.account) continue;
     activity.set(workerKey(row), row.t);
     if (['message', 'question', 'answered'].includes(row.event)) continue;
     if (row.event === 'running' && !starts.has(row.runId)) starts.set(row.runId, row.t);
-    latestRuns.set(JSON.stringify([row.account, row.runId]), row);
   }
+  for (const [key, { row }] of workerRunStates(ordered))
+    if (row.account) latestRuns.set(key, row);
   // Resolve provisional run IDs before deduplicating registered hub threads.
   for (const row of [...latestRuns.values()].sort((a, b) => a.t - b.t || (a.seq ?? 0) - (b.seq ?? 0))) latest.set(workerKey(row), row);
   const unresolved = [];

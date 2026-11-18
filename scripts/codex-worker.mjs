@@ -61,6 +61,7 @@ import { saveQueue, readQueue } from './lib/worker-queue.mjs';
 import { loadDigest, workerInstructions, auditLaunch, rulesLog, rulesShared } from './lib/global-rules.mjs';
 import { isPolicyBlock, policyBlockRecord, appendPolicyBlock, policyBlockAction } from './lib/policy-block.mjs';
 import { runHubForeground, hubListReachable } from './lib/hub-foreground.mjs';
+import { readTurnState, reconcileTurnEvents } from './lib/worker-turn.mjs';
 import { parseRouteArgs, routeFlag, rerouteWorker, turnHasWork } from './lib/worker-reroute.mjs';
 import { inheritedLaunch, saveLaunch, recordLaunchModel, readRequestBufferExceededAt, markRequestBufferExceeded } from './lib/worker-launch.mjs';
 import { recordWorkerOutcome, reviewSeat, reviewInstructions } from './lib/worker-outcome.mjs';
@@ -254,7 +255,7 @@ if (cmd === 'watch' || cmd === 'mine') {
     const debounceSec = opts['debounce-sec'] === undefined ? 45 : typeof opts['debounce-sec'] === 'string' ? Number(opts['debounce-sec']) : NaN;
     try { process.exit(await watch(owner, undefined, { debounceSec })); } catch (e) { die(e.message, 1); }
   }
-  const events = readEvents(), current = inbox(events, owner, readAck(owner));
+  const events = reconcileTurnEvents(readEvents()), current = inbox(events, owner, readAck(owner));
   for (const row of current.unresolved) console.log(`unresolved owner ${row.ownerOriginal}: ${row.ownerResolution} (${row.ownerMatches?.join(', ')||'no full owner in events'}) event=${row.id}`);
   for (const row of current.pending) console.log(eventLine(row));
   const pendingIds = new Set(current.pending.map((row) => row.id));
@@ -269,8 +270,9 @@ if (cmd === 'watch' || cmd === 'mine') {
         const output = execFileSync(process.execPath, [...process.execArgv, fileURLToPath(import.meta.url), '--account', row.account,
           'status', '--thread', row.thread], { encoding: 'utf8', timeout: Number(process.env.MINE_STATUS_TIMEOUT_MS ?? 15000), stdio: ['ignore', 'pipe', 'ignore'] });
         observed = JSON.parse(output.trim()); status = observed.last?.status ?? 'unknown';
-        if (observed.last && ['completed', 'failed', 'interrupted'].includes(status)) appendEvent({ ...row, event: 'observed', mayRun: false,
+        if (observed.last && ['completed', 'failed', 'interrupted'].includes(status) && (!row.turn || observed.last.id === row.turn)) appendEvent({ ...row, event: 'observed', mayRun: false,
           turn: observed.last.id, status, stale: false, finalLine: `hub confirms ${status}; read the result or reattach with wait` });
+        else if (row.turn && observed.last?.id !== row.turn && followerAlive(row)) status = 'running (follower alive; persisted turn differs)';
       } catch {
         // A slow hub read (long threads on a large history) is not "unknown" while this worker's follower is alive.
         try { if (Number.isSafeInteger(row.pid) && row.pid > 0) { process.kill(row.pid, 0); status = 'running (follower alive; hub read slow)'; } } catch {}
@@ -331,7 +333,7 @@ const talkbackContext = (thread) => {
   const prior = workerContext(account ?? 'main', thread, true);
   const metadata = { account: account ?? 'main', thread, owner: tracker.owner, name: opts.name ?? prior?.name ?? state.name,
     project: opts.project ?? prior?.project ?? state.project, task: opts.task ?? prior?.task ?? state.task,
-    runId: state.runId, model: state.model, effort: state.effort, turn: state.turn ?? null,
+    runId: state.runId, pid: state.pid, model: state.model, effort: state.effort, turn: state.turn ?? null,
     cwd: path.resolve(opts.cwd ?? prior?.cwd ?? process.cwd()), startedAt: followerStartedAt };
   const file = saveWorkerContext(metadata);
   const env = { CODEX_WORKER_THREAD: thread, CODEX_WORKER_ACCOUNT: metadata.account,
@@ -1102,10 +1104,9 @@ const waitBrowserTools = async threadId => {
 };
 const textInput = (t) => [{ type: 'text', text: t }];
 const readTurns = async (threadId) => (await call('thread/read', { threadId, includeTurns: true })).thread?.turns ?? [];
-const currentTurn = async (threadId) => {
-  const turns = await readTurns(threadId);
-  return turns.filter((t) => t.status === 'inProgress').at(-1) ?? turns.at(-1);
-};
+const turnState = (thread, liveThread) => readTurnState({ account: account ?? 'main', thread, liveThread,
+  readThread: threadId => call('thread/read', { threadId, includeTurns: true }) });
+const currentTurn = async (thread, liveThread) => (await turnState(thread, liveThread)).turn;
 const lastMessage = (items) => (items ?? []).filter((i) => i.type === 'agentMessage' && i.text).at(-1)?.text;
 const printFinal = (final) => {
   if (!final) return;
@@ -1189,7 +1190,7 @@ const report = async (threadId, turn, final, usage) => {
   printFinal(final);
   await redactEndedTurn(threadId);
   tracker?.result(rejectedModel ? 'failed' : /^(?:\S+\s+)?(?:BLOCKED|QUESTION)\b/.test(final?.trim() ?? '') ? 'needs-user'
-    : turn.status === 'completed' ? 'finished' : 'failed', { thread: threadId, turn: turn.id, mayRun: false,
+    : turn.status === 'completed' ? 'finished' : 'failed', { thread: threadId, turn: turn.id, status: turn.status, mayRun: false,
       reason: rejectedModel ? 'review model rejected' : turn.status === 'completed' ? null : JSON.stringify(turn.error ?? turn.status),
       finalLine: maskPasswordStyleValues(final?.split('\n').find((line) => line.trim()) ?? '').text });
   const infrastructureMiss = (['trae','ttadk'].includes(PROF?.kind)&&failureKind(errorText)==='unavailable')||(PROF?.kind==='trae'&&/access (temporarily )?restricted|\b983\b/i.test(errorText));
@@ -1468,29 +1469,30 @@ try {
     if (!opts.thread) die('wait needs --thread');
     const resumed = await call('thread/resume', { threadId: opts.thread }).catch(() => null);
     sessionPath = resumed?.thread?.path ?? null;
-    const t = await currentTurn(opts.thread);
+    const t = await currentTurn(opts.thread, resumed?.thread);
     if (!t) die('thread has no turns', 3);
+    if (t.status === 'unknown') die(`turn ${t.id} is unconfirmed; no live follower or matching hub status`, 3);
     if (t.status === 'inProgress') { markOutputStart(); follow(opts.thread, t.id, t.items); }
     else { console.log(`thread=${opts.thread} turn=${t.id}`); await report(opts.thread, t); }
   } else if (cmd === 'steer' || cmd === 'reply') {
     if (!opts.thread || !text) die('steer needs --thread and a message');
-    await call('thread/resume', { threadId: opts.thread }).catch(() => {});
-    const t = await currentTurn(opts.thread);
+    const resumed = await call('thread/resume', { threadId: opts.thread }).catch(() => null);
+    const t = await currentTurn(opts.thread, resumed?.thread);
     if (!t || t.status !== 'inProgress') die(`no turn in progress (last: ${t?.status ?? 'none'}); use \`turn\` to start a new one`, 3);
     const r = await call('turn/steer', { threadId: opts.thread, expectedTurnId: t.id, input: textInput(text) });
     console.log(`steered turn ${r.turnId ?? t.id}`); finish(0);
   } else if (cmd === 'interrupt') {
     if (!opts.thread) die('interrupt needs --thread');
-    await call('thread/resume', { threadId: opts.thread }).catch(() => {});
-    const t = await currentTurn(opts.thread);
+    const resumed = await call('thread/resume', { threadId: opts.thread }).catch(() => null);
+    const t = await currentTurn(opts.thread, resumed?.thread);
     if (!t || t.status !== 'inProgress') die(`no turn in progress (last: ${t?.status ?? 'none'})`, 3);
     await call('turn/interrupt', { threadId: opts.thread, turnId: t.id });
     console.log(`interrupted turn ${t.id}`); finish(0);
   } else if (cmd === 'status') {
     if (!opts.thread) die('status needs --thread');
-    const r = await call('thread/read', { threadId: opts.thread, includeTurns: true });
-    const turns = r.thread?.turns ?? [];
-    const lastTurn = turns.at(-1);
+    const r = await turnState(opts.thread);
+    const turns = r.turns;
+    const lastTurn = r.turn;
     const q = PROF?.home ? readQueue(PROF.home, opts.thread) : null;
     // Only a turn still running, with a queue signal recorded for it, has queue info; otherwise say so plainly.
     const queue = lastTurn?.status === 'inProgress' && q && q.turnId === lastTurn.id && q.state !== 'ready'

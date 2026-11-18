@@ -32,6 +32,17 @@ export const followerAlive = (row) => live(row.pid);
 // Exec JSON may contain a session ID, but it is not a registered hub thread.
 export const processWorker = row => row.followerCommand === 'exec' || !row.thread;
 export const workerKey = row => JSON.stringify([row.account, processWorker(row) ? row.runId : row.thread]);
+export const workerRunStates = rows => {
+  const latest = new Map();
+  rows.forEach((row, i) => {
+    if (talkback(row)) return;
+    const key = JSON.stringify([row.account, row.runId]), prior = latest.get(key)?.row;
+    // A stale thread/read result must not settle a follower attached to a different turn.
+    if (row.event === 'observed' && prior?.turn && row.turn && row.turn !== prior.turn) return;
+    latest.set(key, { row, i });
+  });
+  return latest;
+};
 const parseRows = (text) => text.split('\n').flatMap((line) => {
   try { const row = JSON.parse(line); return typeof row?.id === 'string' && typeof row.runId === 'string' && Number.isFinite(row.t)
     && (row.owner == null || validOwner(row.owner)) && ['running', 'finished', 'failed', 'stalled', 're-routed', 'needs-user', 'follower-ended', 'observed', 'message', 'question', 'answered'].includes(row.event) ? [row] : []; } catch { return []; }
@@ -177,10 +188,10 @@ export const inbox = (rows, owner, ack = emptyAck(owner), now = Date.now()) => {
   const matches = [...new Set(rows.map(row=>row.owner).filter(fullOwner))].filter(id=>shortOwner(owner)&&id.toLowerCase().startsWith(owner.toLowerCase()));
   if(matches.length===1) owner=matches[0];
   const unresolved = rows.filter(row=>['ambiguous','unmatched'].includes(row.ownerResolution));
-  const own = rows.filter((row) => row.owner === owner && !['ambiguous','unmatched'].includes(row.ownerResolution)), latest = new Map(), turns = new Map(), threads = new Map();
+  const own = rows.filter((row) => row.owner === owner && !['ambiguous','unmatched'].includes(row.ownerResolution)), latest = workerRunStates(own), turns = new Map(), threads = new Map();
   own.forEach((row, i) => {
     if (talkback(row)) return;
-    latest.set(row.runId, { row, i });
+    if (row.event === 'observed' && latest.get(JSON.stringify([row.account, row.runId]))?.row.turn !== row.turn) return;
     if (!processWorker(row) && !row.mayRun && terminal(row)) {
       threads.set(JSON.stringify([row.account, row.thread]), i);
       if (row.turn) turns.set(JSON.stringify([row.account, row.thread, row.turn]), i);
