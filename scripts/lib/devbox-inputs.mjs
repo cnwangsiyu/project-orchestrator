@@ -100,19 +100,22 @@ export function placement(rows, inputs, indices, history = {}, { now = Date.now(
 }
 // Directories hash sorted relative UTF-8 names, file sizes and bytes; files hash their bytes.
 export async function fingerprint(file) {
-  const hash = createHash('sha256'); let bytes = 0;
-  const walk = async (target, relative = '') => {
-    const stat = fs.lstatSync(target);
-    if (stat.isSymbolicLink() || (!stat.isFile() && !stat.isDirectory())) throw Error('input must contain only regular files/directories');
-    if (stat.isDirectory()) {
-      for (const name of fs.readdirSync(target).sort((a,b)=>Buffer.compare(Buffer.from(a),Buffer.from(b)))) await walk(path.join(target,name), relative ? `${relative}/${name}` : name);
-    } else {
-      if (relative) hash.update(`${relative}\n${stat.size}\n`);
-      for await (const chunk of fs.createReadStream(target)) { hash.update(chunk); bytes += chunk.length; }
-    }
+  const hash = createHash('sha256'); let bytes = 0; const files=[];
+  const collect = (target, relative = '') => {
+    const stat=fs.lstatSync(target);
+    if(stat.isSymbolicLink() || (!stat.isFile() && !stat.isDirectory())) throw Error('input must contain only regular files/directories');
+    if(stat.isDirectory()) for(const name of fs.readdirSync(target)) collect(path.join(target,name),relative ? `${relative}/${name}` : name);
+    else files.push({target,relative,size:stat.size});
   };
-  await walk(file); return { hash: hash.digest('hex'), bytes };
+  collect(file);
+  files.sort((a,b)=>Buffer.compare(Buffer.from(a.relative),Buffer.from(b.relative)));
+  for(const item of files) {
+    if(item.relative) hash.update(`${item.relative}\n${item.size}\n`);
+    for await(const chunk of fs.createReadStream(item.target)){hash.update(chunk);bytes+=chunk.length;}
+  }
+  return {hash:hash.digest('hex'),bytes};
 }
+
 export const inputPython = `import hashlib
 root=pathlib.Path(d['root'])
 private={'login','cookies','cookie','session','sessions','.netrc','.npmrc','.pypirc','.ssh','.aws','.kube','.env','.git'}

@@ -737,6 +737,12 @@ async function inputScenarios() {
   const denied=fixture();fs.writeFileSync(path.join(denied.repo,'private.txt'),'password='+['fixture','credential'].join('-'));
   const deniedSeed=await run(denied,['--input',`name=asset,hash=${actual.hash},rebuildable=yes,cost=1s,size=0.01,seed=private.txt`]);
   assert.notEqual(deniedSeed.code,0);assert.match(deniedSeed.stderr,/credential gate refused seed/);assert.equal(denied.events().length,0);
+  const directory=fixture();directory.env.RES_COMMAND=f.env.RES_COMMAND;
+  const seedDir=path.join(directory.dir,'directory-seed');fs.mkdirSync(path.join(seedDir,'assets'),{recursive:true});
+  fs.writeFileSync(path.join(seedDir,'assets/item.txt'),'sample');fs.writeFileSync(path.join(seedDir,'assets.json'),JSON.stringify({layout:'sample'}));
+  const directoryHash=await fingerprint(seedDir);
+  const directoryRun=await run(directory,['--input',`name=directory,hash=${directoryHash.hash},rebuildable=yes,cost=1s,size=0.01,seed=${seedDir}`]);ok(directoryRun);returned(directory);
+  assert.equal(directoryRun.summary.shards[0].attempts[0].seeds.length,1,'directory hashes use identical full-path ordering on sender and receiver');
   const seedCommand=fixture();seedCommand.env.RES_COMMAND=f.env.RES_COMMAND;
   const badCommand=await run(seedCommand,['--input',`name=asset,hash=${actual.hash},rebuildable=yes,cost=1s,size=0.01,seed=cmd:printf wrong > "$DEVBOX_INPUT_PATH"`]);
   assert.notEqual(badCommand.code,0);assert.match(badCommand.stdout,/seed hash\/size mismatch/);returned(seedCommand);
