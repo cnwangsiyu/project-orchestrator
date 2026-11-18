@@ -112,6 +112,31 @@ try {
   eq(reused.length, 1); eq(reused[0][3], 0);
   eq(take(slot(1)).status, 0); eq(JSON.parse(fs.readFileSync(ledger, 'utf8')).length, 1, 'one per holder');
   release(slot(1));
+  metrics(0,100,0,1);
+  eq(run('take',slot(1),...args(slot(1)),'--maintenance').status,0,'maintenance admits cleanup below disk floor'); release(slot(1));
+  metrics(99,100,0,1);
+  eq(run('take',slot(1),...args(slot(1)),'--maintenance').status,2,'maintenance still checks load');
+  metrics(0,0,0,1);
+  eq(run('take',slot(1),...args(slot(1)),'--maintenance').status,2,'maintenance still checks memory');
+  metrics(0,100,0,1);
+  eq(run('take',slot(4),...args(slot(4)),'--maintenance').status,3,'maintenance cannot open forbidden rows');
+  const costPlacement=path.join(root,'placement.json');
+  const scores = (warmCost,coldCost) => fs.writeFileSync(costPlacement,JSON.stringify({version:1,at:Date.now()/1000,slots:{
+    [slot(1)]:{eligible:true,waitSec:600,rebuildSec:warmCost,extraDiskGiB:0,hardReasons:[]},
+    [slot(5)]:{eligible:true,waitSec:0,rebuildSec:coldCost,extraDiskGiB:0,hardReasons:[]}
+  }}));
+  metrics(0,100,0,1000);
+  seedHold(slot(1),1,process.pid);
+  scores(0,1620);
+  eq(wait('warm-busy','--placement-file',costPlacement).status,2,'warm busy slot beats cold 27m build, preserves wait');
+  scores(0,45);
+  const coldWinner=wait('cold-free','--placement-file',costPlacement);
+  eq(coldWinner.status,0);match(coldWinner.stdout,/placement=.*"chosen":"devbox-cn-5"/);release(slot(5),'cold-free');
+  release(slot(1),'old-holder');
+  scores(0,0);
+  const pinned=JSON.parse(fs.readFileSync(costPlacement)); pinned.slots[slot(5)].eligible=false;
+  pinned.slots[slot(5)].hardReasons=['missing non-rebuildable input simulator'];fs.writeFileSync(costPlacement,JSON.stringify(pinned));
+  eq(wait('input-pin','--placement-file',costPlacement).status,0);release(slot(1),'input-pin');
   metrics(0, 100, 0, 52.99);
   eq(run('take', slot(1), ...args(slot(1)), '--disk-gib', '0').status, 2, 'real free-space floor stays enforced');
   const diskFile = path.join(root, 'disk-costs.json'); fs.writeFileSync(diskFile, JSON.stringify({[slot(1)]: 0}));

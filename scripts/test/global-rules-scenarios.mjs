@@ -24,8 +24,10 @@ try {
   assert.equal(digestText.match(/^version:/gm)?.length, 1, 'integration must publish one digest version');
   assert.equal(digestText.match(/^## Changes In This Version$/gm)?.length, 1);
   assert.ok(digestText.split('\n').length<=61,'digest line budget');
-  assert.equal(digest.version, '2026-11-18.9');
-  assert.match(digest.worker, /--exclude-host.*--exclude-slot.*--prefer-slot.*--exclude-reason.*in their report.*any matching devbox/);
+  assert.equal(digest.version, '2026-11-18.10');
+  assert.match(digest.worker,/Declare host-bound inputs with --input/);
+  assert.match(digest.worker,/never edit a slot worktree in place/);
+  assert.match(digest.worker, /--exclude-host.*--exclude-slot.*--prefer-slot.*--exclude-reason.*in their report.*Declare host-bound inputs with --input/);
   assert.match(digest.worker, /Mid-turn talkback:.*ask --default.*never routine progress/);
   assert.match(digest.worker, /If `codex-worker` is not on PATH, use the launcher's absolute Node\/script command with its RULES_SHARED, account and thread/);
   assert.ok(digest.worker.includes('node <skill>/scripts/codex-worker.mjs --account <account> note --thread <thread> --kind risk "<file and issue, no value>"'));

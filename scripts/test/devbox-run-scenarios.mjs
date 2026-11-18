@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs, readRegistry, remoteScripts, storeIdentity, makeBundle, cpuBudget, cpuEnvironment, parseUnits, discoverUnits, assignUnits, planShards } from '../devbox-run.mjs';
 
 import { makeSubmoduleFixture } from './devbox-submodule-fixture.mjs';
+import { fingerprint, inputKey, indexFile } from '../lib/devbox-inputs.mjs';
 import { transferFindings } from '../lib/devbox-transfer-check.mjs';
 
 const script = fileURLToPath(new URL('../devbox-run.mjs', import.meta.url));
@@ -705,9 +706,54 @@ async function sshDropScenarios() {
   console.log('PASS bounded SSH reconnect confirms a gone group or retains a live job until explicit stop');
 }
 
+async function inputScenarios() {
+  const f=fixture(); f.env.RES_COMMAND=fileURLToPath(new URL('../res/res',import.meta.url));
+  const actual=await fingerprint(path.join(f.repo,'source.txt'));
+  const input=`name=asset,hash=${actual.hash},rebuildable=yes,cost=2s,size=0.01,seed=source.txt`;
+  const command=`node -e 'const fs=require("fs");const paths=JSON.parse(fs.readFileSync(process.env.DEVBOX_INPUTS_FILE));if(fs.readFileSync(paths.asset,"utf8")!=="first\\n")process.exit(9)'`;
+  const first=await run(f,['--input',input],command);ok(first);returned(f);
+  const receipt=first.summary.shards[0].attempts[0];
+  assert.equal(receipt.seeds.length,1);assert.ok(receipt.placementDecisions.length);
+  const file=indexFile(f.shared,first.summary.shards[0].host);
+  assert.ok(JSON.parse(fs.readFileSync(file)).inputs['asset+'+actual.hash]);
+  const second=await run(f,['--input',input],command);ok(second);assert.equal(second.summary.shards[0].attempts[0].seeds.length,0);returned(f);
+  const pinned=await run(f,['--input',`name=asset,hash=${actual.hash},rebuildable=no,cost=0s,size=0.01`],command);ok(pinned);assert.equal(pinned.summary.shards[0].host,first.summary.shards[0].host);returned(f);
+  fs.unlinkSync(receipt.inputPaths.asset);
+  const index=JSON.parse(fs.readFileSync(file));index.inputs['asset+'+actual.hash].verifiedAt-=301;fs.writeFileSync(file,JSON.stringify(index));
+  const absent=await run(f,['--input',`name=asset,hash=${actual.hash},rebuildable=no,cost=0s,size=0.01`],command);
+  assert.notEqual(absent.code,0);assert.match(absent.stdout,/missing non-rebuildable input asset/);returned(f);
+  const mismatch=fixture();mismatch.env.RES_COMMAND=f.env.RES_COMMAND;
+  const wrong=await run(mismatch,['--input',`name=asset,hash=${'b'.repeat(64)},rebuildable=yes,cost=1s,size=0.01,seed=source.txt`]);
+  assert.notEqual(wrong.code,0);assert.match(wrong.stderr,/seed hash\/size mismatch/);assert.equal(mismatch.events().length,0);
+  const denied=fixture();fs.writeFileSync(path.join(denied.repo,'private.txt'),'password='+['fixture','credential'].join('-'));
+  const deniedSeed=await run(denied,['--input',`name=asset,hash=${actual.hash},rebuildable=yes,cost=1s,size=0.01,seed=private.txt`]);
+  assert.notEqual(deniedSeed.code,0);assert.match(deniedSeed.stderr,/credential gate refused seed/);assert.equal(denied.events().length,0);
+  const seedCommand=fixture();seedCommand.env.RES_COMMAND=f.env.RES_COMMAND;
+  const badCommand=await run(seedCommand,['--input',`name=asset,hash=${actual.hash},rebuildable=yes,cost=1s,size=0.01,seed=cmd:printf wrong > "$DEVBOX_INPUT_PATH"`]);
+  assert.notEqual(badCommand.code,0);assert.match(badCommand.stdout,/seed hash\/size mismatch/);returned(seedCommand);
+  console.log('PASS input seed/hash/gate, verified index reuse, hard pin, stale verification and supervised hash mismatch');
+}
+async function hygieneScenarios() {
+  const f=fixture(); const mods=makeSubmoduleFixture(path.join(f.dir,'modules'));
+  f.repo=mods.repo;
+  const first=await run(f,['--submodules'],mods.command);ok(first);
+  const ws=workspace(f);
+  fs.writeFileSync(path.join(ws,'engine/version'),'dirty engine');
+  fs.writeFileSync(path.join(ws,'engine/nested/payload'),'dirty nested');
+  fs.writeFileSync(path.join(ws,'engine/untracked'),'leftover');
+  const second=await run(f,['--submodules'],mods.command);ok(second);returned(f);
+  const hygiene=second.summary.shards[0].attempts[0].slotHygiene;
+  assert.equal(hygiene.previousJob,'fixture/scenario');
+  assert.ok(hygiene.patches.some(item=>item.tree==='engine'));
+  assert.ok(hygiene.patches.some(item=>item.tree==='engine/nested'));
+  for(const item of hygiene.patches) assert.ok(fs.statSync(item.patch).size>0);
+  assert.equal(fs.existsSync(path.join(ws,'engine/untracked')),false);
+  console.log('PASS dirty nested submodules preserve patches, name previous job and clean checkout succeeds');
+}
+
 async function scenarios() {
   const only = process.env.DEVBOX_TEST_CASE;
-  const perf = { credentials: credentialScenarios, 'packed-module': packedModuleRecovery, receipt: receiptScenarios, 'res-progress': resProgressScenarios, cpu: cpuScenarios, auto: autoScenarios, units: unitScenarios, prewarm: prewarmScenarios, metrics: metricScenarios, placement: placementScenarios, 'ssh-drop': sshDropScenarios };
+  const perf = { inputs:inputScenarios,hygiene:hygieneScenarios,credentials: credentialScenarios, 'packed-module': packedModuleRecovery, receipt: receiptScenarios, 'res-progress': resProgressScenarios, cpu: cpuScenarios, auto: autoScenarios, units: unitScenarios, prewarm: prewarmScenarios, metrics: metricScenarios, placement: placementScenarios, 'ssh-drop': sshDropScenarios };
   if (only && !['baseline', 'bundle', 'ownership', ...Object.keys(perf)].includes(only)) throw Error('unknown devbox fixture case');
   for (const [name, scenario] of Object.entries(perf)) if (!only || only === name) await scenario();
   if (!only || only === 'baseline' || only === 'bundle') await bundleRecovery();

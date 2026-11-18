@@ -5,6 +5,30 @@ tool (devices, checkouts, registry/notes, take/return/extend/add/note/log and he
 from vesdk-mainline to the global-rules owner on 2026-11-13. The unmodified v1.2 contract is preserved
 in `scripts/res/test/fixtures/contract-v1.2.md`. v1.10 takes effect at the owner's reviewed switch.
 
+## Rebuild-aware runner extension (BC-135–137)
+
+`wait-pool --placement-file JSON` consumes the runner's atomically refreshed
+version-1 slot scores, not a lease grant. It selects the minimum remaining wait
+plus rebuild time while retaining FIFO and all hard admission checks. A missing
+non-rebuildable input is hard ineligibility. Placement tables are emitted once
+per minute or when the chosen slot changes. A placement snapshot older than
+180 seconds fails closed. Runner settings are documented in devbox-run.md.
+
+`take`/`wait-pool --maintenance` on a devbox slot bypasses only the disk gate and
+sets disk cost to zero. This lets GC free space when disks are below 53 GiB;
+load, memory, policy and registered row limits remain binding. Normal runs still
+preserve the real-space floor. `--extra-disk-gib` adds declared new content to the
+configured/per-slot workspace budget.
+
+New reservation records are `[at, cores, memoryGiB, diskGiB, owner]`; owner has
+`slot`, `by`, `pid`, `host`, `start`. Reads discard expired/mismatched owners and
+deduplicate by slot. Return/reclaim removes the exact owner under the host ledger
+lock; acquisition rollback does the same if it published a reservation. Anonymous
+legacy three/four-field records remain TTL-bounded until owner rollout archives
+them. Quiesce devbox admissions, coordinate all active holders' return, back up
+and archive the old ledgers, then publish the matched controller/runner. Do not
+archive while old live admissions still need their budget protection.
+
 ## Changes in v1.10
 
 - `wait-pool` treats `--exclude-host` and `--exclude-slot` as soft unless the caller supplies `--exclude-reason TEXT`. `DEVBOX_SOFT_EXCLUDE_MINUTES=5` sets the minimum per-wait age. If no allowed matching slot is free and gate-admitted and an excluded matching slot is, the controller announces the available hosts and exposes `self_restricted` and the reason in `res status`. After the threshold, it drops all soft exclusions for that wait without losing its FIFO position, and emits `softExclusionsDropped=<JSON>` on stdout and a journal entry. It still obeys normal FIFO and gate checks. Explicit internal `--hard-exclude-host` and `--hard-exclude-slot`, policy, capability and quarantine checks never loosen. Preferences affect order only.

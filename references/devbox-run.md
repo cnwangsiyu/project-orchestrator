@@ -114,6 +114,138 @@ still constrain placement. Auto sizing and prewarm plan from current eligible
 capacity and can decline to launch when it is unavailable. Install the matching
 `res` for soft fallback, waiter diagnostics and retained-hold protection.
 
+## Rebuild costs and declared inputs (BC-135–137)
+
+Declare input availability instead of pinning a cache with host exclusions:
+
+```sh
+node scripts/devbox-run.mjs --project vesdk --task android-verify --repo "$PWD" \
+  --need vesdk-android --affinity vesdk-android-main --warm-cost 27m \
+  --input 'name=android-sdk,hash=none,rebuildable=yes,cost=45s,size=2' \
+  -- './gradlew test'
+```
+
+`--input name=N,hash=SHA256|none,rebuildable=yes|no,cost=45s|27m,size=GiB[,seed=SOURCE][,path=/remote/path]`
+is repeatable. `--inputs FILE.json` accepts an array (or `{ "inputs": [...] }`)
+with the same fields; JSON may use a boolean for `rebuildable` and seconds for
+`cost`. Names are unique within a call. Paths are optional, absolute remote
+paths; without one, the input lives at `ROOT/inputs/NAME/HASH`. SHA-256 covers
+file bytes; directory hashing covers sorted relative UTF-8 file names, newline,
+size in bytes, newline, then each file's bytes. Empty directories do not affect
+the hash. Symlinks and special files are refused. `size` is a GiB budget, not an
+exact-byte assertion; positive sizes bound the verified content. Seeded inputs
+require a SHA-256 and a positive size.
+
+A local seed path is scanned before any SSH or lease using the existing
+credential transfer gate, then staged as a task-owned archive. Private paths,
+symlinks and special files are refused before copying. Hash and size must match
+before transfer; the receiver verifies again before publishing the input.
+Binary plist seeds require a source-only export. `seed=cmd:COMMAND` runs a
+source-only seed command on the selected box under the normal supervisor;
+`DEVBOX_INPUT_PATH` names its output. Commands cannot fetch login-dependent
+material. Such dependencies must be non-rebuildable or prepared by the task
+through its normal authorized tooling. Seed commands get separate control
+directories and cleanup before the main command.
+
+The main command receives `DEVBOX_INPUTS_DIR=ROOT/inputs` and
+`DEVBOX_INPUTS_FILE=CONTROL/inputs.json`, a JSON map from input names to paths.
+It must build any missing rebuildable input that has no seed or is too expensive
+to seed automatically. Ordinary runs seed inputs costing at most 300 seconds;
+`prewarm` seeds all declared sources on otherwise idle eligible hosts:
+
+```sh
+node scripts/devbox-run.mjs prewarm --project video-agent --repo "$PWD" \
+  --input 'name=sg-prepare,hash=SHA256,rebuildable=yes,cost=45s,size=1,seed=./prepare-inputs'
+```
+
+An input-only prewarm command defaults to `true`; optional `--command` still
+runs once per idle host at nice 10. No prewarm queues or busy-host work is added.
+
+`devbox-inputs/HOST.json` (under the normal runner cache directory) records
+version 1, `inputs`, and entries keyed `NAME+HASH`, with `path`, `bytes`, and
+`verifiedAt` Unix seconds. Missing or expired entries trigger read-only SSH
+hash/size verification; a failed verification removes the entry. Successful
+seeds and runs update the index atomically under its existing local state lock.
+Hardware, running emulators/devices, stateful containers, and state that requires
+login to retrieve must be declared non-rebuildable. A task can provide an
+absolute verification path or have the owner register a current marker in the
+index. The runner verifies the marker/content, not emulator or container health;
+the task retains those health probes. Uncommitted source is transferred by
+`--ref worktree` and is not host-bound input state.
+
+The implicit warm input is keyed by project, repository identity and affinity,
+and tracked separately for each slot. `--warm-cost` declares its cold rebuild
+penalty. Successful timing receipts record cold and warm durations; with history,
+the estimate is their median difference. Explicit costs remain authoritative
+until both classes have at least three observations. Seed observations likewise
+replace declared input costs after three samples, using a bounded 21-sample
+median. For an unseeded rebuild, one missing input can be measured against three
+successful runs with all inputs present and the same warm/cold cache class; its
+command-duration delta supplies the observations. Multi-input rebuilds retain
+declared costs until separately observed; the runner does not invent per-input
+breakdowns. Without a manifest, declared warm cost, or usable history, rebuild cost
+is zero and normal placement/exclusion behavior applies.
+
+For each hard-compatible candidate, the runner supplies missing-input cost and
+estimated holder time remaining (historical slot duration minus holder age,
+minimum 60 seconds, maximum 2,700 seconds, 300-second fallback). `res` checks
+actual admission: a free admitted slot has zero wait, a gated slot has at least
+60 seconds estimated wait, and disk-denied/floating-closed rows are excluded.
+A missing non-rebuildable input excludes the candidate with the input's name.
+The minimum wait-plus-rebuild score wins; a busy warm winner remains queued
+instead of immediately taking a more expensive cold slot. `res` continues to
+own FIFO and rechecks policy, capabilities, quarantine and gates after claiming.
+The runner refreshes inputs, metrics and scores each minute while waiting.
+Decision tables (`host`, `slot`, `waitSec`, `rebuildSec`, `totalSec`, reasons)
+appear in shard logs and `attempts[].placementDecisions` in `summary.json`;
+the runner's input estimate is also retained in `attempts[].inputPlan`.
+
+With a 27-minute cold VESDK build and 43-second warm build, measured rebuild
+penalty is 1,577 seconds. A warm slot with 15 minutes remaining scores 900
+seconds versus a free cold slot's 1,577 seconds: wait on the warm slot. With
+35 minutes remaining, the warm score is 2,100 seconds: use the free cold slot.
+For VAK SG prepare, a 45-second reusable source-only prepare input missing on
+an idle host beats waiting 10 minutes for a cached host; seed the input, verify
+its hash, and run the prepare command using its mapped path. A box-local
+stateful prepare container declared `rebuildable=no` keeps the job on the box
+that has a verified marker. These examples assume matching registered CN
+capabilities and the normal disk/load/memory gates; SG itself remains probes-only.
+
+`machine.conf` adds the following integer keys (no host suffixes):
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `DEVBOX_REBUILD_PLACEMENT` | `1` | `0` disables cost-aware placement; non-rebuildable manifests then fail closed |
+| `DEVBOX_INPUT_TTL_SECONDS` | `300` | Read-only input verification TTL, 1–86400 seconds |
+| `DEVBOX_INPUT_WAIT_CAP_SECONDS` | `2700` | Maximum holder wait estimate, 1–86400 seconds |
+| `DEVBOX_INPUT_SEED_MAX_SECONDS` | `300` | Normal-run seed cost limit, 1–86400 seconds |
+
+Publish configuration via a sibling temporary file and rename. The kill switch
+retains normal placement, disk reservation and slot hygiene; rebuildable inputs
+still get verified/seeded for the command. Matching runner and `res` revisions
+are required for explicit input placement.
+
+BC-137 reservations end on return/reclaim and never duplicate a live slot's
+exact owner. New workspaces retain configured project/host disk cost; existing
+per-slot project worktrees reserve zero base disk. Missing declared content
+adds its size budget, including prewarm, with a live disk check before seeding.
+Direct `res take`/`wait-pool` may pass `--disk-gib N` (zero allowed),
+`--disk-gib-file JSON` for per-slot overrides, or `--extra-disk-gib N` to add
+content cost without reducing the configured base. The real 53 GiB floor stays.
+Legacy anonymous reservations expire at the previous TTL; the owner should
+archive them under quiescence as part of rollout rather than retaining churn.
+
+`res take SLOT --maintenance --for 'worktree cleanup' ...` exempts only disk
+admission and reserves zero disk; load/memory, policy, row limits and FIFO still
+apply. `gc` uses this explicit flag for expired-tree and repo/image cleanup.
+Workers never edit a slot worktree in place: use a separate checkout or ship an
+experiment through the snapshot. At reuse, tracked edits in every initialized
+submodule and the superproject are saved under `CONTROL/slot-edits/*.patch`
+before recursive `reset --hard` and `clean -ffd`. Ignored build caches survive.
+The summary/log records every patch path and the previous job from the slot
+receipt (legacy receipts explicitly say unknown). These patch files are not
+removed by slot reuse or this change's GC.
+
 ## CPU budgets and unit sharding
 
 On enrolled CN hosts the runner refreshes admission metrics before requesting a slot

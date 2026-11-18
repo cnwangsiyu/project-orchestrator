@@ -23,10 +23,10 @@ usage() {
   cat <<'EOF'
 res status [<id>]                     show every resource (or one) and who holds it
 res take <id> --by <session> --project <slug> --for "<purpose>" [--task <id>] [--until <when>] [--offline] [--pid <pid>] [--disk-gib <GiB>]
-res wait <id> --by <session> --project <slug> --for "<purpose>" --timeout <minutes> [--disk-gib <GiB>] [--disk-gib-file <JSON>] [take options]
+res wait <id> --by <session> --project <slug> --for "<purpose>" --timeout <minutes> [--disk-gib <GiB>] [--disk-gib-file <JSON>] [--placement-file <JSON>] [--maintenance] [take options]
                                       retry held resources; heavy-* waits also enforce the gate
                                       --pid names the long-lived holder (default: caller PID)
-res wait-pool <prefix> --by <session> --project <slug> --for "<purpose>" --timeout <minutes> [--need <cap,cap>] [--prefer-host <ip>] [--prefer-slot <id>] [--exclude-slot <id,...>] [--exclude-host <ip,...>] [--exclude-reason <text>] [--hard-exclude-slot <id,...>] [--hard-exclude-host <ip,...>] [--disk-gib <GiB>] [--disk-gib-file <JSON>] [take options]
+res wait-pool <prefix> --by <session> --project <slug> --for "<purpose>" --timeout <minutes> [--need <cap,cap>] [--prefer-host <ip>] [--prefer-slot <id>] [--exclude-slot <id,...>] [--exclude-host <ip,...>] [--exclude-reason <text>] [--hard-exclude-slot <id,...>] [--hard-exclude-host <ip,...>] [--disk-gib <GiB>] [--disk-gib-file <JSON>] [--placement-file <JSON>] [--maintenance] [take options]
                                       FIFO wait for any remote <prefix>-<number>; prints slot=<id>
                                       devbox-cn excludes light; devbox-cn-light selects only light
                                       no mini locks or heavy-check; return the printed slot
@@ -145,6 +145,7 @@ PY
       # The remote pool controller owns these keys and validates them independently.
       if (key ~ /^DEVBOX_(DYNAMIC_ADMISSION|DYNAMIC_HOSTS|LIGHT_STALE_RECLAIM|SOFT_EXCLUDE_MINUTES)$/ ||
           key ~ /^DEVBOX_(LOAD_PER_CORE|MIN_AVAIL_GIB|HEAVY_CORES|HEAVY_GIB|LIGHT_CORES|LIGHT_GIB|HEAVY_DISK_GIB|LIGHT_DISK_GIB)(\.[A-Za-z0-9][A-Za-z0-9.-]*)?$/ ||
+          key ~ /^DEVBOX_(REBUILD_PLACEMENT|INPUT_TTL_SECONDS|INPUT_WAIT_CAP_SECONDS|INPUT_SEED_MAX_SECONDS)$/ ||
           key ~ /^DEVBOX_(HEAVY|LIGHT)_DISK_GIB\.project\.[A-Za-z0-9][A-Za-z0-9_.-]*$/) next
       if (key !~ /^(LOAD_LIMIT|LOAD_LIMIT_WITH_LANES|MIN_AVAIL_GIB|LANE3_LOAD|LANE3_AVAIL_GIB|LANE_LOAD_PER_CORE|LANE_MIN_AVAIL_GIB|BUILD_LOAD_PER_CORE|BUILD_MAX_CONCURRENCY|BUILD_CONCURRENT_LOAD_PER_CORE|BUILD_CONCURRENT_MIN_AVAIL_GIB|HEAD_OVERRIDE_BASE_LOAD|LOAD_OVERRIDE_MINUTES|LOAD_POLL_SECONDS)$/ || seen[key]++) exit 1
       if (value !~ /^[0-9]+([.][0-9]+)?$/ || value + 0 <= 0) exit 1
@@ -974,7 +975,7 @@ show_build_waiters() {
 }
 
 parse() {
-  BY= PROJECT= PURPOSE= TASK= UNTIL= NOTE= FORCE= OFFLINE= DEVICE= POLICY= PID="$PPID" PID_EXPLICIT= DISK_GIB= DISK_GIB_FILE=
+  BY= PROJECT= PURPOSE= TASK= UNTIL= NOTE= FORCE= OFFLINE= DEVICE= POLICY= PID="$PPID" PID_EXPLICIT= DISK_GIB= DISK_GIB_FILE= PLACEMENT_FILE= MAINTENANCE= EXTRA_DISK_GIB=
   while [ $# -gt 0 ]; do
     case "$1" in
       --by) BY="$2"; shift 2 ;;
@@ -987,6 +988,9 @@ parse() {
       --offline) OFFLINE=1; shift ;;
       --device) DEVICE="$2"; shift 2 ;;
       --policy) POLICY="$2"; shift 2 ;;
+      --maintenance) MAINTENANCE=1; shift ;;
+      --placement-file) [ $# -ge 2 ] || die "$1 needs a value"; PLACEMENT_FILE="$2"; shift 2 ;;
+      --extra-disk-gib) [ $# -ge 2 ] || die "$1 needs a value"; EXTRA_DISK_GIB="$2"; shift 2 ;;
       --disk-gib|--disk-gib-file)
         [ $# -ge 2 ] || die "$1 needs a value"
         if [ "$1" = --disk-gib ]; then
@@ -1734,10 +1738,10 @@ cmd_wait_pool_legacy() {
 pool_controller() {
   local runner=
   if [ "${POOL_EXEC_CHILD:-0}" = 1 ]; then runner=exec; fi
-  ${runner:+$runner} python3 - "$RES_DIR" "$@" "$BY" "$PROJECT" "$TASK" "$PURPOSE" "$PID" "$UNTIL" "${FORCE:-}" "${POOL_NEED:-}" "${prefer_host:-}" "${prefer_slot:-}" "${excluded_slots:-}" "${excluded_hosts:-}" "${WAITER_STALE_SECONDS}" "$$" "${POOL_EPISODE:-none}" "${exclude_reason:-}" "${hard_slots:-}" "${hard_hosts:-}" "${DISK_GIB:-}" "${DISK_GIB_FILE:-}" <<'PY'
+  ${runner:+$runner} python3 - "$RES_DIR" "$@" "$BY" "$PROJECT" "$TASK" "$PURPOSE" "$PID" "$UNTIL" "${FORCE:-}" "${POOL_NEED:-}" "${prefer_host:-}" "${prefer_slot:-}" "${excluded_slots:-}" "${excluded_hosts:-}" "${WAITER_STALE_SECONDS}" "$$" "${POOL_EPISODE:-none}" "${exclude_reason:-}" "${hard_slots:-}" "${hard_hosts:-}" "${DISK_GIB:-}" "${DISK_GIB_FILE:-}" "${PLACEMENT_FILE:-}" "${MAINTENANCE:-}" "${EXTRA_DISK_GIB:-0}" <<'PY'
 import datetime, fcntl, hashlib, json, math, os, re, shutil, signal, socket, stat, sys, tempfile, time
 from contextlib import contextmanager
-root, action, request, timeout, delay, by, project, task, purpose, pid, until, force, need, prefer, preferred_slot, excluded_slots, excluded_hosts, stale, controller, generation, exclude_reason, hard_slots, hard_hosts, disk_gib, disk_gib_file = sys.argv[1:]
+root, action, request, timeout, delay, by, project, task, purpose, pid, until, force, need, prefer, preferred_slot, excluded_slots, excluded_hosts, stale, controller, generation, exclude_reason, hard_slots, hard_hosts, disk_gib, disk_gib_file, placement_file, maintenance, extra_disk_gib = sys.argv[1:]
 pid = int(pid); stamp = time.time(); now = stamp; host = socket.gethostname()
 controller_key = hashlib.sha256(host.encode()).hexdigest() + '.' + controller + '.' + generation
 locks = os.path.join(root, 'locks'); journal = os.path.join(root, 'log.tsv')
@@ -1908,6 +1912,10 @@ try:
                 if key in values: return fallback
                 if key in ('DEVBOX_DYNAMIC_ADMISSION', 'DEVBOX_LIGHT_STALE_RECLAIM') and value in ('0', '1'):
                     values[key] = value
+                elif key == 'DEVBOX_REBUILD_PLACEMENT' and value in ('0','1'):
+                    values[key] = value
+                elif key in ('DEVBOX_INPUT_TTL_SECONDS','DEVBOX_INPUT_WAIT_CAP_SECONDS','DEVBOX_INPUT_SEED_MAX_SECONDS') and value.isdecimal() and 0 < int(value) <= 86400:
+                    values[key] = int(value)
                 elif key == 'DEVBOX_DYNAMIC_HOSTS' and (not value or re.fullmatch(host_pattern + '(,' + host_pattern + ')*', value)):
                     values[key] = value
                 else:
@@ -2028,6 +2036,19 @@ try:
         raise ValueError('invalid --disk-gib')
     if any(not number(value) or not 0 <= value <= 65536 for value in disk_costs.values()):
         raise ValueError('invalid per-slot disk cost')
+    if not re.fullmatch(r'[0-9]+(?:\.[0-9]+)?',extra_disk_gib) or float(extra_disk_gib)>65536: raise ValueError('invalid extra disk GiB')
+    input_placement = None
+    if placement_file:
+        input_placement = json.loads(regular_text(placement_file))
+        if (not isinstance(input_placement, dict) or input_placement.get('version') != 1
+                or not number(input_placement.get('at')) or not 0 <= time.time()-input_placement['at'] < 180
+                or not isinstance(input_placement.get('slots'), dict)):
+            raise ValueError('invalid or stale input placement file')
+        for value in input_placement['slots'].values():
+            if (not isinstance(value, dict) or type(value.get('eligible')) is not bool
+                    or not all(number(value.get(key)) and 0 <= value[key] <= 1e9 for key in ('waitSec','rebuildSec','extraDiskGiB'))
+                    or not isinstance(value.get('hardReasons'), list)):
+                raise ValueError('invalid input placement score')
     def gate(box, kind, settings, current, only_dynamic=False, override=False, id=None):
         value = sample(box, current) if settings else {}
         entries = reservations(box, current) if settings else []
@@ -2037,6 +2058,11 @@ try:
         cost = (settings[kind + '_CORES'], settings[kind + '_GIB'],
                 disk_costs.get(id, float(disk_gib) if disk_gib else
                     settings['project_disk'][kind] or settings[kind + '_DISK_GIB'])) if settings else None
+        if cost: cost=(*cost[:2],cost[2]+float(extra_disk_gib))
+        if cost and input_placement:
+            extra = input_placement['slots'].get(id, {}).get('extraDiskGiB', 0)
+            cost = (*cost[:2], cost[2] + extra)
+        if cost and maintenance: cost = (*cost[:2], 0)
         detail = 'host=%s load5=%s reserved_cores=%g reserved_gib=%g mem_available_gib=%s' % (
             box, value.get('load5', '?'), cpu, mem, value.get('memAvailableGiB', '?'))
         detail += ' free_disk_gib=%s reserved_disk_gib=%g' % (value.get('freeGiB', '?'), disk)
@@ -2046,7 +2072,7 @@ try:
         limit = value['cores'] * settings['LOAD_PER_CORE']
         floor = settings['MIN_AVAIL_GIB']
         detail += ' load_limit=%g mem_floor_gib=%g task_cores=%g task_gib=%g task_disk_gib=%g disk_floor_gib=53' % (limit, floor, *cost)
-        if value['freeGiB'] - disk - cost[2] < 53: return 'disk', detail, entries, cost
+        if not maintenance and value['freeGiB'] - disk - cost[2] < 53: return 'disk', detail, entries, cost
         if value['memAvailableGiB'] - mem - cost[1] < floor: return 'memory', detail, entries, cost
         if value['load5'] + cpu + cost[0] > limit:
             return 'load-override' if override else 'load', detail, entries, cost
@@ -2278,6 +2304,8 @@ try:
             print('already held: %s by %s (pid=%s, since=%s)' % (request, by, hold.get('pid', '?'), hold.get('since', '?')))
             print_notes(request)
             committed = True; sys.exit(0)
+        if maintenance and not slot_type(request): raise ValueError('--maintenance requires a devbox slot')
+        if placement_file: raise ValueError('--placement-file requires wait-pool')
         members = [request]
         if request.endswith('-light') or re.fullmatch(r'.+-[0-9]+', request):
             pool = request if request.endswith('-light') else request.rsplit('-', 1)[0]
@@ -2325,7 +2353,8 @@ try:
             skipped_boxes = csv(value.get('exclude_hosts', ''))
             # A still-published older waiter may already have its fresh claim.
             if eligible(claims.get(value.get('pool_controller')), required_caps, skipped_slots, skipped_boxes): continue
-            options = {slot for slot in available if eligible(slot, required_caps, skipped_slots, skipped_boxes)}
+            allowed_inputs = csv(value['input_allowed_slots']) if 'input_allowed_slots' in value else available
+            options = {slot for slot in available & allowed_inputs if eligible(slot, required_caps, skipped_slots, skipped_boxes)}
             if options: older.append(options)
         return older
     def matching_size(options, free):
@@ -2429,6 +2458,28 @@ try:
         scores = capacity(hosts)
         warm = warm_slots(project, remote)
         candidates = sorted(members, key=rank)
+        if input_placement:
+            table = []
+            for id in compatible:
+                value = input_placement['slots'].get(id, {})
+                if not value: continue
+                reason = evaluate(id, remote[id][1], can_override(), diagnostic=True)[0]
+                held = os.path.isdir(os.path.join(locks, id + '.d'))
+                wait_seconds = max(60, value['waitSec'] - max(0, time.time()-input_placement['at'])) if held else 0
+                if not held and not gate_open(reason): wait_seconds = max(60, value['waitSec'])
+                hard = list(value['hardReasons'])
+                if reason == 'disk' or reason.startswith('closed-'): hard.append('admission ' + reason)
+                allowed = value['eligible'] and eligible(id) and not quarantined(id, state) and not hard
+                table.append(dict(slot=id, host=remote[id][1], waitSec=round(wait_seconds,3), rebuildSec=value['rebuildSec'],
+                                  totalSec=round(wait_seconds+value['rebuildSec'],3), eligible=allowed, hardReasons=hard, gate=reason))
+            eligible_scores = {row['slot']: row['totalSec'] for row in table if row['eligible']}
+            chosen = min(eligible_scores, key=lambda id: (eligible_scores[id], rank(id))) if eligible_scores else None
+            decision = dict(chosen=chosen, table=table)
+            if time.time()-float(own.get('placement_logged_at',0)) >= 60 or own.get('placement_chosen','') != (chosen or ''):
+                print('placement=' + json.dumps(decision,separators=(',',':')), flush=True)
+                own['placement_logged_at'] = str(time.time()); own['placement_chosen'] = chosen or ''; refresh_waiter()
+            candidates = [chosen] if chosen else []
+            own['input_allowed_slots'] = chosen or ''; refresh_waiter()
     if not blocked:
         for id in candidates:
             box = remote[id][1] if id in remote and slot_type(id) else None
@@ -2590,9 +2641,9 @@ cmd_wait_pool() {
           --hard-exclude-slot) hard_slots="$2" ;;
           --hard-exclude-host) hard_hosts="$2" ;;
         esac; shift 2 ;;
-      --by|--project|--for|--task|--until|--note|--pid|--disk-gib|--disk-gib-file)
+      --by|--project|--for|--task|--until|--note|--pid|--disk-gib|--disk-gib-file|--placement-file|--extra-disk-gib)
         [ $# -ge 2 ] || die "$1 needs a value"; args+=("$1" "$2"); shift 2 ;;
-      --force|--offline) args+=("$1"); shift ;;
+      --force|--offline|--maintenance) args+=("$1"); shift ;;
       *) die "unknown option '$1'" ;;
     esac
   done

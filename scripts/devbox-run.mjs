@@ -9,6 +9,8 @@ import { fileURLToPath } from 'node:url';
 import { StringDecoder } from 'node:string_decoder';
 import { redactLogFile } from './lib/log-redaction.mjs';
 import { maskLogText } from './lib/nightly-audit.mjs';
+import { manifest, duration, inputKey, indexFile, readIndex, inputSettings, placement, warmCost, warmInput, median, observedCost, fingerprint, inputPython, seedPython } from './lib/devbox-inputs.mjs';
+import { transferFindings } from './lib/devbox-transfer-check.mjs';
 
 const script = fileURLToPath(import.meta.url);
 const GiB = 1024 ** 3;
@@ -28,10 +30,10 @@ const sharedDir = () => process.env.RES_DIR || process.env.RULES_SHARED || path.
 const resCommand = () => process.env.RES_COMMAND || (fs.existsSync(path.join(sharedDir(), 'res')) ? path.join(sharedDir(), 'res') : 'res');
 
 export function parseArgs(args) {
-  const opts = { ref: 'HEAD', pool: 'devbox-cn', shards: 1, timeout: 120, fetchTimeout: 15, artifacts: [], env: {}, days: 7, need: [], excludeSlot: [], excludeHost: [] };
+  const opts = { ref: 'HEAD', pool: 'devbox-cn', shards: 1, timeout: 120, fetchTimeout: 15, artifacts: [], env: {}, days: 7, need: [], excludeSlot: [], excludeHost: [], inputs: [] };
   if (args[0] === 'gc') { opts.gc = true; args = args.slice(1); }
   if (args[0] === 'prewarm') { opts.prewarm = true; opts.ref = 'main'; opts.task = 'prewarm'; args = args.slice(1); }
-  const names = new Map(['project', 'task', 'repo', 'ref', 'pool', 'shards', 'out', 'timeout', 'prefer-host', 'watch-pid', 'affinity', 'host', 'days', 'units-file', 'command', 'fetch-timeout', 'exclude-reason', 'prefer-slot'].map(n => [`--${n}`, n.replace(/-([a-z])/g, (_, c) => c.toUpperCase())]));
+  const names = new Map(['project', 'task', 'repo', 'ref', 'pool', 'shards', 'out', 'timeout', 'prefer-host', 'watch-pid', 'affinity', 'host', 'days', 'units-file', 'command', 'fetch-timeout', 'exclude-reason', 'prefer-slot', 'warm-cost', 'inputs'].map(n => [`--${n}`, n.replace(/-([a-z])/g, (_, c) => c.toUpperCase())]));
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === '--') { if (opts.command) throw Error('provide only one command'); opts.command = args.slice(i + 1).join(' '); break; }
@@ -39,11 +41,12 @@ export function parseArgs(args) {
     if (arg === '--submodules') { opts.submodules = true; continue; }
     if (arg === '--rerun-on-fail') { opts.rerunOnFail = true; continue; }
     if (arg === '--allow-flaky') { opts.allowFlaky = true; continue; }
-    if (!names.has(arg) && !['--env', '--artifact', '--need', '--exclude-slot', '--exclude-host'].includes(arg)) throw Error(`unknown option ${arg}`);
+    if (!names.has(arg) && !['--env', '--artifact', '--need', '--exclude-slot', '--exclude-host', '--input'].includes(arg)) throw Error(`unknown option ${arg}`);
     const value = args[++i];
     if (value === undefined || value === '--') throw Error(`missing value for ${arg}`);
     if (arg === '--command' && !opts.prewarm) throw Error('--command is for prewarm; use -- COMMAND for runs');
     if (opts.prewarm && ['--shards', '--units-file'].includes(arg)) throw Error('prewarm builds once per idle host, without unit sharding');
+    if (arg === '--input') { opts.inputs.push(value); continue; }
     if (['--need', '--exclude-host', '--exclude-slot'].includes(arg)) {
       const caps = value.split(',');
       if (caps.some(cap => !/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(cap))) throw Error('invalid capability');
@@ -56,12 +59,20 @@ export function parseArgs(args) {
       const match = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/s.exec(value);
       if (!match || sensitive.test(match[1]) || /^(HOME|USER|SSH_.*|KRB5.*|GIT_.*|LD_.*|DYLD_.*|BASH_ENV|ENV)$/.test(match[1])) throw Error('invalid or credential-related --env name');
       opts.env[match[1]] = match[2];
+    } else if (arg === '--inputs') {
+      const declared = JSON.parse(fs.readFileSync(value,'utf8'));
+      const values = Array.isArray(declared) ? declared : declared.inputs;
+      if (!Array.isArray(values)) throw Error('--inputs needs an input array');
+      opts.inputs.push(...values);
     } else opts[names.get(arg)] = value;
   }
   if (opts.excludeReason !== undefined && (!opts.excludeReason.trim() || /[\t\r\n]/.test(opts.excludeReason))) throw Error('invalid --exclude-reason');
   opts.days = Number(opts.days);
   if (!Number.isFinite(opts.days) || opts.days < 1) throw Error('--days must be at least 1');
   if (opts.gc) return opts;
+  opts.inputs = manifest(opts.inputs);
+  if (opts.warmCost !== undefined) opts.warmCost = duration(opts.warmCost);
+  if (opts.prewarm && opts.inputs.length && !opts.command) opts.command='true';
   if (opts.prewarm && !opts.project) throw Error('prewarm requires --project');
   for (const name of (opts.project === undefined ? ['task'] : ['project', 'task'])) if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,100}$/.test(opts[name] || '')) throw Error(`--${name} needs a simple identifier`);
   if (!opts.repo || !opts.command?.trim()) throw Error('--repo and a command after -- are required');
@@ -311,6 +322,9 @@ def group_gone():
 `;
 
 export const remoteScripts = {
+  'input-map': pythonHeader + `ctl=pathlib.Path(d['control']); ctl.mkdir(parents=True,exist_ok=True); (ctl/'inputs.json').write_text(json.dumps(d['paths']))\n`,
+  inputs: pythonHeader + inputPython,
+  seed: pythonHeader + seedPython,
   metrics: pythonHeader + `load5=float(pathlib.Path('/proc/loadavg').read_text().split()[1])
 mem=next(int(line.split()[1])/1048576 for line in pathlib.Path('/proc/meminfo').read_text().splitlines() if line.startswith('MemAvailable:'))
 disk=os.statvfs(d['root'])
@@ -395,6 +409,35 @@ with open(str(repo)+'.lock','a') as lock:
     fcntl.flock(lock,fcntl.LOCK_EX)
     if (ws/'.git').exists():
         old=json.loads(meta.read_text()) if meta.exists() else {}
+        # Save all tracked edits before removing overlays or resetting any gitlink.
+        trees=[]
+        def modules(tree):
+            trees.append(tree)
+            entries=subprocess.check_output(['git','-C',str(tree),'ls-files','--stage','-z']).split(b'\\0')
+            visited=set()
+            for entry in entries:
+                if not entry.startswith(b'160000 '): continue
+                rel=entry.split(b'\\t',1)[1].decode(); child=tree/rel
+                if rel in visited: continue
+                visited.add(rel)
+                if (child/'.git').exists(): modules(child)
+        modules(ws)
+        saved=[]
+        for tree in trees:
+            diff=subprocess.check_output(['git','-C',str(tree),'diff','--binary','HEAD','--'])
+            if not diff: continue
+            ctl=pathlib.Path(d['control'])/'slot-edits'; ctl.mkdir(parents=True,exist_ok=True)
+            relative=tree.relative_to(ws).as_posix()
+            import hashlib, uuid
+            patch=ctl/(hashlib.sha256(relative.encode()).hexdigest()[:16]+'-'+uuid.uuid4().hex+'.patch')
+            with patch.open('xb') as output:
+                os.chmod(patch,0o600); output.write(diff)
+            saved.append({'tree':relative,'patch':str(patch)})
+        if saved:
+            print(json.dumps({'previousJob':old.get('job','unknown (legacy slot receipt)'), 'patches':saved}))
+        for tree in reversed(trees[1:]):
+            subprocess.run(['git','-C',str(tree),'reset','--hard','HEAD'],check=True,stdout=subprocess.DEVNULL)
+            subprocess.run(['git','-C',str(tree),'clean','-ffd','-q'],check=True,stdout=subprocess.DEVNULL)
         for name in old.get('untracked',[]):
             parts=pathlib.PurePosixPath(name).parts
             if not parts or name.startswith('/') or '..' in parts: raise RuntimeError('invalid overlay path')
@@ -410,7 +453,7 @@ with open(str(repo)+'.lock','a') as lock:
     else:
         ws.parent.mkdir(parents=True,exist_ok=True)
         subprocess.run(['git','--git-dir='+str(repo),'worktree','add','--detach',str(ws),d['commit']],check=True,stdout=subprocess.DEVNULL)
-    meta.write_text(json.dumps({'slot':d['slot'],'repository':str(repo),'lastUsed':time.time(),'untracked':d['untracked']}))
+    meta.write_text(json.dumps({'slot':d['slot'],'repository':str(repo),'lastUsed':time.time(),'untracked':d['untracked'],'job':d.get('job','unknown'),'affinity':d.get('affinity')}))
     exclude=pathlib.Path(subprocess.check_output(['git','-C',str(ws),'rev-parse','--path-format=absolute','--git-path','info/exclude'],text=True).strip())
     exclude.parent.mkdir(parents=True,exist_ok=True)
     previous=exclude.read_bytes() if exclude.exists() else b''
@@ -939,6 +982,127 @@ async function hostRoot(row, state, { deadline } = {}) {
   }, deadline === undefined ? undefined : Math.max(1, Math.floor((deadline - Date.now()) / 50)));
 }
 
+async function prepareSeeds(opts, temp, state) {
+  for (const input of opts.inputs) {
+    if (!input.seed) continue;
+    const local = path.resolve(opts.repo, input.seed);
+    if (input.seed.startsWith('cmd:') || !fs.existsSync(local) && /\s/.test(input.seed)) {
+      input.seedCommand = input.seed.replace(/^cmd:/, '');
+      if (transferFindings(input.seedCommand, { dsl: true }).length) throw Error(`pre-transfer credential gate refused seed command for ${input.name}`);
+      continue;
+    }
+    if (!fs.existsSync(local)) throw Error(`seed source missing for ${input.name}`);
+    const files = [];
+    const inspect = file => {
+      if (sensitiveFile.test(file) || /(?:^|\/)(?:cookies?|sessions?|login|\.npmrc|\.claude|\.trae|Library)(?:\/|$)/i.test(file)) throw Error(`private seed path refused for ${input.name}`);
+      const stat = fs.lstatSync(file);
+      if (stat.isSymbolicLink() || (!stat.isFile() && !stat.isDirectory())) throw Error('seed symlink/special file refused');
+      if (stat.isDirectory()) for (const name of fs.readdirSync(file)) inspect(path.join(file,name));
+      else files.push(file);
+    };
+    inspect(local);
+    for (const file of files) {
+      const bytes = fs.readFileSync(file);
+      if (bytes.subarray(0,6).toString() === 'bplist') throw Error('binary plist seed needs a source-only export');
+      if (!bytes.includes(0) && transferFindings(bytes.toString('utf8'), { dsl: /\.(?:gradle|kts|js|mjs|ts)$/.test(file) }).length)
+        throw Error(`pre-transfer credential gate refused seed contents for ${input.name}`);
+    }
+    const seedRepo = path.join(temp, `seed-${input.name}`); fs.mkdirSync(seedRepo);
+    fs.cpSync(local,path.join(seedRepo,'content'),{recursive:true});
+    const git = async args => checked(await execute('git', ['-C',seedRepo,...args],{state}), 'seed snapshot');
+    await git(['init','-q']); await git(['add','--','content']);
+    await git(['-c','user.name=Devbox input','-c','user.email=devbox@example.invalid','commit','-qm','Input seed']);
+    const commit = (await git(['rev-parse','HEAD'])).trim();
+    await scanTransfer({sourceRepo:seedRepo,commit,mode:'HEAD',scanId:'id-'+createHash('sha256').update('seed:'+input.hash).digest('hex')},'all',[],state);
+    const actual = await fingerprint(path.join(seedRepo,'content'));
+    if (actual.hash !== input.hash || input.sizeGiB > 0 && actual.bytes > input.sizeGiB * GiB) throw Error(`seed hash/size mismatch for ${input.name}`);
+    input.seedFile = path.join(temp, `seed-${input.name}.tar`);
+    checked(await execute('tar',['-cf',input.seedFile,'-C',seedRepo,'content'],{state,env:{...process.env,COPYFILE_DISABLE:'1'}}), 'seed archive');
+  }
+}
+
+function inputPath(root,input) { return input.path || `${root}/inputs/${input.name}/${input.hash}`; }
+async function verifyInputs(row, inputs, opts, state, { force=false, timeout=60000 }={}) {
+  const settings = inputSettings(sharedDir());
+  const file = indexFile(cacheDir(),row.host); fs.mkdirSync(path.dirname(file),{recursive:true});
+  return withStateLock(file, async () => {
+    const index = readIndex(cacheDir(),row.host), now=Date.now()/1000;
+    const root = await hostRoot(row,state,{deadline:Date.now()+timeout});
+    const probes=[];
+    for (const input of inputs) {
+      const key=inputKey(input)+(input.warm?'+'+row.slot:'');
+      const entry=index.inputs[key];
+      if (!force && entry && (!input.path || entry.path===input.path) && Number.isFinite(entry.verifiedAt) && 0<=now-entry.verifiedAt && now-entry.verifiedAt<settings.ttlSec) continue;
+      // Warm paths are only learned from successful slot receipts.
+      if (input.warm && !entry) continue;
+      probes.push({...input,key,path:input.path || entry?.path || inputPath(root,input)});
+    }
+    if (probes.length) {
+      const result=await ssh(row,'inputs',{root,inputs:probes,affinity:opts.affinity},{state,timeout});
+      const records=JSON.parse(checked(result,'input verification'));
+      for (const record of records) {
+        if (!probes.some(input=>input.key===record.key)) throw Error('unexpected input verification record');
+        if (record.present) index.inputs[record.key]={path:record.path,bytes:record.bytes,verifiedAt:Date.now()/1000};
+        else delete index.inputs[record.key];
+      }
+      writeJSON(file,index);
+    }
+    return index;
+  });
+}
+async function inputPlan(opts,rows,state) {
+  const settings=inputSettings(sharedDir()), indices={}, holds={}, durations={};
+  for (const row of rows) {
+    indices[row.host]=await verifyInputs(row,opts.placementInputs,opts,state,{timeout:Math.min(15000,opts.deadline-Date.now())});
+    try { holds[row.slot]=Object.fromEntries(fs.readFileSync(path.join(lockPath(sharedDir(),row.slot),'info'),'utf8').trim().split('\n').map(line=>line.split('\t'))); }
+    catch(error) { if(error.code!=='ENOENT') throw error; }
+    const history=readTimings(opts.snapshot.storeKey);
+    durations[row.slot]=history.slots?.[row.slot]?.durationSec;
+  }
+  const history=readTimings(opts.snapshot.storeKey).commands?.[opts.commandKey]?.placement || {};
+  const table=placement(rows,opts.placementInputs,indices,history,{...settings,holds,durations});
+  const slots=Object.fromEntries(table.map(value=>[value.slot,{...value,extraDiskGiB:opts.placementInputs.filter(input=>!input.warm && value.missing.includes(input.name)).reduce((sum,input)=>sum+input.sizeGiB,0)}]));
+  return {version:1,at:Date.now()/1000,slots};
+}
+async function seedInputs(row,data,opts,attempt,state,emit,remaining) {
+  const settings=inputSettings(sharedDir());
+  const index=await verifyInputs(row,[...opts.inputs,...(opts.placementInputs || []).filter(input=>input.warm)],opts,state,{force:true,timeout:remaining()});
+  attempt.seeds=[];
+  attempt.missingInputs=[...(attempt.missingInputs || []).filter(name=>name.startsWith('warm.')),...opts.inputs.filter(input=>!index.inputs[inputKey(input)]).map(input=>input.name)];
+  const missingGiB=opts.inputs.filter(input=>!index.inputs[inputKey(input)]).reduce((sum,input)=>sum+input.sizeGiB,0);
+  const disk=JSON.parse(checked(await ssh(row,'inspect',data,{state,timeout:remaining()}),'input disk check'));
+  if(disk.free/GiB-missingGiB<53) throw Object.assign(Error('input workspace disk guard'),{code:72});
+  for (const input of opts.inputs) {
+    if (index.inputs[inputKey(input)]) continue;
+    if (!input.rebuildable) throw Error(`missing non-rebuildable input ${input.name} after acquisition`);
+    if (!input.seed || observedCost(input,readTimings(opts.snapshot.storeKey).commands?.[opts.commandKey]?.placement)>settings.seedMaxSec && !opts.prewarm) continue;
+    const target=inputPath(data.root,input);
+    if (input.path) throw Error('seed destinations must use the runner input store');
+    const started=Date.now();
+    if (input.seedFile) checked(await ssh(row,'seed',{root:data.root,path:target,hash:input.hash,sizeGiB:input.sizeGiB},{inputFile:input.seedFile,state,timeout:remaining()}),'input seed');
+    else {
+      const job=`mkdir -p ${quote(path.posix.dirname(target))} && DEVBOX_INPUT_PATH=${quote(target)} bash -c ${quote(input.seedCommand)}`;
+      attempt.seedStarted=true;
+      const result=await ssh(row,'run',{...data,command:job,env:{},seconds:remaining()/1000},{state,timeout:remaining(),onOutput:emit});
+      const cleanup=await ssh(row,'cleanup',{...data,started:true},{state,cancellable:false,timeout:35000});
+      if (cleanup.code || !cleanup.stdout.includes('group-gone')) throw Error('seed command cleanup unconfirmed');
+      checked(result,'input seed command');
+      attempt.seedStarted=false;
+      // Each supervisor control directory is single-use.
+      data.control=`${data.root}/runs/${randomUUID()}`;
+      checked(await ssh(row,'inspect',data,{state,timeout:remaining()}),'post-seed preparation');
+    }
+    const verified=await verifyInputs(row,[input],opts,state,{force:true,timeout:remaining()});
+    if (!verified.inputs[inputKey(input)]) throw Error(`seed hash/size mismatch for ${input.name}`);
+    const seed={name:input.name,key:inputKey(input),durationSec:(Date.now()-started)/1000,path:target};
+    attempt.seeds.push(seed); emit(`[shard ${opts.shard}] seeded ${input.name}; hash verified\n`);
+  }
+  const paths=Object.fromEntries(opts.inputs.map(input=>[input.name,inputPath(data.root,input)]));
+  const inputMap=path.join(data.control,'inputs.json');
+  checked(await ssh(row,'input-map',{...data,paths},{state,timeout:remaining()}),'input path map');
+  attempt.inputPaths=paths; return inputMap;
+}
+
 function timingFile(repoId) { return path.join(cacheDir(), 'timings', `${repoId}.json`); }
 
 function readTimings(repoId) {
@@ -950,11 +1114,11 @@ async function recordTimings(repoId, commandKey, shards) {
   const file = timingFile(repoId);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   await withStateLock(file, () => {
-    const history = readTimings(repoId); history.units ||= {}; history.commands ||= {}; history.version = 1;
+    const history = readTimings(repoId); history.units ||= {}; history.commands ||= {}; history.slots ||= {}; history.version = 1;
     const update = (map, key, durationSec) => {
       if (!Number.isFinite(durationSec) || durationSec <= 0) return;
       const previous = map[key], samples = previous?.samples || 0;
-      map[key] = { durationSec: ((previous?.durationSec || 0) * samples + durationSec) / (samples + 1), samples: samples + 1, updatedAt: new Date().toISOString() };
+      map[key] = { ...previous, durationSec: ((previous?.durationSec || 0) * samples + durationSec) / (samples + 1), samples: samples + 1, updatedAt: new Date().toISOString() };
     };
     for (const shard of shards) {
       const units = new Map();
@@ -962,6 +1126,30 @@ async function recordTimings(repoId, commandKey, shards) {
         if (!record.exit) units.set(record.unit, record.durationSec);
       }
       for (const [unit, duration] of units) update(history.units, unit, duration);
+    }
+    for (const shard of shards) for (const attempt of shard.attempts || []) {
+      const command=history.commands[commandKey] ||= {};
+      const thermal=command.placement ||= {cold:[],warm:[],inputs:{}};
+      for (const seed of attempt.seeds || []) {
+        const observations=thermal.inputs[seed.key] ||= []; observations.push(seed.durationSec); if(observations.length>21) observations.shift();
+      }
+      if (attempt.exit || !attempt.returned || !attempt.commandDurationSec) continue;
+      update(history.slots,attempt.slot,attempt.commandDurationSec);
+      const samples=thermal[attempt.warmWorkspace?'warm':'cold'] ||= [];
+      samples.push(attempt.commandDurationSec); if(samples.length>21) samples.shift();
+      const cacheClass=attempt.warmWorkspace?'warm':'cold';
+      const missing=attempt.missingInputs.filter(name=>attempt.declaredInputKeys?.[name] && !(attempt.seeds || []).some(seed=>seed.name===name));
+      const base=thermal.baselines ||= {cold:[],warm:[]};
+      const runs=thermal.rebuildRuns ||= {};
+      if (!missing.length && !(attempt.seeds || []).length) {
+        base[cacheClass].push(attempt.commandDurationSec); if(base[cacheClass].length>21) base[cacheClass].shift();
+      } else if (missing.length===1) {
+        const key=attempt.declaredInputKeys[missing[0]];
+        const values=runs[key+'+'+cacheClass] ||= []; values.push(attempt.commandDurationSec); if(values.length>21) values.shift();
+        if(base[cacheClass].length>=3) thermal.inputs[key]=values.map(value=>Math.max(0,value-median(base[cacheClass])));
+      }
+
+      if (attempt.warmWorkspace && thermal.cold.length && thermal.warm.length>=3) command.rebuildCostSec=warmCost(thermal);
     }
     if (shards.length && shards.every(shard => !shard.exit && !shard.skipped)) {
       update(history.commands, commandKey, shards.reduce((total, shard) => total + (shard.attempts.at(-1).commandDurationSec || 0), 0));
@@ -999,7 +1187,7 @@ async function collectGarbage({ rows, days = 7, host, state, emit = text => proc
       const member = rows.find(r => r.slot === item.slot && r.host === row.host);
       if (!member || item.slot === skipSlot || state.cancel) continue;
       const by = `devbox-gc-${process.pid}-${randomUUID()}`;
-      const take = await executeRes(['take', member.slot, '--by', by, '--project', 'devbox-run', '--task', 'gc', '--for', 'expired worktree cleanup', '--pid', String(process.pid)], { state });
+      const take = await executeRes(['take', member.slot, '--by', by, '--project', 'devbox-run', '--task', 'gc', '--for', 'expired worktree cleanup', '--maintenance', '--pid', String(process.pid)], { state });
       if (take.code === 2 || take.code === 3) continue;
       if (take.code) {
         try {
@@ -1044,6 +1232,7 @@ async function shard(opts) {
   const parentWatch = setInterval(() => { try { process.kill(opts.parentPid, 0); } catch { state.stop(143); } }, 1000);
   const timer = setTimeout(() => state.stop(124), opts.timeout * 60000);
   const started = Date.now(), deadline = started + opts.timeout * 60000;
+  opts.deadline=deadline;
   const command = opts.command.replaceAll('{shards}', String(opts.shards)).replaceAll('{shard}', String(opts.shard));
   const by = `${opts.task}-s${opts.shard}-${process.pid}`;
   const log = path.join(opts.out, `shard-${opts.shard}.log`);
@@ -1063,6 +1252,9 @@ async function shard(opts) {
   const runRes = (args, cleanup = false) => executeRes(args, {
     state, cancellable: !cleanup, timeout: cleanup ? 30000 : remaining(), rawCapture: true,
     interceptStdout: line => {
+      if (line.startsWith('placement=') && state.currentAttempt) {
+        try { (state.currentAttempt.placementDecisions ||= []).push(JSON.parse(line.slice(10))); } catch { state.stop(74); }
+      }
       const slot = /^slot=(devbox-cn-(?:\d+|light(?:-\d+)?))$/.exec(line)?.[1];
       if (slot) state.reportedSlot = slot;
       return false;
@@ -1084,7 +1276,7 @@ async function shard(opts) {
     while (!state.cancel) {
       const attempt = { slot: null, host: null, exit: 1, durationSec: 0, log, returned: false };
       const attemptStart = Date.now(); let row, data, prepared = false, launched = false, clean = true;
-      attempts.push(attempt);
+      attempts.push(attempt); state.currentAttempt=attempt;
       state.onBundleFailure = diagnostics => {
         (attempt.bundleFailures ||= []).push(diagnostics);
         emit(`[shard ${opts.shard}] bundleFailure=${JSON.stringify(diagnostics)}\n`);
@@ -1110,7 +1302,20 @@ async function shard(opts) {
         const affinitySlot = opts.preferSlot || affinity?.slot;
         const preferred = avoid ? (possible.find(item => item.host !== avoid.host) || possible[0]).host : opts.preferHost || affinity?.host;
         const common = ['--by', by, '--project', opts.project, '--task', opts.task, '--for', opts.task, '--pid', String(process.pid)];
-        const refresh = () => refreshHostMetrics(possible, state, { timeout: Math.min(15000, remaining()) });
+        const placementFile=path.join(opts.out,`shard-${opts.shard}-placement.json`);
+        const inputRows=possible.filter(item=>!quarantinedHosts(sharedDir()).has(item.host));
+        const refresh = async () => {
+          await refreshHostMetrics(possible, state, { timeout: Math.min(15000, remaining()) });
+          if (opts.placementInputs.length) {
+            const plan=await inputPlan(opts,inputRows,state);
+            attempt.inputPlan=plan;
+            if (!Object.values(plan.slots).some(value=>value.eligible)) {
+              emit(`[shard ${opts.shard}] input placement=${JSON.stringify(plan)}\n`);
+              throw Error('no eligible host: '+Object.values(plan.slots).flatMap(value=>value.hardReasons).join('; '));
+            }
+            writeJSON(placementFile,plan);
+          }
+        };
         await refresh();
         const diskCosts = {};
         if (opts.diskCostsSupported) for (const [host, candidate] of new Map(possible.map(item => [item.host, item]))) {
@@ -1123,7 +1328,7 @@ async function shard(opts) {
         if (opts.diskCostsSupported) writeJSON(diskCostFile, diskCosts);
         const diskArgs = opts.diskCostsSupported ? ['--disk-gib-file', diskCostFile] : [];
         attempt.diskCosts = diskCosts;
-        const args = ['wait-pool', opts.pool, ...common, '--timeout', String(remaining() / 60000), ...diskArgs];
+        const args = ['wait-pool', opts.pool, ...common, '--timeout', String(remaining() / 60000), ...diskArgs, ...(opts.placementInputs.length ? ['--placement-file',placementFile] : [])];
         const callerSlots = softExclusionsDropped ? [] : opts.excludeSlot;
         const callerHosts = softExclusionsDropped ? [] : opts.excludeHost;
         if (opts.splitExclusions) {
@@ -1145,12 +1350,15 @@ async function shard(opts) {
           const candidates = opts.prewarmSlots.map(slot => choices.find(item => item.slot === slot)).filter(Boolean);
           for (const candidate of candidates) {
             if (quarantinedHosts(sharedDir()).has(candidate.host) || heldSlots(sharedDir(), candidate.host).length) break;
-            const take = await runRes(['take', candidate.slot, ...common, ...diskArgs]);
+            const inputScore=attempt.inputPlan?.slots[candidate.slot];
+            if (inputScore && !inputScore.eligible) continue;
+            const prewarmArgs=[...diskArgs,...(inputScore ? ['--extra-disk-gib',String(inputScore.extraDiskGiB)] : [])];
+            const take = await runRes(['take', candidate.slot, ...common, ...prewarmArgs]);
             if (!take.code) { acquire = { ...take, stdout: `slot=${candidate.slot}\n` }; break; }
             if (take.code !== 2 && take.code !== 3) checked(take, 'prewarm slot acquisition');
           }
           if (!acquire) { attempt.skipped = true; attempt.exit = 0; emit(`[shard ${opts.shard}] prewarm skipped: host is busy\n`); break; }
-        } else if (!avoid) for (const candidate of preferredSlots) {
+        } else if (!avoid && !opts.placementInputs.length) for (const candidate of preferredSlots) {
           const take = await runRes(['take', candidate.slot, ...common, ...diskArgs]);
           if (!take.code) { acquire = { ...take, stdout: `slot=${candidate.slot}\n` }; break; }
           if (take.code !== 2 && take.code !== 3) checked(take, 'affinity slot acquisition');
@@ -1158,7 +1366,7 @@ async function shard(opts) {
         if (!acquire) {
           let refreshing;
           const timer = setInterval(() => {
-            if (!refreshing) refreshing = refresh().finally(() => { refreshing = null; });
+            if (!refreshing) refreshing = refresh().catch(error=>{attempt.placementError=error.message; state.stop(74);}).finally(() => { refreshing = null; });
           }, 60000);
           try { acquire = await runRes(args); }
           finally { clearInterval(timer); await refreshing; }
@@ -1183,6 +1391,8 @@ async function shard(opts) {
           checked(result, 'alternate slot acquisition');
         }
         attempt.host = row.host;
+        attempt.missingInputs=attempt.inputPlan?.slots[row.slot]?.missing || [];
+        attempt.declaredInputKeys=Object.fromEntries(opts.inputs.map(input=>[input.name,inputKey(input)]));
         if (opts.prewarm && (quarantinedHosts(sharedDir()).has(row.host) || heldSlots(sharedDir(), row.host).some(member => member.slot !== row.slot))) {
           attempt.skipped = true; attempt.exit = 0; emit(`[shard ${opts.shard}] prewarm skipped: host became busy\n`); break;
         }
@@ -1193,7 +1403,7 @@ async function shard(opts) {
         const workspace = `${root}/wt/${opts.project}/${storeName}/${row.slot}`;
         const repository = `${root}/repos/${opts.project}/${storeName}`;
         attempt.repository = repository;
-        data = { root, workspace, repository, slot: row.slot, control: `${root}/runs/${randomUUID()}`, commit: opts.snapshot.commit, untracked: opts.snapshot.untracked };
+        data = { root, workspace, repository, slot: row.slot, job: `${opts.project}/${opts.task}`, affinity:opts.affinity, control: `${root}/runs/${randomUUID()}`, commit: opts.snapshot.commit, untracked: opts.snapshot.untracked };
         let inspection = JSON.parse(checked(await ssh(row, 'inspect', data, { state, timeout: Math.min(60000, remaining()) }), 'workspace inspection'));
         if (inspection.free < 73 * GiB) {
           await collectGarbage({ rows: [...readRegistry(sharedDir(), 'devbox-cn'), ...readRegistry(sharedDir(), 'devbox-cn-light')], host: row.host, state, emit, skipSlot: row.slot });
@@ -1203,6 +1413,7 @@ async function shard(opts) {
           attempt.diskGuard = true; emit(`[shard ${opts.shard}] disk guard refused ${row.host}: need 53 GiB free\n`);
           throw Object.assign(Error('workspace disk guard'), { code: 72 });
         }
+        attempt.warmWorkspace=opts.placementInputs.some(input=>input.warm) ? !attempt.missingInputs.some(name=>name.startsWith('warm.')) : inspection.present && Object.hasOwn(diskCosts,row.slot);
         prepared = true;
         for (let uploadTry = 0; ; uploadTry++) {
           try {
@@ -1215,7 +1426,10 @@ async function shard(opts) {
               finally { fs.unlinkSync(bundle); }
             };
             await feed(opts.snapshot, data, inspection, 'bundleBytes');
-            checked(await ssh(row, 'checkout', data, { state, timeout: remaining() }), 'worktree checkout');
+            const checkout=await ssh(row, 'checkout', data, { state, timeout: remaining() });
+            checked(checkout,'worktree checkout');
+            const hygiene=checkout.stdout.trim();
+            if (hygiene) { attempt.slotHygiene=JSON.parse(hygiene); emit(`[shard ${opts.shard}] slot hygiene=${hygiene}\n`); }
             if (opts.snapshot.patchFile && fs.statSync(opts.snapshot.patchFile).size) checked(await ssh(row, 'patch', data, { inputFile: opts.snapshot.patchFile, state, timeout: remaining() }), 'worktree patch');
             if (opts.snapshot.extra) checked(await ssh(row, 'upload', data, { inputFile: opts.snapshot.extra, state, timeout: remaining() }), 'untracked upload');
             for (const mod of opts.snapshot.modules) {
@@ -1243,12 +1457,17 @@ async function shard(opts) {
         const hosts = JSON.parse(fs.readFileSync(path.join(cacheDir(), 'devbox-hosts.json'), 'utf8'));
         Object.assign(attempt, cpuBudget(sharedDir(), row.host, hosts[row.host]?.cores));
         emit(`[shard ${opts.shard}] cpus=${attempt.cpus} cores=${attempt.hostCores} heavyHolders=${attempt.heavyHolders}\n`);
+        const inputMap=opts.inputs.length ? await seedInputs(row,data,opts,attempt,state,emit,remaining) : null;
         let job = opts.units ? remoteCommand('units', remoteScripts.units, { control: data.control, command, units: opts.units }) : command;
+        if (inputMap) {
+          const afterSeed=JSON.parse(checked(await ssh(row,'inspect',data,{state,timeout:remaining()}),'post-seed disk check'));
+          if (afterSeed.free<53*GiB) throw Object.assign(Error('post-seed workspace disk guard'),{code:72});
+        }
         if (opts.prewarm) job = `nice -n 10 bash -c ${quote(job)}`;
         launched = true;
         const caches = { GRADLE_USER_HOME: `${root}/shared/gradle`, npm_config_cache: `${root}/shared/npm`, PNPM_STORE_DIR: `${root}/shared/pnpm`, CCACHE_DIR: `${root}/shared/ccache`, CCACHE_MAXSIZE: '20G', PIP_CACHE_DIR: `${root}/shared/pip`, DEVBOX_TOOLCHAINS: `${root}/shared/toolchains` };
         const commandStart = Date.now();
-        const result = await ssh(row, 'run', { ...data, command: job, cpus: attempt.cpus, env: { ...caches, ...opts.env, ...cpuEnvironment(attempt.cpus), DEVBOX_RUN_RECEIPT: `${workspace}/.devbox-run.json` }, seconds: remaining() / 1000 }, { state, timeout: remaining() + 15000, onOutput: emit });
+        const result = await ssh(row, 'run', { ...data, command: job, cpus: attempt.cpus, env: { ...caches, ...opts.env, ...cpuEnvironment(attempt.cpus), DEVBOX_RUN_RECEIPT: `${workspace}/.devbox-run.json`, ...(inputMap?{DEVBOX_INPUTS_FILE:inputMap,DEVBOX_INPUTS_DIR:`${root}/inputs`}:{}) }, seconds: remaining() / 1000 }, { state, timeout: remaining() + 15000, onOutput: emit });
         attempt.commandDurationSec = (Date.now() - commandStart) / 1000;
         const loginFailure = result.code === 255 && !result.sshStarted && /permission denied|gssapi|authentication failed/i.test(result.stderr);
         if (result.code === 255 && !loginFailure) attempt.sshDropped = true;
@@ -1276,7 +1495,7 @@ async function shard(opts) {
           } else if (attempt.authenticationBlocked) {
             clean = false;
           } else {
-            const cleanup = await ssh(row, 'cleanup', { ...data, started: launched }, { cancellable: false, state, timeout: 35000 });
+            const cleanup = await ssh(row, 'cleanup', { ...data, started: launched || attempt.seedStarted }, { cancellable: false, state, timeout: 35000 });
             clean = cleanup.code === 0 && cleanup.stdout.includes('group-gone');
           }
           if (!clean) {
@@ -1299,6 +1518,19 @@ async function shard(opts) {
             }
             const message = attempt.remoteJobStillRunning ? 'remote job still running' : 'remote cleanup unconfirmed';
             emit(`[shard ${opts.shard}] BLOCKED: ${message}; retaining ${attempt.slot}${attempt.stopCommand ? `; to stop: ${attempt.stopCommand}` : ''}\n`);
+          }
+          if (clean && launched && !attempt.exit) {
+            try {
+              if (opts.inputs.length) await verifyInputs(row,opts.inputs,opts,state,{force:true,timeout:30000});
+              const warm=warmInput(opts.project,opts.snapshot.storeKey,opts.affinity,0);
+              const file=indexFile(cacheDir(),row.host); fs.mkdirSync(path.dirname(file),{recursive:true});
+              await withStateLock(file,()=>{
+                const index=readIndex(cacheDir(),row.host);
+                // Successful command + clean supervisor establishes this slot's warm receipt.
+                index.inputs[inputKey(warm)+'+'+row.slot]={path:data.workspace,verifiedAt:Date.now()/1000};
+                writeJSON(file,index);
+              });
+            } catch(error) { attempt.exit ||= 74; attempt.inputIndexError=error.message; emit(`[shard ${opts.shard}] input index: ${error.message}\n`); }
           }
           if (clean && launched && opts.units) {
             const timings = await ssh(row, 'timings', data, { cancellable: false, state, timeout: 30000 });
@@ -1423,7 +1655,7 @@ async function main(args) {
   }
   const opts = parseArgs(args);
   if (opts.help) {
-    console.log('Usage: devbox-run.mjs [--project P] --task T --repo PATH [--ref COMMIT|HEAD|worktree] [--pool devbox-cn|devbox-cn-light] [--shards N|auto] [--units-file PATH] [--artifact GLOB]... [--fetch-timeout MIN] [--out DIR] [--timeout MIN] [--env K=V]... [--rerun-on-fail] [--allow-flaky] [--affinity KEY] [--prefer-host IP] [--prefer-slot ID] [--need CAP]... [--exclude-slot IDS] [--exclude-host IPS] [--exclude-reason TEXT] [--submodules] [--watch-pid PID] -- COMMAND\n       devbox-run.mjs prewarm --project P --repo PATH [--ref main] --command COMMAND [--need CAP]...\n       devbox-run.mjs gc [--host IP] [--days N]\n       devbox-run.mjs stop --out DIR --run-id UUID\nCOMMAND supports {shard}, {shards} and {units}. Timeout includes queue/upload/run; cleanup follows. See references/devbox-run.md.');
+    console.log('Usage: devbox-run.mjs [--project P] --task T --repo PATH [--ref COMMIT|HEAD|worktree] [--pool devbox-cn|devbox-cn-light] [--shards N|auto] [--units-file PATH] [--artifact GLOB]... [--fetch-timeout MIN] [--out DIR] [--timeout MIN] [--env K=V]... [--rerun-on-fail] [--allow-flaky] [--affinity KEY] [--prefer-host IP] [--prefer-slot ID] [--need CAP]... [--exclude-slot IDS] [--exclude-host IPS] [--exclude-reason TEXT] [--submodules] [--watch-pid PID] [--input MANIFEST]... [--inputs JSON] [--warm-cost DURATION] -- COMMAND\n       devbox-run.mjs prewarm --project P --repo PATH [--ref main] [--command COMMAND] [--need CAP]... [--input MANIFEST]...\n       devbox-run.mjs gc [--host IP] [--days N]\n       devbox-run.mjs stop --out DIR --run-id UUID\nCOMMAND supports {shard}, {shards} and {units}. Timeout includes queue/upload/run; cleanup follows. See references/devbox-run.md.');
     return 0;
   }
   if (opts.gc) {
@@ -1455,12 +1687,17 @@ async function main(args) {
   }, 1000);
   try {
     opts.snapshot = await snapshot(opts, temp, state);
+    await prepareSeeds(opts,temp,state);
     if (state.cancel) return state.cancel;
     if (opts.unitsFile) opts.units = parseUnits(fs.readFileSync(opts.unitsFile, 'utf8'));
     else if (opts.command.includes('{units}')) opts.units = parseUnits(discoverUnits(opts.snapshot.files).join('\n'));
     if (opts.units?.some(unit => !opts.snapshot.files.includes(unit))) throw Error('unit is absent from the source snapshot');
     delete opts.snapshot.files;
     const commandKey = createHash('sha256').update(JSON.stringify([opts.command, opts.units || null, Boolean(opts.prewarm)])).digest('hex');
+    opts.commandKey=commandKey;
+    const thermal=readTimings(opts.snapshot.storeKey).commands?.[commandKey]?.placement;
+    const cost=warmCost(thermal,opts.warmCost);
+    opts.placementInputs=[...opts.inputs,...(cost===undefined?[]:[warmInput(opts.project,opts.snapshot.storeKey,opts.affinity,cost)])];
     const prewarm = opts.prewarm ? await planPrewarm(opts, state) : null;
     let plan;
     if (opts.prewarm) plan = { count: prewarm.length, strategy: 'prewarm', groups: prewarm.map(() => null) };
@@ -1483,6 +1720,14 @@ async function main(args) {
       console.error('devbox-run: could not read res flags (`res help` and `res wait-pool --help` both failed); refusing to place shards without --need/--exclude-* constraints');
       return 2;
     }
+    opts.placementSupported=helpText.includes('--placement-file');
+    const settings=inputSettings(sharedDir());
+    if (!settings.enabled) {
+      if (opts.inputs.some(input=>!input.rebuildable)) throw Error('rebuild placement disabled; non-rebuildable inputs require enabled placement');
+      opts.placementInputs=[];
+    }
+    if (opts.inputs.length && !opts.placementSupported && settings.enabled) throw Error('input placement requires matching res with --placement-file');
+    if (!opts.placementSupported) opts.placementInputs=[];
     opts.diskCostsSupported = helpText.includes('--disk-gib-file');
     opts.preferSupported = /--prefer-host\b/.test(helpText);
     opts.excludeSlotSupported = helpText.includes('--exclude-slot');
