@@ -82,5 +82,13 @@ try {
   assert.match(capturedText, /NEXUS_MAGIC_WORD=\[MASKED\]/);
   assert.match(capturedText, /storePassword "\[MASKED\]"/);
   assert.match(capturedText, /TOKEN_NAME = \[MASKED\]/);
+  // BC-123: upload CLI key forms (access key ids, -ak/-sk, signed URL params, tosutil -i/-k).
+  const V = 'FAKE_AK_VALUE_7781';
+  for (const form of [`--access_key_id ${V}`, `--access-key-id=${V}`, `-ak ${V}`, `--ak ${V}`, `AK=${V}`, `accessKeyId=${V}`, `AccessKeyId: ${V}`,
+    `ACCESS_KEY_ID=${V}`, `-sk ${V}`, `--secret-access-key ${V}`, `secret_access_key=${V}`, `tosutil cp a tos://b -i ${V} -k ${V}`,
+    `?X-Tos-Credential=${V}%2F20261118`, `&AccessKeyId=${V}&Signature=${V}`]) {
+    assert.ok(!maskLogText(`upload ${form}\n`).text.includes(V), `masks ${form.replaceAll(V, 'V')}`);
+  }
+  for (const plain of ['curl -k https://example.invalid', 'ls -i build', 'tar -xk archive']) assert.equal(maskLogText(plain).masked, 0, `keeps ${plain}`);
   console.log('PASS build log masking: Gradle/Xcode values, dry-run secrecy, binary/symlink/JSONL skips, line structure and exit preservation');
 } finally { fs.rmSync(temp, { recursive: true, force: true }); }

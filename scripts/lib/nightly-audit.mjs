@@ -1,9 +1,9 @@
-const fields = 'password|passphrase|passwd|pwd|pass|token|secret|api[_-]?key|access[_-]?key|private[_-]?key|credentials?|auth|username';
+const fields = 'password|passphrase|passwd|pwd|pass|token|secret[_-]?access[_-]?key|secret|api[_-]?key|access[_-]?key(?:[_-]?id)?|private[_-]?key|credentials?|auth|username|ak|sk|x-(?:tos|amz)-(?:credential|signature|security-token)|signature';
 const quotedValue = String.raw`"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'`;
 const inlineQuotedValue = String.raw`"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'`;
 const bareValue = String.raw`\$\{[^}\r\n]*\}|<[^>\r\n]*>|\[[^\]\r\n]*\]|[^\s,;{}"'\[\]<>]+`;
 // A minus is a diff prefix only at the start of a line, not inside an ordinary word.
-const assignmentKey = String.raw`(?:(?<![\w.-])|(?<=^[+-])|(?<=^--)|(?<=[\t ]--))(["']?)(${fields})\1`;
+const assignmentKey = String.raw`(?:(?<![\w.-])|(?<=^[+-])|(?<=^--)|(?<=[\t ]--)|(?<=[\t ]-))(["']?)(${fields})\1`;
 const assignments = new RegExp(String.raw`${assignmentKey}([\t ]*[:=][\t ]*)(${quotedValue}|${bareValue})`, 'gim');
 const whitespaceAssignments = new RegExp(String.raw`${assignmentKey}([\t ]+)(${inlineQuotedValue}|${bareValue})`, 'gim');
 const properties = new RegExp(String.raw`^([+-]?[\t ]*(?:export[\t ]+)?)(["']?)([A-Za-z_][\w.-]*)\2([\t ]*[:=][\t ]*)(${quotedValue}|${bareValue})`, 'gm');
@@ -91,9 +91,16 @@ function credentialBlocks(text) {
 // HTTP auth headers: the whole header value (Cookie/Set-Cookie pairs, Authorization schemes) is secret.
 const headers = /(?:(?<![\w-])|(?<=^[+-]))(set-cookie|cookie|authorization|proxy-authorization|x-[\w-]*(?:token|api-key|auth)[\w-]*)([\t ]*:[\t ]*)([^\r\n"]+)/gim;
 
+// tosutil takes its key pair as `-i <AK> -k <SK>`; these short flags are too generic to mask elsewhere.
+const tosutilKeys = /(?<=\btosutil\b[^\r\n]*[\t ])-([ik])([\t ]+)([^\s"']+)/gi;
+
 function visitSecrets(text, visit) {
   const hits = [];
   collectSecrets(text, (hit) => hits.push(hit));
+  for (const match of text.matchAll(tosutilKeys)) {
+    const start = match.index + 1 + match[1].length + match[2].length;
+    hits.push({ line: 0, field: `tosutil -${match[1]}`, start, end: start + match[3].length });
+  }
   for (const match of boundedMatches(text, headers, 3)) {
     const value = (markdownRow(text, match.index) ? cellValue(match[3]) : match[3]).trimEnd();
     if (!value || /^(?:\[[^\]]*(?:redact|masked)[^\]]*\]|REDACTED|\*+)$/i.test(value)) continue;
