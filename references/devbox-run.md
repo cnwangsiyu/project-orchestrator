@@ -431,6 +431,140 @@ per host and publish atomically. Root discovery is cached; free space is checked
 on the workspace filesystem for every run. Consumers should label host
 measurements older than 24 hours stale.
 
+## VE Android Source-Only Recipe
+
+T152 qualified the unsigned MT Android vemo build on devbox 8 at
+`91e795f3e661427dd1cad7a540d9a924f68cf459`. With 9 allocated CPUs,
+the cold build ran in 1641.222s and compiled 4,771 native objects.
+The warm build ran in 43.354s with zero new native objects.
+See `tasks/T152/report.md` for the APK and verification receipts.
+
+VE and Lynx use the shared `vesdk` namespace on devbox 8
+(`10.37.251.219`). Request `--need vesdk-android` and keep the runner's
+per-slot worktree. The base JDK, Android SDK, NDK 21.1, CMake and Gradle 7.6.3
+live under `shared/toolchains`. The separate `VESDK_ANDROID_OVERLAY`
+provides the Ninja wrapper, SWIG 4.0.2, and the Python libraries needed by
+AmazingEngine. The setup script
+`install-swig.sh` installs the SHA-256-verified Linux wheel from
+[PyPI](https://pypi.org/project/swig/4.0.2/) into that overlay. The build
+uses the BCE-carrying Bach
+`22.7.0.15-MT-debug` with `USE_BACH_SOURCE=0`.
+
+Prepare from a local vesdk branch name or full commit. The exporter creates
+a parentless Git snapshot and records the original commit in
+`source-provenance.json`. Prep generates the EffectSDK Android version metadata
+and MT build flags from the pinned parser in this isolated snapshot. Its local
+Python needs PyYAML, requests and rich. It rejects credential-file paths and blanks
+credential-labelled fields in Gradle and properties, including HTTP headers
+embedded in command strings. `source-build-fields.json` records path,
+key and count only. A branch must use matching engine, nodegraph, Bach,
+and LFS inputs. Stage and audit matching dependencies on the mini when
+the branch changes a pin.
+
+Prep exports the following configure-time source inputs on the mini from
+exact local Git objects. Each export omits repository metadata and is
+audited before transfer. The shared payload uses AmazingEngine
+`99eef0da72b9ddd6f4983c26a928187fc317ec4f`.
+
+| Consumer | Source | Revision |
+| --- | --- | --- |
+| AmazingEngine | EasySensor | `eaf4802cb67de29b8c02cbf379d25ccf72081254` |
+| AmazingEngine | pathkit | `64a34916a1019aca045cd58b3250f0a39f228171` |
+| AmazingEngine | jazz | `655dc6847d8508ef7acdc3248af773165d0966f4` |
+| AmazingEngine | VECodecHeader | `6853578c01aa57608c1f41677aa3a9f1713de9c2` |
+| EffectSDK | EasySensor | `c3c5e8f649d6e0597254c17f095818759a0c5df3` |
+| EffectSDK | tiktok_nodegraph | `2e21a7279266d1680551e637ebaba23aa3bd3fdc` |
+
+The worktree prep installs the six exports at the paths declared in the
+two version files and writes `<dependency>=debug` in the corresponding
+uncommitted `local.cfg`. The build permits only local Git transport.
+The five staged TTBin packages are freetype 1.0.9, harfbuzz 1.0.2,
+ICU 1.0.24, Lua 1.0.2 and YAML 1.0.2. The mini records a SHA-256
+inventory for their files. The worktree verifies the relocated bytes
+and regenerates the upstream path-dependent cache index before CMake.
+Integrated AmazingEngine uses the Bach binary chosen by EffectSDK, so the
+worktree overlay skips AmazingEngine's standalone availability probe.
+The debug overlay restores the branch's MT selector, keeps one EffectSDK
+publication include tree, and enables exceptions only for generated SWIG
+JNI translation units. MetaNative uses a local build description with
+remote caching disabled.
+This MT Android configuration leaves ACanvas and nodegraph's test and
+benchmark fetches disabled. A branch that changes a required pin needs a
+matching, audited payload before it can use the shared recipe.
+
+The same prep command stages a separate copy of the native dependencies.
+The path globs for the three Bach layouts are
+`native-deps/bach-sdk/pub/inc/smash/avatar_base_model.h`,
+`ecache/ttbin/android/BachSDK_android/*/inc/smash/avatar_base_model.h`,
+and `bach/*/inc/smash/avatar_base_model.h`. At each match,
+`stage-build-payload.py` replaces the `m_authCode` initializer with
+`""`, preserving the declaration and donor file. A different initializer
+shape stops prep. The prep manifest records path, identifier and count.
+The rule applies to VE and Lynx. There is no allowlist entry for this field.
+
+Prep omits staged Maven and Gradle caches so Gradle resolves them on devbox
+8 through credential-free repositories. It also omits AmazingEngine
+`Demos`, `.ci`, `Tests`, and nodegraph's `.claude` directory.
+The independent source and dependency gates and the stock runner's snapshot,
+history and source checks must all pass with zero unapproved findings and
+zero read errors. Dependency exceptions are limited to the four documented
+C++ enum or glyph expressions in `payload-allowlist.json`. Each matches
+an exact path, line and line SHA-256. LFS and separately uploaded recipe
+files pass the credential-shaped gate as well. If the stock runner refuses
+a blanked export, report its path and key to the rules owner and stop
+before transfer. Keep values out of reports and logs.
+
+```sh
+RECIPE=/Users/bytedance/code/.claude-data/orchestrator/vesdk-mainline/tasks/T152
+VESDK=/Users/bytedance/code/tiktok_vesdk
+REF=91e795f3e661427dd1cad7a540d9a924f68cf459   # Or an existing local branch or commit.
+PREP=/absolute/path/to/new-prep-directory
+bash "$RECIPE/prepare-transfer.sh" "$VESDK" "$REF" "$PREP"
+```
+
+The one-time shared setup uses `bash "$RECIPE/setup.sh" "$PREP"` after
+a successful prep. It rechecks the staged inputs before acquiring a slot
+or transferring them. It installs the filtered payload, LFS objects
+and overlay. On devbox 8, the existing T152 base payload can be upgraded
+with `bash "$RECIPE/setup.sh" "$PREP" --configure-only`. Slot prep validates that the snapshot contains generated EffectSDK
+metadata. Subsequent compatible builds use the existing shared native inputs.
+For a new dependency set, coordinate a versioned setup with the recipe
+owner before running the build.
+
+Pass the prepared export as the runner repo with `--ref HEAD`. Pass the
+original commit from the prep manifest separately for artifact provenance.
+The Gradle and Ninja limits follow `DEVBOX_CPUS`; the native link pool
+has one worker. The recipe assembles an unsigned vemo APK with
+`:vemo:assembleDebug -PENABLE_EFFECT_DEBUG=true` twice in the same
+workspace. The first run is labeled `cold` when the workspace has no native
+objects and `incremental` when it reuses them. The runner returns the APK
+and receives the timing and disk receipts. Signing runs separately on the
+mini when authorized.
+
+```sh
+SOURCE_COMMIT=$(node -p 'require(process.argv[1]).sourceCommit' "$PREP/source-provenance.json")
+bash "$RECIPE/run-verified.sh" \
+  --project vesdk --task lynx-vemo-build --repo "$PREP/source-only" --ref HEAD \
+  --need vesdk-android --prefer-host 10.37.251.219 \
+  --affinity vesdk-android-main --timeout 120 \
+  --env "VESDK_SOURCE_COMMIT=$SOURCE_COMMIT" \
+  --artifact 't152-proof/*' --out /absolute/path/to/new-build-results \
+  -- 'python3 "$VESDK_ANDROID_DEPS/recipe/remote-build.py" build'
+```
+
+The returned shard archive contains `t152-proof/vemo-debug-unsigned.apk`,
+`acceptance.json`, and `disk.json` under `t152-proof/`.
+
+The pinned T152 qualification uses `remote-build.py qualify`. The
+runner prints `cold_apk_ready=...` when the unsigned APK is ready. Run
+`bash "$RECIPE/watch-cold-apk.sh" "$RUN_RESULTS" "$RUN_OUTPUT" "$MINI_OUT"`
+alongside the qualification run, using its result directory and redirected
+console output. The watcher acquires a light slot to return the APK while
+the runner retains its workspace. The mini verifies the APK and
+the commit-specific AArch64 marker in `lib/arm64-v8a/libeffect.so`, then
+returns a receipt that starts the warm build. See `tasks/T152/report.md`
+for the qualification status, artifact, timings, and disk usage.
+
 ## Cleanup and space guard
 
 Before transfer and again before launching the command, the runner requires 53 GiB free: 33 GiB reserve plus 20 GiB
