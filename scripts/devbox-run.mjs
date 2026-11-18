@@ -368,6 +368,8 @@ with open(str(repo)+'.lock','a') as lock:
             else:
                 if target.is_file(): target.unlink()
         subprocess.run(['git','-C',str(ws),'reset','--hard',d['commit']],check=True,stdout=subprocess.DEVNULL)
+        # BC-117: drop untracked leftovers of earlier runs (not ignored build caches) so each run sees only its own overlay.
+        subprocess.run(['git','-C',str(ws),'clean','-ffd','-q'],check=True,stdout=subprocess.DEVNULL)
     else:
         ws.parent.mkdir(parents=True,exist_ok=True)
         subprocess.run(['git','--git-dir='+str(repo),'worktree','add','--detach',str(ws),d['commit']],check=True,stdout=subprocess.DEVNULL)
@@ -675,7 +677,9 @@ async function snapshot(opts, temp, state, ancestors = new Set(), parentObjects 
   let files = (await git(['ls-tree', '-rz', '--name-only', commit])).split('\0').filter(Boolean);
   let untracked = [];
   if (opts.ref === 'worktree') {
-    untracked = (await git(['ls-files', '--others', '--exclude-standard', '-z'])).split('\0').filter(Boolean);
+    untracked = (await git(['ls-files', '--others', '--exclude-standard', '-z'])).split('\0').filter(Boolean)
+      // macOS AppleDouble/.DS_Store files are Finder metadata, never sources (BC-117).
+      .filter(file => !/(?:^|\/)(?:\._[^/]*|\.DS_Store)$/.test(file));
     if (untracked.some(name => name.endsWith('/'))) throw Error('nested untracked repositories cannot be archived');
     files.push(...untracked, ...(await git(['diff', '--name-only', '-z', 'HEAD'])).split('\0').filter(Boolean));
   }
@@ -711,7 +715,7 @@ async function snapshot(opts, temp, state, ancestors = new Set(), parentObjects 
     if (untracked.length) {
       const list = path.join(temp, 'untracked.list'); fs.writeFileSync(list, `${untracked.join('\0')}\0`);
       extra = path.join(temp, 'untracked.tar');
-      checked(await execute('tar', ['-C', opts.repo, '--null', '-T', list, '-cf', extra], { state, timeout: 300000 }), 'untracked archive');
+      checked(await execute('tar', ['-C', opts.repo, '--null', '-T', list, '-cf', extra], { state, timeout: 300000, env: { ...process.env, COPYFILE_DISABLE: '1' } }), 'untracked archive');
     }
   }
   const modules = [];
