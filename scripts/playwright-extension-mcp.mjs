@@ -12,7 +12,9 @@ const file = process.env.PLAYWRIGHT_EXTENSION_TOKEN_FILE || path.join(os.homedir
 let token = '';
 try { token = fs.readFileSync(file, 'utf8').trim(); } catch {}
 if (!token) { process.stderr.write(`playwright-extension-mcp: pairing token file missing or empty: ${file}\n`); process.exit(1); }
-const child = spawn('npx', ['-y', '@playwright/mcp@latest', '--extension', ...process.argv.slice(2)],
+// Resolve the installed cache without a registry metadata request on every
+// thread. A registry outage otherwise leaves the hub at "starting" indefinitely.
+const child = spawn('npx', ['--offline', '-y', '@playwright/mcp@latest', '--extension', ...process.argv.slice(2)],
   { stdio: 'inherit', env: { ...process.env, PLAYWRIGHT_MCP_EXTENSION_TOKEN: token } });
 for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(signal, () => child.kill(signal));
 child.on('error', (error) => { process.stderr.write(`playwright-extension-mcp: ${error.message}\n`); process.exit(1); });

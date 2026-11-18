@@ -25,8 +25,16 @@ const transport = path.join(tmp, 'transport.mjs');
 fs.writeFileSync(transport, `import fs from 'node:fs';
 globalThis.WebSocket=class { constructor(){setImmediate(()=>this.onopen?.());} close(){} send(raw){
 const m=JSON.parse(raw);if(m.id==null)return;fs.appendFileSync(process.env.CAPTURE,JSON.stringify(m)+'\\n');
-const result=m.method==='thread/start'?{thread:{id:'fixture-thread'}}:m.method==='turn/start'?{turn:{id:'fixture-turn'}}:{};
-setImmediate(()=>{this.onmessage?.({data:JSON.stringify({id:m.id,result})});if(m.method==='turn/start')setImmediate(()=>this.onmessage?.({data:JSON.stringify({method:'turn/completed',params:{threadId:'fixture-thread',turn:{id:'fixture-turn',status:'completed',items:[{type:'agentMessage',text:'DONE fixture'}]}}})}));});}};
+if(['thread/start','thread/resume'].includes(m.method)&&m.params.config?.mcp_servers?.playwright?.enabled){
+ this.browser=true;this.status=process.env.MCP_MODE||'ready';
+ const status=this.status==='delayed'?'starting':this.status;
+ this.onmessage?.({data:JSON.stringify({method:'mcpServer/startupStatus/updated',params:{threadId:'fixture-thread',name:'playwright',status,failureReason:status==='failed'?'fixture startup failure':null}})});
+ if(this.status==='delayed')setTimeout(()=>{this.status='ready';this.onmessage?.({data:JSON.stringify({method:'mcpServer/startupStatus/updated',params:{threadId:'fixture-thread',name:'playwright',status:'ready'}})});},100);
+}
+const result=m.method==='thread/start'?{thread:{id:'fixture-thread'}}:m.method==='turn/start'?{turn:{id:'fixture-turn'}}:
+ m.method==='mcpServerStatus/list'?{data:[{name:'playwright',runtimeStatus:this.status==='delayed'?'starting':this.status,tools:{browser_navigate:{},browser_snapshot:{}}}]}:{};
+setImmediate(()=>{if(m.method==='turn/start'&&this.browser&&this.status!=='ready')throw Error('turn sent before MCP ready');
+this.onmessage?.({data:JSON.stringify({id:m.id,result})});if(m.method==='turn/start')setImmediate(()=>this.onmessage?.({data:JSON.stringify({method:'turn/completed',params:{threadId:'fixture-thread',turn:{id:'fixture-turn',status:'completed',items:[{type:'agentMessage',text:'DONE fixture'}]}}})}));});}};
 `);
 const fakeBin=path.join(tmp,'bin');fs.mkdirSync(fakeBin);
 fs.writeFileSync(path.join(fakeBin,'npx'), `#!${process.execPath}
@@ -185,4 +193,23 @@ try {
   assert.equal(missing.status,1);assert.match(missing.stderr,/BLOCKED browser preflight.*pairing file is missing/);assert.equal(fs.readFileSync(capture,'utf8'),'');
   console.log('ok   TRAE preflight: Chrome down or missing pairing blocks once before RPC; explicit skip launches');
 } catch(e){fail++;console.log(`FAIL browser preflight: ${e.stack}`);}
+try {
+  for (const command of ['start', 'turn']) for (const mode of ['delayed', 'failed', 'starting']) {
+    const capture = path.join(tmp, `${command}-${mode}-rpc.jsonl`); fs.writeFileSync(capture, '');
+    const r = spawnSync(process.execPath, ['--import', transport, worker, '--account', 'trae', command,
+      ...(command === 'start' ? ['--cwd', tmp] : ['--thread', 'fixture-thread']),
+      '--effort', 'high', '--sandbox', 'read-only', '--browser-origins', 'example.com', 'reply DONE'],
+      {env:{...baseEnv,CAPTURE:capture,MCP_MODE:mode,CODEX_WORKER_MCP_READY_TIMEOUT_MS:'300'},encoding:'utf8',timeout:5000});
+    const rpc = fs.readFileSync(capture, 'utf8');
+    assert.equal(r.status, mode === 'delayed' ? 0 : 1, r.stderr);
+    if (mode === 'delayed') assert.match(rpc, /turn\/start/);
+    else { assert.doesNotMatch(rpc, /turn\/start/); assert.match(r.stderr, /BLOCKED browser preflight: MCP playwright/); }
+  }
+  const capture = path.join(tmp, 'health-rpc.jsonl');
+  const {result,rpc} = run(capture, ['browser-health']);
+  assert.equal(JSON.parse(result.stdout).traeBrowser, true);
+  assert.ok(!rpc.some(m=>m.method==='turn/start'));
+  assert.ok(rpc.some(m=>m.method==='thread/unsubscribe'));
+  console.log('ok   TRAE start/resume wait for delayed MCP readiness, block failed/stuck startup, and probe health without a model turn');
+} catch(e){fail++;console.log(`FAIL MCP startup readiness: ${e.stack}`);}
 process.exitCode = fail ? 1 : 0;

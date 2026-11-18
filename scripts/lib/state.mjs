@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { readPause, readPoolPauses, readModelPauses, liftAuthPause, poolOf, claimProbes } from './trae-health.mjs';
+import { readPause, readPoolPauses, readModelPauses, liftAuthPause, poolOf, claimProbes, readTraeBrowserHealth } from './trae-health.mjs';
 import { modelPreference } from './pipeline/policy.mjs';
 import { BALANCE, readTraeModels, freshLoad, readQueueState, companySnapshot, readQuotaHistory, ttadkBurn, freshTraeQuota, ttadkExpiringUnused, TTADK_EXPIRY_HINT } from './company-load.mjs';
 import { withLock, writeJson as atomicJson } from './shared-file.mjs';
@@ -331,10 +331,13 @@ const readTtadk = (name, prof, { routing = false } = {}) => {
     const ms = Array.isArray(mj) ? mj : mj?.models;
     if(!Array.isArray(ms)||ms.some(m=>!m||typeof m.id!=='string')) throw Error('incomplete TTADK catalog');
     out.models = ms.filter((m) => (m.availableAgents ?? []).includes('codex') && m.realtimeHealth?.tier !== 'unhealthy').map((m) => m.id);
-  } catch { out.statusReadFailed=true; }
+  } catch { out.catalogError = 'TTADK models read failed; retaining the registered catalog'; }
   const qualified=new Set(['light','normal','hard'].flatMap(tier=>modelPreference({category:'analysis',tier,contentLabels:[]},{kind:'ttadk'}))
     .concat(modelPreference({category:'image-read',tier:'normal',contentLabels:[]},{kind:'ttadk'}),['kimi-k3']));
-  if (!out.models.some(id=>qualified.has(String(id).toLowerCase()))) { out.reason = 'the TTADK gateway lists no usable qualified Codex model'; return out; }
+  if (!out.models.some(id=>qualified.has(String(id).toLowerCase()))) {
+    if (out.catalogError) out.statusReadFailed = true;
+    out.reason = 'the TTADK gateway lists no usable qualified Codex model'; return out;
+  }
   out.healthy = true;
   // Token quota used up (the proxy records it; see ttadk-search-proxy.mjs): unusable until the reset, for every model.
   try {
@@ -393,6 +396,7 @@ export const traeQuota = (payload, sampledAt = Date.now()) => {
 // A TRAE CLI account (codex-worker trae-setup): the company's agent CLI with its own model pool, used after TTADK and
 // before personal quota (user, 2026-11-08). Healthy = the CLI present, logged in, a nonempty catalog, the hub sound.
 const readTrae = (name, prof, { routing = false } = {}) => {
+  const browserHealth = account => ({ ...account, ...(account.live ? readTraeBrowserHealth(name, prof) : { traeBrowser: false }) });
   const out = { name, kind: 'trae', home: prof.home, hub: prof.hub, browser: false, traeBrowser: traeBrowserReady(), chromePlugin: null, models: prof.models ?? Object.keys(prof.modelIds ?? {}), modelIds: prof.modelIds ?? {},
     windows: [], resets: null, healthy: false, reason: null, live: false, active: 0, email: null, search: true, searchLive: true,
     // Per-model daily buckets guide route.mjs model choice; they never pause the account or cap concurrency.
@@ -434,7 +438,7 @@ const readTrae = (name, prof, { routing = false } = {}) => {
     if (hubHealthy(prof.hub)) out.live = true; // fast path; routing then skips the slow list below
     if (routing && out.live) {
       const broken=hubBroken(name,prof);
-      return broken ? {...out,healthy:false,hubBroken:broken,reason:broken.why} : out;
+      return browserHealth(broken ? {...out,healthy:false,hubBroken:broken,reason:broken.why} : out);
     } // usage already proved the hub transport
     const list = execFileSync(process.execPath, [WORKER, '--account', name, 'list', '--limit', routing ? '3' : '60'], { encoding: 'utf8', timeout: 30000, stdio: ['ignore', 'pipe', 'pipe'] });
     out.live = true;
@@ -442,7 +446,7 @@ const readTrae = (name, prof, { routing = false } = {}) => {
   } catch { if (!routing && !hubHealthy(prof.hub)) out.live = false; }
   const broken = out.live ? hubBroken(name, prof) : null;
   if (broken) { out.healthy = false; out.hubBroken = broken; out.reason = `its hub answers but can't start threads (${broken.why}); restart it ${broken.fix}`; }
-  return out;
+  return browserHealth(out);
 };
 // A ChatGPT Codex home can drive Chrome and desktop apps when its config has the node_repl MCP server with the browser
 // service — written by `codex-worker browser-setup`, or by the ChatGPT app itself on its own home (~/.codex), which then

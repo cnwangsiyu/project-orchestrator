@@ -336,6 +336,10 @@ for (const [sc,args,oldWant,oldNote] of CASES) {
     const ttFirst = parseRouteJSON(run('ttFresh', ['browser'], env));
     assert.equal(ttFirst.pick.account, 'ttadk');
     assert.equal(parseRouteJSON(run('ttAndTrae',['browser'],env)).pick.account,'trae');
+    const healthyBridge = S.ttAndTrae.codex.find(a=>a.kind==='trae');
+    healthyBridge.traeBrowser = false;
+    assert.equal(parseRouteJSON(run('ttAndTrae',['browser'],env)).pick.account,'ttadk', 'MCP health failure survives a present pairing file');
+    delete healthyBridge.traeBrowser;
     assert.equal(parseRouteJSON(run('ttAndTrae',['ui-browser','--impact','service'],env)).pick.account,'trae');
     const trae = parseRouteJSON(run('ttOutTrae', ['browser', '--origins', 'example.com'], env));
     assert.equal(trae.pick.account, 'trae'); assert.equal(trae.pick.launcher, 'codex-worker');

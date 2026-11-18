@@ -38,6 +38,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
+import os from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { withLock, writeJson } from './shared-file.mjs';
 import { modelId } from './pipeline/common.mjs';
 
@@ -69,6 +72,19 @@ const read = (home) => { try {
   return r;
 } catch(e) {return unknown(e.code==='ENOENT');} };
 export const readHealthStatus = home => read(home).status==='UNKNOWN'?'UNKNOWN':'KNOWN';
+// Use the hub's public MCP protocol in an ephemeral thread, with no model turn
+// or page access. A pairing file alone cannot establish browser availability.
+export const readTraeBrowserHealth = (name, profile) => {
+  const paired = process.env.PLAYWRIGHT_EXTENSION_TOKEN_FILE || path.join(os.homedir(), '.trae', 'playwright-extension-token');
+  if (!fs.existsSync(paired) || !profile?.hub) return { traeBrowser: false };
+  try {
+    const result = JSON.parse(execFileSync(process.execPath,
+      [fileURLToPath(new URL('../codex-worker.mjs', import.meta.url)), '--account', name, 'browser-health'],
+      { encoding: 'utf8', timeout: 15000, stdio: ['ignore', 'pipe', 'ignore'] }));
+    return result?.traeBrowser === true && result.status === 'ready' ? { traeBrowser: true }
+      : { traeBrowser: false, browserError: 'Playwright MCP startup check did not establish readiness' };
+  } catch { return { traeBrowser: false, browserError: 'Playwright MCP startup check failed or timed out' }; }
+};
 const write = (home, rec) => writeJson(file(home), rec);
 const update = (home, fn, fallback = null) => {
   try { return withLock(file(home), () => {const r=read(home);return r.status==='UNKNOWN'&&!r.missing?fallback:fn(r.status==='UNKNOWN'?{failures:[]}:r);}); } catch { return fallback; }

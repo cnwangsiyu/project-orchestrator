@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import childProcess from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
-import {readPause,readPoolPauses,readModelPauses,readHealthStatus,claimProbes} from '../lib/trae-health.mjs';
+import {readPause,readPoolPauses,readModelPauses,readHealthStatus,claimProbes,readTraeBrowserHealth} from '../lib/trae-health.mjs';
 import {readHubDiagnostics,writeHubState} from '../lib/hub-state.mjs';
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'company-read-'));
@@ -40,13 +40,17 @@ const stub = (bin, args) => {
     if (fault === 'malformed') return 'truncated catalog JSON';
     if (bin === traeBin && fault.startsWith('catalog:')) return JSON.stringify({ models: [{ id: fault.slice(8) }] });
   }
-  if (args[0] === 'models') return args.includes('--json') ? JSON.stringify({ models: [{ id: SOL }] })
-    : JSON.stringify([{ id: fault.startsWith('tt-catalog:')?fault.slice(11):SOL, availableAgents: ['codex'] }]);
+  if (args[0] === 'models') {
+    if (bin === ttadkBin && fault === 'tt-model-timeout') throw Object.assign(Error('fixture catalog timeout'), { code: 'ETIMEDOUT' });
+    return args.includes('--json') ? JSON.stringify({ models: [{ id: SOL }] })
+      : JSON.stringify([{ id: fault.startsWith('tt-catalog:')?fault.slice(11):SOL, availableAgents: ['codex'] }]);
+  }
   if (args.includes('usage')) {
     if (fault === 'malformed') return 'truncated usage JSON';
     throw Object.assign(Error('fixture usage failure'), { code: fault === 'timeouts' ? 'ETIMEDOUT' : 'EIO' });
   }
   if (args.includes('list')) return '';
+  if (args.includes('browser-health')) return JSON.stringify({traeBrowser:fault!=='bridge-failed',status:'ready'});
   throw Error('unexpected subprocess in company-read fixture');
 };
 childProcess.execFileSync = stub;
@@ -73,7 +77,17 @@ try {
   assert.equal(readHubDiagnostics(healthHome,['ttadk']).complete,true);
   console.log('ok   null/absent health readers return UNKNOWN; corrupt ledgers are preserved; missing supervisor state is incomplete');
   fs.writeFileSync(profiles, JSON.stringify(registry));
-  const { readState, analyze, readProfiles } = await import('../lib/state.mjs');
+  const { readState, analyze, readProfiles, readRoutingAccount } = await import('../lib/state.mjs');
+  const pairingFile = path.join(tmp, 'fixture-pairing'); fs.writeFileSync(pairingFile, 'synthetic-fixture');
+  process.env.PLAYWRIGHT_EXTENSION_TOKEN_FILE = pairingFile;
+  fault = 'bridge-failed';
+  assert.equal(readTraeBrowserHealth('trae', registry.trae).traeBrowser, false);
+  const failedBridge = readRoutingAccount('trae', registry.trae);
+  assert.equal(failedBridge.healthy, true); assert.equal(failedBridge.traeBrowser, false);
+  fault = '';
+  assert.equal(readTraeBrowserHealth('trae', registry.trae).traeBrowser, true);
+  delete process.env.PLAYWRIGHT_EXTENSION_TOKEN_FILE;
+  console.log('ok   failed bridge startup disables TRAE browser capability while preserving ordinary account health');
   fs.renameSync = (src, dst) => {
     if (dst === profiles) throw Object.assign(Error('fixture registry write failed'), { code: 'EIO' });
     return rename(src, dst);
@@ -206,6 +220,13 @@ syncBuiltinESMExports();
   const repairedState={...recovered,checkedAt:Date.now(),codexAccounts:recovered.codexAccounts.map(a=>({...a,live:true,healthy:true}))};
   const repaired=route(['analysis'],repairedState,'');
   assert.equal(repaired.pick.account,'ttadk'); assert.equal(repaired.blocked,false); assert.equal(gate(repaired),false);
+  const browserRegistry = JSON.stringify({...registry,ttadk:{...registry.ttadk,browser:true}});
+  for (const mode of ['', 'tt-model-timeout']) {
+    const browser = route(['browser','--fresh'], missing, mode, browserRegistry);
+    assert.equal(browser.pick.account, 'ttadk'); assert.equal(browser.blocked, false);
+    assert.ok(!browser.notes.some(n=>/retained last-good stale observations for ttadk/.test(n)));
+  }
+  console.log('ok   healthy TTADK browser routes with failing display-only usage and a retained qualified catalog');
   const design=route(['design'],repairedState,'');
   assert.equal(design.secondOpinion,null,'ordinary design no longer adds a reviewer');
   for(const broken of ['{"checkedAt":',{...missing,codexAccounts:null}]) {

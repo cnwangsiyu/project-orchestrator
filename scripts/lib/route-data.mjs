@@ -83,7 +83,7 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
     if (!object(p)) continue;
     const reset=a.quotaOut?.resetsAt??a.usage?.resetsAt;
     const deniedUntilReset=a.kind==='ttadk' && reset>now && (!!a.quotaOut || /quota|daily token/i.test(a.reason??''));
-    if ((parsed.flags.fresh || !deniedUntilReset) && (parsed.flags.fresh || a.stateUnknown || a.live !== true || !nonnegative(at) || now-at > 600000)) {
+    if ((parsed.flags.fresh || !deniedUntilReset) && (parsed.flags.fresh || a.stateUnknown || a.live !== true || !nonnegative(at) || now-at > 600000 || a.kind==='trae' && parsed.category==='browser')) {
       try {
         const observed = readAccount(a.name, p);
         if(!object(observed)||observed.stateUnknown||observed.statusReadFailed) throw Error('account status read incomplete');
@@ -98,9 +98,9 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
       } catch { a.statusSource = 'last-good-stale'; a.observationStale=true; }
     }
   }
-  // Capability detection checks only whether the configured pairing file exists;
-  // it neither reads pairing material nor queries a provider, including fixtures.
-  for(const a of accounts) if(a.kind==='trae') a.traeBrowser=traeBrowserReady();
+  // A live MCP startup failure must survive the presence-only pairing check.
+  // Offline fixtures never probe the host or read pairing material.
+  for(const a of accounts) if(a.kind==='trae') a.traeBrowser=traeBrowserReady() && a.traeBrowser !== false;
   if (live && (parsed.flags.fresh || !Array.isArray(data.claude) || now-data.checkedAt > 600000)) {
     try { const observed=readClaude(); if(!Array.isArray(observed)||!observed.length) throw Error('Claude usage incomplete');
       data.claude = observed; data.claudeSeenAt = Date.now(); data.claudeObservationStale=false;

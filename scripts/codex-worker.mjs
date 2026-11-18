@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import {modelPreference} from './lib/pipeline/policy.mjs';
+import {mcpStartupMonitor} from './lib/mcp-startup.mjs';
 // codex-worker: run and steer Codex workers through a shared Codex app-server ("hub") over WebSocket.
 //
 //   codex-worker [--account NAME] <command> …                             (any command, on that account's home and hub)
@@ -672,8 +673,8 @@ const PLAYWRIGHT_EXTENSION_TOKEN_FILE = process.env.PLAYWRIGHT_EXTENSION_TOKEN_F
   || path.join(os.homedir(), '.trae', 'playwright-extension-token');
 const ROUTE_CATEGORY = ROUTE_ARGS?.[0] ?? routedMetadata?.category;
 const TRAE_HEADLESS_BROWSER = PROF?.kind === 'trae' && ROUTE_CATEGORY === 'ui-browser' && ['start', 'turn'].includes(cmd);
-const TRAE_BROWSER_REQUEST = PROF?.kind === 'trae' && !TRAE_HEADLESS_BROWSER && (BU_ORIGINS.length > 0 || ROUTE_CATEGORY === 'browser') && ['start', 'turn'].includes(cmd);
-if (TRAE_BROWSER_REQUEST && !BU_ORIGINS.length) die('TRAE browser threads need --browser-origins to scope signed-in Chrome access', 1);
+const TRAE_BROWSER_REQUEST = PROF?.kind === 'trae' && !TRAE_HEADLESS_BROWSER && (cmd === 'browser-health' || (BU_ORIGINS.length > 0 || ROUTE_CATEGORY === 'browser') && ['start', 'turn'].includes(cmd));
+if (TRAE_BROWSER_REQUEST && cmd !== 'browser-health' && !BU_ORIGINS.length) die('TRAE browser threads need --browser-origins to scope signed-in Chrome access', 1);
 const TRAE_EXTENSION_BROWSER = TRAE_BROWSER_REQUEST && fs.existsSync(PLAYWRIGHT_EXTENSION_TOKEN_FILE);
 const CHROME_PROFILE_DIR = typeof opts['chrome-profile-dir'] === 'string' ? opts['chrome-profile-dir'].trim() : 'Profile 1';
 if (opts['chrome-profile-dir'] !== undefined && !CHROME_PROFILE_DIR) die('--chrome-profile-dir needs a non-empty Chrome profile directory name');
@@ -778,12 +779,12 @@ const extensionConnect = () => new Promise(resolve => {
   send({jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:'2024-11-05',capabilities:{},clientInfo:{name:'browser-preflight',version:'1'}}});
 });
 const browserPreflight = async () => {
-  if(opts['no-browser-preflight'] || TRAE_HEADLESS_BROWSER || !BU_ORIGINS.length || !['start','turn'].includes(cmd)) return;
+  if(opts['no-browser-preflight'] || TRAE_HEADLESS_BROWSER || (!BU_ORIGINS.length && cmd !== 'browser-health') || !['start','turn','browser-health'].includes(cmd)) return;
   // Only checks this client can make truthfully. The launcher runs in the orchestrator's process context, which on this
   // Mac cannot read Chrome's profile (macOS privacy), while the hub that spawns the browser tools can — a client-side
   // extension probe reported a working TRAE Playwright lane as unreachable (live test 2026-11-15). So: is Chrome
-  // running at all, and (TRAE) is the pairing token file there (the pairing-file check above). Everything deeper is
-  // reported by the worker's own first browser call.
+  // running at all, and (TRAE) is the pairing file there. MCP startup is checked
+  // through the hub below; page connectivity is reported by the first browser call.
   let chrome = false;
   try { execFileSync('pgrep', ['-x', 'Google Chrome'], { timeout: 1500, stdio: 'ignore' }); chrome = true; } catch {}
   if (!chrome) die('BLOCKED browser preflight: Google Chrome is not running on this machine. Start Chrome (signed-in profile), then retry; for a tool failure re-route with --failure-kind tool --failures 1.', 1);
@@ -839,6 +840,7 @@ if (cmd === 'list') setTimeout(() => die(`hub list probe timed out (${hub}); tel
 let done = false, nextId = 0;
 const pending = new Map();
 const handlers = [];
+const browserStartup = mcpStartupMonitor();
 const cleanups = new Set();
 let exitCode = null;
 let activeTurn = null, attemptThreadId = null, workStarted = false, hopProgressRecorded = false;
@@ -890,7 +892,7 @@ const markWorkStarted = () => {
 const logFile = opts.log ? path.resolve(opts.log) : null;
 let setupPhase = 'websocket/open';
 const setupStarted = Date.now();
-const controlCommand = ['interrupt', 'steer', 'status'].includes(cmd);
+const controlCommand = ['interrupt', 'steer', 'status', 'browser-health'].includes(cmd);
 // One total setup deadline, including the wait before follow() can install its idle guard.
 // Expiry detaches observation; an accepted request may still be running at the hub.
 const setupMs = controlCommand ? CONTROL_SEC * 1000
@@ -1054,6 +1056,7 @@ ws.onerror = () => connectionLost(`cannot reach the hub at ${hub}; probe with co
 ws.onmessage = (ev) => {
   const line = String(ev.data);
   let m; try { m = JSON.parse(line); } catch { return; }
+  browserStartup.observe(m);
   if (m.id !== undefined && pending.has(m.id) && !m.method) {
     const p = pending.get(m.id); pending.delete(m.id);
     if (logFile && p.audit) try { fs.appendFileSync(logFile, JSON.stringify({ rpc: 'reply', id: m.id,
@@ -1078,6 +1081,20 @@ ws.onmessage = (ev) => {
 await new Promise((resolve) => { ws.onopen = resolve; });
 
 const init = async () => { await call('initialize', { clientInfo: { name: 'codex-worker', version: '1.1.0' } }); write({ jsonrpc: '2.0', method: 'initialized', params: {} }); };
+const waitBrowserTools = async threadId => {
+  if (!TRAE_EXTENSION_BROWSER && !TRAE_HEADLESS_BROWSER) return;
+  setupPhase = 'MCP playwright readiness';
+  const requested = Number(process.env.CODEX_WORKER_MCP_READY_TIMEOUT_MS ?? (cmd === 'browser-health' ? 10000 : 130000));
+  const remaining = setupMs ? setupMs - (Date.now() - setupStarted) - 1000 : requested;
+  const timeoutMs = Math.max(1, Math.min(Number.isFinite(requested) && requested > 0 ? requested : 130000, remaining));
+  try {
+    await browserStartup.wait(threadId, { timeoutMs, readStatus: () => call('mcpServerStatus/list', { threadId }) });
+  } catch (error) {
+    tracker?.result('failed', { phase: 'browser-preflight', thread: threadId, settled: true,
+      mayRun: false, finalLine: error.message });
+    throw error;
+  }
+};
 const textInput = (t) => [{ type: 'text', text: t }];
 const readTurns = async (threadId) => (await call('thread/read', { threadId, includeTurns: true })).thread?.turns ?? [];
 const currentTurn = async (threadId) => {
@@ -1358,7 +1375,17 @@ const follow = (threadId, turnId, items = []) => {
 
 try {
   await init();
-  if (cmd === 'start') {
+  if (cmd === 'browser-health') {
+    if (PROF?.kind !== 'trae') die('browser-health requires a TRAE account');
+    const started = await call('thread/start', { cwd: os.homedir(), ephemeral: true,
+      sandbox: 'read-only', approvalPolicy: 'never', config: TRAE_MCP_CONFIG });
+    const threadId = started.thread?.id ?? started.threadId;
+    try {
+      await waitBrowserTools(threadId);
+      console.log(JSON.stringify({ traeBrowser: true, status: 'ready' }));
+    } finally { await call('thread/unsubscribe', { threadId }).catch(() => {}); }
+    await finish(0);
+  } else if (cmd === 'start') {
     if (!opts.cwd || !text) die('start needs --cwd and a prompt');
     // Browser / desktop threads (2026-11-10, the MacBook's main account): the ChatGPT app's unified-computer-use plugin
     // (cua_repl) needs the app's own runtime — under the CLI hub it accepted the site approval, then failed every call
@@ -1406,6 +1433,7 @@ try {
     const talkback = talkbackContext(threadId);
     const instructions = [browserHowTo, projectWorkerInstructions(digest), talkback.instructions, reviewHowTo].filter(Boolean).join('\n');
     const configured = await call('thread/resume', { threadId, config: { ...browserConfig, ...talkback.config }, developerInstructions: instructions }).catch(resumeFallback);
+    await waitBrowserTools(threadId);
     markOutputStart();
     const ts = await call('turn/start', {
       threadId, input: textInput(configured ? text : `${talkback.instructions}\n\n${text}`), effort: opts.effort, model: opts.model,
@@ -1423,6 +1451,7 @@ try {
     auditStart(opts.model??resumed?.thread?.model,opts.sandbox??resumed?.thread?.sandbox??undefined,{thread:opts.thread,name:resumed?.thread?.name??undefined});
     tracker?.set({ mayRun: true, rolloutFile: sessionPath });
     saveLaunch(account ?? 'main', opts.thread, { ...opts, 'auto-reroute-depth': REROUTE_DEPTH }, resolveOwner(opts.owner), { ...modelEvidence(), rolloutFile: sessionPath });
+    await waitBrowserTools(opts.thread);
     markOutputStart();
     const ts = await call('turn/start', {
       threadId: opts.thread, input: textInput(resumed ? text : `${talkback.instructions}\n\n${text}`), effort: opts.effort, model: opts.model,
