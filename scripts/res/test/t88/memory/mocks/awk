@@ -1,7 +1,7 @@
 #!/bin/bash
-# Only Linux's proc probes are simulated; all metric math uses macOS awk.
+# Only Linux proc probes are simulated; metric math uses the selected real awk.
 case "$*" in
   *'/proc/loadavg') printf '8\n' ;;
   *'/proc/meminfo') printf '17179869184\n' ;;
-  *) exec /usr/bin/awk "$@" ;;
+  *) exec "${RES_TEST_AWK:-/usr/bin/awk}" "$@" ;;
 esac
