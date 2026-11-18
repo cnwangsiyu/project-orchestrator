@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
+import { testPoolIdentity } from './pool-identity.mjs';
 
 const root = path.join(process.env.RES_TEST_ROOT, 'pools');
 const state = path.join(root, 'state'), mocks = path.join(root, 'mocks');
@@ -29,7 +30,7 @@ if [ -n "\${SECOND_MARK:-}" ] && [ "$1" = 2 ]; then
 fi
 exec /bin/sleep 0.03
 `, { mode: 0o755 });
-const env = { ...process.env, RES_DIR: state, PATH: `${mocks}:${process.env.PATH}` };
+const env = { ...process.env, RES_DIR: state, PATH: `${mocks}:${process.env.PATH}`, RES_TEST_POOL_FAST_POLL: '1', RES_WAITER_STALE_SECONDS: '45' };
 const args = (by) => ['--by', by, '--project', by, '--task', 'fixture', '--for', 'remote fixture', '--pid', String(process.pid)];
 const locks = () => fs.readdirSync(path.join(state, 'locks')).filter(n => n.endsWith('.d')).sort();
 const waiters = (pool = 'devbox-cn') => {
@@ -199,9 +200,78 @@ try {
   const python = spawnSync('python3', ['-c', 'import sys; print(sys.executable)'], { encoding: 'utf8' }).stdout.trim();
   ok(path.isAbsolute(python));
   fs.writeFileSync(path.join(mocks, 'python3'), `#!/bin/sh\n[ "$3" != check ] || exit 1\nexec '${python.replaceAll("'", "'\\''")}' "$@"\n`, { mode: 0o755 });
-  try { eq(acquire('health-read-failed-after-reservation').code, 1); eq(locks(), []); eq(waiters(), []); }
+  try {
+    const failed = spawnSync(process.env.RES_SOURCE, ['wait-pool', 'devbox-cn', ...args('health-read-failed-after-reservation'), '--timeout', '0'],
+      { env: { ...env, RES_TEST_POOL_REJECT: 'error' }, encoding: 'utf8' });
+    eq(failed.status, 1, failed.stderr); eq(locks(), []); eq(waiters(), []);
+  }
   finally { fs.unlinkSync(path.join(mocks, 'python3')); }
   fs.writeFileSync(healthFile, '{'); eq(acquire('malformed-health').code, 1); eq(locks(), []); eq(waiters(), []); fs.writeFileSync(healthFile, '{}');
+
+  // Expire the head exactly after its health read, without a 45-second sleep.
+  const hook = path.join(root, 'check-hook.mjs');
+  fs.writeFileSync(hook, `import fs from 'node:fs'; import path from 'node:path';
+const [state, slot, holder, action, log] = process.argv.slice(2);
+const dir = path.join(state, 'pool-waiters/devbox-cn');
+fs.appendFileSync(log, slot + '\\n');
+if (action === 'expire') for (const name of fs.readdirSync(dir)) {
+  const file = path.join(dir, name, 'info');
+  if (!fs.existsSync(file)) continue;
+  const info = fs.readFileSync(file, 'utf8');
+  if (info.includes('holder\\t' + holder + '\\n')) fs.writeFileSync(file, info.replace(/^heartbeat\\t.*$/m, 'heartbeat\\t1'));
+}
+process.exit(action === 'reject' ? 2 : 0);
+`);
+  const quote = value => `'${value.replaceAll("'", "'\\''")}'`;
+  fs.writeFileSync(path.join(mocks, 'python3'), `#!/bin/sh
+${quote(python)} "$@"
+rc=$?
+[ "$rc" = 0 ] || exit "$rc"
+if [ "$3" = check ] && [ -n "\${CHECK_ACTION:-}" ]; then
+  exec ${quote(process.execPath)} ${quote(hook)} "$2" "$4" "$CHECK_HOLDER" "$CHECK_ACTION" "$CHECK_LOG"
+fi
+exit 0
+`, { mode: 0o755 });
+  try {
+    const ids = ['devbox-cn-1', 'devbox-cn-2', 'devbox-cn-3', 'devbox-cn-4', 'devbox-cn-5'];
+    for (const id of ids) take(id);
+    const expireMark = path.join(root, 'expire-head'), expireNextMark = path.join(root, 'expire-next');
+    const expireLog = path.join(root, 'expire-checks');
+    const head = start('expire-head', { PAUSE_MARK: expireMark, RES_TEST_POOL_REJECT: 'expire', RES_TEST_POOL_CHECK_LOG: expireLog });
+    await until(() => fs.existsSync(expireMark), head);
+    const next = start('expire-next', { PAUSE_MARK: expireNextMark });
+    await until(() => fs.existsSync(expireNextMark) && waiters().length === 2, next);
+    release('devbox-cn-1'); unblock(expireMark);
+    eq(await head.done, 0, head.text); eq(owner('devbox-cn-1'), 'expire-head');
+    eq(fs.readFileSync(expireLog, 'utf8').trim().split('\n'), ['devbox-cn-1']);
+    ok(!fs.readFileSync(path.join(state, 'log.tsv'), 'utf8').includes('\treturn\tdevbox-cn-1\texpire-head\t'));
+    release('devbox-cn-1', 'expire-head'); unblock(expireNextMark);
+    eq(await next.done, 0, next.text); eq(owner('devbox-cn-1'), 'expire-next'); release('devbox-cn-1', 'expire-next');
+    for (const id of ids.slice(1)) release(id);
+
+    for (const id of ids) take(id);
+    const rollbackMark = path.join(root, 'rollback-head'), nextMark = path.join(root, 'rollback-next'), rollbackRetry = path.join(root, 'rollback-retry');
+    const rollbackLog = path.join(root, 'rollback-checks');
+    const failing = start('rollback-head', { PAUSE_MARK: rollbackMark, SECOND_MARK: rollbackRetry,
+      RES_TEST_POOL_REJECT: 'all', RES_TEST_POOL_CHECK_LOG: rollbackLog });
+    await until(() => fs.existsSync(rollbackMark), failing);
+    const successor = start('rollback-next', { PAUSE_MARK: nextMark });
+    await until(() => fs.existsSync(nextMark) && waiters().length === 2, successor);
+    const originalStart = field(waiters().find(dir => field(dir, 'holder') === 'rollback-head'), 'start');
+    for (const id of ids) release(id);
+    unblock(rollbackMark); await until(() => fs.existsSync(rollbackRetry), failing);
+    eq(fs.readFileSync(rollbackLog, 'utf8').trim().split('\n').length, 3);
+    ok(failing.text.includes('yielding pool')); eq(locks(), []);
+    eq(field(waiters().find(dir => field(dir, 'holder') === 'rollback-head'), 'start'), originalStart);
+    const queued = waiters().sort((a, b) => field(a, 'order').localeCompare(field(b, 'order')));
+    eq(field(queued[0], 'holder'), 'rollback-next');
+    unblock(nextMark); eq(await successor.done, 0, successor.text); eq(owner('devbox-cn-1'), 'rollback-next');
+    eq(fs.readFileSync(rollbackLog, 'utf8').trim().split('\n').length, 3);
+    failing.kill('SIGTERM'); unblock(rollbackRetry); eq(await failing.done, 143); eq(waiters(), []);
+    release('devbox-cn-1', 'rollback-next');
+    ok(fs.readFileSync(path.join(state, 'log.tsv'), 'utf8').includes('\twaiter-yield\tdevbox-cn-any\trollback-head (rollback-head/fixture)\trollbacks=3'));
+  } finally { fs.unlinkSync(path.join(mocks, 'python3')); }
+  count += testPoolIdentity({ source: process.env.RES_SOURCE, root: path.join(root, 'identity') });
   console.log(`ALL ${count} ASSERTIONS PASSED`);
 } finally {
   // Release fixture pause hooks before signalling their parents on failure.

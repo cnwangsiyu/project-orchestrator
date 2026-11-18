@@ -57,7 +57,7 @@ EOF
 die() { echo "res: $*" >&2; exit 1; }
 now() { date '+%Y-%m-%d %H:%M'; }
 
-local_host() { hostname; }
+local_host() { printf '%s\n' "$HOSTNAME"; }
 
 # Legacy holds and other hosts cannot be judged safely from this machine's PID table.
 hold_stale() {
@@ -344,12 +344,26 @@ cmd_wait() {
   done
 }
 
-reg_line() { awk -F'\t' -v id="$1" '$1==id' "$REG"; }
+reg_line() {
+  local line
+  while IFS= read -r line; do
+    [ "${line%%$'\t'*}" != "$1" ] || { printf '%s\n' "$line"; return 0; }
+  done <"$REG"
+}
+
 need_id() {
   [ -n "${1:-}" ] || die "missing resource id"
   [ -n "$(reg_line "$1")" ] || die "unknown resource '$1' (see: res status)"
 }
-field() { awk -F'\t' -v k="$2" '$1==k{print $2}' "$LOCKS/$1.d/info" 2>/dev/null || true; }
+field() {
+  local key value
+  [ -f "$LOCKS/$1.d/info" ] || return 0
+  while IFS=$'\t' read -r key value; do
+    [ "$key" != "$2" ] || { printf '%s\n' "$value"; return 0; }
+  done <"$LOCKS/$1.d/info"
+  return 0
+}
+
 holder_details() {
   local details
   details=$(awk -F'\t' '
@@ -389,7 +403,26 @@ conn() {
 }
 log() { printf '%s\t%s\t%s\t%s\t%s\n' "$(now)" "$1" "$2" "$3" "$4" >>"$LOG"; }
 
-waiter_field() { awk -F'\t' -v k="$2" '$1==k{print $2}' "$1/info" 2>/dev/null || true; }
+waiter_field() {
+  local key value
+  [ -f "$1/info" ] || return 0
+  while IFS=$'\t' read -r key value; do
+    [ "$key" != "$2" ] || { printf '%s\n' "$value"; return 0; }
+  done <"$1/info"
+  return 0
+}
+
+
+waiter_is_current() {
+  local dir="$1"
+  [ -n "$dir" ] || return 1
+  [ "${BUILD_WAITER_DIR:-}" != "$dir" ] || return 0
+  [ -n "${BUILD_WAITER_ORDER:-}" ] && \
+    [ "$(waiter_field "$dir" order)" = "$BUILD_WAITER_ORDER" ] && \
+    [ "$(waiter_field "$dir" holder)" = "${BY:-}" ] && \
+    [ "$(waiter_field "$dir" pid)" = "${PID:-}" ] && \
+    [ "$(waiter_field "$dir" host)" = "${BUILD_WAITER_HOST:-}" ]
+}
 
 waiter_live() {
   local dir="$1" pid host heartbeat current rc=0
@@ -413,6 +446,8 @@ cleanup_build_waiters() {
   [ -d "$root" ] || return 0
   for dir in "$root"/waiter.*; do
     [ -d "$dir" ] || continue
+    # A slow post-mkdir check must not reap the pool caller's own live episode.
+    if [ "${POOL_ACQUIRE:-0}" = 1 ] && waiter_is_current "$dir"; then continue; fi
     waiter_live "$dir" || rm -rf "$dir"
   done
 }
@@ -680,6 +715,7 @@ pool_waiter_blocks() {
   oldest=$(oldest_build_waiter "$root")
   [ -n "$oldest" ] || return 1
   [ "${BUILD_WAITER_DIR:-}" != "$oldest" ] || return 1
+  waiter_is_current "$oldest" && return 1
   RESERVED_MESSAGE="reserved for waiting pool $(waiter_field "$oldest" holder) (FIFO); retry or use wait-pool $pool"
   return 0
 }
@@ -693,16 +729,20 @@ write_build_waiter() {
   mv "$tmp" "$BUILD_WAITER_DIR/info"
 }
 
+next_waiter_order() {
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import time; print(f"{time.time_ns():020d}")'
+  else
+    printf '%010d-%010d' "$(date +%s)" "$$"
+  fi
+}
+
 start_build_waiter() {
   local published suffix root="${WAITER_ROOT:-$WAITERS}"
   mkdir -p "$root"
   BUILD_WAITER_DIR=$(mktemp -d "$root/.staging.XXXXXX")
   BUILD_WAITER_HOST=$(local_host); BUILD_WAITER_SINCE=$(now); BUILD_WAITER_START=$(date +%s)
-  if command -v python3 >/dev/null 2>&1; then
-    BUILD_WAITER_ORDER=$(python3 -c 'import time; print(f"{time.time_ns():020d}")')
-  else
-    BUILD_WAITER_ORDER=$(printf '%010d-%010d' "$BUILD_WAITER_START" "$$")
-  fi
+  BUILD_WAITER_ORDER=$(next_waiter_order)
   BUILD_WAITER_GATE_STREAK=0
   write_build_waiter starting CLOSED
   arm_build_waiter_cleanup
@@ -1018,6 +1058,7 @@ acquire_attempt() {
   local TAKE_CREATED=0 TAKE_TRANSACTION=1 TAKE_FRESH_ONLY=1 current_id= rc=0 CHECK_FRESH=1
   local TRANSACTION_PENDING_SIGNAL=0 TRANSACTION_CLEANING=0 TRANSACTION_COMMITTED=0
   local cleanup_failed=0
+  ACQUIRE_ROLLED_BACK=0
   # Keep retry metadata intact when rollback invokes the normal return parser.
   local BY="$BY" PROJECT="$PROJECT" PURPOSE="$PURPOSE" TASK="$TASK" UNTIL="$UNTIL"
   local NOTE="$NOTE" FORCE="$FORCE" OFFLINE="$OFFLINE" DEVICE="$DEVICE" POLICY="$POLICY"
@@ -1029,6 +1070,7 @@ acquire_attempt() {
       TAKE_CREATED=0
     fi
     if [ "$lane_created" -eq 1 ]; then
+      [ "$mode" != pool ] || ACQUIRE_ROLLED_BACK=1
       if protected_rollback_created "$candidate" "$BY"; then lane_created=0
       else [ ! -d "$LOCKS/$candidate.d" ] && lane_created=0; status=1; fi
     fi
@@ -1216,13 +1258,13 @@ cmd_acquire() {
   done
 }
 
-cmd_wait_pool() {
+cmd_wait_pool_legacy() {
   if [ "${1:-}" = --help ]; then usage; return 0; fi
   local pool="${1:-}"; shift || true
   pool="${pool%-}"
   [[ "$pool" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || die "wait-pool needs a resource prefix (for example devbox-cn)"
   local timeout= timeout_seen= args=() ALLOW_PID=1 pin= ACQUIRE_PID_EXPLICIT prefer_host= prefer_slot= POOL_NEED= excluded_slots= excluded_hosts= POOL_ACQUIRE=1
-  local duration deadline remaining delay=1 candidate rc ids
+  local duration deadline remaining delay=1 candidate rc ids rollbacks ACQUIRE_ROLLED_BACK=0
   local BUILD_WAITER_DIR= BUILD_WAITER_STAGING= BUILD_WAITER_HOST= BUILD_WAITER_SINCE= BUILD_WAITER_START=
   local BUILD_WAITER_ORDER= BUILD_WAITER_GATE_STREAK=0
   local WAITER_ROOT="$POOL_WAITERS/$pool" WAITER_RESOURCE="$pool-any"
@@ -1276,12 +1318,26 @@ cmd_wait_pool() {
     if [ "$BUILD_WAITER_DIR" = "$(oldest_build_waiter "$WAITER_ROOT")" ]; then
       # Refresh membership on every retry, including newly registered capacity.
       ids=$(box_health select "$pool" "$prefer_host" "$prefer_slot" "$POOL_NEED" "$excluded_slots" "$excluded_hosts") || { rc=$?; cleanup_build_waiter; return "$rc"; }
+      rollbacks=0
       for candidate in $ids; do
         [ ! -d "$LOCKS/$candidate.d" ] || continue
         # A member retired (policy never/ask-user) after membership was read is skipped, not fatal.
         [ "$(reg_line "$candidate" | cut -f3)" = open ] || continue
+        update_build_waiter slot CLOSED
         if acquire_attempt pool "$candidate"; then return 0; else rc=$?; fi
         if [ "$rc" -ne 2 ] && [ "$rc" -ne 3 ]; then cleanup_build_waiter; return "$rc"; fi
+        if [ "$ACQUIRE_ROLLED_BACK" -eq 1 ]; then
+          rollbacks=$((rollbacks + 1))
+          if [ "$rollbacks" -gt 2 ]; then
+            # Keep the original wait episode, but give already queued callers the head.
+            BUILD_WAITER_ORDER=$(next_waiter_order)
+            update_build_waiter rollback CLOSED
+            log waiter-yield "$WAITER_RESOURCE" "$BY ($PROJECT${TASK:+/$TASK})" "rollbacks=$rollbacks"
+            echo "res: yielding pool '$pool' (FIFO) after $rollbacks candidate rollbacks" >&2
+            break
+          fi
+        fi
+        [ "$SECONDS" -lt "$deadline" ] || break
       done
     else
       update_build_waiter FIFO CLOSED
@@ -1296,6 +1352,333 @@ cmd_wait_pool() {
     sleep "$delay"
     delay=$((delay * 2)); [ "$delay" -le 15 ] || delay=15
   done
+}
+
+pool_controller() {
+  local runner=
+  if [ "${POOL_EXEC_CHILD:-0}" = 1 ]; then runner=exec; fi
+  ${runner:+$runner} python3 - "$RES_DIR" "$@" "$BY" "$PROJECT" "$TASK" "$PURPOSE" "$PID" "$UNTIL" "${FORCE:-}" "${POOL_NEED:-}" "${prefer_host:-}" "${prefer_slot:-}" "${excluded_slots:-}" "${excluded_hosts:-}" "${WAITER_STALE_SECONDS}" "$$" <<'PY'
+import datetime, json, os, re, shutil, signal, socket, sys, time
+root, action, request, timeout, delay, by, project, task, purpose, pid, until, force, need, prefer, preferred_slot, excluded_slots, excluded_hosts, stale, controller = sys.argv[1:]
+pid = int(pid); stamp = time.time(); host = socket.gethostname()
+locks = os.path.join(root, 'locks'); journal = os.path.join(root, 'log.tsv')
+queue = waiter = episode = None; created = None; committed = False
+def info(directory):
+    try:
+        with open(os.path.join(directory, 'info')) as stream:
+            return dict(line.rstrip('\n').split('\t', 1) for line in stream if '\t' in line)
+    except FileNotFoundError: return {}
+def publish(directory, value):
+    tmp = os.path.join(directory, '.info.' + str(os.getpid()))
+    with open(tmp, 'w') as stream:
+        for key, val in value.items(): stream.write(str(key) + '\t' + str(val) + '\n')
+    os.replace(tmp, os.path.join(directory, 'info'))
+def log(event, resource, holder, detail=''):
+    with open(journal, 'a') as stream:
+        stream.write(datetime.datetime.now().strftime('%Y-%m-%d %H:%M') + '\t' + event + '\t' + resource + '\t' + holder + '\t' + detail + '\n')
+def alive(value):
+    try: os.kill(int(value), 0); return True
+    except ProcessLookupError: return False
+    except (ValueError, TypeError): return False
+    except PermissionError: return True
+def remove_waiter():
+    if waiter and os.path.isdir(waiter): shutil.rmtree(waiter)
+    if episode and os.path.isdir(episode): shutil.rmtree(episode)
+def refresh_waiter():
+    rejoin = not os.path.isdir(waiter)
+    own['heartbeat'] = str(int(time.time()))
+    os.makedirs(episode, exist_ok=True); publish(episode, own)
+    try: publish(waiter, own)
+    except FileNotFoundError:
+        staging = os.path.join(queue, '.publish.' + controller + '.' + str(os.getpid()))
+        os.makedirs(staging, exist_ok=True); publish(staging, own)
+        try: os.replace(staging, waiter)
+        except FileExistsError:
+            shutil.rmtree(staging); publish(waiter, own)
+    if rejoin: log('waiter-rejoin', request + '-any', by + ' (' + project + ('/' + task if task else '') + ')', 'pid=' + str(pid))
+def rollback():
+    global created
+    if created:
+        directory, identity = created
+        if os.path.isdir(directory) and os.stat(directory).st_ino == identity:
+            shutil.rmtree(directory); log('return', os.path.basename(directory)[:-2], by, 'pool acquisition rollback')
+        created = None
+def cancelled(signum, frame): raise SystemExit(128 + signum)
+for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP): signal.signal(signum, cancelled)
+try:
+    if any(c in value for value in (by, project, task, purpose, until) for c in '\t\r\n'): raise ValueError('hold metadata must be one line')
+    os.makedirs(locks, exist_ok=True)
+    if action in ('cancel', 'cleanup'):
+        waiter = os.path.join(root, 'pool-waiters', request, 'waiter.' + controller)
+        episode = os.path.join(root, 'pool-waiters', request, '.episode.' + controller)
+        if action == 'cancel':
+            for name in os.listdir(locks):
+                directory = os.path.join(locks, name)
+                if name.endswith('.d') and info(directory).get('pool_controller') == controller:
+                    created = (directory, os.stat(directory).st_ino); rollback()
+        remove_waiter(); sys.exit(0)
+    rows = {}
+    with open(os.path.join(root, 'resources.tsv')) as stream:
+        for line in stream:
+            if line.startswith('#') or not line.strip(): continue
+            parts = line.rstrip('\n').split('\t', 4)
+            if len(parts) != 5: raise ValueError('invalid resource registry')
+            rows[parts[0]] = parts[1:]
+    remote = {}
+    for id, (kind, policy, device, description) in rows.items():
+        match = re.search(r'[A-Za-z0-9_.-]+@([A-Za-z0-9][A-Za-z0-9.-]*)', description)
+        if kind != 'remote' or not match: continue
+        caps = re.search(r'(?:^|\s)caps=([^\s]+)', description)
+        prefs = re.search(r'(?:^|\s)prefer=([^\s]+)', description)
+        remote[id] = (policy, match.group(1).rstrip('.'), set(caps.group(1).split(',')) if caps else set(), set(prefs.group(1).split(',')) if prefs else set())
+    if action == 'status':
+        print('%-16s %-9s %-9s %-12s %-34s %s' % ('ID', 'KIND', 'POLICY', 'LINK', 'HOLDER', 'SINCE → UNTIL / PURPOSE'))
+        for id, (kind, policy, device, description) in rows.items():
+            if request and id != request: continue
+            value = info(os.path.join(locks, id + '.d'))
+            holder = 'FREE'; detail = description
+            if value:
+                holder = value.get('by', '?') + ' (' + value.get('project', '?') + ('/' + value['task'] if value.get('task') else '') + ')'
+                if value.get('host') == host and not alive(value.get('pid')):
+                    short = value.get('pid_warning') or stamp - int(value.get('start', '0')) <= 5
+                    holder = ('STALE?(short-lived pid) ' if short else 'STALE ') + holder
+                detail = value.get('since', '?') + ' → ' + (value.get('until') or '?') + ' · ' + value.get('for', '?')
+            print('%-16s %-9s %-9s %-12s %-34s %s' % (id, kind, policy, '-', holder, detail))
+        for category in ('build', 'lane', 'pool'):
+            parent = os.path.join(root, category + '-waiters')
+            if not os.path.isdir(parent): continue
+            queues = [parent] if category != 'pool' else [os.path.join(parent, name) for name in os.listdir(parent)]
+            for directory in queues:
+                label = 'pool ' + os.path.basename(directory) if category == 'pool' else category + 's'
+                if request and category == 'pool' and not (request == os.path.basename(directory) or request.startswith(os.path.basename(directory) + '-')): continue
+                if request and category != 'pool' and not request.startswith('heavy-'): continue
+                values = []
+                if not os.path.isdir(directory): continue
+                for name in os.listdir(directory):
+                    if not name.startswith('waiter.'): continue
+                    path = os.path.join(directory, name); value = info(path)
+                    try: fresh = 0 <= stamp - int(value.get('heartbeat', '0')) <= int(stale)
+                    except ValueError: fresh = False
+                    if not fresh or value.get('host') == host and not alive(value.get('pid')): shutil.rmtree(path); continue
+                    values.append(value)
+                if values:
+                    print('\nWaiting ' + label + ':')
+                    print('%-24s %-24s %-16s %s' % ('HOLDER', 'PROJECT/TASK', 'SINCE', 'BLOCKED'))
+                    for value in sorted(values, key=lambda v: v.get('order', '')):
+                        blocked = value.get('blocked', '?'); blocked = 'blocked=load' if blocked == 'load' else blocked
+                        print('%-24s %-24s %-16s %s' % (value.get('holder', '?'), value.get('project', '?') + '/' + value.get('task', ''), value.get('since', '?'), blocked))
+        committed = True; sys.exit(0)
+    def csv(value): return set(value.split(',')) if value else set()
+    required, excluded, excluded_boxes = csv(need), csv(excluded_slots), csv(excluded_hosts)
+    if any(not re.fullmatch(r'[A-Za-z0-9_.-]+', cap) for cap in required): raise ValueError('invalid --need capability list')
+    def eligible(id, req=required, skip=excluded, boxes=excluded_boxes):
+        return id in remote and remote[id][0] == 'open' and id not in skip and remote[id][1] not in boxes and req <= remote[id][2]
+    def pool_member(id, pool): return bool(re.fullmatch(re.escape(pool) + r'-[0-9]+', id) or pool.endswith('-light') and id == pool)
+    if action == 'wait':
+        members = [id for id in rows if pool_member(id, request) and eligible(id)]
+        if not members: raise ValueError("no open remote member of pool '%s' satisfies --need '%s'" % (request, need or '(none)'))
+        for id in members:
+            hold = info(os.path.join(locks, id + '.d'))
+            if hold.get('by') == by and hold.get('pid') == str(pid) and hold.get('host') == host:
+                print('slot=' + id); committed = True; sys.exit(0)
+        queue = os.path.join(root, 'pool-waiters', request)
+        os.makedirs(queue, exist_ok=True); waiter = os.path.join(queue, 'waiter.' + controller)
+        episode = os.path.join(queue, '.episode.' + controller)
+        own = info(waiter) or info(episode)
+        if not own:
+            own = dict(holder=by, project=project, task=task, pid=str(pid), host=host,
+                       since=datetime.datetime.now().strftime('%Y-%m-%d %H:%M'), start=str(int(stamp)),
+                       started_at=str(stamp), order='%020d' % time.time_ns(), gate_streak='0', lane='', lane3='CLOSED')
+            log('waiter-start', request + '-any', by + ' (' + project + ('/' + task if task else '') + ')', 'pid=' + str(pid))
+        own.update(heartbeat=str(int(stamp)), blocked='slot', need=need, exclude_slots=excluded_slots, exclude_hosts=excluded_hosts)
+        refresh_waiter()
+    elif action == 'return':
+        if request not in rows: raise ValueError("unknown resource '%s'" % request)
+        directory = os.path.join(locks, request + '.d'); hold = info(directory)
+        if not os.path.isdir(directory): print(request + ' was not held'); committed = True; sys.exit(0)
+        if hold.get('by') != by:
+            if not force or not purpose: raise ValueError("'%s' is held by %s; only --force --note may reclaim it" % (request, hold.get('by', '?')))
+            log('reclaim', request, by, 'from ' + hold.get('by', '?') + ': ' + purpose)
+        else: log('return', request, by, purpose)
+        shutil.rmtree(directory); print('returned ' + request); committed = True; sys.exit(0)
+    elif action == 'take':
+        if request not in rows: raise ValueError("unknown resource '%s'" % request)
+        policy = rows[request][1]
+        if policy == 'never' or policy == 'ask-user' and not force:
+            print("res: '%s' needs the user's OK or is off limits (policy %s)" % (request, policy), file=sys.stderr); sys.exit(3)
+        hold = info(os.path.join(locks, request + '.d'))
+        if hold.get('by') == by:
+            print('already held: %s by %s (pid=%s, since=%s)' % (request, by, hold.get('pid', '?'), hold.get('since', '?')))
+            committed = True; sys.exit(0)
+        members = [request]
+        if request.endswith('-light') or re.fullmatch(r'.+-[0-9]+', request):
+            pool = request if request.endswith('-light') else request.rsplit('-', 1)[0]
+            queue = os.path.join(root, 'pool-waiters', pool)
+    else: raise ValueError('invalid pool action')
+    def health():
+        try:
+            with open(os.path.join(root, 'box-health.json')) as stream: state = json.load(stream)
+        except FileNotFoundError: return {}
+        if not isinstance(state, dict): raise ValueError('invalid box-health.json')
+        for value in state.values():
+            if not isinstance(value, dict): raise ValueError('invalid box health entry')
+            if not isinstance(value.get('failures', []), list): raise ValueError('invalid failures')
+            if not isinstance(value.get('quarantinedUntil', 0), (int, float)): raise ValueError('invalid quarantine expiry')
+        return state
+    def quarantined(id, state):
+        value = state.get(remote[id][1], {})
+        return value.get('manual', False) or value.get('quarantinedUntil', 0) > time.time()
+    state = health()
+    heads = []
+    if queue and os.path.isdir(queue):
+        for name in os.listdir(queue):
+            directory = os.path.join(queue, name)
+            if not name.startswith('waiter.') or not os.path.isdir(directory): continue
+            value = info(directory)
+            current = directory == waiter
+            try: fresh = 0 <= time.time() - int(value.get('heartbeat', '0')) <= int(stale)
+            except ValueError: fresh = False
+            live = value.get('host') != host or alive(value.get('pid'))
+            if not current and (not fresh or not live): shutil.rmtree(directory); continue
+            if int(value.get('gate_streak', '0')) < 3: heads.append((value.get('order', value.get('start', '')), directory, value))
+    heads.sort()
+    blocked = bool(heads and heads[0][1] != waiter)
+    preferred_host = remote.get(preferred_slot, (None, None))[1]
+    def rank(id):
+        preferences = remote[id][3]
+        tier = 0 if not preferences else -1 if required & preferences else 1
+        return tier, id != preferred_slot, not preferred_host or remote[id][1] != preferred_host, remote[id][1] != prefer, id
+    rollbacks = 0
+    if not blocked:
+        for id in sorted(members, key=rank):
+            directory = os.path.join(locks, id + '.d')
+            if os.path.isdir(directory) or action == 'wait' and quarantined(id, state): continue
+            if waiter:
+                refresh_waiter()
+            try: os.mkdir(directory)
+            except FileExistsError: continue
+            created = (directory, os.stat(directory).st_ino)
+            hold = dict(by=by, project=project, task=task, **{'for': purpose}, since=datetime.datetime.now().strftime('%Y-%m-%d %H:%M'),
+                        until=until, pid=str(pid), host=host, start=str(int(time.time())), pool_controller=controller)
+            if not alive(pid): hold['pid_warning'] = 'short-lived pid'
+            publish(directory, hold)
+            scratch = os.path.realpath(root) != os.path.realpath(os.path.expanduser('~/.claude/orchestrator/_shared'))
+            inject = os.environ.get('RES_TEST_POOL_REJECT', '') if scratch else ''
+            check_log = os.environ.get('RES_TEST_POOL_CHECK_LOG', '') if scratch else ''
+            if check_log:
+                with open(check_log, 'a') as stream: stream.write(id + '\n')
+            if inject == 'error': raise ValueError('injected health read failure after reservation')
+            if inject == 'expire' and waiter:
+                own['heartbeat'] = '1'; publish(waiter, own)
+            # Recheck the local health snapshot and registry after the atomic claim.
+            rejected = action == 'wait' and quarantined(id, health())
+            with open(os.path.join(root, 'resources.tsv')) as stream:
+                current_rows = [line.rstrip('\n').split('\t', 4) for line in stream if not line.startswith('#') and line.strip()]
+            rejected = rejected or action == 'wait' and not any(len(row) == 5 and row[0] == id and row[1] == 'remote' and row[2] == 'open' and row[4] == rows[id][3] for row in current_rows)
+            rejected = rejected or inject == 'all'
+            if waiter:
+                refresh_waiter()
+            if rejected:
+                rollback(); rollbacks += 1
+                if rollbacks >= 3:
+                    own['order'] = '%020d' % time.time_ns(); own['blocked'] = 'rollback'; refresh_waiter()
+                    log('waiter-yield', request + '-any', by + ' (' + project + ('/' + task if task else '') + ')', 'rollbacks=3')
+                    print("res: yielding pool '%s' (FIFO) after 3 candidate rollbacks" % request, file=sys.stderr)
+                    break
+                continue
+            log('take', id, by + ' (' + project + ('/' + task if task else '') + ')', purpose + (' · until ' + until if until else ''))
+            print('took ' + id)
+            if action == 'wait':
+                log('waiter-acquire', request + '-any', by + ' (' + project + ('/' + task if task else '') + ')', 'slot=' + id)
+                remove_waiter(); print('slot=' + id)
+            notes = os.path.join(root, 'notes', id + '.md')
+            if os.path.isfile(notes):
+                with open(notes) as stream: print(stream.read())
+            committed = True; sys.exit(0)
+    if action == 'take':
+        hold = info(os.path.join(locks, request + '.d'))
+        if blocked: print("res: '%s': reserved for waiting pool %s (FIFO); retry or use wait-pool" % (request, heads[0][2].get('holder', '?')), file=sys.stderr)
+        else: print("res: '%s' is held by %s (pid=%s, since=%s)" % (request, hold.get('by', '?'), hold.get('pid', '?'), hold.get('since', '?')), file=sys.stderr)
+        sys.exit(2)
+    own['blocked'] = 'FIFO' if blocked else own.get('blocked', 'slot'); publish(waiter, own)
+    remaining = float(own['started_at']) + float(timeout) * 60 - time.time()
+    if remaining <= 0:
+        log('waiter-timeout', request + '-any', by + ' (' + project + ('/' + task if task else '') + ')', 'after ' + timeout + ' minutes')
+        remove_waiter(); print("res: timed out waiting for pool '%s' after %s minutes" % (request, timeout), file=sys.stderr); sys.exit(2)
+    wait = min(float(delay), remaining)
+    print("res: waiting for pool '%s' (FIFO); retry in %ss" % (request, '%g' % wait), file=sys.stderr, flush=True)
+    scratch = os.path.realpath(root) != os.path.realpath(os.path.expanduser('~/.claude/orchestrator/_shared'))
+    if scratch:
+        mark = os.environ.get('PAUSE_MARK', '') if float(delay) == 1 else os.environ.get('SECOND_MARK', os.environ.get('PAUSE_ON_SECOND', '')) if float(delay) == 2 else ''
+        if mark:
+            with open(mark, 'w'): pass
+            while not os.path.exists(mark + '.release'):
+                time.sleep(0.02)
+            refresh_waiter()
+        if os.environ.get('RES_TEST_POOL_FAST_POLL') == '1': wait = min(wait, 0.03)
+    time.sleep(wait); sys.exit(6)
+except (OSError, ValueError, TypeError, KeyError) as error:
+    print('res: pool: ' + str(error), file=sys.stderr); sys.exit(1)
+finally:
+    if not committed: rollback()
+    if sys.exc_info()[0] is not None and not (isinstance(sys.exc_info()[1], SystemExit) and sys.exc_info()[1].code == 6): remove_waiter()
+PY
+}
+
+
+cmd_wait_pool() {
+  local pool="${1:-}"; shift || true; pool="${pool%-}"
+  [[ "$pool" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || die "wait-pool needs a resource prefix"
+  local timeout= args=() ALLOW_PID=1 prefer_host= prefer_slot= POOL_NEED= excluded_slots= excluded_hosts= delay=1 rc POOL_CHILD_PID=
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --timeout|--need|--prefer-host|--prefer-slot|--exclude-slot|--exclude-host)
+        [ $# -ge 2 ] || die "$1 needs a value"
+        case "$1" in
+          --timeout) [ -z "$timeout" ] || die "duplicate --timeout"; timeout="$2" ;;
+          --need) POOL_NEED="$2" ;;
+          --prefer-host) prefer_host="$2" ;;
+          --prefer-slot) prefer_slot="$2" ;;
+          --exclude-slot) excluded_slots="$2" ;;
+          --exclude-host) excluded_hosts="$2" ;;
+        esac; shift 2 ;;
+      --by|--project|--for|--task|--until|--note|--pid)
+        [ $# -ge 2 ] || die "$1 needs a value"; args+=("$1" "$2"); shift 2 ;;
+      --force|--offline) args+=("$1"); shift ;;
+      *) die "unknown option '$1'" ;;
+    esac
+  done
+  [[ "$timeout" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "wait-pool needs --timeout <non-negative minutes>"
+  parse ${args[@]+"${args[@]}"}; validate_pid
+  [ -n "$BY" ] && [ -n "$PROJECT" ] && [ -n "$PURPOSE" ] || die "wait-pool needs --by, --project and --for"
+  pool_cancel() {
+    [ -z "$POOL_CHILD_PID" ] || kill -s "$2" "$POOL_CHILD_PID" 2>/dev/null || true
+    [ -z "$POOL_CHILD_PID" ] || wait "$POOL_CHILD_PID" 2>/dev/null || true
+    pool_controller cancel "$pool" 0 0 >/dev/null
+    trap - EXIT
+    exit "$1"
+  }
+  trap 'pool_controller cleanup "$pool" 0 0 >/dev/null' EXIT
+  trap 'pool_cancel 130 INT' INT
+  trap 'pool_cancel 143 TERM' TERM
+  trap 'pool_cancel 129 HUP' HUP
+  while :; do
+    POOL_EXEC_CHILD=1 pool_controller wait "$pool" "$timeout" "$delay" & POOL_CHILD_PID=$!
+    if wait "$POOL_CHILD_PID"; then rc=0; else rc=$?; fi
+    POOL_CHILD_PID=
+    [ "$rc" -eq 6 ] || { trap - EXIT INT TERM HUP; return "$rc"; }
+    delay=$((delay * 2)); [ "$delay" -le 15 ] || delay=15
+  done
+}
+
+
+registry_record() {
+  local wanted="$1" id
+  REG_KIND= REG_POLICY= REG_DEVICE= REG_DESCRIPTION=
+  while IFS=$'\t' read -r id REG_KIND REG_POLICY REG_DEVICE REG_DESCRIPTION; do
+    [ "$id" != "$wanted" ] || return 0
+  done <"$REG"
+  return 1
 }
 
 cmd_return_build() {
@@ -1333,6 +1716,16 @@ take_mkdir() {
 
 cmd_status() {
   [ -f "$REG" ] || die "no registry at $REG"
+  local scan_id scan_kind scan_policy scan_device scan_description devices=0
+  while IFS=$'\t' read -r scan_id scan_kind scan_policy scan_device scan_description; do
+    [ -z "${1:-}" ] || [ "$scan_id" = "$1" ] || continue
+    [ "$scan_device" = - ] || [ -z "$scan_id" ] || [[ "$scan_id" = \#* ]] || devices=1
+  done <"$REG"
+  if [ "$devices" -eq 0 ]; then
+    local BY= PROJECT= TASK= PURPOSE= PID="$PPID" UNTIL= FORCE= POOL_NEED= prefer_host= prefer_slot= excluded_slots= excluded_hosts=
+    pool_controller status "${1:-}" 0 0
+    return $?
+  fi
   # A status of one checkout needs no device probe. One awk renders everything: a fork per
   # field and row cost ~1.5 s.
   if [ -z "${1:-}" ] || [ "$(reg_line "$1" | cut -f4)" != - ]; then probe; fi
@@ -1408,9 +1801,16 @@ cmd_add() {
 }
 
 cmd_take() {
-  local id="${1:-}" ALLOW_PID=1; shift || true; need_id "$id"; parse "$@"
+  local id="${1:-}" ALLOW_PID=1; shift || true
+  registry_record "$id" || die "unknown resource '$id'"
+  parse "$@"
   [ -n "$BY" ] && [ -n "$PROJECT" ] && [ -n "$PURPOSE" ] || die "take needs --by, --project and --for"
   validate_pid
+  if [ "$REG_KIND" = remote ] && [ "$REG_DEVICE" = - ] && [ "${POOL_ACQUIRE:-0}" != 1 ]; then
+    local POOL_NEED= prefer_host= prefer_slot= excluded_slots= excluded_hosts=
+    pool_controller take "$id" 0 0
+    return $?
+  fi
   local policy dev link; policy=$(reg_line "$id" | cut -f3); dev=$(reg_line "$id" | cut -f4)
   case "$policy" in
     never) echo "res: '$id' is off limits (policy never): $(reg_line "$id" | cut -f5)" >&2; exit 3 ;;
@@ -1458,7 +1858,12 @@ cmd_take() {
     TAKE_CREATED=1
     write_info "$(now)" "$id" || return $?
     # Recheck the health snapshot after mkdir; a losing pool transaction unwinds.
-    if [ "${POOL_ACQUIRE:-0}" = 1 ]; then box_health check "$id" "$POOL_NEED" "$excluded_slots" "$excluded_hosts" || return $?; fi
+    if [ "${POOL_ACQUIRE:-0}" = 1 ]; then
+      box_health check "$id" "$POOL_NEED" "$excluded_slots" "$excluded_hosts" || return $?
+      # A slow health read may expire/delete our heartbeat. Restore it before
+      # the FIFO recheck, or a fresh hold is spuriously returned to younger waiters.
+      update_build_waiter slot CLOSED
+    fi
     local RESERVED_MESSAGE=
     if lane_reserved_for_waiter "$id"; then
       RESERVED_MESSAGE="reserved for waiting build $RESERVED_WAITER_HOLDER; retry or use wait-lane"
@@ -1507,8 +1912,15 @@ cmd_extend() {
 }
 
 cmd_return() {
-  local id="${1:-}"; shift || true; need_id "$id"; parse "$@"
+  local id="${1:-}"; shift || true
+  registry_record "$id" || die "unknown resource '$id'"
+  parse "$@"
   [ -n "$BY" ] || die "return needs --by"
+  if [ "$REG_KIND" = remote ] && [ "$REG_DEVICE" = - ]; then
+    local PURPOSE="$NOTE" POOL_NEED= prefer_host= prefer_slot= excluded_slots= excluded_hosts=
+    pool_controller return "$id" 0 0
+    return $?
+  fi
   [ -d "$LOCKS/$id.d" ] || { echo "$id was not held"; return 0; }
   local holder; holder=$(field "$id" by)
   if [ "$holder" != "$BY" ]; then
