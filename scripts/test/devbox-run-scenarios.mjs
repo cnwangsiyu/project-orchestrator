@@ -14,6 +14,8 @@ import { transferFindings } from '../lib/devbox-transfer-check.mjs';
 const script = fileURLToPath(new URL('../devbox-run.mjs', import.meta.url));
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'devbox-scenarios-'));
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+// Hosts without a global git identity (devbox 8) must still run every fixture commit.
+Object.assign(process.env, { GIT_AUTHOR_NAME: 'Fixture', GIT_AUTHOR_EMAIL: 'fixture@example.invalid', GIT_COMMITTER_NAME: 'Fixture', GIT_COMMITTER_EMAIL: 'fixture@example.invalid' });
 const git = (repo, ...args) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 let count = 0;
 function fixture(options = {}) {
