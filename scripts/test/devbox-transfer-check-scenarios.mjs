@@ -72,6 +72,16 @@ try {
   git(lockfile.repo, 'add', '.'); git(lockfile.repo, 'commit', '-qm', 'embedded registry credential fixture');
   let lockFindings = await scan(lockfile, { scope: 'snapshot' });
   assert.ok(lockFindings.some(hit => hit.path === 'package-lock.json' && hit.key === 'EMBEDDED_URL_CREDENTIAL'));
+  for (const host of ['example.com', 'sub.example.org:8443', 'example.net']) {
+    manifest.packages['node_modules/path-key'].resolved = `https://fixture-user:fixture-pass@${host}/path-key.tgz`;
+    fs.writeFileSync(path.join(lockfile.repo, 'package-lock.json'), JSON.stringify(manifest));
+    git(lockfile.repo, 'add', '.'); git(lockfile.repo, 'commit', '-qm', `reserved documentation host ${host}`);
+    assert.ok(!(await scan(lockfile, { scope: 'snapshot' })).some(hit => hit.key === 'EMBEDDED_URL_CREDENTIAL'), `reserved host ${host} is a sample, not a credential`);
+  }
+  manifest.packages['node_modules/path-key'].resolved = 'https://fixture-user:fixture-pass@example.com.evil.invalid/path-key.tgz';
+  fs.writeFileSync(path.join(lockfile.repo, 'package-lock.json'), JSON.stringify(manifest));
+  git(lockfile.repo, 'add', '.'); git(lockfile.repo, 'commit', '-qm', 'lookalike host');
+  assert.ok((await scan(lockfile, { scope: 'snapshot' })).some(hit => hit.key === 'EMBEDDED_URL_CREDENTIAL'), 'lookalike host is still refused');
   manifest.packages['node_modules/path-key'].resolved = 'https://registry.example.invalid/path-key.tgz';
   manifest.packages['node_modules/path-key'].integrity = fakeAccess;
   fs.writeFileSync(path.join(lockfile.repo, 'package-lock.json'), JSON.stringify(manifest));

@@ -39,7 +39,10 @@ const configPath = file => lockfilePath(file) || gradleConfigPath(file) || struc
 const privateBlock = /-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/g;
 const accessKey = /\bAKIA[A-Z0-9]{16}\b/g;
 const jwt = /\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g;
-const embeddedUrlCredential = /\b[a-z][a-z\d+.-]*:\/\/[^\s/:@]+:[^\s/@]+@[^\s/]+/gi;
+const embeddedUrlCredential = /\b[a-z][a-z\d+.-]*:\/\/[^\s/:@]+:[^\s/@]+@([^\s/]+)/gi;
+// RFC 2606 reserved documentation domains cannot belong to a real service,
+// so `user:pass@example.com` fixtures are samples, not credentials.
+const reservedHost = host => /^(?:[a-z\d-]+\.)*example\.(?:com|org|net)(?::\d+)?$/i.test(host.replace(/["'`)\]>,;]+$/, ''));
 const quoted = String.raw`"""[\s\S]*?"""|'''[\s\S]*?'''|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'` + '|`(?:\\\\.|[^`\\\\])*`';
 const reference = value => /(?<!\\)\$(?:[A-Za-z_]\w*|\{[^}]*\})/.test(value)
   // CI/template placeholders such as "{{NPM_TOKEN}}" or {{ secrets.X }} are references, not values (BC-116).
@@ -136,7 +139,7 @@ export function transferFindings(text, { dsl = false, plist = false, lockfile = 
   for (const match of text.matchAll(privateBlock)) add('PRIVATE_KEY_BLOCK', match.index);
   for (const match of text.matchAll(accessKey)) add('AKIA_ACCESS_KEY', match.index);
   for (const match of text.matchAll(jwt)) add('JWT', match.index);
-  for (const match of text.matchAll(embeddedUrlCredential)) add('EMBEDDED_URL_CREDENTIAL', match.index);
+  for (const match of text.matchAll(embeddedUrlCredential)) if (!reservedHost(match[1])) add('EMBEDDED_URL_CREDENTIAL', match.index);
   const counts = new Map();
   // Audit and transfer matchers can identify the same field on the same line.
   const seen = new Set();
