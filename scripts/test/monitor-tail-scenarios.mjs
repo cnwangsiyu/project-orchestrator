@@ -107,7 +107,7 @@ try {
   console.log('PASS BC-10/17 three hub states and codex-worker-independent running thread listing');
 
   const root = path.join(tmp, 'ledgers'); fs.mkdirSync(root);
-  const version = '2026-11-17.7';
+  const version = '2026-11-18.1';
   for (const project of ['video-agent', 'webview', 'global-rules']) {
     const target = path.join(tmp, `project-${project}`); fs.mkdirSync(target);
     fs.writeFileSync(path.join(target, 'ledger.md'), `- **Orchestrator session**: "${project}-owner"\n- **rules-ack**: \`${version}\`\n`);
