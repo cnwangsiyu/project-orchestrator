@@ -6,7 +6,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createTaskSpec } from './pipeline/taskspec.mjs';
 import { createSnapshot } from './pipeline/snapshot.mjs';
-import { isAstra, modelId, familyOf, object, array, nonnegative, VERSION } from './pipeline/common.mjs';
+import { policyModel, isAstra, modelId, familyOf, object, array, nonnegative, VERSION } from './pipeline/common.mjs';
 import { dedupeOutcomes } from './pipeline/outcomes.mjs';
 import { personalBudget } from './pipeline/quota.mjs';
 import { modelLoad } from './company-load.mjs';
@@ -61,8 +61,9 @@ function personalCatalog(name, home, shared, declared = DEFAULT_MODELS) {
     if (!sharedCatalog?.codexError) entries = sharedCatalog?.codex;
   }
   if (!Array.isArray(entries)) return array(declared);
-  const astra = entries.filter(m => m?.visibility !== 'hide' && isAstra(m?.slug)).map(m => m.slug);
-  return [...array(declared).filter(id => !isAstra(id)), ...astra];
+  const currentRung = id => ['astra', 'sol'].includes(policyModel(id));
+  const releases = entries.filter(m => m?.visibility !== 'hide' && currentRung(m?.slug)).map(m => m.slug);
+  return [...array(declared).filter(id => !currentRung(id)), ...releases];
 }
 export const BROWSER_ORIGINS = ['*.bytedance.net', '*.byted.org', '*.larkoffice.com', '*.feishu.cn', '*.tiktok-row.net', '*.byteintl.net', '*.bytedance.com'];
 export function taskContext(env = process.env) {
@@ -221,7 +222,7 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
   if (retryHistory && !attempts.length && parsed.failureKind !== 'tool') {
     const deviceAccounts=env.ROUTE_SNAPSHOT_FILE?array(injectedSnapshot?.accounts):accounts;
     const a = deviceAccounts.some(a=>['trae','ttadk'].includes(a.kind)) && !['image-gen','claude-tools','computer-use'].includes(parsed.category) ? {kind:'trae'} : {kind:'chatgpt'}, initial = createTaskSpec({...parsed, flags:{...flags,failures:'0'}, failures:0, previousAttempts:[]});
-    const model = modelPreference(initial,a)[0], effort = policyEffort(initial,{family:familyOf(model),modelId:model},a,{accounts:[]});
+    const model = modelId(modelPreference(initial,a)[0]), effort = policyEffort(initial,{family:familyOf(model),modelId:model},a,{accounts:[]});
     addActual({model,effort,account:familyOf(model)==='claude'?'claude':a.kind==='trae'?'assumed-company':'assumed-personal'}, {id:'assumed-first-rung',failureKind:parsed.failures?parsed.failureKind:'infra',assumed:true});
     retryAssumption = `No actual launch history found; assumed first category ladder rung ${model}/${effort} for --failures ${parsed.failures}.`;
   }
@@ -323,7 +324,7 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
       const q = a.quota?.daily?.[m], sample = a.quota?.sampledAt;
       const freshQuota = nonnegative(sample) && sample <= now && now-sample <= 1800000 && (!q?.resetsAt || q.resetsAt>now);
       const explicitFree = (a.quotaKeys && Object.hasOwn(a.quotaKeys,m) && a.quotaKeys[m] === null)
-        || (freshQuota && object(a.quota?.daily) && Object.values(a.quota.daily).some(b=>object(b)&&nonnegative(b.used)&&typeof b.limit==='number'&&b.limit>0&&b.resetsAt>now) && !Object.hasOwn(a.quota.daily,m) && !isAstra(m) && !['gpt-6.1-sol','gpt-5.6-sol'].includes(m));
+        || (freshQuota && object(a.quota?.daily) && Object.values(a.quota.daily).some(b=>object(b)&&nonnegative(b.used)&&typeof b.limit==='number'&&b.limit>0&&b.resetsAt>now) && !Object.hasOwn(a.quota.daily,m) && !['astra','sol','gpt-5.6-sol'].includes(policyModel(m)));
       const mode = kind !== 'trae' ? 'standard' : freshQuota && object(q) && nonnegative(q.used) && typeof q.limit==='number' && q.limit>0 && q.resetsAt>now ? (q.depleted ? 'low-priority' : 'priority') : explicitFree ? 'bucket-free' : 'UNKNOWN';
       const direct = telemetry?.[m], directLoad = modelLoad(load,m,now);
       lanes.push({ id:`${name}:${m}:hub`, accountId:name, modelId:m, harness: isClaude?'claude-bg':'hub', efforts:declared(['low','medium','high','xhigh','max']),
@@ -339,9 +340,10 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
   accounts.forEach((a)=>add(a)); add({},true);
   // A route decision that was never launched can be voided by appending {kind:'void',routeId,reason} (route.mjs void).
   const voidedRoutes=new Set(rows.filter((r)=>r.kind==='void'&&typeof r.routeId==='string').map((r)=>r.routeId));
+  const currentSolModels = [...models.keys()].filter(id => policyModel(id) === 'sol');
   const snapshot = createSnapshot({ schemaVersion:VERSION, collectedFrom, collectedThrough:now, decisionAt:now, accounts:normalized, models:[...models.values()], lanes, health,
     qualityRelations:['gpt-6-luna','gpt-6.1-terra','gpt-5.6-terra','gpt-5.5','gpt-5.6-sol'].flatMap((from)=>['low','medium','high','xhigh','max'].flatMap((e,i,efforts)=>
-      efforts.slice(i).map((to)=>({from:`${from}:${e}`,to:`gpt-6.1-sol:${to}`,version:VERSION,evidenceId:'policy-light-to-sol'})))),
+      currentSolModels.flatMap(id => efforts.slice(i).map(to => ({from:`${from}:${e}`,to:`${id}:${to}`,version:VERSION,evidenceId:'policy-light-to-sol'}))))),
     resources: { held:false, ownedReturned:true, registeredResources:readLeases(shared).registered,
       signingRegistry:fs.existsSync(path.join(shared,'user-signing/registry.json'))&&fs.existsSync(path.join(shared,'user-signing/identities.json')) },
     dependencies:[], approvals: array(read(env.ROUTE_APPROVAL_FILE || path.join(shared,'route-approvals.json'),[])),

@@ -177,7 +177,7 @@ resume, the read-only sandbox and hub workers behave as with a ChatGPT account (
 ### Health and fallback
 
 `quota.mjs` and `route.mjs` treat TTADK as usable when the `ttadk` CLI is present, the SSO session is active and the
-gateway lists a healthy `gpt-6.1-sol`. The hub being down only matters for hub workers, and the router says to start it.
+gateway lists a healthy, qualified Codex model. The hub being down only matters for hub workers, and the router says to start it.
 
 There is no concurrency cap (user, 2026-11-07):
 - The gateway limits queries per minute. About 90 per minute sustained was fine; a burst of 20 simultaneous starts got
@@ -267,7 +267,7 @@ remain routing telemetry, not local spending/concurrency caps. Reports must name
 - **Use.** Hub workers: `codex-worker.mjs --account trae start … --model GPT-6.1-Sol` (lower-case ids are mapped).
   One-shot: `traecli exec -C <dir> -s <sandbox> -m GPT-6.1-Sol -c model_reasoning_effort='"high"' --json -o <file> "<prompt>"`.
   `route.mjs` prints both. Sessions live in `~/.trae/cli/sessions`.
-- **Health.** `quota.mjs` reads the account as healthy when the CLI is present, logged in and lists GPT-6.1-Sol or one
+- **Health.** `quota.mjs` reads the account as healthy when the CLI is present, logged in and lists the current Sol or one
   of its fallback models (model-routing.md, "Fallback models on the company account"), its hub is sound, and it isn't
   paused. A popular model can sit "Queued for capacity": a hub worker then prints `queued: position N (state)` from
   TRAE's `queue/status` notifications (see "Queue position" below); let it wait, and interrupt only a worker with no
@@ -600,7 +600,7 @@ facts behind it (2026-11-03):
   CLI. Don't route to `ultra` (the router never does): it makes every turn fan out and multiplies usage. Workers may not spawn sub-agents; the experiment below is historical only.
   Set the effort on every launch: the catalog default for Sol is `low` (weak for coding: Terminal-Bench 4 31%); the
   user's config sets `high`.
-- **Models:** `gpt-6.1-sol` is the workhorse and Codex's default (near Astra, 500K context); the newest Astra listed by each account is its
+- **Models:** the newest current Sol in each account catalog is the workhorse; the newest Astra listed by each account is its
   frontier model at 5x; `gpt-6.1-terra` is positioned for writing and visual understanding, not coding (its
   computer-use strength is not what the Codex computer-use plugin relies on); personal `gpt-6-luna` remains the first lookup (`low`), extract (`medium`) and image-generation (`low`) choice. Only TRAE `gpt-5.6-luna` is unused (slow, about 3x tokens). Don't pick `gpt-6-sol` or the
   `gpt-5.6-*` models on personal ChatGPT accounts: they're older at the same or higher cost. TRAE's approved company-quota

@@ -39,8 +39,10 @@ telemetry expire after 30 minutes; identity/catalog facts after 10 minutes.
 Malformed nested state becomes UNKNOWN for that account. Browser-ready TTADK and ChatGPT have the desktop runtime unless explicitly
 unavailable; TRAE and Claude have no desktop path. Missing tools or vision blocks.
 
-Each account uses the newest Astra version in its own catalog. Main and b currently list
-`gpt-6.2-astra`, TRAE lists `gpt-6-astra`, and TTADK has no Astra entry.
+Each account uses its newest catalog release for the Sol and Astra policy choices.
+Main and b list `gpt-6.2-sol` and `gpt-6.2-astra`. TRAE currently offers
+`gpt-6.1-sol` and `gpt-6-astra`. TTADK offers `gpt-6.1-sol` and has no Astra entry.
+The separate 5.6-Sol fallback retains its own quota bucket and tier.
 Scoped Astra approvals and the hard-tier standing decision cover the family.
 
 Company accounts remain first. Hard work stays on qualified Sol/Astra (or the
@@ -117,8 +119,8 @@ TRAE foreground tier lists are:
 | Tier | Qualified preference |
 |---|---|
 | Light | GPT-5.6-Terra, GPT-5.5, DeepSeek-V4.1-Flash |
-| Normal | GPT-6.1-Sol, GPT-5.6-Sol, GPT-5.6-Terra, DeepSeek-V4.1-Flash |
-| Hard | Astra on a free company lane, then GPT-6.1-Sol |
+| Normal | Current Sol, GPT-5.6-Sol, GPT-5.6-Terra, DeepSeek-V4.1-Flash |
+| Hard | Astra on a free company lane, then current Sol |
 
 Walk the tier ladder in quality order across all company accounts. Select the first model with a free lane; depleted-but-ready/progressing low-priority lanes count. For that model, free TRAE wins unless TTADK has the expiring-quota preference; if TRAE is congested/queued/stalled, use free TTADK for that same model before stepping down. Priority quota is at most a same-model lane tie-break, never a reason to downgrade Sol to Flash. Light work stays on its qualified light ladder; hard work never demotes. TRAE Gemini and `gpt-5.6-luna` are excluded; personal ChatGPT `gpt-6-luna` remains the first lookup/extract/image-gen choice; TTADK fresh catalog and historical model evidence remain.
 

@@ -22,7 +22,7 @@ export function orderCandidates(task, snapshot, rows) {
   // Exclusions, capabilities and actual retry floors already bounded these rows.
   const companyRows=cohort.filter(r=>company(parts(r).account));
   const ladder=adversarial(task)?['kimi-k3','deepseek-v4.1-flash','opus']
-    :task.category==='image-read'?['gpt-6.1-sol',ASTRA,'gemini-3.1-pro-preview','seed-evolving']
+    :task.category==='image-read'?[SOL,ASTRA,'gemini-3.1-pro-preview','seed-evolving']
     :[...(task.tier==='hard'?hardPreference(task):TIERS[task.tier]),...companyRows.flatMap(r=>modelPreference(task,parts(r).account))];
   const models=[...new Set(ladder)];
   const first=models.find(id=>companyRows.some(r=>policyModel(r.candidate.modelId)===id&&ready(r)));

@@ -290,13 +290,15 @@ try {
       { name: 'ttadk', kind: 'ttadk', live: true, healthy: false, home, models: [SOL], quotaOut: { resetsAt: NOW + 3600000 } },
       { name: 'main', kind: 'chatgpt', live: true, home, windows: [] }], claude: [] }));
     fs.writeFileSync(path.join(home, 'models_cache.json'), JSON.stringify({ models: [
-      { slug: ASTRA }, { slug: 'gpt-6-astra' }, { slug: 'gpt-7-astra', visibility: 'hide' },
+      { slug: 'gpt-6.2-sol' }, { slug: SOL }, { slug: ASTRA }, { slug: 'gpt-6-astra' }, { slug: 'gpt-7-astra', visibility: 'hide' },
     ] }));
     const env = { RULES_SHARED: home, CODEX_ACCOUNTS: registry, QUOTA_CACHE: cache, ROUTE_NOW: String(NOW),
       ROUTE_LOG_FILE: path.join(home, 'routes.jsonl'), QUOTA_LOG_FILE: path.join(home, 'quota-log.jsonl') };
     const context = acquireRoute(task(), { env, now: NOW, root });
     assert.equal(context.snapshot.personalFallback.enabled, true); assert.equal(context.snapshot.personalFallback.queueWaitMinutes, 5);
-    assert.equal(routePure(context.task, context.snapshot).kind, 'launch');
+    const personal = routePure(context.task, context.snapshot);
+    assert.equal(personal.kind, 'launch');
+    assert.deepEqual([personal.primary.candidate.accountId, personal.primary.candidate.modelId], ['main', 'gpt-6.2-sol']);
     const hard = acquireRoute(task({ category: 'implement-hard', impact: 'service' }), { env, now: NOW, root });
     const seat = routePure(hard.task, hard.snapshot).primary;
     assert.deepEqual([seat.candidate.accountId, seat.candidate.modelId], ['main', ASTRA]);

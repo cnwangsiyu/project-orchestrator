@@ -33,6 +33,7 @@ fs.writeFileSync(routeLog, routes.map((r) => JSON.stringify(r)).join('\n') + '\n
 const daily = (used) => ({
   'gpt-5.6-sol': { used, limit: 80, resetsAt: reset },
   'gpt-6.2-astra': { used: used ? 58 : 0, limit: 58, resetsAt: reset },
+  'gpt-6.2-sol': { used, limit: 80, resetsAt: reset },
   'gpt-6.1-sol': { used, limit: 80, resetsAt: reset },
 });
 const quotaRows = [
@@ -51,6 +52,7 @@ const session = (file, model, input) => {
   fs.writeFileSync(path.join(sessions, file), rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
 };
 session('sol56.jsonl', 'GPT-5.6-Sol', 20_000_000); // $80 at the public $4/M input price.
+session('sol62.jsonl', 'GPT-6.2-Sol', 10_000_000);
 session('astra.jsonl', 'GPT-6.2-Astra', 5_800_000); // $58 at the public $10/M input price.
 
 const env = { ...process.env, HOME: home, PATH: `${bin}:${process.env.PATH}`, ROUTE_LOG_FILE: routeLog,
@@ -88,6 +90,7 @@ try {
   const byModel = (model) => windows.find((w) => w.model === model);
   assert.deepEqual([byModel('gpt-5.6-sol').publicListCostUsd, byModel('gpt-5.6-sol').dollarsPerUnit, byModel('gpt-5.6-sol').coveragePct], [80, 1, 100]);
   assert.deepEqual([byModel('gpt-6.2-astra').publicListCostUsd, byModel('gpt-6.2-astra').dollarsPerUnit, byModel('gpt-6.2-astra').coveragePct], [58, 1, 100]);
+  assert.equal(byModel('gpt-6.2-sol').publicListCostUsd, 20);
   assert.equal(byModel('gpt-6.1-sol').status, 'UNKNOWN'); assert.equal(byModel('gpt-6.1-sol').coveragePct, null);
   assert.ok(byModel('gpt-5.6-sol').quotaLogSpanPct > 90); assert.ok(byModel('gpt-5.6-sol').sessionTelemetrySpanPct > 90);
   console.log('PASS TRAE reset-window units, token pricing, ratio, coverage and UNKNOWN gaps');

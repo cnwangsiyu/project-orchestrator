@@ -11,20 +11,26 @@ export const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
 export const unique = (xs) => [...new Set(xs)].sort(compare);
 export const modelId = (id) => {
   const s = typeof id === 'string' ? id.toLowerCase() : '';
-  if (/^\d+(?:\.\d+)*-astra$/.test(s)) return `gpt-${s}`;
-  return ({ sol: 'gpt-6.1-sol', astra: 'gpt-6-astra', '6.1-sol': 'gpt-6.1-sol',
+  if (/^\d+(?:\.\d+)*-(?:astra|sol)$/.test(s)) return `gpt-${s}`;
+  return ({ sol: 'gpt-6.1-sol', astra: 'gpt-6-astra',
     terra: 'gpt-6.1-terra', '6.1-terra': 'gpt-6.1-terra',
     'claude-opus': 'opus', 'claude-sonnet': 'sonnet', 'claude-haiku': 'haiku', 'claude-fable': 'fable' })[s] ?? s;
 };
-// Policy compares Astra releases as one rung. Launches and telemetry keep exact IDs.
-export const isAstra = id => /^gpt-\d+(?:\.\d+)*-astra$/.test(modelId(id));
-export const policyModel = id => isAstra(id) ? 'astra' : modelId(id);
+// Each current Sol/Astra rung resolves to a concrete catalog release. Older
+// Sol models (notably 5.6) retain their own qualification and quota policies.
 const versions = new Intl.Collator('en', { numeric: true });
-export const newestAstra = catalog => catalog.filter(isAstra)
+export function policyModel(id) {
+  const model = modelId(id);
+  const release = /^gpt-(\d+(?:\.\d+)*)-(astra|sol)$/.exec(model);
+  if (!release || release[2] === 'sol' && versions.compare(release[1], '6.1') < 0) return model;
+  return release[2];
+}
+export const isAstra = id => policyModel(id) === 'astra';
+export const newestRelease = (catalog, family) => catalog.filter(id => policyModel(id) === family)
   .sort((a, b) => versions.compare(modelId(b).split('-')[1], modelId(a).split('-')[1]))[0];
-// Keep an unversioned Astra selector broad and a versioned lane exclusion exact.
-export const modelSelector = id => typeof id === 'string' && id.toLowerCase() === 'astra' ? 'astra' : modelId(id);
-export const matchesModel = (selector, id) => selector === 'astra' ? isAstra(id) : modelId(selector) === id;
+// Unversioned selectors cover the rung. Exclusions of concrete lanes stay exact.
+export const modelSelector = id => /^(astra|sol)$/i.test(id) ? id.toLowerCase() : modelId(id);
+export const matchesModel = (selector, id) => ['astra','sol'].includes(selector) ? policyModel(id) === selector : modelId(selector) === id;
 export const familyOf = (id) => /^(opus|sonnet|haiku|fable)$/.test(modelId(id)) ? 'claude' : modelId(id).split('-')[0];
 export const company = (a) => ['ttadk', 'trae'].includes(a?.kind);
 export const companyDevice = (s) => s.accounts.some(company);

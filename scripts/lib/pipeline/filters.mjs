@@ -1,5 +1,5 @@
 import {mandatoryReview} from '../review-policy-data.mjs';
-import { policyModel, matchesModel, isAstra, newestAstra, VERSION, EFFORTS, array, company, companyDevice, known, modelId, familyOf, isReview, adversarial, result, reason, fingerprint, stable } from './common.mjs';
+import { policyModel, matchesModel, isAstra, newestRelease, VERSION, EFFORTS, array, company, companyDevice, known, modelId, familyOf, isReview, adversarial, result, reason, fingerprint, stable } from './common.mjs';
 import { candidateParts, enumerateCandidates } from './candidates.mjs';
 import { modelPreference, policyEffort } from './policy.mjs';
 import { estimateCandidate } from './estimate.mjs';
@@ -77,19 +77,19 @@ export function pCapabilities(t, s, c) {
 }
 export function pTierFloor(t, s, c) {
   const account = candidateParts(s,c).account;
-  const astra = isAstra(c.modelId);
-  if (astra && c.modelId !== newestAstra(known(account?.catalog) ?? []))
-    return deny('pTierFloor', 'ASTRA_SUPERSEDED', 'A newer Astra is listed for this account.', c);
+  const rung = policyModel(c.modelId);
+  if (['astra', 'sol'].includes(rung) && c.modelId !== newestRelease(known(account?.catalog) ?? [], rung))
+    return deny('pTierFloor', 'MODEL_SUPERSEDED', 'A newer release is listed for this account.', c);
   const explicitEscalation = t.selectionCause === 'quality-escalation' && matchesModel(t.qualityEscalation?.modelId, c.modelId)
     && t.qualityEscalation?.policyVersion === s.policyVersion && !!t.qualityEscalation?.evidenceId;
-  if (astra && t.tier !== 'hard' && t.category !== 'image-read' && !explicitEscalation) return deny('pTierFloor', 'ASTRA_SUBSTITUTION_HARD_ONLY', 'Astra substitutions are reserved for hard tasks.', c);
+  if (rung === 'astra' && t.tier !== 'hard' && t.category !== 'image-read' && !explicitEscalation) return deny('pTierFloor', 'ASTRA_SUBSTITUTION_HARD_ONLY', 'Astra substitutions are reserved for hard tasks.', c);
   const hardNonGPT = adversarial(t) && isReview(t) && !t.writes && !t.runsTests && ['kimi', 'deepseek'].includes(c.family);
-  if (t.tier === 'hard' && !astra && !['gpt-6.1-sol', 'opus', 'fable'].includes(c.modelId) && !hardNonGPT)
+  if (t.tier === 'hard' && !['astra', 'sol', 'opus', 'fable'].includes(rung) && !hardNonGPT)
     return deny('pTierFloor', 'TIER_QUALITY_FLOOR', 'Candidate is outside the established hard-task floor.', c);
-  if (t.tier !== 'hard' && !astra && !['gpt-6.1-sol', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.5', 'gpt-6.1-terra', 'gpt-6-luna',
-    'gpt-5.6-luna', 'kimi-k3', 'deepseek-v4.1-flash', 'gemini-3.1-pro-preview', 'seed-evolving', 'opus', 'sonnet', 'haiku', 'fable'].includes(c.modelId))
+  if (t.tier !== 'hard' && !['astra', 'sol', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.5', 'gpt-6.1-terra', 'gpt-6-luna',
+    'gpt-5.6-luna', 'kimi-k3', 'deepseek-v4.1-flash', 'gemini-3.1-pro-preview', 'seed-evolving', 'opus', 'sonnet', 'haiku', 'fable'].includes(rung))
     return deny('pTierFloor', 'TIER_QUALITY_FLOOR', 'Model has no established category qualification.', c);
-  if (!modelPreference(t,account,s).includes(policyModel(c.modelId))&&!explicitEscalation) return deny('pTierFloor','CATEGORY_MODEL_FIT','Model is outside the category/account policy list.',c);
+  if (!modelPreference(t,account,s).includes(rung)&&!explicitEscalation) return deny('pTierFloor','CATEGORY_MODEL_FIT','Model is outside the category/account policy list.',c);
   if (effortIndex(c.effort) < effortIndex(policyEffort(t, c, account,s))) return deny('pTierFloor', 'TIER_EFFORT_FLOOR', 'Effort is below the category/model floor.', c);
   return pass('pTierFloor');
 }
@@ -99,10 +99,11 @@ export function dominates(c, previous, s) {
   const id = modelId(previous.modelId ?? previous.model), effort = previous.effort;
   if (!EFFORTS.includes(effort) || !id) return false;
   if (id === c.modelId) return effortIndex(c.effort) >= effortIndex(effort);
-  if (isAstra(id) && c.family === 'gpt')
-    return isAstra(c.modelId) && newestAstra([id, c.modelId]) === c.modelId && effortIndex(c.effort) >= effortIndex(effort);
-  if (id === 'gpt-6.1-sol' && c.family === 'gpt' && !isAstra(c.modelId)) return false;
-  if (id === 'gpt-6.1-sol' && isAstra(c.modelId)) return effortIndex(c.effort) >= effortIndex(effort);
+  const previousRung = policyModel(id);
+  if (['astra', 'sol'].includes(previousRung) && c.family === 'gpt') {
+    if (previousRung === 'sol' && isAstra(c.modelId)) return effortIndex(c.effort) >= effortIndex(effort);
+    return newestRelease([id, c.modelId], previousRung) === c.modelId && effortIndex(c.effort) >= effortIndex(effort);
+  }
   const from = `${id}:${effort}`, to = c.qualityProfileId;
   const seen = new Set([from]), pending = [from];
   while (pending.length) {
@@ -130,7 +131,7 @@ export function pPreviousFloor(t, s, c) {
   const lightRetry = ['lookup', 'extract', 'draft'].includes(t.category) || t.category === 'build-run' && t.env === 'test';
   if (lightRetry && relevant.some(a => ['quality', 'spec', 'process'].includes(a.failureKind)
     && ['gpt-5.6-terra', 'gpt-5.5'].includes(modelId(a.actual?.modelId)))
-    && c.family === 'gpt' && c.modelId !== 'gpt-6.1-sol' && !isAstra(c.modelId))
+    && c.family === 'gpt' && !['sol', 'astra'].includes(policyModel(c.modelId)))
     return deny('pPreviousFloor', 'RETRY_LIGHT_REQUIRES_SOL', 'A failed light quality rung requires the Sol retry or a stronger model.', c);
   for (const a of relevant) {
     // A failed tool says nothing about answer quality across model families.

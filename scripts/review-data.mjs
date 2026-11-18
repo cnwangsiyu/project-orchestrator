@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import { execFileSync } from 'node:child_process';
-import { isAstra } from './lib/pipeline/common.mjs';
+import { policyModel } from './lib/pipeline/common.mjs';
 import { CACHE, SHARED, ROUTE_LOG, QUOTA_LOG, readState, analyze, leanLines, fmt, outcomeOwns, isReviewDecision, dedupeOutcomes, codexCatalog, readProfiles, compareHarness, harnessDrift, modelView, effectiveFirst, OUTCOME_OVERRIDES } from './lib/state.mjs';
 import { loadDigest, isRouteDecision, rulesShared } from './lib/global-rules.mjs';
 import { auditGlobalRules } from './lib/global-rules-audit.mjs';
@@ -375,7 +375,8 @@ const traeReconciliation = async () => {
     const units = Math.max(...rs.map((r) => r.used));
     const tokenRows = telemetry.events.filter((e) => e.model === model && e.t >= startAt && e.t <= endAt);
     const tokens = tokenRows.reduce((a, e) => ({ input: a.input + e.input, cached: a.cached + e.cached, output: a.output + e.output }), { input: 0, cached: 0, output: 0 });
-    if (!TRAE_PUBLIC_PRICES[model] && isAstra(model)) TRAE_PUBLIC_PRICES[model] = TRAE_PUBLIC_PRICES['gpt-6-astra'];
+    const baseline = { astra: 'gpt-6-astra', sol: 'gpt-6.1-sol' }[policyModel(model)];
+    if (baseline && !TRAE_PUBLIC_PRICES[model]) TRAE_PUBLIC_PRICES[model] = TRAE_PUBLIC_PRICES[baseline];
     const price = TRAE_PUBLIC_PRICES[model];
     const uncached = Math.max(0, tokens.input - tokens.cached);
     const dollars = price && tokenRows.length ? (uncached * price.input + tokens.cached * price.cachedInput + tokens.output * price.output) / 1e6 : null;

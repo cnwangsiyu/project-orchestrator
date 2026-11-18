@@ -1,4 +1,4 @@
-import { VERSION, EFFORTS, array, object, idOK, modelSelector, policyModel, stable, modelId, familyOf, compare, unique, nonnegative, finite, clone, freeze, fingerprint, reason } from './common.mjs';
+import { VERSION, EFFORTS, array, object, idOK, modelSelector, isAstra, stable, modelId, familyOf, compare, unique, nonnegative, finite, clone, freeze, fingerprint, reason } from './common.mjs';
 import { personalFallbackPolicy, fallbackUnavailable } from './personal-fallback.mjs';
 
 export const FRESHNESS = freeze({ cacheMs: 600000, telemetryMs: 1800000, quotaMs: 1800000 });
@@ -167,7 +167,7 @@ function cloneApproval(a) {
   const astraScopes = new Set(scopes.filter(p => p.action === 'astra').map(stable));
   for (const p of scopes) {
     if (p.action === 'astra' || (p.action === 'personal-quota' && astraScopes.has(stable({ ...p, action: 'astra' }))))
-      p.models = unique(p.models.map(policyModel));
+      p.models = unique(p.models.map(id => isAstra(id) ? 'astra' : id));
   }
   return { id: a.id, userDecisionRef: a.userDecisionRef, grantedAt: a.grantedAt, expiresAt: a.expiresAt, revoked: a.revoked,
     consumed: a.consumed === true, scopes: scopes.sort((a, b) => compare(fingerprint(a), fingerprint(b))) };

@@ -1,6 +1,6 @@
 // Category qualification and preferences, shared by admission and ordering.
 import { EFFORTS, company, adversarial, known, policyModel, isAstra } from './common.mjs';
-export const SOL='gpt-6.1-sol', ASTRA='astra';
+export const SOL='sol', ASTRA='astra';
 // Company hard-tier trial: 2026-11-16 through the 2026-11-23 review.
 export const TIERS = {hard:[ASTRA,SOL],normal:[SOL,'gpt-5.6-sol','gpt-5.6-terra','deepseek-v4.1-flash'],light:['gpt-5.6-terra','gpt-5.5','deepseek-v4.1-flash']};
 export function hardPreference(t) {

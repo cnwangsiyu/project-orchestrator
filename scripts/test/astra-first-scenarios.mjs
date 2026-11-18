@@ -63,6 +63,24 @@ try {
     pick(hard, s, quotaOnly?ASTRA:SOL, 'trae');
     unavailable(s, SOL, 'hot'); pick(hard, s, quotaOnly?ASTRA:SOL, quotaOnly?'trae':'ttadk');
   }
+  // Matching concrete Sol versions across accounts is unnecessary: each account
+  // ranks its own newest release in the same workhorse position.
+  const mixed = copy(), newSol = 'gpt-6.2-sol';
+  const main = mixed.accounts.find(a => a.id === 'main');
+  const addSol = account => {
+    account.catalog.value.push(newSol);
+    const old = lane(mixed, SOL, account.id);
+    mixed.lanes.push({ ...old, id: old.id.replace(SOL, newSol), modelId: newSol });
+  };
+  mixed.models.push({ ...mixed.models.find(m => m.id === SOL), id: newSol });
+  addSol(main);
+  pick(['analysis'], mixed, SOL, 'trae');
+  const personalOnly = structuredClone(mixed);
+  personalOnly.accounts = personalOnly.accounts.filter(a => a.id === 'main');
+  personalOnly.lanes = personalOnly.lanes.filter(l => l.accountId === 'main');
+  pick(['analysis'], personalOnly, newSol, 'main');
+  addSol(mixed.accounts.find(a => a.id === 'trae'));
+  pick(['analysis'], mixed, newSol, 'trae');
   const exclusion = copy(); pick([...hard, '--exclude-model', ASTRA], exclusion, SOL, 'trae');
   const incapable = copy(); lane(incapable, ASTRA).capabilities.search.value = false;
   pick(['research', '--stakes', 'high'], incapable, SOL, 'trae');

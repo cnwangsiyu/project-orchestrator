@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { policyModel } from './lib/pipeline/common.mjs';
+import { newestRelease, policyModel } from './lib/pipeline/common.mjs';
 import {modelPreference} from './lib/pipeline/policy.mjs';
 import {mcpStartupMonitor} from './lib/mcp-startup.mjs';
 // codex-worker: run and steer Codex workers through a shared Codex app-server ("hub") over WebSocket.
@@ -492,7 +492,7 @@ if (cmd === 'ttadk-setup') {
   try { models = ((j) => (Array.isArray(j) ? j : j.models ?? []))(JSON.parse(execFileSync(ttadkBin, ['models', '-f', 'json'], { encoding: 'utf8', timeout: 60000, stdio: ['ignore', 'pipe', 'ignore'] }))).filter((m) => (m.availableAgents ?? []).includes('codex')).map((m) => m.id); } catch {}
   const qualified=new Set(['light','normal','hard'].flatMap(tier=>modelPreference({category:'analysis',tier,contentLabels:[]},{kind:'ttadk'})).concat(modelPreference({category:'image-read',tier:'normal',contentLabels:[]},{kind:'ttadk'}),['kimi-k3']));
   const usable=models.filter(m=>qualified.has(policyModel(m)));if(!usable.length)die('the TTADK gateway lists no usable qualified Codex model',1);
-  const gatewayDefault=usable.includes('gpt-6.1-sol')?'gpt-6.1-sol':usable[0];
+  const gatewayDefault=newestRelease(usable, 'sol') ?? usable[0];
   const reg = readAccounts();
   reg.main ??= { home: path.join(os.homedir(), '.codex'), hub: 'ws://127.0.0.1:47321' };
   const home = path.resolve(typeof opts.home === 'string' ? opts.home : reg[name]?.home ?? path.join(os.homedir(), `.codex-${name}`));
@@ -590,7 +590,7 @@ if (cmd === 'trae-setup') {
   if (!/logged in/i.test(status) || /not logged in/i.test(status)) die('TRAE CLI is not logged in: run `traecli login --git-code` (or ask the user to run `! traecli login --sso`)', 1);
   let ids = [];
   try { ids = execFileSync(bin, ['models'], { encoding: 'utf8', timeout: 60000, stdio: ['ignore', 'pipe', 'ignore'] }).split('\n').map((l) => l.trim()).filter((l) => /^[A-Za-z0-9][\w.-]*$/.test(l)); } catch {}
-  if (!ids.some((i) => i.toLowerCase() === 'gpt-6.1-sol')) die(`TRAE CLI lists no GPT-6.1-Sol (models: ${ids.join(', ') || 'none'})`, 1);
+  if (!newestRelease(ids, 'sol')) die(`TRAE CLI lists no current Sol (models: ${ids.join(', ') || 'none'})`, 1);
   const home = path.join(os.homedir(), '.trae'), cfg = path.join(home, 'traecli.toml');
   let toml = fs.existsSync(cfg) ? fs.readFileSync(cfg, 'utf8') : '';
   const strip = (t, a, b) => { const i = t.indexOf(a); if (i < 0) return t; const j = t.indexOf(b, i); return t.slice(0, i) + (j >= 0 ? t.slice(j + b.length).replace(/^\n/, '') : ''); };

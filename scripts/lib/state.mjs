@@ -908,7 +908,7 @@ export const leanLines = (st, data) => {
   }
   const TR = X.trae;
   if (TR) {
-    if (TR.usable && !T?.usable) out.push(`TRAE available: with TTADK ${T ? 'out' : 'absent'}, work TTADK would take runs on TRAE CLI (account ${TR.name}, GPT-6.1-Sol and eligible alternatives; route.mjs applies daily-quota and model-fit rules, with Seed-Evolving for image-read) before personal quota; web browser work is available only with the Playwright Extension token, while desktop apps and image generation stay off TRAE`);
+    if (TR.usable && !T?.usable) out.push(`TRAE available: with TTADK ${T ? 'out' : 'absent'}, work TTADK would take runs on TRAE CLI (account ${TR.name}, Sol and eligible alternatives; route.mjs applies daily-quota and model-fit rules, with Seed-Evolving for image-read) before personal quota; web browser work is available only with the Playwright Extension token, while desktop apps and image generation stay off TRAE`);
     else if (TR.usable) out.push(`TRAE CLI (account ${TR.name}) shares eligible work with TTADK under the quality-first, free-lane and congestion rules, and remains its fallback before personal quota`);
     else out.push(`TRAE CLI unavailable — ${TR.reason}`);
     for (const [pool, r] of Object.entries(TR.poolPauses ?? {})) out.push(`TRAE ${pool} models ${r.pausedUntil > Date.now() ? `paused until ${fmt(r.pausedUntil)}, then probed` : 'being probed for recovery'} (${String(r.reason).slice(0, 120)}): route.mjs uses the next model family meanwhile`);
