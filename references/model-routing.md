@@ -65,7 +65,8 @@ floors, exclusions and confirmed-cancellation requirements. Automatic hops are
 company-only, owner-preserving, and capped at two.
 
 Personal quota asks first on devices with a registered TTADK or TRAE account,
-except the standing personal Codex fallback approved on 2026-11-17. Its visible
+except for the dated priority window or the standing personal Codex fallback
+approved on 2026-11-17. The fallback's
 default is `references/personal-fallback.json`; `_shared/personal-fallback.json`
 overrides it (`PERSONAL_FALLBACK_FILE` selects a fixture/alternate file). Set
 `enabled: false` to revoke it. The data records `userDecisionRef`, `since`,
@@ -102,6 +103,26 @@ Account-less explicit actuals keep the account UNKNOWN and retain the supplied
 model/effort floor. Max effort outside company accounts (TTADK and TRAE), Fable and reset redemption keep separate
 authorization. An eligible company primary launches while a gated personal
 second reviewer awaits the user's answer before acceptance.
+
+The user's 2026-11-18 decision prefers ready, qualified personal Codex `main`
+through the weekly reset at **2026-11-19 00:26 PST (08:26 UTC)**. The decision
+lives in `_shared/personal-priority-window.json` and applies from its inclusive
+start through its exclusive expiry. The router records the standing decision
+reference and expiry for window-backed picks. It resumes normal routing if
+current weekly use reaches 90%, projected weekly use at reset reaches 95%, or
+fresh weekly usage for that reset is unavailable. The window preserves the
+usual model, scope, capability, retry and independent-review checks. Hard-tier
+Astra on `main` uses the separate enabled hard-Astra standing decision.
+Personal `b`, Claude/Fable, max effort, reset redemption, normal-tier Astra,
+and explicit review/security approvals keep their existing rules.
+Only install a window for a recorded user decision. Use the same
+`RULES_SHARED` as the router, or omit it for the default shared directory.
+
+```sh
+node scripts/personal-priority.mjs add 'FROM_UTC_ISO' 'UNTIL_UTC_ISO' 'standing:personal-priority-DECISION' 'VERBATIM_USER_QUOTE'
+node scripts/personal-priority.mjs inspect
+node scripts/personal-priority.mjs revoke 'standing:personal-priority-DECISION'
+```
 
 Review policy: Mandatory review is ONLY explicit --review-class A|B|C|D plus --review-reason: A a version that reaches external users and cannot be rolled back within hours; B login/auth/permission/signing logic; C irreversible data operations or billing/quota accounting; D a named adversarial review. High stakes, installation and fallback authorship alone do not qualify. Use `--review-reason` and optional stable `--review-scope`. Without a class, review-high downgrades with a note. Release impact is class A only; profiles without external release normalize other release requests to service. Internal-demo never blocks explicit classes or requires profile-override. Routine work uses tests, or one optional ordinary review when tests cannot cover it. Classified adversarial/review-high/release reviews require independent families; adversarial uses two non-GPT families. Required seconds are acceptance obligations and do not hold a runnable company primary.
 
@@ -184,7 +205,7 @@ admission. Follow [resources.md](resources.md) and the injected worker digest fo
 res v1.5, one-process build wrappers, registered devices and restoration. Acquire
 holds after the first model response and return them before a replacement.
 
-Registered own-test signing uses ordinary full-access Codex-family workers, with company quota first and personal quota subject to its existing scoped gates. They check the existing package registry and identity allowlist. The resident
+Registered own-test signing uses ordinary full-access Codex-family workers subject to the applicable quota policy. They check the existing package registry and identity allowlist. The resident
 Claude signer is retired. All workers use installed, signed-in tools without
 opening credential or session files.
 
@@ -196,7 +217,7 @@ without exporting tokens, reading credential files or clearing restrictions.
 Current acquisition refreshes individual stale/negative account readings through
 authenticated read-only status commands; it never exports credentials or clears
 restriction generations. No runnable company lane waits for a future quota
-reset. Browser and ui-browser prefer observed free TRAE Playwright capacity, then
+reset. In normal order, browser and ui-browser prefer observed free TRAE Playwright capacity, then
 usable TTADK → browser-ready personal ChatGPT → Claude in Chrome. Personal ChatGPT asks on company devices; ordinary Claude asks on every device. Desktop: TTADK → browser-ready personal ChatGPT (ask), never TRAE/Claude. --signing uses ordinary full-access Codex-family workers subject to quota gates for registered
 own-test packages and allowlisted identities; the resident Claude signer is retired.
 

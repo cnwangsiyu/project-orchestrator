@@ -1,5 +1,6 @@
 import { VERSION, EFFORTS, array, object, idOK, modelSelector, isAstra, stable, modelId, familyOf, compare, unique, nonnegative, finite, clone, freeze, fingerprint, reason } from './common.mjs';
 import { personalFallbackPolicy, fallbackUnavailable } from './personal-fallback.mjs';
+import { activePersonalPriority } from './personal-priority.mjs';
 import { RUN_USAGE_HISTORY_MS } from './ttadk-reserve.mjs';
 
 export const FRESHNESS = freeze({ cacheMs: 600000, telemetryMs: 1800000, quotaMs: 1800000 });
@@ -138,12 +139,14 @@ export function createSnapshot(raw, options = {}) {
       recovery: cleared ? 'cleared' : h.recovery === 'not-due' ? 'not-due' : 'awaiting-probe', evidence };
   }).sort((a, b) => compare(fingerprint(a), fingerprint(b)));
   const approvals = rows(raw.approvals ?? [], 'approvals').map(cloneApproval).filter(Boolean).sort((a, b) => compare(a.id, b.id));
+  const personalPriority = !unsupported && !invalidTime && activePersonalPriority(raw.personalPriority, decisionAt);
   const snapshot = { schemaVersion: VERSION, collectedFrom, collectedThrough, decisionAt: nonnegative(decisionAt) ? decisionAt : null,
     policyVersion: raw.policyVersion ?? VERSION, policyHash: raw.policyHash ?? VERSION, catalogVersion: raw.catalogVersion ?? VERSION,
     capabilityVersion: raw.capabilityVersion ?? VERSION, qualityRelationVersion: raw.qualityRelationVersion ?? VERSION,
     qualityRelations: rows(raw.qualityRelations ?? [], 'qualityRelations').map((r) => ({ from: r.from, to: r.to, version: r.version, evidenceId: r.evidenceId })),
     accounts, models, lanes, approvals, health,
     personalFallback: personalFallbackPolicy(raw.personalFallback, decisionAt),
+    ...(personalPriority ? { personalPriority } : {}),
     resources: obs(raw.resources, 'resources', object), dependencies: obs(raw.dependencies, 'dependencies', strings),
     rotationState: Number.isSafeInteger(raw.rotationState) && raw.rotationState >= 0 ? raw.rotationState : 0,
     etaHistory: rows(raw.etaHistory ?? [], 'etaHistory').filter((h) => idOK(h.attemptId) && nonnegative(h.minutes) && h.minutes > 0

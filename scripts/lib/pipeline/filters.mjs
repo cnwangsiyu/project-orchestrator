@@ -4,6 +4,7 @@ import { candidateParts, enumerateCandidates } from './candidates.mjs';
 import { modelPreference, policyEffort } from './policy.mjs';
 import { estimateCandidate } from './estimate.mjs';
 import { standingPersonalFallback } from './personal-fallback.mjs';
+import { standingPersonalPriority } from './personal-priority.mjs';
 import { ttadkReserve } from './ttadk-reserve.mjs';
 
 const pass = (id) => result(id);
@@ -188,9 +189,10 @@ export function pDevice(t, s, c) {
 }
 export function pScopedApproval(t, s, c, context = {}) {
   const a = candidateParts(s, c).account;
-  const personalFallback = a.kind === 'chatgpt' && s.personalFallback?.enabled ? standingPersonalFallback(t, s, c,
+  const personalPriority = standingPersonalPriority(t, s, c, a);
+  const personalFallback = personalPriority ?? (a.kind === 'chatgpt' && s.personalFallback?.enabled ? standingPersonalFallback(t, s, c,
     context.companyRows ?? enumerateCandidates(t, s).candidates.filter(p => company(candidateParts(s, p).account))
-      .map(candidate => ({ candidate, predicates: evaluateCandidate(t, s, candidate, context), estimate: estimateCandidate(t, s, candidate) }))) : null;
+      .map(candidate => ({ candidate, predicates: evaluateCandidate(t, s, candidate, context), estimate: estimateCandidate(t, s, candidate) }))) : null);
   const requirements = [];
   if (!company(a) && (a.kind==='claude'||companyDevice(s)) && !personalFallback?.quotaApproved) requirements.push(['personal-quota', 'PERSONAL_QUOTA_OK_REQUIRED', 'Current scoped personal-quota approval is required.', context.companyEligible || context.companyUnknown]);
   if (isAstra(c.modelId) && a?.kind==='chatgpt' && !personalFallback?.astraApprovalRef) requirements.push(['astra','PERSONAL_ASTRA_OK_REQUIRED',`use ${c.modelId} on personal account ${a.id}?`]);

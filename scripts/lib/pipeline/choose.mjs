@@ -18,6 +18,12 @@ export function orderCandidates(task, snapshot, rows) {
   const parts=r=>candidateParts(snapshot,r.candidate);
   const ready=r=>!stalled(r)&&!r.estimate.capacityReset&&r.estimate.startDelayMin===0
     &&(parts(r).account.kind!=='trae'||r.estimate.balance?.freeNow===true);
+  const priority = snapshot.personalPriority;
+  if (priority) {
+    const preferred = cohort.filter(r => r.ok && ready(r)
+      && r.predicates.some(p => p.personalFallback?.approvalRef === priority.userDecisionRef));
+    if (preferred.length) cohort = preferred;
+  }
   // Tier preference precedes quota; only observed free lanes get that preference.
   // Exclusions, capabilities and actual retry floors already bounded these rows.
   const companyRows=cohort.filter(r=>company(parts(r).account));

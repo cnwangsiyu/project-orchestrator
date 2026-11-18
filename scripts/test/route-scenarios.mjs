@@ -269,15 +269,81 @@ const run = (sc, args0, overrides = {}) => {
   let args = args0.filter((a) => a !== '__noimpact');
   if (CODE.includes(args[0]) && !args.includes('--impact') && !args0.includes('__noimpact')) args = [...args, '--impact', 'service'];
   const cache = path.join(tmp, 'q.json');
-  fs.writeFileSync(cache, JSON.stringify({ checkedAt: now, claude: S[sc].claude, codexAccounts: S[sc].codex, errors: {}, history: {} }));
+  fs.writeFileSync(cache, JSON.stringify({ checkedAt: now, claude: S[sc].claude, codexAccounts: S[sc].codex, errors: {}, history: S[sc].history ?? {} }));
   const category=args.find(v=>['review','review-high','second-opinion'].includes(v));
   if(!args.includes('--review-class')) {
     const cls=args.includes('release')?'A':category&&!args.includes('--defensive')&&(args.includes('--security')||args.includes('--adversarial'))?'D':category==='review-high'?'B':null;
     if(cls)args.push('--review-class',cls,'--review-reason','synthetic classified review basis');
   }
-  const env = { ...process.env, QUOTA_CACHE: cache, CODEX_ACCOUNTS: path.join(tmp, 'none.json'), ROUTE_LOG: '0', ROUTE_NOW: String(now), ROUTE_LOG_FILE: path.join(tmp, 'empty-route-history.jsonl'), QUOTA_LOG: '0', TRAE_PROBE: '0', ROUTE_RR: path.join(tmp, 'rr.txt'), QUOTA_LOG_FILE: path.join(tmp, 'empty-company-history'), PLAYWRIGHT_EXTENSION_TOKEN_FILE: absentPlaywrightToken, ...overrides };
+  const env = { ...process.env, RULES_SHARED: tmp, QUOTA_CACHE: cache, CODEX_ACCOUNTS: path.join(tmp, 'none.json'), ROUTE_LOG: '0', ROUTE_NOW: String(now), ROUTE_LOG_FILE: path.join(tmp, 'empty-route-history.jsonl'), QUOTA_LOG: '0', TRAE_PROBE: '0', ROUTE_RR: path.join(tmp, 'rr.txt'), QUOTA_LOG_FILE: path.join(tmp, 'empty-company-history'), PLAYWRIGHT_EXTENSION_TOKEN_FILE: absentPlaywrightToken, ...overrides };
   return routeFixture(ROUTE,[...args,'--artifact-ref','fixture-artifact','--json'],{env,dir:tmp,approve:overrides.TEST_APPROVE===true||args0.includes('--user-ok')});
 };
+{
+  const shared = path.join(tmp, 'priority-window');
+  const env = { RULES_SHARED: shared, ROUTE_REQUEST_ID: 'window-fixture' };
+  const noWindow = { ...env, RULES_SHARED: tmp };
+  const until = now + 10 * h, ref = 'standing:personal-priority-fixture';
+  const policy = (...args) => JSON.parse(execFileSync(process.execPath, [path.join(path.dirname(ROUTE), 'personal-priority.mjs'), ...args], {
+    env: { ...process.env, ...env }, encoding: 'utf8',
+  }));
+  const read = (args, overrides = env) => JSON.parse(run('priority', [...args, '--dry'], overrides));
+  try {
+    S.priority = { claude: cl(10, 120), codex: [acc('main', 50, 10, [], { browser: true }), acc('b', 10, 3), tt(), tr()] };
+    const normal = read(['analysis'], noWindow);
+    assert.ok(normal.pick.company);
+    policy('add', new Date(now).toISOString(), new Date(until).toISOString(), ref, 'synthetic decision');
+    assert.equal(policy('inspect').active, true);
+    for (const args of [['analysis'], ['browser', '--origins', 'example.com'], ['design'], ['analysis', '--background']]) {
+      const preferred = read(args);
+      assert.equal(preferred.pick.account, 'main', args.join(' '));
+      assert.equal(preferred.pick.approvalRef, ref);
+      assert.deepEqual(preferred.needsUserOK, []);
+      assert.ok(preferred.why.some(line => line.includes(new Date(until).toISOString())));
+    }
+    for (const args of [['claude-tools'], ['analysis', '--exclude-account', 'main'],
+      ['analysis', '--exclude-account', 'main,ttadk,trae,claude'], ['implement', '--security'],
+      ['review', '--author', 'codex']]) {
+      const actual = read(args), expected = read(args, noWindow);
+      assert.deepEqual((actual.plan.primary ?? actual.plan.primaryProposal)?.candidate,
+        (expected.plan.primary ?? expected.plan.primaryProposal)?.candidate, args.join(' '));
+      assert.equal(actual.pick?.approvalRef, expected.pick?.approvalRef);
+      assert.equal(actual.executable, expected.executable);
+      assert.deepEqual(actual.needsUserOK, expected.needsUserOK);
+      assert.deepEqual(actual.why, expected.why);
+    }
+    const hardAstra = { ...env, PERSONAL_FALLBACK_FILE: path.join(path.dirname(ROUTE), '../references/personal-fallback.json') };
+    const hard = read(['implement-hard'], hardAstra);
+    assert.equal(hard.pick.account, 'main');
+    assert.equal(hard.pick.model, 'gpt-6-astra');
+    assert.equal(hard.pick.astraApprovalRef, 'standing:hard-astra-2026-11-17');
+    assert.equal(read(['analysis'], hardAstra).pick.model, 'gpt-6.1-sol');
+    for (const [used, earlier, reason] of [[87, 83, /projected at reset 95%/], [90, 90, /used 90%/]]) {
+      S.priority.codex[0].windows = [wk(used, 10)];
+      S.priority.history = { 'codex:main': [{ t: now - 5 * h, used: earlier, resetsAt: until }] };
+      const guarded = read(['analysis']);
+      assert.equal(guarded.pick.account, normal.pick.account);
+      assert.ok(guarded.why.some(line => line.includes('weekly quota guard') && reason.test(line)));
+    }
+    S.priority.codex[0].windows = [wk(10, 11)];
+    const unknown = read(['analysis']);
+    assert.equal(unknown.pick.account, normal.pick.account);
+    assert.ok(unknown.why.some(line => line.includes('fresh weekly quota for this reset is unavailable')));
+    const activeAccounts = S.priority.codex;
+    S.priority.codex = activeAccounts.map(a => ({ ...a, seenAt: until, ...(a.name === 'main' ? { windows: [wk(5, 178)] } : {}) }));
+    const atExpiry = { ROUTE_NOW: String(until), ROUTE_REQUEST_ID: env.ROUTE_REQUEST_ID };
+    const expired = run('priority', ['analysis', '--dry'], { ...env, ...atExpiry });
+    assert.deepEqual(expired, run('priority', ['analysis', '--dry'], { ...noWindow, ...atExpiry }));
+    assert.equal(JSON.parse(expired).pick.account, normal.pick.account);
+    S.priority.codex = activeAccounts;
+    policy('revoke', ref);
+    assert.equal(policy('inspect').active, false);
+    assert.deepEqual(read(['analysis']), read(['analysis'], noWindow));
+    console.log('ok   personal main-first window, scoped approval, quota thresholds and exact expiry');
+  } catch (error) {
+    fail++;
+    console.error('FAIL personal main-first window', error.message);
+  }
+}
 const expectationChanges=[];
 const revisedCase=(sc,args,want,note)=>{
   const category=args.find(a=>['lookup','extract','analysis','research','implement','implement-hard','debug','science','review','review-high','design','docs','draft','build-run','browser','ui-browser','computer-use','claude-tools','image-gen','image-read','second-opinion'].includes(a));

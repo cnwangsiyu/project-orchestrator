@@ -9,7 +9,8 @@ import { createSnapshot } from './pipeline/snapshot.mjs';
 import { policyModel, isAstra, modelId, familyOf, object, array, nonnegative, VERSION } from './pipeline/common.mjs';
 import { dedupeOutcomes } from './pipeline/outcomes.mjs';
 import { RUN_USAGE_HISTORY_MS } from './pipeline/ttadk-reserve.mjs';
-import { personalBudget } from './pipeline/quota.mjs';
+import { personalBudget, weeklyProjection } from './pipeline/quota.mjs';
+import { activePersonalPriority, PERSONAL_PRIORITY_FILE } from './pipeline/personal-priority.mjs';
 import { modelLoad } from './company-load.mjs';
 import { isQueueOrStall } from './trae-health.mjs';
 import { readRoutingAccount, readRoutingClaude, traeBrowserReady } from './state.mjs';
@@ -279,6 +280,7 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
   if (env.ROUTE_SNAPSHOT_FILE) return finish(createSnapshot(injectedSnapshot, { now }));
   const fallbackFile = env.PERSONAL_FALLBACK_FILE || path.join(shared, 'personal-fallback.json');
   const personalFallback = read(fallbackFile, fs.existsSync(fallbackFile) ? null : read(path.join(root, 'references/personal-fallback.json')));
+  const personalPriority = activePersonalPriority(read(path.join(shared, PERSONAL_PRIORITY_FILE)), now);
   const at = data?.checkedAt, globalStamp = (value, sampledAt = at, maxAgeMs = 600000) => ({ status: 'KNOWN', value, sampledAt, receivedAt: now, maxAgeMs, source: 'public-status-cache' });
   const baseCaps = (vision = true) => ({ search: true, browser: vision, 'signed-in-browser': vision, 'desktop-tool': vision, vision, 'image-generation': true, 'claude-tools': true });
   const models = new Map(), normalized = [], lanes = [], health = [];
@@ -316,12 +318,15 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
     if (prior && a.usage && at - prior.t >= 600000 && a.usage.used >= prior.ttadk.used) burn = { resetsAt: a.usage.resetsAt,
       projectedAtReset: a.usage.used + (a.usage.used - prior.ttadk.used) / (at - prior.t) * (a.usage.resetsAt - at) };
     const declared=(value)=>isClaude||profileCatalog?{...globalStamp(value,now),source:'declared-harness'}:stamp(value);
+    const history = data.history?.[isClaude ? 'claude' : `codex:${name}`];
+    const budget = personalBudget(windows, a.resets, history, now, isClaude);
+    if (kind === 'chatgpt' && name === personalPriority?.account) budget.weekly = weeklyProjection(windows, history, now);
     normalized.push({ id: name, kind, catalog: declared(catalog), auth: stamp(((registryInvalid||invalidProfiles.has(name))&&!isClaude||a.stateUnknown)?null:a.auth ?? (isClaude ? Array.isArray(data.claude)?true:null : company ? a.healthy || quotaDenied : a.live === true)),
       transport: stamp(a.stateUnknown?null:a.transport ?? (isClaude ? Array.isArray(data.claude)?true:null : a.live ?? (company ? a.healthy || quotaDenied : null))), health: declared(!unknownHealth && !badWindows),
       capabilities: Object.fromEntries(Object.entries(caps).map(([k,v]) => [k,declared(v)])), quota, burn: stamp(burn),
       providerDenied: currentLimit?.resetsAt>now?globalStamp(true,now):stamp(quotaDenied || (!company && spent)), denialResetAt: stamp(currentLimit?.resetsAt ?? a.quotaOut?.resetsAt ?? a.usage?.resetsAt ?? windows.find((w) => w?.used >= 95)?.resetsAt),
       resets: a.resets, workerClass: a.workerClass,
-      budget:stamp(personalBudget(windows,a.resets,data.history?.[isClaude?'claude':`codex:${name}`],now,isClaude)) });
+      budget:stamp(budget) });
     const appendPause = (r, extra = {}) => {
       if (!object(r) || (!(r.pausedUntil > now) && r.kind !== 'hard')) return;
       health.push({ accountId: name, modelId: null, family: null, generation: String(r.generation ?? r.t ?? r.pausedUntil),
@@ -360,7 +365,7 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
     resources: { held:false, ownedReturned:true, registeredResources:readLeases(shared).registered,
       signingRegistry:fs.existsSync(path.join(shared,'user-signing/registry.json'))&&fs.existsSync(path.join(shared,'user-signing/identities.json')) },
     dependencies:[], approvals: array(read(env.ROUTE_APPROVAL_FILE || path.join(shared,'route-approvals.json'),[])),
-    personalFallback, projectProfiles, reviewHistory:rows.filter((r)=>
+    personalFallback, personalPriority, projectProfiles, reviewHistory:rows.filter((r)=>
       !voidedRoutes.has(r.routeId)&&(r.kind==='route'||!r.kind)&&r.pick&&r.executable!==false&&!r.deferred&&(r.executable===true||!r.needsOK?.length))
       .flatMap((r)=>[r,...(r.second&&r.secondExecutable!==false?[{...r,category:'second-opinion',role:'second'}]:[])]),
     outcomes:outcomes.map((r)=>({...r,modelId:r.actual?.[0]?.model??r.first?.model})), runUsage: [...runUsage.values()],

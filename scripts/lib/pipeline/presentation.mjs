@@ -10,6 +10,7 @@ import { estimateCandidate } from './estimate.mjs';
 import { etaText } from '../eta.mjs';
 import { modelPreference } from './policy.mjs';
 import { flagArgs } from '../route-args.mjs';
+import { personalPriorityGuard } from './personal-priority.mjs';
 export const shellQuote = (v) => /^[a-zA-Z0-9_./:@-]+$/.test(String(v)) ? String(v) : `'${String(v).replaceAll("'", "'\\''")}'`;
 const command = (args) => args.map(shellQuote).join(' ');
 export function presentRoute(plan, view, context) {
@@ -24,6 +25,12 @@ export function presentRoute(plan, view, context) {
   const fixedNotes = [];
   const notes = [...view.notes,...(t.policyNotes??[])], why = [...(t.policyNotes??[])], tellUser = [...view.tellUser], needsUserOK = [...view.needsOK];
   if (plan.kind === 'launch' && seat?.personalFallback) why.push(seat.personalFallback.text);
+  if (plan.kind === 'launch' && snapshot.personalPriority) for (const reviewer of plan.reviewers) {
+    if (reviewer.personalFallback?.approvalRef === snapshot.personalPriority.userDecisionRef)
+      why.push(`second reviewer: ${reviewer.personalFallback.text}`);
+  }
+  const priorityGuard = personalPriorityGuard(snapshot);
+  if (priorityGuard) why.push(`personal main-first window until ${snapshot.personalPriority.until} paused: ${priorityGuard}; using normal routing order`);
   for (const text of new Set(plan.rejected.filter(p => p.reason?.code === 'TTADK_DAILY_RESERVE').map(p => p.reason.text)))
     if (!why.some(line => line.includes(text))) why.push(text);
   if (t.needsCli.length) notes.push('signed-in CLIs need the full-access sandbox (keychain); stay read-only by instruction: queries only, no writes');

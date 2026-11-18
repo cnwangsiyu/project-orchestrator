@@ -1,12 +1,21 @@
 import { array, object } from './common.mjs';
+function projectUsage(w, history, now) {
+  const hours=w.windowMins/60,left=Math.max(0,(w.resetsAt-now)/3600000);
+  const old=array(history).filter((x)=>x.t<=now&&now-x.t<=86400000&&Math.abs(x.resetsAt-w.resetsAt)<300000&&x.used<=w.used).sort((a,b)=>a.t-b.t)[0];
+  const rate=old&&now-old.t>=10800000?(w.used-old.used)/((now-old.t)/3600000):w.used/Math.max(.1*hours,hours-left);
+  return { hours, left, rate, projected: Math.round(w.used+rate*left) };
+}
+export function weeklyProjection(windows, history, now) {
+  const w = array(windows).find(w => object(w) && !w.scoped && w.windowMins === 10080);
+  if (!w || !Number.isFinite(w.used) || w.used < 0 || !Number.isFinite(w.resetsAt) || w.resetsAt <= now) return null;
+  return { used: w.used, projected: projectUsage(w, history, now).projected, resetsAt: w.resetsAt };
+}
 // Existing personal-window discipline, with an explicit clock. No cache reads.
 export function personalBudget(windows, resets, history, now, claude=false) {
   const w=array(windows).filter((w)=>object(w)&&!w.scoped&&w.windowMins>0).sort((a,b)=>b.windowMins-a.windowMins)[0];
   if(!w) return {status:'UNKNOWN',underused:false,overspending:false,deadline:null};
-  const hours=w.windowMins/60,left=Math.max(0,(w.resetsAt-now)/3600000),elapsed=1-left/hours;
-  const old=array(history).filter((x)=>x.t<=now&&now-x.t<=86400000&&Math.abs(x.resetsAt-w.resetsAt)<300000&&x.used<=w.used).sort((a,b)=>a.t-b.t)[0];
-  const rate=old&&now-old.t>=10800000?(w.used-old.used)/((now-old.t)/3600000):w.used/Math.max(.1*hours,hours-left);
-  const projected=Math.round(w.used+rate*left),credits=array(resets?.credits).filter((c)=>c.expiresAt>now);
+  const { hours, left, rate, projected } = projectUsage(w, history, now), elapsed=1-left/hours;
+  const credits=array(resets?.credits).filter((c)=>c.expiresAt>now);
   const deadline=Math.min(left,...credits.map((c)=>(c.expiresAt-now)/3600000));
   if(claude) {
     const share=Math.min(1,left/hours),reserve=Math.max(2,Math.round(20/7*left/24)),cap=Math.round(95-15*share),spareLine=Math.round(cap-20*share);
