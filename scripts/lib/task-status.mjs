@@ -77,7 +77,7 @@ export const statusText = pages => pages.map(page => {
   lines.push('Live Workers:');
   for (const worker of page.liveWorkers) {
     const auto = page.board.tasks.flatMap(task => task.auto.workers).find(row => workerKey(row) === workerKey(worker));
-    lines.push(`  ${worker.name ?? '-'} ${worker.account}/${worker.model ?? '?'} ${worker.effort ?? '?'} thread=${worker.followerCommand === 'exec' ? 'exec' : worker.thread ?? '-'} owner=${worker.owner ?? '?'} task=${worker.task ?? '?'} started=${iso(worker.startedAt)} active=${iso(worker.lastActivityAt)} ${auto?.currentStep ?? ''}`);
+    lines.push(`  ${worker.name ?? '-'} ${worker.account}/${worker.model ?? '?'} ${worker.effort ?? '?'} thread=${worker.followerCommand === 'exec' ? 'exec' : worker.thread ?? '-'} owner=${worker.owner ?? '?'} task=${worker.task ?? '?'} started=${iso(worker.startedAt)} active=${iso(worker.lastActivityAt)} ${auto?.currentStep ?? ''}${worker.queueStalled ? ` | ${worker.queueStalled}` : ''}`);
   }
   for (const worker of page.unknownWorkers) lines.push(`  UNKNOWN ${worker.account}/${worker.thread}: ${worker.reason}`);
   if (!page.liveWorkers.length && !page.unknownWorkers.length) lines.push('  none');

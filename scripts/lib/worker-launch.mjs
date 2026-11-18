@@ -31,6 +31,7 @@ export const inheritedLaunch = (account, opts) => {
   return Object.fromEntries(keys.filter((key) => opts[key] === undefined && record.defaults[key] !== undefined)
     .map((key) => [key, record.defaults[key]]));
 };
+export const savedLaunch = (account, thread) => readLaunch(launchFile(account, thread));
 export const saveLaunch = (account, thread, opts, owner, evidence = {}) => {
   const file = launchFile(account, thread);
   const defaults = launchDefaults(opts, owner);

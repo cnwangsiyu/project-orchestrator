@@ -67,6 +67,7 @@ export function standingPersonalFallback(task, snapshot, candidate, rows) {
     && (!h.family || h.family === c.family) && (h.restricted || h.recovery === 'awaiting-probe'));
   const explanations = companies.length ? [] : ['no company accounts registered'], options = [];
   const relevant = rows.filter(r => r.predicates.every(p => p.ok || ['pAvailable', 'pExclusions', 'pScopedApproval'].includes(p.ruleId)));
+  let reserveApplied = false;
   for (const a of companies) {
     const pool = relevant.filter(r => r.candidate.accountId === a.id);
     const excluded = task.exclusions.some(e => e.scope === 'account' && e.value === a.id)
@@ -87,6 +88,12 @@ export function standingPersonalFallback(task, snapshot, candidate, rows) {
         continue;
       }
       if (allCompanyUnknown) return null;
+      const reserve = failures.find(p => p.reason?.code === 'TTADK_DAILY_RESERVE');
+      if (reserve) {
+        reserveApplied = true;
+        explanations.push(reserve.reason.text);
+        continue;
+      }
       if (failures.some(p => ['TOOL_CHANNEL_FAILED', 'ACTIVE_RESTRICTION', 'PROVIDER_QUOTA_DENIED'].includes(p.reason?.code)
         || p.reason?.code === 'EXCLUDED' && excludedAfterInfrastructure(task, r.candidate))) {
         explanations.push(`${a.id}/${r.candidate.modelId}: excluded after infrastructure failure, restricted or quota denied`);
@@ -100,8 +107,9 @@ export function standingPersonalFallback(task, snapshot, candidate, rows) {
   if (options.length) {
     options.sort((a, b) => (a.estimate.startDelayMin ?? Infinity) - (b.estimate.startDelayMin ?? Infinity));
     const best = options[0], { account: a, lane } = candidateParts(snapshot, best.candidate);
-    if (a.kind !== 'trae' || lane.mode !== 'low-priority') return null;
-    explanations.push(`${a.id}/${best.candidate.modelId} low-priority ${best.estimate.stalled ? 'flat/stalled queue' : `predicted start ~${Math.round(best.estimate.startDelayMin)} min`} > ${policy.queueWaitMinutes} min`);
+    if (a.kind !== 'trae' || (lane.mode !== 'low-priority' && !reserveApplied)) return null;
+    const queue = best.estimate.stalled ? 'flat/stalled queue' : `predicted start ~${Math.round(best.estimate.startDelayMin)} min`;
+    explanations.push(`${a.id}/${best.candidate.modelId} ${lane.mode === 'low-priority' ? 'low-priority ' : ''}${queue} > ${policy.queueWaitMinutes} min`);
   }
   if (astra) explanations.push(`personal Astra for hard-tier task (standing user OK ${policy.since}: ${policy.hardAstraDecisionRef})`);
   return freeze({ approvalRef: policy.userDecisionRef, since: policy.since, queueWaitMinutes: policy.queueWaitMinutes,

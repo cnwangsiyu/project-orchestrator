@@ -9,6 +9,7 @@ import { reviewAfterWrite } from './review-policy.mjs';
 import { estimateCandidate } from './estimate.mjs';
 import { etaText } from '../eta.mjs';
 import { modelPreference } from './policy.mjs';
+import { flagArgs } from '../route-args.mjs';
 export const shellQuote = (v) => /^[a-zA-Z0-9_./:@-]+$/.test(String(v)) ? String(v) : `'${String(v).replaceAll("'", "'\\''")}'`;
 const command = (args) => args.map(shellQuote).join(' ');
 export function presentRoute(plan, view, context) {
@@ -23,6 +24,8 @@ export function presentRoute(plan, view, context) {
   const fixedNotes = [];
   const notes = [...view.notes,...(t.policyNotes??[])], why = [...(t.policyNotes??[])], tellUser = [...view.tellUser], needsUserOK = [...view.needsOK];
   if (plan.kind === 'launch' && seat?.personalFallback) why.push(seat.personalFallback.text);
+  for (const text of new Set(plan.rejected.filter(p => p.reason?.code === 'TTADK_DAILY_RESERVE').map(p => p.reason.text)))
+    if (!why.some(line => line.includes(text))) why.push(text);
   if (t.needsCli.length) notes.push('signed-in CLIs need the full-access sandbox (keychain); stay read-only by instruction: queries only, no writes');
   else if (f['read-only']) notes.push('read-only sandbox: keychain-backed CLIs (lark-cli, bytedcli) will not work; add --needs-cli if the task must use them');
   if(['implement','implement-hard','build-run','debug','ui-browser'].includes(t.category))fixedNotes.push(sourceDigest.worker.split('\n').find(line=>line.startsWith('- Project dependencies'))??'');
@@ -72,7 +75,8 @@ export function presentRoute(plan, view, context) {
     if(gate.kind==='max-effort') needsUserOK.push('max effort');
     if(gate.kind==='capacity-decision') needsUserOK.push(gate.reason.text);
   }
-  const routeArgs = [t.category, ...Object.entries({...f, failures:t.failures, ...(owner?{owner}:{})}).filter(([k])=>!['json','table','dry','verbose'].includes(k)).flatMap(([k,v])=>[`--${k}`,...(v===true?[]:[String(v)])])];
+  const routeArgs = [t.category, ...flagArgs(Object.fromEntries(Object.entries({...f, failures:t.failures, ...(owner?{owner}:{})})
+    .filter(([k])=>!['json','table','dry'].includes(k))))];
   const estimatedRows = (plan.trace?.candidates ?? []).map((r) => r.predicates.some((p)=>p.reason?.code==='PROVIDER_QUOTA_DENIED')
     ? {...r, estimate:estimateCandidate(t,snapshot,r.candidate,{capacityReset:true})} : r);
   const eta = estimatedRows.filter((r)=>r.predicates.every((p)=>p.ok || p.reason?.code==='PROVIDER_QUOTA_DENIED'))
@@ -111,7 +115,7 @@ export function presentRoute(plan, view, context) {
       astraApprovalRef: executable ? s.personalFallback?.astraApprovalRef ?? null : null};
     if(!executable) return out;
     const prompt=`${primary?'':`Act as the independent ${s.role} reviewer of artifact ${task.artifactRevision}. `}Read ${paths.brief} and follow it.`;
-    const routed={name,project:task.project,category:task.category,role:s.role,account:an,model:c.modelId,effort:c.effort,sandbox:task.sandbox,
+    const routed={name,project:task.project,category:task.category,tier:task.tier,role:s.role,account:an,model:c.modelId,effort:c.effort,sandbox:task.sandbox,
       company:company(a),routeId:plan.routeId,approvalRef:out.approvalRef};
     const audit=command(['node',`${root}/scripts/launch-audit.mjs`,'--name',name,'--project',task.project,'--role',s.role,'--vendor',vendor,'--account',an,'--model',c.modelId,
       '--effort',c.effort,'--sandbox',task.sandbox,'--routed-seat',JSON.stringify(routed),...(f['user-ok']?['--user-ok',f['user-ok']]:[])]);

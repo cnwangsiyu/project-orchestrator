@@ -1,3 +1,4 @@
+import { scopedFlags } from '../route-args.mjs';
 import {REVIEW_CLASSES,projectReviewPolicy} from '../review-policy-data.mjs';
 import { VERSION, array, object, idOK, modelSelector, modelId, unique, clone, freeze, fingerprint, isReview, compare, stable } from './common.mjs';
 
@@ -174,8 +175,7 @@ export function createTaskSpec(input) {
   if (!['primary', 'second', 'followup', 'finisher'].includes(task.role)) fail('INVALID_ROLE', 'Unknown task role.');
   // Derive from constraints, never accept a caller-supplied hash as authority.
   const { requestId: ignored, previousAttempts: prior, approvalRefs: refs, warnings, ...constraints } = task;
-  constraints.flags={...constraints.flags};
-  for(const k of ['user-ok','json','dry','table','fresh','mode']) delete constraints.flags[k];
+  constraints.flags = scopedFlags(constraints.flags);
   task.constraintHash = fingerprint(constraints);
   return freeze(task);
 }

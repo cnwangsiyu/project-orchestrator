@@ -11,6 +11,7 @@ import { acquireRoute, taskContext } from './lib/route-data.mjs';
 import { loadDigest } from './lib/global-rules.mjs';
 import { launcherIdentity, validOwner } from './lib/worker-events.mjs';
 import { taskLaunchPaths } from './lib/launch-paths.mjs';
+import { approvalMismatchHints, mismatchHintText } from './lib/approval-diagnostics.mjs';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 if (process.argv[2] === 'void') {
@@ -48,7 +49,10 @@ try {
     });
     const launchPaths = Object.fromEntries([plan.primary ?? plan.primaryProposal, ...plan.reviewers, ...(plan.reviewerProposals ?? [])]
       .filter(s => s?.task.flags['task-dir']).map(s => [s.role, taskLaunchPaths(s.task.taskDir, s.role)]));
-    const out = renderPlan(plan, {...context, launchPaths, owner, digest: loadDigest()});
+    const view = renderPlan(plan, {...context, launchPaths, owner, digest: loadDigest()});
+    const approvalHints = approvalMismatchHints(plan, context.snapshot, root);
+    const out = approvalHints.length ? { ...view, approvalMismatchHints: approvalHints,
+      needsUserOK: [...view.needsUserOK, ...approvalHints.map(mismatchHintText)] } : view;
     if (!task.flags.dry && process.env.ROUTE_LOG !== '0') {
       const tuple = p => p ? {vendor:p.vendor,model:p.model,effort:p.effort,account:p.account,sandbox:p.sandbox,company:p.company} : null;
       const rec = {t:context.now,kind:'route',project:plan.task.project,name:plan.task.flags.name??plan.task.taskId,requestId:plan.task.requestId,

@@ -28,6 +28,7 @@ const run = (script, args) => {
   fs.writeFileSync(snapshot, JSON.stringify(raw));
   return spawnSync(process.execPath, [path.join(scripts, script), ...args], { env, encoding: 'utf8', timeout: 120000 });
 };
+const owner = '0586c8c4-46fd-41ac-8ccb-7fc8c56cb660';
 const A = ['implement', '--name', 'approval-probe', '--project', 'approval-test', '--cwd', tmp, '--task-dir', tmp, '--writes', '--impact', 'service',
   '--exclude-account', 'ttadk,trae,b'];
 try {
@@ -39,6 +40,30 @@ try {
   const saved = JSON.parse(fs.readFileSync(file, 'utf8')); assert.equal(saved.length, 1); assert.equal(saved[0].scopes[0].allowPersonalWithCompany, true);
   assert.match(run('route.mjs', [...A, '--user-ok', id]).stdout, /^LAUNCH .* on main/);
   assert.match(run('approval.mjs', ['list']).stdout, new RegExp(`LIVE\\t${id}`));
+  const changed = [...A, '--owner', owner, '--failures', '0', '--verbose'];
+  const changedRoute = run('route.mjs', [...changed, '--user-ok', id, '--json']);
+  assert.equal(changedRoute.status, 0, changedRoute.stderr);
+  const blocked = JSON.parse(changedRoute.stdout);
+  assert.equal(blocked.kind, 'blocked');
+  const [hint] = blocked.approvalMismatchHints;
+  assert.equal(hint.approvalId, id);
+  assert.deepEqual(hint.differences, [
+    { arg: '--failures', approved: null, requested: '0' },
+    { arg: '--owner', approved: null, requested: owner },
+    { arg: '--verbose', approved: null, requested: true }
+  ]);
+  assert.match(run('route.mjs', [...changed, '--user-ok', id]).stdout, /closest approval .*--failures: approved <missing>; requested 0.*--owner/);
+  const otherProject = changed.map(arg => arg === 'approval-test' ? 'other-project' : arg);
+  assert.equal(JSON.parse(run('route.mjs', [...otherProject, '--json']).stdout).approvalMismatchHints, undefined);
+  const corrected = spawnSync('/bin/sh', ['-c', hint.command], { env, encoding: 'utf8', timeout: 120000 });
+  assert.equal(corrected.status, 0, corrected.stderr);
+  assert.notEqual(corrected.stdout.trim(), id);
+  assert.match(run('route.mjs', [...changed, '--user-ok', corrected.stdout.trim()]).stdout, /^LAUNCH .* on main/);
+  assert.match(run('route.mjs', [...A, '--user-ok', id]).stdout, /^LAUNCH .* on main/);
+  fs.writeFileSync(file, JSON.stringify(saved.map(({ id, userDecisionRef, grantedAt, expiresAt, revoked, scopes }) =>
+    ({ id, userDecisionRef, grantedAt, expiresAt, revoked, scopes }))));
+  const legacyMismatch = JSON.parse(run('route.mjs', [...A, '--owner', owner, '--failures', '0', '--json']).stdout);
+  assert.deepEqual(legacyMismatch.approvalMismatchHints?.[0].differences.map(d => d.arg), ['--failures', '--owner']);
   assert.equal(run('approval.mjs', ['add', '--account', 'zz', '--ref', 'r', '--until', new Date(Date.now() + 3600000).toISOString(), '--', ...A]).status, 1, 'wrong account refused');
   assert.equal(run('approval.mjs', ['revoke', id]).status, 0);
   assert.match(run('route.mjs', [...A, '--user-ok', id]).stdout, /^BLOCKED /);

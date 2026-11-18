@@ -3,6 +3,7 @@ import { readTurnState, reconcileTurnEvents } from './worker-turn.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { hubRPC } from './hub-state.mjs';
+import { queueStatus, queueStallLabel } from './queue-stall-watch.mjs';
 
 // Worker events are sparse (a long command writes none), so the hub's own session file is the real activity signal.
 // Layout: <home>/sessions/YYYY/MM/DD/rollout-<time>-<thread>.jsonl (TRAE: <home>/cli/sessions/...). Newest 10 day folders only.
@@ -48,17 +49,21 @@ export async function runningWorkers({ rows = readEvents(), profiles = {}, alive
   // Resolve provisional run IDs before deduplicating registered hub threads.
   for (const row of [...latestRuns.values()].sort((a, b) => a.t - b.t || (a.seq ?? 0) - (b.seq ?? 0))) latest.set(workerKey(row), row);
   const unresolved = [];
+  const now = Date.now();
   const candidates = [...latest.values()].filter(row => row.event === 'running' && !row.settled);
   const threads = (await Promise.all(candidates.map(async row => {
     let live = alive(row.pid), basis = live ? 'follower-pid' : 'hub-thread';
     if (!live && !processWorker(row)) try { live = await knownThread(row.account, row.thread); }
     catch { unresolved.push({ account: row.account, thread: row.thread, owner: row.owner, reason: 'follower gone; hub status UNKNOWN' }); }
-    return live ? { account: row.account, thread: row.thread, owner: row.owner ?? null, model: row.model ?? null,
+    if (!live) return null;
+    const queue = queueStatus(row, profiles);
+    return { account: row.account, thread: row.thread, owner: row.owner ?? null, model: row.model ?? null,
       effort: row.effort ?? null, project: row.project ?? null, task: row.task ?? row.name ?? null,
       runId: row.runId, followerCommand: row.followerCommand ?? null, pid: row.pid,
+      queue, queueStalled: queueStallLabel(queue, now),
       name: row.name ?? null, startedAt: starts.get(row.runId) ?? row.t,
       lastActivityAt: Math.max(row.lastActivityAt ?? activity.get(workerKey(row)) ?? row.t,
-        Math.floor(processWorker(row) ? 0 : activityOf(row.account, row.thread) ?? 0)), basis } : null;
+        Math.floor(processWorker(row) ? 0 : activityOf(row.account, row.thread) ?? 0)), basis };
   }))).filter(Boolean).sort((a, b) => a.account.localeCompare(b.account) || a.startedAt - b.startedAt);
   return { threads, unresolved, byAccount: Object.fromEntries([...new Set(Object.keys(profiles).concat(threads.map(r => r.account)))].map(account =>
     [account, threads.filter(row => row.account === account)])) };

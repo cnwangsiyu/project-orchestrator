@@ -51,6 +51,32 @@ function launchesPersonal(raw, t = task()) {
   return { p, v };
 }
 try {
+  check('TTADK keeps 5% in reserve and sends new work to a ready TRAE priority lane', () => {
+    const raw = fixture();
+    raw.accounts[0].quota = [{ bucketId: 'ttadk-daily', unit: 'tokens', usage: { used: 980, limit: 1000, resetsAt: NOW + 3600000 } }];
+    const plan = run(raw);
+    assert.equal(plan.primary.candidate.accountId, 'trae');
+    assert.match(view(plan, raw).why.join('\n'), /near-exhausted.*20 input tokens remaining.*50-token reserve.*5%/);
+    queued(raw, 12);
+    assert.match(launchesPersonal(raw).v.why.join('\n'), /near-exhausted/);
+    raw.lanes.find(l => l.accountId === 'trae').mode = 'priority';
+    assert.equal(launchesPersonal(raw).p.primary.candidate.accountId, 'main');
+    raw.accounts[0].quota[0].usage.used = 950;
+    assert.equal(run(raw).primary.candidate.accountId, 'ttadk', 'exactly 5% remains admissible');
+  });
+  check('TTADK reserve uses same-category recent finished-run p50 and expires with the quota window', () => {
+    const raw = fixture();
+    raw.accounts[0].quota = [{ bucketId: 'ttadk-daily', unit: 'tokens', usage: { used: 900, limit: 1000, resetsAt: NOW + 3600000 } }];
+    queued(raw, 12);
+    raw.runUsage = [80, 130, 300].map(cumulativeInput => ({ t: NOW - 1000, accountId: 'ttadk', category: 'analysis', cumulativeInput }));
+    raw.runUsage.push({ ...raw.runUsage[0], category: 'debug', cumulativeInput: 9000 },
+      { ...raw.runUsage[0], t: NOW - 15 * 86400000, cumulativeInput: 9000 },
+      { ...raw.runUsage[0], t: NOW + 1, cumulativeInput: 9000 });
+    assert.match(launchesPersonal(raw).v.why.join('\n'), /100 input tokens remaining.*130-token reserve.*p50/);
+    assert.equal(run(raw, task({ category: 'lookup' })).primary.candidate.accountId, 'ttadk');
+    raw.accounts[0].quota[0].usage.resetsAt = NOW;
+    assert.equal(run(raw).primary.candidate.accountId, 'ttadk');
+  });
   check('company exhausted: personal Codex launches without task approval', () => {
     const raw = fixture(); deny(raw, 'ttadk'); deny(raw, 'trae'); launchesPersonal(raw);
   });

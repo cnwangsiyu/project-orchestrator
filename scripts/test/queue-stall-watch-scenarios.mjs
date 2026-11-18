@@ -1,0 +1,118 @@
+#!/usr/bin/env node
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
+import { createQueueStallMonitor, fallbackRouteArgs, queueStallText } from '../lib/queue-stall-watch.mjs';
+import { appendEvent, readEvents } from '../lib/worker-events.mjs';
+import { saveQueue } from '../lib/worker-queue.mjs';
+import { saveLaunch } from '../lib/worker-launch.mjs';
+import { parseTaskSpec } from '../lib/pipeline/taskspec.mjs';
+
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'queue-stall-'));
+const scripts = fileURLToPath(new URL('../', import.meta.url));
+const min = 60000, now = Date.now(), owner = '654340f6-99c4-5443-b024-020342e6b320';
+Object.assign(process.env, { HOME: tmp, RULES_SHARED: tmp, RES_DIR: tmp, CODEX_ACCOUNTS: path.join(tmp, 'accounts.json') });
+const profiles = { trae: { home: tmp, kind: 'trae' } };
+const row = { owner, account: 'trae', name: 'queue-probe', project: 'fixture', thread: 'thread-1',
+  turn: 'turn-1', runId: 'run-1', model: 'gpt-6.2-sol', pid: process.pid, t: now - 30 * min };
+const policy = { enabled: true, queueWaitMinutes: 5, allowHardPersonalAstra: true };
+const quota = { codexAccounts: [
+  { name: 'trae', quota: { daily: { [row.model]: { depleted: true, resetsAt: now + 30 * min } } } },
+  { name: 'ttadk', kind: 'ttadk', usage: { used: 95, limit: 100, resetsAt: now + 45 * min } }
+] };
+const argv = ['implement', '--name', row.name, '--project', row.project, '--impact', 'service',
+  '--task-dir', path.join(tmp, "work's brief"), '--verbose', '--exclude-account', 'other', '--no-local-build', '--user-ok', 'old-approval'];
+const defaults = { owner, 'route-args': JSON.stringify(argv), 'routed-seat': JSON.stringify({ tier: 'normal' }) };
+const launch = { t: row.t, defaults };
+const wait = (since, position = 244) => ({ state: 'waiting', since, position, turnId: row.turn });
+const samples = [];
+let queue = wait(now - 6 * min);
+const monitor = () => createQueueStallMonitor(owner, { statusOf: () => queue, launchOf: () => launch,
+  quotaOf: () => quota, holdsOf: () => false, policyOf: () => policy, emit: event => (samples.push(event), event) });
+
+try {
+  const [first] = await monitor().poll([row], [], now);
+  assert.equal(first.kind, 'queue-stalled'); assert.equal(first.severity, 'risk'); assert.equal(first.wake, true);
+  assert.match(first.text, /thread-1 turn=turn-1 task=queue-probe, position 244, 6.0 min waiting; bucket depleted until/);
+  assert.match(first.text, /--exclude-account 'other,trae,ttadk'/);
+  assert.ok(!first.text.includes('old-approval'));
+  assert.equal((await monitor().poll([row], [], now + min)).length, 0, 'restart deduplicates the same episode');
+  queue = { state: 'ready' };
+  await monitor().poll([row], [], now + 2 * min);
+  queue = wait(now + 3 * min, 100);
+  for (let minute = 3; minute < 8; minute++) {
+    queue.position -= 10;
+    assert.equal((await monitor().poll([row], [], now + minute * min)).length, 0);
+  }
+  assert.equal((await monitor().poll([row], [], now + 9 * min)).length, 1);
+  assert.equal(samples.length, 2);
+  queue = wait(now + 10 * min);
+  assert.equal((await monitor().poll([row], [], now + 10 * min)).length, 0, 'changed since re-arms even if ready was between polls');
+  assert.equal((await monitor().poll([row], [], now + 16 * min)).length, 1);
+  console.log('PASS queue episodes remain deduplicated across watcher restarts, re-arm, and ignore fast drain under the threshold');
+
+  const presented = queueStallText(row, wait(now - 6 * min), { now, quota, launch, policy, holds: false });
+  assert.ok(!presented.commands.approval.includes('--astra'));
+  const hard = { ...launch, defaults: { ...defaults, 'routed-seat': '{"tier":"hard"}' } };
+  assert.match(queueStallText(row, wait(now - 6 * min), { now, quota, launch: hard, policy, holds: false }).commands.approval, /--account main --astra/);
+  const args = fallbackRouteArgs(launch).args;
+  const parse = args => parseTaskSpec(args, { taskId: row.name, requestId: 'fixture', sandboxCeiling: 'danger-full-access' });
+  assert.equal(parse(args).flags.owner, owner);
+  assert.equal(parse(args).flags.failures, '0');
+  assert.equal(parse(args).flags.verbose, true);
+  const fromShell = command => {
+    const r = spawnSync('/bin/sh', ['-c', 'set -- ' + command + '; printf "%s\\0" "$@"'], { encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    return r.stdout.split('\0').slice(0, -1);
+  };
+  const addCommand = fromShell(presented.commands.approval);
+  const rerouteCommand = fromShell(presented.commands.reroute);
+  const approvalArgs = addCommand.slice(addCommand.indexOf('--') + 1);
+  assert.deepEqual(rerouteCommand.slice(2, -2), approvalArgs);
+  assert.equal(parse(rerouteCommand.slice(2)).constraintHash, parse(approvalArgs).constraintHash);
+  assert.equal(parse(approvalArgs).flags['task-dir'], path.join(tmp, "work's brief"));
+  console.log('PASS saved argument and shell quoting round-trip matches approval scope; Astra only for hard tier');
+
+  fs.writeFileSync(path.join(tmp, 'resources.tsv'), 'testslot\tpool\tmanaged\t-\tfixture\n');
+  fs.mkdirSync(path.join(tmp, 'locks'));
+  const done = { ...row, event: 'message', kind: 'progress', text: 'DONE. Work finished and resources returned.' };
+  const wrap = options => queueStallText(row, wait(now - 13 * min), { now, launch, quota, policy, ...options });
+  assert.match(wrap({ notes: [done] }).text, /likely final report only — let it finish; do not interrupt$/);
+  assert.equal(wrap({ notes: [done] }).commands, undefined);
+  const lock = path.join(tmp, 'locks/testslot.d');
+  fs.mkdirSync(lock);
+  fs.writeFileSync(path.join(lock, 'info'), 'project\tfixture\ntask\tqueue-probe\n');
+  assert.equal(wrap({ notes: [done] }).wrapUp, undefined, 'an owned hold prevents wrap-up inference');
+  fs.rmSync(lock, { recursive: true });
+  const out = path.join(tmp, 'codex-last.md');
+  fs.writeFileSync(out, 'Finished.\n');
+  const fresh = { ...launch, defaults: { ...defaults, out } };
+  assert.equal(wrap({ launch: fresh, now: Date.now() }).wrapUp, true);
+  const old = new Date(now - 20 * min);
+  fs.utimesSync(out, old, old);
+  assert.equal(wrap({ launch: fresh }).wrapUp, undefined);
+  console.log('PASS final-report protection uses a progress note or fresh output, with confirmed returned holds');
+
+  fs.writeFileSync(process.env.CODEX_ACCOUNTS, JSON.stringify(profiles));
+  fs.writeFileSync(path.join(tmp, 'quota.json'), JSON.stringify(quota));
+  saveLaunch('trae', row.thread, { ...defaults, project: row.project }, owner, { turn: row.turn });
+  saveQueue(tmp, row.thread, wait(Date.now() - 13 * min));
+  appendEvent({ ...row, event: 'running' });
+  appendEvent(done);
+  const run = (script, args = []) => spawnSync(process.execPath, [path.join(scripts, script), ...args],
+    { encoding: 'utf8', timeout: 8000 });
+  const status = run('quota.mjs', ['--running']);
+  assert.equal(status.status, 0, status.stderr);
+  assert.match(status.stdout, /QUEUE-STALLED 13 min @244/);
+  const watcher = run('codex-worker.mjs', ['watch', '--owner', owner, '--debounce-sec', '0']);
+  assert.equal(watcher.status, 0, watcher.stderr);
+  assert.match(watcher.stdout, /notes \[queue-stalled\].*likely final report only — let it finish; do not interrupt/);
+  const events = readEvents().filter(event => event.kind === 'queue-stalled');
+  assert.equal(events.length, 1);
+  assert.equal(events[0].wrapUp, true);
+  console.log('PASS the real watcher exits via owner risk-note delivery and quota --running shows the active queue');
+  console.log('Example: ' + events[0].text);
+} finally { fs.rmSync(tmp, { recursive: true, force: true }); }

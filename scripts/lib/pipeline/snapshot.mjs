@@ -1,5 +1,6 @@
 import { VERSION, EFFORTS, array, object, idOK, modelSelector, isAstra, stable, modelId, familyOf, compare, unique, nonnegative, finite, clone, freeze, fingerprint, reason } from './common.mjs';
 import { personalFallbackPolicy, fallbackUnavailable } from './personal-fallback.mjs';
+import { RUN_USAGE_HISTORY_MS } from './ttadk-reserve.mjs';
 
 export const FRESHNESS = freeze({ cacheMs: 600000, telemetryMs: 1800000, quotaMs: 1800000 });
 // A frozen object alone is not proof that the normalization boundary ran.
@@ -150,6 +151,10 @@ export function createSnapshot(raw, options = {}) {
         effort: h.effort, minutes: h.minutes, cause: h.cause ?? null })).sort((a, b) => compare(a.attemptId, b.attemptId)),
     reviewHistory: rows(raw.reviewHistory ?? [], 'reviewHistory').map((r) => ({ t: r.t, project: r.project, name: r.name, category: r.category, role: r.role ?? 'primary', reviewOverride:r.reviewOverride??null, requestId:r.requestId??null })),
     outcomes: rows(raw.outcomes ?? [], 'outcomes').map((r) => ({ t: r.t, category: r.category, modelId: modelId(r.modelId), result: r.result })),
+    runUsage: rows(raw.runUsage ?? [], 'runUsage').filter(r => idOK(r.accountId) && idOK(r.category)
+      && nonnegative(r.t) && r.t <= decisionAt && decisionAt - r.t <= RUN_USAGE_HISTORY_MS
+      && Number.isSafeInteger(r.cumulativeInput) && r.cumulativeInput > 0)
+      .map(({ t, accountId, category, cumulativeInput }) => ({ t, accountId, category, cumulativeInput })),
     projectProfiles: clone(object(raw.projectProfiles) ? raw.projectProfiles : {}),
     diagnostics: diagnostics.sort((a, b) => compare(`${a.subjects}:${a.code}`, `${b.subjects}:${b.code}`)) };
   snapshot.contentHash = fingerprint(snapshot); snapshot.id = `snapshot:${snapshot.contentHash}`;
@@ -170,7 +175,10 @@ function cloneApproval(a) {
       p.models = unique(p.models.map(id => isAstra(id) ? 'astra' : id));
   }
   return { id: a.id, userDecisionRef: a.userDecisionRef, grantedAt: a.grantedAt, expiresAt: a.expiresAt, revoked: a.revoked,
-    consumed: a.consumed === true, scopes: scopes.sort((a, b) => compare(fingerprint(a), fingerprint(b))) };
+    consumed: a.consumed === true, project: typeof a.project === 'string' ? a.project : null,
+    category: idOK(a.category) ? a.category : null,
+    routeFlags: object(a.routeFlags) ? clone(a.routeFlags) : null,
+    scopes: scopes.sort((a, b) => compare(fingerprint(a), fingerprint(b))) };
 }
 
 // metadata supplies ALL registered accounts (analyze has only one TTADK/TRAE),

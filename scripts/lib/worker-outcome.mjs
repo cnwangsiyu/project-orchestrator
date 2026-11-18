@@ -20,7 +20,7 @@ export const parseReviewResult = (final = '') => {
 export const unresolvedFinal = (final = '') => /^(?:\s*(?:#{1,6}\s+|[-*]\s+)?(?:\*\*)?(?:[\w.-]+[ :]+)?(?:BLOCKED|FAILED|FAIL|QUESTION|NEEDS[-_ ]USER)\b)|\bneeds[-_ ]user\b/im.test(final);
 
 export function recordWorkerOutcome({ project, name, category, role, account = 'main', model, effort, actualModel,
-  startedAt, command, thread, turn, exit, final = '', terminal = false, skip = false, log = rulesLog(), time = Date.now() }) {
+  startedAt, command, thread, turn, exit, final = '', terminal = false, cumulativeInput, skip = false, log = rulesLog(), time = Date.now() }) {
   // Exit 4 leaves a live turn. Handoffs, approval/deferral and cancellation uncertainty are not task results.
   if (skip || [4, 7, 8, 9, 10, 130, 143, 129].includes(exit)) return null;
   const records = readRecords(log);
@@ -58,6 +58,7 @@ export function recordWorkerOutcome({ project, name, category, role, account = '
       reviewRun, ...(!unresolved ? { result: exit === 0 ? rounds ? 'rework' : 'pass' : 'fail' } : {}), rounds,
       cause: exit === 0 ? null : 'infra', failureKind: exit === 0 ? 'quality' : 'infra',
       minutes: Math.max(0, (time - firstLaunch) / 60000), startedAt: firstLaunch, thread, turn, exit,
+      ...(terminal && Number.isSafeInteger(cumulativeInput) && cumulativeInput > 0 ? { cumulativeInput, usageAccount: account } : {}),
       first: owned[0]?.pick ?? previous?.first ?? pick, accepted: exit === 0 ? pick : null,
       impact: owned[0]?.impact ?? null, decisions: owned.length,
       ...(actual ? { actual } : {}), actualStatus: actualModel ? 'KNOWN' : 'UNKNOWN',

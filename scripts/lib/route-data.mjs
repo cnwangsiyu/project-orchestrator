@@ -8,6 +8,7 @@ import { createTaskSpec } from './pipeline/taskspec.mjs';
 import { createSnapshot } from './pipeline/snapshot.mjs';
 import { policyModel, isAstra, modelId, familyOf, object, array, nonnegative, VERSION } from './pipeline/common.mjs';
 import { dedupeOutcomes } from './pipeline/outcomes.mjs';
+import { RUN_USAGE_HISTORY_MS } from './pipeline/ttadk-reserve.mjs';
 import { personalBudget } from './pipeline/quota.mjs';
 import { modelLoad } from './company-load.mjs';
 import { isQueueOrStall } from './trae-health.mjs';
@@ -124,6 +125,16 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
   if(live) saveRoutingObservations(cachePath,data);
   if (live) now=Math.max(now,Date.now()); // refreshed samples precede the live decision
   const rows = lines(routeLog), quotaHistory = lines(env.QUOTA_LOG_FILE || path.join(shared, 'quota-log.jsonl'));
+  // A continuation reports a cumulative thread total. Keep the latest finished
+  // sample per account, category and thread instead of counting every follow-up.
+  const runUsage = new Map();
+  for (const r of rows) {
+    if (r.kind !== 'outcome' || !r.thread || !r.usageAccount || r.t > now || r.t < now - RUN_USAGE_HISTORY_MS
+      || !Number.isSafeInteger(r.cumulativeInput) || r.cumulativeInput <= 0) continue;
+    const key = JSON.stringify([r.usageAccount, r.category, r.thread]);
+    if ((runUsage.get(key)?.t ?? 0) <= r.t)
+      runUsage.set(key, { t: r.t, accountId: r.usageAccount, category: r.category, cumulativeInput: r.cumulativeInput });
+  }
   const outcomes=dedupeOutcomes(rows.filter(r=>r.kind==='outcome'&&r.t<=now))
     .filter(r=>!r.reviewRun && r.role !== 'second' && !['review','review-high','adversarial','second-opinion'].includes(r.category));
   const projectProfiles = read(path.join(root,'references/project-risk-profiles.json'),{});
@@ -352,7 +363,7 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
     personalFallback, projectProfiles, reviewHistory:rows.filter((r)=>
       !voidedRoutes.has(r.routeId)&&(r.kind==='route'||!r.kind)&&r.pick&&r.executable!==false&&!r.deferred&&(r.executable===true||!r.needsOK?.length))
       .flatMap((r)=>[r,...(r.second&&r.secondExecutable!==false?[{...r,category:'second-opinion',role:'second'}]:[])]),
-    outcomes:outcomes.map((r)=>({...r,modelId:r.actual?.[0]?.model??r.first?.model})),
+    outcomes:outcomes.map((r)=>({...r,modelId:r.actual?.[0]?.model??r.first?.model})), runUsage: [...runUsage.values()],
     etaHistory:outcomes.map((r)=>({attemptId:`${r.name}-${r.t}`,category:r.category,modelId:r.actual?.[0]?.model??r.first?.model,
       accountId:r.actual?.[0]?.account??r.first?.account,effort:r.actual?.[0]?.effort??r.first?.effort,minutes:r.minutes,cause:r.cause})) });
   return finish(snapshot);

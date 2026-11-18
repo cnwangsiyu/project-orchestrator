@@ -134,7 +134,7 @@ if (tracker) {
   tracker.set({ ancestorPids: ancestors });
 }
 // Exit also covers validation/RPC failures before report(). Never read a stale --out file.
-let outcomeTurn = null, outcomeFinal = '', outcomeSkip = false;
+let outcomeTurn = null, outcomeFinal = '', outcomeSkip = false, outcomeInput;
 if (tracker) process.on('exit', (exit) => {
   try {
     const state = tracker.metadata();
@@ -146,7 +146,7 @@ if (tracker) process.on('exit', (exit) => {
       name: options.name ?? seat.name, category: args?.[0] ?? seat.category, role: options.role ?? seat.role,
       account: account ?? 'main', model: state.model, effort: state.effort, actualModel: state.actualModel,
       startedAt: followerStartedAt, command: argv[0], thread: state.thread, turn: outcomeTurn?.id ?? state.turn,
-      exit, final: outcomeFinal, terminal: !!outcomeTurn, skip: outcomeSkip || state.signal });
+      exit, final: outcomeFinal, terminal: !!outcomeTurn, cumulativeInput: outcomeInput, skip: outcomeSkip || state.signal });
   } catch (e) { process.stderr.write(`auto-outcome: NOT RECORDED: ${e.message}\n`); }
 });
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) if (tracker) process.once(signal, () => {
@@ -1124,6 +1124,8 @@ const recordPolicyBlock = (model, error) => {
 };
 // Prints the outcome and exits: status, usage, the final message's first line (whole message to --out).
 const report = async (threadId, turn, final, usage) => {
+  if (PROF?.kind === 'ttadk' && turn.status === 'completed') outcomeInput = usage?.inputTokens;
+  if (PROF?.kind === 'trae') saveQueue(PROF.home, threadId, { state: 'ready', turnId: turn.id, at: Date.now() });
   if (!actualModel || PROF?.kind === 'ttadk') observeModel(rolloutTurnModel(PROF?.home ?? process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex'),
     sessionPath, threadId, turn.id), threadId, turn.id);
   // A family mismatch (or a cross-family sub-agent) fails a review; missing evidence only warns, so a hub that exposes no
@@ -1236,6 +1238,9 @@ const follow = (threadId, turnId, items = []) => {
   let final, usage, last = Date.now();
   let runningSince = Date.now(), completedItems = 0;
   let queueSince = PATIENCE_MIN!=null&&!BACKGROUND?Date.now():null, queuePosition = null, lastPrintedQueue = null, queuePrinted = null;
+  const previousQueue = PROF?.kind === 'trae' ? readQueue(PROF.home, threadId) : null;
+  let observedQueueSince = previousQueue?.turnId === turnId && ['waiting', 'queued'].includes(previousQueue.state)
+    ? previousQueue.since : null;
   let patienceSamples = [];
   let handingOff = false, reporting = false;
   // Use measured drain for an early decision, but never require drain to enforce the elapsed deadline.
@@ -1300,7 +1305,8 @@ const follow = (threadId, turnId, items = []) => {
     const pos = p.position != null && p.position !== '' && Number.isFinite(Number(p.position)) ? Number(p.position) : null;
     queuePosition = pos;
     if (state !== 'ready') queueSince = Math.min(queueSince ?? t,t);
-    const queue = { state, position: pos, since: queueSince, turnId, at: t };
+    observedQueueSince = ['waiting', 'queued'].includes(state) ? observedQueueSince ?? t : null;
+    const queue = { state, position: pos, since: observedQueueSince, turnId, at: t };
     if (PROF?.home) saveQueue(PROF.home, threadId, queue);
     recordQueue?.(p, t);
     if (state === 'ready') { markWorkStarted(); patienceSamples = []; runningSince = t; completedItems = 0; }
@@ -1358,6 +1364,12 @@ const follow = (threadId, turnId, items = []) => {
     if ((p.threadId === threadId || p.turnId === turnId) &&
       ((m.method.startsWith('item/') && p.item?.type !== 'userMessage')
         || (m.method === 'thread/tokenUsage/updated' && p.tokenUsage?.total?.outputTokens > 0))) markWorkStarted();
+    if (observedQueueSince != null && PROF?.kind === 'trae' && (p.threadId === threadId || p.turnId === turnId)
+      && m.method.startsWith('item/') && p.item?.type !== 'userMessage') {
+      observedQueueSince = null;
+      lastPrintedQueue = null;
+      saveQueue(PROF.home, threadId, { state: 'ready', turnId, at: Date.now() });
+    }
     // Only this turn's or thread's own events count as progress; account-wide updates (rate limits…) don't.
     if (p.turnId === turnId || p.threadId === threadId || p.turn?.id === turnId) last = Date.now();
     if (m.method === 'item/completed' && runningSince != null) {

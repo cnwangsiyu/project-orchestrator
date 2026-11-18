@@ -4,6 +4,7 @@ import { candidateParts, enumerateCandidates } from './candidates.mjs';
 import { modelPreference, policyEffort } from './policy.mjs';
 import { estimateCandidate } from './estimate.mjs';
 import { standingPersonalFallback } from './personal-fallback.mjs';
+import { ttadkReserve } from './ttadk-reserve.mjs';
 
 const pass = (id) => result(id);
 const deny = (id, code, text, c, extra) => result(id, code, text, [c.id], extra);
@@ -61,6 +62,8 @@ export function pAvailable(t, s, c) {
       {gate:approvalGate(t,c,'reset-redemption','RESET_REDEMPTION_OK_REQUIRED','Reset redemption requires its own decision and refreshed capacity evidence.')});
   if (known(a.providerDenied) === true) return deny('pAvailable', 'PROVIDER_QUOTA_DENIED', 'Provider explicitly denied quota capacity.', c,
     { reconsiderAt: known(a.denialResetAt) > s.decisionAt ? known(a.denialResetAt) : null });
+  const reserve = ttadkReserve(t, s, a);
+  if (reserve) return deny('pAvailable', 'TTADK_DAILY_RESERVE', reserve, c);
   return pass('pAvailable');
 }
 export function pCapabilities(t, s, c) {

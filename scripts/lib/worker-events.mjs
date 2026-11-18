@@ -22,7 +22,7 @@ const ownerKey = (owner) => createHash('sha256').update(owner).digest('hex');
 export const ackFile = (owner) => path.join(rulesShared(), 'worker-acks', `${ownerKey(owner)}.json`);
 const receiptFile = (owner) => path.join(rulesShared(), 'worker-ack-history', `${ownerKey(owner)}.jsonl`);
 const watcherFile = (owner) => path.join(rulesShared(), 'worker-watchers', `${ownerKey(owner)}.claim`);
-const clean = (value) => typeof value === 'string' ? value.replace(/[\r\n\t\x00-\x1f]/g, ' ').slice(0, 2000) : '-';
+const clean = (value, limit = 2000) => typeof value === 'string' ? value.replace(/[\r\n\t\x00-\x1f]/g, ' ').slice(0, limit) : '-';
 const live = (pid) => { try { return Number.isInteger(pid) && pid > 0 && (process.kill(pid, 0), true); } catch (e) { return e.code === 'EPERM'; } };
 const talkback = (row) => ['message', 'question', 'answered'].includes(row.event);
 const terminal = (row) => !talkback(row) && row.event !== 'running';
@@ -372,7 +372,7 @@ const firstLine = (file) => {
 };
 export const eventLine = (row, message = row.finalLine ?? firstLine(row.outFile)) => {
   if (row.event === 'answered') return `worker ${clean(row.name ?? row.thread)} answered: ${clean(row.questionText)} → ${clean(row.text)}`;
-  if (row.event === 'message') return `worker ${clean(row.name ?? row.thread)} notes [${clean(row.kind)}]: ${clean(row.text)}`;
+  if (row.event === 'message') return `worker ${clean(row.name ?? row.thread)} notes [${clean(row.kind)}]: ${clean(row.text, row.kind === 'queue-stalled' ? Infinity : 2000)}`;
   if (row.event === 'question') return `worker ${clean(row.name ?? row.thread)} asks (id ${clean(row.questionId)}): ${clean(row.text)}`
     + `${row.default !== undefined ? ` — default: ${clean(row.default)}` : ''} — timeout ${row.timeoutMin}m; answer with codex-worker reply${row.owner ? ` --owner ${clean(row.owner)}` : ''} --thread ${clean(row.thread)} --account ${clean(row.account)} --question ${clean(row.questionId)} "<text>"`;
   return `${clean(row.name ?? row.thread)}\t${clean(row.event)}\t${clean(row.outFile)}\t${clean(message)}`;
@@ -431,9 +431,10 @@ export const createEventTail = (owner) => {
   const rows = new Map(), needle = `"owner":${JSON.stringify(owner)}`;
   const stats = { reads: 0, bytes: 0, parsed: 0 };
   return { stats, rows: () => normalizeOwners([...rows.values()], [...fullIds]).sort((a, b) => (a.seq ?? a.t) - (b.seq ?? b.t)),
-    prune: (ack) => {
+    prune: (ack, retainProgress) => {
       const own = normalizeOwners([...rows.values()],[...fullIds]), snapshot = inbox(own, owner, ack), running = new Set(snapshot.running.map((row) => row.id));
       const keep = new Set([...snapshot.pending, ...snapshot.running, ...snapshot.questions].map((row) => row.id));
+      if (retainProgress) for (const id of retainProgress(snapshot.running, own)) keep.add(id);
       const unresolvedIds = new Set(snapshot.unresolved.map(row=>row.id));
       for (const [id, row] of rows) {
         if (!keep.has(id) && !unresolvedIds.has(id)) rows.delete(id);
@@ -552,7 +553,7 @@ export const watchDeadline = (flushAt, questions, now = Date.now()) => questions
   return Math.min(deadline, Number.isFinite(reserveAt) ? reserveAt : now);
 }, flushAt);
 export const watch = async (owner, print = (rows) => new Promise((resolve, reject) =>
-  process.stdout.write(rows.map((row) => eventLine(row)).join('\n') + '\n', (error) => error ? reject(error) : resolve())), { debounceSec = 45 } = {}) => {
+  process.stdout.write(rows.map((row) => eventLine(row)).join('\n') + '\n', (error) => error ? reject(error) : resolve())), { debounceSec = 45, queueMonitor } = {}) => {
   if (!Number.isFinite(debounceSec) || debounceSec < 0) throw Error('--debounce-sec takes a nonnegative finite number');
   if(shortOwner(owner)) owner=eventOwner(owner,readEvents());
   if (!validOwner(owner)) throw Error('watch needs --owner <session-id> (or ORCHESTRATOR_OWNER)');
@@ -580,10 +581,23 @@ export const watch = async (owner, print = (rows) => new Promise((resolve, rejec
   try {
     heartbeat();
     timer = setInterval(() => { try { heartbeat(); } catch { exit = 1; stop(); } }, 5000);
+    if (!queueMonitor) {
+      const { createQueueStallMonitor } = await import('./queue-stall-watch.mjs');
+      const { readProfiles } = await import('./state.mjs');
+      let profiles = {}; try { profiles = readProfiles(); } catch {}
+      queueMonitor = createQueueStallMonitor(owner, { profiles, emit: appendEvent });
+    }
+    let queuePollAt = 0;
     for (;;) {
       if (stopped) return exit;
       await tail.read();
-      const ack = await readAckAsync(owner), own = tail.rows(), snapshot = inbox(own, owner, ack);
+      const ack = await readAckAsync(owner);
+      if (Date.now() >= queuePollAt) {
+        await queueMonitor.poll(inbox(tail.rows(), owner, ack).running, tail.rows());
+        queuePollAt = Date.now() + 5000;
+        await tail.read();
+      }
+      const own = tail.rows(), snapshot = inbox(own, owner, ack);
       for (const row of snapshot.running.filter((row) => !row.stale)) waitingRuns.add(row.runId);
       // A hook's successful delivery owns the wake. Forget its settled runs silently.
       for (const row of own) if (terminal(row) && acknowledged(row, ack)) waitingRuns.delete(row.runId);
@@ -605,7 +619,7 @@ export const watch = async (owner, print = (rows) => new Promise((resolve, rejec
         await print([{ name: owner, event: 'workers-no-longer-running', finalLine: 'observed completion or stale/dead follower; reconcile with mine' }]);
         return 0;
       }
-      tail.prune(ack);
+      tail.prune(ack, queueMonitor.retainProgress);
       await new Promise((resolve) => setTimeout(resolve, Math.max(1, Math.min(150, flushAt === undefined ? 150 : flushAt - Date.now()))));
     }
   } finally {

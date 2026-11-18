@@ -6,13 +6,14 @@
 // `add` runs route.mjs with the given args, takes the personal-quota gate scope for that account
 // from the plan, and appends an approval entry that expires at --until. It prints the id to pass
 // back to route.mjs as --user-ok. Only record approvals the user actually gave (verbatim ref).
-import { isAstra } from './lib/pipeline/common.mjs';
+import { fingerprint, isAstra } from './lib/pipeline/common.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { withLock } from './lib/shared-file.mjs';
+import { scopedFlags } from './lib/route-args.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const shared = process.env.RULES_SHARED || path.join(os.homedir(), '.claude/orchestrator/_shared');
@@ -53,7 +54,7 @@ const opt = (k) => { const i = own.indexOf(`--${k}`); return i >= 0 ? own[i + 1]
 const account = opt('account'), ref = opt('ref'), until = Date.parse(opt('until') ?? '');
 if (!account || !ref || !Number.isFinite(until)) die('add needs --account, --ref and --until <ISO time>');
 if (until <= Date.now()) die('--until is in the past');
-const r = spawnSync(process.execPath, [path.join(here, 'route.mjs'), ...routeArgs.filter((a) => a !== '--json'), '--json'], { encoding: 'utf8', maxBuffer: 32 * 2 ** 20 });
+const r = spawnSync(process.execPath, [path.join(here, 'route.mjs'), ...routeArgs.filter(a => !['--json', '--dry'].includes(a)), '--dry', '--json'], { encoding: 'utf8', maxBuffer: 32 * 2 ** 20 });
 let plan; try { plan = JSON.parse(r.stdout).plan; } catch { die(`route.mjs did not return a plan: ${(r.stderr || r.stdout).slice(0, 400)}`, 1); }
 // --astra also records the personal Astra family gate (only when the user's decision covers Astra).
 const kinds = own.includes('--astra') ? ['personal-quota', 'astra'] : ['personal-quota'];
@@ -68,12 +69,17 @@ if (!gates.length) {
 const scopes = gates.map((g) => ({ ...g.scope,
   models: own.includes('--astra') ? g.scope.models.map(id => isAstra(id) ? 'astra' : id) : g.scope.models,
   allowPersonalWithCompany: true }));
-const taskId = scopes[0].taskId, id = idSafe(`user-${account}-${taskId}-${new Date(until).toISOString().slice(0, 13)}`);
-withLock(file, () => {
-  const rows = read().filter((a) => a.id !== id);
+const taskId = scopes[0].taskId, baseId = idSafe(`user-${account}-${taskId}-${new Date(until).toISOString().slice(0, 13)}`);
+const id = withLock(file, () => {
+  const scopeHash = fingerprint(scopes), existing = read();
+  // A correction with the same expiry can coexist with the original grant.
+  const conflict = existing.some(a => a.id === baseId && fingerprint(a.scopes) !== scopeHash);
+  const id = conflict ? `${baseId.slice(0, 100)}-${scopeHash}` : baseId;
+  const rows = existing.filter(a => a.id !== id);
   rows.push({ id, userDecisionRef: idSafe(ref), grantedAt: Date.now(), expiresAt: until, revoked: false, consumed: false,
-    note: opt('note') ?? null, scopes });
+    note: opt('note') ?? null, project: plan.task.project, category: plan.task.category, routeFlags: scopedFlags(plan.task.flags), scopes });
   write(rows);
+  return id;
 });
 console.log(id);
 console.error(`approval: recorded ${id} (${account}, task ${taskId}, until ${new Date(until).toISOString()}); route again with --user-ok ${id}`);

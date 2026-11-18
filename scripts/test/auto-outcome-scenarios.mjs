@@ -161,5 +161,16 @@ try {
     for (const exit of [4, 7, 8, 9, 10, 130, 143]) assert.equal(recordWorkerOutcome({ ...base, exit }), null);
     assert.equal(rows(log).length, 1);
   });
+  check('routing uses the latest cumulative input per finished TTADK thread', () => {
+    const f = fixture('reserve-summary'), t = Date.now();
+    const done = { project: 'p', name: 'reserve-summary', category: 'analysis', account: 'ttadk', thread: 'one-thread',
+      terminal: true, exit: 0, final: 'DONE', log: f.log };
+    recordWorkerOutcome({ ...done, turn: 'first', cumulativeInput: 100, time: t - 1000 });
+    recordWorkerOutcome({ ...done, turn: 'second', cumulativeInput: 200, time: t });
+    recordWorkerOutcome({ ...done, turn: 'still-running', terminal: false, exit: 4, cumulativeInput: 300, time: t });
+    const parsed = parseTaskSpec(['analysis', '--name', 'next-task'], { taskId: 'next-task', requestId: 'reserve-test' });
+    const { snapshot } = acquireRoute(parsed, { env: { ...f.env, ROUTE_NOW: String(t) }, root: path.dirname(scripts) });
+    assert.deepEqual(snapshot.runUsage, [{ t, accountId: 'ttadk', category: 'analysis', cumulativeInput: 200 }]);
+  });
   console.log(`\n${count} scenarios passed`);
 } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
