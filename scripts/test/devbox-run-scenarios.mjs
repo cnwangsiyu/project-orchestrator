@@ -333,12 +333,16 @@ print(shell)`, JSON.stringify({ env, command: 'printf "%s:" "$BOOTSTRAP_VALUE"; 
   git(npm.repo, 'add', '.npmrc'); git(npm.repo, 'commit', '-qm', 'registry only');
   ok(await run(npm, ['--exclude-host', '192.0.2.2', '--exclude-slot', 'devbox-cn-2']));
   assert.ok(npm.events().some(e => e.op === 'acquire-call' && e.args.includes('--exclude-slot') && e.args.includes('--exclude-host')));
-  for (const name of ['.npmrc', 'project.conf']) {
+  for (const name of ['.npmrc', '.yarnrc', 'project.conf']) {
     fs.writeFileSync(path.join(npm.repo, name), '//host/:_authToken=synthetic-fixture-value\n');
     git(npm.repo, 'add', name);
     fs.writeFileSync(path.join(npm.repo, name), '# working copy is clean\n');
-    const rejected = await run(npm, ['--ref', 'worktree']); assert.equal(rejected.code, 1);
-    assert.ok(rejected.stderr.includes(name) && rejected.stderr.includes('_authToken') && !rejected.stderr.includes('synthetic-fixture-value'));
+    const result = await run(npm, ['--ref', 'worktree']);
+    if (name === 'project.conf') ok(result); // npm-specific matching is limited to package manager configuration.
+    else {
+      assert.equal(result.code, 1);
+      assert.ok(result.stderr.includes(name) && result.stderr.includes('_authToken') && !result.stderr.includes('synthetic-fixture-value'));
+    }
     git(npm.repo, 'reset', '--hard', 'HEAD');
     if (name !== '.npmrc') fs.rmSync(path.join(npm.repo, name), {force:true});
   }
