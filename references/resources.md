@@ -130,7 +130,7 @@ one through `res`, a worker may tap Allow/Authorize/Trust/OK on our app and syst
 camera, microphone, photos, notifications, local network, tracking, developer trust, USB debugging and install
 confirmations, without per-prompt approval or a button whitelist. The personal iPhone 15 Pro Max is `policy=never`,
 and no worker may operate it or any device absent from the `res` registry. Leases are at most 2 h and must be returned;
-back up app data before destructive reinstall/wipe/erase; never enter personal-account credentials, passwords or
+back up app data before destructive reinstall/wipe/erase (app data holding login sessions is never copied: a user card approving the step and accepting the loss plus a verified APK/IPA backup suffices); never enter personal-account credentials, passwords or
 verification codes, and make no purchases. If Codex refuses an allowed prompt, re-route that step to Claude rather
 than asking the user to tap it. Irreversible browser actions retain their separate approval rules.
 

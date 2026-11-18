@@ -352,7 +352,8 @@ Only registered shared test phones **iphone8/iphone11/s21** may be used; never p
 Pro Max (`policy=never`) or unregistered devices. Our own apps' permission/trust/install dialogs
 are authorized without per-prompt cards/button whitelists; no personal credentials/verification
 codes or purchases. Lease <=2 h; device connected/unlocked; readable app-data backup before
-any destructive reinstall/wipe/erase (devices and simulators). For iOS exclude protected
+any destructive reinstall/wipe/erase (devices and simulators); app data holding login sessions is never
+copied, so a user card approving the step and accepting the loss plus a verified APK/IPA backup suffices. For iOS exclude protected
 `Library/SplashBoard/`, verify before any install and install over the top when save data matters.
 A Codex refusal of an allowed prompt routes that step to Claude, never a user tap request.
 Disconnect handling preserves ownership within the lease deadline; longer access needs renewal.
