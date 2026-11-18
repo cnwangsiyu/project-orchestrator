@@ -62,7 +62,7 @@ const ok = (a, msg) => { assert.ok(a, msg); count++; };
 const run = (args, extra = {}) => {
   const r = spawnSync(process.env.RES_SOURCE, args, { env: { ...env, ...extra }, encoding: 'utf8', timeout: 30000 });
   if (r.error) throw r.error;
-  return { code: r.status, text: `${r.stdout}${r.stderr}` };
+  return { code: r.status, stdout: r.stdout, stderr: r.stderr, text: `${r.stdout}${r.stderr}` };
 };
 const config = (text) => {
   const staged = path.join(state, 'machine.conf.next');
@@ -138,7 +138,7 @@ for (const text of ['LOAD_LIMIT=0\n', 'LOAD_LIMIT=-1\n', 'LOAD_LIMIT=1025\n', 'M
 }
 config('UNKNOWN=12\n'); gate = check(); eq(gate.code, 0);
 ok(gate.text.includes('ignoring unknown machine.conf key UNKNOWN'));
-eq(parseHeavyCheck(gate.text).loadGate, 12);
+eq(parseHeavyCheck(gate.stdout).loadGate, 12);
 config('MIN_AVAIL_GIB=8\n'); gate = check(); eq(gate.code, 0); eq(parseHeavyCheck(gate.text).loadGate, 12);
 eq(parseHeavyCheck(gate.text).memoryGateGiB, 8);
 config('LOAD_LIMIT=6.500001\nLANE3_LOAD=4\n'); gate = check({ RES_TEST_LOAD1M: '6.500001' });
