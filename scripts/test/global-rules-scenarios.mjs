@@ -24,8 +24,14 @@ try {
   assert.equal(digestText.match(/^version:/gm)?.length, 1, 'integration must publish one digest version');
   assert.equal(digestText.match(/^## Changes In This Version$/gm)?.length, 1);
   assert.ok(digestText.split('\n').length<=61,'digest line budget');
-  assert.equal(digest.version, '2026-11-18.2');
+  assert.equal(digest.version, '2026-11-18.3');
   assert.match(digest.worker, /Mid-turn talkback:.*ask --default.*never routine progress/);
+  assert.match(digest.worker, /If `codex-worker` is not on PATH, use the launcher's absolute Node\/script command with its RULES_SHARED, account and thread/);
+  assert.ok(digest.worker.includes('node <skill>/scripts/codex-worker.mjs --account <account> note --thread <thread> --kind risk "<file and issue, no value>"'));
+  assert.match(digest.worker, /Save downloaded CI\/job\/build logs \(bytedcli, curl, etc\.\).*as `\.log`\/`\.txt`\/`\.out`; immediately after download and before any read/);
+  assert.ok(digest.worker.includes('node <skill>/scripts/mask-logs.mjs --force <log-file-or-log-only-dir>'));
+  assert.match(digest.worker, /proceed only after successful masking.*Read only named masked CI logs with credential-excluding greps/);
+  assert.ok(digest.worker.includes('rg -vi "password|passwd|token|secret|apikey|api_key|credential|auth"'));
   assert.match(digest.worker, /Identity uses explicit flags, CODEX_WORKER_\*, runtime CODEX_THREAD_ID\/TRAECLI_THREAD_ID or exactly one running public context matching cwd; ambiguity exits 2/);
   assert.match(digest.worker, /bare note\/ask use runtime CODEX_THREAD_ID or TRAECLI_THREAD_ID/);
   assert.doesNotMatch(digest.worker, /newest running public context|discover the newest running/);
