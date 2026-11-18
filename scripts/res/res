@@ -26,7 +26,7 @@ res take <id> --by <session> --project <slug> --for "<purpose>" [--task <id>] [-
 res wait <id> --by <session> --project <slug> --for "<purpose>" --timeout <minutes> [take options]
                                       retry held resources; heavy-* waits also enforce the gate
                                       --pid names the long-lived holder (default: caller PID)
-res wait-pool <prefix> --by <session> --project <slug> --for "<purpose>" --timeout <minutes> [--need <cap,cap>] [--prefer-host <ip>] [--prefer-slot <id>] [take options]
+res wait-pool <prefix> --by <session> --project <slug> --for "<purpose>" --timeout <minutes> [--need <cap,cap>] [--prefer-host <ip>] [--prefer-slot <id>] [--exclude-slot <id,...>] [--exclude-host <ip,...>] [take options]
                                       FIFO wait for any remote <prefix>-<number>; prints slot=<id>
                                       devbox-cn excludes light; devbox-cn-light selects only light
                                       no mini locks or heavy-check; return the printed slot
@@ -590,29 +590,37 @@ try:
     with open(os.path.join(root, 'resources.tsv')) as stream:
         rows = [line.rstrip('\n').split('\t') for line in stream if line.strip() and not line.startswith('#')]
     remote = {r[0]: (r[2], host_of('\t'.join(r[4:]))) for r in rows if len(r) >= 5 and r[1] == 'remote'}
-    caps = {}
+    caps, preferences = {}, {}
     for row in rows:
         if row[0] not in remote: continue
         match = re.search(r'(?:^|\s)caps=([A-Za-z0-9_,.-]+)(?=\s|$)', '\t'.join(row[4:]))
         caps[row[0]] = set(match.group(1).split(',')) if match else set()
+        prefer_tag = re.search(r'(?:^|\s)prefer=([^\s]+)', '\t'.join(row[4:]))
+        preferences[row[0]] = set(prefer_tag.group(1).split(',')) if prefer_tag else set()
+    def eligible(id, need, excluded_slots, excluded_hosts):
+        return (id in remote and id not in excluded_slots.split(',') and remote[id][1] not in excluded_hosts.split(',')
+                and need <= caps[id])
     hosts = {host for _, host in remote.values() if host}
     if action in ('select', 'members'):
-        pool, prefer, preferred_slot, need = args
+        pool, prefer, preferred_slot, need, excluded_slots, excluded_hosts = args
         required = set(need.split(',')) if need else set()
         state = read_state() if action == 'select' else {}
         ids = [id for id, (policy, host) in remote.items() if policy == 'open'
                and (re.fullmatch(re.escape(pool) + r'-[0-9]+', id) or pool.endswith('-light') and id == pool)
-               and required <= caps[id]]
+               and eligible(id, required, excluded_slots, excluded_hosts)]
         if not ids:
             raise ValueError(f"no open remote member of pool '{pool}' satisfies --need '{need or '(none)'}'")
         ids = [id for id in ids if not quarantined(state.get(remote[id][1], {}))]
         preferred_host = remote.get(preferred_slot, (None, None))[1]
-        print('\n'.join(sorted(ids, key=lambda id: (id != preferred_slot,
+        def tier(id):
+            if not preferences[id]: return 0
+            return -1 if required & preferences[id] else 1
+        print('\n'.join(sorted(ids, key=lambda id: (tier(id), id != preferred_slot,
               not preferred_host or remote[id][1] != preferred_host, remote[id][1] != prefer, id))))
     elif action == 'check':
         policy, host = remote.get(args[0], (None, None))
         required = set(args[1].split(',')) if args[1] else set()
-        sys.exit(2 if policy != 'open' or not required <= caps.get(args[0], set()) or quarantined(read_state().get(host, {})) else 0)
+        sys.exit(2 if policy != 'open' or not eligible(args[0], required, args[2], args[3]) or quarantined(read_state().get(host, {})) else 0)
     elif action == 'show':
         if args not in ([], ['--json']): raise ValueError('box-health accepts only --json')
         state = read_state(); shown = display(state, hosts | set(state))
@@ -1213,7 +1221,7 @@ cmd_wait_pool() {
   local pool="${1:-}"; shift || true
   pool="${pool%-}"
   [[ "$pool" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || die "wait-pool needs a resource prefix (for example devbox-cn)"
-  local timeout= timeout_seen= args=() ALLOW_PID=1 pin= ACQUIRE_PID_EXPLICIT prefer_host= prefer_slot= POOL_NEED= POOL_ACQUIRE=1
+  local timeout= timeout_seen= args=() ALLOW_PID=1 pin= ACQUIRE_PID_EXPLICIT prefer_host= prefer_slot= POOL_NEED= excluded_slots= excluded_hosts= POOL_ACQUIRE=1
   local duration deadline remaining delay=1 candidate rc ids
   local BUILD_WAITER_DIR= BUILD_WAITER_STAGING= BUILD_WAITER_HOST= BUILD_WAITER_SINCE= BUILD_WAITER_START=
   local BUILD_WAITER_ORDER= BUILD_WAITER_GATE_STREAK=0
@@ -1229,6 +1237,11 @@ cmd_wait_pool() {
         [ $# -ge 2 ] && [ -n "$2" ] || die "--prefer-slot needs a slot ID"
         [ -z "$prefer_slot" ] || die "duplicate --prefer-slot"
         prefer_slot="$2"; shift 2 ;;
+      --exclude-slot|--exclude-host)
+        [ $# -ge 2 ] && [[ "$2" =~ ^[A-Za-z0-9_.-]+(,[A-Za-z0-9_.-]+)*$ ]] || die "$1 needs comma-separated IDs"
+        if [ "$1" = --exclude-slot ]; then excluded_slots="${excluded_slots:+$excluded_slots,}$2"
+        else excluded_hosts="${excluded_hosts:+$excluded_hosts,}$2"; fi
+        shift 2 ;;
       --need)
         [ $# -ge 2 ] && [[ "$2" =~ ^[A-Za-z0-9_.-]+(,[A-Za-z0-9_.-]+)*$ ]] || die "--need needs comma-separated capability names"
         [ -z "$POOL_NEED" ] || die "duplicate --need"
@@ -1248,7 +1261,7 @@ cmd_wait_pool() {
   parse ${args[@]+"${args[@]}"}; validate_pid
   ACQUIRE_PID_EXPLICIT="$PID_EXPLICIT"
   [ -n "$BY" ] && [ -n "$PROJECT" ] && [ -n "$PURPOSE" ] || die "wait-pool needs --by, --project and --for"
-  ids=$(box_health members "$pool" "$prefer_host" "$prefer_slot" "$POOL_NEED") || return $?
+  ids=$(box_health members "$pool" "$prefer_host" "$prefer_slot" "$POOL_NEED" "$excluded_slots" "$excluded_hosts") || return $?
   for candidate in $ids; do
     if [ "$(field "$candidate" by)" = "$BY" ] && [ "$(field "$candidate" pid)" = "$PID" ] && \
       [ "$(field "$candidate" host)" = "$(local_host)" ]; then
@@ -1262,7 +1275,7 @@ cmd_wait_pool() {
     update_build_waiter slot CLOSED
     if [ "$BUILD_WAITER_DIR" = "$(oldest_build_waiter "$WAITER_ROOT")" ]; then
       # Refresh membership on every retry, including newly registered capacity.
-      ids=$(box_health select "$pool" "$prefer_host" "$prefer_slot" "$POOL_NEED") || { rc=$?; cleanup_build_waiter; return "$rc"; }
+      ids=$(box_health select "$pool" "$prefer_host" "$prefer_slot" "$POOL_NEED" "$excluded_slots" "$excluded_hosts") || { rc=$?; cleanup_build_waiter; return "$rc"; }
       for candidate in $ids; do
         [ ! -d "$LOCKS/$candidate.d" ] || continue
         # A member retired (policy never/ask-user) after membership was read is skipped, not fatal.
@@ -1445,7 +1458,7 @@ cmd_take() {
     TAKE_CREATED=1
     write_info "$(now)" "$id" || return $?
     # Recheck the health snapshot after mkdir; a losing pool transaction unwinds.
-    if [ "${POOL_ACQUIRE:-0}" = 1 ]; then box_health check "$id" "$POOL_NEED" || return $?; fi
+    if [ "${POOL_ACQUIRE:-0}" = 1 ]; then box_health check "$id" "$POOL_NEED" "$excluded_slots" "$excluded_hosts" || return $?; fi
     local RESERVED_MESSAGE=
     if lane_reserved_for_waiter "$id"; then
       RESERVED_MESSAGE="reserved for waiting build $RESERVED_WAITER_HOLDER; retry or use wait-lane"

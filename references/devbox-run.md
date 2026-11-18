@@ -1,7 +1,7 @@
 # Shared devbox runner
 
 `scripts/devbox-run.mjs` runs Linux commands on registered, open CN devbox slots.
-It requires Node 22, Git, tar and the user's working SSH command locally; boxes
+It requires Node 22, Python 3, Git, tar and the user's working SSH command locally; boxes
 need Linux, Python 3.9 or later, Git, tar, Bash and util-linux `setsid`. It uses the public
 `~/.claude/orchestrator/_shared/res` controller, with no local build/lane locks.
 
@@ -25,6 +25,9 @@ belongs only on boxes provisioned with that toolchain; a large CPU count does
 not establish readiness. Other examples include `--need node,chromium`.
 Multiple `--need` arguments combine their requirements. Every required
 capability must appear in the slot's `caps=...` registry description.
+A `prefer=vesdk-android` slot ranks first for eligible requests that need
+`vesdk-android` and last for generic work. Generic jobs may use it when the
+other eligible slots are occupied.
 
 The text after `--` is a Bash command. Quote it as one shell argument when it
 contains shell expansion, pipes or redirects. `{shard}` is one-based and
@@ -43,7 +46,7 @@ repositories remain on RemoteX / TT-VEIS, rather than these devbox worktrees.
 
 | Option | Behavior |
 | --- | --- |
-| `--project`, `--task`, `--repo` | Required identifiers and repository root |
+| `--project`, `--task`, `--repo` | Task and repository root are required. An explicit project names the shared repository. |
 | `--ref HEAD\|worktree\|<commit-or-ref>` | Defaults to HEAD; worktree adds the tracked diff against HEAD and nonignored untracked files |
 | `--pool devbox-cn\|devbox-cn-light` | Heavy pool by default; light for checks under about five minutes |
 | `--shards N` | 1–64 independent shard holders |
@@ -51,9 +54,11 @@ repositories remain on RemoteX / TT-VEIS, rather than these devbox worktrees.
 | `--artifact GLOB` | Repeatable, workspace-relative files; fetched into one tar per shard attempt |
 | `--out DIR` | Logs and summary; defaults to a unique directory in the local temporary directory; refuses to overwrite a previous run |
 | `--env K=V` | Repeatable explicit command environment; credential-related and SSH/Git configuration variables are refused |
-| `--affinity KEY` | Defaults to project + repository name + branch/ref |
+| `--affinity KEY` | Defaults to repository identity + branch/ref |
 | `--prefer-host IP` | Preferred box, subject to availability and capabilities |
 | `--need CAP[,CAP]` | Required registry capabilities |
+| `--exclude-slot ID[,ID]`, `--exclude-host IP[,IP]` | Skip these slots or hosts even when preferred. Both options are repeatable. |
+| `--submodules` | Transfer recursively pinned commits from initialized local submodules, including unpublished commits. |
 | `--rerun-on-fail` | Retry a failed shard once on another slot, preferring a different box |
 | `--allow-flaky` | A failing shard that passes its rerun may make the overall run pass |
 | `--watch-pid PID` | Watch an explicit worker PID; otherwise watches the launching parent |
@@ -109,10 +114,28 @@ previous overlay's uploaded untracked files. It leaves build outputs,
 then applies `git diff --binary HEAD` to both the remote index and checkout,
 so the next reset also removes staged additions. It uploads a tar of `git ls-files --others
 --exclude-standard`. Keep generated caches ignored by Git so they do not
-become upload overlays. Submodule contents and Git LFS objects are not fetched
-automatically; provision those project inputs separately. Repositories with
-the same project and basename intentionally share the object store: choose
-distinct project IDs when that is inappropriate.
+become upload overlays. Each project name selects one repository identity, including across linked
+worktrees. Without a project, the runner hashes the normalized origin (host in
+lowercase, without transport, user or trailing `.git`). With no origin it hashes
+the real path of the Git common directory. On a box with an older basename
+store, the runner records a matching store in place when it can verify shared
+history in the project namespace. Existing worktree links remain usable.
+
+With `--submodules`, initialize the pinned repositories locally before running.
+The runner reads the gitlinks from the selected superproject commit and feeds
+each pin and its ancestors from local Git objects. Each box holds one bare
+store per submodule identity. Slot clones reference that store. Each level uses
+a local URL and file-only Git transport. Uncommitted submodule changes and LFS
+objects are outside the snapshot. Attempt records include the superproject
+repository path and transferred bundle bytes (`submoduleBundleBytes` for modules,
+absent or zero on a warm run).
+
+A tracked registry-only `.npmrc` is accepted. Historical npm configurations and
+staged upload contents are checked for credential settings and token expansions
+before leasing. Refusals identify the path and setting. Other private-file path
+rules still apply. Set `DEVBOX_CACHE_DIR` to an existing private directory to
+keep the runner's host, affinity and flaky records there while using public res
+for leases.
 
 `_shared/devbox-affinity.json` remembers the last host and slot for each key.
 The runner passes the remembered eligible slot through `--prefer-slot` when

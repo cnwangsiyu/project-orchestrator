@@ -140,6 +140,17 @@ try {
   eq(impossible.code, 1); ok(impossible.text.includes('no open remote member')); eq(waiters(), []);
   eq(acquire('bad-caps', 'devbox-cn', ['--need', 'node,']).code, 1);
   const registryFile = path.join(state, 'resources.tsv'), registry = fs.readFileSync(registryFile, 'utf8');
+  fs.writeFileSync(registryFile, registry.replace(row('devbox-cn-1'), row('devbox-cn-1').trimEnd() + ' prefer=android,vesdk\n'));
+  expectSlot('generic-prefers-neutral', 'devbox-cn-2', ['--prefer-slot', 'devbox-cn-1']);
+  expectSlot('unrelated-need', 'devbox-cn-2', ['--need', 'node']);
+  expectSlot('prefer-tag-over-affinity', 'devbox-cn-1', ['--need', 'android', '--prefer-slot', 'devbox-cn-2']);
+  const others = ['devbox-cn-2', 'devbox-cn-3', 'devbox-cn-4', 'devbox-cn-5'];
+  for (const id of others) take(id);
+  expectSlot('generic-uses-spare', 'devbox-cn-1', []);
+  for (const id of others) release(id);
+  expectSlot('exclude-slot', 'devbox-cn-3', ['--need', 'node', '--exclude-slot', 'devbox-cn-1,devbox-cn-2']);
+  expectSlot('exclude-host', 'devbox-cn-3', ['--prefer-host', hostA, '--exclude-host', hostA]);
+  eq(acquire('excluded-all', 'devbox-cn', ['--exclude-host', hostA + ',' + hostB]).code, 1);
   fs.writeFileSync(registryFile, registry.replace(row('devbox-cn-2'), row('devbox-cn-2').replace('caps=node,android', 'caps=node,vesdk-android')));
   expectSlot('per-slot-caps', 'devbox-cn-2', ['--need', 'vesdk-android', '--prefer-slot', 'devbox-cn-1']);
   fs.writeFileSync(registryFile, registry);

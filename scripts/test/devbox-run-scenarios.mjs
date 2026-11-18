@@ -6,7 +6,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { parseArgs, readRegistry, remoteScripts } from '../devbox-run.mjs';
+import { parseArgs, readRegistry, remoteScripts, storeIdentity } from '../devbox-run.mjs';
+
+import { makeSubmoduleFixture } from './devbox-submodule-fixture.mjs';
 
 const script = fileURLToPath(new URL('../devbox-run.mjs', import.meta.url));
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'devbox-scenarios-'));
@@ -47,7 +49,7 @@ const flag=(args,name)=>args[args.indexOf(name)+1];
 const fakeRes = shimHeader + String.raw`
 (async()=>{
 const a=process.argv.slice(2), op=a[0], by=flag(a,'--by');
-if(a.includes('--help')) {console.log('res wait-pool'+(c.legacy?'':' --prefer-host IP --need CAP'+(c.preferSlot?' --prefer-slot SLOT':'')));return;}
+if(a.includes('--help')) {console.log('res wait-pool'+(c.legacy?'':' --prefer-host IP --need CAP --exclude-slot IDS --exclude-host IPS'+(c.preferSlot?' --prefer-slot SLOT':'')));return;}
 const rows=fs.readFileSync(path.join(c.shared,'resources.tsv'),'utf8').trim().split('\n').map(l=>{const [slot,kind,policy,,desc]=l.split('\t');return {slot,kind,policy,host:desc.match(/@(\d+\.\d+\.\d+\.\d+)/)?.[1],caps:desc.match(/caps=([\w,-]+)/)?.[1].split(',')||[]};});
 if(op==='return'){
  const lock=path.join(c.shared,'locks',a[1]+'.d');
@@ -57,6 +59,7 @@ if(op==='return'){
 if(!['take','wait','wait-pool'].includes(op))process.exit(9);
 event('acquire-call',{args:a,pid:flag(a,'--pid')});
 let ids=rows.filter(r=>r.policy==='open'&&(op==='wait-pool'?(a[1].endsWith('light')?/^devbox-cn-light(?:-\d+)?$/.test(r.slot):/^devbox-cn-\d+$/.test(r.slot)):r.slot===a[1]));
+for (const [opt,field] of [['--exclude-slot','slot'],['--exclude-host','host']]) if(a.includes(opt))ids=ids.filter(r=>!flag(a,opt).split(',').includes(r[field]));
 if(a.includes('--need'))ids=ids.filter(r=>flag(a,'--need').split(',').every(cap=>r.caps.includes(cap)));
 if(a.includes('--prefer-host')) ids.sort((x,y)=>Number(y.host===flag(a,'--prefer-host'))-Number(x.host===flag(a,'--prefer-host')));
 if(a.includes('--prefer-slot')) ids.sort((x,y)=>Number(y.slot===flag(a,'--prefer-slot'))-Number(x.slot===flag(a,'--prefer-slot')));
@@ -160,7 +163,8 @@ function returned(f) {
 function ok(result) { assert.equal(result.code, 0, result.stdout + result.stderr); }
 function workspace(f, host = '192.0.2.1', slot = 'devbox-cn-1') {
   const cache = JSON.parse(fs.readFileSync(path.join(f.shared, 'devbox-hosts.json')));
-  return path.join(cache[host].root, 'wt/fixture/source', slot);
+  const dir = path.join(cache[host].root, 'wt/fixture');
+  return path.join(dir, fs.readdirSync(dir)[0], slot);
 }
 
 try {
@@ -191,6 +195,12 @@ print(shell)`, JSON.stringify({ env, command: 'printf "%s:" "$BOOTSTRAP_VALUE"; 
   console.log('PASS actual command shell: toolchain bootstrap, local Node fallback and explicit env precedence');
 
   const f = fixture();
+  const linked = path.join(f.dir, 'nested', 'second');
+  git(f.repo, 'worktree', 'add', '--detach', linked);
+  for (const origin of [null, '../upstream.git']) {
+    if (origin) git(f.repo, 'remote', 'add', 'origin', origin);
+    assert.equal(await storeIdentity(f.repo), await storeIdentity(linked));
+  }
   const rows = readRegistry(f.shared, 'devbox-cn'); assert.deepEqual(rows.map(r => r.user), ['alice', 'bob']);
   assert.equal(rows.length, 2); assert.deepEqual(parseArgs(['--project', 'p', '--task', 't', '--repo', f.repo, '--need', 'node,vesdk-android', '--', 'true']).need, ['node', 'vesdk-android']);
   for (const [name, source] of Object.entries(remoteScripts)) execFileSync('python3', ['-c', 'import ast,sys;ast.parse(sys.stdin.read())'], { input: source });
@@ -211,9 +221,46 @@ print(shell)`, JSON.stringify({ env, command: 'printf "%s:" "$BOOTSTRAP_VALUE"; 
   assert.equal(common1, common2); assert.equal(sameBox.events().filter(e => e.op === 'probe').length, 1); returned(sameBox);
   console.log('PASS same-box shards share one object store and one root probe');
 
+  const pinned = makeSubmoduleFixture(path.join(sameBox.dir, 'unpushed'));
+  const build = await run(sameBox, ['--project', 'game', '--repo', pinned.repo, '--submodules', '--shards', '2'], pinned.command);
+  ok(build);
+  assert.equal(new Set(build.summary.shards.map(s => s.slot)).size, 2);
+  const repeat = await run(sameBox, ['--project', 'game', '--repo', pinned.other, '--submodules'], pinned.command); ok(repeat);
+  const second = repeat.summary.shards[0].attempts[0];
+  assert.ok(build.summary.shards.every(s => s.attempts[0].repository === second.repository));
+  assert.equal(second.bundleBytes || 0, 0); assert.equal(second.submoduleBundleBytes || 0, 0);
+  const moduleDir = path.join(path.dirname(path.dirname(second.repository)), 'submodules');
+  assert.equal(fs.readdirSync(moduleDir, { withFileTypes: true }).filter(f => f.isDirectory()).length, 2, 'one engine store and one leaf store');
+  returned(sameBox);
+  console.log('PASS two worktrees, unpushed app and recursive module pins, two slots, warm bundle reuse');
+
+  const npm = fixture();
+  fs.writeFileSync(path.join(npm.repo, '.npmrc'), 'registry=https://registry.example.invalid/\n');
+  git(npm.repo, 'add', '.npmrc'); git(npm.repo, 'commit', '-qm', 'registry only');
+  ok(await run(npm, ['--exclude-host', '192.0.2.2', '--exclude-slot', 'devbox-cn-2']));
+  assert.ok(npm.events().some(e => e.op === 'acquire-call' && e.args.includes('--exclude-slot') && e.args.includes('--exclude-host')));
+  for (const name of ['.npmrc', 'project.conf']) {
+    fs.writeFileSync(path.join(npm.repo, name), '//host/:_authToken=synthetic-fixture-value\n');
+    git(npm.repo, 'add', name);
+    fs.writeFileSync(path.join(npm.repo, name), '# working copy is clean\n');
+    const rejected = await run(npm, ['--ref', 'worktree']); assert.equal(rejected.code, 1);
+    assert.ok(rejected.stderr.includes(name) && rejected.stderr.includes('_authToken') && !rejected.stderr.includes('synthetic-fixture-value'));
+    git(npm.repo, 'reset', '--hard', 'HEAD');
+    if (name !== '.npmrc') fs.rmSync(path.join(npm.repo, name), {force:true});
+  }
+  fs.writeFileSync(path.join(npm.repo, '.npmrc'), '_auth=synthetic-fixture-value\n');
+  git(npm.repo, 'commit', '-qam', 'private synthetic config');
+  git(npm.repo, 'rm', '.npmrc'); git(npm.repo, 'commit', '-qm', 'remove it');
+  const history = await run(npm); assert.equal(history.code, 1); assert.match(history.stderr, /_auth/); returned(npm);
+  console.log('PASS registry-only npm config, staged and historical content checks, pool exclusion flags');
+
   const warm = fixture({ dataDisk: false });
   ok(await run(warm, [], 'mkdir -p build && echo retained > build/cache'));
   const ws = workspace(warm); const initialMtime = fs.statSync(path.join(ws, 'source.txt')).mtimeMs;
+  const rootDir = JSON.parse(fs.readFileSync(path.join(warm.shared, 'devbox-hosts.json')))['192.0.2.1'].root;
+  const legacyRepo = path.join(rootDir, 'repos', 'old-project', 'source');
+  fs.mkdirSync(path.dirname(legacyRepo), { recursive: true });
+  git(warm.repo, 'clone', '--bare', warm.repo, legacyRepo);
   const firstBundle = warm.events().filter(e => e.op === 'bundle').length;
   ok(await run(warm, [], 'test -f build/cache'));
   assert.equal(warm.events().filter(e => e.op === 'bundle').length, firstBundle, 'same commit sends no bundle');
@@ -222,6 +269,8 @@ print(shell)`, JSON.stringify({ env, command: 'printf "%s:" "$BOOTSTRAP_VALUE"; 
   const next = await run(warm, [], 'test -f build/cache && test -f next.txt'); ok(next);
   assert.ok(next.summary.shards[0].attempts[0].bundleBytes > 0);
   assert.equal(fs.readdirSync(path.join(JSON.parse(fs.readFileSync(path.join(warm.shared, 'devbox-hosts.json')))['192.0.2.1'].root, 'repos/fixture')).length, 2, 'one repo plus flock file');
+  const migrated = await run(warm, ['--project', 'old-project']); ok(migrated);
+  assert.equal(migrated.summary.shards[0].attempts[0].repository, legacyRepo, 'reuse verified legacy store after advancing HEAD');
   fs.writeFileSync(path.join(warm.repo, 'source.txt'), 'overlay\n'); fs.writeFileSync(path.join(warm.repo, 'extra.txt'), 'extra\n');
   ok(await run(warm, ['--ref', 'worktree'], 'test "$(cat source.txt)" = overlay && test -f extra.txt && test -f build/cache'));
   fs.writeFileSync(path.join(warm.repo, 'staged.txt'), 'staged addition\n');

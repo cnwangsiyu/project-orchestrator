@@ -11,36 +11,39 @@ import { StringDecoder } from 'node:string_decoder';
 const script = fileURLToPath(import.meta.url);
 const GiB = 1024 ** 3;
 const sensitive = /password|passwd|token|secret|apikey|api_key|credential|authorization/i;
-const sensitiveFile = /(^|\/)(\.env(?:\..*)?|\.npmrc|\.netrc|\.pypirc|\.git|\.ssh|\.aws|\.kube|id_rsa|id_ed25519)(\/|$)|\.(?:pem|p12|pfx|key|keystore)$/i;
+const sensitiveFile = /(^|\/)(\.env(?:\..*)?|\.netrc|\.pypirc|\.git|\.ssh|\.aws|\.kube|id_rsa|id_ed25519)(\/|$)|\.(?:pem|p12|pfx|key|keystore)$/i;
 // Bundles include ancestors. Limit the history query to matching paths so a
 // deleted sensitive file cannot ride along behind an otherwise clean commit.
-const privateNames = ['.env', '.env.*', '.npmrc', '.netrc', '.pypirc', '.git', '.ssh', '.aws', '.kube', 'id_rsa', 'id_ed25519'];
+const privateNames = ['.env', '.env.*', '.netrc', '.pypirc', '.git', '.ssh', '.aws', '.kube', 'id_rsa', 'id_ed25519'];
 const privateHistoryPaths = [
   ...privateNames.flatMap(name => [`**/${name}`, `**/${name}/**`]),
   ...['pem', 'p12', 'pfx', 'key', 'keystore'].map(ext => `**/*.${ext}`),
 ].map(glob => `:(glob,icase)${glob}`);
 const quote = value => `'${String(value).replaceAll("'", "'\\''")}'`;
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+const cacheDir = () => process.env.DEVBOX_CACHE_DIR || sharedDir();
 const sharedDir = () => process.env.RES_DIR || process.env.RULES_SHARED || path.join(os.homedir(), '.claude/orchestrator/_shared');
 const resCommand = () => process.env.RES_COMMAND || (fs.existsSync(path.join(sharedDir(), 'res')) ? path.join(sharedDir(), 'res') : 'res');
 
 export function parseArgs(args) {
-  const opts = { ref: 'HEAD', pool: 'devbox-cn', shards: 1, timeout: 120, artifacts: [], env: {}, days: 7, need: [] };
+  const opts = { ref: 'HEAD', pool: 'devbox-cn', shards: 1, timeout: 120, artifacts: [], env: {}, days: 7, need: [], excludeSlot: [], excludeHost: [] };
   if (args[0] === 'gc') { opts.gc = true; args = args.slice(1); }
   const names = new Map(['project', 'task', 'repo', 'ref', 'pool', 'shards', 'out', 'timeout', 'prefer-host', 'watch-pid', 'affinity', 'host', 'days'].map(n => [`--${n}`, n.replace(/-([a-z])/g, (_, c) => c.toUpperCase())]));
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === '--') { opts.command = args.slice(i + 1).join(' '); break; }
     if (arg === '--help' || arg === '-h') return { help: true };
+    if (arg === '--submodules') { opts.submodules = true; continue; }
     if (arg === '--rerun-on-fail') { opts.rerunOnFail = true; continue; }
     if (arg === '--allow-flaky') { opts.allowFlaky = true; continue; }
-    if (!names.has(arg) && !['--env', '--artifact', '--need'].includes(arg)) throw Error(`unknown option ${arg}`);
+    if (!names.has(arg) && !['--env', '--artifact', '--need', '--exclude-slot', '--exclude-host'].includes(arg)) throw Error(`unknown option ${arg}`);
     const value = args[++i];
     if (value === undefined || value === '--') throw Error(`missing value for ${arg}`);
-    if (arg === '--need') {
+    if (['--need', '--exclude-host', '--exclude-slot'].includes(arg)) {
       const caps = value.split(',');
       if (caps.some(cap => !/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(cap))) throw Error('invalid capability');
-      opts.need = [...new Set([...opts.need, ...caps])];
+      const field = { '--need': 'need', '--exclude-slot': 'excludeSlot', '--exclude-host': 'excludeHost' }[arg];
+      opts[field].push(...caps);
     } else if (arg === '--artifact') {
       if (path.posix.isAbsolute(value) || value.split('/').includes('..') || value.includes('\0')) throw Error('artifacts must be workspace-relative globs');
       opts.artifacts.push(value);
@@ -53,7 +56,7 @@ export function parseArgs(args) {
   opts.days = Number(opts.days);
   if (!Number.isFinite(opts.days) || opts.days < 1) throw Error('--days must be at least 1');
   if (opts.gc) return opts;
-  for (const name of ['project', 'task']) if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,100}$/.test(opts[name] || '')) throw Error(`--${name} needs a simple identifier`);
+  for (const name of (opts.project === undefined ? ['task'] : ['project', 'task'])) if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,100}$/.test(opts[name] || '')) throw Error(`--${name} needs a simple identifier`);
   if (!opts.repo || !opts.command?.trim()) throw Error('--repo and a command after -- are required');
   if (!['devbox-cn', 'devbox-cn-light'].includes(opts.pool)) throw Error('unsupported pool');
   opts.shards = Number(opts.shards); opts.timeout = Number(opts.timeout);
@@ -164,6 +167,42 @@ v=os.statvfs(root)
 mount=subprocess.check_output(['df','-P',root],text=True).splitlines()[-1].split()[-1]
 mem=next(int(x.split()[1])/1048576 for x in pathlib.Path('/proc/meminfo').read_text().splitlines() if x.startswith('MemTotal:'))
 print(json.dumps({'root':root,'user':d['user'],'fs':mount,'freeGiB':v.f_bavail*v.f_frsize/1073741824,'totalGiB':v.f_blocks*v.f_frsize/1073741824,'cores':os.cpu_count(),'memGiB':mem,'probedAt':datetime.datetime.now(datetime.timezone.utc).isoformat()}))
+`,
+  store: pythonHeader + `import subprocess, fcntl, re
+root=pathlib.Path(d['root']); key=d['key']; parent=root/'repos'/d['project']
+index=root/'store-index'; index.mkdir(exist_ok=True); record=index/key
+with open(str(record)+'.lock','a') as lock:
+    fcntl.flock(lock,fcntl.LOCK_EX)
+    if record.exists():
+        name=record.read_text()
+    else:
+        name=key
+        # Old stores had no identity field. Adopt only in the explicit project
+        # namespace and only with a matching commit, keeping all worktree links.
+        if parent.is_dir() and d['legacy']:
+            candidates=sorted(parent.iterdir(), key=lambda p: (p.name!=d['legacy'],p.name))
+            for repo in candidates:
+                if repo.name.startswith('id-') or repo.is_symlink() or not (repo/'HEAD').is_file(): continue
+                probe=subprocess.run(['git','--git-dir='+str(repo),'cat-file','--batch-check=%(objecttype)'],
+                                     input='\\n'.join(d['anchors'])+'\\n',text=True,capture_output=True,check=True)
+                if 'commit' in probe.stdout.splitlines():
+                    name=repo.name; break
+        tmp=record.with_suffix('.tmp'); tmp.write_text(name); tmp.replace(record)
+    if not re.fullmatch(r'[A-Za-z0-9_.-]+',name) or name in ('.','..'): raise ValueError('invalid store name')
+    print(name)
+`,
+  submodule: pythonHeader + `import subprocess
+ws=pathlib.Path(d['workspace']).resolve(); parent=ws/d['parent']; rel=d['relative']; store=d['repository']
+if (parent/rel).resolve()!=parent/rel or not (parent/rel).is_relative_to(ws): raise ValueError('invalid submodule destination')
+env={**os.environ,'GIT_ALLOW_PROTOCOL':'file','GIT_TERMINAL_PROMPT':'0'}
+def git(args):
+    return subprocess.check_output(['git','-C',str(parent),*args],env=env)
+name=d['name']
+if git(['config','--file','.gitmodules','--get','submodule.'+name+'.path']).decode().rstrip('\\n')!=rel: raise ValueError('submodule mapping differs from pin')
+# Explicitly walk one level at a time so every nested clone has a local URL.
+# --reference makes future pins visible even in an existing slot clone.
+git(['-c','submodule.'+name+'.url='+store,'submodule','update','--init','--checkout','--no-fetch','--reference',store,'--',rel])
+if git(['-C',rel,'rev-parse','HEAD']).decode().strip()!=d['commit']: raise ValueError('submodule pin mismatch')
 `,
   inspect: pythonHeader + `import subprocess
 root=pathlib.Path(d['root']); root.mkdir(parents=True,exist_ok=True)
@@ -399,13 +438,42 @@ function writeJSON(file, value) {
   fs.writeFileSync(temp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 }); fs.renameSync(temp, file);
 }
 
-async function snapshot(opts, temp, state) {
+function normalizedOrigin(raw, repo) {
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) {
+    let url;
+    try { url = new URL(raw); } catch { throw Error('invalid origin URL'); }
+    if (url.protocol === 'file:') return path.resolve(decodeURIComponent(url.pathname)).replace(/\.git\/?$/, '');
+    return url.host.toLowerCase() + '/' + url.pathname.replace(/^\/+|\/+$/g, '').replace(/\.git$/, '');
+  }
+  const scp = /^(?:[^@/]+@)?([^/:]+):(.+)$/.exec(raw);
+  return scp ? scp[1].toLowerCase() + '/' + scp[2].replace(/^\/+|\/+$/g, '').replace(/\.git$/, '')
+    : path.resolve(repo, raw).replace(/\.git$/, '');
+}
+
+export async function storeIdentity(repo, project, state) {
+  let identity;
+  if (project) identity = 'project:' + project;
+  else {
+    const result = await execute('git', ['-C', repo, 'rev-parse', '--path-format=absolute', '--git-common-dir'], { state });
+    const common = fs.realpathSync(checked(result, 'Git common directory').trim());
+    const origin = await execute('git', ['-C', repo, 'config', '--get', 'remote.origin.url'], { state, rawCapture: true });
+    if (origin.code === 0) identity = 'origin:' + normalizedOrigin(origin.stdout.trim(), path.dirname(common));
+    else if (origin.code === 1) identity = 'local:' + common;
+    else throw Error('cannot resolve repository identity');
+  }
+  return 'id-' + createHash('sha256').update(identity).digest('hex');
+}
+
+async function snapshot(opts, temp, state, ancestors = new Set()) {
   const git = async args => checked(await execute('git', ['-C', opts.repo, ...args], { state, rawCapture: true }), 'git snapshot');
   const top = (await git(['rev-parse', '--show-toplevel'])).trim();
   if (fs.realpathSync(top) !== opts.repo) throw Error('--repo must be the repository root');
   const commit = (await git(['rev-parse', '--verify', '--end-of-options', `${opts.ref === 'worktree' ? 'HEAD' : opts.ref}^{commit}`])).trim();
+  const storeKey = await storeIdentity(opts.repo, opts.project, state);
+  if (ancestors.has(storeKey + commit)) throw Error('recursive submodule cycle');
+  opts.project ||= storeKey;
   const branch = opts.ref === 'HEAD' || opts.ref === 'worktree' ? (await git(['rev-parse', '--abbrev-ref', 'HEAD'])).trim() : opts.ref;
-  opts.affinity ||= `${opts.project}+${opts.repoName}+${branch}`;
+  opts.affinity ||= `${storeKey}+${branch}`;
   let files = (await git(['ls-tree', '-rz', '--name-only', commit])).split('\0').filter(Boolean);
   let untracked = [];
   if (opts.ref === 'worktree') {
@@ -415,6 +483,14 @@ async function snapshot(opts, temp, state) {
   }
   files = [...new Set(files)];
   if (files.some(name => sensitiveFile.test(name))) throw Error('snapshot contains credential-related paths; use a source-only ref/worktree');
+  if (untracked.some(name => path.basename(name).toLowerCase() === '.npmrc')) throw Error('untracked .npmrc refused');
+  const checker = fileURLToPath(new URL('./lib/devbox-source-check.py', import.meta.url));
+  const verdict = await execute('python3', [checker, opts.repo, commit, opts.ref], { state, timeout: 300000 });
+  if (verdict.code && verdict.stdout.trim()) {
+    const [file, key] = JSON.parse(verdict.stdout);
+    throw Error('credential setting refused in ' + JSON.stringify(file) + ' (' + key + ')');
+  }
+  checked(verdict, 'source content check');
   if ((await git(['rev-list', '--full-history', '--max-count=1', commit, '--', ...privateHistoryPaths])).trim())
     throw Error('bundle history contains credential-related paths; use a source-only history');
   if ((await git(['rev-parse', '--is-shallow-repository'])).trim() === 'true')
@@ -428,14 +504,36 @@ async function snapshot(opts, temp, state) {
   let patchFile, extra;
   if (opts.ref === 'worktree') {
     patchFile = path.join(temp, 'worktree.patch');
-    checked(await execute('git', ['-C', opts.repo, 'diff', '--binary', '--no-ext-diff', '--no-textconv', 'HEAD'], { outputFile: patchFile, state }), 'worktree diff');
+    checked(await execute('git', ['-C', opts.repo, 'diff', '--binary', ...(opts.submodules ? ['--ignore-submodules=all'] : []), '--no-ext-diff', '--no-textconv', 'HEAD'], { outputFile: patchFile, state }), 'worktree diff');
     if (untracked.length) {
       const list = path.join(temp, 'untracked.list'); fs.writeFileSync(list, `${untracked.join('\0')}\0`);
       extra = path.join(temp, 'untracked.tar');
       checked(await execute('tar', ['-C', opts.repo, '--null', '-T', list, '-cf', extra], { state, timeout: 300000 }), 'untracked archive');
     }
   }
-  return { commit, untracked, exportRepo, patchFile, extra, temp };
+  const modules = [];
+  if (opts.submodules) {
+    const links = (await git(['ls-tree', '-rz', commit])).split('\0').filter(entry => entry.startsWith('160000 commit '));
+    if (links.length) {
+      const config = await git(['config', '--no-includes', '--blob', commit + ':.gitmodules', '-z', '--get-regexp', '^submodule\\..*\\.path$']);
+      const names = new Map(config.split('\0').filter(Boolean).map(pair => {
+        const i = pair.indexOf('\n');
+        return [pair.slice(i + 1), pair.slice(10, i - 5)];
+      }));
+      for (const entry of links) {
+        const tab = entry.indexOf('\t'), relative = entry.slice(tab + 1), ref = entry.slice(14, tab);
+        const name = names.get(relative);
+        if (!name || !relative || relative.split('/').some(part => !part || ['.', '..', '.git'].includes(part))) throw Error('invalid pinned submodule path');
+        const repo = path.join(opts.repo, relative);
+        if (!fs.existsSync(repo) || fs.realpathSync(repo) !== repo || !fs.existsSync(path.join(repo, '.git'))) throw Error('initialize local submodule: ' + relative);
+        const child = await snapshot({ repo, ref, submodules: true }, fs.mkdtempSync(path.join(temp, 'mod-')), state, new Set([...ancestors, storeKey + commit]));
+        const { modules: nested, ...transfer } = child;
+        modules.push({ ...transfer, name, relative, parent: '' }, ...nested.map(m => ({ ...m, parent: path.posix.join(relative, m.parent) })));
+      }
+    }
+  }
+  const anchors = (await git(['rev-list', '--first-parent', '--max-count=64', commit])).trim().split('\n');
+  return { commit, anchors, storeKey, modules, untracked, exportRepo, patchFile, extra, temp };
 }
 
 async function makeBundle(snapshot, known, state) {
@@ -471,8 +569,8 @@ async function mergeState(file, key, value) {
 }
 
 async function hostRoot(row, state) {
-  const cacheFile = path.join(sharedDir(), 'devbox-hosts.json');
-  return withStateLock(path.join(sharedDir(), `devbox-probe-${row.host}`), async () => {
+  const cacheFile = path.join(cacheDir(), 'devbox-hosts.json');
+  return withStateLock(path.join(cacheDir(), `devbox-probe-${row.host}`), async () => {
   let cache = {}; try { cache = JSON.parse(fs.readFileSync(cacheFile, 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw error; }
   let entry = cache[row.host];
   if (!entry?.root || entry.user !== row.user) {
@@ -565,17 +663,24 @@ async function shard(opts) {
       try {
         let rows = readRegistry(sharedDir(), opts.pool);
         if (!rows.length) throw Error('no open slots in pool');
-        rows = rows.filter(item => opts.need.every(cap => item.caps.includes(cap)));
+        const eligible = item => opts.need.every(cap => item.caps.includes(cap))
+          && !opts.excludeSlot.includes(item.slot) && !opts.excludeHost.includes(item.host);
+        rows = rows.filter(eligible);
         if (!rows.length) throw Error('no open slot provides all required capabilities');
         // Bad descriptions must not cause a lease or an implicit local-user SSH login.
         if (rows.some(item => !item.target)) throw Error('open pool registry row lacks an unambiguous user@ip description');
         const choices = rows.filter(item => item.slot !== avoid?.slot && !failedSlots.has(item.slot) && !diskHosts.has(item.host));
         if (!choices.length) throw Error('no different open slot available for retry');
-        let affinities = {}; try { affinities = JSON.parse(fs.readFileSync(path.join(sharedDir(), 'devbox-affinity.json'), 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+        let affinities = {}; try { affinities = JSON.parse(fs.readFileSync(path.join(cacheDir(), 'devbox-affinity.json'), 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw error; }
         const affinity = affinities[opts.affinity];
         const preferred = avoid ? (choices.find(item => item.host !== avoid.host) || choices[0]).host : opts.preferHost || affinity?.host;
         const common = ['--by', by, '--project', opts.project, '--task', opts.task, '--for', opts.task, '--pid', String(process.pid)];
         const args = ['wait-pool', opts.pool, ...common, '--timeout', String(remaining() / 60000)];
+        const skipSlots = new Set([...opts.excludeSlot, ...failedSlots]);
+        const skipHosts = new Set([...opts.excludeHost, ...diskHosts]);
+        if (avoid && choices.some(item => item.host !== avoid.host)) skipHosts.add(avoid.host);
+        if (opts.excludeSlotSupported && skipSlots.size) args.push('--exclude-slot', [...skipSlots].join(','));
+        if (opts.excludeHostSupported && skipHosts.size) args.push('--exclude-host', [...skipHosts].join(','));
         if (preferred && opts.preferSupported) args.push('--prefer-host', preferred);
         if (opts.needSupported && opts.need.length) args.push('--need', opts.need.join(','));
         const warm = choices.find(item => item.host === preferred && item.slot === affinity?.slot);
@@ -595,7 +700,7 @@ async function shard(opts) {
         rows = readRegistry(sharedDir(), opts.pool);
         row = rows.find(item => item.slot === attempt.slot);
         if (!row?.target) throw Error('acquired slot is no longer an open mapped pool member');
-        if (!choices.some(item => item.slot === row.slot) || (avoid && choices.some(item => item.host !== avoid.host) && row.host === avoid.host)) {
+        if (!eligible(row) || !choices.some(item => item.slot === row.slot) || (avoid && choices.some(item => item.host !== avoid.host) && row.host === avoid.host)) {
           await release(row.slot); attempt.slot = null;
           // Old controllers have no preference/exclusion flag. Keep arbitration in res.
           row = choices.find(item => avoid && item.host !== avoid.host) || choices[0];
@@ -607,8 +712,10 @@ async function shard(opts) {
         if (state.cancel) throw Object.assign(Error('cancelled'), { code: state.cancel });
         emit(`[shard ${opts.shard}] slot=${row.slot} host=${row.host}\n`);
         const root = await hostRoot(row, state);
-        const workspace = `${root}/wt/${opts.project}/${opts.repoName}/${row.slot}`;
-        const repository = `${root}/repos/${opts.project}/${opts.repoName}`;
+        const storeName = checked(await ssh(row, 'store', { root, project: opts.project, key: opts.snapshot.storeKey, legacy: opts.repoName, anchors: opts.snapshot.anchors }, { state }), 'resolve shared store').trim();
+        const workspace = `${root}/wt/${opts.project}/${storeName}/${row.slot}`;
+        const repository = `${root}/repos/${opts.project}/${storeName}`;
+        attempt.repository = repository;
         data = { root, workspace, repository, slot: row.slot, control: `${root}/runs/${randomUUID()}`, commit: opts.snapshot.commit, untracked: opts.snapshot.untracked };
         let inspection = JSON.parse(checked(await ssh(row, 'inspect', data, { state, timeout: Math.min(60000, remaining()) }), 'workspace inspection'));
         if (inspection.free < 73 * GiB) {
@@ -623,15 +730,24 @@ async function shard(opts) {
         for (let uploadTry = 0; ; uploadTry++) {
           try {
             if (uploadTry) inspection = JSON.parse(checked(await ssh(row, 'inspect', data, { state }), 'retry inspection'));
-            if (!inspection.present) {
-              const bundle = await makeBundle(opts.snapshot, inspection.known, state);
-              attempt.bundleBytes = (attempt.bundleBytes || 0) + fs.statSync(bundle).size;
-              try { checked(await ssh(row, 'bundle', data, { inputFile: bundle, state, timeout: remaining() }), 'bundle upload'); }
+            const feed = async (source, target, info, counter) => {
+              if (info.present) return;
+              const bundle = await makeBundle(source, info.known, state);
+              attempt[counter] = (attempt[counter] || 0) + fs.statSync(bundle).size;
+              try { checked(await ssh(row, 'bundle', target, { inputFile: bundle, state, timeout: remaining() }), 'bundle upload'); }
               finally { fs.unlinkSync(bundle); }
-            }
+            };
+            await feed(opts.snapshot, data, inspection, 'bundleBytes');
             checked(await ssh(row, 'checkout', data, { state, timeout: remaining() }), 'worktree checkout');
             if (opts.snapshot.patchFile && fs.statSync(opts.snapshot.patchFile).size) checked(await ssh(row, 'patch', data, { inputFile: opts.snapshot.patchFile, state, timeout: remaining() }), 'worktree patch');
             if (opts.snapshot.extra) checked(await ssh(row, 'upload', data, { inputFile: opts.snapshot.extra, state, timeout: remaining() }), 'untracked upload');
+            for (const mod of opts.snapshot.modules) {
+              const target = { ...data, repository: `${root}/repos/submodules/${mod.storeKey}`, commit: mod.commit,
+                relative: mod.relative, parent: mod.parent, name: mod.name };
+              const info = JSON.parse(checked(await ssh(row, 'inspect', target, { state }), 'submodule store inspection'));
+              await feed(mod, target, info, 'submoduleBundleBytes');
+              checked(await ssh(row, 'submodule', target, { state, timeout: remaining() }), 'offline submodule update');
+            }
             break;
           } catch (error) {
             if (state.cancel || uploadTry || !/broken pipe|message authentication code incorrect|corrupted mac/i.test(error.message)) throw error;
@@ -645,7 +761,7 @@ async function shard(opts) {
           emit(`[shard ${opts.shard}] disk guard refused ${row.host} after upload: need 53 GiB free\n`);
           throw Object.assign(Error('post-upload workspace disk guard'), { code: 72 });
         }
-        await mergeState(path.join(sharedDir(), 'devbox-affinity.json'), opts.affinity, { host: row.host, slot: row.slot, time: new Date().toISOString() });
+        await mergeState(path.join(cacheDir(), 'devbox-affinity.json'), opts.affinity, { host: row.host, slot: row.slot, time: new Date().toISOString() });
         if (state.cancel) throw Object.assign(Error('cancelled'), { code: state.cancel });
         launched = true;
         const caches = { GRADLE_USER_HOME: `${root}/shared/gradle`, npm_config_cache: `${root}/shared/npm`, PNPM_STORE_DIR: `${root}/shared/pnpm`, CCACHE_DIR: `${root}/shared/ccache`, CCACHE_MAXSIZE: '20G', PIP_CACHE_DIR: `${root}/shared/pip`, DEVBOX_TOOLCHAINS: `${root}/shared/toolchains` };
@@ -701,7 +817,7 @@ async function shard(opts) {
 async function main(args) {
   const opts = parseArgs(args);
   if (opts.help) {
-    console.log('Usage: devbox-run.mjs --project P --task T --repo PATH [--ref COMMIT|HEAD|worktree] [--pool devbox-cn|devbox-cn-light] [--shards N] [--artifact GLOB]... [--out DIR] [--timeout MIN] [--env K=V]... [--rerun-on-fail] [--allow-flaky] [--affinity KEY] [--prefer-host IP] [--need CAP]... [--watch-pid PID] -- COMMAND\n       devbox-run.mjs gc [--host IP] [--days N]\nCOMMAND supports {shard} and {shards}. Timeout includes queue/upload/run; cleanup follows. See references/devbox-run.md.');
+    console.log('Usage: devbox-run.mjs [--project P] --task T --repo PATH [--ref COMMIT|HEAD|worktree] [--pool devbox-cn|devbox-cn-light] [--shards N] [--artifact GLOB]... [--out DIR] [--timeout MIN] [--env K=V]... [--rerun-on-fail] [--allow-flaky] [--affinity KEY] [--prefer-host IP] [--need CAP]... [--exclude-slot IDS] [--exclude-host IPS] [--submodules] [--watch-pid PID] -- COMMAND\n       devbox-run.mjs gc [--host IP] [--days N]\nCOMMAND supports {shard} and {shards}. Timeout includes queue/upload/run; cleanup follows. See references/devbox-run.md.');
     return 0;
   }
   if (opts.gc) {
@@ -730,6 +846,8 @@ async function main(args) {
     if (state.cancel) return state.cancel;
     const help = await execute(resCommand(), ['wait-pool', '--help'], { state });
     opts.preferSupported = /--prefer-host\b/.test(help.stdout + help.stderr);
+    opts.excludeSlotSupported = (help.stdout + help.stderr).includes('--exclude-slot');
+    opts.excludeHostSupported = (help.stdout + help.stderr).includes('--exclude-host');
     opts.needSupported = /--need\b/.test(help.stdout + help.stderr);
     opts.preferSlotSupported = /--prefer-slot\b/.test(help.stdout + help.stderr);
     const shards = await Promise.all(Array.from({ length: opts.shards }, (_, index) => new Promise(resolve => {
@@ -749,7 +867,7 @@ async function main(args) {
     const summary = { project: opts.project, task: opts.task, commit: opts.snapshot.commit, commandHash: createHash('sha256').update(opts.command).digest('hex'), time: new Date().toISOString(), exit, shards };
     writeJSON(path.join(opts.out, 'summary.json'), summary);
     for (const item of shards.filter(item => item.flaky)) {
-      fs.appendFileSync(path.join(sharedDir(), 'flaky-log.jsonl'), `${JSON.stringify({ project: opts.project, task: opts.task, commandHash: summary.commandHash, shard: item.shard, hosts: item.attempts.filter(a => !a.diskGuard).map(a => a.host), time: summary.time })}\n`, { mode: 0o600 });
+      fs.appendFileSync(path.join(cacheDir(), 'flaky-log.jsonl'), `${JSON.stringify({ project: opts.project, task: opts.task, commandHash: summary.commandHash, shard: item.shard, hosts: item.attempts.filter(a => !a.diskGuard).map(a => a.host), time: summary.time })}\n`, { mode: 0o600 });
     }
     console.log(`summary=${path.join(opts.out, 'summary.json')} exit=${exit}`);
     return exit;
