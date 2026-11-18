@@ -716,6 +716,12 @@ async function inputScenarios() {
   assert.equal(receipt.seeds.length,1);assert.ok(receipt.placementDecisions.length);
   const file=indexFile(f.shared,first.summary.shards[0].host);
   assert.ok(JSON.parse(fs.readFileSync(file)).inputs['asset+'+actual.hash]);
+  const legacyIndex=JSON.parse(fs.readFileSync(file));
+  for(const key of Object.keys(legacyIndex.inputs))if(key.startsWith('warm.'))delete legacyIndex.inputs[key];
+  fs.writeFileSync(file,JSON.stringify(legacyIndex));
+  const legacyMetaFile=path.join(workspace(f),'.devbox-run.json');const legacyMeta=JSON.parse(fs.readFileSync(legacyMetaFile));delete legacyMeta.affinity;fs.writeFileSync(legacyMetaFile,JSON.stringify(legacyMeta));
+  const migrated=await run(f,['--input',input,'--warm-cost','27m'],command);ok(migrated);returned(f);
+  assert.ok(!migrated.summary.shards[0].attempts[0].inputPlan.slots[migrated.summary.shards[0].slot].missing.some(name=>name.startsWith('warm.')),'legacy warm cache is verified before scoring');
   const second=await run(f,['--input',input],command);ok(second);assert.equal(second.summary.shards[0].attempts[0].seeds.length,0);returned(f);
   const pinned=await run(f,['--input',`name=asset,hash=${actual.hash},rebuildable=no,cost=0s,size=0.01`],command);ok(pinned);assert.equal(pinned.summary.shards[0].host,first.summary.shards[0].host);returned(f);
   fs.unlinkSync(receipt.inputPaths.asset);

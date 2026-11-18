@@ -482,6 +482,12 @@ for meta in (root/'wt').glob('*/*/*/.devbox-run.json'):
         rows.append({'slot':row['slot'],'workspace':str(meta.parent),'repository':row['repository']})
 print(json.dumps(rows))
 `,
+  'warm-path': pythonHeader + `root=pathlib.Path(d['root']); record=root/'store-index'/d['key']
+name=record.read_text() if record.is_file() else d['key']
+if not name or '/' in name or name in ('.','..'): raise RuntimeError('invalid store index')
+ws=root/'wt'/d['project']/name/d['slot']
+print(json.dumps(str(ws) if (ws/'.git').is_file() and (ws/'.devbox-run.json').is_file() else None))
+`,
   workspaces: pythonHeader + `root=pathlib.Path(d['root']); record=root/'store-index'/d['key']
 name=record.read_text() if record.is_file() else d['key']
 if not name or '/' in name or name in ('.','..'): raise RuntimeError('invalid store index')
@@ -1041,18 +1047,25 @@ async function verifyInputs(row, inputs, opts, state, { force=false, timeout=600
     const probes=[];
     for (const input of inputs) {
       const key=inputKey(input)+(input.warm?'+'+row.slot:'');
-      const entry=index.inputs[key];
+      let entry=index.inputs[key];
       if (!force && entry && (!input.path || entry.path===input.path) && Number.isFinite(entry.verifiedAt) && 0<=now-entry.verifiedAt && now-entry.verifiedAt<settings.ttlSec) continue;
       // Warm paths are only learned from successful slot receipts.
-      if (input.warm && !entry) continue;
-      probes.push({...input,key,path:input.path || entry?.path || inputPath(root,input)});
+      if (input.warm && !entry) {
+        let affinities={}; try { affinities=JSON.parse(fs.readFileSync(path.join(cacheDir(),'devbox-affinity.json'),'utf8')); } catch(error) {if(error.code!=='ENOENT')throw error;}
+        const previous=affinities[opts.affinity];
+        if(previous?.host!==row.host || previous?.slot!==row.slot || !Number.isFinite(Date.parse(previous.time)) || Date.parse(previous.time)>Date.now()+1000) continue;
+        const legacyPath=JSON.parse(checked(await ssh(row,'warm-path',{root,project:opts.project,key:opts.snapshot.storeKey,slot:row.slot},{state,timeout}),'warm workspace verification'));
+        if(!legacyPath) continue;
+        entry={path:legacyPath,legacyAffinityAt:Date.parse(previous.time)/1000};
+      }
+      probes.push({...input,key,path:input.path || entry?.path || inputPath(root,input),...(entry?.legacyAffinityAt?{legacyAffinityAt:entry.legacyAffinityAt}:{})});
     }
     if (probes.length) {
       const result=await ssh(row,'inputs',{root,inputs:probes,affinity:opts.affinity},{state,timeout});
       const records=JSON.parse(checked(result,'input verification'));
       for (const record of records) {
         if (!probes.some(input=>input.key===record.key)) throw Error('unexpected input verification record');
-        if (record.present) index.inputs[record.key]={path:record.path,bytes:record.bytes,verifiedAt:Date.now()/1000};
+        if (record.present) index.inputs[record.key]={path:record.path,bytes:record.bytes,verifiedAt:Date.now()/1000,...(probes.find(input=>input.key===record.key).legacyAffinityAt?{legacyAffinityAt:probes.find(input=>input.key===record.key).legacyAffinityAt}:{})};
         else delete index.inputs[record.key];
       }
       writeJSON(file,index);
@@ -1070,6 +1083,7 @@ async function inputPlan(opts,rows,state) {
     durations[row.slot]=history.slots?.[row.slot]?.durationSec;
   }
   const history=readTimings(opts.snapshot.storeKey).commands?.[opts.commandKey]?.placement || {};
+  for(const input of opts.placementInputs)if(input.warm) input.costSec=warmCost(history,opts.warmCost) ?? input.costSec;
   const table=placement(rows,opts.placementInputs,indices,history,{...settings,holds,durations});
   const slots=Object.fromEntries(table.map(value=>[value.slot,{...value,extraDiskGiB:opts.placementInputs.filter(input=>!input.warm && value.missing.includes(input.name)).reduce((sum,input)=>sum+input.sizeGiB,0)}]));
   return {version:1,at:Date.now()/1000,slots};
@@ -1313,7 +1327,7 @@ async function shard(opts) {
         const preferred = avoid ? (possible.find(item => item.host !== avoid.host) || possible[0]).host : opts.preferHost || affinity?.host;
         const common = ['--by', by, '--project', opts.project, '--task', opts.task, '--for', opts.task, '--pid', String(process.pid)];
         const placementFile=path.join(opts.out,`shard-${opts.shard}-placement.json`);
-        const inputRows=possible.filter(item=>!quarantinedHosts(sharedDir()).has(item.host));
+        const inputRows=()=>runRows(opts).filter(eligible).filter(mayRetry).filter(item=>(opts.splitExclusions && !opts.prewarm || callerAllows(item)) && !quarantinedHosts(sharedDir()).has(item.host));
         const refresh = async () => {
           try { opts.inputSettings=inputSettings(sharedDir()); attempt.inputConfigWarned=false; }
           catch(error) {
@@ -1323,7 +1337,7 @@ async function shard(opts) {
           }
           await refreshHostMetrics(possible, state, { timeout: Math.min(15000, remaining()) });
           if (opts.placementInputs.length) {
-            const plan=await inputPlan(opts,inputRows,state);
+            const plan=await inputPlan(opts,inputRows(),state);
             attempt.inputPlan=plan;
             if (!Object.values(plan.slots).some(value=>value.eligible)) {
               emit(`[shard ${opts.shard}] input placement=${JSON.stringify(plan)}\n`);
@@ -1396,7 +1410,7 @@ async function shard(opts) {
         rows = runRows(opts);
         row = rows.find(item => item.slot === attempt.slot);
         if (!row?.target) throw Error('acquired slot is no longer an open mapped pool member');
-        if (!eligible(row) || !callerAllows(row) || !internalChoices.some(item => item.slot === row.slot)) {
+        if (!eligible(row) || !callerAllows(row) || !mayRetry(row)) {
           await release(row.slot); attempt.slot = null;
           if (opts.prewarm) { attempt.returned = true; attempt.skipped = true; attempt.exit = 0; break; }
           // Old controllers have no preference/exclusion flag. Keep arbitration in res.

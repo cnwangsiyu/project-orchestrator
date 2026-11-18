@@ -143,7 +143,8 @@ for item in d['inputs']:
     target=safe(item['path']); valid=target.exists(); size=0
     if valid and item.get('warm'):
         meta=target/'.devbox-run.json'
-        valid=meta.is_file() and json.loads(meta.read_text()).get('affinity')==d['affinity']
+        metadata=json.loads(meta.read_text()) if meta.is_file() else {}
+        valid=(metadata.get('affinity')==d['affinity'] or not metadata.get('affinity') and item.get('legacyAffinityAt') and metadata.get('lastUsed',1e30)<=item['legacyAffinityAt']+1)
     elif valid and item['hash']!='none':
         actual,size=fingerprint(target); valid=actual==item['hash']
     elif valid:

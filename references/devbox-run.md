@@ -174,7 +174,9 @@ the task retains those health probes. Uncommitted source is transferred by
 `--ref worktree` and is not host-bound input state.
 
 The implicit warm input is keyed by project, repository identity and affinity,
-and tracked separately for each slot. `--warm-cost` declares its cold rebuild
+and tracked separately for each slot. Legacy warm slots are backfilled read-only
+from the affinity record and matching slot receipt; a newer slot use invalidates
+the old affinity marker. `--warm-cost` declares its cold rebuild
 penalty. Successful timing receipts record cold and warm durations; with history,
 the estimate is their median difference. Explicit costs remain authoritative
 until both classes have at least three observations. Seed observations likewise
