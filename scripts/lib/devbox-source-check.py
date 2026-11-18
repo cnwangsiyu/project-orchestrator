@@ -14,7 +14,13 @@ def git(*args):
 
 
 assignment = re.compile(rb"""^\s*(?:export\s+)?(?:[^\s=]*:)?["']?(_authToken|_auth|_password)["']?\s*[:=]\s*(.+?)\s*$""", re.I)
-expansion = re.compile(rb"\$\{([A-Za-z_][A-Za-z_0-9]*TOKEN[A-Za-z_0-9]*|TOKEN)\}", re.I)
+# Environment expansions in npm config are upper-case by convention; a JS template like `${token}` is not one.
+expansion = re.compile(rb"\$\{([A-Z_][A-Z_0-9]*TOKEN[A-Z_0-9]*|TOKEN)\}")
+NPM_CONFIG = {b".npmrc", b".yarnrc", b".yarnrc.yml"}
+
+
+def npm_config(path):
+    return os.path.basename(path).lower() in NPM_CONFIG
 
 
 def check(stream, path):
@@ -62,12 +68,13 @@ for oid, path in changes(["log", "--full-history", "-m", "--root", "--format=", 
 
 if mode == "worktree":
     for oid, path in changes(["diff", "--cached", "--raw", "-z", "--no-renames", "--no-abbrev", "HEAD"]):
-        check_blob(oid, path)
+        if npm_config(path):
+            check_blob(oid, path)
     changed = git("diff", "--name-only", "--no-renames", "-z", "HEAD").split(b"\0")
     extra = git("ls-files", "--others", "--exclude-standard", "-z").split(b"\0")
     for path in set(changed + extra) - {b""}:
         if os.path.islink(path) and os.path.basename(path).lower() == b".npmrc":
             sys.exit("symlinked npm configuration refused")
-        if not os.path.islink(path) and os.path.isfile(path):
+        if npm_config(path) and not os.path.islink(path) and os.path.isfile(path):
             with open(path, "rb") as stream:
                 check(stream, path)
