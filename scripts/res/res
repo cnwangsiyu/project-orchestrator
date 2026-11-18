@@ -1278,7 +1278,12 @@ build_guard_start() {
 
 build_guard_end() {
   [ "${BUILD_GUARD:-0}" = 1 ] || return 0
-  if [ "$(cat "$RES_DIR/.build-admission.lock" 2>/dev/null || true)" = "$$" ]; then
+  local recorded_pid
+  recorded_pid=$(cat "$RES_DIR/.build-admission.lock" 2>/dev/null || true)
+  # INN's user-space shlock pads its ASCII PID to ten columns; BSD shlock does not.
+  recorded_pid="${recorded_pid#"${recorded_pid%%[![:space:]]*}"}"
+  recorded_pid="${recorded_pid%"${recorded_pid##*[![:space:]]}"}"
+  if [ "$recorded_pid" = "$$" ]; then
     rm -f "$RES_DIR/.build-admission.lock"
   fi
   BUILD_GUARD=0

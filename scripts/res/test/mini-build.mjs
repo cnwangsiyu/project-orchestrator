@@ -55,7 +55,7 @@ result = run(['take-build', ...args('first-pages'), '--checkout', path.join(repo
   RES_TEST_MEMORYSTATUS_LEVEL: 'missing',
   RES_TEST_VM_STAT: 'Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free: 4194304.\nPages inactive: 0.\nPages speculative: 0.',
 });
-eq(result.code, 0, result.text); release('first-pages');
+eq(result.code, 0, result.text); ok(!fs.existsSync(path.join(state,'.build-admission.lock')),'successful acquisition releases its private guard, including padded shlock PIDs'); release('first-pages');
 
 // Counted slots admit different repositories, reject overlap and enforce cap.
 config('LOAD_LIMIT=30\nLOAD_LIMIT_WITH_LANES=30\nMIN_AVAIL_GIB=8\n');
