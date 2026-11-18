@@ -103,7 +103,21 @@ try {
   fs.writeFileSync(path.join(root, 'resources.tsv'), row(slot(1), host) + row(slot(2), host)
     + row(slot(3), host, 'caps=node dynamic-only') + row(slot(4), host, 'caps=node', 'never')
     + row(slot(5), other, 'caps=node,rust') + row(light, host));
-  config();
+  config(); metrics(0, 100);
+  for (let cycle = 0; cycle < 30; cycle++) { eq(take(slot(1)).status, 0); release(slot(1)); }
+  eq(JSON.parse(fs.readFileSync(ledger, 'utf8')).length, 0, '30 quick cycles leave no reservations');
+  metrics(0, 100, 0, 53);
+  eq(run('take', slot(1), ...args(slot(1)), '--disk-gib', '0').status, 0, 'existing workspace reserves zero disk');
+  const reused = JSON.parse(fs.readFileSync(ledger, 'utf8'));
+  eq(reused.length, 1); eq(reused[0][3], 0);
+  eq(take(slot(1)).status, 0); eq(JSON.parse(fs.readFileSync(ledger, 'utf8')).length, 1, 'one per holder');
+  release(slot(1));
+  metrics(0, 100, 0, 52.99);
+  eq(run('take', slot(1), ...args(slot(1)), '--disk-gib', '0').status, 2, 'real free-space floor stays enforced');
+  const diskFile = path.join(root, 'disk-costs.json'); fs.writeFileSync(diskFile, JSON.stringify({[slot(1)]: 0}));
+  metrics(0, 100, 0, 53);
+  eq(wait('per-slot-reuse', '--disk-gib-file', diskFile, '--exclude-host', other).status, 0); release(slot(1), 'per-slot-reuse');
+  metrics(0, 100, 0, 1000); fs.rmSync(path.join(root, 'devbox-metrics', host + '.json'));
   eq(take(slot(3)).status, 3, 'missing metrics: floating row stays closed');
   eq(take(slot(1)).status, 0, 'missing metrics: static row remains usable');
   release(slot(1)); expireReservations();
@@ -118,19 +132,20 @@ try {
   eq(take(slot(3)).status, 0, 'inclusive load and memory limits');
   match(run('status', slot(3)).stdout, /heavy admitted=1\/3 gate=CLOSED reason=memory .*load5=5 reserved_cores=3 reserved_gib=4 mem_available_gib=8/);
   release(slot(3));
-  match(take(slot(1)).stderr, /devbox gate memory/, 'starts remain reserved after return');
+  eq(JSON.parse(fs.readFileSync(ledger, 'utf8')).length, 0, 'return releases reservation');
+  eq(take(slot(1)).status, 0, 'returned starts no longer block admission');
   expireReservations(301);
-  eq(take(slot(1)).status, 0, 'five-minute-old CPU/memory reservations expire');
+  eq(take(slot(1)).status, 0, 'same holder take remains idempotent');
   release(slot(1)); expireReservations();
   metrics(0, 100, 0, 72.99);
   match(take(slot(1)).stderr, /devbox gate disk/, 'heavy cost preserves 53 GiB');
   metrics(0, 100, 0, 73);
   eq(take(slot(1)).status, 0, 'inclusive disk floor');
-  release(slot(1)); expireReservations(301);
+  expireReservations(301);
   match(take(light).stderr, /devbox gate disk/, 'heavy disk reservation still blocks light after five minutes');
   match(run('status', slot(1)).stdout, /free_disk_gib=73 reserved_disk_gib=20/);
   expireReservations();
-  eq(take(light).status, 0, 'disk reservation expires at 15 minutes'); release(light);
+  eq(take(light).status, 0, 'disk reservation expires at 15 minutes'); release(light); release(slot(1));
   expireReservations();
   config(1, `DEVBOX_HEAVY_DISK_GIB.${host}=15\nDEVBOX_HEAVY_DISK_GIB.project.fixture=50\n`);
   metrics(0, 100, 0, 102.99);

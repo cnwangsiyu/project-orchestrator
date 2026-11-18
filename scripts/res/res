@@ -22,11 +22,11 @@ WAITER_STALE_SECONDS="${RES_WAITER_STALE_SECONDS:-300}"  # 45 s expired the FIFO
 usage() {
   cat <<'EOF'
 res status [<id>]                     show every resource (or one) and who holds it
-res take <id> --by <session> --project <slug> --for "<purpose>" [--task <id>] [--until <when>] [--offline] [--pid <pid>]
-res wait <id> --by <session> --project <slug> --for "<purpose>" --timeout <minutes> [take options]
+res take <id> --by <session> --project <slug> --for "<purpose>" [--task <id>] [--until <when>] [--offline] [--pid <pid>] [--disk-gib <GiB>]
+res wait <id> --by <session> --project <slug> --for "<purpose>" --timeout <minutes> [--disk-gib <GiB>] [--disk-gib-file <JSON>] [take options]
                                       retry held resources; heavy-* waits also enforce the gate
                                       --pid names the long-lived holder (default: caller PID)
-res wait-pool <prefix> --by <session> --project <slug> --for "<purpose>" --timeout <minutes> [--need <cap,cap>] [--prefer-host <ip>] [--prefer-slot <id>] [--exclude-slot <id,...>] [--exclude-host <ip,...>] [--exclude-reason <text>] [--hard-exclude-slot <id,...>] [--hard-exclude-host <ip,...>] [take options]
+res wait-pool <prefix> --by <session> --project <slug> --for "<purpose>" --timeout <minutes> [--need <cap,cap>] [--prefer-host <ip>] [--prefer-slot <id>] [--exclude-slot <id,...>] [--exclude-host <ip,...>] [--exclude-reason <text>] [--hard-exclude-slot <id,...>] [--hard-exclude-host <ip,...>] [--disk-gib <GiB>] [--disk-gib-file <JSON>] [take options]
                                       FIFO wait for any remote <prefix>-<number>; prints slot=<id>
                                       devbox-cn excludes light; devbox-cn-light selects only light
                                       no mini locks or heavy-check; return the printed slot
@@ -953,7 +953,7 @@ show_build_waiters() {
 }
 
 parse() {
-  BY= PROJECT= PURPOSE= TASK= UNTIL= NOTE= FORCE= OFFLINE= DEVICE= POLICY= PID="$PPID" PID_EXPLICIT=
+  BY= PROJECT= PURPOSE= TASK= UNTIL= NOTE= FORCE= OFFLINE= DEVICE= POLICY= PID="$PPID" PID_EXPLICIT= DISK_GIB= DISK_GIB_FILE=
   while [ $# -gt 0 ]; do
     case "$1" in
       --by) BY="$2"; shift 2 ;;
@@ -966,6 +966,13 @@ parse() {
       --offline) OFFLINE=1; shift ;;
       --device) DEVICE="$2"; shift 2 ;;
       --policy) POLICY="$2"; shift 2 ;;
+      --disk-gib|--disk-gib-file)
+        [ $# -ge 2 ] || die "$1 needs a value"
+        if [ "$1" = --disk-gib ]; then
+          [[ "$2" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "--disk-gib needs non-negative GiB"
+          DISK_GIB="$2"
+        else DISK_GIB_FILE="$2"; fi
+        shift 2 ;;
       --pid)
         [ "${ALLOW_PID:-}" = 1 ] || die "unknown option '$1'"
         [ $# -ge 2 ] || die "--pid needs a value"
@@ -1700,14 +1707,14 @@ cmd_wait_pool_legacy() {
 pool_controller() {
   local runner=
   if [ "${POOL_EXEC_CHILD:-0}" = 1 ]; then runner=exec; fi
-  ${runner:+$runner} python3 - "$RES_DIR" "$@" "$BY" "$PROJECT" "$TASK" "$PURPOSE" "$PID" "$UNTIL" "${FORCE:-}" "${POOL_NEED:-}" "${prefer_host:-}" "${prefer_slot:-}" "${excluded_slots:-}" "${excluded_hosts:-}" "${WAITER_STALE_SECONDS}" "$$" "${POOL_EPISODE:-none}" "${exclude_reason:-}" "${hard_slots:-}" "${hard_hosts:-}" <<'PY'
+  ${runner:+$runner} python3 - "$RES_DIR" "$@" "$BY" "$PROJECT" "$TASK" "$PURPOSE" "$PID" "$UNTIL" "${FORCE:-}" "${POOL_NEED:-}" "${prefer_host:-}" "${prefer_slot:-}" "${excluded_slots:-}" "${excluded_hosts:-}" "${WAITER_STALE_SECONDS}" "$$" "${POOL_EPISODE:-none}" "${exclude_reason:-}" "${hard_slots:-}" "${hard_hosts:-}" "${DISK_GIB:-}" "${DISK_GIB_FILE:-}" <<'PY'
 import datetime, fcntl, hashlib, json, math, os, re, shutil, signal, socket, stat, sys, tempfile, time
 from contextlib import contextmanager
-root, action, request, timeout, delay, by, project, task, purpose, pid, until, force, need, prefer, preferred_slot, excluded_slots, excluded_hosts, stale, controller, generation, exclude_reason, hard_slots, hard_hosts = sys.argv[1:]
+root, action, request, timeout, delay, by, project, task, purpose, pid, until, force, need, prefer, preferred_slot, excluded_slots, excluded_hosts, stale, controller, generation, exclude_reason, hard_slots, hard_hosts, disk_gib, disk_gib_file = sys.argv[1:]
 pid = int(pid); stamp = time.time(); now = stamp; host = socket.gethostname()
 controller_key = hashlib.sha256(host.encode()).hexdigest() + '.' + controller + '.' + generation
 locks = os.path.join(root, 'locks'); journal = os.path.join(root, 'log.tsv')
-queue = waiter = episode = None; created = None; committed = False
+queue = waiter = episode = None; created = None; committed = False; reservation_written = False
 def info(directory):
     try:
         with open(os.path.join(directory, 'info')) as stream:
@@ -1786,6 +1793,7 @@ def rollback():
         try: current = os.stat(directory)
         except FileNotFoundError: return False
         if not os.path.samestat(current, os.fstat(descriptor)): return False
+        if reservation_written: forget_reservation(os.path.basename(directory)[:-2], info(directory))
         shutil.rmtree(directory)
         log('return', os.path.basename(directory)[:-2], by, 'pool acquisition rollback')
         return True
@@ -1932,11 +1940,27 @@ try:
         try:
             values = json.loads(regular_text(os.path.join(reserve_dir, box + '.json')))
         except FileNotFoundError: return []
-        # A corrupt reservation ledger must not silently reopen a measured host.
-        if not isinstance(values, list) or any(not isinstance(value, list) or len(value) not in (3, 4)
-                or not all(number(item) and item > 0 for item in value) for value in values):
-            raise ValueError('invalid devbox reservations for ' + box)
-        return [value for value in values if current - value[0] < (900 if len(value) == 4 else 300)]
+        # Legacy anonymous entries expire normally; new records are tied to exact ownership.
+        if not isinstance(values, list): raise ValueError('invalid devbox reservations for ' + box)
+        result = []
+        seen = set()
+        for value in values:
+            if (not isinstance(value, list) or len(value) not in (3, 4, 5)
+                    or not all(number(item) and item > 0 for item in value[:3])
+                    or len(value) >= 4 and (not number(value[3]) or value[3] < 0)):
+                raise ValueError('invalid devbox reservations for ' + box)
+            if current - value[0] >= (900 if len(value) >= 4 else 300): continue
+            if len(value) == 5:
+                owner = value[4]
+                if not isinstance(owner, dict) or not all(owner.get(k) for k in ('slot', 'by', 'pid', 'host', 'start')):
+                    raise ValueError('invalid devbox reservation owner')
+                if owner['slot'] not in remote or remote[owner['slot']][1] != box: continue
+                hold = info(os.path.join(locks, owner['slot'] + '.d'))
+                if any(hold.get(k) != owner[k] for k in ('by', 'pid', 'host', 'start')): continue
+                if owner['slot'] in seen: continue
+                seen.add(owner['slot'])
+            result.append(value)
+        return result
     @contextmanager
     def host_guard(box):
         if not box:
@@ -1946,24 +1970,46 @@ try:
         with open(os.path.join(reserve_dir, box + '.lock'), 'a') as guard:
             fcntl.flock(guard, fcntl.LOCK_EX)
             yield
-    def reserve(box, entries, current, cost):
-        # Keep recent starts after return as both utilization signals can lag.
+    def write_reservations(box, entries):
         with tempfile.NamedTemporaryFile(mode='w', dir=reserve_dir, delete=False) as stream:
             temp = stream.name
             try:
-                json.dump(entries + [[current, *cost]], stream)
+                json.dump(entries, stream)
                 stream.close()
                 os.replace(temp, os.path.join(reserve_dir, box + '.json'))
             finally:
                 if os.path.exists(temp): os.unlink(temp)
-    def gate(box, kind, settings, current, only_dynamic=False, override=False):
+    def reserve(box, entries, current, cost, id, hold):
+        global reservation_written
+        owner = dict(slot=id, **{key: hold[key] for key in ('by', 'pid', 'host', 'start')})
+        entries = [entry for entry in entries if len(entry) < 5 or entry[4]['slot'] != id]
+        write_reservations(box, entries + [[current, *cost, owner]])
+        reservation_written = True
+    def forget_reservation(id, hold):
+        if id not in remote or not slot_type(id): return
+        box = remote[id][1]
+        with host_guard(box):
+            entries = reservations(box, time.time())
+            entries = [entry for entry in entries if len(entry) < 5 or not
+                       (entry[4]['slot'] == id and all(entry[4][k] == hold.get(k) for k in ('by', 'pid', 'host', 'start')))]
+            write_reservations(box, entries)
+    disk_costs = {}
+    if disk_gib_file:
+        disk_costs = json.loads(regular_text(disk_gib_file))
+        if not isinstance(disk_costs, dict): raise ValueError('invalid disk cost file')
+    if disk_gib and (not re.fullmatch(r'[0-9]+(?:\.[0-9]+)?', disk_gib) or float(disk_gib) > 65536):
+        raise ValueError('invalid --disk-gib')
+    if any(not number(value) or not 0 <= value <= 65536 for value in disk_costs.values()):
+        raise ValueError('invalid per-slot disk cost')
+    def gate(box, kind, settings, current, only_dynamic=False, override=False, id=None):
         value = sample(box, current) if settings else {}
         entries = reservations(box, current) if settings else []
         recent = [entry for entry in entries if current - entry[0] < 300]
         cpu, mem = (sum(entry[i] for entry in recent) for i in (1, 2))
-        disk = sum(entry[3] for entry in entries if len(entry) == 4)
+        disk = sum(entry[3] for entry in entries if len(entry) >= 4)
         cost = (settings[kind + '_CORES'], settings[kind + '_GIB'],
-                settings['project_disk'][kind] or settings[kind + '_DISK_GIB']) if settings else None
+                disk_costs.get(id, float(disk_gib) if disk_gib else
+                    settings['project_disk'][kind] or settings[kind + '_DISK_GIB'])) if settings else None
         detail = 'host=%s load5=%s reserved_cores=%g reserved_gib=%g mem_available_gib=%s' % (
             box, value.get('load5', '?'), cpu, mem, value.get('memAvailableGiB', '?'))
         detail += ' free_disk_gib=%s reserved_disk_gib=%g' % (value.get('freeGiB', '?'), disk)
@@ -2192,6 +2238,7 @@ try:
                 if not force or not purpose: raise ValueError("'%s' is held by %s; only --force --note may reclaim it" % (request, hold.get('by', '?')))
                 log('reclaim', request, by, 'from ' + hold.get('by', '?') + ': ' + purpose)
             else: log('return', request, by, purpose)
+            forget_reservation(request, hold)
             shutil.rmtree(directory)
         print('returned ' + request); committed = True; sys.exit(0)
     elif action == 'take':
@@ -2306,7 +2353,7 @@ try:
     def evaluate(id, box, override=False, claimed=False, diagnostic=False):
         current = time.time()
         kind = slot_type(id)
-        reason, detail, entries, cost = gate(box, kind, dynamic.get(box), current, floating(id), override)
+        reason, detail, entries, cost = gate(box, kind, dynamic.get(box), current, floating(id), override, id=id)
         if reason.startswith('static-') and static_full(box, kind, id if claimed else None):
             reason = 'static-cap'
         if not gate_open(reason) and not diagnostic:
@@ -2381,6 +2428,7 @@ try:
                 if stale_hold:
                     old, age = stale_hold
                     previous_holder = old.get('by', '?')
+                    forget_reservation(id, old)
                     shutil.rmtree(directory)
                     log('reclaim-stale', id, previous_holder, 'by=%s pid=%s age_seconds=%d' % (by, old['pid'], age))
                 previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, (signal.SIGINT, signal.SIGTERM, signal.SIGHUP))
@@ -2437,7 +2485,7 @@ try:
                     if not gate_open(reason):
                         rollback()
                         continue
-                    if cost: reserve(box, entries, current, cost)
+                    if cost: reserve(box, entries, current, cost, id, hold)
                     if cost or floating(id): log('gate-admit', id, holder, 'reason=' + reason + ' ' + detail)
             log('take', id, by + ' (' + project + ('/' + task if task else '') + ')', purpose + (' · until ' + until if until else ''))
             print('took ' + id)
@@ -2515,7 +2563,7 @@ cmd_wait_pool() {
           --hard-exclude-slot) hard_slots="$2" ;;
           --hard-exclude-host) hard_hosts="$2" ;;
         esac; shift 2 ;;
-      --by|--project|--for|--task|--until|--note|--pid)
+      --by|--project|--for|--task|--until|--note|--pid|--disk-gib|--disk-gib-file)
         [ $# -ge 2 ] || die "$1 needs a value"; args+=("$1" "$2"); shift 2 ;;
       --force|--offline) args+=("$1"); shift ;;
       *) die "unknown option '$1'" ;;

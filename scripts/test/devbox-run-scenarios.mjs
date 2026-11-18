@@ -55,7 +55,7 @@ const a=process.argv.slice(2), op=a[0], by=flag(a,'--by');
 if(c.noHelp&&(op==='help'||a.includes('--help'))){console.error('res: broken');process.exit(1);}
 if(c.liveHelp&&a.includes('--help')){console.error('res: wait-pool needs a resource prefix');process.exit(1);}
 if(c.liveHelp&&op==='help'){console.log('res wait-pool <prefix> --by S [--need <cap,cap>] [--prefer-host <ip>] [--prefer-slot <id>] [--exclude-slot <id,...>] [--exclude-host <ip,...>]');return;}
-if(a.includes('--help')) {console.log('res wait-pool'+(c.legacy?'':' --prefer-host IP --need CAP --exclude-slot IDS --exclude-host IPS'+(c.preferSlot?' --prefer-slot SLOT':'')));return;}
+if(a.includes('--help')) {console.log('res wait-pool'+(c.legacy?'':' --prefer-host IP --need CAP --exclude-slot IDS --exclude-host IPS'+(c.preferSlot?' --prefer-slot SLOT':'')+(c.diskCosts?' --disk-gib-file JSON':'')));return;}
 const rows=fs.readFileSync(path.join(c.shared,'resources.tsv'),'utf8').trim().split('\n').map(l=>{const [slot,kind,policy,,desc]=l.split('\t');return {slot,kind,policy,host:desc.match(/@(\d+\.\d+\.\d+\.\d+)/)?.[1],caps:desc.match(/caps=([\w,-]+)/)?.[1].split(',')||[]};});
 if(op==='return'){
  const lock=path.join(c.shared,'locks',a[1]+'.d');
@@ -648,6 +648,13 @@ async function metricScenarios() {
   assert.equal(result.summary.shards[0].host, '192.0.2.2');
   assert.ok(!unavailable.events().some(event => event.op === 'run' && event.host === host && event.slot === 'devbox-cn-1'));
   returned(unavailable);
+  const reuse = fixture({ diskCosts: true });
+  const cold = await run(reuse); ok(cold);
+  assert.deepEqual(cold.summary.shards[0].attempts[0].diskCosts, {});
+  const warm = await run(reuse); ok(warm);
+  assert.equal(warm.summary.shards[0].attempts[0].diskCosts['devbox-cn-1'], 0);
+  assert.ok(reuse.events().some(event => event.op === 'acquire-call' && event.args.includes('--disk-gib-file')));
+  returned(reuse);
   console.log('PASS devbox metrics refresh, fresh-cache reuse, kill switch and disk guard on fallback');
 }
 

@@ -128,7 +128,7 @@ under five minutes old, `res` uses the baseline static rows and leaves
 With light reclaim enabled, a light-pool FIFO head can recover a hold older than
 15 minutes when `res` can prove the recorded local holder PID is dead.
 The dynamic disk budget keeps at least 53 GiB available after 15-minute
-reservations. See the res contract for [disk budgets and rollout](res-contract.md#changes-in-v110) and [load and memory admission](res-contract.md#changes-in-v19).
+reservations, released on return. The runner inventories per-slot project worktrees before admission and uses zero disk cost for existing workspaces; new workspaces use the configured project/host cost. See the res contract for [disk budgets and rollout](res-contract.md#changes-in-v110) and [load and memory admission](res-contract.md#changes-in-v19).
 
 Immediately before each command launch, the runner reads host cores from the
 mini's `devbox-hosts.json` and counts currently held registered heavy slots on

@@ -429,6 +429,11 @@ for meta in (root/'wt').glob('*/*/*/.devbox-run.json'):
         rows.append({'slot':row['slot'],'workspace':str(meta.parent),'repository':row['repository']})
 print(json.dumps(rows))
 `,
+  workspaces: pythonHeader + `root=pathlib.Path(d['root']); record=root/'store-index'/d['key']
+name=record.read_text() if record.is_file() else d['key']
+if not name or '/' in name or name in ('.','..'): raise RuntimeError('invalid store index')
+print(json.dumps([slot for slot in d['slots'] if (root/'wt'/d['project']/name/slot/'.git').is_file()]))
+`,
   recent: pythonHeader + `root=pathlib.Path(d['root']); recent={}
 for meta in (root/'wt'/d['project']).glob('*/*/.devbox-run.json'):
     if meta.is_symlink() or not meta.resolve().is_relative_to(root.resolve()): continue
@@ -1107,7 +1112,18 @@ async function shard(opts) {
         const common = ['--by', by, '--project', opts.project, '--task', opts.task, '--for', opts.task, '--pid', String(process.pid)];
         const refresh = () => refreshHostMetrics(possible, state, { timeout: Math.min(15000, remaining()) });
         await refresh();
-        const args = ['wait-pool', opts.pool, ...common, '--timeout', String(remaining() / 60000)];
+        const diskCosts = {};
+        if (opts.diskCostsSupported) for (const [host, candidate] of new Map(possible.map(item => [item.host, item]))) {
+          const root = await hostRoot(candidate, state, { deadline });
+          const present = JSON.parse(checked(await ssh(candidate, 'workspaces', { root, project: opts.project, key: opts.snapshot.storeKey,
+            slots: possible.filter(item => item.host === host).map(item => item.slot) }, { state, timeout: remaining() }), 'workspace disk inventory'));
+          for (const slot of present) if (possible.some(item => item.host === host && item.slot === slot)) diskCosts[slot] = 0;
+        }
+        const diskCostFile = path.join(opts.out, `shard-${opts.shard}-disk-costs.json`);
+        if (opts.diskCostsSupported) writeJSON(diskCostFile, diskCosts);
+        const diskArgs = opts.diskCostsSupported ? ['--disk-gib-file', diskCostFile] : [];
+        attempt.diskCosts = diskCosts;
+        const args = ['wait-pool', opts.pool, ...common, '--timeout', String(remaining() / 60000), ...diskArgs];
         const callerSlots = softExclusionsDropped ? [] : opts.excludeSlot;
         const callerHosts = softExclusionsDropped ? [] : opts.excludeHost;
         if (opts.splitExclusions) {
@@ -1129,13 +1145,13 @@ async function shard(opts) {
           const candidates = opts.prewarmSlots.map(slot => choices.find(item => item.slot === slot)).filter(Boolean);
           for (const candidate of candidates) {
             if (quarantinedHosts(sharedDir()).has(candidate.host) || heldSlots(sharedDir(), candidate.host).length) break;
-            const take = await runRes(['take', candidate.slot, ...common]);
+            const take = await runRes(['take', candidate.slot, ...common, ...diskArgs]);
             if (!take.code) { acquire = { ...take, stdout: `slot=${candidate.slot}\n` }; break; }
             if (take.code !== 2 && take.code !== 3) checked(take, 'prewarm slot acquisition');
           }
           if (!acquire) { attempt.skipped = true; attempt.exit = 0; emit(`[shard ${opts.shard}] prewarm skipped: host is busy\n`); break; }
         } else if (!avoid) for (const candidate of preferredSlots) {
-          const take = await runRes(['take', candidate.slot, ...common]);
+          const take = await runRes(['take', candidate.slot, ...common, ...diskArgs]);
           if (!take.code) { acquire = { ...take, stdout: `slot=${candidate.slot}\n` }; break; }
           if (take.code !== 2 && take.code !== 3) checked(take, 'affinity slot acquisition');
         }
@@ -1162,7 +1178,7 @@ async function shard(opts) {
           // Old controllers have no preference/exclusion flag. Keep arbitration in res.
           row = choices.find(item => avoid && item.host !== avoid.host) || choices[0];
           if (!row) throw Error('no alternate slot meets the requested placement constraints');
-          const result = await runRes(['wait', row.slot, ...common, '--timeout', String(remaining() / 60000)]);
+          const result = await runRes(['wait', row.slot, ...common, ...diskArgs, '--timeout', String(remaining() / 60000)]);
           if (!result.code) attempt.slot = row.slot;
           checked(result, 'alternate slot acquisition');
         }
@@ -1467,6 +1483,7 @@ async function main(args) {
       console.error('devbox-run: could not read res flags (`res help` and `res wait-pool --help` both failed); refusing to place shards without --need/--exclude-* constraints');
       return 2;
     }
+    opts.diskCostsSupported = helpText.includes('--disk-gib-file');
     opts.preferSupported = /--prefer-host\b/.test(helpText);
     opts.excludeSlotSupported = helpText.includes('--exclude-slot');
     opts.excludeHostSupported = helpText.includes('--exclude-host');
