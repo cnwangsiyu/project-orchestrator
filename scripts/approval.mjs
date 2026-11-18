@@ -24,7 +24,7 @@ const idSafe = (s) => String(s).replace(/[^a-zA-Z0-9_.:@/-]+/g, '-').replace(/\.
 const argv = process.argv.slice(2);
 const cmd = argv[0];
 if (!cmd || cmd === '--help' || cmd === '-h') {
-  console.log('usage: approval.mjs add --account <id> --ref <user decision ref> --until <ISO> [--note "..."] -- <route.mjs args>\n       approval.mjs list [--all]\n       approval.mjs revoke <id>');
+  console.log('usage: approval.mjs add --account <id> --ref <user decision ref> --until <ISO> [--astra] [--note "..."] -- <route.mjs args>\n       approval.mjs list [--all]\n       approval.mjs revoke <id>');
   process.exit(cmd ? 0 : 2);
 }
 if (cmd === 'list') {
@@ -54,7 +54,9 @@ if (!account || !ref || !Number.isFinite(until)) die('add needs --account, --ref
 if (until <= Date.now()) die('--until is in the past');
 const r = spawnSync(process.execPath, [path.join(here, 'route.mjs'), ...routeArgs.filter((a) => a !== '--json'), '--json'], { encoding: 'utf8', maxBuffer: 32 * 2 ** 20 });
 let plan; try { plan = JSON.parse(r.stdout).plan; } catch { die(`route.mjs did not return a plan: ${(r.stderr || r.stdout).slice(0, 400)}`, 1); }
-const gates = (plan?.gates ?? []).filter((g) => g.kind === 'personal-quota' && g.scope?.accounts?.includes(account));
+// --astra also records the personal GPT-6-Astra gate (only when the user's decision covers Astra).
+const kinds = own.includes('--astra') ? ['personal-quota', 'astra'] : ['personal-quota'];
+const gates = (plan?.gates ?? []).filter((g) => kinds.includes(g.kind) && g.scope?.accounts?.includes(account));
 if (!gates.length) {
   const asked = (plan?.gates ?? []).map((g) => g.scope?.accounts?.join(',')).filter(Boolean);
   die(asked.length ? `the route asks for ${asked.join(' / ')}, not ${account}; add --exclude-account for the others to the route args`
