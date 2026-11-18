@@ -104,6 +104,10 @@ if(c.authFailures){
  const file=path.join(c.dir,'auth-count');const count=fs.existsSync(file)?Number(fs.readFileSync(file)):0;
  if(count<c.authFailures){fs.writeFileSync(file,String(count+1));console.error(c.authMessage||'Permission denied (gssapi-with-mic)');process.exit(255);}
 }
+if(op==='reconnect'){
+ if(c.reconnectRetries&&!fs.existsSync(path.join(c.dir,'reconnect-failed'))){fs.writeFileSync(path.join(c.dir,'reconnect-failed'),'1');process.exit(255);}
+ console.log(c.remoteRunning?'group-running':'group-gone');return;
+}
 if(c.postStartFailure&&op==='run'){
  console.error(command.match(/'(DEVBOX_STARTED_[^']+)'/)[1]);console.error('Connection closed by remote host');process.exit(255);
 }
@@ -113,7 +117,7 @@ if(op==='probe') {
 }
 if(op==='metrics') {
  if(c.metricsUnavailable)process.exit(1);
- console.log(JSON.stringify({cores:8,load5:2.5,memAvailableGiB:24}));return;
+ console.log(JSON.stringify({cores:8,load5:2.5,memAvailableGiB:24,freeGiB:100}));return;
 }
 if(op==='bundle'&&c.uploadRetry&&!fs.existsSync(path.join(c.dir,'retried'))){fs.writeFileSync(path.join(c.dir,'retried'),'1');process.stdin.resume();await new Promise(r=>process.stdin.on('end',r));console.error(c.uploadRetry);process.exit(255);}
 if(op==='run') {
@@ -588,6 +592,14 @@ os.kill(pid,0)`;
       old.run = path.basename(ctl);
       for (const file of ['owner.json','group.json']) fs.writeFileSync(path.join(ctl,file),JSON.stringify(old));
       assert.equal(cleanup().status,0, 'reused group ID with a different start time');
+      const reconnect = control => spawnSync('python3', ['-c', remoteScripts.reconnect,
+        Buffer.from(JSON.stringify({ control })).toString('base64')], { encoding: 'utf8' });
+      assert.equal(reconnect(active).stdout.trim(), 'group-gone');
+      const stat = fs.readFileSync(`/proc/${other.pid}/stat`, 'utf8').split(')').at(-1).trim().split(' ');
+      fs.rmSync(path.join(ctl, 'cancel'));
+      fs.writeFileSync(path.join(ctl, 'group.json'), JSON.stringify({ ...old, start: stat[19] }));
+      assert.equal(reconnect(ctl).stdout.trim(), 'group-running');
+      assert.ok(!fs.existsSync(path.join(ctl, 'cancel')), 'read-only reconnect must never cancel a process');
     }
     const alive = await Promise.race([closed.then(() => false), sleep(100).then(() => true)]);
     assert.equal(alive,true,'the foreign process survived both stop and cleanup');
@@ -602,10 +614,11 @@ async function metricScenarios() {
   fs.writeFileSync(mem, 'MemTotal: 33554432 kB\nMemAvailable: 25165824 kB\n');
   const metricsSource = remoteScripts.metrics.replace("'/proc/loadavg'", JSON.stringify(load))
     .replace("'/proc/meminfo'", JSON.stringify(mem));
-  const actual = JSON.parse(execFileSync('python3', ['-c', metricsSource, 'e30='], { encoding: 'utf8' }));
+  const actual = JSON.parse(execFileSync('python3', ['-c', metricsSource, Buffer.from(JSON.stringify({ root: temp })).toString('base64')], { encoding: 'utf8' }));
   assert.ok(actual.cores > 0);
   assert.equal(actual.load5, 2.5);
   assert.equal(actual.memAvailableGiB, 24);
+  assert.ok(actual.freeGiB > 0);
   const config = f => path.join(f.shared, 'machine.conf');
   const setGate = (f, enabled) => fs.writeFileSync(config(f), `DEVBOX_DYNAMIC_ADMISSION=${enabled}\nDEVBOX_DYNAMIC_HOSTS=${host}\n`);
   const f = fixture();
@@ -619,7 +632,7 @@ async function metricScenarios() {
   assert.ok(first.indexOf('metrics') < first.indexOf('acquire-call'));
   assert.ok(first.lastIndexOf('metrics') > first.indexOf('group-gone'));
   const sample = JSON.parse(fs.readFileSync(file));
-  assert.deepEqual({ ...sample, at: 0 }, { at: 0, cores: 8, load5: 2.5, memAvailableGiB: 24 });
+  assert.deepEqual({ ...sample, at: 0 }, { at: 0, cores: 8, load5: 2.5, memAvailableGiB: 24, freeGiB: 100 });
   assert.ok(Date.now() / 1000 - sample.at < 60);
   ok(await run(f));
   assert.equal(f.events().filter(event => event.op === 'metrics').length, 3, 'fresh sample only refreshes after the next run');
@@ -638,9 +651,56 @@ async function metricScenarios() {
   console.log('PASS devbox metrics refresh, fresh-cache reuse, kill switch and disk guard on fallback');
 }
 
+async function placementScenarios() {
+  const f = fixture();
+  f.env.RES_COMMAND = fileURLToPath(new URL('../res/res', import.meta.url));
+  fs.writeFileSync(path.join(f.shared, 'machine.conf'), 'DEVBOX_SOFT_EXCLUDE_MINUTES=0.001\n');
+  const held = path.join(f.shared, 'locks', 'devbox-cn-1.d');
+  fs.mkdirSync(held);
+  fs.writeFileSync(path.join(held, 'info'), 'by\tforeign-fixture\npid\t1\n');
+  const result = await run(f, ['--exclude-host', '192.0.2.2'], 'exit 9');
+  assert.equal(result.code, 9, result.stdout + result.stderr);
+  const shard = result.summary.shards[0];
+  assert.deepEqual(shard.softExclusionsDropped.hosts, ['192.0.2.2']);
+  assert.equal(shard.host, '192.0.2.2');
+  assert.match(result.stdout, /rerun with --exclude-reason/i);
+  assert.match(shard.attempts[0].error, /dropped automatically/);
+  const hard = await run(f, ['--timeout', '0.05', '--exclude-host', '192.0.2.2', '--exclude-reason', 'fixture binding']);
+  assert.notEqual(hard.code, 0);
+  assert.equal(hard.summary.shards[0].softExclusionsDropped, undefined);
+  assert.ok(f.events().every(event => event.op !== 'run' || event.host === '192.0.2.2'));
+  assert.deepEqual(fs.readdirSync(path.join(f.shared, 'locks')), ['devbox-cn-1.d']);
+  console.log('PASS runner soft-exclusion summary and failure guidance, hard filter, and foreign hold preservation');
+}
+
+async function sshDropScenarios() {
+  const gone = fixture({ postStartFailure: true, reconnectRetries: true });
+  const completed = await run(gone);
+  assert.equal(completed.code, 255);
+  assert.equal(completed.summary.shards[0].attempts[0].sshRecovery, 'group-gone');
+  assert.equal(gone.events().filter(e => e.op === 'run').length, 1);
+  assert.equal(gone.events().filter(e => e.op === 'reconnect').length, 2);
+  assert.ok(!gone.events().some(e => e.op === 'cleanup'));
+  returned(gone);
+
+  const live = fixture({ postStartFailure: true, remoteRunning: true });
+  const held = await run(live);
+  assert.equal(held.code, 255);
+  const attempt = held.summary.shards[0].attempts[0];
+  assert.equal(attempt.remoteJobStillRunning, true);
+  assert.match(held.stdout, /remote job still running/);
+  assert.ok(held.stdout.includes(attempt.stopCommand));
+  assert.ok(!live.events().some(e => e.op === 'cleanup' || e.op === 'return'));
+  const stop = spawnSync('/bin/sh', ['-c', attempt.stopCommand], { env: live.env, encoding: 'utf8' });
+  assert.equal(stop.status, 0, stop.stdout + stop.stderr);
+  assert.match(stop.stdout, /confirmed remote cleanup and returned/);
+  returned(live);
+  console.log('PASS bounded SSH reconnect confirms a gone group or retains a live job until explicit stop');
+}
+
 async function scenarios() {
   const only = process.env.DEVBOX_TEST_CASE;
-  const perf = { credentials: credentialScenarios, 'packed-module': packedModuleRecovery, receipt: receiptScenarios, 'res-progress': resProgressScenarios, cpu: cpuScenarios, auto: autoScenarios, units: unitScenarios, prewarm: prewarmScenarios, metrics: metricScenarios };
+  const perf = { credentials: credentialScenarios, 'packed-module': packedModuleRecovery, receipt: receiptScenarios, 'res-progress': resProgressScenarios, cpu: cpuScenarios, auto: autoScenarios, units: unitScenarios, prewarm: prewarmScenarios, metrics: metricScenarios, placement: placementScenarios, 'ssh-drop': sshDropScenarios };
   if (only && !['baseline', 'bundle', 'ownership', ...Object.keys(perf)].includes(only)) throw Error('unknown devbox fixture case');
   for (const [name, scenario] of Object.entries(perf)) if (!only || only === name) await scenario();
   if (!only || only === 'baseline' || only === 'bundle') await bundleRecovery();
@@ -842,8 +902,8 @@ async function scenarios() {
   const exhausted = fixture({ authFailures: 4 }); const exhaustedRun = await run(exhausted, ['--rerun-on-fail']);
   assert.equal(exhaustedRun.code, 255); assert.equal(exhaustedRun.summary.shards[0].attempts[0].infraFailure, true);
   assert.equal(exhausted.events().filter(e => e.op === 'probe').length, 4); returned(exhausted);
-  const started = fixture({ postStartFailure: true }); assert.equal((await run(started)).code, 255);
-  assert.equal(started.events().filter(e => e.op === 'run').length, 1); returned(started);
+  await placementScenarios();
+  await sshDropScenarios();
   console.log('PASS jittered SSH establishment retries, bounded infra failure, no replay after remote start, no ControlMaster');
 }
 

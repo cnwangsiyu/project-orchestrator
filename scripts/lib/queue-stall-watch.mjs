@@ -106,10 +106,55 @@ export function queueStallText(row, queue, { launch, quota = {}, notes = [], hol
   return { text: `${head} Owner only: check current status and standing approval, write a handoff, and confirm no work will be lost and holds are returned. Interrupt: ${interrupt}; after confirmed cancellation, if scoped approval is required and covered: ${approval}; replan with ${reroute}; start a fresh thread with the handoff.`, commands: { interrupt, approval, reroute }, routeArgs: route.args };
 }
 
+const readPoolWaits = () => {
+  const root = path.join(process.env.RES_DIR || rulesShared(), 'pool-waiters');
+  const names = dir => { try { return fs.readdirSync(dir); } catch { return []; } };
+  return names(root).flatMap(pool => names(path.join(root, pool)).filter(name => name.startsWith('waiter.')).flatMap(name => {
+    try {
+      const lines = fs.readFileSync(path.join(root, pool, name, 'info'), 'utf8').trimEnd().split('\n');
+      const wait = Object.fromEntries(lines.map(line => line.split(/\t(.*)/s).slice(0, 2)));
+      return [{ ...wait, key: pool + '/' + name }];
+    } catch { return []; }
+  }));
+};
+
+export function createPoolStallMonitor(owner, { emit, waitsOf = readPoolWaits } = {}) {
+  const file = path.join(rulesShared(), 'pool-stall-watch', `${createHash('sha256').update(owner).digest('hex')}.json`);
+  return async (rows, notes, now) => {
+    const waits = waitsOf();
+    if (!waits.length && !fs.existsSync(file)) return [];
+    return withLock(file, () => {
+      const states = read(file, {}), prior = JSON.stringify(states), events = [];
+      const active = new Set(waits.map(wait => wait.key));
+      for (const key of Object.keys(states)) if (!active.has(key) && now - states[key] > 1800000) delete states[key];
+      for (const wait of waits) {
+        const age = now - Number(wait.started_at) * 1000, heartbeatAge = now - Number(wait.heartbeat) * 1000;
+        if (!wait.exclude_reason || !wait.self_restricted || !(age > 600000)
+            || !(heartbeatAge >= 0 && heartbeatAge <= 300000) || states[wait.key]
+            || wait.worker_owner && wait.worker_owner !== owner) continue;
+        const matches = rows.filter(row => row.owner === owner && !row.stale && (wait.worker_thread
+          ? row.thread === wait.worker_thread && (!wait.worker_account || row.account === wait.worker_account)
+          : wait.worker_owner && row.project === wait.project && [row.task, row.name].includes(wait.task)));
+        if (matches.length !== 1) continue;
+        if (notes.some(note => note.kind === 'pool-stalled' && note.poolEpisode === wait.key)) {
+          states[wait.key] = now;
+          continue;
+        }
+        const event = emit({ ...matches[0], event: 'message', kind: 'pool-stalled', severity: 'risk', wake: true, poolEpisode: wait.key,
+          text: `Devbox wait stalled for ${Math.floor(age / 60000)} min. ${wait.holder} (${wait.project}/${wait.task}) set exclusions with reason "${wait.exclude_reason}". Free matching hosts: ${wait.self_restricted}.` });
+        if (event) { states[wait.key] = now; events.push(event); }
+      }
+      if (JSON.stringify(states) !== prior) writeJson(file, states);
+      return events;
+    });
+  };
+}
+
 export function createQueueStallMonitor(owner, { profiles = {}, statusOf = row => queueStatus(row, profiles),
   launchOf = row => savedLaunch(row.account, row.thread), quotaOf = () => read(process.env.QUOTA_CACHE || path.join(rulesShared(), 'quota.json'), {}),
   emit, policyOf = queuePolicy, holdsOf = holdsFor } = {}) {
   const file = path.join(rulesShared(), 'queue-stall-watch', `${createHash('sha256').update(owner).digest('hex')}.json`);
+  const poolPoll = createPoolStallMonitor(owner, { emit });
   const retainProgress = (rows, notes) => rows.filter(row => profiles[row.account]?.kind === 'trae')
     .map(row => lastProgress(row, notes)?.id).filter(Boolean);
   const poll = async (rows, notes = rows, now = Date.now()) => {
@@ -149,5 +194,11 @@ export function createQueueStallMonitor(owner, { profiles = {}, statusOf = row =
       return events;
     });
   };
-  return { poll, retainProgress };
+  return {
+    async poll(rows, notes = rows, now = Date.now()) {
+      const events = await poll(rows, notes, now);
+      return events.concat(await poolPoll(rows, notes, now));
+    },
+    retainProgress,
+  };
 }

@@ -66,9 +66,10 @@ repositories remain on RemoteX / TT-VEIS, rather than these devbox worktrees.
 | `--out DIR` | Logs and summary; defaults to a unique directory in the local temporary directory; refuses to overwrite a previous run |
 | `--env K=V` | Repeatable explicit command environment; credential-related and SSH/Git configuration variables are refused |
 | `--affinity KEY` | Defaults to repository identity + branch/ref |
-| `--prefer-host IP` | Preferred box, subject to availability and capabilities |
+| `--prefer-host IP`, `--prefer-slot ID` | Preferred box or slot, subject to availability, capabilities and FIFO |
 | `--need CAP[,CAP]` | Required registry capabilities |
-| `--exclude-slot ID[,ID]`, `--exclude-host IP[,IP]` | Skip these slots or hosts even when preferred. Both options are repeatable. |
+| `--exclude-slot ID[,ID]`, `--exclude-host IP[,IP]` | Initially skip these slots or hosts. Both options are repeatable. |
+| `--exclude-reason TEXT` | State a reason and keep caller exclusions for the entire wait. Include the reason in the worker report when adding exclusions or a slot preference. |
 | `--submodules` | Transfer recursively pinned commits from initialized local submodules, including unpublished commits. |
 | `--rerun-on-fail` | Retry a failed shard once on another slot, preferring a different box |
 | `--allow-flaky` | A failing shard that passes its rerun may make the overall run pass |
@@ -98,21 +99,36 @@ strategy and expected total command seconds), and the run mode. Attempts record
 `cpus`, `hostCores`, `heavyHolders` and `commandDurationSec`; unit runs include
 their assigned `units` and per-unit duration/exit receipts.
 
+## Placement waits
+
+Keep task inputs usable on any matching devbox. When free matching capacity is
+available only on an excluded host, the controller names those hosts in the
+shard log and displays `self_restricted` in `res status`. With no reason,
+a queued shard drops its soft exclusions after five minutes in this condition,
+keeps its FIFO position, and records `softExclusionsDropped: {hosts, slots, afterSec}`
+in `summary.json`. A subsequent failure includes the rerun guidance.
+`DEVBOX_SOFT_EXCLUDE_MINUTES` changes the threshold. A reasoned wait longer
+than ten minutes in this condition wakes an armed owner watcher once. Failed
+slots, hosts refused by the live disk guard, quarantine, and slot requirements
+still constrain placement. Auto sizing and prewarm plan from current eligible
+capacity and can decline to launch when it is unavailable. Install the matching
+`res` for soft fallback, waiter diagnostics and retained-hold protection.
+
 ## CPU budgets and unit sharding
 
 On enrolled CN hosts the runner refreshes admission metrics before requesting a slot
 when the cached sample is over 60 seconds old. It checks again every minute while
 waiting and refreshes the selected host after a run with confirmed cleanup.
 The probe reads field 2 of Linux `/proc/loadavg` (the five-minute average), the
-CPU count and `MemAvailable`. Samples are atomically published to
+CPU count, `MemAvailable` and available GiB on the workspace-root filesystem. Samples are atomically published to
 `<RES_DIR>/devbox-metrics/<host>.json` with a local Unix timestamp in seconds.
 The runner can still place work when the probe is unavailable. With no sample
 under five minutes old, `res` uses the baseline static rows and leaves
 `dynamic-only` rows closed. Existing workspace disk checks still run before the job.
 With light reclaim enabled, a light-pool FIFO head can recover a hold older than
 15 minutes when `res` can prove the recorded local holder PID is dead.
-See [the res contract](res-contract.md#changes-in-v19) for host enrollment, reservations,
-status and rollback.
+The dynamic disk budget keeps at least 53 GiB available after 15-minute
+reservations. See the res contract for [disk budgets and rollout](res-contract.md#changes-in-v110) and [load and memory admission](res-contract.md#changes-in-v19).
 
 Immediately before each command launch, the runner reads host cores from the
 mini's `devbox-hosts.json` and counts currently held registered heavy slots on
@@ -609,6 +625,15 @@ identity, and enforces a remote deadline even when the local connection is
 lost. Signals, timeout and normal completion all stop remaining descendants.
 Cleanup writes a cancellation marker, waits for the supervisor's receipt and
 confirms that the group is gone before artifact retrieval and `res return`.
+If the remote command's SSH session drops with exit 255, the runner opens
+up to three read-only reconnects. If the remote process group is confirmed gone,
+the runner returns the slot and preserves the command's transport exit status.
+If it is still running or cleanup cannot be proven, the runner retains the slot
+and records the exact UUID-scoped stop command. The reconnect never requests
+cancellation. An explicit `stop` can use the retained run receipt after the
+local runner exits. It verifies the slot holder, requests remote cleanup and
+returns the slot after confirmation.
+
 SSH uses batch mode and 15-second keepalives with four missed responses;
 interrupted bundle/overlay uploads get one fresh connection retry on Broken
 pipe or MAC errors.

@@ -26,7 +26,7 @@ res take <id> --by <session> --project <slug> --for "<purpose>" [--task <id>] [-
 res wait <id> --by <session> --project <slug> --for "<purpose>" --timeout <minutes> [take options]
                                       retry held resources; heavy-* waits also enforce the gate
                                       --pid names the long-lived holder (default: caller PID)
-res wait-pool <prefix> --by <session> --project <slug> --for "<purpose>" --timeout <minutes> [--need <cap,cap>] [--prefer-host <ip>] [--prefer-slot <id>] [--exclude-slot <id,...>] [--exclude-host <ip,...>] [take options]
+res wait-pool <prefix> --by <session> --project <slug> --for "<purpose>" --timeout <minutes> [--need <cap,cap>] [--prefer-host <ip>] [--prefer-slot <id>] [--exclude-slot <id,...>] [--exclude-host <ip,...>] [--exclude-reason <text>] [--hard-exclude-slot <id,...>] [--hard-exclude-host <ip,...>] [take options]
                                       FIFO wait for any remote <prefix>-<number>; prints slot=<id>
                                       devbox-cn excludes light; devbox-cn-light selects only light
                                       no mini locks or heavy-check; return the printed slot
@@ -34,6 +34,7 @@ res wait-pool <prefix> --by <session> --project <slug> --for "<purpose>" --timeo
                                       need requires all caps; prefer-slot then its host precede fallback
                                       affinity only at score <=0.5; otherwise balance held slots/cores
                                       recent same-repo worktrees break capacity-score ties only
+res retain-remote <id> --by <session> --pid <holder-pid>
 res box-health [--json]               show remote box health (no probes)
 res quarantine <host> --reason "..."  exclude a registered box until unquarantine
 res unquarantine <host>              clear quarantine and infrastructure failure history
@@ -142,7 +143,7 @@ PY
       gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
       gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
       # The remote pool controller owns these keys and validates them independently.
-      if (key ~ /^DEVBOX_(DYNAMIC_ADMISSION|DYNAMIC_HOSTS|LIGHT_STALE_RECLAIM)$/ || key ~ /^DEVBOX_(LOAD_PER_CORE|MIN_AVAIL_GIB|HEAVY_CORES|HEAVY_GIB|LIGHT_CORES|LIGHT_GIB)(\.[A-Za-z0-9][A-Za-z0-9.-]*)?$/) next
+      if (key ~ /^DEVBOX_(DYNAMIC_ADMISSION|DYNAMIC_HOSTS|LIGHT_STALE_RECLAIM|SOFT_EXCLUDE_MINUTES)$/ || key ~ /^DEVBOX_(LOAD_PER_CORE|MIN_AVAIL_GIB|HEAVY_CORES|HEAVY_GIB|LIGHT_CORES|LIGHT_GIB|HEAVY_DISK_GIB|LIGHT_DISK_GIB)(\.[A-Za-z0-9][A-Za-z0-9.-]*)?$/) next
       if (key !~ /^(LOAD_LIMIT|LOAD_LIMIT_WITH_LANES|MIN_AVAIL_GIB|LANE3_LOAD|LANE3_AVAIL_GIB|LANE_LOAD_PER_CORE|LANE_MIN_AVAIL_GIB|BUILD_LOAD_PER_CORE|BUILD_MAX_CONCURRENCY|BUILD_CONCURRENT_LOAD_PER_CORE|BUILD_CONCURRENT_MIN_AVAIL_GIB|LOAD_OVERRIDE_MINUTES|LOAD_POLL_SECONDS)$/ || seen[key]++) exit 1
       if (value !~ /^[0-9]+([.][0-9]+)?$/ || value + 0 <= 0) exit 1
       if (key ~ /^(BUILD_MAX_CONCURRENCY|LOAD_POLL_SECONDS)$/ && value !~ /^[0-9]+$/) exit 1
@@ -1689,10 +1690,10 @@ cmd_wait_pool_legacy() {
 pool_controller() {
   local runner=
   if [ "${POOL_EXEC_CHILD:-0}" = 1 ]; then runner=exec; fi
-  ${runner:+$runner} python3 - "$RES_DIR" "$@" "$BY" "$PROJECT" "$TASK" "$PURPOSE" "$PID" "$UNTIL" "${FORCE:-}" "${POOL_NEED:-}" "${prefer_host:-}" "${prefer_slot:-}" "${excluded_slots:-}" "${excluded_hosts:-}" "${WAITER_STALE_SECONDS}" "$$" "${POOL_EPISODE:-none}" <<'PY'
+  ${runner:+$runner} python3 - "$RES_DIR" "$@" "$BY" "$PROJECT" "$TASK" "$PURPOSE" "$PID" "$UNTIL" "${FORCE:-}" "${POOL_NEED:-}" "${prefer_host:-}" "${prefer_slot:-}" "${excluded_slots:-}" "${excluded_hosts:-}" "${WAITER_STALE_SECONDS}" "$$" "${POOL_EPISODE:-none}" "${exclude_reason:-}" "${hard_slots:-}" "${hard_hosts:-}" <<'PY'
 import datetime, fcntl, hashlib, json, math, os, re, shutil, signal, socket, stat, sys, tempfile, time
 from contextlib import contextmanager
-root, action, request, timeout, delay, by, project, task, purpose, pid, until, force, need, prefer, preferred_slot, excluded_slots, excluded_hosts, stale, controller, generation = sys.argv[1:]
+root, action, request, timeout, delay, by, project, task, purpose, pid, until, force, need, prefer, preferred_slot, excluded_slots, excluded_hosts, stale, controller, generation, exclude_reason, hard_slots, hard_hosts = sys.argv[1:]
 pid = int(pid); stamp = time.time(); now = stamp; host = socket.gethostname()
 controller_key = hashlib.sha256(host.encode()).hexdigest() + '.' + controller + '.' + generation
 locks = os.path.join(root, 'locks'); journal = os.path.join(root, 'log.tsv')
@@ -1850,30 +1851,40 @@ try:
             return stream.read()
     def devbox_settings():
         host_pattern = r'[A-Za-z0-9][A-Za-z0-9.-]*'
-        defaults = dict(LOAD_PER_CORE=1, MIN_AVAIL_GIB=4, HEAVY_CORES=3, HEAVY_GIB=4, LIGHT_CORES=1, LIGHT_GIB=2)
+        defaults = dict(LOAD_PER_CORE=1, MIN_AVAIL_GIB=4, HEAVY_CORES=3, HEAVY_GIB=4, LIGHT_CORES=1, LIGHT_GIB=2, HEAVY_DISK_GIB=20, LIGHT_DISK_GIB=2)
         values = {}
+        fallback = {}, False, 5
         try:
             content = regular_text(os.path.join(root, 'machine.conf'))
-            if not content.endswith('\n'): return {}, False
+            if not content.endswith('\n'): return fallback
             for line in content.splitlines():
                 key, _, value = (part.strip() for part in line.partition('='))
                 if not key.startswith('DEVBOX_'): continue
-                if key in values: return {}, False
+                if key in values: return fallback
                 if key in ('DEVBOX_DYNAMIC_ADMISSION', 'DEVBOX_LIGHT_STALE_RECLAIM') and value in ('0', '1'):
                     values[key] = value
                 elif key == 'DEVBOX_DYNAMIC_HOSTS' and (not value or re.fullmatch(host_pattern + '(,' + host_pattern + ')*', value)):
                     values[key] = value
                 else:
                     setting, _, suffix = key[7:].partition('.')
-                    if setting not in defaults or suffix and not re.fullmatch(host_pattern, suffix): return {}, False
-                    if not re.fullmatch(r'[0-9]+(?:\.[0-9]+)?', value) or not 0 < float(value) <= 65536: return {}, False
+                    valid_suffix = not suffix or re.fullmatch(host_pattern, suffix)
+                    if setting == 'SOFT_EXCLUDE_MINUTES':
+                        if suffix: return fallback
+                    elif setting not in defaults or not valid_suffix:
+                        return fallback
+                    elif suffix.startswith('project.') and (not setting.endswith('_DISK_GIB') or not re.fullmatch(host_pattern, suffix[8:])):
+                        return fallback
+                    if not re.fullmatch(r'[0-9]+(?:\.[0-9]+)?', value) or not 0 < float(value) <= 65536: return fallback
                     values[key] = float(value)
-        except (OSError, ValueError): return {}, False
+        except (OSError, ValueError): return fallback
         reclaim = values.get('DEVBOX_LIGHT_STALE_RECLAIM') == '1'
-        if values.get('DEVBOX_DYNAMIC_ADMISSION') != '1': return {}, reclaim
-        return {box: {key: values.get('DEVBOX_' + key + '.' + box, values.get('DEVBOX_' + key, default))
-                      for key, default in defaults.items()}
-                for box in values.get('DEVBOX_DYNAMIC_HOSTS', '').split(',') if box}, reclaim
+        soft_minutes = values.get('DEVBOX_SOFT_EXCLUDE_MINUTES', 5)
+        enrolled = values.get('DEVBOX_DYNAMIC_HOSTS', '').split(',') if values.get('DEVBOX_DYNAMIC_ADMISSION') == '1' else []
+        return {box: dict({key: values.get('DEVBOX_' + key + '.' + box, values.get('DEVBOX_' + key, default))
+                           for key, default in defaults.items()},
+                          project_disk={kind: values.get('DEVBOX_' + kind + '_DISK_GIB.project.' + project)
+                                        for kind in ('HEAVY', 'LIGHT')})
+                for box in enrolled if box}, reclaim, soft_minutes
     def slot_type(id):
         if re.fullmatch(r'devbox-cn-[0-9]+', id): return 'HEAVY'
         if re.fullmatch(r'devbox-cn-light(?:-[0-9]+)?', id): return 'LIGHT'
@@ -1882,7 +1893,7 @@ try:
     def stale_light(directory):
         hold = info(directory)
         old_pid, start = hold.get('pid', ''), hold.get('start', '')
-        if (not hold.get('by') or hold.get('host') != host or not re.fullmatch(r'[0-9]{1,10}', old_pid)
+        if (hold.get('remote_cleanup_required') or not hold.get('by') or hold.get('host') != host or not re.fullmatch(r'[0-9]{1,10}', old_pid)
                 or not 0 < int(old_pid) <= 2147483647 or not re.fullmatch(r'[0-9]{1,12}', start)
                 or int(start) == 0 or alive(old_pid)):
             return None
@@ -1900,9 +1911,9 @@ try:
     def sample(box, current):
         try:
             value = json.loads(regular_text(os.path.join(metrics_dir, box + '.json')))
-            if (isinstance(value, dict) and all(number(value.get(key)) for key in ('at', 'cores', 'load5', 'memAvailableGiB'))
+            if (isinstance(value, dict) and all(number(value.get(key)) for key in ('at', 'cores', 'load5', 'memAvailableGiB', 'freeGiB'))
                     and 0 <= current - value['at'] < 300 and value['cores'] > 0 and value['cores'] == int(value['cores'])
-                    and min(value['load5'], value['memAvailableGiB']) >= 0):
+                    and min(value['load5'], value['memAvailableGiB'], value['freeGiB']) >= 0):
                 return value
         except (OSError, ValueError): pass
         return {}
@@ -1911,10 +1922,10 @@ try:
             values = json.loads(regular_text(os.path.join(reserve_dir, box + '.json')))
         except FileNotFoundError: return []
         # A corrupt reservation ledger must not silently reopen a measured host.
-        if not isinstance(values, list) or any(not isinstance(value, list) or len(value) != 3
+        if not isinstance(values, list) or any(not isinstance(value, list) or len(value) not in (3, 4)
                 or not all(number(item) and item > 0 for item in value) for value in values):
             raise ValueError('invalid devbox reservations for ' + box)
-        return [value for value in values if current - value[0] < 300]
+        return [value for value in values if current - value[0] < (900 if len(value) == 4 else 300)]
     @contextmanager
     def host_guard(box):
         if not box:
@@ -1937,23 +1948,28 @@ try:
     def gate(box, kind, settings, current, only_dynamic=False, override=False):
         value = sample(box, current) if settings else {}
         entries = reservations(box, current) if settings else []
-        cpu, mem = (sum(entry[i] for entry in entries) for i in (1, 2))
-        cost = (settings[kind + '_CORES'], settings[kind + '_GIB']) if settings else None
+        recent = [entry for entry in entries if current - entry[0] < 300]
+        cpu, mem = (sum(entry[i] for entry in recent) for i in (1, 2))
+        disk = sum(entry[3] for entry in entries if len(entry) == 4)
+        cost = (settings[kind + '_CORES'], settings[kind + '_GIB'],
+                settings['project_disk'][kind] or settings[kind + '_DISK_GIB']) if settings else None
         detail = 'host=%s load5=%s reserved_cores=%g reserved_gib=%g mem_available_gib=%s' % (
             box, value.get('load5', '?'), cpu, mem, value.get('memAvailableGiB', '?'))
+        detail += ' free_disk_gib=%s reserved_disk_gib=%g' % (value.get('freeGiB', '?'), disk)
         if not value:
             reason = 'stale-or-missing-metrics' if settings else 'disabled'
             return ('closed-' if only_dynamic else 'static-') + reason, detail, entries, cost
         limit = value['cores'] * settings['LOAD_PER_CORE']
         floor = settings['MIN_AVAIL_GIB']
-        detail += ' load_limit=%g mem_floor_gib=%g task_cores=%g task_gib=%g' % (limit, floor, *cost)
+        detail += ' load_limit=%g mem_floor_gib=%g task_cores=%g task_gib=%g task_disk_gib=%g disk_floor_gib=53' % (limit, floor, *cost)
+        if value['freeGiB'] - disk - cost[2] < 53: return 'disk', detail, entries, cost
         if value['memAvailableGiB'] - mem - cost[1] < floor: return 'memory', detail, entries, cost
         if value['load5'] + cpu + cost[0] > limit:
             return 'load-override' if override else 'load', detail, entries, cost
         return 'headroom', detail, entries, cost
     def gate_open(reason):
         return reason in ('headroom', 'load-override', 'static-disabled', 'static-stale-or-missing-metrics')
-    dynamic, light_reclaim = devbox_settings()
+    dynamic, light_reclaim, soft_minutes = devbox_settings()
     def capacity(hosts):
         try:
             with open(os.path.join(root, 'devbox-hosts.json')) as stream: probes = json.load(stream)
@@ -2071,6 +2087,7 @@ try:
                     warn_short_pid |= short
                     holder = ('STALE?(short-lived pid) ' if short else 'STALE ') + holder
                 detail = value.get('since', '?') + ' → ' + (value.get('until') or '?') + ' · ' + value.get('for', '?')
+                if value.get('remote_cleanup_required'): detail += ' · remote cleanup required'
             print('%-16s %-9s %-9s %-12s %-34s %s' % (id, kind, policy, '-', holder, detail))
         if warn_short_pid:
             print('res: short-lived holder PID; use scripts/heavy-build.sh <command...>; lock, build and return must share one long-lived process', file=sys.stderr)
@@ -2098,33 +2115,62 @@ try:
                     print('%-24s %-24s %-16s %s' % ('HOLDER', 'PROJECT/TASK', 'SINCE', 'BLOCKED'))
                     for value in sorted(values, key=lambda v: v.get('order', '')):
                         blocked = value.get('blocked', '?'); blocked = 'blocked=load' if blocked == 'load' else blocked
+                        if value.get('self_restricted'):
+                            blocked += ' self_restricted reason=%s free_hosts=%s' % (
+                                value.get('restriction_reason', '?'), value['self_restricted'])
                         print('%-24s %-24s %-16s %s' % (value.get('holder', '?'), value.get('project', '?') + '/' + value.get('task', ''), value.get('since', '?'), blocked))
         if request: print_notes(request)
         committed = True; sys.exit(0)
     def csv(value): return set(value.split(',')) if value else set()
-    required, excluded, excluded_boxes = csv(need), csv(excluded_slots), csv(excluded_hosts)
+    required = csv(need)
+    caller_slots, caller_boxes = csv(excluded_slots), csv(excluded_hosts)
+    hard_skip, hard_boxes = csv(hard_slots), csv(hard_hosts)
+    excluded, excluded_boxes = caller_slots | hard_skip, caller_boxes | hard_boxes
     if any(not re.fullmatch(r'[A-Za-z0-9_.-]+', cap) for cap in required): raise ValueError('invalid --need capability list')
-    def eligible(id, req=required, skip=excluded, boxes=excluded_boxes):
+    def eligible(id, req=None, skip=None, boxes=None):
+        req = required if req is None else req
+        skip = excluded if skip is None else skip
+        boxes = excluded_boxes if boxes is None else boxes
         return id in remote and remote[id][0] == 'open' and id not in skip and remote[id][1] not in boxes and req <= remote[id][2]
+
     def pool_member(id, pool): return bool(re.fullmatch(re.escape(pool) + r'-[0-9]+', id) or pool.endswith('-light') and id == pool)
     if action == 'wait':
-        members = [id for id in rows if pool_member(id, request) and eligible(id)]
-        if not members: raise ValueError("no open remote member of pool '%s' satisfies --need '%s'" % (request, need or '(none)'))
-        for id in members:
-            hold = info(os.path.join(locks, id + '.d'))
-            if hold.get('by') == by and hold.get('pid') == str(pid) and hold.get('host') == host:
-                print('slot=' + id); committed = True; sys.exit(0)
+        compatible = [id for id in rows if pool_member(id, request) and eligible(id, skip=hard_skip, boxes=hard_boxes)]
+        if not compatible: raise ValueError("no open remote member of pool '%s' satisfies --need '%s'" % (request, need or '(none)'))
         queue = os.path.join(root, 'pool-waiters', request)
         os.makedirs(queue, exist_ok=True); waiter = os.path.join(queue, 'waiter.' + controller_key)
         episode = os.path.join(queue, '.episode.' + controller_key)
         own = info(waiter) or info(episode)
+        if own.get('soft_exclusions_dropped'):
+            excluded, excluded_boxes = hard_skip, hard_boxes
+        members = [id for id in compatible if eligible(id)]
+        for id in members:
+            hold = info(os.path.join(locks, id + '.d'))
+            if hold.get('by') == by and hold.get('pid') == str(pid) and hold.get('host') == host:
+                print('slot=' + id); committed = True; sys.exit(0)
         if not own:
             own = dict(holder=by, project=project, task=task, pid=str(pid), host=host,
                        since=datetime.datetime.now().strftime('%Y-%m-%d %H:%M'), start=str(int(stamp)),
                        started_at=str(stamp), order='%020d' % time.time_ns(), gate_streak='0', lane='', lane3='CLOSED', controller_pid=controller)
             log('waiter-start', request + '-any', by + ' (' + project + ('/' + task if task else '') + ')', 'pid=' + str(pid))
-        own.update(pool_controller=controller_key, heartbeat=str(int(stamp)), blocked='slot', need=need, exclude_slots=excluded_slots, exclude_hosts=excluded_hosts)
+        own.update(pool_controller=controller_key, heartbeat=str(int(stamp)), blocked='slot', need=need,
+                   exclude_slots=','.join(sorted(excluded)), exclude_hosts=','.join(sorted(excluded_boxes)),
+                   exclude_reason=exclude_reason, worker_thread=os.environ.get('CODEX_WORKER_THREAD') or os.environ.get('CODEX_THREAD_ID') or os.environ.get('TRAECLI_THREAD_ID', ''),
+                   worker_account=os.environ.get('CODEX_WORKER_ACCOUNT', ''),
+                   worker_owner=os.environ.get('CODEX_WORKER_OWNER') or os.environ.get('ORCHESTRATOR_OWNER', ''))
         refresh_waiter()
+    elif action == 'retain-remote':
+        if request not in remote or not slot_type(request): raise ValueError('expected a registered devbox slot')
+        if slot_type(request) == 'LIGHT': queue = os.path.join(root, 'pool-waiters', 'devbox-cn-light')
+        with admission():
+            directory = os.path.join(locks, request + '.d')
+            hold = info(directory)
+            if not by or hold.get('by') != by or hold.get('pid') != str(pid) or hold.get('host') != host:
+                raise ValueError('retained slot ownership mismatch')
+            hold['remote_cleanup_required'] = '1'
+            publish(directory, hold)
+            log('retain-remote', request, by, 'remote cleanup unconfirmed')
+        committed = True; sys.exit(0)
     elif action == 'return':
         if request not in rows: raise ValueError("unknown resource '%s'" % request)
         if slot_type(request) == 'LIGHT': queue = os.path.join(root, 'pool-waiters', 'devbox-cn-light')
@@ -2246,13 +2292,13 @@ try:
     rollbacks = 0
     gate_reasons = set()
     holder = by + ' (' + project + ('/' + task if task else '') + ')'
-    def evaluate(id, box, override=False, claimed=False):
+    def evaluate(id, box, override=False, claimed=False, diagnostic=False):
         current = time.time()
         kind = slot_type(id)
         reason, detail, entries, cost = gate(box, kind, dynamic.get(box), current, floating(id), override)
         if reason.startswith('static-') and static_full(box, kind, id if claimed else None):
             reason = 'static-cap'
-        if not gate_open(reason):
+        if not gate_open(reason) and not diagnostic:
             gate_reasons.add(reason)
             log('gate-deny', id, holder, 'reason=' + reason + ' ' + detail)
         return reason, detail, entries, cost, current
@@ -2262,6 +2308,37 @@ try:
     def can_override():
         return (waiter and own.get('load_blocked_since')
                 and time.time() - float(own['load_blocked_since']) >= 1200 and is_head())
+    if action == 'wait' and (caller_slots or caller_boxes) and not own.get('soft_exclusions_dropped'):
+        def available(id):
+            if quarantined(id, state) or os.path.isdir(os.path.join(locks, id + '.d')): return False
+            return not slot_type(id) or gate_open(evaluate(id, remote[id][1], diagnostic=True)[0])
+        if any(available(id) for id in members):
+            free_hosts = []
+        else:
+            free_hosts = sorted({remote[id][1] for id in compatible if not eligible(id) and available(id)})
+        if free_hosts:
+            own['self_restricted'] = ','.join(free_hosts)
+            own['restriction_reason'] = exclude_reason or 'soft exclusions (no --exclude-reason)'
+            if not own.get('restriction_noticed'):
+                own['restriction_noticed'] = '1'
+                refresh_waiter()
+                print('res: waiting only because of your own exclusions; free matching slots on ' + ', '.join(free_hosts),
+                      file=sys.stderr, flush=True)
+            age = time.time() - float(own['started_at'])
+            if not exclude_reason and age >= soft_minutes * 60 and age < float(timeout) * 60:
+                dropped = dict(hosts=sorted(caller_boxes), slots=sorted(caller_slots), afterSec=int(age))
+                own['soft_exclusions_dropped'] = json.dumps(dropped, separators=(',', ':'))
+                excluded, excluded_boxes = hard_skip, hard_boxes
+                members = compatible
+                own.update(exclude_slots=hard_slots, exclude_hosts=hard_hosts)
+                free_hosts = []
+                print('res: dropped soft exclusions automatically after %ds' % dropped['afterSec'], file=sys.stderr, flush=True)
+                print('softExclusionsDropped=' + own['soft_exclusions_dropped'], flush=True)
+                log('soft-exclusions-dropped', request + '-any', holder, own['soft_exclusions_dropped'])
+        if not free_hosts:
+            own.pop('self_restricted', None)
+            own.pop('restriction_reason', None)
+        refresh_waiter()
     candidates = members
     if action == 'wait':
         scores = capacity(hosts)
@@ -2279,7 +2356,7 @@ try:
                     stale_hold = stale_light(directory)
                     if not stale_hold or stale_hold[1] <= 900: continue
                     current_rows, _ = read_registry()
-                    dynamic, light_reclaim = devbox_settings()
+                    dynamic, light_reclaim, soft_minutes = devbox_settings()
                     if not light_reclaim or current_rows.get(id) != rows[id] or quarantined(id, health()): continue
                 if not fifo_allows(id, state):
                     blocked = True; heads = waiting()
@@ -2331,7 +2408,7 @@ try:
                     rows, remote = read_registry()
                     rejected = (id not in rows or rows[id][3] != description or rows[id][1] == 'never'
                                 or rows[id][1] == 'ask-user' and not force)
-                if box: dynamic, _ = devbox_settings()
+                if box: dynamic, _, _ = devbox_settings()
                 permitted = not rejected and fifo_allows(id, state, claimed=True)
                 if not rejected and not permitted: blocked = True; heads = waiting()
                 if rejected or not permitted or inject == 'all':
@@ -2372,7 +2449,7 @@ try:
         own.setdefault('load_blocked_since', str(time.time()))
     else:
         own.pop('load_blocked_since', None)
-    own['blocked'] = ('memory' if 'memory' in gate_reasons else 'load' if 'load' in gate_reasons else
+    own['blocked'] = ('disk' if 'disk' in gate_reasons else 'memory' if 'memory' in gate_reasons else 'load' if 'load' in gate_reasons else
                       'FIFO' if blocked else own.get('blocked', 'slot'))
     refresh_waiter()
     remaining = float(own['started_at']) + float(timeout) * 60 - time.time()
@@ -2407,12 +2484,12 @@ PY
 cmd_wait_pool() {
   local pool="${1:-}"; shift || true; pool="${pool%-}"
   [[ "$pool" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || die "wait-pool needs a resource prefix"
-  local timeout= args=() ALLOW_PID=1 prefer_host= prefer_slot= POOL_NEED= excluded_slots= excluded_hosts= delay=1 rc POOL_CHILD_PID=
+  local timeout= args=() ALLOW_PID=1 prefer_host= prefer_slot= POOL_NEED= excluded_slots= excluded_hosts= exclude_reason= hard_slots= hard_hosts= delay=1 rc POOL_CHILD_PID=
   local POOL_EPISODE="$RANDOM.$RANDOM.$RANDOM"
   local POOL_PENDING_SIGNAL=0
   while [ $# -gt 0 ]; do
     case "$1" in
-      --timeout|--need|--prefer-host|--prefer-slot|--exclude-slot|--exclude-host)
+      --timeout|--need|--prefer-host|--prefer-slot|--exclude-slot|--exclude-host|--exclude-reason|--hard-exclude-slot|--hard-exclude-host)
         [ $# -ge 2 ] || die "$1 needs a value"
         case "$1" in
           --timeout) [ -z "$timeout" ] || die "duplicate --timeout"; timeout="$2" ;;
@@ -2421,6 +2498,11 @@ cmd_wait_pool() {
           --prefer-slot) prefer_slot="$2" ;;
           --exclude-slot) excluded_slots="$2" ;;
           --exclude-host) excluded_hosts="$2" ;;
+          --exclude-reason)
+            [[ "$2" =~ [^[:space:]] && "$2" != *$'\n'* && "$2" != *$'\r'* && "$2" != *$'\t'* ]] || die "invalid --exclude-reason"
+            exclude_reason="$2" ;;
+          --hard-exclude-slot) hard_slots="$2" ;;
+          --hard-exclude-host) hard_hosts="$2" ;;
         esac; shift 2 ;;
       --by|--project|--for|--task|--until|--note|--pid)
         [ $# -ge 2 ] || die "$1 needs a value"; args+=("$1" "$2"); shift 2 ;;
@@ -2801,6 +2883,10 @@ case "${1:-}" in
     shift
     [ "$#" -eq 0 ] || { [ "$#" -eq 1 ] && [ "$1" = --json ]; } || die 'box-health accepts only --json'
     pool_report box-health "${1:-}" ;;
+  retain-remote)
+    id="${2:-}"; shift 2
+    ALLOW_PID=1 parse "$@"; validate_pid
+    pool_controller retain-remote "$id" 0 0 ;;
   quarantine|unquarantine|report-infra) box_health "$@" ;;
   return-build) shift; cmd_return_build "$@" ;;
   heavy-check) shift; cmd_heavy_check "$@" ;;

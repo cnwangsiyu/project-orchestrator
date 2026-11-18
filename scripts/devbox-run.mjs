@@ -31,7 +31,7 @@ export function parseArgs(args) {
   const opts = { ref: 'HEAD', pool: 'devbox-cn', shards: 1, timeout: 120, fetchTimeout: 15, artifacts: [], env: {}, days: 7, need: [], excludeSlot: [], excludeHost: [] };
   if (args[0] === 'gc') { opts.gc = true; args = args.slice(1); }
   if (args[0] === 'prewarm') { opts.prewarm = true; opts.ref = 'main'; opts.task = 'prewarm'; args = args.slice(1); }
-  const names = new Map(['project', 'task', 'repo', 'ref', 'pool', 'shards', 'out', 'timeout', 'prefer-host', 'watch-pid', 'affinity', 'host', 'days', 'units-file', 'command', 'fetch-timeout'].map(n => [`--${n}`, n.replace(/-([a-z])/g, (_, c) => c.toUpperCase())]));
+  const names = new Map(['project', 'task', 'repo', 'ref', 'pool', 'shards', 'out', 'timeout', 'prefer-host', 'watch-pid', 'affinity', 'host', 'days', 'units-file', 'command', 'fetch-timeout', 'exclude-reason', 'prefer-slot'].map(n => [`--${n}`, n.replace(/-([a-z])/g, (_, c) => c.toUpperCase())]));
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === '--') { if (opts.command) throw Error('provide only one command'); opts.command = args.slice(i + 1).join(' '); break; }
@@ -58,6 +58,7 @@ export function parseArgs(args) {
       opts.env[match[1]] = match[2];
     } else opts[names.get(arg)] = value;
   }
+  if (opts.excludeReason !== undefined && (!opts.excludeReason.trim() || /[\t\r\n]/.test(opts.excludeReason))) throw Error('invalid --exclude-reason');
   opts.days = Number(opts.days);
   if (!Number.isFinite(opts.days) || opts.days < 1) throw Error('--days must be at least 1');
   if (opts.gc) return opts;
@@ -97,7 +98,8 @@ export function readRegistry(dir, pool) {
 
 const lockPath = (dir, slot) => path.join(dir, 'locks', `${slot}.d`);
 const freeSlot = (dir, row) => !fs.existsSync(lockPath(dir, row.slot));
-const eligibleSlot = (opts, row) => opts.need.every(cap => row.caps.includes(cap))
+const hasCapabilities = (opts, row) => opts.need.every(cap => row.caps.includes(cap));
+const eligibleSlot = (opts, row) => hasCapabilities(opts, row)
   && !opts.excludeSlot.includes(row.slot) && !opts.excludeHost.includes(row.host);
 const runRows = opts => opts.prewarm
   ? [...readRegistry(sharedDir(), 'devbox-cn'), ...readRegistry(sharedDir(), 'devbox-cn-light')]
@@ -285,10 +287,34 @@ function remoteCommand(operation, python, data) {
 }
 const pythonHeader = 'import os, sys, json, base64, pathlib, time, signal\n# Source-only worktrees: never run git-lfs smudge (the bare store has no remote; boxes differ in global git-lfs setup).\nimport shutil as _sh\n_lfs=[("filter.lfs.smudge","git-lfs smudge --skip -- %f"),("filter.lfs.process","git-lfs filter-process --skip")] if _sh.which("git-lfs") else []\n_lfs.append(("filter.lfs.required","false"))\n_lfs.append(("core.hooksPath","/dev/null"))  # runner checkouts never run repo hooks (e.g. git-lfs post-checkout)\nos.environ.update({"GIT_LFS_SKIP_SMUDGE":"1","GIT_CONFIG_COUNT":str(len(_lfs))})\nif not _sh.which("git-lfs"): os.environ.update({"GIT_CONFIG_GLOBAL":"/dev/null","GIT_CONFIG_NOSYSTEM":"1"})  # no git-lfs: drop any global/system lfs driver; undefined filters are no-ops\nfor _i,(_k,_v) in enumerate(_lfs): os.environ["GIT_CONFIG_KEY_%d"%_i]=_k; os.environ["GIT_CONFIG_VALUE_%d"%_i]=_v\nd=json.loads(base64.b64decode(sys.argv[1]))\n';
 
+const remoteRunIdentity = `ctl=pathlib.Path(d['control'])
+run_id=ctl.name
+def read_own(file):
+    record=json.loads(file.read_text())
+    if record.get('run')!=run_id: sys.exit(70)
+    return record
+def alive(record):
+    try:
+        fields=pathlib.Path('/proc/'+str(record['pid'])+'/stat').read_text().rsplit(')',1)[1].split()
+        return fields[0]!='Z' and fields[19]==record['start']
+    except FileNotFoundError: return False
+def group_gone():
+    file=ctl/'group.json'
+    if not file.exists(): return True
+    group=read_own(file); pgid=group['pid']
+    current=pathlib.Path('/proc/'+str(pgid)+'/stat')
+    try:
+        if current.read_text().rsplit(')',1)[1].split()[19]!=group['start']: return True
+    except FileNotFoundError: pass
+    try: os.killpg(pgid,0); return False
+    except ProcessLookupError: return True
+`;
+
 export const remoteScripts = {
   metrics: pythonHeader + `load5=float(pathlib.Path('/proc/loadavg').read_text().split()[1])
 mem=next(int(line.split()[1])/1048576 for line in pathlib.Path('/proc/meminfo').read_text().splitlines() if line.startswith('MemAvailable:'))
-print(json.dumps({'cores':os.cpu_count(),'load5':load5,'memAvailableGiB':mem}))
+disk=os.statvfs(d['root'])
+print(json.dumps({'cores':os.cpu_count(),'load5':load5,'memAvailableGiB':mem,'freeGiB':disk.f_bavail*disk.f_frsize/1073741824}))
 `,
   probe: pythonHeader + `import subprocess, datetime, tempfile
 data=pathlib.Path('/data00'); home=pathlib.Path(os.path.expanduser('~'))
@@ -539,30 +565,19 @@ finally:
     save('done.json',{'gone':gone,'exit':result if gone else 70})
 sys.exit(result if gone else 70)
 `,
-  cleanup: pythonHeader + `ctl=pathlib.Path(d['control']); ctl.mkdir(parents=True, exist_ok=True)
-run_id=ctl.name
-def read_own(file):
-    record=json.loads(file.read_text())
-    if record.get('run')!=run_id: sys.exit(70)
-    return record
+  reconnect: pythonHeader + remoteRunIdentity + `done=ctl/'done.json'; owner=ctl/'owner.json'; group=ctl/'group.json'
+if done.exists() and read_own(done)['gone'] and group_gone():
+    print('group-gone')
+elif owner.exists() and alive(read_own(owner)) or group.exists() and not group_gone():
+    print('group-running')
+elif group.exists() and owner.exists() and not done.exists():
+    print('group-gone')
+else: sys.exit(70)
+`,
+  cleanup: pythonHeader + remoteRunIdentity + `ctl.mkdir(parents=True, exist_ok=True)
 for file in ('owner.json','group.json','done.json'):
     if (ctl/file).exists(): read_own(ctl/file)
 (ctl/'cancel').touch()
-def alive(record):
-    try:
-        fields=pathlib.Path('/proc/'+str(record['pid'])+'/stat').read_text().rsplit(')',1)[1].split()
-        return fields[0]!='Z' and fields[19]==record['start']
-    except FileNotFoundError: return False
-def group_gone():
-    file=ctl/'group.json'
-    if not file.exists(): return True
-    group=read_own(file); pgid=group['pid']
-    current=pathlib.Path('/proc/'+str(pgid)+'/stat')
-    try:
-        if current.read_text().rsplit(')',1)[1].split()[19]!=group['start']: return True
-    except FileNotFoundError: pass
-    try: os.killpg(pgid,0); return False
-    except ProcessLookupError: return True
 limit=time.monotonic()+20
 while time.monotonic()<limit:
     done=ctl/'done.json'; owner=ctl/'owner.json'
@@ -616,10 +631,20 @@ async function ssh(row, operation, data, opts = {}) {
       ...opts, interceptStderr: line => { if (line === marker) { started = true; return true; } return false; },
     });
     const transient = result.code === 255 && !started && /Permission denied \(gssapi-with-mic\)|Connection closed\b/i.test(result.stderr);
-    if (operation === 'metrics' || !transient || (opts.state?.cancel && opts.cancellable !== false)) return result;
+    if (opts.noRetry || operation === 'metrics' || !transient || (opts.state?.cancel && opts.cancellable !== false)) return result;
     if (retry === 3) return { ...result, infraFailure: true, stderr: `SSH establishment failed after 4 attempts: ${result.stderr}` };
     await pause(2000 + Math.floor(Math.random() * 8001));
   }
+}
+
+async function reconnectRun(row, data, state) {
+  for (const delay of [0, 1000, 2000]) {
+    if (delay) await pause(delay);
+    const result = await ssh(row, 'reconnect', { control: data.control }, { state, cancellable: false, timeout: 8000, noRetry: true });
+    if (result.code === 0 && ['group-gone', 'group-running'].includes(result.stdout.trim())) return result.stdout.trim();
+    if (/permission denied|gssapi|authentication failed/i.test(result.stderr)) break;
+  }
+  return 'unknown';
 }
 
 function writeJSON(file, value) {
@@ -864,7 +889,7 @@ async function refreshHostMetrics(rows, state, { force = false, timeout = 15000 
     const file = path.join(sharedDir(), 'devbox-metrics', `${host}.json`);
     const requestedAt = Date.now() / 1000;
     const valid = value => Number.isInteger(value?.cores) && value.cores > 0
-      && [value.load5, value.memAvailableGiB].every(item => Number.isFinite(item) && item >= 0);
+      && [value.load5, value.memAvailableGiB, value.freeGiB].every(item => Number.isFinite(item) && item >= 0);
     const fresh = () => {
       try {
         const value = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -876,12 +901,16 @@ async function refreshHostMetrics(rows, state, { force = false, timeout = 15000 
     try {
       fs.mkdirSync(path.dirname(file), { recursive: true });
       await withStateLock(file, async () => {
-        const at = Date.now() / 1000, remaining = timeout - (at - requestedAt) * 1000;
-        if (state.cancel || remaining <= 0 || fresh()) return;
-        const result = await ssh(row, 'metrics', {}, { state, timeout: remaining });
+        const deadline = requestedAt * 1000 + timeout;
+        if (state.cancel || deadline <= Date.now() || fresh()) return;
+        const root = await hostRoot(row, state, { deadline });
+        const at = Date.now() / 1000;
+        if (state.cancel || deadline <= Date.now()) return;
+        const result = await ssh(row, 'metrics', { root }, { state, timeout: deadline - Date.now() });
         if (result.code) return;
-        const { cores, load5, memAvailableGiB } = JSON.parse(result.stdout);
-        if (valid({ cores, load5, memAvailableGiB })) writeJSON(file, { at, cores, load5, memAvailableGiB });
+        const { cores, load5, memAvailableGiB, freeGiB } = JSON.parse(result.stdout);
+        const sample = { at, cores, load5, memAvailableGiB, freeGiB };
+        if (valid(sample)) writeJSON(file, sample);
       }, Math.floor(timeout / 50));
     } catch {
       // Admission handles an unavailable sample using the registered static slots.
@@ -889,18 +918,20 @@ async function refreshHostMetrics(rows, state, { force = false, timeout = 15000 
   }));
 }
 
-async function hostRoot(row, state) {
+async function hostRoot(row, state, { deadline } = {}) {
   const cacheFile = path.join(cacheDir(), 'devbox-hosts.json');
   return withStateLock(path.join(cacheDir(), `devbox-probe-${row.host}`), async () => {
   let cache = {}; try { cache = JSON.parse(fs.readFileSync(cacheFile, 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw error; }
   let entry = cache[row.host];
   if (!entry?.root || entry.user !== row.user || !Number.isInteger(entry.cores) || entry.cores < 1) {
-    entry = JSON.parse(checked(await ssh(row, 'probe', { user: row.user }, { state }), 'root probe').trim());
+    const timeout = deadline === undefined ? 60000 : deadline - Date.now();
+    if (timeout <= 0) throw Error('root probe deadline expired');
+    entry = JSON.parse(checked(await ssh(row, 'probe', { user: row.user }, { state, timeout, noRetry: deadline !== undefined }), 'root probe').trim());
     await mergeState(cacheFile, row.host, entry);
   }
   if (typeof entry.root !== 'string' || !entry.root.startsWith('/') || !entry.root.endsWith('/devbox-run') || entry.root.includes('\0') || entry.root.split('/').includes('..')) throw Error('invalid remote workspace root');
   return entry.root;
-  });
+  }, deadline === undefined ? undefined : Math.max(1, Math.floor((deadline - Date.now()) / 50)));
 }
 
 function timingFile(repoId) { return path.join(cacheDir(), 'timings', `${repoId}.json`); }
@@ -1020,6 +1051,7 @@ async function shard(opts) {
   };
   const attempts = []; let firstFailure = 0, diskRetries = 0, reruns = 0, avoid;
   const failedSlots = new Set(), diskHosts = new Set();
+  let softExclusionsDropped;
   const remaining = () => Math.max(1, deadline - Date.now());
   const stateFile = path.join(opts.out, `shard-${opts.shard}-state.json`);
   const resEvents = [];
@@ -1055,30 +1087,39 @@ async function shard(opts) {
       try {
         let rows = runRows(opts);
         if (!rows.length) throw Error('no open slots in pool');
-        const eligible = item => eligibleSlot(opts, item) && (!opts.prewarmSlots || opts.prewarmSlots.includes(item.slot));
+        const eligible = item => hasCapabilities(opts, item) && (!opts.prewarmSlots || opts.prewarmSlots.includes(item.slot));
+        const callerAllows = item => softExclusionsDropped || eligibleSlot(opts, item);
         rows = rows.filter(eligible);
         if (!rows.length) throw Error('no open slot provides all required capabilities');
         // Bad descriptions must not cause a lease or an implicit local-user SSH login.
         if (rows.some(item => !item.target)) throw Error('open pool registry row lacks an unambiguous user@ip description');
-        const choices = rows.filter(item => item.slot !== avoid?.slot && !failedSlots.has(item.slot) && !diskHosts.has(item.host));
-        if (!choices.length) throw Error('no different open slot available for retry');
+        const internalChoices = rows.filter(item => !failedSlots.has(item.slot) && !diskHosts.has(item.host));
+        const choices = internalChoices.filter(callerAllows);
+        const possible = opts.splitExclusions && !opts.prewarm ? internalChoices : choices;
+        if (!possible.length) throw Error('no open slot meets the requested placement constraints');
         let affinities = {}; try { affinities = JSON.parse(fs.readFileSync(path.join(cacheDir(), 'devbox-affinity.json'), 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw error; }
         const affinity = affinities[opts.affinity];
-        const preferred = avoid ? (choices.find(item => item.host !== avoid.host) || choices[0]).host : opts.preferHost || affinity?.host;
+        const affinitySlot = opts.preferSlot || affinity?.slot;
+        const preferred = avoid ? (possible.find(item => item.host !== avoid.host) || possible[0]).host : opts.preferHost || affinity?.host;
         const common = ['--by', by, '--project', opts.project, '--task', opts.task, '--for', opts.task, '--pid', String(process.pid)];
-        const skipSlots = new Set([...opts.excludeSlot, ...failedSlots]);
-        const skipHosts = new Set([...opts.excludeHost, ...diskHosts]);
-        if (avoid && choices.some(item => item.host !== avoid.host)) skipHosts.add(avoid.host);
-        const metricRows = choices.filter(item => !skipHosts.has(item.host));
-        const refresh = () => refreshHostMetrics(metricRows, state, { timeout: Math.min(15000, remaining()) });
+        const refresh = () => refreshHostMetrics(possible, state, { timeout: Math.min(15000, remaining()) });
         await refresh();
         const args = ['wait-pool', opts.pool, ...common, '--timeout', String(remaining() / 60000)];
-        if (opts.excludeSlotSupported && skipSlots.size) args.push('--exclude-slot', [...skipSlots].join(','));
-        if (opts.excludeHostSupported && skipHosts.size) args.push('--exclude-host', [...skipHosts].join(','));
+        const callerSlots = softExclusionsDropped ? [] : opts.excludeSlot;
+        const callerHosts = softExclusionsDropped ? [] : opts.excludeHost;
+        if (opts.splitExclusions) {
+          if (failedSlots.size) args.push('--hard-exclude-slot', [...failedSlots].join(','));
+          if (diskHosts.size) args.push('--hard-exclude-host', [...diskHosts].join(','));
+          if ((callerSlots.length || callerHosts.length) && opts.excludeReason) args.push('--exclude-reason', opts.excludeReason);
+        }
+        const skipSlots = opts.splitExclusions ? callerSlots : [...new Set([...callerSlots, ...failedSlots])];
+        const skipHosts = opts.splitExclusions ? callerHosts : [...new Set([...callerHosts, ...diskHosts])];
+        if (opts.excludeSlotSupported && skipSlots.length) args.push('--exclude-slot', skipSlots.join(','));
+        if (opts.excludeHostSupported && skipHosts.length) args.push('--exclude-host', skipHosts.join(','));
         if (preferred && opts.preferSupported) args.push('--prefer-host', preferred);
         if (opts.needSupported && opts.need.length) args.push('--need', opts.need.join(','));
-        const warm = choices.find(item => item.host === preferred && item.slot === affinity?.slot);
-        if (warm && opts.preferSlotSupported) args.push('--prefer-slot', warm.slot);
+        const warm = choices.find(item => item.slot === affinitySlot && (opts.preferSlot || item.host === preferred));
+        if (opts.preferSlotSupported && (opts.preferSlot || warm)) args.push('--prefer-slot', opts.preferSlot || warm.slot);
         let acquire;
         const preferredSlots = opts.preferSlotSupported ? [] : warm ? [warm] : !opts.preferSupported ? choices.filter(item => item.host === preferred) : [];
         if (opts.prewarm) {
@@ -1103,6 +1144,8 @@ async function shard(opts) {
           try { acquire = await runRes(args); }
           finally { clearInterval(timer); await refreshing; }
         }
+        const dropped = /^softExclusionsDropped=(\{.*\})$/m.exec(acquire.stdout);
+        if (opts.splitExclusions && dropped) softExclusionsDropped = attempt.softExclusionsDropped = JSON.parse(dropped[1]);
         const match = /^slot=(\S+)$/m.exec(acquire.stdout);
         if (match) attempt.slot = match[1];
         checked(acquire, 'slot acquisition');
@@ -1110,11 +1153,12 @@ async function shard(opts) {
         rows = runRows(opts);
         row = rows.find(item => item.slot === attempt.slot);
         if (!row?.target) throw Error('acquired slot is no longer an open mapped pool member');
-        if (!eligible(row) || !choices.some(item => item.slot === row.slot) || (avoid && choices.some(item => item.host !== avoid.host) && row.host === avoid.host)) {
+        if (!eligible(row) || !callerAllows(row) || !internalChoices.some(item => item.slot === row.slot)) {
           await release(row.slot); attempt.slot = null;
           if (opts.prewarm) { attempt.returned = true; attempt.skipped = true; attempt.exit = 0; break; }
           // Old controllers have no preference/exclusion flag. Keep arbitration in res.
           row = choices.find(item => avoid && item.host !== avoid.host) || choices[0];
+          if (!row) throw Error('no alternate slot meets the requested placement constraints');
           const result = await runRes(['wait', row.slot, ...common, '--timeout', String(remaining() / 60000)]);
           if (!result.code) attempt.slot = row.slot;
           checked(result, 'alternate slot acquisition');
@@ -1187,6 +1231,7 @@ async function shard(opts) {
         const commandStart = Date.now();
         const result = await ssh(row, 'run', { ...data, command: job, cpus: attempt.cpus, env: { ...caches, ...opts.env, ...cpuEnvironment(attempt.cpus), DEVBOX_RUN_RECEIPT: `${workspace}/.devbox-run.json` }, seconds: remaining() / 1000 }, { state, timeout: remaining() + 15000, onOutput: emit });
         attempt.commandDurationSec = (Date.now() - commandStart) / 1000;
+        if (result.code === 255 && !/permission denied|gssapi|authentication failed/i.test(result.stderr)) attempt.sshDropped = true;
         attempt.exit = state.cancel || result.code;
         if (result.infraFailure) attempt.infraFailure = true;
         else if (/permission denied|gssapi|authentication failed/i.test(result.stderr)) attempt.authenticationBlocked = true;
@@ -1198,9 +1243,43 @@ async function shard(opts) {
         emit(`[shard ${opts.shard}] ${error.message}\n`);
       } finally {
         if (data && prepared) {
-          const cleanup = await ssh(row, 'cleanup', { ...data, started: launched }, { cancellable: false, state, timeout: 35000 });
-          clean = cleanup.code === 0 && cleanup.stdout.includes('group-gone');
-          if (!clean) { attempt.cleanupUnconfirmed = true; attempt.exit ||= 70; emit(`[shard ${opts.shard}] BLOCKED: remote cleanup unconfirmed; retaining ${attempt.slot}\n`); }
+          if (attempt.sshDropped) {
+            const recovery = await reconnectRun(row, data, state);
+            clean = recovery === 'group-gone';
+            attempt.sshRecovery = recovery;
+            if (clean) emit(`[shard ${opts.shard}] SSH reconnected and confirmed remote cleanup\n`);
+            else {
+              attempt.remoteJobStillRunning = recovery === 'group-running';
+              attempt.retainedRun = { control: data.control, target: row.target, by, pid: process.pid };
+              attempt.stopCommand = `${quote(process.execPath)} ${quote(script)} stop --out ${quote(opts.out)} --run-id ${opts.runId}`;
+            }
+          } else if (attempt.authenticationBlocked) {
+            clean = false;
+          } else {
+            const cleanup = await ssh(row, 'cleanup', { ...data, started: launched }, { cancellable: false, state, timeout: 35000 });
+            clean = cleanup.code === 0 && cleanup.stdout.includes('group-gone');
+          }
+          if (!clean) {
+            attempt.cleanupUnconfirmed = true;
+            attempt.exit ||= 70;
+            if (opts.retainRemoteSupported) {
+              const retained = await runRes(['retain-remote', attempt.slot, '--by', by, '--pid', String(process.pid)], true);
+              if (retained.code) {
+                attempt.retentionError = retained.stderr.trim() || `res exit ${retained.code}`;
+                emit(`[shard ${opts.shard}] could not protect held slot from stale reclaim: ${attempt.retentionError}\n`);
+              }
+            }
+            if (attempt.retainedRun) {
+              try {
+                writeJSON(path.join(opts.out, `retained-${opts.shard}.json`), { runId: opts.runId, slot: attempt.slot, retainedRun: attempt.retainedRun });
+              } catch (error) {
+                attempt.receiptError = error.code || 'write failed';
+                emit(`[shard ${opts.shard}] immediate stop receipt unavailable; see the final summary\n`);
+              }
+            }
+            const message = attempt.remoteJobStillRunning ? 'remote job still running' : 'remote cleanup unconfirmed';
+            emit(`[shard ${opts.shard}] BLOCKED: ${message}; retaining ${attempt.slot}${attempt.stopCommand ? `; to stop: ${attempt.stopCommand}` : ''}\n`);
+          }
           if (clean && launched && opts.units) {
             const timings = await ssh(row, 'timings', data, { cancellable: false, state, timeout: 30000 });
             try {
@@ -1236,6 +1315,11 @@ async function shard(opts) {
         }
         attempt.durationSec = (Date.now() - attemptStart) / 1000;
       }
+      if (attempt.exit && softExclusionsDropped) {
+        const guidance = 'Soft exclusions were dropped automatically. Rerun with --exclude-reason if the host binding is required.';
+        attempt.error = attempt.error ? `${attempt.error} ${guidance}` : guidance;
+        emit(`[shard ${opts.shard}] ${guidance}\n`);
+      }
       if (state.cancel || opts.prewarm || attempt.cleanupUnconfirmed || attempt.returnError || attempt.authenticationBlocked || attempt.infraFailure) break;
       if (attempt.diskGuard && diskRetries++ === 0) { diskHosts.add(row.host); avoid = row; continue; }
       if (attempt.exit && !attempt.diskGuard && opts.rerunOnFail && reruns++ === 0 && row) {
@@ -1249,7 +1333,7 @@ async function shard(opts) {
     try { writeJSON(stateFile, { shard: opts.shard, updatedAt: new Date().toISOString(), status: 'complete', slot: last?.slot || null, exit, resEvents }); }
     catch { state.stop(74); exit = state.cancel; }
     return { shard: opts.shard, slot: last?.slot || null, host: last?.host || null, exit, flaky, stateFile, resEvents, ...(last?.skipped ? { skipped: true } : {}),
-      ...(opts.units ? { units: opts.units } : {}), durationSec: (Date.now() - started) / 1000, log, attempts };
+      ...(opts.units ? { units: opts.units } : {}), ...(softExclusionsDropped ? { softExclusionsDropped } : {}), durationSec: (Date.now() - started) / 1000, log, attempts };
   } finally {
     clearTimeout(timer); clearInterval(parentWatch); fs.closeSync(fd);
     try {
@@ -1259,6 +1343,49 @@ async function shard(opts) {
       if (!process.stderr.destroyed) process.stderr.write(`[shard ${opts.shard}] log redaction failed (${error.message})\n`);
     }
   }
+}
+
+async function stopRetainedRuns(out, runId) {
+  const summaryFile = path.join(out, 'summary.json');
+  let retained;
+  if (fs.existsSync(summaryFile)) {
+    const summary = JSON.parse(fs.readFileSync(summaryFile, 'utf8'));
+    if (summary.runId !== runId) throw Error('summary identity mismatch');
+    retained = summary.shards.flatMap(shard => (shard.attempts || []).filter(attempt => attempt.retainedRun));
+  } else {
+    retained = fs.readdirSync(out).filter(name => /^retained-\d+\.json$/.test(name)).map(name =>
+      JSON.parse(fs.readFileSync(path.join(out, name), 'utf8'))).filter(receipt => receipt.runId === runId);
+  }
+  if (!retained.length) return 0;
+  const rows = [...readRegistry(sharedDir(), 'devbox-cn'), ...readRegistry(sharedDir(), 'devbox-cn-light')];
+  const state = cancellationState();
+  let exit = 0;
+  for (const attempt of retained) {
+    const { control, target, by, pid } = attempt.retainedRun;
+    const row = rows.find(row => row.slot === attempt.slot && row.target === target);
+    if (!row || !/^\/[^\r\n]*\/devbox-run\/runs\/[0-9a-f-]{36}$/.test(control) || control.split('/').includes('..'))
+      throw Error('retained run no longer matches its registered slot');
+    const info = path.join(lockPath(sharedDir(), row.slot), 'info');
+    await withStateLock(path.join(out, `stop-${runId}-${row.slot}`), async () => {
+      let hold;
+      try {
+        hold = Object.fromEntries(fs.readFileSync(info, 'utf8').trim().split('\n').map(line => line.split('\t')));
+      } catch (error) {
+        if (error.code === 'ENOENT') return;
+        throw error;
+      }
+      if (hold.by !== by || hold.pid !== String(pid)) return;
+      const cleanup = await ssh(row, 'cleanup', { control }, { state, timeout: 35000, noRetry: true });
+      if (cleanup.code !== 0 || cleanup.stdout.trim() !== 'group-gone') {
+        console.error(`BLOCKED: remote cleanup unconfirmed; retaining ${row.slot}`);
+        exit ||= 70;
+        return;
+      }
+      checked(await executeRes(['return', row.slot, '--by', by]), 'retained slot return');
+      console.log('confirmed remote cleanup and returned ' + row.slot);
+    });
+  }
+  return exit;
 }
 
 async function main(args) {
@@ -1272,11 +1399,11 @@ async function main(args) {
     try { fs.writeFileSync(path.join(out, 'stop-' + runId), '', { flag: 'wx', mode: 0o600 }); }
     catch (error) { if (error.code !== 'EEXIST') throw error; }
     console.log('stop requested for ' + runId);
-    return 0;
+    return await stopRetainedRuns(out, runId);
   }
   const opts = parseArgs(args);
   if (opts.help) {
-    console.log('Usage: devbox-run.mjs [--project P] --task T --repo PATH [--ref COMMIT|HEAD|worktree] [--pool devbox-cn|devbox-cn-light] [--shards N|auto] [--units-file PATH] [--artifact GLOB]... [--fetch-timeout MIN] [--out DIR] [--timeout MIN] [--env K=V]... [--rerun-on-fail] [--allow-flaky] [--affinity KEY] [--prefer-host IP] [--need CAP]... [--exclude-slot IDS] [--exclude-host IPS] [--submodules] [--watch-pid PID] -- COMMAND\n       devbox-run.mjs prewarm --project P --repo PATH [--ref main] --command COMMAND [--need CAP]...\n       devbox-run.mjs gc [--host IP] [--days N]\n       devbox-run.mjs stop --out DIR --run-id UUID\nCOMMAND supports {shard}, {shards} and {units}. Timeout includes queue/upload/run; cleanup follows. See references/devbox-run.md.');
+    console.log('Usage: devbox-run.mjs [--project P] --task T --repo PATH [--ref COMMIT|HEAD|worktree] [--pool devbox-cn|devbox-cn-light] [--shards N|auto] [--units-file PATH] [--artifact GLOB]... [--fetch-timeout MIN] [--out DIR] [--timeout MIN] [--env K=V]... [--rerun-on-fail] [--allow-flaky] [--affinity KEY] [--prefer-host IP] [--prefer-slot ID] [--need CAP]... [--exclude-slot IDS] [--exclude-host IPS] [--exclude-reason TEXT] [--submodules] [--watch-pid PID] -- COMMAND\n       devbox-run.mjs prewarm --project P --repo PATH [--ref main] --command COMMAND [--need CAP]...\n       devbox-run.mjs gc [--host IP] [--days N]\n       devbox-run.mjs stop --out DIR --run-id UUID\nCOMMAND supports {shard}, {shards} and {units}. Timeout includes queue/upload/run; cleanup follows. See references/devbox-run.md.');
     return 0;
   }
   if (opts.gc) {
@@ -1341,6 +1468,10 @@ async function main(args) {
     opts.excludeHostSupported = helpText.includes('--exclude-host');
     opts.needSupported = /--need\b/.test(helpText);
     opts.preferSlotSupported = /--prefer-slot\b/.test(helpText);
+    opts.retainRemoteSupported = helpText.includes('res retain-remote');
+    opts.splitExclusions = helpText.includes('--exclude-reason') && helpText.includes('--hard-exclude-host') && helpText.includes('--hard-exclude-slot');
+    if (!opts.splitExclusions && !opts.excludeReason && (opts.excludeSlot.length || opts.excludeHost.length))
+      console.error('devbox-run: installed res treats exclusions as fixed; update res to enable soft fallback');
     const shards = await Promise.all(Array.from({ length: opts.shards }, (_, index) => new Promise(resolve => {
       const child = fork(script, ['--internal-shard'], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
       const signalChild = ownChild(child); workers.add(signalChild); let result;
@@ -1351,7 +1482,7 @@ async function main(args) {
         workers.delete(signalChild);
         resolve(result || { shard: index + 1, slot: null, host: null, exit: code || (signal ? 143 : 1), error: 'shard process exited without cleanup report' });
       });
-      child.send({ ...opts, units: plan.groups[index], ...(opts.prewarm ? { prewarmSlots: prewarm[index] } : {}), shard: index + 1, parentPid: process.pid });
+      child.send({ ...opts, runId, units: plan.groups[index], ...(opts.prewarm ? { prewarmSlots: prewarm[index] } : {}), shard: index + 1, parentPid: process.pid });
       if (state.cancel) signalChild('SIGTERM');
     })));
     let exit = state.cancel || shards.find(item => item.exit)?.exit || 0;

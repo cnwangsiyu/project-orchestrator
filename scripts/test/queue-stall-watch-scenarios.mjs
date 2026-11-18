@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { createQueueStallMonitor, fallbackRouteArgs, queueStallText } from '../lib/queue-stall-watch.mjs';
+import { createPoolStallMonitor, createQueueStallMonitor, fallbackRouteArgs, queueStallText } from '../lib/queue-stall-watch.mjs';
 import { appendEvent, readEvents } from '../lib/worker-events.mjs';
 import { saveQueue } from '../lib/worker-queue.mjs';
 import { saveLaunch } from '../lib/worker-launch.mjs';
@@ -114,5 +114,23 @@ try {
   assert.equal(events.length, 1);
   assert.equal(events[0].wrapUp, true);
   console.log('PASS the real watcher exits via owner risk-note delivery and quota --running shows the active queue');
+  const poolWait = { key: 'devbox-cn/waiter.fixture', holder: 'fixture-s1', project: row.project, task: row.name,
+    worker_owner: owner, worker_account: row.account, worker_thread: row.thread, self_restricted: '192.0.2.2,192.0.2.3',
+    exclude_reason: 'fixture binding', started_at: (now - 10 * min) / 1000, heartbeat: now / 1000 };
+  const poolMonitor = options => createPoolStallMonitor(owner, { waitsOf: () => [{ ...poolWait, ...options }], emit: appendEvent });
+  assert.deepEqual(await poolMonitor()([row], [], now), [], 'exactly ten minutes is too early');
+  assert.deepEqual(await poolMonitor({ exclude_reason: '' })([row], [], now + min), [], 'soft filters do not alert');
+  assert.deepEqual(await poolMonitor({ worker_owner: 'different-owner' })([row], [], now + min), [], 'foreign owner does not alert');
+  assert.deepEqual(await poolMonitor({ self_restricted: '' })([row], [], now + min), [], 'no eligible free alternatives do not alert');
+  const dir = path.join(tmp, 'pool-waiters/devbox-cn/waiter.fixture');
+  fs.mkdirSync(dir, { recursive: true });
+  const metadata = { ...poolWait, started_at: Date.now() / 1000 - 601, heartbeat: Date.now() / 1000 };
+  fs.writeFileSync(path.join(dir, 'info'), Object.entries(metadata).map(([key, value]) => key + '\t' + value + '\n').join(''));
+  const poolWatcher = run('codex-worker.mjs', ['watch', '--owner', owner, '--debounce-sec', '0']);
+  assert.equal(poolWatcher.status, 0, poolWatcher.stderr);
+  assert.match(poolWatcher.stdout, /notes \[pool-stalled\].*fixture-s1 \(fixture\/queue-probe\).*fixture binding.*192\.0\.2\.2,192\.0\.2\.3/);
+  assert.deepEqual(await poolMonitor()([row], [], now + min), [], 'persisted waiter episode suppresses repeat notifications');
+  assert.equal(readEvents().filter(event => event.kind === 'pool-stalled').length, 1);
+  console.log('PASS hard devbox waits wake their owner once with holder, task, reason and available hosts');
   console.log('Example: ' + events[0].text);
 } finally { fs.rmSync(tmp, { recursive: true, force: true }); }

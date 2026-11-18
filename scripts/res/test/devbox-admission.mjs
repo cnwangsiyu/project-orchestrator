@@ -41,13 +41,13 @@ async function until(test) {
 function config(enabled = 1, overrides = '') {
   fs.writeFileSync(path.join(root, 'machine.conf'), `DEVBOX_DYNAMIC_ADMISSION=${enabled}\nDEVBOX_DYNAMIC_HOSTS=${host}\n${overrides}`);
 }
-function metrics(load5, memAvailableGiB, age = 0) {
+function metrics(load5, memAvailableGiB, age = 0, freeGiB = 1000) {
   fs.writeFileSync(path.join(root, 'devbox-metrics', host + '.json'),
-    JSON.stringify({ at: Date.now() / 1000 - age, cores: 8, load5, memAvailableGiB, load1: 99 }));
+    JSON.stringify({ at: Date.now() / 1000 - age, cores: 8, load5, memAvailableGiB, freeGiB, load1: 99 }));
 }
-function expireReservations() {
+function expireReservations(age = 901) {
   const entries = JSON.parse(fs.readFileSync(ledger, 'utf8'));
-  fs.writeFileSync(ledger, JSON.stringify(entries.map(([, ...cost]) => [Date.now() / 1000 - 301, ...cost])));
+  fs.writeFileSync(ledger, JSON.stringify(entries.map(([, ...cost]) => [Date.now() / 1000 - age, ...cost])));
 }
 function row(id, box, tags = 'caps=node', policy = 'open') {
   return `${id}\tremote\t${policy}\t-\tfixture runner@${box} ${tags}\n`;
@@ -86,7 +86,7 @@ for record in records:
     info.update(load_blocked_since=at-float(os.environ['AGE_SECONDS']), started_at=at-120)
     record.write_text(''.join('%s\t%s\n' % pair for pair in info.items()))
 (root / 'devbox-metrics' / (os.environ['AGE_HOST'] + '.json')).write_text(json.dumps(
-    dict(at=at, cores=8, load5=float(os.environ['AGE_LOAD']), memAvailableGiB=float(os.environ['AGE_MEMORY']))))
+    dict(at=at, cores=8, load5=float(os.environ['AGE_LOAD']), memAvailableGiB=float(os.environ['AGE_MEMORY']), freeGiB=1000)))
 `);
   const result = spawnSync(res, ['wait-pool', heavy, ...args(by), '--timeout', '1', '--exclude-host', other], {
     env: { ...env, PATH: `${root}:${env.PATH}`, REAL_PYTHON: real, AGE_INJECT: inject,
@@ -119,9 +119,25 @@ try {
   match(run('status', slot(3)).stdout, /heavy admitted=1\/3 gate=CLOSED reason=memory .*load5=5 reserved_cores=3 reserved_gib=4 mem_available_gib=8/);
   release(slot(3));
   match(take(slot(1)).stderr, /devbox gate memory/, 'starts remain reserved after return');
-  expireReservations();
-  eq(take(slot(1)).status, 0, 'five-minute-old reservations expire');
+  expireReservations(301);
+  eq(take(slot(1)).status, 0, 'five-minute-old CPU/memory reservations expire');
   release(slot(1)); expireReservations();
+  metrics(0, 100, 0, 72.99);
+  match(take(slot(1)).stderr, /devbox gate disk/, 'heavy cost preserves 53 GiB');
+  metrics(0, 100, 0, 73);
+  eq(take(slot(1)).status, 0, 'inclusive disk floor');
+  release(slot(1)); expireReservations(301);
+  match(take(light).stderr, /devbox gate disk/, 'heavy disk reservation still blocks light after five minutes');
+  match(run('status', slot(1)).stdout, /free_disk_gib=73 reserved_disk_gib=20/);
+  expireReservations();
+  eq(take(light).status, 0, 'disk reservation expires at 15 minutes'); release(light);
+  expireReservations();
+  config(1, `DEVBOX_HEAVY_DISK_GIB.${host}=15\nDEVBOX_HEAVY_DISK_GIB.project.fixture=50\n`);
+  metrics(0, 100, 0, 102.99);
+  match(take(slot(1)).stderr, /devbox gate disk/, 'project cost overrides host cost');
+  const hostOverride = run('take', slot(1), '--by', 'other-project', '--project', 'different', '--for', 'host cost fixture', '--pid', String(process.pid));
+  eq(hostOverride.status, 0, 'different projects can use host override'); release(slot(1), 'other-project');
+  expireReservations(); config();
   metrics(99, 0, 301);
   eq(take(slot(1)).status, 0); release(slot(1));
   eq(take(slot(3)).status, 3);
@@ -152,6 +168,16 @@ try {
   eq(result.filter(code => code === 2).length, 2);
   eq(JSON.parse(fs.readFileSync(ledger, 'utf8')).length, 1);
   release(burstIds[result.indexOf(0)]); expireReservations();
+  metrics(0, 100, 0, 73);
+  fs.rmSync(barrier, { recursive: true }); fs.mkdirSync(barrier);
+  const diskBurst = [slot(1), slot(2)].map(id => start(['take', id, ...args(id)], { RES_TEST_POOL_CLAIM_BARRIER: barrier }));
+  await until(() => fs.readdirSync(barrier).length === diskBurst.length);
+  fs.writeFileSync(path.join(barrier, 'release'), '');
+  const diskResults = await Promise.all(diskBurst);
+  eq(diskResults.filter(code => code === 0).length, 1, 'serialized disk reservations block a burst');
+  eq(diskResults.filter(code => code === 2).length, 1);
+  release(burstIds[diskResults.indexOf(0)]); expireReservations();
+
 
   const head = seedHead();
   metrics(0, 100);
@@ -202,6 +228,16 @@ try {
   match(run('status', slot(1)).stdout, /STALE old-holder/);
   release(slot(2), 'heavy-free-slot'); release(slot(1), 'old-holder');
   eq(journal().split('\n').filter(line => line.includes('\treclaim-stale\t')).length, 1);
+  config(0, 'DEVBOX_LIGHT_STALE_RECLAIM=1\n');
+  const protectedHolder = 'protected-fixture';
+  eq(take(light, protectedHolder).status, 0);
+  eq(run('retain-remote', light, '--by', protectedHolder, '--pid', String(process.pid)).status, 0);
+  const heldInfo = path.join(root, 'locks', light + '.d', 'info');
+  fs.writeFileSync(heldInfo, fs.readFileSync(heldInfo, 'utf8').replace(/^pid\t.*$/m, 'pid\t2147483647')
+    .replace(/^start\t.*$/m, 'start\t' + (Math.floor(Date.now() / 1000) - 901)));
+  eq(run('wait-pool', light, ...args('replacement'), '--timeout', '0', '--exclude-host', other, '--exclude-reason', 'fixture binding').status, 2);
+  match(run('status', light).stdout, /remote cleanup required/);
+  release(light, protectedHolder);
   console.log(`ALL ${count} ASSERTIONS PASSED`);
 } finally {
   for (const child of children) child.kill('SIGTERM');

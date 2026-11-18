@@ -162,7 +162,7 @@ try {
   for (const id of others) release(id);
   expectSlot('exclude-slot', 'devbox-cn-3', ['--need', 'node', '--exclude-slot', 'devbox-cn-1,devbox-cn-2']);
   expectSlot('exclude-host', 'devbox-cn-3', ['--prefer-host', hostA, '--exclude-host', hostA]);
-  eq(acquire('excluded-all', 'devbox-cn', ['--exclude-host', hostA + ',' + hostB]).code, 1);
+  eq(acquire('excluded-all', 'devbox-cn', ['--exclude-host', hostA + ',' + hostB]).code, 2);
   fs.writeFileSync(registryFile, registry.replace(row('devbox-cn-2'), row('devbox-cn-2').replace('caps=node,android', 'caps=node,vesdk-android')));
   expectSlot('per-slot-caps', 'devbox-cn-2', ['--need', 'vesdk-android', '--prefer-slot', 'devbox-cn-1']);
   fs.writeFileSync(registryFile, registry);
