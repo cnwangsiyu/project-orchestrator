@@ -8,7 +8,7 @@ export function main(argv = process.argv.slice(2)) {
   const { opts, pos } = parseOptions(argv, { values: ['project', 'question', 'option', 'recommended', 'default', 'deadline', 'task', 'raised-by', 'choice', 'note'],
     booleans: ['open', 'all', 'json'] });
   const [cmd, id, ...extra] = pos;
-  if (extra.length || !['add', 'list', 'card', 'answer', 'close'].includes(cmd)) throw Error('usage: user-queue.mjs add|list|card|answer|close [id]');
+  if (extra.length || !['add', 'list', 'card', 'answer', 'close'].includes(cmd)) throw Error('usage: user-queue.mjs add --project p --question "..." --option A --option B | list [--open|--all] | card <id> | answer <id> --choice "<user words>" [--note "..."] | close <id>');
   if (cmd === 'add') {
     if (id) throw Error('add takes no id');
     console.log(addQuestion({ project: opts.project, question: opts.question, options: opts.option, recommended: opts.recommended,
