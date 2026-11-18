@@ -19,6 +19,7 @@ fs.writeFileSync(snapshot, JSON.stringify({ schemaVersion: 'pipeline-v1', collec
   lanes: ['ttadk', 'trae', 'main'].map(accountId => ({ id: `${accountId}:${sol}`, accountId, modelId: sol, harness: 'hub',
     efforts, mode: 'standard', selectable: true, readyAt: now, capabilities: {} })) }));
 const env = { ...process.env, HOME: tmp, RULES_SHARED: tmp, CODEX_ACCOUNTS: registry, QUOTA_CACHE: path.join(tmp, 'quota.json'),
+  ORCHESTRATOR_OWNER: '30000000-0000-4000-8000-000000000003',
   ROUTE_NOW: String(now), ROUTE_SNAPSHOT_FILE: snapshot, ROUTE_APPROVAL_FILE: file, ROUTE_LOG_FILE: path.join(tmp, 'routes.jsonl'),
   QUOTA_LOG_FILE: path.join(tmp, 'quota-log.jsonl'), QUOTA_LOG: '0', TRAE_PROBE: '0' };
 const run = (script, args) => {

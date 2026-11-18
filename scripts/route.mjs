@@ -50,7 +50,7 @@ try {
     const launchPaths = Object.fromEntries([plan.primary ?? plan.primaryProposal, ...plan.reviewers, ...(plan.reviewerProposals ?? [])]
       .filter(s => s?.task.flags['task-dir']).map(s => [s.role, taskLaunchPaths(s.task.taskDir, s.role)]));
     const view = renderPlan(plan, {...context, launchPaths, owner, digest: loadDigest()});
-    const approvalHints = approvalMismatchHints(plan, context.snapshot, root);
+    const approvalHints = approvalMismatchHints(plan, context.snapshot, root, process.env.ORCHESTRATOR_OWNER);
     const out = approvalHints.length ? { ...view, approvalMismatchHints: approvalHints,
       needsUserOK: [...view.needsUserOK, ...approvalHints.map(mismatchHintText)] } : view;
     if (!task.flags.dry && process.env.ROUTE_LOG !== '0') {

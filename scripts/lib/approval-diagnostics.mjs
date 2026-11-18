@@ -4,7 +4,7 @@ import { createTaskSpec } from './pipeline/taskspec.mjs';
 
 // Older records contain only a hash. Recover the missing-default cases only
 // when recomputing the hash verifies the exact arguments and project.
-function legacyFlags(task, hash) {
+function legacyFlags(task, hash, inheritedOwner) {
   const current = scopedFlags(task.flags);
   const omissions = [];
   if (current.owner) omissions.push(['owner']);
@@ -13,13 +13,19 @@ function legacyFlags(task, hash) {
   for (const keys of omissions) {
     const flags = { ...current };
     for (const key of keys) delete flags[key];
-    for (const owner of keys.includes('owner') ? [task.owner, 'UNKNOWN'] : [task.owner])
+    // Without --owner the original route may have inherited the launcher owner.
+    const owners = new Set([task.owner]);
+    if (keys.includes('owner')) {
+      if (inheritedOwner) owners.add(inheritedOwner);
+      owners.add('UNKNOWN');
+    }
+    for (const owner of owners)
       if (createTaskSpec({ ...task, flags, owner }).constraintHash === hash) return flags;
   }
   return null;
 }
 
-export function approvalMismatchHints(plan, snapshot, root) {
+export function approvalMismatchHints(plan, snapshot, root, inheritedOwner) {
   const task = plan.task, current = scopedFlags(task.flags);
   const hints = [];
   for (const gate of plan.gates.filter(g => g.reason?.code === 'PERSONAL_QUOTA_OK_REQUIRED')) {
@@ -32,7 +38,7 @@ export function approvalMismatchHints(plan, snapshot, root) {
         if (prior.action !== 'personal-quota' || prior.taskId !== scope.taskId || !prior.accounts.includes(account)
           || !prior.roles.includes(scope.roles[0]) || prior.constraintHash === scope.constraintHash) continue;
         const flags = approval.project === task.project && approval.routeFlags ? scopedFlags(approval.routeFlags)
-          : scope.roles[0] === task.role ? legacyFlags(task, prior.constraintHash) : null;
+          : scope.roles[0] === task.role ? legacyFlags(task, prior.constraintHash, inheritedOwner) : null;
         if (!flags) continue;
         const differences = [...new Set([...Object.keys(current), ...Object.keys(flags)])].sort()
           .filter(k => current[k] !== flags[k])
