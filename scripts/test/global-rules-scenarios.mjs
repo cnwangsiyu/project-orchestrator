@@ -24,7 +24,7 @@ try {
   assert.equal(digestText.match(/^version:/gm)?.length, 1, 'integration must publish one digest version');
   assert.equal(digestText.match(/^## Changes In This Version$/gm)?.length, 1);
   assert.ok(digestText.split('\n').length<=61,'digest line budget');
-  assert.equal(digest.version, '2026-11-18.8');
+  assert.equal(digest.version, '2026-11-18.9');
   assert.match(digest.worker, /--exclude-host.*--exclude-slot.*--prefer-slot.*--exclude-reason.*in their report.*any matching devbox/);
   assert.match(digest.worker, /Mid-turn talkback:.*ask --default.*never routine progress/);
   assert.match(digest.worker, /If `codex-worker` is not on PATH, use the launcher's absolute Node\/script command with its RULES_SHARED, account and thread/);
