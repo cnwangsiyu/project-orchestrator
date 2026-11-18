@@ -494,8 +494,14 @@ Python needs PyYAML, requests and rich. It rejects credential-file paths and bla
 credential-labelled fields in Gradle and properties, including HTTP headers
 embedded in command strings. `source-build-fields.json` records path,
 key and count only. A branch must use matching engine, nodegraph, Bach,
-and LFS inputs. Stage and audit matching dependencies on the mini when
-the branch changes a pin.
+and LFS inputs. Prep resolves AmazingEngine, tiktok_nodegraph and the
+branch's declared Android MT-debug Bach pin through a payload manifest.
+Each dependency set has its own directory under
+`shared/deps/vesdk-android`. The qualified `T152-v1` keeps its staged
+`22.7.0.15-MT-debug` compatibility override. New sets use a sibling
+directory with their own pinned sources, Bach binary and audited LFS.
+Run both transfer gates before installing a new set. A successful prep
+writes `payload-id`, which `run-verified.sh` uses to select the install.
 
 Prep exports the following configure-time source inputs on the mini from
 exact local Git objects. Each export omits repository metadata and is
@@ -541,6 +547,20 @@ The rule applies to VE and Lynx. There is no allowlist entry for this field.
 Prep omits staged Maven and Gradle caches so Gradle resolves them on devbox
 8 through credential-free repositories. It also omits AmazingEngine
 `Demos`, `.ci`, `Tests`, and nodegraph's `.claude` directory.
+
+| Scope | Excluded inputs | Reason |
+| --- | --- | --- |
+| All source-only refs | `lynx-games/tools/` | Developer tools outside the vemo build graph. |
+| T176 LFS, default vemo debug | Two exact paths under `lynx-games/MobilePerfTest/effect-packages/lynx/` in `T176/configure-source-pins.json` | The Gradle asset task runs only with `VEMO_LYNX_PERF_PACKAGES=true`. |
+| T176 LFS, default vemo debug | Ten exact paths under `lynx-games/effect-packages/original-images-20261017/` in the same manifest | The vemo asset source set uses `lynx-games/effect-packages/android/`. |
+| T176 snapshot and LFS only | `proj/android/vemo/src/main/assets/sticker/round20261014_case-13_texturefix_lynx.zip` | Lynx opted to omit this October harness sticker from its APK. |
+| T176 snapshot and LFS only | `proj/android/vemo/src/main/assets/sticker/round20261014_case-16_lynx.zip` | Lynx opted to omit this October harness sticker from its APK. |
+
+AmazingEngine's `cache_recycling.sh` (line 194) expires cached TTBin packages after 30 days, judged by the newest
+mtime among the first 200 files. Prep therefore refreshes the TTBin package timestamps and then rebuilds the cache
+index (T183). The `T176-22.4.0` set also carries `jazz` (from `configure-source-v2`, pin `f83ee6291ad8`) and seven
+AILib dependency trees, each recorded in its `install-receipt.json`.
+
 The independent source and dependency gates and the stock runner's snapshot,
 history and source checks must all pass with zero unapproved findings and
 zero read errors. Dependency exceptions are limited to the four documented
