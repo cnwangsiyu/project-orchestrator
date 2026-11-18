@@ -178,3 +178,11 @@ claims and checks scarce and mixed-capability FIFO, eligibility changes during a
 `pool-identity.mjs` checks waiter identity across path changes and preservation of existing holds.
 Companion checks run with `node scripts/test/fleet-report-scenarios.mjs` and
 `node scripts/test/devbox-run-scenarios.mjs`. Every suite uses scratch state.
+
+
+### Head override for the base load limit (user 2026-11-18)
+
+`HEAD_OVERRIDE_BASE_LOAD=1` in `machine.conf` (user card: "A 等满 20 分钟后内存达标就放行一个（推荐）"): a mini build-queue FIFO head
+blocked by load alone for `LOAD_OVERRIDE_MINUTES` is admitted past the base `LOAD_LIMIT` as well, when memory passes.
+It applies to one solo build only: never beside a running heavy build, and lane 3 stays strict. `res status` shows
+`blocked=load waiting for load, head override 20 min after HH:MM`. Remove the key to revert.

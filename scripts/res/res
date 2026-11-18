@@ -104,7 +104,7 @@ machine_thresholds() {
   LOAD_LIMIT=12 LOAD_LIMIT_WITH_LANES=20 MIN_AVAIL_GIB=16 LANE3_LOAD=8 LANE3_AVAIL_GIB=32
   LANE_LOAD_PER_CORE=1.25 LANE_MIN_AVAIL_GIB=12 BUILD_LOAD_PER_CORE=1.5
   BUILD_MAX_CONCURRENCY=2 BUILD_CONCURRENT_LOAD_PER_CORE=0.6 BUILD_CONCURRENT_MIN_AVAIL_GIB=24
-  LOAD_OVERRIDE_MINUTES=20 LOAD_POLL_SECONDS=15
+  LOAD_OVERRIDE_MINUTES=20 LOAD_POLL_SECONDS=15 HEAD_OVERRIDE_BASE_LOAD=0
   THRESHOLDS_SOURCE=defaults
   local conf="$RES_DIR/machine.conf" content values key value
   if [ ! -e "$conf" ]; then
@@ -146,9 +146,10 @@ PY
       if (key ~ /^DEVBOX_(DYNAMIC_ADMISSION|DYNAMIC_HOSTS|LIGHT_STALE_RECLAIM|SOFT_EXCLUDE_MINUTES)$/ ||
           key ~ /^DEVBOX_(LOAD_PER_CORE|MIN_AVAIL_GIB|HEAVY_CORES|HEAVY_GIB|LIGHT_CORES|LIGHT_GIB|HEAVY_DISK_GIB|LIGHT_DISK_GIB)(\.[A-Za-z0-9][A-Za-z0-9.-]*)?$/ ||
           key ~ /^DEVBOX_(HEAVY|LIGHT)_DISK_GIB\.project\.[A-Za-z0-9][A-Za-z0-9_.-]*$/) next
-      if (key !~ /^(LOAD_LIMIT|LOAD_LIMIT_WITH_LANES|MIN_AVAIL_GIB|LANE3_LOAD|LANE3_AVAIL_GIB|LANE_LOAD_PER_CORE|LANE_MIN_AVAIL_GIB|BUILD_LOAD_PER_CORE|BUILD_MAX_CONCURRENCY|BUILD_CONCURRENT_LOAD_PER_CORE|BUILD_CONCURRENT_MIN_AVAIL_GIB|LOAD_OVERRIDE_MINUTES|LOAD_POLL_SECONDS)$/ || seen[key]++) exit 1
+      if (key !~ /^(LOAD_LIMIT|LOAD_LIMIT_WITH_LANES|MIN_AVAIL_GIB|LANE3_LOAD|LANE3_AVAIL_GIB|LANE_LOAD_PER_CORE|LANE_MIN_AVAIL_GIB|BUILD_LOAD_PER_CORE|BUILD_MAX_CONCURRENCY|BUILD_CONCURRENT_LOAD_PER_CORE|BUILD_CONCURRENT_MIN_AVAIL_GIB|HEAD_OVERRIDE_BASE_LOAD|LOAD_OVERRIDE_MINUTES|LOAD_POLL_SECONDS)$/ || seen[key]++) exit 1
       if (value !~ /^[0-9]+([.][0-9]+)?$/ || value + 0 <= 0) exit 1
       if (key ~ /^(BUILD_MAX_CONCURRENCY|LOAD_POLL_SECONDS)$/ && value !~ /^[0-9]+$/) exit 1
+      if (key == "HEAD_OVERRIDE_BASE_LOAD" && value != "1") exit 1
       max = key ~ /GIB$/ ? 65536 : (key == "LOAD_OVERRIDE_MINUTES" ? 1440 : 1024)
       if (value + 0 > max) exit 1
       print key "\t" value
@@ -168,6 +169,7 @@ PY
       BUILD_CONCURRENT_LOAD_PER_CORE) BUILD_CONCURRENT_LOAD_PER_CORE="$value" ;;
       BUILD_CONCURRENT_MIN_AVAIL_GIB) BUILD_CONCURRENT_MIN_AVAIL_GIB="$value" ;;
       LOAD_OVERRIDE_MINUTES) LOAD_OVERRIDE_MINUTES="$value" ;;
+      HEAD_OVERRIDE_BASE_LOAD) HEAD_OVERRIDE_BASE_LOAD="$value" ;;
       LOAD_POLL_SECONDS) LOAD_POLL_SECONDS="$value" ;;
     esac
   done <<<"$values"
@@ -276,7 +278,7 @@ cmd_heavy_check() {
         -v admission="$admission" -v cores="$cores" -v override="$override" \
         -v lane_ratio="$LANE_LOAD_PER_CORE" -v lane_gib="$LANE_MIN_AVAIL_GIB" -v build_ratio="$BUILD_LOAD_PER_CORE" \
         -v concurrent_ratio="$BUILD_CONCURRENT_LOAD_PER_CORE" -v concurrent_gib="$BUILD_CONCURRENT_MIN_AVAIL_GIB" \
-        -v poll="$LOAD_POLL_SECONDS" -v override_minutes="$LOAD_OVERRIDE_MINUTES" \
+        -v poll="$LOAD_POLL_SECONDS" -v override_minutes="$LOAD_OVERRIDE_MINUTES" -v base="${HEAD_OVERRIDE_BASE_LOAD:-0}" \
         -v third_load="$LANE3_LOAD" -v third_gib="$LANE3_AVAIL_GIB" 'BEGIN {
         if (load !~ /^[0-9]+([.][0-9]+)?$/ || pages !~ /^[0-9]+$/ || swap !~ /^[0-9]+$/) exit 1
         if (has_level && (level !~ /^[0-9]+$/ || level > 100 || ram !~ /^[0-9]+$/ || ram <= 0)) exit 1
@@ -284,11 +286,16 @@ cmd_heavy_check() {
         if ((admission == "lane" || admission == "build-concurrent") && !has_level) exit 1
         gib = (has_level ? level / 100 * ram : pages) / 1073741824
         legacy_bad = load > limit || gib < min_gib
+        # User 2026-11-18: with HEAD_OVERRIDE_BASE_LOAD=1 the 20-minute FIFO head of a solo build
+        # passes the base load limit too; memory still gates it.
+        head_base = base == 1 && admission == "build"
+        if (head_base && override) legacy_bad = gib < min_gib
         new_bad = admission == "lane" ? load > cores * lane_ratio || gib < lane_gib : load > cores * build_ratio
         if (admission == "build-concurrent") new_bad = load > cores * concurrent_ratio || gib < concurrent_gib
         used = override && admission != "build-concurrent" && new_bad
         overloaded = admission == "legacy" ? legacy_bad : admission == "lane" ? new_bad && !used : legacy_bad || (new_bad && !used)
         blocked = admission ~ /^build/ && legacy_bad ? "gate" : overloaded ? "load" : "none"
+        if (head_base && blocked == "gate" && gib >= min_gib) blocked = "load"
         if (admission == "lane") { limit = cores * lane_ratio; min_gib = lane_gib }
         if (admission == "build" && cores * build_ratio < limit) limit = cores * build_ratio
         if (admission == "build-concurrent") { if (cores * concurrent_ratio < limit) limit = cores * concurrent_ratio; if (concurrent_gib > min_gib) min_gib = concurrent_gib }
@@ -331,17 +338,22 @@ cmd_heavy_check() {
     -v admission="$admission" -v cores="$cores" -v override="$override" \
     -v lane_ratio="$LANE_LOAD_PER_CORE" -v lane_gib="$LANE_MIN_AVAIL_GIB" -v build_ratio="$BUILD_LOAD_PER_CORE" \
     -v concurrent_ratio="$BUILD_CONCURRENT_LOAD_PER_CORE" -v concurrent_gib="$BUILD_CONCURRENT_MIN_AVAIL_GIB" \
-    -v poll="$LOAD_POLL_SECONDS" -v override_minutes="$LOAD_OVERRIDE_MINUTES" \
+    -v poll="$LOAD_POLL_SECONDS" -v override_minutes="$LOAD_OVERRIDE_MINUTES" -v base="${HEAD_OVERRIDE_BASE_LOAD:-0}" \
     -v min_gib="$MIN_AVAIL_GIB" -v third_load="$LANE3_LOAD" -v third_gib="$LANE3_AVAIL_GIB" 'BEGIN {
     if (load !~ /^[0-9]+([.][0-9]+)?$/ || bytes !~ /^[0-9]+$/) exit 1
     if (admission != "legacy" && (cores !~ /^[0-9]+$/ || cores + 0 <= 0)) exit 1
     gib = bytes / 1073741824
     legacy_bad = load > limit || gib < min_gib
+    # User 2026-11-18: with HEAD_OVERRIDE_BASE_LOAD=1 the 20-minute FIFO head of a solo build
+    # passes the base load limit too; memory still gates it.
+    head_base = base == 1 && admission == "build"
+    if (head_base && override) legacy_bad = gib < min_gib
     new_bad = admission == "lane" ? load > cores * lane_ratio || gib < lane_gib : load > cores * build_ratio
     if (admission == "build-concurrent") new_bad = load > cores * concurrent_ratio || gib < concurrent_gib
     used = override && admission != "build-concurrent" && new_bad
     overloaded = admission == "legacy" ? legacy_bad : admission == "lane" ? new_bad && !used : legacy_bad || (new_bad && !used)
     blocked = admission ~ /^build/ && legacy_bad ? "gate" : overloaded ? "load" : "none"
+    if (head_base && blocked == "gate" && gib >= min_gib) blocked = "load"
     if (admission == "lane") { limit = cores * lane_ratio; min_gib = lane_gib }
     if (admission == "build" && cores * build_ratio < limit) limit = cores * build_ratio
     if (admission == "build-concurrent") { if (cores * concurrent_ratio < limit) limit = cores * concurrent_ratio; if (concurrent_gib > min_gib) min_gib = concurrent_gib }
@@ -533,6 +545,15 @@ oldest_live_waiter() {
 
 reading_field() {
   printf '%s\n' "$1" | awk -v key="$2" '{for (i=1; i<=NF; i++) if (index($i, key "=") == 1) {sub(/^[^=]*=/, "", $i); print $i; exit}}'
+}
+
+# True when the legacy gate reading is blocked by load alone (memory fine) and the
+# user-approved head override for the base load limit is enabled.
+base_load_only() {
+  ( machine_thresholds >/dev/null 2>&1 || exit 1
+    [ "${HEAD_OVERRIDE_BASE_LOAD:-0}" = 1 ] || exit 1
+    avail=$(reading_field "$1" avail); avail=${avail%GiB}
+    awk -v a="$avail" -v m="$MIN_AVAIL_GIB" 'BEGIN { exit !(a ~ /^[0-9]+([.][0-9]+)?$/ && a + 0 >= m + 0) }' )
 }
 
 update_load_head() {
@@ -1445,7 +1466,7 @@ acquire_attempt() {
   else printf 'lane=%s\n' "$candidate"; fi
   TRANSACTION_COMMITTED=1
   if [ "$mode" = build ] && [ "${LOAD_OVERRIDE_ACTIVE:-0}" = 1 ]; then
-    log load-override "$build_id" "$BY ($PROJECT${TASK:+/$TASK})" "FIFO head exceeded ${OVERRIDE_MINUTES_ACTIVE:-20} minutes; existing build/lane-3 gates retained"
+    log load-override "$build_id" "$BY ($PROJECT${TASK:+/$TASK})" "FIFO head exceeded ${OVERRIDE_MINUTES_ACTIVE:-20} minutes; memory and lane-3 gates retained"
   fi
   build_guard_end
   if [ "$mode" = pool ]; then finish_build_waiter acquire "slot=$candidate"
@@ -1523,6 +1544,12 @@ cmd_acquire() {
       else
         reading=$(cmd_heavy_check --pid "$PID") || rc=$?
       fi
+    fi
+    if [ "$can_attempt" = 1 ] && [ "$rc" -eq 5 ] && [ "$mode" = build ] && [ "$blocking" = 1 ] && base_load_only "$reading"; then
+      update_load_head load
+      if head_load_override "$override_minutes"; then rc=0
+      else printf '%s\n' "$reading"; rc=2; block_reason=load; BUILD_WAITER_GATE_STREAK=$((BUILD_WAITER_GATE_STREAK + 1))
+        update_build_waiter load "$lane3_state"; delay="$poll_seconds"; can_attempt=0; fi
     fi
     if [ "$can_attempt" = 1 ] && [ "$rc" -eq 0 ]; then
       printf '%s\n' "$reading"
@@ -2171,7 +2198,7 @@ try:
                     print('\nWaiting ' + label + ':')
                     print('%-24s %-24s %-16s %s' % ('HOLDER', 'PROJECT/TASK', 'SINCE', 'BLOCKED'))
                     for value in sorted(values, key=lambda v: v.get('order', '')):
-                        blocked = value.get('blocked', '?'); blocked = 'blocked=load' if blocked == 'load' else blocked
+                        blocked = value.get('blocked', '?'); blocked = ('blocked=load' + (' waiting for load, head override 20 min after %s' % time.strftime('%H:%M', time.localtime(int(value['head_since']))) if label == 'builds' and value.get('head_since', '0').isdigit() and value.get('head_since', '0') != '0' else '')) if blocked == 'load' else blocked
                         if value.get('self_restricted'):
                             blocked += ' self_restricted reason=%s free_hosts=%s' % (
                                 value.get('restriction_reason', '?'), value['self_restricted'])

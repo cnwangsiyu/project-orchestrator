@@ -107,11 +107,26 @@ const oldHead = String(Math.floor(Date.now() / 1000) - 1201);
 result = run(['wait-build', ...args('override'), '--checkout', path.join(repos, 'a'), '--timeout', '0'], { RES_TEST_LOAD1M: '18', RES_TEST_LOAD_HEAD_SINCE: oldHead });
 eq(result.code, 0, result.text); ok(result.text.includes('load_override=1'), result.text); release('override');
 journal = fs.readFileSync(path.join(state, 'log.tsv'), 'utf8'); ok(journal.includes('\tload-override\theavy-build\toverride '), journal);
-const overrideCount = journal.split('\n').filter(line => line.includes('\tload-override\t')).length;
+let overrideCount = journal.split('\n').filter(line => line.includes('\tload-override\t')).length;
 result = run(['wait-build', ...args('old-gate'), '--checkout', path.join(repos, 'a'), '--timeout', '0'], { RES_TEST_LOAD1M: '31', RES_TEST_LOAD_HEAD_SINCE: oldHead });
 eq(result.code, 2, result.text);
 journal = fs.readFileSync(path.join(state, 'log.tsv'), 'utf8');
 eq(journal.split('\n').filter(line => line.includes('\tload-override\t')).length, overrideCount);
+// User 2026-11-18: with HEAD_OVERRIDE_BASE_LOAD=1 the 20-minute head also passes the
+// base load limit; memory still gates it and it never applies beside a running build.
+config('LOAD_LIMIT=30\nLOAD_LIMIT_WITH_LANES=30\nMIN_AVAIL_GIB=8\nLOAD_OVERRIDE_MINUTES=20\nLOAD_POLL_SECONDS=15\nHEAD_OVERRIDE_BASE_LOAD=1\n');
+result = run(['wait-build', ...args('base-young'), '--checkout', path.join(repos, 'a'), '--timeout', '0'], { RES_TEST_LOAD1M: '31' });
+eq(result.code, 2, result.text);
+result = run(['wait-build', ...args('base-memory'), '--checkout', path.join(repos, 'a'), '--timeout', '0'],
+  { RES_TEST_LOAD1M: '31', RES_TEST_LOAD_HEAD_SINCE: oldHead, RES_TEST_MEMORYSTATUS_LEVEL: '10' });
+eq(result.code, 2, result.text);
+result = run(['wait-build', ...args('base-override'), '--checkout', path.join(repos, 'a'), '--timeout', '0'], { RES_TEST_LOAD1M: '31', RES_TEST_LOAD_HEAD_SINCE: oldHead });
+eq(result.code, 0, result.text); ok(result.text.includes('load_override=1'), result.text);
+result = run(['wait-build', ...args('base-second'), '--checkout', path.join(repos, 'b'), '--timeout', '0'], { RES_TEST_LOAD1M: '31', RES_TEST_LOAD_HEAD_SINCE: oldHead });
+eq(result.code, 2, result.text); release('base-override');
+journal = fs.readFileSync(path.join(state, 'log.tsv'), 'utf8');
+eq(journal.split('\n').filter(line => line.includes('\tload-override\t')).length, overrideCount + 1); overrideCount += 1;
+config('LOAD_LIMIT=30\nLOAD_LIMIT_WITH_LANES=30\nMIN_AVAIL_GIB=8\nLOAD_OVERRIDE_MINUTES=20\nLOAD_POLL_SECONDS=15\n');
 result = run(['take-build', ...args('concurrent-anchor'), '--checkout', path.join(repos, 'a')]); eq(result.code, 0, result.text);
 result = run(['wait-build', ...args('concurrent-no-override'), '--checkout', path.join(repos, 'b'), '--timeout', '0'],
   { RES_TEST_LOAD1M: '9', RES_TEST_LOAD_HEAD_SINCE: oldHead });
