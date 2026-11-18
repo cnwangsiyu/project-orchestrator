@@ -43,18 +43,44 @@ function* boundedMatches(text, pattern, valueGroup = 4) {
   }
 }
 
+function quotedRanges(text, { multiline = false } = {}) {
+  const ranges = [];
+  for (let i = 0; i < text.length; i++) {
+    const quote = text[i];
+    if (quote !== '"' && quote !== "'") continue;
+    const start = i; let closed = false;
+    for (i++; i < text.length; i++) {
+      if (!multiline && (text[i] === '\n' || text[i] === '\r')) { i = start; break; }
+      if (text[i] === '\\') { i++; continue; }
+      if (text[i] === quote) { ranges.push({ index: start, length: i - start + 1 }); closed = true; break; }
+    }
+    if (!closed && i >= text.length) i = start;
+  }
+  return ranges;
+}
+
 function credentialBlocks(text) {
   const stack = [], blocks = [];
-  let active = 0, start;
-  // Quoted braces and nested closures must not end a Gradle credentials block.
-  for (const match of text.matchAll(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\bcredentials\s*\{|[{}]/gi)) {
-    if (match[0][0] === '"' || match[0][0] === "'") continue;
-    if (match[0] === '}') {
-      if (stack.pop() && --active === 0) blocks.push([start, match.index]);
+  let active = 0, start, quoted = 0;
+  const ranges = quotedRanges(text, { multiline: true });
+  // Scan linearly: V8's quoted-string regexp can overflow on giant compiler-log lines.
+  for (let i = 0; i < text.length; i++) {
+    while (ranges[quoted]?.index + ranges[quoted]?.length <= i) quoted++;
+    if (ranges[quoted]?.index === i) { i += ranges[quoted].length - 1; quoted++; continue; }
+    if (text[i] === '}') {
+      if (stack.pop() && --active === 0) blocks.push([start, i]);
     } else {
-      const credential = match[0] !== '{';
+      let credential = false, brace = text[i] === '{';
+      if (!brace && (i === 0 || !/[\w$]/.test(text[i - 1]))
+        && text.slice(i, i + 11).toLowerCase() === 'credentials'
+        && !/[\w$]/.test(text[i + 11] || '')) {
+        let end = i + 11;
+        while (/\s/.test(text[end] || '')) end++;
+        if (text[end] === '{') { credential = true; brace = true; i = end; }
+      }
+      if (!brace) continue;
       stack.push(credential);
-      if (credential && active++ === 0) start = match.index;
+      if (credential && active++ === 0) start = i;
     }
   }
   if (active) blocks.push([start, text.length]);
@@ -85,7 +111,7 @@ function visitSecrets(text, visit) {
 
 function collectSecrets(text, visit) {
   const blocks = credentialBlocks(text);
-  const strings = [...text.matchAll(new RegExp(inlineQuotedValue, 'g'))];
+  const strings = quotedRanges(text);
   let string = 0;
   let line = 1, offset = 0, block = 0;
   const matches = [...boundedMatches(text, assignments), ...boundedMatches(text, whitespaceAssignments)]
@@ -121,7 +147,7 @@ function collectSecrets(text, visit) {
   }
   matches.sort((a, b) => a.index - b.index);
   for (const match of matches) {
-    while (string < strings.length && strings[string].index + strings[string][0].length <= match.index) string++;
+    while (string < strings.length && strings[string].index + strings[string].length <= match.index) string++;
     if (strings[string]?.index < match.index) continue; // A mention inside a log message is not source code.
     for (; offset < match.index; offset++) if (text[offset] === '\n') line++;
     const field = match[2].toLowerCase(), originalRaw = match[4];

@@ -7,6 +7,8 @@ import { spawn, fork } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { StringDecoder } from 'node:string_decoder';
+import { redactLogFile } from './lib/log-redaction.mjs';
+import { maskLogText } from './lib/nightly-audit.mjs';
 
 const script = fileURLToPath(import.meta.url);
 const GiB = 1024 ** 3;
@@ -198,6 +200,7 @@ function lineSink(write, values = [], intercept) {
     if (/-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/.test(line)) privateBlock = true;
     if (privateBlock) { if (/-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/.test(line)) privateBlock = false; return '[MASKED private key output]'; }
     for (const value of values.filter(Boolean).sort((a, b) => b.length - a.length)) line = line.replaceAll(value, '[MASKED]');
+    line = maskLogText(line).text;
     if ((sensitive.test(line) || /ACCESS|SCRECT|KEY(?!ALIAS)|PASS|PWD|AUTH|NEXUS|MAGIC|PRIVATE/i.test(line)) && /[=:]|bearer\s/i.test(line)) return '[MASKED sensitive output]';
     return line.replace(/\bAKIA[A-Z0-9]{16}\b/g, '[MASKED access key]');
   };
@@ -1170,7 +1173,15 @@ async function shard(opts) {
     catch { state.stop(74); exit = state.cancel; }
     return { shard: opts.shard, slot: last?.slot || null, host: last?.host || null, exit, flaky, stateFile, resEvents, ...(last?.skipped ? { skipped: true } : {}),
       ...(opts.units ? { units: opts.units } : {}), durationSec: (Date.now() - started) / 1000, log, attempts };
-  } finally { clearTimeout(timer); clearInterval(parentWatch); fs.closeSync(fd); }
+  } finally {
+    clearTimeout(timer); clearInterval(parentWatch); fs.closeSync(fd);
+    try {
+      const result = redactLogFile(log, { force: true });
+      if (!process.stdout.destroyed) process.stdout.write(`[shard ${opts.shard}] log-redaction files=1 masked=${result.masked}\n`);
+    } catch (error) {
+      if (!process.stderr.destroyed) process.stderr.write(`[shard ${opts.shard}] log redaction failed (${error.message})\n`);
+    }
+  }
 }
 
 async function main(args) {

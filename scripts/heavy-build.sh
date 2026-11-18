@@ -17,6 +17,8 @@ project="${HEAVY_BUILD_PROJECT:?set HEAVY_BUILD_PROJECT}"
 task="${HEAVY_BUILD_TASK:?set HEAVY_BUILD_TASK}"
 timeout="${HEAVY_BUILD_TIMEOUT:-60}"
 preferred_lane="${HEAVY_BUILD_LANE:-}"
+build_log="${HEAVY_BUILD_LOG:-}"
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 watch_pid=''
 if [ "${1:-}" = --watch-pid ]; then
   [ "$#" -ge 2 ] || { echo 'heavy-build: --watch-pid needs a PID' >&2; exit 2; }
@@ -25,14 +27,15 @@ fi
 [ "${1:-}" != -- ] || shift
 if [ "$#" -eq 0 ] || ! [[ "$timeout" =~ ^[0-9]+([.][0-9]+)?$ ]] ||
    { [ -n "$preferred_lane" ] && ! [[ "$preferred_lane" =~ ^heavy-lane-[123]$ ]]; } ||
-   { [ -n "$watch_pid" ] && ! [[ "$watch_pid" =~ ^[1-9][0-9]*$ ]]; }; then
-  echo 'usage: heavy-build.sh [--watch-pid <long-lived worker PID>] [--] <command...>; finite timeout minutes, optional HEAVY_BUILD_LANE=heavy-lane-1/2/3' >&2
+   { [ -n "$watch_pid" ] && ! [[ "$watch_pid" =~ ^[1-9][0-9]*$ ]]; } ||
+   { [ -n "$build_log" ] && { [[ "$build_log" != /* ]] || ! [[ "$build_log" =~ \.(log|txt|out)$ ]]; }; }; then
+  echo 'usage: heavy-build.sh [--watch-pid <long-lived worker PID>] [--] <command...>; finite timeout minutes, optional HEAVY_BUILD_LANE=heavy-lane-1/2/3 and absolute HEAVY_BUILD_LOG=*.log/*.txt/*.out' >&2
   exit 2
 fi
 if [ -n "$watch_pid" ] && ! kill -0 "$watch_pid" 2>/dev/null; then
   echo "heavy-build: watched worker $watch_pid is gone" >&2; exit 143
 fi
-child='' watcher='' spawning=0 acquiring=0 acquiring_id='' output='' modern=1 build_held=0 lane_held=0 lane='' cancel_status=0
+child='' watcher='' spawning=0 acquiring=0 acquiring_id='' output='' modern=1 build_held=0 lane_held=0 lane='' cancel_status=0 build_finished=0
 stop_group() {
   [ -n "$1" ] || return 0
   kill -TERM -- "-$1" 2>/dev/null || true
@@ -49,6 +52,14 @@ cleanup() {
   if [ "$spawning" -eq 1 ] && [ -z "$child" ]; then child="${!:-}"; fi
   stop_group "$watcher"
   stop_group "$child"
+  if [ "$build_finished" -eq 0 ] && [ -n "$build_log" ] && [ -f "$build_log" ]; then
+    if masked_output=$(node "$script_dir/mask-logs.mjs" --force "$build_log"); then
+      masked_count=$(printf '%s\n' "$masked_output" | awk -F '\t' '{ total += $NF } END { print total + 0 }')
+      echo "heavy-build: interrupted log-redaction files=1 masked=$masked_count" >&2
+    else
+      echo 'heavy-build: interrupted log redaction failed' >&2
+    fi
+  fi
   # Return by ownership even if interrupted before acquisition reports success.
   if [ "$modern" -eq 1 ]; then
     "$res" return-build --by "$by" --pid "$$" || status=1
@@ -156,8 +167,13 @@ else
   legacy_pair || exit $?
 fi
 spawning=1
-"$@" &
+if [ -n "$build_log" ]; then
+  node "$script_dir/lib/run-with-masked-log.mjs" "$build_log" -- "$@" &
+else
+  "$@" &
+fi
 child=$!; spawning=0
 wait "$child"; status=$?
+build_finished=1
 # Cleanup terminates descendants before releasing the pair and reaps the watcher.
 exit "$status"

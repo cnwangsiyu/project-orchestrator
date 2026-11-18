@@ -748,8 +748,10 @@ async function scenarios() {
   git(historical.repo, 'rm', 'config/.Env.old'); git(historical.repo, 'commit', '-qm', 'remove fixture');
   assert.match((await run(historical)).stderr, /bundle history contains credential-related paths/);
   assert.equal(historical.events().length, 0, 'reject historical paths before acquiring a slot');
-  const redaction = fixture(); const redacted = await run(redaction, [], 'printf api_; sleep .02; printf "token=fixture-value\\n"'); ok(redacted);
-  assert.ok(!redacted.stdout.includes('fixture-value')); assert.ok(!fs.readFileSync(redacted.summary.shards[0].log, 'utf8').includes('fixture-value')); returned(redaction);
+  const redaction = fixture(); const redacted = await run(redaction, [], 'printf api_; sleep .02; printf "token=FAKE_DEVBOX_TOKEN_123\\n"; printf \'storePassword "FAKE_DEVBOX_PASSWORD_456"\\n\''); ok(redacted);
+  assert.ok(!redacted.stdout.includes('FAKE_DEVBOX_'));
+  assert.ok(!fs.readFileSync(redacted.summary.shards[0].log, 'utf8').includes('FAKE_DEVBOX_'));
+  assert.match(redacted.stdout, /log-redaction files=1 masked=0/); returned(redaction);
   console.log('PASS leased stale-worktree GC and source-only snapshot guard');
 
   for (const authMessage of ['Permission denied (gssapi-with-mic)', 'Connection closed by 192.0.2.1 port 22']) {

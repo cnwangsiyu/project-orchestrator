@@ -168,6 +168,10 @@ recipient identity leaves a durable blocked receipt. No launchd installation/cha
 
 `node scripts/nightly-review.mjs scan-log --file /absolute/worker.log` reports secret-like field locations only; `.log`, `.out`, `.txt` and `.jsonl` are supported.
 Run `node scripts/nightly-review.mjs redact-log --file /absolute/worker.jsonl` after the worker's turn ended when a risk note says secrets were printed; it atomically masks values and prints counts only, refusing logs modified in the last 120 s unless `--force`.
+For retained task/build output, `node scripts/mask-logs.mjs [--dry-run] <dir-or-file>...` recursively handles only
+`.log`, `.txt` and `.out`, follows no symlinks, skips binaries and files above 256 MiB, and never rewrites JSONL
+rollouts. Dry-run prints only each matching file path and its count. Normal mode refuses files modified in the
+last 120 seconds; use `--force` only after the producing process and any `tee` have closed.
 
 All validation uses isolated fixture HOME/shared directories, mocked CLIs and public test metadata. Never write
 the real shared directory or contact real hubs while developing this stage. Focused suites are

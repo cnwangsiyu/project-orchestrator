@@ -558,6 +558,13 @@ the shared entry and HEAVY_BUILD_LANE pins heavy-lane-1/2/3; neither grants a lo
 min(20, 12 + 8 * other lanes), available memory >=16 GiB; lane 3 only after a reviewed switch, at
 load1m <=8 AND memory >=32 GiB. UNKNOWN blocks; captured controller verdicts govern rounded readings.
 
+Set `HEAVY_BUILD_LOG` to a fresh absolute `.log`, `.txt` or `.out` path when the wrapper should retain
+combined build output. After the command and log writer close, the wrapper atomically masks credential-like
+property/DSL values in place and reports counts only; the build command's exit code is preserved on success or
+failure. Equivalent local wrappers and custom `tee` capture must close their logs before running
+`node scripts/mask-logs.mjs --force <log-or-build-dir>`. The masker skips symlinks, binaries, files above
+256 MiB and JSONL rollouts.
+
 Full local packages use one watched `heavy-build.sh` or equivalent process for atomic pair acquisition,
 compute, owned-child cleanup and reverse return. Other local heavy work uses wait-lane. Install exit/
 signal cleanup before acquisition, use a unique holder and long-lived PID, finite timeout and worker

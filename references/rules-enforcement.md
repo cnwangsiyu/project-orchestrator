@@ -66,12 +66,15 @@ Full-package build briefs use the wrapper or explicit equivalent res protocol:
 
 ```bash
 HEAVY_BUILD_BY="<unique-session-holder>" HEAVY_BUILD_PROJECT="<slug>" HEAVY_BUILD_TASK="<task-id>" \
-HEAVY_BUILD_TIMEOUT=60 HEAVY_BUILD_LANE=heavy-lane-1 \
+HEAVY_BUILD_TIMEOUT=60 HEAVY_BUILD_LANE=heavy-lane-1 HEAVY_BUILD_LOG="/absolute/task/build/full-build.log" \
 bash "$HOME/.agents/skills/project-orchestrator/scripts/heavy-build.sh" <command> <args...>
 ```
 
 The wrapper holds heavy-build then the chosen lane, using gated finite res waits, long-lived PID and EXIT/signal
 cleanup of owned process groups; never nest it or enter already holding heavy locks. Set lane 2 when appropriate.
+When `HEAVY_BUILD_LOG` is set, it must name a fresh absolute `.log`, `.txt` or `.out`; masking runs atomically
+after capture closes, reports counts only and preserves the build exit. Equivalent wrappers must apply
+`node scripts/mask-logs.mjs --force` only after their own log writers close.
 Other heavy tasks use lane-only res take/return. The [resource sampler](resources.md) independently detects builds
 without holders; denied probes remain UNKNOWN and telemetry never reclaims locks/restarts hubs. The wrapper doesn't enforce signing safety by sandboxing;
 the injected adjacent login-material/test-signing rules and the brief remain mandatory. A signing task uses
