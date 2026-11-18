@@ -5,7 +5,10 @@ import { spawn, spawnSync } from 'node:child_process';
 
 const root = fs.mkdtempSync(path.join(process.env.RES_TEST_ROOT, 'exclusions-'));
 const res = process.env.RES_SOURCE;
-const env = { ...process.env, RES_DIR: root };
+const mocks = path.join(root, 'bin');
+fs.mkdirSync(mocks);
+for (const name of ['adb', 'xcrun', 'idevice_id']) fs.writeFileSync(path.join(mocks, name), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+const env = { ...process.env, RES_DIR: root, PATH: mocks + path.delimiter + process.env.PATH };
 const first = '192.0.2.1', free = '192.0.2.2', hard = '192.0.2.3';
 const pool = 'devbox-cn', slot = n => `${pool}-${n}`;
 const ownerArgs = by => ['--by', by, '--project', 'fixture', '--task', 'placement', '--for', 'scenario', '--pid', String(process.pid)];
@@ -32,8 +35,8 @@ check(call('return', slot(2), '--by', 'soft').status, 0);
 const journal = fs.readFileSync(path.join(root, 'log.tsv'), 'utf8');
 check(journal.match(/waiter-start.*\tsoft \(/g)?.length, 1);
 
-const child = spawn(res, waitArgs('hard', '0.1', ...filters, '--exclude-reason', 'fixture binding'), { env, stdio: ['ignore', 'pipe', 'pipe'] });
-let output = '', status;
+const child = spawn(res, waitArgs('hard', '0.15', ...filters, '--exclude-reason', 'fixture binding'), { env, stdio: ['ignore', 'pipe', 'pipe'] });
+let output = '';
 child.stdout.on('data', data => { output += data; });
 const observed = new Promise((resolve, reject) => {
   const timer = setTimeout(() => reject(Error('wait notice missing')), 10000);
@@ -46,8 +49,10 @@ const observed = new Promise((resolve, reject) => {
 });
 const closed = new Promise(resolve => child.on('close', resolve));
 await observed;
-status = call('status', pool);
-match(status.stdout, /hard\s+fixture\/placement.*self_restricted reason=fixture binding free_hosts=192\.0\.2\.2/);
+const restriction = /hard\s+fixture\/placement.*self_restricted reason=fixture binding free_hosts=192\.0\.2\.2/;
+match(call('status', pool).stdout, restriction);
+fs.appendFileSync(path.join(root, 'resources.tsv'), 'fixture-device\tphone\tnever\tfixture-id\tsynthetic device\n');
+match(call('status').stdout, restriction);
 check(await closed, 2);
 check(output.includes('softExclusionsDropped='), false);
 check(output.match(/waiting only because/g)?.length, 1);

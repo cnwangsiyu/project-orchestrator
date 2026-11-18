@@ -923,7 +923,7 @@ finish_build_waiter() {
 }
 
 show_build_waiters() {
-  local dir blocked found=0 root="${1:-$WAITERS}" label="${2:-builds}"
+  local dir key value blocked holder project task since restricted reason found=0 root="${1:-$WAITERS}" label="${2:-builds}"
   cleanup_build_waiters "$root"
   for dir in "$root"/waiter.*; do [ -d "$dir" ] && found=1; done
   [ "$found" -eq 1 ] || return 0
@@ -934,13 +934,21 @@ show_build_waiters() {
     [ -d "$dir" ] || continue
     printf '%s\t%s\n' "$(waiter_field "$dir" order)" "$dir"
   done | LC_ALL=C sort -t $'\t' -k1,1 | while IFS=$'\t' read -r _ dir; do
-    blocked=$(waiter_field "$dir" blocked)
+    blocked= holder= project= task= since= restricted= reason=
+    while IFS=$'\t' read -r key value; do
+      case "$key" in
+        blocked) blocked="$value" ;;
+        holder) holder="$value" ;;
+        project) project="$value" ;;
+        task) task="$value" ;;
+        since) since="$value" ;;
+        self_restricted) restricted="$value" ;;
+        restriction_reason) reason="$value" ;;
+      esac
+    done 2>/dev/null <"$dir/info" || continue
     [ "$blocked" != load ] || blocked=blocked=load
-    printf '%-24s %-24s %-16s %s\n' \
-      "$(waiter_field "$dir" holder)" \
-      "$(waiter_field "$dir" project)/$(waiter_field "$dir" task)" \
-      "$(waiter_field "$dir" since)" \
-      "$blocked"
+    if [ -n "$restricted" ]; then blocked="$blocked self_restricted reason=$reason free_hosts=$restricted"; fi
+    printf '%-24s %-24s %-16s %s\n' "$holder" "$project/$task" "$since" "$blocked"
   done
 }
 
@@ -2641,6 +2649,7 @@ cmd_status() {
           if (short_pid) fix = 1
         }
         detail = H[$1, "since"] " → " (u != "" ? u : "?") " · " H[$1, "for"]
+        if (H[$1, "remote_cleanup_required"] != "") detail = detail " · remote cleanup required"
       } else { holder = "FREE"; detail = $5 }
       printf "%-16s %-9s %-9s %-12s %-34s %s\n", $1, $2, $3, state($4), holder, detail
     }
