@@ -42,6 +42,8 @@ const jwt = /\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g;
 const embeddedUrlCredential = /\b[a-z][a-z\d+.-]*:\/\/[^\s/:@]+:[^\s/@]+@[^\s/]+/gi;
 const quoted = String.raw`"""[\s\S]*?"""|'''[\s\S]*?'''|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'` + '|`(?:\\\\.|[^`\\\\])*`';
 const reference = value => /(?<!\\)\$(?:[A-Za-z_]\w*|\{[^}]*\})/.test(value)
+  // CI/template placeholders such as "{{NPM_TOKEN}}" or {{ secrets.X }} are references, not values (BC-116).
+  || /^["']?\{\{\s*[\w.-]+\s*\}\}["']?$/.test(value.trim())
   || /^(?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$][\w$]*\s*\(/.test(value);
 const publicValue = value => /^(?:true|false|null|none|nil)$/i.test(value)
   || /^(?:[a-z][a-z\d+.-]*:\/\/|\/\/)/i.test(value);
