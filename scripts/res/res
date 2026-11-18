@@ -142,7 +142,7 @@ PY
       gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
       gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
       # The remote pool controller owns these keys and validates them independently.
-      if (key ~ /^DEVBOX_DYNAMIC_(ADMISSION|HOSTS)$/ || key ~ /^DEVBOX_(LOAD_PER_CORE|MIN_AVAIL_GIB|HEAVY_CORES|HEAVY_GIB|LIGHT_CORES|LIGHT_GIB)(\.[A-Za-z0-9][A-Za-z0-9.-]*)?$/) next
+      if (key ~ /^DEVBOX_(DYNAMIC_ADMISSION|DYNAMIC_HOSTS|LIGHT_STALE_RECLAIM)$/ || key ~ /^DEVBOX_(LOAD_PER_CORE|MIN_AVAIL_GIB|HEAVY_CORES|HEAVY_GIB|LIGHT_CORES|LIGHT_GIB)(\.[A-Za-z0-9][A-Za-z0-9.-]*)?$/) next
       if (key !~ /^(LOAD_LIMIT|LOAD_LIMIT_WITH_LANES|MIN_AVAIL_GIB|LANE3_LOAD|LANE3_AVAIL_GIB|LANE_LOAD_PER_CORE|LANE_MIN_AVAIL_GIB|BUILD_LOAD_PER_CORE|BUILD_MAX_CONCURRENCY|BUILD_CONCURRENT_LOAD_PER_CORE|BUILD_CONCURRENT_MIN_AVAIL_GIB|LOAD_OVERRIDE_MINUTES|LOAD_POLL_SECONDS)$/ || seen[key]++) exit 1
       if (value !~ /^[0-9]+([.][0-9]+)?$/ || value + 0 <= 0) exit 1
       if (key ~ /^(BUILD_MAX_CONCURRENCY|LOAD_POLL_SECONDS)$/ && value !~ /^[0-9]+$/) exit 1
@@ -1802,12 +1802,13 @@ try:
         waiter = os.path.join(root, 'pool-waiters', request, 'waiter.' + controller_key)
         episode = os.path.join(root, 'pool-waiters', request, '.episode.' + controller_key)
         if action == 'cancel':
-            for name in os.listdir(locks):
-                directory = os.path.join(locks, name)
-                if not name.endswith('.d') or not os.path.isdir(directory): continue
-                hold = info(directory)
-                if name.endswith('.d') and hold.get('pool_controller') == controller_key and hold.get('by') == by and hold.get('pid') == str(pid) and hold.get('host') == host:
-                    created = (directory, os.open(directory, os.O_RDONLY | os.O_DIRECTORY)); rollback()
+            with admission():
+                for name in os.listdir(locks):
+                    directory = os.path.join(locks, name)
+                    if not name.endswith('.d') or not os.path.isdir(directory): continue
+                    hold = info(directory)
+                    if hold.get('pool_controller') == controller_key and hold.get('by') == by and hold.get('pid') == str(pid) and hold.get('host') == host:
+                        created = (directory, os.open(directory, os.O_RDONLY | os.O_DIRECTORY)); rollback()
         remove_waiter(); sys.exit(0)
     def read_registry():
         rows = {}
@@ -1847,36 +1848,45 @@ try:
         with os.fdopen(os.open(file, os.O_RDONLY | os.O_NONBLOCK)) as stream:
             if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode): raise ValueError('expected a regular file')
             return stream.read()
-    def dynamic_config():
+    def devbox_settings():
         host_pattern = r'[A-Za-z0-9][A-Za-z0-9.-]*'
         defaults = dict(LOAD_PER_CORE=1, MIN_AVAIL_GIB=4, HEAVY_CORES=3, HEAVY_GIB=4, LIGHT_CORES=1, LIGHT_GIB=2)
         values = {}
         try:
             content = regular_text(os.path.join(root, 'machine.conf'))
-            if not content.endswith('\n'): return {}
+            if not content.endswith('\n'): return {}, False
             for line in content.splitlines():
                 key, _, value = (part.strip() for part in line.partition('='))
                 if not key.startswith('DEVBOX_'): continue
-                if key in values: return {}
-                if key == 'DEVBOX_DYNAMIC_ADMISSION' and value in ('0', '1'):
+                if key in values: return {}, False
+                if key in ('DEVBOX_DYNAMIC_ADMISSION', 'DEVBOX_LIGHT_STALE_RECLAIM') and value in ('0', '1'):
                     values[key] = value
                 elif key == 'DEVBOX_DYNAMIC_HOSTS' and (not value or re.fullmatch(host_pattern + '(,' + host_pattern + ')*', value)):
                     values[key] = value
                 else:
                     setting, _, suffix = key[7:].partition('.')
-                    if setting not in defaults or suffix and not re.fullmatch(host_pattern, suffix): return {}
-                    if not re.fullmatch(r'[0-9]+(?:\.[0-9]+)?', value) or not 0 < float(value) <= 65536: return {}
+                    if setting not in defaults or suffix and not re.fullmatch(host_pattern, suffix): return {}, False
+                    if not re.fullmatch(r'[0-9]+(?:\.[0-9]+)?', value) or not 0 < float(value) <= 65536: return {}, False
                     values[key] = float(value)
-        except (OSError, ValueError): return {}
-        if values.get('DEVBOX_DYNAMIC_ADMISSION') != '1': return {}
+        except (OSError, ValueError): return {}, False
+        reclaim = values.get('DEVBOX_LIGHT_STALE_RECLAIM') == '1'
+        if values.get('DEVBOX_DYNAMIC_ADMISSION') != '1': return {}, reclaim
         return {box: {key: values.get('DEVBOX_' + key + '.' + box, values.get('DEVBOX_' + key, default))
                       for key, default in defaults.items()}
-                for box in values.get('DEVBOX_DYNAMIC_HOSTS', '').split(',') if box}
+                for box in values.get('DEVBOX_DYNAMIC_HOSTS', '').split(',') if box}, reclaim
     def slot_type(id):
         if re.fullmatch(r'devbox-cn-[0-9]+', id): return 'HEAVY'
         if re.fullmatch(r'devbox-cn-light(?:-[0-9]+)?', id): return 'LIGHT'
     def floating(id):
         return id in rows and 'dynamic-only' in rows[id][3].split()
+    def stale_light(directory):
+        hold = info(directory)
+        old_pid, start = hold.get('pid', ''), hold.get('start', '')
+        if (not hold.get('by') or hold.get('host') != host or not re.fullmatch(r'[0-9]{1,10}', old_pid)
+                or not 0 < int(old_pid) <= 2147483647 or not re.fullmatch(r'[0-9]{1,12}', start)
+                or int(start) == 0 or alive(old_pid)):
+            return None
+        return hold, time.time() - int(start)
     def host_slots(box, kind):
         return {id: member[0] for id, member in remote.items() if member[1] == box and slot_type(id) == kind}
     def static_full(box, kind, own_slot=None):
@@ -1943,7 +1953,7 @@ try:
         return 'headroom', detail, entries, cost
     def gate_open(reason):
         return reason in ('headroom', 'load-override', 'static-disabled', 'static-stale-or-missing-metrics')
-    dynamic = dynamic_config()
+    dynamic, light_reclaim = devbox_settings()
     def capacity(hosts):
         try:
             with open(os.path.join(root, 'devbox-hosts.json')) as stream: probes = json.load(stream)
@@ -2028,6 +2038,16 @@ try:
                 why = reason if not gate_open(reason) or free else 'slots-full'
                 print('  %s admitted=%d/%d gate=%s reason=%s %s' % (
                     kind.lower(), admitted, len(members), 'OPEN' if gate_open(reason) and free else 'CLOSED', why, detail))
+                if kind == 'LIGHT':
+                    for id in sorted(slots):
+                        directory = os.path.join(locks, id + '.d')
+                        stale_hold = stale_light(directory)
+                        if stale_hold:
+                            hold, age = stale_hold
+                            reclaim = 'disabled' if not light_reclaim else 'eligible' if age > 900 and id in members else 'ineligible'
+                            print('  light STALE slot=%s holder=%s age_seconds=%d reclaim=%s' % (id, hold.get('by', '?'), age, reclaim))
+                        previous = info(directory).get('reclaimed_from')
+                        if previous: print('  light reclaimed slot=%s previous_holder=%s' % (id, previous))
     if action == 'scores':
         print_scores()
         print_build_capacity()
@@ -2107,13 +2127,16 @@ try:
         refresh_waiter()
     elif action == 'return':
         if request not in rows: raise ValueError("unknown resource '%s'" % request)
-        directory = os.path.join(locks, request + '.d'); hold = info(directory)
-        if not os.path.isdir(directory): print(request + ' was not held'); committed = True; sys.exit(0)
-        if hold.get('by') != by:
-            if not force or not purpose: raise ValueError("'%s' is held by %s; only --force --note may reclaim it" % (request, hold.get('by', '?')))
-            log('reclaim', request, by, 'from ' + hold.get('by', '?') + ': ' + purpose)
-        else: log('return', request, by, purpose)
-        shutil.rmtree(directory); print('returned ' + request); committed = True; sys.exit(0)
+        if slot_type(request) == 'LIGHT': queue = os.path.join(root, 'pool-waiters', 'devbox-cn-light')
+        with admission():
+            directory = os.path.join(locks, request + '.d'); hold = info(directory)
+            if not os.path.isdir(directory): print(request + ' was not held'); committed = True; sys.exit(0)
+            if hold.get('by') != by:
+                if not force or not purpose: raise ValueError("'%s' is held by %s; only --force --note may reclaim it" % (request, hold.get('by', '?')))
+                log('reclaim', request, by, 'from ' + hold.get('by', '?') + ': ' + purpose)
+            else: log('return', request, by, purpose)
+            shutil.rmtree(directory)
+        print('returned ' + request); committed = True; sys.exit(0)
     elif action == 'take':
         if request not in rows: raise ValueError("unknown resource '%s'" % request)
         policy = rows[request][1]
@@ -2233,11 +2256,12 @@ try:
             gate_reasons.add(reason)
             log('gate-deny', id, holder, 'reason=' + reason + ' ' + detail)
         return reason, detail, entries, cost, current
-    def can_override():
-        if not waiter or not own.get('load_blocked_since'): return False
+    def is_head():
         heads = waiting()
-        return (bool(heads) and current_waiter(heads[0][1], heads[0][2])
-                and time.time() - float(own['load_blocked_since']) >= 1200)
+        return bool(heads and current_waiter(heads[0][1], heads[0][2]))
+    def can_override():
+        return (waiter and own.get('load_blocked_since')
+                and time.time() - float(own['load_blocked_since']) >= 1200 and is_head())
     candidates = members
     if action == 'wait':
         scores = capacity(hosts)
@@ -2248,15 +2272,29 @@ try:
             box = remote[id][1] if id in remote and slot_type(id) else None
             with admission():
                 directory = os.path.join(locks, id + '.d')
-                if os.path.isdir(directory) or action == 'wait' and (not eligible(id) or quarantined(id, state)): continue
+                if action == 'wait' and (not eligible(id) or quarantined(id, state)): continue
+                stale_hold = None
+                if os.path.isdir(directory):
+                    if not (light_reclaim and request == 'devbox-cn-light' and action == 'wait' and is_head()): continue
+                    stale_hold = stale_light(directory)
+                    if not stale_hold or stale_hold[1] <= 900: continue
+                    current_rows, _ = read_registry()
+                    dynamic, light_reclaim = devbox_settings()
+                    if not light_reclaim or current_rows.get(id) != rows[id] or quarantined(id, health()): continue
                 if not fifo_allows(id, state):
                     blocked = True; heads = waiting()
                     continue
                 if box:
-                    reason, *_ = evaluate(id, box, can_override())
+                    reason, *_ = evaluate(id, box, can_override(), claimed=bool(stale_hold))
                     if not gate_open(reason): continue
                 if waiter:
                     refresh_waiter()
+                previous_holder = None
+                if stale_hold:
+                    old, age = stale_hold
+                    previous_holder = old.get('by', '?')
+                    shutil.rmtree(directory)
+                    log('reclaim-stale', id, previous_holder, 'by=%s pid=%s age_seconds=%d' % (by, old['pid'], age))
                 previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, (signal.SIGINT, signal.SIGTERM, signal.SIGHUP))
                 try:
                     try: os.mkdir(directory)
@@ -2266,6 +2304,7 @@ try:
                 hold = dict(by=by, project=project, task=task, **{'for': purpose}, since=datetime.datetime.now().strftime('%Y-%m-%d %H:%M'),
                             until=until, pid=str(pid), host=host, start=str(int(time.time())), pool_controller=controller_key)
                 if not alive(pid): hold['pid_warning'] = 'short-lived pid'
+                if previous_holder: hold['reclaimed_from'] = previous_holder
                 publish(directory, hold)
                 description = rows[id][3]
             scratch = os.path.realpath(root) != os.path.realpath(os.path.expanduser('~/.claude/orchestrator/_shared'))
@@ -2292,7 +2331,7 @@ try:
                     rows, remote = read_registry()
                     rejected = (id not in rows or rows[id][3] != description or rows[id][1] == 'never'
                                 or rows[id][1] == 'ask-user' and not force)
-                if box: dynamic = dynamic_config()
+                if box: dynamic, _ = devbox_settings()
                 permitted = not rejected and fifo_allows(id, state, claimed=True)
                 if not rejected and not permitted: blocked = True; heads = waiting()
                 if rejected or not permitted or inject == 'all':
@@ -2356,7 +2395,9 @@ except (OSError, ValueError, TypeError, KeyError) as error:
     label = 'box health' if action == 'box-health' else 'pool'
     print('res: ' + label + ': ' + str(error), file=sys.stderr); sys.exit(1)
 finally:
-    if not committed: rollback()
+    if not committed and created:
+        # In particular, a light-slot rollback must serialize with stale reclaim.
+        with admission(): rollback()
     elif created: os.close(created[1])
     if sys.exc_info()[0] is not None and not (isinstance(sys.exc_info()[1], SystemExit) and sys.exc_info()[1].code == 6): remove_waiter()
 PY

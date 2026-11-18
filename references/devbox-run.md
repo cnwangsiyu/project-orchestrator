@@ -109,6 +109,8 @@ CPU count and `MemAvailable`. Samples are atomically published to
 The runner can still place work when the probe is unavailable. With no sample
 under five minutes old, `res` uses the baseline static rows and leaves
 `dynamic-only` rows closed. Existing workspace disk checks still run before the job.
+With light reclaim enabled, a light-pool FIFO head can recover a hold older than
+15 minutes when `res` can prove the recorded local holder PID is dead.
 See [the res contract](res-contract.md#changes-in-v19) for host enrollment, reservations,
 status and rollback.
 

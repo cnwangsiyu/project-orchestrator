@@ -61,7 +61,7 @@ export function computeFleet({ log, registry, now = Date.now(), since = now - 24
         if (resource && e.t >= since) resource.takes++;
       }
       latestTake.set(e.holder, e);
-    } else if (['return', 'reclaim', 'rollback'].includes(e.event)) {
+    } else if (['return', 'reclaim', 'reclaim-stale', 'rollback'].includes(e.event)) {
       if (e.event !== 'return' || active.get(e.resource)?.by === by) close(e.resource, e.t);
     }
     if (e.event === 'return' && /^heavy-build(?:-[23])?$/.test(e.resource)) {

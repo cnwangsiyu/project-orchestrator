@@ -227,7 +227,7 @@ eq(result.holdTimes.map((h) => h.validity), ['VALID', 'VALID']);
 eq(result.holdTimes[0].durationMinutesUpper, 0.83); eq(result.holdTimes[1].durationMinutesUpper, 0.5);
 const formatted = formatReview({ ...review([], { now: t, hours: 1 }), heavyLocks: invalidResult });
 ok(formatted.includes('INVALID')); ok(!formatted.includes('v1.2 live')); ok(formatted.includes(`Source contract v${RES_CONTRACT_VERSION}`));
-eq(RES_CONTRACT_VERSION, '1.8');
+eq(RES_CONTRACT_VERSION, '1.9');
 const configuredSample = { t, heavyGate: configuredGate, heavyLocks: { complete: true, locks: ['heavy-build', 'heavy-lane-1', 'heavy-lane-2', 'heavy-lane-3'].map((id) => ({ id, state: 'FREE' })) } };
 const assessed = assessThresholds([configuredSample], { strictMinutes: 0, looseMinutes: 0, bypassMinutes: 0, comparableIntervals: [] },
   { since: t, loadGate: 12, loadGateWithOneHeavyTask: 20, memoryGateGiB: 16 });

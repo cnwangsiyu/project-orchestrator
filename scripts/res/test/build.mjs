@@ -448,7 +448,8 @@ try {
   // Worker dies during acquisition/backoff, before the build command starts.
   occupy('heavy-lane-2');
   const waitingWorker = start('/bin/sleep', ['30']);
-  const watchedWait = wrapped(['--watch-pid', String(waitingWorker.pid), '/bin/sh', '-c', 'exit 99'], { HEAVY_BUILD_LANE: 'heavy-lane-2' });
+  const watchedWait = wrapped(['--watch-pid', String(waitingWorker.pid), '/bin/sh', '-c', 'exit 99'],
+    { HEAVY_BUILD_LANE: 'heavy-lane-2', HEAVY_BUILD_TIMEOUT: recoveryTimeout });
   await until(() => watchedWait.text.includes('retry in 1s'), 'watched acquisition did not retry', watchedWait);
   await stop(waitingWorker); eq((await watchedWait.done).code, 143); eq(held(), ['heavy-lane-2']); release('heavy-lane-2');
   eq(run([wrapper, '--watch-pid', String(dead), '/bin/true'], wrapperEnv, '/bin/bash').code, 143); eq(held(), []);

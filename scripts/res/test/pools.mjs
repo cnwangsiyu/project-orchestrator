@@ -292,31 +292,8 @@ try {
   }
   fs.unlinkSync(hostsFile); fs.writeFileSync(registryFile, registry);
 
-  // Expire the head exactly after its health read, without a 45-second sleep.
-  const hook = path.join(root, 'check-hook.mjs');
-  fs.writeFileSync(hook, `import fs from 'node:fs'; import path from 'node:path';
-const [state, slot, holder, action, log] = process.argv.slice(2);
-const dir = path.join(state, 'pool-waiters/devbox-cn');
-fs.appendFileSync(log, slot + '\\n');
-if (action === 'expire') for (const name of fs.readdirSync(dir)) {
-  const file = path.join(dir, name, 'info');
-  if (!fs.existsSync(file)) continue;
-  const info = fs.readFileSync(file, 'utf8');
-  if (info.includes('holder\\t' + holder + '\\n')) fs.writeFileSync(file, info.replace(/^heartbeat\\t.*$/m, 'heartbeat\\t1'));
-}
-process.exit(action === 'reject' ? 2 : 0);
-`);
-  const quote = value => `'${value.replaceAll("'", "'\\''")}'`;
-  fs.writeFileSync(path.join(mocks, 'python3'), `#!/bin/sh
-${quote(python)} "$@"
-rc=$?
-[ "$rc" = 0 ] || exit "$rc"
-if [ "$3" = check ] && [ -n "\${CHECK_ACTION:-}" ]; then
-  exec ${quote(process.execPath)} ${quote(hook)} "$2" "$4" "$CHECK_HOLDER" "$CHECK_ACTION" "$CHECK_LOG"
-fi
-exit 0
-`, { mode: 0o755 });
-  try {
+  // Exercise expiry and rollback with the controller’s in-process test hooks.
+  {
     const ids = ['devbox-cn-1', 'devbox-cn-2', 'devbox-cn-3', 'devbox-cn-4', 'devbox-cn-5'];
     for (const id of ids) take(id);
     const expireMark = path.join(root, 'expire-head'), expireNextMark = path.join(root, 'expire-next');
@@ -354,7 +331,7 @@ exit 0
     failing.kill('SIGTERM'); unblock(rollbackRetry); eq(await failing.done, 143); eq(waiters(), []);
     release('devbox-cn-1', 'rollback-next');
     ok(fs.readFileSync(path.join(state, 'log.tsv'), 'utf8').includes('\twaiter-yield\tdevbox-cn-any\trollback-head (rollback-head/fixture)\trollbacks=3'));
-  } finally { fs.unlinkSync(path.join(mocks, 'python3')); }
+  }
   count += testPoolIdentity({ source: process.env.RES_SOURCE, root: path.join(root, 'identity') });
   count += await testPoolSurplus({ source: process.env.RES_SOURCE, root: path.join(root, 'surplus') });
   console.log(`ALL ${count} ASSERTIONS PASSED`);

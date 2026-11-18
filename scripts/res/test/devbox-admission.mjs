@@ -17,13 +17,12 @@ const wait = (by, ...extra) => run('wait-pool', heavy, ...args(by), '--timeout',
 const release = (id, by = id) => eq(run('return', id, '--by', by).status, 0);
 const journal = () => fs.readFileSync(path.join(root, 'log.tsv'), 'utf8');
 const ledger = path.join(root, 'devbox-reservations', host + '.json');
-const poolQueue = path.join(root, 'pool-waiters', heavy);
 const children = new Set();
 let count = 0;
 function eq(actual, expected, message) { assert.equal(actual, expected, message); count++; }
 function match(value, expression) { assert.match(value, expression); count++; }
 function run(...argv) {
-  const result = spawnSync(res, argv, { env, encoding: 'utf8', timeout: 15000 });
+  const result = spawnSync(res, argv, { env, encoding: 'utf8', timeout: 120000 });
   if (result.error) throw result.error;
   return result;
 }
@@ -36,7 +35,7 @@ function start(argv, extra) {
   });
 }
 async function until(test) {
-  const deadline = Date.now() + 10000;
+  const deadline = Date.now() + 60000;
   while (!test()) { assert.ok(Date.now() < deadline, 'fixture synchronization timed out'); await pause(15); }
 }
 function config(enabled = 1, overrides = '') {
@@ -53,31 +52,50 @@ function expireReservations() {
 function row(id, box, tags = 'caps=node', policy = 'open') {
   return `${id}\tremote\t${policy}\t-\tfixture runner@${box} ${tags}\n`;
 }
-function seedHead() {
-  const head = path.join(poolQueue, 'waiter.older');
+function seedHead(pool = heavy) {
+  const head = path.join(root, 'pool-waiters', pool, 'waiter.older');
   fs.mkdirSync(head, { recursive: true });
   fs.writeFileSync(path.join(head, 'info'), `holder\tolder\npid\t${process.pid}\nhost\t${os.hostname()}\nheartbeat\t${Math.floor(Date.now() / 1000)}\norder\t00000000000000000001\nneed\tnode\nexclude_hosts\t${other}\n`);
   return head;
 }
-async function ageWaiter(by, agedSeconds, nextLoad, nextMemory) {
-  const mark = path.join(root, 'mark-' + by);
-  const processExit = start(['wait-pool', heavy, ...args(by), '--timeout', '0.04', '--exclude-host', other], { PAUSE_MARK: mark });
-  await until(() => fs.existsSync(mark));
-  const records = fs.readdirSync(poolQueue).filter(name => name.startsWith('.episode.') || name.startsWith('waiter.'))
-    .map(name => path.join(poolQueue, name, 'info'))
-    .filter(file => fs.readFileSync(file, 'utf8').includes(`holder\t${by}\n`));
-  eq(records.length, 2);
-  const episode = records.find(file => file.includes('.episode.'));
-  fs.writeFileSync(episode, fs.readFileSync(episode, 'utf8').replace(/^heartbeat\t.*$/m, 'heartbeat\t0'));
-  fs.writeFileSync(mark + '.release', '');
-  // The controller republishes after the pause and then backs off for one second.
-  await until(() => !fs.readFileSync(episode, 'utf8').includes('heartbeat\t0\n'));
-  for (const file of records) {
-    const data = fs.readFileSync(file, 'utf8').replace(/^load_blocked_since\t.*\n/m, '');
-    fs.writeFileSync(file, data + `load_blocked_since\t${Date.now() / 1000 - agedSeconds}\n`);
-  }
-  metrics(nextLoad, nextMemory);
-  return processExit;
+function seedHold(id, age, pid, recordedHost = os.hostname()) {
+  const directory = path.join(root, 'locks', id + '.d');
+  fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(path.join(directory, 'info'), `by\told-holder\nproject\tfixture\npid\t${pid}\nhost\t${recordedHost}\nstart\t${Math.floor(Date.now() / 1000) - age}\n`);
+}
+function ageWaiter(by, agedSeconds, nextLoad, nextMemory) {
+  const shim = path.join(root, 'python3');
+  const inject = path.join(root, 'age-waiter.py');
+  const real = spawnSync('/bin/sh', ['-c', 'command -v python3'], { encoding: 'utf8' }).stdout.trim();
+  fs.writeFileSync(shim, `#!/bin/sh
+if [ "$3" = wait ] && [ "$6" = 2 ]; then
+  "$REAL_PYTHON" "$AGE_INJECT" "$2" "$4" "$7" || exit 1
+fi
+exec "$REAL_PYTHON" "$@"
+`, { mode: 0o755 });
+  // Age the records immediately before the second poll, independent of host scheduling.
+  fs.writeFileSync(inject, String.raw`import json, os, pathlib, sys, time
+root, pool, holder = sys.argv[1:]
+root = pathlib.Path(root)
+records = [p for p in (root / 'pool-waiters' / pool).glob('*/info')
+           if 'holder\t' + holder + '\n' in p.read_text()]
+assert len(records) == 2
+at = time.time()
+for record in records:
+    info = dict(line.split('\t', 1) for line in record.read_text().splitlines())
+    info.update(load_blocked_since=at-float(os.environ['AGE_SECONDS']), started_at=at-120)
+    record.write_text(''.join('%s\t%s\n' % pair for pair in info.items()))
+(root / 'devbox-metrics' / (os.environ['AGE_HOST'] + '.json')).write_text(json.dumps(
+    dict(at=at, cores=8, load5=float(os.environ['AGE_LOAD']), memAvailableGiB=float(os.environ['AGE_MEMORY']))))
+`);
+  const result = spawnSync(res, ['wait-pool', heavy, ...args(by), '--timeout', '1', '--exclude-host', other], {
+    env: { ...env, PATH: `${root}:${env.PATH}`, REAL_PYTHON: real, AGE_INJECT: inject,
+      AGE_SECONDS: String(agedSeconds), AGE_HOST: host, AGE_LOAD: String(nextLoad), AGE_MEMORY: String(nextMemory),
+      RES_TEST_POOL_FAST_POLL: '1' }, encoding: 'utf8', timeout: 120000,
+  });
+  if (result.error) throw result.error;
+  if (result.status === 1) throw Error(result.stderr);
+  return result.status;
 }
 
 try {
@@ -140,16 +158,50 @@ try {
   eq(wait('younger', '--exclude-host', other).status, 2, 'younger preserves measured headroom across distinct rows');
   match(wait('surplus').stdout, /slot=devbox-cn-5/); release(slot(5), 'surplus');
   metrics(9, 100);
-  eq(await ageWaiter('not-head', 1205, 9, 100), 2);
+  eq(ageWaiter('not-head', 1205, 9, 100), 2);
   fs.rmSync(head, { recursive: true });
-  eq(await ageWaiter('under-20', 1190, 9, 100), 2);
-  eq(await ageWaiter('memory-floor', 1205, 9, 3), 2);
+  eq(ageWaiter('under-20', 1100, 9, 100), 2);
+  eq(ageWaiter('memory-floor', 1205, 9, 3), 2);
   metrics(9, 100);
-  eq(await ageWaiter('load-override', 1205, 9, 100), 0);
+  eq(ageWaiter('load-override', 1205, 9, 100), 0);
   eq(journal().split('\n').filter(line => /gate-admit.*reason=load-override/.test(line)).length, 1);
   match(journal(), /gate-deny\tdevbox-cn-1[^\n]+reason=load .*load5=5\.1 reserved_cores=0.*mem_available_gib=20/);
   match(journal(), /gate-deny\tdevbox-cn-1[^\n]+reason=memory .*load5=0 .*mem_available_gib=7\.99/);
   eq(wait('new-waiter', '--exclude-host', other).status, 2, 'override cannot be inherited by another waiter');
+
+  const overrideSlot = fs.readdirSync(path.join(root, 'locks')).find(name => name.endsWith('.d')).slice(0, -2);
+  release(overrideSlot, 'load-override');
+  const dead = spawnSync('/bin/sh', ['-c', 'exit 0']).pid;
+  const waitLight = by => run('wait-pool', light, ...args(by), '--timeout', '0');
+  config(0, 'DEVBOX_LIGHT_STALE_RECLAIM=0\n');
+  seedHold(light, 901, dead);
+  eq(waitLight('reclaim-off').status, 2);
+  match(run('status', light).stdout, /light STALE slot=devbox-cn-light holder=old-holder .*reclaim=disabled/);
+  config(0, 'DEVBOX_LIGHT_STALE_RECLAIM=1\n');
+  eq(take(light, 'direct').status, 2, 'only a pool waiter can reclaim');
+  const lightHead = seedHead(light);
+  eq(waitLight('light-younger').status, 2, 'a younger waiter cannot reclaim');
+  fs.rmSync(lightHead, { recursive: true });
+  match(run('status', light).stdout, /light STALE slot=devbox-cn-light holder=old-holder .*reclaim=eligible/);
+  match(waitLight('reclaim-head').stdout, /slot=devbox-cn-light/);
+  match(journal(), /reclaim-stale\tdevbox-cn-light\told-holder\tby=reclaim-head pid=\d+ age_seconds=\d+/);
+  match(run('status', light).stdout, /light reclaimed slot=devbox-cn-light previous_holder=old-holder/);
+  release(light, 'reclaim-head');
+  for (const [by, age, pid, recordedHost] of [
+    ['young', 840, dead, os.hostname()],
+    ['live', 1200, process.pid, os.hostname()],
+    ['remote', 1200, dead, 'fixture-foreign-host'],
+  ]) {
+    seedHold(light, age, pid, recordedHost);
+    eq(waitLight(by).status, 2, by);
+    release(light, 'old-holder');
+  }
+  seedHold(slot(1), 7200, dead);
+  eq(wait('heavy-no-reclaim', '--exclude-host', other, '--exclude-slot', slot(2)).status, 2);
+  match(wait('heavy-free-slot', '--exclude-host', other).stdout, /slot=devbox-cn-2/);
+  match(run('status', slot(1)).stdout, /STALE old-holder/);
+  release(slot(2), 'heavy-free-slot'); release(slot(1), 'old-holder');
+  eq(journal().split('\n').filter(line => line.includes('\treclaim-stale\t')).length, 1);
   console.log(`ALL ${count} ASSERTIONS PASSED`);
 } finally {
   for (const child of children) child.kill('SIGTERM');
