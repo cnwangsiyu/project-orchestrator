@@ -159,31 +159,42 @@ warnings appear in the attempt; failure to write local history is exit 74.
 Every project and prewarm run completes a local, fail-closed configuration scan
 before any SSH, lease acquisition, bundle upload, patch or untracked archive
 transfer. Recursive module snapshots must pass too. The scanner checks the
-selected commit's tree and all reachable configuration blobs in its history,
-including merge-parent changes and later-deleted files. This deliberately
-includes more history than an incremental warm transfer might need. Worktree
-runs additionally check staged blobs, changed working files and nonignored
-untracked files before constructing upload archives.
+selected commit's tree and the configuration history that the next bundle will
+transfer, including merge-parent changes and later-deleted files. Known bundle
+bases exclude already-remote history; a first transfer scans full history once,
+then reuses content-addressed clean-blob verdicts. Worktree runs additionally
+check staged blobs, changed working files and nonignored untracked files before
+constructing upload archives.
 
 Patterns include `*.properties`, `.env*`, `*.gradle`, `*.gradle.kts`,
 `*.yml`, `*.yaml`, `*.toml`, `*.ini`, `*.cfg`, `*.conf`, `*.json`, `*.plist`,
-`*.xcconfig`, and Groovy/Kotlin `*.groovy`, `*.kt`, `*.kts` source/DSL files.
-Binary plists are decoded locally. Configuration symlinks and unavailable
-blobs/parsers fail closed; they are not followed to another file. Module scans
-use the same ancestor-object fallback as export staging, without repairing
-source repositories. Known private paths and their history are rejected by
-filename before any configuration contents are read. The npm gates remain
-in force, so an allow entry cannot authorize private files or npm credentials.
+`*.xcconfig`, `*.strings`, and JavaScript/TypeScript, Java/Kotlin, Swift and
+Objective-C source files. Binary plists are decoded locally. A configuration
+symlink is allowed only when it resolves inside the scanned repository to a
+tracked regular file; escaping, untracked, ignored, missing and non-file targets
+fail closed. Unavailable blobs/parsers also fail closed. Module scans use the
+same ancestor-object fallback as export staging, without repairing source
+repositories. Known private paths and their history are rejected by filename
+before any configuration contents are read. The npm gates remain in force, so
+an allow entry cannot authorize private files or npm credentials.
 
-The transfer detector reuses the nightly audit's key/DSL detector and extends
-it for admission. Nonblank literal values under names containing `ACCESS`,
-`SECRET`, `SCRECT`, `KEY` (except `keyAlias`), `TOKEN`, `PASS`, `PWD`, `AUTH`,
-`CREDENTIAL`, `NEXUS`, `MAGIC`, or `PRIVATE` are refused. PEM private-key
-markers and AKIA-style access keys are also refused even without a matching
-field name. Blank values, environment references such as `${ENV}`, source
-variable/method references, booleans, nulls and public URLs are not credential
-literals. Wildcard names are intentionally conservative; a nonblank numeric
-credential literal is not automatically exempt.
+The transfer detector reuses the nightly audit's literal parsing but applies
+key-name DSL heuristics only to Gradle build configuration. JSON, YAML, TOML,
+plist and xcconfig keys require either an exact strong credential name with a
+nonblank non-reference string literal, or a separator-delimited weak credential
+token whose literal is at least eight non-whitespace characters and looks
+secret-like. Generic `key`, camelCase fragments such as `passStart`, and `author`
+are not credential names. Asset-catalog `Contents.json`, localization JSON,
+`*.strings`, plain source, and generated dependency lockfiles use value-shape
+detectors only. Package names and `node_modules/` dependency paths are never
+credential keys.
+
+PEM private-key markers, AKIA-style access keys, JWTs, URLs with embedded
+user/password credentials, and `_authToken`/`_auth` assignments are refused
+even without a matching field name. Blank values, environment references such
+as `${ENV}`, source variable/method references, booleans, nulls and public URLs
+are not credential literals. Generated lockfiles retain all of these shape
+checks while skipping key-name heuristics.
 
 On refusal, diagnostics contain only **path, key name and count**, never the
 suspected value. Use a source-only export with these fields blanked. Blanking
@@ -193,11 +204,68 @@ an exact repo-level allow entry below: `repoId` is the normalized-origin (or
 Git common-directory) identity from `storeIdentity(repo)` **without** a project
 override, `path` and `key` are exact, and `reason` records the proof. There is no
 CLI or environment bypass and no wildcard allow. Do not add credential values
-to the entry. No exceptions are currently approved.
+to the entry. Approved entries remain repository-, path-, and detector-specific;
+test fixture exceptions do not weaken the corresponding value-shape detector
+elsewhere.
 
 <!-- devbox-nonsecret-allow -->
 ```json
-[]
+[
+  {
+    "repoId": "id-a53976bd7bafd0216991445b719692d85a4db1b801739ef0ccac0722eec7b205",
+    "path": "apps/android/app/src/test/java/com/videoagent/app/BlobUploadRoutingTest.java",
+    "key": "EMBEDDED_URL_CREDENTIAL",
+    "reason": "VAK upload-routing test fixture exercises redacted URL handling with a synthetic credential-shaped URL."
+  },
+  {
+    "repoId": "id-a53976bd7bafd0216991445b719692d85a4db1b801739ef0ccac0722eec7b205",
+    "path": "apps/app-ui/test/upload-routing.test.ts",
+    "key": "EMBEDDED_URL_CREDENTIAL",
+    "reason": "VAK upload-routing test fixture exercises redacted URL handling with a synthetic credential-shaped URL."
+  },
+  {
+    "repoId": "id-a53976bd7bafd0216991445b719692d85a4db1b801739ef0ccac0722eec7b205",
+    "path": "apps/ios/Packages/AgentKit/Tests/AgentClientTests/BlobUploadURLTests.swift",
+    "key": "EMBEDDED_URL_CREDENTIAL",
+    "reason": "VAK upload-routing test fixture exercises redacted URL handling with a synthetic credential-shaped URL."
+  },
+  {
+    "repoId": "id-a53976bd7bafd0216991445b719692d85a4db1b801739ef0ccac0722eec7b205",
+    "path": "services/agent/test/director-bridge.test.ts",
+    "key": "EMBEDDED_URL_CREDENTIAL",
+    "reason": "VAK director-bridge test fixture validates rejection of a synthetic credential-shaped URL."
+  },
+  {
+    "repoId": "id-a53976bd7bafd0216991445b719692d85a4db1b801739ef0ccac0722eec7b205",
+    "path": "services/agent/test/employee-profile.test.ts",
+    "key": "EMBEDDED_URL_CREDENTIAL",
+    "reason": "VAK employee-profile test fixture validates synthetic identity-provider URLs."
+  },
+  {
+    "repoId": "id-a53976bd7bafd0216991445b719692d85a4db1b801739ef0ccac0722eec7b205",
+    "path": "services/agent/test/employee-session-ingress.test.ts",
+    "key": "JWT",
+    "reason": "VAK employee-session test fixture validates a synthetic JWT-shaped input."
+  },
+  {
+    "repoId": "id-a53976bd7bafd0216991445b719692d85a4db1b801739ef0ccac0722eec7b205",
+    "path": "services/agent/test/employee-sign-in-claims.test.ts",
+    "key": "EMBEDDED_URL_CREDENTIAL",
+    "reason": "VAK employee-sign-in test fixture validates a synthetic identity-provider URL."
+  },
+  {
+    "repoId": "id-f2b50a216f270092e558d06ffd23da41628a3adcdece55d66398b26153f3de8e",
+    "path": "lynx-games/tools/effect-relay/check_input.m",
+    "key": "EMBEDDED_URL_CREDENTIAL",
+    "reason": "The lynx-games effect-relay input checker uses a synthetic credential-shaped URL as rejected test input."
+  },
+  {
+    "repoId": "id-26e536eedee9afa400661964c5e6ae6af4b89be87db960e9434d23e06c5b1b56",
+    "path": ".codebase/pipelines/publish-bnpm.yaml",
+    "key": "NPM_TOKEN",
+    "reason": "The lynx2video pipeline maps NPM_TOKEN to a secret-provider variable name rather than embedding a credential value."
+  }
+]
 ```
 <!-- /devbox-nonsecret-allow -->
 

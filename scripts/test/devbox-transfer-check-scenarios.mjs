@@ -39,7 +39,7 @@ function batches() {
   catch (error) { if (error.code === 'ENOENT') return 0; throw error; }
 }
 const head = repo => git(repo, 'rev-parse', 'HEAD');
-const scan = (f, options) => checkTransfer(f.repo, head(f.repo), 'HEAD', f.repoId, { cacheRoot: f.cacheRoot, ...options });
+const scan = (f, options, mode = 'HEAD') => checkTransfer(f.repo, head(f.repo), mode, f.repoId, { cacheRoot: f.cacheRoot, ...options });
 
 try {
   const parsed = fixture(), fake = 'fixtureValue123';
@@ -93,6 +93,76 @@ try {
   assert.ok(jsonFindings.some(hit => hit.key === 'TOKEN'));
   assert.ok(!jsonFindings.some(hit => hit.key === 'PASSWORD'), 'non-string JSON values do not trigger key heuristics');
 
+  const jsonPaths = fixture();
+  fs.writeFileSync(path.join(jsonPaths.repo, 'manifest.json'), JSON.stringify({ 'src/core/fx/frame_pass.cc': fake, _authToken: '${NPM_TOKEN}' }));
+  git(jsonPaths.repo, 'add', '.'); git(jsonPaths.repo, 'commit', '-qm', 'JSON path key and auth reference');
+  assert.deepEqual(await scan(jsonPaths, { scope: 'snapshot' }), [], 'manifest paths and referenced auth lines are not credential literals');
+
+  const gradle = fixture();
+  fs.writeFileSync(path.join(gradle.repo, 'gradle.properties'), `ACCESS_KEY=${fake}\nSCRECT_KEY=${fake}\nNEXUS_MAGIC_WORD=${fake}\n`);
+  fs.writeFileSync(path.join(gradle.repo, 'build.gradle'), "android { signingConfigs { fixture { storePassword 'x' } } }\n");
+  git(gradle.repo, 'add', '.'); git(gradle.repo, 'commit', '-qm', 'Gradle credential-like literals');
+  const gradleFindings = await scan(gradle, { scope: 'snapshot' });
+  for (const key of ['ACCESS_KEY', 'SCRECT_KEY', 'NEXUS_MAGIC_WORD', 'storePassword'])
+    assert.ok(gradleFindings.some(hit => hit.key === key), `${key} remains fail-closed in Gradle config`);
+
+  const source = fixture(), sourceDir = path.join(source.repo, 'src');
+  fs.mkdirSync(sourceDir);
+  fs.writeFileSync(path.join(sourceDir, 'Playback.kt'), `
+private val passStart = "${fake}"
+private val passCount = "${fake}"
+private val keyboardVisible = "${fake}"
+private const val KEYFRAMES_PER_SHOT = "${fake}"
+private const val KEYFRAME_INTERVAL = "${fake}"
+`);
+  git(source.repo, 'add', '.'); git(source.repo, 'commit', '-qm', 'ordinary Kotlin identifiers');
+  assert.deepEqual(await scan(source, { scope: 'snapshot' }), [], 'plain source uses value-shape detectors only');
+  fs.writeFileSync(path.join(sourceDir, 'Playback.kt'), `private val publicFixture = "${fakeAccess}"\n`);
+  git(source.repo, 'add', '.'); git(source.repo, 'commit', '-qm', 'source value-shape fixture');
+  assert.ok((await scan(source, { scope: 'snapshot' })).some(hit => hit.key === 'AKIA_ACCESS_KEY'), 'source still applies value-shape detectors');
+
+  const localized = fixture();
+  const localizationDir = path.join(localized.repo, 'app', 'i18n');
+  const assetDir = path.join(localized.repo, 'Assets.xcassets', 'Fixture.imageset');
+  fs.mkdirSync(localizationDir, { recursive: true }); fs.mkdirSync(assetDir, { recursive: true });
+  fs.writeFileSync(path.join(localizationDir, 'zh-CN.json'), JSON.stringify({ authToken: fake, PASS_LABEL: '请输入密码', keyboardVisible: fake }));
+  fs.writeFileSync(path.join(assetDir, 'Contents.json'), JSON.stringify({ info: { author: fake, version: 1 } }));
+  fs.writeFileSync(path.join(localized.repo, 'Localizable.strings'), `"authToken" = "${fake}";\n`);
+  git(localized.repo, 'add', '.'); git(localized.repo, 'commit', '-qm', 'localized labels and asset metadata');
+  assert.deepEqual(await scan(localized, { scope: 'snapshot' }), [], 'i18n JSON, strings, and asset catalogs use shape-only checks');
+
+  const structured = fixture();
+  fs.writeFileSync(path.join(structured.repo, 'config.json'), JSON.stringify({
+    author: fake, passStart: fake, keyboardVisible: fake, RENDER_TOKEN: 'public', endpoint_key: 'https://example.invalid/public', password: 'x',
+  }));
+  git(structured.repo, 'add', '.'); git(structured.repo, 'commit', '-qm', 'structured key strength');
+  const structuredFindings = await scan(structured, { scope: 'snapshot' });
+  assert.deepEqual(structuredFindings.map(hit => hit.key), ['password'], 'author/camel weak names/public values pass while an exact strong name fails');
+
+  const yamlStructure = fixture();
+  fs.writeFileSync(path.join(yamlStructure.repo, 'config.yaml'), `fixture: { password: "x" }\ncommand: "fetch('/ready',{headers:{authorization: 'fixtureValue123'}})"\n`);
+  git(yamlStructure.repo, 'add', '.'); git(yamlStructure.repo, 'commit', '-qm', 'structured inline keys and quoted code');
+  const yamlFindings = await scan(yamlStructure, { scope: 'snapshot' });
+  assert.deepEqual(yamlFindings.map(hit => hit.key), ['password'], 'inline YAML keys are scanned without treating code inside a quoted scalar as YAML keys');
+
+  const symlinks = fixture(), schemas = path.join(symlinks.repo, 'schemas');
+  fs.mkdirSync(schemas);
+  fs.writeFileSync(path.join(schemas, 'material-card.schema.source.json'), '{"type":"object"}\n');
+  fs.symlinkSync('material-card.schema.source.json', path.join(schemas, 'material-card.schema.json'));
+  git(symlinks.repo, 'add', '.'); git(symlinks.repo, 'commit', '-qm', 'tracked internal schema symlink');
+  assert.deepEqual(await scan(symlinks, { scope: 'snapshot' }), [], 'internal symlink to a tracked regular file passes');
+  assert.deepEqual(await scan(symlinks, { scope: 'history' }), [], 'internal historical symlink to a tracked regular file passes');
+  fs.unlinkSync(path.join(schemas, 'material-card.schema.json'));
+  fs.symlinkSync('../../outside.json', path.join(schemas, 'material-card.schema.json'));
+  git(symlinks.repo, 'add', '.'); git(symlinks.repo, 'commit', '-qm', 'escaping schema symlink');
+  assert.ok((await scan(symlinks, { scope: 'snapshot' })).some(hit => hit.path === 'schemas/material-card.schema.json' && hit.key === 'SYMLINK_CONFIG'), 'escaping symlink fails');
+  fs.unlinkSync(path.join(schemas, 'material-card.schema.json'));
+  fs.writeFileSync(path.join(schemas, 'untracked.json'), '{}\n');
+  fs.symlinkSync('untracked.json', path.join(schemas, 'material-card.schema.json'));
+  git(symlinks.repo, 'add', 'schemas/material-card.schema.json'); git(symlinks.repo, 'commit', '-qm', 'untracked-target schema symlink');
+  assert.ok((await scan(symlinks, { scope: 'snapshot' })).some(hit => hit.key === 'SYMLINK_CONFIG'), 'symlink to an untracked target fails');
+  assert.ok((await scan(symlinks, { scope: 'snapshot' }, 'worktree')).some(hit => hit.key === 'SYMLINK_CONFIG'), 'worktree symlink to an untracked target fails');
+
   const repeated = fixture();
   fs.writeFileSync(path.join(repeated.repo, 'config.yaml'), `MAGIC_WORD: ${fake}\n`);
   git(repeated.repo, 'add', '.'); git(repeated.repo, 'commit', '-qm', 'finding is never clean-cached');
@@ -129,7 +199,7 @@ try {
   assert.equal(batches() - before, 1, 'cached OIDs need no second cat-file process');
   assert.ok(warmMs < coldMs, `cached scan should be faster (${warmMs}ms warm, ${coldMs}ms cold)`);
 
-  console.log('PASS batched blob framing/binary plist, lockfile/JSON shape rules, clean-OID cache, repeated findings, base-limited/full history, cached timing');
+  console.log('PASS batched blob framing/binary plist, lockfile/JSON/source/i18n/asset rules, Gradle fail-closed literals, internal/escaping symlinks, clean-OID cache, repeated findings, base-limited/full history, cached timing');
 } finally {
   fs.rmSync(temp, { recursive: true, force: true });
 }
