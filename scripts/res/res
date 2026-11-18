@@ -17,6 +17,7 @@ NOTES="$RES_DIR/notes"
 WAITERS="$RES_DIR/build-waiters"
 LANE_WAITERS="$RES_DIR/lane-waiters"
 POOL_WAITERS="$RES_DIR/pool-waiters"
+WAIT_CONFIG_FILE=  # private state owned by this waiter, never inherited
 WAITER_STALE_SECONDS="${RES_WAITER_STALE_SECONDS:-300}"  # 45 s expired the FIFO head during its own slow (ssh-probing) attempt under load (BC-103 hotfix)
 
 usage() {
@@ -100,12 +101,12 @@ heavy_lanes_held() {
 
 # Configuration is data, never shell code. Unknown/duplicate keys and malformed
 # values fail closed; an absent file retains the original admission thresholds.
-machine_thresholds() {
+machine_thresholds_parse() {
   LOAD_LIMIT=12 LOAD_LIMIT_WITH_LANES=20 MIN_AVAIL_GIB=16 LANE3_LOAD=8 LANE3_AVAIL_GIB=32
   LANE_LOAD_PER_CORE=1.25 LANE_MIN_AVAIL_GIB=12 BUILD_LOAD_PER_CORE=1.5
   BUILD_MAX_CONCURRENCY=2 BUILD_CONCURRENT_LOAD_PER_CORE=0.6 BUILD_CONCURRENT_MIN_AVAIL_GIB=24
   LOAD_OVERRIDE_MINUTES=20 LOAD_POLL_SECONDS=15 HEAD_OVERRIDE_BASE_LOAD=0
-  THRESHOLDS_SOURCE=defaults
+  THRESHOLDS_SOURCE=defaults MACHINE_UNKNOWN_KEYS=
   local conf="$RES_DIR/machine.conf" content values key value
   if [ ! -e "$conf" ]; then
     [ ! -L "$conf" ] || die "machine.conf is a dangling symlink"
@@ -138,16 +139,17 @@ PY
   values=$(printf '%s\n' "$content" | awk '
     /^[[:space:]]*(#|$)/ { next }
     {
-      if (split($0, parts, "=") != 2) exit 1
-      key=parts[1]; value=parts[2]
+      at=index($0,"="); if (!at) exit 1
+      key=substr($0,1,at-1); value=substr($0,at+1)
       gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
       gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+      if (key !~ /^[A-Z][A-Z0-9_]*(\.[A-Za-z0-9_.-]+)?$/ || seen[key]++) exit 1
       # The remote pool controller owns these keys and validates them independently.
       if (key ~ /^DEVBOX_(DYNAMIC_ADMISSION|DYNAMIC_HOSTS|LIGHT_STALE_RECLAIM|SOFT_EXCLUDE_MINUTES)$/ ||
           key ~ /^DEVBOX_(LOAD_PER_CORE|MIN_AVAIL_GIB|HEAVY_CORES|HEAVY_GIB|LIGHT_CORES|LIGHT_GIB|HEAVY_DISK_GIB|LIGHT_DISK_GIB)(\.[A-Za-z0-9][A-Za-z0-9.-]*)?$/ ||
           key ~ /^DEVBOX_(REBUILD_PLACEMENT|INPUT_TTL_SECONDS|INPUT_WAIT_CAP_SECONDS|INPUT_SEED_MAX_SECONDS)$/ ||
           key ~ /^DEVBOX_(HEAVY|LIGHT)_DISK_GIB\.project\.[A-Za-z0-9][A-Za-z0-9_.-]*$/) next
-      if (key !~ /^(LOAD_LIMIT|LOAD_LIMIT_WITH_LANES|MIN_AVAIL_GIB|LANE3_LOAD|LANE3_AVAIL_GIB|LANE_LOAD_PER_CORE|LANE_MIN_AVAIL_GIB|BUILD_LOAD_PER_CORE|BUILD_MAX_CONCURRENCY|BUILD_CONCURRENT_LOAD_PER_CORE|BUILD_CONCURRENT_MIN_AVAIL_GIB|HEAD_OVERRIDE_BASE_LOAD|LOAD_OVERRIDE_MINUTES|LOAD_POLL_SECONDS)$/ || seen[key]++) exit 1
+      if (key !~ /^(LOAD_LIMIT|LOAD_LIMIT_WITH_LANES|MIN_AVAIL_GIB|LANE3_LOAD|LANE3_AVAIL_GIB|LANE_LOAD_PER_CORE|LANE_MIN_AVAIL_GIB|BUILD_LOAD_PER_CORE|BUILD_MAX_CONCURRENCY|BUILD_CONCURRENT_LOAD_PER_CORE|BUILD_CONCURRENT_MIN_AVAIL_GIB|HEAD_OVERRIDE_BASE_LOAD|LOAD_OVERRIDE_MINUTES|LOAD_POLL_SECONDS)$/) {print "@unknown\t" key; next}
       if (value !~ /^[0-9]+([.][0-9]+)?$/ || value + 0 <= 0) exit 1
       if (key ~ /^(BUILD_MAX_CONCURRENCY|LOAD_POLL_SECONDS)$/ && value !~ /^[0-9]+$/) exit 1
       if (key == "HEAD_OVERRIDE_BASE_LOAD" && value != "1") exit 1
@@ -158,6 +160,7 @@ PY
   while IFS=$'\t' read -r key value; do
     [ -n "$key" ] || continue
     case "$key" in
+      @unknown) MACHINE_UNKNOWN_KEYS="${MACHINE_UNKNOWN_KEYS}${MACHINE_UNKNOWN_KEYS:+,}$value" ;;
       LOAD_LIMIT) LOAD_LIMIT="$value" ;;
       LOAD_LIMIT_WITH_LANES) LOAD_LIMIT_WITH_LANES="$value" ;;
       MIN_AVAIL_GIB) MIN_AVAIL_GIB="$value" ;;
@@ -185,6 +188,57 @@ PY
     }' || die "invalid machine.conf (concurrent load <= lane <= first-build load; concurrent memory >= lane memory; override <=1440 minutes; poll 15..30 seconds)"
   [ "$BUILD_MAX_CONCURRENCY" -le 3 ] || die "invalid machine.conf (BUILD_MAX_CONCURRENCY must be 1..3)"
   THRESHOLDS_SOURCE=machine.conf
+}
+
+# Subshell gate probes reload configuration too. A waiter-owned snapshot survives
+# those probes and preserves its original FIFO record during a bad publication.
+machine_thresholds() {
+  local parsed previous= warned= key value next snapshot known
+  if [ -n "${WAIT_CONFIG_FILE:-}" ] && [ -f "$WAIT_CONFIG_FILE" ]; then
+    previous=$(cat "$WAIT_CONFIG_FILE")
+    while IFS=$'\t' read -r key value; do
+      [ "$key" != MACHINE_WARNED_KEYS ] || warned="$value"
+    done <<<"$previous"
+  fi
+  if parsed=$( (
+    machine_thresholds_parse
+    for key in LOAD_LIMIT LOAD_LIMIT_WITH_LANES MIN_AVAIL_GIB LANE3_LOAD LANE3_AVAIL_GIB LANE_LOAD_PER_CORE LANE_MIN_AVAIL_GIB BUILD_LOAD_PER_CORE BUILD_MAX_CONCURRENCY BUILD_CONCURRENT_LOAD_PER_CORE BUILD_CONCURRENT_MIN_AVAIL_GIB LOAD_OVERRIDE_MINUTES LOAD_POLL_SECONDS HEAD_OVERRIDE_BASE_LOAD THRESHOLDS_SOURCE MACHINE_UNKNOWN_KEYS; do
+      printf '%s\t%s\n' "$key" "${!key}"
+    done
+  ) 2>&1 ); then
+    snapshot="$parsed"
+    [ -z "${WAIT_CONFIG_FILE:-}" ] || [ ! -f "$WAIT_CONFIG_FILE.warn" ] || rm -f "$WAIT_CONFIG_FILE.warn"
+  else
+    if [ -z "$previous" ]; then printf '%s\n' "$parsed" >&2; exit 1; fi
+    snapshot="$previous"
+    if [ ! -f "$WAIT_CONFIG_FILE.warn" ]; then
+      printf '%s\n' 'res: warning: invalid machine.conf reload; keeping last-good thresholds and FIFO position' >&2
+      : >"$WAIT_CONFIG_FILE.warn"
+    fi
+  fi
+  MACHINE_UNKNOWN_KEYS=
+  while IFS=$'\t' read -r key value; do
+    case "$key" in
+      LOAD_LIMIT|LOAD_LIMIT_WITH_LANES|MIN_AVAIL_GIB|LANE3_LOAD|LANE3_AVAIL_GIB|LANE_LOAD_PER_CORE|LANE_MIN_AVAIL_GIB|BUILD_LOAD_PER_CORE|BUILD_MAX_CONCURRENCY|BUILD_CONCURRENT_LOAD_PER_CORE|BUILD_CONCURRENT_MIN_AVAIL_GIB|LOAD_OVERRIDE_MINUTES|LOAD_POLL_SECONDS|HEAD_OVERRIDE_BASE_LOAD|THRESHOLDS_SOURCE|MACHINE_UNKNOWN_KEYS)
+        printf -v "$key" '%s' "$value" ;;
+    esac
+  done <<<"$snapshot"
+  local unknown_ifs="$IFS"; IFS=,
+  for key in $MACHINE_UNKNOWN_KEYS; do
+    case ",$warned," in *",$key,"*) ;; *)
+      printf 'res: warning: ignoring unknown machine.conf key %s\n' "$key" >&2
+      warned="${warned}${warned:+,}$key" ;;
+    esac
+  done
+  IFS="$unknown_ifs"
+  if [ -n "${WAIT_CONFIG_FILE:-}" ]; then
+    next="$WAIT_CONFIG_FILE.$$.$RANDOM.tmp"
+    (umask 077;
+      for key in LOAD_LIMIT LOAD_LIMIT_WITH_LANES MIN_AVAIL_GIB LANE3_LOAD LANE3_AVAIL_GIB LANE_LOAD_PER_CORE LANE_MIN_AVAIL_GIB BUILD_LOAD_PER_CORE BUILD_MAX_CONCURRENCY BUILD_CONCURRENT_LOAD_PER_CORE BUILD_CONCURRENT_MIN_AVAIL_GIB LOAD_OVERRIDE_MINUTES LOAD_POLL_SECONDS HEAD_OVERRIDE_BASE_LOAD THRESHOLDS_SOURCE MACHINE_UNKNOWN_KEYS; do printf '%s\t%s\n' "$key" "${!key}"; done
+      printf 'MACHINE_WARNED_KEYS\t%s\n' "$warned"
+    ) >"$next"
+    mv -f "$next" "$WAIT_CONFIG_FILE"
+  fi
 }
 
 cmd_heavy_check() {
@@ -899,6 +953,7 @@ start_build_waiter() {
   BUILD_WAITER_STAGING="$BUILD_WAITER_DIR"; BUILD_WAITER_DIR="$published"
   mv "$BUILD_WAITER_STAGING" "$BUILD_WAITER_DIR"
   BUILD_WAITER_STAGING=
+  WAIT_CONFIG_FILE="$root/.config.$suffix.tsv"
   log waiter-start "${WAITER_RESOURCE:-heavy-build}" "$BY ($PROJECT${TASK:+/$TASK})" "pid=$PID"
 }
 
@@ -923,6 +978,8 @@ update_build_waiter() {
 }
 
 cleanup_build_waiter() {
+  [ -z "${WAIT_CONFIG_FILE:-}" ] || rm -f "$WAIT_CONFIG_FILE" "$WAIT_CONFIG_FILE.warn"
+  WAIT_CONFIG_FILE=
   [ -z "${BUILD_WAITER_DIR:-}" ] || rm -rf "$BUILD_WAITER_DIR"
   [ -z "${BUILD_WAITER_STAGING:-}" ] || rm -rf "$BUILD_WAITER_STAGING"
   BUILD_WAITER_DIR=
@@ -1807,6 +1864,10 @@ def remove_waiter():
 def refresh_waiter():
     rejoin = not os.path.isdir(waiter)
     own['heartbeat'] = str(int(time.time()))
+    if globals().get('config_current_values') is not None:
+        own['last_good_devbox_config']=json.dumps(config_current_values,separators=(',',':'))
+        own['ignored_config_keys']=json.dumps(sorted(config_unknown_warned))
+        own['config_invalid_warned']='1' if config_invalid_warned else '0'
     os.makedirs(episode, exist_ok=True); publish(episode, own)
     try: publish(waiter, own)
     except FileNotFoundError:
@@ -1898,39 +1959,67 @@ try:
         with os.fdopen(os.open(file, os.O_RDONLY | os.O_NONBLOCK)) as stream:
             if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode): raise ValueError('expected a regular file')
             return stream.read()
+    config_record = info(os.path.join(root,'pool-waiters',request,'.episode.'+controller_key)) if action=='wait' else {}
+    config_current_values = None
+    config_unknown_warned = set(json.loads(config_record.get('ignored_config_keys','[]')))
+    config_invalid_warned = config_record.get('config_invalid_warned')=='1'
     def devbox_settings():
+        global config_current_values, config_unknown_warned, config_invalid_warned
         host_pattern = r'[A-Za-z0-9][A-Za-z0-9.-]*'
         defaults = dict(LOAD_PER_CORE=1, MIN_AVAIL_GIB=4, HEAVY_CORES=3, HEAVY_GIB=4, LIGHT_CORES=1, LIGHT_GIB=2, HEAVY_DISK_GIB=20, LIGHT_DISK_GIB=2)
-        values = {}
-        fallback = {}, False, 5
+        heavy_defaults = dict(LOAD_LIMIT=12,LOAD_LIMIT_WITH_LANES=20,MIN_AVAIL_GIB=16,LANE3_LOAD=8,LANE3_AVAIL_GIB=32,
+            LANE_LOAD_PER_CORE=1.25,LANE_MIN_AVAIL_GIB=12,BUILD_LOAD_PER_CORE=1.5,BUILD_MAX_CONCURRENCY=2,
+            BUILD_CONCURRENT_LOAD_PER_CORE=0.6,BUILD_CONCURRENT_MIN_AVAIL_GIB=24,LOAD_OVERRIDE_MINUTES=20,
+            LOAD_POLL_SECONDS=15,HEAD_OVERRIDE_BASE_LOAD=0)
+        values = {}; heavy=dict(heavy_defaults); seen=set(); unknown=set()
+        if action in ('return','retain-remote'): return {},False,5
         try:
-            content = regular_text(os.path.join(root, 'machine.conf'))
-            if not content.endswith('\n'): return fallback
+            try: content=regular_text(os.path.join(root,'machine.conf'))
+            except FileNotFoundError:
+                if os.path.lexists(os.path.join(root,'machine.conf')): raise ValueError('invalid machine.conf')
+                content='\n'
+            if not content.endswith('\n'): raise ValueError('incomplete machine.conf')
             for line in content.splitlines():
-                key, _, value = (part.strip() for part in line.partition('='))
-                if not key.startswith('DEVBOX_'): continue
-                if key in values: return fallback
-                if key in ('DEVBOX_DYNAMIC_ADMISSION', 'DEVBOX_LIGHT_STALE_RECLAIM') and value in ('0', '1'):
-                    values[key] = value
-                elif key == 'DEVBOX_REBUILD_PLACEMENT' and value in ('0','1'):
-                    values[key] = value
-                elif key in ('DEVBOX_INPUT_TTL_SECONDS','DEVBOX_INPUT_WAIT_CAP_SECONDS','DEVBOX_INPUT_SEED_MAX_SECONDS') and value.isdecimal() and 0 < int(value) <= 86400:
-                    values[key] = int(value)
-                elif key == 'DEVBOX_DYNAMIC_HOSTS' and (not value or re.fullmatch(host_pattern + '(,' + host_pattern + ')*', value)):
-                    values[key] = value
+                if not line.strip() or line.lstrip().startswith('#'): continue
+                key,sep,value=(part.strip() for part in line.partition('='))
+                if not sep or not re.fullmatch(r'[A-Z][A-Z0-9_]*(\.[A-Za-z0-9_.-]+)?',key) or key in seen: raise ValueError('invalid machine.conf line or duplicate')
+                seen.add(key)
+                if key in heavy:
+                    if not re.fullmatch(r'[0-9]+(?:\.[0-9]+)?',value) or not 0<float(value)<= (65536 if key.endswith('GIB') else 1440 if key=='LOAD_OVERRIDE_MINUTES' else 1024):
+                        raise ValueError('invalid known machine.conf value')
+                    if key in ('BUILD_MAX_CONCURRENCY','LOAD_POLL_SECONDS') and not value.isdecimal(): raise ValueError('invalid known integer')
+                    if key=='HEAD_OVERRIDE_BASE_LOAD' and value!='1': raise ValueError('invalid base load override')
+                    heavy[key]=float(value); continue
+                if key in ('DEVBOX_DYNAMIC_ADMISSION','DEVBOX_LIGHT_STALE_RECLAIM','DEVBOX_REBUILD_PLACEMENT'):
+                    if value not in ('0','1'): raise ValueError('invalid devbox switch')
+                    values[key]=value
+                elif key in ('DEVBOX_INPUT_TTL_SECONDS','DEVBOX_INPUT_WAIT_CAP_SECONDS','DEVBOX_INPUT_SEED_MAX_SECONDS'):
+                    if not value.isdecimal() or not 0<int(value)<=86400: raise ValueError('invalid input setting')
+                    values[key]=int(value)
+                elif key=='DEVBOX_DYNAMIC_HOSTS':
+                    if value and not re.fullmatch(host_pattern+'(,'+host_pattern+')*',value): raise ValueError('invalid dynamic hosts')
+                    values[key]=value
                 else:
-                    setting, _, suffix = key[7:].partition('.')
-                    if setting == 'SOFT_EXCLUDE_MINUTES':
-                        if suffix: return fallback
-                    elif setting not in defaults:
-                        return fallback
-                    elif suffix.startswith('project.') and setting.endswith('_DISK_GIB'):
-                        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', suffix[8:]): return fallback
-                    elif suffix and not re.fullmatch(host_pattern, suffix):
-                        return fallback
-                    if not re.fullmatch(r'[0-9]+(?:\.[0-9]+)?', value) or not 0 < float(value) <= 65536: return fallback
-                    values[key] = float(value)
-        except (OSError, ValueError): return fallback
+                    setting,_,suffix=key[7:].partition('.') if key.startswith('DEVBOX_') else ('','','')
+                    known=setting in defaults or setting=='SOFT_EXCLUDE_MINUTES' and not suffix
+                    if not known: unknown.add(key); continue
+                    if suffix.startswith('project.') and setting.endswith('_DISK_GIB'):
+                        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*',suffix[8:]): raise ValueError('invalid project override')
+                    elif suffix and not re.fullmatch(host_pattern,suffix): raise ValueError('invalid host override')
+                    if not re.fullmatch(r'[0-9]+(?:\.[0-9]+)?',value) or not 0<float(value)<=65536: raise ValueError('invalid devbox cost')
+                    values[key]=float(value)
+            if not (heavy['LOAD_LIMIT_WITH_LANES']>=heavy['LOAD_LIMIT']>=heavy['LANE3_LOAD'] and heavy['LANE3_AVAIL_GIB']>=heavy['MIN_AVAIL_GIB']
+                    and heavy['BUILD_CONCURRENT_LOAD_PER_CORE']<=heavy['LANE_LOAD_PER_CORE']<=heavy['BUILD_LOAD_PER_CORE']
+                    and heavy['BUILD_CONCURRENT_MIN_AVAIL_GIB']>=heavy['LANE_MIN_AVAIL_GIB'] and 1<=heavy['BUILD_MAX_CONCURRENCY']<=3
+                    and 15<=heavy['LOAD_POLL_SECONDS']<=30): raise ValueError('invalid machine.conf relations')
+            for key in sorted(unknown-config_unknown_warned): print('res: warning: ignoring unknown machine.conf key '+key,file=sys.stderr,flush=True)
+            config_unknown_warned.update(unknown); config_current_values=values; config_invalid_warned=False
+        except (OSError,ValueError):
+            cached=config_current_values
+            if cached is None and 'last_good_devbox_config' in config_record: cached=json.loads(config_record['last_good_devbox_config'])
+            if cached is None: raise ValueError('invalid machine.conf; no last-good thresholds')
+            if not config_invalid_warned: print('res: warning: invalid machine.conf reload; keeping last-good thresholds and FIFO position',file=sys.stderr,flush=True)
+            config_invalid_warned=True; values=cached; config_current_values=cached
         reclaim = values.get('DEVBOX_LIGHT_STALE_RECLAIM') == '1'
         soft_minutes = values.get('DEVBOX_SOFT_EXCLUDE_MINUTES', 5)
         enrolled = values.get('DEVBOX_DYNAMIC_HOSTS', '').split(',') if values.get('DEVBOX_DYNAMIC_ADMISSION') == '1' else []

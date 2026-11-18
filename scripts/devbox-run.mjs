@@ -1033,7 +1033,7 @@ async function prepareSeeds(opts, temp, state) {
 
 function inputPath(root,input) { return input.path || `${root}/inputs/${input.name}/${input.hash}`; }
 async function verifyInputs(row, inputs, opts, state, { force=false, timeout=60000 }={}) {
-  const settings = inputSettings(sharedDir());
+  const settings = opts.inputSettings || inputSettings(sharedDir());
   const file = indexFile(cacheDir(),row.host); fs.mkdirSync(path.dirname(file),{recursive:true});
   return withStateLock(file, async () => {
     const index = readIndex(cacheDir(),row.host), now=Date.now()/1000;
@@ -1061,7 +1061,7 @@ async function verifyInputs(row, inputs, opts, state, { force=false, timeout=600
   });
 }
 async function inputPlan(opts,rows,state) {
-  const settings=inputSettings(sharedDir()), indices={}, holds={}, durations={};
+  const settings=opts.inputSettings || inputSettings(sharedDir()), indices={}, holds={}, durations={};
   for (const row of rows) {
     indices[row.host]=await verifyInputs(row,opts.placementInputs,opts,state,{timeout:Math.min(15000,opts.deadline-Date.now())});
     try { holds[row.slot]=Object.fromEntries(fs.readFileSync(path.join(lockPath(sharedDir(),row.slot),'info'),'utf8').trim().split('\n').map(line=>line.split('\t'))); }
@@ -1075,7 +1075,7 @@ async function inputPlan(opts,rows,state) {
   return {version:1,at:Date.now()/1000,slots};
 }
 async function seedInputs(row,data,opts,attempt,state,emit,remaining) {
-  const settings=inputSettings(sharedDir());
+  const settings=opts.inputSettings || inputSettings(sharedDir());
   const index=await verifyInputs(row,[...opts.inputs,...(opts.placementInputs || []).filter(input=>input.warm)],opts,state,{force:true,timeout:remaining()});
   attempt.seeds=[];
   attempt.missingInputs=[...(attempt.missingInputs || []).filter(name=>name.startsWith('warm.')),...opts.inputs.filter(input=>!index.inputs[inputKey(input)]).map(input=>input.name)];
@@ -1315,6 +1315,12 @@ async function shard(opts) {
         const placementFile=path.join(opts.out,`shard-${opts.shard}-placement.json`);
         const inputRows=possible.filter(item=>!quarantinedHosts(sharedDir()).has(item.host));
         const refresh = async () => {
+          try { opts.inputSettings=inputSettings(sharedDir()); attempt.inputConfigWarned=false; }
+          catch(error) {
+            if(!opts.inputSettings) throw error;
+            if(!attempt.inputConfigWarned) emit(`[shard ${opts.shard}] invalid machine.conf reload; keeping last-good input settings\n`);
+            attempt.inputConfigWarned=true;
+          }
           await refreshHostMetrics(possible, state, { timeout: Math.min(15000, remaining()) });
           if (opts.placementInputs.length) {
             const plan=await inputPlan(opts,inputRows,state);
@@ -1731,7 +1737,7 @@ async function main(args) {
       return 2;
     }
     opts.placementSupported=helpText.includes('--placement-file');
-    const settings=inputSettings(sharedDir());
+    const settings=inputSettings(sharedDir()); opts.inputSettings=settings;
     if (!settings.enabled) {
       if (opts.inputs.some(input=>!input.rebuildable)) throw Error('rebuild placement disabled; non-rebuildable inputs require enabled placement');
       opts.placementInputs=[];

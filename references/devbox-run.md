@@ -222,7 +222,9 @@ capabilities and the normal disk/load/memory gates; SG itself remains probes-onl
 
 Publish configuration via a sibling temporary file and rename. The kill switch
 retains normal placement, disk reservation and slot hygiene; rebuildable inputs
-still get verified/seeded for the command. Matching runner and `res` revisions
+still get verified/seeded for the command. Running placement refreshes retain last-good input settings during an invalid
+reload. `res` likewise keeps waiter thresholds/FIFO state and warns once; valid
+unknown configuration keys are ignored by the controller. Matching runner and `res` revisions
 are required for explicit input placement.
 
 BC-137 reservations end on return/reclaim and never duplicate a live slot's
