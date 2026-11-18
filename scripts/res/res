@@ -32,6 +32,8 @@ res wait-pool <prefix> --by <session> --project <slug> --for "<purpose>" --timeo
                                       no mini locks or heavy-check; return the printed slot
                                       skips quarantined boxes; prefer-host falls back immediately
                                       need requires all caps; prefer-slot then its host precede fallback
+                                      affinity only at score <=0.5; otherwise balance held slots/cores
+                                      recent same-repo worktrees break capacity-score ties only
 res box-health [--json]               show remote box health (no probes)
 res quarantine <host> --reason "..."  exclude a registered box until unquarantine
 res unquarantine <host>              clear quarantine and infrastructure failure history
@@ -656,15 +658,6 @@ try:
         policy, host = remote.get(args[0], (None, None))
         required = set(args[1].split(',')) if args[1] else set()
         sys.exit(2 if policy != 'open' or not eligible(args[0], required, args[2], args[3]) or quarantined(read_state().get(host, {})) else 0)
-    elif action == 'show':
-        if args not in ([], ['--json']): raise ValueError('box-health accepts only --json')
-        state = read_state(); shown = display(state, hosts | set(state))
-        if args: print(json.dumps(shown, indent=2))
-        else:
-            for host, value in shown.items():
-                status = 'QUARANTINED' if value['quarantined'] else 'healthy'
-                until = 'manual' if value.get('manual') else value.get('quarantinedUntil', 0)
-                print(f"{host} {status} failures30m={value['failures30m']} until={until} reason={value.get('reason', '')}")
     else:
         if action == 'quarantine' and len(args) == 3 and args[1] == '--reason' and args[2].strip():
             host, _, reason = args
@@ -1357,10 +1350,12 @@ cmd_wait_pool_legacy() {
 pool_controller() {
   local runner=
   if [ "${POOL_EXEC_CHILD:-0}" = 1 ]; then runner=exec; fi
-  ${runner:+$runner} python3 - "$RES_DIR" "$@" "$BY" "$PROJECT" "$TASK" "$PURPOSE" "$PID" "$UNTIL" "${FORCE:-}" "${POOL_NEED:-}" "${prefer_host:-}" "${prefer_slot:-}" "${excluded_slots:-}" "${excluded_hosts:-}" "${WAITER_STALE_SECONDS}" "$$" <<'PY'
-import datetime, json, os, re, shutil, signal, socket, sys, time
-root, action, request, timeout, delay, by, project, task, purpose, pid, until, force, need, prefer, preferred_slot, excluded_slots, excluded_hosts, stale, controller = sys.argv[1:]
-pid = int(pid); stamp = time.time(); host = socket.gethostname()
+  ${runner:+$runner} python3 - "$RES_DIR" "$@" "$BY" "$PROJECT" "$TASK" "$PURPOSE" "$PID" "$UNTIL" "${FORCE:-}" "${POOL_NEED:-}" "${prefer_host:-}" "${prefer_slot:-}" "${excluded_slots:-}" "${excluded_hosts:-}" "${WAITER_STALE_SECONDS}" "$$" "${POOL_EPISODE:-none}" <<'PY'
+import datetime, fcntl, hashlib, json, math, os, re, shutil, signal, socket, sys, time
+from contextlib import contextmanager
+root, action, request, timeout, delay, by, project, task, purpose, pid, until, force, need, prefer, preferred_slot, excluded_slots, excluded_hosts, stale, controller, generation = sys.argv[1:]
+pid = int(pid); stamp = time.time(); now = stamp; host = socket.gethostname()
+controller_key = hashlib.sha256(host.encode()).hexdigest() + '.' + controller + '.' + generation
 locks = os.path.join(root, 'locks'); journal = os.path.join(root, 'log.tsv')
 queue = waiter = episode = None; created = None; committed = False
 def info(directory):
@@ -1389,18 +1384,22 @@ def print_notes(id):
 def alive(value):
     try: os.kill(int(value), 0); return True
     except ProcessLookupError: return False
-    except (ValueError, TypeError): return False
+    except (ValueError, TypeError, OverflowError): return False
     except PermissionError: return True
 def remove_waiter():
     if waiter and os.path.isdir(waiter): shutil.rmtree(waiter)
     if episode and os.path.isdir(episode): shutil.rmtree(episode)
+    if queue and os.path.isdir(queue):
+        for name in os.listdir(queue):
+            if name.startswith('.publish.' + controller_key + '.'):
+                shutil.rmtree(os.path.join(queue, name))
 def refresh_waiter():
     rejoin = not os.path.isdir(waiter)
     own['heartbeat'] = str(int(time.time()))
     os.makedirs(episode, exist_ok=True); publish(episode, own)
     try: publish(waiter, own)
     except FileNotFoundError:
-        staging = os.path.join(queue, '.publish.' + controller + '.' + str(os.getpid()))
+        staging = os.path.join(queue, '.publish.' + controller_key + '.' + str(os.getpid()))
         os.makedirs(staging, exist_ok=True); publish(staging, own)
         try: os.replace(staging, waiter)
         except FileExistsError:
@@ -1408,39 +1407,154 @@ def refresh_waiter():
     if rejoin: log('waiter-rejoin', request + '-any', by + ' (' + project + ('/' + task if task else '') + ')', 'pid=' + str(pid))
 def rollback():
     global created
-    if created:
-        directory, identity = created
-        if os.path.isdir(directory) and os.stat(directory).st_ino == identity:
-            shutil.rmtree(directory); log('return', os.path.basename(directory)[:-2], by, 'pool acquisition rollback')
-        created = None
-def cancelled(signum, frame): raise SystemExit(128 + signum)
+    if not created: return False
+    directory, descriptor = created
+    try:
+        try: current = os.stat(directory)
+        except FileNotFoundError: return False
+        if not os.path.samestat(current, os.fstat(descriptor)): return False
+        shutil.rmtree(directory)
+        log('return', os.path.basename(directory)[:-2], by, 'pool acquisition rollback')
+        return True
+    finally: os.close(descriptor); created = None
+@contextmanager
+def admission():
+    if not queue:
+        yield
+        return
+    os.makedirs(queue, exist_ok=True)
+    # A claim's mkdir and metadata publication must appear together to FIFO.
+    # Release the guard before post-claim validation so callers can overlap.
+    with open(os.path.join(queue, '.admission.lock'), 'a') as guard:
+        fcntl.flock(guard, fcntl.LOCK_EX)
+        yield
+def cancelled(signum, frame):
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP): signal.signal(sig, signal.SIG_IGN)
+    raise SystemExit(128 + signum)
 for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP): signal.signal(signum, cancelled)
 try:
     if any(c in value for value in (by, project, task, purpose, until) for c in '\t\r\n'): raise ValueError('hold metadata must be one line')
-    os.makedirs(locks, exist_ok=True)
+    if action not in ('box-health', 'scores', 'status'): os.makedirs(locks, exist_ok=True)
     if action in ('cancel', 'cleanup'):
-        waiter = os.path.join(root, 'pool-waiters', request, 'waiter.' + controller)
-        episode = os.path.join(root, 'pool-waiters', request, '.episode.' + controller)
+        queue = os.path.join(root, 'pool-waiters', request)
+        waiter = os.path.join(root, 'pool-waiters', request, 'waiter.' + controller_key)
+        episode = os.path.join(root, 'pool-waiters', request, '.episode.' + controller_key)
         if action == 'cancel':
             for name in os.listdir(locks):
                 directory = os.path.join(locks, name)
-                if name.endswith('.d') and info(directory).get('pool_controller') == controller:
-                    created = (directory, os.stat(directory).st_ino); rollback()
+                if not name.endswith('.d') or not os.path.isdir(directory): continue
+                hold = info(directory)
+                if name.endswith('.d') and hold.get('pool_controller') == controller_key and hold.get('by') == by and hold.get('pid') == str(pid) and hold.get('host') == host:
+                    created = (directory, os.open(directory, os.O_RDONLY | os.O_DIRECTORY)); rollback()
         remove_waiter(); sys.exit(0)
-    rows = {}
-    with open(os.path.join(root, 'resources.tsv')) as stream:
-        for line in stream:
-            if line.startswith('#') or not line.strip(): continue
-            parts = line.rstrip('\n').split('\t', 4)
-            if len(parts) != 5: raise ValueError('invalid resource registry')
-            rows[parts[0]] = parts[1:]
-    remote = {}
-    for id, (kind, policy, device, description) in rows.items():
-        match = re.search(r'[A-Za-z0-9_.-]+@([A-Za-z0-9][A-Za-z0-9.-]*)', description)
-        if kind != 'remote' or not match: continue
-        caps = re.search(r'(?:^|\s)caps=([^\s]+)', description)
-        prefs = re.search(r'(?:^|\s)prefer=([^\s]+)', description)
-        remote[id] = (policy, match.group(1).rstrip('.'), set(caps.group(1).split(',')) if caps else set(), set(prefs.group(1).split(',')) if prefs else set())
+    def read_registry():
+        rows = {}
+        with open(os.path.join(root, 'resources.tsv')) as stream:
+            for line in stream:
+                if line.startswith('#') or not line.strip(): continue
+                parts = line.rstrip('\n').split('\t', 4)
+                if len(parts) != 5: raise ValueError('invalid resource registry')
+                rows[parts[0]] = parts[1:]
+        remote = {}
+        for id, (kind, policy, device, description) in rows.items():
+            match = re.search(r'[A-Za-z0-9_.-]+@([A-Za-z0-9][A-Za-z0-9.-]*)', description)
+            if kind != 'remote' or not match: continue
+            caps = re.search(r'(?:^|\s)caps=([^\s]+)', description)
+            prefs = re.search(r'(?:^|\s)prefer=([^\s]+)', description)
+            remote[id] = (policy, match.group(1).rstrip('.'), set(caps.group(1).split(',')) if caps else set(), set(prefs.group(1).split(',')) if prefs else set())
+        return rows, remote
+    rows, remote = read_registry()
+    def health():
+        try:
+            with open(os.path.join(root, 'box-health.json')) as stream: state = json.load(stream)
+        except FileNotFoundError: return {}
+        if not isinstance(state, dict): raise ValueError('invalid box-health.json')
+        for value in state.values():
+            if not isinstance(value, dict): raise ValueError('invalid box health entry')
+            if not isinstance(value.get('failures', []), list): raise ValueError('invalid failures')
+            expiry = value.get('quarantinedUntil', 0)
+            if not isinstance(expiry, (int, float)) or not math.isfinite(expiry) or expiry < 0: raise ValueError('invalid quarantine expiry')
+            for key in ('manual', 'autoQuarantined'):
+                if key in value and not isinstance(value[key], bool): raise ValueError('invalid quarantine flag')
+            for failure in value.get('failures', []):
+                if not isinstance(failure, dict) or not isinstance(failure.get('at'), (int, float)) or not math.isfinite(failure['at']): raise ValueError('invalid failure timestamp')
+        return state
+    def number(value):
+        return type(value) in (int, float) and -sys.maxsize <= value <= sys.maxsize
+    def capacity(hosts):
+        try:
+            with open(os.path.join(root, 'devbox-hosts.json')) as stream: probes = json.load(stream)
+            if not isinstance(probes, dict): probes = {}
+        except (OSError, ValueError): probes = {}
+        fallback = {}
+        held = dict.fromkeys(hosts, 0)
+        for id, (_, box, _, _) in remote.items():
+            if box not in held: continue
+            match = re.search(r'(?:^|\s)cores=([0-9]{1,19})(?=\s|$)', rows[id][3])
+            if match:
+                cores = int(match.group(1))
+                if 0 < cores <= sys.maxsize: fallback.setdefault(box, cores)
+            if os.path.isdir(os.path.join(locks, id + '.d')): held[box] += 1
+        result = {}
+        for box in hosts:
+            probe = probes.get(box, {})
+            if not isinstance(probe, dict): probe = {}
+            try:
+                when = datetime.datetime.fromisoformat(probe.get('probedAt', '').replace('Z', '+00:00'))
+                fresh = when.tzinfo is not None and 0 <= now - when.timestamp() <= 86400
+            except (AttributeError, TypeError, ValueError, OverflowError): fresh = False
+            cores = probe.get('cores') if fresh else None
+            cores = int(cores) if number(cores) and cores > 0 and cores == int(cores) else fallback.get(box, 8)
+            free = probe.get('freeGiB') if fresh else None
+            result[box] = dict(cores=cores, heldSlots=held[box], score=held[box] / cores,
+                               nextScore=(held[box] + 1) / cores, freeGiB=free if number(free) and free >= 0 else None)
+        return result
+    def warm_slots(project, remote):
+        try:
+            with open(os.path.join(root, 'devbox-affinity.json')) as stream: affinities = json.load(stream)
+            if not isinstance(affinities, dict): return {}
+        except (OSError, ValueError): return {}
+        # Match devbox-run's project identity and its default identity+branch keys.
+        identity = project if re.fullmatch(r'id-[a-f0-9]{64}', project) else 'id-' + hashlib.sha256(('project:' + project).encode()).hexdigest()
+        warm = {}
+        for key, value in affinities.items():
+            if not key.startswith(identity + '+') or not isinstance(value, dict): continue
+            slot = value.get('slot')
+            if not isinstance(slot, str) or slot not in remote or value.get('host') != remote[slot][1]: continue
+            try:
+                stamp = datetime.datetime.fromisoformat(value.get('time', '').replace('Z', '+00:00'))
+                used = stamp.timestamp()
+                if stamp.tzinfo is None or not math.isfinite(used) or used <= 0 or used > now: continue
+            except (AttributeError, TypeError, ValueError, OverflowError): continue
+            warm[slot] = max(warm.get(slot, 0), used)
+        return warm
+    hosts = {value[1] for value in remote.values()}
+    def score_line(value):
+        return 'heldSlots=%d cores=%d score=%.4f nextScore=%.4f' % (value['heldSlots'], value['cores'], value['score'], value['nextScore'])
+    if action == 'box-health':
+        state = health()
+        scores = capacity(hosts | set(state))
+        shown = {}
+        for box in sorted(scores):
+            value = state.get(box, {})
+            shown[box] = {**value, **scores[box], 'quarantined': value.get('manual', False) or value.get('quarantinedUntil', 0) > now,
+                          'failures30m': sum(now - 1800 <= f['at'] <= now for f in value.get('failures', []))}
+        if request == '--json':
+            print(json.dumps(shown, indent=2))
+        else:
+            for box, value in shown.items():
+                status = 'QUARANTINED' if value['quarantined'] else 'healthy'
+                until = 'manual' if value.get('manual') else value.get('quarantinedUntil', 0)
+                print(f"{box} {status} failures30m={value['failures30m']} until={until} reason={value.get('reason', '')} {score_line(value)}")
+        committed = True; sys.exit(0)
+    def print_scores():
+        shown = hosts if not request else {remote[request][1]} if request in remote else set()
+        values = capacity(shown) if shown else {}
+        for box, value in sorted(values.items()):
+            print('Host ' + box + ' ' + score_line(value))
+    if action == 'scores':
+        print_scores()
+        committed = True; sys.exit(0)
     if action == 'status':
         print('%-16s %-9s %-9s %-12s %-34s %s' % ('ID', 'KIND', 'POLICY', 'LINK', 'HOLDER', 'SINCE → UNTIL / PURPOSE'))
         warn_short_pid = False
@@ -1460,6 +1574,7 @@ try:
             print('%-16s %-9s %-9s %-12s %-34s %s' % (id, kind, policy, '-', holder, detail))
         if warn_short_pid:
             print('res: short-lived holder PID; use scripts/heavy-build.sh <command...>; lock, build and return must share one long-lived process', file=sys.stderr)
+        print_scores()
         for category in ('build', 'lane', 'pool'):
             parent = os.path.join(root, category + '-waiters')
             if not os.path.isdir(parent): continue
@@ -1499,15 +1614,15 @@ try:
             if hold.get('by') == by and hold.get('pid') == str(pid) and hold.get('host') == host:
                 print('slot=' + id); committed = True; sys.exit(0)
         queue = os.path.join(root, 'pool-waiters', request)
-        os.makedirs(queue, exist_ok=True); waiter = os.path.join(queue, 'waiter.' + controller)
-        episode = os.path.join(queue, '.episode.' + controller)
+        os.makedirs(queue, exist_ok=True); waiter = os.path.join(queue, 'waiter.' + controller_key)
+        episode = os.path.join(queue, '.episode.' + controller_key)
         own = info(waiter) or info(episode)
         if not own:
             own = dict(holder=by, project=project, task=task, pid=str(pid), host=host,
                        since=datetime.datetime.now().strftime('%Y-%m-%d %H:%M'), start=str(int(stamp)),
-                       started_at=str(stamp), order='%020d' % time.time_ns(), gate_streak='0', lane='', lane3='CLOSED')
+                       started_at=str(stamp), order='%020d' % time.time_ns(), gate_streak='0', lane='', lane3='CLOSED', controller_pid=controller)
             log('waiter-start', request + '-any', by + ' (' + project + ('/' + task if task else '') + ')', 'pid=' + str(pid))
-        own.update(heartbeat=str(int(stamp)), blocked='slot', need=need, exclude_slots=excluded_slots, exclude_hosts=excluded_hosts)
+        own.update(pool_controller=controller_key, heartbeat=str(int(stamp)), blocked='slot', need=need, exclude_slots=excluded_slots, exclude_hosts=excluded_hosts)
         refresh_waiter()
     elif action == 'return':
         if request not in rows: raise ValueError("unknown resource '%s'" % request)
@@ -1533,53 +1648,116 @@ try:
             pool = request if request.endswith('-light') else request.rsplit('-', 1)[0]
             queue = os.path.join(root, 'pool-waiters', pool)
     else: raise ValueError('invalid pool action')
-    def health():
-        try:
-            with open(os.path.join(root, 'box-health.json')) as stream: state = json.load(stream)
-        except FileNotFoundError: return {}
-        if not isinstance(state, dict): raise ValueError('invalid box-health.json')
-        for value in state.values():
-            if not isinstance(value, dict): raise ValueError('invalid box health entry')
-            if not isinstance(value.get('failures', []), list): raise ValueError('invalid failures')
-            if not isinstance(value.get('quarantinedUntil', 0), (int, float)): raise ValueError('invalid quarantine expiry')
-        return state
     def quarantined(id, state):
         value = state.get(remote[id][1], {})
         return value.get('manual', False) or value.get('quarantinedUntil', 0) > time.time()
     state = health()
-    heads = []
-    if queue and os.path.isdir(queue):
-        for name in os.listdir(queue):
-            directory = os.path.join(queue, name)
-            if not name.startswith('waiter.') or not os.path.isdir(directory): continue
-            value = info(directory)
-            current = directory == waiter
-            try: fresh = 0 <= time.time() - int(value.get('heartbeat', '0')) <= int(stale)
-            except ValueError: fresh = False
-            live = value.get('host') != host or alive(value.get('pid'))
-            if not current and (not fresh or not live): shutil.rmtree(directory); continue
-            if int(value.get('gate_streak', '0')) < 3: heads.append((value.get('order', value.get('start', '')), directory, value))
-    heads.sort()
-    blocked = bool(heads and heads[0][1] != waiter)
+    def current_waiter(directory, value):
+        return bool(waiter and (directory == waiter or all(value.get(key) == own.get(key) for key in ('order', 'holder', 'pid', 'host'))))
+    def waiting():
+        heads = []
+        if queue and os.path.isdir(queue):
+            for name in os.listdir(queue):
+                directory = os.path.join(queue, name)
+                if name.startswith(('.episode.', '.publish.')) and os.path.isdir(directory):
+                    value = info(directory)
+                    try: expired = time.time() - int(value.get('heartbeat', '0')) > int(stale)
+                    except ValueError: expired = False
+                    if expired and value.get('host') == host and not alive(value.get('controller_pid')):
+                        try: shutil.rmtree(directory)
+                        except FileNotFoundError: pass
+                    continue
+                if not name.startswith('waiter.') or not os.path.isdir(directory): continue
+                value = info(directory)
+                try: fresh = 0 <= time.time() - int(value.get('heartbeat', '0')) <= int(stale)
+                except ValueError: fresh = False
+                live = value.get('host') != host or alive(value.get('pid'))
+                if not current_waiter(directory, value) and (not fresh or not live):
+                    if info(directory) == value:
+                        try: shutil.rmtree(directory)
+                        except FileNotFoundError: pass
+                    continue
+                try: streak = int(value.get('gate_streak', '0'))
+                except ValueError: streak = 0
+                if streak < 3: heads.append((value.get('order', value.get('start', '')), directory, value))
+        return sorted(heads)
+    def older_options(heads, available, claims):
+        older = []
+        for _, directory, value in heads:
+            if current_waiter(directory, value): break
+            required_caps = csv(value.get('need', ''))
+            skipped_slots = csv(value.get('exclude_slots', ''))
+            skipped_boxes = csv(value.get('exclude_hosts', ''))
+            # A still-published older waiter may already have its fresh claim.
+            if eligible(claims.get(value.get('pool_controller')), required_caps, skipped_slots, skipped_boxes): continue
+            options = {slot for slot in available if eligible(slot, required_caps, skipped_slots, skipped_boxes)}
+            if options: older.append(options)
+        return older
+    def matching_size(options, free):
+        assigned = {}
+        def assign(index, seen):
+            for id in sorted(options[index] & free):
+                if id in seen: continue
+                seen.add(id)
+                if id not in assigned or assign(assigned[id], seen): assigned[id] = index; return True
+            return False
+        for index in range(len(options)): assign(index, set())
+        return len(assigned)
+    def fifo_allows(id, state, claimed=False):
+        heads = waiting()
+        if action != 'wait': return not heads
+        if not heads or current_waiter(heads[0][1], heads[0][2]): return True
+        free, claims = set(), {}
+        for slot, (policy, _, _, _) in remote.items():
+            if policy != 'open' or not pool_member(slot, request) or quarantined(slot, state): continue
+            directory = os.path.join(locks, slot + '.d')
+            if slot == id and claimed or not os.path.isdir(directory):
+                free.add(slot)
+            else:
+                controller = info(directory).get('pool_controller')
+                if controller: claims[controller] = slot
+        options = older_options(heads, free, claims)
+        # Removing this slot must preserve the best allocation for earlier
+        # waiters, including overlaps in their capabilities and exclusions.
+        return matching_size(options, free - {id}) == matching_size(options, free)
+    heads = waiting()
+    blocked = action == 'take' and bool(heads)
     preferred_host = remote.get(preferred_slot, (None, None))[1]
     def rank(id):
         preferences = remote[id][3]
         tier = 0 if not preferences else -1 if required & preferences else 1
-        return tier, id != preferred_slot, not preferred_host or remote[id][1] != preferred_host, remote[id][1] != prefer, id
+        value = scores[remote[id][1]]; affinity = value['nextScore'] <= 0.5
+        return (tier, not (affinity and id == preferred_slot),
+                not (affinity and preferred_host and remote[id][1] == preferred_host),
+                not (affinity and remote[id][1] == prefer), value['nextScore'],
+                -warm.get(id, 0), -(value['freeGiB'] or 0), id)
     rollbacks = 0
+    candidates = members
+    if action == 'wait':
+        scores = capacity(hosts)
+        warm = warm_slots(project, remote)
+        candidates = sorted(members, key=rank)
     if not blocked:
-        for id in sorted(members, key=rank):
-            directory = os.path.join(locks, id + '.d')
-            if os.path.isdir(directory) or action == 'wait' and quarantined(id, state): continue
-            if waiter:
-                refresh_waiter()
-            try: os.mkdir(directory)
-            except FileExistsError: continue
-            created = (directory, os.stat(directory).st_ino)
-            hold = dict(by=by, project=project, task=task, **{'for': purpose}, since=datetime.datetime.now().strftime('%Y-%m-%d %H:%M'),
-                        until=until, pid=str(pid), host=host, start=str(int(time.time())), pool_controller=controller)
-            if not alive(pid): hold['pid_warning'] = 'short-lived pid'
-            publish(directory, hold)
+        for id in candidates:
+            with admission():
+                directory = os.path.join(locks, id + '.d')
+                if os.path.isdir(directory) or action == 'wait' and (not eligible(id) or quarantined(id, state)): continue
+                if not fifo_allows(id, state):
+                    blocked = True; heads = waiting()
+                    continue
+                if waiter:
+                    refresh_waiter()
+                previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, (signal.SIGINT, signal.SIGTERM, signal.SIGHUP))
+                try:
+                    try: os.mkdir(directory)
+                    except FileExistsError: continue
+                    created = (directory, os.open(directory, os.O_RDONLY | os.O_DIRECTORY))
+                finally: signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+                hold = dict(by=by, project=project, task=task, **{'for': purpose}, since=datetime.datetime.now().strftime('%Y-%m-%d %H:%M'),
+                            until=until, pid=str(pid), host=host, start=str(int(time.time())), pool_controller=controller_key)
+                if not alive(pid): hold['pid_warning'] = 'short-lived pid'
+                publish(directory, hold)
+                description = rows[id][3]
             scratch = os.path.realpath(root) != os.path.realpath(os.path.expanduser('~/.claude/orchestrator/_shared'))
             inject = os.environ.get('RES_TEST_POOL_REJECT', '') if scratch else ''
             check_log = os.environ.get('RES_TEST_POOL_CHECK_LOG', '') if scratch else ''
@@ -1588,22 +1766,30 @@ try:
             if inject == 'error': raise ValueError('injected health read failure after reservation')
             if inject == 'expire' and waiter:
                 own['heartbeat'] = '1'; publish(waiter, own)
-            # Recheck the local health snapshot and registry after the atomic claim.
-            rejected = action == 'wait' and quarantined(id, health())
-            with open(os.path.join(root, 'resources.tsv')) as stream:
-                current_rows = [line.rstrip('\n').split('\t', 4) for line in stream if not line.startswith('#') and line.strip()]
-            rejected = rejected or action == 'wait' and not any(len(row) == 5 and row[0] == id and row[1] == 'remote' and row[2] == 'open' and row[4] == rows[id][3] for row in current_rows)
-            rejected = rejected or inject == 'all'
-            if waiter:
-                refresh_waiter()
-            if rejected:
-                rollback(); rollbacks += 1
-                if rollbacks >= 3:
-                    own['order'] = '%020d' % time.time_ns(); own['blocked'] = 'rollback'; refresh_waiter()
-                    log('waiter-yield', request + '-any', by + ' (' + project + ('/' + task if task else '') + ')', 'rollbacks=3')
-                    print("res: yielding pool '%s' (FIFO) after 3 candidate rollbacks" % request, file=sys.stderr)
-                    break
-                continue
+            barrier = os.environ.get('RES_TEST_POOL_CLAIM_BARRIER', '') if scratch else ''
+            if barrier:
+                with open(os.path.join(barrier, controller), 'w'): pass
+                while not os.path.exists(os.path.join(barrier, 'release')): time.sleep(0.02)
+            # Recheck the current registry, health, and FIFO after the atomic claim.
+            with admission():
+                state = health()
+                rejected = False
+                if action == 'wait':
+                    rows, remote = read_registry()
+                    rejected = not eligible(id) or rows[id][3] != description or quarantined(id, state)
+                    refresh_waiter()
+                permitted = fifo_allows(id, state, claimed=True)
+                if not permitted: blocked = True; heads = waiting()
+                if rejected or not permitted or inject == 'all':
+                    rollbacks += int(rollback())
+                    if rollbacks >= 3:
+                        last_order = max((int(order) for order, _, _ in waiting() if order.isdecimal()), default=0)
+                        own['order'] = '%020d' % max(time.time_ns(), last_order + 1)
+                        own['blocked'] = 'rollback'; refresh_waiter()
+                        log('waiter-yield', request + '-any', by + ' (' + project + ('/' + task if task else '') + ')', 'rollbacks=3')
+                        print("res: yielding pool '%s' (FIFO) after 3 candidate rollbacks" % request, file=sys.stderr)
+                        break
+                    continue
             log('take', id, by + ' (' + project + ('/' + task if task else '') + ')', purpose + (' · until ' + until if until else ''))
             print('took ' + id)
             print_notes(id)
@@ -1613,7 +1799,7 @@ try:
             committed = True; sys.exit(0)
     if action == 'take':
         hold = info(os.path.join(locks, request + '.d'))
-        if blocked: print("res: '%s': reserved for waiting pool %s (FIFO); retry or use wait-pool" % (request, heads[0][2].get('holder', '?')), file=sys.stderr)
+        if blocked: print("res: '%s': reserved for waiting pool %s (FIFO); retry or use wait-pool" % (request, heads[0][2].get('holder', '?') if heads else '?'), file=sys.stderr)
         else: print("res: '%s' is held by %s (pid=%s, since=%s)" % (request, hold.get('by', '?'), hold.get('pid', '?'), hold.get('since', '?')), file=sys.stderr)
         sys.exit(2)
     own['blocked'] = 'FIFO' if blocked else own.get('blocked', 'slot'); publish(waiter, own)
@@ -1634,9 +1820,11 @@ try:
         if os.environ.get('RES_TEST_POOL_FAST_POLL') == '1': wait = min(wait, 0.03)
     time.sleep(wait); sys.exit(6)
 except (OSError, ValueError, TypeError, KeyError) as error:
-    print('res: pool: ' + str(error), file=sys.stderr); sys.exit(1)
+    label = 'box health' if action == 'box-health' else 'pool'
+    print('res: ' + label + ': ' + str(error), file=sys.stderr); sys.exit(1)
 finally:
     if not committed: rollback()
+    elif created: os.close(created[1])
     if sys.exc_info()[0] is not None and not (isinstance(sys.exc_info()[1], SystemExit) and sys.exc_info()[1].code == 6): remove_waiter()
 PY
 }
@@ -1646,6 +1834,8 @@ cmd_wait_pool() {
   local pool="${1:-}"; shift || true; pool="${pool%-}"
   [[ "$pool" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || die "wait-pool needs a resource prefix"
   local timeout= args=() ALLOW_PID=1 prefer_host= prefer_slot= POOL_NEED= excluded_slots= excluded_hosts= delay=1 rc POOL_CHILD_PID=
+  local POOL_EPISODE="$RANDOM.$RANDOM.$RANDOM"
+  local POOL_PENDING_SIGNAL=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --timeout|--need|--prefer-host|--prefer-slot|--exclude-slot|--exclude-host)
@@ -1668,18 +1858,29 @@ cmd_wait_pool() {
   parse ${args[@]+"${args[@]}"}; validate_pid
   [ -n "$BY" ] && [ -n "$PROJECT" ] && [ -n "$PURPOSE" ] || die "wait-pool needs --by, --project and --for"
   pool_cancel() {
+    local code="$1"
+    [ "$POOL_PENDING_SIGNAL" -eq 0 ] || code="$POOL_PENDING_SIGNAL"
+    trap '' INT TERM HUP
     [ -z "$POOL_CHILD_PID" ] || kill -s "$2" "$POOL_CHILD_PID" 2>/dev/null || true
     [ -z "$POOL_CHILD_PID" ] || wait "$POOL_CHILD_PID" 2>/dev/null || true
     pool_controller cancel "$pool" 0 0 >/dev/null
     trap - EXIT
-    exit "$1"
+    exit "$code"
   }
   trap 'pool_controller cleanup "$pool" 0 0 >/dev/null' EXIT
   trap 'pool_cancel 130 INT' INT
   trap 'pool_cancel 143 TERM' TERM
   trap 'pool_cancel 129 HUP' HUP
   while :; do
+    POOL_PENDING_SIGNAL=0
+    trap '[ "$POOL_PENDING_SIGNAL" -ne 0 ] || POOL_PENDING_SIGNAL=130' INT
+    trap '[ "$POOL_PENDING_SIGNAL" -ne 0 ] || POOL_PENDING_SIGNAL=143' TERM
+    trap '[ "$POOL_PENDING_SIGNAL" -ne 0 ] || POOL_PENDING_SIGNAL=129' HUP
     POOL_EXEC_CHILD=1 pool_controller wait "$pool" "$timeout" "$delay" & POOL_CHILD_PID=$!
+    trap 'pool_cancel 130 INT' INT
+    trap 'pool_cancel 143 TERM' TERM
+    trap 'pool_cancel 129 HUP' HUP
+    case "$POOL_PENDING_SIGNAL" in 130) pool_cancel 130 INT ;; 143) pool_cancel 143 TERM ;; 129) pool_cancel 129 HUP ;; esac
     if wait "$POOL_CHILD_PID"; then rc=0; else rc=$?; fi
     POOL_CHILD_PID=
     [ "$rc" -eq 6 ] || { trap - EXIT INT TERM HUP; return "$rc"; }
@@ -1730,6 +1931,11 @@ take_mkdir() {
   else mkdir "$1" 2>/dev/null; fi
 }
 
+pool_report() {
+  local BY= PROJECT= TASK= PURPOSE= PID="$PPID" UNTIL= FORCE= POOL_NEED= prefer_host= prefer_slot= excluded_slots= excluded_hosts=
+  pool_controller "$1" "${2:-}" 0 0
+}
+
 cmd_status() {
   [ -f "$REG" ] || die "no registry at $REG"
   local scan_id scan_kind scan_policy scan_device scan_description devices=0
@@ -1738,8 +1944,7 @@ cmd_status() {
     [ "$scan_device" = - ] || [ -z "$scan_id" ] || [[ "$scan_id" = \#* ]] || devices=1
   done <"$REG"
   if [ "$devices" -eq 0 ]; then
-    local BY= PROJECT= TASK= PURPOSE= PID="$PPID" UNTIL= FORCE= POOL_NEED= prefer_host= prefer_slot= excluded_slots= excluded_hosts=
-    pool_controller status "${1:-}" 0 0
+    pool_report status "${1:-}"
     return $?
   fi
   # A status of one checkout needs no device probe. One awk renders everything: a fork per
@@ -1792,6 +1997,8 @@ cmd_status() {
     }
   ' reg="$REG" devs="$t" pids="$t.pids" "$t" "$t.pids" ${infos[@]+"${infos[@]}"} "$REG"
   rm -f "$t" "$t.pids"
+  if [ -z "${1:-}" ]; then pool_report scores
+  elif registry_record "$1" && [ "$REG_KIND" = remote ]; then pool_report scores "$1"; fi
   if [ -z "${1:-}" ] || [ "${1:-}" = heavy-build ]; then show_build_waiters; fi
   case "${1:-}" in ''|heavy-*) show_build_waiters "$LANE_WAITERS" lanes ;; esac
   local pool_root
@@ -1984,7 +2191,10 @@ case "${1:-}" in
   wait-build) shift; cmd_acquire build 1 "$@" ;;
   wait-lane) shift; cmd_acquire lane 1 "$@" ;;
   wait-pool) shift; cmd_wait_pool "$@" ;;
-  box-health) shift; box_health show "$@" ;;
+  box-health)
+    shift
+    [ "$#" -eq 0 ] || { [ "$#" -eq 1 ] && [ "$1" = --json ]; } || die 'box-health accepts only --json'
+    pool_report box-health "${1:-}" ;;
   quarantine|unquarantine|report-infra) box_health "$@" ;;
   return-build) shift; cmd_return_build "$@" ;;
   heavy-check) shift; cmd_heavy_check "$@" ;;

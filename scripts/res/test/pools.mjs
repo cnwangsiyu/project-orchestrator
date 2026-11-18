@@ -4,7 +4,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { testPoolIdentity } from './pool-identity.mjs';
+import { testPoolSurplus } from './pool-surplus.mjs';
 
 const root = path.join(process.env.RES_TEST_ROOT, 'pools');
 const state = path.join(root, 'state'), mocks = path.join(root, 'mocks');
@@ -208,6 +210,79 @@ try {
   finally { fs.unlinkSync(path.join(mocks, 'python3')); }
   fs.writeFileSync(healthFile, '{'); eq(acquire('malformed-health').code, 1); eq(locks(), []); eq(waiters(), []); fs.writeFileSync(healthFile, '{}');
 
+  const hostsFile = path.join(state, 'devbox-hosts.json');
+  const probe = (cores, freeGiB = 100, age = 0) => ({ cores, freeGiB, probedAt: new Date(Date.now() - age).toISOString() });
+  const probes = (a = 4, b = 64) => fs.writeFileSync(hostsFile, JSON.stringify({ [hostA]: probe(a), [hostB]: probe(b) }));
+  probes();
+  expectSlot('capacity-before-id', 'devbox-cn-3', []);
+  expectSlot('affinity-under-limit', 'devbox-cn-1', ['--prefer-host', hostA]);
+  expectSlot('slot-before-host-capacity', 'devbox-cn-2', ['--prefer-slot', 'devbox-cn-2', '--prefer-host', hostB]);
+  take('devbox-cn-1');
+  expectSlot('affinity-at-limit', 'devbox-cn-2', ['--prefer-host', hostA]);
+  expectSlot('busy-slot-host-at-limit', 'devbox-cn-2', ['--prefer-slot', 'devbox-cn-1']);
+  take('devbox-cn-light');
+  eq(health()[hostA].heldSlots, 2); eq(health()[hostA].score, 0.5); eq(health()[hostA].nextScore, 0.75);
+  ok(run(['box-health']).text.includes('cores=4 score=0.5000 nextScore=0.7500'));
+  const hostStatus = run(['status', 'devbox-cn-2']); eq(hostStatus.code, 0, hostStatus.text);
+  ok(hostStatus.text.includes(`Host ${hostA} heldSlots=2 cores=4 score=0.5000`));
+  ok(!hostStatus.text.includes(`Host ${hostB}`));
+  ok(run(['status']).text.includes(`Host ${hostB} heldSlots=0 cores=64 score=0.0000`));
+  fs.appendFileSync(registryFile, 'fixture-device\tdevice\tnever\tfixture-device-id\tsynthetic device status\n');
+  const mixedStatus = run(['status']); eq(mixedStatus.code, 0, mixedStatus.text);
+  ok(mixedStatus.text.includes(`Host ${hostA} heldSlots=2 cores=4 score=0.5000`));
+  fs.writeFileSync(registryFile, registry);
+  expectSlot('host-affinity-over-limit', 'devbox-cn-3', ['--prefer-host', hostA]);
+  expectSlot('slot-affinity-over-limit', 'devbox-cn-3', ['--prefer-slot', 'devbox-cn-2']);
+  expectSlot('busy-slot-host-over-limit', 'devbox-cn-3', ['--prefer-slot', 'devbox-cn-1']);
+  release('devbox-cn-1'); release('devbox-cn-light');
+  take('devbox-cn-3');
+  const spread = acquire('spread'); eq(spread.code, 0, spread.text); ok(spread.text.includes('slot=devbox-cn-4\n'));
+  eq(health()[hostB].heldSlots, 2); release('devbox-cn-4', 'spread'); release('devbox-cn-3');
+  // Equal next scores prefer free disk space, then the original slot-id tie-break.
+  fs.writeFileSync(hostsFile, JSON.stringify({ [hostA]: probe(8, 10), [hostB]: probe(8, 200) }));
+  expectSlot('free-disk-tie', 'devbox-cn-3', []);
+  probes(8, 8); expectSlot('slot-id-tie', 'devbox-cn-1', []);
+  const affinityFile = path.join(state, 'devbox-affinity.json');
+  const affinityKey = (project, branch) => `id-${createHash('sha256').update('project:' + project).digest('hex')}+${branch}`;
+  const recent = age => new Date(Date.now() - age).toISOString();
+  const affinityState = JSON.stringify({
+    [affinityKey('warm-tie', 'main')]: { host: hostA, slot: 'devbox-cn-1', time: recent(60000) },
+    [affinityKey('warm-tie', 'branch')]: { host: hostB, slot: 'devbox-cn-4', time: recent(30000) },
+    [affinityKey('other-repo', 'main')]: { host: hostB, slot: 'devbox-cn-3', time: recent(1000) },
+    [affinityKey('warm-small', 'main')]: { host: hostA, slot: 'devbox-cn-1', time: recent(1000) },
+  });
+  fs.writeFileSync(affinityFile, affinityState);
+  expectSlot('warm-tie', 'devbox-cn-4', []);
+  probes(8, 64); expectSlot('warm-small', 'devbox-cn-3', []);
+  eq(fs.readFileSync(affinityFile, 'utf8'), affinityState); fs.unlinkSync(affinityFile);
+  const hostC = '192.0.2.3';
+  fs.appendFileSync(registryFile, `devbox-cn-21\tremote\topen\t-\tfixture runner@${hostC} caps=node\n`);
+  fs.writeFileSync(hostsFile, JSON.stringify({ [hostA]: probe(8), [hostB]: probe(64), [hostC]: probe(64) }));
+  const firstBig = acquire('first-big'); eq(firstBig.code, 0, firstBig.text); ok(firstBig.text.includes('slot=devbox-cn-21\n'));
+  expectSlot('spread-across-big-hosts', 'devbox-cn-3', []); release('devbox-cn-21', 'first-big');
+  fs.writeFileSync(registryFile, registry);
+  probes();
+  fs.writeFileSync(registryFile, registry.replace(row('devbox-cn-1'), row('devbox-cn-1').trimEnd() + ' prefer=node\n'));
+  expectSlot('matching-tier-before-capacity', 'devbox-cn-1', ['--need', 'node', '--prefer-slot', 'devbox-cn-3']);
+  expectSlot('generic-capacity-neutral', 'devbox-cn-3', []);
+  const taggedBig = registry.split('\n').map(line => line.includes(`@${hostB} `) ? line + ' prefer=node' : line).join('\n');
+  fs.writeFileSync(registryFile, taggedBig);
+  expectSlot('neutral-before-big-tagged', 'devbox-cn-1', []);
+  expectSlot('matching-big-tagged', 'devbox-cn-3', ['--need', 'node', '--prefer-slot', 'devbox-cn-1']);
+  const described = registry.split('\n').map(line => line.includes(`@${hostB} `) ? line + ' cores=64' : line).join('\n');
+  fs.writeFileSync(registryFile, described); fs.unlinkSync(hostsFile);
+  expectSlot('missing-probes-description', 'devbox-cn-3', []);
+  fs.writeFileSync(registryFile, registry);
+  expectSlot('missing-probes-default', 'devbox-cn-1', []); eq(health()[hostA].cores, 8);
+  fs.writeFileSync(registryFile, described);
+  fs.writeFileSync(hostsFile, JSON.stringify({ [hostA]: probe(64, 500, 25 * 3600000), [hostB]: probe(4, 500, 25 * 3600000) }));
+  expectSlot('stale-probes-description', 'devbox-cn-3', []); eq(health()[hostA].freeGiB, null);
+  for (const invalid of ['{', '[]', JSON.stringify({ [hostA]: { cores: 64 }, [hostB]: probe(0) }),
+    JSON.stringify({ [hostA]: probe(64, 500, -3600000), [hostB]: probe(false) })]) {
+    fs.writeFileSync(hostsFile, invalid); expectSlot('invalid-probes-fallback', 'devbox-cn-3', []);
+  }
+  fs.unlinkSync(hostsFile); fs.writeFileSync(registryFile, registry);
+
   // Expire the head exactly after its health read, without a 45-second sleep.
   const hook = path.join(root, 'check-hook.mjs');
   fs.writeFileSync(hook, `import fs from 'node:fs'; import path from 'node:path';
@@ -272,6 +347,7 @@ exit 0
     ok(fs.readFileSync(path.join(state, 'log.tsv'), 'utf8').includes('\twaiter-yield\tdevbox-cn-any\trollback-head (rollback-head/fixture)\trollbacks=3'));
   } finally { fs.unlinkSync(path.join(mocks, 'python3')); }
   count += testPoolIdentity({ source: process.env.RES_SOURCE, root: path.join(root, 'identity') });
+  count += await testPoolSurplus({ source: process.env.RES_SOURCE, root: path.join(root, 'surplus') });
   console.log(`ALL ${count} ASSERTIONS PASSED`);
 } finally {
   // Release fixture pause hooks before signalling their parents on failure.
