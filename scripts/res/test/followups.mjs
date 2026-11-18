@@ -131,11 +131,14 @@ eq(check({ TEST_PLATFORM: 'Linux', RES_TEST_LOAD1M: '6.5001', RES_TEST_LINUX_AVA
 eq(take('heavy-lane-3', { TEST_PLATFORM: 'Linux', RES_TEST_LOAD1M: '4.5', RES_TEST_LINUX_AVAILABLE: '17179869184' }).code, 0); release('heavy-lane-3');
 eq(take('heavy-lane-3', { TEST_PLATFORM: 'Linux', RES_TEST_LOAD1M: '4.5', RES_TEST_LINUX_AVAILABLE: '17179869183' }).code, 5);
 for (const text of ['LOAD_LIMIT=0\n', 'LOAD_LIMIT=-1\n', 'LOAD_LIMIT=1025\n', 'MIN_AVAIL_GIB=65537\n',
-  'LOAD_LIMIT=oops\n', 'LOAD_LIMIT=10\nLOAD_LIMIT=11\n', 'UNKNOWN=12\n', 'LOAD_LIMIT=21\n',
+  'LOAD_LIMIT=oops\n', 'LOAD_LIMIT=10\nLOAD_LIMIT=11\n', 'UNKNOWN=12\nUNKNOWN=13\n', 'LOAD_LIMIT=21\n',
   'LANE3_LOAD=13\n', 'LANE3_AVAIL_GIB=15\n', 'LOAD_LIMIT=$(touch nope)\n', 'LOAD_LIMIT=12=13\n']) {
   config(text); eq(check().code, 1); eq(take('heavy-lane-3').code, 1);
   eq(fs.existsSync(path.join(state, 'locks/heavy-lane-3.d')), false);
 }
+config('UNKNOWN=12\n'); gate = check(); eq(gate.code, 0);
+ok(gate.text.includes('ignoring unknown machine.conf key UNKNOWN'));
+eq(parseHeavyCheck(gate.text).loadGate, 12);
 config('MIN_AVAIL_GIB=8\n'); gate = check(); eq(gate.code, 0); eq(parseHeavyCheck(gate.text).loadGate, 12);
 eq(parseHeavyCheck(gate.text).memoryGateGiB, 8);
 config('LOAD_LIMIT=6.500001\nLANE3_LOAD=4\n'); gate = check({ RES_TEST_LOAD1M: '6.500001' });
