@@ -10,8 +10,13 @@ export function personalPriorityWindow(raw) {
     || !utc.test(raw.from) || !utc.test(raw.until)) return null;
   const from = Date.parse(raw.from), until = Date.parse(raw.until);
   if (!nonnegative(from) || !nonnegative(until) || from >= until) return null;
+  // Optional user decision "spend the account until it is used up": only the used
+  // percentage guards the window, at this value; the projection guard is off.
+  const exhaust = raw.exhaustAtUsed;
+  if (exhaust !== undefined && !(Number.isInteger(exhaust) && exhaust >= 90 && exhaust <= 100)) return null;
   return { account: raw.account, mode: raw.mode, from: new Date(from).toISOString(), until: new Date(until).toISOString(),
-    userDecisionRef: raw.userDecisionRef, quote: raw.quote, revoked: raw.revoked };
+    userDecisionRef: raw.userDecisionRef, quote: raw.quote, revoked: raw.revoked,
+    ...(exhaust === undefined ? {} : { exhaustAtUsed: exhaust }) };
 }
 
 export function activePersonalPriority(raw, now) {
@@ -31,6 +36,9 @@ export function personalPriorityGuard(snapshot) {
     || !nonnegative(weekly?.resetsAt) || weekly.resetsAt <= snapshot.decisionAt
     || Math.abs(weekly.resetsAt - Date.parse(window.until)) >= 60000)
     return 'fresh weekly quota for this reset is unavailable';
+  if (window.exhaustAtUsed !== undefined)
+    return weekly.used >= window.exhaustAtUsed
+      ? `weekly quota used up (used ${weekly.used}% / ${window.exhaustAtUsed}% spend-until threshold)` : null;
   if (weekly.used >= 90 || weekly.projected >= 95)
     return `weekly quota guard (used ${weekly.used}% / 90% threshold, projected at reset ${weekly.projected}% / 95% threshold)`;
   return null;

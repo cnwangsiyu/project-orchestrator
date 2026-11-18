@@ -324,6 +324,21 @@ const run = (sc, args0, overrides = {}) => {
       assert.equal(guarded.pick.account, normal.pick.account);
       assert.ok(guarded.why.some(line => line.includes('weekly quota guard') && reason.test(line)));
     }
+    {
+      const file = path.join(shared, 'personal-priority-window.json');
+      if (fs.existsSync(file)) {
+        const saved = fs.readFileSync(file, 'utf8');
+        fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(saved), exhaustAtUsed: 98 }));
+        S.priority.history = { 'codex:main': [{ t: now - 5 * h, used: 83, resetsAt: until }] };
+        S.priority.codex[0].windows = [wk(97, 10)];
+        assert.equal(read(['analysis']).pick.account, 'main', 'spend-until keeps main below the threshold despite the projection');
+        S.priority.codex[0].windows = [wk(98, 10)];
+        const spent = read(['analysis']);
+        assert.equal(spent.pick.account, normal.pick.account);
+        assert.ok(spent.why.some(line => line.includes('weekly quota used up')));
+        fs.writeFileSync(file, saved);
+      } else assert.fail('window fixture file expected');
+    }
     S.priority.codex[0].windows = [wk(10, 11)];
     const unknown = read(['analysis']);
     assert.equal(unknown.pick.account, normal.pick.account);

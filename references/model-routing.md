@@ -124,6 +124,12 @@ node scripts/personal-priority.mjs inspect
 node scripts/personal-priority.mjs revoke 'standing:personal-priority-DECISION'
 ```
 
+User 2026-11-18 ("消耗完个人 main 再走公司"): a window may carry `"exhaustAtUsed": N` (90–100). Then only the used
+percentage guards it (company-first from N% used) and the 90%/95% projection guard is off. The live window uses 98,
+leaving margin so a running task is not cut. Missing or stale quota data still falls back. Remove the field to restore
+the default guard.
+
+
 Review policy: Mandatory review is ONLY explicit --review-class A|B|C|D plus --review-reason: A a version that reaches external users and cannot be rolled back within hours; B login/auth/permission/signing logic; C irreversible data operations or billing/quota accounting; D a named adversarial review. High stakes, installation and fallback authorship alone do not qualify. Use `--review-reason` and optional stable `--review-scope`. Without a class, review-high downgrades with a note. Release impact is class A only; profiles without external release normalize other release requests to service. Internal-demo never blocks explicit classes or requires profile-override. Routine work uses tests, or one optional ordinary review when tests cannot cover it. Classified adversarial/review-high/release reviews require independent families; adversarial uses two non-GPT families. Required seconds are acceptance obligations and do not hold a runnable company primary.
 
 At most two rounds per task/branch scope; no --review-override escape. Re-reviews check blocked findings. Targets: video-agent 10%, vesdk-mainline/webview 20%; aggregate share is observational. Optional excess warns and still dispatches; mandatory reviews remain. Outcome recording accepts `--review-result blocking|none`; interim notes `review: blocking found` / `review: none` are recognized. Unknown yield remains UNKNOWN.
