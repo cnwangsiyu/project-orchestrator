@@ -40,7 +40,7 @@ export async function main(argv = process.argv.slice(2)) {
     console.log(`${project}: ${tasks.length} task(s)`);
     for (const task of tasks) {
       console.log(`${task.id}\t${task.state}\t${oneLine(task.title, 100)}${task.next ? `\tnext: ${oneLine(task.next)}` : ''}${task.blocker ? `\tblocker: ${oneLine(task.blocker)}` : ''}`);
-      for (const worker of task.auto.workers) console.log(`  ${worker.name}: ${worker.state} ${worker.account}/${worker.model ?? '?'} ${worker.effort ?? '?'} thread=${worker.thread ?? '-'} ${worker.currentStep}`);
+      for (const worker of task.auto.workers) console.log(`  ${worker.name}: ${worker.state} ${worker.account}/${worker.model ?? '?'} ${worker.effort ?? '?'} thread=${worker.followerCommand === 'exec' ? 'exec' : worker.thread ?? '-'} owner=${worker.owner ?? '?'} started=${worker.startedAt} ${worker.currentStep}`);
     }
   }
 }

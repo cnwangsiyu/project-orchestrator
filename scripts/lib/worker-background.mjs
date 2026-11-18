@@ -18,8 +18,8 @@ const sameTaskIdentity = (a, b) => {
   return Number.isInteger(a.pid) && a.pid > 0 && a.pid === b.pid;
 };
 const detached = (command) => /(?:^|[\s;])nohup\b|(?<![>&\d])&(?![&>])/.test(command ?? '');
-const eligible = (row, owner) => typeof row.thread === 'string' && row.thread.length > 0
-  && ['start', 'turn'].includes(row.followerCommand) && row.launcher?.sessionId === owner;
+const eligible = (row, owner) => row.launcher?.sessionId === owner && (row.followerCommand === 'exec'
+  || typeof row.thread === 'string' && row.thread.length > 0 && ['start', 'turn'].includes(row.followerCommand));
 const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const pathMentioned = (command, target, directory = false) => {
   if (typeof target !== 'string' || !path.isAbsolute(target) || target === '/') return false;

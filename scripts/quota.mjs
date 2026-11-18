@@ -25,7 +25,7 @@ if (args.includes('--running')) {
     const checkedAt = Date.now();
     for (const [account, threads] of Object.entries(running.byAccount)) {
       console.log(`${account}: ${threads.length} turns running`);
-      for (const row of threads) console.log(`  ${row.thread}${row.name ? ` name=${row.name}` : ''} owner=${row.owner ?? '?'} model=${row.model ?? '?'} started=${localTime.format(row.startedAt)}; last activity ${Math.max(0, Math.floor((checkedAt - row.lastActivityAt) / 60000))} min ago (${localTime.format(row.lastActivityAt)})`);
+      for (const row of threads) console.log(`  ${row.followerCommand === 'exec' ? 'exec' : row.thread ?? '-'}${row.name ? ` name=${row.name}` : ''} owner=${row.owner ?? '?'} model=${row.model ?? '?'} effort=${row.effort ?? '?'} project=${row.project ?? '?'} task=${row.task ?? '?'} started=${new Date(row.startedAt).toISOString()}; last activity ${Math.max(0, Math.floor((checkedAt - row.lastActivityAt) / 60000))} min ago (${localTime.format(row.lastActivityAt)})`);
     }
     for (const row of running.unresolved) console.log(`UNKNOWN ${row.account}/${row.thread}: ${row.reason}`);
   }

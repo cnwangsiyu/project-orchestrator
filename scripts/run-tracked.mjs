@@ -3,16 +3,21 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
-import { lifecycle, signalExit } from './lib/worker-events.mjs';
+import { lifecycle, signalExit, resolveOwner, setEventObserver } from './lib/worker-events.mjs';
 import { redactWorkerTurn, hubThreadIdle } from './lib/worker-redaction.mjs';
 import { maskPasswordStyleValues } from './lib/nightly-audit.mjs';
 import { canonicalPathOptions, canonicalLaunchArgv } from './lib/launch-paths.mjs';
+import { requestBoardRefresh } from './lib/board-refresh.mjs';
+import { projectForOwner } from './lib/task-board.mjs';
 
 const args = process.argv.slice(2), sep = args.indexOf('--'), opts = {};
 for (let i = 0; i < (sep < 0 ? args.length : sep); i += 2) opts[args[i].replace(/^--/, '')] = args[i + 1];
 canonicalPathOptions(opts);
+setEventObserver(requestBoardRefresh);
 const tracker = lifecycle({ owner: opts.owner, name: opts.name ?? 'exec', account: opts.account ?? 'main', model: opts.model ?? null,
-  effort: opts.effort ?? null,
+  effort: opts.effort ?? null, followerCommand: 'exec',
+  project: opts.project ?? (process.env.ORCHESTRATOR_PROJECT || projectForOwner(resolveOwner(opts.owner))),
+  task: opts.task ?? opts.name ?? 'exec', taskDir: opts['task-dir'] ? path.resolve(opts['task-dir']) : null,
   outFile: opts.out ? path.resolve(opts.out) : null, logFile: opts.log ? path.resolve(opts.log) : null });
 if (sep < 0 || !args[sep + 1]) { console.error('run-tracked: expected options -- command [args...]'); process.exit(2); }
 const outStamp = () => { try { const s = fs.statSync(opts.out, { bigint: true }); return `${s.ino}:${s.mtimeNs}:${s.size}`; } catch { return null; } };

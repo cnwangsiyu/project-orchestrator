@@ -59,7 +59,7 @@ try {
       visible = true;
       const reason = rows.map((row) => ['message', 'question', 'answered'].includes(row.event) ? eventLine(row)
         : `worker ${eventLine({ ...row, name: String(row.name ?? row.thread ?? '-').slice(0, 120), outFile: '' }, '').replaceAll('\t', ' ').trim()}: read ${JSON.stringify(String(row.outFile ?? row.logFile ?? 'the worker log').slice(0, 500))} and act`).join('\n')
-        + '\nAnswer open questions promptly with codex-worker reply; after its timeout the worker proceeds with its stated default (or ends BLOCKED without one). Handle finished workers first; use codex-worker watch as a run_in_background task for asks/risk notes; live tracked start/turn followers cover completion wakes.';
+        + '\nAnswer open questions promptly with codex-worker reply; after its timeout the worker proceeds with its stated default (or ends BLOCKED without one). Handle finished workers first; use codex-worker watch as a run_in_background task for asks/risk notes; live tracked start/turn/exec followers cover completion wakes.';
       await outputWithAnswers(reason);
     }, 10);
     if (delivery.failed || visible) return;
@@ -79,7 +79,7 @@ try {
     const open = questions.filter((ask) => running.some((row) => row.account === ask.account && row.thread === ask.thread));
     const uncovered = running.filter((row) => !background.covered.has(row.runId));
     if (!open.length && !uncovered.length) return;
-    const workers = [...new Set([...uncovered.map((row) => `${row.name ?? row.thread ?? row.runId} (account=${row.account}, thread=${row.thread ?? '-'}: ${!Array.isArray(input.background_tasks) ? 'background_tasks missing; tracked launch cannot be verified' : !followerAlive(row) ? 'follower PID not live' : 'no matching tracked start/turn follower'})`),
+    const workers = [...new Set([...uncovered.map((row) => `${row.name ?? row.thread ?? row.runId} (account=${row.account}, thread=${row.thread ?? '-'}: ${!Array.isArray(input.background_tasks) ? 'background_tasks missing; tracked launch cannot be verified' : !followerAlive(row) ? 'follower PID not live' : 'no matching tracked start/turn/exec follower'})`),
       ...open.map((ask) => `${ask.name ?? ask.thread} (account=${ask.account}, thread=${ask.thread}: open ask ${ask.questionId})`)])].join('; ');
     const why = `watcher claim ${claimed ? 'live' : 'absent or stale'}; background tasks ${watchTasks ? `${input.background_tasks.length} listed, ${watchTasks.length} run a watcher, owner ${registered ? 'matched' : 'not matched'}` : 'not listed'}`;
     const script = path.join(path.dirname(fileURLToPath(import.meta.url)), 'codex-worker.mjs');

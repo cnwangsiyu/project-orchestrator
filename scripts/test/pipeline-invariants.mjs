@@ -55,6 +55,8 @@ test('personal Luna image generation keeps its standing exception on a company d
   assert.equal(p.kind,'launch');assert.equal(p.primary.candidate.accountId,'personal');
   assert.equal(p.primary.candidate.modelId,'gpt-6-luna');assert.equal(p.primary.candidate.effort,'low');
   assert.deepEqual(view.needsUserOK,[]);assert.ok(view.pick.command);
+  assert.match(view.pick.command,/run-tracked\.sh/);
+  assert.match(view.pick.command,/--project fixture --task task-1 --task-dir/);
 });
 
 test('B2 ordinary full-access company signing works on both roles', () => {

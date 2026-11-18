@@ -148,6 +148,7 @@ export function presentRoute(plan, view, context) {
         ])+` -c "$(node ${shellQuote(`${root}/scripts/rules-worker-digest.mjs`)} --config)" `+command(['--json','-o',paths.out,prompt]);
       out.launcher=a.kind==='trae'?'traecli-exec':'codex-exec';
       out.command=command(['sh',`${root}/scripts/run-tracked.sh`,'--name',name,'--account',an,'--model',c.modelId,'--effort',c.effort,'--cwd',cwd,
+        '--project',task.project,'--task',f.task??name,'--task-dir',taskDir,
         '--out',paths.out,'--log',paths.log,...(owner?['--owner',owner]:[]),'--','sh','-c',`${audit} && ${inner}`]);
     } else out.command=command(['node',`${root}/scripts/codex-worker.mjs`,...args,prompt]);
     return out;

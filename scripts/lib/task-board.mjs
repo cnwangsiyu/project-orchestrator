@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { readEvents } from './worker-events.mjs';
+import { readEvents, workerKey } from './worker-events.mjs';
 import { runningWorkers } from './running-workers.mjs';
 import { acquireLock } from './shared-file.mjs';
 import { orchRoot, sharedDir, projectDir, publicId, iso, timeOf, oneLine, maskSecrets, readJson, readText,
@@ -206,7 +206,6 @@ export const resultFields = text => {
   return { summary: oneLine(paragraph, 1000), commit, tests: passed !== undefined || failed !== undefined
     ? { passed: passed === undefined ? null : +passed, failed: failed === undefined ? null : +failed } : null };
 };
-const workerKey = worker => JSON.stringify([worker.account, worker.thread ?? worker.runId]);
 const stateEvent = event => ({ running: 'running', finished: 'finished', failed: 'failed', stalled: 'stalled', 'needs-user': 'blocked',
   're-routed': 'rerouted', 'follower-ended': 'unknown' })[event];
 export const workerFacts = async ({ launches = readLaunches(), events = readEvents() } = {}) => {
@@ -251,7 +250,7 @@ const refreshOnce = async (project, { thread, account, facts, now = Date.now() }
         && (row.task.auto.workers.some(worker => workerKey(worker) === key || base.runId && worker.runId === base.runId)
           || row.task.links?.some(link => link.thread === base.thread && (!link.account || link.account === base.account))))) continue;
       // Do not seed a migration with old completions, even if later notes were appended.
-      const live = facts.live.threads.find(worker => worker.account === base.account && worker.thread === base.thread);
+      const live = facts.live.threads.find(worker => workerKey(worker) === key);
       if (!existing && !manual && !live && ['finished', 'failed'].includes(stateRow?.event) && eventAt < now - 86400000) continue;
       const task = ensureTask(board, id, defaults.name ?? latest?.name ?? id, eventAt || now);
       // Collapse the provisional start row into its final account/thread identity.
@@ -263,6 +262,7 @@ const refreshOnce = async (project, { thread, account, facts, now = Date.now() }
         sameRun ? timeOf(prior?.startedAt) : 0].filter(Boolean);
       const startedAt = starts.length ? Math.min(...starts) : launch?.t || eventAt;
       const worker = { name: defaults.name ?? latest?.name ?? id, thread: base.thread ?? null, account: base.account ?? null,
+        owner: owner ?? null, project, task: id, followerCommand: base.followerCommand ?? prior?.followerCommand ?? null,
         model: launch?.actualModel ?? latest?.actualModel ?? launch?.effectiveModel ?? latest?.model ?? defaults.model ?? prior?.model ?? null,
         effort: latest?.effort ?? launch?.effort ?? defaults.effort ?? prior?.effort ?? null, state: stateEvent(stateRow?.event) ?? prior?.state ?? 'unknown',
         startedAt: iso(startedAt || eventAt || now), lastActivityAt: iso(Math.max(latest?.t ?? launch?.t ?? 0, live?.lastActivityAt ?? 0, timeOf(prior?.lastActivityAt))),
@@ -270,6 +270,10 @@ const refreshOnce = async (project, { thread, account, facts, now = Date.now() }
         eta: latest?.eta ?? prior?.eta ?? null, tokens: latest?.tokens ?? prior?.tokens ?? null,
         result: sameRun ? prior?.result ?? null : null, finishedAt: null,
         runId, eventAt, updatedAt: prior?.updatedAt ?? iso(eventAt || now) };
+      if (worker.followerCommand === 'exec' && worker.state === 'running' && !live) {
+        worker.state = 'failed';
+        worker.eventAt = prior?.state === 'failed' ? prior.eventAt : now;
+      }
       const output = defaults.out ?? latest?.outFile;
       const log = defaults.log ?? latest?.logFile ?? (output ? path.join(path.dirname(output), 'codex.jsonl') : null);
       const files = [...new Set([log, latest?.rolloutFile ?? launch?.rolloutFile].filter(Boolean))];
@@ -287,7 +291,7 @@ const refreshOnce = async (project, { thread, account, facts, now = Date.now() }
       const progress = events.findLast(event => event.event === 'message' && ['progress', 'info'].includes(event.kind));
       if (progress && progress.t >= timeOf(worker.lastProgressAt)) { worker.lastProgress = oneLine(progress.text, 500); worker.lastProgressAt = iso(progress.t); }
       if (['finished', 'failed', 'stalled', 'blocked'].includes(worker.state)) {
-        worker.finishedAt = worker.state === 'stalled' ? null : iso(eventAt);
+        worker.finishedAt = worker.state === 'stalled' ? null : iso(worker.eventAt);
         const result = tail(output, prior?._result);
         if (result && result.mtimeMs >= startedAt) {
           const parsed = result.unchanged ? prior._result.fields : resultFields(result.text);

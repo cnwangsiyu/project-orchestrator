@@ -1,4 +1,4 @@
-import { readEvents } from './worker-events.mjs';
+import { readEvents, processWorker, workerKey } from './worker-events.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { hubRPC } from './hub-state.mjs';
@@ -32,23 +32,28 @@ export async function runningWorkers({ rows = readEvents(), profiles = {}, alive
     const result = await hubRPC(profiles[account].hub, 'thread/read', { threadId: thread, includeTurns: true });
     return result?.thread?.turns?.at(-1)?.status === 'inProgress';
   } } = {}) {
-  const latest = new Map(), starts = new Map(), activity = new Map();
+  const latestRuns = new Map(), latest = new Map(), starts = new Map(), activity = new Map();
   for (const row of [...rows].sort((a, b) => a.t - b.t || (a.seq ?? 0) - (b.seq ?? 0))) {
-    if (row.thread && row.account) activity.set(JSON.stringify([row.account, row.thread]), row.t);
-    if (!row.thread || !row.account || ['message', 'question', 'answered', 'observed'].includes(row.event)) continue;
-    const key = JSON.stringify([row.account, row.thread]);
+    if (!row.account) continue;
+    activity.set(workerKey(row), row.t);
+    if (['message', 'question', 'answered'].includes(row.event)) continue;
     if (row.event === 'running' && !starts.has(row.runId)) starts.set(row.runId, row.t);
-    latest.set(key, row);
+    latestRuns.set(JSON.stringify([row.account, row.runId]), row);
   }
+  // Resolve provisional run IDs before deduplicating registered hub threads.
+  for (const row of [...latestRuns.values()].sort((a, b) => a.t - b.t || (a.seq ?? 0) - (b.seq ?? 0))) latest.set(workerKey(row), row);
   const unresolved = [];
   const candidates = [...latest.values()].filter(row => row.event === 'running' && !row.settled);
   const threads = (await Promise.all(candidates.map(async row => {
     let live = alive(row.pid), basis = live ? 'follower-pid' : 'hub-thread';
-    if (!live) try { live = await knownThread(row.account, row.thread); }
+    if (!live && !processWorker(row)) try { live = await knownThread(row.account, row.thread); }
     catch { unresolved.push({ account: row.account, thread: row.thread, owner: row.owner, reason: 'follower gone; hub status UNKNOWN' }); }
     return live ? { account: row.account, thread: row.thread, owner: row.owner ?? null, model: row.model ?? null,
+      effort: row.effort ?? null, project: row.project ?? null, task: row.task ?? row.name ?? null,
+      runId: row.runId, followerCommand: row.followerCommand ?? null, pid: row.pid,
       name: row.name ?? null, startedAt: starts.get(row.runId) ?? row.t,
-      lastActivityAt: Math.max(row.lastActivityAt ?? activity.get(JSON.stringify([row.account, row.thread])) ?? row.t, Math.floor(activityOf(row.account, row.thread) ?? 0)), basis } : null;
+      lastActivityAt: Math.max(row.lastActivityAt ?? activity.get(workerKey(row)) ?? row.t,
+        Math.floor(processWorker(row) ? 0 : activityOf(row.account, row.thread) ?? 0)), basis } : null;
   }))).filter(Boolean).sort((a, b) => a.account.localeCompare(b.account) || a.startedAt - b.startedAt);
   return { threads, unresolved, byAccount: Object.fromEntries([...new Set(Object.keys(profiles).concat(threads.map(r => r.account)))].map(account =>
     [account, threads.filter(row => row.account === account)])) };

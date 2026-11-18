@@ -29,6 +29,9 @@ const terminal = (row) => !talkback(row) && row.event !== 'running';
 const notification = (row) => row.event !== 'running' && row.event !== 'observed' && row.event !== 'answered';
 const waking = (row) => notification(row) && (row.event !== 'message' || row.wake !== false);
 export const followerAlive = (row) => live(row.pid);
+// Exec JSON may contain a session ID, but it is not a registered hub thread.
+export const processWorker = row => row.followerCommand === 'exec' || !row.thread;
+export const workerKey = row => JSON.stringify([row.account, processWorker(row) ? row.runId : row.thread]);
 const parseRows = (text) => text.split('\n').flatMap((line) => {
   try { const row = JSON.parse(line); return typeof row?.id === 'string' && typeof row.runId === 'string' && Number.isFinite(row.t)
     && (row.owner == null || validOwner(row.owner)) && ['running', 'finished', 'failed', 'stalled', 're-routed', 'needs-user', 'follower-ended', 'observed', 'message', 'question', 'answered'].includes(row.event) ? [row] : []; } catch { return []; }
@@ -178,17 +181,17 @@ export const inbox = (rows, owner, ack = emptyAck(owner), now = Date.now()) => {
   own.forEach((row, i) => {
     if (talkback(row)) return;
     latest.set(row.runId, { row, i });
-    if (row.thread && !row.mayRun && terminal(row)) {
+    if (!processWorker(row) && !row.mayRun && terminal(row)) {
       threads.set(JSON.stringify([row.account, row.thread]), i);
       if (row.turn) turns.set(JSON.stringify([row.account, row.thread, row.turn]), i);
     }
   });
   const running = [...latest.values()].filter(({ row, i }) => {
     if (row.settled || !(row.event === 'running' || row.mayRun)) return false;
-    const settled = row.turn ? turns.get(JSON.stringify([row.account, row.thread, row.turn]))
+    const settled = processWorker(row) ? undefined : row.turn ? turns.get(JSON.stringify([row.account, row.thread, row.turn]))
       : row.thread ? threads.get(JSON.stringify([row.account, row.thread])) : undefined;
     return settled === undefined || settled < i;
-  }).map(({ row }) => ({ ...row, stale: !live(row.pid) && now - row.t > DEAD_FOLLOWER_GRACE_MS }));
+  }).map(({ row }) => ({ ...row, stale: !live(row.pid) && (row.followerCommand === 'exec' || now - row.t > DEAD_FOLLOWER_GRACE_MS) }));
   const questionKey = row => JSON.stringify([row.account,row.thread,row.questionId]);
   const answers = new Map(own.filter(row => row.event === 'answered').map(row => [questionKey(row),row]));
   const pending = own.filter(row => notification(row) && !acknowledged(row,ack)).map(row => {

@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { workerFacts, refreshBoard, visibleBoard, boardProjects, launchProject } from './task-board.mjs';
 import { readQueue, queueOpen } from './user-queue.mjs';
 import { sharedDir, iso, timeOf, oneLine } from './task-storage.mjs';
+import { workerKey } from './worker-events.mjs';
 
 export const parseResourceHolds = (text, project) => String(text).split('\n').flatMap(line => {
   const identity = line.match(/\(([^()/\s]+)(?:\/[^()\s]+)?\)\s+\d{4}-\d\d-\d\d \d\d:\d\d/);
@@ -35,10 +36,10 @@ export const resourceStatus = project => {
     : { state: 'UNKNOWN', holds: [], reason: 'res status unavailable' };
 };
 export const statusMismatches = ({ board, live, queue, now = Date.now() }) => {
-  const mismatches = [], linked = worker => board.tasks.some(task => task.auto.workers.some(row => row.account === worker.account && row.thread === worker.thread)
+  const mismatches = [], linked = worker => board.tasks.some(task => task.auto.workers.some(row => workerKey(row) === workerKey(worker))
     || task.links?.some(link => link.thread === worker.thread && (!link.account || link.account === worker.account)));
   for (const task of board.tasks.filter(task => !task.aliasOf)) {
-    const hasLive = task.auto.workers.some(worker => live.some(row => row.thread === worker.thread && row.account === worker.account));
+    const hasLive = task.auto.workers.some(worker => live.some(row => workerKey(row) === workerKey(worker)));
     const lastActivity = Math.max(timeOf(task.stateUpdatedAt ?? task.updatedAt), ...task.auto.workers.map(worker => timeOf(worker.lastActivityAt)));
     if (task.state === 'running' && !hasLive && now - lastActivity > 30 * 60000)
       mismatches.push({ kind: 'running-without-worker', task: task.id, detail: 'board running but no live worker for >30m' });
@@ -56,13 +57,13 @@ export const statusMismatches = ({ board, live, queue, now = Date.now() }) => {
 export const projectStatus = async (project, { facts, queue = readQueue(), resources, now = Date.now() } = {}) => {
   facts ??= await workerFacts();
   const board = visibleBoard(await refreshBoard(project, { facts, now }));
-  const launches = new Map(facts.launches.map(launch => [JSON.stringify([launch.account, launch.thread]), launch]));
-  const belongs = worker => launchProject(launches.get(JSON.stringify([worker.account, worker.thread]))) === project
-    || facts.events.some(event => event.thread === worker.thread && event.account === worker.account && event.project === project)
-    || board.tasks.some(task => task.auto.workers.some(row => row.account === worker.account && row.thread === worker.thread));
+  const launches = new Map(facts.launches.map(launch => [workerKey(launch), launch]));
+  const belongs = worker => worker.project === project || launchProject(launches.get(workerKey(worker))) === project
+    || facts.events.some(event => workerKey(event) === workerKey(worker) && event.project === project)
+    || board.tasks.some(task => task.auto.workers.some(row => workerKey(row) === workerKey(worker)));
   const live = facts.live.threads.filter(belongs).map(worker => {
-    const auto = board.tasks.flatMap(task => task.auto.workers).find(row => row.account === worker.account && row.thread === worker.thread);
-    return { ...worker, model: auto?.model ?? worker.model, effort: auto?.effort ?? null, currentStep: auto?.currentStep ?? '',
+    const auto = board.tasks.flatMap(task => task.auto.workers).find(row => workerKey(row) === workerKey(worker));
+    return { ...worker, model: auto?.model ?? worker.model, effort: auto?.effort ?? worker.effort ?? null, currentStep: auto?.currentStep ?? '',
       lastActivityAt: Math.max(worker.lastActivityAt, timeOf(auto?.lastActivityAt)) };
   }), items = queue.filter(item => item.project === project);
   return { schemaVersion: 1, project, at: iso(now), board, liveWorkers: live, unknownWorkers: facts.live.unresolved.filter(belongs),
@@ -75,8 +76,8 @@ export const statusText = pages => pages.map(page => {
   for (const task of page.board.tasks) lines.push(`${task.id.padEnd(22)} ${task.state.padEnd(12)} ${oneLine(task.title, 80)}${task.next ? ` | next: ${oneLine(task.next, 80)}` : ''}${task.blocker ? ` | blocker: ${oneLine(task.blocker, 80)}` : ''}`);
   lines.push('Live Workers:');
   for (const worker of page.liveWorkers) {
-    const auto = page.board.tasks.flatMap(task => task.auto.workers).find(row => row.account === worker.account && row.thread === worker.thread);
-    lines.push(`  ${worker.name ?? '-'} ${worker.account}/${worker.model ?? '?'} ${auto?.effort ?? '?'} thread=${worker.thread} active=${iso(worker.lastActivityAt)} ${auto?.currentStep ?? ''}`);
+    const auto = page.board.tasks.flatMap(task => task.auto.workers).find(row => workerKey(row) === workerKey(worker));
+    lines.push(`  ${worker.name ?? '-'} ${worker.account}/${worker.model ?? '?'} ${worker.effort ?? '?'} thread=${worker.followerCommand === 'exec' ? 'exec' : worker.thread ?? '-'} owner=${worker.owner ?? '?'} task=${worker.task ?? '?'} started=${iso(worker.startedAt)} active=${iso(worker.lastActivityAt)} ${auto?.currentStep ?? ''}`);
   }
   for (const worker of page.unknownWorkers) lines.push(`  UNKNOWN ${worker.account}/${worker.thread}: ${worker.reason}`);
   if (!page.liveWorkers.length && !page.unknownWorkers.length) lines.push('  none');

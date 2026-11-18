@@ -71,7 +71,7 @@ import { maskPasswordStyleValues } from './lib/nightly-audit.mjs';
 import { canonicalPathOptions, canonicalBriefPrompt } from './lib/launch-paths.mjs';
 import { requestBoardRefresh } from './lib/board-refresh.mjs';
 import { lifecycle, resolveOwner, validOwner, inbox, readEvents, readAck, eventLine, watch, signalExit, appendEvent, setEventObserver,
-  saveWorkerContext, workerContext, openQuestions, answerQuestion } from './lib/worker-events.mjs';
+  saveWorkerContext, workerContext, openQuestions, answerQuestion, followerAlive } from './lib/worker-events.mjs';
 setEventObserver(requestBoardRefresh);
 // What a TRAE pause covers: one model family (route.mjs moves to the next family) or the whole account.
 const pausedWhat = (p) => (p.pool ? `TRAE's ${p.pool} models are paused` : 'TRAE is paused');
@@ -254,7 +254,7 @@ if (cmd === 'watch' || cmd === 'mine') {
     const debounceSec = opts['debounce-sec'] === undefined ? 45 : typeof opts['debounce-sec'] === 'string' ? Number(opts['debounce-sec']) : NaN;
     try { process.exit(await watch(owner, undefined, { debounceSec })); } catch (e) { die(e.message, 1); }
   }
-  const current = inbox(readEvents(), owner, readAck(owner));
+  const events = readEvents(), current = inbox(events, owner, readAck(owner));
   for (const row of current.unresolved) console.log(`unresolved owner ${row.ownerOriginal}: ${row.ownerResolution} (${row.ownerMatches?.join(', ')||'no full owner in events'}) event=${row.id}`);
   for (const row of current.pending) console.log(eventLine(row));
   const pendingIds = new Set(current.pending.map((row) => row.id));
@@ -262,7 +262,9 @@ if (cmd === 'watch' || cmd === 'mine') {
   // Only query already-known threads; never start a hub or a replacement from mine.
   for (const row of current.running) {
     let status = 'unknown', observed = null;
-    if (row.thread) {
+    if (row.followerCommand === 'exec' || !row.thread) {
+      status = followerAlive(row) ? 'running' : 'failed (exec follower exited)';
+    } else if (row.thread) {
       try {
         const output = execFileSync(process.execPath, [...process.execArgv, fileURLToPath(import.meta.url), '--account', row.account,
           'status', '--thread', row.thread], { encoding: 'utf8', timeout: Number(process.env.MINE_STATUS_TIMEOUT_MS ?? 15000), stdio: ['ignore', 'pipe', 'ignore'] });
@@ -273,10 +275,9 @@ if (cmd === 'watch' || cmd === 'mine') {
         // A slow hub read (long threads on a large history) is not "unknown" while this worker's follower is alive.
         try { if (Number.isSafeInteger(row.pid) && row.pid > 0) { process.kill(row.pid, 0); status = 'running (follower alive; hub read slow)'; } } catch {}
       }
-    } else {
-      try { process.kill(row.pid, 0); status = 'running'; } catch {}
     }
-    console.log(`${row.name}\t${status === 'inProgress' ? 'running (hub)' : status}${row.stale && status === 'unknown' ? ' (stale follower; hub status unconfirmed)' : ''}\t${row.outFile ?? '-'}\tthread=${row.thread ?? '-'} account=${row.account}`);
+    const startedAt = events.find(event => event.runId === row.runId && event.event === 'running')?.t ?? row.t;
+    console.log(`${row.name}\t${status === 'inProgress' ? 'running (hub)' : status}${row.stale && status === 'unknown' ? ' (stale follower; hub status unconfirmed)' : ''}\t${row.outFile ?? '-'}\tthread=${row.followerCommand === 'exec' ? 'exec' : row.thread ?? '-'} account=${row.account} model=${row.model ?? '?'} effort=${row.effort ?? '?'} project=${row.project ?? '?'} task=${row.task ?? row.name ?? '?'} owner=${row.owner} started=${new Date(startedAt).toISOString()}`);
   }
   process.exit(0);
 }
