@@ -17,6 +17,10 @@
 // answers 403/429 "quota exceeded: Daily Limits exceeded. Resets at <ISO>". Every TTADK call passes here, so the proxy
 // records that in --quota-file (default quota-limit.json next to --log): {"kind","resetsAt","seenAt"}. quota.mjs reads
 // it and holds TTADK until the reset.
+// Connect latency to the gateway can exceed Node's 250 ms per-address happy-eyeballs attempt (2026-11-17: ~0.4-1 s
+// over the corporate VPN, dual-stack DNS), which made every upstream connect time out. Give each attempt 2 s.
+import net from 'node:net';
+net.setDefaultAutoSelectFamilyAttemptTimeout(2000);
 import http from 'node:http';
 import fs from 'node:fs';
 

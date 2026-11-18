@@ -265,7 +265,7 @@ process.stdout.write(JSON.stringify(await fetchTtadkQuota(JSON.parse(readFileSyn
 `;
 const quotaViaChild = (token, header) => {
   try {
-    const raw = execFileSync(process.execPath, ['--input-type=module', '-e', QUOTA_CHILD], { input: JSON.stringify({ token, header, url: ttadkQuotaUrl() }),
+    const raw = execFileSync(process.execPath, ['--network-family-autoselection-attempt-timeout=2000', '--input-type=module', '-e', QUOTA_CHILD], { input: JSON.stringify({ token, header, url: ttadkQuotaUrl() }),
       encoding: 'utf8', timeout: 7000, maxBuffer: 4 << 20, stdio: ['pipe', 'pipe', 'ignore'] });
     return JSON.parse(raw);
   } catch (e) { return { usage: null, status: null, error: `quota query failed (${e?.code === 'ETIMEDOUT' ? 'timeout' : 'child error'})` }; }
