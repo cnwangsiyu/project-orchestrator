@@ -675,6 +675,14 @@ confirming the unchanged policy accepts its literal in every supported ref and t
 broad path, digest, alphabet, command-id or test-file exemptions. The vesdk list went from 154 to 59 entries; the
 rest stay as explicit reviewed exceptions.
 
+Tracked test resources are build inputs (2026-11-19, vesdk T203): the export keeps all tracked assets and binary
+test resources except the signing/private file suffixes, and exports Git LFS files as real payloads verified against
+the pointer's sha256 and size (fetched through the repository's normal remote; no auth transplant). PREP fails if a
+retained LFS object is missing, mismatched, or still a pointer. Hydrated files are recorded as `[hydratedLfs]` in
+the manifest. The text sanitizer never runs on binary bytes; key-shape hits inside binary payloads are reported by
+name and count in the audit receipt and sent to the rules owner, and the devbox-run transfer gate still decides.
+The earlier recipe had excluded 14 tracked sticker/test ZIPs, which is why packages lacked them.
+
 Prepare from a local vesdk branch name or full commit. The exporter creates
 a parentless Git snapshot and records the original commit in
 `source-provenance.json`. Prep generates the EffectSDK Android version metadata
