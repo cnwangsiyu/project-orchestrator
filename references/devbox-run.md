@@ -1071,3 +1071,19 @@ archive=$(node -e 'const fs=require("fs"); process.stdout.write(JSON.parse(fs.re
 mkdir -p task-assets
 tar -xf "$archive" -C task-assets
 ```
+
+## Disk-floor eviction (standing rule, user 2026-11-19)
+
+When a devbox refuses admission with `reason=disk`, the rules owner may run
+`scripts/devbox-evict.sh USER@HOST RUNNER_ROOT [TARGET_FREE_GIB]` without a card. It deletes only
+tool-created, rebuildable test-run data: `.data` directories inside runner slot worktrees
+(`wt/<project>/id-*/devbox-cn-*/.data`), least recently used first, and stops when free space
+reaches the target (default 73 GiB: the 53 GiB floor plus 20 GiB so runs can be admitted again).
+
+It never touches anything else: no checkouts, sources, warm build trees, shared caches or
+toolchains, retained artifacts, user files, or anything outside the runner root. It refuses to run
+while any slot on the host is held, and skips a directory when a process has its working directory
+in that slot, when it is a symlink, or when anything in it changed in the last 30 minutes. Every
+deletion is appended to `_shared/reports/devbox-evictions/evictions.tsv` (time, host, path, size,
+free before and after). Deleting any other existing data still needs the user's card. Project
+orchestrators do not run it; they report `reason=disk` denials to the rules owner.
