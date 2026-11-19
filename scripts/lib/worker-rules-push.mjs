@@ -112,8 +112,11 @@ export const pushWorkerRules = async ({ owner, digest = loadDigest(), onWork = (
       if (terminalWorker(row)) return skipped(row.status ?? row.event);
       const state = await runningWorker(row, { claudeWorkers: () => claude ??= activeClaudeWorkers() });
       if (state.running === false) return skipped(state.reason);
-      if (state.running === null) return row.stale || !followerAlive(row)
-        ? skipped(`stale follower; ${state.reason}`) : unconfirmed(state.reason);
+      if (state.running === null) {
+        if (row.stale || !followerAlive(row)) return skipped(`stale follower; ${state.reason}`);
+        // A live worker already on the current rules has nothing to receive: stay silent.
+        return isOlder(workerRulesVersion(row), digest.version) ? unconfirmed(state.reason) : null;
+      }
       targetState(row, false);
       // Hub evidence supplies a missing/new turn; a receipt for the old turn cannot cover it.
       const target = state.turn && state.turn !== row.turn ? { ...row, turn: state.turn, rulesVersion: null } : row;
