@@ -15,6 +15,10 @@ import { transferFindings } from '../lib/devbox-transfer-check.mjs';
 const script = fileURLToPath(new URL('../devbox-run.mjs', import.meta.url));
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'devbox-scenarios-'));
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+// Apple's git shim repeatedly resolves Xcode under a synthetic HOME. Resolve
+// the installed binary once, retaining fixture shims ahead of it in each PATH.
+const gitBin = path.resolve(execFileSync('git', ['--exec-path'], { encoding: 'utf8' }).trim(), '../../bin/git');
+if (fs.existsSync(gitBin)) process.env.PATH = `${path.dirname(gitBin)}:${process.env.PATH}`;
 // Hosts without a global git identity (devbox 8) must still run every fixture commit.
 Object.assign(process.env, { GIT_AUTHOR_NAME: 'Fixture', GIT_AUTHOR_EMAIL: 'fixture@example.invalid', GIT_COMMITTER_NAME: 'Fixture', GIT_COMMITTER_EMAIL: 'fixture@example.invalid' });
 const git = (repo, ...args) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
@@ -918,11 +922,14 @@ async function deadSlotScenarios() {
 async function scenarios() {
   const only = process.env.DEVBOX_TEST_CASE;
   const perf = { affinity:affinityScopeScenarios, 'dead-slot':deadSlotScenarios, inputs:inputScenarios,hygiene:hygieneScenarios,credentials: credentialScenarios, 'packed-module': packedModuleRecovery, receipt: receiptScenarios, 'res-progress': resProgressScenarios, cpu: cpuScenarios, auto: autoScenarios, units: unitScenarios, prewarm: prewarmScenarios, metrics: metricScenarios, placement: placementScenarios, 'ssh-drop': sshDropScenarios };
-  if (only && !['baseline', 'bundle', 'ownership', ...Object.keys(perf)].includes(only)) throw Error('unknown devbox fixture case');
+  const baseline = ['baseline-core', 'baseline-config', 'baseline-warm', 'baseline-placement', 'baseline-artifacts', 'baseline-cleanup', 'baseline-gc', 'baseline-ssh'];
+  if (only && !['baseline', 'bundle', 'ownership', ...baseline, ...Object.keys(perf)].includes(only)) throw Error('unknown devbox fixture case');
   for (const [name, scenario] of Object.entries(perf)) if (!only || only === name) await scenario();
   if (!only || only === 'baseline' || only === 'bundle') await bundleRecovery();
   if (!only || only === 'baseline' || only === 'ownership') await stopOwnership();
-  if (only && only !== 'baseline') return;
+  if (only && only !== 'baseline' && !baseline.includes(only)) return;
+  const group = name => !only || only === 'baseline' || only === name;
+  if (group('baseline-core')) {
   const roots = path.join(temp, 'root-probe'), data = path.join(roots, 'data00'), home = path.join(roots, 'home');
   fs.mkdirSync(data, { recursive: true }); fs.mkdirSync(home); fs.writeFileSync(path.join(roots, 'meminfo'), 'MemTotal: 33554432 kB\n');
   const probeSource = remoteScripts.probe.replace("pathlib.Path('/data00')", `pathlib.Path(${JSON.stringify(data)})`)
@@ -985,6 +992,8 @@ async function scenarios() {
   returned(sameBox);
   console.log('PASS two worktrees, unpushed app and recursive module pins, two slots, warm bundle reuse');
 
+  }
+  if (group('baseline-config')) {
   const npm = fixture();
   fs.writeFileSync(path.join(npm.repo, '.npmrc'), 'registry=https://registry.example.invalid/\n');
   git(npm.repo, 'add', '.npmrc'); git(npm.repo, 'commit', '-qm', 'registry only');
@@ -1008,6 +1017,8 @@ async function scenarios() {
   const history = await run(npm); assert.equal(history.code, 1); assert.match(history.stderr, /_auth/); returned(npm);
   console.log('PASS registry-only npm config, staged and historical content checks, pool exclusion flags');
 
+  }
+  if (group('baseline-warm')) {
   const warm = fixture({ dataDisk: false });
   ok(await run(warm, [], 'mkdir -p build && echo retained > build/cache'));
   const ws = workspace(warm); const initialMtime = fs.statSync(path.join(ws, 'source.txt')).mtimeMs;
@@ -1036,6 +1047,8 @@ async function scenarios() {
   assert.ok(warm.events().filter(e => e.op === 'acquire-call').some(e => e.args[0] === 'take'));
   returned(warm); console.log('PASS incremental bundles, shared object store, warm worktrees/mtime, overlay removal, affinity, home-disk root');
 
+  }
+  if (group('baseline-placement')) {
   {
     const f = fixture({ liveHelp: true }); const r = await run(f, ['--need', 'node,vesdk-android', '--exclude-host', '192.0.2.9']); ok(r);
     assert.ok(f.events().some(e => e.op === 'acquire-call' && e.args.includes('--need') && e.args.includes('--exclude-host')), 'flags read from `res help` when `wait-pool --help` is rejected');
@@ -1065,6 +1078,8 @@ async function scenarios() {
   assert.ok(!filled.events().some(e => e.op === 'run' && e.host === '192.0.2.1')); returned(filled);
   console.log('PASS capability and slot preference passthrough/legacy filtering, fresh upload retry, disk guard alternate-slot retry');
 
+  }
+  if (group('baseline-artifacts')) {
   for (const allow of [false, true]) {
     const f = fixture({ failHost: '192.0.2.1' }); const r = await run(f, ['--rerun-on-fail', ...(allow ? ['--allow-flaky'] : [])]);
     assert.equal(r.code, allow ? 0 : 7); assert.equal(r.summary.shards[0].flaky, true);
@@ -1081,6 +1096,8 @@ async function scenarios() {
   const failure = fixture(); assert.equal((await run(failure, [], 'exit 9')).code, 9); returned(failure);
   console.log('PASS flaky exit policy/history, artifact contents, artifact and command failure release');
 
+  }
+  if (group('baseline-cleanup')) {
   const signal = fixture(); const s = await run(signal, [], 'sleep 60 & wait', events => events.some(e => e.op === 'group'));
   assert.equal(s.code, 143); returned(signal);
   for (const e of signal.events().filter(e => e.op === 'group')) assert.throws(() => process.kill(-e.pid, 0), /ESRCH/);
@@ -1092,6 +1109,8 @@ async function scenarios() {
   assert.equal(blocked.events().filter(e => e.op === 'return').length, 0);
   console.log('PASS SIGTERM process-group cleanup/order, timeout, interrupted acquisition recovery, unconfirmed cleanup retains hold');
 
+  }
+  if (group('baseline-gc')) {
   const gc = fixture(); ok(await run(gc, [], 'mkdir -p build && echo cache > build/output'));
   const oldWs = workspace(gc); const meta = path.join(oldWs, '.devbox-run.json'); const record = JSON.parse(fs.readFileSync(meta)); record.lastUsed -= 8 * 86400; fs.writeFileSync(meta, JSON.stringify(record));
   const foreign = path.join(gc.shared, 'locks/devbox-cn-1.d'); fs.mkdirSync(foreign); fs.writeFileSync(path.join(foreign, 'info'), 'by\tother-fixture\npid\t1\n');
@@ -1112,6 +1131,8 @@ async function scenarios() {
   assert.match(redacted.stdout, /log-redaction files=1 masked=0/); returned(redaction);
   console.log('PASS leased stale-worktree GC and source-only snapshot guard');
 
+  }
+  if (group('baseline-ssh')) {
   for (const authMessage of ['Permission denied (gssapi-with-mic)', 'Connection closed by 192.0.2.1 port 22']) {
     const f = fixture({ authFailures: 1, authMessage }); const r = await run(f); ok(r);
     assert.equal(f.events().filter(e => e.op === 'probe').length, 2); returned(f);
@@ -1121,6 +1142,7 @@ async function scenarios() {
   assert.equal(exhausted.events().filter(e => e.op === 'probe').length, 4); returned(exhausted);
   await placementScenarios();
   console.log('PASS jittered SSH establishment retries, bounded infra failure, no replay after remote start, no ControlMaster');
+  }
 }
 
 try { await scenarios(); } finally { fs.rmSync(temp, { recursive: true, force: true }); }

@@ -177,7 +177,11 @@ function fixture(scenario, fixtureDay = day) {
     RULES_SHARED: shared, FIXTURE_SCENARIO: scenario, FIXTURE_LIVE_PID: String(process.pid) };
   // Never allow a caller's live account registry/routing logs to leak into a fixture.
   delete env.CODEX_ACCOUNTS; delete env.ROUTE_LOG_FILE; delete env.CODEX_HOME; delete env.CODEX_HUB;
-  const execute = (overrides = {}, args = []) => spawnSync('/bin/zsh', [script, ...args], { env: { ...env, ...overrides }, encoding: 'utf8', timeout: 30000 });
+  // The launchd zsh wrapper is exercised on macOS; Linux runs its Node payload
+  // with the same fixture PATH rather than requiring a macOS-only shell.
+  const execute = (overrides = {}, args = []) => spawnSync(process.platform === 'darwin' ? '/bin/zsh' : process.execPath,
+    [process.platform === 'darwin' ? script : script.replace(/\.sh$/, '.mjs'), ...args],
+    { env: { ...env, PATH: `${bin}:/usr/local/bin:/usr/bin:/bin`, ...overrides }, encoding: 'utf8', timeout: 30000 });
   return { home, dir, run, env, execute, status: () => json(path.join(run, 'status.json')),
     calls: () => fs.readFileSync(path.join(home, 'calls.jsonl'), 'utf8').trim().split('\n').map(JSON.parse),
     count: (name) => fs.existsSync(path.join(home, name)) ? Number(fs.readFileSync(path.join(home, name))) : 0 };

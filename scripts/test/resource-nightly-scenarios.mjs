@@ -38,7 +38,9 @@ else console.log('{}');
   fs.writeFileSync(path.join(bin, 'node'), node, { mode: 0o755 });
   fs.writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\n[ "$1" = agents ] || exit 99\nprintf "[]\\n"\n', { mode: 0o755 });
   fs.writeFileSync(path.join(bin, 'codex'), '#!/bin/sh\nprintf "%s\\n" "$*" > "$HOME/worker-args.txt"\nprintf "{}\\n"\n', { mode: 0o755 });
-  const run = spawnSync('/bin/zsh', [path.join(skill, 'scripts/nightly-review.sh')], { env: { ...process.env, HOME: tmp,
+  // macOS covers the launchd shell; Linux exercises the identical Node payload.
+  const run = spawnSync(process.platform === 'darwin' ? '/bin/zsh' : process.execPath,
+    [path.join(skill, process.platform === 'darwin' ? 'scripts/nightly-review.sh' : 'scripts/nightly-review.mjs')], { env: { ...process.env, HOME: tmp, PATH: `${bin}:/usr/local/bin:/usr/bin:/bin`,
     RULES_SHARED: shared, NIGHTLY_DIR: path.join(shared, 'routing-review'), NIGHTLY_DAY: '2026-11-17',
     NIGHTLY_MODE: 'dry', NIGHTLY_PERSONAL_OK: '0' }, encoding: 'utf8', timeout: 15000 });
   assert.equal(run.status, 0, run.stdout + run.stderr);

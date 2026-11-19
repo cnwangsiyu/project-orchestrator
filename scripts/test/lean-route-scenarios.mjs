@@ -40,7 +40,29 @@ try {
   const timedOutput = cli(args);
   assert.match(timedOutput, /~22 min/); assert.doesNotMatch(timedOutput, /21\.582/);
   fs.writeFileSync(snapshot, JSON.stringify(raw));
-  const normalize=pick=>JSON.parse(JSON.stringify(pick).replace(/route:[a-f0-9]+/g,'route:fixture'));
+  const normalize=pick=>{
+    const result=JSON.parse(JSON.stringify(pick).replace(/route:[a-f0-9]+/g,'route:fixture'));
+    // The saved route args retain diagnostic flags for replay. Compare those
+    // args explicitly after removing only --verbose; every executable arg and
+    // every selected tuple field must remain identical.
+    const quote=value=>"'"+value.replaceAll("'","'\\''")+"'";
+    const rewrite=(index,value)=>{
+      const before=result.workerArgs[index];
+      result.workerArgs[index]=value;
+      result.command=result.command.replace(quote(before),quote(value));
+    };
+    const index=result.workerArgs.indexOf('--route-args');
+    if(index>=0) rewrite(index+1,JSON.stringify(JSON.parse(result.workerArgs[index+1]).filter(arg=>arg!=='--verbose')));
+    const alternative=result.workerArgs.indexOf('--queue-alternative');
+    if(alternative>=0) {
+      const saved=JSON.parse(result.workerArgs[alternative+1]);
+      saved.routeArgs=saved.routeArgs.filter(arg=>arg!=='--verbose');
+      rewrite(alternative+1,JSON.stringify(saved));
+    }
+    const alt=result.workerArgs.indexOf('--alt');
+    if(alt>=0) rewrite(alt+1,result.workerArgs[alt+1].replace(/ --verbose(?= |$)/g,''));
+    return result;
+  };
   assert.deepEqual(normalize(JSON.parse(cli([...args,'--verbose','--json'])).pick),normalize(route.pick),'verbose preserves launch arguments and chosen tuple apart from the output-flag fingerprint');
   const phones=structuredClone(raw);phones.resources.value.registeredResources=['iphone11'];
   fs.writeFileSync(snapshot,JSON.stringify(phones));

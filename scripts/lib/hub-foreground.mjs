@@ -115,7 +115,15 @@ export const runHubForeground = async ({ account, profile, hub, script, home, in
     stopped = true;
     for (const child of children) child.kill('SIGTERM');
     if (children.size) await new Promise((r) => setTimeout(r, 200));
+    const closed = [...children].map(child => new Promise(resolve => child.once('close', resolve)));
     for (const child of children) child.kill('SIGKILL');
+    // Reap owned children before launchd restarts us. Merely sending SIGKILL
+    // leaves a Linux child/zombie visible after the supervisor has exited.
+    if (closed.length) {
+      let timer;
+      await Promise.race([Promise.all(closed), new Promise(resolve => { timer = setTimeout(resolve, 2000); })]);
+      clearTimeout(timer);
+    }
     for (const event of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.off(event, signal);
   }
 };

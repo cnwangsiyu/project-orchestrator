@@ -84,6 +84,10 @@ try {
   assert.equal(run(['note', '--thread', 'fallback-thread', '--account', 'trae', 'Explicit identity']).status, 0);
 
   // Two watchers, two owners: only the launcher gets the talkback wake-up.
+  // Consume the separate rules-push skip notice for the completed fixtures
+  // before measuring the exact talkback payload and which watcher wakes.
+  for (const owner of ['1be5e1ea-b928-566d-8b57-991d2b507b6e', '5c5a00d0-2f02-5ba1-af93-9898f8807636'])
+    assert.equal(run(['rules-push', '--owner', owner]).status, 0);
   const a = start(['watch', '--debounce-sec', '0', '--owner', '1be5e1ea-b928-566d-8b57-991d2b507b6e']), b = start(['watch', '--debounce-sec', '0', '--owner', '5c5a00d0-2f02-5ba1-af93-9898f8807636']);
   await until(() => hasWatcher('1be5e1ea-b928-566d-8b57-991d2b507b6e') && hasWatcher('5c5a00d0-2f02-5ba1-af93-9898f8807636'), 'watchers armed');
   assert.equal(run(['note', '--kind', 'scope', 'Need scope decision'], identities.ttadk).status, 0);

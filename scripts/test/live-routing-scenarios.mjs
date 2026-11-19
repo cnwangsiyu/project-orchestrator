@@ -9,7 +9,7 @@ import { execFileSync } from 'node:child_process';
 const route = new URL('../route.mjs', import.meta.url).pathname;
 const captured = parseRouteJSON(fs.readFileSync(new URL('./fixtures/live-routing-2026-11-15.json', import.meta.url),'utf8'));
 const freeTrae = parseRouteJSON(fs.readFileSync(new URL('./fixtures/free-trae-fresh-ttadk-2026-11-15.json', import.meta.url),'utf8'));
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(),'live-routing-fixture-'));
+const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'live-routing-fixture-')));
 const file = path.join(tmp,'snapshot.json');
 const env = {...process.env, HOME:tmp, RULES_SHARED:tmp, QUOTA_CACHE:path.join(tmp,'cache.json'),
   CODEX_ACCOUNTS:path.join(tmp,'accounts.json'), ROUTE_LOG:'0', ROUTE_NOW:String(captured.decisionAt),

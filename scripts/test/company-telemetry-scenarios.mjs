@@ -143,6 +143,8 @@ try {
   fs.writeFileSync(path.join(workerHome, 'thread-models.json'), JSON.stringify({ fixture: 'GPT-6.1-Sol' }));
   const transport = path.join(tmp, 'transport.mjs');
   fs.writeFileSync(transport, `
+import fs from 'node:fs';
+const thread = process.env.FIXTURE_QUEUE_THREAD || 'fixture';
 globalThis.WebSocket = class {
   constructor() { setImmediate(() => this.onopen()); }
   close() {}
@@ -156,14 +158,15 @@ globalThis.WebSocket = class {
         const notify = (params) => this.onmessage({data:JSON.stringify({method:'queue/status',params})});
         notify({threadId:'another-thread',state:'queued',position:9999});
         notify({state:'queued',position:8888});
-        notify({threadId:'fixture',turnId:'other-turn',state:'queued',position:7777});
+        notify({threadId:thread,turnId:'other-turn',state:'queued',position:7777});
         const base = Date.now(); let clock = base; Date.now = () => clock;
         const events = JSON.parse(process.env.FIXTURE_QUEUE_EVENTS || '[[0,"waiting",42]]');
         for (const [offset, state, position] of events) {
           clock = base + offset;
-          notify({threadId:'fixture',turnId:'turn',state,position,modelQuotaLowPriority:true,message:'discard-me'});
+          notify({threadId:thread,turnId:'turn',state,position,modelQuotaLowPriority:true,message:'discard-me'});
         }
-        this.onmessage({data:JSON.stringify({method:'turn/completed',params:{threadId:'fixture',turnId:'turn',turn:{id:'turn',status:'completed',items:[{type:'agentMessage',text:'done'}]}}})});
+        if (process.env.FIXTURE_QUEUE_RECEIPT) fs.copyFileSync(process.env.FIXTURE_QUEUE_FILE, process.env.FIXTURE_QUEUE_RECEIPT);
+        this.onmessage({data:JSON.stringify({method:'turn/completed',params:{threadId:thread,turnId:'turn',turn:{id:'turn',status:'completed',items:[{type:'agentMessage',text:'done'}]}}})});
       }, 10);
     });
   }
@@ -179,24 +182,38 @@ globalThis.WebSocket = class {
   assert.equal(recorded.gpt.message, undefined);
   assert.equal(recorded.gpt.high, undefined);
   console.log('ok   real worker follow records only its own queue/status against the remembered model family');
+  let queueCase = 0;
   for (const [events, positions] of [
     [[[0, 'queued', 1000], [61000, 'queued', 950], [122000, 'queued', 900], [183000, 'queued', 850]], [1000, 900]],
     [[[0, 'queued', 1000], [1000, 'waiting', 1000], [61000, 'waiting', 1000]], [1000, 1000]],
     [[[0, 'queued', 1000], [1000, 'queued', 500], [59000, 'queued', 400], [60000, 'queued', 300]], [1000, 300]],
     [[[0, 'queued', 1000], [1000, 'ready', 0], [2000, 'waiting', 900], [61000, 'waiting', 900]], [1000, 900]],
   ]) {
+    const thread = `queue-fixture-${++queueCase}`;
+    fs.writeFileSync(path.join(workerHome, 'thread-models.json'), JSON.stringify({ [thread]: 'GPT-6.1-Sol' }));
+    const queueReceipt = path.join(tmp, `queue-${queueCase}.json`);
     const followed = exec(process.execPath, ['--import', transport, path.join(root, 'codex-worker.mjs'), '--account', 'trae',
-      'wait', '--thread', 'fixture'], { env: { ...env, FIXTURE_QUEUE_EVENTS: JSON.stringify(events) }, encoding: 'utf8', timeout: 5000 });
+      'wait', '--thread', thread], { env: { ...env, FIXTURE_QUEUE_THREAD: thread, FIXTURE_QUEUE_EVENTS: JSON.stringify(events),
+        FIXTURE_QUEUE_FILE: path.join(workerHome, 'queue-status.json'), FIXTURE_QUEUE_RECEIPT: queueReceipt }, encoding: 'utf8', timeout: 5000 });
     assert.deepEqual([...followed.matchAll(/queued: position (\d+)/g)].map((m) => Number(m[1])), positions);
-    assert.equal(JSON.parse(fs.readFileSync(path.join(workerHome, 'queue-status.json'), 'utf8')).fixture.position, events.at(-1)[2]);
+    assert.equal(JSON.parse(fs.readFileSync(queueReceipt, 'utf8'))[thread].position, events.at(-1)[2]);
+    const terminal = JSON.parse(fs.readFileSync(path.join(workerHome, 'queue-status.json'), 'utf8'))[thread];
+    assert.equal(terminal.state, 'ready'); assert.equal(terminal.position, undefined);
   }
   console.log('ok   real worker queue printing: cumulative 10% moves, pending state changes, minute throttle and ready/requeue');
   // Optimistic-launch patience (addendum, 2026-11-13 night): a measured drain predicts a start later than the deadline
   // passed by route.mjs, so the worker interrupts its queued turn, prints the re-route line and exits 7. No turn/completed
   // is sent: the point is the clean stop, not a finished turn.
   const patienceTransport = path.join(tmp, 'patience-transport.mjs');
+  let patienceCase = 0;
+  const freshPatienceThread = () => {
+    const thread = `patience-fixture-${++patienceCase}`;
+    fs.writeFileSync(path.join(workerHome, 'thread-models.json'), JSON.stringify({ [thread]: 'GPT-6.1-Sol' }));
+    return thread;
+  };
   fs.writeFileSync(patienceTransport, `
 import fs from 'node:fs';
+const thread = process.env.FIXTURE_PATIENCE_THREAD;
 globalThis.WebSocket = class {
   constructor() { setImmediate(() => this.onopen()); }
   close() {}
@@ -219,10 +236,10 @@ globalThis.WebSocket = class {
         const base = Date.now(); let clock = base; Date.now = () => clock;
         for (const [offset, state, position] of JSON.parse(process.env.FIXTURE_QUEUE_EVENTS || '[]')) {
           clock = base + offset;
-          notify({threadId:'fixture',turnId:'turn',state,position});
+          notify({threadId:thread,turnId:'turn',state,position});
         }
         if (process.env.FIXTURE_COMPLETE) this.onmessage({data:JSON.stringify({method:'turn/completed',
-          params:{threadId:'fixture',turnId:'turn',turn:{id:'turn',status:'completed',items:[{type:'agentMessage',text:'done'}]}}})});
+          params:{threadId:thread,turnId:'turn',turn:{id:'turn',status:'completed',items:[{type:'agentMessage',text:'done'}]}}})});
       }, 10);
     });
   }
@@ -230,24 +247,25 @@ globalThis.WebSocket = class {
 `);
   let tooSlow;
   const interruptLog = path.join(tmp, 'interrupt-log.jsonl');
+  const slowThread = freshPatienceThread();
   try {
     tooSlow = exec(process.execPath, ['--import', patienceTransport, path.join(root, 'codex-worker.mjs'), '--account', 'trae',
-      'wait', '--thread', 'fixture', '--queue-patience-min', '5', '--alt', 'route.mjs --exclude-model gpt-6-astra'],
-    { env: { ...env, FIXTURE_INTERRUPT_LOG: interruptLog,
+      'wait', '--thread', slowThread, '--queue-patience-min', '5', '--alt', 'route.mjs --exclude-model gpt-6-astra'],
+    { env: { ...env, FIXTURE_PATIENCE_THREAD: slowThread, FIXTURE_INTERRUPT_LOG: interruptLog,
       FIXTURE_QUEUE_EVENTS: JSON.stringify([[0, 'queued', 100], [120000, 'queued', 90], [180000, 'queued', 89], [240000, 'queued', 88]]) }, encoding: 'utf8', timeout: 5000 });
   } catch (e) { tooSlow = e; }
   assert.equal(tooSlow.status, 7);
   assert.match(tooSlow.stdout, /queue-too-slow: position 90, drain 5\.0\/min, predicted start in 18 min > patience 5 — re-route: route\.mjs --exclude-model gpt-6-astra/);
   assert.equal(tooSlow.stdout.match(/queue-too-slow:/g)?.length, 1);
   assert.ok(!/turn completed|final:/.test(tooSlow.stdout), 'completion during cancellation cannot change the exit');
-  assert.deepEqual(fs.readFileSync(interruptLog, 'utf8').trim().split('\n').map(JSON.parse), [{threadId:'fixture',turnId:'turn'}]);
+  assert.deepEqual(fs.readFileSync(interruptLog, 'utf8').trim().split('\n').map(JSON.parse), [{threadId:slowThread,turnId:'turn'}]);
   for (const mode of ['silent', 'error', 'close']) {
     fs.writeFileSync(interruptLog, '');
     const started = performance.now();
-    let result;
+    let result; const cancelThread = freshPatienceThread();
     try { exec(process.execPath, ['--import', patienceTransport, path.join(root, 'codex-worker.mjs'), '--account', 'trae',
-      'wait', '--thread', 'fixture', '--queue-patience-min', '30', '--alt', 'schedule TTADK at its reset'],
-    {env:{...env, FIXTURE_INTERRUPT_LOG:interruptLog, FIXTURE_INTERRUPT_MODE:mode,
+      'wait', '--thread', cancelThread, '--queue-patience-min', '30', '--alt', 'schedule TTADK at its reset'],
+    {env:{...env, FIXTURE_PATIENCE_THREAD:cancelThread, FIXTURE_INTERRUPT_LOG:interruptLog, FIXTURE_INTERRUPT_MODE:mode,
       FIXTURE_QUEUE_EVENTS:JSON.stringify([[0,'queued',887],[120000,'queued',879],[180000,'queued',875],[240000,'queued',872]])},
       encoding:'utf8',timeout:5000}); } catch (e) { result = e; }
     assert.equal(result?.status, 7, mode);
@@ -257,9 +275,9 @@ globalThis.WebSocket = class {
     assert.equal(fs.readFileSync(interruptLog,'utf8').trim().split('\n').length,1, mode);
   }
   fs.writeFileSync(interruptLog,'');
-  let rapid;
+  let rapid; const rapidThread = freshPatienceThread();
   try { exec(process.execPath,['--import',patienceTransport,path.join(root,'codex-worker.mjs'),'--account','trae',
-    'wait','--thread','fixture','--queue-patience-min','30'],{env:{...env,FIXTURE_INTERRUPT_LOG:interruptLog,
+    'wait','--thread',rapidThread,'--queue-patience-min','30'],{env:{...env,FIXTURE_PATIENCE_THREAD:rapidThread,FIXTURE_INTERRUPT_LOG:interruptLog,
       FIXTURE_QUEUE_EVENTS:JSON.stringify(Array.from({length:181},(_,i)=>[i*1000,'queued',887-i/15]))},encoding:'utf8',timeout:5000});
   } catch(e) { rapid=e; }
   assert.equal(rapid?.status,7,'frequent status notifications retain enough history to estimate drain');
@@ -267,9 +285,10 @@ globalThis.WebSocket = class {
   // A rising or stalled queue has no usable drain: the worker keeps waiting instead of inventing a prediction.
   // End the synthetic turn explicitly: the referenced idle guard now keeps a quiet follower alive.
   fs.writeFileSync(interruptLog, '');
+  const risingThread = freshPatienceThread();
   const stillQueued = exec(process.execPath, ['--import', patienceTransport, path.join(root, 'codex-worker.mjs'), '--account', 'trae',
-    'wait', '--thread', 'fixture', '--queue-patience-min', '5', '--alt', 'route.mjs --exclude-model gpt-6-astra'],
-  { env: { ...env, FIXTURE_INTERRUPT_LOG: interruptLog, FIXTURE_COMPLETE: '1',
+    'wait', '--thread', risingThread, '--queue-patience-min', '5', '--alt', 'route.mjs --exclude-model gpt-6-astra'],
+  { env: { ...env, FIXTURE_PATIENCE_THREAD: risingThread, FIXTURE_INTERRUPT_LOG: interruptLog, FIXTURE_COMPLETE: '1',
     FIXTURE_QUEUE_EVENTS: JSON.stringify([[0, 'queued', 90], [120000, 'queued', 100]]) }, encoding: 'utf8', timeout: 5000 });
   assert.ok(!/queue-too-slow/.test(stillQueued));
   assert.match(stillQueued, /turn completed/); assert.equal(fs.readFileSync(interruptLog, 'utf8'), '');

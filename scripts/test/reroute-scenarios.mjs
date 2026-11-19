@@ -234,4 +234,16 @@ try {
   assert.ok(startPolicy.rows.some((r) => r.kind === 'policy-block'));
   const failedChild = run('failed-child', { childFails: true }); assert.equal(failedChild.status, 1, 'original caller receives child failure');
   console.log('PASS automatic reroutes: queue completion, unavailable/restriction, approval, deferral, depth, work/background guards, cancellation, resource ownership, policy, logs/outcome/nightly');
-} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+} finally {
+  // Completed followers can still have their task-owned log writer closing.
+  // Retry filesystem cleanup races; all routing/outcome assertions stay intact.
+  for (let attempt = 0; ; attempt++) {
+    try { fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 2, retryDelay: 50 }); break; }
+    catch (error) {
+      if (error.code !== 'ENOTEMPTY' || attempt === 9) throw error;
+      // Rewalk newly created entries; fs.rm's rmdir retry alone never visits
+      // files a closing writer creates after the first recursive traversal.
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+  }
+}

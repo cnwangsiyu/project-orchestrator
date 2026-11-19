@@ -24,7 +24,7 @@ const commit = (dir, text) => { fs.writeFileSync(path.join(dir, 'content'), text
 const remote = path.join(tmp, 'remote.git'), seed = path.join(tmp, 'seed');
 fs.mkdirSync(seed); git(seed, 'init', '-b', 'main');
 fs.mkdirSync(path.join(seed, 'scripts'));
-for (const name of ['skill-autoupdate.mjs', 'rules-digest-hook.mjs']) fs.copyFileSync(path.join(scripts, name), path.join(seed, 'scripts', name));
+for (const name of ['skill-autoupdate.mjs', 'rules-digest-hook.mjs', 'resource-policy.json']) fs.copyFileSync(path.join(scripts, name), path.join(seed, 'scripts', name));
 fs.cpSync(path.join(scripts, 'lib'), path.join(seed, 'scripts/lib'), { recursive: true });
 fs.mkdirSync(path.join(seed, 'references')); fs.copyFileSync(path.join(scripts, '../references/global-rules.md'), path.join(seed, 'references/global-rules.md'));
 const base = commit(seed, 'base');
