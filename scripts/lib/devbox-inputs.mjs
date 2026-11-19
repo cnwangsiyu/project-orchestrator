@@ -172,6 +172,13 @@ with tempfile.TemporaryDirectory(dir=target.parent) as staging:
             archive.extract(member,staging)
     actual,size=fingerprint(staging/'content')
     if actual!=d['hash'] or size>d['sizeGiB']*1073741824: raise RuntimeError('seed hash/size mismatch')
-    if target.exists(): raise RuntimeError('seed target already exists; verify or use a new hash')
-    (staging/'content').replace(target)
+    # BC-148: another shard may have seeded the same input meanwhile; an identical target is success.
+    if target.exists():
+        existing,_=fingerprint(target)
+        if existing!=d['hash']: raise RuntimeError('seed target exists with different content; use a new hash')
+    else:
+        try: (staging/'content').rename(target)
+        except OSError:
+            existing,_=fingerprint(target)
+            if existing!=d['hash']: raise
 `;
