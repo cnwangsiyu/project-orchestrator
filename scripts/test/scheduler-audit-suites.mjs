@@ -14,6 +14,7 @@ const suites = kind === 'scenarios' ? required : kind === 'res' ? [
   'packed-module', 'receipt', 'res-progress', 'cpu', 'auto', 'units', 'prewarm', 'metrics', 'placement', 'ssh-drop', 'affinity'] : null;
 if (!suites || !selected.length) throw Error('usage: scheduler-audit-suites.mjs res|scenarios|devbox INDEX...');
 const results = [];
+let failures = 0;
 fs.mkdirSync('reports', { recursive: true });
 const report = 'reports/scheduler-audit-' + kind + '-' + selected.join('-') + '.json';
 const save = () => fs.writeFileSync(report, JSON.stringify({ kind, results }, null, 2) + '\n');
@@ -31,8 +32,9 @@ for (const text of selected) {
   save();
   if (result.error || result.status !== 0) {
     console.error(`FAIL audit ${kind}/${suite}: exit=${result.status} ${result.error?.message || ''}`);
-    console.error(result.stdout || ''); console.error(result.stderr || ''); process.exit(1);
+    console.error(result.stdout || ''); console.error(result.stderr || ''); failures++; continue;
   }
   console.log(`PASS audit ${kind}/${suite}: ${((Date.now()-started)/1000).toFixed(1)}s`);
   if (kind === 'res') console.log(result.stdout.trim());
 }
+process.exitCode = failures ? 1 : 0;
