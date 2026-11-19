@@ -461,7 +461,10 @@ async function receiptScenarios() {
   const exclude = git(workspace(f), 'rev-parse', '--path-format=absolute', '--git-path', 'info/exclude');
   fs.appendFileSync(exclude, '\n# preserve existing slot rules\nexisting-output/\n');
   const before = fs.readFileSync(exclude);
-  ok(await run(f, ['--shards', '2', '--env', 'DEVBOX_RUN_RECEIPT=wrong'], command));
+  // Keep both shards alive until both slots are acquired; tiny commands can
+  // otherwise complete before the second shard acquires and legitimately reuse one slot.
+  const rendezvous = `touch '${f.dir}/receipt-{shard}'; i=0; while [ ! -f '${f.dir}/receipt-1' ] || [ ! -f '${f.dir}/receipt-2' ]; do i=$((i+1)); [ "$i" -lt 250 ] || exit 9; sleep 0.02; done`;
+  ok(await run(f, ['--shards', '2', '--env', 'DEVBOX_RUN_RECEIPT=wrong'], command + '; ' + rendezvous));
   assert.deepEqual(fs.readFileSync(exclude), before, 'idempotent update preserves all existing exclude bytes');
   assert.equal(fs.readFileSync(exclude, 'utf8').split('\n').filter(line => line === '/.devbox-run.json').length, 1);
   assert.equal(git(workspace(f, '192.0.2.1', 'devbox-cn-2'), 'rev-parse', '--path-format=absolute', '--git-path', 'info/exclude'), exclude);
