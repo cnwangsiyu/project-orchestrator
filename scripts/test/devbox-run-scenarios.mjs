@@ -1102,6 +1102,14 @@ async function scenarios() {
   }
   const artifact = fixture(); const a = await run(artifact, ['--artifact', 'build/*.txt'], 'mkdir -p build && echo evidence > build/result.txt'); ok(a);
   assert.equal(execFileSync('tar', ['-xOf', a.summary.shards[0].attempts[0].artifact, 'build/result.txt'], { encoding: 'utf8' }).trim(), 'evidence');
+  const measured = a.summary.shards[0].attempts[0].phaseTimings;
+  assert.equal(Object.values(measured.seconds).reduce((sum, seconds) => sum + seconds, 0), measured.totalSec);
+  assert.ok(Object.values(measured.seconds).every(seconds => Number.isFinite(seconds) && seconds >= 0));
+  assert.ok(measured.seconds.sourceTransferIn > 0 && measured.seconds.remoteCommand > 0 && measured.seconds.cleanup > 0);
+  assert.ok(measured.seconds.artifactCollection > 0, 'remote artifact collection receipt');
+  assert.ok(measured.bytesIn > 0 && measured.bytesOut >= fs.statSync(a.summary.shards[0].attempts[0].artifact).size);
+  assert.match(a.stdout, /attempt phases .*artifactCollection=.*bytesIn=\d+ bytesOut=\d+/);
+
   let failedArtifact = fixture({ badArtifact: true }); assert.equal((await run(failedArtifact, ['--artifact', '*.txt'])).code, 66); returned(failedArtifact);
   const left = await run(failedArtifact = fixture({ badArtifact: true }), ['--artifact', '*.txt', '--fetch-timeout', '30']);
   assert.equal(left.code, 66); assert.match(left.stdout + left.stderr, /artifacts remain on devbox-cn-\d+/);

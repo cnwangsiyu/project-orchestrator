@@ -97,6 +97,25 @@ does not change lease arbitration or slot ownership. This observability does
 not override the controller's current stale-waiter setting, including the
 `RES_WAITER_STALE_SECONDS=300` live hotfix.
 
+Each attempt includes `phaseTimings.seconds`: `slotWaitAdmission`,
+`sourceTransferIn`, `inputPreparation`, `remoteCommand`, `artifactCollection`,
+`transferOut` and `cleanup`, in wall seconds. Their sum is `totalSec`; the same
+breakdown is printed in one `attempt phases` line. Admission includes probes,
+placement checks and slot waiting. Source transfer includes bundle export,
+upload and checkout; cleanup includes confirmation, lease return and refresh.
+Shared snapshot creation before the attempts is outside this breakdown.
+
+`phaseTimings.inputs` records `verifySec`, `seedSec` and `rebuildSec` for each
+input, including zeroes for cache hits. These are details within the phases,
+not additional wall time: seed time includes its verification, and a seed
+command's rebuild is a subset of seed time. A rebuild inside the caller's
+command has `rebuildSec: null` and `rebuildInRemoteCommand: true`, since only
+the caller can distinguish it from its other work. Failed seeds retain elapsed
+time. `bytesIn` and `bytesOut` count SSH stdin/stdout payload bytes, including
+source/seed archives, command output, receipts and artifact archives; SSH
+framing/compression and stderr are excluded. Artifact collection measures
+remote traversal/tar work, with blocking output writes left in transfer out.
+
 The summary also includes `requestedShards`, `shardPlan` (count, assignment
 strategy and expected total command seconds), and the run mode. Attempts record
 `cpus`, `hostCores`, `heavyHolders` and `commandDurationSec`; unit runs include

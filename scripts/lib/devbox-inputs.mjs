@@ -145,6 +145,7 @@ def fingerprint(p):
     return h.hexdigest(),size
 records=[]
 for item in d['inputs']:
+    verification_started=time.monotonic()
     target=safe(item['path']); valid=target.exists(); size=0
     if valid and item.get('warm'):
         meta=target/'.devbox-run.json'
@@ -157,7 +158,7 @@ for item in d['inputs']:
         size=sum(f.stat().st_size for f in target.rglob('*') if f.is_file()) if target.is_dir() else target.stat().st_size
     if valid and not item.get('warm') and item['sizeGiB']>0:
         valid=size<=item['sizeGiB']*1073741824
-    records.append({'key':item['key'],'present':valid,'path':str(target),'bytes':size})
+    records.append({'key':item['key'],'present':valid,'path':str(target),'bytes':size,'verificationSec':time.monotonic()-verification_started})
 print(json.dumps(records))
 `;
 export const seedPython = inputPython.slice(0,inputPython.indexOf('records=[]')) + `import tarfile, tempfile, shutil

@@ -1,0 +1,25 @@
+// Worker runner timing is observational: use a fake clock, no SSH or resources.
+import assert from 'node:assert/strict';
+import { attemptTiming, timingLine } from '../lib/devbox-phase-timing.mjs';
+let clock = 0;
+const timing = attemptTiming(() => clock);
+clock = 1000; timing.phase('sourceTransferIn');
+clock = 3000; timing.phase('inputPreparation');
+timing.addInput('cached', 'verifySec', 0);
+timing.addInput('sdk', 'verifySec', 0.5); timing.addInput('sdk', 'seedSec', 1.5);
+timing.addInput('sdk', 'rebuildSec', 1); timing.missingRebuild('caller-input');
+clock = 6000; timing.phase('remoteCommand');
+clock = 10000; timing.phase('transferOut');
+clock = 15000; timing.artifact(2);
+timing.addBytes(123, 456); timing.addBytes(2, 3);
+timing.phase('cleanup'); clock = 16000;
+const result = timing.finish();
+assert.deepEqual(result.seconds, { slotWaitAdmission: 1, sourceTransferIn: 2, inputPreparation: 3, remoteCommand: 4, artifactCollection: 2, transferOut: 3, cleanup: 1 });
+assert.equal(Object.values(result.seconds).reduce((sum, value) => sum + value, 0), result.totalSec);
+assert.deepEqual(result.inputs.cached, { verifySec: 0, seedSec: 0, rebuildSec: 0 });
+assert.equal(result.bytesIn, 125); assert.equal(result.bytesOut, 459);
+assert.deepEqual(result.inputs.sdk, { verifySec: 0.5, seedSec: 1.5, rebuildSec: 1 });
+assert.equal(result.inputs['caller-input'].rebuildSec, null);
+assert.match(timingLine(result), /slotWaitAdmission=1\.000s.*bytesIn=125 bytesOut=459/);
+clock = 99999; assert.equal(timing.finish().totalSec, 16);
+console.log('PASS fake-clock phase partition, per-input receipts, byte totals and stable finalization');

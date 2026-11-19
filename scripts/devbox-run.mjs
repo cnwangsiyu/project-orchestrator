@@ -8,6 +8,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { StringDecoder } from 'node:string_decoder';
 import { privateKeyBlockStream } from './lib/private-key-blocks.mjs';
+import { attemptTiming, timingLine } from './lib/devbox-phase-timing.mjs';
 import { redactLogFile } from './lib/log-redaction.mjs';
 import { maskLogText } from './lib/nightly-audit.mjs';
 import { manifest, duration, inputKey, indexFile, readIndex, inputSettings, placement, warmCost, warmInput, median, observedCost, fingerprint, inputPython, seedPython } from './lib/devbox-inputs.mjs';
@@ -258,7 +259,7 @@ function ownChild(child) {
 function execute(file, args, { input, inputFile, outputFile, onOutput, timeout = 60000, state, cancellable = true, rawCapture = !onOutput && !outputFile, interceptStderr, interceptStdout, env = process.env, strictOutput = true, deferOutputEnd = false } = {}) {
   return new Promise(resolve => {
     const child = spawn(file, args, { stdio: ['pipe', 'pipe', 'pipe'], env });
-    let stdout = '', stderr = '', stdoutBytes = 0, timedOut = false, spawnError;
+    let stdout = '', stderr = '', stdoutBytes = 0, stdinBytes = 0, timedOut = false, spawnError;
     const sink = outputFile ? fs.createWriteStream(outputFile, { mode: 0o600 }) : null;
     const rawDecoder = new StringDecoder('utf8');
     const out = lineSink(text => { if (!rawCapture) stdout = (stdout + text).slice(-2 * 1024 * 1024); onOutput?.(text, 'stdout'); }, state?.values, interceptStdout, strictOutput);
@@ -289,12 +290,12 @@ function execute(file, args, { input, inputFile, outputFile, onOutput, timeout =
       if (!resumeOutput) out.end(); err.end();
       if (rawCapture) stdout += rawDecoder.end();
       if (sink) await new Promise(done => sink.end(done));
-      resolve({ code: spawnError ? 1 : timedOut ? 124 : code ?? (signal === 'SIGTERM' ? 143 : 1), stdout, stdoutBytes,
+      resolve({ code: spawnError ? 1 : timedOut ? 124 : code ?? (signal === 'SIGTERM' ? 143 : 1), stdout, stdoutBytes, stdinBytes,
         ...(resumeOutput ? { stdoutSink: out } : {}), stdoutPrivateBlockOpen: out.privateBlockOpen,
         stderr: stderr || spawnError || '', error: spawnError });
     });
-    if (inputFile) { source = fs.createReadStream(inputFile); source.on('error', error => { spawnError = `input file ${error.code || 'read failure'}`; stop(); }); source.pipe(child.stdin); }
-    else child.stdin.end(input);
+    if (inputFile) { source = fs.createReadStream(inputFile); source.on('data', chunk => { stdinBytes += chunk.length; }); source.on('error', error => { spawnError = `input file ${error.code || 'read failure'}`; stop(); }); source.pipe(child.stdin); }
+    else { stdinBytes = input ? Buffer.byteLength(input) : 0; child.stdin.end(input); }
     if (state?.cancel && cancellable) stop();
   });
 }
@@ -739,6 +740,7 @@ while time.monotonic()<limit:
 sys.exit(70)
 `,
   artifacts: pythonHeader + `import glob, tarfile
+collection_started=time.monotonic(); transfer_seconds=0
 os.chdir(d['workspace']); names=set()
 for pattern in d['patterns']:
     matches=glob.glob(pattern,recursive=True)
@@ -751,8 +753,15 @@ for name in names:
     p=pathlib.Path(name)
     if p.is_symlink() or not p.resolve().is_relative_to(pathlib.Path.cwd()): raise RuntimeError('artifact leaves workspace')
     if any(x in ('.git','.ssh','.aws','.kube','.npmrc','.netrc') or x=='.env' or x.startswith('.env.') for x in p.parts) or p.suffix.lower() in ('.pem','.p12','.pfx','.key','.keystore'): raise RuntimeError('credential-related artifact refused')
-with tarfile.open(fileobj=sys.stdout.buffer,mode='w|') as tar:
+class TimedOutput:
+    def write(self,payload):
+        global transfer_seconds
+        started=time.monotonic()
+        try: return sys.stdout.buffer.write(payload)
+        finally: transfer_seconds+=time.monotonic()-started
+with tarfile.open(fileobj=TimedOutput(),mode='w|') as tar:
     for name in sorted(names): tar.add(name,arcname=name,recursive=False)
+print('DEVBOX_ARTIFACT_COLLECTION='+json.dumps({'seconds':max(0,time.monotonic()-collection_started-transfer_seconds)}),file=sys.stderr,flush=True)
 `,
 };
 
@@ -771,6 +780,7 @@ async function ssh(row, operation, data, opts = {}) {
     const result = await execute('ssh', ['-o', 'BatchMode=yes', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=4', '-o', 'ConnectTimeout=15', '-o', 'ForwardAgent=no', '-o', 'GSSAPIDelegateCredentials=no', '-o', 'ControlMaster=no', '-o', 'ControlPath=none', '-o', 'ControlPersist=no', row.target, command], {
       ...opts, interceptStderr: line => { if (line === marker) { started = true; return true; } return false; },
     });
+    opts.state?.currentAttemptTiming?.addBytes(result.stdinBytes || 0, result.stdoutBytes || 0);
     const transient = result.code === 255 && !started && /Permission denied \(gssapi-with-mic\)|Connection closed\b/i.test(result.stderr);
     if (opts.noRetry || operation === 'metrics' || !transient || (opts.state?.cancel && opts.cancellable !== false)) return { ...result, sshStarted: started };
     result.stdoutSink?.end();
@@ -1273,6 +1283,8 @@ async function verifyInputs(row, inputs, opts, state, { force=false, timeout=600
       const records=JSON.parse(checked(result,'input verification'));
       for (const record of records) {
         if (!probes.some(input=>input.key===record.key)) throw Error('unexpected input verification record');
+        const measuredInput = probes.find(input=>input.key===record.key);
+        state.currentAttemptTiming?.addInput(measuredInput.name, 'verifySec', record.verificationSec || 0);
         if (record.present) index.inputs[record.key]={path:record.path,bytes:record.bytes,verifiedAt:Date.now()/1000,...(probes.find(input=>input.key===record.key).legacyAffinityAt?{legacyAffinityAt:probes.find(input=>input.key===record.key).legacyAffinityAt}:{})};
         else delete index.inputs[record.key];
       }
@@ -1317,15 +1329,17 @@ async function seedInputs(row,data,opts,attempt,state,emit,remaining) {
   for (const input of opts.inputs) {
     if (index.inputs[inputKey(input)]) continue;
     if (!input.rebuildable) throw Error(`missing non-rebuildable input ${input.name} after acquisition`);
-    if (!input.seed || observedCost(input,readTimings(opts.snapshot.storeKey).commands?.[opts.commandKey]?.placement)>settings.seedMaxSec && !opts.prewarm) continue;
+    if (!input.seed || observedCost(input,readTimings(opts.snapshot.storeKey).commands?.[opts.commandKey]?.placement)>settings.seedMaxSec && !opts.prewarm) { state.currentAttemptTiming?.missingRebuild(input.name); continue; }
     const target=inputPath(data.root,input);
     if (input.path) throw Error('seed destinations must use the runner input store');
-    const started=Date.now();
+    const started=performance.now();
+    try {
     if (input.seedFile) checked(await ssh(row,'seed',{root:data.root,path:target,hash:input.hash,sizeGiB:input.sizeGiB},{inputFile:input.seedFile,state,timeout:remaining()}),'input seed');
     else {
       const job=`mkdir -p ${quote(path.posix.dirname(target))} && DEVBOX_INPUT_PATH=${quote(target)} bash -c ${quote(input.seedCommand)}`;
       attempt.seedStarted=true;
       const result=await ssh(row,'run',{...data,command:job,env:{},seconds:remaining()/1000},{state,timeout:remaining(),onOutput:emit});
+      state.currentAttemptTiming?.addInput(input.name, 'rebuildSec', (performance.now()-started)/1000);
       const cleanup=await ssh(row,'cleanup',{...data,started:true},{state,cancellable:false,timeout:35000});
       if (cleanup.code || !cleanup.stdout.includes('group-gone')) throw Error('seed command cleanup unconfirmed');
       checked(result,'input seed command');
@@ -1336,8 +1350,9 @@ async function seedInputs(row,data,opts,attempt,state,emit,remaining) {
     }
     const verified=await verifyInputs(row,[input],opts,state,{force:true,timeout:remaining()});
     if (!verified.inputs[inputKey(input)]) throw Error(`seed hash/size mismatch for ${input.name}`);
-    const seed={name:input.name,key:inputKey(input),durationSec:(Date.now()-started)/1000,path:target};
+    const seed={name:input.name,key:inputKey(input),durationSec:(performance.now()-started)/1000,path:target};
     attempt.seeds.push(seed); emit(`[shard ${opts.shard}] seeded ${input.name}; hash verified\n`);
+    } finally { state.currentAttemptTiming?.addInput(input.name, 'seedSec', (performance.now()-started)/1000); }
   }
   const paths=Object.fromEntries(opts.inputs.map(input=>[input.name,index.inputs[inputKey(input)]?.path || inputPath(data.root,input)]));
   const inputMap=path.join(data.control,'inputs.json');
@@ -1518,6 +1533,9 @@ async function shard(opts) {
     while (!state.cancel) {
       const attempt = { slot: null, host: null, exit: 1, durationSec: 0, log, returned: false };
       const attemptStart = Date.now(); let row, data, prepared = false, launched = false, clean = true;
+      const phases = attemptTiming(); state.currentAttemptTiming = phases;
+      attempt.phaseTimings = phases.data;
+      for (const input of opts.inputs) phases.addInput(input.name, 'verifySec', 0);
       attempts.push(attempt); state.currentAttempt=attempt;
       state.onBundleFailure = diagnostics => {
         (attempt.bundleFailures ||= []).push(diagnostics);
@@ -1669,6 +1687,7 @@ async function shard(opts) {
           checked(result, 'alternate slot acquisition');
         }
         attempt.host = row.host;
+        phases.phase('sourceTransferIn');
         attempt.missingInputs=attempt.inputPlan?.slots[row.slot]?.missing || [];
         attempt.declaredInputKeys=Object.fromEntries(opts.inputs.map(input=>[input.name,inputKey(input)]));
         if (opts.prewarm && (quarantinedHosts(sharedDir()).has(row.host) || heldSlots(sharedDir(), row.host).some(member => member.slot !== row.slot))) {
@@ -1740,6 +1759,7 @@ async function shard(opts) {
         const hosts = JSON.parse(fs.readFileSync(path.join(cacheDir(), 'devbox-hosts.json'), 'utf8'));
         Object.assign(attempt, cpuBudget(sharedDir(), row.host, hosts[row.host]?.cores));
         emit(`[shard ${opts.shard}] cpus=${attempt.cpus} cores=${attempt.hostCores} heavyHolders=${attempt.heavyHolders}\n`);
+        phases.phase('inputPreparation');
         const inputMap=opts.inputs.length ? await seedInputs(row,data,opts,attempt,state,emit,remaining) : null;
         let job = opts.units ? remoteCommand('units', remoteScripts.units, { control: data.control, command, units: opts.units }) : command;
         if (inputMap) {
@@ -1750,6 +1770,7 @@ async function shard(opts) {
         launched = true;
         const caches = { GRADLE_USER_HOME: `${root}/shared/gradle`, npm_config_cache: `${root}/shared/npm`, PNPM_STORE_DIR: `${root}/shared/pnpm`, CCACHE_DIR: `${root}/shared/ccache`, CCACHE_MAXSIZE: '20G', PIP_CACHE_DIR: `${root}/shared/pip`, DEVBOX_TOOLCHAINS: `${root}/shared/toolchains` };
         const commandStart = Date.now();
+        phases.phase('remoteCommand');
         const result = await ssh(row, 'run', { ...data, stream: true, command: job, cpus: attempt.cpus, env: { ...caches, ...opts.env, ...cpuEnvironment(attempt.cpus), DEVBOX_RUN_RECEIPT: `${workspace}/.devbox-run.json`, ...(inputMap?{DEVBOX_INPUTS_FILE:inputMap,DEVBOX_INPUTS_DIR:`${root}/inputs`}:{}) }, seconds: remaining() / 1000 }, { state, timeout: remaining() + 15000, onOutput: emit, deferOutputEnd: true });
         attempt.commandDurationSec = (Date.now() - commandStart) / 1000;
         const loginFailure = result.code === 255 && !result.sshStarted && /permission denied|gssapi|authentication failed/i.test(result.stderr);
@@ -1775,6 +1796,7 @@ async function shard(opts) {
         else if (/permission denied|gssapi|authentication failed/i.test(error.message)) attempt.authenticationBlocked = true;
         emit(`[shard ${opts.shard}] ${error.message}\n`);
       } finally {
+        phases.phase('cleanup');
         if (data && prepared) {
           if (attempt.sshDropped) {
             const recovery = await reconnectRun(row, data, state);
@@ -1814,6 +1836,7 @@ async function shard(opts) {
             emit(`[shard ${opts.shard}] BLOCKED: ${message}; retaining ${attempt.slot}${attempt.stopCommand ? `; to stop: ${attempt.stopCommand}` : ''}\n`);
           }
           if (clean && launched && !attempt.exit) {
+            phases.phase('inputPreparation');
             try {
               if (opts.inputs.length) await verifyInputs(row,opts.inputs,opts,state,{force:true,timeout:30000});
               const warm=warmInput(opts.project,opts.snapshot.storeKey,opts.affinity,0);
@@ -1827,6 +1850,7 @@ async function shard(opts) {
             } catch(error) { attempt.exit ||= 74; attempt.inputIndexError=error.message; emit(`[shard ${opts.shard}] input index: ${error.message}\n`); }
           }
           if (clean && launched && opts.units) {
+            phases.phase('transferOut');
             const timings = await ssh(row, 'timings', data, { cancellable: false, state, timeout: 30000 });
             try {
               attempt.unitTimings = JSON.parse(checked(timings, 'unit timing fetch')).units;
@@ -1835,8 +1859,11 @@ async function shard(opts) {
             } catch (error) { attempt.timingError = error.message; emit(`[shard ${opts.shard}] ${error.message}\n`); }
           }
           if (clean && opts.artifacts.length) {
+            phases.phase('transferOut');
             const archive = path.join(opts.out, `shard-${opts.shard}-attempt-${attempts.length}.tar`);
             const fetched = await ssh(row, 'artifacts', { ...data, patterns: opts.artifacts }, { outputFile: archive, cancellable: false, state, timeout: opts.fetchTimeout * 60000 });
+            const collection = /DEVBOX_ARTIFACT_COLLECTION=(\{[^\n]*\})/.exec(fetched.stderr);
+            if (collection) { try { phases.artifact(JSON.parse(collection[1]).seconds); } catch {} }
             if (fetched.code) {
               attempt.artifactExit = fetched.code; attempt.exit ||= fetched.code;
               attempt.artifactsLeft = { slot: row.slot, host: row.host, workspace: data.workspace, patterns: opts.artifacts };
@@ -1846,6 +1873,7 @@ async function shard(opts) {
           }
         }
         if (attempt.slot && clean) {
+          phases.phase('cleanup');
           try { await release(attempt.slot); attempt.returned = true; } catch (error) { attempt.exit ||= 70; attempt.returnError = error.message; emit(`[shard ${opts.shard}] BLOCKED: ${error.message}\n`); }
         }
         if (launched && clean) await refreshHostMetrics([row], state, { force: true });
@@ -1860,6 +1888,8 @@ async function shard(opts) {
           }
         }
         attempt.durationSec = (Date.now() - attemptStart) / 1000;
+        phases.finish(); state.currentAttemptTiming = null;
+        emit(`[shard ${opts.shard}] attempt phases ${timingLine(attempt.phaseTimings)}\n`);
       }
       if (attempt.exit && softExclusionsDropped) {
         const guidance = 'Soft exclusions were dropped automatically. Rerun with --exclude-reason if the host binding is required.';
