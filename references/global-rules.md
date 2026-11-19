@@ -2,6 +2,7 @@
 version: 2026-11-18.14
 
 ## Changes In This Version
+- Day 3 (2026-11-15.4): worker mid-turn note/ask/reply through the owner inbox, distinct --out deliverables, omit absent landing gates; quality first across company accounts, free TRAE first for the chosen model including browser; company max ungated; explicit A–D review classes, two-round scope cap, per-project targets/yield; runnable authorized work never auto-parks; failed public state reads retain last-good ages; the resident signing worker is retired; ordinary routed signing workers replace it; workers never delegate or request model changes; dependency installation needs no question. Resource, cancellation, credential, device and signing safeguards remain.
 - Finished and unconfirmed stale workers are skipped once; owner-scoped retirement clears stale tracking.
 
 ## Orchestrator Rules
