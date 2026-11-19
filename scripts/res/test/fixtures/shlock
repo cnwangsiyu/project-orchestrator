@@ -1,0 +1,27 @@
+#!/usr/bin/env python3
+"""Scratch-only PID lock for the Linux replay of the macOS res suites."""
+import fcntl
+import hashlib
+import os
+import pathlib
+import sys
+
+args = sys.argv[1:]
+pid = int(args[args.index('-p') + 1])
+file = pathlib.Path(args[args.index('-f') + 1]).absolute()
+root = pathlib.Path(os.environ['RES_TEST_ROOT']).resolve()
+if not file.resolve().is_relative_to(root): sys.exit(2)
+guard = root / ('.fixture-shlock-' + hashlib.sha256(str(file).encode()).hexdigest())
+with guard.open('a') as stream:
+    fcntl.flock(stream, fcntl.LOCK_EX)
+    try:
+        owner = int(file.read_text().strip())
+        try: os.kill(owner, 0); sys.exit(1)
+        except ProcessLookupError: pass
+        except PermissionError: sys.exit(1)
+        file.unlink()
+    except FileNotFoundError: pass
+    except ValueError: sys.exit(1)
+    try:
+        with file.open('x') as lock: lock.write(str(pid) + '\n')
+    except FileExistsError: sys.exit(1)

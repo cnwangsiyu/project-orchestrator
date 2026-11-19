@@ -40,6 +40,12 @@ export function runResSuites() {
   const bin = path.join(tmp, 'bin'); fs.mkdirSync(bin);
   fs.copyFileSync(path.join(base, 'fixtures/ps'), path.join(bin, 'ps'));
   fs.chmodSync(path.join(bin, 'ps'), 0o755);
+  if (os.platform() === 'linux') {
+    // These suites replay macOS metrics. Individual Linux-path fixtures override uname.
+    fs.writeFileSync(path.join(bin, 'uname'), '#!/bin/sh\nprintf "Darwin\\n"\n', { mode: 0o755 });
+    fs.copyFileSync(path.join(base, 'fixtures/shlock'), path.join(bin, 'shlock'));
+    fs.chmodSync(path.join(bin, 'shlock'), 0o755);
+  }
   const res = path.resolve(base, '../res');
   const env = { ...process.env, HOME: home, TMPDIR: tmp, TMP: tmp, TEMP: tmp,
     PATH: process.env.RES_TEST_NATIVE_PS === '1' ? process.env.PATH : `${bin}:${process.env.PATH}`,

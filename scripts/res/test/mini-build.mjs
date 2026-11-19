@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { spawn, spawnSync } from 'node:child_process';
 
 const root = path.join(process.env.RES_TEST_ROOT, 'mini-build');
@@ -51,7 +52,7 @@ const oldHead=String(Math.floor(Date.now()/1000)-1201);
 const before=fs.existsSync(path.join(state,'log.tsv')) ? fs.readFileSync(path.join(state,'log.tsv'),'utf8') : '';
 const overrideCount=before.split('\n').filter(line=>line.includes('\tload-override\t')).length;
 const orphanInfo = lock('heavy-build'); fs.mkdirSync(orphanInfo);
-fs.writeFileSync(path.join(orphanInfo, 'info'), `by\tdead-orphan\npid\t2147483647\nhost\t${process.env.HOSTNAME || (await import('node:os')).hostname()}\nstart\t${Math.floor(Date.now()/1000)-1000}\ncheckouts\t${JSON.stringify([path.join(repos,'a')])}\n`);
+fs.writeFileSync(path.join(orphanInfo, 'info'), `by\tdead-orphan\npid\t2147483647\nhost\t${process.env.HOSTNAME || os.hostname()}\nstart\t${Math.floor(Date.now()/1000)-1000}\ncheckouts\t${JSON.stringify([path.join(repos,'a')])}\n`);
 const table = path.join(root, 'orphan-table');
 fs.writeFileSync(table, `123456 1 123456 123456 S compiler ${path.join(repos,'a')}/output\n`);
 const result = run(['wait-build', ...args('orphan-no-override'), '--checkout', path.join(repos,'b'), '--timeout', '0'], {

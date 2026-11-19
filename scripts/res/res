@@ -9,13 +9,93 @@
 # Heavy slots additionally support a gated wait and recovery of old, dead-PID holds.
 set -euo pipefail
 
-# Resolve the owner-installed symlink without another interpreter invocation.
-RES_SOURCE_PATH="${BASH_SOURCE[0]}"
-while [ -L "$RES_SOURCE_PATH" ]; do
-  target=$(readlink "$RES_SOURCE_PATH")
-  case "$target" in /*) RES_SOURCE_PATH="$target" ;; *) RES_SOURCE_PATH="$(dirname "$RES_SOURCE_PATH")/$target" ;; esac
-done
-RES_CODE_DIR=$(cd "$(dirname "$RES_SOURCE_PATH")" && pwd -P)
+# Embedded so copied scripts and bash -c entrypoints retain the same bounded guard.
+RES_BUILD_PROCESS_SOURCE=$(cat <<'BUILD_PROCESS_PY'
+"""Bounded process evidence for dead local build holders; never print arguments."""
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+
+def probe(hold):
+    paths = set()
+    for key in ('checkout_paths', 'checkouts'):
+        try:
+            values = json.loads(hold.get(key, '[]'))
+            if not isinstance(values, list): return None, ''
+            for value in values:
+                if not isinstance(value, str): return None, ''
+                if value.startswith('repo:'):
+                    value = value[5:]
+                    if value.endswith('/.git'): value = value[:-5]
+                if os.path.isabs(value):
+                    paths.add(value.rstrip('/') or '/')
+                    canonical = os.path.realpath(value).rstrip('/') or '/'
+                    paths.add(canonical)
+                    if sys.platform == 'darwin' and canonical.startswith(('/private/var/', '/private/tmp/')):
+                        paths.add(canonical[8:])
+        except (TypeError, ValueError): return None, ''
+        if paths: break  # Exact roots take precedence over common repository identities.
+    if not paths: return 0, ''  # Legacy identity-only holds retain their behavior.
+    deadline = time.monotonic() + 4
+    try:
+        result = subprocess.run(['ps', '-axo', 'pid=,ppid=,pgid=,sess=,state=,args='],
+                                capture_output=True, text=True, timeout=2)
+        if result.returncode: return None, sorted(paths)[0]
+        table = {}
+        for line in result.stdout.splitlines():
+            fields = line.strip().split(None, 5)
+            if len(fields) == 6 and fields[0].isdigit() and fields[1].isdigit():
+                table[int(fields[0])] = fields[1:]
+        ignored = set()
+        ancestor = os.getpid()
+        while ancestor and ancestor not in ignored:
+            ignored.add(ancestor)
+            ancestor = int(table.get(ancestor, ['0'])[0])
+        cwd = {}
+        if sys.platform == 'darwin':
+            listing = subprocess.run(['lsof', '-w', '-a', '-d', 'cwd', '-Fpn'],
+                                     capture_output=True, text=True, timeout=2)
+            if listing.returncode not in (0, 1): return None, sorted(paths)[0]
+            current = None
+            for line in listing.stdout.splitlines():
+                if line.startswith('p') and line[1:].isdigit(): current = int(line[1:])
+                elif line.startswith('n') and current: cwd[current] = line[1:]
+        else:
+            for pid in table:
+                if time.monotonic() > deadline: return None, sorted(paths)[0]
+                try: cwd[pid] = os.readlink('/proc/%d/cwd' % pid)
+                except FileNotFoundError: pass
+                except PermissionError: pass  # ps argument evidence still covers these processes.
+        found = set()
+        matched = ''
+        for pid, (_, pgid, session, state, args) in table.items():
+            if pid in ignored or state.startswith('Z'): continue
+            grouped = (hold.get('pgid') not in (None, '', '0', '1') and pgid == hold['pgid'] or
+                       hold.get('session') not in (None, '', '0', '1') and session == hold['session'] or
+                       pgid == hold.get('pid'))
+            for checkout in paths:
+                under = cwd.get(pid, '') == checkout or cwd.get(pid, '').startswith(checkout + '/')
+                argument = re.search(r'(?<![\w/.-])' + re.escape(checkout) + r'(?=/|[\s\x00\x22\x27]|$)', args)
+                if grouped or under or argument:
+                    found.add(pid); matched = checkout; break
+        return len(found), matched or sorted(paths)[0]
+    except (OSError, subprocess.TimeoutExpired):
+        return None, sorted(paths)[0]
+
+
+if __name__ == '__main__':
+    with open(sys.argv[1]) as stream:
+        hold = dict(line.rstrip('\n').split('\t', 1) for line in stream if '\t' in line)
+    count, checkout = probe(hold)
+    print('unknown' if count is None else count, checkout, sep='\t')
+    sys.exit(0 if count == 0 else 1)
+BUILD_PROCESS_PY
+)
+export RES_BUILD_PROCESS_SOURCE
 
 RES_DIR="${RES_DIR:-$HOME/.claude/orchestrator/_shared}"
 REG="$RES_DIR/resources.tsv"
@@ -88,7 +168,7 @@ hold_pid_stale() {
 # A dead wrapper does not establish that its orphaned build has exited.
 hold_stale() {
   hold_pid_stale "$1" || return 1
-  case "$1" in heavy-*) python3 "$RES_CODE_DIR/build_processes.py" "$LOCKS/$1.d/info" >/dev/null ;; *) return 0 ;; esac
+  case "$1" in heavy-*) python3 -c "$RES_BUILD_PROCESS_SOURCE" "$LOCKS/$1.d/info" >/dev/null ;; *) return 0 ;; esac
 }
 
 hold_old() {
@@ -455,7 +535,7 @@ reclaim_stale_heavy() (
   trap 'exit 1' INT TERM HUP
   [ "$(cat info)" = "$snapshot" ] && hold_pid_stale "$id" && hold_old "$id" || return 1
   local evidence count checkout
-  if evidence=$(python3 "$RES_CODE_DIR/build_processes.py" "$lock/info"); then :
+  if evidence=$(python3 -c "$RES_BUILD_PROCESS_SOURCE" "$lock/info"); then :
   else
     IFS=$'\t' read -r count checkout <<<"$evidence"
     if [ ! -e .build-alive-noticed ]; then
@@ -1845,13 +1925,13 @@ cmd_wait_pool_legacy() {
 pool_controller() {
   local runner=
   if [ "${POOL_EXEC_CHILD:-0}" = 1 ]; then runner=exec; fi
-  ${runner:+$runner} python3 - "$RES_DIR" "$@" "$BY" "$PROJECT" "$TASK" "$PURPOSE" "$PID" "$UNTIL" "${FORCE:-}" "${POOL_NEED:-}" "${prefer_host:-}" "${prefer_slot:-}" "${excluded_slots:-}" "${excluded_hosts:-}" "${WAITER_STALE_SECONDS}" "$$" "${POOL_EPISODE:-none}" "${exclude_reason:-}" "${hard_slots:-}" "${hard_hosts:-}" "${DISK_GIB:-}" "${DISK_GIB_FILE:-}" "${PLACEMENT_FILE:-}" "${MAINTENANCE:-}" "${EXTRA_DISK_GIB:-0}" "${WAIT_CONFIG_FILE:+$WAIT_CONFIG_FILE.devbox}" "$RES_CODE_DIR" <<'PY'
+  ${runner:+$runner} python3 - "$RES_DIR" "$@" "$BY" "$PROJECT" "$TASK" "$PURPOSE" "$PID" "$UNTIL" "${FORCE:-}" "${POOL_NEED:-}" "${prefer_host:-}" "${prefer_slot:-}" "${excluded_slots:-}" "${excluded_hosts:-}" "${WAITER_STALE_SECONDS}" "$$" "${POOL_EPISODE:-none}" "${exclude_reason:-}" "${hard_slots:-}" "${hard_hosts:-}" "${DISK_GIB:-}" "${DISK_GIB_FILE:-}" "${PLACEMENT_FILE:-}" "${MAINTENANCE:-}" "${EXTRA_DISK_GIB:-0}" "${WAIT_CONFIG_FILE:+$WAIT_CONFIG_FILE.devbox}" <<'PY'
 import datetime, fcntl, hashlib, json, math, os, re, shutil, signal, socket, stat, sys, tempfile, time
 from contextlib import contextmanager
-root, action, request, timeout, delay, by, project, task, purpose, pid, until, force, need, prefer, preferred_slot, excluded_slots, excluded_hosts, stale, controller, generation, exclude_reason, hard_slots, hard_hosts, disk_gib, disk_gib_file, placement_file, maintenance, extra_disk_gib, legacy_config_path, code_dir = sys.argv[1:]
-sys.path.insert(0, code_dir)
-sys.dont_write_bytecode = True
-from build_processes import probe as build_probe
+root, action, request, timeout, delay, by, project, task, purpose, pid, until, force, need, prefer, preferred_slot, excluded_slots, excluded_hosts, stale, controller, generation, exclude_reason, hard_slots, hard_hosts, disk_gib, disk_gib_file, placement_file, maintenance, extra_disk_gib, legacy_config_path = sys.argv[1:]
+build_namespace = {'__name__': 'res_build_processes'}
+exec(os.environ['RES_BUILD_PROCESS_SOURCE'], build_namespace)
+build_probe = build_namespace['probe']
 pid = int(pid); stamp = time.time(); now = stamp; host = socket.gethostname()
 controller_key = hashlib.sha256(host.encode()).hexdigest() + '.' + controller + '.' + generation
 locks = os.path.join(root, 'locks'); journal = os.path.join(root, 'log.tsv')
@@ -2940,7 +3020,7 @@ cmd_status() {
     local build_id="${info%/info}"; build_id="${build_id##*/}"; build_id="${build_id%.d}"
     case "$build_id" in heavy-*)
       local evidence= count=
-      evidence=$(python3 "$RES_CODE_DIR/build_processes.py" "$info") || true
+      evidence=$(python3 -c "$RES_BUILD_PROCESS_SOURCE" "$info") || true
       count="${evidence%%$'\t'*}"
       [ "$count" = 0 ] || printf '%s\t%s\n' "$build_id" "$count" >>"$t.builds" ;;
     esac
