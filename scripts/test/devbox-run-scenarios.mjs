@@ -11,6 +11,7 @@ import { parseArgs, readRegistry, remoteScripts, storeIdentity, makeBundle, cpuB
 import { makeSubmoduleFixture } from './devbox-submodule-fixture.mjs';
 import { fingerprint, inputKey, indexFile } from '../lib/devbox-inputs.mjs';
 import { transferFindings } from '../lib/devbox-transfer-check.mjs';
+import { muxFailure, muxRetrySafe } from '../lib/devbox-ssh.mjs';
 
 const script = fileURLToPath(new URL('../devbox-run.mjs', import.meta.url));
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'devbox-scenarios-'));
@@ -69,12 +70,14 @@ if(op==='return'||op==='release-dead'){
  event('return',{slot:a[1],by});console.log('return '+a[1]);console.log('ack returned');return;
 }
 if(!['take','wait','wait-pool'].includes(op))process.exit(9);
+if(op==='take'&&a.includes('--placement-file'))throw Error('--placement-file requires wait-pool');
 event('acquire-call',{args:a,pid:flag(a,'--pid'),warmMarkers:fs.existsSync(path.join(c.shared,'devbox-affinity.json'))?Object.values(JSON.parse(fs.readFileSync(path.join(c.shared,'devbox-affinity.json')))).map(value=>value.verifiedWorkspace):[]});
 if(c.acquireProgress&&op==='wait-pool'){
- console.log('waiter-start pool='+a[1]);console.error('rollback/return previous attempt');
+ console.log('waiter-start pool='+a[1]);console.log('ack waiting');
+ await sleep(c.progressStderrDelay||0);console.error('rollback/return previous attempt');
  console.log('res: pass 1 started');console.error('res: pass 1 waiting');
  console.error("res: syntax error near unexpected token ')'");
- console.error('res: api_key=fixture-res-value');console.log('ack waiting');
+ console.error('res: api_key=fixture-res-value');
  const until=Date.now()+120000;while(!fs.existsSync(path.join(c.dir,'progress-observed'))){if(Date.now()>until)process.exit(9);await sleep(50);}
 }
 let ids=rows.filter(r=>r.policy==='open'&&(op==='wait-pool'?(a[1].endsWith('light')?/^devbox-cn-light(?:-\d+)?$/.test(r.slot):/^devbox-cn-\d+$/.test(r.slot)):r.slot===a[1]));
@@ -107,11 +110,15 @@ const op=command.match(/^# devbox-run:([\w-]+)/)?.[1];
 if(!op)throw Error('unmarked SSH');
 if(!args.includes('BatchMode=yes')||!args.includes('ServerAliveInterval=15')||!args.includes('ServerAliveCountMax=4'))throw Error('missing SSH guard');
 if(['artifacts','fetch-artifact','artifact-range'].includes(op)&&(!args.includes('Ciphers=^aes128-gcm@openssh.com')||args.includes('-c')))throw Error('artifact cipher must be preferred, not required');
-if(['run','cleanup','reconnect','result','artifact-range','dead-slot','cleanup-pending'].includes(op) || (op==='probe'&&args.includes('ControlMaster=no'))) {
+if(['run','cleanup','reconnect','result','artifact-range','dead-slot','cleanup-pending','checkout','bundle','patch','upload','seed'].includes(op) || (op==='probe'&&args.includes('ControlMaster=no'))) {
  if(!args.includes('ControlMaster=no')||!args.includes('ControlPath=none'))throw Error('supervisor/recovery SSH must remain independent');
-} else if(!args.includes('ControlMaster=auto')||!args.includes('ControlPersist=60'))throw Error('control SSH must reuse task connection');
+} else if(!((c.muxMessage||c.postStartMessage)&&args.includes('ControlMaster=no')&&args.includes('ControlPath=none'))&&(!args.includes('ControlMaster=auto')||!args.includes('ControlPersist=60')))throw Error('control SSH must reuse task connection');
 let d={};if(op!=='upload')d=JSON.parse(Buffer.from(command.match(/'([A-Za-z0-9+/=]+)'$/)[1],'base64').toString());
-event(op,{host,target,slot:d.slot,workspace:d.workspace,control:d.control,offset:d.offset,length:d.length,forceStage:d.forceStage,reuseAllowed:d.reuseAllowed,env:op==='run'?d.env:undefined,nice:op==='run'?d.command.startsWith('nice -n 10 bash -c'):undefined,cpus:d.cpus});
+event(op,{host,target,multiplexed:args.includes('ControlMaster=auto'),slot:d.slot,workspace:d.workspace,control:d.control,offset:d.offset,length:d.length,forceStage:d.forceStage,reuseAllowed:d.reuseAllowed,env:op==='run'?d.env:undefined,nice:op==='run'?d.command.startsWith('nice -n 10 bash -c'):undefined,cpus:d.cpus});
+if(c.muxMessage&&op===(c.muxOperation||'checkout')){
+ const file=path.join(c.dir,'mux-count'),count=fs.existsSync(file)?Number(fs.readFileSync(file)):0;
+ if(count<(c.muxFailures||1)){fs.writeFileSync(file,String(count+1));process.stderr.write(c.muxMessage);process.exit(255);}
+}
 if(c.authFailures){
  const file=path.join(c.dir,'auth-count');const count=fs.existsSync(file)?Number(fs.readFileSync(file)):0;
  if(count<c.authFailures){fs.writeFileSync(file,String(count+1));console.error(c.authMessage||'Permission denied (gssapi-with-mic)');process.exit(255);}
@@ -143,7 +150,7 @@ if(c.postStartFailure&&op==='run'){
   fs.writeFileSync(path.join(d.control,'output.log'),startOutput+header+'FAKE_PRIVATE_TAIL_ONLY\n'+'-----'+'END OPENSSH PRIVATE KEY-----\n');
   process.stdout.write(c.privateTail==='split'?header.slice(0,8):header);
  }
- console.error(command.match(/'(DEVBOX_STARTED_[^']+)'/)[1]);console.error('Connection closed by remote host');process.exit(255);
+ console.error(command.match(/'(DEVBOX_STARTED_[^']+)'/)[1]);console.error(c.postStartMessage||'Connection closed by remote host');process.exit(255);
 }
 if(op==='probe') {
  const root=path.join(c.dir,'remote',host,c.dataDisk===false?'home':'data00',d.user,'devbox-run');fs.mkdirSync(root,{recursive:true});
@@ -151,7 +158,7 @@ if(op==='probe') {
 }
 if(op==='metrics') {
  if(c.metricsUnavailable)process.exit(1);
- console.log(JSON.stringify({cores:8,load5:2.5,memAvailableGiB:24,freeGiB:100}));return;
+ console.log(JSON.stringify({cores:8,load5:2.5,memAvailableGiB:24,freeGiB:c.readbackDiskGiB??100}));return;
 }
 if(op==='bundle'&&c.uploadRetry&&!fs.existsSync(path.join(c.dir,'retried'))){fs.writeFileSync(path.join(c.dir,'retried'),'1');process.stdin.resume();await new Promise(r=>process.stdin.on('end',r));console.error(c.uploadRetry);process.exit(255);}
 if(op==='bundle'&&c.transferDelay)await sleep(c.transferDelay);
@@ -215,6 +222,10 @@ if(op==='artifact-range'&&c.artifactFault){
  return;
 }
 if(op==='fetch-artifact'&&c.badFetch){console.error('fixture primary readback failure');process.exit(65);}
+if(op==='fetch-artifact'&&c.readbackBarrier){
+ event('readback-start',{pid:process.pid});
+ while(!fs.existsSync(path.join(c.dir,'release-readback-'+process.pid)))await sleep(25);
+}
 if(op==='inspect') {
  const result=cp.spawnSync('/bin/bash',['-c',command],{encoding:'utf8'});
  if(result.status){process.stderr.write(result.stderr);process.exit(result.status);}
@@ -542,7 +553,7 @@ async function receiptScenarios() {
 }
 
 async function resProgressScenarios() {
-  const f = fixture({ acquireProgress: true });
+  const f = fixture({ acquireProgress: true, progressStderrDelay: 250 });
   let observed = false;
   const result = await run(f, ['--env', 'N=1', '--env', 'LABEL=fixture-long-value'],
     'printf "result: %s23 %s\\n" "$N" "$LABEL"; printf "MY_PASS=fixture-remote-value\\n"', () => {
@@ -550,7 +561,8 @@ async function resProgressScenarios() {
     if (!out) return false;
     const file = path.join(f.dir, out, 'shard-1-state.json');
     if (!fs.existsSync(file)) return false;
-    return JSON.parse(fs.readFileSync(file)).resEvents?.some(event => event.kind === 'ack');
+    const events = JSON.parse(fs.readFileSync(file)).resEvents || [];
+    return ['waiter-start', 'rollback', 'ack'].every(kind => events.some(event => event.kind === kind));
   }, (child, out) => {
     const state = JSON.parse(fs.readFileSync(path.join(out, 'shard-1-state.json')));
     assert.equal(state.status, 'acquiring');
@@ -632,6 +644,12 @@ async function stopOwnership() {
       assert.ok(!fs.existsSync(path.join(out,'stop-'+receipt.runId)));
       const stopped = request(receipt.runId);
       assert.equal(stopped.status, 0, stopped.stdout + stopped.stderr);
+      const stopReceipt = JSON.parse(fs.readFileSync(path.join(out, 'stop-result.json')));
+      assert.match(stopReceipt.stopId, /^[0-9a-f-]{36}$/);
+      assert.notEqual(stopReceipt.stopId, receipt.runId);
+      assert.match(stopped.stdout, new RegExp('stopId=' + stopReceipt.stopId));
+      assert.ok(stopped.stdout.split('\n').filter(line => line.startsWith('{')).map(JSON.parse).some(value => value.stopId === stopReceipt.stopId));
+      assert.deepEqual(JSON.parse(fs.readFileSync(path.join(out, `stop-${stopReceipt.stopId}.json`))), stopReceipt);
     });
     assert.equal(r.code,143); returned(f);
     const ctl = path.join(f.dir,'stale-control'); fs.mkdirSync(ctl);
@@ -952,6 +970,8 @@ async function stopShardScenarios() {
     const events=f.events().slice(before);
     assert.equal(events.filter(e=>e.op==='cleanup').length,2,'every shard reached, including dead local holder');
     const receipt=JSON.parse(fs.readFileSync(path.join(held.out,'stop-result.json')));
+    assert.match(stop.stdout,new RegExp('stopId='+receipt.stopId));
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(held.out,`stop-${receipt.stopId}.json`))),receipt);
     assert.equal(receipt.results.length,2);
     assert.equal(receipt.results.filter(r=>r.returned).length,blocked?1:2);
     if (blocked) {
@@ -1274,9 +1294,22 @@ async function artifactResumeScenarios() {
     assert.ok(r.stdout.includes(attempt.fetchArtifactCommand));
     if (artifactFault === 'drop-always') assert.equal(fs.statSync(attempt.artifactManifest.replace(/\.manifest\.json$/, '.tar')).size, 4 * 12345);
     // Run the exact recovery command after the link returns, then retire only this receipt.
-    fs.writeFileSync(path.join(f.dir, 'config.json'), JSON.stringify({ ...f.config, artifactFault: undefined }));
+    const boundedResume = artifactFault === 'drop-always', busyLight = path.join(f.shared, 'locks', 'devbox-cn-light.d');
+    if (boundedResume) {
+      fs.mkdirSync(busyLight); fs.writeFileSync(path.join(busyLight, 'info'), 'by\tfixture-foreign\npid\t1\n');
+      fs.unlinkSync(path.join(f.dir, 'artifact-read-count'));
+    }
+    fs.writeFileSync(path.join(f.dir, 'config.json'), JSON.stringify({ ...f.config, artifactFault: boundedResume ? 'drop-once' : undefined }));
     const recovered = spawnSync('/bin/bash', ['-c', attempt.fetchArtifactCommand], { env: f.env, encoding: 'utf8' });
-    assert.equal(recovered.status, 0, recovered.stdout + recovered.stderr); returned(f);
+    assert.equal(recovered.status, 0, recovered.stdout + recovered.stderr);
+    if (boundedResume) {
+      const readback = JSON.parse(recovered.stdout.trim().split('\n').at(-1));
+      assert.equal(readback.readbackAdmission, 'bounded-no-slot'); assert.equal(readback.transferOut.resumeCount, 1);
+      assert.equal(f.events().filter(event => event.op === 'artifact-range').at(-1).offset, 12345);
+      assert.ok(fs.existsSync(busyLight), 'archive resume preserves the foreign light hold');
+      fs.rmSync(busyLight, { recursive: true });
+    }
+    returned(f);
     const retired = spawnSync(process.execPath, [script, 'retire-artifacts', '--receipt', receipt.run, '--host', receipt.host], { env: f.env, encoding: 'utf8' });
     assert.equal(retired.status, 0, retired.stdout + retired.stderr); returned(f);
     assert.equal(fs.existsSync(path.join(receipt.control, 'artifact-archive.tar')), false);
@@ -1291,6 +1324,141 @@ async function artifactResumeScenarios() {
 
 }
 
+async function muxScenarios() {
+  const baseline = fixture();
+  fs.writeFileSync(path.join(baseline.repo, 'source.txt'), 'local tracked change\n');
+  fs.writeFileSync(path.join(baseline.repo, 'extra.txt'), 'overlay payload\n');
+  const ordinary = await run(baseline); ok(ordinary); returned(baseline);
+  for (const operation of ['checkout', 'bundle']) {
+    const events = baseline.events().filter(event => event.op === operation);
+    assert.ok(events.length, operation + ' exercised');
+    assert.ok(events.every(event => !event.multiplexed), operation + ' independent without a mux error');
+  }
+  assert.ok(baseline.events().filter(event => ['store', 'inspect'].includes(event.op)).every(event => event.multiplexed), 'small metadata operations reuse their connection before degradation');
+  // Verbatim SSH stderr from the owner's masked BC-168 extracts (both hosts).
+  const bc168 = 'mm_send_fd: sendmsg(0): Message too long\r\nmux_client_request_session: send fds failed\n';
+  const diagnostics = [bc168, 'mux send fds failed\n', 'mux_client_request_session: session request failed\n',
+    'Control socket connect(/tmp/devbox-ssh/control): Connection refused\n', 'muxclient: master hello exchange failed\n'];
+  for (const message of diagnostics) {
+    assert.equal(muxFailure({ code: 255, stderr: message }), true);
+    assert.equal(muxFailure({ code: 7, stderr: message }), false);
+    const f = fixture({ muxMessage: message, muxOperation: 'store' });
+    const result = await run(f); ok(result); returned(f);
+    const events = f.events(), stores = events.filter(event => event.op === 'store');
+    assert.deepEqual(stores.map(event => event.multiplexed), [true, false]);
+    assert.ok(events.slice(events.indexOf(stores[1])).every(event => !event.multiplexed), 'all remaining operations use independent connections');
+    assert.equal(events.filter(event => event.op === 'run').length, 1);
+    const attempt = result.summary.shards[0].attempts[0];
+    assert.equal(attempt.sshMuxFallback, true); assert.equal(attempt.sshMuxFallbackCount, 1);
+    assert.equal(attempt.phaseTimings.sshMuxFallback, true); assert.equal(attempt.phaseTimings.sshMuxFallbackCount, 1);
+    assert.match(result.stderr, /SSH mux transport failed during store; retrying once independently/);
+  }
+  assert.equal(muxFailure({ code: 255, stderr: 'Connection closed by remote host' }), false);
+  assert.equal(muxRetrySafe('run', false), false); assert.equal(muxRetrySafe('run', true), false);
+  assert.equal(muxRetrySafe('patch', true), false);
+  const exhausted = fixture({ muxMessage: bc168, muxOperation: 'store', muxFailures: 2 });
+  const failure = await run(exhausted, ['--rerun-on-fail']); assert.notEqual(failure.code, 0); returned(exhausted);
+  assert.equal(failure.summary.shards[0].attempts[0].infraFailure, true);
+  assert.equal(exhausted.events().filter(event => event.op === 'store').length, 2, 'only one fallback');
+  assert.equal(exhausted.events().filter(event => event.op === 'run').length, 0);
+  const started = fixture({ postStartFailure: true, postStartMessage: bc168, remoteExit: 0 });
+  const recovered = await run(started); ok(recovered); returned(started);
+  assert.equal(started.events().filter(event => event.op === 'run').length, 1, 'finished command recovered from receipt without replay');
+  assert.equal(recovered.summary.shards[0].attempts[0].sshDropRecovered, true);
+  assert.ok(started.events().some(event => event.op === 'result'));
+  console.log('PASS BC-168 verbatim mux diagnostics, one independent fallback, degraded-run receipts and no command replay');
+}
+
+async function readbackAdmissionScenarios() {
+  const f = fixture();
+  const saved = await run(f, ['--artifact', 'build/result.txt', '--artifact-fetch', 'manifest'], 'mkdir -p build && printf retained > build/result.txt');
+  ok(saved); returned(f);
+  const manifestFile = saved.summary.shards[0].attempts[0].artifactManifest;
+  const foreignLock = path.join(f.shared, 'locks', 'devbox-cn-light.d'), foreignInfo = 'by\tfixture-foreign\npid\t1\n';
+  fs.mkdirSync(foreignLock); fs.writeFileSync(path.join(foreignLock, 'info'), foreignInfo);
+  fs.writeFileSync(path.join(f.dir, 'config.json'), JSON.stringify({ ...f.config, readbackBarrier: true }));
+  const children = [];
+  const start = name => {
+    const out = path.join(f.dir, name + '.txt');
+    const child = spawn(process.execPath, [script, 'fetch-artifact', '--manifest', manifestFile, '--name', 'build/result.txt', '--out', out], { env: f.env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const record = { child, out, stdout: '', stderr: '', done: false };
+    child.stdout.on('data', bytes => { record.stdout += bytes; }); child.stderr.on('data', bytes => { record.stderr += bytes; });
+    record.closed = new Promise(resolve => child.once('close', code => { record.done = true; resolve(code); }));
+    children.push(record); return record;
+  };
+  const wait = async predicate => {
+    const deadline = Date.now() + 60000;
+    while (!predicate()) { assert.ok(Date.now() < deadline, children.map(child => child.stdout + child.stderr).join('\n')); await sleep(25); }
+  };
+  const starts = () => f.events().filter(event => event.op === 'readback-start');
+  const release = pid => fs.writeFileSync(path.join(f.dir, 'release-readback-' + pid), '');
+  const readbackDir = path.join(f.shared, 'devbox-readbacks', '192.0.2.1');
+  fs.mkdirSync(readbackDir, { recursive: true });
+  fs.writeFileSync(path.join(readbackDir, 'dead.json'), JSON.stringify({ id: 'dead', pid: 2147483647, hostname: os.hostname() }));
+  try {
+    const first = start('first'); await wait(() => starts().length === 1 || first.done);
+    assert.equal(starts().length, 1, first.stdout + first.stderr);
+    assert.equal(fs.existsSync(path.join(readbackDir, 'dead.json')), false, 'dead local readback holder is reclaimed');
+    const second = start('second'); await wait(() => starts().length === 2 || second.done);
+    assert.equal(starts().length, 2, second.stdout + second.stderr);
+    const permits = () => fs.readdirSync(readbackDir).filter(name => name.endsWith('.json'));
+    assert.equal(permits().length, 2);
+    const third = start('third'); await wait(() => third.stderr.includes('readback waiting') || third.done);
+    assert.match(third.stderr, /readback waiting.*limit=2/);
+    assert.equal(starts().length, 2, 'third readback waits while both fallback permits are held');
+    assert.equal(permits().length, 2);
+    const waiting = start('cancelled-waiter'); await wait(() => waiting.stderr.includes('readback waiting') || waiting.done);
+    assert.match(waiting.stderr, /readback waiting/); waiting.child.kill('SIGTERM');
+    assert.notEqual(await waiting.closed, 0); assert.equal(fs.existsSync(waiting.out), false); assert.equal(permits().length, 2);
+    release(starts()[0].pid); assert.equal(await first.closed, 0, first.stdout + first.stderr);
+    await wait(() => starts().length === 3 || third.done);
+    assert.equal(starts().length, 3, third.stdout + third.stderr);
+    for (const event of starts()) release(event.pid);
+    for (const child of [second, third]) assert.equal(await child.closed, 0, child.stdout + child.stderr);
+    for (const child of [first, second, third]) {
+      assert.equal(fs.readFileSync(child.out, 'utf8'), 'retained');
+      const receipt = JSON.parse(child.stdout.trim().split('\n').at(-1));
+      assert.deepEqual(JSON.parse(fs.readFileSync(receipt.receiptFile)), receipt);
+      assert.equal(receipt.readbackAdmission, 'bounded-no-slot'); assert.equal(receipt.readbackLimit, 2);
+      assert.equal(receipt.exit, 0); assert.equal(receipt.host, '192.0.2.1');
+    }
+    assert.deepEqual(permits(), []);
+    assert.equal(f.events().filter(event => event.op === 'take' && event.slot.includes('light')).length, 0, 'readbacks never take another host slot');
+    assert.equal(fs.readFileSync(path.join(foreignLock, 'info'), 'utf8'), foreignInfo);
+    const before = starts().length;
+    fs.writeFileSync(path.join(f.dir, 'config.json'), JSON.stringify({ ...f.config, readbackDiskGiB: 52 }));
+    const denied = start('disk-denied');
+    assert.notEqual(await denied.closed, 0); assert.match(denied.stderr, /disk floor/);
+    assert.equal(starts().length, before); assert.equal(fs.existsSync(denied.out), false); assert.deepEqual(permits(), []);
+    fs.writeFileSync(path.join(f.dir, 'config.json'), JSON.stringify(f.config));
+    const reservations = path.join(f.shared, 'devbox-reservations', '192.0.2.1.json');
+    fs.mkdirSync(path.dirname(reservations), { recursive: true });
+    fs.writeFileSync(reservations, JSON.stringify([[Date.now() / 1000, 1, 1, 48]]));
+    const reserved = start('reserved-disk'); assert.notEqual(await reserved.closed, 0);
+    assert.match(reserved.stderr, /disk floor/); assert.equal(fs.existsSync(reserved.out), false); assert.deepEqual(permits(), []);
+    fs.unlinkSync(reservations);
+    fs.writeFileSync(path.join(f.dir, 'config.json'), JSON.stringify({ ...f.config, readbackBarrier: true }));
+    const cancellable = start('cancellable'); await wait(() => starts().length === before + 1 || cancellable.done);
+    assert.equal(starts().length, before + 1); cancellable.child.kill('SIGTERM');
+    assert.notEqual(await cancellable.closed, 0); assert.equal(fs.existsSync(cancellable.out), false); assert.deepEqual(permits(), []);
+  } finally {
+    for (const event of starts()) release(event.pid);
+    for (const record of children) if (!record.done) record.child.kill('SIGTERM');
+    await Promise.all(children.map(record => record.closed)); fs.rmSync(foreignLock, { recursive: true });
+  }
+  returned(f);
+  fs.writeFileSync(path.join(f.dir, 'config.json'), JSON.stringify(f.config));
+  // Exercise the repository's actual controller; take must not receive the
+  // placement-file flag that is supported only by wait-pool.
+  f.env.RES_COMMAND = fileURLToPath(new URL('../res/res', import.meta.url));
+  const actualOut = path.join(f.dir, 'actual-controller.txt');
+  const actual = spawnSync(process.execPath, [script, 'fetch-artifact', '--manifest', manifestFile, '--name', 'build/result.txt', '--out', actualOut], { env: f.env, encoding: 'utf8', timeout: 60000 });
+  assert.equal(actual.status, 0, actual.stdout + actual.stderr);
+  assert.equal(JSON.parse(actual.stdout.trim().split('\n').at(-1)).readbackAdmission, 'light-slot');
+  assert.deepEqual(fs.readdirSync(path.join(f.shared, 'locks')), []);
+  console.log('PASS busy host light slot uses two bounded readbacks; third waits; disk floor and cancellation release permits');
+}
+
 async function scenarios() {
   const only = process.env.DEVBOX_TEST_CASE;
   if (only === 'readback') { await artifactDirectScenarios(); await artifactResumeScenarios(); return; }
@@ -1301,7 +1469,7 @@ async function scenarios() {
   if (only === 'cleanup-pending') { await cleanupPendingScenarios(); return; }
   if (!only) { await budgetScenarios(); await stopShardScenarios(); await cleanupPendingScenarios(); }
   if (!only) await overheadScenarios();
-  const perf = { affinity:affinityScopeScenarios, 'dead-slot':deadSlotScenarios, inputs:inputScenarios,hygiene:hygieneScenarios,credentials: credentialScenarios, 'packed-module': packedModuleRecovery, receipt: receiptScenarios, 'res-progress': resProgressScenarios, cpu: cpuScenarios, auto: autoScenarios, units: unitScenarios, prewarm: prewarmScenarios, metrics: metricScenarios, placement: placementScenarios, 'ssh-drop': sshDropScenarios };
+  const perf = { mux: muxScenarios, 'readback-admission': readbackAdmissionScenarios, affinity:affinityScopeScenarios, 'dead-slot':deadSlotScenarios, inputs:inputScenarios,hygiene:hygieneScenarios,credentials: credentialScenarios, 'packed-module': packedModuleRecovery, receipt: receiptScenarios, 'res-progress': resProgressScenarios, cpu: cpuScenarios, auto: autoScenarios, units: unitScenarios, prewarm: prewarmScenarios, metrics: metricScenarios, placement: placementScenarios, 'ssh-drop': sshDropScenarios };
   const baseline = ['baseline-core', 'baseline-config', 'baseline-warm', 'baseline-placement', 'baseline-artifacts', 'baseline-cleanup', 'baseline-gc', 'baseline-ssh'];
   if (only && !['baseline', 'bundle', 'ownership', ...baseline, ...Object.keys(perf)].includes(only)) throw Error('unknown devbox fixture case');
   for (const [name, scenario] of Object.entries(perf)) if (!only || only === name) await scenario();
@@ -1512,8 +1680,11 @@ async function scenarios() {
   assert.equal(fs.readFileSync(pulled, 'utf8'), 'retained');
   assert.equal(fs.readFileSync(path.join(foreignLock, 'info'), 'utf8'), foreignInfo);
   const fetchLease = retained.events().filter(event => event.op === 'acquire-call').at(-1);
-  assert.equal(fetchLease.args[0], 'wait-pool'); assert.equal(fetchLease.args[1], 'devbox-cn-light');
-  assert.ok(fetchLease.args.includes('--placement-file'));
+  assert.equal(fetchLease.args[0], 'take'); assert.equal(fetchLease.args[1], 'devbox-cn-light');
+  const readbackReceipt = JSON.parse(fetched.stdout.trim().split('\n').at(-1));
+  assert.equal(readbackReceipt.readbackAdmission, 'light-slot');
+  assert.deepEqual(JSON.parse(fs.readFileSync(readbackReceipt.receiptFile)), readbackReceipt);
+  assert.ok(!fetchLease.args.includes('--placement-file'), 'exact slot take uses controller-supported flags');
   assert.ok(!fetchLease.args.some(arg => arg.startsWith('--exclude')));
   assert.equal(retained.events().filter(event => event.op === 'take').at(-1).slot, 'devbox-cn-light');
   assert.equal(retained.events().filter(event => event.op === 'fetch-artifact').at(-1).target, 'alice@192.0.2.1');

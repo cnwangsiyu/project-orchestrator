@@ -82,6 +82,10 @@ try {
   assert.ok(controlOptions('inspect', state).includes('ControlMaster=auto'));
   assert.ok(Buffer.byteLength(state.sshControlDir + '/control-' + 'a'.repeat(40)) < 104);
   assert.ok(controlOptions('run', state).includes('ControlPath=none'));
+  for (const operation of ['checkout', 'bundle', 'patch', 'upload', 'seed']) {
+    assert.ok(controlOptions(operation, state).includes('ControlMaster=no'));
+    assert.ok(controlOptions(operation, state).includes('ControlPath=none'));
+  }
   assert.notDeepEqual(controlOptions('artifacts', state), controlOptions('inspect', state));
   fs.rmSync(state.sshControlDir, { recursive: true });
   const large = path.join(workspace, 'large.bin'), fd = fs.openSync(large, 'w');

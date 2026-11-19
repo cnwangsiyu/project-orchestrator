@@ -14,7 +14,7 @@ import { maskLogText } from './lib/nightly-audit.mjs';
 import { manifest, duration, inputKey, indexFile, readIndex, inputSettings, placement, warmCost, warmInput, median, observedCost, fingerprint, inputPython, seedPython } from './lib/devbox-inputs.mjs';
 import { transferFindings } from './lib/devbox-transfer-check.mjs';
 import { fileDigest, artifactName, readArtifactManifest, retainedArtifactPython, artifactRangePython, readArchive, artifactTimeoutMs } from './lib/devbox-artifacts.mjs';
-import { controlOptions } from './lib/devbox-ssh.mjs';
+import { controlOptions, muxFailure, muxRetrySafe } from './lib/devbox-ssh.mjs';
 import { retentionPython } from './lib/devbox-retention.mjs';
 import { cleanupEvidencePython } from './lib/devbox-cleanup-pending.mjs';
 
@@ -945,6 +945,7 @@ async function ssh(row, operation, data, opts = {}) {
 }
 
 async function sshCall(row, operation, data, opts = {}) {
+  if (opts.state) opts.state.sshMux ||= { degraded: false, fallbackCount: 0 };
   if (opts.state?.sshStartDelay && !opts.state.sshStarted) {
     opts.state.sshStarted = true;
     await pause(opts.state.sshStartDelay);
@@ -952,6 +953,7 @@ async function sshCall(row, operation, data, opts = {}) {
   const base = operation === 'upload'
     ? `# devbox-run:upload\nmkdir -p ${quote(data.workspace)} && tar -xf - -C ${quote(data.workspace)}`
     : remoteCommand(operation, remoteScripts[operation], data);
+  let muxRetried = false;
   for (let retry = 0; ; retry++) {
     let started = false;
     const marker = `DEVBOX_STARTED_${randomUUID()}`;
@@ -961,6 +963,22 @@ async function sshCall(row, operation, data, opts = {}) {
     });
     opts.state?.currentAttemptTiming?.addBytes(result.stdinBytes || 0, result.stdoutBytes || 0);
     if (opts.state?.sshControlDir) (opts.state.sshTargets ||= new Map()).set(row.target, row);
+    if (muxFailure(result)) {
+      const mux = opts.state?.sshMux;
+      if (mux) mux.degraded = true;
+      if (!muxRetried && muxRetrySafe(operation, started) && !(opts.state?.cancel && opts.cancellable !== false)) {
+        muxRetried = true;
+        if (mux) mux.fallbackCount++;
+        const receipt = { sshMuxFallback: true, sshMuxFallbackCount: mux?.fallbackCount || 1 };
+        if (opts.state?.currentAttempt) Object.assign(opts.state.currentAttempt, receipt);
+        if (opts.state?.currentAttemptTiming) Object.assign(opts.state.currentAttemptTiming.data, receipt);
+        console.error(`devbox-run: SSH mux transport failed during ${operation}; retrying once independently`);
+        result.stdoutSink?.end();
+        retry--;
+        continue;
+      }
+      return { ...result, sshStarted: started, transportFailure: true, ...(operation !== 'run' ? { infraFailure: true } : {}) };
+    }
     const transient = result.code === 255 && !started && /Permission denied \(gssapi-with-mic\)|Connection closed\b/i.test(result.stderr);
     if (opts.noRetry || operation === 'metrics' || !transient || (opts.state?.cancel && opts.cancellable !== false)) return { ...result, sshStarted: started };
     result.stdoutSink?.end();
@@ -2347,7 +2365,7 @@ async function shard(opts) {
   }
 }
 
-async function stopRetainedRuns(out, runId) {
+async function stopRetainedRuns(out, runId, stopId) {
   const summaryFile = path.join(out, 'summary.json');
   const receipts = [], discoveryErrors = [];
   if (fs.existsSync(summaryFile)) {
@@ -2447,9 +2465,70 @@ async function stopRetainedRuns(out, runId) {
         console.error(`BLOCKED: host=${result.host} pgid=${result.pgid ?? 'unknown'} processes=${result.count ?? 'unknown'} slot=${attempt.slot}: ${error.message}; ${result.clean ? 'lease return pending' : 'cleanup pending retained'}`);
       }
     }
-    writeJSON(path.join(out, 'stop-result.json'), { runId, exit, results });
+    const receipt = { runId, stopId, exit, results };
+    writeJSON(path.join(out, `stop-${stopId}.json`), receipt);
+    writeJSON(path.join(out, 'stop-result.json'), receipt);
+    console.log(JSON.stringify(receipt));
     return exit;
   } finally { await closeControlConnections(state); }
+}
+
+async function takeReadback(row, state, deadline, limit) {
+  const dir = path.join(sharedDir(), 'devbox-readbacks', row.host);
+  fs.mkdirSync(dir, { recursive: true });
+  const id = randomUUID(), file = path.join(dir, id + '.json');
+  let announced = false;
+  for (;;) {
+    if (state.cancel || Date.now() >= deadline) throw Object.assign(Error('artifact readback admission cancelled or timed out'), { code: state.cancel || 124 });
+    const acquired = await withStateLock(dir, () => {
+      let active = 0;
+      for (const name of fs.readdirSync(dir).filter(name => name.endsWith('.json'))) {
+        const heldFile = path.join(dir, name), holder = JSON.parse(fs.readFileSync(heldFile, 'utf8'));
+        if (!Number.isInteger(holder.pid) || holder.pid <= 0 || !holder.hostname) throw Error('invalid readback holder');
+        let dead = false;
+        if (holder.hostname === os.hostname()) {
+          try { process.kill(holder.pid, 0); } catch (error) { dead = error.code === 'ESRCH'; }
+        }
+        if (dead) fs.unlinkSync(heldFile); else active++;
+      }
+      if (active >= limit) return false;
+      writeJSON(file, { id, pid: process.pid, hostname: os.hostname() });
+      return true;
+    }, Math.max(1, Math.floor((deadline - Date.now()) / 50)));
+    if (acquired) return async () => {
+      await withStateLock(dir, () => {
+        const holder = JSON.parse(fs.readFileSync(file, 'utf8'));
+        if (holder.id !== id || holder.pid !== process.pid || holder.hostname !== os.hostname()) throw Error('readback ownership changed');
+        fs.unlinkSync(file);
+      });
+    };
+    if (!announced) { console.error(`devbox-run: readback waiting on ${row.host} (limit=${limit})`); announced = true; }
+    await pause(Math.min(200, Math.max(1, deadline - Date.now())));
+  }
+}
+
+function readbackReservedDisk(row, rows) {
+  let values;
+  try { values = JSON.parse(fs.readFileSync(path.join(sharedDir(), 'devbox-reservations', row.host + '.json'), 'utf8')); }
+  catch (error) { if (error.code === 'ENOENT') return 0; throw error; }
+  if (!Array.isArray(values)) throw Error('invalid readback disk reservations');
+  let reserved = 0;
+  const seen = new Set();
+  for (const value of values) {
+    if (!Array.isArray(value) || ![3, 4, 5].includes(value.length) || !value.slice(0, 3).every(n => Number.isFinite(n) && n > 0)
+        || value.length >= 4 && (!Number.isFinite(value[3]) || value[3] < 0)) throw Error('invalid readback disk reservation');
+    if (Date.now() / 1000 - value[0] >= (value.length >= 4 ? 900 : 300)) continue;
+    if (value.length === 5) {
+      const owner = value[4];
+      if (!owner || !['slot', 'by', 'pid', 'host', 'start'].every(name => owner[name])) throw Error('invalid readback disk reservation owner');
+      const candidate = rows.find(candidate => candidate.slot === owner.slot && candidate.host === row.host);
+      const hold = candidate && readHold(candidate)?.fields;
+      if (!hold || !['by', 'pid', 'host', 'start'].every(name => hold[name] === owner[name]) || seen.has(owner.slot)) continue;
+      seen.add(owner.slot);
+    }
+    reserved += value[3] || 0;
+  }
+  return reserved;
 }
 
 export async function fetchArtifact(args) {
@@ -2469,15 +2548,14 @@ export async function fetchArtifact(args) {
   const rows = [...heavyRows, ...lightRows];
   const { receipt, artifact, row } = readArtifactManifest(opts.manifest, opts.name, rows);
   const sameOwner = candidate => candidate.host === row.host && candidate.target === row.target;
-  const pool = lightRows.some(sameOwner) ? 'devbox-cn-light' : 'devbox-cn';
-  const candidates = (pool === 'devbox-cn-light' ? lightRows : heavyRows).filter(sameOwner);
-  if (!candidates.length) throw Error('artifact host has no compatible open resource');
+  const candidates = lightRows.filter(sameOwner);
+  const readbackLimit = Number(process.env.DEVBOX_READBACK_LIMIT || 2);
+  if (!Number.isInteger(readbackLimit) || readbackLimit < 1 || readbackLimit > 8) throw Error('DEVBOX_READBACK_LIMIT must be 1..8');
   const out = path.resolve(opts.out);
+  const readbackId = randomUUID(), receiptFile = `${out}.readback-${readbackId}.json`;
   if (fs.existsSync(out)) throw Error('--out already exists');
   fs.mkdirSync(path.dirname(out), { recursive: true });
   const partial = out + '.' + randomUUID() + '.partial';
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'devbox-artifact-fetch-'));
-  const placementFile = path.join(temp, 'placement.json');
   const placementOpts = { placementInputs: manifest([{ name: 'retained-artifact', hash: artifact.sha256,
     rebuildable: false, cost: '0s', size: artifact.size / GiB, path: receipt.archive ? `${receipt.control}/artifact-archive.tar` : `${receipt.control}/artifacts/${artifact.name}` }]) };
   const by = `artifact-fetch-${process.pid}-${randomUUID()}`;
@@ -2487,55 +2565,68 @@ export async function fetchArtifact(args) {
   const parent = process.ppid;
   const watch = setInterval(() => { try { process.kill(parent, 0); } catch { state.stop(143); } }, 1000);
   const deadline = Date.now() + opts.timeout * 60000;
-  let primaryError;
+  const readbackReceipt = { readbackId, runId: receipt.run, host: row.host, out, receiptFile, bytes: artifact.size };
+  let primaryError, releaseReadback;
   try {
     const root = await hostRoot(row, state, { deadline });
     if (receipt.control !== `${root}/runs/${receipt.run}`) throw Error('artifact manifest root differs from registered host root');
-    await verifyInputs(row, placementOpts.placementInputs, placementOpts, state,
+    await refreshHostMetrics(candidates, state, { timeout: Math.min(15000, Math.max(1, deadline - Date.now())) });
+    // Direct takes bind the read to the exact registered host/user. Verify
+    // the file after admission so hash checks also share the readback bound.
+    let leasedRow;
+    for (const candidate of candidates) {
+      const take = await executeRes(['take', candidate.slot, '--by', by, '--project', 'orchestrator', '--task', 'fetch-artifact', '--for', 'retained artifact ' + opts.name,
+        '--pid', String(process.pid), '--disk-gib', '0'], { state, timeout: Math.max(1, deadline - Date.now()) });
+      if (state.cancel) throw Error('artifact lease cancelled');
+      if (!take.code) { leasedRow = candidate; break; }
+      if (![2, 3].includes(take.code)) checked(take, 'artifact lease');
+    }
+    if (leasedRow) {
+      const hold = readHold(leasedRow);
+      if (hold?.fields.by !== by || hold.fields.pid !== String(process.pid)) throw Error('artifact lease ownership changed');
+      Object.assign(readbackReceipt, { readbackAdmission: 'light-slot', slot: leasedRow.slot });
+    } else {
+      releaseReadback = await takeReadback(row, state, deadline, readbackLimit);
+      Object.assign(readbackReceipt, { readbackAdmission: 'bounded-no-slot', readbackLimit });
+      leasedRow = row;
+    }
+    await verifyInputs(leasedRow, placementOpts.placementInputs, placementOpts, state,
       { force: true, timeout: Math.max(1, deadline - Date.now()) });
-    const refresh = async () => {
-      await refreshHostMetrics(candidates, state, { timeout: Math.min(15000, Math.max(1, deadline - Date.now())) });
-      const index = await verifyInputs(candidates[0], placementOpts.placementInputs, placementOpts, state,
-        { timeout: Math.max(1, deadline - Date.now()) });
-      const holds = Object.fromEntries(candidates.map(candidate => [candidate.slot, readHold(candidate)?.fields]));
-      const scores = placement(candidates, placementOpts.placementInputs, { [row.host]: index }, {},
-        { ...inputSettings(sharedDir()), holds });
-      const plan = { version: 1, at: Date.now() / 1000,
-        slots: Object.fromEntries(scores.map(value => [value.slot, { ...value, extraDiskGiB: 0 }])) };
-      if (!Object.values(plan.slots).some(value => value.eligible)) throw Error('retained artifact is unavailable on its registered host');
-      writeJSON(placementFile, plan);
-    };
-    await refresh();
-    let refreshing;
-    const timer = setInterval(() => {
-      if (!refreshing) refreshing = refresh().catch(() => state.stop(74)).finally(() => { refreshing = null; });
-    }, 60000);
-    let acquired;
-    try {
-      acquired = checked(await executeRes(['wait-pool', pool, '--by', by, '--project', 'orchestrator', '--task', 'fetch-artifact', '--for', 'retained artifact ' + opts.name,
-        '--pid', String(process.pid), '--timeout', String(Math.max(1, deadline - Date.now()) / 60000), '--placement-file', placementFile],
-      { state, timeout: Math.max(1, deadline - Date.now()) }), 'artifact lease');
-    } finally { clearInterval(timer); await refreshing; }
-    const slot = /^slot=(\S+)$/m.exec(acquired)?.[1];
-    const leasedRow = candidates.find(candidate => candidate.slot === slot);
-    if (!leasedRow || !sameOwner(leasedRow)) throw Error('artifact lease selected a different host/user');
-    const hold = readHold(leasedRow);
-    if (hold?.fields.by !== by || hold.fields.pid !== String(process.pid)) throw Error('artifact lease ownership changed');
-    checked(await ssh(leasedRow, receipt.archive ? 'artifact-range' : 'fetch-artifact',
-      { ...receipt, root, artifact, ...(receipt.archive ? { sha256: artifact.sha256, offset: 0, length: artifact.size } : {}) },
-      { state, outputFile: partial, timeout: Math.max(1, deadline - Date.now()) }), 'artifact readback');
+    // The no-slot path performs only bounded reads, but still checks live disk.
+    const disk = JSON.parse(checked(await ssh(leasedRow, 'metrics', { root }, { state, timeout: Math.min(15000, Math.max(1, deadline - Date.now())) }), 'readback disk check'));
+    const reservedDiskGiB = readbackReservedDisk(row, rows);
+    if (!Number.isFinite(disk.freeGiB) || disk.freeGiB - reservedDiskGiB < 53) throw Error('artifact readback disk floor: need 53 GiB free after reservations');
+    Object.assign(readbackReceipt, { freeGiB: disk.freeGiB, reservedDiskGiB });
+    console.error(`devbox-run: readbackAdmission=${readbackReceipt.readbackAdmission} host=${row.host}`);
+    if (receipt.archive) {
+      readbackReceipt.transferOut = await readArchive(artifact, partial, { capMinutes: opts.timeout,
+        readRange: async ({ offset, length, timeout, ...options }) => {
+          if (state.cancel || Date.now() >= deadline) return { code: state.cancel || 124, fatal: true };
+          const result = await ssh(leasedRow, 'artifact-range', { ...receipt, root, sha256: artifact.sha256, offset, length },
+            { ...options, state, appendOutput: true, noRetry: true, timeout: Math.min(timeout, Math.max(1, deadline - Date.now())) });
+          return { ...result, fatal: Boolean(state.cancel) || Date.now() >= deadline
+            || ![0, 124, 255].includes(result.code) || /permission denied|gssapi|authentication failed/i.test(result.stderr) };
+        },
+      });
+    } else {
+      checked(await ssh(leasedRow, 'fetch-artifact', { ...receipt, root, artifact },
+        { state, outputFile: partial, timeout: Math.min(artifactTimeoutMs(artifact.size, opts.timeout), Math.max(1, deadline - Date.now())) }), 'artifact readback');
+    }
     if (fs.statSync(partial).size !== artifact.size || await fileDigest(partial) !== artifact.sha256) throw Error('artifact size/SHA-256 mismatch');
+    if (state.cancel || Date.now() >= deadline) throw Error('artifact readback cancelled or timed out before publication');
     fs.linkSync(partial, out); fs.unlinkSync(partial);
+    readbackReceipt.exit = 0;
     console.log(`artifact=${out} bytes=${artifact.size} sha256=${artifact.sha256}`);
     return 0;
   } catch (error) {
-    primaryError = error; throw error;
+    primaryError = error; readbackReceipt.exit = error.code || 1; readbackReceipt.error = error.message; throw error;
   } finally {
     clearInterval(watch); process.removeListener('SIGTERM', stop); process.removeListener('SIGINT', stop);
     const failures = [];
     const cleanup = async action => { try { await action(); } catch (error) { failures.push(error.message); } };
     await cleanup(() => { if (fs.existsSync(partial)) fs.unlinkSync(partial); });
     await cleanup(() => closeControlConnections(state));
+    if (releaseReadback) await cleanup(releaseReadback);
     // Acquisition may be interrupted after res creates a hold but before it prints the slot.
     for (const candidate of rows) {
       await cleanup(async () => {
@@ -2544,7 +2635,11 @@ export async function fetchArtifact(args) {
           checked(await executeRes(['return', candidate.slot, '--by', by], { state, cancellable: false, timeout: 30000 }), 'artifact lease return');
       });
     }
-    await cleanup(() => fs.rmSync(temp, { recursive: true, force: true }));
+    if (state.sshMux?.fallbackCount) Object.assign(readbackReceipt, { sshMuxFallback: true, sshMuxFallbackCount: state.sshMux.fallbackCount });
+    if (failures.length) Object.assign(readbackReceipt, { exit: readbackReceipt.exit || 1, cleanupErrors: failures });
+    await cleanup(() => fs.writeFileSync(receiptFile, JSON.stringify(readbackReceipt, null, 2) + '\n', { flag: 'wx', mode: 0o600 }));
+    console.error(`devbox-run: readback receipt=${receiptFile}`);
+    if (!primaryError && !failures.length) console.log(JSON.stringify(readbackReceipt));
     if (failures.length) {
       const detail = 'artifact cleanup: ' + failures.join('; ');
       if (primaryError) primaryError.message += '; ' + detail;
@@ -2675,8 +2770,9 @@ async function main(args) {
     // Even if DIR changes between check and write, a different run ignores this name.
     try { fs.writeFileSync(path.join(out, 'stop-' + runId), '', { flag: 'wx', mode: 0o600 }); }
     catch (error) { if (error.code !== 'EEXIST') throw error; }
-    console.log('stop requested for ' + runId);
-    return await stopRetainedRuns(out, runId);
+    const stopId = randomUUID();
+    console.log(`stop requested for ${runId} stopId=${stopId}`);
+    return await stopRetainedRuns(out, runId, stopId);
   }
   const opts = parseArgs(args);
   if (opts.help) {

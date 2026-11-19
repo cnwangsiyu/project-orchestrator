@@ -984,15 +984,15 @@ The runner copies selected regular files into the UUID receipt directory's
 `artifacts/` before releasing its slot. Copies are independent of the reusable
 workspace, so later checkout/builds cannot alter the retained bytes. This needs
 additional devbox disk space; retention still requires the 53 GiB reserve.
-No symlinks or special files are accepted. `fetch-artifact` declares the selected
-copy as a non-rebuildable hashed input and leases an eligible same-host/user
-light slot through input placement (heavy pool only if that host has no open
-light resource). It checks the UUID/source receipt and remote size/hash, verifies
-the returned size/hash, and publishes the destination without overwriting any
-existing file. It returns its lease on success, failure, or cancellation.
-The original slot must remain registered/open for receipt validation, but need
-not be free. Fetching queues for a compatible resource without changing admission
-gates or using exclusions to force placement.
+No symlinks or special files are accepted. `fetch-artifact` verifies the retained
+UUID/source and size/hash, tries an eligible same-host/user light slot without
+waiting, then uses atomic per-host readback permits when that slot is busy or
+absent (default two; `DEVBOX_READBACK_LIMIT=1..8`); receipts at `OUT.readback-READBACK_ID.json`
+record `readbackAdmission: light-slot | bounded-no-slot`, and the third bounded
+read waits for a permit while preserving the 53 GiB disk floor, transfer budgets
+and destination no-overwrite checks. Leases and permits return on success,
+failure and cancellation; the original slot must remain registered/open for
+receipt validation, but need not be free.
 
 A subsequent devbox step can declare each retained file with `--input`, using
 its manifest hash and `path=CONTROL/artifacts/NAME`, and `rebuildable=no`. Input
@@ -1012,6 +1012,14 @@ node scripts/devbox-run.mjs retire-artifacts --receipt RUN_UUID --host HOST_IP
 Explicit retirement takes a same-host light lease and returns it on every exit.
 Only retire your task's exact receipt after all consumers finish. Do not retire
 another task's artifacts. Fetching itself does not consume/delete a receipt.
+
+Each `stop` invocation emits a separate `stopId` in human and JSON output,
+and stores its result in `stop-STOP_ID.json` alongside the compatible
+`stop-result.json`, so later stop attempts do not hide earlier receipts.
+
+The resource-progress scenario waits for all required stdout/stderr events
+before asserting visibility during acquisition, and delays stderr to exercise
+cross-stream ordering deterministically.
 
 ### Control And Phase Overhead
 
@@ -1044,13 +1052,21 @@ remote command emits its start marker, the exact `Permission denied
 (gssapi-with-mic)` and `Connection closed` establishment errors may retry
 three times, each after a random 2–10 seconds. Exhaustion is recorded as
 `infraFailure`; it does not trigger another flaky rerun. After the start marker,
-these errors never replay the command. Control operations reuse a task-private
+these errors never replay the command. Local mux setup errors (`mm_send_fd`,
+`mux ... send fds failed`, `mux_client_request_session: session request failed`,
+`Control socket connect(...)`, and `muxclient: master hello exchange failed`)
+retry safe operations once immediately over `ControlMaster=no ControlPath=none`
+and keep the run independent thereafter; attempt/phase receipts record
+`sshMuxFallback: true` and `sshMuxFallbackCount`, while command drops continue
+through recorded-result recovery without replay. Control operations reuse a task-private
 `ControlMaster` with 60-second persistence; bulk transfers use a separate
 socket/profile with compression disabled. Socket directories are private and
 short enough for macOS, and masters are closed on task exit and upload retry.
-Command supervision, cleanup and read-only recovery keep independent SSH
-connections, so a control-channel failure cannot take down another shard or
-the remote command. No SSH identity/configuration or login files are changed.
+Checkout and stdin uploads (bundle, patch, overlay and seed) now use independent
+connections alongside command supervision, cleanup and read-only recovery;
+small metadata/preparation calls and artifact collection/manifest/retained-file
+fetches retain their control or bulk mux to amortize per-operation SSH setup,
+with the general degraded-mux fallback still applying. No SSH identity/configuration or login files are changed.
 
 If the box cannot confirm process cleanup, the runner reports **BLOCKED** and
 retains that slot for owner recovery instead of admitting another run over
