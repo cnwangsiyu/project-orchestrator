@@ -99,6 +99,21 @@ path before reuse.
   and overflow; daily incremental work stays on the devboxes (50-169 s warm). Remote runners differ in toolchain
   (one had no Java 11): bootstrap JDK 11, ccache and git-lfs in every run. The cold package still lacks 4 BMF
   libraries: deliver the second build's package. Report: `vesdk-mainline/tasks/T195/report.md`.
+- The only supported entry (2026-11-19): `~/code/.claude-data/orchestrator/vesdk-mainline/tasks/T213/` `entry.sh`
+  (hashes in `recipe-sha256s.json`, onboarding text in `onboarding-patch.md`), modes `--probe` and build. It assumes
+  nothing on the runner (a new workspace can land on a fresh runner with no checkout, no client directory and no
+  toolchain): bootstraps JDK 11, ccache and git-lfs (about 28 s fresh, under 1 s reused), sources the system profile
+  before enabling `set -u`, passes the command through a file, and creates an empty `git init` when needed.
+- Source handoff for pushed commits: the runner fetches the exact commit, submodules and LFS objects itself with its
+  own access; we sync only the delta between the local tree and that commit (0 bytes in the verified run) and check a
+  strict manifest. Full rsync of a tree is only for unpushed commits (a first full sync of 21,000 files plus LFS was
+  reset by the peer twice). LFS: keep the object store in the reused workspace (749 s on a fresh runner, 25 s
+  reused); pass include lists through a config file (a 350 KB list exceeds the argv limit).
+- BMF libraries: run the dependency step the build script declares for `copyBmfSo` before assembling (shared
+  `bmf.py` helper, also used on devbox 8) and gate on the 4 libraries; one assemble is then complete.
+- Verified end to end on a5e78a51539 (T213): fetch 9.6 s, LFS 25 s, delta sync 1 s, dependencies 12.8 s, BMF step
+  67.5 s, cold build 633.7 s, second pass 113.5 s, download 93 s, client total 1,033 s; 49 libraries, identical APK
+  hash for cold, second pass, remote and downloaded copies; dependencies fetched with the runner's own access.
 - Onboarding notes for another project: `~/code/.claude-data/orchestrator/vesdk-mainline/tasks/T192/remotex-onboarding.md`.
 - The generic RemoteX client ships helper scripts with embedded credentials (`ws_client.sh` holds a private key;
   `remote_revert_repo.py`, `rsync_opt.sh` hold credential literals) and its `start.sh` uploads some helpers itself
