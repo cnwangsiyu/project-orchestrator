@@ -1105,7 +1105,7 @@ export async function hostRoot(row, state, { deadline } = {}) {
     const timeout = Math.min(usable ? 10000 : 60000, deadline === undefined ? Infinity : deadline - Date.now());
     if (timeout <= 0) throw Error('root probe deadline expired');
     try {
-      const probed = JSON.parse(checked(await ssh(row, 'probe', { user: row.user }, { state, timeout, noRetry: true }), 'root probe').trim());
+      const probed = JSON.parse(checked(await ssh(row, 'probe', { user: row.user }, { state, timeout, noRetry: usable || deadline !== undefined }), 'root probe').trim());
       if (probed.user !== row.user || !Number.isInteger(probed.cores) || probed.cores < 1
           || !Number.isFinite(Date.parse(probed.probedAt))) throw Error('invalid host probe facts');
       entry = probed;
@@ -1179,7 +1179,7 @@ async function verifyInputs(row, inputs, opts, state, { force=false, timeout=600
       // Warm paths are only learned from successful slot receipts.
       if (input.warm && !entry) {
         let affinities={}; try { affinities=JSON.parse(fs.readFileSync(path.join(cacheDir(),'devbox-affinity.json'),'utf8')); } catch(error) {if(error.code!=='ENOENT')throw error;}
-        const previous=affinities[opts.affinity];
+        const previous=affinities[opts.affinity] || (opts.warmCost !== undefined ? affinities[opts.legacyAffinity] : undefined);
         if(previous?.host!==row.host || previous?.slot!==row.slot || !Number.isFinite(Date.parse(previous.time)) || Date.parse(previous.time)>Date.now()+1000) continue;
         const legacyPath=JSON.parse(checked(await ssh(row,'warm-path',{root,project:opts.project,key:opts.snapshot.storeKey,slot:row.slot},{state,timeout}),'warm workspace verification'));
         if(!legacyPath) continue;
@@ -1188,7 +1188,8 @@ async function verifyInputs(row, inputs, opts, state, { force=false, timeout=600
       probes.push({...input,key,path:input.path || entry?.path || inputPath(root,input),...(entry?.legacyAffinityAt?{legacyAffinityAt:entry.legacyAffinityAt}:{})});
     }
     if (probes.length) {
-      const result=await ssh(row,'inputs',{root,inputs:probes,affinity:opts.affinity},{state,timeout});
+      const result=await ssh(row,'inputs',{root,inputs:probes,affinity:opts.affinity,
+        legacyAffinity:opts.warmCost !== undefined ? opts.legacyAffinity : undefined},{state,timeout});
       const records=JSON.parse(checked(result,'input verification'));
       for (const record of records) {
         if (!probes.some(input=>input.key===record.key)) throw Error('unexpected input verification record');
