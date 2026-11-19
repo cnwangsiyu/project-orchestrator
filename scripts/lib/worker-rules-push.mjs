@@ -88,7 +88,7 @@ const targetFile = row => {
 };
 const targetState = (row, skipped, reason) => {
   const file = targetFile(row), unlock = acquireLock(file, { timeoutMs: 0, ownerPid: true });
-  if (!unlock) throw Error('target state is locked');
+  if (!unlock) { if (skipped) return false; throw Error('target state is locked'); }
   try {
     const prior = readJson(file);
     if (prior?.skipped === skipped || !prior && !skipped) return false;
@@ -141,6 +141,7 @@ export const pushWorkerRules = async ({ owner, digest = loadDigest(), onWork = (
         return `delivered ${label} ${version} -> ${digest.version}${message ? '' : ' (no added or changed worker rules)'}`;
       } finally { unlock(); }
     } catch {
+      if (terminalWorker(row)) return unconfirmed('worker skip state could not be recorded');
       const state = await runningWorker(row, { claudeWorkers: () => claude ??= activeClaudeWorkers() });
       try {
         if (state.running === false) return skipped(state.reason);

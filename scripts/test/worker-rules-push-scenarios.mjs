@@ -11,6 +11,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseDigest } from '../lib/global-rules.mjs';
 import { appendEvent, compactWorkerEvents, inbox, readEvents, retireWorker } from '../lib/worker-events.mjs';
 import { rememberWorkerRules, workerRulesMessage, workerRulesVersion } from '../lib/worker-rules-push.mjs';
+import { acquireLock } from '../lib/shared-file.mjs';
 
 const runFile = promisify(execFile);
 const scripts = fileURLToPath(new URL('../', import.meta.url));
@@ -126,6 +127,11 @@ try {
   assert.deepEqual(steers().slice(initial.length).map(row => row.threadId).sort(), ['failing', 'other-owner']);
   assert.equal(workerRulesVersion(outside), v2);
   assert.doesNotMatch(retry.stdout, /thread=finished\b|thread=claude-finished\b/);
+  const unlockSkip = acquireLock(path.join(dir, 'worker-rule-targets/main/finished.json'), { ownerPid: true });
+  try {
+    const competing = await cli(['rules-push', '--owner', owner]);
+    assert.doesNotMatch(competing.stdout, /thread=finished\b/, 'a competing skip receipt never makes a finished worker NOT DELIVERED');
+  } finally { unlockSkip(); }
 
   const unsteerable = tracked('unsteerable');
   const stale = tracked('stale-timeout', { pid: 2147483647, rulesVersion: null });
