@@ -45,6 +45,7 @@ export function runResSuites() {
     fs.writeFileSync(path.join(bin, 'uname'), '#!/bin/sh\nprintf "Darwin\\n"\n', { mode: 0o755 });
     fs.copyFileSync(path.join(base, 'fixtures/shlock'), path.join(bin, 'shlock'));
     fs.chmodSync(path.join(bin, 'shlock'), 0o755);
+    if (fs.existsSync('/usr/bin/mawk')) fs.symlinkSync('/usr/bin/mawk', path.join(bin, 'awk'));
   }
   const res = path.resolve(base, '../res');
   const env = { ...process.env, HOME: home, TMPDIR: tmp, TMP: tmp, TEMP: tmp,
@@ -52,7 +53,8 @@ export function runResSuites() {
     RES_DIR: path.join(tmp, 'unused'), RES_TEST_METRICS: '0',
     // Historical expiry fixtures use 45s; pool-exec checks the production 300s default.
     RES_WAITER_STALE_SECONDS: '45',
-    T88_RES: res, T86_RES: res, T83_RES: res };
+    T88_RES: res, T86_RES: res, T83_RES: res,
+    RES_TEST_AWK: process.env.RES_TEST_AWK || (os.platform() === 'linux' && fs.existsSync('/usr/bin/mawk') ? '/usr/bin/mawk' : '/usr/bin/awk') };
   let assertions = 0;
   console.log(`Res PID table: ${process.env.RES_TEST_NATIVE_PS === '1' ? 'native ps' : 'scratch fixture (host ps not required)'}`);
   for (const [suite, timeout] of Object.entries(SUITE_TIMEOUTS)) {
