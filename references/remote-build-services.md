@@ -11,6 +11,8 @@ Company remote build services count as company CI.
 - Never upload machine-only material: keystores and signing files (`*.jks`, `*.keystore`, `*.p12`,
   `*.mobileprovision`), `local.properties` beyond `sdk.dir`, `~/.gradle/gradle.properties`, `.env` files,
   `.remoteX` config values, cookie/session/token files, `~/.claude`, task directories.
+- Build the upload list from an explicit allowlist of build inputs (source dirs, build files, required submodules and
+  LFS objects), not from "everything tracked minus ignores": repositories track task reports and other non-inputs.
 - Before each sync write the upload list into the task record: file count, size, top-level directories, and the
   result of matching the patterns above (must be none).
 - Use a fresh export of a pushed commit (clean clone or `git archive`, submodules included, LFS resolved). Never
@@ -49,6 +51,8 @@ Company remote build services count as company CI.
 - Internal Ruby, npm and iOS CDN roots answer 200 from the remote side; pinned internal artifacts are untested.
 - VAK results on Xcode 26.3: XCTest build-for-testing passed (13 s and 11 s); the app's simulator build failed after
   79 s on one Swift type-check timeout that Xcode 27.1 tolerates, so the code needs a small change before 26.3 builds it.
+- `kross workload exec` corrupts long multi-line commands on the Mac guest (text dropped mid-token, `exit_code` null
+  although the shell failed): upload a script and run it with a short one-line command (VAK W436).
 - `kross workload exec` can exit 0 while `data.exit_code` is 1: read the remote exit payload and the build log, not
   the CLI status.
 - Workspace quota shows 100 CPU / 400 GiB RAM / 1000 GiB storage. Not shown anywhere: Mac concurrency limits,
@@ -83,5 +87,15 @@ path before reuse.
   `branchForCid`, `commitTimestamp`, `userName`, `userEmail`, `repo`); leave the original untouched.
 - Known hang and fix: CMake/Clang block when the AGP runner's stderr pipe fills. Redirect stderr to a file and
   keep stdin open (the CMake 3.10 server protocol needs it; `</dev/null` breaks it).
-- Status 2026-11-18: native build completes (libeffect.so linked), packaging in progress, APK not yet verified.
-  Timings, concurrency limits and artifact return: to be filled in by Webview.
+- Measured 2026-11-18 (Webview T192, vesdk vemo debug unsigned, commit a5e78a51539): cold 762 s, one-file change
+  426 s, no change 579 s; sync 34-56 s; APK hash identical across the three runs. The "warm" runs are not warm: the
+  sync deletes remote generated headers and metadata, so 1,111 native steps rebuild. Protecting generated files from
+  the sync is under test (T195). The cold package lacked 4 BMF runtime libraries (first-configure input discovery):
+  configure once first, or use the second build's package. Devbox 8 for comparison: cold about 30 min, warm 50-169 s.
+- Onboarding notes for another project: `~/code/.claude-data/orchestrator/vesdk-mainline/tasks/T192/remotex-onboarding.md`.
+- The generic RemoteX client ships helper scripts with embedded credentials (`ws_client.sh` holds a private key;
+  `remote_revert_repo.py`, `rsync_opt.sh` hold credential literals) and its `start.sh` uploads some helpers itself
+  (VAK W438). Never read, print or copy these files; search them by name only. Whether a project may run a client
+  that uploads its own vendor helpers is decided by the rules owner per case (see the bad-case log, BC-158).
+- VAK Android: not pursued. Its builds already run warm on devboxes (assemble 59 s, JVM tests 16 s), below
+  RemoteX's sync time alone.
