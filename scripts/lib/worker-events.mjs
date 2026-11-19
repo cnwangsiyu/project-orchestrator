@@ -17,6 +17,7 @@ export const setEventObserver = observer => { eventObserver = observer; };
 const sequenceFile = () => path.join(rulesShared(), 'worker-events-state.json');
 const historyDir = () => path.join(rulesShared(), 'worker-event-history');
 export const validOwner = (value) => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/.test(value);
+export const validWorkerIdentifier = value => validOwner(value) && !/^(?:true|false|undefined|null)$/i.test(value);
 export const signalExit = (signal) => ({ SIGINT: 130, SIGTERM: 143, SIGHUP: 129 })[signal] ?? 1;
 const ownerKey = (owner) => createHash('sha256').update(owner).digest('hex');
 export const ackFile = (owner) => path.join(rulesShared(), 'worker-acks', `${ownerKey(owner)}.json`);
@@ -30,7 +31,7 @@ const notification = (row) => row.event !== 'running' && row.event !== 'observed
 const waking = (row) => notification(row) && (row.event !== 'message' || row.wake !== false);
 export const followerAlive = (row) => live(row.pid);
 // Exec JSON may contain a session ID, but it is not a registered hub thread.
-export const processWorker = row => row.followerCommand === 'exec' || !row.thread;
+export const processWorker = row => row.followerCommand === 'exec' || !validWorkerIdentifier(row.thread);
 export const workerKey = row => JSON.stringify([row.account, processWorker(row) ? row.runId : row.thread]);
 export const workerRunStates = rows => {
   const latest = new Map();

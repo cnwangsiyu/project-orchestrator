@@ -163,12 +163,40 @@ try {
   assert.throws(() => retireWorker(oldRecord, 'old state'), /worker state changed/);
   const beforeHelp = snapshot(dir);
   for (const args of [['--help'], ['start', '--help'], ['--account', 'missing', '--help'], ['help']]) {
-    const help = await cli(args); assert.equal(help.code, 0, help.stderr); assert.match(help.stdout, /retire --thread/);
+    const help = await cli(args); assert.equal(help.code, 0, help.stderr); assert.match(help.stdout, /retire.*--thread.*--run/);
   }
   for (const args of [['invalid-command'], []]) {
     const usage = await cli(args); assert.equal(usage.code, 2); assert.match(usage.stderr, /usage:/);
   }
+  for (const command of ['turn', 'wait']) {
+    for (const thread of [undefined, '', ' ', 'true', 'False', 'undefined', 'null']) {
+      const result = await cli([command, ...(thread === undefined ? [] : ['--thread', thread])]);
+      assert.equal(result.code, 2); assert.match(result.stderr, /usage:.*codex-worker/s);
+    }
+  }
+  for (const command of ['start', 'turn', 'wait']) for (const name of ['', ' ', 'True', 'false', 'undefined', 'null']) {
+    const result = await cli([command, '--thread', 'valid-thread', '--name', name]);
+    assert.equal(result.code, 2); assert.match(result.stderr, /--name needs nonempty text/);
+  }
+  assert.equal((await cli(['start', '--name'])).code, 2);
+  assert.equal((await cli(['turn', '--thread'])).code, 2);
   assert.deepEqual(snapshot(dir), beforeHelp, 'help and usage errors leave all fixture bytes unchanged');
+  for (const [i, thread] of ['True', false, null].entries()) {
+    const broken = tracked(thread, { runId: `broken-run-${i}`, name: 'True', pid: 2147483647 });
+    appendEvent({ ...broken, event: 'failed', settled: true, mayRun: false });
+    const pushed = await cli(['rules-push', '--owner', owner]);
+    if (thread === 'True') assert.doesNotMatch(pushed.stdout, /worker=True/);
+    const otherOwner = await cli(['retire', '--run', broken.runId, '--owner', other]);
+    assert.equal(otherOwner.code, 2);
+    const retirement = await cli(['retire', '--run', broken.runId, '--owner', owner]);
+    assert.equal(retirement.code, 0, retirement.stderr);
+    assert.match(retirement.stdout, new RegExp(`retired .*run=${broken.runId}`));
+    assert.ok(readEvents().some(row => row.runId === broken.runId && row.event === 'retired'));
+  }
+  const invalidLive = tracked('false', { runId: 'broken-live', pid: process.pid });
+  const refuseInvalidLive = await cli(['retire', '--run', invalidLive.runId, '--owner', owner]);
+  assert.equal(refuseInvalidLive.code, 2); assert.match(refuseInvalidLive.stderr, /live follower/);
+  appendEvent({ ...invalidLive, event: 'failed', pid: 2147483647, settled: true, mayRun: false });
   appendEvent({ ...liveUnknown, event: 'finished', mayRun: false, settled: true });
 
   const later = tracked('watch-start');

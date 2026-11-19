@@ -25,7 +25,7 @@ import {mcpStartupMonitor} from './lib/mcp-startup.mjs';
 //   codex-worker interrupt --thread ID
 //   codex-worker status --thread ID
 //   codex-worker mine | watch [--owner SESSION_ID] [--debounce-sec N]                      (owner-scoped durable inbox; watch is a tracked background task)
-//   codex-worker retire --thread ID [--owner SESSION_ID] [--reason TEXT]                  (retire an ended or unreachable tracked worker)
+//   codex-worker retire --thread ID | retire --run RUN_ID [--owner SESSION_ID] [--reason TEXT]                  (retire an ended or unreachable tracked worker)
 //   codex-worker rules-push [--owner SESSION_ID | --all]                                  (check running workers' digest versions)
 //   codex-worker list   [--cwd DIR] [--search TEXT] [--limit N]
 //   codex-worker quota                                                     (the account's rate-limit windows, JSON)
@@ -75,7 +75,7 @@ import { maskPasswordStyleValues } from './lib/nightly-audit.mjs';
 import { canonicalPathOptions, canonicalBriefPrompt } from './lib/launch-paths.mjs';
 import { requestBoardRefresh } from './lib/board-refresh.mjs';
 import { lifecycle, resolveOwner, validOwner, inbox, readEvents, readAck, eventLine, watch, signalExit, appendEvent, setEventObserver,
-  saveWorkerContext, workerContext, answerQuestion, followerAlive, retiredWorkers, workerKey, retireWorker } from './lib/worker-events.mjs';
+  saveWorkerContext, workerContext, answerQuestion, followerAlive, retiredWorkers, workerKey, retireWorker, validWorkerIdentifier, workerRunStates } from './lib/worker-events.mjs';
 import { runningWorker, trackedWorkers } from './lib/worker-running.mjs';
 setEventObserver(requestBoardRefresh);
 // What a TRAE pause covers: one model family (route.mjs moves to the next family) or the whole account.
@@ -96,7 +96,7 @@ const commands = new Set(['hub', 'start', 'turn', 'wait', 'steer', 'note', 'ask'
   'mine', 'watch', 'retire', 'rules-push', 'list', 'quota', 'usage', 'reset-credits', 'reset-credit-use', 'accounts',
   'account-add', 'browser-setup', 'computer-use-setup', 'ttadk-setup', 'trae-setup', 'probe', 'note-failure',
   'proxy', 'search-proxy', 'browser-health']);
-const usage = `usage: codex-worker [--account NAME] <command> ...\ncommands: ${[...commands].join(' | ')}\nretire --thread ID [--owner SESSION_ID] [--reason TEXT]; mine [--all]\n`;
+const usage = `usage: codex-worker [--account NAME] <command> ...\ncommands: ${[...commands].join(' | ')}\nretire --thread ID | retire --run RUN_ID [--owner SESSION_ID] [--reason TEXT]; mine [--all]\n`;
 // Help/usage errors must exit before tracker registration, account lookup, or hub access.
 if (argv.includes('--help') || argv.includes('-h') || argv[0] === 'help') {
   process.stdout.write(usage); process.exit(0);
@@ -110,12 +110,24 @@ if (!commands.has(commandArgs[0])) {
 const followerStartedAt = Date.now();
 const ai = argv.indexOf('--account');
 const account = ai >= 0 ? argv.splice(ai, 2)[1] : ['note', 'ask'].includes(argv[0]) ? process.env.CODEX_WORKER_ACCOUNT || null : null;
-// Register before validation, hub connection or RPC: every attempted follower gets an exit record.
+// Parse and validate public launch identifiers before any tracker or hub access.
 const earlyOpts = {};
 for (let i = 1; i < argv.length; i++) if (argv[i].startsWith('--')) {
   const key = argv[i].slice(2);
   earlyOpts[key] = key === 'force-large' || key === 'background' || key === 'no-browser-preflight' || key === 'headless-playwright' || key === 'no-headless-playwright' || (key === 'require-model' && !['on', 'off'].includes(argv[i + 1]))
     || argv[i + 1] === undefined || argv[i + 1].startsWith('--') ? true : argv[++i];
+}
+const usageError = message => { process.stderr.write(`codex-worker: ${message}\n${usage}`); process.exit(2); };
+// Preserve owner-identity errors when a malformed request has multiple missing
+// fields, while still rejecting every launch before lifecycle registration.
+if (earlyOpts.owner !== undefined) {
+  try { earlyOpts.owner = resolveOwner(earlyOpts.owner); }
+  catch (error) { process.stderr.write(`codex-worker: ${error.message}\n`); process.exit(error.exitCode ?? 2); }
+}
+if (['turn', 'wait'].includes(argv[0]) && !validWorkerIdentifier(earlyOpts.thread)) usageError(`${argv[0]} needs --thread <public thread-id>`);
+if (['start', 'turn', 'wait'].includes(argv[0])) {
+  if (earlyOpts.thread !== undefined && !validWorkerIdentifier(earlyOpts.thread)) usageError('--thread needs a nonempty public identifier; boolean-like values are invalid');
+  if (earlyOpts.name !== undefined && (typeof earlyOpts.name !== 'string' || !earlyOpts.name.trim() || /^(?:true|false|undefined|null)$/i.test(earlyOpts.name.trim()))) usageError('--name needs nonempty text; boolean-like values are invalid');
 }
 if (argv[0] === 'turn' && typeof earlyOpts.thread === 'string') {
   try {
@@ -278,20 +290,24 @@ if (cmd === 'rules-push') {
   } catch (e) { die(e.message, 1); }
 } else if (cmd === 'retire') {
   try {
-    if (typeof opts.thread !== 'string' || !validOwner(opts.thread)) die('retire needs --thread <public thread-id>');
+    if (opts.thread !== undefined && opts.run !== undefined) die('retire takes --thread or --run, not both');
+    if (opts.run !== undefined ? !validWorkerIdentifier(opts.run) : !validWorkerIdentifier(opts.thread)) die('retire needs --thread <public thread-id> or --run <run-id>');
     if (opts.reason !== undefined && (typeof opts.reason !== 'string' || !opts.reason.trim())) die('--reason needs text');
     const owner = resolveOwner(opts.owner);
     if (!validOwner(owner)) die('retire needs the launching session (--owner <session-id> or ORCHESTRATOR_OWNER)');
     const events = reconcileTurnEvents(readEvents());
-    const row = trackedWorkers(events, owner).find(row => row.account === (account ?? 'main') && row.thread === opts.thread);
+    const candidates = opts.run !== undefined ? [...workerRunStates(events.filter(row => row.owner === owner)).values()].map(state => state.row) : trackedWorkers(events, owner);
+    const row = candidates.find(row => row.account === (account ?? 'main') && (opts.run !== undefined ? row.runId === opts.run : row.thread === opts.thread));
     if (!row) die('no tracked worker for this launching owner/account/thread');
-    const context = workerContext(row.account, row.thread, true);
+    if (opts.run !== undefined && validWorkerIdentifier(row.thread)) die('retire --run is only for workers without a valid thread; use --thread');
+    const context = validWorkerIdentifier(row.thread) ? workerContext(row.account, row.thread, true) : null;
     if (context?.owner && context.owner !== owner) die('retire belongs to a different launching owner');
-    const state = await runningWorker(row, { claudeWorkers: activeClaudeWorkers });
+    const state = validWorkerIdentifier(row.thread) ? await runningWorker(row, { claudeWorkers: activeClaudeWorkers })
+      : { running: followerAlive(row) ? null : false, reason: 'invalid thread; follower exited' };
     if (state.running === true) die(`retire refused: a turn is running (${state.turn ?? 'follower'})`);
     if (state.running === null && followerAlive(row)) die('retire refused: live follower; hub status unconfirmed');
     retireWorker(row, opts.reason ?? state.reason);
-    console.log(`retired account=${row.account} thread=${row.thread} (${opts.reason ?? state.reason})`);
+    console.log(`retired account=${row.account} ${opts.run !== undefined ? 'run=' + row.runId : 'thread=' + row.thread} (${opts.reason ?? state.reason})`);
     process.exit(0);
   } catch (e) { die(e.message, e.exitCode ?? 1); }
 } else if (cmd === 'watch' || cmd === 'mine') {

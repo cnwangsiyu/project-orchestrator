@@ -563,7 +563,7 @@ then stay silent until observed running again. A confirmed running worker that c
 `NOT DELIVERED` on every retry. A live follower with unavailable hub status prints `UNCONFIRMED` and is retried.
 
 Use `codex-worker retire --thread <id> --account <account> [--owner <launching-session-id>] [--reason <text>]`
-to retire finished or unreachable stale workers. Ownership comes from `ORCHESTRATOR_OWNER` or the explicit
+to retire finished or unreachable stale workers. Legacy failed launches without a valid thread can use `retire --run <run-id>` with the same account/owner checks and live-follower refusal. Invalid, empty and boolean-like launch thread IDs or names are rejected before tracking. Ownership comes from `ORCHESTRATOR_OWNER` or the explicit
 launching session; another owner cannot retire the worker. Retirement probes the configured hub without
 starting it and refuses a confirmed running turn or a live follower whose turn cannot be confirmed.
 `mine` hides retired workers by default; `mine --all` includes them and their retirement reasons. A later

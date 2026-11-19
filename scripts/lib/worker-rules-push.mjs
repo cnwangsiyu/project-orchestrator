@@ -6,7 +6,7 @@ import { digestFile, loadDigest, rulesShared } from './global-rules.mjs';
 import { addedRuleLines, compareVersion } from './rules-delivery.mjs';
 import { hubRPC } from './hub-state.mjs';
 import { acquireLock, writeJson } from './shared-file.mjs';
-import { contextFile, followerAlive, readEvents } from './worker-events.mjs';
+import { contextFile, followerAlive, readEvents, validWorkerIdentifier } from './worker-events.mjs';
 import { reconcileTurnEvents } from './worker-turn.mjs';
 import { runningWorker, terminalWorker, trackedWorkers, workerHub } from './worker-running.mjs';
 
@@ -83,6 +83,7 @@ const steer = async (row, message) => {
 
 const targetFile = row => {
   const id = row.followerCommand === 'exec' || !row.thread ? row.runId : row.thread;
+  if (!validWorkerIdentifier(row.account) || !validWorkerIdentifier(id)) throw Error('invalid worker target identifier');
   contextFile(row.account, id);
   return path.join(rulesShared(), 'worker-rule-targets', row.account, `${id}.json`);
 };
@@ -109,7 +110,12 @@ export const pushWorkerRules = async ({ owner, digest = loadDigest(), onWork = (
     const skipped = reason => targetState(row, true, reason) ? `SKIPPED ${label} (not running: ${reason})` : null;
     try {
       if (row.event === 'retired') return null;
-      if (terminalWorker(row)) return skipped(row.status ?? row.event);
+      if (terminalWorker(row)) {
+        // Invalid legacy targets have no receipt path. Keep normal thread-keyed
+        // skip receipts and live Claude status probing unchanged.
+        try { targetFile(row); } catch { return null; }
+        return skipped(row.status ?? row.event);
+      }
       const state = await runningWorker(row, { claudeWorkers: () => claude ??= activeClaudeWorkers() });
       if (state.running === false) return skipped(state.reason);
       if (state.running === null) {
