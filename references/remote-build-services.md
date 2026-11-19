@@ -95,7 +95,10 @@ path before reuse.
 - Onboarding notes for another project: `~/code/.claude-data/orchestrator/vesdk-mainline/tasks/T192/remotex-onboarding.md`.
 - The generic RemoteX client ships helper scripts with embedded credentials (`ws_client.sh` holds a private key;
   `remote_revert_repo.py`, `rsync_opt.sh` hold credential literals) and its `start.sh` uploads some helpers itself
-  (VAK W438). Never read, print or copy these files; search them by name only. Whether a project may run a client
-  that uploads its own vendor helpers is decided by the rules owner per case (see the bad-case log, BC-158).
+  (VAK W438). Never read, print or copy these files; search them by name only. Ruling (BC-158, 2026-11-19): a client whose `start.sh` and helpers are
+  byte-identical to the official package (compare sha256 only) may be used: the vendor's own credential going to its
+  own service is the tool's designed behaviour. `start.sh` uploads `remote_revert_repo.py`, `upload_apk.sh` and
+  `gen_apk_link.sh` itself, apart from the source sync. A client copy that does not match the official package is
+  quarantined (moved, not deleted) and not used. Hash table: `vesdk-mainline/tasks/T198/hashes.md`.
 - VAK Android: not pursued. Its builds already run warm on devboxes (assemble 59 s, JVM tests 16 s), below
   RemoteX's sync time alone.
