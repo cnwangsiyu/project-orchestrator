@@ -8,6 +8,72 @@ export async function fileDigest(file) {
   return hash.digest('hex');
 }
 
+export function artifactTimeoutMs(bytes, capMinutes = 120) {
+  return Math.min(capMinutes * 60000, Math.max(15 * 60000, bytes / 200000 * 1000));
+}
+
+// Range files survive a failed connection. Only verified bytes permit remote release.
+export async function readArchive(plan, out, { streams = 1, capMinutes = 120, readRange, onProgress = () => {}, onStats = () => {} }) {
+  streams = Math.min(streams, plan.size);
+  const length = Math.ceil(plan.size / streams);
+  const parts = Array.from({ length: streams }, (_, i) => ({
+    file: streams === 1 ? out : `${out}.range-${i}.partial`,
+    offset: i * length, length: Math.min(length, plan.size - i * length), received: 0,
+  }));
+  const started = performance.now();
+  let downloaded = 0, resumeCount = 0, restartCount = 0, failed = false;
+  const stats = () => ({ bytes: plan.size, receivedBytes: parts.reduce((sum, part) => sum + part.received, 0),
+    averageMBps: downloaded / 1e6 / Math.max(0.001, (performance.now() - started) / 1000),
+    resumeCount, restartCount, timeoutSec: artifactTimeoutMs(plan.size, capMinutes) / 1000 });
+  const progress = () => { const value = stats(); onProgress({ ...value, percent: value.receivedBytes / plan.size * 100 }); };
+  const timer = setInterval(progress, 30000);
+  try {
+    for (;;) {
+      failed = false;
+      if (streams > 1) fs.writeFileSync(out, '', { mode: 0o600 });
+      for (const part of parts) { fs.writeFileSync(part.file, '', { mode: 0o600 }); part.received = 0; }
+      const results = await Promise.allSettled(parts.map(async part => {
+        while (part.received < part.length) {
+          if (failed) return;
+          const result = await readRange({ offset: part.offset + part.received, length: part.length - part.received,
+            outputFile: part.file, timeout: artifactTimeoutMs(plan.size, capMinutes),
+            onBytes: bytes => { downloaded += bytes; part.received += bytes; } });
+          part.received = fs.statSync(part.file).size;
+          if (part.received > part.length) { failed = true; throw Error('archive range length exceeded'); }
+          if (result.fatal) { failed = true; const error = Error('archive readback stopped'); error.code = result.code; throw error; }
+          // A connection may close after sending its entire range. The final digest decides.
+          if (part.received === part.length) break;
+          if (resumeCount >= 3) {
+            failed = true;
+            const error = Error(`archive readback failed after ${resumeCount} resumes (${result.code || 'short range'})`);
+            error.code = result.code || 74; throw error;
+          }
+          resumeCount++;
+          onProgress({ ...stats(), percent: stats().receivedBytes / plan.size * 100, resuming: true });
+        }
+      }));
+      const failure = results.find(result => result.status === 'rejected');
+      if (failure) throw failure.reason;
+      if (streams > 1) {
+        const fd = fs.openSync(out, 'w', 0o600);
+        try {
+          for (const part of parts) for await (const chunk of fs.createReadStream(part.file)) {
+            let written = 0;
+            while (written < chunk.length) written += fs.writeSync(fd, chunk, written, chunk.length - written);
+          }
+        } finally { fs.closeSync(fd); }
+      }
+      if (await fileDigest(out) === plan.sha256) break;
+      fs.unlinkSync(out);
+      for (const part of parts) { if (fs.existsSync(part.file)) fs.unlinkSync(part.file); part.received = 0; }
+      if (restartCount === 1) { const error = Error('archive SHA-256 mismatch after full restart'); error.code = 74; throw error; }
+      restartCount++;
+    }
+    for (const part of parts) if (part.file !== out) fs.unlinkSync(part.file);
+    return stats();
+  } finally { clearInterval(timer); onStats(stats()); }
+}
+
 export function artifactName(name) {
   return typeof name === 'string' && name.length > 0 && !path.posix.isAbsolute(name)
     && !name.includes('\\') && !/[\x00-\x1f\x7f]/.test(name)
@@ -27,6 +93,8 @@ export function readArtifactManifest(file, name, rows) {
   const selected = receipt.artifacts.filter(item => item.name === name);
   if (selected.length !== 1 || !Number.isSafeInteger(selected[0].size) || selected[0].size < 0
       || !/^[a-f0-9]{64}$/.test(selected[0].sha256 || '')) throw Error('artifact is missing or invalid in manifest');
+  if (receipt.archive !== undefined && (receipt.archive !== true || receipt.artifacts.length !== 1
+      || selected[0].name !== 'artifact-archive.tar' || selected[0].size <= 0)) throw Error('invalid archive manifest');
   return { receipt, artifact: selected[0], row };
 }
 

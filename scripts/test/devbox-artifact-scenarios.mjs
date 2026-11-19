@@ -5,8 +5,10 @@ import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { remoteScripts, parseArgs } from '../devbox-run.mjs';
-import { artifactName, readArtifactManifest } from '../lib/devbox-artifacts.mjs';
+import { artifactName, readArtifactManifest, artifactTimeoutMs } from '../lib/devbox-artifacts.mjs';
 import { controlOptions } from '../lib/devbox-ssh.mjs';
+import { mock } from 'node:test';
+import { readArchive } from '../lib/devbox-artifacts.mjs';
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'artifact-scenarios-'));
 const root = path.join(temp, 'devbox-run'), workspace = path.join(root, 'wt', 'fixture');
@@ -19,13 +21,43 @@ const invoke = (operation, value, python = remoteScripts[operation]) => spawnSyn
 try {
   const args = ['--project', 'fixture', '--task', 'artifact', '--repo', temp];
   assert.equal(parseArgs([...args, '--', 'true']).artifactStreams, 1);
+  assert.equal(parseArgs([...args, '--', 'true']).artifactTimeout, 120);
+  for (const value of ['0', '121', 'NaN']) assert.throws(() => parseArgs([...args, '--artifact-timeout', value, '--', 'true']));
+  assert.equal(artifactTimeoutMs(1000), 900000);
+  assert.equal(artifactTimeoutMs(200 * 1024 ** 2), 1048576);
+  assert.equal(artifactTimeoutMs(10 * 1024 ** 3), 7200000);
+  assert.equal(artifactTimeoutMs(1000, 0.01), 600);
+  const progress = [], progressFile = path.join(temp, 'progress.tar');
+  let finishRange, transferStats;
+  mock.timers.enable({ apis: ['setInterval'] });
+  try {
+    const pending = readArchive({ size: bytes.length, sha256: digest }, progressFile, {
+      readRange: async ({ outputFile, onBytes }) => {
+        fs.appendFileSync(outputFile, bytes.subarray(0, 100)); onBytes(100);
+        await new Promise(resolve => { finishRange = resolve; });
+        fs.appendFileSync(outputFile, bytes.subarray(100)); onBytes(bytes.length - 100); return { code: 0 };
+      }, onProgress: value => progress.push(value), onStats: value => { transferStats = value; },
+    });
+    mock.timers.tick(29999); assert.equal(progress.length, 0);
+    mock.timers.tick(1); assert.equal(progress.length, 1);
+    assert.equal(progress[0].receivedBytes, 100);
+    assert.equal(progress[0].percent, 100 / bytes.length * 100);
+    assert.ok(progress[0].averageMBps > 0);
+    finishRange(); await pending;
+    assert.equal(transferStats.receivedBytes, bytes.length);
+    mock.timers.tick(30000); assert.equal(progress.length, 1, 'progress stops at transfer completion');
+  } finally { mock.timers.reset(); }
   assert.equal(parseArgs([...args, '--artifact-streams', '4', '--', 'true']).artifactStreams, 4);
   for (const value of ['0', '5', 'auto']) assert.throws(() => parseArgs([...args, '--artifact-streams', value, '--', 'true']));
   const all = invoke('artifacts', data);
   assert.equal(all.status, 0, all.stderr.toString());
-  assert.match(all.stderr.toString(), new RegExp('DEVBOX_ARTIFACT_SHA256=' + createHash('sha256').update(all.stdout).digest('hex')));
-  const tar = path.join(temp, 'all.tar'); fs.writeFileSync(tar, all.stdout);
+  const allPlan = JSON.parse(all.stdout);
+  const allBytes = invoke('artifact-range', { ...data, sha256: allPlan.sha256, offset: 0, length: allPlan.size });
+  assert.equal(allBytes.status, 0, allBytes.stderr.toString());
+  assert.match(all.stderr.toString(), new RegExp('DEVBOX_ARTIFACT_SHA256=' + createHash('sha256').update(allBytes.stdout).digest('hex')));
+  const tar = path.join(temp, 'all.tar'); fs.writeFileSync(tar, allBytes.stdout);
   assert.deepEqual(execFileSync('tar', ['-xOf', tar, 'public.bin']), bytes);
+  assert.equal(invoke('artifact-release', { ...data, sha256: allPlan.sha256 }).status, 0);
   const manifest = invoke('artifacts', { ...data, fetch: 'manifest' });
   assert.equal(manifest.status, 0, manifest.stderr.toString());
   const receipt = JSON.parse(manifest.stdout.toString());
@@ -64,10 +96,10 @@ try {
   assert.notEqual(invoke('artifact-range', { ...data, sha256: plan.sha256, offset: -1, length: 1 }).status, 0);
   assert.equal(invoke('artifact-release', { ...data, sha256: plan.sha256 }).status, 0);
   assert.equal(fs.existsSync(path.join(control, 'artifact-archive.tar')), false);
-  const lowDisk = remoteScripts.artifacts.replace("parallel=d.get('streams'", "import types\nos.statvfs=lambda _:types.SimpleNamespace(f_bavail=53*1073741824+1048576,f_frsize=1)\nparallel=d.get('streams'");
+  const lowDisk = remoteScripts.artifacts.replace('\ndisk=os.statvfs(root)\n', '\nimport types\ndisk=types.SimpleNamespace(f_bavail=53*1073741824+1048576,f_frsize=1)\n');
   const fallback = invoke('artifacts', { ...data, streams: 4, patterns: ['large.bin'] }, lowDisk);
-  assert.equal(fallback.status, 0, fallback.stderr.toString());
+  assert.notEqual(fallback.status, 0);
   assert.doesNotMatch(fallback.stderr.toString(), /DEVBOX_ARTIFACT_PLAN=/);
-  assert.match(fallback.stderr.toString(), new RegExp('DEVBOX_ARTIFACT_SHA256=' + createHash('sha256').update(fallback.stdout).digest('hex')));
-  console.log('PASS archive digest, immutable retention, named readback, corruption/path checks, isolated SSH sockets, staged ranges and low-disk streaming fallback');
+  assert.match(fallback.stderr.toString(), /disk reservation guard/);
+  console.log('PASS size-scaled timeout, archive digest, immutable retention, named readback, corruption/path checks, isolated SSH sockets, staged ranges and disk reserve');
 } finally { fs.rmSync(temp, { recursive: true, force: true }); }

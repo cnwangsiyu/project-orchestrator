@@ -110,7 +110,7 @@ if(['run','cleanup','reconnect','result','artifact-range','dead-slot','cleanup-p
  if(!args.includes('ControlMaster=no')||!args.includes('ControlPath=none'))throw Error('supervisor/recovery SSH must remain independent');
 } else if(!args.includes('ControlMaster=auto')||!args.includes('ControlPersist=60'))throw Error('control SSH must reuse task connection');
 let d={};if(op!=='upload')d=JSON.parse(Buffer.from(command.match(/'([A-Za-z0-9+/=]+)'$/)[1],'base64').toString());
-event(op,{host,target,slot:d.slot,workspace:d.workspace,control:d.control,reuseAllowed:d.reuseAllowed,env:op==='run'?d.env:undefined,nice:op==='run'?d.command.startsWith('nice -n 10 bash -c'):undefined,cpus:d.cpus});
+event(op,{host,target,slot:d.slot,workspace:d.workspace,control:d.control,offset:d.offset,length:d.length,reuseAllowed:d.reuseAllowed,env:op==='run'?d.env:undefined,nice:op==='run'?d.command.startsWith('nice -n 10 bash -c'):undefined,cpus:d.cpus});
 if(c.authFailures){
  const file=path.join(c.dir,'auth-count');const count=fs.existsSync(file)?Number(fs.readFileSync(file)):0;
  if(count<c.authFailures){fs.writeFileSync(file,String(count+1));console.error(c.authMessage||'Permission denied (gssapi-with-mic)');process.exit(255);}
@@ -175,6 +175,20 @@ if(op==='cleanup'){
  event('group-gone',{host});console.log('group-gone');return;
 }
 if(op==='artifacts'&&c.badArtifact)process.exit(66);
+if(op==='artifact-range'&&c.artifactFault){
+ const counter=path.join(c.dir,'artifact-read-count'), n=fs.existsSync(counter)?Number(fs.readFileSync(counter)):0;
+ fs.writeFileSync(counter,String(n+1));
+ const result=cp.spawnSync('/bin/bash',['-c',command],{maxBuffer:128*1024*1024});
+ if(result.status){process.stderr.write(result.stderr);process.exit(result.status);}
+ const fault=c.artifactFault, active=n===0||fault.endsWith('always');
+ let payload=result.stdout;
+ if(active&&fault.startsWith('corrupt')){payload=Buffer.from(payload);payload[0]^=1;}
+ if(active&&(fault.startsWith('drop')||fault.startsWith('stall')))payload=payload.subarray(0,Math.min(12345,payload.length-1));
+ await new Promise(r=>process.stdout.write(payload,r));
+ if(active&&fault.startsWith('stall'))await sleep(60000);
+ if(active&&fault.startsWith('drop'))process.exit(255);
+ return;
+}
 if(op==='fetch-artifact'&&c.badFetch){console.error('fixture primary readback failure');process.exit(65);}
 if(op==='inspect') {
  const result=cp.spawnSync('/bin/bash',['-c',command],{encoding:'utf8'});
@@ -1023,8 +1037,58 @@ async function overheadScenarios() {
   console.log('PASS clean-ref shortcut, one batched inspection for recursive pins, dirty-tree repair and ignored-cache preservation');
 }
 
+async function artifactResumeScenarios() {
+  const randomArtifact = 'mkdir -p build && node -e "require(\'node:fs\').writeFileSync(\'build/random.bin\',require(\'node:crypto\').randomBytes(1048576))"';
+  for (const artifactFault of ['drop-once', 'stall-once', 'corrupt-once']) {
+    const f = fixture({ artifactFault });
+    const r = await run(f, ['--artifact', 'build/random.bin', '--artifact-timeout', artifactFault === 'stall-once' ? '0.1' : '2'], randomArtifact);
+    ok(r); returned(f);
+    const attempt = r.summary.shards[0].attempts[0], ranges = f.events().filter(e => e.op === 'artifact-range');
+    assert.equal(ranges.length, 2, artifactFault);
+    assert.equal(ranges[1].offset, artifactFault === 'corrupt-once' ? 0 : 12345);
+    assert.equal(attempt.phaseTimings.transferOut.resumeCount, artifactFault === 'corrupt-once' ? 0 : 1);
+    assert.equal(attempt.phaseTimings.transferOut.restartCount, artifactFault === 'corrupt-once' ? 1 : 0);
+    assert.ok(attempt.phaseTimings.transferOut.averageMBps > 0);
+    assert.equal(attempt.phaseTimings.transferOut.receivedBytes, fs.statSync(attempt.artifact).size);
+    assert.deepEqual(execFileSync('tar', ['-xOf', attempt.artifact, 'build/random.bin']), fs.readFileSync(path.join(workspace(f), 'build/random.bin')));
+    assert.equal(f.events().filter(e => e.op === 'artifact-release').length, 1);
+  }
+  for (const artifactFault of ['drop-always', 'stall-always', 'corrupt-always']) {
+    const f = fixture({ artifactFault, diskCosts: true });
+    const commandExit = artifactFault === 'corrupt-always' ? 7 : 0;
+    const r = await run(f, ['--artifact', 'build/random.bin', '--artifact-timeout', artifactFault === 'stall-always' ? '0.1' : '2'], randomArtifact + '; exit ' + commandExit);
+    assert.equal(r.code, commandExit); returned(f);
+    const attempt = r.summary.shards[0].attempts[0];
+    assert.equal(attempt.retainedRemotely, true);
+    assert.equal(attempt.phaseTimings.transferOut.resumeCount, artifactFault === 'corrupt-always' ? 0 : 3);
+    assert.equal(attempt.artifactExit, artifactFault === 'stall-always' ? 124 : artifactFault === 'drop-always' ? 255 : 74);
+    assert.equal(attempt.phaseTimings.transferOut.restartCount, artifactFault === 'corrupt-always' ? 1 : 0);
+    const receipt = JSON.parse(fs.readFileSync(attempt.artifactManifest));
+    assert.ok(fs.existsSync(path.join(receipt.control, 'artifact-archive.tar')));
+    assert.equal(f.events().filter(e => e.op === 'artifact-release').length, 0);
+    assert.ok(r.stdout.includes(attempt.fetchArtifactCommand));
+    if (artifactFault === 'drop-always') assert.equal(fs.statSync(attempt.artifactManifest.replace(/\.manifest\.json$/, '.tar')).size, 4 * 12345);
+    // Run the exact recovery command after the link returns, then retire only this receipt.
+    fs.writeFileSync(path.join(f.dir, 'config.json'), JSON.stringify({ ...f.config, artifactFault: undefined }));
+    const recovered = spawnSync('/bin/bash', ['-c', attempt.fetchArtifactCommand], { env: f.env, encoding: 'utf8' });
+    assert.equal(recovered.status, 0, recovered.stdout + recovered.stderr); returned(f);
+    const retired = spawnSync(process.execPath, [script, 'retire-artifacts', '--receipt', receipt.run, '--host', receipt.host], { env: f.env, encoding: 'utf8' });
+    assert.equal(retired.status, 0, retired.stdout + retired.stderr); returned(f);
+    assert.equal(fs.existsSync(path.join(receipt.control, 'artifact-archive.tar')), false);
+  }
+  const cancelled = fixture({ artifactFault: 'stall-always' });
+  const interrupted = await run(cancelled, ['--artifact', 'build/random.bin'], randomArtifact,
+    events => events.some(e => e.op === 'artifact-range'));
+  assert.equal(interrupted.code, 143); returned(cancelled);
+  assert.equal(interrupted.summary.shards[0].attempts[0].retainedRemotely, true);
+  assert.equal(interrupted.summary.shards[0].attempts[0].phaseTimings.transferOut.resumeCount, 0);
+  console.log('PASS stalled/dropped range resumes, offset append, digest restart, bounded final failure, retained recovery command and retirement');
+
+}
+
 async function scenarios() {
   const only = process.env.DEVBOX_TEST_CASE;
+  if (only === 'readback') { await artifactResumeScenarios(); return; }
   if (only === 'overhead') { await overheadScenarios(); return; }
   if (only === 'cleanup-pending') { await cleanupPendingScenarios(); return; }
   if (!only) await cleanupPendingScenarios();
@@ -1287,9 +1351,12 @@ async function scenarios() {
   assert.equal(fs.readFileSync(path.join(failedManifest.control,'artifacts/build/result.txt'),'utf8'),'failed','explicit manifest-mode failure retention preserves the copied payload');
   returned(failedCommand);
 
-  let failedArtifact = fixture({ badArtifact: true }); assert.equal((await run(failedArtifact, ['--artifact', '*.txt'])).code, 66); returned(failedArtifact);
+  await artifactResumeScenarios();
+
+  let failedArtifact = fixture({ badArtifact: true }); assert.equal((await run(failedArtifact, ['--artifact', '*.txt'])).code, 0); returned(failedArtifact);
   const left = await run(failedArtifact = fixture({ badArtifact: true }), ['--artifact', '*.txt', '--fetch-timeout', '30']);
-  assert.equal(left.code, 66); assert.match(left.stdout + left.stderr, /artifacts remain on devbox-cn-\d+/);
+  assert.equal(left.code, 0); assert.match(left.stdout + left.stderr, /artifacts remain on devbox-cn-\d+/);
+  assert.equal(left.summary.shards[0].attempts[0].artifactExit, 66);
   assert.deepEqual(left.summary.shards[0].attempts[0].artifactsLeft.patterns, ['*.txt']); returned(failedArtifact);
   await assert.rejects(run(fixture(), ['--fetch-timeout', '0']).then(r => { if (r.code) throw Error('rejected'); }), /rejected/);
   const failure = fixture(); assert.equal((await run(failure, [], 'exit 9')).code, 9); returned(failure);

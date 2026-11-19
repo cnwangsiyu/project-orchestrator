@@ -13,7 +13,7 @@ import { redactLogFile } from './lib/log-redaction.mjs';
 import { maskLogText } from './lib/nightly-audit.mjs';
 import { manifest, duration, inputKey, indexFile, readIndex, inputSettings, placement, warmCost, warmInput, median, observedCost, fingerprint, inputPython, seedPython } from './lib/devbox-inputs.mjs';
 import { transferFindings } from './lib/devbox-transfer-check.mjs';
-import { fileDigest, artifactName, readArtifactManifest, retainedArtifactPython, artifactRangePython } from './lib/devbox-artifacts.mjs';
+import { fileDigest, artifactName, readArtifactManifest, retainedArtifactPython, artifactRangePython, readArchive } from './lib/devbox-artifacts.mjs';
 import { controlOptions } from './lib/devbox-ssh.mjs';
 import { retentionPython } from './lib/devbox-retention.mjs';
 import { cleanupEvidencePython } from './lib/devbox-cleanup-pending.mjs';
@@ -36,10 +36,10 @@ const sharedDir = () => process.env.RES_DIR || process.env.RULES_SHARED || path.
 const resCommand = () => process.env.RES_COMMAND || (fs.existsSync(path.join(sharedDir(), 'res')) ? path.join(sharedDir(), 'res') : 'res');
 
 export function parseArgs(args) {
-  const opts = { ref: 'HEAD', pool: 'devbox-cn', shards: 1, timeout: 120, fetchTimeout: 15, artifactFetch: 'all', artifactStreams: 1, retainHours: 24, artifacts: [], env: {}, days: 7, need: [], excludeSlot: [], excludeHost: [], inputs: [] };
+  const opts = { ref: 'HEAD', pool: 'devbox-cn', shards: 1, timeout: 120, fetchTimeout: 15, artifactTimeout: 120, artifactFetch: 'all', artifactStreams: 1, retainHours: 24, artifacts: [], env: {}, days: 7, need: [], excludeSlot: [], excludeHost: [], inputs: [] };
   if (args[0] === 'gc') { opts.gc = true; args = args.slice(1); }
   if (args[0] === 'prewarm') { opts.prewarm = true; opts.ref = 'main'; opts.task = 'prewarm'; args = args.slice(1); }
-  const names = new Map(['project', 'task', 'repo', 'ref', 'pool', 'shards', 'out', 'timeout', 'prefer-host', 'watch-pid', 'affinity', 'host', 'days', 'units-file', 'command', 'fetch-timeout', 'artifact-fetch', 'artifact-streams', 'retain-hours', 'exclude-reason', 'prefer-slot', 'warm-cost', 'inputs'].map(n => [`--${n}`, n.replace(/-([a-z])/g, (_, c) => c.toUpperCase())]));
+  const names = new Map(['project', 'task', 'repo', 'ref', 'pool', 'shards', 'out', 'timeout', 'prefer-host', 'watch-pid', 'affinity', 'host', 'days', 'units-file', 'command', 'fetch-timeout', 'artifact-timeout', 'artifact-fetch', 'artifact-streams', 'retain-hours', 'exclude-reason', 'prefer-slot', 'warm-cost', 'inputs'].map(n => [`--${n}`, n.replace(/-([a-z])/g, (_, c) => c.toUpperCase())]));
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === '--') { if (opts.command) throw Error('provide only one command'); opts.command = args.slice(i + 1).join(' '); break; }
@@ -94,6 +94,8 @@ export function parseArgs(args) {
   if (!Number.isFinite(opts.timeout) || opts.timeout <= 0 || opts.timeout > 120) throw Error('--timeout must be >0 and <=120 minutes');
   opts.fetchTimeout = Number(opts.fetchTimeout);
   if (!Number.isFinite(opts.fetchTimeout) || opts.fetchTimeout <= 0 || opts.fetchTimeout > 120) throw Error('--fetch-timeout must be >0 and <=120 minutes');
+  opts.artifactTimeout = Number(opts.artifactTimeout);
+  if (!Number.isFinite(opts.artifactTimeout) || opts.artifactTimeout <= 0 || opts.artifactTimeout > 120) throw Error('--artifact-timeout must be >0 and <=120 minutes');
   if (opts.watchPid && (!/^\d+$/.test(opts.watchPid) || Number(opts.watchPid) < 2)) throw Error('invalid --watch-pid');
   opts.repo = fs.realpathSync(opts.repo);
   if (opts.unitsFile) opts.unitsFile = path.resolve(opts.unitsFile);
@@ -266,11 +268,11 @@ function ownChild(child) {
     && child.signalCode === null && child.kill(sig);
 }
 
-export function execute(file, args, { input, inputFile, outputFile, onOutput, timeout = 60000, state, cancellable = true, rawCapture = !onOutput && !outputFile, interceptStderr, interceptStdout, env = process.env, strictOutput = true, deferOutputEnd = false } = {}) {
+export function execute(file, args, { input, inputFile, outputFile, appendOutput = false, onBytes, onOutput, timeout = 60000, state, cancellable = true, rawCapture = !onOutput && !outputFile, interceptStderr, interceptStdout, env = process.env, strictOutput = true, deferOutputEnd = false } = {}) {
   return new Promise(resolve => {
     const child = spawn(file, args, { stdio: ['pipe', 'pipe', 'pipe'], env });
     let stdout = '', stderr = '', stdoutBytes = 0, stdinBytes = 0, timedOut = false, spawnError, sinkFailed = false;
-    const sink = outputFile ? fs.createWriteStream(outputFile, { mode: 0o600 }) : null;
+    const sink = outputFile ? fs.createWriteStream(outputFile, { mode: 0o600, flags: appendOutput ? 'a' : 'w' }) : null;
     const rawDecoder = new StringDecoder('utf8');
     const out = lineSink(text => { if (!rawCapture) stdout = (stdout + text).slice(-2 * 1024 * 1024); onOutput?.(text, 'stdout'); }, state?.values, interceptStdout, strictOutput);
     const err = lineSink(text => { stderr = (stderr + text).slice(-2 * 1024 * 1024); onOutput?.(text, 'stderr'); }, state?.values, interceptStderr, strictOutput);
@@ -285,6 +287,7 @@ export function execute(file, args, { input, inputFile, outputFile, onOutput, ti
     child.stdin.on('error', () => {});
     child.stdout.on('data', chunk => {
       stdoutBytes += chunk.length;
+      onBytes?.(chunk.length);
       if (sink) { if (!sinkFailed && !sink.write(chunk)) child.stdout.pause(); }
       else if (rawCapture) {
         stdout += rawDecoder.write(chunk);
@@ -801,7 +804,7 @@ sys.exit(70)
   'artifact-range': pythonHeader + artifactRangePython,
   'artifact-release': pythonHeader + artifactRangePython.slice(0, artifactRangePython.indexOf('offset=d')) + `(ctl/'artifact-archive.tar').unlink()\n(ctl/'artifact-archive.json').unlink()\n`,
   artifacts: pythonHeader + retentionPython + `import glob, tarfile, hashlib, stat
-collection_started=time.monotonic(); transfer_seconds=0
+collection_started=time.monotonic()
 os.chdir(d['workspace']); names=set()
 for pattern in d['patterns']:
     if pathlib.PurePosixPath(pattern).is_absolute() or '..' in pathlib.PurePosixPath(pattern).parts: raise RuntimeError('artifact pattern must be workspace-relative')
@@ -817,15 +820,11 @@ for name in names:
     if p.is_symlink() or not p.resolve().is_relative_to(pathlib.Path.cwd()): raise RuntimeError('artifact leaves workspace')
     if not p.is_file(): raise RuntimeError('artifact special file refused')
     if any(x in ('.git','.ssh','.aws','.kube','.npmrc','.netrc') or x=='.env' or x.startswith('.env.') for x in p.parts) or p.suffix.lower() in ('.pem','.p12','.pfx','.key','.keystore'): raise RuntimeError('credential-related artifact refused')
-class TimedOutput:
+class DigestOutput:
     def __init__(self,destination): self.digest=hashlib.sha256(); self.destination=destination
     def write(self,payload):
-        global transfer_seconds
         self.digest.update(payload)
-        started=time.monotonic()
-        try:
-            return self.destination.write(payload)
-        finally: transfer_seconds+=time.monotonic()-started
+        return self.destination.write(payload)
 if d.get('fetch')=='manifest':
     ctl=pathlib.Path(d['control']); root=pathlib.Path(d['root'])
     if ctl.parent!=root/'runs' or ctl.is_symlink() or not ctl.resolve().is_relative_to(root.resolve()/'runs'):
@@ -860,28 +859,24 @@ if d.get('fetch')=='manifest':
     print(json.dumps(receipt))
     print('DEVBOX_ARTIFACT_COLLECTION='+json.dumps({'seconds':time.monotonic()-collection_started}),file=sys.stderr,flush=True)
     sys.exit(0)
-parallel=d.get('streams',1)>1 and sum(pathlib.Path(name).stat().st_size for name in names)>=64*1048576
-if parallel:
-    begin_retention(d)
-    ctl=pathlib.Path(d['control']); root=pathlib.Path(d['root'])
-    if ctl.parent!=root/'runs' or ctl.is_symlink() or not ctl.resolve().is_relative_to(root.resolve()/'runs'): raise RuntimeError('archive receipt outside runner root')
-    disk=os.statvfs(root)
-    parallel=disk.f_bavail*disk.f_frsize-sum(pathlib.Path(name).stat().st_size for name in names)-10485760>=53*1073741824
-if parallel:
-    destination=(ctl/'artifact-archive.tar').open('xb'); os.chmod(ctl/'artifact-archive.tar',0o600)
-else: destination=sys.stdout.buffer
-output=TimedOutput(destination)
+retention=begin_retention(d)
+ctl=pathlib.Path(d['control']); root=pathlib.Path(d['root'])
+disk=os.statvfs(root)
+reserved=sum(r['bytes'] for r in retained_inventory(root) if r.get('slot')==d['slot'])
+if disk.f_bavail*disk.f_frsize-sum(pathlib.Path(name).stat().st_size for name in names)-10485760-reserved<53*1073741824:
+    raise RuntimeError('artifact archive disk reservation guard')
+destination=(ctl/'artifact-archive.tar').open('xb'); os.chmod(ctl/'artifact-archive.tar',0o600)
+output=DigestOutput(destination)
 with tarfile.open(fileobj=output,mode='w|',bufsize=1048576) as tar:
     for name in sorted(names): tar.add(name,arcname=name,recursive=False)
 destination.flush()
-if parallel:
-    destination.close()
-    receipt={'run':ctl.name,'commit':d['commit'],'slot':d['slot'],'size':(ctl/'artifact-archive.tar').stat().st_size,'sha256':output.digest.hexdigest()}
-    (ctl/'artifact-archive.json').write_text(json.dumps(receipt))
-    print(json.dumps(receipt))
-    print('DEVBOX_ARTIFACT_PLAN='+json.dumps(receipt),file=sys.stderr,flush=True)
+destination.close()
+receipt={**retention,'control':str(ctl),'size':(ctl/'artifact-archive.tar').stat().st_size,'sha256':output.digest.hexdigest()}
+(ctl/'artifact-archive.json').write_text(json.dumps(receipt))
+print(json.dumps(receipt))
+print('DEVBOX_ARTIFACT_PLAN='+json.dumps(receipt),file=sys.stderr,flush=True)
 print('DEVBOX_ARTIFACT_SHA256='+output.digest.hexdigest(),file=sys.stderr,flush=True)
-print('DEVBOX_ARTIFACT_COLLECTION='+json.dumps({'seconds':max(0,time.monotonic()-collection_started-(0 if parallel else transfer_seconds))}),file=sys.stderr,flush=True)
+print('DEVBOX_ARTIFACT_COLLECTION='+json.dumps({'seconds':time.monotonic()-collection_started}),file=sys.stderr,flush=True)
 `,
 };
 
@@ -938,31 +933,30 @@ async function closeControlConnections(state) {
   delete state.sshControlDir; state.sshTargets?.clear(); state.sshControlPaths?.clear();
 }
 
-async function fetchArchiveRanges(row, data, plan, out, streams, state, deadline) {
+function validateArchivePlan(row, data, plan) {
   if (!Number.isSafeInteger(plan.size) || plan.size <= 0 || !/^[a-f0-9]{64}$/.test(plan.sha256)
       || plan.run !== path.posix.basename(data.control) || plan.commit !== data.commit || plan.slot !== row.slot) throw Error('invalid archive plan');
-  const parts = [], length = Math.ceil(plan.size / streams);
-  try {
-    const results = await Promise.allSettled(Array.from({ length: streams }, async (_, i) => {
-      const offset = i * length, bytes = Math.min(length, plan.size - offset);
-      const file = out + '.' + randomUUID() + '.part'; parts[i] = file;
-      checked(await ssh(row, 'artifact-range', { ...data, sha256: plan.sha256, offset, length: bytes },
-        { state, outputFile: file, cancellable: false, timeout: Math.max(1, deadline - Date.now()) }), 'archive range readback');
-      if (fs.statSync(file).size !== bytes) throw Error('archive range length mismatch');
-    }));
-    const failure = results.find(result => result.status === 'rejected');
-    if (failure) throw failure.reason;
-    const fd = fs.openSync(out, 'w', 0o600);
-    try {
-      for (const part of parts) for await (const chunk of fs.createReadStream(part)) {
-        let written = 0;
-        while (written < chunk.length) written += fs.writeSync(fd, chunk, written, chunk.length - written);
-      }
-    } finally { fs.closeSync(fd); }
-    if (await fileDigest(out) !== plan.sha256) throw Error('assembled archive SHA-256 mismatch');
-    checked(await ssh(row, 'artifact-release', { ...data, sha256: plan.sha256 },
-      { state, cancellable: false, timeout: Math.max(1, deadline - Date.now()) }), 'archive staging cleanup');
-  } finally { for (const part of parts) if (fs.existsSync(part)) fs.unlinkSync(part); }
+}
+
+async function fetchArchiveRanges(row, data, plan, out, streams, state, capMinutes, emit, shard) {
+  validateArchivePlan(row, data, plan);
+  emit(`[shard ${shard}] artifact archive bytes=${plan.size} streams=${streams} timeoutCap=${capMinutes} min\n`);
+  await readArchive(plan, out, { streams, capMinutes,
+    readRange: async ({ offset, length, ...options }) => {
+      if (state.cancel && state.cancel !== 124) return { code: state.cancel, fatal: true };
+      // Timed-out commands still return their logs; user/parent cancellation stops transfer children.
+      const transferState = { ...state, cancel: state.cancel === 124 ? 0 : state.cancel };
+      const result = await ssh(row, 'artifact-range', { ...data, sha256: plan.sha256, offset, length },
+        { ...options, appendOutput: true, state: transferState, noRetry: true });
+      return { ...result, fatal: Boolean(state.cancel && state.cancel !== 124)
+        || /Permission denied|Authentication failed|No supported authentication/i.test(result.stderr) };
+    },
+    onProgress: value => emit(`[shard ${shard}] artifact ${value.resuming ? 'resume ' + value.resumeCount + ': ' : ''}received=${value.receivedBytes}/${value.bytes} bytes (${value.percent.toFixed(1)}%) ${value.averageMBps.toFixed(2)} MB/s\n`),
+    onStats: value => { state.currentAttemptTiming.data.transferOut = value; },
+  });
+  const released = await ssh(row, 'artifact-release', { ...data, sha256: plan.sha256 },
+    { state, cancellable: false, timeout: 30000 });
+  return released;
 }
 
 async function recoverRunResult(row, data, state, offset, emit, privateBlockOpen = false, stdoutSink) {
@@ -1979,6 +1973,8 @@ async function shard(opts) {
         else if (/permission denied|gssapi|authentication failed/i.test(error.message)) attempt.authenticationBlocked = true;
         emit(`[shard ${opts.shard}] ${error.message}\n`);
       } finally {
+        // Execution has ended; readback has its own bounded connection budgets.
+        clearTimeout(timer);
         phases.phase('cleanup');
         if (data && prepared) {
           if (attempt.sshDropped) {
@@ -2056,28 +2052,44 @@ async function shard(opts) {
               emit(`[shard ${opts.shard}] failed command: manifest retention skipped; fetching artifacts normally\n`);
             }
             const streams = Math.min(opts.artifactStreams, Math.max(1, Math.floor(8 / opts.shards)));
-            const fetchDeadline = Date.now() + opts.fetchTimeout * 60000;
             const archive = path.join(opts.out, `shard-${opts.shard}-attempt-${attempts.length}.${manifestOnly ? 'manifest.json' : 'tar'}`);
             const fetched = await ssh(row, 'artifacts', { ...data, host: row.host, fetch: manifestOnly ? 'manifest' : 'all', retainHours: opts.retainHours, streams, patterns: opts.artifacts }, { outputFile: archive, cancellable: false, state, timeout: opts.fetchTimeout * 60000 });
             const planRecord = /DEVBOX_ARTIFACT_PLAN=(\{[^\n]*\})/.exec(fetched.stderr);
+            let recoveryManifest;
             if (!fetched.code && planRecord && !manifestOnly) {
               try {
                 const plan = JSON.parse(planRecord[1]);
-                await fetchArchiveRanges(row, data, plan, archive, streams, state, fetchDeadline);
-                attempt.artifactTransport = { method: 'parallel-ssh', streams, bytes: plan.size };
+                validateArchivePlan(row, data, plan);
+                attempt.artifactReceipt = plan;
+                recoveryManifest = archive.replace(/\.tar$/, '.manifest.json');
+                writeJSON(recoveryManifest, { ...plan, archive: true,
+                  artifacts: [{ name: 'artifact-archive.tar', size: plan.size, sha256: plan.sha256 }] });
+                const actualStreams = plan.size >= 64 * 1048576 ? streams : 1;
+                attempt.artifactTransport = { method: actualStreams > 1 ? 'parallel-ssh' : 'resumable-ssh', streams: actualStreams, bytes: plan.size };
+                const released = await fetchArchiveRanges(row, data, plan, archive, actualStreams, state, opts.artifactTimeout, emit, opts.shard);
+                attempt.artifactSha256 = plan.sha256;
+                if (released.code) {
+                  attempt.artifactReleaseError = `verified archive cleanup failed (${released.code})`;
+                  attempt.artifactsRetained = { host: row.host, slot: row.slot, control: data.control };
+                  attempt.artifactManifest = recoveryManifest;
+                } else fs.unlinkSync(recoveryManifest);
               } catch (error) { fetched.code = error.code || 74; attempt.artifactIntegrityError = error.message; }
             }
             const collection = /DEVBOX_ARTIFACT_COLLECTION=(\{[^\n]*\})/.exec(fetched.stderr);
             if (collection) { try { phases.artifact(JSON.parse(collection[1]).seconds); } catch {} }
             if (!fetched.code && !manifestOnly) {
-              const expected = /DEVBOX_ARTIFACT_SHA256=([a-f0-9]{64})/.exec(fetched.stderr)?.[1];
-              if (!expected || await fileDigest(archive) !== expected) { fetched.code = 74; attempt.artifactIntegrityError = 'archive SHA-256 mismatch or missing remote digest'; }
-              else attempt.artifactSha256 = expected;
+              if (!attempt.artifactSha256) { fetched.code = 74; attempt.artifactIntegrityError = 'missing remote archive plan'; }
             }
             if (fetched.code) {
-              attempt.artifactExit = fetched.code; attempt.exit ||= fetched.code;
+              attempt.artifactExit = fetched.code;
               attempt.artifactsLeft = { slot: row.slot, host: row.host, workspace: data.workspace, patterns: opts.artifacts };
-              emit(`[shard ${opts.shard}] artifact fetch failed (${fetched.code}${fetched.code === 124 ? `, timed out after ${opts.fetchTimeout} min; raise --fetch-timeout` : ''}); command succeeded and artifacts remain on ${row.slot} (${row.host}) under ${data.workspace} matching ${opts.artifacts.join(' ')} until the slot is reused\n`);
+              if (recoveryManifest && fs.existsSync(recoveryManifest)) {
+                attempt.retainedRemotely = true;
+                attempt.artifactManifest = recoveryManifest;
+                attempt.artifactsRetained = { host: row.host, slot: row.slot, control: data.control };
+                attempt.fetchArtifactCommand = `${quote(process.execPath)} ${quote(script)} fetch-artifact --manifest ${quote(recoveryManifest)} --name artifact-archive.tar --out ${quote(archive + '.recovered.tar')} --timeout ${opts.artifactTimeout}`;
+                emit(`[shard ${opts.shard}] artifact readback failed (${fetched.code}); command exit=${attempt.exit}; retainedRemotely on ${row.host} under ${data.control} for ${opts.retainHours} hours\n${attempt.fetchArtifactCommand}\n`);
+              } else emit(`[shard ${opts.shard}] artifact collection failed (${fetched.code}); command exit=${attempt.exit}; no verified retained archive; artifacts remain on ${row.slot} (${row.host}) under ${data.workspace} until slot reuse\n`);
             }
             else if (manifestOnly) {
               attempt.artifactManifest = archive;
@@ -2209,7 +2221,7 @@ export async function fetchArtifact(args) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'devbox-artifact-fetch-'));
   const placementFile = path.join(temp, 'placement.json');
   const placementOpts = { placementInputs: manifest([{ name: 'retained-artifact', hash: artifact.sha256,
-    rebuildable: false, cost: '0s', size: artifact.size / GiB, path: `${receipt.control}/artifacts/${artifact.name}` }]) };
+    rebuildable: false, cost: '0s', size: artifact.size / GiB, path: receipt.archive ? `${receipt.control}/artifact-archive.tar` : `${receipt.control}/artifacts/${artifact.name}` }]) };
   const by = `artifact-fetch-${process.pid}-${randomUUID()}`;
   const state = cancellationState();
   const stop = () => state.stop(143);
@@ -2251,7 +2263,8 @@ export async function fetchArtifact(args) {
     if (!leasedRow || !sameOwner(leasedRow)) throw Error('artifact lease selected a different host/user');
     const hold = readHold(leasedRow);
     if (hold?.fields.by !== by || hold.fields.pid !== String(process.pid)) throw Error('artifact lease ownership changed');
-    checked(await ssh(leasedRow, 'fetch-artifact', { ...receipt, root, artifact },
+    checked(await ssh(leasedRow, receipt.archive ? 'artifact-range' : 'fetch-artifact',
+      { ...receipt, root, artifact, ...(receipt.archive ? { sha256: artifact.sha256, offset: 0, length: artifact.size } : {}) },
       { state, outputFile: partial, timeout: Math.max(1, deadline - Date.now()) }), 'artifact readback');
     if (fs.statSync(partial).size !== artifact.size || await fileDigest(partial) !== artifact.sha256) throw Error('artifact size/SHA-256 mismatch');
     fs.linkSync(partial, out); fs.unlinkSync(partial);
@@ -2409,8 +2422,8 @@ async function main(args) {
   }
   const opts = parseArgs(args);
   if (opts.help) {
-    console.log('Artifacts: --artifact-fetch all|manifest (default all); --artifact-streams 1..4 (default 1); --retain-hours HOURS (default 24, max 72); --retain-on-fail; fetch-artifact --manifest FILE --name NAME --out FILE [--timeout MIN]; list-retained [--host IP]; retire-artifacts --receipt UUID [--host IP]');
-    console.log('Usage: devbox-run.mjs [--project P] --task T --repo PATH [--ref COMMIT|HEAD|worktree] [--pool devbox-cn|devbox-cn-light] [--shards N|auto] [--units-file PATH] [--artifact GLOB]... [--fetch-timeout MIN] [--out DIR] [--timeout MIN] [--env K=V]... [--rerun-on-fail] [--allow-flaky] [--affinity KEY] [--prefer-host IP] [--prefer-slot ID] [--need CAP]... [--exclude-slot IDS] [--exclude-host IPS] [--exclude-reason TEXT] [--submodules] [--watch-pid PID] [--input MANIFEST]... [--inputs JSON] [--warm-cost DURATION] -- COMMAND\n       devbox-run.mjs prewarm --project P --repo PATH [--ref main] [--command COMMAND] [--need CAP]... [--input MANIFEST]...\n       devbox-run.mjs gc [--host IP] [--days N]\n       devbox-run.mjs stop --out DIR --run-id UUID\nCOMMAND supports {shard}, {shards} and {units}. Timeout includes queue/upload/run; cleanup follows. See references/devbox-run.md.');
+    console.log('Artifacts: --artifact-fetch all|manifest (default all); --artifact-timeout MIN (size-scaled connection cap, default 120); --artifact-streams 1..4 (default 1); --retain-hours HOURS (default 24, max 72); --retain-on-fail; fetch-artifact --manifest FILE --name NAME --out FILE [--timeout MIN]; list-retained [--host IP]; retire-artifacts --receipt UUID [--host IP]');
+    console.log('Usage: devbox-run.mjs [--project P] --task T --repo PATH [--ref COMMIT|HEAD|worktree] [--pool devbox-cn|devbox-cn-light] [--shards N|auto] [--units-file PATH] [--artifact GLOB]... [--fetch-timeout MIN] [--artifact-timeout MIN] [--out DIR] [--timeout MIN] [--env K=V]... [--rerun-on-fail] [--allow-flaky] [--affinity KEY] [--prefer-host IP] [--prefer-slot ID] [--need CAP]... [--exclude-slot IDS] [--exclude-host IPS] [--exclude-reason TEXT] [--submodules] [--watch-pid PID] [--input MANIFEST]... [--inputs JSON] [--warm-cost DURATION] -- COMMAND\n       devbox-run.mjs prewarm --project P --repo PATH [--ref main] [--command COMMAND] [--need CAP]... [--input MANIFEST]...\n       devbox-run.mjs gc [--host IP] [--days N]\n       devbox-run.mjs stop --out DIR --run-id UUID\nCOMMAND supports {shard}, {shards} and {units}. Timeout includes queue/upload/run; cleanup follows. See references/devbox-run.md.');
     return 0;
   }
   if (opts.gc) {

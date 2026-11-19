@@ -62,7 +62,8 @@ repositories remain on RemoteX / TT-VEIS, rather than these devbox worktrees.
 | `--units-file PATH` | One source-relative test file per line; units are balanced and invoked separately |
 | `--timeout MIN` | Positive minutes, at most 120, default 120; bounds each shard's queue, transfer and command together |
 | `--artifact GLOB` | Repeatable, workspace-relative files; fetched into one tar per shard attempt |
-| `--fetch-timeout MIN` | Artifact readback limit per shard attempt (default 15, max 120). On failure the summary records `artifactsLeft` (slot, host, workspace, patterns); the files stay on the slot until it is reused |
+| `--fetch-timeout MIN` | Remote artifact collection/manifest budget (default 15, max 120) |
+| `--artifact-timeout MIN` | Archive connection timeout cap (default 120, >0 and <=120). Each connection gets `min(cap, max(15 min, announced bytes / 0.2 MB/s))`; interrupted reads resume up to three times |
 | `--out DIR` | Logs and summary; defaults to a unique directory in the local temporary directory; refuses to overwrite a previous run |
 | `--env K=V` | Repeatable explicit command environment; credential-related and SSH/Git configuration variables are refused |
 | `--affinity KEY` | Defaults to repository identity + branch/ref |
@@ -484,8 +485,8 @@ install or schedule a nightly job.
 
 A successful rerun sets `flaky: true` and appends project, task, command hash,
 shard, both hosts and time to `_shared/flaky-log.jsonl`. Without
-`--allow-flaky`, the original failure remains the exit status. Failure to fetch
-a requested artifact also fails the run. Artifact tars retain relative names;
+`--allow-flaky`, the original failure remains the exit status. Artifact readback
+failures are recorded separately and preserve the command exit. Artifact tars retain relative names;
 inspect with `tar -tf` and extract them into a destination you choose.
 
 ## Shared storage and incremental builds
@@ -885,17 +886,30 @@ returns `shard-N-attempt-M.manifest.json`, containing the source commit, host,
 slot, run receipt directory, and each selected file's `name`, `size`, and
 `sha256`. Existing workspace-relative artifact globs and transfer checks apply.
 
-The default stays a direct, uncompressed, hash-checked tar stream. Opt-in
-`--artifact-streams 2..4` stages large all-mode archives (at least 64 MiB) once,
-hashes them, and reads them back in independent AES-128-GCM SSH ranges with
-compression off. Real CN measurements did not establish a stable parallel
-gain, so parallelism is not the default. The
-assembled archive is hash-checked before the exact staged archive is removed.
-The stream budget decreases with shard count; eight or more shards keep one
-stream each. Small artifacts keep the direct tar stream. When staging cannot
-keep the 53 GiB reserve, all mode falls back to the direct stream rather than
-rejecting an otherwise readable artifact. Failed staged transfers preserve the
-exact archive receipt for recovery.
+All mode stages an uncompressed tar in the UUID receipt directory, hashes it,
+and announces its exact size before any archive bytes are transferred. The
+default uses one independent SSH range stream. Opt-in `--artifact-streams 2..4`
+uses parallel ranges for archives at least 64 MiB, with compression off and
+AES-128-GCM preferred. The stream budget decreases with shard count; eight or
+more shards keep one stream each. Staging must keep the 53 GiB disk reserve;
+if it cannot, collection reports the guard failure separately from the command.
+
+Broken or timed-out ranges append from their received offset, with up to three
+resumes across the attempt. Each new connection gets the size-scaled timeout
+above. A SHA-256 mismatch discards the local bytes and allows one full restart.
+The remote archive stays until local verification succeeds. Progress prints
+received bytes, percent and average MB/s every 30 seconds; the attempt records
+`phaseTimings.transferOut.averageMBps`, `resumeCount`, `restartCount` and bytes.
+The command timeout ends before artifact readback and cleanup.
+
+An exhausted readback preserves the command's exit status, records
+`artifactExit` and `retainedRemotely`, keeps local partial files, and writes an
+archive recovery manifest plus the exact `fetch-artifact` command in the log
+and `attempt.fetchArtifactCommand`. Fetch that manifest with
+`--name artifact-archive.tar` to retrieve the immutable tar. Archive receipts
+follow the same TTL, disk accounting, `list-retained` and `retire-artifacts`
+rules as named copies. Collection failures before a verified archive exists
+record `artifactsLeft`; those workspace files remain only until slot reuse.
 
 ```sh
 node scripts/devbox-run.mjs --project PROJECT --task TASK --repo REPO \
