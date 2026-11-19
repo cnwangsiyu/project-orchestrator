@@ -25,6 +25,7 @@ import {mcpStartupMonitor} from './lib/mcp-startup.mjs';
 //   codex-worker interrupt --thread ID
 //   codex-worker status --thread ID
 //   codex-worker mine | watch [--owner SESSION_ID] [--debounce-sec N]                      (owner-scoped durable inbox; watch is a tracked background task)
+//   codex-worker retire --thread ID [--owner SESSION_ID] [--reason TEXT]                  (retire an ended or unreachable tracked worker)
 //   codex-worker rules-push [--owner SESSION_ID | --all]                                  (check running workers' digest versions)
 //   codex-worker list   [--cwd DIR] [--search TEXT] [--limit N]
 //   codex-worker quota                                                     (the account's rate-limit windows, JSON)
@@ -74,7 +75,8 @@ import { maskPasswordStyleValues } from './lib/nightly-audit.mjs';
 import { canonicalPathOptions, canonicalBriefPrompt } from './lib/launch-paths.mjs';
 import { requestBoardRefresh } from './lib/board-refresh.mjs';
 import { lifecycle, resolveOwner, validOwner, inbox, readEvents, readAck, eventLine, watch, signalExit, appendEvent, setEventObserver,
-  saveWorkerContext, workerContext, answerQuestion, followerAlive } from './lib/worker-events.mjs';
+  saveWorkerContext, workerContext, answerQuestion, followerAlive, retiredWorkers, workerKey, retireWorker } from './lib/worker-events.mjs';
+import { runningWorker, trackedWorkers } from './lib/worker-running.mjs';
 setEventObserver(requestBoardRefresh);
 // What a TRAE pause covers: one model family (route.mjs moves to the next family) or the whole account.
 const pausedWhat = (p) => (p.pool ? `TRAE's ${p.pool} models are paused` : 'TRAE is paused');
@@ -90,6 +92,21 @@ const writeAccounts = (reg) => {
   const t = `${ACCOUNTS}.${process.pid}`; fs.writeFileSync(t, JSON.stringify(reg, null, 1)); fs.renameSync(t, ACCOUNTS);
 };
 const argv = process.argv.slice(2);
+const commands = new Set(['hub', 'start', 'turn', 'wait', 'steer', 'note', 'ask', 'reply', 'interrupt', 'status',
+  'mine', 'watch', 'retire', 'rules-push', 'list', 'quota', 'usage', 'reset-credits', 'reset-credit-use', 'accounts',
+  'account-add', 'browser-setup', 'computer-use-setup', 'ttadk-setup', 'trae-setup', 'probe', 'note-failure',
+  'proxy', 'search-proxy', 'browser-health']);
+const usage = `usage: codex-worker [--account NAME] <command> ...\ncommands: ${[...commands].join(' | ')}\nretire --thread ID [--owner SESSION_ID] [--reason TEXT]; mine [--all]\n`;
+// Help/usage errors must exit before tracker registration, account lookup, or hub access.
+if (argv.includes('--help') || argv.includes('-h') || argv[0] === 'help') {
+  process.stdout.write(usage); process.exit(0);
+}
+const commandArgs = [...argv];
+const commandAccountIndex = commandArgs.indexOf('--account');
+if (commandAccountIndex >= 0) commandArgs.splice(commandAccountIndex, 2);
+if (!commands.has(commandArgs[0])) {
+  process.stderr.write(`codex-worker: ${commandArgs[0] ? `unknown command ${commandArgs[0]}\n` : ''}${usage}`); process.exit(2);
+}
 const followerStartedAt = Date.now();
 const ai = argv.indexOf('--account');
 const account = ai >= 0 ? argv.splice(ai, 2)[1] : ['note', 'ask'].includes(argv[0]) ? process.env.CODEX_WORKER_ACCOUNT || null : null;
@@ -259,6 +276,24 @@ if (cmd === 'rules-push') {
       process.stdout.write(lines.join('\n') + '\n', error => error ? reject(error) : resolve()));
     process.exit(lines.some(line => line.startsWith('NOT DELIVERED')) ? 1 : 0);
   } catch (e) { die(e.message, 1); }
+} else if (cmd === 'retire') {
+  try {
+    if (typeof opts.thread !== 'string' || !validOwner(opts.thread)) die('retire needs --thread <public thread-id>');
+    if (opts.reason !== undefined && (typeof opts.reason !== 'string' || !opts.reason.trim())) die('--reason needs text');
+    const owner = resolveOwner(opts.owner);
+    if (!validOwner(owner)) die('retire needs the launching session (--owner <session-id> or ORCHESTRATOR_OWNER)');
+    const events = reconcileTurnEvents(readEvents());
+    const row = trackedWorkers(events, owner).find(row => row.account === (account ?? 'main') && row.thread === opts.thread);
+    if (!row) die('no tracked worker for this launching owner/account/thread');
+    const context = workerContext(row.account, row.thread, true);
+    if (context?.owner && context.owner !== owner) die('retire belongs to a different launching owner');
+    const state = await runningWorker(row, { claudeWorkers: activeClaudeWorkers });
+    if (state.running === true) die(`retire refused: a turn is running (${state.turn ?? 'follower'})`);
+    if (state.running === null && followerAlive(row)) die('retire refused: live follower; hub status unconfirmed');
+    retireWorker(row, opts.reason ?? state.reason);
+    console.log(`retired account=${row.account} thread=${row.thread} (${opts.reason ?? state.reason})`);
+    process.exit(0);
+  } catch (e) { die(e.message, e.exitCode ?? 1); }
 } else if (cmd === 'watch' || cmd === 'mine') {
   let owner;
   try { owner = resolveOwner(opts.owner); } catch (e) { die(e.message, e.exitCode ?? 2); }
@@ -278,10 +313,13 @@ if (cmd === 'rules-push') {
     try { process.exit(await watch(owner, undefined, { debounceSec, rulesPoll })); } catch (e) { die(e.message, 1); }
   }
   const events = reconcileTurnEvents(readEvents()), current = inbox(events, owner, readAck(owner));
+  const retired = retiredWorkers(events.filter(row => row.owner === owner));
+  const visible = row => opts.all || !retired.has(workerKey(row));
   for (const row of current.unresolved) console.log(`unresolved owner ${row.ownerOriginal}: ${row.ownerResolution} (${row.ownerMatches?.join(', ')||'no full owner in events'}) event=${row.id}`);
-  for (const row of current.pending) console.log(eventLine(row));
+  for (const row of current.pending.filter(visible)) console.log(eventLine(row));
   const pendingIds = new Set(current.pending.map((row) => row.id));
-  for (const row of current.questions) if (!pendingIds.has(row.id)) console.log(eventLine(row));
+  for (const row of current.questions.filter(visible)) if (!pendingIds.has(row.id)) console.log(eventLine(row));
+  if (opts.all) for (const row of retired.values()) console.log(`${row.name}\tretired\tthread=${row.thread} account=${row.account} owner=${row.owner} reason=${row.reason ?? '-'}`);
   // Only query already-known threads; never start a hub or a replacement from mine.
   let rulesVersion, claude;
   try { rulesVersion = loadDigest().version; } catch {}
@@ -308,6 +346,7 @@ if (cmd === 'rules-push') {
     const startedAt = events.find(event => event.runId === row.runId && event.event === 'running')?.t ?? row.t;
     console.log(`${row.name}\t${status === 'inProgress' ? 'running (hub)' : status}${row.stale && status === 'unknown' ? ' (stale follower; hub status unconfirmed)' : ''}\t${row.outFile ?? '-'}\tthread=${row.followerCommand === 'exec' ? 'exec' : row.thread ?? '-'} account=${row.account} model=${row.model ?? '?'} effort=${row.effort ?? '?'} project=${row.project ?? '?'} task=${row.task ?? row.name ?? '?'} owner=${row.owner} started=${new Date(startedAt).toISOString()} ${workerRulesLabel(row, rulesVersion)}`);
   }
+  if (current.running.some(row => row.stale)) console.log(`hint: retire finished stale followers with codex-worker retire --thread <id> --account <account> --owner ${owner}`);
   process.exit(0);
 }
 if ((cmd === 'start' || cmd === 'turn') && typeof opts.effort !== 'string') die(`${cmd} needs --effort (the catalog default may be low)`);

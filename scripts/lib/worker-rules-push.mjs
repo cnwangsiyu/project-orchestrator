@@ -5,10 +5,10 @@ import { promisify } from 'node:util';
 import { digestFile, loadDigest, rulesShared } from './global-rules.mjs';
 import { addedRuleLines, compareVersion } from './rules-delivery.mjs';
 import { hubRPC } from './hub-state.mjs';
-import { MAIN_PROFILE, readProfiles } from './state.mjs';
 import { acquireLock, writeJson } from './shared-file.mjs';
-import { contextFile, followerAlive, inbox, readEvents, workerKey } from './worker-events.mjs';
+import { contextFile, followerAlive, readEvents } from './worker-events.mjs';
 import { reconcileTurnEvents } from './worker-turn.mjs';
+import { runningWorker, terminalWorker, trackedWorkers, workerHub } from './worker-running.mjs';
 
 const runFile = promisify(execFile);
 const versionPattern = /^\d{4}-\d{2}-\d{2}\.\d+$/;
@@ -68,13 +68,12 @@ export const activeClaudeWorkers = async () => {
   const { stdout } = await runFile('claude', ['agents', '--json'], { timeout: DELIVERY_TIMEOUT_MS, maxBuffer: 1024 * 1024 });
   const sessions = JSON.parse(stdout);
   if (!Array.isArray(sessions)) throw Error('invalid Claude agent list');
-  return new Set(sessions.filter(row => row && !['completed', 'finished', 'failed', 'stopped', 'idle'].includes(row.status))
+  return new Set(sessions.filter(row => row && ['working', 'running', 'inProgress', 'busy'].includes(row.status))
     .flatMap(row => [row.sessionId, row.session_id, row.id]).filter(id => typeof id === 'string'));
 };
 
 const steer = async (row, message) => {
-  const profile = readProfiles()[row.account];
-  const hub = profile?.hub ?? (row.account === 'main' ? process.env.CODEX_HUB ?? MAIN_PROFILE.hub : null);
+  const hub = workerHub(row);
   if (!hub) throw Error('account hub is not configured');
   // The server compares the turn ID atomically. A completion or a new turn can race the local tracker.
   const result = await hubRPC(hub, 'turn/steer', { threadId: row.thread, expectedTurnId: row.turn,
@@ -82,34 +81,46 @@ const steer = async (row, message) => {
   if (result?.turnId !== row.turn) throw Error('hub did not confirm the expected turn');
 };
 
-const running = (owner) => {
-  const rows = reconcileTurnEvents(readEvents());
-  const owners = owner ? [owner] : [...new Set(rows.map(row => row.owner ?? null))];
-  const candidates = new Map();
-  for (const id of owners) for (const row of inbox(rows, id).running) {
-    if ((row.followerCommand === 'exec' || !row.thread) && !followerAlive(row)) continue;
-    const key = workerKey(row), prior = candidates.get(key);
-    // A reattached wait may duplicate a launch. Keep the injection evidence for the same turn.
-    if (prior && prior.turn === row.turn && prior.rulesVersion && !row.rulesVersion) continue;
-    candidates.set(key, row);
-  }
-  return [...candidates.values()];
+const targetFile = row => {
+  const id = row.followerCommand === 'exec' || !row.thread ? row.runId : row.thread;
+  contextFile(row.account, id);
+  return path.join(rulesShared(), 'worker-rule-targets', row.account, `${id}.json`);
+};
+const targetState = (row, skipped, reason) => {
+  const file = targetFile(row), unlock = acquireLock(file, { timeoutMs: 0, ownerPid: true });
+  if (!unlock) throw Error('target state is locked');
+  try {
+    const prior = readJson(file);
+    if (prior?.skipped === skipped || !prior && !skipped) return false;
+    writeJson(file, { skipped, reason, at: Date.now() });
+    return true;
+  } finally { unlock(); }
 };
 
 export const pushWorkerRules = async ({ owner, digest = loadDigest(), onWork = () => {} } = {}) => {
-  const rows = running(owner);
+  const rows = trackedWorkers(reconcileTurnEvents(readEvents()), owner);
   if (!rows.length) return [];
   onWork();
   let claude;
   const results = await Promise.all(rows.map(async row => {
     const label = `account=${row.account} thread=${row.thread ?? '-'} worker=${String(row.name ?? row.runId).replace(/\s+/g, ' ').slice(0, 120)}`;
     const undelivered = reason => `NOT DELIVERED ${label} (${reason})`;
+    const unconfirmed = reason => `UNCONFIRMED ${label} (${reason})`;
+    const skipped = reason => targetState(row, true, reason) ? `SKIPPED ${label} (not running: ${reason})` : null;
     try {
+      if (row.event === 'retired') return null;
+      if (terminalWorker(row)) return skipped(row.status ?? row.event);
+      const state = await runningWorker(row, { claudeWorkers: () => claude ??= activeClaudeWorkers() });
+      if (state.running === false) return skipped(state.reason);
+      if (state.running === null) return row.stale || !followerAlive(row)
+        ? skipped(`stale follower; ${state.reason}`) : unconfirmed(state.reason);
+      targetState(row, false);
+      // Hub evidence supplies a missing/new turn; a receipt for the old turn cannot cover it.
+      const target = state.turn && state.turn !== row.turn ? { ...row, turn: state.turn, rulesVersion: null } : row;
+      row = target;
       let version = workerRulesVersion(row);
       if (!isOlder(version, digest.version)) return null;
       if (row.followerCommand === 'claude') {
-        try { claude ??= activeClaudeWorkers(); if (!(await claude).has(row.thread)) return null; }
-        catch { return undelivered('Claude running status unavailable'); }
         return undelivered('Claude background sessions have no supported steer transport');
       }
       if (row.followerCommand === 'exec') return undelivered('one-shot exec has no hub steer transport');
@@ -129,7 +140,15 @@ export const pushWorkerRules = async ({ owner, digest = loadDigest(), onWork = (
         writeJson(file, { turn: row.turn, version: digest.version });
         return `delivered ${label} ${version} -> ${digest.version}${message ? '' : ' (no added or changed worker rules)'}`;
       } finally { unlock(); }
-    } catch { return undelivered('hub did not confirm delivery or receipt could not be recorded'); }
+    } catch {
+      const state = await runningWorker(row, { claudeWorkers: () => claude ??= activeClaudeWorkers() });
+      try {
+        if (state.running === false) return skipped(state.reason);
+        if (state.running === null) return row.stale || !followerAlive(row)
+          ? skipped(`stale follower; ${state.reason}`) : unconfirmed(state.reason);
+      } catch { return unconfirmed('worker target state could not be recorded'); }
+      return undelivered('hub did not confirm delivery or receipt could not be recorded');
+    }
   }));
   return results.filter(Boolean);
 };

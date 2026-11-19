@@ -26,7 +26,7 @@ const clean = (value, limit = 2000) => typeof value === 'string' ? value.replace
 const live = (pid) => { try { return Number.isInteger(pid) && pid > 0 && (process.kill(pid, 0), true); } catch (e) { return e.code === 'EPERM'; } };
 const talkback = (row) => ['message', 'question', 'answered'].includes(row.event);
 const terminal = (row) => !talkback(row) && row.event !== 'running';
-const notification = (row) => row.event !== 'running' && row.event !== 'observed' && row.event !== 'answered';
+const notification = (row) => row.event !== 'running' && row.event !== 'observed' && row.event !== 'answered' && row.event !== 'retired';
 const waking = (row) => notification(row) && (row.event !== 'message' || row.wake !== false);
 export const followerAlive = (row) => live(row.pid);
 // Exec JSON may contain a session ID, but it is not a registered hub thread.
@@ -43,9 +43,18 @@ export const workerRunStates = rows => {
   });
   return latest;
 };
+// Retirement applies to the thread until a later tracked launch/turn attaches.
+export const retiredWorkers = rows => {
+  const retired = new Map();
+  for (const row of rows) {
+    if (row.event === 'retired') retired.set(workerKey(row), row);
+    else if (row.event === 'running' && !row.settled) retired.delete(workerKey(row));
+  }
+  return retired;
+};
 const parseRows = (text) => text.split('\n').flatMap((line) => {
   try { const row = JSON.parse(line); return typeof row?.id === 'string' && typeof row.runId === 'string' && Number.isFinite(row.t)
-    && (row.owner == null || validOwner(row.owner)) && ['running', 'finished', 'failed', 'stalled', 're-routed', 'needs-user', 'follower-ended', 'observed', 'message', 'question', 'answered'].includes(row.event) ? [row] : []; } catch { return []; }
+    && (row.owner == null || validOwner(row.owner)) && ['running', 'finished', 'completed', 'failed', 'cancelled', 'retired', 'stalled', 're-routed', 'needs-user', 'follower-ended', 'observed', 'message', 'question', 'answered'].includes(row.event) ? [row] : []; } catch { return []; }
 });
 const readText = (file) => { try { return fs.readFileSync(file, 'utf8'); } catch (e) { if (e.code === 'ENOENT') return ''; throw e; } };
 const fullOwner = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
@@ -189,6 +198,7 @@ export const inbox = (rows, owner, ack = emptyAck(owner), now = Date.now()) => {
   if(matches.length===1) owner=matches[0];
   const unresolved = rows.filter(row=>['ambiguous','unmatched'].includes(row.ownerResolution));
   const own = rows.filter((row) => row.owner === owner && !['ambiguous','unmatched'].includes(row.ownerResolution)), latest = workerRunStates(own), turns = new Map(), threads = new Map();
+  const retired = retiredWorkers(own);
   own.forEach((row, i) => {
     if (talkback(row)) return;
     if (row.event === 'observed' && latest.get(JSON.stringify([row.account, row.runId]))?.row.turn !== row.turn) return;
@@ -198,7 +208,7 @@ export const inbox = (rows, owner, ack = emptyAck(owner), now = Date.now()) => {
     }
   });
   const running = [...latest.values()].filter(({ row, i }) => {
-    if (row.settled || !(row.event === 'running' || row.mayRun)) return false;
+    if (retired.has(workerKey(row)) || row.settled || !(row.event === 'running' || row.mayRun)) return false;
     const settled = processWorker(row) ? undefined : row.turn ? turns.get(JSON.stringify([row.account, row.thread, row.turn]))
       : row.thread ? threads.get(JSON.stringify([row.account, row.thread])) : undefined;
     return settled === undefined || settled < i;
@@ -224,6 +234,7 @@ const compactLocked = (state, now = Date.now()) => {
   atomicSync(sequenceFile(), JSON.stringify({ ...state, nextSeq: seq }));
   if (migrating) atomicSync(eventFile(), rows.map((row) => JSON.stringify(row)).join('\n') + '\n');
   const keep = new Set(rows.slice(-64).map((row) => row.id));
+  for (const row of retiredWorkers(rows).values()) keep.add(row.id);
   // Unresolved owners remain visible until they can be resolved; retain one
   // full UUID anchor per owner so later short-key completions have evidence.
   const anchors=new Map();
@@ -297,6 +308,12 @@ const appendLocked = (row) => {
   return record;
 };
 export const appendEvent = (row) => withEventLock(() => appendLocked(row));
+export const retireWorker = (row, reason) => withEventLock(() => {
+  const latest = readEvents().findLast(current => !talkback(current) && workerKey(current) === workerKey(row));
+  if (!latest || latest.id !== row.id || latest.owner !== row.owner) throw Error('retire refused: worker state changed; retry');
+  if (latest.event === 'retired') return latest;
+  return appendLocked({ ...row, event: 'retired', settled: true, mayRun: false, reason, finalLine: '', status: 'retired' });
+});
 
 const publicPair = (account, thread) => {
   if (![account, thread].every(validOwner)) throw Error('invalid public account/thread identifier');

@@ -557,7 +557,18 @@ and both returned the right file contents.
 
 Stop and SessionStart hooks and `codex-worker watch` push worker digest changes to running hub turns.
 Use `codex-worker mine --owner <session-id>` to see running workers' versions and
-`codex-worker rules-push --owner <session-id>` to retry. Act on any `NOT DELIVERED` line.
+`codex-worker rules-push --owner <session-id>` to retry. Pushes target running turns; finished workers and
+stale followers whose hub status cannot be confirmed print `SKIPPED (not running: <reason>)` once per worker,
+then stay silent until observed running again. A confirmed running worker that cannot be steered still prints
+`NOT DELIVERED` on every retry. A live follower with unavailable hub status prints `UNCONFIRMED` and is retried.
+
+Use `codex-worker retire --thread <id> --account <account> [--owner <launching-session-id>] [--reason <text>]`
+to retire finished or unreachable stale workers. Ownership comes from `ORCHESTRATOR_OWNER` or the explicit
+launching session; another owner cannot retire the worker. Retirement probes the configured hub without
+starting it and refuses a confirmed running turn or a live follower whose turn cannot be confirmed.
+`mine` hides retired workers by default; `mine --all` includes them and their retirement reasons. A later
+tracked start/turn/wait revives the thread automatically. Retirement does not interrupt a turn or delete
+its result, context, or pending completion. Help and unknown commands do not create tracker records.
 
 ## Differences from Claude workers
 
