@@ -913,15 +913,25 @@ export async function makeBundle(snapshot, known, state) {
 
 // Local short critical sections merge shared JSON without losing another shard's host/key.
 async function withStateLock(file, operation, maxAttempts = 1500) {
-  const lock = `${file}.lock`;
+  const lock = `${file}.lock`, owner = path.join(lock, 'owner');
   for (let attempt = 0; ; attempt++) {
     try { fs.mkdirSync(lock); break; }
     catch (error) {
-      if (error.code !== 'EEXIST' || attempt === maxAttempts) throw error;
+      if (error.code !== 'EEXIST') throw error;
+      // BC-145: a holder that died (killed runner) must not block later runs.
+      let holder = null, age = 0;
+      try { holder = Number(fs.readFileSync(owner, 'utf8')); } catch { /* owner not written yet */ }
+      try { age = Date.now() - fs.statSync(lock).mtimeMs; } catch { continue; }
+      let dead = false;
+      if (Number.isInteger(holder) && holder > 0) { try { process.kill(holder, 0); } catch (e) { dead = e.code === 'ESRCH'; } }
+      else dead = age > 30000;
+      if (dead) { try { fs.rmSync(lock, { recursive: true, force: true }); } catch { /* another waiter removed it */ } continue; }
+      if (attempt >= maxAttempts) throw Error(`state lock busy: ${lock} held by pid ${holder ?? 'unknown'} for ${Math.round(age / 1000)}s`);
       await pause(50);
     }
   }
-  try { return await operation(); } finally { fs.rmdirSync(lock); }
+  try { fs.writeFileSync(owner, String(process.pid)); } catch { /* best effort */ }
+  try { return await operation(); } finally { fs.rmSync(lock, { recursive: true, force: true }); }
 }
 
 async function mergeState(file, key, value) {
@@ -1042,6 +1052,7 @@ function inputPath(root,input) { return input.path || `${root}/inputs/${input.na
 async function verifyInputs(row, inputs, opts, state, { force=false, timeout=60000 }={}) {
   const settings = opts.inputSettings || inputSettings(sharedDir());
   const file = indexFile(cacheDir(),row.host); fs.mkdirSync(path.dirname(file),{recursive:true});
+  // Verification holds the lock across SSH hashing; other shards wait for it (up to 20 min) and then reuse the fresh index.
   return withStateLock(file, async () => {
     const index = readIndex(cacheDir(),row.host), now=Date.now()/1000;
     const root = await hostRoot(row,state,{deadline:Date.now()+timeout});
@@ -1072,7 +1083,7 @@ async function verifyInputs(row, inputs, opts, state, { force=false, timeout=600
       writeJSON(file,index);
     }
     return index;
-  });
+  }, 24000);
 }
 async function inputPlan(opts,rows,state) {
   const settings=opts.inputSettings || inputSettings(sharedDir()), indices={}, holds={}, durations={};

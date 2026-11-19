@@ -123,9 +123,10 @@ def safe(p):
     p=pathlib.Path(p)
     if not p.is_absolute() or '..' in p.parts or any(part.lower() in private or part.lower().startswith('.env.') or part.lower().endswith(('.pem','.p12','.pfx','.key','.keystore')) for part in p.parts):
         raise RuntimeError('input path contains private state')
+    # The workspace root itself may be a symlink (a relocated workspace); only refuse links below it.
     for parent in [p,*p.parents]:
-        if parent.is_symlink(): raise RuntimeError('input symlink refused')
         if parent==root: break
+        if parent.is_symlink(): raise RuntimeError('input symlink refused: '+str(parent))
     return p
 def fingerprint(p):
     h=hashlib.sha256(); size=0
