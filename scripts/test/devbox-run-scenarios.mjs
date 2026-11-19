@@ -110,7 +110,7 @@ if(['run','cleanup','reconnect','result','artifact-range','dead-slot','cleanup-p
  if(!args.includes('ControlMaster=no')||!args.includes('ControlPath=none'))throw Error('supervisor/recovery SSH must remain independent');
 } else if(!args.includes('ControlMaster=auto')||!args.includes('ControlPersist=60'))throw Error('control SSH must reuse task connection');
 let d={};if(op!=='upload')d=JSON.parse(Buffer.from(command.match(/'([A-Za-z0-9+/=]+)'$/)[1],'base64').toString());
-event(op,{host,target,slot:d.slot,workspace:d.workspace,control:d.control,offset:d.offset,length:d.length,reuseAllowed:d.reuseAllowed,env:op==='run'?d.env:undefined,nice:op==='run'?d.command.startsWith('nice -n 10 bash -c'):undefined,cpus:d.cpus});
+event(op,{host,target,slot:d.slot,workspace:d.workspace,control:d.control,offset:d.offset,length:d.length,forceStage:d.forceStage,reuseAllowed:d.reuseAllowed,env:op==='run'?d.env:undefined,nice:op==='run'?d.command.startsWith('nice -n 10 bash -c'):undefined,cpus:d.cpus});
 if(c.authFailures){
  const file=path.join(c.dir,'auth-count');const count=fs.existsSync(file)?Number(fs.readFileSync(file)):0;
  if(count<c.authFailures){fs.writeFileSync(file,String(count+1));console.error(c.authMessage||'Permission denied (gssapi-with-mic)');process.exit(255);}
@@ -175,6 +175,22 @@ if(op==='cleanup'){
  event('group-gone',{host});console.log('group-gone');return;
 }
 if(op==='artifacts'&&c.badArtifact)process.exit(66);
+if(op==='artifacts'&&(c.lowArtifactDisk||c.artifactDirectFault)){
+ const source=c.lowArtifactDisk?command.replaceAll('disk=os.statvfs(root)','disk=__import__("types").SimpleNamespace(f_bavail=53*1073741824,f_frsize=1)'):command;
+ const result=cp.spawnSync('/bin/bash',['-c',source],{maxBuffer:128*1024*1024});
+ process.stderr.write(result.stderr);
+ if(result.status)process.exit(result.status);
+ const counter=path.join(c.dir,'direct-read-count'),n=fs.existsSync(counter)?Number(fs.readFileSync(counter)):0;
+ fs.writeFileSync(counter,String(n+1));
+ const fault=c.artifactDirectFault||'',active=!d.forceStage&&(n===0||fault.endsWith('always'));
+ let payload=result.stdout;
+ if(active&&fault.startsWith('corrupt')){payload=Buffer.from(payload);payload[0]^=1;}
+ if(active&&(fault.startsWith('drop')||fault.startsWith('stall')))payload=payload.subarray(0,12345);
+ await new Promise(r=>process.stdout.write(payload,r));
+ if(active&&fault.startsWith('stall'))await sleep(60000);
+ if(active&&fault.startsWith('drop'))process.exit(255);
+ return;
+}
 if(op==='artifact-range'&&c.artifactFault){
  const counter=path.join(c.dir,'artifact-read-count'), n=fs.existsSync(counter)?Number(fs.readFileSync(counter)):0;
  fs.writeFileSync(counter,String(n+1));
@@ -1037,8 +1053,67 @@ async function overheadScenarios() {
   console.log('PASS clean-ref shortcut, one batched inspection for recursive pins, dirty-tree repair and ignored-cache preservation');
 }
 
+async function artifactDirectScenarios() {
+  const smallArtifact = 'mkdir -p build && node -e "require(\'node:fs\').writeFileSync(\'build/random.bin\',require(\'node:crypto\').randomBytes(1048576))"';
+  for (const lowArtifactDisk of [false, true]) {
+    const f = fixture({ lowArtifactDisk });
+    const r = await run(f, ['--artifact', 'build/random.bin'], lowArtifactDisk ? smallArtifact.replace('randomBytes(1048576)', 'randomBytes(32*1048576)') : smallArtifact);
+    ok(r); returned(f);
+    const attempt = r.summary.shards[0].attempts[0];
+    assert.equal(attempt.artifactTransport.method, 'direct-ssh');
+    assert.equal(attempt.phaseTimings.transferOut.resumable, false);
+    assert.equal(attempt.phaseTimings.transferOut.reason, lowArtifactDisk ? 'low disk' : 'small set');
+    assert.equal(attempt.phaseTimings.transferOut.timeoutSec, 900);
+    assert.equal(f.events().filter(e => e.op === 'artifacts').length, 1, 'small/low-disk success adds no staging round trip');
+    assert.equal(f.events().filter(e => ['artifact-range', 'artifact-release'].includes(e.op)).length, 0);
+    const control = f.events().find(e => e.op === 'artifacts').control;
+    for (const name of ['artifact-archive.tar', 'artifact-retention.json']) assert.equal(fs.existsSync(path.join(control, name)), false);
+    if (lowArtifactDisk) assert.match(r.stdout, /not resumable \(low disk\)/);
+    assert.deepEqual(execFileSync('tar', ['-xOf', attempt.artifact, 'build/random.bin'], { maxBuffer: 64 * 1048576 }), fs.readFileSync(path.join(workspace(f), 'build/random.bin')));
+  }
+  for (const artifactDirectFault of ['drop-once', 'corrupt-once']) {
+    const f = fixture({ artifactDirectFault });
+    const r = await run(f, ['--artifact', 'build/random.bin'], smallArtifact); ok(r); returned(f);
+    const attempt = r.summary.shards[0].attempts[0];
+    assert.equal(attempt.artifactDirectRecovered, true);
+    assert.equal(attempt.phaseTimings.transferOut.resumeCount, 1);
+    assert.equal(attempt.phaseTimings.transferOut.restartCount, artifactDirectFault === 'corrupt-once' ? 1 : 0);
+    assert.equal(f.events().filter(e => e.op === 'artifacts' && e.forceStage).length, 1);
+    const ranges = f.events().filter(e => e.op === 'artifact-range');
+    assert.equal(ranges.length, 1);
+    assert.equal(ranges[0].offset, artifactDirectFault === 'drop-once' ? 12345 : 0);
+    assert.deepEqual(execFileSync('tar', ['-xOf', attempt.artifact, 'build/random.bin']), fs.readFileSync(path.join(workspace(f), 'build/random.bin')));
+  }
+  for (const artifactDirectFault of ['drop-always', 'stall-always']) {
+    const f = fixture({ lowArtifactDisk: true, artifactDirectFault });
+    const r = await run(f, ['--artifact', 'build/random.bin', '--artifact-timeout', '0.1'], smallArtifact); ok(r); returned(f);
+    const attempt = r.summary.shards[0].attempts[0];
+    assert.equal(attempt.artifactExit, artifactDirectFault === 'drop-always' ? 255 : 124);
+    assert.equal(attempt.retainedRemotely, false); assert.equal(attempt.fetchArtifactCommand, undefined);
+    assert.equal(attempt.phaseTimings.transferOut.reason, 'low disk');
+    assert.equal(attempt.phaseTimings.transferOut.timeoutSec, 6);
+    assert.equal(attempt.phaseTimings.transferOut.resumeCount, 0);
+    assert.equal(f.events().filter(e => e.op === 'artifacts').length, 1);
+    assert.match(r.stdout, /artifacts not retained; files remain/);
+    assert.ok(r.stdout.includes(attempt.artifactsLeft.workspace));
+  }
+  for (const artifactDirectFault of ['corrupt-once', 'corrupt-always']) {
+    const f = fixture({ lowArtifactDisk: true, artifactDirectFault });
+    const r = await run(f, ['--artifact', 'build/random.bin'], smallArtifact); ok(r); returned(f);
+    const attempt = r.summary.shards[0].attempts[0];
+    assert.equal(attempt.phaseTimings.transferOut.restartCount, 1);
+    assert.equal(f.events().filter(e => e.op === 'artifacts').length, 2);
+    assert.equal(f.events().filter(e => e.op === 'artifact-range').length, 0);
+    if (artifactDirectFault === 'corrupt-always') {
+      assert.equal(attempt.artifactExit, 74); assert.equal(attempt.retainedRemotely, false);
+      assert.equal(attempt.phaseTimings.transferOut.receivedBytes, 0);
+    } else assert.ok(attempt.artifactSha256);
+  }
+  console.log('PASS cheap small readbacks, stage-on-break offset recovery, low-disk direct SHA-256 and timeout, explicit non-retention');
+}
+
 async function artifactResumeScenarios() {
-  const randomArtifact = 'mkdir -p build && node -e "require(\'node:fs\').writeFileSync(\'build/random.bin\',require(\'node:crypto\').randomBytes(1048576))"';
+  const randomArtifact = 'mkdir -p build && node -e "require(\'node:fs\').writeFileSync(\'build/random.bin\',require(\'node:crypto\').randomBytes(32*1048576))"';
   for (const artifactFault of ['drop-once', 'stall-once', 'corrupt-once']) {
     const f = fixture({ artifactFault });
     const r = await run(f, ['--artifact', 'build/random.bin', '--artifact-timeout', artifactFault === 'stall-once' ? '0.1' : '2'], randomArtifact);
@@ -1050,7 +1125,7 @@ async function artifactResumeScenarios() {
     assert.equal(attempt.phaseTimings.transferOut.restartCount, artifactFault === 'corrupt-once' ? 1 : 0);
     assert.ok(attempt.phaseTimings.transferOut.averageMBps > 0);
     assert.equal(attempt.phaseTimings.transferOut.receivedBytes, fs.statSync(attempt.artifact).size);
-    assert.deepEqual(execFileSync('tar', ['-xOf', attempt.artifact, 'build/random.bin']), fs.readFileSync(path.join(workspace(f), 'build/random.bin')));
+    assert.deepEqual(execFileSync('tar', ['-xOf', attempt.artifact, 'build/random.bin'], { maxBuffer: 64 * 1048576 }), fs.readFileSync(path.join(workspace(f), 'build/random.bin')));
     assert.equal(f.events().filter(e => e.op === 'artifact-release').length, 1);
   }
   for (const artifactFault of ['drop-always', 'stall-always', 'corrupt-always']) {
@@ -1088,7 +1163,8 @@ async function artifactResumeScenarios() {
 
 async function scenarios() {
   const only = process.env.DEVBOX_TEST_CASE;
-  if (only === 'readback') { await artifactResumeScenarios(); return; }
+  if (only === 'readback') { await artifactDirectScenarios(); await artifactResumeScenarios(); return; }
+  if (only === 'artifact-direct') { await artifactDirectScenarios(); return; }
   if (only === 'overhead') { await overheadScenarios(); return; }
   if (only === 'cleanup-pending') { await cleanupPendingScenarios(); return; }
   if (!only) await cleanupPendingScenarios();
@@ -1351,6 +1427,7 @@ async function scenarios() {
   assert.equal(fs.readFileSync(path.join(failedManifest.control,'artifacts/build/result.txt'),'utf8'),'failed','explicit manifest-mode failure retention preserves the copied payload');
   returned(failedCommand);
 
+  await artifactDirectScenarios();
   await artifactResumeScenarios();
 
   let failedArtifact = fixture({ badArtifact: true }); assert.equal((await run(failedArtifact, ['--artifact', '*.txt'])).code, 0); returned(failedArtifact);

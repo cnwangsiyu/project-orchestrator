@@ -51,13 +51,14 @@ try {
   for (const value of ['0', '5', 'auto']) assert.throws(() => parseArgs([...args, '--artifact-streams', value, '--', 'true']));
   const all = invoke('artifacts', data);
   assert.equal(all.status, 0, all.stderr.toString());
-  const allPlan = JSON.parse(all.stdout);
-  const allBytes = invoke('artifact-range', { ...data, sha256: allPlan.sha256, offset: 0, length: allPlan.size });
-  assert.equal(allBytes.status, 0, allBytes.stderr.toString());
-  assert.match(all.stderr.toString(), new RegExp('DEVBOX_ARTIFACT_SHA256=' + createHash('sha256').update(allBytes.stdout).digest('hex')));
-  const tar = path.join(temp, 'all.tar'); fs.writeFileSync(tar, allBytes.stdout);
+  const sizeRecord = JSON.parse(/DEVBOX_ARTIFACT_SIZE=(\{[^\n]*\})/.exec(all.stderr.toString())[1]);
+  assert.equal(sizeRecord.size, all.stdout.length);
+  assert.equal(sizeRecord.reason, 'small set');
+  assert.equal(fs.existsSync(path.join(control, 'artifact-archive.tar')), false);
+  assert.equal(fs.existsSync(path.join(control, 'artifact-retention.json')), false);
+  assert.match(all.stderr.toString(), new RegExp('DEVBOX_ARTIFACT_SHA256=' + createHash('sha256').update(all.stdout).digest('hex')));
+  const tar = path.join(temp, 'all.tar'); fs.writeFileSync(tar, all.stdout);
   assert.deepEqual(execFileSync('tar', ['-xOf', tar, 'public.bin']), bytes);
-  assert.equal(invoke('artifact-release', { ...data, sha256: allPlan.sha256 }).status, 0);
   const manifest = invoke('artifacts', { ...data, fetch: 'manifest' });
   assert.equal(manifest.status, 0, manifest.stderr.toString());
   const receipt = JSON.parse(manifest.stdout.toString());
@@ -98,8 +99,11 @@ try {
   assert.equal(fs.existsSync(path.join(control, 'artifact-archive.tar')), false);
   const lowDisk = remoteScripts.artifacts.replace('\ndisk=os.statvfs(root)\n', '\nimport types\ndisk=types.SimpleNamespace(f_bavail=53*1073741824+1048576,f_frsize=1)\n');
   const fallback = invoke('artifacts', { ...data, streams: 4, patterns: ['large.bin'] }, lowDisk);
-  assert.notEqual(fallback.status, 0);
+  assert.equal(fallback.status, 0, fallback.stderr.toString());
   assert.doesNotMatch(fallback.stderr.toString(), /DEVBOX_ARTIFACT_PLAN=/);
-  assert.match(fallback.stderr.toString(), /disk reservation guard/);
-  console.log('PASS size-scaled timeout, archive digest, immutable retention, named readback, corruption/path checks, isolated SSH sockets, staged ranges and disk reserve');
+  const fallbackSize = JSON.parse(/DEVBOX_ARTIFACT_SIZE=(\{[^\n]*\})/.exec(fallback.stderr.toString())[1]);
+  assert.equal(fallbackSize.reason, 'low disk'); assert.equal(fallbackSize.size, fallback.stdout.length);
+  assert.match(fallback.stderr.toString(), new RegExp('DEVBOX_ARTIFACT_SHA256=' + createHash('sha256').update(fallback.stdout).digest('hex')));
+  assert.equal(fs.existsSync(path.join(control, 'artifact-archive.tar')), false);
+  console.log('PASS size-scaled timeout, cheap small direct streams, archive digest, immutable retention, named readback, corruption/path checks, isolated SSH sockets, staged ranges and low-disk direct fallback');
 } finally { fs.rmSync(temp, { recursive: true, force: true }); }

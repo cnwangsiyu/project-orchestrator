@@ -886,13 +886,21 @@ returns `shard-N-attempt-M.manifest.json`, containing the source commit, host,
 slot, run receipt directory, and each selected file's `name`, `size`, and
 `sha256`. Existing workspace-relative artifact globs and transfer checks apply.
 
-All mode stages an uncompressed tar in the UUID receipt directory, hashes it,
-and announces its exact size before any archive bytes are transferred. The
-default uses one independent SSH range stream. Opt-in `--artifact-streams 2..4`
-uses parallel ranges for archives at least 64 MiB, with compression off and
-AES-128-GCM preferred. The stream budget decreases with shard count; eight or
-more shards keep one stream each. Staging must keep the 53 GiB disk reserve;
-if it cannot, collection reports the guard failure separately from the command.
+All mode announces the exact uncompressed tar size before transferring archive
+bytes. Sets below 32 MiB use the base direct stream, with no archive spool or
+extra SSH round trip. If a small stream breaks, the runner stages the archive
+when disk space permits and resumes from the received offset. Larger sets stage
+in the UUID receipt directory and use one independent SSH range stream by
+default. Opt-in `--artifact-streams 2..4` uses parallel ranges for archives at
+least 64 MiB, with compression off and AES-128-GCM preferred. The stream budget
+decreases with shard count; eight or more shards keep one stream each.
+
+If staging would break the 53 GiB reserve, the runner keeps the direct stream
+at every size. It still uses the announced size for its timeout and verifies
+SHA-256. Progress says `not resumable (low disk)`; the phase record stores
+`resumable: false` and `reason: "low disk"`. A broken low-disk stream cannot
+retain an archive or resume. A digest mismatch discards the local bytes and
+allows one full direct restart.
 
 Broken or timed-out ranges append from their received offset, with up to three
 resumes across the attempt. Each new connection gets the size-scaled timeout
@@ -902,14 +910,17 @@ received bytes, percent and average MB/s every 30 seconds; the attempt records
 `phaseTimings.transferOut.averageMBps`, `resumeCount`, `restartCount` and bytes.
 The command timeout ends before artifact readback and cleanup.
 
-An exhausted readback preserves the command's exit status, records
+An exhausted staged readback preserves the command's exit status, records
 `artifactExit` and `retainedRemotely`, keeps local partial files, and writes an
 archive recovery manifest plus the exact `fetch-artifact` command in the log
 and `attempt.fetchArtifactCommand`. Fetch that manifest with
 `--name artifact-archive.tar` to retrieve the immutable tar. Archive receipts
 follow the same TTL, disk accounting, `list-retained` and `retire-artifacts`
-rules as named copies. Collection failures before a verified archive exists
-record `artifactsLeft`; those workspace files remain only until slot reuse.
+rules as named copies. Low-disk failures and collection failures before a
+verified archive exists explicitly report `retainedRemotely: false` and
+`artifactsLeft`, including the workspace path and requested patterns. Those
+files remain only until slot reuse. The base runner has no fetch-by-path
+subcommand; `fetch-artifact` requires a retained manifest.
 
 ```sh
 node scripts/devbox-run.mjs --project PROJECT --task TASK --repo REPO \

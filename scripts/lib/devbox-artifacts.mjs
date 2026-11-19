@@ -13,15 +13,17 @@ export function artifactTimeoutMs(bytes, capMinutes = 120) {
 }
 
 // Range files survive a failed connection. Only verified bytes permit remote release.
-export async function readArchive(plan, out, { streams = 1, capMinutes = 120, readRange, onProgress = () => {}, onStats = () => {} }) {
+export async function readArchive(plan, out, { streams = 1, capMinutes = 120, initialBytes = 0, initialResumes = 0,
+  startedAt = performance.now(), readRange, onProgress = () => {}, onStats = () => {} }) {
   streams = Math.min(streams, plan.size);
   const length = Math.ceil(plan.size / streams);
   const parts = Array.from({ length: streams }, (_, i) => ({
     file: streams === 1 ? out : `${out}.range-${i}.partial`,
     offset: i * length, length: Math.min(length, plan.size - i * length), received: 0,
   }));
-  const started = performance.now();
-  let downloaded = 0, resumeCount = 0, restartCount = 0, failed = false;
+  if (!Number.isSafeInteger(initialBytes) || initialBytes < 0 || initialBytes > plan.size || (initialBytes && streams !== 1)) throw Error('invalid archive resume offset');
+  const started = startedAt;
+  let downloaded = initialBytes, resumeCount = initialResumes, restartCount = 0, failed = false;
   const stats = () => ({ bytes: plan.size, receivedBytes: parts.reduce((sum, part) => sum + part.received, 0),
     averageMBps: downloaded / 1e6 / Math.max(0.001, (performance.now() - started) / 1000),
     resumeCount, restartCount, timeoutSec: artifactTimeoutMs(plan.size, capMinutes) / 1000 });
@@ -31,7 +33,10 @@ export async function readArchive(plan, out, { streams = 1, capMinutes = 120, re
     for (;;) {
       failed = false;
       if (streams > 1) fs.writeFileSync(out, '', { mode: 0o600 });
-      for (const part of parts) { fs.writeFileSync(part.file, '', { mode: 0o600 }); part.received = 0; }
+      for (const part of parts) {
+        if (initialResumes && !restartCount) part.received = initialBytes;
+        else { fs.writeFileSync(part.file, '', { mode: 0o600 }); part.received = 0; }
+      }
       const results = await Promise.allSettled(parts.map(async part => {
         while (part.received < part.length) {
           if (failed) return;
