@@ -2392,7 +2392,7 @@ try:
         warm = {}
         latest = {}
         for value in affinities.values():
-            if not isinstance(value, dict): continue
+            if not isinstance(value, dict) or not isinstance(value.get('slot'), str): continue
             try: used = datetime.datetime.fromisoformat(value.get('time', '').replace('Z', '+00:00')).timestamp()
             except (AttributeError, TypeError, ValueError, OverflowError): continue
             if 0 < used <= now: latest[value.get('slot')] = max(latest.get(value.get('slot'), 0), used)
@@ -2766,7 +2766,7 @@ try:
         return 0 if not preferences else -1 if required & preferences else 1
     def rank(id):
         tier = preference_tier(id)
-        value = scores[remote[id][1]]; affinity = value['nextScore'] <= 0.5
+        value = scores[remote[id][1]]; affinity = value['cores'] is None or value['nextScore'] <= 0.5
         if rank_spare and value['spareCores'] is not None:
             affinity = value['spareCores'] >= max(0, best_spare.get(tier, value['spareCores']) * 0.5)
             return (tier, 0, not (affinity and id == preferred_slot),
