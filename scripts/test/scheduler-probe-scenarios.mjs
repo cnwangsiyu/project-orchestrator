@@ -29,11 +29,18 @@ console.log(JSON.stringify({root:'/fixture/devbox-run',user:'fixture',cores:64,f
   assert.equal(fs.readFileSync(path.join(root, 'calls'), 'utf8').split('\n').filter(Boolean).length, 1);
   fs.writeFileSync(cacheFile, JSON.stringify({ [row.host]: cached }));
   fs.writeFileSync(path.join(root, 'fail'), 'fixture failure');
+  // One run memoizes the resolved root for 60 s; a memoized call never probes.
+  assert.equal(await hostRoot(row, state, { deadline: Date.now()+2000 }), cached.root);
+  assert.equal(fs.readFileSync(path.join(root, 'calls'), 'utf8').split('\n').filter(Boolean).length, 1, 'in-run root memo');
+  // Each later run starts without the memo and consults the disk cache.
+  state.hostRoots.clear();
   assert.equal(await hostRoot(row, state, { deadline: Date.now()+2000 }), cached.root);
   assert.equal(read().cores, 64); assert.equal(read().probedAt, cached.probedAt);
+  state.hostRoots.clear();
   await hostRoot(row, state, { deadline: Date.now()+2000 });
   assert.equal(fs.readFileSync(path.join(root, 'calls'), 'utf8').split('\n').filter(Boolean).length, 2, 'bounded retry backoff');
   fs.writeFileSync(cacheFile, '{}');
+  state.hostRoots.clear();
   await assert.rejects(hostRoot(row, state, { deadline: Date.now()+2000 }), /root probe/);
   assert.equal(state.children.size, 0);
   console.log('PASS scheduler host probes: stale refresh, cache reuse, retained hardware on failure, retry backoff, no fabricated 8-core default');
