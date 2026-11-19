@@ -43,7 +43,7 @@ try {
   sample(small, 8, 0, 40, 150); sample(large, 8, 0, 40, 200); claim('devbox-cn-2');
   sample(small, 8, 0, 40, 200); claim('devbox-cn-1');
   // CPU reservations, including light starts, matter even before load catches up.
-  fs.mkdirSync(file('devbox-reservations'));
+  fs.mkdirSync(file('devbox-reservations'), { recursive: true });
   fs.writeFileSync(file(`devbox-reservations/${large}.json`), JSON.stringify([[Date.now()/1000, 60, 1]]));
   sample(large, 64, 0); claim('devbox-cn-1');
   fs.unlinkSync(file(`devbox-reservations/${large}.json`));
