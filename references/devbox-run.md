@@ -696,6 +696,26 @@ mtime among the first 200 files. Prep therefore refreshes the TTBin package time
 index (T183). The `T176-22.4.0` set also carries `jazz` (from `configure-source-v2`, pin `f83ee6291ad8`) and seven
 AILib dependency trees, each recorded in its `install-receipt.json`.
 
+### Preserve the VESDK Android worktree across repeated preps (T190b, 2026-11-18)
+
+For the same slot and source revision, run `prepare-transfer.sh REPO REF NEW_PREP PREVIOUS_PREP`. Use a previous prep that completed both transfer gates. The new prep checks the final regular files against the prior export by contents and mode, then carries forward their exact mtimes. The new source-only snapshot still passes the usual audits and transfer gate.
+
+Run `run-verified.sh --recipe-build build` with the usual devbox-run flags and the new snapshot's `source-only` directory. The wrapper audits the recipe and installs the recipe and preparation scripts atomically in the acquired slot’s external task receipt directory. Pass a distinct `--env VESDK_RECIPE_RECEIPT=/srv/devbox-run/receipts/PROJECT/TASK/RUN` for each measurement. Fetch the named receipt outputs through guarded SSH; runner artifact globs are restricted to worktree-relative paths. Use the same task and affinity for consecutive measurements. Pass `--warm-cost 27m` to declare the cost of losing the warm worktree. Check the runner receipt for the slot used by both builds.
+
+The recipe canonicalizes the SDK, toolchain, Gradle and ccache paths. It sets `CCACHE_BASEDIR` to the physical worktree and disables hashing the current directory. It measures shared ccache counters before and after Gradle and uses the job stats log to isolate the build's own hits and misses.
+
+At each task start the runner saves tracked edits as a patch, resets the worktree and its submodules, and removes unignored files. The source-only snapshot keeps the repository ignore rules and adds coverage only for Android module `.cxx/` outputs, `tteffect/Projects/Pub/`, and `.vesdk-ecache/`. Task proof outputs remain eligible for deletion; the new recipe places scripts and proofs outside the worktree in a task receipt directory. Generated `ttvesdk/src/build.toml` remains eligible for deletion, and prep compares contents before copying it. The checkpoint also records this generated input and restores its timestamp after identical regeneration. The slot's ignored Gradle directory retains a digest and mtime checkpoint for tracked inputs and generated Ninja dependencies. After checkout and prep, the recipe restores prior times only for byte-identical files with the same mode. TTBin cache-side times keep the values used by the recycler and cache index. The recipe creates a fresh APK container for each source export and lets Gradle reuse the container on a warm build so ZipFlinger free space does not inflate cross-run size comparisons.
+
+The recipe records `git clean -ffdn` after the build, while the runner still holds the slot, and writes it as `clean-dry-run-after.txt` in the external receipt directory. Fetch it with the other named receipts. Its entries must contain only files that should be deleted; cache and persistent build-output directories must be absent.
+
+For external receipt collection during the build lease, opt in with `--env VESDK_RECIPE_COLLECT_WAIT=1`. After the measured build, the recipe emits `t190b_receipts_ready=1` and holds the existing lease for at most 900 seconds. The task harness fetches only the named receipt files and writes `collection-complete.json` with a boolean `pass` field; failure or timeout exits the recipe with a failure. This interval is outside Gradle timing. T190b uses this path to fetch and verify both A and B receipts during B’s lease, without acquiring a second slot.
+
+If receipt transfer fails after a completed build, use `--recipe-build collect` with the same audited source export and existing `VESDK_RECIPE_RECEIPT`. This mode stages only the receipt-side scripts, emits the collection marker, and waits for the verification acknowledgment; it does not run prep, Gradle, or a compiler. T190b retries named receipt downloads as gzip-compressed tar streams with a 600-second bound per stream. Preserve the failed runner receipt and incomplete archive as evidence.
+
+Build output survives between jobs only on git-ignored paths: the job-start cleanup removes every unignored untracked
+file (`git clean -ffd`, no `-x`). Measured on slot 39 after this change: a rebuild after a fresh prep compiled 0 native
+objects in 50 s with 5 heavy holders on the box (169 s with 13).
+
 The independent source and dependency gates and the stock runner's snapshot,
 history and source checks must all pass with zero unapproved findings and
 zero read errors. Dependency exceptions are limited to the four documented
