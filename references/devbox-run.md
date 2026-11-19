@@ -643,6 +643,16 @@ its hash. Device eligibility: only packages exported with these rules (vesdk T19
 by Lynx T125) may be installed on a device. Packages from earlier devbox exports (T116, T119, T123, T176, T182,
 T183, T190, T190b) stay banned from devices.
 
+Entropy exemption and KEEP maintenance (2026-11-19, vesdk T199): the high-entropy heuristic alone exempts a whole
+value that matches `^[a-z][a-z0-9]*(_[a-z0-9]+){2,}$`, is at least 80% ASCII letters, has no segment longer than 20
+characters and no segment of 12 or more characters made only of hex digits. No lowercasing, prefix stripping or
+substring tests to obtain an exemption. Private-key blocks, access-key ids, JWTs, URL credentials and known
+credential prefixes (`sk_`, `ak_`) are checked independently and are never exempted this way. KEEP is a reviewed
+exception (structural symbol plus literal ordinal), not an inventory of benign literals: delete an entry only after
+confirming the unchanged policy accepts its literal in every supported ref and the export keeps its bytes; never add
+broad path, digest, alphabet, command-id or test-file exemptions. The vesdk list went from 154 to 59 entries; the
+rest stay as explicit reviewed exceptions.
+
 Prepare from a local vesdk branch name or full commit. The exporter creates
 a parentless Git snapshot and records the original commit in
 `source-provenance.json`. Prep generates the EffectSDK Android version metadata
