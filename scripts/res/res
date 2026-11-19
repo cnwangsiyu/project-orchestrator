@@ -123,6 +123,7 @@ res wait-pool <prefix> --by <session> --project <slug> --for "<purpose>" --timeo
                                       need requires all caps; prefer-slot then its host precede fallback
                                       fresh projected spare cores first; affinity within 50% of best
                                       recent same-repo worktrees break capacity-score ties only
+                                      --warm-family <ref> scopes verified worktree markers to the ref family
 res retain-remote <id> --by <session> --pid <holder-pid>
 res release-dead <id> --by <dead-holder> --pid <holder-pid>  runner-confirmed recovery
 res box-health [--json]               show remote box health (no probes)
@@ -1925,10 +1926,10 @@ cmd_wait_pool_legacy() {
 pool_controller() {
   local runner=
   if [ "${POOL_EXEC_CHILD:-0}" = 1 ]; then runner=exec; fi
-  ${runner:+$runner} python3 - "$RES_DIR" "$@" "$BY" "$PROJECT" "$TASK" "$PURPOSE" "$PID" "$UNTIL" "${FORCE:-}" "${POOL_NEED:-}" "${prefer_host:-}" "${prefer_slot:-}" "${excluded_slots:-}" "${excluded_hosts:-}" "${WAITER_STALE_SECONDS}" "$$" "${POOL_EPISODE:-none}" "${exclude_reason:-}" "${hard_slots:-}" "${hard_hosts:-}" "${DISK_GIB:-}" "${DISK_GIB_FILE:-}" "${PLACEMENT_FILE:-}" "${MAINTENANCE:-}" "${EXTRA_DISK_GIB:-0}" "${WAIT_CONFIG_FILE:+$WAIT_CONFIG_FILE.devbox}" <<'PY'
+  ${runner:+$runner} python3 - "$RES_DIR" "$@" "$BY" "$PROJECT" "$TASK" "$PURPOSE" "$PID" "$UNTIL" "${FORCE:-}" "${POOL_NEED:-}" "${prefer_host:-}" "${prefer_slot:-}" "${excluded_slots:-}" "${excluded_hosts:-}" "${WAITER_STALE_SECONDS}" "$$" "${POOL_EPISODE:-none}" "${exclude_reason:-}" "${hard_slots:-}" "${hard_hosts:-}" "${DISK_GIB:-}" "${DISK_GIB_FILE:-}" "${PLACEMENT_FILE:-}" "${MAINTENANCE:-}" "${EXTRA_DISK_GIB:-0}" "${WAIT_CONFIG_FILE:+$WAIT_CONFIG_FILE.devbox}" "${warm_family:-}" <<'PY'
 import datetime, fcntl, hashlib, json, math, os, re, shutil, signal, socket, stat, sys, tempfile, time
 from contextlib import contextmanager
-root, action, request, timeout, delay, by, project, task, purpose, pid, until, force, need, prefer, preferred_slot, excluded_slots, excluded_hosts, stale, controller, generation, exclude_reason, hard_slots, hard_hosts, disk_gib, disk_gib_file, placement_file, maintenance, extra_disk_gib, legacy_config_path = sys.argv[1:]
+root, action, request, timeout, delay, by, project, task, purpose, pid, until, force, need, prefer, preferred_slot, excluded_slots, excluded_hosts, stale, controller, generation, exclude_reason, hard_slots, hard_hosts, disk_gib, disk_gib_file, placement_file, maintenance, extra_disk_gib, legacy_config_path, warm_family = sys.argv[1:]
 build_namespace = {'__name__': 'res_build_processes'}
 exec(os.environ['RES_BUILD_PROCESS_SOURCE'], build_namespace)
 build_probe = build_namespace['probe']
@@ -2045,7 +2046,7 @@ def cancelled(signum, frame):
     raise SystemExit(128 + signum)
 for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP): signal.signal(signum, cancelled)
 try:
-    if any(c in value for value in (by, project, task, purpose, until) for c in '\t\r\n'): raise ValueError('hold metadata must be one line')
+    if any(c in value for value in (by, project, task, purpose, until, warm_family) for c in '\t\r\n'): raise ValueError('hold metadata must be one line')
     if action not in ('box-health', 'scores', 'status', 'audit'): os.makedirs(locks, exist_ok=True)
     if action in ('cancel', 'cleanup'):
         queue = os.path.join(root, 'pool-waiters', request)
@@ -2398,6 +2399,7 @@ try:
             if 0 < used <= now: latest[value.get('slot')] = max(latest.get(value.get('slot'), 0), used)
         for key, value in affinities.items():
             if not key.startswith(identity + '+') or not isinstance(value, dict): continue
+            if value.get('verifiedWorkspace') is False or warm_family and value.get('refFamily') != warm_family: continue
             slot = value.get('slot')
             if not isinstance(slot, str) or slot not in remote or value.get('host') != remote[slot][1]: continue
             try:
@@ -3009,16 +3011,17 @@ PY
 cmd_wait_pool() {
   local pool="${1:-}"; shift || true; pool="${pool%-}"
   [[ "$pool" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || die "wait-pool needs a resource prefix"
-  local timeout= args=() ALLOW_PID=1 prefer_host= prefer_slot= POOL_NEED= excluded_slots= excluded_hosts= exclude_reason= hard_slots= hard_hosts= delay=1 rc POOL_CHILD_PID=
+  local timeout= args=() ALLOW_PID=1 prefer_host= prefer_slot= POOL_NEED= excluded_slots= excluded_hosts= exclude_reason= hard_slots= hard_hosts= warm_family= delay=1 rc POOL_CHILD_PID=
   local POOL_EPISODE="$RANDOM.$RANDOM.$RANDOM"
   local POOL_PENDING_SIGNAL=0
   while [ $# -gt 0 ]; do
     case "$1" in
-      --timeout|--need|--prefer-host|--prefer-slot|--exclude-slot|--exclude-host|--exclude-reason|--hard-exclude-slot|--hard-exclude-host)
+      --timeout|--need|--prefer-host|--prefer-slot|--exclude-slot|--exclude-host|--exclude-reason|--hard-exclude-slot|--hard-exclude-host|--warm-family)
         [ $# -ge 2 ] || die "$1 needs a value"
         case "$1" in
           --timeout) [ -z "$timeout" ] || die "duplicate --timeout"; timeout="$2" ;;
           --need) POOL_NEED="$2" ;;
+          --warm-family) warm_family="$2" ;;
           --prefer-host) prefer_host="$2" ;;
           --prefer-slot) prefer_slot="$2" ;;
           --exclude-slot) excluded_slots="$2" ;;

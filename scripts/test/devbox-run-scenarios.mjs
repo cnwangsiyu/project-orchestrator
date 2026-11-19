@@ -56,7 +56,7 @@ const a=process.argv.slice(2), op=a[0], by=flag(a,'--by');
 if(c.noHelp&&(op==='help'||a.includes('--help'))){console.error('res: broken');process.exit(1);}
 if(c.liveHelp&&a.includes('--help')){console.error('res: wait-pool needs a resource prefix');process.exit(1);}
 if(c.liveHelp&&op==='help'){console.log('res wait-pool <prefix> --by S [--need <cap,cap>] [--prefer-host <ip>] [--prefer-slot <id>] [--exclude-slot <id,...>] [--exclude-host <ip,...>]');return;}
-if(a.includes('--help')) {console.log('res wait-pool'+(c.legacy?'':' --prefer-host IP --need CAP --exclude-slot IDS --exclude-host IPS'+(c.preferSlot?' --prefer-slot SLOT':'')+(c.diskCosts?' --disk-gib-file JSON':'')));return;}
+if(a.includes('--help')) {console.log('res wait-pool'+(c.legacy?'':' --prefer-host IP --need CAP --exclude-slot IDS --exclude-host IPS'+(c.preferSlot?' --prefer-slot SLOT':'')+(c.diskCosts?' --disk-gib-file JSON':'')+(c.warmFamily?' --warm-family REF':'')));return;}
 const rows=fs.readFileSync(path.join(c.shared,'resources.tsv'),'utf8').trim().split('\n').map(l=>{const [slot,kind,policy,,desc]=l.split('\t');return {slot,kind,policy,host:desc.match(/@(\d+\.\d+\.\d+\.\d+)/)?.[1],caps:desc.match(/caps=([\w,-]+)/)?.[1].split(',')||[]};});
 if(op==='return'||op==='release-dead'){
  const lock=path.join(c.shared,'locks',a[1]+'.d');
@@ -64,7 +64,7 @@ if(op==='return'||op==='release-dead'){
  event('return',{slot:a[1],by});console.log('return '+a[1]);console.log('ack returned');return;
 }
 if(!['take','wait','wait-pool'].includes(op))process.exit(9);
-event('acquire-call',{args:a,pid:flag(a,'--pid')});
+event('acquire-call',{args:a,pid:flag(a,'--pid'),warmMarkers:fs.existsSync(path.join(c.shared,'devbox-affinity.json'))?Object.values(JSON.parse(fs.readFileSync(path.join(c.shared,'devbox-affinity.json')))).map(value=>value.verifiedWorkspace):[]});
 if(c.acquireProgress&&op==='wait-pool'){
  console.log('waiter-start pool='+a[1]);console.error('rollback/return previous attempt');
  console.log('res: pass 1 started');console.error('res: pass 1 waiting');
@@ -708,9 +708,17 @@ async function sshDropScenarios() {
 }
 
 async function affinityScopeScenarios() {
-  const f = fixture();
+  const f = fixture({ warmFamily: true });
   ok(await run(f, ['--affinity', 'shared-caller-name'])); returned(f);
+  const firstAcquire = f.events().find(e => e.op === 'acquire-call');
+  assert.ok(firstAcquire.args.includes('--warm-family'));
+  fs.unlinkSync(path.join(workspace(f), '.devbox-run.json'));
   let before = f.events().length;
+  ok(await run(f, ['--affinity', 'shared-caller-name'])); returned(f);
+  const invalidated = f.events().slice(before).find(e => e.op === 'acquire-call');
+  assert.ok(!invalidated.args.includes('--prefer-host'), 'missing receipt cannot retain runner affinity');
+  assert.deepEqual(invalidated.warmMarkers, [false], 'invalidate before the controller reads its own warm cache');
+  before = f.events().length;
   ok(await run(f, ['--affinity', 'shared-caller-name', '--project', 'other-project'])); returned(f);
   assert.ok(f.events().slice(before).filter(e => e.op === 'acquire-call').every(e => !e.args.includes('--prefer-host')),
     'a caller key cannot carry affinity across project identities');
@@ -722,6 +730,8 @@ async function affinityScopeScenarios() {
   const entries = Object.entries(JSON.parse(fs.readFileSync(path.join(f.shared, 'devbox-affinity.json'))));
   assert.equal(entries.length, 3);
   assert.ok(entries.every(([key, value]) => key.startsWith('id-') && value.repository && value.refFamily && value.verifiedWorkspace));
+  const finalAcquire = f.events().filter(e => e.op === 'acquire-call').at(-1);
+  assert.equal(finalAcquire.args[finalAcquire.args.indexOf('--warm-family') + 1], entries.at(-1)[1].refFamily);
   console.log('PASS affinity keys are project/repository/ref scoped and remembered worktrees are receipt verified');
 }
 

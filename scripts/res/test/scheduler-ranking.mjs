@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 
 const root = fs.mkdtempSync(path.join(process.env.RES_TEST_ROOT || os.tmpdir(), 'scheduler-ranking-'));
 const res = process.env.RES_SOURCE || new URL('../res', import.meta.url).pathname;
@@ -60,6 +61,18 @@ try {
     fs.rmdirSync(file(`locks/${a}.d`));
   }
   registry(); sample(small, 8, 0); sample(large, 64, 0);
+  const identity = 'id-' + createHash('sha256').update('project:fixture').digest('hex');
+  const affinityFile = file('devbox-affinity.json');
+  const marker = { slot: 'devbox-cn-2', host: large, time: new Date().toISOString(),
+    repository: identity, refFamily: 'main', verifiedWorkspace: true };
+  const remember = value => fs.writeFileSync(affinityFile, JSON.stringify({ [identity + '+main']: value }));
+  sample(large, 8, 0); remember(marker);
+  claim('devbox-cn-2', ['--warm-family', 'main']);
+  claim('devbox-cn-1', ['--warm-family', 'other-ref']);
+  remember({ ...marker, verifiedWorkspace: false });
+  claim('devbox-cn-1', ['--warm-family', 'main']);
+  claim('devbox-cn-1');
+  fs.unlinkSync(affinityFile); sample(large, 64, 0);
   config('DEVBOX_RANK_BY_SPARE=0\n'); claim('devbox-cn-1', ['--prefer-host', small]);
   config('DEVBOX_RANK_BY_SPARE=invalid\n'); eq(run(['audit']).status, 1);
   config();

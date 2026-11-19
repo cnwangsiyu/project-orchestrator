@@ -1470,7 +1470,16 @@ async function shard(opts) {
             const root = await hostRoot(candidate, state, { deadline });
             const workspace = JSON.parse(checked(await ssh(candidate, 'warm-path', { root, project: opts.project,
               key: opts.snapshot.storeKey, slot: candidate.slot, affinity: opts.affinity }, { state, timeout: Math.min(10000, remaining()) }), 'affinity workspace verification'));
-            if (!workspace) affinity = undefined;
+            if (!workspace) {
+              const file = path.join(cacheDir(), 'devbox-affinity.json');
+              await withStateLock(file, () => {
+                const current = JSON.parse(fs.readFileSync(file, 'utf8'));
+                if (current[opts.affinity]?.time === affinity.time && current[opts.affinity]?.slot === affinity.slot) {
+                  current[opts.affinity] = { ...current[opts.affinity], verifiedWorkspace: false }; writeJSON(file, current);
+                }
+              });
+              affinity = undefined;
+            }
           } else affinity = undefined;
         }
         const affinitySlot = opts.preferSlot || affinity?.slot;
@@ -1519,6 +1528,7 @@ async function shard(opts) {
         const diskArgs = opts.diskCostsSupported ? ['--disk-gib-file', diskCostFile] : [];
         attempt.diskCosts = diskCosts;
         const args = ['wait-pool', opts.pool, ...common, '--timeout', String(remaining() / 60000), ...diskArgs, ...(opts.placementInputs.length ? ['--placement-file',placementFile] : [])];
+        if (opts.warmFamilySupported) args.push('--warm-family', opts.refFamily);
         const callerSlots = softExclusionsDropped ? [] : opts.excludeSlot;
         const callerHosts = softExclusionsDropped ? [] : opts.excludeHost;
         if (opts.splitExclusions) {
@@ -1928,6 +1938,7 @@ async function main(args) {
       return 2;
     }
     opts.placementSupported=helpText.includes('--placement-file');
+    opts.warmFamilySupported=helpText.includes('--warm-family');
     const settings=inputSettings(sharedDir()); opts.inputSettings=settings;
     if (!settings.enabled) {
       if (opts.inputs.some(input=>!input.rebuildable)) throw Error('rebuild placement disabled; non-rebuildable inputs require enabled placement');
