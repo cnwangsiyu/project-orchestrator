@@ -351,7 +351,8 @@ def memory_probe(root, config, platform=None, readings=None, prefer_native=False
         free = (page_count('Pages free') + page_count('Pages inactive')) * int(size[1]) / 2**30
         swap_used = float(used[1]) * 1024**('KMGT'.index(used[2]) + 1) / 2**30
         if not math.isfinite(compressor + free + swap_used): raise ValueError('invalid memory metrics')
-        swap_dir = '/private/var/vm'
+        # Current macOS keeps swapfiles on the VM volume; /private/var/vm is the legacy location (empty today).
+        swap_dir = next((d for d in ('/System/Volumes/VM', '/private/var/vm') if os.path.isdir(d)), '/private/var/vm')
         if os.environ.get('RES_TEST_SWAPFILE_DIR'):
             if os.path.realpath(root) == live: raise ValueError('test swap directory requires scratch state')
             swap_dir = os.environ['RES_TEST_SWAPFILE_DIR']
