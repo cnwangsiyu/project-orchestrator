@@ -16,6 +16,7 @@ import { transferFindings } from './lib/devbox-transfer-check.mjs';
 import { fileDigest, artifactName, readArtifactManifest, retainedArtifactPython, artifactRangePython } from './lib/devbox-artifacts.mjs';
 import { controlOptions } from './lib/devbox-ssh.mjs';
 import { retentionPython } from './lib/devbox-retention.mjs';
+import { cleanupEvidencePython } from './lib/devbox-cleanup-pending.mjs';
 
 const script = fileURLToPath(import.meta.url);
 const GiB = 1024 ** 3;
@@ -361,6 +362,7 @@ temporary.write_text(json.dumps(d['paths'])); temporary.replace(file)
 `;
 
 export const remoteScripts = {
+  'cleanup-pending': pythonHeader + cleanupEvidencePython,
   'list-retained': pythonHeader + retentionPython + `print(json.dumps([r for r in retained_inventory(d['root']) if r['bytes']]))\n`,
   'retire-artifacts': pythonHeader + retentionPython + `ctl=artifact_control(d['root'],d['receipt'])\nprint(json.dumps({'receipt':d['receipt'],'retiredBytes':retire_payload(ctl),'remainingBytes':payload_bytes(ctl)}))\n`,
   'expire-artifacts': pythonHeader + retentionPython + `print(json.dumps({'reclaimedBytes':expire_payloads(d['root'])}))\n`,
@@ -832,7 +834,7 @@ if d.get('fetch')=='manifest':
     disk=os.statvfs(root)
     reserved=sum(r['bytes'] for r in retained_inventory(root) if r.get('slot')==d['slot'])
     if disk.f_bavail*disk.f_frsize-total-reserved<53*1073741824: raise RuntimeError('artifact retention disk reservation guard')
-    if any(part.lower() in {'login','session','sessions','cookie','cookies'} for name in names for part in pathlib.PurePosixPath(name).parts):
+    if any(part.lower() in {'login','session','sessions','cookie','cookies','.netrc','.npmrc','.pypirc','.ssh','.aws','.kube','.env','.git'} for name in names for part in pathlib.PurePosixPath(name).parts):
         raise RuntimeError('artifact manifest name contains private-state component')
     retention=begin_retention(d)
     retained=ctl/'artifacts'; retained.mkdir(mode=0o700)
@@ -1033,7 +1035,8 @@ export async function confirmDeadSlot(row, state) {
   if (record && (record.slot !== row.slot || !sameHolder(record.holder, hold.fields))) record = null;
   if (record?.control) {
     if (!record.control.startsWith(root + '/runs/') || !/^[0-9a-f-]{36}$/.test(path.posix.basename(record.control))) throw Error('invalid held run identity');
-    if (await reconnectRun(row, record, state, true) !== 'group-gone') return null;
+    const pending = await ssh(row,'cleanup-pending',{root,control:record.control},{state,timeout:8000,noRetry:true});
+    if (pending.code || JSON.parse(pending.stdout).clean !== true) return null;
   } else if (hold.fields.remote_cleanup_required) return null;
   const evidence = await ssh(row, 'dead-slot', { root, slot: row.slot, workspace: record?.workspace },
     { state, timeout: 8000, noRetry: true });
@@ -1633,7 +1636,7 @@ async function collectGarbage({ rows, days = 7, host, state, emit = text => proc
       const control = `${root}/gc/${randomUUID()}`;
       try {
         // Inventory is rechecked by gc AFTER leasing. GC itself gets the same supervisor.
-        checked(await ssh(row, 'inspect', { root, control, repository: item.repository || `${root}/repos/.gc-unused`, commit: '0'.repeat(40) }, { state }), 'GC preparation');
+        checked(await ssh(row, 'inspect', { root, control, reuseAllowed: false, repository: item.repository || `${root}/repos/.gc-unused`, commit: '0'.repeat(40) }, { state }), 'GC preparation');
         const op = item.maintenance ? 'maintenance' : 'gc';
         const result = await ssh(row, 'run', { workspace: root, control, command: remoteCommand(op, remoteScripts[op], data), env: {}, seconds: 120 }, { state, timeout: 140000, onOutput: emit });
         const cleanup = await ssh(row, 'cleanup', { control, started: true }, { state, cancellable: false, timeout: 35000 });
@@ -1997,6 +2000,13 @@ async function shard(opts) {
           if (!clean) {
             attempt.cleanupUnconfirmed = true;
             attempt.exit ||= 70;
+            try {
+              await recordCleanupPending(row,data,opts.runId);
+              attempt.cleanupPending = path.join(sharedDir(),'devbox-cleanup-pending',row.slot+'.json');
+            } catch (error) {
+              attempt.pendingMarkerError = error.message;
+              emit(`[shard ${opts.shard}] BLOCKED: cleanup pending marker could not be saved; retain owned hold: ${error.message}\n`);
+            }
             if (opts.retainRemoteSupported) {
               const retained = await runRes(['retain-remote', attempt.slot, '--by', by, '--pid', String(process.pid)], true);
               if (retained.code) {
@@ -2268,6 +2278,45 @@ export async function fetchArtifact(args) {
   }
 }
 
+async function recordCleanupPending(row,data,runId) {
+  const file=path.join(sharedDir(),'devbox-cleanup-pending',row.slot+'.json');
+  fs.mkdirSync(path.dirname(file),{recursive:true});
+  await withStateLock(file,()=>{
+    const previous=fs.existsSync(file) ? JSON.parse(fs.readFileSync(file,'utf8')) : {version:1,slot:row.slot,runs:[]};
+    if (previous.slot !== row.slot || !Array.isArray(previous.runs)) throw Error('invalid existing cleanup pending marker');
+    const record={run:path.posix.basename(data.control),runId,slot:row.slot,host:row.host,target:row.target,root:data.root,control:data.control,at:Date.now()/1000};
+    if (!previous.runs.some(item=>item.run === record.run)) previous.runs.push(record);
+    writeJSON(file,previous);
+  });
+}
+
+export async function checkCleanupPending(slot) {
+  const row=[...readRegistry(sharedDir(),'devbox-cn'),...readRegistry(sharedDir(),'devbox-cn-light')].find(row=>row.slot===slot);
+  if (!row?.target) throw Error('cleanup pending requires an open registered slot');
+  const file=path.join(sharedDir(),'devbox-cleanup-pending',slot+'.json');
+  if (!fs.existsSync(file)) return 0;
+  const state=cancellationState(), deadline=Date.now()+15000;
+  try {
+    return await withStateLock(file,async()=>{
+      if (!fs.existsSync(file)) return 0;
+      const marker=JSON.parse(fs.readFileSync(file,'utf8'));
+      if (marker.version!==1 || marker.slot!==slot || !Array.isArray(marker.runs) || !marker.runs.length) throw Error('invalid cleanup pending marker');
+      for (const item of marker.runs) {
+        if (item.host!==row.host || item.target!==row.target || !item.root?.startsWith('/') || !item.root.endsWith('/devbox-run') || item.root.split('/').includes('..') || item.control!==`${item.root}/runs/${item.run}` || !/^[0-9a-f-]{36}$/.test(item.run))
+          throw Error('cleanup pending registered host/UUID mismatch');
+        const evidence=JSON.parse(checked(await ssh(row,'cleanup-pending',{root:item.root,control:item.control},
+          {state,timeout:Math.max(1,Math.min(8000,deadline-Date.now())),noRetry:true}),'cleanup pending check'));
+        if (evidence.run!==item.run || evidence.clean!==true || evidence.count!==0 || evidence.units!==0) {
+          console.error(`cleanup pending slot=${slot} run=${item.run}: remote work still alive`); return 2;
+        }
+      }
+      fs.unlinkSync(file);
+      console.log(`cleanup pending confirmed gone slot=${slot}; marker cleared`);
+      return 0;
+    },Math.max(1,Math.floor((deadline-Date.now())/50)));
+  } finally { await closeControlConnections(state); }
+}
+
 export async function retainedArtifacts(args, retire = false) {
   const opts = { timeout: 5 };
   for (let i = 0; i < args.length; i += 2) {
@@ -2324,6 +2373,10 @@ export async function retainedArtifacts(args, retire = false) {
 }
 
 async function main(args) {
+  if (args[0] === 'check-cleanup-pending') {
+    if (args.length!==3 || args[1]!=='--slot') throw Error('check-cleanup-pending --slot ID');
+    return checkCleanupPending(args[2]);
+  }
   if (args[0] === 'list-retained' || args[0] === 'retire-artifacts') return retainedArtifacts(args.slice(1),args[0] === 'retire-artifacts');
   if (args[0] === 'fetch-artifact') return fetchArtifact(args.slice(1));
   if (args[0] === 'input-hash') {
@@ -2352,7 +2405,7 @@ async function main(args) {
   }
   const opts = parseArgs(args);
   if (opts.help) {
-    console.log('Artifacts: --artifact-fetch all|manifest (default all); --artifact-streams 1..4 (default 1); fetch-artifact --manifest FILE --name NAME --out FILE [--timeout MIN]');
+    console.log('Artifacts: --artifact-fetch all|manifest (default all); --artifact-streams 1..4 (default 1); --retain-hours HOURS (default 24, max 72); --retain-on-fail; fetch-artifact --manifest FILE --name NAME --out FILE [--timeout MIN]; list-retained [--host IP]; retire-artifacts --receipt UUID [--host IP]');
     console.log('Usage: devbox-run.mjs [--project P] --task T --repo PATH [--ref COMMIT|HEAD|worktree] [--pool devbox-cn|devbox-cn-light] [--shards N|auto] [--units-file PATH] [--artifact GLOB]... [--fetch-timeout MIN] [--out DIR] [--timeout MIN] [--env K=V]... [--rerun-on-fail] [--allow-flaky] [--affinity KEY] [--prefer-host IP] [--prefer-slot ID] [--need CAP]... [--exclude-slot IDS] [--exclude-host IPS] [--exclude-reason TEXT] [--submodules] [--watch-pid PID] [--input MANIFEST]... [--inputs JSON] [--warm-cost DURATION] -- COMMAND\n       devbox-run.mjs prewarm --project P --repo PATH [--ref main] [--command COMMAND] [--need CAP]... [--input MANIFEST]...\n       devbox-run.mjs gc [--host IP] [--days N]\n       devbox-run.mjs stop --out DIR --run-id UUID\nCOMMAND supports {shard}, {shards} and {units}. Timeout includes queue/upload/run; cleanup follows. See references/devbox-run.md.');
     return 0;
   }

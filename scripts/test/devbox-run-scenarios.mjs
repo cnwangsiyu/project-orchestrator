@@ -106,7 +106,7 @@ const op=command.match(/^# devbox-run:([\w-]+)/)?.[1];
 if(!op)throw Error('unmarked SSH');
 if(!args.includes('BatchMode=yes')||!args.includes('ServerAliveInterval=15')||!args.includes('ServerAliveCountMax=4'))throw Error('missing SSH guard');
 if(['artifacts','fetch-artifact','artifact-range'].includes(op)&&(!args.includes('Ciphers=^aes128-gcm@openssh.com')||args.includes('-c')))throw Error('artifact cipher must be preferred, not required');
-if(['run','cleanup','reconnect','result','artifact-range','dead-slot'].includes(op) || (op==='probe'&&args.includes('ControlMaster=no'))) {
+if(['run','cleanup','reconnect','result','artifact-range','dead-slot','cleanup-pending'].includes(op) || (op==='probe'&&args.includes('ControlMaster=no'))) {
  if(!args.includes('ControlMaster=no')||!args.includes('ControlPath=none'))throw Error('supervisor/recovery SSH must remain independent');
 } else if(!args.includes('ControlMaster=auto')||!args.includes('ControlPersist=60'))throw Error('control SSH must reuse task connection');
 let d={};if(op!=='upload')d=JSON.parse(Buffer.from(command.match(/'([A-Za-z0-9+/=]+)'$/)[1],'base64').toString());
@@ -116,6 +116,10 @@ if(c.authFailures){
  if(count<c.authFailures){fs.writeFileSync(file,String(count+1));console.error(c.authMessage||'Permission denied (gssapi-with-mic)');process.exit(255);}
 }
 if(op==='dead-slot'){console.log(JSON.stringify({clean:!c.remoteRunning,count:c.remoteRunning?1:0,worktrees:1}));return;}
+if(op==='cleanup-pending'){
+ if(c.pendingUnknown)process.exit(255);
+ console.log(JSON.stringify({run:path.basename(d.control),clean:!c.remoteRunning,count:c.remoteRunning?1:0,units:c.pendingUnits?1:0}));return;
+}
 if(op==='reconnect'){
  if(c.reconnectRetries&&!fs.existsSync(path.join(c.dir,'reconnect-failed'))){fs.writeFileSync(path.join(c.dir,'reconnect-failed'),'1');process.exit(255);}
  console.log(c.remoteRunning?'group-running':'group-gone');return;
@@ -904,6 +908,42 @@ async function hygieneScenarios() {
   console.log('PASS dirty nested submodules preserve patches, name previous job and clean checkout succeeds');
 }
 
+async function cleanupPendingScenarios() {
+  const f=fixture({badCleanup:true});
+  const old=await run(f); assert.equal(old.code,70);
+  const attempt=old.summary.shards[0].attempts[0];
+  const markerFile=path.join(f.shared,'devbox-cleanup-pending',attempt.slot+'.json');
+  const marker=JSON.parse(fs.readFileSync(markerFile));
+  assert.equal(marker.runs[0].runId,old.summary.runId); assert.equal(marker.runs[0].host,attempt.host);
+  const oldTake=f.events().find(event=>event.op==='take');
+  assert.equal(spawnSync('res',['return',attempt.slot,'--by',oldTake.by],{env:f.env}).status,0);
+  assert.equal(fs.existsSync(markerFile),true,'ordinary return never clears a cleanup-pending marker');
+  marker.runs[0].at=1; fs.writeFileSync(markerFile,JSON.stringify(marker));
+  const actual=fileURLToPath(new URL('../res/res',import.meta.url));
+  const env={...f.env,RES_COMMAND:actual,RES_DEVBOX_RUNNER:script};
+  const config=fields=>fs.writeFileSync(path.join(f.dir,'config.json'),JSON.stringify({...f.config,...fields}));
+  const res=(args)=>spawnSync(actual,args,{env,encoding:'utf8',timeout:30000});
+  const common=['--by','pending-next','--project','fixture','--task','pending-next','--for','fixture pending check','--pid',String(process.pid)];
+  const start=f.events().length;
+  config({remoteRunning:true});
+  const status=res(['status',attempt.slot]); assert.equal(status.status,0,status.stderr); assert.match(status.stdout,/cleanup pending/);
+  assert.equal(f.events().length,start,'res status does not SSH or expire a marker');
+  const refused=res(['take',attempt.slot,...common]); assert.notEqual(refused.status,0); assert.match(refused.stderr,/cleanup pending/);
+  assert.equal(fs.existsSync(markerFile),true,'age alone never expires the marker');
+  const alternate=res(['wait-pool','devbox-cn',...common,'--timeout','0.2']);
+  assert.equal(alternate.status,0,alternate.stdout+alternate.stderr); assert.match(alternate.stdout,/slot=devbox-cn-2/);
+  assert.equal(res(['return','devbox-cn-2','--by','pending-next']).status,0);
+  config({pendingUnknown:true}); assert.notEqual(res(['take',attempt.slot,...common]).status,0); assert.equal(fs.existsSync(markerFile),true);
+  config({pendingUnits:true}); assert.notEqual(res(['take',attempt.slot,...common]).status,0); assert.equal(fs.existsSync(markerFile),true);
+  config({remoteRunning:false});
+  const confirmed=res(['take',attempt.slot,...common]); assert.equal(confirmed.status,0,confirmed.stdout+confirmed.stderr);
+  assert.equal(fs.existsSync(markerFile),false,'only the UUID-specific confirmed check clears the marker');
+  assert.equal(res(['return',attempt.slot,'--by','pending-next']).status,0);
+  assert.ok(f.events().slice(start).some(event=>event.op==='cleanup-pending'));
+  assert.ok(!f.events().slice(start).some(event=>event.op==='cleanup'||event.op==='run'||event.op==='dead-slot'),'acquirers only probe the UUID and never signal another run');
+  console.log('PASS durable cleanup pending after return, read-only status, old/live/unknown/unit markers block, alternate slot admission and confirmed UUID-only clearance');
+}
+
 async function deadSlotScenarios() {
   for (const running of [true,false]) {
     const f=fixture({remoteRunning:running});
@@ -981,6 +1021,8 @@ async function overheadScenarios() {
 async function scenarios() {
   const only = process.env.DEVBOX_TEST_CASE;
   if (only === 'overhead') { await overheadScenarios(); return; }
+  if (only === 'cleanup-pending') { await cleanupPendingScenarios(); return; }
+  if (!only) await cleanupPendingScenarios();
   if (!only) await overheadScenarios();
   const perf = { affinity:affinityScopeScenarios, 'dead-slot':deadSlotScenarios, inputs:inputScenarios,hygiene:hygieneScenarios,credentials: credentialScenarios, 'packed-module': packedModuleRecovery, receipt: receiptScenarios, 'res-progress': resProgressScenarios, cpu: cpuScenarios, auto: autoScenarios, units: unitScenarios, prewarm: prewarmScenarios, metrics: metricScenarios, placement: placementScenarios, 'ssh-drop': sshDropScenarios };
   const baseline = ['baseline-core', 'baseline-config', 'baseline-warm', 'baseline-placement', 'baseline-artifacts', 'baseline-cleanup', 'baseline-gc', 'baseline-ssh'];
@@ -1169,14 +1211,15 @@ async function scenarios() {
   assert.ok(fs.statSync(largeAttempt.artifact).size >= 64 * 1048576);
   assert.equal(large.events().filter(event => event.op === 'artifact-range').length, 4);
   assert.equal(large.events().filter(event => event.op === 'artifact-release').length, 1);
-  const retained = fixture();
+  const retained = fixture({diskCosts:true});
   const saved = await run(retained, ['--artifact', 'build/result.txt', '--artifact-fetch', 'manifest'], 'mkdir -p build && printf retained > build/result.txt'); ok(saved); returned(retained);
   const savedAttempt = saved.summary.shards[0].attempts[0];
   assert.equal(savedAttempt.artifact, undefined);
   const manifest = JSON.parse(fs.readFileSync(savedAttempt.artifactManifest));
   assert.equal(manifest.artifacts[0].name, 'build/result.txt');
   assert.equal(manifest.artifacts[0].size, 8);
-  ok(await run(retained, [], 'printf reused > build/result.txt')); returned(retained);
+  const reuseRetained=await run(retained, [], 'printf reused > build/result.txt'); ok(reuseRetained); returned(retained);
+  assert.equal(reuseRetained.summary.shards[0].attempts[0].diskCosts[manifest.slot],8/1024**3,'retained bytes remain in the warm slot disk reservation');
   const foreignLock = path.join(retained.shared, 'locks', manifest.slot + '.d');
   fs.mkdirSync(foreignLock);
   const foreignInfo = 'by\tfixture-foreign\npid\t1\n';

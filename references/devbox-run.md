@@ -986,6 +986,18 @@ unknown processes. A failed return is also recorded. Cleanup and artifact
 transfer have separate bounded grace periods after the execution timeout.
 Never force-return such a slot until its remote descendants are confirmed gone.
 
+BC-160 also persists `devbox-cleanup-pending/SLOT.json` outside the lease
+directory, with the remote run UUID, run-group UUID, registered host/user and
+observation time. Returning/reclaiming a lease does not erase this marker.
+The next `res take`/`wait-pool` acquirer runs one bounded read-only UUID-specific
+process/unit probe before admission. Confirmed gone clears the marker; live,
+unavailable or mismatched evidence skips the slot. `res status` reports cleanup
+pending without SSH. Markers never expire by time, and acquirers never signal
+the prior run. The final admission recheck rejects a newly appeared marker.
+The checker defaults to `~/.agents/skills/project-orchestrator/scripts/devbox-run.mjs`;
+isolated candidate tests set `RES_DEVBOX_RUNNER` to the candidate script. The
+owner must install the matching runner and `scripts/res/res` together.
+
 The runner transfers source and explicit nonsecret environment only. It does
 not read login files or forward an SSH agent or delegated credentials. Common
 credential-file paths are rejected from the source tree, reachable Git history

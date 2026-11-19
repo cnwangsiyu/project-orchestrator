@@ -1927,7 +1927,7 @@ pool_controller() {
   local runner=
   if [ "${POOL_EXEC_CHILD:-0}" = 1 ]; then runner=exec; fi
   ${runner:+$runner} python3 - "$RES_DIR" "$@" "$BY" "$PROJECT" "$TASK" "$PURPOSE" "$PID" "$UNTIL" "${FORCE:-}" "${POOL_NEED:-}" "${prefer_host:-}" "${prefer_slot:-}" "${excluded_slots:-}" "${excluded_hosts:-}" "${WAITER_STALE_SECONDS}" "$$" "${POOL_EPISODE:-none}" "${exclude_reason:-}" "${hard_slots:-}" "${hard_hosts:-}" "${DISK_GIB:-}" "${DISK_GIB_FILE:-}" "${PLACEMENT_FILE:-}" "${MAINTENANCE:-}" "${EXTRA_DISK_GIB:-0}" "${WAIT_CONFIG_FILE:+$WAIT_CONFIG_FILE.devbox}" "${warm_family:-}" <<'PY'
-import datetime, fcntl, hashlib, json, math, os, re, shutil, signal, socket, stat, sys, tempfile, time
+import datetime, fcntl, hashlib, json, math, os, re, shutil, signal, socket, stat, subprocess, sys, tempfile, time
 from contextlib import contextmanager
 root, action, request, timeout, delay, by, project, task, purpose, pid, until, force, need, prefer, preferred_slot, excluded_slots, excluded_hosts, stale, controller, generation, exclude_reason, hard_slots, hard_hosts, disk_gib, disk_gib_file, placement_file, maintenance, extra_disk_gib, legacy_config_path, warm_family = sys.argv[1:]
 build_namespace = {'__name__': 'res_build_processes'}
@@ -2204,6 +2204,19 @@ try:
         return candidate
     def heavy_reclaim_enabled():
         return (config_current_values or {}).get('DEVBOX_HEAVY_STALE_RECLAIM') == '1'
+    def pending_file(id): return os.path.join(root, 'devbox-cleanup-pending', id + '.json')
+    pending_checks = {}
+    def pending_ready(id):
+        if not os.path.lexists(pending_file(id)): return True
+        if id in pending_checks: return pending_checks[id]
+        runner = os.environ.get('RES_DEVBOX_RUNNER') or os.path.expanduser('~/.agents/skills/project-orchestrator/scripts/devbox-run.mjs')
+        try:
+            result = subprocess.run(['node', runner, 'check-cleanup-pending', '--slot', id], capture_output=True, text=True, timeout=18)
+            ready = result.returncode == 0 and not os.path.lexists(pending_file(id))
+        except (OSError, subprocess.SubprocessError): ready = False
+        pending_checks[id] = ready
+        if not ready: print('res: cleanup pending slot=' + id + '; remote check alive or unconfirmed; skipping', file=sys.stderr, flush=True)
+        return ready
     def host_slots(box, kind):
         return {id: member[0] for id, member in remote.items() if member[1] == box and slot_type(id) == kind}
     def static_full(box, kind, own_slot=None):
@@ -2539,6 +2552,12 @@ try:
                 value = next((item for item in build_values if item), {})
             else: value = info(os.path.join(locks, id + '.d'))
             holder = 'FREE'; detail = description
+            if os.path.lexists(pending_file(id)):
+                holder = 'CLEANUP PENDING'
+                try:
+                    pending = json.loads(regular_text(pending_file(id)))
+                    detail += ' · cleanup pending ' + ','.join('run=%s host=%s at=%s' % (item.get('run','?'), item.get('host','?'), item.get('at','?')) for item in pending['runs'])
+                except (OSError, ValueError, TypeError, KeyError): detail += ' · cleanup pending (invalid marker; blocked)'
             if value:
                 holder = value.get('by', '?') + ' (' + value.get('project', '?') + ('/' + value['task'] if value.get('task') else '') + ')'
                 observed_pid = value.get('pid', '')
@@ -2551,6 +2570,7 @@ try:
                     holder = label + holder
                 detail = value.get('since', '?') + ' → ' + (value.get('until') or '?') + ' · ' + value.get('for', '?')
                 if value.get('remote_cleanup_required'): detail += ' · remote cleanup required'
+                if os.path.lexists(pending_file(id)): detail += ' · cleanup pending (confirmed check required)'
             print('%-16s %-9s %-9s %-12s %-34s %s' % (id, kind, policy, '-', holder, detail))
         if warn_short_pid:
             print('res: short-lived holder PID; use scripts/heavy-build.sh <command...>; lock, build and return must share one long-lived process', file=sys.stderr)
@@ -2855,6 +2875,7 @@ try:
                 wait_seconds = max(60, value['waitSec'] - max(0, time.time()-input_placement['at'])) if held else 0
                 if not held and not gate_open(reason): wait_seconds = max(60, value['waitSec'])
                 hard = list(value['hardReasons'])
+                if not held and not pending_ready(id): hard.append('cleanup pending')
                 if reason == 'disk' or reason.startswith('closed-'): hard.append('admission ' + reason)
                 allowed = value['eligible'] and eligible(id) and not quarantined(id, state) and not hard
                 table.append(dict(slot=id, host=remote[id][1], waitSec=round(wait_seconds,3), rebuildSec=value['rebuildSec'],
@@ -2870,9 +2891,11 @@ try:
     if not blocked:
         for id in candidates:
             box = remote[id][1] if id in remote and slot_type(id) else None
+            if box and not pending_ready(id): continue
             with admission():
                 directory = os.path.join(locks, id + '.d')
                 if action == 'wait' and (not eligible(id) or quarantined(id, state)): continue
+                if box and os.path.lexists(pending_file(id)): continue
                 stale_hold = None
                 if os.path.isdir(directory):
                     if not (action == 'wait' and is_head()): continue
@@ -2937,6 +2960,7 @@ try:
                                 or rows[id][1] == 'ask-user' and not force)
                 if box: dynamic, _, _ = devbox_settings()
                 permitted = not rejected and fifo_allows(id, state, claimed=True)
+                if box and os.path.lexists(pending_file(id)): rejected = True
                 if not rejected and not permitted: blocked = True; heads = waiting()
                 if rejected or not permitted or inject == 'all':
                     rollbacks += int(rollback())
