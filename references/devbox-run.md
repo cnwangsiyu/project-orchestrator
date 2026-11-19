@@ -632,6 +632,17 @@ substring. Boolean, numeric and empty values, `ENABLE_`/`DISABLE_`/`IS_`/`USE_` 
 identifiers are kept and listed in `source-build-fields.json`. Value-shape detectors (private-key blocks, access-key
 ids, JWTs, URL credentials) are unchanged, and the devbox-run transfer gate still checks the export again.
 
+Compiled source is never rewritten by name (2026-11-19, BC-152): blanking a string literal because its NAME looks
+like a credential label changed program behaviour (key-name literals in C++ were emptied; the S21 demo crashed at
+start). In compiled source (C/C++/ObjC/Java/Kotlin/Swift) the sanitizer rewrites only precise value-shape hits, and
+each rewrite is on a reviewed list (path, field, count, reason; no values). Everything else that looks suspicious is
+resolved as a reviewed KEEP entry with a structural anchor, or the export fails closed; the entropy heuristic is
+report-only. Home-directory path literals are kept. A rewrite in a non-compiled file that ships inside the APK must
+be handled before packaging. A declared test overlay (for example targetSdk) is allowed when the manifest records
+its hash. Device eligibility: only packages exported with these rules (vesdk T191b and later; accepted on the S21
+by Lynx T125) may be installed on a device. Packages from earlier devbox exports (T116, T119, T123, T176, T182,
+T183, T190, T190b) stay banned from devices.
+
 Prepare from a local vesdk branch name or full commit. The exporter creates
 a parentless Git snapshot and records the original commit in
 `source-provenance.json`. Prep generates the EffectSDK Android version metadata
