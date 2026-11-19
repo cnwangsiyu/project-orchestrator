@@ -38,9 +38,23 @@ Company remote build services count as company CI.
 - Source reaches the machine by `workload upload` of an archive from the mini, or by cloning on the remote side if
   it has repository access (not verified). vesdk: commit `d0e184d46ce` exported to 22,394 files / 34.6 MiB
   compressed but had 2,966 unresolved LFS pointers, so resolve LFS before uploading.
-- Not yet known: internal pod/binary source access from the remote side, real cores and RAM, build time limits,
-  cost or quota per run, whether Xcode 26.3 builds each project. No build has run there yet.
+- Not yet known: pinned internal pod/binary access, build time limits, cost per run, whether Xcode 26.3 builds
+  vesdk. No vesdk build has run there yet.
+- 2026-11-18 VAK W424 (first builds on Kross): two sequential `ios-dev` workloads reached a usable shell in about
+  40 s each, each after one HTTP 409 (so retry exec for at least a minute before giving up). Guest: 4 CPUs / 8 GiB
+  with 2 CPU / 8192 MB requested; Xcode 26.3, Swift 6.2.4, Ruby 2.6.10.
+- A 143 MB archive (4,972 files) uploaded in 29 s; hash and extraction 9 s. SPM graph resolved in 11 s.
+- Ruby 2.6.10 cannot `gem install cocoapods` from public sources (`public_suffix` needs Ruby >= 3.2). Install
+  through the project's `Gemfile.lock` with Bundler (Bundler 2.3.27 installs in about 23 s).
+- Internal Ruby, npm and iOS CDN roots answer 200 from the remote side; pinned internal artifacts are untested.
+- VAK results on Xcode 26.3: XCTest build-for-testing passed (13 s and 11 s); the app's simulator build failed after
+  79 s on one Swift type-check timeout that Xcode 27.1 tolerates, so the code needs a small change before 26.3 builds it.
+- `kross workload exec` can exit 0 while `data.exit_code` is 1: read the remote exit payload and the build log, not
+  the CLI status.
+- Workspace quota shows 100 CPU / 400 GiB RAM / 1000 GiB storage. Not shown anywhere: Mac concurrency limits,
+  larger guest sizes, cache or snapshot persistence between workloads, the quota-increase path, billing.
 - One orchestrator's pilot at a time until readiness is understood; keep each pilot to one workload.
+- VAK task record: `~/code/.claude-data/orchestrator/video-agent/tasks/W424-ios-kross-build/report.md`.
 - Task records: `~/.claude/jobs/9850afbb/tmp/task-remote-ios-pilot/` (`report.md`, `phase2-runbook.md`),
   `task-remote-ios-xcode27/report.md`, `task-remote-ios-phase2/report.md`.
 
