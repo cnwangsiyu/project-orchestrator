@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { parseArgs, readRegistry, remoteScripts, storeIdentity, makeBundle, cpuBudget, cpuEnvironment, parseUnits, discoverUnits, assignUnits, planShards } from '../devbox-run.mjs';
+import { parseArgs, readRegistry, remoteScripts, storeIdentity, makeBundle, cpuBudget, cpuEnvironment, parseUnits, discoverUnits, assignUnits, planShards, runBudgets, commandOutcome } from '../devbox-run.mjs';
 
 import { makeSubmoduleFixture } from './devbox-submodule-fixture.mjs';
 import { fingerprint, inputKey, indexFile } from '../lib/devbox-inputs.mjs';
@@ -84,6 +84,7 @@ if(a.includes('--prefer-host')) ids.sort((x,y)=>Number(y.host===flag(a,'--prefer
 if(a.includes('--prefer-slot')) ids.sort((x,y)=>Number(y.slot===flag(a,'--prefer-slot'))-Number(x.slot===flag(a,'--prefer-slot')));
 let cancelled=false;process.on('SIGTERM',()=>{cancelled=true;});
 const deadline=Date.now()+Number(a.includes('--timeout')?flag(a,'--timeout'):0)*60000;
+if(c.admissionDelay&&op==='wait-pool')await sleep(c.admissionDelay);
 do {
  const plan=a.includes('--placement-file')?JSON.parse(fs.readFileSync(flag(a,'--placement-file'),'utf8')):null;
  for(const r of ids){if(plan&&!plan.slots[r.slot]?.eligible)continue;const lock=path.join(c.shared,'locks',r.slot+'.d');try{fs.mkdirSync(lock);}catch(e){if(e.code==='EEXIST')continue;throw e;}
@@ -118,7 +119,8 @@ if(c.authFailures){
 if(op==='dead-slot'){console.log(JSON.stringify({clean:!c.remoteRunning,count:c.remoteRunning?1:0,worktrees:1}));return;}
 if(op==='cleanup-pending'){
  if(c.pendingUnknown)process.exit(255);
- console.log(JSON.stringify({run:path.basename(d.control),clean:!c.remoteRunning,count:c.remoteRunning?1:0,units:c.pendingUnits?1:0}));return;
+ const running=c.remoteRunning&&!fs.existsSync(path.join(d.control,'fixture-cleaned'));
+ console.log(JSON.stringify({run:path.basename(d.control),clean:!running&&!c.pendingUnits,count:running?1:0,units:c.pendingUnits?1:0,pgid:12345}));return;
 }
 if(op==='reconnect'){
  if(c.reconnectRetries&&!fs.existsSync(path.join(c.dir,'reconnect-failed'))){fs.writeFileSync(path.join(c.dir,'reconnect-failed'),'1');process.exit(255);}
@@ -131,12 +133,14 @@ if(op==='result'){
 }
 if(c.postStartFailure&&op==='run'){
  fs.mkdirSync(d.control,{recursive:true});
+ if(d.commandMarker)console.log(d.commandMarker);
  if(!c.remoteRunning&&!c.completeOnReconnect)fs.writeFileSync(path.join(d.control,'done.json'),JSON.stringify({run:path.basename(d.control),gone:true,exit:c.remoteExit??0}));
  if(c.recordedUnit)fs.writeFileSync(path.join(d.control,'units.json'),JSON.stringify({run:path.basename(d.control),units:[{unit:c.recordedUnit,exit:0,durationSec:349.366333442}]}));
- fs.writeFileSync(path.join(d.control,'output.log'),'remaining output tail\n');
+ const startOutput=d.commandMarker?d.commandMarker+'\n':'';
+ fs.writeFileSync(path.join(d.control,'output.log'),startOutput+'remaining output tail\n');
  if(c.privateTail){
   const header='-----'+'BEGIN OPENSSH PRIVATE KEY-----\n';
-  fs.writeFileSync(path.join(d.control,'output.log'),header+'FAKE_PRIVATE_TAIL_ONLY\n'+'-----'+'END OPENSSH PRIVATE KEY-----\n');
+  fs.writeFileSync(path.join(d.control,'output.log'),startOutput+header+'FAKE_PRIVATE_TAIL_ONLY\n'+'-----'+'END OPENSSH PRIVATE KEY-----\n');
   process.stdout.write(c.privateTail==='split'?header.slice(0,8):header);
  }
  console.error(command.match(/'(DEVBOX_STARTED_[^']+)'/)[1]);console.error('Connection closed by remote host');process.exit(255);
@@ -150,7 +154,9 @@ if(op==='metrics') {
  console.log(JSON.stringify({cores:8,load5:2.5,memAvailableGiB:24,freeGiB:100}));return;
 }
 if(op==='bundle'&&c.uploadRetry&&!fs.existsSync(path.join(c.dir,'retried'))){fs.writeFileSync(path.join(c.dir,'retried'),'1');process.stdin.resume();await new Promise(r=>process.stdin.on('end',r));console.error(c.uploadRetry);process.exit(255);}
+if(op==='bundle'&&c.transferDelay)await sleep(c.transferDelay);
 if(op==='run') {
+ if(c.launchDelay)await sleep(c.launchDelay);
  if(c.launcherDiskHost===host){console.error('DEVBOX_LAUNCH_DISK_GUARD');process.exit(72);}
  fs.mkdirSync(d.control,{recursive:true});
  if(fs.existsSync(path.join(d.control,'cancel'))){fs.writeFileSync(path.join(d.control,'done.json'),JSON.stringify({gone:true}));process.exit(143);}
@@ -158,20 +164,23 @@ if(op==='run') {
  let cmd=(d.cpus?'export GRADLE_OPTS="'+'$'+'{GRADLE_OPTS:+'+'$'+'GRADLE_OPTS }-Dorg.gradle.workers.max='+d.cpus+'"; ':'')+d.command;
  if(c.failHost===host)cmd='exit 7';
  const child=cp.spawn('/bin/bash',['-c',cmd],{cwd:d.workspace,env:{...process.env,...d.env},detached:true,stdio:['ignore','inherit','inherit']});
+ if(d.commandMarker)console.log(d.commandMarker);
  fs.writeFileSync(path.join(d.control,'group.json'),JSON.stringify({pid:child.pid,run:path.basename(d.control),start:'fixture'}));
  event('group',{pid:child.pid,host});
- let cancelled=false;
+ let cancelled=false,timedOut=false;
  const stop=()=>{cancelled=true;try{process.kill(-child.pid,'SIGTERM')}catch{}};
  process.on('SIGTERM',stop);process.on('SIGHUP',stop);
- const timer=setTimeout(stop,d.seconds*1000);
+ const timer=setTimeout(()=>{timedOut=true;stop();},d.seconds*1000);
  let code=await new Promise(r=>child.on('exit',(code,signal)=>r(code??143)));
  clearTimeout(timer);try{process.kill(-child.pid,'SIGKILL')}catch{}
  fs.writeFileSync(path.join(d.control,'done.json'),JSON.stringify({gone:true}));
- process.exit(cancelled?143:code);
+ process.exit(timedOut?124:cancelled?143:code);
 }
 if(op==='cleanup'){
- if(c.badCleanup)process.exit(70);
+ if(c.badCleanup||c.stopFailureHost===host){console.error('DEVBOX_CLEANUP='+JSON.stringify({run:path.basename(d.control),pgid:12345,count:3,ownerAlive:false}));process.exit(70);}
  fs.mkdirSync(d.control,{recursive:true});fs.writeFileSync(path.join(d.control,'cancel'),'');
+ fs.writeFileSync(path.join(d.control,'fixture-cleaned'),'');
+ console.error('DEVBOX_CLEANUP='+JSON.stringify({run:path.basename(d.control),pgid:12345,count:0,ownerAlive:false}));
  event('group-gone',{host});console.log('group-gone');return;
 }
 if(op==='artifacts'&&c.badArtifact)process.exit(66);
@@ -617,11 +626,12 @@ async function stopOwnership() {
     const r = await run(f, [], 'sleep 100', events => events.some(e => e.op === 'group'), (_, out) => {
       const receipt = JSON.parse(fs.readFileSync(path.join(out,'run.json')));
       const stale = 'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa';
-      const request = id => spawnSync(process.execPath,[script,'stop','--out',out,'--run-id',id]);
+      const request = id => spawnSync(process.execPath,[script,'stop','--out',out,'--run-id',id], { env: f.env, encoding: 'utf8' });
       // A stale receipt from another run must not stop either the job or the foreign process.
       assert.equal(request(stale).status, 1);
       assert.ok(!fs.existsSync(path.join(out,'stop-'+receipt.runId)));
-      assert.equal(request(receipt.runId).status, 0);
+      const stopped = request(receipt.runId);
+      assert.equal(stopped.status, 0, stopped.stdout + stopped.stderr);
     });
     assert.equal(r.code,143); returned(f);
     const ctl = path.join(f.dir,'stale-control'); fs.mkdirSync(ctl);
@@ -764,8 +774,8 @@ async function placementScenarios() {
   assert.equal(shard.host, '192.0.2.2');
   assert.match(result.stdout, /rerun with --exclude-reason/i);
   assert.match(shard.attempts[0].error, /dropped automatically/);
-  const hard = await run(f, ['--timeout', '0.05', '--exclude-host', '192.0.2.2', '--exclude-reason', 'fixture binding']);
-  assert.notEqual(hard.code, 0);
+  const hard = await run(f, ['--timeout', '0.05', '--queue-timeout', '0.05', '--exclude-host', '192.0.2.2', '--exclude-reason', 'fixture binding']);
+  assert.equal(hard.code, 125);
   assert.equal(hard.summary.shards[0].softExclusionsDropped, undefined);
   assert.ok(f.events().every(event => event.op !== 'run' || event.host === '192.0.2.2'));
   assert.deepEqual(fs.readdirSync(path.join(f.shared, 'locks')), ['devbox-cn-1.d']);
@@ -836,6 +846,126 @@ async function sshDropScenarios() {
   assert.match(stop.stdout, /confirmed remote cleanup and returned/);
   returned(live);
   console.log('PASS SSH drop recovers recorded success/failure and output/artifacts, retries unreadable status, and retains live jobs until explicit stop');
+}
+
+async function budgetScenarios() {
+  const f = fixture();
+  const args = ['--project','fixture','--task','budget','--repo',f.repo,'--timeout','30'];
+  const opts = parseArgs([...args,'--','true']);
+  assert.equal(opts.queueTimeout,30);
+  assert.equal(parseArgs([...args,'--timeout','5','--','true']).queueTimeout,30);
+  assert.equal(parseArgs([...args,'--timeout','90','--','true']).queueTimeout,90);
+  for (const value of ['0','121','NaN']) assert.throws(() => parseArgs([...args,'--queue-timeout',value,'--','true']));
+  let clock=0, timer, cancelled;
+  const budgets=runBudgets(opts,code=>{cancelled=code;},()=>clock,(fn,ms)=>{timer={fn,ms};return timer;},()=>{timer=undefined;});
+  assert.equal(budgets.queue(),1800000);
+  // W448 BC-167, run 63612849-b389-4b14-8524-c4d460ccdeca: exact evidence.
+  clock += 1565.58203975*1000;
+  clock += 142.92348416700005*1000;
+  assert.ok(Math.abs(budgets.remaining()/1000-91.494476083)<.001);
+  assert.equal(budgets.command(),true);
+  assert.equal(timer.ms,1815000,'full 30-minute command plus receipt grace after 26.1-minute admission and 2.4-minute transfer');
+  clock += 95.70279241700005*1000;
+  assert.equal(cancelled,undefined,'old remaining budget does not cancel the command');
+  budgets.finish();
+  budgets.queue(); assert.ok(timer.ms<92000,'retry queue/preparation remains cumulative');
+  timer.fn(); assert.equal(cancelled,125);
+  assert.equal(commandOutcome(125,budgets.expiredBudget).outcome,'queue-transfer-timeout');
+  const watchdog=runBudgets(opts,code=>{cancelled=code;},()=>clock,(fn,ms)=>{timer={fn,ms};return timer;},()=>{});
+  watchdog.queue(); watchdog.command(); timer.fn(); assert.equal(cancelled,124); watchdog.finish();
+  assert.equal(commandOutcome(143,watchdog.expiredBudget).outcome,'command-timeout');
+  assert.equal(commandOutcome(0).outcome,'success');
+  assert.equal(commandOutcome(7).outcome,'command-failed');
+  assert.equal(commandOutcome(125).outcome,'command-failed','a recorded command exit 125 is distinct from preparation expiry');
+  assert.equal(commandOutcome(143).outcome,'cancelled');
+  const scaled=fixture({admissionDelay:5219,transferDelay:476});
+  const completed=await run(scaled,['--timeout','0.1','--queue-timeout','0.5'],'sleep 1.5; echo command-finished');
+  ok(completed); returned(scaled);
+  const a=completed.summary.shards[0].attempts[0];
+  assert.equal(a.commandBudgetSec,6); assert.equal(a.outcome,'success');
+  assert.ok(a.phaseTimings.seconds.slotWaitAdmission>=5.219);
+  assert.ok(a.phaseTimings.seconds.sourceTransferIn>=.476);
+  assert.ok(a.phaseTimings.seconds.remoteCommand>=1.5);
+  assert.ok(a.durationSec>6,'work runs after the old combined deadline');
+  const recovered=fixture({postStartFailure:true,remoteExit:124,badArtifact:true});
+  const expired=await run(recovered,['--artifact','missing.txt']);
+  assert.equal(expired.code,124); assert.equal(expired.summary.outcome,'command-timeout');
+  assert.equal(expired.summary.shards[0].attempts[0].commandExit,124);
+  assert.match(expired.stdout,/recorded remote exit=124/);
+  assert.match(expired.stdout,/artifact fetch failed \(66\); command timed out \(--timeout command budget\)/);
+  assert.ok(!expired.stdout.includes('command succeeded')); returned(recovered);
+  const timed=fixture();
+  const deadline=await run(timed,['--timeout','0.035'],'sleep 60');
+  assert.equal(deadline.code,124); assert.equal(deadline.summary.outcome,'command-timeout'); returned(timed);
+  const queued=fixture();
+  for (const slot of ['devbox-cn-1','devbox-cn-2']) {
+    const lock=path.join(queued.shared,'locks',slot+'.d'); fs.mkdirSync(lock);
+    fs.writeFileSync(path.join(lock,'info'),'by\tforeign\npid\t1\n');
+  }
+  const noAdmission=await run(queued,['--queue-timeout','0.04','--timeout','1']);
+  assert.equal(noAdmission.code,125); assert.equal(noAdmission.summary.outcome,'queue-transfer-timeout');
+  assert.match(noAdmission.stdout,/queue\/transfer limit reached; command did not get its budget/);
+  assert.ok(!queued.events().some(e=>e.op==='run'));
+  assert.equal(fs.readdirSync(path.join(queued.shared,'locks')).length,2,'foreign holds preserved');
+  const transfer=fixture({transferDelay:10000});
+  const noTransfer=await run(transfer,['--queue-timeout','0.1','--timeout','1']);
+  assert.equal(noTransfer.code,125); assert.equal(noTransfer.summary.outcome,'queue-transfer-timeout');
+  assert.ok(!transfer.events().some(e=>e.op==='run')); returned(transfer);
+  console.log('PASS BC-167 exact timing shape, independent command budget, cumulative preparation limit, queue/upload expiry and recovered-124 artifact outcome');
+}
+
+async function stopShardScenarios() {
+  const rotated=fixture();
+  rotated.env.RES_COMMAND=fileURLToPath(new URL('../res/res',import.meta.url));
+  const asset=await fingerprint(path.join(rotated.repo,'source.txt'));
+  const rebuilt=await run(rotated,['--input',`name=asset,hash=${asset.hash},rebuildable=yes,cost=1s,size=0.01,seed=cmd:printf 'first\\n' > "$DEVBOX_INPUT_PATH"`],
+    'sleep 60', events=>events.filter(e=>e.op==='group').length===2, (_,out)=>{
+      const active=JSON.parse(fs.readFileSync(path.join(out,'active-1.json')));
+      const commands=rotated.events().filter(e=>e.op==='run');
+      assert.notEqual(commands[0].control,commands[1].control);
+      assert.equal(active.retainedRun.control,commands[1].control,'active receipt follows seed supervisor rotation');
+      const held=JSON.parse(fs.readFileSync(path.join(rotated.shared,'devbox-run-holds',active.slot+'.json')));
+      assert.equal(held.control,commands[1].control);
+      const stopped=spawnSync(process.execPath,[script,'stop','--out',out,'--run-id',active.runId],{env:rotated.env,encoding:'utf8'});
+      assert.equal(stopped.status,0,stopped.stdout+stopped.stderr);
+    });
+  assert.equal(rebuilt.code,143); returned(rotated);
+
+  for (const blocked of [false,true]) {
+    const f=fixture({postStartFailure:true,remoteRunning:true});
+    const held=await run(f,['--shards','2']); assert.equal(held.code,255);
+    const attempts=held.summary.shards.map(s=>s.attempts[0]);
+    const dead=attempts[1];
+    // Recover an older ordinary cleanup-pending shard with no retained receipt.
+    delete held.summary.shards[1].attempts[0].retainedRun;
+    fs.writeFileSync(path.join(held.out,'summary.json'),JSON.stringify(held.summary));
+    fs.unlinkSync(path.join(held.out,'active-2.json')); fs.unlinkSync(path.join(held.out,'retained-2.json'));
+    const lock=path.join(f.shared,'locks',dead.slot+'.d','info');
+    fs.writeFileSync(lock,fs.readFileSync(lock,'utf8').replace(/^pid\t.*$/m,'pid\t2147483647'));
+    const holdFile=path.join(f.shared,'devbox-run-holds',dead.slot+'.json');
+    const hold=JSON.parse(fs.readFileSync(holdFile)); hold.holder.pid='2147483647'; fs.writeFileSync(holdFile,JSON.stringify(hold));
+    if (!blocked) fs.unlinkSync(path.join(f.shared,'devbox-run-holds',attempts[0].slot+'.json'));
+    if (blocked) fs.writeFileSync(path.join(f.dir,'config.json'),JSON.stringify({...f.config,stopFailureHost:attempts[0].host}));
+    const before=f.events().length;
+    const stop=spawnSync(process.execPath,[script,'stop','--out',held.out,'--run-id',held.summary.runId],{env:f.env,encoding:'utf8',timeout:60000});
+    assert.equal(stop.status,blocked?70:0,stop.stdout+stop.stderr);
+    const events=f.events().slice(before);
+    assert.equal(events.filter(e=>e.op==='cleanup').length,2,'every shard reached, including dead local holder');
+    const receipt=JSON.parse(fs.readFileSync(path.join(held.out,'stop-result.json')));
+    assert.equal(receipt.results.length,2);
+    assert.equal(receipt.results.filter(r=>r.returned).length,blocked?1:2);
+    if (blocked) {
+      assert.match(stop.stderr,new RegExp('host='+attempts[0].host+' pgid=12345 processes=3'));
+      assert.ok(fs.existsSync(path.join(f.shared,'devbox-cleanup-pending',attempts[0].slot+'.json')));
+      assert.ok(!fs.existsSync(path.join(f.shared,'devbox-cleanup-pending',dead.slot+'.json')));
+      fs.writeFileSync(path.join(f.dir,'config.json'),JSON.stringify(f.config));
+      const retry=spawnSync(process.execPath,[script,'stop','--out',held.out,'--run-id',held.summary.runId],{env:f.env,encoding:'utf8'});
+      assert.equal(retry.status,0,retry.stdout+retry.stderr);
+    }
+    returned(f);
+    assert.deepEqual(fs.readdirSync(path.join(f.shared,'devbox-cleanup-pending')),[]);
+  }
+  console.log('PASS two-shard stop recovers dead-holder cleanup-pending receipts, continues after one failure, confirms zero before return and preserves unresolved markers');
 }
 
 async function affinityScopeScenarios() {
@@ -1166,8 +1296,10 @@ async function scenarios() {
   if (only === 'readback') { await artifactDirectScenarios(); await artifactResumeScenarios(); return; }
   if (only === 'artifact-direct') { await artifactDirectScenarios(); return; }
   if (only === 'overhead') { await overheadScenarios(); return; }
+  if (only === 'budget') { await budgetScenarios(); return; }
+  if (only === 'stop-shards') { await stopShardScenarios(); return; }
   if (only === 'cleanup-pending') { await cleanupPendingScenarios(); return; }
-  if (!only) await cleanupPendingScenarios();
+  if (!only) { await budgetScenarios(); await stopShardScenarios(); await cleanupPendingScenarios(); }
   if (!only) await overheadScenarios();
   const perf = { affinity:affinityScopeScenarios, 'dead-slot':deadSlotScenarios, inputs:inputScenarios,hygiene:hygieneScenarios,credentials: credentialScenarios, 'packed-module': packedModuleRecovery, receipt: receiptScenarios, 'res-progress': resProgressScenarios, cpu: cpuScenarios, auto: autoScenarios, units: unitScenarios, prewarm: prewarmScenarios, metrics: metricScenarios, placement: placementScenarios, 'ssh-drop': sshDropScenarios };
   const baseline = ['baseline-core', 'baseline-config', 'baseline-warm', 'baseline-placement', 'baseline-artifacts', 'baseline-cleanup', 'baseline-gc', 'baseline-ssh'];

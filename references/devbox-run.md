@@ -60,7 +60,8 @@ repositories remain on RemoteX / TT-VEIS, rather than these devbox worktrees.
 | `--pool devbox-cn\|devbox-cn-light` | Heavy pool by default; light for checks under about five minutes |
 | `--shards N\|auto` | 1–64 independent shard holders; auto sizes from free eligible slots and duration history |
 | `--units-file PATH` | One source-relative test file per line; units are balanced and invoked separately |
-| `--timeout MIN` | Positive minutes, at most 120, default 120; bounds each shard's queue, transfer and command together |
+| `--timeout MIN` | Positive minutes, at most 120, default 120; each remote command gets this full budget starting at launch |
+| `--queue-timeout MIN` | Positive minutes, at most 120; defaults to `max(timeout, 30)`; bounds cumulative admission, source transfer and input preparation per shard across retries, excluding command execution |
 | `--artifact GLOB` | Repeatable, workspace-relative files; fetched into one tar per shard attempt |
 | `--fetch-timeout MIN` | Remote artifact collection/manifest budget (default 15, max 120) |
 | `--artifact-timeout MIN` | Archive connection timeout cap (default 120, >0 and <=120). Each connection gets `min(cap, max(15 min, announced bytes / 0.2 MB/s))`; interrupted reads resume up to three times |
@@ -85,7 +86,36 @@ artifacts are fetched before cleanup and lease return. Unreadable exit status
 after bounded recovery is `reason: "ssh-drop-unconfirmed"`. Attempts also record returns, bundle bytes, artifacts and
 cleanup failures. The overall exit is the first nonzero shard result in shard
 order, or the cancellation status. Command failures retain their exit codes;
-timeout is 124, SIGINT is 130 and SIGTERM is 143.
+command timeout is 124, queue/transfer expiry is 125, SIGINT is 130 and SIGTERM is 143.
+
+`--timeout` starts when the remote supervisor launches the command. Waiting for
+admission, uploading sources and preparing inputs use `--queue-timeout`; that
+budget is cumulative across disk retries and `--rerun-on-fail`. Each command
+attempt gets a fresh full command budget. The default `max(timeout, 30)` keeps
+preparation bounded while allowing short light checks to wait for a busy pool.
+With one attempt, the execution path is bounded by queue/preparation plus
+command budgets, followed by bounded cleanup, receipt recovery and readback.
+The local command watchdog allows 15 seconds for the supervisor to reap and
+publish its exit; the remote deadline itself is exact.
+
+Summaries, shards and attempts expose `outcome`: `success`, `command-failed`,
+`command-timeout`, `queue-transfer-timeout`, `cancelled`, `preparation-failed`
+or `runner-failed` (a later runner operation failed after a successful command).
+Timeouts also record `expiredBudget: "command"` or `"queue-transfer"` on shards
+and attempts. Queue/transfer expiry prints “queue/transfer limit reached;
+command did not get its budget” and is a preparation limit, with exit 125.
+Attempts preserve `commandExit` separately from later cleanup/return errors.
+Every command outcome line, including artifact failure diagnostics, derives
+from the exit/signal; recovered exit 124 always prints a command timeout.
+`commandTimeoutMin` and `queueTimeoutMin` appear in the summary. Phase timings
+continue to report admission, source transfer, input preparation and command
+execution separately; SSH launch establishment is preparation time.
+
+Callers that used `--timeout` as a total deadline must set `--queue-timeout`
+explicitly and budget both phases plus the existing cleanup/readback grace.
+For example, `--timeout 5 --queue-timeout 25` allows up to 25 minutes of
+preparation and a full 5-minute command. Artifact fetch, retirement and raw
+`res --timeout` commands retain their existing meanings.
 
 Res acquisition and return stdout/stderr stream line by line with UTC timestamps
 into each shard log. `shard-k-state.json` is updated atomically during waits,
@@ -860,15 +890,28 @@ A wrapper can cancel its run by saving the UUID printed as `runId=...` at
 launch and calling `node scripts/devbox-run.mjs stop --out DIR --run-id UUID`.
 The runner also writes the UUID to `DIR/run.json`. Use a fresh directory for each
 run. The stop command checks the receipt and writes a UUID-specific request.
-The wrapper should wait for the runner to finish cleanup and return its leases.
+Active shard receipts are written before remote launch; retained receipts and
+UUID-matched durable cleanup-pending/hold records also support recovery after
+a local holder dies. Stop visits every recorded shard, opens an independent
+SSH connection, signals the recorded group with TERM, waits two seconds, then
+uses KILL as needed within a 20-second confirmation window. Identity checks
+match the recorded leader start time and session before signalling. It confirms
+zero group processes, supervisor processes and UUID-specific processes/units
+before clearing that run's pending marker and returning its unchanged hold.
+A missing or replaced lease still permits cleanup of the recorded run, while
+the new holder's lease is preserved. One shard's failure does not skip others.
+`DIR/stop-result.json` records per-shard host, PGID, process count, confirmation
+and return status; unreachable evidence is reported as `unknown`. Unconfirmed
+cleanup exits 70 and keeps the cleanup-pending marker. The wrapper should wait
+for stop and the runner to finish cleanup and return their leases.
 Sending TERM to a PID recovered from an old file can stop a different task.
 
 Every command starts a new session and process group using `setsid(2)`. A Linux subreaper
 outside that group continuously reaps adopted children, records process
 identity, and enforces a remote deadline even when the local connection is
 lost. Signals, timeout and normal completion all stop remaining descendants.
-Cleanup writes a cancellation marker, waits for the supervisor's receipt and
-confirms that the group is gone before artifact retrieval and `res return`.
+Cleanup writes a cancellation marker, signals the recorded group and supervisor,
+and confirms that the group and supervisor are gone before artifact retrieval and `res return`.
 If the remote command's SSH session drops with exit 255, the runner opens
 up to three read-only reconnects. If the remote process group is confirmed gone,
 the runner returns the slot and preserves the command's transport exit status.
