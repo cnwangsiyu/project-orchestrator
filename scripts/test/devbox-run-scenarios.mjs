@@ -928,6 +928,11 @@ async function cleanupPendingScenarios() {
   config({remoteRunning:true});
   const status=res(['status',attempt.slot]); assert.equal(status.status,0,status.stderr); assert.match(status.stdout,/cleanup pending/);
   assert.equal(f.events().length,start,'res status does not SSH or expire a marker');
+  const withDeviceEnv={...env};
+  fs.appendFileSync(path.join(f.shared,'resources.tsv'),'fixture-phone\tphone\tnever\tnot-a-real-device\tfixture device\n');
+  const deviceStatus=spawnSync(actual,['status'],{env:withDeviceEnv,encoding:'utf8',timeout:30000});
+  assert.equal(deviceStatus.status,0,deviceStatus.stderr); assert.match(deviceStatus.stdout,/cleanup pending slot=devbox-cn-1/);
+  assert.equal(f.events().length,start,'device-present status also leaves the marker and remote processes untouched');
   const refused=res(['take',attempt.slot,...common]); assert.notEqual(refused.status,0); assert.match(refused.stderr,/cleanup pending/);
   assert.equal(fs.existsSync(markerFile),true,'age alone never expires the marker');
   const alternate=res(['wait-pool','devbox-cn',...common,'--timeout','0.2']);

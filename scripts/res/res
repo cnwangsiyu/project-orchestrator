@@ -2542,6 +2542,11 @@ try:
         print_scores()
         print_build_capacity()
         committed = True; sys.exit(0)
+    if action == 'cleanup-pending-status':
+        for id in rows:
+            if request and request != id or not os.path.lexists(pending_file(id)): continue
+            print('cleanup pending slot=' + id + ' (confirmed remote check required; never time-expired)')
+        committed = True; sys.exit(0)
     if action == 'status':
         print('%-16s %-9s %-9s %-12s %-34s %s' % ('ID', 'KIND', 'POLICY', 'LINK', 'HOLDER', 'SINCE → UNTIL / PURPOSE'))
         warn_short_pid = False
@@ -3218,6 +3223,7 @@ cmd_status() {
     }
   ' reg="$REG" devs="$t" pids="$t.pids" builds="$t.builds" "$t" "$t.pids" "$t.builds" ${infos[@]+"${infos[@]}"} "$REG"
   rm -f "$t" "$t.pids" "$t.builds"
+  pool_report cleanup-pending-status "${1:-}"
   if [ -z "${1:-}" ]; then pool_report scores
   elif [ "$1" = heavy-build ]; then pool_report scores "$1"
   elif registry_record "$1" && [ "$REG_KIND" = remote ]; then pool_report scores "$1"; fi
