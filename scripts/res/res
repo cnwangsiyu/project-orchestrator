@@ -10,7 +10,7 @@
 set -euo pipefail
 
 # Embedded so copied scripts and bash -c entrypoints retain the same bounded guard.
-RES_BUILD_PROCESS_SOURCE=$(cat <<'BUILD_PROCESS_PY'
+IFS= read -r -d '' RES_BUILD_PROCESS_SOURCE <<'BUILD_PROCESS_PY' || true
 """Bounded process evidence for dead local build holders; never print arguments."""
 import json
 import os
@@ -94,7 +94,6 @@ if __name__ == '__main__':
     print('unknown' if count is None else count, checkout, sep='\t')
     sys.exit(0 if count == 0 else 1)
 BUILD_PROCESS_PY
-)
 export RES_BUILD_PROCESS_SOURCE
 
 RES_DIR="${RES_DIR:-$HOME/.claude/orchestrator/_shared}"
