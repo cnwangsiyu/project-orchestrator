@@ -877,6 +877,74 @@ cancellation. An explicit `stop` can use the retained run receipt after the
 local runner exits. It verifies the slot holder, requests remote cleanup and
 returns the slot after confirmation.
 
+### Retain Artifacts For Devbox Consumers
+
+`--artifact-fetch all` is the default and returns the usual shard tar archive,
+with a SHA-256 verified on both ends. `--artifact-fetch manifest` instead
+returns `shard-N-attempt-M.manifest.json`, containing the source commit, host,
+slot, run receipt directory, and each selected file's `name`, `size`, and
+`sha256`. Existing workspace-relative artifact globs and transfer checks apply.
+
+The default stays a direct, uncompressed, hash-checked tar stream. Opt-in
+`--artifact-streams 2..4` stages large all-mode archives (at least 64 MiB) once,
+hashes them, and reads them back in independent AES-128-GCM SSH ranges with
+compression off. Real CN measurements did not establish a stable parallel
+gain, so parallelism is not the default. The
+assembled archive is hash-checked before the exact staged archive is removed.
+The stream budget decreases with shard count; eight or more shards keep one
+stream each. Small artifacts keep the direct tar stream. When staging cannot
+keep the 53 GiB reserve, all mode falls back to the direct stream rather than
+rejecting an otherwise readable artifact. Failed staged transfers preserve the
+exact archive receipt for recovery.
+
+```sh
+node scripts/devbox-run.mjs --project PROJECT --task TASK --repo REPO \
+  --artifact 'build/*.apk' --artifact-fetch manifest --out RESULTS \
+  -- BUILD_COMMAND
+node scripts/devbox-run.mjs fetch-artifact \
+  --manifest RESULTS/shard-1-attempt-1.manifest.json \
+  --name build/app.apk --out /absolute/path/app.apk --timeout 15
+```
+
+The runner copies selected regular files into the UUID receipt directory's
+`artifacts/` before releasing its slot. Copies are independent of the reusable
+workspace, so later checkout/builds cannot alter the retained bytes. This needs
+additional devbox disk space; retention still requires the 53 GiB reserve.
+No symlinks or special files are accepted. `fetch-artifact` leases the original
+registered slot, checks the UUID/source receipt and remote size/hash, verifies
+the returned size/hash, and publishes the destination without overwriting any
+existing file. It returns its lease on success, failure, or cancellation.
+The original slot must remain registered/open and fetching can queue for it.
+
+A subsequent devbox step can declare each retained file with `--input`, using
+its manifest hash and `path=CONTROL/artifacts/NAME`, and `rebuildable=no`. Input
+placement then selects the host that actually has those bytes. Fetching is not
+required for devbox-only consumers. Retained copies are not automatically
+deleted by fetching or workspace GC; the task owner must retire the exact UUID
+receipt after its consumers finish. Do not delete another task's receipts.
+
+### Control And Phase Overhead
+
+Phase receipts now include `substeps` beneath their existing `seconds` fields.
+SSH operations, controller lease wait/admission, hardware-root cache/probe,
+metrics refresh, input placement, inspect, checkout, submodule updates, bundle
+creation/upload, overlays and final inspections are measured separately.
+Substeps are nested observations and can overlap; do not sum them into the
+already partitioned phase totals. Snapshot/gate work remains outside attempts.
+
+One initial inspection checks the main object store and all submodule stores.
+Matching HEADs plus clean tracked/untracked state in every pinned tree permit
+skipping checkout and submodule updates; dirty trees, overlays and different
+refs use the existing save/reset/clean path. Ignored build caches survive.
+The command launcher independently rechecks the 53 GiB disk guard immediately
+before launch, including when the warm-source shortcut is used.
+
+For unchanged inputs, forced verification, disk check, and atomic input-map
+publication share one remote invocation. Actual seeds retain verification and
+get a final combined map/disk check. Successful jobs still reverify inputs.
+Host-root facts are memoized for at most 60 seconds within a task; hourly
+hardware-probe freshness and stale-probe reporting are unchanged.
+
 SSH uses batch mode and 15-second keepalives with four missed responses;
 interrupted bundle/overlay uploads get one fresh connection retry on Broken
 pipe or MAC errors.
@@ -886,9 +954,13 @@ remote command emits its start marker, the exact `Permission denied
 (gssapi-with-mic)` and `Connection closed` establishment errors may retry
 three times, each after a random 2–10 seconds. Exhaustion is recorded as
 `infraFailure`; it does not trigger another flaky rerun. After the start marker,
-these errors never replay the command. `ControlMaster`, `ControlPath` reuse and
-`ControlPersist` are explicitly disabled so one connection cannot take down
-other shards.
+these errors never replay the command. Control operations reuse a task-private
+`ControlMaster` with 60-second persistence; bulk transfers use a separate
+socket/profile with compression disabled. Socket directories are private and
+short enough for macOS, and masters are closed on task exit and upload retry.
+Command supervision, cleanup and read-only recovery keep independent SSH
+connections, so a control-channel failure cannot take down another shard or
+the remote command. No SSH identity/configuration or login files are changed.
 
 If the box cannot confirm process cleanup, the runner reports **BLOCKED** and
 retains that slot for owner recovery instead of admitting another run over

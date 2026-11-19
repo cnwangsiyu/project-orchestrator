@@ -345,8 +345,16 @@ def group_gone():
     except ProcessLookupError: return True
 `;
 
+const inputMapPython = `ctl=pathlib.Path(d['control']); ctl.mkdir(parents=True,exist_ok=True)
+disk=os.statvfs(d['root'])
+if disk.f_bavail*disk.f_frsize<53*1073741824: sys.exit(72)
+file=ctl/'inputs.json'; temporary=ctl/'inputs.tmp'
+temporary.write_text(json.dumps(d['paths'])); temporary.replace(file)
+`;
+
 export const remoteScripts = {
-  'input-map': pythonHeader + `ctl=pathlib.Path(d['control']); ctl.mkdir(parents=True,exist_ok=True); (ctl/'inputs.json').write_text(json.dumps(d['paths']))\n`,
+  'input-map': pythonHeader + inputMapPython,
+  'inputs-ready': pythonHeader + inputPython.replace('print(json.dumps(records))', '') + inputMapPython + `print(json.dumps({'records':records,'free':disk.f_bavail*disk.f_frsize,'map':str(file)}))\n`,
   inputs: pythonHeader + inputPython,
   seed: pythonHeader + seedPython,
   metrics: pythonHeader + `load5=float(pathlib.Path('/proc/loadavg').read_text().split()[1])
@@ -1387,13 +1395,13 @@ async function prepareSeeds(opts, temp, state) {
 }
 
 function inputPath(root,input) { return input.path || `${root}/inputs/${input.name}/${input.hash}`; }
-async function verifyInputs(row, inputs, opts, state, { force=false, timeout=60000 }={}) {
+async function verifyInputs(row, inputs, opts, state, { force=false, timeout=60000, prepare }={}) {
   const settings = opts.inputSettings || inputSettings(sharedDir());
   const file = indexFile(cacheDir(),row.host); fs.mkdirSync(path.dirname(file),{recursive:true});
   // Verification holds the lock across SSH hashing; other shards wait for it (up to 20 min) and then reuse the fresh index.
   return withStateLock(file, async () => {
     const index = readIndex(cacheDir(),row.host), now=Date.now()/1000;
-    const root = await hostRoot(row,state,{deadline:Date.now()+timeout});
+    const root = prepare?.data.root || await hostRoot(row,state,{deadline:Date.now()+timeout});
     const probes=[];
     for (const input of inputs) {
       const key=inputKey(input)+(input.warm?'+'+row.slot:'');
@@ -1410,10 +1418,14 @@ async function verifyInputs(row, inputs, opts, state, { force=false, timeout=600
       }
       probes.push({...input,key,path:input.path || entry?.path || inputPath(root,input),...(entry?.legacyAffinityAt?{legacyAffinityAt:entry.legacyAffinityAt}:{})});
     }
-    if (probes.length) {
-      const result=await ssh(row,'inputs',{root,inputs:probes,affinity:opts.affinity,
+    if (probes.length || prepare) {
+      const paths = prepare ? Object.fromEntries(prepare.inputs.map(input => [input.name, input.path || index.inputs[inputKey(input)]?.path || inputPath(root, input)])) : undefined;
+      const result=await ssh(row,prepare ? 'inputs-ready' : 'inputs',{root,inputs:probes,affinity:opts.affinity,
+        ...(prepare ? { control: prepare.data.control, paths } : {}),
         legacyAffinity:opts.warmCost !== undefined ? opts.legacyAffinity : undefined},{state,timeout});
-      const records=JSON.parse(checked(result,'input verification'));
+      const response=JSON.parse(checked(result,'input verification'));
+      const records=prepare ? response.records : response;
+      if (prepare) prepare.result=response;
       for (const record of records) {
         if (!probes.some(input=>input.key===record.key)) throw Error('unexpected input verification record');
         const measuredInput = probes.find(input=>input.key===record.key);
@@ -1453,11 +1465,12 @@ async function inputPlan(opts,rows,state) {
 }
 async function seedInputs(row,data,opts,attempt,state,emit,remaining) {
   const settings=opts.inputSettings || inputSettings(sharedDir());
-  const index=await verifyInputs(row,[...opts.inputs,...(opts.placementInputs || []).filter(input=>input.warm)],opts,state,{force:true,timeout:remaining()});
+  const prepare={data,inputs:opts.inputs};
+  const index=await verifyInputs(row,[...opts.inputs,...(opts.placementInputs || []).filter(input=>input.warm)],opts,state,{force:true,timeout:remaining(),prepare});
   attempt.seeds=[];
   attempt.missingInputs=[...(attempt.missingInputs || []).filter(name=>name.startsWith('warm.')),...opts.inputs.filter(input=>!index.inputs[inputKey(input)]).map(input=>input.name)];
   const missingGiB=opts.inputs.filter(input=>!index.inputs[inputKey(input)]).reduce((sum,input)=>sum+input.sizeGiB,0);
-  const disk=JSON.parse(checked(await ssh(row,'inspect',data,{state,timeout:remaining()}),'input disk check'));
+  const disk=prepare.result;
   if(disk.free/GiB-missingGiB<53) throw Object.assign(Error('input workspace disk guard'),{code:72});
   for (const input of opts.inputs) {
     if (index.inputs[inputKey(input)]) continue;
@@ -1489,7 +1502,7 @@ async function seedInputs(row,data,opts,attempt,state,emit,remaining) {
   }
   const paths=Object.fromEntries(opts.inputs.map(input=>[input.name,index.inputs[inputKey(input)]?.path || inputPath(data.root,input)]));
   const inputMap=path.join(data.control,'inputs.json');
-  checked(await ssh(row,'input-map',{...data,paths},{state,timeout:remaining()}),'input path map');
+  if (attempt.seeds.length) checked(await ssh(row,'input-map',{...data,paths},{state,timeout:remaining()}),'post-seed input path map and disk check');
   attempt.inputPaths=paths; return inputMap;
 }
 
@@ -1900,10 +1913,6 @@ async function shard(opts) {
         phases.phase('inputPreparation');
         const inputMap=opts.inputs.length ? await seedInputs(row,data,opts,attempt,state,emit,remaining) : null;
         let job = opts.units ? remoteCommand('units', remoteScripts.units, { control: data.control, command, units: opts.units }) : command;
-        if (inputMap) {
-          const afterSeed=JSON.parse(checked(await ssh(row,'inspect',data,{state,timeout:remaining()}),'post-seed disk check'));
-          if (afterSeed.free<53*GiB) throw Object.assign(Error('post-seed workspace disk guard'),{code:72});
-        }
         if (opts.prewarm) job = `nice -n 10 bash -c ${quote(job)}`;
         launched = true;
         const caches = { GRADLE_USER_HOME: `${root}/shared/gradle`, npm_config_cache: `${root}/shared/npm`, PNPM_STORE_DIR: `${root}/shared/pnpm`, CCACHE_DIR: `${root}/shared/ccache`, CCACHE_MAXSIZE: '20G', PIP_CACHE_DIR: `${root}/shared/pip`, DEVBOX_TOOLCHAINS: `${root}/shared/toolchains` };

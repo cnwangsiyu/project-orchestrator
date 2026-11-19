@@ -843,7 +843,13 @@ async function inputScenarios() {
   const legacyMetaFile=path.join(workspace(f),'.devbox-run.json');const legacyMeta=JSON.parse(fs.readFileSync(legacyMetaFile));delete legacyMeta.affinity;fs.writeFileSync(legacyMetaFile,JSON.stringify(legacyMeta));
   const migrated=await run(f,['--input',input,'--warm-cost','27m'],command);ok(migrated);returned(f);
   assert.ok(!migrated.summary.shards[0].attempts[0].inputPlan.slots[migrated.summary.shards[0].slot].missing.some(name=>name.startsWith('warm.')),'legacy warm cache is verified before scoring');
+  const beforeReady=f.events().filter(event=>event.op==='inputs-ready').length;
+  const beforeMap=f.events().filter(event=>event.op==='input-map').length;
   const second=await run(f,['--input',input],command);ok(second);assert.equal(second.summary.shards[0].attempts[0].seeds.length,0);returned(f);
+  assert.equal(f.events().filter(event=>event.op==='inputs-ready').length-beforeReady,1);
+  assert.equal(f.events().filter(event=>event.op==='input-map').length,beforeMap,'unchanged inputs need no separate map/disk invocation');
+  assert.ok(second.summary.shards[0].attempts[0].phaseTimings.substeps.inputPreparation['ssh.inputs-ready']>0);
+  assert.equal(second.summary.shards[0].attempts[0].phaseTimings.substeps.inputPreparation['ssh.inspect'],undefined);
   const pinned=await run(f,['--input',`name=asset,hash=${actual.hash},rebuildable=no,cost=0s,size=0.01`],command);ok(pinned);assert.equal(pinned.summary.shards[0].host,first.summary.shards[0].host);returned(f);
   const aliasIndex=JSON.parse(fs.readFileSync(file));aliasIndex.inputs['alias+'+actual.hash]={...aliasIndex.inputs['asset+'+actual.hash]};fs.writeFileSync(file,JSON.stringify(aliasIndex));
   const alias=await run(f,['--input',`name=alias,hash=${actual.hash},rebuildable=no,cost=0s,size=0.01`],command.replace('paths.asset','paths.alias'));ok(alias);returned(f);
