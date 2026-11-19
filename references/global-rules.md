@@ -1,6 +1,5 @@
 # Global Rules
 version: 2026-11-18.16
-
 ## Changes In This Version
 - Day 3 (2026-11-15.4): worker mid-turn note/ask/reply through the owner inbox, distinct --out deliverables, omit absent landing gates; quality first across company accounts, free TRAE first for the chosen model including browser; company max ungated; explicit A–D review classes, two-round scope cap, per-project targets/yield; runnable authorized work never auto-parks; failed public state reads retain last-good ages; the resident signing worker is retired; ordinary routed signing workers replace it; workers never delegate or request model changes; dependency installation needs no question. Resource, cancellation, credential, device and signing safeguards remain.
 - 2026-11-18.16: devbox spare-capacity ranking, bounded affinity, hourly hardware refresh and read-only allocation audit. 2026-11-18.15: company remote build services (RemoteX, AirBuild, Kross) are treated like company CI: tracked repo content syncs unsanitized, machine-only files are never uploaded; devbox transfers still blank and pass the gate. 2026-11-18.14: finished and unconfirmed stale workers are skipped once; owner-scoped retirement clears stale tracking.
