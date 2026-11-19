@@ -5,6 +5,46 @@ tool (devices, checkouts, registry/notes, take/return/extend/add/note/log and he
 from vesdk-mainline to the global-rules owner on 2026-11-13. The unmodified v1.2 contract is preserved
 in `scripts/res/test/fixtures/contract-v1.2.md`. v1.10 takes effect at the owner's reviewed switch.
 
+## Lease Observations (BC-161)
+
+`res holder <id> [--by <holder>]` is the cheap lease-guard query. It prints exactly one
+JSON line with `id`, `state` (`held`, `free`, or `pending`), `holder`, `project`, `task`,
+`since`, `until`, `mine` (`yes`/`no`), `waiters`, `oldest-waiter` (`holder` and `since`),
+and `yield-requested` (`yes` when `waiters > 0`, otherwise `no`). Free metadata is null.
+It reads the registry, that resource's lock directory, and only the applicable
+build/lane/pool waiter records. It never enumerates devices, reads host health,
+checks build processes, takes an admission guard, or modifies leases/queues. Counted
+build holds remain individually named: `holder heavy-build` does not adopt the
+different lease at `heavy-build-2` or `heavy-build-3`.
+
+There is no yield-request marker or new lease metadata. The count means existing
+live queued requests compatible with that resource (including a pool containing it),
+not an eviction order. Direct `res wait <id>` does not publish a waiter record today,
+so such a caller is not visible in this count. Dead/expired waiters are ignored, not
+removed. A guard uses `mine=yes` to confirm ownership, treats `waiters>0` as someone
+asking, and coordinates a yield with the owner rather than reclaiming a lease.
+
+Status/holder exit **0** means an observation was answered, not that the resource is
+free, connected, or owned by the caller. Exit **1** is a real usage/read/state error
+(unknown ID, unreadable registry/lease, or stable corrupt metadata); neither query
+returns the take/wait contention code **2**. Publication and directory/info replacement
+races retry internally five times, 20 ms apart. An incomplete publication still present
+after that bound is `pending`, never `free`. Lease guards should retry a single failed
+read or `pending` observation before deciding that ownership was lost; do not continue
+device actions while ownership is unconfirmed. A confirmed different holder/free state
+means the lease is lost.
+
+`res status <id>` reads only that lease and its own notes. Remote/heavy status retains
+the applicable host/capacity/queue diagnostics. A device query uses only its transport:
+ADB for Android serials; usbmux, then devicectl only if needed, for iOS UDIDs/IDs.
+Connectivity has a shared **650 ms** budget and an optional **3-second**, per-resource
+cache at `status-cache/`; a contending cache reader waits within the same budget, not
+an admission lock. Missing/failing/timed-out probes display `unknown` with exit 0.
+Never-policy devices display `not probed` on the single-resource path. Connectivity
+cache data never supplies ownership evidence. Normal fast-path targets are <1 second
+for a device and <0.3 seconds for a non-device/holder; OS scheduling stalls remain
+outside the subprocess timeout. Full `res status` still enumerates all transports.
+
 ## Scheduler Audit (2026-11-18)
 
 `DEVBOX_RANK_BY_SPARE=1` is the default; `0` restores slot-count ranking.

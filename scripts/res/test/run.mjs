@@ -7,6 +7,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const SUITE_TIMEOUTS = {
+  'status.mjs': 600000,
   't88/test-res.sh': 600000,
   't88/memory/test-res.sh': 600000,
   't88/legacy/test-res.sh': 600000,

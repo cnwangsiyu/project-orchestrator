@@ -96,6 +96,269 @@ if __name__ == '__main__':
 BUILD_PROCESS_PY
 export RES_BUILD_PROCESS_SOURCE
 
+# Observers do not acquire admission guards or hold a list of live filenames.
+IFS= read -r -d '' RES_OBSERVATION_SOURCE <<'OBSERVATION_PY' || true
+import fcntl
+import json
+import os
+import re
+import signal
+import socket
+import stat
+import subprocess
+import tempfile
+import time
+
+
+def read_hold(directory, owner_field='by'):
+    """Retry publication/replacement races; never turn an incomplete hold into FREE."""
+    invalid = None
+    for attempt in range(5):
+        invalid = None
+        try:
+            descriptor = os.open(directory, os.O_RDONLY | os.O_NONBLOCK | os.O_DIRECTORY)
+        except FileNotFoundError:
+            return {}
+        try:
+            before_dir = os.fstat(descriptor)
+            try:
+                fd = os.open('info', os.O_RDONLY | os.O_NONBLOCK, dir_fd=descriptor)
+                with os.fdopen(fd, 'rb') as stream:
+                    before = os.fstat(stream.fileno())
+                    if not stat.S_ISREG(before.st_mode): raise ValueError('lease info is not regular')
+                    if before.st_size > 1024 * 1024: raise ValueError('lease info is too large')
+                    data = stream.read(before.st_size + 1)
+                    after = os.fstat(stream.fileno())
+                current = os.stat('info', dir_fd=descriptor)
+                same_file = (before.st_ino, before.st_dev, before.st_mtime_ns, before.st_ctime_ns, before.st_size)
+                if same_file != (after.st_ino, after.st_dev, after.st_mtime_ns, after.st_ctime_ns, after.st_size):
+                    raise BlockingIOError('lease info changed during read')
+                if not os.path.samestat(after, current) or len(data) != before.st_size:
+                    raise BlockingIOError('lease info was replaced')
+                if not data or not data.endswith(b'\n'):
+                    raise BlockingIOError('incomplete lease publication')
+                value = {}
+                try:
+                    for line in data.decode().splitlines():
+                        name, text = line.split('\t', 1)
+                        if not name: raise ValueError('empty lease field')
+                        value[name] = text
+                    if not value.get(owner_field): raise ValueError('missing lease owner')
+                except (UnicodeError, ValueError) as error:
+                    invalid = str(error)
+                if not os.path.samestat(before_dir, os.stat(directory)):
+                    raise BlockingIOError('lease directory was replaced')
+                if invalid is None: return value
+            except FileNotFoundError:
+                pass
+            except BlockingIOError:
+                pass
+        finally:
+            os.close(descriptor)
+        if attempt < 4: time.sleep(0.02)
+    if invalid is not None: raise ValueError('corrupt lease state: ' + invalid)
+    return {owner_field: '?', '_observation': 'pending'}
+
+
+def observed_alive(pid):
+    try: os.kill(int(pid), 0); return True
+    except ProcessLookupError: return False
+    except (ValueError, TypeError, OverflowError, PermissionError): return True
+
+
+def bounded_output(argv, deadline):
+    if time.monotonic() >= deadline: return None
+    try:
+        child = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError: return None
+    try:
+        output, _ = child.communicate(timeout=max(0.001, deadline - time.monotonic()))
+        return output.decode(errors='replace') if child.returncode == 0 else None
+    except subprocess.TimeoutExpired:
+        try: os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError: pass
+        child.communicate()
+        return None
+
+
+def device_link(root, id, row):
+    device = row[2]
+    if device == '-': return '-'
+    if row[1] == 'never': return 'not probed'
+    deadline = time.monotonic() + 0.65
+    def probe_link():
+        ios = id.startswith(('iphone', 'ipad', 'ios')) or bool(re.fullmatch(r'[0-9a-fA-F]{40}|[0-9a-fA-F]{8}-[0-9a-fA-F]{16}', device))
+        if not ios:
+            output = bounded_output(['adb', 'devices'], deadline)
+            if output is None: return 'unknown'
+            for line in output.splitlines():
+                parts = line.split()
+                if len(parts) == 2 and parts[0] == device:
+                    return 'connected' if parts[1] == 'device' else parts[1]
+            return 'not seen'
+        command = ['idevice_id', '-l'] if __import__('shutil').which('idevice_id') else ['pymobiledevice3', 'usbmux', 'list']
+        output = bounded_output(command, deadline)
+        if output is not None and device in output: return 'connected'
+        output = bounded_output(['xcrun', 'devicectl', 'list', 'devices'], deadline)
+        if output is None: return 'unknown'
+        for line in output.splitlines():
+            if device in line:
+                match = re.search(r'\(UDID\)\s+(\S+)', line)
+                if match: return 'connected' if match[1].startswith('available') else match[1]
+        return 'not seen'
+    cache = os.path.join(root, 'status-cache')
+    file = os.path.join(cache, id + '.json')
+    def cached():
+        try:
+            with open(file) as stream: value = json.load(stream)
+            if value['device'] == device and 0 <= time.time() - value['at'] <= 3 and isinstance(value['link'], str):
+                return value['link']
+        except (OSError, ValueError, TypeError, KeyError): pass
+        return None
+    found = cached()
+    if found is not None: return found
+    try:
+        os.makedirs(cache, exist_ok=True)
+        guard = open(os.path.join(cache, id + '.lock'), 'a')
+    except OSError: return probe_link()  # Cache is optional, not lease state.
+    with guard:
+        while True:
+            try: fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB); break
+            except BlockingIOError:
+                found = cached()
+                if found is not None: return found
+                if time.monotonic() >= deadline: return 'unknown'
+                time.sleep(0.02)
+        found = cached()
+        if found is not None: return found
+        link = probe_link()
+        temporary = None
+        try:
+            fd, temporary = tempfile.mkstemp(prefix='.' + id + '.', dir=cache)
+            with os.fdopen(fd, 'w') as stream:
+                json.dump(dict(device=device, at=time.time(), link=link), stream)
+            os.replace(temporary, file)
+        except OSError: pass
+        finally:
+            if temporary and os.path.exists(temporary): os.unlink(temporary)
+        return link
+
+
+def guard_waiters(root, id, row):
+    parents = []
+    if id.startswith('heavy-'):
+        parents.append(os.path.join(root, 'build-waiters'))
+        if id.startswith('heavy-lane-'): parents.append(os.path.join(root, 'lane-waiters'))
+    if row[0] == 'remote':
+        pool = id if id.endswith('-light') else id.rsplit('-', 1)[0]
+        if '-light-' in id: pool = id.rsplit('-', 1)[0]
+        parents.append(os.path.join(root, 'pool-waiters', pool))
+    waiters = []
+    host = socket.gethostname()
+    ttl = int(os.environ.get('RES_WAITER_STALE_SECONDS', '300'))
+    for parent in parents:
+        try: names = os.listdir(parent)
+        except FileNotFoundError: continue
+        for name in names:
+            if not name.startswith('waiter.'): continue
+            value = read_hold(os.path.join(parent, name), 'holder')
+            if not value or value.get('_observation'): continue
+            try: fresh = 0 <= time.time() - int(value.get('heartbeat', '0')) <= ttl
+            except ValueError: fresh = False
+            if not fresh or value.get('host') == host and not observed_alive(value.get('pid')): continue
+            if value.get('lane') and value['lane'] != id and id.startswith('heavy-lane-'): continue
+            resource = value.get('resource')
+            if resource and resource not in (id, 'heavy-build', 'heavy-lane-any', os.path.basename(parent) + '-any'): continue
+            caps = re.search(r'(?:^|\s)caps=([^\s]+)', row[3])
+            required = set(value.get('need', '').split(',')) - {''}
+            if required and not required.issubset(set(caps[1].split(',')) if caps else set()): continue
+            excluded = set(value.get('exclude_slots', '').split(','))
+            if id in excluded: continue
+            remote_host = re.search(r'[A-Za-z0-9_.-]+@([A-Za-z0-9][A-Za-z0-9.-]*)', row[3])
+            if remote_host and remote_host[1].rstrip('.') in set(value.get('exclude_hosts', '').split(',')): continue
+            waiters.append(value)
+    waiters.sort(key=lambda value: (value.get('order', value.get('start', '')), value.get('holder', '')))
+    return waiters
+
+
+def observation_main(root, action, id, by=''):
+    rows = {}
+    with open(os.path.join(root, 'resources.tsv')) as stream:
+        for line in stream:
+            if line.startswith('#') or not line.strip(): continue
+            parts = line.rstrip('\n').split('\t', 4)
+            if len(parts) != 5 or not re.fullmatch(r'[A-Za-z0-9_.-]+', parts[0]): raise ValueError('corrupt resource registry')
+            if parts[0] in rows: raise ValueError('duplicate resource registry entry')
+            rows[parts[0]] = parts[1:]
+    if id and id not in rows: raise ValueError("unknown resource '%s'" % id)
+    if action == 'holder':
+        value = read_hold(os.path.join(root, 'locks', id + '.d'))
+        state = 'pending' if value.get('_observation') else 'held' if value else 'free'
+        waiters = guard_waiters(root, id, rows[id])
+        oldest = waiters[0] if waiters else {}
+        print(json.dumps({'id': id, 'state': state, 'holder': value.get('by'), 'project': value.get('project'),
+                          'task': value.get('task'), 'since': value.get('since'), 'until': value.get('until'),
+                          'mine': 'yes' if by and value.get('by') == by else 'no',
+                          'yield-requested': 'yes' if waiters else 'no', 'waiters': len(waiters),
+                          'oldest-waiter': {'holder': oldest.get('holder'), 'since': oldest.get('since')}}))
+        return
+    print('%-16s %-9s %-9s %-12s %-34s %s' % ('ID', 'KIND', 'POLICY', 'LINK', 'HOLDER', 'SINCE \u2192 UNTIL / PURPOSE'))
+    namespace = {'__name__': 'res_build_processes'}
+    exec(os.environ['RES_BUILD_PROCESS_SOURCE'], namespace)
+    for name, row in rows.items():
+        if id and name != id: continue
+        value = read_hold(os.path.join(root, 'locks', name + '.d'))
+        if name == 'heavy-build' and not value:
+            value = next((v for n in ('heavy-build-2', 'heavy-build-3') if (v := read_hold(os.path.join(root, 'locks', n + '.d')))), {})
+        holder = 'FREE'; detail = row[3]
+        if value:
+            holder = value.get('by', '?') + ' (' + value.get('project', '?') + ('/' + value['task'] if value.get('task') else '') + ')'
+            if value.get('_observation'): holder = 'PENDING ' + holder
+            elif value.get('host') == socket.gethostname() and not observed_alive(value.get('pid')):
+                start = value.get('start', '')
+                short = bool(value.get('pid_warning')) or start.isdecimal() and 0 <= time.time() - int(start) <= 5
+                count, _ = namespace['probe'](value) if name.startswith('heavy-') else (0, '')
+                label = 'STALE-PID (build alive) ' if count else 'STALE-PID (build probe unavailable) ' if count is None else 'STALE?(short-lived pid) ' if short else 'STALE '
+                holder = label + holder
+                if short: print('res: short-lived holder PID; use scripts/heavy-build.sh <command...>; lock, build and return must share one long-lived process', file=__import__('sys').stderr)
+            detail = value.get('since', '?') + ' \u2192 ' + (value.get('until') or '?') + ' \u00b7 ' + value.get('for', '?')
+            if value.get('remote_cleanup_required'): detail += ' \u00b7 remote cleanup required'
+        link = device_link(root, name, row) if id else '-'
+        if not id and row[2] != '-':
+            link = 'not seen'
+            for line in os.environ.get('RES_STATUS_DEVS', '').splitlines():
+                if row[2] + ' (' in line:
+                    match = re.search(r'\((?:UDID|ADB|USBMUX)\)\s+(\S+)', line)
+                    if match: link = 'connected' if match[1] == 'device' or match[1].startswith('available') else match[1]
+                    break
+        print('%-16s %-9s %-9s %-12s %-34s %s' % (name, row[0], row[1], link, holder, detail))
+    if not id:
+        known = {row[2] for row in rows.values()}
+        extra = []
+        for line in os.environ.get('RES_STATUS_DEVS', '').splitlines():
+            match = re.match(r'(\S+) \((USBMUX|ADB)\) device$', line)
+            if not match: match = re.search(r'(\S+) \(UDID\)\s+(?:available|connected).*physical', line)
+            if match and match[1] not in known:
+                extra.append('  ' + match[1] + ' ' + (match[2] if match.lastindex == 2 else 'devicectl'))
+        if extra: print('\nConnected but not registered (add with: res add <id> --device <id> --for "<what it is>"):\n' + '\n'.join(sorted(set(extra))))
+
+
+def observation_cli(root, action, *args):
+    if action == 'holder':
+        if not args or len(args) not in (1, 3) or len(args) == 3 and (args[1] != '--by' or not args[2]):
+            raise ValueError('holder needs <id> [--by <session>]')
+        observation_main(root, action, args[0], args[2] if len(args) == 3 else '')
+    else:
+        if len(args) != 1: raise ValueError('status needs one resource id')
+        observation_main(root, action, args[0])
+        notes = os.path.join(root, 'notes', args[0] + '.md')
+        try:
+            with open(notes) as stream: content = stream.read()
+        except FileNotFoundError: content = ''
+        if content: print('\n\u2500\u2500 notes for %s (%s) \u2014 read before use \u2500\u2500\n%s' % (args[0], notes, content), end='')
+OBSERVATION_PY
+export RES_OBSERVATION_SOURCE
+
 RES_DIR="${RES_DIR:-$HOME/.claude/orchestrator/_shared}"
 REG="$RES_DIR/resources.tsv"
 LOCKS="$RES_DIR/locks"
@@ -107,9 +370,34 @@ POOL_WAITERS="$RES_DIR/pool-waiters"
 WAIT_CONFIG_FILE=  # private state owned by this waiter, never inherited
 WAITER_STALE_SECONDS="${RES_WAITER_STALE_SECONDS:-300}"  # 45 s expired the FIFO head during its own slow (ssh-probing) attempt under load (BC-103 hotfix)
 
+# Polling guards need neither the admission parser nor its large controller.
+# Exec also removes a shell/process wait from the single-resource path.
+fast_observer=
+if [ "${1:-}" = holder ]; then
+  fast_observer=1
+elif [ "${1:-}" = status ] && [ "$#" -eq 2 ] && [ -r "$REG" ] && [[ "$2" != heavy-* ]]; then
+  while IFS=$'\t' read -r observed_id observed_kind observed_policy observed_device observed_description; do
+    if [ "$observed_id" = "$2" ]; then
+      [ "$observed_kind" = remote ] || fast_observer=1
+      break
+    fi
+  done <"$REG"
+fi
+if [ -n "$fast_observer" ]; then
+  exec python3 -c "$RES_OBSERVATION_SOURCE
+import sys
+try:
+    observation_cli(*sys.argv[1:])
+except (OSError, ValueError) as error:
+    print('res: ' + str(error), file=sys.stderr)
+    sys.exit(1)
+" "$RES_DIR" "$@"
+fi
+
 usage() {
   cat <<'EOF'
 res status [<id>]                     show every resource (or one) and who holds it
+res holder <id> [--by <session>]       JSON lease/queued-request snapshot; no device probes
 res audit [--json]                   read-only host facts, slots and 24-hour allocation (no SSH)
 res take <id> --by <session> --project <slug> --for "<purpose>" [--task <id>] [--until <when>] [--offline] [--pid <pid>] [--disk-gib <GiB>]
 res wait <id> --by <session> --project <slug> --for "<purpose>" --timeout <minutes> [--disk-gib <GiB>] [--disk-gib-file <JSON>] [--placement-file <JSON>] [--maintenance] [take options]
@@ -145,6 +433,8 @@ Devices show their live link (usbmux / devicectl / adb). take refuses a device t
 unless --offline (booking ahead of a plug-in).
 Exit codes: 0 ok, 2 held/wait timeout, 3 policy forbids, 4 device not connected,
 5 heavy gate overloaded, 1 usage/other error (including unavailable gate metrics).
+status/holder: 0 answered (including PENDING/unknown link), 1 real state/usage error;
+never 2 for transient contention. Lease guards should use holder and retry a failed read.
 EOF
 }
 
@@ -1938,6 +2228,8 @@ controller_key = hashlib.sha256(host.encode()).hexdigest() + '.' + controller + 
 locks = os.path.join(root, 'locks'); journal = os.path.join(root, 'log.tsv')
 queue = waiter = episode = None; created = None; committed = False; reservation_written = False
 def info(directory):
+    if action == 'status':
+        return observation_namespace['read_hold'](directory, 'holder' if 'waiter.' in os.path.basename(directory) else 'by')
     try:
         with open(os.path.join(directory, 'info')) as stream:
             return dict(line.rstrip('\n').split('\t', 1) for line in stream if '\t' in line)
@@ -2046,6 +2338,8 @@ def cancelled(signum, frame):
     raise SystemExit(128 + signum)
 for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP): signal.signal(signum, cancelled)
 try:
+    observation_namespace = {}
+    if action == 'status': exec(os.environ['RES_OBSERVATION_SOURCE'], observation_namespace)
     if any(c in value for value in (by, project, task, purpose, until, warm_family) for c in '\t\r\n'): raise ValueError('hold metadata must be one line')
     if action not in ('box-health', 'scores', 'status', 'audit'): os.makedirs(locks, exist_ok=True)
     if action in ('cancel', 'cleanup'):
@@ -2078,6 +2372,7 @@ try:
             remote[id] = (policy, match.group(1).rstrip('.'), set(caps.group(1).split(',')) if caps else set(), set(prefs.group(1).split(',')) if prefs else set())
         return rows, remote
     rows, remote = read_registry()
+    if action == 'status' and request and request not in rows: raise ValueError("unknown resource '%s'" % request)
     def health():
         try:
             with open(os.path.join(root, 'box-health.json')) as stream: state = json.load(stream)
@@ -2565,6 +2860,7 @@ try:
                 except (OSError, ValueError, TypeError, KeyError): detail += ' · cleanup pending (invalid marker; blocked)'
             if value:
                 holder = value.get('by', '?') + ' (' + value.get('project', '?') + ('/' + value['task'] if value.get('task') else '') + ')'
+                if value.get('_observation'): holder = 'PENDING ' + holder
                 observed_pid = value.get('pid', '')
                 if value.get('host') == host and observed_pid.isdecimal() and int(observed_pid) > 0 and not alive(observed_pid):
                     start = value.get('start', '')
@@ -2596,7 +2892,7 @@ try:
                     path = os.path.join(directory, name); value = info(path)
                     try: fresh = 0 <= stamp - int(value.get('heartbeat', '0')) <= int(stale)
                     except ValueError: fresh = False
-                    if not fresh or value.get('host') == host and not alive(value.get('pid')): shutil.rmtree(path); continue
+                    if not fresh or value.get('host') == host and not alive(value.get('pid')): shutil.rmtree(path, ignore_errors=True); continue
                     values.append(value)
                 if values:
                     print('\nWaiting ' + label + ':')
@@ -3150,91 +3446,60 @@ pool_report() {
   pool_controller "$1" "${2:-}" 0 0
 }
 
+observe_resource() {
+  RES_STATUS_DEVS="$DEVS" python3 -c "$RES_OBSERVATION_SOURCE
+import sys
+try:
+    observation_main(*sys.argv[1:])
+except (OSError, ValueError) as error:
+    print('res: ' + str(error), file=sys.stderr)
+    sys.exit(1)
+" "$RES_DIR" "$@"
+}
+
+cmd_holder() {
+  local id="${1:-}" by=
+  [ -n "$id" ] || die 'holder needs a resource id'
+  shift
+  if [ "$#" -gt 0 ]; then
+    [ "$#" -eq 2 ] && [ "$1" = --by ] && [ -n "$2" ] || die 'holder accepts only --by <session>'
+    by="$2"
+  fi
+  observe_resource holder "$id" "$by"
+}
+
 cmd_status() {
+  [ "$#" -le 1 ] || die 'status accepts at most one resource id'
   [ -f "$REG" ] || die "no registry at $REG"
+  if [ -n "${1:-}" ]; then
+    registry_record "$1" || die "unknown resource '$1'"
+    if [ "$REG_DEVICE" = - ] && { [ "$REG_KIND" = remote ] || [[ "$1" = heavy-* ]]; }; then
+      pool_report status "$1"
+      return $?
+    fi
+    observe_resource status "$1" || return $?
+    show_notes "$1"
+    return 0
+  fi
   local scan_id scan_kind scan_policy scan_device scan_description devices=0
   while IFS=$'\t' read -r scan_id scan_kind scan_policy scan_device scan_description; do
-    [ -z "${1:-}" ] || [ "$scan_id" = "$1" ] || continue
     [ "$scan_device" = - ] || [ -z "$scan_id" ] || [[ "$scan_id" = \#* ]] || devices=1
   done <"$REG"
   if [ "$devices" -eq 0 ]; then
     pool_report status "${1:-}"
     return $?
   fi
-  # A status of one checkout needs no device probe. One awk renders everything: a fork per
-  # field and row cost ~1.5 s.
-  if [ -z "${1:-}" ] || [ "$(reg_line "$1" | cut -f4)" != - ]; then probe; fi
-  local infos=() t pid_snapshot=0; t=$(mktemp); printf '%s\n' "$DEVS" >"$t"
-  for f in "$LOCKS"/*.d/info; do [ -f "$f" ] && infos+=("$f"); done
-  : >"$t.builds"
-  for info in ${infos[@]+"${infos[@]}"}; do
-    local build_id="${info%/info}"; build_id="${build_id##*/}"; build_id="${build_id%.d}"
-    case "$build_id" in heavy-*)
-      local evidence= count=
-      evidence=$(python3 -c "$RES_BUILD_PROCESS_SOURCE" "$info") || true
-      count="${evidence%%$'\t'*}"
-      [ "$count" = 0 ] || printf '%s\t%s\n' "$build_id" "$count" >>"$t.builds" ;;
-    esac
-  done
-  ps -axo pid= >"$t.pids" 2>/dev/null && pid_snapshot=1
-  awk -F'\t' -v only="${1:-}" -v host="$(local_host)" -v pid_snapshot="$pid_snapshot" -v epoch="$(date +%s)" '
-    function state(dev,   i, l) {
-      if (dev == "-") return "-"
-      for (i = 1; i <= nd; i++) if (index(D[i], dev " (")) {
-        l = D[i]; sub(/.*\((UDID|ADB|USBMUX)\) +/, "", l); sub(/  .*/, "", l)
-        return (l ~ /^available/ || l == "device") ? "connected" : (l == "" ? "not seen" : l)
-      }
-      return "not seen"
-    }
-    FILENAME == devs { D[++nd] = $0; next }
-    FILENAME == builds { B[$1]=$2; next }
-    FILENAME == pids { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0); P[$0] = 1; next }
-    FILENAME != reg { n = split(FILENAME, a, "/"); id = a[n-1]; sub(/\.d$/, "", id); if (id ~ /^heavy-build-[23]$/) id = "heavy-build"; H[id, $1] = $2; held[id] = 1; next }
-    /^#/ || $1 == "" { next }
-    { known[$4] = 1 }
-    only != "" && $1 != only { next }
-    !hdr++ { printf "%-16s %-9s %-9s %-12s %-34s %s\n", "ID", "KIND", "POLICY", "LINK", "HOLDER", "SINCE → UNTIL / PURPOSE" }
-    {
-      if ($1 in held) {
-        t = H[$1, "task"]; u = H[$1, "until"]
-        holder = H[$1, "by"] " (" H[$1, "project"] (t != "" ? "/" t : "") ")"
-        pid = H[$1, "pid"]
-        if (pid_snapshot && H[$1, "host"] == host && pid ~ /^[0-9]+$/ && pid + 0 > 0 && !(pid in P)) {
-          start = H[$1, "start"]
-          short_pid = H[$1, "pid_warning"] != "" || (start ~ /^[0-9]+$/ && epoch >= start && epoch - start <= 5)
-          holder = (($1 in B) ? (B[$1] == "unknown" ? "STALE-PID (build probe unavailable) " : "STALE-PID (build alive) ") : short_pid ? "STALE?(short-lived pid) " : "STALE ") holder
-          if (short_pid) fix = 1
-        }
-        detail = H[$1, "since"] " → " (u != "" ? u : "?") " · " H[$1, "for"]
-        if (H[$1, "remote_cleanup_required"] != "") detail = detail " · remote cleanup required"
-      } else { holder = "FREE"; detail = $5 }
-      printf "%-16s %-9s %-9s %-12s %-34s %s\n", $1, $2, $3, state($4), holder, detail
-    }
-    END {
-      if (fix) print "res: short-lived holder PID; use scripts/heavy-build.sh <command...>; lock, build and return must share one long-lived process" > "/dev/stderr"
-      if (only != "") exit
-      for (i = 1; i <= nd; i++) {
-        l = D[i]; id = ""
-        if (match(l, /^[^ ]+ \((USBMUX|ADB)\) device$/)) { id = l; sub(/ .*/, "", id); src = (l ~ /ADB/) ? "ADB" : "USBMUX" }
-        else if (l ~ /\(UDID\) +(available|connected).*physical/) { id = l; sub(/ \(UDID\).*/, "", id); sub(/.* /, "", id); src = "devicectl" }
-        if (id != "" && !(id in known) && !(id in seen)) { seen[id] = 1; out = out "  " id " " src "\n" }
-      }
-      if (out != "") printf "\nConnected but not registered (add with: res add <id> --device <id> --for \"<what it is>\"):\n%s", out
-    }
-  ' reg="$REG" devs="$t" pids="$t.pids" builds="$t.builds" "$t" "$t.pids" "$t.builds" ${infos[@]+"${infos[@]}"} "$REG"
-  rm -f "$t" "$t.pids" "$t.builds"
-  pool_report cleanup-pending-status "${1:-}"
-  if [ -z "${1:-}" ]; then pool_report scores
-  elif [ "$1" = heavy-build ]; then pool_report scores "$1"
-  elif registry_record "$1" && [ "$REG_KIND" = remote ]; then pool_report scores "$1"; fi
-  if [ -z "${1:-}" ] || [ "${1:-}" = heavy-build ]; then show_build_waiters; fi
-  case "${1:-}" in ''|heavy-*) show_build_waiters "$LANE_WAITERS" lanes ;; esac
+  probe
+  observe_resource status '' || return $?
+  pool_report cleanup-pending-status ''
+  pool_report scores
+  show_build_waiters
+  show_build_waiters "$LANE_WAITERS" lanes
   local pool_root
   for pool_root in "$POOL_WAITERS"/*; do
     [ -d "$pool_root" ] || continue
-    case "${1:-}" in ''|"${pool_root##*/}"|"${pool_root##*/}"-*) show_build_waiters "$pool_root" "pool ${pool_root##*/}" ;; esac
+    show_build_waiters "$pool_root" "pool ${pool_root##*/}"
   done
-  [ -z "${1:-}" ] || show_notes "$1"
 }
 
 cmd_add() {
@@ -3441,6 +3706,7 @@ cmd_log() { [ -f "$LOG" ] && tail -n "${1:-20}" "$LOG" || true; }
 
 case "${1:-}" in
   status) shift; cmd_status "$@" ;;
+  holder) shift; cmd_holder "$@" ;;
   take) shift; cmd_take "$@" ;;
   wait) shift; cmd_wait "$@" ;;
   take-build)

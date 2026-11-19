@@ -296,6 +296,8 @@ ok(currentHelp.includes('res audit [--json]'));
 // the byte-for-byte baseline check for the remaining commands and diagnostics.
 const withoutPoolHelp = text => text.replace(/^res wait-pool[\s\S]*?(?=^res heavy-check)/m, '')
   .replace(/^res audit[^\n]*\n/m, '')
+  .replace(/^res holder[^\n]*\n/m, '')
+  .replace(/^status\/holder:[^\n]*\n[^\n]*\n/m, '')
   .replace(' [--pid <pid>] [--disk-gib <GiB>]\n', ' [--pid <pid>]\n')
   .replace(' [--disk-gib <GiB>] [--disk-gib-file <JSON>] [--placement-file <JSON>] [--maintenance] [take options]\n', ' [take options]\n');
 eq(withoutPoolHelp(currentHelp), run(['--help'], {}, baseline).text);

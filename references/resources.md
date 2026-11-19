@@ -119,6 +119,12 @@ capacity is unavailable; old observations with no lane-3 verdict describe physic
 
 ## Res Ownership
 
+Lease guards should use `res holder <id> --by <holder>`, not the human-facing status
+table. The one-line JSON observation confirms ownership independently of USB probes
+and reports existing queued requests. Retry a single failed or `pending` read without
+performing device actions while ownership is unconfirmed. See `references/res-contract.md`,
+Lease Observations (BC-161), for fields, exit codes, bounded snapshots and probe caching.
+
 Since **2026-11-13**, the routing/global-rules owner maintains the **whole res tool**, handed over by
 vesdk-mainline: iphone11/iphone8/s21 device holds, checkouts, take/return/extend/add/note/log, heavy-build,
 heavy-lane-* and heavy-check. This repository is the source of truth: `scripts/res/res` (Bash), tests and
