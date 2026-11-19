@@ -2374,7 +2374,9 @@ try:
             remote[id] = (policy, match.group(1).rstrip('.'), set(caps.group(1).split(',')) if caps else set(), set(prefs.group(1).split(',')) if prefs else set())
         return rows, remote
     rows, remote = read_registry()
-    if action == 'status' and request and request not in rows: raise ValueError("unknown resource '%s'" % request)
+    # A pool name (prefix of slot ids such as devbox-cn) is a valid status request: it shows that pool's waiters.
+    if action == 'status' and request and request not in rows and not any(key.startswith(request + '-') for key in rows):
+        raise ValueError("unknown resource '%s'" % request)
     def health():
         try:
             with open(os.path.join(root, 'box-health.json')) as stream: state = json.load(stream)
@@ -3474,7 +3476,12 @@ cmd_status() {
   [ "$#" -le 1 ] || die 'status accepts at most one resource id'
   [ -f "$REG" ] || die "no registry at $REG"
   if [ -n "${1:-}" ]; then
-    registry_record "$1" || die "unknown resource '$1'"
+    if ! registry_record "$1"; then
+      # A pool name (prefix of slot ids such as devbox-cn) keeps the pool view with its waiters.
+      grep -q "^$1-" "$REG" 2>/dev/null || die "unknown resource '$1'"
+      pool_report status "$1"
+      return $?
+    fi
     if [ "$REG_DEVICE" = - ] && { [ "$REG_KIND" = remote ] || [[ "$1" = heavy-* ]]; }; then
       pool_report status "$1"
       return $?
