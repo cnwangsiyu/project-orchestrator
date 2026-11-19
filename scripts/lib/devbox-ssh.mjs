@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 // Supervisors and recovery stay independent of the task's disposable control connection.
-const independent = new Set(['run', 'cleanup', 'reconnect', 'result', 'artifact-range']);
+const independent = new Set(['run', 'cleanup', 'reconnect', 'result', 'artifact-range', 'dead-slot']);
 export function controlOptions(operation, state) {
   if (!state || independent.has(operation)) return ['-o', 'ControlMaster=no', '-o', 'ControlPath=none', '-o', 'ControlPersist=no'];
   // macOS's per-user TMPDIR plus %C exceeds OpenSSH's 104-byte socket limit.

@@ -63,6 +63,7 @@ if(c.liveHelp&&op==='help'){console.log('res wait-pool <prefix> --by S [--need <
 if(a.includes('--help')) {console.log('res wait-pool'+(c.legacy?'':' --prefer-host IP --need CAP --exclude-slot IDS --exclude-host IPS'+(c.preferSlot?' --prefer-slot SLOT':'')+(c.diskCosts?' --disk-gib-file JSON':'')+(c.warmFamily?' --warm-family REF':'')));return;}
 const rows=fs.readFileSync(path.join(c.shared,'resources.tsv'),'utf8').trim().split('\n').map(l=>{const [slot,kind,policy,,desc]=l.split('\t');return {slot,kind,policy,host:desc.match(/@(\d+\.\d+\.\d+\.\d+)/)?.[1],caps:desc.match(/caps=([\w,-]+)/)?.[1].split(',')||[]};});
 if(op==='return'||op==='release-dead'){
+ if(c.returnFailure){console.error('fixture lease return failure');process.exit(70);}
  const lock=path.join(c.shared,'locks',a[1]+'.d');
  if(fs.existsSync(lock)){const info=fs.readFileSync(path.join(lock,'info'),'utf8');if(!info.includes('by\t'+by+'\n'))process.exit(9);fs.rmSync(lock,{recursive:true});}
  event('return',{slot:a[1],by});console.log('return '+a[1]);console.log('ack returned');return;
@@ -104,11 +105,12 @@ if(args.includes('-O'))return;
 const op=command.match(/^# devbox-run:([\w-]+)/)?.[1];
 if(!op)throw Error('unmarked SSH');
 if(!args.includes('BatchMode=yes')||!args.includes('ServerAliveInterval=15')||!args.includes('ServerAliveCountMax=4'))throw Error('missing SSH guard');
-if(['run','cleanup','reconnect','result','artifact-range'].includes(op)) {
+if(['artifacts','fetch-artifact','artifact-range'].includes(op)&&(!args.includes('Ciphers=^aes128-gcm@openssh.com')||args.includes('-c')))throw Error('artifact cipher must be preferred, not required');
+if(['run','cleanup','reconnect','result','artifact-range','dead-slot'].includes(op) || (op==='probe'&&args.includes('ControlMaster=no'))) {
  if(!args.includes('ControlMaster=no')||!args.includes('ControlPath=none'))throw Error('supervisor/recovery SSH must remain independent');
 } else if(!args.includes('ControlMaster=auto')||!args.includes('ControlPersist=60'))throw Error('control SSH must reuse task connection');
 let d={};if(op!=='upload')d=JSON.parse(Buffer.from(command.match(/'([A-Za-z0-9+/=]+)'$/)[1],'base64').toString());
-event(op,{host,target,slot:d.slot,workspace:d.workspace,control:d.control,env:op==='run'?d.env:undefined,nice:op==='run'?d.command.startsWith('nice -n 10 bash -c'):undefined,cpus:d.cpus});
+event(op,{host,target,slot:d.slot,workspace:d.workspace,control:d.control,reuseAllowed:d.reuseAllowed,env:op==='run'?d.env:undefined,nice:op==='run'?d.command.startsWith('nice -n 10 bash -c'):undefined,cpus:d.cpus});
 if(c.authFailures){
  const file=path.join(c.dir,'auth-count');const count=fs.existsSync(file)?Number(fs.readFileSync(file)):0;
  if(count<c.authFailures){fs.writeFileSync(file,String(count+1));console.error(c.authMessage||'Permission denied (gssapi-with-mic)');process.exit(255);}
@@ -145,13 +147,14 @@ if(op==='metrics') {
 }
 if(op==='bundle'&&c.uploadRetry&&!fs.existsSync(path.join(c.dir,'retried'))){fs.writeFileSync(path.join(c.dir,'retried'),'1');process.stdin.resume();await new Promise(r=>process.stdin.on('end',r));console.error(c.uploadRetry);process.exit(255);}
 if(op==='run') {
+ if(c.launcherDiskHost===host){console.error('DEVBOX_LAUNCH_DISK_GUARD');process.exit(72);}
  fs.mkdirSync(d.control,{recursive:true});
  if(fs.existsSync(path.join(d.control,'cancel'))){fs.writeFileSync(path.join(d.control,'done.json'),JSON.stringify({gone:true}));process.exit(143);}
  const attemptFile=path.join(c.dir,'run-count-'+host);const n=fs.existsSync(attemptFile)?Number(fs.readFileSync(attemptFile)):0;fs.writeFileSync(attemptFile,String(n+1));
  let cmd=(d.cpus?'export GRADLE_OPTS="'+'$'+'{GRADLE_OPTS:+'+'$'+'GRADLE_OPTS }-Dorg.gradle.workers.max='+d.cpus+'"; ':'')+d.command;
  if(c.failHost===host)cmd='exit 7';
  const child=cp.spawn('/bin/bash',['-c',cmd],{cwd:d.workspace,env:{...process.env,...d.env},detached:true,stdio:['ignore','inherit','inherit']});
- fs.writeFileSync(path.join(d.control,'group.json'),JSON.stringify({pid:child.pid}));
+ fs.writeFileSync(path.join(d.control,'group.json'),JSON.stringify({pid:child.pid,run:path.basename(d.control),start:'fixture'}));
  event('group',{pid:child.pid,host});
  let cancelled=false;
  const stop=()=>{cancelled=true;try{process.kill(-child.pid,'SIGTERM')}catch{}};
@@ -168,6 +171,7 @@ if(op==='cleanup'){
  event('group-gone',{host});console.log('group-gone');return;
 }
 if(op==='artifacts'&&c.badArtifact)process.exit(66);
+if(op==='fetch-artifact'&&c.badFetch){console.error('fixture primary readback failure');process.exit(65);}
 if(op==='inspect') {
  const result=cp.spawnSync('/bin/bash',['-c',command],{encoding:'utf8'});
  if(result.status){process.stderr.write(result.stderr);process.exit(result.status);}
@@ -956,6 +960,10 @@ async function overheadScenarios() {
   const dirty = await run(f, [], 'test ! -e leftover.txt && test -f build/cache'); ok(dirty); returned(f);
   assert.equal(dirty.summary.shards[0].attempts[0].checkoutSkipped, false);
   assert.ok(dirty.summary.shards[0].attempts[0].slotHygiene.patches.length);
+  fs.mkdirSync(path.join(workspace(f),'empty-untracked'));
+  const empty=await run(f,[],'test ! -d empty-untracked && test -f build/cache'); ok(empty); returned(f);
+  assert.equal(empty.summary.shards[0].attempts[0].checkoutSkipped,false,'empty untracked directory falls back to git clean');
+  assert.ok(f.events().filter(event=>event.op==='inspect').some(event=>event.reuseAllowed===false),'post-upload checks never run reuse inspection');
   const modules = fixture(); const pins = makeSubmoduleFixture(path.join(modules.dir, 'modules')); modules.repo = pins.repo;
   ok(await run(modules, ['--submodules'], pins.command)); returned(modules);
   const updates = modules.events().filter(event => event.op === 'submodule').length;
@@ -1129,6 +1137,12 @@ async function scenarios() {
   const filled = fixture({ diskAfterUpload: '192.0.2.1' }); const filledRun = await run(filled); ok(filledRun);
   assert.equal(filledRun.summary.shards[0].attempts[0].exit, 72);
   assert.ok(!filled.events().some(e => e.op === 'run' && e.host === '192.0.2.1')); returned(filled);
+  const launcher=fixture({launcherDiskHost:'192.0.2.1'});
+  const launchRetry=await run(launcher,['--rerun-on-fail']); ok(launchRetry); returned(launcher);
+  assert.equal(launchRetry.summary.shards[0].attempts[0].diskGuard,true);
+  assert.equal(launchRetry.summary.shards[0].host,'192.0.2.2'); assert.equal(launchRetry.summary.shards[0].flaky,false);
+  const command72=fixture(); const commandExit=await run(command72,[],'exit 72');
+  assert.equal(commandExit.code,72); assert.equal(commandExit.summary.shards[0].attempts[0].diskGuard,undefined); returned(command72);
   console.log('PASS capability and slot preference passthrough/legacy filtering, fresh upload retry, disk guard alternate-slot retry');
 
   }
@@ -1193,6 +1207,21 @@ async function scenarios() {
   assert.equal(fs.readFileSync(path.join(foreignLock, 'info'), 'utf8'), foreignInfo);
   assert.deepEqual(fs.readdirSync(path.join(retained.shared, 'locks')), [manifest.slot + '.d']);
   fs.rmSync(foreignLock, { recursive: true }); returned(retained);
+  fs.writeFileSync(path.join(retained.dir,'config.json'),JSON.stringify({...retained.config,badFetch:true,returnFailure:true}));
+  const tempBefore=fs.readdirSync(os.tmpdir()).filter(name=>name.startsWith('devbox-artifact-fetch-')).sort();
+  const failedFetch=spawnSync(process.execPath,[script,'fetch-artifact','--manifest',savedAttempt.artifactManifest,'--name','build/result.txt','--out',path.join(retained.dir,'failed.txt')],{env:retained.env,encoding:'utf8'});
+  assert.notEqual(failedFetch.status,0); assert.match(failedFetch.stderr,/fixture primary readback failure/);
+  assert.match(failedFetch.stderr,/artifact cleanup:.*lease return failure/);
+  assert.deepEqual(fs.readdirSync(os.tmpdir()).filter(name=>name.startsWith('devbox-artifact-fetch-')).sort(),tempBefore);
+  for(const lock of fs.readdirSync(path.join(retained.shared,'locks')))fs.rmSync(path.join(retained.shared,'locks',lock),{recursive:true});
+  fs.writeFileSync(path.join(retained.dir,'config.json'),JSON.stringify(retained.config));
+  const retired=spawnSync(process.execPath,[script,'retire-artifacts','--receipt',manifest.run,'--host',manifest.host],{env:retained.env,encoding:'utf8'});
+  assert.equal(retired.status,0,retired.stdout+retired.stderr); assert.match(retired.stdout,/"remainingBytes": 0/); returned(retained);
+  const failedCommand=fixture();
+  const noRetention=await run(failedCommand,['--artifact','build/result.txt','--artifact-fetch','manifest'],'mkdir -p build && printf failed > build/result.txt; exit 7');
+  assert.equal(noRetention.code,7); assert.equal(failedCommand.events().filter(event=>event.op==='artifacts').length,0); returned(failedCommand);
+  const withRetention=await run(failedCommand,['--artifact','build/result.txt','--artifact-fetch','manifest','--retain-on-fail'],'mkdir -p build && printf failed > build/result.txt; exit 7');
+  assert.equal(withRetention.code,7); assert.ok(withRetention.summary.shards[0].attempts[0].artifactManifest); returned(failedCommand);
 
   let failedArtifact = fixture({ badArtifact: true }); assert.equal((await run(failedArtifact, ['--artifact', '*.txt'])).code, 66); returned(failedArtifact);
   const left = await run(failedArtifact = fixture({ badArtifact: true }), ['--artifact', '*.txt', '--fetch-timeout', '30']);

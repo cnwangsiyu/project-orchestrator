@@ -71,6 +71,23 @@ try {
     [account, { home: dir, hub: `ws://127.0.0.1:${5010 + index}` }]))));
   fs.writeFileSync(fixture, `
     import fs from 'node:fs';
+    import cp from 'node:child_process';
+    import { promisify } from 'node:util';
+    import { syncBuiltinESMExports } from 'node:module';
+    const actualExecFile = cp.execFile, actualAsync = promisify(actualExecFile);
+    const claudeReply = (file, args) => {
+      if (file !== 'claude' || JSON.stringify(args) !== JSON.stringify(['agents','--json'])) throw Error('unexpected Claude fixture command');
+      return { stdout: '[{"sessionId":"claude-live","status":"working"}]', stderr: '' };
+    };
+    cp.execFile = (file, ...args) => {
+      if (file !== 'claude') return actualExecFile(file, ...args);
+      const reply = claudeReply(file, args[0]);
+      queueMicrotask(() => args.at(-1)(null, reply.stdout, reply.stderr));
+      return { kill() {} };
+    };
+    cp.execFile[promisify.custom] = (file, args, options) => file === 'claude'
+      ? Promise.resolve(claudeReply(file, args)) : actualAsync(file, args, options);
+    syncBuiltinESMExports();
     globalThis.WebSocket = class {
       handlers = {};
       constructor(url) { this.url = new URL(url); queueMicrotask(() => this.emit('open', {})); }

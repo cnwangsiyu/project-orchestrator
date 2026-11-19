@@ -15,6 +15,7 @@ import { manifest, duration, inputKey, indexFile, readIndex, inputSettings, plac
 import { transferFindings } from './lib/devbox-transfer-check.mjs';
 import { fileDigest, artifactName, readArtifactManifest, retainedArtifactPython, artifactRangePython } from './lib/devbox-artifacts.mjs';
 import { controlOptions } from './lib/devbox-ssh.mjs';
+import { retentionPython } from './lib/devbox-retention.mjs';
 
 const script = fileURLToPath(import.meta.url);
 const GiB = 1024 ** 3;
@@ -34,10 +35,10 @@ const sharedDir = () => process.env.RES_DIR || process.env.RULES_SHARED || path.
 const resCommand = () => process.env.RES_COMMAND || (fs.existsSync(path.join(sharedDir(), 'res')) ? path.join(sharedDir(), 'res') : 'res');
 
 export function parseArgs(args) {
-  const opts = { ref: 'HEAD', pool: 'devbox-cn', shards: 1, timeout: 120, fetchTimeout: 15, artifactFetch: 'all', artifactStreams: 1, artifacts: [], env: {}, days: 7, need: [], excludeSlot: [], excludeHost: [], inputs: [] };
+  const opts = { ref: 'HEAD', pool: 'devbox-cn', shards: 1, timeout: 120, fetchTimeout: 15, artifactFetch: 'all', artifactStreams: 1, retainHours: 24, artifacts: [], env: {}, days: 7, need: [], excludeSlot: [], excludeHost: [], inputs: [] };
   if (args[0] === 'gc') { opts.gc = true; args = args.slice(1); }
   if (args[0] === 'prewarm') { opts.prewarm = true; opts.ref = 'main'; opts.task = 'prewarm'; args = args.slice(1); }
-  const names = new Map(['project', 'task', 'repo', 'ref', 'pool', 'shards', 'out', 'timeout', 'prefer-host', 'watch-pid', 'affinity', 'host', 'days', 'units-file', 'command', 'fetch-timeout', 'artifact-fetch', 'artifact-streams', 'exclude-reason', 'prefer-slot', 'warm-cost', 'inputs'].map(n => [`--${n}`, n.replace(/-([a-z])/g, (_, c) => c.toUpperCase())]));
+  const names = new Map(['project', 'task', 'repo', 'ref', 'pool', 'shards', 'out', 'timeout', 'prefer-host', 'watch-pid', 'affinity', 'host', 'days', 'units-file', 'command', 'fetch-timeout', 'artifact-fetch', 'artifact-streams', 'retain-hours', 'exclude-reason', 'prefer-slot', 'warm-cost', 'inputs'].map(n => [`--${n}`, n.replace(/-([a-z])/g, (_, c) => c.toUpperCase())]));
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === '--') { if (opts.command) throw Error('provide only one command'); opts.command = args.slice(i + 1).join(' '); break; }
@@ -45,6 +46,7 @@ export function parseArgs(args) {
     if (arg === '--submodules') { opts.submodules = true; continue; }
     if (arg === '--rerun-on-fail') { opts.rerunOnFail = true; continue; }
     if (arg === '--allow-flaky') { opts.allowFlaky = true; continue; }
+    if (arg === '--retain-on-fail') { opts.retainOnFail = true; continue; }
     if (!names.has(arg) && !['--env', '--artifact', '--need', '--exclude-slot', '--exclude-host', '--input'].includes(arg)) throw Error(`unknown option ${arg}`);
     const value = args[++i];
     if (value === undefined || value === '--') throw Error(`missing value for ${arg}`);
@@ -74,6 +76,8 @@ export function parseArgs(args) {
   opts.days = Number(opts.days);
   if (!Number.isFinite(opts.days) || opts.days < 1) throw Error('--days must be at least 1');
   if (opts.gc) return opts;
+  opts.retainHours = Number(opts.retainHours);
+  if (!Number.isFinite(opts.retainHours) || opts.retainHours <= 0 || opts.retainHours > 72) throw Error('--retain-hours must be >0 and <=72');
   if (!['manifest', 'all'].includes(opts.artifactFetch)) throw Error('--artifact-fetch must be manifest or all');
   opts.artifactStreams = Number(opts.artifactStreams);
   if (!Number.isInteger(opts.artifactStreams) || opts.artifactStreams < 1 || opts.artifactStreams > 4) throw Error('--artifact-streams must be 1..4');
@@ -261,10 +265,10 @@ function ownChild(child) {
     && child.signalCode === null && child.kill(sig);
 }
 
-function execute(file, args, { input, inputFile, outputFile, onOutput, timeout = 60000, state, cancellable = true, rawCapture = !onOutput && !outputFile, interceptStderr, interceptStdout, env = process.env, strictOutput = true, deferOutputEnd = false } = {}) {
+export function execute(file, args, { input, inputFile, outputFile, onOutput, timeout = 60000, state, cancellable = true, rawCapture = !onOutput && !outputFile, interceptStderr, interceptStdout, env = process.env, strictOutput = true, deferOutputEnd = false } = {}) {
   return new Promise(resolve => {
     const child = spawn(file, args, { stdio: ['pipe', 'pipe', 'pipe'], env });
-    let stdout = '', stderr = '', stdoutBytes = 0, stdinBytes = 0, timedOut = false, spawnError;
+    let stdout = '', stderr = '', stdoutBytes = 0, stdinBytes = 0, timedOut = false, spawnError, sinkFailed = false;
     const sink = outputFile ? fs.createWriteStream(outputFile, { mode: 0o600 }) : null;
     const rawDecoder = new StringDecoder('utf8');
     const out = lineSink(text => { if (!rawCapture) stdout = (stdout + text).slice(-2 * 1024 * 1024); onOutput?.(text, 'stdout'); }, state?.values, interceptStdout, strictOutput);
@@ -273,14 +277,14 @@ function execute(file, args, { input, inputFile, outputFile, onOutput, timeout =
     if (state && cancellable) state.children.add(signalChild);
     let killTimer;
     const stop = () => { signalChild('SIGTERM'); killTimer ??= setTimeout(() => signalChild('SIGKILL'), 30000); };
-    sink?.on('error', error => { spawnError = `output file ${error.code || 'write failure'}`; stop(); });
+    sink?.on('error', error => { sinkFailed = true; spawnError = `output file ${error.code || 'write failure'}`; child.stdout.resume(); stop(); });
     sink?.on('drain', () => child.stdout.resume());
     const timer = setTimeout(() => { timedOut = true; stop(); }, timeout);
     let source;
     child.stdin.on('error', () => {});
     child.stdout.on('data', chunk => {
       stdoutBytes += chunk.length;
-      if (sink) { if (!sink.write(chunk)) child.stdout.pause(); }
+      if (sink) { if (!sinkFailed && !sink.write(chunk)) child.stdout.pause(); }
       else if (rawCapture) {
         stdout += rawDecoder.write(chunk);
         if (onOutput) out.push(chunk);
@@ -295,7 +299,7 @@ function execute(file, args, { input, inputFile, outputFile, onOutput, timeout =
       const resumeOutput = deferOutputEnd && code === 255 && !spawnError && !timedOut;
       if (!resumeOutput) out.end(); err.end();
       if (rawCapture) stdout += rawDecoder.end();
-      if (sink) await new Promise(done => sink.end(done));
+      if (sink && !sinkFailed) await new Promise(done => { sink.once('error', done); sink.end(done); });
       resolve({ code: spawnError ? 1 : timedOut ? 124 : code ?? (signal === 'SIGTERM' ? 143 : 1), stdout, stdoutBytes, stdinBytes,
         ...(resumeOutput ? { stdoutSink: out } : {}), stdoutPrivateBlockOpen: out.privateBlockOpen,
         stderr: stderr || spawnError || '', error: spawnError });
@@ -348,11 +352,19 @@ def group_gone():
 const inputMapPython = `ctl=pathlib.Path(d['control']); ctl.mkdir(parents=True,exist_ok=True)
 disk=os.statvfs(d['root'])
 if disk.f_bavail*disk.f_frsize<53*1073741824: sys.exit(72)
+if 'records' in globals():
+    for name,p in list(d['paths'].items()):
+        record=next((r for r in records if r['path']==p),None)
+        if record and not record['present']: d['paths'][name]=d['defaultPaths'][name]
 file=ctl/'inputs.json'; temporary=ctl/'inputs.tmp'
 temporary.write_text(json.dumps(d['paths'])); temporary.replace(file)
 `;
 
 export const remoteScripts = {
+  'list-retained': pythonHeader + retentionPython + `print(json.dumps([r for r in retained_inventory(d['root']) if r['bytes']]))\n`,
+  'retire-artifacts': pythonHeader + retentionPython + `ctl=artifact_control(d['root'],d['receipt'])\nprint(json.dumps({'receipt':d['receipt'],'retiredBytes':retire_payload(ctl),'remainingBytes':payload_bytes(ctl)}))\n`,
+  'expire-artifacts': pythonHeader + retentionPython + `print(json.dumps({'reclaimedBytes':expire_payloads(d['root'])}))\n`,
+  'retained-disk': pythonHeader + retentionPython + `totals={}\nfor r in retained_inventory(d['root']):\n    if r.get('slot'): totals[r['slot']]=totals.get(r['slot'],0)+r['bytes']\nprint(json.dumps(totals))\n`,
   'input-map': pythonHeader + inputMapPython,
   'inputs-ready': pythonHeader + inputPython.replace('print(json.dumps(records))', '') + inputMapPython + `print(json.dumps({'records':records,'free':disk.f_bavail*disk.f_frsize,'map':str(file)}))\n`,
   inputs: pythonHeader + inputPython,
@@ -428,9 +440,14 @@ result={'free':disk.f_bavail*disk.f_frsize,**inspect(d),'modules':[inspect(item)
 ws=pathlib.Path(d.get('workspace','/'))
 def clean(tree,commit):
     if not (tree/'.git').exists(): return False
-    head=subprocess.check_output(['git','-C',str(tree),'rev-parse','HEAD'],text=True).strip()
-    status=subprocess.check_output(['git','-C',str(tree),'status','--porcelain','-z','--untracked-files=all','--ignore-submodules=none'])
-    return head==commit and not status
+    try:
+        left=lambda:max(.001,clean_deadline-time.monotonic())
+        head=subprocess.check_output(['git','-C',str(tree),'rev-parse','HEAD'],text=True,timeout=left()).strip()
+        status=subprocess.check_output(['git','-C',str(tree),'status','--porcelain','-z','--untracked-files=all','--ignore-submodules=none'],timeout=left())
+        empty=subprocess.check_output(['git','-C',str(tree),'clean','-nd','--'],timeout=left())
+        return head==commit and not status and not empty
+    except (subprocess.SubprocessError,OSError): return False
+clean_deadline=time.monotonic()+min(10,max(.001,d.get('cleanTimeoutSec',10)))
 if d.get('reuseAllowed') and result['present'] and all(item['present'] for item in result['modules']):
     result['sameRefClean']=clean(ws,d['commit']) and all(clean(ws/item['parent']/item['relative'],item['commit']) for item in d.get('modules',[]))
     if result['sameRefClean']:
@@ -581,8 +598,9 @@ if d.get('docker') and shutil.which('docker'):
 after=os.statvfs(root)
 print(json.dumps({'reclaimedBytes':after.f_bavail*after.f_frsize-before}))
 `,
-  maintenance: pythonHeader + `import subprocess, fcntl, shutil
+  maintenance: pythonHeader + retentionPython + `import subprocess, fcntl, shutil
 root=pathlib.Path(d['root']); before=os.statvfs(root); before=before.f_bavail*before.f_frsize
+expire_payloads(root)
 for repo in (root/'repos').glob('*/*'):
     if not repo.is_dir() or repo.is_symlink() or not (repo/'HEAD').is_file(): continue
     with open(str(repo)+'.lock','a') as lock:
@@ -602,7 +620,8 @@ sys.exit(subprocess.run(['git','apply','--index','--binary','--whitespace=nowarn
   run: pythonHeader + `import ctypes, subprocess, shlex, shutil
 if d.get('root'):
     disk=os.statvfs(d['root'])
-    if disk.f_bavail*disk.f_frsize<53*1073741824: sys.exit(72)
+    if disk.f_bavail*disk.f_frsize<53*1073741824:
+        print('DEVBOX_LAUNCH_DISK_GUARD',file=sys.stderr,flush=True); sys.exit(72)
 ctl=pathlib.Path(d['control']); cancelled=False
 # The streaming SSH process follows a detached, bounded supervisor. Only the
 # supervisor owns the command group; a lost stream cannot cancel its command.
@@ -779,16 +798,18 @@ sys.exit(70)
   'fetch-artifact': pythonHeader + retainedArtifactPython,
   'artifact-range': pythonHeader + artifactRangePython,
   'artifact-release': pythonHeader + artifactRangePython.slice(0, artifactRangePython.indexOf('offset=d')) + `(ctl/'artifact-archive.tar').unlink()\n(ctl/'artifact-archive.json').unlink()\n`,
-  artifacts: pythonHeader + `import glob, tarfile, hashlib, stat
+  artifacts: pythonHeader + retentionPython + `import glob, tarfile, hashlib, stat
 collection_started=time.monotonic(); transfer_seconds=0
 os.chdir(d['workspace']); names=set()
+for pattern in d['patterns']:
+    if pathlib.PurePosixPath(pattern).is_absolute() or '..' in pathlib.PurePosixPath(pattern).parts: raise RuntimeError('artifact pattern must be workspace-relative')
 for pattern in d['patterns']:
     matches=glob.glob(pattern,recursive=True)
     if not matches: print('artifact pattern had no matches',file=sys.stderr); sys.exit(66)
     for name in matches:
         p=pathlib.Path(name)
-        if p.is_dir(): names.update(str(x) for x in p.rglob('*') if x.is_file() or x.is_symlink())
-        else: names.add(name)
+        if p.is_dir(): names.update(x.as_posix() for x in p.rglob('*') if x.is_file() or x.is_symlink())
+        else: names.add(p.as_posix())
 for name in names:
     p=pathlib.Path(name)
     if p.is_symlink() or not p.resolve().is_relative_to(pathlib.Path.cwd()): raise RuntimeError('artifact leaves workspace')
@@ -809,10 +830,15 @@ if d.get('fetch')=='manifest':
         raise RuntimeError('artifact receipt outside runner root')
     total=sum(pathlib.Path(name).stat().st_size for name in names)
     disk=os.statvfs(root)
-    if disk.f_bavail*disk.f_frsize-total<53*1073741824: raise RuntimeError('artifact retention disk guard')
+    reserved=sum(r['bytes'] for r in retained_inventory(root) if r.get('slot')==d['slot'])
+    if disk.f_bavail*disk.f_frsize-total-reserved<53*1073741824: raise RuntimeError('artifact retention disk reservation guard')
+    if any(part.lower() in {'login','session','sessions','cookie','cookies'} for name in names for part in pathlib.PurePosixPath(name).parts):
+        raise RuntimeError('artifact manifest name contains private-state component')
+    retention=begin_retention(d)
     retained=ctl/'artifacts'; retained.mkdir(mode=0o700)
     records=[]
-    for name in sorted(names):
+    try:
+      for name in sorted(names):
         parts=pathlib.PurePosixPath(name).parts
         if not parts or name.startswith('/') or any(part in ('.','..') for part in parts): raise RuntimeError('invalid artifact name')
         target=retained/name; target.parent.mkdir(parents=True,exist_ok=True)
@@ -825,13 +851,16 @@ if d.get('fetch')=='manifest':
                 if not chunk: break
                 dest.write(chunk); h.update(chunk); size+=len(chunk)
         records.append({'name':name,'size':size,'sha256':h.hexdigest()})
-    receipt={'version':1,'run':ctl.name,'commit':d['commit'],'control':str(ctl),'slot':d['slot'],'host':d['host'],'artifacts':records}
+    except BaseException:
+        shutil.rmtree(retained); (ctl/'artifact-retention.json').unlink(missing_ok=True); raise
+    receipt={**retention,'control':str(ctl),'artifacts':records}
     (ctl/'artifact-manifest.json').write_text(json.dumps(receipt))
     print(json.dumps(receipt))
     print('DEVBOX_ARTIFACT_COLLECTION='+json.dumps({'seconds':time.monotonic()-collection_started}),file=sys.stderr,flush=True)
     sys.exit(0)
 parallel=d.get('streams',1)>1 and sum(pathlib.Path(name).stat().st_size for name in names)>=64*1048576
 if parallel:
+    begin_retention(d)
     ctl=pathlib.Path(d['control']); root=pathlib.Path(d['root'])
     if ctl.parent!=root/'runs' or ctl.is_symlink() or not ctl.resolve().is_relative_to(root.resolve()/'runs'): raise RuntimeError('archive receipt outside runner root')
     disk=os.statvfs(root)
@@ -871,7 +900,7 @@ async function sshCall(row, operation, data, opts = {}) {
     let started = false;
     const marker = `DEVBOX_STARTED_${randomUUID()}`;
     const command = base.replace('\n', `\nprintf '%s\\n' ${quote(marker)} >&2\n`);
-    const result = await execute('ssh', ['-o', 'BatchMode=yes', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=4', '-o', 'ConnectTimeout=15', '-o', 'ForwardAgent=no', '-o', 'GSSAPIDelegateCredentials=no', ...controlOptions(operation, opts.state), ...(['artifacts', 'fetch-artifact', 'artifact-range'].includes(operation) ? ['-o', 'Compression=no', '-c', 'aes128-gcm@openssh.com'] : []), row.target, command], {
+    const result = await execute('ssh', ['-o', 'BatchMode=yes', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=4', '-o', 'ConnectTimeout=15', '-o', 'ForwardAgent=no', '-o', 'GSSAPIDelegateCredentials=no', ...controlOptions(operation, opts.state), ...(['artifacts', 'fetch-artifact', 'artifact-range'].includes(operation) ? ['-o', 'Compression=no', '-o', 'Ciphers=^aes128-gcm@openssh.com'] : []), row.target, command], {
       ...opts, interceptStderr: line => { if (line === marker) { started = true; return true; } return false; },
     });
     opts.state?.currentAttemptTiming?.addBytes(result.stdinBytes || 0, result.stdoutBytes || 0);
@@ -1421,7 +1450,7 @@ async function verifyInputs(row, inputs, opts, state, { force=false, timeout=600
     if (probes.length || prepare) {
       const paths = prepare ? Object.fromEntries(prepare.inputs.map(input => [input.name, input.path || index.inputs[inputKey(input)]?.path || inputPath(root, input)])) : undefined;
       const result=await ssh(row,prepare ? 'inputs-ready' : 'inputs',{root,inputs:probes,affinity:opts.affinity,
-        ...(prepare ? { control: prepare.data.control, paths } : {}),
+        ...(prepare ? { control: prepare.data.control, paths, defaultPaths: Object.fromEntries(prepare.inputs.map(input => [input.name, inputPath(root,input)])) } : {}),
         legacyAffinity:opts.warmCost !== undefined ? opts.legacyAffinity : undefined},{state,timeout});
       const response=JSON.parse(checked(result,'input verification'));
       const records=prepare ? response.records : response;
@@ -1492,7 +1521,7 @@ async function seedInputs(row,data,opts,attempt,state,emit,remaining) {
       attempt.seedStarted=false;
       // Each supervisor control directory is single-use.
       data.control=`${data.root}/runs/${randomUUID()}`;
-      checked(await ssh(row,'inspect',data,{state,timeout:remaining()}),'post-seed preparation');
+      checked(await ssh(row,'inspect',{...data,reuseAllowed:false},{state,timeout:remaining()}),'post-seed preparation');
     }
     const verified=await verifyInputs(row,[input],opts,state,{force:true,timeout:remaining()});
     if (!verified.inputs[inputKey(input)]) throw Error(`seed hash/size mismatch for ${input.name}`);
@@ -1764,6 +1793,9 @@ async function shard(opts) {
           const present = JSON.parse(checked(await ssh(candidate, 'workspaces', { root, project: opts.project, key: opts.snapshot.storeKey,
             slots: possible.filter(item => item.host === host).map(item => item.slot) }, { state, timeout: remaining() }), 'workspace disk inventory'));
           for (const slot of present) if (possible.some(item => item.host === host && item.slot === slot)) diskCosts[slot] = 0;
+          const retained = JSON.parse(checked(await ssh(candidate, 'retained-disk', { root }, { state, timeout: remaining() }), 'retained disk inventory'));
+          for (const [slot, bytes] of Object.entries(retained)) if (bytes > 0 && possible.some(item => item.host === host && item.slot === slot))
+            diskCosts[slot] = (diskCosts[slot] ?? 20) + bytes / GiB;
         }
         const diskCostFile = path.join(opts.out, `shard-${opts.shard}-disk-costs.json`);
         if (opts.diskCostsSupported) writeJSON(diskCostFile, diskCosts);
@@ -1856,7 +1888,7 @@ async function shard(opts) {
         let inspection = JSON.parse(checked(await phases.measure('inspect', () => ssh(row, 'inspect', data, { state, timeout: Math.min(60000, remaining()) })), 'workspace inspection'));
         if (inspection.free < 73 * GiB) {
           await collectGarbage({ rows: [...readRegistry(sharedDir(), 'devbox-cn'), ...readRegistry(sharedDir(), 'devbox-cn-light')], host: row.host, state, emit, skipSlot: row.slot });
-          inspection = JSON.parse(checked(await ssh(row, 'inspect', data, { state }), 'disk recheck'));
+          inspection = JSON.parse(checked(await ssh(row, 'inspect', { ...data, reuseAllowed: false }, { state }), 'disk recheck'));
         }
         if (inspection.free < 53 * GiB) {
           attempt.diskGuard = true; emit(`[shard ${opts.shard}] disk guard refused ${row.host}: need 53 GiB free\n`);
@@ -1923,6 +1955,7 @@ async function shard(opts) {
         const loginFailure = result.code === 255 && !result.sshStarted && /permission denied|gssapi|authentication failed/i.test(result.stderr);
         if (result.code === 255 && !loginFailure) { attempt.sshDropped = true; attempt.sshExit = result.code; }
         attempt.exit = state.cancel || result.code;
+        if (result.code === 72 && /(?:^|\n)DEVBOX_LAUNCH_DISK_GUARD(?:\n|$)/.test(result.stderr)) attempt.diskGuard = true;
         if (attempt.sshDropped) {
           const recoveredExit = await recoverRunResult(row, data, state, result.stdoutBytes, emit, result.stdoutPrivateBlockOpen, result.stdoutSink);
           if (recoveredExit !== null) {
@@ -2005,13 +2038,13 @@ async function shard(opts) {
               attempt.unitTimings = attempt.unitTimings.filter(record => opts.units.includes(record.unit));
             } catch (error) { attempt.timingError = error.message; emit(`[shard ${opts.shard}] ${error.message}\n`); }
           }
-          if (clean && opts.artifacts.length) {
+          if (clean && opts.artifacts.length && (!attempt.exit || opts.retainOnFail)) {
             phases.phase('transferOut');
             const manifestOnly = opts.artifactFetch === 'manifest';
             const streams = Math.min(opts.artifactStreams, Math.max(1, Math.floor(8 / opts.shards)));
             const fetchDeadline = Date.now() + opts.fetchTimeout * 60000;
             const archive = path.join(opts.out, `shard-${opts.shard}-attempt-${attempts.length}.${manifestOnly ? 'manifest.json' : 'tar'}`);
-            const fetched = await ssh(row, 'artifacts', { ...data, host: row.host, fetch: opts.artifactFetch, streams, patterns: opts.artifacts }, { outputFile: archive, cancellable: false, state, timeout: opts.fetchTimeout * 60000 });
+            const fetched = await ssh(row, 'artifacts', { ...data, host: row.host, fetch: opts.artifactFetch, retainHours: opts.retainHours, streams, patterns: opts.artifacts }, { outputFile: archive, cancellable: false, state, timeout: opts.fetchTimeout * 60000 });
             const planRecord = /DEVBOX_ARTIFACT_PLAN=(\{[^\n]*\})/.exec(fetched.stderr);
             if (!fetched.code && planRecord && !manifestOnly) {
               try {
@@ -2170,6 +2203,7 @@ export async function fetchArtifact(args) {
   const parent = process.ppid;
   const watch = setInterval(() => { try { process.kill(parent, 0); } catch { state.stop(143); } }, 1000);
   const deadline = Date.now() + opts.timeout * 60000;
+  let primaryError;
   try {
     const root = await hostRoot(row, state, { deadline });
     if (receipt.control !== `${root}/runs/${receipt.run}`) throw Error('artifact manifest root differs from registered host root');
@@ -2209,21 +2243,88 @@ export async function fetchArtifact(args) {
     fs.linkSync(partial, out); fs.unlinkSync(partial);
     console.log(`artifact=${out} bytes=${artifact.size} sha256=${artifact.sha256}`);
     return 0;
+  } catch (error) {
+    primaryError = error; throw error;
   } finally {
     clearInterval(watch); process.removeListener('SIGTERM', stop); process.removeListener('SIGINT', stop);
-    if (fs.existsSync(partial)) fs.unlinkSync(partial);
-    await closeControlConnections(state);
+    const failures = [];
+    const cleanup = async action => { try { await action(); } catch (error) { failures.push(error.message); } };
+    await cleanup(() => { if (fs.existsSync(partial)) fs.unlinkSync(partial); });
+    await cleanup(() => closeControlConnections(state));
     // Acquisition may be interrupted after res creates a hold but before it prints the slot.
     for (const candidate of rows) {
-      const hold = readHold(candidate);
-      if (hold?.fields.by === by && hold.fields.pid === String(process.pid))
-        checked(await executeRes(['return', candidate.slot, '--by', by], { state, cancellable: false, timeout: 30000 }), 'artifact lease return');
+      await cleanup(async () => {
+        const hold = readHold(candidate);
+        if (hold?.fields.by === by && hold.fields.pid === String(process.pid))
+          checked(await executeRes(['return', candidate.slot, '--by', by], { state, cancellable: false, timeout: 30000 }), 'artifact lease return');
+      });
     }
-    fs.rmSync(temp, { recursive: true, force: true });
+    await cleanup(() => fs.rmSync(temp, { recursive: true, force: true }));
+    if (failures.length) {
+      const detail = 'artifact cleanup: ' + failures.join('; ');
+      if (primaryError) primaryError.message += '; ' + detail;
+      else throw Error(detail);
+    }
+  }
+}
+
+export async function retainedArtifacts(args, retire = false) {
+  const opts = { timeout: 5 };
+  for (let i = 0; i < args.length; i += 2) {
+    if (!['--host','--receipt','--timeout'].includes(args[i]) || args[i+1] === undefined) throw Error('list-retained [--host IP]; retire-artifacts --receipt UUID [--host IP] [--timeout MIN]');
+    opts[args[i].slice(2)] = args[i+1];
+  }
+  if (retire && !/^[0-9a-f-]{36}$/.test(opts.receipt || '') || !retire && opts.receipt) throw Error('--receipt must be a run UUID for retirement');
+  if (!Number.isFinite(Number(opts.timeout)) || Number(opts.timeout) <= 0 || Number(opts.timeout) > 120) throw Error('invalid retention timeout');
+  const rows = [...readRegistry(sharedDir(),'devbox-cn'),...readRegistry(sharedDir(),'devbox-cn-light')];
+  const hosts = [...new Map(rows.filter(row => !opts.host || row.host === opts.host).map(row => [row.target,row])).values()];
+  if (!hosts.length) throw Error('no open registered retention host');
+  const state = cancellationState(), by = `artifact-retire-${process.pid}-${randomUUID()}`;
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(),'devbox-artifact-admin-'));
+  const placementFile = path.join(temp,'placement.json'), deadline = Date.now()+Number(opts.timeout)*60000;
+  const stop = () => state.stop(143);
+  process.once('SIGTERM',stop); process.once('SIGINT',stop);
+  const parent = process.ppid, watch = setInterval(() => { try { process.kill(parent,0); } catch { stop(); } },1000);
+  let found = false, primaryError;
+  try {
+    for (const row of hosts) {
+      const root = await hostRoot(row,state,{deadline});
+      const inventory = JSON.parse(checked(await ssh(row,'list-retained',{root},{state,timeout:Math.max(1,deadline-Date.now())}),'retained inventory'));
+      if (!retire) { console.log(JSON.stringify({host:row.host,target:row.target,receipts:inventory})); continue; }
+      if (!inventory.some(record => record.run === opts.receipt)) continue;
+      if (found) throw Error('retained UUID exists on multiple registered hosts');
+      found = true;
+      const light = rows.filter(candidate => candidate.target === row.target && candidate.slot.includes('light'));
+      const candidates = light.length ? light : rows.filter(candidate => candidate.target === row.target);
+      const pool = light.length ? 'devbox-cn-light' : 'devbox-cn';
+      const slots = Object.fromEntries(candidates.map(candidate => [candidate.slot,{eligible:true,host:row.host,waitSec:0,rebuildSec:0,totalSec:0,hardReasons:[],missing:[],extraDiskGiB:0}]));
+      writeJSON(placementFile,{version:1,at:Date.now()/1000,slots});
+      const acquired = checked(await executeRes(['wait-pool',pool,'--by',by,'--project','orchestrator','--task','retire-artifacts','--for','retire exact artifact receipt',
+        '--pid',String(process.pid),'--timeout',String(Math.max(1,deadline-Date.now())/60000),'--placement-file',placementFile],{state,timeout:Math.max(1,deadline-Date.now())}),'retirement lease');
+      const slot = /^slot=(\S+)$/m.exec(acquired)?.[1], leased = candidates.find(candidate => candidate.slot === slot);
+      const hold = leased && readHold(leased);
+      if (!hold || hold.fields.by !== by || hold.fields.pid !== String(process.pid)) throw Error('retirement lease ownership changed');
+      console.log(checked(await ssh(leased,'retire-artifacts',{root,receipt:opts.receipt},{state,timeout:Math.max(1,deadline-Date.now())}),'artifact retirement').trim());
+      checked(await executeRes(['return',leased.slot,'--by',by],{state,cancellable:false,timeout:30000}),'retirement lease return');
+    }
+    if (retire && !found) throw Error('retained artifact receipt not found');
+    return 0;
+  } catch (error) { primaryError=error; throw error; }
+  finally {
+    clearInterval(watch); process.removeListener('SIGTERM',stop); process.removeListener('SIGINT',stop);
+    const failures=[];
+    for (const row of rows) try {
+      const hold=readHold(row);
+      if (hold?.fields.by === by && hold.fields.pid === String(process.pid)) checked(await executeRes(['return',row.slot,'--by',by],{state,cancellable:false,timeout:30000}),'retirement lease return');
+    } catch (error) { failures.push(error.message); }
+    try { await closeControlConnections(state); } catch (error) { failures.push(error.message); }
+    fs.rmSync(temp,{recursive:true,force:true});
+    if (failures.length) { if (primaryError) primaryError.message += '; '+failures.join('; '); else throw Error(failures.join('; ')); }
   }
 }
 
 async function main(args) {
+  if (args[0] === 'list-retained' || args[0] === 'retire-artifacts') return retainedArtifacts(args.slice(1),args[0] === 'retire-artifacts');
   if (args[0] === 'fetch-artifact') return fetchArtifact(args.slice(1));
   if (args[0] === 'input-hash') {
     if (args.length !== 2) throw Error('usage: devbox-run.mjs input-hash PATH');

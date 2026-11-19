@@ -8,13 +8,13 @@ import { fileURLToPath } from 'node:url';
 import { RES_TEST_BUDGET_MS } from '../res/test/run.mjs';
 import { redactLogFile } from '../lib/log-redaction.mjs';
 const base = path.dirname(fileURLToPath(import.meta.url)), root = path.dirname(path.dirname(base));
-const args = process.argv.slice(2), listFailing = args.includes('--list-failing');
+const args = process.argv.slice(2), listFailing = args.includes('--list-failing'), stopOnFailure = args.includes('--stop-on-failure');
 const filesAt = args.indexOf('--files'), selected = filesAt < 0 ? null : args[filesAt + 1]?.split(',');
 const reportAt = args.indexOf('--report'), report = reportAt < 0 ? null : args[reportAt + 1];
 if (filesAt >= 0 && (!selected?.length || selected.some(name => !name))) throw Error('--files needs comma-separated suite names');
 if (reportAt >= 0 && (!report || report.startsWith('--'))) throw Error('--report needs a new JSON file');
 if (report && fs.existsSync(report)) throw Error('--report refuses to overwrite an existing file');
-if (args.some((arg, index) => !['--list-failing', '--files', '--report'].includes(arg) && ![filesAt, reportAt].some(at => at >= 0 && index === at + 1))) throw Error('usage: run-all.mjs [--list-failing] [--files NAME,...] [--report FILE]');
+if (args.some((arg, index) => !['--list-failing', '--stop-on-failure', '--files', '--report'].includes(arg) && ![filesAt, reportAt].some(at => at >= 0 && index === at + 1))) throw Error('usage: run-all.mjs [--list-failing] [--stop-on-failure] [--files NAME,...] [--report FILE]');
 if (report) fs.mkdirSync(path.dirname(path.resolve(report)), { recursive: true });
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'project-orchestrator-tests-'));
 const home = path.join(tmp, 'fixture-home'); fs.mkdirSync(home, { recursive: true });
@@ -56,6 +56,7 @@ for (const suite of suites) {
   if (report) fs.writeFileSync(report, JSON.stringify({ platform: process.platform, node: process.version, results }, null, 2) + '\n', { mode: 0o600 });
   console.log(`${success ? 'PASS' : 'FAIL'} ${suite.name}: duration=${durationSec.toFixed(3)}s exit=${r.status ?? 'unknown'}${r.error ? ' ' + r.error.code : ''}`);
   if (!success && !listFailing) console.log(fs.readFileSync(log, 'utf8').slice(-6000));
+  if (!success && stopOnFailure) break;
 }
-console.log(`Full suite: ${suites.length - failed}/${suites.length} passed; fixture logs: ${tmp}`);
+console.log(`Full suite: ${results.length - failed}/${suites.length} passed; attempted=${results.length}; fixture logs: ${tmp}`);
 process.exitCode = failed ? 1 : 0;

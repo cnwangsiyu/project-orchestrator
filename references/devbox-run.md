@@ -906,6 +906,8 @@ node scripts/devbox-run.mjs fetch-artifact \
   --name build/app.apk --out /absolute/path/app.apk --timeout 15
 ```
 
+`--retain-hours HOURS` sets artifact retention to >0 and <=72 hours (default 24).
+Failed commands do not collect/retain artifacts unless `--retain-on-fail` is set.
 The runner copies selected regular files into the UUID receipt directory's
 `artifacts/` before releasing its slot. Copies are independent of the reusable
 workspace, so later checkout/builds cannot alter the retained bytes. This needs
@@ -923,9 +925,21 @@ gates or using exclusions to force placement.
 A subsequent devbox step can declare each retained file with `--input`, using
 its manifest hash and `path=CONTROL/artifacts/NAME`, and `rebuildable=no`. Input
 placement then selects the host that actually has those bytes. Fetching is not
-required for devbox-only consumers. Retained copies are not automatically
-deleted by fetching or workspace GC; the task owner must retire the exact UUID
-receipt after its consumers finish. Do not delete another task's receipts.
+required for devbox-only consumers. `gc` expires inactive retained copies,
+partial copies and staged archives at the receipt TTL, including legacy receipts
+with a 24-hour default. Retained bytes are included in slot disk reservations.
+Retirement removes only artifact payloads/metadata, never source worktrees or run
+logs, and refuses receipts with live processes. Names are normalized and manifest
+collection rejects private-state path components before copying.
+
+```sh
+node scripts/devbox-run.mjs list-retained --host HOST_IP
+node scripts/devbox-run.mjs retire-artifacts --receipt RUN_UUID --host HOST_IP
+```
+
+Explicit retirement takes a same-host light lease and returns it on every exit.
+Only retire your task's exact receipt after all consumers finish. Do not retire
+another task's artifacts. Fetching itself does not consume/delete a receipt.
 
 ### Control And Phase Overhead
 
