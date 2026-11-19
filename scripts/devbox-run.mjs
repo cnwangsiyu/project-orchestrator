@@ -407,11 +407,30 @@ if git(['-C',rel,'rev-parse','HEAD']).decode().strip()!=d['commit']: raise Value
   inspect: pythonHeader + `import subprocess
 root=pathlib.Path(d['root']); root.mkdir(parents=True,exist_ok=True)
 ctl=pathlib.Path(d['control']); ctl.mkdir(parents=True,exist_ok=True)
-disk=os.statvfs(root); repo=pathlib.Path(d['repository']); known=[]; present=False
-if repo.exists():
-    known=subprocess.check_output(['git','--git-dir='+str(repo),'for-each-ref','--format=%(objectname)'],text=True).splitlines()
-    present=subprocess.run(['git','--git-dir='+str(repo),'cat-file','-e',d['commit']+'^{commit}'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0
-print(json.dumps({'free':disk.f_bavail*disk.f_frsize,'known':known,'present':present}))
+disk=os.statvfs(root)
+def inspect(item):
+    repo=pathlib.Path(item['repository']); known=[]; present=False
+    if repo.exists():
+        present=subprocess.run(['git','--git-dir='+str(repo),'cat-file','-e',item['commit']+'^{commit}'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0
+        if not present: known=subprocess.check_output(['git','--git-dir='+str(repo),'for-each-ref','--format=%(objectname)'],text=True).splitlines()
+    return {'known':known,'present':present}
+result={'free':disk.f_bavail*disk.f_frsize,**inspect(d),'modules':[inspect(item) for item in d.get('modules',[])],'sameRefClean':False}
+ws=pathlib.Path(d.get('workspace','/'))
+def clean(tree,commit):
+    if not (tree/'.git').exists(): return False
+    head=subprocess.check_output(['git','-C',str(tree),'rev-parse','HEAD'],text=True).strip()
+    status=subprocess.check_output(['git','-C',str(tree),'status','--porcelain','-z','--untracked-files=all','--ignore-submodules=none'])
+    return head==commit and not status
+if d.get('reuseAllowed') and result['present'] and all(item['present'] for item in result['modules']):
+    result['sameRefClean']=clean(ws,d['commit']) and all(clean(ws/item['parent']/item['relative'],item['commit']) for item in d.get('modules',[]))
+    if result['sameRefClean']:
+        meta=ws/'.devbox-run.json'
+        old=json.loads(meta.read_text()) if meta.is_file() and not meta.is_symlink() else {}
+        result['sameRefClean']=old.get('repository')==d['repository'] and old.get('slot')==d['slot'] and not old.get('untracked')
+        if result['sameRefClean']:
+            meta.write_text(json.dumps({'slot':d['slot'],'repository':d['repository'],'lastUsed':time.time(),'untracked':[],'job':d['job'],'affinity':d.get('affinity')}))
+            for name in ['gradle','npm','pnpm','ccache','pip','toolchains']: (root/'shared'/name).mkdir(parents=True,exist_ok=True)
+print(json.dumps(result))
 `,
   bundle: pythonHeader + `import subprocess, fcntl, shutil
 repo=pathlib.Path(d['repository']); repo.parent.mkdir(parents=True,exist_ok=True)
@@ -571,6 +590,9 @@ sys.exit(subprocess.run(['git','apply','--index','--binary','--whitespace=nowarn
   // The SSH-owned supervisor is a Linux subreaper OUTSIDE the command group.
   // It continuously reaps adopted children and owns cancellation/start arbitration.
   run: pythonHeader + `import ctypes, subprocess, shlex, shutil
+if d.get('root'):
+    disk=os.statvfs(d['root'])
+    if disk.f_bavail*disk.f_frsize<53*1073741824: sys.exit(72)
 ctl=pathlib.Path(d['control']); cancelled=False
 # The streaming SSH process follows a detached, bounded supervisor. Only the
 # supervisor owns the command group; a lost stream cannot cancel its command.
@@ -1280,7 +1302,16 @@ async function refreshHostMetrics(rows, state, { force = false, timeout = 15000 
   }));
 }
 
-export async function hostRoot(row, state, { deadline } = {}) {
+export async function hostRoot(row, state, options = {}) {
+  const cached = state?.hostRoots?.get(row.host);
+  if (cached?.user === row.user && cached.until > Date.now()) return cached.root;
+  const operation = () => resolveHostRoot(row, state, options);
+  const root = await (state?.currentAttemptTiming?.measure('hostRoot', operation) || operation());
+  if (state) (state.hostRoots ||= new Map()).set(row.host, { root, user: row.user, until: Date.now() + 60000 });
+  return root;
+}
+
+async function resolveHostRoot(row, state, { deadline } = {}) {
   const cacheFile = path.join(cacheDir(), 'devbox-hosts.json');
   return withStateLock(path.join(cacheDir(), `devbox-probe-${row.host}`), async () => {
   let cache = {}; try { cache = JSON.parse(fs.readFileSync(cacheFile, 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw error; }
@@ -1689,7 +1720,7 @@ async function shard(opts) {
             if(!attempt.inputConfigWarned) emit(`[shard ${opts.shard}] invalid machine.conf reload; keeping last-good input settings\n`);
             attempt.inputConfigWarned=true;
           }
-          await refreshHostMetrics(possible, state, { timeout: Math.min(15000, remaining()) });
+          await phases.measure('metricsRefresh', () => refreshHostMetrics(possible, state, { timeout: Math.min(15000, remaining()) }));
           if (opts.pool === 'devbox-cn' && heavyStaleEnabled()) {
             for (const candidate of possible) {
               if (state.cancel || remaining() < 15000) break;
@@ -1701,7 +1732,7 @@ async function shard(opts) {
             }
           }
           if (opts.placementInputs.length) {
-            const plan=await inputPlan(opts,inputRows(),state);
+            const plan=await phases.measure('inputPlacement', () => inputPlan(opts,inputRows(),state));
             attempt.inputPlan=plan;
             if (!Object.values(plan.slots).some(value=>value.eligible)) {
               emit(`[shard ${opts.shard}] input placement=${JSON.stringify(plan)}\n`);
@@ -1800,11 +1831,13 @@ async function shard(opts) {
         const repository = `${root}/repos/${opts.project}/${storeName}`;
         attempt.repository = repository;
         data = { root, workspace, repository, slot: row.slot, job: `${opts.project}/${opts.task}`, affinity:opts.affinity, previousJob:previousSlotJob(row.slot,by), control: `${root}/runs/${randomUUID()}`, commit: opts.snapshot.commit, untracked: opts.snapshot.untracked };
+        data.modules = opts.snapshot.modules.map(mod => ({ repository: `${root}/repos/submodules/${mod.storeKey}`, commit: mod.commit, parent: mod.parent, relative: mod.relative }));
+        data.reuseAllowed = !opts.snapshot.extra && !(opts.snapshot.patchFile && fs.statSync(opts.snapshot.patchFile).size) && !opts.snapshot.untracked.length;
         const hold = readHold(row);
         if (!hold || hold.fields.by !== by || hold.fields.pid !== String(process.pid)) throw Error('slot ownership changed before remote preparation');
         fs.mkdirSync(path.join(sharedDir(), 'devbox-run-holds'), { recursive: true });
         writeJSON(path.join(sharedDir(), 'devbox-run-holds', row.slot + '.json'), { slot: row.slot, holder: hold.fields, workspace, control: data.control });
-        let inspection = JSON.parse(checked(await ssh(row, 'inspect', data, { state, timeout: Math.min(60000, remaining()) }), 'workspace inspection'));
+        let inspection = JSON.parse(checked(await phases.measure('inspect', () => ssh(row, 'inspect', data, { state, timeout: Math.min(60000, remaining()) })), 'workspace inspection'));
         if (inspection.free < 73 * GiB) {
           await collectGarbage({ rows: [...readRegistry(sharedDir(), 'devbox-cn'), ...readRegistry(sharedDir(), 'devbox-cn-light')], host: row.host, state, emit, skipSlot: row.slot });
           inspection = JSON.parse(checked(await ssh(row, 'inspect', data, { state }), 'disk recheck'));
@@ -1815,29 +1848,31 @@ async function shard(opts) {
         }
         attempt.warmWorkspace=opts.placementInputs.some(input=>input.warm) ? !attempt.missingInputs.some(name=>name.startsWith('warm.')) : inspection.present && Object.hasOwn(diskCosts,row.slot);
         prepared = true;
+        attempt.checkoutSkipped = Boolean(inspection.sameRefClean);
         for (let uploadTry = 0; ; uploadTry++) {
           try {
             if (uploadTry) inspection = JSON.parse(checked(await ssh(row, 'inspect', data, { state }), 'retry inspection'));
             const feed = async (source, target, info, counter) => {
               if (info.present) return;
-              const bundle = await makeBundle(source, info.known, state);
+              const bundle = await phases.measure('bundleCreation', () => makeBundle(source, info.known, state));
               attempt[counter] = (attempt[counter] || 0) + fs.statSync(bundle).size;
-              try { checked(await ssh(row, 'bundle', target, { inputFile: bundle, state, timeout: remaining() }), 'bundle upload'); }
+              try { checked(await phases.measure('bundleUpload', () => ssh(row, 'bundle', target, { inputFile: bundle, state, timeout: remaining() })), 'bundle upload'); }
               finally { fs.unlinkSync(bundle); }
             };
             await feed(opts.snapshot, data, inspection, 'bundleBytes');
-            const checkout=await ssh(row, 'checkout', data, { state, timeout: remaining() });
+            if (inspection.sameRefClean) break;
+            const checkout=await phases.measure('checkout', () => ssh(row, 'checkout', data, { state, timeout: remaining() }));
             checked(checkout,'worktree checkout');
             const hygiene=checkout.stdout.trim();
             if (hygiene) { attempt.slotHygiene=JSON.parse(hygiene); emit(`[shard ${opts.shard}] slot hygiene=${hygiene}\n`); }
-            if (opts.snapshot.patchFile && fs.statSync(opts.snapshot.patchFile).size) checked(await ssh(row, 'patch', data, { inputFile: opts.snapshot.patchFile, state, timeout: remaining() }), 'worktree patch');
-            if (opts.snapshot.extra) checked(await ssh(row, 'upload', data, { inputFile: opts.snapshot.extra, state, timeout: remaining() }), 'untracked upload');
+            if (opts.snapshot.patchFile && fs.statSync(opts.snapshot.patchFile).size) checked(await phases.measure('patch', () => ssh(row, 'patch', data, { inputFile: opts.snapshot.patchFile, state, timeout: remaining() })), 'worktree patch');
+            if (opts.snapshot.extra) checked(await phases.measure('overlay', () => ssh(row, 'upload', data, { inputFile: opts.snapshot.extra, state, timeout: remaining() })), 'untracked upload');
             for (const mod of opts.snapshot.modules) {
               const target = { ...data, repository: `${root}/repos/submodules/${mod.storeKey}`, commit: mod.commit,
                 relative: mod.relative, parent: mod.parent, name: mod.name };
-              const info = JSON.parse(checked(await ssh(row, 'inspect', target, { state }), 'submodule store inspection'));
+              const info = inspection.modules[opts.snapshot.modules.indexOf(mod)];
               await feed(mod, target, info, 'submoduleBundleBytes');
-              checked(await ssh(row, 'submodule', target, { state, timeout: remaining() }), 'offline submodule update');
+              checked(await phases.measure('submoduleCheckout', () => ssh(row, 'submodule', target, { state, timeout: remaining() })), 'offline submodule update');
             }
             break;
           } catch (error) {
@@ -1847,7 +1882,7 @@ async function shard(opts) {
           }
         }
         // Transfers can consume substantial space; check again before launching work.
-        const ready = JSON.parse(checked(await ssh(row, 'inspect', data, { state, timeout: Math.min(60000, remaining()) }), 'post-upload disk check'));
+        const ready = inspection.sameRefClean ? inspection : JSON.parse(checked(await phases.measure('postUploadInspect', () => ssh(row, 'inspect', { ...data, reuseAllowed: false }, { state, timeout: Math.min(60000, remaining()) })), 'post-upload disk check'));
         if (ready.free < 53 * GiB) {
           attempt.diskGuard = true;
           emit(`[shard ${opts.shard}] disk guard refused ${row.host} after upload: need 53 GiB free\n`);

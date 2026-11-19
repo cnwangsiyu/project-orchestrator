@@ -936,8 +936,37 @@ async function deadSlotScenarios() {
   console.log('PASS release-dead confirms old local holders and remote worktree cleanup; live work/owners retain slots');
 }
 
+async function overheadScenarios() {
+  const f = fixture();
+  const first = await run(f, [], 'mkdir -p build && printf cache > build/cache'); ok(first); returned(f);
+  const inspected = f.events().filter(event => event.op === 'inspect').length;
+  const second = await run(f, [], 'test -f build/cache'); ok(second); returned(f);
+  assert.equal(second.summary.shards[0].attempts[0].checkoutSkipped, true);
+  assert.equal(f.events().filter(event => event.op === 'checkout').length, 1);
+  assert.equal(f.events().filter(event => event.op === 'inspect').length - inspected, 1, 'warm clean source uses one batched inspection');
+  fs.writeFileSync(path.join(workspace(f), 'source.txt'), 'dirty');
+  fs.writeFileSync(path.join(workspace(f), 'leftover.txt'), 'untracked');
+  const dirty = await run(f, [], 'test ! -e leftover.txt && test -f build/cache'); ok(dirty); returned(f);
+  assert.equal(dirty.summary.shards[0].attempts[0].checkoutSkipped, false);
+  assert.ok(dirty.summary.shards[0].attempts[0].slotHygiene.patches.length);
+  const modules = fixture(); const pins = makeSubmoduleFixture(path.join(modules.dir, 'modules')); modules.repo = pins.repo;
+  ok(await run(modules, ['--submodules'], pins.command)); returned(modules);
+  const updates = modules.events().filter(event => event.op === 'submodule').length;
+  const before = modules.events().filter(event => event.op === 'inspect').length;
+  const repeated = await run(modules, ['--submodules'], pins.command); ok(repeated); returned(modules);
+  assert.equal(repeated.summary.shards[0].attempts[0].checkoutSkipped, true);
+  assert.equal(modules.events().filter(event => event.op === 'submodule').length, updates);
+  assert.equal(modules.events().filter(event => event.op === 'inspect').length - before, 1);
+  fs.writeFileSync(path.join(workspace(modules), 'engine/version'), 'dirty module');
+  const repaired = await run(modules, ['--submodules'], pins.command); ok(repaired); returned(modules);
+  assert.equal(repaired.summary.shards[0].attempts[0].checkoutSkipped, false);
+  console.log('PASS clean-ref shortcut, one batched inspection for recursive pins, dirty-tree repair and ignored-cache preservation');
+}
+
 async function scenarios() {
   const only = process.env.DEVBOX_TEST_CASE;
+  if (only === 'overhead') { await overheadScenarios(); return; }
+  if (!only) await overheadScenarios();
   const perf = { affinity:affinityScopeScenarios, 'dead-slot':deadSlotScenarios, inputs:inputScenarios,hygiene:hygieneScenarios,credentials: credentialScenarios, 'packed-module': packedModuleRecovery, receipt: receiptScenarios, 'res-progress': resProgressScenarios, cpu: cpuScenarios, auto: autoScenarios, units: unitScenarios, prewarm: prewarmScenarios, metrics: metricScenarios, placement: placementScenarios, 'ssh-drop': sshDropScenarios };
   const baseline = ['baseline-core', 'baseline-config', 'baseline-warm', 'baseline-placement', 'baseline-artifacts', 'baseline-cleanup', 'baseline-gc', 'baseline-ssh'];
   if (only && !['baseline', 'bundle', 'ownership', ...baseline, ...Object.keys(perf)].includes(only)) throw Error('unknown devbox fixture case');
