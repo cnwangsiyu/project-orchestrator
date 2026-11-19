@@ -1,0 +1,64 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { remoteScripts } from '../devbox-run.mjs';
+import { artifactName, readArtifactManifest } from '../lib/devbox-artifacts.mjs';
+import { controlOptions } from '../lib/devbox-ssh.mjs';
+
+const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'artifact-scenarios-'));
+const root = path.join(temp, 'devbox-run'), workspace = path.join(root, 'wt', 'fixture');
+const control = path.join(root, 'runs', randomUUID());
+fs.mkdirSync(workspace, { recursive: true }); fs.mkdirSync(control, { recursive: true });
+const bytes = randomBytes(1024 * 1024), digest = createHash('sha256').update(bytes).digest('hex');
+fs.writeFileSync(path.join(workspace, 'public.bin'), bytes);
+const data = { root, workspace, control, commit: 'a'.repeat(40), slot: 'devbox-cn-1', host: '192.0.2.1', patterns: ['public.bin'] };
+const invoke = (operation, value) => spawnSync('python3', ['-c', remoteScripts[operation], Buffer.from(JSON.stringify(value)).toString('base64')], { maxBuffer: 32 * 1024 * 1024 });
+try {
+  const all = invoke('artifacts', data);
+  assert.equal(all.status, 0, all.stderr.toString());
+  assert.match(all.stderr.toString(), new RegExp('DEVBOX_ARTIFACT_SHA256=' + createHash('sha256').update(all.stdout).digest('hex')));
+  const tar = path.join(temp, 'all.tar'); fs.writeFileSync(tar, all.stdout);
+  assert.deepEqual(execFileSync('tar', ['-xOf', tar, 'public.bin']), bytes);
+  const manifest = invoke('artifacts', { ...data, fetch: 'manifest' });
+  assert.equal(manifest.status, 0, manifest.stderr.toString());
+  const receipt = JSON.parse(manifest.stdout.toString());
+  assert.deepEqual(receipt.artifacts, [{ name: 'public.bin', size: bytes.length, sha256: digest }]);
+  fs.writeFileSync(path.join(workspace, 'public.bin'), 'workspace reused');
+  const fetched = invoke('fetch-artifact', { ...receipt, root, artifact: receipt.artifacts[0] });
+  assert.equal(fetched.status, 0, fetched.stderr.toString()); assert.deepEqual(fetched.stdout, bytes);
+  fs.writeFileSync(path.join(control, 'artifacts', 'public.bin'), Buffer.alloc(bytes.length));
+  assert.notEqual(invoke('fetch-artifact', { ...receipt, root, artifact: receipt.artifacts[0] }).status, 0);
+  assert.notEqual(invoke('fetch-artifact', { ...receipt, root, control: path.join(temp, 'elsewhere'), artifact: receipt.artifacts[0] }).status, 0);
+  fs.symlinkSync(path.join(temp, 'outside'), path.join(workspace, 'link'));
+  assert.notEqual(invoke('artifacts', { ...data, patterns: ['link'] }).status, 0);
+  const file = path.join(temp, 'manifest.json'); fs.writeFileSync(file, JSON.stringify(receipt));
+  const rows = [{ slot: data.slot, host: data.host, target: 'alice@192.0.2.1' }];
+  assert.equal(readArtifactManifest(file, 'public.bin', rows).artifact.sha256, digest);
+  assert.throws(() => readArtifactManifest(file, '../public.bin', rows));
+  assert.throws(() => readArtifactManifest(file, 'missing.bin', rows));
+  assert.throws(() => readArtifactManifest(file, 'public.bin', []));
+  for (const invalid of ['/absolute', '../up', 'a/../b', 'a//b', 'a\\b', 'a\nb', '.', '']) assert.equal(artifactName(invalid), false);
+  const state = {};
+  assert.ok(controlOptions('inspect', state).includes('ControlMaster=auto'));
+  assert.ok(Buffer.byteLength(state.sshControlDir + '/control-' + 'a'.repeat(40)) < 104);
+  assert.ok(controlOptions('run', state).includes('ControlPath=none'));
+  assert.notDeepEqual(controlOptions('artifacts', state), controlOptions('inspect', state));
+  fs.rmSync(state.sshControlDir, { recursive: true });
+  const large = path.join(workspace, 'large.bin'), fd = fs.openSync(large, 'w');
+  try { for (let i = 0; i < 64; i++) fs.writeSync(fd, Buffer.alloc(1048576)); } finally { fs.closeSync(fd); }
+  const staged = invoke('artifacts', { ...data, streams: 4, patterns: ['large.bin'] });
+  assert.equal(staged.status, 0, staged.stderr.toString());
+  const plan = JSON.parse(staged.stdout), chunks = [], length = Math.ceil(plan.size / 4);
+  for (let i = 0; i < 4; i++) {
+    const offset = i * length, range = invoke('artifact-range', { ...data, sha256: plan.sha256, offset, length: Math.min(length, plan.size - offset) });
+    assert.equal(range.status, 0, range.stderr.toString()); chunks.push(range.stdout);
+  }
+  assert.equal(createHash('sha256').update(Buffer.concat(chunks)).digest('hex'), plan.sha256);
+  assert.notEqual(invoke('artifact-range', { ...data, sha256: plan.sha256, offset: -1, length: 1 }).status, 0);
+  assert.equal(invoke('artifact-release', { ...data, sha256: plan.sha256 }).status, 0);
+  assert.equal(fs.existsSync(path.join(control, 'artifact-archive.tar')), false);
+  console.log('PASS archive digest, immutable manifest retention, named readback, corrupted bytes, receipt/path checks and short isolated SSH sockets');
+} finally { fs.rmSync(temp, { recursive: true, force: true }); }

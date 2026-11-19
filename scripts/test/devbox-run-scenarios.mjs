@@ -99,10 +99,13 @@ process.exit(cancelled?143:2);
 const fakeSsh = shimHeader + String.raw`
 (async()=>{
 const args=process.argv.slice(2), command=args.at(-1),target=args.at(-2),host=target.split('@')[1];
+if(args.includes('-O'))return;
 const op=command.match(/^# devbox-run:([\w-]+)/)?.[1];
 if(!op)throw Error('unmarked SSH');
 if(!args.includes('BatchMode=yes')||!args.includes('ServerAliveInterval=15')||!args.includes('ServerAliveCountMax=4'))throw Error('missing SSH guard');
-if(!args.includes('ControlMaster=no')||!args.includes('ControlPath=none'))throw Error('SSH multiplexing must be disabled');
+if(['run','cleanup','reconnect','result','artifact-range'].includes(op)) {
+ if(!args.includes('ControlMaster=no')||!args.includes('ControlPath=none'))throw Error('supervisor/recovery SSH must remain independent');
+} else if(!args.includes('ControlMaster=auto')||!args.includes('ControlPersist=60'))throw Error('control SSH must reuse task connection');
 let d={};if(op!=='upload')d=JSON.parse(Buffer.from(command.match(/'([A-Za-z0-9+/=]+)'$/)[1],'base64').toString());
 event(op,{host,target,slot:d.slot,workspace:d.workspace,control:d.control,env:op==='run'?d.env:undefined,nice:op==='run'?d.command.startsWith('nice -n 10 bash -c'):undefined,cpus:d.cpus});
 if(c.authFailures){
@@ -1109,6 +1112,27 @@ async function scenarios() {
   assert.ok(measured.seconds.artifactCollection > 0, 'remote artifact collection receipt');
   assert.ok(measured.bytesIn > 0 && measured.bytesOut >= fs.statSync(a.summary.shards[0].attempts[0].artifact).size);
   assert.match(a.stdout, /attempt phases .*artifactCollection=.*bytesIn=\d+ bytesOut=\d+/);
+  const large = fixture();
+  const ranged = await run(large, ['--artifact', 'build/large.bin'], 'mkdir -p build && dd if=/dev/zero of=build/large.bin bs=1048576 count=64 2>/dev/null'); ok(ranged); returned(large);
+  const largeAttempt = ranged.summary.shards[0].attempts[0];
+  assert.equal(largeAttempt.artifactTransport.streams, 4);
+  assert.ok(fs.statSync(largeAttempt.artifact).size >= 64 * 1048576);
+  assert.equal(large.events().filter(event => event.op === 'artifact-range').length, 4);
+  assert.equal(large.events().filter(event => event.op === 'artifact-release').length, 1);
+  const retained = fixture();
+  const saved = await run(retained, ['--artifact', 'build/result.txt', '--artifact-fetch', 'manifest'], 'mkdir -p build && printf retained > build/result.txt'); ok(saved); returned(retained);
+  const savedAttempt = saved.summary.shards[0].attempts[0];
+  assert.equal(savedAttempt.artifact, undefined);
+  const manifest = JSON.parse(fs.readFileSync(savedAttempt.artifactManifest));
+  assert.equal(manifest.artifacts[0].name, 'build/result.txt');
+  assert.equal(manifest.artifacts[0].size, 8);
+  ok(await run(retained, [], 'printf reused > build/result.txt')); returned(retained);
+  const pulled = path.join(retained.dir, 'pulled.txt');
+  const fetched = spawnSync(process.execPath, [script, 'fetch-artifact', '--manifest', savedAttempt.artifactManifest, '--name', 'build/result.txt', '--out', pulled], { env: retained.env, encoding: 'utf8' });
+  assert.equal(fetched.status, 0, fetched.stdout + fetched.stderr);
+  assert.equal(fs.readFileSync(pulled, 'utf8'), 'retained'); returned(retained);
+  const refused = spawnSync(process.execPath, [script, 'fetch-artifact', '--manifest', savedAttempt.artifactManifest, '--name', 'build/result.txt', '--out', pulled], { env: retained.env, encoding: 'utf8' });
+  assert.notEqual(refused.status, 0); assert.equal(fs.readFileSync(pulled, 'utf8'), 'retained');
 
   let failedArtifact = fixture({ badArtifact: true }); assert.equal((await run(failedArtifact, ['--artifact', '*.txt'])).code, 66); returned(failedArtifact);
   const left = await run(failedArtifact = fixture({ badArtifact: true }), ['--artifact', '*.txt', '--fetch-timeout', '30']);

@@ -13,6 +13,8 @@ import { redactLogFile } from './lib/log-redaction.mjs';
 import { maskLogText } from './lib/nightly-audit.mjs';
 import { manifest, duration, inputKey, indexFile, readIndex, inputSettings, placement, warmCost, warmInput, median, observedCost, fingerprint, inputPython, seedPython } from './lib/devbox-inputs.mjs';
 import { transferFindings } from './lib/devbox-transfer-check.mjs';
+import { fileDigest, artifactName, readArtifactManifest, retainedArtifactPython, artifactRangePython } from './lib/devbox-artifacts.mjs';
+import { controlOptions } from './lib/devbox-ssh.mjs';
 
 const script = fileURLToPath(import.meta.url);
 const GiB = 1024 ** 3;
@@ -32,10 +34,10 @@ const sharedDir = () => process.env.RES_DIR || process.env.RULES_SHARED || path.
 const resCommand = () => process.env.RES_COMMAND || (fs.existsSync(path.join(sharedDir(), 'res')) ? path.join(sharedDir(), 'res') : 'res');
 
 export function parseArgs(args) {
-  const opts = { ref: 'HEAD', pool: 'devbox-cn', shards: 1, timeout: 120, fetchTimeout: 15, artifacts: [], env: {}, days: 7, need: [], excludeSlot: [], excludeHost: [], inputs: [] };
+  const opts = { ref: 'HEAD', pool: 'devbox-cn', shards: 1, timeout: 120, fetchTimeout: 15, artifactFetch: 'all', artifacts: [], env: {}, days: 7, need: [], excludeSlot: [], excludeHost: [], inputs: [] };
   if (args[0] === 'gc') { opts.gc = true; args = args.slice(1); }
   if (args[0] === 'prewarm') { opts.prewarm = true; opts.ref = 'main'; opts.task = 'prewarm'; args = args.slice(1); }
-  const names = new Map(['project', 'task', 'repo', 'ref', 'pool', 'shards', 'out', 'timeout', 'prefer-host', 'watch-pid', 'affinity', 'host', 'days', 'units-file', 'command', 'fetch-timeout', 'exclude-reason', 'prefer-slot', 'warm-cost', 'inputs'].map(n => [`--${n}`, n.replace(/-([a-z])/g, (_, c) => c.toUpperCase())]));
+  const names = new Map(['project', 'task', 'repo', 'ref', 'pool', 'shards', 'out', 'timeout', 'prefer-host', 'watch-pid', 'affinity', 'host', 'days', 'units-file', 'command', 'fetch-timeout', 'artifact-fetch', 'exclude-reason', 'prefer-slot', 'warm-cost', 'inputs'].map(n => [`--${n}`, n.replace(/-([a-z])/g, (_, c) => c.toUpperCase())]));
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === '--') { if (opts.command) throw Error('provide only one command'); opts.command = args.slice(i + 1).join(' '); break; }
@@ -72,6 +74,7 @@ export function parseArgs(args) {
   opts.days = Number(opts.days);
   if (!Number.isFinite(opts.days) || opts.days < 1) throw Error('--days must be at least 1');
   if (opts.gc) return opts;
+  if (!['manifest', 'all'].includes(opts.artifactFetch)) throw Error('--artifact-fetch must be manifest or all');
   opts.inputs = manifest(opts.inputs);
   if (opts.warmCost !== undefined) opts.warmCost = duration(opts.warmCost);
   if (opts.prewarm && opts.inputs.length && !opts.command) opts.command='true';
@@ -269,12 +272,13 @@ function execute(file, args, { input, inputFile, outputFile, onOutput, timeout =
     let killTimer;
     const stop = () => { signalChild('SIGTERM'); killTimer ??= setTimeout(() => signalChild('SIGKILL'), 30000); };
     sink?.on('error', error => { spawnError = `output file ${error.code || 'write failure'}`; stop(); });
+    sink?.on('drain', () => child.stdout.resume());
     const timer = setTimeout(() => { timedOut = true; stop(); }, timeout);
     let source;
     child.stdin.on('error', () => {});
     child.stdout.on('data', chunk => {
       stdoutBytes += chunk.length;
-      if (sink) sink.write(chunk);
+      if (sink) { if (!sink.write(chunk)) child.stdout.pause(); }
       else if (rawCapture) {
         stdout += rawDecoder.write(chunk);
         if (onOutput) out.push(chunk);
@@ -302,7 +306,8 @@ function execute(file, args, { input, inputFile, outputFile, onOutput, timeout =
 
 function executeRes(args, options) {
   // Local res diagnostics still get value masking, but keep their surrounding text.
-  return execute(resCommand(), args, { ...options, strictOutput: false });
+  const operation = () => execute(resCommand(), args, { ...options, strictOutput: false });
+  return options?.state?.currentAttemptTiming?.measure('res.' + args[0], operation) || operation();
 }
 
 function checked(result, label) {
@@ -739,7 +744,10 @@ while time.monotonic()<limit:
     time.sleep(.1)
 sys.exit(70)
 `,
-  artifacts: pythonHeader + `import glob, tarfile
+  'fetch-artifact': pythonHeader + retainedArtifactPython,
+  'artifact-range': pythonHeader + artifactRangePython,
+  'artifact-release': pythonHeader + artifactRangePython.slice(0, artifactRangePython.indexOf('offset=d')) + `(ctl/'artifact-archive.tar').unlink()\n(ctl/'artifact-archive.json').unlink()\n`,
+  artifacts: pythonHeader + `import glob, tarfile, hashlib, stat
 collection_started=time.monotonic(); transfer_seconds=0
 os.chdir(d['workspace']); names=set()
 for pattern in d['patterns']:
@@ -752,20 +760,73 @@ for pattern in d['patterns']:
 for name in names:
     p=pathlib.Path(name)
     if p.is_symlink() or not p.resolve().is_relative_to(pathlib.Path.cwd()): raise RuntimeError('artifact leaves workspace')
+    if not p.is_file(): raise RuntimeError('artifact special file refused')
     if any(x in ('.git','.ssh','.aws','.kube','.npmrc','.netrc') or x=='.env' or x.startswith('.env.') for x in p.parts) or p.suffix.lower() in ('.pem','.p12','.pfx','.key','.keystore'): raise RuntimeError('credential-related artifact refused')
 class TimedOutput:
+    def __init__(self,destination): self.digest=hashlib.sha256(); self.destination=destination
     def write(self,payload):
         global transfer_seconds
+        self.digest.update(payload)
         started=time.monotonic()
-        try: return sys.stdout.buffer.write(payload)
+        try:
+            return self.destination.write(payload)
         finally: transfer_seconds+=time.monotonic()-started
-with tarfile.open(fileobj=TimedOutput(),mode='w|') as tar:
+if d.get('fetch')=='manifest':
+    ctl=pathlib.Path(d['control']); root=pathlib.Path(d['root'])
+    if ctl.parent!=root/'runs' or ctl.is_symlink() or not ctl.resolve().is_relative_to(root.resolve()/'runs'):
+        raise RuntimeError('artifact receipt outside runner root')
+    total=sum(pathlib.Path(name).stat().st_size for name in names)
+    disk=os.statvfs(root)
+    if disk.f_bavail*disk.f_frsize-total<53*1073741824: raise RuntimeError('artifact retention disk guard')
+    retained=ctl/'artifacts'; retained.mkdir(mode=0o700)
+    records=[]
+    for name in sorted(names):
+        parts=pathlib.PurePosixPath(name).parts
+        if not parts or name.startswith('/') or any(part in ('.','..') for part in parts): raise RuntimeError('invalid artifact name')
+        target=retained/name; target.parent.mkdir(parents=True,exist_ok=True)
+        fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW)
+        with os.fdopen(fd,'rb') as source, target.open('xb') as dest:
+            if not stat.S_ISREG(os.fstat(source.fileno()).st_mode): raise RuntimeError('artifact special file refused')
+            os.chmod(target,0o600); h=hashlib.sha256(); size=0
+            while True:
+                chunk=source.read(1048576)
+                if not chunk: break
+                dest.write(chunk); h.update(chunk); size+=len(chunk)
+        records.append({'name':name,'size':size,'sha256':h.hexdigest()})
+    receipt={'version':1,'run':ctl.name,'commit':d['commit'],'control':str(ctl),'slot':d['slot'],'host':d['host'],'artifacts':records}
+    (ctl/'artifact-manifest.json').write_text(json.dumps(receipt))
+    print(json.dumps(receipt))
+    print('DEVBOX_ARTIFACT_COLLECTION='+json.dumps({'seconds':time.monotonic()-collection_started}),file=sys.stderr,flush=True)
+    sys.exit(0)
+parallel=d.get('streams',1)>1 and sum(pathlib.Path(name).stat().st_size for name in names)>=64*1048576
+if parallel:
+    ctl=pathlib.Path(d['control']); root=pathlib.Path(d['root'])
+    if ctl.parent!=root/'runs' or ctl.is_symlink() or not ctl.resolve().is_relative_to(root.resolve()/'runs'): raise RuntimeError('archive receipt outside runner root')
+    disk=os.statvfs(root)
+    if disk.f_bavail*disk.f_frsize-sum(pathlib.Path(name).stat().st_size for name in names)-10485760<53*1073741824: raise RuntimeError('archive staging disk guard')
+    destination=(ctl/'artifact-archive.tar').open('xb'); os.chmod(ctl/'artifact-archive.tar',0o600)
+else: destination=sys.stdout.buffer
+output=TimedOutput(destination)
+with tarfile.open(fileobj=output,mode='w|',bufsize=1048576) as tar:
     for name in sorted(names): tar.add(name,arcname=name,recursive=False)
-print('DEVBOX_ARTIFACT_COLLECTION='+json.dumps({'seconds':max(0,time.monotonic()-collection_started-transfer_seconds)}),file=sys.stderr,flush=True)
+destination.flush()
+if parallel:
+    destination.close()
+    receipt={'run':ctl.name,'commit':d['commit'],'slot':d['slot'],'size':(ctl/'artifact-archive.tar').stat().st_size,'sha256':output.digest.hexdigest()}
+    (ctl/'artifact-archive.json').write_text(json.dumps(receipt))
+    print(json.dumps(receipt))
+    print('DEVBOX_ARTIFACT_PLAN='+json.dumps(receipt),file=sys.stderr,flush=True)
+print('DEVBOX_ARTIFACT_SHA256='+output.digest.hexdigest(),file=sys.stderr,flush=True)
+print('DEVBOX_ARTIFACT_COLLECTION='+json.dumps({'seconds':max(0,time.monotonic()-collection_started-(0 if parallel else transfer_seconds))}),file=sys.stderr,flush=True)
 `,
 };
 
 async function ssh(row, operation, data, opts = {}) {
+  const call = () => sshCall(row, operation, data, opts);
+  return opts.state?.currentAttemptTiming?.measure('ssh.' + operation, call) || call();
+}
+
+async function sshCall(row, operation, data, opts = {}) {
   if (opts.state?.sshStartDelay && !opts.state.sshStarted) {
     opts.state.sshStarted = true;
     await pause(opts.state.sshStartDelay);
@@ -777,10 +838,11 @@ async function ssh(row, operation, data, opts = {}) {
     let started = false;
     const marker = `DEVBOX_STARTED_${randomUUID()}`;
     const command = base.replace('\n', `\nprintf '%s\\n' ${quote(marker)} >&2\n`);
-    const result = await execute('ssh', ['-o', 'BatchMode=yes', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=4', '-o', 'ConnectTimeout=15', '-o', 'ForwardAgent=no', '-o', 'GSSAPIDelegateCredentials=no', '-o', 'ControlMaster=no', '-o', 'ControlPath=none', '-o', 'ControlPersist=no', row.target, command], {
+    const result = await execute('ssh', ['-o', 'BatchMode=yes', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=4', '-o', 'ConnectTimeout=15', '-o', 'ForwardAgent=no', '-o', 'GSSAPIDelegateCredentials=no', ...controlOptions(operation, opts.state), ...(['artifacts', 'fetch-artifact', 'artifact-range'].includes(operation) ? ['-o', 'Compression=no', '-c', 'aes128-gcm@openssh.com'] : []), row.target, command], {
       ...opts, interceptStderr: line => { if (line === marker) { started = true; return true; } return false; },
     });
     opts.state?.currentAttemptTiming?.addBytes(result.stdinBytes || 0, result.stdoutBytes || 0);
+    if (opts.state?.sshControlDir) (opts.state.sshTargets ||= new Map()).set(row.target, row);
     const transient = result.code === 255 && !started && /Permission denied \(gssapi-with-mic\)|Connection closed\b/i.test(result.stderr);
     if (opts.noRetry || operation === 'metrics' || !transient || (opts.state?.cancel && opts.cancellable !== false)) return { ...result, sshStarted: started };
     result.stdoutSink?.end();
@@ -800,6 +862,43 @@ async function reconnectRun(row, data, state, requireAccess = false) {
     }
   }
   return 'unknown';
+}
+
+async function closeControlConnections(state) {
+  if (!state.sshControlDir) return;
+  for (const target of state.sshTargets?.keys() || []) for (const socket of state.sshControlPaths || []) {
+    await execute('ssh', ['-o', 'BatchMode=yes', '-o', 'ControlPath=' + socket, '-O', 'exit', target],
+      { state, cancellable: false, timeout: 10000 });
+  }
+  fs.rmSync(state.sshControlDir, { recursive: true, force: true });
+  delete state.sshControlDir; state.sshTargets?.clear(); state.sshControlPaths?.clear();
+}
+
+async function fetchArchiveRanges(row, data, plan, out, streams, state, deadline) {
+  if (!Number.isSafeInteger(plan.size) || plan.size <= 0 || !/^[a-f0-9]{64}$/.test(plan.sha256)
+      || plan.run !== path.posix.basename(data.control) || plan.commit !== data.commit || plan.slot !== row.slot) throw Error('invalid archive plan');
+  const parts = [], length = Math.ceil(plan.size / streams);
+  try {
+    const results = await Promise.allSettled(Array.from({ length: streams }, async (_, i) => {
+      const offset = i * length, bytes = Math.min(length, plan.size - offset);
+      const file = out + '.' + randomUUID() + '.part'; parts[i] = file;
+      checked(await ssh(row, 'artifact-range', { ...data, sha256: plan.sha256, offset, length: bytes },
+        { state, outputFile: file, cancellable: false, timeout: Math.max(1, deadline - Date.now()) }), 'archive range readback');
+      if (fs.statSync(file).size !== bytes) throw Error('archive range length mismatch');
+    }));
+    const failure = results.find(result => result.status === 'rejected');
+    if (failure) throw failure.reason;
+    const fd = fs.openSync(out, 'w', 0o600);
+    try {
+      for (const part of parts) for await (const chunk of fs.createReadStream(part)) {
+        let written = 0;
+        while (written < chunk.length) written += fs.writeSync(fd, chunk, written, chunk.length - written);
+      }
+    } finally { fs.closeSync(fd); }
+    if (await fileDigest(out) !== plan.sha256) throw Error('assembled archive SHA-256 mismatch');
+    checked(await ssh(row, 'artifact-release', { ...data, sha256: plan.sha256 },
+      { state, cancellable: false, timeout: Math.max(1, deadline - Date.now()) }), 'archive staging cleanup');
+  } finally { for (const part of parts) if (fs.existsSync(part)) fs.unlinkSync(part); }
 }
 
 async function recoverRunResult(row, data, state, offset, emit, privateBlockOpen = false, stdoutSink) {
@@ -1744,6 +1843,7 @@ async function shard(opts) {
           } catch (error) {
             if (state.cancel || uploadTry || !/broken pipe|message authentication code incorrect|corrupted mac/i.test(error.message)) throw error;
             emit(`[shard ${opts.shard}] retrying interrupted upload on a fresh connection\n`);
+            await closeControlConnections(state);
           }
         }
         // Transfers can consume substantial space; check again before launching work.
@@ -1860,16 +1960,36 @@ async function shard(opts) {
           }
           if (clean && opts.artifacts.length) {
             phases.phase('transferOut');
-            const archive = path.join(opts.out, `shard-${opts.shard}-attempt-${attempts.length}.tar`);
-            const fetched = await ssh(row, 'artifacts', { ...data, patterns: opts.artifacts }, { outputFile: archive, cancellable: false, state, timeout: opts.fetchTimeout * 60000 });
+            const manifestOnly = opts.artifactFetch === 'manifest';
+            const streams = Math.min(4, Math.max(1, Math.floor(8 / opts.shards)));
+            const fetchDeadline = Date.now() + opts.fetchTimeout * 60000;
+            const archive = path.join(opts.out, `shard-${opts.shard}-attempt-${attempts.length}.${manifestOnly ? 'manifest.json' : 'tar'}`);
+            const fetched = await ssh(row, 'artifacts', { ...data, host: row.host, fetch: opts.artifactFetch, streams, patterns: opts.artifacts }, { outputFile: archive, cancellable: false, state, timeout: opts.fetchTimeout * 60000 });
+            const planRecord = /DEVBOX_ARTIFACT_PLAN=(\{[^\n]*\})/.exec(fetched.stderr);
+            if (!fetched.code && planRecord && !manifestOnly) {
+              try {
+                const plan = JSON.parse(planRecord[1]);
+                await fetchArchiveRanges(row, data, plan, archive, streams, state, fetchDeadline);
+                attempt.artifactTransport = { method: 'parallel-ssh', streams, bytes: plan.size };
+              } catch (error) { fetched.code = error.code || 74; attempt.artifactIntegrityError = error.message; }
+            }
             const collection = /DEVBOX_ARTIFACT_COLLECTION=(\{[^\n]*\})/.exec(fetched.stderr);
             if (collection) { try { phases.artifact(JSON.parse(collection[1]).seconds); } catch {} }
+            if (!fetched.code && !manifestOnly) {
+              const expected = /DEVBOX_ARTIFACT_SHA256=([a-f0-9]{64})/.exec(fetched.stderr)?.[1];
+              if (!expected || await fileDigest(archive) !== expected) { fetched.code = 74; attempt.artifactIntegrityError = 'archive SHA-256 mismatch or missing remote digest'; }
+              else attempt.artifactSha256 = expected;
+            }
             if (fetched.code) {
               attempt.artifactExit = fetched.code; attempt.exit ||= fetched.code;
               attempt.artifactsLeft = { slot: row.slot, host: row.host, workspace: data.workspace, patterns: opts.artifacts };
               emit(`[shard ${opts.shard}] artifact fetch failed (${fetched.code}${fetched.code === 124 ? `, timed out after ${opts.fetchTimeout} min; raise --fetch-timeout` : ''}); command succeeded and artifacts remain on ${row.slot} (${row.host}) under ${data.workspace} matching ${opts.artifacts.join(' ')} until the slot is reused\n`);
             }
-            else attempt.artifact = archive;
+            else if (manifestOnly) {
+              attempt.artifactManifest = archive;
+              attempt.artifactsRetained = { host: row.host, slot: row.slot, control: data.control };
+              emit(`[shard ${opts.shard}] artifact manifest=${archive}; retained outside reusable workspace\n`);
+            } else attempt.artifact = archive;
           }
         }
         if (attempt.slot && clean) {
@@ -1887,6 +2007,8 @@ async function shard(opts) {
             } catch (error) { if (error.code !== 'ENOENT') { attempt.exit ||= 70; attempt.returnError = error.message; } }
           }
         }
+        phases.phase('cleanup');
+        await phases.measure('controlClose', () => closeControlConnections(state));
         attempt.durationSec = (Date.now() - attemptStart) / 1000;
         phases.finish(); state.currentAttemptTiming = null;
         emit(`[shard ${opts.shard}] attempt phases ${timingLine(attempt.phaseTimings)}\n`);
@@ -1913,6 +2035,7 @@ async function shard(opts) {
       ...(opts.units ? { units: opts.units } : {}), ...(softExclusionsDropped ? { softExclusionsDropped } : {}), durationSec: (Date.now() - started) / 1000, log, attempts };
   } finally {
     clearTimeout(timer); clearInterval(parentWatch); fs.closeSync(fd);
+    await closeControlConnections(state);
     try {
       const result = redactLogFile(log, { force: true });
       if (!process.stdout.destroyed) process.stdout.write(`[shard ${opts.shard}] log-redaction files=1 masked=${result.masked}\n`);
@@ -1965,7 +2088,57 @@ async function stopRetainedRuns(out, runId) {
   return exit;
 }
 
+export async function fetchArtifact(args) {
+  if (args.length === 1 && ['--help', '-h'].includes(args[0])) {
+    console.log('fetch-artifact --manifest FILE --name WORKSPACE_RELATIVE_NAME --out FILE [--timeout MIN]'); return 0;
+  }
+  const opts = { timeout: 15 }, fields = new Set(['--manifest', '--name', '--out', '--timeout']);
+  const seen = new Set();
+  for (let i = 0; i < args.length; i += 2) {
+    if (!fields.has(args[i]) || seen.has(args[i]) || args[i + 1] === undefined) throw Error('usage: fetch-artifact --manifest FILE --name NAME --out FILE [--timeout MIN]');
+    seen.add(args[i]); opts[args[i].slice(2)] = args[i + 1];
+  }
+  opts.timeout = Number(opts.timeout);
+  if (!opts.manifest || !opts.out || !artifactName(opts.name) || sensitiveFile.test(opts.name)
+      || !Number.isFinite(opts.timeout) || opts.timeout <= 0 || opts.timeout > 120) throw Error('invalid fetch-artifact arguments');
+  const rows = [...readRegistry(sharedDir(), 'devbox-cn'), ...readRegistry(sharedDir(), 'devbox-cn-light')];
+  const { receipt, artifact, row } = readArtifactManifest(opts.manifest, opts.name, rows);
+  const out = path.resolve(opts.out);
+  if (fs.existsSync(out)) throw Error('--out already exists');
+  fs.mkdirSync(path.dirname(out), { recursive: true });
+  const partial = out + '.' + randomUUID() + '.partial';
+  const by = `artifact-fetch-${process.pid}-${randomUUID()}`;
+  const state = cancellationState();
+  const stop = () => state.stop(143);
+  process.once('SIGTERM', stop); process.once('SIGINT', stop);
+  const parent = process.ppid;
+  const watch = setInterval(() => { try { process.kill(parent, 0); } catch { state.stop(143); } }, 1000);
+  const deadline = Date.now() + opts.timeout * 60000;
+  try {
+    checked(await executeRes(['wait', row.slot, '--by', by, '--project', 'orchestrator', '--task', 'fetch-artifact', '--for', 'retained artifact ' + opts.name,
+      '--pid', String(process.pid), '--timeout', String(opts.timeout)], { state, timeout: Math.max(1, deadline - Date.now()) }), 'artifact lease');
+    const hold = readHold(row);
+    if (hold?.fields.by !== by || hold.fields.pid !== String(process.pid)) throw Error('artifact lease ownership changed');
+    const root = await hostRoot(row, state, { deadline });
+    if (receipt.control !== `${root}/runs/${receipt.run}`) throw Error('artifact manifest root differs from registered host root');
+    checked(await ssh(row, 'fetch-artifact', { ...receipt, root, artifact },
+      { state, outputFile: partial, timeout: Math.max(1, deadline - Date.now()) }), 'artifact readback');
+    if (fs.statSync(partial).size !== artifact.size || await fileDigest(partial) !== artifact.sha256) throw Error('artifact size/SHA-256 mismatch');
+    fs.linkSync(partial, out); fs.unlinkSync(partial);
+    console.log(`artifact=${out} bytes=${artifact.size} sha256=${artifact.sha256}`);
+    return 0;
+  } finally {
+    clearInterval(watch); process.removeListener('SIGTERM', stop); process.removeListener('SIGINT', stop);
+    if (fs.existsSync(partial)) fs.unlinkSync(partial);
+    await closeControlConnections(state);
+    const hold = readHold(row);
+    if (hold?.fields.by === by && hold.fields.pid === String(process.pid))
+      checked(await executeRes(['return', row.slot, '--by', by], { state, cancellable: false, timeout: 30000 }), 'artifact lease return');
+  }
+}
+
 async function main(args) {
+  if (args[0] === 'fetch-artifact') return fetchArtifact(args.slice(1));
   if (args[0] === 'input-hash') {
     if (args.length !== 2) throw Error('usage: devbox-run.mjs input-hash PATH');
     const file = path.resolve(args[1]);
@@ -1992,6 +2165,7 @@ async function main(args) {
   }
   const opts = parseArgs(args);
   if (opts.help) {
+    console.log('Artifacts: --artifact-fetch all|manifest (default all); fetch-artifact --manifest FILE --name NAME --out FILE [--timeout MIN]');
     console.log('Usage: devbox-run.mjs [--project P] --task T --repo PATH [--ref COMMIT|HEAD|worktree] [--pool devbox-cn|devbox-cn-light] [--shards N|auto] [--units-file PATH] [--artifact GLOB]... [--fetch-timeout MIN] [--out DIR] [--timeout MIN] [--env K=V]... [--rerun-on-fail] [--allow-flaky] [--affinity KEY] [--prefer-host IP] [--prefer-slot ID] [--need CAP]... [--exclude-slot IDS] [--exclude-host IPS] [--exclude-reason TEXT] [--submodules] [--watch-pid PID] [--input MANIFEST]... [--inputs JSON] [--warm-cost DURATION] -- COMMAND\n       devbox-run.mjs prewarm --project P --repo PATH [--ref main] [--command COMMAND] [--need CAP]... [--input MANIFEST]...\n       devbox-run.mjs gc [--host IP] [--days N]\n       devbox-run.mjs stop --out DIR --run-id UUID\nCOMMAND supports {shard}, {shards} and {units}. Timeout includes queue/upload/run; cleanup follows. See references/devbox-run.md.');
     return 0;
   }
@@ -2005,7 +2179,7 @@ async function main(args) {
       if (opts.host && !rows.some(row => row.host === opts.host)) throw Error('GC host has no open mapped slots');
       await collectGarbage({ rows, days: opts.days, host: opts.host, state });
       return state.cancel;
-    } finally { clearInterval(watch); }
+    } finally { clearInterval(watch); await closeControlConnections(state); }
   }
   fs.mkdirSync(opts.out, { recursive: true });
   if (fs.existsSync(path.join(opts.out, 'summary.json')) || fs.readdirSync(opts.out).some(n => /^shard-\d/.test(n))) throw Error('--out already contains a devbox run');
@@ -2100,7 +2274,7 @@ async function main(args) {
     }
     console.log(`summary=${path.join(opts.out, 'summary.json')} exit=${exit}`);
     return exit;
-  } finally { clearInterval(watch); fs.rmSync(temp, { recursive: true, force: true }); }
+  } finally { clearInterval(watch); await closeControlConnections(state); fs.rmSync(temp, { recursive: true, force: true }); }
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === script) {

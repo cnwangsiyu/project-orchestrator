@@ -1,11 +1,20 @@
 const phases = ['slotWaitAdmission', 'sourceTransferIn', 'inputPreparation', 'remoteCommand', 'artifactCollection', 'transferOut', 'cleanup'];
 
 export function attemptTiming(now = () => performance.now()) {
-  const start = now(), data = { seconds: Object.fromEntries(phases.map(phase => [phase, 0])), inputs: {}, bytesIn: 0, bytesOut: 0 };
+  const start = now(), data = { seconds: Object.fromEntries(phases.map(phase => [phase, 0])), substeps: {}, inputs: {}, bytesIn: 0, bytesOut: 0 };
   let phase = 'slotWaitAdmission', since = start, finished = false;
   const input = name => data.inputs[name] ||= { verifySec: 0, seedSec: 0, rebuildSec: 0 };
   return {
     data,
+    async measure(name, operation, parent = phase) {
+      if (!phases.includes(parent)) throw Error('unknown substep phase');
+      const started = now();
+      try { return await operation(); }
+      finally {
+        const steps = data.substeps[parent] ||= {};
+        steps[name] = (steps[name] || 0) + Math.max(0, now() - started) / 1000;
+      }
+    },
     phase(next) {
       if (finished) return;
       if (!phases.includes(next)) throw Error('unknown attempt phase');
@@ -32,5 +41,5 @@ export function attemptTiming(now = () => performance.now()) {
 
 export function timingLine(data) {
   return Object.entries(data.seconds).map(([phase, seconds]) => `${phase}=${seconds.toFixed(3)}s`).join(' ')
-    + ` totalSec=${data.totalSec.toFixed(3)}s bytesIn=${data.bytesIn} bytesOut=${data.bytesOut} inputs=${JSON.stringify(data.inputs)}`;
+    + ` totalSec=${data.totalSec.toFixed(3)}s bytesIn=${data.bytesIn} bytesOut=${data.bytesOut} inputs=${JSON.stringify(data.inputs)} substeps=${JSON.stringify(data.substeps)}`;
 }

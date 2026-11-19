@@ -22,4 +22,10 @@ assert.deepEqual(result.inputs.sdk, { verifySec: 0.5, seedSec: 1.5, rebuildSec: 
 assert.equal(result.inputs['caller-input'].rebuildSec, null);
 assert.match(timingLine(result), /slotWaitAdmission=1\.000s.*bytesIn=125 bytesOut=459/);
 clock = 99999; assert.equal(timing.finish().totalSec, 16);
+let subclock = 0;
+const nested = attemptTiming(() => subclock);
+assert.equal(await nested.measure('probe', async () => { subclock = 1000; return 'ok'; }), 'ok');
+await assert.rejects(nested.measure('failed', async () => { subclock = 2000; throw Error('fixture'); }), /fixture/);
+assert.deepEqual(nested.finish().substeps.slotWaitAdmission, { probe: 1, failed: 1 });
+assert.equal(nested.finish().totalSec, 2);
 console.log('PASS fake-clock phase partition, per-input receipts, byte totals and stable finalization');
