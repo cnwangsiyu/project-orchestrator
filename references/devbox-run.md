@@ -78,7 +78,10 @@ repositories remain on RemoteX / TT-VEIS, rather than these devbox worktrees.
 `shard-k.log` streams command output and runner diagnostics. `summary.json`
 contains the project, task, commit, command hash, overall exit and a `shards`
 array. Each shard includes `slot`, `host`, `exit`, `durationSec`, `log`, `flaky`
-and `attempts`; attempts also record returns, bundle bytes, artifacts and
+and `attempts`; an SSH stream drop with a readable supervised exit sets
+`sshDropRecovered: true` and preserves that exit. The remaining output and
+artifacts are fetched before cleanup and lease return. Unreadable exit status
+after bounded recovery is `reason: "ssh-drop-unconfirmed"`. Attempts also record returns, bundle bytes, artifacts and
 cleanup failures. The overall exit is the first nonzero shard result in shard
 order, or the cancellation status. Command failures retain their exit codes;
 timeout is 124, SIGINT is 130 and SIGTERM is 143.

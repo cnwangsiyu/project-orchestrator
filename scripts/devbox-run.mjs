@@ -257,7 +257,7 @@ function ownChild(child) {
 function execute(file, args, { input, inputFile, outputFile, onOutput, timeout = 60000, state, cancellable = true, rawCapture = !onOutput && !outputFile, interceptStderr, interceptStdout, env = process.env, strictOutput = true } = {}) {
   return new Promise(resolve => {
     const child = spawn(file, args, { stdio: ['pipe', 'pipe', 'pipe'], env });
-    let stdout = '', stderr = '', timedOut = false, spawnError;
+    let stdout = '', stderr = '', stdoutBytes = 0, timedOut = false, spawnError;
     const sink = outputFile ? fs.createWriteStream(outputFile, { mode: 0o600 }) : null;
     const rawDecoder = new StringDecoder('utf8');
     const out = lineSink(text => { if (!rawCapture) stdout = (stdout + text).slice(-2 * 1024 * 1024); onOutput?.(text, 'stdout'); }, state?.values, interceptStdout, strictOutput);
@@ -271,6 +271,7 @@ function execute(file, args, { input, inputFile, outputFile, onOutput, timeout =
     let source;
     child.stdin.on('error', () => {});
     child.stdout.on('data', chunk => {
+      stdoutBytes += chunk.length;
       if (sink) sink.write(chunk);
       else if (rawCapture) {
         stdout += rawDecoder.write(chunk);
@@ -285,7 +286,7 @@ function execute(file, args, { input, inputFile, outputFile, onOutput, timeout =
       state?.children.delete(signalChild); out.end(); err.end();
       if (rawCapture) stdout += rawDecoder.end();
       if (sink) await new Promise(done => sink.end(done));
-      resolve({ code: spawnError ? 1 : timedOut ? 124 : code ?? (signal === 'SIGTERM' ? 143 : 1), stdout, stderr: stderr || spawnError || '', error: spawnError });
+      resolve({ code: spawnError ? 1 : timedOut ? 124 : code ?? (signal === 'SIGTERM' ? 143 : 1), stdout, stdoutBytes, stderr: stderr || spawnError || '', error: spawnError });
     });
     if (inputFile) { source = fs.createReadStream(inputFile); source.on('error', error => { spawnError = `input file ${error.code || 'read failure'}`; stop(); }); source.pipe(child.stdin); }
     else child.stdin.end(input);
@@ -560,6 +561,29 @@ sys.exit(subprocess.run(['git','apply','--index','--binary','--whitespace=nowarn
   // It continuously reaps adopted children and owns cancellation/start arbitration.
   run: pythonHeader + `import ctypes, subprocess, shlex, shutil
 ctl=pathlib.Path(d['control']); cancelled=False
+# The streaming SSH process follows a detached, bounded supervisor. Only the
+# supervisor owns the command group; a lost stream cannot cancel its command.
+if d.get('stream'):
+    output=ctl/'output.log'
+    fd=os.open(output,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+    child=os.fork()
+    if child:
+        os.close(fd)
+        try:
+            with open(output,'rb') as log:
+                while True:
+                    chunk=log.read(65536)
+                    if chunk: os.write(1,chunk); continue
+                    done=ctl/'done.json'
+                    if done.exists():
+                        record=json.loads(done.read_text())
+                        if record.get('run')!=ctl.name: sys.exit(70)
+                        os.waitpid(child,0)
+                        sys.exit(record['exit'])
+                    time.sleep(.05)
+        except (BrokenPipeError,ConnectionError): sys.exit(255)
+    os.setsid()
+    os.dup2(fd,1); os.dup2(fd,2); os.close(fd)
 def cancel(signum, frame):
     global cancelled
     cancelled=True
@@ -671,6 +695,21 @@ elif group.exists() and owner.exists() and not done.exists():
     print('group-gone')
 else: sys.exit(70)
 `,
+  result: pythonHeader + remoteRunIdentity + `import base64
+done=ctl/'done.json'; limit=time.monotonic()+d.get('seconds',0)
+while not done.exists() and time.monotonic()<limit:
+    time.sleep(.1)
+record=read_own(done) if done.exists() else None
+if record and (type(record.get('exit')) is not int or not 0<=record['exit']<=255): sys.exit(70)
+output=ctl/'output.log'
+offset=d.get('offset',0)
+if type(offset) is not int or offset<0: sys.exit(70)
+tail=b''
+if output.exists():
+    with open(output,'rb') as log:
+        log.seek(offset); tail=log.read(1024*1024)
+print(json.dumps({'exit':record['exit'] if record else None,'tail':base64.b64encode(tail).decode(),'offset':offset+len(tail),'more':output.exists() and output.stat().st_size>offset+len(tail)}))
+`,
   cleanup: pythonHeader + remoteRunIdentity + `ctl.mkdir(parents=True, exist_ok=True)
 for file in ('owner.json','group.json','done.json'):
     if (ctl/file).exists(): read_own(ctl/file)
@@ -745,6 +784,39 @@ async function reconnectRun(row, data, state, requireAccess = false) {
     }
   }
   return 'unknown';
+}
+
+async function recoverRunResult(row, data, state, offset, emit) {
+  const tail = lineSink(emit, state.values);
+  const deadline = Date.now() + 27000;
+  let exit = null;
+  try {
+    for (const delay of [0, 1000, 2000]) {
+      if (delay) await pause(delay);
+      const result = await ssh(row, 'result', { control: data.control, offset, seconds: 7 },
+        { state, cancellable: false, timeout: 8000, noRetry: true });
+      if (result.code) continue;
+      try {
+        const record = JSON.parse(result.stdout);
+        if (!Number.isSafeInteger(record.offset) || record.offset < offset || typeof record.tail !== 'string') continue;
+        const bytes = Buffer.from(record.tail, 'base64');
+        if (record.offset !== offset + bytes.length) continue;
+        tail.push(bytes); offset = record.offset;
+        if (Number.isInteger(record.exit) && record.exit >= 0 && record.exit <= 255) exit = record.exit;
+        // Drain a large tail in bounded pages without repeating delivered bytes.
+        for (let page = 0; record.more && page < 63 && Date.now() < deadline; page++) {
+          const fetched = await ssh(row, 'result', { control: data.control, offset },
+            { state, cancellable: false, timeout: Math.min(8000, deadline - Date.now()), noRetry: true });
+          if (fetched.code) break;
+          const next = JSON.parse(fetched.stdout), chunk = Buffer.from(next.tail, 'base64');
+          if (next.offset !== offset + chunk.length) break;
+          tail.push(chunk); offset = next.offset; record.more = next.more;
+        }
+        if (exit !== null) return exit;
+      } catch { /* A partial or unreadable receipt is retried on a fresh connection. */ }
+    }
+    return null;
+  } finally { tail.end(); }
 }
 
 function readHold(row) {
@@ -1672,11 +1744,22 @@ async function shard(opts) {
         launched = true;
         const caches = { GRADLE_USER_HOME: `${root}/shared/gradle`, npm_config_cache: `${root}/shared/npm`, PNPM_STORE_DIR: `${root}/shared/pnpm`, CCACHE_DIR: `${root}/shared/ccache`, CCACHE_MAXSIZE: '20G', PIP_CACHE_DIR: `${root}/shared/pip`, DEVBOX_TOOLCHAINS: `${root}/shared/toolchains` };
         const commandStart = Date.now();
-        const result = await ssh(row, 'run', { ...data, command: job, cpus: attempt.cpus, env: { ...caches, ...opts.env, ...cpuEnvironment(attempt.cpus), DEVBOX_RUN_RECEIPT: `${workspace}/.devbox-run.json`, ...(inputMap?{DEVBOX_INPUTS_FILE:inputMap,DEVBOX_INPUTS_DIR:`${root}/inputs`}:{}) }, seconds: remaining() / 1000 }, { state, timeout: remaining() + 15000, onOutput: emit });
+        const result = await ssh(row, 'run', { ...data, stream: true, command: job, cpus: attempt.cpus, env: { ...caches, ...opts.env, ...cpuEnvironment(attempt.cpus), DEVBOX_RUN_RECEIPT: `${workspace}/.devbox-run.json`, ...(inputMap?{DEVBOX_INPUTS_FILE:inputMap,DEVBOX_INPUTS_DIR:`${root}/inputs`}:{}) }, seconds: remaining() / 1000 }, { state, timeout: remaining() + 15000, onOutput: emit });
         attempt.commandDurationSec = (Date.now() - commandStart) / 1000;
         const loginFailure = result.code === 255 && !result.sshStarted && /permission denied|gssapi|authentication failed/i.test(result.stderr);
-        if (result.code === 255 && !loginFailure) attempt.sshDropped = true;
+        if (result.code === 255 && !loginFailure) { attempt.sshDropped = true; attempt.sshExit = result.code; }
         attempt.exit = state.cancel || result.code;
+        if (attempt.sshDropped) {
+          const recoveredExit = await recoverRunResult(row, data, state, result.stdoutBytes, emit);
+          if (recoveredExit !== null) {
+            attempt.exit = state.cancel || recoveredExit;
+            attempt.sshDropRecovered = true;
+            emit(`[shard ${opts.shard}] SSH drop recovered: recorded remote exit=${recoveredExit}\n`);
+          } else {
+            attempt.reason = 'ssh-drop-unconfirmed';
+            emit(`[shard ${opts.shard}] ssh-drop-unconfirmed: recorded remote exit unavailable\n`);
+          }
+        }
         if (result.infraFailure) attempt.infraFailure = true;
         else if (loginFailure) attempt.authenticationBlocked = true;
       } catch (error) {
@@ -1790,6 +1873,7 @@ async function shard(opts) {
     try { writeJSON(stateFile, { shard: opts.shard, updatedAt: new Date().toISOString(), status: 'complete', slot: last?.slot || null, exit, resEvents }); }
     catch { state.stop(74); exit = state.cancel; }
     return { shard: opts.shard, slot: last?.slot || null, host: last?.host || null, exit, flaky, stateFile, resEvents, ...(last?.skipped ? { skipped: true } : {}),
+      ...(last?.sshDropRecovered ? { sshDropRecovered: true } : {}), ...(last?.reason ? { reason: last.reason } : {}),
       ...(opts.units ? { units: opts.units } : {}), ...(softExclusionsDropped ? { softExclusionsDropped } : {}), durationSec: (Date.now() - started) / 1000, log, attempts };
   } finally {
     clearTimeout(timer); clearInterval(parentWatch); fs.closeSync(fd);

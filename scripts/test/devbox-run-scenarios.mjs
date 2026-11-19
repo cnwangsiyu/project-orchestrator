@@ -110,7 +110,16 @@ if(op==='reconnect'){
  if(c.reconnectRetries&&!fs.existsSync(path.join(c.dir,'reconnect-failed'))){fs.writeFileSync(path.join(c.dir,'reconnect-failed'),'1');process.exit(255);}
  console.log(c.remoteRunning?'group-running':'group-gone');return;
 }
+if(op==='result'){
+ if(c.unreadableResult)process.exit(255);
+ if(c.remoteRunning){console.log(JSON.stringify({exit:null,tail:'',offset:d.offset,more:false}));return;}
+ if(c.completeOnReconnect){fs.writeFileSync(path.join(d.control,'done.json'),JSON.stringify({run:path.basename(d.control),gone:true,exit:c.remoteExit??0}));}
+}
 if(c.postStartFailure&&op==='run'){
+ fs.mkdirSync(d.control,{recursive:true});
+ if(!c.remoteRunning&&!c.completeOnReconnect)fs.writeFileSync(path.join(d.control,'done.json'),JSON.stringify({run:path.basename(d.control),gone:true,exit:c.remoteExit??0}));
+ if(c.recordedUnit)fs.writeFileSync(path.join(d.control,'units.json'),JSON.stringify({run:path.basename(d.control),units:[{unit:c.recordedUnit,exit:0,durationSec:349.366333442}]}));
+ fs.writeFileSync(path.join(d.control,'output.log'),'remaining output tail\n');
  console.error(command.match(/'(DEVBOX_STARTED_[^']+)'/)[1]);console.error('Connection closed by remote host');process.exit(255);
 }
 if(op==='probe') {
@@ -605,6 +614,33 @@ os.kill(pid,0)`;
       fs.writeFileSync(path.join(ctl, 'group.json'), JSON.stringify({ ...old, start: stat[19] }));
       assert.equal(reconnect(ctl).stdout.trim(), 'group-running');
       assert.ok(!fs.existsSync(path.join(ctl, 'cancel')), 'read-only reconnect must never cancel a process');
+      const streamControl = path.join(f.dir, 'linux-stream-drop'); fs.mkdirSync(streamControl);
+      const stream = spawn('python3', ['-c', remoteScripts.run, Buffer.from(JSON.stringify({
+        control: streamControl, workspace: f.dir, seconds: 5, env: {}, stream: true,
+        command: 'echo before-drop; sleep 0.5; echo after-drop; exit 3',
+      })).toString('base64')], { stdio: ['ignore', 'pipe', 'pipe'] });
+      let delivered = Buffer.alloc(0);
+      stream.stdout.on('data', chunk => { delivered = Buffer.concat([delivered, chunk]); });
+      const streamClosed = new Promise(resolve => stream.once('close', resolve));
+      try {
+        const deadline = Date.now() + 5000;
+        while (!delivered.includes(Buffer.from('before-drop')) && Date.now() < deadline) await sleep(10);
+        assert.match(delivered.toString(), /before-drop/);
+        stream.kill('SIGHUP'); await streamClosed;
+        const recovered = spawnSync('python3', ['-c', remoteScripts.result, Buffer.from(JSON.stringify({
+          control: streamControl, offset: delivered.length, seconds: 5,
+        })).toString('base64')], { encoding: 'utf8', timeout: 8000 });
+        assert.equal(recovered.status, 0, recovered.stderr);
+        const record = JSON.parse(recovered.stdout);
+        assert.equal(record.exit, 3);
+        assert.equal(Buffer.from(record.tail, 'base64').toString(), 'after-drop\n');
+        assert.equal(reconnect(streamControl).stdout.trim(), 'group-gone');
+      } finally {
+        stream.kill('SIGTERM');
+        const cleaned = spawnSync('python3', ['-c', remoteScripts.cleanup,
+          Buffer.from(JSON.stringify({ control: streamControl })).toString('base64')], { timeout: 25000 });
+        assert.equal(cleaned.status, 0);
+      }
     }
     const alive = await Promise.race([closed.then(() => false), sleep(100).then(() => true)]);
     assert.equal(alive,true,'the foreign process survived both stop and cleanup');
@@ -686,14 +722,46 @@ async function placementScenarios() {
 }
 
 async function sshDropScenarios() {
-  const gone = fixture({ postStartFailure: true, reconnectRetries: true });
-  const completed = await run(gone);
-  assert.equal(completed.code, 255);
+  const unit = 'apps/app-ui/e2e/units/exports-b--en.json';
+  const gone = fixture({ postStartFailure: true, reconnectRetries: true, recordedUnit: unit });
+  fs.mkdirSync(path.dirname(path.join(gone.repo, unit)), { recursive: true });
+  fs.writeFileSync(path.join(gone.repo, unit), '{"fixture":true}\n');
+  git(gone.repo, 'add', '.'); git(gone.repo, 'commit', '-qm', 'unit receipt fixture');
+  const units = path.join(gone.dir, 'units.txt'); fs.writeFileSync(units, unit + '\n');
+  const completed = await run(gone, ['--units-file', units]);
+  assert.equal(completed.code, 0);
+  assert.equal(completed.summary.shards[0].sshDropRecovered, true);
+  assert.equal(completed.summary.shards[0].attempts[0].sshExit, 255);
+  assert.deepEqual(completed.summary.shards[0].attempts[0].unitTimings,
+    [{ unit, exit: 0, durationSec: 349.366333442 }]);
+  assert.match(completed.stdout, /remaining output tail/);
+  assert.match(completed.stdout, /SSH drop recovered: recorded remote exit=0/);
   assert.equal(completed.summary.shards[0].attempts[0].sshRecovery, 'group-gone');
   assert.equal(gone.events().filter(e => e.op === 'run').length, 1);
   assert.equal(gone.events().filter(e => e.op === 'reconnect').length, 2);
   assert.ok(!gone.events().some(e => e.op === 'cleanup'));
   returned(gone);
+
+  const failed = fixture({ postStartFailure: true, remoteExit: 3 });
+  const failure = await run(failed, ['--artifact', 'source.txt']);
+  assert.equal(failure.code, 3);
+  assert.equal(failure.summary.shards[0].sshDropRecovered, true);
+  assert.ok(failed.events().some(e => e.op === 'artifacts'));
+  returned(failed);
+
+  const finishing = fixture({ postStartFailure: true, completeOnReconnect: true });
+  const reattached = await run(finishing);
+  assert.equal(reattached.code, 0);
+  assert.equal(reattached.summary.shards[0].sshDropRecovered, true);
+  returned(finishing);
+
+  const unreadable = fixture({ postStartFailure: true, unreadableResult: true });
+  const unconfirmed = await run(unreadable);
+  assert.equal(unconfirmed.code, 255);
+  assert.equal(unconfirmed.summary.shards[0].reason, 'ssh-drop-unconfirmed');
+  assert.equal(unconfirmed.summary.shards[0].sshDropRecovered, undefined);
+  assert.equal(unreadable.events().filter(e => e.op === 'result').length, 3);
+  returned(unreadable);
 
   const live = fixture({ postStartFailure: true, remoteRunning: true });
   const held = await run(live);
@@ -707,7 +775,7 @@ async function sshDropScenarios() {
   assert.equal(stop.status, 0, stop.stdout + stop.stderr);
   assert.match(stop.stdout, /confirmed remote cleanup and returned/);
   returned(live);
-  console.log('PASS bounded SSH reconnect confirms a gone group or retains a live job until explicit stop');
+  console.log('PASS SSH drop recovers recorded success/failure and output/artifacts, retries unreadable status, and retains live jobs until explicit stop');
 }
 
 async function affinityScopeScenarios() {
@@ -826,7 +894,19 @@ async function deadSlotScenarios() {
   fs.mkdirSync(workspace,{recursive:true});
   const child=spawn('/bin/sleep',['60'],{cwd:workspace,detached:true,stdio:'ignore'});
   const exit=new Promise(resolve=>child.once('exit',resolve));
-  const probe=()=>spawnSync('python3',['-c',remoteScripts['dead-slot'],Buffer.from(JSON.stringify({root,slot})).toString('base64')],{encoding:'utf8'});
+  // The remote probe is Linux-only. macOS supplies the same /proc inputs while
+  // retaining real live processes and the identical product matching logic.
+  const procRoot=path.join(f.dir,'proc');fs.mkdirSync(procRoot);
+  let source=remoteScripts['dead-slot'];
+  if(process.platform!=='linux')source=source.replace("pathlib.Path('/proc')",`pathlib.Path(${JSON.stringify(procRoot)})`);
+  const probe=()=>{
+    if(process.platform!=='linux')for(const [pid,cwd] of [[child.pid,workspace],[sameTaskOtherRun.pid,otherWorkspace]]){
+      const dir=path.join(procRoot,String(pid));fs.rmSync(dir,{recursive:true,force:true});
+      try{process.kill(pid,0);}catch{continue;}
+      fs.mkdirSync(dir);fs.writeFileSync(path.join(dir,'stat'),`${pid} (sleep) S 1 1 1`);fs.symlinkSync(fs.realpathSync(cwd),path.join(dir,'cwd'));
+    }
+    return spawnSync('python3',['-c',source,Buffer.from(JSON.stringify({root,slot})).toString('base64')],{encoding:'utf8'});
+  };
   try { const evidence=probe();assert.equal(evidence.status,0,evidence.stderr);assert.equal(JSON.parse(evidence.stdout).clean,false); }
   finally {child.kill('SIGTERM');await exit;}
   try {
@@ -1040,7 +1120,6 @@ async function scenarios() {
   assert.equal(exhaustedRun.code, 255); assert.equal(exhaustedRun.summary.shards[0].attempts[0].infraFailure, true);
   assert.equal(exhausted.events().filter(e => e.op === 'probe').length, 4); returned(exhausted);
   await placementScenarios();
-  await sshDropScenarios();
   console.log('PASS jittered SSH establishment retries, bounded infra failure, no replay after remote start, no ControlMaster');
 }
 
