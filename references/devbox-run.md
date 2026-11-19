@@ -1021,6 +1021,15 @@ The resource-progress scenario waits for all required stdout/stderr events
 before asserting visibility during acquisition, and delays stderr to exercise
 cross-stream ordering deterministically.
 
+Before a new command starts, the runner removes older rebuildable entries only
+under its leased slot worktree's `.data/`, preserving current-run paths, declared
+inputs/tracked source, unexpired retained-artifact references, and data modified
+within ten minutes while that worktree has a live recorded process group;
+`dataCleanup: {entries, bytes, warnings}` records removals and failures warn
+without failing the run. The latest run's data stays until reuse, escaping
+symlinks are refused, and projects needing older data pass
+`--env DEVBOX_KEEP_RUN_DATA=1`; `devbox-evict.sh` remains the disk-floor backstop.
+
 ### Control And Phase Overhead
 
 Phase receipts now include `substeps` beneath their existing `seconds` fields.

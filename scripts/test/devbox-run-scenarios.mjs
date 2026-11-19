@@ -6,11 +6,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { parseArgs, readRegistry, remoteScripts, storeIdentity, makeBundle, cpuBudget, cpuEnvironment, parseUnits, discoverUnits, assignUnits, planShards, runBudgets, commandOutcome } from '../devbox-run.mjs';
+import { parseArgs, readRegistry, remoteScripts, storeIdentity, makeBundle, cpuBudget, cpuEnvironment, parseUnits, discoverUnits, assignUnits, planShards, runBudgets, commandOutcome, runDataCleanupPython } from '../devbox-run.mjs';
 
 import { makeSubmoduleFixture } from './devbox-submodule-fixture.mjs';
 import { fingerprint, inputKey, indexFile } from '../lib/devbox-inputs.mjs';
 import { transferFindings } from '../lib/devbox-transfer-check.mjs';
+import { retentionPython } from '../lib/devbox-retention.mjs';
 import { muxFailure, muxRetrySafe } from '../lib/devbox-ssh.mjs';
 
 const script = fileURLToPath(new URL('../devbox-run.mjs', import.meta.url));
@@ -27,7 +28,8 @@ let count = 0;
 function fixture(options = {}) {
   const dir = path.join(temp, `case-${++count}`), bin = path.join(dir, 'bin'), shared = path.join(dir, 'shared'), repo = path.join(dir, 'source');
   for (const p of [bin, shared, repo, path.join(shared, 'locks')]) fs.mkdirSync(p, { recursive: true });
-  const config = { dir, shared, hosts: ['192.0.2.1', '192.0.2.2'], ...options };
+  const cleanupPython = 'import os,sys,json,pathlib,time\n' + retentionPython + runDataCleanupPython + '\nd=json.loads(sys.stdin.read())\nprint(json.dumps(cleanup_run_data(d)))\n';
+  const config = { dir, shared, cleanupPython, hosts: ['192.0.2.1', '192.0.2.2'], ...options };
   fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify(config));
   const rows = [
     'devbox-cn-1\tremote\topen\t-\tfirst alice@192.0.2.1 caps=node',
@@ -163,6 +165,12 @@ if(op==='metrics') {
 if(op==='bundle'&&c.uploadRetry&&!fs.existsSync(path.join(c.dir,'retried'))){fs.writeFileSync(path.join(c.dir,'retried'),'1');process.stdin.resume();await new Promise(r=>process.stdin.on('end',r));console.error(c.uploadRetry);process.exit(255);}
 if(op==='bundle'&&c.transferDelay)await sleep(c.transferDelay);
 if(op==='run') {
+ if(d.stream){
+  const source=c.dataCleanupFailure?c.cleanupPython.replace('d=json.loads(sys.stdin.read())',"original_unlink=os.unlink\ndef faulty_unlink(name,*a,**kw):\n    if name=='blocked': raise PermissionError('fixture cleanup failure')\n    return original_unlink(name,*a,**kw)\nos.unlink=faulty_unlink\nd=json.loads(sys.stdin.read())"):c.cleanupPython;
+  const cleanup=cp.spawnSync('python3',['-c',source],{input:JSON.stringify(d),encoding:'utf8'});
+  if(cleanup.status)console.error('fixture data cleanup warning');
+  else { const record=JSON.parse(cleanup.stdout);console.log('DEVBOX_DATA_CLEANUP='+JSON.stringify(record));fs.mkdirSync(d.control,{recursive:true});fs.writeFileSync(path.join(d.control,'data-cleanup.json'),JSON.stringify({...record,run:path.basename(d.control)})); }
+ }
  if(c.launchDelay)await sleep(c.launchDelay);
  if(c.launcherDiskHost===host){console.error('DEVBOX_LAUNCH_DISK_GUARD');process.exit(72);}
  fs.mkdirSync(d.control,{recursive:true});
@@ -1324,6 +1332,35 @@ async function artifactResumeScenarios() {
 
 }
 
+async function dataCleanupScenarios() {
+  const f = fixture();
+  fs.appendFileSync(path.join(f.repo, '.gitignore'), '.data/\n'); git(f.repo, 'add', '.gitignore'); git(f.repo, 'commit', '-qm', 'ignore run data');
+  const first = await run(f, [], 'mkdir -p .data/stale && printf old > .data/stale/out'); ok(first); returned(f);
+  const next = await run(f, [], 'test ! -e .data/stale && mkdir -p .data/latest && printf latest > .data/latest/out'); ok(next); returned(f);
+  const receipt = next.summary.shards[0].attempts[0].dataCleanup;
+  assert.deepEqual(receipt.entries.map(entry => entry.name), ['stale']); assert.equal(receipt.bytes, 3);
+  assert.ok(fs.existsSync(path.join(workspace(f), '.data/latest/out')), 'latest data stays after the command');
+  assert.match(next.stdout, /DEVBOX_DATA_CLEANUP=/);
+  const opted = await run(f, ['--env', 'DEVBOX_KEEP_RUN_DATA=1'], 'test -f .data/latest/out'); ok(opted); returned(f);
+  assert.equal(opted.summary.shards[0].attempts[0].dataCleanup.skipped, 'DEVBOX_KEEP_RUN_DATA=1');
+  fs.writeFileSync(path.join(workspace(f), '.data/blocked'), 'blocked');
+  fs.writeFileSync(path.join(f.dir, 'config.json'), JSON.stringify({ ...f.config, dataCleanupFailure: true }));
+  const failed = await run(f, [], 'test -f .data/blocked && printf command-still-runs'); ok(failed); returned(f);
+  assert.ok(failed.summary.shards[0].attempts[0].dataCleanup.warnings.some(warning => warning.includes('fixture cleanup failure')));
+  assert.match(failed.stdout, /command-still-runs/);
+  const retained = fixture();
+  fs.appendFileSync(path.join(retained.repo, '.gitignore'), '.data/\n'); git(retained.repo, 'add', '.gitignore'); git(retained.repo, 'commit', '-qm', 'ignore retained run data');
+  const saved = await run(retained, ['--artifact', '.data/retained/result.log', '--artifact-fetch', 'manifest'], 'mkdir -p .data/retained .data/stale; printf saved > .data/retained/result.log; printf old > .data/stale/out'); ok(saved); returned(retained);
+  const reuse = await run(retained, [], 'test -f .data/retained/result.log && test ! -e .data/stale'); ok(reuse); returned(retained);
+  assert.deepEqual(reuse.summary.shards[0].attempts[0].dataCleanup.entries.map(entry => entry.name), ['stale']);
+  const outer = path.join(retained.dir, 'outside.txt'); fs.writeFileSync(outer, 'outside');
+  fs.symlinkSync(outer, path.join(workspace(retained), '.data/escape'));
+  const escape = await run(retained, [], 'echo escape-refused'); ok(escape); returned(retained);
+  assert.ok(escape.summary.shards[0].attempts[0].dataCleanup.warnings.some(warning => warning.includes('symlink escape')));
+  assert.equal(fs.readFileSync(outer, 'utf8'), 'outside'); assert.ok(fs.lstatSync(path.join(workspace(retained), '.data/escape')).isSymbolicLink());
+  console.log('PASS pre-command data cleanup receipts, latest data lifetime, opt-out, retained data, symlink refusal and non-fatal failure');
+}
+
 async function muxScenarios() {
   const baseline = fixture();
   fs.writeFileSync(path.join(baseline.repo, 'source.txt'), 'local tracked change\n');
@@ -1469,7 +1506,7 @@ async function scenarios() {
   if (only === 'cleanup-pending') { await cleanupPendingScenarios(); return; }
   if (!only) { await budgetScenarios(); await stopShardScenarios(); await cleanupPendingScenarios(); }
   if (!only) await overheadScenarios();
-  const perf = { mux: muxScenarios, 'readback-admission': readbackAdmissionScenarios, affinity:affinityScopeScenarios, 'dead-slot':deadSlotScenarios, inputs:inputScenarios,hygiene:hygieneScenarios,credentials: credentialScenarios, 'packed-module': packedModuleRecovery, receipt: receiptScenarios, 'res-progress': resProgressScenarios, cpu: cpuScenarios, auto: autoScenarios, units: unitScenarios, prewarm: prewarmScenarios, metrics: metricScenarios, placement: placementScenarios, 'ssh-drop': sshDropScenarios };
+  const perf = { 'run-data': dataCleanupScenarios, mux: muxScenarios, 'readback-admission': readbackAdmissionScenarios, affinity:affinityScopeScenarios, 'dead-slot':deadSlotScenarios, inputs:inputScenarios,hygiene:hygieneScenarios,credentials: credentialScenarios, 'packed-module': packedModuleRecovery, receipt: receiptScenarios, 'res-progress': resProgressScenarios, cpu: cpuScenarios, auto: autoScenarios, units: unitScenarios, prewarm: prewarmScenarios, metrics: metricScenarios, placement: placementScenarios, 'ssh-drop': sshDropScenarios };
   const baseline = ['baseline-core', 'baseline-config', 'baseline-warm', 'baseline-placement', 'baseline-artifacts', 'baseline-cleanup', 'baseline-gc', 'baseline-ssh'];
   if (only && !['baseline', 'bundle', 'ownership', ...baseline, ...Object.keys(perf)].includes(only)) throw Error('unknown devbox fixture case');
   for (const [name, scenario] of Object.entries(perf)) if (!only || only === name) await scenario();

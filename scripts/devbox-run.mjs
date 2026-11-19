@@ -376,6 +376,143 @@ file=ctl/'inputs.json'; temporary=ctl/'inputs.tmp'
 temporary.write_text(json.dumps(d['paths'])); temporary.replace(file)
 `;
 
+export const runDataCleanupPython = `import re, stat as data_stat
+# Read only process identity/cwd, never argv or environment.
+def data_group_live(root,workspace,proc_root=pathlib.Path('/proc')):
+    workspace=workspace.resolve()
+    runs=root/'runs'
+    if not runs.is_dir(): return False
+    for ctl in runs.iterdir():
+        if not re.fullmatch(r'[0-9a-f-]{36}',ctl.name) or ctl.is_symlink(): continue
+        file=ctl/'group.json'
+        if not file.exists(): continue
+        if file.is_symlink(): raise RuntimeError('group receipt symlink')
+        record=json.loads(file.read_text())
+        if record.get('run')!=ctl.name or not isinstance(record.get('pid'),int) or record['pid']<=0: raise RuntimeError('invalid group receipt')
+        recorded_workspace=record.get('workspace')
+        if recorded_workspace and pathlib.Path(recorded_workspace).resolve()!=workspace: continue
+        pgid=record['pid']; leader=proc_root/str(pgid)/'stat'
+        try:
+            fields=leader.read_text().rsplit(')',1)[1].split()
+            if fields[19]!=record.get('start'): continue
+        except (FileNotFoundError,ProcessLookupError): pass
+        for process in proc_root.glob('[0-9]*'):
+            try:
+                fields=(process/'stat').read_text().rsplit(')',1)[1].split()
+                if fields[0]=='Z' or int(fields[2])!=pgid: continue
+                if recorded_workspace: return True
+                cwd=(process/'cwd').resolve(strict=True)
+                if cwd==workspace or cwd.is_relative_to(workspace): return True
+            except (FileNotFoundError,ProcessLookupError): continue
+    return False
+
+def cleanup_run_data(d):
+    result={'entries':[],'bytes':0,'warnings':[]}
+    if d.get('env',{}).get('DEVBOX_KEEP_RUN_DATA')=='1':
+        return {**result,'skipped':'DEVBOX_KEEP_RUN_DATA=1'}
+    data_fd=None
+    try:
+        root=pathlib.Path(d['root']); workspace=pathlib.Path(d['workspace']); slot=d['slot']
+        relative=workspace.relative_to(root)
+        if (len(relative.parts)!=4 or relative.parts[0]!='wt' or not relative.parts[2].startswith('id-')
+                or relative.parts[3]!=slot or not re.fullmatch(r'devbox-cn-(?:[0-9]+|light(?:-[0-9]+)?)',slot)
+                or workspace.resolve()!=root.resolve()/relative): raise RuntimeError('data cleanup workspace outside slot scope')
+        control=pathlib.Path(d['control'])
+        if control.parent!=root/'runs' or not re.fullmatch(r'[0-9a-f-]{36}',control.name) or control.is_symlink(): raise RuntimeError('data cleanup control outside runner scope')
+        data=workspace/'.data'
+        if data.is_symlink(): raise RuntimeError('data directory symlink refused')
+        if not data.exists(): return result
+        base=data.resolve(strict=True)
+        if base!=workspace.resolve()/'.data': raise RuntimeError('data directory outside slot scope')
+        data_fd=os.open(data,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        current=[value for value in [d.get('runId'),pathlib.Path(d['control']).name] if value]
+        protected=set(); keep_all=False
+        for record in retained_inventory(root):
+            if record.get('slot')!=slot or record['expiresAt']<=time.time(): continue
+            if record.get('workspace') and pathlib.Path(record['workspace']).resolve()!=workspace.resolve(): continue
+            entries=record.get('dataEntries',[])
+            if not isinstance(entries,list) or not all(isinstance(name,str) and name not in ('','.','..') and '/' not in name for name in entries): raise RuntimeError('invalid retained data entries')
+            protected.update(entries)
+            ctl=artifact_control(root,record['run']); manifest=ctl/'artifact-manifest.json'
+            if manifest.is_symlink(): raise RuntimeError('artifact manifest symlink')
+            if manifest.is_file():
+                receipt=json.loads(manifest.read_text())
+                for item in receipt.get('artifacts',[]):
+                    parts=pathlib.PurePosixPath(item['name']).parts
+                    if len(parts)>1 and parts[0]=='.data': protected.add(parts[1])
+            elif record.get('dataEntries') is None and (ctl/'artifact-archive.tar').exists():
+                keep_all=True # Legacy archives have no list of source data entries.
+        if keep_all: return {**result,'skipped':'unexpired legacy retained archive'}
+        inputs=pathlib.Path(d['control'])/'inputs.json'
+        if inputs.is_symlink(): raise RuntimeError('input map symlink')
+        paths=list(d.get('dataInputPaths',[]))
+        if (workspace/'.git').exists():
+            import subprocess
+            tracked=subprocess.check_output(['git','-C',str(workspace),'ls-files','-z','--','.data'],timeout=5)
+            for name in tracked.decode('utf-8','surrogateescape').split('\\0'):
+                parts=pathlib.PurePosixPath(name).parts
+                if len(parts)>1 and parts[0]=='.data': protected.add(parts[1])
+        for name in d.get('untracked',[]):
+            parts=pathlib.PurePosixPath(name).parts
+            if len(parts)>1 and parts[0]=='.data': protected.add(parts[1])
+        if inputs.is_file(): paths+=list(json.loads(inputs.read_text()).values())
+        for value in paths:
+            target=pathlib.Path(value).resolve()
+            if target==base: return {**result,'skipped':'declared data directory input'}
+            if target.is_relative_to(base): protected.add(target.relative_to(base).parts[0])
+        live=data_group_live(root,workspace.resolve())
+        private=re.compile(r'^(?:login|sessions?|cookies?|\\.env(?:\\..*)?|\\.netrc|\\.npmrc|\\.pypirc|\\.ssh|\\.aws|\\.kube|node_modules)$|\\.(?:pem|p12|pfx|key|keystore)$',re.I)
+        def inspect_entry(entry):
+            recent=False; belongs=False
+            todo=[entry]
+            while todo:
+                target=todo.pop(); info=target.lstat()
+                parts=target.relative_to(data).parts
+                if any(private.search(part) for part in parts): raise RuntimeError('private/cache state refused')
+                if not target.resolve().is_relative_to(base): raise RuntimeError('symlink escape refused')
+                if any(value in part for value in current for part in parts): belongs=True
+                recent=recent or info.st_mtime>time.time()-600
+                if data_stat.S_ISDIR(info.st_mode): todo+=list(target.iterdir())
+                elif not (data_stat.S_ISREG(info.st_mode) or data_stat.S_ISLNK(info.st_mode)): raise RuntimeError('special entry refused')
+            return belongs or (live and recent)
+        def remove_entry(parent,name,deleted):
+            info=os.stat(name,dir_fd=parent,follow_symlinks=False)
+            if data_stat.S_ISDIR(info.st_mode):
+                fd=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=parent)
+                try:
+                    opened=os.fstat(fd)
+                    if (opened.st_dev,opened.st_ino)!=(info.st_dev,info.st_ino): raise RuntimeError('entry changed during cleanup')
+                    with os.scandir(fd) as children:
+                        for child in list(children): remove_entry(fd,child.name,deleted)
+                finally: os.close(fd)
+                latest=os.stat(name,dir_fd=parent,follow_symlinks=False)
+                if (latest.st_dev,latest.st_ino)!=(info.st_dev,info.st_ino): raise RuntimeError('entry changed during cleanup')
+                os.rmdir(name,dir_fd=parent); deleted['removed']+=1
+            elif data_stat.S_ISREG(info.st_mode) or data_stat.S_ISLNK(info.st_mode):
+                os.unlink(name,dir_fd=parent); deleted['removed']+=1
+                if data_stat.S_ISREG(info.st_mode): deleted['bytes']+=info.st_size
+            else: raise RuntimeError('special entry refused')
+        for entry in sorted(data.iterdir()):
+            if entry.name in protected: continue
+            deleted={'name':entry.name,'bytes':0,'removed':0}
+            try:
+                if inspect_entry(entry): continue
+                before=data.stat(); opened=os.fstat(data_fd)
+                if (before.st_dev,before.st_ino)!=(opened.st_dev,opened.st_ino): raise RuntimeError('data directory changed during cleanup')
+                remove_entry(data_fd,entry.name,deleted)
+                result['entries'].append(deleted); result['bytes']+=deleted['bytes']
+            except Exception as error:
+                if deleted['removed']:
+                    result['entries'].append({**deleted,'complete':False}); result['bytes']+=deleted['bytes']
+                result['warnings'].append(entry.name+': '+str(error))
+    except Exception as error: result['warnings'].append(str(error))
+    finally:
+        if data_fd is not None:
+            try: os.close(data_fd)
+            except OSError: result['warnings'].append('data handle close failed')
+    return result
+`;
+
 export const remoteScripts = {
   'cleanup-pending': pythonHeader + cleanupEvidencePython,
   'list-retained': pythonHeader + retentionPython + `print(json.dumps(retained_inventory(d['root'])))\n`,
@@ -526,6 +663,7 @@ with open(str(repo)+'.lock','a') as lock:
         for name in old.get('untracked',[]):
             parts=pathlib.PurePosixPath(name).parts
             if not parts or name.startswith('/') or '..' in parts: raise RuntimeError('invalid overlay path')
+            if parts[0]=='.data': continue # Let scoped run-data cleanup apply its protections.
             target=ws
             for part in parts:
                 target=target/part
@@ -534,7 +672,7 @@ with open(str(repo)+'.lock','a') as lock:
                 if target.is_file(): target.unlink()
         subprocess.run(['git','-C',str(ws),'reset','--hard',d['commit']],check=True,stdout=subprocess.DEVNULL)
         # BC-117: drop untracked leftovers of earlier runs (not ignored build caches) so each run sees only its own overlay.
-        subprocess.run(['git','-C',str(ws),'clean','-ffd','-q'],check=True,stdout=subprocess.DEVNULL)
+        subprocess.run(['git','-C',str(ws),'clean','-ffd','-q','-e','.data/'],check=True,stdout=subprocess.DEVNULL)
     else:
         ws.parent.mkdir(parents=True,exist_ok=True)
         subprocess.run(['git','--git-dir='+str(repo),'worktree','add','--detach',str(ws),d['commit']],check=True,stdout=subprocess.DEVNULL)
@@ -634,7 +772,7 @@ sys.exit(subprocess.run(['git','apply','--index','--binary','--whitespace=nowarn
 `,
   // The SSH-owned supervisor is a Linux subreaper OUTSIDE the command group.
   // It continuously reaps adopted children and owns cancellation/start arbitration.
-  run: pythonHeader + `import ctypes, subprocess, shlex, shutil
+  run: pythonHeader + retentionPython + runDataCleanupPython + `import ctypes, subprocess, shlex, shutil
 if d.get('root'):
     disk=os.statvfs(d['root'])
     if disk.f_bavail*disk.f_frsize<53*1073741824:
@@ -677,6 +815,11 @@ def stat(pid):
 def save(name, data):
     tmp=ctl/(name+'.tmp'); tmp.write_text(json.dumps(dict(data,run=run_id))); tmp.replace(ctl/name)
 save('owner.json',{'pid':os.getpid(),'start':stat(os.getpid())[19]})
+if d.get('stream') and not cancelled and not (ctl/'cancel').exists():
+    data_cleanup=cleanup_run_data(d)
+    print('DEVBOX_DATA_CLEANUP='+json.dumps(data_cleanup),flush=True)
+    try: save('data-cleanup.json',data_cleanup)
+    except Exception: print('devbox-run: data cleanup receipt warning',file=sys.stderr,flush=True)
 proc=None; leader_start=None; result=1; command_start=None
 def adopted():
     ids=pathlib.Path('/proc/'+str(os.getpid())+'/task/'+str(os.getpid())+'/children').read_text().split()
@@ -713,7 +856,7 @@ try:
         proc=subprocess.Popen([shutil.which('bash'),'-lc',shell], start_new_session=True, cwd=d['workspace'], env={**os.environ,**d['env']}, stdin=subprocess.DEVNULL)
         command_start=time.monotonic(); deadline=command_start+d['seconds']
         leader_start=stat(proc.pid)[19]
-        save('group.json',{'pid':proc.pid,'start':leader_start})
+        save('group.json',{'pid':proc.pid,'start':leader_start,'workspace':d['workspace'],'slot':d['slot']})
         if d.get('commandMarker'): print(d['commandMarker'],flush=True)
         while True:
             reap(); status=exited()
@@ -880,6 +1023,8 @@ if d.get('fetch')=='manifest':
     if any(part.lower() in {'login','session','sessions','cookie','cookies','.netrc','.npmrc','.pypirc','.ssh','.aws','.kube','.env','.git'} for name in names for part in (ctl/'artifacts'/name).parts):
         raise RuntimeError('artifact manifest name contains private-state component')
     retention=begin_retention(d)
+    retention.update({'workspace':d['workspace'],'dataEntries':sorted({pathlib.PurePosixPath(name).parts[1] for name in names if len(pathlib.PurePosixPath(name).parts)>1 and pathlib.PurePosixPath(name).parts[0]=='.data'})})
+    temporary=ctl/'artifact-retention.tmp'; temporary.write_text(json.dumps(retention)); temporary.replace(ctl/'artifact-retention.json')
     retained=ctl/'artifacts'; retained.mkdir(mode=0o700)
     records=[]
     try:
@@ -914,6 +1059,8 @@ if d.get('forceStage') and not staged:
     print('archive cannot be staged (low disk)',file=sys.stderr); sys.exit(75)
 if staged:
     retention=begin_retention(d)
+    retention.update({'workspace':d['workspace'],'dataEntries':sorted({pathlib.PurePosixPath(name).parts[1] for name in names if len(pathlib.PurePosixPath(name).parts)>1 and pathlib.PurePosixPath(name).parts[0]=='.data'})})
+    temporary=ctl/'artifact-retention.tmp'; temporary.write_text(json.dumps(retention)); temporary.replace(ctl/'artifact-retention.json')
     destination=(ctl/'artifact-archive.tar').open('xb'); os.chmod(ctl/'artifact-archive.tar',0o600)
 else: destination=sys.stdout.buffer
 output=DigestOutput(destination)
@@ -2034,7 +2181,7 @@ async function shard(opts) {
         const workspace = `${root}/wt/${opts.project}/${storeName}/${row.slot}`;
         const repository = `${root}/repos/${opts.project}/${storeName}`;
         attempt.repository = repository;
-        data = { root, workspace, repository, slot: row.slot, job: `${opts.project}/${opts.task}`, affinity:opts.affinity, previousJob:previousSlotJob(row.slot,by), control: `${root}/runs/${randomUUID()}`, commit: opts.snapshot.commit, untracked: opts.snapshot.untracked };
+        data = { root, workspace, repository, slot: row.slot, runId: opts.runId, dataInputPaths: opts.inputs.filter(input=>input.path).map(input=>input.path), job: `${opts.project}/${opts.task}`, affinity:opts.affinity, previousJob:previousSlotJob(row.slot,by), control: `${root}/runs/${randomUUID()}`, commit: opts.snapshot.commit, untracked: opts.snapshot.untracked };
         data.modules = opts.snapshot.modules.map(mod => ({ repository: `${root}/repos/submodules/${mod.storeKey}`, commit: mod.commit, parent: mod.parent, relative: mod.relative }));
         data.reuseAllowed = !opts.snapshot.extra && !(opts.snapshot.patchFile && fs.statSync(opts.snapshot.patchFile).size) && !opts.snapshot.untracked.length;
         recordRun(row, data);
@@ -2106,6 +2253,10 @@ async function shard(opts) {
         const result = await ssh(row, 'run', { ...data, stream: true, command: job, commandMarker, cpus: attempt.cpus, env: { ...caches, ...opts.env, ...cpuEnvironment(attempt.cpus), DEVBOX_RUN_RECEIPT: `${workspace}/.devbox-run.json`, ...(inputMap?{DEVBOX_INPUTS_FILE:inputMap,DEVBOX_INPUTS_DIR:`${root}/inputs`}:{}) }, seconds: opts.timeout * 60 }, {
           state, timeout: remaining(), onOutput: emit, deferOutputEnd: true,
           onStdoutLine: line => {
+            const cleanup = /^DEVBOX_DATA_CLEANUP=(\{[^\n]*\})$/.exec(line);
+            if (cleanup) {
+              try { const record = JSON.parse(cleanup[1]); if (Array.isArray(record.entries) && Number.isFinite(record.bytes) && record.bytes >= 0) attempt.dataCleanup = record; } catch { /* Cleanup telemetry cannot fail a command. */ }
+            }
             if (line !== commandMarker || attempt.commandStarted) return;
             if (!budgets.command()) return;
             attempt.commandStarted = true;
