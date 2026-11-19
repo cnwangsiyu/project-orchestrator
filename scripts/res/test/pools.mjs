@@ -282,10 +282,10 @@ try {
   fs.writeFileSync(registryFile, described); fs.unlinkSync(hostsFile);
   expectSlot('missing-probes-description', 'devbox-cn-3', []);
   fs.writeFileSync(registryFile, registry);
-  expectSlot('missing-probes-default', 'devbox-cn-1', []); eq(health()[hostA].cores, 8);
+  expectSlot('missing-probes-default', 'devbox-cn-1', []); eq(health()[hostA].cores, null); eq(health()[hostA].coresSource, 'unknown');
   fs.writeFileSync(registryFile, described);
   fs.writeFileSync(hostsFile, JSON.stringify({ [hostA]: probe(64, 500, 25 * 3600000), [hostB]: probe(4, 500, 25 * 3600000) }));
-  expectSlot('stale-probes-description', 'devbox-cn-3', []); eq(health()[hostA].freeGiB, null);
+  expectSlot('stale-probes-retain-hardware', 'devbox-cn-1', []); eq(health()[hostA].cores, 64); eq(health()[hostA].coresSource, 'stale-probe'); eq(health()[hostA].freeGiB, null);
   for (const invalid of ['{', '[]', JSON.stringify({ [hostA]: { cores: 64 }, [hostB]: probe(0) }),
     JSON.stringify({ [hostA]: probe(64, 500, -3600000), [hostB]: probe(false) })]) {
     fs.writeFileSync(hostsFile, invalid); expectSlot('invalid-probes-fallback', 'devbox-cn-3', []);

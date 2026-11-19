@@ -583,6 +583,12 @@ skips dependency maps and `node_modules/...` subtrees rather than interpreting
 package names or dependency paths as configuration keys.
 
 `_shared/devbox-affinity.json` remembers the last host and slot for each key.
+Caller-supplied keys are scoped to repository/project identity and ref family,
+so unrelated jobs using the same name do not inherit each other's placement.
+Remembered affinity is used only after the matching slot receipt verifies a
+worktree for that scoped key. Explicit slot/host preferences remain soft and
+fresh spare-capacity ranking limits affinity to hosts within 50% of the best
+compatible headroom. Explicit `--warm-cost` still uses wait-plus-rebuild placement.
 The runner passes the remembered eligible slot through `--prefer-slot` when
 advertised by `res wait-pool`. Older controllers first try that slot without
 waiting, then use the pool. It passes `--prefer-host` and `--need` only when
@@ -592,9 +598,12 @@ The controller remains responsible for lease ownership and queue arbitration.
 
 `_shared/devbox-hosts.json` is keyed by IP. Each entry contains `user`, `root`,
 `fs`, `freeGiB`, `totalGiB`, `cores`, `memGiB`, and `probedAt` (UTC). Writes merge
-per host and publish atomically. Root discovery is cached; free space is checked
-on the workspace filesystem for every run. Consumers should label host
-measurements older than 24 hours stale.
+per host and publish atomically. Stale hardware/disk probes refresh after one
+hour, with a ten-second deadline for cached roots and a one-minute failure
+backoff. A failed refresh retains last-known hardware/root without renewing
+its age; missing initial facts fail rather than inventing eight cores. Free
+space is checked on the workspace filesystem for every run. Consumers label
+expired probe measurements stale and prefer fresh admission metrics for placement.
 
 ## VE Android Source-Only Recipe
 

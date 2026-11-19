@@ -486,7 +486,10 @@ print(json.dumps(rows))
 name=record.read_text() if record.is_file() else d['key']
 if not name or '/' in name or name in ('.','..'): raise RuntimeError('invalid store index')
 ws=root/'wt'/d['project']/name/d['slot']
-print(json.dumps(str(ws) if (ws/'.git').is_file() and (ws/'.devbox-run.json').is_file() else None))
+meta=ws/'.devbox-run.json'
+valid=(ws/'.git').is_file() and meta.is_file()
+if valid and d.get('affinity'): valid=json.loads(meta.read_text()).get('affinity')==d['affinity']
+print(json.dumps(str(ws) if valid else None))
 `,
   workspaces: pythonHeader + `root=pathlib.Path(d['root']); record=root/'store-index'/d['key']
 name=record.read_text() if record.is_file() else d['key']
@@ -869,7 +872,9 @@ async function snapshot(opts, temp, state, ancestors = new Set(), parentObjects 
   if (ancestors.has(storeKey + commit)) throw Error('recursive submodule cycle');
   opts.project ||= storeKey;
   const branch = opts.ref === 'HEAD' || opts.ref === 'worktree' ? (await git(['rev-parse', '--abbrev-ref', 'HEAD'])).trim() : opts.ref;
-  opts.affinity ||= `${storeKey}+${branch}`;
+  opts.legacyAffinity = opts.affinity || `${storeKey}+${branch}`;
+  opts.refFamily = branch;
+  opts.affinity = opts.affinity ? `${storeKey}+${branch}+${opts.affinity}` : `${storeKey}+${branch}`;
   let files = (await git(['ls-tree', '-rz', '--name-only', commit])).split('\0').filter(Boolean);
   let untracked = [];
   if (opts.ref === 'worktree') {
@@ -1088,16 +1093,30 @@ async function refreshHostMetrics(rows, state, { force = false, timeout = 15000 
   }));
 }
 
-async function hostRoot(row, state, { deadline } = {}) {
+export async function hostRoot(row, state, { deadline } = {}) {
   const cacheFile = path.join(cacheDir(), 'devbox-hosts.json');
   return withStateLock(path.join(cacheDir(), `devbox-probe-${row.host}`), async () => {
   let cache = {}; try { cache = JSON.parse(fs.readFileSync(cacheFile, 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw error; }
   let entry = cache[row.host];
-  if (!entry?.root || entry.user !== row.user || !Number.isInteger(entry.cores) || entry.cores < 1) {
-    const timeout = deadline === undefined ? 60000 : deadline - Date.now();
+  const usable = entry?.root && entry.user === row.user && Number.isInteger(entry.cores) && entry.cores > 0;
+  const age = Date.now() - Date.parse(entry?.probedAt);
+  const fresh = Number.isFinite(age) && age >= 0 && age < 3600000;
+  if (!usable || !fresh && !(entry.retryProbeAfter > Date.now())) {
+    const timeout = Math.min(usable ? 10000 : 60000, deadline === undefined ? Infinity : deadline - Date.now());
     if (timeout <= 0) throw Error('root probe deadline expired');
-    entry = JSON.parse(checked(await ssh(row, 'probe', { user: row.user }, { state, timeout, noRetry: deadline !== undefined }), 'root probe').trim());
-    await mergeState(cacheFile, row.host, entry);
+    try {
+      const probed = JSON.parse(checked(await ssh(row, 'probe', { user: row.user }, { state, timeout, noRetry: true }), 'root probe').trim());
+      if (probed.user !== row.user || !Number.isInteger(probed.cores) || probed.cores < 1
+          || !Number.isFinite(Date.parse(probed.probedAt))) throw Error('invalid host probe facts');
+      entry = probed;
+      await mergeState(cacheFile, row.host, entry);
+    } catch (error) {
+      if (!usable || state.cancel || /permission denied|gssapi|authentication failed/i.test(error.message)) throw error;
+      // Keep last-known hardware/root without renewing the observation age.
+      entry = { ...entry, retryProbeAfter: Date.now() + 60000 };
+      await mergeState(cacheFile, row.host, entry);
+      console.error(`devbox-run: stale host probe ${row.host}; refresh unavailable, retaining last-known facts`);
+    }
   }
   if (typeof entry.root !== 'string' || !entry.root.startsWith('/') || !entry.root.endsWith('/devbox-run') || entry.root.includes('\0') || entry.root.split('/').includes('..')) throw Error('invalid remote workspace root');
   return entry.root;
@@ -1440,7 +1459,17 @@ async function shard(opts) {
         const possible = opts.splitExclusions && !opts.prewarm ? internalChoices : choices;
         if (!possible.length) throw Error('no open slot meets the requested placement constraints');
         let affinities = {}; try { affinities = JSON.parse(fs.readFileSync(path.join(cacheDir(), 'devbox-affinity.json'), 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw error; }
-        const affinity = affinities[opts.affinity];
+        let affinity = affinities[opts.affinity];
+        if (affinity?.project !== opts.project || affinity?.repository !== opts.snapshot.storeKey || affinity?.refFamily !== opts.refFamily) affinity = undefined;
+        if (affinity) {
+          const candidate = possible.find(item => item.slot === affinity.slot && item.host === affinity.host);
+          if (candidate) {
+            const root = await hostRoot(candidate, state, { deadline });
+            const workspace = JSON.parse(checked(await ssh(candidate, 'warm-path', { root, project: opts.project,
+              key: opts.snapshot.storeKey, slot: candidate.slot, affinity: opts.affinity }, { state, timeout: Math.min(10000, remaining()) }), 'affinity workspace verification'));
+            if (!workspace) affinity = undefined;
+          } else affinity = undefined;
+        }
         const affinitySlot = opts.preferSlot || affinity?.slot;
         const preferred = avoid ? (possible.find(item => item.host !== avoid.host) || possible[0]).host : opts.preferHost || affinity?.host;
         const common = ['--by', by, '--project', opts.project, '--task', opts.task, '--for', opts.task, '--pid', String(process.pid)];
@@ -1614,7 +1643,8 @@ async function shard(opts) {
           emit(`[shard ${opts.shard}] disk guard refused ${row.host} after upload: need 53 GiB free\n`);
           throw Object.assign(Error('post-upload workspace disk guard'), { code: 72 });
         }
-        await mergeState(path.join(cacheDir(), 'devbox-affinity.json'), opts.affinity, { host: row.host, slot: row.slot, time: new Date().toISOString() });
+        await mergeState(path.join(cacheDir(), 'devbox-affinity.json'), opts.affinity, { host: row.host, slot: row.slot,
+          project: opts.project, repository: opts.snapshot.storeKey, refFamily: opts.refFamily, verifiedWorkspace: true, time: new Date().toISOString() });
         if (state.cancel) throw Object.assign(Error('cancelled'), { code: state.cancel });
         const hosts = JSON.parse(fs.readFileSync(path.join(cacheDir(), 'devbox-hosts.json'), 'utf8'));
         Object.assign(attempt, cpuBudget(sharedDir(), row.host, hosts[row.host]?.cores));

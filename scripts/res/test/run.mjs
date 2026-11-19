@@ -14,6 +14,7 @@ const SUITE_TIMEOUTS = {
   'fairness.mjs': 600000,
   'lanes.mjs': 600000,
   'pools.mjs': 600000,
+  'scheduler-ranking.mjs': 600000,
   'pool-identity.mjs': 600000,
   'pool-surplus.mjs': 600000,
   'pool-exclusions.mjs': 600000,

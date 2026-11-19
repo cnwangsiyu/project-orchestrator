@@ -110,6 +110,7 @@ WAITER_STALE_SECONDS="${RES_WAITER_STALE_SECONDS:-300}"  # 45 s expired the FIFO
 usage() {
   cat <<'EOF'
 res status [<id>]                     show every resource (or one) and who holds it
+res audit [--json]                   read-only host facts, slots and 24-hour allocation (no SSH)
 res take <id> --by <session> --project <slug> --for "<purpose>" [--task <id>] [--until <when>] [--offline] [--pid <pid>] [--disk-gib <GiB>]
 res wait <id> --by <session> --project <slug> --for "<purpose>" --timeout <minutes> [--disk-gib <GiB>] [--disk-gib-file <JSON>] [--placement-file <JSON>] [--maintenance] [take options]
                                       retry held resources; heavy-* waits also enforce the gate
@@ -120,7 +121,7 @@ res wait-pool <prefix> --by <session> --project <slug> --for "<purpose>" --timeo
                                       no mini locks or heavy-check; return the printed slot
                                       skips quarantined boxes; prefer-host falls back immediately
                                       need requires all caps; prefer-slot then its host precede fallback
-                                      affinity only at score <=0.5; otherwise balance held slots/cores
+                                      fresh projected spare cores first; affinity within 50% of best
                                       recent same-repo worktrees break capacity-score ties only
 res retain-remote <id> --by <session> --pid <holder-pid>
 res release-dead <id> --by <dead-holder> --pid <holder-pid>  runner-confirmed recovery
@@ -239,7 +240,7 @@ PY
       gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
       if (key !~ /^[A-Z][A-Z0-9_]*(\.[A-Za-z0-9_.-]+)?$/ || seen[key]++) exit 1
       # The remote pool controller owns these keys and validates them independently.
-      if (key ~ /^DEVBOX_(DYNAMIC_ADMISSION|DYNAMIC_HOSTS|LIGHT_STALE_RECLAIM|HEAVY_STALE_RECLAIM|SOFT_EXCLUDE_MINUTES)$/ ||
+      if (key ~ /^DEVBOX_(DYNAMIC_ADMISSION|DYNAMIC_HOSTS|LIGHT_STALE_RECLAIM|HEAVY_STALE_RECLAIM|SOFT_EXCLUDE_MINUTES|RANK_BY_SPARE)$/ ||
           key ~ /^DEVBOX_(LOAD_PER_CORE|MIN_AVAIL_GIB|HEAVY_CORES|HEAVY_GIB|LIGHT_CORES|LIGHT_GIB|HEAVY_DISK_GIB|LIGHT_DISK_GIB)(\.[A-Za-z0-9][A-Za-z0-9.-]*)?$/ ||
           key ~ /^DEVBOX_(REBUILD_PLACEMENT|INPUT_TTL_SECONDS|INPUT_WAIT_CAP_SECONDS|INPUT_SEED_MAX_SECONDS)$/ ||
           key ~ /^DEVBOX_(HEAVY|LIGHT)_DISK_GIB\.project\.[A-Za-z0-9][A-Za-z0-9_.-]*$/) next
@@ -2045,7 +2046,7 @@ def cancelled(signum, frame):
 for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP): signal.signal(signum, cancelled)
 try:
     if any(c in value for value in (by, project, task, purpose, until) for c in '\t\r\n'): raise ValueError('hold metadata must be one line')
-    if action not in ('box-health', 'scores', 'status'): os.makedirs(locks, exist_ok=True)
+    if action not in ('box-health', 'scores', 'status', 'audit'): os.makedirs(locks, exist_ok=True)
     if action in ('cancel', 'cleanup'):
         queue = os.path.join(root, 'pool-waiters', request)
         waiter = os.path.join(root, 'pool-waiters', request, 'waiter.' + controller_key)
@@ -2131,7 +2132,7 @@ try:
                     if key in ('BUILD_MAX_CONCURRENCY','LOAD_POLL_SECONDS') and not value.isdecimal(): raise ValueError('invalid known integer')
                     if key=='HEAD_OVERRIDE_BASE_LOAD' and value!='1': raise ValueError('invalid base load override')
                     heavy[key]=float(value); continue
-                if key in ('DEVBOX_DYNAMIC_ADMISSION','DEVBOX_LIGHT_STALE_RECLAIM','DEVBOX_HEAVY_STALE_RECLAIM','DEVBOX_REBUILD_PLACEMENT'):
+                if key in ('DEVBOX_DYNAMIC_ADMISSION','DEVBOX_LIGHT_STALE_RECLAIM','DEVBOX_HEAVY_STALE_RECLAIM','DEVBOX_REBUILD_PLACEMENT','DEVBOX_RANK_BY_SPARE'):
                     if value not in ('0','1'): raise ValueError('invalid devbox switch')
                     values[key]=value
                 elif key in ('DEVBOX_INPUT_TTL_SECONDS','DEVBOX_INPUT_WAIT_CAP_SECONDS','DEVBOX_INPUT_SEED_MAX_SECONDS'):
@@ -2348,15 +2349,38 @@ try:
         for box in hosts:
             probe = probes.get(box, {})
             if not isinstance(probe, dict): probe = {}
+            age = None
             try:
                 when = datetime.datetime.fromisoformat(probe.get('probedAt', '').replace('Z', '+00:00'))
-                fresh = when.tzinfo is not None and 0 <= now - when.timestamp() <= 86400
+                age = now - when.timestamp() if when.tzinfo is not None else None
+                fresh = age is not None and 0 <= age <= 3600
             except (AttributeError, TypeError, ValueError, OverflowError): fresh = False
-            cores = probe.get('cores') if fresh else None
-            cores = int(cores) if number(cores) and cores > 0 and cores == int(cores) else fallback.get(box, 8)
-            free = probe.get('freeGiB') if fresh else None
-            result[box] = dict(cores=cores, heldSlots=held[box], score=held[box] / cores,
-                               nextScore=(held[box] + 1) / cores, freeGiB=free if number(free) and free >= 0 else None)
+            measured = sample(box, now)
+            probed_cores = probe.get('cores')
+            valid_cores = number(probed_cores) and probed_cores > 0 and probed_cores == int(probed_cores)
+            if measured: cores, source = measured['cores'], 'metrics'
+            elif fresh and valid_cores: cores, source = int(probed_cores), 'probe'
+            elif box in fallback: cores, source = fallback[box], 'tag'
+            elif age is not None and age >= 0 and valid_cores: cores, source = int(probed_cores), 'stale-probe'
+            else: cores, source = None, 'unknown'
+            free = measured.get('freeGiB') if measured else probe.get('freeGiB') if fresh else None
+            entries = reservations(box, now) if measured else []
+            recent = [entry for entry in entries if now - entry[0] < 300]
+            reserved_cpu = sum(entry[1] for entry in recent)
+            reserved_mem = sum(entry[2] for entry in recent)
+            kind = 'LIGHT' if request == 'devbox-cn-light' else 'HEAVY'
+            settings = dynamic.get(box, {})
+            task_cpu = settings.get(kind + '_CORES', (config_current_values or {}).get('DEVBOX_' + kind + '_CORES.' + box,
+                         (config_current_values or {}).get('DEVBOX_' + kind + '_CORES', 1 if kind == 'LIGHT' else 3)))
+            task_mem = settings.get(kind + '_GIB', 2 if kind == 'LIGHT' else 4)
+            # CPU hardware does not shrink when a disk probe expires. Unknown
+            # hardware uses a labelled slot-count fallback, never invented cores.
+            result[box] = dict(cores=cores, coresSource=source, probeAgeSec=age,
+                               probeStale=not fresh, metricsFresh=bool(measured), heldSlots=held[box],
+                               score=held[box] / (cores or 1), nextScore=(held[box] + 1) / (cores or 1),
+                               spareCores=cores - max(measured['load5'], reserved_cpu) - task_cpu if measured else None,
+                               spareMemGiB=measured['memAvailableGiB'] - reserved_mem - task_mem if measured else None,
+                               freeGiB=free if number(free) and free >= 0 else None)
         return result
     def warm_slots(project, remote):
         try:
@@ -2366,6 +2390,12 @@ try:
         # Match devbox-run's project identity and its default identity+branch keys.
         identity = project if re.fullmatch(r'id-[a-f0-9]{64}', project) else 'id-' + hashlib.sha256(('project:' + project).encode()).hexdigest()
         warm = {}
+        latest = {}
+        for value in affinities.values():
+            if not isinstance(value, dict): continue
+            try: used = datetime.datetime.fromisoformat(value.get('time', '').replace('Z', '+00:00')).timestamp()
+            except (AttributeError, TypeError, ValueError, OverflowError): continue
+            if 0 < used <= now: latest[value.get('slot')] = max(latest.get(value.get('slot'), 0), used)
         for key, value in affinities.items():
             if not key.startswith(identity + '+') or not isinstance(value, dict): continue
             slot = value.get('slot')
@@ -2375,11 +2405,80 @@ try:
                 used = stamp.timestamp()
                 if stamp.tzinfo is None or not math.isfinite(used) or used <= 0 or used > now: continue
             except (AttributeError, TypeError, ValueError, OverflowError): continue
+            if used < latest.get(slot, 0): continue
+            if sample(remote[slot][1], now) and (not value.get('verifiedWorkspace') or value.get('repository') != identity): continue
             warm[slot] = max(warm.get(slot, 0), used)
         return warm
     hosts = {value[1] for value in remote.values()}
     def score_line(value):
-        return 'heldSlots=%d cores=%d score=%.4f nextScore=%.4f' % (value['heldSlots'], value['cores'], value['score'], value['nextScore'])
+        return ('heldSlots=%d cores=%s score=%.4f nextScore=%.4f cores_source=%s probe_age_seconds=%s facts=%s spare_cores=%s' %
+                (value['heldSlots'], value['cores'] if value['cores'] is not None else '?', value['score'], value['nextScore'],
+                 value['coresSource'], int(value['probeAgeSec']) if value['probeAgeSec'] is not None else '?',
+                 'STALE-PROBE' if value['probeStale'] else 'fresh', value['spareCores'] if value['spareCores'] is not None else '?'))
+    if action == 'audit':
+        counts, ever, mini, denials = {}, set(), {}, {}
+        try:
+            with open(journal) as stream:
+                for line in stream:
+                    fields = line.rstrip('\n').split('\t')
+                    if len(fields) < 3: continue
+                    at, event, id = fields[:3]
+                    if event == 'take': ever.add(id)
+                    try: recent = 0 <= now - datetime.datetime.strptime(at, '%Y-%m-%d %H:%M').timestamp() < 86400
+                    except ValueError: continue
+                    if not recent: continue
+                    if event == 'take':
+                        counts[id] = counts.get(id, 0) + 1
+                        if id.startswith('heavy-'): mini[id] = mini.get(id, 0) + 1
+                    elif event == 'gate-deny' and id in remote:
+                        reason = re.search(r'(?:^|\s)reason=([\w-]+)', fields[-1])
+                        if reason:
+                            key = remote[id][1] + ':' + reason.group(1)
+                            denials[key] = denials.get(key, 0) + 1
+        except FileNotFoundError: pass
+        values = capacity({member[1] for id, member in remote.items() if slot_type(id)})
+        active = {box for box in hosts if any(member[0] == 'open' and member[1] == box and slot_type(id) for id, member in remote.items())}
+        total_cores = sum(values[box]['cores'] or 0 for box in active)
+        total_takes = sum(counts.get(id, 0) for id in remote if slot_type(id))
+        shown = {}
+        for box, value in sorted(values.items()):
+            ids = [id for id, member in remote.items() if member[1] == box and slot_type(id)]
+            pools = {}
+            for kind in ('HEAVY', 'LIGHT'):
+                slots = [id for id in ids if slot_type(id) == kind]
+                pools[kind.lower()] = dict(open=sum(remote[id][0] == 'open' and not floating(id) for id in slots),
+                    dynamic=sum(remote[id][0] == 'open' and floating(id) for id in slots), never=sum(remote[id][0] == 'never' for id in slots),
+                    held=sum(os.path.isdir(os.path.join(locks, id + '.d')) for id in slots),
+                    takes24h=sum(counts.get(id, 0) for id in slots))
+            caps, prefs = {}, {}
+            for id in ids:
+                if remote[id][0] != 'open': continue
+                for cap in remote[id][2]: caps[cap] = caps.get(cap, 0) + 1
+                for pref in remote[id][3]: prefs[pref] = prefs.get(pref, 0) + 1
+            takes = sum(counts.get(id, 0) for id in ids)
+            warnings = []
+            if value['probeStale']: warnings.append('stale or missing host probe; refresh through runner')
+            if not value['metricsFresh']: warnings.append('stale or missing admission metrics; static rows only')
+            if value['cores'] is None: warnings.append('unknown cores; slot-count ranking fallback')
+            shown[box] = dict(**value, pools=pools, caps=dict(sorted(caps.items())), prefer=dict(sorted(prefs.items())),
+                takes24h=takes, takeShare=takes / total_takes if total_takes else 0,
+                coreShare=(value['cores'] or 0) / total_cores if box in active and total_cores else 0,
+                unusedOpen24h=[id for id in ids if remote[id][0] == 'open' and not counts.get(id)],
+                neverUsedOpen=[id for id in ids if remote[id][0] == 'open' and id not in ever], warnings=warnings)
+        report = dict(at=now, windowHours=24, hosts=shown, miniTakes24h=dict(sorted(mini.items())), gateDenials24h=dict(sorted(denials.items())))
+        if request == '--json': print(json.dumps(report, indent=2))
+        else:
+            print('Read-only scheduler audit: trailing 24 hours; takes are starts, not CPU utilisation')
+            for box, value in shown.items():
+                print('Host ' + box + ' ' + score_line(value))
+                print('  pools=' + json.dumps(value['pools'], sort_keys=True))
+                print('  caps=' + json.dumps(value['caps'], sort_keys=True) + ' prefer=' + json.dumps(value['prefer'], sort_keys=True))
+                print('  takes24h=%d take_share=%.1f%% core_share=%.1f%% free_disk_gib=%s' % (value['takes24h'], value['takeShare']*100, value['coreShare']*100, value['freeGiB']))
+                print('  unused_open_24h=' + ','.join(value['unusedOpen24h']) + ' never_used_open=' + ','.join(value['neverUsedOpen']))
+                for warning in value['warnings']: print('  WARNING: ' + warning)
+            print('Mini takes24h: ' + json.dumps(report['miniTakes24h'], sort_keys=True))
+            print('Gate denials24h: ' + json.dumps(report['gateDenials24h'], sort_keys=True))
+        committed = True; sys.exit(0)
     if action == 'box-health':
         state = health()
         scores = capacity(hosts | set(state))
@@ -2660,11 +2759,21 @@ try:
     heads = waiting()
     blocked = action == 'take' and bool(heads)
     preferred_host = remote.get(preferred_slot, (None, None))[1]
-    def rank(id):
+    rank_spare = (config_current_values or {}).get('DEVBOX_RANK_BY_SPARE', '1') == '1'
+    best_spare = {}
+    def preference_tier(id):
         preferences = remote[id][3]
-        tier = 0 if not preferences else -1 if required & preferences else 1
+        return 0 if not preferences else -1 if required & preferences else 1
+    def rank(id):
+        tier = preference_tier(id)
         value = scores[remote[id][1]]; affinity = value['nextScore'] <= 0.5
-        return (tier, not (affinity and id == preferred_slot),
+        if rank_spare and value['spareCores'] is not None:
+            affinity = value['spareCores'] >= max(0, best_spare.get(tier, value['spareCores']) * 0.5)
+            return (tier, 0, not (affinity and id == preferred_slot),
+                    not (affinity and preferred_host and remote[id][1] == preferred_host),
+                    not (affinity and remote[id][1] == prefer), -warm.get(id, 0) if affinity else 0,
+                    -value['spareCores'], -(value['spareMemGiB'] or 0), -(value['freeGiB'] or 0), id)
+        return (tier, 1, not (affinity and id == preferred_slot),
                 not (affinity and preferred_host and remote[id][1] == preferred_host),
                 not (affinity and remote[id][1] == prefer), value['nextScore'],
                 -warm.get(id, 0), -(value['freeGiB'] or 0), id)
@@ -2722,6 +2831,17 @@ try:
     if action == 'wait':
         scores = capacity(hosts)
         warm = warm_slots(project, remote)
+        if not own.get('facts_noticed'):
+            for box in sorted({remote[id][1] for id in members}):
+                if scores[box]['probeStale']:
+                    print('res: host facts ' + box + ' ' + score_line(scores[box]), file=sys.stderr, flush=True)
+            own['facts_noticed'] = '1'; refresh_waiter()
+        for id in members:
+            value = scores[remote[id][1]]
+            if value['spareCores'] is None or quarantined(id, state) or os.path.isdir(os.path.join(locks, id + '.d')): continue
+            if slot_type(id) and not gate_open(evaluate(id, remote[id][1], diagnostic=True)[0]): continue
+            tier = preference_tier(id)
+            best_spare[tier] = max(best_spare.get(tier, 0), value['spareCores'])
         candidates = sorted(members, key=rank)
         if input_placement:
             table = []
@@ -3305,6 +3425,10 @@ case "${1:-}" in
     shift
     [ "$#" -eq 0 ] || { [ "$#" -eq 1 ] && [ "$1" = --json ]; } || die 'box-health accepts only --json'
     pool_report box-health "${1:-}" ;;
+  audit)
+    shift
+    [ "$#" -eq 0 ] || { [ "$#" -eq 1 ] && [ "$1" = --json ]; } || die 'audit accepts only --json'
+    pool_report audit "${1:-}" ;;
   release-dead|retain-remote)
     action="$1"
     id="${2:-}"; shift 2

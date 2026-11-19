@@ -5,6 +5,29 @@ tool (devices, checkouts, registry/notes, take/return/extend/add/note/log and he
 from vesdk-mainline to the global-rules owner on 2026-11-13. The unmodified v1.2 contract is preserved
 in `scripts/res/test/fixtures/contract-v1.2.md`. v1.10 takes effect at the owner's reviewed switch.
 
+## Scheduler Audit (2026-11-18)
+
+`DEVBOX_RANK_BY_SPARE=1` is the default; `0` restores slot-count ranking.
+With fresh five-minute admission metrics, candidates within each `prefer=` tier
+rank by projected absolute spare cores: `cores - max(load5, reserved cores) - task cores`.
+Memory headroom, fresh free disk and slot ID resolve ties. Slot/host affinity and
+verified warm worktrees may lead only when spare cores are at least 50% of the
+best free, admitted, compatible host in that tier. FIFO and the conservative
+additive admission gate are unchanged. Explicit rebuild-cost placement still
+minimizes wait plus rebuild cost, retaining the VESDK warm-slot behavior.
+Without fresh metrics the labelled slot-count fallback remains. Hardware comes
+from fresh metrics, a fresh probe, registry tags, or a labelled stale probe;
+unknown hardware is shown as unknown, never fabricated as eight cores. Probe
+disk facts expire after one hour. `res status` and pool diagnostics label stale
+probes, their ages and the cores source.
+
+`res audit [--json]` reads local state only: per-host hardware/source/age,
+baseline/dynamic/never rows by pool, caps/prefer counts, current holds, trailing
+24-hour takes/share versus cores/share, unused open rows, and mini lane/build
+take counts. It never SSHs, acquires, reclaims or writes state. Take share is
+start count, not measured CPU utilisation; a fresh registry capability is not
+proof of the toolchain on untested slots. Registry/config changes remain owner-only.
+
 ## Forward-compatible waiter configuration (BC-140)
 
 Unknown well-formed `KEY=value` records with keys matching
