@@ -1432,7 +1432,7 @@ async function scenarios() {
 
   let failedArtifact = fixture({ badArtifact: true }); assert.equal((await run(failedArtifact, ['--artifact', '*.txt'])).code, 0); returned(failedArtifact);
   const left = await run(failedArtifact = fixture({ badArtifact: true }), ['--artifact', '*.txt', '--fetch-timeout', '30']);
-  assert.equal(left.code, 0); assert.match(left.stdout + left.stderr, /artifacts remain on devbox-cn-\d+/);
+  assert.equal(left.code, 0); assert.match(left.stdout + left.stderr, /artifacts not retained; files remain on devbox-cn-\d+/);
   assert.equal(left.summary.shards[0].attempts[0].artifactExit, 66);
   assert.deepEqual(left.summary.shards[0].attempts[0].artifactsLeft.patterns, ['*.txt']); returned(failedArtifact);
   await assert.rejects(run(fixture(), ['--fetch-timeout', '0']).then(r => { if (r.code) throw Error('rejected'); }), /rejected/);
