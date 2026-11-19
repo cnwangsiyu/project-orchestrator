@@ -907,7 +907,11 @@ node scripts/devbox-run.mjs fetch-artifact \
 ```
 
 `--retain-hours HOURS` sets artifact retention to >0 and <=72 hours (default 24).
-Failed commands do not collect/retain artifacts unless `--retain-on-fail` is set.
+Default `--artifact-fetch all` behavior on failure is unchanged: requested
+artifacts are collected and read back even when the command exits non-zero.
+In manifest mode only, failed commands do not retain artifact copies unless
+`--retain-on-fail` is set. Without that opt-in, the attempt falls back to normal
+readback (`attempt.artifactFetchFallback=all`) so logs/reports are not lost.
 The runner copies selected regular files into the UUID receipt directory's
 `artifacts/` before releasing its slot. Copies are independent of the reusable
 workspace, so later checkout/builds cannot alter the retained bytes. This needs

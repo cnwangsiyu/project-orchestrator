@@ -2048,13 +2048,17 @@ async function shard(opts) {
               attempt.unitTimings = attempt.unitTimings.filter(record => opts.units.includes(record.unit));
             } catch (error) { attempt.timingError = error.message; emit(`[shard ${opts.shard}] ${error.message}\n`); }
           }
-          if (clean && opts.artifacts.length && (!attempt.exit || opts.retainOnFail)) {
+          if (clean && opts.artifacts.length) {
             phases.phase('transferOut');
-            const manifestOnly = opts.artifactFetch === 'manifest';
+            const manifestOnly = opts.artifactFetch === 'manifest' && (!attempt.exit || opts.retainOnFail);
+            if (opts.artifactFetch === 'manifest' && !manifestOnly) {
+              attempt.artifactFetchFallback = 'all';
+              emit(`[shard ${opts.shard}] failed command: manifest retention skipped; fetching artifacts normally\n`);
+            }
             const streams = Math.min(opts.artifactStreams, Math.max(1, Math.floor(8 / opts.shards)));
             const fetchDeadline = Date.now() + opts.fetchTimeout * 60000;
             const archive = path.join(opts.out, `shard-${opts.shard}-attempt-${attempts.length}.${manifestOnly ? 'manifest.json' : 'tar'}`);
-            const fetched = await ssh(row, 'artifacts', { ...data, host: row.host, fetch: opts.artifactFetch, retainHours: opts.retainHours, streams, patterns: opts.artifacts }, { outputFile: archive, cancellable: false, state, timeout: opts.fetchTimeout * 60000 });
+            const fetched = await ssh(row, 'artifacts', { ...data, host: row.host, fetch: manifestOnly ? 'manifest' : 'all', retainHours: opts.retainHours, streams, patterns: opts.artifacts }, { outputFile: archive, cancellable: false, state, timeout: opts.fetchTimeout * 60000 });
             const planRecord = /DEVBOX_ARTIFACT_PLAN=(\{[^\n]*\})/.exec(fetched.stderr);
             if (!fetched.code && planRecord && !manifestOnly) {
               try {

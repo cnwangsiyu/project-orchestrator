@@ -776,14 +776,8 @@ async function sshDropScenarios() {
   const failure = await run(failed, ['--artifact', 'source.txt']);
   assert.equal(failure.code, 3);
   assert.equal(failure.summary.shards[0].sshDropRecovered, true);
-  assert.ok(!failed.events().some(e => e.op === 'artifacts'),'a recovered failed command does not collect artifacts by default');
+  assert.ok(failed.events().some(e => e.op === 'artifacts'));
   returned(failed);
-  const retainedFailure = fixture({ postStartFailure: true, remoteExit: 3 });
-  const retained = await run(retainedFailure, ['--artifact', 'source.txt', '--retain-on-fail']);
-  assert.equal(retained.code, 3);
-  assert.equal(retained.summary.shards[0].sshDropRecovered, true);
-  assert.ok(retainedFailure.events().some(e => e.op === 'artifacts'),'explicit failure retention still collects recovered command artifacts');
-  returned(retainedFailure);
 
   const finishing = fixture({ postStartFailure: true, completeOnReconnect: true });
   const reattached = await run(finishing);
@@ -1278,9 +1272,20 @@ async function scenarios() {
   assert.equal(retired.status,0,retired.stdout+retired.stderr); assert.match(retired.stdout,/"remainingBytes": 0/); returned(retained);
   const failedCommand=fixture();
   const noRetention=await run(failedCommand,['--artifact','build/result.txt','--artifact-fetch','manifest'],'mkdir -p build && printf failed > build/result.txt; exit 7');
-  assert.equal(noRetention.code,7); assert.equal(failedCommand.events().filter(event=>event.op==='artifacts').length,0); returned(failedCommand);
+  assert.equal(noRetention.code,7); assert.equal(failedCommand.events().filter(event=>event.op==='artifacts').length,1);
+  const failedAttempt=noRetention.summary.shards[0].attempts[0];
+  assert.equal(failedAttempt.artifactFetchFallback,'all');
+  assert.equal(failedAttempt.artifactManifest,undefined); assert.equal(failedAttempt.artifactsRetained,undefined);
+  assert.ok(failedAttempt.artifact,'failed manifest-mode attempts fall back to normal readback instead of losing artifacts');
+  assert.equal(execFileSync('tar',['-xOf',failedAttempt.artifact,'build/result.txt'],{encoding:'utf8'}),'failed');
+  const failedRoot=JSON.parse(fs.readFileSync(path.join(failedCommand.shared,'devbox-hosts.json')))['192.0.2.1'].root;
+  assert.ok(fs.readdirSync(path.join(failedRoot,'runs')).every(run=>!fs.existsSync(path.join(failedRoot,'runs',run,'artifacts'))),'failed manifest mode leaves no retained payload directory');
+  returned(failedCommand);
   const withRetention=await run(failedCommand,['--artifact','build/result.txt','--artifact-fetch','manifest','--retain-on-fail'],'mkdir -p build && printf failed > build/result.txt; exit 7');
-  assert.equal(withRetention.code,7); assert.ok(withRetention.summary.shards[0].attempts[0].artifactManifest); returned(failedCommand);
+  assert.equal(withRetention.code,7); assert.ok(withRetention.summary.shards[0].attempts[0].artifactManifest);
+  const failedManifest=JSON.parse(fs.readFileSync(withRetention.summary.shards[0].attempts[0].artifactManifest));
+  assert.equal(fs.readFileSync(path.join(failedManifest.control,'artifacts/build/result.txt'),'utf8'),'failed','explicit manifest-mode failure retention preserves the copied payload');
+  returned(failedCommand);
 
   let failedArtifact = fixture({ badArtifact: true }); assert.equal((await run(failedArtifact, ['--artifact', '*.txt'])).code, 66); returned(failedArtifact);
   const left = await run(failedArtifact = fixture({ badArtifact: true }), ['--artifact', '*.txt', '--fetch-timeout', '30']);
