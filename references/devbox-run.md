@@ -910,11 +910,15 @@ The runner copies selected regular files into the UUID receipt directory's
 `artifacts/` before releasing its slot. Copies are independent of the reusable
 workspace, so later checkout/builds cannot alter the retained bytes. This needs
 additional devbox disk space; retention still requires the 53 GiB reserve.
-No symlinks or special files are accepted. `fetch-artifact` leases the original
-registered slot, checks the UUID/source receipt and remote size/hash, verifies
+No symlinks or special files are accepted. `fetch-artifact` declares the selected
+copy as a non-rebuildable hashed input and leases an eligible same-host/user
+light slot through input placement (heavy pool only if that host has no open
+light resource). It checks the UUID/source receipt and remote size/hash, verifies
 the returned size/hash, and publishes the destination without overwriting any
 existing file. It returns its lease on success, failure, or cancellation.
-The original slot must remain registered/open and fetching can queue for it.
+The original slot must remain registered/open for receipt validation, but need
+not be free. Fetching queues for a compatible resource without changing admission
+gates or using exclusions to force placement.
 
 A subsequent devbox step can declare each retained file with `--input`, using
 its manifest hash and `path=CONTROL/artifacts/NAME`, and `rebuildable=no`. Input

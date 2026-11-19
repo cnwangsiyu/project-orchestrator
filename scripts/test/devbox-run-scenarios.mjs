@@ -84,7 +84,8 @@ if(a.includes('--prefer-slot')) ids.sort((x,y)=>Number(y.slot===flag(a,'--prefer
 let cancelled=false;process.on('SIGTERM',()=>{cancelled=true;});
 const deadline=Date.now()+Number(a.includes('--timeout')?flag(a,'--timeout'):0)*60000;
 do {
- for(const r of ids){const lock=path.join(c.shared,'locks',r.slot+'.d');try{fs.mkdirSync(lock);}catch(e){if(e.code==='EEXIST')continue;throw e;}
+ const plan=a.includes('--placement-file')?JSON.parse(fs.readFileSync(flag(a,'--placement-file'),'utf8')):null;
+ for(const r of ids){if(plan&&!plan.slots[r.slot]?.eligible)continue;const lock=path.join(c.shared,'locks',r.slot+'.d');try{fs.mkdirSync(lock);}catch(e){if(e.code==='EEXIST')continue;throw e;}
   fs.writeFileSync(path.join(lock,'info'),'by\t'+by+'\npid\t'+flag(a,'--pid')+'\n');event('take',{slot:r.slot,by,pid:Number(flag(a,'--pid'))});
   if(c.prewarmBusyOnAcquire&&r.slot.includes('light')){const heavy=rows.find(x=>x.host===r.host&&/^devbox-cn-\d+$/.test(x.slot));const foreign=path.join(c.shared,'locks',heavy.slot+'.d');fs.mkdirSync(foreign);fs.writeFileSync(path.join(foreign,'info'),'by\tfixture-foreign\npid\t1\n');}
   if(c.cancelAcquire){process.kill(Number(flag(a,'--pid')),'SIGTERM');await sleep(100);process.exit(143);}
@@ -1162,12 +1163,36 @@ async function scenarios() {
   assert.equal(manifest.artifacts[0].name, 'build/result.txt');
   assert.equal(manifest.artifacts[0].size, 8);
   ok(await run(retained, [], 'printf reused > build/result.txt')); returned(retained);
+  const foreignLock = path.join(retained.shared, 'locks', manifest.slot + '.d');
+  fs.mkdirSync(foreignLock);
+  const foreignInfo = 'by\tfixture-foreign\npid\t1\n';
+  fs.writeFileSync(path.join(foreignLock, 'info'), foreignInfo);
+  // Put the other host first to ensure input placement, not pool order, binds the fetch.
+  const registryFile = path.join(retained.shared, 'resources.tsv');
+  const registryLines = fs.readFileSync(registryFile, 'utf8').trim().split('\n');
+  registryLines.sort((x, y) => Number(y.startsWith('devbox-cn-light-2\t')) - Number(x.startsWith('devbox-cn-light-2\t')));
+  fs.writeFileSync(registryFile, registryLines.join('\n') + '\n');
   const pulled = path.join(retained.dir, 'pulled.txt');
   const fetched = spawnSync(process.execPath, [script, 'fetch-artifact', '--manifest', savedAttempt.artifactManifest, '--name', 'build/result.txt', '--out', pulled], { env: retained.env, encoding: 'utf8' });
   assert.equal(fetched.status, 0, fetched.stdout + fetched.stderr);
-  assert.equal(fs.readFileSync(pulled, 'utf8'), 'retained'); returned(retained);
+  assert.equal(fs.readFileSync(pulled, 'utf8'), 'retained');
+  assert.equal(fs.readFileSync(path.join(foreignLock, 'info'), 'utf8'), foreignInfo);
+  const fetchLease = retained.events().filter(event => event.op === 'acquire-call').at(-1);
+  assert.equal(fetchLease.args[0], 'wait-pool'); assert.equal(fetchLease.args[1], 'devbox-cn-light');
+  assert.ok(fetchLease.args.includes('--placement-file'));
+  assert.ok(!fetchLease.args.some(arg => arg.startsWith('--exclude')));
+  assert.equal(retained.events().filter(event => event.op === 'take').at(-1).slot, 'devbox-cn-light');
+  assert.equal(retained.events().filter(event => event.op === 'fetch-artifact').at(-1).target, 'alice@192.0.2.1');
   const refused = spawnSync(process.execPath, [script, 'fetch-artifact', '--manifest', savedAttempt.artifactManifest, '--name', 'build/result.txt', '--out', pulled], { env: retained.env, encoding: 'utf8' });
   assert.notEqual(refused.status, 0); assert.equal(fs.readFileSync(pulled, 'utf8'), 'retained');
+  fs.writeFileSync(path.join(retained.dir, 'config.json'), JSON.stringify({ ...retained.config, cancelAcquire: true }));
+  const cancelledOut = path.join(retained.dir, 'cancelled.txt');
+  const cancelledFetch = spawnSync(process.execPath, [script, 'fetch-artifact', '--manifest', savedAttempt.artifactManifest, '--name', 'build/result.txt', '--out', cancelledOut], { env: retained.env, encoding: 'utf8' });
+  assert.notEqual(cancelledFetch.status, 0);
+  assert.equal(fs.existsSync(cancelledOut), false);
+  assert.equal(fs.readFileSync(path.join(foreignLock, 'info'), 'utf8'), foreignInfo);
+  assert.deepEqual(fs.readdirSync(path.join(retained.shared, 'locks')), [manifest.slot + '.d']);
+  fs.rmSync(foreignLock, { recursive: true }); returned(retained);
 
   let failedArtifact = fixture({ badArtifact: true }); assert.equal((await run(failedArtifact, ['--artifact', '*.txt'])).code, 66); returned(failedArtifact);
   const left = await run(failedArtifact = fixture({ badArtifact: true }), ['--artifact', '*.txt', '--fetch-timeout', '30']);

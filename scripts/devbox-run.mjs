@@ -2148,12 +2148,21 @@ export async function fetchArtifact(args) {
   opts.timeout = Number(opts.timeout);
   if (!opts.manifest || !opts.out || !artifactName(opts.name) || sensitiveFile.test(opts.name)
       || !Number.isFinite(opts.timeout) || opts.timeout <= 0 || opts.timeout > 120) throw Error('invalid fetch-artifact arguments');
-  const rows = [...readRegistry(sharedDir(), 'devbox-cn'), ...readRegistry(sharedDir(), 'devbox-cn-light')];
+  const heavyRows = readRegistry(sharedDir(), 'devbox-cn'), lightRows = readRegistry(sharedDir(), 'devbox-cn-light');
+  const rows = [...heavyRows, ...lightRows];
   const { receipt, artifact, row } = readArtifactManifest(opts.manifest, opts.name, rows);
+  const sameOwner = candidate => candidate.host === row.host && candidate.target === row.target;
+  const pool = lightRows.some(sameOwner) ? 'devbox-cn-light' : 'devbox-cn';
+  const candidates = (pool === 'devbox-cn-light' ? lightRows : heavyRows).filter(sameOwner);
+  if (!candidates.length) throw Error('artifact host has no compatible open resource');
   const out = path.resolve(opts.out);
   if (fs.existsSync(out)) throw Error('--out already exists');
   fs.mkdirSync(path.dirname(out), { recursive: true });
   const partial = out + '.' + randomUUID() + '.partial';
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'devbox-artifact-fetch-'));
+  const placementFile = path.join(temp, 'placement.json');
+  const placementOpts = { placementInputs: manifest([{ name: 'retained-artifact', hash: artifact.sha256,
+    rebuildable: false, cost: '0s', size: artifact.size / GiB, path: `${receipt.control}/artifacts/${artifact.name}` }]) };
   const by = `artifact-fetch-${process.pid}-${randomUUID()}`;
   const state = cancellationState();
   const stop = () => state.stop(143);
@@ -2162,13 +2171,39 @@ export async function fetchArtifact(args) {
   const watch = setInterval(() => { try { process.kill(parent, 0); } catch { state.stop(143); } }, 1000);
   const deadline = Date.now() + opts.timeout * 60000;
   try {
-    checked(await executeRes(['wait', row.slot, '--by', by, '--project', 'orchestrator', '--task', 'fetch-artifact', '--for', 'retained artifact ' + opts.name,
-      '--pid', String(process.pid), '--timeout', String(opts.timeout)], { state, timeout: Math.max(1, deadline - Date.now()) }), 'artifact lease');
-    const hold = readHold(row);
-    if (hold?.fields.by !== by || hold.fields.pid !== String(process.pid)) throw Error('artifact lease ownership changed');
     const root = await hostRoot(row, state, { deadline });
     if (receipt.control !== `${root}/runs/${receipt.run}`) throw Error('artifact manifest root differs from registered host root');
-    checked(await ssh(row, 'fetch-artifact', { ...receipt, root, artifact },
+    await verifyInputs(row, placementOpts.placementInputs, placementOpts, state,
+      { force: true, timeout: Math.max(1, deadline - Date.now()) });
+    const refresh = async () => {
+      await refreshHostMetrics(candidates, state, { timeout: Math.min(15000, Math.max(1, deadline - Date.now())) });
+      const index = await verifyInputs(candidates[0], placementOpts.placementInputs, placementOpts, state,
+        { timeout: Math.max(1, deadline - Date.now()) });
+      const holds = Object.fromEntries(candidates.map(candidate => [candidate.slot, readHold(candidate)?.fields]));
+      const scores = placement(candidates, placementOpts.placementInputs, { [row.host]: index }, {},
+        { ...inputSettings(sharedDir()), holds });
+      const plan = { version: 1, at: Date.now() / 1000,
+        slots: Object.fromEntries(scores.map(value => [value.slot, { ...value, extraDiskGiB: 0 }])) };
+      if (!Object.values(plan.slots).some(value => value.eligible)) throw Error('retained artifact is unavailable on its registered host');
+      writeJSON(placementFile, plan);
+    };
+    await refresh();
+    let refreshing;
+    const timer = setInterval(() => {
+      if (!refreshing) refreshing = refresh().catch(() => state.stop(74)).finally(() => { refreshing = null; });
+    }, 60000);
+    let acquired;
+    try {
+      acquired = checked(await executeRes(['wait-pool', pool, '--by', by, '--project', 'orchestrator', '--task', 'fetch-artifact', '--for', 'retained artifact ' + opts.name,
+        '--pid', String(process.pid), '--timeout', String(Math.max(1, deadline - Date.now()) / 60000), '--placement-file', placementFile],
+      { state, timeout: Math.max(1, deadline - Date.now()) }), 'artifact lease');
+    } finally { clearInterval(timer); await refreshing; }
+    const slot = /^slot=(\S+)$/m.exec(acquired)?.[1];
+    const leasedRow = candidates.find(candidate => candidate.slot === slot);
+    if (!leasedRow || !sameOwner(leasedRow)) throw Error('artifact lease selected a different host/user');
+    const hold = readHold(leasedRow);
+    if (hold?.fields.by !== by || hold.fields.pid !== String(process.pid)) throw Error('artifact lease ownership changed');
+    checked(await ssh(leasedRow, 'fetch-artifact', { ...receipt, root, artifact },
       { state, outputFile: partial, timeout: Math.max(1, deadline - Date.now()) }), 'artifact readback');
     if (fs.statSync(partial).size !== artifact.size || await fileDigest(partial) !== artifact.sha256) throw Error('artifact size/SHA-256 mismatch');
     fs.linkSync(partial, out); fs.unlinkSync(partial);
@@ -2178,9 +2213,13 @@ export async function fetchArtifact(args) {
     clearInterval(watch); process.removeListener('SIGTERM', stop); process.removeListener('SIGINT', stop);
     if (fs.existsSync(partial)) fs.unlinkSync(partial);
     await closeControlConnections(state);
-    const hold = readHold(row);
-    if (hold?.fields.by === by && hold.fields.pid === String(process.pid))
-      checked(await executeRes(['return', row.slot, '--by', by], { state, cancellable: false, timeout: 30000 }), 'artifact lease return');
+    // Acquisition may be interrupted after res creates a hold but before it prints the slot.
+    for (const candidate of rows) {
+      const hold = readHold(candidate);
+      if (hold?.fields.by === by && hold.fields.pid === String(process.pid))
+        checked(await executeRes(['return', candidate.slot, '--by', by], { state, cancellable: false, timeout: 30000 }), 'artifact lease return');
+    }
+    fs.rmSync(temp, { recursive: true, force: true });
   }
 }
 
