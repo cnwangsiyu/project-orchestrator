@@ -776,8 +776,14 @@ async function sshDropScenarios() {
   const failure = await run(failed, ['--artifact', 'source.txt']);
   assert.equal(failure.code, 3);
   assert.equal(failure.summary.shards[0].sshDropRecovered, true);
-  assert.ok(failed.events().some(e => e.op === 'artifacts'));
+  assert.ok(!failed.events().some(e => e.op === 'artifacts'),'a recovered failed command does not collect artifacts by default');
   returned(failed);
+  const retainedFailure = fixture({ postStartFailure: true, remoteExit: 3 });
+  const retained = await run(retainedFailure, ['--artifact', 'source.txt', '--retain-on-fail']);
+  assert.equal(retained.code, 3);
+  assert.equal(retained.summary.shards[0].sshDropRecovered, true);
+  assert.ok(retainedFailure.events().some(e => e.op === 'artifacts'),'explicit failure retention still collects recovered command artifacts');
+  returned(retainedFailure);
 
   const finishing = fixture({ postStartFailure: true, completeOnReconnect: true });
   const reattached = await run(finishing);
