@@ -11,6 +11,8 @@ case "$*" in
     pid="$2"
     alive "$pid" || exit 1
     printf '%s\n' "$pid" ;;
+  '-axo pid=,ppid=,pgid=,sess=,state=,args=')
+    if [ -n "${RES_TEST_PROCESS_TABLE:-}" ]; then cat "$RES_TEST_PROCESS_TABLE"; fi ;;
   '-axo pid=')
     for file in "$RES_DIR"/locks/*.d/info; do
       [ -f "$file" ] || continue

@@ -58,7 +58,7 @@ if(c.liveHelp&&a.includes('--help')){console.error('res: wait-pool needs a resou
 if(c.liveHelp&&op==='help'){console.log('res wait-pool <prefix> --by S [--need <cap,cap>] [--prefer-host <ip>] [--prefer-slot <id>] [--exclude-slot <id,...>] [--exclude-host <ip,...>]');return;}
 if(a.includes('--help')) {console.log('res wait-pool'+(c.legacy?'':' --prefer-host IP --need CAP --exclude-slot IDS --exclude-host IPS'+(c.preferSlot?' --prefer-slot SLOT':'')+(c.diskCosts?' --disk-gib-file JSON':'')));return;}
 const rows=fs.readFileSync(path.join(c.shared,'resources.tsv'),'utf8').trim().split('\n').map(l=>{const [slot,kind,policy,,desc]=l.split('\t');return {slot,kind,policy,host:desc.match(/@(\d+\.\d+\.\d+\.\d+)/)?.[1],caps:desc.match(/caps=([\w,-]+)/)?.[1].split(',')||[]};});
-if(op==='return'){
+if(op==='return'||op==='release-dead'){
  const lock=path.join(c.shared,'locks',a[1]+'.d');
  if(fs.existsSync(lock)){const info=fs.readFileSync(path.join(lock,'info'),'utf8');if(!info.includes('by\t'+by+'\n'))process.exit(9);fs.rmSync(lock,{recursive:true});}
  event('return',{slot:a[1],by});console.log('return '+a[1]);console.log('ack returned');return;
@@ -105,6 +105,7 @@ if(c.authFailures){
  const file=path.join(c.dir,'auth-count');const count=fs.existsSync(file)?Number(fs.readFileSync(file)):0;
  if(count<c.authFailures){fs.writeFileSync(file,String(count+1));console.error(c.authMessage||'Permission denied (gssapi-with-mic)');process.exit(255);}
 }
+if(op==='dead-slot'){console.log(JSON.stringify({clean:!c.remoteRunning,count:c.remoteRunning?1:0,worktrees:1}));return;}
 if(op==='reconnect'){
  if(c.reconnectRetries&&!fs.existsSync(path.join(c.dir,'reconnect-failed'))){fs.writeFileSync(path.join(c.dir,'reconnect-failed'),'1');process.exit(255);}
  console.log(c.remoteRunning?'group-running':'group-gone');return;
@@ -772,9 +773,40 @@ async function hygieneScenarios() {
   console.log('PASS dirty nested submodules preserve patches, name previous job and clean checkout succeeds');
 }
 
+async function deadSlotScenarios() {
+  for (const running of [true,false]) {
+    const f=fixture({remoteRunning:running});
+    const slot='devbox-cn-1', lock=path.join(f.shared,'locks',slot+'.d');fs.mkdirSync(lock);
+    fs.writeFileSync(path.join(lock,'info'),`by\tdead-fixture\npid\t2147483647\nhost\t${os.hostname()}\nstart\t${Math.floor(Date.now()/1000)-1000}\n`);
+    const r=spawnSync(process.execPath,[script,'release-dead','--slot',slot],{env:f.env,encoding:'utf8',timeout:30000});
+    assert.equal(r.status,running?1:0, r.stdout+r.stderr);
+    assert.equal(fs.existsSync(lock),running);
+    assert.equal(f.events().filter(e=>e.op==='dead-slot').length,1,JSON.stringify({stdout:r.stdout,stderr:r.stderr,ops:f.events().map(e=>e.op)}));
+    assert.equal(f.events().filter(e=>e.op==='return').length,running?0:1);
+  }
+  const f=fixture(), slot='devbox-cn-1', lock=path.join(f.shared,'locks',slot+'.d');fs.mkdirSync(lock);
+  fs.writeFileSync(path.join(lock,'info'),`by\tlive-fixture\npid\t${process.pid}\nhost\t${os.hostname()}\nstart\t${Math.floor(Date.now()/1000)-1000}\n`);
+  const r=spawnSync(process.execPath,[script,'release-dead','--slot',slot],{env:f.env,encoding:'utf8',timeout:30000});
+  assert.equal(r.status,1);assert.equal(f.events().length,0,'live owner never triggers SSH');
+  const root=path.join(f.dir,'native-devbox-run'), workspace=path.join(root,'wt','fixture','store',slot);
+  const otherWorkspace=path.join(root,'wt','fixture','store','devbox-cn-2');fs.mkdirSync(otherWorkspace,{recursive:true});
+  const sameTaskOtherRun=spawn('/bin/sleep',['60'],{cwd:otherWorkspace,detached:true,stdio:'ignore'});
+  const otherExit=new Promise(resolve=>sameTaskOtherRun.once('exit',resolve));
+  fs.mkdirSync(workspace,{recursive:true});
+  const child=spawn('/bin/sleep',['60'],{cwd:workspace,detached:true,stdio:'ignore'});
+  const exit=new Promise(resolve=>child.once('exit',resolve));
+  const probe=()=>spawnSync('python3',['-c',remoteScripts['dead-slot'],Buffer.from(JSON.stringify({root,slot})).toString('base64')],{encoding:'utf8'});
+  try { const evidence=probe();assert.equal(evidence.status,0,evidence.stderr);assert.equal(JSON.parse(evidence.stdout).clean,false); }
+  finally {child.kill('SIGTERM');await exit;}
+  try {
+    const clean=probe();assert.equal(clean.status,0,clean.stderr);assert.equal(JSON.parse(clean.stdout).clean,true,'different live same-task slot must not block dead slot');
+  } finally {sameTaskOtherRun.kill('SIGTERM');await otherExit;}
+  console.log('PASS release-dead confirms old local holders and remote worktree cleanup; live work/owners retain slots');
+}
+
 async function scenarios() {
   const only = process.env.DEVBOX_TEST_CASE;
-  const perf = { inputs:inputScenarios,hygiene:hygieneScenarios,credentials: credentialScenarios, 'packed-module': packedModuleRecovery, receipt: receiptScenarios, 'res-progress': resProgressScenarios, cpu: cpuScenarios, auto: autoScenarios, units: unitScenarios, prewarm: prewarmScenarios, metrics: metricScenarios, placement: placementScenarios, 'ssh-drop': sshDropScenarios };
+  const perf = { 'dead-slot':deadSlotScenarios, inputs:inputScenarios,hygiene:hygieneScenarios,credentials: credentialScenarios, 'packed-module': packedModuleRecovery, receipt: receiptScenarios, 'res-progress': resProgressScenarios, cpu: cpuScenarios, auto: autoScenarios, units: unitScenarios, prewarm: prewarmScenarios, metrics: metricScenarios, placement: placementScenarios, 'ssh-drop': sshDropScenarios };
   if (only && !['baseline', 'bundle', 'ownership', ...Object.keys(perf)].includes(only)) throw Error('unknown devbox fixture case');
   for (const [name, scenario] of Object.entries(perf)) if (!only || only === name) await scenario();
   if (!only || only === 'baseline' || only === 'bundle') await bundleRecovery();

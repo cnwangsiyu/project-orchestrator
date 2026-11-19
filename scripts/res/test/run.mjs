@@ -22,6 +22,7 @@ const SUITE_TIMEOUTS = {
   'config-reload.mjs': 600000,
   'followups.mjs': 600000,
   'mini-build.mjs': 600000,
+  'stale-holds.mjs': 600000,
   'build.mjs': 1200000,
 };
 // The outer runner must allow every bounded child plus fixture setup/logging overhead.
@@ -50,6 +51,7 @@ export function runResSuites() {
   console.log(`Res PID table: ${process.env.RES_TEST_NATIVE_PS === '1' ? 'native ps' : 'scratch fixture (host ps not required)'}`);
   for (const [suite, timeout] of Object.entries(SUITE_TIMEOUTS)) {
     if (selected && selected !== suite) continue;
+    if ((process.env.RES_TEST_EXCLUDE_SUITES || '').split(',').includes(suite)) continue;
     const node = suite.endsWith('.mjs');
     const script = path.join(node ? base : tmp, suite);
     // Slow/load-sensitive runs may select one suite and disable only its outer

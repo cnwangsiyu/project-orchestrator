@@ -853,3 +853,33 @@ case alone before using longer startup allowances.
 For isolated tests, `RES_DIR` selects registry/state and `RES_COMMAND` selects
 the controller. Production defaults to the shared public entry; do not use a
 private controller against live state.
+
+
+### Recover dead heavy holders
+
+`DEVBOX_HEAVY_STALE_RECLAIM=0` is the safe default; set it to `1` in the owner-managed `machine.conf` to enable heavy-pool FIFO recovery. The runner confirms that a locally dead holder's hold is strictly older than 15 minutes, probes the named slot's remote worktrees for live cwd/argument matches, and reuses the read-only reconnect check for a recorded run group. Unknown or running work retains the lease. Locally recorded run identity is stored under `devbox-run-holds/<slot>.json`; a hold marked as requiring remote cleanup cannot be recovered without matching run evidence.
+
+The runner publishes `devbox-stale-confirmations/<slot>.json` with a 60-second expiry and the exact hold-info digest; the SSH-free controller rechecks local death, age, digest and FIFO before reclaiming. New holders invalidate old evidence; holder identity uses exact `by`, PID, host, start and slot, never the task name (different live runs can share `--task`). No new configuration is required for existing waiters. Explicit orchestrator recovery uses:
+
+```sh
+node scripts/devbox-run.mjs release-dead --slot devbox-cn-1
+```
+
+This command prints the dead local PID, hold age threshold and confirmed zero remote processes before returning the matching lease. It works independently of the automatic switch and retains the hold on any uncertainty or SSH failure.
+
+### Declare files and directories by their input hash
+
+```sh
+node scripts/devbox-run.mjs input-hash ./assets
+node scripts/devbox-run.mjs input-hash ./assets.tar
+```
+
+The command prints JSON containing `hash` (SHA-256), `bytes` and `kind` (`file` or `directory`), using the same fingerprint function as seed verification. A directory hashes sorted relative UTF-8 file names, lengths and contents; a file hashes its bytes. Only public task inputs consisting of regular files/directories are accepted.
+
+For an archive, declare the archive **file**, using the SHA-256 of its bytes, with no `path` field. For example, supply `--input name=assets,hash=<sha256>,rebuildable=yes,cost=30s,size=1,seed=./assets.tar`. The runner's `DEVBOX_INPUTS_FILE` is a JSON map from input names to remote paths. Read `assets` from that map and extract the archive inside the task:
+
+```sh
+archive=$(node -e 'const fs=require("fs"); process.stdout.write(JSON.parse(fs.readFileSync(process.env.DEVBOX_INPUTS_FILE,"utf8")).assets)')
+mkdir -p task-assets
+tar -xf "$archive" -C task-assets
+```

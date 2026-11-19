@@ -629,6 +629,36 @@ finally:
     save('done.json',{'gone':gone,'exit':result if gone else 70})
 sys.exit(result if gone else 70)
 `,
+  'dead-slot': pythonHeader + `import re, subprocess
+if not re.fullmatch(r'devbox-cn-(?:[0-9]+|light(?:-[0-9]+)?)',d['slot']): sys.exit(70)
+root=pathlib.Path(d['root'])
+# Every project/store path for this named slot, including legacy holders.
+paths=list((root/'wt').glob('*/*/'+d['slot']))
+if len(paths)>1024: sys.exit(70)
+paths=[str(p.resolve()) for p in paths]
+if d.get('workspace'): paths.append(d['workspace'])
+limit=time.monotonic()+4
+listing=subprocess.run(['ps','-axo','pid=,state=,args='],capture_output=True,text=True,timeout=2)
+if listing.returncode: sys.exit(70)
+arguments={}
+for line in listing.stdout.splitlines():
+    fields=line.strip().split(None,2)
+    if len(fields)==3 and fields[0].isdigit() and not fields[1].startswith('Z'): arguments[int(fields[0])]=fields[2]
+count=0
+for proc in pathlib.Path('/proc').iterdir():
+    if time.monotonic()>limit: sys.exit(70)
+    if not proc.name.isdigit() or int(proc.name)==os.getpid(): continue
+    try:
+        fields=(proc/'stat').read_text().rsplit(')',1)[1].split()
+        if fields[0]=='Z': continue
+        args=arguments.get(int(proc.name),'')
+        try: cwd=os.readlink(proc/'cwd')
+        except PermissionError: cwd=''  # All-process ps arguments remain available.
+    except FileNotFoundError: continue
+    except (PermissionError,OSError): sys.exit(70)
+    if any(cwd==p or cwd.startswith(p+'/') or re.search(r'(?<![\\w/.-])'+re.escape(p)+r'(?=/|[\\s\\x00\\x22\\x27]|$)',args) for p in paths): count+=1
+print(json.dumps({'clean':count==0,'count':count,'worktrees':len(paths)}))
+`,
   reconnect: pythonHeader + remoteRunIdentity + `done=ctl/'done.json'; owner=ctl/'owner.json'; group=ctl/'group.json'
 if done.exists() and read_own(done)['gone'] and group_gone():
     print('group-gone')
@@ -701,14 +731,80 @@ async function ssh(row, operation, data, opts = {}) {
   }
 }
 
-async function reconnectRun(row, data, state) {
+async function reconnectRun(row, data, state, requireAccess = false) {
   for (const delay of [0, 1000, 2000]) {
     if (delay) await pause(delay);
     const result = await ssh(row, 'reconnect', { control: data.control }, { state, cancellable: false, timeout: 8000, noRetry: true });
     if (result.code === 0 && ['group-gone', 'group-running'].includes(result.stdout.trim())) return result.stdout.trim();
-    if (/permission denied|gssapi|authentication failed/i.test(result.stderr)) break;
+    if (/permission denied|gssapi|authentication failed/i.test(result.stderr)) {
+      if (requireAccess) throw Error('BLOCKED: SSH authentication error during dead-slot confirmation');
+      break;
+    }
   }
   return 'unknown';
+}
+
+function readHold(row) {
+  try {
+    const text = fs.readFileSync(path.join(lockPath(sharedDir(), row.slot), 'info'), 'utf8');
+    return { text, fields: Object.fromEntries(text.trimEnd().split('\n').filter(line => line.includes('\t')).map(line => line.split('\t'))) };
+  } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+}
+function oldDeadHold(hold) {
+  if (!hold || hold.fields.host !== os.hostname() || !/^[1-9]\d*$/.test(hold.fields.pid || '')
+      || !/^[1-9]\d*$/.test(hold.fields.start || '') || !hold.fields.by
+      || Date.now() / 1000 - Number(hold.fields.start) <= 900) return false;
+  try { process.kill(Number(hold.fields.pid), 0); return false; }
+  catch (error) { return error.code === 'ESRCH'; }
+}
+function sameHolder(a, b) {
+  return ['by','pid','host','start'].every(key => a?.[key] === b?.[key]);
+}
+function heavyStaleEnabled() {
+  try {
+    const fd = fs.openSync(path.join(sharedDir(), 'machine.conf'), fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+    try {
+      if (!fs.fstatSync(fd).isFile()) return false;
+      const text = fs.readFileSync(fd, 'utf8');
+      const matches = [...text.matchAll(/^[ \t]*DEVBOX_HEAVY_STALE_RECLAIM[ \t]*=[ \t]*([^\n]*)/gm)];
+      return text.endsWith('\n') && matches.length === 1 && matches[0][1].trim() === '1';
+    } finally { fs.closeSync(fd); }
+  } catch { return false; }
+}
+export async function confirmDeadSlot(row, state) {
+  const hold = readHold(row);
+  if (!oldDeadHold(hold)) return null;
+  const root = await hostRoot(row, state, { deadline: Date.now() + 15000 });
+  let record;
+  try { record = JSON.parse(fs.readFileSync(path.join(sharedDir(), 'devbox-run-holds', row.slot + '.json'), 'utf8')); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  if (record && (record.slot !== row.slot || !sameHolder(record.holder, hold.fields))) record = null;
+  if (record?.control) {
+    if (!record.control.startsWith(root + '/runs/') || !/^[0-9a-f-]{36}$/.test(path.posix.basename(record.control))) throw Error('invalid held run identity');
+    if (await reconnectRun(row, record, state, true) !== 'group-gone') return null;
+  } else if (hold.fields.remote_cleanup_required) return null;
+  const evidence = await ssh(row, 'dead-slot', { root, slot: row.slot, workspace: record?.workspace },
+    { state, timeout: 8000, noRetry: true });
+  if (evidence.code !== 0) {
+    if (/permission denied|gssapi|authentication failed/i.test(evidence.stderr)) throw Error('BLOCKED: SSH authentication error during dead-slot confirmation');
+    return null;
+  }
+  const verified = JSON.parse(evidence.stdout);
+  if (verified.clean !== true || verified.count !== 0) return null;
+  const current = readHold(row);
+  if (!oldDeadHold(current) || current.text !== hold.text) return null;
+  const dir = path.join(sharedDir(), 'devbox-stale-confirmations'); fs.mkdirSync(dir, { recursive: true });
+  writeJSON(path.join(dir, row.slot + '.json'), { slot: row.slot, digest: createHash('sha256').update(hold.text).digest('hex'),
+    at: Date.now() / 1000, clean: true, target: row.target });
+  return { ...hold, ...verified };
+}
+export async function releaseDeadSlot(slot) {
+  const row = [...readRegistry(sharedDir(), 'devbox-cn'), ...readRegistry(sharedDir(), 'devbox-cn-light')].find(row => row.slot === slot);
+  if (!row?.target) throw Error('release-dead requires an open registered devbox slot with user@ip');
+  const confirmed = await confirmDeadSlot(row);
+  if (!confirmed) throw Error('BLOCKED: local holder death/age or remote cleanup unconfirmed; retaining ' + slot);
+  checked(await executeRes(['release-dead', slot, '--by', confirmed.fields.by, '--pid', confirmed.fields.pid]), 'dead slot return');
+  console.log(`returned ${slot}: local PID ${confirmed.fields.pid} dead, hold >15 minutes, remote worktrees=${confirmed.worktrees} processes=0, recorded group gone when available`);
 }
 
 function writeJSON(file, value) {
@@ -1358,6 +1454,16 @@ async function shard(opts) {
             attempt.inputConfigWarned=true;
           }
           await refreshHostMetrics(possible, state, { timeout: Math.min(15000, remaining()) });
+          if (opts.pool === 'devbox-cn' && heavyStaleEnabled()) {
+            for (const candidate of possible) {
+              if (state.cancel || remaining() < 15000) break;
+              try { await confirmDeadSlot(candidate, state); }
+              catch (error) {
+                if (/permission denied|gssapi|authentication failed/i.test(error.message)) throw error;
+                emit(`[shard ${opts.shard}] stale cleanup unconfirmed for ${candidate.slot}; retaining hold\n`);
+              }
+            }
+          }
           if (opts.placementInputs.length) {
             const plan=await inputPlan(opts,inputRows(),state);
             attempt.inputPlan=plan;
@@ -1419,7 +1525,7 @@ async function shard(opts) {
           let refreshing;
           const timer = setInterval(() => {
             if (!refreshing) refreshing = refresh().catch(error=>{attempt.placementError=error.message; state.stop(74);}).finally(() => { refreshing = null; });
-          }, 60000);
+          }, heavyStaleEnabled() ? 30000 : 60000);
           try { acquire = await runRes(args); }
           finally { clearInterval(timer); await refreshing; }
         }
@@ -1456,6 +1562,10 @@ async function shard(opts) {
         const repository = `${root}/repos/${opts.project}/${storeName}`;
         attempt.repository = repository;
         data = { root, workspace, repository, slot: row.slot, job: `${opts.project}/${opts.task}`, affinity:opts.affinity, previousJob:previousSlotJob(row.slot,by), control: `${root}/runs/${randomUUID()}`, commit: opts.snapshot.commit, untracked: opts.snapshot.untracked };
+        const hold = readHold(row);
+        if (!hold || hold.fields.by !== by || hold.fields.pid !== String(process.pid)) throw Error('slot ownership changed before remote preparation');
+        fs.mkdirSync(path.join(sharedDir(), 'devbox-run-holds'), { recursive: true });
+        writeJSON(path.join(sharedDir(), 'devbox-run-holds', row.slot + '.json'), { slot: row.slot, holder: hold.fields, workspace, control: data.control });
         let inspection = JSON.parse(checked(await ssh(row, 'inspect', data, { state, timeout: Math.min(60000, remaining()) }), 'workspace inspection'));
         if (inspection.free < 73 * GiB) {
           await collectGarbage({ rows: [...readRegistry(sharedDir(), 'devbox-cn'), ...readRegistry(sharedDir(), 'devbox-cn-light')], host: row.host, state, emit, skipSlot: row.slot });
@@ -1693,6 +1803,18 @@ async function stopRetainedRuns(out, runId) {
 }
 
 async function main(args) {
+  if (args[0] === 'input-hash') {
+    if (args.length !== 2) throw Error('usage: devbox-run.mjs input-hash PATH');
+    const file = path.resolve(args[1]);
+    if (file.split(path.sep).some(part => /^(?:login|cookies?|sessions?|\.netrc|\.npmrc|\.pypirc|\.ssh|\.aws|\.kube|\.env(?:\..*)?|\.git)$/i.test(part)) || sensitiveFile.test(file))
+      throw Error('input path contains private state');
+    const kind = fs.lstatSync(file).isDirectory() ? 'directory' : 'file';
+    console.log(JSON.stringify({ ...await fingerprint(file), kind })); return 0;
+  }
+  if (args[0] === 'release-dead') {
+    if (args.length !== 3 || args[1] !== '--slot') throw Error('usage: devbox-run.mjs release-dead --slot ID');
+    await releaseDeadSlot(args[2]); return 0;
+  }
   if (args[0] === 'stop') {
     const [, outFlag, out, idFlag, runId] = args;
     if (args.length !== 5 || outFlag !== '--out' || idFlag !== '--run-id' || !/^[0-9a-f-]{36}$/.test(runId))

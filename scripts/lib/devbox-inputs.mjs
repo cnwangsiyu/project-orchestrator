@@ -102,6 +102,7 @@ export function placement(rows, inputs, indices, history = {}, { now = Date.now(
 export async function fingerprint(file) {
   const hash = createHash('sha256'); let bytes = 0; const files=[];
   const collect = (target, relative = '') => {
+    if (path.resolve(target).split(path.sep).some(part => /^(?:login|cookies?|sessions?|\.netrc|\.npmrc|\.pypirc|\.ssh|\.aws|\.kube|\.env(?:\..*)?|\.git)$/i.test(part) || /\.(?:pem|p12|pfx|key|keystore)$/i.test(part))) throw Error('input path contains private state');
     const stat=fs.lstatSync(target);
     if(stat.isSymbolicLink() || (!stat.isFile() && !stat.isDirectory())) throw Error('input must contain only regular files/directories');
     if(stat.isDirectory()) for(const name of fs.readdirSync(target)) collect(path.join(target,name),relative ? `${relative}/${name}` : name);

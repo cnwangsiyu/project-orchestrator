@@ -2,7 +2,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { duration, manifest, inputKey, readIndex, indexFile, inputSettings, placement, observedCost, warmCost, warmInput } from '../lib/devbox-inputs.mjs';
+import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+import { remoteScripts } from '../devbox-run.mjs';
+import { fingerprint, duration, manifest, inputKey, readIndex, indexFile, inputSettings, placement, observedCost, warmCost, warmInput } from '../lib/devbox-inputs.mjs';
 const root = fs.mkdtempSync(path.join(os.tmpdir(),'input-scenarios-'));
 try {
   const hash = 'a'.repeat(64);
@@ -39,5 +43,18 @@ try {
   fs.writeFileSync(path.join(root,'machine.conf'),'DEVBOX_REBUILD_PLACEMENT=0\nDEVBOX_INPUT_TTL_SECONDS=60\n');
   assert.deepEqual(inputSettings(root),{enabled:false,ttlSec:60,maxWaitSec:2700,seedMaxSec:300});
   fs.writeFileSync(path.join(root,'machine.conf'),'DEVBOX_INPUT_TTL_SECONDS=0\n');assert.throws(() => inputSettings(root));
+  const file=path.join(root,'archive.tar');fs.writeFileSync(file,'named test input\n');
+  const directory=path.join(root,'directory');fs.mkdirSync(directory);fs.writeFileSync(path.join(directory,'z.txt'),'last');fs.writeFileSync(path.join(directory,'a.txt'),'first');
+  const script=fileURLToPath(new URL('../devbox-run.mjs',import.meta.url));
+  for (const [target,kind] of [[file,'file'],[directory,'directory']]) {
+    const result=spawnSync(process.execPath,[script,'input-hash',target],{encoding:'utf8'});
+    assert.equal(result.status,0,result.stderr);const actual=JSON.parse(result.stdout);
+    assert.deepEqual(actual,{...await fingerprint(target),kind});
+    if(kind==='file') assert.equal(actual.hash,createHash('sha256').update(fs.readFileSync(file)).digest('hex'));
+    const data={root,inputs:[{path:target,hash:actual.hash,key:'fixture',sizeGiB:0.01}]};
+    const remote=spawnSync('python3',['-c',remoteScripts.inputs,Buffer.from(JSON.stringify(data)).toString('base64')],{encoding:'utf8'});
+    assert.equal(remote.status,0,remote.stderr);const [verified]=JSON.parse(remote.stdout);
+    assert.equal(verified.present,true);assert.equal(verified.bytes,actual.bytes);
+  }
   console.log('PASS manifest validation, warm/cold placement, hard pins, TTL, observed medians, index and kill switch');
 } finally { fs.rmSync(root,{recursive:true,force:true}); }

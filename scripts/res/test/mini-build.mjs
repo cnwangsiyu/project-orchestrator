@@ -43,6 +43,31 @@ for (const [name, worktree] of [['same-one', 'one'], ['same-two', 'two']]) {
   fs.writeFileSync(path.join(common, 'worktrees', worktree, 'commondir'), '../..\n');
 }
 
+function orphanScenario() {
+
+clear();
+config('HEAD_OVERRIDE_BASE_LOAD=1\n');
+const oldHead=String(Math.floor(Date.now()/1000)-1201);
+const before=fs.existsSync(path.join(state,'log.tsv')) ? fs.readFileSync(path.join(state,'log.tsv'),'utf8') : '';
+const overrideCount=before.split('\n').filter(line=>line.includes('\tload-override\t')).length;
+const orphanInfo = lock('heavy-build'); fs.mkdirSync(orphanInfo);
+fs.writeFileSync(path.join(orphanInfo, 'info'), `by\tdead-orphan\npid\t2147483647\nhost\t${process.env.HOSTNAME || (await import('node:os')).hostname()}\nstart\t${Math.floor(Date.now()/1000)-1000}\ncheckouts\t${JSON.stringify([path.join(repos,'a')])}\n`);
+const table = path.join(root, 'orphan-table');
+fs.writeFileSync(table, `123456 1 123456 123456 S compiler ${path.join(repos,'a')}/output\n`);
+const result = run(['wait-build', ...args('orphan-no-override'), '--checkout', path.join(repos,'b'), '--timeout', '0'], {
+  RES_TEST_LOAD1M:'31', RES_TEST_LOAD_HEAD_SINCE:oldHead, RES_TEST_PROCESS_TABLE:table,
+});
+eq(result.code,2,result.text);
+ok(fs.existsSync(orphanInfo),'orphan hold survives');
+ok(run(['status','heavy-build'],{RES_TEST_PROCESS_TABLE:table}).text.includes('STALE-PID (build alive)'));
+const journal=fs.readFileSync(path.join(state,'log.tsv'),'utf8');
+eq(journal.split('\n').filter(line=>line.includes('\tload-override\t')).length,overrideCount);
+
+}
+if (process.env.RES_TEST_MINI_CASE === 'orphan') {
+  orphanScenario(); clear(); console.log(`ALL ${assertions} ASSERTIONS PASSED`); process.exit(0);
+}
+
 // Normal lanes use the physical-core threshold and memorystatus-derived memory.
 let result = run(['take', 'heavy-lane-1', ...args('lane-boundary')], { RES_TEST_LOAD1M: '17.5', RES_TEST_MEMORYSTATUS_LEVEL: '20', RES_TEST_MEMSIZE: '64424509440' });
 eq(result.code, 0, result.text); eq(run(['return', 'heavy-lane-1', '--by', 'lane-boundary']).code, 0);
@@ -180,6 +205,8 @@ for (const wait of [['wait-lane'], ['wait', 'heavy-lane-1']]) {
     await done;
   }
 }
+
+orphanScenario();
 
 clear();
 console.log(`ALL ${assertions} ASSERTIONS PASSED`);

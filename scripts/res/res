@@ -9,6 +9,14 @@
 # Heavy slots additionally support a gated wait and recovery of old, dead-PID holds.
 set -euo pipefail
 
+# Resolve the owner-installed symlink without another interpreter invocation.
+RES_SOURCE_PATH="${BASH_SOURCE[0]}"
+while [ -L "$RES_SOURCE_PATH" ]; do
+  target=$(readlink "$RES_SOURCE_PATH")
+  case "$target" in /*) RES_SOURCE_PATH="$target" ;; *) RES_SOURCE_PATH="$(dirname "$RES_SOURCE_PATH")/$target" ;; esac
+done
+RES_CODE_DIR=$(cd "$(dirname "$RES_SOURCE_PATH")" && pwd -P)
+
 RES_DIR="${RES_DIR:-$HOME/.claude/orchestrator/_shared}"
 REG="$RES_DIR/resources.tsv"
 LOCKS="$RES_DIR/locks"
@@ -36,6 +44,7 @@ res wait-pool <prefix> --by <session> --project <slug> --for "<purpose>" --timeo
                                       affinity only at score <=0.5; otherwise balance held slots/cores
                                       recent same-repo worktrees break capacity-score ties only
 res retain-remote <id> --by <session> --pid <holder-pid>
+res release-dead <id> --by <dead-holder> --pid <holder-pid>  runner-confirmed recovery
 res box-health [--json]               show remote box health (no probes)
 res quarantine <host> --reason "..."  exclude a registered box until unquarantine
 res unquarantine <host>              clear quarantine and infrastructure failure history
@@ -64,7 +73,7 @@ now() { date '+%Y-%m-%d %H:%M'; }
 local_host() { printf '%s\n' "$HOSTNAME"; }
 
 # Legacy holds and other hosts cannot be judged safely from this machine's PID table.
-hold_stale() {
+hold_pid_stale() {
   local pid host
   pid=$(field "$1" pid); host=$(field "$1" host)
   case "$pid" in ''|*[!0-9]*|0) return 1 ;; esac
@@ -74,6 +83,12 @@ hold_stale() {
   else
     [ "$?" -eq 1 ]
   fi
+}
+
+# A dead wrapper does not establish that its orphaned build has exited.
+hold_stale() {
+  hold_pid_stale "$1" || return 1
+  case "$1" in heavy-*) python3 "$RES_CODE_DIR/build_processes.py" "$LOCKS/$1.d/info" >/dev/null ;; *) return 0 ;; esac
 }
 
 hold_old() {
@@ -145,7 +160,7 @@ PY
       gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
       if (key !~ /^[A-Z][A-Z0-9_]*(\.[A-Za-z0-9_.-]+)?$/ || seen[key]++) exit 1
       # The remote pool controller owns these keys and validates them independently.
-      if (key ~ /^DEVBOX_(DYNAMIC_ADMISSION|DYNAMIC_HOSTS|LIGHT_STALE_RECLAIM|SOFT_EXCLUDE_MINUTES)$/ ||
+      if (key ~ /^DEVBOX_(DYNAMIC_ADMISSION|DYNAMIC_HOSTS|LIGHT_STALE_RECLAIM|HEAVY_STALE_RECLAIM|SOFT_EXCLUDE_MINUTES)$/ ||
           key ~ /^DEVBOX_(LOAD_PER_CORE|MIN_AVAIL_GIB|HEAVY_CORES|HEAVY_GIB|LIGHT_CORES|LIGHT_GIB|HEAVY_DISK_GIB|LIGHT_DISK_GIB)(\.[A-Za-z0-9][A-Za-z0-9.-]*)?$/ ||
           key ~ /^DEVBOX_(REBUILD_PLACEMENT|INPUT_TTL_SECONDS|INPUT_WAIT_CAP_SECONDS|INPUT_SEED_MAX_SECONDS)$/ ||
           key ~ /^DEVBOX_(HEAVY|LIGHT)_DISK_GIB\.project\.[A-Za-z0-9][A-Za-z0-9_.-]*$/) next
@@ -431,14 +446,27 @@ reclaim_stale_heavy() (
   local id="$1" by="$2" lock="$LOCKS/$1.d" snapshot retired holder pid start
   case "$id" in heavy-*) ;; *) return 1 ;; esac
   [ -d "$lock" ] || return 1
-  hold_stale "$id" && hold_old "$id" || return 1
+  hold_pid_stale "$id" && hold_old "$id" || return 1
   snapshot=$(cat "$lock/info") || return 1
   retired=$(mktemp -d "$LOCKS/.stale-$id.XXXXXX") || return 1
   cd "$lock" || { rmdir "$retired"; return 1; }
   shlock -p "$$" -f .reclaim 2>/dev/null || { rmdir "$retired"; return 1; }
   trap 'rm -f .reclaim; rmdir "$retired" 2>/dev/null || true' EXIT
   trap 'exit 1' INT TERM HUP
-  [ "$(cat info)" = "$snapshot" ] && hold_stale "$id" && hold_old "$id" || return 1
+  [ "$(cat info)" = "$snapshot" ] && hold_pid_stale "$id" && hold_old "$id" || return 1
+  local evidence count checkout
+  if evidence=$(python3 "$RES_CODE_DIR/build_processes.py" "$lock/info"); then :
+  else
+    IFS=$'\t' read -r count checkout <<<"$evidence"
+    if [ ! -e .build-alive-noticed ]; then
+      : >.build-alive-noticed
+      local message="STALE pid but build processes alive under $checkout: $count"
+      [ "$count" != unknown ] || message="STALE pid; build process check unavailable under $checkout; retaining hold"
+      log stale-build-alive "$id" "$by" "$message"
+      echo "res: $message" >&2
+    fi
+    return 1
+  fi
   holder=$(field "$id" by); pid=$(field "$id" pid); start=$(field "$id" start)
   mv "$lock" "$retired/hold" || return 1
   log reclaim "$id" "$by" "auto-reclaim STALE heavy hold from $holder (pid=$pid start=$start; age > 10 minutes)"
@@ -1301,6 +1329,7 @@ build_slot_select() {
 import json, os, sys
 root, locks, maximum, by, pid, project, explicit, cwd = sys.argv[1:]
 maximum = int(maximum)
+checkout_paths = set()
 def hold(directory):
     try:
         with open(os.path.join(directory, 'info')) as stream:
@@ -1327,6 +1356,7 @@ def repo(path):
         if os.path.isfile(common):
             try: gitdir = os.path.realpath(os.path.join(gitdir, open(common).read().strip()))
             except OSError: return None
+        checkout_paths.add(here)
         return 'repo:' + os.path.realpath(gitdir)
 identities = set()
 rows = {}
@@ -1338,7 +1368,11 @@ with open(os.path.join(root, 'resources.tsv')) as stream:
 for id, row in rows.items():
     if row[1] != 'checkout': continue
     value = hold(os.path.join(locks, id + '.d'))
-    if value.get('by') == by and value.get('pid') == pid: identities.add('lock:' + id)
+    if value.get('by') == by and value.get('pid') == pid:
+        identities.add('lock:' + id)
+        # Checkout registrations may name a path in their description.
+        for item in rows[id][4].split():
+            if item.startswith('/'): repo(item)
 if explicit:
     if explicit in rows and rows[explicit][1] == 'checkout': identities.add('lock:' + explicit)
     else:
@@ -1372,11 +1406,11 @@ if holds:
             print('res: concurrent build checkout identity unresolved; waiting for solo admission', file=sys.stderr); sys.exit(2)
         if identities & existing:
             print('res: concurrent build checkout is already held by another heavy-build holder', file=sys.stderr); sys.exit(2)
-print(free + '\t' + str(len(holds)) + '\t' + json.dumps(sorted(identities), separators=(',', ':')))
+print(free + '\t' + str(len(holds)) + '\t' + json.dumps(sorted(identities), separators=(',', ':')) + '\t' + json.dumps(sorted(checkout_paths), separators=(',', ':')))
 PY
   ) || rc=$?
   [ "$rc" -eq 0 ] || return "$rc"
-  IFS=$'\t' read -r BUILD_SLOT BUILD_ACTIVE_COUNT REQUEST_CHECKOUTS <<<"$selection"
+  IFS=$'\t' read -r BUILD_SLOT BUILD_ACTIVE_COUNT REQUEST_CHECKOUTS REQUEST_CHECKOUT_PATHS <<<"$selection"
 }
 
 build_mark_peak() {
@@ -1519,12 +1553,18 @@ acquire_attempt() {
     build_created="$TAKE_CREATED"; TAKE_CREATED=0
     printf 'checkouts\t%s\nbuild_mode\t%s\npeak_concurrent\t%s\n' "$REQUEST_CHECKOUTS" \
       "$([ "$BUILD_ACTIVE_COUNT" -eq 0 ] && printf solo || printf concurrent)" "$((BUILD_ACTIVE_COUNT + 1))" >>"$LOCKS/$build_id.d/info"
+    printf 'checkout_paths\t%s\n' "$REQUEST_CHECKOUT_PATHS" >>"$LOCKS/$build_id.d/info"
+    ps -p "$PID" -o pgid=,sess= 2>/dev/null | awk 'NF==2 {print "pgid\t" $1; print "session\t" $2}' >>"$LOCKS/$build_id.d/info" || true
   fi
   [ ! -d "$LOCKS/$candidate.d" ] || { finish_attempt 2; return $?; }
   current_id="$candidate"
   if cmd_take "$candidate" "${options[@]}"; then :
   else rc=$?; finish_attempt "$rc"; return $?; fi
   lane_created="$TAKE_CREATED"; TAKE_CREATED=0
+  if [ "$mode" = build ]; then
+    printf 'checkouts\t%s\ncheckout_paths\t%s\n' "$REQUEST_CHECKOUTS" "$REQUEST_CHECKOUT_PATHS" >>"$LOCKS/$candidate.d/info"
+    ps -p "$PID" -o pgid=,sess= 2>/dev/null | awk 'NF==2 {print "pgid\t" $1; print "session\t" $2}' >>"$LOCKS/$candidate.d/info" || true
+  fi
   # The stable holder is validated after both locks are available, not while
   # waiting for a lane. Signals during this check still unwind the entire pair.
   if [ -n "$ACQUIRE_PID_EXPLICIT" ]; then
@@ -1805,10 +1845,13 @@ cmd_wait_pool_legacy() {
 pool_controller() {
   local runner=
   if [ "${POOL_EXEC_CHILD:-0}" = 1 ]; then runner=exec; fi
-  ${runner:+$runner} python3 - "$RES_DIR" "$@" "$BY" "$PROJECT" "$TASK" "$PURPOSE" "$PID" "$UNTIL" "${FORCE:-}" "${POOL_NEED:-}" "${prefer_host:-}" "${prefer_slot:-}" "${excluded_slots:-}" "${excluded_hosts:-}" "${WAITER_STALE_SECONDS}" "$$" "${POOL_EPISODE:-none}" "${exclude_reason:-}" "${hard_slots:-}" "${hard_hosts:-}" "${DISK_GIB:-}" "${DISK_GIB_FILE:-}" "${PLACEMENT_FILE:-}" "${MAINTENANCE:-}" "${EXTRA_DISK_GIB:-0}" "${WAIT_CONFIG_FILE:+$WAIT_CONFIG_FILE.devbox}" <<'PY'
+  ${runner:+$runner} python3 - "$RES_DIR" "$@" "$BY" "$PROJECT" "$TASK" "$PURPOSE" "$PID" "$UNTIL" "${FORCE:-}" "${POOL_NEED:-}" "${prefer_host:-}" "${prefer_slot:-}" "${excluded_slots:-}" "${excluded_hosts:-}" "${WAITER_STALE_SECONDS}" "$$" "${POOL_EPISODE:-none}" "${exclude_reason:-}" "${hard_slots:-}" "${hard_hosts:-}" "${DISK_GIB:-}" "${DISK_GIB_FILE:-}" "${PLACEMENT_FILE:-}" "${MAINTENANCE:-}" "${EXTRA_DISK_GIB:-0}" "${WAIT_CONFIG_FILE:+$WAIT_CONFIG_FILE.devbox}" "$RES_CODE_DIR" <<'PY'
 import datetime, fcntl, hashlib, json, math, os, re, shutil, signal, socket, stat, sys, tempfile, time
 from contextlib import contextmanager
-root, action, request, timeout, delay, by, project, task, purpose, pid, until, force, need, prefer, preferred_slot, excluded_slots, excluded_hosts, stale, controller, generation, exclude_reason, hard_slots, hard_hosts, disk_gib, disk_gib_file, placement_file, maintenance, extra_disk_gib, legacy_config_path = sys.argv[1:]
+root, action, request, timeout, delay, by, project, task, purpose, pid, until, force, need, prefer, preferred_slot, excluded_slots, excluded_hosts, stale, controller, generation, exclude_reason, hard_slots, hard_hosts, disk_gib, disk_gib_file, placement_file, maintenance, extra_disk_gib, legacy_config_path, code_dir = sys.argv[1:]
+sys.path.insert(0, code_dir)
+sys.dont_write_bytecode = True
+from build_processes import probe as build_probe
 pid = int(pid); stamp = time.time(); now = stamp; host = socket.gethostname()
 controller_key = hashlib.sha256(host.encode()).hexdigest() + '.' + controller + '.' + generation
 locks = os.path.join(root, 'locks'); journal = os.path.join(root, 'log.tsv')
@@ -1864,6 +1907,12 @@ def print_build_capacity():
     except (OSError, ValueError):
         limit = '?'
     print('\nBuild capacity: heavy-build %d/%s' % (count, limit))
+    for name in ('heavy-build-2', 'heavy-build-3'):
+        value = info(os.path.join(locks, name + '.d'))
+        if value.get('host') == host and value.get('pid', '').isdigit() and not alive(value['pid']):
+            count, checkout = build_probe(value)
+            if count: print('  %s STALE-PID (build alive) holder=%s under %s: %d' % (name, value.get('by', '?'), checkout, count))
+            elif count is None: print('  %s STALE-PID (build probe unavailable)' % name)
 def remove_waiter():
     if waiter and os.path.isdir(waiter): shutil.rmtree(waiter)
     if episode and os.path.isdir(episode): shutil.rmtree(episode)
@@ -1985,7 +2034,7 @@ try:
             BUILD_CONCURRENT_LOAD_PER_CORE=0.6,BUILD_CONCURRENT_MIN_AVAIL_GIB=24,LOAD_OVERRIDE_MINUTES=20,
             LOAD_POLL_SECONDS=15,HEAD_OVERRIDE_BASE_LOAD=0)
         values = {}; heavy=dict(heavy_defaults); seen=set(); unknown=set()
-        if action in ('return','retain-remote'): return {},False,5
+        if action in ('return','retain-remote','release-dead'): return {},False,5
         try:
             try: content=regular_text(os.path.join(root,'machine.conf'))
             except FileNotFoundError:
@@ -2003,7 +2052,7 @@ try:
                     if key in ('BUILD_MAX_CONCURRENCY','LOAD_POLL_SECONDS') and not value.isdecimal(): raise ValueError('invalid known integer')
                     if key=='HEAD_OVERRIDE_BASE_LOAD' and value!='1': raise ValueError('invalid base load override')
                     heavy[key]=float(value); continue
-                if key in ('DEVBOX_DYNAMIC_ADMISSION','DEVBOX_LIGHT_STALE_RECLAIM','DEVBOX_REBUILD_PLACEMENT'):
+                if key in ('DEVBOX_DYNAMIC_ADMISSION','DEVBOX_LIGHT_STALE_RECLAIM','DEVBOX_HEAVY_STALE_RECLAIM','DEVBOX_REBUILD_PLACEMENT'):
                     if value not in ('0','1'): raise ValueError('invalid devbox switch')
                     values[key]=value
                 elif key in ('DEVBOX_INPUT_TTL_SECONDS','DEVBOX_INPUT_WAIT_CAP_SECONDS','DEVBOX_INPUT_SEED_MAX_SECONDS'):
@@ -2052,14 +2101,28 @@ try:
         if re.fullmatch(r'devbox-cn-light(?:-[0-9]+)?', id): return 'LIGHT'
     def floating(id):
         return id in rows and 'dynamic-only' in rows[id][3].split()
-    def stale_light(directory):
+    def stale_dead(directory, retained=False):
         hold = info(directory)
         old_pid, start = hold.get('pid', ''), hold.get('start', '')
-        if (hold.get('remote_cleanup_required') or not hold.get('by') or hold.get('host') != host or not re.fullmatch(r'[0-9]{1,10}', old_pid)
+        if (not retained and hold.get('remote_cleanup_required') or not hold.get('by') or hold.get('host') != host or not re.fullmatch(r'[0-9]{1,10}', old_pid)
                 or not 0 < int(old_pid) <= 2147483647 or not re.fullmatch(r'[0-9]{1,12}', start)
                 or int(start) == 0 or alive(old_pid)):
             return None
         return hold, time.time() - int(start)
+    def stale_light(directory): return stale_dead(directory)
+    def confirmed_dead(id, directory):
+        candidate = stale_dead(directory, retained=True)
+        if not candidate or candidate[1] <= 900: return None
+        try:
+            confirmation = json.loads(regular_text(os.path.join(root, 'devbox-stale-confirmations', id + '.json')))
+            digest = hashlib.sha256(regular_text(os.path.join(directory, 'info')).encode()).hexdigest()
+            targets = set(re.findall(r'[A-Za-z_][A-Za-z0-9_.-]*@(?:[0-9]{1,3}\.){3}[0-9]{1,3}', rows[id][3]))
+            if (targets != {confirmation.get('target')} or confirmation.get('slot') != id or confirmation.get('digest') != digest or confirmation.get('clean') is not True
+                    or type(confirmation.get('at')) not in (int, float) or not 0 <= time.time() - confirmation['at'] <= 60): return None
+        except (OSError, ValueError, TypeError): return None
+        return candidate
+    def heavy_reclaim_enabled():
+        return (config_current_values or {}).get('DEVBOX_HEAVY_STALE_RECLAIM') == '1'
     def host_slots(box, kind):
         return {id: member[0] for id, member in remote.items() if member[1] == box and slot_type(id) == kind}
     def static_full(box, kind, own_slot=None):
@@ -2272,16 +2335,16 @@ try:
                 why = reason if not gate_open(reason) or free else 'slots-full'
                 print('  %s admitted=%d/%d gate=%s reason=%s %s' % (
                     kind.lower(), admitted, len(members), 'OPEN' if gate_open(reason) and free else 'CLOSED', why, detail))
-                if kind == 'LIGHT':
+                if kind in ('LIGHT', 'HEAVY'):
                     for id in sorted(slots):
                         directory = os.path.join(locks, id + '.d')
-                        stale_hold = stale_light(directory)
+                        stale_hold = stale_light(directory) if kind == 'LIGHT' else stale_dead(directory, retained=True)
                         if stale_hold:
                             hold, age = stale_hold
-                            reclaim = 'disabled' if not light_reclaim else 'eligible' if age > 900 and id in members else 'ineligible'
-                            print('  light STALE slot=%s holder=%s age_seconds=%d reclaim=%s' % (id, hold.get('by', '?'), age, reclaim))
+                            reclaim = ('disabled' if not light_reclaim else 'eligible' if age > 900 and id in members else 'ineligible') if kind == 'LIGHT' else ('disabled' if not heavy_reclaim_enabled() else 'eligible' if id in members and confirmed_dead(id, directory) else 'unconfirmed')
+                            print('  %s STALE slot=%s holder=%s age_seconds=%d reclaim=%s' % (kind.lower(), id, hold.get('by', '?'), age, reclaim))
                         previous = info(directory).get('reclaimed_from')
-                        if previous: print('  light reclaimed slot=%s previous_holder=%s' % (id, previous))
+                        if previous: print('  %s reclaimed slot=%s previous_holder=%s' % (kind.lower(), id, previous))
     if action == 'scores':
         print_scores()
         print_build_capacity()
@@ -2303,7 +2366,9 @@ try:
                     start = value.get('start', '')
                     short = bool(value.get('pid_warning')) or start.isdecimal() and 0 <= int(stamp) - int(start) <= 5
                     warn_short_pid |= short
-                    holder = ('STALE?(short-lived pid) ' if short else 'STALE ') + holder
+                    count, checkout = build_probe(value) if id.startswith('heavy-') else (0, '')
+                    label = 'STALE-PID (build alive) ' if count else 'STALE-PID (build probe unavailable) ' if count is None else 'STALE?(short-lived pid) ' if short else 'STALE '
+                    holder = label + holder
                 detail = value.get('since', '?') + ' → ' + (value.get('until') or '?') + ' · ' + value.get('for', '?')
                 if value.get('remote_cleanup_required'): detail += ' · remote cleanup required'
             print('%-16s %-9s %-9s %-12s %-34s %s' % (id, kind, policy, '-', holder, detail))
@@ -2388,6 +2453,19 @@ try:
             hold['remote_cleanup_required'] = '1'
             publish(directory, hold)
             log('retain-remote', request, by, 'remote cleanup unconfirmed')
+        committed = True; sys.exit(0)
+    elif action == 'release-dead':
+        if request not in remote or not slot_type(request): raise ValueError('expected a registered devbox slot')
+        with admission():
+            directory = os.path.join(locks, request + '.d')
+            candidate = confirmed_dead(request, directory)
+            if not candidate or candidate[0].get('by') != by or candidate[0].get('pid') != str(pid):
+                raise ValueError('dead holder/age/remote confirmation no longer matches; retaining slot')
+            hold, age = candidate
+            forget_reservation(request, hold)
+            shutil.rmtree(directory)
+            log('reclaim-stale', request, by, 'explicit release-dead pid=%s age_seconds=%d remote-confirmed' % (pid, age))
+        print('returned ' + request + ' (dead local holder, age >15 minutes, remote processes confirmed gone)')
         committed = True; sys.exit(0)
     elif action == 'return':
         if request not in rows: raise ValueError("unknown resource '%s'" % request)
@@ -2596,12 +2674,15 @@ try:
                 if action == 'wait' and (not eligible(id) or quarantined(id, state)): continue
                 stale_hold = None
                 if os.path.isdir(directory):
-                    if not (light_reclaim and request == 'devbox-cn-light' and action == 'wait' and is_head()): continue
-                    stale_hold = stale_light(directory)
-                    if not stale_hold or stale_hold[1] <= 900: continue
+                    if not (action == 'wait' and is_head()): continue
                     current_rows, _ = read_registry()
                     dynamic, light_reclaim, soft_minutes = devbox_settings()
-                    if not light_reclaim or current_rows.get(id) != rows[id] or quarantined(id, health()): continue
+                    if current_rows.get(id) != rows[id] or quarantined(id, health()): continue
+                    if request == 'devbox-cn-light' and light_reclaim:
+                        stale_hold = stale_light(directory)
+                    elif request == 'devbox-cn' and heavy_reclaim_enabled():
+                        stale_hold = confirmed_dead(id, directory)
+                    if not stale_hold or stale_hold[1] <= 900: continue
                 if not fifo_allows(id, state):
                     blocked = True; heads = waiting()
                     continue
@@ -2853,8 +2934,18 @@ cmd_status() {
   # field and row cost ~1.5 s.
   if [ -z "${1:-}" ] || [ "$(reg_line "$1" | cut -f4)" != - ]; then probe; fi
   local infos=() t pid_snapshot=0; t=$(mktemp); printf '%s\n' "$DEVS" >"$t"
-  ps -axo pid= >"$t.pids" 2>/dev/null && pid_snapshot=1
   for f in "$LOCKS"/*.d/info; do [ -f "$f" ] && infos+=("$f"); done
+  : >"$t.builds"
+  for info in ${infos[@]+"${infos[@]}"}; do
+    local build_id="${info%/info}"; build_id="${build_id##*/}"; build_id="${build_id%.d}"
+    case "$build_id" in heavy-*)
+      local evidence= count=
+      evidence=$(python3 "$RES_CODE_DIR/build_processes.py" "$info") || true
+      count="${evidence%%$'\t'*}"
+      [ "$count" = 0 ] || printf '%s\t%s\n' "$build_id" "$count" >>"$t.builds" ;;
+    esac
+  done
+  ps -axo pid= >"$t.pids" 2>/dev/null && pid_snapshot=1
   awk -F'\t' -v only="${1:-}" -v host="$(local_host)" -v pid_snapshot="$pid_snapshot" -v epoch="$(date +%s)" '
     function state(dev,   i, l) {
       if (dev == "-") return "-"
@@ -2865,6 +2956,7 @@ cmd_status() {
       return "not seen"
     }
     FILENAME == devs { D[++nd] = $0; next }
+    FILENAME == builds { B[$1]=$2; next }
     FILENAME == pids { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0); P[$0] = 1; next }
     FILENAME != reg { n = split(FILENAME, a, "/"); id = a[n-1]; sub(/\.d$/, "", id); if (id ~ /^heavy-build-[23]$/) id = "heavy-build"; H[id, $1] = $2; held[id] = 1; next }
     /^#/ || $1 == "" { next }
@@ -2879,7 +2971,7 @@ cmd_status() {
         if (pid_snapshot && H[$1, "host"] == host && pid ~ /^[0-9]+$/ && pid + 0 > 0 && !(pid in P)) {
           start = H[$1, "start"]
           short_pid = H[$1, "pid_warning"] != "" || (start ~ /^[0-9]+$/ && epoch >= start && epoch - start <= 5)
-          holder = (short_pid ? "STALE?(short-lived pid) " : "STALE ") holder
+          holder = (($1 in B) ? (B[$1] == "unknown" ? "STALE-PID (build probe unavailable) " : "STALE-PID (build alive) ") : short_pid ? "STALE?(short-lived pid) " : "STALE ") holder
           if (short_pid) fix = 1
         }
         detail = H[$1, "since"] " → " (u != "" ? u : "?") " · " H[$1, "for"]
@@ -2898,8 +2990,8 @@ cmd_status() {
       }
       if (out != "") printf "\nConnected but not registered (add with: res add <id> --device <id> --for \"<what it is>\"):\n%s", out
     }
-  ' reg="$REG" devs="$t" pids="$t.pids" "$t" "$t.pids" ${infos[@]+"${infos[@]}"} "$REG"
-  rm -f "$t" "$t.pids"
+  ' reg="$REG" devs="$t" pids="$t.pids" builds="$t.builds" "$t" "$t.pids" "$t.builds" ${infos[@]+"${infos[@]}"} "$REG"
+  rm -f "$t" "$t.pids" "$t.builds"
   if [ -z "${1:-}" ]; then pool_report scores
   elif [ "$1" = heavy-build ]; then pool_report scores "$1"
   elif registry_record "$1" && [ "$REG_KIND" = remote ]; then pool_report scores "$1"; fi
@@ -3134,10 +3226,11 @@ case "${1:-}" in
     shift
     [ "$#" -eq 0 ] || { [ "$#" -eq 1 ] && [ "$1" = --json ]; } || die 'box-health accepts only --json'
     pool_report box-health "${1:-}" ;;
-  retain-remote)
+  release-dead|retain-remote)
+    action="$1"
     id="${2:-}"; shift 2
     ALLOW_PID=1 parse "$@"; validate_pid
-    pool_controller retain-remote "$id" 0 0 ;;
+    pool_controller "$action" "$id" 0 0 ;;
   quarantine|unquarantine|report-infra) box_health "$@" ;;
   return-build) shift; cmd_return_build "$@" ;;
   heavy-check) shift; cmd_heavy_check "$@" ;;
