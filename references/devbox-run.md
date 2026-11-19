@@ -586,7 +586,9 @@ package names or dependency paths as configuration keys.
 Caller-supplied keys are scoped to repository/project identity and ref family,
 so unrelated jobs using the same name do not inherit each other's placement.
 Remembered affinity is used only after the matching slot receipt verifies a
-worktree for that scoped key. Explicit slot/host preferences remain soft and
+worktree for that scoped key; a missing receipt invalidates the cached marker
+before controller acquisition. `--warm-family` scopes controller warmth to the
+runner's ref family when supported. Explicit slot/host preferences remain soft and
 fresh spare-capacity ranking limits affinity to hosts within 50% of the best
 compatible headroom. Explicit `--warm-cost` still uses wait-plus-rebuild placement.
 The runner passes the remembered eligible slot through `--prefer-slot` when
