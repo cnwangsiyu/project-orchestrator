@@ -152,6 +152,20 @@ const oldRegistry = fs.readFileSync(registry, 'utf8');
 fs.appendFileSync(registry, 'invalid registry\n');
 eq(run(['status', 's21']).code, 1); eq(run(['holder', 's21']).code, 1);
 fs.writeFileSync(registry, oldRegistry);
+// The incoming BC-160/runner-overhead base must still display durable cleanup markers.
+const pendingRoot = path.join(state, 'devbox-cleanup-pending');
+fs.mkdirSync(pendingRoot);
+const pendingFile = path.join(pendingRoot, 'devbox-cn-1.json');
+const pendingText = JSON.stringify({ runs: [{ run: 'fixture-run', host: '192.0.2.1', at: 'fixture-time' }] });
+fs.writeFileSync(pendingFile, pendingText);
+clearProbes();
+const pendingSlot = run(['status', 'devbox-cn-1']);
+eq(pendingSlot.code, 0, pendingSlot.err); ok(pendingSlot.out.includes('CLEANUP PENDING')); eq(probes(), []);
+const isolatedDevice = run(['status', 's21']); eq(isolatedDevice.code, 0);
+ok(!isolatedDevice.out.includes('cleanup pending slot=devbox-cn-1'), 'device status must not inspect another slot marker');
+const allResources = run(['status']); eq(allResources.code, 0, allResources.err);
+ok(allResources.out.includes('cleanup pending slot=devbox-cn-1'), allResources.out);
+eq(fs.readFileSync(pendingFile, 'utf8'), pendingText, 'status never clears a cleanup marker');
 
 const children = new Set();
 function start(argv, extra = {}) {

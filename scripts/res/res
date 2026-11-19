@@ -98,15 +98,10 @@ export RES_BUILD_PROCESS_SOURCE
 
 # Observers do not acquire admission guards or hold a list of live filenames.
 IFS= read -r -d '' RES_OBSERVATION_SOURCE <<'OBSERVATION_PY' || true
-import fcntl
 import json
 import os
 import re
-import signal
-import socket
 import stat
-import subprocess
-import tempfile
 import time
 
 
@@ -167,6 +162,7 @@ def observed_alive(pid):
 
 
 def bounded_output(argv, deadline):
+    import subprocess
     if time.monotonic() >= deadline: return None
     try:
         child = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
@@ -175,6 +171,7 @@ def bounded_output(argv, deadline):
         output, _ = child.communicate(timeout=max(0.001, deadline - time.monotonic()))
         return output.decode(errors='replace') if child.returncode == 0 else None
     except subprocess.TimeoutExpired:
+        import signal
         try: os.killpg(child.pid, signal.SIGKILL)
         except ProcessLookupError: pass
         child.communicate()
@@ -196,7 +193,7 @@ def device_link(root, id, row):
                 if len(parts) == 2 and parts[0] == device:
                     return 'connected' if parts[1] == 'device' else parts[1]
             return 'not seen'
-        command = ['idevice_id', '-l'] if __import__('shutil').which('idevice_id') else ['pymobiledevice3', 'usbmux', 'list']
+        command = ['idevice_id', '-l'] if any(os.access(os.path.join(directory, 'idevice_id'), os.X_OK) for directory in os.get_exec_path()) else ['pymobiledevice3', 'usbmux', 'list']
         output = bounded_output(command, deadline)
         if output is not None and device in output: return 'connected'
         output = bounded_output(['xcrun', 'devicectl', 'list', 'devices'], deadline)
@@ -217,6 +214,7 @@ def device_link(root, id, row):
         return None
     found = cached()
     if found is not None: return found
+    import fcntl
     try:
         os.makedirs(cache, exist_ok=True)
         guard = open(os.path.join(cache, id + '.lock'), 'a')
@@ -234,7 +232,9 @@ def device_link(root, id, row):
         link = probe_link()
         temporary = None
         try:
-            fd, temporary = tempfile.mkstemp(prefix='.' + id + '.', dir=cache)
+            candidate = os.path.join(cache, '.' + id + '.' + str(os.getpid()))
+            fd = os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            temporary = candidate
             with os.fdopen(fd, 'w') as stream:
                 json.dump(dict(device=device, at=time.time(), link=link), stream)
             os.replace(temporary, file)
@@ -254,7 +254,7 @@ def guard_waiters(root, id, row):
         if '-light-' in id: pool = id.rsplit('-', 1)[0]
         parents.append(os.path.join(root, 'pool-waiters', pool))
     waiters = []
-    host = socket.gethostname()
+    host = os.uname().nodename
     ttl = int(os.environ.get('RES_WAITER_STALE_SECONDS', '300'))
     for parent in parents:
         try: names = os.listdir(parent)
@@ -303,8 +303,6 @@ def observation_main(root, action, id, by=''):
                           'oldest-waiter': {'holder': oldest.get('holder'), 'since': oldest.get('since')}}))
         return
     print('%-16s %-9s %-9s %-12s %-34s %s' % ('ID', 'KIND', 'POLICY', 'LINK', 'HOLDER', 'SINCE \u2192 UNTIL / PURPOSE'))
-    namespace = {'__name__': 'res_build_processes'}
-    exec(os.environ['RES_BUILD_PROCESS_SOURCE'], namespace)
     for name, row in rows.items():
         if id and name != id: continue
         value = read_hold(os.path.join(root, 'locks', name + '.d'))
@@ -314,10 +312,14 @@ def observation_main(root, action, id, by=''):
         if value:
             holder = value.get('by', '?') + ' (' + value.get('project', '?') + ('/' + value['task'] if value.get('task') else '') + ')'
             if value.get('_observation'): holder = 'PENDING ' + holder
-            elif value.get('host') == socket.gethostname() and not observed_alive(value.get('pid')):
+            elif value.get('host') == os.uname().nodename and not observed_alive(value.get('pid')):
                 start = value.get('start', '')
                 short = bool(value.get('pid_warning')) or start.isdecimal() and 0 <= time.time() - int(start) <= 5
-                count, _ = namespace['probe'](value) if name.startswith('heavy-') else (0, '')
+                count = 0
+                if name.startswith('heavy-'):
+                    namespace = {'__name__': 'res_build_processes'}
+                    exec(os.environ['RES_BUILD_PROCESS_SOURCE'], namespace)
+                    count, _ = namespace['probe'](value)
                 label = 'STALE-PID (build alive) ' if count else 'STALE-PID (build probe unavailable) ' if count is None else 'STALE?(short-lived pid) ' if short else 'STALE '
                 holder = label + holder
                 if short: print('res: short-lived holder PID; use scripts/heavy-build.sh <command...>; lock, build and return must share one long-lived process', file=__import__('sys').stderr)
