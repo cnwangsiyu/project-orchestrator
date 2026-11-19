@@ -48,7 +48,8 @@ project-orchestrator/references/res-contract.md. Install only after reviewed own
   Count held heavy-lane-* only, excluding local proven STALE and matching
   holder PID; legacy/remote holds count conservatively. Lane 3 enforces its
   stricter configured gate again at take time. OPEN does not mean FREE.
-  Plain take still needs caller heavy-check (lane-3 take also enforces its gate).
+  Plain build take still needs caller heavy-check for load/availability; it also
+  enforces the memory-pressure guard itself. Lane takes enforce their gates.
 - The first build also requires load1m <=1.5 x physical cores. Second/third
   builds require load1m <=0.6 x cores, available memory >=24 GiB, spare configured
   capacity and no checkout/repository conflict; unresolved legacy identity blocks
@@ -59,16 +60,64 @@ project-orchestrator/references/res-contract.md. Install only after reviewed own
   LANE_MIN_AVAIL_GIB, BUILD_LOAD_PER_CORE, BUILD_MAX_CONCURRENCY,
   BUILD_CONCURRENT_LOAD_PER_CORE, BUILD_CONCURRENT_MIN_AVAIL_GIB,
   LOAD_OVERRIDE_MINUTES and LOAD_POLL_SECONDS as validated KEY=value data.
-  heavy-check prints all active values and defaults/machine.conf source.
+  MEM_GUARD defaults to 1. The local memory guard denies admission when
+  compressor occupation exceeds MEM_GUARD_COMPRESSOR_GIB (24 GiB) in at least
+  MEM_GUARD_SUSTAIN (6) of the last nine samples taken at least ten seconds
+  apart, or swap used exceeds MEM_GUARD_SWAP_GIB (36 GiB) in the same sustained
+  way. It also stops immediately when swapfile count reaches
+  MEM_GUARD_SWAPFILES (48), or current free+inactive pages total less than 2 GiB.
+  The panic had 68 swapfiles; the 48-file hard stop leaves earlier headroom.
+  Single-reading compressor/swap swings do not deny work. Sustained checks
+  prevent near-idle swings of 2..35 GiB compressor and 13..35 GiB swap from
+  starving builds. Compressor/swap comparisons are strict greater-than;
+  the swapfile hard stop is inclusive. MEM_GUARD_SUSTAIN is an integer 1..9,
+  swapfile count is a positive integer <=1024, and GiB thresholds are >0..65536.
+  MEM_GUARD_SAMPLES accepts an absolute or ~/ path ending in .tsv and names the owner's external TSV sampler file. The default
+  is ~/.claude/orchestrator/_shared/reports/mini-memory/samples-%Y-%m-%d.tsv,
+  with the date expanded at read time. TSV columns are time, compressor_gib,
+  free_gib, swap_used_gib, swapfiles, load1, procs, top_cpu. The guard reads only
+  a bounded tail and never writes this file. File mtime and newest valid sample
+  must both be <=60 seconds old; missing, unreadable or stale files fall back
+  to a current reading plus the two hard stops. ISO timestamps, local times of
+  day and epoch seconds are accepted. No background sampler is launched by res.
+  A bounded, atomically replaced memory-samples.json under RES_DIR tracks swap
+  growth for diagnostics, using MEM_GUARD_WINDOW_SEC (120; integer 1..86400).
+  Diagnostic-cache contention or write failure leaves sustained and hard-stop
+  evaluation active. Status/holder read growth without writing the sample cache.
+  On macOS they use the same read-only Mach/sysctl counters directly, with CLI
+  fallback when native access is unavailable; admission keeps vm_stat/sysctl and
+  reads page size from vm_stat's header. Comparisons use unrounded readings.
+  MEM_GUARD_SWAP_GROWTH_GIB (6) remains accepted for configuration compatibility;
+  growth alone no longer denies admission. MEM_GUARD=0 disables the guard.
+  FIFO load overrides never bypass a sustained or hard-stop memory denial.
+  Linux and unavailable compressor/swap tools leave the guard inactive and
+  issue one warning per minute; existing availability/load errors still apply.
+  Devices, checkouts and remote devbox slots do not use the local memory guard.
+  heavy-check preserves its public output format; status shows the new readings,
+  counts and sampler source. Its source label describes the saved configuration's
+  origin; status additionally marks config=last-good during fallback.
   Publish a complete newline-terminated file using temp + rename; never edit
-  machine.conf in place. Invalid paths and incomplete/changing reads fail with
-  exit 1 before overrides apply. Reads use Python 3. Consult references/res-contract.md for ranges. The controller never creates
-  the file; absent configuration keeps the original thresholds.
+  machine.conf in place. Use res check-config [FILE] to validate a candidate
+  without changing state. Every successful read atomically saves normalized,
+  validated settings in RES_DIR/machine-last-good.json. Invalid paths or
+  incomplete/changing edits retain that saved configuration, including for new
+  commands, and log config-invalid at most once per minute. Without a valid
+  saved copy the read fails with exit 1. Reads use Python 3; configuration is
+  never executed. The controller never creates machine.conf; absent configuration
+  selects defaults and records them as the last-good settings.
 - macOS available memory = kern.memorystatus_level/100 * hw.memsize. Only an
   explicitly missing sysctl permits (free+inactive+speculative) pages fallback.
-  Page headroom and swap are diagnostics; Linux uses MemAvailable. Metrics
+  Page headroom is diagnostic; compressor occupation and swap also feed the
+  local memory guard. Linux uses MemAvailable. Existing gate metrics
   failures stop admission. heavy-check: 0 OK, 5 overloaded, 1 metrics/error;
   prints limit/lanes_held and appends lane3=OPEN|CLOSED, using unrounded gates.
+- Memory pressure does not revoke an existing hold or kill its processes.
+  res status shows current compressor/swap/growth and memory=HIGH in build
+  capacity; res holder <heavy-id> exposes the same memory state in JSON.
+  Harnesses may check it and stop voluntarily, then return their resources.
+  New takes exit 5 when memory is HIGH; waits retain FIFO position and keep
+  polling until admission or timeout. Denials log reason=memory and all three
+  readings, limited to one entry per holder/waiter per minute.
 - Install EXIT/INT/TERM/HUP traps BEFORE acquisition. Return in reverse order:
   lane then slot, via return-build --by <unique-run-holder> or normal returns.
   The wrapper also passes --pid $$ on return-build to protect preexisting holds.

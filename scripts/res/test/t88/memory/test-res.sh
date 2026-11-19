@@ -7,6 +7,8 @@ ROOT=$(mktemp -d "$SOURCE/check.XXXXXX")
 export RES_DIR="$ROOT/scratch"
 mkdir -p "$RES_DIR/locks" "$RES_DIR/notes"
 printf 'heavy-build\tslot\topen\t-\tscratch build\nheavy-lane-1\tslot\topen\t-\tscratch lane\nheavy-lane-2\tslot\topen\t-\tscratch lane\n' >"$RES_DIR/resources.tsv"
+# This historical suite isolates OS-availability behavior; mem-guard.mjs covers pressure.
+printf 'MEM_GUARD=0\n' >"$RES_DIR/machine.conf"
 export RES_TEST_METRICS=1 RES_TEST_LOAD1M=8 RES_TEST_MEMORYSTATUS_LEVEL=37 RES_TEST_PHYSICAL_CORES=14
 export RES_TEST_MEMSIZE=68719476736
 export RES_TEST_SWAPUSAGE='total = 36864.00M  used = 36273.62M  free = 590.38M  (encrypted)'

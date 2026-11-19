@@ -78,18 +78,18 @@ const conf = path.join(state, 'machine.conf'), nextConf = `${conf}.next`;
 const twentyGiB = { RES_TEST_MEMSIZE: '42949672960' };
 config('MIN_AVAIL_GIB=3');
 let incomplete = check(twentyGiB); eq(incomplete.code, 1); ok(incomplete.text.includes('incomplete machine.conf'));
-ok(incomplete.text.includes('defaults retained')); eq(take('heavy-lane-3', twentyGiB).code, 1);
+ok(incomplete.text.includes('no last-good thresholds')); eq(take('heavy-lane-3', twentyGiB).code, 1);
 fs.writeFileSync(nextConf, 'MIN_AVAIL_GIB=32\n'); fs.renameSync(nextConf, conf);
 eq(check(twentyGiB).code, 5);
 fs.writeFileSync(nextConf, 'MIN_AVAIL_GIB=3');
 const duringEdit = check(twentyGiB); eq(duringEdit.code, 5); ok(duringEdit.text.includes('MIN_AVAIL_GIB=32'));
 fs.writeFileSync(nextConf, 'MIN_AVAIL_GIB=32\n'); fs.renameSync(nextConf, conf); eq(check(twentyGiB).code, 5);
-config(''); eq(check(twentyGiB).code, 1); fs.rmSync(conf);
+config(''); eq(check(twentyGiB).code, 5, 'empty edit retains valid 32 GiB threshold'); fs.rmSync(conf);
 
-// Review #4: existing invalid entries must fail promptly for both checks and
-// heavy takes. Only a missing entry selects defaults; a regular target is valid.
+// Invalid paths still fail promptly when no saved valid configuration exists.
 const heavyArgs = (id) => ['take', id, '--by', 'fixture', '--project', 'fixture', '--for', 'fixture'];
 for (const kind of ['fifo', 'directory', 'dangling', 'nonregular-target']) {
+  fs.rmSync(path.join(state, 'machine-last-good.json'), { force: true });
   if (kind === 'fifo') {
     const made = spawnSync('/usr/bin/mkfifo', [conf]); eq(made.status, 0);
   } else if (kind === 'directory') fs.mkdirSync(conf);
@@ -107,14 +107,14 @@ fs.writeFileSync(nextConf, 'MIN_AVAIL_GIB=16\n'); fs.symlinkSync(nextConf, conf)
 eq(check().code, 0); fs.rmSync(conf); fs.rmSync(nextConf);
 
 eq(fs.existsSync(path.join(state, 'machine.conf')), false);
-let gate = check(); eq(gate.code, 0); eq(parseHeavyCheck(gate.text).thresholds,
+let gate = check(); eq(gate.code, 0); eq(parseHeavyCheck(gate.stdout).thresholds,
   { LOAD_LIMIT: 12, LOAD_LIMIT_WITH_LANES: 20, MIN_AVAIL_GIB: 16, LANE3_LOAD: 8, LANE3_AVAIL_GIB: 32, source: 'defaults' });
 eq(fs.existsSync(path.join(state, 'machine.conf')), false);
 config('# smaller machine\n LOAD_LIMIT = 6.5\nLOAD_LIMIT_WITH_LANES=10.5\nMIN_AVAIL_GIB=8\nLANE3_LOAD=4.5\nLANE3_AVAIL_GIB=16\n');
-gate = check(); eq(gate.code, 5); eq(parseHeavyCheck(gate.text, gate.code).loadGate, 6.5);
-const configuredGate = parseHeavyCheck(gate.text, gate.code);
-eq(parseHeavyCheck(gate.text, gate.code).memoryGateGiB, 8);
-eq(parseHeavyCheck(gate.text, gate.code).thresholds.source, 'machine.conf');
+gate = check(); eq(gate.code, 5); eq(parseHeavyCheck(gate.stdout, gate.code).loadGate, 6.5);
+const configuredGate = parseHeavyCheck(gate.stdout, gate.code);
+eq(parseHeavyCheck(gate.stdout, gate.code).memoryGateGiB, 8);
+eq(parseHeavyCheck(gate.stdout, gate.code).thresholds.source, 'machine.conf');
 eq(check({ RES_TEST_LOAD1M: '6.5', RES_TEST_MEMORYSTATUS_LEVEL: '12.5' }).code, 1); // metrics percentages stay integers
 eq(check({ RES_TEST_LOAD1M: '6.5', RES_TEST_MEMSIZE: '17179869184' }).code, 0);
 eq(check({ RES_TEST_LOAD1M: '6.5001' }).code, 5);
@@ -123,26 +123,27 @@ eq(take('heavy-lane-3', { RES_TEST_LOAD1M: '4.5', RES_TEST_MEMSIZE: '34359738368
 eq(take('heavy-lane-3', { RES_TEST_LOAD1M: '4.50001' }).code, 5);
 eq(take('heavy-lane-3', { RES_TEST_LOAD1M: '4.5', RES_TEST_MEMSIZE: '34359738367' }).code, 5);
 eq(take('heavy-lane-1').code, 0);
-gate = run(['heavy-check', '--pid', String(process.ppid)], { RES_TEST_LOAD1M: '10.5' }); eq(gate.code, 0); eq(parseHeavyCheck(gate.text).loadGate, 10.5);
+gate = run(['heavy-check', '--pid', String(process.ppid)], { RES_TEST_LOAD1M: '10.5' }); eq(gate.code, 0); eq(parseHeavyCheck(gate.stdout).loadGate, 10.5);
 release('heavy-lane-1');
 gate = check({ TEST_PLATFORM: 'Linux', RES_TEST_LOAD1M: '6.5', RES_TEST_LINUX_AVAILABLE: '8589934592' });
-eq(gate.code, 0); eq(parseHeavyCheck(gate.text).availableBasis, 'Linux MemAvailable'); eq(parseHeavyCheck(gate.text).memoryGateGiB, 8);
+eq(gate.code, 0); eq(parseHeavyCheck(gate.stdout).availableBasis, 'Linux MemAvailable'); eq(parseHeavyCheck(gate.stdout).memoryGateGiB, 8);
 eq(check({ TEST_PLATFORM: 'Linux', RES_TEST_LOAD1M: '6.5001', RES_TEST_LINUX_AVAILABLE: '8589934592' }).code, 5);
 eq(take('heavy-lane-3', { TEST_PLATFORM: 'Linux', RES_TEST_LOAD1M: '4.5', RES_TEST_LINUX_AVAILABLE: '17179869184' }).code, 0); release('heavy-lane-3');
 eq(take('heavy-lane-3', { TEST_PLATFORM: 'Linux', RES_TEST_LOAD1M: '4.5', RES_TEST_LINUX_AVAILABLE: '17179869183' }).code, 5);
 for (const text of ['LOAD_LIMIT=0\n', 'LOAD_LIMIT=-1\n', 'LOAD_LIMIT=1025\n', 'MIN_AVAIL_GIB=65537\n',
   'LOAD_LIMIT=oops\n', 'LOAD_LIMIT=10\nLOAD_LIMIT=11\n', 'UNKNOWN=12\nUNKNOWN=13\n', 'LOAD_LIMIT=21\n',
   'LANE3_LOAD=13\n', 'LANE3_AVAIL_GIB=15\n', 'LOAD_LIMIT=$(touch nope)\n', 'LOAD_LIMIT=12=13\n']) {
+  fs.rmSync(path.join(state, 'machine-last-good.json'), { force: true });
   config(text); eq(check().code, 1); eq(take('heavy-lane-3').code, 1);
   eq(fs.existsSync(path.join(state, 'locks/heavy-lane-3.d')), false);
 }
 config('UNKNOWN=12\n'); gate = check(); eq(gate.code, 0);
 ok(gate.text.includes('ignoring unknown machine.conf key UNKNOWN'));
 eq(parseHeavyCheck(gate.stdout).loadGate, 12);
-config('MIN_AVAIL_GIB=8\n'); gate = check(); eq(gate.code, 0); eq(parseHeavyCheck(gate.text).loadGate, 12);
-eq(parseHeavyCheck(gate.text).memoryGateGiB, 8);
+config('MIN_AVAIL_GIB=8\n'); gate = check(); eq(gate.code, 0); eq(parseHeavyCheck(gate.stdout).loadGate, 12);
+eq(parseHeavyCheck(gate.stdout).memoryGateGiB, 8);
 config('LOAD_LIMIT=6.500001\nLANE3_LOAD=4\n'); gate = check({ RES_TEST_LOAD1M: '6.500001' });
-eq(gate.code, 0); eq(parseHeavyCheck(gate.text).loadGate, 6.500001);
+eq(gate.code, 0); eq(parseHeavyCheck(gate.stdout).loadGate, 6.500001);
 fs.rmSync(path.join(state, 'machine.conf')); eq(check().code, 0);
 
 // A snapshot failure cannot fail or alter device admission. Idempotence retains evidence.

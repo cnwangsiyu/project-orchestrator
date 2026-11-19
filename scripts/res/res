@@ -96,6 +96,320 @@ if __name__ == '__main__':
 BUILD_PROCESS_PY
 export RES_BUILD_PROCESS_SOURCE
 
+# Shared by shell admission and Python observers/controllers; copied res stays standalone.
+IFS= read -r -d '' RES_MACHINE_SOURCE <<'MACHINE_PY' || true
+import datetime
+import fcntl
+import hashlib
+import json
+import math
+import os
+import re
+import stat
+import subprocess
+import tempfile
+import time
+
+HEAVY_DEFAULTS = dict(LOAD_LIMIT=12, LOAD_LIMIT_WITH_LANES=20, MIN_AVAIL_GIB=16,
+    LANE3_LOAD=8, LANE3_AVAIL_GIB=32, LANE_LOAD_PER_CORE=1.25, LANE_MIN_AVAIL_GIB=12,
+    BUILD_LOAD_PER_CORE=1.5, BUILD_MAX_CONCURRENCY=2, BUILD_CONCURRENT_LOAD_PER_CORE=0.6,
+    BUILD_CONCURRENT_MIN_AVAIL_GIB=24, LOAD_OVERRIDE_MINUTES=20, LOAD_POLL_SECONDS=15,
+    HEAD_OVERRIDE_BASE_LOAD=0, MEM_GUARD=1, MEM_GUARD_COMPRESSOR_GIB=24,
+    MEM_GUARD_SWAP_GIB=36, MEM_GUARD_SWAP_GROWTH_GIB=6, MEM_GUARD_WINDOW_SEC=120,
+    MEM_GUARD_SUSTAIN=6, MEM_GUARD_SWAPFILES=48,
+    MEM_GUARD_SAMPLES='~/.claude/orchestrator/_shared/reports/mini-memory/samples-%Y-%m-%d.tsv')
+DEVBOX_DEFAULTS = dict(LOAD_PER_CORE=1, MIN_AVAIL_GIB=4, HEAVY_CORES=3, HEAVY_GIB=4,
+    LIGHT_CORES=1, LIGHT_GIB=2, HEAVY_DISK_GIB=20, LIGHT_DISK_GIB=2)
+
+def regular_config(file, maximum=65536):
+    with os.fdopen(os.open(file, os.O_RDONLY | os.O_NONBLOCK), 'rb') as stream:
+        before = os.fstat(stream.fileno())
+        if not stat.S_ISREG(before.st_mode) or before.st_size > maximum:
+            raise ValueError('machine.conf must be a readable regular file <=64 KiB')
+        data = stream.read(before.st_size + 1)
+        after = os.fstat(stream.fileno())
+    stamp = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+    if stamp(before) != stamp(after) or len(data) != before.st_size:
+        raise ValueError('machine.conf changed during the read')
+    if not data or not data.endswith(b'\n'): raise ValueError('incomplete machine.conf (final newline required)')
+    return data.decode('utf-8')
+
+def parse_config(content):
+    heavy = dict(HEAVY_DEFAULTS); values = {}; unknown = set(); seen = set()
+    host = r'[A-Za-z0-9][A-Za-z0-9.-]*'
+    for line in content.splitlines():
+        if not line.strip() or line.lstrip().startswith('#'): continue
+        name, sep, value = (part.strip() for part in line.partition('='))
+        if not sep or not re.fullmatch(r'[A-Z][A-Z0-9_]*(\.[A-Za-z0-9_.-]+)?', name) or name in seen:
+            raise ValueError('invalid machine.conf line or duplicate setting')
+        seen.add(name)
+        if name == 'MEM_GUARD_SAMPLES':
+            if not value.startswith(('/', '~/')) or len(value) > 4096 or not value.endswith('.tsv') or any(ord(c) < 32 for c in value):
+                raise ValueError('invalid memory sample path')
+            heavy[name] = value; continue
+        if name in heavy:
+            if name in ('MEM_GUARD', 'HEAD_OVERRIDE_BASE_LOAD'):
+                if value not in ('0', '1') or name == 'HEAD_OVERRIDE_BASE_LOAD' and value != '1':
+                    raise ValueError('invalid machine.conf switch ' + name)
+                heavy[name] = int(value); continue
+            ceiling = 65536 if name.endswith('GIB') else 86400 if name == 'MEM_GUARD_WINDOW_SEC' else 1440 if name == 'LOAD_OVERRIDE_MINUTES' else 1024
+            if not re.fullmatch(r'[0-9]+(?:\.[0-9]+)?', value) or not 0 < float(value) <= ceiling:
+                raise ValueError('invalid machine.conf number ' + name)
+            if name in ('BUILD_MAX_CONCURRENCY', 'LOAD_POLL_SECONDS', 'MEM_GUARD_WINDOW_SEC', 'MEM_GUARD_SUSTAIN', 'MEM_GUARD_SWAPFILES') and not value.isdecimal():
+                raise ValueError('invalid machine.conf integer ' + name)
+            heavy[name] = int(value) if value.isdecimal() else float(value)
+        elif name in ('DEVBOX_DYNAMIC_ADMISSION', 'DEVBOX_LIGHT_STALE_RECLAIM', 'DEVBOX_HEAVY_STALE_RECLAIM', 'DEVBOX_REBUILD_PLACEMENT', 'DEVBOX_RANK_BY_SPARE'):
+            if value not in ('0', '1'): raise ValueError('invalid devbox switch ' + name)
+            values[name] = value
+        elif name in ('DEVBOX_INPUT_TTL_SECONDS', 'DEVBOX_INPUT_WAIT_CAP_SECONDS', 'DEVBOX_INPUT_SEED_MAX_SECONDS'):
+            if not value.isdecimal() or not 0 < int(value) <= 86400: raise ValueError('invalid input setting ' + name)
+            values[name] = int(value)
+        elif name == 'DEVBOX_DYNAMIC_HOSTS':
+            if value and not re.fullmatch(host + '(,' + host + ')*', value): raise ValueError('invalid dynamic hosts')
+            values[name] = value
+        else:
+            setting, _, suffix = name[7:].partition('.') if name.startswith('DEVBOX_') else ('', '', '')
+            if setting not in DEVBOX_DEFAULTS and not (setting == 'SOFT_EXCLUDE_MINUTES' and not suffix):
+                unknown.add(name); continue
+            pattern = r'[A-Za-z0-9][A-Za-z0-9_.-]*' if suffix.startswith('project.') and setting.endswith('_DISK_GIB') else host
+            target = suffix[8:] if suffix.startswith('project.') and setting.endswith('_DISK_GIB') else suffix
+            if suffix and not re.fullmatch(pattern, target): raise ValueError('invalid devbox override')
+            if not re.fullmatch(r'[0-9]+(?:\.[0-9]+)?', value) or not 0 < float(value) <= 65536:
+                raise ValueError('invalid devbox cost ' + name)
+            values[name] = float(value)
+    if not (heavy['LOAD_LIMIT_WITH_LANES'] >= heavy['LOAD_LIMIT'] >= heavy['LANE3_LOAD']
+            and heavy['LANE3_AVAIL_GIB'] >= heavy['MIN_AVAIL_GIB']
+            and heavy['BUILD_CONCURRENT_LOAD_PER_CORE'] <= heavy['LANE_LOAD_PER_CORE'] <= heavy['BUILD_LOAD_PER_CORE']
+            and heavy['BUILD_CONCURRENT_MIN_AVAIL_GIB'] >= heavy['LANE_MIN_AVAIL_GIB']
+            and 1 <= heavy['BUILD_MAX_CONCURRENCY'] <= 3 and 15 <= heavy['LOAD_POLL_SECONDS'] <= 30
+            and 1 <= heavy['MEM_GUARD_SUSTAIN'] <= 9):
+        raise ValueError('invalid machine.conf threshold relations')
+    return dict(heavy=heavy, devbox=values, unknown=sorted(unknown))
+
+def atomic_json(file, value):
+    temporary = None
+    try:
+        fd, temporary = tempfile.mkstemp(prefix='.' + os.path.basename(file) + '.', dir=os.path.dirname(file))
+        with os.fdopen(fd, 'w') as stream:
+            json.dump(value, stream, separators=(',', ':'), allow_nan=False)
+            stream.write('\n')
+        os.replace(temporary, file)
+    finally:
+        if temporary and os.path.exists(temporary): os.unlink(temporary)
+
+def read_json(file, default):
+    try: return json.loads(regular_config(file, maximum=1048576))
+    except (OSError, ValueError): return default
+
+def journal(root, event, resource, holder, detail):
+    with open(os.path.join(root, 'log.tsv'), 'a') as stream:
+        stream.write(datetime.datetime.now().strftime('%Y-%m-%d %H:%M') + '\t' + event + '\t' + resource + '\t' + holder + '\t' + detail + '\n')
+
+def throttled(root, category, identity, event, resource, holder, detail):
+    file = os.path.join(root, category + '.json')
+    try:
+        with open(file + '.lock', 'a') as guard:
+            fcntl.flock(guard, fcntl.LOCK_EX)
+            rates = read_json(file, {})
+            if not isinstance(rates, dict): rates = {}
+            current = time.time(); code = hashlib.sha256(identity.encode()).hexdigest()
+            recent = rates.get(code, 0)
+            if isinstance(recent, (int, float)) and 0 <= current - recent < 60: return False
+            rates = {k: v for k, v in rates.items() if isinstance(v, (int, float)) and 0 <= current - v < 60}
+            rates[code] = current
+            # JSON state always ends with a newline so the same bounded reader applies.
+            journal(root, event, resource, holder, detail) if event else None
+            atomic_json(file, rates)
+            return True
+    except OSError: return True
+
+def machine_config(root, warn=True):
+    file = os.path.join(root, 'machine.conf'); saved = os.path.join(root, 'machine-last-good.json')
+    try:
+        try: content = regular_config(file); source = 'machine.conf'
+        except FileNotFoundError:
+            if os.path.lexists(file): raise ValueError('machine.conf is a dangling symlink')
+            content = '\n'; source = 'defaults'
+        result = parse_config(content)
+        atomic_json(saved, dict(version=1, source=source, content='\n'.join(
+            ['%s=%s' % (n, v) for n, v in {**result['heavy'], **result['devbox']}.items()
+             if n != 'HEAD_OVERRIDE_BASE_LOAD' or v != 0] + ['%s=ignored' % n for n in result['unknown']]) + '\n'))
+    except (OSError, ValueError) as error:
+        cached = read_json(saved, None)
+        if not isinstance(cached, dict) or cached.get('version') != 1 or not isinstance(cached.get('content'), str):
+            raise ValueError('invalid machine.conf; no last-good thresholds: ' + str(error))
+        result = parse_config(cached['content']); source = cached.get('source', 'machine.conf')
+        result['fallback'] = True
+        if throttled(root, 'config-invalid', 'config', 'config-invalid', 'machine.conf', '-', 'using last-good thresholds') and warn:
+            print('res: warning: invalid machine.conf reload; keeping last-good thresholds and FIFO position', file=__import__('sys').stderr)
+    result['source'] = source
+    return result
+
+def sampler_rows(file, current):
+    """Read only a bounded tail; ignore columns after the five numeric memory fields."""
+    try:
+        with os.fdopen(os.open(file, os.O_RDONLY | os.O_NONBLOCK), 'rb') as stream:
+            before = os.fstat(stream.fileno())
+            if not stat.S_ISREG(before.st_mode) or not 0 <= current - before.st_mtime <= 60: return []
+            offset = max(0, before.st_size - 32768)
+            stream.seek(offset); data = stream.read(32769)
+            after = os.fstat(stream.fileno())
+        if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns): return []
+        lines = data.decode().splitlines()
+        if data and not data.endswith(b'\n'): lines = lines[:-1]
+        if offset: lines = lines[1:]
+        rows = []
+        for line in lines:
+            fields = line.split('\t')
+            if len(fields) < 5: continue
+            try:
+                stamp = fields[0]
+                if re.fullmatch(r'[0-9]+(?:\.[0-9]+)?', stamp): at = float(stamp)
+                else:
+                    if re.fullmatch(r'\d{2}:\d{2}:\d{2}(?:\.\d+)?', stamp):
+                        stamp = datetime.datetime.fromtimestamp(current).strftime('%Y-%m-%dT') + stamp
+                    at = datetime.datetime.fromisoformat(stamp.replace('Z', '+00:00')).timestamp()
+                numbers = [float(value) for value in fields[1:5]]
+                if not all(math.isfinite(v) and v >= 0 for v in [at] + numbers) or at > current: continue
+                rows.append([at] + numbers)
+            except (ValueError, OverflowError): continue
+        # A sampler is fresh only when the data, as well as the file, is recent.
+        rows.sort(reverse=True)
+        if not rows or current - rows[0][0] > 60: return []
+        spaced = []
+        for row in rows:
+            if not spaced or spaced[-1][0] - row[0] >= 10:
+                spaced.append(row)
+                if len(spaced) == 9: break
+        return spaced
+    except (OSError, ValueError): return []
+
+def native_memory_readings():
+    """Observer fast path: the same read-only Mach/sysctl counters as the two CLIs."""
+    import ctypes
+    lib = ctypes.CDLL('/usr/lib/libSystem.B.dylib', use_errno=True)
+    lib.mach_host_self.restype = ctypes.c_uint
+    lib.host_page_size.argtypes = [ctypes.c_uint, ctypes.POINTER(ctypes.c_uint)]
+    lib.host_statistics64.argtypes = [ctypes.c_uint, ctypes.c_int, ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint)]
+    lib.mach_port_deallocate.argtypes = [ctypes.c_uint, ctypes.c_uint]
+    host = lib.mach_host_self(); page = ctypes.c_uint()
+    values = (ctypes.c_uint * 256)(); count = ctypes.c_uint(256)
+    try:
+        if not host or lib.host_page_size(host, ctypes.byref(page)) or lib.host_statistics64(host, 4, values, ctypes.byref(count)):
+            raise ValueError('native memory counters unavailable')
+        # vm_statistics64 rev1 prefix: free/ inactive words 0/2, speculative 23,
+        # occupied compressor pages 32. vm_stat excludes speculative from free.
+        if count.value < 38 or not page.value or values[0] < values[23]:
+            raise ValueError('invalid native memory counters')
+        pages = ('Mach Virtual Memory Statistics: (page size of %d bytes)\n'
+                 'Pages free: %d.\nPages inactive: %d.\nPages occupied by compressor: %d.\n') % (
+                     page.value, values[0] - values[23], values[2], values[32])
+    finally:
+        if host: lib.mach_port_deallocate(ctypes.c_uint.in_dll(lib, 'mach_task_self_').value, host)
+    lib.sysctlbyname.argtypes = [ctypes.c_char_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p, ctypes.c_size_t]
+    swap = ctypes.create_string_buffer(32); size = ctypes.c_size_t(32)
+    if lib.sysctlbyname(b'vm.swapusage', swap, ctypes.byref(size), None, 0) or size.value != 32:
+        raise ValueError('native swap counter unavailable')
+    used = int.from_bytes(swap.raw[16:24], __import__('sys').byteorder)
+    return pages, 'used = %.8fK' % (used / 1024)
+
+def memory_probe(root, config, platform=None, readings=None, prefer_native=False):
+    heavy = config['heavy']
+    state = dict(memory='UNKNOWN', guard='unavailable', compressor_gib=None, swap_used_gib=None,
+                 swap_growth_gib=None, free_inactive_gib=None, swapfiles=None, samples=0,
+                 compressor_high=0, swap_high=0, sample_source='single')
+    if heavy['MEM_GUARD'] == 0:
+        state.update(memory='DISABLED', guard='disabled'); return state
+    live = os.path.realpath(os.path.expanduser('~/.claude/orchestrator/_shared'))
+    if (os.environ.get('RES_TEST_MEMORY_GUARD') == '0' or os.environ.get('RES_TEST_METRICS') == '1' or os.environ.get('RES_TEST_SWAPFILE_DIR')) and os.path.realpath(root) == live:
+        raise ValueError('test guard overrides require scratch state')
+    try:
+        if os.environ.get('RES_TEST_MEMORY_GUARD') == '0':
+            state.update(memory='DISABLED', guard='test-disabled'); return state
+        def output(args): return subprocess.check_output(args, stderr=subprocess.DEVNULL, timeout=2, env={**os.environ, 'LC_ALL': 'C'}).decode()
+        platform = platform or (output(['uname', '-s']).strip() if os.environ.get('RES_TEST_SWAPFILE_DIR') else os.uname().sysname)
+        if platform != 'Darwin':
+            state.update(memory='UNSUPPORTED', guard='unsupported')
+            raise ValueError('unsupported platform')
+        if readings is None and prefer_native and os.environ.get('RES_TEST_METRICS') != '1' and not os.environ.get('RES_TEST_SWAPFILE_DIR'):
+            try: readings = native_memory_readings()
+            except (OSError, ValueError, AttributeError): pass  # CLI fallback preserves the no-op warning contract.
+        if readings is None:
+            if os.environ.get('RES_TEST_METRICS') == '1':
+                if os.path.realpath(root) == live: raise ValueError('test metrics require scratch state')
+                readings = (os.environ.get('RES_TEST_VM_STAT', ''), os.environ.get('RES_TEST_SWAPUSAGE', ''))
+            else: readings = (output(['vm_stat']), output(['sysctl', '-n', 'vm.swapusage']))
+        pages, swap = readings
+        def page_count(label):
+            found = re.search(r'^' + re.escape(label) + r':\s*([0-9]+)\.?\s*$', pages, re.M)
+            if not found: raise ValueError('unreadable page metric')
+            return int(found[1])
+        size = re.search(r'page size of ([0-9]+) bytes', pages)
+        used = re.search(r'\bused\s*=\s*([0-9]+(?:\.[0-9]+)?)([KMGT])\b', swap)
+        if not size or int(size[1]) <= 0 or not used: raise ValueError('unreadable memory metrics')
+        compressor = page_count('Pages occupied by compressor') * int(size[1]) / 2**30
+        free = (page_count('Pages free') + page_count('Pages inactive')) * int(size[1]) / 2**30
+        swap_used = float(used[1]) * 1024**('KMGT'.index(used[2]) + 1) / 2**30
+        if not math.isfinite(compressor + free + swap_used): raise ValueError('invalid memory metrics')
+        swap_dir = '/private/var/vm'
+        if os.environ.get('RES_TEST_SWAPFILE_DIR'):
+            if os.path.realpath(root) == live: raise ValueError('test swap directory requires scratch state')
+            swap_dir = os.environ['RES_TEST_SWAPFILE_DIR']
+        with os.scandir(swap_dir) as entries:
+            swapfiles = sum(bool(re.fullmatch(r'swapfile[0-9]+', entry.name)) for entry in entries)
+        current = time.time(); growth = 0; window = heavy['MEM_GUARD_WINDOW_SEC']
+        history_file = os.path.join(root, 'memory-samples.json')
+        def recent_history():
+            history = read_json(history_file, [])
+            if not isinstance(history, list): return []
+            return [v for v in history if isinstance(v, list) and len(v) == 2 and all(type(n) in (int, float) and math.isfinite(n) for n in v)
+                    and 0 <= current - v[0] <= window and v[1] >= 0]
+        history = recent_history()
+        if history: growth = max(0, swap_used - min(v[1] for v in history))
+        if not prefer_native:  # Observers read diagnostics without a cache write or wait.
+            try:
+                with open(history_file + '.lock', 'a') as guard:
+                    fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    history = recent_history()
+                    if history: growth = max(0, swap_used - min(v[1] for v in history))
+                    buckets = {}; width = max(1, window / 127)
+                    for value in history + [[current, swap_used]]:
+                        bucket = int(value[0] / width)
+                        if bucket not in buckets or value[1] < buckets[bucket][1]: buckets[bucket] = value
+                    atomic_json(history_file, list(buckets.values())[-128:])
+            except OSError:
+                pass  # Optional diagnostics must not suppress sustained/current hard stops.
+        file = datetime.datetime.fromtimestamp(current).strftime(os.path.expanduser(heavy['MEM_GUARD_SAMPLES']))
+        samples = sampler_rows(file, current)
+        if prefer_native:
+            recent_swap = [row[3] for row in samples if 0 <= current - row[0] <= window]
+            if recent_swap: growth = max(0, swap_used - min(recent_swap))
+        compressor_high = sum(row[1] > heavy['MEM_GUARD_COMPRESSOR_GIB'] for row in samples)
+        swap_high = sum(row[3] > heavy['MEM_GUARD_SWAP_GIB'] for row in samples)
+        hard = swapfiles >= heavy['MEM_GUARD_SWAPFILES'] or free < 2
+        high = hard or compressor_high >= heavy['MEM_GUARD_SUSTAIN'] or swap_high >= heavy['MEM_GUARD_SUSTAIN']
+        state.update(memory='HIGH' if high else 'OK', guard='enabled', compressor_gib=compressor,
+                     swap_used_gib=swap_used, swap_growth_gib=growth, free_inactive_gib=free, swapfiles=swapfiles,
+                     samples=len(samples), compressor_high=compressor_high, swap_high=swap_high,
+                     sample_source='external' if samples else 'single')
+    except (OSError, ValueError, subprocess.SubprocessError):
+        if throttled(root, 'memory-warning', 'probe', '', '', '', ''):
+            print('res: warning: memory guard unavailable (%s); no memory-pressure denial' % state['guard'], file=__import__('sys').stderr)
+    return state
+
+def memory_line(state):
+    value = lambda name: '?' if state[name] is None else '%.3f' % state[name]
+    return 'memory=%s guard=%s compressor_gib=%s swap_used_gib=%s swap_growth_gib=%s free_inactive_gib=%s swapfiles=%s samples=%d sustained_compressor=%d sustained_swap=%d sample_source=%s' % (
+        state['memory'], state['guard'], value('compressor_gib'), value('swap_used_gib'), value('swap_growth_gib'),
+        value('free_inactive_gib'), state['swapfiles'] if state['swapfiles'] is not None else '?', state['samples'],
+        state['compressor_high'], state['swap_high'], state['sample_source'])
+
+def memory_denial(root, state, identity, resource, holder):
+    if state['memory'] == 'HIGH':
+        throttled(root, 'memory-denials', identity, 'gate-denied', resource, holder, 'reason=memory ' + memory_line(state))
+MACHINE_PY
+export RES_MACHINE_SOURCE
+
 # Observers do not acquire admission guards or hold a list of live filenames.
 IFS= read -r -d '' RES_OBSERVATION_SOURCE <<'OBSERVATION_PY' || true
 import json
@@ -296,7 +610,11 @@ def observation_main(root, action, id, by=''):
         state = 'pending' if value.get('_observation') else 'held' if value else 'free'
         waiters = guard_waiters(root, id, rows[id])
         oldest = waiters[0] if waiters else {}
-        print(json.dumps({'id': id, 'state': state, 'holder': value.get('by'), 'project': value.get('project'),
+        memory = {}
+        if id.startswith('heavy-'):
+            namespace = {}; exec(os.environ['RES_MACHINE_SOURCE'], namespace)
+            memory['memory'] = namespace['memory_probe'](root, namespace['machine_config'](root), prefer_native=True)['memory']
+        print(json.dumps({**memory, 'id': id, 'state': state, 'holder': value.get('by'), 'project': value.get('project'),
                           'task': value.get('task'), 'since': value.get('since'), 'until': value.get('until'),
                           'mine': 'yes' if by and value.get('by') == by else 'no',
                           'yield-requested': 'yes' if waiters else 'no', 'waiters': len(waiters),
@@ -421,6 +739,7 @@ res quarantine <host> --reason "..."  exclude a registered box until unquarantin
 res unquarantine <host>              clear quarantine and infrastructure failure history
 res report-infra <slot> --kind ssh|disk|upload
                                       3 failures/30 min quarantine for 20 min; next failure repeats
+res check-config [FILE]               validate candidate machine.conf without changing state
 res heavy-check [--pid <pid>]         print lane-aware load limit and available memory; 5 if overloaded
 res extend <id> --by <session> --until <when>
 res return <id> --by <session> [--note "<text>"]
@@ -488,149 +807,77 @@ heavy_lanes_held() {
 }
 
 # Configuration is data, never shell code. Unknown well-formed keys are ignored;
-# fresh invalid reads fail closed and running waiters keep their last-good values.
-machine_thresholds_parse() {
-  LOAD_LIMIT=12 LOAD_LIMIT_WITH_LANES=20 MIN_AVAIL_GIB=16 LANE3_LOAD=8 LANE3_AVAIL_GIB=32
-  LANE_LOAD_PER_CORE=1.25 LANE_MIN_AVAIL_GIB=12 BUILD_LOAD_PER_CORE=1.5
-  BUILD_MAX_CONCURRENCY=2 BUILD_CONCURRENT_LOAD_PER_CORE=0.6 BUILD_CONCURRENT_MIN_AVAIL_GIB=24
-  LOAD_OVERRIDE_MINUTES=20 LOAD_POLL_SECONDS=15 HEAD_OVERRIDE_BASE_LOAD=0
-  THRESHOLDS_SOURCE=defaults MACHINE_UNKNOWN_KEYS=
-  local conf="$RES_DIR/machine.conf" content values key value
-  if [ ! -e "$conf" ]; then
-    [ ! -L "$conf" ] || die "machine.conf is a dangling symlink"
-    return 0
-  fi
-  [ -f "$conf" ] && [ -r "$conf" ] || die "machine.conf must be a readable regular file"
-  # Open nonblocking and inspect that descriptor, so a path replacement cannot
-  # turn the reader into a FIFO wait. Only a complete, unchanged snapshot applies.
-  content=$(python3 - "$conf" <<'PY'
-import os, stat, sys
-try:
-    fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NONBLOCK)
-    with os.fdopen(fd, 'rb') as stream:
-        before = os.fstat(stream.fileno())
-        if not stat.S_ISREG(before.st_mode):
-            raise ValueError('machine.conf must be a readable regular file')
-        data = stream.read(before.st_size + 1)
-        after = os.fstat(stream.fileno())
-    stamp = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
-    if stamp(before) != stamp(after) or len(data) != before.st_size:
-        raise ValueError('machine.conf changed during the read')
-    if not data or not data.endswith(b'\n'):
-        raise ValueError('incomplete machine.conf (final record needs a newline)')
-    sys.stdout.write(data.decode('utf-8'))
-except (OSError, UnicodeError, ValueError) as error:
-    print('res: ' + (str(error) if isinstance(error, ValueError) else 'cannot read regular machine.conf'), file=sys.stderr)
-    sys.exit(1)
-PY
-  ) || die "machine.conf overrides not applied; defaults retained; publish complete configuration using temp + rename to keep the previous file active"
-  values=$(printf '%s\n' "$content" | awk '
-    /^[[:space:]]*(#|$)/ { next }
-    {
-      at=index($0,"="); if (!at) exit 1
-      key=substr($0,1,at-1); value=substr($0,at+1)
-      gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
-      gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
-      if (key !~ /^[A-Z][A-Z0-9_]*(\.[A-Za-z0-9_.-]+)?$/ || seen[key]++) exit 1
-      # The remote pool controller owns these keys and validates them independently.
-      if (key ~ /^DEVBOX_(DYNAMIC_ADMISSION|DYNAMIC_HOSTS|LIGHT_STALE_RECLAIM|HEAVY_STALE_RECLAIM|SOFT_EXCLUDE_MINUTES|RANK_BY_SPARE)$/ ||
-          key ~ /^DEVBOX_(LOAD_PER_CORE|MIN_AVAIL_GIB|HEAVY_CORES|HEAVY_GIB|LIGHT_CORES|LIGHT_GIB|HEAVY_DISK_GIB|LIGHT_DISK_GIB)(\.[A-Za-z0-9][A-Za-z0-9.-]*)?$/ ||
-          key ~ /^DEVBOX_(REBUILD_PLACEMENT|INPUT_TTL_SECONDS|INPUT_WAIT_CAP_SECONDS|INPUT_SEED_MAX_SECONDS)$/ ||
-          key ~ /^DEVBOX_(HEAVY|LIGHT)_DISK_GIB\.project\.[A-Za-z0-9][A-Za-z0-9_.-]*$/) next
-      if (key !~ /^(LOAD_LIMIT|LOAD_LIMIT_WITH_LANES|MIN_AVAIL_GIB|LANE3_LOAD|LANE3_AVAIL_GIB|LANE_LOAD_PER_CORE|LANE_MIN_AVAIL_GIB|BUILD_LOAD_PER_CORE|BUILD_MAX_CONCURRENCY|BUILD_CONCURRENT_LOAD_PER_CORE|BUILD_CONCURRENT_MIN_AVAIL_GIB|HEAD_OVERRIDE_BASE_LOAD|LOAD_OVERRIDE_MINUTES|LOAD_POLL_SECONDS)$/) {print "@unknown\t" key; next}
-      if (value !~ /^[0-9]+([.][0-9]+)?$/ || value + 0 <= 0) exit 1
-      if (key ~ /^(BUILD_MAX_CONCURRENCY|LOAD_POLL_SECONDS)$/ && value !~ /^[0-9]+$/) exit 1
-      if (key == "HEAD_OVERRIDE_BASE_LOAD" && value != "1") exit 1
-      max = key ~ /GIB$/ ? 65536 : (key == "LOAD_OVERRIDE_MINUTES" ? 1440 : 1024)
-      if (value + 0 > max) exit 1
-      print key "\t" value
-    }') || die "invalid machine.conf (unique known KEY=value; load >0..1024, GiB >0..65536)"
-  while IFS=$'\t' read -r key value; do
-    [ -n "$key" ] || continue
-    case "$key" in
-      @unknown) MACHINE_UNKNOWN_KEYS="${MACHINE_UNKNOWN_KEYS}${MACHINE_UNKNOWN_KEYS:+,}$value" ;;
-      LOAD_LIMIT) LOAD_LIMIT="$value" ;;
-      LOAD_LIMIT_WITH_LANES) LOAD_LIMIT_WITH_LANES="$value" ;;
-      MIN_AVAIL_GIB) MIN_AVAIL_GIB="$value" ;;
-      LANE3_LOAD) LANE3_LOAD="$value" ;;
-      LANE3_AVAIL_GIB) LANE3_AVAIL_GIB="$value" ;;
-      LANE_LOAD_PER_CORE) LANE_LOAD_PER_CORE="$value" ;;
-      LANE_MIN_AVAIL_GIB) LANE_MIN_AVAIL_GIB="$value" ;;
-      BUILD_LOAD_PER_CORE) BUILD_LOAD_PER_CORE="$value" ;;
-      BUILD_MAX_CONCURRENCY) BUILD_MAX_CONCURRENCY="$value" ;;
-      BUILD_CONCURRENT_LOAD_PER_CORE) BUILD_CONCURRENT_LOAD_PER_CORE="$value" ;;
-      BUILD_CONCURRENT_MIN_AVAIL_GIB) BUILD_CONCURRENT_MIN_AVAIL_GIB="$value" ;;
-      LOAD_OVERRIDE_MINUTES) LOAD_OVERRIDE_MINUTES="$value" ;;
-      HEAD_OVERRIDE_BASE_LOAD) HEAD_OVERRIDE_BASE_LOAD="$value" ;;
-      LOAD_POLL_SECONDS) LOAD_POLL_SECONDS="$value" ;;
-    esac
-  done <<<"$values"
-  awk -v empty="$LOAD_LIMIT" -v held="$LOAD_LIMIT_WITH_LANES" -v mem="$MIN_AVAIL_GIB" \
-    -v third="$LANE3_LOAD" -v thirdmem="$LANE3_AVAIL_GIB" \
-    'BEGIN { exit !(held >= empty && third <= empty && thirdmem >= mem) }' || die "invalid machine.conf (held load >= idle load; lane 3 load <= idle load and memory >= normal memory)"
-  awk -v lane="$LANE_LOAD_PER_CORE" -v build="$BUILD_LOAD_PER_CORE" \
-    -v concurrent="$BUILD_CONCURRENT_LOAD_PER_CORE" -v lane_mem="$LANE_MIN_AVAIL_GIB" \
-    -v concurrent_mem="$BUILD_CONCURRENT_MIN_AVAIL_GIB" -v override="$LOAD_OVERRIDE_MINUTES" \
-    -v poll="$LOAD_POLL_SECONDS" 'BEGIN {
-      exit !(concurrent <= lane && lane <= build && concurrent_mem >= lane_mem && override <= 1440 && poll >= 15 && poll <= 30)
-    }' || die "invalid machine.conf (concurrent load <= lane <= first-build load; concurrent memory >= lane memory; override <=1440 minutes; poll 15..30 seconds)"
-  [ "$BUILD_MAX_CONCURRENCY" -le 3 ] || die "invalid machine.conf (BUILD_MAX_CONCURRENCY must be 1..3)"
-  THRESHOLDS_SOURCE=machine.conf
-}
-
-# Subshell gate probes reload configuration too. A waiter-owned snapshot survives
-# those probes and preserves its original FIFO record during a bad publication.
+# Configuration is validated by the same module as observers and remote controllers.
 machine_thresholds() {
-  local parsed previous= warned= key value next snapshot known
+  local snapshot name value previous= warned= next known
   if [ -n "${WAIT_CONFIG_FILE:-}" ] && [ -f "$WAIT_CONFIG_FILE" ]; then
     previous=$(cat "$WAIT_CONFIG_FILE")
-    while IFS=$'\t' read -r key value; do
-      [ "$key" != MACHINE_WARNED_KEYS ] || warned="$value"
-    done <<<"$previous"
+    warned=$(printf '%s\n' "$previous" | awk -F'\t' '$1=="UNKNOWN_KEYS_WARNED" {print $2}')
   fi
-  if parsed=$( (
-    machine_thresholds_parse
-    for key in LOAD_LIMIT LOAD_LIMIT_WITH_LANES MIN_AVAIL_GIB LANE3_LOAD LANE3_AVAIL_GIB LANE_LOAD_PER_CORE LANE_MIN_AVAIL_GIB BUILD_LOAD_PER_CORE BUILD_MAX_CONCURRENCY BUILD_CONCURRENT_LOAD_PER_CORE BUILD_CONCURRENT_MIN_AVAIL_GIB LOAD_OVERRIDE_MINUTES LOAD_POLL_SECONDS HEAD_OVERRIDE_BASE_LOAD THRESHOLDS_SOURCE MACHINE_UNKNOWN_KEYS; do
-      printf '%s\t%s\n' "$key" "${!key}"
-    done
-  ) 2>&1 ); then
-    snapshot="$parsed"
-    [ -z "${WAIT_CONFIG_FILE:-}" ] || [ ! -f "$WAIT_CONFIG_FILE.warn" ] || rm -f "$WAIT_CONFIG_FILE.warn"
-  else
-    if [ -z "$previous" ]; then printf '%s\n' "$parsed" >&2; exit 1; fi
-    snapshot="$previous"
-    if [ ! -f "$WAIT_CONFIG_FILE.warn" ]; then
-      printf '%s\n' 'res: warning: invalid machine.conf reload; keeping last-good thresholds and FIFO position' >&2
-      : >"$WAIT_CONFIG_FILE.warn"
-    fi
-  fi
-  MACHINE_UNKNOWN_KEYS=
-  while IFS=$'\t' read -r key value; do
-    case "$key" in
-      LOAD_LIMIT|LOAD_LIMIT_WITH_LANES|MIN_AVAIL_GIB|LANE3_LOAD|LANE3_AVAIL_GIB|LANE_LOAD_PER_CORE|LANE_MIN_AVAIL_GIB|BUILD_LOAD_PER_CORE|BUILD_MAX_CONCURRENCY|BUILD_CONCURRENT_LOAD_PER_CORE|BUILD_CONCURRENT_MIN_AVAIL_GIB|LOAD_OVERRIDE_MINUTES|LOAD_POLL_SECONDS|HEAD_OVERRIDE_BASE_LOAD|THRESHOLDS_SOURCE|MACHINE_UNKNOWN_KEYS)
-        printf -v "$key" '%s' "$value" ;;
+  snapshot=$(python3 -c "$RES_MACHINE_SOURCE
+import sys
+try:
+    config = machine_config(sys.argv[1])
+    for name, value in config['heavy'].items(): print(name, value, sep='\t')
+    print('THRESHOLDS_SOURCE', config['source'], sep='\t')
+    print('UNKNOWN_KEYS', ','.join(config['unknown']), sep='\t')
+except (OSError, ValueError) as error:
+    print('res: ' + str(error), file=sys.stderr); sys.exit(1)
+" "$RES_DIR") || return $?
+  while IFS=$'\t' read -r name value; do
+    case "$name" in
+      LOAD_LIMIT|LOAD_LIMIT_WITH_LANES|MIN_AVAIL_GIB|LANE3_LOAD|LANE3_AVAIL_GIB|LANE_LOAD_PER_CORE|LANE_MIN_AVAIL_GIB|BUILD_LOAD_PER_CORE|BUILD_MAX_CONCURRENCY|BUILD_CONCURRENT_LOAD_PER_CORE|BUILD_CONCURRENT_MIN_AVAIL_GIB|LOAD_OVERRIDE_MINUTES|LOAD_POLL_SECONDS|HEAD_OVERRIDE_BASE_LOAD|MEM_GUARD|MEM_GUARD_COMPRESSOR_GIB|MEM_GUARD_SWAP_GIB|MEM_GUARD_SWAP_GROWTH_GIB|MEM_GUARD_WINDOW_SEC|MEM_GUARD_SUSTAIN|MEM_GUARD_SWAPFILES|MEM_GUARD_SAMPLES|THRESHOLDS_SOURCE|UNKNOWN_KEYS)
+        printf -v "$name" '%s' "$value" ;;
     esac
   done <<<"$snapshot"
   local unknown_ifs="$IFS"; IFS=,
-  for key in $MACHINE_UNKNOWN_KEYS; do
-    case ",$warned," in *",$key,"*) ;; *)
-      printf 'res: warning: ignoring unknown machine.conf key %s\n' "$key" >&2
-      warned="${warned}${warned:+,}$key" ;;
+  for name in $UNKNOWN_KEYS; do
+    case ",$warned," in *",$name,"*) ;; *)
+      printf 'res: warning: ignoring unknown machine.conf key %s\n' "$name" >&2
+      warned="${warned}${warned:+,}$name" ;;
     esac
   done
   IFS="$unknown_ifs"
   if [ -n "${WAIT_CONFIG_FILE:-}" ]; then
     next="$WAIT_CONFIG_FILE.$$.$RANDOM.tmp"
-    (umask 077; {
-      for key in LOAD_LIMIT LOAD_LIMIT_WITH_LANES MIN_AVAIL_GIB LANE3_LOAD LANE3_AVAIL_GIB LANE_LOAD_PER_CORE LANE_MIN_AVAIL_GIB BUILD_LOAD_PER_CORE BUILD_MAX_CONCURRENCY BUILD_CONCURRENT_LOAD_PER_CORE BUILD_CONCURRENT_MIN_AVAIL_GIB LOAD_OVERRIDE_MINUTES LOAD_POLL_SECONDS HEAD_OVERRIDE_BASE_LOAD THRESHOLDS_SOURCE MACHINE_UNKNOWN_KEYS; do printf '%s\t%s\n' "$key" "${!key}"; done
-      printf 'MACHINE_WARNED_KEYS\t%s\n' "$warned"
-    } >"$next")
+    (umask 077; printf '%s\nUNKNOWN_KEYS_WARNED\t%s\n' "$snapshot" "$warned" >"$next")
     mv -f "$next" "$WAIT_CONFIG_FILE"
   fi
 }
 
+cmd_check_config() {
+  [ "$#" -le 1 ] || die 'check-config accepts at most one candidate file'
+  python3 -c "$RES_MACHINE_SOURCE
+import sys
+try:
+    parse_config(regular_config(sys.argv[1]))
+    print('configuration valid')
+except (OSError, ValueError) as error:
+    print('res: ' + str(error), file=sys.stderr); sys.exit(1)
+" "${1:-$RES_DIR/machine.conf}"
+}
+
+# Reuse macOS readings collected by heavy-check; observers probe in their existing Python.
+local_memory_reading() {
+  RES_MEMORY_PAGES="$1" RES_MEMORY_SWAP="$2" python3 -c "$RES_MACHINE_SOURCE
+import sys
+heavy = dict(HEAVY_DEFAULTS)
+for item in sys.argv[3:]:
+    name, value = item.split('=', 1); heavy[name] = value if name == 'MEM_GUARD_SAMPLES' else float(value)
+state = memory_probe(sys.argv[1], {'heavy': heavy}, platform=sys.argv[2],
+                     readings=(os.environ['RES_MEMORY_PAGES'], os.environ['RES_MEMORY_SWAP']))
+print(memory_line(state))
+memory_denial(sys.argv[1], state, os.environ.get('RES_MEMORY_ID', str(os.getppid())),
+              os.environ.get('RES_MEMORY_RESOURCE', 'heavy-build'), os.environ.get('RES_MEMORY_HOLDER', '-'))
+" "$RES_DIR" "$3" "MEM_GUARD=$MEM_GUARD" "MEM_GUARD_COMPRESSOR_GIB=$MEM_GUARD_COMPRESSOR_GIB" \
+    "MEM_GUARD_SWAP_GIB=$MEM_GUARD_SWAP_GIB" "MEM_GUARD_SWAP_GROWTH_GIB=$MEM_GUARD_SWAP_GROWTH_GIB" "MEM_GUARD_WINDOW_SEC=$MEM_GUARD_WINDOW_SEC" "MEM_GUARD_SUSTAIN=$MEM_GUARD_SUSTAIN" \
+    "MEM_GUARD_SWAPFILES=$MEM_GUARD_SWAPFILES" "MEM_GUARD_SAMPLES=$MEM_GUARD_SAMPLES"
+}
+
 cmd_heavy_check() {
-  local PID="$PPID" lanes_held limit admission=legacy override=0
+  local PID="$PPID" lanes_held limit admission=legacy override=0 memory_details=0
+  local MEM_GUARD MEM_GUARD_COMPRESSOR_GIB MEM_GUARD_SWAP_GIB MEM_GUARD_SWAP_GROWTH_GIB MEM_GUARD_WINDOW_SEC MEM_GUARD_SUSTAIN MEM_GUARD_SWAPFILES MEM_GUARD_SAMPLES
+  local memory_reading memory_high=0
   local LOAD_LIMIT LOAD_LIMIT_WITH_LANES MIN_AVAIL_GIB LANE3_LOAD LANE3_AVAIL_GIB THRESHOLDS_SOURCE
   local LANE_LOAD_PER_CORE LANE_MIN_AVAIL_GIB BUILD_LOAD_PER_CORE BUILD_MAX_CONCURRENCY
   local BUILD_CONCURRENT_LOAD_PER_CORE BUILD_CONCURRENT_MIN_AVAIL_GIB LOAD_OVERRIDE_MINUTES LOAD_POLL_SECONDS cores=0
@@ -643,12 +890,13 @@ cmd_heavy_check() {
         [ $# -ge 2 ] || die "--admission needs lane, build or build-concurrent"
         case "$2" in lane|build|build-concurrent) admission="$2" ;; *) die "--admission needs lane, build or build-concurrent" ;; esac
         shift 2 ;;
+      --memory-details) memory_details=1; shift ;;
       --load-override) override=1; shift ;;
       *) die "unknown option '$1'" ;;
     esac
   done
   validate_pid
-  machine_thresholds
+  machine_thresholds || return $?
   lanes_held=$(heavy_lanes_held "$PID")
   limit="$LOAD_LIMIT"
   [ "$lanes_held" -eq 0 ] || limit="$LOAD_LIMIT_WITH_LANES"
@@ -715,7 +963,10 @@ cmd_heavy_check() {
           }
         }
         END { if (!found) exit 1 }') || die "cannot read swap usage"
-      awk -v load="$load" -v pages="$pages_headroom" -v level="$memorystatus" \
+      memory_reading=$(RES_MEMORY_ID="${WAIT_CONFIG_FILE:-${BY:-check}:$PID}" RES_MEMORY_RESOURCE="${WAITER_RESOURCE:-${id:-heavy-build}}" RES_MEMORY_HOLDER="${BY:-check}" local_memory_reading "$pages_reading" "$swap_reading" "$platform")
+      [ "$memory_details" != 1 ] || printf '%s\n' "$memory_reading"
+      [[ "$memory_reading" != *memory=HIGH* ]] || memory_high=1
+      awk -v memory_high="$memory_high" -v load="$load" -v pages="$pages_headroom" -v level="$memorystatus" \
         -v has_level="$has_memorystatus" -v ram="$memsize" -v swap="$swap_used" \
         -v limit="$limit" -v lanes="$lanes_held" -v min_gib="$MIN_AVAIL_GIB" \
         -v admission="$admission" -v cores="$cores" -v override="$override" \
@@ -742,7 +993,8 @@ cmd_heavy_check() {
         if (admission == "lane") { limit = cores * lane_ratio; min_gib = lane_gib }
         if (admission == "build" && cores * build_ratio < limit) limit = cores * build_ratio
         if (admission == "build-concurrent") { if (cores * concurrent_ratio < limit) limit = cores * concurrent_ratio; if (concurrent_gib > min_gib) min_gib = concurrent_gib }
-        lane3 = load <= third_load && gib >= third_gib ? "OPEN" : "CLOSED"
+        if (memory_high) { overloaded = 1; blocked = "memory" }
+        lane3 = !memory_high && load <= third_load && gib >= third_gib ? "OPEN" : "CLOSED"
         source = has_level ? sprintf("memorystatus %d%%", level) : "memorystatus unavailable; pages fallback"
         printf "load1m=%.2f limit=%s lanes_held=%d avail=%.2fGiB (%s) pages_headroom=%.2fGiB swap_used=%.2fGiB gate=%s lane3=%s", \
           load, limit, lanes, gib, source, pages / 1073741824, swap / 1073741824, overloaded ? "OVERLOADED" : "OK", \
@@ -755,6 +1007,8 @@ cmd_heavy_check() {
       return $?
       ;;
     Linux)
+      memory_reading=$(local_memory_reading '' '' "$platform")
+      [ "$memory_details" != 1 ] || printf '%s\n' "$memory_reading"
       if [ "$admission" != legacy ]; then
         if [ "${RES_TEST_METRICS:-0}" = 1 ]; then
           test_dir=$(cd "$RES_DIR" && pwd -P) || die "test metrics need an existing scratch RES_DIR"
@@ -879,8 +1133,8 @@ cmd_wait() {
         case "$id" in
           heavy-lane-1|heavy-lane-2) admission_args=(--admission lane) ;;
         esac
-        if reading=$(cmd_heavy_check --pid "$PID" ${admission_args[@]+"${admission_args[@]}"}); then
-          printf '%s\n' "$reading"
+        if reading=$(cmd_heavy_check --memory-details --pid "$PID" ${admission_args[@]+"${admission_args[@]}"}); then
+          print_gate_reading "$reading"
           if [ "$id" != heavy-lane-3 ] || lane3_open "$reading"; then
             reclaim_stale_heavy "$id" "$BY" || true
           else
@@ -888,7 +1142,7 @@ cmd_wait() {
           fi
         else
           rc=$?
-          [ -z "$reading" ] || printf '%s\n' "$reading"
+          [ -z "$reading" ] || print_gate_reading "$reading"
           [ "$rc" -eq 5 ] || { cleanup_build_waiter; return "$rc"; }
         fi ;;
     esac
@@ -1008,9 +1262,19 @@ reading_field() {
   printf '%s\n' "$1" | awk -v key="$2" '{for (i=1; i<=NF; i++) if (index($i, key "=") == 1) {sub(/^[^=]*=/, "", $i); print $i; exit}}'
 }
 
+# Keep successful legacy take/wait transcripts stable; internal checks retain details.
+print_gate_reading() {
+  local line
+  while IFS= read -r line; do
+    case "$line" in memory=HIGH*) ;; memory=*) continue ;; esac
+    printf '%s\n' "$line"
+  done <<<"$1"
+}
+
 # True when the legacy gate reading is blocked by load alone (memory fine) and the
 # user-approved head override for the base load limit is enabled.
 base_load_only() {
+  [[ "$1" != *memory=HIGH* ]] || return 1
   ( machine_thresholds >/dev/null 2>&1 || exit 1
     [ "${HEAD_OVERRIDE_BASE_LOAD:-0}" = 1 ] || exit 1
     avail=$(reading_field "$1" avail); avail=${avail%GiB}
@@ -1697,7 +1961,7 @@ build_slot_select() {
   local LOAD_LIMIT LOAD_LIMIT_WITH_LANES MIN_AVAIL_GIB LANE3_LOAD LANE3_AVAIL_GIB THRESHOLDS_SOURCE
   local LANE_LOAD_PER_CORE LANE_MIN_AVAIL_GIB BUILD_LOAD_PER_CORE BUILD_MAX_CONCURRENCY
   local BUILD_CONCURRENT_LOAD_PER_CORE BUILD_CONCURRENT_MIN_AVAIL_GIB LOAD_OVERRIDE_MINUTES LOAD_POLL_SECONDS selection rc=0
-  machine_thresholds
+  machine_thresholds || return $?
   selection=$(python3 - "$RES_DIR" "$LOCKS" "$BUILD_MAX_CONCURRENCY" "$BY" "$PID" "$PROJECT" "${CHECKOUT:-}" "$PWD" <<'PY'
 import json, os, sys
 root, locks, maximum, by, pid, project, explicit, cwd = sys.argv[1:]
@@ -2024,19 +2288,19 @@ cmd_acquire() {
     fi
     if [ "$can_attempt" = 1 ]; then
       if [ "$mode" = lane ]; then
-        reading=$(cmd_heavy_check --pid "$PID" --admission lane) || rc=$?
+        reading=$(cmd_heavy_check --memory-details --pid "$PID" --admission lane) || rc=$?
       else
-        reading=$(cmd_heavy_check --pid "$PID") || rc=$?
+        reading=$(cmd_heavy_check --memory-details --pid "$PID") || rc=$?
       fi
     fi
     if [ "$can_attempt" = 1 ] && [ "$rc" -eq 5 ] && [ "$mode" = build ] && [ "$blocking" = 1 ] && base_load_only "$reading"; then
       update_load_head load
       if head_load_override "$override_minutes"; then rc=0
-      else printf '%s\n' "$reading"; rc=2; block_reason=load; BUILD_WAITER_GATE_STREAK=$((BUILD_WAITER_GATE_STREAK + 1))
+      else print_gate_reading "$reading"; rc=2; block_reason=load; BUILD_WAITER_GATE_STREAK=$((BUILD_WAITER_GATE_STREAK + 1))
         update_build_waiter load "$lane3_state"; delay="$poll_seconds"; can_attempt=0; fi
     fi
     if [ "$can_attempt" = 1 ] && [ "$rc" -eq 0 ]; then
-      printf '%s\n' "$reading"
+      print_gate_reading "$reading"
       lane3_state=CLOSED; lane3_open "$reading" && lane3_state=OPEN
       BUILD_WAITER_GATE_STREAK=0
       update_build_waiter lane "$lane3_state"
@@ -2047,12 +2311,12 @@ cmd_acquire() {
         REQUEST_LOAD_OVERRIDE=1; OVERRIDE_MINUTES_ACTIVE="$override_minutes"
       fi
       if [ "$mode" = build ] && [ "$pin" != heavy-lane-3 ]; then
-        local lane_args=(--pid "$PID" --admission lane)
+        local lane_args=(--memory-details --pid "$PID" --admission lane)
         [ "$REQUEST_LOAD_OVERRIDE" != 1 ] || lane_args+=(--load-override)
         if reading=$(cmd_heavy_check "${lane_args[@]}"); then
-          printf '%s\n' "$reading"
+          print_gate_reading "$reading"
         else
-          rc=$?; [ -z "$reading" ] || printf '%s\n' "$reading"
+          rc=$?; [ -z "$reading" ] || print_gate_reading "$reading"
           ATTEMPT_BLOCK_REASON=$(reading_field "$reading" blocked)
           ATTEMPT_POLL_SECONDS=$(reading_field "$reading" poll_seconds)
           ATTEMPT_OVERRIDE_MINUTES=$(reading_field "$reading" override_minutes)
@@ -2094,13 +2358,15 @@ cmd_acquire() {
         update_build_waiter "$block_reason" "$lane3_state"
       fi
     elif [ "$can_attempt" = 1 ]; then
-      [ -z "$reading" ] || printf '%s\n' "$reading"
+      [ -z "$reading" ] || print_gate_reading "$reading"
       [ "$rc" -eq 5 ] || return "$rc"
       if [ "$mode" = lane ]; then
         poll_seconds=$(reading_field "$reading" poll_seconds)
       fi
       BUILD_WAITER_GATE_STREAK=$((BUILD_WAITER_GATE_STREAK + 1))
-      block_reason="${ATTEMPT_BLOCK_REASON:-$([ "$mode" = build ] && printf gate || printf load)}"
+      block_reason="${ATTEMPT_BLOCK_REASON:-$(reading_field "$reading" blocked)}"
+      [[ "$reading" != *memory=HIGH* ]] || block_reason=memory
+      [ -n "$block_reason" ] || block_reason=$([ "$mode" = build ] && printf gate || printf load)
       if [ "$mode" = build ] && [ "$block_reason" = load ]; then update_load_head load
       else update_load_head "$block_reason"; fi
       update_build_waiter "$block_reason" "$lane3_state"
@@ -2259,29 +2525,14 @@ def alive(value):
     except ProcessLookupError: return False
     except (ValueError, TypeError, OverflowError): return False
     except PermissionError: return True
+machine_helpers = {}; exec(os.environ['RES_MACHINE_SOURCE'], machine_helpers)
 def print_build_capacity():
-    if request and request != 'heavy-build': return
+    if request and not request.startswith('heavy-'): return
     count = sum(os.path.isdir(os.path.join(locks, name + '.d')) for name in ('heavy-build', 'heavy-build-2', 'heavy-build-3'))
-    limit = '2'
-    # Status reads just the display cap. Admission validates all thresholds.
-    try:
-        fd = os.open(os.path.join(root, 'machine.conf'), os.O_RDONLY | os.O_NONBLOCK)
-        with os.fdopen(fd, 'rb') as stream:
-            before = os.fstat(stream.fileno())
-            if not stat.S_ISREG(before.st_mode): raise ValueError('not regular')
-            data = stream.read(before.st_size + 1)
-            after = os.fstat(stream.fileno())
-        if len(data) != before.st_size or not data.endswith(b'\n') or before.st_mtime_ns != after.st_mtime_ns or before.st_ctime_ns != after.st_ctime_ns:
-            raise ValueError('incomplete configuration')
-        values = re.findall(rb'^[ \t]*BUILD_MAX_CONCURRENCY[ \t]*=([^\n]*)', data, re.M)
-        if values:
-            match = re.fullmatch(rb'0*([1-3])', values[0].strip())
-            limit = match[1].decode() if len(values) == 1 and match else '?'
-    except FileNotFoundError:
-        if os.path.lexists(os.path.join(root, 'machine.conf')): limit = '?'
-    except (OSError, ValueError):
-        limit = '?'
+    config = globals().get('status_machine_config') or machine_helpers['machine_config'](root)
+    limit = config['heavy']['BUILD_MAX_CONCURRENCY']
     print('\nBuild capacity: heavy-build %d/%s' % (count, limit))
+    print('  ' + machine_helpers['memory_line'](machine_helpers['memory_probe'](root, config, prefer_native=True)) + (' config=last-good' if config.get('fallback') else ''))
     for name in ('heavy-build-2', 'heavy-build-3'):
         value = info(os.path.join(locks, name + '.d'))
         if value.get('host') == host and value.get('pid', '').isdigit() and not alive(value['pid']):
@@ -2406,68 +2657,17 @@ try:
     config_unknown_warned = set(json.loads(config_record.get('ignored_config_keys','[]')))
     config_invalid_warned = config_record.get('config_invalid_warned')=='1'
     def devbox_settings():
-        global config_current_values, config_unknown_warned, config_invalid_warned
+        global config_current_values, config_unknown_warned, config_invalid_warned, status_machine_config
         host_pattern = r'[A-Za-z0-9][A-Za-z0-9.-]*'
         defaults = dict(LOAD_PER_CORE=1, MIN_AVAIL_GIB=4, HEAVY_CORES=3, HEAVY_GIB=4, LIGHT_CORES=1, LIGHT_GIB=2, HEAVY_DISK_GIB=20, LIGHT_DISK_GIB=2)
-        heavy_defaults = dict(LOAD_LIMIT=12,LOAD_LIMIT_WITH_LANES=20,MIN_AVAIL_GIB=16,LANE3_LOAD=8,LANE3_AVAIL_GIB=32,
-            LANE_LOAD_PER_CORE=1.25,LANE_MIN_AVAIL_GIB=12,BUILD_LOAD_PER_CORE=1.5,BUILD_MAX_CONCURRENCY=2,
-            BUILD_CONCURRENT_LOAD_PER_CORE=0.6,BUILD_CONCURRENT_MIN_AVAIL_GIB=24,LOAD_OVERRIDE_MINUTES=20,
-            LOAD_POLL_SECONDS=15,HEAD_OVERRIDE_BASE_LOAD=0)
-        values = {}; heavy=dict(heavy_defaults); seen=set(); unknown=set()
         if action in ('return','retain-remote','release-dead'): return {},False,5
-        try:
-            try: content=regular_text(os.path.join(root,'machine.conf'))
-            except FileNotFoundError:
-                if os.path.lexists(os.path.join(root,'machine.conf')): raise ValueError('invalid machine.conf')
-                content='\n'
-            if not content.endswith('\n'): raise ValueError('incomplete machine.conf')
-            for line in content.splitlines():
-                if not line.strip() or line.lstrip().startswith('#'): continue
-                key,sep,value=(part.strip() for part in line.partition('='))
-                if not sep or not re.fullmatch(r'[A-Z][A-Z0-9_]*(\.[A-Za-z0-9_.-]+)?',key) or key in seen: raise ValueError('invalid machine.conf line or duplicate')
-                seen.add(key)
-                if key in heavy:
-                    if not re.fullmatch(r'[0-9]+(?:\.[0-9]+)?',value) or not 0<float(value)<= (65536 if key.endswith('GIB') else 1440 if key=='LOAD_OVERRIDE_MINUTES' else 1024):
-                        raise ValueError('invalid known machine.conf value')
-                    if key in ('BUILD_MAX_CONCURRENCY','LOAD_POLL_SECONDS') and not value.isdecimal(): raise ValueError('invalid known integer')
-                    if key=='HEAD_OVERRIDE_BASE_LOAD' and value!='1': raise ValueError('invalid base load override')
-                    heavy[key]=float(value); continue
-                if key in ('DEVBOX_DYNAMIC_ADMISSION','DEVBOX_LIGHT_STALE_RECLAIM','DEVBOX_HEAVY_STALE_RECLAIM','DEVBOX_REBUILD_PLACEMENT','DEVBOX_RANK_BY_SPARE'):
-                    if value not in ('0','1'): raise ValueError('invalid devbox switch')
-                    values[key]=value
-                elif key in ('DEVBOX_INPUT_TTL_SECONDS','DEVBOX_INPUT_WAIT_CAP_SECONDS','DEVBOX_INPUT_SEED_MAX_SECONDS'):
-                    if not value.isdecimal() or not 0<int(value)<=86400: raise ValueError('invalid input setting')
-                    values[key]=int(value)
-                elif key=='DEVBOX_DYNAMIC_HOSTS':
-                    if value and not re.fullmatch(host_pattern+'(,'+host_pattern+')*',value): raise ValueError('invalid dynamic hosts')
-                    values[key]=value
-                else:
-                    setting,_,suffix=key[7:].partition('.') if key.startswith('DEVBOX_') else ('','','')
-                    known=setting in defaults or setting=='SOFT_EXCLUDE_MINUTES' and not suffix
-                    if not known: unknown.add(key); continue
-                    if suffix.startswith('project.') and setting.endswith('_DISK_GIB'):
-                        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*',suffix[8:]): raise ValueError('invalid project override')
-                    elif suffix and not re.fullmatch(host_pattern,suffix): raise ValueError('invalid host override')
-                    if not re.fullmatch(r'[0-9]+(?:\.[0-9]+)?',value) or not 0<float(value)<=65536: raise ValueError('invalid devbox cost')
-                    values[key]=float(value)
-            if not (heavy['LOAD_LIMIT_WITH_LANES']>=heavy['LOAD_LIMIT']>=heavy['LANE3_LOAD'] and heavy['LANE3_AVAIL_GIB']>=heavy['MIN_AVAIL_GIB']
-                    and heavy['BUILD_CONCURRENT_LOAD_PER_CORE']<=heavy['LANE_LOAD_PER_CORE']<=heavy['BUILD_LOAD_PER_CORE']
-                    and heavy['BUILD_CONCURRENT_MIN_AVAIL_GIB']>=heavy['LANE_MIN_AVAIL_GIB'] and 1<=heavy['BUILD_MAX_CONCURRENCY']<=3
-                    and 15<=heavy['LOAD_POLL_SECONDS']<=30): raise ValueError('invalid machine.conf relations')
-            for key in sorted(unknown-config_unknown_warned): print('res: warning: ignoring unknown machine.conf key '+key,file=sys.stderr,flush=True)
-            config_unknown_warned.update(unknown); config_current_values=values; config_invalid_warned=False
-        except (OSError,ValueError):
-            cached=config_current_values
-            if cached is None and 'last_good_devbox_config' in config_record: cached=json.loads(config_record['last_good_devbox_config'])
-            if cached is None: raise ValueError('invalid machine.conf; no last-good thresholds')
-            if not config_invalid_warned: print('res: warning: invalid machine.conf reload; keeping last-good thresholds and FIFO position',file=sys.stderr,flush=True)
-            config_invalid_warned=True; values=cached; config_current_values=cached
-        if action=='take' and legacy_config_path:
-            record=dict(last_good_devbox_config=json.dumps(config_current_values,separators=(',',':')),
-                        ignored_config_keys=json.dumps(sorted(config_unknown_warned)),config_invalid_warned='1' if config_invalid_warned else '0')
-            temp=legacy_config_path+'.'+str(os.getpid())+'.tmp'
-            with open(temp,'w') as stream: json.dump(record,stream)
-            os.chmod(temp,0o600); os.replace(temp,legacy_config_path)
+        config = machine_helpers['machine_config'](root)
+        status_machine_config = config
+        values = config['devbox']; unknown = set(config['unknown'])
+        for name in sorted(unknown-config_unknown_warned):
+            print('res: warning: ignoring unknown machine.conf key '+name,file=sys.stderr,flush=True)
+        config_unknown_warned.update(unknown); config_current_values=values
+        config_invalid_warned = config.get('fallback', False)
         reclaim = values.get('DEVBOX_LIGHT_STALE_RECLAIM') == '1'
         soft_minutes = values.get('DEVBOX_SOFT_EXCLUDE_MINUTES', 5)
         enrolled = values.get('DEVBOX_DYNAMIC_HOSTS', '').split(',') if values.get('DEVBOX_DYNAMIC_ADMISSION') == '1' else []
@@ -3548,8 +3748,24 @@ cmd_take() {
       return 0
     fi ;;
   esac
+  if [[ "$id" =~ ^heavy-build(-[23])?$ ]] && [ "${BUILD_SLOT_INTERNAL:-0}" != 1 ]; then
+    local memory_reading
+    memory_reading=$(RES_MEMORY_ID="${WAIT_CONFIG_FILE:-$BY:$PID}" RES_MEMORY_RESOURCE="$id" RES_MEMORY_HOLDER="$BY" python3 -c "$RES_MACHINE_SOURCE
+import sys
+try:
+    config = machine_config(sys.argv[1]); state = memory_probe(sys.argv[1], config)
+    print(memory_line(state))
+    memory_denial(sys.argv[1], state, os.environ['RES_MEMORY_ID'], os.environ['RES_MEMORY_RESOURCE'], os.environ['RES_MEMORY_HOLDER'])
+except (OSError, ValueError) as error:
+    print('res: ' + str(error), file=sys.stderr); sys.exit(1)
+" "$RES_DIR") || return $?
+    if [[ "$memory_reading" == *memory=HIGH* ]]; then
+      printf '%s\n' "$memory_reading"
+      return 5
+    fi
+  fi
   if [[ "$id" =~ ^heavy-lane-[123]$ ]] || { [[ "$id" =~ ^heavy-build(-[23])?$ ]] && [ "${BUILD_SLOT_INTERNAL:-0}" = 1 ]; }; then
-    local reading rc=0 admission=legacy check_args=(--pid "$PID")
+    local reading rc=0 admission=legacy check_args=(--memory-details --pid "$PID")
     case "$id" in
       heavy-lane-1|heavy-lane-2)
         admission=lane; check_args+=(--admission lane)
@@ -3561,7 +3777,7 @@ cmd_take() {
         [ "${LOAD_OVERRIDE_ACTIVE:-0}" != 1 ] || check_args+=(--load-override) ;;
     esac
     reading=$(cmd_heavy_check "${check_args[@]}") || rc=$?
-    [ -z "$reading" ] || printf '%s\n' "$reading"
+    [ -z "$reading" ] || print_gate_reading "$reading"
     ATTEMPT_BLOCK_REASON=$(reading_field "$reading" blocked)
     ATTEMPT_POLL_SECONDS=$(reading_field "$reading" poll_seconds)
     ATTEMPT_OVERRIDE_MINUTES=$(reading_field "$reading" override_minutes)
@@ -3744,6 +3960,7 @@ case "${1:-}" in
     pool_controller "$action" "$id" 0 0 ;;
   quarantine|unquarantine|report-infra) box_health "$@" ;;
   return-build) shift; cmd_return_build "$@" ;;
+  check-config) shift; cmd_check_config "$@" ;;
   heavy-check) shift; cmd_heavy_check "$@" ;;
   extend) shift; cmd_extend "$@" ;;
   return) shift; cmd_return "$@" ;;

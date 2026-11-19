@@ -74,7 +74,9 @@ try {
   claim('devbox-cn-1');
   fs.unlinkSync(affinityFile); sample(large, 64, 0);
   config('DEVBOX_RANK_BY_SPARE=0\n'); claim('devbox-cn-1', ['--prefer-host', small]);
-  config('DEVBOX_RANK_BY_SPARE=invalid\n'); eq(run(['audit']).status, 1);
+  config('DEVBOX_RANK_BY_SPARE=invalid\n'); eq(run(['audit']).status, 0, 'audit uses last-good configuration');
+  fs.rmSync(file('machine-last-good.json'));
+  eq(run(['audit']).status, 1, 'invalid configuration without last-good fails');
   config();
   fs.writeFileSync(file('devbox-hosts.json'), JSON.stringify({ [large]: { cores: 64, freeGiB: 1, probedAt: new Date(Date.now()-90000000).toISOString() } }));
   fs.unlinkSync(file(`devbox-metrics/${large}.json`));

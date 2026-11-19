@@ -32,7 +32,7 @@ async function until(test,record){const deadline=Date.now()+60000;while(!test())
 function waiter(pool,by){const dir=path.join(state,pool);for(const name of fs.existsSync(dir)?fs.readdirSync(dir):[]){const info=path.join(dir,name,'info');if(name.startsWith('waiter.') && fs.existsSync(info)){const text=fs.readFileSync(info,'utf8');if(text.includes('holder\t'+by+'\n'))return Object.fromEntries(text.trim().split('\n').map(line=>line.split('\t')));}}}
 try{
  config('FUTURE_GATE.rule_one=alpha=beta\n');const future=run(['heavy-check']);eq(future.status,0,future.stderr);ok(future.stderr.includes('ignoring unknown machine.conf key FUTURE_GATE.rule_one'));
- for(const text of ['bad line\n','lowercase=1\n','LOAD_LIMIT=oops\n','LOAD_LIMIT=12\nLOAD_LIMIT=12\n','FUTURE_GATE=1\nFUTURE_GATE=2\n','LOAD_POLL_SECONDS=31\n']){config(text);eq(run(['heavy-check']).status,1,'fresh invalid configuration fails closed');}
+ for(const text of ['bad line\n','lowercase=1\n','LOAD_LIMIT=oops\n','LOAD_LIMIT=12\nLOAD_LIMIT=12\n','FUTURE_GATE=1\nFUTURE_GATE=2\n','LOAD_POLL_SECONDS=31\n']){fs.rmSync(path.join(state,'machine-last-good.json'),{force:true});config(text);eq(run(['heavy-check']).status,1,'invalid configuration without last-good fails closed');}
  config('LOAD_POLL_SECONDS=15\nFUTURE_GATE.rule_one=alpha\n');
  const build=start(['wait-build',...args('build-reload'),'--timeout','2'],{RES_TEST_LOAD1M:'100'});
  await until(()=>fs.existsSync(path.join(root,'sleep.1')),build);
@@ -50,7 +50,7 @@ try{
  await until(()=>fs.existsSync(path.join(root,'sleep.4')),legacy);config('LOAD_LIMIT=bad\n');fs.writeFileSync(path.join(root,'sleep.4.release'),'');
  await until(()=>fs.existsSync(path.join(root,'sleep.5')),legacy);eq(legacy.code,undefined);
  config('LANE_LOAD_PER_CORE=10\nBUILD_LOAD_PER_CORE=10\nFUTURE_GATE.rule_one=alpha\n');fs.writeFileSync(path.join(root,'sleep.5.release'),'');
- eq(await legacy.done,0,legacy.output);eq((legacy.output.match(/invalid machine.conf reload/g)||[]).length,1);
+ eq(await legacy.done,0,legacy.output);ok((legacy.output.match(/invalid machine.conf reload/g)||[]).length<=1,'global invalid-config warning rate limit');
  eq(run(['return','heavy-lane-1','--by','legacy-reload']).status,0);
  const host='192.0.2.1';fs.writeFileSync(path.join(state,'devbox-metrics',host+'.json'),JSON.stringify({at:Date.now()/1000,cores:8,load5:99,memAvailableGiB:100,freeGiB:1000}));
  const poolConfig='DEVBOX_DYNAMIC_ADMISSION=1\nDEVBOX_DYNAMIC_HOSTS='+host+'\nFUTURE_GATE.rule_one=alpha\n';
@@ -58,11 +58,12 @@ try{
  const pool=start(['wait-pool','devbox-cn',...args('pool-reload'),'--timeout','2'],{PAUSE_MARK:first,SECOND_MARK:second,RES_TEST_POOL_FAST_POLL:'1'});
  await until(()=>fs.existsSync(first),pool);const poolOrder=waiter('pool-waiters/devbox-cn','pool-reload').order;
  config('DEVBOX_HEAVY_CORES=bad\n');fs.writeFileSync(first+'.release','');await until(()=>fs.existsSync(second),pool);
- eq(waiter('pool-waiters/devbox-cn','pool-reload').order,poolOrder);eq(pool.code,undefined);eq((pool.output.match(/invalid machine.conf reload/g)||[]).length,1);
+ eq(waiter('pool-waiters/devbox-cn','pool-reload').order,poolOrder);eq(pool.code,undefined);ok((pool.output.match(/invalid machine.conf reload/g)||[]).length<=1,'global invalid-config warning rate limit');
  config(poolConfig+'DEVBOX_LOAD_PER_CORE=20\nHEAD_OVERRIDE_BASE_LOAD=1\n');fs.writeFileSync(second+'.release','');eq(await pool.done,0,pool.output);
  eq((pool.output.match(/ignoring unknown machine.conf key FUTURE_GATE.rule_one/g)||[]).length,1);ok(pool.output.includes('slot=devbox-cn-1'));
  config('bad line\n');eq(run(['return','devbox-cn-1','--by','pool-reload']).status,0,'return works during invalid publication');
- eq(run(['wait-pool','devbox-cn',...args('fresh-bad'),'--timeout','0']).status,1,'fresh pool with invalid config fails closed');
+ eq(run(['wait-pool','devbox-cn',...args('fresh-bad'),'--timeout','0']).status,0,'fresh pool uses durable last-good config');
+ eq(run(['return','devbox-cn-1','--by','fresh-bad']).status,0);
  eq(fs.readdirSync(path.join(state,'build-waiters')).filter(name=>name.startsWith('.config.')).length,0,'waiter cache cleaned after exit');
  console.log(`ALL ${assertions} ASSERTIONS PASSED`);
 }finally{for(const child of children)child.kill('SIGTERM');fs.rmSync(root,{recursive:true,force:true});}

@@ -50,7 +50,8 @@ const observed = new Promise((resolve, reject) => {
 const closed = new Promise(resolve => child.on('close', resolve));
 await observed;
 const restriction = /hard\s+fixture\/placement.*self_restricted reason=fixture binding free_hosts=192\.0\.2\.2/;
-match(call('status', pool).stdout, restriction);
+// Status takes a registered resource ID; slot 1 observes this pool's waiters.
+match(call('status', slot(1)).stdout, restriction);
 fs.appendFileSync(path.join(root, 'resources.tsv'), 'fixture-device\tphone\tnever\tfixture-id\tsynthetic device\n');
 match(call('status').stdout, restriction);
 check(await closed, 2);

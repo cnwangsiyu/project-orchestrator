@@ -334,8 +334,9 @@ try {
   }
   // Isolated states make cases independent; bounded parallel batches keep the
   // exhaustive matrix comfortably inside the per-suite deadline on busy hosts.
-  for (let i = 0; i < interruptionJobs.length; i += 8)
-    await Promise.all(interruptionJobs.slice(i, i + 8).map((job) => job()));
+  const batchSize = process.env.RES_TEST_SERIAL_CASES === '1' ? 1 : 8;
+  for (let i = 0; i < interruptionJobs.length; i += batchSize)
+    await Promise.all(interruptionJobs.slice(i, i + batchSize).map((job) => job()));
   // Pinning the removed directory's identity must also support relative state
   // roots, and must not confuse a replacement holder with an unreleased hold.
   for (const replacement of [false, true]) {
@@ -456,7 +457,13 @@ try {
   // Wrapper signals during the delayed PID validation unwind the already acquired pair.
   for (const [signal, code] of [['SIGTERM', 143], ['SIGINT', 130], ['SIGHUP', 129]]) {
     const interrupted = wrapped(['/bin/sleep', '30']);
-    await until(() => interrupted.text.includes('took heavy-lane-1'), 'wrapper pair not acquired', interrupted);
+    // Acquisition stdout is buffered by heavy-build.sh until its PID check ends.
+    // Observe this wrapper's published pair to interrupt the intended PID-check window.
+    await until(() => {
+      try { return field('heavy-build', 'pid') === String(interrupted.pid) &&
+        field('heavy-lane-1', 'pid') === String(interrupted.pid); }
+      catch (error) { if (error.code === 'ENOENT') return false; throw error; }
+    }, 'wrapper pair not acquired (' + signal + ')', interrupted);
     eq((await stop(interrupted, signal, false)).code, code); eq(held(), []);
   }
   // Observers retain correct STALE identity and see both new waiter forms.

@@ -22,6 +22,7 @@ const SUITE_TIMEOUTS = {
   'pool-exec.mjs': 600000,
   'devbox-admission.mjs': 600000,
   'config-reload.mjs': 600000,
+  'mem-guard.mjs': 600000,
   'followups.mjs': 600000,
   'mini-build.mjs': 600000,
   'stale-holds.mjs': 600000,
@@ -52,7 +53,7 @@ export function runResSuites() {
   const res = path.resolve(base, '../res');
   const env = { ...process.env, HOME: home, TMPDIR: tmp, TMP: tmp, TEMP: tmp,
     PATH: process.env.RES_TEST_NATIVE_PS === '1' ? process.env.PATH : `${bin}:${process.env.PATH}`,
-    RES_DIR: path.join(tmp, 'unused'), RES_TEST_METRICS: '0',
+    RES_DIR: path.join(tmp, 'unused'), RES_TEST_METRICS: '0', RES_TEST_MEMORY_GUARD: '0', RES_TEST_SERIAL_CASES: '1',
     // Historical expiry fixtures use 45s; pool-exec checks the production 300s default.
     RES_WAITER_STALE_SECONDS: '45',
     T88_RES: res, T86_RES: res, T83_RES: res,
