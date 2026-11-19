@@ -1213,8 +1213,13 @@ async function scenarios() {
   assert.notEqual(failedFetch.status,0); assert.match(failedFetch.stderr,/fixture primary readback failure/);
   assert.match(failedFetch.stderr,/artifact cleanup:.*lease return failure/);
   assert.deepEqual(fs.readdirSync(os.tmpdir()).filter(name=>name.startsWith('devbox-artifact-fetch-')).sort(),tempBefore);
-  for(const lock of fs.readdirSync(path.join(retained.shared,'locks')))fs.rmSync(path.join(retained.shared,'locks',lock),{recursive:true});
   fs.writeFileSync(path.join(retained.dir,'config.json'),JSON.stringify(retained.config));
+  for(const lock of fs.readdirSync(path.join(retained.shared,'locks'))){
+    const info=fs.readFileSync(path.join(retained.shared,'locks',lock,'info'),'utf8');
+    const by=/^by\t([^\n]+)/m.exec(info)[1];
+    const returnedLease=spawnSync('res',['return',lock.slice(0,-2),'--by',by],{env:retained.env,encoding:'utf8'});
+    assert.equal(returnedLease.status,0,returnedLease.stdout+returnedLease.stderr);
+  }
   const retired=spawnSync(process.execPath,[script,'retire-artifacts','--receipt',manifest.run,'--host',manifest.host],{env:retained.env,encoding:'utf8'});
   assert.equal(retired.status,0,retired.stdout+retired.stderr); assert.match(retired.stdout,/"remainingBytes": 0/); returned(retained);
   const failedCommand=fixture();
