@@ -92,6 +92,13 @@ path before reuse.
   sync deletes remote generated headers and metadata, so 1,111 native steps rebuild. Protecting generated files from
   the sync is under test (T195). The cold package lacked 4 BMF runtime libraries (first-configure input discovery):
   configure once first, or use the second build's package. Devbox 8 for comparison: cold about 30 min, warm 50-169 s.
+- True warm build after the sync filter fix (Webview T195, official client): no-change rebuild 179 s total (sync
+  35 s, 0 compiles, 0 links, same APK hash); one-line change 266 s remote phase (1 compile, 7 links); cold 721 s
+  remote phase including toolchain bootstrap. The filter syncs every tracked file except keystores and protects
+  remote generated headers, metadata, `.cxx`, `.gradle` and dependency caches. Use: cold builds, parallel packaging
+  and overflow; daily incremental work stays on the devboxes (50-169 s warm). Remote runners differ in toolchain
+  (one had no Java 11): bootstrap JDK 11, ccache and git-lfs in every run. The cold package still lacks 4 BMF
+  libraries: deliver the second build's package. Report: `vesdk-mainline/tasks/T195/report.md`.
 - Onboarding notes for another project: `~/code/.claude-data/orchestrator/vesdk-mainline/tasks/T192/remotex-onboarding.md`.
 - The generic RemoteX client ships helper scripts with embedded credentials (`ws_client.sh` holds a private key;
   `remote_revert_repo.py`, `rsync_opt.sh` hold credential literals) and its `start.sh` uploads some helpers itself
