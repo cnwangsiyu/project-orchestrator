@@ -1087,8 +1087,18 @@ async function verifyInputs(row, inputs, opts, state, { force=false, timeout=600
 }
 async function inputPlan(opts,rows,state) {
   const settings=opts.inputSettings || inputSettings(sharedDir()), indices={}, holds={}, durations={};
+  // BC-147: host-level inputs are verified once per host (hosts in parallel), not once per slot;
+  // only per-slot warm inputs are checked for the remaining slots of a host.
+  const byHost=new Map(); for (const row of rows) byHost.set(row.host,[...(byHost.get(row.host) || []),row]);
+  await Promise.all([...byHost.values()].map(async hostRows => {
+    let first=true;
+    for (const row of hostRows) {
+      const wanted=first ? opts.placementInputs : opts.placementInputs.filter(input=>input.warm);
+      if (first || wanted.length) indices[row.host]=await verifyInputs(row,wanted,opts,state,{timeout:Math.min(15000,opts.deadline-Date.now())});
+      first=false;
+    }
+  }));
   for (const row of rows) {
-    indices[row.host]=await verifyInputs(row,opts.placementInputs,opts,state,{timeout:Math.min(15000,opts.deadline-Date.now())});
     try { holds[row.slot]=Object.fromEntries(fs.readFileSync(path.join(lockPath(sharedDir(),row.slot),'info'),'utf8').trim().split('\n').map(line=>line.split('\t'))); }
     catch(error) { if(error.code!=='ENOENT') throw error; }
     const history=readTimings(opts.snapshot.storeKey);
