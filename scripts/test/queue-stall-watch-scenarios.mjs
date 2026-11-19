@@ -36,8 +36,9 @@ const monitor = () => createQueueStallMonitor(owner, { statusOf: () => queue, la
 try {
   const [first] = await monitor().poll([row], [], now);
   assert.equal(first.kind, 'queue-stalled'); assert.equal(first.severity, 'risk'); assert.equal(first.wake, true);
-  assert.match(first.text, /thread-1 turn=turn-1 task=queue-probe, position 244, 6.0 min waiting; bucket depleted until/);
-  assert.match(first.text, /--exclude-account 'other,trae,ttadk'/);
+  assert.match(first.text, /task=queue-probe thread=thread-1 turn=turn-1.*queued 6.0 min position=244/);
+  assert.ok(first.options.some(o=>o.id==='wait'));
+  assert.match(first.options.find(o=>o.id==='wait').command,/queue-choice.*--owner.*--option wait/);
   assert.ok(!first.text.includes('old-approval'));
   assert.equal((await monitor().poll([row], [], now + min)).length, 0, 'restart deduplicates the same episode');
   queue = { state: 'ready' };

@@ -36,7 +36,8 @@ import {mcpStartupMonitor} from './lib/mcp-startup.mjs';
 // `start` and `turn` follow the turn until it ends: every notification is appended to --log as JSONL, the first stdout
 // line is `thread=<id> turn=<id>`, and the process exits 0 on completed, 1 on failed/interrupted, 4 when the turn has
 // been silent for --stall-min minutes (default 30; the turn keeps running — re-attach with `wait`). Routed queue
-// patience/unavailable/first-request restriction misses automatically follow a fresh company worker (at most 2 hops).
+// waits notify the owner with options when fallback is enabled. Disabled-policy
+// patience/unavailable/first-request restriction misses retain company hops (at most 2).
 // Exit 7 means cancellation/handoff could not be confirmed, 8 needs approval, 9 persists a deferral in reroute.json,
 // and 10 is the automatic hop limit. Without --route-args, queue patience retains its legacy exit 7 handoff.
 // On exit it prints
@@ -65,7 +66,9 @@ import { activeClaudeWorkers, pushWorkerRules, rememberWorkerRules, workerRulesL
 import { isPolicyBlock, policyBlockRecord, appendPolicyBlock, policyBlockAction } from './lib/policy-block.mjs';
 import { runHubForeground, hubListReachable } from './lib/hub-foreground.mjs';
 import { readTurnState, reconcileTurnEvents } from './lib/worker-turn.mjs';
-import { parseRouteArgs, routeFlag, rerouteWorker, turnHasWork } from './lib/worker-reroute.mjs';
+import { parseRouteArgs, routeFlag, rerouteWorker, turnHasWork, heldTaskResources } from './lib/worker-reroute.mjs';
+import { notifyQueueOwner, pendingQueueChoice, claimQueueChoice, settleQueueChoice, queueRouteContext, queueOptionPlan } from './lib/queue-decision.mjs';
+import { queuePolicy } from './lib/queue-stall-watch.mjs';
 import { inheritedLaunch, savedLaunch, saveLaunch, recordLaunchModel, readRequestBufferExceededAt, markRequestBufferExceeded } from './lib/worker-launch.mjs';
 import { recordWorkerOutcome, reviewSeat, reviewInstructions } from './lib/worker-outcome.mjs';
 import { sizeLimits, threadSize, freshThreadRoute } from './lib/worker-thread-size.mjs';
@@ -95,7 +98,7 @@ const argv = process.argv.slice(2);
 const commands = new Set(['hub', 'start', 'turn', 'wait', 'steer', 'note', 'ask', 'reply', 'interrupt', 'status',
   'mine', 'watch', 'retire', 'rules-push', 'list', 'quota', 'usage', 'reset-credits', 'reset-credit-use', 'accounts',
   'account-add', 'browser-setup', 'computer-use-setup', 'ttadk-setup', 'trae-setup', 'probe', 'note-failure',
-  'proxy', 'search-proxy', 'browser-health']);
+  'proxy', 'search-proxy', 'browser-health','queue-choice']);
 const usage = `usage: codex-worker [--account NAME] <command> ...\ncommands: ${[...commands].join(' | ')}\nretire --thread ID | retire --run RUN_ID [--owner SESSION_ID] [--reason TEXT]; mine [--all]\n`;
 // Help/usage errors must exit before tracker registration, account lookup, or hub access.
 if (argv.includes('--help') || argv.includes('-h') || argv[0] === 'help') {
@@ -116,6 +119,28 @@ for (let i = 1; i < argv.length; i++) if (argv[i].startsWith('--')) {
   const key = argv[i].slice(2);
   earlyOpts[key] = key === 'force-large' || key === 'background' || key === 'no-browser-preflight' || key === 'headless-playwright' || key === 'no-headless-playwright' || (key === 'require-model' && !['on', 'off'].includes(argv[i + 1]))
     || argv[i + 1] === undefined || argv[i + 1].startsWith('--') ? true : argv[++i];
+}
+if (argv[0] === 'queue-choice') {
+  const {requestQueueChoice}=await import('./lib/queue-decision.mjs');
+  try {
+    const result=requestQueueChoice({account,thread:earlyOpts.thread,turn:earlyOpts.turn,owner:earlyOpts.owner},
+      earlyOpts.notice,earlyOpts.option,earlyOpts['user-ok']);
+    process.stdout.write(JSON.stringify({exitCode:result.exitCode,option:result.option,needsUserOK:result.route?.needsUserOK})+'\n');
+    if(result.exitCode===0) {
+      const state=pendingQueueChoice({account,thread:earlyOpts.thread,turn:earlyOpts.turn});
+      if(state&&!followerAlive(state.row)) {
+        const {spawn}=await import('node:child_process');
+        const defaults=state.launch?.defaults??{},args=['--account',account,'wait','--thread',earlyOpts.thread,'--model',state.row.model,'--effort',state.row.effort];
+        for(const k of ['name','cwd','owner','project','log','out','route-args','auto-reroute-depth','sandbox','network','browser-origins','computer-use-apps'])
+          if(typeof defaults[k]==='string'||typeof defaults[k]==='number')args.push(`--${k}`,String(defaults[k]));
+        const child=spawn(process.execPath,[...process.execArgv,fileURLToPath(new URL('./codex-worker.mjs',import.meta.url)),...args],{stdio:'inherit'});
+        child.on('error',e=>{process.stderr.write(`queue-choice: ${e.message}\n`);process.exitCode=7;});
+        await new Promise(resolve=>child.on('close',code=>{process.exitCode=code??7;resolve();}));
+        process.exit(process.exitCode??0);
+      }
+    }
+    process.exit(result.exitCode);
+  } catch(e) {process.stderr.write(`queue-choice: ${e.message}\n`);process.exit(2);}
 }
 const usageError = message => { process.stderr.write(`codex-worker: ${message}\n${usage}`); process.exit(2); };
 // Preserve owner-identity errors when a malformed request has multiple missing
@@ -932,7 +957,7 @@ const handlers = [];
 const browserStartup = mcpStartupMonitor();
 const cleanups = new Set();
 let exitCode = null;
-let activeTurn = null, attemptThreadId = null, workStarted = false, hopProgressRecorded = false;
+let activeTurn = null, attemptThreadId = null, workStarted = false, hopProgressRecorded = false, preserveQueueNotice = false;
 let sessionPath = null, actualModel = null, actualModelSource = null, actualModelProvider = null, modelMismatch = false;
 const delegatedModels = [], earlyNotifications = [];
 const strictReviewModel = opts['require-model'] === true || opts['require-model'] === 'on'
@@ -971,6 +996,10 @@ const observeModel = (observation, threadId, turnId) => {
   recordModelEvidence(threadId, turnId);
 };
 const markWorkStarted = () => {
+  if(!workStarted&&activeTurn) {
+    settleQueueChoice({account:account??'main',thread:activeTurn.threadId,turn:activeTurn.turnId},'ended');
+    if(PROF?.home)saveQueue(PROF.home,activeTurn.threadId,{state:'ready',position:0,turnId:activeTurn.turnId,workStarted:true,at:Date.now()});
+  }
   workStarted = true;
   if (!hopProgressRecorded && opts['reroute-hop-at']) {
     hopProgressRecorded = true;
@@ -1050,6 +1079,7 @@ const redactEndedTurn = (thread = activeTurn?.threadId ?? attemptThreadId ?? opt
 const finish = async (code) => {
   if (finishing) return;
   finishing = true;
+  if(activeTurn&&!preserveQueueNotice)settleQueueChoice({account:account??'main',thread:activeTurn.threadId,turn:activeTurn.turnId},'ended');
   done = true; stopFollowing();
   try { await redactEndedTurn(); } catch { console.error('redaction warning: turn-end redaction could not complete'); }
   ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null;
@@ -1073,7 +1103,7 @@ const detachHub = () => {
   ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null;
   pending.clear(); try { ws.close(); } catch {}
 };
-const autoReroute = async (reason, queue = {}, policy = false) => {
+const autoReroute = async (reason, queue = {}, policy = false, selection = null) => {
   outcomeSkip = true; // The successor follower owns the final task outcome.
   await redactEndedTurn();
   tracker?.result('re-routed', { reason, mayRun: false, finalLine: '' });
@@ -1085,7 +1115,7 @@ const autoReroute = async (reason, queue = {}, policy = false) => {
     threadId: cancelledTurn?.threadId ?? attemptThreadId, turnId: cancelledTurn?.turnId ?? null };
   try {
     const code = await rerouteWorker({ args: ROUTE_ARGS, depth: REROUTE_DEPTH, from, reason, prompt: text,
-      opts: { ...opts, owner: tracker?.sessionId ?? opts.owner }, policy, onHandoff: () => tracker?.end(0) });
+      opts: { ...opts, owner: tracker?.sessionId ?? opts.owner,queueSelection:selection }, policy, onHandoff: () => tracker?.end(0) });
     if (code === 8 || code === 9) tracker?.result('needs-user');
     else if (code !== 0) tracker?.result('failed');
     await finish(code);
@@ -1319,15 +1349,59 @@ const follow = (threadId, turnId, items = []) => {
   if (recordQueue) cleanups.add(() => recordQueue.stop());
   let final, usage, last = Date.now();
   let runningSince = Date.now(), completedItems = 0;
-  let queueSince = PATIENCE_MIN!=null&&!BACKGROUND?Date.now():null, queuePosition = null, lastPrintedQueue = null, queuePrinted = null;
-  const previousQueue = PROF?.kind === 'trae' ? readQueue(PROF.home, threadId) : null;
+  const noticePolicyAtFollow=queuePolicy()?.enabled;
+  let queueSince = !noticePolicyAtFollow&&PATIENCE_MIN!=null&&!BACKGROUND?Date.now():null, queuePosition = null, lastPrintedQueue = null, queuePrinted = null;
+  const previousQueue = PROF?.home ? readQueue(PROF.home, threadId) : null;
   let observedQueueSince = previousQueue?.turnId === turnId && ['waiting', 'queued'].includes(previousQueue.state)
     ? previousQueue.since : null;
+  if (noticePolicyAtFollow&&Number.isFinite(observedQueueSince) && observedQueueSince >= 0 && observedQueueSince <= Date.now()) queueSince = observedQueueSince;
   let patienceSamples = [];
   let handingOff = false, reporting = false;
+  const ownerRow={...context.metadata,turn:turnId,model:opts.model,effort:opts.effort,pid:process.pid,
+    runId:tracker?.metadata().runId,name:opts.name??context.metadata.name};
+  const ownerLaunch={...(savedLaunch(account??'main',threadId)??{}),defaults:{...opts,'route-args':JSON.stringify(ROUTE_ARGS)}};
+  ownerRow.model=String(opts.model??tracker?.metadata().model??ownerLaunch.model??(PROF?.home?threadModel(PROF.home,threadId):null)??'unknown').toLowerCase();
+  ownerRow.effort=opts.effort??ownerLaunch.effort??tracker?.metadata().effort??'unknown';
+  const chooseQueued = async state => {
+    const option=state.options.find(o=>o.id===state.choice.optionId);
+    if (option?.type==='wait') {settleQueueChoice(ownerRow,'waiting');console.log(`queue-choice: ${opts.name} keeps waiting`);return;}
+    handingOff=true;let cancelSent=false;
+    const bounded = promise => new Promise((resolve,reject)=>{
+      const timer=setTimeout(()=>reject(Error('queue choice control RPC timed out; cancellation is unconfirmed')),3000);
+      promise.then(value=>{clearTimeout(timer);resolve(value);},error=>{clearTimeout(timer);reject(error);});
+    });
+    try {
+      const before=(await bounded(readTurns(threadId))).find(t=>t.id===turnId);
+      if(!before||before.status!=='inProgress'||turnHasWork(before)||workStarted) {
+        settleQueueChoice(ownerRow,'ended');handingOff=false;markWorkStarted();console.log('queue-choice-skipped: turn has work or ended');return;
+      }
+      const held=heldTaskResources(ROUTE_ARGS??[],opts.name);if(held)throw Error(held);
+      const select=()=>queueOptionPlan(queueRouteContext(ownerRow,ownerLaunch),ownerRow,state.queue,option.candidateId,state.noticeId,state.choice.userOK);
+      if(option?.type==='switch') {const route=select();if(route.blocked||route.needsUserOK.length||!route.pick?.command)throw Error('selected option now requires approval or is unavailable; original queue retained');}
+      // Snapshot/approval work may take time. Reconcile again immediately before
+      // interruption so a queue that started work during option validation wins.
+      const current=(await bounded(readTurns(threadId))).find(t=>t.id===turnId);
+      if(!current||current.status!=='inProgress'||turnHasWork(current)||workStarted) {
+        settleQueueChoice(ownerRow,'ended');handingOff=false;markWorkStarted();console.log('queue-choice-skipped: turn started during option validation');return;
+      }
+      cancelSent=true;await bounded(call('turn/interrupt',{threadId,turnId}));
+      const after=(await bounded(readTurns(threadId))).find(t=>t.id===turnId);
+      if(!after||after.status!=='interrupted'||turnHasWork(after)||workStarted)throw Error('cancellation unconfirmed; no replacement launched');
+      if(PROF?.home)saveQueue(PROF.home,threadId,{state:'cancelled',position:null,turnId,at:Date.now()});
+      settleQueueChoice(ownerRow,option.type==='park'?'parked':'selected');
+      if(option.type==='park') {outcomeSkip=true;tracker?.result('stalled',{reason:'owner parked queued turn',mayRun:false});console.log('queue-choice: parked; no replacement launched');finish(0);return;}
+      await autoReroute('queue-too-slow',{position:state.queue.position,waitedMin:(Date.now()-state.since)/60000},false,
+        {option,noticeId:state.noticeId,owner:state.choice.owner,selectRoute:select,resume:option.context==='same thread / resume'});
+    } catch(e) {
+      console.error(`queue-choice-blocked: ${e.message}`);
+      appendEvent({...ownerRow,event:'message',kind:'queue-stalled',severity:'risk',wake:true,text:`queue-choice-blocked: ${e.message}; task=${opts.name} thread=${threadId}; owner must reconcile.`});
+      settleQueueChoice(ownerRow,'waiting');
+      if(cancelSent){preserveQueueNotice=true;finish(7);return;}handingOff=false;
+    }
+  };
   // Use measured drain for an early decision, but never require drain to enforce the elapsed deadline.
   const checkPatience = (t, pos, sample = true) => {
-    if (done || handingOff || reporting || workStarted || BACKGROUND || PATIENCE_MIN == null || queueSince == null) return false;
+    if (done || handingOff || reporting || workStarted || queueSince == null) return false;
     // Frequent notifications must not evict the two-minute baseline from the bounded sample window.
     if (sample && pos != null && pos > 0 && (!patienceSamples.length || t - patienceSamples.at(-1).t >= 10000)) patienceSamples.push({ t, pos });
     patienceSamples = patienceSamples.filter((s) => t - s.t <= 10 * 60000).slice(-30);
@@ -1336,6 +1410,17 @@ const follow = (threadId, turnId, items = []) => {
     const drain = spanMin >= 2 && last.pos < first.pos ? (first.pos - last.pos) / spanMin : null;
     const predicted = drain > 0 && pos != null && pos > 0 ? pos / drain : null;
     const waitedMin = Math.max(0, (t - queueSince) / 60000);
+    const policy=queuePolicy(t);
+    if(policy?.enabled) {
+      if(ownerRow.owner) {
+        const choice=claimQueueChoice(ownerRow);if(choice){void chooseQueued(choice);return false;}
+        const event=notifyQueueOwner(ownerRow,{state:'queued',since:queueSince,position:pos,
+          drainPerMin:spanMin>=2?Math.max(0,(first.pos-last.pos)/spanMin):null},ownerLaunch,{now:t,policy});
+        if(event)console.log(`queue-owner-notice: ${event.noticeId} notice=${event.noticeCount} queued=${waitedMin.toFixed(1)} min${event.secretaryRelay?' secretary-relay: owner queue decision pending':''}`);
+      }
+      return false; // A launched/resumed queue never switches by default routing.
+    }
+    if(BACKGROUND||PATIENCE_MIN==null)return false;
     const deadlineMin = Math.min(PATIENCE_MIN, QUEUE_ALT_START_MIN ?? Infinity);
     const elapsed = waitedMin >= deadlineMin;
     if (!elapsed && (predicted == null || predicted + waitedMin <= deadlineMin)) return false;
@@ -1388,7 +1473,7 @@ const follow = (threadId, turnId, items = []) => {
     queuePosition = pos;
     if (state !== 'ready') queueSince = Math.min(queueSince ?? t,t);
     observedQueueSince = ['waiting', 'queued'].includes(state) ? observedQueueSince ?? t : null;
-    const queue = { state, position: pos, since: observedQueueSince, turnId, at: t };
+    const queue = { state, position: pos, since: observedQueueSince, turnId,workStarted, at: t };
     if (PROF?.home) saveQueue(PROF.home, threadId, queue);
     recordQueue?.(p, t);
     if (state === 'ready') { markWorkStarted(); patienceSamples = []; runningSince = t; completedItems = 0; }
@@ -1407,16 +1492,16 @@ const follow = (threadId, turnId, items = []) => {
     queuePrinted = t;
     console.log(`queued: position ${pos ?? '?'} (${state})`);
   };
-  if (PATIENCE_MIN != null && !BACKGROUND) {
+  if (queuePolicy()?.enabled || PATIENCE_MIN != null && !BACKGROUND) {
     const patienceAlarm = setInterval(() => checkPatience(Date.now(), queuePosition, false),
-      Math.min(60000, Math.max(1000, PATIENCE_MIN * 6000)));
+      queuePolicy()?.enabled ? 1000 : Math.min(60000, Math.max(1000, PATIENCE_MIN * 6000)));
     patienceAlarm.unref(); cleanups.add(() => clearInterval(patienceAlarm));
   }
   if (STALL_MIN > 0) {
     const alarm = setInterval(() => {
     if (done || handingOff) return;
     // Queue patience owns known waiting turns, even when the stall and patience ticks coincide.
-    if (queueSince != null && !workStarted && !BACKGROUND && PATIENCE_MIN != null) {
+    if (queueSince != null && !workStarted && (queuePolicy()?.enabled || !BACKGROUND && PATIENCE_MIN != null)) {
       checkPatience(Date.now(), queuePosition, false); return;
     }
     const idle = (Date.now() - last) / 60000;

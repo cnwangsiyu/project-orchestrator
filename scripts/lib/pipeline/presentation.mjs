@@ -24,6 +24,10 @@ export function presentRoute(plan, view, context) {
   const t = plan.task, f = t.flags, seat = plan.primary ?? plan.primaryProposal, c = seat?.candidate;
   const fixedNotes = [];
   const notes = [...view.notes,...(t.policyNotes??[])], why = [...(t.policyNotes??[])], tellUser = [...view.tellUser], needsUserOK = [...view.needsOK];
+  if(snapshot.personalFallback?.enabled) {
+    const i=notes.findIndex(line=>line.startsWith('Queue patience:'));
+    if(i>=0)notes[i]=`Queue decision: notify the owner after >${snapshot.personalFallback.queueWaitMinutes} min; repeat after ${snapshot.personalFallback.queueReminderMinutes} min; owner chooses, no automatic switch.`;
+  }
   if (plan.kind === 'launch' && seat?.personalFallback) why.push(seat.personalFallback.text);
   if (plan.kind === 'launch' && snapshot.personalPriority) for (const reviewer of plan.reviewers) {
     if (reviewer.personalFallback?.approvalRef === snapshot.personalPriority.userDecisionRef)
@@ -120,6 +124,7 @@ export function presentRoute(plan, view, context) {
       launcher:vendor==='claude'?'claude-bg':'codex-worker',command:null,
       approvalRef:executable ? (s.personalFallback?.quotaApproved ? s.personalFallback.approvalRef : f['user-ok'] ?? null) : null,
       astraApprovalRef: executable ? s.personalFallback?.astraApprovalRef ?? null : null};
+    if (executable && s.personalFallback) out.personalFallback = s.personalFallback;
     if(!executable) return out;
     const prompt=`${primary?'':`Act as the independent ${s.role} reviewer of artifact ${task.artifactRevision}. `}Read ${paths.brief} and follow it.`;
     const routed={name,project:task.project,category:task.category,tier:task.tier,role:s.role,account:an,model:c.modelId,effort:c.effort,sandbox:task.sandbox,
@@ -172,7 +177,7 @@ export function presentRoute(plan, view, context) {
       why.push(`no company account on this device: personal ChatGPT account ${account.id} is the default lane`);
     why.push(`ETA: ${eta.length?eta.map(e=>`${company(snapshot.accounts.find(a=>a.id===e.account))?'company':'personal'} ${etaText(e)}`).join('; '):`${company(account)?'company':'personal'} ${c.modelId}@${c.accountId}, est. ~${Math.round(seat.estimate.completionMin)} min`}; selected by policy, qualified floor and completion ETA`);
     if(adversarial(t)) why.push('adversarial: no GPT model on any account; Kimi-K3, DeepSeek-V4.1-Flash, then scoped Opus; two independent non-GPT families required.');
-    if(candidateParts(snapshot,c).lane.mode==='low-priority') why.push(`TRAE ${c.modelId} low-priority lane (bucket depleted): provider capacity remains eligible with bounded queue patience.`);
+    if(candidateParts(snapshot,c).lane.mode==='low-priority') why.push(`TRAE ${c.modelId} low-priority lane (bucket depleted): provider capacity remains eligible with ${snapshot.personalFallback?.enabled?'an owner queue decision':'bounded queue patience'}.`);
     if(seat.estimate.basis==='progressing') why.push(`${c.modelId} low-priority lane (bucket depleted): slower bucket designation, but progressing without queue cycles in fresh per-model telemetry.`);
     if(['browser','ui-browser'].includes(t.category)&&c.family==='claude') fixedNotes.push(WORKER_NOTES.claudeBrowser);
     if(t.writes||['browser','computer-use'].includes(t.category)) fixedNotes.unshift(sourceDigest.worker.split('\n').find(line=>line.startsWith('- Scope safety:'))??'');
@@ -260,7 +265,7 @@ export function presentRoute(plan, view, context) {
     if (c && line.startsWith('ETA:'))
       return `ETA: ${c.modelId}@${c.accountId}, est. ~${Math.round(seat.estimate.completionMin)} min (${seat.estimate.basis}); policy choice; alternatives: --json/--verbose.`;
     if (c && line.includes('low-priority lane (bucket depleted)'))
-      return `${c.modelId}: low-priority capacity; ${seat.estimate.basis==='progressing'?'fresh progress observed':'bounded queue patience'}.`;
+      return `${c.modelId}: low-priority capacity; ${snapshot.personalFallback?.enabled?'owner decides queued handoffs':seat.estimate.basis==='progressing'?'fresh progress observed':'bounded queue patience'}.`;
     return line;
   }))];
   const shortNotes = notes.map(line => {
@@ -276,7 +281,8 @@ export function presentRoute(plan, view, context) {
     background:t.background,tier:t.tier,kind:plan.kind,blocked,executable:plan.kind==='launch',routeId:plan.routeId,planHash:plan.planHash,
     deferred:plan.kind==='defer'?plan.reason.text:(!pick&&blocked?plan.reasons.map((r)=>r.text).join('; '):null),
     deferUntil:plan.deferUntil??null,deferReason:plan.reason?.text??null,deferRunnerUp:plan.runnerUp?{model:plan.runnerUp.modelId,account:plan.runnerUp.accountId}:null,
-    eta,queuePatienceMin:patience,queueAlt,queueAlternative,pick,secondOpinion:plan.reviewers[0]?launch(plan.reviewers[0],plan.kind==='launch'):plan.reviewerProposals?.[0]?launch(plan.reviewerProposals[0],false):null,
+    eta,queuePatienceMin:patience,queueMode:snapshot.personalFallback?.enabled?'owner':'legacy',queueNoticeAfterMin:snapshot.personalFallback?.enabled?snapshot.personalFallback.queueWaitMinutes:null,
+    queueAlt,queueAlternative,pick,queueFallbackPolicy:snapshot.personalFallback?.enabled?snapshot.personalFallback:null,secondOpinion:plan.reviewers[0]?launch(plan.reviewers[0],plan.kind==='launch'):plan.reviewerProposals?.[0]?launch(plan.reviewerProposals[0],false):null,
     needsUserOK:[...new Set(needsUserOK)],tellUser:[...new Set(tellUser)],why,shortWhy,notes,shortNotes,fixedNotes,workerRulesVersion:sourceDigest.version,
     redeemFirst:c?known(candidateParts(snapshot,c).account.budget)?.redemption??null:null,balance,quota,quotaSummary,plan };
 }

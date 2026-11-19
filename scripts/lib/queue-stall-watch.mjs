@@ -11,6 +11,7 @@ import { personalFallbackPolicy } from './pipeline/personal-fallback.mjs';
 import { parseTaskSpec } from './pipeline/taskspec.mjs';
 import { shellQuote } from './pipeline/presentation.mjs';
 import { flagArgs, scopedFlags } from './route-args.mjs';
+import { notifyQueueOwner,settleQueueChoice } from './queue-decision.mjs';
 
 const root = fileURLToPath(new URL('../..', import.meta.url)).replace(/\/$/, '');
 const read = (file, fallback = null) => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; } };
@@ -21,7 +22,7 @@ export const queuePolicy = (now = Date.now()) => {
 };
 export const queueStatus = (row, profiles) => {
   const home = profiles[row.account]?.home;
-  if (!home || profiles[row.account]?.kind !== 'trae' || !row.turn) return null;
+  if (!home || !row.turn) return null;
   const queue = readQueue(home, row.thread);
   return queue?.turnId === row.turn ? queue : null;
 };
@@ -168,12 +169,21 @@ export function createQueueStallMonitor(owner, { profiles = {}, statusOf = row =
       for (const { row, queue, unknown } of statuses) {
         const key = JSON.stringify([row.account, row.thread, row.turn ?? row.runId]); active.add(key);
         if (unknown) continue;
-        if (!waiting(queue)) { delete states[key]; continue; }
+        if (!waiting(queue)||queue.workStarted) {delete states[key];settleQueueChoice(row,'ended',now);continue;}
         let state = states[key];
         if (!state || Number.isFinite(queue.since) && queue.since !== state.since) state = { since: queue.since ?? now,
           lastDecreaseAt: now, position: queue.position ?? null, emitted: false };
         if (Number.isFinite(queue.position) && Number.isFinite(state.position) && queue.position < state.position) state.lastDecreaseAt = now;
         if (Number.isFinite(queue.position)) state.position = queue.position;
+        if(policy?.enabled) {
+          let launch;try{launch=launchOf(row);}catch{}
+          if(launch?.turn&&launch.turn!==row.turn)launch=null;
+          if(!likelyWrapUp(row,launch,notes,now,holdsOf(row,launch))) {
+            const event=notifyQueueOwner(row,{...queue,since:state.since},launch,{now,policy,emit});
+            if(event)events.push(event);
+            states[key]=state;continue;
+          }
+        }
         // The event is written first. A watcher restarted before the state
         // write can recover that commit from its retained owner event tail.
         if (notes.some(n => n.kind === 'queue-stalled' && n.queueEpisode === key && n.queueSince === state.since)) state.emitted = true;

@@ -225,6 +225,7 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
       && attempts[0].actual.accountId===r.from.account && attempts[0].actual.modelId===modelId(r.from.model)
       && attempts[0].actual.effort===r.from.effort) Object.assign(attempts[0],{
         state:'cancelled-no-work',usefulWork:false,cancellationEvidenceId:r.cancellationEvidenceId,
+        rerouteReason:r.reason,queueWaitMinutes:r.reason==='queue-too-slow'?r.from.waitedMin:null,
         failureKind:r.reason==='policy-block'?'policy-block':'infra'});
   }
   if (flags['failure-kind'] && !flags.actual && attempts.length && parsed.autoRerouteDepth === 0) {

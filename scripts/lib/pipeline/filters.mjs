@@ -86,14 +86,16 @@ export function pTierFloor(t, s, c) {
     return deny('pTierFloor', 'MODEL_SUPERSEDED', 'A newer release is listed for this account.', c);
   const explicitEscalation = t.selectionCause === 'quality-escalation' && matchesModel(t.qualityEscalation?.modelId, c.modelId)
     && t.qualityEscalation?.policyVersion === s.policyVersion && !!t.qualityEscalation?.evidenceId;
+  const ownerDowngrade = t.queueOwnerChoice?.candidateId === c.id && t.queueOwnerChoice.owner
+    && t.queueOwnerChoice.decisionId && account.kind === 'trae' && t.queueOwnerChoice.allowLowerFloor;
   if (rung === 'astra' && t.tier !== 'hard' && t.category !== 'image-read' && !explicitEscalation) return deny('pTierFloor', 'ASTRA_SUBSTITUTION_HARD_ONLY', 'Astra substitutions are reserved for hard tasks.', c);
   const hardNonGPT = adversarial(t) && isReview(t) && !t.writes && !t.runsTests && ['kimi', 'deepseek'].includes(c.family);
-  if (t.tier === 'hard' && !['astra', 'sol', 'opus', 'fable'].includes(rung) && !hardNonGPT)
+  if (t.tier === 'hard' && !['astra', 'sol', 'opus', 'fable'].includes(rung) && !hardNonGPT && !ownerDowngrade)
     return deny('pTierFloor', 'TIER_QUALITY_FLOOR', 'Candidate is outside the established hard-task floor.', c);
   if (t.tier !== 'hard' && !['astra', 'sol', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.5', 'gpt-6.1-terra', 'gpt-6-luna',
     'gpt-5.6-luna', 'kimi-k3', 'deepseek-v4.1-flash', 'gemini-3.1-pro-preview', 'seed-evolving', 'opus', 'sonnet', 'haiku', 'fable'].includes(rung))
     return deny('pTierFloor', 'TIER_QUALITY_FLOOR', 'Model has no established category qualification.', c);
-  if (!modelPreference(t,account,s).includes(rung)&&!explicitEscalation) return deny('pTierFloor','CATEGORY_MODEL_FIT','Model is outside the category/account policy list.',c);
+  if (!modelPreference(t,account,s).includes(rung)&&!explicitEscalation&&!ownerDowngrade) return deny('pTierFloor','CATEGORY_MODEL_FIT','Model is outside the category/account policy list.',c);
   if (effortIndex(c.effort) < effortIndex(policyEffort(t, c, account,s))) return deny('pTierFloor', 'TIER_EFFORT_FLOOR', 'Effort is below the category/model floor.', c);
   return pass('pTierFloor');
 }
@@ -130,6 +132,9 @@ export function pPreviousFloor(t, s, c) {
   if (t.floor.relationVersion !== s.qualityRelationVersion && relevant.length) return deny('pPreviousFloor', 'QUALITY_RELATION_UNKNOWN', 'The pinned quality relation is unavailable.', c);
   if (array(t.floor.previousAttemptIds).some((id) => !relevant.some((a) => a.id === id)) || relevant.some((a) => a.actualStatus !== 'KNOWN' || !a.actual))
     return deny('pPreviousFloor', 'PREVIOUS_ATTEMPT_UNKNOWN', 'An actual prior tuple is unknown.', c);
+  if (t.queueOwnerChoice?.candidateId === c.id && t.queueOwnerChoice.owner && t.queueOwnerChoice.decisionId
+    && (t.queueOwnerChoice.allowLowerFloor && candidateParts(s,c).account.kind === 'trae'
+      || t.queueOwnerChoice.allowFamilyChange && c.family === 'claude')) return pass('pPreviousFloor');
   // Light quality failures promote to the Sol retry, even when a weaker normal
   // model has a free lane. More effort on the failed light model is not this rung.
   const lightRetry = ['lookup', 'extract', 'draft'].includes(t.category) || t.category === 'build-run' && t.env === 'test';
@@ -248,8 +253,14 @@ export function pLaunchMatches(t, s, c, context = {}) {
   if (live) return deny('pLaunchMatches', 'ATTEMPT_RECONCILIATION_REQUIRED', 'A live or uncertain accepted attempt prevents duplicate dispatch.', c);
   if (t.autoRerouteDepth > 0) {
     const prior = t.previousAttempts.filter((a) => a.taskId === t.taskId && (a.role ?? 'primary') === t.role);
-  if (t.autoRerouteDepth > 2 || t.background || t.flags.signing || !company(candidateParts(s, c).account)) return deny('pLaunchMatches', 'AUTO_REROUTE_FORBIDDEN', 'Automatic hop limit or task scope forbids replacement.', c);
-    if (!prior.length || prior.some((a) => a.state !== 'cancelled-no-work' || a.usefulWork !== false || !a.cancellationEvidenceId))
+    const personalQueue = !company(candidateParts(s,c).account) && s.personalFallback?.enabled
+      && prior.at(-1)?.rerouteReason === 'queue-too-slow'
+      && Number.isFinite(prior.at(-1)?.queueWaitMinutes) && prior.at(-1).queueWaitMinutes >= s.personalFallback.queueWaitMinutes
+      && pScopedApproval(t,s,c,context).personalFallback?.quotaApproved;
+    const ownerChoice=t.queueOwnerChoice?.candidateId===c.id&&t.queueOwnerChoice.owner&&t.queueOwnerChoice.decisionId;
+    if (t.autoRerouteDepth > 2 || t.background&&!ownerChoice || t.flags.signing || (!company(candidateParts(s,c).account) && !personalQueue&&!ownerChoice)) return deny('pLaunchMatches', 'AUTO_REROUTE_FORBIDDEN', 'Automatic hop limit or task scope forbids replacement.', c);
+    const checked = t.queueOwnerChoice?.candidateId === c.id ? prior.filter(a=>a.id === t.queueOwnerChoice.previousAttemptId) : prior;
+    if (!checked.length || checked.some((a) => a.state !== 'cancelled-no-work' || a.usefulWork !== false || !a.cancellationEvidenceId))
       return deny('pLaunchMatches', 'CANCELLATION_UNCONFIRMED', 'Automatic replacement requires terminal no-work cancellation evidence.', c);
   }
   if (context.proposed && ['accountId', 'modelId', 'effort', 'laneId', 'harness'].some((k) => context.proposed[k] !== c[k]))

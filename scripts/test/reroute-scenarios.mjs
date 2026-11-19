@@ -49,9 +49,10 @@ const run = (label, config = {}, flags = [], options = {}) => {
   for (const cli of ['codex', 'claude']) fs.writeFileSync(path.join(bin, cli), '#!/bin/sh\nprintf \'{"models":[]}\\n\'\n', { mode: 0o755 });
   fs.writeFileSync(path.join(bin, 'traecli'), '#!/bin/sh\nprintf \'Not logged in\\n\'\nexit 1\n', { mode: 0o755 });
   const env = { ...process.env, HOME: home, PATH: `${bin}:${process.env.PATH}`, CODEX_ACCOUNTS: profiles, QUOTA_CACHE: cache,
-    ROUTE_LOG_FILE: log, RULES_SHARED: dir, QUOTA_LOG: '0', TRAE_PROBE: '0', ROUTE_RR: path.join(dir, 'rotation'),
+    ROUTE_LOG_FILE: log, RULES_SHARED: dir, PERSONAL_FALLBACK_FILE: path.join(dir, 'fallback-off.json'), QUOTA_LOG: '0', TRAE_PROBE: '0', ROUTE_RR: path.join(dir, 'rotation'),
     REROUTE_FIXTURE: JSON.stringify({ source, rpc, ...(options.authGuard ? { authGuard: guard } : {}), ...config }),
     ...(options.authGuard ? { NODE_OPTIONS: `--import=${transport}` } : {}) };
+  fs.writeFileSync(env.PERSONAL_FALLBACK_FILE, '{"enabled":false}');
   // The accepted Sol attempt sets a real quality floor. A hard task can move to
   // company Astra; ordinary analysis cannot silently fall to 5.6-Sol or Flash.
   let routeArgs = ['implement-hard', '--impact', 'service', '--project', 'reroute', '--name', label, '--cwd', dir, '--task-dir', task,

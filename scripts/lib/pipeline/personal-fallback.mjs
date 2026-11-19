@@ -7,8 +7,10 @@ export function personalFallbackPolicy(raw, now) {
     || raw.userDecisionRef !== `standing:personal-fallback-${raw.since}`) return null;
   const queueWaitMinutes = raw.queueWaitMinutes ?? 5;
   if (!finite(queueWaitMinutes) || queueWaitMinutes <= 0) return null;
+  const queueReminderMinutes = raw.queueReminderMinutes ?? 10;
+  if (!finite(queueReminderMinutes) || queueReminderMinutes <= 0) return null;
   const hardAstraDecisionRef = raw.hardAstraDecisionRef === `standing:hard-astra-${raw.since}` ? raw.hardAstraDecisionRef : null;
-  return { enabled: raw.enabled, since: raw.since, userDecisionRef: raw.userDecisionRef, queueWaitMinutes,
+  return { enabled: raw.enabled, since: raw.since, userDecisionRef: raw.userDecisionRef, queueWaitMinutes,queueReminderMinutes,
     allowHardPersonalAstra: raw.allowHardPersonalAstra === true && !!hardAstraDecisionRef, hardAstraDecisionRef };
 }
 

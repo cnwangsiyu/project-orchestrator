@@ -54,10 +54,20 @@ const opt = (k) => { const i = own.indexOf(`--${k}`); return i >= 0 ? own[i + 1]
 const account = opt('account'), ref = opt('ref'), until = Date.parse(opt('until') ?? '');
 if (!account || !ref || !Number.isFinite(until)) die('add needs --account, --ref and --until <ISO time>');
 if (until <= Date.now()) die('--until is in the past');
-const r = spawnSync(process.execPath, [path.join(here, 'route.mjs'), ...routeArgs.filter(a => !['--json', '--dry'].includes(a)), '--dry', '--json'], { encoding: 'utf8', maxBuffer: 32 * 2 ** 20 });
-let plan; try { plan = JSON.parse(r.stdout).plan; } catch { die(`route.mjs did not return a plan: ${(r.stderr || r.stdout).slice(0, 400)}`, 1); }
+let plan;
+if(opt('queue-notice')) {
+  const {queueDecisionFile,queueRouteContext,queueOptionPlan}=await import('./lib/queue-decision.mjs');
+  const state=JSON.parse(fs.readFileSync(queueDecisionFile({account:opt('queue-source'),thread:opt('queue-thread'),turn:opt('queue-turn')}),'utf8'));
+  if(state.noticeId!==opt('queue-notice')||state.status!=='waiting')die('queue notice is stale or ended');
+  const option=state.options.find(o=>o.id===opt('queue-option')&&o.account===account);
+  if(!option)die('queue option/account does not match this notice');
+  plan=queueOptionPlan(queueRouteContext(state.row,state.launch),state.row,state.queue,option.candidateId,state.noticeId).plan;
+} else {
+  const r = spawnSync(process.execPath, [path.join(here, 'route.mjs'), ...routeArgs.filter(a => !['--json', '--dry'].includes(a)), '--dry', '--json'], { encoding: 'utf8', maxBuffer: 32 * 2 ** 20 });
+  try { plan = JSON.parse(r.stdout).plan; } catch { die(`route.mjs did not return a plan: ${(r.stderr || r.stdout).slice(0, 400)}`, 1); }
+}
 // --astra also records the personal Astra family gate (only when the user's decision covers Astra).
-const kinds = own.includes('--astra') ? ['personal-quota', 'astra'] : ['personal-quota'];
+const kinds = ['personal-quota',...(own.includes('--astra')?['astra']:[]),...(own.includes('--max')?['max-effort']:[]),...(own.includes('--fable')?['fable']:[])];
 const gates = (plan?.gates ?? []).filter((g) => kinds.includes(g.kind) && g.scope?.accounts?.includes(account));
 if (!gates.length) {
   const asked = (plan?.gates ?? []).map((g) => g.scope?.accounts?.join(',')).filter(Boolean);

@@ -1,5 +1,7 @@
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
+import { spawnSync } from 'node:child_process';
+import { queueDecisionFile } from '../../lib/queue-decision.mjs';
 const config = JSON.parse(process.env.REROUTE_FIXTURE);
 if (config.functionalSetupBudget) {
   // This case tests the 60 ms follow stall against queue patience, not cold startup/fsync timing.
@@ -67,9 +69,31 @@ globalThis.WebSocket = class {
           notify('turn/completed', { turn: { id: 'turn', status: 'failed', items: [],
             error: config.mode === 'policy' ? { codexErrorInfo: 'cyberPolicy' } : { message: 'Model access temporarily restricted. (983)' } } }); return;
         }
+        if(config.queueOwnerSelect) {
+          const timer=setInterval(()=>{
+            let state;try{state=JSON.parse(fs.readFileSync(queueDecisionFile({account,thread:'fixture',turn:'turn'})));}catch{return;}
+            if(state.status!=='waiting'||!state.options)return;
+            const option=state.options.find(o=>Object.entries(config.queueOwnerSelect).every(([k,v])=>o[k]===v));
+            if(!option)return;
+            clearInterval(timer);
+            let choice=option.command;
+            if(option.needsUserApproval&&config.queueOwnerApprove) {
+              const grant=option.approvalCommand.replace('<actual user decision reference>','fixture-explicit-user-decision')
+                .replace('<approval expiry ISO>',new Date(Date.now()+3600000).toISOString());
+              const granted=spawnSync('/bin/sh',['-c',grant],{env:process.env,encoding:'utf8',timeout:5000});
+              if(granted.status!==0){console.error('fixture scoped approval failed');return;}
+              const snapshot=JSON.parse(fs.readFileSync(process.env.ROUTE_SNAPSHOT_FILE));
+              snapshot.approvals=JSON.parse(fs.readFileSync(`${process.env.RULES_SHARED}/route-approvals.json`));
+              fs.writeFileSync(process.env.ROUTE_SNAPSHOT_FILE,JSON.stringify(snapshot));
+              choice+=` --user-ok ${granted.stdout.trim()}`;
+            }
+            const result=spawnSync('/bin/sh',['-c',choice],{env:process.env,encoding:'utf8',timeout:5000});
+            if(result.status!==0)console.error(`fixture queue choice failed: ${result.stdout} ${result.stderr}`);
+          },100);timer.unref();
+        }
         if (config.progress) notify('item/started', { item: { type: 'commandExecution' } });
         if (config.ready) notify('queue/status', { state: 'ready', position: 0 });
-        const realNow = Date.now, base = realNow() - (config.quiet ? 0 : 120000);
+        const realNow = Date.now, base = realNow() - (config.queueAgeMin!=null?config.queueAgeMin*60000:config.quiet?0:120000);
         for (const [offset, position] of config.samples ?? (config.quiet ? [[0, 100]] : [[0, 100], [120000, 90]])) {
           Date.now = () => base + offset;
           notify('queue/status', { state: 'queued', position });
@@ -77,7 +101,7 @@ globalThis.WebSocket = class {
         Date.now = realNow;
         if (config.quiet) setTimeout(() => {}, config.quietKeepAliveMs ?? 3000);
         if (config.complete) setTimeout(() => notify('turn/completed', { turn: { id: 'turn', status: 'completed',
-          items: [{ type: 'agentMessage', text: 'DONE original completed' }] } }), 30);
+          items: [{ type: 'agentMessage', text: 'DONE original completed' }] } }), config.completeDelayMs??30);
       }, 15);
     });
   }

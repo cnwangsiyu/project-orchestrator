@@ -3,6 +3,7 @@
   "since": "2026-11-17",
   "userDecisionRef": "standing:personal-fallback-2026-11-17",
   "queueWaitMinutes": 5,
+  "queueReminderMinutes": 10,
   "allowHardPersonalAstra": true,
   "hardAstraDecisionRef": "standing:hard-astra-2026-11-17",
   "hardAstraDecision": "特别难的任务用 astra 也不用问我，直接用吧",

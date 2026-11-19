@@ -169,6 +169,7 @@ export function createTaskSpec(input) {
     allowedOrigins, allowedApps: apps, deviceId: input.deviceId ?? null, ownTestApp: input.ownTestApp === true,
     signingManifestRef: input.signingManifestRef ?? null, approvalRefs: unique([...array(input.approvalRefs), ...list(f['user-ok'])]),
     autoRerouteDepth, notifyBy: input.notifyBy ?? null, timezone: input.timezone ?? 'America/Los_Angeles',
+    ...(input.queueOwnerChoice ? {queueOwnerChoice:clone(input.queueOwnerChoice)} : {}),
     artifactRevision: f['artifact-ref'] ?? input.artifactRevision ?? null, requirements: clone({...input.requirements,...(f.installed?{installedOnMachine:true}:{})}), selectionCause: input.selectionCause ?? (attempts.length ? 'infra-reroute' : 'initial'),
     qualityEscalation: clone(input.qualityEscalation ?? null), warnings: f.mode ? ['MODE_DEPRECATED'] : [] };
   if (f['previous-attempt'] && !attempts.length) task.floor.previousAttemptIds = unique([...task.floor.previousAttemptIds, f['previous-attempt']]);

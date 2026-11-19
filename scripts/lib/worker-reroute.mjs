@@ -54,9 +54,9 @@ export const heldTaskResources = (args, name) => {
     || (project && r.project === project && r.task && [r.task, `${project}-${r.task}`].includes(name)));
   return hold ? `resource ${hold.id} is still held; exit the owning wrapper so it returns the hold before redispatch` : null;
 };
-const runNode = (script, args, { capture = false, timeout = 0 } = {}) => new Promise((resolve, reject) => {
+const runNode = (script, args, { capture = false, timeout = 0,cwd } = {}) => new Promise((resolve, reject) => {
   const child = spawn(process.execPath, [...process.execArgv, script, ...args],
-    { stdio: capture ? ['ignore', 'pipe', 'inherit'] : ['ignore', 'inherit', 'inherit'] });
+    { cwd,stdio: capture ? ['ignore', 'pipe', 'inherit'] : ['ignore', 'inherit', 'inherit'] });
   let stdout = '', signal = null;
   child.stdout?.on('data', (chunk) => { stdout += chunk; if (stdout.length > 4 * 2 ** 20) child.kill('SIGTERM'); });
   const forward = (s) => { signal = s; child.kill(s); };
@@ -71,7 +71,8 @@ const runNode = (script, args, { capture = false, timeout = 0 } = {}) => new Pro
 
 // Only a confirmed, never-started turn reaches this entry point. Never use a shell or a detached launch.
 export const rerouteWorker = async ({ args, depth, from, reason, prompt, opts, policy = false, onHandoff = () => {} }) => {
-  if (!args || routeFlag(args, 'background') || opts.background) return REROUTE_EXIT.stopped;
+  const selection=opts.queueSelection;
+  if (!args || !selection&&(routeFlag(args, 'background') || opts.background)) return REROUTE_EXIT.stopped;
   if (typeof opts.cwd === 'string') args = setRouteFlag(args, 'cwd', path.resolve(opts.cwd));
   if (typeof opts.name === 'string') args = setRouteFlag(args, 'name', opts.name);
   if (typeof opts.owner === 'string') args = setRouteFlag(args, 'owner', opts.owner);
@@ -106,12 +107,20 @@ export const rerouteWorker = async ({ args, depth, from, reason, prompt, opts, p
   let route;
   try {
     persist();
-    const routed = await runNode(path.join(scripts, 'route.mjs'), [...next, '--json'], { capture: true, timeout: 60000 });
-    if (routed.code !== 0) throw Object.assign(Error(`route exited ${routed.code}`), { exitCode: routed.code });
-    route = JSON.parse(routed.stdout);
+    const routed = selection ? null : await runNode(path.join(scripts, 'route.mjs'), [...next, '--json'], { capture: true, timeout: 60000 });
+    if (routed && routed.code !== 0) throw Object.assign(Error(`route exited ${routed.code}`), { exitCode: routed.code });
+    route = selection ? selection.selectRoute() : JSON.parse(routed.stdout);
     if (!route || typeof route !== 'object' || Array.isArray(route) || typeof route.category !== 'string'
       || !Object.hasOwn(route, 'pick') || !Array.isArray(route.needsUserOK)) throw Error('route returned an invalid result');
-    state.route = route; state.status = 'routed'; persist();
+    state.route = route; state.status = 'routed';
+    if(selection) {
+      state.selection={noticeId:selection.noticeId,option:selection.option,owner:selection.owner};
+      fs.mkdirSync(path.dirname(rulesLog()),{recursive:true});
+      fs.appendFileSync(rulesLog(),JSON.stringify({kind:'route',t:Date.now(),name:opts.name,project:routeFlag(args,'project'),
+        category:route.category,pick:route.pick,second:route.secondOpinion,approvalRef:route.pick?.approvalRef??null,
+        routeId:route.routeId,ownerDecision:selection.noticeId,owner:selection.owner})+'\n');
+    }
+    persist();
   } catch (e) {
     state.status = 'route-failed'; state.exitCode = REROUTE_EXIT.stopped;
     state.error = { stage: 'route', message: e.message, exitCode: e.exitCode ?? null };
@@ -131,20 +140,44 @@ export const rerouteWorker = async ({ args, depth, from, reason, prompt, opts, p
   }
   const pick = route.pick;
   const picks = [pick, route.secondOpinion].filter(Boolean);
-  if (picks.some((p) => !p.company || p.vendor !== 'codex' || !p.workerArgs
+  const fallback = route.queueFallbackPolicy;
+  const standingPersonal = (p) => p === pick && reason === 'queue-too-slow' && !policy && fallback?.enabled
+    && from.waitedMin >= fallback.queueWaitMinutes && p.personalFallback?.quotaApproved
+    && p.approvalRef === p.personalFallback.approvalRef
+    && (p.approvalRef === fallback.userDecisionRef || p.approvalRef?.startsWith('standing:personal-priority-'));
+  if (picks.some((p) => (!p.company && !standingPersonal(p) && !(selection&&p.approvalRef))
+    || !(selection&&p.vendor==='claude')&&(p.vendor !== 'codex' || !p.workerArgs)
     || (policy && /^(gpt|claude)/i.test(p.model))) || route.signing) {
     state.status = 'needs-user'; state.exitCode = REROUTE_EXIT.needsUser; persist();
-    console.log(`reroute-needs-user: automatic hops require a company hub worker; ${JSON.stringify(route)}`);
+    console.log(`reroute-needs-user: automatic hops require a company hub worker or standing-approved queued personal fallback; ${JSON.stringify(route)}`);
     return REROUTE_EXIT.needsUser;
   }
-  const to = { vendor: pick.vendor, model: pick.model, effort: pick.effort, account: pick.account };
-  const record = { t: Date.now(), kind: 'reroute', automatic: true, project: routeFlag(args, 'project'), name: opts.name,
+  const to = { vendor: pick.vendor, model: pick.model, effort: pick.effort, account: pick.account??selection?.option.account };
+  if (!pick.company) console.log(selection?`why: owner selected personal ${to.account}; queue decision ${selection.noticeId}; approval ${pick.approvalRef}`
+    :`why: queued > ${fallback.queueWaitMinutes} min → personal ${pick.account} by routing`);
+  const record = { t: Date.now(), kind: 'reroute', automatic: !selection,ownerDecision:selection?.noticeId??null, project: routeFlag(args, 'project'), name: opts.name,
     from, to, reason, category: route.category, depth: depth + 1, toStartEstimateMin: route.eta?.find((r) => r.model === pick.model && r.account === pick.account)?.startDelayMin ?? null };
   fs.mkdirSync(path.dirname(rulesLog()), { recursive: true });
   fs.appendFileSync(rulesLog(), JSON.stringify(record) + '\n');
   onHandoff();
   console.log(`rerouted: ${from.model}@${from.account} (queued ${from.position ?? '?'}, waited ${Number(from.waitedMin ?? 0).toFixed(1)} min) → ${to.model}@${to.account}`);
+  if(selection&&pick.vendor==='claude') {
+    const metadata={name:opts.name,model:pick.model,effort:pick.effort,project:routeFlag(args,'project'),owner:selection.owner};
+    const claudeArgs=[JSON.stringify(metadata),'claude','--bg','--remote-control',
+      '--permission-mode','bypassPermissions','-n',opts.name,'--model',pick.model,'--effort',pick.effort,handover];
+    const cwd=route.plan.task.flags['trusted-cwd']??opts.cwd;
+    state.recovery.claudeArgs=claudeArgs;state.recovery.cwd=cwd;persist();
+    const audit=await runNode(path.join(scripts,'launch-audit.mjs'),['--name',opts.name,'--project',metadata.project,
+      '--vendor','claude','--account',to.account,'--model',pick.model,'--effort',pick.effort,'--user-ok',pick.approvalRef]);
+    if(audit.code!==0){state.status='launch-failed';state.exitCode=audit.code;persist();return audit.code;}
+    const launched=await runNode(path.join(scripts,'launch-claude-worker.mjs'),claudeArgs,{cwd});
+    state.status=launched.code===0?'following-background':'launch-failed';state.exitCode=launched.code;persist();return launched.code;
+  }
   const childArgs = [...pick.workerArgs];
+  if(selection?.resume) {
+    childArgs[childArgs.indexOf('start')]='turn';
+    childArgs.push('--thread',from.threadId);
+  }
   childArgs.push('--reroute-hop-at', String(record.t));
   for (const key of ['owner', 'log', 'out', 'stall-min', 'network', 'sandbox', 'browser-origins', 'computer-use-apps']) {
     if (typeof opts[key] === 'string') {

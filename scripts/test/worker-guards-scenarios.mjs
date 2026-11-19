@@ -20,11 +20,12 @@ const rows = (file) => fs.existsSync(file) ? fs.readFileSync(file, 'utf8').split
 const fixture = (label, kind = 'trae') => {
   const dir = path.join(tmp, label), home = path.join(dir, 'home'), accountHome = path.join(home, 'account');
   fs.mkdirSync(accountHome, { recursive: true });
+  fs.writeFileSync(path.join(dir,'fallback-off.json'), '{"enabled":false}');
   const profiles = path.join(dir, 'accounts.json'), rpc = path.join(dir, 'rpc.jsonl'), log = path.join(dir, 'route.jsonl');
   fs.writeFileSync(profiles, JSON.stringify({ fixture: { kind, home: accountHome, hub: 'ws://127.0.0.1:1',
     modelIds: { 'gpt-6.1-sol': 'GPT-6.1-Sol' } } }));
   return { dir, accountHome, rpc, log, env: { ...process.env, HOME: home, CODEX_HOME: accountHome, CODEX_HUB: 'ws://127.0.0.1:1',
-    CODEX_ACCOUNTS: profiles, RULES_SHARED: dir, ROUTE_LOG_FILE: log, NODE_OPTIONS: '', ORCHESTRATOR_OWNER: '',
+    CODEX_ACCOUNTS: profiles, RULES_SHARED: dir, PERSONAL_FALLBACK_FILE:path.join(dir,'fallback-off.json'), ROUTE_LOG_FILE: log, NODE_OPTIONS: '', ORCHESTRATOR_OWNER: '',
     CLAUDE_SESSION_ID: '', CLAUDE_JOB_DIR: '', CLAUDECODE: '' } };
 };
 const run = (f, cmd = 'start', config = {}, flags = []) => {
