@@ -1107,7 +1107,9 @@ export async function hostRoot(row, state, { deadline } = {}) {
     try {
       const probed = JSON.parse(checked(await ssh(row, 'probe', { user: row.user }, { state, timeout, noRetry: usable || deadline !== undefined }), 'root probe').trim());
       if (probed.user !== row.user || !Number.isInteger(probed.cores) || probed.cores < 1
-          || !Number.isFinite(Date.parse(probed.probedAt))) throw Error('invalid host probe facts');
+          || !Number.isFinite(Date.parse(probed.probedAt)) || typeof probed.root !== 'string'
+          || !probed.root.startsWith('/') || !probed.root.endsWith('/devbox-run')
+          || probed.root.includes('\0') || probed.root.split('/').includes('..')) throw Error('invalid host probe facts');
       entry = probed;
       await mergeState(cacheFile, row.host, entry);
     } catch (error) {

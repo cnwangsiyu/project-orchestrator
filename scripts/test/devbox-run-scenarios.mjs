@@ -707,6 +707,24 @@ async function sshDropScenarios() {
   console.log('PASS bounded SSH reconnect confirms a gone group or retains a live job until explicit stop');
 }
 
+async function affinityScopeScenarios() {
+  const f = fixture();
+  ok(await run(f, ['--affinity', 'shared-caller-name'])); returned(f);
+  let before = f.events().length;
+  ok(await run(f, ['--affinity', 'shared-caller-name', '--project', 'other-project'])); returned(f);
+  assert.ok(f.events().slice(before).filter(e => e.op === 'acquire-call').every(e => !e.args.includes('--prefer-host')),
+    'a caller key cannot carry affinity across project identities');
+  git(f.repo, 'checkout', '-qb', 'different-ref');
+  before = f.events().length;
+  ok(await run(f, ['--affinity', 'shared-caller-name'])); returned(f);
+  assert.ok(f.events().slice(before).filter(e => e.op === 'acquire-call').every(e => !e.args.includes('--prefer-host')),
+    'a caller key cannot carry affinity across ref families');
+  const entries = Object.entries(JSON.parse(fs.readFileSync(path.join(f.shared, 'devbox-affinity.json'))));
+  assert.equal(entries.length, 3);
+  assert.ok(entries.every(([key, value]) => key.startsWith('id-') && value.repository && value.refFamily && value.verifiedWorkspace));
+  console.log('PASS affinity keys are project/repository/ref scoped and remembered worktrees are receipt verified');
+}
+
 async function inputScenarios() {
   const f=fixture(); f.env.RES_COMMAND=fileURLToPath(new URL('../res/res',import.meta.url));
   const actual=await fingerprint(path.join(f.repo,'source.txt'));
@@ -806,7 +824,7 @@ async function deadSlotScenarios() {
 
 async function scenarios() {
   const only = process.env.DEVBOX_TEST_CASE;
-  const perf = { 'dead-slot':deadSlotScenarios, inputs:inputScenarios,hygiene:hygieneScenarios,credentials: credentialScenarios, 'packed-module': packedModuleRecovery, receipt: receiptScenarios, 'res-progress': resProgressScenarios, cpu: cpuScenarios, auto: autoScenarios, units: unitScenarios, prewarm: prewarmScenarios, metrics: metricScenarios, placement: placementScenarios, 'ssh-drop': sshDropScenarios };
+  const perf = { affinity:affinityScopeScenarios, 'dead-slot':deadSlotScenarios, inputs:inputScenarios,hygiene:hygieneScenarios,credentials: credentialScenarios, 'packed-module': packedModuleRecovery, receipt: receiptScenarios, 'res-progress': resProgressScenarios, cpu: cpuScenarios, auto: autoScenarios, units: unitScenarios, prewarm: prewarmScenarios, metrics: metricScenarios, placement: placementScenarios, 'ssh-drop': sshDropScenarios };
   if (only && !['baseline', 'bundle', 'ownership', ...Object.keys(perf)].includes(only)) throw Error('unknown devbox fixture case');
   for (const [name, scenario] of Object.entries(perf)) if (!only || only === name) await scenario();
   if (!only || only === 'baseline' || only === 'bundle') await bundleRecovery();
