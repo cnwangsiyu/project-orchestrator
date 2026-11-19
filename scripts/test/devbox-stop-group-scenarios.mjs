@@ -39,7 +39,8 @@ try:
     for resistant in (False,True):
         ctl=fixture/('resistant' if resistant else 'normal'); ctl.mkdir()
         ready=ctl/'ready'
-        command=('trap "" TERM; ' if resistant else '')+'touch '+str(ready)+'; sleep 60 & wait'
+        # The TERM-resistant leader loops so it cannot exit by itself when its child is killed first: only KILL ends it.
+        command=('trap "" TERM; touch '+str(ready)+'; while :; do sleep 60 & wait; done') if resistant else ('touch '+str(ready)+'; sleep 60 & wait')
         child=subprocess.Popen(['bash','-c',command],start_new_session=True); children.append(child)
         deadline=time.monotonic()+5
         while not ready.exists():
