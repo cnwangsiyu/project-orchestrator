@@ -381,4 +381,3 @@ Aggregated named receipts are retained task-locally as
 Original per-batch JSON receipts remain inside their named runner artifact tars.
 Syntax checks and `git diff --check` passed. The installed tool and live
 registry/config were not changed.
-
