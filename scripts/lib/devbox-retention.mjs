@@ -29,7 +29,9 @@ def retention_record(ctl):
 def retained_inventory(root):
     runs=pathlib.Path(root)/'runs'
     return [retention_record(artifact_control(root,ctl.name)) for ctl in sorted(runs.iterdir())
-            if re.fullmatch(r'[0-9a-f-]{36}',ctl.name) and ctl.is_dir()] if runs.is_dir() else []
+            if re.fullmatch(r'[0-9a-f-]{36}',ctl.name) and ctl.is_dir()
+            and any((ctl/name).exists() or (ctl/name).is_symlink() for name in
+                    ['artifacts','artifact-archive.tar','artifact-retention.json','artifact-manifest.json','artifact-archive.json'])] if runs.is_dir() else []
 def active_receipt(ctl):
     for name in ['owner.json','group.json']:
         file=ctl/name

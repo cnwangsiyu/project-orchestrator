@@ -27,6 +27,11 @@ try {
   const privateName=invoke('artifacts',{...data,control:other,patterns:['cookie/public.bin']});
   assert.notEqual(privateName.status,0); assert.match(privateName.stderr,/private-state component/);
   assert.equal(fs.existsSync(path.join(other,'artifacts')),false);
+  const privateRoot=path.join(temp,'cookie','devbox-run'), privateControl=path.join(privateRoot,'runs',randomUUID());
+  fs.mkdirSync(privateControl,{recursive:true});
+  const privatePrefix=invoke('artifacts',{...data,root:privateRoot,control:privateControl});
+  assert.notEqual(privatePrefix.status,0); assert.match(privatePrefix.stderr,/private-state component/);
+  assert.equal(fs.existsSync(path.join(privateControl,'artifacts')),false,'retained path prefixes use the same private-state filter as fetching');
   const midCopy=remoteScripts.artifacts.replace("records.append({'name':name", "raise OSError('fixture copy failure')\n        records.append({'name':name");
   assert.notEqual(invoke('artifacts',{...data,control:other},midCopy).status,0);
   assert.equal(fs.existsSync(path.join(other,'artifacts')),false,'mid-copy cleanup removes only its partial payload');
@@ -45,6 +50,14 @@ try {
   assert.equal(JSON.parse(invoke('retained-disk',{root}).stdout)['devbox-cn-1'],14);
   assert.equal(invoke('retire-artifacts',{root,receipt:path.basename(other)}).status,0);
   assert.equal(fs.existsSync(path.join(other,'artifacts')),false);
+  fs.writeFileSync(path.join(workspace,'build/empty.bin'),'');
+  const empty=invoke('artifacts',{...data,control:other,patterns:['build/empty.bin']});
+  assert.equal(empty.status,0,empty.stderr);
+  const emptyInventory=JSON.parse(invoke('list-retained',{root}).stdout);
+  assert.equal(emptyInventory.length,1); assert.equal(emptyInventory[0].run,path.basename(other));
+  assert.equal(emptyInventory[0].bytes,0,'zero-byte retained receipts remain listable and retireable');
+  assert.equal(invoke('retire-artifacts',{root,receipt:path.basename(other)}).status,0);
+  assert.equal(JSON.parse(invoke('list-retained',{root}).stdout).length,0);
   const args=['--project','fixture','--task','retention','--repo',temp];
   assert.equal(parseArgs([...args,'--retain-on-fail','--retain-hours','72','--','true']).retainOnFail,true);
   for(const hours of ['0','73','NaN']) assert.throws(()=>parseArgs([...args,'--retain-hours',hours,'--','true']));

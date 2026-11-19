@@ -363,7 +363,7 @@ temporary.write_text(json.dumps(d['paths'])); temporary.replace(file)
 
 export const remoteScripts = {
   'cleanup-pending': pythonHeader + cleanupEvidencePython,
-  'list-retained': pythonHeader + retentionPython + `print(json.dumps([r for r in retained_inventory(d['root']) if r['bytes']]))\n`,
+  'list-retained': pythonHeader + retentionPython + `print(json.dumps(retained_inventory(d['root'])))\n`,
   'retire-artifacts': pythonHeader + retentionPython + `ctl=artifact_control(d['root'],d['receipt'])\nprint(json.dumps({'receipt':d['receipt'],'retiredBytes':retire_payload(ctl),'remainingBytes':payload_bytes(ctl)}))\n`,
   'expire-artifacts': pythonHeader + retentionPython + `print(json.dumps({'reclaimedBytes':expire_payloads(d['root'])}))\n`,
   'retained-disk': pythonHeader + retentionPython + `totals={}\nfor r in retained_inventory(d['root']):\n    if r.get('slot'): totals[r['slot']]=totals.get(r['slot'],0)+r['bytes']\nprint(json.dumps(totals))\n`,
@@ -834,7 +834,7 @@ if d.get('fetch')=='manifest':
     disk=os.statvfs(root)
     reserved=sum(r['bytes'] for r in retained_inventory(root) if r.get('slot')==d['slot'])
     if disk.f_bavail*disk.f_frsize-total-reserved<53*1073741824: raise RuntimeError('artifact retention disk reservation guard')
-    if any(part.lower() in {'login','session','sessions','cookie','cookies','.netrc','.npmrc','.pypirc','.ssh','.aws','.kube','.env','.git'} for name in names for part in pathlib.PurePosixPath(name).parts):
+    if any(part.lower() in {'login','session','sessions','cookie','cookies','.netrc','.npmrc','.pypirc','.ssh','.aws','.kube','.env','.git'} for name in names for part in (ctl/'artifacts'/name).parts):
         raise RuntimeError('artifact manifest name contains private-state component')
     retention=begin_retention(d)
     retained=ctl/'artifacts'; retained.mkdir(mode=0o700)
