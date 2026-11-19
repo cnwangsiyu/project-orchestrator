@@ -1,4 +1,5 @@
 const fields = 'password|passphrase|passwd|pwd|pass|token|secret[_-]?access[_-]?key|secret|api[_-]?key|access[_-]?key(?:[_-]?id)?|private[_-]?key|credentials?|auth|username|ak|sk|x-(?:tos|amz)-(?:credential|signature|security-token)|signature';
+import { maskPrivateKeyBlocks } from './private-key-blocks.mjs';
 const quotedValue = String.raw`"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'`;
 const inlineQuotedValue = String.raw`"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'`;
 const bareValue = String.raw`\$\{[^}\r\n]*\}|<[^>\r\n]*>|\[[^\]\r\n]*\]|[^\s,;{}"'\[\]<>]+`;
@@ -10,7 +11,7 @@ const properties = new RegExp(String.raw`^([+-]?[\t ]*(?:export[\t ]+)?)(["']?)(
 // Source assignments are deliberately limited to complete string-literal values.
 const sourceAssignments = new RegExp(String.raw`(?<![\w.-])([A-Za-z_$][\w$]*)([\t ]*(?::[\t ]*[\w?.<>\[\]]+[\t ]*)?=[\t ]*@?)(${inlineQuotedValue})(?=[\t ]*(?:$|[;,)}\r\n]|//|/\*))`, 'gm');
 const dslCalls = new RegExp(String.raw`(?<![\w$-])([A-Za-z_$][\w$]*)([\t ]*(?:\.[\t ]*set[\t ]*)?\([\t ]*)(${inlineQuotedValue})(?=[\t ]*\))`, 'gm');
-const dslWhitespace = new RegExp(String.raw`(?<![\w$.-])([A-Za-z_$][\w$]*)([\t ]+)(${inlineQuotedValue})(?![\t ]*[+.([])`, 'gm');
+const dslWhitespace = new RegExp(String.raw`(?<![\w$.-])([A-Za-z_$][\w$]*)([\t ]*)(${inlineQuotedValue})(?![\t ]*[+.([])`, 'gm');
 const sourceField = value => /(?:Password|Passphrase|Passwd|Token|Secret|ApiKey|AccessKey|PrivateKey|Credentials?|Auth|Key)$/.test(value)
   || /(?:^|_)(?:password|passphrase|passwd|token|secret|api_key|access_key|private_key|credentials?|auth|key)$/i.test(value);
 const exactField = new RegExp(`^(?:${fields})$`, 'i');
@@ -238,10 +239,77 @@ export function scanLogFindings(text, { jsonl = false } = {}) {
 }
 
 export function maskLogText(text, { jsonl = false } = {}) {
-  let masked = 0;
-  const result = processLog(text, jsonl, (string) => {
-    const result = maskPasswordStyleValues(string); masked += result.masked;
+  const blocks = maskPrivateKeyBlocks(text);
+  let masked = blocks.masked;
+  const result = processLog(blocks.text, jsonl, (string) => {
+    const urls = maskExecURLQueries(string); masked += urls.masked;
+    const prose = maskDocumentCredentials(urls.text); masked += prose.masked;
+    const result = maskPasswordStyleValues(prose.text); masked += result.masked;
     return result.text;
   });
   return { text: result, masked, lines: text ? text.split('\n').length - Number(text.endsWith('\n')) : 0 };
+}
+
+// Temporary exec links can use short, otherwise innocuous parameter names.
+// Preserve the URL and parameter names, masking every value for Kross/webshell
+// links and credential-named parameters on other URLs.
+export function maskExecURLQueries(text) {
+  let masked = 0;
+  const result = text.replace(/https?:[\\]*\/[\\]*\/[^\s"'<>]+/gi, (raw, index) => {
+    const context = text.slice(Math.max(0, index - 160), index);
+    const closing = context.endsWith('(') && raw.endsWith(')') ? ')' : '';
+    if (closing) raw = raw.slice(0, -1);
+    const signed = [...raw.matchAll(/[?&]([^=&#]+)=/g)].some(match => {
+      let name; try { name = decodeURIComponent(match[1]); } catch { name = match[1]; }
+      return /sign|signature|token|expires|auth|ticket|(?:^|amp;)x-amz-|(?:^|amp;)x-tos-/i.test(name);
+    });
+    const temporary = signed || /kross|webshell|\/(?:exec|terminal)(?:[/?]|$)/i.test(raw.replace(/\\\//g, '/'))
+      || /(?:webshell|exec|terminal)[_-]?(?:url|link)?["'\s]*[:=]["'\s]*$/i.test(context);
+    return raw.replace(/([?&]([^=&#]*)=)([^&#]*)/g, (param, prefix, key, value) => {
+      let name; try { name = decodeURIComponent(key); } catch { name = key; }
+      if (!temporary && !/token|secret|password|passwd|credential|signature|auth|session|ticket|^sign$|^(?:(?:api|access|private|client)[_-]?)?key$|^code$/i.test(name)) return param;
+      const escapedQuote = value.match(/\\+$/)?.[0] ?? '';
+      const content = escapedQuote ? value.slice(0, -escapedQuote.length) : value;
+      if (!content || /^(?:\[MASKED\]|%5BMASKED%5D)$/i.test(content)) return param;
+      masked++; return prefix + '[MASKED]' + escapedQuote;
+    }) + closing;
+  });
+  return { text: result, masked };
+}
+
+export function maskDocumentCredentials(text, depth = 0) {
+  let masked = 0;
+  if (depth < 8) {
+    const ranges = quotedRanges(text).filter(range => {
+      if (text[range.index] !== '"') return false;
+      let before = range.index - 1;
+      while (before >= 0 && /[\t ]/.test(text[before])) before--;
+      return before < 0 || ':[,'.includes(text[before]);
+    });
+    for (const range of ranges.reverse()) {
+      const raw = text.slice(range.index, range.index + range.length);
+      try {
+        const decoded = JSON.parse(raw), urls = maskExecURLQueries(decoded), prose = maskDocumentCredentials(urls.text, depth + 1), nested = maskPasswordStyleValues(prose.text);
+        if (urls.masked || prose.masked || nested.masked) {
+          masked += urls.masked + prose.masked + nested.masked;
+          text = text.slice(0, range.index) + JSON.stringify(nested.text) + text.slice(range.index + range.length);
+        }
+      } catch {}
+    }
+  }
+  const value = String.raw`("(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|\$\{[^}\r\n]*\}|(?![\\@]["'])[^\s,;，。；、"'<>{}\[\]|]+)`;
+  const chinese = new RegExp(String.raw`(账号密码|密码|口令|密钥|令牌)([\t ]*(?:[:：是为])[\t ]*)${value}`, 'g');
+  const replace = (prefix, raw) => {
+    const quoted = raw[0] === '"' || raw[0] === "'", body = quoted ? raw.slice(1, -1) : raw;
+    if (!body || /\[MASKED|REDACTED/i.test(body)) return prefix + raw;
+    masked++; return prefix + (quoted ? raw[0] + '[MASKED]' + raw[0] : '[MASKED]');
+  };
+  let result = text.replace(chinese, (_, key, separator, raw) => replace(key + separator, raw));
+  const safeAlt = alt => alt.replace(/\b(?:[a-z0-9_-]+\.)+[a-z][a-z0-9.-]*\b/gi, host => {
+      if (!host.split('.').some(part => part.length >= 24 && /[a-z]/i.test(part) && /\d/.test(part))) return host;
+      masked++; return '[MASKED HOSTNAME]';
+  });
+  result = result.replace(/!\[([^\]]*)\](?=\()/g, (_, alt) => '![' + safeAlt(alt) + ']');
+  result = result.replace(/(<img\b[^>]*\balt\s*=\s*["'])([^"']*)(["'])/gi, (_, prefix, alt, suffix) => prefix + safeAlt(alt) + suffix);
+  return { text: result, masked };
 }

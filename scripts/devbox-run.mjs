@@ -7,6 +7,7 @@ import { spawn, fork } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { StringDecoder } from 'node:string_decoder';
+import { privateKeyBlockStream } from './lib/private-key-blocks.mjs';
 import { redactLogFile } from './lib/log-redaction.mjs';
 import { maskLogText } from './lib/nightly-audit.mjs';
 import { manifest, duration, inputKey, indexFile, readIndex, inputSettings, placement, warmCost, warmInput, median, observedCost, fingerprint, inputPython, seedPython } from './lib/devbox-inputs.mjs';
@@ -219,19 +220,16 @@ export function planShards(requested, freeSlots, units, history = {}, commandKey
 }
 
 // Output is line-buffered so assignments split across SSH chunks are still masked.
-function lineSink(write, values = [], intercept, strictOutput = true) {
-  const decoder = new StringDecoder('utf8'); let pending = '', dropping = false, privateBlock = false;
+function lineSink(write, values = [], intercept, strictOutput = true, initialPrivateBlock = false) {
+  let pending = '', dropping = false;
   const redact = line => {
-    if (/-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/.test(line)) privateBlock = true;
-    if (privateBlock) { if (/-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/.test(line)) privateBlock = false; return '[MASKED private key output]'; }
     for (const value of values) line = line.replaceAll(value, '[MASKED]');
     line = maskLogText(line).text;
     if (strictOutput && (sensitive.test(line) || /ACCESS|SCRECT|KEY(?!ALIAS)|PASS|PWD|AUTH|NEXUS|MAGIC|PRIVATE/i.test(line)) && /[=:]|bearer\s/i.test(line)) return '[MASKED sensitive output]';
     return line.replace(/\bAKIA[A-Z0-9]{16}\b/g, '[MASKED access key]');
   };
-  return {
-    push(chunk) {
-      pending += decoder.write(chunk);
+  const stream = privateKeyBlockStream(text => {
+      pending += text;
       let index;
       while ((index = pending.indexOf('\n')) !== -1) {
         const line = pending.slice(0, index); pending = pending.slice(index + 1);
@@ -239,8 +237,11 @@ function lineSink(write, values = [], intercept, strictOutput = true) {
         dropping = false;
       }
       if (pending.length > 1024 * 1024) { if (!dropping) write('[suppressed oversized output line]\n'); pending = ''; dropping = true; }
-    },
-    end() { pending += decoder.end(); if (pending && !dropping) write(redact(pending)); },
+  }, { initialActive: initialPrivateBlock });
+  return {
+    push(chunk) { stream.push(chunk); },
+    end() { stream.end(); if (pending && !dropping) write(redact(pending)); },
+    get privateBlockOpen() { return stream.active; },
   };
 }
 
@@ -254,7 +255,7 @@ function ownChild(child) {
     && child.signalCode === null && child.kill(sig);
 }
 
-function execute(file, args, { input, inputFile, outputFile, onOutput, timeout = 60000, state, cancellable = true, rawCapture = !onOutput && !outputFile, interceptStderr, interceptStdout, env = process.env, strictOutput = true } = {}) {
+function execute(file, args, { input, inputFile, outputFile, onOutput, timeout = 60000, state, cancellable = true, rawCapture = !onOutput && !outputFile, interceptStderr, interceptStdout, env = process.env, strictOutput = true, deferOutputEnd = false } = {}) {
   return new Promise(resolve => {
     const child = spawn(file, args, { stdio: ['pipe', 'pipe', 'pipe'], env });
     let stdout = '', stderr = '', stdoutBytes = 0, timedOut = false, spawnError;
@@ -283,10 +284,14 @@ function execute(file, args, { input, inputFile, outputFile, onOutput, timeout =
     child.on('error', error => { spawnError = error.code || 'spawn failed'; });
     child.on('close', async (code, signal) => {
       clearTimeout(timer); clearTimeout(killTimer); source?.destroy();
-      state?.children.delete(signalChild); out.end(); err.end();
+      state?.children.delete(signalChild);
+      const resumeOutput = deferOutputEnd && code === 255 && !spawnError && !timedOut;
+      if (!resumeOutput) out.end(); err.end();
       if (rawCapture) stdout += rawDecoder.end();
       if (sink) await new Promise(done => sink.end(done));
-      resolve({ code: spawnError ? 1 : timedOut ? 124 : code ?? (signal === 'SIGTERM' ? 143 : 1), stdout, stdoutBytes, stderr: stderr || spawnError || '', error: spawnError });
+      resolve({ code: spawnError ? 1 : timedOut ? 124 : code ?? (signal === 'SIGTERM' ? 143 : 1), stdout, stdoutBytes,
+        ...(resumeOutput ? { stdoutSink: out } : {}), stdoutPrivateBlockOpen: out.privateBlockOpen,
+        stderr: stderr || spawnError || '', error: spawnError });
     });
     if (inputFile) { source = fs.createReadStream(inputFile); source.on('error', error => { spawnError = `input file ${error.code || 'read failure'}`; stop(); }); source.pipe(child.stdin); }
     else child.stdin.end(input);
@@ -768,6 +773,7 @@ async function ssh(row, operation, data, opts = {}) {
     });
     const transient = result.code === 255 && !started && /Permission denied \(gssapi-with-mic\)|Connection closed\b/i.test(result.stderr);
     if (opts.noRetry || operation === 'metrics' || !transient || (opts.state?.cancel && opts.cancellable !== false)) return { ...result, sshStarted: started };
+    result.stdoutSink?.end();
     if (retry === 3) return { ...result, infraFailure: true, stderr: `SSH establishment failed after 4 attempts: ${result.stderr}` };
     await pause(2000 + Math.floor(Math.random() * 8001));
   }
@@ -786,8 +792,8 @@ async function reconnectRun(row, data, state, requireAccess = false) {
   return 'unknown';
 }
 
-async function recoverRunResult(row, data, state, offset, emit) {
-  const tail = lineSink(emit, state.values);
+async function recoverRunResult(row, data, state, offset, emit, privateBlockOpen = false, stdoutSink) {
+  const tail = stdoutSink || lineSink(emit, state.values, undefined, true, privateBlockOpen);
   const deadline = Date.now() + 27000;
   let exit = null;
   try {
@@ -1744,13 +1750,13 @@ async function shard(opts) {
         launched = true;
         const caches = { GRADLE_USER_HOME: `${root}/shared/gradle`, npm_config_cache: `${root}/shared/npm`, PNPM_STORE_DIR: `${root}/shared/pnpm`, CCACHE_DIR: `${root}/shared/ccache`, CCACHE_MAXSIZE: '20G', PIP_CACHE_DIR: `${root}/shared/pip`, DEVBOX_TOOLCHAINS: `${root}/shared/toolchains` };
         const commandStart = Date.now();
-        const result = await ssh(row, 'run', { ...data, stream: true, command: job, cpus: attempt.cpus, env: { ...caches, ...opts.env, ...cpuEnvironment(attempt.cpus), DEVBOX_RUN_RECEIPT: `${workspace}/.devbox-run.json`, ...(inputMap?{DEVBOX_INPUTS_FILE:inputMap,DEVBOX_INPUTS_DIR:`${root}/inputs`}:{}) }, seconds: remaining() / 1000 }, { state, timeout: remaining() + 15000, onOutput: emit });
+        const result = await ssh(row, 'run', { ...data, stream: true, command: job, cpus: attempt.cpus, env: { ...caches, ...opts.env, ...cpuEnvironment(attempt.cpus), DEVBOX_RUN_RECEIPT: `${workspace}/.devbox-run.json`, ...(inputMap?{DEVBOX_INPUTS_FILE:inputMap,DEVBOX_INPUTS_DIR:`${root}/inputs`}:{}) }, seconds: remaining() / 1000 }, { state, timeout: remaining() + 15000, onOutput: emit, deferOutputEnd: true });
         attempt.commandDurationSec = (Date.now() - commandStart) / 1000;
         const loginFailure = result.code === 255 && !result.sshStarted && /permission denied|gssapi|authentication failed/i.test(result.stderr);
         if (result.code === 255 && !loginFailure) { attempt.sshDropped = true; attempt.sshExit = result.code; }
         attempt.exit = state.cancel || result.code;
         if (attempt.sshDropped) {
-          const recoveredExit = await recoverRunResult(row, data, state, result.stdoutBytes, emit);
+          const recoveredExit = await recoverRunResult(row, data, state, result.stdoutBytes, emit, result.stdoutPrivateBlockOpen, result.stdoutSink);
           if (recoveredExit !== null) {
             attempt.exit = state.cancel || recoveredExit;
             attempt.sshDropRecovered = true;

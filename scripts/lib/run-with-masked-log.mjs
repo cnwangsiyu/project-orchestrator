@@ -5,6 +5,8 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { redactLogFile } from './log-redaction.mjs';
 import { unsafeFile } from './resource-data.mjs';
+import { maskLogText } from './nightly-audit.mjs';
+import { privateKeyBlockStream } from './private-key-blocks.mjs';
 
 const script = fileURLToPath(import.meta.url);
 const signals = { SIGHUP: 129, SIGINT: 130, SIGTERM: 143, SIGKILL: 137, SIGQUIT: 131 };
@@ -21,21 +23,27 @@ export async function runWithMaskedLog(logFile, command, args) {
   const fd = fs.openSync(logFile, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
   let writeError;
   const child = spawn(command, args, { stdio: ['inherit', 'pipe', 'pipe'] });
-  const copy = (chunk, output) => {
+  let streamMasked = 0;
+  const copy = (text, output) => {
+    const safe = maskLogText(text); streamMasked += safe.masked;
+    const chunk = Buffer.from(safe.text);
     if (!writeError) try { writeAll(fd, chunk); } catch (error) { writeError = error; }
     output.write(chunk);
   };
-  child.stdout.on('data', chunk => copy(chunk, process.stdout));
-  child.stderr.on('data', chunk => copy(chunk, process.stderr));
+  const stdout = privateKeyBlockStream(text => copy(text, process.stdout));
+  const stderr = privateKeyBlockStream(text => copy(text, process.stderr));
+  child.stdout.on('data', chunk => stdout.push(chunk));
+  child.stderr.on('data', chunk => stderr.push(chunk));
   const result = await new Promise((resolve, reject) => {
     child.once('error', reject);
     child.once('close', (code, signal) => resolve({ code, signal }));
   });
+  stdout.end(); stderr.end();
   fs.closeSync(fd);
   if (writeError) console.error(`heavy-build: log capture failed (${writeError.code || 'write error'}); redaction may be incomplete`);
   try {
     const redacted = redactLogFile(logFile, { force: true });
-    console.error(`heavy-build: log-redaction files=1 masked=${redacted.masked}`);
+    console.error(`heavy-build: log-redaction files=1 masked=${redacted.masked + stdout.masked + stderr.masked + streamMasked}`);
   } catch (error) {
     console.error(`heavy-build: log redaction failed (${error.message})`);
   }

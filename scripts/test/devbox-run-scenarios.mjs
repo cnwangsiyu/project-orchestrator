@@ -124,6 +124,11 @@ if(c.postStartFailure&&op==='run'){
  if(!c.remoteRunning&&!c.completeOnReconnect)fs.writeFileSync(path.join(d.control,'done.json'),JSON.stringify({run:path.basename(d.control),gone:true,exit:c.remoteExit??0}));
  if(c.recordedUnit)fs.writeFileSync(path.join(d.control,'units.json'),JSON.stringify({run:path.basename(d.control),units:[{unit:c.recordedUnit,exit:0,durationSec:349.366333442}]}));
  fs.writeFileSync(path.join(d.control,'output.log'),'remaining output tail\n');
+ if(c.privateTail){
+  const header='-----'+'BEGIN OPENSSH PRIVATE KEY-----\n';
+  fs.writeFileSync(path.join(d.control,'output.log'),header+'FAKE_PRIVATE_TAIL_ONLY\n'+'-----'+'END OPENSSH PRIVATE KEY-----\n');
+  process.stdout.write(c.privateTail==='split'?header.slice(0,8):header);
+ }
  console.error(command.match(/'(DEVBOX_STARTED_[^']+)'/)[1]);console.error('Connection closed by remote host');process.exit(255);
 }
 if(op==='probe') {
@@ -745,6 +750,15 @@ async function sshDropScenarios() {
   assert.equal(gone.events().filter(e => e.op === 'reconnect').length, 2);
   assert.ok(!gone.events().some(e => e.op === 'cleanup'));
   returned(gone);
+
+  for (const privateTail of [true, 'split']) {
+    const privateDrop = fixture({ postStartFailure: true, privateTail });
+    const privateRecovered = await run(privateDrop);
+    assert.equal(privateRecovered.code, 0);
+    assert.doesNotMatch(privateRecovered.stdout, /FAKE_PRIVATE_TAIL_ONLY/);
+    assert.equal((privateRecovered.stdout.match(/\[MASKED PRIVATE KEY BLOCK\]/g) || []).length, 1);
+    returned(privateDrop);
+  }
 
   const failed = fixture({ postStartFailure: true, remoteExit: 3 });
   const failure = await run(failed, ['--artifact', 'source.txt']);
