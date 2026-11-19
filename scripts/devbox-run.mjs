@@ -34,10 +34,10 @@ const sharedDir = () => process.env.RES_DIR || process.env.RULES_SHARED || path.
 const resCommand = () => process.env.RES_COMMAND || (fs.existsSync(path.join(sharedDir(), 'res')) ? path.join(sharedDir(), 'res') : 'res');
 
 export function parseArgs(args) {
-  const opts = { ref: 'HEAD', pool: 'devbox-cn', shards: 1, timeout: 120, fetchTimeout: 15, artifactFetch: 'all', artifacts: [], env: {}, days: 7, need: [], excludeSlot: [], excludeHost: [], inputs: [] };
+  const opts = { ref: 'HEAD', pool: 'devbox-cn', shards: 1, timeout: 120, fetchTimeout: 15, artifactFetch: 'all', artifactStreams: 1, artifacts: [], env: {}, days: 7, need: [], excludeSlot: [], excludeHost: [], inputs: [] };
   if (args[0] === 'gc') { opts.gc = true; args = args.slice(1); }
   if (args[0] === 'prewarm') { opts.prewarm = true; opts.ref = 'main'; opts.task = 'prewarm'; args = args.slice(1); }
-  const names = new Map(['project', 'task', 'repo', 'ref', 'pool', 'shards', 'out', 'timeout', 'prefer-host', 'watch-pid', 'affinity', 'host', 'days', 'units-file', 'command', 'fetch-timeout', 'artifact-fetch', 'exclude-reason', 'prefer-slot', 'warm-cost', 'inputs'].map(n => [`--${n}`, n.replace(/-([a-z])/g, (_, c) => c.toUpperCase())]));
+  const names = new Map(['project', 'task', 'repo', 'ref', 'pool', 'shards', 'out', 'timeout', 'prefer-host', 'watch-pid', 'affinity', 'host', 'days', 'units-file', 'command', 'fetch-timeout', 'artifact-fetch', 'artifact-streams', 'exclude-reason', 'prefer-slot', 'warm-cost', 'inputs'].map(n => [`--${n}`, n.replace(/-([a-z])/g, (_, c) => c.toUpperCase())]));
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === '--') { if (opts.command) throw Error('provide only one command'); opts.command = args.slice(i + 1).join(' '); break; }
@@ -75,6 +75,8 @@ export function parseArgs(args) {
   if (!Number.isFinite(opts.days) || opts.days < 1) throw Error('--days must be at least 1');
   if (opts.gc) return opts;
   if (!['manifest', 'all'].includes(opts.artifactFetch)) throw Error('--artifact-fetch must be manifest or all');
+  opts.artifactStreams = Number(opts.artifactStreams);
+  if (!Number.isInteger(opts.artifactStreams) || opts.artifactStreams < 1 || opts.artifactStreams > 4) throw Error('--artifact-streams must be 1..4');
   opts.inputs = manifest(opts.inputs);
   if (opts.warmCost !== undefined) opts.warmCost = duration(opts.warmCost);
   if (opts.prewarm && opts.inputs.length && !opts.command) opts.command='true';
@@ -825,7 +827,8 @@ if parallel:
     ctl=pathlib.Path(d['control']); root=pathlib.Path(d['root'])
     if ctl.parent!=root/'runs' or ctl.is_symlink() or not ctl.resolve().is_relative_to(root.resolve()/'runs'): raise RuntimeError('archive receipt outside runner root')
     disk=os.statvfs(root)
-    if disk.f_bavail*disk.f_frsize-sum(pathlib.Path(name).stat().st_size for name in names)-10485760<53*1073741824: raise RuntimeError('archive staging disk guard')
+    parallel=disk.f_bavail*disk.f_frsize-sum(pathlib.Path(name).stat().st_size for name in names)-10485760>=53*1073741824
+if parallel:
     destination=(ctl/'artifact-archive.tar').open('xb'); os.chmod(ctl/'artifact-archive.tar',0o600)
 else: destination=sys.stdout.buffer
 output=TimedOutput(destination)
@@ -1996,7 +1999,7 @@ async function shard(opts) {
           if (clean && opts.artifacts.length) {
             phases.phase('transferOut');
             const manifestOnly = opts.artifactFetch === 'manifest';
-            const streams = Math.min(4, Math.max(1, Math.floor(8 / opts.shards)));
+            const streams = Math.min(opts.artifactStreams, Math.max(1, Math.floor(8 / opts.shards)));
             const fetchDeadline = Date.now() + opts.fetchTimeout * 60000;
             const archive = path.join(opts.out, `shard-${opts.shard}-attempt-${attempts.length}.${manifestOnly ? 'manifest.json' : 'tar'}`);
             const fetched = await ssh(row, 'artifacts', { ...data, host: row.host, fetch: opts.artifactFetch, streams, patterns: opts.artifacts }, { outputFile: archive, cancellable: false, state, timeout: opts.fetchTimeout * 60000 });
@@ -2200,7 +2203,7 @@ async function main(args) {
   }
   const opts = parseArgs(args);
   if (opts.help) {
-    console.log('Artifacts: --artifact-fetch all|manifest (default all); fetch-artifact --manifest FILE --name NAME --out FILE [--timeout MIN]');
+    console.log('Artifacts: --artifact-fetch all|manifest (default all); --artifact-streams 1..4 (default 1); fetch-artifact --manifest FILE --name NAME --out FILE [--timeout MIN]');
     console.log('Usage: devbox-run.mjs [--project P] --task T --repo PATH [--ref COMMIT|HEAD|worktree] [--pool devbox-cn|devbox-cn-light] [--shards N|auto] [--units-file PATH] [--artifact GLOB]... [--fetch-timeout MIN] [--out DIR] [--timeout MIN] [--env K=V]... [--rerun-on-fail] [--allow-flaky] [--affinity KEY] [--prefer-host IP] [--prefer-slot ID] [--need CAP]... [--exclude-slot IDS] [--exclude-host IPS] [--exclude-reason TEXT] [--submodules] [--watch-pid PID] [--input MANIFEST]... [--inputs JSON] [--warm-cost DURATION] -- COMMAND\n       devbox-run.mjs prewarm --project P --repo PATH [--ref main] [--command COMMAND] [--need CAP]... [--input MANIFEST]...\n       devbox-run.mjs gc [--host IP] [--days N]\n       devbox-run.mjs stop --out DIR --run-id UUID\nCOMMAND supports {shard}, {shards} and {units}. Timeout includes queue/upload/run; cleanup follows. See references/devbox-run.md.');
     return 0;
   }

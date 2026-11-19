@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { remoteScripts } from '../devbox-run.mjs';
+import { remoteScripts, parseArgs } from '../devbox-run.mjs';
 import { artifactName, readArtifactManifest } from '../lib/devbox-artifacts.mjs';
 import { controlOptions } from '../lib/devbox-ssh.mjs';
 
@@ -15,8 +15,12 @@ fs.mkdirSync(workspace, { recursive: true }); fs.mkdirSync(control, { recursive:
 const bytes = randomBytes(1024 * 1024), digest = createHash('sha256').update(bytes).digest('hex');
 fs.writeFileSync(path.join(workspace, 'public.bin'), bytes);
 const data = { root, workspace, control, commit: 'a'.repeat(40), slot: 'devbox-cn-1', host: '192.0.2.1', patterns: ['public.bin'] };
-const invoke = (operation, value) => spawnSync('python3', ['-c', remoteScripts[operation], Buffer.from(JSON.stringify(value)).toString('base64')], { maxBuffer: 32 * 1024 * 1024 });
+const invoke = (operation, value, python = remoteScripts[operation]) => spawnSync('python3', ['-c', python, Buffer.from(JSON.stringify(value)).toString('base64')], { maxBuffer: 128 * 1024 * 1024 });
 try {
+  const args = ['--project', 'fixture', '--task', 'artifact', '--repo', temp];
+  assert.equal(parseArgs([...args, '--', 'true']).artifactStreams, 1);
+  assert.equal(parseArgs([...args, '--artifact-streams', '4', '--', 'true']).artifactStreams, 4);
+  for (const value of ['0', '5', 'auto']) assert.throws(() => parseArgs([...args, '--artifact-streams', value, '--', 'true']));
   const all = invoke('artifacts', data);
   assert.equal(all.status, 0, all.stderr.toString());
   assert.match(all.stderr.toString(), new RegExp('DEVBOX_ARTIFACT_SHA256=' + createHash('sha256').update(all.stdout).digest('hex')));
@@ -60,5 +64,10 @@ try {
   assert.notEqual(invoke('artifact-range', { ...data, sha256: plan.sha256, offset: -1, length: 1 }).status, 0);
   assert.equal(invoke('artifact-release', { ...data, sha256: plan.sha256 }).status, 0);
   assert.equal(fs.existsSync(path.join(control, 'artifact-archive.tar')), false);
-  console.log('PASS archive digest, immutable manifest retention, named readback, corrupted bytes, receipt/path checks and short isolated SSH sockets');
+  const lowDisk = remoteScripts.artifacts.replace("parallel=d.get('streams'", "import types\nos.statvfs=lambda _:types.SimpleNamespace(f_bavail=53*1073741824+1048576,f_frsize=1)\nparallel=d.get('streams'");
+  const fallback = invoke('artifacts', { ...data, streams: 4, patterns: ['large.bin'] }, lowDisk);
+  assert.equal(fallback.status, 0, fallback.stderr.toString());
+  assert.doesNotMatch(fallback.stderr.toString(), /DEVBOX_ARTIFACT_PLAN=/);
+  assert.match(fallback.stderr.toString(), new RegExp('DEVBOX_ARTIFACT_SHA256=' + createHash('sha256').update(fallback.stdout).digest('hex')));
+  console.log('PASS archive digest, immutable retention, named readback, corruption/path checks, isolated SSH sockets, staged ranges and low-disk streaming fallback');
 } finally { fs.rmSync(temp, { recursive: true, force: true }); }

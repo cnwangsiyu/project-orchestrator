@@ -1142,7 +1142,7 @@ async function scenarios() {
   assert.ok(measured.bytesIn > 0 && measured.bytesOut >= fs.statSync(a.summary.shards[0].attempts[0].artifact).size);
   assert.match(a.stdout, /attempt phases .*artifactCollection=.*bytesIn=\d+ bytesOut=\d+/);
   const large = fixture();
-  const ranged = await run(large, ['--artifact', 'build/large.bin'], 'mkdir -p build && dd if=/dev/zero of=build/large.bin bs=1048576 count=64 2>/dev/null'); ok(ranged); returned(large);
+  const ranged = await run(large, ['--artifact', 'build/large.bin', '--artifact-streams', '4'], 'mkdir -p build && dd if=/dev/zero of=build/large.bin bs=1048576 count=64 2>/dev/null'); ok(ranged); returned(large);
   const largeAttempt = ranged.summary.shards[0].attempts[0];
   assert.equal(largeAttempt.artifactTransport.streams, 4);
   assert.ok(fs.statSync(largeAttempt.artifact).size >= 64 * 1048576);
