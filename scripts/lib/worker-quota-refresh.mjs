@@ -14,19 +14,9 @@ const read = file => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
   if (error.code === 'ENOENT') return {}; throw error;
 } };
 export const readQuotaRefreshState = (file = fileOf()) => read(file);
-const needsLogin = data => /not logged|log.?in required|please.*log.?in|interactive|authentication required|HTTP 401/i.test(
-  [...Object.values(data?.errors ?? {}), ...(data?.codexAccounts ?? []).flatMap(account =>
-    [account.usageError, account.quotaError, account.stateUnknown ? account.reason : null])]
-    .filter(value => typeof value === 'string').join(' '));
 export function refreshWorkerQuota({ timeoutMs = 30000, accounts = [] } = {}) {
-  const source = `import {readState} from ${JSON.stringify(new URL('./state.mjs', import.meta.url).href)};
-    const data=readState({fresh:true});
-    const login=(${needsLogin.toString()})(data);
-    const targets=${JSON.stringify(accounts)};
-    const company=(data.codexAccounts??[]).filter(account=>targets.includes(account.name));
-    const failed=Object.keys(data.errors??{}).length>0 || company.length!==targets.length
-      || company.some(account=>account.stateUnknown||account.usageError||account.quotaError);
-    console.log(JSON.stringify({status:login?'unavailable':failed?'failed':'ok'}));`;
+  const source = `import {readRequestedCompanyQuota} from ${JSON.stringify(new URL('./worker-company-quota.mjs', import.meta.url).href)};
+    console.log(JSON.stringify(readRequestedCompanyQuota({accounts:${JSON.stringify(accounts)}})));`;
   return new Promise(resolve => {
     let output = '', settled = false;
     const finish = value => { if (!settled) { settled = true; resolve(value); } };
@@ -64,15 +54,21 @@ export async function pollWorkerQuota({ owner, data = cachedWorkerQuota(), rows 
     const running = [...workerRunStates(rows).values()].map(({ row }) => row).filter(row => row.owner === owner
       && companies.has(row.account) && row.event === 'running' && !row.settled && alive(row));
     if (!running.length) return { status: 'idle' };
+    const requested = [...new Set(running.map(row => row.account))];
+    const cacheAt = name => {
+      const account = data?.codexAccounts?.find(account => account.name === name);
+      return account?.quota?.sampledAt ?? account?.usageSeenAt ?? account?.seenAt ?? data?.checkedAt ?? null;
+    };
     const stale = !Number.isFinite(data?.checkedAt) || now - data.checkedAt > 15 * 60000
       || (data?.codexAccounts ?? []).some(account => running.some(row => row.account === account.name)
         && Number.isFinite(account.quota?.sampledAt) && now - account.quota.sampledAt > 15 * 60000);
     if (!stale) { checkQuotaWarnings({ data, rows, now }); return { status: 'fresh' }; }
+    let targets = requested;
     const claim = withLock(file, () => {
       const state = read(file);
-      if (needsLogin(data) || state.status === 'unavailable' && state.cacheAt === (data?.checkedAt ?? null)) {
-        writeJson(file, { ...state, status: 'unavailable', cacheAt: data?.checkedAt ?? null }); return null;
-      }
+      targets = requested.filter(account => state.accounts?.[account] !== 'unavailable'
+        || state.accountCacheAt?.[account] !== cacheAt(account));
+      if (!targets.length) return null;
       if (Number.isFinite(state.lastAttempt) && now - state.lastAttempt < 10 * 60000) return null;
       const attempt = randomUUID();
       writeJson(file, { ...state, lastAttempt: now, attempt, status: 'refreshing', cacheAt: data?.checkedAt ?? null });
@@ -80,18 +76,29 @@ export async function pollWorkerQuota({ owner, data = cachedWorkerQuota(), rows 
     }, { timeoutMs: 200, retryMs: 20, ownerPid: true });
     let refreshed = { status: read(file).status === 'unavailable' ? 'unavailable' : 'throttled' };
     if (claim) {
-      try { refreshed = await refresh({ timeoutMs: 30000, accounts: [...new Set(running.map(row => row.account))] }); }
+      try { refreshed = await refresh({ timeoutMs: 30000, accounts: targets }); }
       catch { refreshed = { status: 'failed' }; }
       if (!['ok', 'failed', 'unavailable'].includes(refreshed?.status)) refreshed = { status: 'failed' };
       withLock(file, () => {
         const state = read(file);
         if (state.attempt !== claim) return;
-        writeJson(file, { ...state, status: refreshed.status, consecutiveFailures: refreshed.status === 'ok' ? 0
-          : (state.consecutiveFailures ?? 0) + 1 });
+        writeJson(file, { ...state, status: refreshed.status,
+          consecutiveFailures: refreshed.status === 'failed' ? (state.consecutiveFailures ?? 0) + 1 : 0,
+          accounts: { ...state.accounts, ...refreshed.accounts },
+          accountCacheAt: { ...state.accountCacheAt, ...Object.fromEntries(targets.map(account => [account, cacheAt(account)])) } });
       }, { timeoutMs: 200, retryMs: 20, ownerPid: true });
     }
     withLock(file, () => {
       const state = read(file), day = new Date(now).toISOString().slice(0, 10);
+      for (const [account, status] of Object.entries(state.accounts ?? {})) {
+        if (status !== 'unavailable' || !running.some(row => row.account === account)
+          || state.unavailableNotices?.[owner]?.[account] === day) continue;
+        emit({ ...running.find(row => row.account === account), event: 'message', kind: 'info', wake: false,
+          text: `quota warnings unavailable for ${account}: normal signed-in usage provides no numeric quota` },
+        `quota-refresh-failure:${owner}:${account}:${day}`);
+        ((state.unavailableNotices ??= {})[owner] ??= {})[account] = day;
+        writeJson(file, state);
+      }
       if ((state.consecutiveFailures ?? 0) >= 3 && state.notices?.[owner] !== day) {
         const alertId = `quota-refresh-failure:${owner}:${day}`;
         emit({ ...running[0], event: 'message', kind: 'info', wake: false,
@@ -99,7 +106,7 @@ export async function pollWorkerQuota({ owner, data = cachedWorkerQuota(), rows 
         (state.notices ??= {})[owner] = day; writeJson(file, state);
       }
     }, { timeoutMs: 200, retryMs: 20, ownerPid: true });
-    checkQuotaWarnings({ data: claim && refreshed.status === 'ok' ? readSnapshot() : data, rows, now: Date.now() });
+    checkQuotaWarnings({ data: claim ? readSnapshot() : data, rows, now: Date.now() });
     return refreshed;
   } catch { return { status: 'unavailable' }; } // Monitoring never fails or interrupts a turn.
 }

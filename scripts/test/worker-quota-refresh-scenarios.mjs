@@ -65,31 +65,36 @@ try {
   assert.equal(numericRefreshes, 1, 'fresh routing cache cannot hide a stale numeric quota sample');
 
   const unavailableFile = path.join(tmp, 'worker-quota-refresh.json');
-  const result = await pollWorkerQuota({ ...options, file: unavailableFile,
-    data: { ...data, errors: { codex: 'login required' } }, refresh: () => { forbidden++; } });
-  assert.equal(result.status, 'unavailable'); assert.equal(forbidden, 0);
-  assert.equal(JSON.parse(fs.readFileSync(unavailableFile, 'utf8')).status, 'unavailable');
+  let unavailableReads = 0;
+  const unavailableRefresh = () => { unavailableReads++; return { status: 'unavailable', accounts: { company: 'unavailable' } }; };
+  for (let i = 0; i < 2; i++) {
+    const result = await pollWorkerQuota({ ...options, file: unavailableFile, now: now + i * 10 * 60000,
+      data: { ...data, errors: { codex: 'login required on unrelated account' } }, refresh: unavailableRefresh });
+    assert.equal(result.status, 'unavailable');
+  }
+  assert.equal(unavailableReads, 1);
+  assert.equal(readEvents().filter(row => row.text?.startsWith('quota warnings unavailable for company:')).length, 1);
+  assert.equal(JSON.parse(fs.readFileSync(unavailableFile, 'utf8')).accounts.company, 'unavailable');
   const quotaCli = fileURLToPath(new URL('../quota.mjs', import.meta.url));
   const status = spawnSync(process.execPath, [quotaCli, '--running', '--json'], {
     env: { ...process.env, HOME: tmp, CODEX_ACCOUNTS: path.join(tmp, 'absent-accounts.json'), QUOTA_CACHE: path.join(tmp, 'absent-cache.json') },
     encoding: 'utf8', timeout: 5000 });
   assert.equal(status.status, 0, status.stderr); assert.equal(JSON.parse(status.stdout).quotaRefresh.status, 'unavailable');
-  console.log('PASS known login/interactive requirements are recorded unavailable without invoking the refresh');
+  console.log('PASS requested account unavailability produces one daily info note and never blocks another account by a global login error');
 
   const lib = path.join(tmp, 'lib');
   fs.cpSync(fileURLToPath(new URL('../lib', import.meta.url)), lib, { recursive: true });
-  fs.writeFileSync(path.join(lib, 'state.mjs'), `export const readProfiles=()=>({});
-    process.on('SIGTERM',()=>{});
-    export const readState=()=>{Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,5000);return {errors:{}};};`);
+  fs.writeFileSync(path.join(lib, 'state.mjs'), `export const readProfiles=()=>({});`);
+  fs.writeFileSync(path.join(lib, 'worker-company-quota.mjs'), `process.on('SIGTERM',()=>{});
+    export const readRequestedCompanyQuota=()=>{Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,5000);return {status:'ok'};};`);
   const copied = await import(new URL('file://' + path.join(lib, 'worker-quota-refresh.mjs')));
   const start = Date.now(); assert.equal((await copied.refreshWorkerQuota({ timeoutMs: 60 })).status, 'failed');
   assert.ok(Date.now() - start < 2000);
-  fs.writeFileSync(path.join(lib, 'state.mjs'), `export const readProfiles=()=>({});export const readState=()=>({errors:{}});`);
-  assert.equal((await copied.refreshWorkerQuota({ timeoutMs: 2000 })).status, 'ok');
-  fs.writeFileSync(path.join(lib, 'state.mjs'), `export const readProfiles=()=>({});
-    export const readState=()=>({errors:{},codexAccounts:[{name:'company',kind:'trae',quotaError:'quota read failed'}]});`);
-  assert.equal((await copied.refreshWorkerQuota({ timeoutMs: 2000, accounts: ['company'] })).status, 'failed');
-  console.log('PASS existing-reader child boundary is noninteractive, timeout-bounded, and only returns a status enum');
+  fs.writeFileSync(path.join(lib, 'worker-company-quota.mjs'), `export const readRequestedCompanyQuota=()=>({status:'ok',accounts:{company:'ok'}});`);
+  assert.equal((await copied.refreshWorkerQuota({ timeoutMs: 2000, accounts: ['company'] })).status, 'ok');
+  fs.writeFileSync(path.join(lib, 'worker-company-quota.mjs'), `export const readRequestedCompanyQuota=()=>({status:'unavailable',accounts:{company:'unavailable'}});`);
+  assert.equal((await copied.refreshWorkerQuota({ timeoutMs: 2000, accounts: ['company'] })).status, 'unavailable');
+  console.log('PASS company-only child boundary is noninteractive, timeout-bounded, and returns only account status enums');
   console.log('all pass');
 } finally {
   if (prior === undefined) delete process.env.RULES_SHARED; else process.env.RULES_SHARED = prior;
