@@ -10,7 +10,7 @@ import { eventLine } from '../lib/worker-events.mjs';
 import { recordWorkerOutcome } from '../lib/worker-outcome.mjs';
 import { createTaskSpec } from '../lib/pipeline/taskspec.mjs';
 import { TRANSPORT_CONTINUE_MESSAGE, transportQuotaBlock, transportHealthBlock, transportSourceBlock } from '../lib/worker-transport-retry.mjs';
-import { claimTransportContinuation, saveTransportContinuation, saveLaunch } from '../lib/worker-launch.mjs';
+import { claimTransportContinuation, markTransportContinuationStarting, saveTransportContinuation, savedLaunch, saveLaunch } from '../lib/worker-launch.mjs';
 
 const errors = [
   // W569 and W513 had the same exact terminal message (masked named logs).
@@ -56,13 +56,13 @@ const follower = (label, config = {}, extra = []) => {
     TRAE_PROBE:'0',QUOTA_LOG:'0',TRAE_SESSIONS_DIR:path.join(dir,'empty-sessions'),
     TRANSPORT_RETRY_FIXTURE:JSON.stringify({rpc,errors:[errors[0]],...config})};
   const seat = {project:'p',name:label,category,role:'primary',...pick};
-  const run = (command = 'start') => {
+  const run = (command = 'start', override = {}) => {
     const args = ['--account','fixture',command,...(command === 'start' ? ['--cwd',dir] : ['--thread','transport-thread']),
       '--sandbox','read-only','--name',label,'--project','p','--model','gpt-6.1-sol','--effort','high',
       '--routed-seat',JSON.stringify(seat),'--out',path.join(dir,'final.md'),...extra,
       ...(['start','turn'].includes(command) ? ['Follow fixture.'] : [])];
     const r = spawnSync(process.execPath,['--import',path.join(scripts,'test/fixtures/worker-transport-retry.mjs'),path.join(scripts,'codex-worker.mjs'),...args],
-      {env,encoding:'utf8',timeout:5000});
+      {env:{...env,TRANSPORT_RETRY_FIXTURE:JSON.stringify({rpc,errors:[errors[0]],...config,...override})},encoding:'utf8',timeout:5000});
     assert.equal(r.error,undefined,r.stderr+r.stdout); return r;
   };
   const rows = file => fs.existsSync(file) ? fs.readFileSync(file,'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : [];
@@ -171,6 +171,24 @@ try {
       {thread:{turns:[source],activeTurn:{id:'newer',status:'inProgress'}}}])
       assert.ok(transportSourceBlock({result,threadId:'thread',sourceTurn:'source'}));
   });
+  check('lost continuation acknowledgement is consumed before a later follower observes its failed turn', () => {
+    const f=follower('retry-lost-ack',{errors,loseContinuationAck:true});
+    const first=f.run(); assert.equal(first.status,7,first.stderr+first.stdout);
+    assert.equal(f.calls().filter(r=>r.method==='turn/start').length,2);
+    const file=path.join(f.dir,'worker-launches/fixture/transport-thread.json');
+    const claim=JSON.parse(fs.readFileSync(file,'utf8')).transportRetry;
+    assert.equal(claim.phase,'starting'); assert.equal(claim.sourceTurn,'transport-turn-1');
+    assert.equal(claim.continuationTurn,undefined);
+    const later=f.run('wait',{loseContinuationAck:false,existingTurns:[
+      {id:'transport-turn-1',status:'failed',error:{message:errors[0]},items:[]},
+      {id:'transport-turn-2',status:'failed',error:{message:errors[1]},items:[]}]});
+    assert.equal(later.status,1,later.stderr+later.stdout);
+    assert.match(later.stderr,/unacknowledged automatic continuation claim is consumed.*continue manually:/);
+    assert.equal(f.calls().filter(r=>r.method==='turn/start').length,2,'later follower must not create turn three');
+    assert.deepEqual(JSON.parse(fs.readFileSync(file,'utf8')).transportRetry,claim);
+    process.env.RULES_SHARED=f.dir;
+    assert.match(claimTransportContinuation('fixture','transport-thread','different-turn'),/unacknowledged.*consumed/);
+  });
   check('no-auto-continue persists across wait and review seats honor the flag', () => {
     for (const review of [false,true]) {
       const f = follower(`retry-disabled-${review}`,{review},['--no-auto-continue']);
@@ -201,7 +219,11 @@ try {
     process.env.RULES_SHARED=home; saveLaunch('a','thread',{model:'gpt-6.1-sol'},'owner');
     assert.equal(claimTransportContinuation('a','thread','turn'),null);
     assert.equal(claimTransportContinuation('a','thread','turn'),'one automatic continuation already claimed');
+    assert.equal(savedLaunch('a','thread').transportRetry.phase,'claimed');
+    assert.match(claimTransportContinuation('a','thread','different'),/unacknowledged.*consumed/);
+    markTransportContinuationStarting('a','thread','turn'); assert.equal(savedLaunch('a','thread').transportRetry.phase,'starting');
     saveTransportContinuation('a','thread','turn','next');
+    assert.equal(savedLaunch('a','thread').transportRetry.phase,'acknowledged');
     assert.equal(claimTransportContinuation('a','thread','next'),'one automatic continuation already claimed');
   });
   console.log(`${count} scenarios passed`);

@@ -72,7 +72,7 @@ import { queuePolicy } from './lib/queue-stall-watch.mjs';
 import { inheritedLaunch, savedLaunch, saveLaunch, recordLaunchModel, readRequestBufferExceededAt, markRequestBufferExceeded } from './lib/worker-launch.mjs';
 import { recordWorkerOutcome, reviewSeat, reviewInstructions } from './lib/worker-outcome.mjs';
 import { completionKind } from './lib/worker-completion.mjs';
-import { claimTransportContinuation, saveTransportContinuation } from './lib/worker-launch.mjs';
+import { claimTransportContinuation, markTransportContinuationStarting, saveTransportContinuation } from './lib/worker-launch.mjs';
 import { TRANSPORT_BACKOFF_MS, TRANSPORT_CONTINUE_MESSAGE, transportHealthBlock, transportQuotaBlock, transportSourceBlock, boundedTransportRead } from './lib/worker-transport-retry.mjs';
 import { sizeLimits, threadSize, freshThreadRoute } from './lib/worker-thread-size.mjs';
 import { modelFamily, modelObservation, rolloutTurnModel } from './lib/worker-model.mjs';
@@ -1388,6 +1388,7 @@ const report = async (threadId, turn, final, usage, observation = {}) => {
         markOutputStart();
         let nextTurn;
         try {
+          markTransportContinuationStarting(account ?? 'main',threadId,turn.id);
           const started = await boundedTransportRead(() => call('turn/start',{threadId,input:textInput(TRANSPORT_CONTINUE_MESSAGE),model,effort:opts.effort,
             sandboxPolicy:opts.sandbox && sandboxPolicy(opts.sandbox),approvalPolicy:CU_APPS.length || BU_ORIGINS.length ? APPROVAL_POLICY : undefined}));
           nextTurn = started.turn?.id ?? started.turnId;

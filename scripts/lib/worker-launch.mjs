@@ -51,8 +51,20 @@ export const claimTransportContinuation = (account, thread, turn, now = Date.now
     if (!record) return 'missing launch metadata';
     if (record.transportRetry?.sourceTurn === turn || record.transportRetry?.continuationTurn === turn)
       return 'one automatic continuation already claimed';
-    writeJson(file, { ...record, transportRetry: { sourceTurn: turn, claimedAt: now, pid: process.pid } });
+    if (record.transportRetry && !record.transportRetry.continuationTurn)
+      return 'unacknowledged automatic continuation claim is consumed; reconcile it explicitly';
+    if (record.turn && record.turn !== turn) return 'launch metadata belongs to a newer turn; reconcile it before continuing';
+    writeJson(file, { ...record, transportRetry: { sourceTurn: turn, phase:'claimed', claimedAt: now, pid: process.pid } });
     return null;
+  });
+};
+export const markTransportContinuationStarting = (account, thread, sourceTurn, now = Date.now()) => {
+  const file = launchFile(account, thread);
+  return withLock(file, () => {
+    const record = readLaunch(file);
+    if (record?.transportRetry?.sourceTurn !== sourceTurn || record.transportRetry.continuationTurn)
+      throw Error('transport continuation claim changed before start');
+    writeJson(file,{...record,transportRetry:{...record.transportRetry,phase:'starting',startRequestedAt:now}});
   });
 };
 export const saveTransportContinuation = (account, thread, sourceTurn, continuationTurn) => {
@@ -60,7 +72,8 @@ export const saveTransportContinuation = (account, thread, sourceTurn, continuat
   return withLock(file, () => {
     const record = readLaunch(file);
     if (record?.transportRetry?.sourceTurn !== sourceTurn) throw Error('transport retry claim changed');
-    writeJson(file, { ...record, turn: continuationTurn, transportRetry: { ...record.transportRetry, continuationTurn } });
+    writeJson(file, { ...record, turn: continuationTurn, transportRetry: { ...record.transportRetry,
+      phase:'acknowledged',acknowledgedAt:Date.now(),continuationTurn } });
   });
 };
 export const readRequestBufferExceededAt = (account, thread) => readLaunch(launchFile(account, thread))?.requestBufferExceededAt ?? null;

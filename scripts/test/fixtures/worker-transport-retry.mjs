@@ -24,11 +24,11 @@ globalThis.setTimeout = (callback, ms, ...args) => {
       appendEvent({...row,event:'failed',status:'failed',mayRun:false,settled:true,runId:'peer-fixture-run',pid:process.pid});
     }
   }
-  return nativeTimeout(callback,ms === 60000 ? 10 : ms,...args);
+  return nativeTimeout(callback,ms === 60000 ? 10 : ms === 5000 && config.loseContinuationAck ? 50 : ms,...args);
 };
 globalThis.WebSocket = class {
   constructor() {
-    this.turns = config.wait ? [{id:'transport-turn-1',status:'failed',error:{message:config.errors[0]},items:[]}] : [];
+    this.turns = config.existingTurns ?? (config.wait ? [{id:'transport-turn-1',status:'failed',error:{message:config.errors[0]},items:[]}] : []);
     this.started = this.turns.length;
     setImmediate(() => this.onopen?.());
   }
@@ -54,7 +54,7 @@ globalThis.WebSocket = class {
       if (call.method==='thread/read' && config.backedOff && config.hubReadFailureAfterBackoff) {
         this.notify({id:call.id,error:{code:-32000,message:'fixture fresh hub read failed'}}); return;
       }
-      this.notify({id:call.id,result});
+      if (!(call.method==='turn/start' && this.started===2 && config.loseContinuationAck)) this.notify({id:call.id,result});
       if (turn) nativeTimeout(() => {
         this.notify({method:'item/completed',params:{threadId:'transport-thread',turnId:turn.id,item:{type:'agentMessage',text:turn.items[0].text}}});
         this.notify({method:'turn/completed',params:{threadId:'transport-thread',turn}});
