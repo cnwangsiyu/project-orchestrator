@@ -80,6 +80,22 @@ try {
   assert.equal(lostEvent.events.some(event => event.event === 'truncated'), false);
   assert.equal(lostEvent.rpc.filter(rpc => rpc.method === 'turn/start').length, 1);
   console.log('PASS confirmed complete final from periodic read succeeds when the completion event was omitted');
+  const limitedItem = { ...item(), finish_reason: 'length' };
+  const historicalLimit = run({ status: 'completed', historyItems: [[limitedItem]] }, { wait: true });
+  assert.equal(historicalLimit.status, TRUNCATED_EXIT, historicalLimit.stderr + historicalLimit.stdout);
+  assert.match(historicalLimit.events.find(event => event.event === 'truncated').reason, /output limit/);
+  assert.equal(historicalLimit.rpc.some(rpc => rpc.method === 'turn/start'), false);
+  const periodicLimit = run({ omitCompletion: true, status: 'completed', messages: [], historyItems: [[limitedItem]] });
+  assert.match(truncated(periodicLimit).reason, /output limit/);
+  const seededLimit = completionEvidence([limitedItem]);
+  assert.equal(seededLimit.snapshot().limit, true);
+  assert.equal(classifyCompletion({ turn: { ...completed, items: [] }, evidence: seededLimit.snapshot(),
+    final, live: true, completedEvent: false }).status, 'TRUNCATED');
+  assert.equal(classifyCompletion({ turn: { ...completed, status: 'failed', items: [limitedItem] }, final }).status, 'TRUNCATED',
+    'recorded item limits must pass the failed-turn status filter');
+  assert.equal(classifyCompletion({ turn: { ...completed, status: 'interrupted', items: [limitedItem] }, final }), null);
+  for (const result of [historicalLimit, periodicLimit]) assert.equal(fs.readFileSync(result.out, 'utf8').trim(), final);
+  console.log('PASS historical, confirmed periodic, seeded-evidence and failed-turn reads retain recorded item output limits');
 
   const commentary = run({ messages: [{ method: 'item/completed', params: { threadId: 'guard-thread', turnId: 'guard-turn', item: item('The controller is', 'commentary') } }],
     terminal: { items: [item('The controller is', 'commentary')] } });

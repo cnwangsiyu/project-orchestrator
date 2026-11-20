@@ -12,7 +12,7 @@ const stoppedAtLimit = object => object && (stopFields.some(field => lengthStop(
   || ['response', 'metadata', 'result', 'error'].some(field => object[field] && stopFields.some(name => lengthStop(object[field][name]))));
 export function completionEvidence(items = []) {
   let completedAgent = items.filter(item => item?.type === 'agentMessage').at(-1);
-  let completedFinal = finalItem(completedAgent), pendingFinal = false, pendingItemId = null, limit = false;
+  let completedFinal = finalItem(completedAgent), pendingFinal = false, pendingItemId = null, limit = items.some(stoppedAtLimit);
   return {
     observe(message) {
       const params = message.params ?? {}, item = params.item;
@@ -42,11 +42,12 @@ export function classifyCompletion({ turn, evidence, live = false, completedEven
     leases: leases.map(({ id, holder, pid }) => ({ id, holder, pid })) };
   if (turn.status === 'uncertain') return { status: 'uncertain',
     reasons: [turn.reason ?? 'previously classified uncertain completion'], leases: [] };
-  // Provider failures and owner interruptions retain their existing failure/cancellation paths.
-  if (turn.status !== 'completed' && !(turn.status === 'failed' && (stoppedAtLimit(turn) || evidence?.limit))) return null;
-  const reasons = [];
-  if (stoppedAtLimit(turn) || evidence?.limit) reasons.push('transport stop reason reached output limit');
   const items = turn.items ?? [];
+  const limit = stoppedAtLimit(turn) || items.some(stoppedAtLimit) || evidence?.limit;
+  // Provider failures and owner interruptions retain their existing failure/cancellation paths.
+  if (turn.status !== 'completed' && !(turn.status === 'failed' && limit)) return null;
+  const reasons = [];
+  if (limit) reasons.push('transport stop reason reached output limit');
   const lastAgent = items.filter(item => item?.type === 'agentMessage').at(-1) ?? evidence?.completedAgent;
   const markerComplete = requiredMarker && final.trimEnd().split(/\r?\n/).at(-1) === requiredMarker;
   const availableFinal = evidence?.completedFinal || finalItem(lastAgent) || markerComplete;
