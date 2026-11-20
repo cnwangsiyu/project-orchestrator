@@ -9,7 +9,7 @@ export function estimateCandidate(task, snapshot, candidate, { capacityReset = f
   // Use the established category/effort median, with its actual provenance.
   // It is a heuristic across models/accounts, not proof of equivalent speed.
   const rows = snapshot.etaHistory.filter((r) => r.category === task.category && r.effort === candidate.effort && r.minutes > 0
-    && !['queue-too-slow', 'cancelled-no-work', 'infra', 'policy-block'].includes(r.cause));
+    && !['queue-too-slow', 'cancelled-no-work', 'infra', 'transport', 'transport-failed', 'policy-block'].includes(r.cause));
   const history = rows.map((r) => ({ ...r, actual: [{ effort: r.effort }] }));
   const workMin = workMinutes(task.category, task.tier, history, candidate.effort), requests = requestsFor(task.category, task.tier);
   const ready = known(l.readyAt), position = known(l.position), drainPerMin = known(l.drainPerMin);

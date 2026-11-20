@@ -154,6 +154,9 @@ export function createSnapshot(raw, options = {}) {
         effort: h.effort, minutes: h.minutes, cause: h.cause ?? null })).sort((a, b) => compare(a.attemptId, b.attemptId)),
     reviewHistory: rows(raw.reviewHistory ?? [], 'reviewHistory').map((r) => ({ t: r.t, project: r.project, name: r.name, category: r.category, role: r.role ?? 'primary', reviewOverride:r.reviewOverride??null, requestId:r.requestId??null })),
     outcomes: rows(raw.outcomes ?? [], 'outcomes').map((r) => ({ t: r.t, category: r.category, modelId: modelId(r.modelId), result: r.result })),
+    transportFailures: rows(raw.transportFailures ?? [], 'transportFailures').map(r => ({ t: r.t, result: 'transport-failed',
+      account: r.account ?? r.actual?.at?.(-1)?.account ?? r.first?.account,
+      modelId: modelId(r.modelId ?? r.actual?.at?.(-1)?.model ?? r.first?.model), thread: r.thread, turn: r.turn, name: r.name })),
     runUsage: rows(raw.runUsage ?? [], 'runUsage').filter(r => idOK(r.accountId) && idOK(r.category)
       && nonnegative(r.t) && r.t <= decisionAt && decisionAt - r.t <= RUN_USAGE_HISTORY_MS
       && Number.isSafeInteger(r.cumulativeInput) && r.cumulativeInput > 0)

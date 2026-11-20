@@ -1,4 +1,5 @@
 import { scopedFlags } from '../route-args.mjs';
+import { transportOutcome } from '../worker-completion.mjs';
 import {REVIEW_CLASSES,projectReviewPolicy} from '../review-policy-data.mjs';
 import { VERSION, array, object, idOK, modelSelector, modelId, unique, clone, freeze, fingerprint, isReview, compare, stable } from './common.mjs';
 
@@ -116,7 +117,13 @@ export function createTaskSpec(input) {
   if (f.apps && cat !== 'computer-use') fail('APPS_CATEGORY', 'Apps scope is for computer-use.');
   if (f.origins && !['browser', 'ui-browser'].includes(cat)) fail('ORIGINS_CATEGORY', 'Origins scope is for browser tasks.');
   const allowedOrigins = origins(input.allowedOrigins ?? list(f.origins));
-  const attempts = clone(array(input.previousAttempts));
+  const priorTurns = clone(array(input.previousAttempts));
+  const transportFailures = priorTurns.filter(a => transportOutcome(a) && a.taskId === (input.taskId ?? f.name)
+    && (a.role ?? 'primary') === (input.role ?? 'primary'));
+  const transportIds = new Set(transportFailures.map(a => a.thread && a.turn ? `${a.thread}:${a.turn}` : a.id));
+  failures = Math.max(0, failures - transportIds.size);
+  if (transportIds.size) f.failures = String(failures);
+  const attempts = priorTurns.filter(a => !transportOutcome(a));
   for (const a of attempts) if (object(a.actual)) {
     a.actual.modelId = modelId(a.actual.modelId ?? a.actual.model); delete a.actual.model;
   }
@@ -161,7 +168,8 @@ export function createTaskSpec(input) {
     role: input.role ?? 'primary', parentTaskId: input.parentTaskId ?? null, briefHash: input.briefHash ?? 'UNKNOWN', flags: f,
     reviewClass,reviewReason,reviewScope:f['review-scope']??input.reviewScope??null,policyNotes:unique([...array(input.policyNotes),...policyNotes]), tier, stakes, impact, env, execution, writes, runsTests: f['runs-tests'] ?? input.runsTests ?? false, background,
     contentLabels: unique([...labels]), capabilitiesNeeded: unique([...caps]), exclusions: unique(exclusions.map(stable)).map(JSON.parse),
-    failures, failureKind, qualityFailures, previousAttempts: attempts.sort((a, b) => compare(String(a?.id), String(b?.id))),
+    failures, failureKind, qualityFailures, transportFailures: transportFailures.length ? transportFailures : clone(array(input.transportFailures)),
+    previousAttempts: attempts.sort((a, b) => compare(String(a?.id), String(b?.id))),
     floor: clone(input.floor ?? { profileIds: [], previousAttemptIds: [], relationVersion: VERSION, historyStatus: failures || autoRerouteDepth || f['previous-attempt'] ? 'UNKNOWN' : 'KNOWN' }),
     authorAttemptId: input.authorAttemptId ?? null, againstAttemptId: input.againstAttemptId ?? null,
     cwd: f.cwd ?? input.cwd ?? '.', taskDir: f['task-dir'] ?? input.taskDir ?? '.', sandbox, sandboxCeiling: ceiling,

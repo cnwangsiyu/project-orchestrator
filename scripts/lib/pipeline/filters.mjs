@@ -127,7 +127,8 @@ export function pPreviousFloor(t, s, c, context = {}) {
       .map(candidate => ({ candidate, predicates: evaluateCandidate(t, s, candidate, { ...context, companyRows: [] }),
         estimate: estimateCandidate(t, s, candidate) })) : []);
   const attempts = t.previousAttempts;
-  const relevant = attempts.filter((a) => a?.taskId === t.taskId && (a.role ?? 'primary') === t.role && a.state !== 'planned');
+  const relevant = attempts.filter((a) => a?.taskId === t.taskId && (a.role ?? 'primary') === t.role
+    && a.state !== 'planned' && a.state !== 'transport-failed' && a.failureKind !== 'transport-failed');
   const accountlessActual=a=>a.source==='explicit-actual'&&a.actualStatus==='KNOWN'&&a.actual?.accountStatus==='UNKNOWN'
     && a.actual.accountId===null && modelId(a.actual.modelId??a.actual.model) && EFFORTS.includes(a.actual.effort);
   if (relevant.some((a) => !a.id || (!a.actual?.accountId&&!accountlessActual(a)))) return deny('pPreviousFloor', 'PREVIOUS_ATTEMPT_UNKNOWN', 'Prior attempt identity and actual account must be attested, or an explicit account-less model/effort floor supplied.', c);

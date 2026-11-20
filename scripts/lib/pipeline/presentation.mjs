@@ -11,6 +11,7 @@ import { etaText, taskEstimateText, laneStartText } from '../eta.mjs';
 import { modelPreference } from './policy.mjs';
 import { flagArgs } from '../route-args.mjs';
 import { personalPriorityGuard } from './personal-priority.mjs';
+import { transportLaneFailures } from '../worker-completion.mjs';
 export const shellQuote = (v) => /^[a-zA-Z0-9_./:@-]+$/.test(String(v)) ? String(v) : `'${String(v).replaceAll("'", "'\\''")}'`;
 const command = (args) => args.map(shellQuote).join(' ');
 export function presentRoute(plan, view, context) {
@@ -79,6 +80,12 @@ export function presentRoute(plan, view, context) {
   const staleAccounts=snapshot.accounts.filter(a=>a.auth.source==='last-good-stale').map(a=>a.id);
   if(staleAccounts.length) why.push(`Status read incomplete: retained last-good stale observations for ${staleAccounts.join(', ')}; original sample ages and admission checks remain in force.`);
   if(context.retryAssumption) why.push(context.retryAssumption);
+  if(t.transportFailures?.length) why.push(`Ignored ${new Set(t.transportFailures.map(a=>a.thread&&a.turn?`${a.thread}:${a.turn}`:a.id)).size} transport-failed turn(s): no quality attempt, --failures increment, repeat gate or dominance floor.`);
+  for (const lane of new Set((snapshot.transportFailures ?? []).map(r => `${r.account}:${r.modelId}`))) {
+    const at = lane.indexOf(':'), account = lane.slice(0,at), model = lane.slice(at+1);
+    const count = transportLaneFailures(snapshot.transportFailures, account, model, snapshot.decisionAt);
+    if(count >= 2) why.push(`Transport lane demoted: ${lane}, ${count} transport-failed turns in the last 30 minutes; remains eligible when no healthy qualified alternative exists.`);
+  }
   if(t.previousAttempts.some(a=>a.source==='explicit-actual'&&a.actual?.accountStatus==='UNKNOWN'))
     why.push('Prior actual account is unknown; retaining the supplied model/effort floor.');
   for(const warning of plan.warnings??[]) { why.push(warning.text);tellUser.push(warning.text); }

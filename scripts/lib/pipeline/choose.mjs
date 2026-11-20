@@ -1,6 +1,7 @@
 import { policyModel, isAstra, EFFORTS, company, companyDevice, adversarial, compare, freeze, stable, known, isReview } from './common.mjs';
 import { candidateParts } from './candidates.mjs';
 import { matchingApproval } from './filters.mjs';
+import { transportLaneFailures } from '../worker-completion.mjs';
 import { modelPreference, hardPreference, TIERS, SOL, ASTRA } from './policy.mjs';
 export const prefersPersonalCodex = task => ['lookup','extract','analysis','implement','implement-hard','debug','science','review','draft','build-run','image-gen','second-opinion'].includes(task.category);
 
@@ -14,6 +15,11 @@ export function orderCandidates(task, snapshot, rows) {
     cohort = cohort.filter(r => !company(candidateParts(snapshot, r.candidate).account) || !candidateParts(snapshot, r.candidate).account.fallbackUnavailable);
   const stalled = (r) => r.estimate.stalled || r.reviewers?.some(s=>s.estimate.stalled);
   if(cohort.some(r=>!stalled(r))) cohort=cohort.filter(r=>!stalled(r));
+  const demoted = r => transportLaneFailures(snapshot.transportFailures, r.candidate.accountId, r.candidate.modelId, snapshot.decisionAt) >= 2;
+  // Prefer a healthy qualified lane in the same quota class. Keep a failing lane
+  // eligible when it is the only option; transport evidence never bans a lane.
+  const healthyClasses = new Set(cohort.filter(r => r.ok && !demoted(r)).map(r => company(candidateParts(snapshot,r.candidate).account)));
+  cohort = cohort.filter(r => !demoted(r) || !healthyClasses.has(company(candidateParts(snapshot,r.candidate).account)));
   const backgroundChoice=task.background&&!['browser','ui-browser','computer-use','build-run'].includes(task.category);
   const parts=r=>candidateParts(snapshot,r.candidate);
   const ready=r=>!stalled(r)&&!r.estimate.capacityReset&&r.estimate.startDelayMin===0

@@ -8,6 +8,7 @@ import { createTaskSpec } from './pipeline/taskspec.mjs';
 import { createSnapshot } from './pipeline/snapshot.mjs';
 import { policyModel, isAstra, modelId, familyOf, object, array, nonnegative, VERSION } from './pipeline/common.mjs';
 import { dedupeOutcomes } from './pipeline/outcomes.mjs';
+import { transportOutcome } from './worker-completion.mjs';
 import { RUN_USAGE_HISTORY_MS } from './pipeline/ttadk-reserve.mjs';
 import { personalBudget, weeklyProjection } from './pipeline/quota.mjs';
 import { activePersonalPriority, PERSONAL_PRIORITY_FILE } from './pipeline/personal-priority.mjs';
@@ -152,6 +153,8 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
   const metadata = file => { try { return fs.lstatSync(file).isSymbolicLink() ? null : read(file); } catch { return null; } };
   const sameTask = r => object(r) && r.project === parsed.project && r.category === parsed.category
     && (r.taskId ?? r.name) === id && (r.role ?? 'primary') === role;
+  const terminalOutcomes = rows.filter(r => r.kind === 'outcome' && sameTask(r) && r.t <= now && r.thread && r.turn);
+  const turnOutcome = r => terminalOutcomes.findLast(o => o.thread === r.thread && o.turn === r.turn);
   const addActual = (actual, extra = {}) => {
     if (!actual) return;
     const accountId=Object.hasOwn(actual,'account') ? actual.account : actual.accountId
@@ -162,6 +165,11 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
   let missingTerminalActual=false;
   const ingestAttempt = r => {
     if (!sameTask(r) || r.dry === true || r.launched === false || r.state==='planned') return;
+    if (transportOutcome(turnOutcome(r)) || transportOutcome(r)) {
+      attempts.push({ ...r, id: r.id ?? `transport-${r.thread}-${r.turn}`, taskId: id, role,
+        state: 'transport-failed', failureKind: 'transport-failed' });
+      return;
+    }
     const terminal=['failed','completed','cancelled-no-work','cancelled','succeeded'].includes(r.state);
     if ((!terminal && !['starting','queued','running','cancel-pending','UNKNOWN'].includes(r.state))
       || (r.kind && !['attempt','launch','launch-model'].includes(r.kind)) || r.accepted===false) return;
@@ -237,8 +245,13 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
     }
   }
   if (flags['failure-kind'] && !flags.actual && attempts.length && parsed.autoRerouteDepth === 0) {
-    attempts.at(-1).failureKind = parsed.failureKind;
+    if (!transportOutcome(attempts.at(-1))) attempts.at(-1).failureKind = parsed.failureKind;
     if (parsed.failures && parsed.failureKind === 'tool' && ['completed','succeeded'].includes(attempts.at(-1).state)) attempts.at(-1).state='failed';
+  }
+  // Terminal transport evidence can be known even when execution-model evidence is missing.
+  if (retryHistory && !flags.actual) for (const row of terminalOutcomes.filter(transportOutcome)) {
+    if (!attempts.some(a => a.thread === row.thread && a.turn === row.turn))
+      ingestAttempt({ ...row, state: 'transport-failed' });
   }
   let retryAssumption = missingTerminalActual ? 'A finished attempt had no confirmed actual tuple; using the next available recorded retry baseline.' : null;
   if (retryHistory && !attempts.length && parsed.failureKind !== 'tool') {
@@ -287,7 +300,8 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
         ? canonicalPath(flags['trusted-cwd'] ?? projectConfig.root ?? projectConfig.projectRoot) : null,
       slowTests: Array.isArray(projectConfig.slowTests) ? projectConfig.slowTests : []};
   };
-  if (env.ROUTE_SNAPSHOT_FILE) return finish(createSnapshot(injectedSnapshot, { now }));
+  if (env.ROUTE_SNAPSHOT_FILE) return finish(createSnapshot({ ...injectedSnapshot,
+    transportFailures: [...array(injectedSnapshot.transportFailures), ...rows.filter(r => r.kind === 'outcome' && transportOutcome(r))] }, { now }));
   const fallbackFile = env.PERSONAL_FALLBACK_FILE || path.join(shared, 'personal-fallback.json');
   const personalFallback = read(fallbackFile, fs.existsSync(fallbackFile) ? null : read(path.join(root, 'references/personal-fallback.json')));
   const personalPriority = activePersonalPriority(read(path.join(shared, PERSONAL_PRIORITY_FILE)), now);
@@ -379,6 +393,7 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
       !voidedRoutes.has(r.routeId)&&(r.kind==='route'||!r.kind)&&r.pick&&r.executable!==false&&!r.deferred&&(r.executable===true||!r.needsOK?.length))
       .flatMap((r)=>[r,...(r.second&&r.secondExecutable!==false?[{...r,category:'second-opinion',role:'second'}]:[])]),
     outcomes:outcomes.map((r)=>({...r,modelId:r.actual?.[0]?.model??r.first?.model})), runUsage: [...runUsage.values()],
+    transportFailures: rows.filter(r => r.kind === 'outcome' && transportOutcome(r)),
     etaHistory:outcomes.map((r)=>({attemptId:`${r.name}-${r.t}`,category:r.category,modelId:r.actual?.[0]?.model??r.first?.model,
       accountId:r.actual?.[0]?.account??r.first?.account,effort:r.actual?.[0]?.effort??r.first?.effort,minutes:r.minutes,cause:r.cause})) });
   return finish(snapshot);
