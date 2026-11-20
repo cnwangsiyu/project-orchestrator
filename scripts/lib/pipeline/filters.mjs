@@ -132,7 +132,7 @@ export function pPreviousFloor(t, s, c, context = {}) {
   const accountlessActual=a=>a.source==='explicit-actual'&&a.actualStatus==='KNOWN'&&a.actual?.accountStatus==='UNKNOWN'
     && a.actual.accountId===null && modelId(a.actual.modelId??a.actual.model) && EFFORTS.includes(a.actual.effort);
   if (relevant.some((a) => !a.id || (!a.actual?.accountId&&!accountlessActual(a)))) return deny('pPreviousFloor', 'PREVIOUS_ATTEMPT_UNKNOWN', 'Prior attempt identity and actual account must be attested, or an explicit account-less model/effort floor supplied.', c);
-  if ((t.autoRerouteDepth > 0 || array(t.floor.previousAttemptIds).length > 0) && !relevant.length)
+  if ((t.autoRerouteDepth > 0 || array(t.floor.previousAttemptIds).length > 0) && !relevant.length && !t.transportFailures?.length)
     return deny('pPreviousFloor', 'PREVIOUS_ATTEMPT_UNKNOWN', 'Retry requires sanitized actual-attempt evidence.', c);
   if (t.floor.relationVersion !== s.qualityRelationVersion && relevant.length) return deny('pPreviousFloor', 'QUALITY_RELATION_UNKNOWN', 'The pinned quality relation is unavailable.', c);
   if (array(t.floor.previousAttemptIds).some((id) => !relevant.some((a) => a.id === id)) || relevant.some((a) => a.actualStatus !== 'KNOWN' || !a.actual))

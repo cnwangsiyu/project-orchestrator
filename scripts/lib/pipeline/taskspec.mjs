@@ -6,7 +6,7 @@ import { VERSION, array, object, idOK, modelSelector, modelId, unique, clone, fr
 export const CATEGORIES = Object.freeze(['lookup', 'extract', 'analysis', 'research', 'implement', 'implement-hard', 'ui-browser',
   'debug', 'review', 'review-high', 'design', 'docs', 'draft', 'build-run', 'browser', 'computer-use', 'claude-tools', 'science', 'image-gen', 'image-read', 'second-opinion']);
 const BOOLEANS = new Set(['auto-check', 'writes', 'read-only', 'runs-tests', 'signing', 'fresh', 'json', 'verbose', 'table', 'no-redeem', 'dry',
-  'urgent', 'security', 'adversarial', 'defensive', 'background', 'device-lease', 'shared-lock', 'no-local-build', 'worker', 'installed', 'no-browser-preflight']);
+  'urgent', 'security', 'adversarial', 'defensive', 'background', 'device-lease', 'shared-lock', 'no-local-build', 'worker', 'installed', 'no-browser-preflight', 'no-auto-continue']);
 const VALUES = new Set(['stakes', 'failures', 'against', 'author', 'impact', 'env', 'exclude-account', 'exclude-model', 'origins', 'mode',
   'sandbox', 'cwd', 'task-dir', 'task', 'name', 'project', 'apps', 'user-ok', 'auto-reroute-depth', 'previous-attempt', 'execution', 'actual',
   'owner', 'failure-kind', 'trusted-cwd', 'exclude-lane', 'review-override', 'review-required', 'profile-override', 'artifact-ref', 'network', 'review-class', 'review-reason', 'review-scope', 'needs-cli']);
@@ -180,7 +180,7 @@ export function createTaskSpec(input) {
     ...(input.queueOwnerChoice ? {queueOwnerChoice:clone(input.queueOwnerChoice)} : {}),
     artifactRevision: f['artifact-ref'] ?? input.artifactRevision ?? null, requirements: clone({...input.requirements,...(f.installed?{installedOnMachine:true}:{})}), selectionCause: input.selectionCause ?? (attempts.length ? 'infra-reroute' : 'initial'),
     qualityEscalation: clone(input.qualityEscalation ?? null), warnings: f.mode ? ['MODE_DEPRECATED'] : [] };
-  if (f['previous-attempt'] && !attempts.length) task.floor.previousAttemptIds = unique([...task.floor.previousAttemptIds, f['previous-attempt']]);
+  if (f['previous-attempt'] && !attempts.length && !task.transportFailures.length) task.floor.previousAttemptIds = unique([...task.floor.previousAttemptIds, f['previous-attempt']]);
   if (!['primary', 'second', 'followup', 'finisher'].includes(task.role)) fail('INVALID_ROLE', 'Unknown task role.');
   // Derive from constraints, never accept a caller-supplied hash as authority.
   const { requestId: ignored, previousAttempts: prior, approvalRefs: refs, warnings, ...constraints } = task;

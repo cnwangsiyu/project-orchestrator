@@ -60,7 +60,7 @@ export const saveTransportContinuation = (account, thread, sourceTurn, continuat
   return withLock(file, () => {
     const record = readLaunch(file);
     if (record?.transportRetry?.sourceTurn !== sourceTurn) throw Error('transport retry claim changed');
-    writeJson(file, { ...record, transportRetry: { ...record.transportRetry, continuationTurn } });
+    writeJson(file, { ...record, turn: continuationTurn, transportRetry: { ...record.transportRetry, continuationTurn } });
   });
 };
 export const readRequestBufferExceededAt = (account, thread) => readLaunch(launchFile(account, thread))?.requestBufferExceededAt ?? null;

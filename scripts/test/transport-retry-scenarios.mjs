@@ -13,8 +13,9 @@ import { TRANSPORT_CONTINUE_MESSAGE, transportQuotaBlock, transportHealthBlock }
 import { claimTransportContinuation, saveTransportContinuation, saveLaunch } from '../lib/worker-launch.mjs';
 
 const errors = [
+  // W569 and W513 had the same exact terminal message (masked named logs).
   'stream disconnected before completion: Transport error: network error: error decoding response body',
-  'stream disconnected before completion: Transport error: network error: connection reset by peer',
+  'stream disconnected before completion: Transport error: network error: error decoding response body',
 ];
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'transport-retry-'));
 let count = 0;
@@ -23,14 +24,14 @@ const scripts = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const now = Date.now();
 const routeDir = path.join(tmp, 'route'); fs.mkdirSync(routeDir);
 const routeLog = path.join(routeDir, 'route.jsonl'), cache = path.join(routeDir, 'cache.json');
-const route = (history = [], failures = 0, onlyMain = false) => {
+const route = (history = [], failures = 0, onlyMain = false, extra = []) => {
   const account = (name, hours) => ({ name, kind: 'chatgpt', home: path.join(routeDir,name), live: true,
     healthy: true, windows: [{ used: 20, resetsAt: now + hours * 3600000, windowMins: 10080 }] });
   fs.writeFileSync(cache, JSON.stringify({ checkedAt: now, codexAccounts: [account('main',80), ...(!onlyMain ? [account('alt',120)] : [])],
     claude: null, errors: {}, history: {} }));
   fs.writeFileSync(routeLog, history.map(r => JSON.stringify(r)).join('\n') + '\n');
   const run = spawnSync(process.execPath, [path.join(scripts,'route.mjs'), 'implement', '--impact','service',
-    '--project','p','--name','task','--failures',String(failures),'--dry','--json'], { encoding:'utf8',
+    '--project','p','--name','task','--failures',String(failures),'--dry','--json',...extra], { encoding:'utf8',
     env: { ...process.env, HOME:routeDir, RULES_SHARED:routeDir, CODEX_ACCOUNTS:path.join(routeDir,'none.json'),
       QUOTA_CACHE:cache, ROUTE_NOW:String(now), ROUTE_LOG_FILE:routeLog, QUOTA_LOG_FILE:path.join(routeDir,'empty-quota'),
       ROUTE_SNAPSHOT_FILE:'', QUOTA_LOG:'0', TRAE_PROBE:'0', PERSONAL_FALLBACK_FILE:path.join(routeDir,'disabled.json') } });
@@ -69,12 +70,13 @@ const follower = (label, config = {}, extra = []) => {
 };
 try {
   check('real stream errors and exhausted provider errors are transport failures', () => {
-    for (const error of [...errors, 'ECONNRESET', 'HTTP 500 after retries', 'provider 503', 'provider overloaded after retries'])
+    for (const error of [...errors, 'connection reset by peer', 'ECONNRESET', 'HTTP 500 after retries', 'provider 503', 'provider overloaded after retries'])
       assert.equal(completionKind({ status: 'failed', error: { message: error } }), 'transport-failed');
     for (const status of ['completed', 'interrupted', 'BLOCKED', 'TRUNCATED'])
       assert.equal(completionKind({ status, error: errors[0] }), status);
     assert.equal(completionKind({ status: 'failed', error: 'test assertions failed' }), 'failed');
     assert.equal(classifyCompletion({turn:{status:'failed',error:errors[0]}}).status,'transport-failed');
+    assert.equal(classifyCompletion({turn:{status:'failed',error:{httpStatusCode:500}}}).status,'transport-failed');
     assert.match(eventLine({event:'message',kind:'transport-retry',text:'Continue: node script.mjs --thread thread',name:'fixture'}),/^\[transport-retry\].*Continue: node script.mjs --thread thread$/);
   });
   check('transport outcome is durable, idempotent, and distinct from quality or partial final prose', () => {
@@ -106,6 +108,10 @@ try {
           actual:{accountId:'main',modelId:'gpt-6.1-sol',effort:'high'} }] });
     assert.equal(direct.failures,1); assert.equal(direct.qualityFailures,1); assert.equal(direct.previousAttempts.length,1);
     assert.equal(createTaskSpec(direct).failures,1, 'normalization must not subtract twice');
+    fs.writeFileSync(path.join(routeDir,'attempts.json'),JSON.stringify([{...launch,id:'transport-attempt',taskId:'task',state:'transport-failed',failureKind:'transport-failed'}]));
+    const named = route([],1,false,['--task-dir',routeDir,'--previous-attempt','attempts.json']);
+    assert.equal(named.blocked,false); assert.equal(named.failures,0); assert.equal(named.plan.task.floor.previousAttemptIds.length,0);
+    assert.match(route([],0,false,['--no-auto-continue']).pick.command,/--no-auto-continue/);
   });
   check('lane demotion lasts 30 minutes, dedupes turns, and never bans the only lane', () => {
     const recent = [failed('first'),failed('second')];
@@ -115,6 +121,18 @@ try {
     assert.match(route(recent).why.join('\n'),/Transport lane demoted: main:gpt-6.1-sol/);
     assert.equal(route(recent,0,true).pick.account,'main');
     assert.equal(route(recent.map(r=>({...r,t:now-1800001}))).pick.account,'main');
+  });
+  check('manual transport correction binds the latest terminal turn for cutover routing', () => {
+    const original = {...failed('legacy-turn'),auto:true,result:'fail',failureKind:'infra',cause:'infra'};
+    const launch = {...original,kind:'launch-model',state:'failed',accepted:true,actual:{accountId:'main',modelId:'gpt-6-astra',effort:'max'}};
+    fs.writeFileSync(routeLog,[launch,original].map(JSON.stringify).join('\n')+'\n');
+    const r = spawnSync(process.execPath,[path.join(scripts,'outcome.mjs'),'--project','p','--name','task','--correct',
+      '--result','transport-failed','--rounds','0'],{encoding:'utf8',env:{...process.env,RULES_SHARED:routeDir,ROUTE_LOG_FILE:routeLog}});
+    assert.equal(r.status,0,r.stderr);
+    const corrected = fs.readFileSync(routeLog,'utf8').trim().split('\n').map(JSON.parse);
+    assert.equal(corrected.at(-1).thread,'thread'); assert.equal(corrected.at(-1).turn,'legacy-turn');
+    assert.equal(corrected.at(-1).failureKind,'transport-failed');
+    const rerouted = route(corrected.map(r=>({...r,t:Math.min(r.t,now)})),1); assert.equal(rerouted.failures,0); assert.equal(rerouted.blocked,false);
   });
   check('follower retries once on the same thread with 60s backoff and fixed state-check message', () => {
     const f = follower('retry-success'); const r = f.run(); assert.equal(r.status,0,r.stderr+r.stdout);
@@ -132,6 +150,7 @@ try {
     assert.deepEqual(f.outcomes().map(r=>r.result),['transport-failed','transport-failed']);
     const launch = JSON.parse(fs.readFileSync(path.join(f.dir,'worker-launches/fixture/transport-thread.json'),'utf8'));
     assert.equal(launch.transportRetry.sourceTurn,'transport-turn-1'); assert.equal(launch.transportRetry.continuationTurn,'transport-turn-2');
+    assert.equal(launch.turn,'transport-turn-2');
   });
   check('no-auto-continue persists across wait and review seats honor the flag', () => {
     for (const review of [false,true]) {

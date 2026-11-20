@@ -154,6 +154,7 @@ export function presentRoute(plan, view, context) {
     if(f.task) args.push('--task',f.task);
     args.push('--project',task.project,'--role',s.role,'--routed-seat',JSON.stringify(routed));
     if(task.background) args.push('--background');
+    if(task.flags['no-auto-continue']) args.push('--no-auto-continue');
     if(f['user-ok']) args.push('--user-ok',f['user-ok']);
     if(task.flags.network) args.push('--network',task.flags.network);
     if(seatPatience!==null) args.push('--queue-patience-min',String(seatPatience),'--alt',primary?queueAlt:'Return this result to the owner and replan the required reviewer set, preserving artifact and family independence.',...(primary?['--queue-alternative',JSON.stringify(queueAlternative)]:[]));

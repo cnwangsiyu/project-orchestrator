@@ -74,7 +74,7 @@ export function continuationCommand({ script, account, thread, owner, out, log }
 }
 
 // Classify provider turn failures from public terminal evidence, never task prose.
-const TRANSPORT = /stream disconnected before completion|transport error|network error|error decoding response body|connection reset|\bECONNRESET\b|\b(?:HTTP|status(?: code)?|provider|server)\s*[:=]?\s*5\d\d\b|\b(?:502|503|504)\b|\boverloaded\b|\binternal server error\b|\bbad gateway\b|\bservice unavailable\b/i;
+const TRANSPORT = /stream disconnected before completion|transport error|network error|error decoding response body|connection reset|\bECONNRESET\b|\b(?:HTTP|http[_ ]?status[_ ]?code|status(?:[_ ]?code)?|provider|server)[\s"':=]*5\d\d\b|\b(?:502|503|504)\b|\boverloaded\b|\binternal server error\b|\bbad gateway\b|\bservice unavailable\b/i;
 export const isTransportError = error => TRANSPORT.test(typeof error === 'string' ? error : JSON.stringify(error ?? ''));
 export const completionKind = turn => classifyCompletion({ turn: turn ?? {} })?.status ?? turn?.status;
 export const transportOutcome = row => row?.result === 'transport-failed' || row?.failureKind === 'transport-failed' || row?.state === 'transport-failed';
