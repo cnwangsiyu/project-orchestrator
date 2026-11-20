@@ -29,7 +29,8 @@ function fixture(options = {}) {
   const dir = path.join(options.canonical ? fs.realpathSync(temp) : temp, `case-${++count}`), bin = path.join(dir, 'bin'), shared = path.join(dir, 'shared'), repo = path.join(dir, 'source');
   for (const p of [bin, shared, repo, path.join(shared, 'locks')]) fs.mkdirSync(p, { recursive: true });
   const cleanupPython = 'import os,sys,json,pathlib,time\n' + retentionPython + runDataCleanupPython + '\nd=json.loads(sys.stdin.read())\nprint(json.dumps(cleanup_run_data(d)))\n';
-  const config = { dir, shared, cleanupPython, hosts: ['192.0.2.1', '192.0.2.2'], ...options };
+  const cleanupOutputPython = 'import json,sys,pathlib\n' + runDataCleanupPython + '\nprint_data_cleanup(json.loads(sys.stdin.read()))\n';
+  const config = { dir, shared, cleanupPython, cleanupOutputPython, hosts: ['192.0.2.1', '192.0.2.2'], ...options };
   fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify(config));
   const rows = [
     'devbox-cn-1\tremote\topen\t-\tfirst alice@192.0.2.1 caps=node',
@@ -179,7 +180,7 @@ if(op==='run') {
   const source=c.dataCleanupFailure?c.cleanupPython.replace('d=json.loads(sys.stdin.read())',"original_unlink=os.unlink\ndef faulty_unlink(name,*a,**kw):\n    if name=='blocked': raise PermissionError('fixture cleanup failure')\n    return original_unlink(name,*a,**kw)\nos.unlink=faulty_unlink\nd=json.loads(sys.stdin.read())"):c.cleanupPython;
   const cleanup=cp.spawnSync('python3',['-c',source],{input:JSON.stringify(d),encoding:'utf8'});
   if(cleanup.status)console.error('fixture data cleanup warning');
-  else { const record=JSON.parse(cleanup.stdout);console.log('DEVBOX_DATA_CLEANUP='+JSON.stringify(record));fs.mkdirSync(d.control,{recursive:true});fs.writeFileSync(path.join(d.control,'data-cleanup.json'),JSON.stringify({...record,run:path.basename(d.control)})); }
+  else { const record=JSON.parse(cleanup.stdout);const output=cp.spawnSync('python3',['-c',c.cleanupOutputPython],{input:JSON.stringify(record),encoding:'utf8'});if(output.status)throw Error(output.stderr);process.stdout.write(output.stdout);fs.mkdirSync(d.control,{recursive:true});fs.writeFileSync(path.join(d.control,'data-cleanup.json'),JSON.stringify({...record,run:path.basename(d.control)})); }
  }
  if(c.launchDelay)await sleep(c.launchDelay);
  if(c.launcherDiskHost===host){console.error('DEVBOX_LAUNCH_DISK_GUARD');process.exit(72);}
@@ -1366,7 +1367,19 @@ async function dataCleanupScenarios() {
   fs.writeFileSync(path.join(f.dir, 'config.json'), JSON.stringify({ ...f.config, dataCleanupFailure: true }));
   const failed = await run(f, [], 'test -f .data/blocked && printf command-still-runs'); ok(failed); returned(f);
   assert.ok(failed.summary.shards[0].attempts[0].dataCleanup.warnings.some(warning => warning.includes('fixture cleanup failure')));
+  assert.doesNotMatch(failed.stdout, /^\[cleanup-ineffective\]/m, 'partial cleanup is not a zero-byte warning');
   assert.match(failed.stdout, /command-still-runs/);
+  for (let repeat = 0; repeat < 2; repeat++) {
+    const ineffective = await run(f, [], 'test -f .data/blocked && printf still-runs'); ok(ineffective); returned(f);
+    assert.equal(ineffective.summary.shards[0].attempts[0].dataCleanup.bytes, 0);
+    assert.equal(ineffective.stdout.split('\n').filter(line => line.startsWith('[cleanup-ineffective]')).length, 1);
+    assert.match(ineffective.stdout, /^\[cleanup-ineffective\].*fixture cleanup failure/m);
+    const cleanupRun = f.events().filter(event => event.op === 'run').at(-1);
+    const warningReceipt = JSON.parse(fs.readFileSync(path.join(cleanupRun.control, 'data-cleanup.json')));
+    assert.deepEqual(warningReceipt.warnings, ineffective.summary.shards[0].attempts[0].dataCleanup.warnings);
+  }
+  assert.doesNotMatch(next.stdout, /^\[cleanup-ineffective\]/m);
+  assert.doesNotMatch(opted.stdout, /^\[cleanup-ineffective\]/m);
   const retained = fixture();
   fs.appendFileSync(path.join(retained.repo, '.gitignore'), '.data/\n'); git(retained.repo, 'add', '.gitignore'); git(retained.repo, 'commit', '-qm', 'ignore retained run data');
   const saved = await run(retained, ['--artifact', '.data/retained/result.log', '--artifact-fetch', 'manifest'], 'mkdir -p .data/retained .data/stale; printf saved > .data/retained/result.log; printf old > .data/stale/out'); ok(saved); returned(retained);

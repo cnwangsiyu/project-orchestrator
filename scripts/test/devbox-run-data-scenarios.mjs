@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { runDataCleanupPython } from '../devbox-run.mjs';
+import { execute, runDataCleanupPython } from '../devbox-run.mjs';
 import { retentionPython } from '../lib/devbox-retention.mjs';
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'devbox-run-data-'));
@@ -169,6 +169,23 @@ try {
     assert.equal(fs.existsSync(path.join(modern.data, 'recent')), same);
   }
   console.log('PASS live modern receipts protect recent data of the same workspace without blocking other workspaces');
+
+  const privateValue = 'fixture-sensitive-value'; let output = '';
+  const warningOutput = await execute('python3', ['-c', 'import json,sys,pathlib\n' + runDataCleanupPython + '\nprint_data_cleanup(json.loads(sys.stdin.read()))'], {
+    input: JSON.stringify({ entries: [], bytes: 0, warnings: ['cleanup failure: ' + privateValue + '\ncontinued'] }),
+    state: { values: [privateValue], children: new Set() }, onOutput: text => { output += text; },
+  });
+  assert.equal(warningOutput.code, 0); assert.ok(!output.includes(privateValue));
+  assert.equal(output.split('\n').filter(line => line.startsWith('[cleanup-ineffective]')).length, 1);
+  assert.match(output, /\[cleanup-ineffective\].*cleanup failure/); assert.ok(output.includes('[MASKED]'));
+  let assignmentOutput = '';
+  const assignmentWarning = await execute('python3', ['-c', 'import json,sys,pathlib\n' + runDataCleanupPython + '\nprint_data_cleanup(json.loads(sys.stdin.read()))'], {
+    input: JSON.stringify({ entries: [], bytes: 0, warnings: ['fixture cleanup password=FAKE_VALUE_FOR_TEST'] }),
+    state: { values: [], children: new Set() }, onOutput: text => { assignmentOutput += text; },
+  });
+  assert.equal(assignmentWarning.code, 0); assert.ok(!assignmentOutput.includes('FAKE_VALUE_FOR_TEST'));
+  assert.equal(assignmentOutput.split('\n').filter(line => line.startsWith('[cleanup-ineffective]')).length, 1);
+  console.log('PASS ineffective cleanup warning stays on one line and uses normal runner output redaction');
 
   const escaped = fixture(), other = path.join(temp, 'other-data'); fs.mkdirSync(other); fs.writeFileSync(path.join(other, 'keep'), 'outside');
   fs.rmdirSync(escaped.data); fs.symlinkSync(other, escaped.data);

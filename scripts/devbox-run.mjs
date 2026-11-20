@@ -238,6 +238,11 @@ export function planShards(requested, freeSlots, units, history = {}, commandKey
 // Output is line-buffered so assignments split across SSH chunks are still masked.
 function lineSink(write, values = [], intercept, strictOutput = true, initialPrivateBlock = false) {
   let pending = '', dropping = false;
+  const visibleLine = line => {
+    const masked = redact(line);
+    return line.startsWith('[cleanup-ineffective] ') && !masked.startsWith('[cleanup-ineffective] ')
+      ? '[cleanup-ineffective] ' + masked : masked;
+  };
   const redact = line => {
     for (const value of values) line = line.replaceAll(value, '[MASKED]');
     line = maskLogText(line).text;
@@ -249,14 +254,14 @@ function lineSink(write, values = [], intercept, strictOutput = true, initialPri
       let index;
       while ((index = pending.indexOf('\n')) !== -1) {
         const line = pending.slice(0, index); pending = pending.slice(index + 1);
-        if (!dropping && !intercept?.(line)) write(`${redact(line)}\n`);
+        if (!dropping && !intercept?.(line)) write(`${visibleLine(line)}\n`);
         dropping = false;
       }
       if (pending.length > 1024 * 1024) { if (!dropping) write('[suppressed oversized output line]\n'); pending = ''; dropping = true; }
   }, { initialActive: initialPrivateBlock });
   return {
     push(chunk) { stream.push(chunk); },
-    end() { stream.end(); if (pending && !dropping) write(redact(pending)); },
+    end() { stream.end(); if (pending && !dropping) write(visibleLine(pending)); },
     get privateBlockOpen() { return stream.active; },
   };
 }
@@ -536,6 +541,11 @@ def cleanup_run_data(d):
             try: os.close(data_fd)
             except OSError: result['warnings'].append('data handle close failed')
     return result
+
+def print_data_cleanup(result):
+    print('DEVBOX_DATA_CLEANUP='+json.dumps(result),flush=True)
+    if result.get('bytes')==0 and result.get('warnings'):
+        print('[cleanup-ineffective] '+json.dumps(result['warnings']),flush=True)
 `;
 
 export const remoteScripts = {
@@ -854,7 +864,7 @@ def save(name, data):
 save('owner.json',{'pid':os.getpid(),'start':stat(os.getpid())[19]})
 if d.get('stream') and not cancelled and not (ctl/'cancel').exists():
     data_cleanup=cleanup_run_data(d)
-    print('DEVBOX_DATA_CLEANUP='+json.dumps(data_cleanup),flush=True)
+    print_data_cleanup(data_cleanup)
     try: save('data-cleanup.json',data_cleanup)
     except Exception: print('devbox-run: data cleanup receipt warning',file=sys.stderr,flush=True)
 proc=None; leader_start=None; result=1; command_start=None
