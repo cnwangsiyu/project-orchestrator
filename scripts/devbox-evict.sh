@@ -5,6 +5,12 @@
 # Usage: devbox-evict.sh USER@HOST RUNNER_ROOT [TARGET_FREE_GIB=73]
 set -u
 target=${1:?user@host}; root=${2:?runner root}; want=${3:-73}
+# Opt-in whole-tree eviction uses per-slot public maintenance leases. Disabled
+# configuration leaves the legacy SSH command and .data-only behavior unchanged.
+mode=$(node ${0:A:h}/devbox-evict.mjs --enabled "$target") || exit $?
+if [ "$mode" = enabled ]; then
+  exec node ${0:A:h}/devbox-evict.mjs "$target" "$root" "$want"
+fi
 host=${target#*@}
 shared=~/.claude/orchestrator/_shared
 log=$shared/reports/devbox-evictions/evictions.tsv

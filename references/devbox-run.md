@@ -1191,3 +1191,80 @@ in that slot, when it is a symlink, or when anything in it changed in the last 3
 deletion is appended to `_shared/reports/devbox-evictions/evictions.tsv` (time, host, path, size,
 free before and after). Deleting any other existing data still needs the user's card. Project
 orchestrators do not run it; they report `reason=disk` denials to the rules owner.
+
+## Opt-In On-Demand Tree Roots (2026-11-19)
+
+Rows are leases, not preallocated directories. Checkout already creates trees
+lazily; opening more rows does not prewarm or consume disk. These runner-only
+per-IP `machine.conf` settings require no `scripts/res/res` change:
+
+| Setting (append `.HOST_IP`) | Default | Purpose |
+| --- | --- | --- |
+| `DEVBOX_TREE_PLACEMENT` | `0` | Enable placement, inventory/affinity and whole-tree owner eviction |
+| `DEVBOX_EXTRA_ROOTS` | empty | Comma-separated absolute roots; no symlinks, overlap or private-state paths |
+| `DEVBOX_TREE_PRIMARY_FLOOR_GIB` | `53` | Primary floor, never below the existing 53 GiB guard |
+| `DEVBOX_TREE_SECONDARY_FLOOR_GIB` | `20` | Floor for every secondary root |
+| `DEVBOX_TREE_RESERVE_GIB` | `20` | Required new-tree surplus and live new-tree reserve |
+| `DEVBOX_TREE_COLD_DAYS` | `3` | Owner eviction age; explicit runner `gc --days` keeps its meaning |
+
+Primary owns `repos/`, `shared/`, `store-index/`, `inputs/` and `runs/`.
+Secondary roots own only `wt/<project>/id-<repository>/<slot>/`. Existing trees
+never move or rescore; foreign/partial trees fail closed. New-tree score is
+`max(0, freeGiB - floorGiB - liveNewTreeReservations) * (1 - diskBusyFraction)`.
+A root needs at least the configured reserve above its floor/reservations.
+Device busy time comes from two `/sys/dev/block/MAJOR:MINOR/stat` reads about
+one second apart; partitions use their parent disk. If any device is unknown,
+all roots use space alone. This is observed busy time, not benchmark IOPS or
+the controller's host I/O admission gate.
+
+`PRIMARY/wt-map.json` version 1 records each slot/project/store's root, last use
+and new-tree reserve. Repository and global map locks protect atomic, fsynced
+replacement. Reserves count matching held public lease-info digests. Normal
+cleanup clears the exact owner's reserve before returning its lease; replaced
+owners retire when observed. A stale hold inventory cannot omit a newly published
+reserve: missing/unknown evidence remains conservative for up to four hours
+(the maximum preparation plus command budget), or while a matching hold is
+known live. Failed reserve cleanup warns and may bias placement until expiry
+or slot reuse. Keep existing secondary roots registered while placement is on.
+Attempts, phase receipts and tree metadata record `treeRoot`, `treeState`
+(`warm` or `cold-new`) and score inputs. Warm reuse emits no score sample.
+Inspection/launch guard primary and selected-root floors, including clean-ref
+reuse. Legacy non-identity stores remain on the old primary-root path.
+Dead-holder path discovery also covers every registered root, not just the
+primary tree for the most recently recorded project.
+
+A cheap read-only inventory before acquisition ranks free slots: matching
+project/store, newest first; empty slots; then foreign trees, oldest first.
+The runner sends one soft `--prefer-slot` hint to `wait-pool`, within an
+explicit/verified preferred host when present. Caller slot preferences win.
+FIFO, capabilities, quarantine, spare-core ranking and the affinity window
+stay in `res`. A changed host or occupied hint can fall back without this
+host-local order. Old controllers record `applied: false`; no forced take is
+introduced for these hints.
+
+Opt-in `devbox-evict.sh` delegates to `devbox-evict.mjs`: inventory covers all
+registered roots, each candidate takes a public maintenance lease, and remote
+locks protect deletion rechecks. Cold trees expire after the configured age;
+below-floor roots reclaim whole trees LRU. An initially pressured primary may
+refill to the existing target (default 73 GiB). Held/unregistered slots, dirty
+trees, private state, symlinks, foreign Git repositories and live/unknown
+processes survive. Path, allocated size and before/after space go to the existing
+eviction TSV. A matching controller with `retain-remote` protects the lease
+before deletion; unknown SSH completion retains it for owner recovery instead
+of risking stale reclaim over a still-running deletion. Return failure is fatal.
+Disabled config retains the original
+`.data`-only SSH command exactly. Normal leased GC also covers secondary roots,
+but keeps its explicit age rule. Whole-tree eviction excludes legacy stores.
+
+`devbox-slot-rows.mjs --registry FILE --host IP --count NEW_ROWS --first-id N`
+prints TSV proposals only. It preserves host/capability/preference/hardware
+tags, adds `dynamic-only` to extra rows, and refuses ID collisions. Keep today's
+baseline rows; target 32-40 total heavy rows per box, not concurrent jobs. Enable
+only after dynamic enrollment, fresh metrics and the companion I/O gate pass
+owner checks. Stale metrics/disable must admit only baseline rows. Do not
+precreate slot trees.
+
+Controller disk admission/reservations still refer to primary free space.
+Secondary space cannot override a primary-disk denial; removing that conservative
+limit needs a reviewed per-device controller contract, not a runner bypass.
+Detailed owner rollout/rollback commands are in this change's `report.md`.

@@ -26,7 +26,7 @@ Object.assign(process.env, { GIT_AUTHOR_NAME: 'Fixture', GIT_AUTHOR_EMAIL: 'fixt
 const git = (repo, ...args) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 let count = 0;
 function fixture(options = {}) {
-  const dir = path.join(temp, `case-${++count}`), bin = path.join(dir, 'bin'), shared = path.join(dir, 'shared'), repo = path.join(dir, 'source');
+  const dir = path.join(options.canonical ? fs.realpathSync(temp) : temp, `case-${++count}`), bin = path.join(dir, 'bin'), shared = path.join(dir, 'shared'), repo = path.join(dir, 'source');
   for (const p of [bin, shared, repo, path.join(shared, 'locks')]) fs.mkdirSync(p, { recursive: true });
   const cleanupPython = 'import os,sys,json,pathlib,time\n' + retentionPython + runDataCleanupPython + '\nd=json.loads(sys.stdin.read())\nprint(json.dumps(cleanup_run_data(d)))\n';
   const config = { dir, shared, cleanupPython, hosts: ['192.0.2.1', '192.0.2.2'], ...options };
@@ -116,7 +116,17 @@ if(['run','cleanup','reconnect','result','artifact-range','dead-slot','cleanup-p
  if(!args.includes('ControlMaster=no')||!args.includes('ControlPath=none'))throw Error('supervisor/recovery SSH must remain independent');
 } else if(!((c.muxMessage||c.postStartMessage)&&args.includes('ControlMaster=no')&&args.includes('ControlPath=none'))&&(!args.includes('ControlMaster=auto')||!args.includes('ControlPersist=60')))throw Error('control SSH must reuse task connection');
 let d={};if(op!=='upload')d=JSON.parse(Buffer.from(command.match(/'([A-Za-z0-9+/=]+)'$/)[1],'base64').toString());
-event(op,{host,target,multiplexed:args.includes('ControlMaster=auto'),slot:d.slot,workspace:d.workspace,control:d.control,offset:d.offset,length:d.length,forceStage:d.forceStage,reuseAllowed:d.reuseAllowed,env:op==='run'?d.env:undefined,nice:op==='run'?d.command.startsWith('nice -n 10 bash -c'):undefined,cpus:d.cpus});
+event(op,{host,target,multiplexed:args.includes('ControlMaster=auto'),slot:d.slot,workspace:d.workspace,control:d.control,treeRoot:d.treeRoot,treeState:d.treeState,offset:d.offset,length:d.length,forceStage:d.forceStage,reuseAllowed:d.reuseAllowed,env:op==='run'?d.env:undefined,nice:op==='run'?d.command.startsWith('nice -n 10 bash -c'):undefined,cpus:d.cpus});
+if(c.assertLegacyWire&&op!=='upload'){
+ if(Object.hasOwn(d,'treeConfig'))throw Error('disabled configuration changed SSH payload');
+ const quote=v=>"'"+v.replaceAll("'","'\\''")+"'";
+ if(!command.includes('python3 -c '+quote(c.legacyScripts[op])+' '))throw Error('disabled configuration changed SSH script: '+op);
+}
+if(op==='tree-place'&&c.treeFree){
+ const setup="original_statvfs=os.statvfs\ndef fixture_statvfs(p):\n    free="+JSON.stringify(c.treeFree)+"\n    name='primary' if str(p)==d['root'] else 'secondary'\n    return __import__('types').SimpleNamespace(f_bavail=free[name]*1073741824,f_frsize=1)\nos.statvfs=fixture_statvfs\ntree_disk_sample=lambda roots:{}\n";
+ const source=command.replace('print(json.dumps(tree_place(d)))',()=>setup.replaceAll("'","'\\''")+'print(json.dumps(tree_place(d)))');
+ const result=cp.spawnSync('/bin/bash',['-c',source],{encoding:'utf8'});process.stdout.write(result.stdout);process.stderr.write(result.stderr);process.exit(result.status);
+}
 if(c.muxMessage&&op===(c.muxOperation||'checkout')){
  const file=path.join(c.dir,'mux-count'),count=fs.existsSync(file)?Number(fs.readFileSync(file)):0;
  if(count<(c.muxFailures||1)){fs.writeFileSync(file,String(count+1));process.stderr.write(c.muxMessage);process.exit(255);}
@@ -1505,8 +1515,54 @@ async function readbackAdmissionScenarios() {
   console.log('PASS busy host light slot uses two bounded readbacks; third waits; disk floor and cancellation release permits');
 }
 
+async function treePlacementScenarios() {
+  const f = fixture({ canonical: true, preferSlot: true, diskCosts: true, treeFree: { primary: 80, secondary: 160 } });
+  fs.appendFileSync(path.join(f.shared, 'resources.tsv'), 'devbox-cn-5\tremote\topen\t-\tfirst alice@192.0.2.1 caps=node\n');
+  const secondary = path.join(f.dir, 'secondary');
+  fs.writeFileSync(path.join(f.shared, 'machine.conf'), `DEVBOX_TREE_PLACEMENT.192.0.2.1=1\nDEVBOX_EXTRA_ROOTS.192.0.2.1=${secondary}\n`);
+  const first = await run(f, ['--prefer-host', '192.0.2.1']); ok(first); returned(f);
+  const cold = first.summary.shards[0].attempts[0];
+  assert.equal(cold.treeRoot, secondary); assert.equal(cold.treeState, 'cold-new');
+  assert.equal(cold.placementScores.length, 2);
+  assert.equal(cold.phaseTimings.treeRoot, secondary);
+  assert.ok(cold.phaseTimings.substeps.sourceTransferIn.treePlacement >= 0);
+  fs.mkdirSync(path.join(cold.workspace, 'build'), { recursive: true });
+  fs.writeFileSync(path.join(cold.workspace, 'build', 'warm-cache'), 'keep');
+  f.config.treeFree = { primary: 400, secondary: 60 }; fs.writeFileSync(path.join(f.dir, 'config.json'), JSON.stringify(f.config));
+  const reused = await run(f, ['--prefer-host', '192.0.2.1']); ok(reused); returned(f);
+  const warm = reused.summary.shards[0].attempts[0];
+  assert.equal(warm.treeRoot, secondary); assert.equal(warm.treeState, 'warm'); assert.deepEqual(warm.placementScores, []);
+  assert.equal(warm.diskCosts[cold.slot], 0); assert.equal(warm.treeAffinity.slot, cold.slot);
+  assert.equal(fs.readFileSync(path.join(warm.workspace, 'build/warm-cache'), 'utf8'), 'keep');
+  const explicit = await run(f, ['--prefer-slot', 'devbox-cn-5', '--prefer-host', '192.0.2.1']); ok(explicit); returned(f);
+  assert.equal(explicit.summary.shards[0].slot, 'devbox-cn-5');
+  const newest = await run(f, ['--prefer-host', '192.0.2.1']); ok(newest); returned(f);
+  assert.equal(newest.summary.shards[0].slot, 'devbox-cn-5');
+  const wait = f.events().filter(event => event.op === 'acquire-call').at(-1);
+  assert.ok(wait.args.includes('--prefer-slot')); assert.equal(wait.args[wait.args.indexOf('--prefer-slot') + 1], 'devbox-cn-5');
+  assert.equal(wait.args[0], 'wait-pool');
+  const occupied = path.join(f.shared, 'locks/devbox-cn-5.d'); fs.mkdirSync(occupied); fs.writeFileSync(path.join(occupied, 'info'), 'by\tfixture-foreign\npid\t1\n');
+  const fallback = await run(f, ['--prefer-host', '192.0.2.1']); ok(fallback);
+  assert.equal(fallback.summary.shards[0].slot, 'devbox-cn-1');
+  fs.rmSync(occupied, { recursive: true }); returned(f);
+  const primary = JSON.parse(fs.readFileSync(path.join(f.shared, 'devbox-hosts.json')))['192.0.2.1'].root;
+  const map = JSON.parse(fs.readFileSync(path.join(primary, 'wt-map.json')));
+  assert.equal(Object.values(map.slots[cold.slot])[0].treeRoot, secondary);
+  assert.ok(fs.existsSync(path.join(primary, 'repos/fixture')) && fs.existsSync(path.join(primary, 'shared')) && fs.existsSync(path.join(primary, 'runs')));
+  assert.deepEqual(fs.readdirSync(secondary), ['wt']);
+  console.log('PASS fake SSH placement, score receipts, existing-tree reuse, warm cache, newest warm slot hint and primary-only shared state');
+
+  const legacy = fixture({ preferSlot: true, diskCosts: true, assertLegacyWire: true, legacyScripts: remoteScripts });
+  ok(await run(legacy)); returned(legacy);
+  fs.writeFileSync(path.join(legacy.shared, 'machine.conf'), 'DEVBOX_TREE_PLACEMENT.192.0.2.1=0\nDEVBOX_EXTRA_ROOTS.192.0.2.1=/unused/root\n');
+  ok(await run(legacy)); returned(legacy);
+  assert.ok(!legacy.events().some(event => ['tree-list', 'tree-place'].includes(event.op)));
+  console.log('PASS absent/disabled config sends identical legacy Python SSH commands and no treeConfig payload');
+}
+
 async function scenarios() {
   const only = process.env.DEVBOX_TEST_CASE;
+  if (only === 'trees') { await treePlacementScenarios(); return; }
   if (only === 'readback') { await artifactDirectScenarios(); await artifactResumeScenarios(); return; }
   if (only === 'artifact-direct') { await artifactDirectScenarios(); return; }
   if (only === 'overhead') { await overheadScenarios(); return; }

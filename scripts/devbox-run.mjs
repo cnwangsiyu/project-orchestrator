@@ -17,6 +17,7 @@ import { fileDigest, artifactName, readArtifactManifest, retainedArtifactPython,
 import { controlOptions, muxFailure, muxRetrySafe } from './lib/devbox-ssh.mjs';
 import { retentionPython } from './lib/devbox-retention.mjs';
 import { cleanupEvidencePython } from './lib/devbox-cleanup-pending.mjs';
+import { treeSettings, treePreference, treeScript } from './lib/devbox-trees.mjs';
 
 const script = fileURLToPath(import.meta.url);
 const GiB = 1024 ** 3;
@@ -1104,6 +1105,10 @@ async function ssh(row, operation, data, opts = {}) {
 }
 
 async function sshCall(row, operation, data, opts = {}) {
+  if (data.root && !Object.hasOwn(data, 'treeConfig')) {
+    const settings = opts.state ? opts.state.treeSettings ||= treeSettings(sharedDir()) : treeSettings(sharedDir());
+    if (settings[row.host]) data = { ...data, treeConfig: settings[row.host] };
+  }
   if (opts.state) opts.state.sshMux ||= { degraded: false, fallbackCount: 0 };
   if (opts.state?.sshStartDelay && !opts.state.sshStarted) {
     opts.state.sshStarted = true;
@@ -1111,7 +1116,7 @@ async function sshCall(row, operation, data, opts = {}) {
   }
   const base = operation === 'upload'
     ? `# devbox-run:upload\nmkdir -p ${quote(data.workspace)} && tar -xf - -C ${quote(data.workspace)}`
-    : remoteCommand(operation, remoteScripts[operation], data);
+    : remoteCommand(operation, treeScript(operation, remoteScripts[operation], pythonHeader, data), data);
   let muxRetried = false;
   for (let retry = 0; ; retry++) {
     let started = false;
@@ -1901,13 +1906,14 @@ async function collectGarbage({ rows, days = 7, host, state, emit = text => proc
       }
       checked(take, 'GC slot acquisition');
       let clean = true;
-      const data = { root, ...item, slot: member.slot, days, docker: false };
+      const config = (state.treeSettings ||= treeSettings(sharedDir()))[row.host];
+      const data = { root, ...item, slot: member.slot, days, docker: false, ...(config ? { treeConfig: config } : {}) };
       const control = `${root}/gc/${randomUUID()}`;
       try {
         // Inventory is rechecked by gc AFTER leasing. GC itself gets the same supervisor.
         checked(await ssh(row, 'inspect', { root, control, reuseAllowed: false, repository: item.repository || `${root}/repos/.gc-unused`, commit: '0'.repeat(40) }, { state }), 'GC preparation');
         const op = item.maintenance ? 'maintenance' : 'gc';
-        const result = await ssh(row, 'run', { workspace: root, control, command: remoteCommand(op, remoteScripts[op], data), env: {}, seconds: 120 }, { state, timeout: 140000, onOutput: emit });
+        const result = await ssh(row, 'run', { workspace: root, control, command: remoteCommand(op, treeScript(op, remoteScripts[op], pythonHeader, data), data), env: {}, seconds: 120 }, { state, timeout: 140000, onOutput: emit });
         const cleanup = await ssh(row, 'cleanup', { control, started: true }, { state, cancellable: false, timeout: 35000 });
         clean = cleanup.code === 0 && cleanup.stdout.includes('group-gone');
         if (!clean) throw Error(`BLOCKED: GC cleanup unconfirmed; retaining ${member.slot}`);
@@ -1969,6 +1975,7 @@ export function commandOutcome(exit, expiredBudget, signal, started = true) {
 
 async function shard(opts) {
   const state = cancellationState(Object.values(opts.env));
+  state.treeSettings = treeSettings(sharedDir());
   state.sshStartDelay = (opts.shard - 1) * (500 + Math.floor(Math.random() * 1001));
   const signals = { SIGINT: 130, SIGTERM: 143, SIGHUP: 129 };
   for (const [signal, code] of Object.entries(signals)) process.on(signal, () => state.stop(code));
@@ -2021,7 +2028,16 @@ async function shard(opts) {
       } catch { state.stop(74); }
     },
   });
-  async function release(slot) { checked(await runRes(['return', slot, '--by', by], true), `return ${slot}`); }
+  async function release(slot) {
+    const treeLease = state.treeLeases?.get(slot);
+    if (treeLease) {
+      try { checked(await ssh(treeLease.row, 'tree-release', { root: treeLease.root, slot, owner: treeLease.owner },
+        { state, cancellable: false, timeout: 10000 }), 'tree reservation return'); }
+      catch { emit(`[shard ${opts.shard}] tree reservation release unconfirmed for ${slot}; conservative reserve retained\n`); }
+      state.treeLeases.delete(slot);
+    }
+    checked(await runRes(['return', slot, '--by', by], true), `return ${slot}`);
+  }
   try {
     while (!state.cancel) {
       opts.deadline = budgets.queue();
@@ -2106,11 +2122,25 @@ async function shard(opts) {
           }
         };
         await refresh();
+        const treeInventory = {};
+        for (const [host, candidate] of new Map(possible.filter(item => state.treeSettings[item.host]).map(item => [item.host, item]))) {
+          const root = await hostRoot(candidate, state, { deadline: opts.deadline });
+          treeInventory[host] = JSON.parse(checked(await ssh(candidate, 'tree-list', { root,
+            slots: possible.filter(item => item.host === host).map(item => item.slot) }, { state, timeout: remaining() }), 'tree affinity inventory'));
+        }
+        const treeHint = !opts.preferSlot && treePreference(choices.filter(item => state.treeSettings[item.host]
+          && freeSlot(sharedDir(), item) && !quarantinedHosts(sharedDir()).has(item.host)), treeInventory, opts.project, opts.snapshot.storeKey, preferred);
+        if (treeHint) {
+          attempt.treeAffinity = { ...treeHint, applied: opts.preferSlotSupported };
+          emit(`[shard ${opts.shard}] tree affinity=${JSON.stringify(attempt.treeAffinity)} (soft res hint)\n`);
+        }
         const diskCosts = {};
         if (opts.diskCostsSupported) for (const [host, candidate] of new Map(possible.map(item => [item.host, item]))) {
           const root = await hostRoot(candidate, state, { deadline: opts.deadline });
-          const present = JSON.parse(checked(await ssh(candidate, 'workspaces', { root, project: opts.project, key: opts.snapshot.storeKey,
-            slots: possible.filter(item => item.host === host).map(item => item.slot) }, { state, timeout: remaining() }), 'workspace disk inventory'));
+          const present = treeInventory[host]
+            ? treeInventory[host].filter(item => item.project === opts.project && item.store === opts.snapshot.storeKey).map(item => item.slot)
+            : JSON.parse(checked(await ssh(candidate, 'workspaces', { root, project: opts.project, key: opts.snapshot.storeKey,
+              slots: possible.filter(item => item.host === host).map(item => item.slot) }, { state, timeout: remaining() }), 'workspace disk inventory'));
           for (const slot of present) if (possible.some(item => item.host === host && item.slot === slot)) diskCosts[slot] = 0;
           const retained = JSON.parse(checked(await ssh(candidate, 'retained-disk', { root }, { state, timeout: remaining() }), 'retained disk inventory'));
           for (const [slot, bytes] of Object.entries(retained)) if (bytes > 0 && possible.some(item => item.host === host && item.slot === slot))
@@ -2136,7 +2166,7 @@ async function shard(opts) {
         if (preferred && opts.preferSupported) args.push('--prefer-host', preferred);
         if (opts.needSupported && opts.need.length) args.push('--need', opts.need.join(','));
         const warm = choices.find(item => item.slot === affinitySlot && (opts.preferSlot || item.host === preferred));
-        if (opts.preferSlotSupported && (opts.preferSlot || warm)) args.push('--prefer-slot', opts.preferSlot || warm.slot);
+        if (opts.preferSlotSupported && (opts.preferSlot || treeHint || warm)) args.push('--prefer-slot', opts.preferSlot || treeHint?.slot || warm.slot);
         let acquire;
         const preferredSlots = opts.preferSlotSupported ? [] : warm ? [warm] : !opts.preferSupported ? choices.filter(item => item.host === preferred) : [];
         if (opts.prewarm) {
@@ -2194,10 +2224,25 @@ async function shard(opts) {
         emit(`[shard ${opts.shard}] slot=${row.slot} host=${row.host}\n`);
         const root = await hostRoot(row, state);
         const storeName = checked(await ssh(row, 'store', { root, project: opts.project, key: opts.snapshot.storeKey, legacy: opts.repoName, anchors: opts.snapshot.anchors }, { state }), 'resolve shared store').trim();
-        const workspace = `${root}/wt/${opts.project}/${storeName}/${row.slot}`;
+        let workspace = `${root}/wt/${opts.project}/${storeName}/${row.slot}`;
         const repository = `${root}/repos/${opts.project}/${storeName}`;
         attempt.repository = repository;
-        data = { root, workspace, repository, slot: row.slot, runId: opts.runId, dataInputPaths: opts.inputs.filter(input=>input.path).map(input=>input.path), job: `${opts.project}/${opts.task}`, affinity:opts.affinity, previousJob:previousSlotJob(row.slot,by), control: `${root}/runs/${randomUUID()}`, commit: opts.snapshot.commit, untracked: opts.snapshot.untracked };
+        let tree;
+        if (state.treeSettings[row.host] && storeName.startsWith('id-')) {
+          const own = readHold(row);
+          if (!own || own.fields.by !== by || own.fields.pid !== String(process.pid)) throw Error('slot ownership changed before tree placement');
+          const heldTreeOwners = Object.fromEntries(heldSlots(sharedDir(), row.host).map(member => {
+            const hold = readHold(member);
+            return [member.slot, hold ? createHash('sha256').update(hold.text).digest('hex') : null];
+          }));
+          (state.treeLeases ||= new Map()).set(row.slot, { row, root, owner: heldTreeOwners[row.slot] });
+          tree = JSON.parse(checked(await phases.measure('treePlacement', () => ssh(row, 'tree-place', { root,
+            project: opts.project, store: storeName, slot: row.slot, heldTreeOwners }, { state, timeout: remaining() })), 'tree placement'));
+          workspace = tree.workspace;
+          Object.assign(attempt, tree); Object.assign(phases.data, tree);
+          emit(`[shard ${opts.shard}] tree placement=${JSON.stringify(tree)}\n`);
+        }
+        data = { root, workspace, repository, slot: row.slot, runId: opts.runId, ...(tree || state.treeSettings[row.host] ? { treeConfig: tree ? state.treeSettings[row.host] : null, ...tree } : {}), dataInputPaths: opts.inputs.filter(input=>input.path).map(input=>input.path), job: `${opts.project}/${opts.task}`, affinity:opts.affinity, previousJob:previousSlotJob(row.slot,by), control: `${root}/runs/${randomUUID()}`, commit: opts.snapshot.commit, untracked: opts.snapshot.untracked };
         data.modules = opts.snapshot.modules.map(mod => ({ repository: `${root}/repos/submodules/${mod.storeKey}`, commit: mod.commit, parent: mod.parent, relative: mod.relative }));
         data.reuseAllowed = !opts.snapshot.extra && !(opts.snapshot.patchFile && fs.statSync(opts.snapshot.patchFile).size) && !opts.snapshot.untracked.length;
         recordRun(row, data);
