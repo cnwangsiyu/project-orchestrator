@@ -288,6 +288,22 @@ try {
   assert.equal(deadZombie.bytes, 3); assert.deepEqual(deadZombie.warnings, []); assert.equal(deadZombie.processProbe.zombiesIgnored, 1);
   console.log('PASS unreadable inventory, scoped/unrelated/unattributed fd errors, secret-free reasons and confirmed zombie deletion safety');
 
+  const kernel = groupFixture();
+  kernel.process(1234, 1234, kernel.workspace);
+  kernel.receipt({ pid: 1234, start: '42', workspace: kernel.workspace });
+  const kernelStat = path.join(kernel.proc, '1234/stat');
+  const statFields = fs.readFileSync(kernelStat, 'utf8').split(') ')[1].split(' ');
+  statFields[6] = String(0x00200000);
+  fs.writeFileSync(kernelStat, '1234 (fixture) ' + statFields.join(' '));
+  const kernelOnly = kernel.cleanup();
+  assert.equal(kernelOnly.bytes, 3); assert.equal(kernelOnly.processProbe.eligible, 0);
+
+  const fdOnly = groupFixture(); fdOnly.process(1234, 1234);
+  fs.symlinkSync(path.join(fdOnly.data, 'stale/out'), path.join(fdOnly.proc, '1234/fd/4'));
+  const liveFd = fdOnly.cleanup();
+  assert.equal(liveFd.bytes, 0); assert.equal(liveFd.processProbe.ignoredUnreadableOwn, 0);
+  assert.equal(liveFd.processProbe.uncertaintyHere, 1);
+
   const busy = groupFixture();
   for (let pid = 2000; pid < 2100; pid++) busy.process(pid, pid, temp);
   const busyOther = path.join(busy.root, 'wt/fixture/id-123456/devbox-cn-2'); fs.mkdirSync(busyOther, { recursive: true });
