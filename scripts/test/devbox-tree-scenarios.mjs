@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync, execFileSync } from 'node:child_process';
+import { spawn, spawnSync, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
 import { treeSettings, treePreference, treePython, treeScript } from '../lib/devbox-trees.mjs';
@@ -17,7 +17,7 @@ fs.mkdirSync(root); fs.mkdirSync(secondary);
 const config = { extraRoots: [secondary], primaryFloorGiB: 53, secondaryFloorGiB: 20, reserveGiB: 20, coldDays: 3 };
 const base = { root, treeConfig: config, project: 'fixture', store: 'id-fixture', slot: 'devbox-cn-1' };
 function python(code, data = base) {
-  const result = spawnSync('python3', ['-c', 'import os,sys,json,pathlib,time\nd=json.loads(sys.stdin.read())\n' + treePython + code], { input: JSON.stringify(data), encoding: 'utf8' });
+  const result = spawnSync('python3', ['-c', 'import os,sys,json,pathlib,time\nd=json.loads(sys.stdin.read())\n' + treePython + 'fixture_filesystem=tree_filesystem\ntree_filesystem=lambda root:str(root)\n' + code], { input: JSON.stringify(data), encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
   return JSON.parse(result.stdout);
 }
@@ -62,6 +62,8 @@ try {
   assert.equal(partial[0].score, 147); assert.equal(partial[1].scoreMode, 'space');
   const floors = score({ [root]: 72, [secondary]: 39 }, {});
   assert.ok(floors.every(row => !row.eligible));
+  const sharedDisk = python("tree_filesystem=fixture_filesystem\ntree_disk_sample=lambda roots:{}\nos.statvfs=lambda p:__import__('types').SimpleNamespace(f_bavail=110*TREE_GIB,f_frsize=1)\nprint(json.dumps(tree_scores(d)))", { ...base, treeReservations: { [root]: 20, [secondary]: 20 } });
+  assert.ok(sharedDisk.every(row => row.floorGiB === 53 && row.reservedGiB === 40 && !row.eligible), 'shared filesystem uses strongest floor and combined reservations');
   const denied = spawnSync('python3', ['-c', 'import os,sys,json,pathlib,time\nd=json.loads(sys.stdin.read())\n' + treePython + `tree_scores=lambda d:${JSON.stringify(floors).replaceAll('false', 'False').replaceAll('null', 'None')}\nprint(json.dumps(tree_place(d)))`], { input: JSON.stringify(base), encoding: 'utf8' });
   assert.equal(denied.status, 72); assert.ok(!fs.existsSync(path.join(root, 'wt-map.json')));
   const devices = path.join(temp, 'devices'); fs.mkdirSync(devices);
@@ -142,6 +144,22 @@ try {
   const foreignPlace = spawnSync('python3', ['-c', 'import os,sys,json,pathlib,time\nd=json.loads(sys.stdin.read())\n' + treePython + 'print(json.dumps(tree_place(d)))'], { input: JSON.stringify(base), encoding: 'utf8' });
   assert.notEqual(foreignPlace.status, 0); assert.ok(fs.existsSync(kept.workspace));
   console.log('PASS live-lease disk reservations, returned/replaced-owner release and foreign existing-tree rejection');
+  const concurrentRoot = path.join(temp, 'concurrent'); fs.mkdirSync(concurrentRoot);
+  const concurrentBase = { ...base, root: concurrentRoot, treeConfig: { ...config, extraRoots: [] } };
+  const concurrentCode = 'import os,sys,json,pathlib,time\nd=json.loads(sys.stdin.read())\n' + treePython + "tree_disk_sample=lambda roots:{}\nos.statvfs=lambda p:__import__('types').SimpleNamespace(f_bavail=94*TREE_GIB,f_frsize=1)\nprint(json.dumps(tree_place(d)))";
+  const placements = await Promise.all(Array.from({ length: 8 }, (_, i) => new Promise((resolve, reject) => {
+    const slot = 'devbox-cn-' + (100 + i), child = spawn('python3', ['-c', concurrentCode], { stdio: ['pipe', 'pipe', 'pipe'] });
+    let stdout = '', stderr = '';
+    child.stdout.on('data', bytes => { stdout += bytes; }); child.stderr.on('data', bytes => { stderr += bytes; }); child.on('error', reject);
+    child.on('close', status => resolve({ status, stdout, stderr, slot }));
+    child.stdin.end(JSON.stringify({ ...concurrentBase, slot, store: 'id-concurrent-' + i, heldTreeOwners: { [slot]: 'owner-' + i } }));
+  })));
+  assert.equal(placements.filter(row => row.status === 0).length, 2, 'concurrent stale inventories cannot overcommit 41 GiB of surplus');
+  assert.ok(placements.every(row => row.status === 0 || row.status === 72), JSON.stringify(placements));
+  const concurrentMap = JSON.parse(fs.readFileSync(path.join(concurrentRoot, 'wt-map.json')));
+  assert.equal(Object.keys(concurrentMap.slots).length, 2, 'different repository locks preserve every admitted map update');
+  assert.equal(Object.values(concurrentMap.slots).flatMap(entries => Object.values(entries)).reduce((sum, entry) => sum + entry.reserveGiB, 0), 40);
+  console.log('PASS concurrent cross-repository placement, stale hold snapshots, atomic map updates and filesystem budgets');
   const mappedTree = coldTree('devbox-cn-20', root), duplicate = coldTree('devbox-cn-20', secondary);
   const mapped = JSON.parse(fs.readFileSync(path.join(root, 'wt-map.json'))); mapped.slots['devbox-cn-20'] = { 'fixture/id-fixture': { treeRoot: root } };
   fs.writeFileSync(path.join(root, 'wt-map.json'), JSON.stringify(mapped));

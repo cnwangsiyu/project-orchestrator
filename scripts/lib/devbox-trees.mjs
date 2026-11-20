@@ -144,15 +144,25 @@ def tree_disk_sample(roots):
         except (OSError,ValueError,IndexError,KeyError): pass
     return result
 
+def tree_filesystem(root):
+    while not root.exists(): root=root.parent
+    return root.stat().st_dev
+
 def tree_scores(d):
     roots=tree_roots(d); io=tree_disk_sample(roots); rows=[]
+    devices={str(root):tree_filesystem(root) for root,_ in roots}
+    floors={}; reservations={}
+    for root,floor in roots:
+        device=devices[str(root)]
+        floors[device]=max(floors.get(device,0),floor)
+        reservations[device]=reservations.get(device,0)+d.get('treeReservations',{}).get(str(root),0)
     # If any backing device is unknown, compare all roots using space alone.
     complete=all(str(root) in io for root,_ in roots)
     for root,floor in roots:
         ancestor=root
         while not ancestor.exists(): ancestor=ancestor.parent
         disk=os.statvfs(ancestor); free=disk.f_bavail*disk.f_frsize/TREE_GIB
-        reserved=d.get('treeReservations',{}).get(str(root),0)
+        floor=floors[devices[str(root)]]; reserved=reservations[devices[str(root)]]
         surplus=max(0,free-floor-reserved); headroom=1-io[str(root)]['busyFraction'] if complete else 1
         rows.append({'root':str(root),'freeGiB':free,'floorGiB':floor,'reserveGiB':d['treeConfig']['reserveGiB'],
                      'reservedGiB':reserved,'surplusGiB':surplus,'io':io.get(str(root)),'ioHeadroom':headroom,'score':surplus*headroom,
@@ -210,7 +220,7 @@ def tree_place(d):
                'owner':d.get('heldTreeOwners',{}).get(slot),'reserveUntil':time.time()+14400 if state=='cold-new' else 0}
         record['slots'].setdefault(slot,{})[identity]=entry; tree_map_write(primary,record)
         return {'treeRoot':str(root),'workspace':str(ws),'treeState':state,'placementScores':scores,
-                'floorGiB':next(floor for p,floor in roots if p==root)}
+                'floorGiB':max(floor for p,floor in roots if tree_filesystem(p)==tree_filesystem(root))}
 
 def tree_release(d):
     primary=pathlib.Path(d['root']); tree_roots(d)

@@ -1212,6 +1212,8 @@ Secondary roots own only `wt/<project>/id-<repository>/<slot>/`. Existing trees
 never move or rescore; foreign/partial trees fail closed. New-tree score is
 `max(0, freeGiB - floorGiB - liveNewTreeReservations) * (1 - diskBusyFraction)`.
 A root needs at least the configured reserve above its floor/reservations.
+Roots sharing a filesystem use the largest configured floor and the combined
+new-tree reservations for that filesystem; directory aliases do not add capacity.
 Device busy time comes from two `/sys/dev/block/MAJOR:MINOR/stat` reads about
 one second apart; partitions use their parent disk. If any device is unknown,
 all roots use space alone. This is observed busy time, not benchmark IOPS or

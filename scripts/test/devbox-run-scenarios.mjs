@@ -123,7 +123,7 @@ if(c.assertLegacyWire&&op!=='upload'){
  if(!command.includes('python3 -c '+quote(c.legacyScripts[op])+' '))throw Error('disabled configuration changed SSH script: '+op);
 }
 if(op==='tree-place'&&c.treeFree){
- const setup="original_statvfs=os.statvfs\ndef fixture_statvfs(p):\n    free="+JSON.stringify(c.treeFree)+"\n    name='primary' if str(p)==d['root'] else 'secondary'\n    return __import__('types').SimpleNamespace(f_bavail=free[name]*1073741824,f_frsize=1)\nos.statvfs=fixture_statvfs\ntree_disk_sample=lambda roots:{}\n";
+ const setup="original_statvfs=os.statvfs\ndef fixture_statvfs(p):\n    free="+JSON.stringify(c.treeFree)+"\n    name='primary' if str(p)==d['root'] else 'secondary'\n    return __import__('types').SimpleNamespace(f_bavail=free[name]*1073741824,f_frsize=1)\nos.statvfs=fixture_statvfs\ntree_disk_sample=lambda roots:{}\ntree_filesystem=lambda root:str(root)\n";
  const source=command.replace('print(json.dumps(tree_place(d)))',()=>setup.replaceAll("'","'\\''")+'print(json.dumps(tree_place(d)))');
  const result=cp.spawnSync('/bin/bash',['-c',source],{encoding:'utf8'});process.stdout.write(result.stdout);process.stderr.write(result.stderr);process.exit(result.status);
 }
