@@ -293,6 +293,7 @@ official API only; never print/copy/export/relocate key material. Missing login/
 never a session transplant or permission laundering through another worker. Never put internal
 code, logs or private material into public search queries. Full injected wording lives in
 [the digest](references/global-rules.md#worker-rules).
+Synthetic test identities minted by the project's own fixtures for a loopback test service they start are test data (see global-rules).
 
 **Own-test signing** (user, 2026-11-13): only manifest/hash-registered packages in
 `~/.claude/orchestrator/_shared/user-signing/registry.json` and identities on the dated user-approved
