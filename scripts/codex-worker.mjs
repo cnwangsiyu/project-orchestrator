@@ -1267,8 +1267,10 @@ const report = async (threadId, turn, final, usage, observation = {}) => {
   }
   const resourceState = completionLeases({ ...tracker?.metadata(), by: opts.by, account: account ?? 'main', thread: threadId,
     project: opts.project ?? tracker?.metadata().project, task: opts.task ?? tracker?.metadata().task, name: opts.name });
-  const truncated = classifyCompletion({ turn, final, leases: resourceState.held, ...observation });
-  if (truncated) turn = { ...turn, status: truncated.status };
+  const completion = classifyCompletion({ turn, final, leases: resourceState.held, ...observation });
+  const truncated = completion?.status === 'TRUNCATED' ? completion : null;
+  const uncertain = completion?.status === 'uncertain' ? completion : null;
+  if (completion) turn = { ...turn, status: completion.status };
   if (PROF?.kind === 'ttadk' && turn.status === 'completed') outcomeInput = usage?.inputTokens;
   if (PROF?.kind === 'trae') saveQueue(PROF.home, threadId, { state: 'ready', turnId: turn.id, at: Date.now() });
   if (!actualModel || PROF?.kind === 'ttadk') observeModel(rolloutTurnModel(PROF?.home ?? process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex'),
@@ -1342,10 +1344,14 @@ const report = async (threadId, turn, final, usage, observation = {}) => {
     text: `TRUNCATED: ${truncated.reasons.join('; ')}. Reply tail: ${maskPasswordStyleValues(final ?? '').text.slice(-200) || '(none)'}. `
       + `Held leases: ${truncated.leases.map(lease => `${lease.id} by ${lease.holder} pid=${lease.pid}`).join(', ') || 'none'}${resourceState.complete ? '' : ' (lease metadata incomplete)'}. Continue: ${continuation}` },
     `truncated:${account}:${threadId}:${turn.id}`);
-  tracker?.result(truncated ? 'truncated' : rejectedModel ? 'failed' : /^(?:\S+\s+)?(?:BLOCKED|QUESTION)\b/.test(final?.trim() ?? '') ? 'needs-user'
+  if (uncertain && tracker?.owner) appendWorkerAlert({ ...tracker.metadata(), thread: threadId, turn: turn.id,
+    event: 'message', kind: 'info', wake: false,
+    text: `completion uncertain: ${uncertain.reasons.join('; ')}; inspect the recorded output` },
+    `completion-uncertain:${account}:${threadId}:${turn.id}`);
+  tracker?.result(truncated ? 'truncated' : uncertain ? 'observed' : rejectedModel ? 'failed' : /^(?:\S+\s+)?(?:BLOCKED|QUESTION)\b/.test(final?.trim() ?? '') ? 'needs-user'
     : turn.status === 'completed' ? 'finished' : 'failed', { thread: threadId, turn: turn.id, status: turn.status, mayRun: false,
       ...(truncated ? { mayRun: !!observation.unconfirmed, settled: !observation.unconfirmed, leases: truncated.leases, continuation } : {}),
-      reason: truncated ? truncated.reasons.join('; ') : rejectedModel ? 'review model rejected' : turn.status === 'completed' ? null : JSON.stringify(turn.error ?? turn.status),
+      reason: completion ? completion.reasons.join('; ') : rejectedModel ? 'review model rejected' : turn.status === 'completed' ? null : JSON.stringify(turn.error ?? turn.status),
       finalLine: maskPasswordStyleValues(final?.split('\n').find((line) => line.trim()) ?? '').text });
   const infrastructureMiss = (['trae','ttadk'].includes(PROF?.kind)&&failureKind(errorText)==='unavailable')||(PROF?.kind==='trae'&&/access (temporarily )?restricted|\b983\b/i.test(errorText));
   if (!(strictReviewModel && modelMismatch) && turn.status === 'failed' && ROUTE_ARGS && !BACKGROUND && !workStarted && !turnHasWork(turn) && !final
@@ -1357,7 +1363,7 @@ const report = async (threadId, turn, final, usage, observation = {}) => {
     }
     console.log('reroute-skipped: failed turn has work or its no-progress terminal state is unconfirmed');
   }
-  await finish(truncated ? TRUNCATED_EXIT : rejectedModel ? 5 : turn.status === 'completed' ? 0 : 1);
+  await finish(truncated ? TRUNCATED_EXIT : rejectedModel ? 5 : turn.status === 'completed' || uncertain ? 0 : 1);
 };
 // Stall alarm: no event for this turn in --stall-min minutes (default 30, 0 = off) ends the follower with exit 4 so the
 // orchestrator wakes up. The turn keeps running on the hub. A worker waiting on its own sub-agents can be quiet that long,

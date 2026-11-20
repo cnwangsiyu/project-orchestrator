@@ -83,8 +83,17 @@ try {
 
   const commentary = run({ messages: [{ method: 'item/completed', params: { threadId: 'guard-thread', turnId: 'guard-turn', item: item('The controller is', 'commentary') } }],
     terminal: { items: [item('The controller is', 'commentary')] } });
-  assert.match(truncated(commentary).reason, /commentary/);
-  console.log('PASS W511 pattern: a completed turn containing only commentary is TRUNCATED');
+  assert.equal(commentary.status, 0, commentary.stderr + commentary.stdout);
+  assert.equal(commentary.events.find(event => event.event === 'observed').status, 'uncertain');
+  assert.ok(commentary.events.some(event => event.kind === 'info' && !event.wake && /completion uncertain/.test(event.text)));
+  assert.equal(commentary.events.some(event => event.event === 'truncated'), false);
+  assert.equal(resolveTurnState({ account: 'fixture', thread: 'guard-thread', rows: commentary.events,
+    result: { thread: { turns: [completed] } }, alive: () => false }).turn.status, 'uncertain');
+  const summaryCommentary = run({ messages: [{ method: 'item/completed', params: {
+    threadId: 'guard-thread', turnId: 'guard-turn', item: item('Complete reply.', 'commentary') } }], terminal: { items: [] } });
+  assert.equal(summaryCommentary.status, 0, summaryCommentary.stderr + summaryCommentary.stdout);
+  assert.equal(summaryCommentary.events.find(event => event.event === 'observed').status, 'uncertain');
+  console.log('PASS commentary phase alone reports uncertain with an info note and normal exit');
 
   for (const holder of ['worker-holder', 'codex:guard-thread']) {
     const result = run({}, { lease: holder });
@@ -104,8 +113,8 @@ try {
   const emptyHistory = run({ status: 'completed', historyItems: [[]] }, { wait: true });
   assert.equal(emptyHistory.status, 0, emptyHistory.stderr + emptyHistory.stdout);
   const recoveredCommentary = run({ status: 'completed', historyItems: [[], [item('The controller is', 'commentary')]] }, { wait: true });
-  assert.equal(recoveredCommentary.status, TRUNCATED_EXIT, recoveredCommentary.stderr + recoveredCommentary.stdout);
-  assert.match(recoveredCommentary.events.find(event => event.event === 'truncated').reason, /commentary/);
+  assert.equal(recoveredCommentary.status, 0, recoveredCommentary.stderr + recoveredCommentary.stdout);
+  assert.equal(recoveredCommentary.events.find(event => event.event === 'observed').status, 'uncertain');
   const failed = run({ failure: 'synthetic provider failure', messages: [] }); assert.equal(failed.status, 1);
   assert.equal(failed.events.some(event => event.event === 'truncated'), false);
   console.log('PASS normal completion, legacy final items, completed wait reattachment, and provider failures retain existing paths');
@@ -128,26 +137,28 @@ try {
     'a live completed turn must supply a completed final item');
   assert.ok(classifyCompletion({ turn: { ...completed, items: [] }, leases: [{ id: 'held' }] }));
   assert.ok(classifyCompletion({ turn: { ...completed, status: 'failed', stop_reason: 'length' }, final }));
-  assert.ok(classifyCompletion({ turn: { ...completed, items: [item(), item('cut off', 'commentary')] }, final }));
+  assert.equal(classifyCompletion({ turn: { ...completed, items: [item(), item('Complete reply.', 'commentary')] }, final }).status, 'uncertain');
+  assert.equal(classifyCompletion({ turn: { ...completed, items: [item('Done.\nWORKER-END', 'commentary')] },
+    final: 'Done.\nWORKER-END', requiredMarker: 'WORKER-END' }), null);
   evidence.observe({ method: 'item/agentMessage/delta', params: { itemId: 'next-final', delta: 'cut off' } });
   assert.ok(classifyCompletion({ turn: completed, evidence: evidence.snapshot(), final }));
   assert.match(classifyCompletion({ turn: completed, final, requiredMarker: 'WORKER-END' }).reasons.join(';'), /marker/);
   assert.equal(classifyCompletion({ turn: completed, final: final + '\nWORKER-END', requiredMarker: 'WORKER-END' }), null);
-  const event = commentary.events.find(event => event.event === 'truncated');
-  const printed = eventLine({ ...commentary.events.find(event => event.alertId?.startsWith('truncated:')),
+  const event = earlyComplete.events.find(event => event.event === 'truncated');
+  const printed = eventLine({ ...earlyComplete.events.find(event => event.alertId?.startsWith('truncated:')),
     text: 'delivery skipped finished' });
   assert.match(printed, /^\[truncated\]/); assert.doesNotMatch(printed, /deliver|skip|finish/i);
   assert.match(eventLine(event), /^\[truncated\]/);
   assert.match(hookEventLine(event), /^\[truncated\]/); assert.doesNotMatch(hookEventLine(event), /deliver|skip|finish/i);
   assert.equal(terminalWorker(event), true);
   assert.equal(classifyCompletion({ turn: { ...completed, status: 'TRUNCATED', reason: event.reason }, final }).status, 'TRUNCATED');
-  assert.equal(resolveTurnState({ account: 'fixture', thread: 'guard-thread', rows: commentary.events,
+  assert.equal(resolveTurnState({ account: 'fixture', thread: 'guard-thread', rows: earlyComplete.events,
     result: { thread: { turns: [{ ...completed, id: event.turn }] } }, alive: () => false }).turn.status, 'TRUNCATED');
   const display = spawnSync(process.execPath, [path.join(scripts, 'quota.mjs'), '--running', '--json'], {
-    env: commentary.env, encoding: 'utf8', timeout: 5000 });
+    env: earlyComplete.env, encoding: 'utf8', timeout: 5000 });
   assert.equal(display.status, 0, display.stderr);
   assert.equal(JSON.parse(display.stdout).truncated[0].status, 'TRUNCATED');
-  const priorShared = process.env.RULES_SHARED; process.env.RULES_SHARED = commentary.dir;
+  const priorShared = process.env.RULES_SHARED; process.env.RULES_SHARED = earlyComplete.dir;
   assert.ok(readEventHistory().some(row => row.status === 'TRUNCATED'));
   if (priorShared === undefined) delete process.env.RULES_SHARED; else process.env.RULES_SHARED = priorShared;
   console.log('PASS marker checking stays opt-in; local TRUNCATED overrides hub completed and appears in quota/history');

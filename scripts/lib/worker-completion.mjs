@@ -11,19 +11,21 @@ const stopFields = ['finish_reason', 'finishReason', 'stop_reason', 'stopReason'
 const stoppedAtLimit = object => object && (stopFields.some(field => lengthStop(object[field]))
   || ['response', 'metadata', 'result', 'error'].some(field => object[field] && stopFields.some(name => lengthStop(object[field][name]))));
 export function completionEvidence(items = []) {
-  let completedFinal = finalItem(items.filter(item => item?.type === 'agentMessage').at(-1)), pendingFinal = false, pendingItemId = null, limit = false;
+  let completedAgent = items.filter(item => item?.type === 'agentMessage').at(-1);
+  let completedFinal = finalItem(completedAgent), pendingFinal = false, pendingItemId = null, limit = false;
   return {
     observe(message) {
       const params = message.params ?? {}, item = params.item;
       if (message.method === 'item/agentMessage/delta') { pendingFinal = true; pendingItemId = params.itemId; }
       if (message.method === 'item/started' && item?.type === 'agentMessage') { pendingFinal = true; pendingItemId = item.id; }
       if (message.method === 'item/completed' && item?.type === 'agentMessage') {
+        completedAgent = item;
         completedFinal = finalItem(item); pendingFinal = false;
         if (stoppedAtLimit(item)) limit = true;
       }
       if (stoppedAtLimit(params) || stoppedAtLimit(params.turn)) limit = true;
     },
-    snapshot() { return { completedFinal, pendingFinal, pendingItemId, limit }; },
+    snapshot() { return { completedFinal, completedAgent, pendingFinal, pendingItemId, limit }; },
   };
 }
 export function completionLeases({ by, account, thread, pid, project, task, name,
@@ -43,17 +45,20 @@ export function classifyCompletion({ turn, evidence, live = false, completedEven
   const reasons = [];
   if (stoppedAtLimit(turn) || evidence?.limit) reasons.push('transport stop reason reached output limit');
   const items = turn.items ?? [];
-  const lastAgent = items.filter(item => item?.type === 'agentMessage').at(-1);
-  const availableFinal = evidence?.completedFinal || finalItem(lastAgent);
-  if (live && !completedEvent && (unconfirmed || !availableFinal))
+  const lastAgent = items.filter(item => item?.type === 'agentMessage').at(-1) ?? evidence?.completedAgent;
+  const markerComplete = requiredMarker && final.trimEnd().split(/\r?\n/).at(-1) === requiredMarker;
+  const availableFinal = evidence?.completedFinal || finalItem(lastAgent) || markerComplete;
+  if (live && !completedEvent && unconfirmed)
     reasons.push('stream ended without turn-completed event');
   const pendingCovered = finalItem(lastAgent) && (!evidence?.pendingItemId || lastAgent.id === evidence.pendingItemId);
   // Historical hub views may omit all items. Absence in that view is unknown;
   // a live stream or an explicit agent item supplies evidence we can classify.
-  if (evidence?.pendingFinal && !pendingCovered || !availableFinal && (live || lastAgent))
+  if (evidence?.pendingFinal && !pendingCovered || !availableFinal && live && !lastAgent)
     reasons.push('no completed final agent item (commentary is not a final reply)');
   if (requiredMarker && final.trimEnd().split(/\r?\n/).at(-1) !== requiredMarker) reasons.push('required final marker missing');
   if (leases.length) reasons.push('worker still holds res leases');
+  if (!reasons.length && !availableFinal && lastAgent)
+    return { status: 'uncertain', reasons: ['completed commentary-phase reply has no contractual final evidence'], leases: [] };
   return reasons.length ? { status: 'TRUNCATED', reasons, leases: leases.map(({ id, holder, pid }) => ({ id, holder, pid })) } : null;
 }
 export function continuationCommand({ script, account, thread, owner, out, log }) {
