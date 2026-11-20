@@ -1947,7 +1947,7 @@ async function collectGarbage({ rows, days = 7, host, state, emit = text => proc
         // Inventory is rechecked by gc AFTER leasing. GC itself gets the same supervisor.
         checked(await ssh(row, 'inspect', { root, control, reuseAllowed: false, repository: item.repository || `${root}/repos/.gc-unused`, commit: '0'.repeat(40) }, { state }), 'GC preparation');
         const op = item.maintenance ? 'maintenance' : 'gc';
-        const result = await ssh(row, 'run', { workspace: root, control, command: remoteCommand(op, treeScript(op, remoteScripts[op], pythonHeader, data), data), env: {}, seconds: 120 }, { state, timeout: 140000, onOutput: emit });
+        const result = await ssh(row, 'run', { workspace: root, control, slot: member.slot, command: remoteCommand(op, treeScript(op, remoteScripts[op], pythonHeader, data), data), env: {}, seconds: 120 }, { state, timeout: 140000, onOutput: emit });
         const cleanup = await ssh(row, 'cleanup', { control, started: true }, { state, cancellable: false, timeout: 35000 });
         clean = cleanup.code === 0 && cleanup.stdout.includes('group-gone');
         if (!clean) throw Error(`BLOCKED: GC cleanup unconfirmed; retaining ${member.slot}`);

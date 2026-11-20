@@ -695,7 +695,7 @@ os.kill(pid,0)`;
     execFileSync('python3',['-c',verifyGate,String(other.pid)],{input:remoteScripts.run});
     if (process.platform === 'linux') {
       const active = path.join(f.dir,'linux-supervisor'); fs.mkdirSync(active);
-      const data = { control:active, workspace:f.dir, seconds:5, env:{},
+      const data = { control:active, workspace:f.dir, slot:'devbox-cn-1', seconds:5, env:{},
         command:'sleep 120 & echo $! > owned-background; exit 7' };
       const result = spawnSync('python3',['-c',remoteScripts.run,Buffer.from(JSON.stringify(data)).toString('base64')],{timeout:20000});
       assert.equal(result.status,7,result.stderr?.toString());
@@ -714,7 +714,7 @@ os.kill(pid,0)`;
       assert.ok(!fs.existsSync(path.join(ctl, 'cancel')), 'read-only reconnect must never cancel a process');
       const streamControl = path.join(f.dir, 'linux-stream-drop'); fs.mkdirSync(streamControl);
       const stream = spawn('python3', ['-c', remoteScripts.run, Buffer.from(JSON.stringify({
-        control: streamControl, workspace: f.dir, seconds: 5, env: {}, stream: true,
+        control: streamControl, workspace: f.dir, slot:'devbox-cn-1', seconds: 5, env: {}, stream: true,
         command: 'echo before-drop; sleep 0.5; echo after-drop; exit 3',
       })).toString('base64')], { stdio: ['ignore', 'pipe', 'pipe'] });
       let delivered = Buffer.alloc(0);
