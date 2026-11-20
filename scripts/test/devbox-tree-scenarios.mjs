@@ -178,9 +178,11 @@ try {
   assert.ok(fs.existsSync(mappedTree.workspace));
   assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'wt-map.json'))).slots['devbox-cn-20']['fixture/id-fixture'].treeRoot, root);
 
-  // land-7 wire snapshots include the prerequisite Linux I/O metrics change.
+  // Preserve the land-7 non-run wire baseline; pin the intentional cleanup fixes to run separately.
   const hash = value => createHash('sha256').update(value).digest('hex');
-  assert.equal(hash(JSON.stringify(remoteScripts)), '0214faba6b8e8a7a90e9039747511f3e183467c255b3a20c6f773878326609ed', 'all legacy remote scripts unchanged from land-7');
+  const nonRun = Object.fromEntries(Object.entries(remoteScripts).filter(([operation]) => operation !== 'run'));
+  assert.equal(hash(JSON.stringify(nonRun)), '2c8b894cd5b2479b37c29cfe4a1b472c7d62d379d5c7293ac716628a89a76d10', 'all 33 non-run remote scripts unchanged from land-7');
+  assert.equal(hash(remoteScripts.run), '07948f0c3e9e64e7b9b855cbdb52ac6ba1efd1d12ebf4fbb263a08338e843ccb', 'run wire snapshot includes the cleanup liveness and warning fixes');
   for (const [operation, source] of Object.entries(remoteScripts)) assert.equal(treeScript(operation, source, '', {}), source, 'legacy script unchanged: ' + operation);
   const scripts = fileURLToPath(new URL('../', import.meta.url));
   for (const operation of ['inspect', 'checkout', 'run', 'input-map', 'inputs-ready', 'dead-slot']) {
