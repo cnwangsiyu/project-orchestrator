@@ -62,6 +62,7 @@ import { noteFailure, noteSuccess, notePolicyRestriction, rememberThreadModel, t
 import { createQueueRecorder } from './lib/company-load.mjs';
 import { saveQueue, readQueue } from './lib/worker-queue.mjs';
 import { loadDigest, workerInstructions, auditLaunch, rulesLog, rulesShared } from './lib/global-rules.mjs';
+import { assertExclusiveNewThread } from './lib/personal-launch-admission.mjs';
 import { activeClaudeWorkers, pushWorkerRules, rememberWorkerRules, workerRulesLabel } from './lib/worker-rules-push.mjs';
 import { isPolicyBlock, policyBlockRecord, appendPolicyBlock, policyBlockAction } from './lib/policy-block.mjs';
 import { runHubForeground, hubListReachable } from './lib/hub-foreground.mjs';
@@ -444,6 +445,11 @@ const auditStart = (model=opts.model,sandbox=opts.sandbox,continued) => {
   try {return auditLaunch({ name: opts.name??continued?.name, continuation:continued?.thread, project:opts.project??(ROUTE_ARGS&&routeFlag(ROUTE_ARGS,'project'))??undefined,
     account:account??'main',model,effort:opts.effort,sandbox,userOK:opts['user-ok'],role:opts.role,seat:routedMetadata});}
   catch(e) {die(e.message,e.exitCode??1);}
+};
+const checkNewThreadAdmission = () => {
+  try { assertExclusiveNewThread({ account: account ?? 'main', profiles: { [account ?? 'main']: PROF },
+    shared: rulesShared(), name: opts.name }); }
+  catch (error) { die(error.message, error.exitCode ?? 1); }
 };
 const talkbackContext = (thread) => {
   const state = tracker.metadata();
@@ -1808,6 +1814,7 @@ try {
     const digest = loadDigest();
     const rulesVersion = rememberWorkerRules(digest);
     tracker?.set({ rulesVersion });
+    checkNewThreadAdmission();
     const th = await call('thread/start', {
       cwd: path.resolve(opts.cwd), model: opts.model, sandbox: opts.sandbox, approvalPolicy: APPROVAL_POLICY,
       developerInstructions: [browserHowTo, projectWorkerInstructions(digest), reviewHowTo].filter(Boolean).join('\n'),

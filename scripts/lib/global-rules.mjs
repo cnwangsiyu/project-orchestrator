@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { modelId, company } from './pipeline/common.mjs';
 import { modelFamily } from './worker-model.mjs';
+import { assertExclusiveNewThread } from './personal-launch-admission.mjs';
 
 export const SKILL_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 export const rulesShared = () => process.env.RULES_SHARED || path.join(process.env.ORCH_ROOT || path.join(os.homedir(), '.claude/orchestrator'), '_shared');
@@ -76,15 +77,20 @@ export const auditLaunch = ({ name, project, account, model, effort, vendor = 'c
     routeId:decision?.routeId??supplied?.routeId??null,role,userOK:typeof userOK==='string'?userOK:typeof approvalRef==='string'?approvalRef:null,
     routeApprovalRef:typeof approvalRef==='string'?approvalRef:null,routed:expected??null };
   const mismatch=compareLaunch(expected,base,profiles);
-  const blocked=!!mismatch?.companyToPersonal&&!(typeof approvalRef==='string'&&approvalRef.trim());
+  let admissionError;
+  try { assertExclusiveNewThread({ account: account ?? 'main', vendor, continuation, profiles, shared: rulesShared(), name }); }
+  catch (error) { admissionError = error; }
+  const blocked=!!admissionError||!!mismatch?.companyToPersonal&&!(typeof approvalRef==='string'&&approvalRef.trim());
   if(mismatch) process.stderr.write(`launch-mismatch: ${name??'(unnamed)'} ${mismatch.differences.map(d=>`${d.field} ${d.routed} -> ${d.actual}`).join('; ')}${blocked?'; re-route or pass the approval recorded on the route decision':''}\n`);
   if (!expected && !continuation) process.stderr.write(`unrouted-launch: ${name ?? '(unnamed)'} ${account ?? '?'} ${model ?? '?'}; route it first\n`);
   try {
     fs.mkdirSync(path.dirname(log), { recursive: true });
     const rows = [...(!expected && !continuation ? [{ kind: 'unrouted', ...base }] : []),
-      ...(mismatch?[{kind:'launch-mismatch',...base,...mismatch,blocked}]:[]),{ kind: 'launch', ...base,blocked,...(continuation?{continuation}:{}) }];
+      ...(mismatch?[{kind:'launch-mismatch',...base,...mismatch,blocked}]:[]),{ kind: 'launch', ...base,blocked,
+        ...(admissionError ? { admissionReason: admissionError.code } : {}), ...(continuation?{continuation}:{}) }];
     fs.appendFileSync(log, rows.map((row) => JSON.stringify(row)).join('\n') + '\n');
   } catch { process.stderr.write('launch-audit: route log unavailable; launch evidence not recorded\n'); }
+  if(admissionError) throw admissionError;
   if(blocked) throw Object.assign(Error('Personal account replaces a company route without a recorded --user-ok reference; re-route or pass the approval recorded on the route decision.'),{code:'PERSONAL_ROUTE_APPROVAL_REQUIRED',exitCode:1});
   return decision??(supplied?{project:supplied.project,category:supplied.category,pick:supplied}:null);
 };

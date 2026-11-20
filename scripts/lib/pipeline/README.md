@@ -59,6 +59,11 @@ exclusive mode. The existing prefer-first command remains supported.
 Fresh readings at 90% emit `[personal-main-90]` once per reset window through
 the durable owner inbox. Dry routing previews emit no notices. Reset cards
 remain manual.
+New Codex threads recheck the current exclusive window at launch audit and
+immediately before `thread/start`; saved primary or reviewer routes from before
+activation cannot admit b. Main requires fresh public quota metadata and 5%
+headroom at that boundary. Refusals require re-routing; existing b threads may
+continue.
 
 `--actual vendor:model:effort[@account]` supplies sanitized actual attempt evidence.
 An omitted account stays UNKNOWN while its explicit model/effort floor remains
