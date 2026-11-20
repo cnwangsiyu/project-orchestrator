@@ -93,6 +93,10 @@ try {
     threadId: 'guard-thread', turnId: 'guard-turn', item: item('Complete reply.', 'commentary') } }], terminal: { items: [] } });
   assert.equal(summaryCommentary.status, 0, summaryCommentary.stderr + summaryCommentary.stdout);
   assert.equal(summaryCommentary.events.find(event => event.event === 'observed').status, 'uncertain');
+  const uncertainWait = run({ status: 'uncertain', historyItems: [[item('Complete commentary reply.', 'commentary')]] }, { wait: true });
+  assert.equal(uncertainWait.status, 0, uncertainWait.stderr + uncertainWait.stdout);
+  assert.equal(uncertainWait.events.find(event => event.event === 'observed').status, 'uncertain');
+  assert.equal(uncertainWait.rpc.some(rpc => rpc.method === 'turn/start'), false);
   console.log('PASS commentary phase alone reports uncertain with an info note and normal exit');
 
   for (const holder of ['worker-holder', 'codex:guard-thread']) {

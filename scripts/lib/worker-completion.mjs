@@ -40,6 +40,8 @@ export function classifyCompletion({ turn, evidence, live = false, completedEven
   requiredMarker = null, final = '' }) {
   if (turn.status === 'TRUNCATED') return { status: 'TRUNCATED', reasons: [turn.reason ?? 'previously classified truncated'],
     leases: leases.map(({ id, holder, pid }) => ({ id, holder, pid })) };
+  if (turn.status === 'uncertain') return { status: 'uncertain',
+    reasons: [turn.reason ?? 'previously classified uncertain completion'], leases: [] };
   // Provider failures and owner interruptions retain their existing failure/cancellation paths.
   if (turn.status !== 'completed' && !(turn.status === 'failed' && (stoppedAtLimit(turn) || evidence?.limit))) return null;
   const reasons = [];
