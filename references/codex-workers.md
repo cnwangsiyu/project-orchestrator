@@ -6,6 +6,8 @@ Use this whenever `scripts/route.mjs` puts a task on Codex — mostly coding (im
 
 ## Launch, resume, follow
 
+Terminal network/stream errors report `transport-failed` (no quality attempt or retry floor); `start`/`turn`/`wait` issue one same-thread continuation after 60 seconds with `[transport-retry]` alerts, then stop with the exact manual command if it also fails. `--no-auto-continue`, held leases, exhausted/stalled lanes, or unconfirmed quota/state suppress it; repeated transport failures demote the lane for 30 minutes.
+
 Keep route.mjs's `run-tracked.sh` wrapper for one-shot execs; the raw examples below describe the underlying CLI,
 not a substitute for the durable launcher. Every worker is a tracked background task or covered by an armed
 owner watcher, never detached with `&`. See [worker inbox and owner identity](worker-inbox.md);
