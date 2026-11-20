@@ -773,8 +773,24 @@ def git(args):
     return subprocess.check_output(['git','-C',str(parent),*args],env=env)
 name=d['name']
 if git(['config','--file','.gitmodules','--get','submodule.'+name+'.path']).decode().rstrip('\\n')!=rel: raise ValueError('submodule mapping differs from pin')
+pin=d['commit']+'^{commit}'
+def has_pin(args):
+    return subprocess.run(['git',*args,'cat-file','-e',pin],env=env,
+                          stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0
+if not has_pin(['--git-dir='+store]):
+    raise ValueError('submodule store missing pin: '+d['commit']+' in '+store)
+# --reference only affects new clones. Legacy slot clones can still borrow
+# from an older store, so import the exact pin locally without changing config.
+child=parent/rel
+if (child/'.git').exists() and not has_pin(['-C',str(child)]):
+    try:
+        git(['-C',rel,'-c','gc.auto=0','fetch','--no-tags','--no-recurse-submodules',
+             '--no-write-fetch-head',store,d['commit']+':refs/devbox-run/'+d['commit']])
+    except subprocess.CalledProcessError as error:
+        raise RuntimeError('submodule slot pin import failed: '+d['commit']+' from '+store+' into '+str(child)) from error
+    if not has_pin(['-C',str(child)]):
+        raise ValueError('submodule slot missing imported pin: '+d['commit']+' in '+str(child))
 # Explicitly walk one level at a time so every nested clone has a local URL.
-# --reference makes future pins visible even in an existing slot clone.
 git(['-c','submodule.'+name+'.url='+store,'submodule','update','--init','--checkout','--no-fetch','--reference',store,'--',rel])
 if git(['-C',rel,'rev-parse','HEAD']).decode().strip()!=d['commit']: raise ValueError('submodule pin mismatch')
 `,
@@ -1534,9 +1550,20 @@ function normalizedOrigin(raw, repo) {
     : path.resolve(repo, raw).replace(/\.git$/, '');
 }
 
-export async function storeIdentity(repo, project, state) {
+export function submoduleOrigin(raw, parentOrigin, repo) {
+  if (!/^\.\.?\//.test(raw)) return raw;
+  parentOrigin ||= repo;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(parentOrigin))
+    return new URL(raw, parentOrigin.replace(/\/+$/, '') + '/').href;
+  const scp = /^((?:[^@/]+@)?[^/:]+:)(.+)$/.exec(parentOrigin);
+  return scp ? scp[1] + path.posix.normalize(path.posix.join(scp[2], raw))
+    : path.resolve(repo, parentOrigin, raw);
+}
+
+export async function storeIdentity(repo, project, state, originOverride) {
   let identity;
   if (project) identity = 'project:' + project;
+  else if (originOverride !== undefined) identity = 'origin:' + normalizedOrigin(originOverride, repo);
   else {
     const result = await execute('git', ['-C', repo, 'rev-parse', '--path-format=absolute', '--git-common-dir'], { state });
     const common = fs.realpathSync(checked(result, 'Git common directory').trim());
@@ -1574,7 +1601,7 @@ async function snapshot(opts, temp, state, ancestors = new Set(), parentObjects 
   const top = (await git(['rev-parse', '--show-toplevel'])).trim();
   if (fs.realpathSync(top) !== opts.repo) throw Error('--repo must be the repository root');
   const commit = (await git(['rev-parse', '--verify', '--end-of-options', `${opts.ref === 'worktree' ? 'HEAD' : opts.ref}^{commit}`])).trim();
-  const storeKey = await storeIdentity(opts.repo, opts.project, state);
+  const storeKey = await storeIdentity(opts.repo, opts.project, state, opts.identityOrigin);
   if (ancestors.has(storeKey + commit)) throw Error('recursive submodule cycle');
   opts.project ||= storeKey;
   const branch = opts.ref === 'HEAD' || opts.ref === 'worktree' ? (await git(['rev-parse', '--abbrev-ref', 'HEAD'])).trim() : opts.ref;
@@ -1640,7 +1667,19 @@ async function snapshot(opts, temp, state, ancestors = new Set(), parentObjects 
         if (!name || !relative || relative.split('/').some(part => !part || ['.', '..', '.git'].includes(part))) throw Error('invalid pinned submodule path');
         const repo = path.join(opts.repo, relative);
         if (!fs.existsSync(repo) || fs.realpathSync(repo) !== repo || !fs.existsSync(path.join(repo, '.git'))) throw Error('initialize local submodule: ' + relative);
-        const child = await snapshot({ repo, ref, submodules: true }, fs.mkdtempSync(path.join(temp, 'mod-')), state, new Set([...ancestors, storeKey + commit]), objectDirs);
+        const declared = (await git(['config', '--no-includes', '--blob', commit + ':.gitmodules', '--get', 'submodule.' + name + '.url'])).trim();
+        if (!declared) throw Error('pinned submodule URL is empty: ' + relative);
+        // A source worktree may clone from a local mirror. Identity follows the
+        // pinned declaration, not that worktree-specific remote.origin override.
+        let parentOrigin = opts.identityOrigin;
+        if (parentOrigin === undefined && /^\.\.?\//.test(declared)) {
+          const configured = await execute('git', ['-C', opts.repo, 'config', '--get', 'remote.origin.url'], { state, env: gitEnv });
+          if (configured.code === 0) parentOrigin = configured.stdout.trim();
+          else if (configured.code === 1) parentOrigin = opts.repo;
+          else checked(configured, 'parent submodule origin');
+        }
+        const identityOrigin = submoduleOrigin(declared, parentOrigin, opts.repo);
+        const child = await snapshot({ repo, ref, submodules: true, identityOrigin }, fs.mkdtempSync(path.join(temp, 'mod-')), state, new Set([...ancestors, storeKey + commit]), objectDirs);
         const { modules: nested, ...transfer } = child;
         modules.push({ ...transfer, name, relative, parent: '' }, ...nested.map(m => ({ ...m, parent: path.posix.join(relative, m.parent) })));
       }
@@ -2446,12 +2485,22 @@ async function shard(opts) {
         for (let uploadTry = 0; ; uploadTry++) {
           try {
             if (uploadTry) inspection = JSON.parse(checked(await ssh(row, 'inspect', data, { state }), 'retry inspection'));
-            const feed = async (source, target, info, counter) => {
-              if (info.present) return;
-              const bundle = await phases.measure('bundleCreation', () => makeBundle(source, info.known, state));
-              attempt[counter] = (attempt[counter] || 0) + fs.statSync(bundle).size;
-              try { checked(await phases.measure('bundleUpload', () => ssh(row, 'bundle', target, { inputFile: bundle, state, timeout: remaining() })), 'bundle upload'); }
-              finally { fs.unlinkSync(bundle); }
+            const feed = async (source, target, info, counter, verifyPin = false) => {
+              const upload = async known => {
+                const bundle = await phases.measure('bundleCreation', () => makeBundle(source, known, state));
+                attempt[counter] = (attempt[counter] || 0) + fs.statSync(bundle).size;
+                try { checked(await phases.measure('bundleUpload', () => ssh(row, 'bundle', target, { inputFile: bundle, state, timeout: remaining() })), 'bundle upload'); }
+                finally { fs.unlinkSync(bundle); }
+              };
+              if (!info.present) await upload(info.known);
+              if (!verifyPin) return;
+              const present = async () => JSON.parse(checked(await phases.measure('submodulePinVerify',
+                () => ssh(row, 'inspect', { ...target, reuseAllowed: false }, { state, timeout: remaining() })), 'submodule store verification')).present;
+              if (await present()) return;
+              attempt.submoduleFullRefeeds = (attempt.submoduleFullRefeeds || 0) + 1;
+              emit(`[shard ${opts.shard}] submodule store missing ${source.commit}; sending one full bundle\n`);
+              await upload([]);
+              if (!await present()) throw Error('submodule store missing pin after full refeed: ' + source.commit + ' in ' + target.repository);
             };
             await feed(opts.snapshot, data, inspection, 'bundleBytes');
             if (inspection.sameRefClean) break;
@@ -2465,7 +2514,7 @@ async function shard(opts) {
               const target = { ...data, repository: `${root}/repos/submodules/${mod.storeKey}`, commit: mod.commit,
                 relative: mod.relative, parent: mod.parent, name: mod.name };
               const info = inspection.modules[opts.snapshot.modules.indexOf(mod)];
-              await feed(mod, target, info, 'submoduleBundleBytes');
+              await feed(mod, target, info, 'submoduleBundleBytes', true);
               checked(await phases.measure('submoduleCheckout', () => ssh(row, 'submodule', target, { state, timeout: remaining() })), 'offline submodule update');
             }
             break;

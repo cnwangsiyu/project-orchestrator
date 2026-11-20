@@ -178,10 +178,11 @@ try {
   assert.ok(fs.existsSync(mappedTree.workspace));
   assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'wt-map.json'))).slots['devbox-cn-20']['fixture/id-fixture'].treeRoot, root);
 
-  // Preserve the land-7 non-run wire baseline; pin the intentional cleanup fixes to run separately.
+  // Preserve unrelated land-7 scripts; pin intentional run/submodule fixes separately.
   const hash = value => createHash('sha256').update(value).digest('hex');
-  const nonRun = Object.fromEntries(Object.entries(remoteScripts).filter(([operation]) => operation !== 'run'));
-  assert.equal(hash(JSON.stringify(nonRun)), '2c8b894cd5b2479b37c29cfe4a1b472c7d62d379d5c7293ac716628a89a76d10', 'all 33 non-run remote scripts unchanged from land-7');
+  const nonRun = Object.fromEntries(Object.entries(remoteScripts).filter(([operation]) => !['run', 'submodule'].includes(operation)));
+  assert.equal(hash(JSON.stringify(nonRun)), 'b60900e37f98c75361e0a0ab7f4fc803bf5574482f671c1c3cf8530cf937375e', 'all 32 unrelated remote scripts unchanged from land-7');
+  assert.equal(hash(remoteScripts.submodule), 'f07f6023f8d5d85580b9682135fd1d83250d8fe5ecc1402d2f0ce088c043407d', 'submodule snapshot includes offline legacy-clone pin import');
   assert.equal(hash(remoteScripts.run), '424595dc72f587dc006b623ce596f87626bbcd12804791a55a5132f17fa2d618', 'run wire snapshot includes the cleanup liveness and warning fixes');
   for (const [operation, source] of Object.entries(remoteScripts)) assert.equal(treeScript(operation, source, '', {}), source, 'legacy script unchanged: ' + operation);
   const scripts = fileURLToPath(new URL('../', import.meta.url));

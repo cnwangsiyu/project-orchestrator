@@ -607,11 +607,25 @@ takes precedence over a conflicting `--env` value.
 With `--submodules`, initialize the pinned repositories locally before running.
 The runner reads the gitlinks from the selected superproject commit and feeds
 each pin and its ancestors from local Git objects. Each box holds one bare
-store per submodule identity. Slot clones reference that store. Each level uses
+store per submodule identity, derived from the selected parent's pinned
+`.gitmodules` URL rather than a source clone's local-mirror origin. Relative
+nested URLs resolve against the parent's declared origin; equivalent SCP/SSH
+URL forms share a store. Slot clones reference that store. Each level uses
 a local URL and file-only Git transport. Uncommitted submodule changes and LFS
 objects are outside the snapshot. Attempt records include the superproject
 repository path and transferred bundle bytes (`submoduleBundleBytes` for modules,
 absent or zero on a warm run).
+
+`--reference` attaches alternates only when Git creates a clone. Before updating
+an existing slot clone, the runner verifies the pin in the currently selected
+bare store after feeding. A missing pin triggers one self-contained bundle
+refeed and a second verification; persistent absence stops preparation. It then
+imports an absent clone pin from that exact local store, with tags,
+recursive fetching and network protocols disabled. This also repairs legacy
+clones borrowing from an earlier store identity without modifying their origin,
+alternates or source repositories. Missing-store and failed-slot-import errors
+are distinguished before the command starts; a clean same-pin run still skips
+checkout and import entirely.
 
 A tracked registry-only `.npmrc` is accepted. The selected tree plus staged,
 modified and untracked worktree configuration are checked for credential

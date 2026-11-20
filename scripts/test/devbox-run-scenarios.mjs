@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { parseArgs, readRegistry, remoteScripts, storeIdentity, makeBundle, cpuBudget, cpuEnvironment, parseUnits, discoverUnits, assignUnits, planShards, runBudgets, commandOutcome, runDataCleanupPython } from '../devbox-run.mjs';
+import { parseArgs, readRegistry, remoteScripts, storeIdentity, submoduleOrigin, makeBundle, cpuBudget, cpuEnvironment, parseUnits, discoverUnits, assignUnits, planShards, runBudgets, commandOutcome, runDataCleanupPython } from '../devbox-run.mjs';
 
 import { makeSubmoduleFixture } from './devbox-submodule-fixture.mjs';
 import { fingerprint, inputKey, indexFile } from '../lib/devbox-inputs.mjs';
@@ -249,6 +249,10 @@ if(op==='inspect') {
  const result=cp.spawnSync('/bin/bash',['-c',command],{encoding:'utf8'});
  if(result.status){process.stderr.write(result.stderr);process.exit(result.status);}
  const info=JSON.parse(result.stdout);info.free=((c.diskFailHost===host || (c.diskAfterUpload===host && fs.existsSync(path.join(d.workspace,'.git'))))?40:100)*1024**3;
+ if(d.relative&&c.moduleVerifyMissing){
+  const marker=path.join(c.dir,'module-verify-missing');
+  if(c.moduleVerifyMissing==='always'||!fs.existsSync(marker)){fs.writeFileSync(marker,'observed');info.present=false;}
+ }
  console.log(JSON.stringify(info));return;
 }
 const child=cp.spawn('/bin/bash',['-c',command],{stdio:'inherit'});
@@ -1573,8 +1577,120 @@ async function treePlacementScenarios() {
   console.log('PASS absent/disabled config sends identical legacy Python SSH commands and no treeConfig payload');
 }
 
+async function submodulePinScenarios() {
+  const f = fixture(), pins = makeSubmoduleFixture(path.join(f.dir, 'pin-refresh'));
+  f.repo = pins.repo;
+  git(pins.repo, 'config', '--file', '.gitmodules', 'submodule.engine.url', 'git@unreachable.invalid:fleet/engine.git');
+  git(path.join(pins.repo, 'engine'), 'config', '--file', '.gitmodules', 'submodule.nested.url', '../leaf.git');
+  git(path.join(pins.repo, 'engine'), 'commit', '-qam', 'canonical nested origin');
+  git(pins.repo, 'commit', '-qam', 'canonical engine origin');
+  const initialCommand = 'test "$(cat engine/version)" = local-engine && test "$(cat engine/nested/payload)" = leaf';
+  const registry = path.join(f.shared, 'resources.tsv');
+  fs.writeFileSync(registry, fs.readFileSync(registry, 'utf8').replaceAll('bob@192.0.2.2', 'alice@192.0.2.1'));
+  const args = ['--submodules', '--shards', '2'];
+  const initial = await run(f, args, initialCommand); ok(initial); returned(f);
+  const roots = f.events().filter(event => event.op === 'checkout').map(event => event.workspace);
+  assert.equal(new Set(roots).size, 2);
+  const sources = [path.join(pins.repo, 'engine'), path.join(pins.repo, 'engine/nested')];
+  const stores = new Map();
+  for (const [index, root] of roots.entries()) {
+    for (const relative of ['engine', 'engine/nested']) {
+      const repo = path.join(root, relative);
+      const alt = git(repo, 'rev-parse', '--path-format=absolute', '--git-path', 'objects/info/alternates');
+      const store = path.dirname(fs.readFileSync(alt, 'utf8').trim());
+      stores.set(relative, store);
+      // Keep the old pin usable while replaying both generations of legacy clones.
+      git(repo, 'repack', '-a', '-d');
+      if (!index) fs.unlinkSync(alt);
+      else {
+        const stale = path.join(f.dir, 'stale-' + relative.replaceAll('/', '-'));
+        git(f.dir, 'clone', '--mirror', store, stale);
+        fs.writeFileSync(alt, path.join(stale, 'objects') + '\n');
+      }
+    }
+  }
+  function advance(value) {
+    fs.writeFileSync(path.join(sources[1], 'payload'), value);
+    git(sources[1], 'commit', '-qam', value);
+    fs.writeFileSync(path.join(sources[0], 'version'), value);
+    git(sources[0], 'commit', '-qam', value);
+    git(pins.repo, 'commit', '-qam', value);
+    return `test "$(git rev-parse HEAD)" = ${git(pins.repo, 'rev-parse', 'HEAD')} && test "$(git -C engine rev-parse HEAD)" = ${git(sources[0], 'rev-parse', 'HEAD')} && test "$(git -C engine/nested rev-parse HEAD)" = ${git(sources[1], 'rev-parse', 'HEAD')} && test "$(cat engine/version)" = ${value} && test "$(cat engine/nested/payload)" = ${value}`;
+  }
+  const command = advance('cached-pin');
+  for (const [index, relative] of ['engine', 'engine/nested'].entries()) {
+    const pin = git(sources[index], 'rev-parse', 'HEAD');
+    git(f.dir, '--git-dir=' + stores.get(relative), 'fetch', '--no-write-fetch-head', sources[index], pin + ':refs/devbox-run/' + pin);
+    for (const root of roots) assert.throws(() => git(path.join(root, relative), 'cat-file', '-e', pin + '^{commit}'));
+  }
+  const cached = await run(f, args, command); ok(cached); returned(f);
+  assert.ok(cached.summary.shards.every(shard => !(shard.attempts[0].submoduleBundleBytes || 0)), 'cached store pins need no bundle upload');
+  for (const root of roots) for (const [index, relative] of ['engine', 'engine/nested'].entries()) {
+    assert.equal(git(path.join(root, relative), 'rev-parse', 'HEAD'), git(sources[index], 'rev-parse', 'HEAD'));
+  }
+  const updates = f.events().filter(event => event.op === 'submodule').length;
+  ok(await run(f, args, command)); returned(f);
+  assert.equal(f.events().filter(event => event.op === 'submodule').length, updates, 'clean same-pin reuse stays upload/checkout-free');
+  // The caller origin can change from SSH to a local mirror without splitting stores.
+  git(sources[0], 'remote', 'set-url', 'origin', path.join(f.dir, 'local-mirror'));
+  const mirrored = await run(f, args, command); ok(mirrored); returned(f);
+  assert.ok(mirrored.summary.shards.every(shard => !(shard.attempts[0].submoduleBundleBytes || 0)));
+  assert.equal(f.events().filter(event => event.op === 'submodule').length, updates);
+  const moduleRoot = path.dirname([...stores.values()][0]);
+  const primary = JSON.parse(fs.readFileSync(path.join(f.shared, 'devbox-hosts.json')))['192.0.2.1'].root;
+  assert.equal(fs.realpathSync(moduleRoot), fs.realpathSync(path.join(primary, 'repos/submodules')), 'both real cases feed the primary-root store, not a slot-local cache');
+  assert.equal(fs.readdirSync(moduleRoot, { withFileTypes: true }).filter(entry => entry.isDirectory()).length, 2);
+  const canonical = await storeIdentity(sources[0], undefined, undefined, 'git@unreachable.invalid:fleet/engine.git');
+  assert.equal(path.basename(stores.get('engine')), canonical);
+  assert.equal(await storeIdentity(sources[0], undefined, undefined, 'ssh://git@UNREACHABLE.invalid/fleet/engine.git'), canonical);
+  assert.equal(submoduleOrigin('../leaf.git', 'git@unreachable.invalid:fleet/engine.git', pins.repo), 'git@unreachable.invalid:fleet/leaf.git');
+  assert.equal(submoduleOrigin('../leaf.git', 'ssh://git@unreachable.invalid/fleet/engine.git', pins.repo), 'ssh://git@unreachable.invalid/fleet/leaf.git');
+  assert.equal(submoduleOrigin('../leaf.git', '/fixtures/engine.git', pins.repo), '/fixtures/leaf.git');
+  assert.equal(submoduleOrigin('../leaf.git', undefined, '/fixtures/engine'), '/fixtures/leaf.git');
+  assert.equal(path.basename(stores.get('engine/nested')), await storeIdentity(sources[1], undefined, undefined, 'git@unreachable.invalid:fleet/leaf.git'));
+  const uploaded = await run(f, args, advance('uploaded-pin')); ok(uploaded); returned(f);
+  assert.ok(uploaded.summary.shards.some(shard => shard.attempts[0].submoduleBundleBytes > 0), 'new pins still use the bundle path');
+  const data = { workspace: roots[0], parent: '', relative: 'engine', name: 'engine', repository: stores.get('engine'), commit: 'f'.repeat(40) };
+  const invoke = () => spawnSync('python3', ['-c', remoteScripts.submodule, Buffer.from(JSON.stringify(data)).toString('base64')], { env: f.env, encoding: 'utf8' });
+  const before = git(path.join(roots[0], 'engine'), 'rev-parse', 'HEAD');
+  const absent = invoke();
+  assert.notEqual(absent.status, 0); assert.match(absent.stderr, /submodule store missing pin/);
+  assert.equal(git(path.join(roots[0], 'engine'), 'rev-parse', 'HEAD'), before);
+  advance('retry-pin');
+  data.commit = git(sources[0], 'rev-parse', 'HEAD');
+  git(f.dir, '--git-dir=' + data.repository, 'fetch', '--no-write-fetch-head', sources[0], data.commit + ':refs/devbox-run/' + data.commit);
+  git(roots[0], 'fetch', '--no-recurse-submodules', '--no-write-fetch-head', pins.repo, 'HEAD');
+  git(roots[0], 'reset', '--hard', git(pins.repo, 'rev-parse', 'HEAD'));
+  const clone = path.join(roots[0], 'engine');
+  const refLock = git(clone, 'rev-parse', '--path-format=absolute', '--git-path', 'refs/devbox-run/' + data.commit + '.lock');
+  fs.mkdirSync(path.dirname(refLock), { recursive: true }); fs.writeFileSync(refLock, 'fixture contention');
+  const failed = invoke();
+  assert.notEqual(failed.status, 0); assert.match(failed.stderr, /submodule slot pin import failed/);
+  assert.equal(git(clone, 'rev-parse', 'HEAD'), before);
+  fs.unlinkSync(refLock);
+  assert.equal(invoke().status, 0, 'retry after ref contention imports/checks out the pin');
+  assert.equal(invoke().status, 0, 'repeated import is idempotent');
+  f.config.moduleVerifyMissing = 'once';
+  fs.writeFileSync(path.join(f.dir, 'config.json'), JSON.stringify(f.config));
+  const recovered = await run(f, ['--submodules'], advance('refeed-pin')); ok(recovered); returned(f);
+  assert.equal(recovered.summary.shards[0].attempts[0].submoduleFullRefeeds, 1);
+  const blocked = fixture({ moduleVerifyMissing: 'always' });
+  const blockedPins = makeSubmoduleFixture(path.join(blocked.dir, 'modules')); blocked.repo = blockedPins.repo;
+  const missing = await run(blocked, ['--submodules'], blockedPins.command);
+  assert.notEqual(missing.code, 0); returned(blocked);
+  assert.match(missing.stdout + missing.stderr, /submodule store missing pin after full refeed/);
+  assert.equal(missing.summary.shards[0].attempts[0].submoduleFullRefeeds, 1);
+  assert.equal(blocked.events().filter(event => event.op === 'bundle').length, 3, 'parent, module, then one full module refeed');
+  assert.ok(!blocked.events().some(event => ['submodule', 'run'].includes(event.op)), 'unverified store never reaches checkout or command');
+  console.log('PASS cached and newly bundled nested pins refresh two legacy slot clones offline; canonical declarations survive mirror origins and relative nested URLs');
+  console.log('PASS missing store and failed slot import diagnostics preserve HEAD; retry and duplicate succeed');
+  console.log('PASS post-feed missing pin replays one full bundle; persistent failure never starts checkout or command');
+}
+
 async function scenarios() {
   const only = process.env.DEVBOX_TEST_CASE;
+  if (only === 'submodule-pin') { await submodulePinScenarios(); return; }
+  if (!only) await submodulePinScenarios();
   if (only === 'trees') { await treePlacementScenarios(); return; }
   if (only === 'readback') { await artifactDirectScenarios(); await artifactResumeScenarios(); return; }
   if (only === 'artifact-direct') { await artifactDirectScenarios(); return; }
