@@ -400,11 +400,8 @@ export const eventLine = (row, message = row.finalLine ?? firstLine(row.outFile)
   if (alertTag) {
     const detail = row.event === 'message' ? `worker ${clean(row.name ?? row.thread)} notes [${clean(row.kind)}]: ${clean(row.text, Infinity)}`
       : `worker ${clean(row.name ?? row.thread)} TRUNCATED ${clean(row.outFile)} ${clean(message)}`;
-    // Alert lines survive the owner's operational-noise filter. Persisted text
-    // and structured options retain the original wording and exact commands.
-    const printed = detail.replace(/unfinished/gi, 'incomplete').replace(/deliver\w*/gi, 'sent')
-      .replace(/skip\w*/gi, 'omitted').replace(/finish\w*/gi, 'complete');
-    return `[${alertTag}] ${printed}`;
+    // Filter by the leading tag. Commands, identifiers and paths stay verbatim.
+    return `[${alertTag}] ${detail}`;
   }
   if (row.event === 'answered') return `worker ${clean(row.name ?? row.thread)} answered: ${clean(row.questionText)} → ${clean(row.text)}`;
   if (row.event === 'message') return `worker ${clean(row.name ?? row.thread)} notes [${clean(row.kind)}]: ${clean(row.text, ['queue-stalled', 'quota-warning'].includes(row.kind) || row.alertId?.startsWith('truncated:') ? Infinity : 2000)}`;

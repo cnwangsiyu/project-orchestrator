@@ -119,8 +119,15 @@ try {
   }
   assert.ok(notice?.wake, output);
   const printed = eventLine({ ...notice, text: notice.text + ' delivery skipped finished' });
-  assert.match(printed, /^\[queue-stalled\]/); assert.doesNotMatch(printed, /deliver|skip|finish/i);
-  assert.match(hookEventLine(notice), /^\[queue-stalled\]/); assert.doesNotMatch(hookEventLine(notice), /deliver|skip|finish/i);
+  assert.match(printed, /^\[queue-stalled\]/); assert.ok(printed.endsWith(' delivery skipped finished'));
+  assert.match(hookEventLine(notice), /^\[queue-stalled\]/);
+  for (const option of notice.options) assert.ok(printed.includes(option.command));
+  const command = 'node /tmp/delivery/scripts/codex-worker.mjs --out /tmp/finished-review.out --log /tmp/delivery-review.log turn --thread skipped-worker';
+  for (const kind of ['queue-stalled', 'quota-warning']) {
+    const row = { event: 'message', kind, name: 'finished-worker', text: command };
+    assert.ok(eventLine(row).includes(command)); assert.ok(hookEventLine(row).includes(command));
+    assert.ok(eventLine(row).includes('finished-worker'));
+  }
   const queue = JSON.parse(fs.readFileSync(path.join(home, 'queue-status.json'), 'utf8'))['guard-thread'];
   assert.equal(queue.position, 1399); assert.equal(queue.modelQuotaLowPriority, true);
   const display = spawnSync(process.execPath, [path.join(scripts, 'quota.mjs'), '--running'], { env, encoding: 'utf8', timeout: 5000 });

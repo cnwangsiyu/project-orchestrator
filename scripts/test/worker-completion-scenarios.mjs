@@ -147,9 +147,11 @@ try {
   const event = earlyComplete.events.find(event => event.event === 'truncated');
   const printed = eventLine({ ...earlyComplete.events.find(event => event.alertId?.startsWith('truncated:')),
     text: 'delivery skipped finished' });
-  assert.match(printed, /^\[truncated\]/); assert.doesNotMatch(printed, /deliver|skip|finish/i);
+  assert.match(printed, /^\[truncated\]/); assert.ok(printed.includes('delivery skipped finished'));
   assert.match(eventLine(event), /^\[truncated\]/);
-  assert.match(hookEventLine(event), /^\[truncated\]/); assert.doesNotMatch(hookEventLine(event), /deliver|skip|finish/i);
+  assert.match(hookEventLine(event), /^\[truncated\]/);
+  const continuationText = 'Continue: node /tmp/delivery/codex-worker.mjs --out /tmp/finished-review.out --log /tmp/delivery-review.log turn --thread unfinished-worker';
+  assert.ok(eventLine({ ...earlyComplete.events.find(event => event.alertId?.startsWith('truncated:')), text: continuationText }).includes(continuationText));
   assert.equal(terminalWorker(event), true);
   assert.equal(classifyCompletion({ turn: { ...completed, status: 'TRUNCATED', reason: event.reason }, final }).status, 'TRUNCATED');
   assert.equal(resolveTurnState({ account: 'fixture', thread: 'guard-thread', rows: earlyComplete.events,

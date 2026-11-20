@@ -19,7 +19,7 @@ General worker rules currently specify no required ending marker. Proposed cutov
 
 `quota.mjs --running` shows `QUEUED position=<n>` for waiting and queued transport states, including low-priority buckets. Hard-task max escalations whose company model class is stalled/exhausted offer personal Astra at xhigh under the standing hard-task approval, explain that max was unavailable and list the stalled max alternatives. An executed max floor and personal max approval remain enforced; a failed personal quality step still needs its own repeat decision.
 
-Watcher and hook alert lines start with `[queue-stalled]`, `[quota-warning]` or `[truncated]`. Printed alert prose uses sent/omitted/complete wording so operational-noise filters retain it; the event ledger and structured options keep original text and exact commands.
+Watcher and hook alert lines start with `[queue-stalled]`, `[quota-warning]` or `[truncated]`. Filters use the leading tag; printed commands, identifiers, paths, and message text retain their original wording.
 Both launchers automatically redact `--log`, `--out` and the Codex rollout at turn end after hub-idle and two-second writer checks; counts and a non-waking info note are recorded, while manual `redact-log` remains available for other logs.
 
 With personal fallback enabled, a launched or continued turn queued longer than `queueWaitMinutes` (default 5), including a mid-turn re-queue, sends its owner a waking `queue-stalled` notice and keeps waiting. The threshold restarts at re-queue; events include phase, prior work minutes, queue minutes, position and drain. No automatic mid-turn switch occurs; completing/reporting turns are protected. Disabling the policy retains legacy queue patience and no-work automatic company handoffs.
