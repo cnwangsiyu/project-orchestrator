@@ -20,7 +20,8 @@ function fixture() {
   return { root, workspace, control, data, write, args: { root, workspace, control, slot: 'devbox-cn-1', runId: randomUUID(), env: {} } };
 }
 function invoke(f, setup = '', overrides = {}) {
-  const code = 'import os,sys,json,pathlib,time\n' + retentionPython + runDataCleanupPython + '\n' + setup + '\nd=json.loads(sys.stdin.read())\nprint(json.dumps(cleanup_run_data(d)))\n';
+  const proc = path.join(f.root, 'fixture-proc'); fs.mkdirSync(proc, { recursive: true });
+  const code = 'import os,sys,json,pathlib,time\n' + retentionPython + runDataCleanupPython + '\n' + setup + '\nd=json.loads(sys.stdin.read())\nprint(json.dumps(cleanup_run_data(d,pathlib.Path(' + JSON.stringify(proc) + '))))\n';
   const result = spawnSync('python3', ['-c', code], { input: JSON.stringify({ ...f.args, ...overrides }), encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
   return JSON.parse(result.stdout);
@@ -64,10 +65,10 @@ try {
   const live = fixture(); live.write('recent/out'); const old = live.write('old/out');
   const ancient = new Date(Date.now() - 3600000); fs.utimesSync(old, ancient, ancient); fs.utimesSync(path.dirname(old), ancient, ancient);
   const kept = invoke(live, 'data_group_live=lambda *args: True');
-  assert.deepEqual(kept.entries.map(entry => entry.name), ['old']); assert.ok(fs.existsSync(path.join(live.data, 'recent')));
+  assert.deepEqual(kept.entries, []); assert.equal(kept.bytes, 0); assert.ok(fs.existsSync(path.join(live.data, 'old'))); assert.ok(fs.existsSync(path.join(live.data, 'recent')));
   const gone = invoke(live, 'data_group_live=lambda *args: False');
-  assert.deepEqual(gone.entries.map(entry => entry.name), ['recent']);
-  console.log('PASS recent data protection requires a live group; old data is removed');
+  assert.deepEqual(gone.entries.map(entry => entry.name), ['old', 'recent']);
+  console.log('PASS live ownership protects all workspace data; confirmed idle output can be removed');
 
   const fault = fixture(); fault.write('blocked'); fault.write('removed/out', '123');
   const failed = invoke(fault, "original=os.unlink\ndef fail(name,*args,**kwargs):\n    if name=='blocked' and kwargs.get('dir_fd') is not None: raise PermissionError('fixture cleanup failure')\n    return original(name,*args,**kwargs)\nos.unlink=fail");
@@ -90,14 +91,16 @@ try {
   const fields = Array(20).fill('0'); fields[0] = 'S'; fields[1] = '1'; fields[2] = '1234'; fields[19] = '42';
   fs.writeFileSync(path.join(proc, '1234/stat'), '1234 (fixture) ' + fields.join(' '));
   fs.symlinkSync(grouped.workspace, path.join(proc, '1234/cwd'));
+  fs.mkdirSync(path.join(proc, '1234/fd'));
   fs.writeFileSync(path.join(grouped.control, 'group.json'), JSON.stringify({ run: path.basename(grouped.control), workspace: grouped.workspace, pid: 1234, start: '42' }));
   invoke(grouped, `assert data_group_live(pathlib.Path(${JSON.stringify(grouped.root)}),pathlib.Path(${JSON.stringify(grouped.workspace)}),pathlib.Path(${JSON.stringify(proc)}))`);
   fields[19] = '99'; fs.writeFileSync(path.join(proc, '1234/stat'), '1234 (fixture) ' + fields.join(' '));
+  fs.unlinkSync(path.join(proc, '1234/cwd')); fs.symlinkSync(temp, path.join(proc, '1234/cwd'));
   invoke(grouped, `assert not data_group_live(pathlib.Path(${JSON.stringify(grouped.root)}),pathlib.Path(${JSON.stringify(grouped.workspace)}),pathlib.Path(${JSON.stringify(proc)}))`);
   console.log('PASS live group attribution uses recorded start identity, group membership and workspace cwd');
 
   function groupFixture() {
-    const f = fixture(), proc = path.join(f.root, 'fixture-proc'); fs.mkdirSync(proc);
+    const f = fixture(), proc = path.join(f.root, 'fixture-proc'); fs.mkdirSync(proc, { recursive: true });
     f.write('stale/out', 'old');
     const old = new Date(Date.now() - 3600000);
     for (const file of [path.join(f.data, 'stale/out'), path.join(f.data, 'stale')]) fs.utimesSync(file, old, old);
@@ -108,11 +111,12 @@ try {
     };
     const process = (pid, pgid, cwd, start = '42') => {
       const dir = path.join(proc, String(pid)); fs.mkdirSync(dir, { recursive: true });
+      fs.mkdirSync(path.join(dir, 'fd'), { recursive: true });
       const fields = Array(20).fill('0'); fields[0] = 'S'; fields[1] = '1'; fields[2] = String(pgid); fields[19] = start;
       fs.writeFileSync(path.join(dir, 'stat'), `${pid} (fixture) ${fields.join(' ')}`);
       if (cwd) fs.symlinkSync(cwd, path.join(dir, 'cwd'));
     };
-    const cleanup = () => invoke(f, `original_group_live=data_group_live\ndata_group_live=lambda root,workspace: original_group_live(root,workspace,pathlib.Path(${JSON.stringify(proc)}))`);
+    const cleanup = () => invoke(f);
     return { ...f, proc, receipt, process, cleanup };
   }
   const deadGroups = groupFixture();
@@ -127,7 +131,7 @@ try {
   const legacyLive = groupFixture(); legacyLive.receipt({ pid: 1234, start: '42' });
   legacyLive.process(1234, 1234, legacyLive.workspace);
   const protectedLegacy = legacyLive.cleanup();
-  assert.equal(protectedLegacy.bytes, 0); assert.match(protectedLegacy.warnings.join(' '), /live group protects workspace/);
+  assert.equal(protectedLegacy.bytes, 0); assert.match(protectedLegacy.warnings.join(' '), /protects workspace/);
   fs.unlinkSync(path.join(legacyLive.proc, '1234/cwd')); fs.symlinkSync(temp, path.join(legacyLive.proc, '1234/cwd'));
   assert.equal(legacyLive.cleanup().bytes, 3, 'live legacy group of another workspace does not block');
 
@@ -135,7 +139,7 @@ try {
   orphan.process(5678, 1234, orphan.workspace);
   assert.equal(orphan.cleanup().bytes, 0, 'surviving group members protect data after leader exit');
   const ambiguous = groupFixture(); ambiguous.receipt({ pid: 1234, start: '42' }); ambiguous.process(1234, 1234);
-  assert.match(ambiguous.cleanup().warnings.join(' '), /ambiguous group cwd/);
+  assert.match(ambiguous.cleanup().warnings.join(' '), /ambiguous process cwd/);
   const malformed = groupFixture(); malformed.receipt('{broken'); malformed.process(1234, 1234, malformed.workspace);
   assert.equal(malformed.cleanup().bytes, 0);
   fs.unlinkSync(path.join(malformed.proc, '1234/cwd')); fs.symlinkSync(temp, path.join(malformed.proc, '1234/cwd'));
@@ -162,13 +166,58 @@ try {
     const modern = groupFixture(), run = randomUUID();
     modern.receipt({ run, pid: 1234, start: '42', workspace: same ? modern.workspace : temp }, run);
     modern.process(1234, 1234, same ? modern.workspace : temp);
-    // Modern receipts retain the existing recent-data protection semantics.
     modern.write('recent/out', 'new');
     const result = modern.cleanup();
-    assert.equal(result.bytes, same ? 3 : 6); assert.deepEqual(result.warnings, []);
+    assert.equal(result.bytes, same ? 0 : 6);
+    if (same) assert.match(result.warnings.join(' '), /protects workspace/); else assert.deepEqual(result.warnings, []);
     assert.equal(fs.existsSync(path.join(modern.data, 'recent')), same);
   }
-  console.log('PASS live modern receipts protect recent data of the same workspace without blocking other workspaces');
+  console.log('PASS live modern receipts protect the same workspace without blocking other workspaces');
+
+  // Reviewer reproductions: receipt exclusions can never erase observed users.
+  for (const start of ['broken', '41', undefined]) {
+    const f = groupFixture(); f.write('recent/out', 'live-output');
+    f.receipt({ pid: 1234, ...(start === undefined ? {} : { start }) });
+    f.process(1234, 1234, f.workspace, '42');
+    const result = f.cleanup();
+    assert.equal(result.bytes, 0); assert.deepEqual(result.entries, []); assert.ok(result.warnings.length);
+    assert.equal(fs.readFileSync(path.join(f.data, 'recent/out'), 'utf8'), 'live-output');
+  }
+  for (const corrupt of [{ start: '41' }, { start: 'broken' }, { pid: 9999 }, { workspace: temp }]) {
+    const f = groupFixture(), run = randomUUID(); f.write('recent/out', 'live-output');
+    f.receipt({ run, pid: 1234, start: '42', workspace: f.workspace, ...corrupt }, run);
+    f.process(1234, 1234, f.workspace);
+    if (corrupt.pid === 9999) f.process(9999, 9999, temp);
+    assert.equal(f.cleanup().bytes, 0);
+    assert.ok(fs.existsSync(path.join(f.data, 'recent/out')));
+  }
+  const unpublished = groupFixture(); unpublished.write('recent/out', 'live-output');
+  unpublished.process(1234, 1234, unpublished.workspace);
+  assert.equal(unpublished.cleanup().bytes, 0, 'workspace cwd blocks deletion with no group receipt');
+  const openFiles = groupFixture(); openFiles.write('recent/out', 'live-output'); openFiles.process(1234, 1234, temp);
+  fs.symlinkSync(path.join(openFiles.data, 'recent/out'), path.join(openFiles.proc, '1234/fd/3'));
+  assert.equal(openFiles.cleanup().bytes, 0, 'workspace open fd blocks deletion with no group receipt and cwd elsewhere');
+  const deletedFd = groupFixture(); deletedFd.process(1234, 1234, temp);
+  fs.symlinkSync(path.join(deletedFd.data, 'old-output') + ' (deleted)', path.join(deletedFd.proc, '1234/fd/3'));
+  assert.equal(deletedFd.cleanup().bytes, 0, 'deleted but open workspace fd remains protective');
+  const reused = groupFixture(); reused.write('recent/out', 'new');
+  reused.receipt({ pid: 1234, start: '41' }); reused.process(1234, 1234, temp, '42');
+  assert.equal(reused.cleanup().bytes, 6, 'valid differing start with unrelated cwd/fds is not blocking');
+  const reusedModern = groupFixture(), reusedRun = randomUUID(); reusedModern.write('recent/out', 'new');
+  reusedModern.receipt({ run: reusedRun, pid: 1234, start: '41', workspace: reusedModern.workspace }, reusedRun);
+  reusedModern.process(1234, 1234, temp, '42');
+  assert.equal(reusedModern.cleanup().bytes, 6, 'stale modern receipt cannot block an unrelated reused PID');
+  const recordedRun = groupFixture();
+  const runDir = path.join(recordedRun.data, 'active-run'); fs.mkdirSync(runDir);
+  recordedRun.receipt({ pid: 1234, start: '42', workspace: runDir }); recordedRun.process(1234, 1234, temp);
+  assert.equal(recordedRun.cleanup().bytes, 0, 'live recorded run directory below workspace adds protection');
+  for (const start of ['42', 'broken', undefined]) {
+    const f = groupFixture(), run = randomUUID(), runDir = path.join(f.data, 'active-run'); fs.mkdirSync(runDir);
+    f.receipt({ run, pid: 1234, ...(start === undefined ? {} : { start }), workspace: runDir }, run);
+    f.process(1234, 5678, temp, '42');
+    assert.equal(f.cleanup().bytes, 0, 'recorded directory adds protection before non-leader/group filtering');
+  }
+  console.log('PASS reviewer start broken/41/missing, modern corrupt fields, unpublished receipts, cwd/open/deleted fds and reused unrelated PID');
 
   const privateValue = 'fixture-sensitive-value'; let output = '';
   const warningOutput = await execute('python3', ['-c', 'import json,sys,pathlib\n' + runDataCleanupPython + '\nprint_data_cleanup(json.loads(sys.stdin.read()))'], {

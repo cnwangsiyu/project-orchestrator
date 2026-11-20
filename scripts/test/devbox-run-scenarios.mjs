@@ -28,7 +28,7 @@ let count = 0;
 function fixture(options = {}) {
   const dir = path.join(options.canonical ? fs.realpathSync(temp) : temp, `case-${++count}`), bin = path.join(dir, 'bin'), shared = path.join(dir, 'shared'), repo = path.join(dir, 'source');
   for (const p of [bin, shared, repo, path.join(shared, 'locks')]) fs.mkdirSync(p, { recursive: true });
-  const cleanupPython = 'import os,sys,json,pathlib,time\n' + retentionPython + runDataCleanupPython + '\nd=json.loads(sys.stdin.read())\nprint(json.dumps(cleanup_run_data(d)))\n';
+  const cleanupPython = 'import os,sys,json,pathlib,time\n' + retentionPython + runDataCleanupPython + '\nd=json.loads(sys.stdin.read())\nproc_root=pathlib.Path(d["control"])/"fixture-proc"\nproc_root.mkdir(parents=True,exist_ok=True)\nprint(json.dumps(cleanup_run_data(d,proc_root)))\n';
   const cleanupOutputPython = 'import json,sys,pathlib\n' + runDataCleanupPython + '\nprint_data_cleanup(json.loads(sys.stdin.read()))\n';
   const config = { dir, shared, cleanupPython, cleanupOutputPython, hosts: ['192.0.2.1', '192.0.2.2'], ...options };
   fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify(config));

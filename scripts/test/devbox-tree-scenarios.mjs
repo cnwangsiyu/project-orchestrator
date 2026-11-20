@@ -99,7 +99,7 @@ try {
   const control = path.join(root, 'runs', randomUUID()); fs.mkdirSync(control, { recursive: true });
   const dataDir = path.join(kept.workspace, '.data'); fs.mkdirSync(dataDir); fs.writeFileSync(path.join(dataDir, 'stale-output'), 'old');
   const h = 'import os,sys,json,pathlib,time\nd=json.loads(sys.stdin.read())\n';
-  const cleanup = treeScript('run', h + retentionPython + runDataCleanupPython + '\nprint(json.dumps(cleanup_run_data(d)))', h, kept);
+  const cleanup = treeScript('run', h + retentionPython + runDataCleanupPython + '\nproc_root=pathlib.Path(d["control"])/"fixture-proc"\nproc_root.mkdir(parents=True,exist_ok=True)\nprint(json.dumps(cleanup_run_data(d,proc_root)))', h, kept);
   const cleaned = spawnSync('python3', ['-c', cleanup], { input: JSON.stringify({ ...kept, control, runId: randomUUID(), env: {} }), encoding: 'utf8' });
   assert.equal(cleaned.status, 0, cleaned.stderr); assert.deepEqual(JSON.parse(cleaned.stdout).entries.map(row => row.name), ['stale-output']);
   fs.rmdirSync(dataDir);

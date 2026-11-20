@@ -383,9 +383,46 @@ temporary.write_text(json.dumps(d['paths'])); temporary.replace(file)
 `;
 
 export const runDataCleanupPython = `import re, stat as data_stat
-# Read only process identity/cwd, never argv or environment.
+# Inspect identity, cwd and fd link names only; never argv, environment or fd contents.
+def workspace_process_live(workspace,proc_root):
+    if not proc_root.is_dir(): raise RuntimeError('process inventory unavailable for workspace')
+    for process in proc_root.glob('[0-9]*'):
+        if not process.name.isdigit(): continue
+        # This supervisor opens .data for guarded removal before any command is
+        # launched. Its own housekeeping handles are not another workspace user.
+        if proc_root==pathlib.Path('/proc') and process.name==str(os.getpid()): continue
+        try:
+            fields=(process/'stat').read_text().rsplit(')',1)[1].split()
+            if fields[0]=='Z' or int(fields[6]) & 0x00200000: continue # Kernel threads cannot hold app workspace files.
+        except (FileNotFoundError,ProcessLookupError):
+            if not process.exists(): continue
+        except (OSError,ValueError,IndexError): pass
+        uncertain=False
+        links=[process/'cwd']
+        try: links+=list((process/'fd').iterdir())
+        except (FileNotFoundError,ProcessLookupError):
+            if not process.exists(): continue
+            uncertain=True
+        except OSError: uncertain=True
+        for link in links:
+            try:
+                target=os.readlink(link)
+                if target.endswith(' (deleted)'): target=target[:-10]
+                if not target.startswith('/'): continue # Pipes, sockets and anonymous descriptors.
+                target=pathlib.Path(target).resolve()
+                if target==workspace or target.is_relative_to(workspace): return True
+            except (FileNotFoundError,ProcessLookupError):
+                if link.name=='cwd' and process.exists(): uncertain=True
+            except (OSError,ValueError,RuntimeError):
+                if process.exists(): uncertain=True
+        if uncertain and process.exists(): raise RuntimeError('ambiguous process cwd or open files for workspace')
+    return False
+
 def data_group_live(root,workspace,proc_root=pathlib.Path('/proc')):
     workspace=workspace.resolve()
+    # Receipts may be missing or not yet published. Live workspace users always
+    # protect data independently of receipt schema or a reused recorded PID.
+    if workspace_process_live(workspace,proc_root): return True
     runs=root/'runs'
     if not runs.is_dir(): return False
     for ctl in runs.iterdir():
@@ -403,19 +440,26 @@ def data_group_live(root,workspace,proc_root=pathlib.Path('/proc')):
         if not isinstance(recorded_workspace,str) or not pathlib.Path(recorded_workspace).is_absolute(): recorded_workspace=None
         try: recorded_scope=pathlib.Path(recorded_workspace).resolve() if recorded_workspace else None
         except (OSError,ValueError,RuntimeError): recorded_scope=None
+        recorded_here=recorded_scope is not None and (recorded_scope==workspace or recorded_scope.is_relative_to(workspace))
         pgid=record.get('pid')
         valid_pid=type(pgid) is int and pgid>0
-        valid_start=isinstance(record.get('start'),str) and bool(record['start'])
+        valid_start=isinstance(record.get('start'),str) and re.fullmatch(r'[0-9]+',record['start']) is not None
         modern=record.get('run')==ctl.name and valid_pid and valid_start and recorded_scope is not None
-        if modern and recorded_scope!=workspace: continue
-        ambiguous_identity=False
+        if modern and not recorded_here: continue
+        ambiguous_identity=not valid_start
         if valid_pid:
             try:
                 fields=(proc_root/str(pgid)/'stat').read_text().rsplit(')',1)[1].split()
-                if valid_start and fields[19]!=record['start']: continue
+                live_start=fields[19]
+                if re.fullmatch(r'[0-9]+',live_start) is None: ambiguous_identity=True
+                elif valid_start and int(live_start)!=int(record['start']): continue
             except (FileNotFoundError,ProcessLookupError): pass
             except (OSError,ValueError,IndexError):
                 ambiguous_identity=True
+            # A live (or ambiguous) recorded PID with a directory in this
+            # workspace adds protection even if it is not a group leader.
+            # Only the validated start mismatch above can exclude that identity.
+            if (proc_root/str(pgid)).exists() and recorded_here: return True
         # Without a usable PID, cwd evidence still limits a malformed receipt
         # to workspaces it can own. Never inspect process argv/environment.
         for process in proc_root.glob('[0-9]*'):
@@ -426,7 +470,7 @@ def data_group_live(root,workspace,proc_root=pathlib.Path('/proc')):
             except (OSError,ValueError,IndexError): fields=None
             try:
                 if modern and fields is not None and not ambiguous_identity: return True
-                if recorded_scope==workspace: raise RuntimeError('legacy or invalid live group protects workspace')
+                if recorded_here: raise RuntimeError('legacy or invalid live group protects workspace')
                 cwd=(process/'cwd').resolve(strict=True)
                 if cwd==workspace or cwd.is_relative_to(workspace):
                     raise RuntimeError('legacy or invalid live group protects workspace')
@@ -436,7 +480,7 @@ def data_group_live(root,workspace,proc_root=pathlib.Path('/proc')):
                 raise RuntimeError('ambiguous group evidence for workspace')
     return False
 
-def cleanup_run_data(d):
+def cleanup_run_data(d,proc_root=pathlib.Path('/proc')):
     result={'entries':[],'bytes':0,'warnings':[]}
     if d.get('env',{}).get('DEVBOX_KEEP_RUN_DATA')=='1':
         return {**result,'skipped':'DEVBOX_KEEP_RUN_DATA=1'}
@@ -490,10 +534,11 @@ def cleanup_run_data(d):
             target=pathlib.Path(value).resolve()
             if target==base: return {**result,'skipped':'declared data directory input'}
             if target.is_relative_to(base): protected.add(target.relative_to(base).parts[0])
-        live=data_group_live(root,workspace.resolve())
+        live=data_group_live(root,workspace.resolve(),proc_root)
+        if live: raise RuntimeError('live process group or workspace user protects workspace')
         private=re.compile(r'^(?:login|sessions?|cookies?|\\.env(?:\\..*)?|\\.netrc|\\.npmrc|\\.pypirc|\\.ssh|\\.aws|\\.kube|node_modules)$|\\.(?:pem|p12|pfx|key|keystore)$',re.I)
         def inspect_entry(entry):
-            recent=False; belongs=False
+            belongs=False
             todo=[entry]
             while todo:
                 target=todo.pop(); info=target.lstat()
@@ -501,10 +546,9 @@ def cleanup_run_data(d):
                 if any(private.search(part) for part in parts): raise RuntimeError('private/cache state refused')
                 if not target.resolve().is_relative_to(base): raise RuntimeError('symlink escape refused')
                 if any(value in part for value in current for part in parts): belongs=True
-                recent=recent or info.st_mtime>time.time()-600
                 if data_stat.S_ISDIR(info.st_mode): todo+=list(target.iterdir())
                 elif not (data_stat.S_ISREG(info.st_mode) or data_stat.S_ISLNK(info.st_mode)): raise RuntimeError('special entry refused')
-            return belongs or (live and recent)
+            return belongs
         def remove_entry(parent,name,deleted):
             info=os.stat(name,dir_fd=parent,follow_symlinks=False)
             if data_stat.S_ISDIR(info.st_mode):
