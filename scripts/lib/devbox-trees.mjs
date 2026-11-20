@@ -257,7 +257,9 @@ def tree_process_live(ws):
 
 def tree_evict(d):
     primary=pathlib.Path(d['root']); ws=pathlib.Path(d['workspace']); root=pathlib.Path(d['treeRoot'])
-    roots=dict(tree_roots(d)); repo=pathlib.Path(d['repository']); slot=d['slot']
+    registered=tree_roots(d)
+    roots={p:max(floor for peer,floor in registered if tree_filesystem(peer)==tree_filesystem(p)) for p,_ in registered}
+    repo=pathlib.Path(d['repository']); slot=d['slot']
     if slot in d.get('heldSlots',[]) or root not in roots or not tree_scope(root,ws) or ws.name!=slot: raise RuntimeError('eviction outside leased tree scope')
     expected=primary/'repos'/ws.parts[-3]/ws.parts[-2]
     if repo!=expected or repo.resolve()!=repo: raise RuntimeError('eviction foreign repository')
@@ -265,7 +267,7 @@ def tree_evict(d):
         candidates=[row for row in tree_list(d) if row['workspace']==str(ws)]
         if not candidates: return {'skipped':'not a runner tree'}
         row=candidates[0]; disk=os.statvfs(root); free=disk.f_bavail*disk.f_frsize/TREE_GIB
-        below=not d.get('coldOnly') and free<d.get('targetFreeGiB',roots[root]); cold=row['lastUsed']<time.time()-d.get('days',d['treeConfig']['coldDays'])*86400
+        below=not d.get('coldOnly') and free<max(d.get('targetFreeGiB',roots[root]),roots[root]); cold=row['lastUsed']<time.time()-d.get('days',d['treeConfig']['coldDays'])*86400
         if not below and not cold: return {'skipped':'warm and above floor'}
         if tree_process_live(ws): return {'skipped':'live or unknown process'}
         # Preserve edits and any private/symlink state rather than treating it as rebuildable.

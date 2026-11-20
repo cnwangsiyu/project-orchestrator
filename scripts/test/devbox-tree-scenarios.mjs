@@ -127,6 +127,11 @@ try {
   assert.equal(ageOnly.skipped, 'warm and above floor'); assert.ok(fs.existsSync(fresh.workspace), 'gc age recheck preserves a tree reused since inventory');
   const underFloor = python("os.statvfs=lambda p:__import__('types').SimpleNamespace(f_bavail=19*TREE_GIB,f_frsize=1)\nprint(json.dumps(tree_evict(d)))", fresh);
   assert.equal(underFloor.reason, 'below-floor-lru'); assert.ok(!fs.existsSync(fresh.workspace));
+  const sharedPressure = coldTree('devbox-cn-21');
+  const sharedMeta = JSON.parse(fs.readFileSync(path.join(sharedPressure.workspace, '.devbox-run.json'))); sharedMeta.lastUsed = Date.now() / 1000;
+  fs.writeFileSync(path.join(sharedPressure.workspace, '.devbox-run.json'), JSON.stringify(sharedMeta));
+  const sharedEvicted = python("tree_filesystem=fixture_filesystem\nos.statvfs=lambda p:__import__('types').SimpleNamespace(f_bavail=40*TREE_GIB,f_frsize=1)\nprint(json.dumps(tree_evict(d)))", { ...sharedPressure, targetFreeGiB: 20 });
+  assert.equal(sharedEvicted.reason, 'below-floor-lru', 'owner eviction protects the primary floor on a shared filesystem');
   assert.ok(fs.existsSync(path.join(root, 'repos/fixture/id-fixture')));
   console.log('PASS held slots, dirty/private trees, live/unknown processes, unregistered roots, symlinks and foreign paths preserved; cold and below-floor trees logged');
 
