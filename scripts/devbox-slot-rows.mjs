@@ -20,7 +20,7 @@ export function slotRows(text, host, count, first) {
     const copy = [id, ...template.slice(1)];
     // Generous ceilings must disappear on stale-metrics/static fallback, rather
     // than accidentally multiplying the host's baseline admitted concurrency.
-    if (!/\bdynamic-only\b/.test(copy.slice(4).join('\t'))) copy[4] += ' dynamic-only';
+    if (!copy.slice(4).join('\t').split(/\s+/).includes('dynamic-only')) copy[4] += ' dynamic-only';
     return copy.join('\t');
   }).join('\n') + '\n';
 }
