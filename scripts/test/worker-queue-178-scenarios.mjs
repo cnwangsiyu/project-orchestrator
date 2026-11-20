@@ -41,10 +41,14 @@ try {
   }
   console.log('PASS BC-178: escalated max with stalled company Astra uses approved personal xhigh, including excluded-company retry; max remains gated');
 
-  for (const variant of ['unknown-status', 'unknown-catalog', 'missing-advertised-astra-lane']) {
+  for (const variant of ['unknown-status', 'unknown-catalog', 'unknown-account-kind', 'missing-advertised-astra-lane']) {
     const raw = fixture();
     if (variant === 'unknown-status') raw.accounts.find(account => account.id === 'trae').auth.status = 'UNKNOWN';
     if (variant === 'unknown-catalog') raw.accounts.find(account => account.id === 'ttadk').catalog.status = 'UNKNOWN';
+    if (variant === 'unknown-account-kind') {
+      const account = raw.accounts.find(account => account.id === 'ttadk');
+      account.kind = 'UNKNOWN'; account.catalog.status = 'UNKNOWN';
+    }
     if (variant === 'missing-advertised-astra-lane') raw.accounts.find(account => account.id === 'ttadk').catalog.value.push(ASTRA);
     const plan = routePure(task(), createSnapshot(raw));
     assert.equal(plan.kind, 'blocked', variant);
@@ -52,10 +56,32 @@ try {
       .every(row => !row.predicates.find(predicate => predicate.ruleId === 'pScopedApproval')?.personalFallback?.maxUnavailable), variant);
   }
   console.log('PASS unresolved company status/catalog and a missing advertised Astra lane stay blocked; no quality-repeat exemption');
+  for (const field of ['auth', 'transport', 'health', 'catalog']) {
+    const raw = fixture(); raw.accounts.find(account => account.id === 'trae')[field].source = 'last-good-stale';
+    assert.equal(routePure(task(), createSnapshot(raw)).kind, 'blocked', field);
+  }
+  console.log('PASS last-good-stale account or catalog observations cannot attest current company capacity');
+  for (const source of ['unreadable recent-turn queue metadata', 'unreadable recent-turn health metadata']) {
+    const raw = fixture(), lane = raw.lanes.find(lane => lane.accountId === 'trae' && lane.modelId === ASTRA);
+    lane.position.value = null; lane.queueState.value = null; lane.drainPerMin.value = null;
+    lane.recentQueue = { status: 'KNOWN', value: { blocked: true, sources: [source] }, source: 'recent-turn-summary',
+      sampledAt: raw.decisionAt, receivedAt: raw.decisionAt, maxAgeMs: 1800000 };
+    const plan = routePure(task(), createSnapshot(raw));
+    assert.equal(plan.kind, 'launch'); assert.equal(plan.primary.candidate.accountId, 'trae');
+    assert.equal(plan.primary.candidate.effort, 'max');
+  }
+  console.log('PASS unreadable queue or health metadata cannot prove a company stall or enable personal quota');
 
   const available = structuredClone(source); available.personalFallback = policy;
   const ready = routePure(task(), createSnapshot(available));
   assert.equal(ready.primary.candidate.accountId, 'trae'); assert.equal(ready.primary.candidate.effort, 'max');
+  const fast = fixture(), fastLane = fast.lanes.find(lane => lane.accountId === 'trae' && lane.modelId === ASTRA);
+  fastLane.position.value = 1; fastLane.drainPerMin.value = 100; fastLane.progressAt.value = fast.decisionAt;
+  const draining = routePure(task(), createSnapshot(fast));
+  assert.equal(draining.primary.candidate.accountId, 'trae'); assert.equal(draining.primary.candidate.effort, 'max');
+  const denied = structuredClone(available); denied.accounts.find(account => account.id === 'trae').providerDenied.value = true;
+  const unavailableProvider = routePure(task(), createSnapshot(denied));
+  assert.equal(unavailableProvider.primary.candidate.accountId, 'b'); assert.equal(unavailableProvider.primary.candidate.effort, 'xhigh');
   const alreadyMax = routePure(task(ASTRA, 'max'), createSnapshot(fixture()));
   assert.notEqual(alreadyMax.kind, 'launch', 'an executed max quality floor cannot be lowered');
   for (const variant of [{ state: 'planned' }, { role: 'second' }, { taskId: 'another-task' }]) {

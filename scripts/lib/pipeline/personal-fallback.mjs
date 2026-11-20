@@ -68,15 +68,20 @@ export function hardPersonalXhighFallback(task, snapshot, candidate, rows = []) 
     || task.floor.profileIds?.some(profile => profile.endsWith(':max'))) return null;
   // Missing company declarations are uncertainty, not negative capacity. Check
   // the catalogs before enumeration can silently omit an advertised Astra.
+  if (snapshot.accounts.some(account => account.kind === 'UNKNOWN')) return null;
   for (const account of snapshot.accounts.filter(company)) {
     const catalog = known(account.catalog);
-    if (!catalog || known(account.auth) !== true || known(account.transport) !== true
+    if (!catalog || [account.auth, account.transport, account.health, account.catalog]
+      .some(observation => observation?.source === 'last-good-stale')
+      || known(account.auth) !== true || known(account.transport) !== true
       || known(account.health) !== true) return null;
     for (const id of catalog.filter(isAstra)) {
       const model = snapshot.models.find(model => model.id === id);
       const lanes = snapshot.lanes.filter(lane => lane.accountId === account.id && lane.modelId === id);
       if (!model || model.effortsStatus !== 'KNOWN' || !lanes.length
         || lanes.some(lane => !known(lane.efforts) || lane.harness === 'UNKNOWN')) return null;
+      if (lanes.some(lane => known(lane.recentQueue)?.blocked
+        && array(known(lane.recentQueue)?.sources).some(source => String(source).startsWith('unreadable ')))) return null;
     }
   }
   const capacityCodes = ['PROVIDER_QUOTA_DENIED', 'ACTIVE_RESTRICTION', 'TTADK_DAILY_RESERVE'];
@@ -89,15 +94,19 @@ export function hardPersonalXhighFallback(task, snapshot, candidate, rows = []) 
   if (!max.length) return null;
   const unavailable = row => {
     const { account, lane } = candidateParts(snapshot, row.candidate);
+    if (row.predicates.some(predicate => !predicate.ok && capacityCodes.includes(predicate.reason?.code))) return true;
     if (known(lane.position) === 0 && known(lane.queueState) === 'ready') return false;
+    const position = known(lane.position), drain = known(lane.drainPerMin);
+    if (!row.estimate.stalled && position >= 0 && position !== null && drain > 0
+      && ['queued', 'waiting', 'ready'].includes(known(lane.queueState))
+      && position / drain <= policy.queueWaitMinutes) return false;
     const usage = known(account.quota.find(bucket => bucket.bucketId === row.candidate.modelId)?.usage);
     const exhausted = usage && usage.resetsAt > snapshot.decisionAt && (usage.depleted || usage.used >= usage.limit);
     const family = known(lane.familyQueue), recent = known(lane.recentQueue);
     const recentQueue = recent?.blocked === true || family?.position > 0 || family?.high?.position > 0
       && family.high.t <= snapshot.decisionAt && snapshot.decisionAt - family.high.t <= 1800000
       || ['queued', 'waiting'].includes(family?.state);
-    return row.estimate.stalled || row.predicates.some(predicate => !predicate.ok
-      && ['PROVIDER_QUOTA_DENIED', 'ACTIVE_RESTRICTION', 'TTADK_DAILY_RESERVE'].includes(predicate.reason?.code))
+    return row.estimate.stalled
       || exhausted && (known(lane.position) > 0 || ['queued', 'waiting'].includes(known(lane.queueState)) || recentQueue);
   };
   if (!max.every(unavailable)) return null;
