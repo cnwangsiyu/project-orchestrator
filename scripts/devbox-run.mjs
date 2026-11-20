@@ -570,7 +570,9 @@ def docker_workspace_live(workspace):
             for line in sources.splitlines():
                 if not line.strip(): continue
                 source=pathlib.Path(json.loads(line))
-                if source.is_absolute() and source.resolve().is_relative_to(workspace): return True
+                if source.is_absolute():
+                    mount=source.resolve()
+                    if mount.is_relative_to(workspace) or workspace.is_relative_to(mount): return True
     except (OSError,subprocess.SubprocessError,ValueError,TypeError,RuntimeError):
         if docker_socket_present(): raise RuntimeError('docker-unqueryable')
     return False

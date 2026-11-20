@@ -318,9 +318,13 @@ try {
   console.log('PASS busy fixture: one unreadable own process, 100 unrelated errors ignored, one other-workspace and one current-workspace error');
 
   // Exercise the CLI protocol using an isolated PATH and a real fixture Unix socket.
-  for (const mode of ['mount', 'sibling', 'empty', 'ps-fails', 'inspect-fails', 'absent', 'absent-with-socket', 'fails-no-socket']) {
+  for (const mode of ['mount', 'parent', 'parent-alias', 'root', 'sibling', 'empty', 'ps-fails', 'inspect-fails', 'absent', 'absent-with-socket', 'fails-no-socket']) {
     const f = groupFixture(), bin = path.join(f.root, 'bin'); fs.mkdirSync(bin);
-    const mount = mode === 'mount' ? path.join(f.data, 'active\nrun') : f.workspace + '-sibling';
+    const parentAlias = path.join(bin, 'runner-root');
+    fs.symlinkSync(f.root, parentAlias);
+    const coveringMounts = { mount: path.join(f.data, 'active\nrun'), parent: f.root, 'parent-alias': parentAlias, root: '/' };
+    const coversWorkspace = Object.hasOwn(coveringMounts, mode);
+    const mount = coversWorkspace ? coveringMounts[mode] : f.workspace + '-sibling';
     if (!mode.startsWith('absent')) {
       const cli = `#!/bin/sh
 if [ "$*" = "ps -q" ]; then
@@ -345,8 +349,8 @@ pathlib.Path.is_socket=lambda p: p==pathlib.Path.cwd()/'docker.sock' and origina
 ${hasSocket ? "sock=socket.socket(socket.AF_UNIX); sock.bind('docker.sock')" : ''}`;
     const failed = ['ps-fails', 'inspect-fails', 'absent-with-socket'].includes(mode);
     const result = invoke(f, setup, {}, { docker: true, warning: failed && /^\[cleanup-ineffective\] \["docker-unqueryable"\]$/m });
-    assert.equal(result.bytes, failed || mode === 'mount' ? 0 : 3, mode);
-    assert.deepEqual(result.warnings, failed ? ['docker-unqueryable'] : mode === 'mount' ? ['live container mount protects workspace'] : [], mode);
+    assert.equal(result.bytes, failed || coversWorkspace ? 0 : 3, mode);
+    assert.deepEqual(result.warnings, failed ? ['docker-unqueryable'] : coversWorkspace ? ['live container mount protects workspace'] : [], mode);
   }
   console.log('PASS running container mount sources, path boundaries, empty inventory, unavailable CLI and socket-dependent failures');
 
