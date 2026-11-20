@@ -20,7 +20,9 @@ export function slotRows(text, host, count, first) {
     const copy = [id, ...template.slice(1)];
     // Generous ceilings must disappear on stale-metrics/static fallback, rather
     // than accidentally multiplying the host's baseline admitted concurrency.
-    if (!copy.slice(4).join('\t').split(/\s+/).includes('dynamic-only')) copy[4] += ' dynamic-only';
+    // Recognize ASCII controller delimiters conservatively: JS \s also accepts
+    // FEFF, which Python str.split() does not treat as a row-tag separator.
+    if (!copy.slice(4).join('\t').split(/[ \t\r\n\v\f]+/).includes('dynamic-only')) copy[4] += ' dynamic-only';
     return copy.join('\t');
   }).join('\n') + '\n';
 }

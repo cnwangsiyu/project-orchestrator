@@ -87,6 +87,8 @@ try {
   assert.throws(() => slotRows(registry, '192.0.2.1', 2, 1), /already exists/);
   const embeddedTag = slotRows(registry.replace('caps=node', 'caps=node,dynamic-only'), '192.0.2.1', 1, 100);
   assert.ok(embeddedTag.trim().split('\t').slice(4).join('\t').split(/\s+/).includes('dynamic-only'), 'capability substrings cannot replace the standalone controller flag');
+  const bomTag = slotRows(registry.replace('caps=node', 'caps=node\uFEFFdynamic-only'), '192.0.2.1', 1, 100);
+  assert.ok(bomTag.trim().split('\t').slice(4).join('\t').split(/[ \t\r\n\v\f]+/).includes('dynamic-only'), 'JS-only whitespace cannot hide a missing controller flag');
   const prefixHost = 'devbox-cn-2\tremote\topen\t-\tbox bob@192.0.2.10 caps=foreign\n' + registry;
   assert.ok(slotRows(prefixHost, '192.0.2.1', 1, 100).includes('alice@192.0.2.1'));
   console.log('PASS warm-newest, empty, foreign-tree LRU, chosen-host preferences and print-only ceiling row generation');
