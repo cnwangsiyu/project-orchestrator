@@ -47,7 +47,9 @@ print(json.dumps({'trees':trees,'roots':roots}))
   try {
     const log = path.join(shared(), 'reports/devbox-evictions/evictions.tsv');
     fs.mkdirSync(path.dirname(log), { recursive: true });
-    if (!fs.existsSync(log)) fs.writeFileSync(log, 'time\thost\tpath\tsize_mb\tdir_mtime\tfree_before_gib\tfree_after_gib\n');
+    try {
+      fs.writeFileSync(log, 'time\thost\tpath\tsize_mb\tdir_mtime\tfree_before_gib\tfree_after_gib\n', { flag: 'wx' });
+    } catch (error) { if (error.code !== 'EEXIST') throw error; }
     fs.accessSync(log, fs.constants.W_OK);
     const inventory = await remote('list', data);
     const pressure = new Set(inventory.roots.filter(row => row.freeGiB < row.floorGiB).map(row => row.root));
