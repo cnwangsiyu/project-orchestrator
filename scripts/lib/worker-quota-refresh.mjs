@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process';
 import { rulesShared } from './global-rules.mjs';
 import { readProfiles } from './state.mjs';
 import { withLock, writeJson } from './shared-file.mjs';
-import { readEvents, workerRunStates, followerAlive, appendWorkerAlert } from './worker-events.mjs';
+import { readEvents, quotaRunningWorkers, followerAlive, appendWorkerQuotaAlert } from './worker-events.mjs';
 import { cachedWorkerQuota, checkQuotaWarnings, numericQuotaSampledAt } from './worker-quota-warnings.mjs';
 
 const fileOf = () => path.join(rulesShared(), 'worker-quota-refresh.json');
@@ -44,15 +44,14 @@ export function refreshWorkerQuota({ timeoutMs = 30000, accounts = [] } = {}) {
   });
 }
 export async function pollWorkerQuota({ owner, data = cachedWorkerQuota(), rows = readEvents(), now = Date.now(),
-  file = fileOf(), profiles, alive = followerAlive, refresh = refreshWorkerQuota, emit = appendWorkerAlert,
+  file = fileOf(), profiles, alive = followerAlive, refresh = refreshWorkerQuota, emit = appendWorkerQuotaAlert,
   readSnapshot = cachedWorkerQuota, readRows = readEvents } = {}) {
   try {
     if (!owner) return { status: 'idle' };
     profiles ??= readProfiles();
     const companies = new Set([...(data?.codexAccounts ?? []).filter(a => ['trae', 'ttadk'].includes(a.kind)).map(a => a.name),
       ...Object.entries(profiles).filter(([, p]) => ['trae', 'ttadk'].includes(p.kind)).map(([name]) => name)]);
-    let running = [...workerRunStates(rows).values()].map(({ row }) => row).filter(row => row.owner === owner
-      && companies.has(row.account) && row.event === 'running' && !row.settled && alive(row));
+    let running = quotaRunningWorkers(rows, alive).filter(row => row.owner === owner && companies.has(row.account));
     if (!running.length) return { status: 'idle' };
     const requested = [...new Set(running.map(row => row.account))];
     const cacheAt = name => {
@@ -92,25 +91,25 @@ export async function pollWorkerQuota({ owner, data = cachedWorkerQuota(), rows 
     // A turn may finish while its numeric refresh is running. Monitoring must
     // use the current ledger before emitting any owner annotation.
     if (claim) rows = readRows();
-    running = [...workerRunStates(rows).values()].map(({ row }) => row).filter(row => row.owner === owner
-      && companies.has(row.account) && row.event === 'running' && !row.settled && alive(row));
+    running = quotaRunningWorkers(rows, alive).filter(row => row.owner === owner && companies.has(row.account));
     if (!running.length) return refreshed;
     withLock(file, () => {
       const state = read(file), day = new Date(Date.now()).toISOString().slice(0, 10);
       for (const [account, status] of Object.entries(state.accounts ?? {})) {
         if (status !== 'unavailable' || !running.some(row => row.account === account)
           || state.unavailableNotices?.[owner]?.[account] === day) continue;
-        emit({ ...running.find(row => row.account === account), event: 'message', kind: 'info', wake: false,
+        const delivered = emit({ ...running.find(row => row.account === account), event: 'message', kind: 'info', wake: false,
           text: `quota warnings unavailable for ${account}: normal signed-in usage provides no numeric quota` },
-        `quota-refresh-failure:${owner}:${account}:${day}`);
+        `quota-refresh-failure:${owner}:${account}:${day}`, { alive });
+        if (delivered === null) continue;
         ((state.unavailableNotices ??= {})[owner] ??= {})[account] = day;
         writeJson(file, state);
       }
       if ((state.consecutiveFailures ?? 0) >= 3 && state.notices?.[owner] !== day) {
         const alertId = `quota-refresh-failure:${owner}:${day}`;
-        emit({ ...running[0], event: 'message', kind: 'info', wake: false,
-          text: 'quota warnings unavailable: refresh failing' }, alertId);
-        (state.notices ??= {})[owner] = day; writeJson(file, state);
+        const delivered = emit({ ...running[0], event: 'message', kind: 'info', wake: false,
+          text: 'quota warnings unavailable: refresh failing' }, alertId, { alive });
+        if (delivered !== null) { (state.notices ??= {})[owner] = day; writeJson(file, state); }
       }
     }, { timeoutMs: 200, retryMs: 20, ownerPid: true });
     checkQuotaWarnings({ data: claim ? readSnapshot() : data, rows, now: Date.now() });

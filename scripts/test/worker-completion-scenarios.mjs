@@ -121,6 +121,14 @@ try {
   assert.equal(recoveredCommentary.events.find(event => event.event === 'observed').status, 'uncertain');
   const failed = run({ failure: 'synthetic provider failure', messages: [] }); assert.equal(failed.status, 1);
   assert.equal(failed.events.some(event => event.event === 'truncated'), false);
+  const reportingProbe = path.join(tmp, 'reporting-probe.json');
+  const reportingWindow = run({ status: 'completed', historyItems: [[], [item()]], reportingProbe }, { wait: true });
+  assert.equal(reportingWindow.status, 0, reportingWindow.stderr + reportingWindow.stdout);
+  const probe = JSON.parse(fs.readFileSync(reportingProbe, 'utf8'));
+  assert.equal(probe.row.reporting, true); assert.equal(probe.row.status, 'completed');
+  assert.equal(probe.result.status, 'idle'); assert.equal(probe.refreshes, 0);
+  assert.equal(reportingWindow.events.some(event => event.alertId?.startsWith('quota-refresh-failure:')), false);
+  console.log('PASS report publishes lifecycle state before historical readback awaits; reporting window emits no quota notice');
   console.log('PASS normal completion, legacy final items, completed wait reattachment, and provider failures retain existing paths');
 
   const evidence = completionEvidence(); evidence.observe(messages[0]);

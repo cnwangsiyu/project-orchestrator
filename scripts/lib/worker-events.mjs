@@ -44,6 +44,10 @@ export const workerRunStates = rows => {
   });
   return latest;
 };
+// Reporting remains a running lifecycle row until the final result is written.
+export const quotaRunningWorkers = (rows, alive = followerAlive) => [...workerRunStates(rows).values()]
+  .map(({ row }) => row).filter(row => row.event === 'running' && !row.settled
+    && !row.reporting && row.status !== 'completed' && row.owner && alive(row));
 // Retirement applies to the thread until a later tracked launch/turn attaches.
 export const retiredWorkers = rows => {
   const retired = new Map();
@@ -194,6 +198,22 @@ export const readEventHistory = () => auditRows();
 // Durable alert identity covers a follower crash between event append and its own state write.
 export const appendWorkerAlert = (row, alertId) => withEventLock(() =>
   auditRows().find(event => event.alertId === alertId) ?? appendLocked({ ...row, alertId }));
+
+// Check lifecycle eligibility in the same transaction as the quota alert append.
+// An existing alert is a successful delivery; suppression has no durable identity.
+export const appendWorkerQuotaAlert = (row, alertId, { alive = followerAlive, format } = {}) => withEventLock(() => {
+  const rows = auditRows(), existing = rows.find(event => event.alertId === alertId);
+  if (existing) return existing;
+  const turns = quotaRunningWorkers(rows, alive).filter(current => current.owner === row.owner
+    && current.account === row.account && (row.kind !== 'quota-warning' || row.quotaModel == null
+      || String(current.actualModel ?? current.model ?? '').toLowerCase() === row.quotaModel));
+  if (!turns.length) return null;
+  const current = turns[0];
+  return appendLocked({ ...row, runId: current.runId, thread: current.thread, turn: current.turn,
+    name: current.name, pid: current.pid,
+    ...(row.kind === 'quota-warning' ? { turns: turns.map(({ thread, turn, name }) => ({ thread, turn, name })) } : {}),
+    ...format?.(turns), alertId });
+});
 
 export const inbox = (rows, owner, ack = emptyAck(owner), now = Date.now()) => {
   // The asking session's own full id also resolves short owners: a session that always launches with its 8-character id

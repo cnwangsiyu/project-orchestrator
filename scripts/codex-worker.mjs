@@ -1254,6 +1254,8 @@ const recordPolicyBlock = (model, error) => {
 };
 // Prints the outcome and exits: status, usage, the final message's first line (whole message to --out).
 const report = async (threadId, turn, final, usage, observation = {}) => {
+  // Publish before historical readback or redaction yields to a quota poll.
+  tracker?.update({ reporting: true, thread: threadId, turn: turn.id, status: turn.status });
   if (observation.live && observation.evidence?.pendingFinal) {
     const item = turn.items?.findLast(item => isCompletedFinalItem(item)
       && (!observation.evidence.pendingItemId || item.id === observation.evidence.pendingItemId));

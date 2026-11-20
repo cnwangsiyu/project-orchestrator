@@ -6,7 +6,7 @@ import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { checkQuotaWarnings, quotaBurn, readQuotaWarnings, dailyWarningBuckets } from '../lib/worker-quota-warnings.mjs';
-import { appendEvent, readEvents, eventLine, hookEventLine } from '../lib/worker-events.mjs';
+import { appendEvent, appendWorkerQuotaAlert, workerRunStates, readEvents, eventLine, hookEventLine } from '../lib/worker-events.mjs';
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'worker-quota-warning-'));
 const scripts = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -19,7 +19,20 @@ const row = { runId: 'running-one', event: 'running', account: 'company', thread
 const data = (used, t = now, resetsAt = reset, kind = 'ttadk') => ({ checkedAt: t, codexAccounts: [{
   name: 'company', kind, ...(kind === 'ttadk' ? { usage: { used, limit: 1000, resetsAt } }
     : { quota: { sampledAt: t, daily: { 'gpt-6.1-sol': { used, limit: 1000, resetsAt } } } }) }] });
-const check = (snapshot, rows = [row], options = {}) => checkQuotaWarnings({ data: snapshot, rows, now: snapshot.checkedAt, ...options });
+const publish = rows => {
+  for (const { row } of workerRunStates(readEvents()).values()) {
+    if (row.event === 'running' && !rows.some(next => next.runId === row.runId))
+      appendEvent({ ...row, event: 'finished', settled: true });
+  }
+  for (const row of rows) {
+    const current = [...workerRunStates(readEvents()).values()].find(state => state.row.runId === row.runId)?.row;
+    if (!current || [...Object.keys(row), 'reporting', 'settled', 'status'].some(field => current[field] !== row[field])) appendEvent(row);
+  }
+};
+const check = (snapshot, rows = [row], options = {}) => {
+  publish(rows);
+  return checkQuotaWarnings({ data: snapshot, rows, now: snapshot.checkedAt, ...options });
+};
 try {
   assert.equal(check(data(790)).length, 0);
   assert.equal(check(data(800, now + minute)).length, 1);
@@ -48,6 +61,29 @@ try {
   assert.equal(Object.keys(readQuotaWarnings(noWorkers).buckets).length, 1);
   console.log('PASS no note for finished turns, dead followers, or owners with no running turn');
 
+  for (const extra of [{ reporting: true }, { status: 'completed' }]) {
+    assert.equal(check(data(950), [{ ...row, ...extra }], { file: path.join(tmp, `reporting-${Object.keys(extra)[0]}.json`) }).length, 0);
+  }
+  const raceFile = path.join(tmp, 'finish-before-append.json');
+  let raced = false;
+  assert.equal(check(data(950, now, reset + 2 * 86400000), [row], { file: raceFile, emit: (alert, id, options) => {
+    if (!raced) { raced = true; appendEvent({ ...row, event: 'finished', settled: true }); }
+    return appendWorkerQuotaAlert(alert, id, options);
+  } }).length, 0);
+  assert.deepEqual(Object.values(readQuotaWarnings(raceFile).buckets)[0].notices, {});
+  assert.equal(check(data(950, now, reset + 2 * 86400000), [row], { file: raceFile }).length, 2,
+    'a suppressed warning must not consume either threshold notice');
+  const pair = { ...row, runId: 'race-pair', thread: 'race-pair-thread', name: 'remaining-worker' };
+  const pairWarnings = check(data(950, now, reset + 3 * 86400000), [row, pair], { file: path.join(tmp, 'remaining-turn.json'), emit: (alert, id, options) => {
+    appendEvent({ ...row, reporting: true });
+    return appendWorkerQuotaAlert(alert, id, options);
+  } });
+  assert.equal(pairWarnings.length, 2);
+  assert.deepEqual(pairWarnings[0].turns.map(turn => turn.thread), [pair.thread]);
+  assert.ok(!pairWarnings[0].text.includes('worker-one thread-one'));
+  appendEvent({ ...pair, event: 'finished', settled: true });
+  console.log('PASS reporting rows and finish-before-append suppress warnings without consuming notices; remaining turn details are current');
+
   const modelFile = path.join(tmp, 'models.json');
   assert.equal(check(data(810, now, reset, 'trae'), [row, { ...second, model: 'DeepSeek-V4.1-Flash' }], { file: modelFile }).length, 1);
   assert.equal(check(data(810, now, reset, 'trae'), [{ ...row, model: 'DeepSeek-V4.1-Flash' }], { file: path.join(tmp, 'wrong-model.json') }).length, 0);
@@ -74,6 +110,7 @@ try {
     let errors = ''; child.stderr.on('data', chunk => errors += chunk);
     child.once('error', reject); child.once('close', code => code === 0 ? resolve() : reject(Error(errors)));
   });
+  publish(concurrentRows);
   const before = readEvents().length;
   await Promise.all([follow(), follow()]);
   assert.equal(readEvents().length - before, 2);

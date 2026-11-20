@@ -4,7 +4,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { rulesShared } from './global-rules.mjs';
 import { withLock, writeJson } from './shared-file.mjs';
-import { readEvents, workerRunStates, followerAlive, appendWorkerAlert } from './worker-events.mjs';
+import { readEvents, quotaRunningWorkers, followerAlive, appendWorkerQuotaAlert } from './worker-events.mjs';
 
 const MINUTE = 60000;
 export const quotaWarningFile = () => path.join(rulesShared(), 'worker-quota-warnings.json');
@@ -49,11 +49,10 @@ const alertText = (bucket, threshold, burn, turns) => {
     + `running turns: ${turns.map(row => `${row.name ?? row.task ?? '?'} ${row.thread ?? 'launching'}/${row.turn ?? '?'}`).join(', ')}.`;
 };
 export function checkQuotaWarnings({ data = cachedWorkerQuota(), rows = readEvents(), now = Date.now(),
-  file = quotaWarningFile(), emit = appendWorkerAlert, alive = followerAlive } = {}) {
+  file = quotaWarningFile(), emit = appendWorkerQuotaAlert, alive = followerAlive } = {}) {
   const buckets = dailyWarningBuckets(data, now);
   if (!buckets.length) return [];
-  const running = [...workerRunStates(rows).values()].map(({ row }) => row).filter(row => row.event === 'running'
-    && !row.settled && row.owner && alive(row));
+  const running = quotaRunningWorkers(rows, alive);
   return withLock(file, () => {
     const state = read(file), emitted = [];
     state.buckets ??= {};
@@ -81,9 +80,10 @@ export function checkQuotaWarnings({ data = cachedWorkerQuota(), rows = readEven
             wake: threshold === 90, warningId, threshold, used: bucket.used, limit: bucket.limit, burn,
             resetsAt: bucket.resetsAt, quotaModel: bucket.model,
             turns: turns.map(({ thread, turn, name }) => ({ thread, turn, name })), text: alertText(bucket, threshold, burn, turns) };
-          emit(row, warningId); // Alert emission is idempotent even after a crash before state persistence.
+          const delivered = emit(row, warningId, { alive, format: turns => ({ text: alertText(bucket, threshold, burn, turns) }) });
+          if (delivered === null) continue; // Suppression must leave the notice available for a later running turn.
           (saved.notices[owner] ??= {})[threshold] = { at: now, warningId };
-          emitted.push(row);
+          emitted.push(delivered ?? row);
         }
       }
       state.buckets[bucket.id] = saved;

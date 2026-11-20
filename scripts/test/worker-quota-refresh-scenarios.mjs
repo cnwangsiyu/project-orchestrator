@@ -6,7 +6,7 @@ import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { pollWorkerQuota, refreshWorkerQuota } from '../lib/worker-quota-refresh.mjs';
-import { readEvents, eventLine } from '../lib/worker-events.mjs';
+import { appendEvent, appendWorkerQuotaAlert, readEvents, eventLine } from '../lib/worker-events.mjs';
 import { dailyWarningBuckets } from '../lib/worker-quota-warnings.mjs';
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'worker-quota-refresh-'));
@@ -17,6 +17,7 @@ const row = { owner, account: 'company', runId: 'one', thread: 'one', event: 'ru
 const data = { checkedAt: now - 30 * 60000, codexAccounts: [{ name: 'company', kind: 'trae' }] };
 const options = { owner, rows: [row], data, profiles, now, readSnapshot: () => data, readRows: () => [row] };
 try {
+  appendEvent(row);
   const file = path.join(tmp, 'shared-refresh.json'), calls = path.join(tmp, 'calls.txt');
   const driver = path.join(tmp, 'follower.mjs');
   const module = fileURLToPath(new URL('../lib/worker-quota-refresh.mjs', import.meta.url));
@@ -51,7 +52,7 @@ try {
   console.log('PASS refresh failure is harmless, and three consecutive failures produce one info note per owner/day');
 
   let forbidden = 0;
-  for (const rows of [[], [{ ...row, account: 'personal' }], [{ ...row, event: 'finished' }]]) {
+  for (const rows of [[], [{ ...row, account: 'personal' }], [{ ...row, event: 'finished' }], [{ ...row, reporting: true }], [{ ...row, status: 'completed' }]]) {
     const result = await pollWorkerQuota({ ...options, rows, file: path.join(tmp, 'unused.json'), refresh: () => { forbidden++; } });
     assert.equal(result.status, 'idle');
   }
@@ -67,6 +68,25 @@ try {
   assert.equal(completedDuringRefresh.status, 'unavailable'); assert.equal(lateNotices, 0);
   assert.equal(fs.existsSync(path.join(tmp, 'worker-quota-warnings.json')), false);
   console.log('PASS terminal lifecycle evidence after async refresh suppresses all owner notes');
+  const raceOwner = '063283ad-1bc8-5a31-ad44-d68e6b199eb6', raceRow = { ...row, owner: raceOwner, runId: 'race' };
+  appendEvent(raceRow);
+  const raceOptions = { ...options, owner: raceOwner, rows: [raceRow], readRows: () => [raceRow] };
+  const raceFile = path.join(tmp, 'notice-finish-before-append.json');
+  fs.writeFileSync(raceFile, JSON.stringify({ status: 'unavailable', consecutiveFailures: 3,
+    accounts: { company: 'unavailable' }, accountCacheAt: { company: data.checkedAt } }));
+  await pollWorkerQuota({ ...raceOptions, file: raceFile, refresh: () => { throw Error('unexpected refresh'); },
+    emit: (alert, id, options) => {
+      appendEvent({ ...raceRow, event: 'finished', settled: true });
+      return appendWorkerQuotaAlert(alert, id, options);
+    } });
+  const suppressed = JSON.parse(fs.readFileSync(raceFile, 'utf8'));
+  assert.equal(suppressed.unavailableNotices, undefined); assert.equal(suppressed.notices, undefined);
+  appendEvent(raceRow);
+  await pollWorkerQuota({ ...raceOptions, file: raceFile, refresh: () => { throw Error('unexpected refresh'); } });
+  const resumed = JSON.parse(fs.readFileSync(raceFile, 'utf8'));
+  assert.ok(resumed.unavailableNotices[raceOwner].company); assert.ok(resumed.notices[raceOwner]);
+  console.log('PASS finish-before-append suppresses both unavailable notes without consuming daily notice state');
+
   let numericRefreshes = 0;
   await pollWorkerQuota({ ...options, file: path.join(tmp, 'stale-numeric.json'),
     data: { checkedAt: now, codexAccounts: [{ name: 'company', kind: 'trae', quota: { sampledAt: now - 16 * 60000 } }] },
@@ -92,7 +112,7 @@ try {
     assert.equal(result.status, 'unavailable');
   }
   assert.equal(unavailableReads, 1);
-  assert.equal(readEvents().filter(row => row.text?.startsWith('quota warnings unavailable for company:')).length, 1);
+  assert.equal(readEvents().filter(row => row.owner === owner && row.text?.startsWith('quota warnings unavailable for company:')).length, 1);
   assert.equal(JSON.parse(fs.readFileSync(unavailableFile, 'utf8')).accounts.company, 'unavailable');
   const quotaCli = fileURLToPath(new URL('../quota.mjs', import.meta.url));
   const status = spawnSync(process.execPath, [quotaCli, '--running', '--json'], {
