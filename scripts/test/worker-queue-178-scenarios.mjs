@@ -41,6 +41,18 @@ try {
   }
   console.log('PASS BC-178: escalated max with stalled company Astra uses approved personal xhigh, including excluded-company retry; max remains gated');
 
+  for (const variant of ['unknown-status', 'unknown-catalog', 'missing-advertised-astra-lane']) {
+    const raw = fixture();
+    if (variant === 'unknown-status') raw.accounts.find(account => account.id === 'trae').auth.status = 'UNKNOWN';
+    if (variant === 'unknown-catalog') raw.accounts.find(account => account.id === 'ttadk').catalog.status = 'UNKNOWN';
+    if (variant === 'missing-advertised-astra-lane') raw.accounts.find(account => account.id === 'ttadk').catalog.value.push(ASTRA);
+    const plan = routePure(task(), createSnapshot(raw));
+    assert.equal(plan.kind, 'blocked', variant);
+    assert.ok(plan.trace.candidates.filter(row => ['main', 'b'].includes(row.candidate.accountId))
+      .every(row => !row.predicates.find(predicate => predicate.ruleId === 'pScopedApproval')?.personalFallback?.maxUnavailable), variant);
+  }
+  console.log('PASS unresolved company status/catalog and a missing advertised Astra lane stay blocked; no quality-repeat exemption');
+
   const available = structuredClone(source); available.personalFallback = policy;
   const ready = routePure(task(), createSnapshot(available));
   assert.equal(ready.primary.candidate.accountId, 'trae'); assert.equal(ready.primary.candidate.effort, 'max');

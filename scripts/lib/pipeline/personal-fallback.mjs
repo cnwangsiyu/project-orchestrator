@@ -66,9 +66,24 @@ export function hardPersonalXhighFallback(task, snapshot, candidate, rows = []) 
   if (attempts.some(attempt => attempt.actual?.effort === 'max'
     && !(attempt.state === 'cancelled-no-work' && attempt.usefulWork === false && attempt.cancellationEvidenceId))
     || task.floor.profileIds?.some(profile => profile.endsWith(':max'))) return null;
+  // Missing company declarations are uncertainty, not negative capacity. Check
+  // the catalogs before enumeration can silently omit an advertised Astra.
+  for (const account of snapshot.accounts.filter(company)) {
+    const catalog = known(account.catalog);
+    if (!catalog || known(account.auth) !== true || known(account.transport) !== true
+      || known(account.health) !== true) return null;
+    for (const id of catalog.filter(isAstra)) {
+      const model = snapshot.models.find(model => model.id === id);
+      const lanes = snapshot.lanes.filter(lane => lane.accountId === account.id && lane.modelId === id);
+      if (!model || model.effortsStatus !== 'KNOWN' || !lanes.length
+        || lanes.some(lane => !known(lane.efforts) || lane.harness === 'UNKNOWN')) return null;
+    }
+  }
+  const capacityCodes = ['PROVIDER_QUOTA_DENIED', 'ACTIVE_RESTRICTION', 'TTADK_DAILY_RESERVE'];
   const qualifiedMax = rows.filter(row => row.candidate.effort === 'max'
     && company(candidateParts(snapshot, row.candidate).account)
-    && row.predicates.every(predicate => predicate.ok || ['pAvailable', 'pExclusions'].includes(predicate.ruleId)));
+    && row.predicates.every(predicate => predicate.ok || predicate.ruleId === 'pExclusions'
+      || predicate.ruleId === 'pAvailable' && capacityCodes.includes(predicate.reason?.code)));
   const astraMax = qualifiedMax.filter(row => isAstra(row.candidate.modelId));
   const max = astraMax.length ? astraMax : qualifiedMax;
   if (!max.length) return null;
