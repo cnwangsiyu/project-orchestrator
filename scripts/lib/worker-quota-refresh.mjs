@@ -96,7 +96,7 @@ export async function pollWorkerQuota({ owner, data = cachedWorkerQuota(), rows 
       && companies.has(row.account) && row.event === 'running' && !row.settled && alive(row));
     if (!running.length) return refreshed;
     withLock(file, () => {
-      const state = read(file), day = new Date(now).toISOString().slice(0, 10);
+      const state = read(file), day = new Date(Date.now()).toISOString().slice(0, 10);
       for (const [account, status] of Object.entries(state.accounts ?? {})) {
         if (status !== 'unavailable' || !running.some(row => row.account === account)
           || state.unavailableNotices?.[owner]?.[account] === day) continue;

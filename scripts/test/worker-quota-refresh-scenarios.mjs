@@ -100,6 +100,20 @@ try {
     encoding: 'utf8', timeout: 5000 });
   assert.equal(status.status, 0, status.stderr); assert.equal(JSON.parse(status.stdout).quotaRefresh.status, 'unavailable');
   console.log('PASS requested account unavailability produces one daily info note and never blocks another account by a global login error');
+  const originalNow = Date.now, beforeMidnight = Date.UTC(2030, 0, 1, 23, 59, 59);
+  let calendarClock = beforeMidnight, calendarNotes = 0;
+  Date.now = () => calendarClock;
+  try {
+    const calendarOptions = { ...options, file: path.join(tmp, 'calendar-rollover.json'), alive: () => true,
+      data: { ...data, checkedAt: beforeMidnight - 30 * 60000 }, readSnapshot: () => null,
+      emit: () => { calendarNotes++; },
+      refresh: () => { calendarClock = beforeMidnight + 2000; return { status: 'unavailable', accounts: { company: 'unavailable' } }; } };
+    await pollWorkerQuota({ ...calendarOptions, now: beforeMidnight });
+    calendarClock += 1000;
+    await pollWorkerQuota({ ...calendarOptions, now: calendarClock });
+    assert.equal(calendarNotes, 1, 'refresh crossing midnight cannot emit two info notes on the same UTC day');
+  } finally { Date.now = originalNow; }
+  console.log('PASS unavailable-account info dedupe uses the emission day when refresh crosses UTC midnight');
 
   const lib = path.join(tmp, 'lib');
   fs.cpSync(fileURLToPath(new URL('../lib', import.meta.url)), lib, { recursive: true });
