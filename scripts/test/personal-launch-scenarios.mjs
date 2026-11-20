@@ -16,6 +16,7 @@ fs.mkdirSync(shared);
 // Set before importing state: every incidental state read stays in this fixture.
 Object.assign(process.env, { HOME: tmp, RULES_SHARED: shared, TRAE_PROBE: '0', QUOTA_LOG: '0', ROUTE_LOG: '0' });
 const { analyze, leanLines, POLICY } = await import('../lib/state.mjs');
+const { personalLaunchChoice } = await import('../lib/personal-launch.mjs');
 const { acquireRoute } = await import('../lib/route-data.mjs');
 const { createTaskSpec, createSnapshot, routePure, renderPlan } = await import('../lib/pipeline/index.mjs');
 const exec = promisify(execFile);
@@ -52,6 +53,7 @@ let count = 0;
 function check(name, fn) { fn(); count++; console.log(`PASS ${name}`); }
 try {
   assert.equal(POLICY.launchHeadroom, 5);
+  assert.equal(POLICY.deadlineTieH, 6);
   for (const [label, b, main, want] of [['98/0', 98, 0, 'main'], ['90/0', 90, 0, 'b'], ['95/0 boundary', 95, 0, 'b'],
     ['both low, main has more', 98, 96, 'main'], ['both low, b has more', 96, 98, 'b']]) {
     check(`${label}: quota and hard Astra launch choose ${want}`, () => {
@@ -87,6 +89,44 @@ try {
     assert.equal(r.pick.model, ASTRA); assert.equal(r.pick.effort, 'xhigh');
     assert.match(r.why.join('\n'), /b 98% used: below launch headroom 5%.*-> main/);
     assert.deepEqual(r.needsUserOK, []);
+  });
+  check('fresh weekly resets one minute apart alternate as used share changes', () => {
+    const d = data(0, 0, { bLeft: 168, mainLeft: 168 + 1 / 60 });
+    d.codexAccounts[0].resets.count = 2;
+    d.codexAccounts[0].resets.credits.pop();
+    for (const [b, main, want] of [[0, 0, 'b'], [1, 0, 'main'], [1, 2, 'b']]) {
+      d.codexAccounts[0].windows[0].used = b; d.codexAccounts[1].windows[0].used = main;
+      assert.equal(analyze(d).codex.pick.a.name, want); assert.equal(route(d).pick.account, want);
+      assert.match(route(d).why.join('\n'), /deadlines within 6h/);
+    }
+    assert.equal(d.codexAccounts[0].resets.count, 2); assert.equal(d.codexAccounts[1].resets.count, 3);
+  });
+  check('one-hour deadline tie spends main 10% before b 40%, including imminent resets', () => {
+    for (const left of [20, 110]) {
+      const d = data(40, 10, { bLeft: left, mainLeft: left + 1 });
+      assert.equal(analyze(d).codex.pick.a.name, 'main'); assert.equal(analyze(d).codex.rotate, null);
+      assert.equal(route(d, 0).pick.account, 'main'); assert.equal(route(d, 1).pick.account, 'main');
+    }
+  });
+  check('six-hour tie boundary is inclusive; wider deadlines retain earliest-first order', () => {
+    for (const [gap, want] of [[6, 'main'], [6.01, 'b'], [48, 'b']]) {
+      const d = data(40, 10, { bLeft: 110, mainLeft: 110 + gap });
+      assert.equal(analyze(d).codex.pick.a.name, want); assert.equal(route(d).pick.account, want);
+    }
+  });
+  check('equal-usage ties prefer live hub, then name; tie groups do not chain past six hours', () => {
+    const a = { id: 'b', used: 0, deadline: 100, live: false }, b = { id: 'main', used: 0, deadline: 100.01, live: true };
+    assert.equal(personalLaunchChoice([a, b]).pick.id, 'main');
+    a.live = true; assert.equal(personalLaunchChoice([b, a]).pick.id, 'b');
+    const rows = [{ id: 'a', used: 80, deadline: 100, live: true }, { id: 'b', used: 20, deadline: 105, live: true },
+      { id: 'c', used: 0, deadline: 110, live: true }];
+    for (const input of [rows, [...rows].reverse(), [rows[1], rows[2], rows[0]]]) assert.equal(personalLaunchChoice(input).pick.id, 'b');
+  });
+  check('imminent reset rotation balances tie groups without choosing the higher-used member', () => {
+    const d = data(40, 10, { bLeft: 20, mainLeft: 21 });
+    d.codexAccounts.push(account('c', 20, 40));
+    assert.deepEqual(analyze(d).codex.rotate.map(r => r.a.name), ['main', 'c']);
+    assert.equal(route(d, 0).pick.account, 'main'); assert.equal(route(d, 1).pick.account, 'c');
   });
   check('two deadlines below 48h still rotate among accounts with headroom', () => {
     const d = data(90, 20, { bLeft: 20, mainLeft: 30 });

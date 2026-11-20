@@ -11,7 +11,7 @@ import { modelPreference } from './pipeline/policy.mjs';
 import { BALANCE, readTraeModels, freshLoad, readQueueState, companySnapshot, readQuotaHistory, ttadkBurn, freshTraeQuota, ttadkExpiringUnused, TTADK_EXPIRY_HINT } from './company-load.mjs';
 import { withLock, writeJson as atomicJson } from './shared-file.mjs';
 import { readHubState } from './hub-state.mjs';
-import { PERSONAL_LAUNCH_HEADROOM, personalLaunchChoice } from './personal-launch.mjs';
+import { PERSONAL_LAUNCH_HEADROOM, PERSONAL_DEADLINE_TIE_H, personalLaunchChoice } from './personal-launch.mjs';
 export { withLock } from './shared-file.mjs';
 
 export const now = Date.now();
@@ -741,6 +741,7 @@ export const POLICY = {
   claudeReserveMin: 2, claudeMargin: 5, claudeUncertainty: 15, claudeSpareGap: 20,
   redeemAt: 99, // a reset card is suggested only once an account's week is this spent
   launchHeadroom: PERSONAL_LAUNCH_HEADROOM, // % of a week to leave for a new launch; running turns are untouched
+  deadlineTieH: PERSONAL_DEADLINE_TIE_H, // nearby weekly resets share priority; spend the less-used account first
   throttle5h: 95, // a 5-hour window this full pauses new work on that vendor/account until it resets
   overspend: 115, // projected % at reset above which a lone Codex account without cards is overspending
   fableAvoid: 70, // Fable's own window at or above this: no Fable
@@ -845,17 +846,20 @@ export const analyze = (data) => {
     return { a, s, unconstrained, spent, throttledUntil, cp, deadline, known: unconstrained || !!s };
   });
   const usable = (r) => r.known && !r.spent && !r.throttledUntil;
-  // Earliest deadline first, stale readings included (their quota is lost on the same clock); ties go to live hubs.
-  const available = rows.filter(usable).sort((x, y) => x.deadline - y.deadline || (y.a.live - x.a.live));
+  // Stale readings still consume headroom and retain their quota deadline.
+  const available = rows.filter(usable);
   // A reachable hub must be able to take the choice. Keep last-good readings
   // when every hub is down, as before, for the quota diagnostic.
   const reachable = available.filter(r => r.a.live);
   const launch = personalLaunchChoice((reachable.length ? reachable : available)
-    .map(r => ({ id: r.a.name, used: r.s?.used ?? null, remaining: r.unconstrained ? Infinity : 100 - r.s.used, row: r })), P.launchHeadroom);
+    .map(r => ({ id: r.a.name, used: r.s?.used ?? null, deadline: r.deadline, live: r.a.live,
+      remaining: r.unconstrained ? Infinity : 100 - r.s.used, row: r })), P.launchHeadroom, P.deadlineTieH);
   const open = launch.open.map(r => r.row);
   const pick = launch.pick?.row ?? null;
   // Several accounts that must all be spent within two days: rotate launches across them instead of piling onto one.
-  const rotate = launch.hasHeadroom && open.filter((r) => r.deadline <= 48).length >= 2 ? open.filter((r) => r.deadline <= 48) : null;
+  // Each six-hour tie group contributes its least-used account to rotation.
+  const expiring = launch.groups.map(group => group[0].row).filter(r => r.deadline <= 48);
+  const rotate = launch.hasHeadroom && expiring.length >= 2 ? expiring : null;
   const urgent = rows.filter((r) => r.cp?.urgent);
   const redeemable = rows.filter((r) => r.spent && r.cp?.redeem).sort((x, y) => y.cp.gain - x.cp.gain);
   const redeem = urgent[0] ?? (!pick ? redeemable[0] ?? null : null);
@@ -932,7 +936,7 @@ export const leanLines = (st, data) => {
   else if (X.redeem) out.push(`redeem a reset card${multi ? ` on ${who(X.redeem)}` : ''}: ${X.redeem.cp.line} — ask the user first, every time; only after a yes: `
     + `codex-worker.mjs --account ${X.redeem.a.name} reset-credit-use --key <new uuid>${X.redeem.cp.card ? ` --credit ${X.redeem.cp.card.id}` : ''}, then quota.mjs --fresh`);
   if (X.rotate) out.push(`${companyDevice ? 'approved ChatGPT-account work' : 'new Codex work'} → rotate across ${X.rotate.map((r) => r.a.name).join(', ')} (each must be spent within ${hours(Math.max(...X.rotate.map((r) => r.deadline)))}); route.mjs alternates per launch`);
-  else if (X.pick && multi) out.push(`${companyDevice ? 'approved ChatGPT-account work (images, company capability fallback)' : 'new Codex work'} → account ${who(X.pick)} (week ${X.pick.s?.used ?? '-'}%, its quota is lost first: ${hours(X.pick.deadline)})${X.pickStale ? ' — from a stale reading' : ''}`);
+  else if (X.pick && multi) out.push(`${companyDevice ? 'approved ChatGPT-account work (images, company capability fallback)' : 'new Codex work'} → account ${who(X.pick)} (week ${X.pick.s?.used ?? '-'}%, quota deadline in ${hours(X.pick.deadline)})${X.pickStale ? ' — from a stale reading' : ''}`);
   if (X.out && (T?.usable||TR?.usable)) out.push('Personal ChatGPT accounts are out; qualified company work continues through route.mjs on TTADK/TRAE; ask for any remaining personal option.');
   else if (X.out && X.throttledOnly) out.push(`codex paused: 5h windows full, free in ${hours(X.nextFree)} — Claude takes it only while it has spare; otherwise request a capacity decision`);
   else if (X.out) out.push(`codex out on every account (next free in ${hours(X.nextFree)}): tell the user; ${C.status === 'over' || C.status === 'unknown'

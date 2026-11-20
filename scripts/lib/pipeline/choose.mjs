@@ -3,7 +3,7 @@ import { candidateParts } from './candidates.mjs';
 import { matchingApproval } from './filters.mjs';
 import { transportLaneFailures } from '../worker-completion.mjs';
 import { modelPreference, hardPreference, TIERS, SOL, ASTRA } from './policy.mjs';
-import { personalLaunchChoice } from '../personal-launch.mjs';
+import { personalLaunchChoice, personalLaunchExplanation } from '../personal-launch.mjs';
 export const prefersPersonalCodex = task => ['lookup','extract','analysis','implement','implement-hard','debug','science','review','draft','build-run','image-gen','second-opinion'].includes(task.category);
 
 export function orderCandidates(task, snapshot, rows) {
@@ -82,20 +82,19 @@ export function orderCandidates(task, snapshot, rows) {
   if(task.previousAttempts.length&&astraOffers.length&&cohort.every(r=>r.predicates?.some(p=>!p.ok))) cohort=astraOffers;
   // The legacy device lane spends accounts with deadlines <=48h in rotation;
   // otherwise it uses the earliest deadline. The CLI owns the counter mutation.
-  const availablePersonal=[...new Set(cohort.filter(r=>candidateParts(snapshot,r.candidate).account.kind==='chatgpt').map(r=>r.candidate.accountId))]
-    .sort((a,b)=>compare(known(snapshot.accounts.find(r=>r.id===a).budget)?.deadline??Infinity,
-      known(snapshot.accounts.find(r=>r.id===b).budget)?.deadline??Infinity)||compare(a,b));
+  const availablePersonal=[...new Set(cohort.filter(r=>candidateParts(snapshot,r.candidate).account.kind==='chatgpt').map(r=>r.candidate.accountId))];
   const launch=personalLaunchChoice(availablePersonal.map(id=>{
     const account=snapshot.accounts.find(a=>a.id===id);
     // A last-good usage reading still limits launch headroom; it never proves
     // a hub is reachable (the account predicates enforce that independently).
     const used=account.budget?.value?.weekly?.used??null;
-    return {id,used};
+    return {id,used,deadline:known(account.budget)?.deadline,live:known(account.transport)===true};
   }));
   const personalAccounts=launch.open.map(r=>r.id);
+  const personalOrder=new Map(personalAccounts.map((id,i)=>[id,i]));
   if(launch.below.length) cohort=cohort.filter(r=>candidateParts(snapshot,r.candidate).account.kind!=='chatgpt'
     ||(launch.hasHeadroom?personalAccounts.includes(r.candidate.accountId):r.candidate.accountId===launch.pick?.id));
-  const expiring=personalAccounts.filter(id=>{const deadline=known(snapshot.accounts.find(a=>a.id===id).budget)?.deadline;return deadline!==null&&deadline!==undefined&&deadline<=48;});
+  const expiring=launch.groups.map(group=>group[0]).filter(r=>r.deadline!==null&&r.deadline!==undefined&&r.deadline<=48).map(r=>r.id);
   const rotate=noCompany&&launch.hasHeadroom&&expiring.length>=2?expiring:[];
   const rotationRank=id=>rotate.length?(rotate.indexOf(id)-(snapshot.rotationState%rotate.length)+rotate.length)%rotate.length:0;
   if(rotate.length) cohort=cohort.filter(r=>candidateParts(snapshot,r.candidate).account.kind!=='chatgpt'||rotate.includes(r.candidate.accountId));
@@ -122,8 +121,9 @@ export function orderCandidates(task, snapshot, rows) {
     const pref=hardCompany&&policyModel(c.modelId)===first?0:preference.indexOf(policyModel(c.modelId));
     const accountOrder=account.kind==='ttadk'?0:account.kind==='trae'?1:2;
     const deviceLane=noCompany?[pref<0?preference.length:pref,
-      account.kind==='chatgpt'?(rotate.length?rotationRank(c.accountId):known(account.budget)?.deadline??Infinity):0]:[0,0];
-    return [...common, ...deviceLane, ...(task.tier==='light'&&!task.background?[e.completionMin,pref < 0 ? preference.length : pref]:[]), ...scheduling, pref < 0 ? preference.length : pref, accountOrder, known(account.budget)?.deadline??Infinity, c.accountId, c.laneId, EFFORTS.indexOf(c.effort), c.id];
+      account.kind==='chatgpt'?(rotate.length?rotationRank(c.accountId):personalOrder.get(c.accountId)??Infinity):0]:[0,0];
+    const deadlineRank=account.kind==='chatgpt'?personalOrder.get(c.accountId)??Infinity:known(account.budget)?.deadline??Infinity;
+    return [...common, ...deviceLane, ...(task.tier==='light'&&!task.background?[e.completionMin,pref < 0 ? preference.length : pref]:[]), ...scheduling, pref < 0 ? preference.length : pref, accountOrder, deadlineRank, c.accountId, c.laneId, EFFORTS.indexOf(c.effort), c.id];
   };
   const decorated = cohort.map((r) => ({ ...r, orderingTerms: terms(r) }));
   decorated.sort((a, b) => {
@@ -131,7 +131,9 @@ export function orderCandidates(task, snapshot, rows) {
     return 0;
   });
   return freeze({ rows: decorated, winner: decorated[0] ?? null, runnerUp: decorated[1] ?? null,
-    terms: { costComparable, freeLight, accountRotation:rotate, personalLaunchWhy:launch.why, policyLock: adversarial(task) ? 'kimi-deepseek-scoped-opus' : null, background: task.background } });
+    terms: { costComparable, freeLight, accountRotation:rotate,
+      personalLaunchWhy:personalLaunchExplanation(launch,launch.open.find(r=>r.id===decorated[0]?.candidate.accountId)??null),
+      policyLock: adversarial(task) ? 'kimi-deepseek-scoped-opus' : null, background: task.background } });
 }
 export const choose = (task, snapshot, rows) => orderCandidates(task, snapshot, rows).winner;
 function tolerateClaude(t,b) { return !b||t.category==='claude-tools'||b.status==='spare'||b.status==='near'&&(t.category==='design'||t.stakes==='high'||t.category==='review-high'); }

@@ -38,7 +38,11 @@ current history has no per-run weekly cost by category/effort, so the fixed
 `POLICY.launchHeadroom` margin applies. Accounts with enough headroom keep
 deadline order. If none has enough, use the usable account with most remaining
 quota and keep the reset-card suggestion rules. Running turns are untouched.
-Eligible accounts with deadlines within 48 hours rotate;
+Deadlines within `POLICY.deadlineTieH` (6 hours) of the earliest eligible
+deadline are tied: lower weekly usage wins, then a live hub, then account name.
+This balances launches as usage changes when weekly resets are close together.
+Eligible tie groups with deadlines within 48 hours rotate, using each group's
+least-used account;
 otherwise the earliest deadline wins. Nondry personal launches advance the CLI
 counter under a short lock. Max effort and reset redemption still ask separately.
 
