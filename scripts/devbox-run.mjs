@@ -1594,7 +1594,7 @@ async function scanTransfer(snapshot, scope, bases, state, env = process.env) {
     + '. Use a source-only export with those fields blanked, or a repo-level allow entry in references/devbox-run.md for proven non-secrets.');
 }
 
-async function snapshot(opts, temp, state, ancestors = new Set(), parentObjects = []) {
+export async function snapshot(opts, temp, state, ancestors = new Set(), parentObjects = []) {
   const gitEnv = parentObjects.length ? { ...process.env, GIT_ALTERNATE_OBJECT_DIRECTORIES:
     [process.env.GIT_ALTERNATE_OBJECT_DIRECTORIES, ...parentObjects.map(dir => JSON.stringify(dir))].filter(Boolean).join(path.delimiter) } : process.env;
   const git = async args => checked(await execute('git', ['-C', opts.repo, ...args], { state, rawCapture: true, env: gitEnv }), 'git snapshot');

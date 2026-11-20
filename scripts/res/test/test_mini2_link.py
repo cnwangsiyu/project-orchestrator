@@ -18,8 +18,8 @@ def answer(ip, idx=17):
 class ResolverTests(unittest.TestCase):
     def resolve(self, records, status="active"):
         with patch.object(socket, "if_nametoindex", return_value=17), \
-                patch.object(subprocess, "run", return_value=subprocess.CompletedProcess(
-                    [], 0, stdout="\tstatus: " + status)), \
+                patch.object(subprocess, "run", side_effect=lambda args, **kw: subprocess.CompletedProcess(
+                    [], 0, stdout="\tinterface: en12" if args[0] == "/sbin/route" else "\tstatus: " + status)), \
                 patch.object(socket, "getaddrinfo", return_value=records):
             return probe.resolve()
 

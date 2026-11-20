@@ -48,7 +48,15 @@ def resolve():
         raise LinkFailure("resolution-failed") from error
     if len(addresses) != 1:
         raise LinkFailure("ambiguous-answer" if addresses else "no-cable-answer")
-    return addresses.pop() + "%" + INTERFACE
+    address = addresses.pop() + "%" + INTERFACE
+    try:
+        route = subprocess.run(["/sbin/route", "-n", "get", "-inet6", address],
+                               capture_output=True, text=True, timeout=3, check=True)
+        if "interface: " + INTERFACE not in {line.strip() for line in route.stdout.splitlines()}:
+            raise LinkFailure("wrong-cable-route")
+    except (OSError, subprocess.SubprocessError) as error:
+        raise LinkFailure("route-unavailable") from error
+    return address
 
 
 def observation(mode):
@@ -71,7 +79,8 @@ def observation(mode):
             "-oConnectionAttempts=1", "-oStrictHostKeyChecking=yes", "-oUpdateHostKeys=no",
             "-oHostKeyAlias=" + HOST, "-oHostname=" + address.replace("%", "%%"), "-oControlPath=none",
             "-oProxyCommand=none", "-oProxyJump=none", "-oClearAllForwardings=yes",
-            "-oPermitLocalCommand=no", "bytedance@" + HOST, "printf 'mini2-link-ok\\n'"]
+            "-oPermitLocalCommand=no", "bytedance@" + HOST,
+            'test "$(hostname)" = Bytedances-Mac-mini.local && true && printf "mini2-link-ok\\n"']
     try:
         ssh = subprocess.run(args, capture_output=True, timeout=12)
     except subprocess.TimeoutExpired:

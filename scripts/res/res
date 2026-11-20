@@ -9,6 +9,22 @@
 # Heavy slots additionally support a gated wait and recovery of old, dead-PID holds.
 set -euo pipefail
 
+# The Darwin pool has an independent, default-off controller. Keep named takes,
+# waits and returns on that same guard instead of treating the row as generic.
+mini2_controller() {
+  local resolved
+  resolved=$(python3 -c 'import os,sys; print(os.path.join(os.path.dirname(os.path.realpath(sys.argv[1])),"mini2_control.py"))' "${BASH_SOURCE[0]}")
+  [ -f "$resolved" ] || { echo 'res: mini2 controller unavailable' >&2; return 2; }
+  python3 -B "$resolved" "$@"
+}
+case "${1:-}:${2:-}" in
+  mini2:*) shift; mini2_controller "$@"; exit $? ;;
+  take:mini2-exec-1|wait:mini2-exec-1|wait-pool:mini2|return:mini2-exec-1|holder:mini2-exec-1|retain-remote:mini2-exec-1)
+    mini2_controller "$@"; exit $? ;;
+  release-dead:mini2-exec-1|extend:mini2-exec-1)
+    echo 'res: mini2 requires receipt-matched reconciliation' >&2; exit 2 ;;
+esac
+
 # Embedded so copied scripts and bash -c entrypoints retain the same bounded guard.
 IFS= read -r -d '' RES_BUILD_PROCESS_SOURCE <<'BUILD_PROCESS_PY' || true
 """Bounded process evidence for dead local build holders; never print arguments."""
@@ -3966,7 +3982,7 @@ cmd_note() {
 cmd_log() { [ -f "$LOG" ] && tail -n "${1:-20}" "$LOG" || true; }
 
 case "${1:-}" in
-  status) shift; cmd_status "$@" ;;
+  status) shift; cmd_status "$@"; if [ -f "$RES_DIR/mini2-config.json" ]; then mini2_controller status; fi ;;
   holder) shift; cmd_holder "$@" ;;
   take) shift; cmd_take "$@" ;;
   wait) shift; cmd_wait "$@" ;;
@@ -3988,7 +4004,12 @@ case "${1:-}" in
   audit)
     shift
     [ "$#" -eq 0 ] || { [ "$#" -eq 1 ] && [ "$1" = --json ]; } || die 'audit accepts only --json'
-    pool_report audit "${1:-}" ;;
+    if [ "${1:-}" = --json ] && [ -f "$RES_DIR/mini2-config.json" ]; then
+      pool_report audit --json | python3 -c 'import json,sys; value=json.load(sys.stdin); value["mini2"]=json.loads(sys.argv[1]); print(json.dumps(value,indent=2))' "$(mini2_controller status --json)"
+    else
+      pool_report audit "${1:-}"
+      if [ -f "$RES_DIR/mini2-config.json" ]; then mini2_controller status; fi
+    fi ;;
   release-dead|retain-remote)
     action="$1"
     id="${2:-}"; shift 2
