@@ -153,8 +153,16 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
   const metadata = file => { try { return fs.lstatSync(file).isSymbolicLink() ? null : read(file); } catch { return null; } };
   const sameTask = r => object(r) && r.project === parsed.project && r.category === parsed.category
     && (r.taskId ?? r.name) === id && (r.role ?? 'primary') === role;
-  const terminalOutcomes = rows.filter(r => r.kind === 'outcome' && sameTask(r) && r.t <= now && r.thread && r.turn);
-  const turnOutcome = r => terminalOutcomes.findLast(o => o.thread === r.thread && o.turn === r.turn);
+  const terminalByTurn = new Map();
+  const terminalId = r => JSON.stringify([r.thread,r.turn]);
+  for (const row of rows.filter(r => r.kind === 'outcome' && sameTask(r) && r.t <= now && r.thread && r.turn)) {
+    const id = terminalId(row);
+    // A correction is a new version of the same terminal event. Preserve its
+    // confirmed execution fields when the correction only changes the verdict.
+    terminalByTurn.set(id,{...terminalByTurn.get(id),...row});
+  }
+  const terminalOutcomes = [...terminalByTurn.values()];
+  const turnOutcome = r => terminalByTurn.get(terminalId(r));
   const addActual = (actual, extra = {}) => {
     if (!actual) return;
     const accountId=Object.hasOwn(actual,'account') ? actual.account : actual.accountId

@@ -141,6 +141,22 @@ try {
     const rerouted = route(corrected.map(r=>({...r,t:Math.min(r.t,now)})),1); assert.equal(rerouted.failures,0); assert.equal(rerouted.blocked,false);
     assert.equal(route(corrected.map(r=>({...r,t:Math.min(r.t,now)})),1,false,['--actual','codex:gpt-6-astra:max@main']).failures,0);
   });
+  check('terminal corrections consume one tuple identity and preserve an identical earlier quality floor', () => {
+    const actual=[{account:'main',model:'gpt-6-astra',effort:'max'}];
+    const quality={...failed('Q',now-3000),actual,result:'fail',failureKind:'quality',cause:'code'};
+    const original={...failed('T',now-2000),actual,result:'fail',failureKind:'infra',cause:'infra'};
+    const correction={...original,t:now-1000,correction:true,result:'transport-failed',failureKind:'transport-failed'};
+    const args=['--actual','codex:gpt-6-astra:max@main,codex:gpt-6-astra:max@main'];
+    for (const changed of [correction,{t:now-1000,kind:'outcome',project:'p',name:'task',category:'implement',
+      thread:'thread',turn:'T',correction:true,result:'transport-failed',failureKind:'transport-failed'}]) {
+      const r=route([quality,original,changed],2,false,args);
+      assert.equal(r.failures,1); assert.equal(r.plan.task.qualityFailures,1); assert.equal(r.plan.task.previousAttempts.length,1);
+      assert.equal(r.plan.task.previousAttempts[0].failureKind,'quality');
+      assert.equal(r.plan.task.previousAttempts[0].actual.modelId,'gpt-6-astra');
+      assert.equal(r.plan.task.previousAttempts[0].actual.effort,'max');
+      assert.ok(r.plan.rejected.some(p=>p.reason?.code==='RETRY_BELOW_ACTUAL_FLOOR'));
+    }
+  });
   check('follower retries once on the same thread with 60s backoff and fixed state-check message', () => {
     const f = follower('retry-success'); const r = f.run(); assert.equal(r.status,0,r.stderr+r.stdout);
     const starts = f.calls().filter(r=>r.method==='turn/start'); assert.equal(starts.length,2);
