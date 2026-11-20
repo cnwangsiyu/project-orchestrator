@@ -93,7 +93,7 @@ try {
   const longText = 'x'.repeat(2500);
   assert.ok(eventLine({ event: 'message', kind: 'quota-warning', text: longText }).includes(longText));
   const printed = eventLine({ event: 'message', kind: 'quota-warning', text: 'delivery skipped finished' });
-  assert.match(printed, /^\[quota-warning\]/); assert.doesNotMatch(printed, /deliver|skip|finish/i);
+  assert.match(printed, /^\[quota-warning\]/); assert.ok(printed.includes('delivery skipped finished'));
   assert.match(hookEventLine({ event: 'message', kind: 'quota-warning', text: 'delivered skipped finished' }), /^\[quota-warning\]/);
   console.log('PASS quota --running displays durable per-account warning state without a credential query; owner note preserves long turn lists');
   console.log('all pass');
