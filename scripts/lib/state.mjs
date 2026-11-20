@@ -11,6 +11,7 @@ import { modelPreference } from './pipeline/policy.mjs';
 import { BALANCE, readTraeModels, freshLoad, readQueueState, companySnapshot, readQuotaHistory, ttadkBurn, freshTraeQuota, ttadkExpiringUnused, TTADK_EXPIRY_HINT } from './company-load.mjs';
 import { withLock, writeJson as atomicJson } from './shared-file.mjs';
 import { readHubState } from './hub-state.mjs';
+import { PERSONAL_LAUNCH_HEADROOM, personalLaunchChoice } from './personal-launch.mjs';
 export { withLock } from './shared-file.mjs';
 
 export const now = Date.now();
@@ -739,6 +740,7 @@ export const POLICY = {
   claudeOrchPerDay: Number(process.env.QUOTA_CLAUDE_ORCH_PER_DAY ?? 20 / 7), // % of Claude's week the orchestrators use per day
   claudeReserveMin: 2, claudeMargin: 5, claudeUncertainty: 15, claudeSpareGap: 20,
   redeemAt: 99, // a reset card is suggested only once an account's week is this spent
+  launchHeadroom: PERSONAL_LAUNCH_HEADROOM, // % of a week to leave for a new launch; running turns are untouched
   throttle5h: 95, // a 5-hour window this full pauses new work on that vendor/account until it resets
   overspend: 115, // projected % at reset above which a lone Codex account without cards is overspending
   fableAvoid: 70, // Fable's own window at or above this: no Fable
@@ -844,10 +846,16 @@ export const analyze = (data) => {
   });
   const usable = (r) => r.known && !r.spent && !r.throttledUntil;
   // Earliest deadline first, stale readings included (their quota is lost on the same clock); ties go to live hubs.
-  const open = rows.filter(usable).sort((x, y) => x.deadline - y.deadline || (y.a.live - x.a.live));
-  const pick = open[0] ?? null;
+  const available = rows.filter(usable).sort((x, y) => x.deadline - y.deadline || (y.a.live - x.a.live));
+  // A reachable hub must be able to take the choice. Keep last-good readings
+  // when every hub is down, as before, for the quota diagnostic.
+  const reachable = available.filter(r => r.a.live);
+  const launch = personalLaunchChoice((reachable.length ? reachable : available)
+    .map(r => ({ id: r.a.name, used: r.s?.used ?? null, remaining: r.unconstrained ? Infinity : 100 - r.s.used, row: r })), P.launchHeadroom);
+  const open = launch.open.map(r => r.row);
+  const pick = launch.pick?.row ?? null;
   // Several accounts that must all be spent within two days: rotate launches across them instead of piling onto one.
-  const rotate = open.filter((r) => r.deadline <= 48).length >= 2 ? open.filter((r) => r.deadline <= 48) : null;
+  const rotate = launch.hasHeadroom && open.filter((r) => r.deadline <= 48).length >= 2 ? open.filter((r) => r.deadline <= 48) : null;
   const urgent = rows.filter((r) => r.cp?.urgent);
   const redeemable = rows.filter((r) => r.spent && r.cp?.redeem).sort((x, y) => y.cp.gain - x.cp.gain);
   const redeem = urgent[0] ?? (!pick ? redeemable[0] ?? null : null);
@@ -858,7 +866,7 @@ export const analyze = (data) => {
     ttadk, trae,
     companyAccounts: registeredCompany,
     companyUnknown: companyUnknown(data, registeredCompany), registryError: data.errors?.registry ?? null,
-    readable: rows.some((r) => r.known), rows, pick, redeem, cardsHeld, throttled, rotate, open,
+    readable: rows.some((r) => r.known), rows, pick, redeem, cardsHeld, throttled, rotate, open, launchWhy: launch.why,
     out: !pick && !redeem && rows.some((r) => r.known),
     // Out only because 5-hour windows are full: a pause of hours, not a spent week.
     throttledOnly: !pick && !redeem && throttled.length > 0 && rows.every((r) => !r.known || r.spent || r.throttledUntil),
@@ -879,6 +887,7 @@ export const analyze = (data) => {
 // ---- the lean, as lines; every line is derived from analyze() ----
 export const leanLines = (st, data) => {
   const { claude: C, codex: X } = st, out = [];
+  if (X.launchWhy) out.push(X.launchWhy);
   const multi = X.rows.length > 1, who = (r) => `${r.a.name}${r.a.email ? ` (${r.a.email})` : ''}`;
   if (X.companyUnknown.length || X.registryError) out.push(`company account state unknown (${X.companyUnknown.map((a) => `${a.name}/${a.kind}`).join(', ') || X.registryError}): check quota.mjs --fresh; personal quota needs the user's OK`);
   if (st.stop) return [...out, 'stop: neither vendor\'s usage is readable — report the account uncertainty and route any other authorized runnable lane; check `claude -p /usage` and the Codex hubs, tell the user'];

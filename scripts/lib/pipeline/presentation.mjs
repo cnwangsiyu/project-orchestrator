@@ -25,6 +25,8 @@ export function presentRoute(plan, view, context) {
   const t = plan.task, f = t.flags, seat = plan.primary ?? plan.primaryProposal, c = seat?.candidate;
   const fixedNotes = [];
   const notes = [...view.notes,...(t.policyNotes??[])], why = [...(t.policyNotes??[])], tellUser = [...view.tellUser], needsUserOK = [...view.needsOK];
+  if(c && candidateParts(snapshot,c).account.kind==='chatgpt' && plan.trace?.comparator?.personalLaunchWhy)
+    why.push(plan.trace.comparator.personalLaunchWhy);
   if(snapshot.personalFallback?.enabled) {
     const i=notes.findIndex(line=>line.startsWith('Queue patience:'));
     if(i>=0)notes[i]=`Queue decision: notify the owner after >${snapshot.personalFallback.queueWaitMinutes} min; repeat after ${snapshot.personalFallback.queueReminderMinutes} min; owner chooses, no automatic switch.`;

@@ -3,6 +3,7 @@ import { candidateParts } from './candidates.mjs';
 import { matchingApproval } from './filters.mjs';
 import { transportLaneFailures } from '../worker-completion.mjs';
 import { modelPreference, hardPreference, TIERS, SOL, ASTRA } from './policy.mjs';
+import { personalLaunchChoice } from '../personal-launch.mjs';
 export const prefersPersonalCodex = task => ['lookup','extract','analysis','implement','implement-hard','debug','science','review','draft','build-run','image-gen','second-opinion'].includes(task.category);
 
 export function orderCandidates(task, snapshot, rows) {
@@ -81,11 +82,21 @@ export function orderCandidates(task, snapshot, rows) {
   if(task.previousAttempts.length&&astraOffers.length&&cohort.every(r=>r.predicates?.some(p=>!p.ok))) cohort=astraOffers;
   // The legacy device lane spends accounts with deadlines <=48h in rotation;
   // otherwise it uses the earliest deadline. The CLI owns the counter mutation.
-  const personalAccounts=[...new Set(cohort.filter(r=>candidateParts(snapshot,r.candidate).account.kind==='chatgpt').map(r=>r.candidate.accountId))]
+  const availablePersonal=[...new Set(cohort.filter(r=>candidateParts(snapshot,r.candidate).account.kind==='chatgpt').map(r=>r.candidate.accountId))]
     .sort((a,b)=>compare(known(snapshot.accounts.find(r=>r.id===a).budget)?.deadline??Infinity,
       known(snapshot.accounts.find(r=>r.id===b).budget)?.deadline??Infinity)||compare(a,b));
+  const launch=personalLaunchChoice(availablePersonal.map(id=>{
+    const account=snapshot.accounts.find(a=>a.id===id);
+    // A last-good usage reading still limits launch headroom; it never proves
+    // a hub is reachable (the account predicates enforce that independently).
+    const used=account.budget?.value?.weekly?.used??null;
+    return {id,used};
+  }));
+  const personalAccounts=launch.open.map(r=>r.id);
+  if(launch.below.length) cohort=cohort.filter(r=>candidateParts(snapshot,r.candidate).account.kind!=='chatgpt'
+    ||(launch.hasHeadroom?personalAccounts.includes(r.candidate.accountId):r.candidate.accountId===launch.pick?.id));
   const expiring=personalAccounts.filter(id=>{const deadline=known(snapshot.accounts.find(a=>a.id===id).budget)?.deadline;return deadline!==null&&deadline!==undefined&&deadline<=48;});
-  const rotate=noCompany&&expiring.length>=2?expiring:[];
+  const rotate=noCompany&&launch.hasHeadroom&&expiring.length>=2?expiring:[];
   const rotationRank=id=>rotate.length?(rotate.indexOf(id)-(snapshot.rotationState%rotate.length)+rotate.length)%rotate.length:0;
   if(rotate.length) cohort=cohort.filter(r=>candidateParts(snapshot,r.candidate).account.kind!=='chatgpt'||rotate.includes(r.candidate.accountId));
   const freeLight = !task.background && task.tier === 'light' && cohort.some((r) => company(candidateParts(snapshot, r.candidate).account) && r.estimate.noPrioritySpend === true);
@@ -120,7 +131,7 @@ export function orderCandidates(task, snapshot, rows) {
     return 0;
   });
   return freeze({ rows: decorated, winner: decorated[0] ?? null, runnerUp: decorated[1] ?? null,
-    terms: { costComparable, freeLight, accountRotation:rotate, policyLock: adversarial(task) ? 'kimi-deepseek-scoped-opus' : null, background: task.background } });
+    terms: { costComparable, freeLight, accountRotation:rotate, personalLaunchWhy:launch.why, policyLock: adversarial(task) ? 'kimi-deepseek-scoped-opus' : null, background: task.background } });
 }
 export const choose = (task, snapshot, rows) => orderCandidates(task, snapshot, rows).winner;
 function tolerateClaude(t,b) { return !b||t.category==='claude-tools'||b.status==='spare'||b.status==='near'&&(t.category==='design'||t.stakes==='high'||t.category==='review-high'); }

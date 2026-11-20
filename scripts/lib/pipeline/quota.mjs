@@ -26,5 +26,6 @@ export function personalBudget(windows, resets, history, now, claude=false) {
   const gain=w.used/100+left/hours-1, redeem=!!card&&(w.used>=99&&(left/hours>=.1||expH<left)||expH<=1&&gain>.05);
   return {status:'KNOWN',underused:credits.length>0||((w.used+rate*deadline)<100&&(deadline<left||elapsed>=.1)),
     overspending:!credits.length&&projected>115,deadline,frontLoad:credits.length>0,
+    weekly:weeklyProjection(windows,history,now),
     redemption:redeem?{cardId:card.id,expiresAt:card.expiresAt,gain}:null};
 }

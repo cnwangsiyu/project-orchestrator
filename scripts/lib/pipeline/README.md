@@ -33,7 +33,12 @@ TTADK, personal ChatGPT Astra, Fable and reset redemption keep their separate de
 proposals contain no executable commands; gated second reviewers do not stop
 an eligible company primary, and remain required before acceptance.
 On devices without company accounts, personal ChatGPT is the normal lane with
-standing permission. Eligible accounts with deadlines within 48 hours rotate;
+standing permission. New personal launches require 5% of weekly headroom;
+current history has no per-run weekly cost by category/effort, so the fixed
+`POLICY.launchHeadroom` margin applies. Accounts with enough headroom keep
+deadline order. If none has enough, use the usable account with most remaining
+quota and keep the reset-card suggestion rules. Running turns are untouched.
+Eligible accounts with deadlines within 48 hours rotate;
 otherwise the earliest deadline wins. Nondry personal launches advance the CLI
 counter under a short lock. Max effort and reset redemption still ask separately.
 
