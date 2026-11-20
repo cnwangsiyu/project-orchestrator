@@ -191,6 +191,22 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
     addActual({ model: m[2], effort: m[3], account: m[4] ?? null, accountStatus:m[4]?'KNOWN':'UNKNOWN' },
       { source:'explicit-actual', failureKind: parsed.failures ? parsed.failureKind : 'infra' });
   }
+  // Explicit launch-order tuples may identify the same finished transport turn.
+  // Bind newest-to-oldest once each, so equal tuples from earlier quality turns
+  // keep their floor rather than all inheriting the newest transport result.
+  if (flags.actual) {
+    const terminal = terminalOutcomes.filter(r => r.actualStatus === 'KNOWN').toReversed();
+    for (const attempt of attempts.toReversed()) {
+      const index = terminal.findIndex(row => {
+        const actual = Array.isArray(row.actual) ? row.actual.at(-1) : row.actual;
+        return actual && modelId(actual.modelId ?? actual.model) === attempt.actual.modelId
+          && actual.effort === attempt.actual.effort && (actual.accountId ?? actual.account) === attempt.actual.accountId;
+      });
+      if (index < 0) continue;
+      const [row] = terminal.splice(index,1);
+      if (transportOutcome(turnOutcome(row))) Object.assign(attempt,{state:'transport-failed',failureKind:'transport-failed',thread:row.thread,turn:row.turn});
+    }
+  }
   if (retryHistory && flags['previous-attempt'] && !flags.actual) {
     const dir = path.resolve(flags['task-dir'] ?? '.'), file = path.resolve(dir, flags['previous-attempt']);
     if (!file.startsWith(`${dir}${path.sep}`) || !['attempts.json', 'actual-attempts.json', 'launch.json'].includes(path.basename(file))) throw Error('--previous-attempt must name task-owned attempts.json, actual-attempts.json or launch.json');

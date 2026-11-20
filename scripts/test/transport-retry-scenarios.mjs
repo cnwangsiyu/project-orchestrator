@@ -112,6 +112,12 @@ try {
     const named = route([],1,false,['--task-dir',routeDir,'--previous-attempt','attempts.json']);
     assert.equal(named.blocked,false); assert.equal(named.failures,0); assert.equal(named.plan.task.floor.previousAttemptIds.length,0);
     assert.match(route([],0,false,['--no-auto-continue']).pick.command,/--no-auto-continue/);
+    const explicit = {...outcome,actual:[{account:'main',model:'gpt-6-astra',effort:'max'}]};
+    const matched = route([launch,explicit],1,false,['--actual','codex:gpt-6-astra:max@main']);
+    assert.equal(matched.failures,0); assert.equal(matched.blocked,false); assert.equal(matched.plan.task.previousAttempts.length,0);
+    const quality = {...explicit,turn:'older-quality',t:now-2000,result:'fail',failureKind:'quality'};
+    const mixed = route([quality,explicit],2,false,['--actual','codex:gpt-6-astra:max@main,codex:gpt-6-astra:max@main']);
+    assert.equal(mixed.failures,1); assert.equal(mixed.plan.task.previousAttempts.length,1);
   });
   check('lane demotion lasts 30 minutes, dedupes turns, and never bans the only lane', () => {
     const recent = [failed('first'),failed('second')];
@@ -123,7 +129,7 @@ try {
     assert.equal(route(recent.map(r=>({...r,t:now-1800001}))).pick.account,'main');
   });
   check('manual transport correction binds the latest terminal turn for cutover routing', () => {
-    const original = {...failed('legacy-turn'),auto:true,result:'fail',failureKind:'infra',cause:'infra'};
+    const original = {...failed('legacy-turn'),auto:true,result:'fail',failureKind:'infra',cause:'infra',actual:[{account:'main',model:'gpt-6-astra',effort:'max'}]};
     const launch = {...original,kind:'launch-model',state:'failed',accepted:true,actual:{accountId:'main',modelId:'gpt-6-astra',effort:'max'}};
     fs.writeFileSync(routeLog,[launch,original].map(JSON.stringify).join('\n')+'\n');
     const r = spawnSync(process.execPath,[path.join(scripts,'outcome.mjs'),'--project','p','--name','task','--correct',
@@ -133,6 +139,7 @@ try {
     assert.equal(corrected.at(-1).thread,'thread'); assert.equal(corrected.at(-1).turn,'legacy-turn');
     assert.equal(corrected.at(-1).failureKind,'transport-failed');
     const rerouted = route(corrected.map(r=>({...r,t:Math.min(r.t,now)})),1); assert.equal(rerouted.failures,0); assert.equal(rerouted.blocked,false);
+    assert.equal(route(corrected.map(r=>({...r,t:Math.min(r.t,now)})),1,false,['--actual','codex:gpt-6-astra:max@main']).failures,0);
   });
   check('follower retries once on the same thread with 60s backoff and fixed state-check message', () => {
     const f = follower('retry-success'); const r = f.run(); assert.equal(r.status,0,r.stderr+r.stdout);
