@@ -4,7 +4,7 @@ import { candidateParts, enumerateCandidates } from './candidates.mjs';
 import { modelPreference, policyEffort } from './policy.mjs';
 import { estimateCandidate } from './estimate.mjs';
 import { standingPersonalFallback, hardPersonalXhighFallback } from './personal-fallback.mjs';
-import { standingPersonalPriority } from './personal-priority.mjs';
+import { standingPersonalPriority, personalPriorityGuard, exclusiveCodexTask } from './personal-priority.mjs';
 import { ttadkReserve } from './ttadk-reserve.mjs';
 
 const pass = (id) => result(id);
@@ -36,6 +36,10 @@ export function pUserRules(t, s, c) {
 }
 export function pExclusions(t, s, c) {
   const { account } = candidateParts(s, c);
+  if (s.personalPriority?.mode === 'exclusive' && (!company(account) && account.kind !== 'claude'
+    && (account.id !== s.personalPriority.account || account.kind !== 'chatgpt')
+    || account.kind === 'claude' && exclusiveCodexTask(t, s)))
+    return deny('pExclusions', 'PERSONAL_EXCLUSIVE_ACCOUNT', 'New personal Codex work is restricted to main until the standing window is revoked.', c);
   const toolChannelFailed = ['browser','ui-browser','computer-use'].includes(t.category) && t.previousAttempts.some(a =>
     a.taskId === t.taskId && (a.role ?? 'primary') === t.role && ['failed','completed','succeeded'].includes(a.state) && a.failureKind === 'tool'
     && a.actualStatus === 'KNOWN' && (a.browserChannel ?? s.accounts.find(p => p.id === a.actual?.accountId)?.kind) === account.kind);
@@ -51,6 +55,10 @@ export function pAvailable(t, s, c) {
     || c.family !== m.family || c.qualityProfileId !== m.qualityProfiles[c.effort])
     return deny('pAvailable', 'CATALOG_UNSUPPORTED', 'The exact model, effort and harness must be declared.', c);
   if (!l.selectable && !l.evidenced) return deny('pAvailable', 'LANE_NOT_EVIDENCED', 'Provider-assigned lanes need current evidence; they cannot be forced.', c);
+  if (s.personalPriority?.mode === 'exclusive' && a.kind === 'chatgpt' && a.id === s.personalPriority.account) {
+    const guard = personalPriorityGuard(s);
+    if (guard) return deny('pAvailable', 'PERSONAL_EXCLUSIVE_WAIT', guard, c);
+  }
   if (known(a.auth) !== true) return deny('pAvailable', 'AUTH_UNKNOWN_OR_DENIED', 'Fresh positive authentication status is required.', c);
   if (known(a.transport) !== true) return deny('pAvailable', 'TRANSPORT_UNKNOWN_OR_DENIED', 'Fresh positive transport/supervisor status is required.', c);
   if (known(a.health) !== true) return deny('pAvailable', 'HEALTH_UNKNOWN', 'Health status is unknown.', c);

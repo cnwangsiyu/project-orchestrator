@@ -101,6 +101,8 @@ export function createSnapshot(raw, options = {}) {
       denialResetAt: obs(a.denialResetAt, `${prefix}.denialResetAt`, nonnegative),
       burn: obs(a.burn, `${prefix}.burn`, (v) => object(v) && nonnegative(v.projectedAtReset) && nonnegative(v.resetsAt), FRESHNESS.telemetryMs),
       budget: obs(a.budget, `${prefix}.budget`, object),
+      ...(a.resetCards !== undefined || a.resets?.count !== undefined ? {
+        resetCards: obs(a.resetCards ?? a.resets.count, `${prefix}.resetCards`, n => Number.isInteger(n) && n >= 0) } : {}),
     };
   }), 'accounts');
   const lanes = byId(rows(raw.lanes, 'lanes').map((l) => {

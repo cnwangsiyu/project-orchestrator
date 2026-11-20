@@ -10,13 +10,17 @@
 // lines come from lib/state.mjs, where all quota policy lives. Readings are cached for 10 minutes in
 // ~/.claude/orchestrator/_shared/quota.json and shared by every orchestrator; --fresh re-reads everything.
 import os from 'node:os';
-import { readState, readProfiles, analyze, leanLines, winState, weekly, fmt, fmtAgo, POLICY } from './lib/state.mjs';
+import fs from 'node:fs';
+import path from 'node:path';
+import { readState, readProfiles, analyze, leanLines, winState, weekly, fmt, fmtAgo, POLICY, SHARED } from './lib/state.mjs';
+import { PERSONAL_PRIORITY_FILE, personalPriorityWindow } from './lib/pipeline/personal-priority.mjs';
+import { checkPersonalPriorityNotices } from './lib/personal-priority-notices.mjs';
 import { probeHub } from './lib/hub-state.mjs';
 import { runningWorkers } from './lib/running-workers.mjs';
 import { notifyMonitorFailure } from './lib/monitor-notify.mjs';
 import { readQuotaWarnings, checkQuotaWarnings } from './lib/worker-quota-warnings.mjs';
 import { readQuotaRefreshState } from './lib/worker-quota-refresh.mjs';
-import { readEventHistory } from './lib/worker-events.mjs';
+import { readEventHistory, launcherIdentity } from './lib/worker-events.mjs';
 
 const args = process.argv.slice(2);
 let profiles = {}; try { profiles = readProfiles(); } catch {}
@@ -59,8 +63,15 @@ data = { ...data, codexAccounts: data.codexAccounts?.map(account => {
 }) };
 try { checkQuotaWarnings({ data }); running.quotaWarnings = readQuotaWarnings(); }
 catch (error) { running.quotaWarningError = error.message; }
+try {
+  const raw = JSON.parse(fs.readFileSync(path.join(process.env.RULES_SHARED || SHARED, PERSONAL_PRIORITY_FILE), 'utf8'));
+  const window = personalPriorityWindow(raw);
+  if (!window) throw Error('invalid personal priority window');
+  data.personalPriority = window;
+} catch (error) { if (error.code !== 'ENOENT') throw error; }
 const st = analyze(data);
 const lean = leanLines(st, data);
+const personalNotices = checkPersonalPriorityNotices({ snapshot: st.codex.prioritySnapshot, owner: launcherIdentity().sessionId });
 // Tokens as the dashboard shows them: 185M / 500M.
 const fmtTokens = (n) => {
   if (n == null || !Number.isFinite(n)) return '?';
@@ -77,6 +88,7 @@ if (args.includes('--json')) {
     codex: codex.rows.map((r) => ({ name: r.a.name, email: r.a.email ?? null, live: r.a.live, usageLive: r.a.usageLive, plan: r.a.plan ?? null, week: r.s, spent: r.spent, throttledUntil: r.throttledUntil, unconstrained: r.unconstrained, resets: r.a.resets, cardPlan: r.cp })),
     codexPick: codex.pick?.a.name ?? null, redeem: codex.redeem ? { account: codex.redeem.a.name, card: codex.redeem.cp.card?.id ?? null } : null,
     codexOut: codex.out, underused: codex.underused, frontLoad: codex.frontLoad, overspending: codex.overspending, lean,
+    personalPriorityNotices: personalNotices.map(row => row.text),
     ttadk: codex.ttadk ? { name: codex.ttadk.name, healthy: codex.ttadk.healthy, reason: codex.ttadk.reason, quotaOut: codex.ttadk.quotaOut,
       usage: codex.ttadk.usage, usageError: codex.ttadk.usageError, burn: codex.ttadk.burn } : null,
     trae: codex.trae ? { name: codex.trae.name, healthy: codex.trae.healthy, quota: codex.trae.quota,
@@ -129,6 +141,7 @@ for (const [family, q] of Object.entries(TRA?.queue ?? {})) console.log(`  trae 
 if (TRA && !Object.keys(TRA.load).length) console.log('  trae   load unknown (missing or older than 30m)');
 if (TRA && !Object.keys(TRA.queue).length) console.log('  trae   queue unknown (missing or older than 30m)');
 console.log(`budget: claude ${st.claude.status} (now: spare ≤${st.claude.spareLine}%, cap ${st.claude.cap}%, ${st.claude.reserve ?? '?'}% kept for orchestration until the reset); `
-  + `codex ${st.codex.out ? 'out' : st.codex.rotate ? `→ rotate ${st.codex.rotate.map((r) => r.a.name).join('/')}` : st.codex.pick ? `→ ${st.codex.pick.a.name}` : st.codex.redeem ? `→ redeem a card on ${st.codex.redeem.a.name}` : 'unreadable'}${st.codex.underused ? ', underused' : ''}${st.codex.overspending ? ', overspending' : ''}`
+  + `codex ${st.codex.exclusiveWait ? '→ wait main' : st.codex.out ? 'out' : st.codex.rotate ? `→ rotate ${st.codex.rotate.map((r) => r.a.name).join('/')}` : st.codex.pick ? `→ ${st.codex.pick.a.name}` : st.codex.redeem ? `→ redeem a card on ${st.codex.redeem.a.name}` : 'unreadable'}${st.codex.underused ? ', underused' : ''}${st.codex.overspending ? ', overspending' : ''}`
   + `${st.codex.cardsHeld ? `, ${st.codex.cardsHeld} reset card(s)` : ''}`);
 for (const l of lean) console.log(`lean: ${l}`);
+for (const row of personalNotices) console.log(row.text);

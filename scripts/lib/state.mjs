@@ -12,6 +12,8 @@ import { BALANCE, readTraeModels, freshLoad, readQueueState, companySnapshot, re
 import { withLock, writeJson as atomicJson } from './shared-file.mjs';
 import { readHubState } from './hub-state.mjs';
 import { PERSONAL_LAUNCH_HEADROOM, PERSONAL_DEADLINE_TIE_H, personalLaunchChoice } from './personal-launch.mjs';
+import { activePersonalPriority, personalPriorityGuard } from './pipeline/personal-priority.mjs';
+import { weeklyProjection } from './pipeline/quota.mjs';
 export { withLock } from './shared-file.mjs';
 
 export const now = Date.now();
@@ -846,8 +848,20 @@ export const analyze = (data) => {
     return { a, s, unconstrained, spent, throttledUntil, cp, deadline, known: unconstrained || !!s };
   });
   const usable = (r) => r.known && !r.spent && !r.throttledUntil;
+  const personalPriority = activePersonalPriority(data.personalPriority, now);
+  const prioritySnapshot = { personalPriority, decisionAt: now, accounts: rows.map(r => {
+    const at = r.a.seenAt ?? data.checkedAt;
+    const fresh = Number.isFinite(at) && at <= now && now - at <= TTL_MS && !r.a.observationStale && r.a.usageLive !== false;
+    return { id: r.a.name, kind: 'chatgpt', resets: r.a.resets, budget: { status: fresh ? 'KNOWN' : 'UNKNOWN',
+      value: { weekly: weeklyProjection(r.a.windows, hist[`codex:${r.a.name}`], now) } } };
+  }) };
+  const priorityGuard = personalPriorityGuard(prioritySnapshot);
   // Stale readings still consume headroom and retain their quota deadline.
-  const available = rows.filter(usable);
+  let available = rows.filter(usable);
+  const exclusive = personalPriority?.mode === 'exclusive';
+  if (exclusive) available = priorityGuard ? [] : available.filter(r => r.a.name === personalPriority.account && r.a.live === true);
+  else if (personalPriority && !priorityGuard && available.some(r => r.a.name === personalPriority.account && r.a.live === true))
+    available = available.filter(r => r.a.name === personalPriority.account);
   // A reachable hub must be able to take the choice. Keep last-good readings
   // when every hub is down, as before, for the quota diagnostic.
   const reachable = available.filter(r => r.a.live);
@@ -860,8 +874,9 @@ export const analyze = (data) => {
   // Each six-hour tie group contributes its least-used account to rotation.
   const expiring = launch.groups.map(group => group[0].row).filter(r => r.deadline <= 48);
   const rotate = launch.hasHeadroom && expiring.length >= 2 ? expiring : null;
-  const urgent = rows.filter((r) => r.cp?.urgent);
-  const redeemable = rows.filter((r) => r.spent && r.cp?.redeem).sort((x, y) => y.cp.gain - x.cp.gain);
+  const cardRows = exclusive ? rows.filter(r => r.a.name === personalPriority.account) : rows;
+  const urgent = cardRows.filter((r) => r.cp?.urgent);
+  const redeemable = cardRows.filter((r) => r.spent && r.cp?.redeem).sort((x, y) => y.cp.gain - x.cp.gain);
   const redeem = urgent[0] ?? (!pick ? redeemable[0] ?? null : null);
   const throttled = rows.filter((r) => r.throttledUntil).sort((x, y) => x.throttledUntil - y.throttledUntil);
   const cardsHeld = rows.reduce((n, r) => n + (r.a.resets?.count ?? 0), 0);
@@ -870,7 +885,9 @@ export const analyze = (data) => {
     ttadk, trae,
     companyAccounts: registeredCompany,
     companyUnknown: companyUnknown(data, registeredCompany), registryError: data.errors?.registry ?? null,
-    readable: rows.some((r) => r.known), rows, pick, redeem, cardsHeld, throttled, rotate, open, launchWhy: launch.why,
+    readable: rows.some((r) => r.known), rows, pick, redeem, cardsHeld, throttled, rotate, open,
+    launchWhy: exclusive ? `personal main only until ${personalPriority.until ?? 'revoked'}${priorityGuard ? `: ${priorityGuard}` : ''}` : launch.why,
+    exclusiveWait: exclusive && !pick, prioritySnapshot,
     out: !pick && !redeem && rows.some((r) => r.known),
     // Out only because 5-hour windows are full: a pause of hours, not a spent week.
     throttledOnly: !pick && !redeem && throttled.length > 0 && rows.every((r) => !r.known || r.spent || r.throttledUntil),
@@ -937,7 +954,8 @@ export const leanLines = (st, data) => {
     + `codex-worker.mjs --account ${X.redeem.a.name} reset-credit-use --key <new uuid>${X.redeem.cp.card ? ` --credit ${X.redeem.cp.card.id}` : ''}, then quota.mjs --fresh`);
   if (X.rotate) out.push(`${companyDevice ? 'approved ChatGPT-account work' : 'new Codex work'} → rotate across ${X.rotate.map((r) => r.a.name).join(', ')} (each must be spent within ${hours(Math.max(...X.rotate.map((r) => r.deadline)))}); route.mjs alternates per launch`);
   else if (X.pick && multi) out.push(`${companyDevice ? 'approved ChatGPT-account work (images, company capability fallback)' : 'new Codex work'} → account ${who(X.pick)} (week ${X.pick.s?.used ?? '-'}%, quota deadline in ${hours(X.pick.deadline)})${X.pickStale ? ' — from a stale reading' : ''}`);
-  if (X.out && (T?.usable||TR?.usable)) out.push('Personal ChatGPT accounts are out; qualified company work continues through route.mjs on TTADK/TRAE; ask for any remaining personal option.');
+  if (X.exclusiveWait) out.push('New personal Codex work waits for main capacity; qualified company lanes remain available through route.mjs.');
+  else if (X.out && (T?.usable||TR?.usable)) out.push('Personal ChatGPT accounts are out; qualified company work continues through route.mjs on TTADK/TRAE; ask for any remaining personal option.');
   else if (X.out && X.throttledOnly) out.push(`codex paused: 5h windows full, free in ${hours(X.nextFree)} — Claude takes it only while it has spare; otherwise request a capacity decision`);
   else if (X.out) out.push(`codex out on every account (next free in ${hours(X.nextFree)}): tell the user; ${C.status === 'over' || C.status === 'unknown'
     ? 'Claude takes only Claude-only work that can\'t wait; ask for a runnable personal option or a recorded capacity decision'

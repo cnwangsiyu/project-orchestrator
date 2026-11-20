@@ -46,6 +46,20 @@ least-used account;
 otherwise the earliest deadline wins. Nondry personal launches advance the CLI
 counter under a short lock. Max effort and reset redemption still ask separately.
 
+An active personal-priority window in `exclusive` mode admits new personal
+Codex work only on main. Its fresh weekly reading must retain 5% headroom;
+if main cannot take the task, use an eligible company lane or defer with the
+verbatim `[personal-main-wait]` alert. Claude-only tools keep their own route.
+The window follows the account across card redemption, with an explicit expiry
+or `until: null` (until revoked). Six-hour deadline ties apply outside exclusive
+mode. `personal-priority.mjs add FROM none REF QUOTE --mode exclusive
+--exhaust-at-used 99` creates an open-ended window. Add `--replace` to atomically
+promote or renew the existing window under the same decision reference in
+exclusive mode. The existing prefer-first command remains supported.
+Fresh readings at 90% emit `[personal-main-90]` once per reset window through
+the durable owner inbox. Dry routing previews emit no notices. Reset cards
+remain manual.
+
 `--actual vendor:model:effort[@account]` supplies sanitized actual attempt evidence.
 An omitted account stays UNKNOWN while its explicit model/effort floor remains
 binding. Personal Astra needs its own scoped OK on every device; runnable

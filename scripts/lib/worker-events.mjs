@@ -414,6 +414,8 @@ const firstLine = (file) => {
   } catch { return ''; } finally { if (fd !== undefined) fs.closeSync(fd); }
 };
 export const eventLine = (row, message = row.finalLine ?? firstLine(row.outFile)) => {
+  if (row.event === 'message' && ['personal-main-90', 'personal-main-wait'].includes(row.kind)
+    && row.text?.startsWith(`[${row.kind}] `)) return clean(row.text, Infinity);
   const alertTag = row.event === 'truncated' || row.alertId?.startsWith('truncated:') ? 'truncated'
     : row.alertId?.startsWith('quota-refresh-failure:') ? 'quota-warning'
     : ['queue-stalled', 'quota-warning', 'transport-retry'].includes(row.kind) ? row.kind : null;

@@ -8,6 +8,7 @@ import { makePlan } from './plan.mjs';
 import { validatePlan } from './validate.mjs';
 import { reviewDecision, reviewAfterWrite } from './review-policy.mjs';
 import { isAstra, array, company, companyDevice, known, reason, fingerprint, compare, clone, freeze } from './common.mjs';
+import { exclusiveCodexTask, personalMainWaitText } from './personal-priority.mjs';
 
 function assess(task, snapshot, context = {}) {
   const { candidates, diagnostics } = enumerateCandidates(task, snapshot);
@@ -87,6 +88,11 @@ export function routePure(taskSpec, stateSnapshot, history = []) {
   const trace = { candidates: assessment.rows.map((r) => ({ candidate: r.candidate, predicates: r.predicates, estimate: r.estimate })),
     ordering: ordered.rows.map((r) => ({ candidateId: r.candidate.id, terms: r.orderingTerms })), comparator: ordered.terms, diagnostics };
   const fields = { warnings: reviewBlock?.code === 'REVIEW_BUDGET_WARNING' ? [reviewBlock] : [], rejected: dedupe([...rejected, ...reviewerRejections]), trace };
+  const mainOfferable = assessment.rows.some(r => r.candidate.accountId === 'main' && !r.estimate.stalled
+    && r.predicates.every(p => p.ok || p.gate));
+  if (exclusiveCodexTask(task, snapshot) && !mainOfferable && (!rankedNow.winner || rankedNow.winner.estimate.stalled))
+    return makePlan('defer', task, snapshot, { ...fields, deferUntil: null, trigger: 'personal-main-capacity',
+      reason: reason('choose', 'PERSONAL_MAIN_WAIT', personalMainWaitText(task, snapshot), [task.taskId]) });
   if(!rankedNow.winner||rankedNow.winner.estimate.stalled) {
     const personalRows=assessment.rows.filter(r=>!company(candidateParts(snapshot,r.candidate).account)&&!r.estimate.stalled
       &&r.estimate.startDelayMin===0&&r.predicates.filter(p=>!p.ok).every(p=>p.gate));

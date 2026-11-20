@@ -38,7 +38,9 @@ export function presentRoute(plan, view, context) {
       why.push(`second reviewer: ${reviewer.personalFallback.text}`);
   }
   const priorityGuard = personalPriorityGuard(snapshot);
-  if (priorityGuard) why.push(`personal main-first window until ${snapshot.personalPriority.until} paused: ${priorityGuard}; using normal routing order`);
+  if (priorityGuard) why.push(snapshot.personalPriority.mode === 'exclusive'
+    ? `personal main-only window: ${priorityGuard}; other personal Codex accounts remain ineligible`
+    : `personal main-first window until ${snapshot.personalPriority.until} paused: ${priorityGuard}; using normal routing order`);
   for (const text of new Set(plan.rejected.filter(p => p.reason?.code === 'TTADK_DAILY_RESERVE').map(p => p.reason.text)))
     if (!why.some(line => line.includes(text))) why.push(text);
   if (t.needsCli.length) notes.push('signed-in CLIs need the full-access sandbox (keychain); stay read-only by instruction: queries only, no writes');
@@ -260,7 +262,7 @@ export function presentRoute(plan, view, context) {
   if(t.background&&!c) tellUser.push('No runnable authorized background lane: present the plan’s decision and keep dispatching independent work.');
   if(plan.kind==='blocked') why.unshift(...plan.reasons.map(r=>r.text));
   if(!why.length) why.push(...(plan.reasons??[plan.reason]).filter(Boolean).map((r)=>r.text));
-  if(companyDevice(snapshot)&&(plan.kind==='defer' || (plan.kind==='blocked' && plan.gates.some(g=>g.kind==='personal-quota')))) {
+  if(companyDevice(snapshot)&&plan.trigger!=='personal-main-capacity'&&(plan.kind==='defer' || (plan.kind==='blocked' && plan.gates.some(g=>g.kind==='personal-quota')))) {
     const reset=plan.deferUntil??Math.min(...snapshot.accounts.filter(company).map(a=>known(a.denialResetAt)).filter(at=>at>snapshot.decisionAt));
     const question=`No company lane can start now. Use personal quota now, or wait until ${Number.isFinite(reset)?new Date(reset).toISOString():'company lane progress'}?`;
     needsUserOK.push(question);tellUser.push(question);
