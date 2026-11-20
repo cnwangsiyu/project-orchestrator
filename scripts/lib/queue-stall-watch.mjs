@@ -56,7 +56,8 @@ const holdsFor = (row, launch) => {
     || (hold.project === row.project && taskIds.includes(hold.task)));
 };
 const lastProgress = (row, notes) => notes.findLast(n => n.account === row.account && n.thread === row.thread
-  && (n.turn ? n.turn === row.turn : n.runId === row.runId) && !['queue-stalled', 'pool-stalled'].includes(n.kind)
+  && (n.turn ? n.turn === row.turn : n.runId === row.runId) && !['queue-stalled', 'pool-stalled', 'quota-warning'].includes(n.kind)
+  && !n.alertId?.startsWith('quota-refresh-failure:')
   && (n.event === 'message' || n.currentStep || n.finalLine));
 export function likelyWrapUp(row, launch, notes, now, holds = holdsFor(row, launch)) {
   if (holds !== false) return false;

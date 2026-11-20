@@ -45,13 +45,13 @@ export function refreshWorkerQuota({ timeoutMs = 30000, accounts = [] } = {}) {
 }
 export async function pollWorkerQuota({ owner, data = cachedWorkerQuota(), rows = readEvents(), now = Date.now(),
   file = fileOf(), profiles, alive = followerAlive, refresh = refreshWorkerQuota, emit = appendWorkerAlert,
-  readSnapshot = cachedWorkerQuota } = {}) {
+  readSnapshot = cachedWorkerQuota, readRows = readEvents } = {}) {
   try {
     if (!owner) return { status: 'idle' };
     profiles ??= readProfiles();
     const companies = new Set([...(data?.codexAccounts ?? []).filter(a => ['trae', 'ttadk'].includes(a.kind)).map(a => a.name),
       ...Object.entries(profiles).filter(([, p]) => ['trae', 'ttadk'].includes(p.kind)).map(([name]) => name)]);
-    const running = [...workerRunStates(rows).values()].map(({ row }) => row).filter(row => row.owner === owner
+    let running = [...workerRunStates(rows).values()].map(({ row }) => row).filter(row => row.owner === owner
       && companies.has(row.account) && row.event === 'running' && !row.settled && alive(row));
     if (!running.length) return { status: 'idle' };
     const requested = [...new Set(running.map(row => row.account))];
@@ -89,6 +89,12 @@ export async function pollWorkerQuota({ owner, data = cachedWorkerQuota(), rows 
           accountCacheAt: { ...state.accountCacheAt, ...Object.fromEntries(targets.map(account => [account, cacheAt(account)])) } });
       }, { timeoutMs: 200, retryMs: 20, ownerPid: true });
     }
+    // A turn may finish while its numeric refresh is running. Monitoring must
+    // use the current ledger before emitting any owner annotation.
+    if (claim) rows = readRows();
+    running = [...workerRunStates(rows).values()].map(({ row }) => row).filter(row => row.owner === owner
+      && companies.has(row.account) && row.event === 'running' && !row.settled && alive(row));
+    if (!running.length) return refreshed;
     withLock(file, () => {
       const state = read(file), day = new Date(now).toISOString().slice(0, 10);
       for (const [account, status] of Object.entries(state.accounts ?? {})) {

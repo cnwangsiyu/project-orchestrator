@@ -83,6 +83,9 @@ try {
   const wrap = options => queueStallText(row, wait(now - 13 * min), { now, launch, quota, policy, ...options });
   assert.match(wrap({ notes: [done] }).text, /likely final report only — let it finish; do not interrupt$/);
   assert.equal(wrap({ notes: [done] }).commands, undefined);
+  for (const annotation of [{ ...done, kind: 'quota-warning', text: 'quota crossed 90%' },
+    { ...done, kind: 'info', alertId: 'quota-refresh-failure:fixture', text: 'numeric quota unavailable' }])
+    assert.equal(wrap({ notes: [done, annotation] }).wrapUp, true, 'quota annotations cannot replace worker progress');
   const lock = path.join(tmp, 'locks/testslot.d');
   fs.mkdirSync(lock);
   fs.writeFileSync(path.join(lock, 'info'), 'project\tfixture\ntask\tqueue-probe\n');

@@ -15,7 +15,7 @@ const now = Date.now(), owner = '053283ad-1bc8-5a31-ad44-d68e6b199eb6';
 const profiles = { company: { kind: 'trae' }, personal: { kind: 'chatgpt' } };
 const row = { owner, account: 'company', runId: 'one', thread: 'one', event: 'running', pid: process.pid };
 const data = { checkedAt: now - 30 * 60000, codexAccounts: [{ name: 'company', kind: 'trae' }] };
-const options = { owner, rows: [row], data, profiles, now, readSnapshot: () => data };
+const options = { owner, rows: [row], data, profiles, now, readSnapshot: () => data, readRows: () => [row] };
 try {
   const file = path.join(tmp, 'shared-refresh.json'), calls = path.join(tmp, 'calls.txt');
   const driver = path.join(tmp, 'follower.mjs');
@@ -59,6 +59,14 @@ try {
   await pollWorkerQuota({ ...options, data: { ...data, checkedAt: now }, file: path.join(tmp, 'fresh.json'), refresh: () => { forbidden++; } });
   assert.equal(forbidden, 0);
   console.log('PASS no running company turn, dead follower, or fresh snapshot triggers no refresh');
+  const lateFile = path.join(tmp, 'finished-during-refresh.json');
+  let lateRows = [row], lateNotices = 0;
+  const completedDuringRefresh = await pollWorkerQuota({ ...options, file: lateFile, readRows: () => lateRows,
+    refresh: () => { lateRows = [{ ...row, event: 'finished', mayRun: false, settled: true }];
+      return { status: 'unavailable', accounts: { company: 'unavailable' } }; }, emit: () => { lateNotices++; } });
+  assert.equal(completedDuringRefresh.status, 'unavailable'); assert.equal(lateNotices, 0);
+  assert.equal(fs.existsSync(path.join(tmp, 'worker-quota-warnings.json')), false);
+  console.log('PASS terminal lifecycle evidence after async refresh suppresses all owner notes');
   let numericRefreshes = 0;
   await pollWorkerQuota({ ...options, file: path.join(tmp, 'stale-numeric.json'),
     data: { checkedAt: now, codexAccounts: [{ name: 'company', kind: 'trae', quota: { sampledAt: now - 16 * 60000 } }] },
