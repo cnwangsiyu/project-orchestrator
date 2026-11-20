@@ -315,10 +315,6 @@ else:
     "paths=[p for tree_root,_ in tree_roots(d) for p in (tree_root/'wt').glob('*/*/'+d['slot'])]")
     .replace(header, () => header + treePython);
   if (operation === 'inspect' || operation === 'checkout') source = source.replaceAll("'affinity':d.get('affinity')}", "'affinity':d.get('affinity'),'treeRoot':d.get('treeRoot'),'treeState':d.get('treeState'),'placementScores':d.get('placementScores',[])}");
-  if (operation === 'run') {
-    source = source.replace('relative=workspace.relative_to(root)', "tree_root=pathlib.Path(d.get('treeRoot',d['root'])); relative=workspace.relative_to(tree_root)")
-      .replace('workspace.resolve()!=root.resolve()/relative', 'workspace.resolve()!=tree_root.resolve()/relative');
-  }
   if (['run', 'inspect', 'input-map', 'inputs-ready'].includes(operation) && data.workspace) source = source.replace(header, () => header + treePython + 'tree_guard(d)\n');
   return source;
 }

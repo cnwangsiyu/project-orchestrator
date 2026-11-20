@@ -378,6 +378,43 @@ ${hasSocket ? "sock=socket.socket(socket.AF_UNIX); sock.bind('docker.sock')" : '
   const wrong = fixture(); wrong.write('keep');
   assert.ok(invoke(wrong, '', { workspace: path.dirname(wrong.workspace) }).warnings.some(warning => warning.includes('outside slot scope')));
   assert.ok(fs.existsSync(path.join(wrong.data, 'keep')));
+  const placed = groupFixture();
+  const secondary = path.join(fs.realpathSync(placed.root), '..', 'devbox-run-2');
+  const slotPath = path.relative(placed.root, placed.workspace);
+  const secondWorkspace = path.join(secondary, slotPath);
+  const secondData = path.join(secondWorkspace, '.data');
+  fs.mkdirSync(secondData, { recursive: true });
+  const stale = path.join(secondData, 'stale');
+  fs.writeFileSync(stale, 'old');
+  const roots = { extraRoots: [secondary] };
+  const collect = (override = {}) => invoke(placed, '', { workspace: secondWorkspace, treeConfig: roots, ...override });
+
+  const receipt = placed.receipt({ pid: 1234, start: '42', workspace: secondWorkspace });
+  placed.process(1234, 1234, temp);
+  assert.equal(collect().bytes, 0, 'live receipt on primary protects secondary data');
+  fs.unlinkSync(receipt);
+  assert.equal(collect().bytes, 3, 'registered secondary with primary control is cleaned');
+  assert.ok(fs.existsSync(path.join(placed.data, 'stale/out')), 'primary workspace is untouched');
+
+  fs.writeFileSync(stale, 'keep');
+  const unregistered = collect({ treeRoot: secondary, treeConfig: { extraRoots: [] } });
+  assert.match(unregistered.warnings.join(' '), /outside registered slot scope/);
+  assert.equal(unregistered.bytes, 0);
+  const secondControl = path.join(secondary, 'runs', path.basename(placed.control));
+  fs.mkdirSync(secondControl, { recursive: true });
+  assert.match(collect({ control: secondControl }).warnings.join(' '), /control outside runner scope/);
+  assert.equal(fs.readFileSync(stale, 'utf8'), 'keep');
+
+  const foreignWorkspace = path.join(path.dirname(secondary), 'unregistered', slotPath);
+  fs.mkdirSync(path.dirname(foreignWorkspace), { recursive: true });
+  fs.renameSync(secondWorkspace, foreignWorkspace);
+  fs.symlinkSync(foreignWorkspace, secondWorkspace);
+  const escape = collect();
+  assert.match(escape.warnings.join(' '), /workspace outside slot scope/);
+  assert.equal(escape.bytes, 0);
+  assert.equal(fs.readFileSync(path.join(foreignWorkspace, '.data/stale'), 'utf8'), 'keep');
+  console.log('PASS registered secondary cleanup, primary control and receipts, unregistered and symlink-escaping workspaces');
+
   const legacy = fixture(); legacy.write('keep/result.log'); retain(legacy, 'keep', false, true);
   assert.equal(invoke(legacy).skipped, 'unexpired legacy retained archive');
   assert.ok(fs.existsSync(path.join(legacy.data, 'keep')));

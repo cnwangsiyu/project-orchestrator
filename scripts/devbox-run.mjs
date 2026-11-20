@@ -584,12 +584,21 @@ def cleanup_run_data(d,proc_root=pathlib.Path('/proc')):
     data_fd=None
     try:
         root=pathlib.Path(d['root']); workspace=pathlib.Path(d['workspace']); slot=d['slot']
-        relative=workspace.relative_to(root)
-        if (len(relative.parts)!=4 or relative.parts[0]!='wt' or not relative.parts[2].startswith('id-')
-                or relative.parts[3]!=slot or not re.fullmatch(r'devbox-cn-(?:[0-9]+|light(?:-[0-9]+)?)',slot)
-                or workspace.resolve()!=root.resolve()/relative): raise RuntimeError('data cleanup workspace outside slot scope')
+        # Control records always live on the primary. Placement may put the slot on an extra root.
         control=pathlib.Path(d['control'])
-        if control.parent!=root/'runs' or not re.fullmatch(r'[0-9a-f-]{36}',control.name) or control.is_symlink(): raise RuntimeError('data cleanup control outside runner scope')
+        if (control.parent!=root/'runs' or not re.fullmatch(r'[0-9a-f-]{36}',control.name)
+                or control.is_symlink() or control.resolve()!=root.resolve()/'runs'/control.name): raise RuntimeError('data cleanup control outside runner scope')
+        parts=workspace.parts[-4:]
+        if (not workspace.is_absolute() or len(workspace.parents)<4 or parts[0]!='wt' or not parts[2].startswith('id-')
+                or parts[3]!=slot or not re.fullmatch(r'devbox-cn-(?:[0-9]+|light(?:-[0-9]+)?)',slot)):
+            raise RuntimeError('data cleanup workspace outside slot scope')
+        tree_root=workspace.parents[3]
+        extras=(d.get('treeConfig') or {}).get('extraRoots',[])
+        canonical_root=tree_root.resolve()
+        if tree_root not in (root,root.resolve()) and (not isinstance(extras,list) or str(tree_root) not in extras
+                or tree_root==pathlib.Path('/') or tree_root!=canonical_root):
+            raise RuntimeError('data cleanup workspace outside registered slot scope')
+        if workspace.resolve()!=canonical_root.joinpath(*parts): raise RuntimeError('data cleanup workspace outside slot scope')
         data=workspace/'.data'
         if data.is_symlink(): raise RuntimeError('data directory symlink refused')
         if not data.exists(): return result
