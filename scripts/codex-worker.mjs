@@ -71,6 +71,7 @@ import { notifyQueueOwner, pendingQueueChoice, claimQueueChoice, settleQueueChoi
 import { queuePolicy } from './lib/queue-stall-watch.mjs';
 import { inheritedLaunch, savedLaunch, saveLaunch, recordLaunchModel, readRequestBufferExceededAt, markRequestBufferExceeded } from './lib/worker-launch.mjs';
 import { recordWorkerOutcome, reviewSeat, reviewInstructions } from './lib/worker-outcome.mjs';
+import { completionKind } from './lib/worker-completion.mjs';
 import { sizeLimits, threadSize, freshThreadRoute } from './lib/worker-thread-size.mjs';
 import { modelFamily, modelObservation, rolloutTurnModel } from './lib/worker-model.mjs';
 import { redactWorkerTurn, checkThreadIdle } from './lib/worker-redaction.mjs';
@@ -205,7 +206,8 @@ if (tracker) process.on('exit', (exit) => {
       name: options.name ?? seat.name, category: args?.[0] ?? seat.category, role: options.role ?? seat.role,
       account: account ?? 'main', model: state.model, effort: state.effort, actualModel: state.actualModel,
       startedAt: followerStartedAt, command: argv[0], thread: state.thread, turn: outcomeTurn?.id ?? state.turn,
-      exit, final: outcomeFinal, terminal: !!outcomeTurn, cumulativeInput: outcomeInput, skip: outcomeSkip || state.signal });
+      exit, final: outcomeFinal, terminal: !!outcomeTurn, status: outcomeTurn?.status, error: outcomeTurn?.error,
+      cumulativeInput: outcomeInput, skip: outcomeSkip || state.signal });
   } catch (e) { process.stderr.write(`auto-outcome: NOT RECORDED: ${e.message}\n`); }
 });
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) if (tracker) process.once(signal, () => {
@@ -1326,7 +1328,7 @@ const report = async (threadId, turn, final, usage, observation = {}) => {
         `cyberPolicy blocked this turn: ${JSON.stringify(turn.error ?? '').slice(0, 140)}`, Date.now(), model);
       if (p) console.log(`trae-restricted: TRAE's ${p.pool} models are restricted until ${new Date(p.pausedUntil).toLocaleTimeString()} (${p.reason}); re-route this task with route.mjs ... --adversarial (it moves to the next non-GPT family)`);
       else console.log('security-policy-block: no model is known for this thread, so no TRAE family restriction was written (the kind:policy-block row is still logged)');
-    } else if (turn.status === 'failed') {
+    } else if (turn.status === 'failed' && completion?.status !== 'transport-failed') {
       const p = noteFailure(PROF.home, JSON.stringify(turn.error ?? 'failed'), Date.now(), model);
       if (p?.modelPause) console.log(unavailableHint(p));
       else if (p) console.log(`trae-paused: ${pausedWhat(p)} until ${new Date(p.pausedUntil).toLocaleTimeString()} (${p.reason}); re-route this task with route.mjs ... ${p.pool ? `(it moves to the next model family; --exclude-model ${p.pool} for this task)` : `--exclude-account ${account}`}`);

@@ -38,6 +38,8 @@ export function completionLeases({ by, account, thread, pid, project, task, name
 }
 export function classifyCompletion({ turn, evidence, live = false, completedEvent = true, unconfirmed = false, leases = [],
   requiredMarker = null, final = '' }) {
+  if (turn.status === 'transport-failed' || turn.status === 'failed' && isTransportError(turn.error))
+    return { status: 'transport-failed', reasons: ['provider turn ended with a network/stream error'], leases: [] };
   if (turn.status === 'TRUNCATED') return { status: 'TRUNCATED', reasons: [turn.reason ?? 'previously classified truncated'],
     leases: leases.map(({ id, holder, pid }) => ({ id, holder, pid })) };
   if (turn.status === 'uncertain') return { status: 'uncertain',
@@ -70,3 +72,21 @@ export function continuationCommand({ script, account, thread, owner, out, log }
     'Continue from the truncated turn. Inspect the current task artifacts and held leases; finish the remaining authorized work and return owned resources.'];
   return args.map(shellQuote).join(' ');
 }
+
+// Classify provider turn failures from public terminal evidence, never task prose.
+const TRANSPORT = /stream disconnected before completion|transport error|network error|error decoding response body|connection reset|\bECONNRESET\b|\b(?:HTTP|status(?: code)?|provider|server)\s*[:=]?\s*5\d\d\b|\b(?:502|503|504)\b|\boverloaded\b|\binternal server error\b|\bbad gateway\b|\bservice unavailable\b/i;
+export const isTransportError = error => TRANSPORT.test(typeof error === 'string' ? error : JSON.stringify(error ?? ''));
+export const completionKind = turn => classifyCompletion({ turn: turn ?? {} })?.status ?? turn?.status;
+export const transportOutcome = row => row?.result === 'transport-failed' || row?.failureKind === 'transport-failed' || row?.state === 'transport-failed';
+export const TRANSPORT_WINDOW_MS = 30 * 60000;
+export const transportLaneFailures = (rows, account, model, now) => {
+  const ids = new Set();
+  for (const row of rows ?? []) {
+    const actual = row.actual?.at?.(-1) ?? row.actual ?? row.first;
+    if (!transportOutcome(row) || !Number.isFinite(row.t) || row.t > now || now - row.t > TRANSPORT_WINDOW_MS
+      || (row.account ?? actual?.accountId ?? actual?.account) !== account
+      || String(row.modelId ?? actual?.modelId ?? actual?.model ?? '').toLowerCase() !== String(model ?? '').toLowerCase()) continue;
+    ids.add(JSON.stringify([row.thread ?? row.name, row.turn ?? row.t]));
+  }
+  return ids.size;
+};

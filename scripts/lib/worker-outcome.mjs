@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { rulesLog, readRecords, isRouteDecision } from './global-rules.mjs';
 import { withLock } from './shared-file.mjs';
+import { completionKind } from './worker-completion.mjs';
 
 const bare = (project, name) => name.startsWith(`${project}-`) ? name.slice(project.length + 1) : name;
 const sameTask = (project, name, row) => row.project === project && typeof row.name === 'string'
@@ -20,7 +21,7 @@ export const parseReviewResult = (final = '') => {
 export const unresolvedFinal = (final = '') => /^(?:\s*(?:#{1,6}\s+|[-*]\s+)?(?:\*\*)?(?:[\w.-]+[ :]+)?(?:BLOCKED|FAILED|FAIL|QUESTION|NEEDS[-_ ]USER)\b)|\bneeds[-_ ]user\b/im.test(final);
 
 export function recordWorkerOutcome({ project, name, category, role, account = 'main', model, effort, actualModel,
-  startedAt, command, thread, turn, exit, final = '', terminal = false, cumulativeInput, skip = false, log = rulesLog(), time = Date.now() }) {
+  startedAt, command, thread, turn, exit, final = '', terminal = false, status, error, cumulativeInput, skip = false, log = rulesLog(), time = Date.now() }) {
   // Exit 4 leaves a live turn. Handoffs, approval/deferral and cancellation uncertainty are not task results.
   if (skip || [4, 7, 8, 9, 10, 130, 143, 129].includes(exit)) return null;
   const records = readRecords(log);
@@ -33,9 +34,10 @@ export function recordWorkerOutcome({ project, name, category, role, account = '
   const reviewRun = reviewSeat({ category, role, name });
   const reviewResult = reviewRun && terminal && exit === 0 ? parseReviewResult(final) : null;
   const unresolved = unresolvedFinal(final);
+  const transport = completionKind({ status, error }) === 'transport-failed';
   // A review verdict may say BLOCKED while supplying a valid blocking marker. Keep that yield as metadata,
   // without calling the unresolved turn a task pass/fail.
-  if (unresolved && !reviewResult) return null;
+  if (unresolved && !reviewResult && !transport) return null;
   fs.mkdirSync(path.dirname(log), { recursive: true });
   return withLock(log, () => {
     const rows = readRecords(log);
@@ -55,8 +57,8 @@ export function recordWorkerOutcome({ project, name, category, role, account = '
     const pick = { vendor: 'codex', model: actualModel ?? model ?? null, effort: effort ?? 'medium', account };
     const actual = actualModel ? [...(previous?.actual ?? []), { ...pick }] : previous?.actual;
     const rec = { t: time, kind: 'outcome', auto: true, project, name, category, role: role ?? 'primary',
-      reviewRun, ...(!unresolved ? { result: exit === 0 ? rounds ? 'rework' : 'pass' : 'fail' } : {}), rounds,
-      cause: exit === 0 ? null : 'infra', failureKind: exit === 0 ? 'quality' : 'infra',
+      reviewRun, ...(transport ? { result: 'transport-failed' } : !unresolved ? { result: exit === 0 ? rounds ? 'rework' : 'pass' : 'fail' } : {}), rounds,
+      cause: transport ? 'transport' : exit === 0 ? null : 'infra', failureKind: transport ? 'transport-failed' : exit === 0 ? 'quality' : 'infra',
       minutes: Math.max(0, (time - firstLaunch) / 60000), startedAt: firstLaunch, thread, turn, exit,
       ...(terminal && Number.isSafeInteger(cumulativeInput) && cumulativeInput > 0 ? { cumulativeInput, usageAccount: account } : {}),
       first: owned[0]?.pick ?? previous?.first ?? pick, accepted: exit === 0 ? pick : null,
