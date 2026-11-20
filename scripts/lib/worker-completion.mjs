@@ -34,7 +34,7 @@ export function completionLeases({ by, account, thread, pid, project, task, name
   return { ...leases, held: leases.held.filter(hold => holders.includes(hold.holder)
     || pid && hold.pid === pid || project && hold.project === project && [task, name].filter(Boolean).includes(hold.task)) };
 }
-export function classifyCompletion({ turn, evidence, live = false, completedEvent = true, leases = [],
+export function classifyCompletion({ turn, evidence, live = false, completedEvent = true, unconfirmed = false, leases = [],
   requiredMarker = null, final = '' }) {
   if (turn.status === 'TRUNCATED') return { status: 'TRUNCATED', reasons: [turn.reason ?? 'previously classified truncated'],
     leases: leases.map(({ id, holder, pid }) => ({ id, holder, pid })) };
@@ -42,10 +42,11 @@ export function classifyCompletion({ turn, evidence, live = false, completedEven
   if (turn.status !== 'completed' && !(turn.status === 'failed' && (stoppedAtLimit(turn) || evidence?.limit))) return null;
   const reasons = [];
   if (stoppedAtLimit(turn) || evidence?.limit) reasons.push('transport stop reason reached output limit');
-  if (live && !completedEvent) reasons.push('stream ended without turn-completed event');
   const items = turn.items ?? [];
   const lastAgent = items.filter(item => item?.type === 'agentMessage').at(-1);
   const availableFinal = evidence?.completedFinal || finalItem(lastAgent);
+  if (live && !completedEvent && (unconfirmed || !availableFinal))
+    reasons.push('stream ended without turn-completed event');
   const pendingCovered = finalItem(lastAgent) && (!evidence?.pendingItemId || lastAgent.id === evidence.pendingItemId);
   // Historical hub views may omit all items. Absence in that view is unknown;
   // a live stream or an explicit agent item supplies evidence we can classify.

@@ -76,8 +76,10 @@ try {
   console.log('PASS completed frame with an unfinished final item preserves the streamed fragment');
 
   const lostEvent = run({ omitCompletion: true, status: 'completed' });
-  assert.match(truncated(lostEvent).reason, /without turn-completed/);
-  console.log('PASS existing follower periodic path catches hub completion when the completion event was omitted');
+  assert.equal(lostEvent.status, 0, lostEvent.stderr + lostEvent.stdout);
+  assert.equal(lostEvent.events.some(event => event.event === 'truncated'), false);
+  assert.equal(lostEvent.rpc.filter(rpc => rpc.method === 'turn/start').length, 1);
+  console.log('PASS confirmed complete final from periodic read succeeds when the completion event was omitted');
 
   const commentary = run({ messages: [{ method: 'item/completed', params: { threadId: 'guard-thread', turnId: 'guard-turn', item: item('The controller is', 'commentary') } }],
     terminal: { items: [item('The controller is', 'commentary')] } });
@@ -110,6 +112,11 @@ try {
 
   const evidence = completionEvidence(); evidence.observe(messages[0]);
   assert.equal(classifyCompletion({ turn: completed, evidence: evidence.snapshot(), final }), null);
+  assert.equal(classifyCompletion({ turn: completed, evidence: evidence.snapshot(), final, live: true, completedEvent: false }), null);
+  assert.ok(classifyCompletion({ turn: completed, evidence: evidence.snapshot(), final, live: true, completedEvent: false, unconfirmed: true }));
+  const recovered = run({ messages: [{ method: 'error', params: { threadId: 'guard-thread', turnId: 'guard-turn',
+    error: { message: 'retriable stream disconnect', willRetry: true } } }, ...messages] });
+  assert.equal(recovered.status, 0, recovered.stderr + recovered.stdout);
   const limited = completionEvidence();
   limited.observe({ method: 'response/metadata', params: { finish_reason: 'length' } });
   limited.observe(messages[0]);
