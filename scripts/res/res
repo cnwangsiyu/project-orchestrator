@@ -119,7 +119,8 @@ HEAVY_DEFAULTS = dict(LOAD_LIMIT=12, LOAD_LIMIT_WITH_LANES=20, MIN_AVAIL_GIB=16,
     MEM_GUARD_SUSTAIN=6, MEM_GUARD_SWAPFILES=48,
     MEM_GUARD_SAMPLES='~/.claude/orchestrator/_shared/reports/mini-memory/samples-%Y-%m-%d.tsv')
 DEVBOX_DEFAULTS = dict(LOAD_PER_CORE=1, MIN_AVAIL_GIB=4, HEAVY_CORES=3, HEAVY_GIB=4,
-    LIGHT_CORES=1, LIGHT_GIB=2, HEAVY_DISK_GIB=20, LIGHT_DISK_GIB=2)
+    LIGHT_CORES=1, LIGHT_GIB=2, HEAVY_DISK_GIB=20, LIGHT_DISK_GIB=2,
+    IO_SOME_AVG60_MAX=25, IO_FULL_AVG10_MAX=10)
 
 def regular_config(file, maximum=65536):
     with os.fdopen(os.open(file, os.O_RDONLY | os.O_NONBLOCK), 'rb') as stream:
@@ -174,7 +175,9 @@ def parse_config(content):
             pattern = r'[A-Za-z0-9][A-Za-z0-9_.-]*' if suffix.startswith('project.') and setting.endswith('_DISK_GIB') else host
             target = suffix[8:] if suffix.startswith('project.') and setting.endswith('_DISK_GIB') else suffix
             if suffix and not re.fullmatch(pattern, target): raise ValueError('invalid devbox override')
-            if not re.fullmatch(r'[0-9]+(?:\.[0-9]+)?', value) or not 0 < float(value) <= 65536:
+            io = setting in ('IO_SOME_AVG60_MAX', 'IO_FULL_AVG10_MAX')
+            if (not re.fullmatch(r'[0-9]+(?:\.[0-9]+)?', value)
+                    or not (0 <= float(value) <= 100 if io else 0 < float(value) <= 65536)):
                 raise ValueError('invalid devbox cost ' + name)
             values[name] = float(value)
     if not (heavy['LOAD_LIMIT_WITH_LANES'] >= heavy['LOAD_LIMIT'] >= heavy['LANE3_LOAD']
@@ -2660,7 +2663,7 @@ try:
     def devbox_settings():
         global config_current_values, config_unknown_warned, config_invalid_warned, status_machine_config
         host_pattern = r'[A-Za-z0-9][A-Za-z0-9.-]*'
-        defaults = dict(LOAD_PER_CORE=1, MIN_AVAIL_GIB=4, HEAVY_CORES=3, HEAVY_GIB=4, LIGHT_CORES=1, LIGHT_GIB=2, HEAVY_DISK_GIB=20, LIGHT_DISK_GIB=2)
+        defaults = machine_helpers['DEVBOX_DEFAULTS']
         if action in ('return','retain-remote','release-dead'): return {},False,5
         config = machine_helpers['machine_config'](root)
         status_machine_config = config
@@ -2727,6 +2730,32 @@ try:
         return held >= cap
     metrics_dir = os.path.join(root, 'devbox-metrics')
     reserve_dir = os.path.join(root, 'devbox-reservations')
+    def io_reading(value, name):
+        reading = value.get(name)
+        return reading if number(reading) and 0 <= reading <= 100 else None
+    def io_closed(box, value, settings):
+        # Separate state in the metrics cache survives the runner's atomic sample refresh.
+        # Its own lock also serializes status/diagnostic evaluations outside host_guard.
+        some = io_reading(value, 'io_some_avg60')
+        full = io_reading(value, 'io_full_avg10')
+        if some is None or full is None: return False
+        limits = (settings['IO_SOME_AVG60_MAX'], settings['IO_FULL_AVG10_MAX'])
+        file = os.path.join(metrics_dir, box + '.io-state.json')
+        with open(file + '.lock', 'a') as guard:
+            fcntl.flock(guard, fcntl.LOCK_EX)
+            try: state = json.loads(regular_text(file))
+            except (OSError, ValueError): state = {}
+            closed = isinstance(state, dict) and state.get('closed') is True
+            readings = (some, full)
+            # 100 disables that signal, including a previously latched closure.
+            if any(reading > limit for reading, limit in zip(readings, limits)):
+                closed = True
+            elif all(limit == 100 or reading < 0.8 * limit
+                     for reading, limit in zip(readings, limits)):
+                closed = False
+            updated = dict(closed=closed)
+            if state != updated: machine_helpers['atomic_json'](file, updated)
+            return closed
     def sample(box, current):
         try:
             value = json.loads(regular_text(os.path.join(metrics_dir, box + '.json')))
@@ -2831,12 +2860,18 @@ try:
         detail = 'host=%s load5=%s reserved_cores=%g reserved_gib=%g mem_available_gib=%s' % (
             box, value.get('load5', '?'), cpu, mem, value.get('memAvailableGiB', '?'))
         detail += ' free_disk_gib=%s reserved_disk_gib=%g' % (value.get('freeGiB', '?'), disk)
+        some = io_reading(value, 'io_some_avg60')
+        full = io_reading(value, 'io_full_avg10')
+        detail += ' io_some_avg60=%s io_full_avg10=%s io=%s' % (
+            some if some is not None else '?', full if full is not None else '?',
+            'unknown' if some is None or full is None else 'known')
         if not value:
             reason = 'stale-or-missing-metrics' if settings else 'disabled'
             return ('closed-' if only_dynamic else 'static-') + reason, detail, entries, cost
         limit = value['cores'] * settings['LOAD_PER_CORE']
         floor = settings['MIN_AVAIL_GIB']
         detail += ' load_limit=%g mem_floor_gib=%g task_cores=%g task_gib=%g task_disk_gib=%g disk_floor_gib=53' % (limit, floor, *cost)
+        if kind == 'HEAVY' and io_closed(box, value, settings): return 'io-pressure', detail, entries, cost
         if not maintenance and value['freeGiB'] - disk - cost[2] < 53: return 'disk', detail, entries, cost
         if value['memAvailableGiB'] - mem - cost[1] < floor: return 'memory', detail, entries, cost
         if value['load5'] + cpu + cost[0] > limit:
@@ -3506,7 +3541,7 @@ try:
         own.setdefault('load_blocked_since', str(time.time()))
     else:
         own.pop('load_blocked_since', None)
-    own['blocked'] = ('disk' if 'disk' in gate_reasons else 'memory' if 'memory' in gate_reasons else 'load' if 'load' in gate_reasons else
+    own['blocked'] = ('io-pressure' if 'io-pressure' in gate_reasons else 'disk' if 'disk' in gate_reasons else 'memory' if 'memory' in gate_reasons else 'load' if 'load' in gate_reasons else
                       'FIFO' if blocked else own.get('blocked', 'slot'))
     refresh_waiter()
     remaining = float(own['started_at']) + float(timeout) * 60 - time.time()

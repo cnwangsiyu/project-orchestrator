@@ -526,7 +526,19 @@ export const remoteScripts = {
   metrics: pythonHeader + `load5=float(pathlib.Path('/proc/loadavg').read_text().split()[1])
 mem=next(int(line.split()[1])/1048576 for line in pathlib.Path('/proc/meminfo').read_text().splitlines() if line.startswith('MemAvailable:'))
 disk=os.statvfs(d['root'])
-print(json.dumps({'cores':os.cpu_count(),'load5':load5,'memAvailableGiB':mem,'freeGiB':disk.f_bavail*disk.f_frsize/1073741824}))
+io={'io_some_avg10':None,'io_some_avg60':None,'io_full_avg10':None}
+try:
+    for line in pathlib.Path('/proc/pressure/io').read_text().splitlines():
+        fields=line.split()
+        if not fields: continue
+        for field in fields[1:]:
+            name,sep,value=field.partition('=')
+            metric='io_'+fields[0]+'_'+name
+            if sep and metric in io:
+                reading=float(value)
+                if 0 <= reading <= 100: io[metric]=reading
+except (OSError,ValueError): pass
+print(json.dumps({'cores':os.cpu_count(),'load5':load5,'memAvailableGiB':mem,'freeGiB':disk.f_bavail*disk.f_frsize/1073741824,**io}))
 `,
   probe: pythonHeader + `import subprocess, datetime, tempfile
 data=pathlib.Path('/data00'); home=pathlib.Path(os.path.expanduser('~'))
@@ -1587,8 +1599,12 @@ async function refreshHostMetrics(rows, state, { force = false, timeout = 15000 
         if (state.cancel || deadline <= Date.now()) return;
         const result = await ssh(row, 'metrics', { root }, { state, timeout: deadline - Date.now() });
         if (result.code) return;
-        const { cores, load5, memAvailableGiB, freeGiB } = JSON.parse(result.stdout);
+        const { cores, load5, memAvailableGiB, freeGiB, ...readings } = JSON.parse(result.stdout);
         const sample = { at, cores, load5, memAvailableGiB, freeGiB };
+        for (const name of ['io_some_avg10', 'io_some_avg60', 'io_full_avg10']) {
+          const reading = readings[name];
+          sample[name] = Number.isFinite(reading) && reading >= 0 && reading <= 100 ? reading : null;
+        }
         if (valid(sample)) writeJSON(file, sample);
       }, Math.floor(timeout / 50));
     } catch {

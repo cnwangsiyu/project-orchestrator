@@ -41,9 +41,9 @@ async function until(test) {
 function config(enabled = 1, overrides = '') {
   fs.writeFileSync(path.join(root, 'machine.conf'), `DEVBOX_DYNAMIC_ADMISSION=${enabled}\nDEVBOX_DYNAMIC_HOSTS=${host}\n${overrides}`);
 }
-function metrics(load5, memAvailableGiB, age = 0, freeGiB = 1000) {
+function metrics(load5, memAvailableGiB, age = 0, freeGiB = 1000, io = {}) {
   fs.writeFileSync(path.join(root, 'devbox-metrics', host + '.json'),
-    JSON.stringify({ at: Date.now() / 1000 - age, cores: 8, load5, memAvailableGiB, freeGiB, load1: 99 }));
+    JSON.stringify({ at: Date.now() / 1000 - age, cores: 8, load5, memAvailableGiB, freeGiB, load1: 99, ...io }));
 }
 function expireReservations(age = 901) {
   const entries = JSON.parse(fs.readFileSync(ledger, 'utf8'));
@@ -104,6 +104,73 @@ try {
     + row(slot(3), host, 'caps=node dynamic-only') + row(slot(4), host, 'caps=node', 'never')
     + row(slot(5), other, 'caps=node,rust') + row(light, host));
   config(); metrics(0, 100);
+  const ioMetrics = (some, full) => metrics(0, 100, 0, 1000,
+    { io_some_avg10: some, io_some_avg60: some, io_full_avg10: full });
+  const ioState = path.join(root, 'devbox-metrics', host + '.io-state.json');
+  ioMetrics(25, 10);
+  eq(take(slot(1)).status, 0, 'inclusive PSI limits admit'); release(slot(1));
+  ioMetrics(25.01, 0);
+  eq(take(slot(1)).status, 2); match(take(slot(3)).stderr, /devbox gate io-pressure/);
+  eq(take(light).status, 0, 'some pressure does not block light'); release(light);
+  match(run('status', slot(1)).stdout, /heavy .*gate=CLOSED reason=io-pressure .*io_some_avg60=25.01 io_full_avg10=0 io=known/);
+  eq(JSON.parse(fs.readFileSync(ioState)).closed, true);
+  ioMetrics(20, 0);
+  eq(take(slot(1)).status, 2, 'equality at 80% stays closed across sample replacement');
+  ioMetrics(19.99, 8);
+  eq(take(slot(1)).status, 2, 'both metrics must be strictly below their reopen threshold');
+  ioMetrics(19.99, 7.99);
+  eq(take(slot(1)).status, 0, 'both metrics below 80% reopen'); release(slot(1));
+  ioMetrics(0, 10.01);
+  match(take(slot(1)).stderr, /devbox gate io-pressure/);
+  eq(take(light).status, 0, 'full pressure does not block light'); release(light);
+  ioMetrics(null, null);
+  eq(take(slot(1)).status, 0, 'null PSI allows heavy'); release(slot(1));
+  match(run('status', slot(1)).stdout, /io_some_avg60=\? io_full_avg10=\? io=unknown/);
+  ioMetrics(null, 90);
+  eq(take(slot(1)).status, 0, 'partial PSI is unknown and does not refuse'); release(slot(1));
+  metrics(0, 100);
+  eq(take(slot(1)).status, 0, 'legacy samples without PSI allow heavy'); release(slot(1));
+  ioMetrics(0, 8);
+  eq(take(slot(1)).status, 2, 'unknown samples preserve the latch for the next known reading');
+  config(1, `DEVBOX_IO_SOME_AVG60_MAX=5\nDEVBOX_IO_SOME_AVG60_MAX.${host}=50\nDEVBOX_IO_FULL_AVG10_MAX=2\nDEVBOX_IO_FULL_AVG10_MAX.${host}=20\n`);
+  ioMetrics(30, 10);
+  eq(take(slot(1)).status, 0, 'host overrides govern closure and reopening'); release(slot(1));
+  ioMetrics(50.01, 0);
+  eq(take(slot(1)).status, 2, 'host some threshold is enforced');
+  ioMetrics(0, 20.01);
+  eq(take(slot(1)).status, 2, 'host full threshold is enforced');
+  config(1, 'DEVBOX_IO_SOME_AVG60_MAX=100\nDEVBOX_IO_FULL_AVG10_MAX=100\n');
+  ioMetrics(100, 100);
+  eq(take(slot(1)).status, 0, '100 disables both signals and clears an existing latch'); release(slot(1));
+  config(); ioMetrics(0, 0);
+  eq(take(slot(1)).status, 0); release(slot(1));
+  ioMetrics(0, 10.01);
+  const queued = start(['wait-pool', heavy, ...args('io-waiter'), '--timeout', '1',
+    '--exclude-host', other, '--exclude-reason', 'PSI fixture host'], { RES_TEST_POOL_FAST_POLL: '1' });
+  await until(() => journal().includes('io-waiter (fixture)\treason=io-pressure')
+    && fs.readdirSync(path.join(root, 'pool-waiters', heavy)).some(name => {
+      const file = path.join(root, 'pool-waiters', heavy, name, 'info');
+      return fs.existsSync(file) && fs.readFileSync(file, 'utf8').includes('blocked\tio-pressure\n');
+    }));
+  ioMetrics(0, 7.99);
+  eq(await queued, 0, 'queued waiter acquires through the existing poll path on reopening');
+  const acquired = fs.readdirSync(path.join(root, 'locks')).find(name => name.endsWith('.d')).slice(0, -2);
+  release(acquired, 'io-waiter');
+  match(journal(), /gate-deny\tdevbox-cn-1[^\n]+reason=io-pressure/);
+  eq(JSON.parse(run('audit', '--json').stdout).gateDenials24h[host + ':io-pressure'] > 0, true);
+  const candidate = path.join(root, 'candidate.conf');
+  for (const name of ['DEVBOX_IO_SOME_AVG60_MAX', 'DEVBOX_IO_FULL_AVG10_MAX',
+    `DEVBOX_IO_SOME_AVG60_MAX.${host}`, `DEVBOX_IO_FULL_AVG10_MAX.${host}`]) {
+    for (const value of ['0', '25.5', '100']) {
+      fs.writeFileSync(candidate, `${name}=${value}\n`);
+      eq(run('check-config', candidate).status, 0, 'valid PSI config');
+    }
+    for (const value of ['-1', '100.01', 'NaN', 'Infinity', 'bad']) {
+      fs.writeFileSync(candidate, `${name}=${value}\n`);
+      eq(run('check-config', candidate).status, 1, 'invalid PSI config');
+    }
+  }
+  metrics(0, 100);
   for (let cycle = 0; cycle < 30; cycle++) { eq(take(slot(1)).status, 0); release(slot(1)); }
   eq(JSON.parse(fs.readFileSync(ledger, 'utf8')).length, 0, '30 quick cycles leave no reservations');
   metrics(0, 100, 0, 53);

@@ -160,7 +160,7 @@ if(op==='probe') {
 }
 if(op==='metrics') {
  if(c.metricsUnavailable)process.exit(1);
- console.log(JSON.stringify({cores:8,load5:2.5,memAvailableGiB:24,freeGiB:c.readbackDiskGiB??100}));return;
+ console.log(JSON.stringify({cores:8,load5:2.5,memAvailableGiB:24,freeGiB:c.readbackDiskGiB??100,...c.ioMetrics}));return;
 }
 if(op==='bundle'&&c.uploadRetry&&!fs.existsSync(path.join(c.dir,'retried'))){fs.writeFileSync(path.join(c.dir,'retried'),'1');process.stdin.resume();await new Promise(r=>process.stdin.on('end',r));console.error(c.uploadRetry);process.exit(255);}
 if(op==='bundle'&&c.transferDelay)await sleep(c.transferDelay);
@@ -737,19 +737,24 @@ os.kill(pid,0)`;
 
 async function metricScenarios() {
   const host = '192.0.2.1';
-  const load = path.join(temp, 'loadavg'), mem = path.join(temp, 'meminfo');
+  const load = path.join(temp, 'loadavg'), mem = path.join(temp, 'meminfo'), io = path.join(temp, 'pressure-io');
   fs.writeFileSync(load, '99.00 2.50 1.00 1/1 1\n');
   fs.writeFileSync(mem, 'MemTotal: 33554432 kB\nMemAvailable: 25165824 kB\n');
+  fs.writeFileSync(io, 'some avg10=12.34 avg60=23.45 avg300=1.00 total=1234\nfull avg10=4.56 avg60=2.00 avg300=0.00 total=567\n');
   const metricsSource = remoteScripts.metrics.replace("'/proc/loadavg'", JSON.stringify(load))
-    .replace("'/proc/meminfo'", JSON.stringify(mem));
+    .replace("'/proc/meminfo'", JSON.stringify(mem)).replace("'/proc/pressure/io'", JSON.stringify(io));
   const actual = JSON.parse(execFileSync('python3', ['-c', metricsSource, Buffer.from(JSON.stringify({ root: temp })).toString('base64')], { encoding: 'utf8' }));
   assert.ok(actual.cores > 0);
   assert.equal(actual.load5, 2.5);
   assert.equal(actual.memAvailableGiB, 24);
   assert.ok(actual.freeGiB > 0);
+  assert.deepEqual([actual.io_some_avg10, actual.io_some_avg60, actual.io_full_avg10], [12.34, 23.45, 4.56]);
+  fs.rmSync(io);
+  const missing = JSON.parse(execFileSync('python3', ['-c', metricsSource, Buffer.from(JSON.stringify({ root: temp })).toString('base64')], { encoding: 'utf8' }));
+  assert.deepEqual([missing.io_some_avg10, missing.io_some_avg60, missing.io_full_avg10], [null, null, null]);
   const config = f => path.join(f.shared, 'machine.conf');
   const setGate = (f, enabled) => fs.writeFileSync(config(f), `DEVBOX_DYNAMIC_ADMISSION=${enabled}\nDEVBOX_DYNAMIC_HOSTS=${host}\n`);
-  const f = fixture();
+  const f = fixture({ ioMetrics: { io_some_avg10: 12.34, io_some_avg60: 23.45, io_full_avg10: 4.56 } });
   setGate(f, 1);
   const file = path.join(f.shared, 'devbox-metrics', host + '.json');
   fs.mkdirSync(path.dirname(file));
@@ -760,9 +765,13 @@ async function metricScenarios() {
   assert.ok(first.indexOf('metrics') < first.indexOf('acquire-call'));
   assert.ok(first.lastIndexOf('metrics') > first.indexOf('group-gone'));
   const sample = JSON.parse(fs.readFileSync(file));
-  assert.deepEqual({ ...sample, at: 0 }, { at: 0, cores: 8, load5: 2.5, memAvailableGiB: 24, freeGiB: 100 });
+  assert.deepEqual({ ...sample, at: 0 }, { at: 0, cores: 8, load5: 2.5, memAvailableGiB: 24, freeGiB: 100,
+    io_some_avg10: 12.34, io_some_avg60: 23.45, io_full_avg10: 4.56 });
+  const ioState = path.join(f.shared, 'devbox-metrics', host + '.io-state.json');
+  fs.writeFileSync(ioState, JSON.stringify({ closed: true }));
   assert.ok(Date.now() / 1000 - sample.at < 60);
   ok(await run(f));
+  assert.deepEqual(JSON.parse(fs.readFileSync(ioState)), { closed: true }, 'sample refresh preserves separate hysteresis state');
   assert.equal(f.events().filter(event => event.op === 'metrics').length, 3, 'fresh sample only refreshes after the next run');
   setGate(f, 0);
   ok(await run(f));

@@ -114,6 +114,31 @@ archive while old live admissions still need their budget protection.
 
 For the owner switch, back up the current executable and machine configuration, then stage and atomically rename the new executable and any config updates in the shared directory. Keep the current host enrollment and registry. Publish the runner and watcher from the same revision and re-arm active owner watches. Before rolling back to v1.9, quiesce devbox admissions, disable dynamic admission and atomically restore the previous configuration without the new keys. Archive the v1.10 reservation JSON ledgers before enabling dynamic admission on v1.9, which only understands three/four-field entries. Wait 15 minutes after the last v1.10 admission before archiving if outstanding disk reservations still matter. Resolve marked retained light holds before restoring a controller that cannot recognize the marker.
 
+### Devbox I/O pressure admission (2026-11-19)
+
+The runner reads Linux `/proc/pressure/io` with each load/memory/disk sample and
+caches `io_some_avg10`, `io_some_avg60` and `io_full_avg10` in
+`devbox-metrics/<host>.json`. An absent or unreadable PSI file yields null readings.
+`DEVBOX_IO_SOME_AVG60_MAX=25` and `DEVBOX_IO_FULL_AVG10_MAX=10` accept numeric
+percentages from 0 through 100, with the same `.<host>` override precedence as
+other devbox settings. `res check-config` validates both global and host values.
+On enrolled hosts with fresh, known PSI, heavy claims close with
+`reason=io-pressure` if some avg60 exceeds its maximum or full avg10 exceeds its
+maximum. Light claims remain eligible under their usual load/memory/disk checks.
+Missing or invalid readings show `io=unknown` and do not refuse admission for I/O.
+
+The I/O closure persists in `devbox-metrics/<host>.io-state.json`, serialized by
+its adjacent `.lock` file, independently of atomic sample refreshes. A closed
+gate reopens only when both readings are strictly below 80% of their maxima;
+unknown samples allow admission while retaining the latch for the next known
+sample. A maximum of 100 disables that signal, including its hysteresis; set
+both keys to 100 to turn off I/O admission immediately. A zero maximum blocks
+any positive reading and requires a configuration change to clear a latched
+closure. Status shows `io_some_avg60`, `io_full_avg10` and `io=known|unknown` for
+each heavy/light gate. The existing journal and audit denial counters use
+`io-pressure`, and queued waiters retry through the normal dynamic gate poll
+path. The FIFO load override cannot override I/O pressure.
+
 ## Changes in v1.9
 
 - Enrolled CN hosts gate new numbered heavy and light slot claims using Linux's **5-minute load average** and `MemAvailable`. Admit if `load5 + reserved cores + task cores <= cores × load-per-core` and `MemAvailable - reserved GiB - task GiB >= memory floor`. A per-host guard shares the reservation budget between both pools and direct takes. Each admitted start reserves its estimated cost for five minutes, including starts that used static fallback and runs that have already returned. The registered open rows remain the hard cap.

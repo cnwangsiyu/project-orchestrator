@@ -315,6 +315,17 @@ under five minutes old, `res` uses the baseline static rows and leaves
 `dynamic-only` rows closed. Existing workspace disk checks still run before the job.
 With light reclaim enabled, a light-pool FIFO head can recover a hold older than
 15 minutes when `res` can prove the recorded local holder PID is dead.
+
+Each admission sample also reads `/proc/pressure/io` into `io_some_avg10`,
+`io_some_avg60` and `io_full_avg10` (null if unavailable). Heavy claims close with
+`reason=io-pressure` above `DEVBOX_IO_SOME_AVG60_MAX=25` or
+`DEVBOX_IO_FULL_AVG10_MAX=10`, with `.<host>` overrides; light claims skip this
+I/O check. The cached closure reopens below 80% of both thresholds and survives
+sample refreshes in `devbox-metrics/<host>.io-state.json`. Unknown PSI permits
+admission and appears as `io=unknown` in status. Set both thresholds to 100 to
+disable the I/O check, including a prior closure. Waiters use their normal
+metric refresh and admission retry path.
+
 The dynamic disk budget keeps at least 53 GiB available after 15-minute
 reservations, released on return. The runner inventories per-slot project worktrees before admission and uses zero disk cost for existing workspaces; new workspaces use the configured project/host cost. See the res contract for [disk budgets and rollout](res-contract.md#changes-in-v110) and [load and memory admission](res-contract.md#changes-in-v19).
 
