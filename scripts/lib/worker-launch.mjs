@@ -5,7 +5,7 @@ import { withLock, writeJson } from './shared-file.mjs';
 import { canonicalPath } from './launch-paths.mjs';
 
 const keys = ['route-args', 'auto-reroute-depth', 'owner', 'name', 'cwd', 'log', 'out', 'stall-min',
-  'queue-patience-min', 'alt', 'queue-alternative', 'queue-alt-start-min', 'background', 'require-model',
+  'queue-patience-min', 'alt', 'queue-alternative', 'queue-alt-start-min', 'background', 'require-model', 'no-auto-continue', 'model', 'effort',
   // Browser/desktop scope must survive a continuation: without it the hub answers every site approval with a decline
   // and the worker reports "The user declined approval" (VAK W304-queue-cancel-2, 2026-11-15).
   'browser-origins', 'computer-use-apps', 'chrome-profile-dir','project','task','role','routed-seat','sandbox','network'];
@@ -39,7 +39,28 @@ export const saveLaunch = (account, thread, opts, owner, evidence = {}) => {
     const record = readLaunch(file);
     // --force-large permits a turn without clearing the provider's size evidence.
     writeJson(file, { account, thread, t: Date.now(), defaults, effort: opts.effort ?? record?.effort ?? null, ...evidence,
-      ...(record?.requestBufferExceededAt != null ? { requestBufferExceededAt: record.requestBufferExceededAt } : {}) });
+      ...(record?.requestBufferExceededAt != null ? { requestBufferExceededAt: record.requestBufferExceededAt } : {}),
+      ...(record?.transportRetry ? { transportRetry: record.transportRetry } : {}) });
+  });
+};
+// The claim is durable before backoff/RPC. Uncertain starts are never repeated.
+export const claimTransportContinuation = (account, thread, turn, now = Date.now()) => {
+  const file = launchFile(account, thread);
+  return withLock(file, () => {
+    const record = readLaunch(file);
+    if (!record) return 'missing launch metadata';
+    if (record.transportRetry?.sourceTurn === turn || record.transportRetry?.continuationTurn === turn)
+      return 'one automatic continuation already claimed';
+    writeJson(file, { ...record, transportRetry: { sourceTurn: turn, claimedAt: now, pid: process.pid } });
+    return null;
+  });
+};
+export const saveTransportContinuation = (account, thread, sourceTurn, continuationTurn) => {
+  const file = launchFile(account, thread);
+  return withLock(file, () => {
+    const record = readLaunch(file);
+    if (record?.transportRetry?.sourceTurn !== sourceTurn) throw Error('transport retry claim changed');
+    writeJson(file, { ...record, transportRetry: { ...record.transportRetry, continuationTurn } });
   });
 };
 export const readRequestBufferExceededAt = (account, thread) => readLaunch(launchFile(account, thread))?.requestBufferExceededAt ?? null;

@@ -416,7 +416,7 @@ const firstLine = (file) => {
 export const eventLine = (row, message = row.finalLine ?? firstLine(row.outFile)) => {
   const alertTag = row.event === 'truncated' || row.alertId?.startsWith('truncated:') ? 'truncated'
     : row.alertId?.startsWith('quota-refresh-failure:') ? 'quota-warning'
-    : ['queue-stalled', 'quota-warning'].includes(row.kind) ? row.kind : null;
+    : ['queue-stalled', 'quota-warning', 'transport-retry'].includes(row.kind) ? row.kind : null;
   if (alertTag) {
     const detail = row.event === 'message' ? `worker ${clean(row.name ?? row.thread)} notes [${clean(row.kind)}]: ${clean(row.text, Infinity)}`
       : `worker ${clean(row.name ?? row.thread)} TRUNCATED ${clean(row.outFile)} ${clean(message)}`;

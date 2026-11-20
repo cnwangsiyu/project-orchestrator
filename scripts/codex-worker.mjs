@@ -72,6 +72,8 @@ import { queuePolicy } from './lib/queue-stall-watch.mjs';
 import { inheritedLaunch, savedLaunch, saveLaunch, recordLaunchModel, readRequestBufferExceededAt, markRequestBufferExceeded } from './lib/worker-launch.mjs';
 import { recordWorkerOutcome, reviewSeat, reviewInstructions } from './lib/worker-outcome.mjs';
 import { completionKind } from './lib/worker-completion.mjs';
+import { claimTransportContinuation, saveTransportContinuation } from './lib/worker-launch.mjs';
+import { TRANSPORT_BACKOFF_MS, TRANSPORT_CONTINUE_MESSAGE, transportHealthBlock, transportQuotaBlock, boundedTransportRead } from './lib/worker-transport-retry.mjs';
 import { sizeLimits, threadSize, freshThreadRoute } from './lib/worker-thread-size.mjs';
 import { modelFamily, modelObservation, rolloutTurnModel } from './lib/worker-model.mjs';
 import { redactWorkerTurn, checkThreadIdle } from './lib/worker-redaction.mjs';
@@ -120,6 +122,7 @@ const account = ai >= 0 ? argv.splice(ai, 2)[1] : ['note', 'ask'].includes(argv[
 // Parse and validate public launch identifiers before any tracker or hub access.
 const earlyOpts = {};
 for (let i = 1; i < argv.length; i++) if (argv[i].startsWith('--')) {
+  if (argv[i] === '--no-auto-continue') { earlyOpts['no-auto-continue'] = true; continue; }
   const key = argv[i].slice(2);
   earlyOpts[key] = key === 'force-large' || key === 'background' || key === 'no-browser-preflight' || key === 'headless-playwright' || key === 'no-headless-playwright' || (key === 'require-model' && !['on', 'off'].includes(argv[i + 1]))
     || argv[i + 1] === undefined || argv[i + 1].startsWith('--') ? true : argv[++i];
@@ -158,7 +161,7 @@ if (['start', 'turn', 'wait'].includes(argv[0])) {
   if (earlyOpts.thread !== undefined && !validWorkerIdentifier(earlyOpts.thread)) usageError('--thread needs a nonempty public identifier; boolean-like values are invalid');
   if (earlyOpts.name !== undefined && (typeof earlyOpts.name !== 'string' || !earlyOpts.name.trim() || /^(?:true|false|undefined|null)$/i.test(earlyOpts.name.trim()))) usageError('--name needs nonempty text; boolean-like values are invalid');
 }
-if (argv[0] === 'turn' && typeof earlyOpts.thread === 'string') {
+if (['turn','wait'].includes(argv[0]) && typeof earlyOpts.thread === 'string') {
   try {
     const inherited = inheritedLaunch(account ?? 'main', earlyOpts);
     if (inherited === null) console.log(`inherited: no saved launch for ${account ?? 'main'}/${earlyOpts.thread}; provide --route-args once to seed it`);
@@ -195,7 +198,7 @@ if (tracker) {
 }
 // Exit also covers validation/RPC failures before report(). Never read a stale --out file.
 let outcomeTurn = null, outcomeFinal = '', outcomeSkip = false, outcomeInput;
-if (tracker) process.on('exit', (exit) => {
+const recordOutcome = exit => {
   try {
     const state = tracker.metadata();
     const saved = state.thread ? inheritedLaunch(account ?? 'main', { thread: state.thread }) ?? {} : {};
@@ -209,7 +212,8 @@ if (tracker) process.on('exit', (exit) => {
       exit, final: outcomeFinal, terminal: !!outcomeTurn, status: outcomeTurn?.status, error: outcomeTurn?.error,
       cumulativeInput: outcomeInput, skip: outcomeSkip || state.signal });
   } catch (e) { process.stderr.write(`auto-outcome: NOT RECORDED: ${e.message}\n`); }
-});
+};
+if (tracker) process.on('exit', recordOutcome);
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) if (tracker) process.once(signal, () => {
   tracker.signal(signal);
   if (!process.listenerCount(signal)) process.exit(signalExit(signal));
@@ -246,6 +250,7 @@ for (let i = 0; i < rest.length; i++) {
   else if (rest[i] === '--wake') opts.wake = true;
   else if (rest[i] === '--force-large') opts['force-large'] = true;
   else if (rest[i] === '--background') opts.background = true;
+  else if (rest[i] === '--no-auto-continue') opts['no-auto-continue'] = true;
   else if (rest[i] === '--require-model' && !['on', 'off'].includes(rest[i + 1])) opts['require-model'] = true;
   else if (rest[i].startsWith('--')) opts[rest[i].slice(2)] = rest[i + 1]?.startsWith('--') || rest[i + 1] === undefined ? true : rest[++i];
   else pos.push(rest[i]);
@@ -979,8 +984,8 @@ const recordModelEvidence = (threadId, turnId, state = 'running') => {
   try {
     fs.mkdirSync(path.dirname(rulesLog()), { recursive: true });
     fs.appendFileSync(rulesLog(), JSON.stringify({ kind: 'launch-model', t: Date.now(),
-      name: opts.name, project:ROUTE_ARGS ? routeFlag(ROUTE_ARGS,'project') ?? 'general' : launchDecision?.project,
-      category:ROUTE_ARGS?.[0] ?? launchDecision?.category, role:'primary',
+      name: opts.name, project:opts.project ?? (ROUTE_ARGS ? routeFlag(ROUTE_ARGS,'project') ?? 'general' : launchDecision?.project),
+      category:ROUTE_ARGS?.[0] ?? routedMetadata?.category ?? launchDecision?.category, role:opts.role ?? routedMetadata?.role ?? 'primary',
       account: account ?? 'main', thread: threadId, turn: turnId, accepted:!!threadId&&!!turnId,state,
       actualStatus:actualModel ? 'KNOWN' : 'UNKNOWN',
       actual:actualModel ? {accountId:account ?? 'main',modelId:actualModel,effort:opts.effort ?? 'medium'} : null,
@@ -1284,7 +1289,7 @@ const report = async (threadId, turn, final, usage, observation = {}) => {
   const explicitStrict = opts['require-model'] === true || opts['require-model'] === 'on';
   const rejectedModel = strictReviewModel && (modelMismatch || (explicitStrict && (!actualModel || !REQUESTED_MODEL)));
   if (strictReviewModel && !rejectedModel && !actualModel) console.log(`actual-model: unknown (requested ${REQUESTED_MODEL ?? 'default'}; no execution evidence from this hub)`);
-  recordModelEvidence(threadId, turn.id, turn.status==='completed'?'completed':'failed');
+  recordModelEvidence(threadId, turn.id, completionKind(turn));
   if (rejectedModel) console.error(`review-model-rejected: requested ${REQUESTED_MODEL ?? 'default'}, actual ${actualModel ?? 'unknown'}, delegated ${delegatedModels.map((row) => row.model).join(', ') || 'none'}`);
   console.log(`turn ${turn.status}${turn.error ? ' error=' + JSON.stringify(turn.error) : ''}`);
   const errorText = JSON.stringify(turn.error ?? '');
@@ -1341,6 +1346,67 @@ const report = async (threadId, turn, final, usage, observation = {}) => {
   outcomeTurn = turn; outcomeFinal = final ?? '';
   printFinal(final);
   await redactEndedTurn(threadId);
+  if (completion?.status === 'transport-failed' && !rejectedModel && !policyBlock) {
+    recordOutcome(1);
+    const continueCommand = [process.execPath,fileURLToPath(import.meta.url),'--account',account ?? 'main','turn','--thread',threadId,
+      ...(opts.model ? ['--model',opts.model] : []),...(opts.effort ? ['--effort',opts.effort] : []),TRANSPORT_CONTINUE_MESSAGE].map(shellQuote).join(' ');
+    const notify = message => {
+      const line = `[transport-retry] ${message}`;
+      console.error(line);
+      appendWorkerAlert({ ...tracker.metadata(),event:'message',kind:'transport-retry',text:message,wake:false },`transport-retry:${account}:${threadId}:${turn.id}:${message.startsWith('stopped')?'stop':'start'}`);
+      return line;
+    };
+    const quotaBlock = async () => {
+      const health = transportHealthBlock({home:PROF?.home ?? process.env.CODEX_HOME ?? path.join(os.homedir(),'.codex'),model:opts.model ?? actualModel});
+      if (health) return health;
+      try {
+        const payload = PROF?.kind === 'ttadk' ? null : await boundedTransportRead(() => call(PROF?.kind === 'trae' ? 'model/internalUsage/read' : 'account/rateLimits/read',{}));
+        return transportQuotaBlock({kind:PROF?.kind,account:account ?? 'main',payload});
+      } catch { return 'lane quota could not be confirmed'; }
+    };
+    let block = opts['no-auto-continue'] ? '--no-auto-continue' : resourceState.held.length ? 'worker still holds res leases' : await quotaBlock();
+    if (!block) block = claimTransportContinuation(account ?? 'main',threadId,turn.id);
+    if (!block) {
+      tracker?.update({mayRun:false,phase:'transport-backoff'});
+      notify(`one continuation on ${account ?? 'main'}/${opts.model ?? actualModel ?? 'default'} after 60s; thread=${threadId} turn=${turn.id}`);
+      await new Promise(resolve => setTimeout(resolve,TRANSPORT_BACKOFF_MS));
+      block = await quotaBlock();
+      if (!block) {
+        // A different follower/owner may have started work during the backoff.
+        let observed;
+        try { observed = await boundedTransportRead(() => currentTurn(threadId)); } catch { block = 'thread state could not be confirmed after backoff'; }
+        if (!block && (!observed || observed.id !== turn.id || !['failed','transport-failed'].includes(observed.status))) block = 'thread changed during backoff; reconcile it before continuing';
+      }
+      if (!block) {
+        const model = opts.model ?? actualModel;
+        auditStart(model,opts.sandbox,{thread:threadId,name:opts.name});
+        activeTurn = null; workStarted = false; workStartedAt = null; runningCommands.clear(); quietNoted = false;
+        actualModel = actualModelSource = actualModelProvider = null; delegatedModels.length = 0;
+        outcomeTurn = null; outcomeFinal = ''; outcomeInput = undefined; redactionPromise = null; done = false;
+        tracker?.update({reporting:false,status:'inProgress',mayRun:true});
+        markOutputStart();
+        let nextTurn;
+        try {
+          const started = await boundedTransportRead(() => call('turn/start',{threadId,input:textInput(TRANSPORT_CONTINUE_MESSAGE),model,effort:opts.effort,
+            sandboxPolicy:opts.sandbox && sandboxPolicy(opts.sandbox),approvalPolicy:CU_APPS.length || BU_ORIGINS.length ? APPROVAL_POLICY : undefined}));
+          nextTurn = started.turn?.id ?? started.turnId;
+          if (!nextTurn) throw Error('no turn id');
+        } catch {
+          outcomeSkip = true;
+          const line = notify(`stopped: continuation start unconfirmed; inspect thread=${threadId} before any new turn. Continue only after confirming idle: ${continueCommand}`);
+          tracker?.result('failed',{thread:threadId,mayRun:true,finalLine:line});
+          await finish(7); return;
+        }
+        saveTransportContinuation(account ?? 'main',threadId,turn.id,nextTurn);
+        follow(threadId,nextTurn);
+        return;
+      }
+    }
+    const line = notify(`stopped: ${block}; continue manually: ${continueCommand}`);
+    tracker?.result('failed',{thread:threadId,turn:turn.id,status:'transport-failed',mayRun:false,finalLine:line});
+    await finish(1);
+    return;
+  }
   const continuation = truncated ? continuationCommand({ script: fileURLToPath(import.meta.url), account: account ?? 'main',
     thread: threadId, owner: tracker?.owner, out: opts.out, log: opts.log }) : null;
   if (truncated && tracker?.owner) appendWorkerAlert({ ...tracker.metadata(), thread: threadId, turn: turn.id,

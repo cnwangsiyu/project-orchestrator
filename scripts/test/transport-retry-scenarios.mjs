@@ -5,9 +5,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { completionKind, transportLaneFailures } from '../lib/worker-completion.mjs';
+import { completionKind, classifyCompletion, transportLaneFailures } from '../lib/worker-completion.mjs';
+import { eventLine } from '../lib/worker-events.mjs';
 import { recordWorkerOutcome } from '../lib/worker-outcome.mjs';
 import { createTaskSpec } from '../lib/pipeline/taskspec.mjs';
+import { TRANSPORT_CONTINUE_MESSAGE, transportQuotaBlock, transportHealthBlock } from '../lib/worker-transport-retry.mjs';
+import { claimTransportContinuation, saveTransportContinuation, saveLaunch } from '../lib/worker-launch.mjs';
 
 const errors = [
   'stream disconnected before completion: Transport error: network error: error decoding response body',
@@ -36,6 +39,34 @@ const route = (history = [], failures = 0, onlyMain = false) => {
 const failed = (turn, t = now - 1000) => ({ kind:'outcome', t, project:'p', name:'task', category:'implement',
   account:'main', thread:'thread', turn, result:'transport-failed', failureKind:'transport-failed',
   actual:[{ account:'main', model:'gpt-6.1-sol', effort:'max' }], actualStatus:'KNOWN' });
+const follower = (label, config = {}, extra = []) => {
+  const dir = path.join(tmp,label), home = path.join(dir,'home'), bin = path.join(dir,'bin');
+  fs.mkdirSync(home,{recursive:true}); fs.mkdirSync(bin);
+  for (const [name,output] of [['codex','{"models":[]}'],['claude','fixture']])
+    fs.writeFileSync(path.join(bin,name),`#!/bin/sh\nprintf '%s\\n' '${output}'\n`,{mode:0o755});
+  const profiles = path.join(dir,'profiles.json'), rpc = path.join(dir,'rpc.jsonl'), log = path.join(dir,'outcomes.jsonl');
+  fs.writeFileSync(profiles,JSON.stringify({fixture:{kind:'trae',home,hub:'ws://127.0.0.1:1'}}));
+  const category = config.review ? 'review' : 'implement';
+  const pick = {vendor:'codex',account:'fixture',model:'gpt-6.1-sol',effort:'high',sandbox:'read-only'};
+  fs.writeFileSync(log,JSON.stringify({kind:'route',t:now,project:'p',name:label,category,pick})+'\n');
+  const env = {...process.env,HOME:home,CODEX_HOME:home,CODEX_ACCOUNTS:profiles,CODEX_HUB:'ws://127.0.0.1:1',
+    RULES_SHARED:dir,ROUTE_LOG_FILE:log,QUOTA_CACHE:path.join(dir,'cache.json'),QUOTA_LOG_FILE:path.join(dir,'empty-quota'),
+    PATH:`${bin}:${process.env.PATH}`,NODE_OPTIONS:'',ORCHESTRATOR_OWNER:'',CLAUDE_SESSION_ID:'',CLAUDE_JOB_DIR:'',CLAUDECODE:'',
+    TRAE_PROBE:'0',QUOTA_LOG:'0',TRAE_SESSIONS_DIR:path.join(dir,'empty-sessions'),
+    TRANSPORT_RETRY_FIXTURE:JSON.stringify({rpc,errors:[errors[0]],...config})};
+  const seat = {project:'p',name:label,category,role:'primary',...pick};
+  const run = (command = 'start') => {
+    const args = ['--account','fixture',command,...(command === 'start' ? ['--cwd',dir] : ['--thread','transport-thread']),
+      '--sandbox','read-only','--name',label,'--project','p','--model','gpt-6.1-sol','--effort','high',
+      '--routed-seat',JSON.stringify(seat),'--out',path.join(dir,'final.md'),...extra,
+      ...(['start','turn'].includes(command) ? ['Follow fixture.'] : [])];
+    const r = spawnSync(process.execPath,['--import',path.join(scripts,'test/fixtures/worker-transport-retry.mjs'),path.join(scripts,'codex-worker.mjs'),...args],
+      {env,encoding:'utf8',timeout:5000});
+    assert.equal(r.error,undefined,r.stderr+r.stdout); return r;
+  };
+  const rows = file => fs.existsSync(file) ? fs.readFileSync(file,'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : [];
+  return {dir,home,env,run,calls:()=>rows(rpc),outcomes:()=>rows(log).filter(r=>r.kind==='outcome')};
+};
 try {
   check('real stream errors and exhausted provider errors are transport failures', () => {
     for (const error of [...errors, 'ECONNRESET', 'HTTP 500 after retries', 'provider 503', 'provider overloaded after retries'])
@@ -43,6 +74,8 @@ try {
     for (const status of ['completed', 'interrupted', 'BLOCKED', 'TRUNCATED'])
       assert.equal(completionKind({ status, error: errors[0] }), status);
     assert.equal(completionKind({ status: 'failed', error: 'test assertions failed' }), 'failed');
+    assert.equal(classifyCompletion({turn:{status:'failed',error:errors[0]}}).status,'transport-failed');
+    assert.match(eventLine({event:'message',kind:'transport-retry',text:'Continue: node script.mjs --thread thread',name:'fixture'}),/^\[transport-retry\].*Continue: node script.mjs --thread thread$/);
   });
   check('transport outcome is durable, idempotent, and distinct from quality or partial final prose', () => {
     const log = path.join(tmp, 'outcomes.jsonl');
@@ -56,6 +89,7 @@ try {
     assert.equal(JSON.parse(fs.readFileSync(log, 'utf8')).result, 'transport-failed');
     const success = recordWorkerOutcome({ ...base, turn: 'continued', command: 'turn', status: 'completed', exit: 0, final: 'DONE' });
     assert.equal(success.result, 'pass'); assert.equal(success.rounds, 0);
+    assert.equal(recordWorkerOutcome({...base,turn:'later-transport',command:'turn'}).rounds,0);
   });
   check('router ledger joins terminal transport errors, ignores failures and stronger launch dominance', () => {
     const outcome = failed('turn');
@@ -82,5 +116,55 @@ try {
     assert.equal(route(recent,0,true).pick.account,'main');
     assert.equal(route(recent.map(r=>({...r,t:now-1800001}))).pick.account,'main');
   });
+  check('follower retries once on the same thread with 60s backoff and fixed state-check message', () => {
+    const f = follower('retry-success'); const r = f.run(); assert.equal(r.status,0,r.stderr+r.stdout);
+    const starts = f.calls().filter(r=>r.method==='turn/start'); assert.equal(starts.length,2);
+    assert.equal(starts[1].params.threadId,'transport-thread'); assert.equal(starts[1].params.model,starts[0].params.model);
+    assert.equal(starts[1].params.effort,starts[0].params.effort); assert.equal(starts[1].params.input[0].text,TRANSPORT_CONTINUE_MESSAGE);
+    assert.equal(f.calls().filter(r=>r.backoffMs===60000).length,1); assert.match(r.stderr,/\[transport-retry\].*after 60s/);
+    assert.deepEqual(f.outcomes().map(r=>[r.result,r.rounds]),[['transport-failed',0],['pass',0]]);
+    assert.equal(fs.readFileSync(path.join(f.dir,'final.md'),'utf8'),'DONE transport fixture\n');
+  });
+  check('second transport failure stops with an exact continue command and receipt prevents wait duplication', () => {
+    const f = follower('retry-stop',{errors}); const r = f.run(); assert.equal(r.status,1,r.stderr+r.stdout);
+    assert.equal(f.calls().filter(r=>r.method==='turn/start').length,2);
+    assert.match(r.stderr,/stopped: one automatic continuation already claimed; continue manually: .*codex-worker.mjs.*--account fixture turn --thread transport-thread/);
+    assert.deepEqual(f.outcomes().map(r=>r.result),['transport-failed','transport-failed']);
+    const launch = JSON.parse(fs.readFileSync(path.join(f.dir,'worker-launches/fixture/transport-thread.json'),'utf8'));
+    assert.equal(launch.transportRetry.sourceTurn,'transport-turn-1'); assert.equal(launch.transportRetry.continuationTurn,'transport-turn-2');
+  });
+  check('no-auto-continue persists across wait and review seats honor the flag', () => {
+    for (const review of [false,true]) {
+      const f = follower(`retry-disabled-${review}`,{review},['--no-auto-continue']);
+      assert.equal(f.run().status,1); assert.equal(f.calls().filter(r=>r.method==='turn/start').length,1);
+      assert.equal(f.calls().filter(r=>r.backoffMs).length,0);
+      const saved = JSON.parse(fs.readFileSync(path.join(f.dir,'worker-launches/fixture/transport-thread.json'),'utf8'));
+      assert.equal(saved.defaults['no-auto-continue'],true);
+    }
+    const review = follower('retry-review',{review:true,final:'DONE\nREVIEW-RESULT: none'});
+    assert.equal(review.run().status,0); assert.equal(review.calls().filter(r=>r.method==='turn/start').length,2);
+  });
+  check('wait followers continue terminal failures and exhausted quota skips continuation', () => {
+    const f = follower('retry-wait',{wait:true});
+    process.env.RULES_SHARED=f.dir;
+    saveLaunch('fixture','transport-thread',{name:'retry-wait',project:'p',model:'gpt-6.1-sol',effort:'high',sandbox:'read-only',
+      'routed-seat':JSON.stringify({category:'implement'})},'053283ad-1bc8-5a31-ad44-d68e6b199eb6');
+    const waited = f.run('wait'); assert.equal(waited.status,0,waited.stderr+waited.stdout); assert.equal(f.calls().filter(r=>r.method==='turn/start').length,1);
+    const depleted = follower('retry-quota',{exhausted:true}); const r=depleted.run();
+    assert.equal(r.status,1); assert.match(r.stderr,/quota exhausted/); assert.equal(depleted.calls().filter(r=>r.method==='turn/start').length,1);
+  });
+  check('durable retry claims and stalled/unknown quota prevent unsafe automatic repeats', () => {
+    const home = path.join(tmp,'health'); fs.mkdirSync(home);
+    fs.writeFileSync(path.join(home,'lane-state.json'),JSON.stringify({'gpt-6.1-sol':{t:now,state:'queued',position:10,drainPerMin:0}}));
+    assert.equal(transportHealthBlock({home,model:'gpt-6.1-sol',now}),'lane stalled');
+    assert.equal(transportQuotaBlock({kind:'trae',payload:{},now}),'lane quota unknown');
+    assert.equal(transportQuotaBlock({payload:{rateLimits:{primary:{usedPercent:100}}},now}),'lane quota exhausted');
+    assert.equal(transportQuotaBlock({kind:'ttadk',account:'t',now,cache:{checkedAt:now-900001,codexAccounts:[{name:'t',usage:{used:1,limit:100,resetsAt:now+1000}}]}}),'lane quota unknown or stale');
+    process.env.RULES_SHARED=home; saveLaunch('a','thread',{model:'gpt-6.1-sol'},'owner');
+    assert.equal(claimTransportContinuation('a','thread','turn'),null);
+    assert.equal(claimTransportContinuation('a','thread','turn'),'one automatic continuation already claimed');
+    saveTransportContinuation('a','thread','turn','next');
+    assert.equal(claimTransportContinuation('a','thread','next'),'one automatic continuation already claimed');
+  });
   console.log(`${count} scenarios passed`);
-} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+} finally { fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); }

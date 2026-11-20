@@ -53,7 +53,7 @@ export function recordWorkerOutcome({ project, name, category, role, account = '
     const firstLaunch = Math.min(startedAt ?? time, ...launches.map(row => row.t), ...prior.map(row => row.startedAt ?? row.t));
     const previous = prior.at(-1);
     const newTurns = launches.filter(row => row.continuation && row.t > (previous?.t ?? time) && !row.blocked).length;
-    const rounds = (previous?.rounds ?? 0) + (command === 'turn' && previous && ['pass', 'rework'].includes(previous.result) ? Math.max(1, newTurns) : 0);
+    const rounds = (previous?.rounds ?? 0) + (!transport && command === 'turn' && previous && ['pass', 'rework'].includes(previous.result) ? Math.max(1, newTurns) : 0);
     const pick = { vendor: 'codex', model: actualModel ?? model ?? null, effort: effort ?? 'medium', account };
     const actual = actualModel ? [...(previous?.actual ?? []), { ...pick }] : previous?.actual;
     const rec = { t: time, kind: 'outcome', auto: true, project, name, category, role: role ?? 'primary',
