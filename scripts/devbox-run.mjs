@@ -386,25 +386,49 @@ def data_group_live(root,workspace,proc_root=pathlib.Path('/proc')):
     for ctl in runs.iterdir():
         if not re.fullmatch(r'[0-9a-f-]{36}',ctl.name) or ctl.is_symlink(): continue
         file=ctl/'group.json'
-        if not file.exists(): continue
-        if file.is_symlink(): raise RuntimeError('group receipt symlink')
-        record=json.loads(file.read_text())
-        if record.get('run')!=ctl.name or not isinstance(record.get('pid'),int) or record['pid']<=0: raise RuntimeError('invalid group receipt')
-        recorded_workspace=record.get('workspace')
-        if recorded_workspace and pathlib.Path(recorded_workspace).resolve()!=workspace: continue
-        pgid=record['pid']; leader=proc_root/str(pgid)/'stat'
+        if not file.exists() and not file.is_symlink(): continue
+        # Old receipts omit run/workspace. Attribute each receipt before refusing
+        # this workspace, rather than letting one old host receipt stop all slots.
         try:
-            fields=leader.read_text().rsplit(')',1)[1].split()
-            if fields[19]!=record.get('start'): continue
-        except (FileNotFoundError,ProcessLookupError): pass
+            if file.is_symlink(): raise ValueError('group receipt symlink')
+            record=json.loads(file.read_text())
+            if not isinstance(record,dict): record={}
+        except (OSError,ValueError): record={}
+        recorded_workspace=record.get('workspace')
+        if not isinstance(recorded_workspace,str) or not pathlib.Path(recorded_workspace).is_absolute(): recorded_workspace=None
+        try: recorded_scope=pathlib.Path(recorded_workspace).resolve() if recorded_workspace else None
+        except (OSError,ValueError,RuntimeError): recorded_scope=None
+        pgid=record.get('pid')
+        valid_pid=type(pgid) is int and pgid>0
+        valid_start=isinstance(record.get('start'),str) and bool(record['start'])
+        modern=record.get('run')==ctl.name and valid_pid and valid_start and recorded_scope is not None
+        if modern and recorded_scope!=workspace: continue
+        ambiguous_identity=False
+        if valid_pid:
+            try:
+                fields=(proc_root/str(pgid)/'stat').read_text().rsplit(')',1)[1].split()
+                if valid_start and fields[19]!=record['start']: continue
+            except (FileNotFoundError,ProcessLookupError): pass
+            except (OSError,ValueError,IndexError):
+                ambiguous_identity=True
+        # Without a usable PID, cwd evidence still limits a malformed receipt
+        # to workspaces it can own. Never inspect process argv/environment.
         for process in proc_root.glob('[0-9]*'):
             try:
                 fields=(process/'stat').read_text().rsplit(')',1)[1].split()
-                if fields[0]=='Z' or int(fields[2])!=pgid: continue
-                if recorded_workspace: return True
-                cwd=(process/'cwd').resolve(strict=True)
-                if cwd==workspace or cwd.is_relative_to(workspace): return True
+                if fields[0]=='Z' or (valid_pid and int(fields[2])!=pgid): continue
             except (FileNotFoundError,ProcessLookupError): continue
+            except (OSError,ValueError,IndexError): fields=None
+            try:
+                if modern and fields is not None and not ambiguous_identity: return True
+                if recorded_scope==workspace: raise RuntimeError('legacy or invalid live group protects workspace')
+                cwd=(process/'cwd').resolve(strict=True)
+                if cwd==workspace or cwd.is_relative_to(workspace):
+                    raise RuntimeError('legacy or invalid live group protects workspace')
+            except (FileNotFoundError,ProcessLookupError):
+                if (process/'stat').exists(): raise RuntimeError('ambiguous group cwd for workspace')
+            except (OSError,ValueError,IndexError):
+                raise RuntimeError('ambiguous group evidence for workspace')
     return False
 
 def cleanup_run_data(d):

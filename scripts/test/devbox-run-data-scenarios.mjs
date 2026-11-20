@@ -90,11 +90,85 @@ try {
   const fields = Array(20).fill('0'); fields[0] = 'S'; fields[1] = '1'; fields[2] = '1234'; fields[19] = '42';
   fs.writeFileSync(path.join(proc, '1234/stat'), '1234 (fixture) ' + fields.join(' '));
   fs.symlinkSync(grouped.workspace, path.join(proc, '1234/cwd'));
-  fs.writeFileSync(path.join(grouped.control, 'group.json'), JSON.stringify({ run: path.basename(grouped.control), pid: 1234, start: '42' }));
+  fs.writeFileSync(path.join(grouped.control, 'group.json'), JSON.stringify({ run: path.basename(grouped.control), workspace: grouped.workspace, pid: 1234, start: '42' }));
   invoke(grouped, `assert data_group_live(pathlib.Path(${JSON.stringify(grouped.root)}),pathlib.Path(${JSON.stringify(grouped.workspace)}),pathlib.Path(${JSON.stringify(proc)}))`);
   fields[19] = '99'; fs.writeFileSync(path.join(proc, '1234/stat'), '1234 (fixture) ' + fields.join(' '));
   invoke(grouped, `assert not data_group_live(pathlib.Path(${JSON.stringify(grouped.root)}),pathlib.Path(${JSON.stringify(grouped.workspace)}),pathlib.Path(${JSON.stringify(proc)}))`);
   console.log('PASS live group attribution uses recorded start identity, group membership and workspace cwd');
+
+  function groupFixture() {
+    const f = fixture(), proc = path.join(f.root, 'fixture-proc'); fs.mkdirSync(proc);
+    f.write('stale/out', 'old');
+    const old = new Date(Date.now() - 3600000);
+    for (const file of [path.join(f.data, 'stale/out'), path.join(f.data, 'stale')]) fs.utimesSync(file, old, old);
+    const receipt = (record, run = randomUUID()) => {
+      const ctl = path.join(f.root, 'runs', run); fs.mkdirSync(ctl, { recursive: true });
+      const file = path.join(ctl, 'group.json');
+      fs.writeFileSync(file, typeof record === 'string' ? record : JSON.stringify(record)); return file;
+    };
+    const process = (pid, pgid, cwd, start = '42') => {
+      const dir = path.join(proc, String(pid)); fs.mkdirSync(dir, { recursive: true });
+      const fields = Array(20).fill('0'); fields[0] = 'S'; fields[1] = '1'; fields[2] = String(pgid); fields[19] = start;
+      fs.writeFileSync(path.join(dir, 'stat'), `${pid} (fixture) ${fields.join(' ')}`);
+      if (cwd) fs.symlinkSync(cwd, path.join(dir, 'cwd'));
+    };
+    const cleanup = () => invoke(f, `original_group_live=data_group_live\ndata_group_live=lambda root,workspace: original_group_live(root,workspace,pathlib.Path(${JSON.stringify(proc)}))`);
+    return { ...f, proc, receipt, process, cleanup };
+  }
+  const deadGroups = groupFixture();
+  for (const [run, pid] of [
+    ['251bfb79-4db4-4cc9-a026-db051f5a63fc', 185465], ['c216aa52-693f-4968-bd7f-6035b3badecb', 177841],
+    ['29b232ff-790a-4797-834d-2a75180b4790', 103781], ['c7679be1-f23b-4b2d-96bf-2adfd7fa26be', 185039],
+  ]) deadGroups.receipt({ pid, start: 'dead' }, run);
+  assert.equal(deadGroups.cleanup().bytes, 3);
+  assert.equal(fs.readdirSync(path.join(deadGroups.root, 'runs')).filter(run => run !== path.basename(deadGroups.control)).length, 4);
+  console.log('PASS BC-180 four dead legacy receipts permit cleanup without modifying receipts');
+
+  const legacyLive = groupFixture(); legacyLive.receipt({ pid: 1234, start: '42' });
+  legacyLive.process(1234, 1234, legacyLive.workspace);
+  const protectedLegacy = legacyLive.cleanup();
+  assert.equal(protectedLegacy.bytes, 0); assert.match(protectedLegacy.warnings.join(' '), /live group protects workspace/);
+  fs.unlinkSync(path.join(legacyLive.proc, '1234/cwd')); fs.symlinkSync(temp, path.join(legacyLive.proc, '1234/cwd'));
+  assert.equal(legacyLive.cleanup().bytes, 3, 'live legacy group of another workspace does not block');
+
+  const orphan = groupFixture(); orphan.receipt({ pid: 1234, start: '42' });
+  orphan.process(5678, 1234, orphan.workspace);
+  assert.equal(orphan.cleanup().bytes, 0, 'surviving group members protect data after leader exit');
+  const ambiguous = groupFixture(); ambiguous.receipt({ pid: 1234, start: '42' }); ambiguous.process(1234, 1234);
+  assert.match(ambiguous.cleanup().warnings.join(' '), /ambiguous group cwd/);
+  const malformed = groupFixture(); malformed.receipt('{broken'); malformed.process(1234, 1234, malformed.workspace);
+  assert.equal(malformed.cleanup().bytes, 0);
+  fs.unlinkSync(path.join(malformed.proc, '1234/cwd')); fs.symlinkSync(temp, path.join(malformed.proc, '1234/cwd'));
+  assert.equal(malformed.cleanup().bytes, 3, 'malformed receipt is attributed by cwd rather than aborting the host');
+  const malformedStat = groupFixture(); malformedStat.receipt({ pid: 1234, start: '42' }); malformedStat.process(1234, 1234, temp);
+  fs.writeFileSync(path.join(malformedStat.proc, '1234/stat'), 'invalid stat');
+  assert.equal(malformedStat.cleanup().bytes, 3, 'malformed process identity still checks workspace attribution');
+  const malformedStatOwned = groupFixture(); malformedStatOwned.receipt({ pid: 1234, start: '42' }); malformedStatOwned.process(1234, 1234, malformedStatOwned.workspace);
+  fs.writeFileSync(path.join(malformedStatOwned.proc, '1234/stat'), 'invalid stat');
+  assert.equal(malformedStatOwned.cleanup().bytes, 0, 'ambiguous process identity with this cwd protects workspace');
+  const conflicting = groupFixture(); conflicting.receipt({ run: 'invalid', pid: 1234, start: '42', workspace: temp });
+  conflicting.process(1234, 1234, conflicting.workspace);
+  assert.equal(conflicting.cleanup().bytes, 0, 'invalid receipt cannot exclude this workspace using conflicting metadata');
+  const unrelated = groupFixture(); unrelated.receipt({ run: 'invalid', pid: 1234, start: '42', workspace: temp });
+  unrelated.process(1234, 1234, temp);
+  assert.equal(unrelated.cleanup().bytes, 3, 'invalid receipt with unrelated process cwd does not block');
+  const broken = groupFixture(), brokenReceipt = broken.receipt({});
+  fs.unlinkSync(brokenReceipt); fs.symlinkSync(path.join(temp, 'missing-receipt'), brokenReceipt);
+  broken.process(1234, 1234, broken.workspace);
+  assert.equal(broken.cleanup().bytes, 0, 'broken receipt symlink still attributes possible live ownership without following the link');
+  console.log('PASS live legacy, surviving members and ambiguous/malformed ownership protect only possibly owned workspace');
+
+  for (const same of [false, true]) {
+    const modern = groupFixture(), run = randomUUID();
+    modern.receipt({ run, pid: 1234, start: '42', workspace: same ? modern.workspace : temp }, run);
+    modern.process(1234, 1234, same ? modern.workspace : temp);
+    // Modern receipts retain the existing recent-data protection semantics.
+    modern.write('recent/out', 'new');
+    const result = modern.cleanup();
+    assert.equal(result.bytes, same ? 3 : 6); assert.deepEqual(result.warnings, []);
+    assert.equal(fs.existsSync(path.join(modern.data, 'recent')), same);
+  }
+  console.log('PASS live modern receipts protect recent data of the same workspace without blocking other workspaces');
 
   const escaped = fixture(), other = path.join(temp, 'other-data'); fs.mkdirSync(other); fs.writeFileSync(path.join(other, 'keep'), 'outside');
   fs.rmdirSync(escaped.data); fs.symlinkSync(other, escaped.data);
