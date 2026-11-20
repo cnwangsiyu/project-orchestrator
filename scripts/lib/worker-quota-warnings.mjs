@@ -17,11 +17,14 @@ export const cachedWorkerQuota = () => {
   catch { return null; }
 };
 const modelId = value => String(value ?? '').toLowerCase();
+export const numericQuotaSampledAt = (account, data) => account.kind === 'ttadk'
+  ? account.usageSeenAt ?? account.usage?.sampledAt ?? account.seenAt ?? data?.checkedAt
+  : account.quota?.sampledAt ?? data?.checkedAt;
 export function dailyWarningBuckets(data, now = Date.now()) {
   return (data?.codexAccounts ?? []).flatMap(account => {
-    const buckets = account.kind === 'ttadk' ? [{ ...account.usage, model: null, sampledAt: data.checkedAt }]
+    const buckets = account.kind === 'ttadk' ? [{ ...account.usage, model: null, sampledAt: numericQuotaSampledAt(account, data) }]
       : account.kind === 'trae' ? Object.entries(account.quota?.daily ?? {}).map(([model, bucket]) => ({
-        ...bucket, model: modelId(model), sampledAt: account.quota.sampledAt ?? data.checkedAt })) : [];
+        ...bucket, model: modelId(model), sampledAt: numericQuotaSampledAt(account, data) })) : [];
     return buckets.filter(bucket => Number.isFinite(bucket.used) && bucket.used >= 0
       && Number.isFinite(bucket.limit) && bucket.limit > 0 && Number.isFinite(bucket.resetsAt) && bucket.resetsAt > now
       && Number.isFinite(bucket.sampledAt) && bucket.sampledAt <= now && now - bucket.sampledAt <= 15 * MINUTE)

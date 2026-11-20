@@ -7,7 +7,7 @@ import { rulesShared } from './global-rules.mjs';
 import { readProfiles } from './state.mjs';
 import { withLock, writeJson } from './shared-file.mjs';
 import { readEvents, workerRunStates, followerAlive, appendWorkerAlert } from './worker-events.mjs';
-import { cachedWorkerQuota, checkQuotaWarnings } from './worker-quota-warnings.mjs';
+import { cachedWorkerQuota, checkQuotaWarnings, numericQuotaSampledAt } from './worker-quota-warnings.mjs';
 
 const fileOf = () => path.join(rulesShared(), 'worker-quota-refresh.json');
 const read = file => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch (error) {
@@ -57,11 +57,12 @@ export async function pollWorkerQuota({ owner, data = cachedWorkerQuota(), rows 
     const requested = [...new Set(running.map(row => row.account))];
     const cacheAt = name => {
       const account = data?.codexAccounts?.find(account => account.name === name);
-      return account?.quota?.sampledAt ?? account?.usageSeenAt ?? account?.seenAt ?? data?.checkedAt ?? null;
+      return account ? numericQuotaSampledAt(account, data) ?? null : data?.checkedAt ?? null;
     };
     const stale = !Number.isFinite(data?.checkedAt) || now - data.checkedAt > 15 * 60000
       || (data?.codexAccounts ?? []).some(account => running.some(row => row.account === account.name)
-        && Number.isFinite(account.quota?.sampledAt) && now - account.quota.sampledAt > 15 * 60000);
+        && (!Number.isFinite(numericQuotaSampledAt(account, data))
+          || now - numericQuotaSampledAt(account, data) > 15 * 60000));
     if (!stale) { checkQuotaWarnings({ data, rows, now }); return { status: 'fresh' }; }
     let targets = requested;
     const claim = withLock(file, () => {

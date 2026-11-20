@@ -7,6 +7,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { pollWorkerQuota, refreshWorkerQuota } from '../lib/worker-quota-refresh.mjs';
 import { readEvents, eventLine } from '../lib/worker-events.mjs';
+import { dailyWarningBuckets } from '../lib/worker-quota-warnings.mjs';
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'worker-quota-refresh-'));
 const prior = process.env.RULES_SHARED; process.env.RULES_SHARED = tmp;
@@ -63,6 +64,16 @@ try {
     data: { checkedAt: now, codexAccounts: [{ name: 'company', kind: 'trae', quota: { sampledAt: now - 16 * 60000 } }] },
     refresh: () => { numericRefreshes++; return { status: 'ok' }; } });
   assert.equal(numericRefreshes, 1, 'fresh routing cache cannot hide a stale numeric quota sample');
+  const staleTtadk = { checkedAt: now, codexAccounts: [{ name: 'company', kind: 'ttadk', usageSeenAt: now - 60 * 60000,
+    usage: { used: 85, limit: 100, resetsAt: now + 3600000 } }] };
+  assert.equal(dailyWarningBuckets(staleTtadk, now).length, 0);
+  let ttadkRefreshes = 0;
+  const ttadkResult = await pollWorkerQuota({ ...options, data: staleTtadk, profiles: { company: { kind: 'ttadk' } },
+    file: path.join(tmp, 'stale-ttadk.json'), refresh: () => { ttadkRefreshes++; return { status: 'ok' }; } });
+  assert.equal(ttadkResult.status, 'ok'); assert.equal(ttadkRefreshes, 1);
+  staleTtadk.codexAccounts[0].usageSeenAt = now;
+  assert.equal(dailyWarningBuckets(staleTtadk, now).length, 1);
+  console.log('PASS last successful TTADK numeric timestamp controls warning admission and tick freshness');
 
   const unavailableFile = path.join(tmp, 'worker-quota-refresh.json');
   let unavailableReads = 0;
