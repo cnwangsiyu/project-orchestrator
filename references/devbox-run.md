@@ -1267,4 +1267,5 @@ precreate slot trees.
 Controller disk admission/reservations still refer to primary free space.
 Secondary space cannot override a primary-disk denial; removing that conservative
 limit needs a reviewed per-device controller contract, not a runner bypass.
-Detailed owner rollout/rollback commands are in this change's `report.md`.
+The owner must retain a rollout plan with exact publish, drain, validation and
+rollback commands before enabling these settings.

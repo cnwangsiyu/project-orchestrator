@@ -149,9 +149,9 @@ try {
   assert.ok(fs.existsSync(mappedTree.workspace));
   assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'wt-map.json'))).slots['devbox-cn-20']['fixture/id-fixture'].treeRoot, root);
 
-  // d4168da wire snapshots, without requiring history in a shallow checkout.
+  // land-7 wire snapshots include the prerequisite Linux I/O metrics change.
   const hash = value => createHash('sha256').update(value).digest('hex');
-  assert.equal(hash(JSON.stringify(remoteScripts)), '5b3cca978af5bbc216036a251e49c4c54e9e313c00a8edd476d6c5516a87dceb', 'all legacy remote scripts unchanged');
+  assert.equal(hash(JSON.stringify(remoteScripts)), '0214faba6b8e8a7a90e9039747511f3e183467c255b3a20c6f773878326609ed', 'all legacy remote scripts unchanged from land-7');
   for (const [operation, source] of Object.entries(remoteScripts)) assert.equal(treeScript(operation, source, '', {}), source, 'legacy script unchanged: ' + operation);
   const scripts = fileURLToPath(new URL('../', import.meta.url));
   for (const operation of ['inspect', 'checkout', 'run', 'input-map', 'inputs-ready', 'dead-slot']) {
