@@ -9,7 +9,7 @@ import { completionKind, classifyCompletion, transportLaneFailures } from '../li
 import { eventLine } from '../lib/worker-events.mjs';
 import { recordWorkerOutcome } from '../lib/worker-outcome.mjs';
 import { createTaskSpec } from '../lib/pipeline/taskspec.mjs';
-import { TRANSPORT_CONTINUE_MESSAGE, transportQuotaBlock, transportHealthBlock } from '../lib/worker-transport-retry.mjs';
+import { TRANSPORT_CONTINUE_MESSAGE, transportQuotaBlock, transportHealthBlock, transportSourceBlock } from '../lib/worker-transport-retry.mjs';
 import { claimTransportContinuation, saveTransportContinuation, saveLaunch } from '../lib/worker-launch.mjs';
 
 const errors = [
@@ -158,6 +158,18 @@ try {
     const launch = JSON.parse(fs.readFileSync(path.join(f.dir,'worker-launches/fixture/transport-thread.json'),'utf8'));
     assert.equal(launch.transportRetry.sourceTurn,'transport-turn-1'); assert.equal(launch.transportRetry.continuationTurn,'transport-turn-2');
     assert.equal(launch.turn,'transport-turn-2');
+  });
+  check('failed fresh hub read cancels continuation even when another follower cached a terminal state', () => {
+    const f=follower('retry-unconfirmed-hub',{cachedTerminalAfterBackoff:true,hubReadFailureAfterBackoff:true});
+    const r=f.run(); assert.equal(r.status,1,r.stderr+r.stdout);
+    assert.match(r.stderr,/fresh hub state could not be confirmed after backoff/);
+    assert.equal(f.calls().filter(r=>r.method==='turn/start').length,1);
+    const source={id:'source',status:'failed'};
+    assert.equal(transportSourceBlock({result:{thread:{id:'thread',turns:[source]}},threadId:'thread',sourceTurn:'source'}),null);
+    for(const result of [{},{thread:{turns:[]}},{thread:{turns:[source],status:{type:'unknown'}}},{thread:{turns:[{id:'source',status:'unknown'}]}},
+      {thread:{turns:[source,{id:'newer',status:'completed'}]}},
+      {thread:{turns:[source],activeTurn:{id:'newer',status:'inProgress'}}}])
+      assert.ok(transportSourceBlock({result,threadId:'thread',sourceTurn:'source'}));
   });
   check('no-auto-continue persists across wait and review seats honor the flag', () => {
     for (const review of [false,true]) {

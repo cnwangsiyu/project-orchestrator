@@ -5,6 +5,20 @@ import { poolOf } from './trae-health.mjs';
 
 export const TRANSPORT_BACKOFF_MS = 60000;
 export const TRANSPORT_CONTINUE_MESSAGE = 'The previous turn was cut off by a network/stream error. Continue the task from where you stopped; do not redo finished steps; re-check the state of anything you were changing.';
+// Only the successful fresh hub reply can authorize a continuation. Cached
+// follower state is useful for status display, never for this admission check.
+export const transportSourceBlock = ({ result, threadId, sourceTurn }) => {
+  const thread = result?.thread;
+  if (!thread || thread.id && thread.id !== threadId || !Array.isArray(thread.turns) || !thread.turns.length)
+    return 'fresh hub state does not confirm the source turn';
+  const status = thread.status?.type ?? thread.status;
+  if (['unknown','UNKNOWN','notLoaded','notFound'].includes(status)) return 'fresh hub state is unknown';
+  if ([thread.activeTurn,thread.currentTurn].filter(Boolean).some(turn => turn.id !== sourceTurn || !['failed','transport-failed'].includes(turn.status)))
+    return 'hub reports a newer or unconfirmed current turn; reconcile it before continuing';
+  const latest = thread.turns.at(-1);
+  return latest?.id === sourceTurn && ['failed','transport-failed'].includes(latest.status)
+    ? null : 'thread changed during backoff; reconcile it before continuing';
+};
 const read = file => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch(e) { return e.code === 'ENOENT' ? {} : null; } };
 export const transportHealthBlock = ({ home, model, now = Date.now() }) => {
   const health = read(path.join(home,'worker-health.json'));

@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import childProcess from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { EventEmitter } from 'node:events';
+import { appendEvent, readEvents } from '../../lib/worker-events.mjs';
 // Board refresh is outside these scenarios; keep its unref'd subprocesses out
 // of fixture teardown while leaving worker launch and quota behavior intact.
 const nativeSpawn = childProcess.spawn;
@@ -15,7 +16,14 @@ syncBuiltinESMExports();
 const config = JSON.parse(process.env.TRANSPORT_RETRY_FIXTURE);
 const nativeTimeout = globalThis.setTimeout;
 globalThis.setTimeout = (callback, ms, ...args) => {
-  if (ms === 60000) fs.appendFileSync(config.rpc,JSON.stringify({backoffMs:ms})+'\n');
+  if (ms === 60000) {
+    fs.appendFileSync(config.rpc,JSON.stringify({backoffMs:ms})+'\n');
+    config.backedOff = true;
+    if (config.cachedTerminalAfterBackoff) {
+      const row = readEvents().findLast(row=>row.thread==='transport-thread'&&row.turn==='transport-turn-1');
+      appendEvent({...row,event:'failed',status:'failed',mayRun:false,settled:true,runId:'peer-fixture-run',pid:process.pid});
+    }
+  }
   return nativeTimeout(callback,ms === 60000 ? 10 : ms,...args);
 };
 globalThis.WebSocket = class {
@@ -43,6 +51,9 @@ globalThis.WebSocket = class {
       this.turns.push(turn); result = {turn:{...turn,status:'inProgress'}};
     }
     setImmediate(() => {
+      if (call.method==='thread/read' && config.backedOff && config.hubReadFailureAfterBackoff) {
+        this.notify({id:call.id,error:{code:-32000,message:'fixture fresh hub read failed'}}); return;
+      }
       this.notify({id:call.id,result});
       if (turn) nativeTimeout(() => {
         this.notify({method:'item/completed',params:{threadId:'transport-thread',turnId:turn.id,item:{type:'agentMessage',text:turn.items[0].text}}});

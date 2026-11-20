@@ -73,7 +73,7 @@ import { inheritedLaunch, savedLaunch, saveLaunch, recordLaunchModel, readReques
 import { recordWorkerOutcome, reviewSeat, reviewInstructions } from './lib/worker-outcome.mjs';
 import { completionKind } from './lib/worker-completion.mjs';
 import { claimTransportContinuation, saveTransportContinuation } from './lib/worker-launch.mjs';
-import { TRANSPORT_BACKOFF_MS, TRANSPORT_CONTINUE_MESSAGE, transportHealthBlock, transportQuotaBlock, boundedTransportRead } from './lib/worker-transport-retry.mjs';
+import { TRANSPORT_BACKOFF_MS, TRANSPORT_CONTINUE_MESSAGE, transportHealthBlock, transportQuotaBlock, transportSourceBlock, boundedTransportRead } from './lib/worker-transport-retry.mjs';
 import { sizeLimits, threadSize, freshThreadRoute } from './lib/worker-thread-size.mjs';
 import { modelFamily, modelObservation, rolloutTurnModel } from './lib/worker-model.mjs';
 import { redactWorkerTurn, checkThreadIdle } from './lib/worker-redaction.mjs';
@@ -1373,9 +1373,10 @@ const report = async (threadId, turn, final, usage, observation = {}) => {
       block = await quotaBlock();
       if (!block) {
         // A different follower/owner may have started work during the backoff.
-        let observed;
-        try { observed = await boundedTransportRead(() => currentTurn(threadId)); } catch { block = 'thread state could not be confirmed after backoff'; }
-        if (!block && (!observed || observed.id !== turn.id || !['failed','transport-failed'].includes(observed.status))) block = 'thread changed during backoff; reconcile it before continuing';
+        try {
+          const fresh = await boundedTransportRead(() => call('thread/read',{threadId,includeTurns:true}));
+          block = transportSourceBlock({result:fresh,threadId,sourceTurn:turn.id});
+        } catch { block = 'fresh hub state could not be confirmed after backoff'; }
       }
       if (!block) {
         const model = opts.model ?? actualModel;
