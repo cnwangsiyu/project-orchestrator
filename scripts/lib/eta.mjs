@@ -75,11 +75,9 @@ export const patienceMinutes = ({ now, nextAvailableAt, ttadk }) => {
   if (!finite(reset) || reset <= now) return ETA.patienceMaxMin;
   return Math.min(ETA.patienceMaxMin, ETA.patienceShare * (reset - now) / 60000);
 };
-// Human-readable estimate for `why`: "6.1-Sol@trae now, est. 95 min; TTADK in 9.2h → est. 10.7h".
-export const etaText = (row) => {
-  if (row.stalled || row.basis === 'stalled') return `${row.model}@${row.account} STALLED (fresh waiting/zero-drain telemetry; awaiting progress)`;
-  const start = row.startDelayMin >= 1 ? `in ${Math.round(row.startDelayMin)} min` : 'now';
-  const total = row.completionMin >= 90 ? `${(row.completionMin / 60).toFixed(1)}h` : `${Math.round(row.completionMin)} min`;
-  const queue = row.basis === 'queue' ? ` queued ${row.lane.position}, drain ${row.lane.drainPerMin.toFixed(2)}/min` : '';
-  return `${row.model}@${row.account}${queue} ${start}, est. ${total}${row.unknown ? ' (telemetry missing; optimistic)' : ''}`;
-};
+export const taskEstimateText = row => `task estimate ~${Math.round(row.workMin)} min (${row.sampleIds?.length?'category history':'category fallback'}, same for every lane at this effort; not lane speed)`;
+export const laneStartText = row => row.stalled || row.basis === 'stalled' ? 'stalled (awaiting queue progress)'
+  : row.startDelayMin == null || row.unknown || row.confidence === 'UNKNOWN' ? 'start wait unknown (bounded queue patience)'
+  : row.startDelayMin > 0 ? `queue ~${Math.max(1,Math.round(row.startDelayMin))} min` : 'start now';
+// Lane waits are distinct from the shared category/effort task-work estimate.
+export const etaText = row => `${row.model}@${row.account} ${laneStartText(row)}`;

@@ -5,7 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {createSnapshot,parseTaskSpec,createTaskSpec} from '../lib/pipeline/index.mjs';
-import {notifyQueueOwner,queueOptions,queueOptionPlan,queueDecisionFile,requestQueueChoice,claimQueueChoice,settleQueueChoice} from '../lib/queue-decision.mjs';
+import {notifyQueueOwner,queueOptions,queueOptionPlan,queueDecisionFile,requestQueueChoice,claimQueueChoice,settleQueueChoice,queueChoiceSafety} from '../lib/queue-decision.mjs';
+import {queueStallLabel} from '../lib/queue-stall-watch.mjs';
 import {saveQueue} from '../lib/worker-queue.mjs';
 import {readEvents,eventLine} from '../lib/worker-events.mjs';
 const root=new URL('../../',import.meta.url).pathname.replace(/\/$/,''),tmp=fs.mkdtempSync(path.join(os.tmpdir(),'queue-decisions-'));
@@ -81,7 +82,29 @@ try {
   assert.equal(requestQueueChoice(f.row,tt.noticeId,tt.options.find(o=>o.account==='ttadk').id,null,now).exitCode,0);
   settleQueueChoice(f.row,'ended',now);fs.rmSync(queueDecisionFile(f.row));
   f=fixture(false,[SOL],['max']);assert.ok(queueOptions(f.row,f.queue,f.launch,now,f.context).some(o=>o.account==='b'&&o.effort==='max'&&o.needsUserApproval));
-  assert.equal(notifyQueueOwner(f.row,{...f.queue,workStarted:true},f.launch,{now,policy,context:f.context,emit}),null);
+  const midQueue={...f.queue,workStarted:true,workedMinutesBefore:24};
+  assert.match(queueStallLabel(midQueue,now,f.row),/notice=none/);
+  const midNotice=notifyQueueOwner(f.row,midQueue,f.launch,{now,policy,context:f.context,emit});
+  assert.equal(midNotice.phase,'mid-turn');assert.equal(midNotice.workedMinutesBefore,24);assert.equal(midNotice.queuedMinutes,6);
+  assert.match(queueStallLabel(midQueue,now,f.row),/notice=1/);
+  for(const option of midNotice.options.filter(o=>o.type!=='wait'))assert.match(option.interruptionNote,/interrupt.*uncommitted/);
+  const midTurn={status:'inProgress',items:[{type:'commandExecution',status:'completed'}]};
+  assert.equal(queueChoiceSafety(midTurn,midQueue,{workStarted:true}),null);
+  assert.match(queueChoiceSafety(midTurn,midQueue,{runningTools:1}),/tool call.*refused/);
+  assert.match(queueChoiceSafety({...midTurn,items:[{type:'mcpToolCall',status:'inProgress'}]},midQueue),/tool call.*refused/);
+  assert.match(queueChoiceSafety({...midTurn,items:[{type:'commandExecution'}]},midQueue),/tool call.*refused/,'unknown tool status cannot confirm idle');
+  saveQueue(f.profiles.trae.home,f.row.thread,{...midQueue,runningTools:1});
+  assert.throws(()=>requestQueueChoice(f.row,midNotice.noticeId,'park',null,now),/tool call.*refused/);
+  assert.equal(requestQueueChoice(f.row,midNotice.noticeId,'wait',null,now).exitCode,0);
+  settleQueueChoice(f.row,'waiting',now);
+  saveQueue(f.profiles.trae.home,f.row.thread,midQueue);
+  assert.equal(requestQueueChoice(f.row,midNotice.noticeId,'park',null,now).exitCode,0);
+  settleQueueChoice(f.row,'waiting',now);
+  assert.equal(notifyQueueOwner(f.row,midQueue,f.launch,{now:now+9*min,policy,context:f.context,emit}),null);
+  assert.equal(notifyQueueOwner(f.row,midQueue,f.launch,{now:now+10*min,policy,context:f.context,emit}).noticeCount,2);
+  for(const ending of [{reporting:true},{completing:true},{state:'ready'}]) {
+    assert.equal(notifyQueueOwner(f.row,{...midQueue,...ending},f.launch,{now:now+20*min,policy,context:f.context,emit}),null);
+  }
   assert.equal(notifyQueueOwner(f.row,f.queue,f.launch,{now,policy:{...policy,enabled:false},context:f.context,emit}),null);
   fs.rmSync(queueDecisionFile(f.row),{force:true});f=fixture();
   assert.throws(()=>notifyQueueOwner(f.row,f.queue,f.launch,{now,policy,context:f.context,emit:()=>{throw Error('fixture event write failed');}}));
@@ -91,7 +114,26 @@ try {
   console.log('PASS queue notice options, owner choices, approval gates, +10m repeats, secretary relay, and work/disabled guards');
 
   // Real worker follower, fake hub, and the exact one-line owner command.
+  f=fixture(true,[SOL,'gpt-6.2-astra']);
+  f.raw.accounts.find(a=>a.id==='trae').catalog.push(ASTRA);
+  f.raw.models.push({...f.raw.models[0],id:ASTRA});
+  f.raw.lanes.push({...f.raw.lanes[0],id:`trae:${ASTRA}`,modelId:ASTRA,position:501,drainPerMin:0});
+  f.row.model=ASTRA;f.row.effort='xhigh';
+  const hardMid={...f.queue,workStarted:true,workedMinutesBefore:24};
+  const hardMidContext={...f.context,snapshot:createSnapshot(f.raw),task:createTaskSpec({...f.context.task,category:'implement-hard',tier:'hard'})};
+  const hardOptions=queueOptions(f.row,hardMid,f.launch,now,hardMidContext);
+  assert.ok(hardOptions.some(o=>o.model==='gpt-6.2-astra'&&o.approvalRef===policy.userDecisionRef&&!o.needsUserApproval),
+    'mid-turn hard queues list standing-approved personal Astra even with ready TTADK Sol');
+  const hardPlan=queueOptionPlan(hardMidContext,f.row,hardMid,hardOptions.find(o=>o.model==='gpt-6.2-astra').candidateId,'fixture-mid-hard');
+  assert.equal(hardPlan.plan.task.previousAttempts[0].usefulWork,true);
+  assert.equal(hardPlan.plan.task.previousAttempts[0].state,'interrupted');
+  assert.equal(hardPlan.blocked,false);
+  console.log('PASS mid-turn hard queue lists personal Astra with honest interrupted-work evidence');
   for(const [label,selection,ttReady] of [['no-switch',null,false],['continued',null,false],['work-started',null,false],['legacy-disabled',null,true],
+    ['mid-wait',null,false],['mid-threshold',null,false],['mid-repeat',null,false],['mid-resume',{model:TERRA},false],
+    ['mid-fresh',{account:'ttadk'},true],['mid-park',{id:'park'},false],['mid-tool-running',{id:'park'},false],
+    ['mid-tool-race',{id:'park'},false],['mid-reporting',null,false],['mid-items-only',null,false],['mid-server-request',null,false],
+    ['mid-complete-race',{id:'park'},false],
     ['trae-resume',{model:TERRA},false],['ttadk',{account:'ttadk'},true],['personal',{account:'b',model:SOL},false],
     ['claude-approved',{model:'opus'},false],['cancel-silent',{id:'park'},false],['cancel-unconfirmed',{account:'b',model:SOL},false],
     ['wait',{id:'wait'},false],['park',{id:'park'},false]]) {
@@ -104,7 +146,7 @@ try {
       fs.writeFileSync(path.join(bin,'claude'),'#!/bin/sh\nprintf "%s\\n" "$@" > "$QUEUE_CLAUDE_ARGS"\nexit 0\n',{mode:0o755});
       process.env.PATH=`${bin}:${envBefore.PATH}`;process.env.QUEUE_CLAUDE_ARGS=path.join(tmp,'claude-args.log');
     }
-    const age=['no-switch','continued'].includes(label)?40:6;
+    const mid=label.startsWith('mid-'),age=['mid-threshold','mid-reporting'].includes(label)?4:['no-switch','continued'].includes(label)?40:6;
     saveQueue(f.profiles.trae.home,'fixture',{...f.queue,since:now-age*min});
     fs.writeFileSync(process.env.PERSONAL_FALLBACK_FILE,JSON.stringify(label==='legacy-disabled'?{...policy,enabled:false}:policy));
     const args=['--import',transport,path.join(root,'scripts/codex-worker.mjs'),'--account','trae',label==='continued'?'turn':'start',
@@ -114,14 +156,34 @@ try {
     const cancelCase=label.startsWith('cancel-');
     const config={source:SOL,rpc,quiet:true,quietKeepAliveMs:10000,queueAgeMin:age,complete:!cancelCase,completeDelayMs:3500,
       queueOwnerSelect:selection,queueOwnerApprove:label==='claude-approved',progress:label==='work-started',
+      ...(mid?{midTurn:true,midWorkMinutes:24,midToolRunning:label==='mid-tool-running',midToolType:'mcpToolCall',
+        midReadRunning:label==='mid-tool-race',queueWhileReporting:label==='mid-reporting',
+        midWithoutReady:['mid-items-only','mid-server-request'].includes(label),midServerRequest:label==='mid-server-request',
+        ...(label==='mid-repeat'?{midSamples:[5,5.01,15.01]}:{})}:{}),
       ...(cancelCase?{cancel:label==='cancel-silent'?'silent':'unconfirmed'}:{})};
+    if(label==='mid-complete-race')config.cancel='completed';
     const r=spawnSync(process.execPath,args,{env:{...process.env,REROUTE_FIXTURE:JSON.stringify(config)},encoding:'utf8',timeout:15000});
     assert.equal(r.error,undefined,label);assert.equal(r.status,cancelCase?7:0,r.stderr+r.stdout);
     const calls=fs.readFileSync(rpc,'utf8').trim().split('\n').map(JSON.parse);
     const interrupts=calls.filter(c=>c.method==='turn/interrupt');
-    assert.equal(interrupts.length,label==='legacy-disabled'||selection&&!['wait'].includes(selection.id)?1:0,label);
-    if(['work-started','legacy-disabled'].includes(label))assert.equal(fs.existsSync(queueDecisionFile(f.row)),false,label);
+    assert.equal(interrupts.length,label==='legacy-disabled'||selection&&!['wait'].includes(selection.id)&&!label.startsWith('mid-tool')?1:0,label);
+    if(['legacy-disabled','mid-threshold','mid-reporting'].includes(label))assert.equal(fs.existsSync(queueDecisionFile(f.row)),false,label);
     else assert.ok(JSON.parse(fs.readFileSync(queueDecisionFile(f.row))).noticeCount>=1,label);
+    if(mid&&!['mid-threshold','mid-reporting'].includes(label)) {
+      const decision=JSON.parse(fs.readFileSync(queueDecisionFile(f.row)));
+      assert.equal(decision.queue.workStarted,true,label);
+      assert.equal(decision.queue.workedMinutesBefore,24,label);
+      assert.equal(decision.noticeCount,label==='mid-repeat'?2:1,label);
+      if(label==='mid-tool-running')assert.equal(decision.queue.runningTools,1);
+      if(label.startsWith('mid-tool'))assert.match(r.stderr,/tool call is still running.*refused/);
+    }
+    if(label==='mid-resume')assert.ok(calls.some(c=>c.method==='thread/resume'&&c.params.model===TERRA));
+    if(label==='mid-fresh')assert.ok(calls.some(c=>c.method==='thread/start'&&c.account==='ttadk'));
+    if(label==='mid-complete-race') {
+      assert.match(r.stdout,/final: DONE original completed during queue choice/);
+      assert.doesNotMatch(r.stderr,/queue-choice-blocked/);
+      assert.equal(calls.filter(c=>c.method==='thread/start').length,1,'completion wins without a replacement');
+    }
     if(label==='trae-resume')assert.ok(calls.some(c=>c.method==='thread/resume'&&c.params.model===TERRA),'chosen TRAE model resumes context');
     if(label==='personal'){
       assert.ok(calls.some(c=>c.method==='thread/start'&&c.account==='b'));
@@ -133,6 +195,18 @@ try {
     if(cancelCase)assert.equal(calls.filter(c=>c.method==='thread/start').length,1,'unconfirmed cancellation cannot launch a replacement');
     if((!selection&&label!=='legacy-disabled')||selection?.id==='wait')assert.match(fs.readFileSync(out,'utf8'),/DONE original/);
     console.log(`PASS one-step queue choice ${label}`);
+  }
+  // A steer is accepted without interrupting, but acceptance is not an answer while queued.
+  for(const state of ['queued','waiting','ready']) {
+    f=fixture();saveQueue(f.profiles.trae.home,f.row.thread,{...f.queue,state,workStarted:true});
+    const rpc=path.join(tmp,`steer-${state}.rpc.jsonl`);
+    const r=spawnSync(process.execPath,['--import',path.join(root,'scripts/test/fixtures/reroute-transport.mjs'),
+      path.join(root,'scripts/codex-worker.mjs'),'--account','trae','steer','--thread','fixture','Continue when ready.'],
+      {env:{...process.env,REROUTE_FIXTURE:JSON.stringify({source:SOL,rpc})},encoding:'utf8',timeout:10000});
+    assert.equal(r.status,0,r.stderr+r.stdout);assert.match(r.stdout,/steered turn turn/);
+    if(state!=='ready')assert.match(r.stdout,/queued \d+\.\d min at position 100.*delivered only when the turn runs/);
+    else assert.doesNotMatch(r.stdout,/delivered only when/);
+    assert.ok(!fs.readFileSync(rpc,'utf8').includes('turn/interrupt'));
   }
   assert.ok(readEvents().some(e=>e.kind==='queue-stalled'&&e.wake));
 } finally {Object.keys(process.env).filter(k=>!(k in envBefore)).forEach(k=>delete process.env[k]);Object.assign(process.env,envBefore);fs.rmSync(tmp,{recursive:true,force:true});}

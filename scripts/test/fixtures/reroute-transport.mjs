@@ -50,7 +50,11 @@ globalThis.WebSocket = class {
           message: config.mode === 'policy-start' ? 'cyberPolicy: flagged for possible cybersecurity risk' : 'Model access temporarily restricted. (983)' } }) }); return;
       }
       const turn = { id: 'turn', status: this.failed ? 'failed' : this.interrupted && config.cancel !== 'unconfirmed' ? 'interrupted' : 'inProgress',
-        items: config.readWork && fail ? [{ type: 'commandExecution' }] : [] };
+        items: config.midTurn && fail && this.midWorked ? [{id:'mid-tool',type:config.midToolType??'commandExecution',status:config.midToolRunning||config.midReadRunning?'inProgress':'completed'}]
+          : config.readWork && fail ? [{ type: 'commandExecution' }] : [] };
+      if(this.interrupted&&config.cancel==='completed') {
+        turn.status='completed';turn.items.push({type:'agentMessage',text:'DONE original completed during queue choice'});
+      }
       const result = m.method === 'account/rateLimits/read' ? config.usage ?? {}
         : m.method === 'thread/start' ? { thread: { id: 'fixture' } }
         : m.method === 'turn/start' ? { turn } : m.method === 'thread/read' ? { thread: { turns: [turn] } } : {};
@@ -91,6 +95,25 @@ globalThis.WebSocket = class {
             if(result.status!==0)console.error(`fixture queue choice failed: ${result.stdout} ${result.stderr}`);
           },100);timer.unref();
         }
+        if (config.midTurn) {
+          const realNow=Date.now, at=realNow(), queuedAt=at-(config.queueAgeMin??6)*60000;
+          Date.now=()=>queuedAt-(config.midWorkMinutes??24)*60000;
+          if(!config.midWithoutReady)notify('queue/status',{state:'ready',position:0});
+          const item={id:'mid-tool',type:config.midToolType??'commandExecution',status:'inProgress'};
+          if(config.midServerRequest) this.onmessage({data:JSON.stringify({id:990,method:'item/tool/call',params:{threadId:'fixture',turnId:'turn'}})});
+          else {
+            notify('item/started',{item});
+            if(!config.midToolRunning)notify('item/completed',{item:{...item,status:'completed'}});
+          }
+          this.midWorked=true;
+          Date.now=()=>queuedAt;
+          notify('queue/status',{state:'queued',position:501});
+          for(const age of config.midSamples??[]) {
+            Date.now=()=>queuedAt+age*60000;
+            notify('queue/status',{state:'queued',position:501});
+          }
+          Date.now=realNow;
+        } else {
         if (config.progress) notify('item/started', { item: { type: 'commandExecution' } });
         if (config.ready) notify('queue/status', { state: 'ready', position: 0 });
         const realNow = Date.now, base = realNow() - (config.queueAgeMin!=null?config.queueAgeMin*60000:config.quiet?0:120000);
@@ -99,9 +122,17 @@ globalThis.WebSocket = class {
           notify('queue/status', { state: 'queued', position });
         }
         Date.now = realNow;
+        }
         if (config.quiet) setTimeout(() => {}, config.quietKeepAliveMs ?? 3000);
-        if (config.complete) setTimeout(() => notify('turn/completed', { turn: { id: 'turn', status: 'completed',
-          items: [{ type: 'agentMessage', text: 'DONE original completed' }] } }), config.completeDelayMs??30);
+        if (config.complete) setTimeout(() => {
+          notify('turn/completed', {turn:{id:'turn',status:'completed',items:[{type:'agentMessage',text:'DONE original completed'}]}});
+          if(config.queueWhileReporting) {
+            const realNow=Date.now;
+            notify('queue/status',{state:'queued',position:501});
+            const later=realNow()+6*60000;Date.now=()=>later;
+            notify('queue/status',{state:'queued',position:501});Date.now=realNow;
+          }
+        },config.completeDelayMs??30);
       }, 15);
     });
   }

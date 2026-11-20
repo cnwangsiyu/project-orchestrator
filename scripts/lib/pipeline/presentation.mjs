@@ -7,7 +7,7 @@ import {mandatoryReview,projectReviewPolicy} from '../review-policy-data.mjs';
 import { deriveReview } from './taskspec.mjs';
 import { reviewAfterWrite } from './review-policy.mjs';
 import { estimateCandidate } from './estimate.mjs';
-import { etaText } from '../eta.mjs';
+import { etaText, taskEstimateText, laneStartText } from '../eta.mjs';
 import { modelPreference } from './policy.mjs';
 import { flagArgs } from '../route-args.mjs';
 import { personalPriorityGuard } from './personal-priority.mjs';
@@ -175,7 +175,8 @@ export function presentRoute(plan, view, context) {
     const account=candidateParts(snapshot,c).account;
     if(!companyDevice(snapshot)&&account.kind==='chatgpt')
       why.push(`no company account on this device: personal ChatGPT account ${account.id} is the default lane`);
-    why.push(`ETA: ${eta.length?eta.map(e=>`${company(snapshot.accounts.find(a=>a.id===e.account))?'company':'personal'} ${etaText(e)}`).join('; '):`${company(account)?'company':'personal'} ${c.modelId}@${c.accountId}, est. ~${Math.round(seat.estimate.completionMin)} min`}; selected by policy, qualified floor and completion ETA`);
+    const alternatives=eta.filter(e=>e.account!==c.accountId||e.model!==c.modelId);
+    why.push(`ETA: ${taskEstimateText(seat.estimate)}; chosen lane: ${company(account)?'company':'personal'} ${c.modelId}@${c.accountId} ${laneStartText(seat.estimate)}${alternatives.length?`; alternatives: ${alternatives.map(e=>`${company(snapshot.accounts.find(a=>a.id===e.account))?'company':'personal'} ${etaText(e)}`).join('; ')}`:''}; selected by policy and qualified floor; task time is not a lane-speed ranking`);
     if(adversarial(t)) why.push('adversarial: no GPT model on any account; Kimi-K3, DeepSeek-V4.1-Flash, then scoped Opus; two independent non-GPT families required.');
     if(candidateParts(snapshot,c).lane.mode==='low-priority') why.push(`TRAE ${c.modelId} low-priority lane (bucket depleted): provider capacity remains eligible with ${snapshot.personalFallback?.enabled?'an owner queue decision':'bounded queue patience'}.`);
     if(seat.estimate.basis==='progressing') why.push(`${c.modelId} low-priority lane (bucket depleted): slower bucket designation, but progressing without queue cycles in fresh per-model telemetry.`);
@@ -263,7 +264,7 @@ export function presentRoute(plan, view, context) {
   // JSON retains full diagnostics; text repeats only the choice and task context.
   const shortWhy = [...new Set(why.map(line => {
     if (c && line.startsWith('ETA:'))
-      return `ETA: ${c.modelId}@${c.accountId}, est. ~${Math.round(seat.estimate.completionMin)} min (${seat.estimate.basis}); policy choice; alternatives: --json/--verbose.`;
+      return `ETA: ${taskEstimateText(seat.estimate)}; chosen lane: ${c.modelId}@${c.accountId} ${laneStartText(seat.estimate)}; alternative waits: --json/--verbose.`;
     if (c && line.includes('low-priority lane (bucket depleted)'))
       return `${c.modelId}: low-priority capacity; ${snapshot.personalFallback?.enabled?'owner decides queued handoffs':seat.estimate.basis==='progressing'?'fresh progress observed':'bounded queue patience'}.`;
     return line;

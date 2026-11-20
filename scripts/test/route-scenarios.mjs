@@ -2049,6 +2049,33 @@ for (const [sc, args] of ERRORS) {
     console.log(`${ok ? 'ok  ' : 'FAIL'} defensive route log records the flag, TTADK GPT and no adversarial lane`);
   } catch (e) { fail++; console.log(`FAIL defensive route log: ${e.message}`); }
 }
+// BC-172: hard-class capacity, not identical task-work medians, decides the fallback.
+{
+  try {
+    const home=fs.mkdtempSync(path.join(tmp,'bc172-'));
+    const ASTRA='gpt-6-astra',personalAstra='gpt-6.2-astra',SOL='gpt-6.1-sol';
+    const daily={[ASTRA]:{used:58,limit:58,remaining:0,depleted:true,resetsAt:now+6*h}};
+    fs.writeFileSync(path.join(home,'lane-state.json'),JSON.stringify({[ASTRA]:{t:now,state:'queued',position:501,drainPerMin:0}}));
+    S.bc172={claude:cl(10,120),codex:[acc('main',20,120,[],{models:[personalAstra,'gpt-6.2-sol']}),
+      tt(),tr({home,models:[SOL,ASTRA],modelIds:{[SOL]:SOL,[ASTRA]:ASTRA},quota:{daily}})]};
+    const enabled={PERSONAL_FALLBACK_FILE:path.join(path.dirname(ROUTE),'../references/personal-fallback.json')};
+    const hard=parseRouteJSON(run('bc172',['implement-hard','--dry'],enabled));
+    assert.equal(hard.pick.account,'main');assert.equal(hard.pick.model,personalAstra);assert.equal(hard.pick.effort,'xhigh');
+    assert.equal(hard.pick.approvalRef,'standing:personal-fallback-2026-11-17');assert.deepEqual(hard.needsUserOK,[]);
+    assert.match(hard.why.join('\n'),/personal Astra for hard task: company Astra.*company gpt-6.1-sol available as lower-class alternative/);
+    assert.match(hard.why.join('\n'),/task estimate.*same for every lane.*chosen lane: personal.*start now/);
+    assert.match(hard.why.join('\n'),/alternatives:.*gpt-6-astra@trae stalled.*gpt-6.1-sol@ttadk start now/);
+    assert.equal(parseRouteJSON(run('bc172',['implement','--dry'],enabled)).pick.account,'ttadk');
+    assert.equal(parseRouteJSON(run('bc172',['implement-hard','--dry'])).pick.account,'ttadk','disabled policy keeps the company choice');
+    daily[ASTRA]={...daily[ASTRA],used:20,remaining:38,depleted:false};
+    S.bc172.codex.at(-1).quota.daily=daily;
+    fs.writeFileSync(path.join(home,'lane-state.json'),JSON.stringify({[ASTRA]:{t:now,state:'ready',position:0,drainPerMin:1}}));
+    assert.equal(parseRouteJSON(run('bc172',['implement-hard','--dry'],enabled)).pick.account,'trae','ready company Astra wins');
+    S.bc172.codex.at(-1).models=[SOL];S.bc172.codex.at(-1).modelIds={[SOL]:SOL};
+    assert.equal(parseRouteJSON(run('bc172',['implement-hard','--dry'],enabled)).pick.account,'ttadk','no company Astra catalog keeps existing policy');
+    console.log('ok   BC-172 hard Astra fallback, lower-class alternative, unchanged non-hard/absent/ready-company cases and task/start-wait wording');
+  } catch(e) {fail++;console.log(`FAIL BC-172 hard Astra fallback: ${e.stack}`);}
+}
 fs.rmSync(tmp, { recursive: true, force: true });
 // Reports are opt-in so fixture runs do not overwrite another task's temporary report.
 if(process.env.ROUTE_EXPECTATION_REPORT)fs.writeFileSync(process.env.ROUTE_EXPECTATION_REPORT,JSON.stringify(expectationChanges,null,2));

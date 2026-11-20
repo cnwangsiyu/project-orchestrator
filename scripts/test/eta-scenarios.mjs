@@ -45,7 +45,7 @@ try {
   assert.equal(r.pick.model,SOL); assert.equal(r.deferred,null); assert.equal(r.queuePatienceMin,30);
   assert.match(r.pick.command,/--queue-patience-min/); assert.match(r.queueAlt,/--failures 0.*--exclude-lane/);
   assert.equal(r.queueAlternative.routeArgs.includes('--fresh'),false);
-  assert.ok(r.why.some((s)=>/ETA: company/.test(s)));
+  assert.ok(r.why.some((s)=>/ETA: task estimate.*chosen lane: company/.test(s)));
   assert.ok(!r.needsUserOK.some((s)=>s.startsWith('personal quota:')));
   r = route({lanes:{[ASTRA]:lane(500,0.5)}});
   assert.match(r.queueAlt,/scheduled dispatch.*--exclude-lane trae:gpt-6.1-sol/);
@@ -64,7 +64,7 @@ try {
   assert.equal(r.pick.account,'ttadk','available TTADK beats measured queued lanes');
   r = route({lanes:{[SOL]:lane(10,1),[ASTRA]:lane(20,20)},resetMin:100});
   assert.equal(r.pick.model,SOL,'free TTADK Sol precedes measured queued TRAE Astra');
-  assert.ok(r.why.some((s)=>/queued 20, drain 20.00\/min/.test(s)));
+  assert.ok(r.why.some((s)=>/gpt-6-astra@trae queue ~1 min/.test(s)));
   r = route({lanes:{[SOL]:lane(10,5),[ASTRA]:lane(20,5)},resetMin:240});
   assert.equal(r.pick.account,'trae','runnable company work launches even if a reset projects earlier completion');
   assert.equal(r.deferUntil,null); assert.ok(r.pick.command);
@@ -78,7 +78,7 @@ try {
   assert.equal(r.pick.model,SOL,'a progressing lane beats a fresh zero-drain queue');
   const stalled=r.eta.find(x=>x.model===ASTRA&&x.account==='trae');
   assert.equal(stalled.confidence,'STALLED');assert.equal(stalled.startDelayMin,null);assert.equal(stalled.completionMin,null);
-  assert.equal(stalled.unknown,false);assert.match(r.why.join(' '),/gpt-6-astra@trae STALLED/);
+  assert.equal(stalled.unknown,false);assert.match(r.why.join(' '),/gpt-6-astra@trae stalled/);
   assert.doesNotMatch(r.why.join(' '),/gpt-6-astra@trae now/);
   r=route({ttAvailable:true,lanes:{[SOL]:stuck,[ASTRA]:stuck}});
   assert.equal(r.pick.account,'ttadk','ready company capacity beats every stalled lane');

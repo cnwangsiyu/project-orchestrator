@@ -1,4 +1,4 @@
-import { isAstra, array, object, finite, nonnegative, company, freeze, matchesModel } from './common.mjs';
+import { isAstra, array, object, finite, nonnegative, company, freeze, matchesModel, known } from './common.mjs';
 import { candidateParts } from './candidates.mjs';
 
 export function personalFallbackPolicy(raw, now) {
@@ -69,6 +69,35 @@ export function standingPersonalFallback(task, snapshot, candidate, rows) {
     && (!h.family || h.family === c.family) && (h.restricted || h.recovery === 'awaiting-probe'));
   const explanations = companies.length ? [] : ['no company accounts registered'], options = [];
   const relevant = rows.filter(r => r.predicates.every(p => p.ok || ['pAvailable', 'pExclusions', 'pScopedApproval'].includes(p.ruleId)));
+  // Hard tasks compare capacity within the best company model class first.
+  // A startable lower-class company lane is an alternative, not an Astra veto.
+  const topClass = astra && task.tier === 'hard' ? relevant.filter(r => isAstra(r.candidate.modelId)) : [];
+  if (topClass.length) {
+    const reasons = [];
+    for (const r of topClass) {
+      const a = candidateParts(snapshot,r.candidate).account;
+      const failures = r.predicates.filter(p => !p.ok);
+      const capacityCodes = ['TTADK_DAILY_RESERVE','TOOL_CHANNEL_FAILED','ACTIVE_RESTRICTION','PROVIDER_QUOTA_DENIED'];
+      if (failures.some(p => !capacityCodes.includes(p.reason?.code)
+        && !(p.reason?.code === 'EXCLUDED' && excludedAfterInfrastructure(task,r.candidate)))) return null;
+      const usage = known(a.quota.find(q => q.bucketId === r.candidate.modelId)?.usage);
+      const exhausted = a.fallbackUnavailable || usage && usage.resetsAt > snapshot.decisionAt
+        && (usage.depleted === true || usage.used >= usage.limit);
+      const denied = failures.length || restrictedFor(r.candidate);
+      if (exhausted || denied) reasons.push(`${a.id}/${r.candidate.modelId} ${exhausted?'exhausted':'restricted/unavailable'}`);
+      else if (r.estimate.stalled) reasons.push(`${a.id}/${r.candidate.modelId} stalled`);
+      else if (r.estimate.confidence !== 'UNKNOWN' && r.estimate.startDelayMin > policy.queueWaitMinutes)
+        reasons.push(`${a.id}/${r.candidate.modelId} predicted start ~${Math.round(r.estimate.startDelayMin)} min > ${policy.queueWaitMinutes} min`);
+      else return null; // Ready/short-wait and unknown top-class capacity keep the gate.
+    }
+    const lower = [...new Set(relevant.filter(r => !isAstra(r.candidate.modelId) && r.predicates.every(p => p.ok)
+      && !r.estimate.stalled && r.estimate.confidence !== 'UNKNOWN' && r.estimate.startDelayMin <= policy.queueWaitMinutes)
+      .map(r => r.candidate.modelId))];
+    return freeze({approvalRef:policy.userDecisionRef,since:policy.since,queueWaitMinutes:policy.queueWaitMinutes,
+      quotaApproved:candidate.effort !== 'max' && !task.requirements.resetRedemption,
+      astraApprovalRef:policy.hardAstraDecisionRef,preferOverLowerCompany:true,
+      text:`personal fallback (standing user OK ${policy.since}): personal Astra for hard task: company Astra ${[...new Set(reasons)].join('; ')}${lower.length?`; company ${lower.join(', ')} available as lower-class alternative`:''}; personal Astra for hard-tier task (standing user OK ${policy.since}: ${policy.hardAstraDecisionRef})`});
+  }
   let reserveApplied = false;
   for (const a of companies) {
     const pool = relevant.filter(r => r.candidate.accountId === a.id);

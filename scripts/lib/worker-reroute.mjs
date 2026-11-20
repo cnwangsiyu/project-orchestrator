@@ -43,6 +43,10 @@ export const nextRouteArgs = (args, from, depth, policy = false, alternative = n
   return next;
 };
 export const turnHasWork = (turn) => (turn?.items ?? []).some((item) => item.type !== 'userMessage');
+const toolTypes = new Set(['commandExecution', 'fileChange', 'mcpToolCall', 'dynamicToolCall', 'collabAgentToolCall', 'webSearch', 'imageGeneration', 'toolCall']);
+export const isToolItem = item => toolTypes.has(item?.type);
+export const turnHasRunningTools = turn => (turn?.items ?? []).some(item => isToolItem(item)
+  && !['completed', 'failed', 'interrupted', 'cancelled', 'declined'].includes(item.status));
 export const heldTaskResources = (args, name) => {
   const shared = process.env.RULES_SHARED ?? path.dirname(rulesLog());
   const bound = routeFlag(args, 'shared-lock') || routeFlag(args, 'device-lease');
@@ -69,7 +73,7 @@ const runNode = (script, args, { capture = false, timeout = 0,cwd } = {}) => new
   child.on('close', (code, s) => { cleanup(); resolve({ code: code ?? ((s ?? signal) === 'SIGINT' ? 130 : (s ?? signal) === 'SIGHUP' ? 129 : 143), stdout }); });
 });
 
-// Only a confirmed, never-started turn reaches this entry point. Never use a shell or a detached launch.
+// Automatic hops require no work; explicit owner choices may interrupt an idle queued mid-turn.
 export const rerouteWorker = async ({ args, depth, from, reason, prompt, opts, policy = false, onHandoff = () => {} }) => {
   const selection=opts.queueSelection;
   if (!args || !selection&&(routeFlag(args, 'background') || opts.background)) return REROUTE_EXIT.stopped;
@@ -96,6 +100,11 @@ export const rerouteWorker = async ({ args, depth, from, reason, prompt, opts, p
       routeCommand: [process.execPath, path.join(scripts, 'route.mjs'), ...next, '--json'],
       continuationPrompt: handover, cwd: opts.cwd ?? routeFlag(args, 'cwd'),
     } };
+  if (selection?.midTurn) {
+    state.cancellationEvidenceId = `interrupted-mid-turn:${selection.noticeId}`;
+    state.usefulWork = true;
+    state.recovery.instructions = 'The owner interrupted a mid-turn queue after confirming no tool call was running. Uncommitted changes remain in the worktree. Revalidate the selected tuple and inspect git status/diff before continuing from the recorded continuationPrompt.';
+  }
   const persist = () => {
     fs.mkdirSync(taskDir, { recursive: true });
     const file = path.join(taskDir, 'reroute.json'), temp = `${file}.${process.pid}`;

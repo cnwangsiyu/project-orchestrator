@@ -18,6 +18,9 @@ export function orderCandidates(task, snapshot, rows) {
   const parts=r=>candidateParts(snapshot,r.candidate);
   const ready=r=>!stalled(r)&&!r.estimate.capacityReset&&r.estimate.startDelayMin===0
     &&(parts(r).account.kind!=='trae'||r.estimate.balance?.freeNow===true);
+  const hardAstra = task.tier === 'hard' ? cohort.filter(r => r.ok && ready(r) && isAstra(r.candidate.modelId)
+    && r.predicates.some(p => p.personalFallback?.astraApprovalRef && p.personalFallback.preferOverLowerCompany)) : [];
+  if (hardAstra.length) cohort = hardAstra;
   const priority = snapshot.personalPriority;
   if (priority) {
     const preferred = cohort.filter(r => r.ok && ready(r)

@@ -1,5 +1,6 @@
 import { VERSION, fingerprint, freeze, clone, unique, stable } from './common.mjs';
 import { presentRoute } from './presentation.mjs';
+import { taskEstimateText, laneStartText } from '../eta.mjs';
 
 export function planFingerprint(plan) {
   const copy = clone(plan); delete copy.planHash;
@@ -45,7 +46,7 @@ export function renderPlan(plan, context = null) {
   }
   if (plan.kind === 'launch') {
     const { candidate: c, estimate: e } = plan.primary;
-    notes.push(`${c.modelId}/${c.effort} on ${c.accountId}; estimated completion ~${Math.round(e.completionMin)} min (${e.confidence}, ${e.basis}).`);
+    notes.push(`${c.modelId}/${c.effort} on ${c.accountId}; ${taskEstimateText(e)}; lane: ${laneStartText(e)}.`);
     notes.push(...e.uncertainty.map((r) => r.text));
     if (e.patienceMin !== null) notes.push(`Queue patience: ${Math.round(e.patienceMin)} min; cancel/reconcile before any replacement.`);
   } else if (plan.kind === 'defer') tellUser.push(`${plan.reason.text} Owner ${plan.task.owner} must record a ${plan.trigger} wake and replan.`);

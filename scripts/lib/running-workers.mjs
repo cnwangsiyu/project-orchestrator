@@ -60,7 +60,7 @@ export async function runningWorkers({ rows = readEvents(), profiles = {}, alive
     return { account: row.account, thread: row.thread, owner: row.owner ?? null, model: row.model ?? null,
       effort: row.effort ?? null, project: row.project ?? null, task: row.task ?? row.name ?? null,
       runId: row.runId, followerCommand: row.followerCommand ?? null, pid: row.pid,
-      queue, queueStalled: queueStallLabel(queue, now),
+      queue, queueStalled: queueStallLabel(queue, now, row),
       name: row.name ?? null, startedAt: starts.get(row.runId) ?? row.t,
       lastActivityAt: Math.max(row.lastActivityAt ?? activity.get(workerKey(row)) ?? row.t,
         Math.floor(processWorker(row) ? 0 : activityOf(row.account, row.thread) ?? 0)), basis };

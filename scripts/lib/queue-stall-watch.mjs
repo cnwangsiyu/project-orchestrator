@@ -11,7 +11,7 @@ import { personalFallbackPolicy } from './pipeline/personal-fallback.mjs';
 import { parseTaskSpec } from './pipeline/taskspec.mjs';
 import { shellQuote } from './pipeline/presentation.mjs';
 import { flagArgs, scopedFlags } from './route-args.mjs';
-import { notifyQueueOwner,settleQueueChoice } from './queue-decision.mjs';
+import { notifyQueueOwner,settleQueueChoice,queueOwnerNotice } from './queue-decision.mjs';
 
 const root = fileURLToPath(new URL('../..', import.meta.url)).replace(/\/$/, '');
 const read = (file, fallback = null) => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; } };
@@ -26,11 +26,11 @@ export const queueStatus = (row, profiles) => {
   const queue = readQueue(home, row.thread);
   return queue?.turnId === row.turn ? queue : null;
 };
-export function queueStallLabel(queue, now = Date.now()) {
+export function queueStallLabel(queue, now = Date.now(), row = null) {
   if (!waiting(queue) || !Number.isFinite(queue.since)) return '';
   const elapsed = (now - queue.since) / 60000;
   return elapsed >= (queuePolicy(now)?.queueWaitMinutes ?? 5)
-    ? `QUEUE-STALLED ${Math.floor(elapsed)} min @${queue.position ?? '?'}` : '';
+    ? `QUEUE-STALLED ${Math.floor(elapsed)} min @${queue.position ?? '?'} notice=${queueOwnerNotice(row,queue)??'none'}` : '';
 }
 
 export function fallbackRouteArgs(launch) {

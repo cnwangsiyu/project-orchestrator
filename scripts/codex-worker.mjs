@@ -66,8 +66,8 @@ import { activeClaudeWorkers, pushWorkerRules, rememberWorkerRules, workerRulesL
 import { isPolicyBlock, policyBlockRecord, appendPolicyBlock, policyBlockAction } from './lib/policy-block.mjs';
 import { runHubForeground, hubListReachable } from './lib/hub-foreground.mjs';
 import { readTurnState, reconcileTurnEvents } from './lib/worker-turn.mjs';
-import { parseRouteArgs, routeFlag, rerouteWorker, turnHasWork, heldTaskResources } from './lib/worker-reroute.mjs';
-import { notifyQueueOwner, pendingQueueChoice, claimQueueChoice, settleQueueChoice, queueRouteContext, queueOptionPlan } from './lib/queue-decision.mjs';
+import { parseRouteArgs, routeFlag, rerouteWorker, turnHasWork, heldTaskResources, isToolItem, turnHasRunningTools } from './lib/worker-reroute.mjs';
+import { notifyQueueOwner, pendingQueueChoice, claimQueueChoice, settleQueueChoice, queueRouteContext, queueOptionPlan, queueChoiceSafety } from './lib/queue-decision.mjs';
 import { queuePolicy } from './lib/queue-stall-watch.mjs';
 import { inheritedLaunch, savedLaunch, saveLaunch, recordLaunchModel, readRequestBufferExceededAt, markRequestBufferExceeded } from './lib/worker-launch.mjs';
 import { recordWorkerOutcome, reviewSeat, reviewInstructions } from './lib/worker-outcome.mjs';
@@ -958,6 +958,7 @@ const browserStartup = mcpStartupMonitor();
 const cleanups = new Set();
 let exitCode = null;
 let activeTurn = null, attemptThreadId = null, workStarted = false, hopProgressRecorded = false, preserveQueueNotice = false;
+let workStartedAt = null;
 let sessionPath = null, actualModel = null, actualModelSource = null, actualModelProvider = null, modelMismatch = false;
 const delegatedModels = [], earlyNotifications = [];
 const strictReviewModel = opts['require-model'] === true || opts['require-model'] === 'on'
@@ -996,6 +997,7 @@ const observeModel = (observation, threadId, turnId) => {
   recordModelEvidence(threadId, turnId);
 };
 const markWorkStarted = () => {
+  workStartedAt ??= Date.now();
   if(!workStarted&&activeTurn) {
     settleQueueChoice({account:account??'main',thread:activeTurn.threadId,turn:activeTurn.turnId},'ended');
     if(PROF?.home)saveQueue(PROF.home,activeTurn.threadId,{state:'ready',position:0,turnId:activeTurn.turnId,workStarted:true,at:Date.now()});
@@ -1112,6 +1114,7 @@ const autoReroute = async (reason, queue = {}, policy = false, selection = null)
   const from = { vendor: 'codex', model: String(opts.model ?? '').toLowerCase(), effort: opts.effort ?? null,
     account: account ?? 'main', position: queue.position ?? null, waitedMin: queue.waitedMin ?? 0,
     predictedStartMin: queue.predictedStartMin ?? null,
+    workStarted:!!selection?.midTurn,
     threadId: cancelledTurn?.threadId ?? attemptThreadId, turnId: cancelledTurn?.turnId ?? null };
   try {
     const code = await rerouteWorker({ args: ROUTE_ARGS, depth: REROUTE_DEPTH, from, reason, prompt: text,
@@ -1185,7 +1188,10 @@ ws.onmessage = (ev) => {
   if (done) return; // During cancellation only the interrupt RPC reply is still relevant.
   if (logFile) fs.appendFileSync(logFile, line + '\n');
   if (m.id !== undefined && m.method) {
-    if (activeTurn && m.method.startsWith('item/') && (m.params?.threadId === activeTurn.threadId || m.params?.turnId === activeTurn.turnId)) markWorkStarted();
+    if (activeTurn && m.method.startsWith('item/') && (m.params?.threadId === activeTurn.threadId || m.params?.turnId === activeTurn.turnId)) {
+      markWorkStarted();
+      for (const h of handlers) h(m);
+    }
     const reply = REPLIES[m.method];
     write(reply ? { jsonrpc: '2.0', id: m.id, result: reply(m.params || {}) }
       : { jsonrpc: '2.0', id: m.id, error: { code: -32601, message: `${m.method} is not supported by codex-worker` } });
@@ -1331,11 +1337,14 @@ const LONG_COMMAND_MAX_MIN = Number(process.env.CODEX_WORKER_LONG_COMMAND_MAX_MI
 const runningCommands = new Set(); let quietNoted = false;
 const follow = (threadId, turnId, items = []) => {
   clearTimeout(setupAlarm);
+  const runningTools = new Set(items.filter(item => isToolItem(item) && turnHasRunningTools({items:[item]})).map(item => item.id));
   handlers.push((m) => {
     const p = m.params ?? {}, item = p.item;
-    if (p.threadId !== threadId || item?.type !== 'commandExecution' || !item.id) return;
-    if (m.method === 'item/started') runningCommands.add(item.id);
-    else if (m.method === 'item/completed') { runningCommands.delete(item.id); quietNoted = false; }
+    if (p.threadId !== threadId || p.turnId && p.turnId !== turnId || !isToolItem(item) || !item.id) return;
+    if (m.method === 'item/started') {
+      runningTools.add(item.id);
+      if (item.type === 'commandExecution') runningCommands.add(item.id);
+    } else if (m.method === 'item/completed') { runningTools.delete(item.id); runningCommands.delete(item.id); quietNoted = false; }
   });
   activeTurn = { threadId, turnId };
   tracker?.update({ thread: threadId, turn: turnId, model: opts.model ?? null, mayRun: true });
@@ -1352,56 +1361,90 @@ const follow = (threadId, turnId, items = []) => {
   const noticePolicyAtFollow=queuePolicy()?.enabled;
   let queueSince = !noticePolicyAtFollow&&PATIENCE_MIN!=null&&!BACKGROUND?Date.now():null, queuePosition = null, lastPrintedQueue = null, queuePrinted = null;
   const previousQueue = PROF?.home ? readQueue(PROF.home, threadId) : null;
+  if (turnHasWork({items}) || previousQueue?.turnId === turnId && previousQueue.workStarted
+    && ['ready','waiting','queued'].includes(previousQueue.state)) {
+    workStarted = true; workStartedAt ??= Date.now();
+  }
   let observedQueueSince = previousQueue?.turnId === turnId && ['waiting', 'queued'].includes(previousQueue.state)
     ? previousQueue.since : null;
   if (noticePolicyAtFollow&&Number.isFinite(observedQueueSince) && observedQueueSince >= 0 && observedQueueSince <= Date.now()) queueSince = observedQueueSince;
   let patienceSamples = [];
   let handingOff = false, reporting = false;
+  let workedMs = previousQueue?.turnId === turnId ? (previousQueue.workedMinutesBefore ?? 0) * 60000 : 0;
+  const previousWork = previousQueue?.turnId === turnId && previousQueue.workStarted
+    && ['ready','waiting','queued'].includes(previousQueue.state);
+  const workedBeforeKnown = !previousWork && !turnHasWork({items}) || previousWork
+    && Number.isFinite(previousQueue.workedMinutesBefore)
+    && (previousQueue.state !== 'ready' || Number.isFinite(previousQueue.workSegmentSince));
+  let workSegmentSince = workStarted && queueSince == null
+    ? previousWork && Number.isFinite(previousQueue.workSegmentSince) ? previousQueue.workSegmentSince : workStartedAt : null;
   const ownerRow={...context.metadata,turn:turnId,model:opts.model,effort:opts.effort,pid:process.pid,
     runId:tracker?.metadata().runId,name:opts.name??context.metadata.name};
   const ownerLaunch={...(savedLaunch(account??'main',threadId)??{}),defaults:{...opts,'route-args':JSON.stringify(ROUTE_ARGS)}};
   ownerRow.model=String(opts.model??tracker?.metadata().model??ownerLaunch.model??(PROF?.home?threadModel(PROF.home,threadId):null)??'unknown').toLowerCase();
   ownerRow.effort=opts.effort??ownerLaunch.effort??tracker?.metadata().effort??'unknown';
+  const clearQueueEpisode = (t = Date.now()) => {
+    const wasQueued = queueSince != null;
+    markWorkStarted();
+    workSegmentSince = wasQueued ? t : workSegmentSince ?? workStartedAt ?? t;
+    if(wasQueued){runningSince=t;completedItems=0;}
+    queueSince = observedQueueSince = queuePosition = lastPrintedQueue = null;
+    patienceSamples = [];
+    settleQueueChoice(ownerRow,'ended');
+    if (PROF?.home) saveQueue(PROF.home,threadId,{state:'ready',turnId,workStarted:true,
+      workedMinutesBefore:workedBeforeKnown?workedMs/60000:null,workSegmentSince,runningTools:runningTools.size,at:t});
+  };
   const chooseQueued = async state => {
     const option=state.options.find(o=>o.id===state.choice.optionId);
     if (option?.type==='wait') {settleQueueChoice(ownerRow,'waiting');console.log(`queue-choice: ${opts.name} keeps waiting`);return;}
-    handingOff=true;let cancelSent=false;
+    handingOff=true;let cancelSent=false,terminalTurn=null;
     const bounded = promise => new Promise((resolve,reject)=>{
       const timer=setTimeout(()=>reject(Error('queue choice control RPC timed out; cancellation is unconfirmed')),3000);
       promise.then(value=>{clearTimeout(timer);resolve(value);},error=>{clearTimeout(timer);reject(error);});
     });
     try {
+      const midTurn = !!state.queue.workStarted;
+      const reconcile = turn => {
+        if (turn && ['completed','failed','interrupted'].includes(turn.status)) terminalTurn=turn;
+        const queue = PROF?.home ? readQueue(PROF.home,threadId) : null;
+        if (queue?.turnId !== turnId || queue.since !== state.since) return 'source turn is no longer in this queue episode';
+        return queueChoiceSafety(turn,queue,{runningTools:runningTools.size,reporting,workStarted});
+      };
       const before=(await bounded(readTurns(threadId))).find(t=>t.id===turnId);
-      if(!before||before.status!=='inProgress'||turnHasWork(before)||workStarted) {
-        settleQueueChoice(ownerRow,'ended');handingOff=false;markWorkStarted();console.log('queue-choice-skipped: turn has work or ended');return;
-      }
+      const beforeError=reconcile(before);if(beforeError)throw Error(beforeError);
       const held=heldTaskResources(ROUTE_ARGS??[],opts.name);if(held)throw Error(held);
       const select=()=>queueOptionPlan(queueRouteContext(ownerRow,ownerLaunch),ownerRow,state.queue,option.candidateId,state.noticeId,state.choice.userOK);
       if(option?.type==='switch') {const route=select();if(route.blocked||route.needsUserOK.length||!route.pick?.command)throw Error('selected option now requires approval or is unavailable; original queue retained');}
       // Snapshot/approval work may take time. Reconcile again immediately before
       // interruption so a queue that started work during option validation wins.
       const current=(await bounded(readTurns(threadId))).find(t=>t.id===turnId);
-      if(!current||current.status!=='inProgress'||turnHasWork(current)||workStarted) {
-        settleQueueChoice(ownerRow,'ended');handingOff=false;markWorkStarted();console.log('queue-choice-skipped: turn started during option validation');return;
-      }
+      const currentError=reconcile(current);if(currentError)throw Error(currentError);
       cancelSent=true;await bounded(call('turn/interrupt',{threadId,turnId}));
       const after=(await bounded(readTurns(threadId))).find(t=>t.id===turnId);
-      if(!after||after.status!=='interrupted'||turnHasWork(after)||workStarted)throw Error('cancellation unconfirmed; no replacement launched');
+      if(after&&['completed','failed'].includes(after.status)){terminalTurn=after;throw Error('turn ended during queue choice');}
+      if(!after||!Array.isArray(after.items)||after.status!=='interrupted'||runningTools.size||turnHasRunningTools(after)
+        ||!midTurn&&(turnHasWork(after)||workStarted))throw Error('cancellation unconfirmed; no replacement launched');
       if(PROF?.home)saveQueue(PROF.home,threadId,{state:'cancelled',position:null,turnId,at:Date.now()});
       settleQueueChoice(ownerRow,option.type==='park'?'parked':'selected');
       if(option.type==='park') {outcomeSkip=true;tracker?.result('stalled',{reason:'owner parked queued turn',mayRun:false});console.log('queue-choice: parked; no replacement launched');finish(0);return;}
       await autoReroute('queue-too-slow',{position:state.queue.position,waitedMin:(Date.now()-state.since)/60000},false,
-        {option,noticeId:state.noticeId,owner:state.choice.owner,selectRoute:select,resume:option.context==='same thread / resume'});
+        {option,noticeId:state.noticeId,owner:state.choice.owner,selectRoute:select,midTurn,resume:option.context==='same thread / resume'});
     } catch(e) {
+      if(terminalTurn&&!reporting) {
+        handingOff=false;reporting=true;queueSince=observedQueueSince=null;
+        settleQueueChoice(ownerRow,'ended');
+        if(PROF?.home)saveQueue(PROF.home,threadId,{state:'completing',turnId,reporting:true,workStarted,at:Date.now()});
+        try{await report(threadId,terminalTurn,final,usage);}catch(error){console.error(`codex-worker: report failed: ${error.message}`);finish(1);}return;
+      }
       console.error(`queue-choice-blocked: ${e.message}`);
-      appendEvent({...ownerRow,event:'message',kind:'queue-stalled',severity:'risk',wake:true,text:`queue-choice-blocked: ${e.message}; task=${opts.name} thread=${threadId}; owner must reconcile.`});
-      settleQueueChoice(ownerRow,'waiting');
+      if(!reporting&&!done&&queueSince!=null)appendEvent({...ownerRow,event:'message',kind:'queue-stalled',severity:'risk',wake:true,text:`queue-choice-blocked: ${e.message}; task=${opts.name} thread=${threadId}; owner must reconcile.`});
+      settleQueueChoice(ownerRow,reporting||done||queueSince==null?'ended':'waiting');
       if(cancelSent){preserveQueueNotice=true;finish(7);return;}handingOff=false;
     }
   };
   // Use measured drain for an early decision, but never require drain to enforce the elapsed deadline.
   const checkPatience = (t, pos, sample = true) => {
-    if (done || handingOff || reporting || workStarted || queueSince == null) return false;
+    if (done || handingOff || reporting || queueSince == null) return false;
     // Frequent notifications must not evict the two-minute baseline from the bounded sample window.
     if (sample && pos != null && pos > 0 && (!patienceSamples.length || t - patienceSamples.at(-1).t >= 10000)) patienceSamples.push({ t, pos });
     patienceSamples = patienceSamples.filter((s) => t - s.t <= 10 * 60000).slice(-30);
@@ -1415,12 +1458,13 @@ const follow = (threadId, turnId, items = []) => {
       if(ownerRow.owner) {
         const choice=claimQueueChoice(ownerRow);if(choice){void chooseQueued(choice);return false;}
         const event=notifyQueueOwner(ownerRow,{state:'queued',since:queueSince,position:pos,
+          workStarted,workedMinutesBefore:workedBeforeKnown?workedMs/60000:null,runningTools:runningTools.size,
           drainPerMin:spanMin>=2?Math.max(0,(first.pos-last.pos)/spanMin):null},ownerLaunch,{now:t,policy});
         if(event)console.log(`queue-owner-notice: ${event.noticeId} notice=${event.noticeCount} queued=${waitedMin.toFixed(1)} min${event.secretaryRelay?' secretary-relay: owner queue decision pending':''}`);
       }
       return false; // A launched/resumed queue never switches by default routing.
     }
-    if(BACKGROUND||PATIENCE_MIN==null)return false;
+    if(workStarted||BACKGROUND||PATIENCE_MIN==null)return false;
     const deadlineMin = Math.min(PATIENCE_MIN, QUEUE_ALT_START_MIN ?? Infinity);
     const elapsed = waitedMin >= deadlineMin;
     if (!elapsed && (predicted == null || predicted + waitedMin <= deadlineMin)) return false;
@@ -1468,20 +1512,28 @@ const follow = (threadId, turnId, items = []) => {
     return true;
   };
   const queueUpdate = (p) => {
+    if (reporting || done) return;
     const t = Date.now(), state = String(p.state ?? 'queued');
     const pos = p.position != null && p.position !== '' && Number.isFinite(Number(p.position)) ? Number(p.position) : null;
     queuePosition = pos;
-    if (state !== 'ready') queueSince = Math.min(queueSince ?? t,t);
+    if (['waiting','queued'].includes(state)) {
+      if (queueSince == null && workStarted) {
+        workedMs += Math.max(0,t-(workSegmentSince ?? workStartedAt ?? t));
+        workSegmentSince = null;
+      }
+      queueSince = Math.min(queueSince ?? t,t);
+    }
     observedQueueSince = ['waiting', 'queued'].includes(state) ? observedQueueSince ?? t : null;
-    const queue = { state, position: pos, since: observedQueueSince, turnId,workStarted, at: t };
+    const queue = { state, position: pos, since: observedQueueSince, turnId,workStarted,
+      workedMinutesBefore:workedBeforeKnown?workedMs/60000:null,runningTools:runningTools.size,at: t };
     if (PROF?.home) saveQueue(PROF.home, threadId, queue);
     recordQueue?.(p, t);
-    if (state === 'ready') { markWorkStarted(); patienceSamples = []; runningSince = t; completedItems = 0; }
-    else { runningSince = null; completedItems = 0; if (checkPatience(t, pos)) return; }
+    if (state === 'ready') { runningSince = t; completedItems = 0; }
+    else if (['waiting','queued'].includes(state)) { runningSince = null; completedItems = 0; if (checkPatience(t, pos)) return; }
+    else { queueSince = null; settleQueueChoice(ownerRow,'ended'); return; }
     if (state === 'ready') {
       if (queueSince) console.log(`queue cleared after ${Math.max(1, Math.round((t - queueSince) / 60000))}m`);
-      queueSince = null;
-      lastPrintedQueue = null;
+      clearQueueEpisode(t);
       return;
     }
     const prev = lastPrintedQueue;
@@ -1499,9 +1551,9 @@ const follow = (threadId, turnId, items = []) => {
   }
   if (STALL_MIN > 0) {
     const alarm = setInterval(() => {
-    if (done || handingOff) return;
+    if (done || handingOff || reporting) return;
     // Queue patience owns known waiting turns, even when the stall and patience ticks coincide.
-    if (queueSince != null && !workStarted && (queuePolicy()?.enabled || !BACKGROUND && PATIENCE_MIN != null)) {
+    if (queueSince != null && (queuePolicy()?.enabled || !workStarted && !BACKGROUND && PATIENCE_MIN != null)) {
       checkPatience(Date.now(), queuePosition, false); return;
     }
     const idle = (Date.now() - last) / 60000;
@@ -1531,11 +1583,9 @@ const follow = (threadId, turnId, items = []) => {
     if ((p.threadId === threadId || p.turnId === turnId) &&
       ((m.method.startsWith('item/') && p.item?.type !== 'userMessage')
         || (m.method === 'thread/tokenUsage/updated' && p.tokenUsage?.total?.outputTokens > 0))) markWorkStarted();
-    if (observedQueueSince != null && PROF?.kind === 'trae' && (p.threadId === threadId || p.turnId === turnId)
+    if (!reporting && (p.threadId === threadId || p.turnId === turnId)
       && m.method.startsWith('item/') && p.item?.type !== 'userMessage') {
-      observedQueueSince = null;
-      lastPrintedQueue = null;
-      saveQueue(PROF.home, threadId, { state: 'ready', turnId, at: Date.now() });
+      clearQueueEpisode();
     }
     // Only this turn's or thread's own events count as progress; account-wide updates (rate limits…) don't.
     if (p.turnId === turnId || p.threadId === threadId || p.turn?.id === turnId) last = Date.now();
@@ -1549,6 +1599,9 @@ const follow = (threadId, turnId, items = []) => {
     else if (m.method === 'queue/status' && (p.threadId === threadId || p.turnId === turnId)) queueUpdate(p);
     else if (!handingOff && !reporting && m.method === 'turn/completed' && (p.turn?.id ?? p.turnId) === turnId) {
       reporting = true;
+      queueSince = observedQueueSince = null;
+      settleQueueChoice(ownerRow,'ended');
+      if(PROF?.home)saveQueue(PROF.home,threadId,{state:'completing',turnId,reporting:true,workStarted,at:Date.now()});
       report(threadId, p.turn ?? { id: turnId, status: 'completed' }, final, usage)
       // report() is async and this handler cannot await it: an unexpected throw must still end the follower normally
       // (status 1) instead of leaving it to the 30-minute stall alarm with the policy guidance unprinted.
@@ -1667,7 +1720,10 @@ try {
     const t = await currentTurn(opts.thread, resumed?.thread);
     if (!t || t.status !== 'inProgress') die(`no turn in progress (last: ${t?.status ?? 'none'}); use \`turn\` to start a new one`, 3);
     const r = await call('turn/steer', { threadId: opts.thread, expectedTurnId: t.id, input: textInput(text) });
-    console.log(`steered turn ${r.turnId ?? t.id}`); finish(0);
+    const queue = PROF?.home ? readQueue(PROF.home,opts.thread) : null;
+    const queued = queue?.turnId === t.id && ['queued','waiting'].includes(queue.state);
+    const age = Number.isFinite(queue?.since) ? Math.max(0,(Date.now()-queue.since)/60000).toFixed(1) : '?';
+    console.log(`steered turn ${r.turnId ?? t.id}${queued ? `; queued ${age} min at position ${queue.position??'?'} (${queue.state}); the steer is delivered only when the turn runs, not answered yet` : ''}`); finish(0);
   } else if (cmd === 'interrupt') {
     if (!opts.thread) die('interrupt needs --thread');
     const resumed = await call('thread/resume', { threadId: opts.thread }).catch(() => null);

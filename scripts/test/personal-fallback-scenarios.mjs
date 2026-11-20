@@ -36,6 +36,14 @@ function queued(raw, minutes, extra = {}) {
   Object.assign(raw.lanes.find(l => l.accountId === 'trae'), { mode: 'low-priority', readyAt: null,
     position: minutes, drainPerMin: 1, queueState: 'queued', ...extra });
 }
+function companyAstra(raw, extra = {}, id = 'trae', model = 'gpt-6-astra') {
+  const a=raw.accounts.find(a=>a.id===id),lane=raw.lanes.find(l=>l.accountId===id);
+  a.catalog.push(model);
+  if(!raw.models.some(m=>m.id===model))raw.models.push({...raw.models[0],id:model});
+  const added={...lane,id:`${id}:${model}`,modelId:model,mode:'low-priority',readyAt:null,
+    queueState:'queued',position:501,drainPerMin:0,...extra};
+  raw.lanes.push(added);return added;
+}
 const run = (raw, t = task()) => routePure(t, createSnapshot(raw));
 const view = (p, raw) => renderPlan(p, { snapshot: createSnapshot(raw), root, profiles: {} });
 let count = 0;
@@ -106,6 +114,49 @@ try {
   check('hard personal Astra does not displace a ready company lane', () => {
     const raw = fixture([ASTRA]); queued(raw, 45);
     assert.equal(run(raw, task({ category: 'implement-hard', impact: 'service' })).primary.candidate.accountId, 'ttadk');
+  });
+  for(const condition of ['stalled','late','exhausted','restricted'])check(`hard Astra fallback beats ready lower-class company Sol: ${condition}`,()=>{
+    const raw=fixture([SOL,ASTRA]),lane=companyAstra(raw);
+    if(condition==='late')lane.drainPerMin=10;
+    if(condition==='exhausted') {
+      Object.assign(lane,{readyAt:NOW,queueState:'ready',position:0});
+      raw.accounts[1].quota=[{bucketId:lane.modelId,usage:{used:58,limit:58,depleted:true,resetsAt:NOW+3600000}}];
+    }
+    if(condition==='restricted')raw.health=[{accountId:'trae',modelId:lane.modelId,restricted:true,generation:'astra-only',until:NOW+3600000}];
+    const {p,v}=launchesPersonal(raw,task({category:'implement-hard',impact:'service'}));
+    assert.equal(p.primary.candidate.modelId,ASTRA);assert.equal(p.primary.personalFallback.preferOverLowerCompany,true);
+    assert.match(v.why.join('\n'),/personal Astra for hard task: company Astra.*company gpt-6.1-sol available as lower-class alternative/);
+    assert.match(v.why.join('\n'),/task estimate.*same for every lane.*chosen lane: personal.*start now.*alternatives:.*start now/);
+    assert.ok(v.notes.some(s=>/task estimate.*lane: start now/.test(s)));
+    assert.ok(!v.why.some(s=>/est\. ~|estimated completion/.test(s)));
+    assert.ok(['ttadk','trae'].includes(run(raw).primary.candidate.accountId),'non-hard tasks still use a startable company row');
+  });
+  check('any ready or short-wait company Astra vetoes personal Astra, across accounts and releases',()=>{
+    for(const wait of [0,4,5]) {
+      const raw=fixture([ASTRA]);companyAstra(raw);
+      companyAstra(raw,{readyAt:wait?null:NOW,position:wait,drainPerMin:1,queueState:wait?'queued':'ready',mode:'standard'},'ttadk','gpt-6.2-astra');
+      assert.ok(['ttadk','trae'].includes(run(raw,task({category:'implement-hard',impact:'service'})).primary.candidate.accountId));
+    }
+  });
+  check('unknown top-class ETA, absent Astra catalog, and manual exclusion are not stalled evidence',()=>{
+    for(const condition of ['unknown','absent','excluded']) {
+      const raw=fixture([ASTRA]);
+      if(condition!=='absent')companyAstra(raw,condition==='unknown'?{position:null,drainPerMin:null}:{});
+      const t=task({category:'implement-hard',impact:'service',...(condition==='excluded'?{flags:{'exclude-model':'gpt-6-astra'}}:{})});
+      assert.ok(['ttadk','trae'].includes(run(raw,t).primary.candidate.accountId));
+    }
+  });
+  check('hard-class fallback keeps max/reset, classified review and content gates',()=>{
+    for(const condition of ['max','reset','review','security','adversarial','disabled']) {
+      const raw=fixture([ASTRA]);companyAstra(raw);
+      if(condition==='max')raw.lanes.find(l=>l.accountId==='main').efforts=['max'];
+      if(condition==='disabled')raw.personalFallback={...policy,allowHardPersonalAstra:false};
+      const t=task({category:'implement-hard',impact:'service',
+        ...(condition==='reset'?{requirements:{resetRedemption:true}}:{}),
+        ...(condition==='review'?{reviewClass:'B',reviewReason:'fixture classified review'}:{}),
+        ...(['security','adversarial'].includes(condition)?{contentLabels:[condition]}:{})});
+      const p=run(raw,t);assert.notEqual(p.primary?.candidate.accountId,'main');
+    }
   });
   check('hard personal Astra keeps UNKNOWN company status gated', () => {
     const raw = fixture([ASTRA]); deny(raw, 'ttadk'); raw.accounts[1].auth = null;

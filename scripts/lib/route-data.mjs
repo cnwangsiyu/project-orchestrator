@@ -144,6 +144,7 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
   const cacheAgeMs = nonnegative(cachedAt) && cachedAt <= now ? now - cachedAt : null;
   const flags = parsed.flags, id = flags.name ?? parsed.taskId, role = parsed.role;
   const attempts = [];
+  let savedQueueChoice = null;
   const injectedSnapshot=env.ROUTE_SNAPSHOT_FILE ? read(env.ROUTE_SNAPSHOT_FILE) : null;
   const retryHistory = parsed.failures > 0;
   const ownedDir = flags['task-dir'] ?? (flags.name && flags.project && !['.','..'].includes(flags.project) && /^[\w.-]+$/.test(flags.project)
@@ -223,10 +224,17 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
     if (sameTask(r) && r.depth === parsed.autoRerouteDepth && typeof r.cancellationEvidenceId==='string' && r.cancellationEvidenceId.length>0
       && r.from && attempts.length===1
       && attempts[0].actual.accountId===r.from.account && attempts[0].actual.modelId===modelId(r.from.model)
-      && attempts[0].actual.effort===r.from.effort) Object.assign(attempts[0],{
-        state:'cancelled-no-work',usefulWork:false,cancellationEvidenceId:r.cancellationEvidenceId,
+      && attempts[0].actual.effort===r.from.effort) {
+      Object.assign(attempts[0],{
+        state:r.from.workStarted?'interrupted':'cancelled-no-work',usefulWork:!!r.from.workStarted,cancellationEvidenceId:r.cancellationEvidenceId,
         rerouteReason:r.reason,queueWaitMinutes:r.reason==='queue-too-slow'?r.from.waitedMin:null,
         failureKind:r.reason==='policy-block'?'policy-block':'infra'});
+      const choice=r.route?.plan?.task?.queueOwnerChoice;
+      if(r.from.workStarted && choice?.midTurn && choice.decisionId===r.selection?.noticeId
+        && choice.owner===r.selection.owner && choice.candidateId===r.selection.option?.candidateId
+        && choice.candidateId===r.route.plan.primary?.candidate.id)
+        savedQueueChoice={...choice,previousAttemptId:attempts[0].id};
+    }
   }
   if (flags['failure-kind'] && !flags.actual && attempts.length && parsed.autoRerouteDepth === 0) {
     attempts.at(-1).failureKind = parsed.failureKind;
@@ -243,6 +251,7 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
   const writes = parsed.writes || !!flags.signing;
   const sandbox = flags.sandbox ?? (writes ? 'danger-full-access' : parsed.runsTests ? 'workspace-write' : 'read-only');
   let task = createTaskSpec({ ...parsed, taskId: id, writes, sandbox, sandboxCeiling: 'danger-full-access', previousAttempts: attempts,
+    ...(savedQueueChoice?{queueOwnerChoice:savedQueueChoice}:{}),
     flags:canonicalPathOptions({...flags}),
     projectProfiles,
     allowedOrigins: ['browser', 'ui-browser'].includes(parsed.category) ? [...BROWSER_ORIGINS, ...array(projectConfig.browserOrigins), ...(parsed.category === 'ui-browser' ? ['localhost', '127.0.0.1'] : []), ...parsed.allowedOrigins] : parsed.allowedOrigins,
