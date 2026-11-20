@@ -384,104 +384,150 @@ temporary.write_text(json.dumps(d['paths'])); temporary.replace(file)
 
 export const runDataCleanupPython = `import re, stat as data_stat
 # Inspect identity, cwd and fd link names only; never argv, environment or fd contents.
-def workspace_process_live(workspace,proc_root):
-    if not proc_root.is_dir(): raise RuntimeError('process inventory unavailable for workspace')
-    for process in proc_root.glob('[0-9]*'):
+def process_exists(process):
+    try: process.lstat(); return True
+    except (FileNotFoundError,ProcessLookupError): return False
+    except OSError: return True # Inaccessibility cannot prove that a PID is dead.
+
+def probe_link(link):
+    target=os.readlink(link)
+    if target.endswith(' (deleted)'): target=target[:-10]
+    return pathlib.Path(target).resolve() if target.startswith('/') else None
+
+def process_snapshot(proc_root,probe):
+    # Path.glob hides directory PermissionError. Explicit enumeration must fail closed.
+    try: inventory=list(proc_root.iterdir())
+    except OSError as error:
+        probe['inventoryErrors']+=1
+        raise RuntimeError('process inventory unreadable ('+type(error).__name__+')')
+    rows=[]
+    for process in inventory:
         if not process.name.isdigit(): continue
-        # This supervisor opens .data for guarded removal before any command is
-        # launched. Its own housekeeping handles are not another workspace user.
         if proc_root==pathlib.Path('/proc') and process.name==str(os.getpid()): continue
+        probe['scanned']+=1
+        fields=None; errors=[]
         try:
             fields=(process/'stat').read_text().rsplit(')',1)[1].split()
-            if fields[0]=='Z' or int(fields[6]) & 0x00200000: continue # Kernel threads cannot hold app workspace files.
+            if fields[0]=='Z': probe['zombiesIgnored']+=1; continue
+            if int(fields[6]) & 0x00200000: continue # Kernel threads are not app workspace users.
         except (FileNotFoundError,ProcessLookupError):
-            if not process.exists(): continue
-        except (OSError,ValueError,IndexError): pass
-        uncertain=False
-        links=[process/'cwd']
-        try: links+=list((process/'fd').iterdir())
-        except (FileNotFoundError,ProcessLookupError):
-            if not process.exists(): continue
-            uncertain=True
-        except OSError: uncertain=True
-        for link in links:
+            if not process_exists(process): continue
+            probe['statErrors']+=1; errors.append('stat unavailable')
+        except (OSError,ValueError,IndexError) as error:
+            probe['statErrors']+=1; errors.append('stat unreadable ('+type(error).__name__+')')
+        probe['eligible']+=1
+        cwd=None; cwd_readable=False; paths=[]
+        try: cwd=probe_link(process/'cwd'); cwd_readable=cwd is not None
+        except (OSError,ValueError,RuntimeError) as error:
+            if not process_exists(process): continue
+            probe['cwdErrors']+=1; errors.append('cwd unreadable ('+type(error).__name__+')')
+        try: descriptors=list((process/'fd').iterdir())
+        except OSError as error:
+            if not process_exists(process): continue
+            descriptors=[]; probe['fdErrors']+=1; errors.append('fd inventory unreadable ('+type(error).__name__+')')
+        for descriptor in descriptors:
             try:
-                target=os.readlink(link)
-                if target.endswith(' (deleted)'): target=target[:-10]
-                if not target.startswith('/'): continue # Pipes, sockets and anonymous descriptors.
-                target=pathlib.Path(target).resolve()
-                if target==workspace or target.is_relative_to(workspace): return True
-            except (FileNotFoundError,ProcessLookupError):
-                if link.name=='cwd' and process.exists(): uncertain=True
-            except (OSError,ValueError,RuntimeError):
-                if process.exists(): uncertain=True
-        if uncertain and process.exists(): raise RuntimeError('ambiguous process cwd or open files for workspace')
-    return False
+                target=probe_link(descriptor)
+                if target is not None: paths.append(target)
+            except (FileNotFoundError,ProcessLookupError): pass # A closed descriptor no longer holds a file.
+            except (OSError,ValueError,RuntimeError) as error:
+                probe['fdErrors']+=1; errors.append('fd link unreadable ('+type(error).__name__+')')
+        rows.append({'pid':process.name,'fields':fields,'cwd':cwd,'cwdReadable':cwd_readable,'paths':paths,'errors':errors})
+    return rows
 
-def data_group_live(root,workspace,proc_root=pathlib.Path('/proc')):
-    workspace=workspace.resolve()
-    # Receipts may be missing or not yet published. Live workspace users always
-    # protect data independently of receipt schema or a reused recorded PID.
-    if workspace_process_live(workspace,proc_root): return True
-    runs=root/'runs'
-    if not runs.is_dir(): return False
-    for ctl in runs.iterdir():
+def group_records(root,probe):
+    try: controls=list((root/'runs').iterdir())
+    except FileNotFoundError: return []
+    except OSError as error:
+        probe['receiptInventoryErrors']+=1
+        raise RuntimeError('receipt inventory unreadable ('+type(error).__name__+')')
+    records=[]
+    for ctl in controls:
         if not re.fullmatch(r'[0-9a-f-]{36}',ctl.name) or ctl.is_symlink(): continue
         file=ctl/'group.json'
-        if not file.exists() and not file.is_symlink(): continue
-        # Old receipts omit run/workspace. Attribute each receipt before refusing
-        # this workspace, rather than letting one old host receipt stop all slots.
         try:
-            if file.is_symlink(): raise ValueError('group receipt symlink')
+            info=file.lstat()
+            if data_stat.S_ISLNK(info.st_mode): raise ValueError('receipt symlink')
             record=json.loads(file.read_text())
             if not isinstance(record,dict): record={}
-        except (OSError,ValueError): record={}
-        recorded_workspace=record.get('workspace')
-        if not isinstance(recorded_workspace,str) or not pathlib.Path(recorded_workspace).is_absolute(): recorded_workspace=None
-        try: recorded_scope=pathlib.Path(recorded_workspace).resolve() if recorded_workspace else None
-        except (OSError,ValueError,RuntimeError): recorded_scope=None
-        recorded_here=recorded_scope is not None and (recorded_scope==workspace or recorded_scope.is_relative_to(workspace))
-        pgid=record.get('pid')
-        valid_pid=type(pgid) is int and pgid>0
-        valid_start=isinstance(record.get('start'),str) and re.fullmatch(r'[0-9]+',record['start']) is not None
-        modern=record.get('run')==ctl.name and valid_pid and valid_start and recorded_scope is not None
-        if modern and not recorded_here: continue
-        ambiguous_identity=not valid_start
-        if valid_pid:
-            try:
-                fields=(proc_root/str(pgid)/'stat').read_text().rsplit(')',1)[1].split()
-                live_start=fields[19]
-                if re.fullmatch(r'[0-9]+',live_start) is None: ambiguous_identity=True
-                elif valid_start and int(live_start)!=int(record['start']): continue
-            except (FileNotFoundError,ProcessLookupError): pass
-            except (OSError,ValueError,IndexError):
-                ambiguous_identity=True
-            # A live (or ambiguous) recorded PID with a directory in this
-            # workspace adds protection even if it is not a group leader.
-            # Only the validated start mismatch above can exclude that identity.
-            if (proc_root/str(pgid)).exists() and recorded_here: return True
-        # Without a usable PID, cwd evidence still limits a malformed receipt
-        # to workspaces it can own. Never inspect process argv/environment.
-        for process in proc_root.glob('[0-9]*'):
-            try:
-                fields=(process/'stat').read_text().rsplit(')',1)[1].split()
-                if fields[0]=='Z' or (valid_pid and int(fields[2])!=pgid): continue
-            except (FileNotFoundError,ProcessLookupError): continue
-            except (OSError,ValueError,IndexError): fields=None
-            try:
-                if modern and fields is not None and not ambiguous_identity: return True
-                if recorded_here: raise RuntimeError('legacy or invalid live group protects workspace')
-                cwd=(process/'cwd').resolve(strict=True)
-                if cwd==workspace or cwd.is_relative_to(workspace):
-                    raise RuntimeError('legacy or invalid live group protects workspace')
-            except (FileNotFoundError,ProcessLookupError):
-                if (process/'stat').exists(): raise RuntimeError('ambiguous group cwd for workspace')
-            except (OSError,ValueError,IndexError):
-                raise RuntimeError('ambiguous group evidence for workspace')
-    return False
+        except FileNotFoundError: continue # The process scan covers the publication window.
+        except (OSError,ValueError): probe['receiptErrors']+=1; record={}
+        value=record.get('workspace'); scope=None
+        if isinstance(value,str) and pathlib.Path(value).is_absolute():
+            try: scope=pathlib.Path(value).resolve()
+            except (OSError,ValueError,RuntimeError): pass
+        records.append({'pid':record.get('pid'),'start':record.get('start'),'scope':scope,'scopeUnknown':scope is None})
+    return records
+
+def workspace_process_live(workspace,root,rows,records,probe):
+    def inside(target,base): return target is not None and (target==base or target.is_relative_to(base))
+    roots={root.resolve()}
+    # Numbered workspace layout also identifies another workspace's affiliation,
+    # including a registered secondary tree represented by a receipt.
+    for target in [workspace]+[record['scope'] for record in records if record['scope'] is not None]:
+        parts=target.parts
+        for i,part in enumerate(parts):
+            if part=='wt' and len(parts)>=i+4 and parts[i+2].startswith('id-') and re.fullmatch(r'devbox-cn-(?:[0-9]+|light(?:-[0-9]+)?)',parts[i+3]):
+                roots.add(pathlib.Path(*parts[:i])); break
+    def affiliation(target):
+        if inside(target,workspace): return workspace
+        if target is None: return None
+        for base in roots:
+            try: parts=target.relative_to(base/'wt').parts
+            except ValueError: continue
+            if len(parts)>=3 and parts[1].startswith('id-') and re.fullmatch(r'devbox-cn-(?:[0-9]+|light(?:-[0-9]+)?)',parts[2]):
+                return base/'wt'/pathlib.Path(*parts[:3])
+        return None
+    table={row['pid']:row for row in rows}; holds=False; warnings=[]
+    for row in rows:
+        # Cwd and open-file positives are established before any receipt identity exclusion.
+        direct=inside(row['cwd'],workspace) or any(inside(target,workspace) for target in row['paths'])
+        scopes=[]; record_unknown=False
+        fields=row['fields']; pgid=None
+        try: pgid=int(fields[2])
+        except (TypeError,ValueError,IndexError): pass
+        for record in records:
+            pid=record['pid']
+            if type(pid) is int and pid>0:
+                if str(pid)!=row['pid'] and pid!=pgid: continue
+                leader=table.get(str(pid)); observed=None
+                try: observed=leader['fields'][19]
+                except (TypeError,IndexError): pass
+                start=record['start']
+                if isinstance(start,str) and re.fullmatch(r'[0-9]+',start) and isinstance(observed,str) and re.fullmatch(r'[0-9]+',observed) and int(start)!=int(observed): continue
+            elif record['scope'] is None: continue
+            if record['scope'] is not None: scopes.append(record['scope'])
+            else: record_unknown=True
+        recorded=any(inside(scope,workspace) for scope in scopes)
+        holds=holds or direct or recorded
+        if not row['errors']: continue
+        affiliations={value for value in [affiliation(row['cwd'])]+[affiliation(scope) for scope in scopes] if value is not None}
+        reason=', '.join(sorted(set(row['errors'])))
+        if workspace in affiliations or recorded or direct:
+            probe['uncertaintyHere']+=1; holds=True
+            warnings.append('workspace process evidence unreadable: '+reason)
+        elif affiliations:
+            probe['uncertaintyElsewhere']+=1
+        elif row['cwdReadable'] and not record_unknown:
+            # Readable cwd and recorded directories outside every workspace scope
+            # make an inaccessible descriptor unrelated to this collector.
+            probe['uncertaintyUnrelatedIgnored']+=1
+        else:
+            probe['uncertaintyUnattributed']+=1; holds=True
+            warnings.append('unattributed process evidence unreadable: '+reason)
+    if warnings: raise RuntimeError('; '.join(sorted(set(warnings))))
+    return holds
+
+def data_group_live(root,workspace,proc_root=pathlib.Path('/proc'),probe=None):
+    if probe is None: probe={}
+    for name in ['scanned','eligible','inventoryErrors','receiptInventoryErrors','receiptErrors','zombiesIgnored','statErrors','cwdErrors','fdErrors','uncertaintyHere','uncertaintyElsewhere','uncertaintyUnrelatedIgnored','uncertaintyUnattributed']: probe.setdefault(name,0)
+    workspace=workspace.resolve()
+    rows=process_snapshot(proc_root,probe)
+    records=group_records(root,probe)
+    return workspace_process_live(workspace,root,rows,records,probe)
 
 def cleanup_run_data(d,proc_root=pathlib.Path('/proc')):
-    result={'entries':[],'bytes':0,'warnings':[]}
+    result={'entries':[],'bytes':0,'warnings':[],'processProbe':{}}
     if d.get('env',{}).get('DEVBOX_KEEP_RUN_DATA')=='1':
         return {**result,'skipped':'DEVBOX_KEEP_RUN_DATA=1'}
     data_fd=None
@@ -534,7 +580,7 @@ def cleanup_run_data(d,proc_root=pathlib.Path('/proc')):
             target=pathlib.Path(value).resolve()
             if target==base: return {**result,'skipped':'declared data directory input'}
             if target.is_relative_to(base): protected.add(target.relative_to(base).parts[0])
-        live=data_group_live(root,workspace.resolve(),proc_root)
+        live=data_group_live(root,workspace.resolve(),proc_root,result['processProbe'])
         if live: raise RuntimeError('live process group or workspace user protects workspace')
         private=re.compile(r'^(?:login|sessions?|cookies?|\\.env(?:\\..*)?|\\.netrc|\\.npmrc|\\.pypirc|\\.ssh|\\.aws|\\.kube|node_modules)$|\\.(?:pem|p12|pfx|key|keystore)$',re.I)
         def inspect_entry(entry):

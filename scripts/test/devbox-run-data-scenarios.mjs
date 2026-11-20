@@ -139,12 +139,12 @@ try {
   orphan.process(5678, 1234, orphan.workspace);
   assert.equal(orphan.cleanup().bytes, 0, 'surviving group members protect data after leader exit');
   const ambiguous = groupFixture(); ambiguous.receipt({ pid: 1234, start: '42' }); ambiguous.process(1234, 1234);
-  assert.match(ambiguous.cleanup().warnings.join(' '), /ambiguous process cwd/);
+  assert.match(ambiguous.cleanup().warnings.join(' '), /unattributed process evidence unreadable/);
   const malformed = groupFixture(); malformed.receipt('{broken'); malformed.process(1234, 1234, malformed.workspace);
   assert.equal(malformed.cleanup().bytes, 0);
   fs.unlinkSync(path.join(malformed.proc, '1234/cwd')); fs.symlinkSync(temp, path.join(malformed.proc, '1234/cwd'));
   assert.equal(malformed.cleanup().bytes, 3, 'malformed receipt is attributed by cwd rather than aborting the host');
-  const malformedStat = groupFixture(); malformedStat.receipt({ pid: 1234, start: '42' }); malformedStat.process(1234, 1234, temp);
+  const malformedStat = groupFixture(); malformedStat.receipt({ pid: 1234, start: '42', workspace: temp }); malformedStat.process(1234, 1234, temp);
   fs.writeFileSync(path.join(malformedStat.proc, '1234/stat'), 'invalid stat');
   assert.equal(malformedStat.cleanup().bytes, 3, 'malformed process identity still checks workspace attribution');
   const malformedStatOwned = groupFixture(); malformedStatOwned.receipt({ pid: 1234, start: '42' }); malformedStatOwned.process(1234, 1234, malformedStatOwned.workspace);
@@ -218,6 +218,62 @@ try {
     assert.equal(f.cleanup().bytes, 0, 'recorded directory adds protection before non-leader/group filtering');
   }
   console.log('PASS reviewer start broken/41/missing, modern corrupt fields, unpublished receipts, cwd/open/deleted fds and reused unrelated PID');
+
+  const deniedInventory = groupFixture(); deniedInventory.process(1234, 1234, deniedInventory.workspace);
+  const inventorySetup = `original_iterdir=pathlib.Path.iterdir\ndef inventory_denied(self):\n    if self==pathlib.Path(${JSON.stringify(deniedInventory.proc)}): raise PermissionError('fixture-sensitive-path')\n    return original_iterdir(self)\npathlib.Path.iterdir=inventory_denied`;
+  const unreadable = invoke(deniedInventory, inventorySetup);
+  assert.equal(unreadable.bytes, 0); assert.equal(unreadable.processProbe.inventoryErrors, 1);
+  assert.match(unreadable.warnings.join(' '), /process inventory unreadable \(PermissionError\)/);
+  assert.ok(!unreadable.warnings.join(' ').includes('fixture-sensitive-path'));
+
+  const denyFds = (proc, pids) => `original_iterdir=pathlib.Path.iterdir\ndef fd_denied(self):\n    if self.name=='fd' and self.parent.name in ${JSON.stringify(pids.map(String))} and self.parent.parent==pathlib.Path(${JSON.stringify(proc)}): raise PermissionError('fixture-sensitive-path')\n    return original_iterdir(self)\npathlib.Path.iterdir=fd_denied`;
+  const unrelatedFd = groupFixture(); unrelatedFd.process(1234, 1234, temp);
+  const ignoredFd = invoke(unrelatedFd, denyFds(unrelatedFd.proc, [1234]));
+  assert.equal(ignoredFd.bytes, 3); assert.deepEqual(ignoredFd.warnings, []);
+  assert.equal(ignoredFd.processProbe.uncertaintyUnrelatedIgnored, 1);
+  const unrelatedLink = groupFixture(), unrelatedRun = randomUUID(); unrelatedLink.process(1234, 1234, temp);
+  unrelatedLink.receipt({ run: unrelatedRun, pid: 1234, start: '42', workspace: temp }, unrelatedRun);
+  fs.symlinkSync(path.join(temp, 'outside-file'), path.join(unrelatedLink.proc, '1234/fd/3'));
+  const linkSetup = `original_readlink=os.readlink\ndef link_denied(file,*a,**k):\n    if pathlib.Path(file)==pathlib.Path(${JSON.stringify(path.join(unrelatedLink.proc, '1234/fd/3'))}): raise PermissionError('fixture-sensitive-path')\n    return original_readlink(file,*a,**k)\nos.readlink=link_denied`;
+  const ignoredLink = invoke(unrelatedLink, linkSetup);
+  assert.equal(ignoredLink.bytes, 3); assert.deepEqual(ignoredLink.warnings, []); assert.equal(ignoredLink.processProbe.uncertaintyUnrelatedIgnored, 1);
+  const scopedFd = groupFixture(), otherWorkspace = path.join(scopedFd.root, 'wt/fixture/id-123456/devbox-cn-2');
+  fs.mkdirSync(otherWorkspace, { recursive: true }); scopedFd.process(1234, 1234, otherWorkspace);
+  const elsewhere = invoke(scopedFd, denyFds(scopedFd.proc, [1234]));
+  assert.equal(elsewhere.bytes, 3); assert.deepEqual(elsewhere.warnings, []); assert.equal(elsewhere.processProbe.uncertaintyElsewhere, 1);
+  const scopedCwd = groupFixture(), cwdRun = randomUUID(), recordedOther = path.join(scopedCwd.root, 'wt/fixture/id-123456/devbox-cn-2');
+  fs.mkdirSync(recordedOther, { recursive: true }); scopedCwd.process(1234, 1234);
+  scopedCwd.receipt({ run: cwdRun, pid: 1234, start: '42', workspace: recordedOther }, cwdRun);
+  const cwdElsewhere = scopedCwd.cleanup();
+  assert.equal(cwdElsewhere.bytes, 3); assert.deepEqual(cwdElsewhere.warnings, []); assert.equal(cwdElsewhere.processProbe.uncertaintyElsewhere, 1);
+  const ownedFd = groupFixture(); ownedFd.process(1234, 1234, ownedFd.workspace);
+  const owned = invoke(ownedFd, denyFds(ownedFd.proc, [1234]));
+  assert.equal(owned.bytes, 0); assert.equal(owned.processProbe.uncertaintyHere, 1);
+  assert.match(owned.warnings.join(' '), /workspace process evidence unreadable/);
+  const unknownFd = groupFixture(); unknownFd.process(1234, 1234);
+  const unknown = invoke(unknownFd, denyFds(unknownFd.proc, [1234]));
+  assert.equal(unknown.bytes, 0); assert.equal(unknown.processProbe.uncertaintyUnattributed, 1);
+  assert.match(unknown.warnings.join(' '), /unattributed process evidence unreadable/);
+  assert.ok(!unknown.warnings.join(' ').includes('fixture-sensitive-path'));
+
+  const zombie = groupFixture(), zombieRun = randomUUID();
+  zombie.receipt({ run: zombieRun, pid: 1234, start: '42', workspace: zombie.workspace }, zombieRun);
+  zombie.process(1234, 1234, zombie.workspace);
+  const zombieStat = path.join(zombie.proc, '1234/stat'); fs.writeFileSync(zombieStat, fs.readFileSync(zombieStat, 'utf8').replace('(fixture) S ', '(fixture) Z '));
+  const deadZombie = zombie.cleanup();
+  assert.equal(deadZombie.bytes, 3); assert.deepEqual(deadZombie.warnings, []); assert.equal(deadZombie.processProbe.zombiesIgnored, 1);
+  console.log('PASS unreadable inventory, scoped/unrelated/unattributed fd errors, secret-free reasons and confirmed zombie deletion safety');
+
+  const busy = groupFixture();
+  for (let pid = 2000; pid < 2100; pid++) busy.process(pid, pid, temp);
+  const busyOther = path.join(busy.root, 'wt/fixture/id-123456/devbox-cn-2'); fs.mkdirSync(busyOther, { recursive: true });
+  busy.process(1234, 1234); busy.process(1235, 1235, busyOther); busy.process(1236, 1236, busy.workspace);
+  const busyResult = invoke(busy, denyFds(busy.proc, [1234, 1235, 1236, ...Array.from({ length: 100 }, (_, i) => 2000+i)]));
+  assert.equal(busyResult.processProbe.eligible, 103);
+  assert.equal(busyResult.processProbe.uncertaintyUnrelatedIgnored, 100);
+  assert.equal(busyResult.processProbe.uncertaintyElsewhere, 1); assert.equal(busyResult.processProbe.uncertaintyHere, 1);
+  assert.equal(busyResult.processProbe.uncertaintyUnattributed, 1);
+  console.log('PASS busy fixture: 1/103 unattributed (0.971%), 100 unrelated errors ignored, one other-workspace and one current-workspace error');
 
   const privateValue = 'fixture-sensitive-value'; let output = '';
   const warningOutput = await execute('python3', ['-c', 'import json,sys,pathlib\n' + runDataCleanupPython + '\nprint_data_cleanup(json.loads(sys.stdin.read()))'], {
