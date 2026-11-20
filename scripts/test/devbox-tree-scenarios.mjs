@@ -123,6 +123,8 @@ try {
   const meta = JSON.parse(fs.readFileSync(path.join(fresh.workspace, '.devbox-run.json'))); meta.lastUsed = Date.now() / 1000;
   fs.writeFileSync(path.join(fresh.workspace, '.devbox-run.json'), JSON.stringify(meta));
   assert.equal(python("print(json.dumps(tree_evict(d)))", fresh).skipped, 'warm and above floor');
+  const ageOnly = python("d['coldOnly']=True\nos.statvfs=lambda p:__import__('types').SimpleNamespace(f_bavail=19*TREE_GIB,f_frsize=1)\nprint(json.dumps(tree_evict(d)))", fresh);
+  assert.equal(ageOnly.skipped, 'warm and above floor'); assert.ok(fs.existsSync(fresh.workspace), 'gc age recheck preserves a tree reused since inventory');
   const underFloor = python("os.statvfs=lambda p:__import__('types').SimpleNamespace(f_bavail=19*TREE_GIB,f_frsize=1)\nprint(json.dumps(tree_evict(d)))", fresh);
   assert.equal(underFloor.reason, 'below-floor-lru'); assert.ok(!fs.existsSync(fresh.workspace));
   assert.ok(fs.existsSync(path.join(root, 'repos/fixture/id-fixture')));

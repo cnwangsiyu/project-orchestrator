@@ -265,7 +265,7 @@ def tree_evict(d):
         candidates=[row for row in tree_list(d) if row['workspace']==str(ws)]
         if not candidates: return {'skipped':'not a runner tree'}
         row=candidates[0]; disk=os.statvfs(root); free=disk.f_bavail*disk.f_frsize/TREE_GIB
-        below=free<d.get('targetFreeGiB',roots[root]); cold=row['lastUsed']<time.time()-d.get('days',d['treeConfig']['coldDays'])*86400
+        below=not d.get('coldOnly') and free<d.get('targetFreeGiB',roots[root]); cold=row['lastUsed']<time.time()-d.get('days',d['treeConfig']['coldDays'])*86400
         if not below and not cold: return {'skipped':'warm and above floor'}
         if tree_process_live(ws): return {'skipped':'live or unknown process'}
         # Preserve edits and any private/symlink state rather than treating it as rebuildable.
@@ -294,7 +294,8 @@ export function treeScript(operation, legacy, header, data) {
   if (operation === 'tree-list') return body('print(json.dumps(tree_list(d)))\n');
   if (operation === 'tree-place') return body('print(json.dumps(tree_place(d)))\n');
   if (operation === 'tree-release') return body('print(json.dumps(tree_release(d)))\n');
-  if (operation === 'tree-evict' || operation === 'gc') return body('print(json.dumps(tree_evict(d)))\n');
+  if (operation === 'tree-evict') return body('print(json.dumps(tree_evict(d)))\n');
+  if (operation === 'gc') return body("d['coldOnly']=True\nprint(json.dumps(tree_evict(d)))\n");
   if (operation === 'inventory') return body("print(json.dumps([row for row in tree_list(d) if row['lastUsed']<time.time()-d['days']*86400]))\n");
   if (operation === 'recent') return body("rows=tree_list(d); recent={}\nfor row in rows:\n    if row['project']==d['project']: recent[row['slot']]=max(recent.get(row['slot'],0),row['lastUsed'])\nprint(json.dumps(recent))\n");
   if (operation === 'workspaces' || operation === 'warm-path') return body(String.raw`
