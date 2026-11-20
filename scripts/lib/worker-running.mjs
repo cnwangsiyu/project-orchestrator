@@ -5,8 +5,8 @@ import { followerAlive, inbox, retiredWorkers, workerKey, workerRunStates } from
 export const workerHub = row => readProfiles()[row.account]?.hub
   ?? (row.account === 'main' ? process.env.CODEX_HUB ?? MAIN_PROFILE.hub : null);
 export const terminalWorker = row => !row.mayRun && (row.settled
-  || ['finished', 'completed', 'failed', 'cancelled', 'retired'].includes(row.event)
-  || ['completed', 'finished', 'failed', 'cancelled', 'interrupted'].includes(row.status));
+  || ['finished', 'completed', 'truncated', 'failed', 'cancelled', 'retired'].includes(row.event)
+  || ['completed', 'finished', 'TRUNCATED', 'failed', 'cancelled', 'interrupted'].includes(row.status));
 
 export const trackedWorkers = (rows, owner) => {
   const own = rows.filter(row => (!owner || row.owner === owner) && !['ambiguous', 'unmatched'].includes(row.ownerResolution));

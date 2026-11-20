@@ -3,7 +3,7 @@ import { policyModel, matchesModel, isAstra, newestRelease, VERSION, EFFORTS, ar
 import { candidateParts, enumerateCandidates } from './candidates.mjs';
 import { modelPreference, policyEffort } from './policy.mjs';
 import { estimateCandidate } from './estimate.mjs';
-import { standingPersonalFallback } from './personal-fallback.mjs';
+import { standingPersonalFallback, hardPersonalXhighFallback } from './personal-fallback.mjs';
 import { standingPersonalPriority } from './personal-priority.mjs';
 import { ttadkReserve } from './ttadk-reserve.mjs';
 
@@ -121,7 +121,11 @@ export function dominates(c, previous, s) {
   }
   return false;
 }
-export function pPreviousFloor(t, s, c) {
+export function pPreviousFloor(t, s, c, context = {}) {
+  const capacityRows = context.companyRows ?? (candidateParts(s, c).account?.kind === 'chatgpt' && isAstra(c.modelId)
+    ? enumerateCandidates(t, s).candidates.filter(candidate => company(candidateParts(s, candidate).account))
+      .map(candidate => ({ candidate, predicates: evaluateCandidate(t, s, candidate, { ...context, companyRows: [] }),
+        estimate: estimateCandidate(t, s, candidate) })) : []);
   const attempts = t.previousAttempts;
   const relevant = attempts.filter((a) => a?.taskId === t.taskId && (a.role ?? 'primary') === t.role && a.state !== 'planned');
   const accountlessActual=a=>a.source==='explicit-actual'&&a.actualStatus==='KNOWN'&&a.actual?.accountStatus==='UNKNOWN'
@@ -143,12 +147,16 @@ export function pPreviousFloor(t, s, c) {
     && c.family === 'gpt' && !['sol', 'astra'].includes(policyModel(c.modelId)))
     return deny('pPreviousFloor', 'RETRY_LIGHT_REQUIRES_SOL', 'A failed light quality rung requires the Sol retry or a stronger model.', c);
   for (const a of relevant) {
+    const capacityFallback = hardPersonalXhighFallback(t, s, c, capacityRows);
+    if (capacityFallback && a.state === 'cancelled-no-work' && a.usefulWork === false && a.cancellationEvidenceId) continue;
     // A failed tool says nothing about answer quality across model families.
     const toolSwitch = a.failureKind === 'tool' && ['browser','ui-browser','computer-use'].includes(t.category)
       && c.family !== familyOf(a.actual.modelId ?? a.actual.model);
     if (!toolSwitch && !dominates(c, a.actual, s)) return deny('pPreviousFloor', 'RETRY_BELOW_ACTUAL_FLOOR', 'Candidate does not dominate every real prior attempt.', c);
     if (['quality', 'spec', 'process'].includes(a.failureKind) && policyModel(a.actual.modelId ?? a.actual.model) === policyModel(c.modelId) && a.actual.effort === c.effort
-      && !matchingApproval(t, s, c, 'retry-same-floor')) return deny('pPreviousFloor', 'QUALITY_REPEAT_REQUIRES_DECISION', 'Repeating an exhausted quality step requires an explicit task decision.', c);
+      && !matchingApproval(t, s, c, 'retry-same-floor') && !(capacityFallback
+        && company(s.accounts.find(account => account.id === a.actual.accountId))))
+      return deny('pPreviousFloor', 'QUALITY_REPEAT_REQUIRES_DECISION', 'Repeating an exhausted quality step requires an explicit task decision.', c);
   }
   for (const profile of array(t.floor.profileIds)) {
     const at = profile.lastIndexOf(':');

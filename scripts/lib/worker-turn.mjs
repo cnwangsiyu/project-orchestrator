@@ -1,7 +1,8 @@
 import { readEvents, workerContext, workerRunStates, followerAlive, processWorker } from './worker-events.mjs';
 
-const ended = status => ['completed', 'failed', 'interrupted'].includes(status);
+const ended = status => ['completed', 'TRUNCATED', 'failed', 'interrupted'].includes(status);
 const trackedStatus = (row, alive) => {
+  if (!row.mayRun && (row.status === 'TRUNCATED' || row.event === 'truncated')) return 'TRUNCATED';
   if (!row.settled && (row.event === 'running' || row.mayRun)) return alive(row) ? 'inProgress' : 'unknown';
   if (!row.mayRun && ['finished', 'failed', 'observed', 'needs-user'].includes(row.event))
     return ended(row.status) ? row.status : row.event === 'finished' || row.exit === 0 ? 'completed' : 'failed';
@@ -52,7 +53,8 @@ export const resolveTurnState = ({ account, thread, result = {}, liveThread, row
   const localAuthority = tracked?.status === 'inProgress' || !fallbackLive
     || ended(tracked?.status) && known.has(fallbackLive.id);
   if (!turn && tracked && !laterPersisted && localAuthority) {
-    turn = matching && ended(matching.status) ? matching : { ...matching, id: tracked.id, status: tracked.status };
+    turn = tracked.status === 'TRUNCATED' ? { ...matching, id: tracked.id, status: tracked.status, reason: tracked.row.reason }
+      : matching && ended(matching.status) ? matching : { ...matching, id: tracked.id, status: tracked.status };
     source = turn === matching ? 'persisted' : 'tracker';
   }
   turn ??= fallbackLive ?? persisted.at(-1);

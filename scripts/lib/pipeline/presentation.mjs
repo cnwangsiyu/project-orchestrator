@@ -29,6 +29,7 @@ export function presentRoute(plan, view, context) {
     if(i>=0)notes[i]=`Queue decision: notify the owner after >${snapshot.personalFallback.queueWaitMinutes} min; repeat after ${snapshot.personalFallback.queueReminderMinutes} min; owner chooses, no automatic switch.`;
   }
   if (plan.kind === 'launch' && seat?.personalFallback) why.push(seat.personalFallback.text);
+  if (plan.kind === 'launch' && seat?.personalFallback?.maxUnavailable) tellUser.push(seat.personalFallback.text);
   if (plan.kind === 'launch' && snapshot.personalPriority) for (const reviewer of plan.reviewers) {
     if (reviewer.personalFallback?.approvalRef === snapshot.personalPriority.userDecisionRef)
       why.push(`second reviewer: ${reviewer.personalFallback.text}`);

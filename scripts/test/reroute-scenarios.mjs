@@ -150,13 +150,17 @@ try {
     [['trae', SOL], ['ttadk', SOL]], 'lane exclusions retain the same model on a ready alternative account');
   const guarded = run('credential-free-refresh', {}, ['--fresh'], { authGuard: true, expiredCache: true });
   assert.equal(guarded.status, 8, guarded.stderr + guarded.stdout);
+  // The follower's stale-quota monitor may already have used the existing full
+  // quota reader. The following route itself must preserve that public cache.
+  const beforeRouteRefresh = JSON.parse(fs.readFileSync(guarded.cache));
   execFileSync(process.execPath, [path.join(scripts, 'route.mjs'), 'analysis', '--fresh', '--json'],
     { env: guarded.env, stdio: ['ignore', 'pipe', 'pipe'], timeout: 15000 });
   const guardRows = fs.readFileSync(guarded.guard, 'utf8').trim().split('\n').map(JSON.parse);
   assert.ok(guardRows.some((r) => r.kind === 'guard-active' && r.pid !== guardRows[0].pid));
   assert.ok(!guardRows.some((r) => r.kind === 'auth-read'), 'neither the worker nor its router/refresh children open credential files');
   const refreshed = JSON.parse(fs.readFileSync(guarded.cache));
-  assert.equal(refreshed.codexAccounts.some((r)=>r.name==='main'),false,'routing does not rewrite the public cache from the registry');
+  assert.equal(refreshed.codexAccounts.some((r)=>r.name==='main'),beforeRouteRefresh.codexAccounts.some((r)=>r.name==='main'),
+    'routing does not rewrite the public cache from the registry');
   for (const routeFailure of [2, 143, 'json']) {
     const failed = run(`router-failed-${routeFailure}`, { routeFailure }, [], { staleRecovery: routeFailure === 2 });
     assert.equal(failed.status, 7, failed.stderr + failed.stdout);

@@ -53,6 +53,48 @@ function excludedAfterInfrastructure(task, candidate) {
       && a.actualStatus === 'KNOWN' && a.failureKind === 'infra' && ['failed', 'cancelled-no-work'].includes(a.state))));
 }
 
+// A planned max escalation is not permission to use personal max. The standing
+// hard-task decision permits personal Astra/xhigh when qualified company max
+// lanes have explicit negative capacity evidence; an executed max floor remains.
+export function hardPersonalXhighFallback(task, snapshot, candidate, rows = []) {
+  const policy = snapshot.personalFallback, account = candidateParts(snapshot, candidate).account;
+  if (!policy?.enabled || !policy.allowHardPersonalAstra || task.tier !== 'hard' || task.reviewClass
+    || account?.kind !== 'chatgpt' || !isAstra(candidate.modelId) || candidate.effort !== 'xhigh'
+    || !task.qualityFailures || task.contentLabels.some(label => ['security', 'adversarial', 'attack-material', 'policy-blocked'].includes(label))) return null;
+  const attempts = task.previousAttempts.filter(attempt => attempt.taskId === task.taskId
+    && (attempt.role ?? 'primary') === task.role && attempt.state !== 'planned');
+  if (attempts.some(attempt => attempt.actual?.effort === 'max'
+    && !(attempt.state === 'cancelled-no-work' && attempt.usefulWork === false && attempt.cancellationEvidenceId))
+    || task.floor.profileIds?.some(profile => profile.endsWith(':max'))) return null;
+  const qualifiedMax = rows.filter(row => row.candidate.effort === 'max'
+    && company(candidateParts(snapshot, row.candidate).account)
+    && row.predicates.every(predicate => predicate.ok || ['pAvailable', 'pExclusions'].includes(predicate.ruleId)));
+  const astraMax = qualifiedMax.filter(row => isAstra(row.candidate.modelId));
+  const max = astraMax.length ? astraMax : qualifiedMax;
+  if (!max.length) return null;
+  const unavailable = row => {
+    const { account, lane } = candidateParts(snapshot, row.candidate);
+    if (known(lane.position) === 0 && known(lane.queueState) === 'ready') return false;
+    const usage = known(account.quota.find(bucket => bucket.bucketId === row.candidate.modelId)?.usage);
+    const exhausted = usage && usage.resetsAt > snapshot.decisionAt && (usage.depleted || usage.used >= usage.limit);
+    const family = known(lane.familyQueue), recent = known(lane.recentQueue);
+    const recentQueue = recent?.blocked === true || family?.position > 0 || family?.high?.position > 0
+      && family.high.t <= snapshot.decisionAt && snapshot.decisionAt - family.high.t <= 1800000
+      || ['queued', 'waiting'].includes(family?.state);
+    return row.estimate.stalled || row.predicates.some(predicate => !predicate.ok
+      && ['PROVIDER_QUOTA_DENIED', 'ACTIVE_RESTRICTION', 'TTADK_DAILY_RESERVE'].includes(predicate.reason?.code))
+      || exhausted && (known(lane.position) > 0 || ['queued', 'waiting'].includes(known(lane.queueState)) || recentQueue);
+  };
+  if (!max.every(unavailable)) return null;
+  const alternatives = max.map(row => ({ account: row.candidate.accountId, model: row.candidate.modelId,
+    effort: 'max', lane: row.candidate.laneId, stalled: row.estimate.stalled, position: known(candidateParts(snapshot, row.candidate).lane.position) }));
+  return freeze({ approvalRef: policy.userDecisionRef, since: policy.since, queueWaitMinutes: policy.queueWaitMinutes,
+    quotaApproved: !task.requirements.resetRedemption, astraApprovalRef: policy.hardAstraDecisionRef,
+    preferOverLowerCompany: true, maxUnavailable: true, alternatives,
+    text: `max was unavailable on qualified company lanes; xhigh on personal Astra instead under standing hard-task approval ${policy.hardAstraDecisionRef}. `
+      + `Stalled/exhausted max alternatives: ${alternatives.map(lane => `${lane.model}/max@${lane.account} position=${lane.position ?? '?'}`).join('; ')}.` });
+}
+
 export function standingPersonalFallback(task, snapshot, candidate, rows) {
   const policy = snapshot.personalFallback, account = candidateParts(snapshot, candidate).account;
   const astra = isAstra(candidate.modelId);
@@ -60,6 +102,8 @@ export function standingPersonalFallback(task, snapshot, candidate, rows) {
     || (astra && !(task.tier === 'hard' && policy.allowHardPersonalAstra))
     || (!astra && (candidate.effort === 'max' || task.requirements.resetRedemption)) || task.reviewClass
     || task.contentLabels.some(l => ['security', 'adversarial', 'attack-material', 'policy-blocked'].includes(l))) return null;
+  const maxFallback = hardPersonalXhighFallback(task, snapshot, candidate, rows);
+  if (maxFallback) return maxFallback;
   const companies = snapshot.accounts.filter(company);
   if (!companies.length && snapshot.accounts.some(a => a.kind === 'UNKNOWN')) return null;
   if (!companies.length && !astra) return null; // Existing personal-device quota permission.

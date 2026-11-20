@@ -110,7 +110,8 @@ try {
   assert.match(status.stdout, /QUEUE-STALLED 13 min @244/);
   const watcher = run('codex-worker.mjs', ['watch', '--owner', owner, '--debounce-sec', '0']);
   assert.equal(watcher.status, 0, watcher.stderr);
-  assert.match(watcher.stdout, /notes \[queue-stalled\].*likely final report only — let it finish; do not interrupt/);
+  assert.match(watcher.stdout, /^\[queue-stalled\].*notes \[queue-stalled\].*likely final report only — let it complete; do not interrupt/m);
+  assert.doesNotMatch(watcher.stdout.split('\n').find(line => line.startsWith('[queue-stalled]')), /deliver|skip|finish/i);
   const events = readEvents().filter(event => event.kind === 'queue-stalled');
   assert.equal(events.length, 1);
   assert.equal(events[0].wrapUp, true);

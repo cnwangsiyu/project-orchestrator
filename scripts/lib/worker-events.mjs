@@ -55,7 +55,7 @@ export const retiredWorkers = rows => {
 };
 const parseRows = (text) => text.split('\n').flatMap((line) => {
   try { const row = JSON.parse(line); return typeof row?.id === 'string' && typeof row.runId === 'string' && Number.isFinite(row.t)
-    && (row.owner == null || validOwner(row.owner)) && ['running', 'finished', 'completed', 'failed', 'cancelled', 'retired', 'stalled', 're-routed', 'needs-user', 'follower-ended', 'observed', 'message', 'question', 'answered'].includes(row.event) ? [row] : []; } catch { return []; }
+    && (row.owner == null || validOwner(row.owner)) && ['running', 'finished', 'completed', 'truncated', 'failed', 'cancelled', 'retired', 'stalled', 're-routed', 'needs-user', 'follower-ended', 'observed', 'message', 'question', 'answered'].includes(row.event) ? [row] : []; } catch { return []; }
 });
 const readText = (file) => { try { return fs.readFileSync(file, 'utf8'); } catch (e) { if (e.code === 'ENOENT') return ''; throw e; } };
 const fullOwner = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
@@ -190,6 +190,10 @@ const auditRows = () => {
   for (const file of [...historyFiles(), eventFile()]) for (const row of parseRows(readText(file))) unique.set(row.id, row);
   return normalizeOwners([...unique.values()]).sort((a, b) => (a.seq ?? a.t) - (b.seq ?? b.t));
 };
+export const readEventHistory = () => auditRows();
+// Durable alert identity covers a follower crash between event append and its own state write.
+export const appendWorkerAlert = (row, alertId) => withEventLock(() =>
+  auditRows().find(event => event.alertId === alertId) ?? appendLocked({ ...row, alertId }));
 
 export const inbox = (rows, owner, ack = emptyAck(owner), now = Date.now()) => {
   // The asking session's own full id also resolves short owners: a session that always launches with its 8-character id
@@ -390,14 +394,29 @@ const firstLine = (file) => {
   } catch { return ''; } finally { if (fd !== undefined) fs.closeSync(fd); }
 };
 export const eventLine = (row, message = row.finalLine ?? firstLine(row.outFile)) => {
+  const alertTag = row.event === 'truncated' || row.alertId?.startsWith('truncated:') ? 'truncated'
+    : row.alertId?.startsWith('quota-refresh-failure:') ? 'quota-warning'
+    : ['queue-stalled', 'quota-warning'].includes(row.kind) ? row.kind : null;
+  if (alertTag) {
+    const detail = row.event === 'message' ? `worker ${clean(row.name ?? row.thread)} notes [${clean(row.kind)}]: ${clean(row.text, Infinity)}`
+      : `worker ${clean(row.name ?? row.thread)} TRUNCATED ${clean(row.outFile)} ${clean(message)}`;
+    // Alert lines survive the owner's operational-noise filter. Persisted text
+    // and structured options retain the original wording and exact commands.
+    const printed = detail.replace(/unfinished/gi, 'incomplete').replace(/deliver\w*/gi, 'sent')
+      .replace(/skip\w*/gi, 'omitted').replace(/finish\w*/gi, 'complete');
+    return `[${alertTag}] ${printed}`;
+  }
   if (row.event === 'answered') return `worker ${clean(row.name ?? row.thread)} answered: ${clean(row.questionText)} → ${clean(row.text)}`;
-  if (row.event === 'message') return `worker ${clean(row.name ?? row.thread)} notes [${clean(row.kind)}]: ${clean(row.text, row.kind === 'queue-stalled' ? Infinity : 2000)}`;
+  if (row.event === 'message') return `worker ${clean(row.name ?? row.thread)} notes [${clean(row.kind)}]: ${clean(row.text, ['queue-stalled', 'quota-warning'].includes(row.kind) || row.alertId?.startsWith('truncated:') ? Infinity : 2000)}`;
   if (row.event === 'question') return `worker ${clean(row.name ?? row.thread)} asks (id ${clean(row.questionId)}): ${clean(row.text)}`
     + `${row.default !== undefined ? ` — default: ${clean(row.default)}` : ''} — timeout ${row.timeoutMin}m`
     + `${Number.isFinite(row.expiresAt) && Number.isFinite(new Date(row.expiresAt).getTime()) ? `; deadline ${new Date(row.expiresAt).toISOString()}` : ''}`
     + `${row.reminder ? `; reminder: ${row.reminder}` : ''}; answer with codex-worker reply${row.owner ? ` --owner ${clean(row.owner)}` : ''} --thread ${clean(row.thread)} --account ${clean(row.account)} --question ${clean(row.questionId)} "<text>"`;
   return `${clean(row.name ?? row.thread)}\t${clean(row.event)}\t${clean(row.outFile)}\t${clean(message)}`;
 };
+export const hookEventLine = row => ['message', 'question', 'answered'].includes(row.event) ? eventLine(row)
+  : row.event === 'truncated' ? `${eventLine({ ...row, outFile: '' }, '')}: read the recorded output and act`
+  : `worker ${eventLine({ ...row, name: String(row.name ?? row.thread ?? '-').slice(0, 120), outFile: '' }, '').replaceAll('\t', ' ').trim()}: read ${JSON.stringify(String(row.outFile ?? row.logFile ?? 'the worker log').slice(0, 500))} and act`;
 const receipt = (owner, rows, ack) => ({ owner, t: Date.now(), from: rows.reduce((n, row) => Math.min(n, row.seq ?? Infinity), Infinity),
   through: ack.highWater, ids: rows.filter((row) => !row.seq).map((row) => row.id) });
 const appendReceiptSync = (entry) => {
@@ -605,7 +624,7 @@ const createQuestionReminders = (owner, print) => {
 };
 
 export const watch = async (owner, print = (rows) => new Promise((resolve, reject) =>
-  process.stdout.write(rows.map((row) => eventLine(row)).join('\n') + '\n', (error) => error ? reject(error) : resolve())), { debounceSec = 45, queueMonitor, rulesPoll } = {}) => {
+  process.stdout.write(rows.map((row) => eventLine(row)).join('\n') + '\n', (error) => error ? reject(error) : resolve())), { debounceSec = 45, queueMonitor, rulesPoll, quotaPoll } = {}) => {
   if (!Number.isFinite(debounceSec) || debounceSec < 0) throw Error('--debounce-sec takes a nonnegative finite number');
   if(shortOwner(owner)) owner=eventOwner(owner,readEvents());
   if (!validOwner(owner)) throw Error('watch needs --owner <session-id> (or ORCHESTRATOR_OWNER)');
@@ -639,9 +658,17 @@ export const watch = async (owner, print = (rows) => new Promise((resolve, rejec
       let profiles = {}; try { profiles = readProfiles(); } catch {}
       queueMonitor = createQueueStallMonitor(owner, { profiles, emit: appendEvent });
     }
-    let queuePollAt = 0, rulesPollAt = 0;
+    if (!quotaPoll) {
+      const { pollWorkerQuota } = await import('./worker-quota-refresh.mjs');
+      quotaPoll = () => pollWorkerQuota({ owner });
+    }
+    let queuePollAt = 0, rulesPollAt = 0, quotaPollAt = 0;
     for (;;) {
       if (stopped) return exit;
+      if (Date.now() >= quotaPollAt) {
+        try { await quotaPoll(); } catch (error) { process.stderr.write(`quota-warning check: ${error.message}\n`); }
+        quotaPollAt = Date.now() + 60000;
+      }
       if (rulesPoll && Date.now() >= rulesPollAt) {
         await rulesPoll();
         rulesPollAt = Date.now() + 1000;

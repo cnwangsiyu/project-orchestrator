@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { orchestrator } from './lib/hook-context.mjs';
 import { validRulesSession, readSeen, withRulesDelivery, hookOutput, cleanupRulesDelivery } from './lib/rules-delivery.mjs';
-import { validOwner, readInboxAsync, deliverAsync, hasWatcherAsync, eventLine, followerAlive } from './lib/worker-events.mjs';
+import { validOwner, readInboxAsync, deliverAsync, hasWatcherAsync, hookEventLine, followerAlive } from './lib/worker-events.mjs';
 import { captureStopTasks, stopBackgroundState } from './lib/worker-background.mjs';
 import { deliverAnswers, answerLine } from './lib/user-queue.mjs';
 import { projectForOwner } from './lib/task-board.mjs';
@@ -69,8 +69,7 @@ try {
       rows = rows.filter((row) => !background.suppressed.has(row.id));
       if (!rows.length) return;
       visible = true;
-      const reason = rows.map((row) => ['message', 'question', 'answered'].includes(row.event) ? eventLine(row)
-        : `worker ${eventLine({ ...row, name: String(row.name ?? row.thread ?? '-').slice(0, 120), outFile: '' }, '').replaceAll('\t', ' ').trim()}: read ${JSON.stringify(String(row.outFile ?? row.logFile ?? 'the worker log').slice(0, 500))} and act`).join('\n')
+      const reason = rows.map(hookEventLine).join('\n')
         + '\nAnswer open questions promptly with codex-worker reply; after its timeout the worker proceeds with its stated default (or ends BLOCKED without one). Handle finished workers first; use codex-worker watch as a run_in_background task for asks/risk notes; live tracked start/turn/exec followers cover completion wakes.';
       await outputWithAnswers(reason);
     }, 10);

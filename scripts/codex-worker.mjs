@@ -80,6 +80,9 @@ import { requestBoardRefresh } from './lib/board-refresh.mjs';
 import { lifecycle, resolveOwner, validOwner, inbox, readEvents, readAck, eventLine, watch, signalExit, appendEvent, setEventObserver,
   saveWorkerContext, workerContext, answerQuestion, followerAlive, retiredWorkers, workerKey, retireWorker, validWorkerIdentifier, workerRunStates } from './lib/worker-events.mjs';
 import { runningWorker, trackedWorkers } from './lib/worker-running.mjs';
+import { pollWorkerQuota } from './lib/worker-quota-refresh.mjs';
+import { completionEvidence, classifyCompletion, completionLeases, continuationCommand, TRUNCATED_EXIT, isCompletedFinalItem } from './lib/worker-completion.mjs';
+import { appendWorkerAlert } from './lib/worker-events.mjs';
 setEventObserver(requestBoardRefresh);
 // What a TRAE pause covers: one model family (route.mjs moves to the next family) or the whole account.
 const pausedWhat = (p) => (p.pool ? `TRAE's ${p.pool} models are paused` : 'TRAE is paused');
@@ -958,6 +961,7 @@ const browserStartup = mcpStartupMonitor();
 const cleanups = new Set();
 let exitCode = null;
 let activeTurn = null, attemptThreadId = null, workStarted = false, hopProgressRecorded = false, preserveQueueNotice = false;
+let streamCompletion = null;
 let workStartedAt = null;
 let sessionPath = null, actualModel = null, actualModelSource = null, actualModelProvider = null, modelMismatch = false;
 const delegatedModels = [], earlyNotifications = [];
@@ -1035,11 +1039,12 @@ if (setupMs) {
   if (controlCommand) console.error(line); else console.log(line);
 }
 const write = (obj) => ws.send(JSON.stringify(obj));
-const call = (method, params, { audit = true } = {}) => new Promise((resolve, reject) => {
+const call = (method, params, { audit = true, timeoutMs = 0 } = {}) => new Promise((resolve, reject) => {
   const id = ++nextId; setupPhase = method;
+  const timer = timeoutMs ? setTimeout(() => { pending.delete(id); reject(Error(`${method} timed out`)); }, timeoutMs) : null;
   if (logFile && audit) try { fs.appendFileSync(logFile, JSON.stringify({ rpc: 'sent', id, method,
     threadId: params?.threadId ?? null, at: Date.now() }) + '\n'); } catch {}
-  pending.set(id, { resolve, reject, method, audit }); write({ jsonrpc: '2.0', id, method, params });
+  pending.set(id, { resolve: value => { clearTimeout(timer); resolve(value); }, reject: error => { clearTimeout(timer); reject(error); }, method, audit }); write({ jsonrpc: '2.0', id, method, params });
 });
 const settleSetup = async (thread) => {
   const phase = setupPhase;
@@ -1171,7 +1176,14 @@ const connectionLost = (message) => {
   if (exitCode != null) {
     console.error('queue-cancel-unconfirmed: hub connection lost before interrupt acknowledgement; check the original turn before dispatching its replacement');
     finish(exitCode);
-  } else if (!done) die(message);
+  } else if (!done && streamCompletion && !streamCompletion.reporting) {
+    const observed = streamCompletion;
+    observed.reporting = true;
+    redactionStatusOnly = true;
+    report(activeTurn.threadId, { id: activeTurn.turnId, status: 'completed', items: [] }, observed.final, observed.usage,
+      { evidence: observed.evidence.snapshot(), live: true, completedEvent: false, unconfirmed: true })
+      .catch(error => { console.error(`codex-worker: disconnected report failed: ${error.message}`); finish(TRUNCATED_EXIT); });
+  } else if (!done && !streamCompletion?.reporting) die(message);
 };
 ws.onclose = () => connectionLost(`hub connection closed (${hub}); is it running? (codex-worker hub)`);
 ws.onerror = () => connectionLost(`cannot reach the hub at ${hub}; probe with codex-worker list --limit 1, start with codex-worker hub only if unreachable, and tell the global-rules owner`);
@@ -1241,7 +1253,22 @@ const recordPolicyBlock = (model, error) => {
   try { appendPolicyBlock(rulesLog(), policyBlockRecord({ account, vendor: PROF?.kind === 'trae' ? 'trae' : 'codex', model, error })); } catch {}
 };
 // Prints the outcome and exits: status, usage, the final message's first line (whole message to --out).
-const report = async (threadId, turn, final, usage) => {
+const report = async (threadId, turn, final, usage, observation = {}) => {
+  if (observation.live && observation.evidence?.pendingFinal) {
+    const item = turn.items?.findLast(item => isCompletedFinalItem(item)
+      && (!observation.evidence.pendingItemId || item.id === observation.evidence.pendingItemId));
+    final = item?.text ?? streamCompletion?.final ?? final;
+  }
+  final ??= lastMessage(turn.items);
+  if (!final && turn.status === 'completed' && !observation.unconfirmed && !observation.live) {
+    const loaded = (await readTurns(threadId).catch(() => [])).find(t => t.id === turn.id);
+    if (loaded?.items?.length) turn = { ...turn, items: loaded.items };
+    final = lastMessage(turn.items);
+  }
+  const resourceState = completionLeases({ ...tracker?.metadata(), by: opts.by, account: account ?? 'main', thread: threadId,
+    project: opts.project ?? tracker?.metadata().project, task: opts.task ?? tracker?.metadata().task, name: opts.name });
+  const truncated = classifyCompletion({ turn, final, leases: resourceState.held, ...observation });
+  if (truncated) turn = { ...turn, status: truncated.status };
   if (PROF?.kind === 'ttadk' && turn.status === 'completed') outcomeInput = usage?.inputTokens;
   if (PROF?.kind === 'trae') saveQueue(PROF.home, threadId, { state: 'ready', turnId: turn.id, at: Date.now() });
   if (!actualModel || PROF?.kind === 'ttadk') observeModel(rolloutTurnModel(PROF?.home ?? process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex'),
@@ -1304,14 +1331,21 @@ const report = async (threadId, turn, final, usage) => {
   }
   if(PROF?.kind==='ttadk'&&turn.status==='failed'&&!policyBlock&&failureKind(JSON.stringify(turn.error??''))==='unavailable'){const p=noteFailure(PROF.home,JSON.stringify(turn.error),Date.now(),opts.model??actualModel);if(p?.modelPause)console.log(unavailableHint(p));}
   if (usage) console.log(`usage (thread total) input=${usage.inputTokens} cached=${usage.cachedInputTokens} output=${usage.outputTokens}`);
-  final ??= lastMessage(turn.items);
-  if (!final) final = lastMessage((await readTurns(threadId).catch(() => [])).find((t) => t.id === turn.id)?.items);
+  if (!final && turn.status === 'failed') final = lastMessage((await readTurns(threadId).catch(() => [])).find(t => t.id === turn.id)?.items);
   outcomeTurn = turn; outcomeFinal = final ?? '';
   printFinal(final);
   await redactEndedTurn(threadId);
-  tracker?.result(rejectedModel ? 'failed' : /^(?:\S+\s+)?(?:BLOCKED|QUESTION)\b/.test(final?.trim() ?? '') ? 'needs-user'
+  const continuation = truncated ? continuationCommand({ script: fileURLToPath(import.meta.url), account: account ?? 'main',
+    thread: threadId, owner: tracker?.owner, out: opts.out, log: opts.log }) : null;
+  if (truncated && tracker?.owner) appendWorkerAlert({ ...tracker.metadata(), thread: threadId, turn: turn.id,
+    event: 'message', kind: 'risk', severity: 'risk', wake: true,
+    text: `TRUNCATED: ${truncated.reasons.join('; ')}. Reply tail: ${maskPasswordStyleValues(final ?? '').text.slice(-200) || '(none)'}. `
+      + `Held leases: ${truncated.leases.map(lease => `${lease.id} by ${lease.holder} pid=${lease.pid}`).join(', ') || 'none'}${resourceState.complete ? '' : ' (lease metadata incomplete)'}. Continue: ${continuation}` },
+    `truncated:${account}:${threadId}:${turn.id}`);
+  tracker?.result(truncated ? 'truncated' : rejectedModel ? 'failed' : /^(?:\S+\s+)?(?:BLOCKED|QUESTION)\b/.test(final?.trim() ?? '') ? 'needs-user'
     : turn.status === 'completed' ? 'finished' : 'failed', { thread: threadId, turn: turn.id, status: turn.status, mayRun: false,
-      reason: rejectedModel ? 'review model rejected' : turn.status === 'completed' ? null : JSON.stringify(turn.error ?? turn.status),
+      ...(truncated ? { mayRun: !!observation.unconfirmed, settled: !observation.unconfirmed, leases: truncated.leases, continuation } : {}),
+      reason: truncated ? truncated.reasons.join('; ') : rejectedModel ? 'review model rejected' : turn.status === 'completed' ? null : JSON.stringify(turn.error ?? turn.status),
       finalLine: maskPasswordStyleValues(final?.split('\n').find((line) => line.trim()) ?? '').text });
   const infrastructureMiss = (['trae','ttadk'].includes(PROF?.kind)&&failureKind(errorText)==='unavailable')||(PROF?.kind==='trae'&&/access (temporarily )?restricted|\b983\b/i.test(errorText));
   if (!(strictReviewModel && modelMismatch) && turn.status === 'failed' && ROUTE_ARGS && !BACKGROUND && !workStarted && !turnHasWork(turn) && !final
@@ -1323,7 +1357,7 @@ const report = async (threadId, turn, final, usage) => {
     }
     console.log('reroute-skipped: failed turn has work or its no-progress terminal state is unconfirmed');
   }
-  await finish(rejectedModel ? 5 : turn.status === 'completed' ? 0 : 1);
+  await finish(truncated ? TRUNCATED_EXIT : rejectedModel ? 5 : turn.status === 'completed' ? 0 : 1);
 };
 // Stall alarm: no event for this turn in --stall-min minutes (default 30, 0 = off) ends the follower with exit 4 so the
 // orchestrator wakes up. The turn keeps running on the hub. A worker waiting on its own sub-agents can be quiet that long,
@@ -1357,6 +1391,35 @@ const follow = (threadId, turnId, items = []) => {
   const recordQueue = ['trae','ttadk'].includes(PROF?.kind) ? createQueueRecorder(PROF.home, opts.model ?? threadModel(PROF.home, threadId)) : null;
   if (recordQueue) cleanups.add(() => recordQueue.stop());
   let final, usage, last = Date.now();
+  const evidence = completionEvidence(items);
+  streamCompletion = { evidence, reporting: false };
+  let periodicBusy = false;
+  const periodic = async () => {
+    if (done || streamCompletion.reporting) return;
+    void pollWorkerQuota({ owner: tracker?.owner });
+    if (periodicBusy) return;
+    periodicBusy = true;
+    let reportingHere = false;
+    try {
+      const response = await call('thread/read', { threadId, includeTurns: true }, { audit: false, timeoutMs: 3000 });
+      const terminal = response.thread?.turns?.find(turn => turn.id === turnId && turn.status === 'completed');
+      if (terminal && !done && !streamCompletion.reporting) {
+        reportingHere = true;
+        streamCompletion.reporting = reporting = true;
+        await report(threadId, terminal, streamCompletion.final, streamCompletion.usage,
+          { evidence: evidence.snapshot(), live: true, completedEvent: false });
+      }
+    } catch (error) {
+      if (!done) {
+        console.error(`worker periodic check: ${error.message}`);
+        if (reportingHere) finish(1);
+      }
+    }
+    finally { periodicBusy = false; }
+  };
+  const quotaAlarm = setInterval(periodic, Math.max(20, Number(process.env.CODEX_WORKER_PERIODIC_MS) || 60000));
+  quotaAlarm.unref(); cleanups.add(() => clearInterval(quotaAlarm));
+  void pollWorkerQuota({ owner: tracker?.owner });
   let runningSince = Date.now(), completedItems = 0;
   const noticePolicyAtFollow=queuePolicy()?.enabled;
   let queueSince = !noticePolicyAtFollow&&PATIENCE_MIN!=null&&!BACKGROUND?Date.now():null, queuePosition = null, lastPrintedQueue = null, queuePrinted = null;
@@ -1524,7 +1587,7 @@ const follow = (threadId, turnId, items = []) => {
       queueSince = Math.min(queueSince ?? t,t);
     }
     observedQueueSince = ['waiting', 'queued'].includes(state) ? observedQueueSince ?? t : null;
-    const queue = { state, position: pos, since: observedQueueSince, turnId,workStarted,
+    const queue = { state, position: pos, modelQuotaLowPriority: p.modelQuotaLowPriority === true, since: observedQueueSince, turnId,workStarted,
       workedMinutesBefore:workedBeforeKnown?workedMs/60000:null,runningTools:runningTools.size,at: t };
     if (PROF?.home) saveQueue(PROF.home, threadId, queue);
     recordQueue?.(p, t);
@@ -1579,6 +1642,14 @@ const follow = (threadId, turnId, items = []) => {
     const p = m.params || {};
     if (p.threadId !== undefined && p.threadId !== threadId) return;
     if (p.turnId !== undefined && p.turnId !== turnId) return;
+    evidence.observe(m);
+    if (m.method === 'item/started' && p.item?.type === 'agentMessage') streamCompletion.partial = { id: p.item.id, text: '' };
+    if (m.method === 'item/agentMessage/delta') {
+      if (streamCompletion.partial?.id !== p.itemId) streamCompletion.partial = { id: p.itemId, text: '' };
+      streamCompletion.partial.text += p.delta ?? '';
+      streamCompletion.final = streamCompletion.partial.text;
+    }
+    if (m.method === 'thread/tokenUsage/updated') streamCompletion.usage = p.tokenUsage;
     observeModel(modelObservation(m, threadId, turnId), threadId, turnId);
     if ((p.threadId === threadId || p.turnId === turnId) &&
       ((m.method.startsWith('item/') && p.item?.type !== 'userMessage')
@@ -1594,15 +1665,17 @@ const follow = (threadId, turnId, items = []) => {
       recordQueue?.({ state: 'ready', position: null, progress: true,
         itemsPerMin: completedItems / Math.max((Date.now() - runningSince) / 60000, 1 / 60) });
     }
-    if (m.method === 'item/completed' && p.item?.type === 'agentMessage' && p.item.text) final = p.item.text;
+    if (m.method === 'item/completed' && p.item?.type === 'agentMessage' && p.item.text) final = streamCompletion.final = p.item.text;
     else if (m.method === 'thread/tokenUsage/updated') usage = p.tokenUsage?.total;
     else if (m.method === 'queue/status' && (p.threadId === threadId || p.turnId === turnId)) queueUpdate(p);
     else if (!handingOff && !reporting && m.method === 'turn/completed' && (p.turn?.id ?? p.turnId) === turnId) {
       reporting = true;
+      streamCompletion.reporting = true;
       queueSince = observedQueueSince = null;
       settleQueueChoice(ownerRow,'ended');
       if(PROF?.home)saveQueue(PROF.home,threadId,{state:'completing',turnId,reporting:true,workStarted,at:Date.now()});
-      report(threadId, p.turn ?? { id: turnId, status: 'completed' }, final, usage)
+      report(threadId, p.turn ?? { id: turnId, status: 'completed' }, final, usage,
+        { evidence: evidence.snapshot(), live: true, completedEvent: true })
       // report() is async and this handler cannot await it: an unexpected throw must still end the follower normally
       // (status 1) instead of leaving it to the 30-minute stall alarm with the policy guidance unprinted.
       .catch((e) => { console.error(`codex-worker: report failed: ${e?.stack ?? e}`); finish(1); });

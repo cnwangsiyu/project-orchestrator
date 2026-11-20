@@ -300,7 +300,8 @@ globalThis.setTimeout = (fn, ms, ...args) => {
   const lost = invokeWorker(['start', '--owner', '7bef4f73-d37d-5025-b238-980dd81876ae', '--name', 'lost', '--cwd', tmp, '--sandbox', 'read-only', '--effort', 'high', 'fixture'],
     { lostAtTurnStart: true, thread: 'lost-thread' });
   assert.equal(lost.status, 2); assert.equal(inbox(readEvents(), '7bef4f73-d37d-5025-b238-980dd81876ae').running.length, 1);
-  const recovery = invokeWorker(['wait', '--owner', '7bef4f73-d37d-5025-b238-980dd81876ae', '--thread', 'lost-thread'], { status: 'completed', turn: 'recovered-turn' });
+  const recovery = invokeWorker(['wait', '--owner', '7bef4f73-d37d-5025-b238-980dd81876ae', '--thread', 'lost-thread'],
+    { status: 'completed', turn: 'recovered-turn', items: [{ type: 'agentMessage', phase: 'final_answer', text: 'DONE recovered fixture' }] });
   assert.equal(recovery.status, 0, recovery.stderr);
   assert.equal(inbox(readEvents(), '7bef4f73-d37d-5025-b238-980dd81876ae').running.length, 0, 'recovered completion settles a turn-less start hint');
   hookRun('7bef4f73-d37d-5025-b238-980dd81876ae'); assert.equal(hookRun('7bef4f73-d37d-5025-b238-980dd81876ae'), null, 'completed recovered work needs no watcher');

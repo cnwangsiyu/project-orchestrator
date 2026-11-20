@@ -14,10 +14,17 @@ import { readState, readProfiles, analyze, leanLines, winState, weekly, fmt, fmt
 import { probeHub } from './lib/hub-state.mjs';
 import { runningWorkers } from './lib/running-workers.mjs';
 import { notifyMonitorFailure } from './lib/monitor-notify.mjs';
+import { readQuotaWarnings, checkQuotaWarnings } from './lib/worker-quota-warnings.mjs';
+import { readQuotaRefreshState } from './lib/worker-quota-refresh.mjs';
+import { readEventHistory } from './lib/worker-events.mjs';
 
 const args = process.argv.slice(2);
 let profiles = {}; try { profiles = readProfiles(); } catch {}
 const running = await runningWorkers({ profiles });
+running.truncated = readEventHistory().filter(row => row.event === 'truncated').map(({ account, thread, turn, name, status, reason, leases, continuation, t }) =>
+  ({ account, thread, turn, name, status, reason, leases, continuation, t }));
+try { checkQuotaWarnings(); running.quotaWarnings = readQuotaWarnings(); running.quotaRefresh = readQuotaRefreshState(); }
+catch (error) { running.quotaWarningError = error.message; }
 if (args.includes('--running')) {
   if (args.includes('--json')) console.log(JSON.stringify(running));
   else {
@@ -25,9 +32,14 @@ if (args.includes('--running')) {
     const checkedAt = Date.now();
     for (const [account, threads] of Object.entries(running.byAccount)) {
       console.log(`${account}: ${threads.length} turns running`);
-      for (const row of threads) console.log(`  ${row.followerCommand === 'exec' ? 'exec' : row.thread ?? '-'}${row.name ? ` name=${row.name}` : ''} owner=${row.owner ?? '?'} model=${row.model ?? '?'} effort=${row.effort ?? '?'} project=${row.project ?? '?'} task=${row.task ?? '?'} started=${new Date(row.startedAt).toISOString()}; last activity ${Math.max(0, Math.floor((checkedAt - row.lastActivityAt) / 60000))} min ago (${localTime.format(row.lastActivityAt)})${row.queueStalled ? `; ${row.queueStalled}` : ''}`);
+      for (const row of threads) console.log(`  ${row.followerCommand === 'exec' ? 'exec' : row.thread ?? '-'}${row.name ? ` name=${row.name}` : ''} owner=${row.owner ?? '?'} model=${row.model ?? '?'} effort=${row.effort ?? '?'} project=${row.project ?? '?'} task=${row.task ?? '?'} started=${new Date(row.startedAt).toISOString()}; last activity ${Math.max(0, Math.floor((checkedAt - row.lastActivityAt) / 60000))} min ago (${localTime.format(row.lastActivityAt)})${['queued', 'waiting'].includes(row.queue?.state) ? `; QUEUED position=${row.queue.position ?? '?'}${row.queue.modelQuotaLowPriority ? ' low-priority' : ''}` : ''}${row.queueStalled ? `; ${row.queueStalled}` : ''}`);
     }
     for (const row of running.unresolved) console.log(`UNKNOWN ${row.account}/${row.thread}: ${row.reason}`);
+    for (const bucket of Object.values(running.quotaWarnings?.buckets ?? {})) console.log(
+      `quota-warning ${bucket.account}${bucket.model ? '/' + bucket.model : ''}: ${bucket.used}/${bucket.limit}; reset=${new Date(bucket.resetsAt).toISOString()}; sampled=${new Date(bucket.sampledAt).toISOString()}; notified=${JSON.stringify(bucket.notices)}`);
+    if (running.quotaWarningError) console.log(`quota-warning UNKNOWN: ${running.quotaWarningError}`);
+    if (running.quotaRefresh?.status) console.log(`[quota-warning] refresh=${running.quotaRefresh.status}; consecutive failures=${running.quotaRefresh.consecutiveFailures ?? 0}; last attempt=${running.quotaRefresh.lastAttempt ? new Date(running.quotaRefresh.lastAttempt).toISOString() : 'none'}`);
+    for (const row of running.truncated) console.log(`TRUNCATED ${row.account}/${row.thread} turn=${row.turn}: ${row.reason}; leases=${row.leases?.map(lease => lease.id).join(', ') || 'none'}; continue: ${row.continuation}`);
   }
   process.exit(0);
 }
@@ -45,6 +57,8 @@ data = { ...data, codexAccounts: data.codexAccounts?.map(account => {
   return { ...account, usageLive: account.live, hubState: hub?.state ?? (account.live ? 'up' : 'down'),
     live: hub ? hub.state !== 'down' : account.live, active: running.byAccount[account.name]?.length ?? 0 };
 }) };
+try { checkQuotaWarnings({ data }); running.quotaWarnings = readQuotaWarnings(); }
+catch (error) { running.quotaWarningError = error.message; }
 const st = analyze(data);
 const lean = leanLines(st, data);
 // Tokens as the dashboard shows them: 185M / 500M.
