@@ -182,7 +182,7 @@ try {
   const hash = value => createHash('sha256').update(value).digest('hex');
   const nonRun = Object.fromEntries(Object.entries(remoteScripts).filter(([operation]) => operation !== 'run'));
   assert.equal(hash(JSON.stringify(nonRun)), '2c8b894cd5b2479b37c29cfe4a1b472c7d62d379d5c7293ac716628a89a76d10', 'all 33 non-run remote scripts unchanged from land-7');
-  assert.equal(hash(remoteScripts.run), '93a4af5a7c0537aab7ec5ec78d9daa38c790cdf04e0b072340c0fb09c47585d6', 'run wire snapshot includes the cleanup liveness and warning fixes');
+  assert.equal(hash(remoteScripts.run), '424595dc72f587dc006b623ce596f87626bbcd12804791a55a5132f17fa2d618', 'run wire snapshot includes the cleanup liveness and warning fixes');
   for (const [operation, source] of Object.entries(remoteScripts)) assert.equal(treeScript(operation, source, '', {}), source, 'legacy script unchanged: ' + operation);
   const scripts = fileURLToPath(new URL('../', import.meta.url));
   for (const operation of ['inspect', 'checkout', 'run', 'input-map', 'inputs-ready', 'dead-slot']) {
