@@ -19,12 +19,14 @@ function fixture() {
   const write = (name, text = 'data') => { const file = path.join(data, name); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, text); return file; };
   return { root, workspace, control, data, write, args: { root, workspace, control, slot: 'devbox-cn-1', runId: randomUUID(), env: {} } };
 }
-function invoke(f, setup = '', overrides = {}) {
+function invoke(f, setup = '', overrides = {}, { docker = false, warning } = {}) {
   const proc = path.join(f.root, 'fixture-proc'); fs.mkdirSync(proc, { recursive: true });
-  const code = 'import os,sys,json,pathlib,time\n' + retentionPython + runDataCleanupPython + '\n' + setup + '\nd=json.loads(sys.stdin.read())\nprint(json.dumps(cleanup_run_data(d,pathlib.Path(' + JSON.stringify(proc) + '))))\n';
+  const dockerSetup = docker ? '' : 'docker_workspace_live=lambda workspace: False';
+  const code = 'import os,sys,json,pathlib,time\n' + retentionPython + runDataCleanupPython + '\nos.geteuid=lambda: 1000\n' + dockerSetup + '\n' + setup + '\nd=json.loads(sys.stdin.read())\nprint_data_cleanup(cleanup_run_data(d,pathlib.Path(' + JSON.stringify(proc) + ')))\n';
   const result = spawnSync('python3', ['-c', code], { input: JSON.stringify({ ...f.args, ...overrides }), encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
-  return JSON.parse(result.stdout);
+  if (warning) assert.match(result.stdout, warning);
+  return JSON.parse(result.stdout.split('\n')[0].slice('DEVBOX_DATA_CLEANUP='.length));
 }
 function retain(f, name, expired = false, archive = false) {
   const run = randomUUID(), control = path.join(f.root, 'runs', run);
@@ -109,11 +111,12 @@ try {
       const file = path.join(ctl, 'group.json');
       fs.writeFileSync(file, typeof record === 'string' ? record : JSON.stringify(record)); return file;
     };
-    const process = (pid, pgid, cwd, start = '42') => {
+    const process = (pid, pgid, cwd, start = '42', uid = 1000, comm = 'fixture') => {
       const dir = path.join(proc, String(pid)); fs.mkdirSync(dir, { recursive: true });
       fs.mkdirSync(path.join(dir, 'fd'), { recursive: true });
       const fields = Array(20).fill('0'); fields[0] = 'S'; fields[1] = '1'; fields[2] = String(pgid); fields[19] = start;
-      fs.writeFileSync(path.join(dir, 'stat'), `${pid} (fixture) ${fields.join(' ')}`);
+      fs.writeFileSync(path.join(dir, 'status'), `Uid:\t${uid}\t${uid}\t${uid}\t${uid}\n`);
+      fs.writeFileSync(path.join(dir, 'stat'), `${pid} (${comm}) ${fields.join(' ')}`);
       if (cwd) fs.symlinkSync(cwd, path.join(dir, 'cwd'));
     };
     const cleanup = () => invoke(f);
@@ -250,11 +253,32 @@ try {
   const owned = invoke(ownedFd, denyFds(ownedFd.proc, [1234]));
   assert.equal(owned.bytes, 0); assert.equal(owned.processProbe.uncertaintyHere, 1);
   assert.match(owned.warnings.join(' '), /workspace process evidence unreadable/);
-  const unknownFd = groupFixture(); unknownFd.process(1234, 1234);
-  const unknown = invoke(unknownFd, denyFds(unknownFd.proc, [1234]));
-  assert.equal(unknown.bytes, 0); assert.equal(unknown.processProbe.uncertaintyUnattributed, 1);
+  const daemons = groupFixture();
+  daemons.process(1234, 1234, null, '42', 0, 'systemd');
+  daemons.process(1235, 1235, null, '42', 101, 'dbus-daemon');
+  daemons.process(1236, 1236, null, '42', 1000, 'sshd');
+  daemons.process(1237, 1237, daemons.workspace, '42', 101);
+  const ignored = invoke(daemons, denyFds(daemons.proc, [1234, 1235, 1236]));
+  assert.equal(ignored.bytes, 3); assert.deepEqual(ignored.warnings, []);
+  assert.equal(ignored.processProbe.ignoredOtherUid, 3);
+  assert.equal(ignored.processProbe.fdErrors, 1);
+  assert.equal(ignored.processProbe.ignoredUnreadableOwn, 1);
+  assert.deepEqual(ignored.processProbe.ignoredUnreadableOwnComms, { sshd: 1 });
+  assert.equal(ignored.processProbe.uncertaintyUnattributed, 0);
+
+  for (const uid of [0, 1000]) {
+    for (const scoped of [true, false]) {
+      const f = groupFixture(); f.process(1234, 1234, null, '42', uid);
+      f.receipt({ pid: 1234, start: '42', ...(scoped ? { workspace: f.workspace } : {}) });
+      const result = invoke(f, denyFds(f.proc, [1234]));
+      assert.equal(result.bytes, 0, 'excluded PID still matches an active or ambiguous receipt');
+    }
+  }
+  const unknownUid = groupFixture(); unknownUid.process(1234, 1234);
+  fs.unlinkSync(path.join(unknownUid.proc, '1234/status'));
+  const unknown = invoke(unknownUid, denyFds(unknownUid.proc, [1234]));
+  assert.equal(unknown.bytes, 0); assert.equal(unknown.processProbe.ignoredUnreadableOwn, 0);
   assert.match(unknown.warnings.join(' '), /unattributed process evidence unreadable/);
-  assert.ok(!unknown.warnings.join(' ').includes('fixture-sensitive-path'));
 
   const zombie = groupFixture(), zombieRun = randomUUID();
   zombie.receipt({ run: zombieRun, pid: 1234, start: '42', workspace: zombie.workspace }, zombieRun);
@@ -272,8 +296,43 @@ try {
   assert.equal(busyResult.processProbe.eligible, 103);
   assert.equal(busyResult.processProbe.uncertaintyUnrelatedIgnored, 100);
   assert.equal(busyResult.processProbe.uncertaintyElsewhere, 1); assert.equal(busyResult.processProbe.uncertaintyHere, 1);
-  assert.equal(busyResult.processProbe.uncertaintyUnattributed, 1);
-  console.log('PASS busy fixture: 1/103 unattributed (0.971%), 100 unrelated errors ignored, one other-workspace and one current-workspace error');
+  assert.equal(busyResult.bytes, 0);
+  assert.equal(busyResult.processProbe.ignoredUnreadableOwn, 1);
+  assert.equal(busyResult.processProbe.uncertaintyUnattributed, 0);
+  console.log('PASS busy fixture: one unreadable own process, 100 unrelated errors ignored, one other-workspace and one current-workspace error');
+
+  // Exercise the CLI protocol using an isolated PATH and a real fixture Unix socket.
+  for (const mode of ['mount', 'sibling', 'empty', 'ps-fails', 'inspect-fails', 'absent', 'absent-with-socket', 'fails-no-socket']) {
+    const f = groupFixture(), bin = path.join(f.root, 'bin'); fs.mkdirSync(bin);
+    const mount = mode === 'mount' ? path.join(f.data, 'active\nrun') : f.workspace + '-sibling';
+    if (!mode.startsWith('absent')) {
+      const cli = `#!/bin/sh
+if [ "$*" = "ps -q" ]; then
+  case "${mode}" in ps-fails|fails-no-socket) exit 1;; empty) exit 0;; esac
+  printf '%s\\n' abcd
+elif [ "$1" = inspect ] && [ "$2" = --type ] && [ "$3" = container ] && [ "$4" = --format ] && [ "$5" = '{{range .Mounts}}{{json .Source}}{{println}}{{end}}' ] && [ "$6" = abcd ]; then
+  [ "${mode}" != inspect-fails ] || exit 1
+  printf '%s\\n' '"/other"' '${JSON.stringify(mount)}'
+else exit 2
+fi
+`;
+      fs.writeFileSync(path.join(bin, 'docker'), cli, { mode: 0o755 });
+    }
+    // Bind a short relative address to stay within the Unix socket path limit on macOS.
+    const hasSocket = !['absent', 'fails-no-socket'].includes(mode);
+    const setup = `import socket
+os.chdir(${JSON.stringify(bin)})
+os.environ['PATH']=os.getcwd()
+os.environ['DOCKER_HOST']='unix://'+os.getcwd()+'/docker.sock'
+original_socket=pathlib.Path.is_socket
+pathlib.Path.is_socket=lambda p: p==pathlib.Path.cwd()/'docker.sock' and original_socket(p)
+${hasSocket ? "sock=socket.socket(socket.AF_UNIX); sock.bind('docker.sock')" : ''}`;
+    const failed = ['ps-fails', 'inspect-fails', 'absent-with-socket'].includes(mode);
+    const result = invoke(f, setup, {}, { docker: true, warning: failed && /^\[cleanup-ineffective\] \["docker-unqueryable"\]$/m });
+    assert.equal(result.bytes, failed || mode === 'mount' ? 0 : 3, mode);
+    assert.deepEqual(result.warnings, failed ? ['docker-unqueryable'] : mode === 'mount' ? ['live container mount protects workspace'] : [], mode);
+  }
+  console.log('PASS running container mount sources, path boundaries, empty inventory, unavailable CLI and socket-dependent failures');
 
   const privateValue = 'fixture-sensitive-value'; let output = '';
   const warningOutput = await execute('python3', ['-c', 'import json,sys,pathlib\n' + runDataCleanupPython + '\nprint_data_cleanup(json.loads(sys.stdin.read()))'], {

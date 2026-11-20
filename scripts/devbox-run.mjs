@@ -382,7 +382,7 @@ file=ctl/'inputs.json'; temporary=ctl/'inputs.tmp'
 temporary.write_text(json.dumps(d['paths'])); temporary.replace(file)
 `;
 
-export const runDataCleanupPython = `import re, stat as data_stat
+export const runDataCleanupPython = `import re, stat as data_stat, subprocess
 # Inspect identity, cwd and fd link names only; never argv, environment or fd contents.
 def process_exists(process):
     try: process.lstat(); return True
@@ -405,9 +405,11 @@ def process_snapshot(proc_root,probe):
         if not process.name.isdigit(): continue
         if proc_root==pathlib.Path('/proc') and process.name==str(os.getpid()): continue
         probe['scanned']+=1
-        fields=None; errors=[]
+        fields=None; errors=[]; comm='(unknown)'
         try:
-            fields=(process/'stat').read_text().rsplit(')',1)[1].split()
+            identity,tail=(process/'stat').read_bytes().rsplit(b')',1)
+            comm=identity.partition(b'(')[2].decode('utf-8','replace')
+            fields=tail.decode('ascii').split()
             if fields[0]=='Z': probe['zombiesIgnored']+=1; continue
             if int(fields[6]) & 0x00200000: continue # Kernel threads are not app workspace users.
         except (FileNotFoundError,ProcessLookupError):
@@ -416,23 +418,43 @@ def process_snapshot(proc_root,probe):
         except (OSError,ValueError,IndexError) as error:
             probe['statErrors']+=1; errors.append('stat unreadable ('+type(error).__name__+')')
         probe['eligible']+=1
+        # A non-dumpable process can have root-owned /proc entries even for our UID.
+        # Read the effective UID in status, keeping identity for receipt matching.
+        try:
+            uid_line=next(line for line in (process/'status').read_bytes().splitlines() if line.startswith(b'Uid:'))
+            uid=int(uid_line.split()[2])
+        except (OSError,StopIteration,ValueError,IndexError):
+            if not process_exists(process): continue
+            uid=None # Unknown ownership does not qualify for either exclusion.
+        row={'pid':process.name,'fields':fields,'cwd':None,'cwdReadable':False,'paths':[],'errors':errors}
+        if uid is not None and uid!=os.geteuid():
+            probe['ignoredOtherUid']+=1
+            row['ignored']=True
+            rows.append(row); continue
         cwd=None; cwd_readable=False; paths=[]
         try: cwd=probe_link(process/'cwd'); cwd_readable=cwd is not None
         except (OSError,ValueError,RuntimeError) as error:
             if not process_exists(process): continue
             probe['cwdErrors']+=1; errors.append('cwd unreadable ('+type(error).__name__+')')
-        try: descriptors=list((process/'fd').iterdir())
+        fd_readable=False; fd_denied=False
+        try:
+            descriptors=list((process/'fd').iterdir()); fd_readable=not descriptors
         except OSError as error:
             if not process_exists(process): continue
-            descriptors=[]; probe['fdErrors']+=1; errors.append('fd inventory unreadable ('+type(error).__name__+')')
+            descriptors=[]; fd_denied=True; probe['fdErrors']+=1; errors.append('fd inventory unreadable ('+type(error).__name__+')')
         for descriptor in descriptors:
             try:
-                target=probe_link(descriptor)
+                target=probe_link(descriptor); fd_readable=True
                 if target is not None: paths.append(target)
-            except (FileNotFoundError,ProcessLookupError): pass # A closed descriptor no longer holds a file.
+            except (FileNotFoundError,ProcessLookupError): continue # A closed descriptor no longer holds a file.
             except (OSError,ValueError,RuntimeError) as error:
-                probe['fdErrors']+=1; errors.append('fd link unreadable ('+type(error).__name__+')')
-        rows.append({'pid':process.name,'fields':fields,'cwd':cwd,'cwdReadable':cwd_readable,'paths':paths,'errors':errors})
+                fd_denied=True; probe['fdErrors']+=1; errors.append('fd link unreadable ('+type(error).__name__+')')
+        if uid==os.geteuid() and not cwd_readable and fd_denied and not fd_readable:
+            probe['ignoredUnreadableOwn']+=1
+            names=probe['ignoredUnreadableOwnComms']; names[comm]=names.get(comm,0)+1
+            row['ignored']=True
+        row.update(cwd=cwd,cwdReadable=cwd_readable,paths=paths)
+        rows.append(row)
     return rows
 
 def group_records(root,probe):
@@ -500,9 +522,11 @@ def workspace_process_live(workspace,root,rows,records,probe):
             else: record_unknown=True
         recorded=any(inside(scope,workspace) for scope in scopes)
         holds=holds or direct or recorded
-        if not row['errors']: continue
+        if row.get('ignored') and not record_unknown: continue
+        errors=row['errors'] or (['ambiguous live receipt'] if row.get('ignored') else [])
+        if not errors: continue
         affiliations={value for value in [affiliation(row['cwd'])]+[affiliation(scope) for scope in scopes] if value is not None}
-        reason=', '.join(sorted(set(row['errors'])))
+        reason=', '.join(sorted(set(errors)))
         if workspace in affiliations or recorded or direct:
             probe['uncertaintyHere']+=1; holds=True
             warnings.append('workspace process evidence unreadable: '+reason)
@@ -520,11 +544,36 @@ def workspace_process_live(workspace,root,rows,records,probe):
 
 def data_group_live(root,workspace,proc_root=pathlib.Path('/proc'),probe=None):
     if probe is None: probe={}
-    for name in ['scanned','eligible','inventoryErrors','receiptInventoryErrors','receiptErrors','zombiesIgnored','statErrors','cwdErrors','fdErrors','uncertaintyHere','uncertaintyElsewhere','uncertaintyUnrelatedIgnored','uncertaintyUnattributed']: probe.setdefault(name,0)
+    for name in ['scanned','eligible','ignoredOtherUid','ignoredUnreadableOwn','inventoryErrors','receiptInventoryErrors','receiptErrors','zombiesIgnored','statErrors','cwdErrors','fdErrors','uncertaintyHere','uncertaintyElsewhere','uncertaintyUnrelatedIgnored','uncertaintyUnattributed']: probe.setdefault(name,0)
+    probe.setdefault('ignoredUnreadableOwnComms',{})
     workspace=workspace.resolve()
     rows=process_snapshot(proc_root,probe)
     records=group_records(root,probe)
     return workspace_process_live(workspace,root,rows,records,probe)
+
+def docker_socket_present():
+    sockets=[pathlib.Path('/var/run/docker.sock')]
+    endpoint=os.environ.get('DOCKER_HOST','')
+    if endpoint.startswith('unix://'): sockets.append(pathlib.Path(endpoint[7:]))
+    runtime=os.environ.get('XDG_RUNTIME_DIR')
+    if runtime: sockets.append(pathlib.Path(runtime)/'docker.sock')
+    return any(socket.is_socket() for socket in sockets)
+
+def docker_workspace_live(workspace):
+    def query(*args):
+        return subprocess.check_output(['docker',*args],timeout=5,stderr=subprocess.DEVNULL)
+    try:
+        ids=query('ps','-q').decode('ascii').split()
+        if ids:
+            # Emit only JSON-escaped source paths, including names with spaces/newlines.
+            sources=query('inspect','--type','container','--format','{{range .Mounts}}{{json .Source}}{{println}}{{end}}',*ids)
+            for line in sources.splitlines():
+                if not line.strip(): continue
+                source=pathlib.Path(json.loads(line))
+                if source.is_absolute() and source.resolve().is_relative_to(workspace): return True
+    except (OSError,subprocess.SubprocessError,ValueError,TypeError,RuntimeError):
+        if docker_socket_present(): raise RuntimeError('docker-unqueryable')
+    return False
 
 def cleanup_run_data(d,proc_root=pathlib.Path('/proc')):
     result={'entries':[],'bytes':0,'warnings':[],'processProbe':{}}
@@ -581,6 +630,7 @@ def cleanup_run_data(d,proc_root=pathlib.Path('/proc')):
             if target==base: return {**result,'skipped':'declared data directory input'}
             if target.is_relative_to(base): protected.add(target.relative_to(base).parts[0])
         live=data_group_live(root,workspace.resolve(),proc_root,result['processProbe'])
+        if docker_workspace_live(workspace.resolve()): raise RuntimeError('live container mount protects workspace')
         if live: raise RuntimeError('live process group or workspace user protects workspace')
         private=re.compile(r'^(?:login|sessions?|cookies?|\\.env(?:\\..*)?|\\.netrc|\\.npmrc|\\.pypirc|\\.ssh|\\.aws|\\.kube|node_modules)$|\\.(?:pem|p12|pfx|key|keystore)$',re.I)
         def inspect_entry(entry):
