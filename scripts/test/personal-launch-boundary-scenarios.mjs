@@ -103,9 +103,14 @@ try {
     assert.equal(r.calls.some(c => c.method === 'thread/start'), false);
   });
   check('main launches only with fresh current headroom; stale/low readings require re-routing', () => {
-    for (const [label, used, stale, want] of [['ready', 95, false, 0], ['low', 96, false, 1], ['stale', 10, true, 1]]) {
+    for (const [label, used, stale, want] of [['ready', 95, false, 0], ['low', 96, false, 1], ['stale', 10, true, 1], ['reset-shift', 3, false, 0]]) {
       const f = fixture('main-' + label, used); f.route.pick = f.tuple('main');
-      fs.writeFileSync(f.log, JSON.stringify(f.route) + '\n'); fs.writeFileSync(f.windowFile, JSON.stringify(policy()));
+      const current = policy();
+      if (label === 'reset-shift') {
+        current.until = new Date(f.data.codexAccounts[0].windows[0].resetsAt).toISOString();
+        f.data.codexAccounts[0].windows[0].resetsAt += 102000; fs.writeFileSync(f.quota, JSON.stringify(f.data));
+      }
+      fs.writeFileSync(f.log, JSON.stringify(f.route) + '\n'); fs.writeFileSync(f.windowFile, JSON.stringify(current));
       if (stale) { f.data.codexAccounts[0].seenAt -= 20 * 60000; fs.writeFileSync(f.quota, JSON.stringify(f.data)); }
       const r = launch(f, 'main'); assert.equal(r.status, want, r.stderr);
       assert.equal(r.calls.some(c => c.method === 'thread/start'), want === 0);

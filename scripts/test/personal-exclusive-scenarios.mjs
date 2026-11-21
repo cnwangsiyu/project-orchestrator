@@ -103,6 +103,33 @@ try {
     raw.personalPriority.until = new Date(NOW + 24 * h).toISOString();
     assert.equal(run(raw).plan.primary.candidate.accountId, 'main', 'explicit until is independent of the new reset');
   });
+  check('a reported reset shifting by 1m42s does not pause exclusive or admit b', () => {
+    const raw = fixture(3), original = raw.accounts[0].budget.weekly.resetsAt;
+    raw.personalPriority.until = new Date(original).toISOString();
+    assert.equal(run(raw).plan.primary.candidate.accountId, 'main');
+    raw.accounts[0].budget.weekly.resetsAt += 102000;
+    const { plan, snapshot, view } = run(raw);
+    assert.equal(snapshot.personalPriority.mode, 'exclusive'); assert.equal(personalPriorityGuard(snapshot), null);
+    assert.equal(plan.primary.candidate.accountId, 'main'); assert.equal(view.pick.approvalRef, ref);
+    assert.ok(!view.why.some(text => text.includes('fresh weekly quota for this reset is unavailable')));
+  });
+  check('main 3% exclusive wins over the hard-Astra standing fallback without excluding b', () => {
+    const raw = fixture(3, true), companyAstra = 'gpt-6-astra';
+    raw.accounts.find(a => a.id === 'trae').catalog.push(companyAstra);
+    raw.models.push({ ...raw.models.find(m => m.id === ASTRA), id: companyAstra });
+    raw.lanes.push({ ...raw.lanes.find(l => l.accountId === 'trae'), id: `trae:${companyAstra}`,
+      modelId: companyAstra, mode: 'low-priority', readyAt: null, position: 501, drainPerMin: 0, queueState: 'queued' });
+    const hard = task({ category: 'implement-hard', impact: 'service' }), result = run(raw, hard);
+    assert.equal(result.plan.kind, 'launch'); assert.equal(result.view.pick.account, 'main');
+    assert.equal(result.view.pick.model, ASTRA); assert.equal(result.view.pick.effort, 'xhigh');
+    assert.equal(result.view.pick.approvalRef, ref);
+    assert.match(result.view.why.join('\n'), /personal main only under the standing routing window/);
+    raw.accounts[0].budget.weekly.used = 96;
+    assert.ok(['ttadk', 'trae'].includes(run(raw, hard).view.pick.account));
+    for (const a of raw.accounts.filter(a => ['ttadk', 'trae'].includes(a.kind))) a.providerDenied = true;
+    assert.equal(run(raw, hard).plan.trigger, 'personal-main-capacity');
+    assert.equal(run(raw, hard).view.pick, null);
+  });
   check('revocation restores normal company selection and Claude-only tools retain their route', () => {
     const raw = fixture(0, true); raw.personalPriority.revoked = true;
     assert.ok(['ttadk', 'trae'].includes(run(raw).plan.primary.candidate.accountId));
