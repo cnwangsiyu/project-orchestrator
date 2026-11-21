@@ -41,7 +41,7 @@ for (const suite of suites) {
   // The runner file includes all sixteen selector groups. Keep its individual
   // fixture watchdogs unchanged; macOS process startup makes the full set longer.
   const timeout = suite.name === 'res-scenarios.mjs' ? RES_TEST_BUDGET_MS
-    : suite.name === 'devbox-run-scenarios.mjs' ? 1800000 : 300000;
+    : suite.name === 'devbox-run-scenarios.mjs' ? 3600000 : 300000;
   const started = performance.now();
   const r = spawnSync(suite.exe, suite.args, { cwd: root, env, encoding: 'utf8', timeout, maxBuffer: 16 * 2 ** 20 });
   const output = `${r.stdout ?? ''}${r.stderr ?? ''}${r.error ? '\n' + r.error.message : ''}`;
