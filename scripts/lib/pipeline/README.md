@@ -57,7 +57,10 @@ mode. `personal-priority.mjs add FROM none REF QUOTE --mode exclusive
 promote or renew the existing window under the same decision reference in
 exclusive mode. The existing prefer-first command remains supported.
 Fresh readings at 90% emit `[personal-main-90]` once per reset window through
-the durable owner inbox. Dry routing previews emit no notices. Reset cards
+the durable owner inbox. The ledger records fresh usage below 90% too: a usage
+drop opens a new notice cycle even if its deadline stays the same. Reset-time
+corrections within six hours retain the cycle; stale or older observations
+cannot reopen it. Dry routing previews emit no notices. Reset cards
 remain manual.
 New Codex threads recheck the current exclusive window at launch audit and
 immediately before `thread/start`; saved primary or reviewer routes from before

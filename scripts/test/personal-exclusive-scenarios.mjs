@@ -160,6 +160,59 @@ try {
     assert.match(rows[1].text, /cards 2$/);
     assert.equal(eventLine({ ...rows[0], event: 'message' }), rows[0].text);
   });
+  check('90% notice keeps one cycle across forward and backward reset-time corrections', () => {
+    const file = path.join(tmp, 'notice-drift.json'), rows = [], emit = row => { rows.push(row); return row; };
+    function notify(used, drift) {
+      const raw = fixture(used); raw.accounts[0].budget.weekly.resetsAt += drift;
+      return checkPersonalPriorityNotices({ snapshot: run(raw).snapshot, task: task(), owner, file, emit });
+    }
+    assert.equal(notify(90, 0).length, 1);
+    assert.deepEqual(notify(91, 102000), []);
+    assert.deepEqual(notify(92, -102000), []);
+    assert.equal(rows.length, 1);
+  });
+  check('fresh usage after a manual reset reopens the notice even with the same deadline', () => {
+    const file = path.join(tmp, 'notice-same-deadline-reset.json'), rows = [], emit = row => { rows.push(row); return row; };
+    function notify(used, cards) {
+      const raw = fixture(used); raw.accounts[0].resets.count = cards;
+      return checkPersonalPriorityNotices({ snapshot: run(raw).snapshot, task: task(), owner, file, emit });
+    }
+    assert.equal(notify(90, 3).length, 1);
+    assert.deepEqual(notify(0, 2), []);
+    assert.equal(notify(90, 2).length, 1);
+    assert.deepEqual(notify(91, 2), []);
+    assert.equal(rows.length, 2); assert.match(rows[1].text, /cards 2$/);
+  });
+  check('stale low usage cannot create another 90% notice cycle', () => {
+    const file = path.join(tmp, 'notice-stale-reset.json'), rows = [], emit = row => { rows.push(row); return row; };
+    const notify = snapshot => checkPersonalPriorityNotices({ snapshot, task: task(), owner, file, emit });
+    assert.equal(notify(run(fixture(90)).snapshot).length, 1);
+    const raw = fixture(0);
+    raw.accounts[0].budget = { status: 'KNOWN', value: raw.accounts[0].budget, sampledAt: NOW, receivedAt: NOW, source: 'last-good-stale' };
+    assert.deepEqual(notify(run(raw).snapshot), []);
+    assert.deepEqual(notify(run(fixture(91)).snapshot), []);
+    assert.equal(rows.length, 1);
+    assert.deepEqual(notify(run(fixture(0)).snapshot), []);
+    assert.equal(notify(run(fixture(90)).snapshot).length, 1);
+  });
+  check('older fresh observations cannot consume a reset cycle notice', () => {
+    const file = path.join(tmp, 'notice-observation-order.json'), rows = [], emit = row => { rows.push(row); return row; };
+    function notify(used, sampledAt, at) {
+      const raw = fixture(used); raw.decisionAt = at;
+      raw.collectedFrom = Math.min(sampledAt, at); raw.collectedThrough = at;
+      raw.accounts[0].budget = { status: 'KNOWN', value: raw.accounts[0].budget, sampledAt, receivedAt: at, source: 'public-status-cache' };
+      const snapshot = run(raw).snapshot;
+      return checkPersonalPriorityNotices({ snapshot, task: task(), owner, file, emit });
+    }
+    assert.equal(notify(90, NOW, NOW).length, 1);
+    assert.deepEqual(notify(0, NOW - 1000, NOW + 1000), []);
+    assert.deepEqual(notify(91, NOW + 1000, NOW + 1000), []);
+    assert.deepEqual(notify(0, NOW + 2000, NOW + 2000), []);
+    assert.deepEqual(notify(91, NOW + 1000, NOW + 3000), []);
+    assert.deepEqual(notify(89, NOW + 3000, NOW + 3000), []);
+    assert.equal(notify(90, NOW + 4000, NOW + 4000).length, 1);
+    assert.equal(rows.length, 2);
+  });
   check('wait notices preserve the exact tag/text, deduplicate the task, and dry/missing-owner calls consume nothing', () => {
     const { snapshot, plan } = run(fixture(96)), file = path.join(tmp, 'wait-notices.json'), rows = [], emit = row => { rows.push(row); return row; };
     const args = { snapshot, plan, task: task(), owner, file, emit };
