@@ -3,6 +3,7 @@ import argparse
 import datetime
 import ipaddress
 import json
+import re
 import socket
 import subprocess
 import sys
@@ -10,7 +11,6 @@ from pathlib import Path
 
 
 HOST = "Bytedances-Mac-mini.local"
-INTERFACE = "en12"
 
 
 class LinkFailure(Exception):
@@ -20,9 +20,39 @@ class LinkFailure(Exception):
 
 
 def resolve():
+    # Darwin can renumber both ends of the USB network link after a reboot.
+    # Intersect hardware-backed interface names with scoped peer answers.
     try:
-        index = socket.if_nametoindex(INTERFACE)
-        info = subprocess.run(["/sbin/ifconfig", INTERFACE], capture_output=True,
+        cables = {}
+        for driver in ("AppleUSBNCMData", "AppleUSBDeviceNCM11Data"):
+            tree = subprocess.run(["/usr/sbin/ioreg", "-r", "-c", driver, "-w0"],
+                                  capture_output=True, text=True, timeout=3, check=True)
+            for name in re.findall(r"^  \+-o (en[0-9]+)\s+<class IOEthernetInterface,", tree.stdout, re.M):
+                cables[socket.if_nametoindex(name)] = name
+    except (OSError, subprocess.SubprocessError) as error:
+        raise LinkFailure("interface-unavailable") from error
+    if not cables:
+        raise LinkFailure("interface-unavailable")
+
+    try:
+        addresses = set()
+        for family, _, _, _, addr in socket.getaddrinfo(HOST, 22, socket.AF_INET6, socket.SOCK_STREAM):
+            index = addr[3]
+            interface = cables.get(index)
+            if family != socket.AF_INET6 or not interface:
+                continue
+            literal, _, zone = addr[0].partition("%")
+            ip = ipaddress.IPv6Address(literal)
+            if ip.is_link_local and zone in ("", interface, str(index)):
+                addresses.add((str(ip), interface))
+    except (OSError, ValueError) as error:
+        raise LinkFailure("resolution-failed") from error
+    if len(addresses) != 1:
+        raise LinkFailure("ambiguous-answer" if addresses else "no-cable-answer")
+    literal, interface = addresses.pop()
+    address = literal + "%" + interface
+    try:
+        info = subprocess.run(["/sbin/ifconfig", interface], capture_output=True,
                               text=True, timeout=3, check=True)
     except (OSError, subprocess.SubprocessError) as error:
         raise LinkFailure("interface-unavailable") from error
@@ -31,28 +61,10 @@ def resolve():
         raise LinkFailure("interface-inactive", "DOWN")
     if "status: active" not in lines:
         raise LinkFailure("interface-status-unknown")
-
-    try:
-        answers = socket.getaddrinfo(HOST, 22, socket.AF_INET6, socket.SOCK_STREAM)
-        addresses = set()
-        for family, _, _, _, addr in answers:
-            if family != socket.AF_INET6 or addr[3] != index:
-                continue
-            literal, _, zone = addr[0].partition("%")
-            if zone and zone not in (INTERFACE, str(index)):
-                continue
-            ip = ipaddress.IPv6Address(literal)
-            if ip.is_link_local:
-                addresses.add(str(ip))
-    except (OSError, ValueError) as error:
-        raise LinkFailure("resolution-failed") from error
-    if len(addresses) != 1:
-        raise LinkFailure("ambiguous-answer" if addresses else "no-cable-answer")
-    address = addresses.pop() + "%" + INTERFACE
     try:
         route = subprocess.run(["/sbin/route", "-n", "get", "-inet6", address],
                                capture_output=True, text=True, timeout=3, check=True)
-        if "interface: " + INTERFACE not in {line.strip() for line in route.stdout.splitlines()}:
+        if "interface: " + interface not in {line.strip() for line in route.stdout.splitlines()}:
             raise LinkFailure("wrong-cable-route")
     except (OSError, subprocess.SubprocessError) as error:
         raise LinkFailure("route-unavailable") from error
@@ -64,7 +76,7 @@ def observation(mode):
         return {"link": mode.upper()}
     # Bound libc name resolution in a disposable process, including ifconfig.
     try:
-        child = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--resolve-en12"],
+        child = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--resolve-usb"],
                                capture_output=True, text=True, timeout=8, check=True)
         result = json.loads(child.stdout)
     except subprocess.TimeoutExpired:
@@ -101,7 +113,7 @@ def main():
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--probe", dest="mode", action="store_const", const="probe")
     modes.add_argument("--maintenance", dest="mode", action="store_const", const="maintenance")
-    modes.add_argument("--resolve-en12", dest="mode", action="store_const", const="resolve",
+    modes.add_argument("--resolve-usb", dest="mode", action="store_const", const="resolve",
                        help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.mode == "resolve":
@@ -112,7 +124,7 @@ def main():
         print(json.dumps(result))
         return 0
     result = observation(args.mode or "disabled")
-    result.update(host=HOST, interface=INTERFACE,
+    result.update(host=HOST, interface=result.get("address", "").partition("%")[2] or None,
                   checked=datetime.datetime.now(datetime.timezone.utc).isoformat())
     print(json.dumps(result))
     return int(result["link"] in ("DOWN", "UNKNOWN"))

@@ -4,7 +4,7 @@
 
 ## Transport and source boundary
 
-Every operation resolves `Bytedances-Mac-mini.local` again, preserves the IPv6 zone, verifies the actual route uses the direct USB interface `en12`, and uses the existing trusted host alias with strict host-key checking. There is no fixed address, alternate network route, key enrollment, agent forwarding or signing support. Thunderbolt is not used.
+Every operation resolves `Bytedances-Mac-mini.local` again, preserves the IPv6 zone, verifies the actual route uses the direct USB NCM interface discovered through IOKit, and uses the existing trusted host alias with strict host-key checking. There is no fixed address, alternate network route, key enrollment, agent forwarding or signing support. Thunderbolt is not used.
 
 FileVault is **Off**, and decryption is complete. Mini2's disk is unencrypted: it must never receive signing material, keychains, tokens, keys, sessions or any other secrets. `--allowlist` is mandatory and contains exact regular tracked source paths. The runner rejects secret-looking names, symlinks, unlisted paths, submodules and untracked inputs before source-content reads or packaging. Every historical path in the bundle must also be allowed. The existing content/history gate then checks the approved snapshot. Repositories containing excluded files must be materialized into a new, reviewed source-only snapshot; adding an excluded path to the list cannot override the path check. Machine configuration, credentials and local application data are never copied.
 
@@ -46,6 +46,11 @@ node scripts/mini2-run.mjs --repo /absolute/source-snapshot --allowlist /absolut
 # Retry cleanup for this exact holder and retained run only.
 node scripts/mini2-run.mjs reconcile --out /absolute/run-evidence --by unique-wrapper
 
+# After an interrupted controller, preserve the build log and artifacts, inspect the
+# remote run and reconcile it. For a dead PID the controller accepts a clean receipt
+# bound to the exact lease generation, holder, and local PID.
+scripts/res/res release-dead mini2-exec-1 --by "$holder" --pid "$dead_pid" --receipt "$clean_receipt"
+
 # Disable new admission; existing owned execution must still complete/clean.
 scripts/res/res mini2 configure --disable
 
@@ -53,4 +58,4 @@ scripts/res/res mini2 configure --disable
 launchctl bootout gui/$(id -u) "$HOME/Library/LaunchAgents/com.bytedance.orchestrator.mini2-link.plist"
 ```
 
-Enabling is a separate owner action after reviewed evidence and cleanup. The controller requires a successful measured summary with retained artifacts; the exact qualification receipt and command are recorded in the task report. This task does not enable placement. No installation, energy/network/system setting or security change on mini2 is part of the runner.
+Enabling is a separate owner action after reviewed evidence and cleanup. The controller requires a successful measured summary with retained artifacts; add `--ios-receipt` with the clean simulator build summary to admit unsigned iOS simulator compiles alongside CMake. The exact command is recorded in the task report. This task does not enable placement. No installation, energy/network/system setting or security change on mini2 is part of the runner.

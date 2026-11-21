@@ -3,10 +3,12 @@ import argparse
 from contextlib import contextmanager
 import datetime
 import fcntl
+import hashlib
 import json
 import math
 import os
 from pathlib import Path
+import plistlib
 import re
 import shutil
 import sys
@@ -17,7 +19,7 @@ HOST = "Bytedances-Mac-mini.local"
 SLOT = "mini2-exec-1"
 DEFAULT = dict(enabled=False, maintenance=False, load5Limit=6, minAvailableGiB=16,
                minFreeGiB=20, owner="9850afbb-edd7-492b-b885-913ccbf40020", generation=0)
-ROW = SLOT + "\tremote\tnever\t-\tSecond Mac mini bytedance@" + HOST + " os=darwin arch=arm64 cores=10 ram=32GiB iface=en12\n"
+ROW = SLOT + "\tremote\tnever\t-\tSecond Mac mini bytedance@" + HOST + " os=darwin arch=arm64 cores=10 ram=32GiB iface=usb-ncm\n"
 
 
 def root_dir():
@@ -225,9 +227,34 @@ def acquire(root, args):
         ticket.unlink(missing_ok=True)
 
 
+def measured_build(file):
+    evidence = read(file, {})
+    if evidence.get("clean") is not True or evidence.get("receipt", {}).get("exit") != 0 or not evidence.get("artifacts"):
+        raise ValueError("successful measured build receipt required")
+    return evidence
+
+
+def verify_simulator_build(summary):
+    evidence = measured_build(summary)
+    if evidence.get("host") != HOST:
+        raise ValueError("mini2 receipt required")
+    root = (summary.parent / "artifacts").resolve()
+    for item in evidence["artifacts"]:
+        relative = Path(item["path"])
+        if relative.name != "Info.plist" or relative.parent.suffix != ".app":
+            continue
+        file = (root / relative).resolve()
+        if root not in file.parents or not file.is_file():
+            continue
+        data = file.read_bytes()
+        if hashlib.sha256(data).hexdigest() == item["sha256"] and "iPhoneSimulator" in plistlib.loads(data).get("CFBundleSupportedPlatforms", []):
+            return
+    raise ValueError("verified simulator app artifact required")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("status", "stage", "configure", "take", "wait", "wait-pool", "return", "retain-remote", "holder"))
+    parser.add_argument("action", choices=("status", "stage", "configure", "take", "wait", "wait-pool", "return", "retain-remote", "release-dead", "holder"))
     parser.add_argument("resource", nargs="?")
     for arg in ("by", "project", "task", "profile", "need", "qualification", "receipt", "note"):
         parser.add_argument("--"+arg, default="")
@@ -235,6 +262,7 @@ def main():
     parser.add_argument("--pid", type=int)
     parser.add_argument("--disk-gib", type=float, default=8)
     parser.add_argument("--timeout", type=float, default=0)
+    parser.add_argument("--ios-receipt", type=Path)
     parser.add_argument("--enable", action="store_true")
     parser.add_argument("--disable", action="store_true")
     parser.add_argument("--maintenance", choices=("on", "off"))
@@ -255,9 +283,10 @@ def main():
             else:
                 if args.enable and args.disable: raise ValueError("conflicting flags")
                 if args.enable:
-                    evidence = read(Path(args.receipt), {}) if args.receipt else {}
-                    if evidence.get("clean") is not True or evidence.get("receipt", {}).get("exit") != 0 or not evidence.get("artifacts"):
-                        raise ValueError("successful measured build receipt required")
+                    if not args.receipt: raise ValueError("successful measured build receipt required")
+                    measured_build(Path(args.receipt))
+                    if args.ios_receipt:
+                        verify_simulator_build(args.ios_receipt)
                     cfg["enabled"]=True
                 if args.disable: cfg["enabled"]=False
                 if args.maintenance: cfg["maintenance"]=args.maintenance == "on"
@@ -271,7 +300,9 @@ def main():
                     if fields[1] != "remote" or fields[3] != "-": raise ValueError("invalid mini2 row")
                     fields[2]="open" if args.enable else "never"
                     fields[4]=re.sub(r"\s+caps=[a-zA-Z0-9_,.-]+", "", fields[4])
-                    if args.enable: fields[4]+=" caps=cmake-native"
+                    if args.enable:
+                        fields[4]+=" caps=cmake-native"
+                        if args.ios_receipt: fields[4]+=",xcode-ios-sim-compile"
                     lines[i]="\t".join(fields)+"\n"
                     staged=file.with_name(".mini2-registry-"+str(uuid.uuid4()))
                     staged.write_text("".join(lines)); os.replace(staged,file)
@@ -288,6 +319,15 @@ def main():
             lease=read(hold/"lease.json", {})
             if not lease: raise ValueError("mini2 hold missing")
             if lease.get("by") != args.by: raise ValueError("mini2 hold belongs to another wrapper")
+            if args.action == "release-dead":
+                if args.resource != SLOT or lease.get("host") != os.uname().nodename or not args.pid or args.pid <= 1 or args.pid != lease.get("pid"):
+                    raise ValueError("exact local holder PID required")
+                try:
+                    os.kill(args.pid, 0)
+                except ProcessLookupError:
+                    pass
+                else:
+                    raise ValueError("holder still alive")
             if args.action == "retain-remote":
                 atomic(root/"mini2-cleanup-pending.json", dict(lease=lease, reason=args.note, at=time.time()))
             else:
@@ -296,7 +336,7 @@ def main():
                     raise ValueError("receipt-matched cleanup required")
                 (root/"mini2-cleanup-pending.json").unlink(missing_ok=True)
                 shutil.rmtree(hold)
-                journal(root,"return",args.by)
+                journal(root,args.action,args.by, "pid="+str(args.pid) if args.action=="release-dead" else "")
             print(args.action+" "+SLOT)
 
 

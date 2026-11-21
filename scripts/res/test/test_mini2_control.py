@@ -102,6 +102,45 @@ class Mini2Tests(unittest.TestCase):
         result=subprocess.run([str(res),"return",m.SLOT,"--by","fixture","--receipt",str(clean)],env=env,capture_output=True)
         self.assertEqual(result.returncode,0,result.stderr)
 
+    def test_dead_release_requires_receipt_and_dead_local_holder(self):
+        res = Path(__file__).resolve().parents[1] / "res"
+        hold = self.root / "locks" / (m.SLOT + ".d")
+        with contextlib.redirect_stdout(io.StringIO()):
+            m.acquire(self.root, self.take_args())
+        lease = m.read(hold / "lease.json")
+        receipt = self.root / "clean.json"
+        m.atomic(receipt, dict(generation=lease["generation"], clean=True))
+        def release(pid):
+            return subprocess.run([str(res), "release-dead", m.SLOT, "--by", "fixture",
+                                   "--pid", str(pid), "--receipt", str(receipt)],
+                                  env={**os.environ, "RES_DIR": str(self.root)}, capture_output=True)
+        self.assertNotEqual(release(os.getpid()).returncode, 0)
+        dead = subprocess.Popen(["/usr/bin/true"])
+        dead.wait()
+        self.assertNotEqual(release(dead.pid).returncode, 0)
+        m.atomic(hold / "lease.json", {**lease, "pid": dead.pid})
+        self.assertEqual(release(dead.pid).returncode, 0)
+        self.assertFalse(hold.exists())
+
+    def test_simulator_capability_requires_verified_simulator_product(self):
+        import hashlib
+        import plistlib
+        relative = "Debug-iphonesimulator/Fixture.app/Info.plist"
+        file = self.root / "artifacts" / relative
+        file.parent.mkdir(parents=True)
+        summary = self.root / "summary.json"
+        for platform in ("iPhoneOS", "iPhoneSimulator"):
+            data = plistlib.dumps({"CFBundleSupportedPlatforms": [platform]})
+            file.write_bytes(data)
+            m.atomic(summary, dict(clean=True, host=m.HOST, receipt={"exit": 0},
+                                   artifacts=[dict(path=relative, sha256=hashlib.sha256(data).hexdigest())]))
+            if platform == "iPhoneOS":
+                with self.assertRaises(ValueError): m.verify_simulator_build(summary)
+            else:
+                m.verify_simulator_build(summary)
+        file.write_bytes(b"changed")
+        with self.assertRaises(ValueError): m.verify_simulator_build(summary)
+
     def test_qualification_is_task_and_holder_scoped(self):
         q=self.root/"qualification.json"; m.atomic(q,dict(task="mini2-enable",by="fixture",at=self.now,enabled=True)); q.chmod(0o600)
         args=self.take_args(); args.qualification=str(q)

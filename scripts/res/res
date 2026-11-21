@@ -19,9 +19,9 @@ mini2_controller() {
 }
 case "${1:-}:${2:-}" in
   mini2:*) shift; mini2_controller "$@"; exit $? ;;
-  take:mini2-exec-1|wait:mini2-exec-1|wait-pool:mini2|return:mini2-exec-1|holder:mini2-exec-1|retain-remote:mini2-exec-1)
+  take:mini2-exec-1|wait:mini2-exec-1|wait-pool:mini2|return:mini2-exec-1|holder:mini2-exec-1|retain-remote:mini2-exec-1|release-dead:mini2-exec-1)
     mini2_controller "$@"; exit $? ;;
-  release-dead:mini2-exec-1|extend:mini2-exec-1)
+  extend:mini2-exec-1)
     echo 'res: mini2 requires receipt-matched reconciliation' >&2; exit 2 ;;
 esac
 

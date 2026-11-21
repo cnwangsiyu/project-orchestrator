@@ -20,8 +20,8 @@ const write = (file, value) => {
   fs.writeFileSync(temp, JSON.stringify(value, null, 2) + '\n', { mode: 0o600 }); fs.renameSync(temp, file);
 };
 
-export function sshArgs(address, command) {
-  if (!/^fe80:[0-9a-f:]+%en12$/i.test(address)) throw Error('invalid cable endpoint');
+export function sshArgs(address, command, cableInterface) {
+  if (!/^en[0-9]+$/.test(cableInterface) || !/^fe80:[0-9a-f:]+%en[0-9]+$/i.test(address) || address.split('%')[1] !== cableInterface) throw Error('invalid cable endpoint');
   return ['-6', '-Tax', '-oBatchMode=yes', '-oConnectTimeout=10', '-oConnectionAttempts=1',
     '-oStrictHostKeyChecking=yes', '-oUpdateHostKeys=no', '-oHostKeyAlias=Bytedances-Mac-mini.local',
     '-oHostname=' + address.replace('%', '%%'), '-oControlPath=none', '-oProxyCommand=none',
@@ -34,7 +34,7 @@ export async function remote(operation, data, options = {}) {
   const observation = JSON.parse(link.stdout);
   if (link.code || observation.link !== 'UP') throw Error('mini2 link unavailable: ' + observation.reason);
   const command = '. "$HOME/.mini2-env.sh" && exec /usr/bin/python3 -c ' + quote(remoteSource()) + ' ' + quote(operation) + ' ' + quote(JSON.stringify(data));
-  const result = await execute('/usr/bin/ssh', sshArgs(observation.address, command), { timeout: 120000, ...options });
+  const result = await execute('/usr/bin/ssh', sshArgs(observation.address, command, observation.interface), { timeout: 120000, ...options });
   if (options.errorFile && result.stderr) {
     fs.appendFileSync(options.errorFile, result.stderr, { mode: 0o600 });
     redactLogFile(options.errorFile, { force: true });

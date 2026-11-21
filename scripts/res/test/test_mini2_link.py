@@ -16,23 +16,32 @@ def answer(ip, idx=17):
 
 
 class ResolverTests(unittest.TestCase):
-    def resolve(self, records, status="active"):
+    def resolve(self, records, status="active", route="en7"):
+        outputs = {"/usr/sbin/ioreg": "  +-o en7  <class IOEthernetInterface, ",
+                   "/sbin/route": "\tinterface: " + route,
+                   "/sbin/ifconfig": "\tstatus: " + status}
         with patch.object(socket, "if_nametoindex", return_value=17), \
                 patch.object(subprocess, "run", side_effect=lambda args, **kw: subprocess.CompletedProcess(
-                    [], 0, stdout="\tinterface: en12" if args[0] == "/sbin/route" else "\tstatus: " + status)), \
+                    [], 0, stdout=outputs[args[0]])), \
                 patch.object(socket, "getaddrinfo", return_value=records):
             return probe.resolve()
 
     def test_only_unique_scoped_answer_and_fresh_lookup(self):
         records = [answer("fe80::a", 3), answer("fe80::a%en0"), answer("2001:db8::1"),
                    answer("fe80::a", 0), answer("fe80::2"), answer("fe80::2%17")]
-        self.assertEqual(self.resolve(records), "fe80::2%en12")
-        self.assertEqual(self.resolve([answer("fe80::3%en12")]), "fe80::3%en12")
+        self.assertEqual(self.resolve(records), "fe80::2%en7")
+        self.assertEqual(self.resolve([answer("fe80::3%en7")]), "fe80::3%en7")
+
+    def test_non_usb_answer_and_changed_route(self):
+        with self.assertRaisesRegex(probe.LinkFailure, "no-cable-answer"):
+            self.resolve([answer("fe80::1", 3)])
+        with self.assertRaisesRegex(probe.LinkFailure, "wrong-cable-route"):
+            self.resolve([answer("fe80::1")], route="bridge0")
 
     def test_fail_closed(self):
         for records, status, link, reason in [
-            ([], "inactive", "DOWN", "interface-inactive"),
-            ([], "unknown", "UNKNOWN", "interface-status-unknown"),
+            ([answer("fe80::1")], "inactive", "DOWN", "interface-inactive"),
+            ([answer("fe80::1")], "unknown", "UNKNOWN", "interface-status-unknown"),
             ([answer("fe80::1", 0)], "active", "UNKNOWN", "no-cable-answer"),
             ([answer("fe80::1"), answer("fe80::2")], "active", "UNKNOWN", "ambiguous-answer"),
         ]:
@@ -45,7 +54,7 @@ class ObservationTests(unittest.TestCase):
     @staticmethod
     def resolved():
         return subprocess.CompletedProcess([], 0, stdout=json.dumps(
-            {"link": "RESOLVED", "address": "fe80::c%en12"}))
+            {"link": "RESOLVED", "address": "fe80::c%en7"}))
 
     def test_default_and_maintenance_do_no_io(self):
         for mode in ("disabled", "maintenance"):
@@ -64,16 +73,16 @@ class ObservationTests(unittest.TestCase):
     def test_read_only_ssh_over_resolved_route(self):
         with patch.object(subprocess, "run", side_effect=[self.resolved(),
                           subprocess.CompletedProcess([], 0, b"mini2-link-ok\n", b"")]) as run:
-            self.assertEqual(probe.observation("probe"), {"link": "UP", "address": "fe80::c%en12"})
+            self.assertEqual(probe.observation("probe"), {"link": "UP", "address": "fe80::c%en7"})
             args = run.call_args.args[0]
-            for option in ["-oHostname=fe80::c%%en12", "-oHostKeyAlias=" + probe.HOST,
+            for option in ["-oHostname=fe80::c%%en7", "-oHostKeyAlias=" + probe.HOST,
                            "-oStrictHostKeyChecking=yes", "-oProxyCommand=none", "-oControlPath=none"]:
                 self.assertIn(option, args)
             self.assertEqual(run.call_args.kwargs["timeout"], 12)
             # Validate client option compatibility without connecting.
         config = subprocess.run([args[0], "-G", *args[1:]], capture_output=True)
         self.assertEqual(config.returncode, 0)
-        self.assertIn(b"hostname fe80::c%en12\n", config.stdout)
+        self.assertIn(b"hostname fe80::c%en7\n", config.stdout)
 
     def test_ssh_timeout_identity_failure_and_bad_reply(self):
         for response, reason in [
@@ -83,7 +92,7 @@ class ObservationTests(unittest.TestCase):
         ]:
             with patch.object(subprocess, "run", side_effect=[self.resolved(), response]):
                 self.assertEqual(probe.observation("probe"),
-                                 dict(link="UNKNOWN", address="fe80::c%en12", reason=reason))
+                                 dict(link="UNKNOWN", address="fe80::c%en7", reason=reason))
 
 
 if __name__ == "__main__":

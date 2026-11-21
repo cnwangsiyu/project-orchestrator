@@ -1,1 +1,1 @@
-mini2-exec-1	remote	never	-	Second Mac mini bytedance@Bytedances-Mac-mini.local os=darwin arch=arm64 cores=10 ram=32GiB iface=en12
+mini2-exec-1	remote	never	-	Second Mac mini bytedance@Bytedances-Mac-mini.local os=darwin arch=arm64 cores=10 ram=32GiB iface=usb-ncm
