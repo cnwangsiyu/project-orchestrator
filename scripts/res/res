@@ -751,7 +751,7 @@ res status [<id>]                     show every resource (or one) and who holds
 res holder <id> [--by <session>]       JSON lease/queued-request snapshot; no device probes
 res audit [--json]                   read-only host facts, slots and 24-hour allocation (no SSH)
 res take <id> --by <session> --project <slug> --for "<purpose>" [--task <id>] [--until <when>] [--offline] [--pid <pid>] [--disk-gib <GiB>]
-res wait <id> --by <session> --project <slug> --for "<purpose>" --timeout <minutes> [--disk-gib <GiB>] [--disk-gib-file <JSON>] [--placement-file <JSON>] [--cores N] [--mem-gib GiB] [--maintenance] [take options]
+res wait <id> --by <session> --project <slug> --for "<purpose>" --timeout <minutes> [--disk-gib <GiB>] [--disk-gib-file <JSON>] [--placement-file <JSON>] [--maintenance] [take options]
                                       retry held resources; heavy-* waits also enforce the gate
                                       --pid names the long-lived holder (default: caller PID)
 res wait-pool <prefix> --by <session> --project <slug> --for "<purpose>" --timeout <minutes> [--need <cap,cap>] [--prefer-host <ip>] [--prefer-slot <id>] [--exclude-slot <id,...>] [--exclude-host <ip,...>] [--exclude-reason <text>] [--hard-exclude-slot <id,...>] [--hard-exclude-host <ip,...>] [--disk-gib <GiB>] [--disk-gib-file <JSON>] [--placement-file <JSON>] [--cores N] [--mem-gib GiB] [--maintenance] [take options]
