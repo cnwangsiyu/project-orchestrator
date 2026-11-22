@@ -21,6 +21,7 @@ import { modelPreference, policyEffort } from './pipeline/policy.mjs';
 import { readLeases } from './resource-data.mjs';
 import { publishMainQuota, readRoutingObservations, saveRoutingObservations } from './routing-observations.mjs';
 import { canonicalPathOptions, canonicalPath } from './launch-paths.mjs';
+import { probeBrowserRuntime } from './browser-runtime.mjs';
 
 const read = (file, fallback = null) => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; } };
 const lines = (file) => { try { return fs.readFileSync(file, 'utf8').split('\n').flatMap((l) => { try { const r = JSON.parse(l); return object(r) ? [r] : []; } catch { return []; } }); } catch { return []; } };
@@ -74,7 +75,7 @@ export const BROWSER_ORIGINS = ['*.bytedance.net', '*.byted.org', '*.larkoffice.
 export function taskContext(env = process.env) {
   return { taskId: 'unnamed-task', requestId: env.ROUTE_REQUEST_ID || randomUUID(), sandboxCeiling: 'danger-full-access' };
 }
-export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE_NOW ?? Date.now()), root, readAccount = readRoutingAccount, readClaude = readRoutingClaude } = {}) {
+export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE_NOW ?? Date.now()), root, readAccount = readRoutingAccount, readClaude = readRoutingClaude, readBrowserRuntime = probeBrowserRuntime } = {}) {
   if (!nonnegative(now)) throw Error('ROUTE_NOW must be a finite epoch timestamp');
   const shared = env.RULES_SHARED || path.join(os.homedir(), '.claude/orchestrator/_shared');
   const cachePath = env.QUOTA_CACHE || path.join(shared, 'quota.json'), routeLog = env.ROUTE_LOG_FILE || path.join(shared, 'route-log.jsonl');
@@ -122,6 +123,15 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
   // A live MCP startup failure must survive the presence-only pairing check.
   // Offline fixtures never probe the host or read pairing material.
   for(const a of accounts) if(a.kind==='trae') a.traeBrowser=traeBrowserReady() && a.traeBrowser !== false;
+  // Runtime removal and host disconnects must be visible even inside the quota
+  // cache TTL. Offline replay uses its supplied facts and never probes this host.
+  if (live && ['browser', 'ui-browser', 'computer-use'].includes(parsed.category)) for (const a of accounts) {
+    const profile = profiles[a.name];
+    if (['ttadk', 'chatgpt'].includes(a.kind ?? profile?.kind ?? 'chatgpt')) {
+      try { a.browserRuntime = readBrowserRuntime(a.name, profile, { desktop: parsed.category === 'computer-use' }); }
+      catch { a.browserRuntime = { ready: false, why: `${a.name} browser runtime probe failed`, checkedAt: Date.now() }; }
+    }
+  }
   if (live && (parsed.flags.fresh || !Array.isArray(data.claude) || now-data.checkedAt > 600000)) {
     try { const observed=readClaude(); if(!Array.isArray(observed)||!observed.length) throw Error('Claude usage incomplete');
       data.claude = observed; data.claudeSeenAt = Date.now(); data.claudeObservationStale=false;
@@ -374,7 +384,7 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
     const windows = array(isClaude ? data.claude : a.windows), badWindows = (isClaude ? data.claude : a.windows) !== undefined
       && (!Array.isArray(isClaude ? data.claude : a.windows) || windows.some((w)=>!object(w)));
     const spent = windows.some((w) => object(w)&&!w.scoped && (w.used >= 99 || (w.windowMins < 1440 && w.used >= 95)) && (!w.resetsAt || w.resetsAt > now));
-    const browser = isClaude || a.browser === true || profile.browser === true || (kind==='trae' && a.traeBrowser === true);
+    const browser = isClaude || a.browser === true || profile.browser === true || a.browserRuntime?.ready === true || (kind==='trae' && a.traeBrowser === true);
     const desktop = !isClaude && kind!=='trae' && (a.desktop ?? profile.desktop ?? browser) === true;
     const caps = { search: isClaude || kind === 'chatgpt' || kind === 'trae' || (a.search === true && a.searchLive !== false),
       browser: browser || a.publicBrowser === true, 'signed-in-browser': browser, 'desktop-tool': desktop, vision: true,
@@ -396,6 +406,7 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
     normalized.push({ id: name, kind, catalog: declared(catalog), auth: stamp(((registryInvalid||invalidProfiles.has(name))&&!isClaude||a.stateUnknown)?null:a.auth ?? (isClaude ? Array.isArray(data.claude)?true:null : company ? a.healthy || quotaDenied : a.live === true)),
       transport: stamp(a.stateUnknown?null:a.transport ?? (isClaude ? Array.isArray(data.claude)?true:null : a.live ?? (company ? a.healthy || quotaDenied : null))), health: declared(!unknownHealth && !badWindows),
       capabilities: Object.fromEntries(Object.entries(caps).map(([k,v]) => [k,declared(v)])), quota, burn: stamp(burn),
+      ...(a.browserRuntime ? { browserRuntime: { ...stamp(a.browserRuntime, a.browserRuntime.checkedAt, 30000), source: 'local-browser-runtime' } } : {}),
       providerDenied: currentLimit?.resetsAt>now?globalStamp(true,now):stamp(quotaDenied || (!company && spent)), denialResetAt: stamp(currentLimit?.resetsAt ?? a.quotaOut?.resetsAt ?? a.usage?.resetsAt ?? windows.find((w) => w?.used >= 95)?.resetsAt),
       resets: a.resets, workerClass: a.workerClass,
       budget:stamp(budget) });

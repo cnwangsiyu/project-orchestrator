@@ -57,6 +57,7 @@ import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { shellQuote } from './lib/pipeline/presentation.mjs';
+import { probeBrowserRuntime } from './lib/browser-runtime.mjs';
 import { runWorkerTalkback, createTalkbackRelay } from './lib/worker-talkback.mjs';
 import { noteFailure, noteSuccess, notePolicyRestriction, rememberThreadModel, threadModel, probeResult, failureKind } from './lib/trae-health.mjs';
 import { createQueueRecorder } from './lib/company-load.mjs';
@@ -1910,7 +1911,9 @@ try {
     // Only a turn still running, with a queue signal recorded for it, has queue info; otherwise say so plainly.
     const queue = lastTurn?.status === 'inProgress' && q && q.turnId === lastTurn.id && q.state !== 'ready'
       ? { state: q.state, position: q.position, since: q.since } : 'no queue info';
-    console.log(JSON.stringify({ thread: opts.thread, name: r.thread?.name, turns: turns.length, last: lastTurn && { id: lastTurn.id, status: lastTurn.status, error: lastTurn.error }, queue }));
+    const browserRuntime = ['ttadk','chatgpt'].includes(PROF?.kind ?? 'chatgpt')
+      ? probeBrowserRuntime(account ?? 'main', { ...PROF, home: PROF?.home ?? process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex') }) : null;
+    console.log(JSON.stringify({ thread: opts.thread, name: r.thread?.name, turns: turns.length, last: lastTurn && { id: lastTurn.id, status: lastTurn.status, error: lastTurn.error }, queue, browserRuntime }));
     finish(0);
   } else if (cmd === 'list') {
     const r = await call('thread/list', {

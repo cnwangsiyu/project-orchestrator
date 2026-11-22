@@ -78,6 +78,11 @@ export function pAvailable(t, s, c) {
 }
 export function pCapabilities(t, s, c) {
   const { account: a, model: m, lane: l } = candidateParts(s, c);
+  if (['browser', 'ui-browser', 'computer-use'].includes(t.category) && a?.browserRuntime !== undefined) {
+    const runtime = known(a.browserRuntime);
+    if (runtime?.ready !== true) return deny('pCapabilities', 'BROWSER_RUNTIME_UNAVAILABLE',
+      runtime?.why ?? `${a.id} browser runtime readiness is unknown or stale`, c);
+  }
   if (t.category==='computer-use' && !['ttadk','chatgpt'].includes(a?.kind))
     return deny('pCapabilities','CAPABILITY_DESKTOP_TOOL','Desktop runtime is available only to TTADK and browser-ready ChatGPT.',c);
   for (const cap of t.capabilitiesNeeded) if ([a, m, l].some((part) => known(part?.capabilities?.[cap]) !== true))

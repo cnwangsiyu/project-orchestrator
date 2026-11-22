@@ -81,6 +81,9 @@ try {
   const panel = JSON.parse((await promisify(execFile)(process.execPath, [path.join(skill, 'scripts/quota.mjs'), '--json'], { env: { ...env, USAGE_FAIL: '1' }, encoding: 'utf8' })).stdout);
   assert.equal(panel.hubs[0].state, 'up'); assert.equal(panel.codex[0].live, true); assert.equal(panel.codex[0].usageLive, false);
   assert.equal(panel.running.byAccount.main.length, 1);
+  assert.equal(typeof panel.browserReadiness.main.ready,'boolean');
+  assert.match(panel.browserReadiness.main.why,/main browser runtime/);
+  assert.ok(panel.browserReadiness.main.checkedAt>=result.data.checkedAt);
   console.log('PASS quota keeps hub connectivity separate from stale usage and counts an active event while usage fails');
 
   console.log('\nall pass');

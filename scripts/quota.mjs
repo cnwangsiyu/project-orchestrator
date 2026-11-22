@@ -21,6 +21,7 @@ import { notifyMonitorFailure } from './lib/monitor-notify.mjs';
 import { readQuotaWarnings, checkQuotaWarnings } from './lib/worker-quota-warnings.mjs';
 import { readQuotaRefreshState } from './lib/worker-quota-refresh.mjs';
 import { readEventHistory, launcherIdentity } from './lib/worker-events.mjs';
+import { probeBrowserRuntime } from './lib/browser-runtime.mjs';
 
 const args = process.argv.slice(2);
 let profiles = {}; try { profiles = readProfiles(); } catch {}
@@ -71,6 +72,10 @@ try {
 } catch (error) { if (error.code !== 'ENOENT') throw error; }
 const st = analyze(data);
 const lean = leanLines(st, data);
+// Runtime installation is independent of the ten-minute usage cache. Report
+// each Codex browser account's current local fact without altering quota state.
+const browserReadiness = Object.fromEntries((data.codexAccounts ?? []).filter(a=>['ttadk','chatgpt'].includes(a.kind ?? 'chatgpt'))
+  .map(a=>[a.name, probeBrowserRuntime(a.name, profiles[a.name] ?? a)]));
 const personalNotices = checkPersonalPriorityNotices({ snapshot: st.codex.prioritySnapshot, owner: launcherIdentity().sessionId });
 // Tokens as the dashboard shows them: 185M / 500M.
 const fmtTokens = (n) => {
@@ -83,7 +88,7 @@ const fmtTokens = (n) => {
 if (args.includes('--json')) {
   const { codex, claude } = st;
   console.log(JSON.stringify({
-    checkedAt: new Date(data.checkedAt).toISOString(), errors: data.errors, stop: st.stop, policy: POLICY, hubs, running,
+    checkedAt: new Date(data.checkedAt).toISOString(), errors: data.errors, stop: st.stop, policy: POLICY, hubs, running, browserReadiness,
     claude: { ...claude, windows: data.claude },
     codex: codex.rows.map((r) => ({ name: r.a.name, email: r.a.email ?? null, live: r.a.live, usageLive: r.a.usageLive, plan: r.a.plan ?? null, week: r.s, spent: r.spent, throttledUntil: r.throttledUntil, unconstrained: r.unconstrained, resets: r.a.resets, cardPlan: r.cp })),
     codexPick: codex.pick?.a.name ?? null, redeem: codex.redeem ? { account: codex.redeem.a.name, card: codex.redeem.cp.card?.id ?? null } : null,
@@ -100,6 +105,7 @@ if (args.includes('--json')) {
 const row = (vendor, tag, w, s, extra = '') => console.log(`  ${vendor.padEnd(7)}${`${tag}${w.label}`.padEnd(34)}${String(w.used).padStart(3)}% used  resets ${fmt(w.resetsAt)}`
   + `${s?.projected != null ? `  → ${s.projected}% at reset (${s.basis})` : ''}${w.scoped ? '  (one model only)' : ''}${extra}`);
 console.log(`quota (read ${fmt(data.checkedAt)}, ${Math.round((Date.now() - data.checkedAt) / 60000)}m ago)`);
+for (const runtime of Object.values(browserReadiness)) console.log(`  browser ${runtime.ready ? 'READY' : 'UNAVAILABLE'}: ${runtime.why}`);
 const cw = weekly(data.claude);
 for (const w of data.claude ?? []) row('claude', '', w, w === cw ? st.claude.week : winState(w, null));
 if (!data.claude) console.log(`  claude unavailable: ${data.errors.claude ?? 'unknown error'}`);

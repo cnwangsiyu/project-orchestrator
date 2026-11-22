@@ -227,6 +227,8 @@ export function presentRoute(plan, view, context) {
     if(t.category==='build-run') { fixedNotes.push(t.env==='test'&&t.stakes!=='high'?WORKER_NOTES.testBuild:WORKER_NOTES.deployBuild); notes.push(`build-run environment: ${t.env}, stakes: ${t.stakes}; pin the task's health and restore checklist.`); }
     if(phones.length&&(['build-run','ui-browser','computer-use'].includes(t.category)||f['device-lease'])) fixedNotes.push(`registered shared test phones ${phones.join(', ')} are pre-authorized for OUR OWN apps: tap ordinary Allow/Authorize/Trust/OK dialogs without a new per-prompt card. Never operate personal iPhone 15 Pro Max or unregistered devices. Device lease: at most 2 h; back up app data before a destructive reinstall/wipe/erase; take the lease/lock only after the first model response.`);
     if(['browser','ui-browser'].includes(t.category)) fixedNotes.push(WORKER_NOTES.browser);
+    if(['browser','ui-browser','computer-use'].includes(t.category) && t.sandbox==='read-only')
+      notes.push('Read-only reports go in the final message; the launcher writes --out and status/log files. Worker-created evidence files require --sandbox workspace-write and a destination separate from --out.');
     if(t.category==='computer-use') fixedNotes.push(WORKER_NOTES.desktop);
     if(['browser','ui-browser','computer-use'].includes(t.category)) {
       fixedNotes.push(WORKER_NOTES.browserIdentity);
@@ -269,6 +271,7 @@ export function presentRoute(plan, view, context) {
   if(plan.reviewers.length) fixedNotes.push(WORKER_NOTES.reviewers);
   if(t.background&&!c) tellUser.push('No runnable authorized background lane: present the plan’s decision and keep dispatching independent work.');
   if(plan.kind==='blocked') why.unshift(...plan.reasons.map(r=>r.text));
+  why.push(...new Set(plan.rejected.filter(r=>r.reason?.code==='BROWSER_RUNTIME_UNAVAILABLE').map(r=>r.reason.text)));
   if(!why.length) why.push(...(plan.reasons??[plan.reason]).filter(Boolean).map((r)=>r.text));
   if(companyDevice(snapshot)&&plan.trigger!=='personal-main-capacity'&&(plan.kind==='defer' || (plan.kind==='blocked' && plan.gates.some(g=>g.kind==='personal-quota')))) {
     const reset=plan.deferUntil??Math.min(...snapshot.accounts.filter(company).map(a=>known(a.denialResetAt)).filter(at=>at>snapshot.decisionAt));

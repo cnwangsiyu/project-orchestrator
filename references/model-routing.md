@@ -36,8 +36,17 @@ renderer. `route.mjs --table` reads static category metadata only.
 The clock, quota, model capabilities, restrictions, attempts and review history
 are pinned inputs. `ROUTE_NOW` supports deterministic fixtures. Quota and lane
 telemetry expire after 30 minutes; identity/catalog facts after 10 minutes.
-Malformed nested state becomes UNKNOWN for that account. Browser-ready TTADK and ChatGPT have the desktop runtime unless explicitly
-unavailable; TRAE and Claude have no desktop path. Missing tools or vision blocks.
+Malformed nested state becomes UNKNOWN for that account. Before a live browser,
+ui-browser or desktop decision, TTADK and ChatGPT need a fresh local runtime check:
+ChatGPT.app exists, the account's configured node_repl command is executable,
+and browser work has a connected Chrome extension host. Cached browser flags
+cannot override a failed check. The route explains the excluded account's reason
+and keeps the usual fallback order and personal-quota approvals. Desktop does
+not require the Chrome host; TRAE and Claude have no desktop path. Offline replay
+uses supplied runtime observations without host probes. Runtime facts expire
+after 30 seconds and contain no environment or provider configuration values.
+`quota.mjs` text/JSON and `codex-worker status` expose fresh per-account Codex
+browser runtime readiness independently of the usage cache.
 
 Each account uses its newest catalog release for the Sol and Astra policy choices.
 Main and b list `gpt-6.2-sol` and `gpt-6.2-astra`. TRAE currently offers
@@ -291,5 +300,12 @@ Project review defaults: `references/project-risk-profiles.json` has a `default`
 `--failure-kind quality|tool|infra` defaults to quality and is recorded on the route. For browser/desktop tool failures, carry `--failures` and the known `--actual` tuple: the failed channel is excluded rather than raising effort there. Browser order remains observed free TRAE → TTADK → browser-ready personal ChatGPT (ask) → Claude (ask); desktop omits TRAE/Claude. Earlier quality failures keep their floor. `--dry` uses cached observations without refresh/probes and prints the cache age.
 
 Project `browserOrigins` merge with policy defaults and explicit `--origins`. Claude launches use `--trusted-cwd`, otherwise the configured project root; the prompt names the working directory. An unconfigured root keeps the supplied working directory and prints a note to verify trust or pass --trusted-cwd. Browser workers check the installed extension/host or the Playwright connect before the turn, within a few seconds; `--no-browser-preflight` skips it.
+
+Read-only browser workers return their report in the final message. The launcher
+writes `--out` (including codex-last.md), event logs and public status outside
+the worker sandbox. A brief needing worker-created screenshots or other evidence
+files must request `--sandbox workspace-write` and keep those files separate from
+`--out`. Browser routing therefore retains read-only by default; report-only work
+does not need a wider sandbox.
 
 Historical benchmarks, bucket facts, Kimi-K3 rationale and dated user decisions are in [model-evidence.md](model-evidence.md). Its superseded policy passages are marked changed 2026-11-15; the current pipeline is authoritative.

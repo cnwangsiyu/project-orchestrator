@@ -95,6 +95,8 @@ export function createSnapshot(raw, options = {}) {
       company: ['ttadk', 'trae'].includes(a.kind), auth: obs(a.auth, `${prefix}.auth`, bool), transport: obs(a.transport, `${prefix}.transport`, bool),
       health: obs(a.health ?? (Array.isArray(raw.health) && raw.health.every((h) => object(h) && idOK(h.accountId) && typeof h.restricted === 'boolean') ? true : undefined), `${prefix}.health`, bool), catalog,
       capabilities: caps(a.capabilities, `${prefix}.capabilities`), quota,
+      ...(a.browserRuntime === undefined ? {} : { browserRuntime: obs(a.browserRuntime, `${prefix}.browserRuntime`,
+        v => object(v) && typeof v.ready === 'boolean' && typeof v.why === 'string', 30000) }),
       workerClass: 'ordinary',
       providerDenied: obs(a.providerDenied, `${prefix}.providerDenied`, bool),
       fallbackUnavailable: fallbackUnavailable(a, decisionAt),

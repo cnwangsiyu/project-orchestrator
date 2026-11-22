@@ -177,6 +177,9 @@ try {
   console.log('ok   TTADK remains healthy without Sol when its catalog contains another usable qualified model');
 
   // Real router and quota entry points, with all provider I/O stubbed before they import state.mjs.
+  const browserCommand=path.join(tmp,'node_repl');
+  fs.writeFileSync(browserCommand,'fixture runtime',{mode:0o700});
+  fs.writeFileSync(path.join(tmp,'config.toml'),`[mcp_servers.node_repl]\ncommand = ${JSON.stringify(browserCommand)}\n`);
   const preload = path.join(tmp, 'preload.mjs');
   fs.writeFileSync(preload, `
 import fs from 'node:fs';
@@ -188,6 +191,10 @@ const SOL = ${JSON.stringify(SOL)}, exists = fs.existsSync, counts = {};
 let fault = process.env.COMPANY_READ_FAULT || '', companyChecks = 0;
 childProcess.execFileSync = ${stub.toString()};
 fs.existsSync = ${checkCompany.toString()};
+const stat=fs.statSync;
+fs.statSync=(file,...args)=>file==='/Applications/ChatGPT.app'?{isDirectory:()=>true}:stat(file,...args);
+const childExec=childProcess.execFileSync;
+childProcess.execFileSync=(file,args,...rest)=>file==='pgrep'?'fixture host':childExec(file,args,...rest);
 syncBuiltinESMExports();
 `);
   const route = (args, state = missing, mode = 'unknown-both', registryText = JSON.stringify(registry)) => {
@@ -248,6 +255,7 @@ syncBuiltinESMExports();
   const safeEnv={RULES_SHARED:safeDir,CODEX_ACCOUNTS:safeRegistry,QUOTA_CACHE:safeCache,ROUTE_LOG_FILE:path.join(safeDir,'routes.jsonl')};
   const acquire=(args,readAccount=()=>({name:'ttadk',kind:'ttadk',healthy:false,live:false,models:[],statusReadFailed:true}))=>acquireRoute(parseTaskSpec(args,{taskId:'fixture',requestId:'last-good-fixture'}),{env:safeEnv,root:new URL('../../',import.meta.url).pathname,
     readAccount,
+    readBrowserRuntime:name=>({ready:true,why:`${name} fixture browser runtime ready`,checkedAt:Date.now()}),
     readClaude:()=>{throw Error('fixture timed-out usage');}});
   acquire(['computer-use','--apps','com.apple.calculator']); // remembers the good public reading
   const statusOnly=()=>({...good.codexAccounts[0],usage:null});
