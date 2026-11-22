@@ -1,6 +1,6 @@
 import { transferFindings } from './devbox-transfer-check.mjs';
 
-const compiled = /\.(?:c|cc|cpp|cxx|h|hh|hpp|hxx|inl|m|mm|java|kt|kts|swift)$/i;
+const compiled = { test: file => /\.(?:c|cc|cpp|cxx|h|hh|hpp|hxx|inl|m|mm|java|kt|kts|swift)$/i.test(file) && !/\.gradle\.kts$/i.test(file) };
 const source = /\.(?:c|cc|cpp|cxx|h|hh|hpp|hxx|inl|m|mm|java|kt|kts|swift|groovy|js|jsx|ts|tsx|py|sh)$/i;
 const lock = /(?:^|\/)(?:package-lock.json|npm-shrinkwrap.json|yarn.lock|pnpm-lock.ya?ml|Podfile.lock|Gemfile.lock|Cargo.lock|poetry.lock|gradle.lockfile|Package.resolved)$/i;
 export const pathMatch = (pattern, file) => new RegExp('^' + pattern.split('*').map(p => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('[^/]*') + '$').test(file);

@@ -69,6 +69,9 @@ try {
     ok(sanitizeText(content, file, { ...profile, rules: [rule] }).findings.length === 0, 'reviewed configuration rewrite');
     ok(sanitizeText(content + content, file, { ...profile, rules: [rule] }).findings.length > 0, 'configuration count drift');
   }
+  const gradleKotlinRule = { id: 'fixture-kotlin-config', path: 'fixture.gradle.kts', field: 'keyPassword', detector: 'transfer:keyPassword', action: 'rewrite', state: 'approved', count: 1, anchor: { before: 'keyPassword =', after: '' }, reason: 'Synthetic Gradle configuration fixture' };
+  const kotlinConfig = sanitizeText('keyPassword = "syntheticfixture"\n', 'fixture.gradle.kts', { ...profile, rules: [gradleKotlinRule] });
+  ok(kotlinConfig.findings.length === 0 && kotlinConfig.text === 'keyPassword = ""\n' && kotlinConfig.receipts[0]?.rewritten === 1, 'Gradle Kotlin DSL follows configuration rewrite rules');
 
   put(repo, 'ordinary.cpp', 'int main() { return 0; }\n');
   fs.symlinkSync('ordinary.cpp', path.join(repo, 'safe-link.cpp'));
