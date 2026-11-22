@@ -53,13 +53,14 @@
       "field": "keyPassword",
       "detector": "transfer:keyPassword",
       "action": "rewrite",
-      "state": "proposed",
+      "state": "approved",
       "count": 1,
       "anchor": {
         "before": "keyPassword",
         "after": ""
       },
-      "reason": "Android 签名配置字段；不是熵或测试标识符误报。拟在 unsigned staged 构建配置清空，保留结构。"
+      "reason": "Android 签名配置字段；不是熵或测试标识符误报。拟在 unsigned staged 构建配置清空，保留结构。",
+      "approvedBy": "user 2026-11-22 (review-list P01-P08, card sent 08:59 PT)"
     },
     {
       "id": "baseline-12-02",
@@ -67,13 +68,14 @@
       "field": "storePassword",
       "detector": "transfer:storePassword",
       "action": "rewrite",
-      "state": "proposed",
+      "state": "approved",
       "count": 1,
       "anchor": {
         "before": "storePassword",
         "after": ""
       },
-      "reason": "Android 签名配置字段；不是熵或测试标识符误报。拟在 unsigned staged 构建配置清空，保留结构。"
+      "reason": "Android 签名配置字段；不是熵或测试标识符误报。拟在 unsigned staged 构建配置清空，保留结构。",
+      "approvedBy": "user 2026-11-22 (review-list P01-P08, card sent 08:59 PT)"
     },
     {
       "id": "baseline-12-03",
@@ -81,12 +83,13 @@
       "field": "postman-token",
       "detector": "transfer:postman-token",
       "action": "rewrite",
-      "state": "proposed",
+      "state": "approved",
       "count": 1,
       "anchor": {
         "syntax": "curl-header"
       },
-      "reason": "构建脚本中的 HTTP 头字段；不是熵标识符。拟仅清空 staged HTTP 头值，不删除整个构建脚本。"
+      "reason": "构建脚本中的 HTTP 头字段；不是熵标识符。拟仅清空 staged HTTP 头值，不删除整个构建脚本。",
+      "approvedBy": "user 2026-11-22 (review-list P01-P08, card sent 08:59 PT)"
     },
     {
       "id": "baseline-12-04",
@@ -94,12 +97,13 @@
       "field": "NEXUS_USERNAME",
       "detector": "transfer:NEXUS_USERNAME",
       "action": "rewrite",
-      "state": "proposed",
+      "state": "approved",
       "count": 1,
       "anchor": {
         "syntax": "properties-assignment"
       },
-      "reason": "发布仓库或 SDK 服务配置字段；不是熵误报。拟精确清空 staged 属性值，保留字段和计数。"
+      "reason": "发布仓库或 SDK 服务配置字段；不是熵误报。拟精确清空 staged 属性值，保留字段和计数。",
+      "approvedBy": "user 2026-11-22 (review-list P01-P08, card sent 08:59 PT)"
     },
     {
       "id": "baseline-12-05",
@@ -107,12 +111,13 @@
       "field": "NEXUS_USERNAME_TTP",
       "detector": "transfer:NEXUS_USERNAME_TTP",
       "action": "rewrite",
-      "state": "proposed",
+      "state": "approved",
       "count": 1,
       "anchor": {
         "syntax": "properties-assignment"
       },
-      "reason": "发布仓库或 SDK 服务配置字段；不是熵误报。拟精确清空 staged 属性值，保留字段和计数。"
+      "reason": "发布仓库或 SDK 服务配置字段；不是熵误报。拟精确清空 staged 属性值，保留字段和计数。",
+      "approvedBy": "user 2026-11-22 (review-list P01-P08, card sent 08:59 PT)"
     },
     {
       "id": "baseline-12-06",
@@ -120,12 +125,13 @@
       "field": "NEXUS_MAGIC_WORD_TTP",
       "detector": "transfer:NEXUS_MAGIC_WORD_TTP",
       "action": "rewrite",
-      "state": "proposed",
+      "state": "approved",
       "count": 1,
       "anchor": {
         "syntax": "properties-assignment"
       },
-      "reason": "发布仓库或 SDK 服务配置字段；不是熵误报。拟精确清空 staged 属性值，保留字段和计数。"
+      "reason": "发布仓库或 SDK 服务配置字段；不是熵误报。拟精确清空 staged 属性值，保留字段和计数。",
+      "approvedBy": "user 2026-11-22 (review-list P01-P08, card sent 08:59 PT)"
     },
     {
       "id": "baseline-12-07",
@@ -133,12 +139,13 @@
       "field": "NEXUS_MAGIC_WORD",
       "detector": "transfer:NEXUS_MAGIC_WORD",
       "action": "rewrite",
-      "state": "proposed",
+      "state": "approved",
       "count": 1,
       "anchor": {
         "syntax": "properties-assignment"
       },
-      "reason": "发布仓库或 SDK 服务配置字段；不是熵误报。拟精确清空 staged 属性值，保留字段和计数。"
+      "reason": "发布仓库或 SDK 服务配置字段；不是熵误报。拟精确清空 staged 属性值，保留字段和计数。",
+      "approvedBy": "user 2026-11-22 (review-list P01-P08, card sent 08:59 PT)"
     },
     {
       "id": "baseline-12-08",
@@ -146,12 +153,13 @@
       "field": "VESDK_ACCESS_KEY_MT",
       "detector": "transfer:VESDK_ACCESS_KEY_MT",
       "action": "rewrite",
-      "state": "proposed",
+      "state": "approved",
       "count": 2,
       "anchor": {
         "syntax": "properties-assignment"
       },
-      "reason": "发布仓库或 SDK 服务配置字段；不是熵误报。拟精确清空 staged 属性值，保留字段和计数。"
+      "reason": "发布仓库或 SDK 服务配置字段；不是熵误报。拟精确清空 staged 属性值，保留字段和计数。",
+      "approvedBy": "user 2026-11-22 (review-list P01-P08, card sent 08:59 PT)"
     },
     {
       "id": "baseline-12-09",
@@ -159,12 +167,13 @@
       "field": "VESDK_SCRECT_KEY_MT",
       "detector": "transfer:VESDK_SCRECT_KEY_MT",
       "action": "rewrite",
-      "state": "proposed",
+      "state": "approved",
       "count": 2,
       "anchor": {
         "syntax": "properties-assignment"
       },
-      "reason": "发布仓库或 SDK 服务配置字段；不是熵误报。拟精确清空 staged 属性值，保留字段和计数。"
+      "reason": "发布仓库或 SDK 服务配置字段；不是熵误报。拟精确清空 staged 属性值，保留字段和计数。",
+      "approvedBy": "user 2026-11-22 (review-list P01-P08, card sent 08:59 PT)"
     },
     {
       "id": "baseline-12-10",
@@ -172,12 +181,13 @@
       "field": "password",
       "detector": "transfer:password",
       "action": "rewrite",
-      "state": "proposed",
+      "state": "approved",
       "count": 2,
       "anchor": {
         "syntax": "gradle-reference"
       },
-      "reason": "Gradle 发布配置中的变量引用；不是熵误报。拟仅在 staged 配置清空，最终仍须原 runner gate 验收。"
+      "reason": "Gradle 发布配置中的变量引用；不是熵误报。拟仅在 staged 配置清空，最终仍须原 runner gate 验收。",
+      "approvedBy": "user 2026-11-22 (review-list P01-P08, card sent 08:59 PT)"
     },
     {
       "id": "baseline-12-11",
@@ -185,13 +195,14 @@
       "field": "keyPassword",
       "detector": "transfer:keyPassword",
       "action": "rewrite",
-      "state": "proposed",
+      "state": "approved",
       "count": 1,
       "anchor": {
         "before": "keyPassword",
         "after": ""
       },
-      "reason": "Android 签名配置字段；不是熵或测试标识符误报。拟在 unsigned staged 构建配置清空，保留结构。"
+      "reason": "Android 签名配置字段；不是熵或测试标识符误报。拟在 unsigned staged 构建配置清空，保留结构。",
+      "approvedBy": "user 2026-11-22 (review-list P01-P08, card sent 08:59 PT)"
     },
     {
       "id": "baseline-12-12",
@@ -199,13 +210,14 @@
       "field": "storePassword",
       "detector": "transfer:storePassword",
       "action": "rewrite",
-      "state": "proposed",
+      "state": "approved",
       "count": 1,
       "anchor": {
         "before": "storePassword",
         "after": ""
       },
-      "reason": "Android 签名配置字段；不是熵或测试标识符误报。拟在 unsigned staged 构建配置清空，保留结构。"
+      "reason": "Android 签名配置字段；不是熵或测试标识符误报。拟在 unsigned staged 构建配置清空，保留结构。",
+      "approvedBy": "user 2026-11-22 (review-list P01-P08, card sent 08:59 PT)"
     },
     {
       "id": "symlink-delete-1",
@@ -213,12 +225,13 @@
       "field": "[symlink]",
       "detector": "symlink",
       "action": "delete-path",
-      "state": "proposed",
+      "state": "approved",
       "count": 1,
       "anchor": {
         "mode": "120000"
       },
-      "reason": "Android devbox 不消费该 iOS/工具链软链接；目标越界或不在快照中，拟仅在 staged 快照删除精确路径。"
+      "reason": "Android devbox 不消费该 iOS/工具链软链接；目标越界或不在快照中，拟仅在 staged 快照删除精确路径。",
+      "approvedBy": "user 2026-11-22 (review-list P01-P08, card sent 08:59 PT)"
     },
     {
       "id": "symlink-delete-2",
@@ -226,12 +239,13 @@
       "field": "[symlink]",
       "detector": "symlink",
       "action": "delete-path",
-      "state": "proposed",
+      "state": "approved",
       "count": 1,
       "anchor": {
         "mode": "120000"
       },
-      "reason": "Android devbox 不消费该 iOS/工具链软链接；目标越界或不在快照中，拟仅在 staged 快照删除精确路径。"
+      "reason": "Android devbox 不消费该 iOS/工具链软链接；目标越界或不在快照中，拟仅在 staged 快照删除精确路径。",
+      "approvedBy": "user 2026-11-22 (review-list P01-P08, card sent 08:59 PT)"
     },
     {
       "id": "symlink-delete-3",
@@ -239,12 +253,13 @@
       "field": "[symlink]",
       "detector": "symlink",
       "action": "delete-path",
-      "state": "proposed",
+      "state": "approved",
       "count": 1,
       "anchor": {
         "mode": "120000"
       },
-      "reason": "Android devbox 不消费该 iOS/工具链软链接；目标越界或不在快照中，拟仅在 staged 快照删除精确路径。"
+      "reason": "Android devbox 不消费该 iOS/工具链软链接；目标越界或不在快照中，拟仅在 staged 快照删除精确路径。",
+      "approvedBy": "user 2026-11-22 (review-list P01-P08, card sent 08:59 PT)"
     },
     {
       "id": "symlink-delete-5",
@@ -252,12 +267,13 @@
       "field": "[symlink]",
       "detector": "symlink",
       "action": "delete-path",
-      "state": "proposed",
+      "state": "approved",
       "count": 1,
       "anchor": {
         "mode": "120000"
       },
-      "reason": "Android devbox 不消费该 iOS/工具链软链接；目标越界或不在快照中，拟仅在 staged 快照删除精确路径。"
+      "reason": "Android devbox 不消费该 iOS/工具链软链接；目标越界或不在快照中，拟仅在 staged 快照删除精确路径。",
+      "approvedBy": "user 2026-11-22 (review-list P01-P08, card sent 08:59 PT)"
     },
     {
       "id": "symlink-delete-7",
@@ -265,12 +281,13 @@
       "field": "[symlink]",
       "detector": "symlink",
       "action": "delete-path",
-      "state": "proposed",
+      "state": "approved",
       "count": 1,
       "anchor": {
         "mode": "120000"
       },
-      "reason": "Android devbox 不消费该 iOS/工具链软链接；目标越界或不在快照中，拟仅在 staged 快照删除精确路径。"
+      "reason": "Android devbox 不消费该 iOS/工具链软链接；目标越界或不在快照中，拟仅在 staged 快照删除精确路径。",
+      "approvedBy": "user 2026-11-22 (review-list P01-P08, card sent 08:59 PT)"
     },
     {
       "id": "symlink-delete-8",
@@ -278,12 +295,13 @@
       "field": "[symlink]",
       "detector": "symlink",
       "action": "delete-path",
-      "state": "proposed",
+      "state": "approved",
       "count": 1,
       "anchor": {
         "mode": "120000"
       },
-      "reason": "Android devbox 不消费该 iOS/工具链软链接；目标越界或不在快照中，拟仅在 staged 快照删除精确路径。"
+      "reason": "Android devbox 不消费该 iOS/工具链软链接；目标越界或不在快照中，拟仅在 staged 快照删除精确路径。",
+      "approvedBy": "user 2026-11-22 (review-list P01-P08, card sent 08:59 PT)"
     },
     {
       "id": "symlink-delete-9",
@@ -291,12 +309,13 @@
       "field": "[symlink]",
       "detector": "symlink",
       "action": "delete-path",
-      "state": "proposed",
+      "state": "approved",
       "count": 1,
       "anchor": {
         "mode": "120000"
       },
-      "reason": "Android devbox 不消费该 iOS/工具链软链接；目标越界或不在快照中，拟仅在 staged 快照删除精确路径。"
+      "reason": "Android devbox 不消费该 iOS/工具链软链接；目标越界或不在快照中，拟仅在 staged 快照删除精确路径。",
+      "approvedBy": "user 2026-11-22 (review-list P01-P08, card sent 08:59 PT)"
     }
   ]
 }
