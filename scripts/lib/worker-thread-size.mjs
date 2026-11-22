@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { rolloutReadPath } from './rollout-redaction.mjs';
 
 export const sizeLimits = (opts = {}, env = process.env) => {
   const bytes = Number(opts['max-rollout-mb'] ?? env.CODEX_WORKER_MAX_ROLLOUT_MB ?? 5) * 1024 * 1024;
@@ -31,9 +32,10 @@ export async function threadSize(home, thread) {
   for (const file of await threadRollouts(home, thread)) {
     let fd;
     try {
-      fd = await fs.open(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+      const readFile = rolloutReadPath(file);
+      fd = await fs.open(readFile, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
       const stat = await fd.stat(); if (!stat.isFile()) continue;
-      bytes = Math.max(bytes, stat.size);
+      bytes = Math.max(bytes, readFile === file ? stat.size : (await fs.lstat(file)).size);
       // Only the bounded tail is needed for already-recorded cumulative usage.
       const n = Math.min(stat.size, 65536), buffer = Buffer.alloc(n);
       const read = await fd.read(buffer, 0, n, stat.size - n);

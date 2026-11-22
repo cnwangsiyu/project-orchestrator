@@ -8,6 +8,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { redactWorkerTurn, threadIsIdle, checkThreadIdle } from '../lib/worker-redaction.mjs';
 import { redactLogFile } from '../lib/log-redaction.mjs';
+import { maskedRolloutFile } from '../lib/rollout-redaction.mjs';
 
 const scripts = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const transport = path.join(scripts, 'test/fixtures/worker-redaction-transport.mjs');
@@ -24,12 +25,14 @@ const fixture = name => {
   const env = { ...process.env, HOME: home, CODEX_HOME: home, CODEX_HUB: 'ws://fixture', CODEX_ACCOUNTS: accounts,
     RULES_SHARED: shared, ROUTE_LOG_FILE: path.join(shared, 'route-log.jsonl'), ORCHESTRATOR_OWNER: '',
     CLAUDECODE: '', CLAUDE_JOB_DIR: '', NODE_OPTIONS: '', WORKER_REDACTION_FIXTURE: JSON.stringify({ thread, rollout }) };
-  return { root, home, thread, rollout, log, out, shared, env };
+  return { root, home, thread, rollout, log, out, shared, env,
+    rolloutBefore: fs.readFileSync(rollout, 'utf8'), rolloutStat: fs.statSync(rollout) };
 };
 const events = f => fs.readFileSync(path.join(f.shared, 'worker-events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
-const hub = (name, config = {}, command = 'start') => {
-  const f = fixture(name);
+const hub = (name, config = {}, command = 'start', existing = null) => {
+  const f = existing ?? fixture(name);
   if (config.output) fs.writeFileSync(f.rollout, JSON.stringify({ output: config.output }) + '\n');
+  f.rolloutBefore = fs.readFileSync(f.rollout, 'utf8'); f.rolloutStat = fs.statSync(f.rollout);
   fs.writeFileSync(f.log, JSON.stringify({ output: `token=${fake}` }) + '\n');
   fs.writeFileSync(f.out, `secret=${fake}\n`);
   f.env.WORKER_REDACTION_FIXTURE = JSON.stringify({ thread: f.thread, rollout: f.rollout, ...config });
@@ -43,6 +46,10 @@ const hub = (name, config = {}, command = 'start') => {
 };
 const verify = (f, result, counts, exit, event) => {
   assert.equal(result.status, exit, result.stderr);
+  assert.equal(fs.readFileSync(f.rollout, 'utf8'), f.rolloutBefore, 'durable rollout was rewritten');
+  const current = fs.statSync(f.rollout);
+  for (const field of ['ino', 'size', 'mtimeMs', 'ctimeMs']) assert.equal(current[field], f.rolloutStat[field]);
+  f = { ...f, rollout: maskedRolloutFile(f.rollout) };
   const rows = events(f), terminal = rows.filter(row => !['running', 'message'].includes(row.event)).at(-1);
   assert.equal(terminal.event, event); assert.equal(terminal.exit, exit); assert.deepEqual(terminal.masked, counts);
   const notes = rows.filter(row => row.event === 'message');
@@ -163,4 +170,17 @@ try {
     assert.ok(fs.readFileSync(f.log, 'utf8').includes(fake));
   }
   console.log('PASS rollout growth/restarted turn untouched and bounded status guard');
+
+  {
+    const first = hub('two-turns', { status: 'completed' });
+    verify(first.f, first.result, { log: 3, rollout: 1, out: 1 }, 0, 'finished');
+    const projectedBytes = first.f.rolloutStat.size;
+    const second = hub('two-turns', { status: 'completed', projectedBytes }, 'turn', first.f);
+    assert.equal(second.result.status, 0, 'second turn could not project durable history');
+    assert.equal(fs.readFileSync(second.f.rollout, 'utf8'), first.f.rolloutBefore);
+    assert.deepEqual(events(second.f).filter(row => row.event === 'finished').at(-1).masked, { log: 3, rollout: 0, out: 1 });
+    assert.match(second.result.stdout, /redacted: log=3 rollout=0 out=1/);
+    assert.ok(!fs.readFileSync(maskedRolloutFile(second.f.rollout), 'utf8').includes(fake));
+  }
+  console.log('PASS two launcher turns retain durable projection and masked reporting');
 } finally { fs.rmSync(tmp, { recursive: true, force: true }); }

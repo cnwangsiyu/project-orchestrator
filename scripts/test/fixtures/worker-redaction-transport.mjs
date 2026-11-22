@@ -14,6 +14,12 @@ globalThis.WebSocket = class {
   send(raw) {
     const request = JSON.parse(raw);
     if (request.id == null) return;
+    if (['thread/resume', 'turn/start', 'thread/read'].includes(request.method) && config.projectedBytes != null
+      && fs.statSync(config.rollout).size < config.projectedBytes) {
+      setImmediate(() => this.onmessage?.({ data: JSON.stringify({ id: request.id,
+        error: { code: -32603, message: 'durable rollout shrank before projection' } }) }));
+      return;
+    }
     const turn = () => ({ id: 'redaction-turn', status: this.status, items: [] });
     if (request.method === 'turn/interrupt') this.status = 'interrupted';
     const result = request.method === 'thread/start' ? { thread: { id: config.thread } }
