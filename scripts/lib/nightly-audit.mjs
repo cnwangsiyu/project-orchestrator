@@ -1,5 +1,7 @@
 const fields = 'password|passphrase|passwd|pwd|pass|token|secret[_-]?access[_-]?key|secret|api[_-]?key|access[_-]?key(?:[_-]?id)?|private[_-]?key|credentials?|auth|username|ak|sk|x-(?:tos|amz)-(?:credential|signature|security-token)|signature';
 import { maskPrivateKeyBlocks } from './private-key-blocks.mjs';
+import { buildLogFindings } from './build-log-findings.mjs';
+
 const quotedValue = String.raw`"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'`;
 const inlineQuotedValue = String.raw`"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'`;
 const bareValue = String.raw`\$\{[^}\r\n]*\}|<[^>\r\n]*>|\[[^\]\r\n]*\]|[^\s,;{}"'\[\]<>]+`;
@@ -77,6 +79,19 @@ function credentialBlocks(text) {
         && !/[\w$]/.test(text[i + 11] || '')) {
         let end = i + 11;
         while (/\s/.test(text[end] || '')) end++;
+        if (text[end] === '(') {
+          let nesting = 1, quote;
+          for (end++; end < text.length && nesting; end++) {
+            const char = text[end];
+            if (quote) {
+              if (char === '\\') end++;
+              else if (char === quote) quote = undefined;
+            } else if (char === '"' || char === "'") quote = char;
+            else if (char === '(') nesting++;
+            else if (char === ')') nesting--;
+          }
+          while (/\s/.test(text[end] || '')) end++;
+        }
         if (text[end] === '{') { credential = true; brace = true; i = end; }
       }
       if (!brace) continue;
@@ -97,6 +112,7 @@ const tosutilKeys = /(?<=\btosutil\b[^\r\n]*[\t ])-([ik])([\t ]+)([^\s"']+)/gi;
 
 function visitSecrets(text, visit) {
   const hits = [];
+  for (const hit of buildLogFindings(text, credentialBlocks(text), publicValue)) hits.push(hit);
   collectSecrets(text, (hit) => hits.push(hit));
   for (const match of text.matchAll(tosutilKeys)) {
     const start = match.index + 1 + match[1].length + match[2].length;
@@ -161,6 +177,7 @@ function collectSecrets(text, visit) {
     const field = match[2].toLowerCase(), originalRaw = match[4];
     const table = markdownRow(text, match.index), whitespace = !/[:=]/.test(match[3]);
     const quoted = originalRaw[0] === '"' || originalRaw[0] === "'";
+    if (field === 'username' && quoted && /^[\t ]*[+.([]/.test(text.slice(match.index + match[0].length))) continue;
     if (match[1] && match[3].includes(':') && !quoted && /^[A-Za-z_$][\w$]*(?:\.[\w$]+)*$/.test(originalRaw)) continue;
     // Markdown status cells are not password aliases, even when their details are quoted.
     if (table && whitespace && match[2] === 'PASS') continue;
