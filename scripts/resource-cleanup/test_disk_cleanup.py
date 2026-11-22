@@ -10,6 +10,10 @@ import unittest
 from unittest.mock import patch
 import inventory as inv
 
+# Disposable fixtures must stay outside protected task archives, even when the
+# checkout or the caller's TMPDIR lives there. These tests target Unix hosts.
+FIXTURE_ROOT = Path("/tmp").resolve()
+
 spec = importlib.util.spec_from_file_location("disk", inv.BASE / "disk-cleanup.py")
 d = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(d)
@@ -17,7 +21,7 @@ spec.loader.exec_module(d)
 
 class DiskTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(dir=inv.BASE)
+        self.temp = tempfile.TemporaryDirectory(dir=FIXTURE_ROOT)
         self.base = Path(self.temp.name).resolve()
         self.root = self.base / "build"
         self.root.mkdir()
@@ -119,7 +123,7 @@ class DiskTests(unittest.TestCase):
 
     def test_task_archive_and_shared_cache_paths_refused(self):
         original = self.registry["artifacts"][0]["path"]
-        for suffix in ("orchestrator/p/tasks/T1", ".gradle/generated", "Library/Caches/generated"):
+        for suffix in ("orchestrator/p/tasks/T1", "orchestrator/_shared/tasks/T1", ".gradle/generated", "Library/Caches/generated"):
             folder = self.base / suffix
             folder.mkdir(parents=True)
             self.registry["artifacts"][0]["path"] = str(folder)

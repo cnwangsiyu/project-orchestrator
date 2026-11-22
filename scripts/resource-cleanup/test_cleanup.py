@@ -12,6 +12,10 @@ from unittest.mock import patch
 
 import inventory as inv
 
+# Keep synthetic metadata and logs outside the checkout and caller's TMPDIR,
+# which can be inside the protected orchestrator task archive on Unix hosts.
+FIXTURE_ROOT = Path("/tmp").resolve()
+
 spec = importlib.util.spec_from_file_location("guarded", inv.BASE / "guarded-cleanup.py")
 g = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(g)
@@ -48,7 +52,7 @@ def claims(snap):
 
 class ProtectionTests(unittest.TestCase):
     def test_res_lock_inventory_retains_pid_host_and_start(self):
-        with tempfile.TemporaryDirectory(dir=inv.BASE) as tmp, patch.object(inv, "SHARED", Path(tmp)):
+        with tempfile.TemporaryDirectory(dir=FIXTURE_ROOT) as tmp, patch.object(inv, "SHARED", Path(tmp)):
             shared = Path(tmp)
             (shared / "resources.tsv").write_text("heavy-build\tslot\topen\t-\n")
             lock = shared / "locks/heavy-build.d"
@@ -134,7 +138,7 @@ class ProtectionTests(unittest.TestCase):
             self.assertEqual([call.args[1] for call in sent.call_args_list], expected)
 
     def test_shell_dry_never_launches_session_or_writes_health(self):
-        with tempfile.TemporaryDirectory(dir=inv.BASE) as tmp:
+        with tempfile.TemporaryDirectory(dir=FIXTURE_ROOT) as tmp:
             folder = Path(tmp)
             (folder / "mini-nightly-cleanup.sh").write_text((inv.BASE / "mini-nightly-cleanup.sh").read_text())
             stub = folder / "inventory.sh"
@@ -146,7 +150,7 @@ class ProtectionTests(unittest.TestCase):
             self.assertFalse((folder / ".claude").exists())
 
     def test_launcher_same_day_idempotence_and_no_old_worker_stop(self):
-        with tempfile.TemporaryDirectory(dir=inv.BASE) as tmp, patch.object(launcher.Path, "home", return_value=Path(tmp)), patch.dict(launcher.os.environ, {"MINI_CLEANUP_MODE": "apply"}), patch.object(launcher, "agents", return_value=[{"name": "mini-nightly-cleanup-2020-01-01", "id": "abcdef12"}, {"name": "mini-nightly-cleanup-2020-01-01-other", "id": "abcdef13"}, {"name": "Webview 问题跟进主对话", "id": "abcdef14"}]), patch.object(launcher.subprocess, "run", return_value=SimpleNamespace(returncode=0)) as run:
+        with tempfile.TemporaryDirectory(dir=FIXTURE_ROOT) as tmp, patch.object(launcher.Path, "home", return_value=Path(tmp)), patch.dict(launcher.os.environ, {"MINI_CLEANUP_MODE": "apply"}), patch.object(launcher, "agents", return_value=[{"name": "mini-nightly-cleanup-2020-01-01", "id": "abcdef12"}, {"name": "mini-nightly-cleanup-2020-01-01-other", "id": "abcdef13"}, {"name": "Webview 问题跟进主对话", "id": "abcdef14"}]), patch.object(launcher.subprocess, "run", return_value=SimpleNamespace(returncode=0)) as run:
             with self.assertRaises(RuntimeError):
                 launcher.main()
             run.assert_not_called()
@@ -210,7 +214,7 @@ class ProtectionTests(unittest.TestCase):
             self.assertTrue(result[pid]["protected_reasons"])
 
     def test_dry_mode_cannot_apply(self):
-        with tempfile.TemporaryDirectory(dir=inv.BASE) as tmp:
+        with tempfile.TemporaryDirectory(dir=FIXTURE_ROOT) as tmp:
             s = snapshot()
             ip, cp = Path(tmp) / "inventory.json", Path(tmp) / "claims.json"
             ip.write_text(json.dumps(s))
@@ -272,7 +276,7 @@ class ProtectionTests(unittest.TestCase):
         self.assertLess(inv.history_evidence(p, histories, 8200, POLICY["thresholds"])["observed_idle_seconds"], 7200)
 
     def test_resource_jsonl_adapter_keeps_identity_and_failure_barrier(self):
-        with tempfile.TemporaryDirectory(dir=inv.BASE) as tmp:
+        with tempfile.TemporaryDirectory(dir=FIXTURE_ROOT) as tmp:
             file = Path(tmp) / "resource-log.jsonl"
             row = {"schema": 1, "host": inv.os.uname().nodename, "t": 1000000, "processComplete": True, "attributionComplete": True,
                    "processes": [{"id": "100:START:HASH", "cpuSeconds": 10, "cpuPct": 0}]}
@@ -365,11 +369,11 @@ class ProtectionTests(unittest.TestCase):
             self.assertIn("--restore-last-session", argv)
             kwargs["stdout"].write(b"Claude Chrome Native Host status: ready\n")
             kwargs["stdout"].flush()
-        with tempfile.TemporaryDirectory(dir=inv.BASE) as tmp, patch.object(g.subprocess, "Popen", side_effect=popen), patch.object(g, "chrome_up", return_value=True):
+        with tempfile.TemporaryDirectory(dir=FIXTURE_ROOT) as tmp, patch.object(g.subprocess, "Popen", side_effect=popen), patch.object(g, "chrome_up", return_value=True):
             self.assertEqual(g.restore_chrome(POLICY, Path(tmp))["status"], "verified")
 
     def test_chrome_host_missing_retries_once(self):
-        with tempfile.TemporaryDirectory(dir=inv.BASE) as tmp, patch.object(g.subprocess, "Popen") as launch, patch.object(g, "chrome_up", return_value=True), patch.object(g.time, "monotonic", side_effect=[0, 100, 200, 300]):
+        with tempfile.TemporaryDirectory(dir=FIXTURE_ROOT) as tmp, patch.object(g.subprocess, "Popen") as launch, patch.object(g, "chrome_up", return_value=True), patch.object(g.time, "monotonic", side_effect=[0, 100, 200, 300]):
             result = g.restore_chrome(POLICY, Path(tmp))
         self.assertEqual(launch.call_count, 2)
         self.assertTrue(result["status"].startswith("BLOCKED"))
@@ -385,7 +389,7 @@ class ProtectionTests(unittest.TestCase):
         self.assertTrue(inv.unfinished_recovery(record))
 
     def test_chrome_binary_launch_failure_retries_once(self):
-        with tempfile.TemporaryDirectory(dir=inv.BASE) as tmp, patch.object(g.subprocess, "Popen", side_effect=OSError("launch failed")) as launch:
+        with tempfile.TemporaryDirectory(dir=FIXTURE_ROOT) as tmp, patch.object(g.subprocess, "Popen", side_effect=OSError("launch failed")) as launch:
             result = g.restore_chrome(POLICY, Path(tmp))
         self.assertEqual(launch.call_count, 2)
         self.assertTrue(result["status"].startswith("BLOCKED"))
