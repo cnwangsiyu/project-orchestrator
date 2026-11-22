@@ -35,3 +35,9 @@ export function blockedEnvironmentFinal(final = '') {
 // An explicit quality/tool correction always takes precedence over this signal.
 export const environmentOutcome = row => !!row && row.failureKind === 'infra'
   && (row.result === 'blocked-environment' || row.environmentBlocked === true);
+
+// Completed/accepted turns historically defaulted to quality without rejection
+// evidence. They must not become quality floors during infrastructure recovery.
+export const rejectedQualityAttempt = row => ['quality','spec','process'].includes(row?.failureKind)
+  && (row.qualityFailure === true || row.result !== 'pass' && !['infra','transport'].includes(row.cause)
+    && (row.state === 'failed' || row.result === 'fail' || row.result === 'rework'));

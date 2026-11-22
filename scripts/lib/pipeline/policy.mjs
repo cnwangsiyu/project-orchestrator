@@ -61,13 +61,13 @@ export function policyEffort(t,c,a,s) {
     e=t.tier==='light'&&t.category!=='image-read'?'medium':(PERSONAL[t.category]??[]).find(([m])=>m===SOL)?.[1]??'medium';
     if(['docs','research','image-read','analysis'].includes(t.category)&&t.tier!=='light') e='high';
     if(t.flags.author==='codex') e='xhigh';
-    if(t.impact==='throwaway'&&EFFORTS.indexOf(e)>2&&!t.failures) e='high';
+    if(t.impact==='throwaway'&&EFFORTS.indexOf(e)>2&&!t.qualityFailures) e='high';
   }
   if(t.stakes==='high') e=EFFORTS[Math.min(3,EFFORTS.indexOf(e)+1)];
   if(!company(a)) {
     const floor=c.family==='gpt'&&c.modelId!=='gpt-6-luna'?1:0;
     const notch=(d)=>{ e=EFFORTS[Math.max(floor,Math.min(3,EFFORTS.indexOf(e)+d))]; };
-    if(!t.failures&&t.stakes!=='high'&&(t.flags['auto-check']||t.stakes==='low')) notch(-1);
+    if(!t.qualityFailures&&t.stakes!=='high'&&(t.flags['auto-check']||t.stakes==='low')) notch(-1);
     const budget=known(a.budget), companyDevice=s.accounts.some(company), cheap=['lookup','extract','image-gen','draft'].includes(t.category);
     if(!companyDevice&&budget?.underused&&!cheap&&c.family==='gpt') notch(1);
     else if(budget?.overspending&&t.flags['auto-check']&&t.stakes!=='high') notch(-1);

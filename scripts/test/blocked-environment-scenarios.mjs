@@ -27,12 +27,11 @@ fs.writeFileSync(path.join(tmp,'disabled.json'),'{"enabled":false}');
 fs.mkdirSync(path.join(tmp,'main'));
 fs.writeFileSync(path.join(tmp,'main','models_cache.json'),JSON.stringify({models:[{slug:'gpt-6.1-sol'},{slug:'gpt-6.2-sol'}]}));
 const rows = () => fs.existsSync(log) ? fs.readFileSync(log,'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : [];
-const route = (history = [], failures = 0, extra = [], approve = false) => {
+const route = (history = [], failures = 0, extra = [], approve = false, {category='implement',project='p',name='task'} = {}) => {
   fs.writeFileSync(log, history.map(JSON.stringify).join('\n')+'\n');
-  if (approve) return JSON.parse(routeFixture(path.join(scripts,'route.mjs'),['implement','--impact','service',
-    '--project','p','--name','task','--failures',String(failures),'--dry','--json',...extra],{env,dir:tmp,approve:true}));
-  const r = spawnSync(process.execPath,[path.join(scripts,'route.mjs'),'implement','--impact','service',
-    '--project','p','--name','task','--failures',String(failures),'--dry','--json',...extra],{env,encoding:'utf8',timeout:10000});
+  const args=[category,'--impact','service','--project',project,'--name',name,'--failures',String(failures),'--dry','--json',...extra];
+  if (approve) return JSON.parse(routeFixture(path.join(scripts,'route.mjs'),args,{env,dir:tmp,approve:true}));
+  const r = spawnSync(process.execPath,[path.join(scripts,'route.mjs'),...args],{env,encoding:'utf8',timeout:10000});
   assert.equal(r.status,0,r.stderr); return JSON.parse(r.stdout);
 };
 const actual = {account:'trae',model:'gpt-6.1-sol',effort:'high'};
@@ -45,6 +44,59 @@ const outcome = (turn, final) => recordWorkerOutcome({ project:'p',name:'task',c
 let count=0;
 const check=(label,fn)=>{fn();count++;console.log(`PASS ${label}`);};
 try {
+  check('T139 infra retries return from a completed personal newer Sol to qualified company Sol',()=>{
+    const context={category:'build-run',project:'lynx-view',name:'T139'};
+    const attempt=(account,model,turn,t,failureKind)=>({kind:'launch-model',t,...context,thread:account,turn,
+      accepted:true,state:'completed',actualStatus:'KNOWN',failureKind,
+      actual:{accountId:account,modelId:model,effort:'medium'}});
+    const main=attempt('main','gpt-6.2-sol','personal',now-5000,'quality');
+    const blocked=['one','two'].flatMap((turn,i)=>{
+      const launch=attempt('trae','gpt-6.1-sol',turn,now-3000+i*1000);
+      return [launch,{...launch,kind:'outcome',auto:true,result:'blocked-environment',failureKind:'infra',
+        actual:[{account:'trae',model:'gpt-6.1-sol',effort:'medium'}]}];
+    });
+    const history=[main,{...main,kind:'outcome',auto:true,result:'pass',failureKind:'quality',
+      actual:[{account:'main',model:'gpt-6.2-sol',effort:'medium'}]},...blocked];
+    for(const failures of [1,4,99]) {
+      const r=route(history,failures,['--failure-kind','infra'],true,context);
+      assert.equal(r.pick?.account,'trae',`infra count ${failures} must not retain the personal floor`);
+      assert.equal(r.pick.model,'gpt-6.1-sol'); assert.equal(r.pick.effort,'medium');
+      assert.equal(r.plan.task.qualityFailures,0); assert.equal(r.plan.task.tier,'normal');
+      assert.ok(r.plan.task.previousAttempts.some(a=>a.actual?.modelId==='gpt-6.2-sol'),'retain execution history for audit');
+    }
+    const automatic=route(history,2,[],true,context);
+    assert.equal(automatic.pick?.account,'trae'); assert.equal(automatic.plan.task.qualityFailures,0);
+    const explicit=route(history,1,['--failure-kind','infra','--actual','codex:gpt-6.2-sol:medium@main'],true,context);
+    assert.equal(explicit.pick?.account,'trae'); assert.equal(explicit.pick.model,'gpt-6.1-sol');
+    const personalOnly=route(history.slice(0,2),99,['--failure-kind','infra'],true,context);
+    assert.equal(personalOnly.pick?.account,'trae'); assert.equal(personalOnly.plan.task.qualityFailures,0);
+    const acceptedResult=route(history.map(row=>row.thread==='main'?{...row,state:'failed'}:row),1,
+      ['--failure-kind','infra'],true,context);
+    assert.equal(acceptedResult.pick?.account,'trae'); assert.equal(acceptedResult.plan.task.qualityFailures,0);
+    const completedCompany={...main,thread:'trae',actual:{accountId:'trae',modelId:'gpt-6.1-sol',effort:'medium'}};
+    const repeat=route([completedCompany],99,['--failure-kind','infra'],true,context);
+    assert.equal(repeat.pick?.account,'trae'); assert.equal(repeat.pick.effort,'medium');
+    const quality=history.map(row=>row.thread==='main'?{...row,state:'failed',result:'fail'}:row);
+    const rejected=route(quality,1,['--failure-kind','infra'],true,context);
+    assert.equal(rejected.pick?.account,'main'); assert.equal(rejected.plan.task.qualityFailures,1);
+    assert.ok(rejected.plan.rejected.some(p=>p.reason?.code==='RETRY_BELOW_ACTUAL_FLOOR'));
+    const infraCause=route(quality.map(row=>row.thread==='main'?{...row,cause:'infra'}:row),1,
+      ['--failure-kind','infra'],true,context);
+    assert.equal(infraCause.pick?.account,'trae'); assert.equal(infraCause.plan.task.qualityFailures,0);
+    const corrected=route(history.map(row=>row.thread==='main'&&row.kind==='outcome'
+      ?{...row,result:'blocked-environment',cause:'infra',correction:true}:row),1,['--failure-kind','infra'],true,context);
+    assert.equal(corrected.pick?.account,'main'); assert.equal(corrected.plan.task.qualityFailures,1);
+    const declared=route(history,1,['--failure-kind','quality'],true,context);
+    assert.equal(declared.pick?.account,'main'); assert.ok(declared.plan.task.qualityFailures>0);
+    const higherCompany=history.map(row=>row.thread==='trae'?{...row,actual:Array.isArray(row.actual)
+      ?row.actual.map(a=>({...a,effort:'high'})):{...row.actual,effort:'high'}}:row);
+    const retained=route(higherCompany,99,['--failure-kind','infra'],true,context);
+    assert.equal(retained.pick?.account,'trae'); assert.equal(retained.pick.effort,'high');
+    const testEnv=route(history,99,['--env','test','--failure-kind','infra'],true,context);
+    assert.equal(testEnv.pick?.account,'trae'); assert.equal(testEnv.plan.task.tier,'light');
+    const normalized=createTaskSpec(retained.plan.task);
+    assert.equal(normalized.qualityFailures,0); assert.equal(normalized.constraintHash,retained.plan.task.constraintHash);
+  });
   check('structured marker and conservative legacy status labels classify environment blockers',()=>{
     assert.equal(parseWorkerResult('Report\nWORKER-RESULT: blocked-environment\nREVIEW-RESULT: none'),'blocked-environment');
     assert.equal(blockedEnvironmentFinal('Checks failed.\nWORKER-RESULT: blocked-environment'),'marker');

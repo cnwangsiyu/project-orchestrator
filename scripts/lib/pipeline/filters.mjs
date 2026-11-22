@@ -6,6 +6,7 @@ import { estimateCandidate } from './estimate.mjs';
 import { standingPersonalFallback, hardPersonalXhighFallback } from './personal-fallback.mjs';
 import { standingPersonalPriority, personalPriorityGuard, exclusiveCodexTask } from './personal-priority.mjs';
 import { ttadkReserve } from './ttadk-reserve.mjs';
+import { rejectedQualityAttempt } from '../worker-result.mjs';
 
 const pass = (id) => result(id);
 const deny = (id, code, text, c, extra) => result(id, code, text, [c.id], extra);
@@ -152,17 +153,25 @@ export function pPreviousFloor(t, s, c, context = {}) {
   // model has a free lane. More effort on the failed light model is not this rung.
   const lightRetry = ['lookup', 'extract', 'draft'].includes(t.category) || t.category === 'build-run' && t.env === 'test';
   if (lightRetry && relevant.some(a => ['quality', 'spec', 'process'].includes(a.failureKind)
+    && (!t.infraRetry || rejectedQualityAttempt(a))
     && ['gpt-5.6-terra', 'gpt-5.5'].includes(modelId(a.actual?.modelId)))
     && c.family === 'gpt' && !['sol', 'astra'].includes(policyModel(c.modelId)))
     return deny('pPreviousFloor', 'RETRY_LIGHT_REQUIRES_SOL', 'A failed light quality rung requires the Sol retry or a stronger model.', c);
   for (const a of relevant) {
+    // Category-qualified company recovery may step back from a personal model
+    // that was merely executed/completed, while genuine quality rejection and
+    // every company actual tuple still retain their established floor.
+    if (t.infraRetry && company(candidateParts(s,c).account)
+      && ['chatgpt','claude'].includes(s.accounts.find(account => account.id === a.actual?.accountId)?.kind)
+      && !rejectedQualityAttempt(a)) continue;
     const capacityFallback = hardPersonalXhighFallback(t, s, c, capacityRows);
     if (capacityFallback && a.state === 'cancelled-no-work' && a.usefulWork === false && a.cancellationEvidenceId) continue;
     // A failed tool says nothing about answer quality across model families.
     const toolSwitch = a.failureKind === 'tool' && ['browser','ui-browser','computer-use'].includes(t.category)
       && c.family !== familyOf(a.actual.modelId ?? a.actual.model);
     if (!toolSwitch && !dominates(c, a.actual, s)) return deny('pPreviousFloor', 'RETRY_BELOW_ACTUAL_FLOOR', 'Candidate does not dominate every real prior attempt.', c);
-    if (['quality', 'spec', 'process'].includes(a.failureKind) && policyModel(a.actual.modelId ?? a.actual.model) === policyModel(c.modelId) && a.actual.effort === c.effort
+    if (['quality', 'spec', 'process'].includes(a.failureKind) && (!t.infraRetry || rejectedQualityAttempt(a))
+      && policyModel(a.actual.modelId ?? a.actual.model) === policyModel(c.modelId) && a.actual.effort === c.effort
       && !matchingApproval(t, s, c, 'retry-same-floor') && !(capacityFallback
         && company(s.accounts.find(account => account.id === a.actual.accountId))))
       return deny('pPreviousFloor', 'QUALITY_REPEAT_REQUIRES_DECISION', 'Repeating an exhausted quality step requires an explicit task decision.', c);
@@ -179,8 +188,10 @@ export function pContent(t, s, c) {
     return deny('pContent', 'SECURITY_TRAE_GPT_FORBIDDEN', 'Security content excludes TRAE GPT.', c);
   return pass('pContent');
 }
-export function pModelFit(t, s, c) {
-  if (!t.flags['failure-kind'] && !t.qualityFailures && t.environmentFailures?.some(a => company(s.accounts.find(account => account.id === a.actual?.accountId)))
+export function pModelFit(t, s, c, context = {}) {
+  if (t.infraRetry && !t.qualityFailures && context.companyEligible && !company(candidateParts(s,c).account))
+    return deny('pModelFit', 'INFRA_RETRY_COMPANY_FIRST', 'An infrastructure retry returns to a qualified company lane; its retry count and completed personal turns do not establish a quality escalation.', c);
+  if (t.infraRetry && !t.qualityFailures && t.environmentFailures?.some(a => company(s.accounts.find(account => account.id === a.actual?.accountId)))
     && !company(candidateParts(s,c).account))
     return deny('pModelFit', 'ENVIRONMENT_RETRY_COMPANY_ONLY', 'An environment-blocked company turn retries on company lanes without advancing the quality ladder.', c);
   if(c.modelId==='gpt-5.6-luna'||candidateParts(s,c).account.kind==='trae'&&c.modelId.startsWith('gemini')) return deny('pModelFit','MODEL_RETIRED','This model is retired from current routing; historical tuples remain valid history.',c);

@@ -1,6 +1,6 @@
 import { scopedFlags } from '../route-args.mjs';
 import { transportOutcome } from '../worker-completion.mjs';
-import { environmentOutcome } from '../worker-result.mjs';
+import { environmentOutcome, rejectedQualityAttempt } from '../worker-result.mjs';
 import {REVIEW_CLASSES,projectReviewPolicy} from '../review-policy-data.mjs';
 import { VERSION, array, object, idOK, modelSelector, modelId, unique, clone, freeze, fingerprint, isReview, compare, stable } from './common.mjs';
 
@@ -133,11 +133,13 @@ export function createTaskSpec(input) {
   const normalizedEnvironmentIds = new Set(array(input.environmentFailures).map(a => a.thread && a.turn ? `${a.thread}:${a.turn}` : a.id));
   failures = Math.max(0, failures - [...environmentIds].filter(id => !normalizedEnvironmentIds.has(id)).length);
   if (environmentIds.size) f.failures = String(failures);
+  const infraRetry = failureKind === 'infra' || environmentFailures.length > 0 && !f['failure-kind'];
   for (const a of attempts) if (object(a.actual)) {
     a.actual.modelId = modelId(a.actual.modelId ?? a.actual.model); delete a.actual.model;
   }
   const failedActualIds = new Set(attempts.filter((a) => a.taskId === (input.taskId ?? f.name) && (a.role ?? 'primary') === (input.role ?? 'primary')
-    && a.state !== 'planned' && a.actualStatus === 'KNOWN' && a.actual && ['quality', 'spec', 'process'].includes(a.failureKind)).map((a) => a.id));
+    && a.state !== 'planned' && a.actualStatus === 'KNOWN' && a.actual && ['quality', 'spec', 'process'].includes(a.failureKind)
+    && (!infraRetry || rejectedQualityAttempt(a))).map((a) => a.id));
   failures = Math.max(failures, failedActualIds.size);
   const labels = new Set(array(input.contentLabels));
   for (const a of attempts) {
@@ -154,7 +156,7 @@ export function createTaskSpec(input) {
   if (labels.size > 1) labels.delete('ordinary');
   const writes = f['read-only'] ? false : (f.writes ?? input.writes ?? ['implement', 'implement-hard', 'debug', 'science', 'docs', 'draft', 'ui-browser', 'build-run', 'computer-use', 'claude-tools', 'image-gen'].includes(cat));
   const background = f.background ?? input.background ?? false;
-  const qualityFailures = failureKind === 'quality' ? failures : failedActualIds.size;
+  const qualityFailures = failureKind === 'quality' && !infraRetry ? failures : failedActualIds.size;
   const tier = ['implement-hard', 'debug', 'science', 'review-high', 'design'].includes(cat) || stakes === 'high' || (CODE.has(cat) && qualityFailures > 0) ? 'hard'
     : qualityFailures > 0 ? 'normal'
     : cat === 'build-run' && (env === 'prod' || impact === 'release') ? 'normal'
@@ -177,7 +179,7 @@ export function createTaskSpec(input) {
     role: input.role ?? 'primary', parentTaskId: input.parentTaskId ?? null, briefHash: input.briefHash ?? 'UNKNOWN', flags: f,
     reviewClass,reviewReason,reviewScope:f['review-scope']??input.reviewScope??null,policyNotes:unique([...array(input.policyNotes),...policyNotes]), tier, stakes, impact, env, execution, writes, runsTests: f['runs-tests'] ?? input.runsTests ?? false, background,
     contentLabels: unique([...labels]), capabilitiesNeeded: unique([...caps]), exclusions: unique(exclusions.map(stable)).map(JSON.parse),
-    failures, failureKind, qualityFailures, environmentFailures, transportFailures: transportFailures.length ? transportFailures : clone(array(input.transportFailures)),
+    failures, failureKind, qualityFailures, infraRetry, environmentFailures, transportFailures: transportFailures.length ? transportFailures : clone(array(input.transportFailures)),
     previousAttempts: attempts.sort((a, b) => compare(String(a?.id), String(b?.id))),
     floor: clone(input.floor ?? { profileIds: [], previousAttemptIds: [], relationVersion: VERSION, historyStatus: failures || autoRerouteDepth || f['previous-attempt'] ? 'UNKNOWN' : 'KNOWN' }),
     authorAttemptId: input.authorAttemptId ?? null, againstAttemptId: input.againstAttemptId ?? null,

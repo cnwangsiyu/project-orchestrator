@@ -118,9 +118,13 @@ or STOPPED status label and a concrete missing-tool/login/access/network/resourc
 the same paragraph. Bare BLOCKED, rejected work and narrative mentions do not qualify.
 Other BLOCKED/FAILED/needs-user reports remain unresolved. A continued provisional pass adds rework;
 reattachment does not duplicate a turn. Missing actual evidence or review marker is UNKNOWN.
-Routing joins the terminal signal to its own launch/actual tuple, excludes these turns from the
-quality-failure count and keeps their model/effort floor. Company environment retries stay on company
-lanes and the same tier; only real quality failures may advance to a personal-only model, with the
+Routing joins the terminal signal to its own launch/actual tuple and excludes these turns from the
+quality-failure count. During explicit infra or environment recovery, raw `--failures` never advances
+the quality ladder or effort. Completed personal turns without rejection evidence do not establish
+a quality floor: a category-qualified company model may take over from a personal-only model reached
+by an earlier mislabelled escalation. Actual company tuples, rejected quality work and explicit
+quality profiles keep their floors; unknown execution identity is not assumed to be personal.
+Company environment retries stay on company lanes and the same tier; only real quality failures may advance to a personal-only model, with the
 quality reason stated in `why`. Explicit `--failure-kind` takes precedence over environment inference;
 manual outcome metadata/corrections retain their existing precedence.
 The launcher requests a final `REVIEW-RESULT: blocking` or `REVIEW-RESULT: none` line for review seats;

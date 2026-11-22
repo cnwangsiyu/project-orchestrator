@@ -183,8 +183,11 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
       return;
     }
     const outcome = turnOutcome(r);
-    if (!flags['failure-kind'] && environmentOutcome(outcome))
+    if ((!flags['failure-kind'] || flags['failure-kind'] === 'infra') && environmentOutcome(outcome))
       r = { ...r, state: 'failed', failureKind: 'infra', environmentBlocked: true };
+    else if (outcome?.result) r = {...r, result:outcome.result, ...(outcome.cause ? {cause:outcome.cause} : {})};
+    if (outcome?.correction && outcome.result !== 'pass' && ['quality','spec','process'].includes(outcome.failureKind))
+      r = {...r, failureKind:outcome.failureKind, qualityFailure:true};
     const terminal=['failed','completed','cancelled-no-work','cancelled','succeeded'].includes(r.state);
     if ((!terminal && !['starting','queued','running','cancel-pending','UNKNOWN'].includes(r.state))
       || (r.kind && !['attempt','launch','launch-model'].includes(r.kind)) || r.accepted===false) return;
@@ -220,7 +223,7 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
       if (index < 0) continue;
       const [row] = terminal.splice(index,1);
       if (transportOutcome(turnOutcome(row))) Object.assign(attempt,{state:'transport-failed',failureKind:'transport-failed',thread:row.thread,turn:row.turn});
-      else if (!flags['failure-kind'] && environmentOutcome(row))
+      else if ((!flags['failure-kind'] || flags['failure-kind'] === 'infra') && environmentOutcome(row))
         Object.assign(attempt,{failureKind:'infra',environmentBlocked:true,thread:row.thread,turn:row.turn});
     }
   }
@@ -288,7 +291,7 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
   }
   // --actual may carry only the latest tuple. Earlier confirmed environment
   // turns still explain the retry count and retain their own execution floor.
-  if (retryHistory && !flags['failure-kind']) for (const row of terminalOutcomes.filter(environmentOutcome)) {
+  if (retryHistory && (!flags['failure-kind'] || flags['failure-kind'] === 'infra')) for (const row of terminalOutcomes.filter(environmentOutcome)) {
     if (!attempts.some(a => a.thread === row.thread && a.turn === row.turn)) {
       const actual = Array.isArray(row.actual) ? row.actual.at(-1) : row.actual;
       addActual(actual, { thread:row.thread, turn:row.turn, actualStatus:row.actualStatus,

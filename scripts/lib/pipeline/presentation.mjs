@@ -89,6 +89,7 @@ export function presentRoute(plan, view, context) {
   if(context.retryAssumption) why.push(context.retryAssumption);
   if(t.transportFailures?.length) why.push(`Ignored ${new Set(t.transportFailures.map(a=>a.thread&&a.turn?`${a.thread}:${a.turn}`:a.id)).size} transport-failed turn(s): no quality attempt, --failures increment, repeat gate or dominance floor.`);
   if(t.environmentFailures?.length) why.push(`Ignored ${new Set(t.environmentFailures.map(a=>a.thread&&a.turn?`${a.thread}:${a.turn}`:a.id)).size} blocked-environment turn(s) for quality escalation: ${f['failure-kind'] ? 'explicit --failure-kind takes precedence' : 'retry on the same tier and company lanes'}; retain the actual model/effort floor.`);
+  if(t.infraRetry) why.push('Infrastructure recovery: raw --failures does not advance the quality ladder; completed personal turns without quality rejection do not prevent a qualified company retry. Genuine quality failures and company execution floors remain in force.');
   if(c && t.qualityFailures > 0 && !company(candidateParts(snapshot,c).account)
     && !snapshot.accounts.some(a => company(a) && known(a.catalog)?.includes(c.modelId)))
     why.push(`Quality escalation after ${t.qualityFailures} quality failure(s): ${c.modelId} is offered only on personal accounts; environment blockers do not advance the ladder.`);
