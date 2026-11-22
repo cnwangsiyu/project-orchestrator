@@ -76,7 +76,7 @@ def tree_scope(root,ws):
     try: parts=ws.relative_to(root).parts
     except ValueError: return False
     return (len(parts)==4 and parts[0]=='wt' and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,100}',parts[1])
-            and re.fullmatch(r'id-[A-Za-z0-9_.-]+',parts[2]) and re.fullmatch(r'devbox-cn-(?:[0-9]+|light(?:-[0-9]+)?)',parts[3])
+            and re.fullmatch(r'id-[A-Za-z0-9_.-]+',parts[2]) and re.fullmatch(r'devbox-cn-(?:[0-9]+|light(?:-[0-9]+)?|[A-Za-z0-9][A-Za-z0-9_.-]*-[1-9][0-9]*)',parts[3])
             and ws.resolve()==ws and not any(p.is_symlink() for p in [ws,*ws.parents]))
 
 def tree_list(d):

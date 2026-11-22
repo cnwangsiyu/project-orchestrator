@@ -35,7 +35,7 @@ function fixture(options = {}) {
   const cleanupPython = 'import os,sys,json,pathlib,time\n' + retentionPython + runDataCleanupPython + '\nd=json.loads(sys.stdin.read())\nproc_root=pathlib.Path(d["control"])/"fixture-proc"\nproc_root.mkdir(parents=True,exist_ok=True)\ndocker_workspace_live=lambda workspace: False\nprint(json.dumps(cleanup_run_data(d,proc_root)))\n';
   const cleanupOutputPython = 'import json,sys,pathlib\n' + runDataCleanupPython + '\nprint_data_cleanup(json.loads(sys.stdin.read()))\n';
   const tmpdirPython = 'import os,json,pathlib,sys\n' + runTmpdirPython + '\nctl=pathlib.Path(sys.argv[2])\nif sys.argv[1]=="create": print(create_run_tmpdir(ctl))\nelse: cleanup_run_tmpdir(ctl)\n';
-  const config = { dir, shared, cleanupPython, cleanupOutputPython, tmpdirPython, hosts: ['192.0.2.1', '192.0.2.2'], ...options };
+  const config = { realRes: fileURLToPath(new URL('../res/res', import.meta.url)), dir, shared, cleanupPython, cleanupOutputPython, tmpdirPython, hosts: ['192.0.2.1', '192.0.2.2'], ...options };
   fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify(config));
   const rows = [
     'devbox-cn-1\tremote\topen\t-\tfirst alice@192.0.2.1 caps=node',
@@ -45,7 +45,7 @@ function fixture(options = {}) {
     'devbox-cn-3\tremote\tnever\t-\tretired nobody@192.0.2.3 caps=node',
     'devbox-cn-4\tremote\task-user\t-\tpending nobody@192.0.2.4 caps=node',
   ];
-  fs.writeFileSync(path.join(shared, 'resources.tsv'), rows.join('\n') + '\n');
+  fs.writeFileSync(path.join(shared, 'resources.tsv'), options.dynamic ? 'devbox-host-first\tremote\topen\t-\talice@192.0.2.1 caps=node\n' : rows.join('\n') + '\n');
   git(repo, 'init', '-q'); git(repo, 'config', 'user.name', 'Fixture'); git(repo, 'config', 'user.email', 'fixture@example.invalid');
   fs.writeFileSync(path.join(repo, 'source.txt'), 'first\n'); fs.writeFileSync(path.join(repo, '.gitignore'), 'build/\nnode_modules/\n');
   git(repo, 'add', '.'); git(repo, 'commit', '-qm', 'first');
@@ -66,6 +66,14 @@ const flag=(args,name)=>args[args.indexOf(name)+1];
 const fakeRes = shimHeader + String.raw`
 (async()=>{
 const a=process.argv.slice(2), op=a[0], by=flag(a,'--by');
+if(c.dynamic) {
+ const result=cp.spawnSync(c.realRes,a,{env:process.env,encoding:'utf8'});
+ process.stdout.write(result.stdout||'');process.stderr.write(result.stderr||'');
+ if(result.status===0 && ['take','wait-pool','return'].includes(op)) {
+  const slot=/^slot=(\S+)$/m.exec(result.stdout)?.[1] || a[1];event(op==='return'?'return':'take',{slot,by,pid:Number(flag(a,'--pid'))});
+ }
+ process.exit(result.status??1);
+}
 if(c.noHelp&&(op==='help'||a.includes('--help'))){console.error('res: broken');process.exit(1);}
 if(c.liveHelp&&a.includes('--help')){console.error('res: wait-pool needs a resource prefix');process.exit(1);}
 if(c.liveHelp&&op==='help'){console.log('res wait-pool <prefix> --by S [--need <cap,cap>] [--prefer-host <ip>] [--prefer-slot <id>] [--exclude-slot <id,...>] [--exclude-host <ip,...>]');return;}
@@ -1731,8 +1739,37 @@ async function submodulePinScenarios() {
   console.log('PASS post-feed missing pin replays one full bundle; persistent failure never starts checkout or command');
 }
 
+async function dynamicScenarios() {
+  const f = fixture({ dynamic: true });
+  const r = await run(f, ['--cores', '2', '--mem-gib', '4']); ok(r); returned(f);
+  assert.match(r.summary.shards[0].slot, /^devbox-cn-first-[1-9]\d*$/);
+  assert.equal(r.summary.shards[0].attempts[0].cpus, 2);
+  assert.equal(readRegistry(f.shared, 'devbox-cn-light').some(row => row.slot === r.summary.shards[0].slot), true);
+  const auto = fixture({ dynamic:true });
+  ok(await run(auto,['--shards','auto'])); returned(auto);
+  const prewarm = fixture({ dynamic:true });
+  ok(await run(prewarm, ['prewarm','--host','192.0.2.1'])); returned(prewarm);
+  const gc = fixture({ dynamic:true }); const initial=await run(gc); ok(initial); returned(gc);
+  const ws=workspace(gc,'192.0.2.1',initial.summary.shards[0].slot), meta=path.join(ws,'.devbox-run.json');
+  const record=JSON.parse(fs.readFileSync(meta)); record.lastUsed-=8*86400;fs.writeFileSync(meta,JSON.stringify(record));
+  ok(await run(gc,['gc','--host','192.0.2.1'])); assert.ok(!fs.existsSync(ws)); returned(gc);
+  const pending=fixture({dynamic:true,badCleanup:true}); const interrupted=await run(pending);assert.equal(interrupted.code,70);
+  const lease=interrupted.summary.shards[0].slot;
+  assert.match(lease,/^devbox-cn-first-/);assert.ok(fs.existsSync(path.join(pending.shared,'locks',lease+'.d')));
+  assert.equal(readRegistry(pending.shared,'devbox-cn').some(row=>row.slot===lease),true);
+  const source=fs.readFileSync(path.join(pending.shared,'locks',lease+'.d','info'),'utf8');assert.match(source,/remote_cleanup_required/);
+  const backup=path.join(pending.shared,'resources.tsv.pre-dynamic');
+  fs.writeFileSync(backup,'devbox-cn-1\tremote\topen\t-\talice@192.0.2.1 caps=node\n');
+  execFileSync(process.execPath,[fileURLToPath(new URL('../devbox-host-migrate.mjs',import.meta.url)),'--registry',path.join(pending.shared,'resources.tsv'),'--rollback'],{encoding:'utf8'});
+  assert.equal(readRegistry(pending.shared,'devbox-cn').find(row=>row.slot===lease)?.resolverOnly,true);
+  const reject=spawnSync(pending.config.realRes,['take',lease,'--by','rollback-test','--project','fixture','--for','test','--pid',String(process.pid)],{env:pending.env,encoding:'utf8'});
+  assert.equal(reject.status,3);
+  console.log('PASS dynamic runner: actual allocator, opaque IDs, reservation CPU budget, prewarm, GC and retained cleanup');
+}
+
 async function scenarios() {
   const only = process.env.DEVBOX_TEST_CASE;
+  if (!only || only === 'dynamic') { await dynamicScenarios(); if (only) return; }
   if (!only || only === 'tmpdir') {
     const f = fixture();
     const command = 'node -e '+JSON.stringify("const fs=require('fs'); const p=process.env.TMPDIR; if(!/^\\/tmp\\/dr-[a-z0-9_]{8}$/.test(p))process.exit(5); if((fs.statSync(p).mode&511)!==448)process.exit(6); fs.mkdirSync(p+'/nested'); fs.writeFileSync(p+'/nested/output','temp'); fs.symlinkSync(process.cwd(),p+'/workspace-link');");

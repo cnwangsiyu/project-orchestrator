@@ -57,8 +57,9 @@ repositories remain on RemoteX / TT-VEIS, rather than these devbox worktrees.
 | --- | --- |
 | `--project`, `--task`, `--repo` | Task and repository root are required. An explicit project names the shared repository. |
 | `--ref HEAD\|worktree\|<commit-or-ref>` | Defaults to HEAD; worktree adds the tracked diff against HEAD and nonignored untracked files |
-| `--pool devbox-cn\|devbox-cn-light` | Heavy pool by default; light for checks under about five minutes |
-| `--shards N\|auto` | 1–64 independent shard holders; auto sizes from free eligible slots and duration history |
+| `--pool devbox-cn\|devbox-cn-light` | Heavy default weights; light inherits small weights for checks under about five minutes; host capacity is shared |
+| `--shards N\|auto` | 1–64 independent shard holders; auto estimates weighted host headroom and duration history for host rows |
+| `--cores N`, `--mem-gib GiB`, `--disk-gib GiB` | Explicit per-claim reservations; omitted values inherit the category/host configuration |
 | `--units-file PATH` | One source-relative test file per line; units are balanced and invoked separately |
 | `--timeout MIN` | Positive minutes, at most 120, default 120; each remote command gets this full budget starting at launch |
 | `--queue-timeout MIN` | Positive minutes, at most 120; defaults to `max(timeout, 30)`; bounds cumulative admission, source transfer and input preparation per shard across retries, excluding command execution |
@@ -310,24 +311,25 @@ waiting and refreshes the selected host after a run with confirmed cleanup.
 The probe reads field 2 of Linux `/proc/loadavg` (the five-minute average), the
 CPU count, `MemAvailable` and available GiB on the workspace-root filesystem. Samples are atomically published to
 `<RES_DIR>/devbox-metrics/<host>.json` with a local Unix timestamp in seconds.
-The runner can still place work when the probe is unavailable. With no sample
-under five minutes old, `res` uses the baseline static rows and leaves
-`dynamic-only` rows closed. Existing workspace disk checks still run before the job.
+Migrated host rows require a sample under five minutes old and close admission
+when metrics are unavailable. Unmigrated numbered registries retain their baseline
+static fallback and leave `dynamic-only` rows closed. Existing workspace disk checks still run before the job.
 With light reclaim enabled, a light-pool FIFO head can recover a hold older than
 15 minutes when `res` can prove the recorded local holder PID is dead.
 
 Each admission sample also reads `/proc/pressure/io` into `io_some_avg10`,
 `io_some_avg60` and `io_full_avg10` (null if unavailable). Heavy claims close with
 `reason=io-pressure` above `DEVBOX_IO_SOME_AVG60_MAX=25` or
-`DEVBOX_IO_FULL_AVG10_MAX=10`, with `.<host>` overrides; light claims skip this
-I/O check. The cached closure reopens below 80% of both thresholds and survives
+`DEVBOX_IO_FULL_AVG10_MAX=10`, with `.<host>` overrides. On migrated host rows both categories share this
+I/O check; legacy numbered registries preserve their original light behavior. The cached closure reopens below 80% of both thresholds and survives
 sample refreshes in `devbox-metrics/<host>.io-state.json`. Unknown PSI permits
 admission and appears as `io=unknown` in status. Set both thresholds to 100 to
 disable the I/O check, including a prior closure. Waiters use their normal
 metric refresh and admission retry path.
 
-The dynamic disk budget keeps at least 53 GiB available after 15-minute
-reservations, released on return. The runner inventories per-slot project worktrees before admission and uses zero disk cost for existing workspaces; new workspaces use the configured project/host cost. See the res contract for [disk budgets and rollout](res-contract.md#changes-in-v110) and [load and memory admission](res-contract.md#changes-in-v19).
+The dynamic disk budget keeps at least 53 GiB available after reservations,
+released on return. Active dynamic leases keep CPU, memory and disk weights
+reserved until exact ownership is returned; legacy anonymous entries retain their TTL. The runner inventories per-slot project worktrees before admission and uses zero disk cost for existing workspaces; new workspaces use the configured project/host cost. See the res contract for [disk budgets and rollout](res-contract.md#changes-in-v110) and [load and memory admission](res-contract.md#changes-in-v19).
 
 Immediately before each command launch, the runner reads host cores from the
 mini's `devbox-hosts.json` and counts currently held registered heavy slots on
@@ -347,8 +349,9 @@ CPU limits take precedence over conflicting `--env` values. Jobs with their
 own worker option should use the budget explicitly, for example
 `ninja -j"$DEVBOX_CPUS"` or `pytest -n "$DEVBOX_CPUS"`.
 
-`--shards auto` never launches more than the currently free eligible slots
-(capabilities, exclusions and current box quarantines apply), or more shards
+`--shards auto` uses estimated weighted headroom on migrated hosts, with final
+admission enforced by `res`; numbered registries retain free-slot planning.
+Capabilities, exclusions and quarantines apply. It never creates more shards
 than units. With history,
 it targets at least 120 seconds per shard. For known unit timings it also
 reduces N when an uneven assignment would leave a shard below that target.
@@ -544,8 +547,12 @@ inspect with `tar -tf` and extract them into a destination you choose.
 
 ## Shared storage and incremental builds
 
-The registry's five-column `resources.tsv` supplies both the slot and the
-unambiguous `<user>@<ip>` in its description. The runner never guesses an SSH
+The registry's five-column `resources.tsv` supplies one `devbox-host-<label>` row
+per migrated host, with an unambiguous `<user>@<ip>`, capabilities and optional
+`root=/absolute/runner/path` in its description. Hardware remains in the hourly
+probe cache. `res slot-host ID` returns JSON containing slot, host, user, target,
+root, caps, category and hourly hardware facts; callers must treat lease IDs as opaque. Legacy numbered
+rows and aliases remain resolvable during migration. The runner never guesses an SSH
 account or uses rows with `never` or `ask-user` policy.
 
 Root discovery tries `/data00/home/<user>/devbox-run`, then
@@ -1203,13 +1210,44 @@ Disabled config retains the original
 `.data`-only SSH command exactly. Normal leased GC also covers secondary roots,
 but keeps its explicit age rule. Whole-tree eviction excludes legacy stores.
 
-`devbox-slot-rows.mjs --registry FILE --host IP --count NEW_ROWS --first-id N`
-prints TSV proposals only. It preserves host/capability/preference/hardware
-tags, adds `dynamic-only` to extra rows, and refuses ID collisions. Keep today's
-baseline rows; target 32-40 total heavy rows per box, not concurrent jobs. Enable
-only after dynamic enrollment, fresh metrics and the companion I/O gate pass
-owner checks. Stale metrics/disable must admit only baseline rows. Do not
-precreate slot trees.
+Dynamic hosts allocate `devbox-cn-<label>-<n>` IDs as needed, reusing the lowest
+free ordinal while retaining held IDs, pending cleanup receipts and cataloged
+worktrees. There is no numbered slot count or separate light/heavy cap. Both
+`wait-pool devbox-cn` and `wait-pool devbox-cn-light` use the same host gates and
+reservations, with defaults HEAVY=3 cores/4 GiB/20 disk GiB and LIGHT=1 core/2
+GiB/2 disk GiB. `--cores`, `--mem-gib` and disk flags override the claim weights.
+Compiler parallelism for a dynamic lease uses its declared CPU reservation.
+Automatic planning queries `res pool-capacity POOL` so configured weights,
+reservations and host gates also govern its available claim count.
+`DEVBOX_MAX_CLAIMS[.<host>]=0` derives a safety ceiling from hardware cores divided
+by the minimum configured CPU weight; a positive integer overrides that ceiling.
+`DEVBOX_MAX_BYPASS[.<host>]=3` bounds successful smaller admissions ahead of a
+compatible larger FIFO head blocked by load, memory or disk. A fitting older head
+always runs first; after the bypass budget, the host drains for it. The committed
+bypass count survives waiter heartbeat/retry publication in `pool-bypasses/`. Other hosts
+and disjoint capability requirements remain available.
+
+Owner migration (never performed automatically by the runner):
+
+```sh
+node scripts/devbox-host-migrate.mjs --registry "$RES_DIR/resources.tsv"
+node scripts/devbox-host-migrate.mjs --registry "$RES_DIR/resources.tsv" --apply
+node scripts/devbox-host-migrate.mjs --registry "$RES_DIR/resources.tsv" --rollback
+```
+
+The first command prints a unified diff only. Apply creates an exclusive
+`resources.tsv.pre-dynamic` backup, combines named old notes into host notes,
+preserves original notes and writes the registry with temp-file + rename. A
+host's caps/prefer tags are unioned; contradictory target, root or policy requires
+owner reconciliation before migration. Legacy IDs are retained in `aliases=`.
+Install the compatible allocator/runner first, then migrate registry rows; old
+held IDs need no restart. Rollback restores all numbered rows and adds
+`leases-only` host rows that resolve dynamic IDs without admitting new dynamic
+work. Keep compatible code and those resolver rows while any dynamic holds,
+cleanup receipts, or retained artifacts remain. Once retired, the owner may
+restore the exact registry backup and prior code. Adding a new host requires
+one host row and a normal runner hardware/metrics refresh. Never precreate
+slot trees. `devbox-slot-rows.mjs` remains a legacy-only proposal tool.
 
 Controller disk admission/reservations still refer to primary free space.
 Secondary space cannot override a primary-disk denial; removing that conservative

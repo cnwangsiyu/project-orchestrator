@@ -136,7 +136,7 @@ HEAVY_DEFAULTS = dict(LOAD_LIMIT=12, LOAD_LIMIT_WITH_LANES=20, MIN_AVAIL_GIB=16,
     MEM_GUARD_SAMPLES='~/.claude/orchestrator/_shared/reports/mini-memory/samples-%Y-%m-%d.tsv')
 DEVBOX_DEFAULTS = dict(LOAD_PER_CORE=1, MIN_AVAIL_GIB=4, HEAVY_CORES=3, HEAVY_GIB=4,
     LIGHT_CORES=1, LIGHT_GIB=2, HEAVY_DISK_GIB=20, LIGHT_DISK_GIB=2,
-    IO_SOME_AVG60_MAX=25, IO_FULL_AVG10_MAX=10)
+    IO_SOME_AVG60_MAX=25, IO_FULL_AVG10_MAX=10, MAX_CLAIMS=0, MAX_BYPASS=3)
 
 def regular_config(file, maximum=65536):
     with os.fdopen(os.open(file, os.O_RDONLY | os.O_NONBLOCK), 'rb') as stream:
@@ -192,8 +192,10 @@ def parse_config(content):
             target = suffix[8:] if suffix.startswith('project.') and setting.endswith('_DISK_GIB') else suffix
             if suffix and not re.fullmatch(pattern, target): raise ValueError('invalid devbox override')
             io = setting in ('IO_SOME_AVG60_MAX', 'IO_FULL_AVG10_MAX')
+            integer = setting in ('MAX_CLAIMS', 'MAX_BYPASS')
+            if integer and not value.isdecimal(): raise ValueError('invalid integer ' + name)
             if (not re.fullmatch(r'[0-9]+(?:\.[0-9]+)?', value)
-                    or not (0 <= float(value) <= 100 if io else 0 < float(value) <= 65536)):
+                    or not (0 <= float(value) <= (100 if io else 65536) if io or integer else 0 < float(value) <= 65536)):
                 raise ValueError('invalid devbox cost ' + name)
             values[name] = float(value)
     if not (heavy['LOAD_LIMIT_WITH_LANES'] >= heavy['LOAD_LIMIT'] >= heavy['LANE3_LOAD']
@@ -586,7 +588,9 @@ def guard_waiters(root, id, row):
     if row[0] == 'remote':
         pool = id if id.endswith('-light') else id.rsplit('-', 1)[0]
         if '-light-' in id: pool = id.rsplit('-', 1)[0]
-        parents.append(os.path.join(root, 'pool-waiters', pool))
+        if 'dynamic-host-row' in row[3].split():
+            parents.extend(os.path.join(root,'pool-waiters', category) for category in ('devbox-cn','devbox-cn-light'))
+        else: parents.append(os.path.join(root, 'pool-waiters', pool))
     waiters = []
     host = os.uname().nodename
     ttl = int(os.environ.get('RES_WAITER_STALE_SECONDS', '300'))
@@ -624,6 +628,12 @@ def observation_main(root, action, id, by=''):
             if len(parts) != 5 or not re.fullmatch(r'[A-Za-z0-9_.-]+', parts[0]): raise ValueError('corrupt resource registry')
             if parts[0] in rows: raise ValueError('duplicate resource registry entry')
             rows[parts[0]] = parts[1:]
+    if id and id not in rows and any(resource.startswith('devbox-host-') for resource in rows):
+        import subprocess
+        result = subprocess.run([os.environ['RES_SELF_COMMAND'],'slot-host',id], env={**os.environ,'RES_DIR':root}, capture_output=True,text=True,timeout=10)
+        if result.returncode == 0:
+            value=json.loads(result.stdout)
+            rows[id]=['remote',value['policy'],'-',value['target']+' caps='+','.join(value['caps'])+' dynamic-host-row']
     if id and id not in rows: raise ValueError("unknown resource '%s'" % id)
     if action == 'holder':
         value = read_hold(os.path.join(root, 'locks', id + '.d'))
@@ -712,6 +722,7 @@ WAITER_STALE_SECONDS="${RES_WAITER_STALE_SECONDS:-300}"  # 45 s expired the FIFO
 
 # Polling guards need neither the admission parser nor its large controller.
 # Exec also removes a shell/process wait from the single-resource path.
+export RES_SELF_COMMAND="${BASH_SOURCE[0]}"
 fast_observer=
 if [ "${1:-}" = holder ]; then
   fast_observer=1
@@ -740,12 +751,14 @@ res status [<id>]                     show every resource (or one) and who holds
 res holder <id> [--by <session>]       JSON lease/queued-request snapshot; no device probes
 res audit [--json]                   read-only host facts, slots and 24-hour allocation (no SSH)
 res take <id> --by <session> --project <slug> --for "<purpose>" [--task <id>] [--until <when>] [--offline] [--pid <pid>] [--disk-gib <GiB>]
-res wait <id> --by <session> --project <slug> --for "<purpose>" --timeout <minutes> [--disk-gib <GiB>] [--disk-gib-file <JSON>] [--placement-file <JSON>] [--maintenance] [take options]
+res wait <id> --by <session> --project <slug> --for "<purpose>" --timeout <minutes> [--disk-gib <GiB>] [--disk-gib-file <JSON>] [--placement-file <JSON>] [--cores N] [--mem-gib GiB] [--maintenance] [take options]
                                       retry held resources; heavy-* waits also enforce the gate
                                       --pid names the long-lived holder (default: caller PID)
-res wait-pool <prefix> --by <session> --project <slug> --for "<purpose>" --timeout <minutes> [--need <cap,cap>] [--prefer-host <ip>] [--prefer-slot <id>] [--exclude-slot <id,...>] [--exclude-host <ip,...>] [--exclude-reason <text>] [--hard-exclude-slot <id,...>] [--hard-exclude-host <ip,...>] [--disk-gib <GiB>] [--disk-gib-file <JSON>] [--placement-file <JSON>] [--maintenance] [take options]
-                                      FIFO wait for any remote <prefix>-<number>; prints slot=<id>
-                                      devbox-cn excludes light; devbox-cn-light selects only light
+res wait-pool <prefix> --by <session> --project <slug> --for "<purpose>" --timeout <minutes> [--need <cap,cap>] [--prefer-host <ip>] [--prefer-slot <id>] [--exclude-slot <id,...>] [--exclude-host <ip,...>] [--exclude-reason <text>] [--hard-exclude-slot <id,...>] [--hard-exclude-host <ip,...>] [--disk-gib <GiB>] [--disk-gib-file <JSON>] [--placement-file <JSON>] [--cores N] [--mem-gib GiB] [--maintenance] [take options]
+res slot-host <id>                    resolve a current or legacy devbox lease as JSON
+res devbox-registry                   expanded devbox host/lease catalog as JSON
+                                      FIFO wait for a compatible remote lease; prints slot=<id>
+                                      host rows share dynamic capacity; devbox-cn-light inherits a small weight
                                       no mini locks or heavy-check; return the printed slot
                                       skips quarantined boxes; prefer-host falls back immediately
                                       need requires all caps; prefer-slot then its host precede fallback
@@ -1722,7 +1735,7 @@ show_build_waiters() {
 }
 
 parse() {
-  BY= PROJECT= PURPOSE= TASK= UNTIL= NOTE= FORCE= OFFLINE= DEVICE= POLICY= PID="$PPID" PID_EXPLICIT= DISK_GIB= DISK_GIB_FILE= PLACEMENT_FILE= MAINTENANCE= EXTRA_DISK_GIB=
+  BY= PROJECT= PURPOSE= TASK= UNTIL= NOTE= FORCE= OFFLINE= DEVICE= POLICY= PID="$PPID" PID_EXPLICIT= DISK_GIB= DISK_GIB_FILE= PLACEMENT_FILE= MAINTENANCE= EXTRA_DISK_GIB= CLAIM_CORES= CLAIM_MEM=
   while [ $# -gt 0 ]; do
     case "$1" in
       --by) BY="$2"; shift 2 ;;
@@ -1735,6 +1748,10 @@ parse() {
       --offline) OFFLINE=1; shift ;;
       --device) DEVICE="$2"; shift 2 ;;
       --policy) POLICY="$2"; shift 2 ;;
+      --cores|--mem-gib)
+        [ $# -ge 2 ] || die "$1 needs a value"
+        [[ "$2" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "invalid claim weight"
+        if [ "$1" = --cores ]; then CLAIM_CORES="$2"; else CLAIM_MEM="$2"; fi; shift 2 ;;
       --maintenance) MAINTENANCE=1; shift ;;
       --placement-file) [ $# -ge 2 ] || die "$1 needs a value"; PLACEMENT_FILE="$2"; shift 2 ;;
       --extra-disk-gib) [ $# -ge 2 ] || die "$1 needs a value"; EXTRA_DISK_GIB="$2"; shift 2 ;;
@@ -2504,10 +2521,10 @@ cmd_wait_pool_legacy() {
 pool_controller() {
   local runner=
   if [ "${POOL_EXEC_CHILD:-0}" = 1 ]; then runner=exec; fi
-  ${runner:+$runner} python3 - "$RES_DIR" "$@" "$BY" "$PROJECT" "$TASK" "$PURPOSE" "$PID" "$UNTIL" "${FORCE:-}" "${POOL_NEED:-}" "${prefer_host:-}" "${prefer_slot:-}" "${excluded_slots:-}" "${excluded_hosts:-}" "${WAITER_STALE_SECONDS}" "$$" "${POOL_EPISODE:-none}" "${exclude_reason:-}" "${hard_slots:-}" "${hard_hosts:-}" "${DISK_GIB:-}" "${DISK_GIB_FILE:-}" "${PLACEMENT_FILE:-}" "${MAINTENANCE:-}" "${EXTRA_DISK_GIB:-0}" "${WAIT_CONFIG_FILE:+$WAIT_CONFIG_FILE.devbox}" "${warm_family:-}" <<'PY'
+  ${runner:+$runner} python3 - "$RES_DIR" "$@" "$BY" "$PROJECT" "$TASK" "$PURPOSE" "$PID" "$UNTIL" "${FORCE:-}" "${POOL_NEED:-}" "${prefer_host:-}" "${prefer_slot:-}" "${excluded_slots:-}" "${excluded_hosts:-}" "${WAITER_STALE_SECONDS}" "$$" "${POOL_EPISODE:-none}" "${exclude_reason:-}" "${hard_slots:-}" "${hard_hosts:-}" "${DISK_GIB:-}" "${DISK_GIB_FILE:-}" "${PLACEMENT_FILE:-}" "${MAINTENANCE:-}" "${EXTRA_DISK_GIB:-0}" "${WAIT_CONFIG_FILE:+$WAIT_CONFIG_FILE.devbox}" "${warm_family:-}" "${CLAIM_CORES:-}" "${CLAIM_MEM:-}" <<'PY'
 import datetime, fcntl, hashlib, json, math, os, re, shutil, signal, socket, stat, subprocess, sys, tempfile, time
 from contextlib import contextmanager
-root, action, request, timeout, delay, by, project, task, purpose, pid, until, force, need, prefer, preferred_slot, excluded_slots, excluded_hosts, stale, controller, generation, exclude_reason, hard_slots, hard_hosts, disk_gib, disk_gib_file, placement_file, maintenance, extra_disk_gib, legacy_config_path, warm_family = sys.argv[1:]
+root, action, request, timeout, delay, by, project, task, purpose, pid, until, force, need, prefer, preferred_slot, excluded_slots, excluded_hosts, stale, controller, generation, exclude_reason, hard_slots, hard_hosts, disk_gib, disk_gib_file, placement_file, maintenance, extra_disk_gib, legacy_config_path, warm_family, claim_cores, claim_mem = sys.argv[1:]
 build_namespace = {'__name__': 'res_build_processes'}
 exec(os.environ['RES_BUILD_PROCESS_SOURCE'], build_namespace)
 build_probe = build_namespace['probe']
@@ -2515,6 +2532,9 @@ pid = int(pid); stamp = time.time(); now = stamp; host = socket.gethostname()
 controller_key = hashlib.sha256(host.encode()).hexdigest() + '.' + controller + '.' + generation
 locks = os.path.join(root, 'locks'); journal = os.path.join(root, 'log.tsv')
 queue = waiter = episode = None; created = None; committed = False; reservation_written = False
+dynamic_ids = {}; host_rows = {}; bypass_pending = []
+with open(os.path.join(root, 'resources.tsv')) as registry_stream:
+    host_registry_present = any(line.startswith('devbox-host-') for line in registry_stream)
 def info(directory):
     if action == 'status':
         return observation_namespace['read_hold'](directory, 'holder' if 'waiter.' in os.path.basename(directory) else 'by')
@@ -2531,7 +2551,8 @@ def log(event, resource, holder, detail=''):
     with open(journal, 'a') as stream:
         stream.write(datetime.datetime.now().strftime('%Y-%m-%d %H:%M') + '\t' + event + '\t' + resource + '\t' + holder + '\t' + detail + '\n')
 def print_notes(id):
-    notes = root + '/notes/' + id + '.md'
+    resource = host_rows.get(dynamic_ids.get(id), id)
+    notes = root + '/notes/' + resource + '.md'
     if os.path.isfile(notes) and os.path.getsize(notes) > 0:
         sys.stdout.write('\n── notes for %s (%s) — read before use ──\n' % (id, notes))
         with open(notes) as stream: sys.stdout.write(stream.read())
@@ -2559,7 +2580,19 @@ def print_build_capacity():
             count, checkout = build_probe(value)
             if count: print('  %s STALE-PID (build alive) holder=%s under %s: %d' % (name, value.get('by', '?'), checkout, count))
             elif count is None: print('  %s STALE-PID (build probe unavailable)' % name)
+def bypass_file(value):
+    identity=value.get('pool_controller') or '|'.join(value.get(field,'') for field in ('order','holder','host','pid'))
+    return os.path.join(root,'pool-bypasses',hashlib.sha256(identity.encode()).hexdigest()+'.json')
+def bypass_count(value):
+    try:
+        with open(bypass_file(value)) as stream: return int(json.load(stream))
+    except FileNotFoundError: return int(value.get('bypasses','0'))
 def remove_waiter():
+    if waiter:
+        value=info(waiter) or (info(episode) if episode else {})
+        if value:
+            try: os.unlink(bypass_file(value))
+            except FileNotFoundError: pass
     if waiter and os.path.isdir(waiter): shutil.rmtree(waiter)
     if episode and os.path.isdir(episode): shutil.rmtree(episode)
     if queue and os.path.isdir(queue):
@@ -2603,7 +2636,8 @@ def admission():
     os.makedirs(queue, exist_ok=True)
     # A claim's mkdir and metadata publication must appear together to FIFO.
     # Release the guard before post-claim validation so callers can overlap.
-    with open(os.path.join(queue, '.admission.lock'), 'a') as guard:
+    shared = os.path.join(root, 'pool-waiters', '.devbox-admission.lock') if host_registry_present and request.startswith('devbox-cn') else os.path.join(queue, '.admission.lock')
+    with open(shared, 'a') as guard:
         fcntl.flock(guard, fcntl.LOCK_EX)
         yield
 def cancelled(signum, frame):
@@ -2614,7 +2648,7 @@ try:
     observation_namespace = {}
     if action == 'status': exec(os.environ['RES_OBSERVATION_SOURCE'], observation_namespace)
     if any(c in value for value in (by, project, task, purpose, until, warm_family) for c in '\t\r\n'): raise ValueError('hold metadata must be one line')
-    if action not in ('box-health', 'scores', 'status', 'audit'): os.makedirs(locks, exist_ok=True)
+    if action not in ('box-health', 'scores', 'status', 'audit', 'slot-host', 'devbox-registry', 'pool-capacity'): os.makedirs(locks, exist_ok=True)
     if action in ('cancel', 'cleanup'):
         queue = os.path.join(root, 'pool-waiters', request)
         waiter = os.path.join(root, 'pool-waiters', request, 'waiter.' + controller_key)
@@ -2636,6 +2670,45 @@ try:
                 parts = line.rstrip('\n').split('\t', 4)
                 if len(parts) != 5: raise ValueError('invalid resource registry')
                 rows[parts[0]] = parts[1:]
+        # Host rows define aliases and a namespace, never a fixed number of slots.
+        global dynamic_ids, host_rows
+        dynamic_ids = {}; host_rows = {}
+        known = {request, preferred_slot}
+        for folder, suffix in (('locks', '.d'), ('devbox-cleanup-pending', '.json'), ('devbox-leases', '.json')):
+            directory = os.path.join(root, folder)
+            if os.path.isdir(directory): known.update(name[:-len(suffix)] for name in os.listdir(directory) if name.endswith(suffix))
+        try:
+            with open(os.path.join(root, 'devbox-affinity.json')) as stream: affinity = json.load(stream)
+            known.update(v.get('slot', '') for v in affinity.values() if isinstance(v, dict))
+        except FileNotFoundError: pass
+        for resource, data in list(rows.items()):
+            if not resource.startswith('devbox-host-'): continue
+            if data[0] != 'remote' or data[2] != '-': raise ValueError('invalid devbox host row')
+            label = resource[len('devbox-host-'):]
+            if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', label): raise ValueError('invalid host label')
+            addresses = set(re.findall(r'[A-Za-z_][A-Za-z0-9_.-]*@[A-Za-z0-9][A-Za-z0-9.-]*', data[3]))
+            if len(addresses) != 1: raise ValueError('host row needs one user@host')
+            box = next(iter(addresses)).split('@', 1)[1].rstrip('.')
+            if box in host_rows: raise ValueError('duplicate devbox host row')
+            host_rows[box] = resource
+            alias_tag = re.search(r'(?:^|\s)aliases=([^\s]+)', data[3])
+            aliases = set(alias_tag.group(1).split(',')) if alias_tag else set()
+            if any(not re.fullmatch(r'devbox-cn-(?:[0-9]+|light(?:-[0-9]+)?)', v) for v in aliases): raise ValueError('invalid legacy aliases')
+            prefix = 'devbox-cn-' + label + '-'
+            leases = {v for v in known if isinstance(v, str) and re.fullmatch(re.escape(prefix) + r'[1-9][0-9]*', v)}
+            leases_only = 'leases-only' in data[3].split()
+            if not leases_only:
+                ordinal = 1
+                while (os.path.lexists(os.path.join(locks, prefix + str(ordinal) + '.d'))
+                       or os.path.lexists(os.path.join(root, 'devbox-cleanup-pending', prefix + str(ordinal) + '.json'))
+                       or prefix + str(ordinal) in set((excluded_slots+','+hard_slots).split(','))): ordinal += 1
+                leases.add(prefix + str(ordinal))
+            for id in aliases | leases:
+                if id in rows: continue  # Rollback restores the original alias policy/caps.
+                row = list(data)
+                if leases_only: row[1] = 'never'
+                rows[id] = row
+                dynamic_ids[id] = box
         remote = {}
         for id, (kind, policy, device, description) in rows.items():
             match = re.search(r'[A-Za-z0-9_.-]+@([A-Za-z0-9][A-Za-z0-9.-]*)', description)
@@ -2645,8 +2718,29 @@ try:
             remote[id] = (policy, match.group(1).rstrip('.'), set(caps.group(1).split(',')) if caps else set(), set(prefs.group(1).split(',')) if prefs else set())
         return rows, remote
     rows, remote = read_registry()
+    def lease_json(id):
+        if id not in remote or id.startswith('devbox-host-'): raise ValueError('unknown devbox lease ' + id)
+        description = rows[id][3]
+        target = re.search(r'([A-Za-z_][A-Za-z0-9_.-]*)@([A-Za-z0-9][A-Za-z0-9.-]*)', description)
+        runner_root = re.search(r'(?:^|\s)root=([^\s]+)', description)
+        cached_root = None; fact = {}
+        try:
+            with open(os.path.join(root,'devbox-hosts.json')) as stream: facts=json.load(stream)
+            candidate=facts.get(remote[id][1],{})
+            if candidate.get('user') == target.group(1):
+                fact=candidate; cached_root=fact.get('root')
+        except FileNotFoundError: pass
+        hold = info(os.path.join(locks, id + '.d'))
+        return dict(slot=id, kind=rows[id][0], policy=rows[id][1], host=remote[id][1], user=target.group(1),
+                    target=target.group(0), root=runner_root.group(1) if runner_root else cached_root,
+                    cores=fact.get('cores'), memGiB=fact.get('memGiB'), factsAt=fact.get('probedAt'),
+                    caps=sorted(remote[id][2]), dynamic=id in dynamic_ids, resolverOnly='leases-only' in description.split(),
+                    category=hold.get('claim_kind') or ('LIGHT' if id.startswith('devbox-cn-light') else 'HEAVY'))
+    if action in ('slot-host', 'devbox-registry'):
+        value = lease_json(request) if action == 'slot-host' else [lease_json(id) for id in remote if not id.startswith('devbox-host-')]
+        print(json.dumps(value)); committed = True; sys.exit(0)
     # A pool name (prefix of slot ids such as devbox-cn) is a valid status request: it shows that pool's waiters.
-    if action == 'status' and request and request not in rows and not any(key.startswith(request + '-') for key in rows):
+    if action == 'status' and request and request not in rows and not (host_rows and request in ('devbox-cn','devbox-cn-light')) and not any(key.startswith(request + '-') for key in rows):
         raise ValueError("unknown resource '%s'" % request)
     def health():
         try:
@@ -2690,17 +2784,26 @@ try:
         config_invalid_warned = config.get('fallback', False)
         reclaim = values.get('DEVBOX_LIGHT_STALE_RECLAIM') == '1'
         soft_minutes = values.get('DEVBOX_SOFT_EXCLUDE_MINUTES', 5)
-        enrolled = values.get('DEVBOX_DYNAMIC_HOSTS', '').split(',') if values.get('DEVBOX_DYNAMIC_ADMISSION') == '1' else []
+        enrolled = set(values.get('DEVBOX_DYNAMIC_HOSTS', '').split(',')) if values.get('DEVBOX_DYNAMIC_ADMISSION') == '1' else set()
+        enrolled.update(host_rows)
         return {box: dict({key: values.get('DEVBOX_' + key + '.' + box, values.get('DEVBOX_' + key, default))
                            for key, default in defaults.items()},
                           project_disk={kind: values.get('DEVBOX_' + kind + '_DISK_GIB.project.' + project)
                                         for kind in ('HEAVY', 'LIGHT')})
                 for box in enrolled if box}, reclaim, soft_minutes
     def slot_type(id):
+        if id in dynamic_ids:
+            hold = info(os.path.join(locks, id + '.d'))
+            if hold.get('claim_kind'): return hold['claim_kind']
+            try:
+                issued=json.loads(regular_text(os.path.join(root,'devbox-leases',id+'.json')))
+                if issued.get('category') in ('HEAVY','LIGHT'): return issued['category']
+            except FileNotFoundError: pass
+            return 'LIGHT' if id.startswith('devbox-cn-light') or request == 'devbox-cn-light' else 'HEAVY'
         if re.fullmatch(r'devbox-cn-[0-9]+', id): return 'HEAVY'
         if re.fullmatch(r'devbox-cn-light(?:-[0-9]+)?', id): return 'LIGHT'
     def floating(id):
-        return id in rows and 'dynamic-only' in rows[id][3].split()
+        return id in dynamic_ids or id in rows and 'dynamic-only' in rows[id][3].split()
     def stale_dead(directory, retained=False):
         hold = info(directory)
         old_pid, start = hold.get('pid', ''), hold.get('start', '')
@@ -2794,7 +2897,7 @@ try:
                     or not all(number(item) and item > 0 for item in value[:3])
                     or len(value) >= 4 and (not number(value[3]) or value[3] < 0)):
                 raise ValueError('invalid devbox reservations for ' + box)
-            if current - value[0] >= (900 if len(value) >= 4 else 300): continue
+            if len(value) < 5 and current - value[0] >= (900 if len(value) >= 4 else 300): continue
             if len(value) == 5:
                 owner = value[4]
                 if not isinstance(owner, dict) or not all(owner.get(k) for k in ('slot', 'by', 'pid', 'host', 'start')):
@@ -2804,7 +2907,22 @@ try:
                 if any(hold.get(k) != owner[k] for k in ('by', 'pid', 'host', 'start')): continue
                 if owner['slot'] in seen: continue
                 seen.add(owner['slot'])
+            if len(value) == 5 and value[4]['slot'] not in dynamic_ids and current - value[0] >= 900: continue
             result.append(value)
+        # In-flight claims and migrated old holds also reserve their inherited weight.
+        if box in host_rows:
+            settings = dynamic.get(box, {})
+            for id, member in remote.items():
+                if member[1] != box or id.startswith('devbox-host-') or id in seen: continue
+                directory = os.path.join(locks, id + '.d')
+                if not os.path.isdir(directory): continue
+                hold = info(directory)
+                if not hold or not settings: continue
+                kind = hold.get('claim_kind') or ('LIGHT' if id.startswith('devbox-cn-light') else 'HEAVY')
+                weights = [float(hold.get('claim_cores', settings[kind+'_CORES'])),
+                           float(hold.get('claim_mem', settings[kind+'_GIB'])),
+                           float(hold.get('claim_disk', settings[kind+'_DISK_GIB']))]
+                result.append([current, *weights, dict(slot=id, **{k:hold.get(k, '') for k in ('by','pid','host','start')})])
         return result
     @contextmanager
     def host_guard(box):
@@ -2838,6 +2956,8 @@ try:
             entries = [entry for entry in entries if len(entry) < 5 or not
                        (entry[4]['slot'] == id and all(entry[4][k] == hold.get(k) for k in ('by', 'pid', 'host', 'start')))]
             write_reservations(box, entries)
+    for name, weight in (('--cores', claim_cores), ('--mem-gib', claim_mem)):
+        if weight and (not re.fullmatch(r'[0-9]+(?:\.[0-9]+)?', weight) or not 0 < float(weight) <= 65536): raise ValueError('invalid ' + name)
     disk_costs = {}
     if disk_gib_file:
         disk_costs = json.loads(regular_text(disk_gib_file))
@@ -2859,17 +2979,24 @@ try:
                     or not all(number(value.get(key)) and 0 <= value[key] <= 1e9 for key in ('waitSec','rebuildSec','extraDiskGiB'))
                     or not isinstance(value.get('hardReasons'), list)):
                 raise ValueError('invalid input placement score')
-    def gate(box, kind, settings, current, only_dynamic=False, override=False, id=None):
+    if input_placement:
+        for id, box in dynamic_ids.items():
+            if id in input_placement['slots']: continue
+            template = next((v for slot,v in input_placement['slots'].items() if slot in remote and remote[slot][1] == box), None)
+            if template: input_placement['slots'][id] = dict(template)
+    def gate(box, kind, settings, current, only_dynamic=False, override=False, id=None, weights=None, claimed=False):
         value = sample(box, current) if settings else {}
         entries = reservations(box, current) if settings else []
-        recent = [entry for entry in entries if current - entry[0] < 300]
+        if claimed: entries = [entry for entry in entries if len(entry) < 5 or entry[4]['slot'] != id]
+        recent = [entry for entry in entries if current - entry[0] < 300 or len(entry) == 5 and entry[4]['slot'] in dynamic_ids]
         cpu, mem = (sum(entry[i] for entry in recent) for i in (1, 2))
         disk = sum(entry[3] for entry in entries if len(entry) >= 4)
         cost = (settings[kind + '_CORES'], settings[kind + '_GIB'],
-                disk_costs.get(id, float(disk_gib) if disk_gib else
-                    settings['project_disk'][kind] or settings[kind + '_DISK_GIB'])) if settings else None
-        if cost: cost=(*cost[:2],cost[2]+float(extra_disk_gib))
-        if cost and input_placement:
+                disk_costs.get(id, next((disk_costs[slot] for slot in disk_costs if id in dynamic_ids and slot in remote and remote[slot][1] == box), float(disk_gib) if disk_gib else
+                    settings['project_disk'][kind] or settings[kind + '_DISK_GIB']))) if settings else None
+        if cost: cost=(float(claim_cores) if claim_cores else cost[0], float(claim_mem) if claim_mem else cost[1], cost[2]+float(extra_disk_gib))
+        if cost and weights is not None: cost=weights
+        if cost and input_placement and weights is None:
             extra = input_placement['slots'].get(id, {}).get('extraDiskGiB', 0)
             cost = (*cost[:2], cost[2] + extra)
         if cost and maintenance: cost = (*cost[:2], 0)
@@ -2884,10 +3011,14 @@ try:
         if not value:
             reason = 'stale-or-missing-metrics' if settings else 'disabled'
             return ('closed-' if only_dynamic else 'static-') + reason, detail, entries, cost
+        if box in host_rows:
+            ceiling = int(settings['MAX_CLAIMS']) or max(1, int(value['cores'] / min(settings['HEAVY_CORES'], settings['LIGHT_CORES'])))
+            occupied = sum(os.path.isdir(os.path.join(locks, slot + '.d')) for slot, member in remote.items() if member[1] == box and not slot.startswith('devbox-host-') and (not claimed or slot != id))
+            if occupied >= ceiling: return 'max-claims', detail + ' max_claims=' + str(ceiling), entries, cost
         limit = value['cores'] * settings['LOAD_PER_CORE']
         floor = settings['MIN_AVAIL_GIB']
         detail += ' load_limit=%g mem_floor_gib=%g task_cores=%g task_gib=%g task_disk_gib=%g disk_floor_gib=53' % (limit, floor, *cost)
-        if kind == 'HEAVY' and io_closed(box, value, settings): return 'io-pressure', detail, entries, cost
+        if (kind == 'HEAVY' or box in host_rows) and io_closed(box, value, settings): return 'io-pressure', detail, entries, cost
         if not maintenance and value['freeGiB'] - disk - cost[2] < 53: return 'disk', detail, entries, cost
         if value['memAvailableGiB'] - mem - cost[1] < floor: return 'memory', detail, entries, cost
         if value['load5'] + cpu + cost[0] > limit:
@@ -2896,6 +3027,29 @@ try:
     def gate_open(reason):
         return reason in ('headroom', 'load-override', 'static-disabled', 'static-stale-or-missing-metrics')
     dynamic, light_reclaim, soft_minutes = devbox_settings()
+    if action == 'pool-capacity':
+        if request not in ('devbox-cn', 'devbox-cn-light'): raise ValueError('unsupported capacity pool')
+        kind = 'LIGHT' if request == 'devbox-cn-light' else 'HEAVY'
+        result = {}
+        for box in host_rows:
+            if rows[host_rows[box]][1] != 'open' or 'leases-only' in rows[host_rows[box]][3].split():
+                result[box]=dict(claims=0,gate='resolver-only-or-policy'); continue
+            settings = dynamic.get(box); current=time.time()
+            reason, _, entries, cost = gate(box, kind, settings, current, True)
+            value = sample(box,current)
+            count = 0
+            if reason == 'headroom':
+                recent = [entry for entry in entries if current-entry[0] < 300 or len(entry)==5 and entry[4]['slot'] in dynamic_ids]
+                cpu=sum(entry[1] for entry in recent); mem=sum(entry[2] for entry in recent)
+                disk=sum(entry[3] for entry in entries if len(entry)>=4)
+                maximum=int(settings['MAX_CLAIMS']) or max(1,int(value['cores']/min(settings['HEAVY_CORES'],settings['LIGHT_CORES'])))
+                held=sum(os.path.isdir(os.path.join(locks,id+'.d')) for id,member in remote.items() if member[1]==box and not id.startswith('devbox-host-'))
+                count=max(0,min(math.floor((value['cores']*settings['LOAD_PER_CORE']-value['load5']-cpu)/cost[0]),
+                                math.floor((value['memAvailableGiB']-mem-settings['MIN_AVAIL_GIB'])/cost[1]),
+                                math.floor((value['freeGiB']-disk-53)/cost[2]) if cost[2] else maximum,
+                                maximum-held))
+            result[box]=dict(claims=count,gate=reason)
+        print(json.dumps(result)); committed=True; sys.exit(0)
     def capacity(hosts):
         try:
             with open(os.path.join(root, 'devbox-hosts.json')) as stream: probes = json.load(stream)
@@ -2930,20 +3084,20 @@ try:
             else: cores, source = None, 'unknown'
             free = measured.get('freeGiB') if measured else probe.get('freeGiB') if fresh else None
             entries = reservations(box, now) if measured else []
-            recent = [entry for entry in entries if now - entry[0] < 300]
+            recent = [entry for entry in entries if now - entry[0] < 300 or len(entry) == 5 and entry[4]['slot'] in dynamic_ids]
             reserved_cpu = sum(entry[1] for entry in recent)
             reserved_mem = sum(entry[2] for entry in recent)
             kind = 'LIGHT' if request == 'devbox-cn-light' else 'HEAVY'
             settings = dynamic.get(box, {})
-            task_cpu = settings.get(kind + '_CORES', (config_current_values or {}).get('DEVBOX_' + kind + '_CORES.' + box,
+            task_cpu = float(claim_cores) if claim_cores else settings.get(kind + '_CORES', (config_current_values or {}).get('DEVBOX_' + kind + '_CORES.' + box,
                          (config_current_values or {}).get('DEVBOX_' + kind + '_CORES', 1 if kind == 'LIGHT' else 3)))
-            task_mem = settings.get(kind + '_GIB', 2 if kind == 'LIGHT' else 4)
+            task_mem = float(claim_mem) if claim_mem else settings.get(kind + '_GIB', 2 if kind == 'LIGHT' else 4)
             # CPU hardware does not shrink when a disk probe expires. Unknown
             # hardware uses a labelled slot-count fallback, never invented cores.
             result[box] = dict(cores=cores, coresSource=source, probeAgeSec=age,
                                probeStale=not fresh, metricsFresh=bool(measured), heldSlots=held[box],
                                score=held[box] / (cores or 1), nextScore=(held[box] + 1) / (cores or 1),
-                               spareCores=cores - max(measured['load5'], reserved_cpu) - task_cpu if measured else None,
+                               spareCores=cores - (measured['load5'] + reserved_cpu if box in host_rows else max(measured['load5'], reserved_cpu)) - task_cpu if measured else None,
                                spareMemGiB=measured['memAvailableGiB'] - reserved_mem - task_mem if measured else None,
                                freeGiB=free if number(free) and free >= 0 else None)
         return result
@@ -3062,7 +3216,7 @@ try:
                 print(f"{box} {status} failures30m={value['failures30m']} until={until} reason={value.get('reason', '')} {score_line(value)}")
         committed = True; sys.exit(0)
     def print_scores():
-        shown = hosts if not request else {remote[request][1]} if request in remote else set()
+        shown = hosts if not request or host_rows and request in ('devbox-cn','devbox-cn-light') else {remote[request][1]} if request in remote else set()
         values = capacity(shown) if shown else {}
         for box, value in sorted(values.items()):
             print('Host ' + box + ' ' + score_line(value))
@@ -3077,6 +3231,13 @@ try:
                 free = (not (reason.startswith('static-') and static_full(box, kind))
                         and any(not os.path.isdir(os.path.join(locks, id + '.d')) for id in members))
                 why = reason if not gate_open(reason) or free else 'slots-full'
+                if box in host_rows:
+                    free = any(not os.path.isdir(os.path.join(locks,slot+'.d')) for slot in dynamic_ids if dynamic_ids[slot] == box and remote[slot][0] == 'open')
+                    why = reason if not gate_open(reason) or free else 'claims-full'
+                    total = sum(os.path.isdir(os.path.join(locks, slot+'.d')) for slot, member in remote.items() if member[1] == box and not slot.startswith('devbox-host-'))
+                    ceiling = int(settings['MAX_CLAIMS']) or (max(1,int(measured['cores']/min(settings['HEAVY_CORES'],settings['LIGHT_CORES']))) if measured else '?')
+                    print('  %s admitted=%d shared_claims=%d max_claims=%s gate=%s reason=%s %s' % (kind.lower(), admitted,total,ceiling,'OPEN' if gate_open(reason) and free else 'CLOSED',why,detail))
+                    continue
                 print('  %s admitted=%d/%d gate=%s reason=%s %s' % (
                     kind.lower(), admitted, len(members), 'OPEN' if gate_open(reason) and free else 'CLOSED', why, detail))
                 if kind in ('LIGHT', 'HEAVY'):
@@ -3102,7 +3263,7 @@ try:
         print('%-16s %-9s %-9s %-12s %-34s %s' % ('ID', 'KIND', 'POLICY', 'LINK', 'HOLDER', 'SINCE → UNTIL / PURPOSE'))
         warn_short_pid = False
         for id, (kind, policy, device, description) in rows.items():
-            if request and id != request: continue
+            if request and id != request and not (host_rows and request in ('devbox-cn','devbox-cn-light') and (id in dynamic_ids or id.startswith('devbox-host-'))): continue
             if id == 'heavy-build':
                 build_values = [info(os.path.join(locks, name + '.d')) for name in ('heavy-build', 'heavy-build-2', 'heavy-build-3')]
                 value = next((item for item in build_values if item), {})
@@ -3173,7 +3334,9 @@ try:
         boxes = excluded_boxes if boxes is None else boxes
         return id in remote and remote[id][0] == 'open' and id not in skip and remote[id][1] not in boxes and req <= remote[id][2]
 
-    def pool_member(id, pool): return bool(re.fullmatch(re.escape(pool) + r'-[0-9]+', id) or pool.endswith('-light') and id == pool)
+    def pool_member(id, pool):
+        if id in dynamic_ids and pool in ('devbox-cn', 'devbox-cn-light'): return True
+        return bool(re.fullmatch(re.escape(pool) + r'-[0-9]+', id) or pool.endswith('-light') and id == pool)
     if action == 'wait':
         compatible = [id for id in rows if pool_member(id, request) and eligible(id, skip=hard_skip, boxes=hard_boxes)]
         if not compatible: raise ValueError("no open remote member of pool '%s' satisfies --need '%s'" % (request, need or '(none)'))
@@ -3194,14 +3357,19 @@ try:
                        started_at=str(stamp), order='%020d' % time.time_ns(), gate_streak='0', lane='', lane3='CLOSED', controller_pid=controller)
             log('waiter-start', request + '-any', by + ' (' + project + ('/' + task if task else '') + ')', 'pid=' + str(pid))
         own.update(pool_controller=controller_key, heartbeat=str(int(stamp)), blocked='slot', need=need,
+                   claim_kind='LIGHT' if request == 'devbox-cn-light' else 'HEAVY', claim_cores=claim_cores, claim_mem=claim_mem, claim_disk=disk_gib,
                    exclude_slots=','.join(sorted(excluded)), exclude_hosts=','.join(sorted(excluded_boxes)),
                    exclude_reason=exclude_reason, worker_thread=os.environ.get('CODEX_WORKER_THREAD') or os.environ.get('CODEX_THREAD_ID') or os.environ.get('TRAECLI_THREAD_ID', ''),
                    worker_account=os.environ.get('CODEX_WORKER_ACCOUNT', ''),
                    worker_owner=os.environ.get('CODEX_WORKER_OWNER') or os.environ.get('ORCHESTRATOR_OWNER', ''))
+        if host_rows:
+            weights = {id:list(gate(remote[id][1],own['claim_kind'],dynamic.get(remote[id][1]),time.time(),True,id=id)[3]) for id in members if id in dynamic_ids}
+            own['claim_weights']=json.dumps(weights,separators=(',',':'))
         refresh_waiter()
     elif action == 'retain-remote':
         if request not in remote or not slot_type(request): raise ValueError('expected a registered devbox slot')
-        if slot_type(request) == 'LIGHT': queue = os.path.join(root, 'pool-waiters', 'devbox-cn-light')
+        if request in dynamic_ids: queue = os.path.join(root, 'pool-waiters', 'devbox-cn')
+        elif slot_type(request) == 'LIGHT': queue = os.path.join(root, 'pool-waiters', 'devbox-cn-light')
         with admission():
             directory = os.path.join(locks, request + '.d')
             hold = info(directory)
@@ -3212,6 +3380,7 @@ try:
             log('retain-remote', request, by, 'remote cleanup unconfirmed')
         committed = True; sys.exit(0)
     elif action == 'release-dead':
+        if request in dynamic_ids: queue = os.path.join(root, 'pool-waiters', 'devbox-cn')
         if request not in remote or not slot_type(request): raise ValueError('expected a registered devbox slot')
         with admission():
             directory = os.path.join(locks, request + '.d')
@@ -3226,7 +3395,8 @@ try:
         committed = True; sys.exit(0)
     elif action == 'return':
         if request not in rows: raise ValueError("unknown resource '%s'" % request)
-        if slot_type(request) == 'LIGHT': queue = os.path.join(root, 'pool-waiters', 'devbox-cn-light')
+        if request in dynamic_ids: queue = os.path.join(root, 'pool-waiters', 'devbox-cn')
+        elif slot_type(request) == 'LIGHT': queue = os.path.join(root, 'pool-waiters', 'devbox-cn-light')
         with admission():
             directory = os.path.join(locks, request + '.d'); hold = info(directory)
             if not os.path.isdir(directory): print(request + ' was not held'); committed = True; sys.exit(0)
@@ -3239,6 +3409,7 @@ try:
         print('returned ' + request); committed = True; sys.exit(0)
     elif action == 'take':
         if request not in rows: raise ValueError("unknown resource '%s'" % request)
+        if request.startswith('devbox-host-'): raise ValueError('host rows are resolved through wait-pool, not taken directly')
         policy = rows[request][1]
         if policy == 'never' or policy == 'ask-user' and not force:
             print("res: '%s' needs the user's OK or is off limits (policy %s)" % (request, policy), file=sys.stderr); sys.exit(3)
@@ -3257,10 +3428,11 @@ try:
     def quarantined(id, state):
         value = state.get(remote[id][1], {})
         return value.get('manual', False) or value.get('quarantinedUntil', 0) > time.time()
+    if host_rows and request.startswith('devbox-cn') and not queue: queue = os.path.join(root, 'pool-waiters', 'devbox-cn')
     state = health()
     def current_waiter(directory, value):
         return bool(waiter and (directory == waiter or all(value.get(key) == own.get(key) for key in ('order', 'holder', 'pid', 'host'))))
-    def waiting():
+    def waiting_one():
         heads = []
         if queue and os.path.isdir(queue):
             for name in os.listdir(queue):
@@ -3285,7 +3457,16 @@ try:
                     continue
                 try: streak = int(value.get('gate_streak', '0'))
                 except ValueError: streak = 0
-                if streak < 3: heads.append((value.get('order', value.get('start', '')), directory, value))
+                if host_rows or streak < 3: heads.append((value.get('order', value.get('start', '')), directory, value))
+        return sorted(heads)
+    def waiting():
+        global queue
+        if not host_rows or not request.startswith('devbox-cn'): return waiting_one()
+        original = queue; heads = []
+        try:
+            for pool in ('devbox-cn', 'devbox-cn-light'):
+                queue = os.path.join(root, 'pool-waiters', pool); heads.extend(waiting_one())
+        finally: queue = original
         return sorted(heads)
     def older_options(heads, available, claims):
         older = []
@@ -3311,9 +3492,35 @@ try:
         for index in range(len(options)): assign(index, set())
         return len(assigned)
     def fifo_allows(id, state, claimed=False):
+        global bypass_pending
+        bypass_pending = []
         heads = waiting()
         if action != 'wait': return not heads
         if not heads or current_waiter(heads[0][1], heads[0][2]): return True
+        if id in dynamic_ids:
+            box = remote[id][1]; settings = dynamic.get(box)
+            if not settings: return False
+            for _, directory, value in heads:
+                if current_waiter(directory, value): break
+                if value.get('pool_controller') and any(info(os.path.join(locks, slot+'.d')).get('pool_controller') == value['pool_controller'] for slot in remote if slot != id): continue
+                if not eligible(id, csv(value.get('need','')), csv(value.get('exclude_slots','')), csv(value.get('exclude_hosts',''))): continue
+                allowed = csv(value['input_allowed_slots']) if 'input_allowed_slots' in value else None
+                if allowed is not None and id not in allowed: continue
+                kind = value.get('claim_kind', 'HEAVY')
+                weights = (float(value.get('claim_cores') or settings[kind+'_CORES']),
+                           float(value.get('claim_mem') or settings[kind+'_GIB']),
+                           float(value.get('claim_disk') or settings[kind+'_DISK_GIB']))
+                recorded=json.loads(value.get('claim_weights','{}'))
+                if id in recorded: weights=tuple(recorded[id])
+                reason = gate(box, kind, settings, time.time(), True, id=id, weights=weights, claimed=claimed)[0]
+                # Bypass only a larger claim blocked by measured headroom. After
+                # MAX_BYPASS successful small admissions, drain for this head.
+                own_kind = 'LIGHT' if request == 'devbox-cn-light' else 'HEAVY'
+                own_weights = (float(claim_cores or settings[own_kind+'_CORES']), float(claim_mem or settings[own_kind+'_GIB']))
+                if (gate_open(reason) or bypass_count(value) >= int(settings['MAX_BYPASS'])
+                        or reason not in ('load','memory','disk') or not (own_weights[0] < weights[0] or own_weights[1] < weights[1])): return False
+                bypass_pending.append((directory, value))
+            return True
         free, claims = set(), {}
         for slot, (policy, _, _, _) in remote.items():
             if policy != 'open' or not pool_member(slot, request) or quarantined(slot, state): continue
@@ -3362,7 +3569,7 @@ try:
     def evaluate(id, box, override=False, claimed=False, diagnostic=False):
         current = time.time()
         kind = slot_type(id)
-        reason, detail, entries, cost = gate(box, kind, dynamic.get(box), current, floating(id), override, id=id)
+        reason, detail, entries, cost = gate(box, ('LIGHT' if request == 'devbox-cn-light' else 'HEAVY') if id in dynamic_ids else kind, dynamic.get(box), current, floating(id), override and box not in host_rows, id=id, claimed=claimed)
         if reason.startswith('static-') and static_full(box, kind, id if claimed else None):
             reason = 'static-cap'
         if not gate_open(reason) and not diagnostic:
@@ -3489,6 +3696,12 @@ try:
                             until=until, pid=str(pid), host=host, start=str(int(time.time())), pool_controller=controller_key)
                 if not alive(pid): hold['pid_warning'] = 'short-lived pid'
                 if previous_holder: hold['reclaimed_from'] = previous_holder
+                if id in dynamic_ids:
+                    claim_kind = 'LIGHT' if request == 'devbox-cn-light' else 'HEAVY'
+                    _, _, _, weights, _ = evaluate(id, box, claimed=True)
+                    hold.update(claim_kind=claim_kind, claim_cores=str(weights[0]), claim_mem=str(weights[1]), claim_disk=str(weights[2]))
+                    catalog = os.path.join(root, 'devbox-leases'); os.makedirs(catalog, exist_ok=True)
+                    machine_helpers['atomic_json'](os.path.join(catalog, id + '.json'), dict(slot=id, host=box, category=claim_kind))
                 publish(directory, hold)
                 description = rows[id][3]
             scratch = os.path.realpath(root) != os.path.realpath(os.path.expanduser('~/.claude/orchestrator/_shared'))
@@ -3535,6 +3748,14 @@ try:
                         rollback()
                         continue
                     if cost: reserve(box, entries, current, cost, id, hold)
+                    for directory, earlier in bypass_pending:
+                        latest = info(directory)
+                        if latest.get('order') == earlier.get('order'):
+                            count=bypass_count(latest)+1
+                            os.makedirs(os.path.join(root,'pool-bypasses'),exist_ok=True)
+                            machine_helpers['atomic_json'](bypass_file(latest), count)
+                            latest['bypasses'] = str(count); publish(directory, latest)
+                            log('waiter-bypass', id, by, 'older=' + latest.get('holder','?') + ' count=' + latest['bypasses'])
                     if cost or floating(id): log('gate-admit', id, holder, 'reason=' + reason + ' ' + detail)
             log('take', id, by + ' (' + project + ('/' + task if task else '') + ')', purpose + (' · until ' + until if until else ''))
             print('took ' + id)
@@ -3613,7 +3834,7 @@ cmd_wait_pool() {
           --hard-exclude-slot) hard_slots="$2" ;;
           --hard-exclude-host) hard_hosts="$2" ;;
         esac; shift 2 ;;
-      --by|--project|--for|--task|--until|--note|--pid|--disk-gib|--disk-gib-file|--placement-file|--extra-disk-gib)
+      --by|--project|--for|--task|--until|--note|--pid|--disk-gib|--disk-gib-file|--placement-file|--extra-disk-gib|--cores|--mem-gib)
         [ $# -ge 2 ] || die "$1 needs a value"; args+=("$1" "$2"); shift 2 ;;
       --force|--offline|--maintenance) args+=("$1"); shift ;;
       *) die "unknown option '$1'" ;;
@@ -3661,6 +3882,12 @@ registry_record() {
   while IFS=$'\t' read -r id REG_KIND REG_POLICY REG_DEVICE REG_DESCRIPTION; do
     [ "$id" != "$wanted" ] || return 0
   done <"$REG"
+  if [[ "$wanted" = devbox-cn-* ]]; then
+    local resolved
+    resolved=$(pool_report slot-host "$wanted" 2>/dev/null) || return 1
+    IFS=$'\t' read -r REG_KIND REG_POLICY REG_DEVICE REG_DESCRIPTION < <(python3 -c 'import json,sys; v=json.loads(sys.argv[1]); print(v["kind"]+"\t"+v["policy"]+"\t-\t"+v["target"])' "$resolved")
+    return 0
+  fi
   return 1
 }
 
@@ -3730,7 +3957,7 @@ cmd_status() {
   if [ -n "${1:-}" ]; then
     if ! registry_record "$1"; then
       # A pool name (prefix of slot ids such as devbox-cn) keeps the pool view with its waiters.
-      grep -q "^$1-" "$REG" 2>/dev/null || die "unknown resource '$1'"
+      [[ "$1" = devbox-cn* ]] && grep -q "^devbox-host-" "$REG" || grep -q "^$1-" "$REG" 2>/dev/null || die "unknown resource '$1'"
       pool_report status "$1"
       return $?
     fi
@@ -3997,6 +4224,14 @@ case "${1:-}" in
     cmd_wait_pool "$@"
     # Bash can read more source after a long wait if the executable was overwritten.
     exit 0 ;;
+  pool-capacity)
+    request="${2:-}"; shift 2
+    ALLOW_PID=1 parse "$@"
+    pool_report pool-capacity "$request" ;;
+  slot-host|devbox-registry)
+    action="$1"; shift
+    [ "$#" -le 1 ] || die "$action accepts at most one id"
+    pool_report "$action" "${1:-}" ;;
   box-health)
     shift
     [ "$#" -eq 0 ] || { [ "$#" -eq 1 ] && [ "$1" = --json ]; } || die 'box-health accepts only --json'

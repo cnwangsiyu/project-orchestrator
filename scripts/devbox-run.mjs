@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn, fork } from 'node:child_process';
+import { spawn, fork, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { StringDecoder } from 'node:string_decoder';
@@ -41,7 +41,7 @@ export function parseArgs(args) {
   const opts = { ref: 'HEAD', pool: 'devbox-cn', shards: 1, timeout: 120, fetchTimeout: 15, artifactTimeout: 120, artifactFetch: 'all', artifactStreams: 1, retainHours: 24, artifacts: [], env: {}, days: 7, need: [], excludeSlot: [], excludeHost: [], inputs: [] };
   if (args[0] === 'gc') { opts.gc = true; args = args.slice(1); }
   if (args[0] === 'prewarm') { opts.prewarm = true; opts.ref = 'main'; opts.task = 'prewarm'; args = args.slice(1); }
-  const names = new Map(['project', 'task', 'repo', 'ref', 'pool', 'shards', 'out', 'timeout', 'queue-timeout', 'prefer-host', 'watch-pid', 'affinity', 'host', 'days', 'units-file', 'command', 'fetch-timeout', 'artifact-timeout', 'artifact-fetch', 'artifact-streams', 'retain-hours', 'exclude-reason', 'prefer-slot', 'warm-cost', 'inputs'].map(n => [`--${n}`, n.replace(/-([a-z])/g, (_, c) => c.toUpperCase())]));
+  const names = new Map(['project', 'task', 'repo', 'ref', 'pool', 'shards', 'out', 'timeout', 'queue-timeout', 'prefer-host', 'watch-pid', 'affinity', 'host', 'days', 'units-file', 'command', 'fetch-timeout', 'artifact-timeout', 'artifact-fetch', 'artifact-streams', 'retain-hours', 'exclude-reason', 'prefer-slot', 'warm-cost', 'inputs', 'cores', 'mem-gib', 'disk-gib'].map(n => [`--${n}`, n.replace(/-([a-z])/g, (_, c) => c.toUpperCase())]));
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === '--') { if (opts.command) throw Error('provide only one command'); opts.command = args.slice(i + 1).join(' '); break; }
@@ -90,6 +90,7 @@ export function parseArgs(args) {
   if (opts.prewarm && !opts.project) throw Error('prewarm requires --project');
   for (const name of (opts.project === undefined ? ['task'] : ['project', 'task'])) if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,100}$/.test(opts[name] || '')) throw Error(`--${name} needs a simple identifier`);
   if (!opts.repo || !opts.command?.trim()) throw Error('--repo and a command after -- are required');
+  for (const name of ['cores', 'memGib', 'diskGib']) if (opts[name] !== undefined && (!/^[0-9]+(?:\.[0-9]+)?$/.test(opts[name]) || !(Number(opts[name]) > (name === 'diskGib' ? -1 : 0)) || Number(opts[name]) > 65536)) throw Error('invalid claim weight ' + name);
   if (!['devbox-cn', 'devbox-cn-light'].includes(opts.pool)) throw Error('unsupported pool');
   opts.shards = opts.shards === 'auto' ? 'auto' : Number(opts.shards); opts.timeout = Number(opts.timeout);
   if (opts.shards !== 'auto' && (!Number.isInteger(opts.shards) || opts.shards < 1 || opts.shards > 64)) throw Error('--shards must be auto or 1..64');
@@ -110,7 +111,16 @@ export function parseArgs(args) {
 }
 
 function registryRows(dir) {
-  const rows = fs.readFileSync(path.join(dir, 'resources.tsv'), 'utf8').trim().split('\n').map(line => {
+  const text = fs.readFileSync(path.join(dir, 'resources.tsv'), 'utf8');
+  if (/^devbox-host-/m.test(text)) {
+    // One catalog implementation: the source allocator resolves host rows,
+    // legacy aliases, pending cleanup and previously issued dynamic IDs.
+    const result = spawnSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'res/res'), ['devbox-registry'], {
+      env: { ...process.env, RULES_SHARED: dir, RES_DIR: dir }, encoding: 'utf8', timeout: 30000, maxBuffer: 8 * 2 ** 20 });
+    if (result.status !== 0) throw Error('dynamic devbox catalog failed: ' + (result.stderr || result.error?.message || result.status));
+    return JSON.parse(result.stdout);
+  }
+  const rows = text.trim().split('\n').map(line => {
     const [slot, kind, policy, , ...description] = line.split('\t');
     const addresses = [...description.join('\t').matchAll(/\b([A-Za-z_][A-Za-z0-9_.-]*)@((?:\d{1,3}\.){3}\d{1,3})\b/g)];
     const unique = [...new Set(addresses.map(m => `${m[1]}@${m[2]}`))];
@@ -120,9 +130,23 @@ function registryRows(dir) {
   return rows;
 }
 
+export function dynamicShardCapacity(rows, opts) {
+  const hosts = new Set(rows.filter(row=>row.dynamic).map(row=>row.host));
+  let count = rows.filter(row=>!row.dynamic).length;
+  if (!hosts.size) return count;
+  const weights = ['cores', 'memGib', 'diskGib'].flatMap(name=>opts[name]===undefined?[]:
+    ['--'+name.replace(/[A-Z]/g,c=>'-'+c.toLowerCase()),String(opts[name])]);
+  const result=spawnSync(path.join(path.dirname(fileURLToPath(import.meta.url)),'res/res'), ['pool-capacity',opts.pool,...weights],
+    {env:{...process.env,RES_DIR:sharedDir()},encoding:'utf8',timeout:30000});
+  if(result.status!==0) throw Error('dynamic capacity query failed: '+result.stderr);
+  const capacity=JSON.parse(result.stdout);
+  for(const host of hosts) count+=capacity[host]?.claims || 0;
+  return count;
+}
+
 export function readRegistry(dir, pool) {
   const pattern = pool === 'devbox-cn' ? /^devbox-cn-\d+$/ : /^devbox-cn-light(?:-\d+)?$/;
-  return registryRows(dir).filter(row => row.kind === 'remote' && row.policy === 'open' && pattern.test(row.slot));
+  return registryRows(dir).filter(row => row.kind === 'remote' && (row.policy === 'open' || row.dynamic && row.resolverOnly) && (row.dynamic || pattern.test(row.slot)));
 }
 
 const lockPath = (dir, slot) => path.join(dir, 'locks', `${slot}.d`);
@@ -138,12 +162,13 @@ function previousSlotJob(slot, by) {
 }
 const freeSlot = (dir, row) => !fs.existsSync(lockPath(dir, row.slot));
 const hasCapabilities = (opts, row) => opts.need.every(cap => row.caps.includes(cap));
-const eligibleSlot = (opts, row) => hasCapabilities(opts, row)
+const eligibleSlot = (opts, row) => !row.resolverOnly && hasCapabilities(opts, row)
   && (!opts.prewarm || opts.host === undefined || row.host === opts.host)
   && !opts.excludeSlot.includes(row.slot) && !opts.excludeHost.includes(row.host);
-const runRows = opts => opts.prewarm
-  ? [...readRegistry(sharedDir(), 'devbox-cn'), ...readRegistry(sharedDir(), 'devbox-cn-light')]
-  : readRegistry(sharedDir(), opts.pool);
+const uniqueRows = rows => [...new Map(rows.map(row => [row.slot, row])).values()];
+const runRows = opts => (opts.prewarm
+  ? uniqueRows([...readRegistry(sharedDir(), 'devbox-cn'), ...readRegistry(sharedDir(), 'devbox-cn-light')])
+  : readRegistry(sharedDir(), opts.pool)).filter(row=>!row.resolverOnly);
 
 function quarantinedHosts(dir) {
   let health;
@@ -169,7 +194,7 @@ function quarantinedHosts(dir) {
 
 function heldSlots(dir, host, liveOnly = false) {
   return registryRows(dir).filter(row => {
-    if (row.kind !== 'remote' || row.host !== host || !/^devbox-cn-(?:\d+|light(?:-\d+)?)$/.test(row.slot) || freeSlot(dir, row)) return false;
+    if (row.kind !== 'remote' || row.host !== host || !/^devbox-cn-(?:\d+|light(?:-\d+)?|[A-Za-z0-9][A-Za-z0-9_.-]*-[1-9]\d*)$/.test(row.slot) || freeSlot(dir, row)) return false;
     if (liveOnly) {
       try {
         const info = Object.fromEntries(fs.readFileSync(path.join(lockPath(dir, row.slot), 'info'), 'utf8').trim().split('\n').map(line => line.split('\t')));
@@ -185,7 +210,7 @@ function heldSlots(dir, host, liveOnly = false) {
 
 export function cpuBudget(dir, host, hostCores) {
   if (!Number.isInteger(hostCores) || hostCores < 1) throw Error(`missing valid core count for ${host}`);
-  const heavyHolders = heldSlots(dir, host, true).filter(row => /^devbox-cn-\d+$/.test(row.slot)).length;
+  const heavyHolders = heldSlots(dir, host, true).filter(row => row.dynamic ? row.category === 'HEAVY' : /^devbox-cn-\d+$/.test(row.slot)).length;
   return { cpus: Math.min(hostCores, Math.max(2, Math.floor(hostCores / Math.max(1, heavyHolders)))), hostCores, heavyHolders };
 }
 
@@ -491,7 +516,7 @@ def workspace_process_live(workspace,root,rows,records,probe):
     for target in [workspace]+[record['scope'] for record in records if record['scope'] is not None]:
         parts=target.parts
         for i,part in enumerate(parts):
-            if part=='wt' and len(parts)>=i+4 and parts[i+2].startswith('id-') and re.fullmatch(r'devbox-cn-(?:[0-9]+|light(?:-[0-9]+)?)',parts[i+3]):
+            if part=='wt' and len(parts)>=i+4 and parts[i+2].startswith('id-') and re.fullmatch(r'devbox-cn-(?:[0-9]+|light(?:-[0-9]+)?|[A-Za-z0-9][A-Za-z0-9_.-]*-[1-9][0-9]*)',parts[i+3]):
                 roots.add(pathlib.Path(*parts[:i])); break
     def affiliation(target):
         if inside(target,workspace): return workspace
@@ -499,7 +524,7 @@ def workspace_process_live(workspace,root,rows,records,probe):
         for base in roots:
             try: parts=target.relative_to(base/'wt').parts
             except ValueError: continue
-            if len(parts)>=3 and parts[1].startswith('id-') and re.fullmatch(r'devbox-cn-(?:[0-9]+|light(?:-[0-9]+)?)',parts[2]):
+            if len(parts)>=3 and parts[1].startswith('id-') and re.fullmatch(r'devbox-cn-(?:[0-9]+|light(?:-[0-9]+)?|[A-Za-z0-9][A-Za-z0-9_.-]*-[1-9][0-9]*)',parts[2]):
                 return base/'wt'/pathlib.Path(*parts[:3])
         return None
     table={row['pid']:row for row in rows}; holds=False; warnings=[]
@@ -592,7 +617,7 @@ def cleanup_run_data(d,proc_root=pathlib.Path('/proc')):
                 or control.is_symlink() or control.resolve()!=root.resolve()/'runs'/control.name): raise RuntimeError('data cleanup control outside runner scope')
         parts=workspace.parts[-4:]
         if (not workspace.is_absolute() or len(workspace.parents)<4 or parts[0]!='wt' or not parts[2].startswith('id-')
-                or parts[3]!=slot or not re.fullmatch(r'devbox-cn-(?:[0-9]+|light(?:-[0-9]+)?)',slot)):
+                or parts[3]!=slot or not re.fullmatch(r'devbox-cn-(?:[0-9]+|light(?:-[0-9]+)?|[A-Za-z0-9][A-Za-z0-9_.-]*-[1-9][0-9]*)',slot)):
             raise RuntimeError('data cleanup workspace outside slot scope')
         tree_root=workspace.parents[3]
         extras=(d.get('treeConfig') or {}).get('extraRoots',[])
@@ -1102,7 +1127,7 @@ finally:
 sys.exit(result if gone else 70)
 `,
   'dead-slot': pythonHeader + `import re, subprocess
-if not re.fullmatch(r'devbox-cn-(?:[0-9]+|light(?:-[0-9]+)?)',d['slot']): sys.exit(70)
+if not re.fullmatch(r'devbox-cn-(?:[0-9]+|light(?:-[0-9]+)?|[A-Za-z0-9][A-Za-z0-9_.-]*-[1-9][0-9]*)',d['slot']): sys.exit(70)
 root=pathlib.Path(d['root'])
 # Every project/store path for this named slot, including legacy holders.
 paths=list((root/'wt').glob('*/*/'+d['slot']))
@@ -1814,7 +1839,7 @@ function dynamicMetricHosts() {
 async function refreshHostMetrics(rows, state, { force = false, timeout = 15000 } = {}) {
   if (state.cancel || timeout <= 0) return;
   const enabled = dynamicMetricHosts();
-  const hosts = new Map(rows.filter(row => enabled.has(row.host)).map(row => [row.host, row]));
+  const hosts = new Map(rows.filter(row => row.dynamic || enabled.has(row.host)).map(row => [row.host, row]));
   await Promise.all([...hosts].map(async ([host, row]) => {
     const file = path.join(sharedDir(), 'devbox-metrics', `${host}.json`);
     const requestedAt = Date.now() / 1000;
@@ -1853,6 +1878,10 @@ async function refreshHostMetrics(rows, state, { force = false, timeout = 15000 
 }
 
 export async function hostRoot(row, state, options = {}) {
+  if (row.root) {
+    if (!/^\/[A-Za-z0-9_./-]+$/.test(row.root) || path.posix.normalize(row.root) !== row.root || row.root === '/' || row.root.split('/').some(part => ['.', '..', '.ssh', '.claude'].includes(part))) throw Error('invalid registered runner root');
+    return row.root;
+  }
   const cached = state?.hostRoots?.get(row.host);
   if (cached?.user === row.user && cached.until > Date.now()) return cached.root;
   const operation = () => resolveHostRoot(row, state, options);
@@ -2252,7 +2281,7 @@ async function shard(opts) {
       if (line.startsWith('placement=') && state.currentAttempt) {
         try { (state.currentAttempt.placementDecisions ||= []).push(JSON.parse(line.slice(10))); } catch { state.stop(74); }
       }
-      const slot = /^slot=(devbox-cn-(?:\d+|light(?:-\d+)?))$/.exec(line)?.[1];
+      const slot = /^slot=(devbox-cn-(?:\d+|light(?:-\d+)?|[A-Za-z0-9][A-Za-z0-9_.-]*-[1-9]\d*))$/.exec(line)?.[1];
       if (slot) state.reportedSlot = slot;
       return false;
     },
@@ -2390,7 +2419,8 @@ async function shard(opts) {
         if (opts.diskCostsSupported) writeJSON(diskCostFile, diskCosts);
         const diskArgs = opts.diskCostsSupported ? ['--disk-gib-file', diskCostFile] : [];
         attempt.diskCosts = diskCosts;
-        const args = ['wait-pool', opts.pool, ...common, '--timeout', String(remaining() / 60000), ...diskArgs, ...(opts.placementInputs.length ? ['--placement-file',placementFile] : [])];
+        const weightArgs = ['cores', 'memGib', 'diskGib'].flatMap(name => opts[name] === undefined ? [] : ['--' + name.replace(/[A-Z]/g, c => '-' + c.toLowerCase()), String(opts[name])]);
+        const args = ['wait-pool', opts.pool, ...weightArgs, ...common, '--timeout', String(remaining() / 60000), ...diskArgs, ...(opts.placementInputs.length ? ['--placement-file',placementFile] : [])];
         if (opts.warmFamilySupported) args.push('--warm-family', opts.refFamily);
         const callerSlots = softExclusionsDropped ? [] : opts.excludeSlot;
         const callerHosts = softExclusionsDropped ? [] : opts.excludeHost;
@@ -2416,13 +2446,13 @@ async function shard(opts) {
             const inputScore=attempt.inputPlan?.slots[candidate.slot];
             if (inputScore && !inputScore.eligible) continue;
             const prewarmArgs=[...diskArgs,...(inputScore ? ['--extra-disk-gib',String(inputScore.extraDiskGiB)] : [])];
-            const take = await runRes(['take', candidate.slot, ...common, ...prewarmArgs]);
+            const take = await runRes(['take', candidate.slot, ...weightArgs, ...common, ...prewarmArgs]);
             if (!take.code) { acquire = { ...take, stdout: `slot=${candidate.slot}\n` }; break; }
             if (take.code !== 2 && take.code !== 3) checked(take, 'prewarm slot acquisition');
           }
           if (!acquire) { attempt.skipped = true; attempt.exit = 0; emit(`[shard ${opts.shard}] prewarm skipped: host is busy\n`); break; }
         } else if (!avoid && !opts.placementInputs.length) for (const candidate of preferredSlots) {
-          const take = await runRes(['take', candidate.slot, ...common, ...diskArgs]);
+          const take = await runRes(['take', candidate.slot, ...weightArgs, ...common, ...diskArgs]);
           if (!take.code) { acquire = { ...take, stdout: `slot=${candidate.slot}\n` }; break; }
           if (take.code !== 2 && take.code !== 3) checked(take, 'affinity slot acquisition');
         }
@@ -2552,6 +2582,12 @@ async function shard(opts) {
         if (state.cancel) throw Object.assign(Error('cancelled'), { code: state.cancel });
         const hosts = JSON.parse(fs.readFileSync(path.join(cacheDir(), 'devbox-hosts.json'), 'utf8'));
         Object.assign(attempt, cpuBudget(sharedDir(), row.host, hosts[row.host]?.cores));
+        if (row.dynamic) {
+          const hold = readHold(row);
+          const claimed = Number(hold?.fields.claim_cores);
+          if (!Number.isFinite(claimed) || claimed <= 0) throw Error('dynamic lease lacks declared CPU reservation');
+          attempt.cpus = Math.max(1, Math.min(attempt.hostCores, Math.floor(claimed)));
+        }
         emit(`[shard ${opts.shard}] cpus=${attempt.cpus} cores=${attempt.hostCores} heavyHolders=${attempt.heavyHolders}\n`);
         phases.phase('inputPreparation');
         const inputMap=opts.inputs.length ? await seedInputs(row,data,opts,attempt,state,emit,remaining,() => recordRun(row, data)) : null;
@@ -3239,7 +3275,7 @@ async function main(args) {
   const opts = parseArgs(args);
   if (opts.help) {
     console.log('Artifacts: --artifact-fetch all|manifest (default all); --artifact-timeout MIN (size-scaled connection cap, default 120); --artifact-streams 1..4 (default 1); --retain-hours HOURS (default 24, max 72); --retain-on-fail; fetch-artifact --manifest FILE --name NAME --out FILE [--timeout MIN]; list-retained [--host IP]; retire-artifacts --receipt UUID [--host IP]');
-    console.log('Usage: devbox-run.mjs [--project P] --task T --repo PATH [--ref COMMIT|HEAD|worktree] [--pool devbox-cn|devbox-cn-light] [--shards N|auto] [--units-file PATH] [--artifact GLOB]... [--fetch-timeout MIN] [--artifact-timeout MIN] [--out DIR] [--timeout MIN] [--queue-timeout MIN] [--env K=V]... [--rerun-on-fail] [--allow-flaky] [--affinity KEY] [--prefer-host IP] [--prefer-slot ID] [--need CAP]... [--exclude-slot IDS] [--exclude-host IPS] [--exclude-reason TEXT] [--submodules] [--watch-pid PID] [--input MANIFEST]... [--inputs JSON] [--warm-cost DURATION] -- COMMAND\n       devbox-run.mjs prewarm --project P --repo PATH [--ref main] [--command COMMAND] [--need CAP]... [--input MANIFEST]...\n       devbox-run.mjs gc [--host IP] [--days N]\n       devbox-run.mjs stop --out DIR --run-id UUID\nCOMMAND supports {shard}, {shards} and {units}. --timeout bounds the remote command (default 120 min). --queue-timeout bounds cumulative queue/upload/input preparation (default max(timeout, 30) min); cleanup and artifact readback follow. See references/devbox-run.md.');
+    console.log('Usage: devbox-run.mjs [--project P] --task T --repo PATH [--ref COMMIT|HEAD|worktree] [--pool devbox-cn|devbox-cn-light] [--shards N|auto] [--units-file PATH] [--artifact GLOB]... [--fetch-timeout MIN] [--artifact-timeout MIN] [--out DIR] [--timeout MIN] [--queue-timeout MIN] [--env K=V]... [--rerun-on-fail] [--allow-flaky] [--affinity KEY] [--cores N] [--mem-gib GiB] [--disk-gib GiB] [--prefer-host IP] [--prefer-slot ID] [--need CAP]... [--exclude-slot IDS] [--exclude-host IPS] [--exclude-reason TEXT] [--submodules] [--watch-pid PID] [--input MANIFEST]... [--inputs JSON] [--warm-cost DURATION] -- COMMAND\n       devbox-run.mjs prewarm --project P --repo PATH [--ref main] [--command COMMAND] [--need CAP]... [--input MANIFEST]...\n       devbox-run.mjs gc [--host IP] [--days N]\n       devbox-run.mjs stop --out DIR --run-id UUID\nCOMMAND supports {shard}, {shards} and {units}. --timeout bounds the remote command (default 120 min). --queue-timeout bounds cumulative queue/upload/input preparation (default max(timeout, 30) min); cleanup and artifact readback follow. See references/devbox-run.md.');
     return 0;
   }
   if (opts.gc) {
@@ -3288,8 +3324,9 @@ async function main(args) {
     else {
       const rows = runRows(opts).filter(row => eligibleSlot(opts, row));
       if (rows.some(row => !row.target)) throw Error('open pool registry row lacks an unambiguous user@ip description');
+      if (opts.shards === 'auto' && rows.some(row=>row.dynamic)) await refreshHostMetrics(rows, state, { timeout: 15000 });
       const blocked = opts.shards === 'auto' ? quarantinedHosts(sharedDir()) : new Set();
-      plan = planShards(opts.shards, rows.filter(row => freeSlot(sharedDir(), row) && !blocked.has(row.host)).length, opts.units, readTimings(opts.snapshot.storeKey), commandKey);
+      plan = planShards(opts.shards, dynamicShardCapacity(rows.filter(row => freeSlot(sharedDir(), row) && !blocked.has(row.host)), opts), opts.units, readTimings(opts.snapshot.storeKey), commandKey);
     }
     const requestedShards = opts.shards;
     opts.shards = plan.count;

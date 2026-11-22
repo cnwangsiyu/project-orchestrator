@@ -179,9 +179,12 @@ try {
   assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'wt-map.json'))).slots['devbox-cn-20']['fixture/id-fixture'].treeRoot, root);
 
   // Preserve unrelated land-7 scripts; pin intentional supervisor/cleanup fixes separately.
-  const hash = value => createHash('sha256').update(value).digest('hex');
+  // Dynamic lease syntax is the intentional wire change in this task; keep
+  // the frozen comparison for every other byte of the remote scripts.
+  const legacyWire = value => value.replaceAll('|[A-Za-z0-9][A-Za-z0-9_.-]*-[1-9][0-9]*', '');
+  const hash = value => createHash('sha256').update(legacyWire(value)).digest('hex');
   const nonRun = Object.fromEntries(Object.entries(remoteScripts).filter(([operation]) => !['run', 'submodule', 'cleanup', 'reconnect'].includes(operation)));
-  assert.equal(hash(JSON.stringify(nonRun)), '8aacfd8c6ea07ea85fa35212b06b855238ce787438174817f981e60c84d2e886', 'all 30 unrelated remote scripts unchanged from land-7');
+  assert.equal(hash(JSON.stringify(nonRun)), '8aacfd8c6ea07ea85fa35212b06b855238ce787438174817f981e60c84d2e886', 'remote scripts retain land-7 bytes except dynamic lease syntax');
   assert.equal(hash(remoteScripts.submodule), 'f07f6023f8d5d85580b9682135fd1d83250d8fe5ecc1402d2f0ce088c043407d', 'submodule snapshot includes offline legacy-clone pin import');
   assert.equal(hash(remoteScripts.run), 'b5315491f55620e5388bb32f5d2cc1d734c90c45488f6b996558e0c4819d20ef', 'run wire snapshot includes short owned TMPDIR creation and cleanup');
   assert.equal(hash(remoteScripts.cleanup), '8d9a439a1c6427608902c39313c3f0434c6c67e35c33a64ddd647e7968c68388', 'cleanup wire snapshot includes guarded TMPDIR removal');
