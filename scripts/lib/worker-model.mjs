@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { rolloutReadPath } from './rollout-redaction.mjs';
 
 export const modelFamily = (model) => String(model ?? '').toLowerCase().match(/^(gpt|deepseek|kimi|seed|doubao|gemini|claude)/)?.[1]
   ?.replace('doubao', 'seed') ?? String(model ?? '').toLowerCase();
@@ -31,7 +32,7 @@ export const rolloutTurnModel = (home, file, threadId, turnId) => {
     if (!roots.some((root) => real.startsWith(root)) || !real.endsWith('.jsonl')
       || !path.basename(real).endsWith(`-${threadId}.jsonl`)) return null;
     let found = null, provider = null;
-    for (const line of fs.readFileSync(real, 'utf8').split('\n')) {
+    for (const line of fs.readFileSync(rolloutReadPath(real), 'utf8').split('\n')) {
       let row; try { row = JSON.parse(line); } catch { continue; }
       const settings = row.type === 'thread_settings_applied'
         || (row.type === 'event_msg' && row.payload?.type === 'thread_settings_applied');

@@ -1,4 +1,5 @@
 import { checkedLogStat, sameLog, redactLogFile } from './log-redaction.mjs';
+import { redactRolloutFile } from './rollout-redaction.mjs';
 import { threadRollouts } from './worker-thread-size.mjs';
 import { appendNote } from './worker-events.mjs';
 
@@ -108,9 +109,15 @@ export async function redactWorkerTurn({ home, thread, log, out, checkIdle, trac
     const seen = new Set();
     for (const target of files) {
       if (!target.stat || seen.has(target.file)) continue;
+      // A --log/--out alias must not rewrite the durable rollout either.
+      if (target.kind !== 'rollout' && prior.some(rollout => rollout.stat
+        && rollout.stat.dev === target.stat.dev && rollout.stat.ino === target.stat.ino)) continue;
       seen.add(target.file);
       try {
-        masked[target.kind] += redactLogFile(target.file, { force: true, markdown: target.kind === 'out', expected: target.stat }).masked;
+        const result = target.kind === 'rollout'
+          ? redactRolloutFile(target.file, { expected: target.stat })
+          : redactLogFile(target.file, { force: true, markdown: target.kind === 'out', expected: target.stat });
+        masked[target.kind] += result.masked;
       } catch { warning(`${target.kind} I/O or concurrent writer`); }
     }
     if (Object.values(masked).some(n => n > 0)) {

@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { readEvents, workerKey } from './worker-events.mjs';
 import { runningWorkers } from './running-workers.mjs';
+import { rolloutReadPath } from './rollout-redaction.mjs';
 import { acquireLock } from './shared-file.mjs';
 import { orchRoot, sharedDir, projectDir, publicId, iso, timeOf, oneLine, maskSecrets, readJson, readText,
   jsonLines, atomicJson, appendLogLocked, withLock } from './task-storage.mjs';
@@ -150,7 +151,7 @@ export const boardProjects = () => entries(orchRoot()).filter(entry => entry.isD
 
 // Read a bounded tail through a regular, non-symlink file descriptor, never a FIFO or auth/config file.
 const tail = (file, cached, limit = 128 * 1024) => {
-  if (typeof file !== 'string' || !/\.(?:jsonl|md)$/.test(file)) return null;
+  if (typeof file !== 'string' || !/\.(?:jsonl|md|out)$/.test(file)) return null;
   let fd;
   try {
     fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
@@ -160,7 +161,7 @@ const tail = (file, cached, limit = 128 * 1024) => {
     const offset = Math.max(0, stat.size - limit), buffer = Buffer.alloc(Math.min(stat.size, limit));
     const n = fs.readSync(fd, buffer, 0, buffer.length, offset);
     let text = buffer.subarray(0, n).toString('utf8');
-    if (offset && file.endsWith('.jsonl')) text = text.slice(text.indexOf('\n') + 1);
+    if (offset && (file.endsWith('.jsonl') || file.endsWith('.jsonl.out'))) text = text.slice(text.indexOf('\n') + 1);
     return { file, mtimeMs: stat.mtimeMs, size: stat.size, text };
   } catch (e) { if (['ENOENT', 'ELOOP', 'EACCES'].includes(e.code)) return null; throw e; }
   finally { if (fd !== undefined) fs.closeSync(fd); }
@@ -280,7 +281,7 @@ const refreshOnce = async (project, { thread, account, facts, now = Date.now() }
       let stepAt = 0;
       for (const file of files) {
         const priorCache = file === log ? prior?._rollout : prior?._session;
-        const rollout = tail(file, priorCache);
+        const rollout = tail(file === log ? file : rolloutReadPath(file), priorCache);
         if (!rollout) continue;
         const parsed = rollout.unchanged ? priorCache.fields : rolloutFields(rollout.text, worker.thread);
         worker[file === log ? '_rollout' : '_session'] = { file: rollout.file, mtimeMs: rollout.mtimeMs, size: rollout.size, fields: parsed };
