@@ -18,6 +18,9 @@ import { muxFailure, muxRetrySafe } from '../lib/devbox-ssh.mjs';
 const script = fileURLToPath(new URL('../devbox-run.mjs', import.meta.url));
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'devbox-scenarios-'));
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+// Fixture Git commands must not inherit caller command-scope configuration.
+for (const name of Object.keys(process.env))
+  if (['GIT_CONFIG_PARAMETERS', 'GIT_CONFIG_COUNT'].includes(name) || /^GIT_CONFIG_(?:KEY|VALUE)_\d+$/.test(name)) delete process.env[name];
 // Apple's git shim repeatedly resolves Xcode under a synthetic HOME. Resolve
 // the installed binary once, retaining fixture shims ahead of it in each PATH.
 const gitBin = path.resolve(execFileSync('git', ['--exec-path'], { encoding: 'utf8' }).trim(), '../../bin/git');
@@ -446,6 +449,33 @@ async function unitScenarios() {
 }
 
 async function prewarmScenarios() {
+  const selected = fixture(), selectedRun = await run(selected, ['prewarm', '--host', '192.0.2.1']); ok(selectedRun);
+  assert.deepEqual(selectedRun.summary.shards.map(shard => shard.host), ['192.0.2.1']);
+  assert.equal(selectedRun.summary.shards[0].slot, 'devbox-cn-light');
+  assert.ok(selected.events().filter(event => event.host).every(event => event.host === '192.0.2.1'), 'prewarm contacts only the selected host');
+  returned(selected);
+  const repeated = fixture(), repeatedRun = await run(repeated, ['prewarm', '--host', '192.0.2.1', '--host', '192.0.2.2']); ok(repeatedRun);
+  assert.deepEqual(repeatedRun.summary.shards.map(shard => shard.host), ['192.0.2.2']);
+  assert.ok(repeated.events().filter(event => event.host).every(event => event.host === '192.0.2.2'));
+  returned(repeated);
+  for (const [flags, message] of [
+    [['--host', ''], /unknown prewarm host/],
+    [['--host', '192.0.2.99'], /unknown prewarm host 192\.0\.2\.99/],
+    [['--host', '192.0.2.3'], /ineligible prewarm host 192\.0\.2\.3/],
+    [['--host', '192.0.2.4'], /ineligible prewarm host 192\.0\.2\.4/],
+    [['--host', '192.0.2.1', '--need', 'vesdk-android'], /ineligible prewarm host 192\.0\.2\.1/],
+    [['--host', '192.0.2.1', '--exclude-host', '192.0.2.1'], /ineligible prewarm host 192\.0\.2\.1/],
+    [['--host', '192.0.2.1', '--exclude-slot', 'devbox-cn-1,devbox-cn-light'], /ineligible prewarm host 192\.0\.2\.1/],
+  ]) {
+    const rejected = fixture(), failed = await run(rejected, ['prewarm', ...flags]);
+    assert.notEqual(failed.code, 0); assert.match(failed.stderr, message);
+    assert.deepEqual(rejected.events(), [], 'invalid requested host must not contact or acquire another host');
+    returned(rejected);
+  }
+  const regular = fixture(), regularRun = await run(regular, ['--host', '192.0.2.1', '--host', '192.0.2.2']); ok(regularRun);
+  assert.equal(regularRun.summary.shards[0].host, '192.0.2.1', 'regular-run placement keeps ignoring the scalar host option');
+  returned(regular);
+  console.log('PASS selected prewarm host, last repeated host, unknown/closed/incapable/excluded refusals and unchanged regular-run placement');
   const f = fixture(), r = await run(f, ['prewarm'], 'mkdir -p build; echo warmed > build/cache'); ok(r);
   assert.equal(r.summary.mode, 'prewarm'); assert.equal(r.summary.shards.length, 2);
   assert.deepEqual(r.summary.shards.map(shard => shard.slot).sort(), ['devbox-cn-light', 'devbox-cn-light-2']);
@@ -453,6 +483,9 @@ async function prewarmScenarios() {
   assert.ok(f.events().filter(e => e.op === 'acquire-call').every(e => e.args[0] === 'take'));
   returned(f);
   const busy = path.join(f.shared, 'locks/devbox-cn-1.d'); fs.mkdirSync(busy); fs.writeFileSync(path.join(busy, 'info'), 'by\tforeign\npid\t1\n');
+  const beforeBusy = f.events().length, selectedBusy = await run(f, ['prewarm', '--host', '192.0.2.1']); ok(selectedBusy);
+  assert.deepEqual(selectedBusy.summary.shards, []);
+  assert.deepEqual(f.events().slice(beforeBusy), [], 'busy selected host must not redirect work to the idle host');
   const eligible = await run(f, ['prewarm', '--need', 'vesdk-android']); ok(eligible); assert.equal(eligible.summary.shards.length, 1);
   const otherBusy = path.join(f.shared, 'locks/devbox-cn-2.d'); fs.mkdirSync(otherBusy);
   const none = await run(f, ['prewarm']); ok(none); assert.deepEqual(none.summary.shards, []);
@@ -472,6 +505,8 @@ async function prewarmScenarios() {
   const health = fixture(), healthFile = path.join(health.shared, 'box-health.json');
   fs.writeFileSync(healthFile, JSON.stringify({ '192.0.2.1': { manual: true }, '192.0.2.2': { quarantinedUntil: Date.now() / 1000 + 60 } }));
   const blocked = await run(health, ['prewarm']); ok(blocked); assert.deepEqual(blocked.summary.shards, []);
+  const selectedBlocked = await run(health, ['prewarm', '--host', '192.0.2.1']); ok(selectedBlocked);
+  assert.deepEqual(selectedBlocked.summary.shards, []);
   assert.ok(!health.events().some(event => ['probe', 'run', 'take'].includes(event.op)));
   fs.writeFileSync(healthFile, JSON.stringify({ '192.0.2.1': { manual: true }, '192.0.2.2': { quarantinedUntil: 1 } }));
   const expired = await run(health, ['prewarm']); ok(expired); assert.equal(expired.summary.shards.length, 1); returned(health);

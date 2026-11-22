@@ -514,6 +514,18 @@ an eligible light slot and then the most recently used slot in that pool for
 the project. When no light slot has the required capabilities, it uses the
 most recently used eligible heavy slot. The build runs under `nice -n 10`.
 
+Use `--host IP` to prewarm only that box:
+
+```sh
+node scripts/devbox-run.mjs prewarm --project video-agent --repo "$PWD" \
+  --ref main --host 192.0.2.10 --command 'npm run build'
+```
+
+`--host` is a single value; when repeated, the last value wins. An unknown
+host or one with no open mapped slot satisfying capabilities and
+`--exclude-host`/`--exclude-slot` is refused with an error. Placement stays
+within the selected host; omitting `--host` keeps all eligible CN boxes.
+
 Prewarm uses only nonblocking `res take`, never `wait` or `wait-pool`. A held
 heavy or light slot makes the box busy; quarantined boxes are also skipped.
 It rechecks holder and quarantine state after taking its own slot

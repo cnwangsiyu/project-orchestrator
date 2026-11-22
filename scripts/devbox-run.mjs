@@ -139,6 +139,7 @@ function previousSlotJob(slot, by) {
 const freeSlot = (dir, row) => !fs.existsSync(lockPath(dir, row.slot));
 const hasCapabilities = (opts, row) => opts.need.every(cap => row.caps.includes(cap));
 const eligibleSlot = (opts, row) => hasCapabilities(opts, row)
+  && (!opts.prewarm || opts.host === undefined || row.host === opts.host)
   && !opts.excludeSlot.includes(row.slot) && !opts.excludeHost.includes(row.host);
 const runRows = opts => opts.prewarm
   ? [...readRegistry(sharedDir(), 'devbox-cn'), ...readRegistry(sharedDir(), 'devbox-cn-light')]
@@ -2102,6 +2103,12 @@ async function recordTimings(repoId, commandKey, shards) {
 
 async function planPrewarm(opts, state) {
   const rows = runRows(opts).filter(row => eligibleSlot(opts, row));
+  if (opts.host !== undefined) {
+    if (!registryRows(sharedDir()).some(row => row.host === opts.host))
+      throw Error(`unknown prewarm host ${opts.host}: no registered mapped slot`);
+    if (!rows.length)
+      throw Error(`ineligible prewarm host ${opts.host}: no open slot satisfies required capabilities and exclusions`);
+  }
   if (rows.some(row => !row.target)) throw Error('open pool registry row lacks an unambiguous user@ip description');
   if (!rows.length) throw Error('no open slot provides all required capabilities');
   const plans = [], blocked = quarantinedHosts(sharedDir());
