@@ -1,0 +1,302 @@
+{
+  "version": 1,
+  "name": "lynx-view",
+  "excludePrefixes": [
+    "proj/ios/"
+  ],
+  "buildEnvironmentNames": [
+    "USE_BACH_SOURCE",
+    "ORG_GRADLE_PROJECT_VEMO_SOURCE_VMSDK_VERSION",
+    "WEBVIEW_ENABLE_TEST_HOOKS"
+  ],
+  "requirements": {
+    "localUnpushedRefs": true,
+    "lfs": "all-retained-files-per-gitattributes-plus-all-pointer-files",
+    "keepDependenciesBach": true,
+    "androidBachMode": "binary-TTBin",
+    "machineGradleMaterial": "excluded"
+  },
+  "rules": [
+    {
+      "id": "bach-staged-1",
+      "path": "native-deps/bach-sdk/pub/inc/smash/avatar_base_model.h",
+      "field": "m_authCode",
+      "action": "bach-empty",
+      "state": "approved",
+      "count": 1,
+      "declaration": "std::string m_authCode",
+      "reason": "用户 A′ 已授权：仅在新 staged copy 中清空 Bach 初始化字符串，保留声明；不是 KEEP。"
+    },
+    {
+      "id": "bach-staged-2",
+      "path": "ecache/ttbin/android/BachSDK_android/*/inc/smash/avatar_base_model.h",
+      "field": "m_authCode",
+      "action": "bach-empty",
+      "state": "approved",
+      "count": 1,
+      "declaration": "std::string m_authCode",
+      "reason": "用户 A′ 已授权：仅在新 staged copy 中清空 Bach 初始化字符串，保留声明；不是 KEEP。"
+    },
+    {
+      "id": "bach-staged-3",
+      "path": "bach/*/inc/smash/avatar_base_model.h",
+      "field": "m_authCode",
+      "action": "bach-empty",
+      "state": "approved",
+      "count": 1,
+      "declaration": "std::string m_authCode",
+      "reason": "用户 A′ 已授权：仅在新 staged copy 中清空 Bach 初始化字符串，保留声明；不是 KEEP。"
+    },
+    {
+      "id": "baseline-12-01",
+      "path": "proj/android/app/build.gradle",
+      "field": "keyPassword",
+      "detector": "transfer:keyPassword",
+      "action": "rewrite",
+      "state": "proposed",
+      "count": 1,
+      "anchor": {
+        "before": "keyPassword",
+        "after": ""
+      },
+      "reason": "Android 签名配置字段；不是熵或测试标识符误报。拟在 unsigned staged 构建配置清空，保留结构。"
+    },
+    {
+      "id": "baseline-12-02",
+      "path": "proj/android/app/build.gradle",
+      "field": "storePassword",
+      "detector": "transfer:storePassword",
+      "action": "rewrite",
+      "state": "proposed",
+      "count": 1,
+      "anchor": {
+        "before": "storePassword",
+        "after": ""
+      },
+      "reason": "Android 签名配置字段；不是熵或测试标识符误报。拟在 unsigned staged 构建配置清空，保留结构。"
+    },
+    {
+      "id": "baseline-12-03",
+      "path": "proj/android/compile_opt.gradle",
+      "field": "postman-token",
+      "detector": "transfer:postman-token",
+      "action": "rewrite",
+      "state": "proposed",
+      "count": 1,
+      "anchor": {
+        "syntax": "curl-header"
+      },
+      "reason": "构建脚本中的 HTTP 头字段；不是熵标识符。拟仅清空 staged HTTP 头值，不删除整个构建脚本。"
+    },
+    {
+      "id": "baseline-12-04",
+      "path": "proj/android/gradle.properties",
+      "field": "NEXUS_USERNAME",
+      "detector": "transfer:NEXUS_USERNAME",
+      "action": "rewrite",
+      "state": "proposed",
+      "count": 1,
+      "anchor": {
+        "syntax": "properties-assignment"
+      },
+      "reason": "发布仓库或 SDK 服务配置字段；不是熵误报。拟精确清空 staged 属性值，保留字段和计数。"
+    },
+    {
+      "id": "baseline-12-05",
+      "path": "proj/android/gradle.properties",
+      "field": "NEXUS_USERNAME_TTP",
+      "detector": "transfer:NEXUS_USERNAME_TTP",
+      "action": "rewrite",
+      "state": "proposed",
+      "count": 1,
+      "anchor": {
+        "syntax": "properties-assignment"
+      },
+      "reason": "发布仓库或 SDK 服务配置字段；不是熵误报。拟精确清空 staged 属性值，保留字段和计数。"
+    },
+    {
+      "id": "baseline-12-06",
+      "path": "proj/android/gradle.properties",
+      "field": "NEXUS_MAGIC_WORD_TTP",
+      "detector": "transfer:NEXUS_MAGIC_WORD_TTP",
+      "action": "rewrite",
+      "state": "proposed",
+      "count": 1,
+      "anchor": {
+        "syntax": "properties-assignment"
+      },
+      "reason": "发布仓库或 SDK 服务配置字段；不是熵误报。拟精确清空 staged 属性值，保留字段和计数。"
+    },
+    {
+      "id": "baseline-12-07",
+      "path": "proj/android/gradle.properties",
+      "field": "NEXUS_MAGIC_WORD",
+      "detector": "transfer:NEXUS_MAGIC_WORD",
+      "action": "rewrite",
+      "state": "proposed",
+      "count": 1,
+      "anchor": {
+        "syntax": "properties-assignment"
+      },
+      "reason": "发布仓库或 SDK 服务配置字段；不是熵误报。拟精确清空 staged 属性值，保留字段和计数。"
+    },
+    {
+      "id": "baseline-12-08",
+      "path": "proj/android/gradle.properties",
+      "field": "VESDK_ACCESS_KEY_MT",
+      "detector": "transfer:VESDK_ACCESS_KEY_MT",
+      "action": "rewrite",
+      "state": "proposed",
+      "count": 2,
+      "anchor": {
+        "syntax": "properties-assignment"
+      },
+      "reason": "发布仓库或 SDK 服务配置字段；不是熵误报。拟精确清空 staged 属性值，保留字段和计数。"
+    },
+    {
+      "id": "baseline-12-09",
+      "path": "proj/android/gradle.properties",
+      "field": "VESDK_SCRECT_KEY_MT",
+      "detector": "transfer:VESDK_SCRECT_KEY_MT",
+      "action": "rewrite",
+      "state": "proposed",
+      "count": 2,
+      "anchor": {
+        "syntax": "properties-assignment"
+      },
+      "reason": "发布仓库或 SDK 服务配置字段；不是熵误报。拟精确清空 staged 属性值，保留字段和计数。"
+    },
+    {
+      "id": "baseline-12-10",
+      "path": "proj/android/modules.gradle",
+      "field": "password",
+      "detector": "transfer:password",
+      "action": "rewrite",
+      "state": "proposed",
+      "count": 2,
+      "anchor": {
+        "syntax": "gradle-reference"
+      },
+      "reason": "Gradle 发布配置中的变量引用；不是熵误报。拟仅在 staged 配置清空，最终仍须原 runner gate 验收。"
+    },
+    {
+      "id": "baseline-12-11",
+      "path": "proj/android/vemo/build.gradle",
+      "field": "keyPassword",
+      "detector": "transfer:keyPassword",
+      "action": "rewrite",
+      "state": "proposed",
+      "count": 1,
+      "anchor": {
+        "before": "keyPassword",
+        "after": ""
+      },
+      "reason": "Android 签名配置字段；不是熵或测试标识符误报。拟在 unsigned staged 构建配置清空，保留结构。"
+    },
+    {
+      "id": "baseline-12-12",
+      "path": "proj/android/vemo/build.gradle",
+      "field": "storePassword",
+      "detector": "transfer:storePassword",
+      "action": "rewrite",
+      "state": "proposed",
+      "count": 1,
+      "anchor": {
+        "before": "storePassword",
+        "after": ""
+      },
+      "reason": "Android 签名配置字段；不是熵或测试标识符误报。拟在 unsigned staged 构建配置清空，保留结构。"
+    },
+    {
+      "id": "symlink-delete-1",
+      "path": "Podfile.seer",
+      "field": "[symlink]",
+      "detector": "symlink",
+      "action": "delete-path",
+      "state": "proposed",
+      "count": 1,
+      "anchor": {
+        "mode": "120000"
+      },
+      "reason": "Android devbox 不消费该 iOS/工具链软链接；目标越界或不在快照中，拟仅在 staged 快照删除精确路径。"
+    },
+    {
+      "id": "symlink-delete-2",
+      "path": "proj/VESDK-ToolSet/PAT/projs/PAT-iOS/.seer",
+      "field": "[symlink]",
+      "detector": "symlink",
+      "action": "delete-path",
+      "state": "proposed",
+      "count": 1,
+      "anchor": {
+        "mode": "120000"
+      },
+      "reason": "Android devbox 不消费该 iOS/工具链软链接；目标越界或不在快照中，拟仅在 staged 快照删除精确路径。"
+    },
+    {
+      "id": "symlink-delete-3",
+      "path": "proj/VESDK-ToolSet/PAT/projs/PAT-iOS/Podfile.seer",
+      "field": "[symlink]",
+      "detector": "symlink",
+      "action": "delete-path",
+      "state": "proposed",
+      "count": 1,
+      "anchor": {
+        "mode": "120000"
+      },
+      "reason": "Android devbox 不消费该 iOS/工具链软链接；目标越界或不在快照中，拟仅在 staged 快照删除精确路径。"
+    },
+    {
+      "id": "symlink-delete-5",
+      "path": "ttvecodec/example/ios/.seer",
+      "field": "[symlink]",
+      "detector": "symlink",
+      "action": "delete-path",
+      "state": "proposed",
+      "count": 1,
+      "anchor": {
+        "mode": "120000"
+      },
+      "reason": "Android devbox 不消费该 iOS/工具链软链接；目标越界或不在快照中，拟仅在 staged 快照删除精确路径。"
+    },
+    {
+      "id": "symlink-delete-7",
+      "path": "ttvecodec/example/ios/vecodec/Example/Podfile.seer",
+      "field": "[symlink]",
+      "detector": "symlink",
+      "action": "delete-path",
+      "state": "proposed",
+      "count": 1,
+      "anchor": {
+        "mode": "120000"
+      },
+      "reason": "Android devbox 不消费该 iOS/工具链软链接；目标越界或不在快照中，拟仅在 staged 快照删除精确路径。"
+    },
+    {
+      "id": "symlink-delete-8",
+      "path": "ttvecodec/example/ios/vecodec/_Pods.xcodeproj",
+      "field": "[symlink]",
+      "detector": "symlink",
+      "action": "delete-path",
+      "state": "proposed",
+      "count": 1,
+      "anchor": {
+        "mode": "120000"
+      },
+      "reason": "Android devbox 不消费该 iOS/工具链软链接；目标越界或不在快照中，拟仅在 staged 快照删除精确路径。"
+    },
+    {
+      "id": "symlink-delete-9",
+      "path": "ttveimage/iOS/.clang-format",
+      "field": "[symlink]",
+      "detector": "symlink",
+      "action": "delete-path",
+      "state": "proposed",
+      "count": 1,
+      "anchor": {
+        "mode": "120000"
+      },
+      "reason": "Android devbox 不消费该 iOS/工具链软链接；目标越界或不在快照中，拟仅在 staged 快照删除精确路径。"
+    }
+  ]
+}

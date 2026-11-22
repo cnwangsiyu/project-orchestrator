@@ -1,0 +1,102 @@
+[
+  {
+    "field": "field:VEConfigKeys/KEY_LIMIT_ANDROID_OS_VERSION_FOR_POWERVR_GL_BUGFIX#declaration1",
+    "ordinal": 1
+  },
+  {
+    "field": "field:VEConfigKeys/KEY_DEMUX_NOT_UPLOADING_WITH_SYNTHESIS#declaration1",
+    "ordinal": 1
+  },
+  {
+    "field": "annotation:KEY_ENABLE_BYTEVC1_REMUX/BTCStrategy:key#declaration1",
+    "ordinal": 1
+  },
+  {
+    "field": "field:VEConfigKeys/KEY_ENABLE_BYTEVC1_REMUX#declaration1",
+    "ordinal": 1
+  },
+  {
+    "field": "field:VEConfigKeys/KEY_CLEAR_BUNDLE_IN_COMPILE_GRAPH_DESTROY#declaration1",
+    "ordinal": 1
+  },
+  {
+    "field": "field:VEConfigKeys/KEY_MEDIA_API_REFACTOR_ENABLE_GRAPH_DESTROY_FIX#declaration1",
+    "ordinal": 1
+  },
+  {
+    "field": "field:VEConfigKeys/KEY_VE_DYNAMIC_RESOLUTION_ENABLE_DOWNGRADE_DROP_FPS_THRESHOLD#declaration1",
+    "ordinal": 1
+  },
+  {
+    "field": "field:VEConfigKeys/KEY_VE_DYNAMIC_RESOLUTION_RESTORE_DOWNGRADE_DROP_FPS_THRESHOLD#declaration1",
+    "ordinal": 1
+  },
+  {
+    "field": "field:VEConfigKeys/KEY_ENABLE_IMAGE_ALGORITHM_REUSE_AND_OPT_FOR_AMAZING#declaration1",
+    "ordinal": 1
+  },
+  {
+    "field": "field:VEConfigKeys/KEY_BYTEVC1_10BIT_HWENCODER_TIMEOUT#declaration1",
+    "ordinal": 1
+  },
+  {
+    "field": "field:VEConfigKeys/KEY_COMPILE_HW_BYTEVC1_MAX_PIXEL_COUNT#declaration1",
+    "ordinal": 1
+  },
+  {
+    "field": "field:VEConfigKeys/KEY_ENABLE_CODEC2_OUTPUT_FORMAT_ALIGN_16#declaration1",
+    "ordinal": 1
+  },
+  {
+    "field": "field:VEConfigKeys/KEY_RESOLUTIONLIMIT_FOR_IMAGEUPLOADDIRECTLY#declaration1",
+    "ordinal": 1
+  },
+  {
+    "field": "field:VEConfigKeys/KEY_ENABLE_CONTINUE_COMPILE_ON_CLOUDPROCESSWITHMUSIC#declaration1",
+    "ordinal": 1
+  },
+  {
+    "field": "field:VEConfigKeys/KEY_UNITBASE_FRAMEALLOCATOR_USELOCK#declaration1",
+    "ordinal": 1
+  },
+  {
+    "field": "field:VEConfigKeys/KEY_COPY_BUNDLE_ON_EDITORGRAPH_READY#declaration1",
+    "ordinal": 1
+  },
+  {
+    "field": "field:VEConfigKeys/KEY_ENABLE_REDUCE_EFFECTSDK_CALLS_OPTIMIZATION#declaration1",
+    "ordinal": 1
+  },
+  {
+    "field": "field:VEConfigKeys/KEY_BYTEBENCH_CAMERA_CAPABILITIES_REPORT_MOVE_TO_BACKGROUND_THREAD#declaration1",
+    "ordinal": 1
+  },
+  {
+    "field": "field:VEConfigKeys/KEY_ENABLE_Fix_AVSyncUnit2_StackOverflow#declaration1",
+    "ordinal": 1
+  },
+  {
+    "field": "field:VEConfigKeys/KEY_VE_LOW_LIGHT_CAMERA_FPS_LOWER_BOUND_MIN#declaration1",
+    "ordinal": 1
+  },
+  {
+    "field": "field:VEConfigKeys/KEY_VE_LOW_LIGHT_CAMERA_FPS_LOWER_BOUND_MAX#declaration1",
+    "ordinal": 1
+  },
+  {
+    "field": "field:VEConfigKeys/KEY_VE_LOW_LIGHT_CAMERA_FPS_ADJUST_STRATEGY#declaration1",
+    "ordinal": 1
+  },
+  {
+    "field": "field:VEConfigKeys/KEY_VE_LOW_LIGHT_CAMERA_FPS_ALLOW_FIXED_RANGE#declaration1",
+    "ordinal": 1
+  },
+  {
+    "field": "field:VEConfigKeys/KEY_VE_LOW_LIGHT_CAMERA_FPS_MAX_ADJUST_GAP#declaration1",
+    "ordinal": 1
+  },
+  {
+    "field": "field:VEConfigKeys/KEY_VE_ENABLE_STREAMING_PRIORITY_SCHEDULER#declaration1",
+    "ordinal": 1
+  }
+]
