@@ -3499,6 +3499,30 @@ try:
             return False
         for index in range(len(options)): assign(index, set())
         return len(assigned)
+    def waiter_anchors(value, box):
+        allowed = csv(value['input_eligible_slots']) if 'input_eligible_slots' in value else csv(value['input_allowed_slots']) if 'input_allowed_slots' in value else None
+        skipped_slots, skipped_boxes = csv(value.get('exclude_slots','')), csv(value.get('exclude_hosts',''))
+        required_caps = csv(value.get('need',''))
+        resource = host_rows[box]
+        prefix = 'devbox-cn-' + resource[len('devbox-host-'):] + '-'
+        host_member = remote[resource]
+        admitting = 'leases-only' not in rows[resource][3].split()
+        candidates = set(allowed) if allowed is not None else {slot for slot, member in remote.items() if member[1] == box and not slot.startswith('devbox-host-')}
+        if allowed is None and admitting:
+            # An unconstrained head has its own ordinal namespace, independent
+            # of the younger caller's catalog and slot exclusions.
+            ordinal = 1
+            while prefix + str(ordinal) in skipped_slots: ordinal += 1
+            candidates.add(prefix + str(ordinal))
+        anchors = []
+        for slot in sorted(candidates):
+            member = remote.get(slot)
+            # Input-only IDs may never have been issued. Resolve them from the
+            # host row without adding candidates to the younger caller's catalog.
+            if member is None and admitting and re.fullmatch(re.escape(prefix) + r'[1-9][0-9]*', slot): member = host_member
+            if (member and not slot.startswith('devbox-host-') and member[0] == 'open' and member[1] == box
+                    and slot not in skipped_slots and box not in skipped_boxes and required_caps <= member[2]): anchors.append(slot)
+        return anchors
     def fifo_allows(id, state, claimed=False):
         global bypass_pending
         bypass_pending = []
@@ -3522,11 +3546,7 @@ try:
                     continue
                 # Input eligibility survives capacity-denied placement. The
                 # selected ID can be empty while an eligible host is saturated.
-                allowed = csv(value['input_eligible_slots']) if 'input_eligible_slots' in value else csv(value['input_allowed_slots']) if 'input_allowed_slots' in value else None
-                anchors = [slot for slot, member in remote.items() if member[1] == box
-                           and not slot.startswith('devbox-host-')
-                           and eligible(slot, csv(value.get('need','')), csv(value.get('exclude_slots','')), csv(value.get('exclude_hosts','')))
-                           and (allowed is None or slot in allowed)]
+                anchors = waiter_anchors(value, box)
                 if not anchors: continue
                 kind = value.get('claim_kind', 'HEAVY')
                 weights = (float(value.get('claim_cores') or settings[kind+'_CORES']),

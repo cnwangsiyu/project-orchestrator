@@ -22,6 +22,7 @@ const SUITE_TIMEOUTS = {
   'pool-exec.mjs': 600000,
   'devbox-admission.mjs': 600000,
   'dynamic-leases.mjs': 600000,
+  'dynamic-fifo.mjs': 600000,
   'config-reload.mjs': 600000,
   'mem-guard.mjs': 600000,
   'followups.mjs': 600000,
