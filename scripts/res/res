@@ -2649,7 +2649,7 @@ try:
     observation_namespace = {}
     if action == 'status': exec(os.environ['RES_OBSERVATION_SOURCE'], observation_namespace)
     if any(c in value for value in (by, project, task, purpose, until, warm_family) for c in '\t\r\n'): raise ValueError('hold metadata must be one line')
-    if action not in ('box-health', 'scores', 'status', 'audit', 'slot-host', 'devbox-registry', 'pool-capacity'): os.makedirs(locks, exist_ok=True)
+    if action not in ('box-health', 'scores', 'status', 'audit', 'slot-host', 'devbox-registry', 'pool-capacity', 'reserved-disk'): os.makedirs(locks, exist_ok=True)
     if action in ('cancel', 'cleanup'):
         queue = os.path.join(root, 'pool-waiters', request)
         waiter = os.path.join(root, 'pool-waiters', request, 'waiter.' + controller_key)
@@ -2993,8 +2993,8 @@ try:
         cpu, mem = (sum(entry[i] for entry in recent) for i in (1, 2))
         disk = sum(entry[3] for entry in entries if len(entry) >= 4)
         cost = (settings[kind + '_CORES'], settings[kind + '_GIB'],
-                disk_costs.get(id, next((disk_costs[slot] for slot in disk_costs if id in dynamic_ids and slot in remote and remote[slot][1] == box), float(disk_gib) if disk_gib else
-                    settings['project_disk'][kind] or settings[kind + '_DISK_GIB']))) if settings else None
+                float(disk_gib) if disk_gib else disk_costs.get(id,
+                    settings['project_disk'][kind] or settings[kind + '_DISK_GIB'])) if settings else None
         if cost: cost=(float(claim_cores) if claim_cores else cost[0], float(claim_mem) if claim_mem else cost[1], cost[2]+float(extra_disk_gib))
         if cost and weights is not None: cost=weights
         if cost and input_placement and weights is None:
@@ -3028,6 +3028,11 @@ try:
     def gate_open(reason):
         return reason in ('headroom', 'load-override', 'static-disabled', 'static-stale-or-missing-metrics')
     dynamic, light_reclaim, soft_minutes = devbox_settings()
+    if action == 'reserved-disk':
+        if request not in remote or not slot_type(request): raise ValueError('expected a registered devbox lease')
+        entries = reservations(remote[request][1], time.time())
+        print(json.dumps(dict(reservedGiB=sum(entry[3] for entry in entries if len(entry) >= 4))))
+        committed = True; sys.exit(0)
     if action == 'pool-capacity':
         if request not in ('devbox-cn', 'devbox-cn-light'): raise ValueError('unsupported capacity pool')
         kind = 'LIGHT' if request == 'devbox-cn-light' else 'HEAVY'
@@ -3363,6 +3368,8 @@ try:
                    exclude_reason=exclude_reason, worker_thread=os.environ.get('CODEX_WORKER_THREAD') or os.environ.get('CODEX_THREAD_ID') or os.environ.get('TRAECLI_THREAD_ID', ''),
                    worker_account=os.environ.get('CODEX_WORKER_ACCOUNT', ''),
                    worker_owner=os.environ.get('CODEX_WORKER_OWNER') or os.environ.get('ORCHESTRATOR_OWNER', ''))
+        if input_placement:
+            own['input_eligible_slots'] = ','.join(id for id in compatible if input_placement['slots'].get(id, {}).get('eligible'))
         if host_rows:
             weights = {id:list(gate(remote[id][1],own['claim_kind'],dynamic.get(remote[id][1]),time.time(),True,id=id)[3]) for id in members if id in dynamic_ids}
             own['claim_weights']=json.dumps(weights,separators=(',',':'))
@@ -3513,16 +3520,24 @@ try:
                     # yet. Preserve its host through the commit recheck.
                     if any(remote[slot][1] == box for slot,_ in owned): return False
                     continue
-                if not eligible(id, csv(value.get('need','')), csv(value.get('exclude_slots','')), csv(value.get('exclude_hosts',''))): continue
-                allowed = csv(value['input_allowed_slots']) if 'input_allowed_slots' in value else None
-                if allowed is not None and id not in allowed: continue
+                # Input eligibility survives capacity-denied placement. The
+                # selected ID can be empty while an eligible host is saturated.
+                allowed = csv(value['input_eligible_slots']) if 'input_eligible_slots' in value else csv(value['input_allowed_slots']) if 'input_allowed_slots' in value else None
+                anchors = [slot for slot, member in remote.items() if member[1] == box
+                           and not slot.startswith('devbox-host-')
+                           and eligible(slot, csv(value.get('need','')), csv(value.get('exclude_slots','')), csv(value.get('exclude_hosts','')))
+                           and (allowed is None or slot in allowed)]
+                if not anchors: continue
                 kind = value.get('claim_kind', 'HEAVY')
                 weights = (float(value.get('claim_cores') or settings[kind+'_CORES']),
                            float(value.get('claim_mem') or settings[kind+'_GIB']),
                            float(value.get('claim_disk') or settings[kind+'_DISK_GIB']))
                 recorded=json.loads(value.get('claim_weights','{}'))
-                if id in recorded: weights=tuple(recorded[id])
-                reason = gate(box, kind, settings, time.time(), True, id=id, weights=weights, claimed=claimed)[0]
+                options = [(tuple(recorded.get(anchor, weights)), anchor) for anchor in anchors]
+                evaluated = [(gate(box, kind, settings, time.time(), True, id=id, weights=cost, claimed=claimed)[0], cost)
+                             for cost, anchor in options]
+                if any(gate_open(reason) for reason, _ in evaluated): return False
+                reason, weights = min(evaluated, key=lambda item: (item[1][0], item[1][1], item[1][2]))
                 # Bypass only a larger claim blocked by measured headroom. After
                 # MAX_BYPASS successful small admissions, drain for this head.
                 own_kind = 'LIGHT' if request == 'devbox-cn-light' else 'HEAVY'
@@ -4240,7 +4255,7 @@ case "${1:-}" in
     request="${2:-}"; shift 2
     ALLOW_PID=1 parse "$@"
     pool_report pool-capacity "$request" ;;
-  slot-host|devbox-registry)
+  slot-host|devbox-registry|reserved-disk)
     action="$1"; shift
     [ "$#" -le 1 ] || die "$action accepts at most one id"
     pool_report "$action" "${1:-}" ;;

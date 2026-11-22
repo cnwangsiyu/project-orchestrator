@@ -42,6 +42,54 @@ try {
   const snapshot=run('holder',slot(results[0]),'--by',results[0].by);assert.equal(snapshot.status,0,snapshot.stderr);assert.equal(JSON.parse(snapshot.stdout).mine,'yes');
   const status=run('status','devbox-cn-light'); assert.equal(status.status,0,status.stderr);assert.match(status.stdout,/reserved_cores=12/);
   for(const r of results)release(slot(r),r.by);
+  // Workspace inventory costs are exact-ID facts. A cold ordinal cannot
+  // borrow a warm ordinal's zero cost, and explicit job estimates take priority.
+  const costs=path.join(root,'disk-costs.json');fs.writeFileSync(costs,JSON.stringify({[lease(1)]:0}));
+  sample({freeGiB:54});
+  const cold=run('take',lease(30),...args('cold-ordinal'),'--disk-gib-file',costs);
+  assert.equal(cold.status,2,cold.stderr);
+  const declared=run('take',lease(30),...args('declared-cold'),'--disk-gib-file',costs,'--disk-gib','50');
+  assert.equal(declared.status,2,declared.stderr);
+  const exactWarm=run('take',lease(1),...args('warm-exact'),'--disk-gib-file',costs);
+  assert.equal(exactWarm.status,0,exactWarm.stderr);release(lease(1),'warm-exact');
+  const explicitWarm=run('take',lease(1),...args('declared-warm'),'--disk-gib-file',costs,'--disk-gib','50');
+  assert.equal(explicitWarm.status,2,explicitWarm.stderr);
+  sample({freeGiB:103});
+  const exactBoundary=run('take',lease(30),...args('declared-boundary'),'--disk-gib-file',costs,'--disk-gib','50');
+  assert.equal(exactBoundary.status,0,exactBoundary.stderr);
+  assert.match(fs.readFileSync(path.join(root,'locks',lease(30)+'.d','info'),'utf8'),/claim_disk\t50/);
+  release(lease(30),'declared-boundary');
+
+  // Concurrent heavy/light reservations share all three admission boundaries.
+  const batch=specs=>Promise.all(specs.map(({by,pool,extra=[]})=>new Promise(resolve=>{
+    const child=start(source,['wait-pool',pool,...args(by),'--timeout','0',...extra],{env});
+    let stdout='',stderr='';child.stdout.on('data',x=>stdout+=x);child.stderr.on('data',x=>stderr+=x);
+    child.once('close',status=>resolve({by,status,stdout,stderr}));
+  })));
+  for(const boundary of ['cpu','memory','maximum']) {
+    fs.writeFileSync(path.join(root,'machine.conf'),boundary==='maximum'?'DEVBOX_MAX_BYPASS=3\nDEVBOX_MAX_CLAIMS=1\n':'DEVBOX_MAX_BYPASS=3\n');
+    sample(boundary==='cpu'?{cores:3}:boundary==='memory'?{memAvailableGiB:8}:{});
+    const competing=await batch([{by:boundary+'-heavy',pool:'devbox-cn'},{by:boundary+'-light',pool:'devbox-cn-light'}]);
+    assert.equal(competing.filter(r=>r.status===0).length,1,JSON.stringify(competing));
+    assert.equal(competing.filter(r=>r.status===2).length,1,JSON.stringify(competing));
+    const entries=JSON.parse(fs.readFileSync(path.join(root,'devbox-reservations',host+'.json'),'utf8'));
+    assert.equal(entries.length,1);
+    if(boundary==='cpu')assert.ok(entries.reduce((sum,e)=>sum+e[1],0)<=3);
+    if(boundary==='memory')assert.ok(entries.reduce((sum,e)=>sum+e[2],0)<=4);
+    for(const r of competing)if(r.status===0)release(slot(r),r.by);
+  }
+  // Both categories fit at the exact combined CPU and memory boundaries.
+  fs.writeFileSync(path.join(root,'machine.conf'),'DEVBOX_MAX_BYPASS=3\nDEVBOX_MAX_CLAIMS=2\n');
+  sample({cores:4,memAvailableGiB:10});
+  const fitting=await batch([{by:'fit-heavy',pool:'devbox-cn'},{by:'fit-light',pool:'devbox-cn-light'}]);
+  for(const r of fitting)assert.equal(r.status,0,r.stderr);
+  assert.equal(new Set(fitting.map(slot)).size,2);
+  const full=JSON.parse(fs.readFileSync(path.join(root,'devbox-reservations',host+'.json'),'utf8'));
+  assert.equal(full.reduce((sum,e)=>sum+e[1],0),4);assert.equal(full.reduce((sum,e)=>sum+e[2],0),6);
+  assert.equal(wait('fit-overflow').status,2);
+  for(const r of fitting)release(slot(r),r.by);
+  fs.writeFileSync(path.join(root,'machine.conf'),'DEVBOX_MAX_BYPASS=3\n');sample();
+
   // Every real host gate blocks admission for either default category.
   for(const [field,value,reason] of [['load5',64,'load'],['memAvailableGiB',5,'memory'],['freeGiB',54,'disk'],['io_some_avg60',26,'io-pressure']]){
     sample({[field]:value});const r=wait('gate-'+field);assert.equal(r.status,2,r.stderr);
@@ -58,6 +106,24 @@ try {
   assert.equal(wait('bounded').status,2,'fourth small request must wait for large FIFO head');
   assert.match(fs.readFileSync(path.join(q,'info'),'utf8'),/bypasses\t3/);
   for(let i=0;i<3;i++)release(bypass[i],'bypass-'+i);
+  // Placement binds input eligibility to an ID but reserves capacity on its
+  // host. Exhausted heads protect that host across other free ordinals.
+  waiter.input_allowed_slots=lease(1);waiter.bypasses='3';publish();
+  assert.equal(run('wait-pool','devbox-cn-light',...args('placement-exhausted'),'--timeout','0','--hard-exclude-slot',lease(1)).status,2);
+  waiter.input_allowed_slots='';waiter.input_eligible_slots=lease(1);publish();
+  assert.equal(run('wait-pool','devbox-cn-light',...args('placement-capacity-closed'),'--timeout','0','--hard-exclude-slot',lease(1)).status,2);
+  delete waiter.input_eligible_slots;waiter.input_allowed_slots=lease(1);publish();
+  const counterDir=path.join(root,'pool-bypasses');
+  for(const name of fs.readdirSync(counterDir))fs.unlinkSync(path.join(counterDir,name));
+  waiter.bypasses='0';publish();
+  const placed=[];
+  for(let i=0;i<3;i++) {
+    const r=run('wait-pool','devbox-cn-light',...args('placed-'+i),'--timeout','0','--hard-exclude-slot',lease(1));
+    assert.equal(r.status,0,r.stderr);assert.notEqual(slot(r),lease(1));placed.push(r);
+  }
+  assert.equal(run('wait-pool','devbox-cn-light',...args('placed-drain'),'--timeout','0','--hard-exclude-slot',lease(1)).status,2);
+  for(let i=0;i<placed.length;i++)release(slot(placed[i]),'placed-'+i);
+  delete waiter.input_allowed_slots;
   // A fitting older heavy waiter blocks the other category immediately.
   waiter.claim_cores='3';publish();assert.equal(wait('fitting-head').status,2);
   fs.rmSync(q,{recursive:true});

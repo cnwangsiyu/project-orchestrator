@@ -149,6 +149,16 @@ export function readRegistry(dir, pool) {
   return registryRows(dir).filter(row => row.kind === 'remote' && (row.policy === 'open' || row.dynamic && row.resolverOnly) && (row.dynamic || pattern.test(row.slot)));
 }
 
+export function resolveSlot(dir, slot) {
+  const result = spawnSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'res/res'), ['slot-host', slot], {
+    env: { ...process.env, RES_DIR: dir, RULES_SHARED: dir }, encoding: 'utf8', timeout: 30000,
+  });
+  if (result.status !== 0) throw Error('devbox lease resolution failed: ' + (result.stderr || result.error?.message || result.status));
+  const row = JSON.parse(result.stdout);
+  if (row.slot !== slot || row.kind !== 'remote' || !row.target || !row.host) throw Error('invalid resolved devbox lease');
+  return row;
+}
+
 const lockPath = (dir, slot) => path.join(dir, 'locks', `${slot}.d`);
 function previousSlotJob(slot, by) {
   try {
@@ -3005,28 +3015,14 @@ async function takeReadback(row, state, deadline, limit) {
   }
 }
 
-function readbackReservedDisk(row, rows) {
-  let values;
-  try { values = JSON.parse(fs.readFileSync(path.join(sharedDir(), 'devbox-reservations', row.host + '.json'), 'utf8')); }
-  catch (error) { if (error.code === 'ENOENT') return 0; throw error; }
-  if (!Array.isArray(values)) throw Error('invalid readback disk reservations');
-  let reserved = 0;
-  const seen = new Set();
-  for (const value of values) {
-    if (!Array.isArray(value) || ![3, 4, 5].includes(value.length) || !value.slice(0, 3).every(n => Number.isFinite(n) && n > 0)
-        || value.length >= 4 && (!Number.isFinite(value[3]) || value[3] < 0)) throw Error('invalid readback disk reservation');
-    if (Date.now() / 1000 - value[0] >= (value.length >= 4 ? 900 : 300)) continue;
-    if (value.length === 5) {
-      const owner = value[4];
-      if (!owner || !['slot', 'by', 'pid', 'host', 'start'].every(name => owner[name])) throw Error('invalid readback disk reservation owner');
-      const candidate = rows.find(candidate => candidate.slot === owner.slot && candidate.host === row.host);
-      const hold = candidate && readHold(candidate)?.fields;
-      if (!hold || !['by', 'pid', 'host', 'start'].every(name => hold[name] === owner[name]) || seen.has(owner.slot)) continue;
-      seen.add(owner.slot);
-    }
-    reserved += value[3] || 0;
-  }
-  return reserved;
+export function readbackReservedDisk(row) {
+  const result = spawnSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'res/res'), ['reserved-disk', row.slot], {
+    env: { ...process.env, RES_DIR: sharedDir(), RULES_SHARED: sharedDir() }, encoding: 'utf8', timeout: 30000,
+  });
+  if (result.status !== 0) throw Error('readback reservation query failed: ' + (result.stderr || result.error?.message || result.status));
+  const value = JSON.parse(result.stdout).reservedGiB;
+  if (!Number.isFinite(value) || value < 0) throw Error('invalid readback disk reservations');
+  return value;
 }
 
 export async function fetchArtifact(args) {
@@ -3092,7 +3088,7 @@ export async function fetchArtifact(args) {
       { force: true, timeout: Math.max(1, deadline - Date.now()) });
     // The no-slot path performs only bounded reads, but still checks live disk.
     const disk = JSON.parse(checked(await ssh(leasedRow, 'metrics', { root }, { state, timeout: Math.min(15000, Math.max(1, deadline - Date.now())) }), 'readback disk check'));
-    const reservedDiskGiB = readbackReservedDisk(row, rows);
+    const reservedDiskGiB = readbackReservedDisk(row);
     if (!Number.isFinite(disk.freeGiB) || disk.freeGiB - reservedDiskGiB < 53) throw Error('artifact readback disk floor: need 53 GiB free after reservations');
     Object.assign(readbackReceipt, { freeGiB: disk.freeGiB, reservedDiskGiB });
     console.error(`devbox-run: readbackAdmission=${readbackReceipt.readbackAdmission} host=${row.host}`);
@@ -3203,6 +3199,7 @@ export async function retainedArtifacts(args, retire = false) {
   process.once('SIGTERM',stop); process.once('SIGINT',stop);
   const parent = process.ppid, watch = setInterval(() => { try { process.kill(parent,0); } catch { stop(); } },1000);
   let found = false, primaryError;
+  const acquiredSlots = new Set();
   try {
     for (const row of hosts) {
       const root = await hostRoot(row,state,{deadline});
@@ -3216,13 +3213,22 @@ export async function retainedArtifacts(args, retire = false) {
       const pool = light.length ? 'devbox-cn-light' : 'devbox-cn';
       const slots = Object.fromEntries(candidates.map(candidate => [candidate.slot,{eligible:true,host:row.host,waitSec:0,rebuildSec:0,totalSec:0,hardReasons:[],missing:[],extraDiskGiB:0}]));
       writeJSON(placementFile,{version:1,at:Date.now()/1000,slots});
-      const acquired = checked(await executeRes(['wait-pool',pool,'--by',by,'--project','orchestrator','--task','retire-artifacts','--for','retire exact artifact receipt',
-        '--pid',String(process.pid),'--timeout',String(Math.max(1,deadline-Date.now())/60000),'--placement-file',placementFile],{state,timeout:Math.max(1,deadline-Date.now())}),'retirement lease');
-      const slot = /^slot=(\S+)$/m.exec(acquired)?.[1], leased = candidates.find(candidate => candidate.slot === slot);
+      const acquisition = await executeRes(['wait-pool',pool,'--by',by,'--project','orchestrator','--task','retire-artifacts','--for','retire exact artifact receipt',
+        '--pid',String(process.pid),'--timeout',String(Math.max(1,deadline-Date.now())/60000),'--placement-file',placementFile], {
+          state, timeout:Math.max(1,deadline-Date.now()), rawCapture:true,
+          interceptStdout: line => { const slot = /^slot=(\S+)$/.exec(line)?.[1]; if (slot) acquiredSlots.add(slot); return false; },
+        });
+      const slot = /^slot=(\S+)$/m.exec(acquisition.stdout)?.[1];
+      if (slot) acquiredSlots.add(slot);
+      checked(acquisition,'retirement lease');
+      if (!slot) throw Error('retirement allocator did not return a lease ID');
+      const leased = resolveSlot(sharedDir(), slot);
+      if (leased.host !== row.host || leased.target !== row.target) throw Error('retirement lease host changed');
       const hold = leased && readHold(leased);
       if (!hold || hold.fields.by !== by || hold.fields.pid !== String(process.pid)) throw Error('retirement lease ownership changed');
       console.log(checked(await ssh(leased,'retire-artifacts',{root,receipt:opts.receipt},{state,timeout:Math.max(1,deadline-Date.now())}),'artifact retirement').trim());
       checked(await executeRes(['return',leased.slot,'--by',by],{state,cancellable:false,timeout:30000}),'retirement lease return');
+      acquiredSlots.delete(leased.slot);
     }
     if (retire && !found) throw Error('retained artifact receipt not found');
     return 0;
@@ -3230,7 +3236,13 @@ export async function retainedArtifacts(args, retire = false) {
   finally {
     clearInterval(watch); process.removeListener('SIGTERM',stop); process.removeListener('SIGINT',stop);
     const failures=[];
-    for (const row of rows) try {
+    // Refresh for interrupted acquisition before slot=, and retain every exact
+    // reported ID even if resolution or retirement failed after acquisition.
+    let cleanupRows = rows;
+    try { cleanupRows = uniqueRows([...rows, ...readRegistry(sharedDir(),'devbox-cn'), ...readRegistry(sharedDir(),'devbox-cn-light')]); }
+    catch (error) { failures.push(error.message); }
+    for (const slot of new Set([...acquiredSlots, ...cleanupRows.map(row => row.slot)])) try {
+      const row = { slot };
       const hold=readHold(row);
       if (hold?.fields.by === by && hold.fields.pid === String(process.pid)) checked(await executeRes(['return',row.slot,'--by',by],{state,cancellable:false,timeout:30000}),'retirement lease return');
     } catch (error) { failures.push(error.message); }

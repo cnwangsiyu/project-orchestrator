@@ -67,12 +67,16 @@ const fakeRes = shimHeader + String.raw`
 (async()=>{
 const a=process.argv.slice(2), op=a[0], by=flag(a,'--by');
 if(c.dynamic) {
+ if(c.retirementRace&&op==='wait-pool'&&a.includes('retire-artifacts')) {
+  const rival=cp.spawnSync(c.realRes,['take','devbox-cn-first-1','--by','fixture-retirement-rival','--project','fixture','--for','race','--pid',String(process.ppid),'--disk-gib','0','--cores','1','--mem-gib','1'],{env:process.env,encoding:'utf8'});
+  if(rival.status)throw Error(rival.stderr);event('retirement-race',{slot:'devbox-cn-first-1'});
+ }
  const result=cp.spawnSync(c.realRes,a,{env:process.env,encoding:'utf8'});
  process.stdout.write(result.stdout||'');process.stderr.write(result.stderr||'');
  if(result.status===0 && ['take','wait-pool','return'].includes(op)) {
   const slot=/^slot=(\S+)$/m.exec(result.stdout)?.[1] || a[1];event(op==='return'?'return':'take',{slot,by,pid:Number(flag(a,'--pid'))});
  }
- process.exit(result.status??1);
+ process.exit(c.retirementAcquireFailure&&op==='wait-pool'&&a.includes('retire-artifacts') ? 70 : (result.status??1));
 }
 if(c.noHelp&&(op==='help'||a.includes('--help'))){console.error('res: broken');process.exit(1);}
 if(c.liveHelp&&a.includes('--help')){console.error('res: wait-pool needs a resource prefix');process.exit(1);}
@@ -182,6 +186,7 @@ if(op==='probe') {
  const root=path.join(c.dir,'remote',host,c.dataDisk===false?'home':'data00',d.user,'devbox-run');fs.mkdirSync(root,{recursive:true});
  console.log(JSON.stringify({root,user:d.user,fs:c.dataDisk===false?'/':'/data00',freeGiB:100,totalGiB:200,cores:8,memGiB:32,probedAt:new Date().toISOString()}));return;
 }
+if(op==='retire-artifacts'&&c.retirementFailure){console.error('fixture retirement failure');process.exit(70);}
 if(op==='metrics') {
  if(c.metricsUnavailable)process.exit(1);
  console.log(JSON.stringify({cores:8,load5:2.5,memAvailableGiB:24,freeGiB:c.readbackDiskGiB??100,...c.ioMetrics}));return;
@@ -1767,8 +1772,44 @@ async function dynamicScenarios() {
   console.log('PASS dynamic runner: actual allocator, opaque IDs, reservation CPU budget, prewarm, GC and retained cleanup');
 }
 
+async function reviewRegressions() {
+  for(const mode of ['success','retirement-failure','acquisition-failure']) {
+    const retirementFailure=mode==='retirement-failure', retirementAcquireFailure=mode==='acquisition-failure';
+    const f=fixture({dynamic:true});
+    const saved=await run(f,['--artifact','build/result.txt','--artifact-fetch','manifest'],'mkdir -p build && printf retained > build/result.txt');ok(saved);returned(f);
+    const receipt=JSON.parse(fs.readFileSync(saved.summary.shards[0].attempts[0].artifactManifest));
+    fs.writeFileSync(path.join(f.dir,'config.json'),JSON.stringify({...f.config,retirementRace:true,retirementFailure,retirementAcquireFailure}));
+    const retired=spawnSync(process.execPath,[script,'retire-artifacts','--receipt',receipt.run,'--host',receipt.host],{env:f.env,encoding:'utf8',timeout:30000});
+    assert.equal(retired.status,mode==='success'?0:1,retired.stdout+retired.stderr);
+    if(retirementFailure)assert.match(retired.stderr,/fixture retirement failure/);
+    const returnedLease=f.events().filter(e=>e.op==='return'&&e.by?.startsWith('artifact-retire-')).at(-1);
+    assert.equal(returnedLease?.slot,'devbox-cn-first-2','new ordinal returned on success and failure');
+    assert.ok(fs.existsSync(path.join(f.shared,'locks','devbox-cn-first-1.d')),'rival hold preserved');
+    assert.ok(!fs.existsSync(path.join(f.shared,'locks','devbox-cn-first-2.d')),'retirement hold released');
+    const release=spawnSync(f.config.realRes,['return','devbox-cn-first-1','--by','fixture-retirement-rival'],{env:f.env,encoding:'utf8'});
+    assert.equal(release.status,0,release.stderr);returned(f);
+  }
+  const f=fixture({dynamic:true});
+  const saved=await run(f,['--artifact','build/result.txt','--artifact-fetch','manifest'],'mkdir -p build && printf retained > build/result.txt');ok(saved);returned(f);
+  const manifest=saved.summary.shards[0].attempts[0].artifactManifest, lease='devbox-cn-first-22';
+  const owner={slot:lease,by:'fixture-readback-holder',pid:String(process.pid),host:os.hostname(),start:String(Math.floor(Date.now()/1000)-1000)};
+  const dir=path.join(f.shared,'locks',lease+'.d');fs.mkdirSync(dir);
+  fs.writeFileSync(path.join(dir,'info'),Object.entries({...owner,claim_kind:'HEAVY',claim_cores:'1',claim_mem:'1',claim_disk:'20'}).map(([k,v])=>k+'\t'+v+'\n').join(''));
+  fs.mkdirSync(path.join(f.shared,'devbox-reservations'),{recursive:true});
+  fs.writeFileSync(path.join(f.shared,'devbox-reservations','192.0.2.1.json'),JSON.stringify([[Date.now()/1000-1000,1,1,20,owner]]));
+  fs.writeFileSync(path.join(f.shared,'machine.conf'),'DEVBOX_MAX_CLAIMS=1\n');
+  fs.writeFileSync(path.join(f.dir,'config.json'),JSON.stringify({...f.config,readbackDiskGiB:60}));
+  const out=path.join(f.dir,'readback.txt');
+  const refused=spawnSync(process.execPath,[script,'fetch-artifact','--manifest',manifest,'--name','build/result.txt','--out',out],{env:f.env,encoding:'utf8',timeout:30000});
+  assert.equal(refused.status,1,refused.stdout+refused.stderr);assert.match(refused.stderr,/disk floor/);
+  assert.ok(!fs.existsSync(out),'persistent reservations prevent artifact publication below disk floor');
+  assert.ok(fs.existsSync(dir),'active foreign dynamic holder preserved');fs.rmSync(dir,{recursive:true});
+  console.log('PASS review regressions: newly allocated retirement IDs returned on success/failure; old active dynamic reservations enforce readback disk floor');
+}
+
 async function scenarios() {
   const only = process.env.DEVBOX_TEST_CASE;
+  if (!only || only === 'dynamic-review') { await reviewRegressions(); if (only) return; }
   if (!only || only === 'dynamic') { await dynamicScenarios(); if (only) return; }
   if (!only || only === 'tmpdir') {
     const f = fixture();

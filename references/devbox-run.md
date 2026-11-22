@@ -329,7 +329,7 @@ metric refresh and admission retry path.
 
 The dynamic disk budget keeps at least 53 GiB available after reservations,
 released on return. Active dynamic leases keep CPU, memory and disk weights
-reserved until exact ownership is returned; legacy anonymous entries retain their TTL. The runner inventories per-slot project worktrees before admission and uses zero disk cost for existing workspaces; new workspaces use the configured project/host cost. See the res contract for [disk budgets and rollout](res-contract.md#changes-in-v110) and [load and memory admission](res-contract.md#changes-in-v19).
+reserved until exact ownership is returned; legacy anonymous entries retain their TTL. The runner inventories per-slot project worktrees before admission. Workspace costs apply only to that exact lease ID; unseen IDs use the declared/default cold cost. An explicit `--disk-gib` takes precedence over inventory costs; input/retained-data adjustments remain additive. See the res contract for [disk budgets and rollout](res-contract.md#changes-in-v110) and [load and memory admission](res-contract.md#changes-in-v19).
 
 Immediately before each command launch, the runner reads host cores from the
 mini's `devbox-hosts.json` and counts currently held registered heavy slots on
@@ -1222,7 +1222,9 @@ reservations and host gates also govern its available claim count.
 `DEVBOX_MAX_CLAIMS[.<host>]=0` derives a safety ceiling from hardware cores divided
 by the minimum configured CPU weight; a positive integer overrides that ceiling.
 `DEVBOX_MAX_BYPASS[.<host>]=3` bounds successful smaller admissions ahead of a
-compatible larger FIFO head blocked by load, memory or disk. A fitting older head
+compatible larger FIFO head blocked by load, memory or disk. A placement-bound
+head protects eligible host capacity across ordinals, while input validation
+still applies to its allowed IDs. A fitting older head
 always runs first; after the bypass budget, the host drains for it. The committed
 bypass count survives waiter heartbeat/retry publication in `pool-bypasses/`. Other hosts
 and disjoint capability requirements remain available.
@@ -1254,3 +1256,5 @@ Secondary space cannot override a primary-disk denial; removing that conservativ
 limit needs a reviewed per-device controller contract, not a runner bypass.
 The owner must retain a rollout plan with exact publish, drain, validation and
 rollback commands before enabling these settings.
+
+Artifact retirement resolves and tracks the exact newly acquired lease ID through the central resolver. Artifact readback queries `res reserved-disk ID`, using the allocator's persistent dynamic ownership and legacy expiry rules.
