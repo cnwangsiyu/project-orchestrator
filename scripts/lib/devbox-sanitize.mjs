@@ -17,10 +17,11 @@ export function highEntropy(value) {
     >= (/^[0-9a-fA-F]+$/.test(value) ? 3.5 : 4);
 }
 
+const lexer = /\/\*[\s\S]*?\*\/|\/\/[^\r\n]*|(?:u8|u|U|L)?R"([^ ()\\\t\r\n]{0,16})\([\s\S]*?\)\1"|"""[\s\S]*?"""|(?:u8|u|U|L|@)?"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'/g;
+
 // Match comments first. Literal offsets never leave this module; receipts have no values.
 export function literals(text) {
   const rows = [], ordinals = new Map(); let previous = 0, line = 1;
-  const lexer = /\/\*[\s\S]*?\*\/|\/\/[^\r\n]*|(?:u8|u|U|L)?R"([^ ()\\\t\r\n]{0,16})\([\s\S]*?\)\1"|"""[\s\S]*?"""|(?:u8|u|U|L|@)?"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'/g;
   for (const m of text.matchAll(lexer)) {
     line += (text.slice(previous, m.index).match(/\n/g) || []).length; previous = m.index;
     if (/^\//.test(m[0])) continue;
@@ -113,19 +114,34 @@ export function validateProfile(profile) {
   return profile;
 }
 
+function bachShape(text, rule, item) {
+  if (!item) return null;
+  const escape = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const field = escape(rule.field);
+  const declaration = '(?:' + escape(rule.declaration) + '|const\\s+char\\s*\\*\\s*' + field + ')';
+  // Blank comments and literals so neither can masquerade as a declaration or write.
+  const structure = text.replace(lexer, part => part.replace(/[^\r\n]/g, ' '));
+  const declarations = [...structure.matchAll(new RegExp('(?:^|(?<=[;{}\\r\\n]))\\s*' + declaration + '\\s*([=;])', 'g'))];
+  const writes = [...structure.matchAll(new RegExp('\\b' + field + '\\s*=(?!=)', 'g'))];
+  if (declarations.length !== 1 || writes.length !== 1) return null;
+  if (declarations[0][1] === '=' && new RegExp('^' + declaration + '\\s*=\\s*$').test(item.before)) return 'initializer';
+  if (declarations[0][1] === ';' && new RegExp('^(?:this\\s*->\\s*)?' + field + '\\s*=\\s*$').test(item.before)) return 'assignment';
+  return null;
+}
+
 export function sanitizeText(text, file, profile) {
   const applicable = profile.rules.filter(r => pathMatch(r.path, file));
   const receipts = [], failures = [], observed = [], observations = [];
   for (const rule of applicable.filter(r => r.action === 'bach-empty' && r.state === 'approved')) {
     const items = literals(text).filter(item => item.field === rule.field);
-    // Bach permits only one ordinary literal after its exact declaration.
+    // Bach permits one ordinary literal, with one declaration and one write.
     const item = items[0];
-    const declared = item && new RegExp('^' + rule.declaration.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*=\\s*$').test(item.before);
-    if (items.length !== rule.count || !declared || !/^"(?:\\.|[^"\\])*"$/.test(item.raw) || item.after !== ';') {
+    const shape = bachShape(text, rule, item);
+    if (items.length !== rule.count || !shape || !/^"(?:\\.|[^"\\])*"$/.test(item.raw) || item.after !== ';') {
       failures.push(safeHit(file, rule.field, 'bach-shape-or-count', item?.line || 1)); continue;
     }
     text = text.slice(0, item.start) + '""' + text.slice(item.end);
-    observed.push(rule.id); receipts.push({ path: file, field: rule.field, rule: rule.id, rewritten: item.value.length ? 1 : 0, noOp: item.value.length ? 0 : 1 });
+    observed.push(rule.id); receipts.push({ path: file, field: rule.field, rule: rule.id, shape, rewritten: item.value.length ? 1 : 0, noOp: item.value.length ? 0 : 1 });
   }
   let { hits, rows } = scanText(text, file);
   const edits = [];

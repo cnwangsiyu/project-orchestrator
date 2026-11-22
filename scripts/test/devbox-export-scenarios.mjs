@@ -26,16 +26,37 @@ try {
   for (const file of ['.env', '.npmrc', 'local.properties', '.gradle/gradle.properties', 'signing/debug.keystore', '.remoteX/config', 'proj/ios/fixture.txt']) ok(forbiddenPath(file, profile), 'forbidden path filter');
   ok(!forbiddenPath('Dependencies/bach/version.yml', profile), 'Bach build dependency retained');
 
-  for (const rule of profile.rules.filter(r => r.action === 'bach-empty')) {
-    const file = rule.path.replace('*', 'fixture-version');
-    const content = 'namespace fixture {\nstd::string m_authCode = "synthetic-bach-fixture";\n}\n';
-    const result = sanitizeText(content, file, profile);
-    ok(result.findings.length === 0 && result.text === content.replace('"synthetic-bach-fixture"', '""'), 'Bach staged rewrite');
-    ok(result.receipts[0].rewritten === 1, 'Bach rewrite receipt');
-    const noOp = sanitizeText(result.text, file, profile);
-    ok(noOp.findings.length === 0 && noOp.receipts[0].noOp === 1, 'Bach no-op');
-    for (const changed of [content + content, content.replace('std::string', 'auto'), content.replace('"synthetic-bach-fixture"', 'factory()'), content.replace('"synthetic-bach-fixture"', '"one" "two"')])
-      ok(sanitizeText(changed, file, profile).findings.length > 0, 'Bach changed declaration rejected');
+  for (const selected of [profile, loadProfile('lynx-view')]) {
+    for (const rule of selected.rules.filter(r => r.action === 'bach-empty')) {
+      const file = rule.path.replace('*', 'fixture-version');
+      for (const type of ['std::string', 'const char*']) {
+        for (const shape of ['initializer', 'assignment', 'this-assignment']) {
+          const declaration = `${type} ${rule.field}`;
+          const content = shape === 'initializer' ? `${declaration} = "synthetic-bach-fixture";\n`
+            : `${declaration};\n${shape === 'this-assignment' ? 'this->' : ''}${rule.field} = "synthetic-bach-fixture";\n`;
+          const result = sanitizeText(content, file, selected);
+          ok(result.findings.length === 0 && result.text === content.replace('"synthetic-bach-fixture"', '""'), 'Bach staged rewrite');
+          const expectedShape = shape === 'initializer' ? shape : 'assignment';
+          ok(result.receipts[0].rewritten === 1 && result.receipts[0].shape === expectedShape, 'Bach rewrite receipt shape');
+          const noOp = sanitizeText(result.text, file, selected);
+          ok(noOp.findings.length === 0 && noOp.receipts[0].noOp === 1 && noOp.receipts[0].shape === expectedShape, 'Bach no-op shape');
+          for (const changed of [content + content, content.replace(type, 'auto'), content.replace('"synthetic-bach-fixture"', 'factory()'),
+            content.replace('"synthetic-bach-fixture"', '"one" "two"'), content.replace('"synthetic-bach-fixture"', 'BACH_VALUE'),
+            content.replace('"synthetic-bach-fixture"', 'u8"synthetic-bach-fixture"'), content.replace('"synthetic-bach-fixture"', '"synthetic-bach-fixture" + suffix'),
+            content + `${rule.field} = factory();\n`, content + `${declaration};\n`, content.trimEnd() + ` ${declaration};\n`])
+            ok(sanitizeText(changed, file, selected).findings.some(h => h.detector === 'bach-shape-or-count'), 'Bach changed declaration or expression rejected');
+          if (shape !== 'initializer') {
+            for (const changed of [content.replace(`${declaration};\n`, ''), content.replace(`${declaration};`, `// ${declaration};`), content.replace(`${declaration};`, `/* ${declaration}; */`)])
+              ok(sanitizeText(changed, file, selected).findings.some(h => h.detector === 'bach-shape-or-count'), 'Bach assignment needs a real declaration');
+          }
+        }
+      }
+    }
+    for (const prefix of ['tteffect/AmazingEngine/Demos', 'tteffect/AmazingEngine/.ttadk']) {
+      ok(forbiddenPath(prefix, selected) && forbiddenPath(prefix + '/fixture.cpp', selected), 'AmazingEngine excluded prefix');
+      ok(!forbiddenPath(prefix + '-retained/fixture.cpp', selected), 'AmazingEngine exclusion boundary');
+    }
+    ok(!forbiddenPath('tteffect/AmazingEngine/AmazingAPI/src/fixture.cpp', selected), 'AmazingEngine Android library retained');
   }
   ok(sanitizeText('apiKey = "syntheticfixturevalue";', 'fixture.properties', profile).findings.length > 0, 'unresolved finding refused');
   const shape = 'AKIA' + 'ABCDEFGHIJKLMNOP';
@@ -79,6 +100,10 @@ try {
   put(repo, 'proj/ios/excluded.txt', 'fixture\n');
   // Filename filtering happens before any contents are read; this symlink target is never opened.
   fs.symlinkSync(path.join(tmp, 'does-not-exist'), path.join(repo, '.env'));
+  for (const prefix of ['tteffect/AmazingEngine/Demos', 'tteffect/AmazingEngine/.ttadk']) {
+    fs.mkdirSync(path.join(repo, prefix), { recursive: true });
+    fs.symlinkSync(path.join(tmp, 'does-not-exist'), path.join(repo, prefix, 'unreadable-fixture.cpp'));
+  }
   const first = commit();
   put(repo, 'local-overlay.cpp', 'int local_fixture = 34;\n'); const local = commit();
   ok(local !== first && git(repo, ['remote']) === '', 'unpushed local commit fixture');
@@ -88,6 +113,8 @@ try {
   ok(fs.existsSync(path.join(source, 'local-overlay.cpp')), 'local overlay included');
   ok(fs.existsSync(path.join(source, 'Dependencies/bach/version.yml')), 'Bach pin included');
   ok(!fs.existsSync(path.join(source, '.env')), 'forbidden symlink excluded before reading');
+  for (const prefix of ['tteffect/AmazingEngine/Demos', 'tteffect/AmazingEngine/.ttadk'])
+    ok(result.excluded.some(row => row.path === prefix + '/unreadable-fixture.cpp') && !fs.existsSync(path.join(source, prefix)), 'AmazingEngine Git paths excluded before reading');
   ok(fs.lstatSync(path.join(source, 'safe-link.cpp')).isSymbolicLink() && fs.readlinkSync(path.join(source, 'safe-link.cpp')) === 'ordinary.cpp', 'in-tree link preserved without following');
   ok(git(source, ['ls-tree', 'HEAD', 'safe-link.cpp']).startsWith('120000 blob'), 'Git preserves symlink mode');
   ok(git(source, ['rev-list', '--count', 'HEAD']) === '1' && git(source, ['rev-list', '--parents', '-n', '1', 'HEAD']).split(' ').length === 1, 'parentless source history');
@@ -102,6 +129,18 @@ try {
   ok(fs.readFileSync(path.join(donor, 'pub/inc/smash/avatar_base_model.h')).equals(original), 'donor bytes untouched');
   result = await exportSource({ repo, ref: local, profile: 'lynx-view', out: path.join(tmp, 'missing-header'), dependencies: [{ dir: donor, prefix: 'native-deps/bach-sdk', expectedBachHeaders: ['pub/inc/smash/missing.h'] }] });
   ok(result.status === 'failed', 'expected missing header refused');
+
+  const amazingDonor = path.join(tmp, 'amazing-donor'); fs.mkdirSync(amazingDonor);
+  put(amazingDonor, 'AmazingAPI/src/fixture.cpp', 'int amazing_fixture = 1;\n');
+  for (const folder of ['Demos', '.ttadk']) {
+    fs.mkdirSync(path.join(amazingDonor, folder));
+    fs.symlinkSync(path.join(tmp, 'does-not-exist'), path.join(amazingDonor, folder, 'unreadable-fixture.cpp'));
+  }
+  for (const name of ['vesdk-mainline', 'lynx-view']) {
+    result = await exportSource({ repo, ref: local, profile: name, out: path.join(tmp, name + '-amazing-export'), dependencies: [{ dir: amazingDonor, prefix: 'tteffect/AmazingEngine' }] });
+    ok(result.status === 'passed', 'AmazingEngine staged directories excluded before reading');
+    ok(fs.existsSync(path.join(tmp, name + '-amazing-export/source/tteffect/AmazingEngine/AmazingAPI/src/fixture.cpp')), 'AmazingEngine staged library retained');
+  }
 
   const payload = Buffer.from('Synthetic LFS payload for local fixtures\n');
   const oid = createHash('sha256').update(payload).digest('hex');
