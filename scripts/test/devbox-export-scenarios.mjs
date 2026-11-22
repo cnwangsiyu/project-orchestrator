@@ -111,13 +111,14 @@ try {
   // Avoid installing any Git LFS filter in this fixture repository.
   const blob = git(repo, ['hash-object', '-w', '--stdin'], Buffer.from(pointer));
   git(repo, ['add', '.gitattributes']);
-  git(repo, ['update-index', '--add', '--cacheinfo', `100644,${blob},lynx-games/effect-packages/android/sticker/fixture.zip`]);
+  git(repo, ['update-index', '--add', '--cacheinfo', `100755,${blob},lynx-games/effect-packages/android/sticker/fixture.zip`]);
   git(repo, ['commit', '-qm', 'Synthetic LFS pointer']); const lfsRef = git(repo, ['rev-parse', 'HEAD']);
   const object = path.join(repo, '.git/lfs/objects', oid.slice(0, 2), oid.slice(2, 4), oid); put(repo, path.relative(repo, object), payload);
   result = await exportSource({ repo, ref: lfsRef, profile: 'lynx-view', out: path.join(tmp, 'lfs-export') });
   ok(result.status === 'passed' && result.hydratedLfs.length === 1, 'LFS hydration');
   const hydratedRepo = fs.realpathSync(path.join(tmp, 'lfs-export/source'));
   ok(fs.readFileSync(path.join(hydratedRepo, 'lynx-games/effect-packages/android/sticker/fixture.zip')).equals(payload), 'hydrated bytes match');
+  ok((fs.statSync(path.join(hydratedRepo, 'lynx-games/effect-packages/android/sticker/fixture.zip')).mode & 0o111) !== 0 && git(hydratedRepo, ['ls-tree', 'HEAD', 'lynx-games/effect-packages/android/sticker/fixture.zip']).startsWith('100755 blob'), 'LFS Git executable mode preserved independently of cache mode');
   ok(git(hydratedRepo, ['show', 'HEAD:lynx-games/effect-packages/android/sticker/fixture.zip']) === payload.toString().trim(), 'Git snapshot has payload rather than pointer');
   // Exercise the runner snapshot and bundle, then a fresh local receiver. No SSH.
   const state = { children: new Set(), cleanup: [], timings: {}, events: [] };

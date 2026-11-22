@@ -222,6 +222,7 @@ export async function exportSource({ repo, ref, profile: profileName, out, depen
         if (result.findings.length) { if (pointer) fs.rmSync(destination, { force: true }); return; }
         fs.mkdirSync(path.dirname(destination), { recursive: true });
         fs.writeFileSync(destination, result.bytes, { mode: entry.mode === '100755' ? 0o755 : 0o644 });
+        fs.chmodSync(destination, entry.mode === '100755' ? 0o755 : 0o644);
       });
       for (const expected of input.expectedBachHeaders || []) {
         const name = input.prefix ? input.prefix + '/' + expected : expected;
