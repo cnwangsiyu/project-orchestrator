@@ -14,6 +14,8 @@ import { readHubState } from './hub-state.mjs';
 import { PERSONAL_LAUNCH_HEADROOM, PERSONAL_DEADLINE_TIE_H, personalLaunchChoice } from './personal-launch.mjs';
 import { activePersonalPriority, personalPriorityGuard } from './pipeline/personal-priority.mjs';
 import { weeklyProjection } from './pipeline/quota.mjs';
+import { hubBroken, readCodexUsage, readPersonalCodexQuota } from './codex-quota.mjs';
+export { hubBroken, PANIC_WINDOW_MIN, recentPanic } from './codex-quota.mjs';
 export { withLock } from './shared-file.mjs';
 
 export const now = Date.now();
@@ -105,29 +107,6 @@ export const codexCatalog = ({ reg = readProfiles(), env = process.env } = {}) =
 };
 export const updateProfiles = (fn) => withLock(ACCOUNTS, () => { const reg = readProfiles(); fn(reg); writeJson(ACCOUNTS, reg); return reg; });
 
-const parseUsage = (usage) => {
-  // Plans differ in which windows they have, so take whatever comes back and label each by its own duration.
-  const windows = []; let plan = null, unlimited = false;
-  for (const [id, b] of Object.entries(usage.buckets ?? {})) {
-    if (!b) continue;
-    plan ??= b.planType;
-    if (b.credits?.unlimited) { unlimited = true; continue; }
-    for (const w of [b.primary, b.secondary]) {
-      if (!w || w.usedPercent == null) continue;
-      const mins = w.windowDurationMins;
-      const span = mins === 300 ? '5h' : mins === 10080 ? 'week' : mins ? `${mins}m` : '?';
-      windows.push({ label: id === 'codex' ? span : `${span} (${b.limitName ?? id})`, used: w.usedPercent, resetsAt: w.resetsAt ? w.resetsAt * 1000 : null, windowMins: mins ?? null, scoped: id !== 'codex' });
-    }
-  }
-  const rc = usage.resetCredits;
-  const resets = rc ? {
-    count: rc.availableCount ?? 0,
-    credits: (rc.credits ?? []).filter((c) => c.status === 'available')
-      .map((c) => ({ id: c.id, expiresAt: c.expiresAt ? c.expiresAt * 1000 : null }))
-      .sort((a, b) => (a.expiresAt ?? Infinity) - (b.expiresAt ?? Infinity)),
-  } : null;
-  return { plan, windows, resets, unlimited, id: usage.accountId ?? null, allowed: usage.ordinaryUsageAllowed ?? null };
-};
 // Identity is public registry metadata, supplemented by the hub's usage account id. An unreachable hub leaves
 // login state unknown; never inspect credential files to distinguish an outage from a missing login.
 const cachedIdentity = (prof) => ({ id: prof.id ?? null, email: prof.email ?? null,
@@ -141,49 +120,6 @@ const rollForward = (acc) => {
   const all = acc.resets?.credits ?? [];
   const credits = all.filter((c) => !c.expiresAt || c.expiresAt > now);
   return { ...acc, windows, resets: acc.resets ? { count: Math.max(0, (acc.resets.count ?? 0) - (all.length - credits.length)), credits } : null };
-};
-// A hub that answers but can't start threads (2026-11-08: a hub started inside a since-removed worktree panicked on every
-// new thread, "provider auth cwd must resolve", while every check here said healthy). Two checks that cost no quota:
-// the hub process's working directory still exists, and its hub.log shows no panic since its last start banner. A real
-// thread-start probe costs seconds, so it runs only in the nightly review or after a failed start (user, 2026-11-08).
-// Only recent panics count (2026-11-09: a one-off panic when the whole system ran out of file handles —
-// "Too many open files in system" — left a working TRAE hub flagged broken for hours): a hub that keeps failing keeps
-// panicking, so a persistent fault stays visible while a passing one ages out.
-// Returns null when fine or not checkable (no listener, no lsof), else { pid, why, fix }.
-export const PANIC_WINDOW_MIN = 30;
-// Pure: the message of a panic since the hub's last start banner that happened within the window, or null. Panic lines
-// carry no timestamp: a panic takes the time of the nearest timestamped log line before it (else after it, else mtime).
-export const recentPanic = (log, now, mtime, windowMin = PANIC_WINDOW_MIN) => {
-  const start = Math.max(0, ...[...log.matchAll(/app-server \(WebSockets\)/g)].map((m) => m.index));
-  const lines = log.slice(start).split('\n');
-  const ts = lines.map((l) => { const m = /(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z)/.exec(l); return m ? Date.parse(m[1]) : null; });
-  let found = null;
-  lines.forEach((l, i) => {
-    if (!/panicked at /.test(l)) return;
-    let t = null;
-    for (let k = i; k >= 0 && t == null; k--) t = ts[k];
-    for (let k = i; k < lines.length && t == null; k++) t = ts[k];
-    if ((t ?? mtime) >= now - windowMin * 60000) found = (lines[i + 1] ?? '').trim().slice(0, 160);
-  });
-  return found;
-};
-export const hubBroken = (name, prof) => {
-  try {
-    const port = new URL(prof.hub).port;
-    const pid = execFileSync('lsof', ['-t', '-nP', `-iTCP:${port}`, '-sTCP:LISTEN'], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }).trim().split('\n')[0];
-    if (!pid) return null;
-    const why = [];
-    const cwd = (execFileSync('lsof', ['-a', '-p', pid, '-d', 'cwd', '-Fn'], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] })
-      .split('\n').find((l) => l.startsWith('n')) ?? '').slice(1);
-    if (cwd && !fs.existsSync(cwd)) why.push(`its working directory ${cwd} no longer exists`);
-    const logPath = path.join(prof.home, 'hub.log');
-    if (fs.existsSync(logPath)) {
-      const p = recentPanic(fs.readFileSync(logPath, 'utf8'), Date.now(), fs.statSync(logPath).mtimeMs);
-      if (p) why.push(`hub.log has a panic in the last ${PANIC_WINDOW_MIN} min: ${p}`);
-    }
-    if (!why.length) return null;
-    return { pid: Number(pid), why: why.join('; '), fix: `once its running turns finish: kill ${pid}; cd ~ && node ${WORKER} --account ${name} hub` };
-  } catch { return null; }
 };
 // ---- TTADK daily token quota (LLMBox) ----
 // TTADK's own dashboard number: GET /api/v1/user/quota on the LLMBox gateway, which wants a short-lived token in
@@ -481,10 +417,7 @@ const chromePluginOf = (home) => {
 export const readRoutingAccount = (name, prof) => {
   if (prof.kind === 'trae') return readTrae(name, prof, { routing: true });
   if (prof.kind === 'ttadk') return readTtadk(name, prof, { routing: true });
-  const u = parseUsage(JSON.parse(execFileSync(process.execPath, [WORKER, '--account', name, 'usage'],
-    { encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'ignore'] })));
-  const broken = hubBroken(name, prof);
-  return { ...prof, ...u, name, live: !broken, healthy: !broken, auth: true, hubBroken: broken };
+  return readPersonalCodexQuota(name, prof);
 };
 export const readRoutingClaude = readClaude;
 const companyProfiles = (reg) => Object.entries(reg).filter(([, p]) => p.kind === 'ttadk' || p.kind === 'trae')
@@ -515,7 +448,7 @@ const readCodexAll = (reg, errors) => {
     }
     const identity = cachedIdentity(prof);
     try {
-      const u = parseUsage(JSON.parse(execFileSync(process.execPath, [WORKER, '--account', name, 'usage'], { encoding: 'utf8', timeout: 30000, stdio: ['ignore', 'pipe', 'pipe'] })));
+      const u = readCodexUsage(name, 30000);
       updates[name] = { id: u.id ?? identity.id, email: !u.id || !identity.id || identity.id === u.id ? identity.email : null,
         plan: u.plan ?? identity.plan, seenAt: now, windows: u.windows, resets: u.resets, unlimited: u.unlimited };
       // A broken hub still answers `usage`; count it as not live so routing prefers a working hub, and say how to fix it.

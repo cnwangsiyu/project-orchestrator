@@ -18,7 +18,7 @@ import { readRoutingAccount, readRoutingClaude, traeBrowserReady } from './state
 import { routePure } from './pipeline/index.mjs';
 import { modelPreference, policyEffort } from './pipeline/policy.mjs';
 import { readLeases } from './resource-data.mjs';
-import { readRoutingObservations, saveRoutingObservations } from './routing-observations.mjs';
+import { publishMainQuota, readRoutingObservations, saveRoutingObservations } from './routing-observations.mjs';
 import { canonicalPathOptions, canonicalPath } from './launch-paths.mjs';
 
 const read = (file, fallback = null) => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; } };
@@ -112,6 +112,9 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
           a.usage = previous?.usage;a.usageSeenAt=previous?.usageSeenAt??data.checkedAt;
         } else if(a.kind==='ttadk') a.usageSeenAt=a.seenAt;
         profiles[a.name] = {...p, modelIds: observed.modelIds ?? p.modelIds};
+        if (a.name === 'main' && (a.kind === 'chatgpt' || a.kind === undefined)) {
+          try { publishMainQuota(cachePath, a); } catch { /* launch admission can refresh if the cache is busy */ }
+        }
       } catch { a.statusSource = 'last-good-stale'; a.observationStale=true; }
     }
   }

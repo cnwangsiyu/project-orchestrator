@@ -16,6 +16,7 @@ globalThis.WebSocket = class {
     const result = ['thread/start', 'thread/resume'].includes(m.method) ? { thread: { id: config.thread, path: config.rollout,
       model: config.metadataModel ?? 'metadata-is-not-execution-evidence' } }
       : m.method === 'thread/list' ? { data: config.listData ?? [], nextCursor: config.listCursor ?? null }
+      : m.method === 'account/rateLimits/read' ? config.rateLimits ?? {}
       : m.method === 'turn/start' ? { turn } : m.method === 'thread/read' ? { thread: { name: 'guard-fixture', turns: [turn] } } : {};
     if (m.method === 'turn/interrupt') this.interrupted = true;
     setImmediate(() => {

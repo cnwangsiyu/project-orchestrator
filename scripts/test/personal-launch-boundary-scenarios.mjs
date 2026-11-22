@@ -7,6 +7,8 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { auditLaunch } from '../lib/global-rules.mjs';
+import { acquireRoute } from '../lib/route-data.mjs';
+import { parseTaskSpec } from '../lib/pipeline/index.mjs';
 
 const scripts = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tmp = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'personal-launch-boundary-')));
@@ -37,16 +39,34 @@ function fixture(label, used = 0) {
       ROUTE_LOG_FILE: log, PERSONAL_FALLBACK_FILE: path.join(dir, 'missing-fallback.json'),
       ORCHESTRATOR_OWNER: '', CODEX_HOME: '', CODEX_HUB: '', NODE_OPTIONS: '', CLAUDECODE: '', CLAUDE_SESSION_ID: '', CLAUDE_JOB_DIR: '' } };
 }
-function launch(f, account = 'b', { role, cmd = 'start', preload, name = 'old-worker' } = {}) {
+function launch(f, account = 'b', { role, cmd = 'start', preload, name = 'old-worker', transport } = {}) {
   const messages = [{ method: 'thread/usage/updated', params: { threadId: 'guard-thread', turnId: 'guard-turn', context: { model: 'GPT-6.1-Sol' } } }];
-  const args = ['--import', path.join(scripts, 'test/fixtures/worker-guards-transport.mjs'),
-    ...(preload ? ['--import', preload] : []), path.join(scripts, 'codex-worker.mjs'), '--account', account, cmd,
+  const args = [...(preload ? ['--import', preload] : []), path.join(scripts, 'codex-worker.mjs'), '--account', account, cmd,
     ...(cmd === 'start' ? ['--cwd', f.dir, '--sandbox', 'read-only'] : ['--thread', 'guard-thread']),
     '--model', 'gpt-6.1-sol', '--effort', 'high', '--name', name, '--project', 'boundary', ...(role ? ['--role', role] : []), 'Follow the synthetic brief.'];
-  const result = spawnSync(process.execPath, args, { env: { ...f.env, WORKER_GUARDS_FIXTURE: JSON.stringify({
-    thread: 'guard-thread', rpc: f.rpc, messages }) }, encoding: 'utf8', timeout: 10000 });
+  const transportFixture = path.join(scripts, 'test/fixtures/worker-guards-transport.mjs');
+  const result = spawnSync(process.execPath, args, { env: { ...f.env, NODE_OPTIONS: `--import=${transportFixture}`,
+    WORKER_GUARDS_FIXTURE: JSON.stringify({ thread: 'guard-thread', rpc: f.rpc, messages, ...transport }) },
+    encoding: 'utf8', timeout: 10000 });
   assert.equal(result.error, undefined, result.stderr);
   return { ...result, calls: readRows(f.rpc), records: readRows(f.log) };
+}
+function exclusiveMain(label, { stale = false, ...fields } = {}) {
+  const f = fixture(label);
+  f.route.pick = f.tuple('main');
+  delete f.data.codexAccounts[0].models; // the default main profile has no saved catalog
+  if (stale) f.data.codexAccounts[0].seenAt -= 20 * 60000;
+  Object.assign(f.data.codexAccounts[0], fields);
+  fs.writeFileSync(f.quota, JSON.stringify(f.data));
+  fs.writeFileSync(f.log, JSON.stringify(f.route) + '\n');
+  fs.writeFileSync(f.windowFile, JSON.stringify(policy()));
+  return f;
+}
+const readLimits = result => result.calls.filter(c => c.method === 'account/rateLimits/read').length;
+function rateLimits(used) {
+  return { ordinaryUsageAllowed: true, rateLimits: { limitId: 'codex', primary: {
+    usedPercent: used, windowDurationMins: 10080, resetsAt: Math.floor(Date.now() / 1000) + 604800,
+  } } };
 }
 let count = 0;
 function check(name, fn) { fn(); count++; console.log(`PASS ${name}`); }
@@ -102,8 +122,8 @@ try {
     assert.equal(r.status, 1); assert.match(r.stderr, /below launch headroom 5%.*re-route/);
     assert.equal(r.calls.some(c => c.method === 'thread/start'), false);
   });
-  check('main launches only with fresh current headroom; stale/low readings require re-routing', () => {
-    for (const [label, used, stale, want] of [['ready', 95, false, 0], ['low', 96, false, 1], ['stale', 10, true, 1], ['reset-shift', 3, false, 0]]) {
+  check('main launches only with fresh current headroom', () => {
+    for (const [label, used, want] of [['ready', 95, 0], ['low', 96, 1], ['reset-shift', 3, 0]]) {
       const f = fixture('main-' + label, used); f.route.pick = f.tuple('main');
       const current = policy();
       if (label === 'reset-shift') {
@@ -111,10 +131,75 @@ try {
         f.data.codexAccounts[0].windows[0].resetsAt += 102000; fs.writeFileSync(f.quota, JSON.stringify(f.data));
       }
       fs.writeFileSync(f.log, JSON.stringify(f.route) + '\n'); fs.writeFileSync(f.windowFile, JSON.stringify(current));
-      if (stale) { f.data.codexAccounts[0].seenAt -= 20 * 60000; fs.writeFileSync(f.quota, JSON.stringify(f.data)); }
       const r = launch(f, 'main'); assert.equal(r.status, want, r.stderr);
+      assert.equal(readLimits(r), 0);
       assert.equal(r.calls.some(c => c.method === 'thread/start'), want === 0);
       if (want) assert.match(r.stderr, /re-route/);
+    }
+  });
+  check('live routing publishes a new main observation for launch even without a saved model catalog', () => {
+    const f = exclusiveMain('route-publishes-main', { stale: true });
+    const company = { name: 'ttadk', kind: 'ttadk', live: true, healthy: true, models: ['gpt-6.1-sol'] };
+    f.data.codexAccounts.push(company);
+    fs.writeFileSync(f.quota, JSON.stringify(f.data));
+    const parsed = parseTaskSpec(['analysis', '--name', 'old-worker', '--project', 'boundary'],
+      { taskId: 'route-publishes-main', requestId: 'route-publishes-main' });
+    acquireRoute(parsed, { env: f.env, root: path.dirname(scripts), readClaude: () => [],
+      readAccount: account => {
+        assert.equal(account, 'main');
+        return { ...f.data.codexAccounts[0], windows: [{ ...f.data.codexAccounts[0].windows[0], used: 20 }] };
+      } });
+    const cache = JSON.parse(fs.readFileSync(f.quota, 'utf8'));
+    assert.equal(cache.checkedAt, f.data.checkedAt);
+    assert.deepEqual(cache.codexAccounts.find(a => a.name === 'ttadk'), company);
+    assert.equal(cache.codexAccounts.find(a => a.name === 'main').windows[0].used, 20);
+    const r = launch(f, 'main');
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(readLimits(r), 0);
+  });
+  check('stale main quota refreshes once before starting a thread', () => {
+    const f = exclusiveMain('refresh-stale', { stale: true });
+    const r = launch(f, 'main', { transport: { rateLimits: rateLimits(10) } });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(readLimits(r), 1);
+    const methods = r.calls.map(c => c.method);
+    assert.ok(methods.includes('thread/start'));
+    assert.ok(methods.indexOf('account/rateLimits/read') < methods.indexOf('thread/start'));
+  });
+  check('failed main quota refresh attempts once and keeps the original refusal', () => {
+    const f = exclusiveMain('failed-refresh', { stale: true });
+    const r = launch(f, 'main', { transport: { rpcFailure: 'account/rateLimits/read' } });
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /\[personal-exclusive-launch-refused\] fresh main quota and availability telemetry is unavailable \(refresh quota\.mjs --fresh\); re-route/);
+    assert.equal(readLimits(r), 1);
+    assert.equal(r.calls.some(c => c.method === 'thread/start'), false);
+  });
+  check('refreshed main quota still has to pass the weekly guard', () => {
+    const f = exclusiveMain('refresh-weekly-guard', { stale: true });
+    const r = launch(f, 'main', { transport: { rateLimits: rateLimits(96) } });
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /below launch headroom 5%/);
+    assert.equal(readLimits(r), 1);
+    assert.equal(r.calls.some(c => c.method === 'thread/start'), false);
+  });
+  check('logged-out, unhealthy and throttled main refusals do not refresh', () => {
+    const cases = [
+      ['logged-out', { stale: true, loggedIn: false }, /fresh main quota and availability telemetry is unavailable/],
+      ['unhealthy', { stale: true, healthy: false }, /fresh main quota and availability telemetry is unavailable/],
+      ['denied', { stale: true, allowed: false }, /fresh main quota and availability telemetry is unavailable/],
+      ['throttled', {}, /main short quota window is throttled/],
+    ];
+    for (const [label, fields, message] of cases) {
+      const f = exclusiveMain(label, fields);
+      if (label === 'throttled') {
+        f.data.codexAccounts[0].windows.push({ used: 95, windowMins: 300, resetsAt: Date.now() + 3600000 });
+        fs.writeFileSync(f.quota, JSON.stringify(f.data));
+      }
+      const r = launch(f, 'main');
+      assert.equal(r.status, 1);
+      assert.match(r.stderr, message);
+      assert.equal(readLimits(r), 0);
+      assert.equal(r.calls.some(c => c.method === 'thread/start'), false);
     }
   });
   check('company launches and revoked windows retain normal admission', () => {
@@ -138,4 +223,4 @@ try {
     } finally { for (const [k, value] of Object.entries(prior)) if (value === undefined) delete process.env[k]; else process.env[k] = value; }
   });
   console.log(`Personal launch boundary scenarios: ${count} passed`);
-} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+} finally { fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 5 }); }

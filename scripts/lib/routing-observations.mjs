@@ -1,7 +1,7 @@
 // Public account observations only. Independent last-good readings survive a
 // partial quota-cache write or a failed probe without renewing their timestamps.
 import fs from 'node:fs';
-import { writeJson } from './shared-file.mjs';
+import { withLock, writeJson } from './shared-file.mjs';
 import { object, nonnegative } from './pipeline/common.mjs';
 const read=file=>{try{return JSON.parse(fs.readFileSync(file,'utf8'));}catch{return null;}};
 const windows=v=>Array.isArray(v)&&v.every(w=>object(w)&&nonnegative(w.used));
@@ -29,10 +29,24 @@ export function mergeRoutingObservations(current, previous, now) {
   data.checkedAt=nonnegative(data.checkedAt)?data.checkedAt:prior.checkedAt;
   return data;
 }
-export function readRoutingObservations(file, now) {
+export function readQuotaCache(file) {
   let current=read(file);
   if(!object(current)||!Array.isArray(current.codexAccounts)) current=read(file); // legacy non-atomic writer
-  return mergeRoutingObservations(current,read(`${file}.routing-last-good.json`),now);
+  return current;
+}
+export function readRoutingObservations(file, now) {
+  return mergeRoutingObservations(readQuotaCache(file),read(`${file}.routing-last-good.json`),now);
+}
+// Keep the launch cache current when routing reads main independently of quota.mjs.
+export function publishMainQuota(file, main) {
+  withLock(file, () => {
+    const cache = readQuotaCache(file);
+    const accounts = Array.isArray(cache?.codexAccounts) ? cache.codexAccounts : [];
+    const previous = accounts.find(account => account?.name === 'main');
+    if ((previous?.seenAt ?? cache?.checkedAt) > main.seenAt) return;
+    const codexAccounts = accounts.filter(account => account?.name !== 'main');
+    writeJson(file, { ...cache, codexAccounts: [...codexAccounts, main] });
+  }, { timeoutMs: 0 });
 }
 export function saveRoutingObservations(file,data) {
   const target=`${file}.routing-last-good.json`,lock=`${target}.lock`;
