@@ -7,6 +7,7 @@ import re
 import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -47,8 +48,29 @@ def resolve():
                 addresses.add((str(ip), interface))
     except (OSError, ValueError) as error:
         raise LinkFailure("resolution-failed") from error
-    if len(addresses) != 1:
-        raise LinkFailure("ambiguous-answer" if addresses else "no-cable-answer")
+    if not addresses:
+        raise LinkFailure("no-cable-answer")
+    if len(addresses) > 1:
+        # mDNS may also advertise the peer's Thunderbolt bridge on the USB
+        # interface. Only disambiguate when exactly one candidate accepts SSH.
+        deadline = time.monotonic() + 5
+        reachable = set()
+        indices = {interface: index for index, interface in cables.items()}
+        for literal, interface in sorted(addresses):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                # Untested candidates could still be reachable.
+                raise LinkFailure("ambiguous-answer")
+            try:
+                with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as connection:
+                    connection.settimeout(min(2, remaining))
+                    connection.connect((literal, 22, 0, indices[interface]))
+                reachable.add((literal, interface))
+            except OSError:
+                continue
+        if len(reachable) != 1:
+            raise LinkFailure("ambiguous-answer")
+        addresses = reachable
     literal, interface = addresses.pop()
     address = literal + "%" + interface
     try:
