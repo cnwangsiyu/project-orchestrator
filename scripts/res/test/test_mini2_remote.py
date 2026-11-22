@@ -16,6 +16,53 @@ spec=importlib.util.spec_from_file_location("mini2_remote",Path(__file__).resolv
 m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 
 class RemoteTests(unittest.TestCase):
+    def test_device_facts_require_pinned_sdk(self):
+        versions = {
+            "cmake": "cmake version 4.4.5", "ninja": "1.13.2", "ccache": "ccache version 4.14.3",
+            "/usr/bin/clang": "Apple clang (clang-2100.3.34.2)",
+            "/usr/bin/xcodebuild": "Xcode 27.1\nBuild version 27A9275",
+            "/bin/hostname": "Bytedances-Mac-mini.local",
+        }
+        for sdk in ("27.1", "27.0", None):
+            with self.subTest(sdk=sdk):
+                def version(args):
+                    if args[0] == "/usr/bin/xcrun":
+                        if args[2] == "iphonesimulator":
+                            return "27.1"
+                        self.assertEqual(args[2:], ["iphoneos", "--show-sdk-version"])
+                        if sdk is None:
+                            raise subprocess.CalledProcessError(1, args)
+                        return sdk
+                    return versions[args[0]]
+
+                with patch.object(m, "command", side_effect=version):
+                    facts = m.facts()
+                self.assertEqual(facts["tools"]["deviceSDK"], sdk)
+                caps = ["cmake-native", "xcode-ios-sim-compile"]
+                if sdk == "27.1":
+                    caps.append("xcode-ios-device-compile-unsigned")
+                self.assertEqual(facts["caps"], caps)
+
+    def test_collect_checks_signing_files_even_if_they_are_not_retained(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(m, "ROOT", Path(temp).resolve()/"runner"):
+            run = m.location(str(uuid.uuid4()))
+            relative = "Fixture.app/Info.plist"
+            plist = run/"work"/relative
+            plist.parent.mkdir(parents=True)
+            plist.touch()
+            m.atomic(run/"receipt.json", {})
+            signing_entries = [plist.parent/"_CodeSignature", plist.parent/"embedded.mobileprovision"]
+            for entry in signing_entries:
+                with self.subTest(entry=entry):
+                    entry.touch()
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        m.collect(dict(runId=run.name, artifacts=[relative]))
+                    self.assertIs(json.loads((run/"artifacts.json").read_text())[0]["unsignedApp"], False)
+                    entry.unlink()
+            with contextlib.redirect_stdout(io.StringIO()):
+                m.collect(dict(runId=run.name, artifacts=[relative]))
+            self.assertIs(json.loads((run/"artifacts.json").read_text())[0]["unsignedApp"], True)
+
     @unittest.skipUnless(sys.platform == "darwin", "Darwin kernel identity acceptance")
     def test_kernel_original_parent_survives_reparenting(self):
         module=str(Path(__file__).resolve().parents[2]/"lib/mini2_remote.py")

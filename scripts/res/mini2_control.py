@@ -14,9 +14,11 @@ import shutil
 import sys
 import time
 import uuid
+from xml.parsers.expat import ExpatError
 
 HOST = "Bytedances-Mac-mini.local"
 SLOT = "mini2-exec-1"
+DEVICE_CAP = "xcode-ios-device-compile-unsigned"
 DEFAULT = dict(enabled=False, maintenance=False, load5Limit=6, minAvailableGiB=16,
                minFreeGiB=20, owner="9850afbb-edd7-492b-b885-913ccbf40020", generation=0)
 ROW = SLOT + "\tremote\tnever\t-\tSecond Mac mini bytedance@" + HOST + " os=darwin arch=arm64 cores=10 ram=32GiB iface=usb-ncm\n"
@@ -234,7 +236,7 @@ def measured_build(file):
     return evidence
 
 
-def verify_simulator_build(summary):
+def verify_ios_build(summary, platform, *, unsigned=False):
     evidence = measured_build(summary)
     if evidence.get("host") != HOST:
         raise ValueError("mini2 receipt required")
@@ -243,13 +245,37 @@ def verify_simulator_build(summary):
         relative = Path(item["path"])
         if relative.name != "Info.plist" or relative.parent.suffix != ".app":
             continue
-        file = (root / relative).resolve()
+        if relative.is_absolute() or ".." in relative.parts:
+            continue
+        artifact = root / relative
+        file = artifact.resolve()
         if root not in file.parents or not file.is_file():
             continue
+        if unsigned:
+            if item.get("unsignedApp") is not True or file != artifact:
+                continue
+            if any(entry.name.casefold() in {"_codesignature", "embedded.mobileprovision"}
+                   for entry in file.parent.rglob("*")):
+                continue
         data = file.read_bytes()
-        if hashlib.sha256(data).hexdigest() == item["sha256"] and "iPhoneSimulator" in plistlib.loads(data).get("CFBundleSupportedPlatforms", []):
+        if hashlib.sha256(data).hexdigest() != item["sha256"]:
+            continue
+        try:
+            plist = plistlib.loads(data)
+        except (plistlib.InvalidFileException, ExpatError):
+            continue
+        platforms = plist.get("CFBundleSupportedPlatforms") if isinstance(plist, dict) else None
+        if isinstance(platforms, list) and platform in platforms:
             return
-    raise ValueError("verified simulator app artifact required")
+    raise ValueError(f"verified {'unsigned ' if unsigned else ''}{platform} app artifact required")
+
+
+def verify_simulator_build(summary):
+    verify_ios_build(summary, "iPhoneSimulator")
+
+
+def verify_device_build(summary):
+    verify_ios_build(summary, "iPhoneOS", unsigned=True)
 
 
 def main():
@@ -263,6 +289,7 @@ def main():
     parser.add_argument("--disk-gib", type=float, default=8)
     parser.add_argument("--timeout", type=float, default=0)
     parser.add_argument("--ios-receipt", type=Path)
+    parser.add_argument("--ios-device-receipt", type=Path)
     parser.add_argument("--enable", action="store_true")
     parser.add_argument("--disable", action="store_true")
     parser.add_argument("--maintenance", choices=("on", "off"))
@@ -287,25 +314,34 @@ def main():
                     measured_build(Path(args.receipt))
                     if args.ios_receipt:
                         verify_simulator_build(args.ios_receipt)
+                    if args.ios_device_receipt:
+                        if (root/"locks"/(SLOT+".d")).exists():
+                            raise ValueError("mini2 slot held")
+                        verify_device_build(args.ios_device_receipt)
                     cfg["enabled"]=True
                 if args.disable: cfg["enabled"]=False
                 if args.maintenance: cfg["maintenance"]=args.maintenance == "on"
                 cfg["generation"]+=1
                 if args.enable or args.disable:
                     file = root/"resources.tsv"
-                    lines=file.read_text().splitlines(keepends=True)
+                    with file.open(newline="") as stream:
+                        lines=stream.readlines()
                     matches=[i for i,line in enumerate(lines) if line.startswith(SLOT+"\t")]
                     if len(matches) != 1: raise ValueError("mini2 row missing or duplicate")
-                    i=matches[0]; fields=lines[i].rstrip("\n").split("\t")
+                    i=matches[0]; row=lines[i].rstrip("\r\n"); fields=row.split("\t")
                     if fields[1] != "remote" or fields[3] != "-": raise ValueError("invalid mini2 row")
                     fields[2]="open" if args.enable else "never"
                     fields[4]=re.sub(r"\s+caps=[a-zA-Z0-9_,.-]+", "", fields[4])
                     if args.enable:
                         fields[4]+=" caps=cmake-native"
                         if args.ios_receipt: fields[4]+=",xcode-ios-sim-compile"
-                    lines[i]="\t".join(fields)+"\n"
+                        if args.ios_device_receipt: fields[4]+=","+DEVICE_CAP
+                    lines[i]="\t".join(fields)+lines[i][len(row):]
                     staged=file.with_name(".mini2-registry-"+str(uuid.uuid4()))
-                    staged.write_text("".join(lines)); os.replace(staged,file)
+                    with staged.open("x", newline="") as stream:
+                        stream.writelines(lines)
+                    shutil.copymode(file, staged)
+                    os.replace(staged,file)
             atomic(root/"mini2-config.json", cfg)
             print(json.dumps(cfg))
     elif args.action in ("take", "wait", "wait-pool"):

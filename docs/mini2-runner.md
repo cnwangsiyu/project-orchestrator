@@ -58,4 +58,4 @@ scripts/res/res mini2 configure --disable
 launchctl bootout gui/$(id -u) "$HOME/Library/LaunchAgents/com.bytedance.orchestrator.mini2-link.plist"
 ```
 
-Enabling is a separate owner action after reviewed evidence and cleanup. The controller requires a successful measured summary with retained artifacts; add `--ios-receipt` with the clean simulator build summary to admit unsigned iOS simulator compiles alongside CMake. The exact command is recorded in the task report. This task does not enable placement. No installation, energy/network/system setting or security change on mini2 is part of the runner.
+Enabling is a separate owner action after reviewed evidence and cleanup. The controller requires a successful measured summary with retained artifacts. Add `--ios-receipt` with a clean simulator build summary to admit unsigned iOS simulator compiles alongside CMake. Add `--ios-device-receipt` with a clean unsigned `iphoneos` arm64 app build summary to grant `xcode-ios-device-compile-unsigned` on mini2 with SDK 27.1. The exact command is recorded in the task report. No installation, energy/network/system setting or security change on mini2 is part of the runner.

@@ -1,10 +1,12 @@
 import argparse
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
 import os
 from pathlib import Path
+import plistlib
 import subprocess
 import sys
 import tempfile
@@ -122,24 +124,77 @@ class Mini2Tests(unittest.TestCase):
         self.assertEqual(release(dead.pid).returncode, 0)
         self.assertFalse(hold.exists())
 
-    def test_simulator_capability_requires_verified_simulator_product(self):
-        import hashlib
-        import plistlib
-        relative = "Debug-iphonesimulator/Fixture.app/Info.plist"
+    def app_receipt(self, platform, name="summary", host=m.HOST, unsigned=True):
+        relative = f"{name}/Fixture.app/Info.plist"
         file = self.root / "artifacts" / relative
-        file.parent.mkdir(parents=True)
-        summary = self.root / "summary.json"
-        for platform in ("iPhoneOS", "iPhoneSimulator"):
-            data = plistlib.dumps({"CFBundleSupportedPlatforms": [platform]})
-            file.write_bytes(data)
-            m.atomic(summary, dict(clean=True, host=m.HOST, receipt={"exit": 0},
-                                   artifacts=[dict(path=relative, sha256=hashlib.sha256(data).hexdigest())]))
-            if platform == "iPhoneOS":
-                with self.assertRaises(ValueError): m.verify_simulator_build(summary)
-            else:
-                m.verify_simulator_build(summary)
+        file.parent.mkdir(parents=True, exist_ok=True)
+        summary = self.root / f"{name}.json"
+        data = plistlib.dumps({"CFBundleSupportedPlatforms": [platform]})
+        file.write_bytes(data)
+        item = dict(path=relative, sha256=hashlib.sha256(data).hexdigest())
+        if unsigned is not None:
+            item["unsignedApp"] = unsigned
+        m.atomic(summary, dict(clean=True, host=host, receipt={"exit": 0}, artifacts=[item]))
+        return summary, file
+
+    def test_simulator_capability_requires_verified_simulator_product(self):
+        summary, _ = self.app_receipt("iPhoneOS", unsigned=None)
+        with self.assertRaises(ValueError): m.verify_simulator_build(summary)
+        summary, file = self.app_receipt("iPhoneSimulator", unsigned=None)
+        m.verify_simulator_build(summary)
         file.write_bytes(b"changed")
         with self.assertRaises(ValueError): m.verify_simulator_build(summary)
+
+    def test_device_capability_requires_verified_unsigned_device_product(self):
+        summary, file = self.app_receipt("iPhoneOS")
+        m.verify_device_build(summary)
+        for entry in ("_CodeSignature", "embedded.mobileprovision"):
+            with self.subTest(entry=entry):
+                signing_file = file.parent / entry
+                signing_file.touch()
+                with self.assertRaises(ValueError): m.verify_device_build(summary)
+                signing_file.unlink()
+        file.write_bytes(b"changed")
+        with self.assertRaises(ValueError): m.verify_device_build(summary)
+
+        for platform, host, unsigned in (("iPhoneSimulator", m.HOST, True),
+                                         ("iPhoneOS", "other-host", True),
+                                         ("iPhoneOS", m.HOST, False),
+                                         ("iPhoneOS", m.HOST, None)):
+            with self.subTest(platform=platform, host=host, unsigned=unsigned):
+                summary, _ = self.app_receipt(platform, host=host, unsigned=unsigned)
+                with self.assertRaises(ValueError): m.verify_device_build(summary)
+
+    def test_configure_device_capability_requires_device_receipt(self):
+        simulator, _ = self.app_receipt("iPhoneSimulator", "simulator", unsigned=None)
+        device, _ = self.app_receipt("iPhoneOS", "device")
+        registry = self.root / "resources.tsv"
+        other_row = "other\tremote\topen\t-\tOther host caps=other\r\n"
+        with registry.open("a", newline="") as stream:
+            stream.write(other_row)
+        args = [sys.executable, "-B", str(Path(m.__file__)), "configure", "--enable",
+                "--receipt", str(simulator), "--ios-receipt", str(simulator)]
+
+        def configure(*flags):
+            return subprocess.run([*args, *flags], env={**os.environ, "RES_DIR": str(self.root)},
+                                  capture_output=True, text=True)
+
+        result = configure()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        before = registry.read_bytes()
+        self.assertNotIn(m.DEVICE_CAP.encode(), before)
+        self.assertNotEqual(configure("--ios-device-receipt", str(simulator)).returncode, 0)
+        self.assertEqual(registry.read_bytes(), before)
+        hold = self.root / "locks" / (m.SLOT + ".d")
+        hold.mkdir(parents=True)
+        self.assertNotEqual(configure("--ios-device-receipt", str(device)).returncode, 0)
+        self.assertEqual(registry.read_bytes(), before)
+        hold.rmdir()
+        result = configure("--ios-device-receipt", str(device))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(registry.read_bytes().splitlines(keepends=True),
+                         [before.splitlines()[0] + ("," + m.DEVICE_CAP + "\n").encode(),
+                          other_row.encode()])
 
     def test_qualification_is_task_and_holder_scoped(self):
         q=self.root/"qualification.json"; m.atomic(q,dict(task="mini2-enable",by="fixture",at=self.now,enabled=True)); q.chmod(0o600)

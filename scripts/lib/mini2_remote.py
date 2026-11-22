@@ -76,12 +76,19 @@ def facts():
     tools["clang"] = command(["/usr/bin/clang", "--version"]).splitlines()[0]
     tools["xcode"] = command(["/usr/bin/xcodebuild", "-version"])
     tools["simulatorSDK"] = command(["/usr/bin/xcrun", "--sdk", "iphonesimulator", "--show-sdk-version"])
+    try:
+        tools["deviceSDK"] = command(["/usr/bin/xcrun", "--sdk", "iphoneos", "--show-sdk-version"])
+    except subprocess.SubprocessError:
+        tools["deviceSDK"] = None
     if tools["cmake"] != "cmake version 4.4.5" or tools["ninja"] != "1.13.2" or tools["ccache"] != "ccache version 4.14.3":
         raise RuntimeError("native tool version changed")
     if "clang-2100.3.34.2" not in tools["clang"] or tools["xcode"] != "Xcode 27.1\nBuild version 27A9275":
         raise RuntimeError("compiler version changed")
     if tools["simulatorSDK"] != "27.1": raise RuntimeError("simulator SDK version changed")
-    return dict(at=time.time(), host=command(["/bin/hostname"]), caps=["cmake-native", "xcode-ios-sim-compile"], tools=tools)
+    caps = ["cmake-native", "xcode-ios-sim-compile"]
+    if tools["deviceSDK"] == "27.1":
+        caps.append("xcode-ios-device-compile-unsigned")
+    return dict(at=time.time(), host=command(["/bin/hostname"]), caps=caps, tools=tools)
 
 
 class BSDInfo(ctypes.Structure):
@@ -311,6 +318,17 @@ def execute(data):
     print(json.dumps(receipt))
 
 
+def app_is_unsigned(bundle):
+    def raise_walk_error(error):
+        raise error
+
+    signing_entries = {"_codesignature", "embedded.mobileprovision"}
+    for _, directories, files in os.walk(bundle, onerror=raise_walk_error):
+        if signing_entries.intersection(name.casefold() for name in directories + files):
+            return False
+    return True
+
+
 def collect(data):
     run = location(data["runId"])
     receipt = json.loads((run/"receipt.json").read_text())
@@ -323,8 +341,12 @@ def collect(data):
         file = workspace/relative
         if file.is_symlink() or not file.is_file() or file.resolve() != file.absolute():
             raise RuntimeError("artifact is not a regular owned file")
-        artifacts.append(dict(path=relative, size=file.stat().st_size,
-                              sha256=hashlib.sha256(file.read_bytes()).hexdigest()))
+        item = dict(path=relative, size=file.stat().st_size,
+                    sha256=hashlib.sha256(file.read_bytes()).hexdigest())
+        # Check the complete bundle on mini2, where unlisted files are visible.
+        if file.name == "Info.plist" and file.parent.suffix == ".app":
+            item["unsignedApp"] = app_is_unsigned(file.parent)
+        artifacts.append(item)
     atomic(run/"artifacts.json", artifacts)
     print(json.dumps(dict(receipt=receipt, artifacts=artifacts)))
 
