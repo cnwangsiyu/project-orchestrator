@@ -65,12 +65,27 @@ try {
       assert.equal(f.outcomes().length, 1); assert.equal(f.outcomes()[0].result, 'fail'); assert.equal(f.outcomes()[0].cause, 'infra');
     }
   });
-  check('BLOCKED, FAILED and needs-user reports remain unresolved; old output cannot imply pass', () => {
+  check('environment BLOCKED records infra; other unresolved reports and old output cannot imply pass', () => {
     for (const [i, final] of ['BLOCKED: login required', '**BLOCKED**: login required', 'T1 FAILED: checks failed', 'Result: needs-user'].entries()) {
       const f = fixture(`unresolved-${i}`); fs.writeFileSync(path.join(f.dir, 'final.md'), 'old DONE');
-      assert.equal(f.run('start', { final }).status, 0); assert.equal(f.outcomes().length, 0);
+      assert.equal(f.run('start', { final }).status, 0);
+      if (i < 2) {
+        assert.equal(f.outcomes().length, 1); assert.equal(f.outcomes()[0].result, 'blocked-environment');
+        assert.equal(f.outcomes()[0].failureKind, 'infra'); assert.equal(f.outcomes()[0].accepted, null);
+      } else assert.equal(f.outcomes().length, 0);
     }
     assert.equal(unresolvedFinal('DONE. No BLOCKED tasks remain.'), false);
+  });
+  check('environment marker is injected on start and continuation and does not add rework', () => {
+    const f = fixture('environment-marker'); f.run();
+    f.run('turn', { turn:'env-turn', final:'Stopped pending a precondition.\nWORKER-RESULT: blocked-environment' });
+    assert.equal(f.outcomes().at(-1).result, 'blocked-environment'); assert.equal(f.outcomes().at(-1).rounds, 0);
+    f.run('wait', { turn:'env-turn', status:'completed', final:'Stopped pending a precondition.\nWORKER-RESULT: blocked-environment' });
+    assert.equal(f.outcomes().length, 2);
+    f.run('turn', { turn:'resumed-turn' });
+    assert.equal(f.outcomes().at(-1).result, 'rework'); assert.equal(f.outcomes().at(-1).rounds, 1);
+    for (const call of rows(f.rpc).filter(c => ['thread/start','thread/resume'].includes(c.method) && c.params.developerInstructions))
+      assert.match(call.params.developerInstructions, /standalone line WORKER-RESULT: blocked-environment/);
   });
   check('continuations add rework rounds and wait reattachments are idempotent', () => {
     const f = fixture('continuation'); assert.equal(f.run().status, 0);
@@ -173,4 +188,4 @@ try {
     assert.deepEqual(snapshot.runUsage, [{ t, accountId: 'ttadk', category: 'analysis', cumulativeInput: 200 }]);
   });
   console.log(`\n${count} scenarios passed`);
-} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+} finally { fs.rmSync(tmp, { recursive: true, force: true, maxRetries:20, retryDelay:100 }); }

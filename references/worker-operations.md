@@ -109,8 +109,20 @@ Idle-stop has no switch; pin or keep working. Do not mutate settings as part of 
 
 Launch followers record outcomes, actual model evidence, queue-inclusive elapsed time and reviewer
 yield automatically. Exit-0 proven completions give provisional pass; launcher/hub errors give infra
-failure. BLOCKED/FAILED/needs-user remains unresolved. A continued provisional pass adds rework;
+failure. Environment blockers record `result: blocked-environment`, `failureKind: infra`, no accepted
+tuple and no added fix round, including exit-0 turns. Workers include exactly one standalone
+`WORKER-RESULT: blocked-environment` line when a tool, access or resource precondition stops work;
+put it before the final `REVIEW-RESULT` line for a review seat. An explicit `WORKER-RESULT: completed`
+suppresses legacy inference. For older reports without a valid marker, inference requires a BLOCKED
+or STOPPED status label and a concrete missing-tool/login/access/network/resource precondition in
+the same paragraph. Bare BLOCKED, rejected work and narrative mentions do not qualify.
+Other BLOCKED/FAILED/needs-user reports remain unresolved. A continued provisional pass adds rework;
 reattachment does not duplicate a turn. Missing actual evidence or review marker is UNKNOWN.
+Routing joins the terminal signal to its own launch/actual tuple, excludes these turns from the
+quality-failure count and keeps their model/effort floor. Company environment retries stay on company
+lanes and the same tier; only real quality failures may advance to a personal-only model, with the
+quality reason stated in `why`. Explicit `--failure-kind` takes precedence over environment inference;
+manual outcome metadata/corrections retain their existing precedence.
 The launcher requests a final `REVIEW-RESULT: blocking` or `REVIEW-RESULT: none` line for review seats;
 seat yield is separate from author outcome. See `scripts/lib/worker-outcome.mjs` for the state machine.
 

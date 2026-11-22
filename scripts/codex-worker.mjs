@@ -72,6 +72,7 @@ import { notifyQueueOwner, pendingQueueChoice, claimQueueChoice, settleQueueChoi
 import { queuePolicy } from './lib/queue-stall-watch.mjs';
 import { inheritedLaunch, savedLaunch, saveLaunch, recordLaunchModel, readRequestBufferExceededAt, markRequestBufferExceeded } from './lib/worker-launch.mjs';
 import { recordWorkerOutcome, reviewSeat, reviewInstructions } from './lib/worker-outcome.mjs';
+import { workerResultInstructions } from './lib/worker-result.mjs';
 import { completionKind } from './lib/worker-completion.mjs';
 import { claimTransportContinuation, markTransportContinuationStarting, saveTransportContinuation } from './lib/worker-launch.mjs';
 import { TRANSPORT_BACKOFF_MS, TRANSPORT_CONTINUE_MESSAGE, transportHealthBlock, transportQuotaBlock, transportSourceBlock, boundedTransportRead } from './lib/worker-transport-retry.mjs';
@@ -438,9 +439,9 @@ if (!Number.isInteger(REROUTE_DEPTH) || REROUTE_DEPTH < 0) die('--auto-reroute-d
 tracker?.set({ routeArgs: ROUTE_ARGS, rerouteDepth: REROUTE_DEPTH });
 const BACKGROUND = !!opts.background || !!(ROUTE_ARGS && routeFlag(ROUTE_ARGS, 'background'));
 let routedMetadata;try {routedMetadata=opts['routed-seat']?JSON.parse(opts['routed-seat']):undefined;} catch {die('--routed-seat needs JSON');}
-const projectWorkerInstructions = (digest) => workerInstructions(digest, {
+const projectWorkerInstructions = (digest) => [workerInstructions(digest, {
   project: opts.project ?? (ROUTE_ARGS && routeFlag(ROUTE_ARGS, 'project')) ?? routedMetadata?.project,
-});
+}), workerResultInstructions].join('\n');
 const auditStart = (model=opts.model,sandbox=opts.sandbox,continued) => {
   try {return auditLaunch({ name: opts.name??continued?.name, continuation:continued?.thread, project:opts.project??(ROUTE_ARGS&&routeFlag(ROUTE_ARGS,'project'))??undefined,
     account:account??'main',model,effort:opts.effort,sandbox,userOK:opts['user-ok'],role:opts.role,seat:routedMetadata});}

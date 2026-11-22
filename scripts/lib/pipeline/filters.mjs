@@ -180,6 +180,9 @@ export function pContent(t, s, c) {
   return pass('pContent');
 }
 export function pModelFit(t, s, c) {
+  if (!t.flags['failure-kind'] && !t.qualityFailures && t.environmentFailures?.some(a => company(s.accounts.find(account => account.id === a.actual?.accountId)))
+    && !company(candidateParts(s,c).account))
+    return deny('pModelFit', 'ENVIRONMENT_RETRY_COMPANY_ONLY', 'An environment-blocked company turn retries on company lanes without advancing the quality ladder.', c);
   if(c.modelId==='gpt-5.6-luna'||candidateParts(s,c).account.kind==='trae'&&c.modelId.startsWith('gemini')) return deny('pModelFit','MODEL_RETIRED','This model is retired from current routing; historical tuples remain valid history.',c);
   if (c.family === 'deepseek' && !adversarial(t) && isReview(t) && (t.stakes === 'high' || t.impact === 'release' || t.contentLabels.includes('defensive-confirmation'))) return deny('pModelFit', 'MODEL_FIT_SENSITIVE_REVIEW', 'Sensitive reviews require an established strong reviewer family.', c);
   if (c.family === 'kimi' && candidateParts(s, c).account?.kind !== 'ttadk') return deny('pModelFit', 'KIMI_TTADK_ONLY', 'The established Kimi route is TTADK only.', c);

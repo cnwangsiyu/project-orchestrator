@@ -8,6 +8,7 @@ import { createTaskSpec } from './pipeline/taskspec.mjs';
 import { createSnapshot } from './pipeline/snapshot.mjs';
 import { policyModel, isAstra, modelId, familyOf, object, array, nonnegative, VERSION } from './pipeline/common.mjs';
 import { dedupeOutcomes } from './pipeline/outcomes.mjs';
+import { environmentOutcome } from './worker-result.mjs';
 import { transportOutcome } from './worker-completion.mjs';
 import { RUN_USAGE_HISTORY_MS } from './pipeline/ttadk-reserve.mjs';
 import { personalBudget, weeklyProjection } from './pipeline/quota.mjs';
@@ -181,6 +182,9 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
         state: 'transport-failed', failureKind: 'transport-failed' });
       return;
     }
+    const outcome = turnOutcome(r);
+    if (!flags['failure-kind'] && environmentOutcome(outcome))
+      r = { ...r, state: 'failed', failureKind: 'infra', environmentBlocked: true };
     const terminal=['failed','completed','cancelled-no-work','cancelled','succeeded'].includes(r.state);
     if ((!terminal && !['starting','queued','running','cancel-pending','UNKNOWN'].includes(r.state))
       || (r.kind && !['attempt','launch','launch-model'].includes(r.kind)) || r.accepted===false) return;
@@ -216,6 +220,8 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
       if (index < 0) continue;
       const [row] = terminal.splice(index,1);
       if (transportOutcome(turnOutcome(row))) Object.assign(attempt,{state:'transport-failed',failureKind:'transport-failed',thread:row.thread,turn:row.turn});
+      else if (!flags['failure-kind'] && environmentOutcome(row))
+        Object.assign(attempt,{failureKind:'infra',environmentBlocked:true,thread:row.thread,turn:row.turn});
     }
   }
   if (retryHistory && flags['previous-attempt'] && !flags.actual) {
@@ -279,6 +285,18 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
   if (retryHistory && !flags.actual) for (const row of terminalOutcomes.filter(transportOutcome)) {
     if (!attempts.some(a => a.thread === row.thread && a.turn === row.turn))
       ingestAttempt({ ...row, state: 'transport-failed' });
+  }
+  // --actual may carry only the latest tuple. Earlier confirmed environment
+  // turns still explain the retry count and retain their own execution floor.
+  if (retryHistory && !flags['failure-kind']) for (const row of terminalOutcomes.filter(environmentOutcome)) {
+    if (!attempts.some(a => a.thread === row.thread && a.turn === row.turn)) {
+      const actual = Array.isArray(row.actual) ? row.actual.at(-1) : row.actual;
+      addActual(actual, { thread:row.thread, turn:row.turn, actualStatus:row.actualStatus,
+        failureKind:'infra', environmentBlocked:true });
+      if (!actual) attempts.push({ id:`environment-${row.thread}-${row.turn}`, taskId:id, role,
+        state:'failed', actualStatus:'UNKNOWN', thread:row.thread, turn:row.turn,
+        failureKind:'infra', environmentBlocked:true });
+    }
   }
   let retryAssumption = missingTerminalActual ? 'A finished attempt had no confirmed actual tuple; using the next available recorded retry baseline.' : null;
   if (retryHistory && !attempts.length && parsed.failureKind !== 'tool') {

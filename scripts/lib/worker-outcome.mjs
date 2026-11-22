@@ -4,6 +4,7 @@ import path from 'node:path';
 import { rulesLog, readRecords, isRouteDecision } from './global-rules.mjs';
 import { withLock } from './shared-file.mjs';
 import { completionKind } from './worker-completion.mjs';
+import { blockedEnvironmentFinal, environmentOutcome } from './worker-result.mjs';
 
 const bare = (project, name) => name.startsWith(`${project}-`) ? name.slice(project.length + 1) : name;
 const sameTask = (project, name, row) => row.project === project && typeof row.name === 'string'
@@ -35,9 +36,10 @@ export function recordWorkerOutcome({ project, name, category, role, account = '
   const reviewResult = reviewRun && terminal && exit === 0 ? parseReviewResult(final) : null;
   const unresolved = unresolvedFinal(final);
   const transport = completionKind({ status, error }) === 'transport-failed';
+  const environmentSignal = terminal && !transport ? blockedEnvironmentFinal(final) : null;
   // A review verdict may say BLOCKED while supplying a valid blocking marker. Keep that yield as metadata,
   // without calling the unresolved turn a task pass/fail.
-  if (unresolved && !reviewResult && !transport) return null;
+  if (unresolved && !reviewResult && !transport && !environmentSignal) return null;
   fs.mkdirSync(path.dirname(log), { recursive: true });
   return withLock(log, () => {
     const rows = readRecords(log);
@@ -52,16 +54,17 @@ export function recordWorkerOutcome({ project, name, category, role, account = '
     const owned = rows.filter(row => isRouteDecision(row) && sameTask(project, name, row));
     const firstLaunch = Math.min(startedAt ?? time, ...launches.map(row => row.t), ...prior.map(row => row.startedAt ?? row.t));
     const previous = prior.at(-1);
+    const previousWork = prior.findLast(row => !environmentOutcome(row));
     const newTurns = launches.filter(row => row.continuation && row.t > (previous?.t ?? time) && !row.blocked).length;
-    const rounds = (previous?.rounds ?? 0) + (!transport && command === 'turn' && previous && ['pass', 'rework'].includes(previous.result) ? Math.max(1, newTurns) : 0);
+    const rounds = (previous?.rounds ?? 0) + (!transport && !environmentSignal && command === 'turn' && previousWork && ['pass', 'rework'].includes(previousWork.result) ? Math.max(1, newTurns) : 0);
     const pick = { vendor: 'codex', model: actualModel ?? model ?? null, effort: effort ?? 'medium', account };
     const actual = actualModel ? [...(previous?.actual ?? []), { ...pick }] : previous?.actual;
     const rec = { t: time, kind: 'outcome', auto: true, project, name, category, role: role ?? 'primary',
-      reviewRun, ...(transport ? { result: 'transport-failed' } : !unresolved ? { result: exit === 0 ? rounds ? 'rework' : 'pass' : 'fail' } : {}), rounds,
-      cause: transport ? 'transport' : exit === 0 ? null : 'infra', failureKind: transport ? 'transport-failed' : exit === 0 ? 'quality' : 'infra',
+      reviewRun, ...(transport ? { result: 'transport-failed' } : environmentSignal ? { result: 'blocked-environment', environmentSignal } : !unresolved ? { result: exit === 0 ? rounds ? 'rework' : 'pass' : 'fail' } : {}), rounds,
+      cause: transport ? 'transport' : environmentSignal ? 'infra' : exit === 0 ? null : 'infra', failureKind: transport ? 'transport-failed' : environmentSignal ? 'infra' : exit === 0 ? 'quality' : 'infra',
       minutes: Math.max(0, (time - firstLaunch) / 60000), startedAt: firstLaunch, thread, turn, exit,
       ...(terminal && Number.isSafeInteger(cumulativeInput) && cumulativeInput > 0 ? { cumulativeInput, usageAccount: account } : {}),
-      first: owned[0]?.pick ?? previous?.first ?? pick, accepted: exit === 0 ? pick : null,
+      first: owned[0]?.pick ?? previous?.first ?? pick, accepted: exit === 0 && !environmentSignal ? pick : null,
       impact: owned[0]?.impact ?? null, decisions: owned.length,
       ...(actual ? { actual } : {}), actualStatus: actualModel ? 'KNOWN' : 'UNKNOWN',
       ...(reviewRun ? { reviewResult } : {}) };

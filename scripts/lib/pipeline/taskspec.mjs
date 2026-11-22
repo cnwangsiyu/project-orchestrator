@@ -1,5 +1,6 @@
 import { scopedFlags } from '../route-args.mjs';
 import { transportOutcome } from '../worker-completion.mjs';
+import { environmentOutcome } from '../worker-result.mjs';
 import {REVIEW_CLASSES,projectReviewPolicy} from '../review-policy-data.mjs';
 import { VERSION, array, object, idOK, modelSelector, modelId, unique, clone, freeze, fingerprint, isReview, compare, stable } from './common.mjs';
 
@@ -124,6 +125,14 @@ export function createTaskSpec(input) {
   failures = Math.max(0, failures - transportIds.size);
   if (transportIds.size) f.failures = String(failures);
   const attempts = priorTurns.filter(a => !transportOutcome(a));
+  const environmentFailures = attempts.filter(a => environmentOutcome(a) && a.taskId === (input.taskId ?? f.name)
+    && (a.role ?? 'primary') === (input.role ?? 'primary')).sort((a,b) => compare(String(a.id),String(b.id)));
+  const environmentIds = new Set(environmentFailures.map(a => a.thread && a.turn ? `${a.thread}:${a.turn}` : a.id));
+  // Normalized specs retain these actual tuples as a floor. Only consume their
+  // retry-count contribution when first normalizing the incoming history.
+  const normalizedEnvironmentIds = new Set(array(input.environmentFailures).map(a => a.thread && a.turn ? `${a.thread}:${a.turn}` : a.id));
+  failures = Math.max(0, failures - [...environmentIds].filter(id => !normalizedEnvironmentIds.has(id)).length);
+  if (environmentIds.size) f.failures = String(failures);
   for (const a of attempts) if (object(a.actual)) {
     a.actual.modelId = modelId(a.actual.modelId ?? a.actual.model); delete a.actual.model;
   }
@@ -168,7 +177,7 @@ export function createTaskSpec(input) {
     role: input.role ?? 'primary', parentTaskId: input.parentTaskId ?? null, briefHash: input.briefHash ?? 'UNKNOWN', flags: f,
     reviewClass,reviewReason,reviewScope:f['review-scope']??input.reviewScope??null,policyNotes:unique([...array(input.policyNotes),...policyNotes]), tier, stakes, impact, env, execution, writes, runsTests: f['runs-tests'] ?? input.runsTests ?? false, background,
     contentLabels: unique([...labels]), capabilitiesNeeded: unique([...caps]), exclusions: unique(exclusions.map(stable)).map(JSON.parse),
-    failures, failureKind, qualityFailures, transportFailures: transportFailures.length ? transportFailures : clone(array(input.transportFailures)),
+    failures, failureKind, qualityFailures, environmentFailures, transportFailures: transportFailures.length ? transportFailures : clone(array(input.transportFailures)),
     previousAttempts: attempts.sort((a, b) => compare(String(a?.id), String(b?.id))),
     floor: clone(input.floor ?? { profileIds: [], previousAttemptIds: [], relationVersion: VERSION, historyStatus: failures || autoRerouteDepth || f['previous-attempt'] ? 'UNKNOWN' : 'KNOWN' }),
     authorAttemptId: input.authorAttemptId ?? null, againstAttemptId: input.againstAttemptId ?? null,

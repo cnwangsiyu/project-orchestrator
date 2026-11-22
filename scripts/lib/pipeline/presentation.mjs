@@ -88,6 +88,10 @@ export function presentRoute(plan, view, context) {
   if(staleAccounts.length) why.push(`Status read incomplete: retained last-good stale observations for ${staleAccounts.join(', ')}; original sample ages and admission checks remain in force.`);
   if(context.retryAssumption) why.push(context.retryAssumption);
   if(t.transportFailures?.length) why.push(`Ignored ${new Set(t.transportFailures.map(a=>a.thread&&a.turn?`${a.thread}:${a.turn}`:a.id)).size} transport-failed turn(s): no quality attempt, --failures increment, repeat gate or dominance floor.`);
+  if(t.environmentFailures?.length) why.push(`Ignored ${new Set(t.environmentFailures.map(a=>a.thread&&a.turn?`${a.thread}:${a.turn}`:a.id)).size} blocked-environment turn(s) for quality escalation: ${f['failure-kind'] ? 'explicit --failure-kind takes precedence' : 'retry on the same tier and company lanes'}; retain the actual model/effort floor.`);
+  if(c && t.qualityFailures > 0 && !company(candidateParts(snapshot,c).account)
+    && !snapshot.accounts.some(a => company(a) && known(a.catalog)?.includes(c.modelId)))
+    why.push(`Quality escalation after ${t.qualityFailures} quality failure(s): ${c.modelId} is offered only on personal accounts; environment blockers do not advance the ladder.`);
   for (const lane of new Set((snapshot.transportFailures ?? []).map(r => `${r.account}:${r.modelId}`))) {
     const at = lane.indexOf(':'), account = lane.slice(0,at), model = lane.slice(at+1);
     const count = transportLaneFailures(snapshot.transportFailures, account, model, snapshot.decisionAt);

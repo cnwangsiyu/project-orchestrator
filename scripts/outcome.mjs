@@ -17,6 +17,7 @@
 // so it carries the vendor, model, effort and category of the first attempt and of the attempt that was accepted.
 import fs from 'node:fs';
 import { ROUTE_LOG, outcomeOwns, isReviewDecision, dedupeOutcomes, effectiveFirst, effectiveAccepted } from './lib/state.mjs';
+import { environmentOutcome } from './lib/worker-result.mjs';
 
 const argv = process.argv.slice(2), opts = {};
 for (let i = 0; i < argv.length; i++) if (argv[i].startsWith('--')) {
@@ -89,6 +90,10 @@ if (opts.correct || metadataOnly) {
     ...(opts.correct ? { correction: true } : {}), ...(!metadataOnly ? { result: opts.result, rounds } : {}) };
   const fields = { 'failure-kind':opts['failure-kind'], rounds, cause, retries, 'scope-changes': scopeChanges, minutes, reviewed: !!opts.reviewed,reviewResult:opts['review-result']??null, note: opts.note, actual, 'review-result':opts['review-result'] };
   for (const [flag, value] of Object.entries(fields)) if (opts[flag] !== undefined) rec[flag==='failure-kind'?'failureKind':flag==='review-result'?'reviewResult':flag === 'scope-changes' ? 'scopeChanges' : flag] = value;
+  if (opts['failure-kind'] !== undefined && prior.some(environmentOutcome)) {
+    const terminal = prior.findLast(r => r.thread && r.turn);
+    if (terminal) Object.assign(rec,{thread:terminal.thread,turn:terminal.turn,category:terminal.category,role:terminal.role??'primary'});
+  }
   if (opts.result === 'transport-failed' || opts['failure-kind'] === 'transport-failed') {
     const terminal = prior.findLast(r => r.thread && r.turn);
     Object.assign(rec,{ failureKind:'transport-failed',cause:'transport',

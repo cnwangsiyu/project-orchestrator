@@ -10,6 +10,7 @@ import { once } from 'node:events';
 import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
 import { loadDigest } from '../lib/global-rules.mjs';
+import { workerResultInstructions } from '../lib/worker-result.mjs';
 
 const scripts = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rules-enforcement-'));
@@ -126,13 +127,13 @@ if(m.method==='turn/start')setImmediate(()=>this.onmessage({data:JSON.stringify(
   execFileSync(process.execPath, ['--import', transport, path.join(scripts, 'codex-worker.mjs'), '--account', 'main', 'start',
     '--cwd', tmp, '--effort', 'high', '--sandbox', 'read-only', '--model', 'gpt-6.1-sol', '--name', 'digest-fixture', '--log', path.join(tmp, 'worker.jsonl'), 'reply DONE'],
   { env: { ...env, CODEX_ACCOUNTS: profiles, CAPTURE: captured }, encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'] });
-  assert.equal(JSON.parse(fs.readFileSync(captured)).developerInstructions, `Global worker rules ${digest.version}\n${digest.worker}`);
+  assert.equal(JSON.parse(fs.readFileSync(captured)).developerInstructions, `Global worker rules ${digest.version}\n${digest.worker}\n${workerResultInstructions}`);
   for(const clause of Object.values(WORKER_NOTES)) assert.ok(JSON.parse(fs.readFileSync(captured)).developerInstructions.includes(clause), clause);
   assert.match(JSON.parse(fs.readFileSync(captured)).developerInstructions, /never overwrite, delete or move files outside the task's scope.*restore.*byte-for-byte/);
   const workerLaunch = rows().findLast((row) => row.kind === 'launch');
   assert.equal(workerLaunch.account, 'main'); assert.equal(workerLaunch.sandbox, 'read-only');
   assert.equal(rows().at(-1).kind, 'launch-model'); assert.equal(rows().at(-1).thread, 'fixture');
-  console.log('ok   real codex-worker start injects the single-source worker digest and records launch evidence');
+  console.log('ok   real codex-worker start preserves the worker digest, adds the outcome protocol and records launch evidence');
   const probeBin = path.join(tmp, 'probe-bin'), spawned = path.join(tmp, 'unexpected-hub-spawn');
   fs.mkdirSync(probeBin);
   fs.writeFileSync(path.join(probeBin, 'codex'), `#!/bin/sh\ntouch '${spawned}'\nexit 1\n`, { mode: 0o755 });
