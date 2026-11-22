@@ -630,6 +630,7 @@ def observation_main(root, action, id, by=''):
             rows[parts[0]] = parts[1:]
     if id and id not in rows and any(resource.startswith('devbox-host-') for resource in rows):
         import subprocess
+        if not os.environ.get('RES_SELF_COMMAND'): raise ValueError('dynamic holder requires a res file or RES_SOURCE')
         result = subprocess.run([os.environ['RES_SELF_COMMAND'],'slot-host',id], env={**os.environ,'RES_DIR':root}, capture_output=True,text=True,timeout=10)
         if result.returncode == 0:
             value=json.loads(result.stdout)
@@ -722,7 +723,7 @@ WAITER_STALE_SECONDS="${RES_WAITER_STALE_SECONDS:-300}"  # 45 s expired the FIFO
 
 # Polling guards need neither the admission parser nor its large controller.
 # Exec also removes a shell/process wait from the single-resource path.
-export RES_SELF_COMMAND="${BASH_SOURCE[0]}"
+export RES_SELF_COMMAND="${BASH_SOURCE[0]:-${RES_SOURCE:-}}"
 fast_observer=
 if [ "${1:-}" = holder ]; then
   fast_observer=1
