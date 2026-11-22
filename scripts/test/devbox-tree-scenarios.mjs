@@ -178,12 +178,14 @@ try {
   assert.ok(fs.existsSync(mappedTree.workspace));
   assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'wt-map.json'))).slots['devbox-cn-20']['fixture/id-fixture'].treeRoot, root);
 
-  // Preserve unrelated land-7 scripts; pin intentional run/submodule fixes separately.
+  // Preserve unrelated land-7 scripts; pin intentional supervisor/cleanup fixes separately.
   const hash = value => createHash('sha256').update(value).digest('hex');
-  const nonRun = Object.fromEntries(Object.entries(remoteScripts).filter(([operation]) => !['run', 'submodule'].includes(operation)));
-  assert.equal(hash(JSON.stringify(nonRun)), 'b60900e37f98c75361e0a0ab7f4fc803bf5574482f671c1c3cf8530cf937375e', 'all 32 unrelated remote scripts unchanged from land-7');
+  const nonRun = Object.fromEntries(Object.entries(remoteScripts).filter(([operation]) => !['run', 'submodule', 'cleanup', 'reconnect'].includes(operation)));
+  assert.equal(hash(JSON.stringify(nonRun)), '8aacfd8c6ea07ea85fa35212b06b855238ce787438174817f981e60c84d2e886', 'all 30 unrelated remote scripts unchanged from land-7');
   assert.equal(hash(remoteScripts.submodule), 'f07f6023f8d5d85580b9682135fd1d83250d8fe5ecc1402d2f0ce088c043407d', 'submodule snapshot includes offline legacy-clone pin import');
-  assert.equal(hash(remoteScripts.run), '424595dc72f587dc006b623ce596f87626bbcd12804791a55a5132f17fa2d618', 'run wire snapshot includes the cleanup liveness and warning fixes');
+  assert.equal(hash(remoteScripts.run), 'b5315491f55620e5388bb32f5d2cc1d734c90c45488f6b996558e0c4819d20ef', 'run wire snapshot includes short owned TMPDIR creation and cleanup');
+  assert.equal(hash(remoteScripts.cleanup), '8d9a439a1c6427608902c39313c3f0434c6c67e35c33a64ddd647e7968c68388', 'cleanup wire snapshot includes guarded TMPDIR removal');
+  assert.equal(hash(remoteScripts.reconnect), '70225c93d52ce7997b3e69deaf0f0e337d18a054c5a585f9ad9eb729f266cf0e', 'reconnect wire snapshot includes guarded TMPDIR recovery');
   for (const [operation, source] of Object.entries(remoteScripts)) assert.equal(treeScript(operation, source, '', {}), source, 'legacy script unchanged: ' + operation);
   const scripts = fileURLToPath(new URL('../', import.meta.url));
   for (const operation of ['inspect', 'checkout', 'run', 'input-map', 'inputs-ready', 'dead-slot']) {

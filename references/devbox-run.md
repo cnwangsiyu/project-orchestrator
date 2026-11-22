@@ -1132,6 +1132,16 @@ normal signed-in SSH environment outside the runner.
 
 ## Validation
 
+Every supervised remote command (including input rebuilds and GC) receives a
+fresh 0700 `TMPDIR` at `/tmp/dr-XXXXXXXX`, overriding ambient, bootstrap and
+explicit TMPDIR values. The runner checks the encoded Chromium singleton socket
+path against the 107-byte maximum before launching. After confirming its command
+processes are gone, it removes only the directory recorded for that run, checks
+the directory identity, and refuses a replaced directory or top-level symlink.
+Links inside the owned directory are unlinked without following their targets.
+`node scripts/test/devbox-tmpdir-scenarios.mjs` checks the length boundary,
+environment precedence and cleanup guards using local fixtures.
+
 `node scripts/test/devbox-run-scenarios.mjs` uses isolated PATH shims for SSH
 and res, real local Git bundles/worktrees, and no network. It covers shard
 leases, registry mapping, capabilities on new and old controllers, shared

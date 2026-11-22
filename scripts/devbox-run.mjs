@@ -17,6 +17,7 @@ import { fileDigest, artifactName, readArtifactManifest, retainedArtifactPython,
 import { controlOptions, muxFailure, muxRetrySafe } from './lib/devbox-ssh.mjs';
 import { retentionPython } from './lib/devbox-retention.mjs';
 import { cleanupEvidencePython } from './lib/devbox-cleanup-pending.mjs';
+import { runTmpdirPython } from './lib/devbox-tmpdir.mjs';
 import { treeSettings, treePreference, treeScript } from './lib/devbox-trees.mjs';
 
 const script = fileURLToPath(import.meta.url);
@@ -986,7 +987,7 @@ sys.exit(subprocess.run(['git','apply','--index','--binary','--whitespace=nowarn
 `,
   // The SSH-owned supervisor is a Linux subreaper OUTSIDE the command group.
   // It continuously reaps adopted children and owns cancellation/start arbitration.
-  run: pythonHeader + retentionPython + runDataCleanupPython + `import ctypes, subprocess, shlex, shutil
+  run: pythonHeader + retentionPython + runDataCleanupPython + runTmpdirPython + `import ctypes, subprocess, shlex, shutil
 if d.get('root'):
     disk=os.statvfs(d['root'])
     if disk.f_bavail*disk.f_frsize<53*1073741824:
@@ -1063,6 +1064,7 @@ def stop_group(sig):
 try:
     if cancelled or (ctl/'cancel').exists(): result=143
     else:
+        d['env']={**d['env'],'TMPDIR':create_run_tmpdir(ctl)}
         bootstrap='if [ -f "$HOME/devbox-env.sh" ]; then . "$HOME/devbox-env.sh"; else export PATH="$HOME/.local/node/bin:$HOME/.local/bin:$PATH"; fi'
         exports='; '.join('export '+key+'='+shlex.quote(value) for key,value in d['env'].items())
         parallel=('export GRADLE_OPTS="'+'\u0024{GRADLE_OPTS:+\u0024GRADLE_OPTS }-Dorg.gradle.workers.max='+str(d['cpus'])+'"') if d.get('cpus') else ''
@@ -1091,6 +1093,10 @@ finally:
     reap()
     gone=(not proc or exited() is not None) and not adopted()
     if gone and proc: proc.wait()
+    if gone:
+        try: cleanup_run_tmpdir(ctl)
+        except Exception as error:
+            print('devbox-run: TMPDIR cleanup refused: '+str(error),file=sys.stderr,flush=True); result=70
     save('done.json',{'gone':gone,'exit':result if gone else 70,'commandDurationSec':time.monotonic()-command_start if command_start is not None else 0})
 sys.exit(result if gone else 70)
 `,
@@ -1124,12 +1130,14 @@ for proc in pathlib.Path('/proc').iterdir():
     if any(cwd==p or cwd.startswith(p+'/') or re.search(r'(?<![\\w/.-])'+re.escape(p)+r'(?=/|[\\s\\x00\\x22\\x27]|$)',args) for p in paths): count+=1
 print(json.dumps({'clean':count==0,'count':count,'worktrees':len(paths)}))
 `,
-  reconnect: pythonHeader + remoteRunIdentity + `done=ctl/'done.json'; owner=ctl/'owner.json'; group=ctl/'group.json'
+  reconnect: pythonHeader + remoteRunIdentity + runTmpdirPython + `done=ctl/'done.json'; owner=ctl/'owner.json'; group=ctl/'group.json'
 if done.exists() and read_own(done)['gone'] and group_gone():
+    cleanup_run_tmpdir(ctl)
     print('group-gone')
 elif owner.exists() and alive(read_own(owner)) or group.exists() and not group_gone():
     print('group-running')
 elif group.exists() and owner.exists() and not done.exists():
+    cleanup_run_tmpdir(ctl)
     print('group-gone')
 else: sys.exit(70)
 `,
@@ -1148,7 +1156,7 @@ if output.exists():
         log.seek(offset); tail=log.read(1024*1024)
 print(json.dumps({'exit':record['exit'] if record else None,'tail':base64.b64encode(tail).decode(),'offset':offset+len(tail),'more':output.exists() and output.stat().st_size>offset+len(tail)}))
 `,
-  cleanup: pythonHeader + remoteRunIdentity + `ctl.mkdir(parents=True, exist_ok=True)
+  cleanup: pythonHeader + remoteRunIdentity + runTmpdirPython + `ctl.mkdir(parents=True, exist_ok=True)
 for file in ('owner.json','group.json','done.json'):
     if (ctl/file).exists(): read_own(ctl/file)
 (ctl/'cancel').touch()
@@ -1192,6 +1200,7 @@ while time.monotonic()<limit:
     pgid=group['pid'] if group else None
     value=status()
     if not value['count'] and not value['ownerAlive']:
+        cleanup_run_tmpdir(ctl)
         report(value); print('group-gone'); sys.exit(0)
     if time.monotonic()>limit-18: signal_group(signal.SIGKILL)
     time.sleep(.1)

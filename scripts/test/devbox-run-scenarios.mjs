@@ -12,6 +12,7 @@ import { makeSubmoduleFixture } from './devbox-submodule-fixture.mjs';
 import { fingerprint, inputKey, indexFile } from '../lib/devbox-inputs.mjs';
 import { transferFindings } from '../lib/devbox-transfer-check.mjs';
 import { retentionPython } from '../lib/devbox-retention.mjs';
+import { runTmpdirPython } from '../lib/devbox-tmpdir.mjs';
 import { muxFailure, muxRetrySafe } from '../lib/devbox-ssh.mjs';
 
 const script = fileURLToPath(new URL('../devbox-run.mjs', import.meta.url));
@@ -30,7 +31,8 @@ function fixture(options = {}) {
   for (const p of [bin, shared, repo, path.join(shared, 'locks')]) fs.mkdirSync(p, { recursive: true });
   const cleanupPython = 'import os,sys,json,pathlib,time\n' + retentionPython + runDataCleanupPython + '\nd=json.loads(sys.stdin.read())\nproc_root=pathlib.Path(d["control"])/"fixture-proc"\nproc_root.mkdir(parents=True,exist_ok=True)\ndocker_workspace_live=lambda workspace: False\nprint(json.dumps(cleanup_run_data(d,proc_root)))\n';
   const cleanupOutputPython = 'import json,sys,pathlib\n' + runDataCleanupPython + '\nprint_data_cleanup(json.loads(sys.stdin.read()))\n';
-  const config = { dir, shared, cleanupPython, cleanupOutputPython, hosts: ['192.0.2.1', '192.0.2.2'], ...options };
+  const tmpdirPython = 'import os,json,pathlib,sys\n' + runTmpdirPython + '\nctl=pathlib.Path(sys.argv[2])\nif sys.argv[1]=="create": print(create_run_tmpdir(ctl))\nelse: cleanup_run_tmpdir(ctl)\n';
+  const config = { dir, shared, cleanupPython, cleanupOutputPython, tmpdirPython, hosts: ['192.0.2.1', '192.0.2.2'], ...options };
   fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify(config));
   const rows = [
     'devbox-cn-1\tremote\topen\t-\tfirst alice@192.0.2.1 caps=node',
@@ -186,6 +188,9 @@ if(op==='run') {
  if(c.launcherDiskHost===host){console.error('DEVBOX_LAUNCH_DISK_GUARD');process.exit(72);}
  fs.mkdirSync(d.control,{recursive:true});
  if(fs.existsSync(path.join(d.control,'cancel'))){fs.writeFileSync(path.join(d.control,'done.json'),JSON.stringify({gone:true}));process.exit(143);}
+  const tmpdir=cp.spawnSync('python3',['-c',c.tmpdirPython,'create',d.control],{encoding:'utf8'});
+  if(tmpdir.status)throw Error(tmpdir.stderr);
+  d.env={...d.env,TMPDIR:tmpdir.stdout.trim()};
  const attemptFile=path.join(c.dir,'run-count-'+host);const n=fs.existsSync(attemptFile)?Number(fs.readFileSync(attemptFile)):0;fs.writeFileSync(attemptFile,String(n+1));
  let cmd=(d.cpus?'export GRADLE_OPTS="'+'$'+'{GRADLE_OPTS:+'+'$'+'GRADLE_OPTS }-Dorg.gradle.workers.max='+d.cpus+'"; ':'')+d.command;
  if(c.failHost===host)cmd='exit 7';
@@ -199,6 +204,8 @@ if(op==='run') {
  const timer=setTimeout(()=>{timedOut=true;stop();},d.seconds*1000);
  let code=await new Promise(r=>child.on('exit',(code,signal)=>r(code??143)));
  clearTimeout(timer);try{process.kill(-child.pid,'SIGKILL')}catch{}
+  const tmpCleanup=cp.spawnSync('python3',['-c',c.tmpdirPython,'cleanup',d.control],{encoding:'utf8'});
+  if(tmpCleanup.status)throw Error(tmpCleanup.stderr);
  fs.writeFileSync(path.join(d.control,'done.json'),JSON.stringify({gone:true}));
  process.exit(timedOut?124:cancelled?143:code);
 }
@@ -206,6 +213,8 @@ if(op==='cleanup'){
  if(c.badCleanup||c.stopFailureHost===host){console.error('DEVBOX_CLEANUP='+JSON.stringify({run:path.basename(d.control),pgid:12345,count:3,ownerAlive:false}));process.exit(70);}
  fs.mkdirSync(d.control,{recursive:true});fs.writeFileSync(path.join(d.control,'cancel'),'');
  fs.writeFileSync(path.join(d.control,'fixture-cleaned'),'');
+  const tmpCleanup=cp.spawnSync('python3',['-c',c.tmpdirPython,'cleanup',d.control],{encoding:'utf8'});
+  if(tmpCleanup.status)throw Error(tmpCleanup.stderr);
  console.error('DEVBOX_CLEANUP='+JSON.stringify({run:path.basename(d.control),pgid:12345,count:0,ownerAlive:false}));
  event('group-gone',{host});console.log('group-gone');return;
 }
@@ -1689,6 +1698,20 @@ async function submodulePinScenarios() {
 
 async function scenarios() {
   const only = process.env.DEVBOX_TEST_CASE;
+  if (!only || only === 'tmpdir') {
+    const f = fixture();
+    const command = 'node -e '+JSON.stringify("const fs=require('fs'); const p=process.env.TMPDIR; if(!/^\\/tmp\\/dr-[a-z0-9_]{8}$/.test(p))process.exit(5); if((fs.statSync(p).mode&511)!==448)process.exit(6); fs.mkdirSync(p+'/nested'); fs.writeFileSync(p+'/nested/output','temp'); fs.symlinkSync(process.cwd(),p+'/workspace-link');");
+    ok(await run(f, ['--env','TMPDIR=/a/very/long/ambient/tmpdir'], command)); returned(f);
+    const controls=f.events().filter(event=>event.op==='run').map(event=>event.control);
+    for (const control of controls) {
+      const record=JSON.parse(fs.readFileSync(path.join(control,'tmpdir.json')));
+      assert.equal(record.run,path.basename(control));
+      assert.ok(!fs.existsSync(record.path),'owned TMPDIR removed after command');
+    }
+    assert.ok(fs.existsSync(workspace(f)),'workspace symlink target preserved');
+    console.log('PASS short 0700 TMPDIR overrides ambient/explicit values and guarded cleanup preserves symlink targets');
+    if (only === 'tmpdir') return;
+  }
   if (only === 'submodule-pin') { await submodulePinScenarios(); return; }
   if (!only) await submodulePinScenarios();
   if (only === 'trees') { await treePlacementScenarios(); return; }
