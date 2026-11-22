@@ -1,6 +1,7 @@
 const fields = 'password|passphrase|passwd|pwd|pass|token|secret[_-]?access[_-]?key|secret|api[_-]?key|access[_-]?key(?:[_-]?id)?|private[_-]?key|credentials?|auth|username|ak|sk|x-(?:tos|amz)-(?:credential|signature|security-token)|signature';
 import { maskPrivateKeyBlocks } from './private-key-blocks.mjs';
 import { buildLogFindings } from './build-log-findings.mjs';
+import { xmlLogFindings } from './xml-log-findings.mjs';
 
 const quotedValue = String.raw`"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'`;
 const inlineQuotedValue = String.raw`"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'`;
@@ -62,6 +63,21 @@ function quotedRanges(text, { multiline = false } = {}) {
   return ranges;
 }
 
+function jsonStringRanges(text) {
+  const ranges = [];
+  for (const range of quotedRanges(text)) {
+    if (text[range.index] !== '"') continue;
+    let before = range.index - 1;
+    while (before >= 0 && /[\t ]/.test(text[before])) before--;
+    if (before >= 0 && !':[,'.includes(text[before])) continue;
+    try {
+      const decoded = JSON.parse(text.slice(range.index, range.index + range.length));
+      ranges.push({ ...range, decoded });
+    } catch {}
+  }
+  return ranges;
+}
+
 function credentialBlocks(text) {
   const stack = [], blocks = [];
   let active = 0, start, quoted = 0;
@@ -111,9 +127,9 @@ const headers = /(?:(?<![\w-])|(?<=^[+-]))(set-cookie|cookie|authorization|proxy
 const tosutilKeys = /(?<=\btosutil\b[^\r\n]*[\t ])-([ik])([\t ]+)([^\s"']+)/gi;
 
 function visitSecrets(text, visit) {
-  const hits = [];
-  for (const hit of buildLogFindings(text, credentialBlocks(text), publicValue)) hits.push(hit);
-  collectSecrets(text, (hit) => hits.push(hit));
+  const { hits, labelRanges } = xmlLogFindings(text, publicValue, jsonStringRanges(text));
+  for (const hit of buildLogFindings(text, credentialBlocks(text), publicValue, labelRanges)) hits.push(hit);
+  collectSecrets(text, (hit) => hits.push(hit), labelRanges);
   for (const match of text.matchAll(tosutilKeys)) {
     const start = match.index + 1 + match[1].length + match[2].length;
     hits.push({ line: 0, field: `tosutil -${match[1]}`, start, end: start + match[3].length });
@@ -133,10 +149,10 @@ function visitSecrets(text, visit) {
   }
 }
 
-function collectSecrets(text, visit) {
+function collectSecrets(text, visit, labelRanges = []) {
   const blocks = credentialBlocks(text);
   const strings = quotedRanges(text);
-  let string = 0;
+  let string = 0, label = 0;
   let line = 1, offset = 0, block = 0;
   const matches = [...boundedMatches(text, assignments), ...boundedMatches(text, whitespaceAssignments)]
     .filter(match => {
@@ -171,6 +187,8 @@ function collectSecrets(text, visit) {
   }
   matches.sort((a, b) => a.index - b.index);
   for (const match of matches) {
+    while (labelRanges[label]?.[1] <= match.index) label++;
+    if (labelRanges[label]?.[0] <= match.index && match.index < labelRanges[label][1]) continue;
     while (string < strings.length && strings[string].index + strings[string].length <= match.index) string++;
     if (strings[string]?.index < match.index) continue; // A mention inside a log message is not source code.
     for (; offset < match.index; offset++) if (text[offset] === '\n') line++;
@@ -297,16 +315,10 @@ export function maskExecURLQueries(text) {
 export function maskDocumentCredentials(text, depth = 0) {
   let masked = 0;
   if (depth < 8) {
-    const ranges = quotedRanges(text).filter(range => {
-      if (text[range.index] !== '"') return false;
-      let before = range.index - 1;
-      while (before >= 0 && /[\t ]/.test(text[before])) before--;
-      return before < 0 || ':[,'.includes(text[before]);
-    });
+    const ranges = jsonStringRanges(text);
     for (const range of ranges.reverse()) {
-      const raw = text.slice(range.index, range.index + range.length);
       try {
-        const decoded = JSON.parse(raw), urls = maskExecURLQueries(decoded), prose = maskDocumentCredentials(urls.text, depth + 1), nested = maskPasswordStyleValues(prose.text);
+        const urls = maskExecURLQueries(range.decoded), prose = maskDocumentCredentials(urls.text, depth + 1), nested = maskPasswordStyleValues(prose.text);
         if (urls.masked || prose.masked || nested.masked) {
           masked += urls.masked + prose.masked + nested.masked;
           text = text.slice(0, range.index) + JSON.stringify(nested.text) + text.slice(range.index + range.length);

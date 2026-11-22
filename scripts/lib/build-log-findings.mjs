@@ -27,9 +27,12 @@ function valueAt(text, index) {
   return end > index ? { start: index, end } : null;
 }
 
-export function buildLogFindings(text, blocks, publicValue) {
+export function buildLogFindings(text, blocks, publicValue, labelRanges = []) {
   const hits = [], assignments = [], paired = new Set();
+  let label = 0;
   for (const match of text.matchAll(fields)) {
+    while (labelRanges[label]?.[1] <= match.index) label++;
+    if (labelRanges[label]?.[0] <= match.index && match.index < labelRanges[label][1]) continue;
     const value = valueAt(text, match.index + match[0].length);
     if (!value) continue;
     const name = match[2], normalized = name.replace(/^-[PD]/, '');
