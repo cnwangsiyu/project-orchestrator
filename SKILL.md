@@ -197,6 +197,11 @@ and every reset redemption have separate scoped gates. `--urgent --user-ok` alon
 store the matching task/role/account/model/effort approval. If redemption is declined, reroute
 with `--no-redeem`. Never invent a review, downgrade quality or invent new work to spend quota.
 
+An `exclusive` personal-priority window keeps company lanes first under the existing
+quality and queue rules; personal overflow goes only to `main`. It never bypasses
+available company capacity, and `b` remains refused for new personal Codex work.
+Preserve the window file and the user's quote; see [model routing](references/model-routing.md).
+
 Quota goals (user, 2026-11-03): use Codex's week before reset, reserve Claude for orchestrators so
 it never runs out first, loosen reserves near reset, redeem cards last (99% or impending expiry),
 and ask freshly every time. Check `quota.mjs` for batch planning and at least every half hour

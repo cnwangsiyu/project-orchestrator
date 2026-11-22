@@ -31,6 +31,9 @@ export function presentRoute(plan, view, context) {
     const i=notes.findIndex(line=>line.startsWith('Queue patience:'));
     if(i>=0)notes[i]=`Queue decision: notify the owner after >${snapshot.personalFallback.queueWaitMinutes} min; repeat after ${snapshot.personalFallback.queueReminderMinutes} min; owner chooses, no automatic switch.`;
   }
+  if (plan.kind === 'launch' && snapshot.personalPriority?.mode === 'exclusive'
+    && company(candidateParts(snapshot, c).account))
+    why.push(`company lanes first; personal overflow only on main under the standing routing window ${snapshot.personalPriority.until === null ? 'until revoked' : `until ${snapshot.personalPriority.until}`}`);
   if (plan.kind === 'launch' && seat?.personalFallback) why.push(seat.personalFallback.text);
   if (plan.kind === 'launch' && seat?.personalFallback?.maxUnavailable) tellUser.push(seat.personalFallback.text);
   if (plan.kind === 'launch' && snapshot.personalPriority) for (const reviewer of plan.reviewers) {
@@ -39,7 +42,7 @@ export function presentRoute(plan, view, context) {
   }
   const priorityGuard = personalPriorityGuard(snapshot);
   if (priorityGuard) why.push(snapshot.personalPriority.mode === 'exclusive'
-    ? `personal main-only window: ${priorityGuard}; other personal Codex accounts remain ineligible`
+    ? `company lanes first; personal overflow only on main: ${priorityGuard}; other personal Codex accounts remain ineligible`
     : `personal main-first window until ${snapshot.personalPriority.until} paused: ${priorityGuard}; using normal routing order`);
   for (const text of new Set(plan.rejected.filter(p => p.reason?.code === 'TTADK_DAILY_RESERVE').map(p => p.reason.text)))
     if (!why.some(line => line.includes(text))) why.push(text);

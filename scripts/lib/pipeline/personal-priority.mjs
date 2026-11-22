@@ -73,5 +73,5 @@ export function standingPersonalPriority(task, snapshot, candidate, account) {
     ? fallback.hardAstraDecisionRef : null;
   if ((isAstra(candidate.modelId) && !astraApprovalRef) || personalPriorityGuard(snapshot)) return null;
   return { approvalRef: window.userDecisionRef, quotaApproved: true, astraApprovalRef,
-    text: `personal ${window.account} ${window.mode === 'exclusive' ? 'only' : 'first'} under the standing routing window ${window.until === null ? 'until revoked' : `until ${window.until}`}` };
+    text: `${window.mode === 'exclusive' ? `company lanes first; personal overflow only on ${window.account}` : `personal ${window.account} first`} under the standing routing window ${window.until === null ? 'until revoked' : `until ${window.until}`}` };
 }

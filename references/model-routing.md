@@ -104,30 +104,45 @@ model/effort floor. Max effort outside company accounts (TTADK and TRAE), Fable 
 authorization. An eligible company primary launches while a gated personal
 second reviewer awaits the user's answer before acceptance.
 
-The user's 2026-11-18 decision prefers ready, qualified personal Codex `main`
-through the weekly reset at **2026-11-19 00:26 PST (08:26 UTC)**. The decision
-lives in `_shared/personal-priority-window.json` and applies from its inclusive
-start through its exclusive expiry. The router records the standing decision
-reference and expiry for window-backed picks. It resumes normal routing if
-current weekly use reaches 90%, projected weekly use at reset reaches 95%, or
-fresh weekly usage for that reset is unavailable. The window preserves the
-usual model, scope, capability, retry and independent-review checks. Hard-tier
-Astra on `main` uses the separate enabled hard-Astra standing decision.
-Personal `b`, Claude/Fable, max effort, reset redemption, normal-tier Astra,
-and explicit review/security approvals keep their existing rules.
+The user's 2026-11-21 clarification makes an `exclusive` personal-priority
+window overflow-only: company lanes go first through the existing quality
+ladder, free-TRAE/TTADK preferences and queue threshold. Personal quota is used
+when company lanes cannot serve the task because of exhausted quota, excessive
+queue/congestion or a missing required model/capability. During the window,
+new personal Codex work goes only to `main`; `b` remains code-refused. If main
+also cannot serve the task, defer with `[personal-main-wait]`. Claude-only
+tools retain their route. Hard-tier Astra on main uses its separate enabled
+standing decision; max effort, reset redemption and explicit review approvals
+retain their separate gates.
+
+The recorded decision lives in `_shared/personal-priority-window.json`; keep
+its fields and the user's verbatim quote. Its inclusive start and optional
+exclusive expiry (`until: null` means until revoked) bound the window. An
+exclusive window follows main across reset-card redemption, requires fresh
+weekly quota and at least 5% launch headroom, and restricts personal overflow
+to main even when main is unavailable. Window-backed picks explain "company
+lanes first; personal overflow only on main under the standing routing window"
+and record the standing decision reference.
+
+The legacy `prefer-first` mode still prefers ready, qualified main until the
+specified expiry. It pauses at 90% weekly use, 95% projected use at reset or
+when fresh weekly usage for that reset is unavailable. Both modes preserve
+model, scope, capability, retry and independent-review checks.
 Only install a window for a recorded user decision. Use the same
 `RULES_SHARED` as the router, or omit it for the default shared directory.
 
 ```sh
 node scripts/personal-priority.mjs add 'FROM_UTC_ISO' 'UNTIL_UTC_ISO' 'standing:personal-priority-DECISION' 'VERBATIM_USER_QUOTE'
+node scripts/personal-priority.mjs add 'FROM_UTC_ISO' none 'standing:personal-priority-DECISION' 'VERBATIM_USER_QUOTE' --mode exclusive --exhaust-at-used 99
 node scripts/personal-priority.mjs inspect
 node scripts/personal-priority.mjs revoke 'standing:personal-priority-DECISION'
 ```
 
-User 2026-11-18 ("消耗完个人 main 再走公司"): a window may carry `"exhaustAtUsed": N` (90–100). Then only the used
-percentage guards it (company-first from N% used) and the 90%/95% projection guard is off. The live window uses 98,
-leaving margin so a running task is not cut. Missing or stale quota data still falls back. Remove the field to restore
-the default guard.
+A window may carry `"exhaustAtUsed": N` (90–100). This replaces the default
+90%/95% guard in `prefer-first` mode with a used-percentage threshold. In
+`exclusive` mode the default spend-until threshold is 99%; the separate 5%
+launch-headroom requirement still applies. Missing or stale weekly usage
+refuses main. This field never changes exclusive mode's company-first order.
 
 
 Review policy: Mandatory review is ONLY explicit --review-class A|B|C|D plus --review-reason: A a version that reaches external users and cannot be rolled back within hours; B login/auth/permission/signing logic; C irreversible data operations or billing/quota accounting; D a named adversarial review. High stakes, installation and fallback authorship alone do not qualify. Use `--review-reason` and optional stable `--review-scope`. Without a class, review-high downgrades with a note. Release impact is class A only; profiles without external release normalize other release requests to service. Internal-demo never blocks explicit classes or requires profile-override. Routine work uses tests, or one optional ordinary review when tests cannot cover it. Classified adversarial/review-high/release reviews require independent families; adversarial uses two non-GPT families. Required seconds are acceptance obligations and do not hold a runnable company primary.

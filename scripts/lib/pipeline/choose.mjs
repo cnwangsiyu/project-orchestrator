@@ -25,11 +25,21 @@ export function orderCandidates(task, snapshot, rows) {
   const parts=r=>candidateParts(snapshot,r.candidate);
   const ready=r=>!stalled(r)&&!r.estimate.capacityReset&&r.estimate.startDelayMin===0
     &&(parts(r).account.kind!=='trae'||r.estimate.balance?.freeNow===true);
+  const priority = snapshot.personalPriority;
+  if (priority?.mode === 'exclusive') {
+    // Exclusive selects the personal overflow account, never the quota class.
+    // Keep company capacity through the existing short-queue threshold before
+    // considering main; unknown wait evidence does not establish overflow.
+    const companyServing = cohort.filter(r => r.ok && company(parts(r).account)
+      && !parts(r).account.fallbackUnavailable && !stalled(r) && !r.estimate.capacityReset
+      && (r.estimate.confidence === 'UNKNOWN'
+        || r.estimate.startDelayMin <= (snapshot.personalFallback?.queueWaitMinutes ?? 5)));
+    if (companyServing.length) cohort = companyServing;
+  }
   const hardAstra = task.tier === 'hard' ? cohort.filter(r => r.ok && ready(r) && isAstra(r.candidate.modelId)
     && r.predicates.some(p => p.personalFallback?.astraApprovalRef && p.personalFallback.preferOverLowerCompany)) : [];
   if (hardAstra.length) cohort = hardAstra;
-  const priority = snapshot.personalPriority;
-  if (priority) {
+  if (priority?.mode === 'prefer-first') {
     const preferred = cohort.filter(r => r.ok && ready(r)
       && r.predicates.some(p => p.personalFallback?.approvalRef === priority.userDecisionRef));
     if (preferred.length) cohort = preferred;

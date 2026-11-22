@@ -46,10 +46,13 @@ least-used account;
 otherwise the earliest deadline wins. Nondry personal launches advance the CLI
 counter under a short lock. Max effort and reset redemption still ask separately.
 
-An active personal-priority window in `exclusive` mode admits new personal
-Codex work only on main. Its fresh weekly reading must retain 5% headroom;
-if main cannot take the task, use an eligible company lane or defer with the
-verbatim `[personal-main-wait]` alert. Claude-only tools keep their own route.
+An active personal-priority window in `exclusive` mode keeps company lanes
+first under the existing quality ladder, free-lane preferences and queue
+threshold. Personal quota is overflow for company quota exhaustion, excessive
+queues/congestion or a missing required model/capability, and admits new
+personal Codex work only on main. Its fresh weekly reading must retain 5%
+headroom; if neither company capacity nor main can take the task, defer with
+the verbatim `[personal-main-wait]` alert. Claude-only tools keep their route.
 The window follows the account across card redemption, with an explicit expiry
 or `until: null` (until revoked). Six-hour deadline ties apply outside exclusive
 mode. `personal-priority.mjs add FROM none REF QUOTE --mode exclusive

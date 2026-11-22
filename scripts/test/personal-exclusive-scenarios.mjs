@@ -22,7 +22,7 @@ const ref = 'standing:personal-priority-2026-11-20', owner = '00000000-0000-4000
 const fallback = JSON.parse(fs.readFileSync(path.join(root, 'references/personal-fallback.json'), 'utf8'));
 const caps = { search: true, vision: true, 'claude-tools': true };
 const window = extra => ({ account: 'main', mode: 'exclusive', from: new Date(NOW - 1000).toISOString(), until: null,
-  userDecisionRef: ref, quote: 'synthetic user decision: main only until revoked', exhaustAtUsed: 99, revoked: false, ...extra });
+  userDecisionRef: ref, quote: 'synthetic user decision: personal overflow on main only until revoked', exhaustAtUsed: 99, revoked: false, ...extra });
 const task = extra => createTaskSpec({ category: 'analysis', taskId: 'W-main', requestId: 'W-main-request', ...extra });
 function fixture(used = 0, companyReady = false) {
   const accounts = [['main', 'chatgpt', [SOL, ASTRA]], ['b', 'chatgpt', [SOL, ASTRA]],
@@ -56,11 +56,44 @@ try {
     assert.ok(activePersonalPriority(window({ until }), NOW));
     assert.equal(activePersonalPriority(window({ until }), NOW + h), null);
   });
-  check('exclusive wins over healthy company lanes, b headroom and earlier deadline', () => {
-    const raw = fixture(40, true), { plan, snapshot } = run(raw);
+  check('company headroom wins during exclusive despite main and b headroom and earlier deadlines', () => {
+    const raw = fixture(40, true), { plan, snapshot, view } = run(raw);
+    assert.equal(plan.kind, 'launch'); assert.equal(plan.primary.candidate.accountId, 'trae');
+    assert.equal(validatePlan(plan, snapshot).ok, true);
+    assert.match(view.why.join('\n'), /company lanes first; personal overflow only on main/);
+    raw.accounts[1].budget.deadline = 167; raw.rotationState = 1;
+    assert.equal(run(raw).plan.primary.candidate.accountId, 'trae');
+    raw.accounts.find(a => a.id === 'trae').providerDenied = true;
+    assert.equal(run(raw).plan.primary.candidate.accountId, 'ttadk');
+  });
+  check('company quota exhausted uses main as the only personal overflow account', () => {
+    const raw = fixture(40), { plan, view, snapshot } = run(raw);
     assert.equal(plan.kind, 'launch'); assert.equal(plan.primary.candidate.accountId, 'main');
     assert.equal(validatePlan(plan, snapshot).ok, true);
-    raw.accounts[1].budget.deadline = 167; raw.rotationState = 1;
+    assert.equal(view.pick.approvalRef, ref);
+    assert.match(view.why.join('\n'), /company lanes first; personal overflow only on main/);
+    raw.accounts[1].budget.deadline = 1;
+    assert.equal(run(raw).plan.primary.candidate.accountId, 'main');
+  });
+  check('ChatGPT-only capability uses main despite healthy company quota and idle b', () => {
+    const raw = fixture(0, true), capability = 'chatgpt-only';
+    for (const a of raw.accounts) a.capabilities = { ...a.capabilities, [capability]: a.kind === 'chatgpt' };
+    for (const m of raw.models) m.capabilities = { ...m.capabilities, [capability]: true };
+    for (const l of raw.lanes) l.capabilities = { ...l.capabilities, [capability]: true };
+    const t = task({ capabilitiesNeeded: [capability] }), { plan, snapshot } = run(raw, t);
+    assert.equal(plan.kind, 'launch'); assert.equal(plan.primary.candidate.accountId, 'main');
+    assert.equal(validatePlan(plan, snapshot).ok, true);
+    raw.accounts[0].transport = false;
+    assert.equal(run(raw, t).plan.trigger, 'personal-main-capacity');
+  });
+  check('short company queues stay company; queues beyond the standing threshold overflow to main', () => {
+    const raw = fixture(0, true);
+    raw.accounts.find(a => a.id === 'ttadk').providerDenied = true;
+    for (const l of raw.lanes.filter(l => l.accountId === 'trae')) {
+      Object.assign(l, { mode: 'low-priority', readyAt: null, position: 5, drainPerMin: 1, queueState: 'queued' });
+    }
+    assert.equal(run(raw).plan.primary.candidate.accountId, 'trae');
+    for (const l of raw.lanes.filter(l => l.accountId === 'trae')) l.position = 6;
     assert.equal(run(raw).plan.primary.candidate.accountId, 'main');
   });
   check('exactly 5% main headroom launches; insufficient headroom uses an eligible company lane', () => {
@@ -113,17 +146,21 @@ try {
     assert.equal(plan.primary.candidate.accountId, 'main'); assert.equal(view.pick.approvalRef, ref);
     assert.ok(!view.why.some(text => text.includes('fresh weekly quota for this reset is unavailable')));
   });
-  check('main 3% exclusive wins over the hard-Astra standing fallback without excluding b', () => {
+  check('exclusive keeps qualified company alternatives before hard personal Astra overflow', () => {
     const raw = fixture(3, true), companyAstra = 'gpt-6-astra';
     raw.accounts.find(a => a.id === 'trae').catalog.push(companyAstra);
     raw.models.push({ ...raw.models.find(m => m.id === ASTRA), id: companyAstra });
     raw.lanes.push({ ...raw.lanes.find(l => l.accountId === 'trae'), id: `trae:${companyAstra}`,
       modelId: companyAstra, mode: 'low-priority', readyAt: null, position: 501, drainPerMin: 0, queueState: 'queued' });
     const hard = task({ category: 'implement-hard', impact: 'service' }), result = run(raw, hard);
-    assert.equal(result.plan.kind, 'launch'); assert.equal(result.view.pick.account, 'main');
-    assert.equal(result.view.pick.model, ASTRA); assert.equal(result.view.pick.effort, 'xhigh');
-    assert.equal(result.view.pick.approvalRef, ref);
-    assert.match(result.view.why.join('\n'), /personal main only under the standing routing window/);
+    assert.equal(result.plan.kind, 'launch'); assert.ok(['ttadk', 'trae'].includes(result.view.pick.account));
+    for (const a of raw.accounts.filter(a => ['ttadk', 'trae'].includes(a.kind))) a.providerDenied = true;
+    const overflow = run(raw, hard);
+    assert.equal(overflow.view.pick.account, 'main');
+    assert.equal(overflow.view.pick.model, ASTRA); assert.equal(overflow.view.pick.effort, 'xhigh');
+    assert.equal(overflow.view.pick.approvalRef, ref);
+    assert.match(overflow.view.why.join('\n'), /company lanes first; personal overflow only on main/);
+    for (const a of raw.accounts.filter(a => ['ttadk', 'trae'].includes(a.kind))) a.providerDenied = false;
     raw.accounts[0].budget.weekly.used = 96;
     assert.ok(['ttadk', 'trae'].includes(run(raw, hard).view.pick.account));
     for (const a of raw.accounts.filter(a => ['ttadk', 'trae'].includes(a.kind))) a.providerDenied = true;
