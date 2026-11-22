@@ -111,6 +111,55 @@ try {
   assert.equal(JSON.parse(fs.readFileSync(queueDecisionFile(f.row))).pendingNotice,true);
   const retried=notifyQueueOwner(f.row,f.queue,f.launch,{now:now+1,policy,context:f.context,emit});
   assert.equal(retried.noticeCount,1,'a failed emission is retried without suppressing or mislabelling the first notice');
+
+  // A follower can miss the queue event while another observer publishes the
+  // current notice. Detaching that follower must leave the owner command usable.
+  for(const reason of ['stall','disconnect']) {
+    fs.rmSync(queueDecisionFile(f.row),{force:true});f=fixture();
+    saveQueue(f.profiles.trae.home,f.row.thread,{state:'ready',turnId:f.row.turn});
+    const detachedRpc=path.join(tmp,`detached-${reason}.rpc.jsonl`);
+    const detached=spawnSync(process.execPath,['--import',path.join(root,'scripts/test/fixtures/reroute-transport.mjs'),
+      path.join(root,'scripts/codex-worker.mjs'),'--account','trae','start','--cwd',tmp,'--model',SOL,'--effort','high',
+      '--sandbox','workspace-write','--name',f.row.name,'--owner',owner,'--project','fixture',
+      '--route-args',f.launch.defaults['route-args'],'--stall-min','0.01',
+      '--log',path.join(tmp,`detached-${reason}.log`),'--out',path.join(tmp,`detached-${reason}.md`),'Read the same brief.'],
+      {env:{...process.env,REROUTE_FIXTURE:JSON.stringify({source:SOL,rpc:detachedRpc,watcherOnlyQueue:true,disconnect:reason==='disconnect'})},encoding:'utf8',timeout:10000});
+    assert.equal(detached.error,undefined);assert.equal(detached.status,reason==='stall'?4:11,detached.stdout+detached.stderr);
+    if(reason==='stall')assert.match(detached.stdout,/stalled: no events/);
+    const detachedNotice=JSON.parse(fs.readFileSync(queueDecisionFile(f.row)));
+    assert.equal(detachedNotice.status,'waiting','follower exit is not a queue episode ending');
+    assert.throws(()=>requestQueueChoice({...f.row,owner:'another-owner'},detachedNotice.noticeId,'park'),/owned by another/);
+    assert.throws(()=>requestQueueChoice(f.row,'old-notice','park'),/stale/);
+    for(const changed of [{turnId:'another-turn'},{since:detachedNotice.since+1},{state:'ready'},{reporting:true}]) {
+      saveQueue(f.profiles.trae.home,f.row.thread,{...detachedNotice.queue,turnId:f.row.turn,...changed});
+      assert.throws(()=>requestQueueChoice(f.row,detachedNotice.noticeId,'park'),/no longer in this queue episode/);
+    }
+    saveQueue(f.profiles.trae.home,f.row.thread,{...detachedNotice.queue,turnId:f.row.turn});
+    assert.equal(requestQueueChoice(f.row,detachedNotice.noticeId,'wait').exitCode,0);
+    settleQueueChoice(f.row,'waiting');
+    const parkCommand=detachedNotice.options.find(o=>o.id==='park').command;
+    const parked=spawnSync('/bin/sh',['-c',parkCommand],
+      {env:{...process.env,NODE_OPTIONS:`--import=${path.join(root,'scripts/test/fixtures/reroute-transport.mjs')}`,
+        REROUTE_FIXTURE:JSON.stringify({source:SOL,rpc:detachedRpc})},encoding:'utf8',timeout:10000});
+    assert.equal(parked.status,0,parked.stdout+parked.stderr);assert.match(parked.stdout,/queue-choice: parked/);
+    assert.equal(JSON.parse(fs.readFileSync(queueDecisionFile(f.row))).status,'parked');
+    assert.throws(()=>requestQueueChoice(f.row,detachedNotice.noticeId,'wait'),/stale, ended/);
+    assert.equal(fs.readFileSync(detachedRpc,'utf8').trim().split('\n').map(JSON.parse).filter(c=>c.method==='turn/interrupt').length,1);
+    console.log(`PASS watcher notice survives ${reason}; exact command reattaches and applies once`);
+  }
+
+  // A confirmed terminal turn retires its notice, including historical wait
+  // followers that never set activeTurn.
+  for(const status of ['completed','failed','interrupted']) {
+    fs.rmSync(queueDecisionFile(f.row),{force:true});f=fixture();
+    const endedNotice=notifyQueueOwner(f.row,f.queue,f.launch,{now,policy,context:f.context,emit});
+    const ended=spawnSync(process.execPath,['--import',path.join(root,'scripts/test/fixtures/reroute-transport.mjs'),
+      path.join(root,'scripts/codex-worker.mjs'),'--account','trae','wait','--thread','fixture'],
+      {env:{...process.env,REROUTE_FIXTURE:JSON.stringify({source:SOL,rpc:path.join(tmp,`ended-${status}.rpc.jsonl`),readStatus:status})},encoding:'utf8',timeout:10000});
+    assert.equal(ended.error,undefined);assert.equal(ended.status,status==='completed'?0:1,ended.stdout+ended.stderr);
+    assert.equal(JSON.parse(fs.readFileSync(queueDecisionFile(f.row))).status,'ended');
+    assert.throws(()=>requestQueueChoice(f.row,endedNotice.noticeId,'wait'),/stale, ended/);
+  }
   console.log('PASS queue notice options, owner choices, approval gates, +10m repeats, secretary relay, and work/disabled guards');
 
   // Real worker follower, fake hub, and the exact one-line owner command.
