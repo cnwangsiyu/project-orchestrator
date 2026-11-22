@@ -1099,7 +1099,14 @@ const redactEndedTurn = (thread = activeTurn?.threadId ?? attemptThreadId ?? opt
 const finish = async (code) => {
   if (finishing) return;
   finishing = true;
-  if(activeTurn&&!preserveQueueNotice)settleQueueChoice({account:account??'main',thread:activeTurn.threadId,turn:activeTurn.turnId},'ended');
+  if(activeTurn&&!preserveQueueNotice) {
+    // Detaching observation (stall, setup failure, disconnect) does not end a
+    // queue episode. Another observer may have published the queue and notice
+    // without this follower receiving its queue/status notification.
+    const queue = PROF?.home ? readQueue(PROF.home,activeTurn.threadId) : null;
+    if(queue?.turnId!==activeTurn.turnId||!['waiting','queued'].includes(queue.state)||queue.reporting||queue.completing)
+      settleQueueChoice({account:account??'main',thread:activeTurn.threadId,turn:activeTurn.turnId},'ended');
+  }
   done = true; stopFollowing();
   try { await redactEndedTurn(); } catch { console.error('redaction warning: turn-end redaction could not complete'); }
   ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null;
@@ -1267,6 +1274,10 @@ const recordPolicyBlock = (model, error) => {
 };
 // Prints the outcome and exits: status, usage, the final message's first line (whole message to --out).
 const report = async (threadId, turn, final, usage, observation = {}) => {
+  // Historical wait followers may never set activeTurn. Retire the notice from
+  // confirmed turn evidence, before asynchronous readback/reporting can yield.
+  if(!observation.unconfirmed&&['completed','failed','interrupted'].includes(turn.status))
+    settleQueueChoice({account:account??'main',thread:threadId,turn:turn.id},'ended');
   // Publish before historical readback or redaction yields to a quota poll.
   tracker?.update({ reporting: true, thread: threadId, turn: turn.id, status: turn.status });
   if (observation.live && observation.evidence?.pendingFinal) {
@@ -1287,7 +1298,7 @@ const report = async (threadId, turn, final, usage, observation = {}) => {
   const uncertain = completion?.status === 'uncertain' ? completion : null;
   if (completion) turn = { ...turn, status: completion.status };
   if (PROF?.kind === 'ttadk' && turn.status === 'completed') outcomeInput = usage?.inputTokens;
-  if (PROF?.kind === 'trae') saveQueue(PROF.home, threadId, { state: 'ready', turnId: turn.id, at: Date.now() });
+  if (PROF?.kind === 'trae' && !observation.unconfirmed) saveQueue(PROF.home, threadId, { state: 'ready', turnId: turn.id, at: Date.now() });
   if (!actualModel || PROF?.kind === 'ttadk') observeModel(rolloutTurnModel(PROF?.home ?? process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex'),
     sessionPath, threadId, turn.id), threadId, turn.id);
   // A family mismatch (or a cross-family sub-agent) fails a review; missing evidence only warns, so a hub that exposes no

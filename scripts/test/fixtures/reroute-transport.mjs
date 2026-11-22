@@ -1,7 +1,8 @@
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { spawnSync } from 'node:child_process';
-import { queueDecisionFile } from '../../lib/queue-decision.mjs';
+import { queueDecisionFile, notifyQueueOwner } from '../../lib/queue-decision.mjs';
+import { saveQueue } from '../../lib/worker-queue.mjs';
 const config = JSON.parse(process.env.REROUTE_FIXTURE);
 if (config.functionalSetupBudget) {
   // This case tests the 60 ms follow stall against queue patience, not cold startup/fsync timing.
@@ -49,7 +50,7 @@ globalThis.WebSocket = class {
         this.onmessage({ data: JSON.stringify({ id: m.id, error: { code: -1,
           message: config.mode === 'policy-start' ? 'cyberPolicy: flagged for possible cybersecurity risk' : 'Model access temporarily restricted. (983)' } }) }); return;
       }
-      const turn = { id: 'turn', status: this.failed ? 'failed' : this.interrupted && config.cancel !== 'unconfirmed' ? 'interrupted' : 'inProgress',
+      const turn = { id: 'turn', status: config.readStatus ?? (this.failed ? 'failed' : this.interrupted && config.cancel !== 'unconfirmed' ? 'interrupted' : 'inProgress'),
         items: config.midTurn && fail && this.midWorked ? [{id:'mid-tool',type:config.midToolType??'commandExecution',status:config.midToolRunning||config.midReadRunning?'inProgress':'completed'}]
           : config.readWork && fail ? [{ type: 'commandExecution' }] : [] };
       if(this.interrupted&&config.cancel==='completed') {
@@ -72,6 +73,20 @@ globalThis.WebSocket = class {
           this.failed = true;
           notify('turn/completed', { turn: { id: 'turn', status: 'failed', items: [],
             error: config.mode === 'policy' ? { codexErrorInfo: 'cyberPolicy' } : { message: 'Model access temporarily restricted. (983)' } } }); return;
+        }
+        if (config.watcherOnlyQueue) {
+          // Another observer records the queue and emits its notice; this follower
+          // receives no queue/status event, so its own idle alarm still expires.
+          const profiles = JSON.parse(fs.readFileSync(process.env.CODEX_ACCOUNTS));
+          const queue = { state: 'queued', turnId: 'turn', since: Date.now() - 6 * 60000, position: 270, drainPerMin: 0 };
+          saveQueue(profiles[account].home, 'fixture', queue);
+          const defaults = Object.fromEntries(['owner', 'name', 'cwd', 'project', 'log', 'out', 'route-args', 'sandbox']
+            .map(name => [name, flag(name)]));
+          notifyQueueOwner({ account, thread: 'fixture', turn: 'turn', owner: defaults.owner,
+            name: defaults.name, project: defaults.project, model, effort: flag('effort'), pid: process.pid }, queue, { defaults });
+          if (config.disconnect) setTimeout(() => this.onclose?.(), 30);
+          setTimeout(() => {}, 10000);
+          return;
         }
         if(config.queueOwnerSelect) {
           const timer=setInterval(()=>{
