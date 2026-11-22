@@ -3502,7 +3502,16 @@ try:
             if not settings: return False
             for _, directory, value in heads:
                 if current_waiter(directory, value): break
-                if value.get('pool_controller') and any(info(os.path.join(locks, slot+'.d')).get('pool_controller') == value['pool_controller'] for slot in remote if slot != id): continue
+                owned=[]
+                if value.get('pool_controller'):
+                    owned=[(slot,info(os.path.join(locks,slot+'.d'))) for slot in remote if slot != id]
+                    owned=[(slot,hold) for slot,hold in owned if hold.get('pool_controller') == value['pool_controller']]
+                if owned:
+                    if any(hold.get('admitted') == '1' for _,hold in owned): continue
+                    # A provisional older claim has not received a reservation
+                    # yet. Preserve its host through the commit recheck.
+                    if any(remote[slot][1] == box for slot,_ in owned): return False
+                    continue
                 if not eligible(id, csv(value.get('need','')), csv(value.get('exclude_slots','')), csv(value.get('exclude_hosts',''))): continue
                 allowed = csv(value['input_allowed_slots']) if 'input_allowed_slots' in value else None
                 if allowed is not None and id not in allowed: continue
@@ -3748,6 +3757,8 @@ try:
                         rollback()
                         continue
                     if cost: reserve(box, entries, current, cost, id, hold)
+                    if id in dynamic_ids:
+                        hold['admitted']='1'; publish(os.path.join(locks,id+'.d'), hold)
                     for directory, earlier in bypass_pending:
                         latest = info(directory)
                         if latest.get('order') == earlier.get('order'):

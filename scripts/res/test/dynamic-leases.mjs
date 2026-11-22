@@ -12,6 +12,10 @@ const assert = new Proxy(baseAssert, { get(target, name) {
 import { fileURLToPath } from 'node:url';
 import { migrate } from '../../devbox-host-migrate.mjs';
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dynamic-devbox-'));
+const children = new Set();
+const start = (...args) => {
+  const child = spawn(...args); children.add(child); child.once('close', () => children.delete(child)); return child;
+};
 const source = fileURLToPath(new URL('../res', import.meta.url));
 const env = { ...process.env, RES_DIR: root, RULES_SHARED: root, RES_TEST_POOL_FAST_POLL: '1' };
 const host = '192.0.2.1', lease = n => `devbox-cn-fixture-${n}`;
@@ -27,12 +31,12 @@ const release = (id, by) => { const r=run('return',id,'--by',by); assert.equal(r
 try {
   sample();
   const capacity=run('pool-capacity','devbox-cn-light');assert.equal(capacity.status,0,capacity.stderr);assert.equal(JSON.parse(capacity.stdout)[host].claims,64);
-  const children = Array.from({length:12}, (_,i)=>new Promise(resolve=> {
-    const child=spawn(source,['wait-pool','devbox-cn-light',...args('small-'+i),'--timeout','1'],{env});
+  const concurrent = Array.from({length:12}, (_,i)=>new Promise(resolve=> {
+    const child=start(source,['wait-pool','devbox-cn-light',...args('small-'+i),'--timeout','1'],{env});
     let stdout='',stderr='';child.stdout.on('data',x=>stdout+=x);child.stderr.on('data',x=>stderr+=x);
     child.on('close',status=>resolve({status,stdout,stderr,by:'small-'+i}));
   }));
-  const results = await Promise.all(children);
+  const results = await Promise.all(concurrent);
   for (const r of results) assert.equal(r.status,0,r.stderr);
   assert.equal(new Set(results.map(slot)).size,12);
   const snapshot=run('holder',slot(results[0]),'--by',results[0].by);assert.equal(snapshot.status,0,snapshot.stderr);assert.equal(JSON.parse(snapshot.stdout).mine,'yes');
@@ -62,7 +66,7 @@ try {
   sample({cores:8});
   const blockers=[wait('blocker-0'),wait('blocker-1')];for(const r of blockers)assert.equal(r.status,0,r.stderr);
   const large=new Promise(resolve=>{
-    const child=spawn(source,['wait-pool','devbox-cn',...args('large-live'),'--cores','7','--disk-gib','2','--timeout','1'],{env});
+    const child=start(source,['wait-pool','devbox-cn',...args('large-live'),'--cores','7','--disk-gib','2','--timeout','1'],{env});
     let stdout='',stderr='';child.stdout.on('data',x=>stdout+=x);child.stderr.on('data',x=>stderr+=x);child.on('close',status=>resolve({status,stdout,stderr}));
   });
   const queue=path.join(root,'pool-waiters','devbox-cn');
@@ -79,6 +83,18 @@ try {
   for(let i=0;i<blockers.length;i++)release(slot(blockers[i]),'blocker-'+i);
   for(let i=0;i<smallLive.length;i++)release(slot(smallLive[i]),'small-live-'+i);
   const admittedLarge=await large;assert.equal(admittedLarge.status,0,admittedLarge.stderr);release(slot(admittedLarge),'large-live');
+  sample();
+  const barrier=path.join(root,'claim-barrier');fs.mkdirSync(barrier);
+  const tentative=new Promise(resolve=>{
+    const child=start(source,['wait-pool','devbox-cn',...args('provisional'),'--timeout','1'],{env:{...env,RES_TEST_POOL_CLAIM_BARRIER:barrier}});
+    let stdout='',stderr='';child.stdout.on('data',x=>stdout+=x);child.stderr.on('data',x=>stderr+=x);child.on('close',status=>resolve({status,stdout,stderr}));
+  });
+  for(let i=0;i<200 && !fs.readdirSync(barrier).length;i++)await new Promise(resolve=>setTimeout(resolve,10));
+  assert.ok(fs.readdirSync(barrier).length,'older provisional claim reached commit barrier');
+  const provisionalFollower=wait('provisional-follower');
+  fs.writeFileSync(path.join(barrier,'release'),'');
+  assert.equal(provisionalFollower.status,2,'younger preserves older provisional host reservation');
+  const committedTentative=await tentative;assert.equal(committedTentative.status,0,committedTentative.stderr);release(slot(committedTentative),'provisional');
   sample();const weighted=wait('weighted','devbox-cn',['--cores','7','--mem-gib','9','--disk-gib','4']);assert.equal(weighted.status,0,weighted.stderr);
   const infoFile=path.join(root,'locks',slot(weighted)+'.d','info');assert.match(fs.readFileSync(infoFile,'utf8'),/claim_cores\t7/);
   const reserveFile=path.join(root,'devbox-reservations',host+'.json');const records=JSON.parse(fs.readFileSync(reserveFile,'utf8'));records[0][0]-=1000;fs.writeFileSync(reserveFile,JSON.stringify(records));
@@ -117,4 +133,7 @@ try {
   assert.equal(cli('--rollback').status,0);assert.ok(fs.readFileSync(registry,'utf8').startsWith(old.trimEnd()));assert.match(fs.readFileSync(registry,'utf8'),/leases-only/);
   console.log('PASS dynamic leases: concurrent weights, gates, combined bounded FIFO, persistent reservations, aliases, pending cleanup, stale reclaim, migration/rollback');
   console.log(`ALL ${assertionCount} ASSERTIONS PASSED`);
-} finally { fs.rmSync(root,{recursive:true}); }
+} finally {
+  for (const child of children) child.kill('SIGTERM');
+  fs.rmSync(root,{recursive:true});
+}
