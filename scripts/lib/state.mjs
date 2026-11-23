@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { readPause, readPoolPauses, readModelPauses, liftAuthPause, poolOf, claimProbes, readTraeBrowserHealth } from './trae-health.mjs';
 import { modelPreference } from './pipeline/policy.mjs';
 import { BALANCE, readTraeModels, freshLoad, readQueueState, companySnapshot, readQuotaHistory, ttadkBurn, freshTraeQuota, ttadkExpiringUnused, TTADK_EXPIRY_HINT } from './company-load.mjs';
+import { normalizeTraeDaily } from './trae-quota-aliases.mjs';
 import { withLock, writeJson as atomicJson } from './shared-file.mjs';
 import { readHubState } from './hub-state.mjs';
 import { PERSONAL_LAUNCH_HEADROOM, PERSONAL_DEADLINE_TIE_H, personalLaunchChoice } from './personal-launch.mjs';
@@ -331,7 +332,7 @@ export const traeQuota = (payload, sampledAt = Date.now()) => {
   const u = payload.usage ?? null, limit = num(u?.quota_limit), remaining = num(u?.quota_remaining);
   const weekly = u ? bucket(limit != null && remaining != null ? Math.max(0, limit - remaining) : null, limit, remaining, u.is_depleted, when(u.reset_time)) : null;
   if (!Object.keys(daily).length && !weekly) return null;
-  return { sampledAt, daily, weekly };
+  return { sampledAt, daily: normalizeTraeDaily(daily), weekly };
 };
 // A TRAE CLI account (codex-worker trae-setup): the company's agent CLI with its own model pool, used after TTADK and
 // before personal quota (user, 2026-11-08). Healthy = the CLI present, logged in, a nonempty catalog, the hub sound.

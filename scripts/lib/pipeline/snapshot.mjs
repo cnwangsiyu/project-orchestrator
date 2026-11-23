@@ -1,4 +1,5 @@
 import { VERSION, EFFORTS, array, object, idOK, modelSelector, isAstra, stable, modelId, familyOf, compare, unique, nonnegative, finite, clone, freeze, fingerprint, reason } from './common.mjs';
+import { normalizeTraeDaily } from '../trae-quota-aliases.mjs';
 import { personalFallbackPolicy, fallbackUnavailable } from './personal-fallback.mjs';
 import { activePersonalPriority } from './personal-priority.mjs';
 import { RUN_USAGE_HISTORY_MS } from './ttadk-reserve.mjs';
@@ -212,7 +213,7 @@ export function snapshotFromAnalyze(analyzed, metadata = {}) {
     a.catalog ??= stamp(old.allModels ?? old.models, at);
     if (a.quota === undefined) {
       if (a.kind === 'ttadk') a.quota = [{ bucketId: 'ttadk-daily', unit: 'tokens', authoritative: false, usage: stamp(old.usage, at) }];
-      else if (a.kind === 'trae') a.quota = Object.entries(object(old.quota?.daily) ? old.quota.daily : {}).map(([id, q]) => ({
+      else if (a.kind === 'trae') a.quota = Object.entries(normalizeTraeDaily(old.quota?.daily)).map(([id, q]) => ({
         bucketId: modelId(id), unit: 'model-bucket', authoritative: false, usage: stamp(q, old.quota.sampledAt),
         priority: stamp(q?.depleted === true ? 'depleted' : q?.depleted === false ? 'available' : null, old.quota.sampledAt),
       }));

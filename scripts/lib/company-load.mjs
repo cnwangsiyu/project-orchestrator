@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { poolOf } from './trae-health.mjs';
+import { normalizeTraeDaily } from './trae-quota-aliases.mjs';
 
 export const BALANCE = Object.freeze({ reserveShare: 0.15, loadPercent: 60, queuePosition: 300,
   freshMin: 30, expiresH: 6, burnWindowMin: 120, burnMinSpanMin: 10, queueWriteMs: 60000 });
@@ -165,7 +166,7 @@ export const freshTraeQuota = (quota, now = Date.now()) => {
     const reset = num(q.resetsAt);
     return reset != null && reset <= now ? null : q;
   };
-  return { ...quota, daily: Object.fromEntries(Object.entries(quota.daily ?? {}).map(([id, q]) => [id, dailyFresh ? current(q) : null])),
+  return { ...quota, daily: Object.fromEntries(Object.entries(normalizeTraeDaily(quota.daily)).map(([id, q]) => [id, dailyFresh ? current(q) : null])),
     weekly: current(quota.weekly) };
 };
 export const companySnapshot = (accounts, now = Date.now()) => {

@@ -14,6 +14,7 @@ import { RUN_USAGE_HISTORY_MS } from './pipeline/ttadk-reserve.mjs';
 import { personalBudget, weeklyProjection } from './pipeline/quota.mjs';
 import { activePersonalPriority, PERSONAL_PRIORITY_FILE } from './pipeline/personal-priority.mjs';
 import { modelLoad } from './company-load.mjs';
+import { normalizeTraeDaily } from './trae-quota-aliases.mjs';
 import { isQueueOrStall } from './trae-health.mjs';
 import { readRoutingAccount, readRoutingClaude, traeBrowserReady } from './state.mjs';
 import { routePure } from './pipeline/index.mjs';
@@ -391,9 +392,9 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
       'image-generation': kind === 'chatgpt', 'claude-tools': isClaude };
     for (const origin of task.allowedOrigins) caps[`origin:${origin}`] = browser || a.publicBrowser === true;
     for (const app of task.allowedApps) caps[`app:${app}`] = desktop;
-    const quota = [];
+    const quota = [], daily = normalizeTraeDaily(a.quota?.daily);
     if (kind === 'ttadk') quota.push({ bucketId: 'ttadk-daily', unit: 'tokens', usage: stamp(a.usage,a.usageSeenAt??accountAt), priority: stamp('available') });
-    if (kind === 'trae') for (const [m, q] of Object.entries(object(a.quota?.daily) ? a.quota.daily : {})) quota.push({ bucketId: modelId(m), unit: 'model-bucket',
+    if (kind === 'trae') for (const [m, q] of Object.entries(daily)) quota.push({ bucketId: modelId(m), unit: 'model-bucket',
       usage: stamp(q, a.quota.sampledAt, 1800000), priority: stamp(q?.depleted ? 'depleted' : 'available', a.quota.sampledAt, 1800000) });
     let burn = null;
     const prior = quotaHistory.filter((r) => r.t < at && r.t >= now - 7200000 && r.ttadk?.name === name && r.ttadk?.resetsAt === a.usage?.resetsAt).sort((a,b) => a.t-b.t)[0];
@@ -422,10 +423,10 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
     for (const m of catalog) {
       const family = familyOf(m), vision = !['deepseek','kimi'].includes(family), modelCaps = baseCaps(vision);
       models.set(m, { id:m, efforts: ['low','medium','high','xhigh','max'], capabilities:modelCaps, largeOutput: family !== 'deepseek' });
-      const q = a.quota?.daily?.[m], sample = a.quota?.sampledAt;
+      const q = daily[m], sample = a.quota?.sampledAt;
       const freshQuota = nonnegative(sample) && sample <= now && now-sample <= 1800000 && (!q?.resetsAt || q.resetsAt>now);
       const explicitFree = (a.quotaKeys && Object.hasOwn(a.quotaKeys,m) && a.quotaKeys[m] === null)
-        || (freshQuota && object(a.quota?.daily) && Object.values(a.quota.daily).some(b=>object(b)&&nonnegative(b.used)&&typeof b.limit==='number'&&b.limit>0&&b.resetsAt>now) && !Object.hasOwn(a.quota.daily,m) && !['astra','sol','gpt-5.6-sol'].includes(policyModel(m)));
+        || (freshQuota && Object.values(daily).some(b=>object(b)&&nonnegative(b.used)&&typeof b.limit==='number'&&b.limit>0&&b.resetsAt>now) && !Object.hasOwn(daily,m) && !['astra','sol','gpt-5.6-sol'].includes(policyModel(m)));
       const mode = kind !== 'trae' ? 'standard' : freshQuota && object(q) && nonnegative(q.used) && typeof q.limit==='number' && q.limit>0 && q.resetsAt>now ? (q.depleted ? 'low-priority' : 'priority') : explicitFree ? 'bucket-free' : 'UNKNOWN';
       const direct = telemetry?.[m], directLoad = modelLoad(load,m,now);
       lanes.push({ id:`${name}:${m}:hub`, accountId:name, modelId:m, harness: isClaude?'claude-bg':'hub', efforts:declared(['low','medium','high','xhigh','max']),
