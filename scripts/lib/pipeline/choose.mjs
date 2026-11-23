@@ -54,9 +54,8 @@ export function orderCandidates(task, snapshot, rows) {
   const first=models.find(id=>companyRows.some(r=>policyModel(r.candidate.modelId)===id&&ready(r)));
   if(first) {
     const same=companyRows.filter(r=>policyModel(r.candidate.modelId)===first&&ready(r));
-    const expiringTT=same.filter(r=>parts(r).account.kind==='ttadk'&&r.estimate.expiryOpportunity===true);
     const freeTrae=same.filter(r=>parts(r).account.kind==='trae');
-    const chosen=expiringTT.length?expiringTT:freeTrae.length?freeTrae:same;
+    const chosen=freeTrae.length?freeTrae:same;
     cohort=cohort.filter(r=>!company(parts(r).account)||chosen.includes(r));
   } else if(cohort.some(r=>!company(parts(r).account)&&r.ok===true&&ready(r))) {
     cohort=cohort.filter(r=>!company(parts(r).account)&&r.ok===true&&ready(r));

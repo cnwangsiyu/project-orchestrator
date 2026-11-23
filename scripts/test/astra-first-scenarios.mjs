@@ -88,7 +88,8 @@ try {
   tt.quota[0].usage.value.resetsAt = now + 3 * 3600000;
   tt.burn.value = { resetsAt: tt.quota[0].usage.value.resetsAt, projectedAtReset: 50000000 };
   pick(hard, ttExpiring, ASTRA, 'trae'); // expiry does not displace the chosen model
-  unavailable(ttExpiring, ASTRA, 'hot'); pick(hard, ttExpiring, SOL, 'ttadk');
+  unavailable(ttExpiring, ASTRA, 'hot'); pick(hard, ttExpiring, SOL, 'trae');
+  unavailable(ttExpiring, SOL, 'hot'); pick(hard, ttExpiring, SOL, 'ttadk');
   const approved = copy(), decision = cli(['design', '--urgent'], approved);
   const scopes = decision.plan.trace.candidates.flatMap(r => r.predicates.flatMap(p => p.gates ?? []))
     .filter(g => g.kind === 'personal-quota').map(g => ({ ...g.scope, allowPersonalWithCompany: true }));

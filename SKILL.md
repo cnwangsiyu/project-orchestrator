@@ -208,7 +208,7 @@ and ask freshly every time. Check `quota.mjs` for batch planning and at least ev
 while work is queued; act on login/reset/ready-work suggestions within authority. Keep Claude
 context lean. Account expiry/budget projections belong to the owner/nightly process.
 
-Router-owned free-TRAE/expiring-TTADK preference and Astra-first hard trial (2026-11-16; revisit
+Router-owned free-TRAE preference, company-quota expiry notices and Astra-first hard trial (2026-11-16; revisit
 2026-11-23 success/rework) remain. Queueing alone is not stalled; confirmed no-progress cancellation
 allows bounded company handoff. Never replace active/background turns, duplicate unconfirmed turns,
 hold resources while queued or auto-launch personal/signing. Follow printed recovery/gates;
