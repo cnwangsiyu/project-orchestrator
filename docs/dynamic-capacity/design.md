@@ -26,13 +26,17 @@ and normal pressure govern admission rather than new fixed swap limits. The
 runner samples on demand before each claim. Raw `res` calls use that fresh
 cache; missing, future or stale samples close admission. Waiting does not make
 a stale sample admissible; refresh through the runner before retrying.
+The acquired lease carries its resolved numeric load/memory/disk thresholds
+through prepare, upload and remote launch. A pre-launch rejection cleans owned
+scratch only after open-file proof; after execution starts, the existing boot,
+process-generation and cleanup-receipt checks remain required.
 
 The shared `dynamic_capacity.py` arithmetic is also used by CN devbox admission.
 Each claim atomically writes its reservation in its hold. CPU/memory credit
 requires fresh (15-second) run-attributed usage, capped both by declared cost
 and by the host load/memory increase since the outstanding batch's baseline.
 Credits consume one shared visibility budget, so the same measured increase
-cannot remove multiple reservations. The supervisor reports owned RSS and
+cannot remove multiple reservations. The supervisor reports owned private memory footprints (capped by resident bytes) and
 elapsed five-minute CPU-load contribution; credit is deliberately conservative
 when unrelated memory is freed or load falls. Disk stays reserved to cleanup.
 A newer timestamp alone never removes a reservation. This mini2 convergence is
@@ -42,7 +46,8 @@ for their full lifetime; its behavior is preserved in this change.
 FIFO is shared across named and pool claims. A fitting, componentwise smaller
 claim may pass a head blocked specifically by CPU, memory or disk at most three
 times. The bypass count is persisted in the head's ticket under the host guard.
-A fitting head, non-capacity gate or exhausted count prevents bypass. Dead
+A fitting head, non-capacity gate or exhausted count prevents bypass. Successful
+and timed-out tickets retire inside the same host transaction before publication. Dead
 queue controllers lose their place. Publication failure removes the hold and
 reservation together. Dead local holders are checked by PID start time. An
 unbound dead lease is reclaimed immediately. A dispatched dead lease moves to
@@ -70,9 +75,63 @@ is a JSON array of slot rows (occupied IDs and a free candidate per host);
 `pool-capacity` is a host map with numeric `claims` and string `gate`, plus
 additive diagnostics. Mini2 `claims` counts additional default light claims.
 `status mini2` displays capacity and closing reason without SSH or mutation.
-Rollback restores registry/config bytes, keeps the compatible code while new
-leases drain, and resolves their IDs from holds/pending state. Registry/config
-changes since migration cause rollback to refuse an overwrite.
+Rollback restores the exact mini2 registry row and owning config, keeps compatible
+code while new leases drain, and resolves their IDs from holds/pending state.
+Changes to the target row or owning config cause rollback to refuse an overwrite.
+
+## Main mini local lanes
+
+The independent local migration marks `heavy-build` with `dynamic-local` and
+adds `LOCAL_*` settings to machine.conf. Existing numbered rows remain resolver
+aliases, and old holders finish through the legacy return commands. New build
+claims acquire a build ID and a lane ID together; the wrapper captures
+`build-id`/`build-lane`, binds dispatch before starting work, and returns its
+own pair by holder plus PID. `wait-lane` defaults to medium; callers select
+`--profile heavy|medium|light` or explicit measured weights. Named legacy takes
+pin their names and build takes acquire the corresponding pair atomically.
+
+| Kind | Default cores | Default memory | Disk |
+| --- | --- | --- | --- |
+| Full build/link | ceil(physical cores / 4), min 1 | ceil(RAM / 8), min 2 GiB | 16 GiB |
+| Compile | ceil(physical cores / 8), min 1 | ceil(RAM / 16), min 2 GiB | 8 GiB |
+| Check | 1 | 2 GiB | 2 GiB |
+
+Measured main-mini facts are 14 physical cores and 64 GiB RAM. Defaults are
+load capacity 14, memory reserve 7.68 GiB, disk reserve 20 GiB. At idle and with
+sufficient disk, the worst default concurrency is 14 light claims, seven medium
+claims or three full builds; mixes cannot exceed 14 default claims because each
+reserves at least one core. Each admission leaves the configured memory/disk
+floors after measured use plus unmaterialized reservations. This is a budget
+for honest job estimates, not a process memory limit. The actual available
+memory reading can reduce these counts substantially; nominal RAM never
+substitutes for that reading.
+
+Local claim attempts sample Mach VM counters, sysctl hardware/pressure and load
+on demand without sudo or modifying security software. Prefer the live Darwin
+available-memory level; use measured free/inactive pages only when that OID is
+unsupported. Normal pressure is mandatory; warn/critical, missing counters,
+future/stale metrics (default five seconds), invalid config and the existing
+memory guard's HIGH state close admission. There is no last-good-config
+fallback for dynamic admission. Swap/compressor diagnostics come from the same
+live counters. The main mini remains under memory-panic observation until
+2026-11-26; owner smoke uses light no-op work.
+
+Local and mini2 share headroom arithmetic, bounded-bypass predicates and fresh
+attributed reservation credit. Local usage comes from owned PID descendants'
+CPU/private-memory counters and is capped by the outstanding batch's measured host delta.
+An unbound controlled dead holder is reclaimed; dispatched work is reclaimed
+only when the existing checkout/process evidence proves no surviving work.
+Uncertain or surviving work keeps its own ID/reservation while other claims
+fit. Canonical checkout paths exclude conflicting full builds; caller worktrees
+and their build paths remain the source-isolation boundary for local jobs.
+
+Both migrations keep exact full backups but restore only their target registry
+row, preserving the other migration and unrelated rows. Mini2 restores its own
+config; local restores its own machine.conf additions. They can roll back in
+either order while the compatible controller resolves draining IDs. A changed
+target row or changed owning config causes refusal rather than overwriting an
+owner's later change. The pinned VAK JSON shapes also cover local slot objects,
+registry rows and host capacity maps.
 
 Rejected: numbered extra rows, a second budget formula, whole-host execution
 serialization, timestamp-only reservation expiry, and dropping an unconfirmed

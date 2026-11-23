@@ -6,9 +6,9 @@
 # them, and never pass --shared-lock. A shared remote/CI entry script stays unthrottled; local locks live only in a
 # local-only wrapper (route.mjs --no-local-build documents the remote case).
 # Under contract v1.4, wait-build acquires the slot plus a free admitted lane together or holds neither before retry.
-# Lane preference is 1, 2, then optional 3; HEAVY_BUILD_LANE pins without hold-and-wait. Return in reverse on every
-# exit. The normal gate and lane-3 admission (load1m <=8 AND available memory >=32 GiB at take time) are enforced
-# by res, never reimplemented or bypassed here.
+# Migrated hosts choose weighted dynamic lane IDs; legacy hosts keep their registered lane order.
+# HEAVY_BUILD_LANE pins without hold-and-wait. Return in reverse on every exit.
+# Res owns measured admission and the legacy fallback gates; this wrapper does not bypass them.
 set -u
 set -m
 res="${RES_COMMAND:-$HOME/.claude/orchestrator/_shared/res}"
@@ -26,10 +26,10 @@ if [ "${1:-}" = --watch-pid ]; then
 fi
 [ "${1:-}" != -- ] || shift
 if [ "$#" -eq 0 ] || ! [[ "$timeout" =~ ^[0-9]+([.][0-9]+)?$ ]] ||
-   { [ -n "$preferred_lane" ] && ! [[ "$preferred_lane" =~ ^heavy-lane-[123]$ ]]; } ||
+   { [ -n "$preferred_lane" ] && ! [[ "$preferred_lane" =~ ^heavy-lane-[1-9][0-9]*$ ]]; } ||
    { [ -n "$watch_pid" ] && ! [[ "$watch_pid" =~ ^[1-9][0-9]*$ ]]; } ||
    { [ -n "$build_log" ] && { [[ "$build_log" != /* ]] || ! [[ "$build_log" =~ \.(log|txt|out)$ ]]; }; }; then
-  echo 'usage: heavy-build.sh [--watch-pid <long-lived worker PID>] [--] <command...>; finite timeout minutes, optional HEAVY_BUILD_LANE=heavy-lane-1/2/3 and absolute HEAVY_BUILD_LOG=*.log/*.txt/*.out' >&2
+  echo 'usage: heavy-build.sh [--watch-pid <long-lived worker PID>] [--] <command...>; finite timeout minutes, optional HEAVY_BUILD_LANE=heavy-lane-N and absolute HEAVY_BUILD_LOG=*.log/*.txt/*.out' >&2
   exit 2
 fi
 if [ -n "$watch_pid" ] && ! kill -0 "$watch_pid" 2>/dev/null; then
@@ -157,11 +157,22 @@ legacy_pair() {
 }
 if [ "$modern" -eq 1 ]; then
   args=(wait-build --timeout "$timeout")
+  if [[ "$capability" = *dynamic-local* ]]; then
+    args+=(--wrapper)
+    [ -z "${HEAVY_BUILD_CORES:-}" ] || args+=(--cores "$HEAVY_BUILD_CORES")
+    [ -z "${HEAVY_BUILD_MEM_GIB:-}" ] || args+=(--mem-gib "$HEAVY_BUILD_MEM_GIB")
+    [ -z "${HEAVY_BUILD_PROFILE:-}" ] || args+=(--profile "$HEAVY_BUILD_PROFILE")
+  fi
   [ -z "$preferred_lane" ] || args+=(--lane "$preferred_lane")
   acquiring=1
   run_wait "${args[@]}" || exit $?
-  lane=$(sed -n 's/^build-lane=\(heavy-lane-[123]\)$/\1/p' "$output")
-  [[ "$lane" =~ ^heavy-lane-[123]$ ]] || { echo 'heavy-build: missing acquired lane result' >&2; exit 1; }
+  lane=$(sed -n 's/^build-lane=\(heavy-lane-[1-9][0-9]*\)$/\1/p' "$output")
+  [[ "$lane" =~ ^heavy-lane-[1-9][0-9]*$ ]] || { echo 'heavy-build: missing acquired lane result' >&2; exit 1; }
+  if [[ "$capability" = *dynamic-local* ]]; then
+    acquired_build=$(awk -F= '$1=="build-id" && $2 ~ /^heavy-build(-[1-9][0-9]*)?$/ {print $2}' "$output")
+    [ -n "$acquired_build" ] || { echo 'heavy-build: missing acquired build ID' >&2; exit 1; }
+    "$res" bind "$acquired_build" --by "$by" || exit $?
+  fi
   acquiring=0
 else
   legacy_pair || exit $?

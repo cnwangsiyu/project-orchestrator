@@ -152,7 +152,7 @@ def regular_config(file, maximum=65536):
     return data.decode('utf-8')
 
 def parse_config(content):
-    heavy = dict(HEAVY_DEFAULTS); values = {}; unknown = set(); seen = set()
+    heavy = dict(HEAVY_DEFAULTS); values = {}; local = {}; unknown = set(); seen = set()
     host = r'[A-Za-z0-9][A-Za-z0-9.-]*'
     for line in content.splitlines():
         if not line.strip() or line.lstrip().startswith('#'): continue
@@ -160,6 +160,16 @@ def parse_config(content):
         if not sep or not re.fullmatch(r'[A-Z][A-Z0-9_]*(\.[A-Za-z0-9_.-]+)?', name) or name in seen:
             raise ValueError('invalid machine.conf line or duplicate setting')
         seen.add(name)
+        if name in ('LOCAL_LOAD_LIMIT','LOCAL_MIN_AVAILABLE_GIB','LOCAL_HEAVY_CORES','LOCAL_HEAVY_GIB',
+                    'LOCAL_MEDIUM_CORES','LOCAL_MEDIUM_GIB','LOCAL_LIGHT_CORES','LOCAL_LIGHT_GIB','LOCAL_MIN_FREE_GIB','LOCAL_MAX_BYPASS','LOCAL_METRICS_TTL_SECONDS'):
+            derived = name in ('LOCAL_LOAD_LIMIT','LOCAL_MIN_AVAILABLE_GIB','LOCAL_HEAVY_CORES','LOCAL_HEAVY_GIB','LOCAL_MEDIUM_CORES','LOCAL_MEDIUM_GIB')
+            integer = name in ('LOCAL_MAX_BYPASS','LOCAL_METRICS_TTL_SECONDS')
+            if value == 'derived' and derived: local[name]=value; continue
+            if not re.fullmatch(r'[0-9]+(?:\.[0-9]+)?',value) or not 0<float(value)<=65536 or integer and not value.isdecimal():
+                raise ValueError('invalid local capacity setting ' + name)
+            if name == 'LOCAL_MAX_BYPASS' and float(value)>32 or name == 'LOCAL_METRICS_TTL_SECONDS' and float(value)>30:
+                raise ValueError('local capacity setting exceeds bound ' + name)
+            local[name]=int(value) if integer else float(value); continue
         if name == 'MEM_GUARD_SAMPLES':
             if not value.startswith(('/', '~/')) or len(value) > 4096 or not value.endswith('.tsv') or any(ord(c) < 32 for c in value):
                 raise ValueError('invalid memory sample path')
@@ -205,7 +215,7 @@ def parse_config(content):
             and 1 <= heavy['BUILD_MAX_CONCURRENCY'] <= 3 and 15 <= heavy['LOAD_POLL_SECONDS'] <= 30
             and 1 <= heavy['MEM_GUARD_SUSTAIN'] <= 9):
         raise ValueError('invalid machine.conf threshold relations')
-    return dict(heavy=heavy, devbox=values, unknown=sorted(unknown))
+    return dict(heavy=heavy, devbox=values, local=local, unknown=sorted(unknown))
 
 def atomic_json(file, value):
     temporary = None
@@ -323,8 +333,8 @@ def native_memory_readings():
         if count.value < 38 or not page.value or values[0] < values[23]:
             raise ValueError('invalid native memory counters')
         pages = ('Mach Virtual Memory Statistics: (page size of %d bytes)\n'
-                 'Pages free: %d.\nPages inactive: %d.\nPages occupied by compressor: %d.\n') % (
-                     page.value, values[0] - values[23], values[2], values[32])
+                 'Pages free: %d.\nPages inactive: %d.\nPages occupied by compressor: %d.\nPages stored in compressor: %d.\n') % (
+                     page.value, values[0] - values[23], values[2], values[32], int(values[36]) | (int(values[37]) << 32))
     finally:
         if host: lib.mach_port_deallocate(ctypes.c_uint.in_dll(lib, 'mach_task_self_').value, host)
     lib.sysctlbyname.argtypes = [ctypes.c_char_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p, ctypes.c_size_t]
@@ -724,6 +734,34 @@ WAITER_STALE_SECONDS="${RES_WAITER_STALE_SECONDS:-300}"  # 45 s expired the FIFO
 # Polling guards need neither the admission parser nor its large controller.
 # Exec also removes a shell/process wait from the single-resource path.
 export RES_SELF_COMMAND="${BASH_SOURCE[0]:-${RES_SOURCE:-}}"
+local_controller() {
+  local resolved
+  resolved=$(python3 -c 'import os,sys; print(os.path.join(os.path.dirname(os.path.realpath(sys.argv[1])),"local_control.py"))' "${BASH_SOURCE[0]}")
+  [ -f "$resolved" ] || return 1
+  if [ "${LOCAL_EXEC_CHILD:-0}" = 1 ]; then exec python3 -B "$resolved" "$@"; fi
+  python3 -B "$resolved" "$@"
+}
+local_mode=0
+case "${1:-}:${2:-}" in
+  slot-host:heavy-build*|slot-host:heavy-lane-*|pool-capacity:local|pool-capacity:local-light|pool-capacity:local-build|pool-capacity:heavy-build|pool-capacity:heavy-lane|status:local)
+    local_controller "$@"; exit $? ;;
+  take-build:*|wait-build:*|wait-lane:*|wait-pool:local|wait-pool:local-light|wait-pool:local-build|take:heavy-build*|take:heavy-lane-*|wait:heavy-build*|wait:heavy-lane-*)
+    local_controller enabled && local_mode=1 ;;
+  return-build:*)
+    local_controller has-owned "${@:2}" && local_mode=1 ;;
+  return:heavy-build*|return:heavy-lane-*|bind:heavy-build*|bind:heavy-lane-*|holder:heavy-build*|holder:heavy-lane-*)
+    [ ! -f "$LOCKS/${2:-}.d/lease.json" ] || local_mode=1 ;;
+  status:heavy-build*|status:heavy-lane-*)
+    local_controller enabled && local_mode=1 ;;
+esac
+if [ "$local_mode" = 1 ]; then
+  if [ "${1:-}" = take-build ] && [ "${2:-}" = --wait ]; then shift; set -- wait-build "$@"; fi
+  if [[ "$*" = *--help* ]]; then
+    echo 'res dynamic-local: take-build/wait-build/wait-lane [--profile heavy|medium|light] [--cores N] [--mem-gib GiB] [--disk-gib GiB] [--wrapper]; return-build --by HOLDER; acquired build-id and build-lane IDs'
+    exit 0
+  fi
+  LOCAL_EXEC_CHILD=1 local_controller "$@"; exit $?
+fi
 fast_observer=
 if [ "${1:-}" = holder ]; then
   fast_observer=1
@@ -2572,6 +2610,12 @@ def alive(value):
 machine_helpers = {}; exec(os.environ['RES_MACHINE_SOURCE'], machine_helpers)
 def print_build_capacity():
     if request and not request.startswith('heavy-'): return
+    with open(os.path.join(root,'resources.tsv')) as stream:
+        migrated_local=any(line.startswith('heavy-build\t') and 'dynamic-local' in line.split() for line in stream)
+    if migrated_local:
+        result=subprocess.run([os.environ['RES_SELF_COMMAND'],'status','local','--json'],capture_output=True,text=True,timeout=15)
+        print('\nLocal capacity: ' + (result.stdout.strip() if result.returncode==0 else 'closed: local capacity probe unavailable'))
+        return
     count = sum(os.path.isdir(os.path.join(locks, name + '.d')) for name in ('heavy-build', 'heavy-build-2', 'heavy-build-3'))
     config = globals().get('status_machine_config') or machine_helpers['machine_config'](root)
     limit = config['heavy']['BUILD_MAX_CONCURRENCY']
@@ -4283,6 +4327,10 @@ case "${1:-}" in
     if [ -f "$RES_DIR/mini2-config.json" ] && [ -n "$(reg_line mini2-exec-1)" ]; then
       mini2_json=$(mini2_controller devbox-registry) || exit $?
       registry_json=$(printf '%s' "$registry_json" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)+json.loads(sys.argv[1])))' "$mini2_json")
+    fi
+    if local_controller enabled; then
+      local_json=$(local_controller devbox-registry) || exit $?
+      registry_json=$(printf '%s' "$registry_json" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)+json.loads(sys.argv[1])))' "$local_json")
     fi
     printf '%s\n' "$registry_json" ;;
   slot-host|reserved-disk)

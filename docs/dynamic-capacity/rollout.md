@@ -87,7 +87,7 @@ python3 -B scripts/mini2-host-migrate.py --registry "$capacity_shared/resources.
 "$capacity_shared/res" status mini2 --json
 ```
 
-This one command restores exact registry/config bytes. Keep the new controller
+This one command restores the exact mini2 registry row and config bytes, preserving the local migration and other registry rows. Keep the new controller
 until every mini2 hold and pending receipt has returned; it closes legacy
 admission while dynamic IDs drain. Then, if no independently installed local
 dynamic lanes need this controller, restore the prior code link:
@@ -98,6 +98,107 @@ ln -s "$capacity_previous_res" "$capacity_shared/.res-mini2-rollback-new"
 mv -f "$capacity_shared/.res-mini2-rollback-new" "$capacity_shared/res"
 ```
 
-If registry/config changed after migration, automatic rollback refuses to
+If the target registry row or its owning config changed after migration, automatic rollback refuses to
 overwrite those changes. Reconcile the owner's changes before retrying; the
 original exact backups remain untouched. Code rollback comes last.
+
+## Main-mini local install, independently after mini2
+
+The compatible code link from the mini2 install already contains the local
+controller and helper. Update local callers to use this checkout's
+`scripts/heavy-build.sh` before migration; it accepts opaque lane IDs and uses
+the dispatch binding contract. Let already-held legacy pairs finish normally.
+Coordinate old queued callers at the switch. Preserve the 2026-11-19 memory
+panic observation through 2026-11-26: the smoke below requests light work and
+does not build an app or change security software.
+
+```sh
+cd "$capacity_code"
+python3 -B scripts/res/test/test_local_control.py
+node scripts/res/test/output-shapes.mjs
+RES_TEST_SUITE=mini-build.mjs node scripts/res/test/run.mjs
+RES_TEST_SUITE=build.mjs node scripts/res/test/run.mjs
+python3 -B scripts/local-host-migrate.py --registry "$capacity_shared/resources.tsv"
+python3 -B scripts/local-host-migrate.py --registry "$capacity_shared/resources.tsv" --apply
+"$capacity_shared/res" status local --json
+"$capacity_shared/res" pool-capacity local
+"$capacity_shared/res" pool-capacity local-light
+```
+
+The local migration adds only `dynamic-local` to the `heavy-build` row and
+missing `LOCAL_*` settings in machine.conf. It keeps the old build/lane rows and
+legacy settings as aliases/fallback. Exact backups are
+`resources.tsv.pre-local-dynamic`, `.machine` and `.machine-existed`; the mini2
+backups and config are untouched. Configurable settings are load limit,
+available-memory floor, free-disk floor, heavy/medium/light core and memory
+costs, bypass budget and metric TTL. The first four hardware-dependent costs
+and limits default to `derived`; they resolve against the current sample.
+Claim CLI overrides: `--profile heavy|medium|light --cores N --mem-gib GiB
+--disk-gib GiB`. Wrapper equivalents: `HEAVY_BUILD_PROFILE`,
+`HEAVY_BUILD_CORES`, `HEAVY_BUILD_MEM_GIB`.
+
+## Main-mini live smoke: three overlapping light lane holders
+
+This driver acquires three light lanes with the driver's long-lived PID, holds
+them together while running `true`, resolves their IDs, and returns every owned
+ID in its `finally` block. It takes no resources if the native pressure/load or
+memory gate closes. Do not inject test metrics for this live smoke.
+
+```sh
+python3 - "$capacity_shared/res" <<'PY'
+import concurrent.futures,json,os,subprocess,sys,time,uuid
+res=sys.argv[1]; by='local-light-smoke-'+str(uuid.uuid4()); acquired=[]
+def claim(index):
+    result=subprocess.run([res,'wait-lane','--by',by+'-'+str(index),'--project','local-smoke','--task','light','--for','true smoke','--pid',str(os.getpid()),'--profile','light','--wrapper','--timeout','0'],capture_output=True,text=True)
+    if result.returncode: return index,None,result.stderr
+    lane=dict(line.split('=',1) for line in result.stdout.splitlines() if '=' in line)['lane']
+    acquired.append((index,lane))
+    return index,lane,None
+try:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+        results=list(pool.map(claim,range(1,4)))
+    if len(acquired)!=3: raise RuntimeError('native gate closed; '+str([(index,error) for index,lane,error in results if error]))
+    assert len({lane for index,lane in acquired})==3
+    for index,lane in acquired:
+        value=json.loads(subprocess.check_output([res,'slot-host',lane],text=True))
+        assert value['slot']==lane
+    subprocess.run(['true'],check=True)
+    time.sleep(3)
+    print('PASS three overlapping light lanes:',[lane for index,lane in acquired])
+finally:
+    for index,lane in acquired:
+        subprocess.run([res,'return',lane,'--by',by+'-'+str(index)],check=True)
+PY
+"$capacity_shared/res" status local --json
+```
+
+Full local builds use the same one-process wrapper, for example:
+
+```sh
+HEAVY_BUILD_BY=<unique-holder> HEAVY_BUILD_PROJECT=<project> HEAVY_BUILD_TASK=<task> \
+  RES_COMMAND="$capacity_shared/res" HEAVY_BUILD_PROFILE=heavy \
+  "$capacity_code/scripts/heavy-build.sh" --watch-pid <long-lived-worker-pid> -- <local-build-command>
+```
+
+The wrapper returns its own acquired pair even when interrupted. Do not return
+another holder's resources or remove uncertain pending work. A dead controlled
+unbound hold is reclaimed on the next claim; dispatched work retains its budget
+until checkout/process evidence proves it has ended, or its owning wrapper
+finishes normal cleanup.
+
+## Main-mini local rollback
+
+```sh
+cd "$capacity_code"
+python3 -B scripts/local-host-migrate.py --registry "$capacity_shared/resources.tsv" --rollback
+"$capacity_shared/res" status local --json
+```
+
+This restores the exact original local row and owning machine.conf state while
+preserving mini2's current row/config. Keep compatible code until all dynamic
+local holds return; new dynamic claims close during drain. Either registry
+migration can be rolled back first. Restore the previous code symlink only
+after both migrations are rolled back and all corresponding dynamic holds and
+pending receipts are gone. Publishing `global-rules.md` version 2026-11-22.4 is
+an owner step after the corresponding install; the worker edits only its task
+branch's source file, within the existing digest line budget.

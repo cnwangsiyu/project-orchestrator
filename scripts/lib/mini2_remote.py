@@ -21,6 +21,12 @@ import sys
 import time
 import uuid
 
+# The SSH launcher prefixes the shared capacity module. Offline imports use
+# that same module from the checkout, never a second memory-credit formula.
+if "physical_footprint" not in globals():
+    sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"res"))
+    from dynamic_capacity import physical_footprint
+
 GIB = 1024 ** 3
 ROOT = Path.home() / "mac-build-runner"
 SCRATCH = ("work", "cache", "home", "tmp", "DerivedData", "ModuleCache", "bin")
@@ -77,6 +83,7 @@ def metrics():
                 load5=os.getloadavg()[1], availableGiB=available/GIB, totalGiB=total/GIB,
                 freeGiB=disk.f_bavail*disk.f_frsize/GIB, pressure=pressure,
                 compressorGiB=pages["Pages occupied by compressor"]*page/GIB,
+                compressedLogicalGiB=pages["Pages stored in compressor"]*page/GIB,
                 swapGiB=float(used)/(1024 if unit == "M" else 1),leaseUsage=usage)
 
 
@@ -204,15 +211,33 @@ def location(run_id):
     return run
 
 
-def disk_gate(estimate=0):
+def launch_limits(data):
+    limits=data.get("limits")
+    if limits is None:
+        if data.get("dynamic"): raise RuntimeError("dynamic lease launch limits missing")
+        return dict(loadLimit=6,memoryFloorGiB=16,diskFloorGiB=20)
+    if not isinstance(limits,dict) or set(limits)!={"loadLimit","memoryFloorGiB","diskFloorGiB"}:
+        raise RuntimeError("invalid lease launch limits")
+    if any(type(value) not in (int,float) or not math.isfinite(value) or value<=0 for value in limits.values()):
+        raise RuntimeError("invalid lease launch limits")
+    return limits
+
+
+def launch_gate(sample,data):
+    limits=launch_limits(data)
+    if sample["load5"]>limits["loadLimit"] or sample["availableGiB"]<limits["memoryFloorGiB"] or sample["pressure"]!=1:
+        raise RuntimeError("launch admission closed")
+
+
+def disk_gate(estimate=0,floor=20):
     sample = metrics()
-    if sample["freeGiB"]-estimate < 20: raise RuntimeError("disk gate closed")
+    if sample["freeGiB"]-estimate < floor: raise RuntimeError("disk gate closed")
     return sample
 
 
 def prepare(data):
     run = location(data["runId"])
-    disk_gate(data["diskGiB"])
+    disk_gate(data["diskGiB"],launch_limits(data)["diskFloorGiB"])
     run.mkdir(mode=0o700)  # Never replay or overwrite a launch UUID.
     atomic(run / "intent.json", data)
     print(json.dumps(dict(run=str(run))))
@@ -222,7 +247,7 @@ def receive(data):
     run = location(data["runId"])
     intent = json.loads((run / "intent.json").read_text())
     if data["file"] not in intent["uploads"]: raise RuntimeError("unknown upload")
-    disk_gate(data["diskGiB"])
+    disk_gate(data["diskGiB"],launch_limits(data)["diskFloorGiB"])
     file = run / data["file"]
     digest = hashlib.sha256()
     with file.open("xb") as out:
@@ -270,10 +295,9 @@ def execute_owned(data):
     run = location(data["runId"])
     intent = json.loads((run / "intent.json").read_text())
     if intent != data: raise RuntimeError("launch intent mismatch")
-    (run / "launched").touch(exist_ok=False)
-    sample = disk_gate(data["diskGiB"])
-    if sample["load5"] > 6 or sample["availableGiB"] < 16 or sample["pressure"] != 1:
-        raise RuntimeError("launch admission closed")
+    if (run/"launched").exists(): raise RuntimeError("launch replay")
+    sample = disk_gate(data["diskGiB"],launch_limits(data)["diskFloorGiB"])
+    launch_gate(sample,data)
     workspace = run / "work"
     command(["/usr/bin/git", "clone", "--no-checkout", str(run/"source.bundle"), str(workspace)], timeout=120)
     command(["/usr/bin/git", "-C", str(workspace), "checkout", "--detach", data["commit"]], timeout=120)
@@ -306,6 +330,7 @@ def execute_owned(data):
               + ' '.join(name+'='+shlex.quote(value) for name,value in task_env.items())
               + ' HOME="$MINI2_TASK_HOME" PATH="$MINI2_TASK_BIN:$PATH" && exec /bin/bash -e -c "$1"')
     with (run/"build.log").open("xb") as log:
+        (run/"launched").touch(exist_ok=False)
         child = subprocess.Popen(["/bin/bash", "-c", launch, "mini2", data["command"]],
                                  cwd=workspace, stdin=subprocess.PIPE, stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
                                  env={**os.environ, **task_env})
@@ -336,7 +361,8 @@ def execute_owned(data):
                     # only the corresponding elapsed portion of owned CPU use;
                     # the controller further caps credit by visible host delta.
                     cpu=sum(float(fields[2])/100 for fields in owned)
-                    atomic(run/"usage.json",dict(at=time.time(),cpuLoad=cpu*(1-math.exp(-(time.monotonic()-start)/300)),memoryGiB=current_rss/GIB))
+                    memory=sum(physical_footprint(pid) for pid in family)/GIB
+                    atomic(run/"usage.json",dict(at=time.time(),cpuLoad=cpu*(1-math.exp(-(time.monotonic()-start)/300)),memoryGiB=memory))
                     samples.append(metrics()); last_sample=time.monotonic()
             except Exception as error:
                 errors.append(type(error).__name__+": "+str(error))
@@ -423,6 +449,10 @@ def clean(data, reconciled=False):
                                 capture_output=True, text=True, timeout=15)
         if opened.returncode != 1 or opened.stdout or opened.stderr: raise RuntimeError("upload still open")
         intent = json.loads((run/"intent.json").read_text())
+        for name in SCRATCH:
+            folder=run/name
+            if folder.is_symlink(): raise RuntimeError("owned scratch replaced")
+            if folder.exists(): shutil.rmtree(folder)
         for name in intent["uploads"]: (run/name).unlink(missing_ok=True)
         receipt=dict(runId=data["runId"], clean=True, at=time.time(), neverLaunched=True)
         atomic(run/"clean.json",receipt); print(json.dumps(receipt)); return

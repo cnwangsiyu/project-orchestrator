@@ -494,10 +494,10 @@ for (const [sc,args,oldWant,oldNote] of CASES) {
     assert.ok(merged.pick?.command);
     for (const sc of ['ttFresh', 'ttOutTraeDown', 'fresh']) {
       const routed = parseRouteJSON(run(sc, ['build-run']));
-      assert.ok(routed.allNotes.some((s) => /heavy-build\.sh.*ONE-process wrapper.*res take-build\/wait-build\/return-build.*res v1\.5.*acquire heavy-build plus one free admitted lane together.*holding neither resource while waiting for the other/.test(s)));
+      assert.ok(routed.allNotes.some((s) => /heavy-build\.sh.*ONE-process wrapper.*res take-build\/wait-build\/return-build.*res v1\.5.*acquire a build hold plus one admitted lane together.*holding neither resource while waiting for the other/.test(s)));
       assert.ok(routed.allNotes.some((s) => /only for genuine local heavy compute.*remote pipeline deploys and CI runs never take one.*--no-local-build/.test(s)));
-      assert.ok(routed.allNotes.some((s) => /Normal gate remains min\(20, 12 \+ 8 \* other lanes\), memory >=16 GiB; STALE and caller-owned locks excluded/.test(s)));
-      assert.ok(routed.allNotes.some((s) => /lane 3 is available only after reviewed owner switch.*load1m <=8 AND available memory >=32 GiB.*lane3=OPEN\|CLOSED/.test(s)));
+      assert.ok(routed.allNotes.some((s) => /Unknown\/stale metrics close admission; legacy unweighted holds require drain/.test(s)));
+      assert.ok(routed.allNotes.some((s) => /migrated local hosts.*weighted heavy\/medium\/light.*fresh measured load.*normal pressure.*12% RAM/.test(s)));
       assert.ok(!routed.allNotes.some((s) => /at most 3 concurrent heavy builds/.test(s)));
     }
     for (const sc of ['unreadHub']) {

@@ -13,7 +13,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const quote = value => `'${String(value).replaceAll("'", "'\\''")}'`;
 const digest = file => createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const shared = () => process.env.RES_DIR || process.env.RULES_SHARED || path.join(os.homedir(), '.claude/orchestrator/_shared');
-const remoteSource = () => fs.readFileSync(path.join(here, 'lib/mini2_remote.py'), 'utf8');
+const remoteSource = () => fs.readFileSync(path.join(here, 'res/dynamic_capacity.py'), 'utf8') + '\n' + fs.readFileSync(path.join(here, 'lib/mini2_remote.py'), 'utf8');
 const control = path.join(here, 'res/mini2_control.py');
 const write = (file, value) => {
   const temp = file + '.' + randomUUID();
@@ -136,7 +136,7 @@ export async function main(argv) {
       '--for', 'unsigned Darwin build', '--pid', String(process.pid), ...(opts.profile?['--profile', opts.profile]:[]), '--disk-gib', String(opts.diskGiB),
       '--need', opts.need, ...['cores','memGib'].flatMap(name=>opts[name]===undefined?[]:[name==='cores'?'--cores':'--mem-gib',String(opts[name])]), ...(opts.qualification ? ['--qualification', opts.qualification] : [])])).lease;
     await ctl(['bind', lease.slot, '--by', opts.by, '--generation', lease.generation, '--run-id', runId]);
-    const data = { runId, slot: lease.slot, dynamic: lease.dynamic, cores: lease.weights[0], commit: source.commit, command: opts.command, diskGiB: +opts.diskGiB, timeoutSec: +opts.timeout*60,
+    const data = { runId, slot: lease.slot, dynamic: lease.dynamic, limits: lease.limits, cores: lease.weights[0], commit: source.commit, command: opts.command, diskGiB: +opts.diskGiB, timeoutSec: +opts.timeout*60,
       uploads: Object.fromEntries(Object.entries(evidence.uploads).map(([name, value]) => [name, value.sha256])) };
     write(path.join(opts.out, 'intent.json'), { ...data, lease });
     const syncStart = performance.now();

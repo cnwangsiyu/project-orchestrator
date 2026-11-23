@@ -15,7 +15,7 @@ import sys
 import subprocess
 import time
 import uuid
-from dynamic_capacity import headroom
+from dynamic_capacity import headroom, reservation_totals, smaller_bypass, json_safe
 from xml.parsers.expat import ExpatError
 
 HOST = "Bytedances-Mac-mini.local"
@@ -53,9 +53,9 @@ def atomic(file, value):
 
 
 @contextmanager
-def guard(root):
+def guard(root,name="mini2.guard"):
     root.mkdir(parents=True, exist_ok=True)
-    with (root/"mini2.guard").open("a") as file:
+    with (root/name).open("a") as file:
         fcntl.flock(file, fcntl.LOCK_EX)
         yield
 
@@ -105,42 +105,15 @@ def weights(args):
     defaults = (1, 1, 8) if profile == "light" and native else (4, 8, 16)
     result = tuple(default if value is None else value for default, value in zip(defaults,
                    (getattr(args,"cores",None), getattr(args,"mem_gib",None),args.disk_gib)))
-    if any(type(v) not in (int,float) or not math.isfinite(v) or v <= 0 for v in result):
+    if any(type(v) not in (int,float) or not math.isfinite(v) or v < 0 for v in result):
         raise ValueError("invalid claim weight")
     if result[0] < 0.25 or result[1] < 0.25: raise ValueError("claim weight below minimum")
     return result
 
 
 def reserved(root,sample=None,now=None):
-    # Fresh, attributed usage is already in host metrics. Credit it only
-    # against the measured increase since the oldest outstanding claim.
-    costs = []
     holds=lease_holds(root)+list((root/"mini2-pending").glob("*/hold"))
-    leases=[]
-    for hold in holds:
-        lease = read(hold/"lease.json", {})
-        if not lease or not lease.get("weights"):
-            raise ValueError("legacy-or-incomplete-hold")
-        cost = lease["weights"]
-        if not isinstance(cost,list) or len(cost)!=3 or any(type(v) not in (int,float) or not math.isfinite(v) or v<=0 for v in cost):
-            raise ValueError("invalid lease reservation")
-        costs.append(list(cost)); leases.append(lease)
-    if sample and now is not None:
-        valid=[lease.get("baseline",{}) for lease in leases if lease.get("baseline")]
-        cpu_visible=max(0,sample["load5"]-min((v["load5"] for v in valid),default=sample["load5"]))
-        mem_visible=max(0,max((v["availableGiB"] for v in valid),default=sample["availableGiB"])-sample["availableGiB"])
-        for lease,cost in zip(leases,costs):
-            usage=sample.get("leaseUsage",{}).get(lease.get("runId"),{})
-            if not fresh(usage.get("at"),now,15): continue
-            for index,name in ((0,"cpuLoad"),(1,"memoryGiB")):
-                amount=usage.get(name)
-                if type(amount) not in (int,float) or not math.isfinite(amount) or amount<0: continue
-                pool=cpu_visible if index==0 else mem_visible
-                credit=min(cost[index],amount,pool)
-                cost[index]-=credit
-                if index==0: cpu_visible-=credit
-                else: mem_visible-=credit
-    return tuple(sum(cost[i] for cost in costs) for i in range(3))
+    return reservation_totals([read(hold/"lease.json",{}) for hold in holds],sample,now)
 
 
 def process_start(pid):
@@ -182,6 +155,10 @@ def pending_cleanup(root):
     return (root/"mini2-cleanup-pending.json").exists()
 
 
+def stored_lease(root,resource):
+    return read(root/"locks"/(resource+".d")/"lease.json",None) or read(root/"mini2-pending"/resource/"hold"/"lease.json",{})
+
+
 def resolve(root, resource):
     if not resource or not LEASE_ID.fullmatch(resource): raise ValueError("unknown mini2 lease id")
     row = registry_row(root)
@@ -191,7 +168,7 @@ def resolve(root, resource):
     return dict(slot=resource,host=HOST,user="bytedance",target="bytedance@"+HOST,
                 kind="remote",cores=read(root/"mini2-metrics.json",{}).get("cores"),memGiB=read(root/"mini2-metrics.json",{}).get("totalGiB"),factsAt=datetime.datetime.fromtimestamp(read(root/"mini2-facts.json",{}).get("at",0),datetime.timezone.utc).isoformat(),
                 resolverOnly=not dynamic_row(row) and resource != SLOT,root="/Users/bytedance/mac-build-runner",caps=approved[1].split(",") if approved else [],
-                policy=row[2],dynamic=dynamic_row(row),category="LIGHT" if read(root/"locks"/(resource+".d")/"lease.json",{}).get("profile")=="light" else "HEAVY")
+                policy=row[2],dynamic=dynamic_row(row),category="LIGHT" if stored_lease(root,resource).get("profile")=="light" else "HEAVY")
 
 
 def registry_slots(root):
@@ -374,18 +351,19 @@ def acquire(root, args):
                 else: reason=admission(root, cfg, time.time(), cost[2], required, qualification, cost=cost if dynamic else None)
                 for file in queue.glob("*.json"):
                     value = read(file)
+                    if value is None: continue
                     try: os.kill(value["controller"], 0); os.kill(value["pid"], 0)
                     except ProcessLookupError: file.unlink()
                 earlier = sorted(file for file in queue.glob("*.json") if file < ticket)
                 bypass = []
                 for file in earlier:
                     older = read(file)
+                    if older is None: continue
                     if not dynamic:
                         reason = "fifo"; break
                     old_cost = older["cost"]
                     old_reason = admission(root,cfg,time.time(),old_cost[2],older["need"].split(",") if older["need"] else [],qualification,cost=old_cost)
-                    smaller = all(x<=y for x,y in zip(cost,old_cost)) and any(x<y for x,y in zip(cost,old_cost))
-                    if old_reason not in ("load","memory","disk") or older["bypasses"] >= MAX_BYPASS or not smaller:
+                    if not smaller_bypass(cost,old_cost,old_reason,older["bypasses"],MAX_BYPASS):
                         reason = "fifo"; break
                     bypass.append((file,older))
                 resource = getattr(args,"resource",None) or SLOT
@@ -407,19 +385,23 @@ def acquire(root, args):
                         baseline=read(root/"mini2-baseline.json",sample)
                         values=dict(by=args.by, project=args.project, task=args.task, pid=args.pid,pid_start=pid_start,
                                     host=os.uname().nodename, start=int(time.time()), profile=args.profile or ("light" if not args.need or set(args.need.split(",")) <= {"cmake-native"} else "heavy"),
-                                    slot=resource,dynamic=dynamic,weights=cost,dispatch="unbound",baseline=baseline,
+                                    slot=resource,dynamic=dynamic,weights=cost,dispatch="unbound" if getattr(args,"resource",None)=="mini2" else "legacy",baseline=baseline,
+                                    limits=dict(loadLimit=thresholds(cfg,sample)[0],memoryFloorGiB=thresholds(cfg,sample)[1],diskFloorGiB=cfg["minFreeGiB"]),
                                     generation=str(uuid.uuid4()), remote_host=HOST, remote_cleanup_required="1", purpose=args.purpose)
                         atomic(hold/"lease.json", values)
                         (hold/"info").write_text("".join(str(k)+"\t"+str(v)+"\n" for k,v in values.items()))
                         for file,older in bypass:
                             atomic(file,{**older,"bypasses":older["bypasses"]+1})
                         journal(root, "take", args.by, "qualification" if qualification else values["profile"],slot=resource)
+                        ticket.unlink(missing_ok=True)
                     except BaseException:
                         shutil.rmtree(hold)
                         raise
                     print(json.dumps(dict(slot=resource, lease=values)))
                     return
-                if time.monotonic() >= deadline: raise ValueError("mini2 admission closed: "+reason)
+                if time.monotonic() >= deadline:
+                    ticket.unlink(missing_ok=True)
+                    raise ValueError("mini2 admission closed: "+reason)
             time.sleep(1)
     finally:
         ticket.unlink(missing_ok=True)
@@ -508,7 +490,7 @@ def main():
                                 math.floor(detail["availableGiB"]-detail["memoryFloorGiB"]-remaining[1]),
                                 math.floor((detail["freeGiB"]-detail["diskFloorGiB"]-remaining[2])/8)))
             value={HOST:dict(claims=count,gate="headroom" if value["reason"]=="open" else value["reason"],**value)}
-        print(json.dumps(value) if args.json or args.action=="pool-capacity" else "mini2 "+" ".join(k+"="+str(v) for k,v in value.items()))
+        print(json.dumps(json_safe(value)) if args.json or args.action=="pool-capacity" else "mini2 "+" ".join(k+"="+str(v) for k,v in value.items()))
     elif args.action in ("stage", "configure"):
         with guard(root):
             cfg=config(root)
@@ -559,7 +541,7 @@ def main():
         acquire(root,args)
     elif args.action == "holder":
         resolve(root,args.resource)
-        print(json.dumps(read(root/"locks"/(args.resource+".d")/"lease.json", {})))
+        print(json.dumps(stored_lease(root,args.resource)))
     else:
         with guard(root):
             resolve(root,args.resource)
@@ -580,7 +562,7 @@ def main():
                     raise ValueError("holder still alive")
             if args.action == "bind":
                 if lease.get("generation") != args.generation or not local_alive(lease): raise ValueError("lease generation or holder mismatch")
-                if str(uuid.UUID(args.run_id)) != args.run_id or lease.get("dispatch") != "unbound": raise ValueError("invalid or repeated dispatch")
+                if str(uuid.UUID(args.run_id)) != args.run_id or lease.get("dispatch") not in ("unbound","legacy"): raise ValueError("invalid or repeated dispatch")
                 lease.update(dispatch="bound",runId=args.run_id)
                 atomic(hold/"lease.json",lease)
             elif args.action == "retain-remote":

@@ -17,6 +17,28 @@ spec=importlib.util.spec_from_file_location("mini2_remote",Path(__file__).resolv
 m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 
 class RemoteTests(unittest.TestCase):
+    def test_dynamic_launch_uses_resolved_config_instead_of_legacy_limits(self):
+        data=dict(dynamic=True,limits=dict(loadLimit=10,memoryFloorGiB=4,diskFloorGiB=30))
+        sample=dict(load5=7,availableGiB=14,pressure=1,freeGiB=40)
+        m.launch_gate(sample,data)
+        with self.assertRaisesRegex(RuntimeError,"launch admission"): m.launch_gate(sample,{})
+        with self.assertRaisesRegex(RuntimeError,"missing"): m.launch_gate(sample,dict(dynamic=True))
+        for change in (dict(load5=10.1),dict(availableGiB=3.9),dict(pressure=2)):
+            with self.assertRaisesRegex(RuntimeError,"launch admission"): m.launch_gate({**sample,**change},data)
+        with patch.object(m,"metrics",return_value=sample):
+            m.disk_gate(10,m.launch_limits(data)["diskFloorGiB"])
+            with self.assertRaisesRegex(RuntimeError,"disk gate"): m.disk_gate(10.1,30)
+
+    def test_rejected_prelaunch_cleans_owned_workspace_without_receipt(self):
+        with tempfile.TemporaryDirectory() as temp,patch.object(m,"ROOT",Path(temp)/"runner"),patch.object(m,"disk_gate"):
+            data=dict(runId=str(uuid.uuid4()),diskGiB=1,uploads={})
+            with contextlib.redirect_stdout(io.StringIO()): m.prepare(data)
+            run=m.location(data["runId"])
+            for name in m.SCRATCH: (run/name).mkdir()
+            with patch.object(subprocess,"run",return_value=subprocess.CompletedProcess([],1,"","")),contextlib.redirect_stdout(io.StringIO()): m.clean(data)
+            self.assertFalse(any((run/name).exists() for name in m.SCRATCH))
+            self.assertTrue(json.loads((run/"clean.json").read_text())["neverLaunched"])
+
     def test_concurrent_guards_isolate_runs_and_respect_legacy_lock(self):
         with tempfile.TemporaryDirectory() as temp,patch.object(m,"ROOT",Path(temp)/"runner"):
             runs=[m.location(str(uuid.uuid4())) for _ in range(3)]

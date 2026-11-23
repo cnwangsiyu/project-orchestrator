@@ -248,7 +248,7 @@ class DynamicMini2Tests(unittest.TestCase):
 
     def test_concurrent_claims_fit_exact_core_boundary(self):
         command=["wait-pool","mini2","--by","fixture","--project","fixture","--task","fixture",
-                 "--for","concurrent","--pid",str(os.getpid()),"--need","cmake-native"]
+                 "--for","concurrent","--pid",str(os.getpid()),"--need","cmake-native","--timeout","0.1"]
         with ThreadPoolExecutor(max_workers=8) as pool:
             results=list(pool.map(lambda _:self.cli(*command),range(8)))
         acquired=[json.loads(result.stdout) for result in results if result.returncode==0]
@@ -302,7 +302,17 @@ class DynamicMini2Tests(unittest.TestCase):
         self.assertFalse(m.lease_holds(self.root)); self.assertEqual(m.reserved(self.root),(0,0,0))
         self.assertFalse(list((self.root/"mini2-waiters").glob("*.json")))
 
-    def test_dead_unbound_claim_is_reclaimed_and_bound_claim_closes(self):
+    def test_committed_claim_cannot_remain_a_fifo_head(self):
+        root=self.root
+        tickets=[]
+        class Publication(io.StringIO):
+            def write(self,value):
+                if value.strip(): tickets.append(list((root/"mini2-waiters").glob("*.json")))
+                return super().write(value)
+        with contextlib.redirect_stdout(Publication()): m.acquire(self.root,self.args())
+        self.assertEqual(tickets,[[]])
+
+    def test_dead_unbound_reclaim_and_pending_lease_preserves_remaining_capacity(self):
         dead=subprocess.Popen(["/usr/bin/true"]); dead.wait()
         first=self.take(); hold=self.root/"locks"/(first["slot"]+".d")
         m.atomic(hold/"lease.json",{**first["lease"],"pid":dead.pid})
@@ -314,6 +324,9 @@ class DynamicMini2Tests(unittest.TestCase):
         third=self.take()
         self.assertEqual(third["slot"],"mini2-exec-2")
         self.assertEqual(m.reserved(self.root),(2,2,16))
+        pending=json.loads(self.cli("holder",second["slot"]).stdout)
+        self.assertEqual(pending["generation"],second["lease"]["generation"])
+        self.assertEqual(json.loads(self.cli("slot-host",second["slot"]).stdout)["category"],"LIGHT")
         self.release(second); self.release(third)
 
     def test_stale_foreign_unknown_and_pressure_close(self):

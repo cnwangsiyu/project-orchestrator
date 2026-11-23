@@ -24,7 +24,7 @@ try {
   assert.equal(digestText.match(/^version:/gm)?.length, 1, 'integration must publish one digest version');
   assert.equal(digestText.match(/^## Changes In This Version$/gm)?.length, 1);
   assert.ok(digestText.split('\n').length<=61,'digest line budget');
-  assert.equal(digest.version, '2026-11-22.3');
+  assert.equal(digest.version, '2026-11-22.4');
   assert.match(digest.worker,/Declare host-bound inputs with --input/);
   assert.match(digest.worker,/never edit a slot worktree in place/);
   assert.match(digest.worker, /--exclude-host.*--exclude-slot.*--prefer-slot.*--exclude-reason.*in their report.*Declare host-bound inputs with --input/);

@@ -52,6 +52,16 @@ def exact_backup(file,content):
         stream.write(content); stream.flush(); os.fsync(stream.fileno())
 
 
+def restore_row(current,original,expected,id):
+    def row(content):
+        rows=[line for line in content.splitlines(keepends=True) if line.startswith((id+"\t").encode())]
+        if len(rows)!=1: raise ValueError("missing or duplicate target registry row")
+        return rows[0]
+    old,target,now=row(original),row(expected),row(current)
+    if now!=target: raise ValueError("target registry row changed since migration; refusing to overwrite")
+    return b"".join(old if line==now else line for line in current.splitlines(keepends=True))
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--registry",required=True,type=Path)
@@ -72,10 +82,10 @@ def main():
         config_mode=config.stat().st_mode & 0o777
         if args.rollback:
             original=backup.read_bytes()
-            if current!=migrate(original): raise ValueError("registry changed since migration; refusing to overwrite")
+            restored=restore_row(current,original,migrate(original),SLOT)
             config_original=config_backup.read_bytes()
             if config_current!=derived_config(config_original): raise ValueError("config changed since migration; refusing to overwrite")
-            atomic(file,original,mode)
+            atomic(file,restored,mode)
             atomic(config,config_original,config_mode)
             print("Exact registry restored; keep compatible code until all mini2 leases return.")
             return
