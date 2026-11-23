@@ -72,6 +72,31 @@ const take = (id, extra = {}) => run(['take', id, '--by', 'fixture', '--project'
 const release = (id) => eq(run(['return', id, '--by', 'fixture']).code, 0);
 const check = (extra = {}) => run(['heavy-check', '--pid', String(process.pid)], extra);
 
+// Exercise the installed symlink shape and the note and journal write paths.
+const installed = path.join(root, 'res'); fs.symlinkSync(process.env.RES_SOURCE, installed);
+const putNote = (text, extra = {}) => spawnSync(installed,
+  ['note', 'phone', '--by', 'fixture', '--note', text], { env: { ...env, ...extra }, encoding: 'utf8', timeout: 30000 });
+const noteFile = path.join(state, 'notes/phone.md'), journal = path.join(state, 'log.tsv');
+const plain = `Fixture SHA-256 ${'a1'.repeat(32)}, device 00008020-001A19411234002E, commit 3c65dce9abbf76c53ef6d74031606edd7e061c16.\n`;
+const pasted = 'FIXTURE_PASTED_ONLY';
+const signed = 'https://files.feishu.cn/attachments/download/report';
+const note = `${plain}access_token=${pasted}\nLink: ${signed}?opaque=${pasted}\n`;
+const savedNote = putNote(note);
+eq(savedNote.status, 0, savedNote.stderr);
+const expected = `${plain}access_token=[MASKED]\nLink: ${signed}?[MASKED]\n`;
+const stored = [noteFile, journal].map(file => fs.readFileSync(file, 'utf8'));
+for (const text of stored) {
+  ok(text.includes(expected + '\n'), 'plain identifiers and trailing newline survive masking');
+  ok(!text.includes(pasted), 'fixture value is absent from storage');
+}
+const shown = run(['status', 'phone']);
+eq(shown.code, 0); ok(shown.stdout.includes(expected)); ok(!shown.text.includes(pasted));
+const failedMask = path.join(root, 'failed-mask'); fs.mkdirSync(failedMask);
+fs.writeFileSync(path.join(failedMask, 'node'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+const refusedNote = putNote(note, { PATH: `${failedMask}:${env.PATH}` });
+eq(refusedNote.status, 1); ok(refusedNote.stderr.includes('could not mask note; nothing written'));
+eq([noteFile, journal].map(file => fs.readFileSync(file, 'utf8')), stored);
+
 // Review #2: MIN_AVAIL_GIB=3 is an unfinished prefix of 32. Reject it;
 // staged edits leave the previous complete configuration active until rename.
 const conf = path.join(state, 'machine.conf'), nextConf = `${conf}.next`;

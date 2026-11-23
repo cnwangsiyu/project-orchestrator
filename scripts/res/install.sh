@@ -55,6 +55,15 @@ previous_code_dir=$(python3 -B -c 'import os,sys; print(os.path.dirname(os.path.
 for helper in mini2_control.py mini2_link.py mini2_monitor.py dynamic_capacity.py local_control.py; do
   [ ! -f "$previous_code_dir/$helper" ] || cp -p "$previous_code_dir/$helper" "$backup/$helper"
 done
+if [ -f "$previous_code_dir/note-mask.mjs" ]; then
+  cp -p "$previous_code_dir/note-mask.mjs" "$backup/note-mask.mjs"
+  masker_lib="$previous_code_dir/lib"
+  [ -f "$masker_lib/nightly-audit.mjs" ] || masker_lib="$previous_code_dir/../lib"
+  mkdir "$backup/lib"
+  for helper in nightly-audit.mjs build-log-findings.mjs xml-log-findings.mjs properties-log-findings.mjs credential-labels.mjs private-key-blocks.mjs; do
+    cp -p "$masker_lib/$helper" "$backup/lib/$helper"
+  done
+fi
 cp -p "$registry" "$backup/resources.tsv"
 previous_target=$(readlink "$shared/res")
 printf '%s\n' "$previous_target" >"$backup/previous-target.txt"

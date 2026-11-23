@@ -4339,6 +4339,11 @@ show_notes() {
 cmd_note() {
   local id="${1:-}"; shift || true; need_id "$id"; parse "$@"
   [ -n "$BY" ] && [ -n "$NOTE" ] || die "note needs --by and --note"
+  local masker
+  masker=$(python3 -B -c 'import os,sys; print(os.path.join(os.path.dirname(os.path.realpath(sys.argv[1])),"note-mask.mjs"))' "${BASH_SOURCE[0]}") || die 'could not locate note masker'
+  # Keep the note off the child argv; a sentinel protects trailing newlines.
+  NOTE=$(printf '%s' "$NOTE" | node "$masker" 2>/dev/null && printf '.') || die 'could not mask note; nothing written'
+  NOTE=${NOTE%.}
   mkdir -p "$NOTES"
   [ -f "$NOTES/$id.md" ] || printf '# %s\n\n' "$(reg_line "$id" | cut -f5)" >"$NOTES/$id.md"
   printf -- '- %s (%s): %s\n' "$(date '+%Y-%m-%d')" "$BY" "$NOTE" >>"$NOTES/$id.md"
