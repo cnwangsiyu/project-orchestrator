@@ -203,7 +203,7 @@ const CASES = [
   ['unreadHub', ['implement', '--impact', 'service'], 'codex gpt-6.1-sol high @main', 'routing as if it has room'],
   ['unreadHub', ['image-gen'], 'codex gpt-6-luna low @main'],
   // Low-stakes browser work on the Claude path doesn't wait for Codex.
-  ['codexOut', ['browser', '--stakes', 'low'], 'claude sonnet low'],
+  ['codexOut', ['browser', '--stakes', 'low'], 'claude sonnet medium'], // browser operations keep the fixed Claude tuple
   // research needs web search: on TTADK only with its search hub set up, else the earlier routing. image-read works there.
   ['ttFresh', ['research'], 'claude sonnet medium'],
   ['ttSearch', ['research'], 'codex gpt-6.1-sol high @ttadk', 'local proxy'],

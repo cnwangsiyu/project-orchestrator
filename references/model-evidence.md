@@ -548,8 +548,14 @@ the nightly review compares dispatch reasons and recorded wall-clock time, inclu
 - **Browser row.** `browser` (web pages in the user's signed-in Chrome) goes to TTADK Codex, Sol `medium`, when TTADK is
   browser-ready (`browser-setup`); otherwise to TRAE through the Playwright Extension when its user-pasted token file
   exists; then to a browser-ready ChatGPT account (personal quota, needs the user's OK); finally to Claude Sonnet
-  `medium` (personal Claude quota, needs the user's OK). Re-run `route.mjs` whenever an account becomes unavailable
-  instead of choosing a fallback by hand.
+  `medium` for routine forms, clicks and reading status (personal Claude quota, needs the user's OK).
+  `--browser-kind poll` is only for re-reading a page on a timer and reporting status changes; its Claude lane is
+  Haiku `low`. The router never chooses Opus for the `browser` category. Work needing judgment beyond page
+  operations declares a different category. Re-run `route.mjs browser --browser-origins <sites>
+  --exclude-account <failed>` when a worker has no browser tool or an account becomes unavailable; preserve
+  the poll kind when applicable. The router prints the complete Claude launch, including `--bg --remote-control
+  --chrome --model sonnet --effort medium` (Haiku `low` for polling) and the existing Bypass convention.
+  Orchestrators use that printed line and never choose a Claude browser model by hand.
   `--browser-origins` drives the OpenAI per-site approval path on TTADK/ChatGPT; on TRAE the same list is only stated
   to the worker (Playwright cannot express host globs and would block page subrequests), so it is not enforced there and
   the task brief remains authoritative.

@@ -26,7 +26,7 @@ export const PERSONAL = {
   docs:[['sonnet','medium'],[SOL,'medium'],['opus','medium']],
   draft:[['gpt-6.1-terra','medium'],['sonnet','low'],[SOL,'medium']],
   'build-run':[[SOL,'medium'],['sonnet','medium'],['opus','high']],
-  browser:[[SOL,'medium'],['sonnet','medium'],['opus','high']],
+  browser:[[SOL,'medium'],['sonnet','medium']],
   'ui-browser':[[SOL,'high'],['sonnet','high'],['opus','high']],
   'computer-use':[[SOL,'medium']],
   'claude-tools':[['sonnet','medium'],['opus','high']],
@@ -36,7 +36,11 @@ export const PERSONAL = {
   'image-read':[['sonnet','medium'],['gpt-6.1-terra','medium'],['opus','high'],[SOL,'high']],
   'second-opinion':[[SOL,'high'],['opus','high']],
 };
+export const claudeBrowserPolicy = t => t.category === 'browser'
+  ? (t.browserKind === 'poll' ? ['haiku', 'low'] : ['sonnet', 'medium']) : null;
 export function modelPreference(t,a,s = null) {
+  const browser = claudeBrowserPolicy(t);
+  if (a.kind === 'claude' && browser) return [browser[0]];
   if(adversarial(t)) return ['kimi-k3','deepseek-v4.1-flash','opus'];
   if(company(a)) {
     if(t.category==='image-read') return [SOL,ASTRA,...(a.kind==='ttadk'?['gemini-3.1-pro-preview']:[]),'seed-evolving'];
@@ -53,6 +57,8 @@ export function modelPreference(t,a,s = null) {
   return preference;
 }
 export function policyEffort(t,c,a,s) {
+  const browser = claudeBrowserPolicy(t);
+  if (c.family === 'claude' && browser) return browser[1];
   if(['deepseek','kimi','gemini'].includes(c.family)) return 'high';
   if(c.family==='seed') return 'medium';
   if(adversarial(t)) return ['review','review-high'].includes(t.category)?'xhigh':'high';

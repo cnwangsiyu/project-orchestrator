@@ -9,7 +9,7 @@ export const CATEGORIES = Object.freeze(['lookup', 'extract', 'analysis', 'resea
 const BOOLEANS = new Set(['auto-check', 'writes', 'read-only', 'runs-tests', 'signing', 'fresh', 'json', 'verbose', 'table', 'no-redeem', 'dry',
   'urgent', 'security', 'adversarial', 'defensive', 'background', 'device-lease', 'shared-lock', 'no-local-build', 'worker', 'installed', 'no-browser-preflight', 'no-auto-continue']);
 const VALUES = new Set(['stakes', 'failures', 'against', 'author', 'impact', 'env', 'exclude-account', 'exclude-model', 'origins', 'mode',
-  'sandbox', 'cwd', 'task-dir', 'task', 'name', 'project', 'apps', 'browser-origins', 'computer-use-apps', 'user-ok', 'auto-reroute-depth', 'previous-attempt', 'execution', 'actual',
+  'sandbox', 'cwd', 'task-dir', 'task', 'name', 'project', 'apps', 'browser-origins', 'browser-kind', 'computer-use-apps', 'user-ok', 'auto-reroute-depth', 'previous-attempt', 'execution', 'actual',
   'owner', 'failure-kind', 'trusted-cwd', 'exclude-lane', 'review-override', 'review-required', 'profile-override', 'artifact-ref', 'network', 'review-class', 'review-reason', 'review-scope', 'needs-cli']);
 const CODE = new Set(['implement', 'implement-hard', 'debug', 'science']);
 export class TaskInputError extends Error {
@@ -84,6 +84,9 @@ export function createTaskSpec(input) {
     return Number(raw);
   };
   const failureKind = enumValue('failure-kind', 'quality', ['tool', 'quality', 'infra']);
+  if (f['browser-kind'] && cat !== 'browser') fail('BROWSER_KIND_CATEGORY', '--browser-kind is for the browser category.');
+  const browserKind = cat === 'browser' ? (f['browser-kind'] ?? input.browserKind ?? 'page') : null;
+  if (browserKind !== null && !['page', 'poll'].includes(browserKind)) fail('INVALID_BROWSER_KIND', '--browser-kind takes page or poll.');
   const stakes = enumValue('stakes', 'normal', ['low', 'normal', 'high']);
   let impact = enumValue('impact', null, [null, 'release', 'service', 'throwaway']);
   const project=f.project??input.project??'UNKNOWN', profile=projectReviewPolicy(project,input.projectProfiles??{});
@@ -158,6 +161,7 @@ export function createTaskSpec(input) {
   if ([...labels].some((x) => !['ordinary', 'security', 'attack-material', 'adversarial', 'defensive-confirmation', 'policy-blocked'].includes(x))) fail('INVALID_CONTENT', 'Unknown content label.');
   if (labels.size > 1) labels.delete('ordinary');
   const writes = f['read-only'] ? false : (f.writes ?? input.writes ?? ['implement', 'implement-hard', 'debug', 'science', 'docs', 'draft', 'ui-browser', 'build-run', 'computer-use', 'claude-tools', 'image-gen'].includes(cat));
+  if (browserKind === 'poll' && writes) fail('BROWSER_POLL_READ_ONLY', '--browser-kind poll only re-reads pages and reports status; use page for page changes.');
   const background = f.background ?? input.background ?? false;
   const qualityFailures = failureKind === 'quality' && !infraRetry ? failures : failedActualIds.size;
   const tier = ['implement-hard', 'debug', 'science', 'review-high', 'design'].includes(cat) || stakes === 'high' || (CODE.has(cat) && qualityFailures > 0) ? 'hard'
@@ -180,6 +184,7 @@ export function createTaskSpec(input) {
   if (!idOK(taskId) || !idOK(requestId)) fail('TASK_ID_REQUIRED', 'Inject stable taskId and requestId before planning.');
   const task = { schemaVersion: VERSION, taskId, requestId, project: f.project ?? input.project ?? 'UNKNOWN', owner: f.owner ?? input.owner ?? 'UNKNOWN', category: cat,
     role: input.role ?? 'primary', parentTaskId: input.parentTaskId ?? null, briefHash: input.briefHash ?? 'UNKNOWN', flags: f,
+    ...(browserKind && (f['browser-kind'] !== undefined || input.browserKind !== undefined) ? { browserKind } : {}),
     reviewClass,reviewReason,reviewScope:f['review-scope']??input.reviewScope??null,policyNotes:unique([...array(input.policyNotes),...policyNotes]), tier, stakes, impact, env, execution, writes, runsTests: f['runs-tests'] ?? input.runsTests ?? false, background,
     contentLabels: unique([...labels]), capabilitiesNeeded: unique([...caps]), exclusions: unique(exclusions.map(stable)).map(JSON.parse),
     failures, failureKind, qualityFailures, infraRetry, environmentFailures, transportFailures: transportFailures.length ? transportFailures : clone(array(input.transportFailures)),
@@ -205,6 +210,7 @@ export function createTaskSpec(input) {
 export function deriveReview(task, { role = 'second', authorAttemptId = null, artifactRevision = task.artifactRevision } = {}) {
   const flags = { ...task.flags, 'read-only': true };
   for (const k of ['writes', 'signing', 'runs-tests', 'author', 'against', 'apps', 'origins', 'failures', 'previous-attempt', 'actual', 'auto-reroute-depth', 'failure-kind', 'no-browser-preflight']) delete flags[k];
+  for (const scope of ['browser-kind', 'browser-origins', 'computer-use-apps']) delete flags[scope];
   return createTaskSpec({ ...task, category: task.category==='review-high'||['A','D'].includes(task.reviewClass)?'review-high':'review', flags, role, writes: false, runsTests: false,
     previousAttempts: [], failures: 0, autoRerouteDepth: 0, floor: { profileIds: [], previousAttemptIds: [], relationVersion: task.floor.relationVersion, historyStatus: 'KNOWN' },
     authorAttemptId, againstAttemptId: null, artifactRevision, selectionCause: 'initial', qualityEscalation: null });

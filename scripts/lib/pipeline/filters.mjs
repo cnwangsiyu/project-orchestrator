@@ -1,7 +1,7 @@
 import {mandatoryReview} from '../review-policy-data.mjs';
 import { policyModel, matchesModel, isAstra, newestRelease, VERSION, EFFORTS, array, company, companyDevice, known, modelId, familyOf, isReview, adversarial, result, reason, fingerprint, stable } from './common.mjs';
 import { candidateParts, enumerateCandidates } from './candidates.mjs';
-import { modelPreference, policyEffort } from './policy.mjs';
+import { modelPreference, policyEffort, claudeBrowserPolicy } from './policy.mjs';
 import { estimateCandidate } from './estimate.mjs';
 import { standingPersonalFallback, hardPersonalXhighFallback } from './personal-fallback.mjs';
 import { standingPersonalPriority, personalPriorityGuard, exclusiveCodexTask } from './personal-priority.mjs';
@@ -96,6 +96,14 @@ export function pCapabilities(t, s, c) {
 export function pTierFloor(t, s, c) {
   const account = candidateParts(s,c).account;
   const rung = policyModel(c.modelId);
+  const browser = claudeBrowserPolicy(t);
+  if (c.family === 'claude' && browser) {
+    // Page operations have a fixed qualified tuple; general effort/tier or
+    // budget preferences cannot turn browser work into an Opus launch.
+    if (rung !== browser[0] || c.effort !== browser[1])
+      return deny('pTierFloor', 'CLAUDE_BROWSER_TUPLE', `Claude browser ${t.browserKind ?? 'page'} requires ${browser[0]} ${browser[1]}; use another category for broader judgment.`, c);
+    if (account.kind === 'claude') return pass('pTierFloor');
+  }
   if (['astra', 'sol'].includes(rung) && c.modelId !== newestRelease(known(account?.catalog) ?? [], rung))
     return deny('pTierFloor', 'MODEL_SUPERSEDED', 'A newer release is listed for this account.', c);
   const explicitEscalation = t.selectionCause === 'quality-escalation' && matchesModel(t.qualityEscalation?.modelId, c.modelId)

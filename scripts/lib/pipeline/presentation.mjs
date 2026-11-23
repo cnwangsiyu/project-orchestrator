@@ -146,7 +146,7 @@ export function presentRoute(plan, view, context) {
       astraApprovalRef: executable ? s.personalFallback?.astraApprovalRef ?? null : null};
     if (executable && s.personalFallback) out.personalFallback = s.personalFallback;
     if(!executable) return out;
-    const prompt=`${primary?'':`Act as the independent ${s.role} reviewer of artifact ${task.artifactRevision}. `}Read ${paths.brief} and follow it.`;
+    const prompt=`${primary?'':`Act as the independent ${s.role} reviewer of artifact ${task.artifactRevision}. `}Read ${paths.brief} and follow it.${task.browserKind === 'poll' ? ' Browser kind: poll. Only re-read the page and report status changes.' : ''}`;
     const routed={name,project:task.project,category:task.category,tier:task.tier,role:s.role,account:an,model:c.modelId,effort:c.effort,sandbox:task.sandbox,
       company:company(a),routeId:plan.routeId,approvalRef:out.approvalRef};
     const audit=command(['node',`${root}/scripts/launch-audit.mjs`,'--name',name,'--project',task.project,'--role',s.role,'--vendor',vendor,'--account',an,'--model',c.modelId,
@@ -157,10 +157,10 @@ export function presentRoute(plan, view, context) {
       const browserScope = ['browser', 'ui-browser'].includes(task.category);
       const claudePrompt = `Working directory: ${cwd}. ${browserScope ? `Allowed browser origins (--browser-origins): ${task.allowedOrigins.join(',')}. ` : ''}${prompt}`;
       const metadata = JSON.stringify({ name, model: c.modelId, effort: c.effort, project: task.project, owner,
-        ...(browserScope ? { browserOrigins: task.allowedOrigins, routeArgs } : {}) });
+        ...(browserScope ? { browserOrigins: task.allowedOrigins, browserKind: task.browserKind, routeArgs } : {}) });
       if (browserScope) out.routeArgs = routeArgs;
       out.command=`${audit} && cd ${shellQuote(trustedCwd)} && ${command(['node',`${root}/scripts/launch-claude-worker.mjs`,metadata,
-        'claude','--bg','--remote-control','--permission-mode','bypassPermissions','-n',name,'--model',c.modelId,'--effort',c.effort,claudePrompt])}`;
+        'claude','--bg','--remote-control',...(browserScope ? ['--chrome'] : []),'--permission-mode','bypassPermissions','-n',name,'--model',c.modelId,'--effort',c.effort,claudePrompt])}`;
       return out;
     }
     const args=['--account',an,'start','--cwd',cwd,'--model',launchModel,'--effort',c.effort,'--sandbox',task.sandbox,'--name',name,

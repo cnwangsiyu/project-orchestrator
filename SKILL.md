@@ -316,6 +316,9 @@ Claude Chrome IDs belong only to Claude and are candidates, never proof of the m
 actions, prove Claude's target machine with the brief loopback URL/expected token from
 `browser-identity.mjs serve --once`, trying connected ids in new verification tabs; no match is BLOCKED.
 After proof stay on that browser. Names, `isLocal` and a sole listed browser are insufficient.
+After a browser-tool failure, re-run `route.mjs browser` with the failed account excluded;
+use the printed Claude launch instead of choosing its model by hand. The browser row in
+[model evidence](references/model-evidence.md) defines ordinary page and polling lanes.
 TRAE origins are brief-scoped, not enforced technically.
 Irreversible actions need confirmation; saved site denials need a new authorized thread. Missing
 tool/vision/browser/login is BLOCKED with exact error, never own clicking or login workaround.

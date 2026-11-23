@@ -35,6 +35,10 @@ target machine and gives the URL/expected token to the worker. It proves the mac
 before task actions, trying current connected ids; no exact token match is BLOCKED. Names,
 `isLocal`, remembered ids alone and a sole listed browser are insufficient. Stay on the browser
 after proof. See [browser evidence](model-evidence.md) for the complete verification procedure.
+If a browser worker has no browser tool, re-run `route.mjs browser --browser-origins <sites>
+--exclude-account <failed>` with the saved task facts and optional `--browser-kind poll`.
+Use the full printed Claude command, including `--chrome`, model, effort and Bypass mode;
+never select a Claude browser model by hand. The [browser row](model-evidence.md) defines the lane policy.
 
 Claude commands use the trusted project root (`--trusted-cwd`, otherwise configured root), explicitly
 name the working directory in the prompt, and include `--bg --remote-control --permission-mode
