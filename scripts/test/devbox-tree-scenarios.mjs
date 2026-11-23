@@ -178,12 +178,13 @@ try {
   assert.ok(fs.existsSync(mappedTree.workspace));
   assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'wt-map.json'))).slots['devbox-cn-20']['fixture/id-fixture'].treeRoot, root);
 
-  // Preserve unrelated land-7 scripts; pin intentional supervisor/cleanup and
-  // donor-completeness changes separately, normalizing dynamic lease syntax.
+  // Preserve unrelated land-7 scripts; pin intentional supervisor/cleanup,
+  // donor-completeness and additive input diagnostics separately.
   const legacyWire = value => value.replaceAll('|[A-Za-z0-9][A-Za-z0-9_.-]*-[1-9][0-9]*', '');
   const hash = value => createHash('sha256').update(legacyWire(value)).digest('hex');
-  const nonRun = Object.fromEntries(Object.entries(remoteScripts).filter(([operation]) => !['run', 'submodule', 'checkout', 'cleanup', 'reconnect'].includes(operation)));
+  const nonRun = Object.fromEntries(Object.entries(remoteScripts).filter(([operation]) => !['run', 'submodule', 'checkout', 'cleanup', 'reconnect', 'input-exists'].includes(operation)));
   assert.equal(hash(JSON.stringify(nonRun)), '7326580d1b9581f3bb5c800ff55758adf12caefe6eb48a4841968ff81cd03655', 'unrelated remote scripts retain land-7 bytes except dynamic lease syntax');
+  assert.equal(hash(remoteScripts['input-exists']), 'c7833da1018f3e20a66668d29ee5566123efc51e3fec9a3419a1fc8951bdfccf', 'input creation diagnostic uses validated paths and stat-only existence checks');
   assert.equal(hash(remoteScripts.checkout), '162239ccf56fc01ed8ccb1239f1821525146932fa4f2744e800779c2aba9130e', 'checkout snapshot includes pinned donor completeness check');
   assert.equal(hash(remoteScripts.submodule), 'c6143ab3755aeb71b0f56d09d3e465d2e291b9f55491809330c53941b3c3d6a0', 'submodule snapshot includes pinned donor completeness and offline legacy-clone pin import');
   assert.equal(hash(remoteScripts.run), 'b5315491f55620e5388bb32f5d2cc1d734c90c45488f6b996558e0c4819d20ef', 'run wire snapshot includes short owned TMPDIR creation and cleanup');

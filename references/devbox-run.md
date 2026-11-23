@@ -202,8 +202,19 @@ directories and cleanup before the main command.
 
 The main command receives `DEVBOX_INPUTS_DIR=ROOT/inputs` and
 `DEVBOX_INPUTS_FILE=CONTROL/inputs.json`, a JSON map from input names to paths.
-It must build any missing rebuildable input that has no seed or is too expensive
-to seed automatically. Ordinary runs seed inputs costing at most 300 seconds;
+It must build any missing rebuildable input that has no seed or whose seed
+command is too expensive to run automatically. Validated local file/directory
+seeds always transfer, regardless of the declared rebuild cost. The normal-run
+300-second seed limit applies only to host-side seed commands, using their
+observed cost when available or their declared cost otherwise. A skipped command
+prints its cost, limit and mapped path before the main command, with a reminder
+to use `--prewarm`. Every missing, unseeded input gets an explicit notice naming
+the input and the path the main command must create. After the command and
+confirmed cleanup, a stat-only check reports `input NAME was never created at
+PATH` for any such path still absent, without changing the command's exit code.
+These notices are also recorded in `attempts[].unseededInputs` and
+`attempts[].uncreatedInputs` in `summary.json`; an unavailable existence check
+is recorded as `attempts[].inputExistenceError`, not as a missing path.
 `prewarm` seeds all declared sources on otherwise idle eligible hosts:
 
 ```sh
@@ -273,7 +284,7 @@ capabilities and the normal disk/load/memory gates; SG itself remains probes-onl
 | `DEVBOX_REBUILD_PLACEMENT` | `1` | `0` disables cost-aware placement; non-rebuildable manifests then fail closed |
 | `DEVBOX_INPUT_TTL_SECONDS` | `300` | Read-only input verification TTL, 1–86400 seconds |
 | `DEVBOX_INPUT_WAIT_CAP_SECONDS` | `2700` | Maximum holder wait estimate, 1–86400 seconds |
-| `DEVBOX_INPUT_SEED_MAX_SECONDS` | `300` | Normal-run seed cost limit, 1–86400 seconds |
+| `DEVBOX_INPUT_SEED_MAX_SECONDS` | `300` | Normal-run host-side seed command cost limit (observed/declared), 1–86400 seconds; local file/directory transfers are not limited; `prewarm` overrides it |
 
 Publish configuration via a sibling temporary file and rename. The kill switch
 retains normal placement, disk reservation and slot hygiene; rebuildable inputs

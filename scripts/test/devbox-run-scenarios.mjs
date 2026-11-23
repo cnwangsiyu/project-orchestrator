@@ -154,6 +154,7 @@ if(c.authFailures){
  if(count<c.authFailures){fs.writeFileSync(file,String(count+1));console.error(c.authMessage||'Permission denied (gssapi-with-mic)');process.exit(255);}
 }
 if(op==='dead-slot'){console.log(JSON.stringify({clean:!c.remoteRunning,count:c.remoteRunning?1:0,worktrees:1}));return;}
+if(op==='input-exists'&&c.inputExistenceFailure){console.error('fixture input existence check unavailable');process.exit(70);}
 if(op==='cleanup-pending'){
  if(c.pendingUnknown)process.exit(255);
  const running=c.remoteRunning&&!fs.existsSync(path.join(d.control,'fixture-cleaned'));
@@ -1155,6 +1156,94 @@ async function inputScenarios() {
   const badCommand=await run(seedCommand,['--input',`name=asset,hash=${actual.hash},rebuildable=yes,cost=1s,size=0.01,seed=cmd:printf wrong > "$DEVBOX_INPUT_PATH"`]);
   assert.notEqual(badCommand.code,0);assert.match(badCommand.stdout,/seed hash\/size mismatch/);returned(seedCommand);
   console.log('PASS input seed/hash/gate, verified index reuse, hard pin, stale verification and supervised hash mismatch');
+  await seedPolicyScenarios();
+}
+
+async function seedPolicyScenarios() {
+  const res=fileURLToPath(new URL('../res/res',import.meta.url));
+  const make=options=>{const f=fixture(options);f.env.RES_COMMAND=res;return f;};
+  const readAsset=`node -e 'const fs=require("fs");const paths=JSON.parse(fs.readFileSync(process.env.DEVBOX_INPUTS_FILE));if(fs.readFileSync(paths.asset,"utf8")!=="first\\n")process.exit(9)'`;
+  for (const kind of ['file','directory']) {
+    const f=make(), seed=path.join(f.dir,kind==='file'?'asset.aar':'assets');
+    if(kind==='directory'){fs.mkdirSync(seed);fs.writeFileSync(path.join(seed,'item.txt'),'first\n');}
+    else fs.writeFileSync(seed,'first\n');
+    const actual=await fingerprint(seed);
+    const command=kind==='file'?readAsset:readAsset.replace('paths.asset,"utf8"','require("path").join(paths.asset,"item.txt"),"utf8"');
+    const result=await run(f,['--input',`name=asset,hash=${actual.hash},rebuildable=yes,cost=1211s,size=0.01,seed=${seed}`],command);ok(result);returned(f);
+    const attempt=result.summary.shards[0].attempts[0];
+    assert.equal(attempt.seeds.length,1,`${kind} seed transfers despite rebuild cost above the seed command limit`);
+    assert.deepEqual(attempt.unseededInputs,[]);assert.doesNotMatch(result.stdout,/seed command skipped|was never created/);
+    assert.equal(f.events().filter(event=>event.op==='input-exists').length,0,'seeded inputs need no absence check');
+  }
+  const commandSeed=`seed=cmd:printf 'first\\n' > "$DEVBOX_INPUT_PATH"`;
+  const skipped=make(), actual=await fingerprint(path.join(skipped.repo,'source.txt'));
+  const failed=await run(skipped,['--input',`name=asset,hash=${actual.hash},rebuildable=yes,cost=1211s,size=0.01,${commandSeed}`,
+    '--input','name=other,hash=none,rebuildable=yes,cost=0s,size=0'],'echo MAIN-COMMAND; exit 7');
+  assert.equal(failed.code,7);returned(skipped);
+  const failedAttempt=failed.summary.shards[0].attempts[0];
+  assert.equal(failedAttempt.commandExit,7);assert.equal(failedAttempt.seeds.length,0);
+  assert.equal(failedAttempt.unseededInputs.length,2);assert.equal(failedAttempt.uncreatedInputs.length,2);
+  for (const input of failedAttempt.unseededInputs) {
+    const notice=input.name==='asset'
+      ? `input asset: seed command skipped (cost 1211s > limit 300s); the remote command must create ${input.path}; use --prewarm to seed first`
+      : `input other: no seed; the remote command must create ${input.path}`;
+    assert.equal(input.message,notice);assert.equal(failedAttempt.inputPaths[input.name],input.path);
+    assert.ok(failed.stdout.includes(notice));assert.ok(failed.stdout.indexOf(notice)<failed.stdout.indexOf('MAIN-COMMAND'));
+    const missing=failedAttempt.uncreatedInputs.find(record=>record.name===input.name);
+    assert.equal(missing.message,`input ${input.name} was never created at ${input.path}`);
+    assert.ok(failed.stdout.includes(missing.message));assert.ok(failed.stdout.indexOf(missing.message)>failed.stdout.indexOf('MAIN-COMMAND'));
+    assert.ok(fs.readFileSync(failed.summary.shards[0].log,'utf8').includes(missing.message));
+    assert.equal(failedAttempt.phaseTimings.inputs[input.name].rebuildInRemoteCommand,true);
+  }
+  assert.equal(skipped.events().filter(event=>event.op==='run').length,1,'over-limit command seed never runs');
+  assert.equal(skipped.events().filter(event=>event.op==='input-exists').length,1,'missing inputs share one stat-only check');
+
+  const empty=make();
+  const emptyResult=await run(empty,['--input',`name=asset,hash=${actual.hash},rebuildable=yes,cost=1211s,size=0.01,seed=cmd:`],'echo MAIN-COMMAND');ok(emptyResult);returned(empty);
+  assert.match(emptyResult.stdout,/seed command skipped \(cost 1211s > limit 300s\)/,'an empty command is still a command seed');
+  assert.equal(empty.events().filter(event=>event.op==='run').length,1);
+
+  const absent=make();
+  const absentResult=await run(absent,['--input',`name=asset,hash=${actual.hash},rebuildable=yes,cost=1s,size=0.01`],'echo MAIN-COMMAND');ok(absentResult);returned(absent);
+  const absentAttempt=absentResult.summary.shards[0].attempts[0];
+  assert.equal(absentAttempt.uncreatedInputs.length,1,'absence after a successful command is diagnostic, not an exit override');
+  assert.ok(absentResult.stdout.includes(absentAttempt.unseededInputs[0].message));
+  assert.ok(absentResult.stdout.includes(absentAttempt.uncreatedInputs[0].message));
+
+  for (const [content,exit] of [['first\n',0],['wrong\n',7]]) {
+    const f=make();
+    const command=`node -e 'const fs=require("fs");const paths=JSON.parse(fs.readFileSync(process.env.DEVBOX_INPUTS_FILE));fs.mkdirSync(require("path").dirname(paths.asset),{recursive:true});fs.writeFileSync(paths.asset,${JSON.stringify(content)});console.log("MAIN-COMMAND");process.exit(${exit})'`;
+    const result=await run(f,['--input',`name=asset,hash=${actual.hash},rebuildable=yes,cost=1s,size=0.01`],command);assert.equal(result.code,exit);returned(f);
+    const attempt=result.summary.shards[0].attempts[0];
+    assert.equal(attempt.unseededInputs.length,1);assert.deepEqual(attempt.uncreatedInputs,[]);
+    assert.doesNotMatch(result.stdout,/was never created/,'existence must not be inferred from hash validity');
+    if(!exit)assert.ok(JSON.parse(fs.readFileSync(indexFile(f.shared,result.summary.shards[0].host))).inputs['asset+'+actual.hash]);
+  }
+
+  const observed=make(), command='echo MAIN-COMMAND';
+  ok(await run(observed,['--input',`name=asset,hash=${actual.hash},rebuildable=yes,cost=1s,size=0.01`],command));returned(observed);
+  const dir=path.join(observed.shared,'timings'), file=path.join(dir,fs.readdirSync(dir)[0]);
+  const setSamples=samples=>{const history=JSON.parse(fs.readFileSync(file));for(const entry of Object.values(history.commands))entry.placement.inputs['asset+'+actual.hash]=samples;fs.writeFileSync(file,JSON.stringify(history));};
+  setSamples([1210,1211,1212]);
+  const expensive=await run(observed,['--input',`name=asset,hash=${actual.hash},rebuildable=yes,cost=1s,size=0.01,${commandSeed}`],command);ok(expensive);returned(observed);
+  assert.match(expensive.stdout,/seed command skipped \(cost 1211s > limit 300s\)/,'observed command cost overrides a small declaration');
+  setSamples([1,2,3]);
+  const cheap=await run(observed,['--input',`name=asset,hash=${actual.hash},rebuildable=yes,cost=1211s,size=0.01,${commandSeed}`],command);ok(cheap);returned(observed);
+  assert.equal(cheap.summary.shards[0].attempts[0].seeds.length,1,'observed cheap command runs despite a high declaration');
+
+  const prewarm=make();
+  const warmed=await run(prewarm,['prewarm','--host','192.0.2.1','--input',`name=asset,hash=${actual.hash},rebuildable=yes,cost=1211s,size=0.01,${commandSeed}`],readAsset);ok(warmed);returned(prewarm);
+  assert.equal(warmed.summary.shards[0].attempts[0].seeds.length,1,'prewarm overrides the command cost limit');
+  assert.doesNotMatch(warmed.stdout,/seed command skipped|was never created/);
+
+  for (const exit of [0,7]) {
+    const f=make({inputExistenceFailure:true});
+    const result=await run(f,['--input',`name=asset,hash=${actual.hash},rebuildable=yes,cost=1s,size=0.01`],`exit ${exit}`);assert.equal(result.code,exit);returned(f);
+    const attempt=result.summary.shards[0].attempts[0];
+    assert.ok(attempt.inputExistenceError);assert.equal(attempt.uncreatedInputs,undefined);
+    assert.doesNotMatch(result.stdout,/was never created/,'an unavailable existence check must not invent absence');
+  }
+  console.log('PASS local file/directory seeds above limit, declared/observed command limits, per-input notices, failed/successful command absence receipts, existence-only checks and prewarm override');
 }
 async function hygieneScenarios() {
   const f=fixture(); const mods=makeSubmoduleFixture(path.join(f.dir,'modules'));

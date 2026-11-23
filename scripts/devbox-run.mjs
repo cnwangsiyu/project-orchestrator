@@ -757,6 +757,7 @@ export const remoteScripts = {
   'input-map': pythonHeader + inputMapPython,
   'inputs-ready': pythonHeader + inputPython.replace('print(json.dumps(records))', '') + inputMapPython + `print(json.dumps({'records':records,'free':disk.f_bavail*disk.f_frsize,'map':str(file)}))\n`,
   inputs: pythonHeader + inputPython,
+  'input-exists': pythonHeader + inputPython.slice(0, inputPython.indexOf('records=[]')) + `print(json.dumps([{'name':item['name'],'path':item['path'],'exists':safe(item['path']).exists()} for item in d['inputs']]))\n`,
   seed: pythonHeader + seedPython,
   metrics: pythonHeader + `load5=float(pathlib.Path('/proc/loadavg').read_text().split()[1])
 mem=next(int(line.split()[1])/1048576 for line in pathlib.Path('/proc/meminfo').read_text().splitlines() if line.startswith('MemAvailable:'))
@@ -2098,6 +2099,7 @@ async function seedInputs(row,data,opts,attempt,state,emit,remaining,recordRun) 
   const prepare={data,inputs:opts.inputs};
   const index=await verifyInputs(row,[...opts.inputs,...(opts.placementInputs || []).filter(input=>input.warm)],opts,state,{force:true,timeout:remaining(),prepare});
   attempt.seeds=[];
+  attempt.unseededInputs=[];
   attempt.missingInputs=[...(attempt.missingInputs || []).filter(name=>name.startsWith('warm.')),...opts.inputs.filter(input=>!index.inputs[inputKey(input)]).map(input=>input.name)];
   const missingGiB=opts.inputs.filter(input=>!index.inputs[inputKey(input)]).reduce((sum,input)=>sum+input.sizeGiB,0);
   const disk=prepare.result;
@@ -2105,8 +2107,16 @@ async function seedInputs(row,data,opts,attempt,state,emit,remaining,recordRun) 
   for (const input of opts.inputs) {
     if (index.inputs[inputKey(input)]) continue;
     if (!input.rebuildable) throw Error(`missing non-rebuildable input ${input.name} after acquisition`);
-    if (!input.seed || observedCost(input,readTimings(opts.snapshot.storeKey).commands?.[opts.commandKey]?.placement)>settings.seedMaxSec && !opts.prewarm) { state.currentAttemptTiming?.missingRebuild(input.name); continue; }
     const target=inputPath(data.root,input);
+    const seedCost=input.seedCommand !== undefined ? observedCost(input,readTimings(opts.snapshot.storeKey).commands?.[opts.commandKey]?.placement) : 0;
+    if (!input.seed || input.seedCommand !== undefined && seedCost>settings.seedMaxSec && !opts.prewarm) {
+      const message=input.seed
+        ? `input ${input.name}: seed command skipped (cost ${seedCost}s > limit ${settings.seedMaxSec}s); the remote command must create ${target}; use --prewarm to seed first`
+        : `input ${input.name}: no seed; the remote command must create ${target}`;
+      attempt.unseededInputs.push({name:input.name,path:target,message});
+      emit(`[shard ${opts.shard}] ${message}\n`);
+      state.currentAttemptTiming?.missingRebuild(input.name); continue;
+    }
     if (input.path) throw Error('seed destinations must use the runner input store');
     const started=performance.now();
     try {
@@ -2135,6 +2145,22 @@ async function seedInputs(row,data,opts,attempt,state,emit,remaining,recordRun) 
   const inputMap=path.join(data.control,'inputs.json');
   if (attempt.seeds.length) checked(await ssh(row,'input-map',{...data,paths},{state,timeout:remaining()}),'post-seed input path map and disk check');
   attempt.inputPaths=paths; return inputMap;
+}
+
+async function reportUncreatedInputs(row,data,opts,attempt,state,emit) {
+  try {
+    const inputs=attempt.unseededInputs.map(({name,path})=>({name,path}));
+    // Check existence, not hash validity: a created but invalid input is not an absent one.
+    const records=JSON.parse(checked(await ssh(row,'input-exists',{root:data.root,inputs},{state,cancellable:false,timeout:30000}),'input existence check'));
+    attempt.uncreatedInputs=records.filter(record=>!record.exists).map(({name,path})=>{
+      const message=`input ${name} was never created at ${path}`;
+      emit(`[shard ${opts.shard}] ${message}\n`);
+      return {name,path,message};
+    });
+  } catch (error) {
+    attempt.inputExistenceError=error.message;
+    emit(`[shard ${opts.shard}] input existence check: ${error.message}\n`);
+  }
 }
 
 function timingFile(repoId) { return path.join(cacheDir(), 'timings', `${repoId}.json`); }
@@ -2757,6 +2783,10 @@ async function shard(opts) {
             }
             const message = attempt.remoteJobStillRunning ? 'remote job still running' : 'remote cleanup unconfirmed';
             emit(`[shard ${opts.shard}] BLOCKED: ${message}; retaining ${attempt.slot}${attempt.stopCommand ? `; to stop: ${attempt.stopCommand}` : ''}\n`);
+          }
+          if (clean && launched && attempt.unseededInputs?.length) {
+            phases.phase('inputPreparation');
+            await reportUncreatedInputs(row,data,opts,attempt,state,emit);
           }
           if (clean && launched && !attempt.exit) {
             phases.phase('inputPreparation');
