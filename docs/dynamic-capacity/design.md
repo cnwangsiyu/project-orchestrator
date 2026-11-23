@@ -125,8 +125,11 @@ live counters. The main mini remains under memory-panic observation until
 
 Local and mini2 share headroom arithmetic, bounded-bypass predicates and fresh
 attributed reservation credit. Local usage comes only from the bound workload
-generation and post-claim descendants, with generation checks around footprint
-sampling, and is capped by the outstanding batch's measured host delta.
+generation and post-claim descendants. A Mach-clock fence before the ancestry
+snapshot ties every descendant PID to its kernel start time; births after that
+fence are unproven and receive no credit. Generation checks around footprint
+sampling and a final ancestry check reject changed or unprovable intermediate
+processes and their subtrees. Credit is capped by the outstanding batch's measured host delta.
 For each living claim, credit is `min(measured attributed use, declared weight,
 remaining shared visibility budget)` and the rest of its declared weight stays
 reserved until return or verified reclamation. Credit is not a declaration that
@@ -150,6 +153,9 @@ either order while the compatible controller resolves draining IDs. A changed
 target row or changed owning config causes refusal rather than overwriting an
 owner's later change. The pinned VAK JSON shapes also cover local slot objects,
 registry rows and host capacity maps.
+Backup files, including the exact `0`/`1` presence marker, are published by
+fsynced temporary-file renames. Rollback validates the entire backup set before
+restoring anything; missing, invalid or inconsistent metadata refuses changes.
 Rollback validates each owning file independently as exactly migrated or
 exactly original before writing anything. Retrying any interrupted rollback
 finishes the remaining file, including removal of a newly created machine.conf;
@@ -163,6 +169,9 @@ It also refuses old live waiters, legacy allocator processes and the local
 legacy transaction lock, naming their PIDs and requesting stop/restart on the
 installed controller. The local and mini2 guards are separate. A new entrant
 cannot select legacy mode on one side of a migration and admit on the other.
+Interpreter flags, absolute interpreter/script paths and env wrappers do not
+hide named waiters; allocator-shaped commands that cannot be classified close
+migration rather than being ignored.
 Normal build/host transaction guards remain in place; switch guards are not
 capacity leases and do not serialize concurrent claims against each other.
 

@@ -64,9 +64,14 @@ class DynamicFixTests(unittest.TestCase):
         file=self.root/"locks"/(id+".d")/"lease.json"
         return file,mini.read(file)
 
-    def run_migration(self,kind,root=None,action="--apply",module=None):
+    def run_migration(self,kind,root=None,action="--apply",module=None,process_table=""):
         module=module or migration(kind); root=root or self.root
-        with patch.object(sys,"argv",[str(SOURCE/(kind+"-host-migrate.py")),"--registry",str(root/"resources.tsv"),action]),contextlib.redirect_stdout(io.StringIO()):
+        check_output=mini.subprocess.check_output
+        def processes(command,*args,**kwargs):
+            if command==["/bin/ps","-axww","-o","pid=,args="]: return process_table
+            return check_output(command,*args,**kwargs)
+        table=patch.object(mini.subprocess,"check_output",side_effect=processes) if process_table is not None else contextlib.nullcontext()
+        with table,patch.object(sys,"argv",[str(SOURCE/(kind+"-host-migrate.py")),"--registry",str(root/"resources.tsv"),*([action] if action else [])]),contextlib.redirect_stdout(io.StringIO()):
             module.main()
 
     def test_unbound_memory_credit_cannot_break_the_reserve_floor(self):
@@ -86,7 +91,7 @@ class DynamicFixTests(unittest.TestCase):
                    start=1,creditAfter=50,workload=dict(pid=102,birth=60))
         rows="100 1 0 0\n101 100 0 100\n102 100 0 100\n103 102 0 100\n104 102 0 100\n105 100 0 100\n"
         births={100:1,101:20,102:60,103:70,104:30,105:80}
-        with patch.object(local,"claims",return_value=[(None,lease)]),patch.object(local.subprocess,"check_output",return_value=rows),patch.object(local,"process_start",return_value="holder"),patch.object(local,"process_birth",side_effect=births.get,create=True),patch.object(local,"physical_footprint",return_value=4*2**30) as footprint:
+        with patch.object(local,"claims",return_value=[(None,lease)]),patch.object(local,"process_clock",return_value=100),patch.object(local.subprocess,"check_output",return_value=rows),patch.object(local,"process_start",return_value="holder"),patch.object(local,"process_birth",side_effect=births.get,create=True),patch.object(local,"physical_footprint",return_value=4*2**30) as footprint:
             value=local.usage(self.root,dict(at=100))["run"]
             self.assertEqual(value["memoryGiB"],8,"exclude holder, old descendants, reparented old children and unrelated new siblings")
             self.assertEqual({call.args[0] for call in footprint.call_args_list},{102,103})
@@ -109,6 +114,159 @@ class DynamicFixTests(unittest.TestCase):
         result=self.cli("take-build",*self.args("third"),"--wrapper")
         self.assertNotEqual(result.returncode,0)
         self.assertIn("memory",result.stderr)
+
+    def test_descendant_reuse_with_shared_parent_keeps_the_reserve_floor(self):
+        self.activate("local")
+        leases=[]
+        for name,pid in (("first",102),("second",105)):
+            file,lease=self.claim(name)
+            lease.update(dispatch="bound",creditAfter=50,workload=dict(pid=pid,birth=60))
+            mini.atomic(file,lease); leases.append(lease)
+        rows=f"{os.getpid()} 1 0 0\n102 {os.getpid()} 0 0\n103 102 0 0\n105 {os.getpid()} 0 0\n"
+        births={102:60,103:70,105:60}
+        def snapshot(*args,**kwargs):
+            births[103]=110  # The snapshotted child exits; an unrelated process reuses its PID.
+            return rows
+        sample={**self.sample,"at":time.time(),"availableGiB":24}
+        with patch.object(local,"process_clock",return_value=100),patch.object(local.subprocess,"check_output",side_effect=snapshot),patch.object(local,"process_birth",side_effect=births.get),patch.object(local,"physical_footprint",side_effect=lambda pid:8*2**30 if pid==103 else 0) as footprint:
+            sample["leaseUsage"]=local.usage(self.root,sample)
+        self.assertNotIn(103,{call.args[0] for call in footprint.call_args_list})
+        mini.atomic(self.root/"sample.json",sample)
+        capacity=json.loads(self.cli("pool-capacity","local").stdout)[os.uname().nodename]
+        self.assertEqual(capacity["reserved"][1],16)
+        self.assertGreaterEqual(24-capacity["reserved"][1],capacity["memoryFloorGiB"])
+        result=self.cli("take-build",*self.args("third"),"--wrapper")
+        self.assertNotEqual(result.returncode,0,"replacement memory cannot fund a third declared peak")
+        self.assertIn("memory",result.stderr)
+
+    def test_descendant_generation_must_prove_every_ancestry_edge(self):
+        lease=dict(pid=100,pid_start="holder",runId="run",generation="generation",dispatch="bound",
+                   start=1,creditAfter=50,workload=dict(pid=102,birth=60))
+        rows="100 1 0 0\n102 100 0 0\n103 102 0 0\n104 103 0 0\n"
+        for changed in (None,110):
+            for during_sample in (False,True):
+                with self.subTest(changed=changed,during_sample=during_sample):
+                    births={102:60,103:70,104:80}
+                    def snapshot(*args,**kwargs):
+                        if not during_sample: births[103]=changed
+                        return rows
+                    def footprint(pid):
+                        if during_sample: births[103]=changed
+                        return 4*2**30 if pid==104 else 0
+                    with patch.object(local,"claims",return_value=[(None,lease)]),patch.object(local,"process_clock",return_value=100),patch.object(local.subprocess,"check_output",side_effect=snapshot),patch.object(local,"process_start",return_value="holder"),patch.object(local,"process_birth",side_effect=births.get),patch.object(local,"physical_footprint",side_effect=footprint):
+                        self.assertEqual(local.usage(self.root,dict(at=100))["run"]["memoryGiB"],0)
+        with patch.object(local,"process_clock",return_value=None),patch.object(local,"claims",return_value=[(None,lease)]),patch.object(local.subprocess,"check_output",return_value=rows),patch.object(local,"process_start",return_value="holder"),patch.object(local,"process_birth",return_value=60),patch.object(local,"physical_footprint",return_value=4*2**30):
+            self.assertEqual(local.usage(self.root,dict(at=100)),{},"unavailable snapshot time gives no credit")
+
+    def test_legacy_named_waiters_survive_interpreter_and_env_flags(self):
+        wrappers=("bash", "bash -e", "/bin/bash -eu", "sh -eux", "/bin/zsh -f",
+                  "bash -o pipefail -e", "env bash -e", "/usr/bin/env -i FIXTURE=1 /bin/sh -eu",
+                  "env -u FIXTURE /bin/zsh -e", "env --chdir=/tmp /bin/bash --noprofile -eu",
+                  "env -S 'bash -eu'", "/usr/bin/python3 -B -u")
+        for kind,script,tail in (("local","res","wait heavy-lane-1"),("local","local_control.py","wait-lane"),
+                                 ("mini2","res","wait mini2-exec-1"),("mini2","mini2_control.py","wait mini2-exec-1")):
+            for wrapper in wrappers:
+                with self.subTest(kind=kind,wrapper=wrapper,script=script):
+                    root=self.root/f"waiter-{kind}-{script}-{wrappers.index(wrapper)}"; root.mkdir()
+                    (root/"resources.tsv").write_bytes(self.original)
+                    (root/"machine.conf").write_text("# owner settings\n")
+                    mini.atomic(root/"mini2-config.json",self.config)
+                    table=f"999991 {wrapper} /legacy/{script} {tail} --pid 999992\n"
+                    with patch.object(mini.subprocess,"check_output",return_value=table):
+                        with self.assertRaisesRegex(ValueError,"999991.*restart"):
+                            self.run_migration(kind,root,process_table=None)
+                    self.assertEqual((root/"resources.tsv").read_bytes(),self.original)
+                    self.assertFalse(list(root.glob("resources.tsv.pre-*-dynamic*")))
+
+    def test_unclassifiable_allocator_shaped_commands_fail_closed(self):
+        commands=("bash -c '/legacy/res wait heavy-lane-1'", "env --unknown /legacy/res wait mini2-exec-1",
+                  "opaque-wrapper /legacy/local_control.py wait-lane", "bash -e /legacy/res wait heavy-lane-1 '",
+                  "zsh -c '/legacy/mini2_control.py wait mini2-exec-1'", "bash --unknown /legacy/res status",
+                  "bash -Z /legacy/res status", "bash -eu /legacy/res unknown heavy-lane-1", "/legacy/res wait",
+                  "bash -c 'res unknown heavy-lane-1'", "bash -ec 'res $ACTION heavy-lane-1'")
+        for kind in ("local","mini2"):
+            for command in commands:
+                with self.subTest(kind=kind,command=command),patch.object(mini.subprocess,"check_output",return_value="999991 "+command+"\n"):
+                    with self.assertRaisesRegex(ValueError,"999991.*restart"): self.run_migration(kind,action="",process_table=None)
+        for command in ("bash -eu /legacy/res status local", "env -i /legacy/res pool-capacity mini2",
+                        "/bin/sh -e /legacy/res return heavy-lane-1", "echo unrelated",
+                        "node worker --brief 'local_control.py ~98 and mini2_control.py ~76'"):
+            with patch.object(mini.subprocess,"check_output",return_value="999991 "+command+"\n"):
+                self.assertEqual(mini.allocator_processes("local"),[])
+                self.assertEqual(mini.allocator_processes("mini2"),[])
+
+    def test_interrupted_presence_publication_never_changes_untouched_config(self):
+        module=migration("local")
+        config=self.root/"machine.conf"; original_config=module.configure(b"# owner settings\n")
+        config.write_bytes(original_config)
+        marker=self.root/"resources.tsv.pre-local-dynamic.machine-existed"
+        opened=Path.open
+        def interrupt(file,*args,**kwargs):
+            if file.name.startswith(marker.name) and args and args[0]=="xb":
+                with opened(file,*args,**kwargs): pass
+                raise OSError("interrupted presence publication")
+            return opened(file,*args,**kwargs)
+        with patch.object(Path,"open",interrupt):
+            with self.assertRaisesRegex(OSError,"interrupted"): self.run_migration("local",module=module)
+        self.assertEqual(config.read_bytes(),original_config)
+        try: self.run_migration("local",action="--rollback")
+        except (ValueError,OSError): pass
+        self.assertTrue(config.exists(),"rollback must not delete untouched owner settings")
+        self.assertEqual(config.read_bytes(),original_config)
+        self.assertEqual((self.root/"resources.tsv").read_bytes(),self.original)
+        self.assertFalse(marker.exists(),"an interrupted write must not publish an empty marker")
+
+    def test_rollback_validates_the_entire_backup_set_before_writing(self):
+        module=migration("local"); config=self.root/"machine.conf"
+        original_config=module.configure(b"# owner settings\n"); config.write_bytes(original_config)
+        registry=self.root/"resources.tsv"; registry.write_bytes(module.migrate(self.original))
+        backup=self.root/"resources.tsv.pre-local-dynamic"; backup.write_bytes(self.original)
+        config_backup=backup.with_name(backup.name+".machine"); config_backup.write_bytes(original_config)
+        marker=backup.with_name(backup.name+".machine-existed")
+        for value in (b"",b"2",b"1\n",b"true",b"\0",b"0"):
+            with self.subTest(marker=value):
+                registry.write_bytes(module.migrate(self.original)); config.write_bytes(original_config)
+                marker.write_bytes(value)
+                before=(registry.read_bytes(),config.read_bytes())
+                with patch.object(module.m,"atomic") as atomic:
+                    with self.assertRaises(ValueError): self.run_migration("local",action="--rollback",module=module)
+                    atomic.assert_not_called()
+                self.assertTrue(config.exists())
+                self.assertEqual((registry.read_bytes(),config.read_bytes()),before)
+        marker.write_bytes(b"1"); config_backup.unlink()
+        with patch.object(module.m,"atomic") as atomic:
+            with self.assertRaises((ValueError,OSError)): self.run_migration("local",action="--rollback",module=module)
+            atomic.assert_not_called()
+
+    def test_backup_publication_interruptions_are_atomic_for_both_migrations(self):
+        for kind in ("local","mini2"):
+            for boundary in (1,2,3) if kind=="local" else (1,2):
+                for after in (False,True):
+                    with self.subTest(kind=kind,boundary=boundary,after=after):
+                        root=self.root/f"backup-{kind}-{boundary}-{after}"; root.mkdir()
+                        registry=root/"resources.tsv"; registry.write_bytes(self.original)
+                        module=migration(kind); owner=module.m if kind=="local" else module
+                        config=root/("machine.conf" if kind=="local" else "mini2-config.json")
+                        original_config=module.configure(b"# owner settings\n") if kind=="local" else json.dumps(self.config).encode()
+                        config.write_bytes(original_config)
+                        replace=os.replace; count=0
+                        def interrupt(source,dest):
+                            nonlocal count
+                            if ".pre-" in Path(dest).name:
+                                count+=1
+                                if count==boundary and not after: raise OSError("interrupted backup rename")
+                                replace(source,dest)
+                                if count==boundary and after: raise OSError("interrupted backup rename")
+                            else: replace(source,dest)
+                        with patch.object(owner.os,"replace",side_effect=interrupt):
+                            with self.assertRaises(OSError): self.run_migration(kind,root,module=module)
+                        self.assertEqual(registry.read_bytes(),self.original)
+                        self.assertEqual(config.read_bytes(),original_config)
+                        try: self.run_migration(kind,root,"--rollback")
+                        except (ValueError,OSError): pass
+                        self.assertEqual(registry.read_bytes(),self.original)
+                        self.assertEqual(config.read_bytes(),original_config)
+                        self.assertFalse([p for p in root.glob("*.mini2-*") if p.suffix!=".guard"])
 
     def test_local_migration_refuses_legacy_waiters_and_mid_transactions(self):
         for location in ("build-waiters/waiter.review/info","lane-waiters/waiter.review/info",".build-admission.lock"):

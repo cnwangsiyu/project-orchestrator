@@ -61,27 +61,87 @@ def guard(root,name="mini2.guard"):
         yield
 
 
+def allocator_invocation(args):
+    """Peel known launchers; None means the command cannot be classified."""
+    while args:
+        launcher=Path(args[0]).name
+        index=1
+        if launcher=="env":
+            while index<len(args):
+                option=args[index]
+                if option=="--": index+=1; break
+                if option in ("-i","--ignore-environment","-"): index+=1
+                elif option in ("-u","--unset","-C","--chdir"):
+                    if index+1>=len(args): return None
+                    index+=2
+                elif option in ("-S","--split-string"):
+                    if index+1>=len(args): return None
+                    try: args=args[:index]+shlex.split(args[index+1])+args[index+2:]
+                    except ValueError: return None
+                elif option.startswith(("--unset=","--chdir=")) or re.match(r"^-[uC].+",option): index+=1
+                elif re.match(r"^[A-Za-z_][A-Za-z0-9_]*=",option): index+=1
+                elif option.startswith("-"): return None
+                else: break
+        elif launcher in ("bash","sh","zsh") or re.fullmatch(r"python[0-9.]*",launcher):
+            shell=launcher in ("bash","sh","zsh")
+            while index<len(args):
+                option=args[index]
+                if option=="--": index+=1; break
+                if not option.startswith(("-","+")): break
+                if shell:
+                    if option in ("-o","+o","--rcfile","--init-file"):
+                        if index+1>=len(args): return None
+                        index+=2
+                    elif option in ("--noprofile","--norc","--posix","--restricted","--verbose"): index+=1
+                    elif re.fullmatch(r"[-+][abefhiklmnprtuvxBCEHPT]+",option):
+                        index+=1
+                    else: return None
+                elif option in ("-B","-u","-I","-s","-S","-E","-O","-OO","-q"): index+=1
+                elif option in ("-W","-X"):
+                    if index+1>=len(args): return None
+                    index+=2
+                elif option.startswith(("-W","-X")) and len(option)>2: index+=1
+                else: return None
+        else:
+            return args if launcher in ("res","mini2_control.py","local_control.py") else None
+        args=args[index:]
+    return None
+
+
 def allocator_processes(kind):
     table=subprocess.check_output(["/bin/ps","-axww","-o","pid=,args="],text=True,timeout=3)
     result=[]
     for line in table.splitlines():
         fields=line.strip().split(None,1)
         if len(fields)!=2 or fields[0]==str(os.getpid()): continue
-        try: args=shlex.split(fields[1])
-        except ValueError: continue
-        if not args: continue
-        index=0
-        if re.fullmatch(r"(?:bash|sh|zsh|python[0-9.]*)",Path(args[0]).name):
-            index=1
-            while index<len(args) and args[index] in ("-B","-u","-I","-s","-E"): index+=1
-        if index>=len(args): continue
-        if args[index]=="-c" and "RES_BUILD_PROCESS_SOURCE" in fields[1]:
+        command=fields[1]
+        if "RES_BUILD_PROCESS_SOURCE" in command:
             result.append("pid="+fields[0]+" legacy inline allocator"); continue
-        part=args[index]
-        if Path(part).name not in ("res","mini2_control.py","local_control.py"): continue
-        tail=args[index+1:]
+        try:
+            argv=shlex.split(command)
+            args=allocator_invocation(argv)
+        except ValueError: argv=[]; args=None
+        if args is None:
+            # ps does not preserve argv quoting. Opaque wrappers, inline shell
+            # commands and malformed input must not hide an allocator waiter.
+            scripts=r"(?:res|mini2_control\.py|local_control\.py)"
+            shaped=(any(Path(part).name in ("res","mini2_control.py","local_control.py") for part in argv)
+                    or re.search(r"(?:^|[\s\"';|])[^\s\"';|]+/"+scripts+r"(?=$|[\s\"';|])",command)
+                    or re.search(r"(?:^|[;&|]|\s-[A-Za-z]*c[A-Za-z]*\s+[\"']?)\s*"+scripts+r"(?=$|[\s\"';|])",command)
+                    or re.search(r"(?:^|\s)"+scripts+r"[\"']?\s+(?:take|wait|status|holder|bind|return|pool-capacity|slot-host)(?:[-\s]|$)",command))
+            if shaped:
+                result.append("pid="+fields[0]+" unclassified allocator")
+            continue
+        part=args[0]
+        tail=args[1:]
         if tail and tail[0]=="mini2": tail=tail[1:]
         action=tail[0] if tail else ""; resource=tail[1] if len(tail)>1 else ""
+        known={"take","wait","take-build","wait-build","wait-lane","wait-pool","status","holder","bind",
+               "stage","configure","return","return-build","extend","slot-host","pool-capacity","devbox-registry",
+               "reserved-disk","box-health","audit","release-dead","retain-remote","quarantine","unquarantine",
+               "report-infra","check-config","heavy-check","add","note","log"}
+        if action not in known or action in ("take","wait","wait-pool") and not resource:
+            result.append("pid="+fields[0]+" unclassified allocator"); continue
         local=action in ("take-build","wait-build","wait-lane") or action in ("take","wait") and resource.startswith("heavy-") or action=="wait-pool" and resource in ("local","local-light","local-build")
         mini=action in ("take","wait") and resource.startswith("mini2-exec-") or action=="wait-pool" and resource=="mini2" or part.endswith("mini2_control.py") and action in ("take","wait","wait-pool")
         if (local if kind=="local" else mini):

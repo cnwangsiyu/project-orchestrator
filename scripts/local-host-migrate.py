@@ -58,9 +58,8 @@ def main():
         config_current=config.read_bytes() if config.exists() else b""
         config_mode=config.stat().st_mode & 0o777 if config.exists() else 0o600
         if args.rollback:
-            original=backup.read_bytes(); config_original=config_backup.read_bytes()
+            original,config_original,was_present=m.local_backup_set(backup,config_backup,existed)
             restored=m.restore_row(current,original,migrate(original),"heavy-build")
-            was_present=existed.read_bytes()==b"1"
             is_original=config.exists()==was_present and config_current==config_original
             is_migrated=config.exists() and config_current==configure(config_original)
             if not (is_original or is_migrated): raise ValueError("machine.conf changed since migration; refusing to overwrite")
@@ -81,8 +80,9 @@ def main():
         try:
             m.atomic(config,proposed_config,config_mode); m.atomic(file,proposal,mode)
         except BaseException:
+            _,_,was_present=m.local_backup_set(backup,config_backup,existed)
             m.atomic(file,current,mode)
-            if existed.read_bytes()==b"1": m.atomic(config,config_current,config_mode)
+            if was_present: m.atomic(config,config_current,config_mode)
             else: config.unlink(missing_ok=True)
             raise
         print("Applied independent local lane migration; exact backups: "+str(backup))

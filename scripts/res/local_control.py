@@ -76,6 +76,10 @@ def fixture_file(root,name):
 
 
 def usage(root,sample):
+    # A generation born after this fence cannot be the process whose ancestry
+    # ps observed. Kernel births and this fence use the same Mach clock.
+    snapshot_at=process_clock()
+    if type(snapshot_at) is not int or snapshot_at<=0: return {}
     lines=subprocess.check_output(["/bin/ps","-axo","pid=,ppid=,rss=,pcpu="],text=True,timeout=3)
     rows={int(v[0]):v for line in lines.splitlines() if len(v:=line.split())==4}
     values={}
@@ -87,21 +91,38 @@ def usage(root,sample):
             or pid not in rows or not lease.get("runId")): continue
         if process_start(pid)!=lease.get("pid_start"): continue
         root_pid=workload.get("pid")
-        if root_pid not in rows or process_birth(root_pid)!=workload.get("birth") or workload["birth"]<=cutoff: continue
+        if root_pid not in rows or type(workload.get("birth")) is not int or not cutoff<workload["birth"]<=snapshot_at: continue
         family={root_pid}
         while True:
             expanded=family|{p for p,v in rows.items() if int(v[1]) in family}
             if expanded==family: break
             family=expanded
-        memory=cpu=0
-        for member in family:
-            born=process_birth(member)
-            if born is None or born<=cutoff: continue
+        # Capture a generation for every edge, not just the bound root. An
+        # unproven intermediate process also excludes its entire subtree.
+        births={member:process_birth(member) for member in family}
+        def proven_family(generations):
+            if generations.get(root_pid)!=workload["birth"]: return set()
+            proven={root_pid}
+            while True:
+                expanded=proven|{member for member in family if int(rows[member][1]) in proven
+                    and type(generations.get(member)) is int
+                    and cutoff<generations[member]<=snapshot_at
+                    and generations[member]>=generations[int(rows[member][1])]}
+                if expanded==proven: return proven
+                proven=expanded
+        proven=proven_family(births)
+        if not proven: continue
+        observed={}
+        for member in proven:
+            born=births[member]
+            if process_birth(member)!=born: continue
             footprint=physical_footprint(member)
             if process_birth(member)!=born: continue
-            memory+=footprint
-            cpu+=float(rows[member][3])/100
-        if process_birth(root_pid)!=workload["birth"]: continue
+            observed[member]=(footprint,float(rows[member][3])/100)
+        surviving=proven_family({member:born for member,born in births.items() if process_birth(member)==born})
+        if not surviving: continue
+        memory=sum(observed[member][0] for member in surviving if member in observed)
+        cpu=sum(observed[member][1] for member in surviving if member in observed)
         elapsed=max(0,sample["at"]-lease["start"])
         values[lease["runId"]]=dict(at=sample["at"],memoryGiB=memory/2**30,
                                   cpuLoad=cpu*(1-math.exp(-elapsed/300)),generation=lease["generation"],

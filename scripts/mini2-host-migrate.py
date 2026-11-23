@@ -32,8 +32,8 @@ def atomic(file,content,mode):
     temp=file.with_name(file.name+".mini2-"+str(uuid.uuid4()))
     try:
         with temp.open("xb") as stream:
+            os.fchmod(stream.fileno(),mode)
             stream.write(content); stream.flush(); os.fsync(stream.fileno())
-        temp.chmod(mode)
         os.replace(temp,file)
     finally:
         temp.unlink(missing_ok=True)
@@ -47,9 +47,16 @@ def derived_config(content):
 
 
 def exact_backup(file,content):
-    with file.open("xb") as stream:
-        os.fchmod(stream.fileno(),0o600)
-        stream.write(content); stream.flush(); os.fsync(stream.fileno())
+    if file.exists() or file.is_symlink(): raise FileExistsError("backup exists; refusing overwrite")
+    atomic(file,content,0o600)
+
+
+def local_backup_set(backup,config_backup,existed):
+    original=backup.read_bytes(); config_original=config_backup.read_bytes()
+    presence=existed.read_bytes()
+    if presence not in (b"0",b"1"): raise ValueError("invalid machine.conf presence backup")
+    if presence==b"0" and config_original: raise ValueError("inconsistent absent machine.conf backup")
+    return original,config_original,presence==b"1"
 
 
 def restore_row(current,original,expected,id):

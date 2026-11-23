@@ -31,7 +31,7 @@ try {
   fs.mkdirSync(path.join(scratch,'directory.cc'));
   assert.throws(()=>checkWorktree(scratch,['directory.cc']));
 } finally { fs.rmSync(scratch,{recursive:true,force:true}); }
-for(const file of ['test_mini2_link.py','test_mini2_control.py','test_mini2_remote.py','test_local_control.py']) {
+for(const file of ['test_mini2_link.py','test_mini2_control.py','test_mini2_remote.py','test_local_control.py','test_dynamic_fix.py']) {
   const result=spawnSync('python3',['-B','scripts/res/test/'+file],{encoding:'utf8'});
   assert.equal(result.status,0,result.stdout+result.stderr);
 }
