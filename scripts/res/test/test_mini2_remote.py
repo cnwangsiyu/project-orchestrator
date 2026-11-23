@@ -18,6 +18,76 @@ spec=importlib.util.spec_from_file_location("mini2_remote",Path(__file__).resolv
 m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 
 class RemoteTests(unittest.TestCase):
+    def test_read_only_scratch_cleanup_on_prelaunch_normal_and_reconcile_paths(self):
+        for launched, reconciled in ((False, False), (True, False), (True, True)):
+            with self.subTest(launched=launched, reconciled=reconciled),\
+                 tempfile.TemporaryDirectory() as temp,patch.object(m,"ROOT",Path(temp)/"runner"),patch.object(m,"disk_gate"):
+                data=dict(runId=str(uuid.uuid4()),diskGiB=1,uploads={},artifactsVerified=True)
+                with contextlib.redirect_stdout(io.StringIO()): m.prepare(data)
+                run=m.location(data["runId"])
+                outside=Path(temp)/"outside"; outside.mkdir()
+                keep=outside/"keep"; keep.write_text("fixture"); keep.chmod(0o400); outside.chmod(0o500)
+                for name in m.SCRATCH:
+                    nested=run/name/"nested"/"input"; nested.mkdir(parents=True)
+                    file=nested/"input.mp4"; file.write_text("fixture"); file.chmod(0o400)
+                    (nested/"outside").symlink_to(outside,target_is_directory=True)
+                    nested.chmod(0o500); nested.parent.chmod(0o500); (run/name).chmod(0o500)
+                if launched:
+                    (run/"launched").touch()
+                    m.atomic(run/"receipt.json",dict(cleanupReady=not reconciled))
+                    m.atomic(run/"baseline.json",dict(boot="fixture",processes={}))
+                    m.atomic(run/"tracked.json",[])
+                try:
+                    with patch.object(m,"command",return_value="fixture"),\
+                         patch.object(m,"processes",return_value={}),\
+                         patch.object(subprocess,"run",return_value=subprocess.CompletedProcess([],1,"","")),\
+                         contextlib.redirect_stdout(io.StringIO()):
+                        if reconciled: m.reconcile(data)
+                        else: m.clean(data)
+                    self.assertFalse(any((run/name).exists() for name in m.SCRATCH))
+                    self.assertTrue(json.loads((run/"clean.json").read_text())["clean"])
+                    self.assertEqual(outside.stat().st_mode & 0o777,0o500)
+                    self.assertEqual(keep.stat().st_mode & 0o777,0o400)
+                    self.assertEqual(keep.read_text(),"fixture")
+                finally:
+                    outside.chmod(0o700)
+
+    def test_scratch_cleanup_refuses_foreign_entries_and_top_level_symlinks(self):
+        for kind in ("root", "directory", "file", "symlink"):
+            with self.subTest(kind=kind),tempfile.TemporaryDirectory() as temp,patch.object(m,"ROOT",Path(temp)/"runner"):
+                run=m.location(str(uuid.uuid4())); nested=run/"home"/"nested"; nested.mkdir(parents=True)
+                file=nested/"keep"; file.write_text("fixture"); file.chmod(0o400)
+                outside=Path(temp)/"outside"; outside.mkdir()
+                (nested/"link").symlink_to(outside,target_is_directory=True)
+                nested.chmod(0o500); (run/"home").chmod(0o500)
+                target={"root":"home","directory":"nested","file":"keep","symlink":"link"}[kind]
+                real_stat=os.stat
+                def foreign_stat(name,*args,**kwargs):
+                    info=real_stat(name,*args,**kwargs)
+                    if os.fspath(name)==target:
+                        fields=list(info); fields[4]=os.geteuid()+1; return os.stat_result(fields)
+                    return info
+                with patch.object(os,"stat",side_effect=foreign_stat),self.assertRaisesRegex(RuntimeError,"owner mismatch"):
+                    m.remove_owned_scratch(run,"home")
+                if kind=="symlink": self.assertTrue((nested/"link").is_symlink())
+                else:
+                    self.assertTrue(file.exists()); self.assertEqual(file.stat().st_mode & 0o777,0o400)
+                if kind in ("root","directory"):
+                    folder=run/"home" if kind=="root" else nested
+                    self.assertEqual(folder.stat().st_mode & 0o777,0o500)
+                (run/"tmp").symlink_to(outside,target_is_directory=True)
+                with self.assertRaisesRegex(RuntimeError,"symlink or non-directory"):
+                    m.remove_owned_scratch(run,"tmp")
+                self.assertTrue((run/"tmp").is_symlink()); self.assertTrue(outside.is_dir())
+
+    def test_scratch_cleanup_restores_inaccessible_directories(self):
+        with tempfile.TemporaryDirectory() as temp,patch.object(m,"ROOT",Path(temp)/"runner"):
+            run=m.location(str(uuid.uuid4())); nested=run/"tmp"/"nested"; nested.mkdir(parents=True)
+            (nested/"keep").write_text("fixture")
+            nested.chmod(0); (run/"tmp").chmod(0)
+            m.remove_owned_scratch(run,"tmp")
+            self.assertFalse((run/"tmp").exists())
+
     def test_metrics_do_not_read_usage_or_credit_mid_sample_materialization(self):
         with tempfile.TemporaryDirectory() as temp,patch.object(m,"ROOT",Path(temp)):
             actual={"available":24}

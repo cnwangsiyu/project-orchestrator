@@ -21,6 +21,14 @@ import sys
 import time
 import uuid
 
+# The remote command embeds the helper; direct module tests load its sibling.
+if "remove_owned_tree" not in globals():
+    import importlib.util
+    _tree_spec = importlib.util.spec_from_file_location("owned_rmtree", Path(__file__).with_name("owned_rmtree.py"))
+    _tree_module = importlib.util.module_from_spec(_tree_spec)
+    _tree_spec.loader.exec_module(_tree_module)
+    remove_owned_tree = _tree_module.remove_owned_tree
+
 GIB = 1024 ** 3
 ROOT = Path.home() / "mac-build-runner"
 SCRATCH = ("work", "cache", "home", "tmp", "DerivedData", "ModuleCache", "bin")
@@ -423,6 +431,18 @@ def fetch(data):
     with file.open("rb") as stream: shutil.copyfileobj(stream, sys.stdout.buffer)
 
 
+def remove_owned_scratch(run, name):
+    if name not in SCRATCH: raise RuntimeError("unlisted scratch directory")
+    parent = os.open(run, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        if os.fstat(parent).st_uid != os.geteuid(): raise RuntimeError("foreign run directory")
+        try: info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        except FileNotFoundError: return
+        remove_owned_tree(parent, name, (info.st_dev, info.st_ino), "owned scratch")
+    finally:
+        os.close(parent)
+
+
 def clean(data, reconciled=False):
     run = location(data["runId"])
     if not run.exists(): raise RuntimeError("run evidence missing")
@@ -435,7 +455,7 @@ def clean(data, reconciled=False):
         for name in SCRATCH:
             folder=run/name
             if folder.is_symlink(): raise RuntimeError("owned scratch replaced")
-            if folder.exists(): shutil.rmtree(folder)
+            remove_owned_scratch(run,name)
         for name in intent["uploads"]: (run/name).unlink(missing_ok=True)
         receipt=dict(runId=data["runId"], clean=True, at=time.time(), neverLaunched=True)
         atomic(run/"clean.json",receipt); print(json.dumps(receipt)); return
@@ -463,7 +483,7 @@ def clean(data, reconciled=False):
     for name in SCRATCH:
         file = run/name
         if file.is_symlink(): raise RuntimeError("owned scratch replaced")
-        if file.exists(): shutil.rmtree(file)
+        remove_owned_scratch(run,name)
     for name in json.loads((run/"intent.json").read_text())["uploads"]:
         (run/name).unlink()
     atomic(run/"clean.json", dict(runId=data["runId"], clean=True, at=time.time()))

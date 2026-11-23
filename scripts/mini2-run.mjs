@@ -13,7 +13,8 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const quote = value => `'${String(value).replaceAll("'", "'\\''")}'`;
 const digest = file => createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const shared = () => process.env.RES_DIR || process.env.RULES_SHARED || path.join(os.homedir(), '.claude/orchestrator/_shared');
-const remoteSource = () => fs.readFileSync(path.join(here, 'res/dynamic_capacity.py'), 'utf8') + '\n' + fs.readFileSync(path.join(here, 'lib/mini2_remote.py'), 'utf8');
+export const remoteSource = () => ['res/dynamic_capacity.py', 'lib/owned_rmtree.py', 'lib/mini2_remote.py']
+  .map(file => fs.readFileSync(path.join(here, file), 'utf8')).join('\n');
 const control = path.join(here, 'res/mini2_control.py');
 const write = (file, value) => {
   const temp = file + '.' + randomUUID();

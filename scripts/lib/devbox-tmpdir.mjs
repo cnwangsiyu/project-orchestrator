@@ -1,5 +1,8 @@
+import fs from 'node:fs';
+
 // Shared by the remote supervisor and its independent cleanup connection.
-export const runTmpdirPython = `import re, stat as tmp_stat, tempfile
+export const runTmpdirPython = fs.readFileSync(new URL('./owned_rmtree.py', import.meta.url), 'utf8') + `
+import re, tempfile
 def chromium_socket_bytes(tmpdir):
     socket=str(tmpdir)+'/.org.chromium.Chromium.XXXXXX/SingletonSocket'
     size=len(os.fsencode(socket))
@@ -33,26 +36,10 @@ def cleanup_run_tmpdir(ctl):
     if record.get('run')!=ctl.name or directory.parent!=pathlib.Path('/tmp') or not re.fullmatch(r'dr-[a-z0-9_]{8}',directory.name):
         raise RuntimeError('TMPDIR receipt outside run scope')
     parent=os.open('/tmp',os.O_RDONLY|os.O_DIRECTORY)
-    def same(info,expected):
-        if (info.st_dev,info.st_ino)!=expected: raise RuntimeError('TMPDIR directory identity changed')
-    def remove(parent,name,expected):
-        info=os.stat(name,dir_fd=parent,follow_symlinks=False)
-        if not tmp_stat.S_ISDIR(info.st_mode): raise RuntimeError('TMPDIR symlink or non-directory refused')
-        same(info,expected)
-        fd=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=parent)
-        try:
-            same(os.fstat(fd),expected)
-            for entry in os.listdir(fd):
-                info=os.stat(entry,dir_fd=fd,follow_symlinks=False)
-                if tmp_stat.S_ISDIR(info.st_mode): remove(fd,entry,(info.st_dev,info.st_ino))
-                else: os.unlink(entry,dir_fd=fd) # Unlink sockets/links themselves; never follow links.
-            same(os.stat(name,dir_fd=parent,follow_symlinks=False),expected)
-            os.rmdir(name,dir_fd=parent)
-        finally: os.close(fd)
     try:
         try: info=os.stat(directory.name,dir_fd=parent,follow_symlinks=False)
         except FileNotFoundError: return
         if info.st_uid!=os.geteuid(): raise RuntimeError('TMPDIR owner mismatch')
-        remove(parent,directory.name,(record['dev'],record['ino']))
+        remove_owned_tree(parent,directory.name,(record['dev'],record['ino']),'TMPDIR')
     finally: os.close(parent)
 `;

@@ -3,13 +3,20 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { sshArgs, args } from '../mini2-run.mjs';
+import { sshArgs, args, remoteSource } from '../mini2-run.mjs';
 import { safeSourcePath, checkAllowlist, checkWorktree } from '../lib/mini2-source.mjs';
 assert.throws(() => sshArgs('fe80::1%en0','true','en7'));
 const command=sshArgs('fe80::2%en12','true','en12');
 assert.ok(command.includes('-oHostname=fe80::2%%en12'));
 assert.ok(command.includes('-oStrictHostKeyChecking=yes'));
 assert.throws(() => args(['--repo','/tmp']));
+const embedded = spawnSync('python3', ['-B', '-c', `import sys
+namespace={'__name__':'fixture'}
+exec(sys.stdin.read(),namespace)
+assert callable(namespace['remove_owned_tree'])
+assert callable(namespace['clean'])
+`], {input:remoteSource(),encoding:'utf8'});
+assert.equal(embedded.status,0,embedded.stdout+embedded.stderr);
 for(const name of ['signing/release.txt','Library/login.keychain-db','api_token.txt','id_ed25519','.env','.npmrc',
   'keys/data','private-key.txt','client.mobileprovision','cert.p12','state/session.json','browser/cookies.sqlite']) assert.equal(safeSourcePath(name),false,name);
 const allowed=['src/build.cc','CMakeLists.txt'];
