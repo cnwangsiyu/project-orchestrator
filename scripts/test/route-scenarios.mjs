@@ -31,6 +31,7 @@ const tr = (extra = {}) => ({ name: 'trae', kind: 'trae', home: path.join(tmp, '
   ...(extra.quota ? { quota: { sampledAt: now, ...extra.quota } } : {}) });
 const five = (used, leftH) => ({ label: '5h', used, resetsAt: now + leftH * h, windowMins: 300, scoped: false });
 
+// Legacy multi-account, rotation and capability fixtures use a synthetic peer, not real b.
 const S = {
   fresh: { claude: cl(2, 166), codex: [acc('main', 2, 166, [76, 650])] },
   quiet: { claude: cl(30, 80), codex: [acc('main', 55, 80)] }, // on pace everywhere, no cards
@@ -38,13 +39,13 @@ const S = {
   claudeNearReset: { claude: cl(85, 2), codex: [acc('main', 50, 80)] }, // 85% with 2h left and a slow burn: spare
   codexOut: { claude: cl(30, 48), codex: [acc('main', 99, 48)] },
   codexOutClaudeOver: { claude: cl(85, 48), codex: [acc('main', 99, 48)] },
-  twoAccounts: { claude: cl(10, 120), codex: [acc('main', 99, 120, [400]), acc('b', 40, 20)] },
+  twoAccounts: { claude: cl(10, 120), codex: [acc('main', 99, 120, [400]), acc('fixture-b', 40, 20)] },
   bothSpent: { claude: cl(10, 120), codex: [acc('main', 99, 120, [400]), acc('b', 99, 20)] },
   expiringCard: { claude: cl(10, 120), codex: [acc('main', 60, 120, [0.5])] },
-  cardDeadline: { claude: cl(10, 120), codex: [acc('main', 40, 120, [30]), acc('b', 10, 20)] },
+  cardDeadline: { claude: cl(10, 120), codex: [acc('main', 40, 120, [30]), acc('fixture-b', 10, 20)] },
   claude5h: { claude: [...cl(10, 120), { ...five(97, 3), label: 'session' }], codex: [acc('main', 20, 120)] },
   codex5h: { claude: cl(70, 120), codex: [{ ...acc('main', 40, 120), windows: [wk(40, 120), five(99, 2)] }] },
-  stale: { claude: cl(10, 120), codex: [{ ...acc('main', 20, 120), live: false, seenAt: now - 5 * h, error: 'hub down' }, acc('b', 50, 100)] },
+  stale: { claude: cl(10, 120), codex: [{ ...acc('main', 20, 120), live: false, seenAt: now - 5 * h, error: 'hub down' }, acc('fixture-b', 50, 100)] },
   unreadable: { claude: null, codex: [] },
   // TTADK (company gateway) account: no rate-limit windows; healthy = ttadk CLI + SSO + gpt-6.1-sol listed.
   ttFresh: { claude: cl(10, 120), codex: [acc('main', 20, 120), tt()] },
@@ -59,7 +60,7 @@ const S = {
   traeOnly: { claude: cl(10, 120), codex: [acc('main', 20, 120), tr()] },
   // Browser work on Codex without a company account (2026-11-10: the MacBook sent it all to Claude).
   macBrowser: { claude: cl(10, 120), codex: [acc('main', 20, 120, [], { browser: true, desktop:true, chromePlugin: '/tmp/chrome-main' })] },
-  traeBrowserB: { claude: cl(10, 120), codex: [acc('main', 20, 120), acc('b', 30, 100, [], { browser: true,desktop:true }), tr()] },
+  traeBrowserB: { claude: cl(10, 120), codex: [acc('main', 20, 120), acc('fixture-b', 30, 100, [], { browser: true,desktop:true }), tr()] },
   ttChatOut: { claude: cl(10, 48), codex: [acc('main', 99, 48), tt()] },
   // From the 2026-11-07 review: a hub never read; a spent account with a card next to TTADK; an excluded pick next to
   // a spent account with an urgent card; two accounts that must both be spent soon.
@@ -69,7 +70,7 @@ const S = {
   ttKimi: { claude: cl(10, 120), codex: [acc('main', 20, 120), tt({ models: ['gpt-6.1-sol', 'gpt-5.6-terra', 'kimi-k3'] })] },
   // TTADK with its web search hub + proxy set up (ttadk-setup).
   ttSearch: { claude: cl(10, 120), codex: [acc('main', 20, 120), tt({ search: true, searchLive: true })] },
-  pickExcluded: { claude: cl(10, 120), codex: [acc('main', 50, 100), acc('b', 99, 100, [10])] },
+  pickExcluded: { claude: cl(10, 120), codex: [acc('main', 50, 100), acc('fixture-b', 99, 100, [10])] },
 };
 // [scenario, route args, expectation]; expectation: 'DEFER' or "vendor model effort [@account]"
 const CASES = [
@@ -99,14 +100,14 @@ const CASES = [
   ['codexOut', ['lookup', '--stakes', 'low'], 'claude haiku low'],
   ['codexOutClaudeOver', ['implement'], 'claude opus high'],
   ['codexOutClaudeOver', ['image-gen'], 'DEFER'],
-  ['twoAccounts', ['implement'], 'codex gpt-6.1-sol xhigh @b'],
+  ['twoAccounts', ['implement'], 'codex gpt-6.1-sol xhigh @fixture-b'],
   ['bothSpent', ['implement'], 'codex gpt-6.1-sol xhigh @main'], // after redeeming main's card
   ['bothSpent', ['implement', '--no-redeem'], 'claude sonnet medium'],
   ['expiringCard', ['review'], 'codex gpt-6.1-sol xhigh @main'],
   ['claude5h', ['computer-use'], 'DEFER'],
   ['codex5h', ['image-gen'], 'DEFER'],
   ['codex5h', ['implement'], 'claude opus high'],
-  ['stale', ['analysis'], 'codex gpt-6.1-sol medium @b'],
+  ['stale', ['analysis'], 'codex gpt-6.1-sol medium @fixture-b'],
   ['unreadable', ['implement'], 'DEFER'],
   // A retry a quota notch made identical to the failed attempt is flagged, not passed off as an escalation (nightly
   // review 2026-11-04: video-agent W228c, implement --failures 2, ran the same Sol xhigh as every first pick).
@@ -181,7 +182,7 @@ const CASES = [
   ['macBrowser', ['computer-use'], 'codex gpt-6.1-sol high @main'],
   ['macBrowser', ['ui-browser'], 'codex gpt-6.1-sol xhigh @main'],
   ['fresh', ['browser'], 'claude sonnet medium'],
-  ['traeBrowserB', ['browser'], 'codex gpt-6.1-sol medium @b'],
+  ['traeBrowserB', ['browser'], 'codex gpt-6.1-sol medium @fixture-b'],
   ['traeBrowserB', ['implement'], 'codex gpt-6.1-sol high @trae'],
   ['ttAndTrae', ['implement', '--exclude-account', 'ttadk'], 'codex gpt-6.1-sol high @trae'],
   ['ttAndTrae', ['implement', '--exclude-account', 'ttadk,trae'], 'codex gpt-6.1-sol high @main'],
@@ -432,7 +433,7 @@ for (const [sc,args,oldWant,oldNote] of CASES) {
     const ui = parseRouteJSON(run('ttOutTrae', ['ui-browser'], env));
     assert.equal(ui.pick.account, 'trae'); assert.equal(ui.pick.effort, 'high');
     const desktop = parseRouteJSON(run('traeBrowserB', ['computer-use', '--apps', 'com.apple.Notes'], env));
-    assert.equal(desktop.pick.account, 'b'); assert.notEqual(desktop.pick.account, 'trae');
+    assert.equal(desktop.pick.account, 'fixture-b'); assert.notEqual(desktop.pick.account, 'trae');
     assert.ok(desktop.needsUserOK.some((s) => /personal quota/.test(s)));
     S.noDesktopPath={...S.ttOutTrae,codex:S.ttOutTrae.codex.filter(a=>a.kind!=='ttadk')};
     const noPersonalDesktop = parseRouteJSON(run('noDesktopPath', ['computer-use', '--apps', 'com.apple.Notes'], env));
@@ -440,7 +441,7 @@ for (const [sc,args,oldWant,oldNote] of CASES) {
     const absent = parseRouteJSON(run('ttOutTrae', ['browser']));
     assert.equal(absent.pick.vendor, 'claude'); assert.ok(absent.needsUserOK.some((s) => /personal quota/.test(s)));
     const personal = parseRouteJSON(run('traeBrowserB', ['browser']));
-    assert.equal(personal.pick.account, 'b'); assert.ok(personal.needsUserOK.some((s) => /personal quota/.test(s)));
+    assert.equal(personal.pick.account, 'fixture-b'); assert.ok(personal.needsUserOK.some((s) => /personal quota/.test(s)));
     console.log('ok   TRAE Playwright browser capability: observed free TRAE first, TTADK fallback, personal/Claude, UI floor, token gate, computer-use exclusion');
   } catch (e) { fail++; console.log(`FAIL TRAE Playwright browser capability: ${e.stack}`); }
   finally {Object.assign(S,browserStates);}
@@ -593,7 +594,7 @@ for (const [sc, args, want] of [
 {
   try { fs.rmSync(path.join(tmp, 'rr.txt'), { force: true }); } catch {}
   const a = parseRouteJSON(run('cardDeadline', ['implement'])).pick?.account, b = parseRouteJSON(run('cardDeadline', ['implement'])).pick?.account;
-  const ok = a === 'b' && b === 'main'; // BC-30: nondry personal dispatches advance the locked counter.
+  const ok = a === 'fixture-b' && b === 'main'; // BC-30: nondry personal dispatches advance the locked counter.
   if (!ok) fail++;
   console.log(`${ok ? 'ok  ' : 'FAIL'} cardDeadline        rotation                             ${a} then ${b}`);
 }
@@ -1135,7 +1136,7 @@ for (const [sc, args] of ERRORS) {
   try {
     for (const company of [[], [tt({ healthy: false, quotaOut: { resetsAt: now + h } })], [tt({ browser: false,desktop:false })]]) {
       for (const astraDepleted of [false, true]) {
-        const personal = [acc('main', 20, 120), acc('b', 30, 100, [], { browser: true,desktop:true })];
+        const personal = [acc('main', 20, 120), acc('fixture-b', 30, 100, [], { browser: true,desktop:true })];
         const trae = tr({ home, models: [SOL, ASTRA, 'deepseek-v4.1-flash'],
           quota: { daily: { [SOL]: bucket(true), [ASTRA]: bucket(astraDepleted) } } });
         S.browserQuota = { claude: cl(10, 120), codex: [...personal, ...company, trae] };
@@ -1143,8 +1144,8 @@ for (const [sc, args] of ERRORS) {
         for (const cat of ['browser', 'ui-browser', 'computer-use']) {
           const args = [cat, ...(cat === 'computer-use' ? ['--apps', 'com.apple.Notes'] : ['--origins', 'example.com'])];
           const baseline = parseRouteJSON(run('browserQuotaBaseline', args)), routed = parseRouteJSON(run('browserQuota', args));
-          if(company.some(a=>a.quotaOut)) {assert.equal(routed.kind,'blocked');assert.equal(baseline.kind,'blocked');assert.equal(routed.deferred,null);assert.equal(routed.pick?.account,'b');}
-          assert.equal(routed.pick?.model, SOL); assert.equal(routed.pick?.account, 'b');
+          if(company.some(a=>a.quotaOut)) {assert.equal(routed.kind,'blocked');assert.equal(baseline.kind,'blocked');assert.equal(routed.deferred,null);assert.equal(routed.pick?.account,'fixture-b');}
+          assert.equal(routed.pick?.model, SOL); assert.equal(routed.pick?.account, 'fixture-b');
           assert.deepEqual(routed.pick, baseline.pick); assert.deepEqual(routed.needsUserOK, baseline.needsUserOK);
           assert.equal(routed.balance?.selected ?? false, false);
           assert.ok(!routed.why.some((s) => /bucket is depleted|background:|balanced to TRAE/.test(s)));
@@ -1153,7 +1154,7 @@ for (const [sc, args] of ERRORS) {
           assert.ok(exhausted.pick);assert.ok(!exhausted.plan.reasons?.some(r=>r.code==='PREVIOUS_ATTEMPT_UNKNOWN'));assert.ok(exhausted.why.some(w=>/assumed first/.test(w)));
           assert.deepEqual(exhausted.needsUserOK, parseRouteJSON(run('browserQuotaBaseline', exhaustedArgs)).needsUserOK);
           const background = parseRouteJSON(run('browserQuota', [...args, '--background']));
-          assert.equal(background.kind,'blocked');assert.equal(background.pick.account,'b');assert.equal(background.pick.command,null);assert.ok(background.plan.gates.some(g=>g.kind==='personal-quota'));
+          assert.equal(background.kind,'blocked');assert.equal(background.pick.account,'fixture-b');assert.equal(background.pick.command,null);assert.ok(background.plan.gates.some(g=>g.kind==='personal-quota'));
         }
       }
     }

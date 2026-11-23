@@ -27,6 +27,10 @@ export function presentRoute(plan, view, context) {
   const notes = [...view.notes,...(t.policyNotes??[])], why = [...(t.policyNotes??[])], tellUser = [...view.tellUser], needsUserOK = [...view.needsOK];
   if(c && candidateParts(snapshot,c).account.kind==='chatgpt' && plan.trace?.comparator?.personalLaunchWhy)
     why.push(plan.trace.comparator.personalLaunchWhy);
+  if (!c || !company(candidateParts(snapshot,c).account)) {
+    for (const text of new Set(plan.rejected.filter(p => p.reason?.code === 'PERSONAL_B_REFUSED').map(p => p.reason.text)))
+      if (!why.some(line => line.includes(text))) why.push(text);
+  }
   if(snapshot.personalFallback?.enabled) {
     const i=notes.findIndex(line=>line.startsWith('Queue patience:'));
     if(i>=0)notes[i]=`Queue decision: notify the owner after >${snapshot.personalFallback.queueWaitMinutes} min; repeat after ${snapshot.personalFallback.queueReminderMinutes} min; owner chooses, no automatic switch.`;

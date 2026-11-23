@@ -34,9 +34,9 @@ function account(name, used, left, extra = {}) {
     windows: [{ label: 'week', windowMins: 10080, used, resetsAt: now + left * h }],
     resets: { count: 3, credits: [1, 2, 3].map(id => ({ id: `${name}-${id}`, expiresAt: now + 30 * 24 * h })) }, ...extra };
 }
-function data(b = 98, main = 0, options = {}) {
+function data(other = 98, main = 0, options = {}) {
   const d = { checkedAt: now, claude: [], history: {}, errors: {},
-    codexAccounts: [account('b', b, options.bLeft ?? 110, options.b), account('main', main, options.mainLeft ?? 168, options.main)] };
+    codexAccounts: [account('fixture-b', other, options.bLeft ?? 110, options.other), account('main', main, options.mainLeft ?? 168, options.main)] };
   fs.writeFileSync(cache, JSON.stringify(d));
   fs.writeFileSync(registry, JSON.stringify(Object.fromEntries(d.codexAccounts.map(a => [a.name, { home: a.home, hub, models: a.models }]))));
   return d;
@@ -54,31 +54,32 @@ function check(name, fn) { fn(); count++; console.log(`PASS ${name}`); }
 try {
   assert.equal(POLICY.launchHeadroom, 5);
   assert.equal(POLICY.deadlineTieH, 6);
-  for (const [label, b, main, want] of [['98/0', 98, 0, 'main'], ['90/0', 90, 0, 'b'], ['95/0 boundary', 95, 0, 'b'],
-    ['both low, main has more', 98, 96, 'main'], ['both low, b has more', 96, 98, 'b']]) {
+  // The allocator scenarios use a synthetic peer; real b is refused by routing policy.
+  for (const [label, other, main, want] of [['98/0', 98, 0, 'main'], ['90/0', 90, 0, 'fixture-b'], ['95/0 boundary', 95, 0, 'fixture-b'],
+    ['both low, main has more', 98, 96, 'main'], ['both low, fixture-b has more', 96, 98, 'fixture-b']]) {
     check(`${label}: quota and hard Astra launch choose ${want}`, () => {
-      const d = data(b, main), st = analyze(d), r = route(d);
+      const d = data(other, main), st = analyze(d), r = route(d);
       assert.equal(st.codex.pick.a.name, want); assert.equal(r.kind, 'launch');
       assert.equal(r.pick.account, want); assert.equal(r.pick.model, ASTRA); assert.equal(r.pick.effort, 'xhigh');
       assert.equal(st.codex.redeem, null); assert.deepEqual(r.needsUserOK, []);
-      if (b > 95) {
-        assert.match(r.why.join('\n'), /b 9[68]% used: below launch headroom 5%/);
+      if (other > 95) {
+        assert.match(r.why.join('\n'), /fixture-b 9[68]% used: below launch headroom 5%/);
         assert.match(leanLines(st, d).join('\n'), /below launch headroom 5%/);
       }
     });
   }
   check('stale high-use reading with a reachable hub still reserves launch headroom', () => {
-    const d = data(98, 0, { b: { observationStale: true, seenAt: now - 20 * 60000 } });
+    const d = data(98, 0, { other: { observationStale: true, seenAt: now - 20 * 60000 } });
     // Refresh-independent public transport/catalog evidence; stale weekly usage remains restrictive.
     assert.equal(analyze(d).codex.pick.a.name, 'main');
     assert.equal(route(d).pick.account, 'main');
   });
-  check('main hub unreachable: b remains usable and explains its low headroom', () => {
+  check('main hub unreachable: fixture-b remains usable and explains its low headroom', () => {
     const d = data(98, 0, { main: { live: false } }), st = analyze(d), r = route(d);
-    assert.equal(st.codex.pick.a.name, 'b'); assert.equal(r.pick.account, 'b');
-    assert.match(r.why.join('\n'), /below launch headroom 5%.*no usable account.*most remaining.*-> b/);
+    assert.equal(st.codex.pick.a.name, 'fixture-b'); assert.equal(r.pick.account, 'fixture-b');
+    assert.match(r.why.join('\n'), /below launch headroom 5%.*no usable account.*most remaining.*-> fixture-b/);
   });
-  check('company-device hard Astra fallback also switches from b to main', () => {
+  check('company-device hard Astra fallback also switches from fixture-b to main', () => {
     const d = data();
     for (const name of ['ttadk', 'trae']) d.codexAccounts.push(account(name, 0, 168, {
       kind: name, healthy: false, reason: 'fixture quota depleted',
@@ -87,21 +88,21 @@ try {
     const r = route(d);
     assert.equal(r.kind, 'launch'); assert.equal(r.pick.account, 'main');
     assert.equal(r.pick.model, ASTRA); assert.equal(r.pick.effort, 'xhigh');
-    assert.match(r.why.join('\n'), /b 98% used: below launch headroom 5%.*-> main/);
+    assert.match(r.why.join('\n'), /fixture-b 98% used: below launch headroom 5%.*-> main/);
     assert.deepEqual(r.needsUserOK, []);
   });
   check('fresh weekly resets one minute apart alternate as used share changes', () => {
     const d = data(0, 0, { bLeft: 168, mainLeft: 168 + 1 / 60 });
     d.codexAccounts[0].resets.count = 2;
     d.codexAccounts[0].resets.credits.pop();
-    for (const [b, main, want] of [[0, 0, 'b'], [1, 0, 'main'], [1, 2, 'b']]) {
-      d.codexAccounts[0].windows[0].used = b; d.codexAccounts[1].windows[0].used = main;
+    for (const [other, main, want] of [[0, 0, 'fixture-b'], [1, 0, 'main'], [1, 2, 'fixture-b']]) {
+      d.codexAccounts[0].windows[0].used = other; d.codexAccounts[1].windows[0].used = main;
       assert.equal(analyze(d).codex.pick.a.name, want); assert.equal(route(d).pick.account, want);
       assert.match(route(d).why.join('\n'), /deadlines within 6h/);
     }
     assert.equal(d.codexAccounts[0].resets.count, 2); assert.equal(d.codexAccounts[1].resets.count, 3);
   });
-  check('one-hour deadline tie spends main 10% before b 40%, including imminent resets', () => {
+  check('one-hour deadline tie spends main 10% before fixture-b 40%, including imminent resets', () => {
     for (const left of [20, 110]) {
       const d = data(40, 10, { bLeft: left, mainLeft: left + 1 });
       assert.equal(analyze(d).codex.pick.a.name, 'main'); assert.equal(analyze(d).codex.rotate, null);
@@ -109,7 +110,7 @@ try {
     }
   });
   check('six-hour tie boundary is inclusive; wider deadlines retain earliest-first order', () => {
-    for (const [gap, want] of [[6, 'main'], [6.01, 'b'], [48, 'b']]) {
+    for (const [gap, want] of [[6, 'main'], [6.01, 'fixture-b'], [48, 'fixture-b']]) {
       const d = data(40, 10, { bLeft: 110, mainLeft: 110 + gap });
       assert.equal(analyze(d).codex.pick.a.name, want); assert.equal(route(d).pick.account, want);
     }
@@ -130,8 +131,8 @@ try {
   });
   check('two deadlines below 48h still rotate among accounts with headroom', () => {
     const d = data(90, 20, { bLeft: 20, mainLeft: 30 });
-    assert.deepEqual(analyze(d).codex.rotate.map(r => r.a.name), ['b', 'main']);
-    assert.equal(route(d, 0).pick.account, 'b'); assert.equal(route(d, 1).pick.account, 'main');
+    assert.deepEqual(analyze(d).codex.rotate.map(r => r.a.name), ['fixture-b', 'main']);
+    assert.equal(route(d, 0).pick.account, 'fixture-b'); assert.equal(route(d, 1).pick.account, 'main');
   });
   check('rotation excludes low headroom; all-low rotation uses most remaining', () => {
     for (const [b, main] of [[98, 20], [98, 96]]) {
@@ -145,10 +146,19 @@ try {
     assert.equal(st.codex.pick, null); assert.ok(st.codex.redeem);
     assert.notEqual(r.kind, 'launch'); assert.ok(r.needsUserOK.some(s => /redeem|reset/i.test(s)));
   });
+  check('dated b refusal is visible when personal main wins', () => {
+    const d = data();
+    d.codexAccounts[0] = account('b', 98, 110);
+    const r = route(d);
+    assert.equal(r.kind, 'launch'); assert.equal(r.pick.account, 'main');
+    assert.match(r.why.join('\n'), /2026-11-21 rule forbids new personal work on b/);
+    assert.match(r.shortWhy.join('\n'), /2026-11-21 rule forbids new personal work on b/);
+    assert.doesNotMatch(r.why.join('\n'), /b 98% used: below launch headroom/);
+  });
   const d = data();
   const quota = await exec(process.execPath, [path.join(root, 'scripts/quota.mjs')], { env, maxBuffer: 2 ** 20 });
   assert.match(quota.stdout, /budget:.*codex → main/);
-  assert.match(quota.stdout, /b 98% used: below launch headroom 5%.*-> main/);
+  assert.match(quota.stdout, /fixture-b 98% used: below launch headroom 5%.*-> main/);
   count++; console.log('PASS quota CLI summary agrees with the hard personal launch');
   fs.writeFileSync(cache, JSON.stringify(d));
   const cli = await exec(process.execPath, [path.join(root, 'scripts/route.mjs'), 'implement-hard', '--impact', 'service', '--json'],
