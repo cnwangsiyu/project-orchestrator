@@ -190,7 +190,8 @@ class DynamicFixTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError,"999991.*restart"): self.run_migration(kind,action="",process_table=None)
         for command in ("bash -eu /legacy/res status local", "env -i /legacy/res pool-capacity mini2",
                         "/bin/sh -e /legacy/res return heavy-lane-1", "echo unrelated",
-                        "node worker --brief 'local_control.py ~98 and mini2_control.py ~76'"):
+                        "node worker --brief 'local_control.py ~98 and mini2_control.py ~76'",
+                        "node worker --brief local_control.py ~98 and mini2_control.py ~76"):
             with patch.object(mini.subprocess,"check_output",return_value="999991 "+command+"\n"):
                 self.assertEqual(mini.allocator_processes("local"),[])
                 self.assertEqual(mini.allocator_processes("mini2"),[])

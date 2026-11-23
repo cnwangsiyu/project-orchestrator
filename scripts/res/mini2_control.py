@@ -125,8 +125,7 @@ def allocator_processes(kind):
             # ps does not preserve argv quoting. Opaque wrappers, inline shell
             # commands and malformed input must not hide an allocator waiter.
             scripts=r"(?:res|mini2_control\.py|local_control\.py)"
-            shaped=(any(Path(part).name in ("res","mini2_control.py","local_control.py") for part in argv)
-                    or re.search(r"(?:^|[\s\"';|])[^\s\"';|]+/"+scripts+r"(?=$|[\s\"';|])",command)
+            shaped=(re.search(r"(?:^|[\s\"';|])[^\s\"';|]+/"+scripts+r"(?=$|[\s\"';|])",command)
                     or re.search(r"(?:^|[;&|]|\s-[A-Za-z]*c[A-Za-z]*\s+[\"']?)\s*"+scripts+r"(?=$|[\s\"';|])",command)
                     or re.search(r"(?:^|\s)"+scripts+r"[\"']?\s+(?:take|wait|status|holder|bind|return|pool-capacity|slot-host)(?:[-\s]|$)",command))
             if shaped:
