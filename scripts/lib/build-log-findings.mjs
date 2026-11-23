@@ -1,13 +1,13 @@
 // Build tools echo properties inside prose and quoted log messages as well as DSL.
 // Return offsets only; the shared redactor owns replacement and overlap handling.
+import { credentialLabel as sensitive } from './credential-labels.mjs';
 const fields = /(?<![\w$.-])(["']?)((?:-[PD])?[A-Za-z_][\w.-]*)\1([\t ]*(?:[:=][\t ]*|[\t ]+))/g;
-const sensitive = name => /(?:password|passwd|token|secret|magic[._-]?word)$/i.test(name)
-  || /(?:^|[._-])key$/i.test(name) || /Key$/.test(name);
 const user = name => /user(?:name)?$/i.test(name);
 const stem = name => name.replace(/(?:password|passwd|token|secret|magic[._-]?word|key|user(?:name)?)$/i, '')
   .replace(/[._-]/g, '').toLowerCase();
-const property = name => /^-[PD]|^ORG_GRADLE_PROJECT_|^systemProp\.|^(?:NEXUS|MAVEN|ARTIFACTORY)_/i.test(name);
+const property = name => /^-[PD]|^ORG_GRADLE_PROJECT_|^systemProp\.|^(?:NEXUS|MAVEN|ARTIFACTORY|SONATYPE|OSSRH)_/i.test(name);
 const reference = value => /(?<!\\)\$(?:[A-Za-z_]\w*|\{[^}]*\})/.test(value)
+  || /^@(?:\+)?(?:[\w.]+:)?[\w.]+\//.test(value)
   || /^(?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$][\w$]*\(/.test(value);
 const placeholder = value => !value || /^(?:\[[^\]]*(?:masked|redact)[^\]]*\]|<[^>]*>|REDACTED|\*+)$/i.test(value);
 

@@ -2,6 +2,8 @@ const fields = 'password|passphrase|passwd|pwd|pass|token|secret[_-]?access[_-]?
 import { maskPrivateKeyBlocks } from './private-key-blocks.mjs';
 import { buildLogFindings } from './build-log-findings.mjs';
 import { xmlLogFindings } from './xml-log-findings.mjs';
+import { credentialLabel } from './credential-labels.mjs';
+import { propertiesLogFindings, propertyFileBlocks } from './properties-log-findings.mjs';
 
 const quotedValue = String.raw`"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'`;
 const inlineQuotedValue = String.raw`"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'`;
@@ -20,14 +22,14 @@ const sourceField = value => /(?:Password|Passphrase|Passwd|Token|Secret|ApiKey|
 const exactField = new RegExp(`^(?:${fields})$`, 'i');
 // Repository usernames need repository context; the other requested names are wildcards.
 const repositoryUser = value => /user(?:name)?/i.test(value) && /repo|maven|nexus|artifactory/i.test(value);
-const credentialField = value => !/^keyAlias$/i.test(value) && (
-  /^nexus/i.test(value) || /magic|credential|auth|pass|pwd|secret|token|key/i.test(value)
-  || repositoryUser(value));
+const credentialField = value => !/^keyAlias$/i.test(value) && (credentialLabel(value) || repositoryUser(value));
 const publicValue = value => /^(?:true|false)$/i.test(value)
   || /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?[fLdD]?$|^0[xob][\da-f]+$/i.test(value)
   || /^v?\d+(?:[._-]\d+)+(?:[-+][\w.-]+)?$/i.test(value)
-  || /^(?:[a-z][a-z\d+.-]*:\/|\/\/)/i.test(value);
+  || /^(?:[a-z][a-z\d+.-]*:\/|\/\/)/i.test(value)
+  || /^(?:\.{0,2}\/|~[/\\]|[A-Za-z]:[/\\])/.test(value);
 const referenceValue = value => /(?<!\\)\$(?:[A-Za-z_]\w*|\{[^}]*\})/.test(value)
+  || /^@(?:\+)?(?:[\w.]+:)?[\w.]+\//.test(value)
   || /^(?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$][\w$]*\(/.test(value);
 // Punctuation around a word (or a hyphenated English phrase) is not token entropy.
 const tokenLikeValue = value => value.length >= 8 && !/[\s|]/.test(value) && /[\d\W_]/.test(value)
@@ -70,6 +72,9 @@ function jsonStringRanges(text) {
     let before = range.index - 1;
     while (before >= 0 && /[\t ]/.test(text[before])) before--;
     if (before >= 0 && !':[,'.includes(text[before])) continue;
+    let after = range.index + range.length;
+    while (after < text.length && /[\t ]/.test(text[after])) after++;
+    if (text[after] === ':') continue; // Object labels are not encoded log strings.
     try {
       const decoded = JSON.parse(text.slice(range.index, range.index + range.length));
       ranges.push({ ...range, decoded });
@@ -127,7 +132,10 @@ const headers = /(?:(?<![\w-])|(?<=^[+-]))(set-cookie|cookie|authorization|proxy
 const tosutilKeys = /(?<=\btosutil\b[^\r\n]*[\t ])-([ik])([\t ]+)([^\s"']+)/gi;
 
 function visitSecrets(text, visit) {
-  const { hits, labelRanges } = xmlLogFindings(text, publicValue, jsonStringRanges(text));
+  const jsonStrings = jsonStringRanges(text);
+  const fileBlocks = propertyFileBlocks(text);
+  const { hits, labelRanges } = xmlLogFindings(text, publicValue, jsonStrings, fileBlocks);
+  hits.push(...propertiesLogFindings(text, publicValue, fileBlocks, labelRanges));
   for (const hit of buildLogFindings(text, credentialBlocks(text), publicValue, labelRanges)) hits.push(hit);
   collectSecrets(text, (hit) => hits.push(hit), labelRanges);
   for (const match of text.matchAll(tosutilKeys)) {
@@ -141,8 +149,13 @@ function visitSecrets(text, visit) {
     hits.push({ line: 0, field: match[1].toLowerCase(), start, end: start + value.length });
   }
   hits.sort((a, b) => a.start - b.start || b.end - a.end);
-  let line = 1, offset = 0, last = -1;
+  let line = 1, offset = 0, last = -1, json = 0;
   for (const hit of hits) {
+    while (jsonStrings[json]?.index + jsonStrings[json]?.length <= hit.start) json++;
+    const encoded = jsonStrings[json];
+    if (encoded?.index < hit.start
+      && !(hit.start === encoded.index + 1 && hit.end === encoded.index + encoded.length - 1))
+      continue; // Do not remask a substring inside a separately decoded log string.
     if (hit.start < last) continue; // overlapping match already covered
     for (; offset < hit.start; offset++) if (text[offset] === '\n') line++;
     visit({ ...hit, line }); last = hit.end;
@@ -213,10 +226,22 @@ function collectSecrets(text, visit, labelRanges = []) {
   }
 }
 
-export function passwordStyleFindings(text) {
+function nestedFindings(text, depth = 0) {
   const findings = [];
   visitSecrets(text, ({ line, field }) => findings.push({ line, field }));
+  let line = 1, offset = 0;
+  if (depth < 8) for (const range of jsonStringRanges(text)) {
+    const nested = nestedFindings(range.decoded, depth + 1);
+    if (!nested.length) continue;
+    for (; offset < range.index; offset++) if (text[offset] === '\n') line++;
+    for (const hit of nested) findings.push({ ...hit, line });
+  }
+  findings.sort((a, b) => a.line - b.line);
   return findings;
+}
+
+export function passwordStyleFindings(text) {
+  return nestedFindings(text);
 }
 
 export function maskPasswordStyleValues(text) {

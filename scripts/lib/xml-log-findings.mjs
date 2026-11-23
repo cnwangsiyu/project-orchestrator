@@ -1,6 +1,6 @@
 // Scan XML printed in logs without parsing or rewriting the surrounding document.
 // JSON escapes are decoded by the shared redactor before this detector runs.
-const credentialLabel = name => /key|secret|token|password|passwd|auth|signature|licen[cs]e/i.test(name);
+import { credentialLabel } from './credential-labels.mjs';
 const placeholder = value => /^(?:\[[^\]]*(?:masked|redact)[^\]]*\]|REDACTED|\*+)$/i.test(value);
 const reference = value => /^@(?:\+)?(?:[\w.]+:)?[\w.]+\//.test(value)
   || /(?<!\\)\$(?:[A-Za-z_]\w*|\{[^}]*\})/.test(value);
@@ -69,7 +69,7 @@ function valueParts(text, start, end) {
   return parts;
 }
 
-export function xmlLogFindings(text, publicValue, jsonStrings = []) {
+export function xmlLogFindings(text, publicValue, jsonStrings = [], fileBlocks = []) {
   const hits = [], labelRanges = [];
   const collect = (range, field) => {
     const parts = valueParts(text, range.start, range.end);
@@ -78,8 +78,10 @@ export function xmlLogFindings(text, publicValue, jsonStrings = []) {
     for (const part of parts) if (!placeholder(part.value))
       hits.push({ line: 0, field: field.toLowerCase(), start: part.start, end: part.end });
   };
-  let open, pair, json = 0;
+  let open, pair, json = 0, block = 0;
   for (const tag of tags(text)) {
+    while (block < fileBlocks.length && fileBlocks[block][1] <= tag.start) block++;
+    const structural = fileBlocks[block]?.[0] <= tag.start && tag.start < fileBlocks[block][1];
     while (jsonStrings[json]?.index + jsonStrings[json]?.length <= tag.start) json++;
     if (jsonStrings[json]?.index < tag.start) continue; // Already handled after JSON decoding.
     if (open && tag.closing && tag.name === open.name) {
@@ -107,7 +109,7 @@ export function xmlLogFindings(text, publicValue, jsonStrings = []) {
       if (name) labelRanges.push([name.start - 1, name.end + 1]);
       const label = name ? text.slice(name.start, name.end) : pairedLabel;
       if (!tag.selfClosing) open = { ...tag, label: credentialLabel(label || '') ? label : undefined };
-    }
+    } else if (structural && !tag.selfClosing) open = { ...tag, label: tag.name };
   }
   return { hits, labelRanges };
 }
