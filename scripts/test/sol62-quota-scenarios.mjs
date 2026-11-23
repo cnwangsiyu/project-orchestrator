@@ -16,7 +16,7 @@ const { normalizeTraeDaily } = await import('../lib/trae-quota-aliases.mjs');
 const { traeQuota } = await import('../lib/state.mjs');
 const { freshTraeQuota } = await import('../lib/company-load.mjs');
 const { acquireRoute } = await import('../lib/route-data.mjs');
-const { parseTaskSpec, routePure } = await import('../lib/pipeline/index.mjs');
+const { parseTaskSpec, routePure, renderPlan } = await import('../lib/pipeline/index.mjs');
 
 const bucket = { used: 80, limit: 80, remaining: 0, depleted: true, resetsAt: now + hour };
 const home = path.join(tmp, 'trae');
@@ -57,7 +57,11 @@ try {
   assert.equal(result.plan.primary.candidate.modelId, SOL);
   assert.equal(result.plan.primary.candidate.effort, 'high');
   // Depletion without direct readiness is not demonstrated immediate capacity.
-  assert.equal(fixture({ telemetry: {} }).plan.primary.candidate.accountId, 'ttadk');
+  const unavailable = fixture({ telemetry: {} });
+  assert.equal(unavailable.plan.primary.candidate.accountId, 'ttadk');
+  const explanation = renderPlan(unavailable.plan, unavailable).why.join('\n');
+  assert.match(explanation, /stays on TTADK: gpt-6\.2-sol: no demonstrated immediate uncongested TRAE lane/);
+  assert.doesNotMatch(explanation, /no qualified same-model TRAE lane/);
   assert.equal(fixture({ telemetry: { t: now, state: 'queued', position: 500, drainPerMin: 1 } }).plan.primary.candidate.accountId, 'ttadk');
   assert.equal(fixture({ load: 65 }).plan.primary.candidate.accountId, 'ttadk');
   // An alias must also recover fresh priority capacity from an older cache.
@@ -66,6 +70,9 @@ try {
   assert.equal(result.plan.primary.candidate.modelId, SOL);
   assert.equal(result.snapshot.lanes.find(l => l.accountId === 'trae' && l.modelId === SOL).mode, 'priority');
   assert.equal(fixture({ daily: {} }).snapshot.lanes.find(l => l.accountId === 'trae' && l.modelId === SOL).mode, 'UNKNOWN');
+  const docs = fs.readFileSync(path.join(root, 'references/model-routing.md'), 'utf8');
+  assert.match(docs, /TRAE offers\s+`gpt-6\.2-sol`, `gpt-6\.1-sol` and `gpt-6-astra`/);
+  assert.match(docs, /`gpt_6_2` maps to `gpt-6\.2-sol`/);
   console.log('PASS Sol 6.2 provider/cached aliases, company-first routing, latest release and telemetry boundaries');
 } finally {
   for (const name of Object.keys(process.env)) if (!(name in saved)) delete process.env[name];

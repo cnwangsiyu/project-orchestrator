@@ -79,8 +79,8 @@ export function presentRoute(plan, view, context) {
     : `TRAE lane free: saving TTADK quota; ${c.modelId} load ${chosenBalance.load.percent}%; no queue or stall observed.`);
   else if(chosenBalance) why.push(`TRAE ${c.modelId}: bounded fallback; immediate uncongested capacity is unmeasured.`);
   if(c && candidateParts(snapshot,c).account.kind==='ttadk' && balanceCandidates.length) {
-    const relevant=balanceCandidates.find(b=>b.model===c.modelId);
-    why.push(relevant?`stays on TTADK: ${relevant.model}: ${relevant.queued?'queue observed':relevant.congestion==='high'?'model congested':!relevant.freeNow?'no demonstrated immediate uncongested TRAE lane':'TTADK quota expiry or required capability'}`:`stays on TTADK: ${c.modelId} has no qualified same-model TRAE lane for the required capability/catalog.`);
+    const relevant=balanceCandidates.find(b=>policyModel(b.model)===policyModel(c.modelId));
+    why.push(relevant?`stays on TTADK: ${relevant.model}: ${relevant.queued?'queue observed':relevant.congestion==='high'?'model congested':!relevant.freeNow?'no demonstrated immediate uncongested TRAE lane':'TRAE lane demoted by transport failures or required capability'}`:`stays on TTADK: ${c.modelId} has no qualified same-class TRAE lane for the required capability/catalog.`);
   }
   if(f.dry) notes.push(`--dry: preview only — no route decision is recorded, so do not launch from this output; run again without --dry. State is read as a real route would read it. Cache age: ${context.cacheAgeMs===null||context.cacheAgeMs===undefined?'UNKNOWN':`${Math.round(context.cacheAgeMs/1000)} seconds`}.`);
   if(context.refreshRequired) notes.push('--fresh: account status refreshed through authenticated read-only interfaces.');

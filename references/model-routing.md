@@ -49,8 +49,13 @@ after 30 seconds and contain no environment or provider configuration values.
 browser runtime readiness independently of the usage cache.
 
 Each account uses its newest catalog release for the Sol and Astra policy choices.
-Main and b list `gpt-6.2-sol` and `gpt-6.2-astra`. TRAE currently offers
-`gpt-6.1-sol` and `gpt-6-astra`. TTADK offers `gpt-6.1-sol` and has no Astra entry.
+As observed on 2026-11-23, main and b list `gpt-6.2-sol` and `gpt-6.2-astra`;
+the catalog does not make b eligible for new personal work. TRAE offers
+`gpt-6.2-sol`, `gpt-6.1-sol` and `gpt-6-astra`; its current Sol choice is 6.2.
+The provider daily-quota name `gpt_6_2` maps to `gpt-6.2-sol`, including when
+the provider's model-to-quota mapping omits that entry. TTADK offers
+`gpt-6.1-sol` and has no Astra entry. Company-lane comparison uses the qualified
+Sol/Astra class, not identical release IDs across accounts.
 The separate 5.6-Sol fallback retains its own quota bucket and tier.
 Scoped Astra approvals and the hard-tier standing decision cover the family.
 
