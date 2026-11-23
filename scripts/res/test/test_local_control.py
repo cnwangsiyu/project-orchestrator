@@ -204,7 +204,7 @@ class LocalCapacityTests(unittest.TestCase):
             # separate named backups, without removing any other's artifacts.
             backups={kind:self.root/(kind+"-"+first+".backup") for kind in ("mini2","local")}
             def migration(kind,action):
-                return subprocess.run([sys.executable,"-B",str(self.source/(kind+"-host-migrate.py")),"--registry",str(self.root/"resources.tsv"),"--backup",str(backups[kind]),action],capture_output=True,text=True)
+                return subprocess.run([sys.executable,"-B",str(Path(__file__).with_name("migration_fixture.py")),str(self.source/(kind+"-host-migrate.py")),"--registry",str(self.root/"resources.tsv"),"--backup",str(backups[kind]),action],capture_output=True,text=True)
             for kind in ("mini2","local"):
                 result=migration(kind,"--apply"); self.assertEqual(result.returncode,0,result.stderr)
             self.take("during-"+first,"light")

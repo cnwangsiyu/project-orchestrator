@@ -365,7 +365,7 @@ class DynamicMini2Tests(unittest.TestCase):
         registry.write_bytes(original); registry.chmod(0o640)
         script=Path(m.__file__).parent.parent/"mini2-host-migrate.py"
         def migration(*flags):
-            return subprocess.run([sys.executable,"-B",str(script),"--registry",str(registry),*flags],capture_output=True,text=True)
+            return subprocess.run([sys.executable,"-B",str(Path(__file__).with_name("migration_fixture.py")),str(script),"--registry",str(registry),*flags],capture_output=True,text=True)
         self.assertEqual(migration().returncode,0); self.assertEqual(registry.read_bytes(),original)
         self.assertEqual(migration("--apply").returncode,0)
         self.assertEqual(registry.stat().st_mode & 0o777,0o640)
