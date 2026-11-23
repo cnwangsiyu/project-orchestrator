@@ -417,7 +417,13 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
         restricted: true, until: r.pausedUntil, recovery: r.kind === 'hard' ? 'awaiting-probe' : 'not-due', evidence: stamp(true), ...extra });
     };
     appendPause(h); for (const [family,r] of Object.entries(object(h?.pools) ? h.pools : {})) appendPause(r,{family});
-    for (const [m,r] of Object.entries(object(h?.modelPauses) ? h.modelPauses : {})) if (r?.pausedUntil > now) appendPause(r,{modelId:modelId(m)});
+    for (const [m,r] of Object.entries(object(h?.modelPauses) ? h.modelPauses : {})) {
+      if (r?.kind === 'model-access' && Number.isFinite(r.pausedUntil)) health.push({ accountId: name, modelId: modelId(m),
+        generation: r.generation, restricted: true, until: r.pausedUntil,
+        recovery: now < r.pausedUntil ? 'not-due' : 'awaiting-probe', modelAccess: true,
+        probeInFlight: Number.isFinite(r.probingAt) && r.probingAt <= now && now - r.probingAt < 600000, evidence: stamp(true) });
+      else if (r?.pausedUntil > now) appendPause(r,{modelId:modelId(m)});
+    }
     const telemetry = home ? read(path.join(home,'lane-state.json'),{}) : {}, familyQueue=home?read(path.join(home,'queue-state.json'),{}):{}, load = object(a.load) ? a.load : {};
     const astraRecent=kind==='trae'&&catalog.some(isAstra)?recentAstraQueue(home,h,now):null;
     for (const m of catalog) {

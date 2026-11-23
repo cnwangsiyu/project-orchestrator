@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { newestRelease, policyModel } from './lib/pipeline/common.mjs';
+import { modelId, newestRelease, policyModel } from './lib/pipeline/common.mjs';
+import { normalizeTraeDaily } from './lib/trae-quota-aliases.mjs';
 import {modelPreference} from './lib/pipeline/policy.mjs';
 import {mcpStartupMonitor} from './lib/mcp-startup.mjs';
 // codex-worker: run and steer Codex workers through a shared Codex app-server ("hub") over WebSocket.
@@ -59,7 +60,8 @@ import { fileURLToPath } from 'node:url';
 import { shellQuote } from './lib/pipeline/presentation.mjs';
 import { probeBrowserRuntime, chromeExtensionHostConnected, bundledCodexCliPath } from './lib/browser-runtime.mjs';
 import { runWorkerTalkback, createTalkbackRelay } from './lib/worker-talkback.mjs';
-import { noteFailure, noteSuccess, notePolicyRestriction, rememberThreadModel, threadModel, probeResult, failureKind } from './lib/trae-health.mjs';
+import { noteFailure, noteSuccess, notePolicyRestriction, rememberThreadModel, threadModel, probeResult, failureKind,
+  isModelAccessFailure, noteModelAccessFailure, readModelPauses, startModelProbe, modelProbeResult } from './lib/trae-health.mjs';
 import { createQueueRecorder } from './lib/company-load.mjs';
 import { saveQueue, readQueue } from './lib/worker-queue.mjs';
 import { loadDigest, workerInstructions, auditLaunch, rulesLog, rulesShared } from './lib/global-rules.mjs';
@@ -93,6 +95,7 @@ setEventObserver(requestBoardRefresh);
 // What a TRAE pause covers: one model family (route.mjs moves to the next family) or the whole account.
 const pausedWhat = (p) => (p.pool ? `TRAE's ${p.pool} models are paused` : 'TRAE is paused');
 // A model TRAE no longer resolves (2026-11-13: it dropped Gemini): that model alone is out of routing for 6 h.
+const modelAccessHint = p => `model-access: ${p.model} demoted; recovery probe due ${new Date(p.pausedUntil).toISOString()}`;
 const unavailableHint = (p) => `model-unavailable: ${p.model} isn't available on this company account; re-route (route.mjs skips it now)`;
 
 // --account NAME (anywhere on the line) picks a profile from the accounts file: its own CODEX_HOME, so its own login,
@@ -448,6 +451,23 @@ const auditStart = (model=opts.model,sandbox=opts.sandbox,continued) => {
     account:account??'main',model,effort:opts.effort,sandbox,userOK:opts['user-ok'],role:opts.role,seat:routedMetadata});}
   catch(e) {die(e.message,e.exitCode??1);}
 };
+const recordModelAccess = (model) => {
+  const at = Date.now();
+  let reset = null;
+  try {
+    const cache = JSON.parse(fs.readFileSync(process.env.QUOTA_CACHE || path.join(rulesShared(), 'quota.json'), 'utf8'));
+    const quota = cache.codexAccounts?.find(a => a.name === account)?.quota;
+    if (quota?.sampledAt <= at && at - quota.sampledAt <= 1800000)
+      reset = normalizeTraeDaily(quota.daily)[modelId(model)]?.resetsAt;
+  } catch {} // Public quota metadata is optional; otherwise use the provider UTC reset.
+  const paused = noteModelAccessFailure(PROF.home, model, at, reset);
+  if (paused) console.log(modelAccessHint(paused));
+};
+const checkModelAccessAdmission = (model) => {
+  if (PROF?.kind !== 'trae' || !model) return;
+  const paused = readModelPauses(PROF.home)[modelId(model)];
+  if (paused?.kind === 'model-access') die(`${modelAccessHint(paused)}; re-route to a healthy lane`, 1);
+};
 const checkNewThreadAdmission = () => {
   try { assertExclusiveNewThread({ account: account ?? 'main', profiles: { [account ?? 'main']: PROF },
     shared: rulesShared(), name: opts.name }); }
@@ -699,6 +719,8 @@ ${keep ? `\n# --- previous config ---\n${keep}` : ''}`);
 // Recovery probe (lib/trae-health.mjs): one tiny read-only turn on the paused family's model via traecli exec.
 if (cmd === 'probe') {
   if (PROF?.kind !== 'trae' || typeof opts.model !== 'string') die('probe is for the TRAE account: --account trae probe --model M');
+  const modelProbe = opts['probe-scope'] === 'model';
+  if (modelProbe && !startModelProbe(PROF.home, opts.model, opts['probe-claim'])) die('Model recovery probe claim is unavailable or already started', 1);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'trae-probe-'));
   let out = '', ok = false;
   try {
@@ -708,13 +730,19 @@ if (cmd === 'probe') {
   } catch (e) { out = String(e.stdout ?? '') + String(e.stderr ?? e.message); }
   fs.rmSync(dir, { recursive: true, force: true });
   const why = ok ? '' : (/"message":"([^"]{1,200})/.exec(out)?.[1] ?? out.trim().split('\n').at(-1) ?? 'failed').slice(0, 200);
-  const applied=probeResult(PROF.home, opts.model, ok, why, Date.now(), opts['probe-claim']);
-  console.log(!applied ? `probe ignored: ${opts.model}; claim is missing or superseded` : ok ? `probe ok: ${opts.model} answers again; its family is back in routing` : `probe failed: ${opts.model} — ${why}`);
+  const applied = modelProbe ? modelProbeResult(PROF.home, opts.model, opts['probe-claim'], ok,
+    isPolicyBlock({status:'failed', error:out}) ? '983 (provider policy block)' : out)
+    : probeResult(PROF.home, opts.model, ok, why, Date.now(), opts['probe-claim']);
+  console.log(!applied ? `probe ignored: ${opts.model}; claim is missing or superseded` : ok
+    ? `probe ok: ${opts.model} answers again; ${modelProbe ? 'its lane' : 'its family'} is back in routing`
+    : `probe failed: ${opts.model}${modelProbe ? '' : ` — ${why}`}`);
   process.exit(ok ? 0 : 1);
 }
 if (cmd === 'note-failure') {
   if (PROF?.kind !== 'trae') die('note-failure is for the TRAE account (--account trae)');
-  const p = noteFailure(PROF.home, pos.join(' ') || 'traecli exec failed', Date.now(), typeof opts.model === 'string' ? opts.model : null);
+  const why = pos.join(' ') || 'traecli exec failed', model = typeof opts.model === 'string' ? opts.model : null;
+  if (model && isModelAccessFailure(why)) { recordModelAccess(model); process.exit(0); }
+  const p = noteFailure(PROF.home, why, Date.now(), model);
   if (p?.modelPause) console.log(unavailableHint(p));
   else console.log(p ? `trae-paused: ${pausedWhat(p)} until ${new Date(p.pausedUntil).toLocaleTimeString()} (${p.reason}); route.mjs sends its work elsewhere meanwhile` : 'recorded');
   process.exit(0);
@@ -1304,7 +1332,13 @@ const report = async (threadId, turn, final, usage, observation = {}) => {
   }
   const resourceState = completionLeases({ ...tracker?.metadata(), by: opts.by, account: account ?? 'main', thread: threadId,
     project: opts.project ?? tracker?.metadata().project, task: opts.task ?? tracker?.metadata().task, name: opts.name });
-  const completion = classifyCompletion({ turn, final, leases: resourceState.held, ...observation });
+  const rawPolicyBlock = isPolicyBlock(turn);
+  const providerError = JSON.stringify(turn.error ?? '');
+  const traeFailureModel = PROF?.kind === 'trae' ? (opts.model ?? actualModel ?? threadModel(PROF.home, threadId)) : null;
+  const accessFailure = !!traeFailureModel && !rawPolicyBlock && turn.status === 'failed' && isModelAccessFailure(providerError);
+  const familyRestricted = !!traeFailureModel && !rawPolicyBlock && turn.status === 'failed' && /\b983\b/.test(providerError);
+  const completion = classifyCompletion({ turn: accessFailure ? { ...turn, status: 'transport-failed' } : turn,
+    final, leases: resourceState.held, ...observation });
   const truncated = completion?.status === 'TRUNCATED' ? completion : null;
   const uncertain = completion?.status === 'uncertain' ? completion : null;
   if (completion) turn = { ...turn, status: completion.status };
@@ -1327,7 +1361,7 @@ const report = async (threadId, turn, final, usage, observation = {}) => {
     printFinal(outcomeFinal);
     return rejectRequestBuffer(threadId);
   }
-  const policyBlock = isPolicyBlock(turn);
+  const policyBlock = rawPolicyBlock;
   if (policyBlock) {
     // Without --account there is no profile home: the block is still printed and logged with model=null.
     const model = opts.model ?? (PROF?.home ? threadModel(PROF.home, threadId) : null);
@@ -1356,13 +1390,14 @@ const report = async (threadId, turn, final, usage, observation = {}) => {
   if (PROF?.kind === 'trae') {
     const model = opts.model ?? threadModel(PROF.home, threadId);
     if (turn.status === 'completed') noteSuccess(PROF.home, model);
-    else if (turn.status === 'failed' && policyBlock) {
+    else if (policyBlock) {
       const p = notePolicyRestriction(PROF.home,
         `cyberPolicy blocked this turn: ${JSON.stringify(turn.error ?? '').slice(0, 140)}`, Date.now(), model);
       if (p) console.log(`trae-restricted: TRAE's ${p.pool} models are restricted until ${new Date(p.pausedUntil).toLocaleTimeString()} (${p.reason}); re-route this task with route.mjs ... --adversarial (it moves to the next non-GPT family)`);
       else console.log('security-policy-block: no model is known for this thread, so no TRAE family restriction was written (the kind:policy-block row is still logged)');
-    } else if (turn.status === 'failed' && completion?.status !== 'transport-failed') {
-      const p = noteFailure(PROF.home, JSON.stringify(turn.error ?? 'failed'), Date.now(), model);
+    } else if (accessFailure) recordModelAccess(traeFailureModel);
+    else if (familyRestricted || (turn.status === 'failed' && completion?.status !== 'transport-failed')) {
+      const p = noteFailure(PROF.home, providerError, Date.now(), model ?? traeFailureModel);
       if (p?.modelPause) console.log(unavailableHint(p));
       else if (p) console.log(`trae-paused: ${pausedWhat(p)} until ${new Date(p.pausedUntil).toLocaleTimeString()} (${p.reason}); re-route this task with route.mjs ... ${p.pool ? `(it moves to the next model family; --exclude-model ${p.pool} for this task)` : `--exclude-account ${account}`}`);
       else if (model) console.log(`trae-failed: a ${model} turn failed on TRAE (not paused yet); for an infrastructure error re-route this task with route.mjs ... --exclude-model ${model.toLowerCase()} (not a --failures step)`);
@@ -1392,7 +1427,8 @@ const report = async (threadId, turn, final, usage, observation = {}) => {
         return transportQuotaBlock({kind:PROF?.kind,account:account ?? 'main',payload});
       } catch { return 'lane quota could not be confirmed'; }
     };
-    let block = opts['no-auto-continue'] ? '--no-auto-continue' : resourceState.held.length ? 'worker still holds res leases' : await quotaBlock();
+    let block = accessFailure || familyRestricted ? 'provider model access unavailable; re-route to a healthy lane'
+      : opts['no-auto-continue'] ? '--no-auto-continue' : resourceState.held.length ? 'worker still holds res leases' : await quotaBlock();
     if (!block) block = claimTransportContinuation(account ?? 'main',threadId,turn.id);
     if (!block) {
       tracker?.update({mayRun:false,phase:'transport-backoff'});
@@ -1432,7 +1468,7 @@ const report = async (threadId, turn, final, usage, observation = {}) => {
         return;
       }
     }
-    const line = notify(`stopped: ${block}; continue manually: ${continueCommand}`);
+    const line = notify(`stopped: ${block}${accessFailure || familyRestricted ? '' : `; continue manually: ${continueCommand}`}`);
     tracker?.result('failed',{thread:threadId,turn:turn.id,status:'transport-failed',mayRun:false,finalLine:line});
     await finish(1);
     return;
@@ -1837,6 +1873,7 @@ try {
     const rulesVersion = rememberWorkerRules(digest);
     tracker?.set({ rulesVersion });
     checkNewThreadAdmission();
+    checkModelAccessAdmission(opts.model);
     const th = await call('thread/start', {
       cwd: path.resolve(opts.cwd), model: opts.model, sandbox: opts.sandbox, approvalPolicy: APPROVAL_POLICY,
       developerInstructions: [browserHowTo, projectWorkerInstructions(digest), reviewHowTo].filter(Boolean).join('\n'),
@@ -1862,6 +1899,7 @@ try {
     follow(threadId, ts.turn?.id ?? ts.turnId);
   } else if (cmd === 'turn') {
     if (!opts.thread || !text) die('turn needs --thread and a prompt');
+    if (PROF?.kind === 'trae') checkModelAccessAdmission(opts.model ?? threadModel(PROF.home, opts.thread));
     const talkback = talkbackContext(opts.thread);
     const config = { ...talkback.config, ...TRAE_MCP_CONFIG };
     const resumedDigest=loadDigest();
@@ -1980,10 +2018,16 @@ try {
   const msg = String(e?.message ?? e);
   if (['start', 'turn'].includes(cmd) && failureKind(msg) === 'thread-too-large') await rejectRequestBuffer(attemptThreadId ?? opts.thread);
   const policy = isPolicyBlock({ status: 'failed', error: msg });
-  const infrastructureMiss = (['trae','ttadk'].includes(PROF?.kind)&&failureKind(msg)==='unavailable')||(PROF?.kind==='trae'&&/access (temporarily )?restricted|\b983\b/i.test(msg));
+  const exactAccessModel = PROF?.kind === 'trae' && isModelAccessFailure(msg)
+    ? (opts.model ?? (opts.thread ? threadModel(PROF.home, opts.thread) : null)) : null;
+  const infrastructureMiss = !!exactAccessModel || (['trae','ttadk'].includes(PROF?.kind)&&failureKind(msg)==='unavailable')
+    || (PROF?.kind==='trae'&&/access (temporarily )?restricted|\b983\b/i.test(msg));
   if (infrastructureMiss && !policy) {
-    const p = noteFailure(PROF.home, msg, Date.now(), opts.model ?? null);
-    if (p?.modelPause) console.log(unavailableHint(p));
+    if (exactAccessModel) recordModelAccess(exactAccessModel);
+    else {
+      const p = noteFailure(PROF.home, msg, Date.now(), opts.model ?? null);
+      if (p?.modelPause) console.log(unavailableHint(p));
+    }
   }
   if (policy) {
     recordPolicyBlock(opts.model, msg);

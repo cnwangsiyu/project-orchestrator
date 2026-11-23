@@ -90,6 +90,11 @@ export function presentRoute(plan, view, context) {
   if(context.refreshRequired) notes.push('--fresh: account status refreshed through authenticated read-only interfaces.');
   const staleAccounts=snapshot.accounts.filter(a=>a.auth.source==='last-good-stale').map(a=>a.id);
   if(staleAccounts.length) why.push(`Status read incomplete: retained last-good stale observations for ${staleAccounts.join(', ')}; original sample ages and admission checks remain in force.`);
+  for (const h of snapshot.health.filter(h => h.modelAccess && h.restricted && h.until !== null)) {
+    const due = new Date(h.until).toISOString();
+    why.push(`Model lane demoted: ${h.accountId}:${h.modelId} (provider denied model access); ${h.probeInFlight
+      ? `recovery probe in progress (due ${due})` : h.until <= snapshot.decisionAt ? `recovery probe due since ${due}` : `next recovery probe at ${due}`}.`);
+  }
   if(context.retryAssumption) why.push(context.retryAssumption);
   if(t.transportFailures?.length) why.push(`Ignored ${new Set(t.transportFailures.map(a=>a.thread&&a.turn?`${a.thread}:${a.turn}`:a.id)).size} transport-failed turn(s): no quality attempt, --failures increment, repeat gate or dominance floor.`);
   if(t.environmentFailures?.length) why.push(`Ignored ${new Set(t.environmentFailures.map(a=>a.thread&&a.turn?`${a.thread}:${a.turn}`:a.id)).size} blocked-environment turn(s) for quality escalation: ${f['failure-kind'] ? 'explicit --failure-kind takes precedence' : 'retry on the same tier and company lanes'}; retain the actual model/effort floor.`);

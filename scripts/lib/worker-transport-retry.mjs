@@ -26,7 +26,7 @@ export const transportHealthBlock = ({ home, model, now = Date.now() }) => {
   if (!health || !lanes || !queues) return 'lane health metadata unreadable';
   const family = poolOf(model), id = String(model ?? '').toLowerCase();
   for (const row of [health,health.pools?.[family],health.modelPauses?.[id]].filter(Boolean))
-    if (row.pausedUntil > now || row.kind === 'hard' && row.pausedUntil) return 'lane paused or awaiting a recovery probe';
+    if (row.pausedUntil > now || ['hard', 'model-access'].includes(row.kind) && row.pausedUntil) return 'lane paused or awaiting a recovery probe';
   for (const row of [lanes[id],queues[family]].filter(Boolean)) {
     const at = row.t ?? row.at;
     if (at <= now && now - at <= 30 * 60000 && (row.stalled || row.state === 'stalled'

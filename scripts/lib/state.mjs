@@ -757,7 +757,7 @@ export const analyze = (data) => {
   // A family whose hard pause has ended gets a recovery probe in the background (lib/trae-health.mjs); it stays out of
   // routing until the probe succeeds. TRAE_PROBE=0 turns this off (tests).
   if (tr?.home && tr.healthy && process.env.TRAE_PROBE !== '0') for (const d of claimProbes(tr.home)) {
-    try { spawn(process.execPath, [WORKER, '--account', tr.name, 'probe', '--model', d.model, '--probe-claim', d.claim], { detached: true, stdio: 'ignore', cwd: os.homedir() }).unref(); } catch {}
+    try { spawn(process.execPath, [WORKER, '--account', tr.name, 'probe', '--model', d.model, '--probe-claim', d.claim, ...(d.scope === 'model' ? ['--probe-scope', 'model'] : [])], { detached: true, stdio: 'ignore', cwd: os.homedir() }).unref(); } catch {}
   }
   const poolPauses = tr?.home ? readPoolPauses(tr.home) : {};
   // A model TRAE no longer resolves is out of .models on its own, its family-mates untouched (lib/trae-health.mjs).
@@ -877,7 +877,9 @@ export const leanLines = (st, data) => {
     else out.push(`TRAE CLI unavailable — ${TR.reason}`);
     for (const [pool, r] of Object.entries(TR.poolPauses ?? {})) out.push(`TRAE ${pool} models ${r.pausedUntil > Date.now() ? `paused until ${fmt(r.pausedUntil)}, then probed` : 'being probed for recovery'} (${String(r.reason).slice(0, 120)}): route.mjs uses the next model family meanwhile`);
     // A model TRAE no longer resolves stays out for 6 h; its family-mates keep routing (2026-11-13: TRAE dropped Gemini).
-    for (const [model, r] of Object.entries(TR.modelPauses ?? {})) out.push(`TRAE model ${model} unavailable since ${fmt(r.t)} (${String(r.reason).slice(0, 120)}); routing skips it`);
+    for (const [model, r] of Object.entries(TR.modelPauses ?? {})) out.push(r.kind === 'model-access'
+      ? `TRAE model ${model} demoted (provider access denied); recovery probe ${r.pausedUntil > Date.now() ? `due ${fmt(r.pausedUntil)}` : 'due or in progress'}`
+      : `TRAE model ${model} unavailable since ${fmt(r.t)} (${String(r.reason).slice(0, 120)}); routing skips it`);
     // Daily depletion queues only this model; route.mjs can substitute an eligible model on new dispatches.
     for (const [model, q] of Object.entries(TR.quota?.daily ?? {})) if (q?.depleted)
       out.push(`TRAE ${model}'s daily high-priority quota is used up${q.resetsAt ? ` until ${fmt(q.resetsAt)}` : ''}: its requests use low priority; depletion alone does not prove a queue, and fresh ready/progress telemetry can show immediate capacity`);

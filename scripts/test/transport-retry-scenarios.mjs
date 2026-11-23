@@ -12,6 +12,9 @@ import { createTaskSpec } from '../lib/pipeline/taskspec.mjs';
 import { TRANSPORT_CONTINUE_MESSAGE, transportQuotaBlock, transportHealthBlock, transportSourceBlock } from '../lib/worker-transport-retry.mjs';
 import { claimTransportContinuation, markTransportContinuationStarting, saveTransportContinuation, savedLaunch, saveLaunch } from '../lib/worker-launch.mjs';
 
+import { claimProbes, isModelAccessFailure, modelProbeResult, noteModelAccessFailure, noteSuccess, readModelPauses, startModelProbe } from '../lib/trae-health.mjs';
+
+const accessError = 'stream disconnected before completion: Model access temporarily restricted';
 const errors = [
   // W569 and W513 had the same exact terminal message (masked named logs).
   'stream disconnected before completion: Transport error: network error: error decoding response body',
@@ -165,6 +168,67 @@ try {
     assert.equal(f.calls().filter(r=>r.backoffMs===60000).length,1); assert.match(r.stderr,/\[transport-retry\].*after 60s/);
     assert.deepEqual(f.outcomes().map(r=>[r.result,r.rounds]),[['transport-failed',0],['pass',0]]);
     assert.equal(fs.readFileSync(path.join(f.dir,'final.md'),'utf8'),'DONE transport fixture\n');
+  });
+  check('model access denial persists and does not auto-continue or restart a saved lane', () => {
+    const f = follower('model-access', { errors: [accessError] });
+    const result = f.run(); assert.equal(result.status, 1, result.stderr + result.stdout);
+    assert.match(result.stdout, /model-access: gpt-6.1-sol demoted; recovery probe due/);
+    assert.match(result.stderr, /provider model access unavailable; re-route/);
+    assert.doesNotMatch(result.stderr, /continue manually:/);
+    assert.equal(f.calls().filter(row => row.method === 'turn/start').length, 1);
+    assert.deepEqual(f.outcomes().map(r => [r.result,r.rounds]), [['transport-failed',0]]);
+    assert.equal(f.run().status, 1);
+    assert.equal(f.calls().filter(row => row.method === 'thread/start').length, 1);
+  });
+  check('W754: after five overlapping failures and 40 minutes, route Sol while one Astra probe gets the lane', () => {
+    const home = path.join(tmp,'w754'); fs.mkdirSync(home);
+    const ASTRA = 'gpt-6-astra', SOL = 'gpt-6.2-sol', min = 60000;
+    const t0 = Date.parse('2026-11-23T22:25:00Z'), reset = t0 + 150 * min;
+    assert.ok(isModelAccessFailure(accessError));
+    assert.ok(isModelAccessFailure('Access denied for model GPT-6-Astra'));
+    assert.equal(isModelAccessFailure(`${accessError} (983)`), false);
+    assert.equal(isModelAccessFailure('403 Forbidden from login'), false);
+    const first = noteModelAccessFailure(home, ASTRA.toUpperCase(), t0, reset);
+    assert.equal(first.pausedUntil, t0 + 30 * min);
+    for (let i = 1; i < 5; i++) assert.deepEqual(noteModelAccessFailure(home, ASTRA, t0 + i * min, reset), first);
+    const runAt = at => {
+      const state = { checkedAt: at, codexAccounts: [{ name:'trae', kind:'trae', home, live:true, healthy:true, windows:[],
+        models:[ASTRA,SOL], load:{[SOL]:{percent:47,t:at}},
+        quota:{sampledAt:at,daily:{[ASTRA]:{used:0,limit:58,remaining:58,depleted:false,resetsAt:reset},
+          [SOL]:{used:10,limit:80,remaining:70,depleted:false,resetsAt:reset}}} }], claude:null, errors:{}, history:{} };
+      fs.writeFileSync(cache,JSON.stringify(state));
+      const out = spawnSync(process.execPath,[path.join(scripts,'route.mjs'),'implement-hard','--impact','service','--failures','0','--dry','--json'],
+        {encoding:'utf8',env:{...process.env,HOME:home,RULES_SHARED:home,QUOTA_CACHE:cache,CODEX_ACCOUNTS:path.join(home,'none.json'),
+          ROUTE_NOW:String(at),ROUTE_SNAPSHOT_FILE:'',TRAE_PROBE:'0',QUOTA_LOG:'0',ROUTE_LOG:'0'}});
+      assert.equal(out.status,0,out.stderr); return JSON.parse(out.stdout);
+    };
+    assert.equal(runAt(t0 + 25 * min).pick.model,SOL);
+    const at = t0 + 40 * min;
+    let route = runAt(at); assert.equal(route.pick.model,SOL);
+    assert.match(route.why.join('\n'), /Model lane demoted: trae:gpt-6-astra.*recovery probe due since 2026-11-23T22:55:00/);
+    assert.equal(route.plan.task.qualityFailures,0);
+    assert.deepEqual(claimProbes(home,t0 + 30 * min - 1),[]);
+    noteSuccess(home,SOL,at); noteSuccess(home,ASTRA,at);
+    assert.ok(readModelPauses(home,at)[ASTRA], 'an unrelated or older completion cannot clear the pause');
+    const [probe] = claimProbes(home,at); assert.equal(probe.model,ASTRA); assert.equal(probe.scope,'model');
+    assert.deepEqual(claimProbes(home,at),[]);
+    assert.equal(modelProbeResult(home,ASTRA,probe.claim,true,'',at),false,'unstarted probe cannot clear');
+    assert.equal(startModelProbe(home,ASTRA,probe.claim,at),true);
+    assert.equal(startModelProbe(home,ASTRA,probe.claim,at),false);
+    route = runAt(at); assert.equal(route.pick.model,SOL); assert.match(route.why.join('\n'), /recovery probe in progress/);
+    assert.equal(modelProbeResult(home,ASTRA,probe.claim,false,accessError,at),true);
+    const secondAt = at + 60 * min;
+    assert.equal(readModelPauses(home,at)[ASTRA].pausedUntil,secondAt);
+    assert.deepEqual(claimProbes(home,secondAt-1),[]);
+    const [second] = claimProbes(home,secondAt);
+    assert.equal(startModelProbe(home,ASTRA,second.claim,secondAt),true);
+    assert.equal(modelProbeResult(home,ASTRA,second.claim,false,accessError,secondAt),true);
+    assert.equal(readModelPauses(home,secondAt)[ASTRA].pausedUntil,reset,'two-hour backoff is capped by the provider reset');
+    const [third] = claimProbes(home,reset); assert.equal(startModelProbe(home,ASTRA,third.claim,reset),true);
+    assert.equal(modelProbeResult(home,ASTRA,second.claim,true,'',reset),false);
+    assert.equal(modelProbeResult(home,ASTRA,third.claim,true,'',reset),true);
+    assert.deepEqual(readModelPauses(home,reset),{});
+    assert.equal(runAt(at).pick.model,ASTRA,'successful probe puts Astra back on the normal quality ladder');
   });
   check('second transport failure stops with an exact continue command and receipt prevents wait duplication', () => {
     const f = follower('retry-stop',{errors}); const r = f.run(); assert.equal(r.status,1,r.stderr+r.stdout);

@@ -134,6 +134,14 @@ Claude-only tools retain their route. Hard-tier Astra on main uses its separate 
 standing decision; max effort, reset redemption and explicit review approvals
 retain their separate gates.
 
+A TRAE provider denial scoped to one model keeps that account/model out of
+ordinary routing until its claimed recovery probe succeeds. After the first
+30 minutes, a denied probe increases the wait (60, 120, then at most 240
+minutes), capped at the provider daily reset. Normal quota checks can dispatch
+one read-only probe; tasks continue on qualified company alternatives. The
+route explanation names the paused lane and its next probe time. Explicit 983
+and cyberPolicy signals retain their separate family-wide recovery rules.
+
 The recorded decision lives in `_shared/personal-priority-window.json`; keep
 its fields and the user's verbatim quote. Its inclusive start and optional
 exclusive expiry (`until: null` means until revoked) bound the window. An

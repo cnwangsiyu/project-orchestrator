@@ -18,6 +18,8 @@
 //   -32600 with "model", "model … not found/does not exist/unsupported"): applies to the model, not its family. One
 //   failure pauses just that model id (lowercased) for 6 hours, then the next real launch tries again — no probe — and
 //   its family-mates stay usable (user, 2026-11-13, after TRAE removed Gemini from its model list).
+// - model-access (model-specific provider access denial without 983): pause just that lane, then require its claimed
+//   recovery probe. Repeated denied probes back off 30/60/120/240 min, bounded by the provider day reset.
 //
 // Per model family (2026-11-10: TRAE restricted only its GPT models while DeepSeek and Gemini kept working, and a queue
 // overflow is per model): a failure recorded with its model pauses only that family (gpt, deepseek, gemini, seed…);
@@ -57,6 +59,30 @@ const UNAVAILABLE = /is unavailable because its metadata could not be resolved|m
 const REQUEST_BUFFER = /(?:^|[^\d])-4399(?!\d)|exceeded request buffer limit/i;
 const RESTRICTED_REASON = "restricted by the model vendor's policy until 08:00 China time (00:00 UTC); probed then";
 const nextUtcMidnight = (now) => (Math.floor(now / 86400000) + 1) * 86400000;
+// An explicit provider 983 retains its existing family-wide schedule. Only
+// model-scoped access text without that code enters this lane recovery path.
+export const isModelAccessFailure = (why) => !/\b983\b/.test(String(why)) && (
+  /\bmodel\b[ \t:='"`\w./-]{0,80}\baccess (?:is )?(?:temporarily )?(?:restricted|denied)\b/i.test(String(why))
+  || /\b(?:access (?:is )?(?:denied|restricted)|(?:not|no longer) (?:have access|allowed access))\b[^\n]{0,60}\bmodel\b/i.test(String(why)));
+const MODEL_ACCESS = 'model-access';
+const accessPause = (model, streak, now, resetsAt = null) => ({ kind: MODEL_ACCESS, model, streak, t: now,
+  pausedUntil: Math.min(now + HARD_BACKOFF_MIN[Math.min(streak - 1, HARD_BACKOFF_MIN.length - 1)] * 60000,
+    Number.isFinite(resetsAt) && resetsAt > now ? resetsAt : nextUtcMidnight(now)),
+  resetsAt: Number.isFinite(resetsAt) && resetsAt > now ? resetsAt : null,
+  reason: 'provider denied access to this model lane', generation: randomUUID() });
+export const noteModelAccessFailure = (home, model, now = Date.now(), resetsAt = null) => {
+  const id = modelId(model);
+  if (!id) return null;
+  return update(home, (rec) => {
+    const previous = rec.modelPauses?.[id];
+    // Only a claimed failed probe advances the streak; overlapping failed
+    // turns neither multiply the backoff nor invalidate the running probe.
+    if (previous?.kind === MODEL_ACCESS) return previous;
+    const pause = accessPause(id, 1, now, resetsAt);
+    write(home, { ...rec, modelPauses: { ...rec.modelPauses, [id]: pause } });
+    return pause;
+  });
+};
 export const failureKind = (why) => {
   const w = why ?? '';
   return REQUEST_BUFFER.test(w) ? 'thread-too-large' : AUTH.test(w) ? 'auth' : HARD.test(w) || RESTRICTED.test(w) ? 'hard' : UNAVAILABLE.test(w) ? 'unavailable' : 'transient';
@@ -196,7 +222,7 @@ export const noteSuccess = (home, model = null, now = Date.now()) => update(home
 export const readPause = (home, now = Date.now()) => { const r = read(home); return r.status==='UNKNOWN'?r:r.pausedUntil && r.pausedUntil > now ? r : null; };
 // The models TRAE no longer resolves, still out of routing now: {<model id>: record}.
 export const readModelPauses = (home, now = Date.now()) =>
-  Object.fromEntries(Object.entries(read(home).modelPauses ?? {}).filter(([, r]) => r?.pausedUntil && r.pausedUntil > now));
+  Object.fromEntries(Object.entries(read(home).modelPauses ?? {}).filter(([, r]) => r?.pausedUntil && (r.pausedUntil > now || r.kind === MODEL_ACCESS)));
 // The families out of routing now: {pool: record} — paused, or a hard pause that ended and awaits its probe.
 const awaitingProbe = (r, now) => r?.kind === 'hard' && r.pausedUntil && r.pausedUntil <= now;
 export const readPoolPauses = (home, now = Date.now()) =>
@@ -210,9 +236,45 @@ export const claimProbes = (home, now = Date.now()) => update(home, (rec) => {
       const generation=r.generation??randomUUID(), claim=randomUUID();
       due.push({pool,model:r.model,generation,claim}); rec.pools[pool]={...r,generation,probingAt:now,probeClaim:claim};
     }
+  for (const [model, r] of Object.entries(rec.modelPauses ?? {})) {
+    const family = rec.pools?.[poolOf(model)];
+    if (r.kind !== MODEL_ACCESS || !r.pausedUntil || r.pausedUntil > now
+      || rec.pausedUntil > now || family?.kind === 'hard' || family?.pausedUntil > now
+      || r.probingAt && now - r.probingAt < PROBE_STALE_MIN * 60000) continue;
+    const claim = randomUUID();
+    due.push({ model, generation: r.generation, claim, scope: 'model' });
+    rec.modelPauses[model] = { ...r, probingAt: now, probeClaim: claim, startedAt: null };
+  }
   if (due.length) write(home, rec);
   return due;
 }, []);
+
+// The lock admits one probe process, even if the same launch is delivered twice.
+export const startModelProbe = (home, model, claim, now = Date.now()) => update(home, (rec) => {
+  const id = modelId(model), r = rec.modelPauses?.[id], family = rec.pools?.[poolOf(id)];
+  if (r?.kind !== MODEL_ACCESS || !claim || r.probeClaim !== claim || r.startedAt != null
+    || !Number.isFinite(r.probingAt) || now < r.probingAt || r.probingAt < r.pausedUntil || now - r.probingAt >= PROBE_STALE_MIN * 60000
+    || rec.pausedUntil > now || family?.kind === 'hard' || family?.pausedUntil > now) return false;
+  rec.modelPauses[id] = { ...r, startedAt: now };
+  write(home, rec);
+  return true;
+}, false);
+
+export const modelProbeResult = (home, model, claim, ok, why, now = Date.now()) => update(home, (rec) => {
+  const id = modelId(model), r = rec.modelPauses?.[id];
+  if (r?.kind !== MODEL_ACCESS || !claim || r.probeClaim !== claim
+    || !Number.isFinite(r.startedAt) || r.startedAt < r.pausedUntil || now < r.startedAt) return false;
+  if (ok) delete rec.modelPauses[id];
+  else {
+    rec.modelPauses[id] = accessPause(id, r.streak + (isModelAccessFailure(why) ? 1 : 0), now, r.resetsAt);
+    if (/\b983\b/.test(String(why))) {
+      const pool = poolOf(id);
+      rec.pools = { ...rec.pools, [pool]: restrictionRecord(rec.pools?.[pool] ?? {}, why, now, id) };
+    }
+  }
+  write(home, rec);
+  return true;
+}, false);
 // A probe's result: success clears the family; a failed restriction probe waits for the next UTC midnight,
 // other hard failures another PROBE_EVERY_MIN minutes. Recognize restrictions in older records' reason text too.
 export const probeResult = (home, model, ok, why = '', now = Date.now(), claim = null) => update(home, (rec) => {

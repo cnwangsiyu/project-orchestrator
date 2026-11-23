@@ -141,7 +141,8 @@ export function createSnapshot(raw, options = {}) {
       && nonnegative(h.probe.completedAt) && h.probe.completedAt >= h.probe.startedAt && h.probe.completedAt <= decisionAt;
     return { accountId: h.accountId, modelId: h.modelId ? modelId(h.modelId) : null, family: h.family ?? null,
       generation: h.generation ?? 'UNKNOWN', restricted: !cleared && h.restricted !== false, until: nonnegative(h.until) ? h.until : null,
-      recovery: cleared ? 'cleared' : h.recovery === 'not-due' ? 'not-due' : 'awaiting-probe', evidence };
+      recovery: cleared ? 'cleared' : h.recovery === 'not-due' ? 'not-due' : 'awaiting-probe',
+      ...(h.modelAccess === true ? { modelAccess: true, probeInFlight: h.probeInFlight === true } : {}), evidence };
   }).sort((a, b) => compare(fingerprint(a), fingerprint(b)));
   const approvals = rows(raw.approvals ?? [], 'approvals').map(cloneApproval).filter(Boolean).sort((a, b) => compare(a.id, b.id));
   const personalPriority = !unsupported && !invalidTime && activePersonalPriority(raw.personalPriority, decisionAt);
