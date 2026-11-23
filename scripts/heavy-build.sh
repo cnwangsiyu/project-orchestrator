@@ -11,6 +11,8 @@
 # Res owns measured admission and the legacy fallback gates; this wrapper does not bypass them.
 set -u
 set -m
+# Stock CocoaPods otherwise searches public GitHub with the failing (possibly internal) dependency text.
+export COCOA_PODS_ENV=development
 res="${RES_COMMAND:-$HOME/.claude/orchestrator/_shared/res}"
 by="${HEAVY_BUILD_BY:?set HEAVY_BUILD_BY to a unique session holder name}"
 project="${HEAVY_BUILD_PROJECT:?set HEAVY_BUILD_PROJECT}"
