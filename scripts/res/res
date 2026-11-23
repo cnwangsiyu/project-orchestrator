@@ -2832,7 +2832,13 @@ try:
                     caps=sorted(remote[id][2]), dynamic=id in dynamic_ids, resolverOnly='leases-only' in description.split(),
                     category=hold.get('claim_kind') or ('LIGHT' if id.startswith('devbox-cn-light') else 'HEAVY'))
     if action in ('slot-host', 'devbox-registry'):
-        value = lease_json(request) if action == 'slot-host' else [lease_json(id) for id in remote if not id.startswith('devbox-host-')]
+        # Remote also contains non-devbox resources (e.g. the Darwin mini2).
+        # Keep standalone legacy slots and catalog-only rows on devbox hosts.
+        value = lease_json(request) if action == 'slot-host' else [
+            lease_json(id) for id in remote if id.startswith('devbox-cn-') and (
+                remote[id][1] in host_rows or re.fullmatch(r'devbox-cn-(?:[0-9]+|light(?:-[0-9]+)?)', id)
+            )
+        ]
         print(json.dumps(json_safe(value),allow_nan=False)); committed = True; sys.exit(0)
     # A pool name (prefix of slot ids such as devbox-cn) is a valid status request: it shows that pool's waiters.
     if action == 'status' and request and request not in rows and not (host_rows and request in ('devbox-cn','devbox-cn-light')) and not any(key.startswith(request + '-') for key in rows):
@@ -4376,16 +4382,7 @@ case "${1:-}" in
   devbox-registry)
     shift
     [ "$#" -eq 0 ] || die 'devbox-registry accepts no id'
-    registry_json=$(pool_report devbox-registry '') || exit $?
-    if [ -f "$RES_DIR/mini2-config.json" ] && [ -n "$(reg_line mini2-exec-1)" ]; then
-      mini2_json=$(mini2_controller devbox-registry) || exit $?
-      registry_json=$(printf '%s' "$registry_json" | python3 -B -c 'import json,sys; print(json.dumps(json.load(sys.stdin)+json.loads(sys.argv[1])))' "$mini2_json")
-    fi
-    if local_controller enabled; then
-      local_json=$(local_controller devbox-registry) || exit $?
-      registry_json=$(printf '%s' "$registry_json" | python3 -B -c 'import json,sys; print(json.dumps(json.load(sys.stdin)+json.loads(sys.argv[1])))' "$local_json")
-    fi
-    printf '%s\n' "$registry_json" ;;
+    pool_report devbox-registry '' ;;
   slot-host|reserved-disk)
     action="$1"; shift
     [ "$#" -le 1 ] || die "$action accepts at most one id"

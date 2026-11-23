@@ -110,24 +110,55 @@ export function parseArgs(args) {
   return opts;
 }
 
+const legacyPoolSlot = pool => pool === 'devbox-cn' ? /^devbox-cn-[0-9]+$/ : /^devbox-cn-light(?:-[0-9]+)?$/;
+const devboxHostRow = /^devbox-host-([A-Za-z0-9][A-Za-z0-9_.-]*)$/;
+const foreignPlatform = description => [...description.matchAll(/(?:^|\s)os=([^\s]+)/gi)]
+  .some(([, platform]) => platform.toLowerCase() !== 'linux');
+
 function registryRows(dir) {
   const text = fs.readFileSync(path.join(dir, 'resources.tsv'), 'utf8');
+  const entries = text.trim().split('\n').map(line => {
+    const [slot, kind, policy, , ...description] = line.split('\t');
+    return [slot, kind, policy, description.join('\t')];
+  });
   if (/^devbox-host-/m.test(text)) {
-    // One catalog implementation: the source allocator resolves host rows,
-    // legacy aliases, pending cleanup and previously issued dynamic IDs.
+    // The allocator expands leases, but only the raw devbox rows can establish
+    // membership and the SSH target. A broad catalog (e.g. an older res) cannot.
+    const defined = new Map(), hosts = [], nonLinux = new Set();
+    for (const [slot, kind, , description] of entries) {
+      if (kind !== 'remote') continue;
+      const targets = new Set(description.match(/[A-Za-z_][A-Za-z0-9_.-]*@[A-Za-z0-9][A-Za-z0-9.-]*/g));
+      if (targets.size !== 1) continue;
+      const [target] = targets, [user, address] = target.split('@');
+      const host = address.replace(/\.$/, '');
+      if (foreignPlatform(description)) nonLinux.add(host);
+      const source = { user, host, target };
+      const label = devboxHostRow.exec(slot)?.[1];
+      if (label) {
+        const aliases = /(?:^|\s)aliases=([^\s]+)/.exec(description)?.[1].split(',') || [];
+        hosts.push({ ...source, aliases, prefix: `devbox-cn-${label}-` });
+      } else if (legacyPoolSlot('devbox-cn').test(slot) || legacyPoolSlot('devbox-cn-light').test(slot)) {
+        defined.set(slot, source);
+      }
+    }
     const result = spawnSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'res/res'), ['devbox-registry'], {
       env: { ...process.env, RULES_SHARED: dir, RES_DIR: dir }, encoding: 'utf8', timeout: 30000, maxBuffer: 8 * 2 ** 20 });
     if (result.status !== 0) throw Error('dynamic devbox catalog failed: ' + (result.stderr || result.error?.message || result.status));
-    return JSON.parse(result.stdout);
+    return JSON.parse(result.stdout).filter(row => {
+      if (row.kind !== 'remote' || typeof row.slot !== 'string' || nonLinux.has(row.host)) return false;
+      const matches = source => source && source.target === row.target && source.host === row.host && source.user === row.user;
+      if (defined.has(row.slot) || !row.dynamic) return !row.dynamic && matches(defined.get(row.slot));
+      return hosts.some(source => matches(source) && (source.aliases.includes(row.slot)
+        || row.slot.startsWith(source.prefix) && /^[1-9][0-9]*$/.test(row.slot.slice(source.prefix.length))));
+    });
   }
-  const rows = text.trim().split('\n').map(line => {
-    const [slot, kind, policy, , ...description] = line.split('\t');
-    const addresses = [...description.join('\t').matchAll(/\b([A-Za-z_][A-Za-z0-9_.-]*)@((?:\d{1,3}\.){3}\d{1,3})\b/g)];
+  return entries.flatMap(([slot, kind, policy, description]) => {
+    if (foreignPlatform(description)) return [];
+    const addresses = [...description.matchAll(/\b([A-Za-z_][A-Za-z0-9_.-]*)@((?:\d{1,3}\.){3}\d{1,3})\b/g)];
     const unique = [...new Set(addresses.map(m => `${m[1]}@${m[2]}`))];
-    const caps = /\bcaps=([A-Za-z0-9_,.-]+)/.exec(description.join(' '))?.[1].split(',') || [];
-    return { slot, kind, policy, caps, ...(unique.length === 1 ? { user: addresses[0][1], host: addresses[0][2], target: unique[0] } : {}) };
+    const caps = /\bcaps=([A-Za-z0-9_,.-]+)/.exec(description)?.[1].split(',') || [];
+    return [{ slot, kind, policy, caps, ...(unique.length === 1 ? { user: addresses[0][1], host: addresses[0][2], target: unique[0] } : {}) }];
   });
-  return rows;
 }
 
 export function dynamicShardCapacity(rows, opts) {
@@ -145,7 +176,10 @@ export function dynamicShardCapacity(rows, opts) {
 }
 
 export function readRegistry(dir, pool) {
-  const pattern = pool === 'devbox-cn' ? /^devbox-cn-\d+$/ : /^devbox-cn-light(?:-\d+)?$/;
+  if (pool !== 'devbox-cn' && pool !== 'devbox-cn-light') return [];
+  const pattern = legacyPoolSlot(pool);
+  // Verified host-row leases (including generated aliases) are shared by both
+  // weighted pools. Only standalone legacy slots belong to a single pool.
   return registryRows(dir).filter(row => row.kind === 'remote' && (row.policy === 'open' || row.dynamic && row.resolverOnly) && (row.dynamic || pattern.test(row.slot)));
 }
 

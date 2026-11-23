@@ -29,7 +29,26 @@ const pin=value=>{
 };
 try {
   fs.mkdirSync(path.join(root,'devbox-metrics'));
-  fs.writeFileSync(path.join(root,'resources.tsv'),`devbox-host-fixture\tremote\topen\t-\trunner@${host} caps=node root=/tmp/runner\nmini2-exec-1\tremote\topen\t-\tSecond Mac mini bytedance@${mini} caps=cmake-native dynamic-host\nheavy-build\tslot\topen\t-\tFull build dynamic-local\nheavy-lane-1\tslot\topen\t-\tLocal lane\n`);
+  const registry=path.join(root,'resources.tsv');
+  const legacyRegistry=[
+    `devbox-host-fixture\tremote\topen\t-\trunner@${host} caps=node root=/tmp/runner aliases=devbox-cn-1,devbox-cn-light`,
+    'devbox-host-other\tremote\topen\t-\trunner@192.0.2.2 caps=node',
+    'devbox-cn-2\tremote\topen\t-\tlegacy@192.0.2.3 caps=node',
+    `devbox-cn-setup-8\tremote\tnever\t-\trunner@${host}`,
+    `mini2-exec-1\tremote\topen\t-\tSecond Mac mini bytedance@${mini} os=darwin caps=cmake-native`,
+    'heavy-build\tslot\topen\t-\tFull build',
+    'heavy-lane-1\tslot\topen\t-\tLocal lane',
+    'unrelated-remote\tremote\topen\t-\trunner@192.0.2.4 caps=node',
+  ].join('\n')+'\n';
+  const catalog=()=>{
+    const rows=JSON.parse(run('devbox-registry')); assert.ok(Array.isArray(rows)); rows.forEach(pin);
+    return rows.map(row=>row.slot).sort();
+  };
+  const baseSlots=['devbox-cn-1','devbox-cn-2','devbox-cn-fixture-1','devbox-cn-light','devbox-cn-other-1','devbox-cn-setup-8'];
+  fs.writeFileSync(registry,legacyRegistry);
+  assert.deepEqual(catalog(),baseSlots);
+  fs.writeFileSync(registry,legacyRegistry.replace('os=darwin caps=cmake-native','os=darwin caps=cmake-native dynamic-host')
+    .replace('Full build\n','Full build dynamic-local\n'));
   fs.writeFileSync(path.join(root,'machine.conf'),'DEVBOX_MAX_BYPASS=3\n');
   write('devbox-metrics/'+host+'.json',{at:now,cores:64,load5:0,memAvailableGiB:256,freeGiB:2000,io_some_avg60:0,io_full_avg10:0});
   write('mini2-config.json',{enabled:true,maintenance:false,load5Limit:'derived',minAvailableGiB:'derived',minFreeGiB:20,owner:'fixture',generation:0});
@@ -38,14 +57,14 @@ try {
   write('local-sample.json',{at:now,host:os.hostname(),cores:14,totalGiB:64,load5:0,availableGiB:64,freeGiB:1000,pressure:1,swapGiB:0,compressorGiB:0});
   write('mini2-facts.json',{at:now,host:mini,caps:['cmake-native']});
   const args=['--by','fixture','--project','fixture','--task','shape','--for','shape','--pid',String(process.pid)];
-  const dv=/^slot=(\S+)$/m.exec(run('wait-pool','devbox-cn-light',...args,'--timeout','0'))[1];
+  const dv=/^slot=(\S+)$/m.exec(run('wait-pool','devbox-cn-light',...args,'--hard-exclude-slot','devbox-cn-1,devbox-cn-light','--timeout','0'))[1];
   const mk=JSON.parse(run('wait-pool','mini2',...args,'--need','cmake-native'));
   const resolved=JSON.parse(run('slot-host',dv)); pin(resolved); assert.equal(resolved.host,host);
   pin(JSON.parse(run('slot-host',mk.slot)));
+  const mini2=JSON.parse(run('slot-host','mini2-exec-1')); pin(mini2); assert.equal(mini2.host,mini);
+  assert.ok(JSON.parse(run('status','mini2','--json')).capacity);
   pin(JSON.parse(run('slot-host','heavy-lane-1')));
-  const rows=JSON.parse(run('devbox-registry')); assert.ok(Array.isArray(rows)); rows.forEach(pin);
-  assert.ok(rows.filter(row=>row.host===host).length>=2);
-  assert.ok(rows.filter(row=>row.host===mini).length>=2);
+  assert.deepEqual(catalog(),[...baseSlots,'devbox-cn-fixture-2'].sort());
   for(const pool of ['devbox-cn','devbox-cn-light','mini2','local','local-light']) {
     const map=JSON.parse(run('pool-capacity',pool)); assert.ok(!Array.isArray(map));
     const entry=map[pool==='mini2'?mini:pool.startsWith('local')?os.hostname():host];
@@ -99,5 +118,5 @@ try {
   run('return',dv,'--by','fixture');
   write('clean.json',{generation:mk.lease.generation,clean:true});
   run('return',mk.slot,'--by','fixture','--receipt',path.join(root,'clean.json'));
-  console.log('PASS pinned slot-host object, devbox-registry slot rows, pool-capacity host map');
+  console.log('PASS pinned slot-host and pool-capacity shapes; devbox-only catalog before/after mini migration');
 } finally { fs.rmSync(root,{recursive:true,force:true}); }

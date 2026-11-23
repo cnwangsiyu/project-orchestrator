@@ -296,7 +296,7 @@ async function run(f, extra = [], command = 'echo {shard}/{shards}', signalWhen,
   const args = extra[0] === 'gc' ? extra : extra[0] === 'prewarm'
     ? ['prewarm', '--project', 'fixture', '--repo', f.repo, '--ref', 'HEAD', '--out', out, '--timeout', timeout, ...extra.slice(1), '--command', command]
     : ['--project', 'fixture', '--task', 'scenario', '--repo', f.repo, '--out', out, '--timeout', timeout, ...extra, '--', command];
-  const child = spawn(process.execPath, [script, ...args], { env: f.env, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, [f.runner || script, ...args], { env: f.env, stdio: ['ignore', 'pipe', 'pipe'] });
   let stdout = '', stderr = ''; child.stdout.on('data', b => { stdout += b; }); child.stderr.on('data', b => { stderr += b; });
   let finished = false;
   const closed = new Promise(resolve => child.on('close', code => { finished = true; resolve(code); }));
@@ -1882,6 +1882,47 @@ async function dynamicProbeScenarios() {
   console.log('PASS dynamic runner: hourly hardware refresh with fresh admission metrics, registered/cache roots, failure fallback and backoff');
 }
 
+async function registryScopeScenarios() {
+  for (const pool of ['devbox-cn', 'devbox-cn-light']) {
+    const f = fixture({ dynamic: true, canonical: true });
+    const linux = '192.0.2.1', darwin = 'mac-mini.fixture.local', oppositeHost = '192.0.2.2';
+    const opposite = pool === 'devbox-cn' ? 'devbox-cn-light-2' : 'devbox-cn-2';
+    fs.appendFileSync(path.join(f.shared, 'resources.tsv'), [
+      `mini2-exec-1\tremote\topen\t-\tmini@${darwin} os=darwin`,
+      `devbox-host-mac\tremote\tnever\t-\tmini@${darwin} os=darwin`,
+      `${opposite}\tremote\topen\t-\tbob@${oppositeHost} caps=node`,
+      '',
+    ].join('\n'));
+    // Replace only this fixture's catalog command. A mixed old/incorrect res
+    // still reaches the real runner, with every SSH operation recorded by the shim.
+    f.runner = path.join(f.dir, 'devbox-run.mjs');
+    fs.copyFileSync(script, f.runner);
+    fs.symlinkSync(path.join(path.dirname(script), 'lib'), path.join(f.dir, 'lib'), 'dir');
+    fs.mkdirSync(path.join(f.dir, 'res'));
+    const extra = [
+      { slot: 'mini2-exec-1', kind: 'remote', policy: 'open', dynamic: true, host: darwin, user: 'mini', target: `mini@${darwin}` },
+      { slot: 'heavy-build', kind: 'slot', policy: 'open', dynamic: true, host: darwin, user: 'mini', target: `mini@${darwin}` },
+      { slot: 'devbox-cn-mac-1', kind: 'remote', policy: 'open', dynamic: true, host: darwin, user: 'mini', target: `mini@${darwin}` },
+      { slot: 'devbox-cn-first-1', kind: 'remote', policy: 'open', dynamic: true, host: '192.0.2.3', user: 'nobody', target: 'nobody@192.0.2.3' },
+      { slot: opposite, kind: 'remote', policy: 'open', dynamic: true, host: oppositeHost, user: 'bob', target: `bob@${oppositeHost}` },
+    ].map(row => ({ ...row, caps: [], resolverOnly: false }));
+    fs.writeFileSync(path.join(f.dir, 'res', 'res'), `#!${process.execPath}
+const args=process.argv.slice(2);
+const result=require('node:child_process').spawnSync(${JSON.stringify(f.config.realRes)},args,{encoding:'utf8'});
+process.stderr.write(result.stderr || '');
+if(result.status===0 && args[0]==='devbox-registry') console.log(JSON.stringify([...JSON.parse(result.stdout),...${JSON.stringify(extra)}]));
+else process.stdout.write(result.stdout || '');
+process.exit(result.status ?? 1);
+`, { mode: 0o755 });
+    const result = await run(f, ['--pool', pool]); ok(result); returned(f);
+    assert.equal(result.summary.shards[0].host, linux);
+    const events = f.events();
+    assert.ok(events.some(event => event.op === 'probe' && event.host === linux));
+    assert.ok(events.every(event => !event.host || event.host === linux), 'foreign pool, Darwin and mismapped targets see no SSH');
+  }
+  console.log('PASS both runner pools ignore mixed-catalog foreign rows before probing or running');
+}
+
 async function dynamicScenarios() {
   const f = fixture({ dynamic: true });
   const r = await run(f, ['--cores', '2', '--mem-gib', '4']); ok(r); returned(f);
@@ -1949,6 +1990,7 @@ async function scenarios() {
   const only = process.env.DEVBOX_TEST_CASE;
   if (!only || only === 'dynamic-review') { await reviewRegressions(); if (only) return; }
   if (!only || only === 'dynamic-probe') { await dynamicProbeScenarios(); if (only) return; }
+  if (!only || only === 'registry-scope') { await registryScopeScenarios(); if (only) return; }
   if (!only || only === 'dynamic') { await dynamicScenarios(); if (only) return; }
   if (!only || only === 'tmpdir') {
     const f = fixture();
