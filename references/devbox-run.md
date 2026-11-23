@@ -186,8 +186,8 @@ paths; without one, the input lives at `ROOT/inputs/NAME/HASH`. SHA-256 covers
 file bytes; directory hashing covers sorted relative UTF-8 file names, newline,
 size in bytes, newline, then each file's bytes. Empty directories do not affect
 the hash. Symlinks and special files are refused. `size` is a GiB budget, not an
-exact-byte assertion; positive sizes bound the verified content. Seeded inputs
-require a SHA-256 and a positive size.
+exact-byte assertion; positive sizes bound the verified content. `seed=` requires
+`rebuildable=yes`, a SHA-256 hash (not `none`), and a positive size.
 
 A local seed path is scanned before any SSH or lease using the existing
 credential transfer gate, then staged as a task-owned archive. Private paths,
