@@ -164,6 +164,12 @@ returns that wrapper's acquired pair. Named legacy takes (`res take heavy-lane-N
 including `HEAVY_BUILD_LANE` pins) remain supported, but close dynamic admission
 machine-wide while held. Unmigrated hosts retain the legacy gates below.
 
+The first three weighted local lane leases reuse `heavy-lane-1` through
+`heavy-lane-3`; the first build claim shows as `heavy-build` plus a lane. A
+familiar ID does not mean the hold is legacy. In `res pool-capacity local`, an
+open weighted gate reports `gate: "headroom"` with non-null `reserved`; a legacy
+or incomplete hold reports `gate: "legacy-or-incomplete-hold"`.
+
 ## Changes in v1.8
 
 Normal lanes 1/2 now require load1m <=1.25 x physical cores and memorystatus available memory >=12 GiB.

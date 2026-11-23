@@ -842,6 +842,11 @@ res pool-capacity local|local-light|mini2   JSON measured headroom and declared 
                                       mini2 claims: wait-pool mini2 [--profile heavy|light] [--cores N] [--mem-gib GiB] [--disk-gib GiB]
                                       claims keep their declared reservation for life; acquired IDs are opaque
                                       slot-host also resolves local/mini2 IDs; return the exact acquired IDs
+                                      the first three weighted local lane leases reuse heavy-lane-1..3;
+                                      the first build pair shows as heavy-build plus a lane
+                                      a familiar ID does not imply a legacy hold: res pool-capacity local
+                                      shows gate=headroom with non-null reserved for open weighted admission,
+                                      versus gate=legacy-or-incomplete-hold for legacy/incomplete holds
                                       legacy res take heavy-lane-N / HEAVY_BUILD_LANE still work,
                                       but named legacy takes close dynamic admission machine-wide while held
 res heavy-check [--pid <pid>]         print lane-aware load limit and available memory; 5 if overloaded
