@@ -84,10 +84,34 @@ try {
       }
     }
   }
-  for (const parameter of ['sign', 'signature', 'token', 'expires', 'x-amz-algorithm', 'x-tos-credential', 'auth', 'ticket']) {
-    const result = maskLogText(`https://images.example.invalid/item?width=100&${parameter}=FAKE_SIGNED_ONLY&other=200`);
-    assert.ok(!result.text.includes('100')); assert.ok(!result.text.includes('200')); assert.ok(!result.text.includes('FAKE_SIGNED_ONLY'));
-    assert.ok(result.text.includes(parameter + '=')); assert.equal(result.masked, 3);
+  for (const parameter of ['sign', 'signature', 'sig', 'token', 'access_token', 'auth', 'authorization',
+    'expires=1720000000&signature', 'x-tos-security-token', 'X-Amz-Signature', 'policy', 'code', '%73ig']) {
+    const base = 'https://images.example.invalid/item';
+    const input = `${base}?width=100&${parameter}=FAKE_SIGNED_ONLY&other=200`;
+    assert.equal(maskLogText(input).text, `${base}?[MASKED]`);
+    assert.equal(maskLogText(maskLogText(input).text).masked, 0);
+  }
+  for (const base of ['https://files.feishu.cn/space/api/box/stream/download/all/asset',
+    'https://open.larksuite.com/drive/attachments/fixture', 'https://api.meego.com/assets/download']) {
+    const input = `[fixture](${base}?opaque=invented-value&mode=original#section)`;
+    const expected = `[fixture](${base}?[MASKED]#section)`;
+    assert.equal(maskLogText(input).text, expected);
+    for (const jsonl of [false, true]) {
+      const record = JSON.stringify({ output: input });
+      const masked = maskLogText(record, { jsonl });
+      assert.equal(JSON.parse(masked.text).output, expected);
+      assert.equal(maskLogText(masked.text, { jsonl }).masked, 0);
+    }
+  }
+  const escapedLink = String.raw`{"output":"https://fixture.invalid/a?sig=fake\u0026width=still-private\nnext"}`;
+  for (const jsonl of [false, true]) {
+    assert.equal(JSON.parse(maskLogText(escapedLink, { jsonl }).text).output,
+      'https://fixture.invalid/a?[MASKED]\nnext');
+  }
+  for (const input of ['https://example.invalid/docs?page=2', 'https://example.invalid/search?q=foo',
+    'https://github.com/search?q=webshell&type=code', 'https://docs.feishu.cn/docs/search?q=fixture',
+    'https://feishu.cn.example.invalid/stream/download?q=fixture', 'https://example.invalid/page?q=foo#sig=fixture']) {
+    assert.equal(maskLogText(input).text, input);
   }
   const fakeHost = 'fakeabc123def456ghi789jkl012mno345.example.invalid';
   for (const image of [`![${fakeHost}](https://images.example.invalid/item)`, `<img alt="${fakeHost}" src="https://images.example.invalid/item">`])

@@ -302,28 +302,41 @@ export function maskLogText(text, { jsonl = false } = {}) {
   const blocks = maskPrivateKeyBlocks(text);
   let masked = blocks.masked;
   const result = processLog(blocks.text, jsonl, (string) => {
-    const urls = maskExecURLQueries(string); masked += urls.masked;
-    const prose = maskDocumentCredentials(urls.text); masked += prose.masked;
-    const result = maskPasswordStyleValues(prose.text); masked += result.masked;
+    const prose = maskDocumentCredentials(string); masked += prose.masked;
+    const urls = maskExecURLQueries(prose.text); masked += urls.masked;
+    const result = maskPasswordStyleValues(urls.text); masked += result.masked;
     return result.text;
   });
   return { text: result, masked, lines: text ? text.split('\n').length - Number(text.endsWith('\n')) : 0 };
 }
 
-// Temporary exec links can use short, otherwise innocuous parameter names.
-// Preserve the URL and parameter names, masking every value for Kross/webshell
-// links and credential-named parameters on other URLs.
+// Signed links and download endpoints hide the entire query. Other temporary
+// exec links keep parameter names for troubleshooting.
+const downloadHost = /(?:^|\.)(?:feishu\.cn|feishucdn\.com|larksuite\.com|larkoffice\.com|meego\.(?:cn|com))\.?$/i;
+const downloadPath = /(?:^|[/_.-])(?:attachments?|stream(?:ing)?|downloads?)(?=$|[/_.-])/i;
+
 export function maskExecURLQueries(text) {
   let masked = 0;
-  const result = text.replace(/https?:[\\]*\/[\\]*\/[^\s"'<>]+/gi, (raw, index) => {
+  const result = text.replace(/https?:[\\]*\/[\\]*\/(?:[^\s"'<>\\]|\\\/)+/gi, (raw, index) => {
     const context = text.slice(Math.max(0, index - 160), index);
     const closing = context.endsWith('(') && raw.endsWith(')') ? ')' : '';
     if (closing) raw = raw.slice(0, -1);
-    const signed = [...raw.matchAll(/[?&]([^=&#]+)=/g)].some(match => {
-      let name; try { name = decodeURIComponent(match[1]); } catch { name = match[1]; }
-      return /sign|signature|token|expires|auth|ticket|(?:^|amp;)x-amz-|(?:^|amp;)x-tos-/i.test(name);
-    });
-    const temporary = signed || /kross|webshell|\/(?:exec|terminal)(?:[/?]|$)/i.test(raw.replace(/\\\//g, '/'))
+    const parts = /^([^?#]+)\?([^#]*)(#.*)?$/.exec(raw);
+    if (!parts) return raw + closing;
+    const [, base, query, fragment = ''] = parts;
+    const names = new URLSearchParams(query.replace(/&amp;/gi, '&')).keys();
+    const signed = [...names].some(name => /^(?:sig|policy|code)$/i.test(name) || /sign|signature|token|expires|auth|ticket|(?:^|amp;)x-amz-|(?:^|amp;)x-tos-/i.test(name));
+    let download = false;
+    try {
+      const url = new URL(base.replace(/\\\//g, '/'));
+      if (downloadHost.test(url.hostname)) download = downloadPath.test(decodeURIComponent(url.pathname));
+    } catch { /* Not a valid download endpoint. */ }
+    if (signed || download) {
+      if (!query || /^(?:\[MASKED\]|%5BMASKED%5D)$/i.test(query)) return raw + closing;
+      masked++;
+      return base + '?[MASKED]' + fragment + closing;
+    }
+    const temporary = /kross|webshell|\/(?:exec|terminal)(?:\/|$)/i.test(base.replace(/\\\//g, '/'))
       || /(?:webshell|exec|terminal)[_-]?(?:url|link)?["'\s]*[:=]["'\s]*$/i.test(context);
     return raw.replace(/([?&]([^=&#]*)=)([^&#]*)/g, (param, prefix, key, value) => {
       let name; try { name = decodeURIComponent(key); } catch { name = key; }
@@ -343,10 +356,12 @@ export function maskDocumentCredentials(text, depth = 0) {
     const ranges = jsonStringRanges(text);
     for (const range of ranges.reverse()) {
       try {
-        const urls = maskExecURLQueries(range.decoded), prose = maskDocumentCredentials(urls.text, depth + 1), nested = maskPasswordStyleValues(prose.text);
+        const nested = maskDocumentCredentials(range.decoded, depth + 1);
+        const urls = maskExecURLQueries(nested.text);
+        const prose = maskPasswordStyleValues(urls.text);
         if (urls.masked || prose.masked || nested.masked) {
           masked += urls.masked + prose.masked + nested.masked;
-          text = text.slice(0, range.index) + JSON.stringify(nested.text) + text.slice(range.index + range.length);
+          text = text.slice(0, range.index) + JSON.stringify(prose.text) + text.slice(range.index + range.length);
         }
       } catch {}
     }
