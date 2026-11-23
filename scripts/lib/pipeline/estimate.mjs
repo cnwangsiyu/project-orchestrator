@@ -3,6 +3,23 @@ import { known, freeze, reason } from './common.mjs';
 import { company, policyModel, isAstra } from './common.mjs';
 import { modelPreference } from './policy.mjs';
 import { candidateParts } from './candidates.mjs';
+import { transportLaneFailures } from '../worker-completion.mjs';
+
+export const laneTransportDemoted = (snapshot, candidate) =>
+  transportLaneFailures(snapshot.transportFailures, candidate.accountId, candidate.modelId, snapshot.decisionAt) >= 2;
+
+export const usesExclusiveInfraOverflow = (task, snapshot) =>
+  task.infraRetry && !task.qualityFailures && snapshot.personalPriority?.mode === 'exclusive';
+
+// After an infrastructure failure, an optimistic start or a repeatedly failing
+// lane cannot veto standing main overflow. A verified short queue still can.
+export function companyServesInfraRetry(snapshot, { candidate, estimate }) {
+  const { account } = candidateParts(snapshot, candidate);
+  return company(account) && !account.fallbackUnavailable && !laneTransportDemoted(snapshot, candidate)
+    && !estimate.stalled && !estimate.capacityReset && Number.isFinite(estimate.startDelayMin)
+    && estimate.startDelayMin <= (snapshot.personalFallback?.queueWaitMinutes ?? 5)
+    && (account.kind !== 'trae' || estimate.balance?.freeNow || estimate.basis === 'queue');
+}
 
 export function estimateCandidate(task, snapshot, candidate, { capacityReset = false } = {}) {
   const { account: a, lane: l } = candidateParts(snapshot, candidate), now = snapshot.decisionAt;

@@ -2,7 +2,7 @@ import {mandatoryReview} from '../review-policy-data.mjs';
 import { policyModel, matchesModel, isAstra, newestRelease, VERSION, EFFORTS, array, company, companyDevice, known, modelId, familyOf, isReview, adversarial, result, reason, fingerprint, stable } from './common.mjs';
 import { candidateParts, enumerateCandidates } from './candidates.mjs';
 import { modelPreference, policyEffort, claudeBrowserPolicy } from './policy.mjs';
-import { estimateCandidate } from './estimate.mjs';
+import { companyServesInfraRetry, estimateCandidate, usesExclusiveInfraOverflow } from './estimate.mjs';
 import { standingPersonalFallback, hardPersonalXhighFallback } from './personal-fallback.mjs';
 import { standingPersonalPriority, personalPriorityGuard, exclusiveCodexTask } from './personal-priority.mjs';
 import { ttadkReserve } from './ttadk-reserve.mjs';
@@ -205,8 +205,13 @@ export function pContent(t, s, c) {
   return pass('pContent');
 }
 export function pModelFit(t, s, c, context = {}) {
-  if (t.infraRetry && !t.qualityFailures && context.companyEligible && !company(candidateParts(s,c).account))
-    return deny('pModelFit', 'INFRA_RETRY_COMPANY_FIRST', 'An infrastructure retry returns to a qualified company lane; its retry count and completed personal turns do not establish a quality escalation.', c);
+  const account = candidateParts(s,c).account;
+  if (t.infraRetry && !t.qualityFailures && context.companyEligible && !company(account)) {
+    const mainOverflow = usesExclusiveInfraOverflow(t, s) && standingPersonalPriority(t, s, c, account)
+      && context.companyRows && !context.companyRows.some(r => r.predicates.every(p => p.ok) && companyServesInfraRetry(s, r));
+    if (!mainOverflow)
+      return deny('pModelFit', 'INFRA_RETRY_COMPANY_FIRST', 'An infrastructure retry returns to a qualified company lane; its retry count and completed personal turns do not establish a quality escalation.', c);
+  }
   if (t.infraRetry && !t.qualityFailures && t.environmentFailures?.some(a => company(s.accounts.find(account => account.id === a.actual?.accountId)))
     && !company(candidateParts(s,c).account))
     return deny('pModelFit', 'ENVIRONMENT_RETRY_COMPANY_ONLY', 'An environment-blocked company turn retries on company lanes without advancing the quality ladder.', c);

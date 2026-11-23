@@ -60,7 +60,12 @@ export const exclusiveCodexTask = (task, snapshot) => snapshot.personalPriority?
 export function personalMainWaitText(task, snapshot) {
   const account = snapshot.accounts.find(a => a.id === 'main' && a.kind === 'chatgpt');
   const used = account?.budget?.value?.weekly?.used;
-  return `[personal-main-wait] main ${Number.isFinite(used) ? used : '?'}%: ${task.flags?.name ?? task.taskId} waiting (redeem main card?)`;
+  const weekly = freshPersonalWeekly(snapshot);
+  // Below the weekly exhaustion boundary, a reset card would not address the
+  // refusal (e.g. launch headroom, missing transport or an excluded lane).
+  const redeem = weekly?.used >= 99 && known(account?.resetCards) > 0 && !task.flags?.['no-redeem'];
+  const blocker = personalPriorityGuard(snapshot) ?? 'no executable main lane for this task';
+  return `[personal-main-wait] main ${Number.isFinite(used) ? used : '?'}%: ${task.flags?.name ?? task.taskId} waiting (${redeem ? 'redeem main card?' : blocker})`;
 }
 
 export function standingPersonalPriority(task, snapshot, candidate, account) {

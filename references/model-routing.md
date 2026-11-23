@@ -126,8 +126,11 @@ queue/congestion or a missing required model/capability. During the window,
 new personal Codex work goes only to `main`; `b` remains code-refused. The dated
 2026-11-21 refusal of `b` does not depend on the window being present, valid or
 active; revoking a window cannot silently re-enable that account. If main
-also cannot serve the task, defer with `[personal-main-wait]`. Claude-only
-tools retain their route. Hard-tier Astra on main uses its separate enabled
+also cannot serve the task, defer with `[personal-main-wait]`; it asks about a
+reset card only for fresh weekly exhaustion with a card available. For an
+infrastructure retry, transport-demoted or unmeasured TRAE capacity does not
+block ready main overflow, but a verified short company queue still wins.
+Claude-only tools retain their route. Hard-tier Astra on main uses its separate enabled
 standing decision; max effort, reset redemption and explicit review approvals
 retain their separate gates.
 

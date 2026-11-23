@@ -113,6 +113,48 @@ try {
     for (const l of raw.lanes.filter(l => l.accountId === 'trae')) l.position = 6;
     assert.equal(run(raw).plan.primary.candidate.accountId, 'main');
   });
+  check('W746 infra retry: unavailable company capacity overflows to healthy main, not b', () => {
+    const raw = fixture(46, true), companyAstra = 'gpt-6-astra', companySol = 'gpt-6.2-sol';
+    const ttadk = raw.accounts.find(a => a.id === 'ttadk');
+    ttadk.providerDenied = true;
+    const b = raw.accounts.find(a => a.id === 'b');
+    Object.assign(b.budget.weekly, { used: 15, projected: 15 });
+    const trae = raw.accounts.find(a => a.id === 'trae'), sol = raw.lanes.find(l => l.accountId === 'trae');
+    trae.catalog = [companyAstra, companySol];
+    raw.models.push({ ...raw.models.find(m => m.id === ASTRA), id: companyAstra },
+      { ...raw.models.find(m => m.id === SOL), id: companySol });
+    const astra = { ...sol, id: `trae:${companyAstra}`, modelId: companyAstra };
+    raw.lanes.push(astra);
+    Object.assign(sol, { id: `trae:${companySol}`, modelId: companySol, mode: 'low-priority',
+      readyAt: null, loadPercent: null, position: 501, drainPerMin: 0, queueState: 'queued' });
+    raw.transportFailures = [1, 2, 3].map(i => ({ t: NOW - i * 60000, account: 'trae', modelId: companyAstra, thread: 'fixture', turn: `turn-${i}` }));
+    const retry = task({ category: 'implement-hard', impact: 'service', sandboxCeiling: 'danger-full-access', flags: {
+      failures: 2, 'failure-kind': 'infra', 'exclude-account': 'ttadk', 'needs-cli': 'ssh,bytedcli' } });
+    const checkOverflow = () => {
+      const { plan, snapshot, view } = run(raw, retry);
+      assert.equal(plan.task.qualityFailures, 0);
+      assert.equal(plan.kind, 'launch'); assert.equal(view.pick.account, 'main');
+      assert.equal(view.pick.model, ASTRA); assert.equal(view.pick.effort, 'xhigh');
+      assert.equal(view.pick.approvalRef, ref); assert.equal(view.pick.astraApprovalRef, fallback.hardAstraDecisionRef);
+      assert.equal(validatePlan(plan, snapshot).ok, true);
+      assert.ok(plan.rejected.some(p => p.reason?.code === 'PERSONAL_B_REFUSED'));
+      assert.doesNotMatch(view.tellUser.join('\n'), /personal-main-wait|redeem main card/);
+    };
+    Object.assign(astra, { readyAt: null, position: 501, drainPerMin: 0, queueState: 'queued' });
+    checkOverflow(); // Stalled rows can pass eligibility predicates but cannot serve the retry.
+    Object.assign(astra, { readyAt: NOW, position: 0, drainPerMin: 1, queueState: 'ready' });
+    Object.assign(sol, { position: null, drainPerMin: null, queueState: null });
+    checkOverflow(); // An unmeasured Sol start does not block the approved retry.
+    Object.assign(sol, { position: 5, drainPerMin: 1, queueState: 'queued' });
+    assert.equal(run(raw, retry).view.pick.account, 'trae', 'verified short queue still wins');
+    sol.position = 6;
+    checkOverflow();
+    Object.assign(sol, { loadPercent: 42, position: 0, queueState: 'ready' });
+    const ready = run(raw, retry).view.pick;
+    assert.equal(ready.account, 'trae'); assert.equal(ready.model, companySol);
+    raw.transportFailures = [];
+    assert.equal(run(raw, retry).view.pick.model, companyAstra, 'healthy free Astra still wins');
+  });
   check('exactly 5% main headroom launches; insufficient headroom uses an eligible company lane', () => {
     assert.equal(run(fixture(95)).plan.primary.candidate.accountId, 'main');
     const { plan } = run(fixture(96, true));
@@ -121,9 +163,30 @@ try {
   for (const used of [96, 99, 100]) check(`main ${used}% with company unavailable waits, despite idle b and Claude`, () => {
     const { plan, view } = run(fixture(used));
     assert.equal(plan.kind, 'defer'); assert.equal(plan.trigger, 'personal-main-capacity');
-    assert.equal(plan.reason.text, `[personal-main-wait] main ${used}%: W-main waiting (redeem main card?)`);
+    const reason = used >= 99 ? 'redeem main card?' : 'main 96% used: below launch headroom 5%';
+    assert.equal(plan.reason.text, `[personal-main-wait] main ${used}%: W-main waiting (${reason})`);
     assert.equal(view.pick, null); assert.deepEqual(view.needsUserOK, []);
     assert.ok(view.tellUser.includes(plan.reason.text));
+  });
+  check('main wait card advice requires fresh weekly exhaustion and an available card', () => {
+    const raw = fixture(46);
+    raw.accounts[0].transport = false;
+    let { plan } = run(raw);
+    assert.equal(plan.trigger, 'personal-main-capacity');
+    assert.match(plan.reason.text, /main 46%:.*no executable main lane/);
+    assert.doesNotMatch(plan.reason.text, /redeem/);
+    raw.accounts[0].budget.weekly.used = 99;
+    raw.accounts[0].resets.count = 0;
+    ({ plan } = run(raw));
+    assert.doesNotMatch(plan.reason.text, /redeem/);
+    raw.accounts[0].resets.count = 3;
+    ({ plan } = run(raw, task({ flags: { 'no-redeem': true } })));
+    assert.doesNotMatch(plan.reason.text, /redeem/);
+    raw.accounts[0].budget = { status: 'KNOWN', value: raw.accounts[0].budget,
+      sampledAt: NOW, receivedAt: NOW, source: 'last-good-stale' };
+    ({ plan } = run(raw));
+    assert.match(plan.reason.text, /fresh weekly quota/);
+    assert.doesNotMatch(plan.reason.text, /redeem/);
   });
   check('hard Astra, excluded main and unavailable main transport never select b', () => {
     const raw = fixture(96), hard = task({ category: 'implement-hard', impact: 'service' });
@@ -312,7 +375,7 @@ try {
     const cli = () => JSON.parse(execFileSync(process.execPath, [path.join(root, 'scripts/route.mjs'), 'analysis', '--json', '--owner', owner], { encoding: 'utf8', env }));
     const result = cli(); assert.equal(result.kind, 'defer'); assert.equal(result.pick, null);
     assert.ok(result.tellUser.some(text => text.startsWith('[personal-main-90]')));
-    assert.ok(result.tellUser.includes('[personal-main-wait] main 96%: unnamed-task waiting (redeem main card?)'));
+    assert.ok(result.tellUser.includes('[personal-main-wait] main 96%: unnamed-task waiting (main 96% used: below launch headroom 5%)'));
     cli(); const events = readEvents().filter(row => row.kind?.startsWith('personal-main-'));
     assert.equal(events.filter(row => row.kind === 'personal-main-90').length, 1);
     assert.equal(events.filter(row => row.kind === 'personal-main-wait').length, 1);

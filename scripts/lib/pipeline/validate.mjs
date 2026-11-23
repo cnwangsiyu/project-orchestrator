@@ -3,6 +3,7 @@ import { enumerateCandidates, candidateParts } from './candidates.mjs';
 import { company, result, stable } from './common.mjs';
 import { argvMatches, planFingerprint } from './plan.mjs';
 import { createTaskSpec } from './taskspec.mjs';
+import { estimateCandidate, usesExclusiveInfraOverflow } from './estimate.mjs';
 
 export function validateSeat(task, snapshot, candidate, context = {}) {
   return evaluateCandidate(task, snapshot, candidate, context);
@@ -27,9 +28,13 @@ export function validatePlan(plan, snapshot, { proposed = null } = {}) {
     const enumeration = enumerateCandidates(seat.task, snapshot);
     const context = seat === plan.primary ? {} : { primary: plan.primary.candidate,
       author: plan.task.previousAttempts.find((a) => a.id === seat.task.authorAttemptId) };
-    const eligibleCompany = enumeration.candidates.some((c) => company(candidateParts(snapshot, c).account)
-      && evaluateCandidate(seat.task, snapshot, c, context).every((r) => r.ok));
+    const companyCandidates = enumeration.candidates.filter(c => company(candidateParts(snapshot, c).account));
+    const companyRows = usesExclusiveInfraOverflow(seat.task, snapshot) ? companyCandidates.map(candidate => ({ candidate,
+      predicates: evaluateCandidate(seat.task, snapshot, candidate, context), estimate: estimateCandidate(seat.task, snapshot, candidate) })) : null;
+    const eligibleCompany = companyRows ? companyRows.some(r => r.predicates.every(p => p.ok))
+      : companyCandidates.some(c => evaluateCandidate(seat.task, snapshot, c, context).every(p => p.ok));
     checks.push(...validateSeat(seat.task, snapshot, seat.candidate, { ...context, companyEligible: eligibleCompany,
+      ...(companyRows ? { companyRows } : {}),
       companyUnknown: enumeration.diagnostics.some((d) => snapshot.accounts.some((a) => company(a) && d.subjects.includes(a.id))),
       ...(seat === plan.primary ? { proposed } : {}) }));
     check(argvMatches(plan, seat), 'LAUNCH_ARGV_MISMATCH', 'Launch arguments must match account/model/effort, scope and sandbox.');

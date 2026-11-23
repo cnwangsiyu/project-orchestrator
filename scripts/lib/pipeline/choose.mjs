@@ -1,7 +1,7 @@
 import { policyModel, isAstra, EFFORTS, company, companyDevice, adversarial, compare, freeze, stable, known, isReview } from './common.mjs';
 import { candidateParts } from './candidates.mjs';
 import { matchingApproval } from './filters.mjs';
-import { transportLaneFailures } from '../worker-completion.mjs';
+import { companyServesInfraRetry, laneTransportDemoted, usesExclusiveInfraOverflow } from './estimate.mjs';
 import { modelPreference, hardPreference, TIERS, SOL, ASTRA } from './policy.mjs';
 import { personalLaunchChoice, personalLaunchExplanation } from '../personal-launch.mjs';
 export const prefersPersonalCodex = task => ['lookup','extract','analysis','implement','implement-hard','debug','science','review','draft','build-run','image-gen','second-opinion'].includes(task.category);
@@ -16,7 +16,7 @@ export function orderCandidates(task, snapshot, rows) {
     cohort = cohort.filter(r => !company(candidateParts(snapshot, r.candidate).account) || !candidateParts(snapshot, r.candidate).account.fallbackUnavailable);
   const stalled = (r) => r.estimate.stalled || r.reviewers?.some(s=>s.estimate.stalled);
   if(cohort.some(r=>!stalled(r))) cohort=cohort.filter(r=>!stalled(r));
-  const demoted = r => transportLaneFailures(snapshot.transportFailures, r.candidate.accountId, r.candidate.modelId, snapshot.decisionAt) >= 2;
+  const demoted = r => laneTransportDemoted(snapshot, r.candidate);
   // Prefer a healthy qualified lane in the same quota class. Keep a failing lane
   // eligible when it is the only option; transport evidence never bans a lane.
   const healthyClasses = new Set(cohort.filter(r => r.ok && !demoted(r)).map(r => company(candidateParts(snapshot,r.candidate).account)));
@@ -29,12 +29,19 @@ export function orderCandidates(task, snapshot, rows) {
   if (priority?.mode === 'exclusive') {
     // Exclusive selects the personal overflow account, never the quota class.
     // Keep company capacity through the existing short-queue threshold before
-    // considering main; unknown wait evidence does not establish overflow.
-    const companyServing = cohort.filter(r => r.ok && company(parts(r).account)
-      && !parts(r).account.fallbackUnavailable && !stalled(r) && !r.estimate.capacityReset
-      && (r.estimate.confidence === 'UNKNOWN'
-        || r.estimate.startDelayMin <= (snapshot.personalFallback?.queueWaitMinutes ?? 5)));
-    if (companyServing.length) cohort = companyServing;
+    // considering main. On ordinary dispatch, unknown wait evidence does not
+    // establish overflow; infra recovery with ready main needs observed capacity.
+    const usableCompany = cohort.filter(r => r.ok && company(parts(r).account) && !stalled(r)
+      && !parts(r).account.fallbackUnavailable && !r.estimate.capacityReset);
+    const infraOverflow = usesExclusiveInfraOverflow(task, snapshot);
+    const measuredCompany = infraOverflow ? usableCompany.filter(r => companyServesInfraRetry(snapshot, r)) : [];
+    const mainOverflow = infraOverflow && !measuredCompany.length ? cohort.filter(r => r.ok && ready(r)
+      && r.candidate.accountId === 'main' && r.predicates.some(p => p.personalFallback?.approvalRef === priority.userDecisionRef)) : [];
+    const companyServing = usableCompany.filter(r => r.estimate.confidence === 'UNKNOWN'
+      || r.estimate.startDelayMin <= (snapshot.personalFallback?.queueWaitMinutes ?? 5));
+    if (measuredCompany.length) cohort = measuredCompany;
+    else if (mainOverflow.length) cohort = mainOverflow;
+    else if (companyServing.length) cohort = companyServing;
   }
   const hardAstra = task.tier === 'hard' ? cohort.filter(r => r.ok && ready(r) && isAstra(r.candidate.modelId)
     && r.predicates.some(p => p.personalFallback?.astraApprovalRef && p.personalFallback.preferOverLowerCompany)) : [];

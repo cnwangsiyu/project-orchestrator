@@ -51,8 +51,11 @@ first under the existing quality ladder, free-lane preferences and queue
 threshold. Personal quota is overflow for company quota exhaustion, excessive
 queues/congestion or a missing required model/capability, and admits new
 personal Codex work only on main. Its fresh weekly reading must retain 5%
-headroom; if neither company capacity nor main can take the task, defer with
-the verbatim `[personal-main-wait]` alert. Claude-only tools keep their route.
+headroom. On an infrastructure retry, a verified short company queue still
+wins, but transport-demoted or unmeasured TRAE lanes do not veto ready main
+overflow. If neither can take the task, `[personal-main-wait]` states the
+blocker and asks about a reset card only when a fresh weekly reading shows
+exhaustion and a card is available. Claude-only tools keep their route.
 The window follows the account across card redemption, with an explicit expiry
 or `until: null` (until revoked). Six-hour deadline ties apply outside exclusive
 mode. `personal-priority.mjs add FROM none REF QUOTE --mode exclusive
