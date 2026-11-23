@@ -179,7 +179,8 @@ try {
   // Real router and quota entry points, with all provider I/O stubbed before they import state.mjs.
   const browserCommand=path.join(tmp,'node_repl');
   fs.writeFileSync(browserCommand,'fixture runtime',{mode:0o700});
-  fs.writeFileSync(path.join(tmp,'config.toml'),`[mcp_servers.node_repl]\ncommand = ${JSON.stringify(browserCommand)}\n`);
+  const browserCli=path.join(tmp,'codex'); fs.writeFileSync(browserCli,'fixture executable',{mode:0o700});
+  fs.writeFileSync(path.join(tmp,'config.toml'),`[mcp_servers.node_repl]\ncommand = ${JSON.stringify(browserCommand)}\n[mcp_servers.node_repl.env]\nCODEX_CLI_PATH = ${JSON.stringify(browserCli)}\n`);
   const preload = path.join(tmp, 'preload.mjs');
   fs.writeFileSync(preload, `
 import fs from 'node:fs';
@@ -194,7 +195,7 @@ fs.existsSync = ${checkCompany.toString()};
 const stat=fs.statSync;
 fs.statSync=(file,...args)=>file==='/Applications/ChatGPT.app'?{isDirectory:()=>true}:stat(file,...args);
 const childExec=childProcess.execFileSync;
-childProcess.execFileSync=(file,args,...rest)=>file==='ps'&&args.join(' ')==='-axo comm='?'/Applications/ChatGPT.app/Contents/Resources/extension-host/macos/arm64/ChatGPT for Chrome':file==='pgrep'?'fixture host':childExec(file,args,...rest);
+childProcess.execFileSync=(file,args,...rest)=>file==='/usr/libexec/PlistBuddy'?'26.1117':file==='ps'&&args.join(' ')==='-axo comm='?'/Applications/ChatGPT.app/Contents/Resources/extension-host/macos/arm64/ChatGPT for Chrome':file==='pgrep'?'fixture host':childExec(file,args,...rest);
 syncBuiltinESMExports();
 `);
   const route = (args, state = missing, mode = 'unknown-both', registryText = JSON.stringify(registry)) => {

@@ -57,7 +57,7 @@ import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { shellQuote } from './lib/pipeline/presentation.mjs';
-import { probeBrowserRuntime } from './lib/browser-runtime.mjs';
+import { probeBrowserRuntime, chromeExtensionHostConnected, bundledCodexCliPath } from './lib/browser-runtime.mjs';
 import { runWorkerTalkback, createTalkbackRelay } from './lib/worker-talkback.mjs';
 import { noteFailure, noteSuccess, notePolicyRestriction, rememberThreadModel, threadModel, probeResult, failureKind } from './lib/trae-health.mjs';
 import { createQueueRecorder } from './lib/company-load.mjs';
@@ -531,9 +531,18 @@ if (cmd === 'browser-setup' || cmd === 'computer-use-setup') {
   if (!fs.existsSync(path.join(repl, 'bin', 'node_repl'))) die(`ChatGPT.app's node_repl not found under ${repl}: install the ChatGPT desktop app`, 1);
   if (!fs.existsSync(chromePlugin)) die(`bundled chrome plugin not found under ${market}: open the ChatGPT desktop app once (it unpacks the bundled plugins)`, 1);
   try { if (fs.lstatSync(cfg).isSymbolicLink()) die(`${cfg} is a symlink to another home's config; browser-setup only writes an account's own config (TTADK homes have one)`, 1); } catch {}
-  // The ChatGPT Chrome extension must be installed and enabled, with its native host registered.
-  try { execFileSync(process.execPath, [path.join(chromePlugin, 'scripts', 'check-extension-installed.js'), '--browser', 'chrome', '--json'], { encoding: 'utf8', timeout: 20000 }); }
-  catch (e) { die(`ChatGPT Chrome extension check failed (${String(e.stdout || e.message).split('\n')[0]}): in the ChatGPT app, Settings > Computer use > Google Chrome > install the browser extension`, 1); }
+  // Check only the native messaging manifest and running executable. Chrome's
+  // Local State/profile is outside the worker's readable scope.
+  try {
+    const manifest = JSON.parse(execFileSync(process.execPath, [path.join(chromePlugin, 'scripts', 'check-native-host-manifest.js'), '--browser', 'chrome', '--json'], { encoding: 'utf8', timeout: 20000 }));
+    if (manifest.correct !== true) die('ChatGPT Chrome native host manifest is not configured: install the browser extension through ChatGPT Settings > Computer use > Google Chrome', 1);
+  } catch (e) {
+    if (/EPERM|EACCES/.test(String(e.code) + String(e.stdout) + String(e.stderr) + String(e.message)))
+      console.error('note: cannot verify the Chrome native host manifest from this session (EPERM/EACCES); checking the running host');
+    else die('ChatGPT Chrome native host manifest check failed: install the browser extension through ChatGPT Settings > Computer use > Google Chrome', 1);
+  }
+  if (!chromeExtensionHostConnected()) die('ChatGPT Chrome extension host is not connected: keep Chrome running with the ChatGPT extension enabled', 1);
+  const codexCli = bundledCodexCliPath();
   const MARK = '# --- Browser/Computer Use (codex-worker browser-setup) ---', END = '# --- end browser-setup ---';
   const runtime = path.join(os.homedir(), '.cache', 'codex-runtimes', 'codex-primary-runtime', 'plugins', 'openai-primary-runtime');
   const docPlugins = ['documents', 'pdf', 'spreadsheets', 'presentations', 'template-creator'];
@@ -570,7 +579,7 @@ startup_timeout_sec = 120
 default_tools_approval_mode = "approve"
 
 [mcp_servers.node_repl.env]
-NODE_REPL_NATIVE_PIPE_CONNECT_TIMEOUT_MS = "1000"
+${codexCli ? `CODEX_CLI_PATH = ${JSON.stringify(codexCli)}\n` : ''}NODE_REPL_NATIVE_PIPE_CONNECT_TIMEOUT_MS = "1000"
 NODE_REPL_NODE_MODULE_DIRS = "${repl}/lib/node_modules"
 NODE_REPL_NODE_PATH = "${repl}/bin/node"
 NODE_REPL_TRUSTED_CODE_PATHS = "${home}:${os.homedir()}/.codex:${repl}/lib/node_modules"

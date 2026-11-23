@@ -475,7 +475,9 @@ two personal steps need the user's OK; re-run route.mjs after an account failure
   `/Applications/ChatGPT.app/Contents/Resources/cua_node/`.
 - **ChatGPT Chrome extension.** In the ChatGPT app, go to Settings > Computer use > Google Chrome and install the
   extension; this also registers the native host `com.openai.codexextension`. Verify with
-  `node <plugin>/scripts/check-extension-installed.js --browser chrome --json`.
+  `node <plugin>/scripts/check-native-host-manifest.js --browser chrome --json`. Setup also checks the running
+  native host by executable path; it never reads Chrome's Local State or profile. EPERM/EACCES during the manifest
+  check prints a note that verification is unavailable from this session and continues to the running-host check.
 - **macOS permissions (computer use only).** "Codex Computer Use" needs Screen Recording and Accessibility, which the
   ChatGPT app's computer-use setup asks for.
 - **Account config.** Run `codex-worker.mjs --account <name> browser-setup` on an account with its own config.toml,
@@ -492,6 +494,9 @@ two personal steps need the user's OK; re-run route.mjs after an account failure
     browser access host (a CLI run gets "The browser access host is unavailable", tested 2026-11-07); ChatGPT
     connectors (Gmail, Drive…) come with a ChatGPT account and don't exist on TTADK;
   - `node_repl` with `default_tools_approval_mode = "approve"` (otherwise CLI runs refuse its calls outright);
+  - `CODEX_CLI_PATH` in the node_repl environment, derived from the ChatGPT app bundle when its Codex CLI is an
+    executable file. ChatGPT.app 26.1117 and newer require this for managed execution. The router reports
+    `not configured: CODEX_CLI_PATH` and skips a home whose path is absent or unusable;
   - `NODE_REPL_TRUSTED_SERVICES = {"sky":"@oai/sky/service","browser":"@oai/browser-desktop/service"}`. The ChatGPT app
     sets this itself; without it the CLI fails with "Trusted RPC service is not configured: browser", or with "sky
     requires node_repl" for computer use.

@@ -26,9 +26,9 @@ fs.writeFileSync(cache, JSON.stringify({ checkedAt: now, claude: [week], codexAc
 })) }));
 fs.writeFileSync(path.join(tmp, 'personal-fallback.json'), '{"enabled":false}');
 const env = { RULES_SHARED: tmp, CODEX_ACCOUNTS: accounts, QUOTA_CACHE: cache, ROUTE_LOG_FILE: path.join(tmp, 'routes.jsonl') };
-let probes = 0, connected = true;
+let probes = 0, connected = true, appVersion = '26.1115';
 const readBrowserRuntime = (name, profile, options) => {
-  probes++; return probeBrowserRuntime(name, profile, { ...options, app, hostConnected: () => connected });
+  probes++; return probeBrowserRuntime(name, profile, { ...options, app, appVersion, hostConnected: () => connected });
 };
 const acquire = (category = 'browser', extra = {}) => acquireRoute(parseTaskSpec([category,
   '--impact', 'throwaway', ...(category === 'computer-use' ? ['--apps', 'com.apple.calculator'] : [])],
@@ -88,6 +88,15 @@ try {
   assert.match(probeBrowserRuntime('ttadk', profiles.ttadk, { app }).why, /not configured/);
   assert.match(probeBrowserRuntime('ttadk', profiles.ttadk, { app: path.join(tmp, 'missing.app') }).why, /ttadk browser runtime missing:/);
   fs.writeFileSync(missingConfig, `[mcp_servers.node_repl]\ncommand = ${JSON.stringify(command)}\n`);
+  appVersion = '26.1117';
+  result = route(acquire());
+  assert.equal(result.view.pick.vendor, 'claude', 'managed runtime skips every home missing the CLI env');
+  assert.match(JSON.stringify(result.plan.rejected), /ttadk browser runtime not configured: CODEX_CLI_PATH/);
+  const cli = path.join(app, 'Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex');
+  fs.mkdirSync(path.dirname(cli), { recursive: true });
+  fs.writeFileSync(cli, 'fixture executable', { mode: 0o700 });
+  fs.appendFileSync(missingConfig, `[mcp_servers.node_repl.env]\nCODEX_CLI_PATH = ${JSON.stringify(cli)}\n`);
+  assert.equal(route(acquire()).view.pick.account, 'ttadk', 'configured company home resumes routing');
   const present = acquire();
   const stale = createSnapshot({ ...present.snapshot, accounts: present.snapshot.accounts.map(a => ({ ...a,
     ...(a.browserRuntime ? { browserRuntime: { ...a.browserRuntime, sampledAt: present.now - 31000 } } : {}) })) }, { now: present.now });
