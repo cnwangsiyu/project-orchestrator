@@ -105,7 +105,7 @@ try {
   eq(check().code, 5, 'unwritable diagnostic cache cannot suppress a hard stop');
   fs.rmdirSync(path.join(state, 'memory-samples.json.lock'));
   const cacheReady = path.join(root, 'cache-ready'), cacheRelease = path.join(root, 'cache-release');
-  const cacheActor = spawn('python3', ['-c',
+  const cacheActor = spawn('python3', ['-B', '-c',
     'import fcntl,sys,time,pathlib\nwith open(sys.argv[1], "a") as f:\n fcntl.flock(f, fcntl.LOCK_EX)\n pathlib.Path(sys.argv[2]).touch()\n while not pathlib.Path(sys.argv[3]).exists(): time.sleep(0.02)',
     path.join(state, 'memory-samples.json.lock'), cacheReady, cacheRelease], { env });
   children.add(cacheActor);

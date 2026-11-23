@@ -2,6 +2,7 @@
 import runpy
 import subprocess
 import sys
+sys.dont_write_bytecode = True
 from unittest.mock import patch
 
 

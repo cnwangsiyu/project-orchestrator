@@ -211,9 +211,9 @@ try {
   eq(run(['report-infra', 'devbox-cn-1', '--kind', 'test']).code, 1);
   eq(run(['quarantine', '192.0.2.99', '--reason', 'unknown']).code, 1);
   // Failure after reservation must release both the tentative hold and waiter.
-  const python = spawnSync('python3', ['-c', 'import sys; print(sys.executable)'], { encoding: 'utf8' }).stdout.trim();
+  const python = spawnSync('python3', ['-B', '-c', 'import sys; print(sys.executable)'], { encoding: 'utf8' }).stdout.trim();
   ok(path.isAbsolute(python));
-  fs.writeFileSync(path.join(mocks, 'python3'), `#!/bin/sh\n[ "$3" != check ] || exit 1\nexec '${python.replaceAll("'", "'\\''")}' "$@"\n`, { mode: 0o755 });
+  fs.writeFileSync(path.join(mocks, 'python3'), `#!/bin/sh\n[ "$1" != -B ] || shift\n[ "$3" != check ] || exit 1\nexec '${python.replaceAll("'", "'\\''")}' -B "$@"\n`, { mode: 0o755 });
   try {
     const failed = spawnSync(process.env.RES_SOURCE, ['wait-pool', 'devbox-cn', ...args('health-read-failed-after-reservation'), '--timeout', '0'],
       { env: { ...env, RES_TEST_POOL_REJECT: 'error' }, encoding: 'utf8' });

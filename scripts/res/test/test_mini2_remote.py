@@ -7,6 +7,7 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
+sys.dont_write_bytecode = True
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -166,7 +167,7 @@ if pid:
  print(pid,flush=True); os._exit(0)
 os.setsid(); os.close(1); os.close(2); time.sleep(5); os._exit(0)
 '''
-        parent=subprocess.Popen([sys.executable,"-c",script,module],stdout=subprocess.PIPE,text=True)
+        parent=subprocess.Popen([sys.executable,"-B","-c",script,module],stdout=subprocess.PIPE,text=True)
         child=None
         try:
             original=json.loads(parent.stdout.readline())

@@ -9,6 +9,7 @@ from pathlib import Path
 import plistlib
 import subprocess
 import sys
+sys.dont_write_bytecode = True
 import tempfile
 import time
 import unittest

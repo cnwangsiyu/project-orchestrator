@@ -4,6 +4,7 @@ from pathlib import Path
 import socket
 import subprocess
 import sys
+sys.dont_write_bytecode = True
 import unittest
 from unittest.mock import patch
 

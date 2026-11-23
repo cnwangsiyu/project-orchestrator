@@ -51,7 +51,7 @@ backup=$(mktemp -d "$shared/res-backup.$(date '+%Y%m%d-%H%M%S').XXXXXX")
 cp -p "$shared/res" "$backup/res"
 # Resolver/admission code may import sibling helpers. Preserve their exact
 # versions beside the copied script so the existing rollback link is runnable.
-previous_code_dir=$(python3 -c 'import os,sys; print(os.path.dirname(os.path.realpath(sys.argv[1])))' "$shared/res")
+previous_code_dir=$(python3 -B -c 'import os,sys; print(os.path.dirname(os.path.realpath(sys.argv[1])))' "$shared/res")
 for helper in mini2_control.py mini2_link.py mini2_monitor.py dynamic_capacity.py local_control.py; do
   [ ! -f "$previous_code_dir/$helper" ] || cp -p "$previous_code_dir/$helper" "$backup/$helper"
 done

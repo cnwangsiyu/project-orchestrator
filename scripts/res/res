@@ -8,6 +8,7 @@
 #   notes/<id>.md   pitfalls of that resource (model/OS quirks, workarounds); printed on take
 # Heavy slots additionally support a gated wait and recovery of old, dead-PID holds.
 set -euo pipefail
+export PYTHONDONTWRITEBYTECODE=1
 
 # The shell retains the flock's open-file description after Python exits.
 # This also preserves sourcing callers' traps and protects copied legacy res.
@@ -20,14 +21,14 @@ if [ -n "$allocator_kind" ]; then
   allocator_root="${RES_DIR:-${RULES_SHARED:-$HOME/.claude/orchestrator/_shared}}"
   mkdir -p "$allocator_root"
   exec 9>> "$allocator_root/.$allocator_kind-allocator-switch.guard"
-  python3 -c 'import fcntl; fcntl.flock(9,fcntl.LOCK_SH)'
+  python3 -B -c 'import fcntl; fcntl.flock(9,fcntl.LOCK_SH)'
 fi
 
 # The Darwin pool has an independent, default-off controller. Keep named takes,
 # waits and returns on that same guard instead of treating the row as generic.
 mini2_controller() {
   local resolved
-  resolved=$(python3 -c 'import os,sys; print(os.path.join(os.path.dirname(os.path.realpath(sys.argv[1])),"mini2_control.py"))' "${BASH_SOURCE[0]}")
+  resolved=$(python3 -B -c 'import os,sys; print(os.path.join(os.path.dirname(os.path.realpath(sys.argv[1])),"mini2_control.py"))' "${BASH_SOURCE[0]}")
   [ -f "$resolved" ] || { echo 'res: mini2 controller unavailable' >&2; return 2; }
   python3 -B "$resolved" "$@"
 }
@@ -750,7 +751,7 @@ WAITER_STALE_SECONDS="${RES_WAITER_STALE_SECONDS:-300}"  # 45 s expired the FIFO
 export RES_SELF_COMMAND="${BASH_SOURCE[0]:-${RES_SOURCE:-}}"
 local_controller() {
   local resolved
-  resolved=$(python3 -c 'import os,sys; print(os.path.join(os.path.dirname(os.path.realpath(sys.argv[1])),"local_control.py"))' "${BASH_SOURCE[0]}")
+  resolved=$(python3 -B -c 'import os,sys; print(os.path.join(os.path.dirname(os.path.realpath(sys.argv[1])),"local_control.py"))' "${BASH_SOURCE[0]}")
   [ -f "$resolved" ] || return 1
   if [ "${LOCAL_EXEC_CHILD:-0}" = 1 ]; then exec python3 -B "$resolved" "$@"; fi
   python3 -B "$resolved" "$@"
@@ -793,7 +794,7 @@ elif [ "${1:-}" = status ] && [ "$#" -eq 2 ] && [ -r "$REG" ] && [[ "$2" != heav
   done <"$REG"
 fi
 if [ -n "$fast_observer" ]; then
-  exec python3 -c "$RES_OBSERVATION_SOURCE
+  exec python3 -B -c "$RES_OBSERVATION_SOURCE
 import sys
 try:
     observation_cli(*sys.argv[1:])
@@ -883,7 +884,7 @@ hold_pid_stale() {
 # A dead wrapper does not establish that its orphaned build has exited.
 hold_stale() {
   hold_pid_stale "$1" || return 1
-  case "$1" in heavy-*) python3 -c "$RES_BUILD_PROCESS_SOURCE" "$LOCKS/$1.d/info" >/dev/null ;; *) return 0 ;; esac
+  case "$1" in heavy-*) python3 -B -c "$RES_BUILD_PROCESS_SOURCE" "$LOCKS/$1.d/info" >/dev/null ;; *) return 0 ;; esac
 }
 
 hold_old() {
@@ -917,7 +918,7 @@ machine_thresholds() {
     previous=$(cat "$WAIT_CONFIG_FILE")
     warned=$(printf '%s\n' "$previous" | awk -F'\t' '$1=="UNKNOWN_KEYS_WARNED" {print $2}')
   fi
-  snapshot=$(python3 -c "$RES_MACHINE_SOURCE
+  snapshot=$(python3 -B -c "$RES_MACHINE_SOURCE
 import sys
 try:
     config = machine_config(sys.argv[1])
@@ -950,7 +951,7 @@ except (OSError, ValueError) as error:
 
 cmd_check_config() {
   [ "$#" -le 1 ] || die 'check-config accepts at most one candidate file'
-  python3 -c "$RES_MACHINE_SOURCE
+  python3 -B -c "$RES_MACHINE_SOURCE
 import sys
 try:
     parse_config(regular_config(sys.argv[1]))
@@ -962,7 +963,7 @@ except (OSError, ValueError) as error:
 
 # Reuse macOS readings collected by heavy-check; observers probe in their existing Python.
 local_memory_reading() {
-  RES_MEMORY_PAGES="$1" RES_MEMORY_SWAP="$2" python3 -c "$RES_MACHINE_SOURCE
+  RES_MEMORY_PAGES="$1" RES_MEMORY_SWAP="$2" python3 -B -c "$RES_MACHINE_SOURCE
 import sys
 heavy = dict(HEAVY_DEFAULTS)
 for item in sys.argv[3:]:
@@ -1195,7 +1196,7 @@ reclaim_stale_heavy() (
   trap 'exit 1' INT TERM HUP
   [ "$(cat info)" = "$snapshot" ] && hold_pid_stale "$id" && hold_old "$id" || return 1
   local evidence count checkout
-  if evidence=$(python3 -c "$RES_BUILD_PROCESS_SOURCE" "$lock/info"); then :
+  if evidence=$(python3 -B -c "$RES_BUILD_PROCESS_SOURCE" "$lock/info"); then :
   else
     IFS=$'\t' read -r count checkout <<<"$evidence"
     if [ ! -e .build-alive-noticed ]; then
@@ -1579,7 +1580,7 @@ lane_waiter_blocks() {
 # Kept inline so the installed standalone res needs no companion deployment.
 # A kernel lock serializes writers; atomic replacement gives readers a whole snapshot.
 box_health() {
-  python3 - "$RES_DIR" "$@" <<'PY'
+  python3 -B - "$RES_DIR" "$@" <<'PY'
 import fcntl, json, math, os, re, sys, tempfile, time
 root, action, *args = sys.argv[1:]
 state_path = os.path.join(root, 'box-health.json')
@@ -1711,7 +1712,7 @@ write_build_waiter() {
 
 next_waiter_order() {
   if command -v python3 >/dev/null 2>&1; then
-    python3 -c 'import time; print(f"{time.time_ns():020d}")'
+    python3 -B -c 'import time; print(f"{time.time_ns():020d}")'
   else
     printf '%010d-%010d' "$(date +%s)" "$$"
   fi
@@ -1863,7 +1864,7 @@ write_info() {
 # Retain counts and process identities only, never device serials/details or
 # process arguments. Missing adb/ps is evidence unavailable, not a take error.
 device_clients() {
-  python3 - "$PID_EXPLICIT" "$PID" <<'PY'
+  python3 -B - "$PID_EXPLICIT" "$PID" <<'PY'
 import os, signal, subprocess, sys
 def cancelled(signum, frame):
     raise SystemExit(128 + signum)
@@ -2079,7 +2080,7 @@ build_slot_select() {
   local LANE_LOAD_PER_CORE LANE_MIN_AVAIL_GIB BUILD_LOAD_PER_CORE BUILD_MAX_CONCURRENCY
   local BUILD_CONCURRENT_LOAD_PER_CORE BUILD_CONCURRENT_MIN_AVAIL_GIB LOAD_OVERRIDE_MINUTES LOAD_POLL_SECONDS selection rc=0
   machine_thresholds || return $?
-  selection=$(python3 - "$RES_DIR" "$LOCKS" "$BUILD_MAX_CONCURRENCY" "$BY" "$PID" "$PROJECT" "${CHECKOUT:-}" "$PWD" <<'PY'
+  selection=$(python3 -B - "$RES_DIR" "$LOCKS" "$BUILD_MAX_CONCURRENCY" "$BY" "$PID" "$PROJECT" "${CHECKOUT:-}" "$PWD" <<'PY'
 import json, os, sys
 root, locks, maximum, by, pid, project, explicit, cwd = sys.argv[1:]
 maximum = int(maximum)
@@ -2168,7 +2169,7 @@ PY
 }
 
 build_mark_peak() {
-  python3 - "$LOCKS" "$1" <<'PY'
+  python3 -B - "$LOCKS" "$1" <<'PY'
 import os, sys, tempfile
 root, current = sys.argv[1:]
 holds = []
@@ -2601,7 +2602,7 @@ cmd_wait_pool_legacy() {
 pool_controller() {
   local runner=
   if [ "${POOL_EXEC_CHILD:-0}" = 1 ]; then runner=exec; fi
-  ${runner:+$runner} python3 - "$RES_DIR" "$@" "$BY" "$PROJECT" "$TASK" "$PURPOSE" "$PID" "$UNTIL" "${FORCE:-}" "${POOL_NEED:-}" "${prefer_host:-}" "${prefer_slot:-}" "${excluded_slots:-}" "${excluded_hosts:-}" "${WAITER_STALE_SECONDS}" "$$" "${POOL_EPISODE:-none}" "${exclude_reason:-}" "${hard_slots:-}" "${hard_hosts:-}" "${DISK_GIB:-}" "${DISK_GIB_FILE:-}" "${PLACEMENT_FILE:-}" "${MAINTENANCE:-}" "${EXTRA_DISK_GIB:-0}" "${WAIT_CONFIG_FILE:+$WAIT_CONFIG_FILE.devbox}" "${warm_family:-}" "${CLAIM_CORES:-}" "${CLAIM_MEM:-}" <<'PY'
+  ${runner:+$runner} python3 -B - "$RES_DIR" "$@" "$BY" "$PROJECT" "$TASK" "$PURPOSE" "$PID" "$UNTIL" "${FORCE:-}" "${POOL_NEED:-}" "${prefer_host:-}" "${prefer_slot:-}" "${excluded_slots:-}" "${excluded_hosts:-}" "${WAITER_STALE_SECONDS}" "$$" "${POOL_EPISODE:-none}" "${exclude_reason:-}" "${hard_slots:-}" "${hard_hosts:-}" "${DISK_GIB:-}" "${DISK_GIB_FILE:-}" "${PLACEMENT_FILE:-}" "${MAINTENANCE:-}" "${EXTRA_DISK_GIB:-0}" "${WAIT_CONFIG_FILE:+$WAIT_CONFIG_FILE.devbox}" "${warm_family:-}" "${CLAIM_CORES:-}" "${CLAIM_MEM:-}" <<'PY'
 import datetime, fcntl, hashlib, json, math, os, re, shutil, signal, socket, stat, subprocess, sys, tempfile, time
 from contextlib import contextmanager
 sys.path.insert(0, os.path.dirname(os.path.realpath(os.environ['RES_SELF_COMMAND'])))
@@ -4018,7 +4019,7 @@ registry_record() {
   if [[ "$wanted" = devbox-cn-* ]]; then
     local resolved
     resolved=$(pool_report slot-host "$wanted" 2>/dev/null) || return 1
-    IFS=$'\t' read -r REG_KIND REG_POLICY REG_DEVICE REG_DESCRIPTION < <(python3 -c 'import json,sys; v=json.loads(sys.argv[1]); print(v["kind"]+"\t"+v["policy"]+"\t-\t"+v["target"])' "$resolved")
+    IFS=$'\t' read -r REG_KIND REG_POLICY REG_DEVICE REG_DESCRIPTION < <(python3 -B -c 'import json,sys; v=json.loads(sys.argv[1]); print(v["kind"]+"\t"+v["policy"]+"\t-\t"+v["target"])' "$resolved")
     return 0
   fi
   return 1
@@ -4063,7 +4064,7 @@ pool_report() {
 }
 
 observe_resource() {
-  RES_STATUS_DEVS="$DEVS" python3 -c "$RES_OBSERVATION_SOURCE
+  RES_STATUS_DEVS="$DEVS" python3 -B -c "$RES_OBSERVATION_SOURCE
 import sys
 try:
     observation_main(*sys.argv[1:])
@@ -4162,7 +4163,7 @@ cmd_take() {
   esac
   if [[ "$id" =~ ^heavy-build(-[23])?$ ]] && [ "${BUILD_SLOT_INTERNAL:-0}" != 1 ]; then
     local memory_reading
-    memory_reading=$(RES_MEMORY_ID="${WAIT_CONFIG_FILE:-$BY:$PID}" RES_MEMORY_RESOURCE="$id" RES_MEMORY_HOLDER="$BY" python3 -c "$RES_MACHINE_SOURCE
+    memory_reading=$(RES_MEMORY_ID="${WAIT_CONFIG_FILE:-$BY:$PID}" RES_MEMORY_RESOURCE="$id" RES_MEMORY_HOLDER="$BY" python3 -B -c "$RES_MACHINE_SOURCE
 import sys
 try:
     config = machine_config(sys.argv[1]); state = memory_probe(sys.argv[1], config)
@@ -4367,11 +4368,11 @@ case "${1:-}" in
     registry_json=$(pool_report devbox-registry '') || exit $?
     if [ -f "$RES_DIR/mini2-config.json" ] && [ -n "$(reg_line mini2-exec-1)" ]; then
       mini2_json=$(mini2_controller devbox-registry) || exit $?
-      registry_json=$(printf '%s' "$registry_json" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)+json.loads(sys.argv[1])))' "$mini2_json")
+      registry_json=$(printf '%s' "$registry_json" | python3 -B -c 'import json,sys; print(json.dumps(json.load(sys.stdin)+json.loads(sys.argv[1])))' "$mini2_json")
     fi
     if local_controller enabled; then
       local_json=$(local_controller devbox-registry) || exit $?
-      registry_json=$(printf '%s' "$registry_json" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)+json.loads(sys.argv[1])))' "$local_json")
+      registry_json=$(printf '%s' "$registry_json" | python3 -B -c 'import json,sys; print(json.dumps(json.load(sys.stdin)+json.loads(sys.argv[1])))' "$local_json")
     fi
     printf '%s\n' "$registry_json" ;;
   slot-host|reserved-disk)
@@ -4386,7 +4387,7 @@ case "${1:-}" in
     shift
     [ "$#" -eq 0 ] || { [ "$#" -eq 1 ] && [ "$1" = --json ]; } || die 'audit accepts only --json'
     if [ "${1:-}" = --json ] && [ -f "$RES_DIR/mini2-config.json" ]; then
-      pool_report audit --json | python3 -c 'import json,sys; value=json.load(sys.stdin); value["mini2"]=json.loads(sys.argv[1]); print(json.dumps(value,indent=2))' "$(mini2_controller status --json)"
+      pool_report audit --json | python3 -B -c 'import json,sys; value=json.load(sys.stdin); value["mini2"]=json.loads(sys.argv[1]); print(json.dumps(value,indent=2))' "$(mini2_controller status --json)"
     else
       pool_report audit "${1:-}"
       if [ -f "$RES_DIR/mini2-config.json" ]; then mini2_controller status; fi

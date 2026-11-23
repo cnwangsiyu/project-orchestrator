@@ -13,6 +13,7 @@ import re
 import shutil
 import shlex
 import sys
+sys.dont_write_bytecode = True
 import subprocess
 import time
 import uuid

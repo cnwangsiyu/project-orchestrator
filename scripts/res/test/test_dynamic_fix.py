@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+sys.dont_write_bytecode = True
 import tempfile
 import time
 import unittest
@@ -402,7 +403,7 @@ class DynamicFixTests(unittest.TestCase):
         info.write_text(info.read_text().replace("pid\t"+str(os.getpid())+"\n","pid\t"+str(dead.pid)+"\n"))
         self.assertEqual(mini.read(file)["checkout"],str((self.root/"lane").resolve()))
         source=(SOURCE/"res/res").read_text().split("<<'BUILD_PROCESS_PY'",1)[1].split("\n",1)[1].split("\nBUILD_PROCESS_PY",1)[0]
-        child=subprocess.Popen([sys.executable,"-c","import time; time.sleep(10)"],cwd=self.root/"lane")
+        child=subprocess.Popen([sys.executable,"-B","-c","import time; time.sleep(10)"],cwd=self.root/"lane")
         try:
             with patch.dict(os.environ,{"RES_BUILD_PROCESS_SOURCE":source}): local.reap(self.root)
             self.assertTrue(file.exists()); self.assertTrue(mini.read(file)["pending"])
@@ -414,7 +415,7 @@ class DynamicFixTests(unittest.TestCase):
     def test_wrapper_binds_before_dispatch_without_usage_sampling(self):
         self.activate("local")
         env={**self.env,"RES_COMMAND":str(SOURCE/"res/res"),"HEAVY_BUILD_BY":"wrapped","HEAVY_BUILD_PROJECT":"wrapped","HEAVY_BUILD_TASK":"fixture","HEAVY_BUILD_PROFILE":"light","HEAVY_BUILD_TIMEOUT":"0"}
-        process=subprocess.Popen(["/bin/bash",str(SOURCE/"heavy-build.sh"),"--",sys.executable,"-c","import time; time.sleep(2)"],env=env,cwd=self.root,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+        process=subprocess.Popen(["/bin/bash",str(SOURCE/"heavy-build.sh"),"--",sys.executable,"-B","-c","import time; time.sleep(2)"],env=env,cwd=self.root,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
         try:
             deadline=time.time()+5; lease={}
             while time.time()<deadline:

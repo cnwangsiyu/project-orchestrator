@@ -29,7 +29,7 @@ let suites = fs.readdirSync(base).filter(f => f.endsWith('-scenarios.mjs') || f 
 // pipeline-invariants.mjs is intentionally auto-discovered with the other suites.
 // Fail visibly if a partial checkout accidentally omits the pure pipeline tests.
 if (!suites.some((s) => s.name === 'pipeline-invariants.mjs')) throw Error('pipeline invariant suite is missing');
-suites.push({ name: 'cleanup-python', exe: 'python3', args: ['-m', 'unittest', 'discover', '-s', 'scripts/resource-cleanup', '-p', 'test*.py', '-v'] });
+suites.push({ name: 'cleanup-python', exe: 'python3', args: ['-B', '-m', 'unittest', 'discover', '-s', 'scripts/resource-cleanup', '-p', 'test*.py', '-v'] });
 if (selected) {
   for (const name of selected) if (!suites.some(suite => suite.name === name)) throw Error(`unknown suite: ${name}`);
   suites = suites.filter(suite => selected.includes(suite.name));

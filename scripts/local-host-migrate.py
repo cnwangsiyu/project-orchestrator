@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import sys
+sys.dont_write_bytecode = True
 
 sys.path.insert(0,str(Path(__file__).resolve().parent/"res"))
 from mini2_control import guard, allocator_switch, refuse_legacy_allocators

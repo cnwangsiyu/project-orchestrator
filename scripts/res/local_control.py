@@ -11,6 +11,7 @@ import shutil
 import signal
 import subprocess
 import sys
+sys.dont_write_bytecode = True
 import time
 import uuid
 

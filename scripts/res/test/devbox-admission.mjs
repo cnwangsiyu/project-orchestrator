@@ -68,10 +68,11 @@ function ageWaiter(by, agedSeconds, nextLoad, nextMemory) {
   const inject = path.join(root, 'age-waiter.py');
   const real = spawnSync('/bin/sh', ['-c', 'command -v python3'], { encoding: 'utf8' }).stdout.trim();
   fs.writeFileSync(shim, `#!/bin/sh
+[ "$1" != -B ] || shift
 if [ "$3" = wait ] && [ "$6" = 2 ]; then
-  "$REAL_PYTHON" "$AGE_INJECT" "$2" "$4" "$7" || exit 1
+  "$REAL_PYTHON" -B "$AGE_INJECT" "$2" "$4" "$7" || exit 1
 fi
-exec "$REAL_PYTHON" "$@"
+exec "$REAL_PYTHON" -B "$@"
 `, { mode: 0o755 });
   // Age the records immediately before the second poll, independent of host scheduling.
   fs.writeFileSync(inject, String.raw`import json, os, pathlib, sys, time

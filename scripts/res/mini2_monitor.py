@@ -6,6 +6,7 @@ from pathlib import Path
 import plistlib
 import subprocess
 import sys
+sys.dont_write_bytecode = True
 import time
 
 from mini2_control import root_dir, config, guard, read, atomic, observe

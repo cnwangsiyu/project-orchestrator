@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import shutil
 import sys
+sys.dont_write_bytecode = True
 import tempfile
 import time
 import unittest
@@ -163,7 +164,7 @@ class LocalCapacityTests(unittest.TestCase):
         lease=json.loads(file.read_text()); self.write(str(file.relative_to(self.root)),{**lease,"pid":dead.pid})
         metadata=file.parent/"info"
         metadata.write_text(metadata.read_text().replace("pid\t"+str(os.getpid())+"\n","pid\t"+str(dead.pid)+"\n"))
-        child=subprocess.Popen([sys.executable,"-c","import time; time.sleep(10)"],cwd=self.root/"busy")
+        child=subprocess.Popen([sys.executable,"-B","-c","import time; time.sleep(10)"],cwd=self.root/"busy")
         try:
             self.take("parallel","light")
             self.assertTrue(file.exists())

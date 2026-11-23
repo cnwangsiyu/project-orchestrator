@@ -53,7 +53,7 @@ try {
   const incumbent = run('take', lease(10), ...args('incumbent'), '--cores', '2', '--mem-gib', '2', '--disk-gib', '2');
   assert.equal(incumbent.status, 0, incumbent.stderr);
   fs.mkdirSync(queue, { recursive: true }); publish();
-  const catalog = spawnSync('python3', ['-c', `
+  const catalog = spawnSync('python3', ['-B', '-c', `
 import json, os, re, sys, textwrap
 root, source, hard_slots = sys.argv[1:]
 locks = os.path.join(root, 'locks')

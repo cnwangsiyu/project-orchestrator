@@ -7,6 +7,7 @@ import re
 import socket
 import subprocess
 import sys
+sys.dont_write_bytecode = True
 import time
 from pathlib import Path
 
@@ -98,7 +99,7 @@ def observation(mode):
         return {"link": mode.upper()}
     # Bound libc name resolution in a disposable process, including ifconfig.
     try:
-        child = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--resolve-usb"],
+        child = subprocess.run([sys.executable, "-B", str(Path(__file__).resolve()), "--resolve-usb"],
                                capture_output=True, text=True, timeout=8, check=True)
         result = json.loads(child.stdout)
     except subprocess.TimeoutExpired:

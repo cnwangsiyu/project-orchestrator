@@ -53,7 +53,7 @@ export function runResSuites() {
     if (fs.existsSync('/usr/bin/mawk')) fs.symlinkSync('/usr/bin/mawk', path.join(bin, 'awk'));
   }
   const res = path.resolve(base, '../res');
-  const env = { ...process.env, HOME: home, TMPDIR: tmp, TMP: tmp, TEMP: tmp,
+  const env = { ...process.env, HOME: home, TMPDIR: tmp, TMP: tmp, TEMP: tmp, PYTHONDONTWRITEBYTECODE: '1',
     PATH: process.env.RES_TEST_NATIVE_PS === '1' ? process.env.PATH : `${bin}:${process.env.PATH}`,
     RES_DIR: path.join(tmp, 'unused'), RES_TEST_METRICS: '0', RES_TEST_MEMORY_GUARD: '0', RES_TEST_SERIAL_CASES: '1',
     // Historical expiry fixtures use 45s; pool-exec checks the production 300s default.
