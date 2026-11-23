@@ -831,6 +831,18 @@ res unquarantine <host>              clear quarantine and infrastructure failure
 res report-infra <slot> --kind ssh|disk|upload
                                       3 failures/30 min quarantine for 20 min; next failure repeats
 res check-config [FILE]               validate candidate machine.conf without changing state
+res take-build|wait-build --by <session> --project <slug> --for "<purpose>" [--timeout <minutes>] [claim options]
+res wait-lane --by <session> --project <slug> --for "<purpose>" --timeout <minutes> [claim options]
+                                      local claim options: --profile heavy|medium|light --cores N --mem-gib GiB --disk-gib GiB
+                                      local profile default weights are derived from hardware
+                                      --pid names one long-lived wrapper; builds acquire a pair, lanes only a lane
+res return-build --by <session> --pid <wrapper-pid>   return that wrapper's acquired pair
+res pool-capacity local|local-light|mini2   JSON measured headroom and declared reservations
+                                      mini2 claims: wait-pool mini2 [--profile heavy|light] [--cores N] [--mem-gib GiB] [--disk-gib GiB]
+                                      claims keep their declared reservation for life; acquired IDs are opaque
+                                      slot-host also resolves local/mini2 IDs; return the exact acquired IDs
+                                      legacy res take heavy-lane-N / HEAVY_BUILD_LANE still work,
+                                      but named legacy takes close dynamic admission machine-wide while held
 res heavy-check [--pid <pid>]         print lane-aware load limit and available memory; 5 if overloaded
 res extend <id> --by <session> --until <when>
 res return <id> --by <session> [--note "<text>"]

@@ -560,7 +560,16 @@ are authoritative; staged v1.7 source is not evidence of a live owner switch. Ru
 `res take-build --help` for controller flags. heavy-build.sh has no help flag: set HEAVY_BUILD_BY
 (unique holder), HEAVY_BUILD_PROJECT, HEAVY_BUILD_TASK and finite HEAVY_BUILD_TIMEOUT (minutes), then
 run `scripts/heavy-build.sh [--watch-pid <worker PID>] [--] <command...>`. Optional RES_COMMAND selects
-the shared entry and HEAVY_BUILD_LANE pins heavy-lane-1/2/3; neither grants a lock. Default gates remain
+the shared entry. On migrated hosts, local `take-build`/`wait-build`/`wait-lane` accept
+`--profile heavy|medium|light --cores N --mem-gib GiB --disk-gib GiB`; profile defaults
+are hardware-derived and every claim retains its full declared reservation for life.
+The wrapper accepts `HEAVY_BUILD_PROFILE`, `HEAVY_BUILD_CORES`, `HEAVY_BUILD_MEM_GIB`.
+Acquired IDs are opaque: resolve them with `res slot-host <id>`, inspect
+`res pool-capacity local|local-light|mini2`, and return the exact acquired pair through
+`res return-build --by <holder> --pid <wrapper-pid>`. Mini2 uses `wait-pool mini2`
+with `--profile heavy|light` and explicit core/memory/disk weights. Legacy named takes
+and `HEAVY_BUILD_LANE` pins still work, but close dynamic admission machine-wide while
+held; neither grants a lock. Unmigrated default gates remain
 min(20, 12 + 8 * other lanes), available memory >=16 GiB; lane 3 only after a reviewed switch, at
 load1m <=8 AND memory >=32 GiB. UNKNOWN blocks; captured controller verdicts govern rounded readings.
 

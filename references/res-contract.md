@@ -148,6 +148,22 @@ path. The FIFO load override cannot override I/O pressure.
 - `res status` shows each host's held/open row counts and `gate=OPEN|CLOSED` for heavy and light with the reason, load5, reserved cores/GiB and available memory. It reports actual holds even if the switch or metrics have since closed a floating row. `log.tsv` records `gate-admit` and `gate-deny` for evaluated dynamic decisions with the same readings and a reason, including `load-override` and static fallback. The runner collects the sample and checks disk space on the host.
 - `DEVBOX_LIGHT_STALE_RECLAIM=1` independently opts in to automatic reclaim on `devbox-cn-light`. Only that pool's FIFO head may reclaim an otherwise eligible slot whose hold is strictly older than 15 minutes and whose recorded PID is proven dead on the local `res` host. Admission still applies normal policy, capability, quarantine and any configured load/memory gates. The default and kill switch are `DEVBOX_LIGHT_STALE_RECLAIM=0`. Status shows stale light holds and their reclaim eligibility. A `reclaim-stale` journal entry names the previous holder, which also appears in status while a replacement hold remains active. Heavy numbered slots opt in separately with `DEVBOX_HEAVY_STALE_RECLAIM=1` (default `0`): only the heavy FIFO head may reclaim an old locally dead holder after `devbox-run` confirms zero remote processes and, when recorded, a gone run group. `res` never SSHs; it consumes a confirmation at most 60 seconds old bound to the slot and exact hold-info SHA-256. Missing, expired or mismatched confirmation retains the hold. `devbox-run release-dead --slot <id>` performs the same checks for an explicit orchestrator recovery, independently of the automatic switch.
 
+## Weighted Local And Mini2 Claims
+
+On migrated hosts, `take-build`/`wait-build` acquire a build/lane pair atomically;
+`wait-lane` acquires only a lane. Local claims accept `--profile heavy|medium|light`
+and `--cores N --mem-gib GiB --disk-gib GiB`; local profile defaults are derived
+from hardware. Mini2 uses `wait-pool mini2` with `--profile heavy|light` and the
+same explicit weight overrides. A claim retains its full declared reservation
+for life, even when measured work materializes or exits.
+
+Use `pool-capacity local|local-light|mini2` to inspect headroom and reservations,
+and `slot-host <id>` to resolve the exact acquired ID. IDs are opaque; never infer
+a numbered lane or build ID. `return-build --by <holder> --pid <wrapper-pid>`
+returns that wrapper's acquired pair. Named legacy takes (`res take heavy-lane-N`,
+including `HEAVY_BUILD_LANE` pins) remain supported, but close dynamic admission
+machine-wide while held. Unmigrated hosts retain the legacy gates below.
+
 ## Changes in v1.8
 
 Normal lanes 1/2 now require load1m <=1.25 x physical cores and memorystatus available memory >=12 GiB.
