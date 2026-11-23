@@ -46,7 +46,9 @@ admission. Updated entrypoints hold a shared switch guard through selection and
 their transaction, so new arrivals observe either complete side of migration.
 Local and mini2 use independent switch guards.
 Wrapped/sourced waiters, interpreter flags and `--` separators are blockers too.
-Only ps executable identity exempts known agent runtimes with prose briefs:
+The migration's own process ancestry up to PID 1 is exempt, including a launching
+shell whose argv contains the migration heredoc. Unrelated shells remain strict.
+Outside that ancestry, ps executable identity exempts known agent runtimes with prose briefs:
 codex, claude, or node running codex-worker.mjs/route.mjs as its actual script.
 A legacy unweighted hold appearing after migration closes dynamic admission
 machine-wide until normal return, including otherwise free named/light IDs.

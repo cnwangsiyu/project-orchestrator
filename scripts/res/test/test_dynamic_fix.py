@@ -216,6 +216,22 @@ class DynamicFixTests(unittest.TestCase):
                     self.assertEqual({name:(root/name).read_bytes() for name in before},before)
                     self.assertFalse(list(root.glob("resources.tsv.pre-*-dynamic*")))
 
+    def test_process_ancestry_excludes_only_the_current_parent_chain(self):
+        with patch.object(mini.os,"getpid",return_value=999990), \
+             patch.object(mini.os,"getppid",return_value=999989), \
+             patch.object(mini.subprocess,"check_output",return_value=
+                          "999990 999989\n999989 999988\n999988 1\n1 0\n999991 999989\n"):
+            self.assertEqual(mini.process_ancestry(),{999990,999989,999988,1})
+
+    def test_migrations_ignore_launching_shell_but_refuse_identical_unrelated_shell(self):
+        command="zsh -c 'res pool-capacity local; python3 -B scripts/local-host-migrate.py --registry fixture <<PY'"
+        for kind in ("local","mini2"):
+            with self.subTest(kind=kind), patch.object(mini,"process_ancestry",return_value={999990,999989,999988,1}):
+                table="".join(str(pid)+" /bin/zsh "+command+"\n" for pid in (999989,999988,1))
+                self.run_migration(kind,action="",process_table=table)
+                with self.assertRaisesRegex(ValueError,"999991.*restart"):
+                    self.run_migration(kind,action="",process_table=table+"999991 /bin/zsh "+command+"\n")
+
     def test_agent_prose_exemption_depends_on_executable_not_args(self):
         prose="--brief 'local_control.py ~98 and mini2_control.py ~76; res -- wait heavy-lane-1'"
         exempt=(("/tools/codex","codex "+prose),("/tools/claude","claude "+prose),

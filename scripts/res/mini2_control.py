@@ -126,12 +126,30 @@ def agent_runtime(executable,argv):
     return index<len(argv) and Path(argv[index]).name in ("codex-worker.mjs","route.mjs")
 
 
+def process_ancestry():
+    table=subprocess.check_output(["/bin/ps","-ax","-o","pid=,ppid="],text=True,timeout=3)
+    parents={}
+    for line in table.splitlines():
+        fields=line.split()
+        if len(fields)==2 and all(field.isdigit() for field in fields):
+            parents[int(fields[0])]=int(fields[1])
+    # The launching shell can contain the migration brief/heredoc in its argv.
+    # Exempt only this chain, never descendants or unrelated wrapper processes.
+    ancestors={os.getpid()}
+    pid=os.getppid()
+    while pid>0 and pid not in ancestors:
+        ancestors.add(pid)
+        pid=parents.get(pid,0)
+    return ancestors
+
+
 def allocator_processes(kind):
+    ancestors=process_ancestry()
     table=subprocess.check_output(["/bin/ps","-axww","-o","pid=,comm=,args="],text=True,timeout=3)
     result=[]
     for line in table.splitlines():
         fields=line.strip().split(None,2)
-        if len(fields)!=3 or fields[0]==str(os.getpid()): continue
+        if len(fields)!=3 or fields[0].isdigit() and int(fields[0]) in ancestors: continue
         command=fields[2]
         try: argv=shlex.split(command)
         except ValueError: argv=[]
