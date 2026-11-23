@@ -15,6 +15,10 @@ import { approvalMismatchHints, mismatchHintText } from './lib/approval-diagnost
 import { checkPersonalPriorityNotices } from './lib/personal-priority-notices.mjs';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+if (process.argv.includes('--help') || process.argv.includes('-h') || process.argv[2] === 'help') {
+  console.log('usage: route.mjs <category> [options]\nbrowser | ui-browser: --browser-origins <comma list of hosts or HTTP(S) origins> (required; --origins is an alias)\ncomputer-use: --computer-use-apps <comma list of bundle IDs> (--apps is an alias)\nBrowser origins and desktop apps are carried into the worker launch and --route-args. Never infer sites from a brief.\nUse --table for categories and references/worker-operations.md for task flags.');
+  process.exit(0);
+}
 if (process.argv[2] === 'void') {
   // Void a route decision that was never launched, so it does not count (e.g. as a review round).
   const routeId = process.argv[3], i = process.argv.indexOf('--reason'), why = i > 0 ? process.argv[i + 1] : '';
@@ -32,6 +36,8 @@ try {
     const table = task.categories.map(category => ({ category, engine: 'candidate-pipeline', note: ['implement','implement-hard','debug','science'].includes(category)?WORKER_NOTES.routeImpact:WORKER_NOTES.routeTuple }));
     console.log(process.argv.includes('--json') ? JSON.stringify(table) : table.map(r => `${r.category}  ${r.note}`).join('\n'));
   } else {
+    if (['browser', 'ui-browser'].includes(task.category) && !task.flags['browser-origins'] && !task.flags.origins)
+      throw Object.assign(Error(`usage: route.mjs ${task.category} --browser-origins <comma list> [options]; name the allowed sites explicitly`), { code: 'BROWSER_ORIGINS_REQUIRED', exitCode: 2 });
     if (task.flags.owner !== undefined && !validOwner(task.flags.owner)) throw Error('--owner needs a public session ID');
     const owner = launcherIdentity(task.flags.owner).sessionId;
     const context = acquireRoute({...task,owner:owner??'UNKNOWN'}, {root});

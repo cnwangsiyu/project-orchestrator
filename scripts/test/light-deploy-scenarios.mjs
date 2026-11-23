@@ -37,6 +37,8 @@ const run = (args, { ttadkModels = [SOL, TERRA56, GPT55], traeModels = null, dai
   const cache = path.join(tmp, 'quota.json');
   fs.writeFileSync(cache, JSON.stringify({ checkedAt: now, claude: [{ ...window, used: claudeUsed, label: 'week (all models)' }],
     codexAccounts: [personal, ...(ttadk ? [ttadk] : []), ...(trae ? [trae] : [])], errors: {}, history: {} }));
+  if (['browser', 'ui-browser'].includes(a[0]) && !a.includes('--origins') && !a.includes('--browser-origins'))
+    a.push('--browser-origins', '*.bytedance.net');
   return parseRouteJSON(execFileSync(process.execPath, [path.join(root, 'route.mjs'), ...a, '--mode', 'default', '--json'], {
     encoding: 'utf8', env: { ...process.env, CODEX_ACCOUNTS: path.join(tmp, 'none.json'), QUOTA_CACHE: cache,
       QUOTA_LOG: '0', ROUTE_LOG: '0', ROUTE_NOW:String(now), ROUTE_LOG_FILE:path.join(tmp,'empty-routes.jsonl'), TRAE_PROBE: '0', QUOTA_LOG_FILE: history },

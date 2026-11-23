@@ -1,8 +1,8 @@
 # Worker operations
 
-Execution reference for workers and targeted orchestrator lookups. route.mjs, codex-worker.mjs,
-outcome.mjs and heavy-build.sh do not implement `--help`; use this reference/targeted source headers,
-and `res take-build --help` where supported. Keep planning/acceptance decisions
+Execution reference for workers and targeted orchestrator lookups. route.mjs and codex-worker.mjs
+support `--help`; outcome.mjs and heavy-build.sh use this reference/targeted source headers,
+and `res take-build --help` is also available. Keep planning/acceptance decisions
 in [SKILL.md](../SKILL.md); do not load this file merely to repeat launcher output.
 
 - [Identity, launch and follow](#identity-launch-and-follow)
@@ -23,8 +23,11 @@ finished ones. Treat missing status fields defensively. Codex/TRAE use
 
 Run `node <skill>/scripts/route.mjs --table` for categories. The supported option lists are the short
 BOOLEANS/VALUES declarations in `scripts/lib/pipeline/taskspec.mjs` (lines 6–11).
-Pass project/name/cwd/task-dir/owner and task facts so the command is executable. Dry output is only
-a preview; route again without `--dry` before launching. Preserve the printed `run-tracked.sh` wrapper.
+Pass project/name/cwd/task-dir/owner and task facts so the command is executable.
+Browser and ui-browser routes require `--browser-origins <comma list>` (`--origins`
+is an alias); computer-use accepts `--computer-use-apps <bundle IDs>` (`--apps`
+is an alias). These scope flags survive the worker launch and saved route args.
+Dry output is only a preview; route again without `--dry` before launching. Preserve the printed `run-tracked.sh` wrapper.
 Launch through a tracked background tool (`run_in_background`), never detach with inner `&`.
 
 Claude commands use the trusted project root (`--trusted-cwd`, otherwise configured root), explicitly

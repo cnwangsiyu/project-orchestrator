@@ -19,6 +19,8 @@ const account=(name,left)=>({name,kind:'chatgpt',home:path.join(tmp,name),live:t
 const base={checkedAt:now,codexAccounts:[account('main',24),account('alt',36)],claude:[window(10,120)]};
 const copy=()=>structuredClone(base);
 const cli=(args,raw=base,dry=true)=>{
+  if (['browser', 'ui-browser'].includes(args[0]) && !args.includes('--origins') && !args.includes('--browser-origins'))
+    args = [...args, '--browser-origins', '*.bytedance.net'];
   if(['implement','implement-hard','debug','science'].includes(args[0])&&!args.includes('--impact')) args=[...args,'--impact','service'];
   fs.writeFileSync(env.QUOTA_CACHE,JSON.stringify(raw));
   fs.writeFileSync(env.CODEX_ACCOUNTS,JSON.stringify(Object.fromEntries(raw.codexAccounts.map(a=>[a.name,{kind:a.kind,home:a.home,browser:a.browser,desktop:a.desktop}]))));

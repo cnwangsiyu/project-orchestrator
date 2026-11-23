@@ -154,8 +154,11 @@ export function presentRoute(plan, view, context) {
     if(vendor==='claude') {
       const trustedCwd = context.trustedCwd ?? task.flags['trusted-cwd'] ?? cwd;
       if (!task.flags['trusted-cwd'] && !context.trustedCwd) notes.push('Claude launch: no trusted project root configured; launch uses the working directory; verify it is trusted or pass --trusted-cwd with the trusted project root.');
-      const claudePrompt = `Working directory: ${cwd}. ${prompt}`;
-      const metadata = JSON.stringify({ name, model: c.modelId, effort: c.effort, project: task.project, owner });
+      const browserScope = ['browser', 'ui-browser'].includes(task.category);
+      const claudePrompt = `Working directory: ${cwd}. ${browserScope ? `Allowed browser origins (--browser-origins): ${task.allowedOrigins.join(',')}. ` : ''}${prompt}`;
+      const metadata = JSON.stringify({ name, model: c.modelId, effort: c.effort, project: task.project, owner,
+        ...(browserScope ? { browserOrigins: task.allowedOrigins, routeArgs } : {}) });
+      if (browserScope) out.routeArgs = routeArgs;
       out.command=`${audit} && cd ${shellQuote(trustedCwd)} && ${command(['node',`${root}/scripts/launch-claude-worker.mjs`,metadata,
         'claude','--bg','--remote-control','--permission-mode','bypassPermissions','-n',name,'--model',c.modelId,'--effort',c.effort,claudePrompt])}`;
       return out;

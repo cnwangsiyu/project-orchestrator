@@ -4,6 +4,10 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 
 export function routeFixture(route, args, {env, dir, approve = false, ...options}) {
+  // Routing-policy fixtures have an explicit synthetic site. Scope validation
+  // tests invoke the CLI directly so missing origins remain a real usage error.
+  if (['browser', 'ui-browser'].includes(args[0]) && !args.includes('--origins') && !args.includes('--browser-origins'))
+    args = [...args, '--browser-origins', 'https://example.test'];
   const invoke = (argv, extra = {}) => execFileSync(process.execPath, [route, ...argv], {
     encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], ...options, env:{...env,...extra},
   });

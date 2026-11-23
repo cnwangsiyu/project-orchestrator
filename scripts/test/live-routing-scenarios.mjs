@@ -15,6 +15,8 @@ const env = {...process.env, HOME:tmp, RULES_SHARED:tmp, QUOTA_CACHE:path.join(t
   CODEX_ACCOUNTS:path.join(tmp,'accounts.json'), ROUTE_LOG:'0', ROUTE_NOW:String(captured.decisionAt),
   ROUTE_SNAPSHOT_FILE:file, ROUTE_LOG_FILE:path.join(tmp,'route-log.jsonl'), ROUTE_REQUEST_ID:'live-fixture'};
 const cli = (args, raw=captured, approve=false) => {
+  if (['browser', 'ui-browser'].includes(args[0]) && !args.includes('--origins') && !args.includes('--browser-origins'))
+    args = [...args, '--browser-origins', '*.bytedance.net'];
   if(approve) {const clean=args.slice(),at=clean.indexOf('--user-ok');if(at>=0)clean.splice(at,2);const offered=cli(clean,raw),yes=structuredClone(raw);yes.approvals=[{id:'fixture-approval',userDecisionRef:'synthetic-user-yes',revoked:false,grantedAt:captured.decisionAt-1000,expiresAt:captured.decisionAt+60000,scopes:offered.plan.gates.filter(g=>g.scope).map(g=>({...g.scope,allowPersonalWithCompany:true}))}];return cli([...clean,'--user-ok','fixture-approval'],yes);}
   fs.writeFileSync(file,JSON.stringify(raw));
   return parseRouteJSON(execFileSync(process.execPath,[route,...args,'--dry','--json'],{env,encoding:'utf8',maxBuffer:16<<20}));

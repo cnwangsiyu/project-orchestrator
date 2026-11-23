@@ -9,7 +9,7 @@ export const CATEGORIES = Object.freeze(['lookup', 'extract', 'analysis', 'resea
 const BOOLEANS = new Set(['auto-check', 'writes', 'read-only', 'runs-tests', 'signing', 'fresh', 'json', 'verbose', 'table', 'no-redeem', 'dry',
   'urgent', 'security', 'adversarial', 'defensive', 'background', 'device-lease', 'shared-lock', 'no-local-build', 'worker', 'installed', 'no-browser-preflight', 'no-auto-continue']);
 const VALUES = new Set(['stakes', 'failures', 'against', 'author', 'impact', 'env', 'exclude-account', 'exclude-model', 'origins', 'mode',
-  'sandbox', 'cwd', 'task-dir', 'task', 'name', 'project', 'apps', 'user-ok', 'auto-reroute-depth', 'previous-attempt', 'execution', 'actual',
+  'sandbox', 'cwd', 'task-dir', 'task', 'name', 'project', 'apps', 'browser-origins', 'computer-use-apps', 'user-ok', 'auto-reroute-depth', 'previous-attempt', 'execution', 'actual',
   'owner', 'failure-kind', 'trusted-cwd', 'exclude-lane', 'review-override', 'review-required', 'profile-override', 'artifact-ref', 'network', 'review-class', 'review-reason', 'review-scope', 'needs-cli']);
 const CODE = new Set(['implement', 'implement-hard', 'debug', 'science']);
 export class TaskInputError extends Error {
@@ -113,11 +113,14 @@ export function createTaskSpec(input) {
   if (f.sandbox && !['workspace-write', 'read-only'].includes(f.sandbox)) fail('INVALID_SANDBOX', 'Explicit sandbox only narrows the default. For signed-in or network CLIs (bytedcli, lark-cli) add --needs-cli <names> instead: full-access sandbox, read-only by instruction.');
   if (ceiling === 'workspace-write' && sandbox === 'danger-full-access') fail('SANDBOX_CEILING', 'Requested sandbox exceeds parent ceiling.');
   if (ceiling === 'read-only' && sandbox !== 'read-only') fail('SANDBOX_CEILING', 'Requested sandbox exceeds parent ceiling.');
-  const apps = unique(input.allowedApps ?? list(f.apps));
+  if (f.apps && f['computer-use-apps']) fail('REPEATED_OPTION', 'Use only one of --apps and --computer-use-apps.');
+  if (f.origins && f['browser-origins']) fail('REPEATED_OPTION', 'Use only one of --origins and --browser-origins.');
+  const appScope = f['computer-use-apps'] ?? f.apps, originScope = f['browser-origins'] ?? f.origins;
+  const apps = unique(input.allowedApps ?? list(appScope));
   if (apps.some((s) => !/^[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)+$/.test(s))) fail('INVALID_APP', 'Apps must be bundle IDs.');
-  if (f.apps && cat !== 'computer-use') fail('APPS_CATEGORY', 'Apps scope is for computer-use.');
-  if (f.origins && !['browser', 'ui-browser'].includes(cat)) fail('ORIGINS_CATEGORY', 'Origins scope is for browser tasks.');
-  const allowedOrigins = origins(input.allowedOrigins ?? list(f.origins));
+  if (appScope && cat !== 'computer-use') fail('APPS_CATEGORY', 'Apps scope is for computer-use.');
+  if (originScope && !['browser', 'ui-browser'].includes(cat)) fail('ORIGINS_CATEGORY', 'Origins scope is for browser tasks.');
+  const allowedOrigins = origins(input.allowedOrigins ?? list(originScope));
   const priorTurns = clone(array(input.previousAttempts));
   const transportFailures = priorTurns.filter(a => transportOutcome(a) && a.taskId === (input.taskId ?? f.name)
     && (a.role ?? 'primary') === (input.role ?? 'primary'));

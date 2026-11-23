@@ -198,6 +198,8 @@ childProcess.execFileSync=(file,args,...rest)=>file==='ps'&&args.join(' ')==='-a
 syncBuiltinESMExports();
 `);
   const route = (args, state = missing, mode = 'unknown-both', registryText = JSON.stringify(registry)) => {
+    if (args[0] === 'browser' && !args.includes('--origins') && !args.includes('--browser-origins'))
+      args = [...args, '--browser-origins', 'https://example.test'];
     fs.rmSync(`${cache}.routing-last-good.json`,{force:true}); // independent fixture, no retained reading
     fs.writeFileSync(profiles, registryText);
     fs.writeFileSync(cache, typeof state === 'string' ? state : JSON.stringify(state));

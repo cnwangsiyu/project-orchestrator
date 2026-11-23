@@ -507,7 +507,7 @@ two personal steps need the user's OK; re-run route.mjs after an account failure
   - `codex exec` can't answer elicitations, so it can't reach any site.
   - The official `[browser_use.origins]`, `[browser_use.default_origin_policy]` and `[computer_use.macos.bundle_ids]`
     config is not consulted on CLI runs (tested).
-  - `route.mjs browser` prints the command, with `POLICY.browserOrigins` (internal domains) plus `--origins`.
+  - `route.mjs browser --browser-origins <comma list>` prints the command with the supplied sites plus configured internal domains. Missing sites are a usage error; `--origins` remains an alias. `--computer-use-apps <bundle IDs>` scopes desktop launches (`--apps` alias). Scope flags persist in `--route-args`.
 - **Chrome must already be running.** In the read-only sandbox a worker can't check processes or launch apps, and the
   plugin's own docs say to ask before launching Chrome. Run `pgrep -x "Google Chrome" >/dev/null || open -a "Google Chrome"`
   before dispatching.

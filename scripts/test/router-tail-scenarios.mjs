@@ -23,6 +23,8 @@ const file=path.join(tmp,'snapshot.json');fs.writeFileSync(file,JSON.stringify(s
 const env={...process.env,HOME:tmp,RULES_SHARED:tmp,CODEX_ACCOUNTS:path.join(tmp,'accounts.json'),QUOTA_CACHE:path.join(tmp,'cache.json'),
   ROUTE_LOG_FILE:path.join(tmp,'routes.jsonl'),ROUTE_NOW:String(snapshot.decisionAt),ROUTE_SNAPSHOT_FILE:file,ROUTE_REQUEST_ID:'tail-fixture'};
 const cli=(args,extra={})=>{
+  if (['browser', 'ui-browser'].includes(args[0]) && !args.includes('--origins') && !args.includes('--browser-origins'))
+    args = [...args, '--browser-origins', '*.bytedance.net'];
   const r=spawnSync(process.execPath,[path.join(root,'scripts/route.mjs'),...args,'--dry','--json'],{env:{...env,...extra},encoding:'utf8',timeout:10000,maxBuffer:16<<20});
   assert.equal(r.status,0,r.stderr);return parseRouteJSON(r.stdout);
 };
@@ -59,7 +61,7 @@ try {
   assert.equal(desktop.kind,'blocked');assert.ok(desktop.needsUserOK.length);
   console.log('PASS BC-24 tool failures switch browser/desktop channels, quality escalates and infra retains effort');
 
-  const logged=spawnSync(process.execPath,[path.join(root,'scripts/route.mjs'),'browser','--name','logged-tool','--project','fixture','--failures','1','--failure-kind','tool','--actual','codex:gpt-6.1-sol:medium@trae','--json'],{env:{...env,ROUTE_LOG:'1'},encoding:'utf8',timeout:10000,maxBuffer:16<<20});
+  const logged=spawnSync(process.execPath,[path.join(root,'scripts/route.mjs'),'browser','--browser-origins','*.bytedance.net','--name','logged-tool','--project','fixture','--failures','1','--failure-kind','tool','--actual','codex:gpt-6.1-sol:medium@trae','--json'],{env:{...env,ROUTE_LOG:'1'},encoding:'utf8',timeout:10000,maxBuffer:16<<20});
   assert.equal(logged.status,0,logged.stderr);assert.equal(parseRouteJSON(fs.readFileSync(env.ROUTE_LOG_FILE,'utf8').trim().split('\n').at(-1)).failureKind,'tool');
   const outcome=spawnSync(process.execPath,[path.join(root,'scripts/outcome.mjs'),'--project','fixture','--name','logged-tool','--result','fail','--failure-kind','tool'],{env,encoding:'utf8',timeout:5000});assert.equal(outcome.status,0,outcome.stderr);assert.equal(parseRouteJSON(fs.readFileSync(env.ROUTE_LOG_FILE,'utf8').trim().split('\n').at(-1)).failureKind,'tool');
   const origins=cli(['browser','--project','acq','--origins','example.com']);
