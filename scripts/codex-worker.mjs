@@ -1338,7 +1338,7 @@ const report = async (threadId, turn, final, usage, observation = {}) => {
   // The Chrome extension's native host ("ChatGPT for Chrome") comes and goes; while it is down the browser runtime
   // says "Browser is not available: chrome" (seen 2026-11-07; back within a minute on its own).
   if (/Browser is not available: chrome/.test(JSON.stringify(turn.error ?? '') + (final ?? lastMessage(turn.items) ?? ''))) {
-    console.log('browser-unavailable: the Chrome extension host is not connected (pgrep -f "ChatGPT for Chrome"). Make sure Chrome is running, wait a minute and retry once; if it fails again, re-route after excluding this failed account/lane (route.mjs browser --exclude-account ' + (account ?? '<account>') + ')');
+    console.log(`browser-unavailable: the Chrome extension host is not connected (ps -axo comm= | grep -E '^/.*/extension-host/macos/[^/]+/ChatGPT for Chrome$'). Make sure Chrome is running, wait a minute and retry once; if it fails again, re-route after excluding this failed account/lane (route.mjs browser --exclude-account ${account ?? '<account>'})`);
   }
   // TRAE: every failed turn is recorded and every completed one clears the record; repeated or hard failures pause it.
   // A cyberPolicy block is content policy, not an infrastructure failure. The kind:'policy-block' row above is logged

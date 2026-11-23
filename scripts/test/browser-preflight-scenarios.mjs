@@ -12,6 +12,7 @@ fs.mkdirSync(path.join(plugin,'scripts'),{recursive:true});fs.mkdirSync(bin);
 fs.writeFileSync(path.join(plugin,'scripts/browser-client.mjs'),'// fixture runtime');
 fs.writeFileSync(path.join(plugin,'scripts/check-extension-installed.js'),`process.stdout.write(JSON.stringify({installed:process.env.EXTENSION_MODE!=='missing',enabled:process.env.EXTENSION_MODE!=='disabled'}));`);
 fs.writeFileSync(path.join(bin,'pgrep'),`#!${process.execPath}\nprocess.exit(process.env.EXTENSION_MODE==='host-down'?1:0);\n`,{mode:0o755});
+fs.writeFileSync(path.join(bin,'ps'),`#!${process.execPath}\nif(process.argv.slice(2).join(' ')!=='-axo comm=') process.exit(2);\nif(process.env.EXTENSION_MODE!=='host-down') console.log('/Applications/ChatGPT.app/Contents/Resources/extension-host/macos/arm64/ChatGPT for Chrome');\n`,{mode:0o755});
 const profiles=path.join(tmp,'accounts.json');fs.writeFileSync(profiles,JSON.stringify({ttadk:{kind:'ttadk',home:tmp,hub:'ws://127.0.0.1:1',chromePlugin:plugin}}));
 const preload=path.join(tmp,'preload.mjs');
 const runtime=path.join(bin,'node_repl');fs.writeFileSync(runtime,'fixture runtime',{mode:0o700});

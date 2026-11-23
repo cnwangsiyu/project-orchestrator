@@ -4,11 +4,17 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 
+export function chromeExtensionHostConnected({ exec = execFileSync } = {}) {
+  try {
+    // comm contains executable paths only. Command arguments can mention the
+    // host name while Chrome's native messaging process is absent.
+    const executables = exec('ps', ['-axo', 'comm='], { encoding: 'utf8', timeout: 1000, maxBuffer: 1024 * 1024 });
+    return executables.split('\n').some(line => /^\/.*\/extension-host\/macos\/[^/]+\/ChatGPT for Chrome$/.test(line.trim()));
+  } catch { return false; }
+}
+
 export function probeBrowserRuntime(name, profile, { desktop = false, now = Date.now(),
-  app = '/Applications/ChatGPT.app', hostConnected = () => {
-    try { execFileSync('pgrep', ['-f', 'ChatGPT for Chrome'], { stdio: 'ignore', timeout: 1500 }); return true; }
-    catch { return false; }
-  } } = {}) {
+  app = '/Applications/ChatGPT.app', hostConnected = chromeExtensionHostConnected } = {}) {
   const fail = why => ({ ready: false, why: `${name} browser runtime ${why}`, checkedAt: now });
   try { if (!fs.statSync(app).isDirectory()) return fail(`missing: ${app}`); }
   catch { return fail(`missing: ${app}`); }

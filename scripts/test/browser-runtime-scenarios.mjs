@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { probeBrowserRuntime } from '../lib/browser-runtime.mjs';
+import { chromeExtensionHostConnected, probeBrowserRuntime } from '../lib/browser-runtime.mjs';
 import { acquireRoute } from '../lib/route-data.mjs';
 import { parseTaskSpec, routePure, renderPlan, createSnapshot } from '../lib/pipeline/index.mjs';
 
@@ -36,6 +36,30 @@ const acquire = (category = 'browser', extra = {}) => acquireRoute(parseTaskSpec
   readAccount: () => { throw Error('unexpected account refresh'); }, readClaude: () => { throw Error('unexpected Claude refresh'); }, ...extra });
 const route = context => { const plan = routePure(context.task, context.snapshot); return { plan, view: renderPlan(plan, context) }; };
 try {
+  const hostPath = '/Applications/ChatGPT.app/Contents/Resources/extension-host/macos/arm64/ChatGPT for Chrome';
+  const processes = [
+    { executable: '/bin/zsh', args: ['-c', `echo ${hostPath}`] },
+    { executable: '/usr/bin/grep', args: ['ChatGPT for Chrome'] },
+    { executable: '/Applications/Editor.app/Contents/MacOS/Editor', args: [hostPath] },
+  ];
+  const exec = (file, args, options) => {
+    assert.equal(file, 'ps'); assert.deepEqual(args, ['-axo', 'comm='], 'never inspect process arguments');
+    assert.ok(options.timeout < 1500);
+    return processes.map(p => p.executable).join('\n') + '\n';
+  };
+  assert.equal(chromeExtensionHostConnected({ exec }), false, 'arguments mentioning the host do not connect it');
+  processes.push({ executable: hostPath, args: [] });
+  assert.equal(chromeExtensionHostConnected({ exec }), true, 'real native host executable connects it');
+  processes.at(-1).executable = hostPath.replace('/arm64/', '/x64/');
+  assert.equal(chromeExtensionHostConnected({ exec }), true, 'architecture is not hardcoded');
+  for (const executable of ['/tmp/ChatGPT for Chrome', hostPath + ' helper', hostPath.replace('/macos/', '/linux/')]) {
+    processes.at(-1).executable = executable;
+    assert.equal(chromeExtensionHostConnected({ exec }), false, 'only the exact native host path matches');
+  }
+  processes.length = 0;
+  assert.equal(chromeExtensionHostConnected({ exec }), false, 'no process is not connected');
+  assert.equal(chromeExtensionHostConnected({ exec: () => { throw Error('process query unavailable'); } }), false);
+  console.log('PASS Chrome native host: executable-only query, argument false positives, exact path, architectures, absent process and query failure');
   for (const category of ['browser', 'ui-browser', 'computer-use']) {
     const { plan, view } = route(acquire(category));
     assert.equal(plan.kind, 'launch', JSON.stringify(view.why));

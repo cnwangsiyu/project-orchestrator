@@ -194,7 +194,7 @@ fs.existsSync = ${checkCompany.toString()};
 const stat=fs.statSync;
 fs.statSync=(file,...args)=>file==='/Applications/ChatGPT.app'?{isDirectory:()=>true}:stat(file,...args);
 const childExec=childProcess.execFileSync;
-childProcess.execFileSync=(file,args,...rest)=>file==='pgrep'?'fixture host':childExec(file,args,...rest);
+childProcess.execFileSync=(file,args,...rest)=>file==='ps'&&args.join(' ')==='-axo comm='?'/Applications/ChatGPT.app/Contents/Resources/extension-host/macos/arm64/ChatGPT for Chrome':file==='pgrep'?'fixture host':childExec(file,args,...rest);
 syncBuiltinESMExports();
 `);
   const route = (args, state = missing, mode = 'unknown-both', registryText = JSON.stringify(registry)) => {
