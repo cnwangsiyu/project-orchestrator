@@ -64,6 +64,16 @@ the remote default, which can silently discard the selected task base.
 Tell a worker given a prepared workspace: `Your workspace is <path>, already prepared. Never create
 a worktree; if asked to isolate, call EnterWorktree(path="<path>"); if that fails, continue in place.`
 No-repo workers skip it. Builds count as writers. Do not stash/reset user changes or stage other files.
+Before `--reference`, `--shared`, a local-path clone, alternates or submodule
+initialization borrows a donor's objects, check `remote.*.promisor`,
+`extensions.partialClone` and the donor's recursive alternates chain. A partial
+donor may have the pinned commit but lack its blobs. In a task-owned borrower,
+use normal Git to hydrate the pin (for an existing partial clone,
+`git fetch --refetch --no-filter --no-tags --no-recurse-submodules <remote> <sha>`),
+then require `GIT_NO_LAZY_FETCH=1 git rev-list --objects --missing=print <sha>`
+to succeed with no `?` objects. A plain `fetch <remote> <sha>` may leave already
+promised blobs missing. If completeness cannot be established, use a fresh full
+clone from the official remote and explain why borrowing was declined.
 A verified local project-owned merge uses `git merge --ff-only` in the target branch's checkout, after
 the worker rebases and verifies the actual target tip. Safe merged-branch deletion uses `git branch -d`;
 worktree removal needs retention authority and never `--force`. Reusable worktrees are kept.

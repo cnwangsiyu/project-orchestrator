@@ -736,6 +736,18 @@ def print_data_cleanup(result):
         print('[cleanup-ineffective] '+json.dumps(result['warnings']),flush=True)
 `;
 
+const pinnedObjectsPython = `
+def require_pinned_objects(repo,commit,kind):
+    env={**os.environ,'GIT_NO_LAZY_FETCH':'1','GIT_TERMINAL_PROMPT':'0'}
+    missing=False
+    with subprocess.Popen(['git','--git-dir='+str(repo),'-c','protocol.allow=never','rev-list','--objects','--missing=print',commit],
+                          env=env,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True) as graph:
+        for line in graph.stdout:
+            if line.startswith('?'): missing=True
+        if graph.wait() or missing:
+            raise ValueError(kind+' donor has incomplete pinned objects; refusing to borrow: '+commit+' in '+str(repo))
+`;
+
 export const remoteScripts = {
   'cleanup-pending': pythonHeader + cleanupEvidencePython,
   'list-retained': pythonHeader + retentionPython + `print(json.dumps(retained_inventory(d['root'])))\n`,
@@ -802,10 +814,10 @@ with open(str(record)+'.lock','a') as lock:
     if not re.fullmatch(r'[A-Za-z0-9_.-]+',name) or name in ('.','..'): raise ValueError('invalid store name')
     print(name)
 `,
-  submodule: pythonHeader + `import subprocess
+  submodule: pythonHeader + 'import subprocess\n' + pinnedObjectsPython + `
 ws=pathlib.Path(d['workspace']).resolve(); parent=ws/d['parent']; rel=d['relative']; store=d['repository']
 if (parent/rel).resolve()!=parent/rel or not (parent/rel).is_relative_to(ws): raise ValueError('invalid submodule destination')
-env={**os.environ,'GIT_ALLOW_PROTOCOL':'file','GIT_TERMINAL_PROMPT':'0'}
+env={**os.environ,'GIT_ALLOW_PROTOCOL':'file','GIT_TERMINAL_PROMPT':'0','GIT_NO_LAZY_FETCH':'1'}
 def git(args):
     return subprocess.check_output(['git','-C',str(parent),*args],env=env)
 name=d['name']
@@ -816,6 +828,9 @@ def has_pin(args):
                           stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0
 if not has_pin(['--git-dir='+store]):
     raise ValueError('submodule store missing pin: '+d['commit']+' in '+store)
+# A commit header alone does not make a reference donor complete. Do not let
+# an incomplete/partial store supply alternates to a newly initialized clone.
+require_pinned_objects(store,d['commit'],'submodule reference')
 # --reference only affects new clones. Legacy slot clones can still borrow
 # from an older store, so import the exact pin locally without changing config.
 child=parent/rel
@@ -875,11 +890,12 @@ try:
         subprocess.run(['git','-c','gc.auto=0','--git-dir='+str(repo),'fetch','--no-write-fetch-head',str(bundle),'refs/heads/export:refs/devbox-run/'+d['commit']],check=True,stdout=subprocess.DEVNULL)
 finally: bundle.unlink(missing_ok=True)
 `,
-  checkout: pythonHeader + `import subprocess, fcntl, shutil
+  checkout: pythonHeader + 'import subprocess, fcntl, shutil\n' + pinnedObjectsPython + `
 repo=pathlib.Path(d['repository']); ws=pathlib.Path(d['workspace'])
 meta=ws/'.devbox-run.json'
 with open(str(repo)+'.lock','a') as lock:
     fcntl.flock(lock,fcntl.LOCK_EX)
+    require_pinned_objects(repo,d['commit'],'worktree')
     if (ws/'.git').exists():
         old=json.loads(meta.read_text()) if meta.exists() else {}
         # Save all tracked edits before removing overlays or resetting any gitlink.
@@ -1639,13 +1655,49 @@ async function scanTransfer(snapshot, scope, bases, state, env = process.env) {
     + '. Use a source-only export with those fields blanked, or a repo-level allow entry in references/devbox-run.md for proven non-secrets.');
 }
 
+export async function assertCompleteObjectDonors(repo, commit, state, env = process.env) {
+  const localEnv = { ...env, GIT_NO_LAZY_FETCH: '1', GIT_TERMINAL_PROMPT: '0' };
+  const query = args => execute('git', ['-c', 'protocol.allow=never', ...args], { state, env: localEnv });
+  const markerArgs = ['config', '--local', '--no-includes', '--name-only', '--get-regexp', '^(remote\\..*\\.promisor|extensions\\.partialclone)$'];
+  const primary = await query(['-C', repo, ...markerArgs]);
+  if (![0, 1].includes(primary.code)) throw Error('cannot inspect Git donor configuration; refusing to borrow objects');
+  let partial = primary.code === 0;
+  // Git resolves relative and quoted alternates, their recursive chains and
+  // GIT_ALTERNATE_OBJECT_DIRECTORIES without copying any source configuration.
+  const inventory = await query(['-C', repo, 'count-objects', '-v']);
+  const objects = await query(['-C', repo, 'rev-parse', '--path-format=absolute', '--git-path', 'objects']);
+  if (inventory.code || objects.code) throw Error('cannot inspect Git donor object directories; refusing to borrow objects');
+  const dirs = new Set([objects.stdout.trim(), ...inventory.stdout.split('\n').filter(line => line.startsWith('alternate: ')).map(line => line.slice(11))]);
+  for (const dir of dirs) {
+    try {
+      if (fs.readdirSync(path.join(dir, 'pack')).some(file => file.endsWith('.promisor'))) partial = true;
+    } catch (error) { if (error.code !== 'ENOENT') throw Error('cannot inspect Git donor packs; refusing to borrow objects'); }
+    if (path.basename(dir) === 'objects') {
+      const config = await query(['--git-dir', path.dirname(dir), ...markerArgs]);
+      if (config.code === 0) partial = true;
+    }
+  }
+  if (!partial) return;
+  let missing = 0;
+  const graph = await execute('git', ['-C', repo, '-c', 'protocol.allow=never', 'rev-list', '--objects', '--missing=print', commit], {
+    state, env: localEnv, timeout: 300000, rawCapture: false,
+    onStdoutLine: line => { if (/^\?[a-f0-9]+$/.test(line)) missing++; }, interceptStdout: () => true,
+  });
+  if (graph.code || missing) {
+    const error = Error(`partial clone donor has incomplete pinned objects (${missing} missing); refusing to borrow for ${commit}. Hydrate a task-owned full clone/borrower with normal Git, verify rev-list --objects --missing=print, then retry; source refs/config/objects were not changed.`);
+    error.code = graph.code || 1;
+    throw error;
+  }
+}
+
 export async function snapshot(opts, temp, state, ancestors = new Set(), parentObjects = []) {
-  const gitEnv = parentObjects.length ? { ...process.env, GIT_ALTERNATE_OBJECT_DIRECTORIES:
-    [process.env.GIT_ALTERNATE_OBJECT_DIRECTORIES, ...parentObjects.map(dir => JSON.stringify(dir))].filter(Boolean).join(path.delimiter) } : process.env;
+  const gitEnv = { ...process.env, GIT_NO_LAZY_FETCH: '1', ...(parentObjects.length ? { GIT_ALTERNATE_OBJECT_DIRECTORIES:
+    [process.env.GIT_ALTERNATE_OBJECT_DIRECTORIES, ...parentObjects.map(dir => JSON.stringify(dir))].filter(Boolean).join(path.delimiter) } : {}) };
   const git = async args => checked(await execute('git', ['-C', opts.repo, ...args], { state, rawCapture: true, env: gitEnv }), 'git snapshot');
   const top = (await git(['rev-parse', '--show-toplevel'])).trim();
   if (fs.realpathSync(top) !== opts.repo) throw Error('--repo must be the repository root');
   const commit = (await git(['rev-parse', '--verify', '--end-of-options', `${opts.ref === 'worktree' ? 'HEAD' : opts.ref}^{commit}`])).trim();
+  await assertCompleteObjectDonors(opts.repo, commit, state, gitEnv);
   const storeKey = await storeIdentity(opts.repo, opts.project, state, opts.identityOrigin);
   if (ancestors.has(storeKey + commit)) throw Error('recursive submodule cycle');
   opts.project ||= storeKey;

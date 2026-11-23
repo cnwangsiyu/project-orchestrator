@@ -589,6 +589,17 @@ refs or configuration, and exports only the selected commit's reachable graph.
 It does not fetch missing source objects or consult unrelated repositories.
 An object missing from all these stores remains a bundle failure.
 
+Before staging alternates, the runner detects partial-clone markers in the source
+and in Git's recursively resolved alternate stores (`remote.*.promisor`,
+`extensions.partialClone`, or `.promisor` packs). For a partial donor it checks
+`rev-list --objects --missing=print <pin>` with lazy fetching and network
+protocols disabled. Missing pinned objects stop preparation before scanning or
+borrowing; the source's refs, configuration and objects stay untouched. Use a
+task-owned full clone/borrower to hydrate and recheck the pin before retrying.
+Submodule reference stores also require a complete pinned graph before cloning.
+The bundle repro helper applies the same guard, and remote worktree preparation
+checks its bare donor before modifying or creating a checkout.
+
 Bundle packing failures, including recovered attempts, report `bundleFailures`
 in the log and attempt summary; terminal errors also include `bundleDiagnostics`:
 source repository, exact Git argv and executable, working
