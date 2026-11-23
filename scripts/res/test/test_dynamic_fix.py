@@ -3,6 +3,7 @@ import argparse
 import contextlib
 import importlib.util
 import io
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,8 @@ sys.dont_write_bytecode = True
 import tempfile
 import time
 import unittest
+import concurrent.futures
+import threading
 import shutil
 from unittest.mock import patch
 
@@ -223,6 +226,30 @@ class DynamicFixTests(unittest.TestCase):
                           "999990 999989\n999989 999988\n999988 1\n1 0\n999991 999989\n"):
             self.assertEqual(mini.process_ancestry(),{999990,999989,999988,1})
 
+    def test_simultaneous_immediate_local_claims_do_not_block_on_unpriced_tickets(self):
+        self.activate("local")
+        barrier=threading.Barrier(3)
+        guard=local.guard
+        @contextlib.contextmanager
+        def simultaneous_guard(root,name):
+            barrier.wait(timeout=10)
+            with guard(root,name): yield
+        def claim(index):
+            args=argparse.Namespace(action="wait-lane",resource="",by="immediate-"+str(index),
+                                    project="fixture",task="fixture",purpose="true",pid=os.getpid(),
+                                    timeout=0,checkout=str(self.root),profile="light",cores=None,
+                                    mem_gib=None,disk_gib=None,lane="",wrapper=True)
+            local.acquire(self.root,args)
+        with patch.object(local,"guard",side_effect=simultaneous_guard), \
+             patch.object(local,"configuration",return_value=(local.DEFAULTS,{})), \
+             patch.object(local,"measured",return_value=self.sample), \
+             patch.object(local,"reap"),contextlib.redirect_stdout(io.StringIO()):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+                list(pool.map(claim,range(3)))
+        self.assertEqual(len(local.claims(self.root)),3)
+        self.assertEqual(local.reservation_totals([lease for _,lease in local.claims(self.root)]),(3,6,6))
+        self.assertFalse(list((self.root/"local-waiters").glob("*.json")))
+
     def test_migrations_ignore_launching_shell_but_refuse_identical_unrelated_shell(self):
         command="zsh -c 'res pool-capacity local; python3 -B scripts/local-host-migrate.py --registry fixture <<PY'"
         for kind in ("local","mini2"):
@@ -354,9 +381,16 @@ class DynamicFixTests(unittest.TestCase):
         try:
             with mini.guard(self.root,"local-capacity.guard"):
                 process=subprocess.Popen([str(SOURCE/"res/res"),"wait-build",*self.args("waiting"),"--wrapper","--timeout","1"],env=self.env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
-                deadline=time.time()+5
-                while not list((self.root/"local-waiters").glob("*.json")) and time.time()<deadline: time.sleep(0.02)
-                self.assertTrue(list((self.root/"local-waiters").glob("*.json")))
+                deadline=time.monotonic()+5
+                with (self.root/".local-allocator-switch.guard").open("a") as switch:
+                    while time.monotonic()<deadline:
+                        try:
+                            fcntl.flock(switch,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                            fcntl.flock(switch,fcntl.LOCK_UN)
+                        except BlockingIOError: break
+                        time.sleep(0.02)
+                    else: self.fail("allocator did not enter its shared switch guard")
+                self.assertFalse(list((self.root/"local-waiters").glob("*.json")))
                 result=subprocess.run([sys.executable,"-B",str(SOURCE/"local-host-migrate.py"),"--registry",str(self.root/"resources.tsv"),"--apply"],capture_output=True,text=True,timeout=5)
                 self.assertNotEqual(result.returncode,0)
                 self.assertIn("restart",result.stderr)

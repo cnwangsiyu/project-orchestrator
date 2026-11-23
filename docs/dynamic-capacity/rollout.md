@@ -191,7 +191,7 @@ python3 - "$capacity_shared/res" <<'PY'
 import concurrent.futures,json,os,subprocess,sys,time,uuid
 res=sys.argv[1]; by='local-light-smoke-'+str(uuid.uuid4()); acquired=[]
 def claim(index):
-    result=subprocess.run([res,'wait-lane','--by',by+'-'+str(index),'--project','local-smoke','--task','light','--for','true smoke','--pid',str(os.getpid()),'--profile','light','--wrapper','--timeout','0'],capture_output=True,text=True)
+    result=subprocess.run([res,'wait-lane','--by',by+'-'+str(index),'--project','local-smoke','--task','light','--for','true smoke','--pid',str(os.getpid()),'--profile','light','--wrapper','--timeout','1'],capture_output=True,text=True)
     if result.returncode: return index,None,result.stderr
     lane=dict(line.split('=',1) for line in result.stdout.splitlines() if '=' in line)['lane']
     acquired.append((index,lane))
@@ -213,6 +213,14 @@ finally:
 PY
 "$capacity_shared/res" status local --json
 ```
+
+The live smoke uses a bounded one-minute wait to tolerate real contention.
+With ample headroom and no older capacity waiter, simultaneous immediate
+(`--timeout 0`) light claims should all acquire distinct lanes. The earlier `fifo`
+refusal was a ticket-publication race: a younger transaction observed an older,
+unpriced ticket before its owner entered the admission guard. Ticket registration
+now occurs inside that guard, in transaction order. A genuinely older queued
+capacity request still retains FIFO priority and bounded smaller-claim bypass.
 
 Full local builds use the same one-process wrapper, for example:
 

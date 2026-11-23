@@ -197,13 +197,17 @@ def acquire(root,args):
     build=args.action in ("take-build","wait-build") or args.resource.startswith("heavy-build")
     checkout=checkout_identity(args)
     queue=root/"local-waiters"; queue.mkdir(parents=True,exist_ok=True)
-    ticket=queue/(str(time.time_ns())+"-"+str(uuid.uuid4())+".json")
+    ticket=None
     deadline=time.monotonic()+args.timeout*60
-    atomic(ticket,dict(pid=args.pid,controller=os.getpid(),cost=None,bypasses=0))
     try:
         while True:
             if process_start(args.pid)!=born: raise ValueError("holder exited or changed")
             with guard(root,"local-capacity.guard"):
+                # Register in transaction order. An immediate claim must not see
+                # an unpriced ticket belonging to a caller still entering the guard.
+                if ticket is None:
+                    ticket=queue/(str(time.time_ns())+"-"+str(uuid.uuid4())+".json")
+                    atomic(ticket,dict(pid=args.pid,controller=os.getpid(),cost=None,bypasses=0))
                 cfg,parsed=configuration(root)
                 sample=measured(root,parsed)
                 # Validate hardware before deriving costs; stale evidence always
@@ -270,7 +274,8 @@ def acquire(root,args):
                     ticket.unlink(missing_ok=True)
                     raise ValueError("local admission closed: "+reason)
             time.sleep(1)
-    finally: ticket.unlink(missing_ok=True)
+    finally:
+        if ticket is not None: ticket.unlink(missing_ok=True)
 
 
 def resolve(root,id):
