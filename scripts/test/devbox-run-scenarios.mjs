@@ -1511,7 +1511,7 @@ async function dataCleanupScenarios() {
   const receipt = next.summary.shards[0].attempts[0].dataCleanup;
   assert.deepEqual(receipt.entries.map(entry => entry.name), ['stale']); assert.equal(receipt.bytes, 3);
   assert.ok(fs.existsSync(path.join(workspace(f), '.data/latest/out')), 'latest data stays after the command');
-  assert.match(next.stdout, /DEVBOX_DATA_CLEANUP=/);
+  assert.doesNotMatch(next.stdout, /DEVBOX_DATA_CLEANUP=/);
   const opted = await run(f, ['--env', 'DEVBOX_KEEP_RUN_DATA=1'], 'test -f .data/latest/out'); ok(opted); returned(f);
   assert.equal(opted.summary.shards[0].attempts[0].dataCleanup.skipped, 'DEVBOX_KEEP_RUN_DATA=1');
   fs.writeFileSync(path.join(workspace(f), '.data/blocked'), 'blocked');
@@ -1523,8 +1523,11 @@ async function dataCleanupScenarios() {
   for (let repeat = 0; repeat < 2; repeat++) {
     const ineffective = await run(f, [], 'test -f .data/blocked && printf still-runs'); ok(ineffective); returned(f);
     assert.equal(ineffective.summary.shards[0].attempts[0].dataCleanup.bytes, 0);
+    assert.doesNotMatch(ineffective.stdout, /fixture cleanup failure|DEVBOX_DATA_CLEANUP=/);
     assert.equal(ineffective.stdout.split('\n').filter(line => line.startsWith('[cleanup-ineffective]')).length, 1);
-    assert.match(ineffective.stdout, /^\[cleanup-ineffective\].*fixture cleanup failure/m);
+    assert.match(ineffective.stdout, /^\[cleanup-ineffective\] live-workspace=0 private-state=0 special-entry=0 other=1$/m);
+    assert.match(fs.readFileSync(path.join(ineffective.out, 'shard-1.log'), 'utf8'),
+      /^\[cleanup-ineffective\] live-workspace=0 private-state=0 special-entry=0 other=1$/m);
     const cleanupRun = f.events().filter(event => event.op === 'run').at(-1);
     const warningReceipt = JSON.parse(fs.readFileSync(path.join(cleanupRun.control, 'data-cleanup.json')));
     assert.deepEqual(warningReceipt.warnings, ineffective.summary.shards[0].attempts[0].dataCleanup.warnings);
@@ -2249,6 +2252,7 @@ async function scenarios() {
 
   }
   if (group('baseline-cleanup')) {
+  await dataCleanupScenarios();
   const signal = fixture(); const s = await run(signal, [], 'sleep 60 & wait', events => events.some(e => e.op === 'group'));
   assert.equal(s.code, 143); returned(signal);
   for (const e of signal.events().filter(e => e.op === 'group')) assert.throws(() => process.kill(-e.pid, 0), /ESRCH/);

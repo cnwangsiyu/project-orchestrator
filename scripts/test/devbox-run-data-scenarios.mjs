@@ -348,28 +348,33 @@ original_socket=pathlib.Path.is_socket
 pathlib.Path.is_socket=lambda p: p==pathlib.Path.cwd()/'docker.sock' and original_socket(p)
 ${hasSocket ? "sock=socket.socket(socket.AF_UNIX); sock.bind('docker.sock')" : ''}`;
     const failed = ['ps-fails', 'inspect-fails', 'absent-with-socket'].includes(mode);
-    const result = invoke(f, setup, {}, { docker: true, warning: failed && /^\[cleanup-ineffective\] \["docker-unqueryable"\]$/m });
+    const result = invoke(f, setup, {}, { docker: true, warning: (failed || coversWorkspace) && new RegExp(
+      `^\\[cleanup-ineffective\\] live-workspace=${Number(coversWorkspace)} private-state=0 special-entry=0 other=${Number(failed)}$`, 'm') });
     assert.equal(result.bytes, failed || coversWorkspace ? 0 : 3, mode);
     assert.deepEqual(result.warnings, failed ? ['docker-unqueryable'] : coversWorkspace ? ['live container mount protects workspace'] : [], mode);
   }
   console.log('PASS running container mount sources, path boundaries, empty inventory, unavailable CLI and socket-dependent failures');
 
-  const privateValue = 'fixture-sensitive-value'; let output = '';
+  const refused = fixture();
+  refused.write('.env');
+  refused.write('.npmrc');
+  const fifo = spawnSync('mkfifo', [path.join(refused.data, 'fixture-fifo')]);
+  assert.equal(fifo.status, 0, fifo.stderr?.toString());
+  const counts = { 'live-workspace': 0, 'private-state': 2, 'special-entry': 1, other: 0 };
+  const summary = '[cleanup-ineffective] live-workspace=0 private-state=2 special-entry=1 other=0';
+  const refusal = invoke(refused, '', {}, { warning: /^\[cleanup-ineffective\] live-workspace=0 private-state=2 special-entry=1 other=0$/m });
+  assert.deepEqual(refusal.warningCounts, counts);
+  assert.equal(refusal.warnings.length, 3);
+  assert.ok(refusal.warnings.some(warning => warning.includes('fixture-fifo')));
+  const fixtureValue = 'FAKE_VALUE_FOR_TEST'; let output = '';
   const warningOutput = await execute('python3', ['-c', 'import json,sys,pathlib\n' + runDataCleanupPython + '\nprint_data_cleanup(json.loads(sys.stdin.read()))'], {
-    input: JSON.stringify({ entries: [], bytes: 0, warnings: ['cleanup failure: ' + privateValue + '\ncontinued'] }),
-    state: { values: [privateValue], children: new Set() }, onOutput: text => { output += text; },
+    input: JSON.stringify({ ...refusal, warnings: [`password=${fixtureValue}`, ...refusal.warnings.slice(1)] }),
+    state: { values: [], children: new Set() }, onOutput: text => { output += text; },
   });
-  assert.equal(warningOutput.code, 0); assert.ok(!output.includes(privateValue));
-  assert.equal(output.split('\n').filter(line => line.startsWith('[cleanup-ineffective]')).length, 1);
-  assert.match(output, /\[cleanup-ineffective\].*cleanup failure/); assert.ok(output.includes('[MASKED]'));
-  let assignmentOutput = '';
-  const assignmentWarning = await execute('python3', ['-c', 'import json,sys,pathlib\n' + runDataCleanupPython + '\nprint_data_cleanup(json.loads(sys.stdin.read()))'], {
-    input: JSON.stringify({ entries: [], bytes: 0, warnings: ['fixture cleanup password=FAKE_VALUE_FOR_TEST'] }),
-    state: { values: [], children: new Set() }, onOutput: text => { assignmentOutput += text; },
-  });
-  assert.equal(assignmentWarning.code, 0); assert.ok(!assignmentOutput.includes('FAKE_VALUE_FOR_TEST'));
-  assert.equal(assignmentOutput.split('\n').filter(line => line.startsWith('[cleanup-ineffective]')).length, 1);
-  console.log('PASS ineffective cleanup warning stays on one line and uses normal runner output redaction');
+  assert.equal(warningOutput.code, 0);
+  assert.ok(!output.includes(fixtureValue));
+  assert.deepEqual(output.split('\n').filter(line => line.startsWith('[cleanup-ineffective]')), [summary]);
+  console.log('PASS cleanup reason counts survive strict masking without entry names or detailed errors');
 
   const escaped = fixture(), other = path.join(temp, 'other-data'); fs.mkdirSync(other); fs.writeFileSync(path.join(other, 'keep'), 'outside');
   fs.rmdirSync(escaped.data); fs.symlinkSync(other, escaped.data);

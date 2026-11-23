@@ -275,14 +275,11 @@ export function planShards(requested, freeSlots, units, history = {}, commandKey
 // Output is line-buffered so assignments split across SSH chunks are still masked.
 function lineSink(write, values = [], intercept, strictOutput = true, initialPrivateBlock = false) {
   let pending = '', dropping = false;
-  const visibleLine = line => {
-    const masked = redact(line);
-    return line.startsWith('[cleanup-ineffective] ') && !masked.startsWith('[cleanup-ineffective] ')
-      ? '[cleanup-ineffective] ' + masked : masked;
-  };
   const redact = line => {
     for (const value of values) line = line.replaceAll(value, '[MASKED]');
     line = maskLogText(line).text;
+    // Only the fixed counter line is safe to show; never exempt free-form warnings.
+    if (/^\[cleanup-ineffective\] live-workspace=\d+ private-state=\d+ special-entry=\d+ other=\d+$/.test(line)) return line;
     if (strictOutput && (sensitive.test(line) || /ACCESS|SCRECT|KEY(?!ALIAS)|PASS|PWD|AUTH|NEXUS|MAGIC|PRIVATE/i.test(line)) && /[=:]|bearer\s/i.test(line)) return '[MASKED sensitive output]';
     return line.replace(/\bAKIA[A-Z0-9]{16}\b/g, '[MASKED access key]');
   };
@@ -291,14 +288,14 @@ function lineSink(write, values = [], intercept, strictOutput = true, initialPri
       let index;
       while ((index = pending.indexOf('\n')) !== -1) {
         const line = pending.slice(0, index); pending = pending.slice(index + 1);
-        if (!dropping && !intercept?.(line)) write(`${visibleLine(line)}\n`);
+        if (!dropping && !intercept?.(line)) write(`${redact(line)}\n`);
         dropping = false;
       }
       if (pending.length > 1024 * 1024) { if (!dropping) write('[suppressed oversized output line]\n'); pending = ''; dropping = true; }
   }, { initialActive: initialPrivateBlock });
   return {
     push(chunk) { stream.push(chunk); },
-    end() { stream.end(); if (pending && !dropping) write(visibleLine(pending)); },
+    end() { stream.end(); if (pending && !dropping) write(redact(pending)); },
     get privateBlockOpen() { return stream.active; },
   };
 }
@@ -614,8 +611,19 @@ def docker_workspace_live(workspace):
         if docker_socket_present(): raise RuntimeError('docker-unqueryable')
     return False
 
+DATA_CLEANUP_REASONS=('live-workspace','private-state','special-entry','other')
+
+class DataCleanupRefusal(RuntimeError):
+    def __init__(self,reason,message):
+        super().__init__(message)
+        self.reason=reason
+
 def cleanup_run_data(d,proc_root=pathlib.Path('/proc')):
-    result={'entries':[],'bytes':0,'warnings':[],'processProbe':{}}
+    result={'entries':[],'bytes':0,'warnings':[],'warningCounts':dict.fromkeys(DATA_CLEANUP_REASONS,0),'processProbe':{}}
+    def warn(error,prefix=''):
+        reason=error.reason if isinstance(error,DataCleanupRefusal) else 'other'
+        result['warningCounts'][reason]+=1
+        result['warnings'].append(prefix+str(error))
     if d.get('env',{}).get('DEVBOX_KEEP_RUN_DATA')=='1':
         return {**result,'skipped':'DEVBOX_KEEP_RUN_DATA=1'}
     data_fd=None
@@ -678,8 +686,8 @@ def cleanup_run_data(d,proc_root=pathlib.Path('/proc')):
             if target==base: return {**result,'skipped':'declared data directory input'}
             if target.is_relative_to(base): protected.add(target.relative_to(base).parts[0])
         live=data_group_live(root,workspace.resolve(),proc_root,result['processProbe'])
-        if docker_workspace_live(workspace.resolve()): raise RuntimeError('live container mount protects workspace')
-        if live: raise RuntimeError('live process group or workspace user protects workspace')
+        if docker_workspace_live(workspace.resolve()): raise DataCleanupRefusal('live-workspace','live container mount protects workspace')
+        if live: raise DataCleanupRefusal('live-workspace','live process group or workspace user protects workspace')
         private=re.compile(r'^(?:login|sessions?|cookies?|\\.env(?:\\..*)?|\\.netrc|\\.npmrc|\\.pypirc|\\.ssh|\\.aws|\\.kube|node_modules)$|\\.(?:pem|p12|pfx|key|keystore)$',re.I)
         def inspect_entry(entry):
             belongs=False
@@ -687,11 +695,11 @@ def cleanup_run_data(d,proc_root=pathlib.Path('/proc')):
             while todo:
                 target=todo.pop(); info=target.lstat()
                 parts=target.relative_to(data).parts
-                if any(private.search(part) for part in parts): raise RuntimeError('private/cache state refused')
+                if any(private.search(part) for part in parts): raise DataCleanupRefusal('private-state','private/cache state refused')
                 if not target.resolve().is_relative_to(base): raise RuntimeError('symlink escape refused')
                 if any(value in part for value in current for part in parts): belongs=True
                 if data_stat.S_ISDIR(info.st_mode): todo+=list(target.iterdir())
-                elif not (data_stat.S_ISREG(info.st_mode) or data_stat.S_ISLNK(info.st_mode)): raise RuntimeError('special entry refused')
+                elif not (data_stat.S_ISREG(info.st_mode) or data_stat.S_ISLNK(info.st_mode)): raise DataCleanupRefusal('special-entry','special entry refused')
             return belongs
         def remove_entry(parent,name,deleted):
             info=os.stat(name,dir_fd=parent,follow_symlinks=False)
@@ -709,7 +717,7 @@ def cleanup_run_data(d,proc_root=pathlib.Path('/proc')):
             elif data_stat.S_ISREG(info.st_mode) or data_stat.S_ISLNK(info.st_mode):
                 os.unlink(name,dir_fd=parent); deleted['removed']+=1
                 if data_stat.S_ISREG(info.st_mode): deleted['bytes']+=info.st_size
-            else: raise RuntimeError('special entry refused')
+            else: raise DataCleanupRefusal('special-entry','special entry refused')
         for entry in sorted(data.iterdir()):
             if entry.name in protected: continue
             deleted={'name':entry.name,'bytes':0,'removed':0}
@@ -722,18 +730,19 @@ def cleanup_run_data(d,proc_root=pathlib.Path('/proc')):
             except Exception as error:
                 if deleted['removed']:
                     result['entries'].append({**deleted,'complete':False}); result['bytes']+=deleted['bytes']
-                result['warnings'].append(entry.name+': '+str(error))
-    except Exception as error: result['warnings'].append(str(error))
+                warn(error,entry.name+': ')
+    except Exception as error: warn(error)
     finally:
         if data_fd is not None:
             try: os.close(data_fd)
-            except OSError: result['warnings'].append('data handle close failed')
+            except OSError: warn('data handle close failed')
     return result
 
 def print_data_cleanup(result):
     print('DEVBOX_DATA_CLEANUP='+json.dumps(result),flush=True)
     if result.get('bytes')==0 and result.get('warnings'):
-        print('[cleanup-ineffective] '+json.dumps(result['warnings']),flush=True)
+        counts=result['warningCounts']
+        print('[cleanup-ineffective] '+' '.join(f'{code}={counts[code]}' for code in DATA_CLEANUP_REASONS),flush=True)
 `;
 
 const pinnedObjectsPython = `
@@ -2698,10 +2707,6 @@ async function shard(opts) {
         const result = await ssh(row, 'run', { ...data, stream: true, command: job, commandMarker, cpus: attempt.cpus, env: { ...caches, ...opts.env, ...cpuEnvironment(attempt.cpus), DEVBOX_RUN_RECEIPT: `${workspace}/.devbox-run.json`, ...(inputMap?{DEVBOX_INPUTS_FILE:inputMap,DEVBOX_INPUTS_DIR:`${root}/inputs`}:{}) }, seconds: opts.timeout * 60 }, {
           state, timeout: remaining(), onOutput: emit, deferOutputEnd: true,
           onStdoutLine: line => {
-            const cleanup = /^DEVBOX_DATA_CLEANUP=(\{[^\n]*\})$/.exec(line);
-            if (cleanup) {
-              try { const record = JSON.parse(cleanup[1]); if (Array.isArray(record.entries) && Number.isFinite(record.bytes) && record.bytes >= 0) attempt.dataCleanup = record; } catch { /* Cleanup telemetry cannot fail a command. */ }
-            }
             if (line !== commandMarker || attempt.commandStarted) return;
             if (!budgets.command()) return;
             attempt.commandStarted = true;
@@ -2709,7 +2714,15 @@ async function shard(opts) {
             phases.phase('remoteCommand');
             return opts.timeout * 60000 + 15000;
           },
-          interceptStdout: line => line === commandMarker,
+          interceptStdout: line => {
+            if (line === commandMarker) return true;
+            const cleanup = /^DEVBOX_DATA_CLEANUP=(\{[^\n]*\})$/.exec(line);
+            if (cleanup) {
+              try { const record = JSON.parse(cleanup[1]); if (Array.isArray(record.entries) && Number.isFinite(record.bytes) && record.bytes >= 0) attempt.dataCleanup = record; } catch { /* Cleanup telemetry cannot fail a command. */ }
+              return true;
+            }
+            return false;
+          },
         });
         attempt.commandDurationSec = (Date.now() - commandStart) / 1000;
         const loginFailure = result.code === 255 && !result.sshStarted && /permission denied|gssapi|authentication failed/i.test(result.stderr);

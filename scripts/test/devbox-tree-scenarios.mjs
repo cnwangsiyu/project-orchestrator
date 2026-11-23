@@ -188,7 +188,7 @@ try {
   assert.equal(hash(remoteScripts['input-exists']), 'c7833da1018f3e20a66668d29ee5566123efc51e3fec9a3419a1fc8951bdfccf', 'input creation diagnostic uses validated paths and stat-only existence checks');
   assert.equal(hash(remoteScripts.checkout), '162239ccf56fc01ed8ccb1239f1821525146932fa4f2744e800779c2aba9130e', 'checkout snapshot includes pinned donor completeness check');
   assert.equal(hash(remoteScripts.submodule), 'c6143ab3755aeb71b0f56d09d3e465d2e291b9f55491809330c53941b3c3d6a0', 'submodule snapshot includes pinned donor completeness and offline legacy-clone pin import');
-  assert.equal(hash(remoteScripts.run), '6b02eb2e631829bad0b37f86c84137a44c4eb648713bc3f6be4055589156dc47', 'run wire snapshot includes short owned TMPDIR creation and read-only owned-tree cleanup');
+  assert.equal(hash(remoteScripts.run), '0438d90db7523d9e33443e72d948b38f14583ec4af7b5394bc94a14d186c8413', 'run wire snapshot includes owned TMPDIR handling and cleanup reason counters');
   assert.equal(hash(remoteScripts.cleanup), '3136aefe64ad220eff3bae5b7fc07eb9c5080247c812efbc3679041ec9c06ac4', 'cleanup wire snapshot includes guarded read-only owned-tree TMPDIR removal');
   assert.equal(hash(remoteScripts.reconnect), 'f295dcd2e9b544f8880451391c4eb59e36748e9be32410c200ea986482b09a73', 'reconnect wire snapshot includes guarded read-only owned-tree TMPDIR recovery');
   for (const [operation, source] of Object.entries(remoteScripts)) assert.equal(treeScript(operation, source, '', {}), source, 'legacy script unchanged: ' + operation);
