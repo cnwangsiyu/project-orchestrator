@@ -129,7 +129,7 @@ try {
   assert.equal(run(['analysis', '--impact', 'throwaway'], { projected: false }).pick.account, 'ttadk');
   assert.equal(run(['analysis'], { projected: false, daily: { ...fresh, [SOL]: bucket(.99, now, now + 5 * h) } }).pick.account, 'trae');
   for (const category of ['implement-hard', 'debug', 'science', 'design', 'review-high']) assert.equal(run([category]).pick.model, category === 'review-high' ? SOL : ASTRA);
-  for (const args of [['browser'], ['ui-browser'], ['computer-use','--apps','com.example.calc'], ['build-run'], ['image-read'],
+  for (const args of [['browser','--browser-origins','https://example.com'], ['ui-browser','--browser-origins','http://127.0.0.1:3000'], ['computer-use','--apps','com.example.calc'], ['build-run'], ['image-read'],
     ['implement', '--device-lease'], ['implement', '--shared-lock'], ['implement-hard', '--security']]) {
     const r=run(args);
     if(args.includes('--device-lease')) assert.equal(r.blocked,true);
