@@ -56,6 +56,23 @@ try {
     assert.ok(activePersonalPriority(window({ until }), NOW));
     assert.equal(activePersonalPriority(window({ until }), NOW + h), null);
   });
+  check('dated b refusal survives absent, invalid and revoked personal windows', () => {
+    for (const priority of [undefined, window({ account: 'invalid' }), window({ revoked: true })]) {
+      const raw = fixture(0, true);
+      raw.personalPriority = priority;
+      raw.accounts = raw.accounts.filter(a => a.id === 'b');
+      raw.lanes = raw.lanes.filter(l => l.accountId === 'b');
+      const { plan } = run(raw);
+      assert.notEqual(plan.kind, 'launch', 'a window state cannot re-enable personal b');
+      assert.ok(plan.rejected.some(p => p.reason?.code === 'PERSONAL_B_REFUSED'));
+    }
+    const historical = fixture(0, true), before = Date.parse('2026-11-21T08:00:00Z') - 1;
+    delete historical.personalPriority;
+    historical.decisionAt = before; historical.collectedFrom = before; historical.collectedThrough = before;
+    historical.accounts = historical.accounts.filter(a => a.id === 'b');
+    historical.lanes = historical.lanes.filter(l => l.accountId === 'b');
+    assert.equal(run(historical).plan.primary.candidate.accountId, 'b', 'pre-decision historical routes remain valid');
+  });
   check('company headroom wins during exclusive despite main and b headroom and earlier deadlines', () => {
     const raw = fixture(40, true), { plan, snapshot, view } = run(raw);
     assert.equal(plan.kind, 'launch'); assert.equal(plan.primary.candidate.accountId, 'trae');

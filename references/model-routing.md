@@ -123,7 +123,9 @@ window overflow-only: company lanes go first through the existing quality
 ladder, free-TRAE/TTADK preferences and queue threshold. Personal quota is used
 when company lanes cannot serve the task because of exhausted quota, excessive
 queue/congestion or a missing required model/capability. During the window,
-new personal Codex work goes only to `main`; `b` remains code-refused. If main
+new personal Codex work goes only to `main`; `b` remains code-refused. The dated
+2026-11-21 refusal of `b` does not depend on the window being present, valid or
+active; revoking a window cannot silently re-enable that account. If main
 also cannot serve the task, defer with `[personal-main-wait]`. Claude-only
 tools retain their route. Hard-tier Astra on main uses its separate enabled
 standing decision; max effort, reset redemption and explicit review approvals

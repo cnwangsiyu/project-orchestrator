@@ -47,7 +47,8 @@ try {
   let notice=notifyQueueOwner(f.row,f.queue,f.launch,{now,policy,context:f.context,emit});
   assert.equal(notice.wake,true);assert.match(notice.text,/queued 6.0 min position=100 drain=0/);
   assert.ok(notice.options.some(o=>o.account==='trae'&&o.model===TERRA&&o.context==='same thread / resume'));
-  assert.ok(notice.options.some(o=>o.account==='b'&&o.approvalRef===policy.userDecisionRef&&!o.needsUserApproval));
+  assert.ok(notice.options.some(o=>o.account==='main'&&o.approvalRef===policy.userDecisionRef&&!o.needsUserApproval));
+  assert.ok(!notice.options.some(o=>o.account==='b'), 'queue choices cannot re-enable refused personal b');
   assert.ok(notice.options.some(o=>o.model===ASTRA&&o.needsUserApproval));
   assert.ok(notice.options.some(o=>o.model==='opus'&&o.needsUserApproval));
   const hardContext={...f.context,task:createTaskSpec({...f.context.task,category:'debug'})};
@@ -61,7 +62,7 @@ try {
   assert.equal(notifyQueueOwner(f.row,f.queue,f.launch,{now:now+19*min,policy,context:f.context,emit}),null);
   assert.equal(notifyQueueOwner(f.row,f.queue,f.launch,{now:now+20*min,policy,context:f.context,emit}).noticeCount,3);
   assert.equal(requestQueueChoice(f.row,notice.noticeId,notice.options.find(o=>o.model==='opus').id,null,now).exitCode,8);
-  const astraOption=notice.options.find(o=>o.account==='b'&&o.model===ASTRA);
+  const astraOption=notice.options.find(o=>o.account==='main'&&o.model===ASTRA);
   assert.equal(requestQueueChoice(f.row,notice.noticeId,astraOption.id,null,now).exitCode,8);
   const grant=astraOption.approvalCommand.replace('<actual user decision reference>','fixture-user-decision')
     .replace('<approval expiry ISO>',new Date(Date.now()+3600000).toISOString());
@@ -74,14 +75,14 @@ try {
   assert.equal(requestQueueChoice(f.row,notice.noticeId,'wait',null,now).exitCode,0);
   assert.ok(claimQueueChoice(f.row));assert.equal(claimQueueChoice(f.row),null,'only one follower may execute an owner choice');
   settleQueueChoice(f.row,'waiting',now);assert.equal(JSON.parse(fs.readFileSync(queueDecisionFile(f.row))).choice,null);
-  assert.equal(requestQueueChoice(f.row,notice.noticeId,notice.options.find(o=>o.account==='b'&&o.model===SOL).id,null,now).exitCode,0);
+  assert.equal(requestQueueChoice(f.row,notice.noticeId,notice.options.find(o=>o.account==='main'&&o.model===SOL).id,null,now).exitCode,0);
   settleQueueChoice(f.row,'selected',now);assert.throws(()=>requestQueueChoice(f.row,notice.noticeId,'park',null,now));
   fs.rmSync(queueDecisionFile(f.row));
   f=fixture(true);assert.ok(queueOptions(f.row,f.queue,f.launch,now,f.context).some(o=>o.account==='ttadk'&&!o.needsUserApproval));
   const tt=notifyQueueOwner(f.row,f.queue,f.launch,{now,policy,context:f.context,emit});
   assert.equal(requestQueueChoice(f.row,tt.noticeId,tt.options.find(o=>o.account==='ttadk').id,null,now).exitCode,0);
   settleQueueChoice(f.row,'ended',now);fs.rmSync(queueDecisionFile(f.row));
-  f=fixture(false,[SOL],['max']);assert.ok(queueOptions(f.row,f.queue,f.launch,now,f.context).some(o=>o.account==='b'&&o.effort==='max'&&o.needsUserApproval));
+  f=fixture(false,[SOL],['max']);assert.ok(queueOptions(f.row,f.queue,f.launch,now,f.context).some(o=>o.account==='main'&&o.effort==='max'&&o.needsUserApproval));
   const midQueue={...f.queue,workStarted:true,workedMinutesBefore:24};
   assert.match(queueStallLabel(midQueue,now,f.row),/notice=none/);
   const midNotice=notifyQueueOwner(f.row,midQueue,f.launch,{now,policy,context:f.context,emit});
@@ -183,8 +184,8 @@ try {
     ['mid-fresh',{account:'ttadk'},true],['mid-park',{id:'park'},false],['mid-tool-running',{id:'park'},false],
     ['mid-tool-race',{id:'park'},false],['mid-reporting',null,false],['mid-items-only',null,false],['mid-server-request',null,false],
     ['mid-complete-race',{id:'park'},false],
-    ['trae-resume',{model:TERRA},false],['ttadk',{account:'ttadk'},true],['personal',{account:'b',model:SOL},false],
-    ['claude-approved',{model:'opus'},false],['cancel-silent',{id:'park'},false],['cancel-unconfirmed',{account:'b',model:SOL},false],
+    ['trae-resume',{model:TERRA},false],['ttadk',{account:'ttadk'},true],['personal',{account:'main',model:SOL},false],
+    ['claude-approved',{model:'opus'},false],['cancel-silent',{id:'park'},false],['cancel-unconfirmed',{account:'main',model:SOL},false],
     ['wait',{id:'wait'},false],['park',{id:'park'},false]]) {
     fs.rmSync(queueDecisionFile(f.row),{force:true});f=fixture(ttReady);
     fs.writeFileSync(process.env.ROUTE_LOG_FILE,'');
@@ -235,7 +236,7 @@ try {
     }
     if(label==='trae-resume')assert.ok(calls.some(c=>c.method==='thread/resume'&&c.params.model===TERRA),'chosen TRAE model resumes context');
     if(label==='personal'){
-      assert.ok(calls.some(c=>c.method==='thread/start'&&c.account==='b'));
+      assert.ok(calls.some(c=>c.method==='thread/start'&&c.account==='main'));
       const reroute=JSON.parse(fs.readFileSync(path.join(tmp,'reroute.json')));
       assert.equal(reroute.route.pick.approvalRef,policy.userDecisionRef);assert.equal(reroute.route.needsUserOK.length,0);
     }

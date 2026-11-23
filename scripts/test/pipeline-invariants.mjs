@@ -84,9 +84,9 @@ test('V05/V06 independent desktop tool and vision intersections', () => {
   }
 });
 test('V07 browser account rotation cannot overwrite capability', () => {
-  const raw = fixture([['a', 'chatgpt', [SOL]], ['b', 'chatgpt', [SOL]]]); raw.accounts[0].capabilities.browser = false;
-  let t = task('browser', { allowedOrigins: ['https://example.test'] }); const c = candidate(createSnapshot(raw), 'b', SOL, 'medium');
-  t = approve(raw, t, c); const p = run(t, raw); assert.equal(p.kind, 'launch'); assert.equal(p.primary.candidate.accountId, 'b');
+  const raw = fixture([['a', 'chatgpt', [SOL]], ['fixture-b', 'chatgpt', [SOL]]]); raw.accounts[0].capabilities.browser = false;
+  let t = task('browser', { allowedOrigins: ['https://example.test'] }); const c = candidate(createSnapshot(raw), 'fixture-b', SOL, 'medium');
+  t = approve(raw, t, c); const p = run(t, raw); assert.equal(p.kind, 'launch'); assert.equal(p.primary.candidate.accountId, 'fixture-b');
   const broken = clone(p); broken.primary.argv[broken.primary.argv.indexOf('--account') + 1] = 'a'; assert.equal(validatePlan(broken, createSnapshot(raw)).ok, false);
 });
 test('V08 personal with no company has standing permission', () => {

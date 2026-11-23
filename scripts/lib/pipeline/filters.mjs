@@ -11,6 +11,7 @@ import { rejectedQualityAttempt } from '../worker-result.mjs';
 const pass = (id) => result(id);
 const deny = (id, code, text, c, extra) => result(id, code, text, [c.id], extra);
 const effortIndex = (e) => EFFORTS.indexOf(e);
+const PERSONAL_B_REFUSED_FROM = Date.parse('2026-11-21T08:00:00Z');
 const sameSet = (a, b) => stable([...a].sort()) === stable([...b].sort());
 export function approvalScope(t, c, action) {
   return { taskId: t.taskId, constraintHash: t.constraintHash, roles: [t.role], action, accounts: [c.accountId], models: [c.modelId],
@@ -37,6 +38,8 @@ export function pUserRules(t, s, c) {
 }
 export function pExclusions(t, s, c) {
   const { account } = candidateParts(s, c);
+  if (account.kind === 'chatgpt' && account.id === 'b' && s.decisionAt >= PERSONAL_B_REFUSED_FROM)
+    return deny('pExclusions', 'PERSONAL_B_REFUSED', 'The 2026-11-21 rule forbids new personal work on b independently of the priority window.', c);
   if (s.personalPriority?.mode === 'exclusive' && (!company(account) && account.kind !== 'claude'
     && (account.id !== s.personalPriority.account || account.kind !== 'chatgpt')
     || account.kind === 'claude' && exclusiveCodexTask(t, s)))

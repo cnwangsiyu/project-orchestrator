@@ -168,15 +168,15 @@ try {
     const p = run(raw, task({ category: 'implement-hard', impact: 'service', flags: { 'exclude-account': 'ttadk,trae' } }));
     assert.equal(p.kind, 'blocked'); assert.ok(p.gates.some(g => g.kind === 'astra'));
   });
-  check('hard personal Astra works on account b and on a personal-only device', () => {
+  check('hard personal Astra cannot re-enable b, including on a personal-only device', () => {
     for (const personalOnly of [false, true]) {
       const raw = fixture([ASTRA]); deny(raw, 'ttadk'); deny(raw, 'trae');
       raw.accounts.find(a => a.id === 'main').id = 'b';
       for (const l of raw.lanes.filter(l => l.accountId === 'main')) { l.accountId = 'b'; l.id = `b:${l.modelId}`; }
       if (personalOnly) { raw.accounts = raw.accounts.filter(a => a.id === 'b'); raw.lanes = raw.lanes.filter(l => l.accountId === 'b'); }
       const p = run(raw, task({ category: 'implement-hard', impact: 'service' }));
-      assert.equal(p.kind, 'launch'); assert.equal(p.primary.candidate.accountId, 'b');
-      assert.equal(p.primary.personalFallback.astraApprovalRef, 'standing:hard-astra-2026-11-17');
+      assert.notEqual(p.kind, 'launch');
+      assert.ok(p.rejected.some(p => p.reason?.code === 'PERSONAL_B_REFUSED'));
     }
   });
   check('hard personal Astra disabled policy restores both decision gates', () => {
