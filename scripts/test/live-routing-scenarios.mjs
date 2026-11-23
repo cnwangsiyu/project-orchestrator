@@ -57,7 +57,12 @@ try {
   const expiry=structuredClone(freeTrae),ett=expiry.accounts.find(a=>a.id==='ttadk');
   ett.quota[0].usage.value.resetsAt=captured.decisionAt+3*3600000;
   ett.burn.value={resetsAt:ett.quota[0].usage.value.resetsAt,projectedAtReset:50000000};
-  assert.equal(cli(['analysis'],expiry).pick.account,'ttadk');
+  const expiring=cli(['analysis'],expiry);
+  assert.equal(expiring.pick.account,'trae'); assert.equal(expiring.pick.model,'gpt-6.1-sol');
+  assert.equal(expiring.plan.primary.estimate.balance.freeNow,true);
+  assert.ok(expiring.plan.trace.candidates.some(r=>r.candidate.accountId==='ttadk'
+    && r.candidate.modelId==='gpt-6.1-sol' && r.estimate.expiryOpportunity===true));
+  assert.match(expiring.why.join('\n'),/TRAE lane free: saving TTADK quota/);
   assert.equal(cli(['computer-use','--apps','com.apple.calculator'],freeTrae).pick.account,'ttadk');
   const maxArgs=['debug','--impact','service','--failures','1','--actual','codex:gpt-6.1-sol:xhigh@trae'];
   const siblingQueue=structuredClone(freeTrae);
@@ -76,7 +81,7 @@ try {
     }
     assert.equal(cli(maxArgs,x).pick.model,'gpt-6.1-sol');
   }
-  console.log('PASS observed free TRAE saves fresh TTADK quota; own-model browser/ui-browser load, queue/stall/expiry/desktop exceptions; company Sol/max retry ungated');
+  console.log('PASS observed free TRAE saves fresh TTADK quota; own-model browser/ui-browser load, queue/stall/desktop exceptions and expiring TTADK quota; company Sol/max retry ungated');
   const lookup=cli(['lookup']);assert.ok(lookup.pick.command.includes('--skip-git-repo-check'));
   assert.ok(lookup.pick.command.includes('<workspace>'));assert.ok(lookup.pick.command.includes('<task dir>'));
   const proxyState=structuredClone(freeTrae),proxyHome=path.join(tmp,'ttadk home');
