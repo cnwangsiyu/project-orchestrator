@@ -58,12 +58,12 @@ export async function refresh({ observeLink=true }={}) {
 }
 
 export function args(argv) {
-  const opts = { ref: 'HEAD', profile: '', timeout: 10, artifacts: [], need:'cmake-native' };
+  const opts = { ref: 'HEAD', profile: '', timeout: 10, claimTimeout: 0, artifacts: [], need:'cmake-native' };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === '--') { opts.command = argv.slice(i+1).join(' '); break; }
     if (arg === '--help') return { help: true };
-    if (!['--repo', '--ref', '--project', '--task', '--out', '--by', '--qualification', '--allowlist', '--artifact', '--timeout', '--disk-gib', '--profile', '--watch-pid', '--need', '--cores', '--mem-gib'].includes(arg)) throw Error('unknown option ' + arg);
+    if (!['--repo', '--ref', '--project', '--task', '--out', '--by', '--qualification', '--allowlist', '--artifact', '--timeout', '--claim-timeout', '--disk-gib', '--profile', '--watch-pid', '--need', '--cores', '--mem-gib'].includes(arg)) throw Error('unknown option ' + arg);
     const value = argv[++i]; if (!value) throw Error('missing value ' + arg);
     if (arg === '--artifact') opts.artifacts.push(value);
     else opts[arg.slice(2).replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = value;
@@ -75,6 +75,7 @@ export function args(argv) {
   opts.diskGiB ??= opts.profile==='heavy' || opts.need.split(',').some(cap=>cap!=='cmake-native') ? 16 : 8;
   for (const field of ['timeout', 'diskGiB', ...['cores','memGib'].filter(name=>opts[name]!==undefined)]) if (!Number.isFinite(+opts[field]) || +opts[field] <= 0) throw Error('invalid ' + field);
   if (+opts.timeout > 120) throw Error('mini2 timeout capped at two hours');
+  if (!Number.isFinite(+opts.claimTimeout) || +opts.claimTimeout<0 || +opts.claimTimeout>120) throw Error('invalid claim timeout');
   opts.repo = fs.realpathSync(opts.repo); opts.out = path.resolve(opts.out);
   return opts;
 }
@@ -94,7 +95,7 @@ export async function main(argv) {
     watch = setInterval(() => { try { process.kill(pid, 0); } catch { stop(); } }, 1000);
   }
   const ctl = async input => {
-    const result = await execute('python3', ['-B', control, ...input], { state, timeout: 30000,
+    const result = await execute('python3', ['-B', control, ...input], { state, timeout: input[0]==='wait-pool' ? Math.max(30000,(+opts.claimTimeout*60+5)*1000) : 30000,
       cancellable: !['return', 'retain-remote'].includes(input[0]) });
     if (result.code) throw Error(result.stderr || 'mini2 controller failed');
     return result.stdout;
@@ -134,6 +135,7 @@ export async function main(argv) {
     await refresh();
     lease = JSON.parse(await ctl(['wait-pool', 'mini2', '--by', opts.by, '--project', opts.project, '--task', opts.task,
       '--for', 'unsigned Darwin build', '--pid', String(process.pid), ...(opts.profile?['--profile', opts.profile]:[]), '--disk-gib', String(opts.diskGiB),
+      '--timeout',String(opts.claimTimeout),
       '--need', opts.need, ...['cores','memGib'].flatMap(name=>opts[name]===undefined?[]:[name==='cores'?'--cores':'--mem-gib',String(opts[name])]), ...(opts.qualification ? ['--qualification', opts.qualification] : [])])).lease;
     await ctl(['bind', lease.slot, '--by', opts.by, '--generation', lease.generation, '--run-id', runId]);
     const data = { runId, slot: lease.slot, dynamic: lease.dynamic, limits: lease.limits, cores: lease.weights[0], commit: source.commit, command: opts.command, diskGiB: +opts.diskGiB, timeoutSec: +opts.timeout*60,

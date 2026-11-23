@@ -22,6 +22,9 @@ assert.throws(()=>checkAllowlist(allowed,[{name:'staged.cc',mode:'100644'}],[]))
 const scratch=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'mini2-worktree-')));
 try {
   fs.writeFileSync(path.join(scratch,'safe.cc'),'int main() {}');
+  const runnerArgs=['--repo',scratch,'--allowlist',path.join(scratch,'allow.json'),'--project','fixture','--task','fixture','--by','fixture','--out',path.join(scratch,'out')];
+  assert.equal(args([...runnerArgs,'--claim-timeout','1','--','true']).claimTimeout,'1');
+  assert.throws(()=>args([...runnerArgs,'--claim-timeout','-1','--','true']));
   checkWorktree(scratch,['safe.cc','deleted.cc']);
   fs.symlinkSync('safe.cc',path.join(scratch,'changed.cc'));
   assert.throws(()=>checkWorktree(scratch,['changed.cc']));

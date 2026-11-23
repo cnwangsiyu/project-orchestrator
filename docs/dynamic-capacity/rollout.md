@@ -55,7 +55,7 @@ subprocess.run(['git','-C',str(repo),'-c','user.name=Mini2 fixture','-c','user.e
 allow=root/'allowlist.json'; allow.write_text(json.dumps(['README.md']))
 def run(number):
     out=root/str(number)
-    command=['node',str(code/'scripts/mini2-run.mjs'),'--repo',str(repo),'--allowlist',str(allow),'--project','mini2-smoke','--task','dynamic-light','--by',root.name+'-'+str(number),'--out',str(out),'--profile','light','--cores','1','--mem-gib','1','--disk-gib','1','--watch-pid',str(os.getpid()),'--timeout','2','--','sleep 20; true']
+    command=['node',str(code/'scripts/mini2-run.mjs'),'--repo',str(repo),'--allowlist',str(allow),'--project','mini2-smoke','--task','dynamic-light','--by',root.name+'-'+str(number),'--out',str(out),'--profile','light','--cores','1','--mem-gib','1','--disk-gib','1','--watch-pid',str(os.getpid()),'--timeout','2','--claim-timeout','1','--','sleep 20; true']
     result=subprocess.run(command)
     if result.returncode: raise RuntimeError('runner failed; inspect named masked logs in '+str(out))
     summary=json.loads((out/'summary.json').read_text())
@@ -70,6 +70,10 @@ print('PASS three distinct leases and workspaces, all returned; evidence:',root)
 PY
 "$capacity_shared/res" status mini2 --json
 ```
+
+The smoke uses a bounded one-minute claim wait so queued fitting claims retain
+FIFO order. The runner keeps its existing immediate-claim default unless
+`--claim-timeout` is supplied; `--timeout` still bounds remote execution.
 
 Successful smoke requires three different overlapping lease IDs, different run
 UUIDs, exit zero and clean summaries for all three; no residual owned holds.
