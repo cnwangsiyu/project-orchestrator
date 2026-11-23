@@ -11,11 +11,12 @@ from pathlib import Path
 import plistlib
 import re
 import shutil
+import shlex
 import sys
 import subprocess
 import time
 import uuid
-from dynamic_capacity import headroom, reservation_totals, smaller_bypass, json_safe
+from dynamic_capacity import headroom, reservation_totals, smaller_bypass, json_safe, numeric_metric, iso_timestamp
 from xml.parsers.expat import ExpatError
 
 HOST = "Bytedances-Mac-mini.local"
@@ -60,6 +61,68 @@ def guard(root,name="mini2.guard"):
         yield
 
 
+def allocator_processes(kind):
+    table=subprocess.check_output(["/bin/ps","-axww","-o","pid=,args="],text=True,timeout=3)
+    result=[]
+    for line in table.splitlines():
+        fields=line.strip().split(None,1)
+        if len(fields)!=2 or fields[0]==str(os.getpid()): continue
+        try: args=shlex.split(fields[1])
+        except ValueError: continue
+        if not args: continue
+        index=0
+        if re.fullmatch(r"(?:bash|sh|zsh|python[0-9.]*)",Path(args[0]).name):
+            index=1
+            while index<len(args) and args[index] in ("-B","-u","-I","-s","-E"): index+=1
+        if index>=len(args): continue
+        if args[index]=="-c" and "RES_BUILD_PROCESS_SOURCE" in fields[1]:
+            result.append("pid="+fields[0]+" legacy inline allocator"); continue
+        part=args[index]
+        if Path(part).name not in ("res","mini2_control.py","local_control.py"): continue
+        tail=args[index+1:]
+        if tail and tail[0]=="mini2": tail=tail[1:]
+        action=tail[0] if tail else ""; resource=tail[1] if len(tail)>1 else ""
+        local=action in ("take-build","wait-build","wait-lane") or action in ("take","wait") and resource.startswith("heavy-") or action=="wait-pool" and resource in ("local","local-light","local-build")
+        mini=action in ("take","wait") and resource.startswith("mini2-exec-") or action=="wait-pool" and resource=="mini2" or part.endswith("mini2_control.py") and action in ("take","wait","wait-pool")
+        if (local if kind=="local" else mini):
+            result.append("pid="+fields[0]+" "+kind+" allocator")
+    return result
+
+
+def refuse_legacy_allocators(root,kind):
+    blockers=allocator_processes(kind)
+    paths=([*root.glob("build-waiters/*/info"),*root.glob("lane-waiters/*/info")]
+           if kind=="local" else [*root.glob("mini2-waiters/*.json"),*root.glob("pool-waiters/mini2/*/info")])
+    for file in paths:
+        value=read(file,{}) if file.suffix==".json" else dict(line.split("\t",1) for line in file.read_text().splitlines() if "\t" in line)
+        pid=value.get("controller",value.get("pid"))
+        if value.get("host",os.uname().nodename)!=os.uname().nodename or not str(pid).isdigit() or int(pid)<=1 or process_start(int(pid)) is not None:
+            blockers.append(file.parent.name+" pid="+(str(pid) if str(pid).isdigit() else "unknown"))
+    if kind=="local":
+        file=root/".build-admission.lock"
+        if file.exists():
+            pid=file.read_text().strip()
+            if not pid.isdigit() or int(pid)<=1 or process_start(int(pid)) is not None: blockers.append(".build-admission.lock pid="+(pid if pid.isdigit() else "unknown"))
+    if blockers: raise ValueError("legacy allocators waiting or mid-transaction: "+", ".join(sorted(set(blockers)))+"; stop and restart these allocator commands using the installed controller before retrying migration")
+
+
+@contextmanager
+def allocator_switch(root,kind):
+    # Admission holds a shared lock from allocator selection through its entire
+    # transaction/wait. Migration never waits behind it or races that selection.
+    with (root/("."+kind+"-allocator-switch.guard")).open("a") as file:
+        try: fcntl.flock(file,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except BlockingIOError:
+            blockers=allocator_processes(kind)
+            if tool:=shutil.which("lsof"):
+                try:
+                    listing=subprocess.run([tool,"-w","-t",str(root/("."+kind+"-allocator-switch.guard"))],capture_output=True,text=True,timeout=3)
+                    blockers.extend("pid="+pid+" "+kind+" allocator switch holder" for pid in listing.stdout.splitlines() if pid.isdigit() and pid!=str(os.getpid()))
+                except (OSError,subprocess.TimeoutExpired): pass
+            raise ValueError("allocator selection/transaction active: "+", ".join(blockers or [kind+" allocator"])+"; stop and restart these allocator commands using the installed controller before retrying migration")
+        yield
+
+
 def config(root):
     value = read(root/"mini2-config.json", DEFAULT.copy())
     if not isinstance(value, dict) or set(value) != set(DEFAULT): raise ValueError("invalid mini2 config schema")
@@ -78,7 +141,7 @@ def config(root):
 
 
 def fresh(value, now, ttl):
-    return type(value) in (int, float) and math.isfinite(value) and 0 <= now-value < ttl
+    return numeric_metric(value) is not None and 0 <= now-value < ttl
 
 
 def registry_row(root):
@@ -166,7 +229,7 @@ def resolve(root, resource):
     if not known: raise ValueError("unknown mini2 lease id")
     approved = re.search(r"\bcaps=([a-zA-Z0-9_,.-]+)",row[4])
     return dict(slot=resource,host=HOST,user="bytedance",target="bytedance@"+HOST,
-                kind="remote",cores=read(root/"mini2-metrics.json",{}).get("cores"),memGiB=read(root/"mini2-metrics.json",{}).get("totalGiB"),factsAt=datetime.datetime.fromtimestamp(read(root/"mini2-facts.json",{}).get("at",0),datetime.timezone.utc).isoformat(),
+                kind="remote",cores=numeric_metric(read(root/"mini2-metrics.json",{}).get("cores"),True),memGiB=numeric_metric(read(root/"mini2-metrics.json",{}).get("totalGiB"),True),factsAt=iso_timestamp(read(root/"mini2-facts.json",{}).get("at")),
                 resolverOnly=not dynamic_row(row) and resource != SLOT,root="/Users/bytedance/mac-build-runner",caps=approved[1].split(",") if approved else [],
                 policy=row[2],dynamic=dynamic_row(row),category="LIGHT" if stored_lease(root,resource).get("profile")=="light" else "HEAVY")
 
@@ -190,6 +253,8 @@ def admission(root, cfg, now, disk=0, need=(), qualification=False, cost=None):
     if not fresh(link.get("at"), now, 300) or link.get("link") != "UP": return "link-stale-or-down"
     sample = read(root/"mini2-metrics.json", {})
     if not fresh(sample.get("at"), now, 300) or sample.get("host") != HOST: return "metrics-stale-or-foreign"
+    if any(numeric_metric(sample.get(name)) is None for name in ("load5","availableGiB","freeGiB","pressure","swapGiB","compressorGiB")):
+        return "invalid-metrics"
     for key in ("load5", "availableGiB", "freeGiB", "pressure", "swapGiB", "compressorGiB"):
         if type(sample.get(key)) not in (int, float) or not math.isfinite(sample[key]) or sample[key] < 0:
             return "invalid-metrics"
@@ -245,7 +310,7 @@ def status(root, now=None):
     return dict(host=HOST, slot=SLOT, pool="mini2", enabled=cfg["enabled"],
                 maintenance=cfg["maintenance"] or link.get("maintenance", True),
                 link=link.get("link", "UNKNOWN") if fresh(link.get("at"), now, 300) else "UNKNOWN",
-                lastSuccess=link.get("lastSuccess"), reason="held" if reason == "open" and held and not dynamic else reason,
+                lastSuccess=link.get("lastSuccess") if iso_timestamp(link.get("lastSuccess")) is not None else None, reason="held" if reason == "open" and held and not dynamic else reason,
                 slots=None if dynamic else 1, dynamic=dynamic, held=held,pending=len(list((root/"mini2-pending").glob("*/pending.json"))),
                 capacity=capacity(root,cfg,metrics,dynamic), takes24h=takes, metricsAge=age(metrics,now),
                 factsAge=age(facts,now), caps=facts.get("caps", []),
@@ -254,23 +319,23 @@ def status(root, now=None):
 
 def thresholds(cfg,sample):
     cpu,ram=sample.get("cores"),sample.get("totalGiB")
-    if type(cpu) not in (int,float) or type(ram) not in (int,float) or not math.isfinite(cpu+ram) or cpu<=0 or ram<=0: return None
+    if numeric_metric(cpu,True) is None or numeric_metric(ram,True) is None or numeric_metric(cpu+ram,True) is None: return None
     return (cpu if cfg["load5Limit"]=="derived" else cfg["load5Limit"],
             max(4,0.12*ram) if cfg["minAvailableGiB"]=="derived" else cfg["minAvailableGiB"])
 
 
 def age(value,now):
     at=value.get("at")
-    return now-at if type(at) in (int,float) and math.isfinite(at) else None
+    return now-at if iso_timestamp(at) is not None and now>=at else None
 
 
 def capacity(root,cfg,sample,dynamic):
     try: amounts = reserved(root,sample,time.time()) if dynamic else (0,0,0)
     except ValueError: amounts = None
-    return dict(cores=sample.get("cores"),loadLimit=(thresholds(cfg,sample) or (None,None))[0],memoryFloorGiB=(thresholds(cfg,sample) or (None,None))[1],
-                diskFloorGiB=cfg["minFreeGiB"],load5=sample.get("load5"),availableGiB=sample.get("availableGiB"),
-                freeGiB=sample.get("freeGiB"),reserved=amounts,swapGiB=sample.get("swapGiB"),
-                compressorGiB=sample.get("compressorGiB"),defaultLight=[1,1,8],defaultHeavy=[4,8,16],maxBypass=MAX_BYPASS)
+    return dict(cores=numeric_metric(sample.get("cores"),True),loadLimit=(thresholds(cfg,sample) or (None,None))[0],memoryFloorGiB=(thresholds(cfg,sample) or (None,None))[1],
+                diskFloorGiB=cfg["minFreeGiB"],load5=numeric_metric(sample.get("load5")),availableGiB=numeric_metric(sample.get("availableGiB")),
+                freeGiB=numeric_metric(sample.get("freeGiB")),reserved=amounts,swapGiB=numeric_metric(sample.get("swapGiB")),
+                compressorGiB=numeric_metric(sample.get("compressorGiB")),defaultLight=[1,1,8],defaultHeavy=[4,8,16],maxBypass=MAX_BYPASS)
 
 
 def observe(root, observation, now=None, generation=None):
@@ -375,7 +440,7 @@ def acquire(root, args):
                     resource="mini2-exec-"+str(ordinal)
                 elif resource == "mini2": resource=SLOT
                 hold = root/"locks"/(resource+".d")
-                if hold.exists() and reason == "open": reason = "held"
+                if (hold.exists() or (root/"mini2-pending"/resource).exists()) and reason == "open": reason = "held-or-pending"
                 if reason == "open":
                     hold.mkdir(parents=True)
                     try:
@@ -477,9 +542,9 @@ def main():
     args = parser.parse_args()
     root = root_dir()
     if args.action == "devbox-registry":
-        print(json.dumps(registry_slots(root)))
+        print(json.dumps(json_safe(registry_slots(root)),allow_nan=False))
     elif args.action == "slot-host":
-        print(json.dumps(resolve(root,args.resource)))
+        print(json.dumps(json_safe(resolve(root,args.resource)),allow_nan=False))
     elif args.action in ("status","pool-capacity"):
         value = status(root)
         if args.action == "pool-capacity":
@@ -490,7 +555,7 @@ def main():
                                 math.floor(detail["availableGiB"]-detail["memoryFloorGiB"]-remaining[1]),
                                 math.floor((detail["freeGiB"]-detail["diskFloorGiB"]-remaining[2])/8)))
             value={HOST:dict(claims=count,gate="headroom" if value["reason"]=="open" else value["reason"],**value)}
-        print(json.dumps(json_safe(value)) if args.json or args.action=="pool-capacity" else "mini2 "+" ".join(k+"="+str(v) for k,v in value.items()))
+        print(json.dumps(json_safe(value),allow_nan=False) if args.json or args.action=="pool-capacity" else "mini2 "+" ".join(k+"="+str(v) for k,v in value.items()))
     elif args.action in ("stage", "configure"):
         with guard(root):
             cfg=config(root)

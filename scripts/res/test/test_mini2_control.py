@@ -383,7 +383,7 @@ class DynamicMini2Tests(unittest.TestCase):
         self.release(first); self.release(second)
         self.assertNotEqual(self.cli("slot-host",second["slot"]).returncode,0)
         registry.write_bytes(original+b"# changed\n")
-        self.assertNotEqual(migration("--rollback").returncode,0)
+        self.assertEqual(migration("--rollback").returncode,0)
         self.assertEqual(registry.read_bytes(),original+b"# changed\n")
 
 

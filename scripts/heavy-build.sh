@@ -36,6 +36,7 @@ if [ -n "$watch_pid" ] && ! kill -0 "$watch_pid" 2>/dev/null; then
   echo "heavy-build: watched worker $watch_pid is gone" >&2; exit 143
 fi
 child='' watcher='' spawning=0 acquiring=0 acquiring_id='' output='' modern=1 build_held=0 lane_held=0 lane='' cancel_status=0 build_finished=0
+dynamic_bind='' dispatch_fifo=''
 stop_group() {
   [ -n "$1" ] || return 0
   kill -TERM -- "-$1" 2>/dev/null || true
@@ -52,6 +53,7 @@ cleanup() {
   if [ "$spawning" -eq 1 ] && [ -z "$child" ]; then child="${!:-}"; fi
   stop_group "$watcher"
   stop_group "$child"
+  [ -z "$dispatch_fifo" ] || rm -f "$dispatch_fifo"
   if [ "$build_finished" -eq 0 ] && [ -n "$build_log" ] && [ -f "$build_log" ]; then
     if masked_output=$(node "$script_dir/mask-logs.mjs" --force "$build_log"); then
       masked_count=$(printf '%s\n' "$masked_output" | awk -F '\t' '{ total += $NF } END { print total + 0 }')
@@ -171,19 +173,37 @@ if [ "$modern" -eq 1 ]; then
   if [[ "$capability" = *dynamic-local* ]]; then
     acquired_build=$(awk -F= '$1=="build-id" && $2 ~ /^heavy-build(-[1-9][0-9]*)?$/ {print $2}' "$output")
     [ -n "$acquired_build" ] || { echo 'heavy-build: missing acquired build ID' >&2; exit 1; }
-    "$res" bind "$acquired_build" --by "$by" || exit $?
+    dynamic_bind="$acquired_build"
   fi
   acquiring=0
 else
   legacy_pair || exit $?
 fi
-spawning=1
-if [ -n "$build_log" ]; then
-  node "$script_dir/lib/run-with-masked-log.mjs" "$build_log" -- "$@" &
-else
-  "$@" &
+if [ -n "$dynamic_bind" ]; then
+  dispatch_fifo="$output.dispatch"
+  mkfifo "$dispatch_fifo" || exit 1
+  exec 8<> "$dispatch_fifo"
 fi
+spawning=1
+(
+  if [ -n "$dispatch_fifo" ]; then
+    # The child exists for generation binding, but cannot start the workload yet.
+    read -r dispatch < "$dispatch_fifo" && [ "$dispatch" = start ] || exit 143
+    exec 8>&-
+  fi
+  if [ -n "$build_log" ]; then
+    exec node "$script_dir/lib/run-with-masked-log.mjs" "$build_log" -- "$@"
+  else
+    exec "$@"
+  fi
+) &
 child=$!; spawning=0
+if [ -n "$dynamic_bind" ]; then
+  "$res" bind "$dynamic_bind" --by "$by" --workload-pid "$child" || exit $?
+  printf 'start\n' >&8
+  exec 8>&-
+  rm -f "$dispatch_fifo"; dispatch_fifo=''
+fi
 wait "$child"; status=$?
 build_finished=1
 # Cleanup terminates descendants before releasing the pair and reaps the watcher.

@@ -28,6 +28,14 @@ python3 -B scripts/mini2-host-migrate.py --registry "$capacity_shared/resources.
 
 Coordinate the code switch with callers; existing holders can finish, and old
 unweighted holds close parallel admission until their normal receipt return.
+Both migrations refuse while allocator commands are waiting or mid-transaction.
+The refusal names the commands/PIDs and asks for stop/restart with the installed
+controller. Cancel the named owner-managed wait commands normally, retry the
+same migration command, then restart those requests with the installed code.
+Do not delete their waiter directories or transaction/switch guards to force
+admission. Updated entrypoints hold a shared switch guard through selection and
+their transaction, so new arrivals observe either complete side of migration.
+Local and mini2 use independent switch guards.
 The migration keeps existing enabled/policy/caps/maintenance settings. It backs
 up `resources.tsv` and `mini2-config.json` into
 `resources.tsv.pre-mini2-dynamic` and its `.config` sibling (mode 600), then uses
@@ -105,6 +113,10 @@ mv -f "$capacity_shared/.res-mini2-rollback-new" "$capacity_shared/res"
 If the target registry row or its owning config changed after migration, automatic rollback refuses to
 overwrite those changes. Reconcile the owner's changes before retrying; the
 original exact backups remain untouched. Code rollback comes last.
+An interrupted rollback is resumable: rerun the same `--rollback` command.
+It accepts each target only as exactly migrated or exactly original and finishes
+any remaining write. A completed rollback can be repeated without changing
+unrelated registry rows; later owner edits to either target still cause refusal.
 
 ## Main-mini local install, independently after mini2
 
@@ -119,6 +131,7 @@ does not build an app or change security software.
 ```sh
 cd "$capacity_code"
 python3 -B scripts/res/test/test_local_control.py
+python3 -B scripts/res/test/test_dynamic_fix.py
 node scripts/res/test/output-shapes.mjs
 RES_TEST_SUITE=mini-build.mjs node scripts/res/test/run.mjs
 RES_TEST_SUITE=build.mjs node scripts/res/test/run.mjs
@@ -140,6 +153,14 @@ and limits default to `derived`; they resolve against the current sample.
 Claim CLI overrides: `--profile heavy|medium|light --cores N --mem-gib GiB
 --disk-gib GiB`. Wrapper equivalents: `HEAVY_BUILD_PROFILE`,
 `HEAVY_BUILD_CORES`, `HEAVY_BUILD_MEM_GIB`.
+The updated wrapper binds a newly created FIFO-gated workload child with
+`--workload-pid` before dispatch. Bare `bind` remains compatible but receives
+no credit without workload-generation evidence. Standalone lanes should pass
+`--checkout <canonical task checkout>` so verified dead work can be reclaimed.
+The unmaterialized part of every declared memory weight remains reserved for
+the claim's lifetime; an early memory observation never declares a peak over.
+`heavy-check` preserves its legacy display and adds the dynamic gate diagnostics;
+exit 5 also means that the dynamic budget cannot admit another full build.
 
 ## Main-mini live smoke: three overlapping light lane holders
 
@@ -206,3 +227,6 @@ after both migrations are rolled back and all corresponding dynamic holds and
 pending receipts are gone. Publishing `global-rules.md` version 2026-11-22.4 is
 an owner step after the corresponding install; the worker edits only its task
 branch's source file, within the existing digest line budget.
+If local rollback is interrupted, rerun the same command. It also handles a
+registry already restored while machine.conf still needs restoration/removal.
+No new migration backup is required, and the exact backups remain unchanged.

@@ -7,7 +7,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'res-shapes-'));
-const source=fileURLToPath(new URL('../res',import.meta.url));
+const source=process.env.RES_FIX_SOURCE?path.join(process.env.RES_FIX_SOURCE,'res','res'):fileURLToPath(new URL('../res',import.meta.url));
 const host='192.0.2.1', mini='Bytedances-Mac-mini.local', now=Date.now()/1000;
 const env={...process.env,RES_DIR:root,RULES_SHARED:root,RES_TEST_LOCAL_SAMPLE:path.join(root,"local-sample.json")};
 const write=(name,value)=>fs.writeFileSync(path.join(root,name),JSON.stringify(value));
@@ -23,8 +23,8 @@ const pin=value=>{
   for(const name of ['dynamic','resolverOnly']) assert.equal(typeof value[name],'boolean',name);
   assert.ok(Array.isArray(value.caps));
   assert.ok(value.root===null || typeof value.root==='string');
-  assert.ok(value.cores===null || typeof value.cores==='number');
-  assert.ok(value.memGiB===null || typeof value.memGiB==='number');
+  assert.ok(value.cores===null || Number.isFinite(value.cores));
+  assert.ok(value.memGiB===null || Number.isFinite(value.memGiB));
   assert.ok(value.factsAt===null || typeof value.factsAt==='string');
 };
 try {
@@ -60,6 +60,42 @@ try {
   fs.writeFileSync(localCached,fs.readFileSync(localCached,'utf8').replace('"load5":0','"load5":NaN'));
   const invalidLocal=JSON.parse(run('pool-capacity','local'))[os.hostname()];
   assert.equal(invalidLocal.claims,0); assert.equal(invalidLocal.gate,'invalid-metrics');
+  const corrupt=(name,value,fields)=>{
+    let content=JSON.stringify({...value,...Object.fromEntries(fields.map(field=>[field,'INVALID_METRIC']))});
+    content=content.replaceAll('"INVALID_METRIC"',currentInvalid);
+    fs.writeFileSync(path.join(root,name),content);
+  };
+  let currentInvalid;
+  for(currentInvalid of ['NaN','Infinity','-Infinity','-1','null','"invalid"','true']) {
+    corrupt('mini2-metrics.json',{at:Date.now()/1000,host:mini,arch:'arm64',load5:0,availableGiB:32,freeGiB:200,pressure:1,swapGiB:0,compressorGiB:0},['cores','totalGiB']);
+    corrupt('mini2-facts.json',{host:mini,caps:['cmake-native']},['at']);
+    corrupt('local-metrics.json',{},['at','cores','totalGiB']);
+    corrupt('local-sample.json',{at:Date.now()/1000,host:os.hostname(),load5:0,availableGiB:64,freeGiB:1000,pressure:1,swapGiB:0,compressorGiB:0},['cores','totalGiB']);
+    corrupt('devbox-metrics/'+host+'.json',{at:Date.now()/1000,cores:64,memAvailableGiB:256,freeGiB:2000,io_some_avg60:0,io_full_avg10:0},['load5']);
+    let facts=JSON.stringify({[host]:{user:'runner',cores:'INVALID_METRIC',memGiB:'INVALID_METRIC',probedAt:'INVALID_METRIC'}});
+    fs.writeFileSync(path.join(root,'devbox-hosts.json'),facts.replaceAll('"INVALID_METRIC"',currentInvalid));
+    for(const id of [dv,mk.slot,'heavy-lane-1']) {
+      const value=JSON.parse(run('slot-host',id)); pin(value);
+      assert.equal(value.cores,null); assert.equal(value.memGiB,null); assert.equal(value.factsAt,null);
+    }
+    JSON.parse(run('devbox-registry')).forEach(pin);
+    for(const pool of ['devbox-cn','mini2','local']) {
+      const map=JSON.parse(run('pool-capacity',pool));
+      const entry=map[pool==='mini2'?mini:pool==='local'?os.hostname():host];
+      assert.equal(entry.claims,0); assert.equal(typeof entry.gate,'string');
+    }
+  }
+  for(currentInvalid of ['1e100','{}','[]']) {
+    corrupt('mini2-facts.json',{host:mini,caps:['cmake-native']},['at']);
+    corrupt('local-metrics.json',{cores:14,totalGiB:64},['at']);
+    for(const id of [mk.slot,'heavy-lane-1']) assert.equal(JSON.parse(run('slot-host',id)).factsAt,null);
+    JSON.parse(run('devbox-registry')).forEach(pin);
+  }
+  for(currentInvalid of ['0','1','1e100','{}','[]']) {
+    corrupt('devbox-hosts.json',{[host]:{user:'runner',cores:64,memGiB:256,probedAt:'INVALID_METRIC'}},[]);
+    assert.equal(JSON.parse(run('slot-host',dv)).factsAt,null);
+    JSON.parse(run('devbox-registry')).forEach(pin);
+  }
   run('return',dv,'--by','fixture');
   write('clean.json',{generation:mk.lease.generation,clean:true});
   run('return',mk.slot,'--by','fixture','--receipt',path.join(root,'clean.json'));

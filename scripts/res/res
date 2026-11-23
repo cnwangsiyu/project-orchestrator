@@ -9,6 +9,20 @@
 # Heavy slots additionally support a gated wait and recovery of old, dead-PID holds.
 set -euo pipefail
 
+# The shell retains the flock's open-file description after Python exits.
+# This also preserves sourcing callers' traps and protects copied legacy res.
+allocator_kind=
+case "${1:-}:${2:-}" in
+  take-build:*|wait-build:*|wait-lane:*|take:heavy-*|wait:heavy-*|wait-pool:local|wait-pool:local-light|wait-pool:local-build) allocator_kind=local ;;
+  take:mini2-exec-*|wait:mini2-exec-*|wait-pool:mini2|mini2:take|mini2:wait|mini2:wait-pool) allocator_kind=mini2 ;;
+esac
+if [ -n "$allocator_kind" ]; then
+  allocator_root="${RES_DIR:-${RULES_SHARED:-$HOME/.claude/orchestrator/_shared}}"
+  mkdir -p "$allocator_root"
+  exec 9>> "$allocator_root/.$allocator_kind-allocator-switch.guard"
+  python3 -c 'import fcntl; fcntl.flock(9,fcntl.LOCK_SH)'
+fi
+
 # The Darwin pool has an independent, default-off controller. Keep named takes,
 # waits and returns on that same guard instead of treating the row as generic.
 mini2_controller() {
@@ -754,6 +768,11 @@ case "${1:-}:${2:-}" in
   status:heavy-build*|status:heavy-lane-*)
     local_controller enabled && local_mode=1 ;;
 esac
+if [ "$local_mode" = 0 ] && [ "$allocator_kind" = local ] && [ -f "$REG" ] &&
+   awk -F '\t' '$1=="heavy-build" && $5 ~ /(^|[[:space:]])dynamic-local([[:space:]]|$)/ {found=1} END {exit !found}' "$REG"; then
+  echo 'res: dynamic local controller unavailable; refusing legacy admission' >&2
+  exit 2
+fi
 if [ "$local_mode" = 1 ]; then
   if [ "${1:-}" = take-build ] && [ "${2:-}" = --wait ]; then shift; set -- wait-build "$@"; fi
   if [[ "$*" = *--help* ]]; then
@@ -946,7 +965,7 @@ memory_denial(sys.argv[1], state, os.environ.get('RES_MEMORY_ID', str(os.getppid
     "MEM_GUARD_SWAPFILES=$MEM_GUARD_SWAPFILES" "MEM_GUARD_SAMPLES=$MEM_GUARD_SAMPLES"
 }
 
-cmd_heavy_check() {
+legacy_heavy_check() {
   local PID="$PPID" lanes_held limit admission=legacy override=0 memory_details=0
   local MEM_GUARD MEM_GUARD_COMPRESSOR_GIB MEM_GUARD_SWAP_GIB MEM_GUARD_SWAP_GROWTH_GIB MEM_GUARD_WINDOW_SEC MEM_GUARD_SUSTAIN MEM_GUARD_SWAPFILES MEM_GUARD_SAMPLES
   local memory_reading memory_high=0
@@ -1134,6 +1153,16 @@ cmd_heavy_check() {
     printf "\n"
     exit overloaded ? 5 : 0
   }'
+}
+
+cmd_heavy_check() {
+  local legacy_rc=0 dynamic_rc=0
+  legacy_heavy_check "$@" || legacy_rc=$?
+  if local_controller enabled; then
+    local_controller heavy-check || dynamic_rc=$?
+  fi
+  [ "$legacy_rc" -eq 0 ] || return "$legacy_rc"
+  return "$dynamic_rc"
 }
 
 # Use the unrounded controller verdict, never the rounded load/avail display.
@@ -2564,7 +2593,7 @@ pool_controller() {
 import datetime, fcntl, hashlib, json, math, os, re, shutil, signal, socket, stat, subprocess, sys, tempfile, time
 from contextlib import contextmanager
 sys.path.insert(0, os.path.dirname(os.path.realpath(os.environ['RES_SELF_COMMAND'])))
-from dynamic_capacity import headroom
+from dynamic_capacity import headroom, json_safe, numeric_metric, cached_timestamp
 root, action, request, timeout, delay, by, project, task, purpose, pid, until, force, need, prefer, preferred_slot, excluded_slots, excluded_hosts, stale, controller, generation, exclude_reason, hard_slots, hard_hosts, disk_gib, disk_gib_file, placement_file, maintenance, extra_disk_gib, legacy_config_path, warm_family, claim_cores, claim_mem = sys.argv[1:]
 build_namespace = {'__name__': 'res_build_processes'}
 exec(os.environ['RES_BUILD_PROCESS_SOURCE'], build_namespace)
@@ -2780,12 +2809,12 @@ try:
         hold = info(os.path.join(locks, id + '.d'))
         return dict(slot=id, kind=rows[id][0], policy=rows[id][1], host=remote[id][1], user=target.group(1),
                     target=target.group(0), root=runner_root.group(1) if runner_root else cached_root,
-                    cores=fact.get('cores'), memGiB=fact.get('memGiB'), factsAt=fact.get('probedAt'),
+                    cores=numeric_metric(fact.get('cores'),True), memGiB=numeric_metric(fact.get('memGiB'),True), factsAt=cached_timestamp(fact.get('probedAt')),
                     caps=sorted(remote[id][2]), dynamic=id in dynamic_ids, resolverOnly='leases-only' in description.split(),
                     category=hold.get('claim_kind') or ('LIGHT' if id.startswith('devbox-cn-light') else 'HEAVY'))
     if action in ('slot-host', 'devbox-registry'):
         value = lease_json(request) if action == 'slot-host' else [lease_json(id) for id in remote if not id.startswith('devbox-host-')]
-        print(json.dumps(value)); committed = True; sys.exit(0)
+        print(json.dumps(json_safe(value),allow_nan=False)); committed = True; sys.exit(0)
     # A pool name (prefix of slot ids such as devbox-cn) is a valid status request: it shows that pool's waiters.
     if action == 'status' and request and request not in rows and not (host_rows and request in ('devbox-cn','devbox-cn-light')) and not any(key.startswith(request + '-') for key in rows):
         raise ValueError("unknown resource '%s'" % request)
@@ -3100,7 +3129,7 @@ try:
                                 math.floor((value['freeGiB']-disk-53)/cost[2]) if cost[2] else maximum,
                                 maximum-held))
             result[box]=dict(claims=count,gate=reason)
-        print(json.dumps(result)); committed=True; sys.exit(0)
+        print(json.dumps(json_safe(result),allow_nan=False)); committed=True; sys.exit(0)
     def capacity(hosts):
         try:
             with open(os.path.join(root, 'devbox-hosts.json')) as stream: probes = json.load(stream)

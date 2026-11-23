@@ -171,10 +171,14 @@ class LocalCapacityTests(unittest.TestCase):
 
     def test_reservation_credit_requires_fresh_attribution(self):
         values=self.take("visible")
-        lease=json.loads((self.root/"locks"/(values["build-id"]+".d")/"lease.json").read_text())
-        self.write("sample.json",{**self.sample,"load5":4,"availableGiB":56,"leaseUsage":{lease["runId"]:dict(at=time.time(),cpuLoad=4,memoryGiB=8)}})
+        file=self.root/"locks"/(values["build-id"]+".d")/"lease.json"
+        lease=json.loads(file.read_text())
+        observed=dict(at=time.time(),cpuLoad=4,memoryGiB=8,generation=lease["generation"],workloadPid=123,workloadBirth=456)
+        self.write("sample.json",{**self.sample,"load5":4,"availableGiB":56,"leaseUsage":{lease["runId"]:observed}})
+        self.assertEqual(self.capacity()["reserved"],[4,8,16])
+        self.write(str(file.relative_to(self.root)),{**lease,"dispatch":"bound","workload":dict(pid=123,birth=456)})
         self.assertEqual(self.capacity()["reserved"],[0,0,16])
-        self.write("sample.json",{**self.sample,"load5":4,"availableGiB":56,"leaseUsage":{lease["runId"]:dict(at=time.time()-15,cpuLoad=4,memoryGiB=8)}})
+        self.write("sample.json",{**self.sample,"load5":4,"availableGiB":56,"leaseUsage":{lease["runId"]:{**observed,"at":time.time()-15}}})
         self.assertEqual(self.capacity()["reserved"],[4,8,16])
         self.release("visible")
 

@@ -89,6 +89,13 @@ claims acquire a build ID and a lane ID together; the wrapper captures
 own pair by holder plus PID. `wait-lane` defaults to medium; callers select
 `--profile heavy|medium|light` or explicit measured weights. Named legacy takes
 pin their names and build takes acquire the corresponding pair atomically.
+The wrapper starts a FIFO-gated child, binds it with `--workload-pid`, then
+releases the FIFO. Kernel process start ticks must be newer than the claim's
+Mach absolute-time cutoff. The holder itself, pre-existing descendants and
+other workload subtrees never receive credit; overlapping bindings are refused.
+Unbound claims and bindings without a verifiable workload generation retain
+their full CPU/memory reservations. Missing native generation evidence closes
+credit, not the ordinary measured admission gate.
 
 | Kind | Default cores | Default memory | Disk |
 | --- | --- | --- | --- |
@@ -117,13 +124,24 @@ live counters. The main mini remains under memory-panic observation until
 2026-11-26; owner smoke uses light no-op work.
 
 Local and mini2 share headroom arithmetic, bounded-bypass predicates and fresh
-attributed reservation credit. Local usage comes from owned PID descendants'
-CPU/private-memory counters and is capped by the outstanding batch's measured host delta.
+attributed reservation credit. Local usage comes only from the bound workload
+generation and post-claim descendants, with generation checks around footprint
+sampling, and is capped by the outstanding batch's measured host delta.
+For each living claim, credit is `min(measured attributed use, declared weight,
+remaining shared visibility budget)` and the rest of its declared weight stays
+reserved until return or verified reclamation. Credit is not a declaration that
+the job has peaked: measured use plus its remaining reservation still covers
+the full declared peak. In the review scenario, two unbound 8 GiB claims and
+24 GiB available retain 16 GiB reserved; a third 8 GiB job is refused because
+it would leave 0 GiB, below the 7.68 GiB floor.
 An unbound controlled dead holder is reclaimed; dispatched work is reclaimed
 only when the existing checkout/process evidence proves no surviving work.
 Uncertain or surviving work keeps its own ID/reservation while other claims
 fit. Canonical checkout paths exclude conflicting full builds; caller worktrees
 and their build paths remain the source-isolation boundary for local jobs.
+Standalone lanes persist the same canonical checkout/process evidence as build
+pairs. A dead bound lane is reclaimed only after a zero-process checkout probe;
+surviving or uncertain work continues to reserve its declared cost.
 
 Both migrations keep exact full backups but restore only their target registry
 row, preserving the other migration and unrelated rows. Mini2 restores its own
@@ -132,6 +150,27 @@ either order while the compatible controller resolves draining IDs. A changed
 target row or changed owning config causes refusal rather than overwriting an
 owner's later change. The pinned VAK JSON shapes also cover local slot objects,
 registry rows and host capacity maps.
+Rollback validates each owning file independently as exactly migrated or
+exactly original before writing anything. Retrying any interrupted rollback
+finishes the remaining file, including removal of a newly created machine.conf;
+completed rollback is idempotent and unrelated registry rows remain untouched.
+Configuration is restored before the registry marker, so an interrupted new
+rollback cannot enable legacy admission with the derived dynamic thresholds.
+
+Allocator entrypoints hold a pool-specific shared switch guard from selection
+through admission/wait; migration takes its exclusive side without waiting.
+It also refuses old live waiters, legacy allocator processes and the local
+legacy transaction lock, naming their PIDs and requesting stop/restart on the
+installed controller. The local and mini2 guards are separate. A new entrant
+cannot select legacy mode on one side of a migration and admit on the other.
+Normal build/host transaction guards remain in place; switch guards are not
+capacity leases and do not serialize concurrent claims against each other.
+
+Resolvers and capacity reports emit strict JSON. Invalid/nonfinite numeric
+metrics and invalid or unrepresentable timestamps become null, while admission
+still fails closed. `heavy-check` keeps its legacy fields and adds
+`dynamic_gate`, reason, additional claim count, reservations and memory floor;
+a closed dynamic gate returns 5 even when the legacy display reports OK.
 
 Rejected: numbered extra rows, a second budget formula, whole-host execution
 serialization, timestamp-only reservation expiry, and dropping an unconfirmed

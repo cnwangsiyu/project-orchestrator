@@ -6,6 +6,7 @@ gates. Keeping this arithmetic common prevents host allocators from drifting.
 import math
 import ctypes
 import sys
+import datetime
 
 
 class ProcessUsage(ctypes.Structure):
@@ -15,16 +16,58 @@ class ProcessUsage(ctypes.Structure):
         "wired_size","resident_size","phys_footprint","start_time","exit_time")]
 
 
-def physical_footprint(pid):
-    """Private process ledger; unavailable evidence receives no reservation credit."""
-    if sys.platform!="darwin": return 0
+def process_usage(pid):
+    """Kernel generation and private ledger, using the stable Darwin prefix."""
+    if sys.platform!="darwin": return None
     try:
         lib=ctypes.CDLL("/usr/lib/libproc.dylib",use_errno=True)
         lib.proc_pid_rusage.argtypes=[ctypes.c_int,ctypes.c_int,ctypes.c_void_p]
         value=ProcessUsage()
-        if lib.proc_pid_rusage(int(pid),0,ctypes.byref(value)): return 0
-        return min(value.phys_footprint,value.resident_size)
-    except (OSError,AttributeError): return 0
+        if lib.proc_pid_rusage(int(pid),0,ctypes.byref(value)): return None
+        return value
+    except (OSError,AttributeError): return None
+
+
+def process_clock():
+    if sys.platform!="darwin": return None
+    try:
+        lib=ctypes.CDLL(None)
+        lib.mach_absolute_time.restype=ctypes.c_uint64
+        return lib.mach_absolute_time()
+    except (OSError,AttributeError): return None
+
+
+def process_birth(pid):
+    value=process_usage(pid)
+    return value.start_time if value and value.start_time and not value.exit_time else None
+
+
+def physical_footprint(pid):
+    """Private process ledger; unavailable evidence receives no reservation credit."""
+    value=process_usage(pid)
+    return min(value.phys_footprint,value.resident_size) if value else 0
+
+
+def numeric_metric(value, positive=False):
+    if type(value) not in (int,float): return None
+    try:
+        return value if math.isfinite(value) and (value>0 if positive else value>=0) else None
+    except OverflowError: return None
+
+
+def iso_timestamp(value):
+    if numeric_metric(value) is None: return None
+    try: return datetime.datetime.fromtimestamp(value,datetime.timezone.utc).isoformat()
+    except (ValueError,OverflowError,OSError): return None
+
+
+def cached_timestamp(value):
+    if isinstance(value,str):
+        try:
+            parsed=datetime.datetime.fromisoformat(value.replace("Z","+00:00"))
+            return value if parsed.tzinfo and parsed.timestamp()>=0 else None
+        except (ValueError,OverflowError,OSError): return None
+    return None
 
 
 def json_safe(value):
@@ -44,12 +87,12 @@ def reservation_totals(leases, sample=None, now=None):
     costs=[]
     for lease in leases:
         cost=lease.get("weights")
-        if not isinstance(cost,list) or len(cost)!=3 or any(type(v) not in (int,float) or not math.isfinite(v) or v<0 for v in cost) or cost[0]<=0 or cost[1]<=0:
+        if not isinstance(cost,list) or len(cost)!=3 or any(numeric_metric(v) is None for v in cost) or cost[0]<=0 or cost[1]<=0:
             raise ValueError("legacy-or-incomplete-hold")
         costs.append(list(cost))
-    if sample and now is not None:
+    if sample and now is not None and all(numeric_metric(sample.get(name)) is not None for name in ("load5","availableGiB")):
         baselines=[lease["baseline"] for lease in leases if lease.get("baseline")]
-        if any(any(type(v.get(name)) not in (int,float) or not math.isfinite(v[name]) or v[name]<0 for name in ("load5","availableGiB")) for v in baselines):
+        if any(not isinstance(v,dict) or any(numeric_metric(v.get(name)) is None for name in ("load5","availableGiB")) for v in baselines):
             raise ValueError("invalid reservation baseline")
         visible=[max(0,sample["load5"]-min((v["load5"] for v in baselines),default=sample["load5"])),
                  max(0,max((v["availableGiB"] for v in baselines),default=sample["availableGiB"])-sample["availableGiB"])]
@@ -58,14 +101,23 @@ def reservation_totals(leases, sample=None, now=None):
         for lease,cost in zip(leases,costs):
             usage=usages.get(lease.get("runId"),{})
             if not isinstance(usage,dict): continue
+            if lease.get("ownerId"):
+                workload=lease.get("workload",{})
+                if (lease.get("dispatch")!="bound" or not isinstance(workload,dict) or not workload
+                    or usage.get("generation")!=lease.get("generation")
+                    or usage.get("workloadPid")!=workload.get("pid")
+                    or usage.get("workloadBirth")!=workload.get("birth")):
+                    continue
             at=usage.get("at")
-            if type(at) not in (int,float) or not math.isfinite(at) or not 0<=now-at<15: continue
+            if numeric_metric(at) is None or not 0<=now-at<15: continue
             for index,name in ((0,"cpuLoad"),(1,"memoryGiB")):
                 amount=usage.get(name)
-                if type(amount) not in (int,float) or not math.isfinite(amount) or amount<0: continue
+                if numeric_metric(amount) is None: continue
                 credit=min(cost[index],amount,visible[index])
                 cost[index]-=credit; visible[index]-=credit
-    return tuple(sum(cost[i] for cost in costs) for i in range(3))
+    amounts=tuple(sum(cost[i] for cost in costs) for i in range(3))
+    if any(numeric_metric(value) is None for value in amounts): raise ValueError("invalid reservation total")
+    return amounts
 
 
 def headroom(load, available, free, reserved, cost, load_limit, memory_floor, disk_floor):

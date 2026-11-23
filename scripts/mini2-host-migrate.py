@@ -10,7 +10,7 @@ import sys
 import uuid
 
 sys.path.insert(0,str(Path(__file__).resolve().parent/"res"))
-from mini2_control import HOST, SLOT, guard
+from mini2_control import HOST, SLOT, guard, allocator_switch, refuse_legacy_allocators
 
 
 def migrate(content):
@@ -58,7 +58,7 @@ def restore_row(current,original,expected,id):
         if len(rows)!=1: raise ValueError("missing or duplicate target registry row")
         return rows[0]
     old,target,now=row(original),row(expected),row(current)
-    if now!=target: raise ValueError("target registry row changed since migration; refusing to overwrite")
+    if now not in (target,old): raise ValueError("target registry row changed since migration; refusing to overwrite")
     return b"".join(old if line==now else line for line in current.splitlines(keepends=True))
 
 
@@ -73,7 +73,7 @@ def main():
     file=args.registry.absolute()
     backup=args.backup or file.with_name(file.name+".pre-mini2-dynamic")
     if file.is_symlink() or backup.is_symlink() or file==backup.absolute(): raise ValueError("unsafe registry or backup")
-    with guard(file.parent):
+    with allocator_switch(file.parent,"mini2"),guard(file.parent):
         current=file.read_bytes(); mode=file.stat().st_mode & 0o777
         config=file.parent/"mini2-config.json"
         config_backup=backup.with_name(backup.name+".config")
@@ -84,11 +84,12 @@ def main():
             original=backup.read_bytes()
             restored=restore_row(current,original,migrate(original),SLOT)
             config_original=config_backup.read_bytes()
-            if config_current!=derived_config(config_original): raise ValueError("config changed since migration; refusing to overwrite")
-            atomic(file,restored,mode)
-            atomic(config,config_original,config_mode)
+            if config_current not in (derived_config(config_original),config_original): raise ValueError("config changed since migration; refusing to overwrite")
+            if config_current!=config_original: atomic(config,config_original,config_mode)
+            if current!=restored: atomic(file,restored,mode)
             print("Exact registry restored; keep compatible code until all mini2 leases return.")
             return
+        refuse_legacy_allocators(file.parent,"mini2")
         proposal=migrate(current)
         for line in difflib.unified_diff(current.decode().splitlines(keepends=True),proposal.decode().splitlines(keepends=True),fromfile=str(file),tofile=str(file)+" (dynamic)"):
             if re.search(r"password|passwd|secret|token|api_?key|credential|auth|key",line,re.I):

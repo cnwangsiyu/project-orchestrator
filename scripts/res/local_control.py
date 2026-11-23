@@ -14,7 +14,8 @@ import sys
 import time
 import uuid
 
-from dynamic_capacity import headroom, reservation_totals, smaller_bypass, physical_footprint, json_safe
+from dynamic_capacity import (headroom, reservation_totals, smaller_bypass, physical_footprint, json_safe,
+                              process_birth, process_clock, numeric_metric, iso_timestamp)
 from mini2_control import atomic, guard, read, root_dir, process_start
 
 ID = re.compile(r"(?:heavy-build(?:-[2-9][0-9]*|-[1-9][0-9]+)?|heavy-lane-[1-9][0-9]*)\Z")
@@ -80,16 +81,31 @@ def usage(root,sample):
     values={}
     for _,lease in claims(root):
         pid=lease.get("pid")
-        if pid not in rows or not lease.get("runId"): continue
+        workload=lease.get("workload",{})
+        cutoff=lease.get("creditAfter")
+        if (lease.get("dispatch")!="bound" or not workload or type(cutoff) is not int
+            or pid not in rows or not lease.get("runId")): continue
         if process_start(pid)!=lease.get("pid_start"): continue
-        family={pid}
+        root_pid=workload.get("pid")
+        if root_pid not in rows or process_birth(root_pid)!=workload.get("birth") or workload["birth"]<=cutoff: continue
+        family={root_pid}
         while True:
             expanded=family|{p for p,v in rows.items() if int(v[1]) in family}
             if expanded==family: break
             family=expanded
+        memory=cpu=0
+        for member in family:
+            born=process_birth(member)
+            if born is None or born<=cutoff: continue
+            footprint=physical_footprint(member)
+            if process_birth(member)!=born: continue
+            memory+=footprint
+            cpu+=float(rows[member][3])/100
+        if process_birth(root_pid)!=workload["birth"]: continue
         elapsed=max(0,sample["at"]-lease["start"])
-        values[lease["runId"]]=dict(at=sample["at"],memoryGiB=sum(physical_footprint(p) for p in family)/2**30,
-                                        cpuLoad=sum(float(rows[p][3])/100 for p in family)*(1-math.exp(-elapsed/300)))
+        values[lease["runId"]]=dict(at=sample["at"],memoryGiB=memory/2**30,
+                                  cpuLoad=cpu*(1-math.exp(-elapsed/300)),generation=lease["generation"],
+                                  workloadPid=root_pid,workloadBirth=workload["birth"])
     return values
 
 
@@ -139,11 +155,11 @@ def cost_for(args,cfg,sample):
 
 def gate(root,cfg,sample,cost):
     at=sample.get("at"); now=time.time()
-    if type(at) not in (int,float) or not math.isfinite(at) or not 0<=now-at<cfg["LOCAL_METRICS_TTL_SECONDS"]: return "stale-or-missing-metrics"
+    if numeric_metric(at) is None or not 0<=now-at<cfg["LOCAL_METRICS_TTL_SECONDS"]: return "stale-or-missing-metrics"
     if sample.get("host")!=os.uname().nodename: return "foreign-metrics"
     for name in ("cores","totalGiB","load5","availableGiB","pressure","freeGiB","swapGiB","compressorGiB"):
         value=sample.get(name)
-        if type(value) not in (int,float) or not math.isfinite(value) or value<0: return "invalid-metrics"
+        if numeric_metric(value) is None: return "invalid-metrics"
     if sample["cores"]<=0 or sample["totalGiB"]<=0: return "invalid-metrics"
     if sample["pressure"]!=1: return "pressure"
     if registry(root)[2]!="open": return "policy"
@@ -214,7 +230,7 @@ def acquire(root,args):
     if born is None: raise ValueError("holder is dead")
     if not math.isfinite(args.timeout) or args.timeout<0: raise ValueError("invalid timeout")
     build=args.action in ("take-build","wait-build") or args.resource.startswith("heavy-build")
-    checkout=checkout_identity(args) if build else None
+    checkout=checkout_identity(args)
     queue=root/"local-waiters"; queue.mkdir(parents=True,exist_ok=True)
     ticket=queue/(str(time.time_ns())+"-"+str(uuid.uuid4())+".json")
     deadline=time.monotonic()+args.timeout*60
@@ -227,7 +243,7 @@ def acquire(root,args):
                 sample=measured(root,parsed)
                 # Validate hardware before deriving costs; stale evidence always
                 # closes admission even when a fixture is otherwise well formed.
-                if any(type(sample.get(name)) not in (int,float) or not math.isfinite(sample[name]) or sample[name]<=0 for name in ("cores","totalGiB")):
+                if any(numeric_metric(sample.get(name),True) is None for name in ("cores","totalGiB")):
                     raise ValueError("invalid hardware metrics")
                 profile,cost=cost_for(args,cfg,sample)
                 reap(root)
@@ -267,6 +283,7 @@ def acquire(root,args):
                         generation=str(uuid.uuid4())
                         lease=dict(by=args.by,project=args.project,task=args.task,purpose=args.purpose,pid=args.pid,pid_start=born,
                                    host=os.uname().nodename,start=time.time(),generation=generation,runId=generation,ownerId=owner,
+                                   creditAfter=process_clock(),
                                    weights=cost,baseline=read(root/"local-baseline.json",sample),profile=profile,
                                    build=build,checkout=checkout,lane=lane_id if build else None,controlled=args.wrapper,dispatch="unbound" if args.wrapper else "manual")
                         for id in ([build_id,lane_id] if build else [lane_id]):
@@ -301,8 +318,8 @@ def resolve(root,id):
     lease=read(root/"locks"/(id+".d")/"lease.json",{})
     user=getpass.getuser(); host=os.uname().nodename
     return dict(slot=id,kind="slot",policy=registry(root)[2],host=host,user=user,target=user+"@"+host,
-                root=lease.get("checkout"),cores=sample.get("cores"),memGiB=sample.get("totalGiB"),
-                factsAt=datetime.datetime.fromtimestamp(sample.get("at",0),datetime.timezone.utc).isoformat() if sample else None,
+                root=lease.get("checkout"),cores=numeric_metric(sample.get("cores"),True),memGiB=numeric_metric(sample.get("totalGiB"),True),
+                factsAt=iso_timestamp(sample.get("at")),
                 caps=["local-build"],dynamic=activated(root),resolverOnly=not activated(root) and id not in ("heavy-build","heavy-lane-1","heavy-lane-2","heavy-lane-3"),
                 category=lease.get("profile","heavy").upper())
 
@@ -315,7 +332,7 @@ def registry_slots(root):
 def report(root,args):
     cfg,parsed=configuration(root)
     sample=measured(root,parsed)
-    if any(type(sample.get(name)) not in (int,float) or sample[name]<=0 for name in ("cores","totalGiB")): raise ValueError("invalid hardware metrics")
+    if any(numeric_metric(sample.get(name),True) is None for name in ("cores","totalGiB")): raise ValueError("invalid hardware metrics")
     _,cost=cost_for(args,cfg,sample)
     reason=gate(root,cfg,sample,cost)
     try: amounts=reservation_totals([lease for _,lease in claims(root)],sample,time.time())
@@ -323,8 +340,8 @@ def report(root,args):
     load,floor=limits(cfg,sample)
     count=0 if reason!="open" or amounts is None else max(0,min(math.floor((load-sample["load5"]-amounts[0])/cost[0]),math.floor((sample["availableGiB"]-floor-amounts[1])/cost[1]),(math.floor((sample["freeGiB"]-cfg["LOCAL_MIN_FREE_GIB"]-amounts[2])/cost[2]) if cost[2] else math.inf)))
     return {os.uname().nodename:dict(claims=count,gate="headroom" if reason=="open" else reason,
-                                   cores=sample["cores"],memGiB=sample["totalGiB"],loadLimit=load,memoryFloorGiB=floor,
-                                   load5=sample["load5"],availableGiB=sample["availableGiB"],pressure=sample["pressure"],freeGiB=sample["freeGiB"],diskFloorGiB=cfg["LOCAL_MIN_FREE_GIB"],
+                                   cores=numeric_metric(sample["cores"],True),memGiB=numeric_metric(sample["totalGiB"],True),loadLimit=load,memoryFloorGiB=floor,
+                                   load5=numeric_metric(sample.get("load5")),availableGiB=numeric_metric(sample.get("availableGiB")),pressure=numeric_metric(sample.get("pressure")),freeGiB=numeric_metric(sample.get("freeGiB")),diskFloorGiB=cfg["LOCAL_MIN_FREE_GIB"],
                                    reserved=amounts,held=len(claims(root)),dynamic=activated(root))}
 
 
@@ -337,6 +354,7 @@ def main():
         parser.add_argument("--"+name,default="")
     parser.add_argument("--for",dest="purpose",default="")
     parser.add_argument("--pid",type=int)
+    parser.add_argument("--workload-pid",type=int)
     parser.add_argument("--timeout",type=float,default=0)
     parser.add_argument("--cores",type=float)
     parser.add_argument("--mem-gib",type=float)
@@ -351,12 +369,19 @@ def main():
         sys.exit(0 if enabled else 1)
     elif args.action=="has-owned":
         sys.exit(0 if any(lease.get("by")==args.by and (args.pid is None or lease.get("pid")==args.pid) for _,lease in claims(root)) else 1)
-    elif args.action=="slot-host": print(json.dumps(resolve(root,args.resource)))
-    elif args.action=="devbox-registry": print(json.dumps(registry_slots(root)))
-    elif args.action in ("status","pool-capacity"):
+    elif args.action=="slot-host": print(json.dumps(json_safe(resolve(root,args.resource)),allow_nan=False))
+    elif args.action=="devbox-registry": print(json.dumps(json_safe(registry_slots(root)),allow_nan=False))
+    elif args.action in ("status","pool-capacity","heavy-check"):
         try: value=report(root,args)
         except (ValueError,OSError,subprocess.SubprocessError): value={os.uname().nodename:dict(claims=0,gate="invalid-config-or-metrics")}
-        print(json.dumps(json_safe(value)))
+        if args.action=="heavy-check":
+            detail=value[os.uname().nodename]
+            opened=detail["gate"]=="headroom" and detail["claims"]>0
+            print("dynamic_gate="+("OPEN" if opened else "CLOSED")+" dynamic_reason="+detail["gate"]+
+                  " dynamic_claims="+str(detail["claims"])+" dynamic_reserved="+json.dumps(json_safe(detail.get("reserved")),separators=(",",":"))+
+                  " dynamic_memory_floor_gib="+str(detail.get("memoryFloorGiB")))
+            sys.exit(0 if opened else 5)
+        print(json.dumps(json_safe(value),allow_nan=False))
     elif args.action in ("take-build","wait-build","wait-lane","wait-pool","take","wait"):
         if args.lane and not re.fullmatch(r"heavy-lane-[1-9][0-9]*",args.lane): raise ValueError("invalid pinned lane")
         acquire(root,args)
@@ -375,7 +400,31 @@ def main():
                 owner=root/"locks"/(lease["ownerId"]+".d")
                 if args.action=="bind":
                     if not lease.get("controlled") or lease.get("dispatch")!="unbound" or process_start(lease["pid"])!=lease["pid_start"]: raise ValueError("dispatch identity mismatch")
-                    atomic(owner/"lease.json",{**lease,"dispatch":"bound"})
+                    workload={}
+                    if args.workload_pid:
+                        rows=subprocess.check_output(["/bin/ps","-axo","pid=,ppid="],text=True,timeout=3)
+                        parents={int(v[0]):int(v[1]) for line in rows.splitlines() if len(v:=line.split())==2}
+                        ancestor=args.workload_pid; seen=set()
+                        while ancestor in parents and ancestor not in seen and ancestor!=lease["pid"]:
+                            seen.add(ancestor); ancestor=parents[ancestor]
+                        if ancestor!=lease["pid"] or args.workload_pid==lease["pid"]: raise ValueError("workload is not a holder descendant")
+                        born=process_birth(args.workload_pid); cutoff=lease.get("creditAfter")
+                        if born is not None and type(cutoff) is int:
+                            if born<=cutoff: raise ValueError("workload predates claim")
+                            def under(child,parent):
+                                seen=set()
+                                while child in parents and child not in seen:
+                                    if child==parent: return True
+                                    seen.add(child); child=parents[child]
+                                return child==parent
+                            for _,other in claims(root):
+                                existing=other.get("workload",{})
+                                if not existing or other.get("generation")==lease["generation"]: continue
+                                if process_birth(existing["pid"])!=existing["birth"]: continue
+                                if under(args.workload_pid,existing["pid"]) or under(existing["pid"],args.workload_pid):
+                                    raise ValueError("workload overlaps another claim")
+                            workload=dict(pid=args.workload_pid,birth=born)
+                    atomic(owner/"lease.json",{**lease,"dispatch":"bound","workload":workload})
                 elif hold==owner: remove_claim(root,hold,lease)
                 else:
                     canonical=read(owner/"lease.json",{})

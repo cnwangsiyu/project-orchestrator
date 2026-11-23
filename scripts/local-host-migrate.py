@@ -8,7 +8,7 @@ import re
 import sys
 
 sys.path.insert(0,str(Path(__file__).resolve().parent/"res"))
-from mini2_control import guard
+from mini2_control import guard, allocator_switch, refuse_legacy_allocators
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 from importlib.util import spec_from_file_location,module_from_spec
 spec=spec_from_file_location("mini2_migration",Path(__file__).with_name("mini2-host-migrate.py"))
@@ -53,19 +53,24 @@ def main():
     if any(p.is_symlink() for p in (file,backup,config,config_backup,existed)) or backup.absolute()==file: raise ValueError("unsafe migration path")
     # Both migrations serialize registry edits with the mini2 host guard; local
     # claims also hold their own guard. No live capacity resource is taken.
-    with guard(file.parent),guard(file.parent,"local-capacity.guard"):
+    with allocator_switch(file.parent,"local"),guard(file.parent),guard(file.parent,"local-capacity.guard"):
         current=file.read_bytes(); mode=file.stat().st_mode & 0o777
         config_current=config.read_bytes() if config.exists() else b""
         config_mode=config.stat().st_mode & 0o777 if config.exists() else 0o600
         if args.rollback:
             original=backup.read_bytes(); config_original=config_backup.read_bytes()
             restored=m.restore_row(current,original,migrate(original),"heavy-build")
-            if config_current!=configure(config_original): raise ValueError("machine.conf changed since migration; refusing to overwrite")
-            m.atomic(file,restored,mode)
-            if existed.read_bytes()==b"1": m.atomic(config,config_original,config_mode)
-            else: config.unlink()
+            was_present=existed.read_bytes()==b"1"
+            is_original=config.exists()==was_present and config_current==config_original
+            is_migrated=config.exists() and config_current==configure(config_original)
+            if not (is_original or is_migrated): raise ValueError("machine.conf changed since migration; refusing to overwrite")
+            if not is_original:
+                if was_present: m.atomic(config,config_original,config_mode)
+                else: config.unlink(missing_ok=True)
+            if current!=restored: m.atomic(file,restored,mode)
             print("Local registry row and machine.conf restored; retain compatible code until leases drain.")
             return
+        refuse_legacy_allocators(file.parent,"local")
         proposal=migrate(current); proposed_config=configure(config_current)
         for line in difflib.unified_diff(current.decode().splitlines(keepends=True),proposal.decode().splitlines(keepends=True),fromfile=str(file),tofile=str(file)+" (local dynamic)"):
             print("[MASKED LINE: registry field]" if re.search(r"password|passwd|secret|token|api_?key|credential|auth|key",line,re.I) else line,end="" if line.endswith("\n") else "\n")
