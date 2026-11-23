@@ -19,9 +19,9 @@ mini2_controller() {
 }
 case "${1:-}:${2:-}" in
   mini2:*) shift; mini2_controller "$@"; exit $? ;;
-  take:mini2-exec-1|wait:mini2-exec-1|wait-pool:mini2|return:mini2-exec-1|holder:mini2-exec-1|retain-remote:mini2-exec-1|release-dead:mini2-exec-1)
+  take:mini2-exec-*|wait:mini2-exec-*|wait-pool:mini2|return:mini2-exec-*|holder:mini2-exec-*|retain-remote:mini2-exec-*|release-dead:mini2-exec-*|bind:mini2-exec-*|slot-host:mini2-exec-*|pool-capacity:mini2|status:mini2)
     mini2_controller "$@"; exit $? ;;
-  extend:mini2-exec-1)
+  extend:mini2-exec-*)
     echo 'res: mini2 requires receipt-matched reconciliation' >&2; exit 2 ;;
 esac
 
@@ -2525,6 +2525,8 @@ pool_controller() {
   ${runner:+$runner} python3 - "$RES_DIR" "$@" "$BY" "$PROJECT" "$TASK" "$PURPOSE" "$PID" "$UNTIL" "${FORCE:-}" "${POOL_NEED:-}" "${prefer_host:-}" "${prefer_slot:-}" "${excluded_slots:-}" "${excluded_hosts:-}" "${WAITER_STALE_SECONDS}" "$$" "${POOL_EPISODE:-none}" "${exclude_reason:-}" "${hard_slots:-}" "${hard_hosts:-}" "${DISK_GIB:-}" "${DISK_GIB_FILE:-}" "${PLACEMENT_FILE:-}" "${MAINTENANCE:-}" "${EXTRA_DISK_GIB:-0}" "${WAIT_CONFIG_FILE:+$WAIT_CONFIG_FILE.devbox}" "${warm_family:-}" "${CLAIM_CORES:-}" "${CLAIM_MEM:-}" <<'PY'
 import datetime, fcntl, hashlib, json, math, os, re, shutil, signal, socket, stat, subprocess, sys, tempfile, time
 from contextlib import contextmanager
+sys.path.insert(0, os.path.dirname(os.path.realpath(os.environ['RES_SELF_COMMAND'])))
+from dynamic_capacity import headroom
 root, action, request, timeout, delay, by, project, task, purpose, pid, until, force, need, prefer, preferred_slot, excluded_slots, excluded_hosts, stale, controller, generation, exclude_reason, hard_slots, hard_hosts, disk_gib, disk_gib_file, placement_file, maintenance, extra_disk_gib, legacy_config_path, warm_family, claim_cores, claim_mem = sys.argv[1:]
 build_namespace = {'__name__': 'res_build_processes'}
 exec(os.environ['RES_BUILD_PROCESS_SOURCE'], build_namespace)
@@ -3020,11 +3022,10 @@ try:
         floor = settings['MIN_AVAIL_GIB']
         detail += ' load_limit=%g mem_floor_gib=%g task_cores=%g task_gib=%g task_disk_gib=%g disk_floor_gib=53' % (limit, floor, *cost)
         if (kind == 'HEAVY' or box in host_rows) and io_closed(box, value, settings): return 'io-pressure', detail, entries, cost
-        if not maintenance and value['freeGiB'] - disk - cost[2] < 53: return 'disk', detail, entries, cost
-        if value['memAvailableGiB'] - mem - cost[1] < floor: return 'memory', detail, entries, cost
-        if value['load5'] + cpu + cost[0] > limit:
-            return 'load-override' if override else 'load', detail, entries, cost
-        return 'headroom', detail, entries, cost
+        reason = headroom(value['load5'], value['memAvailableGiB'], value['freeGiB'],
+                          (cpu, mem, disk), cost, limit, floor, float('-inf') if maintenance else 53)
+        if reason == 'load' and override: reason = 'load-override'
+        return 'headroom' if reason == 'open' else reason, detail, entries, cost
     def gate_open(reason):
         return reason in ('headroom', 'load-override', 'static-disabled', 'static-stale-or-missing-metrics')
     dynamic, light_reclaim, soft_minutes = devbox_settings()
@@ -4275,7 +4276,16 @@ case "${1:-}" in
     request="${2:-}"; shift 2
     ALLOW_PID=1 parse "$@"
     pool_report pool-capacity "$request" ;;
-  slot-host|devbox-registry|reserved-disk)
+  devbox-registry)
+    shift
+    [ "$#" -eq 0 ] || die 'devbox-registry accepts no id'
+    registry_json=$(pool_report devbox-registry '') || exit $?
+    if [ -f "$RES_DIR/mini2-config.json" ] && [ -n "$(reg_line mini2-exec-1)" ]; then
+      mini2_json=$(mini2_controller devbox-registry) || exit $?
+      registry_json=$(printf '%s' "$registry_json" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)+json.loads(sys.argv[1])))' "$mini2_json")
+    fi
+    printf '%s\n' "$registry_json" ;;
+  slot-host|reserved-disk)
     action="$1"; shift
     [ "$#" -le 1 ] || die "$action accepts at most one id"
     pool_report "$action" "${1:-}" ;;

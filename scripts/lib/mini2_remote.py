@@ -4,6 +4,7 @@ No daemon workloads are qualified. Owned descendants and any unknown process
 touching the workspace prevent cleanup and slot return; user activity is counted.
 """
 import ctypes
+from contextlib import contextmanager
 import fcntl
 import hashlib
 import json
@@ -14,6 +15,7 @@ import re
 import resource
 import shutil
 import signal
+import shlex
 import subprocess
 import sys
 import time
@@ -21,6 +23,7 @@ import uuid
 
 GIB = 1024 ** 3
 ROOT = Path.home() / "mac-build-runner"
+SCRATCH = ("work", "cache", "home", "tmp", "DerivedData", "ModuleCache", "bin")
 
 
 def command(args, **kwargs):
@@ -63,12 +66,18 @@ def metrics():
     disk = os.statvfs(location)
     # Also require df to identify a readable filesystem at the actual runner root.
     command(["/bin/df", "-k", str(location)])
-    return dict(at=time.time(), host=command(["/bin/hostname"]), os=command(["/usr/bin/sw_vers", "-productVersion"]),
+    usage = {}
+    now=time.time()
+    for file in (ROOT/"runs").glob("*/usage.json"):
+        value=json.loads(file.read_text())
+        if 0 <= now-value.get("at",0) < 15:
+            usage[file.parent.name]={name:value[name] for name in ("at","cpuLoad","memoryGiB")}
+    return dict(at=now, host=command(["/bin/hostname"]), os=command(["/usr/bin/sw_vers", "-productVersion"]),
                 arch=command(["/usr/bin/uname", "-m"]), cores=int(command(["/usr/sbin/sysctl", "-n", "hw.ncpu"])),
                 load5=os.getloadavg()[1], availableGiB=available/GIB, totalGiB=total/GIB,
                 freeGiB=disk.f_bavail*disk.f_frsize/GIB, pressure=pressure,
                 compressorGiB=pages["Pages occupied by compressor"]*page/GIB,
-                swapGiB=float(used)/(1024 if unit == "M" else 1))
+                swapGiB=float(used)/(1024 if unit == "M" else 1),leaseUsage=usage)
 
 
 def facts():
@@ -224,12 +233,43 @@ def receive(data):
     print("received")
 
 
+
+def isolation(run, cores):
+    """All writable compiler caches and default outputs are per run UUID."""
+    jobs = str(max(1,math.floor(cores)))
+    paths = {name:run/name for name in ("home","tmp","cache","DerivedData","ModuleCache","bin")}
+    for folder in paths.values(): folder.mkdir(mode=0o700,exist_ok=True)
+    wrapper = paths["bin"]/"xcodebuild"
+    wrapper.write_text('#!/bin/bash\nexec /usr/bin/xcodebuild "$@" -derivedDataPath "$MINI2_DERIVED_DATA" -jobs "$MINI2_JOBS" CLANG_MODULE_CACHE_PATH="$MINI2_MODULE_CACHE"\n')
+    wrapper.chmod(0o700)
+    return dict(MINI2_TASK_HOME=str(paths["home"]),TMPDIR=str(paths["tmp"])+"/",
+                CCACHE_DIR=str(paths["cache"]),CCACHE_BASEDIR=str(run/"work"),
+                CMAKE_BUILD_PARALLEL_LEVEL=jobs,MAKEFLAGS="-j"+jobs,MINI2_JOBS=jobs,
+                MINI2_DERIVED_DATA=str(paths["DerivedData"]),MINI2_MODULE_CACHE=str(paths["ModuleCache"]),
+                CLANG_MODULE_CACHE_PATH=str(paths["ModuleCache"]),SWIFT_MODULECACHE_PATH=str(paths["ModuleCache"]),
+                XDG_CACHE_HOME=str(paths["cache"]),MINI2_TASK_BIN=str(paths["bin"]))
+
+
+@contextmanager
+def execution_guard(run,dynamic):
+    # The original runner's EX lock is still respected by concurrent SH runs.
+    # Reconciliation takes the per-run EX lock, never another run's lock.
+    with (ROOT/"execution.lock").open("a") as host, (run/"execution.lock").open("a") as lease:
+        fcntl.flock(host, (fcntl.LOCK_SH if dynamic else fcntl.LOCK_EX) | fcntl.LOCK_NB)
+        fcntl.flock(lease,fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
+
+
 def execute(data):
+    run = location(data["runId"])
+    with execution_guard(run,data.get("dynamic",False)):
+        execute_owned(data)
+
+
+def execute_owned(data):
     run = location(data["runId"])
     intent = json.loads((run / "intent.json").read_text())
     if intent != data: raise RuntimeError("launch intent mismatch")
-    lease = (ROOT / "execution.lock").open("a")
-    fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
     (run / "launched").touch(exist_ok=False)
     sample = disk_gate(data["diskGiB"])
     if sample["load5"] > 6 or sample["availableGiB"] < 16 or sample["pressure"] != 1:
@@ -259,11 +299,16 @@ def execute(data):
     failure = None
     errors = []
     peak_tree_rss = 0
+    task_env = isolation(run,data.get("cores",4))
+    # The account's toolchain setup may define cache/parallelism defaults. Task
+    # values win after setup, including in the inherited child environment.
+    launch = ('read -r ready && . "$HOME/.mini2-env.sh" && export '
+              + ' '.join(name+'='+shlex.quote(value) for name,value in task_env.items())
+              + ' HOME="$MINI2_TASK_HOME" PATH="$MINI2_TASK_BIN:$PATH" && exec /bin/bash -e -c "$1"')
     with (run/"build.log").open("xb") as log:
-        child = subprocess.Popen(["/bin/bash", "-c", 'read -r ready && . "$HOME/.mini2-env.sh" && exec /bin/bash -e -c "$1"', "mini2", data["command"]],
+        child = subprocess.Popen(["/bin/bash", "-c", launch, "mini2", data["command"]],
                                  cwd=workspace, stdin=subprocess.PIPE, stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
-                                 env={**os.environ, "CMAKE_BUILD_PARALLEL_LEVEL":"4", "MAKEFLAGS":"-j4",
-                                      "CCACHE_DIR":str(run/"cache"), "CCACHE_BASEDIR":str(workspace)})
+                                 env={**os.environ, **task_env})
         leader = identity(child.pid)
         if not leader: raise RuntimeError("leader identity missing")
         atomic(run/"process.json", dict(boot=boot, leader=leader, supervisor=identity(os.getpid())))
@@ -282,10 +327,16 @@ def execute(data):
                 family = {pid for pid,row in current.items() if ownership.get(row["version"]) is True and pid != os.getpid()}
                 for pid in family:
                     if pid in current: tracked[pid] = current[pid]
-                rss = command(["/bin/ps", "-U", str(os.getuid()), "-o", "pid=,rss="])
-                peak_tree_rss = max(peak_tree_rss, sum(int(fields[1])*1024 for line in rss.splitlines()
-                    if len(fields:=line.split()) == 2 and int(fields[0]) in family))
+                rss = command(["/bin/ps", "-U", str(os.getuid()), "-o", "pid=,rss=,pcpu="])
+                owned = [line.split() for line in rss.splitlines() if len(line.split())==3 and int(line.split()[0]) in family]
+                current_rss=sum(int(fields[1])*1024 for fields in owned)
+                peak_tree_rss = max(peak_tree_rss,current_rss)
                 if time.monotonic()-last_sample >= 2:
+                    # CPU load averages converge over five minutes. Attribute
+                    # only the corresponding elapsed portion of owned CPU use;
+                    # the controller further caps credit by visible host delta.
+                    cpu=sum(float(fields[2])/100 for fields in owned)
+                    atomic(run/"usage.json",dict(at=time.time(),cpuLoad=cpu*(1-math.exp(-(time.monotonic()-start)/300)),memoryGiB=current_rss/GIB))
                     samples.append(metrics()); last_sample=time.monotonic()
             except Exception as error:
                 errors.append(type(error).__name__+": "+str(error))
@@ -386,12 +437,17 @@ def clean(data, reconciled=False):
             raise RuntimeError("recorded process is present; retained")
     # The supervisor's SSH ancestry and this control operation can change. Check
     # exact workspace open files, plus every process recorded during execution.
-    opened = subprocess.run(["/usr/sbin/lsof", "-nP", "+D", str(run/"work"), "-Fpn"],
-                            capture_output=True, text=True, timeout=15)
-    if opened.returncode != 1 or opened.stdout or opened.stderr:
-        raise RuntimeError("open-file attribution not empty")
+    # The guard's own receipt/lock files stay open during reconciliation.
+    # Check every writable scratch tree, excluding those evidence files.
+    for name in SCRATCH:
+        folder=run/name
+        if not folder.exists(): continue
+        opened = subprocess.run(["/usr/sbin/lsof", "-nP", "+D", str(folder), "-Fpn"],
+                                capture_output=True, text=True, timeout=15)
+        if opened.returncode != 1 or opened.stdout or opened.stderr:
+            raise RuntimeError("open-file attribution not empty")
     if data.get("artifactsVerified") is not True: raise RuntimeError("artifact retention not confirmed")
-    for name in ("work", "cache"):
+    for name in SCRATCH:
         file = run/name
         if file.is_symlink(): raise RuntimeError("owned scratch replaced")
         if file.exists(): shutil.rmtree(file)
@@ -403,8 +459,13 @@ def clean(data, reconciled=False):
 
 def reconcile(data):
     run=location(data["runId"])
-    lease=(ROOT/"execution.lock").open("a")
-    fcntl.flock(lease,fcntl.LOCK_EX|fcntl.LOCK_NB)
+    intent=json.loads((run/"intent.json").read_text())
+    with execution_guard(run,intent.get("dynamic",False)):
+        reconcile_owned(data)
+
+
+def reconcile_owned(data):
+    run=location(data["runId"])
     baseline=json.loads((run/"baseline.json").read_text())
     if baseline["boot"] != command(["/usr/sbin/sysctl","-n","kern.bootsessionuuid"]):
         raise RuntimeError("boot changed; retained")

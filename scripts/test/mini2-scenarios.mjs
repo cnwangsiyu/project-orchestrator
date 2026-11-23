@@ -32,4 +32,6 @@ for(const file of ['test_mini2_link.py','test_mini2_control.py','test_mini2_remo
   const result=spawnSync('python3',['-B','scripts/res/test/'+file],{encoding:'utf8'});
   assert.equal(result.status,0,result.stdout+result.stderr);
 }
+const shapes=spawnSync('node',['scripts/res/test/output-shapes.mjs'],{encoding:'utf8'});
+assert.equal(shapes.status,0,shapes.stdout+shapes.stderr);
 console.log('PASS mini2 transport, admission, alarm, identity and cleanup contracts');

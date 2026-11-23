@@ -11,11 +11,59 @@ import tempfile
 import unittest
 from unittest.mock import patch
 import uuid
+from contextlib import ExitStack
 
 spec=importlib.util.spec_from_file_location("mini2_remote",Path(__file__).resolve().parents[2]/"lib/mini2_remote.py")
 m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 
 class RemoteTests(unittest.TestCase):
+    def test_concurrent_guards_isolate_runs_and_respect_legacy_lock(self):
+        with tempfile.TemporaryDirectory() as temp,patch.object(m,"ROOT",Path(temp)/"runner"):
+            runs=[m.location(str(uuid.uuid4())) for _ in range(3)]
+            for run in runs: run.mkdir()
+            with ExitStack() as stack:
+                for run in runs: stack.enter_context(m.execution_guard(run,True))
+                with self.assertRaises(BlockingIOError):
+                    with m.execution_guard(runs[0],True): pass
+                with self.assertRaises(BlockingIOError):
+                    with m.execution_guard(runs[0],False): pass
+            with m.execution_guard(runs[0],False):
+                with self.assertRaises(BlockingIOError):
+                    with m.execution_guard(runs[1],True): pass
+
+    def test_every_mutable_compiler_path_is_distinct(self):
+        with tempfile.TemporaryDirectory() as temp,patch.object(m,"ROOT",Path(temp)/"runner"):
+            environments=[]
+            for cores in (1,4,2):
+                run=m.location(str(uuid.uuid4())); run.mkdir()
+                env=m.isolation(run,cores); environments.append(env)
+                self.assertEqual(env["MAKEFLAGS"],"-j"+str(cores))
+                wrapper=(run/"bin"/"xcodebuild").read_text()
+                self.assertIn('-derivedDataPath "$MINI2_DERIVED_DATA"',wrapper)
+                self.assertIn('CLANG_MODULE_CACHE_PATH="$MINI2_MODULE_CACHE"',wrapper)
+            for name in ("MINI2_TASK_HOME","TMPDIR","CCACHE_DIR","MINI2_DERIVED_DATA","MINI2_MODULE_CACHE","XDG_CACHE_HOME","MINI2_TASK_BIN"):
+                self.assertEqual(len({env[name] for env in environments}),3,name)
+
+    def test_cleanup_checks_cache_files_and_excludes_its_guard(self):
+        with tempfile.TemporaryDirectory() as temp,patch.object(m,"ROOT",Path(temp)/"runner"):
+            run=m.location(str(uuid.uuid4())); run.mkdir()
+            for name in m.SCRATCH: (run/name).mkdir()
+            (run/"launched").touch()
+            m.atomic(run/"receipt.json",dict(cleanupReady=True))
+            m.atomic(run/"baseline.json",dict(boot="fixture"))
+            m.atomic(run/"tracked.json",[])
+            m.atomic(run/"intent.json",dict(uploads={}))
+            def opened(args,**_):
+                path=Path(args[args.index("+D")+1])
+                return subprocess.CompletedProcess(args,0 if path.name=="ModuleCache" else 1,"p42\n" if path.name=="ModuleCache" else "","")
+            with patch.object(m,"command",return_value="fixture"),patch.object(subprocess,"run",side_effect=opened):
+                with self.assertRaisesRegex(RuntimeError,"open-file"): m.clean(dict(runId=run.name,artifactsVerified=True))
+            self.assertTrue((run/"work").exists())
+            with m.execution_guard(run,True),patch.object(m,"command",return_value="fixture"),patch.object(subprocess,"run",return_value=subprocess.CompletedProcess([],1,"","")) as lsof,contextlib.redirect_stdout(io.StringIO()):
+                m.clean(dict(runId=run.name,artifactsVerified=True))
+            self.assertEqual(len(lsof.call_args_list),len(m.SCRATCH))
+            self.assertFalse(any((run/name).exists() for name in m.SCRATCH))
+
     def test_device_facts_require_pinned_sdk(self):
         versions = {
             "cmake": "cmake version 4.4.5", "ninja": "1.13.2", "ccache": "ccache version 4.14.3",

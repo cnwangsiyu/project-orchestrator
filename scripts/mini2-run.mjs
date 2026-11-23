@@ -58,18 +58,22 @@ export async function refresh({ observeLink=true }={}) {
 }
 
 export function args(argv) {
-  const opts = { ref: 'HEAD', profile: 'heavy', timeout: 10, diskGiB: 8, artifacts: [], need:'cmake-native' };
+  const opts = { ref: 'HEAD', profile: '', timeout: 10, artifacts: [], need:'cmake-native' };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === '--') { opts.command = argv.slice(i+1).join(' '); break; }
     if (arg === '--help') return { help: true };
-    if (!['--repo', '--ref', '--project', '--task', '--out', '--by', '--qualification', '--allowlist', '--artifact', '--timeout', '--disk-gib', '--profile', '--watch-pid', '--need'].includes(arg)) throw Error('unknown option ' + arg);
+    if (!['--repo', '--ref', '--project', '--task', '--out', '--by', '--qualification', '--allowlist', '--artifact', '--timeout', '--disk-gib', '--profile', '--watch-pid', '--need', '--cores', '--mem-gib'].includes(arg)) throw Error('unknown option ' + arg);
     const value = argv[++i]; if (!value) throw Error('missing value ' + arg);
     if (arg === '--artifact') opts.artifacts.push(value);
     else opts[arg.slice(2).replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = value;
   }
   for (const required of ['repo', 'project', 'task', 'out', 'by', 'command', 'allowlist']) if (!opts[required]) throw Error('--' + required + ' required');
-  for (const field of ['timeout', 'diskGiB']) if (!Number.isFinite(+opts[field]) || +opts[field] <= 0) throw Error('invalid ' + field);
+  if (/(?:^|[\s"'])\/[^\s"']*\bxcodebuild\b/.test(opts.command) || /-derivedDataPath\b/.test(opts.command)) {
+    throw Error('Xcode commands must use the task xcodebuild wrapper through PATH');
+  }
+  opts.diskGiB ??= opts.profile==='heavy' || opts.need.split(',').some(cap=>cap!=='cmake-native') ? 16 : 8;
+  for (const field of ['timeout', 'diskGiB', ...['cores','memGib'].filter(name=>opts[name]!==undefined)]) if (!Number.isFinite(+opts[field]) || +opts[field] <= 0) throw Error('invalid ' + field);
   if (+opts.timeout > 120) throw Error('mini2 timeout capped at two hours');
   opts.repo = fs.realpathSync(opts.repo); opts.out = path.resolve(opts.out);
   return opts;
@@ -128,10 +132,11 @@ export async function main(argv) {
     evidence.uploads = Object.fromEntries(Object.entries(uploads).map(([name,file]) => [name, { bytes: fs.statSync(file).size, sha256: digest(file) }]));
     write(path.join(opts.out, 'upload-list.json'), evidence.uploads);
     await refresh();
-    lease = JSON.parse(await ctl(['take', 'mini2-exec-1', '--by', opts.by, '--project', opts.project, '--task', opts.task,
-      '--for', 'unsigned Darwin build', '--pid', String(process.pid), '--profile', opts.profile, '--disk-gib', String(opts.diskGiB),
-      '--need', opts.need, ...(opts.qualification ? ['--qualification', opts.qualification] : [])])).lease;
-    const data = { runId, commit: source.commit, command: opts.command, diskGiB: +opts.diskGiB, timeoutSec: +opts.timeout*60,
+    lease = JSON.parse(await ctl(['wait-pool', 'mini2', '--by', opts.by, '--project', opts.project, '--task', opts.task,
+      '--for', 'unsigned Darwin build', '--pid', String(process.pid), ...(opts.profile?['--profile', opts.profile]:[]), '--disk-gib', String(opts.diskGiB),
+      '--need', opts.need, ...['cores','memGib'].flatMap(name=>opts[name]===undefined?[]:[name==='cores'?'--cores':'--mem-gib',String(opts[name])]), ...(opts.qualification ? ['--qualification', opts.qualification] : [])])).lease;
+    await ctl(['bind', lease.slot, '--by', opts.by, '--generation', lease.generation, '--run-id', runId]);
+    const data = { runId, slot: lease.slot, dynamic: lease.dynamic, cores: lease.weights[0], commit: source.commit, command: opts.command, diskGiB: +opts.diskGiB, timeoutSec: +opts.timeout*60,
       uploads: Object.fromEntries(Object.entries(evidence.uploads).map(([name, value]) => [name, value.sha256])) };
     write(path.join(opts.out, 'intent.json'), { ...data, lease });
     const syncStart = performance.now();
@@ -159,7 +164,7 @@ export async function main(argv) {
     const receipt = JSON.parse(await operation('clean', { runId, artifactsVerified: true }));
     if (receipt.runId !== runId || receipt.clean !== true) throw Error('cleanup receipt mismatch');
     write(path.join(opts.out, 'clean.json'), { ...receipt, generation: lease.generation });
-    await ctl(['return', 'mini2-exec-1', '--by', opts.by, '--receipt', path.join(opts.out, 'clean.json')]);
+    await ctl(['return', lease.slot, '--by', opts.by, '--receipt', path.join(opts.out, 'clean.json')]);
     clean = true;
     return evidence.receipt.exit;
   } catch (error) {
@@ -172,13 +177,13 @@ export async function main(argv) {
         const receipt = prepared ? JSON.parse(await remote('clean', { runId, artifactsVerified: false })) : { runId, clean: true, neverDispatched: true };
         if (receipt.runId !== runId || !receipt.clean) throw Error('cleanup mismatch');
         write(path.join(opts.out, 'clean.json'), { ...receipt, generation: lease.generation });
-        await ctl(['return', 'mini2-exec-1', '--by', opts.by, '--receipt', path.join(opts.out, 'clean.json')]);
+        await ctl(['return', lease.slot, '--by', opts.by, '--receipt', path.join(opts.out, 'clean.json')]);
         clean = true;
       } catch { /* Remote intent remains owned until explicit reconciliation. */ }
     }
     if (lease && !clean) {
       // Even a missing launch/receipt remains owned. No timeout reclaims it.
-      await ctl(['retain-remote', 'mini2-exec-1', '--by', opts.by, '--note', `run=${runId} prepared=${prepared}; cleanup unconfirmed`]).catch(() => {});
+      await ctl(['retain-remote', lease.slot, '--by', opts.by, '--note', `run=${runId} prepared=${prepared}; cleanup unconfirmed`]).catch(() => {});
     }
     evidence.clean = clean; write(path.join(opts.out, 'summary.json'), evidence);
     clearInterval(watch); process.off('SIGTERM', stop); process.off('SIGINT', stop); process.off('SIGHUP', stop);
@@ -206,7 +211,7 @@ export async function reconcile(argv) {
   const receipt=JSON.parse(await remote('reconcile',{runId:intent.runId,artifactsVerified:true}));
   if(receipt.runId!==intent.runId || receipt.clean!==true) throw Error('cleanup receipt mismatch');
   const file=path.join(out,'reconciled.json'); write(file,{...receipt,generation:intent.lease.generation});
-  const result=await execute('python3',['-B',control,'return','mini2-exec-1','--by',by,'--receipt',file]);
+  const result=await execute('python3',['-B',control,'return',intent.lease.slot || 'mini2-exec-1','--by',by,'--receipt',file]);
   if(result.code) throw Error('lease return failed');
   write(path.join(out,'summary.json'),{...summary,clean:true,reconciled:true});
   return 0;

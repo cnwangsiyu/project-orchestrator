@@ -1,4 +1,4 @@
-"""One Darwin slot, one host guard, default-off admission, no remote status I/O."""
+"""Darwin host leases, one host transaction, no remote status I/O."""
 import argparse
 from contextlib import contextmanager
 import datetime
@@ -12,14 +12,18 @@ import plistlib
 import re
 import shutil
 import sys
+import subprocess
 import time
 import uuid
+from dynamic_capacity import headroom
 from xml.parsers.expat import ExpatError
 
 HOST = "Bytedances-Mac-mini.local"
 SLOT = "mini2-exec-1"
+LEASE_ID = re.compile(r"mini2-exec-[1-9][0-9]*\Z")
+MAX_BYPASS = 3
 DEVICE_CAP = "xcode-ios-device-compile-unsigned"
-DEFAULT = dict(enabled=False, maintenance=False, load5Limit=6, minAvailableGiB=16,
+DEFAULT = dict(enabled=False, maintenance=False, load5Limit="derived", minAvailableGiB="derived",
                minFreeGiB=20, owner="9850afbb-edd7-492b-b885-913ccbf40020", generation=0)
 ROW = SLOT + "\tremote\tnever\t-\tSecond Mac mini bytedance@" + HOST + " os=darwin arch=arm64 cores=10 ram=32GiB iface=usb-ncm\n"
 
@@ -63,10 +67,10 @@ def config(root):
         if type(value[name]) is not bool: raise ValueError("invalid mini2 switch")
     for name, limit in (("load5Limit", 6), ("minAvailableGiB", 16), ("minFreeGiB", 20)):
         v = value[name]
+        if v == "derived" and name != "minFreeGiB": continue
         if type(v) not in (int, float) or not math.isfinite(v) or v <= 0:
             raise ValueError("invalid mini2 threshold")
-        if name == "load5Limit" and v > limit or name != "load5Limit" and v < limit:
-            raise ValueError("mini2 threshold exceeds qualified envelope")
+
     if not isinstance(value["owner"], str) or not re.fullmatch(r"[a-zA-Z0-9_.:-]{1,200}", value["owner"]):
         raise ValueError("invalid mini2 owner")
     if type(value["generation"]) is not int or value["generation"] < 0: raise ValueError("invalid mini2 generation")
@@ -77,7 +81,131 @@ def fresh(value, now, ttl):
     return type(value) in (int, float) and math.isfinite(value) and 0 <= now-value < ttl
 
 
-def admission(root, cfg, now, disk=0, need=(), qualification=False):
+def registry_row(root):
+    rows = [line.split("\t") for line in (root/"resources.tsv").read_text().splitlines()
+            if line.startswith(SLOT+"\t")]
+    if len(rows) != 1 or len(rows[0]) != 5 or rows[0][1] != "remote" or rows[0][3] != "-":
+        raise ValueError("mini2 row missing or invalid")
+    if "bytedance@"+HOST not in rows[0][4]: raise ValueError("mini2 registry host mismatch")
+    return rows[0]
+
+
+def dynamic_row(row):
+    return "dynamic-host" in row[4].split()
+
+
+def lease_holds(root):
+    return sorted(p for p in (root/"locks").glob("mini2-exec-*.d") if LEASE_ID.fullmatch(p.name[:-2]))
+
+
+def weights(args):
+    native = not args.need or set(args.need.split(",")) <= {"cmake-native"}
+    profile = args.profile or ("light" if native else "heavy")
+    if profile not in ("heavy", "light"): raise ValueError("--profile heavy|light required")
+    defaults = (1, 1, 8) if profile == "light" and native else (4, 8, 16)
+    result = tuple(default if value is None else value for default, value in zip(defaults,
+                   (getattr(args,"cores",None), getattr(args,"mem_gib",None),args.disk_gib)))
+    if any(type(v) not in (int,float) or not math.isfinite(v) or v <= 0 for v in result):
+        raise ValueError("invalid claim weight")
+    if result[0] < 0.25 or result[1] < 0.25: raise ValueError("claim weight below minimum")
+    return result
+
+
+def reserved(root,sample=None,now=None):
+    # Fresh, attributed usage is already in host metrics. Credit it only
+    # against the measured increase since the oldest outstanding claim.
+    costs = []
+    holds=lease_holds(root)+list((root/"mini2-pending").glob("*/hold"))
+    leases=[]
+    for hold in holds:
+        lease = read(hold/"lease.json", {})
+        if not lease or not lease.get("weights"):
+            raise ValueError("legacy-or-incomplete-hold")
+        cost = lease["weights"]
+        if not isinstance(cost,list) or len(cost)!=3 or any(type(v) not in (int,float) or not math.isfinite(v) or v<=0 for v in cost):
+            raise ValueError("invalid lease reservation")
+        costs.append(list(cost)); leases.append(lease)
+    if sample and now is not None:
+        valid=[lease.get("baseline",{}) for lease in leases if lease.get("baseline")]
+        cpu_visible=max(0,sample["load5"]-min((v["load5"] for v in valid),default=sample["load5"]))
+        mem_visible=max(0,max((v["availableGiB"] for v in valid),default=sample["availableGiB"])-sample["availableGiB"])
+        for lease,cost in zip(leases,costs):
+            usage=sample.get("leaseUsage",{}).get(lease.get("runId"),{})
+            if not fresh(usage.get("at"),now,15): continue
+            for index,name in ((0,"cpuLoad"),(1,"memoryGiB")):
+                amount=usage.get(name)
+                if type(amount) not in (int,float) or not math.isfinite(amount) or amount<0: continue
+                pool=cpu_visible if index==0 else mem_visible
+                credit=min(cost[index],amount,pool)
+                cost[index]-=credit
+                if index==0: cpu_visible-=credit
+                else: mem_visible-=credit
+    return tuple(sum(cost[i] for cost in costs) for i in range(3))
+
+
+def process_start(pid):
+    result=subprocess.run(["/bin/ps","-p",str(pid),"-o","stat=","-o","lstart="],capture_output=True,text=True,timeout=5)
+    if result.returncode==1 and not result.stdout: return None
+    if result.returncode!=0 or not result.stdout.strip(): raise ValueError("local process identity unavailable")
+    state,*born=result.stdout.strip().split()
+    return None if state.startswith("Z") else " ".join(born)
+
+
+def local_alive(lease):
+    if lease.get("host") != os.uname().nodename: return True
+    pid = lease.get("pid")
+    if type(pid) is not int or pid <= 1: return True
+    try:
+        current=process_start(pid)
+    except (ValueError,OSError,subprocess.TimeoutExpired): return True
+    return current is not None and (not lease.get("pid_start") or lease["pid_start"] == current)
+
+
+def reap_dead(root):
+    for hold in lease_holds(root):
+        lease = read(hold/"lease.json", {})
+        if local_alive(lease): continue
+        # Old runner holds have no dispatch marker: never assume those safe.
+        if lease.get("dispatch") == "unbound":
+            shutil.rmtree(hold)
+            journal(root,"reclaim-dead",lease.get("by","?"),slot=hold.name[:-2])
+        else:
+            pending = root/"mini2-pending"/hold.name[:-2]
+            pending.mkdir(parents=True,exist_ok=True)
+            atomic(pending/"pending.json",dict(lease=lease,reason="dead-holder-remote-unconfirmed",at=time.time()))
+            # Retain identity for receipt-matched reconciliation and prevent ID
+            # reuse; remove its active reservation by moving it out of locks.
+            os.replace(hold,pending/"hold")
+
+
+def pending_cleanup(root):
+    return (root/"mini2-cleanup-pending.json").exists()
+
+
+def resolve(root, resource):
+    if not resource or not LEASE_ID.fullmatch(resource): raise ValueError("unknown mini2 lease id")
+    row = registry_row(root)
+    known = resource == SLOT or dynamic_row(row) or (root/"locks"/(resource+".d")).exists() or (root/"mini2-pending"/resource).exists()
+    if not known: raise ValueError("unknown mini2 lease id")
+    approved = re.search(r"\bcaps=([a-zA-Z0-9_,.-]+)",row[4])
+    return dict(slot=resource,host=HOST,user="bytedance",target="bytedance@"+HOST,
+                kind="remote",cores=read(root/"mini2-metrics.json",{}).get("cores"),memGiB=read(root/"mini2-metrics.json",{}).get("totalGiB"),factsAt=datetime.datetime.fromtimestamp(read(root/"mini2-facts.json",{}).get("at",0),datetime.timezone.utc).isoformat(),
+                resolverOnly=not dynamic_row(row) and resource != SLOT,root="/Users/bytedance/mac-build-runner",caps=approved[1].split(",") if approved else [],
+                policy=row[2],dynamic=dynamic_row(row),category="LIGHT" if read(root/"locks"/(resource+".d")/"lease.json",{}).get("profile")=="light" else "HEAVY")
+
+
+def registry_slots(root):
+    ids={SLOT}
+    ids.update(hold.name[:-2] for hold in lease_holds(root))
+    ids.update(p.name for p in (root/"mini2-pending").glob("*"))
+    if dynamic_row(registry_row(root)):
+        number=1
+        while "mini2-exec-"+str(number) in ids: number+=1
+        ids.add("mini2-exec-"+str(number))
+    return [resolve(root,id) for id in sorted(ids)]
+
+
+def admission(root, cfg, now, disk=0, need=(), qualification=False, cost=None):
     if not cfg["enabled"] and not qualification: return "disabled"
     if cfg["maintenance"]: return "maintenance"
     link = read(root/"mini2-link.json", {})
@@ -88,49 +216,84 @@ def admission(root, cfg, now, disk=0, need=(), qualification=False):
     for key in ("load5", "availableGiB", "freeGiB", "pressure", "swapGiB", "compressorGiB"):
         if type(sample.get(key)) not in (int, float) or not math.isfinite(sample[key]) or sample[key] < 0:
             return "invalid-metrics"
-    if sample["load5"] > cfg["load5Limit"]: return "load5"
-    if sample["availableGiB"] < cfg["minAvailableGiB"]: return "memory"
+    limits = thresholds(cfg,sample)
+    if limits is None: return "hardware-mismatch"
+    if sample["load5"] > limits[0]: return "load5"
+    if sample["availableGiB"] < limits[1]: return "memory"
     if sample["freeGiB"]-disk < cfg["minFreeGiB"]: return "disk"
     if sample["pressure"] != 1: return "pressure"
     facts = read(root/"mini2-facts.json", {})
     if not fresh(facts.get("at"), now, 3600) or facts.get("host") != HOST: return "facts-stale-or-foreign"
     if not set(need) <= set(facts.get("caps", [])): return "capability"
-    if (root/"mini2-cleanup-pending.json").exists(): return "cleanup-pending"
+    if pending_cleanup(root): return "cleanup-pending"
+    if cost is None and (any(hold.name != SLOT+".d" for hold in lease_holds(root)) or any((root/"mini2-pending").glob("*/pending.json"))): return "dynamic-leases-draining"
+    if cost is not None:
+        if sample.get("arch") != "arm64":
+            return "hardware-mismatch"
+        try: reservations = reserved(root,sample,now)
+        except ValueError: return "legacy-or-incomplete-hold"
+        return headroom(sample["load5"],sample["availableGiB"],sample["freeGiB"],
+                        reservations,cost,limits[0],limits[1],cfg["minFreeGiB"])
     return "open"
 
 
-def journal(root, event, holder, detail=""):
+def journal(root, event, holder, detail="", slot=SLOT):
     with (root/"log.tsv").open("a") as file:
-        file.write(datetime.datetime.now().strftime("%Y-%m-%d %H:%M")+"\t"+event+"\t"+SLOT+"\t"+holder+"\t"+detail+"\n")
+        file.write(datetime.datetime.now().strftime("%Y-%m-%d %H:%M")+"\t"+event+"\t"+slot+"\t"+holder+"\t"+detail+"\n")
 
 
 def status(root, now=None):
     now = time.time() if now is None else now
     try:
         cfg = config(root)
-        reason = admission(root, cfg, now)
+        row = registry_row(root)
+        dynamic = dynamic_row(row)
+        reason = admission(root, cfg, now, cost=(1,1,8) if dynamic else None)
+        if row[2] != "open": reason = "policy"
     except (ValueError, OSError):
-        cfg = DEFAULT.copy(); reason = "invalid-config-or-state"
+        cfg = DEFAULT.copy(); reason = "invalid-config-or-state"; dynamic = False
     def safe(name):
         try: return read(root/name, {})
         except (ValueError, OSError): return {}
     link, metrics, facts = (safe("mini2-"+name+".json") for name in ("link", "metrics", "facts"))
-    held = (root/"locks"/(SLOT+".d")).exists()
+    held = len(lease_holds(root))
     takes = 0
     try:
         for line in (root/"log.tsv").read_text().splitlines():
             fields = line.split("\t")
-            if len(fields) >= 3 and fields[1:3] == ["take", SLOT]:
+            if len(fields) >= 3 and fields[1] == "take" and LEASE_ID.fullmatch(fields[2]):
                 at = datetime.datetime.strptime(fields[0], "%Y-%m-%d %H:%M").timestamp()
                 takes += now-86400 <= at <= now
     except FileNotFoundError: pass
     return dict(host=HOST, slot=SLOT, pool="mini2", enabled=cfg["enabled"],
                 maintenance=cfg["maintenance"] or link.get("maintenance", True),
                 link=link.get("link", "UNKNOWN") if fresh(link.get("at"), now, 300) else "UNKNOWN",
-                lastSuccess=link.get("lastSuccess"), reason="held" if reason == "open" and held else reason,
-                slots=1, held=int(held), takes24h=takes, metricsAge=now-metrics["at"] if "at" in metrics else None,
-                factsAge=now-facts["at"] if "at" in facts else None, caps=facts.get("caps", []),
+                lastSuccess=link.get("lastSuccess"), reason="held" if reason == "open" and held and not dynamic else reason,
+                slots=None if dynamic else 1, dynamic=dynamic, held=held,pending=len(list((root/"mini2-pending").glob("*/pending.json"))),
+                capacity=capacity(root,cfg,metrics,dynamic), takes24h=takes, metricsAge=age(metrics,now),
+                factsAge=age(facts,now), caps=facts.get("caps", []),
                 alert=link.get("alert", "UNCONFIGURED"))
+
+
+def thresholds(cfg,sample):
+    cpu,ram=sample.get("cores"),sample.get("totalGiB")
+    if type(cpu) not in (int,float) or type(ram) not in (int,float) or not math.isfinite(cpu+ram) or cpu<=0 or ram<=0: return None
+    return (cpu if cfg["load5Limit"]=="derived" else cfg["load5Limit"],
+            max(4,0.12*ram) if cfg["minAvailableGiB"]=="derived" else cfg["minAvailableGiB"])
+
+
+def age(value,now):
+    at=value.get("at")
+    return now-at if type(at) in (int,float) and math.isfinite(at) else None
+
+
+def capacity(root,cfg,sample,dynamic):
+    try: amounts = reserved(root,sample,time.time()) if dynamic else (0,0,0)
+    except ValueError: amounts = None
+    return dict(cores=sample.get("cores"),loadLimit=(thresholds(cfg,sample) or (None,None))[0],memoryFloorGiB=(thresholds(cfg,sample) or (None,None))[1],
+                diskFloorGiB=cfg["minFreeGiB"],load5=sample.get("load5"),availableGiB=sample.get("availableGiB"),
+                freeGiB=sample.get("freeGiB"),reserved=amounts,swapGiB=sample.get("swapGiB"),
+                compressorGiB=sample.get("compressorGiB"),defaultLight=[1,1,8],defaultHeavy=[4,8,16],maxBypass=MAX_BYPASS)
 
 
 def observe(root, observation, now=None, generation=None):
@@ -174,8 +337,9 @@ def acquire(root, args):
         raise ValueError("mini2 take requires --by --project --task --for --pid")
     for value in (args.by, args.project, args.task, args.purpose):
         if any(c in value for c in "\t\r\n\0"): raise ValueError("invalid hold field")
-    if args.profile not in ("heavy", "light"): raise ValueError("--profile heavy|light required")
-    if not math.isfinite(args.disk_gib) or args.disk_gib < 0: raise ValueError("invalid disk reservation")
+    cost = weights(args)
+    pid_start = process_start(args.pid)
+    if pid_start is None: raise ValueError("holder is dead")
     if not math.isfinite(args.timeout) or args.timeout < 0: raise ValueError("invalid timeout")
     qualification = False
     if args.qualification:
@@ -189,7 +353,8 @@ def acquire(root, args):
     queue.mkdir(parents=True, exist_ok=True)
     ticket = queue/(str(time.time_ns())+"-"+str(uuid.uuid4())+".json")
     deadline = time.monotonic()+args.timeout*60
-    atomic(ticket, dict(pid=args.pid, controller=os.getpid(), at=time.time()))
+    atomic(ticket, dict(pid=args.pid, controller=os.getpid(), host=os.uname().nodename, at=time.time(),
+                        cost=cost, need=args.need, bypasses=0))
     try:
         while True:
             os.kill(args.pid, 0)
@@ -199,29 +364,60 @@ def acquire(root, args):
                     if q.get("task") != args.task or q.get("by") != args.by or q.get("enabled") is not True or not fresh(q.get("at"),time.time(),7200):
                         raise ValueError("qualification was removed or expired")
                 cfg = config(root)
-                registry = (root/"resources.tsv").read_text().splitlines()
-                rows = [line.split("\t") for line in registry if line.startswith(SLOT+"\t")]
-                if len(rows) != 1 or rows[0][1] != "remote" or rows[0][3] != "-": raise ValueError("mini2 row missing or invalid")
+                row = registry_row(root)
+                dynamic = dynamic_row(row)
+                reap_dead(root)
                 required = args.need.split(",") if args.need else []
-                approved = re.search(r"\bcaps=([a-zA-Z0-9_,.-]+)", rows[0][4])
-                if not qualification and rows[0][2] != "open": reason="policy"
+                approved = re.search(r"\bcaps=([a-zA-Z0-9_,.-]+)", row[4])
+                if not qualification and row[2] != "open": reason="policy"
                 elif not qualification and not set(required) <= set(approved[1].split(",") if approved else []): reason="registry-capability"
-                else: reason=admission(root, cfg, time.time(), args.disk_gib, required, qualification)
-                # Dead queue callers never retain FIFO position; no held slot is reclaimed here.
+                else: reason=admission(root, cfg, time.time(), cost[2], required, qualification, cost=cost if dynamic else None)
                 for file in queue.glob("*.json"):
                     value = read(file)
                     try: os.kill(value["controller"], 0); os.kill(value["pid"], 0)
                     except ProcessLookupError: file.unlink()
-                hold = root/"locks"/(SLOT+".d")
-                if reason == "open" and not hold.exists() and ticket == min(queue.glob("*.json")):
+                earlier = sorted(file for file in queue.glob("*.json") if file < ticket)
+                bypass = []
+                for file in earlier:
+                    older = read(file)
+                    if not dynamic:
+                        reason = "fifo"; break
+                    old_cost = older["cost"]
+                    old_reason = admission(root,cfg,time.time(),old_cost[2],older["need"].split(",") if older["need"] else [],qualification,cost=old_cost)
+                    smaller = all(x<=y for x,y in zip(cost,old_cost)) and any(x<y for x,y in zip(cost,old_cost))
+                    if old_reason not in ("load","memory","disk") or older["bypasses"] >= MAX_BYPASS or not smaller:
+                        reason = "fifo"; break
+                    bypass.append((file,older))
+                resource = getattr(args,"resource",None) or SLOT
+                if resource != "mini2" and not LEASE_ID.fullmatch(resource): raise ValueError("unknown mini2 resource")
+                if resource not in (SLOT,"mini2") and not dynamic: raise ValueError("dynamic admission disabled")
+                if resource == "mini2" and dynamic:
+                    ordinal=1
+                    while (root/"locks"/("mini2-exec-"+str(ordinal)+".d")).exists() or (root/"mini2-pending"/("mini2-exec-"+str(ordinal))).exists(): ordinal+=1
+                    resource="mini2-exec-"+str(ordinal)
+                elif resource == "mini2": resource=SLOT
+                hold = root/"locks"/(resource+".d")
+                if hold.exists() and reason == "open": reason = "held"
+                if reason == "open":
                     hold.mkdir(parents=True)
-                    values=dict(by=args.by, project=args.project, task=args.task, pid=args.pid,
-                                host=os.uname().nodename, start=int(time.time()), profile=args.profile,
-                                generation=str(uuid.uuid4()), remote_host=HOST, remote_cleanup_required="1", purpose=args.purpose)
-                    atomic(hold/"lease.json", values)
-                    (hold/"info").write_text("".join(str(k)+"\t"+str(v)+"\n" for k,v in values.items()))
-                    journal(root, "take", args.by, "qualification" if qualification else args.profile)
-                    print(json.dumps(dict(slot=SLOT, lease=values)))
+                    try:
+                        sample=read(root/"mini2-metrics.json",{})
+                        if len(lease_holds(root))==1 and not list((root/"mini2-pending").glob("*/hold")):
+                            atomic(root/"mini2-baseline.json",sample)
+                        baseline=read(root/"mini2-baseline.json",sample)
+                        values=dict(by=args.by, project=args.project, task=args.task, pid=args.pid,pid_start=pid_start,
+                                    host=os.uname().nodename, start=int(time.time()), profile=args.profile or ("light" if not args.need or set(args.need.split(",")) <= {"cmake-native"} else "heavy"),
+                                    slot=resource,dynamic=dynamic,weights=cost,dispatch="unbound",baseline=baseline,
+                                    generation=str(uuid.uuid4()), remote_host=HOST, remote_cleanup_required="1", purpose=args.purpose)
+                        atomic(hold/"lease.json", values)
+                        (hold/"info").write_text("".join(str(k)+"\t"+str(v)+"\n" for k,v in values.items()))
+                        for file,older in bypass:
+                            atomic(file,{**older,"bypasses":older["bypasses"]+1})
+                        journal(root, "take", args.by, "qualification" if qualification else values["profile"],slot=resource)
+                    except BaseException:
+                        shutil.rmtree(hold)
+                        raise
+                    print(json.dumps(dict(slot=resource, lease=values)))
                     return
                 if time.monotonic() >= deadline: raise ValueError("mini2 admission closed: "+reason)
             time.sleep(1)
@@ -280,13 +476,15 @@ def verify_device_build(summary):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("status", "stage", "configure", "take", "wait", "wait-pool", "return", "retain-remote", "release-dead", "holder"))
+    parser.add_argument("action", choices=("status", "stage", "configure", "take", "wait", "wait-pool", "return", "retain-remote", "release-dead", "holder", "bind", "slot-host", "pool-capacity", "devbox-registry"))
     parser.add_argument("resource", nargs="?")
-    for arg in ("by", "project", "task", "profile", "need", "qualification", "receipt", "note"):
+    for arg in ("by", "project", "task", "profile", "need", "qualification", "receipt", "note", "run-id", "generation"):
         parser.add_argument("--"+arg, default="")
     parser.add_argument("--for", dest="purpose", default="")
     parser.add_argument("--pid", type=int)
-    parser.add_argument("--disk-gib", type=float, default=8)
+    parser.add_argument("--disk-gib", type=float)
+    parser.add_argument("--cores", type=float)
+    parser.add_argument("--mem-gib", type=float)
     parser.add_argument("--timeout", type=float, default=0)
     parser.add_argument("--ios-receipt", type=Path)
     parser.add_argument("--ios-device-receipt", type=Path)
@@ -296,9 +494,21 @@ def main():
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
     root = root_dir()
-    if args.action == "status":
+    if args.action == "devbox-registry":
+        print(json.dumps(registry_slots(root)))
+    elif args.action == "slot-host":
+        print(json.dumps(resolve(root,args.resource)))
+    elif args.action in ("status","pool-capacity"):
         value = status(root)
-        print(json.dumps(value) if args.json else "mini2 "+" ".join(k+"="+str(v) for k,v in value.items()))
+        if args.action == "pool-capacity":
+            detail=value["capacity"]; remaining=detail["reserved"]
+            count=0
+            if value["reason"]=="open" and remaining is not None:
+                count=max(0,min(math.floor(detail["loadLimit"]-detail["load5"]-remaining[0]),
+                                math.floor(detail["availableGiB"]-detail["memoryFloorGiB"]-remaining[1]),
+                                math.floor((detail["freeGiB"]-detail["diskFloorGiB"]-remaining[2])/8)))
+            value={HOST:dict(claims=count,gate="headroom" if value["reason"]=="open" else value["reason"],**value)}
+        print(json.dumps(value) if args.json or args.action=="pool-capacity" else "mini2 "+" ".join(k+"="+str(v) for k,v in value.items()))
     elif args.action in ("stage", "configure"):
         with guard(root):
             cfg=config(root)
@@ -315,7 +525,7 @@ def main():
                     if args.ios_receipt:
                         verify_simulator_build(args.ios_receipt)
                     if args.ios_device_receipt:
-                        if (root/"locks"/(SLOT+".d")).exists():
+                        if lease_holds(root) or pending_cleanup(root) or any((root/"mini2-pending").glob("*/pending.json")):
                             raise ValueError("mini2 slot held")
                         verify_device_build(args.ios_device_receipt)
                     cfg["enabled"]=True
@@ -345,18 +555,22 @@ def main():
             atomic(root/"mini2-config.json", cfg)
             print(json.dumps(cfg))
     elif args.action in ("take", "wait", "wait-pool"):
-        if args.resource not in (SLOT, "mini2"): raise ValueError("unknown mini2 resource")
+        if args.resource != "mini2" and not LEASE_ID.fullmatch(args.resource or ""): raise ValueError("unknown mini2 resource")
         acquire(root,args)
     elif args.action == "holder":
-        print(json.dumps(read(root/"locks"/(SLOT+".d")/"lease.json", {})))
+        resolve(root,args.resource)
+        print(json.dumps(read(root/"locks"/(args.resource+".d")/"lease.json", {})))
     else:
         with guard(root):
-            hold=root/"locks"/(SLOT+".d")
+            resolve(root,args.resource)
+            hold=root/"locks"/(args.resource+".d")
+            pending=root/"mini2-pending"/args.resource
+            if not hold.exists() and (pending/"hold").exists(): hold=pending/"hold"
             lease=read(hold/"lease.json", {})
             if not lease: raise ValueError("mini2 hold missing")
             if lease.get("by") != args.by: raise ValueError("mini2 hold belongs to another wrapper")
             if args.action == "release-dead":
-                if args.resource != SLOT or lease.get("host") != os.uname().nodename or not args.pid or args.pid <= 1 or args.pid != lease.get("pid"):
+                if lease.get("host") != os.uname().nodename or not args.pid or args.pid <= 1 or args.pid != lease.get("pid"):
                     raise ValueError("exact local holder PID required")
                 try:
                     os.kill(args.pid, 0)
@@ -364,16 +578,25 @@ def main():
                     pass
                 else:
                     raise ValueError("holder still alive")
-            if args.action == "retain-remote":
-                atomic(root/"mini2-cleanup-pending.json", dict(lease=lease, reason=args.note, at=time.time()))
+            if args.action == "bind":
+                if lease.get("generation") != args.generation or not local_alive(lease): raise ValueError("lease generation or holder mismatch")
+                if str(uuid.UUID(args.run_id)) != args.run_id or lease.get("dispatch") != "unbound": raise ValueError("invalid or repeated dispatch")
+                lease.update(dispatch="bound",runId=args.run_id)
+                atomic(hold/"lease.json",lease)
+            elif args.action == "retain-remote":
+                atomic(pending/"pending.json", dict(lease=lease, reason=args.note, at=time.time()))
             else:
                 receipt=read(Path(args.receipt), {}) if args.receipt else {}
                 if receipt.get("generation") != lease["generation"] or receipt.get("clean") is not True:
                     raise ValueError("receipt-matched cleanup required")
-                (root/"mini2-cleanup-pending.json").unlink(missing_ok=True)
+                if lease.get("runId") and receipt.get("runId") != lease["runId"]:
+                    raise ValueError("cleanup run identity mismatch")
+                if args.resource == SLOT: (root/"mini2-cleanup-pending.json").unlink(missing_ok=True)
+                (pending/"pending.json").unlink(missing_ok=True)
                 shutil.rmtree(hold)
-                journal(root,args.action,args.by, "pid="+str(args.pid) if args.action=="release-dead" else "")
-            print(args.action+" "+SLOT)
+                if pending.exists(): pending.rmdir()
+                journal(root,args.action,args.by, "pid="+str(args.pid) if args.action=="release-dead" else "",slot=args.resource)
+            print(args.action+" "+args.resource)
 
 
 if __name__ == "__main__":
