@@ -721,8 +721,10 @@ The controller remains responsible for lease ownership and queue arbitration.
 `fs`, `freeGiB`, `totalGiB`, `cores`, `memGiB`, and `probedAt` (UTC). Writes merge
 per host and publish atomically. Stale hardware/disk probes refresh after one
 hour, with a ten-second deadline for cached roots and a one-minute failure
-backoff. A failed refresh retains last-known hardware/root without renewing
-its age; missing initial facts fail rather than inventing eight cores. Free
+backoff. Dynamic leases refresh these facts independently of admission metrics;
+a registered `root=` pins the workspace and the filesystem the probe measures.
+A failed refresh retains last-known facts without renewing their age; missing
+initial facts fail rather than inventing eight cores. Free
 space is checked on the workspace filesystem for every run. Consumers label
 expired probe measurements stale and prefer fresh admission metrics for placement.
 

@@ -2822,6 +2822,7 @@ try:
         hold = info(os.path.join(locks, id + '.d'))
         return dict(slot=id, kind=rows[id][0], policy=rows[id][1], host=remote[id][1], user=target.group(1),
                     target=target.group(0), root=runner_root.group(1) if runner_root else cached_root,
+                    registeredRoot=runner_root.group(1) if runner_root else None,
                     cores=numeric_metric(fact.get('cores'),True), memGiB=numeric_metric(fact.get('memGiB'),True), factsAt=cached_timestamp(fact.get('probedAt')),
                     caps=sorted(remote[id][2]), dynamic=id in dynamic_ids, resolverOnly='leases-only' in description.split(),
                     category=hold.get('claim_kind') or ('LIGHT' if id.startswith('devbox-cn-light') else 'HEAVY'))

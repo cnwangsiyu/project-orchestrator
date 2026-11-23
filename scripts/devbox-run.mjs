@@ -778,13 +778,13 @@ print(json.dumps({'cores':os.cpu_count(),'load5':load5,'memAvailableGiB':mem,'fr
 `,
   probe: pythonHeader + `import subprocess, datetime, tempfile
 data=pathlib.Path('/data00'); home=pathlib.Path(os.path.expanduser('~'))
-candidates=([data/'home'/d['user']/'devbox-run',data/d['user']/'devbox-run'] if data.is_dir() else [])+[home/'devbox-run']
+candidates=[pathlib.Path(d['root'])] if d.get('root') else ([data/'home'/d['user']/'devbox-run',data/d['user']/'devbox-run'] if data.is_dir() else [])+[home/'devbox-run']
 root=None
 for candidate in candidates:
     try:
         candidate.mkdir(parents=True,exist_ok=True)
         with tempfile.TemporaryFile(dir=candidate): pass
-        root=str(candidate); break
+        root=d.get('root') or str(candidate); break
     except OSError: continue
 if root is None: raise RuntimeError('no writable workspace root')
 v=os.statvfs(root)
@@ -1915,15 +1915,19 @@ async function refreshHostMetrics(rows, state, { force = false, timeout = 15000 
           && value.at >= requestedAt - (force ? 0 : 60);
       } catch { return false; }
     };
-    if (fresh()) return;
     try {
+      if (fresh()) {
+        // Fresh admission metrics don't renew the independent hardware probe.
+        if (row.dynamic) await hostRoot(row, state, { deadline: requestedAt * 1000 + timeout });
+        return;
+      }
       fs.mkdirSync(path.dirname(file), { recursive: true });
       await withStateLock(file, async () => {
         const deadline = requestedAt * 1000 + timeout;
-        if (state.cancel || deadline <= Date.now() || fresh()) return;
+        if (state.cancel || deadline <= Date.now() || (!row.dynamic && fresh())) return;
         const root = await hostRoot(row, state, { deadline });
         const at = Date.now() / 1000;
-        if (state.cancel || deadline <= Date.now()) return;
+        if (state.cancel || deadline <= Date.now() || fresh()) return;
         const result = await ssh(row, 'metrics', { root }, { state, timeout: deadline - Date.now() });
         if (result.code) return;
         const { cores, load5, memAvailableGiB, freeGiB, ...readings } = JSON.parse(result.stdout);
@@ -1941,16 +1945,20 @@ async function refreshHostMetrics(rows, state, { force = false, timeout = 15000 
 }
 
 export async function hostRoot(row, state, options = {}) {
-  if (row.root) {
-    if (!/^\/[A-Za-z0-9_./-]+$/.test(row.root) || path.posix.normalize(row.root) !== row.root || row.root === '/' || row.root.split('/').some(part => ['.', '..', '.ssh', '.claude'].includes(part))) throw Error('invalid registered runner root');
-    return row.root;
-  }
+  // The catalog's effective root may just be from the same stale probe cache.
+  // A registered root pins the workspace and probe filesystem, not the facts.
+  const registeredRoot = row.registeredRoot;
+  if (registeredRoot != null && (typeof registeredRoot !== 'string' || !/^\/[A-Za-z0-9_./-]+$/.test(registeredRoot) || path.posix.normalize(registeredRoot) !== registeredRoot || registeredRoot === '/' || registeredRoot.split('/').some(part => ['.', '..', '.ssh', '.claude'].includes(part)))) throw Error('invalid registered runner root');
   const cached = state?.hostRoots?.get(row.host);
-  if (cached?.user === row.user && cached.until > Date.now()) return cached.root;
+  if (cached?.user === row.user && cached.registeredRoot === registeredRoot && cached.until > Date.now()) return cached.root;
   const operation = () => resolveHostRoot(row, state, options);
   const root = await (state?.currentAttemptTiming?.measure('hostRoot', operation) || operation());
-  if (state) (state.hostRoots ||= new Map()).set(row.host, { root, user: row.user, until: Date.now() + 60000 });
+  if (state) (state.hostRoots ||= new Map()).set(row.host, { root, user: row.user, registeredRoot, until: Date.now() + 60000 });
   return root;
+}
+
+function discoveredRoot(root) {
+  return typeof root === 'string' && root.startsWith('/') && root.endsWith('/devbox-run') && !root.includes('\0') && !root.split('/').includes('..');
 }
 
 async function resolveHostRoot(row, state, { deadline } = {}) {
@@ -1958,18 +1966,21 @@ async function resolveHostRoot(row, state, { deadline } = {}) {
   return withStateLock(path.join(cacheDir(), `devbox-probe-${row.host}`), async () => {
   let cache = {}; try { cache = JSON.parse(fs.readFileSync(cacheFile, 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw error; }
   let entry = cache[row.host];
-  const usable = entry?.root && entry.user === row.user && Number.isInteger(entry.cores) && entry.cores > 0;
+  const usable = entry?.user === row.user && Number.isInteger(entry.cores) && entry.cores > 0
+    && (row.registeredRoot != null || discoveredRoot(entry.root));
   const age = Date.now() - Date.parse(entry?.probedAt);
-  const fresh = Number.isFinite(age) && age >= 0 && age < 3600000;
+  const fresh = Number.isFinite(age) && age >= 0 && age < 3600000 && (!row.registeredRoot || entry.root === row.registeredRoot);
   if (!usable || !fresh && !(entry.retryProbeAfter > Date.now())) {
     const timeout = Math.min(usable ? 10000 : 60000, deadline === undefined ? Infinity : deadline - Date.now());
-    if (timeout <= 0) throw Error('root probe deadline expired');
+    if (timeout <= 0) {
+      if (usable) return row.registeredRoot || entry.root;
+      throw Error('root probe deadline expired');
+    }
     try {
-      const probed = JSON.parse(checked(await ssh(row, 'probe', { user: row.user }, { state, timeout, noRetry: usable || deadline !== undefined }), 'root probe').trim());
+      const probed = JSON.parse(checked(await ssh(row, 'probe', { user: row.user, root: row.registeredRoot ?? undefined }, { state, timeout, noRetry: usable || deadline !== undefined }), 'root probe').trim());
       if (probed.user !== row.user || !Number.isInteger(probed.cores) || probed.cores < 1
-          || !Number.isFinite(Date.parse(probed.probedAt)) || typeof probed.root !== 'string'
-          || !probed.root.startsWith('/') || !probed.root.endsWith('/devbox-run')
-          || probed.root.includes('\0') || probed.root.split('/').includes('..')) throw Error('invalid host probe facts');
+          || !Number.isFinite(Date.parse(probed.probedAt))
+          || (row.registeredRoot ? probed.root !== row.registeredRoot : !discoveredRoot(probed.root))) throw Error('invalid host probe facts');
       entry = probed;
       await mergeState(cacheFile, row.host, entry);
     } catch (error) {
@@ -1980,8 +1991,7 @@ async function resolveHostRoot(row, state, { deadline } = {}) {
       console.error(`devbox-run: stale host probe ${row.host}; refresh unavailable, retaining last-known facts`);
     }
   }
-  if (typeof entry.root !== 'string' || !entry.root.startsWith('/') || !entry.root.endsWith('/devbox-run') || entry.root.includes('\0') || entry.root.split('/').includes('..')) throw Error('invalid remote workspace root');
-  return entry.root;
+  return row.registeredRoot || entry.root;
   }, deadline === undefined ? undefined : Math.max(1, Math.floor((deadline - Date.now()) / 50)));
 }
 

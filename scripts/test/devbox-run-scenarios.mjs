@@ -184,7 +184,8 @@ if(c.postStartFailure&&op==='run'){
  console.error(command.match(/'(DEVBOX_STARTED_[^']+)'/)[1]);console.error(c.postStartMessage||'Connection closed by remote host');process.exit(255);
 }
 if(op==='probe') {
- const root=path.join(c.dir,'remote',host,c.dataDisk===false?'home':'data00',d.user,'devbox-run');fs.mkdirSync(root,{recursive:true});
+ if(c.probeFailure)process.exit(1);
+ const root=d.root||path.join(c.dir,'remote',host,c.dataDisk===false?'home':'data00',d.user,'devbox-run');fs.mkdirSync(root,{recursive:true});
  console.log(JSON.stringify({root,user:d.user,fs:c.dataDisk===false?'/':'/data00',freeGiB:100,totalGiB:200,cores:8,memGiB:32,probedAt:new Date().toISOString()}));return;
 }
 if(op==='retire-artifacts'&&c.retirementFailure){console.error('fixture retirement failure');process.exit(70);}
@@ -1833,6 +1834,51 @@ async function submodulePinScenarios() {
   console.log('PASS post-feed missing pin replays one full bundle; persistent failure never starts checkout or command');
 }
 
+async function dynamicProbeScenarios() {
+  const host = '192.0.2.1';
+  for (const pinned of [false, true]) {
+    const f = fixture({ dynamic: true, canonical: true });
+    const cache = path.join(f.shared, 'devbox-hosts.json');
+    const root = path.join(f.dir, 'registered', 'devbox-run');
+    const registry = path.join(f.shared, 'resources.tsv');
+    if (pinned) fs.writeFileSync(registry, fs.readFileSync(registry, 'utf8').trimEnd() + ` root=${root}\n`);
+    const stale = { root: path.join(f.dir, 'old', 'devbox-run'), user: 'alice', cores: 8,
+      freeGiB: 90, probedAt: new Date(Date.now() - 3601000).toISOString() };
+    fs.writeFileSync(cache, JSON.stringify({ [host]: stale }));
+    const facts = () => JSON.parse(fs.readFileSync(cache))[host];
+    const metrics = path.join(f.shared, 'devbox-metrics', `${host}.json`);
+    fs.mkdirSync(path.dirname(metrics));
+    fs.writeFileSync(metrics, JSON.stringify({ at: Date.now()/1000, cores: 8, load5: 1, memAvailableGiB: 24, freeGiB: 100 }));
+    const row = readRegistry(f.shared, 'devbox-cn')[0];
+    assert.equal(row.root, pinned ? root : stale.root);
+    assert.equal(row.registeredRoot, pinned ? root : null);
+    const probes = () => f.events().filter(event => event.op === 'probe');
+    const first = await run(f); ok(first); returned(f);
+    const order = f.events().map(event => event.op);
+    assert.ok(order.includes('probe') && order.indexOf('probe') < order.indexOf('take'), 'refresh stale facts before admission even with fresh metrics');
+    assert.equal(probes().length, 1);
+    assert.ok(Date.parse(facts().probedAt) > Date.parse(stale.probedAt));
+    assert.equal(facts().root, pinned ? root : path.join(f.dir, 'remote', host, 'data00', 'alice', 'devbox-run'));
+
+    const fresh = facts();
+    ok(await run(f)); returned(f);
+    assert.equal(probes().length, 1, 'fresh facts avoid a new hardware probe');
+
+    fs.writeFileSync(cache, JSON.stringify({ [host]: { ...fresh, probedAt: stale.probedAt } }));
+    fs.writeFileSync(f.env.DEVBOX_FIXTURE, JSON.stringify({ ...f.config, probeFailure: true }));
+    const failedRefresh = await run(f); ok(failedRefresh); returned(f);
+    assert.match(failedRefresh.stderr, /refresh unavailable, retaining last-known facts/);
+    assert.equal(probes().length, 2);
+    assert.equal(facts().probedAt, stale.probedAt, 'failure does not extend fact freshness');
+    assert.equal(facts().cores, fresh.cores);
+    assert.equal(facts().root, fresh.root);
+    assert.ok(facts().retryProbeAfter > Date.now());
+    ok(await run(f)); returned(f);
+    assert.equal(probes().length, 2, 'new run honors failure backoff');
+  }
+  console.log('PASS dynamic runner: hourly hardware refresh with fresh admission metrics, registered/cache roots, failure fallback and backoff');
+}
+
 async function dynamicScenarios() {
   const f = fixture({ dynamic: true });
   const r = await run(f, ['--cores', '2', '--mem-gib', '4']); ok(r); returned(f);
@@ -1899,6 +1945,7 @@ async function reviewRegressions() {
 async function scenarios() {
   const only = process.env.DEVBOX_TEST_CASE;
   if (!only || only === 'dynamic-review') { await reviewRegressions(); if (only) return; }
+  if (!only || only === 'dynamic-probe') { await dynamicProbeScenarios(); if (only) return; }
   if (!only || only === 'dynamic') { await dynamicScenarios(); if (only) return; }
   if (!only || only === 'tmpdir') {
     const f = fixture();
@@ -1939,7 +1986,9 @@ async function scenarios() {
   const probeSource = remoteScripts.probe.replace("pathlib.Path('/data00')", `pathlib.Path(${JSON.stringify(data)})`)
     .replace("pathlib.Path(os.path.expanduser('~'))", `pathlib.Path(${JSON.stringify(home)})`)
     .replace("'/proc/meminfo'", JSON.stringify(path.join(roots, 'meminfo')));
-  const probe = () => JSON.parse(execFileSync('python3', ['-c', probeSource, Buffer.from(JSON.stringify({ user: 'alice' })).toString('base64')], { encoding: 'utf8' }));
+  const probe = root => JSON.parse(execFileSync('python3', ['-c', probeSource, Buffer.from(JSON.stringify({ user: 'alice', root })).toString('base64')], { encoding: 'utf8' }));
+  const registered = path.join(roots, 'registered');
+  assert.equal(probe(registered).root, registered);
   assert.equal(probe().root, path.join(data, 'home/alice/devbox-run'));
   fs.rmSync(path.join(data, 'home/alice'), { recursive: true }); fs.writeFileSync(path.join(data, 'home/alice'), 'unusable directory');
   assert.equal(probe().root, path.join(data, 'alice/devbox-run'));
