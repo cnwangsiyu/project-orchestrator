@@ -56,10 +56,18 @@ catches a miss, and how many times the task has fallen short. How the table was 
   (Claude in Chrome) but has no desktop computer-use tool
   (ledger 10-31), so for desktop apps the Claude fallback may only report BLOCKED. TTADK desktop work needs an unlocked
   screen.
-  - A background Claude worker can drive the user's signed-in Chrome. Its brief names the Chrome by `deviceId`
-    (recorded in the ledger once the user has picked it), and the worker calls `select_browser` with that id when
-    several browsers are connected. A worker that still can't reach the browser reports BLOCKED with the tool's
-    error. Clicking never falls back to the orchestrator: video-agent W258 did, and that orchestrator then made 510
+  - A background Claude worker can drive the user's signed-in Chrome only after proving the target machine.
+    The launcher starts `node scripts/browser-identity.mjs serve --once` on that machine and puts the printed
+    loopback URL and expected random token in the brief, including that verification origin in its browser scope.
+    Before any task action, the worker calls `list_connected_browsers`, tries candidates with `select_browser`
+    by their current ids, and opens the verification URL in a new tab for each candidate. It uses only the browser
+    whose page shows the exact expected token. If none matches, it reports BLOCKED, preserving the tool error
+    when available. Names such as "Browser 1/2", `isLocal`, a remembered `deviceId`, and being the sole connected
+    browser do not establish machine identity; a remembered id is only a first candidate. Close an unsuccessful
+    candidate's verification tab before trying the next. After proof, stay on that browser and use task-created
+    tabs only. The helper binds `127.0.0.1` on a free port, serves only `/identity` as plain text without caching,
+    and exits after ten minutes by default (`--minutes N`) or the first valid hit (`--once`). It reads no browser
+    profile, cookies or login material. Clicking never falls back to the orchestrator: video-agent W258 did, and that orchestrator then made 510
     browser calls in 24h (nightly review 2026-11-05). TRAE's Playwright Extension path reuses the user's signed-in
     Chrome; its default headless Playwright still suits pages that do not need that sign-in.
 - **Codex-only work:** every task whose output is an image — generating, editing, variants, icons, illustrations,

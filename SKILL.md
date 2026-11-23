@@ -312,7 +312,11 @@ unless another registered signing run is active. The resident signing worker is 
 
 **Browser/desktop:** brief exact origins/scope, signed-in browser/account or permitted apps/unlocked
 screen. Use that worker's tools; headless public/local access cannot substitute console login;
-Claude Chrome IDs belong only to Claude. TRAE origins are brief-scoped, not enforced technically.
+Claude Chrome IDs belong only to Claude and are candidates, never proof of the machine. Before task
+actions, prove Claude's target machine with the brief loopback URL/expected token from
+`browser-identity.mjs serve --once`, trying connected ids in new verification tabs; no match is BLOCKED.
+After proof stay on that browser. Names, `isLocal` and a sole listed browser are insufficient.
+TRAE origins are brief-scoped, not enforced technically.
 Irreversible actions need confirmation; saved site denials need a new authorized thread. Missing
 tool/vision/browser/login is BLOCKED with exact error, never own clicking or login workaround.
 [Browser workers](references/codex-workers.md#browser-use-and-computer-use-on-a-codex-worker-verified-2026-11-07) has execution details.

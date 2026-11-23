@@ -30,6 +30,12 @@ is an alias). These scope flags survive the worker launch and saved route args.
 Dry output is only a preview; route again without `--dry` before launching. Preserve the printed `run-tracked.sh` wrapper.
 Launch through a tracked background tool (`run_in_background`), never detach with inner `&`.
 
+For Claude-in-Chrome, the launcher starts `node scripts/browser-identity.mjs serve --once` on the
+target machine and gives the URL/expected token to the worker. It proves the machine in a new tab
+before task actions, trying current connected ids; no exact token match is BLOCKED. Names,
+`isLocal`, remembered ids alone and a sole listed browser are insufficient. Stay on the browser
+after proof. See [browser evidence](model-evidence.md) for the complete verification procedure.
+
 Claude commands use the trusted project root (`--trusted-cwd`, otherwise configured root), explicitly
 name the working directory in the prompt, and include `--bg --remote-control --permission-mode
 bypassPermissions`, plus the routed model/effort. Remote Control/Bypass are user decisions of

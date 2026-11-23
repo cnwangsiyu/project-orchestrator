@@ -500,6 +500,12 @@ two personal steps need the user's OK; re-run route.mjs after an account failure
 
 ### Running a browser worker
 
+- **Claude-in-Chrome machine proof.** On the target machine, run `node scripts/browser-identity.mjs serve --once`
+  and include its loopback URL and expected token in the brief's allowed verification scope. Before task actions,
+  list connected browsers and select each candidate by current id, opening that URL in a new tab. Continue only
+  on the browser whose page shows the exact token; otherwise BLOCKED. Names, `isLocal`, a remembered id alone,
+  or a sole browser are insufficient. A remembered id is only a first candidate; after proof stay on that browser
+  and use task-created tabs. The helper defaults to ten minutes (`--minutes N`) and reads no login stores.
 - **Hub workers only.** Per-site approval ("Allow Browser use to access <origin>?") and per-app approval arrive as MCP
   elicitations. Only `codex-worker` can answer them: `--browser-origins` takes origins or host globs such as
   `*.bytedance.net`, and `--computer-use-apps` takes bundle ids. Those flags start the thread on-request; the worker

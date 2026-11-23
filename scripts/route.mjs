@@ -16,7 +16,7 @@ import { checkPersonalPriorityNotices } from './lib/personal-priority-notices.mj
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 if (process.argv.includes('--help') || process.argv.includes('-h') || process.argv[2] === 'help') {
-  console.log('usage: route.mjs <category> [options]\nbrowser | ui-browser: --browser-origins <comma list of hosts or HTTP(S) origins> (required; --origins is an alias)\ncomputer-use: --computer-use-apps <comma list of bundle IDs> (--apps is an alias)\nBrowser origins and desktop apps are carried into the worker launch and --route-args. Never infer sites from a brief.\nUse --table for categories and references/worker-operations.md for task flags.');
+  console.log('usage: route.mjs <category> [options]\nbrowser | ui-browser: --browser-origins <comma list of hosts or HTTP(S) origins> (required; --origins is an alias)\ncomputer-use: --computer-use-apps <comma list of bundle IDs> (--apps is an alias)\nBrowser origins and desktop apps are carried into the worker launch and --route-args. Never infer sites from a brief.\nClaude-in-Chrome: run node scripts/browser-identity.mjs serve --once on the target machine and give the URL/expected token in the brief; prove the machine in a new tab before task actions.\nUse --table for categories and references/worker-operations.md for task flags.');
   process.exit(0);
 }
 if (process.argv[2] === 'void') {

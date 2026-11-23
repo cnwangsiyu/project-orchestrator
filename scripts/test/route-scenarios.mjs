@@ -192,7 +192,7 @@ const CASES = [
   ['ttFresh', ['browser'], 'codex gpt-6.1-sol medium @ttadk', 'Chrome must be running'],
   ['ttFresh', ['browser', '--failures', '2'], 'codex gpt-6.1-sol xhigh @ttadk'],
   ['ttFresh', ['browser', '--failures', '3'], 'claude sonnet medium'],
-  ['ttNoBrowser', ['browser'], 'claude sonnet medium', 'never switch to another connected browser'],
+  ['ttNoBrowser', ['browser'], 'claude sonnet medium', 'After proof, stay on that browser'],
   ['fresh', ['browser'], 'claude sonnet medium'],
   ['ttFresh', ['browser', '--exclude-account', 'ttadk'], 'claude sonnet medium'],
   // ui-browser uses the same browser order and keeps its hard effort floor for writes.

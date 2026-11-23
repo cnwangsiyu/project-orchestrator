@@ -108,7 +108,7 @@ const commands = new Set(['hub', 'start', 'turn', 'wait', 'steer', 'note', 'ask'
   'mine', 'watch', 'retire', 'rules-push', 'list', 'quota', 'usage', 'reset-credits', 'reset-credit-use', 'accounts',
   'account-add', 'browser-setup', 'computer-use-setup', 'ttadk-setup', 'trae-setup', 'probe', 'note-failure',
   'proxy', 'search-proxy', 'browser-health','queue-choice']);
-const usage = `usage: codex-worker [--account NAME] <command> ...\ncommands: ${[...commands].join(' | ')}\nretire --thread ID | retire --run RUN_ID [--owner SESSION_ID] [--reason TEXT]; mine [--all]\n`;
+const usage = `usage: codex-worker [--account NAME] <command> ...\ncommands: ${[...commands].join(' | ')}\nretire --thread ID | retire --run RUN_ID [--owner SESSION_ID] [--reason TEXT]; mine [--all]\nBrowser start/turn: --browser-origins <comma list>; desktop: --computer-use-apps <bundle IDs>.\nClaude-in-Chrome: run node scripts/browser-identity.mjs serve --once on the target machine, give its URL/expected token in the brief, and prove the browser's machine in a new tab before task actions.\n`;
 // Help/usage errors must exit before tracker registration, account lookup, or hub access.
 if (argv.includes('--help') || argv.includes('-h') || argv[0] === 'help') {
   process.stdout.write(usage); process.exit(0);

@@ -270,7 +270,11 @@ provide absolute resolved paths. One-shot exec always includes
 worker event. `--network on|off` carries the requested access without widening
 filesystem permissions, including read-only workers. Device/account notes follow
 the resources registered here. Browser workers use the tools their own harness
-lists; Claude-in-Chrome device IDs belong only in Claude briefs. A thread whose
+lists; Claude-in-Chrome device IDs belong only in Claude briefs and are candidates until the
+target-machine loopback URL/expected token proof succeeds. Start `browser-identity.mjs serve --once`
+on the target, try connected ids in new verification tabs, and block if no page matches. Names,
+`isLocal`, remembered ids alone and a sole browser do not prove identity. After proof stay on that browser.
+A thread whose
 saved permission denies the target site needs a new thread with
 `--browser-origins`.
 
