@@ -121,6 +121,9 @@ try {
   eq(locks().filter(n => n.startsWith('heavy-')), []);
   const replacedRes = path.join(root, 'res-replaced'), replaceMark = path.join(root, 'replace');
   fs.copyFileSync(process.env.RES_SOURCE, replacedRes);
+  for (const helper of ['dynamic_capacity.py', 'mini2_control.py', 'local_control.py']) {
+    fs.copyFileSync(path.join(path.dirname(process.env.RES_SOURCE), helper), path.join(root, helper));
+  }
   const waitingDuringUpdate = start('during-update', { PAUSE_MARK: replaceMark }, replacedRes);
   await until(() => fs.existsSync(replaceMark), waitingDuringUpdate);
   // Simulate unexpected bytes at the old file offset after an in-place copy.
