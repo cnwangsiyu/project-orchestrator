@@ -46,7 +46,7 @@ try {
   assert.equal(parsed.daily[SOL].used, 80);
   assert.equal(parsed.daily.gpt_6_2, undefined);
   assert.deepEqual(traeQuota({ ...payload, modelQuotas: { [SOL]: 'gpt_6_2' } }, now), parsed);
-  const explicit = { ...bucket, used: 20, depleted: false };
+  const explicit = { ...bucket, used: 20, remaining: 60, depleted: false };
   assert.equal(normalizeTraeDaily({ gpt_6_2: bucket, [SOL]: explicit })[SOL], explicit);
   assert.equal(normalizeTraeDaily({ [SOL]: explicit, gpt_6_2: bucket })[SOL], explicit);
   assert.deepEqual(normalizeTraeDaily({ gpt_6_3: bucket }), { gpt_6_3: bucket });
