@@ -15,8 +15,9 @@ capacity is measured cores; default reserve is `max(4 GiB, 12% of RAM)`; disk
 floor remains 20 GiB. The config accepts `derived` or explicit positive values.
 Migration changes only the old explicit load 6 / memory 16 defaults to derived,
 and stores exact registry/config backups. Mini2's 10 cores / 32 GiB gives load
-capacity 10 and reserve 4 GiB: ten default native light leases can fit at idle
-with sufficient disk, or two default heavy leases plus two light leases.
+capacity 10 and reserve 4 GiB. At idle with sufficient disk, default heavy
+concurrency is min(floor(10/4), floor((32-4)/8)) = min(2,3) = 2. Ten default
+native light leases can fit, or two default heavy leases plus two light leases.
 
 Admission retains enabled/policy, maintenance, fresh UP link (300 seconds),
 matching host, arm64, fresh valid metrics (300 seconds), normal pressure,
@@ -32,16 +33,21 @@ scratch only after open-file proof; after execution starts, the existing boot,
 process-generation and cleanup-receipt checks remain required.
 
 The shared `dynamic_capacity.py` arithmetic is also used by CN devbox admission.
-Each claim atomically writes its reservation in its hold. CPU/memory credit
-requires fresh (15-second) run-attributed usage, capped both by declared cost
-and by the host load/memory increase since the outstanding batch's baseline.
-Credits consume one shared visibility budget, so the same measured increase
-cannot remove multiple reservations. The supervisor reports owned private memory footprints (capped by resident bytes) and
-elapsed five-minute CPU-load contribution; credit is deliberately conservative
-when unrelated memory is freed or load falls. Disk stays reserved to cleanup.
-A newer timestamp alone never removes a reservation. This mini2 convergence is
-new: the reference devbox code currently retains active dynamic reservations
-for their full lifetime; its behavior is preserved in this change.
+Each claim atomically writes its full declared cores, memory and disk reservation
+in its hold and retains it until return or ownership-proven reclamation. No
+measured process memory, CPU, footprint, ancestry or generation receives
+reservation credit. Materialized use and declared costs deliberately count twice.
+The reference devbox also retains full active reservations; its behavior is
+preserved. Admission requires fresh metrics and normal pressure, with:
+
+`available_memory - sum(live_declared_memory) - reserve_floor >= new_memory`
+
+`load_limit - measured_load - sum(live_declared_cores) >= new_cores`
+
+`free_disk - sum(live_declared_disk) - disk_floor >= new_disk`
+
+Pending remote cleanup retains its full reservation and ID as before. Obsolete
+usage/baseline fields in existing leases or metrics are ignored, not credited.
 
 FIFO is shared across named and pool claims. A fitting, componentwise smaller
 claim may pass a head blocked specifically by CPU, memory or disk at most three
@@ -89,13 +95,11 @@ claims acquire a build ID and a lane ID together; the wrapper captures
 own pair by holder plus PID. `wait-lane` defaults to medium; callers select
 `--profile heavy|medium|light` or explicit measured weights. Named legacy takes
 pin their names and build takes acquire the corresponding pair atomically.
-The wrapper starts a FIFO-gated child, binds it with `--workload-pid`, then
-releases the FIFO. Kernel process start ticks must be newer than the claim's
-Mach absolute-time cutoff. The holder itself, pre-existing descendants and
-other workload subtrees never receive credit; overlapping bindings are refused.
-Unbound claims and bindings without a verifiable workload generation retain
-their full CPU/memory reservations. Missing native generation evidence closes
-credit, not the ordinary measured admission gate.
+The wrapper starts a FIFO-gated child, binds dispatch, then releases the FIFO.
+`--workload-pid` remains accepted for existing wrappers but no longer triggers
+credit-related process sampling. Bound, unbound and manual claims all retain
+their full declared reservation. Binding still prevents unbound reclamation of
+dispatched work; the existing checkout/process ownership proof is unchanged.
 
 | Kind | Default cores | Default memory | Disk |
 | --- | --- | --- | --- |
@@ -105,10 +109,11 @@ credit, not the ordinary measured admission gate.
 
 Measured main-mini facts are 14 physical cores and 64 GiB RAM. Defaults are
 load capacity 14, memory reserve 7.68 GiB, disk reserve 20 GiB. At idle and with
-sufficient disk, the worst default concurrency is 14 light claims, seven medium
-claims or three full builds; mixes cannot exceed 14 default claims because each
-reserves at least one core. Each admission leaves the configured memory/disk
-floors after measured use plus unmaterialized reservations. This is a budget
+sufficient disk, default full-build concurrency is
+min(floor(14/4), floor((64-7.68)/8)) = min(3,7) = 3. Default light and medium
+concurrency is 14 and seven respectively; mixes cannot exceed 14 default claims
+because each reserves at least one core. Each admission leaves the configured memory/disk
+floors after measured use plus full declared reservations. This is a budget
 for honest job estimates, not a process memory limit. The actual available
 memory reading can reduce these counts substantially; nominal RAM never
 substitutes for that reading.
@@ -123,20 +128,16 @@ fallback for dynamic admission. Swap/compressor diagnostics come from the same
 live counters. The main mini remains under memory-panic observation until
 2026-11-26; owner smoke uses light no-op work.
 
-Local and mini2 share headroom arithmetic, bounded-bypass predicates and fresh
-attributed reservation credit. Local usage comes only from the bound workload
-generation and post-claim descendants. A Mach-clock fence before the ancestry
-snapshot ties every descendant PID to its kernel start time; births after that
-fence are unproven and receive no credit. Generation checks around footprint
-sampling and a final ancestry check reject changed or unprovable intermediate
-processes and their subtrees. Credit is capped by the outstanding batch's measured host delta.
-For each living claim, credit is `min(measured attributed use, declared weight,
-remaining shared visibility budget)` and the rest of its declared weight stays
-reserved until return or verified reclamation. Credit is not a declaration that
-the job has peaked: measured use plus its remaining reservation still covers
-the full declared peak. In the review scenario, two unbound 8 GiB claims and
-24 GiB available retain 16 GiB reserved; a third 8 GiB job is refused because
-it would leave 0 GiB, below the 7.68 GiB floor.
+Local and mini2 share headroom arithmetic, bounded-bypass predicates and full
+lifetime reservations. In the reviewer's timing scenario, availability is
+sampled at 24 GiB, then an existing 8 GiB claim materializes during sampling.
+Two claims still reserve 16 GiB; a third 8 GiB claim is refused because
+24 - 16 - 8 = 0 GiB, below either the main-mini 7.68 GiB or mini2 4 GiB floor.
+Shared parents, workload exit/restart and partial materialization never change
+declared reservations. Previous root/descendant PID-reuse credit transfers are
+structurally impossible: no credit or credit-related ancestry/generation/footprint
+sampling remains. Holder-generation and remote ownership checks remain solely
+for proven reclamation and cleanup, not budget discounts.
 An unbound controlled dead holder is reclaimed; dispatched work is reclaimed
 only when the existing checkout/process evidence proves no surviving work.
 Uncertain or surviving work keeps its own ID/reservation while other claims
@@ -169,9 +170,15 @@ It also refuses old live waiters, legacy allocator processes and the local
 legacy transaction lock, naming their PIDs and requesting stop/restart on the
 installed controller. The local and mini2 guards are separate. A new entrant
 cannot select legacy mode on one side of a migration and admit on the other.
-Interpreter flags, absolute interpreter/script paths and env wrappers do not
-hide named waiters; allocator-shaped commands that cannot be classified close
-migration rather than being ignored.
+Interpreter flags, absolute interpreter/script paths, env, shell, node/python
+wrappers, sourced wrappers, extra arguments and `--` separators do not hide
+named waiters. Allocator-shaped commands that cannot be classified close both
+migrations and list their PIDs. Prose arguments are exempt only when ps `comm`
+identifies `codex` or `claude`, or `node` with its actual script argument equal
+to `codex-worker.mjs` or `route.mjs`; agent names in argv never establish that
+exemption. A legacy unweighted hold appearing after either migration closes
+dynamic admission machine-wide, including light and named claims, until its
+normal return. Other dynamic IDs cannot bypass this backstop.
 Normal build/host transaction guards remain in place; switch guards are not
 capacity leases and do not serialize concurrent claims against each other.
 

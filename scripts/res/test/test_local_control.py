@@ -22,7 +22,8 @@ class LocalCapacityTests(unittest.TestCase):
         self.sample=dict(at=time.time(),host=os.uname().nodename,cores=14,totalGiB=64,load5=0,
                          availableGiB=64,pressure=1,freeGiB=1000,swapGiB=0,compressorGiB=0)
         self.write("sample.json",self.sample)
-        self.env={**os.environ,"RES_DIR":str(self.root),"RES_TEST_LOCAL_SAMPLE":str(self.root/"sample.json")}
+        self.env={**os.environ,"RES_DIR":str(self.root),"RULES_SHARED":str(self.root),
+                  "PYTHONDONTWRITEBYTECODE":"1","RES_TEST_LOCAL_SAMPLE":str(self.root/"sample.json")}
 
     def write(self,name,value):
         (self.root/name).parent.mkdir(parents=True,exist_ok=True)
@@ -139,9 +140,13 @@ class LocalCapacityTests(unittest.TestCase):
         (old/"info").write_text(f"by\tlegacy\npid\t{os.getpid()}\nhost\t{os.uname().nodename}\n")
         result=self.cli("take-build",*self.args("new"))
         self.assertNotEqual(result.returncode,0); self.assertIn("legacy-or-incomplete-hold",result.stderr)
+        result=self.cli("wait-lane",*self.args("new-light","light"),"--lane","heavy-lane-90")
+        self.assertNotEqual(result.returncode,0); self.assertIn("legacy-or-incomplete-hold",result.stderr)
+        self.assertEqual(self.capacity("local-light")["claims"],0)
         result=self.cli("return-build","--by","legacy")
         self.assertEqual(result.returncode,0,result.stderr)
         self.assertFalse(old.exists())
+        self.take("after-legacy-return","light"); self.release("after-legacy-return")
 
     def test_dead_unbound_reclaim_and_bound_work_keeps_its_reservation(self):
         dead=subprocess.Popen(["/usr/bin/true"]); dead.wait()
@@ -169,16 +174,10 @@ class LocalCapacityTests(unittest.TestCase):
         self.take("after-cleanup","light"); self.release("after-cleanup")
         self.assertFalse(file.exists())
 
-    def test_reservation_credit_requires_fresh_attribution(self):
-        values=self.take("visible")
-        file=self.root/"locks"/(values["build-id"]+".d")/"lease.json"
-        lease=json.loads(file.read_text())
-        observed=dict(at=time.time(),cpuLoad=4,memoryGiB=8,generation=lease["generation"],workloadPid=123,workloadBirth=456)
-        self.write("sample.json",{**self.sample,"load5":4,"availableGiB":56,"leaseUsage":{lease["runId"]:observed}})
-        self.assertEqual(self.capacity()["reserved"],[4,8,16])
-        self.write(str(file.relative_to(self.root)),{**lease,"dispatch":"bound","workload":dict(pid=123,birth=456)})
-        self.assertEqual(self.capacity()["reserved"],[0,0,16])
-        self.write("sample.json",{**self.sample,"load5":4,"availableGiB":56,"leaseUsage":{lease["runId"]:{**observed,"at":time.time()-15}}})
+    def test_materialized_claim_retains_its_full_declared_reservation(self):
+        values=self.take("visible","heavy","--wrapper")
+        self.assertEqual(self.cli("bind",values["build-id"],"--by","visible").returncode,0)
+        self.write("sample.json",{**self.sample,"load5":4,"availableGiB":56})
         self.assertEqual(self.capacity()["reserved"],[4,8,16])
         self.release("visible")
 

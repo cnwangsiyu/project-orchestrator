@@ -108,26 +108,45 @@ def allocator_invocation(args):
     return None
 
 
+def agent_runtime(executable,argv):
+    """Only ps comm identifies an agent; a prose argv mention never does."""
+    name=Path(executable).name
+    if name in ("codex","claude"): return True
+    if name!="node" or not argv or Path(argv[0]).name!="node": return False
+    index=1
+    while index<len(argv):
+        option=argv[index]
+        if option=="--": index+=1; break
+        if option in ("--eval","--print") or option.startswith(("-e","-p","--eval=","--print=")): return False
+        if option in ("-r","--require","--import","--loader","--experimental-loader"):
+            index+=2
+        elif option.startswith("-"): index+=1
+        else: break
+    return index<len(argv) and Path(argv[index]).name in ("codex-worker.mjs","route.mjs")
+
+
 def allocator_processes(kind):
-    table=subprocess.check_output(["/bin/ps","-axww","-o","pid=,args="],text=True,timeout=3)
+    table=subprocess.check_output(["/bin/ps","-axww","-o","pid=,comm=,args="],text=True,timeout=3)
     result=[]
     for line in table.splitlines():
-        fields=line.strip().split(None,1)
-        if len(fields)!=2 or fields[0]==str(os.getpid()): continue
-        command=fields[1]
+        fields=line.strip().split(None,2)
+        if len(fields)!=3 or fields[0]==str(os.getpid()): continue
+        command=fields[2]
+        try: argv=shlex.split(command)
+        except ValueError: argv=[]
+        if agent_runtime(fields[1],argv): continue
         if "RES_BUILD_PROCESS_SOURCE" in command:
             result.append("pid="+fields[0]+" legacy inline allocator"); continue
-        try:
-            argv=shlex.split(command)
-            args=allocator_invocation(argv)
-        except ValueError: argv=[]; args=None
+        args=allocator_invocation(argv)
         if args is None:
             # ps does not preserve argv quoting. Opaque wrappers, inline shell
-            # commands and malformed input must not hide an allocator waiter.
+            # commands and malformed input must not hide an allocator waiter;
+            # separators and extra arguments need not keep its action adjacent.
             scripts=r"(?:res|mini2_control\.py|local_control\.py)"
-            shaped=(re.search(r"(?:^|[\s\"';|])[^\s\"';|]+/"+scripts+r"(?=$|[\s\"';|])",command)
+            shaped=(any(Path(part).name in ("res","mini2_control.py","local_control.py") for part in argv)
+                    or re.search(r"(?:^|[\s\"';|])[^\s\"';|]+/"+scripts+r"(?=$|[\s\"';|])",command)
                     or re.search(r"(?:^|[;&|]|\s-[A-Za-z]*c[A-Za-z]*\s+[\"']?)\s*"+scripts+r"(?=$|[\s\"';|])",command)
-                    or re.search(r"(?:^|\s)"+scripts+r"[\"']?\s+(?:take|wait|status|holder|bind|return|pool-capacity|slot-host)(?:[-\s]|$)",command))
+                    or re.search(r"(?:^|[\s\"';|])"+scripts+r"(?=$|[\s\"';|])",command))
             if shaped:
                 result.append("pid="+fields[0]+" unclassified allocator")
             continue
@@ -233,9 +252,9 @@ def weights(args):
     return result
 
 
-def reserved(root,sample=None,now=None):
+def reserved(root):
     holds=lease_holds(root)+list((root/"mini2-pending").glob("*/hold"))
-    return reservation_totals([read(hold/"lease.json",{}) for hold in holds],sample,now)
+    return reservation_totals([read(hold/"lease.json",{}) for hold in holds])
 
 
 def process_start(pid):
@@ -331,7 +350,7 @@ def admission(root, cfg, now, disk=0, need=(), qualification=False, cost=None):
     if cost is not None:
         if sample.get("arch") != "arm64":
             return "hardware-mismatch"
-        try: reservations = reserved(root,sample,now)
+        try: reservations = reserved(root)
         except ValueError: return "legacy-or-incomplete-hold"
         return headroom(sample["load5"],sample["availableGiB"],sample["freeGiB"],
                         reservations,cost,limits[0],limits[1],cfg["minFreeGiB"])
@@ -389,7 +408,7 @@ def age(value,now):
 
 
 def capacity(root,cfg,sample,dynamic):
-    try: amounts = reserved(root,sample,time.time()) if dynamic else (0,0,0)
+    try: amounts = reserved(root) if dynamic else (0,0,0)
     except ValueError: amounts = None
     return dict(cores=numeric_metric(sample.get("cores"),True),loadLimit=(thresholds(cfg,sample) or (None,None))[0],memoryFloorGiB=(thresholds(cfg,sample) or (None,None))[1],
                 diskFloorGiB=cfg["minFreeGiB"],load5=numeric_metric(sample.get("load5")),availableGiB=numeric_metric(sample.get("availableGiB")),
@@ -504,12 +523,9 @@ def acquire(root, args):
                     hold.mkdir(parents=True)
                     try:
                         sample=read(root/"mini2-metrics.json",{})
-                        if len(lease_holds(root))==1 and not list((root/"mini2-pending").glob("*/hold")):
-                            atomic(root/"mini2-baseline.json",sample)
-                        baseline=read(root/"mini2-baseline.json",sample)
                         values=dict(by=args.by, project=args.project, task=args.task, pid=args.pid,pid_start=pid_start,
                                     host=os.uname().nodename, start=int(time.time()), profile=args.profile or ("light" if not args.need or set(args.need.split(",")) <= {"cmake-native"} else "heavy"),
-                                    slot=resource,dynamic=dynamic,weights=cost,dispatch="unbound" if getattr(args,"resource",None)=="mini2" else "legacy",baseline=baseline,
+                                    slot=resource,dynamic=dynamic,weights=cost,dispatch="unbound" if getattr(args,"resource",None)=="mini2" else "legacy",
                                     limits=dict(loadLimit=thresholds(cfg,sample)[0],memoryFloorGiB=thresholds(cfg,sample)[1],diskFloorGiB=cfg["minFreeGiB"]),
                                     generation=str(uuid.uuid4()), remote_host=HOST, remote_cleanup_required="1", purpose=args.purpose)
                         atomic(hold/"lease.json", values)

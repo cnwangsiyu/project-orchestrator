@@ -17,6 +17,28 @@ spec=importlib.util.spec_from_file_location("mini2_remote",Path(__file__).resolv
 m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 
 class RemoteTests(unittest.TestCase):
+    def test_metrics_do_not_read_usage_or_credit_mid_sample_materialization(self):
+        with tempfile.TemporaryDirectory() as temp,patch.object(m,"ROOT",Path(temp)):
+            actual={"available":24}
+            def measured(command):
+                if command[0]=="/usr/sbin/sysctl":
+                    return {"hw.memsize":str(32*2**30),"hw.ncpu":"10",
+                            "kern.memorystatus_vm_pressure_level":"1","vm.swapusage":"used = 0M"}[command[-1]]
+                if command[0]=="/usr/bin/vm_stat":
+                    return ("Mach Virtual Memory Statistics: (page size of 16384 bytes)\n"
+                            "Pages occupied by compressor: 0.\nPages stored in compressor: 0.\n")
+                if command[0]=="/bin/df": actual["available"]-=8
+                return "fixture"
+            with patch.object(m.sys,"platform","darwin"),patch.object(m,"command",side_effect=measured),\
+                 patch.object(m.subprocess,"run",return_value=subprocess.CompletedProcess([],0,"75\n","")),\
+                 patch.object(m.os,"getloadavg",return_value=(0,0,0)),\
+                 patch.object(Path,"glob",side_effect=AssertionError("metric sampling must not collect lease usage")):
+                sample=m.metrics()
+            self.assertEqual(sample["availableGiB"],24)
+            self.assertEqual(actual["available"],16)
+            self.assertNotIn("leaseUsage",sample)
+            self.assertLess(sample["availableGiB"]-2*8-8,4,"full reservations reject a third heavy peak")
+
     def test_dynamic_launch_uses_resolved_config_instead_of_legacy_limits(self):
         data=dict(dynamic=True,limits=dict(loadLimit=10,memoryFloorGiB=4,diskFloorGiB=30))
         sample=dict(load5=7,availableGiB=14,pressure=1,freeGiB=40)

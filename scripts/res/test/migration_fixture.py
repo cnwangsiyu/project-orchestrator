@@ -9,7 +9,7 @@ check_output=subprocess.check_output
 
 
 def fixture_processes(command,*args,**kwargs):
-    if command==["/bin/ps","-axww","-o","pid=,args="]: return ""
+    if command==["/bin/ps","-axww","-o","pid=,comm=,args="]: return ""
     return check_output(command,*args,**kwargs)
 
 

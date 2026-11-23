@@ -96,7 +96,7 @@ class Mini2Tests(unittest.TestCase):
         with self.assertRaises(ValueError): m.acquire(self.root,self.take_args())
         lease=m.read(self.root/"locks"/(m.SLOT+".d")/"lease.json")
         self.assertEqual(lease["remote_cleanup_required"],"1")
-        env={**os.environ,"RES_DIR":str(self.root)}
+        env={**os.environ,"RES_DIR":str(self.root),"RULES_SHARED":str(self.root),"PYTHONDONTWRITEBYTECODE":"1"}
         res=Path(__file__).resolve().parents[1]/"res"
         result=subprocess.run([str(res),"return",m.SLOT,"--by","fixture"],env=env,capture_output=True)
         self.assertNotEqual(result.returncode,0)
@@ -116,7 +116,7 @@ class Mini2Tests(unittest.TestCase):
         def release(pid):
             return subprocess.run([str(res), "release-dead", m.SLOT, "--by", "fixture",
                                    "--pid", str(pid), "--receipt", str(receipt)],
-                                  env={**os.environ, "RES_DIR": str(self.root)}, capture_output=True)
+                                  env={**os.environ, "RES_DIR":str(self.root),"RULES_SHARED":str(self.root),"PYTHONDONTWRITEBYTECODE":"1"}, capture_output=True)
         self.assertNotEqual(release(os.getpid()).returncode, 0)
         dead = subprocess.Popen(["/usr/bin/true"])
         dead.wait()
@@ -177,7 +177,7 @@ class Mini2Tests(unittest.TestCase):
                 "--receipt", str(simulator), "--ios-receipt", str(simulator)]
 
         def configure(*flags):
-            return subprocess.run([*args, *flags], env={**os.environ, "RES_DIR": str(self.root)},
+            return subprocess.run([*args, *flags], env={**os.environ, "RES_DIR":str(self.root),"RULES_SHARED":str(self.root),"PYTHONDONTWRITEBYTECODE":"1"},
                                   capture_output=True, text=True)
 
         result = configure()
@@ -210,7 +210,7 @@ class Mini2Tests(unittest.TestCase):
 
     def test_cli_named_and_pool_disabled(self):
         m.atomic(self.root/"mini2-config.json",{**self.cfg,"enabled":False})
-        env={**os.environ,"RES_DIR":str(self.root)}; res=Path(__file__).resolve().parents[1]/"res"
+        env={**os.environ,"RES_DIR":str(self.root),"RULES_SHARED":str(self.root),"PYTHONDONTWRITEBYTECODE":"1"}; res=Path(__file__).resolve().parents[1]/"res"
         for action,id in (("take",m.SLOT),("wait",m.SLOT),("wait-pool","mini2")):
             result=subprocess.run([str(res),action,id,"--by","fixture","--project","fixture","--task","fixture","--for","test","--pid",str(os.getpid()),"--profile","light"],env=env,capture_output=True)
             self.assertNotEqual(result.returncode,0)
@@ -238,7 +238,7 @@ class DynamicMini2Tests(unittest.TestCase):
         return json.loads(output.getvalue())
 
     def cli(self,*args):
-        return subprocess.run([str(self.res),*args],env={**os.environ,"RES_DIR":str(self.root)},capture_output=True,text=True)
+        return subprocess.run([str(self.res),*args],env={**os.environ,"RES_DIR":str(self.root),"RULES_SHARED":str(self.root),"PYTHONDONTWRITEBYTECODE":"1"},capture_output=True,text=True)
 
     def release(self,value):
         file=self.root/(value["slot"]+"-clean.json")
@@ -264,7 +264,7 @@ class DynamicMini2Tests(unittest.TestCase):
             self.release(value)
         self.assertEqual(m.reserved(self.root),(0,0,0))
 
-    def test_owner_derived_defaults_and_measurement_convergence(self):
+    def test_owner_derived_defaults_and_full_lifetime_reservations(self):
         m.atomic(self.root/"mini2-config.json",{**self.cfg,"load5Limit":"derived","minAvailableGiB":"derived"})
         values=[self.take() for _ in range(10)]
         self.assertEqual(m.thresholds(m.config(self.root),self.sample),(10,4))
@@ -274,12 +274,9 @@ class DynamicMini2Tests(unittest.TestCase):
         hold=self.root/"locks"/(value["slot"]+".d")
         run="00000000-0000-0000-0000-000000000001"
         m.atomic(hold/"lease.json",{**value["lease"],"runId":run,"dispatch":"bound"})
-        observed={**self.sample,"load5":4,"availableGiB":24,"leaseUsage":{run:dict(at=time.time(),cpuLoad=4,memoryGiB=8)}}
-        self.assertEqual(m.reserved(self.root,observed,time.time()),(0,0,8))
-        stale={**observed,"leaseUsage":{run:dict(at=time.time()-15,cpuLoad=4,memoryGiB=8)}}
-        self.assertEqual(m.reserved(self.root,stale,time.time()),(4,8,8))
-        unrelated={**self.sample,"leaseUsage":observed["leaseUsage"]}
-        self.assertEqual(m.reserved(self.root,unrelated,time.time()),(4,8,8))
+        for available,load in ((24,4),(32,0),(24,4)):
+            m.atomic(self.root/"mini2-metrics.json",{**self.sample,"availableGiB":available,"load5":load})
+            self.assertEqual(m.reserved(self.root),(4,8,8))
         file=self.root/"converged-clean.json"
         m.atomic(file,dict(clean=True,generation=value["lease"]["generation"],runId=run))
         self.assertEqual(self.cli("return",value["slot"],"--by","fixture","--receipt",str(file)).returncode,0)
@@ -357,7 +354,11 @@ class DynamicMini2Tests(unittest.TestCase):
         legacy={name:value for name,value in first["lease"].items() if name not in ("weights","dispatch","dynamic","slot")}
         m.atomic(hold/"lease.json",legacy)
         with self.assertRaisesRegex(ValueError,"legacy-or-incomplete-hold"): self.take()
+        with self.assertRaisesRegex(ValueError,"legacy-or-incomplete-hold"): self.take(resource="mini2-exec-90")
+        capacity=json.loads(self.cli("pool-capacity","mini2","--json").stdout)[m.HOST]
+        self.assertEqual(capacity["claims"],0)
         self.release(first)
+        after=self.take(); self.release(after)
 
     def test_migration_exact_rollback_and_dynamic_id_drain(self):
         registry=self.root/"resources.tsv"

@@ -43,7 +43,10 @@ class DynamicFixTests(unittest.TestCase):
                          availableGiB=64,freeGiB=1000,pressure=1,swapGiB=0,compressorGiB=0)
         mini.atomic(self.root/"sample.json",self.sample)
         mini.atomic(self.root/"mini2-metrics.json",{**self.sample,"host":mini.HOST,"cores":10,"totalGiB":32,"availableGiB":32,"arch":"arm64"})
-        self.env={**os.environ,"RES_DIR":str(self.root),"RES_TEST_LOCAL_SAMPLE":str(self.root/"sample.json")}
+        home=self.root/"fixture-home"
+        (home/".claude/orchestrator/_shared").mkdir(parents=True)
+        self.env={**os.environ,"HOME":str(home),"RES_DIR":str(self.root),"RULES_SHARED":str(self.root),
+                  "PYTHONDONTWRITEBYTECODE":"1","RES_TEST_LOCAL_SAMPLE":str(self.root/"sample.json")}
 
     def activate(self,kind):
         module=migration(kind); file=self.root/"resources.tsv"
@@ -68,7 +71,7 @@ class DynamicFixTests(unittest.TestCase):
         module=module or migration(kind); root=root or self.root
         check_output=mini.subprocess.check_output
         def processes(command,*args,**kwargs):
-            if command==["/bin/ps","-axww","-o","pid=,args="]: return process_table
+            if command==["/bin/ps","-axww","-o","pid=,comm=,args="]: return process_table
             return check_output(command,*args,**kwargs)
         table=patch.object(mini.subprocess,"check_output",side_effect=processes) if process_table is not None else contextlib.nullcontext()
         with table,patch.object(sys,"argv",[str(SOURCE/(kind+"-host-migrate.py")),"--registry",str(root/"resources.tsv"),*([action] if action else [])]),contextlib.redirect_stdout(io.StringIO()):
@@ -86,77 +89,74 @@ class DynamicFixTests(unittest.TestCase):
         self.assertEqual(capacity["reserved"],[8,16,32])
         self.assertGreaterEqual(24-capacity["reserved"][1],capacity["memoryFloorGiB"])
 
-    def test_usage_is_bound_to_a_new_workload_generation_not_the_holder_tree(self):
-        lease=dict(pid=100,pid_start="holder",runId="run",generation="generation",dispatch="bound",
-                   start=1,creditAfter=50,workload=dict(pid=102,birth=60))
-        rows="100 1 0 0\n101 100 0 100\n102 100 0 100\n103 102 0 100\n104 102 0 100\n105 100 0 100\n"
-        births={100:1,101:20,102:60,103:70,104:30,105:80}
-        with patch.object(local,"claims",return_value=[(None,lease)]),patch.object(local,"process_clock",return_value=100),patch.object(local.subprocess,"check_output",return_value=rows),patch.object(local,"process_start",return_value="holder"),patch.object(local,"process_birth",side_effect=births.get,create=True),patch.object(local,"physical_footprint",return_value=4*2**30) as footprint:
-            value=local.usage(self.root,dict(at=100))["run"]
-            self.assertEqual(value["memoryGiB"],8,"exclude holder, old descendants, reparented old children and unrelated new siblings")
-            self.assertEqual({call.args[0] for call in footprint.call_args_list},{102,103})
-            lease["dispatch"]="unbound"
-            self.assertEqual(local.usage(self.root,dict(at=100)),{})
-            lease["dispatch"]="bound"; births[102]=90
-            self.assertEqual(local.usage(self.root,dict(at=100)),{},"PID reuse cannot transfer workload credit")
-
-    def test_partial_credit_leaves_the_remaining_declared_peak_reserved(self):
+    def test_shared_parent_and_exit_restart_keep_full_reservations(self):
         self.activate("local")
         leases=[]
         for name in ("first","second"):
             file,lease=self.claim(name)
             lease.update(dispatch="bound",workload=dict(pid=123,birth=456))
             mini.atomic(file,lease); leases.append(lease)
-        usages={lease["runId"]:dict(at=time.time(),memoryGiB=amount,cpuLoad=0,generation=lease["generation"],workloadPid=123,workloadBirth=456) for lease,amount in zip(leases,(4,2))}
-        mini.atomic(self.root/"sample.json",{**self.sample,"at":time.time(),"availableGiB":25,"leaseUsage":usages})
-        capacity=json.loads(self.cli("pool-capacity","local").stdout)[os.uname().nodename]
-        self.assertEqual(capacity["reserved"][1]+6,16)
-        result=self.cli("take-build",*self.args("third"),"--wrapper")
-        self.assertNotEqual(result.returncode,0)
-        self.assertIn("memory",result.stderr)
+        for available in (24,16,32,24):
+            # Old holders may carry obsolete usage/binding fields. None can
+            # discount reservations, even when two claims share a workload PID.
+            usages={lease["runId"]:dict(at=time.time(),memoryGiB=8,cpuLoad=4,
+                        generation=lease["generation"],workloadPid=123,workloadBirth=456) for lease in leases}
+            mini.atomic(self.root/"sample.json",{**self.sample,"at":time.time(),
+                        "availableGiB":available,"leaseUsage":usages})
+            capacity=json.loads(self.cli("pool-capacity","local").stdout)[os.uname().nodename]
+            self.assertEqual(capacity["reserved"],[8,16,32])
+            if available<32:
+                result=self.cli("take-build",*self.args("third"),"--wrapper")
+                self.assertNotEqual(result.returncode,0)
+                self.assertIn("memory",result.stderr)
+        for name in ("first","second"):
+            self.assertEqual(self.cli("return-build","--by",name).returncode,0)
 
-    def test_descendant_reuse_with_shared_parent_keeps_the_reserve_floor(self):
+    def test_materialization_during_available_memory_sampling_cannot_fund_third_claim(self):
         self.activate("local")
-        leases=[]
-        for name,pid in (("first",102),("second",105)):
+        for name in ("first","second"):
             file,lease=self.claim(name)
-            lease.update(dispatch="bound",creditAfter=50,workload=dict(pid=pid,birth=60))
-            mini.atomic(file,lease); leases.append(lease)
-        rows=f"{os.getpid()} 1 0 0\n102 {os.getpid()} 0 0\n103 102 0 0\n105 {os.getpid()} 0 0\n"
-        births={102:60,103:70,105:60}
-        def snapshot(*args,**kwargs):
-            births[103]=110  # The snapshotted child exits; an unrelated process reuses its PID.
-            return rows
-        sample={**self.sample,"at":time.time(),"availableGiB":24}
-        with patch.object(local,"process_clock",return_value=100),patch.object(local.subprocess,"check_output",side_effect=snapshot),patch.object(local,"process_birth",side_effect=births.get),patch.object(local,"physical_footprint",side_effect=lambda pid:8*2**30 if pid==103 else 0) as footprint:
-            sample["leaseUsage"]=local.usage(self.root,sample)
-        self.assertNotIn(103,{call.args[0] for call in footprint.call_args_list})
-        mini.atomic(self.root/"sample.json",sample)
-        capacity=json.loads(self.cli("pool-capacity","local").stdout)[os.uname().nodename]
-        self.assertEqual(capacity["reserved"][1],16)
-        self.assertGreaterEqual(24-capacity["reserved"][1],capacity["memoryFloorGiB"])
-        result=self.cli("take-build",*self.args("third"),"--wrapper")
-        self.assertNotEqual(result.returncode,0,"replacement memory cannot fund a third declared peak")
-        self.assertIn("memory",result.stderr)
+            mini.atomic(file,{**lease,"dispatch":"bound"})
+        vm=("Mach Virtual Memory Statistics: (page size of 16384 bytes)\n"
+            "Pages free: 0.\nPages inactive: 0.\n"
+            "Pages stored in compressor: 0.\nPages occupied by compressor: 0.\n")
+        helper=dict(native_memory_readings=lambda:(vm,"used = 0K"),
+                    memory_probe=lambda *args,**kwargs:dict(memory="NORMAL"))
+        actual={"available":24}
+        statvfs=os.statvfs
+        def materialize(root):
+            actual["available"]-=8
+            return statvfs(root)
+        def hardware(command,*args,**kwargs):
+            self.assertEqual(command,["/usr/sbin/sysctl","-n","hw.physicalcpu","hw.memsize",
+                                      "kern.memorystatus_vm_pressure_level"])
+            return "14\n68719476736\n1\n"
+        with patch.object(local,"fixture_file",return_value=None),patch.object(local,"helpers",return_value=helper),\
+             patch.object(local.subprocess,"check_output",side_effect=hardware),\
+             patch.object(local.subprocess,"run",return_value=subprocess.CompletedProcess([],0,"37.5\n","")),\
+             patch.object(local.os,"statvfs",side_effect=materialize),patch.object(local.os,"getloadavg",return_value=(0,0,0)):
+            sample=local.measured(self.root,{})
+        self.assertEqual(sample["availableGiB"],24)
+        self.assertEqual(actual["available"],16)
+        self.assertNotIn("leaseUsage",sample)
+        self.assertEqual(local.gate(self.root,local.DEFAULTS,sample,[4,8,16]),"memory")
+        self.assertEqual(local.reservation_totals([lease for _,lease in local.claims(self.root)]),(8,16,32))
+        self.assertEqual(actual["available"]-8-8,0,"admitting B and C peaks would violate the floor")
 
-    def test_descendant_generation_must_prove_every_ancestry_edge(self):
-        lease=dict(pid=100,pid_start="holder",runId="run",generation="generation",dispatch="bound",
-                   start=1,creditAfter=50,workload=dict(pid=102,birth=60))
-        rows="100 1 0 0\n102 100 0 0\n103 102 0 0\n104 103 0 0\n"
-        for changed in (None,110):
-            for during_sample in (False,True):
-                with self.subTest(changed=changed,during_sample=during_sample):
-                    births={102:60,103:70,104:80}
-                    def snapshot(*args,**kwargs):
-                        if not during_sample: births[103]=changed
-                        return rows
-                    def footprint(pid):
-                        if during_sample: births[103]=changed
-                        return 4*2**30 if pid==104 else 0
-                    with patch.object(local,"claims",return_value=[(None,lease)]),patch.object(local,"process_clock",return_value=100),patch.object(local.subprocess,"check_output",side_effect=snapshot),patch.object(local,"process_start",return_value="holder"),patch.object(local,"process_birth",side_effect=births.get),patch.object(local,"physical_footprint",side_effect=footprint):
-                        self.assertEqual(local.usage(self.root,dict(at=100))["run"]["memoryGiB"],0)
-        with patch.object(local,"process_clock",return_value=None),patch.object(local,"claims",return_value=[(None,lease)]),patch.object(local.subprocess,"check_output",return_value=rows),patch.object(local,"process_start",return_value="holder"),patch.object(local,"process_birth",return_value=60),patch.object(local,"physical_footprint",return_value=4*2**30):
-            self.assertEqual(local.usage(self.root,dict(at=100)),{},"unavailable snapshot time gives no credit")
+    def test_mini2_default_heavy_claims_and_exit_restart_keep_full_reservations(self):
+        self.activate("mini2")
+        for name in ("first","second"):
+            result=self.cli("wait-pool","mini2","--by",name,"--project",name,"--task","fixture","--for","fixture",
+                            "--pid",str(os.getpid()),"--profile","heavy","--need","cmake-native")
+            self.assertEqual(result.returncode,0,result.stderr)
+        for available in (24,16,32,24):
+            mini.atomic(self.root/"mini2-metrics.json",{**self.sample,"at":time.time(),"host":mini.HOST,
+                        "cores":10,"totalGiB":32,"availableGiB":available,"arch":"arm64"})
+            self.assertEqual(mini.reserved(self.root),(8,16,32))
+            result=self.cli("wait-pool","mini2","--by","third","--project","third","--task","fixture","--for","fixture",
+                            "--pid",str(os.getpid()),"--profile","heavy","--need","cmake-native")
+            self.assertNotEqual(result.returncode,0)
+            self.assertIn("memory" if available<32 else "load",result.stderr)
 
     def test_legacy_named_waiters_survive_interpreter_and_env_flags(self):
         wrappers=("bash", "bash -e", "/bin/bash -eu", "sh -eux", "/bin/zsh -f",
@@ -171,7 +171,7 @@ class DynamicFixTests(unittest.TestCase):
                     (root/"resources.tsv").write_bytes(self.original)
                     (root/"machine.conf").write_text("# owner settings\n")
                     mini.atomic(root/"mini2-config.json",self.config)
-                    table=f"999991 {wrapper} /legacy/{script} {tail} --pid 999992\n"
+                    table=f"999991 /fixture/non-agent {wrapper} /legacy/{script} {tail} --pid 999992\n"
                     with patch.object(mini.subprocess,"check_output",return_value=table):
                         with self.assertRaisesRegex(ValueError,"999991.*restart"):
                             self.run_migration(kind,root,process_table=None)
@@ -186,15 +186,56 @@ class DynamicFixTests(unittest.TestCase):
                   "bash -c 'res unknown heavy-lane-1'", "bash -ec 'res $ACTION heavy-lane-1'")
         for kind in ("local","mini2"):
             for command in commands:
-                with self.subTest(kind=kind,command=command),patch.object(mini.subprocess,"check_output",return_value="999991 "+command+"\n"):
+                with self.subTest(kind=kind,command=command),patch.object(mini.subprocess,"check_output",return_value="999991 /fixture/non-agent "+command+"\n"):
                     with self.assertRaisesRegex(ValueError,"999991.*restart"): self.run_migration(kind,action="",process_table=None)
         for command in ("bash -eu /legacy/res status local", "env -i /legacy/res pool-capacity mini2",
-                        "/bin/sh -e /legacy/res return heavy-lane-1", "echo unrelated",
-                        "node worker --brief 'local_control.py ~98 and mini2_control.py ~76'",
-                        "node worker --brief local_control.py ~98 and mini2_control.py ~76"):
-            with patch.object(mini.subprocess,"check_output",return_value="999991 "+command+"\n"):
+                        "/bin/sh -e /legacy/res return heavy-lane-1", "echo unrelated"):
+            with patch.object(mini.subprocess,"check_output",return_value="999991 /fixture/non-agent "+command+"\n"):
                 self.assertEqual(mini.allocator_processes("local"),[])
                 self.assertEqual(mini.allocator_processes("mini2"),[])
+
+    def test_wrapped_and_sourced_allocator_waiters_close_both_migrations(self):
+        for kind,resource in (("local","heavy-lane-1"),("mini2","mini2-exec-1")):
+            commands=(f"bash -eu /legacy/wait-wrapper.sh res -- wait {resource} --pid 999992",
+                      f"bash -c '. /legacy/wait-wrapper.sh res -- extra wait {resource}'",
+                      f"zsh -c 'source /legacy/res; wait {resource} --pid 999992'",
+                      f"node --no-warnings /legacy/wait-wrapper.mjs res -- extra wait {resource}",
+                      f"python3 -B -u /legacy/wait-wrapper.py res -- extra wait {resource}",
+                      f"env -i bash -eu /legacy/wait-wrapper.sh res -- extra wait {resource}",
+                      f"/legacy/res -- extra wait {resource} --pid 999992")
+            for index,command in enumerate(commands):
+                root=self.root/f"wrapped-{kind}-{index}"; root.mkdir()
+                (root/"resources.tsv").write_bytes(self.original)
+                (root/"machine.conf").write_text("# owner settings\n")
+                mini.atomic(root/"mini2-config.json",self.config)
+                before={file.name:file.read_bytes() for file in root.iterdir()}
+                with self.subTest(kind=kind,command=command):
+                    with self.assertRaisesRegex(ValueError,"999991.*restart"):
+                        self.run_migration(kind,root,process_table="999991 /fixture/non-agent "+command+"\n")
+                    self.assertEqual({name:(root/name).read_bytes() for name in before},before)
+                    self.assertFalse(list(root.glob("resources.tsv.pre-*-dynamic*")))
+
+    def test_agent_prose_exemption_depends_on_executable_not_args(self):
+        prose="--brief 'local_control.py ~98 and mini2_control.py ~76; res -- wait heavy-lane-1'"
+        exempt=(("/tools/codex","codex "+prose),("/tools/claude","claude "+prose),
+                ("/tools/node","node /tools/codex-worker.mjs "+prose),
+                ("/tools/node","node --no-warnings /tools/route.mjs "+prose),
+                ("/tools/node","node --require /tools/setup.cjs -- /tools/route.mjs "+prose))
+        blocked=(("/bin/bash","codex "+prose),("/bin/bash","claude "+prose),
+                 ("/tools/python3","node /tools/codex-worker.mjs "+prose),
+                 ("/tools/node","node /legacy/wrapper.mjs /tools/route.mjs "+prose),
+                 ("/tools/node","node -e 'res -- wait heavy-lane-1' /tools/route.mjs"),
+                 ("/tools/node","node -pe route.mjs res -- wait heavy-lane-1"),
+                 ("/tools/node","node worker "+prose))
+        for kind in ("local","mini2"):
+            for executable,command in exempt+blocked:
+                with self.subTest(kind=kind,executable=executable,command=command):
+                    table="999991 "+executable+" "+command+"\n"
+                    if (executable,command) in exempt:
+                        self.run_migration(kind,action="",process_table=table)
+                    else:
+                        with self.assertRaisesRegex(ValueError,"999991.*restart"):
+                            self.run_migration(kind,action="",process_table=table)
 
     def test_interrupted_presence_publication_never_changes_untouched_config(self):
         module=migration("local")
@@ -369,18 +410,8 @@ class DynamicFixTests(unittest.TestCase):
         with patch.dict(os.environ,{"RES_BUILD_PROCESS_SOURCE":source}): local.reap(self.root)
         self.assertFalse(file.parent.exists(),"a proven dead standalone lane must release its reservation")
 
-    def test_one_workload_generation_cannot_credit_two_claims(self):
-        self.activate("local")
-        first,_=self.claim("first"); second,_=self.claim("second")
-        child=subprocess.Popen([sys.executable,"-c","import time; time.sleep(10)"])
-        try:
-            result=self.cli("bind",first.parent.name[:-2],"--by","first","--workload-pid",str(child.pid))
-            self.assertEqual(result.returncode,0,result.stderr)
-            result=self.cli("bind",second.parent.name[:-2],"--by","second","--workload-pid",str(child.pid))
-            self.assertNotEqual(result.returncode,0); self.assertIn("overlaps",result.stderr)
-        finally: child.terminate(); child.wait(timeout=5)
 
-    def test_wrapper_binds_a_new_kernel_generation_before_dispatch(self):
+    def test_wrapper_binds_before_dispatch_without_usage_sampling(self):
         self.activate("local")
         env={**self.env,"RES_COMMAND":str(SOURCE/"res/res"),"HEAVY_BUILD_BY":"wrapped","HEAVY_BUILD_PROJECT":"wrapped","HEAVY_BUILD_TASK":"fixture","HEAVY_BUILD_PROFILE":"light","HEAVY_BUILD_TIMEOUT":"0"}
         process=subprocess.Popen(["/bin/bash",str(SOURCE/"heavy-build.sh"),"--",sys.executable,"-c","import time; time.sleep(2)"],env=env,cwd=self.root,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
@@ -392,8 +423,9 @@ class DynamicFixTests(unittest.TestCase):
                 if lease.get("dispatch")=="bound": break
                 time.sleep(0.02)
             self.assertEqual(lease.get("dispatch"),"bound")
-            self.assertGreater(lease["workload"]["birth"],lease["creditAfter"])
-            self.assertNotEqual(lease["workload"]["pid"],lease["pid"])
+            self.assertNotIn("workload",lease)
+            self.assertNotIn("creditAfter",lease)
+            self.assertEqual(lease["weights"],[1,2,2])
             stdout,stderr=process.communicate(timeout=10)
             self.assertEqual(process.returncode,0,stdout+stderr)
             self.assertFalse(list((self.root/"locks").glob("*.d")))

@@ -14,8 +14,7 @@ import sys
 import time
 import uuid
 
-from dynamic_capacity import (headroom, reservation_totals, smaller_bypass, physical_footprint, json_safe,
-                              process_birth, process_clock, numeric_metric, iso_timestamp)
+from dynamic_capacity import headroom, reservation_totals, smaller_bypass, json_safe, numeric_metric, iso_timestamp
 from mini2_control import atomic, guard, read, root_dir, process_start
 
 ID = re.compile(r"(?:heavy-build(?:-[2-9][0-9]*|-[1-9][0-9]+)?|heavy-lane-[1-9][0-9]*)\Z")
@@ -75,61 +74,6 @@ def fixture_file(root,name):
     return file
 
 
-def usage(root,sample):
-    # A generation born after this fence cannot be the process whose ancestry
-    # ps observed. Kernel births and this fence use the same Mach clock.
-    snapshot_at=process_clock()
-    if type(snapshot_at) is not int or snapshot_at<=0: return {}
-    lines=subprocess.check_output(["/bin/ps","-axo","pid=,ppid=,rss=,pcpu="],text=True,timeout=3)
-    rows={int(v[0]):v for line in lines.splitlines() if len(v:=line.split())==4}
-    values={}
-    for _,lease in claims(root):
-        pid=lease.get("pid")
-        workload=lease.get("workload",{})
-        cutoff=lease.get("creditAfter")
-        if (lease.get("dispatch")!="bound" or not workload or type(cutoff) is not int
-            or pid not in rows or not lease.get("runId")): continue
-        if process_start(pid)!=lease.get("pid_start"): continue
-        root_pid=workload.get("pid")
-        if root_pid not in rows or type(workload.get("birth")) is not int or not cutoff<workload["birth"]<=snapshot_at: continue
-        family={root_pid}
-        while True:
-            expanded=family|{p for p,v in rows.items() if int(v[1]) in family}
-            if expanded==family: break
-            family=expanded
-        # Capture a generation for every edge, not just the bound root. An
-        # unproven intermediate process also excludes its entire subtree.
-        births={member:process_birth(member) for member in family}
-        def proven_family(generations):
-            if generations.get(root_pid)!=workload["birth"]: return set()
-            proven={root_pid}
-            while True:
-                expanded=proven|{member for member in family if int(rows[member][1]) in proven
-                    and type(generations.get(member)) is int
-                    and cutoff<generations[member]<=snapshot_at
-                    and generations[member]>=generations[int(rows[member][1])]}
-                if expanded==proven: return proven
-                proven=expanded
-        proven=proven_family(births)
-        if not proven: continue
-        observed={}
-        for member in proven:
-            born=births[member]
-            if process_birth(member)!=born: continue
-            footprint=physical_footprint(member)
-            if process_birth(member)!=born: continue
-            observed[member]=(footprint,float(rows[member][3])/100)
-        surviving=proven_family({member:born for member,born in births.items() if process_birth(member)==born})
-        if not surviving: continue
-        memory=sum(observed[member][0] for member in surviving if member in observed)
-        cpu=sum(observed[member][1] for member in surviving if member in observed)
-        elapsed=max(0,sample["at"]-lease["start"])
-        values[lease["runId"]]=dict(at=sample["at"],memoryGiB=memory/2**30,
-                                  cpuLoad=cpu*(1-math.exp(-elapsed/300)),generation=lease["generation"],
-                                  workloadPid=root_pid,workloadBirth=workload["birth"])
-    return values
-
-
 def measured(root,parsed):
     fixture=fixture_file(root,"RES_TEST_LOCAL_SAMPLE")
     if fixture: return read(fixture,{})
@@ -152,7 +96,6 @@ def measured(root,parsed):
     disk=os.statvfs(root)
     sample=dict(at=at,host=os.uname().nodename,cores=cores,totalGiB=total/2**30,load5=os.getloadavg()[1],
                 availableGiB=available,pressure=pressure,compressedLogicalGiB=counts["Pages stored in compressor"]*size/2**30,freeGiB=disk.f_bavail*disk.f_frsize/2**30,compressorGiB=counts["Pages occupied by compressor"]*size/2**30,swapGiB=float(re.search(r"used = ([\d.]+)K",swap)[1])/1024**2)
-    sample["leaseUsage"]=usage(root,sample)
     return sample
 
 
@@ -185,7 +128,7 @@ def gate(root,cfg,sample,cost):
     if sample["pressure"]!=1: return "pressure"
     if registry(root)[2]!="open": return "policy"
     if not activated(root): return "dynamic-leases-draining"
-    try: amounts=reservation_totals([v for _,v in claims(root)],sample,now)
+    try: amounts=reservation_totals([v for _,v in claims(root)])
     except ValueError: return "legacy-or-incomplete-hold"
     load,floor=limits(cfg,sample)
     return headroom(sample["load5"],sample["availableGiB"],sample["freeGiB"],amounts,cost,load,floor,cfg["LOCAL_MIN_FREE_GIB"])
@@ -300,12 +243,10 @@ def acquire(root,args):
                     owner=build_id or lane_id
                     created=[]
                     try:
-                        if not claims(root): atomic(root/"local-baseline.json",sample)
                         generation=str(uuid.uuid4())
                         lease=dict(by=args.by,project=args.project,task=args.task,purpose=args.purpose,pid=args.pid,pid_start=born,
                                    host=os.uname().nodename,start=time.time(),generation=generation,runId=generation,ownerId=owner,
-                                   creditAfter=process_clock(),
-                                   weights=cost,baseline=read(root/"local-baseline.json",sample),profile=profile,
+                                   weights=cost,profile=profile,
                                    build=build,checkout=checkout,lane=lane_id if build else None,controlled=args.wrapper,dispatch="unbound" if args.wrapper else "manual")
                         for id in ([build_id,lane_id] if build else [lane_id]):
                             hold=root/"locks"/(id+".d"); hold.mkdir(parents=True); created.append(hold)
@@ -356,7 +297,7 @@ def report(root,args):
     if any(numeric_metric(sample.get(name),True) is None for name in ("cores","totalGiB")): raise ValueError("invalid hardware metrics")
     _,cost=cost_for(args,cfg,sample)
     reason=gate(root,cfg,sample,cost)
-    try: amounts=reservation_totals([lease for _,lease in claims(root)],sample,time.time())
+    try: amounts=reservation_totals([lease for _,lease in claims(root)])
     except ValueError: amounts=None
     load,floor=limits(cfg,sample)
     count=0 if reason!="open" or amounts is None else max(0,min(math.floor((load-sample["load5"]-amounts[0])/cost[0]),math.floor((sample["availableGiB"]-floor-amounts[1])/cost[1]),(math.floor((sample["freeGiB"]-cfg["LOCAL_MIN_FREE_GIB"]-amounts[2])/cost[2]) if cost[2] else math.inf)))
@@ -421,31 +362,9 @@ def main():
                 owner=root/"locks"/(lease["ownerId"]+".d")
                 if args.action=="bind":
                     if not lease.get("controlled") or lease.get("dispatch")!="unbound" or process_start(lease["pid"])!=lease["pid_start"]: raise ValueError("dispatch identity mismatch")
-                    workload={}
-                    if args.workload_pid:
-                        rows=subprocess.check_output(["/bin/ps","-axo","pid=,ppid="],text=True,timeout=3)
-                        parents={int(v[0]):int(v[1]) for line in rows.splitlines() if len(v:=line.split())==2}
-                        ancestor=args.workload_pid; seen=set()
-                        while ancestor in parents and ancestor not in seen and ancestor!=lease["pid"]:
-                            seen.add(ancestor); ancestor=parents[ancestor]
-                        if ancestor!=lease["pid"] or args.workload_pid==lease["pid"]: raise ValueError("workload is not a holder descendant")
-                        born=process_birth(args.workload_pid); cutoff=lease.get("creditAfter")
-                        if born is not None and type(cutoff) is int:
-                            if born<=cutoff: raise ValueError("workload predates claim")
-                            def under(child,parent):
-                                seen=set()
-                                while child in parents and child not in seen:
-                                    if child==parent: return True
-                                    seen.add(child); child=parents[child]
-                                return child==parent
-                            for _,other in claims(root):
-                                existing=other.get("workload",{})
-                                if not existing or other.get("generation")==lease["generation"]: continue
-                                if process_birth(existing["pid"])!=existing["birth"]: continue
-                                if under(args.workload_pid,existing["pid"]) or under(existing["pid"],args.workload_pid):
-                                    raise ValueError("workload overlaps another claim")
-                            workload=dict(pid=args.workload_pid,birth=born)
-                    atomic(owner/"lease.json",{**lease,"dispatch":"bound","workload":workload})
+                    # --workload-pid remains accepted for existing wrappers;
+                    # binding controls reclamation, never reservation discounts.
+                    atomic(owner/"lease.json",{**lease,"dispatch":"bound"})
                 elif hold==owner: remove_claim(root,hold,lease)
                 else:
                     canonical=read(owner/"lease.json",{})

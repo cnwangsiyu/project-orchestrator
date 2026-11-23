@@ -6,6 +6,13 @@ Use the committed task worktree or an integrated checkout containing the same
 files. The remote Python helper is sent by the runner on each operation; no
 remote daemon or separate remote helper installation is required.
 
+Claims now retain full declared cores, memory and disk until return or verified
+reclamation; measured materialization never discounts their reservations.
+This intentionally double-counts live use. At idle with sufficient disk, defaults
+allow three full builds on the main mini and two heavy claims on mini2, computed
+in design.md. Lower measured headroom reduces those counts; do not tune weights
+to recover credit-based concurrency. Ownership/cleanup evidence is unchanged.
+
 ## Mini2 install and migration
 
 ```sh
@@ -13,6 +20,8 @@ capacity_code=/Users/bytedance/.claude/orchestrator/_shared/tasks/R-mini2-dynami
 capacity_shared=/Users/bytedance/.claude/orchestrator/_shared
 cd "$capacity_code"
 node scripts/test/mini2-scenarios.mjs
+python3 -B scripts/res/test/test_mini2_control.py
+python3 -B scripts/res/test/test_dynamic_fix.py
 node scripts/res/test/dynamic-leases.mjs
 node scripts/res/test/dynamic-fifo.mjs
 mkdir "$capacity_shared/tasks/R-mini2-dynamic/install-mini2"
@@ -36,6 +45,11 @@ Do not delete their waiter directories or transaction/switch guards to force
 admission. Updated entrypoints hold a shared switch guard through selection and
 their transaction, so new arrivals observe either complete side of migration.
 Local and mini2 use independent switch guards.
+Wrapped/sourced waiters, interpreter flags and `--` separators are blockers too.
+Only ps executable identity exempts known agent runtimes with prose briefs:
+codex, claude, or node running codex-worker.mjs/route.mjs as its actual script.
+A legacy unweighted hold appearing after migration closes dynamic admission
+machine-wide until normal return, including otherwise free named/light IDs.
 The migration keeps existing enabled/policy/caps/maintenance settings. It backs
 up `resources.tsv` and `mini2-config.json` into
 `resources.tsv.pre-mini2-dynamic` and its `.config` sibling (mode 600), then uses
@@ -153,12 +167,13 @@ and limits default to `derived`; they resolve against the current sample.
 Claim CLI overrides: `--profile heavy|medium|light --cores N --mem-gib GiB
 --disk-gib GiB`. Wrapper equivalents: `HEAVY_BUILD_PROFILE`,
 `HEAVY_BUILD_CORES`, `HEAVY_BUILD_MEM_GIB`.
-The updated wrapper binds a newly created FIFO-gated workload child with
-`--workload-pid` before dispatch. Bare `bind` remains compatible but receives
-no credit without workload-generation evidence. Standalone lanes should pass
+The updated wrapper binds a newly created FIFO-gated workload child before
+dispatch. `--workload-pid` and bare `bind` remain compatible; neither samples
+workload ancestry/generations or changes reserved costs. Standalone lanes should pass
 `--checkout <canonical task checkout>` so verified dead work can be reclaimed.
-The unmaterialized part of every declared memory weight remains reserved for
-the claim's lifetime; an early memory observation never declares a peak over.
+Every full declared weight remains reserved for the claim's lifetime, regardless
+of materialization, exit/restart or shared parentage. The earlier PID-reuse credit
+scenarios are structurally impossible because the credit mechanism is removed.
 `heavy-check` preserves its legacy display and adds the dynamic gate diagnostics;
 exit 5 also means that the dynamic budget cannot admit another full build.
 
@@ -224,7 +239,7 @@ preserving mini2's current row/config. Keep compatible code until all dynamic
 local holds return; new dynamic claims close during drain. Either registry
 migration can be rolled back first. Restore the previous code symlink only
 after both migrations are rolled back and all corresponding dynamic holds and
-pending receipts are gone. Publishing `global-rules.md` version 2026-11-22.5 is
+pending receipts are gone. Publishing `global-rules.md` version 2026-11-22.6 is
 an owner step after the corresponding install; the worker edits only its task
 branch's source file, within the existing digest line budget.
 If local rollback is interrupted, rerun the same command. It also handles a

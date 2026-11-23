@@ -21,12 +21,6 @@ import sys
 import time
 import uuid
 
-# The SSH launcher prefixes the shared capacity module. Offline imports use
-# that same module from the checkout, never a second memory-credit formula.
-if "physical_footprint" not in globals():
-    sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"res"))
-    from dynamic_capacity import physical_footprint
-
 GIB = 1024 ** 3
 ROOT = Path.home() / "mac-build-runner"
 SCRATCH = ("work", "cache", "home", "tmp", "DerivedData", "ModuleCache", "bin")
@@ -72,19 +66,14 @@ def metrics():
     disk = os.statvfs(location)
     # Also require df to identify a readable filesystem at the actual runner root.
     command(["/bin/df", "-k", str(location)])
-    usage = {}
     now=time.time()
-    for file in (ROOT/"runs").glob("*/usage.json"):
-        value=json.loads(file.read_text())
-        if 0 <= now-value.get("at",0) < 15:
-            usage[file.parent.name]={name:value[name] for name in ("at","cpuLoad","memoryGiB")}
     return dict(at=now, host=command(["/bin/hostname"]), os=command(["/usr/bin/sw_vers", "-productVersion"]),
                 arch=command(["/usr/bin/uname", "-m"]), cores=int(command(["/usr/sbin/sysctl", "-n", "hw.ncpu"])),
                 load5=os.getloadavg()[1], availableGiB=available/GIB, totalGiB=total/GIB,
                 freeGiB=disk.f_bavail*disk.f_frsize/GIB, pressure=pressure,
                 compressorGiB=pages["Pages occupied by compressor"]*page/GIB,
                 compressedLogicalGiB=pages["Pages stored in compressor"]*page/GIB,
-                swapGiB=float(used)/(1024 if unit == "M" else 1),leaseUsage=usage)
+                swapGiB=float(used)/(1024 if unit == "M" else 1))
 
 
 def facts():
@@ -357,12 +346,6 @@ def execute_owned(data):
                 current_rss=sum(int(fields[1])*1024 for fields in owned)
                 peak_tree_rss = max(peak_tree_rss,current_rss)
                 if time.monotonic()-last_sample >= 2:
-                    # CPU load averages converge over five minutes. Attribute
-                    # only the corresponding elapsed portion of owned CPU use;
-                    # the controller further caps credit by visible host delta.
-                    cpu=sum(float(fields[2])/100 for fields in owned)
-                    memory=sum(physical_footprint(pid) for pid in family)/GIB
-                    atomic(run/"usage.json",dict(at=time.time(),cpuLoad=cpu*(1-math.exp(-(time.monotonic()-start)/300)),memoryGiB=memory))
                     samples.append(metrics()); last_sample=time.monotonic()
             except Exception as error:
                 errors.append(type(error).__name__+": "+str(error))
