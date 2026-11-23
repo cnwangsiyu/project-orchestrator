@@ -224,7 +224,7 @@ preserving mini2's current row/config. Keep compatible code until all dynamic
 local holds return; new dynamic claims close during drain. Either registry
 migration can be rolled back first. Restore the previous code symlink only
 after both migrations are rolled back and all corresponding dynamic holds and
-pending receipts are gone. Publishing `global-rules.md` version 2026-11-22.4 is
+pending receipts are gone. Publishing `global-rules.md` version 2026-11-22.5 is
 an owner step after the corresponding install; the worker edits only its task
 branch's source file, within the existing digest line budget.
 If local rollback is interrupted, rerun the same command. It also handles a
