@@ -14,6 +14,7 @@ import shutil
 import shlex
 import sys
 sys.dont_write_bytecode = True
+import signal
 import subprocess
 import time
 import uuid
@@ -640,8 +641,11 @@ def verify_device_build(summary):
 
 
 def main():
+    if os.environ.get("RES_PLACEMENT_REQUEST"):
+        for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+            signal.signal(sig, lambda n, _: sys.exit(128+n))
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("status", "stage", "configure", "take", "wait", "wait-pool", "return", "retain-remote", "release-dead", "holder", "bind", "slot-host", "pool-capacity", "devbox-registry"))
+    parser.add_argument("action", choices=("status", "stage", "configure", "cancel-unbound", "take", "wait", "wait-pool", "return", "retain-remote", "release-dead", "holder", "bind", "slot-host", "pool-capacity", "devbox-registry"))
     parser.add_argument("resource", nargs="?")
     for arg in ("by", "project", "task", "profile", "need", "qualification", "receipt", "note", "run-id", "generation"):
         parser.add_argument("--"+arg, default="")
@@ -720,6 +724,17 @@ def main():
                     os.replace(staged,file)
             atomic(root/"mini2-config.json", cfg)
             print(json.dumps(cfg))
+    elif args.action == "cancel-unbound":
+        if not args.by or not args.pid: raise ValueError("wrapper identity required")
+        with guard(root):
+            for hold in lease_holds(root):
+                lease=read(hold/"lease.json",{})
+                if (lease.get("dispatch")=="unbound" and lease.get("by")==args.by and
+                    lease.get("pid")==args.pid and lease.get("host")==os.uname().nodename and
+                    lease.get("pid_start")==process_start(args.pid)):
+                    shutil.rmtree(hold)
+                    completion(root,HOST,hold.name[:-2],lease,True)
+                    journal(root,"return",args.by,"never dispatched",slot=hold.name[:-2])
     elif args.action in ("take", "wait", "wait-pool"):
         if args.resource != "mini2" and not LEASE_ID.fullmatch(args.resource or ""): raise ValueError("unknown mini2 resource")
         acquire(root,args)

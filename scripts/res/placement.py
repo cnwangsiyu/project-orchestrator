@@ -42,12 +42,28 @@ def devbox_rows(candidates, rank):
 
 
 def constraint(args, machine, fields):
+    if args.darwin_build and machine.startswith("devbox:"): return "runner"
     if args.pin and args.pin != machine.split(":")[0]: return "pin"
     if args.must_local_reason and machine != "main": return "must-local"
     for name in ("os", "arch"):
         if getattr(args, name) and getattr(args, name) != fields.get(name): return name
     missing = set(filter(None, args.need.split(","))) - set(fields.get("caps", "").split(","))
     if missing: return "missing-cap:" + ",".join(sorted(missing))
+
+
+def queue_blocks(directory, cost, preceding_gate, max_bypass):
+    for file in sorted(directory.glob("*.json")):
+        older = mini.read(file)
+        if older is None: continue
+        try:
+            os.kill(older["controller"], 0)
+            os.kill(older["pid"], 0)
+        except ProcessLookupError:
+            continue
+        if not older.get("cost") or not max_bypass: return True
+        if not local.smaller_bypass(cost, older["cost"], preceding_gate(older),
+                                    older["bypasses"], max_bypass): return True
+    return False
 
 
 def darwin(root, args, machine):
@@ -67,6 +83,11 @@ def darwin(root, args, machine):
             sample = local.measured(root, parsed)
             _, cost = local.cost_for(args, cfg, sample)
             reason = local.gate(root, cfg, sample, cost, details)
+            if reason == "open" and queue_blocks(root/"local-waiters", cost,
+                    lambda old: local.gate(root, cfg, sample, old["cost"]), cfg["LOCAL_MAX_BYPASS"]):
+                reason = "fifo"
+            if reason == "open" and args.lane and (root/"locks"/(args.lane+".d")).exists():
+                reason = "held"
             if reason == "open" and any(v.get("build") and v.get("checkout") in
                     (None, local.checkout_identity(args)) for _, v in local.claims(root)):
                 reason = "checkout-held"
@@ -77,9 +98,11 @@ def darwin(root, args, machine):
                                     args.need.split(",") if args.need else [],
                                     cost=cost if dynamic else None, details=details)
             if reason == "open" and not dynamic and mini.lease_holds(root): reason = "held"
-        # A queued caller can only establish its actual position under the controller guard.
-        queue = root / ("local-waiters" if main else "mini2-waiters")
-        if reason == "open" and any(queue.glob("*.json")): reason = "fifo"
+            if reason == "open" and queue_blocks(root/"mini2-waiters", cost,
+                    lambda old: mini.admission(root, mini.config(root), time.time(), old["cost"][2],
+                                               old["need"].split(",") if old["need"] else [],
+                                               cost=old["cost"]), mini.MAX_BYPASS if dynamic else 0):
+                reason = "fifo"
         charged = details.get("chargedCores")
         spare = details["limits"][0] - charged - cost[0] if charged is not None else None
         return candidate(machine, reason, spare)
@@ -107,9 +130,21 @@ def calculate(root, args):
     macs = [darwin(root, args, host) for host in ("main", "mini2")]
     pool = "devbox-cn-light" if args.profile == "light" else "devbox-cn"
     result = subprocess.run([RES, "place-devboxes", pool, args.need, "--project", args.project,
-                             *costs(args)], capture_output=True, text=True)
-    if result.returncode: raise ValueError(result.stderr.strip() or "devbox placement unavailable")
-    boxes = json.loads(result.stdout)
+                             *costs(args)], capture_output=True, text=True, env=dict(os.environ, RES_DIR=str(root)))
+    if result.returncode:
+        # A bad pool cache must close only that pool. Keep its registered hosts
+        # visible and let the independent Darwin controllers answer normally.
+        boxes = {}
+        for line in (root/"resources.tsv").read_text().splitlines():
+            fields = line.split("\t", 4)
+            if len(fields) != 5 or not fields[0].startswith("devbox-") or fields[1] != "remote": continue
+            match = re.search(r"\b[\w.-]+@([A-Za-z0-9][A-Za-z0-9.-]*)", fields[4])
+            if match:
+                host = match[1].rstrip(".")
+                boxes[host] = dict(candidate("devbox:"+host, "invalid-pool-state"), tags=tags(fields[4]))
+        boxes = list(boxes.values())
+    else:
+        boxes = json.loads(result.stdout)
     for row in boxes:
         reason = constraint(args, row["machine"], row.pop("tags"))
         if reason: row.update(candidate(row["machine"], reason, row["spareCores"]))
@@ -125,6 +160,7 @@ def calculate(root, args):
             cmd = ["wait-pool", pool, *costs(args)]
             others = [v["machine"][7:] for v in boxes if v is not row]
             if others: cmd += ["--hard-exclude-host", ",".join(others)]
+        if machine == "main" and args.lane: cmd += ["--lane", args.lane]
         if args.need: cmd += ["--need", args.need]
         row["argv"] = cmd
     # Merge the ordered devbox stream with the two Darwin hosts; sorting all hosts
@@ -150,6 +186,8 @@ def parser():
     for name in ("need", "os", "arch", "project", "must-local-reason"):
         p.add_argument("--" + name, default="")
     p.add_argument("--profile", choices=("heavy", "medium", "light"), default="heavy")
+    p.add_argument("--darwin-build", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--lane", default="")
     p.add_argument("--pin", choices=("main", "mini2", "devbox"))
     for name in ("cores", "mem-gib", "disk-gib"):
         p.add_argument("--" + name, type=float)
@@ -162,6 +200,20 @@ def parser():
     p.add_argument("--json", action="store_true")
     p.set_defaults(checkout="", action="wait-build", resource="")
     return p
+
+
+def local_hint(root, need, profile, project, cores=None, mem_gib=None, disk_gib=None):
+    try:
+        args = parser().parse_args(["place", "--need", need, "--profile", profile, "--project", project])
+        args.cores, args.mem_gib, args.disk_gib = cores, mem_gib, disk_gib
+        rows = calculate(root, args)
+        row = next((r for r in rows if r["machine"] != "main" and r["reason"] == "open"), None)
+        if row:
+            cmd = shlex.join(["res", *row["argv"], "--project", project])
+            print("main mini busy; "+row["machine"]+" can take this now: "+cmd+
+                  ' --by "$holder" --task "$task" --for "$purpose" --pid "$$" --timeout 60', file=sys.stderr)
+    except (ValueError, OSError, subprocess.SubprocessError):
+        pass
 
 
 def reconsider():
@@ -198,10 +250,11 @@ def claim(root, args):
                "--by", args.by, "--project", args.project, "--task", args.task,
                "--for", args.purpose, "--pid", str(args.pid)]
         if machine == "main" and args.wrapper: cmd.append("--wrapper")
-        env = dict(os.environ, RES_PLACEMENT_MACHINE=machine, RES_PLACEMENT_REQUEST=json.dumps(vars(args)))
-        with subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True, env=env) as proc:
+        env = dict(os.environ, RES_DIR=str(root), RES_PLACEMENT_MACHINE=machine, RES_PLACEMENT_REQUEST=json.dumps(vars(args)))
+        with subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True, env=env, start_new_session=True) as proc:
             def cancel(sig, frame):
-                proc.send_signal(sig)
+                try: os.killpg(proc.pid, sig)
+                except ProcessLookupError: pass
             handlers = {sig:signal.signal(sig,cancel) for sig in (signal.SIGINT,signal.SIGTERM,signal.SIGHUP)}
             try: output, _ = proc.communicate()
             finally:
@@ -228,6 +281,8 @@ def claim(root, args):
 
 def main():
     args = parser().parse_args()
+    if args.lane and (args.pin != "main" or not re.fullmatch(r"heavy-lane-[1-9][0-9]*",args.lane)):
+        raise ValueError("--lane requires --pin main and a heavy-lane ID")
     if args.need and not re.fullmatch(r"[\w.:-]+(?:,[\w.:-]+)*", args.need): raise ValueError("invalid --need")
     for value, minimum in ((args.cores, .25), (args.mem_gib, .25), (args.disk_gib, 0)):
         if value is not None and not (minimum <= value <= 65536): raise ValueError("invalid cost")
@@ -239,11 +294,10 @@ def main():
     chosen = next((r["machine"] for r in rows if r["eligible"]), None)
     if args.json: print(json.dumps(dict(chosen=chosen, candidates=rows)))
     else: print("chosen=" + (chosen or "none") + " " + " | ".join(
-        f"{r['machine']}={r['reason']} spareCores={r['spareCores']} wait={r['waitSeconds'] if r['waitSeconds'] is not None else 'unknown'} [{r['command']}]" for r in rows))
+        f"{r['machine']}={r['reason']} eligible={str(r['eligible']).lower()} spareCores={r['spareCores']} wait={r['waitSeconds'] if r['waitSeconds'] is not None else 'unknown'} [{r['command']}]" for r in rows))
 
 
 if __name__ == "__main__":
     try: main()
     except (ValueError, OSError) as error:
         sys.exit("res place: " + str(error))
-

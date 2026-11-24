@@ -184,7 +184,7 @@ try {
   const hash = value => createHash('sha256').update(legacyWire(value)).digest('hex');
   const nonRun = Object.fromEntries(Object.entries(remoteScripts).filter(([operation]) => !['run', 'submodule', 'checkout', 'cleanup', 'reconnect', 'input-exists', 'probe'].includes(operation)));
   assert.equal(hash(JSON.stringify(nonRun)), '16260909d3a7ddde7ed6e8c3004784500ca251241e7526e9363d14e12a2f8dc9', 'unrelated remote scripts retain land-7 bytes except dynamic lease syntax');
-  assert.equal(hash(remoteScripts.probe), 'ca34517c88496df9072231a4fc5a3ebc45faec0ac396dc670d2030c6504a6fbf', 'hardware probe snapshot measures the registered root when configured');
+  assert.equal(hash(remoteScripts.probe), '266f43d35379eb247cf9c12b961594fd7a9b69818ebcbb6d664a8b37f9c878a6', 'hardware probe measures the registered root and reports OS/architecture for placement');
   assert.equal(hash(remoteScripts['input-exists']), 'c7833da1018f3e20a66668d29ee5566123efc51e3fec9a3419a1fc8951bdfccf', 'input creation diagnostic uses validated paths and stat-only existence checks');
   assert.equal(hash(remoteScripts.checkout), '162239ccf56fc01ed8ccb1239f1821525146932fa4f2744e800779c2aba9130e', 'checkout snapshot includes pinned donor completeness check');
   assert.equal(hash(remoteScripts.submodule), 'c6143ab3755aeb71b0f56d09d3e465d2e291b9f55491809330c53941b3c3d6a0', 'submodule snapshot includes pinned donor completeness and offline legacy-clone pin import');

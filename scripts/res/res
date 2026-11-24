@@ -2358,7 +2358,7 @@ acquire_attempt() {
 cmd_acquire() {
   local mode="$1" blocking="$2"; shift 2
   if [ "${1:-}" = --help ]; then build_usage; return 0; fi
-  local timeout=0 timeout_seen= pin= args=() ALLOW_PID=1 CHECKOUT=
+  local timeout=0 timeout_seen= pin= hint_sent= hint_need= args=() ALLOW_PID=1 CHECKOUT=
   local duration deadline remaining delay=1 rc reading candidate missing3=0 ACQUIRE_PID_EXPLICIT can_attempt
   local BUILD_WAITER_DIR= BUILD_WAITER_STAGING= BUILD_WAITER_HOST= BUILD_WAITER_SINCE= BUILD_WAITER_START=
   local BUILD_WAITER_ORDER= BUILD_WAITER_GATE_STREAK=0 lane3_state=CLOSED block_reason LOAD_HEAD_SINCE=0
@@ -2380,6 +2380,7 @@ cmd_acquire() {
         [ "$mode" = build ] && [ $# -ge 2 ] || die "--checkout is a build option and needs a value"
         [ -z "$CHECKOUT" ] || die "duplicate --checkout"
         CHECKOUT="$2"; shift 2 ;;
+      --need) hint_need="$2"; shift 2 ;;
       --by|--project|--for|--task|--until|--pid)
         [ $# -ge 2 ] || die "$1 needs a value"
         args+=("$1" "$2"); shift 2 ;;
@@ -2510,6 +2511,10 @@ cmd_acquire() {
       echo "res: timed out waiting for '$mode' after $timeout minutes" >&2; return 2
     fi
     [ "$delay" -le "$remaining" ] || delay="$remaining"
+    if [ -z "$hint_sent" ]; then
+      hint_sent=1
+      "$RES_SELF_COMMAND" place-hint "$hint_need" "$([ "$mode" = build ] && echo heavy || echo medium)" "$PROJECT" || true
+    fi
     echo "res: waiting for '$mode'; retry in ${delay}s" >&2
     sleep "$delay"
     delay=$((delay * 2)); [ "$delay" -le 15 ] || delay=15
@@ -2692,6 +2697,7 @@ def bypass_count(value):
         with open(bypass_file(value)) as stream: return int(json.load(stream))
     except FileNotFoundError: return int(value.get('bypasses','0'))
 def remove_waiter():
+    if action == 'place-devboxes': return
     if waiter:
         value=info(waiter) or (info(episode) if episode else {})
         if value:
@@ -3248,7 +3254,8 @@ try:
             if measured:
                 charged, available, _ = basis(root,box,measured,(reserved_cpu,reserved_mem,0),now,reservation_leases(recent))
             result[box] = dict(cores=cores, coresSource=source, probeAgeSec=age,
-                               probeStale=not fresh, metricsFresh=bool(measured), heldSlots=held[box],
+                               probeStale=not fresh, platformOS=probe.get('os') if fresh else None,
+                               platformArch=probe.get('arch') if fresh else None, metricsFresh=bool(measured), heldSlots=held[box],
                                score=held[box] / (cores or 1), nextScore=(held[box] + 1) / (cores or 1),
                                spareCores=cores - (charged if box in host_rows else max(measured['load5'], reserved_cpu)) - task_cpu if measured else None,
                                spareMemGiB=available - task_mem if measured else None,
@@ -3480,7 +3487,7 @@ try:
     caller_slots, caller_boxes = csv(excluded_slots), csv(excluded_hosts)
     hard_skip, hard_boxes = csv(hard_slots), csv(hard_hosts)
     excluded, excluded_boxes = caller_slots | hard_skip, caller_boxes | hard_boxes
-    if any(not re.fullmatch(r'[A-Za-z0-9_.-]+', cap) for cap in required): raise ValueError('invalid --need capability list')
+    if any(not re.fullmatch(r'[A-Za-z0-9_.:-]+' if action=='place-devboxes' else r'[A-Za-z0-9_.-]+', cap) for cap in required): raise ValueError('invalid --need capability list')
     def eligible(id, req=None, skip=None, boxes=None):
         req = required if req is None else req
         skip = excluded if skip is None else skip
@@ -3496,6 +3503,9 @@ try:
             hard_boxes.update(box for box in hosts if box != selected[7:])
             excluded_boxes |= hard_boxes
         compatible = [id for id in rows if pool_member(id, request) and eligible(id, skip=hard_skip, boxes=hard_boxes)]
+        if not compatible and os.environ.get('RES_PLACEMENT_REQUEST'):
+            from placement import reconsider
+            reconsider()
         if not compatible: raise ValueError("no open remote member of pool '%s' satisfies --need '%s'" % (request, need or '(none)'))
         queue = os.path.join(root, 'pool-waiters', request)
         os.makedirs(queue, exist_ok=True); waiter = os.path.join(queue, 'waiter.' + controller_key)
@@ -3586,7 +3596,8 @@ try:
         if request.endswith('-light') or re.fullmatch(r'.+-[0-9]+', request):
             pool = request if request.endswith('-light') else request.rsplit('-', 1)[0]
             queue = os.path.join(root, 'pool-waiters', pool)
-    elif action != 'place-devboxes': raise ValueError('invalid pool action')
+    elif action == 'place-devboxes': queue = os.path.join(root, 'pool-waiters', request)
+    else: raise ValueError('invalid pool action')
     def quarantined(id, state):
         value = state.get(remote[id][1], {})
         return value.get('manual', False) or value.get('quarantinedUntil', 0) > time.time()
@@ -3603,7 +3614,7 @@ try:
                     value = info(directory)
                     try: expired = time.time() - int(value.get('heartbeat', '0')) > int(stale)
                     except ValueError: expired = False
-                    if expired and value.get('host') == host and not alive(value.get('controller_pid')):
+                    if action != 'place-devboxes' and expired and value.get('host') == host and not alive(value.get('controller_pid')):
                         try: shutil.rmtree(directory)
                         except FileNotFoundError: pass
                     continue
@@ -3613,7 +3624,7 @@ try:
                 except ValueError: fresh = False
                 live = value.get('host') != host or alive(value.get('pid'))
                 if not current_waiter(directory, value) and (not fresh or not live):
-                    if info(directory) == value:
+                    if action != 'place-devboxes' and info(directory) == value:
                         try: shutil.rmtree(directory)
                         except FileNotFoundError: pass
                     continue
@@ -3681,7 +3692,7 @@ try:
         global bypass_pending
         bypass_pending = []
         heads = waiting()
-        if action != 'wait': return not heads
+        if action not in ('wait','place-devboxes'): return not heads
         if not heads or current_waiter(heads[0][1], heads[0][2]): return True
         if id in dynamic_ids:
             box = remote[id][1]; settings = dynamic.get(box)
@@ -3770,6 +3781,8 @@ try:
         kind = slot_type(id)
         observed = {}
         reason, detail, entries, cost = gate(box, ('LIGHT' if request == 'devbox-cn-light' else 'HEAVY') if id in dynamic_ids else kind, dynamic.get(box), current, floating(id), override and box not in host_rows, id=id, claimed=claimed, observed=observed)
+        if action == 'wait' and os.environ.get('RES_PLACEMENT_MACHINE','').startswith('devbox:'):
+            if capacity({box})[box]['probeStale']: reason = 'facts-stale'
         if reason.startswith('static-') and static_full(box, kind, id if claimed else None):
             reason = 'static-cap'
         if not diagnostic and (not gate_open(reason) or final):
@@ -3796,11 +3809,16 @@ try:
             elif os.path.lexists(pending_file(id)): reason = 'cleanup-pending'
             else:
                 reason = evaluate(id, box, diagnostic=True)[0]
-                if gate_open(reason): reason = 'open'
+                if gate_open(reason): reason = 'open' if fifo_allows(id,state) else 'fifo'
             tier = preference_tier(id)
             spare = scores[box]['spareCores']
             if reason == 'open' and spare is not None: best_spare[tier] = max(best_spare.get(tier, 0), spare)
-            candidates.append((id, box, reason, spare, rows[id][3]))
+            platform = ' '.join(name+'='+value for name,value in
+                                (('os',scores[box]['platformOS']),('arch',scores[box]['platformArch']))
+                                if isinstance(value,str) and re.fullmatch(r'[a-zA-Z0-9_-]+',value))
+            if spare is not None and box in host_rows:
+                spare += scores[box]['cores'] * (dynamic[box]['LOAD_PER_CORE'] - 1)
+            candidates.append((id, box, reason, spare, platform+' '+rows[id][3]))
         print(json.dumps(devbox_rows(candidates, rank)))
         committed = True; sys.exit(0)
     def is_head():
@@ -4457,6 +4475,7 @@ cmd_log() { [ -f "$LOG" ] && tail -n "${1:-20}" "$LOG" || true; }
 
 case "${1:-}" in
   status) shift; cmd_status "$@"; if [ -f "$RES_DIR/mini2-config.json" ]; then mini2_controller status; fi ;;
+  place-hint) shift; python3 -B -c 'import sys; sys.path.insert(0,sys.argv[1]); from placement import local_hint, mini; local_hint(mini.root_dir(), *sys.argv[2:])' "$(dirname "$(realpath "$RES_SELF_COMMAND")")" "$@" ;;
   place|claim-any) exec python3 -B "$(dirname "$(realpath "$RES_SELF_COMMAND")")/placement.py" "$@" ;;
   place-devboxes)
     shift; request="$1"; POOL_NEED="$2"; shift 2

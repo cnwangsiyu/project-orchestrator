@@ -39,7 +39,11 @@ def main():
     if args.action == "apply":
         target = migrated(current)
         if target == current: return
-        with backup.open("xb") as stream: stream.write(current)
+        if backup.exists():
+            if backup.is_symlink() or backup.read_bytes() != current:
+                p.error("existing backup does not match the current registry")
+        else:
+            with backup.open("xb") as stream: stream.write(current)
     else:
         target = backup.read_bytes()
         if migrated(target) != current: p.error("registry changed since migration")

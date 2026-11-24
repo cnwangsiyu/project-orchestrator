@@ -68,7 +68,7 @@ export function args(argv) {
     const arg = argv[i];
     if (arg === '--') { opts.command = argv.slice(i+1).join(' '); break; }
     if (arg === '--help') return { help: true };
-    if (!['--repo', '--ref', '--project', '--task', '--out', '--by', '--qualification', '--allowlist', '--artifact', '--timeout', '--claim-timeout', '--disk-gib', '--profile', '--watch-pid', '--need', '--cores', '--mem-gib'].includes(arg)) throw Error('unknown option ' + arg);
+    if (!['--repo', '--ref', '--project', '--task', '--out', '--by', '--qualification', '--allowlist', '--artifact', '--parent-lease', '--timeout', '--claim-timeout', '--disk-gib', '--profile', '--watch-pid', '--need', '--cores', '--mem-gib'].includes(arg)) throw Error('unknown option ' + arg);
     const value = argv[++i]; if (!value) throw Error('missing value ' + arg);
     if (arg === '--artifact') opts.artifacts.push(value);
     else opts[arg.slice(2).replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = value;
@@ -138,7 +138,13 @@ export async function main(argv) {
     evidence.uploads = Object.fromEntries(Object.entries(uploads).map(([name,file]) => [name, { bytes: fs.statSync(file).size, sha256: digest(file) }]));
     write(path.join(opts.out, 'upload-list.json'), evidence.uploads);
     await refresh();
-    lease = JSON.parse(await ctl(['wait-pool', 'mini2', '--by', opts.by, '--project', opts.project, '--task', opts.task,
+    if (opts.parentLease) {
+      const held = JSON.parse(await ctl(['holder', opts.parentLease]));
+      if (held.pid !== process.ppid || held.by !== opts.by || held.project !== opts.project ||
+          held.task !== opts.task || held.dispatch !== 'unbound' || held.slot !== opts.parentLease ||
+          held.weights[2] !== +opts.diskGiB) throw Error('placed lease ownership or cost mismatch');
+      lease = held;
+    } else lease = JSON.parse(await ctl(['wait-pool', 'mini2', '--by', opts.by, '--project', opts.project, '--task', opts.task,
       '--for', 'unsigned Darwin build', '--pid', String(process.pid), ...(opts.profile?['--profile', opts.profile]:[]), '--disk-gib', String(opts.diskGiB),
       '--timeout',String(opts.claimTimeout),
       '--need', opts.need, ...['cores','memGib'].flatMap(name=>opts[name]===undefined?[]:[name==='cores'?'--cores':'--mem-gib',String(opts[name])]), ...(opts.qualification ? ['--qualification', opts.qualification] : [])])).lease;

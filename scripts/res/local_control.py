@@ -213,6 +213,7 @@ def acquire(root,args):
     checkout=checkout_identity(args)
     queue=root/"local-waiters"; queue.mkdir(parents=True,exist_ok=True)
     ticket=None
+    hinted=False
     deadline=time.monotonic()+args.timeout*60
     try:
         while True:
@@ -230,6 +231,9 @@ def acquire(root,args):
                     reason="memory-guard-high" if str(error)=="memory-guard-high" else "invalid-metrics"
                     decision(root,os.uname().nodename,args.project,args.task,args.profile or "unknown",None,
                              reason,False,evidence(shared(root,os.uname().nodename,time.time(),darwin=True)))
+                    if os.environ.get("RES_PLACEMENT_REQUEST"):
+                        from placement import reconsider
+                        reconsider()
                     raise
                 # Validate hardware before deriving costs; stale evidence always
                 # closes admission even when a fixture is otherwise well formed.
@@ -241,6 +245,12 @@ def acquire(root,args):
                 reap(root)
                 details=evidence(sample)
                 reason=gate(root,cfg,sample,cost,details)
+                if context := os.environ.get("RES_PLACEMENT_REQUEST"):
+                    from placement import constraint, tags
+                    fields=tags(registry(root)[4])
+                    fields.setdefault("os",sys.platform)
+                    fields.setdefault("arch",os.uname().machine)
+                    reason=constraint(argparse.Namespace(**json.loads(context)),"main",fields) or reason
                 own_ticket=read(ticket,{})
                 atomic(ticket,{**own_ticket,"cost":cost})
                 for file in queue.glob("*.json"):
@@ -298,6 +308,10 @@ def acquire(root,args):
                 if time.monotonic()>=deadline:
                     ticket.unlink(missing_ok=True)
                     raise ValueError("local admission closed: "+reason)
+            if not hinted and args.action in ("wait-lane","wait-build"):
+                hinted=True
+                from placement import local_hint
+                local_hint(root,args.need,profile,args.project,args.cores,args.mem_gib,args.disk_gib)
             if os.environ.get("RES_PLACEMENT_REQUEST"):
                 from placement import reconsider
                 reconsider()

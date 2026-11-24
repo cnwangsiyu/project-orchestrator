@@ -834,7 +834,7 @@ if root is None: raise RuntimeError('no writable workspace root')
 v=os.statvfs(root)
 mount=subprocess.check_output(['df','-P',root],text=True).splitlines()[-1].split()[-1]
 mem=next(int(x.split()[1])/1048576 for x in pathlib.Path('/proc/meminfo').read_text().splitlines() if x.startswith('MemTotal:'))
-print(json.dumps({'root':root,'user':d['user'],'fs':mount,'freeGiB':v.f_bavail*v.f_frsize/1073741824,'totalGiB':v.f_blocks*v.f_frsize/1073741824,'cores':os.cpu_count(),'memGiB':mem,'probedAt':datetime.datetime.now(datetime.timezone.utc).isoformat()}))
+print(json.dumps({'root':root,'user':d['user'],'os':os.uname().sysname.lower(),'arch':os.uname().machine,'fs':mount,'freeGiB':v.f_bavail*v.f_frsize/1073741824,'totalGiB':v.f_blocks*v.f_frsize/1073741824,'cores':os.cpu_count(),'memGiB':mem,'probedAt':datetime.datetime.now(datetime.timezone.utc).isoformat()}))
 `,
   store: pythonHeader + `import subprocess, fcntl, re
 root=pathlib.Path(d['root']); key=d['key']; parent=root/'repos'/d['project']

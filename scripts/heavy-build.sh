@@ -37,11 +37,31 @@ fi
 if [ -n "$watch_pid" ] && ! kill -0 "$watch_pid" 2>/dev/null; then
   echo "heavy-build: watched worker $watch_pid is gone" >&2; exit 143
 fi
+placement="${HEAVY_BUILD_PLACE:-local}"
+remote_form=0
+case "$placement" in
+  local) ;;
+  auto)
+    if [ -n "${HEAVY_BUILD_MINI2_COMMAND:-}${HEAVY_BUILD_MINI2_REPO:-}${HEAVY_BUILD_MINI2_REF:-}${HEAVY_BUILD_MINI2_ALLOWLIST:-}${HEAVY_BUILD_MINI2_ARTIFACT:-}${HEAVY_BUILD_MINI2_OUT:-}" ]; then
+      : "${HEAVY_BUILD_MINI2_COMMAND:?unsigned remote command required}" "${HEAVY_BUILD_MINI2_REPO:?repo required}" "${HEAVY_BUILD_MINI2_REF:?ref required}"
+      : "${HEAVY_BUILD_MINI2_ALLOWLIST:?allowlist required}" "${HEAVY_BUILD_MINI2_ARTIFACT:?artifact required}" "${HEAVY_BUILD_MINI2_OUT:?output directory required}"
+      case "${HEAVY_BUILD_NEED:-}" in
+        cmake-native|xcode-ios-sim-compile|xcode-ios-device-compile-unsigned) ;;
+        *) echo 'heavy-build: remote form requires one qualified unsigned compile capability' >&2; exit 2 ;;
+      esac
+      remote_form=1
+    fi ;;
+  *) echo 'heavy-build: HEAVY_BUILD_PLACE must be local or auto' >&2; exit 2 ;;
+esac
 child='' watcher='' spawning=0 acquiring=0 acquiring_id='' output='' modern=1 build_held=0 lane_held=0 lane='' cancel_status=0 build_finished=0
-dynamic_bind='' dispatch_fifo=''
+dynamic_bind='' dispatch_fifo='' remote_running=0
 stop_group() {
   [ -n "$1" ] || return 0
   kill -TERM -- "-$1" 2>/dev/null || true
+  if [ "$remote_running" = 1 ] && [ "$1" = "$child" ]; then
+    wait "$1" 2>/dev/null || true
+    return 0
+  fi
   # Give an interrupted controller time to publish/return its owned directories.
   if [ "$acquiring" -eq 1 ] && [ "$1" = "$child" ]; then sleep 2; else sleep 0.2; fi
   kill -KILL -- "-$1" 2>/dev/null || true
@@ -65,6 +85,9 @@ cleanup() {
     fi
   fi
   # Return by ownership even if interrupted before acquisition reports success.
+  if [ "$placement" = auto ] && [ "$remote_form" = 1 ]; then
+    "$res" mini2 cancel-unbound --by "$by" --pid "$$" || status=1
+  fi
   if [ "$modern" -eq 1 ]; then
     "$res" return-build --by "$by" --pid "$$" || status=1
   elif [ "$acquiring" -eq 1 ] || [ "$build_held" -eq 1 ] || [ "$lane_held" -eq 1 ]; then
@@ -161,15 +184,43 @@ legacy_pair() {
 }
 if [ "$modern" -eq 1 ]; then
   args=(wait-build --timeout "$timeout")
-  if [[ "$capability" = *dynamic-local* ]]; then
+  if [ "$placement" = auto ]; then
+    args=(claim-any --timeout "$timeout" --wrapper --profile "${HEAVY_BUILD_PROFILE:-heavy}")
+    if [ "$remote_form" = 0 ] || [ -n "$preferred_lane" ]; then
+      args+=(--pin main)
+    else
+      args+=(--darwin-build --os darwin --disk-gib "${HEAVY_BUILD_DISK_GIB:-16}")
+    fi
+  elif [[ "$capability" = *dynamic-local* ]]; then
     args+=(--wrapper)
-    [ -z "${HEAVY_BUILD_CORES:-}" ] || args+=(--cores "$HEAVY_BUILD_CORES")
-    [ -z "${HEAVY_BUILD_MEM_GIB:-}" ] || args+=(--mem-gib "$HEAVY_BUILD_MEM_GIB")
     [ -z "${HEAVY_BUILD_PROFILE:-}" ] || args+=(--profile "$HEAVY_BUILD_PROFILE")
   fi
+  if [ "$placement" = auto ] || [[ "$capability" = *dynamic-local* ]]; then
+    [ -z "${HEAVY_BUILD_CORES:-}" ] || args+=(--cores "$HEAVY_BUILD_CORES")
+    [ -z "${HEAVY_BUILD_MEM_GIB:-}" ] || args+=(--mem-gib "$HEAVY_BUILD_MEM_GIB")
+  fi
+  [ -z "${HEAVY_BUILD_NEED:-}" ] || args+=(--need "$HEAVY_BUILD_NEED")
   [ -z "$preferred_lane" ] || args+=(--lane "$preferred_lane")
   acquiring=1
   run_wait "${args[@]}" || exit $?
+  remote_lease=$(sed -n 's/^machine=mini2 lease=\(mini2-exec-[1-9][0-9]*\)$/\1/p' "$output")
+  if [ -n "$remote_lease" ]; then
+    [ "$remote_form" = 1 ] || exit 1
+    acquiring=0
+    remote_running=1
+    spawning=1
+    node "$script_dir/mini2-run.mjs" --parent-lease "$remote_lease" --by "$by" --project "$project" --task "$task" \
+      --repo "$HEAVY_BUILD_MINI2_REPO" --ref "$HEAVY_BUILD_MINI2_REF" --allowlist "$HEAVY_BUILD_MINI2_ALLOWLIST" \
+      --out "$HEAVY_BUILD_MINI2_OUT" --artifact "$HEAVY_BUILD_MINI2_ARTIFACT" --need "$HEAVY_BUILD_NEED" \
+      --disk-gib "${HEAVY_BUILD_DISK_GIB:-16}" --timeout "${HEAVY_BUILD_MINI2_TIMEOUT:-10}" -- "$HEAVY_BUILD_MINI2_COMMAND" &
+    child=$!; spawning=0
+    wait "$child"; status=$?; child=''
+    if [ -n "$build_log" ] && [ -f "$HEAVY_BUILD_MINI2_OUT/build.log" ] && ! [ "$HEAVY_BUILD_MINI2_OUT/build.log" -ef "$build_log" ]; then
+      cp "$HEAVY_BUILD_MINI2_OUT/build.log" "$build_log" || exit 1
+    fi
+    build_finished=1
+    exit "$status"
+  fi
   lane=$(sed -n 's/^build-lane=\(heavy-lane-[1-9][0-9]*\)$/\1/p' "$output")
   [[ "$lane" =~ ^heavy-lane-[1-9][0-9]*$ ]] || { echo 'heavy-build: missing acquired lane result' >&2; exit 1; }
   if [[ "$capability" = *dynamic-local* ]]; then
@@ -179,6 +230,7 @@ if [ "$modern" -eq 1 ]; then
   fi
   acquiring=0
 else
+  [ "$placement" = local ] || { echo 'heavy-build: claim-any controller required' >&2; exit 2; }
   legacy_pair || exit $?
 fi
 if [ -n "$dynamic_bind" ]; then

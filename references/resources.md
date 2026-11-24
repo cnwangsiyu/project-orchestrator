@@ -85,6 +85,32 @@ readings per observed waiter PID (or an observer with no own locks) with the rec
 caller lane counts are not proof of a rollout mismatch. Verified mismatches go to its owner, never a gate bypass.
 Preserve the exact controller verdict at rounded bounds when contexts match; alternate-context readings are estimates.
 
+## Automatic unsigned build placement
+
+`scripts/heavy-build.sh` defaults to `HEAVY_BUILD_PLACE=local`. Set
+`HEAVY_BUILD_PLACE=auto` to let the wrapper claim capacity. Without a remote
+form it claims main and executes its command there. A pinned build lane also
+requires main. A local waiter can pass `--need` (the wrapper forwards
+`HEAVY_BUILD_NEED`) so its one-time alternative-host hint reflects the work.
+
+To allow mini2, provide **all** of the following in addition to the ordinary
+holder, project, task and local command. Keep the command after `--` valid for
+main. The wrapper executes exactly one of the two commands.
+
+| Variable | Required value for the mini2 form |
+| --- | --- |
+| `HEAVY_BUILD_NEED` | One of `cmake-native`, `xcode-ios-sim-compile`, `xcode-ios-device-compile-unsigned` |
+| `HEAVY_BUILD_MINI2_REPO`, `HEAVY_BUILD_MINI2_REF` | Local repository path and explicit commit/ref, or `worktree` for tracked changes |
+| `HEAVY_BUILD_MINI2_ALLOWLIST` | Path to a JSON array of exact source paths covering tracked inputs and history. Inputs must be regular, non-sensitive files. Submodules and untracked inputs are unsupported. |
+| `HEAVY_BUILD_MINI2_COMMAND` | Equivalent unsigned shell command runnable inside the isolated checkout. Invoke Xcode through the runner's PATH wrapper. |
+| `HEAVY_BUILD_MINI2_ARTIFACT`, `HEAVY_BUILD_MINI2_OUT` | Relative artifact file path and fresh local output directory. The verified file returns to `OUT/artifacts/<relative path>`. |
+
+The remote build time limit is `HEAVY_BUILD_MINI2_TIMEOUT` minutes (default 10,
+maximum 120). The two-host claim reserves `HEAVY_BUILD_DISK_GIB` (default
+16 GiB). The mini2 runner binds the wrapper's existing lease, snapshots the
+specified inputs, and verifies the returned artifact hash before receipt-matched
+cleanup. Keep signing, provisioning and attached-device steps on main.
+
 ## Heavy Lock Contract
 
 Follow the [maintained res contract](res-contract.md)

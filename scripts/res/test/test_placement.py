@@ -92,6 +92,65 @@ class PlacementTests(unittest.TestCase):
         self.assertEqual(choices[0]["candidates"][1]["reason"],"link-stale-or-down")
         self.assertFalse(list((self.root/"local-waiters").glob("*.json")))
 
+    def test_hint_for_lane_and_build(self):
+        cap = self.configure()
+        for action in ("wait-build","wait-lane"):
+            result = self.cli(action,"--by","hint","--project","p","--task","t","--for","fixture",
+                              "--pid",str(os.getpid()),"--need",cap,"--timeout","0.001")
+            self.assertNotEqual(result.returncode,0)
+            self.assertEqual(result.stderr.count("main mini busy; mini2 can take this now:"),1,result.stderr)
+
+    def test_auto_wrapper_dispatch(self):
+        import subprocess
+        cap = self.configure()
+        env = dict(self.env, HEAVY_BUILD_PLACE="auto", RES_COMMAND=str(self.res),
+                   HEAVY_BUILD_BY="wrapper",HEAVY_BUILD_PROJECT="fixture",HEAVY_BUILD_TASK="placement",
+                   HEAVY_BUILD_TIMEOUT="0", HEAVY_BUILD_NEED=cap)
+        wrapper = self.res.parent.parent / "heavy-build.sh"
+        cmd = [str(wrapper),"--","touch",str(self.root/"local-built")]
+        result = subprocess.run(cmd,env=env,capture_output=True,text=True,timeout=10)
+        self.assertNotEqual(result.returncode,0)  # no remote form, busy main
+        self.assertFalse((self.root/"local-built").exists())
+        node = self.root/"node"
+        node.write_text("#!/bin/sh\nset -eu\n[ \"$2\" = --parent-lease ]\n[ -d \"$RES_DIR/locks/$3.d\" ]\nprintf '%s\\n' \"$@\" > \"$RES_DIR/runner-args\"\n")
+        node.chmod(0o755)
+        env.update(PATH=str(self.root)+":"+env["PATH"],HEAVY_BUILD_MINI2_REPO=str(self.root),
+                   HEAVY_BUILD_MINI2_REF="HEAD",HEAVY_BUILD_MINI2_COMMAND="make fixture",
+                   HEAVY_BUILD_MINI2_ALLOWLIST="inputs.json",HEAVY_BUILD_MINI2_ARTIFACT="fixture.a",
+                   HEAVY_BUILD_MINI2_OUT=str(self.root/"out"))
+        result = subprocess.run(cmd,env=env,capture_output=True,text=True,timeout=10)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn("machine=mini2 lease=mini2-exec-1",result.stdout)
+        self.assertIn("--artifact\nfixture.a\n",(self.root/"runner-args").read_text())
+        self.assertFalse((self.root/"locks/mini2-exec-1.d").exists())
+        self.assertFalse((self.root/"local-built").exists())
+        self.write("sample.json",dict(self.sample,at=time.time(),load5=0))
+        result = subprocess.run(cmd,env=env,capture_output=True,text=True,timeout=10)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertTrue((self.root/"local-built").exists())
+        self.assertFalse((self.root/"locks/heavy-build.d").exists())
+
+    def test_registry_capabilities_in_memory(self):
+        import runpy
+        migrate = runpy.run_path(str(self.source/"place-registry.py"))["migrated"]
+        original = b"heavy-build\tslot\topen\t-\tdynamic-local caps=custom\r\nother row\r\n"
+        migrated = migrate(original)
+        self.assertIn(b"device:iphone8",migrated)
+        self.assertIn(b"custom",migrated)
+        self.assertTrue(migrated.endswith(b"\r\nother row\r\n"))
+        self.assertEqual(migrated,migrate(migrated))
+
+    def test_independent_controller_failure(self):
+        cap = self.configure()
+        with (self.root/"resources.tsv").open("a") as f:
+            f.write("devbox-host-fault\tremote\topen\t-\tworker@10.1.0.2 caps=node\n")
+        (self.root/"box-health.json").write_text("invalid")
+        result = self.place("--need",cap)
+        self.assertEqual(result["chosen"],"mini2")
+        unavailable = self.place("--need","node")
+        self.assertIsNone(unavailable["chosen"])
+        self.assertIn(("devbox:10.1.0.2","invalid-pool-state"), [(r["machine"],r["reason"]) for r in unavailable["candidates"]])
+
     def test_main_headroom_preference(self):
         cap = self.configure()
         for load, chosen in [(3, "mini2"), (0, "main")]:
