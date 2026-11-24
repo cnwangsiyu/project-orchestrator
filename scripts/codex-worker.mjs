@@ -85,8 +85,9 @@ import { redactWorkerTurn, checkThreadIdle } from './lib/worker-redaction.mjs';
 import { maskPasswordStyleValues } from './lib/nightly-audit.mjs';
 import { canonicalPathOptions, canonicalBriefPrompt } from './lib/launch-paths.mjs';
 import { requestBoardRefresh } from './lib/board-refresh.mjs';
+import { processAlive, sameProcessIdentity } from './lib/process-identity.mjs';
 import { lifecycle, resolveOwner, validOwner, inbox, readEvents, readAck, eventLine, watch, signalExit, appendEvent, setEventObserver,
-  saveWorkerContext, workerContext, answerQuestion, followerAlive, retiredWorkers, workerKey, retireWorker, validWorkerIdentifier, workerRunStates } from './lib/worker-events.mjs';
+  saveWorkerContext, workerContext, answerQuestion, followerAlive, retiredWorkers, workerKey, retireWorker, validWorkerIdentifier, workerRunStates, processWorker } from './lib/worker-events.mjs';
 import { runningWorker, trackedWorkers } from './lib/worker-running.mjs';
 import { pollWorkerQuota } from './lib/worker-quota-refresh.mjs';
 import { completionEvidence, classifyCompletion, completionLeases, continuationCommand, TRUNCATED_EXIT, isCompletedFinalItem } from './lib/worker-completion.mjs';
@@ -350,9 +351,39 @@ if (cmd === 'rules-push') {
     const candidates = opts.run !== undefined ? [...workerRunStates(events.filter(row => row.owner === owner)).values()].map(state => state.row) : trackedWorkers(events, owner);
     const row = candidates.find(row => row.account === (account ?? 'main') && (opts.run !== undefined ? row.runId === opts.run : row.thread === opts.thread));
     if (!row) die('no tracked worker for this launching owner/account/thread');
-    if (opts.run !== undefined && validWorkerIdentifier(row.thread)) die('retire --run is only for workers without a valid thread; use --thread');
+    if (opts.run !== undefined && !processWorker(row)) die('retire --run is only for tracked exec followers; use --thread');
     const context = validWorkerIdentifier(row.thread) ? workerContext(row.account, row.thread, true) : null;
     if (context?.owner && context.owner !== owner) die('retire belongs to a different launching owner');
+    if (opts.run !== undefined) {
+      const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+      const waitGone = async (identity, timeout) => {
+        const until = Date.now() + timeout;
+        while (sameProcessIdentity(identity)) {
+          if (Date.now() >= until) return false;
+          await pause(50);
+        }
+        return true;
+      };
+      const target = row.pidIdentity;
+      if (processAlive(row.pid) && !sameProcessIdentity(target)) die('retire refused: tracked PID identity no longer belongs to this run');
+      const child = row.childPgid === row.childPid ? row.childIdentity : null;
+      if (child && processAlive(child.pid) && !sameProcessIdentity(child)) die('retire refused: tracked child identity no longer belongs to this run');
+      const actions = [];
+      const signal = (identity, group, kind) => {
+        if (!identity || !sameProcessIdentity(identity)) return;
+        try { process.kill(group ? -identity.pid : identity.pid, kind); actions.push(`${kind.slice(3)} pid=${identity.pid} name=${identity.name}`); } catch {}
+      };
+      signal(child, true, 'SIGTERM'); signal(target, false, 'SIGTERM');
+      await Promise.all([waitGone(target, 750), waitGone(child, 750)]);
+      signal(child, true, 'SIGKILL'); signal(target, false, 'SIGKILL');
+      const gone = await Promise.all([waitGone(target, 1000), waitGone(child, 1000)]);
+      if (gone.includes(false)) die('retire refused: tracked process did not exit after bounded cleanup');
+      const latest = [...workerRunStates(readEvents()).values()].map(state => state.row)
+        .find(current => current.owner === owner && current.account === row.account && current.runId === row.runId);
+      if (latest?.event === 'running' && !latest.settled) retireWorker(latest, opts.reason ?? 'finished exec follower terminated');
+      console.log(`retired account=${row.account} run=${row.runId}; ${actions.length ? actions.join('; ') : 'tracked process already exited'}; tracking cleared`);
+      process.exit(0);
+    }
     const state = validWorkerIdentifier(row.thread) ? await runningWorker(row, { claudeWorkers: activeClaudeWorkers })
       : { running: followerAlive(row) ? null : false, reason: 'invalid thread; follower exited' };
     if (state.running === true) die(`retire refused: a turn is running (${state.turn ?? 'follower'})`);

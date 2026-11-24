@@ -10,16 +10,19 @@ import { canonicalPathOptions, canonicalLaunchArgv } from './lib/launch-paths.mj
 import { requestBoardRefresh } from './lib/board-refresh.mjs';
 import { projectForOwner } from './lib/task-board.mjs';
 import { loadDigest, workerInstructions } from './lib/global-rules.mjs';
+import { processIdentity } from './lib/process-identity.mjs';
 
 const args = process.argv.slice(2), sep = args.indexOf('--'), opts = {};
 for (let i = 0; i < (sep < 0 ? args.length : sep); i += 2) opts[args[i].replace(/^--/, '')] = args[i + 1];
 canonicalPathOptions(opts);
 setEventObserver(requestBoardRefresh);
-const tracker = lifecycle({ owner: opts.owner, name: opts.name ?? 'exec', account: opts.account ?? 'main', model: opts.model ?? null,
+let tracker;
+const trackerMetadata = { owner: opts.owner, name: opts.name ?? 'exec', account: opts.account ?? 'main', model: opts.model ?? null,
   effort: opts.effort ?? null, followerCommand: 'exec',
   project: opts.project ?? (process.env.ORCHESTRATOR_PROJECT || projectForOwner(resolveOwner(opts.owner))),
   task: opts.task ?? opts.name ?? 'exec', taskDir: opts['task-dir'] ? path.resolve(opts['task-dir']) : null,
-  outFile: opts.out ? path.resolve(opts.out) : null, logFile: opts.log ? path.resolve(opts.log) : null });
+  outFile: opts.out ? path.resolve(opts.out) : null, logFile: opts.log ? path.resolve(opts.log) : null };
+const ensureTracker = (extra = {}) => tracker ??= lifecycle({ ...trackerMetadata, ...extra });
 if (sep < 0 || !args[sep + 1]) { console.error('run-tracked: expected options -- command [args...]'); process.exit(2); }
 const outStamp = () => { try { const s = fs.statSync(opts.out, { bigint: true }); return `${s.ino}:${s.mtimeNs}:${s.size}`; } catch { return null; } };
 const beforeOut = outStamp();
@@ -45,6 +48,7 @@ const signalOwned = (signal) => {
 };
 const finish = async (code) => {
   if (ending) return;
+  ensureTracker();
   ending = true;
   clearTimeout(watchdog);
   clearTimeout(drainTimer);
@@ -101,13 +105,16 @@ try {
   const cliPaths = /^(codex|traex|traecli)$/.test(path.basename(command))
     || /codex-worker\.mjs$/.test(commandArgs[0] ?? '');
   let env = process.env;
+  let rulesVersion = null;
   if (opts['inject-rules'] === 'on') {
     const digest = loadDigest();
-    tracker.update({ rulesVersion: digest.version });
+    rulesVersion = digest.version;
     env = { ...env, ORCHESTRATOR_WORKER_RULES_CONFIG: `developer_instructions=${JSON.stringify(workerInstructions(digest))}` };
   }
   child = spawn(command, cliPaths ? canonicalLaunchArgv(commandArgs, opts.cwd) : commandArgs, { cwd: opts.cwd, detached: process.platform !== 'win32',
     env, stdio: ['ignore', 'pipe', 'pipe'] });
+  ensureTracker({ ...(rulesVersion ? { rulesVersion } : {}), childPid: child.pid, childIdentity: processIdentity(child.pid),
+    childPgid: process.platform === 'win32' ? null : child.pid });
   child.stdout.on('data',chunk=>{
     if(logFd!==undefined) fs.writeSync(logFd,chunk); else process.stdout.write(chunk);
     stdoutPending=(stdoutPending+chunk.toString()).slice(-65536);
@@ -123,4 +130,4 @@ try {
   });
   child.on('error', (error) => { console.error(`run-tracked: ${error.message}`); finish(1); });
   child.on('close', (code, signal) => finish(code ?? signalExit(signal)));
-} catch (error) { console.error(`run-tracked: ${error.message}`); finish(1); }
+} catch (error) { ensureTracker(); console.error(`run-tracked: ${error.message}`); finish(1); }

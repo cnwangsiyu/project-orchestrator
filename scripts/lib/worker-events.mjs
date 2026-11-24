@@ -5,6 +5,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { StringDecoder } from 'node:string_decoder';
 import { rulesShared } from './global-rules.mjs';
 import { writeJson } from './shared-file.mjs';
+import { processIdentity } from './process-identity.mjs';
 
 export const RETENTION_MS = 7 * 86400000;
 export const ROTATE_BYTES = 1024 * 1024;
@@ -741,7 +742,7 @@ export const watch = async (owner, print = (rows) => new Promise((resolve, rejec
 export const lifecycle = (metadata) => {
   const launcher = launcherIdentity(metadata.owner), owner = resolveOwner(metadata.owner);
   const state = { name: null, thread: null, account: 'main', model: null, exit: null, outFile: null, logFile: null, finalLine: '',
-    ...metadata, launcher, owner, runId: randomUUID(), pid: process.pid, parentPid: process.ppid };
+    ...metadata, launcher, owner, runId: randomUUID(), pid: process.pid, pidIdentity: processIdentity(process.pid), parentPid: process.ppid };
   let ended = false, result = null, mayRun = false;
   const emit = (event, extra = {}) => { try { return appendEvent({ ...state, event, ...extra }); }
     catch (e) { process.stderr.write(`worker-events: NOT RECORDED: ${e.message}\n`); return null; } };
