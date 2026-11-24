@@ -52,7 +52,7 @@ if (chosenOn === 'devbox') {
   const remoteArgs = ['scripts/test/run-all.mjs', '--on', 'local', '--no-claim', '--files', remoteSuites.map(suite => suite.name).join(',')];
   if (listFailing) remoteArgs.push('--list-failing');
   if (stopOnFailure) remoteArgs.push('--stop-on-failure');
-  const command = `SUITE_REMOTE_CHILD=1 SUITE_LOCATION=devbox SUITE_RESULT_STDOUT=1 SUITE_NO_CLAIM_REASON=${quote('devbox lease owns remote resources')} ${[process.execPath, ...remoteArgs].map(quote).join(' ')}`;
+  const command = `SUITE_REMOTE_CHILD=1 SUITE_LOCATION=devbox SUITE_RESULT_STDOUT=1 SUITE_NO_CLAIM_REASON=${quote('devbox lease owns remote resources')} ${['node', ...remoteArgs].map(quote).join(' ')}`;
   const out = path.join(tmp, 'devbox-run');
   const devbox = process.env.SUITE_DEVBOX_RUN_BIN || path.join(root, 'scripts/devbox-run.mjs');
   const run = spawnSync(process.execPath, [devbox, '--project', 'project-orchestrator', '--task', 'full-suite', '--repo', root, '--ref', 'HEAD', '--pool', 'devbox-cn', '--need', 'node', '--cores', '1', '--mem-gib', '2', '--disk-gib', '2', '--out', out, '--timeout', '120', '--queue-timeout', '30', '--', command], { cwd: root, env: process.env, encoding: 'utf8', timeout: 3 * 60 * 60 * 1000, maxBuffer: 32 * 2 ** 20 });
