@@ -230,7 +230,7 @@ class LocalCapacityTests(unittest.TestCase):
 
     def test_code_backup_bundles_helpers_for_runnable_rollback(self):
         backup=self.root/"code-backup"; backup.mkdir()
-        for name in ("res","dynamic_capacity.py","mini2_control.py","mini2_link.py","mini2_monitor.py","local_control.py"):
+        for name in ("res","host_samples.py","dynamic_capacity.py","mini2_control.py","mini2_link.py","mini2_monitor.py","local_control.py"):
             shutil.copy2(self.res.parent/name,backup/name)
         result=subprocess.run([str(backup/"res"),"pool-capacity","local"],env=self.env,capture_output=True,text=True,timeout=10)
         self.assertEqual(result.returncode,0,result.stderr)

@@ -15,6 +15,7 @@ sys.dont_write_bytecode = True
 import time
 import uuid
 
+from host_samples import shared
 from dynamic_capacity import headroom, reservation_totals, smaller_bypass, json_safe, numeric_metric, iso_timestamp
 from mini2_control import atomic, guard, read, root_dir, process_start
 
@@ -77,6 +78,13 @@ def fixture_file(root,name):
 
 def measured(root,parsed):
     fixture=fixture_file(root,"RES_TEST_LOCAL_SAMPLE")
+    cached = shared(root, os.uname().nodename, time.time(), darwin=True)
+    if cached:
+        # Reuse the local guard (including swapfile count and sustained pressure)
+        # with the same page totals as the original vm_stat/sysctl observation.
+        memory = helpers()["memory_probe"](str(root), parsed, sampled=cached, prefer_native=True)
+        if memory["memory"] == "HIGH": raise ValueError("memory-guard-high")
+        return cached
     if fixture: return read(fixture,{})
     helper=helpers()
     at=time.time()
@@ -120,7 +128,7 @@ def cost_for(args,cfg,sample):
 
 def gate(root,cfg,sample,cost):
     at=sample.get("at"); now=time.time()
-    if numeric_metric(at) is None or not 0<=now-at<cfg["LOCAL_METRICS_TTL_SECONDS"]: return "stale-or-missing-metrics"
+    if numeric_metric(at) is None or not 0<=now-at<sample.get("sampleTTL",cfg["LOCAL_METRICS_TTL_SECONDS"]): return "stale-or-missing-metrics"
     if sample.get("host")!=os.uname().nodename: return "foreign-metrics"
     for name in ("cores","totalGiB","load5","availableGiB","pressure","freeGiB","swapGiB","compressorGiB"):
         value=sample.get(name)

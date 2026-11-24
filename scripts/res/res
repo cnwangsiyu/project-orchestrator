@@ -185,6 +185,10 @@ def parse_config(content):
             if name == 'LOCAL_MAX_BYPASS' and float(value)>32 or name == 'LOCAL_METRICS_TTL_SECONDS' and float(value)>30:
                 raise ValueError('local capacity setting exceeds bound ' + name)
             local[name]=int(value) if integer else float(value); continue
+        if name in ('SHARED_SAMPLES','SAMPLE_TTL'):
+            if not value.isdecimal() or int(value) > (1 if name == 'SHARED_SAMPLES' else 86400):
+                raise ValueError('invalid sampling setting ' + name)
+            continue
         if name == 'MEM_GUARD_SAMPLES':
             if not value.startswith(('/', '~/')) or len(value) > 4096 or not value.endswith('.tsv') or any(ord(c) < 32 for c in value):
                 raise ValueError('invalid memory sample path')
@@ -359,7 +363,7 @@ def native_memory_readings():
     used = int.from_bytes(swap.raw[16:24], __import__('sys').byteorder)
     return pages, 'used = %.8fK' % (used / 1024)
 
-def memory_probe(root, config, platform=None, readings=None, prefer_native=False):
+def memory_probe(root, config, platform=None, readings=None, prefer_native=False, sampled=None):
     heavy = config['heavy']
     state = dict(memory='UNKNOWN', guard='unavailable', compressor_gib=None, swap_used_gib=None,
                  swap_growth_gib=None, free_inactive_gib=None, swapfiles=None, samples=0,
@@ -377,25 +381,28 @@ def memory_probe(root, config, platform=None, readings=None, prefer_native=False
         if platform != 'Darwin':
             state.update(memory='UNSUPPORTED', guard='unsupported')
             raise ValueError('unsupported platform')
-        if readings is None and prefer_native and os.environ.get('RES_TEST_METRICS') != '1' and not os.environ.get('RES_TEST_SWAPFILE_DIR'):
-            try: readings = native_memory_readings()
-            except (OSError, ValueError, AttributeError): pass  # CLI fallback preserves the no-op warning contract.
-        if readings is None:
-            if os.environ.get('RES_TEST_METRICS') == '1':
-                if os.path.realpath(root) == live: raise ValueError('test metrics require scratch state')
-                readings = (os.environ.get('RES_TEST_VM_STAT', ''), os.environ.get('RES_TEST_SWAPUSAGE', ''))
-            else: readings = (output(['vm_stat']), output(['sysctl', '-n', 'vm.swapusage']))
-        pages, swap = readings
-        def page_count(label):
-            found = re.search(r'^' + re.escape(label) + r':\s*([0-9]+)\.?\s*$', pages, re.M)
-            if not found: raise ValueError('unreadable page metric')
-            return int(found[1])
-        size = re.search(r'page size of ([0-9]+) bytes', pages)
-        used = re.search(r'\bused\s*=\s*([0-9]+(?:\.[0-9]+)?)([KMGT])\b', swap)
-        if not size or int(size[1]) <= 0 or not used: raise ValueError('unreadable memory metrics')
-        compressor = page_count('Pages occupied by compressor') * int(size[1]) / 2**30
-        free = (page_count('Pages free') + page_count('Pages inactive')) * int(size[1]) / 2**30
-        swap_used = float(used[1]) * 1024**('KMGT'.index(used[2]) + 1) / 2**30
+        if sampled is not None:
+            compressor, free, swap_used = (sampled[k] for k in ('compressorGiB','freeInactiveGiB','swapGiB'))
+        else:
+            if readings is None and prefer_native and os.environ.get('RES_TEST_METRICS') != '1' and not os.environ.get('RES_TEST_SWAPFILE_DIR'):
+                try: readings = native_memory_readings()
+                except (OSError, ValueError, AttributeError): pass  # CLI fallback preserves the no-op warning contract.
+            if readings is None:
+                if os.environ.get('RES_TEST_METRICS') == '1':
+                    if os.path.realpath(root) == live: raise ValueError('test metrics require scratch state')
+                    readings = (os.environ.get('RES_TEST_VM_STAT', ''), os.environ.get('RES_TEST_SWAPUSAGE', ''))
+                else: readings = (output(['vm_stat']), output(['sysctl', '-n', 'vm.swapusage']))
+            pages, swap = readings
+            def page_count(label):
+                found = re.search(r'^' + re.escape(label) + r':\s*([0-9]+)\.?\s*$', pages, re.M)
+                if not found: raise ValueError('unreadable page metric')
+                return int(found[1])
+            size = re.search(r'page size of ([0-9]+) bytes', pages)
+            used = re.search(r'\bused\s*=\s*([0-9]+(?:\.[0-9]+)?)([KMGT])\b', swap)
+            if not size or int(size[1]) <= 0 or not used: raise ValueError('unreadable memory metrics')
+            compressor = page_count('Pages occupied by compressor') * int(size[1]) / 2**30
+            free = (page_count('Pages free') + page_count('Pages inactive')) * int(size[1]) / 2**30
+            swap_used = float(used[1]) * 1024**('KMGT'.index(used[2]) + 1) / 2**30
         if not math.isfinite(compressor + free + swap_used): raise ValueError('invalid memory metrics')
         # Current macOS keeps swapfiles on the VM volume; /private/var/vm is the legacy location (empty today).
         swap_dir = next((d for d in ('/System/Volumes/VM', '/private/var/vm') if os.path.isdir(d)), '/private/var/vm')
@@ -2611,6 +2618,7 @@ pool_controller() {
 import datetime, fcntl, hashlib, json, math, os, re, shutil, signal, socket, stat, subprocess, sys, tempfile, time
 from contextlib import contextmanager
 sys.path.insert(0, os.path.dirname(os.path.realpath(os.environ['RES_SELF_COMMAND'])))
+from host_samples import shared
 from dynamic_capacity import headroom, json_safe, numeric_metric, cached_timestamp
 root, action, request, timeout, delay, by, project, task, purpose, pid, until, force, need, prefer, preferred_slot, excluded_slots, excluded_hosts, stale, controller, generation, exclude_reason, hard_slots, hard_hosts, disk_gib, disk_gib_file, placement_file, maintenance, extra_disk_gib, legacy_config_path, warm_family, claim_cores, claim_mem = sys.argv[1:]
 build_namespace = {'__name__': 'res_build_processes'}
@@ -2977,6 +2985,10 @@ try:
             if state != updated: machine_helpers['atomic_json'](file, updated)
             return closed
     def sample(box, current):
+        observed = shared(root, box, current)
+        if observed:
+            os.makedirs(metrics_dir, exist_ok=True)
+            return observed
         try:
             value = json.loads(regular_text(os.path.join(metrics_dir, box + '.json')))
             if (isinstance(value, dict) and all(number(value.get(key)) for key in ('at', 'cores', 'load5', 'memAvailableGiB', 'freeGiB'))

@@ -13,7 +13,31 @@ sampler = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(sampler)
 
 
+from host_samples import shared
+
+
 class SamplerTests(unittest.TestCase):
+    def test_selection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            now = 1000
+            row = dict(schema=1,host="box",ok=True,at=900,cores=8,totalGiB=16,memAvailableGiB=8,
+                       freeGiB=128,load1=1,load5=1,load15=1)
+            def publish(**fields):
+                sampler.atomic(root/"host-samples/latest.json",dict(schema=1,hosts={"box":dict(row,**fields)}))
+            publish()
+            self.assertFalse(shared(root,"box",now))
+            (root/"machine.conf").write_text("# defaults\n")
+            self.assertEqual(shared(root,"box",now)["sampleSource"],"shared")
+            for fields in (dict(at=1001),dict(at=820),dict(schema=True),dict(host="foreign"),dict(ok=False),
+                           dict(cores=True),dict(load5=-1),dict(io_some_avg60=101),dict(memAvailableGiB=17)):
+                publish(**fields)
+                self.assertFalse(shared(root,"box",now),fields)
+            publish()
+            for setting in ("SAMPLE_TTL=100","SHARED_SAMPLES=0"):
+                (root/"machine.conf").write_text(setting+"\n")
+                self.assertFalse(shared(root,"box",now))
+
     def test_history_failure_backoff_and_pruning(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

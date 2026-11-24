@@ -44,10 +44,14 @@ export async function remote(operation, data, options = {}) {
   return options.outputFile ? result : result.stdout;
 }
 
+import { sharedHostSamples } from './lib/shared-host-samples.mjs';
+
 export async function refresh({ observeLink=true }={}) {
-  const result = JSON.parse(await remote('metrics', {}));
+  const host = 'Bytedances-Mac-mini.local';
+  const cached = sharedHostSamples(shared(), 'darwin', [host])[host];
+  const result = cached || JSON.parse(await remote('metrics', {}));
   if (result.host !== 'Bytedances-Mac-mini.local' || result.arch !== 'arm64') throw Error('mini2 identity mismatch');
-  write(path.join(shared(), 'mini2-metrics.json'), result);
+  if (!cached) write(path.join(shared(), 'mini2-metrics.json'), result);
   // Facts require actual tool execution on the same strictly verified cable path.
   const facts = JSON.parse(await remote('facts', {}));
   write(path.join(shared(), 'mini2-facts.json'), facts);

@@ -17,6 +17,7 @@ sys.dont_write_bytecode = True
 import subprocess
 import time
 import uuid
+from host_samples import shared
 from dynamic_capacity import headroom, reservation_totals, smaller_bypass, json_safe, numeric_metric, iso_timestamp
 from xml.parsers.expat import ExpatError
 
@@ -342,14 +343,18 @@ def registry_slots(root):
     return [resolve(root,id) for id in sorted(ids)]
 
 
+def metrics(root, now):
+    return shared(root, HOST, now, darwin=True) or read(root/"mini2-metrics.json", {})
+
+
 def admission(root, cfg, now, disk=0, need=(), qualification=False, cost=None):
     if not cfg["enabled"] and not qualification: return "disabled"
     if cfg["maintenance"]: return "maintenance"
     link = read(root/"mini2-link.json", {})
     if link.get("maintenance", True): return "link-maintenance"
     if not fresh(link.get("at"), now, 300) or link.get("link") != "UP": return "link-stale-or-down"
-    sample = read(root/"mini2-metrics.json", {})
-    if not fresh(sample.get("at"), now, 300) or sample.get("host") != HOST: return "metrics-stale-or-foreign"
+    sample = metrics(root, now)
+    if not fresh(sample.get("at"), now, sample.get("sampleTTL",300)) or sample.get("host") != HOST: return "metrics-stale-or-foreign"
     if any(numeric_metric(sample.get(name)) is None for name in ("load5","availableGiB","freeGiB","pressure","swapGiB","compressorGiB")):
         return "invalid-metrics"
     for key in ("load5", "availableGiB", "freeGiB", "pressure", "swapGiB", "compressorGiB"):
@@ -395,6 +400,7 @@ def status(root, now=None):
         try: return read(root/name, {})
         except (ValueError, OSError): return {}
     link, metrics, facts = (safe("mini2-"+name+".json") for name in ("link", "metrics", "facts"))
+    metrics = shared(root,HOST,now,darwin=True) or metrics
     held = len(lease_holds(root))
     takes = 0
     try:
@@ -541,7 +547,7 @@ def acquire(root, args):
                 if reason == "open":
                     hold.mkdir(parents=True)
                     try:
-                        sample=read(root/"mini2-metrics.json",{})
+                        sample=metrics(root,time.time())
                         values=dict(by=args.by, project=args.project, task=args.task, pid=args.pid,pid_start=pid_start,
                                     host=os.uname().nodename, start=int(time.time()), profile=args.profile or ("light" if not args.need or set(args.need.split(",")) <= {"cmake-native"} else "heavy"),
                                     slot=resource,dynamic=dynamic,weights=cost,dispatch="unbound" if getattr(args,"resource",None)=="mini2" else "legacy",

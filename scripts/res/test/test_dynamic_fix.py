@@ -81,6 +81,23 @@ class DynamicFixTests(unittest.TestCase):
         with table,patch.object(sys,"argv",[str(SOURCE/(kind+"-host-migrate.py")),"--registry",str(root/"resources.tsv"),*([action] if action else [])]),contextlib.redirect_stdout(io.StringIO()):
             module.main()
 
+    def test_shared_metrics_select_local_and_mini2(self):
+        self.activate("local")
+        self.activate("mini2")
+        hosts = {host: dict(self.sample, host=host, at=time.time()-30, ok=True, schema=1, arch="arm64",
+                            load1=1,load5=99,load15=1,memAvailableGiB=32,freeInactiveGiB=20,compressedLogicalGiB=0)
+                 for host in (mini.HOST,os.uname().nodename)}
+        mini.atomic(self.root/"host-samples/latest.json",dict(schema=1,hosts=hosts))
+        for pool,reason in (("local-light","load"),("mini2","load5")):
+            result = self.cli("pool-capacity",pool)
+            self.assertEqual(result.returncode,0,result.stderr)
+            self.assertEqual(next(iter(json.loads(result.stdout).values()))["gate"],reason)
+        with (self.root/"machine.conf").open("a") as stream:
+            stream.write("SHARED_SAMPLES=0\n")
+        for pool in ("local-light","mini2"):
+            result = self.cli("pool-capacity",pool)
+            self.assertEqual(next(iter(json.loads(result.stdout).values()))["gate"],"headroom",result.stderr)
+
     def test_unbound_memory_credit_cannot_break_the_reserve_floor(self):
         self.activate("local")
         leases=[self.claim(name)[1] for name in ("first","second")]

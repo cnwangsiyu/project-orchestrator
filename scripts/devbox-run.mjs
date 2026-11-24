@@ -14,6 +14,7 @@ import { maskLogText } from './lib/nightly-audit.mjs';
 import { manifest, duration, inputKey, indexFile, readIndex, inputSettings, placement, warmCost, warmInput, median, observedCost, fingerprint, inputPython, seedPython } from './lib/devbox-inputs.mjs';
 import { transferFindings } from './lib/devbox-transfer-check.mjs';
 import { fileDigest, artifactName, readArtifactManifest, retainedArtifactPython, artifactRangePython, readArchive, artifactTimeoutMs } from './lib/devbox-artifacts.mjs';
+import { sharedHostSamples } from './lib/shared-host-samples.mjs';
 import { controlOptions, muxFailure, muxRetrySafe } from './lib/devbox-ssh.mjs';
 import { retentionPython } from './lib/devbox-retention.mjs';
 import { cleanupEvidencePython } from './lib/devbox-cleanup-pending.mjs';
@@ -1946,6 +1947,7 @@ async function refreshHostMetrics(rows, state, { force = false, timeout = 15000 
   if (state.cancel || timeout <= 0) return;
   const enabled = dynamicMetricHosts();
   const hosts = new Map(rows.filter(row => row.dynamic || enabled.has(row.host)).map(row => [row.host, row]));
+  const samples = sharedHostSamples(sharedDir(), "linux", [...hosts.keys()]);
   await Promise.all([...hosts].map(async ([host, row]) => {
     const file = path.join(sharedDir(), 'devbox-metrics', `${host}.json`);
     const requestedAt = Date.now() / 1000;
@@ -1959,7 +1961,7 @@ async function refreshHostMetrics(rows, state, { force = false, timeout = 15000 
       } catch { return false; }
     };
     try {
-      if (fresh()) {
+      if (samples[host] || fresh()) {
         // Fresh admission metrics don't renew the independent hardware probe.
         if (row.dynamic) await hostRoot(row, state, { deadline: requestedAt * 1000 + timeout });
         return;
