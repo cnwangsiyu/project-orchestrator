@@ -1,7 +1,7 @@
 import {mandatoryReview} from '../review-policy-data.mjs';
 import { policyModel, matchesModel, isAstra, newestRelease, VERSION, EFFORTS, array, company, companyDevice, known, modelId, familyOf, isReview, adversarial, result, reason, fingerprint, stable } from './common.mjs';
 import { candidateParts, enumerateCandidates } from './candidates.mjs';
-import { modelPreference, policyEffort, claudeBrowserPolicy, companyDowngrade, normalTierOverflow, tierDecision } from './policy.mjs';
+import { modelPreference, policyEffort, claudeBrowserPolicy, tierApprovalRef, tierDecision } from './policy.mjs';
 import { estimateCandidate } from './estimate.mjs';
 import { standingPersonalFallback, hardPersonalXhighFallback } from './personal-fallback.mjs';
 import { standingPersonalPriority, personalPriorityGuard, exclusiveCodexTask } from './personal-priority.mjs';
@@ -250,18 +250,16 @@ export function pDevice(t, s, c) {
 export function pScopedApproval(t, s, c, context = {}) {
   const a = candidateParts(s, c).account;
   const personalPriority = standingPersonalPriority(t, s, c, a);
-  const tierMain = a.id === 'main' && a.kind === 'chatgpt' && policyModel(c.modelId) === 'sol'
-    && c.effort !== 'max' && normalTierOverflow(t);
-  let personalFallback = personalPriority;
-  if (!personalFallback && a.kind === 'chatgpt' && (tierMain || s.personalFallback?.enabled)) {
-    const companyRows = context.companyRows ?? enumerateCandidates(t, s).candidates.filter(p => company(candidateParts(s, p).account))
-      .map(candidate => ({ candidate, predicates: evaluateCandidate(t, s, candidate, context), estimate: estimateCandidate(t, s, candidate) }));
-    if (s.personalFallback?.enabled) personalFallback = standingPersonalFallback(t, s, c, companyRows);
-    const mainStart = !personalFallback && tierMain ? estimateCandidate(t, s, c) : null;
-    if (mainStart && !mainStart.stalled && mainStart.startDelayMin === 0 && companyRows.some(row => companyDowngrade(row.candidate.modelId) && row.predicates.every(p => p.ok))) {
-      personalFallback = { approvalRef: 'standing:normal-tier-main-2026-11-24', quotaApproved: true,
-        text: `Personal main approved for a proper-tier route ahead of a company downgrade under the user decision of ${tierDecision}.` };
-    }
+  const tierMain = context.tierDowngrade && a.id === 'main' && a.kind === 'chatgpt' && policyModel(c.modelId) === 'sol'
+    && c.effort !== 'max';
+  let personalFallback = personalPriority ?? (a.kind === 'chatgpt' && s.personalFallback?.enabled ? standingPersonalFallback(t, s, c,
+    context.companyRows ?? enumerateCandidates(t, s).candidates.filter(p => company(candidateParts(s, p).account))
+      .map(candidate => ({ candidate, predicates: evaluateCandidate(t, s, candidate, context), estimate: estimateCandidate(t, s, candidate) }))) : null);
+  if (!personalFallback && tierMain) {
+    const start = estimateCandidate(t, s, c);
+    if (!start.stalled && start.startDelayMin === 0) personalFallback = {
+      approvalRef: tierApprovalRef, quotaApproved: true,
+      text: `Personal main approved for a proper-tier route ahead of a company downgrade under the user decision of ${tierDecision}.` };
   }
   const requirements = [];
   if (!company(a) && (a.kind==='claude'||companyDevice(s)) && !personalFallback?.quotaApproved) requirements.push(['personal-quota', 'PERSONAL_QUOTA_OK_REQUIRED', 'Current scoped personal-quota approval is required.', context.companyEligible || context.companyUnknown]);

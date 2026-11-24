@@ -7,6 +7,16 @@ import { modelPreference, hardPreference, companyDowngrade, normalTierOverflow, 
 import { personalLaunchChoice, personalLaunchExplanation } from '../personal-launch.mjs';
 export const prefersPersonalCodex = task => ['lookup','extract','analysis','implement','implement-hard','debug','science','review','draft','build-run','image-gen','second-opinion'].includes(task.category);
 
+// Use the existing company ladder to scope the new grant. A Flash entry in the
+// catalog does not justify personal spend when company routing would pick Sol.
+export function companyWouldDowngrade(task, snapshot, companyRows) {
+  if (!normalTierOverflow(task)) return false;
+  const eligible = companyRows.filter(row => row.predicates.every(predicate => predicate.ok));
+  if (!eligible.some(row => companyDowngrade(row.candidate.modelId))) return false;
+  const best = orderCandidates(task, snapshot, eligible.map(row => ({ ...row, ok: true }))).winner;
+  return !!best && companyDowngrade(best.candidate.modelId);
+}
+
 export function orderCandidates(task, snapshot, rows) {
   // Effort is an approved quality stage, not a speed/expiry bidding dimension.
   const minimum = new Map();

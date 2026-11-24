@@ -125,6 +125,17 @@ try {
     assert.deepEqual(r.needsUserOK, []);
     assert.match(r.why.join(' '), /2026-11-24.*可以按照路由规则走个人的几个模型，不需要授权/);
   }
+  const priorityFile = path.join(shared, 'personal-priority-window.json');
+  fs.writeFileSync(priorityFile, JSON.stringify({ account: 'main', mode: 'exclusive', revoked: false,
+    from: new Date(now - 1000).toISOString(), until: null, userDecisionRef: 'standing:personal-priority-tier-test',
+    quote: 'Use main for overflow in this fixture.' }));
+  try {
+    const overflow = run(['implement'], spent);
+    assert.deepEqual([overflow.kind, overflow.pick.account, overflow.needsUserOK.length], ['launch', 'main', 0]);
+    assert.match(overflow.why.join(' '), /2026-11-24.*可以按照路由规则走个人的几个模型，不需要授权/);
+    const tie = run(['implement'], { ...spent, daily: { ...spent.daily, [SOL56]: bucket() } });
+    assert.deepEqual([tie.pick.account, tie.pick.model], ['trae', SOL56]);
+  } finally { fs.unlinkSync(priorityFile); }
   const proper = run(['implement'], { ...spent, daily: { ...spent.daily, [SOL56]: bucket() } });
   assert.deepEqual([proper.pick.account, proper.pick.model], ['trae', SOL56]);
   const denied = run(['implement'], { ...spent, mainDenied: true });

@@ -891,9 +891,8 @@ for (const [sc, args] of ERRORS) {
     [o('ttFresh', ['science', '--impact', 'service', '--failures', '2']).blocked, false],
     // A light lookup starts on TRAE's light list (DeepSeek) and escalates to Sol; the third retry is Sol xhigh.
     [pk('traeFull', ['lookup', '--failures', '3']), 'RETRY'],
-    // GPT paused on TRAE: normal work walks the fallbacks, no personal-quota question, then Claude. A hard retry
-    // (implement --failures 1) has no fallback family: it goes to Sol on the company ChatGPT account, then Claude.
-    [pk('traeGptOut', ['implement']), 'deepseek-v4.1-flash high @trae'],
+    // A paused TRAE GPT pool leaves ready main Sol ahead of the company Flash downgrade.
+    [pk('traeGptOut', ['implement']), 'gpt-6.1-sol high @main'],
     [pk('traeGptOut', ['implement', '--failures', '1']), 'RETRY'],
     [pk('traeGptOut', ['implement', '--failures', '2']), 'RETRY'],
     [pk('traeGptOut', ['implement', '--failures', '3']), 'RETRY'],
@@ -902,12 +901,12 @@ for (const [sc, args] of ERRORS) {
     [pk('traeGptOut', ['lookup']), 'deepseek-v4.1-flash high @trae'],
     [o('traeGptOut', ['lookup']).pick?.command.includes('--model DEEPSEEK-V4.1-FLASH '), true],
     // The same through --exclude-model (an infrastructure miss on one task).
-    [pk('traeFull', ['implement', '--exclude-model', 'gpt']), 'deepseek-v4.1-flash high @trae'],
+    [pk('traeFull', ['implement', '--exclude-model', 'gpt']), 'gpt-6.1-sol high @main'],
     [pk('traeFull', ['implement', '--exclude-model', 'gpt,deepseek-v4.1-flash']), 'gpt-6.1-sol high @main'],
     // With Gemini gone from TRAE (2026-11-13), Seed-Evolving is the image reader only: image-read falls back to it,
     // implement never picks it; a model-unavailable pause drops only that model, its family-mate keeps routing.
     [pk('traeNoGem', ['image-read', '--exclude-model', 'gpt']), 'seed-evolving medium @trae'],
-    [pk('traeNoGem', ['implement', '--exclude-model', 'gpt']), 'deepseek-v4.1-flash high @trae'],
+    [pk('traeNoGem', ['implement', '--exclude-model', 'gpt']), 'gpt-6.1-sol high @main'],
     [pk('traeNoGemPaused', ['implement', '--exclude-model', 'gpt']), 'gpt-6.1-sol high @main'],
     [pk('traeNoGemPaused', ['implement']), 'gpt-6.1-sol high @trae'],
     // The task flag uses that same exclusion path, scoped to TRAE, with the normal fallback ladder and gates.
@@ -934,9 +933,9 @@ for (const [sc, args] of ERRORS) {
     // A hard review (review-high) has no fallback family: with GPT paused on TRAE it drops to Claude behind the gate.
     [hasNote('traeGptOut', ['review-high'], /independent other-family GPT\/Claude reviewer/), false],
     [hasNote('traeGptOut', ['build-run'], /health thresholds.*rollback triggers.*stronger-model judgment/), true],
-    [hasNote('traeGptOut', ['analysis'], /default headless Playwright MCP is for public\/local pages only.*Missing login means BLOCKED/), true],
+    [hasNote('traeGptOut', ['analysis'], /default headless Playwright MCP is for public\/local pages only.*Missing login means BLOCKED/), false],
     [hasNote('traeFull', ['implement', '--exclude-model', 'gpt,deepseek'], /Gemini-3\.1-Pro ran past 40 minutes/), false],
-    [hasNote('traeGptOut', ['implement'], /can't see images/), true], [hasNote('traeGptOut', ['image-read'], /can't see images/), false],
+    [hasNote('traeGptOut', ['implement'], /can't see images/), false], [hasNote('traeGptOut', ['image-read'], /can't see images/), false],
     // Every family out: personal quota, behind the user's OK.
     [o('traeAllOut', ['implement']).kind, 'blocked'],
   ];
@@ -1005,7 +1004,7 @@ for (const [sc, args] of ERRORS) {
   }
   cases.push([hasNote(o('traeFull', ['analysis', '--failures', '1']), /last miss was spec\/process/), false]);
   for (const cat of ['implement', 'implement-hard', 'debug']) {
-    cases.push([hasNote(o('traeGptOut', [cat]), /DeepSeek: read-only analysis and simple edits only; not full-package builds, auth\/storage reviews or acceptance.*--exclude-model deepseek/), cat === 'implement', `${cat}: limits only for selected/listed DeepSeek`]);
+    cases.push([hasNote(o('traeGptOut', [cat]), /DeepSeek: read-only analysis and simple edits only; not full-package builds, auth\/storage reviews or acceptance.*--exclude-model deepseek/), false, `${cat}: limits only for selected/listed DeepSeek`]);
   }
   // Adversarial --security reviews are the approved DeepSeek exception; the non-adversarial sensitive rows keep it out.
   for (const args of [['build-run'], ['review-high'], ['review', '--impact', 'release'], ['review', '--stakes', 'high']]) {
@@ -1017,7 +1016,7 @@ for (const [sc, args] of ERRORS) {
     const r = o('traeNoGem', [...args, '--exclude-model', 'gpt']);
     cases.push([r.needsUserOK.some((n) => /^personal quota:/.test(n)), true]);
   }
-  for (const cat of ['analysis', 'review', 'implement']) cases.push([o('traeGptOut', [cat]).pick?.model, 'deepseek-v4.1-flash']);
+  for (const cat of ['analysis', 'review', 'implement']) cases.push([o('traeGptOut', [cat]).pick?.model, 'gpt-6.1-sol']);
   for (const cat of ['build-run', 'ui-browser', 'computer-use']) {
     const r = o('ttFresh', [cat]);
     cases.push([hasNote(r, /guarded executor.*continuous idle evidence.*every orchestrator's release/), true],
@@ -1252,10 +1251,10 @@ for (const [sc, args] of ERRORS) {
     ['quotaPreferred', ['build-run'], 'gpt-5.6-sol'],
     ['quotaPreferred', ['image-read'], 'gpt-6-astra'], // 5.6-Sol vision is not qualified
     ['quotaPreferred', ['implement', '--security'], 'deepseek-v4.1-flash'],
-    ['quotaPreferred', ['implement', '--exclude-model', 'gpt-5.6-sol'], 'deepseek-v4.1-flash'],
-    ['quota56Depleted', ['implement'], 'deepseek-v4.1-flash'],
+    ['quotaPreferred', ['implement', '--exclude-model', 'gpt-5.6-sol'], 'gpt-6.1-sol'],
+    ['quota56Depleted', ['implement'], 'gpt-6.1-sol'],
     ['quota56Expired', ['implement'], 'gpt-5.6-sol'],
-    ['quota56Paused', ['implement'], 'deepseek-v4.1-flash'],
+    ['quota56Paused', ['implement'], 'gpt-6.1-sol'],
     ['quotaBoth', ['implement'], 'gpt-5.6-sol'],
     ['quotaBoth', ['implement', '--failures', '4'], undefined], // Availability fallbacks do not become retry rungs.
     ['quotaBoth', ['implement-hard'], undefined], // both hard buckets depleted: keep a hard model, never demote to 5.6/DeepSeek
@@ -1278,7 +1277,7 @@ for (const [sc, args] of ERRORS) {
     ['quotaPausedAstra', ['implement'], 'gpt-5.6-sol'],
     ['quotaSecondFallback', ['implement'], 'gpt-5.6-sol'],
     ['quotaAstra', ['implement', '--exclude-model', 'gpt-6-astra'], 'gpt-5.6-sol'],
-    ['quotaAstra', ['implement', '--exclude-model', 'gpt'], 'deepseek-v4.1-flash'],
+    ['quotaAstra', ['implement', '--exclude-model', 'gpt'], 'gpt-6.1-sol'],
     ['quotaAstra', ['implement', '--security'], 'deepseek-v4.1-flash'],
     ['quotaAstra', ['implement', '--failures', '1'], 'gpt-6-astra'],
     ['quotaFallbackBusy', ['implement', '--failures', '2'], 'gpt-6-astra'],
@@ -1583,7 +1582,7 @@ for (const [sc, args] of ERRORS) {
     assert.equal(gemini.kind,'blocked');assert.equal(gemini.pick.command,null);assert.ok(!gemini.pick.company);assert.ok(gemini.plan.gates.some(g=>g.kind==='personal-quota'));
     assert.ok(gemini.allNotes.some((n) => /list --limit 1.*only if unreachable.*global-rules owner/.test(n)));
     assert.ok(!gemini.allNotes.some((n) => /twice what the task should take|codex exec still works/.test(n)));
-    assert.equal(r(['implement'], 'backgroundOnly').pick?.model, FLASH); // Sol's hot load does not establish Flash congestion; its free bucket remains usable when TTADK is out.
+    assert.equal(r(['implement'], 'backgroundOnly').pick?.account, 'main'); // Foreground implement requires the normal tier.
     assert.equal(r(['implement', '--background'], 'backgroundOnly').pick?.model, FLASH);
     assert.equal(r(['lookup','--background','--security']).pick?.model,'gpt-5.6-terra');
     assert.equal(r(['lookup','--background','--security']).pick?.account,'ttadk');

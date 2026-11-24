@@ -4,7 +4,7 @@ import { enumerateCandidates, candidateParts } from './candidates.mjs';
 import { evaluateCandidate, needsReviewer, pReviewerSet } from './filters.mjs';
 import { estimateCandidate } from './estimate.mjs';
 import { unavailableDayQuota } from './release-fallback.mjs';
-import { orderCandidates, prefersPersonalCodex } from './choose.mjs';
+import { companyWouldDowngrade, orderCandidates, prefersPersonalCodex } from './choose.mjs';
 import { makePlan } from './plan.mjs';
 import { validatePlan } from './validate.mjs';
 import { reviewDecision, reviewAfterWrite } from './review-policy.mjs';
@@ -18,8 +18,9 @@ function assess(task, snapshot, context = {}) {
     estimate: estimateCandidate(task, snapshot, candidate) }));
   const companyEligible = rows.some((r) => company(candidateParts(snapshot, r.candidate).account) && r.predicates.every((p) => p.ok));
   const companyRows = rows.filter(r => company(candidateParts(snapshot, r.candidate).account));
+  const tierDowngrade = companyWouldDowngrade(task, snapshot, companyRows);
   for (const row of rows) {
-    row.predicates = evaluateCandidate(task, snapshot, row.candidate, { ...context, companyEligible, companyUnknown, companyRows });
+    row.predicates = evaluateCandidate(task, snapshot, row.candidate, { ...context, companyEligible, companyUnknown, companyRows, tierDowngrade });
     row.ok = row.predicates.every((p) => p.ok);
   }
   return { rows, diagnostics, companyUnknown };
