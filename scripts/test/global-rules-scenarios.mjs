@@ -24,7 +24,7 @@ try {
   assert.equal(digestText.match(/^version:/gm)?.length, 1, 'integration must publish one digest version');
   assert.equal(digestText.match(/^## Changes In This Version$/gm)?.length, 1);
   assert.ok(digestText.split('\n').length<=61,'digest line budget');
-  assert.equal(digest.version, '2026-11-24.1');
+  assert.equal(digest.version, '2026-11-24.2');
   assert.ok(digest.worker.includes("ask `res place` (or use `claim-any`) instead of naming a machine; name a machine only with a stated reason"));
   assert.match(digest.worker, /process checks list PID and process name only.*pgrep -l.*ps -o pid,comm/);
   assert.match(digest.worker, /never print other tools' full command lines.*pgrep -a\/-f.*args\/command/);
@@ -50,6 +50,7 @@ try {
   const signingAt = digest.worker.indexOf("Allowed with the user's 2026-11-13 authorization: sign OUR OWN TEST packages");
   assert.ok(loginAt >= 0 && signingAt > loginAt, 'worker digest must contain adjacent login and test-signing rules');
   assert.match(digest.worker, /registered shared test phones iphone8\/iphone11\/s21.*freely tap Allow\/Authorize\/Trust\/OK/);
+  assert.match(digest.worker, /Before stopping, uninstalling or installing on a shared device, run the device-app guard; a bundle id owned by another project is a stop, report to both orchestrators/);
   assert.match(digest.worker, /personal iPhone 15 Pro Max \(`policy=never`\).*device not registered in `res`/);
   assert.match(digest.worker, /lease <=2 h.*never enter personal-account credentials\/passwords\/verification codes.*no purchases/);
   assert.match(digest.worker, /never make whole-container or device backups.*pymobiledevice3 apps pull.*devicectl device copy from.*idevicebackup2.*adb backup.*adb exec-out run-as.*use in-place installs/);

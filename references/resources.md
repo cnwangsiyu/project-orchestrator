@@ -11,6 +11,7 @@ probes a device, changes a lease or reads authentication storage.
 - [Sampling](#sampling)
 - [Heavy lock contract](#heavy-lock-contract)
 - [Res ownership](#res-ownership)
+- [Shared-device app ownership](#shared-device-app-ownership)
 - [Cache scope](#cache-scope)
 - [Ownership and task state](#ownership-and-task-state)
 - [Live idle hints](#live-idle-hints)
@@ -346,6 +347,14 @@ and no worker may operate it or any device absent from the `res` registry. Lease
 back up app data before destructive reinstall/wipe/erase (app data holding login sessions is never copied: a user card approving the step and accepting the loss plus a verified APK/IPA backup suffices); never enter personal-account credentials, passwords or
 verification codes, and make no purchases. If Codex refuses an allowed prompt, re-route that step to Claude rather
 than asking the user to tap it. Irreversible browser actions retain their separate approval rules.
+
+## Shared-device app ownership
+
+`res` stores app ownership in its shared state as `device-apps.json`, keyed by registered device resource ID and bundle ID. Each entry records the owning project, display name, last installed version/build, task and time. Only `res device-app claim` writes it: the caller must hold that device lease, and an existing owner can change only with `--transfer-approved-by` plus a reason. `res device-app check` exits **0** for `OWNED-BY-YOU`, **4** for `OWNED-BY-OTHER`, and **5** for `UNREGISTERED`; `res device-app list` is read-only.
+
+Standard shared-device brief sentence: “Before any stop, uninstall or install, read the installed app’s display name/version with the platform’s existing read-only command, then run `scripts/device-app-guard.sh`. Do not perform the operation unless it passes; a bundle owned by another project is a stop and report-to-both-orchestrators event.” The guard does not talk to a device. It accepts the resource ID, bundle ID, project, expected display name and the caller-observed name/version. It passes only when the registry and observed identity agree that this project owns the installed app, or when the ID is unregistered and no app with that ID is installed. A successful install must be followed by `res device-app claim` while the lease remains held.
+
+The S21 remains install-over-the-top only: never uninstall or clear app data.
 
 Imported from `/Users/bytedance/.agents/skills/project-orchestrator/scripts/res`, the target of
 `$HOME/.claude/orchestrator/_shared/res` per T89 handover. Source SHA-256 is

@@ -866,6 +866,9 @@ res add <id> --device <udid|serial|-> --for "<description>" [--policy open|ask-u
                                       decides whether a newly plugged-in device may be shared)
 res note <id> --by <session> --note "<pitfall and workaround>"
                                       append a dated pitfall to notes/<id>.md (shown on every take)
+res device-app check --device <id> --bundle <bundle-id> --project <slug> [--expect-name <display-name>]
+res device-app claim --device <id> --bundle <bundle-id> --project <slug> --name <display-name> --version <version/build> --task <task> --by <lease-holder> [--transfer-approved-by <owner> --reason <text>]
+res device-app list --device <id>     shared-device app ownership registry; check exits 0 yours, 4 other, 5 unregistered
 res log [<n>]                         last n history lines (default 20)
 Devices show their live link (usbmux / devicectl / adb). take refuses a device that is not connected
 unless --offline (booking ahead of a plug-in).
@@ -4471,6 +4474,52 @@ cmd_note() {
   echo "noted on $id"
 }
 
+cmd_device_app() {
+  local action="${1:-}"; shift || true
+  local device_id= bundle_id= app_project= expect_name= app_name= app_version= app_task= holder= transfer= reason=
+  case "$action" in check|claim|list) ;; *) die 'device-app needs check, claim, or list' ;; esac
+  while [ "$#" -gt 0 ]; do
+    [ "$#" -ge 2 ] || die "device-app $action needs a value for $1"
+    case "$1" in
+      --device) device_id="$2" ;;
+      --bundle) bundle_id="$2" ;;
+      --project) app_project="$2" ;;
+      --expect-name) expect_name="$2" ;;
+      --name) app_name="$2" ;;
+      --version) app_version="$2" ;;
+      --task) app_task="$2" ;;
+      --by) holder="$2" ;;
+      --transfer-approved-by) transfer="$2" ;;
+      --reason) reason="$2" ;;
+      *) die "unknown device-app option '$1'" ;;
+    esac
+    shift 2
+  done
+  registry_record "$device_id" || die "unknown resource '$device_id'"
+  [ "$REG_KIND" = device ] || die "'$device_id' is not a shared device"
+  local helper
+  helper="$(dirname "$(realpath "$RES_SELF_COMMAND")")/device-apps.mjs"
+  [ -f "$helper" ] || die 'device-app registry helper unavailable'
+  case "$action" in
+    check)
+      [ -n "$bundle_id$app_project" ] || die 'device-app check needs --device, --bundle and --project'
+      [ -z "$app_name$app_version$app_task$holder$transfer$reason" ] || die 'device-app check accepts only --device, --bundle, --project and --expect-name'
+      node "$helper" check "$RES_DIR" "$device_id" "$bundle_id" "$app_project" "$expect_name"
+      ;;
+    list)
+      [ -z "$bundle_id$app_project$expect_name$app_name$app_version$app_task$holder$transfer$reason" ] || die 'device-app list accepts only --device'
+      node "$helper" list "$RES_DIR" "$device_id"
+      ;;
+    claim)
+      [ -n "$bundle_id$app_project$app_name$app_version$app_task$holder" ] || die 'device-app claim needs --device, --bundle, --project, --name, --version, --task and --by'
+      [ -z "$expect_name" ] || die 'device-app claim does not accept --expect-name'
+      [ -d "$LOCKS/$device_id.d" ] || die "device-app claim requires holding '$device_id'"
+      [ "$(field "$device_id" by)" = "$holder" ] || die "device-app claim requires '$holder' to hold '$device_id'"
+      node "$helper" claim "$RES_DIR" "$device_id" "$bundle_id" "$app_project" "$app_name" "$app_version" "$app_task" "$transfer" "$reason"
+      ;;
+  esac
+}
+
 cmd_log() { [ -f "$LOG" ] && tail -n "${1:-20}" "$LOG" || true; }
 
 case "${1:-}" in
@@ -4534,6 +4583,7 @@ case "${1:-}" in
   return) shift; cmd_return "$@" ;;
   add) shift; cmd_add "$@" ;;
   note) shift; cmd_note "$@" ;;
+  device-app) shift; cmd_device_app "$@" ;;
   log) shift; cmd_log "$@" ;;
   -h|--help|help|'') usage ;;
   *) usage >&2; exit 1 ;;
