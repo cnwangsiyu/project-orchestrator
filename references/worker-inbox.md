@@ -149,8 +149,7 @@ The Bash reference explicitly exposes `run_in_background: true`. The headless gu
 "Claude then takes one more turn with the outcome."
 The docs do not promise the exact `task_notification` message shape for every interactive harness,
 nor say that an inner `&` has its own completion notification. Such a detached child is not a separately registered
-Bash task, so never rely on it. Generic async hooks do not wake idle sessions; `asyncRewake` is documented but is
-not used here. Watch must be a Bash background task, not an `async` hook.
+Bash task, so never rely on it. The Stop template also arms an owner-scoped `asyncRewake` hook while workers are running. It tails the durable inbox for queue notices and exits 2 with the notice on stderr. Claude Code wakes that session even while the launching Bash task is running. The next Stop re-arms it. Its timeout is 24 hours. Install the updated Stop template to enable this channel. With an older template, run `codex-worker watch --owner <session-id>` as a tracked Bash background task and re-arm after each wake.
 
 `claude --help` was run: it exposes `--bg`, `--resume`, `--session-id`, and `--settings`, but not a CLI flag
 for a Bash tool's `run_in_background`. `--bg` backgrounds a Claude session, not an arbitrary worker shell.

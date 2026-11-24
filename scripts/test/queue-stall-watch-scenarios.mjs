@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createPoolStallMonitor, createQueueStallMonitor, fallbackRouteArgs, queueStallText } from '../lib/queue-stall-watch.mjs';
 import { appendEvent, readEvents } from '../lib/worker-events.mjs';
 import { saveQueue } from '../lib/worker-queue.mjs';
@@ -35,6 +35,28 @@ const monitor = () => createQueueStallMonitor(owner, { statusOf: () => queue, la
   quotaOf: () => quota, holdsOf: () => false, policyOf: () => policy, emit: event => (samples.push(event), event) });
 
 try {
+  // Exercise the host's idle-wake contract with a live fixture follower and no watch.
+  const hook = JSON.parse(fs.readFileSync(new URL('../../templates/stop-hook.json', import.meta.url)))
+    .hooks.Stop.flatMap(group => group.hooks).find(entry => entry.asyncRewake);
+  assert.match(hook.command, /queue-rewake-hook/);
+  const idleOwner = 'idle-owner';
+  process.env.RULES_SHARED = path.join(tmp, 'rewake-fixture');
+  appendEvent({ ...row, owner: idleOwner, event: 'running' });
+  const listener = spawn(process.execPath, [path.join(scripts, 'queue-rewake-hook.mjs')]);
+  let reminder = '';
+  listener.stderr.on('data', chunk => { reminder += chunk; });
+  listener.stdin.end(JSON.stringify({ hook_event_name: 'Stop', session_id: idleOwner }));
+  const closed = new Promise(resolve => listener.once('close', resolve));
+  try {
+    const lock = path.join(process.env.RULES_SHARED, 'queue-rewake', idleOwner + '.lock');
+    for (let i = 0; i < 200 && !fs.existsSync(lock); i++) await new Promise(resolve => setTimeout(resolve, 20));
+    assert.ok(fs.existsSync(lock), 'idle listener armed');
+    for (const recipient of ['other-owner', idleOwner])
+      appendEvent({ ...row, owner: recipient, event: 'message', wake: true, kind: 'queue-stalled', text: 'queue for ' + recipient });
+    assert.equal(await closed, 2);
+    assert.match(reminder, /queue for idle-owner/);
+    assert.doesNotMatch(reminder, /other-owner/);
+  } finally { listener.kill(); process.env.RULES_SHARED = tmp; }
   const [first] = await monitor().poll([row], [], now);
   assert.equal(first.kind, 'queue-stalled'); assert.equal(first.severity, 'risk'); assert.equal(first.wake, true);
   assert.match(first.text, /task=queue-probe thread=thread-1 turn=turn-1.*queued 6.0 min position=244/);
