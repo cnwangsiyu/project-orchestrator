@@ -9,12 +9,13 @@ import { RES_TEST_BUDGET_MS } from '../res/test/run.mjs';
 import { redactLogFile } from '../lib/log-redaction.mjs';
 const base = path.dirname(fileURLToPath(import.meta.url)), root = path.dirname(path.dirname(base));
 const args = process.argv.slice(2), listFailing = args.includes('--list-failing'), stopOnFailure = args.includes('--stop-on-failure');
+const noClaim = args.includes('--no-claim');
 const filesAt = args.indexOf('--files'), selected = filesAt < 0 ? null : args[filesAt + 1]?.split(',');
 const reportAt = args.indexOf('--report'), report = reportAt < 0 ? null : args[reportAt + 1];
 if (filesAt >= 0 && (!selected?.length || selected.some(name => !name))) throw Error('--files needs comma-separated suite names');
 if (reportAt >= 0 && (!report || report.startsWith('--'))) throw Error('--report needs a new JSON file');
 if (report && fs.existsSync(report)) throw Error('--report refuses to overwrite an existing file');
-if (args.some((arg, index) => !['--list-failing', '--stop-on-failure', '--files', '--report'].includes(arg) && ![filesAt, reportAt].some(at => at >= 0 && index === at + 1))) throw Error('usage: run-all.mjs [--list-failing] [--stop-on-failure] [--files NAME,...] [--report FILE]');
+if (args.some((arg, index) => !['--list-failing', '--stop-on-failure', '--no-claim', '--files', '--report'].includes(arg) && ![filesAt, reportAt].some(at => at >= 0 && index === at + 1))) throw Error('usage: run-all.mjs [--list-failing] [--stop-on-failure] [--no-claim] [--files NAME,...] [--report FILE]');
 if (report) fs.mkdirSync(path.dirname(path.resolve(report)), { recursive: true });
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'project-orchestrator-tests-'));
 const home = path.join(tmp, 'fixture-home'); fs.mkdirSync(home, { recursive: true });
@@ -33,6 +34,58 @@ suites.push({ name: 'cleanup-python', exe: 'python3', args: ['-B', '-m', 'unitte
 if (selected) {
   for (const name of selected) if (!suites.some(suite => suite.name === name)) throw Error(`unknown suite: ${name}`);
   suites = suites.filter(suite => selected.includes(suite.name));
+}
+const fullRun = !selected || selected.length > 8;
+const res = process.env.SUITE_RES_BIN || path.join(root, 'scripts/res/res');
+const claimTimeout = process.env.SUITE_CLAIM_TIMEOUT_MIN || '20';
+if (!/^\d+(?:\.\d+)?$/.test(claimTimeout)) throw Error('SUITE_CLAIM_TIMEOUT_MIN must be a non-negative number of minutes');
+let claim = null;
+const releaseClaim = () => {
+  if (!claim) return;
+  const owned = claim; claim = null;
+  const released = spawnSync(res, ['return', owned.lane, '--by', owned.holder, '--note', 'full suite finished'], { encoding: 'utf8' });
+  if (released.status !== 0) process.stderr.write(`WARNING: could not return suite slot ${owned.lane}: ${(released.stderr || released.error?.message || `exit ${released.status}`).trim()}\n`);
+};
+const capacity = () => {
+  const result = spawnSync(res, ['pool-capacity', 'local'], { encoding: 'utf8' });
+  if (result.error || result.status !== 0) return { result, row: null };
+  try { return { result, row: Object.values(JSON.parse(result.stdout))[0] ?? null }; }
+  catch { return { result, row: null }; }
+};
+if (fullRun) {
+  if (noClaim) {
+    const reason = process.env.SUITE_NO_CLAIM_REASON?.trim();
+    if (!process.stdin.isTTY && !reason) throw Error('--no-claim is refused without a TTY unless SUITE_NO_CLAIM_REASON is set');
+    console.log(`suite claim bypassed: reason=${reason || 'interactive operator override'}`);
+  } else {
+    const before = capacity();
+    if (before.result.error?.code === 'ENOENT') {
+      console.warn(`WARNING: res unavailable; running full suite without a claim (${before.result.error.message})`);
+    } else if (!before.row && before.result.status !== 0) {
+      console.warn(`WARNING: res admission unavailable; running full suite without a claim (${(before.result.stderr || `exit ${before.result.status}`).trim()})`);
+    } else if (before.row && !['headroom', 'load'].includes(before.row.gate)) {
+      console.warn(`WARNING: res admission closed (${before.row.gate}); running full suite without a claim`);
+    } else {
+      const ahead = Number(before.row?.claims ?? before.row?.held ?? 0);
+      console.log(`waiting for a suite slot: ${Number.isFinite(ahead) ? ahead : 0} ahead`);
+      const holder = `suite-${process.pid}-${Date.now()}`;
+      const acquired = spawnSync(res, ['wait-lane', '--by', holder, '--project', 'project-orchestrator', '--task', 'full-suite', '--for', 'full project-orchestrator fixture suite', '--timeout', claimTimeout, '--profile', 'medium', '--cores', '1', '--mem-gib', '2', '--wrapper', '--pid', String(process.pid)], { encoding: 'utf8' });
+      const lane = acquired.stdout?.match(/^lane=(.+)$/m)?.[1];
+      if (acquired.status === 0 && lane) {
+        claim = { lane, holder };
+        console.log(`suite slot: ${lane}`);
+        process.once('exit', releaseClaim);
+        for (const [signal, code] of [['SIGINT', 130], ['SIGHUP', 129], ['SIGTERM', 143]]) process.once(signal, () => { releaseClaim(); process.exit(code); });
+      } else {
+        const after = capacity();
+        if (acquired.error?.code === 'ENOENT' || !after.row || (after.row.gate && after.row.gate !== 'load')) {
+          console.warn(`WARNING: res claim failed outside the load gate; running full suite without a claim (${(acquired.stderr || acquired.error?.message || `exit ${acquired.status}`).trim()})`);
+        } else {
+          throw Error(`suite slot unavailable after ${claimTimeout} minutes (${after.row.gate})`);
+        }
+      }
+    }
+  }
 }
 let failed = 0;
 const results = [];
