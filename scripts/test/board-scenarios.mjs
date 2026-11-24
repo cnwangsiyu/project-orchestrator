@@ -20,7 +20,8 @@ const fakeSerial = 'RS89J612345';
 const now = Date.parse('2026-11-23T20:00:00Z');
 const reset = now + 2 * 3600_000;
 const w = { account: 'trae', model: 'gpt-6.2-sol', effort: 'high', project, task: 'W746-check', name: 'W746-check', owner: 'VAK 主对话',
-  startedAt: now - 400_000, lastActivityAt: now - 1000, queue: { state: 'waiting', since: now - 390_000, position: 3 } };
+  startedAt: now - 400_000, lastActivityAt: now - 1000, queueStalled: true,
+  queue: { state: 'waiting', since: now - 390_000, position: 3, workedMinutesBefore: 4 } };
 const old = { ...w, task: 'W749', name: 'W749-old' };
 const lockHeader = 'ID KIND POLICY LINK HOLDER SINCE → UNTIL / PURPOSE\n';
 const status = `${lockHeader}iphone11 device open connected W746-rehearsal (${project}/W746-rehearsal) 2026-11-23 11:00 → +120m · ${fakeSerial}\n`
@@ -35,14 +36,14 @@ const registry = [{ slot: 'devbox-cn-66', host: fakeHost, kind: 'remote', policy
   { slot: 'devbox-cn-67', host: fakeHost, kind: 'remote', policy: 'open' },
   { slot: 'heavy-build-4', host: 'main.local', kind: 'slot', policy: 'open' },
   { slot: 'mini2-exec-1', host: 'mini2.local', kind: 'remote', policy: 'open' }];
-let fault, remote = heldRemote, auditHeld = 2, devboxLink;
+let fault, remote = heldRemote, auditHeld = 2, devboxLink, ttadkUsed = 1000;
 async function command(bin, args, signal) {
   assert.ok(signal instanceof AbortSignal);
   if (bin === process.execPath) {
     if (args.includes('--running')) return JSON.stringify({ threads: [w] });
     if (fault === 'quota') throw Error('fixture: quota unavailable');
     return JSON.stringify({ checkedAt: now, trae: { quota: { daily: { gpt_6_2: { used: 1, limit: 100, resetsAt: reset } } } },
-      ttadk: { usage: { used: 1000, limit: 1000, resetsAt: reset } }, claude: { week: { used: 66, resetsAt: reset } },
+      ttadk: { usage: { used: ttadkUsed, limit: 1000, resetsAt: reset } }, claude: { week: { used: 66, resetsAt: reset } },
       codex: [{ name: 'main', email: 'private@example.invalid', week: { used: 40, resetsAt: reset }, resets: { count: 3 } }], hubs: [{ account: 'trae', state: 'up' }] });
   }
   switch (args.join(' ')) {
@@ -72,7 +73,12 @@ let server;
 try {
   const boardRoot = path.join(root, '.claude/orchestrator', project);
   const briefRoot = path.join(root, 'code/.claude-data/orchestrator', project, 'tasks', old.task);
-  await Promise.all([shared, path.join(shared, 'devbox-metrics'), boardRoot, briefRoot, path.join(data, 'history')]
+  const vakRoot = path.join(root, 'vak-state');
+  const nightlyRoot = path.join(root, 'nightly');
+  const rulesFile = path.join(root, 'global-rules.md');
+  await Promise.all([shared, path.join(shared, 'devbox-metrics'), boardRoot, briefRoot, path.join(data, 'history'),
+    vakRoot, path.join(nightlyRoot, 'vak-ppe-release'), path.join(nightlyRoot, 'vak-web/runs/2026-11-23T19-00-00Z'),
+    path.join(nightlyRoot, 'vak-web/runs/2026-11-23T20-00-00Z')]
     .map((dir) => fs.mkdir(dir, { recursive: true })));
   const freshMetric = (at = now - 5 * 60_000) => ({ at: at / 1000, cores: 64, load5: 3.1, memAvailableGiB: 40, freeGiB: 300 });
   await fs.writeFile(path.join(shared, 'devbox-metrics', `${fakeHost}.json`), JSON.stringify(freshMetric()));
@@ -80,32 +86,67 @@ try {
     cores: 10, load5: 1.1, availableGiB: 12, freeGiB: 100 }));
   await fs.writeFile(path.join(boardRoot, 'board.json'), JSON.stringify({ tasks: [{ id: 'W746', title: '编辑后画面检查', next: '检查第 3 组' }] }));
   await fs.writeFile(path.join(briefRoot, 'brief.md'), '# 旧任务标题\n\n正文不可见\n');
+  await fs.writeFile(path.join(vakRoot, 'ppe-state.json'), JSON.stringify({
+    mainPpe: { version: '1.0.0.201', scm: 176799342, deployedAt: new Date(now - 30 * 60_000).toISOString() },
+    autoRelease: {
+      lastTransaction: { prodVersion: '1.0.0.105', updatedAt: new Date(now - 3 * 3600_000).toISOString() },
+      history: [{ version: '1.0.0.201', deployedAt: new Date(now - 30 * 60_000).toISOString() }],
+    },
+  }));
+  await putLines(path.join(nightlyRoot, 'vak-ppe-release/cycle-events.jsonl'), [
+    { at: new Date(now - 45 * 60_000).toISOString(), release: true },
+  ]);
+  await fs.writeFile(path.join(nightlyRoot, 'vak-web/runs/2026-11-23T19-00-00Z/report.json'), JSON.stringify({
+    start: new Date(now - 70 * 60_000).toISOString(), end: new Date(now - 60 * 60_000).toISOString(),
+    rows: [{ job: 'render-basic', status: 'PASS' }, ...Array.from({ length: 6 }, (_, i) => ({ job: `failed-${i + 1}`, status: 'FAIL' }))],
+  }));
+  await fs.writeFile(path.join(nightlyRoot, 'vak-web/runs/2026-11-23T20-00-00Z/report.json'), JSON.stringify({ rows: [] }));
+  await fs.writeFile(rulesFile, '# Rules\nversion: 2026-11-23.2\n');
+  await fs.utimes(rulesFile, (now - 20 * 60_000) / 1000, (now - 20 * 60_000) / 1000);
   await putLines(path.join(shared, 'worker-events.jsonl'), [
-    { ...w, t: now - 3, event: 'message', text: '较早的进展' },
+    { ...w, t: now - 6_000, event: 'message', text: '最早的进展' },
     { ...w, t: now - 2, event: 'message', text: `token=${fakeToken} run ${fakeHost} fd12::1234 test.user@example.invalid serial=${fakeSerial}` },
-    { ...old, t: now - 1, event: 'failed' },
+    { ...w, t: now - 4_000, event: 'message', text: '第三条进展' },
+    { ...w, t: now - 3_000, event: 'message', text: '最新进展' },
+    { ...w, t: now - 2_000, event: 'message', kind: 'queue-stalled', noticeId: 'notice-1', ackAt: null, text: '队列等待需要处理' },
+    { ...old, t: now - 2_500, event: 'message', kind: 'queue-stalled', noticeId: 'notice-closed',
+      ackAt: new Date(now - 2_000).toISOString(), text: '已处理的队列通知' },
+    { ...w, t: now - 14_000, event: 're-routed', account: 'trae' },
+    { ...w, name: 'W750-finished', task: 'W750-finished', t: now - 12_000, event: 'finished' },
+    { ...w, name: 'W751-interrupted', task: 'W751-interrupted', t: now - 11_000, event: 'failed', status: 'interrupted' },
+    { ...old, t: now - 1_000, event: 'failed' },
   ]);
   await putLines(path.join(shared, 'route-log.jsonl'), [
     { ...w, t: now - 3, kind: 'route', why: ['旧理由'] }, { ...w, t: now - 2, kind: 'route', why: ['公司通道优先'] },
     { ...w, t: now - 1, kind: 'launch', why: ['不是路由理由'] },
+    { ...w, t: now - 15_000, kind: 'launch-model', state: 'queued', actualStatus: 'KNOWN', account: 'ttadk' },
+    { ...w, t: now - 14_000, kind: 'launch-model', state: 'running', account: 'trae' },
   ]);
-  const asked = { event: 'asked', at: new Date(now - 200).toISOString(), title: '确认出包', project };
+  const asked = { event: 'asked', at: new Date(now - 40 * 60_000).toISOString(), title: '确认出包', project };
   await putLines(path.join(data, 'cards.ndjson'), [
-    { ...asked, id: 'open' }, { ...asked, id: 'closed' }, { id: 'closed', event: 'answered', at: new Date(now - 100).toISOString() },
+    { ...asked, id: 'open', default: '继续走公司通道', defaultAt: new Date(now - 10 * 60_000).toISOString() },
+    { ...asked, id: 'closed' }, { id: 'closed', event: 'answered', at: new Date(now - 100).toISOString(), answer: '先不出包' },
     { ...asked, id: 'withdrawn' }, { id: 'withdrawn', event: 'withdrawn', at: new Date(now - 100).toISOString() },
-    { ...asked, id: 'expired', defaultAt: new Date(now - 50).toISOString() },
   ]);
+  await fs.appendFile(path.join(data, 'cards.ndjson'), '{malformed\n');
   const history = path.join(data, 'history');
   await putLines(path.join(history, '2026-11-20.ndjson'), [{ at: '2026-11-20T15:00:00.000Z' }]);
   await putLines(path.join(history, '2026-11-21.ndjson'), [{ at: '2026-11-21T19:59:00.000Z' }, { at: '2026-11-21T20:01:00.000Z' }]);
-  const options = { data, home: root, shared, command, now };
+  await putLines(path.join(history, '2026-11-23.ndjson'), [{ at: new Date(now - 2 * 3600_000).toISOString(),
+    quota: { items: [{ id: 'ttadk', label: 'TTADK 今日', exhausted: false, percent: 80, resetsAt: new Date(reset).toISOString() }] } }]);
+  const sampleFile = path.join(root, 'latest.json');
+  const sourcePaths = { vakRoot, nightlyRoot, rulesFile };
+  const options = { data, home: root, shared, sampleFile, sourcePaths, command, now };
   const first = await collect(options);
   assert.deepEqual(Object.values(first.blocks).filter((b) => b.stale), []);
   const task = first.tasks.find((row) => row.task === w.task);
-  assert.equal(task.model, 'gpt-6.2-sol'); assert.equal(task.state, 'queued'); assert.equal(task.queuePosition, 3);
+  assert.equal(task.model, 'gpt-6.2-sol'); assert.equal(task.state, 'stalled'); assert.equal(task.queuePosition, 3);
+  assert.equal(Math.round(task.queueWaitMinutes * 10) / 10, 6.5); assert.equal(task.queueWorkedMinutes, 4);
+  assert.equal(task.ownerNoticeOpen, true); assert.equal(task.lastNotes.length, 3);
   assert.equal(task.title, '编辑后画面检查'); assert.equal(task.summary, '检查第 3 组'); assert.equal(task.routeWhy, '公司通道优先');
   assert.match(task.latestNote, /MASKED|隐藏/);
   assert.equal(first.tasks.find((row) => row.task === old.task).title, '旧任务标题');
+  assert.equal(first.tasks.find((row) => row.task === old.task).ownerNoticeOpen, false);
   assert.equal(first.machines.find((m) => m.name === '开发机 9').load5, 3.1);
   assert.equal(first.machines.find((m) => m.name === '开发机 9').sampleOnDemand, true);
   assert.equal(first.machines.find((m) => m.name === '开发机 9').fault, false);
@@ -116,6 +157,22 @@ try {
   assert.deepEqual(task.resources.map((r) => r.host ?? r.label), ['开发机 9', '主 mini', 'mini2', 'iPhone 11']);
   assert.equal(Date.parse(first.devices[0].until) - Date.parse(first.devices[0].since), 120 * 60_000);
   assert.equal(first.devices.length, 3); assert.equal(first.cards.length, 1); assert.equal(first.cards[0].title, '确认出包');
+  assert.equal(first.cards[0].default, '继续走公司通道'); assert.ok(Date.parse(first.cards[0].defaultAt) < now);
+  assert.equal(first.recentCards.length, 1); assert.equal(first.recentCards[0].answer, '先不出包'); assert.equal(first.cardMalformed, 1);
+  assert.deepEqual(first.releases.ppe, { version: '1.0.0.201', build: '176799342', at: new Date(now - 30 * 60_000).toISOString() });
+  assert.equal(first.releases.production.version, '1.0.0.105'); assert.equal(first.releases.production.build, '');
+  assert.equal(first.releases.lastCycle.result, '已发布');
+  assert.deepEqual(first.releases.nightly, { at: new Date(now - 60 * 60_000).toISOString(), passed: 1, total: 7,
+    failed: true, failures: ['failed-1', 'failed-2', 'failed-3', 'failed-4', 'failed-5'] });
+  assert.equal(first.releases.productionToday, null);
+  assert.ok(first.events.some((row) => row.text === 'W749 失败'));
+  assert.ok(first.events.some((row) => row.text === 'W750-finished 已完成'));
+  assert.ok(first.events.some((row) => row.text === 'W751-interrupted 已中断'));
+  assert.equal(first.tasks.find((row) => row.task === 'W751-interrupted').state, 'interrupted');
+  assert.equal(first.events.filter((row) => row.text === 'W746-check 已改派到 TRAE').length, 1);
+  assert.ok(first.events.some((row) => row.text === '规则升到 2026-11-23.2'));
+  assert.ok(first.events.some((row) => row.text === '提出待确认事项：确认出包'));
+  assert.ok(first.events.some((row) => row.text === 'TTADK 今日 额度用完'));
   assert.equal(first.quota.items.find((q) => q.id === 'ttadk').exhausted, true);
   assert.equal(first.quota.items.find((q) => q.id === 'main').resetCards, 3);
   const daily = await fs.readFile(path.join(history, '2026-11-23.ndjson'), 'utf8');
@@ -123,9 +180,36 @@ try {
   for (const raw of [daily, snapshot]) {
     for (const hidden of [fakeToken, fakeHost, fakeSerial, 'fd12::1234', 'example.invalid', 'main.local', 'mini2.local', 'iphone15pm', '正文不可见']) assert.ok(!raw.includes(hidden), `unexpected ${hidden}`);
   }
-  assert.equal(daily, snapshot);
+  assert.ok(daily.endsWith(snapshot));
   assert.deepEqual(await fs.readdir(history), ['2026-11-21.ndjson', '2026-11-23.ndjson']);
   assert.match(await fs.readFile(path.join(history, '2026-11-21.ndjson'), 'utf8'), /^\{"at":"2026-11-21T20:01:00.000Z"\}\n$/);
+
+  await fs.writeFile(sampleFile, JSON.stringify({ schema: 1, hosts: {
+    [fakeHost]: { at: (now - 60_000) / 1000, ok: true, cores: 64, load1: 8, load5: 7.7, load15: 6,
+      memAvailableGiB: 38, freeGiB: 290 },
+    'mini2.local': { at: (now - 50_000) / 1000, ok: true, cores: 10, load1: 2, load5: 1.8, load15: 1,
+      memAvailableGiB: 11, freeGiB: 99 },
+  } }));
+  ttadkUsed = 100;
+  const sharedFresh = await collect({ ...options, now: now + 1_000 });
+  assert.equal(sharedFresh.machines.find((m) => m.name === '开发机 9').load5, 7.7);
+  assert.equal(sharedFresh.machines.find((m) => m.name === '开发机 9').sampleSource, 'shared');
+  assert.ok(sharedFresh.events.some((row) => row.text === 'TTADK 今日 额度已重置'));
+  ttadkUsed = 1000;
+  await fs.writeFile(sampleFile, JSON.stringify({ schema: 1, hosts: {
+    [fakeHost]: { at: now / 1000, ok: false, errorClass: 'auth' },
+  } }));
+  const sharedAuth = await collect({ ...options, now: now + 2_000 });
+  assert.equal(sharedAuth.machines.find((m) => m.name === '开发机 9').sampleSource, 'scheduler');
+  assert.ok(sharedAuth.machines.find((m) => m.name === '开发机 9').faults.includes('sampler-auth'));
+  await fs.writeFile(sampleFile, JSON.stringify({ schema: 1, hosts: {
+    [fakeHost]: { at: (now - 4 * 60_000) / 1000, ok: true, cores: 64, load1: 8, load5: 9.9, load15: 6,
+      memAvailableGiB: 38, freeGiB: 290 },
+  } }));
+  const sharedOld = await collect({ ...options, now: now + 3_000 });
+  assert.equal(sharedOld.machines.find((m) => m.name === '开发机 9').load5, 3.1);
+  assert.equal(sharedOld.machines.find((m) => m.name === '开发机 9').sampleSource, 'scheduler');
+  await fs.rm(sampleFile);
 
   const metricFile = path.join(shared, 'devbox-metrics', `${fakeHost}.json`);
   await fs.rm(metricFile);
@@ -215,10 +299,13 @@ try {
   }
   assert.doesNotMatch(page.body, /(?:https?:\/\/|\b(?:src|href)=["']\/\/|url\s*\()/i);
   assert.match(page.body, /fetch\('\/snapshot\.json'/);
-  assert.doesNotMatch(page.body, /最近发生的事|发布与回归/);
-  assert.match(page.body, /开发机和 mini2 只在有任务申请时采样/);
+  assert.match(page.body, /最近发生的事/);
+  assert.match(page.body, /发布与回归/);
+  assert.match(page.body, /复制给秘书/);
+  assert.match(page.body, /每分钟共享采样 · 调度和板面共用/);
   assert.match(page.body, /申请时计算/);
   assert.match(page.body, /持有者未知/);
+  assert.match(page.body, /需要登录（Kerberos 票据过期）/);
   execFileSync('python3', ['-c', `
 from html.parser import HTMLParser
 import sys

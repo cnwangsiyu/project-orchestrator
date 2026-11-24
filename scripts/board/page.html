@@ -42,6 +42,9 @@ body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.7 var(--body)}
 .sec{font-size:12px;letter-spacing:.06em;color:var(--muted);font-weight:600;margin:0 0 8px;display:flex;justify-content:space-between;gap:8px}
 .block{margin-bottom:18px}
 .ask{border:1px solid var(--warn);background:var(--warn-soft);border-radius:8px;padding:10px 12px;margin-bottom:8px;font-weight:600;overflow-wrap:anywhere}
+.ask.urgent{border-color:var(--bad);box-shadow:inset 3px 0 var(--bad)}
+.ask b{display:block}.ask span{display:block;font-size:12.5px;color:var(--muted);font-weight:400}
+.recent{font-size:12.5px;color:var(--muted);margin-top:6px}.recent summary,.release summary{cursor:pointer}
 .lane{margin-bottom:16px}
 .lane h2{margin:0 0 6px;font-size:14px;font-weight:600;display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
 .lane h2 small{font-weight:400;color:var(--muted);font-size:12.5px}
@@ -56,6 +59,8 @@ body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.7 var(--body)}
 .detail dl{display:grid;grid-template-columns:auto minmax(0,1fr);gap:3px 12px;margin:0}
 .detail dt{color:var(--muted)} .detail dd{margin:0;overflow-wrap:anywhere}
 .copy{margin:8px 0 0;font:inherit;background:var(--surface);border:1px solid var(--line);color:var(--ink);border-radius:5px;cursor:pointer}
+.release{border:1px solid var(--line);border-radius:6px;padding:5px 9px;margin:0 0 8px;font-size:12.5px;color:var(--muted)}
+.release dl{display:grid;grid-template-columns:auto minmax(0,1fr);gap:2px 9px;margin:6px 0}.release dt{color:var(--muted)}.release dd{margin:0;color:var(--ink);overflow-wrap:anywhere}
 .host,.q{border-top:1px solid var(--line);padding:8px 0}
 .host .h,.q .h{display:flex;justify-content:space-between;gap:8px;font-size:13.5px;overflow-wrap:anywhere}
 .host .h{font-weight:500}
@@ -67,6 +72,9 @@ body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.7 var(--body)}
 .host small,.q small,.empty{font-size:12px;color:var(--muted);display:block;overflow-wrap:anywhere}
 .host .match,.q .match{color:var(--accent);font-weight:600}
 .notice{font-size:12px;color:var(--warn);margin:0 0 6px;overflow-wrap:anywhere}
+.events{margin:0;padding:0;list-style:none}.event-hour{margin:8px 0 0}.event-hour h3{font:12px var(--mono);color:var(--muted);margin:0}
+.event-hour ul{list-style:none;margin:0;padding:0}.event-hour li{display:grid;grid-template-columns:44px minmax(0,1fr);gap:8px;border-top:1px solid var(--line);padding:5px 0;font-size:12.5px}
+.event-hour time{font:12px var(--mono);color:var(--muted)}.event-hour .bad{color:var(--bad)}.event-hour .warn{color:var(--warn)}
 @media(prefers-reduced-motion:no-preference){details[open]>.detail{animation:in .15s ease-out}@keyframes in{from{opacity:.5}to{opacity:1}}}
 </style>
 </head>
@@ -90,9 +98,10 @@ body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.7 var(--body)}
       <div id="tasksNotice"></div><div id="lanes"></div>
     </div>
     <div class="pane">
-      <section class="block" aria-labelledby="machinesTitle"><h2 class="sec" id="machinesTitle">机器 <span>开发机和 mini2 只在有任务申请时采样</span></h2><div id="machinesNotice"></div><div id="machines"></div></section>
+      <section class="block" aria-labelledby="machinesTitle"><h2 class="sec" id="machinesTitle">机器 <span>每分钟共享采样 · 调度和板面共用</span></h2><div id="machinesNotice"></div><div id="machines"></div></section>
       <section class="block" aria-labelledby="devicesTitle"><h2 class="sec" id="devicesTitle">测试设备</h2><div id="devicesNotice"></div><div id="devices"></div></section>
       <section class="block" aria-labelledby="quotaTitle"><h2 class="sec" id="quotaTitle">额度 <span>重置时间</span></h2><div id="quotaNotice"></div><div id="quota"></div></section>
+      <section class="block" aria-labelledby="eventsTitle"><h2 class="sec" id="eventsTitle">最近发生的事 <span>12 小时</span></h2><div id="eventsNotice"></div><div id="events"></div></section>
     </div>
   </div>
 </div></main>
@@ -101,7 +110,7 @@ body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.7 var(--body)}
 const $ = (id) => document.getElementById(id);
 const projects = { 'video-agent': 'VAK', 'vesdk-mainline': 'Webview', 'lynx-view': 'Lynx', orchestrator: '全局规则' };
 const accounts = { trae: 'TRAE', ttadk: 'TTADK', main: '个人 main', b: '个人 b', claude: 'Claude' };
-const sources = { workers: '任务状态', notes: '进展', routes: '路由', cards: '待确认事项', audit: '开发机审计', hostMetrics: '机器样本', devboxLeases: '开发机租约', localLeases: 'mini 租约', devices: '设备', quota: '额度' };
+const sources = { workers: '任务状态', notes: '进展', routes: '路由', cards: '待确认事项', releases: '发布与回归', activity: '最近事件', quotaHistory: '额度历史', audit: '开发机审计', hostMetrics: '调度器机器样本', hostSamples: '共享机器样本', devboxLeases: '开发机租约', localLeases: 'mini 租约', devices: '设备', quota: '额度' };
 const poolLabels = { 'devbox-cn': '重型', 'devbox-cn-light': '轻型', local: '通道', 'local-light': '轻型', 'local-build': '完整构建', mini2: '轻型' };
 const order = ['开发机 9', '开发机 8', '开发机 1', '主 mini', 'mini2'];
 const signatures = new WeakMap();
@@ -136,7 +145,8 @@ function reconcile(parent, nodes) {
 }
 function status(task) {
   if (task.state === 'failed') return ['bad', '失败', 0];
-  if (task.state === 'stalled') return ['bad', '卡住', 0];
+  if (task.state === 'interrupted') return ['warn', '中断', 0];
+  if (task.state === 'stalled') return ['warn', '卡住', 0];
   if (task.state === 'queued') {
     const ms = age(task.queueSince || task.startedAt);
     return [ms > 300_000 ? 'warn' : 'idle', `排队 ${duration(ms)}`, ms > 300_000 ? 1 : 3];
@@ -162,12 +172,20 @@ function taskNode(task) {
     const details = el('details', '', summary, el('div', 'detail', dl, copy));
     row = { details, dot, title, desc, state, meta, dl, copy };
     copy.addEventListener('click', async () => {
-      try { await navigator.clipboard.writeText(`${row.task} 现在什么情况？`); copy.textContent = '已复制'; }
+      const message = `${row.task} 现在什么情况？`;
+      try {
+        await navigator.clipboard.writeText(message); copy.textContent = '已复制';
+        row.copyField?.remove(); row.copyField = null;
+      }
       catch {
-        const field = el('input'); field.value = `${row.task} 现在什么情况？`; field.readOnly = true; copy.after(field); field.select();
-        try { copy.textContent = document.execCommand('copy') ? '已复制' : '请手动复制任务名'; }
-        catch { copy.textContent = '请手动复制任务名'; }
-        field.remove(); copy.focus();
+        const field = row.copyField ?? el('input');
+        field.value = message; field.readOnly = true;
+        if (!row.copyField) { copy.after(field); row.copyField = field; }
+        field.focus(); field.select();
+        let copied = false;
+        try { copied = document.execCommand('copy'); } catch { /* Keep the selected fallback field. */ }
+        copy.textContent = copied ? '已复制' : '请手动复制选中文字';
+        if (copied) { field.remove(); row.copyField = null; copy.focus(); }
       }
     });
     taskNodes.set(task.id, row);
@@ -183,13 +201,31 @@ function taskNode(task) {
   const held = resources(task);
   const lane = [accounts[task.account] ?? task.account, task.model || '模型未知', task.effort || '强度未知'].filter(Boolean).join(' · ');
   update(row.meta, [lane, ...held], ([label, ...items]) => [el('span', 'pill acc', label), ...items.map((item) => el('span', 'pill', item))]);
-  update(row.dl, [task.owner, task.startedAt, task.routeWhy, held.join('、'), task.latestNote, task.queuePosition],
-    ([owner, started, route, held, note, position]) => [['负责', owner], ['时间', time(started, fullClock)], ['为什么在这条通道', route],
-      ['占用', held || '无'], ['最近进展', note], ...(position != null ? [['队列位置', String(position)]] : [])]
+  const queue = task.queueSince || task.queueState || task.queueStalled ? [task.queueStalled || task.state === 'stalled' ? '卡住' : task.state === 'queued' ? '排队中' : task.queueState || '运行中',
+    task.queuePosition != null ? `位置 ${task.queuePosition}` : '', Number.isFinite(task.queueWaitMinutes) ? `已等 ${duration(task.queueWaitMinutes * 60_000)}` : ''].filter(Boolean).join(' · ') : '未排队';
+  const noteText = task.lastNotes?.length ? task.lastNotes.map((note, i) => `${i + 1}. ${note}`).join('；') : task.latestNote;
+  update(row.dl, [task.owner, task.startedAt, task.routeWhy, held.join('、'), noteText, queue, task.ownerNoticeOpen],
+    ([owner, started, route, held, notes, queue, notice]) => [['负责', owner], ['时间', time(started, fullClock)], ['为什么在这条通道', route],
+      ['队列状态', queue], ['负责会话通知', notice ? '有一条未处理通知' : '没有未处理通知'], ['占用', held || '无'], ['最近三条进展', notes]]
       .flatMap(([k, v]) => [el('dt', '', k), el('dd', '', v || '—')]));
   return row.details;
 }
-function renderTasks(tasks) {
+function releaseDetails(value) {
+  const details = el('details', 'release');
+  details.append(el('summary', '', '发布与回归详情'));
+  const nightly = value.nightly;
+  const pairs = [
+    ['PPE', `${value.ppe?.version || '未知'}${value.ppe?.build ? ` / 构建 ${value.ppe.build}` : ' / 构建未知'} · ${time(value.ppe?.at, fullClock)}`],
+    ['生产', `${value.production?.version || '未知'}${value.production?.build ? ` / 构建 ${value.production.build}` : ' / 构建未知'} · ${time(value.production?.at, fullClock)}`],
+    ['上次 PPE 周期', value.lastCycle ? `${value.lastCycle.result} · ${time(value.lastCycle.at, fullClock)}` : '未知'],
+    ['上次夜间回归', nightly ? `${nightly.passed}/${nightly.total} 通过 · ${time(nightly.at, fullClock)}` : '未知'],
+    ['失败单元', nightly?.failures?.length ? nightly.failures.join('、') : nightly ? '无' : '未知'],
+    ['今天生产发布', value.productionToday == null ? '未知' : `${value.productionToday} 次`],
+  ];
+  details.append(el('dl', '', ...pairs.flatMap(([k, v]) => [el('dt', '', k), el('dd', '', v)])));
+  return details;
+}
+function renderTasks(tasks, releases) {
   const groups = new Map(Object.keys(projects).map((p) => [p, []]));
   for (const task of tasks) (groups.get(task.project) ?? groups.get('general') ?? groups.set('general', []).get('general')).push(task);
   const keep = new Set(tasks.map((t) => t.id));
@@ -197,13 +233,16 @@ function renderTasks(tasks) {
   const visible = [];
   for (const [project, group] of groups) {
     if (!laneNodes.has(project)) {
-      const count = el('small'), list = el('div');
-      laneNodes.set(project, { count, list, lane: el('section', 'lane', el('h2', '', projects[project] ?? '其他', count), list) });
+      const count = el('small'), list = el('div'), release = el('div');
+      laneNodes.set(project, { count, list, release, lane: el('section', 'lane', el('h2', '', projects[project] ?? '其他', count), release, list) });
     }
-    const { count, list, lane } = laneNodes.get(project);
+    const { count, list, release, lane } = laneNodes.get(project);
     lane.hidden = selected !== 'all' && project !== selected;
     const active = group.filter((t) => t.state === 'running').length;
-    count.textContent = `${active} 个在跑${active === group.length ? '' : ` · ${group.length - active} 个待留意`}`;
+    const releaseLine = project === 'video-agent' ? ` · PPE ${releases.ppe?.version || '未知'} · 生产 ${releases.production?.version || '未知'} · 今天生产 ${releases.productionToday ?? '未知'} 次` : '';
+    count.textContent = `${active} 个在跑${active === group.length ? '' : ` · ${group.length - active} 个待留意`}${releaseLine}`;
+    if (project === 'video-agent') update(release, releases, (value) => [releaseDetails(value)]);
+    else release.replaceChildren();
     group.sort((a, b) => status(a)[2] - status(b)[2] || (a.startedAt ?? '').localeCompare(b.startedAt ?? '') || a.id.localeCompare(b.id));
     if (group.length) reconcile(list, group.map(taskNode));
     else if (list.firstElementChild?.className !== 'empty') list.replaceChildren(el('small', 'empty', '暂无任务'));
@@ -224,7 +263,7 @@ function holderText(row) {
 function renderMachines(machines) {
   return [...machines].sort((a, b) => (order.indexOf(a.name) + 6) % 6 - (order.indexOf(b.name) + 6) % 6).map((m) => {
     const load = Number.isFinite(m.load5) && m.cores > 0;
-    const sampled = m.sampleOnDemand && m.sampledAt ? `${duration(age(m.sampledAt))}前采样` : '';
+    const sampled = m.sampledAt ? `${m.sampleSource === 'shared' ? '共享采样' : '调度器样本'} · ${duration(age(m.sampledAt))}前` : '';
     const status = [load ? `负载 ${decimal(m.load5)}/${m.cores}` : '负载未知', sampled,
       Number.isFinite(m.availableGiB) ? `可用 ${decimal(m.availableGiB)} GiB` : ''].filter(Boolean).join(' · ');
     const metrics = [Number.isFinite(m.spareCores) ? `预计余 ${decimal(m.spareCores)} 核` : '',
@@ -243,7 +282,8 @@ function renderMachines(machines) {
     }
     const list = [...owners].flatMap(([name, row], i) => [i ? '、' : '', el('span', row.match ? 'match' : '', `${name}${row.count > 1 ? ` × ${row.count}` : ''}`)]);
     const faultLabels = { 'metrics-missing': '机器样本文件缺失', 'metrics-invalid': '机器样本无法读取',
-      'metrics-old-with-lease': '有租约，机器样本已超过 6 小时', 'link-down': '链路未就绪', 'res-failed': '资源状态读取失败' };
+      'metrics-old-with-lease': '有租约，机器样本已超过 6 小时', 'link-down': '链路未就绪', 'res-failed': '资源状态读取失败',
+      'sampler-auth': '需要登录（Kerberos 票据过期）' };
     return el('div', 'host', el('div', 'h', `${m.name}${m.cores ? ` · ${m.cores} 核` : ''}${m.memGiB ? ` / ${m.memGiB} GiB` : ''}`, el('span', '', status)),
       meter(load ? 100 * m.load5 / m.cores : null, `${m.name} 负载`, m.fault ? 'warn' : ''),
       el('small', '', m.held ? `${m.held} 个租约${list.length ? '：' : ' · 持有者未知'}` : '空闲', ...list),
@@ -269,6 +309,34 @@ function renderQuota({ items, hubs }) {
   if (hubs.length) lanes.push(el('div', 'q', el('small', '', 'Hub：', hubs.map((h) => `${accounts[h.name] ?? h.name} ${h.state === 'up' ? '正常' : h.state === 'down' ? '离线' : h.state === 'degraded' ? '异常' : '未知'}`).join(' · '))));
   return lanes;
 }
+function renderCards(cards, recent, missing) {
+  if (cards.length) return cards.map((card) => {
+    const until = card.defaultAt ? Date.parse(card.defaultAt) - Date.now() : null;
+    const urgent = until != null && until <= 30 * 60_000;
+    const applies = !card.defaultAt ? '生效时间未知' : until <= 0 ? `已于 ${time(card.defaultAt, fullClock)} 生效` : `${time(card.defaultAt, fullClock)} 生效${urgent ? ` · 还有 ${duration(until)}` : ''}`;
+    const project = projects[card.project] ?? '其他';
+    return el('div', `ask${urgent ? ' urgent' : ''}`, el('b', '', `${project}：${card.title}`),
+      el('span', '', `${time(card.at, fullClock)} 提出 · 已等 ${duration(age(card.at))}`),
+      el('span', '', `不回复的默认：${card.default || '未知'} · ${applies}`));
+  });
+  const rows = [el('small', 'empty', missing ? '暂无可用的待确认事项数据' : '没有等你的事')];
+  if (recent.length) rows.push(el('details', 'recent', el('summary', '', `最近回答的 ${recent.length} 张`),
+    ...recent.map((card) => el('div', 'q', `${projects[card.project] ?? '其他'}：${card.title}`, el('small', '', `${time(card.answeredAt, fullClock)} · ${card.answer || '已回答'}`)))));
+  return rows;
+}
+function renderEvents(events) {
+  const visible = events.filter((event) => selected === 'all' || event.project === selected);
+  if (!visible.length) return [el('small', 'empty', '最近 12 小时没有匹配的事件')];
+  const groups = new Map();
+  for (const event of visible) {
+    const date = new Date(event.at); date.setMinutes(0, 0, 0);
+    const key = date.toISOString();
+    const list = groups.get(key) ?? []; list.push(event); groups.set(key, list);
+  }
+  return [...groups].map(([hour, rows]) => el('section', 'event-hour', el('h3', '', `${time(hour, fullClock).replace(/:\d{2}/, ':00')}`),
+    el('ul', '', ...rows.map((event) => el('li', '', el('time', '', time(event.at)),
+      el('span', event.tone || '', `${selected === 'all' && projects[event.project] ? `${projects[event.project]} · ` : ''}${event.text}`))))));
+}
 function notices(target, ids, extra = '') {
   const messages = ids.flatMap((id) => {
     const block = snapshot.blocks[id];
@@ -281,31 +349,38 @@ function notices(target, ids, extra = '') {
 }
 function render() {
   if (!snapshot) return;
-  const { at, tasks, machines, devices, cards, quota, blocks } = snapshot;
+  const { at, tasks, machines, devices, cards, recentCards = [], cardMalformed = 0, quota, releases = {}, events = [], blocks } = snapshot;
   const old = age(at), severity = old > 300_000 ? 'bad' : old > 90_000 ? 'warn' : '';
   const running = tasks.filter((t) => t.state === 'running').length;
-  const trouble = tasks.filter((t) => status(t)[2] < 2).length;
+  const stalled = tasks.filter((t) => t.state === 'stalled' || t.queueStalled).length;
+  const failed = tasks.filter((t) => t.state === 'failed').length;
   const spent = quota.items.filter((q) => q.exhausted && (!q.resetsAt || Date.parse(q.resetsAt) > Date.now())).length;
   const stale = Object.values(blocks).filter((b) => b.stale).length;
   const machineFaults = machines.filter((m) => m.fault).length;
-  $('bar').className = `bar ${severity}`;
-  $('verdictDot').className = `dot ${severity || (trouble ? 'bad' : cards.length || spent || stale || machineFaults || unavailable ? 'warn' : '')}`;
+  const nightlyFailed = releases.nightly?.failed === true;
+  const red = severity === 'bad' || failed || nightlyFailed;
+  const amber = severity === 'warn' || stalled || cards.length || spent || stale || machineFaults || unavailable;
+  $('bar').className = `bar ${red ? 'bad' : amber ? 'warn' : ''}`;
+  $('verdictDot').className = `dot ${red ? 'bad' : amber ? 'warn' : ''}`;
   const count = (key, value) => blocks[key]?.stale && !blocks[key]?.updatedAt ? '—' : value;
   $('verdict').textContent = [`${count('cards', cards.length)} 件事等你`, `${count('workers', running)} 个任务在跑`,
-    trouble ? `${trouble} 个任务需留意` : '', spent ? `${spent} 条通道额度用完` : '', machineFaults ? `${machineFaults} 台机器需留意` : '',
+    stalled ? `${stalled} 个队列卡住` : '', failed ? `${failed} 个任务失败` : '', nightlyFailed ? '夜间回归有失败' : '',
+    spent ? `${spent} 条通道额度用完` : '', machineFaults ? `${machineFaults} 台机器需留意` : '',
     stale ? `${stale} 项数据未更新` : ''].filter(Boolean).join(' · ');
   $('fresh').textContent = `${time(at, fullClock)} · ${old < 60_000 ? `${Math.floor(old / 1000)} 秒` : duration(old)}前更新${unavailable ? ' · 连接中断' : ''}`;
   $('cardCount').textContent = count('cards', cards.length);
-  update($('cards'), [cards, blocks.cards?.stale && !blocks.cards.updatedAt], ([cards, missing]) => cards.length ? cards.map((c) => el('div', 'ask', c.title)) : [el('small', 'empty', missing ? '暂无可用的待确认事项数据' : '没有等你的事')]);
-  renderTasks(tasks);
+  update($('cards'), [cards, recentCards, blocks.cards?.stale && !blocks.cards.updatedAt], ([open, recent, missing]) => renderCards(open, recent, missing));
+  renderTasks(tasks, releases);
   update($('machines'), [machines, selected], ([m]) => m.length ? renderMachines(m) : [el('small', 'empty', '暂无机器数据')]);
   update($('devices'), [devices, selected], ([d]) => d.length ? renderDevices(d) : [el('small', 'empty', '暂无设备数据')]);
   update($('quota'), quota, renderQuota);
-  notices('cardsNotice', ['cards']);
+  update($('events'), [events, selected], ([rows]) => renderEvents(rows));
+  notices('cardsNotice', ['cards'], cardMalformed ? `待确认事项：忽略了 ${cardMalformed} 行格式错误的记录` : '');
   notices('tasksNotice', ['workers', 'notes', 'routes', ...Object.keys(projects).filter((p) => selected === 'all' || selected === p).map((p) => `tasks:${p}`)]);
-  notices('machinesNotice', ['audit', 'hostMetrics', 'devboxLeases', 'localLeases', ...Object.keys(poolLabels).map((p) => `pool:${p}`)]);
+  notices('machinesNotice', ['audit', 'hostMetrics', 'hostSamples', 'devboxLeases', 'localLeases', ...Object.keys(poolLabels).map((p) => `pool:${p}`)]);
   notices('devicesNotice', ['devices']);
   notices('quotaNotice', ['quota'], quota.fallback ? '实时额度不可读，显示本地缓存 · ' + time(quota.checkedAt, fullClock) : '');
+  notices('eventsNotice', ['activity', 'quotaHistory', 'releases']);
 }
 $('tabs').addEventListener('click', (event) => {
   const button = event.target.closest('button[data-project]');

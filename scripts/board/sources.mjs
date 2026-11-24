@@ -55,15 +55,16 @@ async function jsonFile(file, signal, { optional = false } = {}) {
   try { return JSON.parse(await fs.readFile(file, { encoding: 'utf8', signal })); }
   catch (error) { if (optional && error.code === 'ENOENT') return null; throw error; }
 }
-async function ndjson(file, signal, visit, { optional = false, strict = false } = {}) {
+async function ndjson(file, signal, visit, { optional = false, strict = false, invalid } = {}) {
   const input = createReadStream(file, { signal, encoding: 'utf8' });
   const lines = createInterface({ input, crlfDelay: Infinity });
   try {
     for await (const line of lines) {
       if (!line.trim()) continue;
       let row;
-      try { row = JSON.parse(line); } catch (error) { if (strict) throw error; continue; }
+      try { row = JSON.parse(line); } catch (error) { if (invalid) { invalid(); continue; } if (strict) throw error; continue; }
       if (object(row)) visit(row);
+      else if (invalid) invalid();
       else if (strict) throw boardError('记录格式无法识别');
     }
   } catch (error) { if (!optional || error.code !== 'ENOENT') throw error; }
@@ -82,7 +83,8 @@ function worker(row, state, startedAt = row.startedAt) {
       (Object.hasOwn(projects, project) ? `${projects[project]} 主对话` : '负责会话') : row.owner,
     account, model: string(row.actualModel) || string(row.model), effort: string(row.effort), state,
     startedAt: iso(startedAt), lastActivityAt: iso(row.lastActivityAt), queueSince: iso(queue.since ?? queue.queuedAt ?? queue.at),
-    queuePosition: number(queue.position),
+    queuePosition: number(queue.position), queueState: string(queue.state), queueStalled: row.queueStalled === true,
+    queueWorkedMinutes: number(queue.workedMinutesBefore),
   };
 }
 export function parseWorkers(data) {
@@ -161,16 +163,31 @@ export function parseStatus(text) {
   return result;
 }
 
-export function parseCards(events, now) {
+export function parseCards(events, now, malformed = 0) {
   const cards = new Map();
   for (const row of events) {
     if (!row.id || !iso(row.at)) continue;
     const at = iso(row.at);
-    if (Date.parse(at) > now || (cards.get(row.id)?.at ?? '') > at) continue;
-    if (['asked', 'answered', 'withdrawn'].includes(row.event)) cards.set(row.id, { ...row, at });
+    if (Date.parse(at) > now || !['asked', 'answered', 'withdrawn'].includes(row.event)) continue;
+    const state = cards.get(row.id) ?? { asked: null, latest: null };
+    if (row.event === 'asked' && (!state.asked || state.asked.at < at)) state.asked = { ...row, at };
+    if (!state.latest || state.latest.at < at) state.latest = { ...row, at };
+    cards.set(row.id, state);
   }
-  return [...cards.values()].filter((row) => row.event === 'asked' && (row.defaultAt == null || Date.parse(row.defaultAt) > now))
-    .map((row) => ({ title: string(row.title) || '待确认事项', project: string(row.project), at: row.at })).sort((a, b) => a.at.localeCompare(b.at));
+  const detail = ({ asked, latest }) => ({ title: string(asked?.title) || '待确认事项', project: string(asked?.project),
+    at: asked?.at ?? latest.at, default: string(asked?.default), defaultAt: iso(asked?.defaultAt),
+    answeredAt: latest.event === 'answered' ? latest.at : null, answer: latest.event === 'answered' ? string(latest.answer) : '' });
+  const open = [...cards.values()].filter((row) => row.latest?.event === 'asked').map(detail).sort((a, b) => a.at.localeCompare(b.at));
+  const recent = [...cards.values()].filter((row) => row.latest?.event === 'answered').map(detail)
+    .sort((a, b) => b.answeredAt.localeCompare(a.answeredAt)).slice(0, 3);
+  const timeline = [...cards.values()].flatMap(({ asked, latest }) => {
+    const rows = [];
+    if (asked && now - Date.parse(asked.at) <= 12 * 3600_000) rows.push({ at: asked.at, project: string(asked.project), text: `提出待确认事项：${string(asked.title) || '未命名事项'}` });
+    if (latest?.event === 'answered' && now - Date.parse(latest.at) <= 12 * 3600_000) rows.push({ at: latest.at,
+      project: string(asked?.project), text: `已回答：${string(asked?.title) || '待确认事项'}` });
+    return rows;
+  });
+  return { open, recent, timeline, malformed };
 }
 
 function hostAliases(registry, labels) {
@@ -207,6 +224,15 @@ function metricSample(value) {
   return { sampledAt, cores, load5, availableGiB, freeGiB };
 }
 
+function sharedSample(value) {
+  record(value, '共享机器样本');
+  const sampledAt = iso(value.at);
+  const errorClass = ['auth', 'timeout', 'refused', 'other'].includes(value.errorClass) ? value.errorClass : null;
+  if (value.ok !== true) return { state: 'failed', sampledAt, errorClass };
+  const sample = metricSample(value);
+  return { ...sample, state: 'ok', errorClass };
+}
+
 async function readMetric(file, signal) {
   try { return { state: 'ok', ...metricSample(await jsonFile(file, signal)) }; }
   catch (error) {
@@ -217,8 +243,104 @@ async function readMetric(file, signal) {
   }
 }
 
+async function latestCycle(file, signal) {
+  let latest = null;
+  await ndjson(file, signal, (row) => { if (iso(row.at) && (!latest || Date.parse(row.at) > Date.parse(latest.at))) latest = row; }, { optional: true });
+  if (!latest) return null;
+  const result = latest.rollback ? '已回滚' : latest.release ? '已发布' : latest.code && latest.code !== 0 || latest.selfCheckFailed ? '失败'
+    : latest.skip ? `跳过：${string(latest.reason) || '没有满足发布条件'}` : '完成，无发布';
+  return { at: iso(latest.at), result, failed: result === '失败' };
+}
+
+async function latestNightly(root, signal) {
+  let entries;
+  try { entries = await fs.readdir(path.join(root, 'runs'), { withFileTypes: true }); }
+  catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+  for (const entry of entries.filter((row) => row.isDirectory()).sort((a, b) => b.name.localeCompare(a.name))) {
+    const report = await jsonFile(path.join(root, 'runs', entry.name, 'report.json'), signal, { optional: true });
+    if (!report || !Array.isArray(report.rows) || !report.rows.length) continue;
+    const rows = report.rows.filter((row) => object(row) && typeof row.status === 'string');
+    if (!rows.length) continue;
+    const failures = rows.filter((row) => row.status !== 'PASS').map((row) => string(row.job) || '未命名单元').slice(0, 5);
+    return { at: iso(report.end ?? report.start), passed: rows.length - rows.filter((row) => row.status !== 'PASS').length,
+      total: rows.length, failed: failures.length > 0, failures };
+  }
+  return null;
+}
+
+async function releaseState(vakRoot, nightlyRoot, signal, now) {
+  const state = await jsonFile(path.join(vakRoot, 'ppe-state.json'), signal, { optional: true });
+  const main = object(state?.mainPpe) ? state.mainPpe : {};
+  const transaction = object(state?.autoRelease?.lastTransaction) ? state.autoRelease.lastTransaction : {};
+  const [lastCycle, nightly] = await Promise.all([
+    latestCycle(path.join(nightlyRoot, 'vak-ppe-release/cycle-events.jsonl'), signal),
+    latestNightly(path.join(nightlyRoot, 'vak-web'), signal),
+  ]);
+  const releaseEvents = Array.isArray(state?.autoRelease?.history) ? state.autoRelease.history.filter((row) => {
+    const at = iso(row.deployedAt ?? row.at);
+    return at && now - Date.parse(at) <= 12 * 3600_000;
+  }).map((row) => ({ at: iso(row.deployedAt ?? row.at), project: 'video-agent', text: 'VAK PPE 已发布' })) : [];
+  return { ppe: { version: string(main.version), build: main.scm == null ? '' : String(main.scm), at: iso(main.deployedAt) },
+    production: { version: string(transaction.prodVersion), build: '', at: iso(transaction.updatedAt ?? transaction.startedAt) },
+    lastCycle, nightly, productionToday: null, releaseEvents };
+}
+
+async function quotaHistory(data, signal, now) {
+  const root = path.join(data, 'history');
+  let entries;
+  try { entries = await fs.readdir(root, { withFileTypes: true }); }
+  catch (error) { if (error.code === 'ENOENT') return []; throw error; }
+  const rows = [];
+  for (const entry of entries.filter((row) => row.isFile() && /^\d{4}-\d{2}-\d{2}\.ndjson$/.test(row.name)).sort((a, b) => a.name.localeCompare(b.name))) {
+    await ndjson(path.join(root, entry.name), signal, (snapshot) => {
+      const at = iso(snapshot.at);
+      if (!at || now - Date.parse(at) > 12 * 3600_000 || !Array.isArray(snapshot.quota?.items)) return;
+      rows.push({ at, items: snapshot.quota.items.map((row) => ({ id: string(row.id), label: string(row.label),
+        exhausted: row.exhausted === true, resetsAt: iso(row.resetsAt), percent: number(row.percent) })) });
+    }, { optional: true });
+  }
+  return rows.slice(-1500);
+}
+
+async function activityState(shared, rulesFile, signal, now) {
+  const cutoff = now - 12 * 3600_000;
+  const events = [];
+  const rerouted = new Set();
+  await ndjson(path.join(shared, 'worker-events.jsonl'), signal, (row) => {
+    const at = iso(row.t);
+    if (!at || Date.parse(at) < cutoff || !row.project || !(row.task || row.name)) return;
+    const task = string(row.task) || string(row.name);
+    if (row.event === 'finished') events.push({ at, project: string(row.project), text: `${task} 已完成`, tone: 'ok' });
+    else if (row.event === 'failed') events.push({ at, project: string(row.project),
+      text: row.status === 'interrupted' ? `${task} 已中断` : `${task} 失败`, tone: row.status === 'interrupted' ? 'warn' : 'bad' });
+    else if (row.event === 're-routed') {
+      const lane = { trae: 'TRAE', ttadk: 'TTADK', main: '个人 main', b: '个人 b' }[row.account] ?? (string(row.account) || '其他通道');
+      events.push({ at, project: string(row.project), text: `${task} 已改派到 ${lane}`, tone: 'warn' });
+      rerouted.add(`${row.project}\0${task}`);
+    }
+  }, { optional: true });
+  const route = new Map();
+  await ndjson(path.join(shared, 'route-log.jsonl'), signal, (row) => {
+    const at = iso(row.t);
+    if (!at || Date.parse(at) < cutoff || row.kind !== 'launch-model' || !row.project || !row.name) return;
+    const id = `${row.project}\0${row.name}`;
+    const before = route.get(id);
+    if (row.state === 'running' && before?.account && before.account !== row.account && before.state !== 'completed') {
+      const lane = { trae: 'TRAE', ttadk: 'TTADK', main: '个人 main', b: '个人 b' }[row.account] ?? (string(row.account) || '其他通道');
+      if (!rerouted.has(id)) events.push({ at, project: string(row.project), text: `${string(row.name)} 已改派到 ${lane}`, tone: 'warn' });
+    }
+    if (row.actualStatus === 'KNOWN' || row.state !== 'running') route.set(id, { account: string(row.account), state: string(row.state) });
+  }, { optional: true });
+  try {
+    const [text, stat] = await Promise.all([fs.readFile(rulesFile, { encoding: 'utf8', signal }), fs.stat(rulesFile)]);
+    const version = /^version:\s*(\S+)/m.exec(text)?.[1];
+    if (version && stat.mtimeMs >= cutoff) events.push({ at: stat.mtime.toISOString(), project: 'orchestrator', text: `规则升到 ${version}`, tone: 'ok' });
+  } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  return events;
+}
+
 export function makeSources({ data, shared = process.env.RULES_SHARED || path.join(os.homedir(), '.claude/orchestrator/_shared'),
-  home = os.homedir(), command = run, labels, now }) {
+  home = os.homedir(), command = run, labels, now, sampleFile = path.join(shared, 'host-samples/latest.json'), sourcePaths = {} }) {
   const res = (...args) => command(path.join(shared, 'res'), args.slice(1), args[0]);
   const quota = (signal, ...args) => command(process.execPath, [quotaScript, ...args], signal).then(JSON.parse);
   // Share these subprocesses across sources; each consumer still has its own
@@ -259,6 +381,26 @@ export function makeSources({ data, shared = process.env.RULES_SHARED || path.jo
       return [...devboxes, { host: labels['mini2-exec-1'], kind: 'mini2',
         ...await readMetric(path.join(shared, 'mini2-metrics.json'), signal) }];
     },
+    hostSamples: async (signal) => {
+      const value = await jsonFile(sampleFile, signal, { optional: true });
+      if (value === null) return [];
+      if (value.schema !== 1) throw boardError('共享机器样本格式无法识别');
+      const hosts = record(value.hosts, '共享机器样本');
+      const [registry, name] = await Promise.all([getRegistry(), names()]);
+      const rows = [];
+      for (const host of [...new Set(registry.filter((row) => row.policy === 'open' && row.kind === 'remote' && /^devbox-cn-/.test(row.slot))
+        .map((row) => string(row.host)).filter(Boolean))]) {
+        if (object(hosts[host])) rows.push({ host: name.remote(host), kind: 'devbox', ...sharedSample(hosts[host]) });
+      }
+      const miniRegistry = registry.find((row) => row.slot === 'mini2-exec-1');
+      let miniHost = string(miniRegistry?.host);
+      if (!miniHost) {
+        try { miniHost = string(JSON.parse(await res(signal, 'slot-host', 'mini2-exec-1')).host); }
+        catch { /* An absent mini2 row only removes the optional shared sample. */ }
+      }
+      if (miniHost && object(hosts[miniHost])) rows.push({ host: labels['mini2-exec-1'], kind: 'mini2', ...sharedSample(hosts[miniHost]) });
+      return rows;
+    },
     devboxLeases: async (signal) => {
       const [raw, registry, name] = await Promise.all([res(signal, 'status', 'devbox-cn'), getRegistry(), names()]);
       const hosts = new Map(registry.filter((row) => row.policy === 'open' && row.kind === 'remote').map((row) => [row.slot, row.host]));
@@ -281,17 +423,23 @@ export function makeSources({ data, shared = process.env.RULES_SHARED || path.jo
           label: row.id.startsWith('mini2') ? '租约' : row.id.startsWith('heavy-build') ? '构建位' : '通道' }));
     },
     cards: async (signal) => {
-      const events = [];
-      await ndjson(path.join(data, 'cards.ndjson'), signal, (row) => events.push(row), { optional: true, strict: true });
-      return parseCards(events, now);
+      const events = []; let malformed = 0;
+      await ndjson(path.join(data, 'cards.ndjson'), signal, (row) => events.push(row), { optional: true, invalid: () => malformed++ });
+      return parseCards(events, now, malformed);
     },
     notes: async (signal, workers) => {
-      const latest = new Map(), lifecycle = new Map();
+      const notes = new Map(), lifecycle = new Map(), notices = new Map();
       await ndjson(path.join(shared, 'worker-events.jsonl'), signal, (row) => {
         if (!row.project || !(row.task || row.name)) return;
         if (row.event === 'message' && typeof row.text === 'string') {
           const id = taskKey({ ...row, task: row.task || row.name });
-          if (!latest.has(id) || row.t >= latest.get(id).t) latest.set(id, { text: row.text, t: row.t });
+          if (row.kind === 'queue-stalled' && row.noticeId) {
+            const before = notices.get(row.noticeId);
+            if (!before || row.t >= before.t) notices.set(row.noticeId, { id, t: row.t, open: !row.ackAt });
+          } else {
+            const list = notes.get(id) ?? [];
+            list.push({ text: row.text, t: row.t }); notes.set(id, list);
+          }
         }
         if (['failed', 'running', 'finished', 'retired'].includes(row.event) && row.name && iso(row.t)) {
           if (now - Date.parse(iso(row.t)) > 30 * 60_000) return;
@@ -299,9 +447,14 @@ export function makeSources({ data, shared = process.env.RULES_SHARED || path.jo
           if (!lifecycle.has(id) || row.t >= lifecycle.get(id).t) lifecycle.set(id, row);
         }
       });
-      const failed = [...lifecycle.values()].filter((row) => row.event === 'failed').map((row) => worker(row, 'failed', row.startedAt ?? row.t));
+      const failed = [...lifecycle.values()].filter((row) => row.event === 'failed')
+        .map((row) => worker(row, row.status === 'interrupted' ? 'interrupted' : 'failed', row.startedAt ?? row.t));
       const wanted = new Set([...workers, ...failed].map((row) => row.taskRef));
-      return { latest: Object.fromEntries([...latest].filter(([k]) => wanted.has(k)).map(([k, v]) => [k, v.text])), failed };
+      const last = Object.fromEntries([...notes].filter(([k]) => wanted.has(k)).map(([k, list]) => [k,
+        list.sort((a, b) => b.t - a.t).slice(0, 3).map((row) => row.text)]));
+      const openNotices = new Set([...notices.values()].filter((row) => row.open).map((row) => row.id));
+      return { latest: Object.fromEntries(Object.entries(last).map(([k, list]) => [k, list[0]])), notes: last,
+        notices: Object.fromEntries([...wanted].map((id) => [id, openNotices.has(id)])), failed };
     },
     routes: async (signal, workers) => {
       const latest = new Map(), wanted = new Set(workers.map((w) => w.routeRef));
@@ -313,6 +466,11 @@ export function makeSources({ data, shared = process.env.RULES_SHARED || path.jo
       });
       return Object.fromEntries([...latest].map(([k, v]) => [k, v.text]));
     },
+    releases: (signal) => releaseState(sourcePaths.vakRoot ?? path.join(home, 'code/.claude-data/orchestrator/video-agent'),
+      sourcePaths.nightlyRoot ?? path.join(shared, 'nightly'), signal, now),
+    activity: (signal) => activityState(shared,
+      sourcePaths.rulesFile ?? fileURLToPath(new URL('../../references/global-rules.md', import.meta.url)), signal, now),
+    quotaHistory: (signal) => quotaHistory(data, signal, now),
   };
   for (const pool of pools) sources[`pool:${pool}`] = async (signal) => {
     const [raw, name] = await Promise.all([res(signal, 'pool-capacity', pool).then(JSON.parse),

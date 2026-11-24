@@ -14,14 +14,20 @@ const DAY = 86_400_000;
 const HOUR = 3_600_000;
 const defaultData = path.join(os.homedir(), '.claude/orchestrator/_shared/board');
 const hostMap = new URL('./hosts.json', import.meta.url);
-const emptySource = (id) => id === 'notes' ? { latest: {}, failed: [] } : id === 'devboxLeases' ? { holds: [], load: {} }
-  : id.startsWith('tasks:') || id === 'routes' ? {} : id === 'quota' ? { items: [], hubs: [] } : [];
+const emptySource = (id) => id === 'notes' ? { latest: {}, notes: {}, notices: {}, failed: [] }
+  : id === 'devboxLeases' ? { holds: [], load: {} }
+    : id === 'cards' ? { open: [], recent: [], timeline: [], malformed: 0 }
+      : id === 'releases' ? { ppe: {}, production: {}, lastCycle: null, nightly: null, productionToday: null, releaseEvents: [] }
+        : id.startsWith('tasks:') || id === 'routes' ? {} : id === 'quota' ? { items: [], hubs: [] } : [];
 
-function clean(value) {
-  if (typeof value === 'string') return sanitize(value).replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, 600);
-  if (Array.isArray(value)) return value.map(clean);
+function clean(value, field = '', scope = '') {
+  if (typeof value === 'string') {
+    const text = scope === 'releases' && field === 'version' && /^\d+(?:\.\d+){2,3}(?:[-+][\w.-]+)?$/.test(value) ? value : sanitize(value);
+    return text.replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, 600);
+  }
+  if (Array.isArray(value)) return value.map((item) => clean(item, '', scope));
   // All object keys are schema fields, configured labels, or opaque join keys.
-  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, clean(v)]));
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, clean(v, k, scope)]));
   return value;
 }
 
@@ -48,7 +54,7 @@ async function block(id, read, before, now, timeout, workers) {
   try {
     const deadline = new Promise((_, reject) => { timer = setTimeout(() => { controller.abort(); reject(signal.reason); }, timeout); });
     const data = await Promise.race([Promise.resolve().then(() => read(signal, workers)), deadline]);
-    return { data: clean(data), updatedAt: now, stale: false };
+    return { data: clean(data, '', id), updatedAt: now, stale: false };
   } catch (error) {
     return { data: before?.data ?? emptySource(id), updatedAt: before?.updatedAt ?? null, stale: true,
       since: before?.since ?? now, error: errorMessage(error, signal) };
@@ -90,37 +96,62 @@ function assignHolds(tasks, leases) {
   return result;
 }
 
+function quotaEvents(history, current, now) {
+  const snapshots = [...history, { at: new Date(now).toISOString(), items: current.items ?? [] }]
+    .filter((row) => row.at && Array.isArray(row.items)).sort((a, b) => a.at.localeCompare(b.at));
+  const result = [];
+  let before = new Map();
+  for (const snapshot of snapshots) {
+    const items = new Map(snapshot.items.map((row) => [row.id, row]));
+    for (const [id, row] of items) {
+      const previous = before.get(id);
+      if (!previous) continue;
+      if (!previous.exhausted && row.exhausted) result.push({ at: snapshot.at, project: 'general', text: `${row.label || id} 额度用完`, tone: 'warn' });
+      else if (previous.exhausted && !row.exhausted) result.push({ at: snapshot.at, project: 'general', text: `${row.label || id} 额度已重置`, tone: 'ok' });
+    }
+    before = items;
+  }
+  return result;
+}
+
 function derive(blocks, now) {
   const get = (id) => blocks[id]?.data ?? emptySource(id);
   const audit = get('audit');
   const metrics = get('hostMetrics');
+  const sharedMetrics = get('hostSamples');
   const devbox = get('devboxLeases');
   // Prefer a fresh command when overlapping status views disagree. A failed
   // source can still show its last good values, explicitly marked below.
   const devices = get('devices');
   const holds = [...devbox.holds, ...get('localLeases')];
-  const machineNames = new Set([...audit.map((r) => r.host), ...metrics.map((r) => r.host), ...holds.map((r) => r.host),
+  const machineNames = new Set([...audit.map((r) => r.host), ...metrics.map((r) => r.host), ...sharedMetrics.map((r) => r.host), ...holds.map((r) => r.host),
     ...pools.flatMap((p) => get(`pool:${p}`).map((r) => r.host))]);
   const machines = [...machineNames].map((name) => {
     const fact = audit.find((r) => r.host === name);
-    const metric = metrics.find((r) => r.host === name);
+    const schedulerMetric = metrics.find((r) => r.host === name);
+    const sharedMetric = sharedMetrics.find((r) => r.host === name);
+    const sharedAge = now - Date.parse(sharedMetric?.sampledAt);
+    const useShared = sharedMetric?.state === 'ok' && sharedAge >= 0 && sharedAge < 3 * 60_000;
+    const metric = useShared ? sharedMetric : schedulerMetric;
     const capacity = Object.fromEntries(pools.flatMap((p) => get(`pool:${p}`).filter((r) => r.host === name).map((r) => [p, r])));
     const sample = capacity.local ?? capacity['local-light'] ?? capacity['local-build'] ?? capacity.mini2;
     const holders = holds.filter((row) => row.host === name);
     const held = Math.max(holders.length, fact?.held ?? sample?.held ?? 0);
     const metricOk = metric?.state === 'ok';
     const related = Object.keys(capacity).map((pool) => `pool:${pool}`);
-    if (metric?.kind === 'devbox') related.push('audit', 'devboxLeases');
-    else if (metric?.kind === 'mini2' || Object.hasOwn(capacity, 'local')) related.push('localLeases');
+    if ((schedulerMetric ?? sharedMetric)?.kind === 'devbox') related.push('audit', 'devboxLeases');
+    else if ((schedulerMetric ?? sharedMetric)?.kind === 'mini2' || Object.hasOwn(capacity, 'local')) related.push('localLeases');
     const faults = [];
-    if (metric?.state === 'missing') faults.push('metrics-missing');
-    if (metric?.state === 'invalid') faults.push('metrics-invalid');
+    if (schedulerMetric?.state === 'missing') faults.push('metrics-missing');
+    if (schedulerMetric?.state === 'invalid') faults.push('metrics-invalid');
+    if (sharedMetric?.errorClass === 'auth') faults.push('sampler-auth');
     if (metricOk && held > 0 && now - Date.parse(metric.sampledAt) > 6 * HOUR) faults.push('metrics-old-with-lease');
     if (Object.values(capacity).some((row) => row.link === 'down')) faults.push('link-down');
-    if ((metric && blocks.hostMetrics?.stale) || related.some((id) => blocks[id]?.stale)) faults.push('res-failed');
+    if ((schedulerMetric && blocks.hostMetrics?.stale) || related.some((id) => blocks[id]?.stale)) faults.push('res-failed');
     return { name, cores: metricOk ? metric.cores : sample?.cores ?? fact?.cores, memGiB: sample?.memGiB,
       load5: metricOk ? metric.load5 : metric ? null : sample?.load5 ?? devbox.load[name],
-      sampledAt: metricOk ? metric.sampledAt : null, sampleOnDemand: Boolean(metric), sampleState: metric?.state ?? null,
+      sampledAt: metricOk ? metric.sampledAt : null, sampleSource: useShared ? 'shared' : metricOk ? 'scheduler' : null,
+      sampleOnDemand: Boolean(metric), sampleState: metric?.state ?? null, samplerError: sharedMetric?.errorClass ?? null,
       availableGiB: metricOk ? metric.availableGiB : metric ? null : sample?.availableGiB,
       freeGiB: metricOk ? metric.freeGiB : metric ? null : sample?.freeGiB ?? fact?.freeGiB, pressure: sample?.pressure,
       spareCores: fact?.spareCores, link: Object.values(capacity).find((row) => row.link)?.link ?? sample?.link,
@@ -138,9 +169,20 @@ function derive(blocks, now) {
     const latestNote = notes.latest[taskRef];
     const title = details?.title;
     return { id, ...worker, title: title || worker.name, summary: details?.summary || (title ? title : latestNote) || worker.task,
-      latestNote, routeWhy: get('routes')[routeRef], resources: assigned.get(id) ?? [] };
+      latestNote, lastNotes: notes.notes[taskRef] ?? [], ownerNoticeOpen: notes.notices[taskRef] === true,
+      queueWaitMinutes: worker.queueSince ? Math.max(0, (now - Date.parse(worker.queueSince)) / 60_000) : null,
+      routeWhy: get('routes')[routeRef], resources: assigned.get(id) ?? [] };
   });
-  return { tasks, machines, devices, quota: get('quota'), cards: get('cards') };
+  const cardData = get('cards');
+  const cards = Array.isArray(cardData) ? cardData : cardData.open ?? [];
+  const quota = get('quota');
+  const releases = get('releases');
+  const events = [...get('activity'), ...(cardData.timeline ?? []), ...(releases.releaseEvents ?? []),
+    ...quotaEvents(get('quotaHistory'), quota, now)].filter((row) => row.at && now - Date.parse(row.at) <= 12 * HOUR)
+    .sort((a, b) => b.at.localeCompare(a.at)).filter((row, index, all) => index === all.findIndex((other) =>
+      other.at === row.at && other.project === row.project && other.text === row.text)).slice(0, 40);
+  return { tasks, machines, devices, quota, cards, recentCards: cardData.recent ?? [], cardMalformed: cardData.malformed ?? 0,
+    releases, events };
 }
 
 async function atomic(file, content) {
@@ -179,11 +221,11 @@ async function pruneHistory(dir, now) {
 }
 
 export async function collect({ data = defaultData, now = Date.now(), timeout = 10_000, command, shared, home,
-  labels, prune = true } = {}) {
+  labels, sampleFile, sourcePaths, prune = true } = {}) {
   const at = new Date(now).toISOString();
   labels ??= JSON.parse(await fs.readFile(hostMap, 'utf8'));
   const before = await readPrevious(data);
-  const sources = makeSources({ data, shared, home, command, labels, now });
+  const sources = makeSources({ data, shared, home, command, labels, now, sampleFile, sourcePaths });
   const fetch = (id, workers) => block(id, sources[id], before.blocks?.[id], at, timeout, workers);
   const independent = Object.keys(sources).filter((id) => !['routes', 'notes'].includes(id) && !id.startsWith('tasks:'));
   const pending = Object.fromEntries(independent.map((id) => [id, fetch(id)]));
