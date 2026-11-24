@@ -9,9 +9,9 @@ import { queuePolicy } from './queue-stall-watch.mjs';
 import { acquireRoute } from './route-data.mjs';
 import { parseTaskSpec, createTaskSpec, routePure, renderPlan, enumerateCandidates, validatePlan } from './pipeline/index.mjs';
 import { makePlan } from './pipeline/plan.mjs';
-import { previousReleaseFallback } from './pipeline/release-fallback.mjs';
+import { previousReleaseFallback, releaseUnavailable } from './pipeline/release-fallback.mjs';
 import { candidateParts } from './pipeline/candidates.mjs';
-import { company, known, isAstra } from './pipeline/common.mjs';
+import { company, known, isAstra, newestRelease, policyModel } from './pipeline/common.mjs';
 import { nextRouteArgs, setRouteFlag, turnHasWork, turnHasRunningTools } from './worker-reroute.mjs';
 import { shellQuote } from './pipeline/presentation.mjs';
 import { readQueue } from './worker-queue.mjs';
@@ -83,7 +83,7 @@ export function queueOptionPlan(context, row, queue, candidateId, decisionId, us
 }
 
 export function queueOptions(row,queue,launch,now=Date.now(),context=queueRouteContext(row,launch,now),decisionId='queue-preview') {
-  const options=[], groups=new Set();
+  const options=[], groups=new Set(), healthyCurrent=new Set();
   for (const c of [...enumerateCandidates(context.task,context.snapshot).candidates].sort((a,b)=>['low','medium','high','xhigh','max'].indexOf(a.effort)-['low','medium','high','xhigh','max'].indexOf(b.effort))) {
     if (c.accountId===row.account&&c.modelId===row.model) continue;
     const group=`${c.accountId}:${c.modelId}`;
@@ -98,6 +98,9 @@ export function queueOptions(row,queue,launch,now=Date.now(),context=queueRouteC
       ? `${lane.mode}; load ${known(lane.loadPercent)??'?'}%; high-priority quota ${usage?`${usage.used}/${usage.limit}`:lane.mode==='priority'?'available':'unknown/depleted'}`
       : company(account)?`company quota ${account.fallbackUnavailable?'exhausted/restricted':'available'}`
       : `${route.pick?.approvalRef??'scoped personal approval required'}; personal quota cost; reset deadline ${budget?.deadline??'?'}h`;
+    const rung = policyModel(c.modelId);
+    if (company(account) && ['astra','sol'].includes(rung) && c.modelId === newestRelease(known(account.catalog) ?? [], rung)
+      && route.plan.kind === 'launch' && !releaseUnavailable(route.plan.task, context.snapshot, c)) healthyCurrent.add(c.id);
     options.push({id:createHash('sha256').update(c.id).digest('hex').slice(0,16),type:'switch',candidateId:c.id,
       lane:c.laneId,account:c.accountId,model:c.modelId,effort:c.effort,expectedStartDelayMin:r.estimate.startDelayMin,
       quotaNote,company:company(account),releaseFallback:previousReleaseFallback(route.plan.task,context.snapshot,c)?.text??null,approvalRef:route.pick?.approvalRef??null,needsUserApproval:route.needsUserOK.length>0,
@@ -107,8 +110,14 @@ export function queueOptions(row,queue,launch,now=Date.now(),context=queueRouteC
       approvalNotes:route.needsUserOK,context:c.accountId===row.account&&c.family!=='claude'&&!launch?.requestBufferExceededAt?'same thread / resume':'fresh worker with the same brief',
       ownerMayLowerFloor:account.kind==='trae'&&c.modelId!==row.model});
   }
-  options.sort((a,b)=>Number(b.company)-Number(a.company)
-    ||Number(!!b.releaseFallback)-Number(!!a.releaseFallback)||Number(b.preferred)-Number(a.preferred)
+  const hasFallback = options.some(o => o.releaseFallback);
+  function releaseRank(option) {
+    if (healthyCurrent.has(option.candidateId)) return 0;
+    if (option.releaseFallback) return 1;
+    return option.company ? 2 : 3;
+  }
+  options.sort((a,b)=>(hasFallback ? releaseRank(a)-releaseRank(b) : 0)
+    ||Number(b.preferred)-Number(a.preferred)
     ||(a.account==='trae'?0:a.account==='ttadk'?1:a.account==='claude'?3:2)-(b.account==='trae'?0:b.account==='ttadk'?1:b.account==='claude'?3:2)
     ||(a.budgetDeadlineHours??Infinity)-(b.budgetDeadlineHours??Infinity));
   options.push({id:'wait',type:'wait',lane:`${row.account}:${row.model}`,model:row.model,effort:row.effort,

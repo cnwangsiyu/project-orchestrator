@@ -102,6 +102,10 @@ try {
     const context = { task: task(), snapshot: createSnapshot(raw), root, now };
     const row = { owner: 'fixture-owner', account: 'trae', model: latest, effort: 'xhigh', thread: 'fixture', turn: 'turn' };
     const queue = { state: 'queued', since: now - 25 * 60000, position: 58, drainPerMin: 0 };
+    const mixedOptions = queueOptions(row, queue, {}, now, { ...context, snapshot: createSnapshot(mixed) });
+    const currentIndex = mixedOptions.findIndex(o => o.account === 'ttadk' && o.model === latest);
+    const previousIndex = mixedOptions.findIndex(o => o.account === 'trae' && o.model === previous);
+    assert.ok(currentIndex >= 0 && currentIndex < previousIndex, 'healthy company newest release comes before the previous release in a notice');
     for (const workStarted of [false, true]) {
       const options = queueOptions(row, { ...queue, workStarted }, {}, now, context);
       const option = options.find(o => o.account === 'trae' && o.model === previous);
