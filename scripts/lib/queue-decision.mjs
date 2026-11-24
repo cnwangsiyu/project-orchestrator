@@ -166,7 +166,10 @@ export function notifyQueueOwner(row,queue,launch,{now=Date.now(),policy=queuePo
     const count=same?(old.pendingNotice&&!renewing?old.noticeCount:(old.noticeCount??1)+1):1;
     const text=`queue-stalled: ${count===2?'SECOND NOTICE; ':count>2?`NOTICE ${count}; `:''}task=${row.name??row.task} thread=${row.thread} turn=${row.turn} owner=${row.owner} lane=${row.account}:${row.model} model=${row.model} effort=${row.effort}; queued ${((now-queue.since)/60000).toFixed(1)} min position=${queue.position??'?'} drain=${queue.drainPerMin??'?'} /min. Owner decides; no automatic switch.${count>1?' secretary-relay: owner queue decision still pending.':''}${optionError?` Options incomplete: ${optionError}.`:''}\n`
       +options.map(o=>`${o.id}: ${o.lane} ${o.model}/${o.effort}; start=${o.expectedStartDelayMin??'?'} min; ${o.quotaNote}; ${o.releaseFallback?`${o.releaseFallback}; `:''}${o.context}; ${o.interruptionNote}; user approval=${o.needsUserApproval?'required':'no'}; ${o.command}${o.approvalCommand?`; after user approval: ${o.approvalCommand}; append --user-ok <returned approval id> to the choice command`:''}`).join('\n');
-    const prepared={row,since:queue.since,queue,launch,options,noticeId,noticeCount:count,lastNoticeAt:now,status:'waiting',pendingNotice:true};
+    const optionKinds = same && !renewing ? {...old.optionKinds} : {};
+    for (const option of [...(same && !renewing ? old.options : []), ...options])
+      optionKinds[option.id] = option.type === 'switch' ? (option.company ? 'company' : 'personal') : option.type;
+    const prepared={optionKinds,row,since:queue.since,queue,launch,options,noticeId,noticeCount:count,lastNoticeAt:now,status:'waiting',pendingNotice:true};
     // Commands are usable when the event becomes visible. A crash before emit
     // leaves a pending notice to retry, rather than an acknowledged silent wait.
     writeJson(file,prepared);
@@ -182,27 +185,48 @@ export function notifyQueueOwner(row,queue,launch,{now=Date.now(),policy=queuePo
   });
 }
 
+export function noticeRow(noticeId, owner) {
+  if (!owner) throw Error('queue-choice needs the owner session in ORCHESTRATOR_OWNER or --owner');
+  if (typeof noticeId !== 'string' || !noticeId) throw Error('queue-choice needs a notice id');
+  const dir = path.join(rulesShared(), 'queue-decisions');
+  for (const name of fs.readdirSync(dir)) {
+    if (!name.endsWith('.json')) continue;
+    const state = read(path.join(dir, name));
+    if (state?.noticeId === noticeId && state.row?.owner === owner) return state.row;
+  }
+  throw Error('notice is stale, ended, or owned by another orchestrator');
+}
+
 export function requestQueueChoice(row,noticeId,optionId,userOK=null,now=Date.now()) {
   if(!queuePolicy(now)?.enabled)throw Error('queue notice policy is disabled; reconcile with legacy controls');
   const file=queueDecisionFile(row),state=read(file);
   if(!state||state.noticeId!==noticeId||state.row.owner!==row.owner||state.status!=='waiting') throw Error('notice is stale, ended, or owned by another orchestrator');
-  const option=state.options.find(o=>o.id===optionId);
-  if(!option) throw Error('option is no longer listed');
+  let option=state.options.find(o=>o.id===optionId);
+  const kind=state.optionKinds?.[optionId];
+  if(!option && optionId!=='best' && !kind) throw Error('unknown queue option');
   const profiles=read(process.env.CODEX_ACCOUNTS??path.join(rulesShared(),'codex-accounts.json'))??{};
   const current=readQueue(profiles[row.account]?.home,row.thread);
   if(!current||current.turnId!==row.turn||!waiting(current)||current.reporting||current.since!==state.since)
     throw Error('source turn is no longer in this queue episode');
+  let context;
+  if (optionId === 'best' || option?.type === 'switch' || !option) {
+    context=queueRouteContext(state.row,state.launch,now);
+    const options=queueOptions(state.row,current,state.launch,now,context,noticeId);
+    const companyKind=option?.company ?? (kind === 'company');
+    option=optionId === 'best' ? options.find(o=>o.type!=='wait') : options.find(o=>o.id===optionId)
+      ?? options.find(o=>o.type==='switch' && o.company===companyKind);
+    if (!option) throw Error('no current replacement of the requested kind; queue retained');
+  }
   if(option.type!=='wait'&&current.runningTools) throw Error('a tool call is still running; choice refused, queue retained; notice will repeat later');
   let route=null;
   if(option.type==='switch') {
-    const context=queueRouteContext(state.row,state.launch,now);
-    route=queueOptionPlan(context,state.row,state.queue,option.candidateId,noticeId,userOK);
-    if(route.blocked||route.needsUserOK.length||!route.pick?.command) return {exitCode:8,route};
+    route=queueOptionPlan(context,state.row,state.queue,option.candidateId,noticeId,option.id===optionId?userOK:null);
+    if(route.blocked||route.needsUserOK.length||!route.pick?.command) return {exitCode:8,route,option};
   }
   return withLock(file,()=>{
     const latest=read(file);
     if(latest.noticeId!==noticeId||latest.status!=='waiting'||latest.choice) throw Error('this notice already has a choice');
-    writeJson(file,{...latest,choice:{optionId,userOK,at:now,owner:row.owner}});
+    writeJson(file,{...latest,choice:{optionId:option.id,option,requestedOptionId:optionId,userOK:option.id===optionId?userOK:null,at:now,owner:row.owner}});
     return {exitCode:0,option};
   });
 }

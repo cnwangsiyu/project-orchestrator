@@ -98,6 +98,22 @@ try {
   const tt=notifyQueueOwner(f.row,f.queue,f.launch,{now,policy,context:f.context,emit});
   assert.equal(requestQueueChoice(f.row,tt.noticeId,tt.options.find(o=>o.account==='ttadk').id,null,now).exitCode,0);
   settleQueueChoice(f.row,'ended',now);fs.rmSync(queueDecisionFile(f.row));
+  // A reminder drops the old TTADK option. Its printed ID still selects a current company lane.
+  f=fixture(true);
+  const beforeChange=notifyQueueOwner(f.row,f.queue,f.launch,{now,policy,context:f.context,emit});
+  const gone=beforeChange.options.find(o=>o.account==='ttadk');
+  f=fixture(false);
+  const changed=notifyQueueOwner(f.row,f.queue,f.launch,{now:now+10*min,policy,context:f.context,emit});
+  assert.ok(!changed.options.some(o=>o.id===gone.id));
+  const substitute=requestQueueChoice(f.row,changed.noticeId,gone.id,null,now);
+  assert.equal(substitute.exitCode,0); assert.equal(substitute.option.company,true);
+  assert.notEqual(substitute.option.id,gone.id);
+  settleQueueChoice(f.row,'waiting',now);
+  const compact=spawnSync(process.execPath,[path.join(root,'scripts/codex-worker.mjs'),'queue-choice','--notice',changed.noticeId,'--best'],
+    {env:{...process.env,ORCHESTRATOR_OWNER:owner},encoding:'utf8'});
+  assert.equal(compact.status,0,compact.stderr);
+  assert.equal(JSON.parse(compact.stdout).option.id,changed.options.find(o=>o.type!=='wait').id);
+  fs.rmSync(queueDecisionFile(f.row));
   f=fixture(false,[SOL],['max']);assert.ok(queueOptions(f.row,f.queue,f.launch,now,f.context).some(o=>o.account==='main'&&o.effort==='max'&&o.needsUserApproval));
   const midQueue={...f.queue,workStarted:true,workedMinutesBefore:24};
   assert.match(queueStallLabel(midQueue,now,f.row),/notice=none/);

@@ -134,16 +134,22 @@ for (let i = 1; i < argv.length; i++) if (argv[i].startsWith('--')) {
     || argv[i + 1] === undefined || argv[i + 1].startsWith('--') ? true : argv[++i];
 }
 if (argv[0] === 'queue-choice') {
-  const {requestQueueChoice}=await import('./lib/queue-decision.mjs');
+  const {requestQueueChoice,noticeRow}=await import('./lib/queue-decision.mjs');
   try {
-    const result=requestQueueChoice({account,thread:earlyOpts.thread,turn:earlyOpts.turn,owner:earlyOpts.owner},
-      earlyOpts.notice,earlyOpts.option,earlyOpts['user-ok']);
-    process.stdout.write(JSON.stringify({exitCode:result.exitCode,option:result.option,needsUserOK:result.route?.needsUserOK})+'\n');
+    if (!!earlyOpts.best === !!earlyOpts.option) throw Error('specify exactly one of --best and --option');
+    const owner=resolveOwner(earlyOpts.owner);
+    const row=account && earlyOpts.thread && earlyOpts.turn ? {account,thread:earlyOpts.thread,turn:earlyOpts.turn,owner}
+      : noticeRow(earlyOpts.notice,owner);
+    if ((account && row.account!==account) || (earlyOpts.thread && row.thread!==earlyOpts.thread) || (earlyOpts.turn && row.turn!==earlyOpts.turn))
+      throw Error('notice does not match the requested source turn');
+    const result=requestQueueChoice(row,
+      earlyOpts.notice,earlyOpts.best ? 'best' : earlyOpts.option,earlyOpts['user-ok']);
+    process.stdout.write(JSON.stringify({exitCode:result.exitCode,requested:earlyOpts.option ?? 'best',option:result.option,needsUserOK:result.route?.needsUserOK})+'\n');
     if(result.exitCode===0) {
-      const state=pendingQueueChoice({account,thread:earlyOpts.thread,turn:earlyOpts.turn});
+      const state=pendingQueueChoice(row);
       if(state&&!followerAlive(state.row)) {
         const {spawn}=await import('node:child_process');
-        const defaults=state.launch?.defaults??{},args=['--account',account,'wait','--thread',earlyOpts.thread,'--model',state.row.model,'--effort',state.row.effort];
+        const defaults=state.launch?.defaults??{},args=['--account',row.account,'wait','--thread',row.thread,'--model',state.row.model,'--effort',state.row.effort];
         for(const k of ['name','cwd','owner','project','log','out','route-args','auto-reroute-depth','sandbox','network','browser-origins','computer-use-apps'])
           if(typeof defaults[k]==='string'||typeof defaults[k]==='number')args.push(`--${k}`,String(defaults[k]));
         const child=spawn(process.execPath,[...process.execArgv,fileURLToPath(new URL('./codex-worker.mjs',import.meta.url)),...args],{stdio:'inherit'});
@@ -1604,7 +1610,7 @@ const follow = (threadId, turnId, items = []) => {
       workedMinutesBefore:workedBeforeKnown?workedMs/60000:null,workSegmentSince,runningTools:runningTools.size,at:t});
   };
   const chooseQueued = async state => {
-    const option=state.options.find(o=>o.id===state.choice.optionId);
+    const option=state.choice.option ?? state.options.find(o=>o.id===state.choice.optionId);
     if (option?.type==='wait') {settleQueueChoice(ownerRow,'waiting');console.log(`queue-choice: ${opts.name} keeps waiting`);return;}
     handingOff=true;let cancelSent=false,terminalTurn=null;
     const bounded = promise => new Promise((resolve,reject)=>{
