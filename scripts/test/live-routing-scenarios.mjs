@@ -52,11 +52,12 @@ try {
   console.log('PASS day3 quality ladder precedes bucket priority on both company accounts and background work');
   for(const args of [['analysis'],['research'],['implement','--impact','service'],['docs'],['image-read'],['browser'],['ui-browser','--impact','service']]) {
     const o=cli(args,freeTrae);assert.equal(o.kind,'launch');assert.equal(o.pick.account,'trae',args.join(' '));
-    assert.match(o.why.join('\n'),/TRAE lane free: saving TTADK quota/);
+    assert.match(o.why.join('\n'),/TRAE lane free/);
     if(['browser','ui-browser'].includes(args[0])) {assert.equal(o.pick.model,'gpt-6.1-sol');assert.match(o.why.join('\n'),/gpt-6.1-sol load 42%/);assert.doesNotMatch(o.why.join('\n'),/load 70%/);}
     for(const variant of ['hot','queued','stalled']) {
       const x=structuredClone(freeTrae);
       for(const l of x.lanes.filter(l=>l.accountId==='trae')) {
+
         if(variant==='hot') l.loadPercent.value=70;
         else {l.position.value=181;l.queueState.value='waiting';l.familyQueue.value.position=181;
           if(variant==='stalled') {l.drainPerMin.value=0;l.progressAt.value=null;}}
@@ -72,7 +73,7 @@ try {
   assert.equal(expiring.plan.primary.estimate.balance.freeNow,true);
   assert.ok(expiring.plan.trace.candidates.some(r=>r.candidate.accountId==='ttadk'
     && r.candidate.modelId==='gpt-6.1-sol' && r.estimate.expiryOpportunity===true));
-  assert.match(expiring.why.join('\n'),/TRAE lane free: saving TTADK quota/);
+  assert.match(expiring.why.join('\n'),/TRAE lane free/);
   assert.equal(cli(['computer-use','--apps','com.apple.calculator'],freeTrae).pick.account,'ttadk');
   const maxArgs=['debug','--impact','service','--failures','1','--actual','codex:gpt-6.1-sol:xhigh@trae'];
   const siblingQueue=structuredClone(freeTrae);

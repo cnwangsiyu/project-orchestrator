@@ -146,7 +146,7 @@ try {
     Object.assign(sol, { position: null, drainPerMin: null, queueState: null });
     checkOverflow(); // An unmeasured Sol start does not block the approved retry.
     Object.assign(sol, { position: 5, drainPerMin: 1, queueState: 'queued' });
-    assert.equal(run(raw, retry).view.pick.account, 'trae', 'verified short queue still wins');
+    checkOverflow();
     sol.position = 6;
     checkOverflow();
     Object.assign(sol, { loadPercent: 42, position: 0, queueState: 'ready' });

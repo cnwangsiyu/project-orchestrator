@@ -1288,7 +1288,8 @@ for (const [sc, args] of ERRORS) {
     ['quotaExpiredAstra', ['implement'], 'gpt-5.6-sol'],
     ['quotaExpiredFallback', ['implement'], 'gpt-5.6-sol'], // The fallback bucket has passed its reset.
   ]) {
-    const r = route(sc, args);
+    // Exercise company reset timing with all personal alternatives explicitly excluded.
+    const r = route(sc, want === undefined ? [...args,'--exclude-account','main,b,claude'] : args);
     if (want === undefined) {
       cases.push([r.kind, 'defer', sc], [r.pick, null, sc], [r.deferUntil > now, true, sc]);
     }
@@ -1323,8 +1324,8 @@ for (const [sc, args] of ERRORS) {
     [route('quotaExpiredSol').why.some((n) => /bucket is depleted/.test(n)), false],
     [note(idle, /queue patience.*cancellation/), true],
     [note(idle, /provider-assigned low-priority\/depleted lanes remain capacity/), true],
-    [route('quotaAllBusy').plan.trigger, 'capacity-reset'],
-    [route('quotaBoth').needsUserOK.length, 0], [route('quotaAllBusy').deferUntil > now, true],
+    [route('quotaAllBusy',['implement','--exclude-account','main,b,claude']).plan.trigger, 'capacity-reset'],
+    [route('quotaBoth').needsUserOK.length, 0], [route('quotaAllBusy').plan.gates.some(g=>g.kind==='personal-quota'), true],
     [route('quotaAstra', ['lookup']).pick?.launcher, 'traecli-exec'],
     [route('quotaBoth', ['lookup']).pick?.launcher, 'traecli-exec'],
     [note(route('quotaBoth', ['lookup', '--failures', '1']), /this retry is not stronger/), false],
@@ -1376,10 +1377,11 @@ for (const [sc, args] of ERRORS) {
     laneTr('soon', lanes({ position: null, drainPerMin: null, lastProgressAt: now - 60000 },
       { position: 50, drainPerMin: 5 }))] };
   const parse = (sc, args) => parseRouteJSON(run(sc, args));
-  const defer = parse('etaDefer', ['implement-hard']);
+  const companyOnly = ['--exclude-account','main,b,claude'];
+  const defer = parse('etaDefer', ['implement-hard',...companyOnly]);
   const progress = parse('etaProgressing', ['implement-hard', '--allow-low-priority-queue']);
-  const soon = parse('etaResetSoon', ['implement-hard']);
-  const bound = parse('etaDefer', ['implement-hard', '--shared-lock']);
+  const soon = parse('etaResetSoon', ['implement-hard',...companyOnly]);
+  const bound = parse('etaDefer', ['implement-hard', '--shared-lock',...companyOnly]);
   const boundQueue = parse('etaDefer', ['implement-hard', '--shared-lock', '--allow-low-priority-queue']);
   const { laneEta, patienceMinutes } = await import('../lib/eta.mjs');
   const queuedEta = (workMin, requests) => laneEta({ workMin, requests, bucketDepleted: true, position: 100, drainPerMin: 2 });
@@ -1516,7 +1518,7 @@ for (const [sc, args] of ERRORS) {
   const env = { QUOTA_LOG_FILE: history };
   const projected = r('balanced', ['implement'], queue(), env);
   cases.push([projected.pick?.account, 'trae'], [projected.balance?.burn?.beforeReset, true],
-    [projected.why.some((s) => /TRAE lane free: saving TTADK quota.*gpt-6.1-sol load 35%/.test(s)), true],
+    [projected.why.some((s) => /TRAE lane free.*gpt-6.1-sol load 35%/.test(s)), true],
     [account('balancedNoLoad', ['implement'], queue(), env), 'ttadk'], [account('balanced', ['implement'], {}, env), 'trae'],
     [account('balanced', ['implement'], queue(400), env), 'ttadk'], [account('balancedOut', ['implement'], queue(400)), 'trae']);
   // Balancing transfers the current rung; it never substitutes an excluded/paused model or changes review count.
@@ -1530,7 +1532,7 @@ for (const [sc, args] of ERRORS) {
   cases.push([idle.pick?.account, busy.pick?.account], [idle.pick?.effort, busy.pick?.effort], [idle.deferred, null],
     [idle.needsUserOK.length, 0], [review.pick?.model, 'sonnet'], [review.secondOpinion?.account, undefined],
     [r('balanced', ['review', '--author', 'codex']).secondOpinion?.model, review.secondOpinion?.model],
-    [idle.why.some((s) => /TRAE lane free: saving TTADK quota/.test(s)), true]);
+    [idle.why.some((s) => /TRAE lane free/.test(s)), true]);
   // Exact time/share boundaries and synthetic burn-rate failures.
   const ttAccount = { name: 'ttadk', usage: usage() };
   const factors = (q) => balanceFactors({ ttadk: ttAccount, trae: { quota: { sampledAt: now, daily: { [SOL]: q } }, load: load(), queue: queue() },
@@ -1676,8 +1678,9 @@ for (const [sc, args] of ERRORS) {
       scenario(daily, models, args[0]==='image-read'?{load:{[SOL]:{percent:35,t:now}}}:{});
       let o = r(args);
       if (step === 1) {
-        assert.equal(o.kind, 'defer');
-        assert.equal(o.pick, null);
+        assert.equal(o.kind, 'blocked');
+        assert.equal(o.pick.command,null);
+        assert.ok(o.plan.gates.some(g=>g.kind==='personal-quota'));
         o = r([...args, '--allow-low-priority-queue']);
       }
       if(['review-high'].includes(args[0])||args.includes('release')) {assert.ok(o.pick);assert.equal(o.kind,'launch');assert.ok(o.plan.gates.some(g=>g.phase==='acceptance'),JSON.stringify({args,category:o.category,cls:o.plan.task.reviewClass,impact:o.plan.task.impact,gates:o.plan.gates}));continue;}
@@ -1700,7 +1703,7 @@ for (const [sc, args] of ERRORS) {
     // Unknown quota retains the ordinary rung; an Astra rung keeps its tier even if Sol is depleted.
     const args = ['implement', '--failures', '5'];
     scenario(null);assert.ok(r(args).pick);assert.ok(!r(args).plan.reasons?.some(p=>p.code==='PREVIOUS_ATTEMPT_UNKNOWN'));
-    scenario({ ...active, [SOL]: bucket(true) });assert.equal(r(args).kind,'defer');assert.ok(!r(args).plan.reasons?.some(p=>p.code==='PREVIOUS_ATTEMPT_UNKNOWN'));
+    scenario({ ...active, [SOL]: bucket(true) });assert.ok(r(args).plan.gates.some(g=>g.kind==='personal-quota'));assert.ok(!r(args).plan.reasons?.some(p=>p.code==='PREVIOUS_ATTEMPT_UNKNOWN'));
     // Fallback service code still requires review; sensitive acceptance keeps the stronger family.
     scenario(active);
     assert.ok(r(['implement']).allNotes.some((n) => /no review/.test(n)));
@@ -1840,7 +1843,7 @@ for (const [sc, args] of ERRORS) {
       assert.ok(gated(r(['lookup',...flags])));
     const depleted=Object.fromEntries([SOL,ASTRA,SOL56,GPT55,TERRA56].map(id=>[id,bucket(true)]));
     const allGPTs=[SOL,ASTRA,SOL56,GPT55,TERRA56];
-    assert.ok(!gated(r(['lookup'],{models:[SOL],daily:depleted})));
+    assert.ok(gated(r(['lookup'],{models:[SOL],daily:depleted})));
     for(const args of [['image-gen'],['claude-tools'],['second-opinion','--against','codex'],['review-high','--author','codex']])
       assert.equal(gated(r(args,{models:[SOL]})),!['image-gen','claude-tools'].includes(args[0]),`personal consent/standing exception: ${args[0]}`);
     assert.equal(r(['computer-use']).blocked,true);

@@ -34,7 +34,11 @@ export function presentRoute(plan, view, context) {
   }
   if(snapshot.personalFallback?.enabled) {
     const i=notes.findIndex(line=>line.startsWith('Queue patience:'));
-    if(i>=0)notes[i]=`Queue decision: notify the owner after >${snapshot.personalFallback.queueWaitMinutes} min; repeat after ${snapshot.personalFallback.queueReminderMinutes} min; owner chooses, no automatic switch.`;
+    if(i>=0) {
+      const count=snapshot.personalFallback.queueAutoChoiceAfterNotices;
+      notes[i]=count>0 ? `Notify the owner on first queue observation. A faster eligible company lane can be selected after ${count} notice(s).`
+        : 'Notify the owner on first queue observation and await their choice.';
+    }
   }
   if (plan.kind === 'launch' && snapshot.personalPriority?.mode === 'exclusive'
     && company(candidateParts(snapshot, c).account))
@@ -49,8 +53,6 @@ export function presentRoute(plan, view, context) {
   if (priorityGuard) why.push(snapshot.personalPriority.mode === 'exclusive'
     ? `company lanes first; personal overflow only on main: ${priorityGuard}; other personal Codex accounts remain ineligible`
     : `personal main-first window until ${snapshot.personalPriority.until} paused: ${priorityGuard}; using normal routing order`);
-  for (const text of new Set(plan.rejected.filter(p => p.reason?.code === 'TTADK_DAILY_RESERVE').map(p => p.reason.text)))
-    if (!why.some(line => line.includes(text))) why.push(text);
   if (t.needsCli.length) notes.push('signed-in CLIs need the full-access sandbox (keychain); stay read-only by instruction: queries only, no writes');
   else if (f['read-only']) notes.push('read-only sandbox: keychain-backed CLIs (lark-cli, bytedcli) will not work; add --needs-cli if the task must use them');
   if(['implement','implement-hard','build-run','debug','ui-browser'].includes(t.category))fixedNotes.push(sourceDigest.worker.split('\n').find(line=>line.startsWith('- Project dependencies'))??'');
@@ -80,8 +82,8 @@ export function presentRoute(plan, view, context) {
   const balance = balanceCandidates.length ? {...(chosenBalance ?? {}),selected:!!(chosenBalance?.freeNow||chosenBalance?.eligible),candidates:walked} : null;
   if(seat?.estimate.expiryOpportunity) { const hint=candidateParts(snapshot,c).account.kind==='ttadk'?'TTADK quota expiring unused: good time for existing qualified work':`TRAE ${c.modelId} priority bucket expiring unused at ${new Date(seat.estimate.expiryEvidence.resetsAt).toISOString()}; quality order preserved`; why.push(hint);quota.push(hint); }
   if(chosenBalance?.freeNow) why.push(chosenBalance.astraUnitsEvidence
-    ? `TRAE lane free: saving TTADK quota; Astra load not published; units ${chosenBalance.astraUnitsEvidence.used}/${chosenBalance.astraUnitsEvidence.limit} used; no queue observed; no recent Astra stall; TRAE hub healthy.`
-    : `TRAE lane free: saving TTADK quota; ${c.modelId} load ${chosenBalance.load.percent}%; no queue or stall observed.`);
+    ? `TRAE lane free; Astra load not published; units ${chosenBalance.astraUnitsEvidence.used}/${chosenBalance.astraUnitsEvidence.limit} used; no queue observed; no recent Astra stall; TRAE hub healthy.`
+    : `TRAE lane free; ${c.modelId} load ${chosenBalance.load.percent}%; no queue or stall observed.`);
   else if(chosenBalance) why.push(`TRAE ${c.modelId}: bounded fallback; immediate uncongested capacity is unmeasured.`);
   if(c && candidateParts(snapshot,c).account.kind==='ttadk' && balanceCandidates.length) {
     const relevant=balanceCandidates.find(b=>policyModel(b.model)===policyModel(c.modelId));
@@ -222,7 +224,7 @@ export function presentRoute(plan, view, context) {
       why.push(`${c.accountId}/${c.modelId} day quota exhausted until ${exhausted.until ? new Date(exhausted.until).toISOString() : 'provider reset (time unknown)'}. ${start}`);
     }
     if(candidateParts(snapshot,c).lane.mode==='low-priority') why.push(`TRAE ${c.modelId} low-priority lane (bucket depleted): provider capacity remains eligible with ${snapshot.personalFallback?.enabled?'an owner queue decision':'bounded queue patience'}.`);
-    if(seat.estimate.basis==='progressing') why.push(`${c.modelId} low-priority lane (bucket depleted): slower bucket designation, but progressing without queue cycles in fresh per-model telemetry.`);
+    if(!exhausted && seat.estimate.basis==='progressing') why.push(`${c.modelId} low-priority lane (bucket depleted): slower bucket designation, but progressing without queue cycles in fresh per-model telemetry.`);
     if(['browser','ui-browser'].includes(t.category)&&c.family==='claude') fixedNotes.push(WORKER_NOTES.claudeBrowser);
     if(t.writes||['browser','computer-use'].includes(t.category)) fixedNotes.unshift(sourceDigest.worker.split('\n').find(line=>line.startsWith('- Scope safety:'))??'');
     if(t.writes&&context.slowTests?.length) notes.push('brief: slow tests for this project — run each ONLY when the listed code is touched, never inside a heavy lane, and report "<file> not run: untouched code" otherwise: '+context.slowTests.map(x=>`${x.file} (${x.cost}; run when touching ${[].concat(x.runWhen??[]).join(', ')})`).join(' | '));
@@ -329,7 +331,7 @@ export function presentRoute(plan, view, context) {
     background:t.background,tier:t.tier,kind:plan.kind,blocked,executable:plan.kind==='launch',routeId:plan.routeId,planHash:plan.planHash,
     deferred:plan.kind==='defer'?plan.reason.text:(!pick&&blocked?plan.reasons.map((r)=>r.text).join('; '):null),
     deferUntil:plan.deferUntil??null,deferReason:plan.reason?.text??null,deferRunnerUp:plan.runnerUp?{model:plan.runnerUp.modelId,account:plan.runnerUp.accountId}:null,
-    eta,queuePatienceMin:patience,queueMode:snapshot.personalFallback?.enabled?'owner':'legacy',queueNoticeAfterMin:snapshot.personalFallback?.enabled?snapshot.personalFallback.queueWaitMinutes:null,
+    eta,queuePatienceMin:patience,queueMode:snapshot.personalFallback?.enabled?'owner':'legacy',queueNoticeAfterMin:snapshot.personalFallback?.enabled?0:null,
     queueAlt,queueAlternative,pick,queueFallbackPolicy:snapshot.personalFallback?.enabled?snapshot.personalFallback:null,secondOpinion:plan.reviewers[0]?launch(plan.reviewers[0],plan.kind==='launch'):plan.reviewerProposals?.[0]?launch(plan.reviewerProposals[0],false):null,
     needsUserOK:[...new Set(needsUserOK)],tellUser:[...new Set(tellUser)],why,shortWhy,notes,shortNotes,fixedNotes,workerRulesVersion:sourceDigest.version,
     redeemFirst:c?known(candidateParts(snapshot,c).account.budget)?.redemption??null:null,balance,quota,quotaSummary,plan };

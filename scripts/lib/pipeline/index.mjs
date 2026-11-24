@@ -99,6 +99,13 @@ export function routePure(taskSpec, stateSnapshot, history = []) {
     && r.predicates.every(p => p.ok || ['ATTEMPT_RECONCILIATION_REQUIRED','PREVIOUS_ATTEMPT_UNKNOWN'].includes(p.reason?.code)));
   if (reconciliation) return makePlan('defer', task, snapshot, { ...fields, deferUntil: null, trigger: 'attempt-reconciliation',
     reason: reconciliation.predicates.find(p => p.reason?.code === 'ATTEMPT_RECONCILIATION_REQUIRED').reason });
+  if(!startable) {
+    const personalRows=assessment.rows.filter(r=>!company(candidateParts(snapshot,r.candidate).account)&&!r.estimate.stalled
+      &&r.estimate.startDelayMin===0&&r.predicates.filter(p=>!p.ok).every(p=>p.gate));
+    const personal=orderCandidates(task,snapshot,personalRows).winner;
+    if(personal)return makePlan('blocked',task,snapshot,{...fields,primaryProposal:proposal(task,personal),gates:gatesOf([personal]),
+      suggestions:personalRows.map(r=>r.candidate),reasons:personal.predicates.filter(p=>!p.ok).map(p=>p.reason)});
+  }
   const exhausted = assessment.rows.flatMap(r => r.predicates.filter(p => p.reason?.code === 'DAY_QUOTA_EXHAUSTED'));
   if (exhausted.length) {
     const denied = snapshot.accounts.filter(a => company(a) && known(a.providerDenied) === true)
@@ -121,13 +128,6 @@ export function routePure(taskSpec, stateSnapshot, history = []) {
   if (exclusiveCodexTask(task, snapshot) && !mainOfferable && !startable)
     return makePlan('defer', task, snapshot, { ...fields, deferUntil: null, trigger: 'personal-main-capacity',
       reason: reason('choose', 'PERSONAL_MAIN_WAIT', personalMainWaitText(task, snapshot), [task.taskId]) });
-  if(!startable) {
-    const personalRows=assessment.rows.filter(r=>!company(candidateParts(snapshot,r.candidate).account)&&!r.estimate.stalled
-      &&r.estimate.startDelayMin===0&&r.predicates.filter(p=>!p.ok).every(p=>p.gate));
-    const personal=orderCandidates(task,snapshot,personalRows).winner;
-    if(personal)return makePlan('blocked',task,snapshot,{...fields,primaryProposal:proposal(task,personal),gates:gatesOf([personal]),
-      suggestions:personalRows.map(r=>r.candidate),reasons:personal.predicates.filter(p=>!p.ok).map(p=>p.reason)});
-  }
   // Show the ready personal choice before scheduling a future company reset.
   // Its command remains gated until the orchestrator supplies the user's yes.
   if (ordered.winner?.estimate.capacityReset && !rankedNow.winner) {

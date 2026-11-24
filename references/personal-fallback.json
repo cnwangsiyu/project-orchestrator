@@ -4,7 +4,7 @@
   "userDecisionRef": "standing:personal-fallback-2026-11-17",
   "queueWaitMinutes": 5,
   "queueWaitSnoozeMinutes": 60,
-  "queueAutoChoiceAfterNotices": 2,
+  "queueAutoChoiceAfterNotices": 1,
   "queueReminderMinutes": 10,
   "allowHardPersonalAstra": true,
   "hardAstraDecisionRef": "standing:hard-astra-2026-11-17",

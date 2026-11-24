@@ -75,13 +75,13 @@ try {
   queue = wait(now + 3 * min, 100);
   for (let minute = 3; minute < 8; minute++) {
     queue.position -= 10;
-    assert.equal((await monitor().poll([row], [], now + minute * min)).length, 0);
+    assert.equal((await monitor().poll([row], [], now + minute * min)).length, minute === 3 ? 1 : 0);
   }
-  assert.equal((await monitor().poll([row], [], now + 9 * min)).length, 1);
+  assert.equal((await monitor().poll([row], [], now + 9 * min)).length, 0);
   assert.equal(samples.length, 2);
   queue = wait(now + 10 * min);
-  assert.equal((await monitor().poll([row], [], now + 10 * min)).length, 0, 'changed since re-arms even if ready was between polls');
-  assert.equal((await monitor().poll([row], [], now + 16 * min)).length, 1);
+  assert.equal((await monitor().poll([row], [], now + 10 * min)).length, 1, 'changed since re-arms even if ready was between polls');
+  assert.equal((await monitor().poll([row], [], now + 16 * min)).length, 0);
   fs.writeFileSync(process.env.CODEX_ACCOUNTS,JSON.stringify(profiles));
   saveQueue(tmp,row.thread,queue);
   requestQueueChoice(row,samples.at(-1).noticeId,'wait',null,now+16*min);

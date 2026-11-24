@@ -12,7 +12,7 @@ export function personalFallbackPolicy(raw, now) {
   if (!finite(queueReminderMinutes) || queueReminderMinutes <= 0) return null;
   const queueWaitSnoozeMinutes = raw.queueWaitSnoozeMinutes ?? 60;
   if (!finite(queueWaitSnoozeMinutes) || queueWaitSnoozeMinutes <= 0) return null;
-  const threshold = raw.queueAutoChoiceAfterNotices ?? 2;
+  const threshold = raw.queueAutoChoiceAfterNotices ?? 1;
   const queueAutoChoiceAfterNotices = Number.isSafeInteger(threshold) && threshold >= 0 ? threshold : 0;
   const hardAstraDecisionRef = raw.hardAstraDecisionRef === `standing:hard-astra-${raw.since}` ? raw.hardAstraDecisionRef : null;
   return { enabled: raw.enabled, since: raw.since, userDecisionRef: raw.userDecisionRef, queueWaitMinutes,queueReminderMinutes,queueWaitSnoozeMinutes,queueAutoChoiceAfterNotices,
@@ -89,7 +89,7 @@ export function hardPersonalXhighFallback(task, snapshot, candidate, rows = []) 
         && array(known(lane.recentQueue)?.sources).some(source => String(source).startsWith('unreadable ')))) return null;
     }
   }
-  const capacityCodes = ['DAY_QUOTA_EXHAUSTED', 'PROVIDER_QUOTA_DENIED', 'ACTIVE_RESTRICTION', 'TTADK_DAILY_RESERVE'];
+  const capacityCodes = ['DAY_QUOTA_EXHAUSTED', 'PROVIDER_QUOTA_DENIED', 'ACTIVE_RESTRICTION'];
   const qualifiedMax = rows.filter(row => row.candidate.effort === 'max'
     && company(candidateParts(snapshot, row.candidate).account)
     && row.predicates.every(predicate => predicate.ok || predicate.ruleId === 'pExclusions'
@@ -150,7 +150,7 @@ export function standingPersonalFallback(task, snapshot, candidate, rows) {
     for (const r of topClass) {
       const a = candidateParts(snapshot,r.candidate).account;
       const failures = r.predicates.filter(p => !p.ok);
-      const capacityCodes = ['TTADK_DAILY_RESERVE','TOOL_CHANNEL_FAILED','ACTIVE_RESTRICTION','DAY_QUOTA_EXHAUSTED','PROVIDER_QUOTA_DENIED'];
+      const capacityCodes = ['TOOL_CHANNEL_FAILED','ACTIVE_RESTRICTION','DAY_QUOTA_EXHAUSTED','PROVIDER_QUOTA_DENIED'];
       if (failures.some(p => !capacityCodes.includes(p.reason?.code)
         && !(p.reason?.code === 'EXCLUDED' && excludedAfterInfrastructure(task,r.candidate)))) return null;
       const usage = known(a.quota.find(q => q.bucketId === r.candidate.modelId)?.usage);
@@ -171,7 +171,6 @@ export function standingPersonalFallback(task, snapshot, candidate, rows) {
       astraApprovalRef:policy.hardAstraDecisionRef,preferOverLowerCompany:true,
       text:`personal fallback (standing user OK ${policy.since}): personal Astra for hard task: company Astra ${[...new Set(reasons)].join('; ')}${lower.length?`; company ${lower.join(', ')} available as lower-class alternative`:''}; personal Astra for hard-tier task (standing user OK ${policy.since}: ${policy.hardAstraDecisionRef})`});
   }
-  let reserveApplied = false;
   for (const a of companies) {
     const pool = relevant.filter(r => r.candidate.accountId === a.id);
     const excluded = task.exclusions.some(e => e.scope === 'account' && e.value === a.id)
@@ -197,12 +196,6 @@ export function standingPersonalFallback(task, snapshot, candidate, rows) {
         explanations.push(`${a.id}/${r.candidate.modelId}: daily quota exhausted; ${dayLimit.reason ?? 'provider reset pending'}`);
         continue;
       }
-      const reserve = failures.find(p => p.reason?.code === 'TTADK_DAILY_RESERVE');
-      if (reserve) {
-        reserveApplied = true;
-        explanations.push(reserve.reason.text);
-        continue;
-      }
       if (failures.some(p => ['TOOL_CHANNEL_FAILED', 'ACTIVE_RESTRICTION', 'DAY_QUOTA_EXHAUSTED', 'PROVIDER_QUOTA_DENIED'].includes(p.reason?.code)
         || p.reason?.code === 'EXCLUDED' && excludedAfterInfrastructure(task, r.candidate))) {
         explanations.push(`${a.id}/${r.candidate.modelId}: excluded after infrastructure failure, restricted or quota denied`);
@@ -216,7 +209,7 @@ export function standingPersonalFallback(task, snapshot, candidate, rows) {
   if (options.length) {
     options.sort((a, b) => (a.estimate.startDelayMin ?? Infinity) - (b.estimate.startDelayMin ?? Infinity));
     const best = options[0], { account: a, lane } = candidateParts(snapshot, best.candidate);
-    if (a.kind !== 'trae' || (lane.mode !== 'low-priority' && !reserveApplied)) return null;
+    if (a.kind !== 'trae' || lane.mode !== 'low-priority') return null;
     const queue = best.estimate.stalled ? 'flat/stalled queue' : `predicted start ~${Math.round(best.estimate.startDelayMin)} min`;
     explanations.push(`${a.id}/${best.candidate.modelId} ${lane.mode === 'low-priority' ? 'low-priority ' : ''}${queue} > ${policy.queueWaitMinutes} min`);
   }

@@ -27,7 +27,7 @@ function fixture(ttReady=false,models=[SOL,ASTRA],personalEfforts=['medium','hig
     lanes:accounts.flatMap(([id,kind,catalog])=>catalog.map(modelId=>({id:`${id}:${modelId}`,accountId:id,modelId,harness:kind==='claude'?'claude-bg':'hub',
       efforts:['main','b'].includes(id)?personalEfforts:['medium','high','xhigh','max'],mode:id==='trae'&&modelId===SOL?'low-priority':'priority',
       selectable:true,readyAt:id==='trae'&&modelId===SOL?null:now,position:id==='trae'&&modelId===SOL?4:0,drainPerMin:1,
-      queueState:id==='trae'&&modelId===SOL?'queued':'ready',loadPercent:modelId===SOL?70:10,loadSource:'model',capabilities:caps}))) };
+      queueState:id==='trae'&&modelId===SOL?'queued':'ready',loadPercent:id==='trae' && modelId===SOL?70:10,loadSource:'model',capabilities:caps}))) };
   const profiles=Object.fromEntries(accounts.filter(a=>a[0]!=='claude').map(([id,kind])=>{
     const home=path.join(tmp,id);fs.mkdirSync(home,{recursive:true});return[id,{kind,home,hub:'ws://127.0.0.1:1',id:`fixture-${id}`,email:`${id}@example.com`,plan:'prolite'}];}));
   fs.writeFileSync(process.env.CODEX_ACCOUNTS,JSON.stringify(profiles));fs.writeFileSync(process.env.ROUTE_SNAPSHOT_FILE,JSON.stringify(raw));
@@ -47,7 +47,7 @@ try {
   personal.raw.lanes=personal.raw.lanes.filter(l=>l.accountId!=='trae' || l.modelId===SOL);
   personal.context.snapshot=createSnapshot(personal.raw);
   const main=automaticQueueOption(personal.row,personal.queue,personal.launch,personal.context,'personal');
-  assert.equal(main?.account,'main'); assert.equal(main.approvalRef,policy.userDecisionRef);
+  assert.equal(main,null,'an approved personal option still requires an explicit switch');
   personal.raw.personalFallback={...policy,enabled:false}; personal.context.snapshot=createSnapshot(personal.raw);
   assert.equal(automaticQueueOption(personal.row,personal.queue,personal.launch,personal.context,'gated'),null);
   f=fixture();
@@ -75,8 +75,17 @@ try {
     }
     fs.rmSync(queueDecisionFile(f.row));
   }
+  f=fixture(true);
+  const slowTerra=f.raw.lanes.find(l=>l.accountId==='trae' && l.modelId===TERRA);
+  Object.assign(slowTerra,{readyAt:null,position:20,drainPerMin:1,queueState:'queued'});
+  f.context.snapshot=createSnapshot(f.raw);
+  assert.equal(queueOptions(f.row,f.queue,f.launch,now,f.context)[0].account,'ttadk',
+    'the owner best command ranks executable options by expected finish');
+  const immediate = notifyQueueOwner(f.row,{...f.queue,since:now},f.launch,{now,policy,context:f.context,emit});
+  assert.equal(immediate.noticeCount,1);
+  assert.ok(claimQueueChoice(f.row,{policy,since:now,now})?.choice.option.company);
+  fs.rmSync(queueDecisionFile(f.row));
   f=fixture();
-  assert.equal(notifyQueueOwner(f.row,{...f.queue,since:now-5*min},f.launch,{now,policy,context:f.context,emit}),null);
   const legacy = {defaults:{...f.launch.defaults,'route-args':undefined,'routed-seat':JSON.stringify({
     name:f.row.name,project:f.row.project,category:'build-run',role:'primary',routeId:'route:fixture',effort:'high'})}};
   const incompleteRow = { ...f.row, effort: undefined };
@@ -264,7 +273,7 @@ try {
   assert.equal(hardPlan.plan.task.previousAttempts[0].state,'interrupted');
   assert.equal(hardPlan.blocked,false);
   console.log('PASS mid-turn hard queue lists personal Astra with honest interrupted-work evidence');
-  for(const [label,selection,ttReady] of [['mid-auto',null,true],['no-switch',null,false],['continued',null,false],['work-started',null,false],['legacy-disabled',null,true],
+  for(const [label,selection,ttReady] of [['first-auto',null,true],['mid-auto',null,true],['no-switch',null,false],['continued',null,false],['work-started',null,false],['legacy-disabled',null,true],
     ['mid-wait',null,false],['mid-threshold',null,false],['mid-repeat',null,false],['mid-resume',{model:TERRA},false],
     ['mid-fresh',{account:'ttadk'},true],['mid-park',{id:'park'},false],['mid-tool-running',{id:'park'},false],
     ['mid-tool-race',{id:'park'},false],['mid-reporting',null,false],['mid-items-only',null,false],['mid-server-request',null,false],
@@ -281,9 +290,9 @@ try {
       fs.writeFileSync(path.join(bin,'claude'),'#!/bin/sh\nprintf "%s\\n" "$@" > "$QUEUE_CLAUDE_ARGS"\nexit 0\n',{mode:0o755});
       process.env.PATH=`${bin}:${envBefore.PATH}`;process.env.QUEUE_CLAUDE_ARGS=path.join(tmp,'claude-args.log');
     }
-    const mid=label.startsWith('mid-'),age=['mid-threshold','mid-reporting'].includes(label)?4:['no-switch','continued'].includes(label)?40:6;
+    const mid=label.startsWith('mid-'),age=label==='first-auto'||selection?0:['mid-threshold','mid-reporting'].includes(label)?4:['no-switch','continued'].includes(label)?40:6;
     saveQueue(f.profiles.trae.home,'fixture',{...f.queue,since:now-age*min});
-    fs.writeFileSync(process.env.PERSONAL_FALLBACK_FILE,JSON.stringify(label==='legacy-disabled'?{...policy,enabled:false}:label==='mid-repeat'?{...policy,queueAutoChoiceAfterNotices:0}:policy));
+    fs.writeFileSync(process.env.PERSONAL_FALLBACK_FILE,JSON.stringify(label==='legacy-disabled'?{...policy,enabled:false}:!['first-auto','mid-auto'].includes(label)?{...policy,queueAutoChoiceAfterNotices:0}:policy));
     const args=['--import',transport,path.join(root,'scripts/codex-worker.mjs'),'--account','trae',label==='continued'?'turn':'start',
       ...(label==='continued'?['--thread','fixture']:[]),'--cwd',tmp,'--model',SOL,
       '--effort','high','--sandbox','workspace-write','--name','queue-test','--owner',owner,'--project','fixture',
@@ -302,10 +311,10 @@ try {
     assert.equal(r.error,undefined,label);assert.equal(r.status,cancelCase?7:0,r.stderr+r.stdout);
     const calls=fs.readFileSync(rpc,'utf8').trim().split('\n').map(JSON.parse);
     const interrupts=calls.filter(c=>c.method==='turn/interrupt');
-    assert.equal(interrupts.length,label==='mid-auto'||label==='legacy-disabled'||selection&&!['wait'].includes(selection.id)&&!label.startsWith('mid-tool')?1:0,label);
-    if(['legacy-disabled','mid-threshold','mid-reporting'].includes(label))assert.equal(fs.existsSync(queueDecisionFile(f.row)),false,label);
+    assert.equal(interrupts.length,label==='first-auto'||label==='legacy-disabled'||selection&&!['wait'].includes(selection.id)&&!label.startsWith('mid-tool')?1:0,label);
+    if(label==='legacy-disabled')assert.equal(fs.existsSync(queueDecisionFile(f.row)),false,label);
     else assert.ok(JSON.parse(fs.readFileSync(queueDecisionFile(f.row))).noticeCount>=1,label);
-    if(mid&&!['mid-threshold','mid-reporting'].includes(label)) {
+    if(mid) {
       const decision=JSON.parse(fs.readFileSync(queueDecisionFile(f.row)));
       assert.equal(decision.queue.workStarted,true,label);
       assert.equal(decision.queue.workedMinutesBefore,24,label);
@@ -313,7 +322,7 @@ try {
       if(label==='mid-tool-running')assert.equal(decision.queue.runningTools,1);
       if(label.startsWith('mid-tool'))assert.match(r.stderr,/tool call is still running.*refused/);
     }
-    if(label==='mid-auto') {
+    if(label==='first-auto') {
       const state=JSON.parse(fs.readFileSync(queueDecisionFile(f.row)));
       assert.equal(state.decision.decidedBy,'auto'); assert.equal(state.decision.option.account,'ttadk');
       const audit=fs.readFileSync(process.env.ROUTE_LOG_FILE,'utf8').trim().split('\n').map(JSON.parse);
@@ -336,7 +345,7 @@ try {
     if(label==='ttadk')assert.ok(calls.some(c=>c.method==='thread/start'&&c.account==='ttadk'));
     if(label==='claude-approved')assert.ok(fs.readFileSync(process.env.QUEUE_CLAUDE_ARGS,'utf8').includes('--model\nopus\n'),'the approved option uses the tracked Claude launcher');
     if(cancelCase)assert.equal(calls.filter(c=>c.method==='thread/start').length,1,'unconfirmed cancellation cannot launch a replacement');
-    if((!selection&&!['legacy-disabled','mid-auto'].includes(label))||selection?.id==='wait')assert.match(fs.readFileSync(out,'utf8'),/DONE original/);
+    if((!selection&&!['legacy-disabled','first-auto'].includes(label))||selection?.id==='wait')assert.match(fs.readFileSync(out,'utf8'),/DONE original/);
     console.log(`PASS one-step queue choice ${label}`);
   }
   // A steer is accepted without interrupting, but acceptance is not an answer while queued.

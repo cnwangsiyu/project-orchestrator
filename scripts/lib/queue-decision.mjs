@@ -8,6 +8,7 @@ import { appendEvent } from './worker-events.mjs';
 import { queuePolicy } from './queue-stall-watch.mjs';
 import { acquireRoute } from './route-data.mjs';
 import { parseTaskSpec, createTaskSpec, routePure, renderPlan, enumerateCandidates, validatePlan } from './pipeline/index.mjs';
+import { estimateCandidate } from './pipeline/estimate.mjs';
 import { orderCandidates } from './pipeline/choose.mjs';
 import { makePlan } from './pipeline/plan.mjs';
 import { previousReleaseFallback, releaseUnavailable } from './pipeline/release-fallback.mjs';
@@ -114,8 +115,12 @@ export function queueOptionPlan(context, row, queue, candidateId, decisionId, us
 }
 
 export function queueOptions(row,queue,launch,now=Date.now(),context=queueRouteContext(row,launch,now),decisionId='queue-preview',automaticOnly=false) {
-  const automaticRows=[], options=[], groups=new Set(), healthyCurrent=new Set();
-  for (const c of [...enumerateCandidates(context.task,context.snapshot).candidates].sort((a,b)=>['low','medium','high','xhigh','max'].indexOf(a.effort)-['low','medium','high','xhigh','max'].indexOf(b.effort))) {
+  const eligibleRows=[], options=[], groups=new Set(), healthyCurrent=new Set();
+  const candidates = enumerateCandidates(context.task,context.snapshot).candidates;
+  const source = candidates.find(c => c.accountId === row.account && c.modelId === row.model && c.effort === (row.effort ?? context.effort));
+  const sourceWork = source && estimateCandidate(context.task,context.snapshot,source).workMin;
+  const queueDelay = queue.position > 0 && queue.drainPerMin > 0 ? queue.position / queue.drainPerMin : null;
+  for (const c of [...candidates].sort((a,b)=>['low','medium','high','xhigh','max'].indexOf(a.effort)-['low','medium','high','xhigh','max'].indexOf(b.effort))) {
     if (c.accountId==='b' || c.accountId===row.account&&c.modelId===row.model) continue;
     const group=`${c.accountId}:${c.modelId}`;
     if (groups.has(group)) continue;
@@ -129,12 +134,16 @@ export function queueOptions(row,queue,launch,now=Date.now(),context=queueRouteC
       ? `${lane.mode}; load ${known(lane.loadPercent)??'?'}%; high-priority quota ${usage?`${usage.used}/${usage.limit}`:lane.mode==='priority'?'available':'unknown/depleted'}`
       : company(account)?`company quota ${account.fallbackUnavailable?'exhausted/restricted':'available'}`
       : `${route.pick?.approvalRef??'scoped personal approval required'}; personal quota cost; reset deadline ${budget?.deadline??'?'}h`;
-    const fallback=route.pick?.personalFallback;
-    const standingMain=c.accountId==='main' && fallback?.quotaApproved && route.pick.approvalRef===fallback.approvalRef
-      && [context.snapshot.personalFallback?.userDecisionRef,context.snapshot.personalPriority?.userDecisionRef].includes(fallback.approvalRef);
-    if (automaticOnly && c.accountId!=='b' && (company(account) || standingMain) && route.pick?.workerArgs && !route.blocked
-      && !route.needsUserOK.length && !route.redeemFirst && !route.signing && (!route.secondOpinion || route.secondOpinion.company))
-      automaticRows.push(r);
+    const executable = route.pick?.command && !route.blocked && !route.needsUserOK.length && !route.redeemFirst;
+    const faster = Number.isFinite(sourceWork) && (queueDelay !== null
+      ? r.estimate.completionMin < sourceWork + queueDelay
+      : r.estimate.startDelayMin === 0 && r.estimate.workMin <= sourceWork);
+    const automaticEligible = company(account) && route.pick?.workerArgs && !route.signing
+      && (!route.secondOpinion || route.secondOpinion.company) && !queue.workStarted && !r.estimate.stalled
+      && Number.isFinite(r.estimate.startDelayMin) && r.estimate.confidence !== 'UNKNOWN'
+      && (account.kind !== 'trae' || r.estimate.balance?.freeNow || ['queue','observed-start'].includes(r.estimate.basis))
+      && faster;
+    if (executable && (!automaticOnly || automaticEligible)) eligibleRows.push({...r,ok:true});
     const rung = policyModel(c.modelId);
     if (company(account) && ['astra','sol'].includes(rung) && c.modelId === newestRelease(known(account.catalog) ?? [], rung)
       && route.plan.kind === 'launch' && !releaseUnavailable(route.plan.task, context.snapshot, c)) healthyCurrent.add(c.id);
@@ -147,17 +156,17 @@ export function queueOptions(row,queue,launch,now=Date.now(),context=queueRouteC
       approvalNotes:route.needsUserOK,context:c.accountId===row.account&&c.family!=='claude'&&!launch?.requestBufferExceededAt?'same thread / resume':'fresh worker with the same brief',
       ownerMayLowerFloor:account.kind==='trae'&&c.modelId!==row.model});
   }
-  const eligible=options.some(o=>o.company) ? automaticRows.filter(r=>company(candidateParts(context.snapshot,r.candidate).account)) : automaticRows;
-  const winner=eligible.length ? orderCandidates(context.task,context.snapshot,eligible).winner : null;
+  const winner=orderCandidates(context.task,context.snapshot,eligibleRows).winner;
   const automatic=options.find(o=>o.candidateId===winner?.candidate.id);
-  if (automatic) automatic.automaticDefault=true;
+  if (automaticOnly && automatic) automatic.automaticDefault=true;
   const hasFallback = options.some(o => o.releaseFallback);
   function releaseRank(option) {
     if (healthyCurrent.has(option.candidateId)) return 0;
     if (option.releaseFallback) return 1;
     return option.company ? 2 : 3;
   }
-  options.sort((a,b)=>(hasFallback ? releaseRank(a)-releaseRank(b) : 0)
+  options.sort((a,b)=>Number(b.candidateId===winner?.candidate.id)-Number(a.candidateId===winner?.candidate.id)
+    || (hasFallback ? releaseRank(a)-releaseRank(b) : 0)
     ||Number(b.preferred)-Number(a.preferred)
     ||(a.account==='trae'?0:a.account==='ttadk'?1:a.account==='claude'?3:2)-(b.account==='trae'?0:b.account==='ttadk'?1:b.account==='claude'?3:2)
     ||(a.budgetDeadlineHours??Infinity)-(b.budgetDeadlineHours??Infinity));
@@ -169,16 +178,16 @@ export function queueOptions(row,queue,launch,now=Date.now(),context=queueRouteC
   return options;
 }
 
-export function automaticQueueOption(row,queue,launch,context,noticeId,listed=queueOptions(row,queue,launch,context.now,context,noticeId)) {
+export function automaticQueueOption(row,queue,launch,context,noticeId) {
   const best=queueOptions(row,queue,launch,context.now,context,noticeId,true).find(o=>o.automaticDefault);
-  return best && (best.company || !listed.some(o=>o.company)) ? best : null;
+  return best ?? null;
 }
 
 export function notifyQueueOwner(row,queue,launch,{now=Date.now(),policy=queuePolicy(now),emit=appendEvent,context}={}) {
   if (row.effort == null) row = { ...row, effort: launchEffort(row, launch) };
   const file=queueDecisionFile(row);
   if (!policy?.enabled||!waiting(queue)||queue.reporting||queue.completing) { const old=read(file); if(old?.status==='waiting') writeJson(file,{...old,status:'ended'}); return null; }
-  if (!Number.isFinite(queue.since)||now-queue.since<=policy.queueWaitMinutes*60000) return null;
+  if (!Number.isFinite(queue.since)||now < queue.since) return null;
   const old=read(file), same=old?.since===queue.since;
   const wait = same && old.status === 'waiting' ? old.explicitWait : null;
   const snoozed = wait && now < wait.until;
@@ -201,7 +210,7 @@ export function notifyQueueOwner(row,queue,launch,{now=Date.now(),policy=queuePo
     options=queueOptions(row,queue,launch,now,context,noticeId);
     const count=same ? old.noticeCount+(old.pendingNotice&&!renewing?0:1) : 1;
     if (!answered && policy.queueAutoChoiceAfterNotices>0 && count>=policy.queueAutoChoiceAfterNotices)
-      autoOption=automaticQueueOption(row,queue,launch,context,noticeId,options);
+      autoOption=automaticQueueOption(row,queue,launch,context,noticeId);
   }
   catch(e) { optionError=e.message; options=[{id:'wait',type:'wait',lane:`${row.account}:${row.model}`,model:row.model,effort:row.effort,
     expectedStartDelayMin:null,quotaNote:'saved route unavailable; recover before switching',needsUserApproval:false,context:'same thread / same turn'},

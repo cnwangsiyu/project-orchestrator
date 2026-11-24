@@ -2,10 +2,9 @@ import {mandatoryReview} from '../review-policy-data.mjs';
 import { policyModel, matchesModel, isAstra, newestRelease, VERSION, EFFORTS, array, company, companyDevice, known, modelId, familyOf, isReview, adversarial, result, reason, fingerprint, stable } from './common.mjs';
 import { candidateParts, enumerateCandidates } from './candidates.mjs';
 import { modelPreference, policyEffort, claudeBrowserPolicy } from './policy.mjs';
-import { companyServesInfraRetry, estimateCandidate, usesExclusiveInfraOverflow } from './estimate.mjs';
+import { estimateCandidate } from './estimate.mjs';
 import { standingPersonalFallback, hardPersonalXhighFallback } from './personal-fallback.mjs';
 import { standingPersonalPriority, personalPriorityGuard, exclusiveCodexTask } from './personal-priority.mjs';
-import { ttadkReserve } from './ttadk-reserve.mjs';
 import { liveAttempts, liveAttemptText } from './live-attempt.mjs';
 import { unavailableDayQuota, previousReleaseFallback } from './release-fallback.mjs';
 import { rejectedQualityAttempt } from '../worker-result.mjs';
@@ -80,8 +79,6 @@ export function pAvailable(t, s, c) {
   if (exhausted && !(a.kind === 'trae' && t.flags['allow-low-priority-queue']))
     return deny('pAvailable', 'DAY_QUOTA_EXHAUSTED', `${a.id}/${m.id} day quota exhausted until ${exhausted.until ? new Date(exhausted.until).toISOString() : 'provider reset (time unknown)'}${exhausted.reason ? '; ' + exhausted.reason : ''}`, c,
       { reconsiderAt: exhausted.until });
-  const reserve = ttadkReserve(t, s, a);
-  if (reserve) return deny('pAvailable', 'TTADK_DAILY_RESERVE', reserve, c);
   return pass('pAvailable');
 }
 export function pCapabilities(t, s, c) {
@@ -218,12 +215,6 @@ export function pContent(t, s, c) {
 }
 export function pModelFit(t, s, c, context = {}) {
   const account = candidateParts(s,c).account;
-  if (t.infraRetry && !t.qualityFailures && context.companyEligible && !company(account)) {
-    const mainOverflow = usesExclusiveInfraOverflow(t, s) && standingPersonalPriority(t, s, c, account)
-      && context.companyRows && !context.companyRows.some(r => r.predicates.every(p => p.ok) && companyServesInfraRetry(s, r));
-    if (!mainOverflow)
-      return deny('pModelFit', 'INFRA_RETRY_COMPANY_FIRST', 'An infrastructure retry returns to a qualified company lane; its retry count and completed personal turns do not establish a quality escalation.', c);
-  }
   if (t.infraRetry && !t.qualityFailures && t.environmentFailures?.some(a => company(s.accounts.find(account => account.id === a.actual?.accountId)))
     && !company(candidateParts(s,c).account))
     return deny('pModelFit', 'ENVIRONMENT_RETRY_COMPANY_ONLY', 'An environment-blocked company turn retries on company lanes without advancing the quality ladder.', c);

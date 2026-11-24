@@ -1667,6 +1667,7 @@ const follow = (threadId, turnId, items = [], submittedAt = null) => {
       const sourceArgs = option?.type === 'switch' ? queueSourceArgs(ownerRow,ownerLaunch).args : ROUTE_ARGS;
       const held=heldTaskResources(sourceArgs??[],opts.name);if(held)throw Error(held);
       const automatic=state.choice.decidedBy==='auto';
+      let sourceQueue = state.queue;
       const select=()=>{
         const context=queueRouteContext(ownerRow,ownerLaunch);
         if(automatic) {
@@ -1674,7 +1675,17 @@ const follow = (threadId, turnId, items = [], submittedAt = null) => {
           const threshold=policy?.queueAutoChoiceAfterNotices;
           if(!policy?.enabled || !(threshold>0) || state.noticeCount<threshold || REROUTE_DEPTH>=2)
             throw Error('automatic queue choice is disabled or outside its limits');
-          const best=automaticQueueOption(ownerRow,state.queue,ownerLaunch,context,state.noticeId);
+          if (!cancelSent) {
+            const current=readQueue(PROF.home,threadId);
+            if (!current || current.since!==state.since || current.workStarted || workStarted)
+              throw Error('source queue has changed or started work');
+            const [first]=patienceSamples, last=patienceSamples.at(-1);
+            const span=first && last ? (last.t-first.t)/60000 : 0;
+            const drain=span>=2 && Date.now()-last.t<=120000 && last.pos===current.position
+              ? Math.max(0,(first.pos-last.pos)/span) : null;
+            sourceQueue={...current,drainPerMin:drain};
+          }
+          const best=automaticQueueOption(ownerRow,sourceQueue,ownerLaunch,context,state.noticeId);
           if(!best || (cancelSent && best.id!==option.id)) throw Error('automatic queue choice is no longer eligible');
           option=best;
         }

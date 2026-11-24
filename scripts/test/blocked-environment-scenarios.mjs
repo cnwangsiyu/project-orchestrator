@@ -69,13 +69,13 @@ try {
     const explicit=route(history,1,['--failure-kind','infra','--actual','codex:gpt-6.2-sol:medium@main'],true,context);
     assert.equal(explicit.pick?.account,'trae'); assert.equal(explicit.pick.model,'gpt-6.1-sol');
     const personalOnly=route(history.slice(0,2),99,['--failure-kind','infra'],true,context);
-    assert.equal(personalOnly.pick?.account,'trae'); assert.equal(personalOnly.plan.task.qualityFailures,0);
+    assert.equal(personalOnly.pick?.account,'main','infra recovery may reuse authorized measured personal capacity'); assert.equal(personalOnly.plan.task.qualityFailures,0);
     const acceptedResult=route(history.map(row=>row.thread==='main'?{...row,state:'failed'}:row),1,
       ['--failure-kind','infra'],true,context);
     assert.equal(acceptedResult.pick?.account,'trae'); assert.equal(acceptedResult.plan.task.qualityFailures,0);
     const completedCompany={...main,thread:'trae',actual:{accountId:'trae',modelId:'gpt-6.1-sol',effort:'medium'}};
     const repeat=route([completedCompany],99,['--failure-kind','infra'],true,context);
-    assert.equal(repeat.pick?.account,'trae'); assert.equal(repeat.pick.effort,'medium');
+    assert.equal(repeat.pick?.account,'main'); assert.equal(repeat.pick.effort,'medium');
     const quality=history.map(row=>row.thread==='main'?{...row,state:'failed',result:'fail'}:row);
     const rejected=route(quality,1,['--failure-kind','infra'],true,context);
     assert.equal(rejected.pick?.account,'main'); assert.equal(rejected.plan.task.qualityFailures,1);
