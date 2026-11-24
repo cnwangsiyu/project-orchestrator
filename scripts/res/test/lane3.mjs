@@ -296,12 +296,14 @@ for (const command of ['res take-build|wait-build', 'res wait-lane', 'res return
   'res pool-capacity local|local-light|mini2', '--profile heavy|medium|light',
   '--cores N --mem-gib GiB --disk-gib GiB', 'derived from hardware',
   'declared reservation for life', 'acquired IDs are opaque', 'slot-host also resolves local/mini2 IDs',
-  'named legacy takes close dynamic admission machine-wide while held']) ok(currentHelp.includes(command));
+  'named legacy takes close dynamic admission machine-wide while held', 'res device-app check',
+  'res device-app claim', 'res device-app list']) ok(currentHelp.includes(command));
 // Normalize the added pool block and declared-input admission options; retain
 // the byte-for-byte baseline check for the remaining commands and diagnostics.
 const withoutPoolHelp = text => text.replace(/^res wait-pool[\s\S]*?(?=^res heavy-check)/m, '')
   .replace(/^res audit[^\n]*\n/m, '')
   .replace(/^res holder[^\n]*\n/m, '')
+  .replace(/^(?:res device-app[^\n]*\n){3}/m, '')
   .replace(/^status\/holder:[^\n]*\n[^\n]*\n/m, '')
   .replace(' [--pid <pid>] [--disk-gib <GiB>]\n', ' [--pid <pid>]\n')
   .replace(' [--disk-gib <GiB>] [--disk-gib-file <JSON>] [--placement-file <JSON>] [--maintenance] [take options]\n', ' [take options]\n');
