@@ -84,8 +84,9 @@ function worker(row, state, startedAt = row.startedAt) {
       (Object.hasOwn(projects, project) ? `${projects[project]} 主对话` : '负责会话') : row.owner,
     account, model: string(row.actualModel) || string(row.model), effort: string(row.effort), state,
     startedAt: iso(startedAt), lastActivityAt: iso(row.lastActivityAt), queueSince: iso(queue.since ?? queue.queuedAt ?? queue.at),
-    queuePosition: number(queue.position), queueState: string(queue.state), queueStalled: row.queueStalled === true,
-    queueWorkedMinutes: number(queue.workedMinutesBefore),
+    queuePosition: number(queue.position), queueState: string(queue.state), queueStalled: Boolean(row.queueStalled),
+    queueDrainPerMinute: number(queue.drainPerMin), queueWorkedMinutes: number(queue.workedMinutesBefore),
+    runningTools: number(queue.runningTools ?? row.runningTools) ?? 0,
   };
 }
 export function parseWorkers(data) {
@@ -467,7 +468,7 @@ export function makeSources({ data, shared = process.env.RULES_SHARED || path.jo
       return parseCards(events, now, malformed);
     },
     notes: async (signal, workers) => {
-      const notes = new Map(), lifecycle = new Map(), notices = new Map();
+      const notes = new Map(), lifecycle = new Map(), notices = new Map(), rerouted = new Map();
       await ndjson(path.join(shared, 'worker-events.jsonl'), signal, (row) => {
         if (!row.project || !(row.task || row.name)) return;
         if (row.event === 'message' && typeof row.text === 'string') {
@@ -479,6 +480,10 @@ export function makeSources({ data, shared = process.env.RULES_SHARED || path.jo
             const list = notes.get(id) ?? [];
             list.push({ text: row.text, t: row.t }); notes.set(id, list);
           }
+        }
+        if (row.event === 're-routed' && iso(row.t)) {
+          const id = taskKey({ ...row, task: row.task || row.name });
+          if (!rerouted.has(id) || row.t > rerouted.get(id)) rerouted.set(id, row.t);
         }
         if (['failed', 'running', 'finished', 'retired'].includes(row.event) && row.name && iso(row.t)) {
           if (now - Date.parse(iso(row.t)) > 30 * 60_000) return;
@@ -493,7 +498,8 @@ export function makeSources({ data, shared = process.env.RULES_SHARED || path.jo
         list.sort((a, b) => b.t - a.t).slice(0, 3).map((row) => row.text)]));
       const openNotices = new Set([...notices.values()].filter((row) => row.open).map((row) => row.id));
       return { latest: Object.fromEntries(Object.entries(last).map(([k, list]) => [k, list[0]])), notes: last,
-        notices: Object.fromEntries([...wanted].map((id) => [id, openNotices.has(id)])), failed };
+        notices: Object.fromEntries([...wanted].map((id) => [id, openNotices.has(id)])),
+        rerouted: Object.fromEntries([...rerouted].map(([id, at]) => [id, iso(at)])), failed };
     },
     routes: async (signal, workers) => {
       const latest = new Map(), wanted = new Set(workers.map((w) => w.routeRef));

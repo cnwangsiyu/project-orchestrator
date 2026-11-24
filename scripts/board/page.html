@@ -30,16 +30,19 @@ body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.7 var(--body)}
 .dot{width:9px;height:9px;border-radius:50%;background:var(--ok);flex:none}
 .dot.warn{background:var(--warn)} .dot.bad{background:var(--bad)} .dot.idle{background:var(--idle)}
 .fresh{margin-left:auto;font:12px var(--mono);color:var(--muted);font-variant-numeric:tabular-nums}
+.time-controls{width:100%;min-width:0;display:grid;grid-template-columns:auto auto minmax(120px,1fr) auto auto;gap:8px;align-items:center}
+.time-controls button{min-height:36px;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--ink);padding:4px 10px;font:inherit;cursor:pointer;touch-action:manipulation}
+.time-controls input{width:100%;min-width:0;accent-color:var(--accent)}.time-controls output{min-width:8em;color:var(--muted);font:12px var(--mono);overflow-wrap:anywhere}
 .tabs{display:flex;gap:6px;flex-wrap:wrap;padding:10px 16px;border-bottom:1px solid var(--line)}
 .tab{font:inherit;font-size:13px;padding:4px 11px;border-radius:999px;border:1px solid var(--line);background:transparent;color:var(--ink);cursor:pointer}
 .tab[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:var(--surface)}
-.tab:focus-visible,.row:focus-visible,.copy:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.tab:focus-visible,.row:focus-visible,.copy:focus-visible,.time-controls button:focus-visible,.time-controls input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .grid{display:grid;grid-template-columns:minmax(0,1.65fr) minmax(0,1fr)}
 .pane{padding:14px 16px;min-width:0}
 .pane + .pane{border-left:1px solid var(--line)}
 @media(max-width:820px){.grid{grid-template-columns:minmax(0,1fr)}.pane + .pane{border-left:0;border-top:1px solid var(--line)}}
-@media(max-width:480px){.wrap{padding-top:8px}.pane,.bar,.tabs{padding-left:12px;padding-right:12px}.fresh{margin-left:0;width:100%}}
-.sec{font-size:12px;letter-spacing:.06em;color:var(--muted);font-weight:600;margin:0 0 8px;display:flex;justify-content:space-between;gap:8px}
+@media(max-width:480px){.wrap{padding-top:8px}.pane,.bar,.tabs{padding-left:12px;padding-right:12px}.fresh{margin-left:0;width:100%}.time-controls{grid-template-columns:1fr 1fr auto}.time-controls input{grid-column:1/-1;grid-row:1}.time-controls button{min-height:44px}.time-controls output{grid-column:1/-1;grid-row:3;min-width:0}}
+.sec{font-size:12px;letter-spacing:.06em;color:var(--muted);font-weight:600;margin:0 0 8px;display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}.sec>*{min-width:0}
 .block{margin-bottom:18px}
 .ask{border:1px solid var(--warn);background:var(--warn-soft);border-radius:8px;padding:10px 12px;margin-bottom:8px;font-weight:600;overflow-wrap:anywhere}
 .ask.urgent{border-color:var(--bad);box-shadow:inset 3px 0 var(--bad)}
@@ -58,13 +61,14 @@ body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.7 var(--body)}
 .detail{background:var(--sunk);border-radius:6px;padding:10px 12px;font-size:13px;margin:4px 0 8px}
 .detail dl{display:grid;grid-template-columns:auto minmax(0,1fr);gap:3px 12px;margin:0}
 .detail dt{color:var(--muted)} .detail dd{margin:0;overflow-wrap:anywhere}
-.copy{margin:8px 0 0;font:inherit;background:var(--surface);border:1px solid var(--line);color:var(--ink);border-radius:5px;cursor:pointer}
+.copy{margin:8px 0 0;font:inherit;background:var(--surface);border:1px solid var(--line);color:var(--ink);border-radius:5px;cursor:pointer}.copy+input{display:block;max-width:100%;width:100%;margin-top:6px}
 .release{border:1px solid var(--line);border-radius:6px;padding:5px 9px;margin:0 0 8px;font-size:12.5px;color:var(--muted)}
 .release dl{display:grid;grid-template-columns:auto minmax(0,1fr);gap:2px 9px;margin:6px 0}.release dt{color:var(--muted)}.release dd{margin:0;color:var(--ink);overflow-wrap:anywhere}
 .host,.q{border-top:1px solid var(--line);padding:8px 0}
 .host .h,.q .h{display:flex;justify-content:space-between;gap:8px;font-size:13.5px;overflow-wrap:anywhere}
 .host .h{font-weight:500}
 .h span{font:12px/1.7 var(--mono);font-weight:400;color:var(--muted);text-align:right;font-variant-numeric:tabular-nums}
+.h>*{min-width:0}
 .h .acc{color:var(--accent)}
 .meter{appearance:none;display:block;width:100%;height:7px;border:0;border-radius:4px;background:var(--idle-soft);margin:5px 0 3px;overflow:hidden;color:var(--accent);accent-color:var(--accent)}
 .meter.warn{color:var(--warn);accent-color:var(--warn)} .meter.bad{color:var(--bad);accent-color:var(--bad)}
@@ -75,6 +79,7 @@ body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.7 var(--body)}
 .events{margin:0;padding:0;list-style:none}.event-hour{margin:8px 0 0}.event-hour h3{font:12px var(--mono);color:var(--muted);margin:0}
 .event-hour ul{list-style:none;margin:0;padding:0}.event-hour li{display:grid;grid-template-columns:44px minmax(0,1fr);gap:8px;border-top:1px solid var(--line);padding:5px 0;font-size:12.5px}
 .event-hour time{font:12px var(--mono);color:var(--muted)}.event-hour .bad{color:var(--bad)}.event-hour .warn{color:var(--warn)}
+@media(max-width:480px){.row{grid-template-columns:auto minmax(0,1fr)}.row>.pill{grid-column:2;justify-self:start;white-space:normal}.meta{grid-column:2}.host .h,.q .h{align-items:flex-start;flex-wrap:wrap}.h span{text-align:left}}
 @media(prefers-reduced-motion:no-preference){details[open]>.detail{animation:in .15s ease-out}@keyframes in{from{opacity:.5}to{opacity:1}}}
 </style>
 </head>
@@ -84,6 +89,11 @@ body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.7 var(--body)}
     <h1>mini 值班台</h1>
     <span class="verdict"><span class="dot idle" id="verdictDot" aria-hidden="true"></span><span id="verdict">正在读取快照</span></span>
     <span class="fresh" id="fresh">—</span>
+    <div class="time-controls" aria-label="历史回看">
+      <button type="button" id="stepBack">后退 5 分</button><button type="button" id="stepForward">前进 5 分</button>
+      <input id="historyRange" type="range" min="0" max="1440" step="5" value="0" aria-label="回看过去 24 小时">
+      <button type="button" id="backNow">回到现在</button><output id="historyLabel" for="historyRange">现在</output>
+    </div>
   </header>
   <nav class="tabs" id="tabs" aria-label="按项目筛选">
     <button class="tab" type="button" aria-pressed="true" data-project="all">全部</button>
@@ -116,11 +126,12 @@ const order = ['开发机 9', '开发机 8', '开发机 1', '主 mini', 'mini2']
 const signatures = new WeakMap();
 const taskNodes = new Map();
 const laneNodes = new Map();
-let selected = 'all', snapshot, unavailable = false;
+let selected = 'all', snapshot, unavailable = false, historyTarget = null, historyController = null;
 const clock = new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
 const fullClock = new Intl.DateTimeFormat('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', timeZoneName: 'short' });
 const time = (at, formatter = clock) => Number.isFinite(Date.parse(at)) ? formatter.format(new Date(at)) : '—';
-const age = (at) => Number.isFinite(Date.parse(at)) ? Math.max(0, Date.now() - Date.parse(at)) : 0;
+const viewNow = () => historyTarget == null ? Date.now() : Date.parse(snapshot?.at);
+const age = (at) => Number.isFinite(Date.parse(at)) ? Math.max(0, viewNow() - Date.parse(at)) : 0;
 const duration = (ms) => {
   const m = Math.floor(ms / 60_000);
   return m < 1 ? '不到 1 分' : m < 60 ? `${m} 分` : `${Math.floor(m / 60)} 时 ${m % 60} 分`;
@@ -146,12 +157,9 @@ function reconcile(parent, nodes) {
 function status(task) {
   if (task.state === 'failed') return ['bad', '失败', 0];
   if (task.state === 'interrupted') return ['warn', '中断', 0];
-  if (task.state === 'stalled') return ['warn', '卡住', 0];
-  if (task.state === 'queued') {
-    const ms = age(task.queueSince || task.startedAt);
-    return [ms > 300_000 ? 'warn' : 'idle', `排队 ${duration(ms)}`, ms > 300_000 ? 1 : 3];
-  }
-  return ['ok', task.startedAt ? `运行 ${duration(age(task.startedAt))}` : '运行中', 2];
+  if (task.state === 'stalled') return ['warn', '卡住', task.stateRank ?? 0];
+  if (task.state === 'queued') return ['idle', '排队', task.stateRank ?? 3];
+  return ['ok', '运行中', task.stateRank ?? 2];
 }
 function resources(task) {
   const counts = new Map();
@@ -197,15 +205,16 @@ function taskNode(task) {
   row.state.textContent = label;
   row.title.textContent = task.title.startsWith(task.task) || task.title === task.name && task.name.includes(task.task)
     ? task.title : `${task.task} ${task.title}`;
-  row.desc.textContent = task.summary;
+  row.desc.textContent = [task.stateReason, task.summary].filter(Boolean).join(' · ');
   const held = resources(task);
   const lane = [accounts[task.account] ?? task.account, task.model || '模型未知', task.effort || '强度未知'].filter(Boolean).join(' · ');
   update(row.meta, [lane, ...held], ([label, ...items]) => [el('span', 'pill acc', label), ...items.map((item) => el('span', 'pill', item))]);
   const queue = task.queueSince || task.queueState || task.queueStalled ? [task.queueStalled || task.state === 'stalled' ? '卡住' : task.state === 'queued' ? '排队中' : task.queueState || '运行中',
     task.queuePosition != null ? `位置 ${task.queuePosition}` : '', Number.isFinite(task.queueWaitMinutes) ? `已等 ${duration(task.queueWaitMinutes * 60_000)}` : ''].filter(Boolean).join(' · ') : '未排队';
   const noteText = task.lastNotes?.length ? task.lastNotes.map((note, i) => `${i + 1}. ${note}`).join('；') : task.latestNote;
-  update(row.dl, [task.owner, task.startedAt, task.routeWhy, held.join('、'), noteText, queue, task.ownerNoticeOpen],
-    ([owner, started, route, held, notes, queue, notice]) => [['负责', owner], ['时间', time(started, fullClock)], ['为什么在这条通道', route],
+  update(row.dl, [task.owner, task.startedAt, task.routeWhy, held.join('、'), noteText, queue, task.ownerNoticeOpen, task.reroutedAt],
+    ([owner, started, route, held, notes, queue, notice, rerouted]) => [['负责', owner], ['时间', time(started, fullClock)], ['为什么在这条通道', route],
+      ...(rerouted ? [['改派', `已改派 ${time(rerouted)}`]] : []),
       ['队列状态', queue], ['负责会话通知', notice ? '有一条未处理通知' : '没有未处理通知'], ['占用', held || '无'], ['最近三条进展', notes]]
       .flatMap(([k, v]) => [el('dt', '', k), el('dd', '', v || '—')]));
   return row.details;
@@ -350,11 +359,11 @@ function notices(target, ids, extra = '') {
 function render() {
   if (!snapshot) return;
   const { at, tasks, machines, devices, cards, recentCards = [], cardMalformed = 0, quota, releases = {}, events = [], blocks } = snapshot;
-  const old = age(at), severity = old > 300_000 ? 'bad' : old > 90_000 ? 'warn' : '';
+  const old = historyTarget == null ? age(at) : 0, severity = old > 300_000 ? 'bad' : old > 90_000 ? 'warn' : '';
   const running = tasks.filter((t) => t.state === 'running').length;
   const stalled = tasks.filter((t) => t.state === 'stalled' || t.queueStalled).length;
   const failed = tasks.filter((t) => t.state === 'failed').length;
-  const spent = quota.items.filter((q) => q.exhausted && (!q.resetsAt || Date.parse(q.resetsAt) > Date.now())).length;
+  const spent = quota.items.filter((q) => q.exhausted && (!q.resetsAt || Date.parse(q.resetsAt) > viewNow())).length;
   const stale = Object.values(blocks).filter((b) => b.stale).length;
   const machineFaults = machines.filter((m) => m.fault).length;
   const nightlyFailed = releases.nightly?.failed === true;
@@ -367,7 +376,9 @@ function render() {
     stalled ? `${stalled} 个队列卡住` : '', failed ? `${failed} 个任务失败` : '', nightlyFailed ? '夜间回归有失败' : '',
     spent ? `${spent} 条通道额度用完` : '', machineFaults ? `${machineFaults} 台机器需留意` : '',
     stale ? `${stale} 项数据未更新` : ''].filter(Boolean).join(' · ');
-  $('fresh').textContent = `${time(at, fullClock)} · ${old < 60_000 ? `${Math.floor(old / 1000)} 秒` : duration(old)}前更新${unavailable ? ' · 连接中断' : ''}`;
+  $('fresh').textContent = historyTarget == null
+    ? `${time(at, fullClock)} · ${old < 60_000 ? `${Math.floor(old / 1000)} 秒` : duration(old)}前更新${unavailable ? ' · 连接中断' : ''}`
+    : `正在回看 · ${time(at, fullClock)} 的快照${unavailable ? ' · 读取失败' : ''}`;
   $('cardCount').textContent = count('cards', cards.length);
   update($('cards'), [cards, recentCards, blocks.cards?.stale && !blocks.cards.updatedAt], ([open, recent, missing]) => renderCards(open, recent, missing));
   renderTasks(tasks, releases);
@@ -390,6 +401,7 @@ $('tabs').addEventListener('click', (event) => {
   render();
 });
 async function refresh() {
+  if (historyTarget != null) return;
   try {
     const response = await fetch('/snapshot.json', { cache: 'no-store', signal: AbortSignal.timeout(10_000) });
     if (!response.ok) throw new Error(String(response.status));
@@ -402,8 +414,42 @@ async function refresh() {
   }
   render();
 }
+async function lookBack(target) {
+  historyController?.abort();
+  const controller = new AbortController(); historyController = controller;
+  historyTarget = Math.min(Date.now(), Math.max(Date.now() - 24 * 60 * 60_000, target));
+  const requested = historyTarget;
+  $('historyRange').value = String(Math.round((Date.now() - historyTarget) / 60_000 / 5) * 5);
+  $('historyLabel').textContent = `回看 ${time(historyTarget, fullClock)}`;
+  try {
+    const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(10_000)]);
+    const response = await fetch(`/history?at=${encodeURIComponent(new Date(requested).toISOString())}`, { cache: 'no-store', signal });
+    if (!response.ok) throw new Error(String(response.status));
+    const next = await response.json();
+    if (next.version !== 1 || !Number.isFinite(Date.parse(next.at))) throw new Error('格式无法识别');
+    if (controller.signal.aborted || historyTarget !== requested) return;
+    snapshot = next; unavailable = false;
+  } catch { if (controller.signal.aborted || historyTarget !== requested) return; unavailable = true; }
+  finally { if (historyController === controller) historyController = null; }
+  render();
+}
+$('stepBack').addEventListener('click', () => lookBack((historyTarget ?? Date.now()) - 5 * 60_000));
+$('stepForward').addEventListener('click', () => {
+  const target = (historyTarget ?? Date.now()) + 5 * 60_000;
+  if (target >= Date.now() - 30_000) $('backNow').click();
+  else lookBack(target);
+});
+$('historyRange').addEventListener('change', (event) => {
+  const minutes = Number(event.target.value);
+  if (minutes === 0) $('backNow').click();
+  else lookBack(Date.now() - minutes * 60_000);
+});
+$('backNow').addEventListener('click', () => {
+  historyController?.abort(); historyController = null; historyTarget = null;
+  $('historyRange').value = '0'; $('historyLabel').textContent = '现在'; refresh();
+});
 refresh();
-setInterval(refresh, 15_000);
+setInterval(() => { if (historyTarget == null) refresh(); }, 15_000);
 setInterval(render, 1000);
 </script>
 </body>

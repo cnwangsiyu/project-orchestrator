@@ -14,7 +14,7 @@ const DAY = 86_400_000;
 const HOUR = 3_600_000;
 const defaultData = path.join(os.homedir(), '.claude/orchestrator/_shared/board');
 const hostMap = new URL('./hosts.json', import.meta.url);
-const emptySource = (id) => id === 'notes' ? { latest: {}, notes: {}, notices: {}, failed: [] }
+const emptySource = (id) => id === 'notes' ? { latest: {}, notes: {}, notices: {}, rerouted: {}, failed: [] }
   : id === 'devboxLeases' ? { holds: [], load: {} }
     : id === 'cards' ? { open: [], recent: [], timeline: [], malformed: 0 }
       : id === 'releases' ? { ppe: {}, production: {}, lastCycle: null, nightly: null, productionToday: null,
@@ -97,6 +97,39 @@ function assignHolds(tasks, leases) {
   return result;
 }
 
+const minutes = (ms) => Math.max(0, Math.floor(ms / 60_000));
+const elapsed = (ms) => minutes(ms) < 1 ? '不到 1 分钟' : `${minutes(ms)} 分钟`;
+
+function exhaustedQuota(task, quota) {
+  const normalized = task.model?.toLowerCase().replaceAll('_', '-');
+  const ids = task.account === 'trae' ? [`trae-${normalized}`] : [task.account];
+  return quota.items?.find((row) => ids.includes(row.id) && row.exhausted);
+}
+
+export function taskStatus(task, quota, now) {
+  if (task.state === 'failed') return { state: 'failed', stateReason: '任务失败', stateRank: 0 };
+  if (task.state === 'interrupted') return { state: 'interrupted', stateReason: '任务中断，尚未重新发起', stateRank: 0 };
+  const queued = ['queued', 'waiting'].includes(task.queueState) || task.state === 'queued' || task.queueStalled;
+  if (queued) {
+    const since = Date.parse(task.queueSince ?? task.startedAt);
+    const waited = Number.isFinite(since) ? Math.max(0, now - since) : 0;
+    const duration = elapsed(waited);
+    const quotaRow = exhaustedQuota(task, quota);
+    const stuck = waited > 5 * 60_000 || task.queueStalled && task.queueDrainPerMinute === 0;
+    const daily = quotaRow && (quotaRow.id === 'ttadk' || quotaRow.id.startsWith('trae-'));
+    const suffix = quotaRow ? daily ? '，该模型今日额度已用完' : '，该通道额度已用完'
+      : task.queueDrainPerMinute === 0 ? '，队列没有前进' : '';
+    return stuck ? { state: 'stalled', stateReason: `排队 ${duration}${suffix}`, stateRank: 0 }
+      : { state: 'queued', stateReason: `排队 ${duration}`, stateRank: 3 };
+  }
+  const lastActivity = Date.parse(task.lastActivityAt ?? task.startedAt);
+  const inactive = Number.isFinite(lastActivity) ? now - lastActivity : 0;
+  if (inactive > 20 * 60_000 && !(task.runningTools > 0)) {
+    return { state: 'stalled', stateReason: `${elapsed(inactive)}没有 worker 活动，也没有长时间运行的工具`, stateRank: 0 };
+  }
+  return { state: 'running', stateReason: task.startedAt ? `运行 ${elapsed(now - Date.parse(task.startedAt))}` : '运行中', stateRank: 2 };
+}
+
 function quotaEvents(history, current, now) {
   const snapshots = [...history, { at: new Date(now).toISOString(), items: current.items ?? [] }]
     .filter((row) => row.at && Array.isArray(row.items)).sort((a, b) => a.at.localeCompare(b.at));
@@ -161,22 +194,23 @@ function derive(blocks, now) {
   });
   const notes = get('notes');
   const running = get('workers');
-  const failed = notes.failed.filter((row) => !running.some((r) => r.routeRef === row.routeRef));
-  const rows = [...running, ...failed];
+  const attempts = [...running, ...notes.failed].sort((a, b) => Date.parse(a.startedAt) - Date.parse(b.startedAt));
+  const rows = [...new Map(attempts.map((row) => [row.taskRef, row])).values()];
   const assigned = assignHolds(running, [...holds, ...devices.filter((r) => r.held)]);
+  const quota = get('quota');
   const tasks = rows.map((row) => {
     const { id, taskRef, routeRef, ...worker } = row;
     const details = get(`tasks:${worker.project}`)[taskRef];
     const latestNote = notes.latest[taskRef];
     const title = details?.title;
-    return { id, ...worker, title: title || worker.name, summary: details?.summary || (title ? title : latestNote) || worker.task,
+    const task = { id, ...worker, title: title || worker.name, summary: details?.summary || (title ? title : latestNote) || worker.task,
       latestNote, lastNotes: notes.notes[taskRef] ?? [], ownerNoticeOpen: notes.notices[taskRef] === true,
       queueWaitMinutes: worker.queueSince ? Math.max(0, (now - Date.parse(worker.queueSince)) / 60_000) : null,
-      routeWhy: get('routes')[routeRef], resources: assigned.get(id) ?? [] };
+      reroutedAt: notes.rerouted?.[taskRef] ?? null, routeWhy: get('routes')[routeRef], resources: assigned.get(id) ?? [] };
+    return { ...task, ...taskStatus(task, quota, now) };
   });
   const cardData = get('cards');
   const cards = Array.isArray(cardData) ? cardData : cardData.open ?? [];
-  const quota = get('quota');
   const releases = get('releases');
   const events = [...get('activity'), ...(cardData.timeline ?? []), ...(releases.releaseEvents ?? []),
     ...quotaEvents(get('quotaHistory'), quota, now)].filter((row) => row.at && now - Date.parse(row.at) <= 12 * HOUR)
