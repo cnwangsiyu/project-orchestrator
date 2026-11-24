@@ -178,25 +178,31 @@ machine, timings, artifact paths and hashes. The remote summary also records
 upload time and compile wall time. Local and remote Debug binaries can differ
 in hash because their build paths differ. Register the returned product itself.
 
-For a full run supply the approved identity name, `--entry ID`,
-`--signer-command ARGV.json` (an array containing the absolute registered
-executable followed by its exact arguments), and `--baseline BASELINE.json`
-(an owner-attested object with `commit` and the absolute path `app` of the
-same-ref local signed build). The project owns this signing method. The utility
-calls it under a light `ios-sign` claim on main. It checks the enabled registry
-entry, identity, exact input/output paths, executable and full bundle hashes.
-The entry must pin the full bundle digest in `input.bundle_sha256` or its
-registered `--bundle-sha256` argument. Supported methods produce a separate
-`OUT/signed/<app>`, a method receipt, and the shared iOS receipt as in T241.
-The proposed shared `user-signing/sign-all.sh --only ID` in the registry README
-is absent from the installation as of 2026-11-24.
+For signing, the project provides its **reviewed signer command** as a JSON
+argv array headed by an absolute executable path (`--signer-command ARGV.json`).
+The signer fixes the test app, permitted arguments, signing identity, profile,
+paths and receipts in reviewed code. It independently checks the live one-shot
+permit at dispatch and prevents reuse. Keep this command with the reviewed
+project handoff. The registry supplies data only.
+
+Supply `--identity NAME --entry ID --baseline BASELINE.json`. The baseline is
+an owner-attested object with the source `commit`, absolute signed `app` path
+and absolute signing `receipt` path for that local build. The wrapper checks
+the named permit's `enabled` flag, one-use limit, UTC expiry, exact
+`input.manifest_path`, `input.sha256_executable` and `input.sha256_bundle`
+against the returned app, then runs the project command under a light
+`ios-sign` claim on main. The signer writes `OUT/signed/<app>`,
+`OUT/signing/signing-receipt.json` and the shared `user-signing/receipts/ID.json`.
+The two receipts must agree. The proposed `user-signing/sign-all.sh --only ID`
+in the registry README is absent from the installation as of 2026-11-24.
 
 For a freshly built hash, run with `--unsigned-only`, give the manifest to the
 registry owner, then repeat the same command and output directory with
 `--resume-sign --entry ID --signer-command ARGV.json --baseline BASELINE.json`.
 Omitting either the registered entry or command produces an unsigned handoff.
 If the project signer already ran independently, use `--verify-returned --entry
-ID --baseline BASELINE.json` instead. Verification checks the signed leaf
+ID --baseline BASELINE.json` instead. This read-only signature check accepts a
+consumed, disabled permit with its original pinned hashes and matching receipts. Verification checks the signed leaf
 certificate SHA-1, team, strict deep signature, bundle ID, versions and
 architectures. It compares canonical entitlement hashes and the sealed SHA-256
 of the embedded profile against the baseline. Only names, identifiers and
@@ -244,9 +250,23 @@ scripts/ios-split-build.sh --project vesdk-mainline --task R-ios-split-build \
   --out "$taskdir/repeat-$(date +%s)" --unsigned-only
 ```
 
-The existing T241 method enforces its original task IDs and directories.
-Webview must supply an already approved signer invocation for the new proof
-entry. `proof/handoff.md` gives the two paths, hashes and receipt contract.
+Webview's reviewed signer is in `vesdk-mainline/tasks/T273/signing/`. Its
+three reviews are recorded under T274. T277 signed the proof with that
+command and the owner disabled the one-shot entry. The T241 method remains
+scoped to its original directories. Verify the returned proof with this
+command from the skill checkout:
+
+```sh
+taskdir="$HOME/.claude/orchestrator/_shared/tasks/R-ios-split-build"
+scripts/ios-split-build.sh --project vesdk-mainline --task R-ios-split-build \
+  --repo "$taskdir/source" --ref f83d879933aa12668a9fb51e17bd5eabe83c63c9 \
+  --allowlist "$taskdir/source-allowlist.json" --xcode-project T180cVolume.xcodeproj \
+  --scheme T180cVolume --product split-products/T180cVolumeHost.app \
+  --identity ios-cosign-dh59r4rnry --entry r-ios-split-build-proof-host \
+  --bundle-id com.example.T180cVolume.host --out "$taskdir/proof" \
+  --baseline "$taskdir/proof/baseline.json" --verify-returned
+```
+
 The R14 VESDK/WebView demo and the XCTest runner have additional host
 dependencies and nested signing requirements. The helper proof covers the host
 app only.

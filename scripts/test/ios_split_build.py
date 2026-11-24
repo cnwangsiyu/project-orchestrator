@@ -65,7 +65,7 @@ esac
         self.check_return()
 
     def test_missing_signer_handoff(self):
-        args = SimpleNamespace(unsigned_only=False, entry=None, identity="test", signer_command=None)
+        args = SimpleNamespace(unsigned_only=False, entry=None, identity="test", signer_command=None, verify_returned=False)
         build = {"app": "Demo.app", "sha256": "b" * 64}
         with patch.object(split, "sign", side_effect=AssertionError("unexpected signer")):
             self.assertEqual("awaiting-registered-signer", split.finish(args, build)["status"])
@@ -93,21 +93,22 @@ esac
         split.record(manifest, m)
         args.entry, args.identity, args.verify_returned = "demo", "test", False
         args.baseline = args.out / "baseline.json"
-        split.record(args.baseline, {"commit": self.commit, "app": str(app)})
+        baseline_receipt = self.root / "baseline-receipt.json"
+        split.record(baseline_receipt, dict(certificate_sha1="A"*40, team="FIXTURE", result="PASS",
+            output=str(app), bundle_sha256=m["bundleSHA256"], profile_uuid="fixture-profile"))
+        split.record(args.baseline, {"commit": self.commit, "app": str(app), "receipt": str(baseline_receipt)})
         args.signer_command = args.out / "argv.json"
-        split.record(args.signer_command, ["/fixture/signer", "--only", "demo"])
         build = dict(app=str(app), commit=self.commit, sha256=m["bundleSHA256"])
-        entry = dict(input=dict(path=str(app), bundle_sha256="0"*64, hash_source=dict(
-            path=str(manifest), additional_path_field="path", additional_sha256_field="bundleSHA256",
-            sha256_field="preparedExecutableSHA256")), output=dict(path=str(args.out/"signed"/app.name),
-            bundle_id=args.bundle_id), method=dict(script="/fixture/signer", argv=["--only", "demo"]))
+        entry = dict(input=dict(manifest_path=str(manifest), sha256_bundle="0"*64,
+                                sha256_executable=m["preparedExecutableSHA256"]),
+                     enabled=True, one_shot=dict(max_uses=1, expires_at="2099-01-01T00:00:00Z"))
         return args, build, entry
 
     def test_registered_hash_mismatch_never_invokes_signer(self):
         args, build, entry = self.signing_fixture()
         with patch.object(split, "allowed"), patch.object(split, "signature", return_value={
                 "bundle": args.bundle_id}), patch.object(split, "wrapped") as signer:
-            with self.assertRaisesRegex(ValueError, "pin the full unsigned bundle hash"):
+            with self.assertRaisesRegex(ValueError, "registered manifest path or product hashes differ"):
                 split.sign(args, build, entry)
             signer.assert_not_called()
 
@@ -116,23 +117,22 @@ esac
         shared = self.root / "shared"
         receipt = shared / "user-signing/receipts/demo.json"
         receipt.parent.mkdir(parents=True)
-        method_receipt = args.out / "method-receipt.json"
-        signed = Path(entry["output"]["path"])
+        method_receipt = args.out / "signing/signing-receipt.json"
+        method_receipt.parent.mkdir()
+        signed = args.out / "signed/Demo.app"
         signed.parent.mkdir()
         cert = "A"*40
-        entry.update(receipt=str(receipt), method_receipt=str(method_receipt),
-                     expected_certificate=dict(sha1=cert, team="FIXTURE"))
-        entry["input"]["bundle_sha256"] = build["sha256"]
+        entry["input"]["sha256_bundle"] = build["sha256"]
         # A fixture signer copies only our generated text package and fixture receipt.
         signer = self.root / "fixture-signer"
         signer.write_text('#!/bin/sh\nset -eu\ncp -R "$1" "$2"\ncp "$3" "$4"\ncp "$3" "$5"\n')
         signer.chmod(0o755)
         template = self.root / "template.json"
         split.record(template, dict(result="PASS", id=args.entry, output=str(signed),
-            input_bundle_sha256=build["sha256"], bundle_sha256=build["sha256"],
+            input=build["app"], input_executable_sha256=entry["input"]["sha256_executable"],
+            profile_uuid="fixture-profile", input_bundle_sha256=build["sha256"], bundle_sha256=build["sha256"],
             certificate_sha1=cert, team="FIXTURE"))
         argv = [build["app"], str(signed), str(template), str(receipt), str(method_receipt)]
-        entry["method"] = dict(script=str(signer), argv=argv)
         args.signer_command.write_text(json.dumps([str(signer), *argv]))
         fake_verify = self.root / "codesign"
         fake_verify.write_text('#!/bin/sh\necho TeamIdentifier=FIXTURE\n')
@@ -140,7 +140,16 @@ esac
         with patch.object(split, "allowed"), patch.object(split, "SHARED", shared), patch.object(
                 split, "signature", return_value=dict(bundle=args.bundle_id, profileSHA256="fixture")
                 ), patch.dict(os.environ, PATH=str(self.root) + os.pathsep + os.environ["PATH"]):
+            entry["one_shot"]["expires_at"] = "2000-01-01T00:00:00Z"
+            with self.assertRaisesRegex(ValueError, "permission is closed"):
+                split.sign(args, build, entry)
+            entry["one_shot"]["expires_at"] = "2099-01-01T00:00:00Z"
             result = split.sign(args, build, entry)
+            with self.assertRaisesRegex(ValueError, "already exists"):
+                split.sign(args, build, entry)
+            entry["enabled"] = False
+            args.verify_returned = True
+            self.assertEqual(split.sign(args, build, entry)["status"], "signed-verified")
         self.assertEqual(result["sha256"], build["sha256"])
         self.assertTrue(method_receipt.is_file())
         calls = self.journal.read_text()

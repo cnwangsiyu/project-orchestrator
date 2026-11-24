@@ -1,5 +1,6 @@
 """Place an unsigned device build, then dispatch only its registered signing method."""
 import argparse
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -258,63 +259,82 @@ def signature(app):
         version=value["CFBundleVersion"], marketingVersion=value.get("CFBundleShortVersionString"))
 
 
+def registered_product(args, build, entry):
+    prepared = verified_manifest(args, build)
+    pins = entry["input"]
+    require(pins.get("manifest_path") == str(args.out / "manifest.json")
+            and pins.get("sha256_bundle") == prepared["bundleSHA256"]
+            and pins.get("sha256_executable") == prepared["preparedExecutableSHA256"],
+            "registered manifest path or product hashes differ")
+    return prepared
+
+
+def certificate_check(app, cert, team):
+    require(len(cert) == 40 and all(c in "0123456789abcdefABCDEF" for c in cert),
+            "invalid baseline certificate SHA-1")
+    subprocess.run(["codesign", "--verify", "--strict", "-R", f'=certificate leaf = H"{cert}"',
+                    app], check=True)
+    display = subprocess.check_output(["codesign", "-dv", "--verbose=4", app],
+                                      stderr=subprocess.STDOUT).decode().splitlines()
+    require("TeamIdentifier=" + team in display, "signed team mismatch")
+
+
+def signed_product(app, receipt, cert, team):
+    require(receipt["result"] == "PASS" and receipt["output"] == str(app)
+            and receipt["certificate_sha1"] == cert and receipt["team"] == team,
+            "signature receipt mismatch")
+    certificate_check(app, cert, team)
+    actual = signature(app)
+    _, hashed = bundle_files(app, actual["profileSHA256"])
+    require(hashed == receipt["bundle_sha256"], "signed bundle differs from its receipt")
+    return actual
+
+
 def sign(args, build, entry):
     allowed(args.identity)
+    prepared = registered_product(args, build, entry)
     base = read(args.baseline)
     require(base["commit"] == build["commit"], "baseline must attest the same source commit")
-    expected = signature(Path(base["app"]))
-    require(expected["bundle"] == args.bundle_id, "baseline bundle mismatch")
+    baseline_receipt = read(base["receipt"])
+    cert, team = baseline_receipt["certificate_sha1"], baseline_receipt["team"]
+    baseline = signed_product(Path(base["app"]), baseline_receipt, cert, team)
+    require(baseline["bundle"] == args.bundle_id, "baseline bundle mismatch")
     app = Path(build["app"])
-    method = entry["method"]
-    signed = Path(entry["output"]["path"])
-    require(entry["input"]["path"] == str(app) and entry["output"]["bundle_id"] == args.bundle_id
-            and signed.resolve() == args.out / "signed" / app.name,
-            "registered input, fresh output or bundle mismatch")
-    prepared = verified_manifest(args, build)
-    source = entry["input"]["hash_source"]
-    registered = read(source["path"])
-    require(registered[source["additional_path_field"]] == str(app)
-            and registered[source["additional_sha256_field"]] == prepared["bundleSHA256"]
-            and registered[source["sha256_field"]] == prepared["preparedExecutableSHA256"],
-            "registered manifest mismatch")
-    argv = [method["script"], *method["argv"]]
-    if not args.verify_returned:
-        require(read(args.signer_command) == argv, "command differs from registered signer")
-    # The live entry must pin the product independently of our newly written manifest.
-    pins = [argv[i+1] for i in range(len(argv)-1) if argv[i] == "--bundle-sha256"]
-    pinned = entry["input"].get("bundle_sha256") or (pins[0] if len(pins) == 1 else None)
-    require(pinned == prepared["bundleSHA256"], "owner must pin the full unsigned bundle hash")
+    signed = args.out / "signed" / app.name
+    require(signed.resolve() == signed, "signed output path changed")
+    require(Path(args.entry).name == args.entry, "invalid entry ID")
     receipt = SHARED / "user-signing/receipts" / (args.entry + ".json")
-    require(Path(entry["receipt"]) == receipt, "shared receipt path mismatch")
+    method_receipt = args.out / "signing/signing-receipt.json"
     signed_sec = None
     if not args.verify_returned:
-        require(not signed.exists() and not receipt.exists() and not Path(entry["method_receipt"]).exists(),
-                "signing requires fresh output and receipt paths")
+        permit = entry["one_shot"]
+        expiry = datetime.fromisoformat(permit["expires_at"].replace("Z", "+00:00"))
+        require(entry["enabled"] is True and permit["max_uses"] == 1 and expiry.tzinfo
+                and expiry > datetime.now(timezone.utc), "one-shot signing permission is closed")
+        require(not signed.exists() and not receipt.exists() and not method_receipt.exists(),
+                "one-shot output or receipt already exists")
+        # Only the caller supplies the reviewed project command. The registry supplies data.
+        argv = read(args.signer_command)
+        require(isinstance(argv, list) and argv and all(isinstance(v, str) for v in argv)
+                and Path(argv[0]).is_absolute(), "expected an absolute project signer and its argv")
         env = environment(args, "ios-sign", "light")
         env["HEAVY_BUILD_LOG"] = str(args.out / "sign.log")
         started = time.monotonic()
-        wrapped(args, env, argv, "registered signing")
+        wrapped(args, env, argv, "project signing")
         signed_sec = time.monotonic() - started
     check = time.monotonic()
     result = read(receipt)
-    require(result["result"] == "PASS" and result["input_bundle_sha256"] == prepared["bundleSHA256"]
-            and result["output"] == str(signed) and result["id"] == args.entry
-            and result["certificate_sha1"] == entry["expected_certificate"]["sha1"]
-            and result["team"] == entry["expected_certificate"]["team"], "signing receipt mismatch")
-    certificate = entry["expected_certificate"]["sha1"]
-    require(len(certificate) == 40 and all(c in "0123456789abcdefABCDEF" for c in certificate),
-            "invalid registered certificate SHA-1")
-    subprocess.run(["codesign", "--verify", "--strict", "-R",
-                    f'=certificate leaf = H"{certificate}"', signed], check=True)
-    display = subprocess.check_output(["codesign", "-dv", "--verbose=4", signed],
-                                      stderr=subprocess.STDOUT).decode().splitlines()
-    require("TeamIdentifier=" + entry["expected_certificate"]["team"] in display, "signed team mismatch")
-    actual = signature(signed)
-    require(expected == actual, "signed bundle differs from local baseline")
-    _, signed_hash = bundle_files(signed, actual["profileSHA256"])
-    require(signed_hash == result["bundle_sha256"], "signed bundle differs from its receipt")
+    require(result == read(method_receipt) and result["id"] == args.entry
+            and result["input"] == str(app) and result["input_bundle_sha256"] == prepared["bundleSHA256"]
+            and result["input_executable_sha256"] == prepared["preparedExecutableSHA256"],
+            "signing receipts or unsigned input mismatch")
+    actual = signed_product(signed, result, cert, team)
+    require(actual == baseline and result["profile_uuid"] == baseline_receipt["profile_uuid"],
+            "signed product differs from local baseline")
+    verified_manifest(args, build)
     return dict(artifact=str(signed), sha256=result["bundle_sha256"], signSec=signed_sec,
-                verifySec=time.monotonic()-check, verified=actual)
+                verifySec=time.monotonic()-check, verified=actual, certificateSHA1=cert,
+                team=team, profileUUID=result["profile_uuid"], status="signed-verified")
 
 
 def finish(args, build):
@@ -322,16 +342,18 @@ def finish(args, build):
         return {**build, "status": "unsigned-verified"}
     registration = SHARED / "user-signing/registry.json"
     rows = read(registration)["entries"] if args.entry and registration.is_file() else []
-    entries = [row for row in rows if row["id"] == args.entry and row["enabled"]
-               and row["kind"] == "ios-app" and row.get("identity_id") == args.identity]
+    entries = [row for row in rows if row["id"] == args.entry
+               and (args.verify_returned or row.get("enabled") is True)]
     if not entries or not (args.signer_command or args.verify_returned):
+        require(not args.verify_returned, "missing registration for returned signed product")
         print("Unsigned product returned and verified. The project orchestrator must register "
               f"{build['app']} with bundle SHA-256 {build['sha256']} and supply --entry and "
               "--signer-command for that enabled entry.")
         return {**build, "status": "awaiting-registered-signer"}
     require(len(entries) == 1 and args.baseline, "unique registration and --baseline required")
     result = {**build, **sign(args, build, entries[0])}
-    record(args.out / "verification.json", result)
+    if not (args.out / "verification.json").exists():
+        record(args.out / "verification.json", result)
     return result
 
 
