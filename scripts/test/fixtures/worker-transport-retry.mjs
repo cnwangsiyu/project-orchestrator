@@ -16,7 +16,10 @@ syncBuiltinESMExports();
 const config = JSON.parse(process.env.TRANSPORT_RETRY_FIXTURE);
 const nativeTimeout = globalThis.setTimeout;
 globalThis.setTimeout = (callback, ms, ...args) => {
-  if (ms === 60000) {
+  // The continuation is a Promise delay; unrelated 60-second RPC watchdogs
+  // must not be accelerated or counted as automatic retries.
+  const continuationDelay = ms === 60000 && /\[native code\]/.test(Function.prototype.toString.call(callback));
+  if (continuationDelay) {
     fs.appendFileSync(config.rpc,JSON.stringify({backoffMs:ms})+'\n');
     config.backedOff = true;
     if (config.cachedTerminalAfterBackoff) {
@@ -24,7 +27,7 @@ globalThis.setTimeout = (callback, ms, ...args) => {
       appendEvent({...row,event:'failed',status:'failed',mayRun:false,settled:true,runId:'peer-fixture-run',pid:process.pid});
     }
   }
-  return nativeTimeout(callback,ms === 60000 ? 10 : ms === 5000 && config.loseContinuationAck ? 50 : ms,...args);
+  return nativeTimeout(callback,continuationDelay ? 10 : ms === 5000 && config.loseContinuationAck ? 50 : ms,...args);
 };
 globalThis.WebSocket = class {
   constructor() {
