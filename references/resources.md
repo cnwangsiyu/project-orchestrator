@@ -85,6 +85,52 @@ readings per observed waiter PID (or an observer with no own locks) with the rec
 caller lane counts are not proof of a rollout mismatch. Verified mismatches go to its owner, never a gate bypass.
 Preserve the exact controller verdict at rounded bounds when contexts match; alternate-context readings are estimates.
 
+## Choosing the execution host
+
+For compute briefs, ask `res place` (or use `claim-any`) instead of naming a machine; name a machine only with a stated reason.
+
+```sh
+res place --need xcode-ios-device-compile-unsigned --profile heavy
+res place --need node,docker --os linux --arch x86_64 --project tools --cores 2 --mem-gib 4 --disk-gib 8 --json
+res claim-any --need cmake-native --profile light --by "$holder" --project "$project" --task "$task" --for "$purpose" --pid "$$" --timeout 10
+```
+
+The first two commands read the registry, cached link/tool facts and measured
+headroom. A candidate can admit now (wait 0), queue at its gate (unknown wait),
+or be ineligible. The text and JSON include each gate and its acquire command.
+State a constraint with `--pin main|mini2|devbox`, or give `--must-local-reason TEXT`
+for main. Report signing, attached phones and the user keychain as capabilities.
+Devbox OS and architecture come from registry tags or the next hourly runner
+probe. Missing evidence for a requested constraint closes that candidate.
+
+Among open hosts, compare spare cores after charging this claim against the
+active admission window. Devboxes retain pool tiers and bounded project affinity.
+Prefer a remote with at least 80% of main's remaining cores. Profiles are
+heavy, medium and light. Main uses its configured profile, mini2 medium reserves
+2 cores/4 GiB/8 GiB, and the devbox heavy pool covers medium and heavy requests.
+Explicit weights override the corresponding defaults.
+
+Run `claim-any` in the long-lived owner with its PID. It enters one machine's
+existing queue and changes queues if denied there and another host opens.
+`--wrapper` marks an unbound main lease for workload binding. On success read
+`machine` and `lease`, dispatch to that host, and use the printed return command.
+A mini2 return requires the runner's generation/run-matched clean receipt.
+Placement decisions have `type=placement` in `host-samples/admission.ndjson`.
+
+**Owner registry migration.** With registry writers quiescent, run these commands
+from the installed checkout. Use rollback only to revert the migration.
+
+```sh
+python3 scripts/place-registry.py apply --registry ~/.claude/orchestrator/_shared/resources.tsv
+python3 scripts/place-registry.py rollback --registry ~/.claude/orchestrator/_shared/resources.tsv
+```
+
+Apply merges `cmake-native`, both qualified Xcode compile capabilities, `ios-sign`,
+`device:iphone8`, `device:iphone11`, `device:s21` and `user-keychain` into the
+main build row. Device leases and signing approvals still apply. Rollback uses
+the exact sibling `resources.pre-place.tsv` and refuses intervening edits.
+Mini2 retains its separately qualified capability list.
+
 ## Automatic unsigned build placement
 
 `scripts/heavy-build.sh` defaults to `HEAVY_BUILD_PLACE=local`. Set
