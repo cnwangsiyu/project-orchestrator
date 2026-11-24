@@ -64,8 +64,10 @@ const follower = (label, config = {}, extra = []) => {
       '--sandbox','read-only','--name',label,'--project','p','--model','gpt-6.1-sol','--effort','high',
       '--routed-seat',JSON.stringify(seat),'--out',path.join(dir,'final.md'),...extra,
       ...(['start','turn'].includes(command) ? ['Follow fixture.'] : [])];
+    // The fixture intercepts the retry delay; this watchdog bounds process
+    // startup and teardown, not the separately asserted continuation timing.
     const r = spawnSync(process.execPath,['--import',path.join(scripts,'test/fixtures/worker-transport-retry.mjs'),path.join(scripts,'codex-worker.mjs'),...args],
-      {env:{...env,TRANSPORT_RETRY_FIXTURE:JSON.stringify({rpc,errors:[errors[0]],...config,...override})},encoding:'utf8',timeout:5000});
+      {env:{...env,TRANSPORT_RETRY_FIXTURE:JSON.stringify({rpc,errors:[errors[0]],...config,...override})},encoding:'utf8',timeout:15000});
     assert.equal(r.error,undefined,r.stderr+r.stdout); return r;
   };
   const rows = file => fs.existsSync(file) ? fs.readFileSync(file,'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : [];
