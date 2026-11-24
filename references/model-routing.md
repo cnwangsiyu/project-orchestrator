@@ -59,11 +59,8 @@ Sol/Astra class, not identical release IDs across accounts.
 The separate 5.6-Sol fallback retains its own quota bucket and tier.
 Scoped Astra approvals and the hard-tier standing decision cover the family.
 
-Company accounts remain first. Hard work stays on qualified Sol/Astra (or the
-explicit adversarial non-GPT exception); light work uses the light list and
-preserves known free capacity. ETA compares model-specific drain/progress and
-known TTADK resets. Fresh positive queue position with zero drain, or waiting
-without progress, is STALLED with no finite ETA and ranks after runnable lanes.
+On 2026-11-24 the user directed “继续推进所有遗留任务吧，不用等公司额度重置” and “以效率优先，不以节省额度优先”.
+After checking approvals, tier and actual effort floors, compare start delay plus runtime. Three confirmed, successful, attributable outcomes for the category, account, model and effort supply a median. Historic outcomes measure launch through acceptance and may include queue time. Use category/effort history or the tier heuristic when the cohort is sparse. Prefer company within three minutes of the fastest estimate. Measured starts precede unmeasured alternatives. A stalled queue has no finite start estimate.
 Only absent/stale telemetry uses the optimistic unknown fallback. A reset decision includes deferUntil, an owner and ledger/timer
 instructions. Queued, unknown or delayed company lanes on either provider carry bounded queue patience and qualified company alternatives. No resource is
 held while waiting for a model response or an automatic replacement.
@@ -92,7 +89,7 @@ option exists. Company capacity available within the threshold still wins.
 Manual exclusions of healthy company accounts retain the scoped quota gate.
 UNKNOWN/stale status alone keeps the question; retained explicit exhaustion or
 restriction evidence can support fallback without freshening status or surviving
-a known quota reset. Ready/progressing depleted TRAE lanes remain company capacity.
+a known quota reset. Depleted TRAE requires fresh evidence from low-priority traffic.
 The same data records `allowHardPersonalAstra`, `hardAstraDecisionRef` and the
 user's decision “特别难的任务用 astra 也不用问我，直接用吧”. Personal Astra's gate
 passes for `tier === 'hard'` only while these fallback conditions hold, and the
@@ -118,18 +115,7 @@ model/effort floor. Max effort outside company accounts (TTADK and TRAE), Fable 
 authorization. An eligible company primary launches while a gated personal
 second reviewer awaits the user's answer before acceptance.
 
-The user's 2026-11-21 clarification makes an `exclusive` personal-priority
-window overflow-only: company lanes go first through the existing quality
-ladder, free-TRAE/TTADK preferences and queue threshold. Personal quota is used
-when company lanes cannot serve the task because of exhausted quota, excessive
-queue/congestion or a missing required model/capability. During the window,
-new personal Codex work goes only to `main`; `b` remains code-refused. The dated
-2026-11-21 refusal of `b` does not depend on the window being present, valid or
-active; revoking a window cannot silently re-enable that account. If main
-also cannot serve the task, defer with `[personal-main-wait]`; it asks about a
-reset card only for fresh weekly exhaustion with a card available. For an
-infrastructure retry, transport-demoted or unmeasured TRAE capacity does not
-block ready main overflow, but a verified short company queue still wins.
+During an active exclusive window, main participates in finish-time ranking. The window authorizes only main for new personal Codex work. The dated b refusal also applies outside the window. Infrastructure retries retain confirmed execution floors and require terminal evidence before starting another worker.
 Claude-only tools retain their route. Hard-tier Astra on main uses its separate enabled
 standing decision; max effort, reset redemption and explicit review approvals
 retain their separate gates.
@@ -144,32 +130,19 @@ and cyberPolicy signals retain their separate family-wide recovery rules.
 
 The recorded decision lives in `_shared/personal-priority-window.json`; keep
 its fields and the user's verbatim quote. Its inclusive start and optional
-exclusive expiry (`until: null` means until revoked) bound the window. An
-exclusive window follows main across reset-card redemption, requires fresh
-weekly quota and at least 5% launch headroom, and restricts personal overflow
-to main even when main is unavailable. Window-backed picks explain "company
-lanes first; personal overflow only on main under the standing routing window"
-and record the standing decision reference.
-
-The legacy `prefer-first` mode still prefers ready, qualified main until the
-specified expiry. It pauses at 90% weekly use, 95% projected use at reset or
-when fresh weekly usage for that reset is unavailable. Both modes preserve
-model, scope, capability, retry and independent-review checks.
+exclusive expiry (`until: null` means until revoked) bound the window. Main weekly use and its projected use at reset appear in route output. A provider denial sends eligible work to the best available company lane. Reset-card redemption requires an independent user decision.
+The legacy timed window retains its specified expiry and reset binding.
 Only install a window for a recorded user decision. Use the same
 `RULES_SHARED` as the router, or omit it for the default shared directory.
 
 ```sh
 node scripts/personal-priority.mjs add 'FROM_UTC_ISO' 'UNTIL_UTC_ISO' 'standing:personal-priority-DECISION' 'VERBATIM_USER_QUOTE'
-node scripts/personal-priority.mjs add 'FROM_UTC_ISO' none 'standing:personal-priority-DECISION' 'VERBATIM_USER_QUOTE' --mode exclusive --exhaust-at-used 99
+node scripts/personal-priority.mjs add 'FROM_UTC_ISO' none 'standing:personal-priority-DECISION' 'VERBATIM_USER_QUOTE' --mode exclusive
 node scripts/personal-priority.mjs inspect
 node scripts/personal-priority.mjs revoke 'standing:personal-priority-DECISION'
 ```
 
-A window may carry `"exhaustAtUsed": N` (90–100). This replaces the default
-90%/95% guard in `prefer-first` mode with a used-percentage threshold. In
-`exclusive` mode the default spend-until threshold is 99%; the separate 5%
-launch-headroom requirement still applies. Missing or stale weekly usage
-refuses main. This field never changes exclusive mode's company-first order.
+Older window files may contain `exhaustAtUsed`. Main's weekly usage and five-hour percentages are advisory. A fresh provider denial blocks dispatch. The existing scope, expiry and fresh telemetry checks still apply.
 
 
 Review policy: Mandatory review is ONLY explicit --review-class A|B|C|D plus --review-reason: A a version that reaches external users and cannot be rolled back within hours; B login/auth/permission/signing logic; C irreversible data operations or billing/quota accounting; D a named adversarial review. High stakes, installation and fallback authorship alone do not qualify. Use `--review-reason` and optional stable `--review-scope`. Without a class, review-high downgrades with a note. Release impact is class A only; profiles without external release normalize other release requests to service. Internal-demo never blocks explicit classes or requires profile-override. Routine work uses tests, or one optional ordinary review when tests cannot cover it. Classified adversarial/review-high/release reviews require independent families; adversarial uses two non-GPT families. Required seconds are acceptance obligations and do not hold a runnable company primary.
@@ -191,7 +164,7 @@ TRAE foreground tier lists are:
 | Normal | Current Sol, GPT-5.6-Sol, GPT-5.6-Terra, DeepSeek-V4.1-Flash |
 | Hard | Astra on a free company lane, then current Sol |
 
-Walk the tier ladder in quality order across all company accounts. Select the first model class with a free lane; depleted-but-ready/progressing low-priority lanes count. For that class, free TRAE wins, including when TTADK quota expires soon; expiry is an advisory opportunity, not an override of company-lane order. If TRAE is congested/queued/stalled, use free TTADK for that same class before stepping down. Priority quota is at most a same-class lane tie-break, never a reason to downgrade Sol to Flash. Light work stays on its qualified light ladder; hard work never demotes. TRAE Gemini and `gpt-5.6-luna` are excluded; personal ChatGPT `gpt-6-luna` remains the first lookup/extract/image-gen choice; TTADK fresh catalog and historical model evidence remain.
+Use the tier preference table to resolve equivalent qualified lanes. For an exhausted TRAE bucket, a fresh timed submit-to-first-work observation for that model on low priority, or a low-priority queue position divided by its measured drain, must show a start within the configured wait. Any waiting turn of ours on that model, or an undrained positive low-priority queue, prevents short-start admission.
 
 Trial from **2026-11-16**, revisit **2026-11-23** with hard-tier first-pass success
 and rework/fix rounds by model. Start hard tasks on company Astra when
@@ -223,25 +196,7 @@ Vision uses its separate qualified catalog. DeepSeek is unsuitable for full buil
 executable/auth/storage acceptance or a large file in one output. Seed is vision
 only. Public catalog, account and harness capabilities must all support the task.
 
-An observed free TRAE lane takes precedence over TTADK for work that its actual
-model and harness can do, including browser/ui-browser on the ready Playwright
-lane and depleted-bucket low-priority work. The lane must start now, have a fresh
-load below 60% for that candidate model (or Astra's units/no-queue evidence above), and show no queue or stall. This preserves
-TTADK daily tokens for later and for capabilities unavailable on TRAE (desktop,
-Kimi and any browser tools absent from its harness). The explanation says
-"TRAE lane free: saving TTADK quota" and names the model whose load it quotes.
-Sibling/account loads do not establish that model's congestion. A queued, stalled
-or congested qualifying lane yields to usable TTADK. Hard floors, actual retry
-floors, capability and authorization gates still apply. A same-model Sol/max
-retry is ungated on both company accounts; prefer that retained effort step over
-switching to missing/stalled telemetry at the same floor.
-
-Fresh reserve/burn observations still explain company capacity. An available
-TTADK lane wins when TRAE cannot demonstrate immediate uncongested capacity. TTADK reset within four hours with projected burn below 70%
-prefers TTADK so its quota does not expire unused. Only truly absent or stale lane
-telemetry is UNKNOWN; it does not prove the lane is free. TRAE expiry is model-bucket-specific, with its own fresh reset/usage evidence and unit, independent of TTADK share, and only ranks within the chosen quality model.
-
-Personal windows retain reserve/deadline and effort policy. Reset redemption is
+Compare the expected finish of lanes that satisfy the model, capability and scope requirements. Bucket expiry, projected spend and the size of a remaining TTADK daily balance do not justify waiting. Reset redemption is
 an independent scoped action followed by refreshed quota and a new plan; a reset
 proposal is never an executable worker launch. Pure planning does not advance an
 ambient rotation counter. Exact account selection is subject to capabilities,

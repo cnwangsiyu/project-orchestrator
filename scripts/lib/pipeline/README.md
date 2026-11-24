@@ -33,11 +33,7 @@ TTADK, personal ChatGPT Astra, Fable and reset redemption keep their separate de
 proposals contain no executable commands; gated second reviewers do not stop
 an eligible company primary, and remain required before acceptance.
 On devices without company accounts, personal ChatGPT is the normal lane with
-standing permission. New personal launches require 5% of weekly headroom;
-current history has no per-run weekly cost by category/effort, so the fixed
-`POLICY.launchHeadroom` margin applies. Accounts with enough headroom keep
-deadline order. If none has enough, use the usable account with most remaining
-quota and keep the reset-card suggestion rules. Running turns are untouched.
+standing permission. Main weekly usage and its projection are reported at routing time. A provider denial removes main from runnable choices. Other personal accounts retain their applicable account policy.
 Deadlines within `POLICY.deadlineTieH` (6 hours) of the earliest eligible
 deadline are tied: lower weekly usage wins, then a live hub, then account name.
 This balances launches as usage changes when weekly resets are close together.
@@ -46,16 +42,7 @@ least-used account;
 otherwise the earliest deadline wins. Nondry personal launches advance the CLI
 counter under a short lock. Max effort and reset redemption still ask separately.
 
-An active personal-priority window in `exclusive` mode keeps company lanes
-first under the existing quality ladder, free-lane preferences and queue
-threshold. Personal quota is overflow for company quota exhaustion, excessive
-queues/congestion or a missing required model/capability, and admits new
-personal Codex work only on main. Its fresh weekly reading must retain 5%
-headroom. On an infrastructure retry, a verified short company queue still
-wins, but transport-demoted or unmeasured TRAE lanes do not veto ready main
-overflow. If neither can take the task, `[personal-main-wait]` states the
-blocker and asks about a reset card only when a fresh weekly reading shows
-exhaustion and a card is available. Claude-only tools keep their route.
+An active exclusive window allows only main for personal Codex. Compare qualified lanes by expected finish, with a three-minute company tie band. Measured starts take precedence over unknown starts. Confirm an infrastructure interruption before rerouting the original task.
 The window follows the account across card redemption, with an explicit expiry
 or `until: null` (until revoked). Six-hour deadline ties apply outside exclusive
 mode. `personal-priority.mjs add FROM none REF QUOTE --mode exclusive
@@ -70,8 +57,7 @@ cannot reopen it. Dry routing previews emit no notices. Reset cards
 remain manual.
 New Codex threads recheck the current exclusive window at launch audit and
 immediately before `thread/start`; saved primary or reviewer routes from before
-activation cannot admit b. Main requires fresh public quota metadata and 5%
-headroom at that boundary. Refusals require re-routing; existing b threads may
+activation cannot admit b. Main requires fresh positive availability at that boundary. Existing b threads may
 continue.
 
 `--actual vendor:model:effort[@account]` supplies sanitized actual attempt evidence.
