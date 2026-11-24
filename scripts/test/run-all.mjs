@@ -41,7 +41,7 @@ const fullRun = !selected || selected.length > 8;
 const explicitOn = onArg || process.env.SUITE_ON;
 if (explicitOn && !['local', 'devbox'].includes(explicitOn)) throw Error('SUITE_ON must be local or devbox');
 const location = process.env.SUITE_LOCATION || 'local';
-const localOnly = new Set(['devbox-tree-scenarios.mjs', 'mini2-scenarios.mjs', 'worker-inbox-fix-scenarios.mjs']);
+const localOnly = new Set(['devbox-run-scenarios.mjs', 'devbox-tree-scenarios.mjs', 'mini2-scenarios.mjs', 'worker-inbox-fix-scenarios.mjs', 'worker-inbox-scenarios.mjs']);
 const originalSuites = suites;
 let remoteResults = [];
 const chosenOn = process.env.SUITE_REMOTE_CHILD ? 'local' : (explicitOn || (fullRun ? 'devbox' : 'local'));
