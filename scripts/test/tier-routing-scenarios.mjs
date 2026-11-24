@@ -30,7 +30,7 @@ const active = { [SOL]: bucket(), [ASTRA]: bucket(), [SOL56]: bucket() };
 const depleted = { ...active, [SOL]: bucket(true) };
 const window = { label: 'week', used: 10, resetsAt: now + 120 * h, windowMins: 10080, scoped: false };
 const home = path.join(tmp, 'trae'); fs.mkdirSync(home);
-const run = (args, { models = ids, daily = depleted, company = false, traeHome = home, claudeUsed = 10, sampledAt = now } = {}) => {
+const run = (args, { models = ids, daily = depleted, company = false, companySpent = false, personalName = 'main', personalModels, mainDenied = false, traeHome = home, claudeUsed = 10, sampledAt = now } = {}) => {
   const a = args.slice();
   if(a[0]==='review-high')a.push('--review-class',a.includes('--security')?'D':'B','--review-reason','tier review classification');
   const failures=Number(a[a.indexOf('--failures')+1])||0;
@@ -52,9 +52,9 @@ const run = (args, { models = ids, daily = depleted, company = false, traeHome =
   fs.writeFileSync(path.join(traeHome, 'lane-state.json'), JSON.stringify({
     ...(daily?.[SOL]?.depleted ? { [SOL]: { t: now, state: 'queued', position: 500, drainPerMin: 0.5 } } : {}),
   }));
-  const personal = { name: 'main', home: path.join(tmp, 'main'), live: true, windows: [window], resets: { credits: [] } };
+  const personal = { name: personalName, models: personalModels, allowed: !mainDenied, home: path.join(tmp, personalName), live: true, windows: [window], resets: { credits: [] } };
   const ttadk = { name: 'ttadk', kind: 'ttadk', home: path.join(tmp, 'ttadk'), healthy: true, live: true, seenAt: now,
-    models: [SOL], windows: [], usage: { used: 90, limit: 100, resetsAt: now + 8 * h } };
+    models: [SOL], windows: [], ...(companySpent ? { healthy: false, quotaOut: { resetsAt: now + 8 * h } } : {}), usage: { used: companySpent ? 100 : 90, limit: 100, resetsAt: now + 8 * h } };
   const history = path.join(tmp, 'history.jsonl');
   fs.writeFileSync(history, company ? `${JSON.stringify({ t: now - h, ttadk: { name: 'ttadk', ...ttadk.usage, used: 50 } })}\n` : '');
   const cache = path.join(tmp, 'quota.json');
@@ -117,8 +117,28 @@ try {
     assert.equal(run(['lookup', '--exclude-model', TERRA56], { daily }).pick.model, GPT55);
     assert.equal(run(['lookup', '--exclude-model', `${TERRA56},${GPT55}`], { daily }).pick.model, FLASH);
   }
-  assert.equal(run(['implement'], { daily: { ...depleted, [SOL56]: bucket(true) } }).pick.model, TERRA56);
-  assert.equal(run(['implement', '--exclude-model', `${SOL56},${TERRA56}`]).pick.model, FLASH);
+  const spent = { personalModels: ['gpt-6.2-sol'], models: ['gpt-6.2-sol', SOL, SOL56, ASTRA, FLASH], company: true, companySpent: true,
+    daily: Object.fromEntries(['gpt-6.2-sol', SOL, SOL56, ASTRA].map(id => [id, bucket(true)])) };
+  for (const category of ['implement', 'review']) {
+    const r = run([category], spent);
+    assert.deepEqual([r.kind, r.pick.account, r.pick.model, r.pick.effort], ['launch', 'main', 'gpt-6.2-sol', 'high']);
+    assert.deepEqual(r.needsUserOK, []);
+    assert.match(r.why.join(' '), /2026-11-24.*可以按照路由规则走个人的几个模型，不需要授权/);
+  }
+  const proper = run(['implement'], { ...spent, daily: { ...spent.daily, [SOL56]: bucket() } });
+  assert.deepEqual([proper.pick.account, proper.pick.model], ['trae', SOL56]);
+  const denied = run(['implement'], { ...spent, mainDenied: true });
+  assert.deepEqual([denied.kind, denied.pick.account, denied.pick.model], ['launch', 'trae', FLASH]);
+  assert.match(denied.why.join(' '), /main quota denied by provider.*company downgrade/);
+  const excluded = run(['implement', '--exclude-account', 'main'], spent);
+  assert.equal(excluded.pick.model, FLASH);
+  assert.match(excluded.why.join(' '), /main excluded.*company downgrade/);
+  assert.equal(run(['lookup'], spent).pick.model, FLASH);
+  const onlyB = run(['implement', '--exclude-account', 'ttadk,trae,claude'], { ...spent, personalName: 'b' });
+  assert.ok(['blocked', 'defer'].includes(onlyB.kind));
+  assert.notEqual(onlyB.pick?.account, 'b');
+  assert.equal(run(['implement'], { daily: { ...depleted, [SOL56]: bucket(true) } }).pick.account, 'main');
+  assert.equal(run(['implement', '--exclude-model', `${SOL56},${TERRA56}`]).pick.account, 'main');
   for (const args of [['analysis'], ['lookup'], ['draft']]) {
     for (const models of [ids.filter((id) => id !== SOL), [ASTRA, FLASH, PRO]]) {
       const r = run(args, { models }); assert.notEqual(r.pick.model, ASTRA); assert.notEqual(r.pick.model, PRO);
@@ -186,7 +206,7 @@ try {
       }
     }
   }
-  assert.ok(run(['analysis', '--exclude-model', 'gpt']).allNotes.some((n) => /can't emit one very large file in a single turn \(output limit\).*split the work or exclude deepseek/.test(n)));
+  assert.ok(run(['analysis', '--exclude-model', 'gpt', '--exclude-account', 'main']).allNotes.some((n) => /can't emit one very large file in a single turn \(output limit\).*split the work or exclude deepseek/.test(n)));
   // Sol review P1: normal-tier availability candidates must not become a weaker-GPT retry ladder.
   const unavailable = ['analysis', '--exclude-model', SOL];
   const first = run(unavailable, { daily: active }), next = run([...unavailable, '--failures', '1'], { daily: active });
@@ -218,7 +238,7 @@ try {
   assert.ok(personalGate(skip)); assert.equal(skip.pick.command,null);
   assert.ok(skip.plan.rejected.some(r=>r.reason?.text.includes('day quota exhausted')));
   const normalSkip = run(['analysis', '--exclude-model', SOL], { daily: { ...active, [SOL56]: bucket(true) } });
-  assert.equal(normalSkip.pick.model, TERRA56);
+  assert.deepEqual([normalSkip.pick.account, normalSkip.pick.model], ['main', SOL]);
   assert.ok(normalSkip.why.length>0);
   const second = run(['review-high', '--author', 'codex']);
   assert.equal(second.pick.vendor,'claude'); assert.equal(second.blocked,true); assert.equal(second.pick.command,null);
@@ -306,7 +326,9 @@ try {
           const crossVendorException = pick.vendor === 'claude' && companyHasSol
             && (secondary || (category === 'review-high' && args.includes('--author') && args.includes('codex'))
               || (category === 'second-opinion' && args.includes('codex')));
-          if (personal && !crossVendorException) assert.ok(personalGate(r), label);
+          const approvedTierMain = pick.account === 'main' && pick.model === SOL && pick.effort !== 'max' && !security
+            && r.tier !== 'light' && pick.approvalRef === 'standing:normal-tier-main-2026-11-24';
+          if (personal && !crossVendorException && !approvedTierMain) assert.ok(personalGate(r), label);
           approvalChecks++;
         }
       }

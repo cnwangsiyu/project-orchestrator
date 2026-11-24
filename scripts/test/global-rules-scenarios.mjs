@@ -24,7 +24,7 @@ try {
   assert.equal(digestText.match(/^version:/gm)?.length, 1, 'integration must publish one digest version');
   assert.equal(digestText.match(/^## Changes In This Version$/gm)?.length, 1);
   assert.ok(digestText.split('\n').length<=61,'digest line budget');
-  assert.equal(digest.version, '2026-11-24.5');
+  assert.equal(digest.version, '2026-11-24.6');
   assert.ok(digest.worker.includes("ask `res place` (or use `claim-any`) instead of naming a machine; name a machine only with a stated reason"));
   assert.match(digest.worker, /process checks list PID and process name only.*pgrep -l.*ps -o pid,comm/);
   assert.match(digest.worker, /never print other tools' full command lines.*pgrep -a\/-f.*args\/command/);

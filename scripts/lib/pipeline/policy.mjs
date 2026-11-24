@@ -3,6 +3,13 @@ import { EFFORTS, company, adversarial, known, policyModel, isAstra } from './co
 export const SOL='sol', ASTRA='astra';
 // Company hard-tier trial: 2026-11-16 through the 2026-11-23 review.
 export const TIERS = {hard:[ASTRA,SOL],normal:[SOL,'gpt-5.6-sol','gpt-5.6-terra','deepseek-v4.1-flash'],light:['gpt-5.6-terra','gpt-5.5','deepseek-v4.1-flash']};
+// The normal ladder also contains company fallback rungs shared with light work.
+export const companyDowngrade = model => TIERS.light.includes(policyModel(model))
+  || /(?:^doubao-|-(?:terra|luna)$)/.test(model);
+export const normalTierOverflow = task => ['normal', 'hard'].includes(task.tier)
+  && task.contentLabels.includes('ordinary') && !task.reviewClass && !task.flags.signing
+  && !task.flags['allow-low-priority-queue'] && !task.queueOwnerChoice && !task.requirements.resetRedemption;
+export const tierDecision = '2026-11-24 “可以按照路由规则走个人的几个模型，不需要授权”';
 export function hardPreference(t) {
   // Retain Sol's effort escalation (including company max) after a Sol attempt.
   // Astra actuals still forbid Sol through pPreviousFloor; preference is not a floor.

@@ -3,7 +3,7 @@ import { unavailableDayQuota, previousReleaseFallback, releaseUnavailable } from
 import { candidateParts } from './candidates.mjs';
 import { matchingApproval } from './filters.mjs';
 import { companyServesInfraRetry, laneTransportDemoted, usesExclusiveInfraOverflow } from './estimate.mjs';
-import { modelPreference, hardPreference, TIERS, SOL, ASTRA } from './policy.mjs';
+import { modelPreference, hardPreference, companyDowngrade, normalTierOverflow, TIERS, SOL, ASTRA } from './policy.mjs';
 import { personalLaunchChoice, personalLaunchExplanation } from '../personal-launch.mjs';
 export const prefersPersonalCodex = task => ['lookup','extract','analysis','implement','implement-hard','debug','science','review','draft','build-run','image-gen','second-opinion'].includes(task.category);
 
@@ -35,6 +35,12 @@ export function orderCandidates(task, snapshot, rows) {
     && cohort.some(row => row.ok && company(parts(row).account))) cohort = cohort.filter(row => company(parts(row).account));
   const ready=r=>!stalled(r)&&!r.estimate.capacityReset&&r.estimate.startDelayMin===0
     &&(parts(r).account.kind!=='trae'||r.estimate.balance?.freeNow===true);
+  // Remove light fallback rungs before computing the fastest finish and company tie band.
+  const readyMain = r => r.ok && ready(r) && parts(r).account.kind === 'chatgpt'
+    && r.candidate.accountId === 'main' && ['sol', 'astra'].includes(policyModel(r.candidate.modelId));
+  const belowTier = r => company(parts(r).account) && companyDowngrade(r.candidate.modelId);
+  const tierOverflow = normalTierOverflow(task) && cohort.some(readyMain) && cohort.some(r => r.ok && belowTier(r));
+  if (tierOverflow) cohort = cohort.filter(r => readyMain(r) || (company(parts(r).account) && !belowTier(r)));
   const hardAstra = task.tier === 'hard' ? cohort.filter(r => r.ok && ready(r) && isAstra(r.candidate.modelId)
     && r.predicates.some(p => p.personalFallback?.astraApprovalRef && p.personalFallback.preferOverLowerCompany)) : [];
   if (hardAstra.length) cohort = hardAstra;
@@ -188,7 +194,7 @@ export function orderCandidates(task, snapshot, rows) {
     return 0;
   });
   return freeze({ rows: decorated, winner: decorated[0] ?? null, runnerUp: decorated[1] ?? null,
-    terms: { costComparable, freeLight, accountRotation:rotate,
+    terms: { tierOverflow, costComparable, freeLight, accountRotation:rotate,
       personalLaunchWhy:personalLaunchExplanation(launch,launch.open.find(r=>r.id===decorated[0]?.candidate.accountId)??null),
       policyLock: adversarial(task) ? 'kimi-deepseek-scoped-opus' : null, background: task.background } });
 }

@@ -9,7 +9,7 @@ import { deriveReview } from './taskspec.mjs';
 import { reviewAfterWrite } from './review-policy.mjs';
 import { estimateCandidate } from './estimate.mjs';
 import { etaText, taskEstimateText, laneStartText } from '../eta.mjs';
-import { modelPreference } from './policy.mjs';
+import { modelPreference, normalTierOverflow, companyDowngrade, tierDecision } from './policy.mjs';
 import { flagArgs } from '../route-args.mjs';
 import { personalPriorityGuard } from './personal-priority.mjs';
 import { transportLaneFailures } from '../worker-completion.mjs';
@@ -50,6 +50,14 @@ export function presentRoute(plan, view, context) {
       why.push(`second reviewer: ${reviewer.personalFallback.text}`);
   }
   const main = snapshot.accounts.find(a => a.id === 'main' && a.kind === 'chatgpt');
+  if (plan.kind === 'launch' && plan.trace?.comparator?.tierOverflow && c.accountId === 'main'
+    && !seat.personalFallback?.text.includes(tierDecision))
+    why.push(`Ready main ${c.modelId} takes precedence over the lower-tier company lane under the user decision of ${tierDecision}.`);
+  if (plan.kind === 'launch' && normalTierOverflow(t) && company(candidateParts(snapshot, c).account) && companyDowngrade(c.modelId)) {
+    const excluded = t.exclusions.some(e => e.scope === 'account' && e.value === 'main');
+    const cause = known(main?.providerDenied) === true ? 'main quota denied by provider' : excluded ? 'main excluded' : 'no eligible proper-tier main lane can start';
+    why.push(`${cause}; using the company downgrade order (${c.modelId} on ${c.accountId}).`);
+  }
   const weekly = main?.budget?.source !== 'last-good-stale' && known(main?.budget)?.weekly;
   if (weekly?.resetsAt > snapshot.decisionAt && Number.isFinite(weekly.used) && Number.isFinite(weekly.projected))
     tellUser.push(`main at ${weekly.used}% of the week, projected ${weekly.projected}% at reset`);
