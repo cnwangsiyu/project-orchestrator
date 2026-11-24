@@ -74,6 +74,7 @@ try {
   const boardRoot = path.join(root, '.claude/orchestrator', project);
   const briefRoot = path.join(root, 'code/.claude-data/orchestrator', project, 'tasks', old.task);
   const vakRoot = path.join(root, 'vak-state');
+  const productionReleases = path.join(root, 'prod-releases.tsv');
   const nightlyRoot = path.join(root, 'nightly');
   const rulesFile = path.join(root, 'global-rules.md');
   await Promise.all([shared, path.join(shared, 'devbox-metrics'), boardRoot, briefRoot, path.join(data, 'history'),
@@ -93,6 +94,12 @@ try {
       history: [{ version: '1.0.0.201', deployedAt: new Date(now - 30 * 60_000).toISOString() }],
     },
   }));
+  await fs.writeFile(productionReleases, [
+    '# released_at_pt\tversion\tscm_build\tcommit\ttce_ticket\tevidence\tnote',
+    '2026-11-22 about 10:15\t1.0.0.180\t176700001\t1234567890abcdef\tTCE-1\treceipt\tolder',
+    'malformed\trow',
+    '2026-11-23 about 11:45\t1.0.0.196\t176785077\tabcdef1234567890\tTCE-2\treceipt\tcurrent',
+  ].join('\n') + '\n');
   await putLines(path.join(nightlyRoot, 'vak-ppe-release/cycle-events.jsonl'), [
     { at: new Date(now - 45 * 60_000).toISOString(), release: true },
   ]);
@@ -135,7 +142,7 @@ try {
   await putLines(path.join(history, '2026-11-23.ndjson'), [{ at: new Date(now - 2 * 3600_000).toISOString(),
     quota: { items: [{ id: 'ttadk', label: 'TTADK 今日', exhausted: false, percent: 80, resetsAt: new Date(reset).toISOString() }] } }]);
   const sampleFile = path.join(root, 'latest.json');
-  const sourcePaths = { vakRoot, nightlyRoot, rulesFile };
+  const sourcePaths = { vakRoot, nightlyRoot, rulesFile, productionReleases };
   const options = { data, home: root, shared, sampleFile, sourcePaths, command, now };
   const first = await collect(options);
   assert.deepEqual(Object.values(first.blocks).filter((b) => b.stale), []);
@@ -160,11 +167,12 @@ try {
   assert.equal(first.cards[0].default, '继续走公司通道'); assert.ok(Date.parse(first.cards[0].defaultAt) < now);
   assert.equal(first.recentCards.length, 1); assert.equal(first.recentCards[0].answer, '先不出包'); assert.equal(first.cardMalformed, 1);
   assert.deepEqual(first.releases.ppe, { version: '1.0.0.201', build: '176799342', at: new Date(now - 30 * 60_000).toISOString() });
-  assert.equal(first.releases.production.version, '1.0.0.105'); assert.equal(first.releases.production.build, '');
+  assert.deepEqual(first.releases.production, { version: '1.0.0.196', build: '176785077', commit: 'abcdef1', at: null,
+    atPt: '2026-11-23 11:45', ticket: 'TCE-2', evidence: 'receipt', note: 'current', fallback: false });
   assert.equal(first.releases.lastCycle.result, '已发布');
   assert.deepEqual(first.releases.nightly, { at: new Date(now - 60 * 60_000).toISOString(), passed: 1, total: 7,
     failed: true, failures: ['failed-1', 'failed-2', 'failed-3', 'failed-4', 'failed-5'] });
-  assert.equal(first.releases.productionToday, null);
+  assert.equal(first.releases.productionToday, 1); assert.equal(first.releases.productionMalformed, 1);
   assert.ok(first.events.some((row) => row.text === 'W749 失败'));
   assert.ok(first.events.some((row) => row.text === 'W750-finished 已完成'));
   assert.ok(first.events.some((row) => row.text === 'W751-interrupted 已中断'));

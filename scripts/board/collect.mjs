@@ -17,7 +17,8 @@ const hostMap = new URL('./hosts.json', import.meta.url);
 const emptySource = (id) => id === 'notes' ? { latest: {}, notes: {}, notices: {}, failed: [] }
   : id === 'devboxLeases' ? { holds: [], load: {} }
     : id === 'cards' ? { open: [], recent: [], timeline: [], malformed: 0 }
-      : id === 'releases' ? { ppe: {}, production: {}, lastCycle: null, nightly: null, productionToday: null, releaseEvents: [] }
+      : id === 'releases' ? { ppe: {}, production: {}, lastCycle: null, nightly: null, productionToday: null,
+        productionMalformed: 0, releaseEvents: [] }
         : id.startsWith('tasks:') || id === 'routes' ? {} : id === 'quota' ? { items: [], hubs: [] } : [];
 
 function clean(value, field = '', scope = '') {

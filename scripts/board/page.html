@@ -216,7 +216,7 @@ function releaseDetails(value) {
   const nightly = value.nightly;
   const pairs = [
     ['PPE', `${value.ppe?.version || '未知'}${value.ppe?.build ? ` / 构建 ${value.ppe.build}` : ' / 构建未知'} · ${time(value.ppe?.at, fullClock)}`],
-    ['生产', `${value.production?.version || '未知'}${value.production?.build ? ` / 构建 ${value.production.build}` : ' / 构建未知'} · ${time(value.production?.at, fullClock)}`],
+    [value.production?.fallback ? '最近观测（可能过期）' : '生产', `${value.production?.version || '未知'}${value.production?.build ? ` / 构建 ${value.production.build}` : ' / 构建未知'}${value.production?.commit ? ` / ${value.production.commit}` : ''} · ${value.production?.atPt ? `约 ${value.production.atPt} PT` : time(value.production?.at, fullClock)}`],
     ['上次 PPE 周期', value.lastCycle ? `${value.lastCycle.result} · ${time(value.lastCycle.at, fullClock)}` : '未知'],
     ['上次夜间回归', nightly ? `${nightly.passed}/${nightly.total} 通过 · ${time(nightly.at, fullClock)}` : '未知'],
     ['失败单元', nightly?.failures?.length ? nightly.failures.join('、') : nightly ? '无' : '未知'],
@@ -380,7 +380,7 @@ function render() {
   notices('machinesNotice', ['audit', 'hostMetrics', 'hostSamples', 'devboxLeases', 'localLeases', ...Object.keys(poolLabels).map((p) => `pool:${p}`)]);
   notices('devicesNotice', ['devices']);
   notices('quotaNotice', ['quota'], quota.fallback ? '实时额度不可读，显示本地缓存 · ' + time(quota.checkedAt, fullClock) : '');
-  notices('eventsNotice', ['activity', 'quotaHistory', 'releases']);
+  notices('eventsNotice', ['activity', 'quotaHistory', 'releases'], releases.productionMalformed ? `生产发布记录：忽略了 ${releases.productionMalformed} 行格式错误的记录` : '');
 }
 $('tabs').addEventListener('click', (event) => {
   const button = event.target.closest('button[data-project]');

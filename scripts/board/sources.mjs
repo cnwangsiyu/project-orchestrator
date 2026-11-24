@@ -10,7 +10,8 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { maskLogText } from '../lib/nightly-audit.mjs';
 
-export const projects = { 'video-agent': 'VAK', 'vesdk-mainline': 'Webview', 'lynx-view': 'Lynx', orchestrator: '全局规则' };
+const projectSettings = JSON.parse(await fs.readFile(new URL('./projects.json', import.meta.url), 'utf8'));
+export const projects = Object.fromEntries(Object.entries(projectSettings).map(([id, row]) => [id, row.label]));
 const deviceNames = { iphone11: 'iPhone 11', iphone8: 'iPhone 8', s21: 'S21' };
 const quotaScript = fileURLToPath(new URL('../quota.mjs', import.meta.url));
 const exec = promisify(execFile);
@@ -268,21 +269,59 @@ async function latestNightly(root, signal) {
   return null;
 }
 
-async function releaseState(vakRoot, nightlyRoot, signal, now) {
+const ptDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit', day: '2-digit' });
+
+function releaseTime(value) {
+  if (value === 'unknown') return { at: null, atPt: 'unknown', date: null };
+  const match = /^(\d{4}-\d{2}-\d{2}) about ([01]\d|2[0-3]):([0-5]\d)$/.exec(value);
+  if (!match) return null;
+  return { at: null, atPt: `${match[1]} ${match[2]}:${match[3]}`, date: match[1] };
+}
+
+async function productionReleases(file, signal, now) {
+  let input;
+  try { input = createReadStream(file, { signal, encoding: 'utf8' }); }
+  catch (error) { if (error.code === 'ENOENT') return { latest: null, today: null, malformed: 0 }; throw error; }
+  const lines = createInterface({ input, crlfDelay: Infinity });
+  let latest = null, malformed = 0, today = 0, found = false;
+  const currentDate = ptDate.format(new Date(now));
+  try {
+    for await (const raw of lines) {
+      if (!raw.trim() || raw.startsWith('#')) continue;
+      found = true;
+      const fields = raw.split('\t');
+      const released = releaseTime(fields[0]);
+      if (fields.length !== 7 || !released || fields.some((field) => !field.trim())) { malformed += 1; continue; }
+      const [releasedAtPt, version, build, commit, ticket, evidence, note] = fields.map((field) => field.trim());
+      latest = { version, build, commit: commit === 'unknown' ? commit : commit.slice(0, 7), at: released.at,
+        atPt: released.atPt, ticket, evidence, note, fallback: false };
+      if (released.date === currentDate) today += 1;
+    }
+  } catch (error) {
+    if (error.code === 'ENOENT') return { latest: null, today: null, malformed: 0 };
+    throw error;
+  } finally { lines.close(); input.destroy(); }
+  return { latest, today: found ? today : null, malformed };
+}
+
+async function releaseState(vakRoot, nightlyRoot, productionFile, signal, now) {
   const state = await jsonFile(path.join(vakRoot, 'ppe-state.json'), signal, { optional: true });
   const main = object(state?.mainPpe) ? state.mainPpe : {};
   const transaction = object(state?.autoRelease?.lastTransaction) ? state.autoRelease.lastTransaction : {};
-  const [lastCycle, nightly] = await Promise.all([
+  const [lastCycle, nightly, recorded] = await Promise.all([
     latestCycle(path.join(nightlyRoot, 'vak-ppe-release/cycle-events.jsonl'), signal),
     latestNightly(path.join(nightlyRoot, 'vak-web'), signal),
+    productionReleases(productionFile, signal, now),
   ]);
   const releaseEvents = Array.isArray(state?.autoRelease?.history) ? state.autoRelease.history.filter((row) => {
     const at = iso(row.deployedAt ?? row.at);
     return at && now - Date.parse(at) <= 12 * 3600_000;
   }).map((row) => ({ at: iso(row.deployedAt ?? row.at), project: 'video-agent', text: 'VAK PPE 已发布' })) : [];
+  const fallback = { version: string(transaction.prodVersion), build: '', commit: '', at: iso(transaction.updatedAt ?? transaction.startedAt),
+    atPt: '', fallback: true };
   return { ppe: { version: string(main.version), build: main.scm == null ? '' : String(main.scm), at: iso(main.deployedAt) },
-    production: { version: string(transaction.prodVersion), build: '', at: iso(transaction.updatedAt ?? transaction.startedAt) },
-    lastCycle, nightly, productionToday: null, releaseEvents };
+    production: recorded.latest ?? fallback, lastCycle, nightly, productionToday: recorded.latest ? recorded.today : null,
+    productionMalformed: recorded.malformed, releaseEvents };
 }
 
 async function quotaHistory(data, signal, now) {
@@ -467,7 +506,8 @@ export function makeSources({ data, shared = process.env.RULES_SHARED || path.jo
       return Object.fromEntries([...latest].map(([k, v]) => [k, v.text]));
     },
     releases: (signal) => releaseState(sourcePaths.vakRoot ?? path.join(home, 'code/.claude-data/orchestrator/video-agent'),
-      sourcePaths.nightlyRoot ?? path.join(shared, 'nightly'), signal, now),
+      sourcePaths.nightlyRoot ?? path.join(shared, 'nightly'), sourcePaths.productionReleases ?? projectSettings['video-agent'].productionReleases,
+      signal, now),
     activity: (signal) => activityState(shared,
       sourcePaths.rulesFile ?? fileURLToPath(new URL('../../references/global-rules.md', import.meta.url)), signal, now),
     quotaHistory: (signal) => quotaHistory(data, signal, now),

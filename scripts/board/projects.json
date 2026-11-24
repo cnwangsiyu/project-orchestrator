@@ -1,0 +1,9 @@
+{
+  "video-agent": {
+    "label": "VAK",
+    "productionReleases": "/Users/bytedance/code/.claude-data/orchestrator/video-agent/prod-releases.tsv"
+  },
+  "vesdk-mainline": { "label": "Webview" },
+  "lynx-view": { "label": "Lynx" },
+  "orchestrator": { "label": "全局规则" }
+}
