@@ -2,7 +2,7 @@ import { WORKER_NOTES } from '../fixed-worker-notes.mjs';
 // Pure compatibility rendering. Receives paths, owner and digest from the CLI;
 // it never launches, reads metadata, or changes the selected tuple.
 import { policyModel, isAstra, company, companyDevice, known, adversarial, isReview } from './common.mjs';
-import { previousReleaseFallback } from './release-fallback.mjs';
+import { dayExhaustion, unavailableDayQuota, previousReleaseFallback } from './release-fallback.mjs';
 import { candidateParts } from './candidates.mjs';
 import {mandatoryReview,projectReviewPolicy} from '../review-policy-data.mjs';
 import { deriveReview } from './taskspec.mjs';
@@ -66,9 +66,9 @@ export function presentRoute(plan, view, context) {
     overspending:personalBudgets.some(b=>b.overspending),redeemDue:personalBudgets.some(b=>b.redemption)};
   if(unknownCompany.length) tellUser.push(`company account state unknown or unavailable: ${unknownCompany.map(a=>`${a.id}/${a.kind}`).join(', ')}; check quota.mjs --fresh using an authorized status reader, then replan.`);
   const balanceRows = (plan.trace?.candidates ?? []).filter(r => r.estimate.balance && r.predicates
-    .filter(p => !p.ok).every(p => p.reason.code === 'ACTIVE_RESTRICTION'));
+    .filter(p => !p.ok).every(p => ['ACTIVE_RESTRICTION','DAY_QUOTA_EXHAUSTED'].includes(p.reason.code)));
   const balanceCandidates = [...new Map(balanceRows.map(r => [r.candidate.modelId, {
-    ...r.estimate.balance, reasons: [...r.estimate.balance.reasons,
+    ...r.estimate.balance, reasons: [...r.estimate.balance.reasons, ...r.predicates.filter(p => p.reason?.code === 'DAY_QUOTA_EXHAUSTED').map(p => p.reason.text),
       ...(r.predicates.some(p => p.reason?.code === 'ACTIVE_RESTRICTION') ? ['model paused'] : [])],
   }])).values()].sort((a,b) => {
     const account = snapshot.accounts.find(a => a.kind === 'trae');
@@ -120,7 +120,7 @@ export function presentRoute(plan, view, context) {
     .filter(([k])=>!['json','table','dry'].includes(k))))];
   const estimatedRows = (plan.trace?.candidates ?? []).map((r) => r.predicates.some((p)=>p.reason?.code==='PROVIDER_QUOTA_DENIED')
     ? {...r, estimate:estimateCandidate(t,snapshot,r.candidate,{capacityReset:true})} : r);
-  const eta = estimatedRows.filter((r)=>r.predicates.every((p)=>p.ok || p.reason?.code==='PROVIDER_QUOTA_DENIED'))
+  const eta = estimatedRows.filter((r)=>r.predicates.every((p)=>p.ok || ['PROVIDER_QUOTA_DENIED','DAY_QUOTA_EXHAUSTED'].includes(p.reason?.code)))
     .filter((r)=>!seat || r.candidate.effort===seat.candidate.effort).map((r)=>({ ...r.estimate, model:r.candidate.modelId, account:r.candidate.accountId, effort:r.candidate.effort,
       unknown:r.estimate.confidence==='UNKNOWN', lane:{position:known(candidateParts(snapshot,r.candidate).lane.position),drainPerMin:known(candidateParts(snapshot,r.candidate).lane.drainPerMin)} }));
   const low = c && company(candidateParts(snapshot,c).account) && (seat.estimate.patienceMin!==null);
@@ -214,6 +214,13 @@ export function presentRoute(plan, view, context) {
     const alternatives=eta.filter(e=>e.account!==c.accountId||e.model!==c.modelId);
     why.push(`ETA: ${taskEstimateText(seat.estimate)}; chosen lane: ${company(account)?'company':'personal'} ${c.modelId}@${c.accountId} ${laneStartText(seat.estimate)}${alternatives.length?`; alternatives: ${alternatives.map(e=>`${company(snapshot.accounts.find(a=>a.id===e.account))?'company':'personal'} ${etaText(e)}`).join('; ')}`:''}; selected by policy and qualified floor; task time is not a lane-speed ranking`);
     if(adversarial(t)) why.push('adversarial: no GPT model on any account; Kimi-K3, DeepSeek-V4.1-Flash, then scoped Opus; two independent non-GPT families required.');
+    const lane = candidateParts(snapshot,c).lane;
+    const exhausted = dayExhaustion(account,lane,snapshot.decisionAt);
+    if (exhausted && account.kind === 'trae') {
+      const start = unavailableDayQuota(account,lane,snapshot)
+        ? 'Owner allowed the low-priority queue.' : 'Fresh queue telemetry shows a start within the configured wait.';
+      why.push(`${c.accountId}/${c.modelId} day quota exhausted until ${exhausted.until ? new Date(exhausted.until).toISOString() : 'provider reset (time unknown)'}. ${start}`);
+    }
     if(candidateParts(snapshot,c).lane.mode==='low-priority') why.push(`TRAE ${c.modelId} low-priority lane (bucket depleted): provider capacity remains eligible with ${snapshot.personalFallback?.enabled?'an owner queue decision':'bounded queue patience'}.`);
     if(seat.estimate.basis==='progressing') why.push(`${c.modelId} low-priority lane (bucket depleted): slower bucket designation, but progressing without queue cycles in fresh per-model telemetry.`);
     if(['browser','ui-browser'].includes(t.category)&&c.family==='claude') fixedNotes.push(WORKER_NOTES.claudeBrowser);
@@ -289,7 +296,7 @@ export function presentRoute(plan, view, context) {
   if(plan.kind==='blocked') why.unshift(...plan.reasons.map(r=>r.text));
   why.push(...new Set(plan.rejected.filter(r=>r.reason?.code==='BROWSER_RUNTIME_UNAVAILABLE').map(r=>r.reason.text)));
   if(!why.length) why.push(...(plan.reasons??[plan.reason]).filter(Boolean).map((r)=>r.text));
-  if(companyDevice(snapshot)&&!['personal-main-capacity','attempt-reconciliation'].includes(plan.trigger)&&(plan.kind==='defer' || (plan.kind==='blocked' && plan.gates.some(g=>g.kind==='personal-quota')))) {
+  if(companyDevice(snapshot)&&plan.reason?.code !== 'DAY_QUOTA_EXHAUSTED'&&!['personal-main-capacity','attempt-reconciliation'].includes(plan.trigger)&&(plan.kind==='defer' || (plan.kind==='blocked' && plan.gates.some(g=>g.kind==='personal-quota')))) {
     const reset=plan.deferUntil??Math.min(...snapshot.accounts.filter(company).map(a=>known(a.denialResetAt)).filter(at=>at>snapshot.decisionAt));
     const question=`No company lane can start now. Use personal quota now, or wait until ${Number.isFinite(reset)?new Date(reset).toISOString():'company lane progress'}?`;
     needsUserOK.push(question);tellUser.push(question);

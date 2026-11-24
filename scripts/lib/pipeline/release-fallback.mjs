@@ -8,6 +8,37 @@ const restricted = (snapshot, c) => snapshot.health.some(h => h.accountId === c.
   && (!h.modelId || h.modelId === c.modelId) && (!h.family || h.family === c.family)
   && (h.restricted || h.recovery === 'awaiting-probe'));
 
+// Only TRAE model buckets describe a provider low-priority lane. TTADK's
+// authoritative daily denial covers the account and cannot be opted into.
+export function dayExhaustion(account, lane, now) {
+  if (account.kind === 'ttadk' && account.fallbackUnavailable?.kind === 'quota-exhausted')
+    return { until: account.fallbackUnavailable.until };
+  if (account.kind !== 'trae') return null;
+  const bucket = quotaFor(account, lane.modelId), usage = known(bucket?.usage);
+  const until = usage?.resetsAt ?? known(bucket?.partialReset);
+  if (until != null && until <= now) return null;
+  if (usage ? usage.used >= usage.limit || usage.depleted === true || usage.remaining === 0 : known(bucket?.priority) === 'depleted')
+    return { until: until ?? null };
+  return null;
+}
+
+// A full TRAE bucket changes queue priority. Only fresh, model-specific
+// queue observations can establish a short start on the remaining capacity.
+export function unavailableDayQuota(account, lane, snapshot) {
+  const quota = dayExhaustion(account, lane, snapshot.decisionAt);
+  if (!quota || account.kind !== 'trae') return quota;
+  const position = known(lane.position), drain = known(lane.drainPerMin), state = known(lane.queueState);
+  const patience = snapshot.personalFallback?.queueWaitMinutes ?? 5;
+  if (state === 'waiting' && known(lane.progressAt) === null || position > 0 && drain === 0)
+    return { ...quota, reason: `flat/stalled queue > ${patience} min` };
+  if (position > 0 && drain > 0) {
+    const delay = position / drain;
+    return delay <= patience ? null : { ...quota, reason: `predicted start ~${Math.round(delay)} min > ${patience} min` };
+  }
+  if ((position === null || position === 0) && (state === 'ready' || position === 0 && state !== 'waiting')) return null;
+  return { ...quota, reason: 'low-priority start unmeasured' };
+}
+
 // A capacity exception for the immediately previous release, never a new
 // quality ordering or permission to step down after a rejected answer.
 export function releaseUnavailable(task, snapshot, c) {
@@ -16,10 +47,16 @@ export function releaseUnavailable(task, snapshot, c) {
     && (e.scope === 'account' ? e.value === c.accountId : e.scope === 'family' ? e.value === c.family : matchesModel(e.value, c.modelId))))
     return 'excluded by flag';
   if (restricted(snapshot, c)) return 'restricted or awaiting a recovery probe';
-  const q = quotaFor(account, c.modelId), usage = known(q?.usage);
-  if (usage?.resetsAt > snapshot.decisionAt && (usage.used >= usage.limit || usage.depleted === true || usage.remaining === 0))
+  const exhausted = unavailableDayQuota(account, lane, snapshot);
+  if (exhausted) return exhausted.until ? `day quota exhausted until ${new Date(exhausted.until).toISOString()}` : 'in the provider low-priority queue';
+  const bucket = quotaFor(account, c.modelId), usage = known(bucket?.usage);
+  const reset = usage?.resetsAt ?? known(bucket?.partialReset);
+  if (account.kind !== 'trae' && usage?.resetsAt > snapshot.decisionAt && (usage.used >= usage.limit || usage.depleted === true || usage.remaining === 0))
     return `day quota exhausted until ${new Date(usage.resetsAt).toISOString()}`;
-  if (known(q?.priority) === 'depleted' || lane.mode === 'low-priority') return 'in the provider low-priority queue';
+  // Retain the existing release preference for lanes with no current day
+  // exhaustion. A lane mode alone is not a quota counter.
+  if ((reset == null || reset > snapshot.decisionAt) && !dayExhaustion(account,lane,snapshot.decisionAt) && (known(bucket?.priority) === 'depleted' || lane.mode === 'low-priority'))
+    return 'in the provider low-priority queue';
   const estimate = estimateCandidate(task, snapshot, c);
   if (estimate.stalled) return 'queue stalled with no observed progress';
   if (estimate.patienceMin !== null && estimate.startDelayMin > estimate.patienceMin)
@@ -40,5 +77,5 @@ export function previousReleaseFallback(task, snapshot, c) {
   if (!latestLanes.length) return null;
   const reasons = latestLanes.map(l => releaseUnavailable(task, snapshot, { ...c, modelId: newest, laneId: l.id, harness: l.harness }));
   if (reasons.some(why => !why)) return null;
-  return { newest, previous: c.modelId, text: `${newest} ${reasons[0]}; using previous release ${c.modelId} on the same company account ${account.id}` };
+  return { newest, previous: c.modelId, dayLimited: latestLanes.every(l => unavailableDayQuota(account,l,snapshot)), text: `${newest} ${reasons[0]}; using previous release ${c.modelId} on the same company account ${account.id}` };
 }

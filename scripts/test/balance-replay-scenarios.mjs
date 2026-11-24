@@ -138,7 +138,7 @@ try {
   assert.equal(run(['implement', '--security']).pick.model, SOL);
   assert.equal(run(['implement', '--exclude-account', 'trae']).pick.account, 'ttadk');
   const fallback = run(['implement'], { company: false, queue: { gpt: { t: now, position: 5000 } } });
-  assert.equal(fallback.pick.account, 'trae'); assert.equal(fallback.pick.model, SOL,'unknown fallback capacity cannot prove that a lower model is free');
+  assert.equal(fallback.pick.account, 'trae'); assert.equal(fallback.pick.model, SOL56,'depleted Sol has no model-specific short-start measurement');
   assert.equal(run(['implement'], { traeHealthy: false }).pick.account, 'ttadk');
 
   const readyQueue = { gpt: { t: now, state: 'ready', position: 0 }, lanes: { [SOL]: { t: now, state: 'ready', position: 0 } } };

@@ -82,9 +82,18 @@ export function createSnapshot(raw, options = {}) {
     const id = a.id, prefix = `accounts.${id}`;
     const catalog = obs(a.catalog, `${prefix}.catalog`, strings);
     if (catalog.value) catalog.value = unique(catalog.value.map(modelId));
-    const quota = rows(a.quota ?? [], `${prefix}.quota`).map((q) => ({ bucketId: q.bucketId, unit: q.unit,
-      authoritative: q.authoritative === true, usage: obs(q.usage, `${prefix}.quota.${q.bucketId}.usage`, usageOK, FRESHNESS.quotaMs),
-      priority: obs(q.priority, `${prefix}.quota.${q.bucketId}.priority`, (v) => ['available', 'depleted', 'bucket-free'].includes(v), FRESHNESS.quotaMs) })).sort((a, b) => compare(a.bucketId, b.bucketId));
+    const quota = rows(a.quota ?? [], `${prefix}.quota`).map(q => {
+      const field = `${prefix}.quota.${q.bucketId}`;
+      const usage = obs(q.usage, `${field}.usage`, usageOK, FRESHNESS.quotaMs);
+      // A partial provider report can date its low-priority flag without reporting counters.
+      const wrapped = object(q.usage) && Object.hasOwn(q.usage, 'status');
+      const reset = (wrapped ? q.usage.value : q.usage)?.resetsAt;
+      const partialReset = usage.status === 'UNKNOWN' && nonnegative(reset)
+        ? obs(wrapped ? { ...q.usage, value: reset } : reset, `${field}.resetsAt`, nonnegative, FRESHNESS.quotaMs) : null;
+      return { bucketId: q.bucketId, unit: q.unit, authoritative: q.authoritative === true, usage,
+        ...(partialReset ? { partialReset } : {}),
+        priority: obs(q.priority, `${field}.priority`, v => ['available', 'depleted', 'bucket-free'].includes(v), FRESHNESS.quotaMs) };
+    }).sort((a, b) => compare(a.bucketId, b.bucketId));
     // Optional legacy cards/windows cannot erase independently good auth/catalog.
     for (const key of ['resets', 'windows']) if (a[key] !== undefined) {
       const good = key === 'resets' ? object(a.resets) && Array.isArray(a.resets.credits) && nonnegative(a.resets.count)

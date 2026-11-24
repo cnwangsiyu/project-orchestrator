@@ -2,7 +2,8 @@ import { createTaskSpec, deriveReview } from './taskspec.mjs';
 import { createSnapshot, isNormalizedSnapshot } from './snapshot.mjs';
 import { enumerateCandidates, candidateParts } from './candidates.mjs';
 import { evaluateCandidate, needsReviewer, pReviewerSet } from './filters.mjs';
-import { estimateCandidate } from './estimate.mjs';
+import { estimateCandidate, companyServesInfraRetry, usesExclusiveInfraOverflow } from './estimate.mjs';
+import { unavailableDayQuota } from './release-fallback.mjs';
 import { orderCandidates, prefersPersonalCodex } from './choose.mjs';
 import { makePlan } from './plan.mjs';
 import { validatePlan } from './validate.mjs';
@@ -73,7 +74,18 @@ export function routePure(taskSpec, stateSnapshot, history = []) {
     }
     complete.push({ ...row, reviewers, reviewerGates, reviewerProposals });
   }
-  const rankedNow = orderCandidates(task, snapshot, complete);
+  const depleted = row => {
+    const { account, lane } = candidateParts(snapshot, row.candidate);
+    return unavailableDayQuota(account, lane, snapshot);
+  };
+  const dayLimited = snapshot.personalPriority?.mode === 'exclusive' && assessment.rows.some(r => depleted(r)
+    && r.predicates.every(p => p.ok || p.reason.code === 'DAY_QUOTA_EXHAUSTED'));
+  const readyCompany = dayLimited ? complete.filter(r => company(candidateParts(snapshot, r.candidate).account)
+    && (!usesExclusiveInfraOverflow(task, snapshot) || companyServesInfraRetry(snapshot, r))
+    && !depleted(r) && !r.estimate.stalled && !r.reviewers.some(seat => seat.estimate.stalled)) : [];
+  const rankedNow = orderCandidates(task, snapshot, readyCompany.length ? readyCompany : complete);
+  const optedQueue = task.flags['allow-low-priority-queue'] && rankedNow.winner && depleted(rankedNow.winner);
+  const startable = rankedNow.winner && (!rankedNow.winner.estimate.stalled || optedQueue);
   // Only explicit quota denial may project recovery. All other hard predicates
   // must pass now; retries, background and resource-bound dispatch never wait.
   const resetAllowed = !task.background && !task.failures && task.previousAttempts.every((a)=>a.state==='cancelled-no-work'&&a.cancellationEvidenceId&&a.usefulWork===false)
@@ -84,7 +96,7 @@ export function routePure(taskSpec, stateSnapshot, history = []) {
       && company(candidateParts(snapshot, r.candidate).account);
   }).map((r) => ({ ...r, estimate: estimateCandidate(task, snapshot, r.candidate, { capacityReset: true }) })) : [];
   // Runnable work always wins over a future quota reset.
-  const ordered = rankedNow.winner && !rankedNow.winner.estimate.stalled ? rankedNow : orderCandidates(task,snapshot,resetRows);
+  const ordered = startable ? rankedNow : orderCandidates(task,snapshot,resetRows);
   const trace = { candidates: assessment.rows.map((r) => ({ candidate: r.candidate, predicates: r.predicates, estimate: r.estimate })),
     ordering: ordered.rows.map((r) => ({ candidateId: r.candidate.id, terms: r.orderingTerms })), comparator: ordered.terms, diagnostics };
   const fields = { warnings: reviewBlock?.code === 'REVIEW_BUDGET_WARNING' ? [reviewBlock] : [], rejected: dedupe([...rejected, ...reviewerRejections]), trace };
@@ -92,12 +104,29 @@ export function routePure(taskSpec, stateSnapshot, history = []) {
     && r.predicates.every(p => p.ok || p.reason?.code === 'ATTEMPT_RECONCILIATION_REQUIRED'));
   if (reconciliation) return makePlan('defer', task, snapshot, { ...fields, deferUntil: null, trigger: 'attempt-reconciliation',
     reason: reconciliation.predicates.find(p => p.reason?.code === 'ATTEMPT_RECONCILIATION_REQUIRED').reason });
+  const exhausted = assessment.rows.flatMap(r => r.predicates.filter(p => p.reason?.code === 'DAY_QUOTA_EXHAUSTED'));
+  if (exhausted.length) {
+    const denied = snapshot.accounts.filter(a => company(a) && known(a.providerDenied) === true)
+      .map(a => `${a.id} quota denied until ${known(a.denialResetAt) > snapshot.decisionAt ? new Date(known(a.denialResetAt)).toISOString() : 'provider reset (time unknown)'}`);
+    const description = [...new Set([...exhausted.map(p => p.reason.text), ...denied])].join('; ');
+    fields.warnings.push(reason('pAvailable', 'DAY_QUOTA_EXHAUSTED', description, []));
+    const capacity = assessment.rows.filter(r => {
+      const failures = r.predicates.filter(p => !p.ok);
+      return failures.length === 1 && ['DAY_QUOTA_EXHAUSTED','PROVIDER_QUOTA_DENIED'].includes(failures[0].reason.code)
+        && company(candidateParts(snapshot, r.candidate).account);
+    });
+    if (!startable && capacity.some(r => r.predicates.some(p => p.reason?.code === 'DAY_QUOTA_EXHAUSTED'))) {
+      const resets = capacity.flatMap(r => r.predicates.filter(p => p.reconsiderAt > snapshot.decisionAt).map(p => p.reconsiderAt));
+      return makePlan('defer', task, snapshot, { ...fields, deferUntil: resets.length ? Math.min(...resets) : null,
+        trigger: 'capacity-reset', reason: reason('choose', 'DAY_QUOTA_EXHAUSTED', description, []), timerOwner: task.owner });
+    }
+  }
   const mainOfferable = assessment.rows.some(r => r.candidate.accountId === 'main' && !r.estimate.stalled
     && r.predicates.every(p => p.ok || p.gate));
-  if (exclusiveCodexTask(task, snapshot) && !mainOfferable && (!rankedNow.winner || rankedNow.winner.estimate.stalled))
+  if (exclusiveCodexTask(task, snapshot) && !mainOfferable && !startable)
     return makePlan('defer', task, snapshot, { ...fields, deferUntil: null, trigger: 'personal-main-capacity',
       reason: reason('choose', 'PERSONAL_MAIN_WAIT', personalMainWaitText(task, snapshot), [task.taskId]) });
-  if(!rankedNow.winner||rankedNow.winner.estimate.stalled) {
+  if(!startable) {
     const personalRows=assessment.rows.filter(r=>!company(candidateParts(snapshot,r.candidate).account)&&!r.estimate.stalled
       &&r.estimate.startDelayMin===0&&r.predicates.filter(p=>!p.ok).every(p=>p.gate));
     const personal=orderCandidates(task,snapshot,personalRows).winner;
@@ -131,7 +160,7 @@ export function routePure(taskSpec, stateSnapshot, history = []) {
       suggestions:cards.map(r=>r.candidate),reasons:card.predicates.filter(p=>!p.ok).map(p=>({...p.reason,
         text:`${card.candidate.modelId} ${card.candidate.effort} on ${card.candidate.accountId}: ${p.reason.text}`}))});
   }
-  if(winner && (winner.estimate.stalled || winner.reviewers.some(s=>s.estimate.stalled))) return makePlan('defer', task, snapshot, {
+  if(winner && (!optedQueue && winner.estimate.stalled || winner.reviewers.some(s=>s.estimate.stalled))) return makePlan('defer', task, snapshot, {
     ...fields, deferUntil:null, trigger:'lane-progress', reason:reason('choose','ETA_STALLED','The qualified lane/reviewer set is STALLED in fresh telemetry; wait for progress and replan before launching.',
       [winner.candidate.id,...winner.reviewers.filter(s=>s.estimate.stalled).map(s=>s.candidate.id)]),
     runnerUp:null,gates:[{id:`capacity:${task.taskId}`,kind:'capacity-decision',phase:'prelaunch',state:'needsOK',scope:null,reason:reason('choose','CAPACITY_DECISION','No authorized lane can start: choose whether to wait for lane progress or change scope.',[task.taskId]),evidenceIds:[]}],timerOwner:task.owner });

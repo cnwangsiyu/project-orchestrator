@@ -138,12 +138,12 @@ try {
   assert.equal(coinciding.rows.filter((r) => r.kind === 'reroute').length, 1, 'the stall alarm must not terminate a queued patience handoff');
   assert.doesNotMatch(coinciding.stdout, /stalled:/);
   const canonical = run('ttadk-sol-reset', {}, [], { canonical: true });
-  assert.equal(canonical.status, 0, canonical.stderr + canonical.stdout);
+  assert.equal(canonical.status, 9, canonical.stderr + canonical.stdout);
   const scheduled = JSON.parse(fs.readFileSync(path.join(canonical.task, 'reroute.json')));
-  assert.equal(scheduled.route.deferUntil,null);assert.equal(scheduled.route.pick.account,'trae');assert.equal(scheduled.route.pick.model,ASTRA);
+  assert.equal(scheduled.route.plan.trigger,'capacity-reset');assert.equal(scheduled.route.pick,null);
   assert.ok(scheduled.route.eta.some((r) => r.account === 'ttadk' && r.model === SOL));
   assert.ok(!routeFlag(scheduled.routeArgs, 'exclude-model')); assert.equal(routeFlag(scheduled.routeArgs, 'exclude-lane'), `trae:${SOL}`);
-  assert.equal(canonical.calls.filter((c) => c.method === 'thread/start').length, 2, 'launches a runnable company alternative instead of waiting for reset');
+  assert.equal(canonical.calls.filter((c) => c.method === 'thread/start').length, 1, 'no second launch while the remaining company lanes are exhausted');
   const sameModel = run('same-model-other-account', {}, [], { canonical: true, ttReady: true });
   assert.equal(sameModel.status, 0, sameModel.stderr + sameModel.stdout);
   assert.deepEqual(sameModel.calls.filter((c) => c.method === 'thread/start').map((c) => [c.account, c.model]),

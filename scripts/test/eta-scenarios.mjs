@@ -35,7 +35,7 @@ const route = ({lanes={}, familyQueue={}, resetMin=540, ttAvailable=false, daily
   fs.writeFileSync(cache,JSON.stringify({checkedAt:now,claude:[{label:'week',used:10,resetsAt:now+120*60*min,windowMins:10080}],
     codexAccounts:[tt,tr],errors:{},history:{}}));
   const flags = ['implement-hard','implement','debug','science'].includes(args[0]) ? ['--impact','service'] : [];
-  const raw = execFileSync(process.execPath,[path.join(scripts,'route.mjs'),...args,...flags,'--dry','--json'],
+  const raw = execFileSync(process.execPath,[path.join(scripts,'route.mjs'),...args,...flags,'--allow-low-priority-queue','--dry','--json'],
     {env,encoding:'utf8',stdio:['ignore','pipe','pipe']});
   assert.equal(raw.trim().split('\n').length,1,'dry JSON stdout is a single document');
   return JSON.parse(raw);
@@ -63,7 +63,7 @@ try {
   r = route({ttAvailable:true,lanes:{[SOL]:lane(500,0.5),[ASTRA]:lane(500,0.5)}});
   assert.equal(r.pick.account,'ttadk','available TTADK beats measured queued lanes');
   r = route({lanes:{[SOL]:lane(10,1),[ASTRA]:lane(20,20)},resetMin:100});
-  assert.equal(r.pick.model,SOL,'free TTADK Sol precedes measured queued TRAE Astra');
+  assert.deepEqual([r.pick.account,r.pick.model],['trae',ASTRA],'one-minute Astra can start before the ten-minute depleted Sol');
   assert.ok(r.why.some((s)=>/gpt-6-astra@trae queue ~1 min/.test(s)));
   r = route({lanes:{[SOL]:lane(10,5),[ASTRA]:lane(20,5)},resetMin:240});
   assert.equal(r.pick.account,'trae','runnable company work launches even if a reset projects earlier completion');
@@ -82,9 +82,9 @@ try {
   assert.doesNotMatch(r.why.join(' '),/gpt-6-astra@trae now/);
   r=route({ttAvailable:true,lanes:{[SOL]:stuck,[ASTRA]:stuck}});
   assert.equal(r.pick.account,'ttadk','ready company capacity beats every stalled lane');
-  r=route({lanes:{[SOL]:stuck,[ASTRA]:stuck},resetMin:40});
+  r=route({daily:{},lanes:{[SOL]:stuck,[ASTRA]:stuck},resetMin:40});
   assert.equal(r.kind,'blocked');assert.equal(r.deferUntil,null,'ready personal proposal requires a decision before a company reset wait');
-  r=route({lanes:{[ASTRA]:stuck},args:['debug','--failures','1','--actual',`codex:${ASTRA}:high@trae`]});
+  r=route({daily:{},lanes:{[ASTRA]:stuck},args:['debug','--failures','1','--actual',`codex:${ASTRA}:high@trae`]});
   assert.equal(r.kind,'defer');assert.equal(r.plan.reason.code,'ETA_STALLED');assert.equal(r.pick,null,'no downgrade or optimistic launch when the only floor-safe lane is stalled');
   r=route({lanes:{[ASTRA]:{...stuck,t:now-31*min}}});
   const expired=r.eta.find(x=>x.model===ASTRA&&x.account==='trae');
@@ -99,16 +99,16 @@ try {
   }
   assert.equal(laneEta({workMin:90,requests:120,bucketDepleted:true,unknown:true}).basis,'unknown');
   r = route({lanes:{[SOL]:lane(500,0.5),[ASTRA]:lane(null,null,{state:'ready',lastProgressAt:now})},args:['implement-hard','--shared-lock']});
-  assert.equal(r.pick.model,SOL,'free TTADK Sol precedes Astra without fresh model load or unused units');
+  assert.deepEqual([r.pick.account,r.pick.model],['trae',ASTRA],'ready Astra starts before the long depleted Sol queue');
   assert.ok([...r.notes,...r.fixedNotes].some((s)=>/take the lease\/lock only after the first model response/.test(s)));
   // Same moderately queued lane: a small task beats the reset, a large one is scheduled for it.
   const slow = {[SOL]:lane(100,2),[ASTRA]:lane(100,2),'gpt-5.6-sol':lane(100,2),'gpt-5.6-terra':lane(100,2),'gpt-5.5':lane(100,2),'deepseek-v4.1-flash':lane(100,2)};
   r = route({lanes:slow,resetMin:600,args:['lookup']});
   assert.equal(r.pick.model,'gpt-5.6-terra'); assert.equal(r.deferred,null,'the qualified light ladder remains unchanged');
   r = route({lanes:slow,resetMin:600}); assert.equal(r.pick.account,'trae');assert.equal(r.deferUntil,null);
-  r = route({args:['implement'], daily:{[SOL]:bucket(),[ASTRA]:bucket(),'gpt-5.6-sol':bucket(false)},
+  r = route({args:['implement'], ttAvailable:true, daily:{[SOL]:bucket(),[ASTRA]:bucket(),'gpt-5.6-sol':bucket(false)},
     lanes:{'gpt-5.6-sol':lane(500,0.5)}});
-  assert.equal(r.pick.model,SOL,'free same-model TTADK keeps quality before queued TRAE alternatives');
+  assert.deepEqual([r.pick.account,r.pick.model],['ttadk',SOL],'free same-model TTADK keeps quality before queued TRAE alternatives');
   r = route({args:['implement','--failures','1','--actual',`codex:${SOL}:high@trae`]});
   assert.equal(r.deferred,null,'retry dispatches are not held for reset');
   assert.ok(r.eta.filter((x)=>x.account==='trae').every((x)=>[SOL,ASTRA].includes(x.model)&&x.requests===120&&x.workMin===90),

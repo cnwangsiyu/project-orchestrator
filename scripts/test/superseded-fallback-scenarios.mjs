@@ -52,6 +52,82 @@ try {
     console.log(JSON.stringify({ at: '2026-11-23 18:45 PT', kind: result.kind, pick: result.pick && { account: result.pick.account, model: result.pick.model, effort: result.pick.effort },
       reason: result.why.filter(s => /previous release|waiting|stalled/.test(s)), previousRejections: rejected(rowFor(result.plan, 'trae', previous)) }, null, 2));
   } else {
+    // Replay the two original route-log inputs, before the manual account exclusions.
+    const terra = 'gpt-5.6-terra', astra = 'gpt-6-astra';
+    for (const [name, project, category, impact, at, expected] of [
+      ['R-res-place', 'orchestrator', 'implement-hard', 'service', 1795508010853, ['main', 'gpt-6.2-astra', 'xhigh']],
+      ['T174-clock-device-recheck', 'lynx-view', 'build-run', 'throwaway', 1795511144639, ['trae', terra, 'medium']],
+    ]) {
+      const raw = fixture([latest, previous, astra, 'gpt-5.6-sol', terra]);
+      raw.collectedFrom = raw.collectedThrough = raw.decisionAt = at;
+      for (const id of [latest, previous, astra, 'gpt-5.6-sol']) {
+        exhaust(raw, id);
+        Object.assign(raw.lanes.find(l => l.accountId === 'trae' && l.modelId === id),
+          { position: null, drainPerMin: null, queueState: null, loadPercent: null });
+      }
+      const main = raw.accounts.find(a => a.id === 'main');
+      main.budget.weekly.used = 68;
+      main.catalog.push('gpt-6.2-astra');
+      raw.models.push({ ...raw.models.find(m => m.id === astra), id: 'gpt-6.2-astra' });
+      raw.lanes.push({ ...raw.lanes.find(l => l.modelId === astra && l.accountId === 'main'),
+        id: 'main:gpt-6.2-astra', modelId: 'gpt-6.2-astra' });
+      raw.personalPriority.userDecisionRef = 'standing:personal-priority-2026-11-20b';
+      const ttReset = Date.parse('2026-11-24T16:00:00Z');
+      raw.accounts.push({ ...structuredClone(main), id: 'ttadk', kind: 'ttadk', providerDenied: true, denialResetAt: ttReset });
+      raw.lanes.push(...raw.lanes.filter(l => l.accountId === 'main').map(l => ({ ...l, id: 'ttadk:' + l.modelId, accountId: 'ttadk' })));
+      const flags = { name, project, impact, ...(category === 'implement-hard' ? { 'exclude-account': 'ttadk' } : {}) };
+      const spec = task({ category, flags, project, impact });
+      const pick = run(raw, spec).primary.candidate;
+      assert.deepEqual([pick.accountId, pick.modelId, pick.effort], expected, name);
+      const opted = run(raw, task({ category, flags: { ...flags, 'allow-low-priority-queue': true }, project, impact })).primary.candidate;
+      assert.deepEqual([opted.accountId, opted.modelId, opted.effort], expected);
+      if (category === 'build-run') {
+        const predecessor = structuredClone(raw);
+        const q = predecessor.accounts[0].quota.find(q => q.bucketId === previous);
+        Object.assign(q.usage,{used:1,remaining:79,depleted:false});
+        predecessor.lanes.find(l => l.accountId === 'trae' && l.modelId === previous).mode='priority';
+        assert.equal(run(predecessor,spec).primary.candidate.modelId,previous,'available previous release precedes ready Terra');
+      }
+      main.transport = false;
+      raw.lanes = raw.lanes.filter(l => l.accountId !== 'trae' || l.modelId !== terra);
+      const deferred = run(raw, spec);
+      assert.equal(deferred.kind, 'defer');
+      assert.equal(deferred.deferUntil, category === 'implement-hard' ? reset : ttReset);
+      assert.equal(run(raw, task({ category, project, impact, flags: { ...flags, 'allow-low-priority-queue': true } })).primary.candidate.accountId, 'trae');
+    }
+    for (const condition of ['unknown', 'expired', 'expired-partial', 'sibling']) {
+      const raw = fixture();
+      const q = raw.accounts[0].quota[0];
+      if (condition === 'unknown') { q.usage = null; q.priority = null; raw.lanes[0].mode = 'UNKNOWN'; }
+      if (condition === 'expired') { exhaust(raw); q.usage.resetsAt=now; raw.lanes[0].queueState='ready'; raw.lanes[0].position=0; }
+      if (condition === 'expired-partial') { q.usage = { resetsAt: now - 1 }; q.priority = 'depleted'; }
+      if (condition === 'sibling') exhaust(raw,previous);
+      const plan = run(raw);
+      assert.ok(!rejected(rowFor(plan, 'trae', latest)).includes('DAY_QUOTA_EXHAUSTED'), condition);
+      assert.equal(plan.kind, 'launch', condition);
+      assert.deepEqual([plan.primary.candidate.accountId, plan.primary.candidate.modelId], ['trae', latest], condition);
+    }
+    for (const [label, telemetry, expected] of [
+      ['ready', { position: 0, queueState: 'ready' }, latest],
+      ['at threshold', { position: 10, drainPerMin: 2 }, latest],
+      ['over threshold', { position: 11, drainPerMin: 2 }, previous],
+      ['flat', { position: 301, drainPerMin: 0 }, previous],
+      ['unmeasured', { position: null, queueState: null }, previous],
+      ['stale', { position: {status:'KNOWN',value:2,sampledAt:now-1860000,receivedAt:now}, drainPerMin:2 }, previous],
+    ]) {
+      const raw = exhaust(fixture());
+      Object.assign(raw.lanes[0], telemetry);
+      const plan = run(raw);
+      assert.equal(plan.primary.candidate.modelId, expected, label);
+    }
+    for (const quota of ['unknown', 'healthy']) {
+      const raw = fixture([latest]);
+      if (quota === 'unknown') raw.accounts[0].quota = [];
+      Object.assign(raw.lanes[0], { mode:'low-priority', position:null, queueState:null, readyAt:null, drainPerMin:null });
+      const plan = run(raw);
+      assert.equal(plan.primary.candidate.accountId, 'trae', quota);
+      assert.ok(!rejected(rowFor(plan, 'trae', latest)).includes('DAY_QUOTA_EXHAUSTED'), quota);
+    }
     let p = run(fixture());
     assert.equal(p.primary.candidate.modelId, latest);
     assert.ok(rejected(rowFor(p, 'trae', previous)).includes('MODEL_SUPERSEDED'));
@@ -87,8 +163,8 @@ try {
     const three = exhaust(fixture(['gpt-6.3-sol', latest, previous]));
     assert.equal(run(three).primary.candidate.modelId, latest);
     assert.ok(rejected(rowFor(run(three), 'trae', previous)).includes('MODEL_SUPERSEDED'));
-    const astra = exhaust(fixture(['gpt-6.2-astra', 'gpt-6-astra']));
-    assert.equal(run(astra).primary.candidate.modelId, 'gpt-6-astra');
+    const olderAstra = exhaust(fixture(['gpt-6.2-astra', 'gpt-6-astra']));
+    assert.equal(run(olderAstra).primary.candidate.modelId, 'gpt-6-astra');
     const tt = exhaust(fixture([latest, previous], 'ttadk')); assert.equal(run(tt).primary.candidate.modelId, previous);
     const mixed = exhaust(fixture());
     mixed.accounts.push({ ...structuredClone(mixed.accounts[0]), id: 'ttadk', kind: 'ttadk', quota: [] });

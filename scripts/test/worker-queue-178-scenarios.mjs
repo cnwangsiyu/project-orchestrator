@@ -14,9 +14,16 @@ const source = JSON.parse(fs.readFileSync(new URL('./fixtures/free-trae-fresh-tt
 const ASTRA = 'gpt-6-astra', SOL = 'gpt-6.1-sol';
 const policy = { enabled: true, since: '2026-11-14', userDecisionRef: 'standing:personal-fallback-2026-11-14',
   queueWaitMinutes: 5, allowHardPersonalAstra: true, hardAstraDecisionRef: 'standing:hard-astra-2026-11-14' };
-const fixture = () => {
+const fixture = ({ astraQuotaAvailable = false } = {}) => {
   const raw = structuredClone(source); raw.personalFallback = policy;
   const lane = raw.lanes.find(lane => lane.accountId === 'trae' && lane.modelId === ASTRA);
+  if (astraQuotaAvailable) {
+    // Isolate unknown catalog/health/queue evidence from a positive daily limit.
+    const bucket = raw.accounts.find(a => a.id === 'trae').quota.find(q => q.bucketId === ASTRA);
+    Object.assign(bucket.usage.value, { used: 1, remaining: bucket.usage.value.limit - 1, depleted: false });
+    bucket.priority.value = 'available';
+    lane.mode = lane.modeEvidence.value = 'priority';
+  }
   lane.readyAt.value = null; lane.position.value = 1399; lane.drainPerMin.value = 0;
   lane.queueState.value = 'waiting'; lane.progressAt.value = null;
   return raw;
@@ -42,7 +49,7 @@ try {
   console.log('PASS BC-178: escalated max with stalled company Astra uses approved personal xhigh, including excluded-company retry; max remains gated');
 
   for (const variant of ['unknown-status', 'unknown-catalog', 'unknown-account-kind', 'missing-advertised-astra-lane']) {
-    const raw = fixture();
+    const raw = fixture({ astraQuotaAvailable: true });
     if (variant === 'unknown-status') raw.accounts.find(account => account.id === 'trae').auth.status = 'UNKNOWN';
     if (variant === 'unknown-catalog') raw.accounts.find(account => account.id === 'ttadk').catalog.status = 'UNKNOWN';
     if (variant === 'unknown-account-kind') {
@@ -57,12 +64,12 @@ try {
   }
   console.log('PASS unresolved company status/catalog and a missing advertised Astra lane stay blocked; no quality-repeat exemption');
   for (const field of ['auth', 'transport', 'health', 'catalog']) {
-    const raw = fixture(); raw.accounts.find(account => account.id === 'trae')[field].source = 'last-good-stale';
+    const raw = fixture({ astraQuotaAvailable: true }); raw.accounts.find(account => account.id === 'trae')[field].source = 'last-good-stale';
     assert.equal(routePure(task(), createSnapshot(raw)).kind, 'blocked', field);
   }
   console.log('PASS last-good-stale account or catalog observations cannot attest current company capacity');
   for (const source of ['unreadable recent-turn queue metadata', 'unreadable recent-turn health metadata']) {
-    const raw = fixture(), lane = raw.lanes.find(lane => lane.accountId === 'trae' && lane.modelId === ASTRA);
+    const raw = fixture({ astraQuotaAvailable: true }), lane = raw.lanes.find(lane => lane.accountId === 'trae' && lane.modelId === ASTRA);
     lane.position.value = null; lane.queueState.value = null; lane.drainPerMin.value = null;
     lane.recentQueue = { status: 'KNOWN', value: { blocked: true, sources: [source] }, source: 'recent-turn-summary',
       sampledAt: raw.decisionAt, receivedAt: raw.decisionAt, maxAgeMs: 1800000 };

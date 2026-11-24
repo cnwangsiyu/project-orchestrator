@@ -7,7 +7,7 @@ import { standingPersonalFallback, hardPersonalXhighFallback } from './personal-
 import { standingPersonalPriority, personalPriorityGuard, exclusiveCodexTask } from './personal-priority.mjs';
 import { ttadkReserve } from './ttadk-reserve.mjs';
 import { liveAttempts, liveAttemptText } from './live-attempt.mjs';
-import { previousReleaseFallback } from './release-fallback.mjs';
+import { unavailableDayQuota, previousReleaseFallback } from './release-fallback.mjs';
 import { rejectedQualityAttempt } from '../worker-result.mjs';
 
 const pass = (id) => result(id);
@@ -77,6 +77,10 @@ export function pAvailable(t, s, c) {
       {gate:approvalGate(t,c,'reset-redemption','RESET_REDEMPTION_OK_REQUIRED','Reset redemption requires its own decision and refreshed capacity evidence.')});
   if (known(a.providerDenied) === true) return deny('pAvailable', 'PROVIDER_QUOTA_DENIED', 'Provider explicitly denied quota capacity.', c,
     { reconsiderAt: known(a.denialResetAt) > s.decisionAt ? known(a.denialResetAt) : null });
+  const exhausted = unavailableDayQuota(a, l, s);
+  if (exhausted && !(a.kind === 'trae' && t.flags['allow-low-priority-queue']))
+    return deny('pAvailable', 'DAY_QUOTA_EXHAUSTED', `${a.id}/${m.id} day quota exhausted until ${exhausted.until ? new Date(exhausted.until).toISOString() : 'provider reset (time unknown)'}${exhausted.reason ? '; ' + exhausted.reason : ''}`, c,
+      { reconsiderAt: exhausted.until });
   const reserve = ttadkReserve(t, s, a);
   if (reserve) return deny('pAvailable', 'TTADK_DAILY_RESERVE', reserve, c);
   return pass('pAvailable');

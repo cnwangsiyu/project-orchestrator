@@ -1,5 +1,5 @@
 import { policyModel, newestRelease, isAstra, EFFORTS, company, companyDevice, adversarial, compare, freeze, stable, known, isReview } from './common.mjs';
-import { previousReleaseFallback, releaseUnavailable } from './release-fallback.mjs';
+import { unavailableDayQuota, previousReleaseFallback, releaseUnavailable } from './release-fallback.mjs';
 import { candidateParts } from './candidates.mjs';
 import { matchingApproval } from './filters.mjs';
 import { companyServesInfraRetry, laneTransportDemoted, usesExclusiveInfraOverflow } from './estimate.mjs';
@@ -13,6 +13,13 @@ export function orderCandidates(task, snapshot, rows) {
   const stageKey=(c)=>`${c.accountId}:${c.modelId}`;
   for (const { candidate: c } of rows) minimum.set(stageKey(c), Math.min(minimum.get(stageKey(c)) ?? Infinity, EFFORTS.indexOf(c.effort)));
   let cohort = rows.filter(({ candidate: c }) => EFFORTS.indexOf(c.effort) === minimum.get(stageKey(c)));
+  if (task.flags['allow-low-priority-queue']) {
+    const immediate = cohort.filter(r => {
+      const { account, lane } = candidateParts(snapshot, r.candidate);
+      return r.ok && !r.estimate.stalled && !unavailableDayQuota(account, lane, snapshot);
+    });
+    if (immediate.length) cohort = immediate;
+  }
   if (cohort.some(r => r.ok && r.predicates?.some(p => p.personalFallback) && r.estimate.startDelayMin === 0 && !r.estimate.stalled))
     cohort = cohort.filter(r => !company(candidateParts(snapshot, r.candidate).account) || !candidateParts(snapshot, r.candidate).account.fallbackUnavailable);
   const stalled = (r) => r.estimate.stalled || r.reviewers?.some(s=>s.estimate.stalled);
@@ -28,7 +35,15 @@ export function orderCandidates(task, snapshot, rows) {
     &&(parts(r).account.kind!=='trae'||r.estimate.balance?.freeNow===true);
   // Prefer a usable current release across company accounts, then the qualified
   // predecessor, before the existing company/personal and effort comparators.
-  for (const rung of ['sol', 'astra']) {
+  const releaseRows = cohort.filter(r => r.ok && company(parts(r).account)
+    && ['sol','astra'].includes(policyModel(r.candidate.modelId)));
+  const previous = releaseRows.filter(r => previousReleaseFallback(task,snapshot,r.candidate)?.dayLimited);
+  if (previous.length) {
+    const current = releaseRows.filter(r => r.candidate.modelId === newestRelease(known(parts(r).account.catalog) ?? [],policyModel(r.candidate.modelId))
+      && !releaseUnavailable(task,snapshot,r.candidate));
+    const preferred = current.length ? current : previous;
+    cohort = cohort.filter(r => !company(parts(r).account) || preferred.includes(r));
+  } else for (const rung of ['sol', 'astra']) {
     const rows = cohort.filter(r => r.ok && company(parts(r).account) && policyModel(r.candidate.modelId) === rung);
     const current = rows.filter(r => r.candidate.modelId === newestRelease(known(parts(r).account.catalog) ?? [], rung)
       && !releaseUnavailable(task, snapshot, r.candidate));

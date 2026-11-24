@@ -183,9 +183,9 @@ try {
   // names skipped depleted candidates. Secondary substitution and explicit Astra quality rungs stay pinned.
   const skip = run(['debug', '--exclude-model', SOL], { daily: { ...active, [ASTRA]: bucket(true) } });
   assert.equal(skip.tier, 'hard');
-  assert.deepEqual([skip.pick.model, skip.pick.effort, skip.pick.account], [ASTRA, 'xhigh', 'trae']);
+  assert.equal(skip.kind,'defer');assert.equal(skip.pick,null);
   assert.ok(!personalGate(skip));
-  assert.ok(skip.why.some((s) => /gpt-6-astra low-priority lane \(bucket depleted\)/.test(s)));
+  assert.ok(skip.why.some((s) => /gpt-6-astra day quota exhausted until/.test(s)));
   const normalSkip = run(['analysis', '--exclude-model', SOL], { daily: { ...active, [SOL56]: bucket(true) } });
   assert.equal(normalSkip.pick.model, TERRA56);
   assert.ok(normalSkip.why.length>0);

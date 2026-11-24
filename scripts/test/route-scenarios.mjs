@@ -1244,7 +1244,7 @@ for (const [sc, args] of ERRORS) {
   const route = (sc, args = ['implement']) => parseRouteJSON(run(sc, args));
   const note = (r, re) => r.allNotes.some((n) => re.test(n));
   for (const [sc, args, want] of [
-    ['quotaAstra', ['implement'], 'deepseek-v4.1-flash'],
+    ['quotaAstra', ['implement'], 'gpt-5.6-sol'],
     ['quotaPreferred', ['implement'], 'gpt-5.6-sol'],
     ['quotaPreferred', ['implement', '--failures', '1'], 'gpt-6-astra'],
     ['quotaPreferred', ['implement', '--stakes', 'high'], 'gpt-6-astra'],
@@ -1255,56 +1255,54 @@ for (const [sc, args] of ERRORS) {
     ['quotaPreferred', ['implement', '--security'], 'deepseek-v4.1-flash'],
     ['quotaPreferred', ['implement', '--exclude-model', 'gpt-5.6-sol'], 'deepseek-v4.1-flash'],
     ['quota56Depleted', ['implement'], 'deepseek-v4.1-flash'],
-    ['quota56Expired', ['implement'], 'deepseek-v4.1-flash'],
+    ['quota56Expired', ['implement'], 'gpt-5.6-sol'],
     ['quota56Paused', ['implement'], 'deepseek-v4.1-flash'],
     ['quotaBoth', ['implement'], 'gpt-5.6-sol'],
-    ['quotaBoth', ['implement', '--failures', '4'], 'opus'], // Availability fallbacks do not become retry rungs.
-    ['quotaBoth', ['implement-hard'], 'gpt-6-astra'], // both hard buckets depleted: keep a hard model, never demote to 5.6/DeepSeek
+    ['quotaBoth', ['implement', '--failures', '4'], undefined], // Availability fallbacks do not become retry rungs.
+    ['quotaBoth', ['implement-hard'], undefined], // both hard buckets depleted: keep a hard model, never demote to 5.6/DeepSeek
     ['quotaBoth', ['lookup'], 'deepseek-v4.1-flash'],
     ['quotaBoth', ['extract'], 'deepseek-v4.1-flash'],
     ['quotaBoth', ['draft'], 'deepseek-v4.1-flash'],
-    ['quotaBoth', ['lookup', '--stakes', 'high'], 'gpt-6-astra'], // hard tier keeps Sol/Astra on the low-priority lane
-    // Without lane evidence, tied hard ETAs retain main's Sol preference; measured slow Sol above prefers Astra.
-    ['quotaHardUnknown', ['implement-hard'], 'gpt-6.1-sol'],
-    ['quotaHardUnknown', ['lookup', '--stakes', 'high'], 'gpt-6.1-sol'],
-    ['quotaBoth', ['implement-hard', '--exclude-model', 'gpt-6-astra'], 'gpt-6.1-sol'],
-    ['quotaBoth', ['implement-hard', '--exclude-model', 'gpt-6.1-sol'], 'gpt-6-astra'],
-    // Light lookup (DeepSeek) escalates to Sol medium; Sol's bucket is depleted, so the comparable GPT with quota
-    // (5.6-Sol) takes the escalation — company quota, not personal Sonnet and not another light model.
-    ['quotaBoth', ['lookup', '--failures', '1'], 'gpt-5.6-sol'],
+    ['quotaBoth', ['lookup', '--stakes', 'high'], undefined], // Both hard-tier buckets are exhausted.
+    // Missing ETA does not clear either provider depletion flag.
+    ['quotaHardUnknown', ['implement-hard'], undefined],
+    ['quotaHardUnknown', ['lookup', '--stakes', 'high'], undefined],
+    ['quotaBoth', ['implement-hard', '--exclude-model', 'gpt-6-astra'], undefined],
+    ['quotaBoth', ['implement-hard', '--exclude-model', 'gpt-6.1-sol'], undefined],
+    // Retain the escalation floor when the required Sol bucket is depleted.
+    ['quotaBoth', ['lookup', '--failures', '1'], undefined],
     ['quotaBoth', ['build-run'], 'gpt-5.6-sol'],
-    ['quotaMissing', ['implement'], 'gpt-5.6-sol'],
-    ['quotaMissingModel', ['implement'], 'deepseek-v4.1-flash'], // fresh slow Sol telemetry beats an unknown bucket
-    ['quotaUnknownAstra', ['implement'], 'deepseek-v4.1-flash'],
-    ['quotaNoAstra', ['implement'], 'deepseek-v4.1-flash'],
-    ['quotaPausedAstra', ['implement'], 'deepseek-v4.1-flash'],
-    ['quotaSecondFallback', ['implement'], 'deepseek-v4.1-flash'],
-    ['quotaAstra', ['implement', '--exclude-model', 'gpt-6-astra'], 'deepseek-v4.1-flash'],
+    ['quotaMissing', ['implement'], 'gpt-6.1-sol'],
+    ['quotaMissingModel', ['implement'], 'gpt-6.1-sol'], // fresh slow Sol telemetry beats an unknown bucket
+    ['quotaUnknownAstra', ['implement'], 'gpt-5.6-sol'],
+    ['quotaNoAstra', ['implement'], 'gpt-5.6-sol'],
+    ['quotaPausedAstra', ['implement'], 'gpt-5.6-sol'],
+    ['quotaSecondFallback', ['implement'], 'gpt-5.6-sol'],
+    ['quotaAstra', ['implement', '--exclude-model', 'gpt-6-astra'], 'gpt-5.6-sol'],
     ['quotaAstra', ['implement', '--exclude-model', 'gpt'], 'deepseek-v4.1-flash'],
     ['quotaAstra', ['implement', '--security'], 'deepseek-v4.1-flash'],
     ['quotaAstra', ['implement', '--failures', '1'], 'gpt-6-astra'],
     ['quotaFallbackBusy', ['implement', '--failures', '2'], 'gpt-6-astra'],
-    ['quotaAllBusy', ['implement'], 'gpt-6.1-sol'],
+    ['quotaAllBusy', ['implement'], undefined],
     ['quotaTT', ['implement'], 'gpt-6.1-sol'], // healthy TTADK remains first
-    ['quotaExpiredSol', ['implement'], 'deepseek-v4.1-flash'], // expiry does not erase fresh model queue evidence
-    ['quotaExpiredAstra', ['implement'], 'deepseek-v4.1-flash'],
-    ['quotaExpiredFallback', ['implement'], 'gpt-5.6-sol'], // no 5.6 quota, DeepSeek expired: depleted Sol low-priority lane
+    ['quotaExpiredSol', ['implement'], 'gpt-6.1-sol'], // expiry does not erase fresh model queue evidence
+    ['quotaExpiredAstra', ['implement'], 'gpt-5.6-sol'],
+    ['quotaExpiredFallback', ['implement'], 'gpt-5.6-sol'], // The fallback bucket has passed its reset.
   ]) {
     const r = route(sc, args);
-    if(args.includes('--failures')&&Number(args[args.indexOf('--failures')+1])>0) {
-      cases.push([!!r.pick&&!r.plan.reasons?.some(p=>p.code==='PREVIOUS_ATTEMPT_UNKNOWN'),true,`${sc} first-rung fallback retry`]); continue;
+    if (want === undefined) {
+      cases.push([r.kind, 'defer', sc], [r.pick, null, sc], [r.deferUntil > now, true, sc]);
     }
-    // Fresh Astra units supply its missing-load readiness; do not overwrite that
-    // explicit hard/vision expectation with the legacy unmeasured Sol fallback.
-    const astraUnitsReady=sc==='quotaPreferred'&&want==='gpt-6-astra';
-    const qualityWant=!astraUnitsReady&&!args.includes('--security')&&!args.includes('gpt')&&!args.includes('gpt-6.1-sol')&&(args.includes('high')||args[0]!=='lookup'&&args[0]!=='extract'&&args[0]!=='draft')?'gpt-6.1-sol':want;
-    cases.push([r.pick?.model, qualityWant, `${sc} ${args.join(' ')} quality-first model`], [r.failures, args.includes('--failures') ? Number(args[args.indexOf('--failures') + 1]) : 0, `${sc} ${args.join(' ')} failures`]);
+    if(args.includes('--failures')&&Number(args[args.indexOf('--failures')+1])>0) {
+      cases.push([(want === undefined || !!r.pick) && !r.plan.reasons?.some(p=>p.code==='PREVIOUS_ATTEMPT_UNKNOWN'),true,`${sc} first-rung fallback retry`]); continue;
+    }
+    cases.push([r.pick?.model, want, `${sc} ${args.join(' ')} quality-first model`], [r.failures, args.includes('--failures') ? Number(args[args.indexOf('--failures') + 1]) : 0, `${sc} ${args.join(' ')} failures`]);
   }
   const idle = route('quotaAstra'), busy = route('quotaBusy'), missing = route('quotaMissing');
   for (const sc of ['quotaBoth', 'quotaHardUnknown']) {
     for (const args of [['implement-hard'], ['debug'], ['science'], ['review-high'], ['design'], ['lookup', '--stakes', 'high']]) {
       for (const flags of [[], ['--background']]) {
-        const r = route(sc, [...args, ...flags]);
+        const r = route(sc, [...args, ...flags, '--allow-low-priority-queue']);
         const label = `${sc} ${[...args, ...flags].join(' ')}`;
         if(args[0]==='review-high') {cases.push([r.executable,true,`${label} primary launches while independent reviewer remains pending`]);continue;}
         cases.push([['gpt-6.1-sol', 'gpt-6-astra'].includes(r.pick?.model), true, `${label} hard floor`],
@@ -1316,7 +1314,7 @@ for (const [sc, args] of ERRORS) {
   cases.push(
     [route('quotaPreferred').pick?.effort, idle.pick?.effort],
     [route('quotaPreferred', ['implement', '--failures', '1']).blocked, false],
-    [route('quotaPreferred').pick?.command.includes('--model GPT-6.1-SOL'), true],
+    [route('quotaPreferred').pick?.command.includes('--model GPT-5.6-SOL'), true],
     [route('quotaPreferred', ['lookup']).pick?.command.includes('-m DEEPSEEK-V4.1-FLASH'), true],
     [route('quotaPreferred', ['implement', '--failures', '1']).allNotes.some((n) => /rework thread rule.*continued original thread because/.test(n)), true],
     [route('quotaPreferred').allNotes.some((n) => /rework thread rule/.test(n)), false],
@@ -1326,8 +1324,8 @@ for (const [sc, args] of ERRORS) {
     [route('quotaExpiredSol').why.some((n) => /bucket is depleted/.test(n)), false],
     [note(idle, /queue patience.*cancellation/), true],
     [note(idle, /provider-assigned low-priority\/depleted lanes remain capacity/), true],
-    [note(route('quotaAllBusy'), /real model\/effort floor/), true],
-    [route('quotaBoth').needsUserOK.length, 0], [route('quotaAllBusy').deferred, null],
+    [route('quotaAllBusy').plan.trigger, 'capacity-reset'],
+    [route('quotaBoth').needsUserOK.length, 0], [route('quotaAllBusy').deferUntil > now, true],
     [route('quotaAstra', ['lookup']).pick?.launcher, 'traecli-exec'],
     [route('quotaBoth', ['lookup']).pick?.launcher, 'traecli-exec'],
     [note(route('quotaBoth', ['lookup', '--failures', '1']), /this retry is not stronger/), false],
@@ -1374,41 +1372,40 @@ for (const [sc, args] of ERRORS) {
   S.etaProgressing = { claude: cl(10, 120), codex: [acc('main', 20, 120), ttOut(540),
     laneTr('progress', lanes({ position: null, drainPerMin: null, lastProgressAt: now - 60000, itemsPerMin: 1.2 },
       { position: 600, drainPerMin: 0.2 }))] };
-  // TTADK resets in 20 min, but the TRAE lane can finish sooner: launch, do not hold.
+  // TRAE has recent progress and depleted buckets. TTADK resets first.
   S.etaResetSoon = { claude: cl(10, 120), codex: [acc('main', 20, 120), ttOut(20),
     laneTr('soon', lanes({ position: null, drainPerMin: null, lastProgressAt: now - 60000 },
       { position: 50, drainPerMin: 5 }))] };
   const parse = (sc, args) => parseRouteJSON(run(sc, args));
   const defer = parse('etaDefer', ['implement-hard']);
-  const progress = parse('etaProgressing', ['implement-hard']);
+  const progress = parse('etaProgressing', ['implement-hard', '--allow-low-priority-queue']);
   const soon = parse('etaResetSoon', ['implement-hard']);
   const bound = parse('etaDefer', ['implement-hard', '--shared-lock']);
+  const boundQueue = parse('etaDefer', ['implement-hard', '--shared-lock', '--allow-low-priority-queue']);
   const { laneEta, patienceMinutes } = await import('../lib/eta.mjs');
   const queuedEta = (workMin, requests) => laneEta({ workMin, requests, bucketDepleted: true, position: 100, drainPerMin: 2 });
   const lightQ = queuedEta(5, 10), hardQ = queuedEta(90, 120);
   const checks = [
-    ['queued company launches before reset', defer.kind, 'launch'],
-    ['queued company has command', !!defer.pick?.command, true],
-    ['no reset hold', defer.deferUntil, null],
-    ['defer eta rows include TTADK', (defer.eta ?? []).some((r) => r.account === 'ttadk'), true],
-    ['defer eta rows include both TRAE hard models', ['gpt-6.1-sol', 'gpt-6-astra'].every((m) => (defer.eta ?? []).some((r) => r.model === m && r.account === 'trae')), true],
+    ['defer to earliest reset', defer.deferUntil, now + 40 * 60000],
+    ['no command while deferred', defer.pick, null],
     ['progressing picks Sol', progress.pick?.model, 'gpt-6.1-sol'],
     ['progressing no defer', progress.deferred, null],
     ['progressing why names lane + telemetry', progress.why.some((s) => /low-priority lane \(bucket depleted\): slower .*progressing without queue cycles/.test(s)), true],
     ['progressing patience set', typeof progress.queuePatienceMin === 'number' && progress.queuePatienceMin > 0, true],
     ['progressing launch passes patience/alt', /--queue-patience-min \d+ --alt /.test(progress.pick?.command), true],
-    ['reset-soon launches', soon.deferred, null],
-    ['reset-soon keeps the hard model', soon.pick?.model, 'gpt-6.1-sol'],
-    ['resource-bound no defer', bound.deferred, null],
-    ['resource-bound note', bound.allNotes.some((s) => /take the lease\/lock only after the first model response/.test(s)), true],
-    ['resource-bound hard pick', ['gpt-6.1-sol', 'gpt-6-astra'].includes(bound.pick?.model), true],
+    ['earlier TTADK reset', soon.deferUntil, now + 20 * 60000],
+    ['resource-bound exhausted lanes', bound.kind, 'defer'],
+    ['owner-approved queue respects hard floor', ['gpt-6.1-sol', 'gpt-6-astra'].includes(boundQueue.pick?.model), true],
+    ['owner-approved queue retains lock instruction', boundQueue.allNotes.some(s => /take the lease\/lock only after the first model response/.test(s)), true],
+    ['ETA includes TTADK reset', defer.eta.some(r => r.account === 'ttadk'), true],
+    ['ETA includes both hard TRAE alternatives', ['gpt-6.1-sol','gpt-6-astra'].every(m => defer.eta.some(r => r.account === 'trae' && r.model === m)), true],
     ['eta size: light beats a 10h reset', lightQ.completionMin < 10 * 60 + 5, true],
     ['eta size: hard loses to a 10h reset', hardQ.completionMin > 10 * 60 + 90, true],
     ['patience cap 30m', patienceMinutes({ now, ttadk: { usage: { resetsAt: now + 600 * 60000 } } }), 30],
     ['patience quarter of a 40m reset', patienceMinutes({ now, ttadk: { usage: { resetsAt: now + 40 * 60000 } } }), 10],
   ];
   // --json purity: the whole stdout is one JSON document for a code category, not a substring.
-  const raw = run('etaProgressing', ['implement-hard']);
+  const raw = run('etaProgressing', ['implement-hard', '--allow-low-priority-queue']);
   const trimmed = raw.trim();
   checks.push(['json purity parses whole stdout', (() => { try { return !!parseRouteJSON(trimmed).pick; } catch { return false; } })(), true]);
   checks.push(['json purity is one line', trimmed.split('\n').length, 1]);
@@ -1585,7 +1582,7 @@ for (const [sc, args] of ERRORS) {
     assert.equal(gemini.kind,'blocked');assert.equal(gemini.pick.command,null);assert.ok(!gemini.pick.company);assert.ok(gemini.plan.gates.some(g=>g.kind==='personal-quota'));
     assert.ok(gemini.allNotes.some((n) => /list --limit 1.*only if unreachable.*global-rules owner/.test(n)));
     assert.ok(!gemini.allNotes.some((n) => /twice what the task should take|codex exec still works/.test(n)));
-    assert.equal(r(['implement'], 'backgroundOnly').pick?.model, SOL); // Sol's hot load does not establish Flash congestion; its free bucket remains usable when TTADK is out.
+    assert.equal(r(['implement'], 'backgroundOnly').pick?.model, FLASH); // Sol's hot load does not establish Flash congestion; its free bucket remains usable when TTADK is out.
     assert.equal(r(['implement', '--background'], 'backgroundOnly').pick?.model, FLASH);
     assert.equal(r(['lookup','--background','--security']).pick?.model,'gpt-5.6-terra');
     assert.equal(r(['lookup','--background','--security']).pick?.account,'ttadk');
@@ -1678,7 +1675,12 @@ for (const [sc, args] of ERRORS) {
   try {
     for (const [daily, args, model, step, models = ids] of cases) {
       scenario(daily, models, args[0]==='image-read'?{load:{[SOL]:{percent:35,t:now}}}:{});
-      const o = r(args);
+      let o = r(args);
+      if (step === 1) {
+        assert.equal(o.kind, 'defer');
+        assert.equal(o.pick, null);
+        o = r([...args, '--allow-low-priority-queue']);
+      }
       if(['review-high'].includes(args[0])||args.includes('release')) {assert.ok(o.pick);assert.equal(o.kind,'launch');assert.ok(o.plan.gates.some(g=>g.phase==='acceptance'),JSON.stringify({args,category:o.category,cls:o.plan.task.reviewClass,impact:o.plan.task.impact,gates:o.plan.gates}));continue;}
       assert.equal(o.pick?.model, model, `${args.join(' ')} step ${step}`);
       assert.equal(o.pick?.account, 'trae'); assert.equal(o.pick?.launcher, 'codex-worker');
@@ -1699,7 +1701,7 @@ for (const [sc, args] of ERRORS) {
     // Unknown quota retains the ordinary rung; an Astra rung keeps its tier even if Sol is depleted.
     const args = ['implement', '--failures', '5'];
     scenario(null);assert.ok(r(args).pick);assert.ok(!r(args).plan.reasons?.some(p=>p.code==='PREVIOUS_ATTEMPT_UNKNOWN'));
-    scenario({ ...active, [SOL]: bucket(true) });assert.ok(r(args).pick);assert.ok(!r(args).plan.reasons?.some(p=>p.code==='PREVIOUS_ATTEMPT_UNKNOWN'));
+    scenario({ ...active, [SOL]: bucket(true) });assert.equal(r(args).kind,'defer');assert.ok(!r(args).plan.reasons?.some(p=>p.code==='PREVIOUS_ATTEMPT_UNKNOWN'));
     // Fallback service code still requires review; sensitive acceptance keeps the stronger family.
     scenario(active);
     assert.ok(r(['implement']).allNotes.some((n) => /no review/.test(n)));
@@ -1851,7 +1853,18 @@ for (const [sc, args] of ERRORS) {
     }
     for(const options of [{},{models:[SOL],daily:depleted},{models:allGPTs,daily:depleted}]) {
       const blocked=r(['lookup','--background','--failures','20','--urgent'],options);
-      assert.ok(!blocked.plan.reasons?.some(p=>p.code==='PREVIOUS_ATTEMPT_UNKNOWN'));if(blocked.kind==='launch') assert.ok(blocked.pick.company);else assert.ok(blocked.blocked);if(blocked.kind==='launch')assert.ok(!gated(blocked));else assert.ok(blocked.plan.gates.length>0,'background capacity needs a decision');
+      assert.ok(!blocked.plan.reasons?.some(p=>p.code==='PREVIOUS_ATTEMPT_UNKNOWN'));
+      if (blocked.kind === 'defer') {
+        assert.equal(options.daily, depleted);
+        assert.equal(blocked.plan.trigger, 'capacity-reset');
+        assert.ok(blocked.deferUntil > now);
+      } else if (blocked.kind === 'launch') {
+        assert.ok(blocked.pick.company);
+        assert.ok(!gated(blocked));
+      } else {
+        assert.ok(blocked.blocked);
+        assert.ok(blocked.plan.gates.length > 0, 'background capacity needs a decision');
+      }
     }
     // Losing Sol must not lower the floor for judgment rows, alternate-Sol tiers, high stakes or authorship.
     for (const args of [['analysis'], ['docs'], ['research'], ['design'], ['review', '--author', 'codex'],
@@ -1875,7 +1888,7 @@ for (const [sc, args] of ERRORS) {
     }
     assert.equal(r(['analysis', '--background'], { models, sampledAt: now - 29 * 60000 }).pick?.model, TERRA56);
     const deterministic=r(['analysis'],{models,sampledAt:now-29*60000,daily:{...active,[SOL]:bucket(true)}});
-    assert.equal(deterministic.pick.model,SOL); assert.ok(deterministic.why.length>0);
+    assert.equal(deterministic.pick.model,SOL56); assert.ok(deterministic.why.length>0);
     console.log('ok   actual personal approval, one-model/excluded/depleted neighbours, background isolation, company effort floors and quota reading age');
   } catch (e) { fail++; console.log(`FAIL fix-round routing regressions: ${e.stack}`); }
 }

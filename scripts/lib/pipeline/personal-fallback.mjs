@@ -1,4 +1,5 @@
 import { isAstra, array, object, finite, nonnegative, company, freeze, matchesModel, known } from './common.mjs';
+import { unavailableDayQuota } from './release-fallback.mjs';
 import { candidateParts } from './candidates.mjs';
 
 export function personalFallbackPolicy(raw, now) {
@@ -86,7 +87,7 @@ export function hardPersonalXhighFallback(task, snapshot, candidate, rows = []) 
         && array(known(lane.recentQueue)?.sources).some(source => String(source).startsWith('unreadable ')))) return null;
     }
   }
-  const capacityCodes = ['PROVIDER_QUOTA_DENIED', 'ACTIVE_RESTRICTION', 'TTADK_DAILY_RESERVE'];
+  const capacityCodes = ['DAY_QUOTA_EXHAUSTED', 'PROVIDER_QUOTA_DENIED', 'ACTIVE_RESTRICTION', 'TTADK_DAILY_RESERVE'];
   const qualifiedMax = rows.filter(row => row.candidate.effort === 'max'
     && company(candidateParts(snapshot, row.candidate).account)
     && row.predicates.every(predicate => predicate.ok || predicate.ruleId === 'pExclusions'
@@ -96,7 +97,7 @@ export function hardPersonalXhighFallback(task, snapshot, candidate, rows = []) 
   if (!max.length) return null;
   const unavailable = row => {
     const { account, lane } = candidateParts(snapshot, row.candidate);
-    if (row.predicates.some(predicate => !predicate.ok && capacityCodes.includes(predicate.reason?.code))) return true;
+    if (unavailableDayQuota(account, lane, snapshot) || row.predicates.some(predicate => !predicate.ok && capacityCodes.includes(predicate.reason?.code))) return true;
     if (known(lane.position) === 0 && known(lane.queueState) === 'ready') return false;
     const position = known(lane.position), drain = known(lane.drainPerMin);
     if (!row.estimate.stalled && position >= 0 && position !== null && drain > 0
@@ -147,11 +148,11 @@ export function standingPersonalFallback(task, snapshot, candidate, rows) {
     for (const r of topClass) {
       const a = candidateParts(snapshot,r.candidate).account;
       const failures = r.predicates.filter(p => !p.ok);
-      const capacityCodes = ['TTADK_DAILY_RESERVE','TOOL_CHANNEL_FAILED','ACTIVE_RESTRICTION','PROVIDER_QUOTA_DENIED'];
+      const capacityCodes = ['TTADK_DAILY_RESERVE','TOOL_CHANNEL_FAILED','ACTIVE_RESTRICTION','DAY_QUOTA_EXHAUSTED','PROVIDER_QUOTA_DENIED'];
       if (failures.some(p => !capacityCodes.includes(p.reason?.code)
         && !(p.reason?.code === 'EXCLUDED' && excludedAfterInfrastructure(task,r.candidate)))) return null;
       const usage = known(a.quota.find(q => q.bucketId === r.candidate.modelId)?.usage);
-      const exhausted = a.fallbackUnavailable || usage && usage.resetsAt > snapshot.decisionAt
+      const exhausted = a.fallbackUnavailable || unavailableDayQuota(a, candidateParts(snapshot,r.candidate).lane, snapshot) || usage && usage.resetsAt > snapshot.decisionAt
         && (usage.depleted === true || usage.used >= usage.limit);
       const denied = failures.length || restrictedFor(r.candidate);
       if (exhausted || denied) reasons.push(`${a.id}/${r.candidate.modelId} ${exhausted?'exhausted':'restricted/unavailable'}`);
@@ -189,13 +190,18 @@ export function standingPersonalFallback(task, snapshot, candidate, rows) {
         continue;
       }
       if (allCompanyUnknown) return null;
+      const dayLimit = unavailableDayQuota(a, candidateParts(snapshot,r.candidate).lane, snapshot);
+      if (dayLimit && failures.every(p => p.reason?.code === 'DAY_QUOTA_EXHAUSTED')) {
+        explanations.push(`${a.id}/${r.candidate.modelId}: daily quota exhausted; ${dayLimit.reason ?? 'provider reset pending'}`);
+        continue;
+      }
       const reserve = failures.find(p => p.reason?.code === 'TTADK_DAILY_RESERVE');
       if (reserve) {
         reserveApplied = true;
         explanations.push(reserve.reason.text);
         continue;
       }
-      if (failures.some(p => ['TOOL_CHANNEL_FAILED', 'ACTIVE_RESTRICTION', 'PROVIDER_QUOTA_DENIED'].includes(p.reason?.code)
+      if (failures.some(p => ['TOOL_CHANNEL_FAILED', 'ACTIVE_RESTRICTION', 'DAY_QUOTA_EXHAUSTED', 'PROVIDER_QUOTA_DENIED'].includes(p.reason?.code)
         || p.reason?.code === 'EXCLUDED' && excludedAfterInfrastructure(task, r.candidate))) {
         explanations.push(`${a.id}/${r.candidate.modelId}: excluded after infrastructure failure, restricted or quota denied`);
         continue;
