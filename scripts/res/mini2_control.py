@@ -273,9 +273,13 @@ def weights(args):
     return result
 
 
-def reserved(root):
+def reservation_leases(root):
     holds=lease_holds(root)+list((root/"mini2-pending").glob("*/hold"))
-    return reservation_totals([read(hold/"lease.json",{}) for hold in holds])
+    return [read(hold/"lease.json",{}) for hold in holds]
+
+
+def reserved(root):
+    return reservation_totals(reservation_leases(root))
 
 
 def process_start(pid):
@@ -378,9 +382,11 @@ def admission(root, cfg, now, disk=0, need=(), qualification=False, cost=None, d
     if cost is not None:
         if sample.get("arch") != "arm64":
             return "hardware-mismatch"
-        try: reservations = reserved(root)
+        try:
+            leases = reservation_leases(root)
+            reservations = reservation_totals(leases)
         except ValueError: return "legacy-or-incomplete-hold"
-        charged, available, window = basis(root,HOST,sample,reservations,now)
+        charged, available, window = basis(root,HOST,sample,reservations,now,leases)
         if details is not None:
             details.update(evidence(sample,reservations,[*limits,cfg["minFreeGiB"]],window,charged,available))
         return headroom(charged,available,sample["freeGiB"],
@@ -660,7 +666,7 @@ def main():
             detail=value["capacity"]; remaining=detail["reserved"]
             count=0
             if value["reason"]=="open" and remaining is not None:
-                charged, available, _ = basis(root,HOST,metrics(root,time.time()),remaining,time.time())
+                charged, available, _ = basis(root,HOST,metrics(root,time.time()),remaining,time.time(),reservation_leases(root))
                 count=max(0,min(math.floor(detail["loadLimit"]-charged),
                                 math.floor(available-detail["memoryFloorGiB"]),
                                 math.floor((detail["freeGiB"]-detail["diskFloorGiB"]-remaining[2])/8)))

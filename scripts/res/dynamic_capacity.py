@@ -55,6 +55,23 @@ def reservation_totals(leases):
     return amounts
 
 
+def reservation_ages(leases, now, seconds):
+    """Unknown or not-yet-covered acquisition times retain their full peak."""
+    young, old = [], []
+    for lease in leases:
+        start = lease.get("start")
+        if isinstance(start,str):
+            try: start = float(start)
+            except ValueError: start = None
+        covered = (numeric_metric(start,True) is not None
+                   and start <= now and now-start >= seconds)
+        (old if covered else young).append(lease)
+    young_cpu, young_mem, _ = reservation_totals(young)
+    old_cpu, old_mem, _ = reservation_totals(old)
+    return dict(youngCores=young_cpu,oldCores=old_cpu,
+                youngGiB=young_mem,oldGiB=old_mem)
+
+
 def headroom(load, available, free, reserved, cost, load_limit, memory_floor, disk_floor):
     cpu, memory, disk = reserved
     if free - disk - cost[2] < disk_floor:

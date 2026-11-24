@@ -37,16 +37,84 @@ class SamplerTests(unittest.TestCase):
                 self.assertEqual(basis(root,"box",row,(4,8,0),now)[:2],(17.2,40))
             write([0,150,300])
             for _ in range(200):
-                cpu,mem,disk=(rng.randrange(0,32) for _ in range(3))
+                cpu,mem=(rng.randrange(1,32) for _ in range(2))
+                disk=rng.randrange(0,32)
                 cost=[rng.uniform(.25,5),rng.uniform(.25,8),rng.randrange(0,30)]
                 limit=rng.randrange(10,32)
-                charged,available,stats=basis(root,"box",row,(cpu,mem,disk),now)
+                leases=[dict(weights=[cpu,mem,disk],start=now-600)]
+                charged,available,stats=basis(root,"box",row,(cpu,mem,disk),now,leases)
                 self.assertTrue(stats["applied"])
                 opened=headroom(charged,available,128,(0,0,disk),cost,limit,8,64)=="open"
                 self.assertEqual(opened, all((cpu+cost[0]<=limit,14+cost[0]<=limit,
                                      32-cost[1]>=8,64-mem-cost[1]>=8,128-disk-cost[2]>=64)))
             (root/"machine.conf").write_text("ADMISSION_WINDOW_SECONDS=0\n")
             self.assertEqual(basis(root,"box",row,(4,8,0),now)[:2],(17.2,40))
+
+    def test_window_keeps_young_claims_and_untracked_load_additive(self):
+        import random
+        from dynamic_capacity import headroom, reservation_totals, reservation_ages
+        from host_records import decision, evidence
+        rng=random.Random(73)
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory); now=1800
+            (root/"machine.conf").write_text("# defaults\n")
+            row=dict(schema=1,host="box",ok=True,at=now,cores=14,totalGiB=64,
+                     memAvailableGiB=60,freeGiB=128,load1=8,load5=8,load15=8,sampleSource="shared")
+            file=root/"host-samples/history/box/1970-01-01.ndjson"
+            file.parent.mkdir(parents=True)
+            def write(load=8,available=60,ages=(0,150,300)):
+                file.write_text("".join(json.dumps(dict(row,at=now-age,load5=load,
+                                                        memAvailableGiB=available))+"\n" for age in ages))
+            write()
+            for start in (now-60,None,"unknown",True,0,-1,now+1,float("nan"),float("inf")):
+                leases=[dict(weights=[4,16,0],start=start)]
+                charged,available,stats=basis(root,"box",row,(4,16,0),now,leases)
+                self.assertEqual((charged,available),(12,44))
+                self.assertEqual((stats["youngCores"],stats["oldCores"],stats["youngGiB"],stats["oldGiB"]),(4,0,16,0))
+                self.assertEqual(headroom(charged,available,128,(0,0,0),(2,1,0),14,8,64),"open")
+                self.assertEqual(headroom(charged,available,128,(0,0,0),(2.01,1,0),14,8,64),"load")
+            self.assertEqual(basis(root,"box",row,(4,16,0),now)[:2],(12,44))
+            for _ in range(200):
+                leases=[dict(weights=[rng.randrange(1,9),rng.randrange(1,17),rng.randrange(0,4)],
+                             start=rng.choice([None,now-599,now-600,str(now-900)]))
+                        for _ in range(rng.randrange(0,5))]
+                totals=reservation_totals(leases)
+                ages=reservation_ages(leases,now,600)
+                peak=rng.randrange(8,33); low=rng.randrange(0,61)
+                write(peak,low)
+                charged,available,stats=basis(root,"box",row,totals,now,leases)
+                expected_charge=max(peak,ages["oldCores"])+ages["youngCores"]
+                expected_memory=min(low-ages["youngGiB"],64-totals[1])
+                self.assertTrue(stats["applied"])
+                self.assertGreaterEqual(charged,expected_charge)
+                self.assertEqual(charged,expected_charge)
+                self.assertGreaterEqual(charged,peak+ages["youngCores"])
+                self.assertGreaterEqual(charged,totals[0])
+                self.assertEqual(available,expected_memory)
+                cost=[rng.randrange(1,9),rng.randrange(1,9),rng.randrange(0,4)]
+                limit=rng.randrange(8,33)
+                self.assertEqual(headroom(charged,available,128,(0,0,totals[2]),cost,limit,8,64)=="open",
+                                 all((expected_charge+cost[0]<=limit,expected_memory-cost[1]>=8,
+                                      128-totals[2]-cost[2]>=64)))
+                old=[dict(lease,start=now-600) for lease in leases]
+                self.assertEqual(basis(root,"box",row,totals,now,old)[:2],
+                                 (max(peak,totals[0]),min(low,64-totals[1])))
+            # The age split is evidence even when the window cannot be used.
+            leases=[dict(weights=[4,16,0],start=now-60)]
+            write(ages=(0,150))
+            charged,available,stats=basis(root,"box",row,(4,16,0),now,leases)
+            self.assertFalse(stats["applied"])
+            self.assertEqual((charged,available),(12,44))
+            write()
+            (root/"machine.conf").write_text("ADMISSION_WINDOW_SECONDS=0\n")
+            self.assertEqual(basis(root,"box",row,(4,16,0),now,leases)[:2],(12,44))
+            (root/"machine.conf").write_text("# defaults\n")
+            charged,available,stats=basis(root,"box",row,(4,16,0),now,leases)
+            decision(root,"box","fixture","young","heavy",[2,1,0],"open",True,
+                     evidence(row,(4,16,0),[14,8,64],stats,charged,available))
+            record=json.loads((root/"host-samples/admission.ndjson").read_text())
+            self.assertEqual({k:record["window"][k] for k in ("youngCores","oldCores","youngGiB","oldGiB")},
+                             dict(youngCores=4,oldCores=0,youngGiB=16,oldGiB=0))
 
     def test_claim_measurements_rotation_report_and_failed_write(self):
         import time

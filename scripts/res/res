@@ -3056,6 +3056,11 @@ try:
                 os.replace(temp, os.path.join(reserve_dir, box + '.json'))
             finally:
                 if os.path.exists(temp): os.unlink(temp)
+    def reservation_leases(entries):
+        # Owned entries may be refreshed; the hold's start is the acquisition.
+        return [dict(weights=[entry[1],entry[2],entry[3] if len(entry)>=4 else 0],
+                     start=entry[4].get('start') if len(entry)==5 else entry[0])
+                for entry in entries]
     def reserve(box, entries, current, cost, id, hold):
         global reservation_written
         owner = dict(slot=id, **{key: hold[key] for key in ('by', 'pid', 'host', 'start')})
@@ -3145,7 +3150,7 @@ try:
         if observed is not None: observed['limits']=[limit,floor,None if maintenance else 53]
         if observed is not None: observed.update(ioSomeMax=settings['IO_SOME_AVG60_MAX'],ioFullMax=settings['IO_FULL_AVG10_MAX'])
         if (kind == 'HEAVY' or box in host_rows) and io_closed(box, value, settings): return 'io-pressure', detail, entries, cost
-        charged, available, window = basis(root,box,value,(cpu,mem,disk),current)
+        charged, available, window = basis(root,box,value,(cpu,mem,disk),current,reservation_leases(recent))
         if observed is not None: observed.update(window=window,chargedCores=charged,availableBeforeFloorGiB=available)
         reason = headroom(charged, available, value['freeGiB'],
                           (0, 0, disk), cost, limit, floor, float('-inf') if maintenance else 53)
@@ -3188,7 +3193,7 @@ try:
                 disk=sum(entry[3] for entry in entries if len(entry)>=4)
                 maximum=int(settings['MAX_CLAIMS']) or max(1,int(value['cores']/min(settings['HEAVY_CORES'],settings['LIGHT_CORES'])))
                 held=sum(os.path.isdir(os.path.join(locks,id+'.d')) for id,member in remote.items() if member[1]==box and not id.startswith('devbox-host-'))
-                charged, available, _ = basis(root,box,value,(cpu,mem,disk),current)
+                charged, available, _ = basis(root,box,value,(cpu,mem,disk),current,reservation_leases(recent))
                 count=max(0,min(math.floor((value['cores']*settings['LOAD_PER_CORE']-charged)/cost[0]),
                                 math.floor((available-settings['MIN_AVAIL_GIB'])/cost[1]),
                                 math.floor((value['freeGiB']-disk-53)/cost[2]) if cost[2] else maximum,
@@ -3240,7 +3245,7 @@ try:
             # CPU hardware does not shrink when a disk probe expires. Unknown
             # hardware uses a labelled slot-count fallback, never invented cores.
             if measured:
-                charged, available, _ = basis(root,box,measured,(reserved_cpu,reserved_mem,0),now)
+                charged, available, _ = basis(root,box,measured,(reserved_cpu,reserved_mem,0),now,reservation_leases(recent))
             result[box] = dict(cores=cores, coresSource=source, probeAgeSec=age,
                                probeStale=not fresh, metricsFresh=bool(measured), heldSlots=held[box],
                                score=held[box] / (cores or 1), nextScore=(held[box] + 1) / (cores or 1),

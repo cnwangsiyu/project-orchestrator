@@ -9,7 +9,7 @@ import stat
 import sys
 import time
 
-from dynamic_capacity import numeric_metric
+from dynamic_capacity import numeric_metric, reservation_ages
 
 
 @lru_cache(maxsize=16)
@@ -117,15 +117,17 @@ def history_rows(raw, host, darwin):
     return rows
 
 
-def basis(root, host, sample, reserved, now):
+def basis(root, host, sample, reserved, now, leases=None):
     """Return charged CPU, available memory before floor, and coverage evidence."""
     load = sample["load5"]
     available = sample.get("memAvailableGiB", sample.get("availableGiB"))
-    stats = dict(windowSeconds=0,count=0,span=0,applied=False)
+    seconds = options(root)["ADMISSION_WINDOW_SECONDS"]
+    ages = (reservation_ages(leases,now,seconds) if leases is not None else
+            dict(youngCores=reserved[0],oldCores=0,youngGiB=reserved[1],oldGiB=0))
+    stats = dict(windowSeconds=0,count=0,span=0,applied=False,**ages)
     legacy = (load+reserved[0], available-reserved[1], stats)
     if sample.get("sampleSource") != "shared":
         return legacy
-    seconds = options(root)["ADMISSION_WINDOW_SECONDS"]
     stats["windowSeconds"] = seconds
     if not seconds:
         return legacy
@@ -138,7 +140,8 @@ def basis(root, host, sample, reserved, now):
     peak = max(load, max(row["load5"] for row in rows))
     low = min(available, min(row["memAvailableGiB"] for row in rows))
     stats.update(applied=True,peakLoad5=peak,lowAvailableGiB=low)
-    return max(peak,reserved[0]), min(low,sample["totalGiB"]-reserved[1]), stats
+    return (max(peak,ages["oldCores"])+ages["youngCores"],
+            min(low-ages["youngGiB"],sample["totalGiB"]-reserved[1]), stats)
 
 if __name__ == "__main__":
     root, platform, *hosts = sys.argv[1:]

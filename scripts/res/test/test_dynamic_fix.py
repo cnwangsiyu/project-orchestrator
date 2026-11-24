@@ -100,17 +100,29 @@ class DynamicFixTests(unittest.TestCase):
 
     def test_window_admission_and_report_share_basis(self):
         self.activate("local")
-        self.claim("running")
+        local_file,_=self.claim("running")
+        self.activate("mini2")
+        args=argparse.Namespace(by="mini-running",project="fixture",task="fixture",purpose="fixture",
+                                pid=os.getpid(),profile="heavy",disk_gib=0,timeout=0,qualification="",
+                                need="cmake-native",resource="mini2")
+        with contextlib.redirect_stdout(io.StringIO()): mini.acquire(self.root,args)
+        mini_file=mini.lease_holds(self.root)[0]/"lease.json"
         box="192.0.2.1"
         with (self.root/"resources.tsv").open("a") as stream:
             stream.write("devbox-host-fixture\tremote\topen\t-\trunner@"+box+" caps=node\n")
+        mini.atomic(self.root/"devbox-metrics"/(box+".json"),
+                    dict(at=time.time(),cores=14,load5=0,memAvailableGiB=64,freeGiB=1000))
+        def remote_args(by):
+            return ["--by",by,"--project",by,"--task","fixture","--for","fixture","--pid",str(os.getpid())]
+        acquired=self.cli("wait-pool","devbox-cn",*remote_args("devbox-running"),"--timeout","0","--cores","4","--mem-gib","8")
+        self.assertEqual(acquired.returncode,0,acquired.stderr)
+        slot=next(line.split("=",1)[1] for line in acquired.stdout.splitlines() if line.startswith("slot="))
+        devbox_info=self.root/"locks"/(slot+".d")/"info"
+        reserve_file=self.root/"devbox-reservations"/(box+".json")
         now=time.time()
-        reserve=self.root/"devbox-reservations"
-        reserve.mkdir(exist_ok=True)
-        (reserve/(box+".json")).write_text(json.dumps([[now,4,8,0]]))
         hosts={}
-        for host in (box,os.uname().nodename):
-            row=dict(self.sample, host=host, at=now, ok=True, schema=1,load1=12,load5=12,load15=12,
+        for host in (box,os.uname().nodename,mini.HOST):
+            row=dict(self.sample, host=host, at=now, ok=True, schema=1,load1=8,load5=8,load15=8,
                      memAvailableGiB=48,freeInactiveGiB=32,compressedLogicalGiB=0)
             if host!=box: row["arch"]="arm64"
             hosts[host]=row
@@ -120,14 +132,64 @@ class DynamicFixTests(unittest.TestCase):
                 file.parent.mkdir(parents=True,exist_ok=True)
                 with file.open("a") as stream: stream.write(json.dumps(dict(row,at=now-age))+"\n")
         mini.atomic(self.root/"host-samples/latest.json",dict(schema=1,hosts=hosts))
-        for pool in ("local-light","devbox-cn-light"):
-            result=self.cli("pool-capacity",pool)
+        placement={}
+        for state,start,expected in (("young",now-60,2),("old",now-900,6),("unknown","invalid",2)):
+            for file in (local_file,mini_file):
+                mini.atomic(file,{**mini.read(file),"start":start})
+            info=local.info(devbox_info.parent); info["start"]=str(start)
+            devbox_info.write_text("".join(k+"\t"+v+"\n" for k,v in info.items()))
+            entries=json.loads(reserve_file.read_text())
+            # Refreshing a live observation must not make an old hold young.
+            entries[0][0]=now; entries[0][4]["start"]=str(start)
+            mini.atomic(reserve_file,entries)
+            for pool in ("local-light","mini2","devbox-cn-light"):
+                with self.subTest(state=state,pool=pool):
+                    result=self.cli("pool-capacity",pool)
+                    self.assertEqual(result.returncode,0,result.stderr)
+                    capacity=next(iter(json.loads(result.stdout).values()))
+                    self.assertEqual((capacity["gate"],capacity["claims"]),("headroom",expected))
+            result=self.cli("box-health","--json")
             self.assertEqual(result.returncode,0,result.stderr)
-            self.assertGreater(next(iter(json.loads(result.stdout).values()))["claims"],0,result.stdout)
+            placement[state]=json.loads(result.stdout)[box]
+            if state=="old": continue
+            requests=[("local",["take-build",*self.args("refused-local"),"--wrapper"]),
+                      ("mini2",["wait-pool","mini2",*remote_args("refused-mini"),"--timeout","0"]),
+                      ("devbox",["wait-pool","devbox-cn-light",*remote_args("refused-devbox"),"--timeout","0"])]
+            for name,command in requests:
+                result=self.cli(*command,"--cores","6","--mem-gib","1")
+                self.assertNotEqual(result.returncode,0,name+": "+result.stdout)
+                records=[json.loads(line) for line in (self.root/"host-samples/admission.ndjson").read_text().splitlines()]
+                last=next(record for record in reversed(records) if record["cost"] and record["cost"][0]==6)
+                self.assertEqual((last["gate"],last["chargedCores"],last["source"]),("load",12,"shared"))
+                self.assertEqual({k:last["window"][k] for k in ("youngCores","oldCores","youngGiB","oldGiB")},
+                                 dict(youngCores=4,oldCores=0,youngGiB=8,oldGiB=0))
+        self.assertEqual(placement["old"]["spareCores"]-placement["young"]["spareCores"],4)
+        self.assertEqual(placement["old"]["spareMemGiB"]-placement["young"]["spareMemGiB"],8)
+        self.assertEqual(placement["unknown"]["spareCores"],placement["young"]["spareCores"])
+        # Old claims still use additive accounting when the window is disabled.
+        for file in (local_file,mini_file): mini.atomic(file,{**mini.read(file),"start":now-900})
+        info["start"]=str(now-900)
+        devbox_info.write_text("".join(k+"\t"+v+"\n" for k,v in info.items()))
+        entries[0][4]["start"]=str(now-900); mini.atomic(reserve_file,entries)
         with (self.root/"machine.conf").open("a") as stream: stream.write("ADMISSION_WINDOW_SECONDS=0\n")
-        for pool in ("local-light","devbox-cn-light"):
+        for pool in ("local-light","mini2","devbox-cn-light"):
             result=self.cli("pool-capacity",pool)
-            self.assertEqual(next(iter(json.loads(result.stdout).values()))["gate"],"load",result.stdout)
+            self.assertEqual(next(iter(json.loads(result.stdout).values()))["claims"],2,result.stdout)
+
+    def test_corrupt_claim_metadata_keeps_the_existing_closed_gate(self):
+        self.activate("local")
+        file,_=self.claim("corrupt-local")
+        mini.atomic(file,[])
+        cfg=dict(LOCAL_METRICS_TTL_SECONDS=300,LOCAL_LOAD_LIMIT=14,
+                 LOCAL_MIN_AVAILABLE_GIB=8,LOCAL_MIN_FREE_GIB=64)
+        self.assertEqual(local.gate(self.root,cfg,self.sample,(1,1,0)),"legacy-or-incomplete-hold")
+        self.activate("mini2")
+        args=argparse.Namespace(by="corrupt-mini",project="fixture",task="fixture",purpose="fixture",
+                                pid=os.getpid(),profile="heavy",disk_gib=0,timeout=0,qualification="",
+                                need="cmake-native",resource="mini2")
+        with contextlib.redirect_stdout(io.StringIO()): mini.acquire(self.root,args)
+        mini.atomic(mini.lease_holds(self.root)[0]/"lease.json",[])
+        self.assertEqual(mini.admission(self.root,self.config,time.time(),cost=(1,1,0)),"legacy-or-incomplete-hold")
 
     def test_records_on_real_claim_and_refusal(self):
         self.activate("local")

@@ -138,10 +138,12 @@ def gate(root,cfg,sample,cost, details=None):
     if sample["pressure"]!=1: return "pressure"
     if registry(root)[2]!="open": return "policy"
     if not activated(root): return "dynamic-leases-draining"
-    try: amounts=reservation_totals([v for _,v in claims(root)])
+    try:
+        leases=[v for _,v in claims(root)]
+        amounts=reservation_totals(leases)
     except ValueError: return "legacy-or-incomplete-hold"
     load,floor=limits(cfg,sample)
-    charged, available, window = basis(root,sample["host"],sample,amounts,now)
+    charged, available, window = basis(root,sample["host"],sample,amounts,now,leases)
     if details is not None:
         details.update(evidence(sample,amounts,[load,floor,cfg["LOCAL_MIN_FREE_GIB"]],window,charged,available))
     return headroom(charged,available,sample["freeGiB"],(0,0,amounts[2]),cost,load,floor,cfg["LOCAL_MIN_FREE_GIB"])
@@ -326,10 +328,12 @@ def report(root,args):
     if any(numeric_metric(sample.get(name),True) is None for name in ("cores","totalGiB")): raise ValueError("invalid hardware metrics")
     _,cost=cost_for(args,cfg,sample)
     reason=gate(root,cfg,sample,cost)
-    try: amounts=reservation_totals([lease for _,lease in claims(root)])
+    try:
+        leases=[lease for _,lease in claims(root)]
+        amounts=reservation_totals(leases)
     except ValueError: amounts=None
     load,floor=limits(cfg,sample)
-    if reason=="open": charged,available,_=basis(root,sample["host"],sample,amounts,time.time())
+    if reason=="open": charged,available,_=basis(root,sample["host"],sample,amounts,time.time(),leases)
     count=0 if reason!="open" or amounts is None else max(0,min(math.floor((load-charged)/cost[0]),math.floor((available-floor)/cost[1]),(math.floor((sample["freeGiB"]-cfg["LOCAL_MIN_FREE_GIB"]-amounts[2])/cost[2]) if cost[2] else math.inf)))
     return {os.uname().nodename:dict(claims=count,gate="headroom" if reason=="open" else reason,
                                    cores=numeric_metric(sample["cores"],True),memGiB=numeric_metric(sample["totalGiB"],True),loadLimit=load,memoryFloorGiB=floor,
