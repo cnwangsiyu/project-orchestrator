@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>mini 值班台</title>
+<style>
+:root{
+  --bg:#f3f5f7; --surface:#fff; --sunk:#e9edf1; --ink:#17212b; --muted:#5b6876; --line:#d5dce3;
+  --accent:#0f5f7a; --accent-soft:#dcecf1;
+  --ok:#1f7a4d; --ok-soft:#dff1e7; --warn:#9a6200; --warn-soft:#fbeed3; --bad:#b3372f; --bad-soft:#f8dedb; --idle:#7b8794; --idle-soft:#e6eaee;
+  --display:"Space Grotesk","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  --body:"IBM Plex Sans","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  --mono:"IBM Plex Mono","SF Mono",Menlo,monospace;
+}
+@media(prefers-color-scheme:dark){:root{
+  --bg:#10161c; --surface:#18212a; --sunk:#0c1116; --ink:#e4eaf0; --muted:#94a2b0; --line:#2b3742;
+  --accent:#6cc3dc; --accent-soft:#17323c;
+  --ok:#5fcf95; --ok-soft:#153224; --warn:#e6b450; --warn-soft:#3a2d0f; --bad:#f08a80; --bad-soft:#3d1b18; --idle:#8a97a5; --idle-soft:#222c36;
+  color-scheme:dark;
+}}
+*{box-sizing:border-box} [hidden]{display:none!important}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.7 var(--body)}
+.wrap{max-width:1152px;margin:auto;padding:18px max(12px,env(safe-area-inset-right)) 24px max(12px,env(safe-area-inset-left))}
+.screen{background:var(--surface);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.bar{display:flex;flex-wrap:wrap;gap:5px 18px;align-items:center;padding:12px 16px;border-bottom:1px solid var(--line);background:var(--sunk)}
+.bar.warn{background:var(--warn-soft)} .bar.bad{background:var(--bad-soft)}
+.bar h1{font:600 16px var(--display);margin:0}
+.verdict{display:flex;gap:8px;align-items:center;font-weight:500}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--ok);flex:none}
+.dot.warn{background:var(--warn)} .dot.bad{background:var(--bad)} .dot.idle{background:var(--idle)}
+.fresh{margin-left:auto;font:12px var(--mono);color:var(--muted);font-variant-numeric:tabular-nums}
+.tabs{display:flex;gap:6px;flex-wrap:wrap;padding:10px 16px;border-bottom:1px solid var(--line)}
+.tab{font:inherit;font-size:13px;padding:4px 11px;border-radius:999px;border:1px solid var(--line);background:transparent;color:var(--ink);cursor:pointer}
+.tab[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:var(--surface)}
+.tab:focus-visible,.row:focus-visible,.copy:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.grid{display:grid;grid-template-columns:minmax(0,1.65fr) minmax(0,1fr)}
+.pane{padding:14px 16px;min-width:0}
+.pane + .pane{border-left:1px solid var(--line)}
+@media(max-width:820px){.grid{grid-template-columns:minmax(0,1fr)}.pane + .pane{border-left:0;border-top:1px solid var(--line)}}
+@media(max-width:480px){.wrap{padding-top:8px}.pane,.bar,.tabs{padding-left:12px;padding-right:12px}.fresh{margin-left:0;width:100%}}
+.sec{font-size:12px;letter-spacing:.06em;color:var(--muted);font-weight:600;margin:0 0 8px;display:flex;justify-content:space-between;gap:8px}
+.block{margin-bottom:18px}
+.ask{border:1px solid var(--warn);background:var(--warn-soft);border-radius:8px;padding:10px 12px;margin-bottom:8px;font-weight:600;overflow-wrap:anywhere}
+.lane{margin-bottom:16px}
+.lane h2{margin:0 0 6px;font-size:14px;font-weight:600;display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+.lane h2 small{font-weight:400;color:var(--muted);font-size:12.5px}
+.row{display:grid;list-style:none;grid-template-columns:auto minmax(0,1fr) auto;gap:4px 10px;align-items:center;text-align:left;color:inherit;border-top:1px solid var(--line);padding:8px 2px;cursor:pointer}
+.row::-webkit-details-marker{display:none} .row:hover{background:var(--sunk)}
+.row .t{min-width:0} .row .t b{font-weight:500;display:block;overflow-wrap:anywhere} .row .t span{font-size:12.5px;color:var(--muted);display:block;overflow-wrap:anywhere}
+.pill{font:11.5px/1.7 var(--mono);padding:2px 7px;border-radius:5px;background:var(--idle-soft);color:var(--muted);overflow-wrap:anywhere}
+.row>.pill{white-space:nowrap;font-variant-numeric:tabular-nums}
+.pill.ok{background:var(--ok-soft);color:var(--ok)} .pill.warn{background:var(--warn-soft);color:var(--warn)} .pill.bad{background:var(--bad-soft);color:var(--bad)} .pill.acc{background:var(--accent-soft);color:var(--accent)}
+.meta{grid-column:2 / -1;display:flex;flex-wrap:wrap;gap:5px;min-width:0}
+.detail{background:var(--sunk);border-radius:6px;padding:10px 12px;font-size:13px;margin:4px 0 8px}
+.detail dl{display:grid;grid-template-columns:auto minmax(0,1fr);gap:3px 12px;margin:0}
+.detail dt{color:var(--muted)} .detail dd{margin:0;overflow-wrap:anywhere}
+.copy{margin:8px 0 0;font:inherit;background:var(--surface);border:1px solid var(--line);color:var(--ink);border-radius:5px;cursor:pointer}
+.host,.q{border-top:1px solid var(--line);padding:8px 0}
+.host .h,.q .h{display:flex;justify-content:space-between;gap:8px;font-size:13.5px;overflow-wrap:anywhere}
+.host .h{font-weight:500}
+.h span{font:12px/1.7 var(--mono);font-weight:400;color:var(--muted);text-align:right;font-variant-numeric:tabular-nums}
+.h .acc{color:var(--accent)}
+.meter{appearance:none;display:block;width:100%;height:7px;border:0;border-radius:4px;background:var(--idle-soft);margin:5px 0 3px;overflow:hidden;color:var(--accent);accent-color:var(--accent)}
+.meter.warn{color:var(--warn);accent-color:var(--warn)} .meter.bad{color:var(--bad);accent-color:var(--bad)}
+.meter::-webkit-progress-bar{background:var(--idle-soft)} .meter::-webkit-progress-value{background:currentColor;border-radius:4px} .meter::-moz-progress-bar{background:currentColor;border-radius:4px}
+.host small,.q small,.empty{font-size:12px;color:var(--muted);display:block;overflow-wrap:anywhere}
+.host .match,.q .match{color:var(--accent);font-weight:600}
+.notice{font-size:12px;color:var(--warn);margin:0 0 6px;overflow-wrap:anywhere}
+@media(prefers-reduced-motion:no-preference){details[open]>.detail{animation:in .15s ease-out}@keyframes in{from{opacity:.5}to{opacity:1}}}
+</style>
+</head>
+<body>
+<main class="wrap"><div class="screen">
+  <header class="bar" id="bar">
+    <h1>mini 值班台</h1>
+    <span class="verdict"><span class="dot idle" id="verdictDot" aria-hidden="true"></span><span id="verdict">正在读取快照</span></span>
+    <span class="fresh" id="fresh">—</span>
+  </header>
+  <nav class="tabs" id="tabs" aria-label="按项目筛选">
+    <button class="tab" type="button" aria-pressed="true" data-project="all">全部</button>
+    <button class="tab" type="button" aria-pressed="false" data-project="video-agent">VAK</button>
+    <button class="tab" type="button" aria-pressed="false" data-project="vesdk-mainline">Webview</button>
+    <button class="tab" type="button" aria-pressed="false" data-project="lynx-view">Lynx</button>
+    <button class="tab" type="button" aria-pressed="false" data-project="orchestrator">全局规则</button>
+  </nav>
+  <div class="grid">
+    <div class="pane">
+      <section class="block" aria-labelledby="cardsTitle"><h2 class="sec" id="cardsTitle">等你处理 <span id="cardCount">—</span></h2><div id="cardsNotice"></div><div id="cards"></div></section>
+      <div id="tasksNotice"></div><div id="lanes"></div>
+    </div>
+    <div class="pane">
+      <section class="block" aria-labelledby="machinesTitle"><h2 class="sec" id="machinesTitle">机器 <span>谁在用</span></h2><div id="machinesNotice"></div><div id="machines"></div></section>
+      <section class="block" aria-labelledby="devicesTitle"><h2 class="sec" id="devicesTitle">测试设备</h2><div id="devicesNotice"></div><div id="devices"></div></section>
+      <section class="block" aria-labelledby="quotaTitle"><h2 class="sec" id="quotaTitle">额度 <span>重置时间</span></h2><div id="quotaNotice"></div><div id="quota"></div></section>
+    </div>
+  </div>
+</div></main>
+<script>
+'use strict';
+const $ = (id) => document.getElementById(id);
+const projects = { 'video-agent': 'VAK', 'vesdk-mainline': 'Webview', 'lynx-view': 'Lynx', orchestrator: '全局规则' };
+const accounts = { trae: 'TRAE', ttadk: 'TTADK', main: '个人 main', b: '个人 b', claude: 'Claude' };
+const sources = { workers: '任务状态', notes: '进展', routes: '路由', cards: '待确认事项', audit: '开发机审计', devboxLeases: '开发机租约', localLeases: 'mini 租约', devices: '设备', quota: '额度' };
+const poolLabels = { 'devbox-cn': '重型', 'devbox-cn-light': '轻型', local: '通道', 'local-light': '轻型', 'local-build': '完整构建', mini2: '轻型' };
+const order = ['开发机 9', '开发机 8', '开发机 1', '主 mini', 'mini2'];
+const signatures = new WeakMap();
+const taskNodes = new Map();
+const laneNodes = new Map();
+let selected = 'all', snapshot, unavailable = false;
+const clock = new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+const fullClock = new Intl.DateTimeFormat('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', timeZoneName: 'short' });
+const time = (at, formatter = clock) => Number.isFinite(Date.parse(at)) ? formatter.format(new Date(at)) : '—';
+const age = (at) => Number.isFinite(Date.parse(at)) ? Math.max(0, Date.now() - Date.parse(at)) : 0;
+const duration = (ms) => {
+  const m = Math.floor(ms / 60_000);
+  return m < 1 ? '不到 1 分' : m < 60 ? `${m} 分` : `${Math.floor(m / 60)} 时 ${m % 60} 分`;
+};
+const decimal = (n) => Number.isFinite(n) ? Number(n.toFixed(1)) : '—';
+function el(tag, className, ...children) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  node.append(...children.filter((v) => v != null));
+  return node;
+}
+function update(node, value, draw) {
+  const signature = JSON.stringify(value);
+  if (signatures.get(node) === signature) return;
+  signatures.set(node, signature);
+  node.replaceChildren(...draw(value));
+}
+function reconcile(parent, nodes) {
+  const keep = new Set(nodes);
+  for (const child of [...parent.children]) if (!keep.has(child)) child.remove();
+  nodes.forEach((node, i) => { if (parent.children[i] !== node) parent.insertBefore(node, parent.children[i] ?? null); });
+}
+function status(task) {
+  if (task.state === 'failed') return ['bad', '失败', 0];
+  if (task.state === 'stalled') return ['bad', '卡住', 0];
+  if (task.state === 'queued') {
+    const ms = age(task.queueSince || task.startedAt);
+    return [ms > 300_000 ? 'warn' : 'idle', `排队 ${duration(ms)}`, ms > 300_000 ? 1 : 3];
+  }
+  return ['ok', task.startedAt ? `运行 ${duration(age(task.startedAt))}` : '运行中', 2];
+}
+function resources(task) {
+  const counts = new Map();
+  for (const { host, label, until } of task.resources) {
+    const name = host ? `${host} · ${label}` : `${label}${until ? ` · 到 ${time(until)}` : ''}`;
+    counts.set(name, (counts.get(name) ?? 0) + 1);
+  }
+  return [...counts].map(([name, count]) => count > 1 ? `${name} × ${count}` : name);
+}
+function taskNode(task) {
+  let row = taskNodes.get(task.id);
+  if (!row) {
+    const dot = el('span', 'dot'); dot.setAttribute('aria-hidden', 'true');
+    const title = el('b'), desc = el('span'), state = el('span'), meta = el('span', 'meta');
+    const summary = el('summary', 'row', dot, el('span', 't', title, desc), state, meta);
+    const dl = el('dl');
+    const copy = el('button', 'copy', '复制给秘书'); copy.type = 'button';
+    const details = el('details', '', summary, el('div', 'detail', dl, copy));
+    row = { details, dot, title, desc, state, meta, dl, copy };
+    copy.addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(`${row.task} 现在什么情况？`); copy.textContent = '已复制'; }
+      catch {
+        const field = el('input'); field.value = `${row.task} 现在什么情况？`; field.readOnly = true; copy.after(field); field.select();
+        try { copy.textContent = document.execCommand('copy') ? '已复制' : '请手动复制任务名'; }
+        catch { copy.textContent = '请手动复制任务名'; }
+        field.remove(); copy.focus();
+      }
+    });
+    taskNodes.set(task.id, row);
+  }
+  row.task = task.task;
+  const [tone, label] = status(task);
+  row.dot.className = `dot ${tone}`;
+  row.state.className = `pill ${tone}`;
+  row.state.textContent = label;
+  row.title.textContent = task.title.startsWith(task.task) || task.title === task.name && task.name.includes(task.task)
+    ? task.title : `${task.task} ${task.title}`;
+  row.desc.textContent = task.summary;
+  const held = resources(task);
+  const lane = [accounts[task.account] ?? task.account, task.model || '模型未知', task.effort || '强度未知'].filter(Boolean).join(' · ');
+  update(row.meta, [lane, ...held], ([label, ...items]) => [el('span', 'pill acc', label), ...items.map((item) => el('span', 'pill', item))]);
+  update(row.dl, [task.owner, task.startedAt, task.routeWhy, held.join('、'), task.latestNote, task.queuePosition],
+    ([owner, started, route, held, note, position]) => [['负责', owner], ['时间', time(started, fullClock)], ['为什么在这条通道', route],
+      ['占用', held || '无'], ['最近进展', note], ...(position != null ? [['队列位置', String(position)]] : [])]
+      .flatMap(([k, v]) => [el('dt', '', k), el('dd', '', v || '—')]));
+  return row.details;
+}
+function renderTasks(tasks) {
+  const groups = new Map(Object.keys(projects).map((p) => [p, []]));
+  for (const task of tasks) (groups.get(task.project) ?? groups.get('general') ?? groups.set('general', []).get('general')).push(task);
+  const keep = new Set(tasks.map((t) => t.id));
+  for (const id of taskNodes.keys()) if (!keep.has(id)) taskNodes.delete(id);
+  const visible = [];
+  for (const [project, group] of groups) {
+    if (!laneNodes.has(project)) {
+      const count = el('small'), list = el('div');
+      laneNodes.set(project, { count, list, lane: el('section', 'lane', el('h2', '', projects[project] ?? '其他', count), list) });
+    }
+    const { count, list, lane } = laneNodes.get(project);
+    lane.hidden = selected !== 'all' && project !== selected;
+    const active = group.filter((t) => t.state === 'running').length;
+    count.textContent = `${active} 个在跑${active === group.length ? '' : ` · ${group.length - active} 个待留意`}`;
+    group.sort((a, b) => status(a)[2] - status(b)[2] || (a.startedAt ?? '').localeCompare(b.startedAt ?? '') || a.id.localeCompare(b.id));
+    if (group.length) reconcile(list, group.map(taskNode));
+    else if (list.firstElementChild?.className !== 'empty') list.replaceChildren(el('small', 'empty', '暂无任务'));
+    visible.push(lane);
+  }
+  reconcile($('lanes'), visible);
+}
+function meter(percent, label, tone = '') {
+  if (!Number.isFinite(percent)) return null;
+  const node = el('progress', `meter ${tone}`);
+  node.max = 100; node.value = Math.max(0, Math.min(100, percent)); node.setAttribute('aria-label', label);
+  return node;
+}
+function holderText(row) {
+  const project = projects[row.project] ?? '';
+  return [project, row.task || row.holder || '持有者未返回'].filter(Boolean).join(' ');
+}
+function renderMachines(machines) {
+  return [...machines].sort((a, b) => (order.indexOf(a.name) + 6) % 6 - (order.indexOf(b.name) + 6) % 6).map((m) => {
+    const load = Number.isFinite(m.load5) && m.cores > 0;
+    const status = [load ? `负载 ${decimal(m.load5)}/${m.cores}` : '负载未知', Number.isFinite(m.availableGiB) ? `可用 ${decimal(m.availableGiB)} GiB` : ''].filter(Boolean).join(' · ');
+    const metrics = [Number.isFinite(m.spareCores) ? `预计余 ${decimal(m.spareCores)} 核` : '',
+      Number.isFinite(m.freeGiB) ? `磁盘剩 ${decimal(m.freeGiB)} GiB` : '', m.link ? `链路${m.link === 'up' ? '正常' : '未就绪'}` : '',
+      m.pressure === 1 ? '内存压力正常' : Number.isFinite(m.pressure) ? '内存压力异常' : ''];
+    for (const [pool, cap] of Object.entries(m.claims)) if (Number.isFinite(cap.count)) metrics.push(`${poolLabels[pool]}可接 ${cap.count}`);
+    const owners = new Map();
+    for (const holder of m.holders) {
+      const text = holderText(holder);
+      const label = m.name === '主 mini' ? `${text} · ${holder.label}` : text;
+      const prev = owners.get(label);
+      owners.set(label, { count: (prev?.count ?? 0) + 1, match: selected !== 'all' && holder.project === selected });
+    }
+    const list = [...owners].flatMap(([name, row], i) => [i ? '、' : '', el('span', row.match ? 'match' : '', `${name}${row.count > 1 ? ` × ${row.count}` : ''}`)]);
+    return el('div', 'host', el('div', 'h', `${m.name}${m.cores ? ` · ${m.cores} 核` : ''}${m.memGiB ? ` / ${m.memGiB} GiB` : ''}`, el('span', '', status)),
+      meter(load ? 100 * m.load5 / m.cores : null, `${m.name} 负载`, m.factsStale ? 'warn' : ''),
+      el('small', '', m.held ? `${m.held} 个租约${list.length ? '：' : ' · 持有者未返回'}` : '空闲', ...list),
+      el('small', '', metrics.filter(Boolean).join(' · ')), m.factsStale ? el('p', 'notice', '机器状态采样已过期或缺失') : null);
+  });
+}
+function renderDevices(devices) {
+  return devices.map((d) => {
+    const match = selected !== 'all' && d.project === selected;
+    const state = d.held ? `${holderText(d)}${d.until ? ` · 到 ${time(d.until)}` : ''}` : d.state === 'unavailable' ? '—' : '空闲';
+    return el('div', 'q', el('div', 'h', d.label, el('span', `pill${d.held ? ' acc' : ''}${match ? ' match' : ''}`, state)),
+      d.link && d.link !== 'connected' ? el('small', '', d.link === 'not seen' || d.link === 'offline' ? '未连接' : '连接状态未知') : null,
+      d.state === 'stale' || d.state === 'pending' ? el('small', '', '租约状态待确认') : null);
+  });
+}
+function renderQuota({ items, hubs }) {
+  const lanes = items.map((q) => {
+    const label = Number.isFinite(q.percent) ? `${decimal(q.percent)}%` : '—';
+    const tone = q.exhausted ? 'bad' : q.expired || q.percent >= 65 ? 'warn' : '';
+    const sub = [q.exhausted ? '用完了' : q.expired ? '已到重置时间，等待新数据' : '', q.id === 'main' ? `只作溢出 · 重置卡 ${q.resetCards ?? '—'} 张` : ''];
+    return el('div', 'q', el('div', 'h', q.label, el('span', '', `${label} · ${time(q.resetsAt, fullClock)}`)), meter(q.percent, q.label, tone), el('small', '', sub.filter(Boolean).join(' · ')));
+  });
+  if (hubs.length) lanes.push(el('div', 'q', el('small', '', 'Hub：', hubs.map((h) => `${accounts[h.name] ?? h.name} ${h.state === 'up' ? '正常' : h.state === 'down' ? '离线' : h.state === 'degraded' ? '异常' : '未知'}`).join(' · '))));
+  return lanes;
+}
+function notices(target, ids, extra = '') {
+  const messages = ids.flatMap((id) => {
+    const block = snapshot.blocks[id];
+    if (!block?.stale) return [];
+    const name = sources[id] ?? (id.startsWith('pool:') ? `${poolLabels[id.slice(5)]}容量` : `${projects[id.slice(6)]} 任务说明`);
+    return [`${name}：${block.updatedAt ? `数据已过期 ${duration(age(block.updatedAt))}` : '暂无数据'}（${block.error}）`];
+  });
+  if (extra) messages.push(extra);
+  update($(target), messages, (messages) => messages.map((message) => el('p', 'notice', message)));
+}
+function render() {
+  if (!snapshot) return;
+  const { at, tasks, machines, devices, cards, quota, blocks } = snapshot;
+  const old = age(at), severity = old > 300_000 ? 'bad' : old > 90_000 ? 'warn' : '';
+  const running = tasks.filter((t) => t.state === 'running').length;
+  const trouble = tasks.filter((t) => status(t)[2] < 2).length;
+  const spent = quota.items.filter((q) => q.exhausted && (!q.resetsAt || Date.parse(q.resetsAt) > Date.now())).length;
+  const stale = Object.values(blocks).filter((b) => b.stale).length;
+  $('bar').className = `bar ${severity}`;
+  $('verdictDot').className = `dot ${severity || (trouble ? 'bad' : cards.length || spent || stale || unavailable ? 'warn' : '')}`;
+  const count = (key, value) => blocks[key]?.stale && !blocks[key]?.updatedAt ? '—' : value;
+  $('verdict').textContent = [`${count('cards', cards.length)} 件事等你`, `${count('workers', running)} 个任务在跑`,
+    trouble ? `${trouble} 个任务需留意` : '', spent ? `${spent} 条通道额度用完` : '', stale ? `${stale} 项数据未更新` : ''].filter(Boolean).join(' · ');
+  $('fresh').textContent = `${time(at, fullClock)} · ${old < 60_000 ? `${Math.floor(old / 1000)} 秒` : duration(old)}前更新${unavailable ? ' · 连接中断' : ''}`;
+  $('cardCount').textContent = count('cards', cards.length);
+  update($('cards'), [cards, blocks.cards?.stale && !blocks.cards.updatedAt], ([cards, missing]) => cards.length ? cards.map((c) => el('div', 'ask', c.title)) : [el('small', 'empty', missing ? '暂无可用的待确认事项数据' : '没有等你的事')]);
+  renderTasks(tasks);
+  update($('machines'), [machines, selected], ([m]) => m.length ? renderMachines(m) : [el('small', 'empty', '暂无机器数据')]);
+  update($('devices'), [devices, selected], ([d]) => d.length ? renderDevices(d) : [el('small', 'empty', '暂无设备数据')]);
+  update($('quota'), quota, renderQuota);
+  notices('cardsNotice', ['cards']);
+  notices('tasksNotice', ['workers', 'notes', 'routes', ...Object.keys(projects).filter((p) => selected === 'all' || selected === p).map((p) => `tasks:${p}`)]);
+  notices('machinesNotice', ['audit', 'devboxLeases', 'localLeases', ...Object.keys(poolLabels).map((p) => `pool:${p}`)]);
+  notices('devicesNotice', ['devices']);
+  notices('quotaNotice', ['quota'], quota.fallback ? '实时额度不可读，显示本地缓存 · ' + time(quota.checkedAt, fullClock) : '');
+}
+$('tabs').addEventListener('click', (event) => {
+  const button = event.target.closest('button[data-project]');
+  if (!button) return;
+  selected = button.dataset.project;
+  for (const tab of $('tabs').querySelectorAll('button')) tab.setAttribute('aria-pressed', String(tab === button));
+  render();
+});
+async function refresh() {
+  try {
+    const response = await fetch('/snapshot.json', { cache: 'no-store', signal: AbortSignal.timeout(10_000) });
+    if (!response.ok) throw new Error(String(response.status));
+    const next = await response.json();
+    if (next.version !== 1 || !Number.isFinite(Date.parse(next.at))) throw new Error('格式无法识别');
+    snapshot = next; unavailable = false;
+  } catch (error) {
+    unavailable = true;
+    if (!snapshot) $('verdict').textContent = error.message === '401' ? '需要重新输入访问口令' : '暂无可用快照';
+  }
+  render();
+}
+refresh();
+setInterval(refresh, 15_000);
+setInterval(render, 1000);
+</script>
+</body>
+</html>
