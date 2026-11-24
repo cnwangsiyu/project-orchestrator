@@ -17,6 +17,28 @@ export function companyWouldDowngrade(task, snapshot, companyRows) {
   return !!best && companyDowngrade(best.candidate.modelId);
 }
 
+const start = r => r.estimate.startDelayMin;
+const finish = r => r.estimate.completionMin;
+const hasOwnWork = r => r.estimate.workBasis === 'account/model history';
+const finishDelta = (a, b) => hasOwnWork(a) && hasOwnWork(b) ? finish(a) - finish(b) : start(a) - start(b);
+const earliest = (rows, minutes) => {
+  const min = Math.min(...rows.map(minutes));
+  return rows.filter(r => minutes(r) === min);
+};
+
+function finishLeaders(rows) {
+  // Mixed pairwise comparisons can cycle (a fast worker may have a late start).
+  // Find each provenance group's leaders first, then compare them by start only.
+  const own = earliest(rows.filter(hasOwnWork), finish);
+  const fallback = earliest(rows.filter(r => !hasOwnWork(r)), start);
+  const ownAnchor = earliest(own, start)[0];
+  if (!ownAnchor || fallback.length && start(fallback[0]) < start(ownAnchor))
+    return { anchor: fallback[0], rows: fallback };
+  if (!fallback.length) return { anchor: ownAnchor, rows: own };
+  return { anchor: ownAnchor, rows: [...own.filter(r => start(r) <= start(fallback[0])),
+    ...(start(ownAnchor) === start(fallback[0]) ? fallback : [])] };
+}
+
 export function orderCandidates(task, snapshot, rows) {
   // Effort is an approved quality stage, not a speed/expiry bidding dimension.
   const minimum = new Map();
@@ -54,18 +76,23 @@ export function orderCandidates(task, snapshot, rows) {
   const hardAstra = task.tier === 'hard' ? cohort.filter(r => r.ok && ready(r) && isAstra(r.candidate.modelId)
     && r.predicates.some(p => p.personalFallback?.astraApprovalRef && p.personalFallback.preferOverLowerCompany)) : [];
   if (hardAstra.length) cohort = hardAstra;
-  // Compare measured starts before applying model or quota preferences. Anchor
-  // the company tie band at the fastest finish so the ordering is transitive.
-  const measured = cohort.filter(r => r.ok && !stalled(r) && !r.estimate.capacityReset
-    && Number.isFinite(r.estimate.completionMin) && r.estimate.confidence !== 'UNKNOWN'
+  // Compare observed starts before applying model or quota preferences. Anchor
+  // the company tie band at one leader; don't chain successive three-minute ties.
+  const timed = cohort.filter(r => r.ok && !stalled(r) && !r.estimate.capacityReset
+    && Number.isFinite(start(r)) && Number.isFinite(finish(r)) && r.estimate.confidence !== 'UNKNOWN'
     && (parts(r).account.kind !== 'trae' || ready(r) || ['queue','observed-start'].includes(r.estimate.basis)));
-  if (measured.length && !adversarial(task) && (!task.flags['allow-low-priority-queue']
-    || measured.some(r => !unavailableDayQuota(parts(r).account,parts(r).lane,snapshot)))) {
-    const fastest = Math.min(...measured.map(r => r.estimate.completionMin));
-    const companyTies = measured.filter(r => company(parts(r).account) && r.estimate.completionMin <= fastest + 3);
-    const pool = companyTies.length ? companyTies : measured;
-    const finish = Math.min(...pool.map(r => r.estimate.completionMin));
-    cohort = pool.filter(r => r.estimate.completionMin === finish);
+  const finishRanked = timed.length > 0 && !adversarial(task) && (!task.flags['allow-low-priority-queue']
+    || timed.some(r => !unavailableDayQuota(parts(r).account,parts(r).lane,snapshot)));
+  let finishComparison = null;
+  if (finishRanked) {
+    const { anchor, rows: leaders } = finishLeaders(timed);
+    const companyTies = timed.filter(r => company(parts(r).account) && finishDelta(r, anchor) <= 3);
+    cohort = companyTies.length ? finishLeaders(companyTies).rows : leaders;
+    if (timed.length > 1) {
+      const fallback = timed.filter(r => !hasOwnWork(r));
+      finishComparison = { comparedOwnWork: timed.length - fallback.length > 1,
+        fallbackCandidateIds: fallback.map(r => r.candidate.id).sort() };
+    }
   }
   // Prefer a usable current release across company accounts, then the qualified
   // predecessor, before the existing company/personal and effort comparators.
@@ -183,8 +210,10 @@ export function orderCandidates(task, snapshot, rows) {
     const cost = costComparable ? e.costs.map((c) => c.normalizedShare) : [];
     const retainedMax=task.previousAttempts.some(a=>policyModel(a.actual?.modelId)===policyModel(c.modelId)&&a.actual?.effort==='xhigh')&&c.effort==='max';
     const common = [stalled(r)?1:0, lock, companyClass(r), task.previousAttempts.length&&e.confidence==='UNKNOWN'&&!retainedMax?1:0];
-    const scheduling = backgroundChoice ? [quotaClass, ...cost, e.expiryOpportunity === true ? 0 : 1, e.completionMin]
-      : [e.expiryOpportunity === true ? 0 : 1,e.completionMin, e.noPrioritySpend === true ? 0 : 1, ...cost];
+    // The finish race already tied these rows; don't split the tie on raw work estimates.
+    const finishTerm = finishRanked ? 0 : e.completionMin;
+    const scheduling = backgroundChoice ? [quotaClass, ...cost, e.expiryOpportunity === true ? 0 : 1, finishTerm]
+      : [e.expiryOpportunity === true ? 0 : 1,finishTerm, e.noPrioritySpend === true ? 0 : 1, ...cost];
     const account=candidateParts(snapshot,c).account;
     const hardCompany=task.tier==='hard'&&!adversarial(task)&&task.category!=='image-read'&&company(account);
     // Without observed free capacity, preserve the pre-trial fallback tie-breaks.
@@ -196,7 +225,7 @@ export function orderCandidates(task, snapshot, rows) {
     const deviceLane=noCompany?[pref<0?preference.length:pref,
       account.kind==='chatgpt'?(rotate.length?rotationRank(c.accountId):personalOrder.get(c.accountId)??Infinity):0]:[0,0];
     const deadlineRank=account.kind==='chatgpt'?personalOrder.get(c.accountId)??Infinity:known(account.budget)?.deadline??Infinity;
-    return [...common, ...deviceLane, ...(task.tier==='light'&&!task.background?[e.completionMin,pref < 0 ? preference.length : pref]:[]), ...scheduling, pref < 0 ? preference.length : pref, accountOrder, deadlineRank, c.accountId, c.laneId, EFFORTS.indexOf(c.effort), c.id];
+    return [...common, ...deviceLane, ...(task.tier==='light'&&!task.background?[finishTerm,pref < 0 ? preference.length : pref]:[]), ...scheduling, pref < 0 ? preference.length : pref, accountOrder, deadlineRank, c.accountId, c.laneId, EFFORTS.indexOf(c.effort), c.id];
   };
   const decorated = cohort.map((r) => ({ ...r, orderingTerms: terms(r) }));
   decorated.sort((a, b) => {
@@ -204,7 +233,7 @@ export function orderCandidates(task, snapshot, rows) {
     return 0;
   });
   return freeze({ rows: decorated, winner: decorated[0] ?? null, runnerUp: decorated[1] ?? null,
-    terms: { tierOverflow, costComparable, freeLight, accountRotation:rotate,
+    terms: { tierOverflow, costComparable, freeLight, finishComparison, accountRotation:rotate,
       personalLaunchWhy:personalLaunchExplanation(launch,launch.open.find(r=>r.id===decorated[0]?.candidate.accountId)??null),
       policyLock: adversarial(task) ? 'kimi-deepseek-scoped-opus' : null, background: task.background } });
 }

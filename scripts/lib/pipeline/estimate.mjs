@@ -71,8 +71,8 @@ export function estimateCandidate(task, snapshot, candidate, { capacityReset = f
   if (stalled) uncertainty.push(reason('estimate', 'ETA_STALLED', 'Fresh queue telemetry reports zero drain or waiting without progress; no finite start/completion estimate.', [candidate.id]));
   if (unknown) uncertainty.push(reason('estimate', 'ETA_UNKNOWN', 'Optimistic fallback; start delay is unmeasured and queue patience is bounded.', [candidate.id]));
   if (rows.length < ETA.historyMin) uncertainty.push(reason('estimate', 'WORK_HEURISTIC', 'Work time uses the versioned tier/category fallback.', [candidate.id]));
-  if (rows.length >= ETA.historyMin && rows.some((r) => r.modelId !== candidate.modelId || r.accountId !== candidate.accountId))
-    uncertainty.push(reason('estimate', 'WORK_COHORT_FALLBACK', 'Category/effort history spans other models or accounts.', rows.map((r) => r.attemptId)));
+  if (workBasis === 'category history')
+    uncertainty.push(reason('estimate', 'WORK_COHORT_FALLBACK', 'Work time uses pooled category/effort history, not enough attributed account/model outcomes.', rows.map((r) => r.attemptId)));
   const noPrioritySpend = a.kind === 'trae' && ['bucket-free', 'low-priority'].includes(l.mode) ? true
     : a.kind === 'trae' && l.mode === 'priority' ? false : null;
   const costs = l.costs.map((c) => ({ ...c, prioritySpend: noPrioritySpend === true ? false : c.prioritySpend }));
@@ -106,7 +106,7 @@ export function estimateCandidate(task, snapshot, candidate, { capacityReset = f
       stalled&&'lane stalled in fresh telemetry',queued&&'queue observed',recentAstraQueue&&'recent Astra queue or stall observed',familyCongested&&'family queue above 300',load>=60&&`${candidate.modelId} load ${load}% is at least 60`,!congestionOK&&load===null&&`${candidate.modelId} has no fresh model load reading`,!triggers.length&&'no balancing trigger'].filter(Boolean)}:null;
   return freeze({ candidateId: candidate.id, startDelayMin: unknown ? null : raw.startDelayMin,
     completionMin: stalled ? null : raw?.completionMin ?? workMin, stalled, basis: raw?.basis ?? 'unknown', confidence: stalled ? 'STALLED' : unknown ? 'UNKNOWN'
-      : rows.length >= ETA.historyMin && !uncertainty.some((r) => r.code === 'WORK_COHORT_FALLBACK') ? 'measured' : 'fallback',
+      : rows === exact ? 'measured' : 'fallback',
     workMin, workBasis, requests, sampleIds: rows.length >= ETA.historyMin ? rows.map((r) => r.attemptId) : [], costs, noPrioritySpend, expiryOpportunity,expiryEvidence,
     uncertainty, patienceMin: a.company&&(unknown||raw?.basis==='queue'||raw?.startDelayMin>0||l.mode==='low-priority') ? patienceMinutes({ now, nextAvailableAt:nextReset }) : null,
     inputAges: { readyAt: l.readyAt.ageMs, position: l.position.ageMs, drainPerMin: l.drainPerMin.ageMs, progressAt: l.progressAt.ageMs, loadPercent: l.loadPercent.ageMs },

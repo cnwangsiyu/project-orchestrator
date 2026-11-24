@@ -325,6 +325,60 @@ test('runnable measured company queue beats reset; auth cannot project recovery'
   raw.accounts[0].auth = true; raw.accounts[0].providerDenied = false; raw.accounts[0].quota = [{ bucketId: 'daily', unit: 'tokens', usage: { used: 100, limit: 100, resetsAt: NOW + 600000 }, priority: 'depleted' }];
   assert.equal(run(task(), raw).primary.candidate.accountId, 'a');
 });
+test('expected finish only compares work with sufficient own account/model history', () => {
+  // Pure snapshots and scoped fixture approvals: no caller home, policy or outcomes.
+  const main = 'gpt-6.2-astra', companySol = 'gpt-6.2-sol';
+  const replay = ({ company = [], companyStart = 0, lowStart = false, companySolRuns = [], pooled = [] } = {}) => {
+    const raw = fixture([['main', 'chatgpt', [main]], ['trae', 'trae', [ASTRA, ...(companySolRuns.length ? [companySol] : [])]]]);
+    for (const l of raw.lanes.filter(l => l.accountId === 'trae'))
+      Object.assign(l, { loadPercent: 10, loadSource: 'model' });
+    if (companyStart && !lowStart) Object.assign(raw.lanes[1], { position: companyStart * 10, drainPerMin: 10, state: 'queued' });
+    if (lowStart) {
+      Object.assign(raw.lanes[1], { mode: 'low-priority', lowStart: companyStart });
+      raw.accounts[1].quota = [{ bucketId: ASTRA, usage: { used: 58, limit: 58, remaining: 0, resetsAt: NOW + 60 * 60000 } }];
+    }
+    const outcomes = (accountId, modelId, times, attributed = true) => times.map((minutes, i) => ({
+      attemptId: `eta-${accountId}-${modelId}-${attributed}-${i}`, accountId, modelId, attributed, minutes,
+      category: 'implement-hard', effort: 'xhigh',
+    }));
+    raw.etaHistory = [...outcomes('main', main, [50, 51.5, 53]), ...outcomes('trae', ASTRA, company),
+      ...outcomes('trae', companySol, companySolRuns), ...outcomes('trae', ASTRA, pooled, false)];
+    let t = task('implement-hard');
+    const c = candidate(createSnapshot(raw), 'main', main, 'xhigh');
+    t = approve(raw, t, c, 'personal-quota', true);
+    t = approve(raw, t, c, 'astra');
+    const snapshot = createSnapshot(raw), plan = routePure(t, snapshot);
+    assert.equal(plan.kind, 'launch');
+    const lane = (accountId, modelId) => plan.trace.candidates.find(r => r.candidate.accountId === accountId
+      && r.candidate.modelId === modelId && r.candidate.effort === 'xhigh');
+    assert.ok(lane('main', main).predicates.every(p => p.ok), 'main is a qualified competitor');
+    assert.ok(lane('trae', ASTRA).predicates.every(p => p.ok), 'company Astra is a qualified competitor');
+    const { accountId, modelId } = plan.primary.candidate;
+    return { pick: [accountId, modelId], estimate: lane('trae', ASTRA).estimate,
+      why: renderPlan(plan, { snapshot, root: '/fixture' }).why.join(' ') };
+  };
+  const observed = replay({ companySolRuns: [70, 72.7, 75], pooled: Array(7).fill(76.8) });
+  assert.deepEqual(observed.pick, ['trae', ASTRA]);
+  assert.equal(observed.estimate.workBasis, 'category history');
+  assert.equal(observed.estimate.workMin, 76.8);
+  assert.match(observed.why, /work time not compared.*trae\/gpt-6-astra \(pooled estimate\).*start delay only/);
+  assert.match(observed.why, /work time compared between lanes with measured account\/model history/);
+  const insufficient = replay({ company: [90, 95], pooled: [99] });
+  assert.deepEqual(insufficient.pick, ['trae', ASTRA]);
+  assert.equal(insufficient.estimate.confidence, 'fallback', 'unattributed samples cannot satisfy the own-history minimum');
+  const slower = replay({ company: [54, 55, 56] });
+  assert.equal(slower.estimate.confidence, 'measured');
+  assert.deepEqual(slower.pick, ['main', main], 'measured company work over 3 minutes slower loses');
+  assert.doesNotMatch(slower.why, /work time not compared/);
+  assert.deepEqual(replay({ company: [53, 54.5, 56] }).pick, ['trae', ASTRA], 'the 3-minute company band is inclusive');
+  assert.deepEqual(replay({ company: [44, 45, 46] }).pick, ['trae', ASTRA], 'faster measured company work wins');
+  for (const [lowStart, basis] of [[false, 'queue'], [true, 'observed-start']]) {
+    const delayed = replay({ companyStart: 4, lowStart, pooled: [1, 2, 3] });
+    assert.equal(delayed.estimate.basis, basis);
+    assert.equal(delayed.estimate.startDelayMin, 4);
+    assert.deepEqual(delayed.pick, ['main', main], 'startup greater than 3 minutes loses even with an optimistic pooled estimate');
+  }
+});
 test('incomparable costs omit term for the entire cohort and sort transitively', () => {
   const raw = fixture([['a', 'ttadk', [SOL]], ['b-company', 'ttadk', [SOL]], ['c', 'ttadk', [SOL]]]);
   raw.lanes.forEach((l, i) => l.costs = [{ bucketId: i === 1 ? 'other' : 'one', unit: 'tokens', normalizedShare: 0.3 - i * 0.1 }]);

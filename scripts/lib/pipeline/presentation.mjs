@@ -229,6 +229,14 @@ export function presentRoute(plan, view, context) {
     if (releaseFallback) why.push(releaseFallback.text);
     const alternatives=eta.filter(e=>e.account!==c.accountId||e.model!==c.modelId);
     why.push(`ETA: ${taskEstimateText(seat.estimate)}; chosen lane: ${company(account)?'company':'personal'} ${c.modelId}@${c.accountId} ${laneStartText(seat.estimate)}${alternatives.length?`; alternatives: ${alternatives.map(e=>`${company(snapshot.accounts.find(a=>a.id===e.account))?'company':'personal'} ${etaText(e)}`).join('; ')}`:''}; expected finish ~${Math.round(seat.estimate.completionMin)} min`);
+    const comparison = plan.trace?.comparator?.finishComparison;
+    if (comparison) {
+      const fallbackIds = new Set(comparison.fallbackCandidateIds);
+      const lanes = [...new Set(plan.trace.candidates.filter(r => fallbackIds.has(r.candidate.id)).map(({ candidate, estimate }) =>
+        `${candidate.accountId}/${candidate.modelId} (${estimate.workBasis === 'category history' ? 'pooled estimate' : 'category fallback'})`))];
+      if (lanes.length) why.push(`work time not compared for lanes without sufficient own history: ${lanes.join(', ')}; those comparisons use start delay only.`);
+      if (comparison.comparedOwnWork) why.push('work time compared between lanes with measured account/model history.');
+    }
     if(adversarial(t)) why.push('adversarial: no GPT model on any account; Kimi-K3, DeepSeek-V4.1-Flash, then scoped Opus; two independent non-GPT families required.');
     const lane = candidateParts(snapshot,c).lane;
     const exhausted = dayExhaustion(account,lane,snapshot.decisionAt);
