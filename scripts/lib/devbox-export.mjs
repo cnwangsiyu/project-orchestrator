@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { checkedMaskPath, worktreeFor } from './masking-scope.mjs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
@@ -125,6 +126,8 @@ function scanBytes(bytes, name, profile) {
 
 export async function exportSource({ repo, ref, profile: profileName, out, dependencies = [] }) {
   repo = fs.realpathSync(repo); out = path.resolve(out);
+  out = checkedMaskPath(out);
+  if (worktreeFor(out)) throw Error('sanitized export output must be outside any git worktree');
   out = path.join(fs.realpathSync(path.dirname(out)), path.basename(out));
   const profile = loadProfile(profileName);
   // Neither the source worktree nor its Git database may contain the output.

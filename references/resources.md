@@ -801,8 +801,10 @@ Set `HEAVY_BUILD_LOG` to a fresh absolute `.log`, `.txt` or `.out` path when the
 combined build output. After the command and log writer close, the wrapper atomically masks credential-like
 property/DSL values in place and reports counts only; the build command's exit code is preserved on success or
 failure. Equivalent local wrappers and custom `tee` capture must close their logs before running
-`node scripts/mask-logs.mjs --force <log-or-build-dir>`. The masker skips symlinks, binaries, files above
-256 MiB and JSONL rollouts.
+`node scripts/mask-logs.mjs --force --task-dir <task-dir> <named-log-file>...`, never a source/build worktree directory.
+No path refuses instead of using cwd; `--force` bypasses only the age check. Directory collection requires a freshly claimed
+run output directory/ownership marker. The masker skips symlinks, binaries, files above 256 MiB and JSONL rollouts,
+refuses tracked targets without exception, and retains rewritten names in a task-dir `mask-rewrites-*.txt` inventory.
 
 Full local packages use one watched `heavy-build.sh` or equivalent process for atomic pair acquisition,
 compute, owned-child cleanup and reverse return. Other local heavy work uses wait-lane. Install exit/

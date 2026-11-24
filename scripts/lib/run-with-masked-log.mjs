@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { redactLogFile } from './log-redaction.mjs';
 import { unsafeFile } from './resource-data.mjs';
 import { maskLogText } from './nightly-audit.mjs';
+import { assertMaskTarget } from './masking-scope.mjs';
 import { privateKeyBlockStream } from './private-key-blocks.mjs';
 
 const script = fileURLToPath(import.meta.url);
@@ -16,6 +17,7 @@ function writeAll(fd, chunk) {
 }
 
 export async function runWithMaskedLog(logFile, command, args) {
+  assertMaskTarget(logFile);
   if (!path.isAbsolute(logFile) || !/\.(?:log|txt|out)$/i.test(logFile) || unsafeFile(logFile))
     throw Error('log path must be an absolute, non-credential .log/.txt/.out path');
   const parent = fs.realpathSync(path.dirname(logFile));

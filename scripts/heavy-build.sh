@@ -37,6 +37,9 @@ fi
 if [ -n "$watch_pid" ] && ! kill -0 "$watch_pid" 2>/dev/null; then
   echo "heavy-build: watched worker $watch_pid is gone" >&2; exit 143
 fi
+if [ -n "$build_log" ]; then
+  node "$script_dir/lib/masking-scope.mjs" check-new-file "$build_log" || exit 2
+fi
 placement="${HEAVY_BUILD_PLACE:-local}"
 remote_form=0
 case "$placement" in
@@ -76,14 +79,8 @@ cleanup() {
   stop_group "$watcher"
   stop_group "$child"
   [ -z "$dispatch_fifo" ] || rm -f "$dispatch_fifo"
-  if [ "$build_finished" -eq 0 ] && [ -n "$build_log" ] && [ -f "$build_log" ]; then
-    if masked_output=$(node "$script_dir/mask-logs.mjs" --force "$build_log"); then
-      masked_count=$(printf '%s\n' "$masked_output" | awk -F '\t' '{ total += $NF } END { print total + 0 }')
-      echo "heavy-build: interrupted log-redaction files=1 masked=$masked_count" >&2
-    else
-      echo 'heavy-build: interrupted log redaction failed' >&2
-    fi
-  fi
+  # The capture child masks before every write, including interrupted runs.
+  # Never re-open a caller-named file here: it may predate this invocation.
   # Return by ownership even if interrupted before acquisition reports success.
   if [ "$placement" = auto ] && [ "$remote_form" = 1 ]; then
     "$res" mini2 cancel-unbound --by "$by" --pid "$$" || status=1

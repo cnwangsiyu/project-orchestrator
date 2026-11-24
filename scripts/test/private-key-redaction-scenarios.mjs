@@ -125,7 +125,10 @@ try {
   assert.equal(maskLogs([cli], { dryRun: true, force: true })[0].masked, 1);
   assert.equal(fs.readFileSync(cli, 'utf8'), plain, 'dry run keeps fixture bytes');
   const maskedCLI = spawnSync(process.execPath, [path.join(root, 'mask-logs.mjs'), '--force', cli], { encoding: 'utf8' });
-  assert.equal(maskedCLI.status, 0, maskedCLI.stderr); assert.match(maskedCLI.stdout, /\t1\n/);
+  assert.equal(maskedCLI.status, 0, maskedCLI.stderr); assert.equal(maskedCLI.stdout, cli + '\n');
+  const rewriteManifest = /rewrite manifest=([^\r\n]+)/.exec(maskedCLI.stderr)?.[1];
+  assert.ok(rewriteManifest);
+  assert.deepEqual(fs.readFileSync(rewriteManifest, 'utf8').trim().split('\n').map(JSON.parse), [cli]);
   assert.equal(fs.readFileSync(cli, 'utf8'), `before\n${placeholder}\nafter\n`);
   const oldShared = process.env.RULES_SHARED; process.env.RULES_SHARED = tmp;
   try {

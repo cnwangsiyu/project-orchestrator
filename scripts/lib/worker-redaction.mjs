@@ -2,6 +2,7 @@ import { checkedLogStat, sameLog, redactLogFile } from './log-redaction.mjs';
 import { redactRolloutFile } from './rollout-redaction.mjs';
 import { threadRollouts } from './worker-thread-size.mjs';
 import { appendNote } from './worker-events.mjs';
+import { finishMaskAudit } from './worker-mask-audit.mjs';
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 export function threadIsIdle(result) {
@@ -67,7 +68,7 @@ export function hubThreadIdle(hub, thread) {
 }
 
 export async function redactWorkerTurn({ home, thread, log, out, checkIdle, tracker,
-  warn = message => console.error(message), print = message => console.log(message) }) {
+  maskAudit, warn = message => console.error(message), print = message => console.log(message) }) {
   const masked = { log: 0, rollout: 0, out: 0 };
   const warning = scope => { try { warn(`redaction warning: ${scope}; logs left unchanged where unsafe`); } catch {} };
   const idle = async () => {
@@ -128,6 +129,10 @@ export async function redactWorkerTurn({ home, thread, log, out, checkIdle, trac
       catch { warning('info note could not be recorded'); }
     }
   } catch { warning('turn-end redaction could not complete'); }
-  finally { try { tracker?.set({ masked }); } catch {} }
+  finally {
+    finishMaskAudit(maskAudit, { paths: [log, out].filter(Boolean), warn,
+      note: message => appendNote({ ...tracker?.metadata(), thread }, 'risk', message) });
+    try { tracker?.set({ masked }); } catch {}
+  }
   return masked;
 }

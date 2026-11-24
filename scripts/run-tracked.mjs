@@ -11,10 +11,13 @@ import { requestBoardRefresh } from './lib/board-refresh.mjs';
 import { projectForOwner } from './lib/task-board.mjs';
 import { loadDigest, workerInstructions } from './lib/global-rules.mjs';
 import { processIdentity } from './lib/process-identity.mjs';
+import { assertMaskTarget } from './lib/masking-scope.mjs';
+import { captureMaskAudit } from './lib/worker-mask-audit.mjs';
 
 const args = process.argv.slice(2), sep = args.indexOf('--'), opts = {};
 for (let i = 0; i < (sep < 0 ? args.length : sep); i += 2) opts[args[i].replace(/^--/, '')] = args[i + 1];
 canonicalPathOptions(opts);
+for (const file of [opts.log, opts.out].filter(Boolean)) assertMaskTarget(file);
 setEventObserver(requestBoardRefresh);
 let tracker;
 const trackerMetadata = { owner: opts.owner, name: opts.name ?? 'exec', account: opts.account ?? 'main', model: opts.model ?? null,
@@ -26,6 +29,8 @@ const ensureTracker = (extra = {}) => tracker ??= lifecycle({ ...trackerMetadata
 if (sep < 0 || !args[sep + 1]) { console.error('run-tracked: expected options -- command [args...]'); process.exit(2); }
 const outStamp = () => { try { const s = fs.statSync(opts.out, { bigint: true }); return `${s.ino}:${s.mtimeNs}:${s.size}`; } catch { return null; } };
 const beforeOut = outStamp();
+const maskAudit = captureMaskAudit({ cwd: opts.cwd ?? process.cwd(), paths: [opts.log, opts.out],
+  taskDirectory: opts['task-dir'] || (opts.log || opts.out ? path.dirname(opts.log || opts.out) : null) });
 const finalIdleMinutes = (() => {
   const value = Number(process.env.CODEX_WORKER_FINAL_IDLE_MIN ?? 10);
   return Number.isFinite(value) && value >= 0 ? value : 10;
@@ -116,7 +121,7 @@ const finish = async (code) => {
       ?? path.join(os.homedir(), '.claude/orchestrator/_shared/codex-accounts.json'), 'utf8')); } catch {}
     const profile = profiles[opts.account ?? 'main'];
     await redactWorkerTurn({ home: opts.home ?? profile?.home ?? process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex'),
-      thread, log: opts.log ? path.resolve(opts.log) : null, out: opts.out ? path.resolve(opts.out) : null, tracker,
+      thread, log: opts.log ? path.resolve(opts.log) : null, out: opts.out ? path.resolve(opts.out) : null, tracker, maskAudit,
       checkIdle: () => hubThreadIdle(opts.hub ?? profile?.hub ?? process.env.CODEX_HUB ?? 'ws://127.0.0.1:47321', thread) });
   } catch {
     console.error('redaction warning: turn-end redaction could not complete');
@@ -128,12 +133,16 @@ const finish = async (code) => {
   process.exit(code);
 };
 try {
-  if (opts.log) { fs.mkdirSync(path.dirname(path.resolve(opts.log)), { recursive: true }); logFd = fs.openSync(opts.log, 'w', 0o600); }
+  if (opts.log) {
+    assertMaskTarget(opts.log);
+    fs.mkdirSync(path.dirname(path.resolve(opts.log)), { recursive: true });
+    logFd = fs.openSync(opts.log, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC | fs.constants.O_NOFOLLOW, 0o600);
+  }
   // A private process group is cleanup ownership, not a daemon: no unref, and the wrapper stays attached.
   const command = args[sep + 1], commandArgs = args.slice(sep + 2);
   const cliPaths = /^(codex|traex|traecli)$/.test(path.basename(command))
     || /codex-worker\.mjs$/.test(commandArgs[0] ?? '');
-  let env = process.env;
+  let env = { ...process.env, CODEX_WORKER_TASK_DIR: maskAudit.taskDirectory ?? '' };
   let rulesVersion = null;
   if (opts['inject-rules'] === 'on') {
     const digest = loadDigest();

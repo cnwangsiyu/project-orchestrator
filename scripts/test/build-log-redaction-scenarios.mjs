@@ -6,6 +6,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { maskLogText } from '../lib/nightly-audit.mjs';
+import { claimOutputDirectory } from '../lib/masking-scope.mjs';
 
 const root = path.dirname(path.dirname(path.dirname(fileURLToPath(import.meta.url))));
 const cli = path.join(root, 'scripts/mask-logs.mjs');
@@ -18,6 +19,8 @@ try {
   const giantMasked = maskLogText(giant);
   assert.equal(giantMasked.masked, 1); assert.ok(!giantMasked.text.includes('FAKE_GIANT_VALUE_123'));
   const logs = path.join(temp, 'logs'); fs.mkdirSync(logs);
+  const scope = claimOutputDirectory(logs);
+  const ownership = ['--run-dir', scope.directory, '--run-id', scope.runId];
   const gradle = path.join(logs, 'gradle-failure.log');
   const xcode = path.join(logs, 'xcodebuild.txt');
   const gradleText = [
@@ -46,7 +49,7 @@ try {
   for (let i = 0; i < 120; i++) { deep = path.join(deep, `d${i}`); fs.mkdirSync(deep); }
   const deepLog = path.join(deep, 'deep.out'); fs.writeFileSync(deepLog, 'SECRET=FAKE_DEEP_VALUE_123\n');
 
-  const dry = spawnSync(process.execPath, [cli, '--dry-run', logs], { encoding: 'utf8' });
+  const dry = spawnSync(process.execPath, [cli, '--dry-run', ...ownership, logs], { encoding: 'utf8' });
   assert.equal(dry.status, 0, dry.stderr);
   assert.ok(dry.stdout.includes(`${gradle}\t3`)); assert.ok(dry.stdout.includes(`${xcode}\t1`));
   assert.ok(dry.stdout.includes(`${deepLog}\t1`));
@@ -54,7 +57,7 @@ try {
   assert.equal(fs.readFileSync(outside, 'utf8'), 'SECRET=FAKE_OUTSIDE_VALUE_123\n');
   assert.equal(fs.readFileSync(rollout, 'utf8'), encrypted);
 
-  const masked = spawnSync(process.execPath, [cli, '--force', logs], { encoding: 'utf8' });
+  const masked = spawnSync(process.execPath, [cli, '--force', ...ownership, logs], { encoding: 'utf8' });
   assert.equal(masked.status, 0, masked.stderr); assert.ok(!masked.stdout.includes('FAKE_'));
   const maskedGradle = fs.readFileSync(gradle, 'utf8'), maskedXcode = fs.readFileSync(xcode, 'utf8');
   assert.equal(lines(maskedGradle), lines(gradleText)); assert.equal(lines(maskedXcode), lines(xcodeText));

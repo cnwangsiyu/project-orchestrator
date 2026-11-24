@@ -3,6 +3,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { checkedLogStat, sameLog, readLogText } from './log-redaction.mjs';
 import { maskLogText } from './nightly-audit.mjs';
+import { assertMaskTarget } from './masking-scope.mjs';
 
 const snapshotType = 'worker_redaction_snapshot';
 // Neither the rollout prefix nor the JSONL extension is exposed to provider discovery.
@@ -33,10 +34,12 @@ export function rolloutReadPath(file) {
 
 export function redactRolloutFile(file, { expected } = {}) {
   if (!file?.endsWith('.jsonl')) throw Error('unsafe rollout path');
+  assertMaskTarget(file);
   const stat = checkedLogStat(file);
   if (expected && !sameLog(expected, stat)) throw Error('rollout changed after idle check');
   const result = maskLogText(readLogText(file, stat), { jsonl: true });
   const copy = maskedRolloutFile(file);
+  assertMaskTarget(copy);
   const text = JSON.stringify({ type: snapshotType, source: identity(stat) }) + '\n' + result.text;
   let prior;
   try {
@@ -53,6 +56,7 @@ export function redactRolloutFile(file, { expected } = {}) {
     fs.fsyncSync(fd); fs.closeSync(fd); fd = undefined;
     if (!sameLog(stat, checkedLogStat(file))) throw Error('rollout changed before snapshot publication');
     if (prior ? !sameLog(prior, checkedLogStat(copy)) : fs.existsSync(copy)) throw Error('rollout snapshot changed before publication');
+    assertMaskTarget(copy);
     fs.renameSync(tmp, copy);
   } finally {
     try { if (fd !== undefined) fs.closeSync(fd); }

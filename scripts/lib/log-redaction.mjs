@@ -3,6 +3,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { maskLogText } from './nightly-audit.mjs';
 import { unsafeFile } from './resource-data.mjs';
+import { assertMaskTarget } from './masking-scope.mjs';
 
 export const sameLog = (a, b) => a.dev === b.dev && a.ino === b.ino && a.size === b.size
   && a.mtimeMs === b.mtimeMs && a.ctimeMs === b.ctimeMs;
@@ -32,13 +33,15 @@ export function readLogText(file, stat) {
   } finally { fs.closeSync(fd); }
 }
 
-export function redactLogFile(file, { force = false, markdown = false, expected } = {}) {
+export function redactLogFile(file, { force = false, markdown = false, expected, scope } = {}) {
+  assertMaskTarget(file, { scope });
   const stat = checkedLogStat(file, { markdown });
   if (expected && !sameLog(expected, stat)) throw Error('worker log changed after idle check');
   if (!force && Date.now() - stat.mtimeMs < 120000)
     throw Error('worker log was modified in the last 120 s; wait for the turn to end or use --force');
   const result = maskLogText(readLogText(file, stat), { jsonl: file.endsWith('.jsonl') });
   if (result.masked) {
+    assertMaskTarget(file, { scope });
     const tmp = path.join(path.dirname(file), `.${path.basename(file)}.${randomUUID()}.tmp`);
     let output, created = false;
     try {
@@ -48,6 +51,7 @@ export function redactLogFile(file, { force = false, markdown = false, expected 
       fs.futimesSync(output, stat.atime, stat.mtime);
       fs.fsyncSync(output); fs.closeSync(output); output = undefined;
       if (!sameLog(stat, checkedLogStat(file, { markdown }))) throw Error('worker log changed before replacement');
+      assertMaskTarget(file, { scope });
       fs.renameSync(tmp, file);
     } finally {
       try { if (output !== undefined) fs.closeSync(output); }

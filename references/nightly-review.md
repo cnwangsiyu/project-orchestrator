@@ -168,10 +168,16 @@ recipient identity leaves a durable blocked receipt. No launchd installation/cha
 
 `node scripts/nightly-review.mjs scan-log --file /absolute/worker.log` reports secret-like field locations only; `.log`, `.out`, `.txt` and `.jsonl` are supported.
 Run `node scripts/nightly-review.mjs redact-log --file /absolute/worker.jsonl` after the worker's turn ended when a risk note says secrets were printed; it atomically masks values and prints counts only, refusing logs modified in the last 120 s unless `--force`.
-For retained task/build output, `node scripts/mask-logs.mjs [--dry-run] <dir-or-file>...` recursively handles only
-`.log`, `.txt` and `.out`, follows no symlinks, skips binaries and files above 256 MiB, and never rewrites JSONL
-rollouts. Dry-run prints only each matching file path and its count. Normal mode refuses files modified in the
-last 120 seconds; use `--force` only after the producing process and any `tee` have closed.
+For retained task/build logs, name external files explicitly: `node scripts/mask-logs.mjs --force --task-dir <task-dir> <log-file>...`.
+No path means an error, never cwd. `--force` bypasses only the 120-second age check, not worktree/path checks.
+Directory walks require the run's freshly claimed output directory and matching ownership marker (`--run-dir DIR --run-id ID`).
+The masker refuses git worktree targets, except untracked git-ignored files under that owned run directory; tracked files are never allowed.
+It follows no symlinks, skips binaries/files above 256 MiB, and never rewrites JSONL rollouts. Dry-run prints names/counts without writes;
+normal mode prints rewritten names and retains a `mask-rewrites-*.txt` inventory in the task directory.
+Before commits after any masking incident, run `node scripts/find-mask-artifacts.mjs --repo <repo> --untracked-dir <named-directory>`.
+For a non-git source snapshot, use `node scripts/find-mask-artifacts.mjs --snapshot-dir /absolute/path/to/source` to list affected filenames and matching-line counts across text file extensions.
+Named directories include ignored dependency fixtures; the detector prints names/counts and directory totals only. Turn-end checks
+compare a startup baseline against tracked diffs and a bounded untracked `.txt`/`.log` scan, and note new artifacts to the owner.
 
 All validation uses isolated fixture HOME/shared directories, mocked CLIs and public test metadata. Never write
 the real shared directory or contact real hubs while developing this stage. Focused suites are

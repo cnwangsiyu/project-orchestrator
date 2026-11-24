@@ -7,6 +7,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { execute, snapshot, makeBundle } from './devbox-run.mjs';
 import { redactLogFile } from './lib/log-redaction.mjs';
+import { prepareRunOutput, assertMaskTarget, scopeForDirectory } from './lib/masking-scope.mjs';
 import { checkAllowlist, checkWorktree } from './lib/mini2-source.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -37,8 +38,9 @@ export async function remote(operation, data, options = {}) {
   const command = '. "$HOME/.mini2-env.sh" && exec /usr/bin/python3 -c ' + quote(remoteSource()) + ' ' + quote(operation) + ' ' + quote(JSON.stringify(data));
   const result = await execute('/usr/bin/ssh', sshArgs(observation.address, command, observation.interface), { timeout: 120000, ...options });
   if (options.errorFile && result.stderr) {
-    fs.appendFileSync(options.errorFile, result.stderr, { mode: 0o600 });
-    redactLogFile(options.errorFile, { force: true });
+    assertMaskTarget(options.errorFile, { scope: options.maskScope });
+    fs.appendFileSync(options.errorFile, result.stderr, { mode: 0o600, flag: fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND | fs.constants.O_NOFOLLOW });
+    redactLogFile(options.errorFile, { force: true, scope: options.maskScope });
   }
   if (result.code) throw Error(`mini2 ${operation} failed (exit ${result.code}); inspect named masked operation log`);
   return options.outputFile ? result : result.stdout;
@@ -73,7 +75,7 @@ export function args(argv) {
     if (arg === '--artifact') opts.artifacts.push(value);
     else opts[arg.slice(2).replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = value;
   }
-  for (const required of ['repo', 'project', 'task', 'out', 'by', 'command', 'allowlist']) if (!opts[required]) throw Error('--' + required + ' required');
+  for (const required of ['repo', 'project', 'task', 'by', 'command', 'allowlist']) if (!opts[required]) throw Error('--' + required + ' required');
   if (/(?:^|[\s"'])\/[^\s"']*\bxcodebuild\b/.test(opts.command) || /-derivedDataPath\b/.test(opts.command)) {
     throw Error('Xcode commands must use the task xcodebuild wrapper through PATH');
   }
@@ -81,7 +83,7 @@ export function args(argv) {
   for (const field of ['timeout', 'diskGiB', ...['cores','memGib'].filter(name=>opts[name]!==undefined)]) if (!Number.isFinite(+opts[field]) || +opts[field] <= 0) throw Error('invalid ' + field);
   if (+opts.timeout > 120) throw Error('mini2 timeout capped at two hours');
   if (!Number.isFinite(+opts.claimTimeout) || +opts.claimTimeout<0 || +opts.claimTimeout>120) throw Error('invalid claim timeout');
-  opts.repo = fs.realpathSync(opts.repo); opts.out = path.resolve(opts.out);
+  opts.repo = fs.realpathSync(opts.repo); if (opts.out) opts.out = path.resolve(opts.out);
   return opts;
 }
 
@@ -89,9 +91,10 @@ export async function main(argv) {
   if (argv[0] === 'reconcile') return reconcile(argv.slice(1));
   const opts = args(argv);
   if (opts.help) { console.log('mini2-run.mjs --repo PATH --allowlist JSON --project NAME --task NAME --by HOLDER --out DIR [--ref worktree] [--artifact FILE] [--qualification FILE] -- COMMAND'); return 0; }
-  fs.mkdirSync(opts.out, { recursive: true });
+  const maskScope = prepareRunOutput(opts.out, { prefix: 'mini2-run-output-' });
+  opts.out = maskScope.directory;
   const temp = fs.mkdtempSync(path.join(opts.out, 'snapshot-'));
-  const state = { cancel: 0, children: new Set(), values: [] }, runId = randomUUID();
+  const state = { cancel: 0, children: new Set(), values: [] }, runId = maskScope.runId;
   let lease, clean = false, prepared = false, watch;
   const stop = () => { state.cancel = 143; for (const child of state.children) child('SIGTERM'); };
   process.on('SIGTERM', stop); process.on('SIGINT', stop); process.on('SIGHUP', stop);
@@ -106,7 +109,7 @@ export async function main(argv) {
     return result.stdout;
   };
   const evidence = { runId, at: new Date().toISOString(), host: 'Bytedances-Mac-mini.local' };
-  const operation = (name, data, options={}) => remote(name,data,{errorFile:path.join(opts.out,'operation-error.log'),...options});
+  const operation = (name, data, options={}) => remote(name,data,{maskScope,errorFile:path.join(opts.out,'operation-error.log'),...options});
   try {
     // Names first: do not inspect, package or read a sensitive-looking source.
     const git=async arguments_ => {
@@ -159,14 +162,14 @@ export async function main(argv) {
     evidence.syncSec = (performance.now()-syncStart)/1000;
     const operationLog = path.join(opts.out, 'operation.log');
     try { await operation('execute', data, { state, outputFile: operationLog, timeout: (+opts.timeout*60+90)*1000 }); }
-    finally { if (fs.existsSync(operationLog)) redactLogFile(operationLog, { force: true }); }
+    finally { if (fs.existsSync(operationLog)) redactLogFile(operationLog, { force: true, scope: maskScope }); }
     const terminal = JSON.parse(await operation('collect', { runId, artifacts: [] }));
     evidence.receipt = terminal.receipt;
     const result = terminal.receipt.exit === 0 ? JSON.parse(await operation('collect', { runId, artifacts: opts.artifacts })) : terminal;
     evidence.artifacts = result.artifacts;
     const log = path.join(opts.out, 'build.log');
     try { await operation('fetch', { runId, file: 'build.log' }, { outputFile: log }); }
-    finally { if (fs.existsSync(log)) redactLogFile(log, { force: true }); }
+    finally { if (fs.existsSync(log)) redactLogFile(log, { force: true, scope: maskScope }); }
     for (const artifact of result.artifacts) {
       const file = path.join(opts.out, 'artifacts', artifact.path);
       if (path.relative(path.join(opts.out, 'artifacts'), file).startsWith('..')) throw Error('invalid retained artifact');
@@ -207,8 +210,10 @@ export async function main(argv) {
 export async function reconcile(argv) {
   if (argv.length !== 4 || argv[0] !== '--out' || argv[2] !== '--by') throw Error('reconcile --out DIR --by HOLDER required');
   const out=path.resolve(argv[1]), by=argv[3];
+  assertMaskTarget(out);
   const intent=JSON.parse(fs.readFileSync(path.join(out,'intent.json'),'utf8'));
   const summary=JSON.parse(fs.readFileSync(path.join(out,'summary.json'),'utf8'));
+  scopeForDirectory(out, intent.runId);
   if (intent.lease.by !== by || intent.runId !== summary.runId) throw Error('reconciliation identity mismatch');
   const terminal=JSON.parse(await remote('collect',{runId:intent.runId,artifacts:[]}));
   const log=path.join(out,'build.log');

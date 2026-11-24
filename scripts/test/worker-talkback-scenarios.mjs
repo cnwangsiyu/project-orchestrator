@@ -59,7 +59,7 @@ try {
     const resume = rpcRows(l.rpc).find((row) => row.method === 'thread/resume');
     const set = resume.params.config.shell_environment_policy.set;
     assert.deepEqual(set, { CODEX_WORKER_THREAD: `${kind}-thread`, CODEX_WORKER_ACCOUNT: kind,
-      CODEX_WORKER_OWNER: owners[kind], CODEX_WORKER_NAME: `${kind}-thread`, RULES_SHARED: tmp });
+      CODEX_WORKER_OWNER: owners[kind], CODEX_WORKER_NAME: `${kind}-thread`, CODEX_WORKER_TASK_DIR: '', RULES_SHARED: tmp });
     // The instructions carry ready-to-run commands with the identity baked in (TRAE does not pass per-thread env).
     assert.match(resume.params.developerInstructions, new RegExp(`--account ${kind} note --thread ${kind}-thread`));
     assert.match(resume.params.developerInstructions, new RegExp(`--account ${kind} ask --thread ${kind}-thread`));

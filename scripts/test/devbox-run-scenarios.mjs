@@ -289,7 +289,7 @@ process.exit(await new Promise(r=>child.on('exit',code=>r(code??143))));
 `;
 
 async function run(f, extra = [], command = 'echo {shard}/{shards}', signalWhen, onSignal = child => child.kill('SIGTERM')) {
-  const out = path.join(f.dir, `out-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  const out = f.outputDirectory ?? path.join(f.dir, `out-${Date.now()}-${Math.random().toString(16).slice(2)}`);
   const timeout = process.env.DEVBOX_TEST_TIMEOUT_MIN || '1';
   const watchdogMs = Number(process.env.DEVBOX_TEST_WATCHDOG_MS || 90000);
   assert.ok(Number.isFinite(watchdogMs) && watchdogMs >= 1000 && watchdogMs <= 600000, 'bounded fixture watchdog');
@@ -2190,6 +2190,33 @@ async function scenarios() {
     const history = JSON.parse(fs.readFileSync(path.join(f.shared, 'flaky-log.jsonl')));
     assert.deepEqual(history.hosts, ['192.0.2.1', '192.0.2.2']); assert.equal(history.commandHash.length, 64); returned(f);
   }
+  const gate = fixture();
+  fs.appendFileSync(path.join(gate.repo, '.gitignore'), '.data/\n');
+  git(gate.repo, 'commit', '-qam', 'ignore gate outputs');
+  gate.outputDirectory = path.join(gate.repo, '.data/web-regression', Date.now() + '-' + process.pid, 'attempt-1');
+  const gateRun = await run(gate, ['--artifact', '.data/web-regression-results/*.json', '--watch-pid', String(process.pid)],
+    'mkdir -p .data/web-regression-results && echo "{}" > .data/web-regression-results/sample.json');
+  ok(gateRun); returned(gate);
+  assert.ok(fs.statSync(gateRun.summary.shards[0].attempts[0].artifact).size > 0);
+  const masker = path.join(path.dirname(script), 'mask-logs.mjs');
+  const gateLogs = fs.readdirSync(gate.outputDirectory, { recursive: true }).filter(file => file.endsWith('.log'));
+  assert.ok(gateLogs.length);
+  for (const log of gateLogs) {
+    const mask = spawnSync(process.execPath, [masker, '--force', path.join(gate.outputDirectory, log)], { env: gate.env });
+    assert.equal(mask.status, 0, mask.stderr.toString());
+  }
+  const nightly = fixture();
+  const name = '.data/w464-nightly-result.json';
+  const savedNightly = await run(nightly, ['--artifact', name, '--artifact-fetch', 'manifest'],
+    'mkdir -p .data && echo "{}" > .data/w464-nightly-result.json');
+  ok(savedNightly);
+  const resultFile = path.join(nightly.dir, 'result-web-1-1-' + savedNightly.summary.runId + '.out');
+  const fetch = spawnSync(process.execPath, [script, 'fetch-artifact', '--manifest', savedNightly.summary.shards[0].attempts[0].artifactManifest,
+    '--name', name, '--out', resultFile, '--timeout', '5'], { env: nightly.env });
+  assert.equal(fetch.status, 0, fetch.stderr.toString());
+  assert.equal(spawnSync(process.execPath, [masker, '--force', resultFile], { env: nightly.env }).status, 0);
+  assert.deepEqual(JSON.parse(fs.readFileSync(resultFile)), {});
+  returned(nightly);
   const artifact = fixture(); const a = await run(artifact, ['--artifact', 'build/*.txt'], 'mkdir -p build && echo evidence > build/result.txt'); ok(a);
   assert.equal(execFileSync('tar', ['-xOf', a.summary.shards[0].attempts[0].artifact, 'build/result.txt'], { encoding: 'utf8' }).trim(), 'evidence');
   const measured = a.summary.shards[0].attempts[0].phaseTimings;
@@ -2202,6 +2229,7 @@ async function scenarios() {
   const large = fixture();
   const ranged = await run(large, ['--artifact', 'build/large.bin', '--artifact-streams', '4'], 'mkdir -p build && dd if=/dev/zero of=build/large.bin bs=1048576 count=64 2>/dev/null'); ok(ranged); returned(large);
   const largeAttempt = ranged.summary.shards[0].attempts[0];
+  assert.ok(largeAttempt.artifactTransport, largeAttempt.artifactIntegrityError || 'expected large artifact transport receipt');
   assert.equal(largeAttempt.artifactTransport.streams, 4);
   assert.ok(fs.statSync(largeAttempt.artifact).size >= 64 * 1048576);
   assert.equal(large.events().filter(event => event.op === 'artifact-range').length, 4);

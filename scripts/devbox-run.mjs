@@ -10,6 +10,7 @@ import { StringDecoder } from 'node:string_decoder';
 import { privateKeyBlockStream } from './lib/private-key-blocks.mjs';
 import { attemptTiming, timingLine } from './lib/devbox-phase-timing.mjs';
 import { redactLogFile } from './lib/log-redaction.mjs';
+import { prepareRunOutput, worktreeFor, assertMaskTarget } from './lib/masking-scope.mjs';
 import { maskLogText } from './lib/nightly-audit.mjs';
 import { manifest, duration, inputKey, indexFile, readIndex, inputSettings, placement, warmCost, warmInput, median, observedCost, fingerprint, inputPython, seedPython } from './lib/devbox-inputs.mjs';
 import { transferFindings } from './lib/devbox-transfer-check.mjs';
@@ -345,11 +346,13 @@ function ownChild(child) {
     && child.signalCode === null && child.kill(sig);
 }
 
-export function execute(file, args, { input, inputFile, outputFile, appendOutput = false, onBytes, onStderrLine, onStdoutLine, onOutput, timeout = 60000, state, cancellable = true, rawCapture = !onOutput && !outputFile, interceptStderr, interceptStdout, env = process.env, strictOutput = true, deferOutputEnd = false } = {}) {
+export function execute(file, args, { input, inputFile, outputFile, outputScope, appendOutput = false, onBytes, onStderrLine, onStdoutLine, onOutput, timeout = 60000, state, cancellable = true, rawCapture = !onOutput && !outputFile, interceptStderr, interceptStdout, env = process.env, strictOutput = true, deferOutputEnd = false } = {}) {
+  if (outputFile) assertMaskTarget(outputFile, { scope: outputScope });
   return new Promise(resolve => {
     const child = spawn(file, args, { stdio: ['pipe', 'pipe', 'pipe'], env });
     let stdout = '', stderr = '', stdoutBytes = 0, stdinBytes = 0, timedOut = false, spawnError, sinkFailed = false;
-    const sink = outputFile ? fs.createWriteStream(outputFile, { mode: 0o600, flags: appendOutput ? 'a' : 'w' }) : null;
+    const sink = outputFile ? fs.createWriteStream(outputFile, { mode: 0o600, flags: fs.constants.O_WRONLY | fs.constants.O_CREAT
+      | fs.constants.O_NOFOLLOW | (appendOutput ? fs.constants.O_APPEND : fs.constants.O_TRUNC) }) : null;
     const rawDecoder = new StringDecoder('utf8');
     const out = lineSink(text => { if (!rawCapture) stdout = (stdout + text).slice(-2 * 1024 * 1024); onOutput?.(text, 'stdout'); }, state?.values, line => {
       const duration = onStdoutLine?.(line);
@@ -1499,7 +1502,7 @@ async function collectArtifacts(row, data, out, state, opts, emit) {
     announced.reason === 'low disk' ? 'not resumable (low disk): ' : 'direct (small set): ');
   try {
     const transferState = { ...state, cancel: state.cancel === 124 ? 0 : state.cancel };
-    const fetched = await ssh(row, 'artifacts', data, { outputFile: out, state: transferState,
+    const fetched = await ssh(row, 'artifacts', data, { outputFile: out, outputScope: opts.maskScope, state: transferState,
       timeout: opts.fetchTimeout * 60000, noRetry: true,
       onBytes: bytes => { received += bytes; },
       onStderrLine: line => {
@@ -1520,7 +1523,7 @@ async function collectArtifacts(row, data, out, state, opts, emit) {
   }
 }
 
-async function fetchArchiveRanges(row, data, plan, out, streams, state, capMinutes, emit, shard, resume = {}) {
+async function fetchArchiveRanges(row, data, plan, out, streams, state, capMinutes, emit, shard, outputScope, resume = {}) {
   validateArchivePlan(row, data, plan);
   emit(`[shard ${shard}] artifact archive bytes=${plan.size} streams=${streams} timeoutCap=${capMinutes} min\n`);
   await readArchive(plan, out, { streams, capMinutes, ...resume,
@@ -1529,7 +1532,7 @@ async function fetchArchiveRanges(row, data, plan, out, streams, state, capMinut
       // Timed-out commands still return their logs; user/parent cancellation stops transfer children.
       const transferState = { ...state, cancel: state.cancel === 124 ? 0 : state.cancel };
       const result = await ssh(row, 'artifact-range', { ...data, sha256: plan.sha256, offset, length },
-        { ...options, appendOutput: true, state: transferState, noRetry: true });
+        { ...options, outputScope, appendOutput: true, state: transferState, noRetry: true });
       return { ...result, fatal: Boolean(state.cancel && state.cancel !== 124)
         || /Permission denied|Authentication failed|No supported authentication/i.test(result.stderr) };
     },
@@ -2923,7 +2926,7 @@ async function shard(opts) {
                   artifacts: [{ name: 'artifact-archive.tar', size: plan.size, sha256: plan.sha256 }] });
                 const actualStreams = !resume && plan.size >= 64 * 1048576 ? streams : 1;
                 attempt.artifactTransport = { method: actualStreams > 1 ? 'parallel-ssh' : 'resumable-ssh', streams: actualStreams, bytes: plan.size };
-                const released = await fetchArchiveRanges(row, data, plan, archive, actualStreams, state, opts.artifactTimeout, emit, opts.shard, resume);
+                const released = await fetchArchiveRanges(row, data, plan, archive, actualStreams, state, opts.artifactTimeout, emit, opts.shard, opts.maskScope, resume);
                 attempt.artifactSha256 = plan.sha256;
                 if (resume) { attempt.artifactDirectRecovered = true; delete attempt.artifactIntegrityError; }
                 if (released.code) {
@@ -3006,7 +3009,7 @@ async function shard(opts) {
     budgets.finish(); clearInterval(parentWatch); fs.closeSync(fd);
     await closeControlConnections(state);
     try {
-      const result = redactLogFile(log, { force: true });
+      const result = redactLogFile(log, { force: true, scope: opts.maskScope });
       if (!process.stdout.destroyed) process.stdout.write(`[shard ${opts.shard}] log-redaction files=1 masked=${result.masked}\n`);
     } catch (error) {
       if (!process.stderr.destroyed) process.stderr.write(`[shard ${opts.shard}] log redaction failed (${error.message})\n`);
@@ -3186,7 +3189,12 @@ export async function fetchArtifact(args) {
   const candidates = lightRows.filter(sameOwner);
   const readbackLimit = Number(process.env.DEVBOX_READBACK_LIMIT || 2);
   if (!Number.isInteger(readbackLimit) || readbackLimit < 1 || readbackLimit > 8) throw Error('DEVBOX_READBACK_LIMIT must be 1..8');
-  const out = path.resolve(opts.out);
+  let out = path.resolve(opts.out);
+  if (worktreeFor(out)) {
+    const scope = prepareRunOutput(path.dirname(out), { prefix: 'devbox-artifact-' });
+    out = path.join(scope.directory, path.basename(out));
+    console.error(`devbox-run: artifact output=${out}`);
+  }
   const readbackId = randomUUID(), receiptFile = `${out}.readback-${readbackId}.json`;
   if (fs.existsSync(out)) throw Error('--out already exists');
   fs.mkdirSync(path.dirname(out), { recursive: true });
@@ -3443,9 +3451,9 @@ async function main(args) {
       return state.cancel;
     } finally { clearInterval(watch); await closeControlConnections(state); }
   }
-  fs.mkdirSync(opts.out, { recursive: true });
-  if (fs.existsSync(path.join(opts.out, 'summary.json')) || fs.readdirSync(opts.out).some(n => /^shard-\d/.test(n))) throw Error('--out already contains a devbox run');
-  const runId = randomUUID(), stopFile = path.join(opts.out, 'stop-' + runId);
+  opts.maskScope = prepareRunOutput(opts.out, { prefix: 'devbox-run-output-' });
+  opts.out = opts.maskScope.directory;
+  const runId = opts.maskScope.runId, stopFile = path.join(opts.out, 'stop-' + runId);
   fs.writeFileSync(path.join(opts.out, 'run.json'), JSON.stringify({ runId }) + '\n', { mode: 0o600, flag: 'wx' });
   console.log('runId=' + runId);
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'devbox-run-'));

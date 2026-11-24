@@ -82,6 +82,8 @@ import { TRANSPORT_BACKOFF_MS, TRANSPORT_CONTINUE_MESSAGE, transportHealthBlock,
 import { sizeLimits, threadSize, freshThreadRoute } from './lib/worker-thread-size.mjs';
 import { modelFamily, modelObservation, rolloutTurnModel } from './lib/worker-model.mjs';
 import { redactWorkerTurn, checkThreadIdle } from './lib/worker-redaction.mjs';
+import { captureMaskAudit } from './lib/worker-mask-audit.mjs';
+import { assertMaskTarget } from './lib/masking-scope.mjs';
 import { maskPasswordStyleValues } from './lib/nightly-audit.mjs';
 import { canonicalPathOptions, canonicalBriefPrompt } from './lib/launch-paths.mjs';
 import { requestBoardRefresh } from './lib/board-refresh.mjs';
@@ -280,6 +282,10 @@ if (PROF?.kind === 'trae' && typeof opts.model === 'string') opts.model = PROF.m
 tracker?.set({ model: opts.model ?? null, requestedModel: REQUESTED_MODEL, effectiveModel: opts.model ?? null,
   actualModel: null, actualModelSource: null, delegatedModels: [] });
 try { canonicalPathOptions(opts); } catch (e) { process.stderr.write(`codex-worker: ${e.message}\n`); process.exit(2); }
+if (['start', 'turn', 'wait'].includes(cmd)) {
+  try { for (const file of [opts.log, opts.out].filter(value => typeof value === 'string')) assertMaskTarget(file); }
+  catch (error) { console.error(`codex-worker: ${error.message}`); process.exit(2); }
+}
 const text = ['start', 'turn'].includes(cmd) ? canonicalBriefPrompt(pos.join(' '), opts.cwd) : pos.join(' ');
 // A read-only worker cannot create files: its deliverable is the final message (--out). Warn when the prompt asks for another file.
 if (cmd === 'start' && opts.sandbox === 'read-only') {
@@ -518,10 +524,12 @@ const talkbackContext = (thread) => {
   const metadata = { account: account ?? 'main', thread, owner: tracker.owner, name: opts.name ?? prior?.name ?? state.name,
     project: opts.project ?? prior?.project ?? state.project, task: opts.task ?? prior?.task ?? state.task,
     runId: state.runId, pid: state.pid, model: state.model, effort: state.effort, turn: state.turn ?? null,
-    cwd: path.resolve(opts.cwd ?? prior?.cwd ?? process.cwd()), startedAt: followerStartedAt };
+    cwd: path.resolve(opts.cwd ?? prior?.cwd ?? process.cwd()), startedAt: followerStartedAt,
+    taskDir: opts['task-dir'] ?? prior?.taskDir ?? state.taskDir ?? (opts.log || opts.out ? path.dirname(opts.log || opts.out) : null),
+    maskAuditStartedAt: maskAudit?.startedAt ?? followerStartedAt };
   const file = saveWorkerContext(metadata);
   const env = { CODEX_WORKER_THREAD: thread, CODEX_WORKER_ACCOUNT: metadata.account,
-    CODEX_WORKER_OWNER: metadata.owner ?? '', CODEX_WORKER_NAME: String(metadata.name), RULES_SHARED: path.dirname(path.dirname(path.dirname(file))) };
+    CODEX_WORKER_OWNER: metadata.owner ?? '', CODEX_WORKER_NAME: String(metadata.name), CODEX_WORKER_TASK_DIR: metadata.taskDir ?? '', RULES_SHARED: path.dirname(path.dirname(path.dirname(file))) };
   return { metadata, config: { shell_environment_policy: { set: env } }, instructions:
     `Worker talkback identity: thread=${thread} account=${metadata.account} owner=${metadata.owner ?? 'unknown'}. Public context: ${file}.\n`
     // Runtime thread IDs disambiguate bare commands when launcher env is ignored;
@@ -1174,11 +1182,18 @@ const stopFollowing = () => {
   cleanups.clear();
 };
 let redactionPromise, finishing = false, redactionStatusOnly = false;
+const auditContext = opts.thread ? workerContext(account ?? 'main', opts.thread, true) : null;
+const originalAuditStart = auditContext?.maskAuditStartedAt ?? auditContext?.startedAt;
+let maskAudit = ['start', 'turn', 'wait'].includes(cmd) ? captureMaskAudit({
+  cwd: opts.cwd ?? auditContext?.cwd ?? process.cwd(),
+  startedAt: cmd === 'wait' && Number.isFinite(originalAuditStart) ? originalAuditStart : Date.now(), resumed: cmd === 'wait',
+  paths: [logFile, typeof opts.out === 'string' ? opts.out : null],
+  taskDirectory: opts['task-dir'] ?? auditContext?.taskDir ?? (logFile || typeof opts.out === 'string' ? path.dirname(logFile || opts.out) : null) }) : null;
 const redactEndedTurn = (thread = activeTurn?.threadId ?? attemptThreadId ?? opts.thread) => {
   if (!tracker) return Promise.resolve();
   done = true; stopFollowing();
   redactionPromise ??= redactWorkerTurn({ home: PROF?.home ?? process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex'),
-    thread, log: logFile, out: typeof opts.out === 'string' ? path.resolve(opts.out) : null, tracker,
+    thread, log: logFile, out: typeof opts.out === 'string' ? path.resolve(opts.out) : null, tracker, maskAudit,
     checkIdle: () => checkThreadIdle((method, params) => call(method, params, { audit: false }), thread,
       { statusOnly: redactionStatusOnly }) });
   return redactionPromise;
@@ -1522,6 +1537,9 @@ const report = async (threadId, turn, final, usage, observation = {}) => {
         activeTurn = null; workStarted = false; workStartedAt = null; runningCommands.clear(); quietNoted = false;
         actualModel = actualModelSource = actualModelProvider = null; delegatedModels.length = 0;
         outcomeTurn = null; outcomeFinal = ''; outcomeInput = undefined; redactionPromise = null; done = false;
+        const continuationContext = workerContext(account ?? 'main', threadId, true);
+        maskAudit = captureMaskAudit({ cwd: opts.cwd ?? continuationContext?.cwd,
+          paths: [logFile], taskDirectory: opts['task-dir'] ?? continuationContext?.taskDir ?? (logFile ? path.dirname(logFile) : null) });
         tracker?.update({reporting:false,status:'inProgress',mayRun:true});
         markOutputStart();
         let nextTurn;

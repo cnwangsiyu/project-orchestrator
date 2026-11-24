@@ -75,6 +75,26 @@ try {
   console.log('PASS DSL and repository credentials masked across launcher log, rollout and final output');
   const waited = hub('stalled-then-ended', { idleStatus: 'completed' }, 'wait');
   verify(waited.f, waited.result, { log: 1, rollout: 1, out: 1 }, 0, 'finished');
+  {
+    const f = fixture('wait-inventory'), taskDir = path.join(f.root, 'audit-task'), repo = path.join(f.root, 'other-tree');
+    fs.mkdirSync(taskDir); fs.mkdirSync(repo);
+    const initialized = spawnSync('git', ['init', '-q', repo], { encoding: 'utf8' });
+    assert.equal(initialized.status, 0);
+    const startedAt = Date.now() - 1000, artifact = path.join(repo, 'new.log');
+    fs.writeFileSync(artifact, '[MASKED] current-turn fixture\n');
+    fs.writeFileSync(path.join(taskDir, 'mask-rewrites-fixture.txt'), JSON.stringify(artifact) + '\n');
+    const contextDir = path.join(f.shared, 'worker-context/fixture'); fs.mkdirSync(contextDir, { recursive: true });
+    fs.writeFileSync(path.join(contextDir, `${f.thread}.json`), JSON.stringify({ account: 'fixture', thread: f.thread,
+      owner, name: 'wait-inventory', cwd: f.root, taskDir, startedAt, maskAuditStartedAt: startedAt }));
+    const { result } = hub('wait-inventory', { idleStatus: 'completed' }, 'wait', f);
+    assert.equal(result.status, 0, result.stderr);
+    const notes = events(f).filter(row => row.event === 'message' && row.kind === 'risk');
+    assert.equal(notes.length, 1, 'wait must reuse the saved task directory to discover rewrite inventories');
+    assert.match(notes[0].text, /new\.log/);
+    const inventories = fs.readdirSync(taskDir).filter(name => name.startsWith('mask-artifact-audit-'));
+    assert.equal(inventories.length, 1);
+    assert.deepEqual(fs.readFileSync(path.join(taskDir, inventories[0]), 'utf8').trim().split('\n').map(JSON.parse), ['new.log']);
+  }
   const interrupted = hub('signal', { signal: true });
   verify(interrupted.f, interrupted.result, { log: 2, rollout: 1, out: 1 }, 143, 'follower-ended');
   const unreadable = hub('unreadable', { unreadable: true });
