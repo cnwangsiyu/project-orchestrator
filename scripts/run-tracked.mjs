@@ -142,8 +142,6 @@ try {
   }
   child = spawn(command, cliPaths ? canonicalLaunchArgv(commandArgs, opts.cwd) : commandArgs, { cwd: opts.cwd, detached: process.platform !== 'win32',
     env, stdio: ['ignore', 'pipe', 'pipe'] });
-  ensureTracker({ ...(rulesVersion ? { rulesVersion } : {}), childPid: child.pid, childIdentity: processIdentity(child.pid),
-    childPgid: process.platform === 'win32' ? null : child.pid });
   child.stdout.on('data',chunk=>{
     if(logFd!==undefined) fs.writeSync(logFd,chunk); else process.stdout.write(chunk);
     stdoutPending=(stdoutPending+chunk.toString()).slice(-65536);
@@ -158,6 +156,10 @@ try {
     signalOwned(signal);
     watchdog ??= setTimeout(() => finish(signalExit(signal)), 2000);
   });
+  // Probe the child identity only after the signal handlers exist: the probe blocks, and a signal
+  // delivered meanwhile must reach the handlers (masking and lifecycle), not the default action.
+  ensureTracker({ ...(rulesVersion ? { rulesVersion } : {}), childPid: child.pid, childIdentity: processIdentity(child.pid),
+    childPgid: process.platform === 'win32' ? null : child.pid });
   child.on('error', (error) => { console.error(`run-tracked: ${error.message}`); finish(1); });
   child.on('close', (code, signal) => finish(code ?? signalExit(signal)));
 } catch (error) { ensureTracker(); console.error(`run-tracked: ${error.message}`); finish(1); }
