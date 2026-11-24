@@ -7,6 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { createTaskSpec, createSnapshot, routePure, renderPlan, enumerateCandidates, validatePlan } from '../lib/pipeline/index.mjs';
+import { personalFallbackPolicy } from '../lib/pipeline/personal-fallback.mjs';
 import { pScopedApproval } from '../lib/pipeline/filters.mjs';
 import { acquireRoute } from '../lib/route-data.mjs';
 import { VERSION } from '../lib/pipeline/common.mjs';
@@ -15,6 +16,9 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'personal-fallback-'));
 const NOW = Date.now(), SOL = 'gpt-6.1-sol', ASTRA = 'gpt-6.2-astra';
 const policy = JSON.parse(fs.readFileSync(path.join(root, 'references/personal-fallback.json'), 'utf8'));
+for (const [configured, expected] of [[undefined,2],[0,0],[3,3],[-1,0],[1.5,0]]) {
+  assert.equal(personalFallbackPolicy({...policy,queueAutoChoiceAfterNotices:configured},NOW).queueAutoChoiceAfterNotices,expected);
+}
 const ref = 'standing:personal-fallback-2026-11-17';
 const caps = { search: true, vision: true };
 const task = extra => createTaskSpec({ category: 'analysis', taskId: 'pfb', requestId: 'pfb-request', project: 'fixture', ...extra });

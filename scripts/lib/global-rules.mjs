@@ -75,6 +75,7 @@ export const auditLaunch = ({ name, project, account, model, effort, vendor = 'c
   const base = { auditId:randomUUID(),name: name ?? null, account: account ?? null, model: model ?? null, effort:effort??null,vendor, t: time,
     sandbox: sandbox ?? null, project: project??decision?.project??supplied?.project??null, routeAt: decision?.t ?? null,
     routeId:decision?.routeId??supplied?.routeId??null,role,userOK:typeof userOK==='string'?userOK:typeof approvalRef==='string'?approvalRef:null,
+    ...(decision?.ownerDecision ? {ownerDecision:decision.ownerDecision,decidedBy:decision.decidedBy??'owner'} : {}),
     routeApprovalRef:typeof approvalRef==='string'?approvalRef:null,routed:expected??null };
   const mismatch=compareLaunch(expected,base,profiles);
   let admissionError;

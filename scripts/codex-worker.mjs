@@ -71,7 +71,7 @@ import { isPolicyBlock, policyBlockRecord, appendPolicyBlock, policyBlockAction 
 import { runHubForeground, hubListReachable } from './lib/hub-foreground.mjs';
 import { readTurnState, reconcileTurnEvents } from './lib/worker-turn.mjs';
 import { parseRouteArgs, routeFlag, rerouteWorker, turnHasWork, heldTaskResources, isToolItem, turnHasRunningTools } from './lib/worker-reroute.mjs';
-import { notifyQueueOwner, pendingQueueChoice, claimQueueChoice, settleQueueChoice, queueRouteContext, queueOptionPlan, queueChoiceSafety } from './lib/queue-decision.mjs';
+import { notifyQueueOwner, pendingQueueChoice, claimQueueChoice, settleQueueChoice, queueRouteContext, automaticQueueOption, queueOptionPlan, queueChoiceSafety } from './lib/queue-decision.mjs';
 import { queuePolicy } from './lib/queue-stall-watch.mjs';
 import { inheritedLaunch, savedLaunch, saveLaunch, recordLaunchModel, readRequestBufferExceededAt, markRequestBufferExceeded } from './lib/worker-launch.mjs';
 import { recordWorkerOutcome, reviewSeat, reviewInstructions } from './lib/worker-outcome.mjs';
@@ -1610,7 +1610,7 @@ const follow = (threadId, turnId, items = []) => {
       workedMinutesBefore:workedBeforeKnown?workedMs/60000:null,workSegmentSince,runningTools:runningTools.size,at:t});
   };
   const chooseQueued = async state => {
-    const option=state.choice.option ?? state.options.find(o=>o.id===state.choice.optionId);
+    let option=state.choice.option ?? state.options.find(o=>o.id===state.choice.optionId);
     if (option?.type==='wait') {settleQueueChoice(ownerRow,'waiting');console.log(`queue-choice: ${opts.name} keeps waiting`);return;}
     handingOff=true;let cancelSent=false,terminalTurn=null;
     const bounded = promise => new Promise((resolve,reject)=>{
@@ -1628,7 +1628,20 @@ const follow = (threadId, turnId, items = []) => {
       const before=(await bounded(readTurns(threadId))).find(t=>t.id===turnId);
       const beforeError=reconcile(before);if(beforeError)throw Error(beforeError);
       const held=heldTaskResources(ROUTE_ARGS??[],opts.name);if(held)throw Error(held);
-      const select=()=>queueOptionPlan(queueRouteContext(ownerRow,ownerLaunch),ownerRow,state.queue,option.candidateId,state.noticeId,state.choice.userOK);
+      const automatic=state.choice.decidedBy==='auto';
+      const select=()=>{
+        const context=queueRouteContext(ownerRow,ownerLaunch);
+        if(automatic) {
+          const policy=queuePolicy();
+          const threshold=policy?.queueAutoChoiceAfterNotices;
+          if(!policy?.enabled || !(threshold>0) || state.noticeCount<threshold || REROUTE_DEPTH>=2)
+            throw Error('automatic queue choice is disabled or outside its limits');
+          const best=automaticQueueOption(ownerRow,state.queue,ownerLaunch,context,state.noticeId);
+          if(!best || (cancelSent && best.id!==option.id)) throw Error('automatic queue choice is no longer eligible');
+          option=best;
+        }
+        return queueOptionPlan(context,ownerRow,state.queue,option.candidateId,state.noticeId,state.choice.userOK,automatic);
+      };
       if(option?.type==='switch') {const route=select();if(route.blocked||route.needsUserOK.length||!route.pick?.command)throw Error('selected option now requires approval or is unavailable; original queue retained');}
       // Snapshot/approval work may take time. Reconcile again immediately before
       // interruption so a queue that started work during option validation wins.
@@ -1640,10 +1653,12 @@ const follow = (threadId, turnId, items = []) => {
       if(!after||!Array.isArray(after.items)||after.status!=='interrupted'||runningTools.size||turnHasRunningTools(after)
         ||!midTurn&&(turnHasWork(after)||workStarted))throw Error('cancellation unconfirmed; no replacement launched');
       if(PROF?.home)saveQueue(PROF.home,threadId,{state:'cancelled',position:null,turnId,at:Date.now()});
-      settleQueueChoice(ownerRow,option.type==='park'?'parked':'selected');
+      settleQueueChoice(ownerRow,option.type==='park'?'parked':'selected',Date.now(),option);
       if(option.type==='park') {outcomeSkip=true;tracker?.result('stalled',{reason:'owner parked queued turn',mayRun:false});console.log('queue-choice: parked; no replacement launched');finish(0);return;}
+      if(automatic) appendEvent({...ownerRow,event:'message',kind:'queue-stalled',wake:true,secretaryRelay:true,
+        noticeId:state.noticeId,decidedBy:'auto',text:`secretary-relay: automatic queue decision for ${ownerRow.name} after ${state.noticeCount} notices; selected ${option.model}/${option.effort}@${option.account}.`});
       await autoReroute('queue-too-slow',{position:state.queue.position,waitedMin:(Date.now()-state.since)/60000},false,
-        {option,noticeId:state.noticeId,owner:state.choice.owner,selectRoute:select,midTurn,resume:option.context==='same thread / resume'});
+        {option,noticeId:state.noticeId,owner:state.choice.owner,decidedBy:automatic?'auto':'owner',selectRoute:select,midTurn,resume:option.context==='same thread / resume'});
     } catch(e) {
       if(terminalTurn&&!reporting) {
         handingOff=false;reporting=true;queueSince=observedQueueSince=null;
@@ -1671,7 +1686,7 @@ const follow = (threadId, turnId, items = []) => {
     const policy=queuePolicy(t);
     if(policy?.enabled) {
       if(ownerRow.owner) {
-        const choice=claimQueueChoice(ownerRow);if(choice){void chooseQueued(choice);return false;}
+        const choice=claimQueueChoice(ownerRow,{policy,since:queueSince,now:t});if(choice){void chooseQueued(choice);return false;}
         const event=notifyQueueOwner(ownerRow,{state:'queued',since:queueSince,position:pos,
           workStarted,workedMinutesBefore:workedBeforeKnown?workedMs/60000:null,runningTools:runningTools.size,
           drainPerMin:spanMin>=2?Math.max(0,(first.pos-last.pos)/spanMin):null},ownerLaunch,{now:t,policy});

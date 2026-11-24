@@ -123,11 +123,11 @@ export const rerouteWorker = async ({ args, depth, from, reason, prompt, opts, p
       || !Object.hasOwn(route, 'pick') || !Array.isArray(route.needsUserOK)) throw Error('route returned an invalid result');
     state.route = route; state.status = 'routed';
     if(selection) {
-      state.selection={noticeId:selection.noticeId,option:selection.option,owner:selection.owner};
+      state.selection={noticeId:selection.noticeId,option:selection.option,decidedBy:selection.decidedBy,owner:selection.owner};
       fs.mkdirSync(path.dirname(rulesLog()),{recursive:true});
       fs.appendFileSync(rulesLog(),JSON.stringify({kind:'route',t:Date.now(),name:opts.name,project:routeFlag(args,'project'),
         category:route.category,pick:route.pick,second:route.secondOpinion,approvalRef:route.pick?.approvalRef??null,
-        routeId:route.routeId,ownerDecision:selection.noticeId,owner:selection.owner})+'\n');
+        routeId:route.routeId,ownerDecision:selection.noticeId,decidedBy:selection.decidedBy,owner:selection.owner})+'\n');
     }
     persist();
   } catch (e) {
@@ -164,7 +164,7 @@ export const rerouteWorker = async ({ args, depth, from, reason, prompt, opts, p
   const to = { vendor: pick.vendor, model: pick.model, effort: pick.effort, account: pick.account??selection?.option.account };
   if (!pick.company) console.log(selection?`why: owner selected personal ${to.account}; queue decision ${selection.noticeId}; approval ${pick.approvalRef}`
     :`why: queued > ${fallback.queueWaitMinutes} min → personal ${pick.account} by routing`);
-  const record = { t: Date.now(), kind: 'reroute', automatic: !selection,ownerDecision:selection?.noticeId??null, project: routeFlag(args, 'project'), name: opts.name,
+  const record = { t: Date.now(), kind: 'reroute', automatic: !selection || selection.decidedBy==='auto',decidedBy:selection?.decidedBy,ownerDecision:selection?.noticeId??null, project: routeFlag(args, 'project'), name: opts.name,
     from, to, reason, category: route.category, depth: depth + 1, toStartEstimateMin: route.eta?.find((r) => r.model === pick.model && r.account === pick.account)?.startDelayMin ?? null };
   fs.mkdirSync(path.dirname(rulesLog()), { recursive: true });
   fs.appendFileSync(rulesLog(), JSON.stringify(record) + '\n');

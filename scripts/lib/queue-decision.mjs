@@ -8,6 +8,7 @@ import { appendEvent } from './worker-events.mjs';
 import { queuePolicy } from './queue-stall-watch.mjs';
 import { acquireRoute } from './route-data.mjs';
 import { parseTaskSpec, createTaskSpec, routePure, renderPlan, enumerateCandidates, validatePlan } from './pipeline/index.mjs';
+import { orderCandidates } from './pipeline/choose.mjs';
 import { makePlan } from './pipeline/plan.mjs';
 import { previousReleaseFallback, releaseUnavailable } from './pipeline/release-fallback.mjs';
 import { candidateParts } from './pipeline/candidates.mjs';
@@ -23,7 +24,7 @@ export const queueDecisionFile = row => path.join(rulesShared(),'queue-decisions
 const waiting = q => ['queued','waiting'].includes(q?.state);
 export function queueChoiceSafety(turn, queue, {runningTools = 0, reporting = false, workStarted = false} = {}) {
   if (reporting || !turn || turn.status !== 'inProgress' || !Array.isArray(turn.items)) return 'turn is completing or ended';
-  if (!waiting(queue) || queue.reporting) return 'turn is no longer queued';
+  if (!waiting(queue) || queue.reporting || queue.completing) return 'turn is no longer queued';
   if (runningTools || queue.runningTools || turnHasRunningTools(turn)) return 'a tool call is still running; choice refused, queue retained; notice will repeat later';
   if (!queue.workStarted && (workStarted || turnHasWork(turn))) return 'turn started during option validation';
   return null;
@@ -52,7 +53,7 @@ export function queueRouteContext(row, launch, now = Date.now()) {
 // This is an explicit capacity choice. Ordinary routing never sets this scope.
 // Forecast receipts describe the options only; the follower confirms cancellation
 // before using the selected plan, then reacquires state for that exact tuple.
-export function queueOptionPlan(context, row, queue, candidateId, decisionId, userOK = null) {
+export function queueOptionPlan(context, row, queue, candidateId, decisionId, userOK = null, automatic = false) {
   const {snapshot} = context;
   const c = enumerateCandidates(context.task,snapshot).candidates.find(c=>c.id===candidateId);
   if (!c) throw Error('selected tuple is no longer in the current catalog');
@@ -65,8 +66,8 @@ export function queueOptionPlan(context, row, queue, candidateId, decisionId, us
       actual:{accountId:row.account,modelId:row.model,effort:row.effort},state:queue.workStarted?'interrupted':'cancelled-no-work',usefulWork:!!queue.workStarted,
       failureKind:'infra',cancellationEvidenceId:decisionId,rerouteReason:'queue-too-slow',queueWaitMinutes:(context.now-queue.since)/60000}],
     floor:{...context.task.floor,previousAttemptIds:[]},
-    queueOwnerChoice:{candidateId,decisionId,owner:row.owner,previousAttemptId:attemptId,midTurn:!!queue.workStarted,allowLowerFloor:account.kind==='trae',allowFamilyChange:c.family==='claude'},
-    ...(isAstra(c.modelId)?{selectionCause:'quality-escalation',qualityEscalation:{modelId:c.modelId,policyVersion:snapshot.policyVersion,evidenceId:decisionId}}:{})});
+    queueOwnerChoice:{candidateId,decisionId,owner:row.owner,previousAttemptId:attemptId,midTurn:!!queue.workStarted,allowLowerFloor:!automatic && account.kind==='trae',allowFamilyChange:!automatic && c.family==='claude'},
+    ...(!automatic && isAstra(c.modelId)?{selectionCause:'quality-escalation',qualityEscalation:{modelId:c.modelId,policyVersion:snapshot.policyVersion,evidenceId:decisionId}}:{})});
   const base = routePure(task,snapshot), r = base.trace?.candidates.find(r=>r.candidate.id===candidateId);
   if (!r) throw Error('selected tuple has no evaluated predicates');
   const failed = r.predicates.filter(p=>!p.ok), gates=failed.flatMap(p=>p.gates??(p.gate?[p.gate]:[]));
@@ -82,13 +83,13 @@ export function queueOptionPlan(context, row, queue, candidateId, decisionId, us
   return view;
 }
 
-export function queueOptions(row,queue,launch,now=Date.now(),context=queueRouteContext(row,launch,now),decisionId='queue-preview') {
-  const options=[], groups=new Set(), healthyCurrent=new Set();
+export function queueOptions(row,queue,launch,now=Date.now(),context=queueRouteContext(row,launch,now),decisionId='queue-preview',automaticOnly=false) {
+  const automaticRows=[], options=[], groups=new Set(), healthyCurrent=new Set();
   for (const c of [...enumerateCandidates(context.task,context.snapshot).candidates].sort((a,b)=>['low','medium','high','xhigh','max'].indexOf(a.effort)-['low','medium','high','xhigh','max'].indexOf(b.effort))) {
     if (c.accountId===row.account&&c.modelId===row.model) continue;
     const group=`${c.accountId}:${c.modelId}`;
     if (groups.has(group)) continue;
-    let route; try { route=queueOptionPlan(context,row,queue,c.id,decisionId); } catch { continue; }
+    let route; try { route=queueOptionPlan(context,row,queue,c.id,decisionId,null,automaticOnly); } catch { continue; }
     const r=route.plan.trace?.candidates.find(r=>r.candidate.id===c.id);
     if (!r || r.predicates.some(p=>!p.ok&&!p.gate&&!p.gates?.length)) continue;
     groups.add(group);
@@ -98,6 +99,12 @@ export function queueOptions(row,queue,launch,now=Date.now(),context=queueRouteC
       ? `${lane.mode}; load ${known(lane.loadPercent)??'?'}%; high-priority quota ${usage?`${usage.used}/${usage.limit}`:lane.mode==='priority'?'available':'unknown/depleted'}`
       : company(account)?`company quota ${account.fallbackUnavailable?'exhausted/restricted':'available'}`
       : `${route.pick?.approvalRef??'scoped personal approval required'}; personal quota cost; reset deadline ${budget?.deadline??'?'}h`;
+    const fallback=route.pick?.personalFallback;
+    const standingMain=c.accountId==='main' && fallback?.quotaApproved && route.pick.approvalRef===fallback.approvalRef
+      && [context.snapshot.personalFallback?.userDecisionRef,context.snapshot.personalPriority?.userDecisionRef].includes(fallback.approvalRef);
+    if (automaticOnly && c.accountId!=='b' && (company(account) || standingMain) && route.pick?.workerArgs && !route.blocked
+      && !route.needsUserOK.length && !route.redeemFirst && !route.signing && (!route.secondOpinion || route.secondOpinion.company))
+      automaticRows.push(r);
     const rung = policyModel(c.modelId);
     if (company(account) && ['astra','sol'].includes(rung) && c.modelId === newestRelease(known(account.catalog) ?? [], rung)
       && route.plan.kind === 'launch' && !releaseUnavailable(route.plan.task, context.snapshot, c)) healthyCurrent.add(c.id);
@@ -110,6 +117,10 @@ export function queueOptions(row,queue,launch,now=Date.now(),context=queueRouteC
       approvalNotes:route.needsUserOK,context:c.accountId===row.account&&c.family!=='claude'&&!launch?.requestBufferExceededAt?'same thread / resume':'fresh worker with the same brief',
       ownerMayLowerFloor:account.kind==='trae'&&c.modelId!==row.model});
   }
+  const eligible=options.some(o=>o.company) ? automaticRows.filter(r=>company(candidateParts(context.snapshot,r.candidate).account)) : automaticRows;
+  const winner=eligible.length ? orderCandidates(context.task,context.snapshot,eligible).winner : null;
+  const automatic=options.find(o=>o.candidateId===winner?.candidate.id);
+  if (automatic) automatic.automaticDefault=true;
   const hasFallback = options.some(o => o.releaseFallback);
   function releaseRank(option) {
     if (healthyCurrent.has(option.candidateId)) return 0;
@@ -128,6 +139,11 @@ export function queueOptions(row,queue,launch,now=Date.now(),context=queueRouteC
   return options;
 }
 
+export function automaticQueueOption(row,queue,launch,context,noticeId,listed=queueOptions(row,queue,launch,context.now,context,noticeId)) {
+  const best=queueOptions(row,queue,launch,context.now,context,noticeId,true).find(o=>o.automaticDefault);
+  return best && (best.company || !listed.some(o=>o.company)) ? best : null;
+}
+
 export function notifyQueueOwner(row,queue,launch,{now=Date.now(),policy=queuePolicy(now),emit=appendEvent,context}={}) {
   const file=queueDecisionFile(row);
   if (!policy?.enabled||!waiting(queue)||queue.reporting||queue.completing) { const old=read(file); if(old?.status==='waiting') writeJson(file,{...old,status:'ended'}); return null; }
@@ -142,8 +158,14 @@ export function notifyQueueOwner(row,queue,launch,{now=Date.now(),policy=queuePo
   if (!canNotify(old)) return null;
   const renewing = same && old.status === 'ended';
   const noticeId=same&&!renewing?old.noticeId:randomUUID();
-  let options, optionError=null;
-  try { options=queueOptions(row,queue,launch,now,context,noticeId); }
+  let options, autoOption=null, optionError=null;
+  try {
+    context??=queueRouteContext(row,launch,now);
+    options=queueOptions(row,queue,launch,now,context,noticeId);
+    const count=same ? old.noticeCount+(old.pendingNotice&&!renewing?0:1) : 1;
+    if (!(same && old.ownerAnswered) && policy.queueAutoChoiceAfterNotices>0 && count>=policy.queueAutoChoiceAfterNotices)
+      autoOption=automaticQueueOption(row,queue,launch,context,noticeId,options);
+  }
   catch(e) { optionError=e.message; options=[{id:'wait',type:'wait',lane:`${row.account}:${row.model}`,model:row.model,effort:row.effort,
     expectedStartDelayMin:null,quotaNote:'saved route unavailable; recover before switching',needsUserApproval:false,context:'same thread / same turn'},
     {id:'park',type:'park',lane:'park',model:row.model,effort:row.effort,expectedStartDelayMin:null,
@@ -164,12 +186,12 @@ export function notifyQueueOwner(row,queue,launch,{now=Date.now(),policy=queuePo
     const current=read(file);
     if (!canNotify(current) || current?.noticeId !== old?.noticeId || current?.status !== old?.status) return null;
     const count=same?(old.pendingNotice&&!renewing?old.noticeCount:(old.noticeCount??1)+1):1;
-    const text=`queue-stalled: ${count===2?'SECOND NOTICE; ':count>2?`NOTICE ${count}; `:''}task=${row.name??row.task} thread=${row.thread} turn=${row.turn} owner=${row.owner} lane=${row.account}:${row.model} model=${row.model} effort=${row.effort}; queued ${((now-queue.since)/60000).toFixed(1)} min position=${queue.position??'?'} drain=${queue.drainPerMin??'?'} /min. Owner decides; no automatic switch.${count>1?' secretary-relay: owner queue decision still pending.':''}${optionError?` Options incomplete: ${optionError}.`:''}\n`
+    const text=`queue-stalled: ${count===2?'SECOND NOTICE; ':count>2?`NOTICE ${count}; `:''}task=${row.name??row.task} thread=${row.thread} turn=${row.turn} owner=${row.owner} lane=${row.account}:${row.model} model=${row.model} effort=${row.effort}; queued ${((now-queue.since)/60000).toFixed(1)} min position=${queue.position??'?'} drain=${queue.drainPerMin??'?'} /min. Owner may choose now.${count>1?' secretary-relay: owner queue decision still pending.':''}${optionError?` Options incomplete: ${optionError}.`:''}\n`
       +options.map(o=>`${o.id}: ${o.lane} ${o.model}/${o.effort}; start=${o.expectedStartDelayMin??'?'} min; ${o.quotaNote}; ${o.releaseFallback?`${o.releaseFallback}; `:''}${o.context}; ${o.interruptionNote}; user approval=${o.needsUserApproval?'required':'no'}; ${o.command}${o.approvalCommand?`; after user approval: ${o.approvalCommand}; append --user-ok <returned approval id> to the choice command`:''}`).join('\n');
     const optionKinds = same && !renewing ? {...old.optionKinds} : {};
     for (const option of [...(same && !renewing ? old.options : []), ...options])
       optionKinds[option.id] = option.type === 'switch' ? (option.company ? 'company' : 'personal') : option.type;
-    const prepared={optionKinds,row,since:queue.since,queue,launch,options,noticeId,noticeCount:count,lastNoticeAt:now,status:'waiting',pendingNotice:true};
+    const prepared={autoOption,ownerAnswered:same && !!old.ownerAnswered,optionKinds,row,since:queue.since,queue,launch,options,noticeId,noticeCount:count,lastNoticeAt:now,status:'waiting',pendingNotice:true};
     // Commands are usable when the event becomes visible. A crash before emit
     // leaves a pending notice to retry, rather than an acknowledged silent wait.
     writeJson(file,prepared);
@@ -206,7 +228,7 @@ export function requestQueueChoice(row,noticeId,optionId,userOK=null,now=Date.no
   if(!option && optionId!=='best' && !kind) throw Error('unknown queue option');
   const profiles=read(process.env.CODEX_ACCOUNTS??path.join(rulesShared(),'codex-accounts.json'))??{};
   const current=readQueue(profiles[row.account]?.home,row.thread);
-  if(!current||current.turnId!==row.turn||!waiting(current)||current.reporting||current.since!==state.since)
+  if(!current||current.turnId!==row.turn||!waiting(current)||current.reporting||current.completing||current.since!==state.since)
     throw Error('source turn is no longer in this queue episode');
   let context;
   if (optionId === 'best' || option?.type === 'switch' || !option) {
@@ -226,21 +248,31 @@ export function requestQueueChoice(row,noticeId,optionId,userOK=null,now=Date.no
   return withLock(file,()=>{
     const latest=read(file);
     if(latest.noticeId!==noticeId||latest.status!=='waiting'||latest.choice) throw Error('this notice already has a choice');
-    writeJson(file,{...latest,choice:{optionId:option.id,option,requestedOptionId:optionId,userOK:option.id===optionId?userOK:null,at:now,owner:row.owner}});
+    writeJson(file,{...latest,ownerAnswered:true,choice:{optionId:option.id,option,requestedOptionId:optionId,userOK:option.id===optionId?userOK:null,at:now,owner:row.owner}});
     return {exitCode:0,option};
   });
 }
 export const pendingQueueChoice = row => {const state=read(queueDecisionFile(row));return state?.status==='waiting'&&state.choice?state:null;};
-export function claimQueueChoice(row) {
+export function claimQueueChoice(row, {policy, since, now=Date.now()}={}) {
   const file=queueDecisionFile(row);if(!fs.existsSync(file))return null;
   return withLock(file,()=>{
-    const state=read(file);if(state?.status!=='waiting'||!state.choice)return null;
+    const state=read(file);
+    if(state?.status!=='waiting') return null;
+    if(!state.choice) {
+      const threshold=policy?.queueAutoChoiceAfterNotices;
+      if(!policy?.enabled || !(threshold>0) || state.noticeCount<threshold || state.pendingNotice || state.ownerAnswered
+        || state.since!==since || state.lastAutoNotice===state.noticeCount) return null;
+      const option=state.autoOption;
+      if(!option) return null;
+      state.lastAutoNotice=state.noticeCount;
+      state.choice={option,optionId:option.id,decidedBy:'auto',owner:row.owner,at:now};
+    }
     writeJson(file,{...state,status:'choosing',choicePid:process.pid});return state;
   });
 }
-export function settleQueueChoice(row,status,now=Date.now()) {
+export function settleQueueChoice(row,status,now=Date.now(),selected) {
   const file=queueDecisionFile(row); if(!fs.existsSync(file))return;withLock(file,()=>{
     const s=read(file);if(s&&(status!=='ended'||['waiting','choosing'].includes(s.status)))writeJson(file,{...s,status,lastNoticeAt:now,choice:null,choicePid:null,
-      ...(['selected','parked'].includes(status)?{choiceExecutedAt:now}:{})});
+      ...(['selected','parked'].includes(status)?{choiceExecutedAt:now,decision:selected?{...s.choice,option:selected,optionId:selected.id}:s.choice}:{})});
   });
 }
