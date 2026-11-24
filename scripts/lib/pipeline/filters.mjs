@@ -6,6 +6,7 @@ import { companyServesInfraRetry, estimateCandidate, usesExclusiveInfraOverflow 
 import { standingPersonalFallback, hardPersonalXhighFallback } from './personal-fallback.mjs';
 import { standingPersonalPriority, personalPriorityGuard, exclusiveCodexTask } from './personal-priority.mjs';
 import { ttadkReserve } from './ttadk-reserve.mjs';
+import { previousReleaseFallback } from './release-fallback.mjs';
 import { rejectedQualityAttempt } from '../worker-result.mjs';
 
 const pass = (id) => result(id);
@@ -107,12 +108,13 @@ export function pTierFloor(t, s, c) {
       return deny('pTierFloor', 'CLAUDE_BROWSER_TUPLE', `Claude browser ${t.browserKind ?? 'page'} requires ${browser[0]} ${browser[1]}; use another category for broader judgment.`, c);
     if (account.kind === 'claude') return pass('pTierFloor');
   }
-  if (['astra', 'sol'].includes(rung) && c.modelId !== newestRelease(known(account?.catalog) ?? [], rung))
+  const releaseFallback = previousReleaseFallback(t, s, c);
+  if (['astra', 'sol'].includes(rung) && c.modelId !== newestRelease(known(account?.catalog) ?? [], rung) && !releaseFallback)
     return deny('pTierFloor', 'MODEL_SUPERSEDED', 'A newer release is listed for this account.', c);
   const explicitEscalation = t.selectionCause === 'quality-escalation' && matchesModel(t.qualityEscalation?.modelId, c.modelId)
     && t.qualityEscalation?.policyVersion === s.policyVersion && !!t.qualityEscalation?.evidenceId;
   const ownerDowngrade = t.queueOwnerChoice?.candidateId === c.id && t.queueOwnerChoice.owner
-    && t.queueOwnerChoice.decisionId && account.kind === 'trae' && t.queueOwnerChoice.allowLowerFloor;
+    && t.queueOwnerChoice.decisionId && account.kind === 'trae' && t.queueOwnerChoice.allowLowerFloor && !releaseFallback;
   if (rung === 'astra' && t.tier !== 'hard' && t.category !== 'image-read' && !explicitEscalation) return deny('pTierFloor', 'ASTRA_SUBSTITUTION_HARD_ONLY', 'Astra substitutions are reserved for hard tasks.', c);
   const hardNonGPT = adversarial(t) && isReview(t) && !t.writes && !t.runsTests && ['kimi', 'deepseek'].includes(c.family);
   if (t.tier === 'hard' && !['astra', 'sol', 'opus', 'fable'].includes(rung) && !hardNonGPT && !ownerDowngrade)
@@ -162,7 +164,8 @@ export function pPreviousFloor(t, s, c, context = {}) {
   if (t.floor.relationVersion !== s.qualityRelationVersion && relevant.length) return deny('pPreviousFloor', 'QUALITY_RELATION_UNKNOWN', 'The pinned quality relation is unavailable.', c);
   if (array(t.floor.previousAttemptIds).some((id) => !relevant.some((a) => a.id === id)) || relevant.some((a) => a.actualStatus !== 'KNOWN' || !a.actual))
     return deny('pPreviousFloor', 'PREVIOUS_ATTEMPT_UNKNOWN', 'An actual prior tuple is unknown.', c);
-  if (t.queueOwnerChoice?.candidateId === c.id && t.queueOwnerChoice.owner && t.queueOwnerChoice.decisionId
+  const releaseFallback = previousReleaseFallback(t, s, c);
+  if (!releaseFallback && t.queueOwnerChoice?.candidateId === c.id && t.queueOwnerChoice.owner && t.queueOwnerChoice.decisionId
     && (t.queueOwnerChoice.allowLowerFloor && candidateParts(s,c).account.kind === 'trae'
       || t.queueOwnerChoice.allowFamilyChange && c.family === 'claude')) return pass('pPreviousFloor');
   // Light quality failures promote to the Sol retry, even when a weaker normal
@@ -180,6 +183,11 @@ export function pPreviousFloor(t, s, c, context = {}) {
     if (t.infraRetry && company(candidateParts(s,c).account)
       && ['chatgpt','claude'].includes(s.accounts.find(account => account.id === a.actual?.accountId)?.kind)
       && !rejectedQualityAttempt(a)) continue;
+    if (releaseFallback && a.actual.accountId === c.accountId && modelId(a.actual.modelId) === releaseFallback.newest
+      && !rejectedQualityAttempt(a) && !['quality', 'spec', 'process'].includes(a.failureKind)
+      && a.cancellationEvidenceId && (a.state === 'cancelled-no-work' && a.usefulWork === false
+        || a.state === 'interrupted' && t.queueOwnerChoice?.midTurn && t.queueOwnerChoice.previousAttemptId === a.id)
+      && effortIndex(c.effort) >= effortIndex(a.actual.effort)) continue;
     const capacityFallback = hardPersonalXhighFallback(t, s, c, capacityRows);
     if (capacityFallback && a.state === 'cancelled-no-work' && a.usefulWork === false && a.cancellationEvidenceId) continue;
     // A failed tool says nothing about answer quality across model families.

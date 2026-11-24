@@ -1,4 +1,5 @@
-import { policyModel, isAstra, EFFORTS, company, companyDevice, adversarial, compare, freeze, stable, known, isReview } from './common.mjs';
+import { policyModel, newestRelease, isAstra, EFFORTS, company, companyDevice, adversarial, compare, freeze, stable, known, isReview } from './common.mjs';
+import { previousReleaseFallback, releaseUnavailable } from './release-fallback.mjs';
 import { candidateParts } from './candidates.mjs';
 import { matchingApproval } from './filters.mjs';
 import { companyServesInfraRetry, laneTransportDemoted, usesExclusiveInfraOverflow } from './estimate.mjs';
@@ -25,6 +26,16 @@ export function orderCandidates(task, snapshot, rows) {
   const parts=r=>candidateParts(snapshot,r.candidate);
   const ready=r=>!stalled(r)&&!r.estimate.capacityReset&&r.estimate.startDelayMin===0
     &&(parts(r).account.kind!=='trae'||r.estimate.balance?.freeNow===true);
+  // Prefer a usable current release across company accounts, then the qualified
+  // predecessor, before the existing company/personal and effort comparators.
+  for (const rung of ['sol', 'astra']) {
+    const rows = cohort.filter(r => r.ok && company(parts(r).account) && policyModel(r.candidate.modelId) === rung);
+    const current = rows.filter(r => r.candidate.modelId === newestRelease(known(parts(r).account.catalog) ?? [], rung)
+      && !releaseUnavailable(task, snapshot, r.candidate));
+    const previous = rows.filter(r => previousReleaseFallback(task, snapshot, r.candidate));
+    const preferred = current.length ? current : previous;
+    if (previous.length && preferred.length) cohort = cohort.filter(r => !rows.includes(r) || preferred.includes(r));
+  }
   const priority = snapshot.personalPriority;
   if (priority?.mode === 'exclusive') {
     // Exclusive selects the personal overflow account, never the quota class.

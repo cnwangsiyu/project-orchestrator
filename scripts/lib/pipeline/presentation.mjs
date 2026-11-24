@@ -2,6 +2,7 @@ import { WORKER_NOTES } from '../fixed-worker-notes.mjs';
 // Pure compatibility rendering. Receives paths, owner and digest from the CLI;
 // it never launches, reads metadata, or changes the selected tuple.
 import { policyModel, isAstra, company, companyDevice, known, adversarial, isReview } from './common.mjs';
+import { previousReleaseFallback } from './release-fallback.mjs';
 import { candidateParts } from './candidates.mjs';
 import {mandatoryReview,projectReviewPolicy} from '../review-policy-data.mjs';
 import { deriveReview } from './taskspec.mjs';
@@ -208,6 +209,8 @@ export function presentRoute(plan, view, context) {
     const account=candidateParts(snapshot,c).account;
     if(!companyDevice(snapshot)&&account.kind==='chatgpt')
       why.push(`no company account on this device: personal ChatGPT account ${account.id} is the default lane`);
+    const releaseFallback = previousReleaseFallback(t, snapshot, c);
+    if (releaseFallback) why.push(releaseFallback.text);
     const alternatives=eta.filter(e=>e.account!==c.accountId||e.model!==c.modelId);
     why.push(`ETA: ${taskEstimateText(seat.estimate)}; chosen lane: ${company(account)?'company':'personal'} ${c.modelId}@${c.accountId} ${laneStartText(seat.estimate)}${alternatives.length?`; alternatives: ${alternatives.map(e=>`${company(snapshot.accounts.find(a=>a.id===e.account))?'company':'personal'} ${etaText(e)}`).join('; ')}`:''}; selected by policy and qualified floor; task time is not a lane-speed ranking`);
     if(adversarial(t)) why.push('adversarial: no GPT model on any account; Kimi-K3, DeepSeek-V4.1-Flash, then scoped Opus; two independent non-GPT families required.');
