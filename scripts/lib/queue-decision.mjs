@@ -179,9 +179,15 @@ export function notifyQueueOwner(row,queue,launch,{now=Date.now(),policy=queuePo
   if (!policy?.enabled||!waiting(queue)||queue.reporting||queue.completing) { const old=read(file); if(old?.status==='waiting') writeJson(file,{...old,status:'ended'}); return null; }
   if (!Number.isFinite(queue.since)||now-queue.since<=policy.queueWaitMinutes*60000) return null;
   const old=read(file), same=old?.since===queue.since;
+  const wait = same && old.status === 'waiting' ? old.explicitWait : null;
+  const snoozed = wait && now < wait.until;
+  const resetPassed = snoozed && wait.resetAt != null && now >= wait.resetAt && !wait.resetReported;
+  const answered = wait ? !!snoozed : same && old.ownerAnswered;
   const canNotify = state => {
     if (state?.since !== queue.since) return true;
     if (state.choice || state.choiceExecutedAt || !['waiting','ended'].includes(state.status)) return false;
+    if (wait && !state.pendingNotice)
+      return !snoozed || resetPassed || now >= (state.nextOptionCheckAt ?? 0);
     return state.status === 'waiting' && state.pendingNotice
       || now-state.lastNoticeAt >= (policy.queueReminderMinutes??10)*60000;
   };
@@ -193,7 +199,7 @@ export function notifyQueueOwner(row,queue,launch,{now=Date.now(),policy=queuePo
     context??=queueRouteContext(row,launch,now);
     options=queueOptions(row,queue,launch,now,context,noticeId);
     const count=same ? old.noticeCount+(old.pendingNotice&&!renewing?0:1) : 1;
-    if (!(same && old.ownerAnswered) && policy.queueAutoChoiceAfterNotices>0 && count>=policy.queueAutoChoiceAfterNotices)
+    if (!answered && policy.queueAutoChoiceAfterNotices>0 && count>=policy.queueAutoChoiceAfterNotices)
       autoOption=automaticQueueOption(row,queue,launch,context,noticeId,options);
   }
   catch(e) { optionError=e.message; options=[{id:'wait',type:'wait',lane:`${row.account}:${row.model}`,model:row.model,effort:row.effort,
@@ -214,21 +220,36 @@ export function notifyQueueOwner(row,queue,launch,{now=Date.now(),policy=queuePo
   }
   return withLock(file,()=>{
     const current=read(file);
-    if (!canNotify(current) || current?.noticeId !== old?.noticeId || current?.status !== old?.status) return null;
+    if (!canNotify(current) || current?.noticeId !== old?.noticeId || current?.status !== old?.status
+      || current?.lastNoticeAt !== old?.lastNoticeAt || current?.explicitWait?.at !== old?.explicitWait?.at
+      || current?.noticeCount !== old?.noticeCount || current?.pendingNotice !== old?.pendingNotice) return null;
+    const optionIds = options.filter(o => o.type === 'switch').map(o => o.id);
+    const addedOption = snoozed && optionIds.some(id => !wait.optionIds.includes(id));
+    const nextOptionCheckAt = now + Math.min(1, policy.queueReminderMinutes ?? 10) * 60000;
+    if (snoozed && !current.pendingNotice && !resetPassed && !addedOption) {
+      writeJson(file,{...current,nextOptionCheckAt});
+      return null;
+    }
+    const account = context?.snapshot.accounts.find(a => a.id === row.account);
+    const bucket = account?.quota.find(q => q.bucketId === row.model);
+    const resetAt = known(bucket?.usage)?.resetsAt ?? known(bucket?.partialReset) ?? known(account?.denialResetAt);
+    const relay = wait ? snoozed ? ' Owner chose wait; queue options or reset changed.' : ' Owner wait period expired.'
+      : ' secretary-relay: owner queue decision still pending.';
     const count=same?(old.pendingNotice&&!renewing?old.noticeCount:(old.noticeCount??1)+1):1;
-    const text=`queue-stalled: ${count===2?'SECOND NOTICE; ':count>2?`NOTICE ${count}; `:''}task=${row.name??row.task} thread=${row.thread} turn=${row.turn} owner=${row.owner} lane=${row.account}:${row.model} model=${row.model} effort=${row.effort}; queued ${((now-queue.since)/60000).toFixed(1)} min position=${queue.position??'?'} drain=${queue.drainPerMin??'?'} /min. Owner may choose now.${context?.source?.derived?' Switch options derived from saved launch metadata (category, project and actual effort).':''}${count>1?' secretary-relay: owner queue decision still pending.':''}${optionError?` Options incomplete: ${optionError}.`:''}\n`
+    const text=`queue-stalled: ${count===2?'SECOND NOTICE; ':count>2?`NOTICE ${count}; `:''}task=${row.name??row.task} thread=${row.thread} turn=${row.turn} owner=${row.owner} lane=${row.account}:${row.model} model=${row.model} effort=${row.effort}; queued ${((now-queue.since)/60000).toFixed(1)} min position=${queue.position??'?'} drain=${queue.drainPerMin??'?'} /min. Owner may choose now.${context?.source?.derived?' Switch options derived from saved launch metadata (category, project and actual effort).':''}${count>1?relay:''}${optionError?` Options incomplete: ${optionError}.`:''}\n`
       +options.map(o=>`${o.id}: ${o.lane} ${o.model}/${o.effort}; start=${o.expectedStartDelayMin??'?'} min; ${o.quotaNote}; ${o.releaseFallback?`${o.releaseFallback}; `:''}${o.context}; ${o.interruptionNote}; user approval=${o.needsUserApproval?'required':'no'}; ${o.command}${o.approvalCommand?`; after user approval: ${o.approvalCommand}; append --user-ok <returned approval id> to the choice command`:''}`).join('\n');
     const optionKinds = same && !renewing ? {...old.optionKinds} : {};
     for (const option of [...(same && !renewing ? old.options : []), ...options])
       optionKinds[option.id] = option.type === 'switch' ? (option.company ? 'company' : 'personal') : option.type;
-    const prepared={autoOption,ownerAnswered:same && !!old.ownerAnswered,optionKinds,row,since:queue.since,queue,launch,options,noticeId,noticeCount:count,lastNoticeAt:now,status:'waiting',pendingNotice:true};
+    const prepared={autoOption,ownerAnswered:!!answered,resetAt,nextOptionCheckAt,
+      explicitWait:snoozed ? {...wait,optionIds:[...new Set([...wait.optionIds,...optionIds])],resetReported:wait.resetReported || resetPassed} : null,optionKinds,row,since:queue.since,queue,launch,options,noticeId,noticeCount:count,lastNoticeAt:now,status:'waiting',pendingNotice:true};
     // Commands are usable when the event becomes visible. A crash before emit
     // leaves a pending notice to retry, rather than an acknowledged silent wait.
     writeJson(file,prepared);
     const phase=queue.workStarted?'mid-turn':'initial-queue';
     const workedMinutesBefore=queue.workedMinutesBefore??null,queuedMinutes=Math.max(0,(now-queue.since)/60000);
     const choiceCommand=command([process.execPath,`${root}/scripts/codex-worker.mjs`,'queue-choice','--notice',noticeId,'--best','--owner',row.owner]);
-    const summary=`queue-stalled notice ${count} for ${String(row.name??row.task).slice(0,80)} at ${row.account}/${row.model}; ${queuedMinutes.toFixed(1)} min queued.${count>1?' secretary-relay: owner queue decision still pending.':''}`;
+    const summary=`queue-stalled notice ${count} for ${String(row.name??row.task).slice(0,80)} at ${row.account}/${row.model}; ${queuedMinutes.toFixed(1)} min queued.${count>1?relay:''}`;
     const event=emit({...row,event:'message',kind:'queue-stalled',severity:'risk',wake:true,
       choiceCommand,summary,text:`${choiceCommand}\nphase=${phase}; worked before queue=${workedMinutesBefore??'?'} min; ${text}`,options,noticeId,noticeCount:count,
       phase,workedMinutesBefore,queuedMinutes,
@@ -252,7 +273,8 @@ export function noticeRow(noticeId, owner) {
 }
 
 export function requestQueueChoice(row,noticeId,optionId,userOK=null,now=Date.now()) {
-  if(!queuePolicy(now)?.enabled)throw Error('queue notice policy is disabled; reconcile with legacy controls');
+  const policy = queuePolicy(now);
+  if(!policy?.enabled)throw Error('queue notice policy is disabled; reconcile with legacy controls');
   const file=queueDecisionFile(row),state=read(file);
   if(!state||state.noticeId!==noticeId||state.row.owner!==row.owner||state.status!=='waiting') throw Error('notice is stale, ended, or owned by another orchestrator');
   let option=state.options.find(o=>o.id===optionId);
@@ -280,7 +302,10 @@ export function requestQueueChoice(row,noticeId,optionId,userOK=null,now=Date.no
   return withLock(file,()=>{
     const latest=read(file);
     if(latest.noticeId!==noticeId||latest.status!=='waiting'||latest.choice) throw Error('this notice already has a choice');
-    writeJson(file,{...latest,ownerAnswered:true,choice:{optionId:option.id,option,requestedOptionId:optionId,userOK:option.id===optionId?userOK:null,at:now,owner:row.owner}});
+    const explicitWait = option.type === 'wait' ? { at:now, until:now + policy.queueWaitSnoozeMinutes * 60000,
+      optionIds:latest.options.filter(o => o.type === 'switch').map(o => o.id),
+      resetAt:latest.resetAt > now ? latest.resetAt : null } : null;
+    writeJson(file,{...latest,explicitWait,nextOptionCheckAt:now,autoOption:null,ownerAnswered:true,choice:explicitWait ? null : {optionId:option.id,option,requestedOptionId:optionId,userOK:option.id===optionId?userOK:null,at:now,owner:row.owner}});
     return {exitCode:0,option};
   });
 }

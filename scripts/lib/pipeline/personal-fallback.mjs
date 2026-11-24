@@ -10,10 +10,12 @@ export function personalFallbackPolicy(raw, now) {
   if (!finite(queueWaitMinutes) || queueWaitMinutes <= 0) return null;
   const queueReminderMinutes = raw.queueReminderMinutes ?? 10;
   if (!finite(queueReminderMinutes) || queueReminderMinutes <= 0) return null;
+  const queueWaitSnoozeMinutes = raw.queueWaitSnoozeMinutes ?? 60;
+  if (!finite(queueWaitSnoozeMinutes) || queueWaitSnoozeMinutes <= 0) return null;
   const threshold = raw.queueAutoChoiceAfterNotices ?? 2;
   const queueAutoChoiceAfterNotices = Number.isSafeInteger(threshold) && threshold >= 0 ? threshold : 0;
   const hardAstraDecisionRef = raw.hardAstraDecisionRef === `standing:hard-astra-${raw.since}` ? raw.hardAstraDecisionRef : null;
-  return { enabled: raw.enabled, since: raw.since, userDecisionRef: raw.userDecisionRef, queueWaitMinutes,queueReminderMinutes,queueAutoChoiceAfterNotices,
+  return { enabled: raw.enabled, since: raw.since, userDecisionRef: raw.userDecisionRef, queueWaitMinutes,queueReminderMinutes,queueWaitSnoozeMinutes,queueAutoChoiceAfterNotices,
     allowHardPersonalAstra: raw.allowHardPersonalAstra === true && !!hardAstraDecisionRef, hardAstraDecisionRef };
 }
 

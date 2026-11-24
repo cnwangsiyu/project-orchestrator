@@ -3,6 +3,7 @@
   "since": "2026-11-17",
   "userDecisionRef": "standing:personal-fallback-2026-11-17",
   "queueWaitMinutes": 5,
+  "queueWaitSnoozeMinutes": 60,
   "queueAutoChoiceAfterNotices": 2,
   "queueReminderMinutes": 10,
   "allowHardPersonalAstra": true,

@@ -8,7 +8,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { createPoolStallMonitor, createQueueStallMonitor, fallbackRouteArgs, queueStallText } from '../lib/queue-stall-watch.mjs';
 import { appendEvent, readEvents } from '../lib/worker-events.mjs';
 import { saveQueue } from '../lib/worker-queue.mjs';
-import { queueDecisionFile, notifyQueueOwner } from '../lib/queue-decision.mjs';
+import { queueDecisionFile, notifyQueueOwner, requestQueueChoice, settleQueueChoice } from '../lib/queue-decision.mjs';
 import { saveLaunch } from '../lib/worker-launch.mjs';
 import { parseTaskSpec } from '../lib/pipeline/taskspec.mjs';
 
@@ -82,6 +82,12 @@ try {
   queue = wait(now + 10 * min);
   assert.equal((await monitor().poll([row], [], now + 10 * min)).length, 0, 'changed since re-arms even if ready was between polls');
   assert.equal((await monitor().poll([row], [], now + 16 * min)).length, 1);
+  fs.writeFileSync(process.env.CODEX_ACCOUNTS,JSON.stringify(profiles));
+  saveQueue(tmp,row.thread,queue);
+  requestQueueChoice(row,samples.at(-1).noticeId,'wait',null,now+16*min);
+  settleQueueChoice(row,'waiting',now+16*min);
+  assert.deepEqual(await monitor().poll([row],[],now+30*min),[],'a restarted watcher honors explicit wait');
+  assert.equal(JSON.parse(fs.readFileSync(noticeFile)).noticeCount,1);
   console.log('PASS queue episodes remain deduplicated across watcher restarts, re-arm, and ignore fast drain under the threshold');
 
   const presented = queueStallText(row, wait(now - 6 * min), { now, quota, launch, policy, holds: false });

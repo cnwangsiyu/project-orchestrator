@@ -52,6 +52,30 @@ try {
   assert.equal(automaticQueueOption(personal.row,personal.queue,personal.launch,personal.context,'gated'),null);
   f=fixture();
   const emit=e=>(events.push(e),e);
+  for (const change of ['none','option','reset']) {
+    f=fixture();
+    const usage = change === 'reset' ? { resetsAt: now + 5 * min } : { used: 10, limit: 10, resetsAt: now + 90 * min };
+    f.raw.accounts.find(a=>a.id==='trae').quota=[{bucketId:SOL,priority:'depleted',usage}];
+    f.context.snapshot=createSnapshot(f.raw);
+    const poll = minutes => notifyQueueOwner(f.row,f.queue,f.launch,{now:now+minutes*min,policy,context:f.context,emit});
+    const first=poll(0);
+    requestQueueChoice(f.row,first.noticeId,'wait',null,now);
+    assert.equal(claimQueueChoice(f.row),null,'wait is durable without a follower');
+    assert.equal(poll(1),null);
+    if(change==='option') f=fixture(true);
+    if(change==='none') {
+      assert.equal(poll(59),null);
+      assert.equal(JSON.parse(fs.readFileSync(queueDecisionFile(f.row))).noticeCount,1);
+      assert.equal(poll(60).noticeCount,2);
+    } else {
+      const material=poll(5);
+      assert.equal(material.noticeCount,2); assert.doesNotMatch(material.summary,/still pending/);
+      assert.equal(poll(15),null);
+      assert.equal(claimQueueChoice(f.row,{policy,since:f.queue.since,now:now+15*min}),null);
+    }
+    fs.rmSync(queueDecisionFile(f.row));
+  }
+  f=fixture();
   assert.equal(notifyQueueOwner(f.row,{...f.queue,since:now-5*min},f.launch,{now,policy,context:f.context,emit}),null);
   const legacy = {defaults:{...f.launch.defaults,'route-args':undefined,'routed-seat':JSON.stringify({
     name:f.row.name,project:f.row.project,category:'build-run',role:'primary',routeId:'route:fixture',effort:'high'})}};
@@ -97,7 +121,7 @@ try {
   fs.writeFileSync(process.env.ROUTE_SNAPSHOT_FILE,JSON.stringify(f.raw));
   assert.equal(requestQueueChoice(f.row,notice.noticeId,astraOption.id,approved.stdout.trim(),Date.now()).exitCode,0);
   settleQueueChoice(f.row,'waiting',now);
-  assert.equal(requestQueueChoice(f.row,notice.noticeId,'wait',null,now).exitCode,0);
+  assert.equal(requestQueueChoice(f.row,notice.noticeId,'park',null,now).exitCode,0);
   assert.ok(claimQueueChoice(f.row));assert.equal(claimQueueChoice(f.row),null,'only one follower may execute an owner choice');
   settleQueueChoice(f.row,'waiting',now);assert.equal(JSON.parse(fs.readFileSync(queueDecisionFile(f.row))).choice,null);
   assert.equal(requestQueueChoice(f.row,notice.noticeId,notice.options.find(o=>o.account==='main'&&o.model===SOL).id,null,now).exitCode,0);
@@ -111,7 +135,7 @@ try {
   const renewed=notifyQueueOwner(f.row,f.queue,f.launch,{now:now+10*min,policy,context:f.context,emit});
   assert.notEqual(renewed.noticeId,endedNotice.noticeId);assert.equal(renewed.noticeCount,2);
   assert.throws(()=>requestQueueChoice(f.row,endedNotice.noticeId,'wait',null,now),/stale/);
-  assert.equal(requestQueueChoice(f.row,renewed.noticeId,'wait',null,now).exitCode,0);
+  assert.equal(requestQueueChoice(f.row,renewed.noticeId,'park',null,now).exitCode,0);
   assert.equal(notifyQueueOwner(f.row,f.queue,f.launch,{now:now+20*min,policy,context:f.context,emit}),null,'pending choice is not replaced');
   assert.ok(claimQueueChoice(f.row));
   assert.equal(notifyQueueOwner(f.row,f.queue,f.launch,{now:now+20*min,policy,context:f.context,emit}),null,'claimed choice is not replaced');
