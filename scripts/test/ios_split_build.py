@@ -80,7 +80,7 @@ esac
         with patch.object(split, "wrapped", transfer), self.assertRaisesRegex(ValueError, "checksum"):
             split.compile_app(self.args, self.commit, "true")
 
-    def test_registered_hash_mismatch_never_invokes_signer(self):
+    def signing_fixture(self):
         args = self.args
         app = args.out / "unsigned" / "Demo.app"
         app.mkdir(parents=True)
@@ -101,11 +101,53 @@ esac
             path=str(manifest), additional_path_field="path", additional_sha256_field="bundleSHA256",
             sha256_field="preparedExecutableSHA256")), output=dict(path=str(args.out/"signed"/app.name),
             bundle_id=args.bundle_id), method=dict(script="/fixture/signer", argv=["--only", "demo"]))
+        return args, build, entry
+
+    def test_registered_hash_mismatch_never_invokes_signer(self):
+        args, build, entry = self.signing_fixture()
         with patch.object(split, "allowed"), patch.object(split, "signature", return_value={
                 "bundle": args.bundle_id}), patch.object(split, "wrapped") as signer:
             with self.assertRaisesRegex(ValueError, "pin the full unsigned bundle hash"):
                 split.sign(args, build, entry)
             signer.assert_not_called()
+
+    def test_project_signer_invocation_and_receipts(self):
+        args, build, entry = self.signing_fixture()
+        shared = self.root / "shared"
+        receipt = shared / "user-signing/receipts/demo.json"
+        receipt.parent.mkdir(parents=True)
+        method_receipt = args.out / "method-receipt.json"
+        signed = Path(entry["output"]["path"])
+        signed.parent.mkdir()
+        cert = "A"*40
+        entry.update(receipt=str(receipt), method_receipt=str(method_receipt),
+                     expected_certificate=dict(sha1=cert, team="FIXTURE"))
+        entry["input"]["bundle_sha256"] = build["sha256"]
+        # A fixture signer copies only our generated text package and fixture receipt.
+        signer = self.root / "fixture-signer"
+        signer.write_text('#!/bin/sh\nset -eu\ncp -R "$1" "$2"\ncp "$3" "$4"\ncp "$3" "$5"\n')
+        signer.chmod(0o755)
+        template = self.root / "template.json"
+        split.record(template, dict(result="PASS", id=args.entry, output=str(signed),
+            input_bundle_sha256=build["sha256"], bundle_sha256=build["sha256"],
+            certificate_sha1=cert, team="FIXTURE"))
+        argv = [build["app"], str(signed), str(template), str(receipt), str(method_receipt)]
+        entry["method"] = dict(script=str(signer), argv=argv)
+        args.signer_command.write_text(json.dumps([str(signer), *argv]))
+        fake_verify = self.root / "codesign"
+        fake_verify.write_text('#!/bin/sh\necho TeamIdentifier=FIXTURE\n')
+        fake_verify.chmod(0o755)
+        with patch.object(split, "allowed"), patch.object(split, "SHARED", shared), patch.object(
+                split, "signature", return_value=dict(bundle=args.bundle_id, profileSHA256="fixture")
+                ), patch.dict(os.environ, PATH=str(self.root) + os.pathsep + os.environ["PATH"]):
+            result = split.sign(args, build, entry)
+        self.assertEqual(result["sha256"], build["sha256"])
+        self.assertTrue(method_receipt.is_file())
+        calls = self.journal.read_text()
+        self.assertIn("--need ios-sign", calls)
+        self.assertIn("--profile light", calls)
+        self.assertIn("--pin main", calls)
+        self.assertIn("return-build", calls)
 
     def test_refuses_unapproved_identity(self):
         with patch.object(split, "read", return_value={"identities": []}), self.assertRaisesRegex(

@@ -230,6 +230,14 @@ def manifest(args, app):
                 bundleSHA256=tree, preparedExecutableSHA256=digest(exe))
 
 
+def verified_manifest(args, build):
+    app = Path(build["app"])
+    prepared = manifest(args, app)
+    require(prepared == read(args.out / "manifest.json") and prepared["bundleSHA256"] == build["sha256"],
+            "unsigned artifact changed after build")
+    return prepared
+
+
 def allowed(identity):
     identities = read(SHARED / "user-signing/identities.json")["identities"]
     require(any(row["id"] == identity and row.get("approved") and row.get("platform") == "ios"
@@ -262,9 +270,7 @@ def sign(args, build, entry):
     require(entry["input"]["path"] == str(app) and entry["output"]["bundle_id"] == args.bundle_id
             and signed.resolve() == args.out / "signed" / app.name,
             "registered input, fresh output or bundle mismatch")
-    prepared = manifest(args, app)
-    require(prepared == read(args.out / "manifest.json") and prepared["bundleSHA256"] == build["sha256"],
-            "unsigned artifact changed after build")
+    prepared = verified_manifest(args, build)
     source = entry["input"]["hash_source"]
     registered = read(source["path"])
     require(registered[source["additional_path_field"]] == str(app)
@@ -358,6 +364,7 @@ checkAllowlist(JSON.parse(fs.readFileSync(file)),rows,history);
         require(build["commit"] == commit and build["project"] == args.project
                 and build["task"] == args.task and Path(build["app"]).resolve().is_relative_to(
                     args.out / "unsigned"), "resume source or task mismatch")
+        verified_manifest(args, build)
     else:
         args.out.mkdir(parents=True, exist_ok=False)
         started = time.monotonic()
