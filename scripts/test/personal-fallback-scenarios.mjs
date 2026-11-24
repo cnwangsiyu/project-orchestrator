@@ -221,12 +221,14 @@ try {
     const raw = fixture(); deny(raw, 'ttadk'); queued(raw, 45, { mode: 'priority' });
     assert.equal(run(raw).primary.candidate.accountId, 'trae');
   });
-  check('faster company fallback model prevents personal spend', () => {
+  check('ready main Sol has standing approval ahead of a faster Terra downgrade', () => {
     const raw = fixture(); deny(raw, 'ttadk'); queued(raw, 45);
     const terra = 'gpt-5.6-terra'; raw.accounts[1].catalog.push(terra);
     raw.models.push({ ...raw.models[0], id: terra });
     raw.lanes.push({ ...raw.lanes[1], id: `trae:${terra}`, modelId: terra, mode: 'bucket-free', readyAt: NOW, position: 0, queueState: 'ready' });
-    const p = run(raw); assert.equal(p.primary.candidate.accountId, 'trae'); assert.equal(p.primary.candidate.modelId, terra);
+    const p = run(raw); assert.equal(p.kind, 'launch');
+    assert.deepEqual([p.primary.candidate.accountId, p.primary.candidate.modelId], ['main', SOL]);
+    assert.match(view(p, raw).why.join(' '), /2026-11-24/);
   });
   check('restricted and excluded company lanes support fallback', () => {
     const raw = fixture(); raw.health = [{ accountId: 'trae', restricted: true, generation: 'restriction-1', until: NOW + 3600000 }];
