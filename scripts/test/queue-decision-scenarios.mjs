@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {createSnapshot,parseTaskSpec,createTaskSpec} from '../lib/pipeline/index.mjs';
-import {notifyQueueOwner,queueOptions,queueOptionPlan,queueDecisionFile,requestQueueChoice,claimQueueChoice,settleQueueChoice,queueChoiceSafety,automaticQueueOption} from '../lib/queue-decision.mjs';
+import {notifyQueueOwner,queueSourceArgs,queueOptions,queueOptionPlan,queueDecisionFile,requestQueueChoice,claimQueueChoice,settleQueueChoice,queueChoiceSafety,automaticQueueOption} from '../lib/queue-decision.mjs';
 import {queueStallLabel} from '../lib/queue-stall-watch.mjs';
 import {saveQueue} from '../lib/worker-queue.mjs';
 import {readEvents,eventLine,hookEventLine} from '../lib/worker-events.mjs';
@@ -53,6 +53,18 @@ try {
   f=fixture();
   const emit=e=>(events.push(e),e);
   assert.equal(notifyQueueOwner(f.row,{...f.queue,since:now-5*min},f.launch,{now,policy,context:f.context,emit}),null);
+  const legacy = {defaults:{...f.launch.defaults,'route-args':undefined,'routed-seat':JSON.stringify({
+    name:f.row.name,project:f.row.project,category:'build-run',role:'primary',routeId:'route:fixture',effort:'high'})}};
+  const incompleteRow = { ...f.row, effort: undefined };
+  const legacyNotice = notifyQueueOwner(incompleteRow,f.queue,legacy,{now,policy,emit});
+  assert.equal(JSON.parse(fs.readFileSync(queueDecisionFile(f.row))).row.effort, 'high');
+  assert.match(legacyNotice.text,/derived from saved launch metadata/);
+  assert.ok(legacyNotice.options.some(o => o.type === 'switch'));
+  const exact = ['build-run','--impact','throwaway','--needs-cli','adb','--exclude-model','gemini'];
+  fs.writeFileSync(process.env.ROUTE_LOG_FILE,JSON.stringify({kind:'route',routeId:'route:fixture',project:f.row.project,name:f.row.name,routeArgs:exact}));
+  assert.deepEqual(queueSourceArgs(f.row,legacy),{args:exact});
+  assert.deepEqual(queueSourceArgs(f.row,{defaults:{...legacy.defaults,'route-args':'truncated['}}),{args:exact});
+  fs.rmSync(queueDecisionFile(f.row)); fs.rmSync(process.env.ROUTE_LOG_FILE);
   let notice=notifyQueueOwner(f.row,f.queue,f.launch,{now,policy,context:f.context,emit});
   const short=hookEventLine({...notice,summary:'long description '.repeat(200)});
   assert.ok(short.length<=500 && short.endsWith('\n'+notice.choiceCommand));
@@ -248,7 +260,8 @@ try {
     const args=['--import',transport,path.join(root,'scripts/codex-worker.mjs'),'--account','trae',label==='continued'?'turn':'start',
       ...(label==='continued'?['--thread','fixture']:[]),'--cwd',tmp,'--model',SOL,
       '--effort','high','--sandbox','workspace-write','--name','queue-test','--owner',owner,'--project','fixture',
-      '--route-args',f.launch.defaults['route-args'],'--queue-patience-min',label==='legacy-disabled'?'0.01':'30','--log',log,'--out',out,'Read the same brief.'];
+      ...(label==='ttadk' ? ['--routed-seat',JSON.stringify({category:'analysis',role:'primary',name:f.row.name,project:f.row.project,account:'trae',model:SOL,effort:'high'})]
+        : ['--route-args',f.launch.defaults['route-args']]),'--queue-patience-min',label==='legacy-disabled'?'0.01':'30','--log',log,'--out',out,'Read the same brief.'];
     const cancelCase=label.startsWith('cancel-');
     const config={source:SOL,rpc,quiet:true,quietKeepAliveMs:10000,queueAgeMin:age,complete:!cancelCase,completeDelayMs:3500,
       queueOwnerSelect:selection,queueOwnerApprove:label==='claude-approved',progress:label==='work-started',

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { rulesShared, loadDigest } from './global-rules.mjs';
+import { rulesShared, rulesLog, readRecords, loadDigest } from './global-rules.mjs';
 import { withLock, writeJson } from './shared-file.mjs';
 import { appendEvent } from './worker-events.mjs';
 import { queuePolicy } from './queue-stall-watch.mjs';
@@ -13,6 +13,7 @@ import { makePlan } from './pipeline/plan.mjs';
 import { previousReleaseFallback, releaseUnavailable } from './pipeline/release-fallback.mjs';
 import { candidateParts } from './pipeline/candidates.mjs';
 import { company, known, isAstra, newestRelease, policyModel } from './pipeline/common.mjs';
+import { flagArgs } from './route-args.mjs';
 import { nextRouteArgs, setRouteFlag, turnHasWork, turnHasRunningTools } from './worker-reroute.mjs';
 import { shellQuote } from './pipeline/presentation.mjs';
 import { readQueue } from './worker-queue.mjs';
@@ -35,19 +36,47 @@ export function queueOwnerNotice(row, queue) {
     ? state.noticeCount : null;
 }
 const command = args => args.map(shellQuote).join(' ');
-const argvOf = launch => {
-  const raw = launch?.defaults?.['route-args'];
-  const args = Array.isArray(raw)?raw:JSON.parse(raw??'null');
-  if (!Array.isArray(args)||!args.length) throw Error('saved route arguments unavailable');
-  return args;
+const parseSaved = value => {
+  if (typeof value !== 'string') return value;
+  try { return JSON.parse(value); } catch { return null; }
 };
+const usableArgs = args => Array.isArray(args) && args.length > 0
+  && args.every(arg => typeof arg === 'string' && arg.length > 0) && !args[0].startsWith('-');
+const launchEffort = (row, launch) => row.effort ?? launch?.effort ?? launch?.defaults?.effort
+  ?? parseSaved(launch?.defaults?.['routed-seat'])?.effort;
+export function queueSourceArgs(row, launch) {
+  const defaults = launch?.defaults ?? {}, saved = parseSaved(defaults['route-args']);
+  if (usableArgs(saved)) return { args: saved };
+  const seat = parseSaved(defaults['routed-seat']);
+  const project = defaults.project ?? seat?.project ?? launch?.project ?? row.project;
+  const decision = seat?.routeId && readRecords(rulesLog()).find(r => r.kind === 'route'
+    && r.routeId === seat.routeId && r.project === project && r.name === seat.name);
+  if (usableArgs(decision?.routeArgs) && seat.role === 'primary') return { args: decision.routeArgs };
+  const category = seat?.category ?? defaults.category ?? launch?.category ?? row.category;
+  if (!category || !project) throw Error('saved route arguments and launch category/project unavailable');
+  // Old records have no argv. Keep scope and exclusions from the matching
+  // decision, plus the worker's persisted restrictions and paths.
+  const flags = { project, name: defaults.name ?? row.name, impact: decision?.impact ?? (['implement','implement-hard','debug','science'].includes(category) ? 'service' : undefined),
+    stakes: decision?.stakes ?? (seat?.tier === 'hard' ? 'high' : undefined), env: decision?.env, failures: decision?.failures,
+    'failure-kind': decision?.failureKind, 'review-class': decision?.reviewClass, 'review-reason': decision?.reviewReason, 'review-scope': decision?.reviewScope,
+    'exclude-account': decision?.excluded?.join(',') || undefined,
+    'exclude-lane': decision?.excludedLanes?.join(',') || undefined,
+    'auto-check': decision?.autoCheck, 'runs-tests': decision?.runsTests, 'no-local-build': decision?.noLocalBuild,
+    'no-redeem': decision?.noRedeem, 'browser-origins': defaults['browser-origins'], apps: defaults['computer-use-apps'],
+    sandbox: defaults.sandbox === 'danger-full-access' ? undefined : defaults.sandbox,
+    'task-dir': defaults['task-dir'] ?? (defaults.log ? path.dirname(defaults.log) : undefined) };
+  for (const k of ['signing','security','defensive','adversarial','background']) flags[k] = defaults[k] || decision?.[k];
+  return { args: [category, ...flagArgs(flags)], derived: true };
+}
 export function queueRouteContext(row, launch, now = Date.now()) {
   const defaults = launch?.defaults??{};
-  let args = nextRouteArgs(argvOf(launch),{account:row.account,model:row.model,effort:row.effort},Number(defaults['auto-reroute-depth']??0));
+  const source = queueSourceArgs(row, launch);
+  const effort = launchEffort(row, launch);
+  let args = nextRouteArgs(source.args,{account:row.account,model:row.model,effort},Number(defaults['auto-reroute-depth']??0));
   for (const name of ['owner','name','cwd','task-dir']) if (defaults[name]??row[name]) args=setRouteFlag(args,name,defaults[name]??row[name]);
   const parsed = parseTaskSpec(args,{taskId:row.name??row.task,requestId:`queue-${key(row)}`,sandboxCeiling:'danger-full-access'});
   const context = acquireRoute(parsed,{root,now});
-  return {...context,args};
+  return {...context,args,source,effort};
 }
 
 // This is an explicit capacity choice. Ordinary routing never sets this scope.
@@ -63,7 +92,7 @@ export function queueOptionPlan(context, row, queue, candidateId, decisionId, us
   const task = createTaskSpec({...context.task,flags,
     approvalRefs:userOK?[...context.task.approvalRefs,userOK]:context.task.approvalRefs,
     previousAttempts:[{id:attemptId,taskId:context.task.taskId,role:context.task.role,actualStatus:'KNOWN',
-      actual:{accountId:row.account,modelId:row.model,effort:row.effort},state:queue.workStarted?'interrupted':'cancelled-no-work',usefulWork:!!queue.workStarted,
+      actual:{accountId:row.account,modelId:row.model,effort:row.effort ?? context.effort},state:queue.workStarted?'interrupted':'cancelled-no-work',usefulWork:!!queue.workStarted,
       failureKind:'infra',cancellationEvidenceId:decisionId,rerouteReason:'queue-too-slow',queueWaitMinutes:(context.now-queue.since)/60000}],
     floor:{...context.task.floor,previousAttemptIds:[]},
     queueOwnerChoice:{candidateId,decisionId,owner:row.owner,previousAttemptId:attemptId,midTurn:!!queue.workStarted,allowLowerFloor:!automatic && account.kind==='trae',allowFamilyChange:!automatic && c.family==='claude'},
@@ -145,6 +174,7 @@ export function automaticQueueOption(row,queue,launch,context,noticeId,listed=qu
 }
 
 export function notifyQueueOwner(row,queue,launch,{now=Date.now(),policy=queuePolicy(now),emit=appendEvent,context}={}) {
+  if (row.effort == null) row = { ...row, effort: launchEffort(row, launch) };
   const file=queueDecisionFile(row);
   if (!policy?.enabled||!waiting(queue)||queue.reporting||queue.completing) { const old=read(file); if(old?.status==='waiting') writeJson(file,{...old,status:'ended'}); return null; }
   if (!Number.isFinite(queue.since)||now-queue.since<=policy.queueWaitMinutes*60000) return null;
@@ -180,13 +210,13 @@ export function notifyQueueOwner(row,queue,launch,{now=Date.now(),policy=queuePo
       '--account',o.account,'--ref','<actual user decision reference>','--until','<approval expiry ISO>',
       '--queue-source',row.account,'--queue-thread',row.thread,'--queue-turn',row.turn,'--queue-notice',noticeId,'--queue-option',o.id,
       ...(o.approvalKinds.includes('astra')?['--astra']:[]),...(o.approvalKinds.includes('max-effort')?['--max']:[]),
-      ...(o.approvalKinds.includes('fable')?['--fable']:[]),'--',...argvOf(launch)]);
+      ...(o.approvalKinds.includes('fable')?['--fable']:[]),'--',...(context?.source ?? queueSourceArgs(row,launch)).args]);
   }
   return withLock(file,()=>{
     const current=read(file);
     if (!canNotify(current) || current?.noticeId !== old?.noticeId || current?.status !== old?.status) return null;
     const count=same?(old.pendingNotice&&!renewing?old.noticeCount:(old.noticeCount??1)+1):1;
-    const text=`queue-stalled: ${count===2?'SECOND NOTICE; ':count>2?`NOTICE ${count}; `:''}task=${row.name??row.task} thread=${row.thread} turn=${row.turn} owner=${row.owner} lane=${row.account}:${row.model} model=${row.model} effort=${row.effort}; queued ${((now-queue.since)/60000).toFixed(1)} min position=${queue.position??'?'} drain=${queue.drainPerMin??'?'} /min. Owner may choose now.${count>1?' secretary-relay: owner queue decision still pending.':''}${optionError?` Options incomplete: ${optionError}.`:''}\n`
+    const text=`queue-stalled: ${count===2?'SECOND NOTICE; ':count>2?`NOTICE ${count}; `:''}task=${row.name??row.task} thread=${row.thread} turn=${row.turn} owner=${row.owner} lane=${row.account}:${row.model} model=${row.model} effort=${row.effort}; queued ${((now-queue.since)/60000).toFixed(1)} min position=${queue.position??'?'} drain=${queue.drainPerMin??'?'} /min. Owner may choose now.${context?.source?.derived?' Switch options derived from saved launch metadata (category, project and actual effort).':''}${count>1?' secretary-relay: owner queue decision still pending.':''}${optionError?` Options incomplete: ${optionError}.`:''}\n`
       +options.map(o=>`${o.id}: ${o.lane} ${o.model}/${o.effort}; start=${o.expectedStartDelayMin??'?'} min; ${o.quotaNote}; ${o.releaseFallback?`${o.releaseFallback}; `:''}${o.context}; ${o.interruptionNote}; user approval=${o.needsUserApproval?'required':'no'}; ${o.command}${o.approvalCommand?`; after user approval: ${o.approvalCommand}; append --user-ok <returned approval id> to the choice command`:''}`).join('\n');
     const optionKinds = same && !renewing ? {...old.optionKinds} : {};
     for (const option of [...(same && !renewing ? old.options : []), ...options])

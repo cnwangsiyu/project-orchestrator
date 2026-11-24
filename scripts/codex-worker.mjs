@@ -71,7 +71,7 @@ import { isPolicyBlock, policyBlockRecord, appendPolicyBlock, policyBlockAction 
 import { runHubForeground, hubListReachable } from './lib/hub-foreground.mjs';
 import { readTurnState, reconcileTurnEvents } from './lib/worker-turn.mjs';
 import { parseRouteArgs, routeFlag, rerouteWorker, turnHasWork, heldTaskResources, isToolItem, turnHasRunningTools } from './lib/worker-reroute.mjs';
-import { notifyQueueOwner, pendingQueueChoice, claimQueueChoice, settleQueueChoice, queueRouteContext, automaticQueueOption, queueOptionPlan, queueChoiceSafety } from './lib/queue-decision.mjs';
+import { notifyQueueOwner, pendingQueueChoice, claimQueueChoice, settleQueueChoice, queueSourceArgs, queueRouteContext, automaticQueueOption, queueOptionPlan, queueChoiceSafety } from './lib/queue-decision.mjs';
 import { queuePolicy } from './lib/queue-stall-watch.mjs';
 import { inheritedLaunch, savedLaunch, saveLaunch, recordLaunchModel, readRequestBufferExceededAt, markRequestBufferExceeded } from './lib/worker-launch.mjs';
 import { recordWorkerOutcome, reviewSeat, reviewInstructions } from './lib/worker-outcome.mjs';
@@ -448,10 +448,6 @@ const QUEUE_ALT_START_MIN = opts['queue-alt-start-min'] === undefined ? null : N
 if (QUEUE_ALT_START_MIN != null && (!Number.isFinite(QUEUE_ALT_START_MIN) || QUEUE_ALT_START_MIN < 0)) die('--queue-alt-start-min takes a number >= 0');
 let ROUTE_ARGS;
 try { ROUTE_ARGS = parseRouteArgs(opts['route-args']); } catch (e) { die(e.message); }
-const REROUTE_DEPTH = Number(opts['auto-reroute-depth'] ?? (ROUTE_ARGS && routeFlag(ROUTE_ARGS, 'auto-reroute-depth')) ?? 0);
-if (!Number.isInteger(REROUTE_DEPTH) || REROUTE_DEPTH < 0) die('--auto-reroute-depth takes a whole number >= 0');
-tracker?.set({ routeArgs: ROUTE_ARGS, rerouteDepth: REROUTE_DEPTH });
-const BACKGROUND = !!opts.background || !!(ROUTE_ARGS && routeFlag(ROUTE_ARGS, 'background'));
 let routedMetadata;try {routedMetadata=opts['routed-seat']?JSON.parse(opts['routed-seat']):undefined;} catch {die('--routed-seat needs JSON');}
 const projectWorkerInstructions = (digest) => [workerInstructions(digest, {
   project: opts.project ?? (ROUTE_ARGS && routeFlag(ROUTE_ARGS, 'project')) ?? routedMetadata?.project,
@@ -509,6 +505,15 @@ let outBaseline;
 const outputStat = () => { try { const s = fs.statSync(path.resolve(opts.out)); return [s.dev, s.ino, s.size, s.mtimeMs, s.ctimeMs].join(':'); } catch { return null; } };
 const markOutputStart = () => { if (opts.out) outBaseline = outputStat(); };
 const launchDecision = cmd === 'start' ? auditStart() : null;
+if (!ROUTE_ARGS && launchDecision?.routeArgs && (opts.role ?? 'primary') === 'primary'
+  && launchDecision.routeId === routedMetadata?.routeId && launchDecision.name === opts.name) {
+  opts['route-args'] = JSON.stringify(launchDecision.routeArgs);
+  ROUTE_ARGS = parseRouteArgs(opts['route-args']);
+}
+const REROUTE_DEPTH = Number(opts['auto-reroute-depth'] ?? (ROUTE_ARGS && routeFlag(ROUTE_ARGS, 'auto-reroute-depth')) ?? 0);
+if (!Number.isInteger(REROUTE_DEPTH) || REROUTE_DEPTH < 0) die('--auto-reroute-depth takes a whole number >= 0');
+tracker?.set({ routeArgs: ROUTE_ARGS, rerouteDepth: REROUTE_DEPTH });
+const BACKGROUND = !!opts.background || !!(ROUTE_ARGS && routeFlag(ROUTE_ARGS, 'background'));
 const reviewHowTo = reviewSeat({ category: ROUTE_ARGS?.[0] ?? routedMetadata?.category ?? launchDecision?.category,
   role: opts.role ?? routedMetadata?.role, name: opts.name }) ? reviewInstructions : null;
 if (cmd === 'start') tracker?.warning();
@@ -1191,7 +1196,7 @@ const autoReroute = async (reason, queue = {}, policy = false, selection = null)
     workStarted:!!selection?.midTurn,
     threadId: cancelledTurn?.threadId ?? attemptThreadId, turnId: cancelledTurn?.turnId ?? null };
   try {
-    const code = await rerouteWorker({ args: ROUTE_ARGS, depth: REROUTE_DEPTH, from, reason, prompt: text,
+    const code = await rerouteWorker({ args: selection?.sourceArgs ?? ROUTE_ARGS, depth: REROUTE_DEPTH, from, reason, prompt: text,
       opts: { ...opts, owner: tracker?.sessionId ?? opts.owner,queueSelection:selection }, policy, onHandoff: () => tracker?.end(0) });
     if (code === 8 || code === 9) tracker?.result('needs-user');
     else if (code !== 0) tracker?.result('failed');
@@ -1595,7 +1600,8 @@ const follow = (threadId, turnId, items = []) => {
     ? previousWork && Number.isFinite(previousQueue.workSegmentSince) ? previousQueue.workSegmentSince : workStartedAt : null;
   const ownerRow={...context.metadata,turn:turnId,model:opts.model,effort:opts.effort,pid:process.pid,
     runId:tracker?.metadata().runId,name:opts.name??context.metadata.name};
-  const ownerLaunch={...(savedLaunch(account??'main',threadId)??{}),defaults:{...opts,'route-args':JSON.stringify(ROUTE_ARGS)}};
+  const saved = savedLaunch(account??'main',threadId);
+  const ownerLaunch = {...saved,defaults:{...saved?.defaults,...opts}};
   ownerRow.model=String(opts.model??tracker?.metadata().model??ownerLaunch.model??(PROF?.home?threadModel(PROF.home,threadId):null)??'unknown').toLowerCase();
   ownerRow.effort=opts.effort??ownerLaunch.effort??tracker?.metadata().effort??'unknown';
   const clearQueueEpisode = (t = Date.now()) => {
@@ -1627,7 +1633,8 @@ const follow = (threadId, turnId, items = []) => {
       };
       const before=(await bounded(readTurns(threadId))).find(t=>t.id===turnId);
       const beforeError=reconcile(before);if(beforeError)throw Error(beforeError);
-      const held=heldTaskResources(ROUTE_ARGS??[],opts.name);if(held)throw Error(held);
+      const sourceArgs = option?.type === 'switch' ? queueSourceArgs(ownerRow,ownerLaunch).args : ROUTE_ARGS;
+      const held=heldTaskResources(sourceArgs??[],opts.name);if(held)throw Error(held);
       const automatic=state.choice.decidedBy==='auto';
       const select=()=>{
         const context=queueRouteContext(ownerRow,ownerLaunch);
@@ -1658,7 +1665,7 @@ const follow = (threadId, turnId, items = []) => {
       if(automatic) appendEvent({...ownerRow,event:'message',kind:'queue-stalled',wake:true,secretaryRelay:true,
         noticeId:state.noticeId,decidedBy:'auto',text:`secretary-relay: automatic queue decision for ${ownerRow.name} after ${state.noticeCount} notices; selected ${option.model}/${option.effort}@${option.account}.`});
       await autoReroute('queue-too-slow',{position:state.queue.position,waitedMin:(Date.now()-state.since)/60000},false,
-        {option,noticeId:state.noticeId,owner:state.choice.owner,decidedBy:automatic?'auto':'owner',selectRoute:select,midTurn,resume:option.context==='same thread / resume'});
+        {option,sourceArgs,noticeId:state.noticeId,owner:state.choice.owner,decidedBy:automatic?'auto':'owner',selectRoute:select,midTurn,resume:option.context==='same thread / resume'});
     } catch(e) {
       if(terminalTurn&&!reporting) {
         handingOff=false;reporting=true;queueSince=observedQueueSince=null;
