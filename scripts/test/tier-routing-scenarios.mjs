@@ -8,11 +8,17 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { noteFailure } from '../lib/trae-health.mjs';
-// Legacy expectations predate the standing personal-fallback policy; personal-fallback-scenarios covers it.
-if (!process.env.PERSONAL_FALLBACK_FILE) { const f = (await import('node:path')).join((await import('node:os')).tmpdir(), `pf-off-${process.pid}.json`); (await import('node:fs')).writeFileSync(f, '{"enabled":false}'); process.env.PERSONAL_FALLBACK_FILE = f; }
-
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tier-routing-'));
+const fixtureHome = path.join(tmp, 'fixture-home'), shared = path.join(fixtureHome, '.claude/orchestrator/_shared');
+fs.mkdirSync(shared, { recursive: true });
+const registry = path.join(tmp, 'accounts.json'), fallback = path.join(tmp, 'fallback-off.json'), approvals = path.join(tmp, 'empty-approvals.json');
+fs.writeFileSync(registry, '{}'); fs.writeFileSync(approvals, '[]');
+// These tier controls predate standing fallback grants; dedicated suites cover those grants.
+fs.writeFileSync(fallback, JSON.stringify({ enabled: false }));
+const fixtureEnv = { PATH: process.env.PATH, HOME: fixtureHome, TMPDIR: tmp, TMP: tmp, TEMP: tmp,
+  RULES_SHARED: shared, CODEX_ACCOUNTS: registry, PERSONAL_FALLBACK_FILE: fallback, ROUTE_APPROVAL_FILE: approvals,
+  ORCHESTRATOR_OWNER: '', QUOTA_LOG: '0', ROUTE_LOG: '0', TRAE_PROBE: '0' };
 const now = Date.now(), h = 3600000;
 const SOL = 'gpt-6.1-sol', ASTRA = 'gpt-6-astra', SOL56 = 'gpt-5.6-sol';
 const TERRA56 = 'gpt-5.6-terra', GPT55 = 'gpt-5.5', FLASH = 'deepseek-v4.1-flash';
@@ -55,12 +61,37 @@ const run = (args, { models = ids, daily = depleted, company = false, traeHome =
   fs.writeFileSync(cache, JSON.stringify({ checkedAt: now, claude: [{ ...window, used: claudeUsed, label: 'week (all models)' }],
     codexAccounts: [personal, ...(company ? [ttadk] : []), trae], errors: {}, history: {} }));
   return parseRouteJSON(execFileSync(process.execPath, [path.join(root, 'route.mjs'), ...a, '--mode', 'default', '--json'], {
-    encoding: 'utf8', env: { ...process.env, CODEX_ACCOUNTS: path.join(tmp, 'none.json'), QUOTA_CACHE: cache,
-      QUOTA_LOG: '0', ROUTE_LOG: '0', ROUTE_NOW: String(now), ROUTE_LOG_FILE: path.join(tmp, 'empty-route-history.jsonl'), TRAE_PROBE: '0', QUOTA_LOG_FILE: history },
+    encoding: 'utf8', env: { ...fixtureEnv, QUOTA_CACHE: cache, ROUTE_NOW: String(now),
+      ROUTE_LOG_FILE: path.join(tmp, 'empty-route-history.jsonl'), QUOTA_LOG_FILE: history },
   }));
 };
 const personalGate = (r) => r.needsUserOK.some((n) => n.startsWith('personal quota:'));
 try {
+  const caller = path.join(tmp, 'caller-home'), callerShared = path.join(caller, '.claude/orchestrator/_shared');
+  fs.mkdirSync(callerShared, { recursive: true });
+  fs.writeFileSync(path.join(callerShared, 'personal-priority-window.json'), JSON.stringify({
+    account: 'main', mode: 'exclusive', from: new Date(now - 1000).toISOString(), until: null, revoked: false,
+    userDecisionRef: 'standing:personal-priority-tier-caller', quote: 'Synthetic caller state must not approve fixture work.'
+  }));
+  fs.writeFileSync(path.join(callerShared, 'model-catalog.json'), JSON.stringify({ codex: [] }));
+  const callerQuota = path.join(caller, 'quota.json'), callerFallback = path.join(caller, 'fallback.json'), callerSnapshot = path.join(caller, 'snapshot.json');
+  fs.writeFileSync(callerQuota, JSON.stringify({ checkedAt: now, codexAccounts: [{ name: 'main', windows: [{ ...window, used: 0 }] }] }));
+  fs.writeFileSync(callerFallback, JSON.stringify({ enabled: true })); fs.writeFileSync(callerSnapshot, '{"schemaVersion":999}');
+  const poison = { HOME: caller, RULES_SHARED: callerShared, QUOTA_CACHE: callerQuota, PERSONAL_FALLBACK_FILE: callerFallback,
+    ROUTE_APPROVAL_FILE: path.join(caller, 'not-an-approval-file.json'), ROUTE_SNAPSHOT_FILE: callerSnapshot,
+    NODE_OPTIONS: `--import=${path.join(caller, 'not-a-loader.mjs')}` };
+  const original = Object.fromEntries(Object.keys(poison).map(name => [name, process.env[name]]));
+  try {
+    Object.assign(process.env, poison);
+    const isolated = run(['debug'], { models: [SOL56, TERRA56, GPT55, PRO] });
+    assert.ok(personalGate(isolated), 'caller public state cannot grant fixture personal quota');
+    assert.equal(isolated.pick?.account, 'main'); assert.equal(isolated.pick?.command, null);
+  } finally {
+    for (const [name, value] of Object.entries(original)) {
+      if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    }
+  }
+  console.log('ok   caller home, shared policy, approvals, snapshots and Node options are isolated');
   for (const [args, tier, model] of [
     [['implement-hard'], 'hard', ASTRA], [['debug'], 'hard', ASTRA], [['science'], 'hard', ASTRA],
     [['review-high'], 'hard', ASTRA], [['design'], 'hard', ASTRA],
