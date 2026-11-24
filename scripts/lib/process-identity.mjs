@@ -5,11 +5,12 @@ import { execFileSync } from 'node:child_process';
 export const processIdentity = (pid, { exec = execFileSync } = {}) => {
   if (!Number.isSafeInteger(pid) || pid <= 0) return null;
   try {
-    const line = String(exec('/bin/ps', ['-p', String(pid), '-o', 'lstart=', '-o', 'comm='], { encoding: 'utf8', timeout: 1000 }))
+    const line = String(exec('/bin/ps', ['-p', String(pid), '-o', 'stat=', '-o', 'lstart=', '-o', 'comm='], { encoding: 'utf8', timeout: 1000 }))
       .trim().replace(/\s+/g, ' ');
-    const match = /^(.{24})\s+(.+)$/.exec(line);
-    if (!match) return null;
-    return { pid, started: match[1], name: match[2].split('/').at(-1).slice(0, 120) };
+    // A zombie has exited and only awaits its parent's wait(); it is not a live owner of the PID.
+    const match = /^(\S+) (\S+ \S+ \d+ [\d:]+ \d{4}) (.+)$/.exec(line);
+    if (!match || match[1].startsWith('Z')) return null;
+    return { pid, started: match[2], name: match[3].split('/').at(-1).replace(/ <defunct>$/, '').slice(0, 120) };
   } catch { return null; }
 };
 
