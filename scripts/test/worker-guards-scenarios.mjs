@@ -44,6 +44,27 @@ const delegated = (model, params = {}) => ({ method: 'item/completed', params: {
   item: { type: 'collabAgentToolCall', senderThreadId: 'guard-thread', receiverThreadIds: ['child-thread'],
     model, reasoningEffort: 'high' }, ...params } });
 try {
+  check('interrupt resolves an omitted turn and honors an explicit string target',()=>{
+    for (const explicit of [false,true]) {
+      const r=run(fixture(`interrupt-target-${explicit}`),'interrupt',{},explicit?['--turn','explicit-turn']:[]);
+      assert.equal(r.status,0,r.stderr);
+      const call=r.calls.find(c=>c.method==='turn/interrupt');
+      assert.deepEqual(call.params,{threadId:'guard-thread',turnId:explicit?'explicit-turn':'guard-turn'});
+      assert.equal(r.calls.some(c=>c.method==='thread/read'),!explicit);
+      assert.deepEqual(r.events,[]);
+    }
+  });
+  check('interrupt rejects malformed IDs before RPC and explains unresolved turns',()=>{
+    for (const flags of [['--turn'],['--turn','true'],['--thread']]) {
+      const r=run(fixture(`interrupt-invalid-${flags.join('-')}`),'interrupt',{},flags);
+      assert.equal(r.status,2,r.stderr);assert.match(r.stderr,/--turn|--thread/);assert.equal(r.calls.length,0);
+    }
+    for (const config of [{turn:true},{rpcFailure:'thread/read'},{status:'completed'}]) {
+      const r=run(fixture(`interrupt-unresolved-${JSON.stringify(config).replaceAll(/[^a-z]/g,'')}`),'interrupt',config);
+      assert.ok([2,3].includes(r.status),r.stderr);assert.match(r.stderr,/--turn <public turn-id>/);
+      assert.ok(!r.calls.some(c=>c.method==='turn/interrupt'));
+    }
+  });
   check('BC-35 one-shot startup failure surfaces stderr and records a failed worker',()=>{
     const f=fixture('one-shot-failure','chatgpt'),out=path.join(f.dir,'start.out'),log=path.join(f.dir,'start.log');
     const r=spawnSync('/bin/sh',[path.join(scripts,'run-tracked.sh'),'--name','one-shot-failure','--owner','053283ad-1bc8-5a31-ad44-d68e6b199eb6','--account','fixture',

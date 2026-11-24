@@ -23,7 +23,7 @@ import {mcpStartupMonitor} from './lib/mcp-startup.mjs';
 //   codex-worker note [--kind progress|risk|scope|info] [--wake] "<text>"         (worker: notify without ending the turn)
 //   codex-worker ask [--timeout-min N] [--default TEXT] "<question>"    (worker: wait for an orchestrator answer)
 //   codex-worker reply --thread ID [--question ID] "<text>"            (orchestrator: answer, or fall back to steer)
-//   codex-worker interrupt --thread ID
+//   codex-worker interrupt --thread ID [--turn ID]
 //   codex-worker status --thread ID
 //   codex-worker mine | watch [--owner SESSION_ID] [--debounce-sec N]                      (owner-scoped durable inbox; watch is a tracked background task)
 //   codex-worker retire --thread ID | retire --run RUN_ID [--owner SESSION_ID] [--reason TEXT]                  (retire an ended or unreachable tracked worker)
@@ -163,6 +163,10 @@ if (earlyOpts.owner !== undefined) {
   catch (error) { process.stderr.write(`codex-worker: ${error.message}\n`); process.exit(error.exitCode ?? 2); }
 }
 if (['turn', 'wait'].includes(argv[0]) && !validWorkerIdentifier(earlyOpts.thread)) usageError(`${argv[0]} needs --thread <public thread-id>`);
+if (argv[0] === 'interrupt') {
+  if (!validWorkerIdentifier(earlyOpts.thread)) usageError('interrupt needs --thread <public thread-id>');
+  if (earlyOpts.turn !== undefined && !validWorkerIdentifier(earlyOpts.turn)) usageError('interrupt --turn needs a nonempty public turn-id');
+}
 if (['start', 'turn', 'wait'].includes(argv[0])) {
   if (earlyOpts.thread !== undefined && !validWorkerIdentifier(earlyOpts.thread)) usageError('--thread needs a nonempty public identifier; boolean-like values are invalid');
   if (earlyOpts.name !== undefined && (typeof earlyOpts.name !== 'string' || !earlyOpts.name.trim() || /^(?:true|false|undefined|null)$/i.test(earlyOpts.name.trim()))) usageError('--name needs nonempty text; boolean-like values are invalid');
@@ -1943,12 +1947,18 @@ try {
     const age = Number.isFinite(queue?.since) ? Math.max(0,(Date.now()-queue.since)/60000).toFixed(1) : '?';
     console.log(`steered turn ${r.turnId ?? t.id}${queued ? `; queued ${age} min at position ${queue.position??'?'} (${queue.state}); the steer is delivered only when the turn runs, not answered yet` : ''}`); finish(0);
   } else if (cmd === 'interrupt') {
-    if (!opts.thread) die('interrupt needs --thread');
-    const resumed = await call('thread/resume', { threadId: opts.thread }).catch(() => null);
-    const t = await currentTurn(opts.thread, resumed?.thread);
-    if (!t || t.status !== 'inProgress') die(`no turn in progress (last: ${t?.status ?? 'none'})`, 3);
-    await call('turn/interrupt', { threadId: opts.thread, turnId: t.id });
-    console.log(`interrupted turn ${t.id}`); finish(0);
+    let turnId = opts.turn;
+    if (turnId === undefined) {
+      const resumed = await call('thread/resume', { threadId: opts.thread }).catch(() => null);
+      let t;
+      try { t = await currentTurn(opts.thread, resumed?.thread); }
+      catch { die('interrupt could not resolve the active turn; provide --turn <public turn-id>'); }
+      if (!t || t.status !== 'inProgress') die(`no turn in progress (last: ${t?.status ?? 'none'}); specify --turn <public turn-id> for an explicitly known target`, 3);
+      if (!validWorkerIdentifier(t.id)) die('interrupt received no valid active turn ID; provide --turn <public turn-id>');
+      turnId = t.id;
+    }
+    await call('turn/interrupt', { threadId: opts.thread, turnId });
+    console.log(`interrupted turn ${turnId}`); finish(0);
   } else if (cmd === 'status') {
     if (!opts.thread) die('status needs --thread');
     const r = await turnState(opts.thread);
