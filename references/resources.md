@@ -157,6 +157,121 @@ maximum 120). The two-host claim reserves `HEAVY_BUILD_DISK_GIB` (default
 specified inputs, and verifies the returned artifact hash before receipt-matched
 cleanup. Keep signing, provisioning and attached-device steps on main.
 
+### Split a development iPhoneOS app build
+
+Run `scripts/ios-split-build.sh` on main with Python 3.12+ and the installed
+resource controller. It resolves the ref to a commit, checks the input allowlist
+against that commit and history, and runs the selected Xcode build in an isolated
+checkout. The two hosts must report identical Xcode version **and build number**
+and iPhoneOS SDK version. The selected host checks these again before compiling.
+Main fallback works when mini2 is unavailable. The generated build command uses
+`-sdk iphoneos -destination generic/platform=iOS CODE_SIGNING_ALLOWED=NO
+CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=` and disables automatic package
+resolution and updates. Use `--dry-run` to see the exact shell command.
+
+The runner returns one regular tar file with a SHA-256 receipt. The wrapper
+checks that digest before unpacking, checks for an unsigned iPhoneOS app with
+the requested bundle ID, and writes its per-file, bundle and executable hashes
+to `OUT/manifest.json`. Use a **fresh** directory for each build. The source
+repo and device stay outside the operation. `IOS_SPLIT_RESULT` reports the
+machine, timings, artifact paths and hashes. The remote summary also records
+upload time and compile wall time. Local and remote Debug binaries can differ
+in hash because their build paths differ. Register the returned product itself.
+
+For a full run supply the approved identity name, `--entry ID`,
+`--signer-command ARGV.json` (an array containing the absolute registered
+executable followed by its exact arguments), and `--baseline BASELINE.json`
+(an owner-attested object with `commit` and the absolute path `app` of the
+same-ref local signed build). The project owns this signing method. The utility
+calls it under a light `ios-sign` claim on main. It checks the enabled registry
+entry, identity, exact input/output paths, executable and full bundle hashes.
+The entry must pin the full bundle digest in `input.bundle_sha256` or its
+registered `--bundle-sha256` argument. Supported methods produce a separate
+`OUT/signed/<app>`, a method receipt, and the shared iOS receipt as in T241.
+The proposed shared `user-signing/sign-all.sh --only ID` in the registry README
+is absent from the installation as of 2026-11-24.
+
+For a freshly built hash, run with `--unsigned-only`, give the manifest to the
+registry owner, then repeat the same command and output directory with
+`--resume-sign --entry ID --signer-command ARGV.json --baseline BASELINE.json`.
+Omitting either the registered entry or command produces an unsigned handoff.
+If the project signer already ran independently, use `--verify-returned --entry
+ID --baseline BASELINE.json` instead. Verification checks the signed leaf
+certificate SHA-1, team, strict deep signature, bundle ID, versions and
+architectures. It compares canonical entitlement hashes and the sealed SHA-256
+of the embedded profile against the baseline. Only names, identifiers and
+hashes enter the result. The heavy wrapper and mini2 runner own lease cleanup;
+a lost remote cleanup receipt requires the existing mini2 reconciliation
+procedure before the resource can be returned.
+
+**Transfer and product limits.** Mini2 accepts a reviewed exact regular-file
+allowlist covering the commit and all reachable history. Submodules, symlinks,
+untracked dependency trees, and machine-only settings need a different input
+snapshot. SwiftPM dependencies must already be present and pinned in that
+snapshot. A lock file alone does not supply a private checkout. Every Pod
+command, including in a custom build script, uses `COCOA_PODS_ENV=development`.
+An unauthenticated smart-HTTP GET for the private tiktok_vesdk Git repository
+from the isolated mini2 runner returned **HTTP 401** on 2026-11-24. That probe
+establishes network reachability and the need for authorization on that repo
+only. Keep private resolution on its authorized source machine. Supply
+reviewed, redistributable regular-file inputs. The runner creates and removes
+DerivedData, module caches, temporary HOME and checkout per run. Budget for a
+cold build on every dispatch.
+
+The default app lands at `split-products/<name>.app`. A custom `--command`
+replaces the Xcode invocation and must build offline through the PATH
+`xcodebuild` wrapper, honor the unsigned overrides, and produce exactly
+`--product`. For an archive, pass a relative `.xcarchive` path. Signing selects
+its single `Products/Applications/*.app`. Archives with links, already signed
+resources or embedded profiles are unsupported. Nested apps and extensions
+need their own bundle IDs, profiles and entitlement comparisons. Keep those
+projects on their current path until the project supplies that per-target flow.
+
+#### Webview / vesdk
+
+The T241 volume host is a real dependency-free companion target. The proof
+snapshot contains the five files in `T241/source-manifest.json` and matches
+all five digests. From the skill checkout, this reproduces the unsigned build
+into a new directory (use a fresh output path on each run).
+
+```sh
+taskdir="$HOME/.claude/orchestrator/_shared/tasks/R-ios-split-build"
+scripts/ios-split-build.sh --project vesdk-mainline --task R-ios-split-build \
+  --repo "$taskdir/source" --ref f83d879933aa12668a9fb51e17bd5eabe83c63c9 \
+  --allowlist "$taskdir/source-allowlist.json" --xcode-project T180cVolume.xcodeproj \
+  --scheme T180cVolume --configuration Debug --product split-products/T180cVolumeHost.app \
+  --identity ios-cosign-dh59r4rnry --bundle-id com.example.T180cVolume.host \
+  --out "$taskdir/repeat-$(date +%s)" --unsigned-only
+```
+
+The existing T241 method enforces its original task IDs and directories.
+Webview must supply an already approved signer invocation for the new proof
+entry. `proof/handoff.md` gives the two paths, hashes and receipt contract.
+The R14 VESDK/WebView demo and the XCTest runner have additional host
+dependencies and nested signing requirements. The helper proof covers the host
+app only.
+
+#### VAK
+
+The VAK app generates VideoAgent.xcodeproj and imports its Pod graph from the
+`third_party/lynx2video` Git submodule (`apps/ios/Podfile`). Its widget adds
+a second provisioning target. The PPE distribution path uses the existing
+BITS re-sign job (W753, configuration 23851). For a split development test,
+the VAK owner must supply a tracked, reviewed offline dependency snapshot and
+generated project or reproducible generator, a test scheme without the widget
+or an approved per-target signing flow, and a hash-pinned development signer
+and signed baseline for that test app.
+
+#### Lynx
+
+T159 builds effect-sdk.xcworkspace, stages the SDK, installs private Pods, then
+builds IESVideoEditorDemo.xcworkspace and prepares the game bundle. T173 and
+T180 reuse device artifacts. The T159 H6 registration signs the old app in
+place and supplies no argument list. The Lynx owner must supply a standalone
+snapshot of the staged SDK, locked Pod sources and prepared game assets, a
+command that reproduces the demo from those files, and a registered
+out-of-place development signing method with its same-ref baseline.
+
 ## Heavy Lock Contract
 
 Follow the [maintained res contract](res-contract.md)

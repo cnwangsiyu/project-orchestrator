@@ -34,8 +34,11 @@ def record(path, data):
 
 
 def digest(path):
+    result = hashlib.sha256()
     with path.open("rb") as file:
-        return hashlib.file_digest(file, "sha256").hexdigest()
+        for block in iter(lambda: file.read(1024 * 1024), b""):
+            result.update(block)
+    return result.hexdigest()
 
 
 def capture(*args):
@@ -52,8 +55,10 @@ def relative(value):
 def arguments():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("project", "task", "repo", "ref", "allowlist", "product", "identity",
-                 "entry", "bundle-id", "out"):
+                 "bundle-id", "out"):
         parser.add_argument("--" + name, required=True)
+    parser.add_argument("--entry", help="owner-registered iOS package ID")
+    parser.add_argument("--signer-command", type=Path, help="JSON argv of the approved project signer")
     group = parser.add_mutually_exclusive_group(required=True)
     for name in ("workspace", "xcode-project", "command"):
         group.add_argument("--" + name)
@@ -62,7 +67,7 @@ def arguments():
     parser.add_argument("--local-control", action="store_true", help="pin main for a same-ref timing control")
     parser.add_argument("--baseline", help="owner-attested JSON with commit and local signed app path")
     mode = parser.add_mutually_exclusive_group()
-    for name in ("dry-run", "unsigned-only", "resume-sign"):
+    for name in ("dry-run", "unsigned-only", "resume-sign", "verify-returned"):
         mode.add_argument("--" + name, action="store_true")
     args = parser.parse_args()
     require(args.configuration.lower() != "release", "only own development test packages")
@@ -105,7 +110,8 @@ export COCOA_PODS_ENV=development {shlex.join(FLAGS)}
     cmd += f'''p={product}
 test -d "$p"
 test "$(cd "$p" && pwd -P)" = "$(pwd -P)/$p"
-test -z "$(find "$p" \\( ! -type f ! -type d -o -iname '*.mobileprovision' -o -iname '*.p12' -o -iname '*.pem' -o -iname '*.key' -o -name _CodeSignature \\) -print -quit)"
+invalid=$(find "$p" \\( ! -type f ! -type d -o -iname '*.mobileprovision' -o -iname '*.p12' -o -iname '*.pem' -o -iname '*.key' -o -name _CodeSignature \\) -print -quit)
+test -z "$invalid"
 test ! -e {ARCHIVE}
 COPYFILE_DISABLE=1 tar -cf {ARCHIVE} -C "$(dirname "$p")" "$(basename "$p")"
 '''
@@ -194,17 +200,32 @@ def info(app):
     return value, app / exe
 
 
-def manifest(args, app):
-    value, exe = info(app)
-    require(value["CFBundleIdentifier"] == args.bundle_id, "unsigned bundle ID mismatch")
+def bundle_files(app, sealed_profile=None):
     rows = []
-    for root, _, files in os.walk(app):
+    require(app.resolve() == app, "unsigned app path changed")
+    for root, dirs, files in os.walk(app):
+        require(all(not (Path(root)/name).is_symlink() for name in dirs + files),
+                "links in unsigned product are unsupported")
         # Registered manifests traverse sorted directory entries depth-first.
         for name in files:
             file = Path(root) / name
-            rows.append({"path": str(file.relative_to(app)), "sha256": digest(file)})
+            name = str(file.relative_to(app))
+            if file.suffix.lower() == ".mobileprovision":
+                require(name == "embedded.mobileprovision" and sealed_profile,
+                        "unexpected provisioning file in product")
+                sha = sealed_profile
+            else:
+                sha = digest(file)
+            rows.append({"path": name, "sha256": sha})
     rows.sort(key=lambda row: Path(row["path"]).parts)
     tree = hashlib.sha256(json.dumps(rows, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+    return rows, tree
+
+
+def manifest(args, app):
+    value, exe = info(app)
+    require(value["CFBundleIdentifier"] == args.bundle_id, "unsigned bundle ID mismatch")
+    rows, tree = bundle_files(app)
     return dict(task=args.task, path=str(app), bundleId=args.bundle_id, files=rows,
                 bundleSHA256=tree, preparedExecutableSHA256=digest(exe))
 
@@ -219,62 +240,93 @@ def signature(app):
     subprocess.run(["codesign", "--verify", "--deep", "--strict", app], check=True)
     value, exe = info(app)
     ent = plistlib.loads(subprocess.check_output(
-        ["codesign", "-d", "--entitlements", "-", app], stderr=subprocess.DEVNULL))
+        ["codesign", "-d", "--entitlements", "-", "--xml", app], stderr=subprocess.DEVNULL))
     # The verified resource seal contains the embedded profile's digest.
     with (app / "_CodeSignature/CodeResources").open("rb") as file:
         profile = plistlib.load(file)["files2"]["embedded.mobileprovision"]["hash2"].hex()
     return dict(profileSHA256=profile, entitlementsSHA256=hashlib.sha256(
         plistlib.dumps(ent, sort_keys=True)).hexdigest(), architectures=sorted(capture(
-            "lipo", "-archs", exe).split()), bundle=value["CFBundleIdentifier"],
+            "lipo", "-archs", exe).split()), entitlementNames=sorted(ent), bundle=value["CFBundleIdentifier"],
         version=value["CFBundleVersion"], marketingVersion=value.get("CFBundleShortVersionString"))
 
 
-def sign(args, build):
+def sign(args, build, entry):
     allowed(args.identity)
     base = read(args.baseline)
     require(base["commit"] == build["commit"], "baseline must attest the same source commit")
     expected = signature(Path(base["app"]))
     require(expected["bundle"] == args.bundle_id, "baseline bundle mismatch")
-    matches = [e for e in read(SHARED / "user-signing/registry.json")["entries"]
-              if e["id"] == args.entry and e["enabled"] and e["kind"] == "ios-app"
-              and e.get("identity_id") == args.identity]
-    require(len(matches) == 1, "owner registration missing or mismatched: " + args.entry)
-    entry = matches[0]
     app = Path(build["app"])
     method = entry["method"]
     signed = Path(entry["output"]["path"])
     require(entry["input"]["path"] == str(app) and entry["output"]["bundle_id"] == args.bundle_id
-            and signed.resolve() == args.out / "signed" / app.name and not signed.exists(),
+            and signed.resolve() == args.out / "signed" / app.name,
             "registered input, fresh output or bundle mismatch")
     prepared = manifest(args, app)
-    require(prepared == read(args.out / "manifest.json") and
-            Path(entry["input"]["hash_source"]["path"]).resolve() == args.out / "manifest.json",
-            "registered input manifest mismatch")
-    argv = method["argv"]
-    require(argv and len(argv) % 2 == 0, "registered method needs explicit argument pairs")
-    options = dict(zip(argv[::2], argv[1::2]))
-    required = {"--id": args.entry, "--input": str(app), "--output": str(signed),
-                "--manifest": str(args.out / "manifest.json"), "--bundle": args.bundle_id,
-                "--bundle-sha256": prepared["bundleSHA256"],
-                "--executable-sha256": prepared["preparedExecutableSHA256"]}
-    require(all(options.get(k) == v for k, v in required.items()), "registered signer arguments mismatch")
+    require(prepared == read(args.out / "manifest.json") and prepared["bundleSHA256"] == build["sha256"],
+            "unsigned artifact changed after build")
+    source = entry["input"]["hash_source"]
+    registered = read(source["path"])
+    require(registered[source["additional_path_field"]] == str(app)
+            and registered[source["additional_sha256_field"]] == prepared["bundleSHA256"]
+            and registered[source["sha256_field"]] == prepared["preparedExecutableSHA256"],
+            "registered manifest mismatch")
+    argv = [method["script"], *method["argv"]]
+    if not args.verify_returned:
+        require(read(args.signer_command) == argv, "command differs from registered signer")
+    # The live entry must pin the product independently of our newly written manifest.
+    pins = [argv[i+1] for i in range(len(argv)-1) if argv[i] == "--bundle-sha256"]
+    pinned = entry["input"].get("bundle_sha256") or (pins[0] if len(pins) == 1 else None)
+    require(pinned == prepared["bundleSHA256"], "owner must pin the full unsigned bundle hash")
     receipt = SHARED / "user-signing/receipts" / (args.entry + ".json")
-    require(Path(entry["receipt"]) == receipt and not receipt.exists(), "fresh signing receipt required")
-    env = environment(args, "ios-sign", "light")
-    env["HEAVY_BUILD_LOG"] = str(args.out / "sign.log")
-    started = time.monotonic()
-    wrapped(args, env, [method["script"], *argv], "registered signing")
-    signed_sec = time.monotonic() - started
+    require(Path(entry["receipt"]) == receipt, "shared receipt path mismatch")
+    signed_sec = None
+    if not args.verify_returned:
+        require(not signed.exists() and not receipt.exists() and not Path(entry["method_receipt"]).exists(),
+                "signing requires fresh output and receipt paths")
+        env = environment(args, "ios-sign", "light")
+        env["HEAVY_BUILD_LOG"] = str(args.out / "sign.log")
+        started = time.monotonic()
+        wrapped(args, env, argv, "registered signing")
+        signed_sec = time.monotonic() - started
     check = time.monotonic()
     result = read(receipt)
     require(result["result"] == "PASS" and result["input_bundle_sha256"] == prepared["bundleSHA256"]
             and result["output"] == str(signed) and result["id"] == args.entry
             and result["certificate_sha1"] == entry["expected_certificate"]["sha1"]
             and result["team"] == entry["expected_certificate"]["team"], "signing receipt mismatch")
+    certificate = entry["expected_certificate"]["sha1"]
+    require(len(certificate) == 40 and all(c in "0123456789abcdefABCDEF" for c in certificate),
+            "invalid registered certificate SHA-1")
+    subprocess.run(["codesign", "--verify", "--strict", "-R",
+                    f'=certificate leaf = H"{certificate}"', signed], check=True)
+    display = subprocess.check_output(["codesign", "-dv", "--verbose=4", signed],
+                                      stderr=subprocess.STDOUT).decode().splitlines()
+    require("TeamIdentifier=" + entry["expected_certificate"]["team"] in display, "signed team mismatch")
     actual = signature(signed)
     require(expected == actual, "signed bundle differs from local baseline")
+    _, signed_hash = bundle_files(signed, actual["profileSHA256"])
+    require(signed_hash == result["bundle_sha256"], "signed bundle differs from its receipt")
     return dict(artifact=str(signed), sha256=result["bundle_sha256"], signSec=signed_sec,
                 verifySec=time.monotonic()-check, verified=actual)
+
+
+def finish(args, build):
+    if args.unsigned_only:
+        return {**build, "status": "unsigned-verified"}
+    registration = SHARED / "user-signing/registry.json"
+    rows = read(registration)["entries"] if args.entry and registration.is_file() else []
+    entries = [row for row in rows if row["id"] == args.entry and row["enabled"]
+               and row["kind"] == "ios-app" and row.get("identity_id") == args.identity]
+    if not entries or not (args.signer_command or args.verify_returned):
+        print("Unsigned product returned and verified. The project orchestrator must register "
+              f"{build['app']} with bundle SHA-256 {build['sha256']} and supply --entry and "
+              "--signer-command for that enabled entry.")
+        return {**build, "status": "awaiting-registered-signer"}
+    require(len(entries) == 1 and args.baseline, "unique registration and --baseline required")
+    result = {**build, **sign(args, build, entries[0])}
+    record(args.out / "verification.json", result)
+    return result
 
 
 def main():
@@ -301,8 +353,7 @@ checkAllowlist(JSON.parse(fs.readFileSync(file)),rows,history);
     if args.dry_run:
         print(f"claim-any unsigned {commit} -> checksum -> main light ios-sign {args.entry} -> compare baseline\n{cmd}")
         return
-    require(args.unsigned_only or args.baseline, "--baseline required for signing")
-    if args.resume_sign:
+    if args.resume_sign or args.verify_returned:
         build = read(args.out / "build.json")
         require(build["commit"] == commit and build["project"] == args.project
                 and build["task"] == args.task and Path(build["app"]).resolve().is_relative_to(
@@ -327,9 +378,7 @@ checkAllowlist(JSON.parse(fs.readFileSync(file)),rows,history);
                      app=str(app), sha256=prepared["bundleSHA256"], transportSHA256=digest(archive),
                      compileAndTransferSec=compile_sec, unpackAndHashSec=time.monotonic()-check)
         record(args.out / "build.json", build)
-    result = build if args.unsigned_only else {**build, **sign(args, build)}
-    if not args.unsigned_only:
-        record(args.out / "verification.json", result)
+    result = finish(args, build)
     print("IOS_SPLIT_RESULT " + json.dumps(result, separators=(",", ":")))
 
 
