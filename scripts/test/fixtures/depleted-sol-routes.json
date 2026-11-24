@@ -16,7 +16,11 @@
       "state": "waiting",
       "t": 1795531781200
     },
-    "remainingShare": 0
+    "remainingShare": 0,
+    "readyMainModels": [
+      "gpt-6.2-astra",
+      "gpt-6.2-sol"
+    ]
   },
   {
     "name": "W785-parity-tests-in-landing-bar",
@@ -35,7 +39,10 @@
       "state": "waiting",
       "t": 1795531781200
     },
-    "remainingShare": 0
+    "remainingShare": 0,
+    "readyMainModels": [
+      "gpt-6.2-sol"
+    ]
   },
   {
     "name": "W786-ppe-mobile-device-checks",
@@ -54,7 +61,10 @@
       "state": "waiting",
       "t": 1795531781200
     },
-    "remainingShare": 0
+    "remainingShare": 0,
+    "readyMainModels": [
+      "gpt-6.2-sol"
+    ]
   },
   {
     "name": "T268-ios-cov-8633426",
@@ -73,7 +83,10 @@
       "state": "ready",
       "t": 1795531839171
     },
-    "remainingShare": 0
+    "remainingShare": 0,
+    "readyMainModels": [
+      "gpt-6.2-sol"
+    ]
   },
   {
     "name": "T269-r14-fps-rootcause",
@@ -92,6 +105,9 @@
       "state": "ready",
       "t": 1795531839171
     },
-    "remainingShare": 0
+    "remainingShare": 0,
+    "readyMainModels": [
+      "gpt-6.2-sol"
+    ]
   }
 ]

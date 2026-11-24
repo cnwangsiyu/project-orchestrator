@@ -212,7 +212,7 @@ export function presentRoute(plan, view, context) {
     const releaseFallback = previousReleaseFallback(t, snapshot, c);
     if (releaseFallback) why.push(releaseFallback.text);
     const alternatives=eta.filter(e=>e.account!==c.accountId||e.model!==c.modelId);
-    why.push(`ETA: ${taskEstimateText(seat.estimate)}; chosen lane: ${company(account)?'company':'personal'} ${c.modelId}@${c.accountId} ${laneStartText(seat.estimate)}${alternatives.length?`; alternatives: ${alternatives.map(e=>`${company(snapshot.accounts.find(a=>a.id===e.account))?'company':'personal'} ${etaText(e)}`).join('; ')}`:''}; selected by policy and qualified floor; task time is not a lane-speed ranking`);
+    why.push(`ETA: ${taskEstimateText(seat.estimate)}; chosen lane: ${company(account)?'company':'personal'} ${c.modelId}@${c.accountId} ${laneStartText(seat.estimate)}${alternatives.length?`; alternatives: ${alternatives.map(e=>`${company(snapshot.accounts.find(a=>a.id===e.account))?'company':'personal'} ${etaText(e)}`).join('; ')}`:''}; expected finish ~${Math.round(seat.estimate.completionMin)} min`);
     if(adversarial(t)) why.push('adversarial: no GPT model on any account; Kimi-K3, DeepSeek-V4.1-Flash, then scoped Opus; two independent non-GPT families required.');
     const lane = candidateParts(snapshot,c).lane;
     const exhausted = dayExhaustion(account,lane,snapshot.decisionAt);

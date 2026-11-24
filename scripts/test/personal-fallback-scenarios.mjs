@@ -130,7 +130,7 @@ try {
     const {p,v}=launchesPersonal(raw,task({category:'implement-hard',impact:'service'}));
     assert.equal(p.primary.candidate.modelId,ASTRA);assert.equal(p.primary.personalFallback.preferOverLowerCompany,true);
     assert.match(v.why.join('\n'),/personal Astra for hard task: company Astra.*company gpt-6.1-sol available as lower-class alternative/);
-    assert.match(v.why.join('\n'),/task estimate.*same for every lane.*chosen lane: personal.*start now.*alternatives:.*start now/);
+    assert.match(v.why.join('\n'),/task estimate.*chosen lane: personal.*start now.*alternatives:.*start now/);
     assert.ok(v.notes.some(s=>/task estimate.*lane: start now/.test(s)));
     assert.ok(!v.why.some(s=>/est\. ~|estimated completion/.test(s)));
     assert.ok(['ttadk','trae'].includes(run(raw).primary.candidate.accountId),'non-hard tasks still use a startable company row');

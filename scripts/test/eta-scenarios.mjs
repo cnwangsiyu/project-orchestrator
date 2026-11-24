@@ -53,10 +53,10 @@ try {
   assert.ok(!r.queueAlt.includes("--exclude-model 'gpt-6.1-sol'"),'TTADK handoff must keep the same model eligible');
   r = route({daily:{[SOL]:bucket(),[ASTRA]:bucket(false)},lanes:{[SOL]:lane(null,null,{state:'ready',lastProgressAt:now-29*min,itemsPerMin:2})}});
   assert.equal(r.pick.model,ASTRA,'free hard Astra precedes Sol even when Sol spends no priority quota');
-  assert.equal(r.eta.find((x)=>x.model===SOL&&x.account==='trae').basis,'progressing');
+  assert.equal(r.eta.find((x)=>x.model===SOL&&x.account==='trae').basis,'unknown');
   r = route({familyQueue:{gpt:{t:now,state:'queued',position:537}},
     lanes:{[SOL]:lane(null,null,{state:'ready',lastProgressAt:now,itemsPerMin:2}),[ASTRA]:lane(537,0.7)}});
-  assert.equal(r.eta.find((x)=>x.model===SOL&&x.account==='trae').basis,'progressing',
+  assert.equal(r.eta.find((x)=>x.model===SOL&&x.account==='trae').basis,'unknown',
     'Astra family queue cannot hide fresh Sol progress');
   r = route({ttAvailable:true,lanes:{[SOL]:lane(null,null,{state:'ready',lastProgressAt:now})}});
   assert.equal(r.pick.account,'ttadk','free TTADK Astra precedes free TRAE Sol in the hard ladder');
@@ -75,7 +75,7 @@ try {
   // Fresh stuck telemetry is positive evidence, even at a queue position below 300.
   const stuck=lane(181,0,{state:'waiting',lastProgressAt:null});
   r=route({lanes:{[ASTRA]:stuck,[SOL]:lane(null,null,{state:'ready',lastProgressAt:now})}});
-  assert.equal(r.pick.model,SOL,'a progressing lane beats a fresh zero-drain queue');
+  assert.equal(r.pick.model,SOL,'an unmeasured explicitly allowed lane beats a stalled queue');
   const stalled=r.eta.find(x=>x.model===ASTRA&&x.account==='trae');
   assert.equal(stalled.confidence,'STALLED');assert.equal(stalled.startDelayMin,null);assert.equal(stalled.completionMin,null);
   assert.equal(stalled.unknown,false);assert.match(r.why.join(' '),/gpt-6-astra@trae stalled/);

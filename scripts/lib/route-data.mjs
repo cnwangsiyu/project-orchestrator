@@ -478,7 +478,8 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
       .flatMap((r)=>[r,...(r.second&&r.secondExecutable!==false?[{...r,category:'second-opinion',role:'second'}]:[])]),
     outcomes:outcomes.map((r)=>({...r,modelId:r.actual?.[0]?.model??r.first?.model})), runUsage: [...runUsage.values()],
     transportFailures: rows.filter(r => r.kind === 'outcome' && transportOutcome(r)),
-    etaHistory:outcomes.map((r)=>({attemptId:`${r.name}-${r.t}`,category:r.category,modelId:r.actual?.[0]?.model??r.first?.model,
+    etaHistory:outcomes.filter(r=>r.result==='pass').map((r)=>({attemptId:`${r.name}-${r.t}`,category:r.category,modelId:r.actual?.[0]?.model??r.first?.model,
+      attributed:r.actualStatus==='KNOWN' && r.actual?.length===1 && r.decisions===1,
       accountId:r.actual?.[0]?.account??r.first?.account,effort:r.actual?.[0]?.effort??r.first?.effort,minutes:r.minutes,cause:r.cause})) });
   return finish(snapshot);
 }

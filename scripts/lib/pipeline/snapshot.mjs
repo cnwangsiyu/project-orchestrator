@@ -169,7 +169,7 @@ export function createSnapshot(raw, options = {}) {
     rotationState: Number.isSafeInteger(raw.rotationState) && raw.rotationState >= 0 ? raw.rotationState : 0,
     etaHistory: rows(raw.etaHistory ?? [], 'etaHistory').filter((h) => idOK(h.attemptId) && nonnegative(h.minutes) && h.minutes > 0
       && (!h.sampledAt || h.sampledAt <= decisionAt)).map((h) => ({ attemptId: h.attemptId, category: h.category, modelId: modelId(h.modelId), accountId: h.accountId,
-        effort: h.effort, minutes: h.minutes, cause: h.cause ?? null })).sort((a, b) => compare(a.attemptId, b.attemptId)),
+        attributed:h.attributed === true, effort: h.effort, minutes: h.minutes, cause: h.cause ?? null })).sort((a, b) => compare(a.attemptId, b.attemptId)),
     reviewHistory: rows(raw.reviewHistory ?? [], 'reviewHistory').map((r) => ({ t: r.t, project: r.project, name: r.name, category: r.category, role: r.role ?? 'primary', reviewOverride:r.reviewOverride??null, requestId:r.requestId??null })),
     outcomes: rows(raw.outcomes ?? [], 'outcomes').map((r) => ({ t: r.t, category: r.category, modelId: modelId(r.modelId), result: r.result })),
     transportFailures: rows(raw.transportFailures ?? [], 'transportFailures').map(r => ({ t: r.t, result: 'transport-failed',

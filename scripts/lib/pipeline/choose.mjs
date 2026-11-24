@@ -33,6 +33,22 @@ export function orderCandidates(task, snapshot, rows) {
   const parts=r=>candidateParts(snapshot,r.candidate);
   const ready=r=>!stalled(r)&&!r.estimate.capacityReset&&r.estimate.startDelayMin===0
     &&(parts(r).account.kind!=='trae'||r.estimate.balance?.freeNow===true);
+  const hardAstra = task.tier === 'hard' ? cohort.filter(r => r.ok && ready(r) && isAstra(r.candidate.modelId)
+    && r.predicates.some(p => p.personalFallback?.astraApprovalRef && p.personalFallback.preferOverLowerCompany)) : [];
+  if (hardAstra.length) cohort = hardAstra;
+  // Compare measured starts before applying model or quota preferences. Anchor
+  // the company tie band at the fastest finish so the ordering is transitive.
+  const measured = cohort.filter(r => r.ok && !stalled(r) && !r.estimate.capacityReset
+    && Number.isFinite(r.estimate.completionMin) && r.estimate.confidence !== 'UNKNOWN'
+    && (parts(r).account.kind !== 'trae' || ready(r) || ['queue','observed-start'].includes(r.estimate.basis)));
+  if (measured.length && !adversarial(task) && (!task.flags['allow-low-priority-queue']
+    || measured.some(r => !unavailableDayQuota(parts(r).account,parts(r).lane,snapshot)))) {
+    const fastest = Math.min(...measured.map(r => r.estimate.completionMin));
+    const companyTies = measured.filter(r => company(parts(r).account) && r.estimate.completionMin <= fastest + 3);
+    const pool = companyTies.length ? companyTies : measured;
+    const finish = Math.min(...pool.map(r => r.estimate.completionMin));
+    cohort = pool.filter(r => r.estimate.completionMin === finish);
+  }
   // Prefer a usable current release across company accounts, then the qualified
   // predecessor, before the existing company/personal and effort comparators.
   const releaseRows = cohort.filter(r => r.ok && company(parts(r).account)
@@ -69,9 +85,6 @@ export function orderCandidates(task, snapshot, rows) {
     else if (mainOverflow.length) cohort = mainOverflow;
     else if (companyServing.length) cohort = companyServing;
   }
-  const hardAstra = task.tier === 'hard' ? cohort.filter(r => r.ok && ready(r) && isAstra(r.candidate.modelId)
-    && r.predicates.some(p => p.personalFallback?.astraApprovalRef && p.personalFallback.preferOverLowerCompany)) : [];
-  if (hardAstra.length) cohort = hardAstra;
   if (priority?.mode === 'prefer-first') {
     const preferred = cohort.filter(r => r.ok && ready(r)
       && r.predicates.some(p => p.personalFallback?.approvalRef === priority.userDecisionRef));

@@ -259,6 +259,7 @@ test('V25 strict input fails before state access', () => {
 
 test('equal-quality company ETA and explicit personal bypass', () => {
   const raw = fixture(); raw.lanes[0].readyAt = NOW + 1000000;
+  Object.assign(raw.lanes[1],{loadPercent:10,loadSource:'model'});
   assert.equal(run(task(), raw).primary.candidate.accountId, 'company-b');
   let t = task(); t = approve(raw, t, candidate(createSnapshot(raw), 'personal', SOL, 'medium'));
   assert.notEqual(run(t, raw).primary.candidate.accountId, 'personal');

@@ -1,5 +1,6 @@
 import { company, known, matchesModel, newestRelease, policyModel } from './common.mjs';
 import { candidateParts } from './candidates.mjs';
+import { lowPriorityStart, dayExhaustion } from './low-priority-start.mjs';
 import { estimateCandidate } from './estimate.mjs';
 
 const quotaFor = (account, id) => account.quota.find(q => q.bucketId === id)
@@ -8,38 +9,15 @@ const restricted = (snapshot, c) => snapshot.health.some(h => h.accountId === c.
   && (!h.modelId || h.modelId === c.modelId) && (!h.family || h.family === c.family)
   && (h.restricted || h.recovery === 'awaiting-probe'));
 
-// Only TRAE model buckets describe a provider low-priority lane. TTADK's
-// authoritative daily denial covers the account and cannot be opted into.
-export function dayExhaustion(account, lane, now) {
-  if (account.kind === 'ttadk' && account.fallbackUnavailable?.kind === 'quota-exhausted')
-    return { until: account.fallbackUnavailable.until };
-  if (account.kind !== 'trae') return null;
-  const bucket = quotaFor(account, lane.modelId), usage = known(bucket?.usage);
-  const until = usage?.resetsAt ?? known(bucket?.partialReset);
-  if (until != null && until <= now) return null;
-  if (usage ? usage.used >= usage.limit || usage.depleted === true || usage.remaining === 0 : known(bucket?.priority) === 'depleted')
-    return { until: until ?? null };
-  return null;
-}
-
 // A full TRAE bucket changes queue priority. Only fresh, model-specific
 // queue observations can establish a short start on the remaining capacity.
 export function unavailableDayQuota(account, lane, snapshot) {
   const quota = dayExhaustion(account, lane, snapshot.decisionAt);
   if (!quota || account.kind !== 'trae') return quota;
+  const evidence = lowPriorityStart(lane);
   const patience = snapshot.personalFallback?.queueWaitMinutes ?? 5;
-  if (known(lane.ownWaiting)) return { ...quota, reason: 'another turn is waiting on this model' };
-  const family = known(lane.familyQueue);
-  const queues = [known(lane.lowQueue), family?.lowPriority === true && family].filter(q => q?.position > 0 || q?.position === 0 && q.drainPerMin > 0);
-  for (const q of queues) {
-    if (!(Number.isFinite(q.drainPerMin) && q.drainPerMin > 0))
-      return { ...quota, reason: 'low-priority queue has no measured drain' };
-    const delay = q.position / q.drainPerMin;
-    if (delay > patience) return { ...quota, reason: `predicted start ~${Math.round(delay)} min > ${patience} min` };
-  }
-  const start = known(lane.lowStart);
-  if (queues.length || start !== null && start <= patience) return null;
-  return { ...quota, reason: 'low-priority start unmeasured' };
+  if (evidence.minutes !== null && evidence.minutes <= patience) return null;
+  return { ...quota, reason: evidence.reason ?? `predicted start ~${Math.round(evidence.minutes)} min > ${patience} min` };
 }
 
 // A capacity exception for the immediately previous release, never a new
@@ -82,3 +60,5 @@ export function previousReleaseFallback(task, snapshot, c) {
   if (reasons.some(why => !why)) return null;
   return { newest, previous: c.modelId, dayLimited: latestLanes.every(l => unavailableDayQuota(account,l,snapshot)), text: `${newest} ${reasons[0]}; using previous release ${c.modelId} on the same company account ${account.id}` };
 }
+
+export { dayExhaustion } from './low-priority-start.mjs';

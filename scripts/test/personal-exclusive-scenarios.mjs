@@ -109,7 +109,7 @@ try {
     for (const l of raw.lanes.filter(l => l.accountId === 'trae')) {
       Object.assign(l, { mode: 'low-priority', readyAt: null, position: 5, drainPerMin: 1, queueState: 'queued' });
     }
-    assert.equal(run(raw).plan.primary.candidate.accountId, 'trae');
+    assert.equal(run(raw).plan.primary.candidate.accountId, 'main');
     for (const l of raw.lanes.filter(l => l.accountId === 'trae')) l.position = 6;
     assert.equal(run(raw).plan.primary.candidate.accountId, 'main');
   });

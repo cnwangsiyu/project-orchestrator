@@ -56,9 +56,22 @@ try {
       const raw = exhaust(fixture([record.model]));
       raw.decisionAt = raw.collectedFrom = raw.collectedThrough = record.t;
       Object.assign(raw.lanes[0], {position:0, readyAt:record.t, progressAt:record.t, queueState:'ready', familyQueue:record.familyQueue});
+      for (const modelId of record.readyMainModels.filter(m=>m!==record.model)) {
+        raw.accounts[1].catalog = [...raw.accounts[1].catalog,modelId];
+        raw.models.push({...raw.models[0],id:modelId});
+        raw.lanes.push({...raw.lanes[1],id:`main:${modelId}`,modelId});
+      }
       const plan = run(raw,task({taskId:record.name,category:record.category,impact:record.impact}));
+      assert.deepEqual([plan.primary.candidate.accountId,plan.primary.candidate.modelId,plan.primary.candidate.effort],
+        ['main',record.readyMainModels[0],record.effort],record.name);
       assert.ok(plan.trace.candidates.filter(r=>r.candidate.accountId==='trae').every(r=>rejected(r).includes('DAY_QUOTA_EXHAUSTED')),record.name);
     }
+    const timed = fixture([latest]);
+    timed.etaHistory = ['trae','main'].flatMap(accountId=>[1,2,3].map(i=>({attemptId:`${accountId}-${i}`,accountId,modelId:latest,
+      category:'implement-hard',effort:'xhigh',attributed:true,minutes:accountId==='main'?5:20})));
+    assert.equal(run(timed).primary.candidate.accountId,'main');
+    timed.etaHistory.filter(r=>r.accountId==='trae').forEach(r=>r.minutes=8);
+    assert.equal(run(timed).primary.candidate.accountId,'trae');
     // Replay the two original route-log inputs, before the manual account exclusions.
     const terra = 'gpt-5.6-terra', astra = 'gpt-6-astra';
     for (const [name, project, category, impact, at, expected] of [
@@ -93,7 +106,7 @@ try {
         const q = predecessor.accounts[0].quota.find(q => q.bucketId === previous);
         Object.assign(q.usage,{used:1,remaining:79,depleted:false});
         predecessor.lanes.find(l => l.accountId === 'trae' && l.modelId === previous).mode='priority';
-        assert.equal(run(predecessor,spec).primary.candidate.modelId,previous,'available previous release precedes ready Terra');
+        assert.equal(run(predecessor,spec).primary.candidate.modelId,terra,'measured ready Terra precedes unmeasured previous release');
       }
       main.transport = false;
       raw.lanes = raw.lanes.filter(l => l.accountId !== 'trae' || l.modelId !== terra);
@@ -135,7 +148,7 @@ try {
       if (quota === 'unknown') raw.accounts[0].quota = [];
       Object.assign(raw.lanes[0], { mode:'low-priority', position:null, queueState:null, readyAt:null, drainPerMin:null });
       const plan = run(raw);
-      assert.equal(plan.primary.candidate.accountId, 'trae', quota);
+      assert.equal(plan.primary.candidate.accountId, 'main', quota);
       assert.ok(!rejected(rowFor(plan, 'trae', latest)).includes('DAY_QUOTA_EXHAUSTED'), quota);
     }
     let p = run(fixture());

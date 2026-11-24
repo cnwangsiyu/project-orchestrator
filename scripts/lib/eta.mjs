@@ -75,7 +75,7 @@ export const patienceMinutes = ({ now, nextAvailableAt, ttadk }) => {
   if (!finite(reset) || reset <= now) return ETA.patienceMaxMin;
   return Math.min(ETA.patienceMaxMin, ETA.patienceShare * (reset - now) / 60000);
 };
-export const taskEstimateText = row => `task estimate ~${Math.round(row.workMin)} min (${row.sampleIds?.length?'category history':'category fallback'}, same for every lane at this effort; not lane speed)`;
+export const taskEstimateText = row => `task estimate ~${Math.round(row.workMin)} min (${row.workBasis ?? 'category fallback'})`;
 export const laneStartText = row => row.stalled || row.basis === 'stalled' ? 'stalled (awaiting queue progress)'
   : row.startDelayMin == null || row.unknown || row.confidence === 'UNKNOWN' ? 'start wait unknown (bounded queue patience)'
   : row.startDelayMin > 0 ? `queue ~${Math.max(1,Math.round(row.startDelayMin))} min` : 'start now';

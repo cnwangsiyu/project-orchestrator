@@ -2,7 +2,7 @@ import { createTaskSpec, deriveReview } from './taskspec.mjs';
 import { createSnapshot, isNormalizedSnapshot } from './snapshot.mjs';
 import { enumerateCandidates, candidateParts } from './candidates.mjs';
 import { evaluateCandidate, needsReviewer, pReviewerSet } from './filters.mjs';
-import { estimateCandidate, companyServesInfraRetry, usesExclusiveInfraOverflow } from './estimate.mjs';
+import { estimateCandidate } from './estimate.mjs';
 import { unavailableDayQuota } from './release-fallback.mjs';
 import { orderCandidates, prefersPersonalCodex } from './choose.mjs';
 import { makePlan } from './plan.mjs';
@@ -78,12 +78,7 @@ export function routePure(taskSpec, stateSnapshot, history = []) {
     const { account, lane } = candidateParts(snapshot, row.candidate);
     return unavailableDayQuota(account, lane, snapshot);
   };
-  const dayLimited = snapshot.personalPriority?.mode === 'exclusive' && assessment.rows.some(r => depleted(r)
-    && r.predicates.every(p => p.ok || p.reason.code === 'DAY_QUOTA_EXHAUSTED'));
-  const readyCompany = dayLimited ? complete.filter(r => company(candidateParts(snapshot, r.candidate).account)
-    && (!usesExclusiveInfraOverflow(task, snapshot) || companyServesInfraRetry(snapshot, r))
-    && !depleted(r) && !r.estimate.stalled && !r.reviewers.some(seat => seat.estimate.stalled)) : [];
-  const rankedNow = orderCandidates(task, snapshot, readyCompany.length ? readyCompany : complete);
+  const rankedNow = orderCandidates(task, snapshot, complete);
   const optedQueue = task.flags['allow-low-priority-queue'] && rankedNow.winner && depleted(rankedNow.winner);
   const startable = rankedNow.winner && (!rankedNow.winner.estimate.stalled || optedQueue);
   // Only explicit quota denial may project recovery. All other hard predicates

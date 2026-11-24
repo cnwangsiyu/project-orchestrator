@@ -1,3 +1,4 @@
+import { lowPriorityStart, dayExhaustion } from './low-priority-start.mjs';
 import { workMinutes, requestsFor, laneEta, ttadkEta, patienceMinutes, ETA } from '../eta.mjs';
 import { known, freeze, reason } from './common.mjs';
 import { company, policyModel, isAstra } from './common.mjs';
@@ -25,8 +26,11 @@ export function estimateCandidate(task, snapshot, candidate, { capacityReset = f
   const { account: a, lane: l } = candidateParts(snapshot, candidate), now = snapshot.decisionAt;
   // Use the established category/effort median, with its actual provenance.
   // It is a heuristic across models/accounts, not proof of equivalent speed.
-  const rows = snapshot.etaHistory.filter((r) => r.category === task.category && r.effort === candidate.effort && r.minutes > 0
+  const pooled = snapshot.etaHistory.filter((r) => r.category === task.category && r.effort === candidate.effort && r.minutes > 0
     && !['queue-too-slow', 'cancelled-no-work', 'infra', 'transport', 'transport-failed', 'policy-block'].includes(r.cause));
+  const exact = pooled.filter(r => r.attributed && r.accountId === candidate.accountId && r.modelId === candidate.modelId);
+  const rows = exact.length >= ETA.historyMin ? exact : pooled;
+  const workBasis = rows === exact ? 'account/model history' : pooled.length >= ETA.historyMin ? 'category history' : 'category fallback';
   const history = rows.map((r) => ({ ...r, actual: [{ effort: r.effort }] }));
   const workMin = workMinutes(task.category, task.tier, history, candidate.effort), requests = requestsFor(task.category, task.tier);
   const ready = known(l.readyAt), position = known(l.position), drainPerMin = known(l.drainPerMin);
@@ -48,9 +52,19 @@ export function estimateCandidate(task, snapshot, candidate, { capacityReset = f
     &&(dq.remaining==null||typeof dq.remaining==='number'&&dq.remaining>0)
     &&!queued&&!familyCongested&&!recentAstraQueue);
   const resetAt = known(a.denialResetAt);
-  const raw = capacityReset ? ttadkEta({ account: { usable: false, quotaOut: { resetsAt: resetAt } }, now, workMin })
+  let raw = capacityReset ? ttadkEta({ account: { usable: false, quotaOut: { resetsAt: resetAt } }, now, workMin })
     : laneEta({ workMin, requests, position, drainPerMin, state: known(l.queueState), bucketDepleted: l.mode === 'low-priority'&&!astraNoLoad, congested, progressing,
       unknown: ready === null && !directClear && !(position !== null && drainPerMin > 0) && !astraNoLoad, startDelayMin: ready === null ? 0 : Math.max(0, (ready - now) / 60000) });
+  // Startup for a new depleted turn is distinct from throughput of running turns.
+  const depleted = a.kind === 'trae' && dayExhaustion(a,l,now);
+  const low = depleted && lowPriorityStart(l);
+  if (!capacityReset && low && low.minutes !== null) {
+    raw = low.basis === 'queue' && low.minutes > 0
+      ? laneEta({workMin,requests,position:low.position,drainPerMin:low.drainPerMin,bucketDepleted:true})
+      : {startDelayMin:low.minutes,completionMin:low.minutes+workMin,basis:low.basis};
+  } else if (!capacityReset && low && !raw?.stalled) {
+    raw = {...raw,unknown:true,basis:'unknown'};
+  }
   const stalled = raw?.stalled === true;
   const unknown = !stalled && (!raw || raw.unknown);
   const uncertainty = [];
@@ -93,7 +107,7 @@ export function estimateCandidate(task, snapshot, candidate, { capacityReset = f
   return freeze({ candidateId: candidate.id, startDelayMin: unknown ? null : raw.startDelayMin,
     completionMin: stalled ? null : raw?.completionMin ?? workMin, stalled, basis: raw?.basis ?? 'unknown', confidence: stalled ? 'STALLED' : unknown ? 'UNKNOWN'
       : rows.length >= ETA.historyMin && !uncertainty.some((r) => r.code === 'WORK_COHORT_FALLBACK') ? 'measured' : 'fallback',
-    workMin, requests, sampleIds: rows.length >= ETA.historyMin ? rows.map((r) => r.attemptId) : [], costs, noPrioritySpend, expiryOpportunity,expiryEvidence,
+    workMin, workBasis, requests, sampleIds: rows.length >= ETA.historyMin ? rows.map((r) => r.attemptId) : [], costs, noPrioritySpend, expiryOpportunity,expiryEvidence,
     uncertainty, patienceMin: a.company&&(unknown||raw?.basis==='queue'||raw?.startDelayMin>0||l.mode==='low-priority') ? patienceMinutes({ now, nextAvailableAt:nextReset }) : null,
     inputAges: { readyAt: l.readyAt.ageMs, position: l.position.ageMs, drainPerMin: l.drainPerMin.ageMs, progressAt: l.progressAt.ageMs, loadPercent: l.loadPercent.ageMs },
     balance, capacityReset, deferUntil: capacityReset ? resetAt : null });

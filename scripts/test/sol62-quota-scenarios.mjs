@@ -26,7 +26,7 @@ const cache = path.join(tmp, 'quota.json');
 const env = { ...process.env, ROUTE_NOW: String(now), QUOTA_CACHE: cache,
   CODEX_ACCOUNTS: path.join(tmp, 'no-registry.json'), ROUTE_LOG_FILE: path.join(tmp, 'no-routes.jsonl'),
   QUOTA_LOG_FILE: path.join(tmp, 'no-quota-log.jsonl'), PERSONAL_FALLBACK_FILE: path.join(tmp, 'fallback.json') };
-function fixture({ daily = { gpt_6_2: bucket }, sampledAt = now, telemetry = { t: now, state: 'ready', position: 0, lowStart: {t:now,minutes:0.5}, lastProgressAt: now }, load = 47 } = {}) {
+function fixture({ daily = { gpt_6_2: bucket }, sampledAt = now, telemetry = { t: now, state: 'ready', position: 0, lowStart: {t:now,minutes:0}, lastProgressAt: now }, load = 47 } = {}) {
   fs.writeFileSync(path.join(home, 'lane-state.json'), JSON.stringify({ [SOL]: telemetry }));
   fs.writeFileSync(cache, JSON.stringify({ checkedAt: now, claude: [], codexAccounts: [
     { name: 'ttadk', kind: 'ttadk', home: path.join(tmp, 'ttadk'), models: [OLD], healthy: true, live: true, windows: [],
