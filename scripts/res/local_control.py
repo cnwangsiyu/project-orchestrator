@@ -15,7 +15,7 @@ sys.dont_write_bytecode = True
 import time
 import uuid
 
-from host_samples import shared
+from host_samples import shared, basis
 from dynamic_capacity import headroom, reservation_totals, smaller_bypass, json_safe, numeric_metric, iso_timestamp
 from mini2_control import atomic, guard, read, root_dir, process_start
 
@@ -140,7 +140,8 @@ def gate(root,cfg,sample,cost):
     try: amounts=reservation_totals([v for _,v in claims(root)])
     except ValueError: return "legacy-or-incomplete-hold"
     load,floor=limits(cfg,sample)
-    return headroom(sample["load5"],sample["availableGiB"],sample["freeGiB"],amounts,cost,load,floor,cfg["LOCAL_MIN_FREE_GIB"])
+    charged, available, _ = basis(root,sample["host"],sample,amounts,now)
+    return headroom(charged,available,sample["freeGiB"],(0,0,amounts[2]),cost,load,floor,cfg["LOCAL_MIN_FREE_GIB"])
 
 
 def log(root,event,id,by,detail=""):
@@ -314,7 +315,8 @@ def report(root,args):
     try: amounts=reservation_totals([lease for _,lease in claims(root)])
     except ValueError: amounts=None
     load,floor=limits(cfg,sample)
-    count=0 if reason!="open" or amounts is None else max(0,min(math.floor((load-sample["load5"]-amounts[0])/cost[0]),math.floor((sample["availableGiB"]-floor-amounts[1])/cost[1]),(math.floor((sample["freeGiB"]-cfg["LOCAL_MIN_FREE_GIB"]-amounts[2])/cost[2]) if cost[2] else math.inf)))
+    if reason=="open": charged,available,_=basis(root,sample["host"],sample,amounts,time.time())
+    count=0 if reason!="open" or amounts is None else max(0,min(math.floor((load-charged)/cost[0]),math.floor((available-floor)/cost[1]),(math.floor((sample["freeGiB"]-cfg["LOCAL_MIN_FREE_GIB"]-amounts[2])/cost[2]) if cost[2] else math.inf)))
     return {os.uname().nodename:dict(claims=count,gate="headroom" if reason=="open" else reason,
                                    cores=numeric_metric(sample["cores"],True),memGiB=numeric_metric(sample["totalGiB"],True),loadLimit=load,memoryFloorGiB=floor,
                                    load5=numeric_metric(sample.get("load5")),availableGiB=numeric_metric(sample.get("availableGiB")),pressure=numeric_metric(sample.get("pressure")),freeGiB=numeric_metric(sample.get("freeGiB")),diskFloorGiB=cfg["LOCAL_MIN_FREE_GIB"],

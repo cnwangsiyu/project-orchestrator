@@ -13,10 +13,41 @@ sampler = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(sampler)
 
 
-from host_samples import shared
+from host_samples import basis, shared
 
 
 class SamplerTests(unittest.TestCase):
+    def test_window_limits_and_fallback(self):
+        import random
+        from dynamic_capacity import headroom
+        rng = random.Random(42)
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            now=1800
+            (root/"machine.conf").write_text("# defaults\n")
+            row=dict(schema=1,host="box",ok=True,at=now,cores=14,totalGiB=64,memAvailableGiB=48,
+                     freeGiB=128,load1=1,load5=13.2,load15=1,sampleSource="shared")
+            file=root/"host-samples/history/box/1970-01-01.ndjson"
+            file.parent.mkdir(parents=True)
+            def write(ages):
+                file.write_text("".join(json.dumps(dict(row,at=now-age,load5=14 if age else 13.2,
+                                                         memAvailableGiB=32 if age else 48))+"\n" for age in ages))
+            for ages in ([0,300],[0,299,100],[0,0,300]):
+                write(ages)
+                self.assertEqual(basis(root,"box",row,(4,8,0),now)[:2],(17.2,40))
+            write([0,150,300])
+            for _ in range(200):
+                cpu,mem,disk=(rng.randrange(0,32) for _ in range(3))
+                cost=[rng.uniform(.25,5),rng.uniform(.25,8),rng.randrange(0,30)]
+                limit=rng.randrange(10,32)
+                charged,available,stats=basis(root,"box",row,(cpu,mem,disk),now)
+                self.assertTrue(stats["applied"])
+                opened=headroom(charged,available,128,(0,0,disk),cost,limit,8,64)=="open"
+                self.assertEqual(opened, all((cpu+cost[0]<=limit,14+cost[0]<=limit,
+                                     32-cost[1]>=8,64-mem-cost[1]>=8,128-disk-cost[2]>=64)))
+            (root/"machine.conf").write_text("ADMISSION_WINDOW_SECONDS=0\n")
+            self.assertEqual(basis(root,"box",row,(4,8,0),now)[:2],(17.2,40))
+
     def test_selection(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

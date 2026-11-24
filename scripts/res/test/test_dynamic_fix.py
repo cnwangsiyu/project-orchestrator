@@ -98,6 +98,37 @@ class DynamicFixTests(unittest.TestCase):
             result = self.cli("pool-capacity",pool)
             self.assertEqual(next(iter(json.loads(result.stdout).values()))["gate"],"headroom",result.stderr)
 
+    def test_window_admission_and_report_share_basis(self):
+        self.activate("local")
+        self.claim("running")
+        box="192.0.2.1"
+        with (self.root/"resources.tsv").open("a") as stream:
+            stream.write("devbox-host-fixture\tremote\topen\t-\trunner@"+box+" caps=node\n")
+        now=time.time()
+        reserve=self.root/"devbox-reservations"
+        reserve.mkdir(exist_ok=True)
+        (reserve/(box+".json")).write_text(json.dumps([[now,4,8,0]]))
+        hosts={}
+        for host in (box,os.uname().nodename):
+            row=dict(self.sample, host=host, at=now, ok=True, schema=1,load1=12,load5=12,load15=12,
+                     memAvailableGiB=48,freeInactiveGiB=32,compressedLogicalGiB=0)
+            if host!=box: row["arch"]="arm64"
+            hosts[host]=row
+            for age in (0,120,360):
+                day=time.strftime("%Y-%m-%d",time.gmtime(now-age))
+                file=self.root/"host-samples/history"/host/(day+".ndjson")
+                file.parent.mkdir(parents=True,exist_ok=True)
+                with file.open("a") as stream: stream.write(json.dumps(dict(row,at=now-age))+"\n")
+        mini.atomic(self.root/"host-samples/latest.json",dict(schema=1,hosts=hosts))
+        for pool in ("local-light","devbox-cn-light"):
+            result=self.cli("pool-capacity",pool)
+            self.assertEqual(result.returncode,0,result.stderr)
+            self.assertGreater(next(iter(json.loads(result.stdout).values()))["claims"],0,result.stdout)
+        with (self.root/"machine.conf").open("a") as stream: stream.write("ADMISSION_WINDOW_SECONDS=0\n")
+        for pool in ("local-light","devbox-cn-light"):
+            result=self.cli("pool-capacity",pool)
+            self.assertEqual(next(iter(json.loads(result.stdout).values()))["gate"],"load",result.stdout)
+
     def test_unbound_memory_credit_cannot_break_the_reserve_floor(self):
         self.activate("local")
         leases=[self.claim(name)[1] for name in ("first","second")]

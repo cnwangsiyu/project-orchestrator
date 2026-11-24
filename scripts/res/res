@@ -185,7 +185,7 @@ def parse_config(content):
             if name == 'LOCAL_MAX_BYPASS' and float(value)>32 or name == 'LOCAL_METRICS_TTL_SECONDS' and float(value)>30:
                 raise ValueError('local capacity setting exceeds bound ' + name)
             local[name]=int(value) if integer else float(value); continue
-        if name in ('SHARED_SAMPLES','SAMPLE_TTL'):
+        if name in ('SHARED_SAMPLES','SAMPLE_TTL','ADMISSION_WINDOW_SECONDS'):
             if not value.isdecimal() or int(value) > (1 if name == 'SHARED_SAMPLES' else 86400):
                 raise ValueError('invalid sampling setting ' + name)
             continue
@@ -2618,7 +2618,7 @@ pool_controller() {
 import datetime, fcntl, hashlib, json, math, os, re, shutil, signal, socket, stat, subprocess, sys, tempfile, time
 from contextlib import contextmanager
 sys.path.insert(0, os.path.dirname(os.path.realpath(os.environ['RES_SELF_COMMAND'])))
-from host_samples import shared
+from host_samples import shared, basis
 from dynamic_capacity import headroom, json_safe, numeric_metric, cached_timestamp
 root, action, request, timeout, delay, by, project, task, purpose, pid, until, force, need, prefer, preferred_slot, excluded_slots, excluded_hosts, stale, controller, generation, exclude_reason, hard_slots, hard_hosts, disk_gib, disk_gib_file, placement_file, maintenance, extra_disk_gib, legacy_config_path, warm_family, claim_cores, claim_mem = sys.argv[1:]
 build_namespace = {'__name__': 'res_build_processes'}
@@ -3132,8 +3132,9 @@ try:
         floor = settings['MIN_AVAIL_GIB']
         detail += ' load_limit=%g mem_floor_gib=%g task_cores=%g task_gib=%g task_disk_gib=%g disk_floor_gib=53' % (limit, floor, *cost)
         if (kind == 'HEAVY' or box in host_rows) and io_closed(box, value, settings): return 'io-pressure', detail, entries, cost
-        reason = headroom(value['load5'], value['memAvailableGiB'], value['freeGiB'],
-                          (cpu, mem, disk), cost, limit, floor, float('-inf') if maintenance else 53)
+        charged, available, window = basis(root,box,value,(cpu,mem,disk),current)
+        reason = headroom(charged, available, value['freeGiB'],
+                          (0, 0, disk), cost, limit, floor, float('-inf') if maintenance else 53)
         if reason == 'load' and override: reason = 'load-override'
         return 'headroom' if reason == 'open' else reason, detail, entries, cost
     def gate_open(reason):
@@ -3161,8 +3162,9 @@ try:
                 disk=sum(entry[3] for entry in entries if len(entry)>=4)
                 maximum=int(settings['MAX_CLAIMS']) or max(1,int(value['cores']/min(settings['HEAVY_CORES'],settings['LIGHT_CORES'])))
                 held=sum(os.path.isdir(os.path.join(locks,id+'.d')) for id,member in remote.items() if member[1]==box and not id.startswith('devbox-host-'))
-                count=max(0,min(math.floor((value['cores']*settings['LOAD_PER_CORE']-value['load5']-cpu)/cost[0]),
-                                math.floor((value['memAvailableGiB']-mem-settings['MIN_AVAIL_GIB'])/cost[1]),
+                charged, available, _ = basis(root,box,value,(cpu,mem,disk),current)
+                count=max(0,min(math.floor((value['cores']*settings['LOAD_PER_CORE']-charged)/cost[0]),
+                                math.floor((available-settings['MIN_AVAIL_GIB'])/cost[1]),
                                 math.floor((value['freeGiB']-disk-53)/cost[2]) if cost[2] else maximum,
                                 maximum-held))
             result[box]=dict(claims=count,gate=reason)
@@ -3211,11 +3213,13 @@ try:
             task_mem = float(claim_mem) if claim_mem else settings.get(kind + '_GIB', 2 if kind == 'LIGHT' else 4)
             # CPU hardware does not shrink when a disk probe expires. Unknown
             # hardware uses a labelled slot-count fallback, never invented cores.
+            if measured:
+                charged, available, _ = basis(root,box,measured,(reserved_cpu,reserved_mem,0),now)
             result[box] = dict(cores=cores, coresSource=source, probeAgeSec=age,
                                probeStale=not fresh, metricsFresh=bool(measured), heldSlots=held[box],
                                score=held[box] / (cores or 1), nextScore=(held[box] + 1) / (cores or 1),
-                               spareCores=cores - (measured['load5'] + reserved_cpu if box in host_rows else max(measured['load5'], reserved_cpu)) - task_cpu if measured else None,
-                               spareMemGiB=measured['memAvailableGiB'] - reserved_mem - task_mem if measured else None,
+                               spareCores=cores - (charged if box in host_rows else max(measured['load5'], reserved_cpu)) - task_cpu if measured else None,
+                               spareMemGiB=available - task_mem if measured else None,
                                freeGiB=free if number(free) and free >= 0 else None)
         return result
     def warm_slots(project, remote):

@@ -17,7 +17,7 @@ sys.dont_write_bytecode = True
 import subprocess
 import time
 import uuid
-from host_samples import shared
+from host_samples import shared, basis
 from dynamic_capacity import headroom, reservation_totals, smaller_bypass, json_safe, numeric_metric, iso_timestamp
 from xml.parsers.expat import ExpatError
 
@@ -376,8 +376,9 @@ def admission(root, cfg, now, disk=0, need=(), qualification=False, cost=None):
             return "hardware-mismatch"
         try: reservations = reserved(root)
         except ValueError: return "legacy-or-incomplete-hold"
-        return headroom(sample["load5"],sample["availableGiB"],sample["freeGiB"],
-                        reservations,cost,limits[0],limits[1],cfg["minFreeGiB"])
+        charged, available, _ = basis(root,HOST,sample,reservations,now)
+        return headroom(charged,available,sample["freeGiB"],
+                        (0,0,reservations[2]),cost,limits[0],limits[1],cfg["minFreeGiB"])
     return "open"
 
 
@@ -651,8 +652,9 @@ def main():
             detail=value["capacity"]; remaining=detail["reserved"]
             count=0
             if value["reason"]=="open" and remaining is not None:
-                count=max(0,min(math.floor(detail["loadLimit"]-detail["load5"]-remaining[0]),
-                                math.floor(detail["availableGiB"]-detail["memoryFloorGiB"]-remaining[1]),
+                charged, available, _ = basis(root,HOST,metrics(root,time.time()),remaining,time.time())
+                count=max(0,min(math.floor(detail["loadLimit"]-charged),
+                                math.floor(available-detail["memoryFloorGiB"]),
                                 math.floor((detail["freeGiB"]-detail["diskFloorGiB"]-remaining[2])/8)))
             value={HOST:dict(claims=count,gate="headroom" if value["reason"]=="open" else value["reason"],**value)}
         print(json.dumps(json_safe(value),allow_nan=False) if args.json or args.action=="pool-capacity" else "mini2 "+" ".join(k+"="+str(v) for k,v in value.items()))
