@@ -78,6 +78,22 @@ try {
   assert.equal(requestQueueChoice(f.row,notice.noticeId,notice.options.find(o=>o.account==='main'&&o.model===SOL).id,null,now).exitCode,0);
   settleQueueChoice(f.row,'selected',now);assert.throws(()=>requestQueueChoice(f.row,notice.noticeId,'park',null,now));
   fs.rmSync(queueDecisionFile(f.row));
+  // A mistaken ending must not silence the same queue episode forever.
+  f=fixture();
+  const endedNotice=notifyQueueOwner(f.row,f.queue,f.launch,{now,policy,context:f.context,emit});
+  settleQueueChoice(f.row,'ended',now);
+  assert.equal(notifyQueueOwner(f.row,f.queue,f.launch,{now:now+9*min,policy,context:f.context,emit}),null);
+  const renewed=notifyQueueOwner(f.row,f.queue,f.launch,{now:now+10*min,policy,context:f.context,emit});
+  assert.notEqual(renewed.noticeId,endedNotice.noticeId);assert.equal(renewed.noticeCount,2);
+  assert.throws(()=>requestQueueChoice(f.row,endedNotice.noticeId,'wait',null,now),/stale/);
+  assert.equal(requestQueueChoice(f.row,renewed.noticeId,'wait',null,now).exitCode,0);
+  assert.equal(notifyQueueOwner(f.row,f.queue,f.launch,{now:now+20*min,policy,context:f.context,emit}),null,'pending choice is not replaced');
+  assert.ok(claimQueueChoice(f.row));
+  assert.equal(notifyQueueOwner(f.row,f.queue,f.launch,{now:now+20*min,policy,context:f.context,emit}),null,'claimed choice is not replaced');
+  settleQueueChoice(f.row,'selected',now);
+  settleQueueChoice(f.row,'ended',now);
+  assert.equal(notifyQueueOwner(f.row,f.queue,f.launch,{now:now+20*min,policy,context:f.context,emit}),null,'executed choice is not reopened');
+  fs.rmSync(queueDecisionFile(f.row));
   f=fixture(true);assert.ok(queueOptions(f.row,f.queue,f.launch,now,f.context).some(o=>o.account==='ttadk'&&!o.needsUserApproval));
   const tt=notifyQueueOwner(f.row,f.queue,f.launch,{now,policy,context:f.context,emit});
   assert.equal(requestQueueChoice(f.row,tt.noticeId,tt.options.find(o=>o.account==='ttadk').id,null,now).exitCode,0);
@@ -122,7 +138,7 @@ try {
     const detached=spawnSync(process.execPath,['--import',path.join(root,'scripts/test/fixtures/reroute-transport.mjs'),
       path.join(root,'scripts/codex-worker.mjs'),'--account','trae','start','--cwd',tmp,'--model',SOL,'--effort','high',
       '--sandbox','workspace-write','--name',f.row.name,'--owner',owner,'--project','fixture',
-      '--route-args',f.launch.defaults['route-args'],'--stall-min','0.01',
+      '--route-args',f.launch.defaults['route-args'],'--stall-min',reason==='disconnect'?'0.1':'0.01',
       '--log',path.join(tmp,`detached-${reason}.log`),'--out',path.join(tmp,`detached-${reason}.md`),'Read the same brief.'],
       {env:{...process.env,REROUTE_FIXTURE:JSON.stringify({source:SOL,rpc:detachedRpc,watcherOnlyQueue:true,disconnect:reason==='disconnect'})},encoding:'utf8',timeout:10000});
     assert.equal(detached.error,undefined);assert.equal(detached.status,reason==='stall'?4:11,detached.stdout+detached.stderr);

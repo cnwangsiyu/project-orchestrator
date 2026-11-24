@@ -124,8 +124,15 @@ export function notifyQueueOwner(row,queue,launch,{now=Date.now(),policy=queuePo
   if (!policy?.enabled||!waiting(queue)||queue.reporting||queue.completing) { const old=read(file); if(old?.status==='waiting') writeJson(file,{...old,status:'ended'}); return null; }
   if (!Number.isFinite(queue.since)||now-queue.since<=policy.queueWaitMinutes*60000) return null;
   const old=read(file), same=old?.since===queue.since;
-  if (same&&(old.status!=='waiting'||old.choice||!old.pendingNotice&&now-old.lastNoticeAt<(policy.queueReminderMinutes??10)*60000)) return null;
-  const noticeId=same?old.noticeId:randomUUID();
+  const canNotify = state => {
+    if (state?.since !== queue.since) return true;
+    if (state.choice || state.choiceExecutedAt || !['waiting','ended'].includes(state.status)) return false;
+    return state.status === 'waiting' && state.pendingNotice
+      || now-state.lastNoticeAt >= (policy.queueReminderMinutes??10)*60000;
+  };
+  if (!canNotify(old)) return null;
+  const renewing = same && old.status === 'ended';
+  const noticeId=same&&!renewing?old.noticeId:randomUUID();
   let options, optionError=null;
   try { options=queueOptions(row,queue,launch,now,context,noticeId); }
   catch(e) { optionError=e.message; options=[{id:'wait',type:'wait',lane:`${row.account}:${row.model}`,model:row.model,effort:row.effort,
@@ -146,8 +153,8 @@ export function notifyQueueOwner(row,queue,launch,{now=Date.now(),policy=queuePo
   }
   return withLock(file,()=>{
     const current=read(file);
-    if(current?.since===queue.since&&(current.status!=='waiting'||current.choice||!current.pendingNotice&&now-current.lastNoticeAt<(policy.queueReminderMinutes??10)*60000)) return null;
-    const count=same?(old.pendingNotice?old.noticeCount:(old.noticeCount??1)+1):1;
+    if (!canNotify(current) || current?.noticeId !== old?.noticeId || current?.status !== old?.status) return null;
+    const count=same?(old.pendingNotice&&!renewing?old.noticeCount:(old.noticeCount??1)+1):1;
     const text=`queue-stalled: ${count===2?'SECOND NOTICE; ':count>2?`NOTICE ${count}; `:''}task=${row.name??row.task} thread=${row.thread} turn=${row.turn} owner=${row.owner} lane=${row.account}:${row.model} model=${row.model} effort=${row.effort}; queued ${((now-queue.since)/60000).toFixed(1)} min position=${queue.position??'?'} drain=${queue.drainPerMin??'?'} /min. Owner decides; no automatic switch.${count>1?' secretary-relay: owner queue decision still pending.':''}${optionError?` Options incomplete: ${optionError}.`:''}\n`
       +options.map(o=>`${o.id}: ${o.lane} ${o.model}/${o.effort}; start=${o.expectedStartDelayMin??'?'} min; ${o.quotaNote}; ${o.releaseFallback?`${o.releaseFallback}; `:''}${o.context}; ${o.interruptionNote}; user approval=${o.needsUserApproval?'required':'no'}; ${o.command}${o.approvalCommand?`; after user approval: ${o.approvalCommand}; append --user-ok <returned approval id> to the choice command`:''}`).join('\n');
     const prepared={row,since:queue.since,queue,launch,options,noticeId,noticeCount:count,lastNoticeAt:now,status:'waiting',pendingNotice:true};
@@ -200,6 +207,7 @@ export function claimQueueChoice(row) {
 }
 export function settleQueueChoice(row,status,now=Date.now()) {
   const file=queueDecisionFile(row); if(!fs.existsSync(file))return;withLock(file,()=>{
-    const s=read(file);if(s&&(status!=='ended'||['waiting','choosing'].includes(s.status)))writeJson(file,{...s,status,lastNoticeAt:now,choice:null,choicePid:null});
+    const s=read(file);if(s&&(status!=='ended'||['waiting','choosing'].includes(s.status)))writeJson(file,{...s,status,lastNoticeAt:now,choice:null,choicePid:null,
+      ...(['selected','parked'].includes(status)?{choiceExecutedAt:now}:{})});
   });
 }
