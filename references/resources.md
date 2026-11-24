@@ -154,7 +154,8 @@ tests compare CLI help and scratch stdout/stderr/exit transcripts against that b
 scratch paths and the approved appended `lane3=OPEN|CLOSED` field. Registry, journal, notes and original
 metadata fields are compared too; the historical legacy suite covers 27 device/checkout/policy commands.
 
-Change process: branch -> `node scripts/test/run-all.mjs` -> compatibility evidence/review -> **owner switches**
+Change process: branch -> `node scripts/test/run-all.mjs` (defaults to the supported CN-devbox/local split;
+use `--on local` only when local execution is required) -> compatibility evidence/review -> **owner switches**
 the installation -> owner publishes the dated rules digest and asks callers to acknowledge/re-invoke waiters.
 After the switch, `_shared/res` remains the public CLI symlink but points to this repo's `scripts/res/res`.
 Do not change hard-coded caller paths, use private locks, migrate live state, or merge over the old installed
@@ -506,6 +507,13 @@ node scripts/resource-sample.mjs --read-only --json
 node scripts/resource-review.mjs --hours 24 --json
 node scripts/resource-review.mjs --hours 96 --json
 ```
+
+The full-suite command defaults to `--on devbox`: Linux-capable suites run from the current `HEAD`
+through `scripts/devbox-run.mjs`, while the documented local-only suites run afterward under a
+weighted local `res` claim. Use `--on local` to force the whole run onto the current machine and
+`--on devbox` to require the split without automatic fallback. `SUITE_ON=local|devbox` is equivalent.
+Selections of at most eight `--files` need no claim. `--no-claim` is only for runner fixtures or an
+interactive override; non-interactive callers must record `SUITE_NO_CLAIM_REASON`.
 
 Full host attribution, full-probe timing, actual message round trips, browser reconnect/recovery and actual launchd
 scheduling require authorized host qualification. Unit tests do not substitute for those boundaries. Process identity

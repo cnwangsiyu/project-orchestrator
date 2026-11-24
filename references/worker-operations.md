@@ -170,6 +170,10 @@ user decisions the worker must not miss, then absolute paths with an explicit re
 order. A bare path list may be skipped by light workers. Reports include Durable lessons; retain
 only supported facts under the applicable memory policy. Do not edit generated memory files.
 
+Standard full-suite brief sentence: `Run node scripts/test/run-all.mjs; it schedules the supported
+CN-devbox/local split and prints one combined result. Use --on local only when the brief requires
+the whole suite on this machine; never add --no-claim without recording SUITE_NO_CLAIM_REASON.`
+
 A task keeps brief.md/report.md; report starts with <=20-line Summary: outcome, changes/commits,
 verification, user decisions and risks. Final starts `[<id>] DONE | QUESTION | BLOCKED | FAILED`,
 with concrete model/effort/account. --out is separate from requested deliverables. A QUESTION or
