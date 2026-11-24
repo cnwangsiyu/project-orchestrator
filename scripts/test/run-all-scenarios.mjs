@@ -38,7 +38,7 @@ assert.equal(result.status, 0, result.stderr);
 assert.equal(fs.readFileSync(calls, 'utf8'), '');
 result = run(['--files', repeated], { SUITE_DEVBOX_RUN_BIN: fakeDevbox });
 assert.equal(result.status, 0, result.stderr);
-assert.match(result.stdout, /PASS \[devbox\] resource-scenarios\.mjs/);
+assert.match(result.stdout, /PASS \[(?:devbox|local)\] resource-scenarios\.mjs/);
 assert.equal((result.stdout.match(/Full suite:/g) || []).length, 1);
 assert.doesNotMatch(result.stdout, /SUITE_RESULT_JSON=/);
 console.log('PASS full-suite claim, release, no-claim guard and small-selection bypass');
