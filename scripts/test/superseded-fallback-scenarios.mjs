@@ -76,7 +76,7 @@ try {
     const terra = 'gpt-5.6-terra', astra = 'gpt-6-astra';
     for (const [name, project, category, impact, at, expected] of [
       ['R-res-place', 'orchestrator', 'implement-hard', 'service', 1795508010853, ['main', 'gpt-6.2-astra', 'xhigh']],
-      ['T174-clock-device-recheck', 'lynx-view', 'build-run', 'throwaway', 1795511144639, ['trae', terra, 'medium']],
+      ['T174-clock-device-recheck', 'lynx-view', 'build-run', 'throwaway', 1795511144639, ['main', latest, 'medium']],
     ]) {
       const raw = fixture([latest, previous, astra, 'gpt-5.6-sol', terra]);
       raw.collectedFrom = raw.collectedThrough = raw.decisionAt = at;
@@ -100,13 +100,15 @@ try {
       const pick = run(raw, spec).primary.candidate;
       assert.deepEqual([pick.accountId, pick.modelId, pick.effort], expected, name);
       const opted = run(raw, task({ category, flags: { ...flags, 'allow-low-priority-queue': true }, project, impact })).primary.candidate;
-      assert.deepEqual([opted.accountId, opted.modelId, opted.effort], expected);
+      assert.deepEqual([opted.accountId, opted.modelId, opted.effort], category === 'build-run' ? ['trae', terra, 'medium'] : expected);
       if (category === 'build-run') {
         const predecessor = structuredClone(raw);
         const q = predecessor.accounts[0].quota.find(q => q.bucketId === previous);
         Object.assign(q.usage,{used:1,remaining:79,depleted:false});
         predecessor.lanes.find(l => l.accountId === 'trae' && l.modelId === previous).mode='priority';
-        assert.equal(run(predecessor,spec).primary.candidate.modelId,terra,'measured ready Terra precedes unmeasured previous release');
+        assert.equal(run(predecessor,spec).primary.candidate.accountId,'main','ready main takes precedence over the measured Terra downgrade');
+        predecessor.accounts.find(a => a.id === 'main').transport = false;
+        assert.equal(run(predecessor,spec).primary.candidate.modelId,terra,'measured ready Terra precedes an unmeasured previous release when main is unavailable');
       }
       main.transport = false;
       raw.lanes = raw.lanes.filter(l => l.accountId !== 'trae' || l.modelId !== terra);
