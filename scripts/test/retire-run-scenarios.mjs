@@ -32,6 +32,8 @@ try {
   await until(() => fs.existsSync(path.join(task, 'ready.json')), 'fixture report');
   const { readEvents, appendEvent } = await import('../lib/worker-events.mjs');
   const { processIdentity } = await import('../lib/process-identity.mjs');
+  // The child can report ready before the wrapper has appended its running event (the identity probe blocks briefly).
+  await until(() => readEvents().some(row => row.event === 'running' && row.name === 'R-cleanup' && row.childIdentity), 'running event with child identity');
   const active = readEvents().findLast(row => row.event === 'running' && row.name === 'R-cleanup');
   assert.ok(active?.pidIdentity && active.childIdentity && active.childPgid === active.childPid, 'exec launch records proven wrapper and child identities');
   childPid = active.childPid;
