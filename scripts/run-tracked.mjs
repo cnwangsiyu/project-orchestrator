@@ -26,7 +26,11 @@ const ensureTracker = (extra = {}) => tracker ??= lifecycle({ ...trackerMetadata
 if (sep < 0 || !args[sep + 1]) { console.error('run-tracked: expected options -- command [args...]'); process.exit(2); }
 const outStamp = () => { try { const s = fs.statSync(opts.out, { bigint: true }); return `${s.ino}:${s.mtimeNs}:${s.size}`; } catch { return null; } };
 const beforeOut = outStamp();
-let child, logFd, signalled = null, ending = false, watchdog, drainTimer, stderrTail='', stdoutPending='', accepted=false;
+const finalIdleMinutes = (() => {
+  const value = Number(process.env.CODEX_WORKER_FINAL_IDLE_MIN ?? 10);
+  return Number.isFinite(value) && value >= 0 ? value : 10;
+})();
+let child, logFd, signalled = null, ending = false, watchdog, drainTimer, finalPoll, finalIdleTimer, stderrTail='', stdoutPending='', accepted=false;
 let thread = opts.thread ?? null, turn = null;
 const stdoutLine = line => {
   const previousThread = thread;
@@ -46,12 +50,37 @@ const stdoutLine = line => {
 const signalOwned = (signal) => {
   try { if (process.platform === 'win32') child?.kill(signal); else if (child?.pid) process.kill(-child.pid, signal); } catch {}
 };
+const finalOutputWritten = () => {
+  let fd;
+  try {
+    if (!opts.out || outStamp() === beforeOut) return false;
+    fd = fs.openSync(opts.out, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+    if (!fs.fstatSync(fd).isFile()) return false;
+    const bytes = Buffer.alloc(512), count = fs.readSync(fd, bytes, 0, bytes.length, 0);
+    return /^(?:\s*(?:\[[^\]]+\]\s*)?)(?:DONE|BLOCKED)\b/i.test(bytes.subarray(0, count).toString('utf8'));
+  } catch { return false; }
+  finally { if (fd !== undefined) fs.closeSync(fd); }
+};
+const watchFinalOutput = () => {
+  if (!opts.out || finalIdleMinutes === 0 && !finalOutputWritten()) return;
+  finalPoll = setInterval(() => {
+    if (ending || finalIdleTimer || !finalOutputWritten()) return;
+    finalIdleTimer = setTimeout(() => {
+      if (ending) return;
+      console.error(`run-tracked: final message idle for ${finalIdleMinutes} min; ending follower`);
+      tracker.result('finished', { finalLine: 'final message idle timeout' });
+      finish(0);
+    }, finalIdleMinutes * 60_000);
+  }, 25);
+};
 const finish = async (code) => {
   if (ending) return;
   ensureTracker();
   ending = true;
   clearTimeout(watchdog);
   clearTimeout(drainTimer);
+  clearTimeout(finalIdleTimer);
+  clearInterval(finalPoll);
   signalOwned('SIGTERM');
   if (process.platform !== 'win32' && child?.pid) {
     const until = Date.now() + 500;
@@ -122,6 +151,7 @@ try {
     for(const line of lines) stdoutLine(line);
   });
   child.stderr.on('data',chunk=>{stderrTail=(stderrTail+chunk.toString()).slice(-4096);if(logFd!==undefined)fs.writeSync(logFd,chunk);else process.stderr.write(chunk);});
+  watchFinalOutput();
   child.once('exit',(code,signal)=>{signalOwned('SIGTERM');drainTimer=setTimeout(()=>finish(code??signalExit(signal)),1000);});
   for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, () => {
     signalled = signal;
