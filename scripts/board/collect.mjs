@@ -9,6 +9,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { makeSources, pools, projects, sanitize, ticket } from './sources.mjs';
+import { finishedNotExited } from '../lib/finished-not-exited.mjs';
 
 const DAY = 86_400_000;
 const HOUR = 3_600_000;
@@ -109,6 +110,8 @@ function exhaustedQuota(task, quota) {
 export function taskStatus(task, quota, now) {
   if (task.state === 'failed') return { state: 'failed', stateReason: '任务失败', stateRank: 0 };
   if (task.state === 'interrupted') return { state: 'interrupted', stateReason: '任务中断，尚未重新发起', stateRank: 0 };
+  const finished = task.finishedNotExited ?? finishedNotExited(task, { now });
+  if (finished) return { state: 'finished-not-exited', stateReason: `已完成，会话未退出（${elapsed(finished.inactiveMs)}）`, stateRank: 1 };
   const queued = ['queued', 'waiting'].includes(task.queueState) || task.state === 'queued' || task.queueStalled;
   if (queued) {
     const since = Date.parse(task.queueSince ?? task.startedAt);

@@ -158,6 +158,7 @@ function status(task) {
   if (task.state === 'failed') return ['bad', '失败', 0];
   if (task.state === 'interrupted') return ['warn', '中断', 0];
   if (task.state === 'stalled') return ['warn', '卡住', task.stateRank ?? 0];
+  if (task.state === 'finished-not-exited') return ['idle', '已完成未退出', task.stateRank ?? 1];
   if (task.state === 'queued') return ['idle', '排队', task.stateRank ?? 3];
   return ['ok', '运行中', task.stateRank ?? 2];
 }

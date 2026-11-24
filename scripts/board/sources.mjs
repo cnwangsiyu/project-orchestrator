@@ -87,6 +87,8 @@ function worker(row, state, startedAt = row.startedAt) {
     queuePosition: number(queue.position), queueState: string(queue.state), queueStalled: Boolean(row.queueStalled),
     queueDrainPerMinute: number(queue.drainPerMin), queueWorkedMinutes: number(queue.workedMinutesBefore),
     runningTools: number(queue.runningTools ?? row.runningTools) ?? 0,
+    taskDir: string(row.taskDir) || null, outFile: string(row.outFile) || null,
+    finishedNotExited: object(row.finishedNotExited) ? row.finishedNotExited : null,
   };
 }
 export function parseWorkers(data) {

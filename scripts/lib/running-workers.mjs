@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { hubRPC } from './hub-state.mjs';
 import { queueStatus, queueStallLabel } from './queue-stall-watch.mjs';
+import { finishedNotExited, retireCommand } from './finished-not-exited.mjs';
 
 // Worker events are sparse (a long command writes none), so the hub's own session file is the real activity signal.
 // Layout: <home>/sessions/YYYY/MM/DD/rollout-<time>-<thread>.jsonl (TRAE: <home>/cli/sessions/...). Newest 10 day folders only.
@@ -57,13 +58,16 @@ export async function runningWorkers({ rows = readEvents(), profiles = {}, alive
     catch { unresolved.push({ account: row.account, thread: row.thread, owner: row.owner, reason: 'follower gone; hub status UNKNOWN' }); }
     if (!live) return null;
     const queue = queueStatus(row, profiles);
-    return { account: row.account, thread: row.thread, owner: row.owner ?? null, model: row.model ?? null,
+    const worker = { account: row.account, thread: row.thread, owner: row.owner ?? null, model: row.model ?? null,
       effort: row.effort ?? null, project: row.project ?? null, task: row.task ?? row.name ?? null,
       runId: row.runId, followerCommand: row.followerCommand ?? null, pid: row.pid,
       queue, queueStalled: queueStallLabel(queue, now, row),
       name: row.name ?? null, startedAt: starts.get(row.runId) ?? row.t,
       lastActivityAt: Math.max(row.lastActivityAt ?? activity.get(workerKey(row)) ?? row.t,
-        Math.floor(processWorker(row) ? 0 : activityOf(row.account, row.thread) ?? 0)), basis };
+        Math.floor(processWorker(row) ? 0 : activityOf(row.account, row.thread) ?? 0)),
+      taskDir: row.taskDir ?? null, outFile: row.outFile ?? null, basis };
+    const finished = finishedNotExited(worker, { now });
+    return finished ? { ...worker, finishedNotExited: { ...finished, retireCommand: retireCommand(worker) } } : worker;
   }))).filter(Boolean).sort((a, b) => a.account.localeCompare(b.account) || a.startedAt - b.startedAt);
   return { threads, unresolved, byAccount: Object.fromEntries([...new Set(Object.keys(profiles).concat(threads.map(r => r.account)))].map(account =>
     [account, threads.filter(row => row.account === account)])) };
