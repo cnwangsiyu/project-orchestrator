@@ -36,6 +36,8 @@ try {
   const display = taskStatus({ ...live.threads[0], finishedNotExited: detected, state: 'running', startedAt: activity - 1_000, runningTools: 0 }, {}, now);
   assert.equal(display.state, 'finished-not-exited');
   assert.match(display.stateReason, /^已完成，会话未退出（19 分钟）$/);
+  const boardDisplay = taskStatus({ ...row, state: 'running', lastActivityAt: new Date(activity).toISOString(), startedAt: activity - 1_000, runningTools: 0 }, {}, now);
+  assert.equal(boardDisplay.state, 'finished-not-exited', 'the board independently evaluates its ISO activity timestamps');
   console.log('PASS final report evidence marks only inactive followers and is shared by quota and board');
 } finally {
   fs.rmSync(dir, { recursive: true, force: true });

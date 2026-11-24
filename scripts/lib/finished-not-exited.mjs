@@ -39,7 +39,8 @@ const evidenceFiles = (row) => {
 // A final artifact is authoritative only when it is the latest worker activity.
 // This keeps a report retained from an earlier continuation from retiring a live run.
 export const finishedNotExited = (row, { now = Date.now(), minutes = finishedNotExitedMinutes() } = {}) => {
-  const lastActivityAt = Number(row.lastActivityAt ?? row.t);
+  const rawActivity = row.lastActivityAt ?? row.t;
+  const lastActivityAt = typeof rawActivity === 'string' ? Date.parse(rawActivity) : Number(rawActivity);
   if (!Number.isFinite(lastActivityAt) || !Number.isFinite(now) || !Number.isFinite(minutes) || minutes < 0) return null;
   for (const file of evidenceFiles(row)) {
     const stat = regularFile(file);
