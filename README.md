@@ -1,5 +1,4 @@
-
-### Continuous host samples on the main mini
+# Continuous host samples on the main mini
 
 Run the sampler once with `python3 -B scripts/res/host-sampler.py --once`. For a per-user LaunchAgent, run these commands from the installed repository. The agent samples every 60 seconds and writes under the shared resource directory. See [the sample schema](references/host-samples.md).
 

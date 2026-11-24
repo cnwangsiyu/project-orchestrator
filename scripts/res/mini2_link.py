@@ -123,7 +123,7 @@ def observation(mode):
     args = cable_ssh(address) + [
             'test "$(hostname)" = Bytedances-Mac-mini.local && true && printf "mini2-link-ok\\n"']
     try:
-        ssh = subprocess.run(args, capture_output=True, timeout=12)
+        ssh = subprocess.run(args, stdin=subprocess.DEVNULL, capture_output=True, timeout=12)
     except subprocess.TimeoutExpired:
         return dict(link="UNKNOWN", address=address, reason="ssh-timeout")
     except OSError:

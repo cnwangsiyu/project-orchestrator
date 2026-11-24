@@ -47,6 +47,7 @@ def targets(root):
 
 
 def collect(mode, target, root):
+    deadline = time.monotonic() + 8
     command = ["python3", "-B", "-", mode, root]
     if mode == "mini2":
         link = subprocess.run([sys.executable, "-B", str(HERE/"mini2_link.py"), "--resolve-usb"],
@@ -56,7 +57,8 @@ def collect(mode, target, root):
     elif mode == "linux":
         command = ["ssh", "-T", "-oBatchMode=yes", "-oConnectTimeout=5", "-oGSSAPIDelegateCredentials=no",
                    target, shlex.join(command)]
-    result = subprocess.run(command, input=(HERE/"host_probe.py").read_bytes(), capture_output=True, timeout=8, check=True)
+    result = subprocess.run(command, input=(HERE/"host_probe.py").read_bytes(), capture_output=True,
+                            timeout=max(0,deadline-time.monotonic()), check=True)
     sample = json.loads(result.stdout)
     metrics = ("cores load1 load5 load15 totalGiB memAvailableGiB freeGiB pressure compressorGiB "
                "compressedLogicalGiB freeInactiveGiB swapGiB io_some_avg10 io_some_avg60 io_full_avg10").split()

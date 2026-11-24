@@ -48,6 +48,37 @@ class SamplerTests(unittest.TestCase):
             (root/"machine.conf").write_text("ADMISSION_WINDOW_SECONDS=0\n")
             self.assertEqual(basis(root,"box",row,(4,8,0),now)[:2],(17.2,40))
 
+    def test_claim_measurements_rotation_report_and_failed_write(self):
+        import time
+        import datetime
+        from host_records import completion, decision, evidence, report
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            now=time.time()
+            sample=dict(schema=1,host="box",ok=True,cores=8,totalGiB=32,freeGiB=99,load1=1,load15=1)
+            for seconds,load,mem in [(90,1,28),(30,5,22),(5,4,18)]:
+                at=now-seconds
+                day=datetime.datetime.fromtimestamp(at,datetime.timezone.utc).date()
+                file=root/"host-samples/history/box"/(str(day)+".ndjson")
+                file.parent.mkdir(parents=True,exist_ok=True)
+                with file.open("a") as stream:
+                    stream.write(json.dumps(dict(sample,at=at,load5=load,memAvailableGiB=mem))+"\n")
+            data=root/"host-samples"
+            old=data/"admission.2000-01-01.ndjson"
+            old.touch()
+            decision(root,"box","project","bad\nfield","heavy",[4,8,1],"load",False,evidence({}))
+            self.assertFalse(old.exists())
+            self.assertEqual(json.loads((data/"admission.ndjson").read_text())["task"],"[masked]")
+            completion(root,"box","slot",dict(start=now-60,project="project",task="test",profile="heavy",weights=[4,8,1]),False)
+            group=report(root,1)["groups"][0]
+            self.assertEqual((group["claims"],group["measured"],group["refusals"]), (1,1,{"load":1}))
+            self.assertEqual(group["percentiles"]["deltaCores"]["p50"],4)
+            self.assertEqual(group["percentiles"]["deltaGiB"]["p90"],10)
+            bad=root/"bad"
+            bad.mkdir()
+            (bad/"host-samples").touch()
+            decision(bad,"box","p","t","light",[1,2,3],"open",True,evidence({}))
+
     def test_selection(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

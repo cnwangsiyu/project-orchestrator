@@ -845,6 +845,7 @@ res wait-lane --by <session> --project <slug> --for "<purpose>" --timeout <minut
                                       local profile default weights are derived from hardware
                                       --pid names one long-lived wrapper; builds acquire a pair, lanes only a lane
 res return-build --by <session> --pid <wrapper-pid>   return that wrapper's acquired pair
+res capacity-report [--days N]        JSON claim usage percentiles and refusals by project and profile
 res pool-capacity local|local-light|mini2   JSON measured headroom and declared reservations
                                       mini2 claims: wait-pool mini2 [--profile heavy|light] [--cores N] [--mem-gib GiB] [--disk-gib GiB]
                                       claims keep their declared reservation for life; acquired IDs are opaque
@@ -2618,6 +2619,7 @@ pool_controller() {
 import datetime, fcntl, hashlib, json, math, os, re, shutil, signal, socket, stat, subprocess, sys, tempfile, time
 from contextlib import contextmanager
 sys.path.insert(0, os.path.dirname(os.path.realpath(os.environ['RES_SELF_COMMAND'])))
+from host_records import decision as record_decision, evidence, completion
 from host_samples import shared, basis
 from dynamic_capacity import headroom, json_safe, numeric_metric, cached_timestamp
 root, action, request, timeout, delay, by, project, task, purpose, pid, until, force, need, prefer, preferred_slot, excluded_slots, excluded_hosts, stale, controller, generation, exclude_reason, hard_slots, hard_hosts, disk_gib, disk_gib_file, placement_file, maintenance, extra_disk_gib, legacy_config_path, warm_family, claim_cores, claim_mem = sys.argv[1:]
@@ -2968,6 +2970,7 @@ try:
         full = io_reading(value, 'io_full_avg10')
         if some is None or full is None: return False
         limits = (settings['IO_SOME_AVG60_MAX'], settings['IO_FULL_AVG10_MAX'])
+        os.makedirs(metrics_dir, exist_ok=True)
         file = os.path.join(metrics_dir, box + '.io-state.json')
         with open(file + '.lock', 'a') as guard:
             fcntl.flock(guard, fcntl.LOCK_EX)
@@ -2986,9 +2989,7 @@ try:
             return closed
     def sample(box, current):
         observed = shared(root, box, current)
-        if observed:
-            os.makedirs(metrics_dir, exist_ok=True)
-            return observed
+        if observed: return observed
         try:
             value = json.loads(regular_text(os.path.join(metrics_dir, box + '.json')))
             if (isinstance(value, dict) and all(number(value.get(key)) for key in ('at', 'cores', 'load5', 'memAvailableGiB', 'freeGiB'))
@@ -3061,6 +3062,12 @@ try:
         entries = [entry for entry in entries if len(entry) < 5 or entry[4]['slot'] != id]
         write_reservations(box, entries + [[current, *cost, owner]])
         reservation_written = True
+    def finish_claim(id, hold):
+        if id not in remote or not slot_type(id): return
+        weights = [float(hold[name]) for name in ("claim_cores","claim_mem","claim_disk")] if all(
+            number_string and re.fullmatch(r"[0-9]+(?:\.[0-9]+)?",number_string)
+            for number_string in (hold.get("claim_cores"),hold.get("claim_mem"),hold.get("claim_disk"))) else None
+        completion(root,remote[id][1],id,dict(hold,weights=weights,profile=hold.get("claim_kind",slot_type(id)).lower()),False)
     def forget_reservation(id, hold):
         if id not in remote or not slot_type(id): return
         box = remote[id][1]
@@ -3097,7 +3104,7 @@ try:
             if id in input_placement['slots']: continue
             template = next((v for slot,v in input_placement['slots'].items() if slot in remote and remote[slot][1] == box), None)
             if template: input_placement['slots'][id] = dict(template)
-    def gate(box, kind, settings, current, only_dynamic=False, override=False, id=None, weights=None, claimed=False):
+    def gate(box, kind, settings, current, only_dynamic=False, override=False, id=None, weights=None, claimed=False, observed=None):
         value = sample(box, current) if settings else {}
         entries = reservations(box, current) if settings else []
         if claimed: entries = [entry for entry in entries if len(entry) < 5 or entry[4]['slot'] != id]
@@ -3113,6 +3120,8 @@ try:
             extra = input_placement['slots'].get(id, {}).get('extraDiskGiB', 0)
             cost = (*cost[:2], cost[2] + extra)
         if cost and maintenance: cost = (*cost[:2], 0)
+        if observed is not None:
+            observed.update(evidence(value,(cpu,mem,disk)))
         detail = 'host=%s load5=%s reserved_cores=%g reserved_gib=%g mem_available_gib=%s' % (
             box, value.get('load5', '?'), cpu, mem, value.get('memAvailableGiB', '?'))
         detail += ' free_disk_gib=%s reserved_disk_gib=%g' % (value.get('freeGiB', '?'), disk)
@@ -3127,16 +3136,33 @@ try:
         if box in host_rows:
             ceiling = int(settings['MAX_CLAIMS']) or max(1, int(value['cores'] / min(settings['HEAVY_CORES'], settings['LIGHT_CORES'])))
             occupied = sum(os.path.isdir(os.path.join(locks, slot + '.d')) for slot, member in remote.items() if member[1] == box and not slot.startswith('devbox-host-') and (not claimed or slot != id))
-            if occupied >= ceiling: return 'max-claims', detail + ' max_claims=' + str(ceiling), entries, cost
+            if occupied >= ceiling:
+                if observed is not None: observed.update(occupied=occupied,maxClaims=ceiling)
+                return 'max-claims', detail + ' max_claims=' + str(ceiling), entries, cost
         limit = value['cores'] * settings['LOAD_PER_CORE']
         floor = settings['MIN_AVAIL_GIB']
         detail += ' load_limit=%g mem_floor_gib=%g task_cores=%g task_gib=%g task_disk_gib=%g disk_floor_gib=53' % (limit, floor, *cost)
+        if observed is not None: observed['limits']=[limit,floor,None if maintenance else 53]
+        if observed is not None: observed.update(ioSomeMax=settings['IO_SOME_AVG60_MAX'],ioFullMax=settings['IO_FULL_AVG10_MAX'])
         if (kind == 'HEAVY' or box in host_rows) and io_closed(box, value, settings): return 'io-pressure', detail, entries, cost
         charged, available, window = basis(root,box,value,(cpu,mem,disk),current)
+        if observed is not None: observed.update(window=window,chargedCores=charged,availableBeforeFloorGiB=available)
         reason = headroom(charged, available, value['freeGiB'],
                           (0, 0, disk), cost, limit, floor, float('-inf') if maintenance else 53)
         if reason == 'load' and override: reason = 'load-override'
         return 'headroom' if reason == 'open' else reason, detail, entries, cost
+    def record_resource_refusal(id, reason):
+        kind=slot_type(id)
+        if id not in remote or kind is None: return
+        box=remote[id][1]
+        if id in dynamic_ids and action=="wait":
+            kind="LIGHT" if request=="devbox-cn-light" else "HEAVY"
+        settings=dynamic.get(box,{})
+        cost=None
+        if settings:
+            cost=[float(claim_cores or settings[kind+"_CORES"]),float(claim_mem or settings[kind+"_GIB"]),
+                  float(disk_gib or disk_costs.get(id,settings[kind+"_DISK_GIB"]))+float(extra_disk_gib)]
+        record_decision(root,box,project,task,kind.lower(),cost,reason,False,evidence({}))
     def gate_open(reason):
         return reason in ('headroom', 'load-override', 'static-disabled', 'static-stale-or-missing-metrics')
     dynamic, light_reclaim, soft_minutes = devbox_settings()
@@ -3513,6 +3539,7 @@ try:
             hold, age = candidate
             forget_reservation(request, hold)
             shutil.rmtree(directory)
+            finish_claim(request,hold)
             log('reclaim-stale', request, by, 'explicit release-dead pid=%s age_seconds=%d remote-confirmed' % (pid, age))
         print('returned ' + request + ' (dead local holder, age >15 minutes, remote processes confirmed gone)')
         committed = True; sys.exit(0)
@@ -3529,12 +3556,14 @@ try:
             else: log('return', request, by, purpose)
             forget_reservation(request, hold)
             shutil.rmtree(directory)
+            finish_claim(request,hold)
         print('returned ' + request); committed = True; sys.exit(0)
     elif action == 'take':
         if request not in rows: raise ValueError("unknown resource '%s'" % request)
         if request.startswith('devbox-host-'): raise ValueError('host rows are resolved through wait-pool, not taken directly')
         policy = rows[request][1]
         if policy == 'never' or policy == 'ask-user' and not force:
+            record_resource_refusal(request,"policy")
             print("res: '%s' needs the user's OK or is off limits (policy %s)" % (request, policy), file=sys.stderr); sys.exit(3)
         hold = info(os.path.join(locks, request + '.d'))
         if hold.get('by') == by:
@@ -3726,12 +3755,15 @@ try:
     rollbacks = 0
     gate_reasons = set()
     holder = by + ' (' + project + ('/' + task if task else '') + ')'
-    def evaluate(id, box, override=False, claimed=False, diagnostic=False):
+    def evaluate(id, box, override=False, claimed=False, diagnostic=False, final=False):
         current = time.time()
         kind = slot_type(id)
-        reason, detail, entries, cost = gate(box, ('LIGHT' if request == 'devbox-cn-light' else 'HEAVY') if id in dynamic_ids else kind, dynamic.get(box), current, floating(id), override and box not in host_rows, id=id, claimed=claimed)
+        observed = {}
+        reason, detail, entries, cost = gate(box, ('LIGHT' if request == 'devbox-cn-light' else 'HEAVY') if id in dynamic_ids else kind, dynamic.get(box), current, floating(id), override and box not in host_rows, id=id, claimed=claimed, observed=observed)
         if reason.startswith('static-') and static_full(box, kind, id if claimed else None):
             reason = 'static-cap'
+        if not diagnostic and (not gate_open(reason) or final):
+            record_decision(root,box,project,task,kind.lower(),cost,reason,gate_open(reason),observed)
         if not gate_open(reason) and not diagnostic:
             gate_reasons.add(reason)
             log('gate-deny', id, holder, 'reason=' + reason + ' ' + detail)
@@ -3845,6 +3877,7 @@ try:
                     previous_holder = old.get('by', '?')
                     forget_reservation(id, old)
                     shutil.rmtree(directory)
+                    finish_claim(id,old)
                     log('reclaim-stale', id, previous_holder, 'by=%s pid=%s age_seconds=%d' % (by, old['pid'], age))
                 previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, (signal.SIGINT, signal.SIGTERM, signal.SIGHUP))
                 try:
@@ -3903,11 +3936,15 @@ try:
                         break
                     continue
                 if box:
-                    reason, detail, entries, cost, current = evaluate(id, box, can_override(), claimed=True)
+                    reason, detail, entries, cost, current = evaluate(id, box, can_override(), claimed=True, final=True)
                     if not gate_open(reason):
                         rollback()
                         continue
-                    if cost: reserve(box, entries, current, cost, id, hold)
+                    if cost:
+                        reserve(box, entries, current, cost, id, hold)
+                        if id not in dynamic_ids:
+                            hold.update(claim_kind=slot_type(id),claim_cores=str(cost[0]),claim_mem=str(cost[1]),claim_disk=str(cost[2]))
+                            publish(os.path.join(locks,id+'.d'),hold)
                     if id in dynamic_ids:
                         hold['admitted']='1'; publish(os.path.join(locks,id+'.d'), hold)
                     for directory, earlier in bypass_pending:
@@ -3926,6 +3963,11 @@ try:
                 log('waiter-acquire', request + '-any', by + ' (' + project + ('/' + task if task else '') + ')', 'slot=' + id)
                 remove_waiter(); print('slot=' + id)
             committed = True; sys.exit(0)
+    if not gate_reasons:
+        for slot in members:
+            if slot not in remote: continue
+            reason = 'fifo' if blocked else 'cleanup-pending' if os.path.lexists(pending_file(slot)) else 'held' if os.path.isdir(os.path.join(locks,slot+'.d')) else 'unavailable'
+            record_resource_refusal(slot,reason)
     if action == 'take':
         hold = info(os.path.join(locks, request + '.d'))
         if blocked: print("res: '%s': reserved for waiting pool %s (FIFO); retry or use wait-pool" % (request, heads[0][2].get('holder', '?') if heads else '?'), file=sys.stderr)
@@ -4377,6 +4419,7 @@ cmd_log() { [ -f "$LOG" ] && tail -n "${1:-20}" "$LOG" || true; }
 
 case "${1:-}" in
   status) shift; cmd_status "$@"; if [ -f "$RES_DIR/mini2-config.json" ]; then mini2_controller status; fi ;;
+  capacity-report) shift; python3 -B "$(dirname "$(realpath "$RES_SELF_COMMAND")")/host_records.py" "$RES_DIR" "$@" ;;
   holder) shift; cmd_holder "$@" ;;
   take) shift; cmd_take "$@" ;;
   wait) shift; cmd_wait "$@" ;;

@@ -129,6 +129,21 @@ class DynamicFixTests(unittest.TestCase):
             result=self.cli("pool-capacity",pool)
             self.assertEqual(next(iter(json.loads(result.stdout).values()))["gate"],"load",result.stdout)
 
+    def test_records_on_real_claim_and_refusal(self):
+        self.activate("local")
+        self.claim("first")
+        refused=self.cli("take-build",*self.args("second"),"--cores","14")
+        self.assertNotEqual(refused.returncode,0)
+        returned=self.cli("return-build","--by","first")
+        self.assertEqual(returned.returncode,0,returned.stderr)
+        result=self.cli("capacity-report","--days","1")
+        self.assertEqual(result.returncode,0,result.stderr)
+        groups={v["project"]:v for v in json.loads(result.stdout)["groups"]}
+        self.assertEqual(groups["first"]["claims"],1)
+        self.assertEqual(groups["second"]["refusals"],{"load":1})
+        last=json.loads((self.root/"host-samples/admission.ndjson").read_text().splitlines()[-1])
+        self.assertEqual((last["chargedCores"],last["source"],last["limits"][0]),(4,"probe",14))
+
     def test_unbound_memory_credit_cannot_break_the_reserve_floor(self):
         self.activate("local")
         leases=[self.claim(name)[1] for name in ("first","second")]

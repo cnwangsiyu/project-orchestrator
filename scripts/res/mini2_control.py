@@ -17,6 +17,7 @@ sys.dont_write_bytecode = True
 import subprocess
 import time
 import uuid
+from host_records import decision, evidence, completion
 from host_samples import shared, basis
 from dynamic_capacity import headroom, reservation_totals, smaller_bypass, json_safe, numeric_metric, iso_timestamp
 from xml.parsers.expat import ExpatError
@@ -302,6 +303,7 @@ def reap_dead(root):
         # Old runner holds have no dispatch marker: never assume those safe.
         if lease.get("dispatch") == "unbound":
             shutil.rmtree(hold)
+            completion(root,HOST,hold.name[:-2],lease,True)
             journal(root,"reclaim-dead",lease.get("by","?"),slot=hold.name[:-2])
         else:
             pending = root/"mini2-pending"/hold.name[:-2]
@@ -347,13 +349,14 @@ def metrics(root, now):
     return shared(root, HOST, now, darwin=True) or read(root/"mini2-metrics.json", {})
 
 
-def admission(root, cfg, now, disk=0, need=(), qualification=False, cost=None):
+def admission(root, cfg, now, disk=0, need=(), qualification=False, cost=None, details=None):
     if not cfg["enabled"] and not qualification: return "disabled"
     if cfg["maintenance"]: return "maintenance"
     link = read(root/"mini2-link.json", {})
     if link.get("maintenance", True): return "link-maintenance"
     if not fresh(link.get("at"), now, 300) or link.get("link") != "UP": return "link-stale-or-down"
     sample = metrics(root, now)
+    if details is not None: details.update(evidence(sample))
     if not fresh(sample.get("at"), now, sample.get("sampleTTL",300)) or sample.get("host") != HOST: return "metrics-stale-or-foreign"
     if any(numeric_metric(sample.get(name)) is None for name in ("load5","availableGiB","freeGiB","pressure","swapGiB","compressorGiB")):
         return "invalid-metrics"
@@ -362,6 +365,7 @@ def admission(root, cfg, now, disk=0, need=(), qualification=False, cost=None):
             return "invalid-metrics"
     limits = thresholds(cfg,sample)
     if limits is None: return "hardware-mismatch"
+    if details is not None: details["limits"]=[*limits,cfg["minFreeGiB"]]
     if sample["load5"] > limits[0]: return "load5"
     if sample["availableGiB"] < limits[1]: return "memory"
     if sample["freeGiB"]-disk < cfg["minFreeGiB"]: return "disk"
@@ -376,7 +380,9 @@ def admission(root, cfg, now, disk=0, need=(), qualification=False, cost=None):
             return "hardware-mismatch"
         try: reservations = reserved(root)
         except ValueError: return "legacy-or-incomplete-hold"
-        charged, available, _ = basis(root,HOST,sample,reservations,now)
+        charged, available, window = basis(root,HOST,sample,reservations,now)
+        if details is not None:
+            details.update(evidence(sample,reservations,[*limits,cfg["minFreeGiB"]],window,charged,available))
         return headroom(charged,available,sample["freeGiB"],
                         (0,0,reservations[2]),cost,limits[0],limits[1],cfg["minFreeGiB"])
     return "open"
@@ -514,10 +520,12 @@ def acquire(root, args):
                 dynamic = dynamic_row(row)
                 reap_dead(root)
                 required = args.need.split(",") if args.need else []
+                profile=args.profile or ("light" if set(required)<={"cmake-native"} else "heavy")
+                details=evidence({})
                 approved = re.search(r"\bcaps=([a-zA-Z0-9_,.-]+)", row[4])
                 if not qualification and row[2] != "open": reason="policy"
                 elif not qualification and not set(required) <= set(approved[1].split(",") if approved else []): reason="registry-capability"
-                else: reason=admission(root, cfg, time.time(), cost[2], required, qualification, cost=cost if dynamic else None)
+                else: reason=admission(root, cfg, time.time(), cost[2], required, qualification, cost=cost if dynamic else None, details=details)
                 for file in queue.glob("*.json"):
                     value = read(file)
                     if value is None: continue
@@ -545,14 +553,14 @@ def acquire(root, args):
                 elif resource == "mini2": resource=SLOT
                 hold = root/"locks"/(resource+".d")
                 if (hold.exists() or (root/"mini2-pending"/resource).exists()) and reason == "open": reason = "held-or-pending"
+                decision(root,HOST,args.project,args.task,profile,cost,reason,reason=="open",details)
                 if reason == "open":
                     hold.mkdir(parents=True)
                     try:
-                        sample=metrics(root,time.time())
                         values=dict(by=args.by, project=args.project, task=args.task, pid=args.pid,pid_start=pid_start,
-                                    host=os.uname().nodename, start=int(time.time()), profile=args.profile or ("light" if not args.need or set(args.need.split(",")) <= {"cmake-native"} else "heavy"),
+                                    host=os.uname().nodename, start=int(time.time()), profile=profile,
                                     slot=resource,dynamic=dynamic,weights=cost,dispatch="unbound" if getattr(args,"resource",None)=="mini2" else "legacy",
-                                    limits=dict(loadLimit=thresholds(cfg,sample)[0],memoryFloorGiB=thresholds(cfg,sample)[1],diskFloorGiB=cfg["minFreeGiB"]),
+                                    limits=dict(loadLimit=details["limits"][0],memoryFloorGiB=details["limits"][1],diskFloorGiB=cfg["minFreeGiB"]),
                                     generation=str(uuid.uuid4()), remote_host=HOST, remote_cleanup_required="1", purpose=args.purpose)
                         atomic(hold/"lease.json", values)
                         (hold/"info").write_text("".join(str(k)+"\t"+str(v)+"\n" for k,v in values.items()))
@@ -743,6 +751,7 @@ def main():
                 if args.resource == SLOT: (root/"mini2-cleanup-pending.json").unlink(missing_ok=True)
                 (pending/"pending.json").unlink(missing_ok=True)
                 shutil.rmtree(hold)
+                completion(root,HOST,args.resource,lease,True)
                 if pending.exists(): pending.rmdir()
                 journal(root,args.action,args.by, "pid="+str(args.pid) if args.action=="release-dead" else "",slot=args.resource)
             print(args.action+" "+args.resource)

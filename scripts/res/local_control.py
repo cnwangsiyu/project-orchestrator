@@ -15,6 +15,7 @@ sys.dont_write_bytecode = True
 import time
 import uuid
 
+from host_records import decision, evidence, completion
 from host_samples import shared, basis
 from dynamic_capacity import headroom, reservation_totals, smaller_bypass, json_safe, numeric_metric, iso_timestamp
 from mini2_control import atomic, guard, read, root_dir, process_start
@@ -126,7 +127,7 @@ def cost_for(args,cfg,sample):
     return profile,cost
 
 
-def gate(root,cfg,sample,cost):
+def gate(root,cfg,sample,cost, details=None):
     at=sample.get("at"); now=time.time()
     if numeric_metric(at) is None or not 0<=now-at<sample.get("sampleTTL",cfg["LOCAL_METRICS_TTL_SECONDS"]): return "stale-or-missing-metrics"
     if sample.get("host")!=os.uname().nodename: return "foreign-metrics"
@@ -140,7 +141,9 @@ def gate(root,cfg,sample,cost):
     try: amounts=reservation_totals([v for _,v in claims(root)])
     except ValueError: return "legacy-or-incomplete-hold"
     load,floor=limits(cfg,sample)
-    charged, available, _ = basis(root,sample["host"],sample,amounts,now)
+    charged, available, window = basis(root,sample["host"],sample,amounts,now)
+    if details is not None:
+        details.update(evidence(sample,amounts,[load,floor,cfg["LOCAL_MIN_FREE_GIB"]],window,charged,available))
     return headroom(charged,available,sample["freeGiB"],(0,0,amounts[2]),cost,load,floor,cfg["LOCAL_MIN_FREE_GIB"])
 
 
@@ -157,6 +160,7 @@ def remove_claim(root,hold,lease):
         if sibling.get("generation")!=lease["generation"]: raise ValueError("lane ownership changed")
         shutil.rmtree(other)
     shutil.rmtree(hold)
+    completion(root,os.uname().nodename,hold.name[:-2],lease,True)
     log(root,"return",hold.name[:-2],lease["by"])
 
 
@@ -218,14 +222,23 @@ def acquire(root,args):
                     ticket=queue/(str(time.time_ns())+"-"+str(uuid.uuid4())+".json")
                     atomic(ticket,dict(pid=args.pid,controller=os.getpid(),cost=None,bypasses=0))
                 cfg,parsed=configuration(root)
-                sample=measured(root,parsed)
+                try:
+                    sample=measured(root,parsed)
+                except (ValueError,OSError,subprocess.SubprocessError) as error:
+                    reason="memory-guard-high" if str(error)=="memory-guard-high" else "invalid-metrics"
+                    decision(root,os.uname().nodename,args.project,args.task,args.profile or "unknown",None,
+                             reason,False,evidence(shared(root,os.uname().nodename,time.time(),darwin=True)))
+                    raise
                 # Validate hardware before deriving costs; stale evidence always
                 # closes admission even when a fixture is otherwise well formed.
                 if any(numeric_metric(sample.get(name),True) is None for name in ("cores","totalGiB")):
+                    decision(root,os.uname().nodename,args.project,args.task,args.profile or "unknown",None,
+                             "invalid-metrics",False,evidence(sample))
                     raise ValueError("invalid hardware metrics")
                 profile,cost=cost_for(args,cfg,sample)
                 reap(root)
-                reason=gate(root,cfg,sample,cost)
+                details=evidence(sample)
+                reason=gate(root,cfg,sample,cost,details)
                 own_ticket=read(ticket,{})
                 atomic(ticket,{**own_ticket,"cost":cost})
                 for file in queue.glob("*.json"):
@@ -253,6 +266,7 @@ def acquire(root,args):
                 lane_pin=args.lane or (pin if not build else ("heavy-lane-"+("1" if pin=="heavy-build" else pin.removeprefix("heavy-build-")) if pin else None))
                 lane_id=free_id(root,"lane",lane_pin)
                 if lane_id is None or build and build_id is None: reason="held"
+                decision(root,os.uname().nodename,args.project,args.task,profile,cost,reason,reason=="open",details)
                 if reason=="open":
                     owner=build_id or lane_id
                     created=[]

@@ -24,3 +24,13 @@ Let L be the largest observed load5, A the lowest available GiB, T physical memo
 The host-wide maxima compare aggregate loads. They cannot distinguish a fresh claim from unrelated CPU use that already exceeds its declaration. Set the window to zero to restore additive accounting while retaining shared observations. From the shared directory run:
 
     sed -i '' '/^[[:space:]]*ADMISSION_WINDOW_SECONDS[[:space:]]*=/d' machine.conf && echo ADMISSION_WINDOW_SECONDS=0 >> machine.conf
+
+## Decision and claim records
+
+The allocators append schema-1 JSON to host-samples/admission.ndjson and claims.ndjson. Each is a hard link to the current UTC date's file (for example admission.2026-11-23.ndjson). Consume either the dated series or the current alias. Writers keep 14 UTC dates on rollover. The report reads each dated file once. Local filesystem failures can leave gaps. Allocation does not wait on the rotation lock. Resource observations and status queries do not count as requests.
+
+Each admission record gives Unix time, host, project/task, profile, cost [cores, memory GiB, disk GiB], outcome, gate, source, readings, and available decision evidence. Reserved weights use the same order; limits are CPU ceiling, memory floor and disk floor. Window statistics include sample count, coverage in seconds, peak and trough when used. Gates checked before capacity can have missing measurements. A polling waiter can produce multiple refusals. Records omit purpose, command lines and remote error text. Identifiers that cannot be safely recorded appear as [masked].
+
+Each completed claim includes declared weights, duration, and host peak load5 and lowest available memory observed during its lifetime. Baseline means the last valid sample strictly before the start, within five minutes. CPU delta = max(0, peak − baseline load5); memory delta = max(0, baseline available − minimum available). Missing either side yields null. The seven-day sample retention bounds coverage. With concurrent claims the host-wide delta is a shared upper-bound estimate for attribution; overlapping claims may report the same change. Sparse sampling and five-minute load averaging can miss short peaks.
+
+Run `res capacity-report --days 7` for JSON grouped by project and profile. The default is 14 days. Counts include completed and measured claims plus refusals by gate. Percentiles use nearest rank (p50, p90, max); null is missing evidence. Declared disk is reported in GiB. Calibration remains manual.
