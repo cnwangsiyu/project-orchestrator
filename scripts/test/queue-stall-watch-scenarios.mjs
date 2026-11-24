@@ -8,6 +8,7 @@ import { spawnSync } from 'node:child_process';
 import { createPoolStallMonitor, createQueueStallMonitor, fallbackRouteArgs, queueStallText } from '../lib/queue-stall-watch.mjs';
 import { appendEvent, readEvents } from '../lib/worker-events.mjs';
 import { saveQueue } from '../lib/worker-queue.mjs';
+import { queueDecisionFile } from '../lib/queue-decision.mjs';
 import { saveLaunch } from '../lib/worker-launch.mjs';
 import { parseTaskSpec } from '../lib/pipeline/taskspec.mjs';
 
@@ -41,6 +42,11 @@ try {
   assert.match(first.options.find(o=>o.id==='wait').command,/queue-choice.*--owner.*--option wait/);
   assert.ok(!first.text.includes('old-approval'));
   assert.equal((await monitor().poll([row], [], now + min)).length, 0, 'restart deduplicates the same episode');
+  const noticeFile = queueDecisionFile(row), midTurn = { ...queue, workStarted: true };
+  assert.equal(JSON.parse(fs.readFileSync(noticeFile, 'utf8')).status, 'waiting');
+  queue = midTurn;
+  assert.equal((await monitor().poll([row], [], now + min)).length, 0, 'a mid-turn re-queue is left to its follower');
+  assert.equal(JSON.parse(fs.readFileSync(noticeFile, 'utf8')).status, 'waiting', 'a mid-turn re-queue keeps its open notice usable');
   queue = { state: 'ready' };
   await monitor().poll([row], [], now + 2 * min);
   queue = wait(now + 3 * min, 100);

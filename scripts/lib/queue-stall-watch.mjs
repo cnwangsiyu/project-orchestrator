@@ -170,7 +170,9 @@ export function createQueueStallMonitor(owner, { profiles = {}, statusOf = row =
       for (const { row, queue, unknown } of statuses) {
         const key = JSON.stringify([row.account, row.thread, row.turn ?? row.runId]); active.add(key);
         if (unknown) continue;
-        if (!waiting(queue)||queue.workStarted) {delete states[key];settleQueueChoice(row,'ended',now);continue;}
+        if (!waiting(queue)) {delete states[key];settleQueueChoice(row,'ended',now);continue;}
+        // A mid-turn re-queue is still waiting: its live follower owns the notice, so never end it here.
+        if (queue.workStarted) {delete states[key];continue;}
         let state = states[key];
         if (!state || Number.isFinite(queue.since) && queue.since !== state.since) state = { since: queue.since ?? now,
           lastDecreaseAt: now, position: queue.position ?? null, emitted: false };
