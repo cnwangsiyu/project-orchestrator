@@ -433,7 +433,9 @@ export const eventLine = (row, message = row.finalLine ?? firstLine(row.outFile)
     + `${row.reminder ? `; reminder: ${row.reminder}` : ''}; answer with codex-worker reply${row.owner ? ` --owner ${clean(row.owner)}` : ''} --thread ${clean(row.thread)} --account ${clean(row.account)} --question ${clean(row.questionId)} "<text>"`;
   return `${clean(row.name ?? row.thread)}\t${clean(row.event)}\t${clean(row.outFile)}\t${clean(message)}`;
 };
-export const hookEventLine = row => ['message', 'question', 'answered'].includes(row.event) ? eventLine(row)
+export const hookEventLine = row => row.kind === 'queue-stalled' && row.choiceCommand
+  ? `[queue-stalled] ${clean(row.summary, Math.max(0, 480 - row.choiceCommand.length))}\n${row.choiceCommand}`
+  : ['message', 'question', 'answered'].includes(row.event) ? eventLine(row)
   : row.event === 'truncated' ? `${eventLine({ ...row, outFile: '' }, '')}: read the recorded output and act`
   : `worker ${eventLine({ ...row, name: String(row.name ?? row.thread ?? '-').slice(0, 120), outFile: '' }, '').replaceAll('\t', ' ').trim()}: read ${JSON.stringify(String(row.outFile ?? row.logFile ?? 'the worker log').slice(0, 500))} and act`;
 const receipt = (owner, rows, ack) => ({ owner, t: Date.now(), from: rows.reduce((n, row) => Math.min(n, row.seq ?? Infinity), Infinity),

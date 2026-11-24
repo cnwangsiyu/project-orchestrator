@@ -1690,7 +1690,7 @@ const follow = (threadId, turnId, items = []) => {
         const event=notifyQueueOwner(ownerRow,{state:'queued',since:queueSince,position:pos,
           workStarted,workedMinutesBefore:workedBeforeKnown?workedMs/60000:null,runningTools:runningTools.size,
           drainPerMin:spanMin>=2?Math.max(0,(first.pos-last.pos)/spanMin):null},ownerLaunch,{now:t,policy});
-        if(event)console.log(`queue-owner-notice: ${event.noticeId} notice=${event.noticeCount} queued=${waitedMin.toFixed(1)} min${event.secretaryRelay?' secretary-relay: owner queue decision pending':''}`);
+        if(event)console.log(`queue-owner-notice: ${event.noticeId} notice=${event.noticeCount} queued=${waitedMin.toFixed(1)} min${event.secretaryRelay?' secretary-relay: owner queue decision pending':''}\n${event.choiceCommand}`);
       }
       return false; // A launched/resumed queue never switches by default routing.
     }

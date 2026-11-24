@@ -8,7 +8,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { createPoolStallMonitor, createQueueStallMonitor, fallbackRouteArgs, queueStallText } from '../lib/queue-stall-watch.mjs';
 import { appendEvent, readEvents } from '../lib/worker-events.mjs';
 import { saveQueue } from '../lib/worker-queue.mjs';
-import { queueDecisionFile } from '../lib/queue-decision.mjs';
+import { queueDecisionFile, notifyQueueOwner } from '../lib/queue-decision.mjs';
 import { saveLaunch } from '../lib/worker-launch.mjs';
 import { parseTaskSpec } from '../lib/pipeline/taskspec.mjs';
 
@@ -51,10 +51,11 @@ try {
     const lock = path.join(process.env.RULES_SHARED, 'queue-rewake', idleOwner + '.lock');
     for (let i = 0; i < 200 && !fs.existsSync(lock); i++) await new Promise(resolve => setTimeout(resolve, 20));
     assert.ok(fs.existsSync(lock), 'idle listener armed');
-    for (const recipient of ['other-owner', idleOwner])
-      appendEvent({ ...row, owner: recipient, event: 'message', wake: true, kind: 'queue-stalled', text: 'queue for ' + recipient });
+    appendEvent({ ...row, owner: 'other-owner', event: 'message', wake: true, kind: 'queue-stalled', text: 'other-owner' });
+    const issued = notifyQueueOwner({ ...row, owner: idleOwner }, queue, launch, { now, policy });
     assert.equal(await closed, 2);
-    assert.match(reminder, /queue for idle-owner/);
+    assert.ok(reminder.includes(issued.choiceCommand));
+    assert.match(reminder, /queue-stalled notice 1 for queue-probe/);
     assert.doesNotMatch(reminder, /other-owner/);
   } finally { listener.kill(); process.env.RULES_SHARED = tmp; }
   const [first] = await monitor().poll([row], [], now);

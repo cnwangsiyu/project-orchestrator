@@ -197,8 +197,10 @@ export function notifyQueueOwner(row,queue,launch,{now=Date.now(),policy=queuePo
     writeJson(file,prepared);
     const phase=queue.workStarted?'mid-turn':'initial-queue';
     const workedMinutesBefore=queue.workedMinutesBefore??null,queuedMinutes=Math.max(0,(now-queue.since)/60000);
+    const choiceCommand=command([process.execPath,`${root}/scripts/codex-worker.mjs`,'queue-choice','--notice',noticeId,'--best','--owner',row.owner]);
+    const summary=`queue-stalled notice ${count} for ${String(row.name??row.task).slice(0,80)} at ${row.account}/${row.model}; ${queuedMinutes.toFixed(1)} min queued.${count>1?' secretary-relay: owner queue decision still pending.':''}`;
     const event=emit({...row,event:'message',kind:'queue-stalled',severity:'risk',wake:true,
-      text:`phase=${phase}; worked before queue=${workedMinutesBefore??'?'} min; ${text}`,options,noticeId,noticeCount:count,
+      choiceCommand,summary,text:`${choiceCommand}\nphase=${phase}; worked before queue=${workedMinutesBefore??'?'} min; ${text}`,options,noticeId,noticeCount:count,
       phase,workedMinutesBefore,queuedMinutes,
       queueEpisode:JSON.stringify([row.account,row.thread,row.turn]),queueSince:queue.since,queuePosition:queue.position??null,
       queuedMinutes:(now-queue.since)/60000,drainPerMin:queue.drainPerMin??null,secretaryRelay:count>1});

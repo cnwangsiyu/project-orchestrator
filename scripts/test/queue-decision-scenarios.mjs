@@ -8,7 +8,7 @@ import {createSnapshot,parseTaskSpec,createTaskSpec} from '../lib/pipeline/index
 import {notifyQueueOwner,queueOptions,queueOptionPlan,queueDecisionFile,requestQueueChoice,claimQueueChoice,settleQueueChoice,queueChoiceSafety,automaticQueueOption} from '../lib/queue-decision.mjs';
 import {queueStallLabel} from '../lib/queue-stall-watch.mjs';
 import {saveQueue} from '../lib/worker-queue.mjs';
-import {readEvents,eventLine} from '../lib/worker-events.mjs';
+import {readEvents,eventLine,hookEventLine} from '../lib/worker-events.mjs';
 const root=new URL('../../',import.meta.url).pathname.replace(/\/$/,''),tmp=fs.mkdtempSync(path.join(os.tmpdir(),'queue-decisions-'));
 const now=Date.now(),min=60000,owner='c2987dae-1fac-5a84-a312-a29117f1b8c7',SOL='gpt-6.1-sol',TERRA='gpt-5.6-terra',ASTRA='gpt-6-astra';
 const policy=JSON.parse(fs.readFileSync(path.join(root,'references/personal-fallback.json')));
@@ -54,6 +54,10 @@ try {
   const emit=e=>(events.push(e),e);
   assert.equal(notifyQueueOwner(f.row,{...f.queue,since:now-5*min},f.launch,{now,policy,context:f.context,emit}),null);
   let notice=notifyQueueOwner(f.row,f.queue,f.launch,{now,policy,context:f.context,emit});
+  const short=hookEventLine({...notice,summary:'long description '.repeat(200)});
+  assert.ok(short.length<=500 && short.endsWith('\n'+notice.choiceCommand));
+  assert.ok(notice.text.startsWith(notice.choiceCommand));
+  assert.ok(notice.choiceCommand.includes('--notice '+notice.noticeId+' --best'));
   assert.equal(notice.wake,true);assert.match(notice.text,/queued 6.0 min position=100 drain=0/);
   assert.ok(notice.options.some(o=>o.account==='trae'&&o.model===TERRA&&o.context==='same thread / resume'));
   assert.ok(notice.options.some(o=>o.account==='main'&&o.approvalRef===policy.userDecisionRef&&!o.needsUserApproval));
