@@ -775,8 +775,8 @@ export const analyze = (data) => {
   const rows = (data.codexAccounts ?? []).filter((a) => a.kind !== 'ttadk' && a.kind !== 'trae').map((a) => {
     const w = weekly(a.windows), s = winState(w, hist[`codex:${a.name}`]), w5 = shortWin(a.windows);
     const unconstrained = !!a.windows && !w; // read fine, but no limit window (or unlimited credits)
-    const spent = !unconstrained && !!s && (s.used >= P.redeemAt || (a.allowed === false && !(w5 && w5.used >= P.throttle5h)));
-    const throttledUntil = w5 && w5.used >= P.throttle5h && w5.resetsAt && !spent ? w5.resetsAt : null;
+    const spent = a.name === 'main' ? a.allowed === false : !unconstrained && !!s && (s.used >= P.redeemAt || (a.allowed === false && !(w5 && w5.used >= P.throttle5h)));
+    const throttledUntil = a.name !== 'main' && w5 && w5.used >= P.throttle5h && w5.resetsAt && !spent ? w5.resetsAt : null;
     const cp = cardPlan(s, a.resets, spent);
     const deadline = unconstrained ? Infinity : Math.min(s?.left ?? Infinity, cp?.deadlineH ?? Infinity);
     return { a, s, unconstrained, spent, throttledUntil, cp, deadline, known: unconstrained || !!s };

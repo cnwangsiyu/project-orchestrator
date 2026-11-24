@@ -9,7 +9,6 @@ import { makePlan } from './plan.mjs';
 import { validatePlan } from './validate.mjs';
 import { reviewDecision, reviewAfterWrite } from './review-policy.mjs';
 import { isAstra, array, company, companyDevice, known, reason, fingerprint, compare, clone, freeze } from './common.mjs';
-import { exclusiveCodexTask, personalMainWaitText } from './personal-priority.mjs';
 
 function assess(task, snapshot, context = {}) {
   const { candidates, diagnostics } = enumerateCandidates(task, snapshot);
@@ -123,11 +122,6 @@ export function routePure(taskSpec, stateSnapshot, history = []) {
         trigger: 'capacity-reset', reason: reason('choose', 'DAY_QUOTA_EXHAUSTED', description, []), timerOwner: task.owner });
     }
   }
-  const mainOfferable = assessment.rows.some(r => r.candidate.accountId === 'main' && !r.estimate.stalled
-    && r.predicates.every(p => p.ok || p.gate));
-  if (exclusiveCodexTask(task, snapshot) && !mainOfferable && !startable)
-    return makePlan('defer', task, snapshot, { ...fields, deferUntil: null, trigger: 'personal-main-capacity',
-      reason: reason('choose', 'PERSONAL_MAIN_WAIT', personalMainWaitText(task, snapshot), [task.taskId]) });
   // Show the ready personal choice before scheduling a future company reset.
   // Its command remains gated until the orchestrator supplies the user's yes.
   if (ordered.winner?.estimate.capacityReset && !rankedNow.winner) {

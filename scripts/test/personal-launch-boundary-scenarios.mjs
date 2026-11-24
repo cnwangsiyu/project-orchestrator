@@ -119,11 +119,11 @@ try {
       }};`);
     const r = launch(f, 'main', { preload });
     assert.ok(r.calls.some(c => c.method === 'initialize'));
-    assert.equal(r.status, 1); assert.match(r.stderr, /below launch headroom 5%.*re-route/);
-    assert.equal(r.calls.some(c => c.method === 'thread/start'), false);
+    assert.equal(r.status,0);
+    assert.ok(r.calls.some(c=>c.method==='thread/start'));
   });
   check('main launches only with fresh current headroom', () => {
-    for (const [label, used, want] of [['ready', 95, 0], ['low', 96, 1], ['reset-shift', 3, 0]]) {
+    for (const [label, used, want] of [['ready', 95, 0], ['low', 96, 0], ['reset-shift', 3, 0]]) {
       const f = fixture('main-' + label, used); f.route.pick = f.tuple('main');
       const current = policy();
       if (label === 'reset-shift') {
@@ -177,10 +177,9 @@ try {
   check('refreshed main quota still has to pass the weekly guard', () => {
     const f = exclusiveMain('refresh-weekly-guard', { stale: true });
     const r = launch(f, 'main', { transport: { rateLimits: rateLimits(96) } });
-    assert.equal(r.status, 1);
-    assert.match(r.stderr, /below launch headroom 5%/);
-    assert.equal(readLimits(r), 1);
-    assert.equal(r.calls.some(c => c.method === 'thread/start'), false);
+    assert.equal(r.status,0);
+    assert.equal(readLimits(r),1);
+    assert.ok(r.calls.some(c=>c.method==='thread/start'));
   });
   check('logged-out, unhealthy and throttled main refusals do not refresh', () => {
     const cases = [
@@ -196,10 +195,10 @@ try {
         fs.writeFileSync(f.quota, JSON.stringify(f.data));
       }
       const r = launch(f, 'main');
-      assert.equal(r.status, 1);
-      assert.match(r.stderr, message);
+      assert.equal(r.status,label==='throttled'?0:1);
+      if(label!=='throttled')assert.match(r.stderr,message);
       assert.equal(readLimits(r), 0);
-      assert.equal(r.calls.some(c => c.method === 'thread/start'), false);
+      assert.equal(r.calls.some(c => c.method === 'thread/start'),label==='throttled');
     }
   });
   check('company launches and revoked windows retain normal admission', () => {

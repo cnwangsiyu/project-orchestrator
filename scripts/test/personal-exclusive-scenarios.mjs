@@ -101,7 +101,7 @@ try {
     assert.equal(plan.kind, 'launch'); assert.equal(plan.primary.candidate.accountId, 'main');
     assert.equal(validatePlan(plan, snapshot).ok, true);
     raw.accounts[0].transport = false;
-    assert.equal(run(raw, t).plan.trigger, 'personal-main-capacity');
+    assert.notEqual(run(raw,t).plan.kind,'launch');
   });
   check('short company queues stay company; queues beyond the standing threshold overflow to main', () => {
     const raw = fixture(0, true);
@@ -160,55 +160,20 @@ try {
     const { plan } = run(fixture(96, true));
     assert.equal(plan.kind, 'launch'); assert.ok(['ttadk', 'trae'].includes(plan.primary.candidate.accountId));
   });
-  for (const used of [96, 99, 100]) check(`main ${used}% with company unavailable waits, despite idle b and Claude`, () => {
-    const { plan, view } = run(fixture(used));
-    assert.equal(plan.kind, 'defer'); assert.equal(plan.trigger, 'personal-main-capacity');
-    const reason = used >= 99 ? 'redeem main card?' : 'main 96% used: below launch headroom 5%';
-    assert.equal(plan.reason.text, `[personal-main-wait] main ${used}%: W-main waiting (${reason})`);
-    assert.equal(view.pick, null); assert.deepEqual(view.needsUserOK, []);
-    assert.ok(view.tellUser.includes(plan.reason.text));
-  });
-  check('main wait card advice requires fresh weekly exhaustion and an available card', () => {
-    const raw = fixture(46);
-    raw.accounts[0].transport = false;
-    let { plan } = run(raw);
-    assert.equal(plan.trigger, 'personal-main-capacity');
-    assert.match(plan.reason.text, /main 46%:.*no executable main lane/);
-    assert.doesNotMatch(plan.reason.text, /redeem/);
-    raw.accounts[0].budget.weekly.used = 99;
-    raw.accounts[0].resets.count = 0;
-    ({ plan } = run(raw));
-    assert.doesNotMatch(plan.reason.text, /redeem/);
-    raw.accounts[0].resets.count = 3;
-    ({ plan } = run(raw, task({ flags: { 'no-redeem': true } })));
-    assert.doesNotMatch(plan.reason.text, /redeem/);
-    raw.accounts[0].budget = { status: 'KNOWN', value: raw.accounts[0].budget,
-      sampledAt: NOW, receivedAt: NOW, source: 'last-good-stale' };
-    ({ plan } = run(raw));
-    assert.match(plan.reason.text, /fresh weekly quota/);
-    assert.doesNotMatch(plan.reason.text, /redeem/);
-  });
-  check('hard Astra, excluded main and unavailable main transport never select b', () => {
-    const raw = fixture(96), hard = task({ category: 'implement-hard', impact: 'service' });
-    assert.equal(run(raw, hard).plan.trigger, 'personal-main-capacity');
-    assert.equal(run(fixture(), task({ flags: { 'exclude-account': 'main' } })).plan.trigger, 'personal-main-capacity');
-    raw.accounts[0].budget.weekly.used = 0; raw.accounts[0].transport = false;
-    assert.equal(run(raw).plan.trigger, 'personal-main-capacity');
+  for (const used of [96,99,100]) check(`main ${used}% remains available until provider denial`, () => {
+    const raw = fixture(used), {plan,view} = run(raw);
+    assert.equal(plan.primary.candidate.accountId,'main');
+    assert.ok(view.tellUser.includes(`main at ${used}% of the week, projected ${raw.accounts[0].budget.weekly.projected}% at reset`));
+    raw.accounts[0].providerDenied = true;
     raw.accounts[2].providerDenied = false;
-    assert.equal(run(raw).plan.primary.candidate.accountId, 'ttadk');
-    const unknown = fixture(); unknown.accounts[0].kind = 'unknown';
-    assert.equal(run(unknown).plan.trigger, 'personal-main-capacity');
-  });
-  check('fresh guard refuses stale telemetry without consuming the main-only restriction', () => {
-    const raw = fixture(10);
-    raw.accounts[0].budget = { status: 'KNOWN', value: raw.accounts[0].budget, sampledAt: NOW - 20 * 60000,
-      receivedAt: NOW, maxAgeMs: 600000, source: 'last-good-stale' };
-    const { plan, snapshot } = run(raw);
-    assert.match(personalPriorityGuard(snapshot), /fresh weekly quota/);
-    assert.equal(plan.trigger, 'personal-main-capacity');
+    const fallback = run(raw);
+    assert.equal(fallback.view.pick.account,'ttadk');
+    assert.match(fallback.view.tellUser.join(' '),/main quota denied by provider/);
+    raw.accounts[0].transport = false;
+    assert.equal(run(raw).view.pick.account,'ttadk');
   });
   check('manual main card redemption changes its reset without ending exclusive mode', () => {
-    const raw = fixture(96); assert.equal(run(raw).plan.trigger, 'personal-main-capacity');
+    const raw = fixture(96); assert.equal(run(raw).view.pick.account,'main');
     raw.accounts[0].budget.weekly = { used: 0, projected: 0, resetsAt: NOW + 14 * 24 * h };
     raw.accounts[0].resets.count = 2;
     const resumed = run(raw);
@@ -244,8 +209,7 @@ try {
     raw.accounts[0].budget.weekly.used = 96;
     assert.ok(['ttadk', 'trae'].includes(run(raw, hard).view.pick.account));
     for (const a of raw.accounts.filter(a => ['ttadk', 'trae'].includes(a.kind))) a.providerDenied = true;
-    assert.equal(run(raw, hard).plan.trigger, 'personal-main-capacity');
-    assert.equal(run(raw, hard).view.pick, null);
+    assert.equal(run(raw,hard).view.pick.account,'main');
   });
   check('revocation restores normal company selection and Claude-only tools retain their route', () => {
     const raw = fixture(0, true); raw.personalPriority.revoked = true;
@@ -255,11 +219,11 @@ try {
   check('quota summary obeys exclusive even when main has no headroom or a stale reading', () => {
     const data = { checkedAt: NOW, claude: [], history: {}, personalPriority: window(), codexAccounts: ['main', 'b'].map(name => ({
       name, live: true, seenAt: NOW, windows: [{ label: 'week', windowMins: 10080, used: name === 'main' ? 96 : 0, resetsAt: NOW + 168 * h }] })) };
-    assert.equal(analyze(data).codex.pick, null); assert.equal(analyze(data).codex.exclusiveWait, true);
+    assert.equal(analyze(data).codex.pick.a.name,'main'); assert.equal(analyze(data).codex.exclusiveWait,false);
     data.codexAccounts[0].windows[0].used = 20;
     assert.equal(analyze(data).codex.pick.a.name, 'main');
     data.codexAccounts[0].observationStale = true;
-    assert.equal(analyze(data).codex.pick, null);
+    assert.equal(analyze(data).codex.pick.a.name,'main');
     data.codexAccounts[0].observationStale = false; data.codexAccounts[0].live = false;
     assert.equal(analyze(data).codex.pick, null);
   });
@@ -335,11 +299,11 @@ try {
     const args = { snapshot, plan, task: task(), owner, file, emit };
     assert.deepEqual(checkPersonalPriorityNotices({ ...args, dry: true }), []);
     assert.deepEqual(checkPersonalPriorityNotices({ ...args, owner: null }), []); assert.equal(fs.existsSync(file), false);
-    assert.equal(checkPersonalPriorityNotices(args).length, 2); assert.equal(checkPersonalPriorityNotices(args).length, 0);
+    assert.equal(checkPersonalPriorityNotices(args).length, 1); assert.equal(checkPersonalPriorityNotices(args).length, 0);
     const wait = rows.find(r => r.kind === 'personal-main-wait');
-    assert.equal(eventLine(wait), plan.reason.text);
+    assert.equal(wait,undefined);
     assert.equal(checkPersonalPriorityNotices({ ...args, task: task({ taskId: 'W-next' }),
-      plan: run(fixture(96), task({ taskId: 'W-next' })).plan }).length, 1);
+      plan: run(fixture(96), task({ taskId: 'W-next' })).plan }).length, 0);
   });
   check('stale usage cannot consume the 90% notice; a later fresh reading delivers it', () => {
     const raw = fixture(90), file = path.join(tmp, 'stale-notices.json'), rows = [], emit = row => { rows.push(row); return row; };
@@ -373,13 +337,13 @@ try {
     fs.writeFileSync(snap, JSON.stringify(raw)); fs.writeFileSync(registry, '{}');
     const env = { ...process.env, ROUTE_SNAPSHOT_FILE: snap, CODEX_ACCOUNTS: registry, QUOTA_CACHE: path.join(tmp, 'quota.json'), ROUTE_LOG_FILE: path.join(tmp, 'route.log') };
     const cli = () => JSON.parse(execFileSync(process.execPath, [path.join(root, 'scripts/route.mjs'), 'analysis', '--json', '--owner', owner], { encoding: 'utf8', env }));
-    const result = cli(); assert.equal(result.kind, 'defer'); assert.equal(result.pick, null);
+    const result = cli(); assert.equal(result.kind,'launch'); assert.equal(result.pick.account,'main');
     assert.ok(result.tellUser.some(text => text.startsWith('[personal-main-90]')));
-    assert.ok(result.tellUser.includes('[personal-main-wait] main 96%: unnamed-task waiting (main 96% used: below launch headroom 5%)'));
+    assert.match(result.tellUser.join(' '),/main at 96% of the week/);
     cli(); const events = readEvents().filter(row => row.kind?.startsWith('personal-main-'));
     assert.equal(events.filter(row => row.kind === 'personal-main-90').length, 1);
-    assert.equal(events.filter(row => row.kind === 'personal-main-wait').length, 1);
-    assert.equal(inbox(events, owner).pending.length, 2);
+    assert.equal(events.filter(row => row.kind === 'personal-main-wait').length, 0);
+    assert.equal(inbox(events, owner).pending.length, 1);
     assert.ok(inbox(events, owner).pending.every(row => eventLine(row).startsWith(`[${row.kind}] `)));
   });
   const server = http.createServer((req, res) => { res.writeHead(200); res.end('ok'); });
@@ -406,7 +370,7 @@ try {
     assert.deepEqual(second.personalPriorityNotices, []);
     accounts[0].windows[0].used = 96; save();
     const waited = (await exec(process.execPath, [path.join(root, 'scripts/quota.mjs')], { env })).stdout;
-    assert.match(waited, /budget:.*codex → wait main/);
+    assert.match(waited, /budget:.*codex → main/);
     count++; console.log('PASS quota CLI respects exclusive main and delivers the 90% notice only once');
   } finally { await new Promise(resolve => server.close(resolve)); }
   console.log(`Personal exclusive scenarios: ${count} passed`);

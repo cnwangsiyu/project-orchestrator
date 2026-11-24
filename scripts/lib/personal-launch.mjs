@@ -22,7 +22,7 @@ function deadlineOrder(rows, tieHours) {
 
 // Input contains only usable accounts. Headroom precedes deadline tie ordering.
 export function personalLaunchChoice(rows, headroom = PERSONAL_LAUNCH_HEADROOM, tieHours = PERSONAL_DEADLINE_TIE_H) {
-  const below = rows.filter(r => Number.isFinite(r.used) && 100 - r.used < headroom);
+  const below = rows.filter(r => r.id !== 'main' && Number.isFinite(r.used) && 100 - r.used < headroom);
   const open = rows.filter(r => !below.includes(r));
   const hasHeadroom = open.length > 0;
   const { ordered, groups } = deadlineOrder(hasHeadroom ? open : rows, tieHours);

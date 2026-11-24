@@ -88,15 +88,18 @@ export const rerouteWorker = async ({ args, depth, from, reason, prompt, opts, p
   if (held) { console.log(`reroute-blocked: ${held}`); return REROUTE_EXIT.stopped; }
   const alternative = reason === 'queue-too-slow' ? opts.queueAlternative : null;
   let next = nextRouteArgs(args, from, depth, policy, alternative);
+  if (reason === 'provider-quota-denied') next = setRouteFlag(next, 'exclude-account',
+    [...new Set([...(routeFlag(next, 'exclude-account') || '').split(',').filter(Boolean), 'main'])].join(','));
   const scripts = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   const taskDir = typeof routeFlag(args, 'task-dir') === 'string' ? routeFlag(args, 'task-dir')
     : path.join(path.resolve(opts.cwd ?? '.'), '.reroute', String(opts.name ?? 'worker').replace(/[^a-zA-Z0-9._-]/g, '_'));
   next=setRouteFlag(next,'task-dir',taskDir);
-  const handover = `Previous attempt on ${from.model}@${from.account} was cancelled ${reason === 'queue-too-slow' ? `while queued at position ${from.position}` : `before work (${reason})`}; inspect git status/diff in the workspace before starting; continue, don't redo.\n\n${prompt}`;
+  const handover = `Previous attempt on ${from.model}@${from.account} ${reason === 'provider-quota-denied' ? 'ended at the provider usage limit; preserve its completed and uncommitted work' : `was cancelled ${reason === 'queue-too-slow' ? `while queued at position ${from.position}` : `before work (${reason})`}`}; inspect git status/diff in the workspace before starting; continue, don't redo.\n\n${prompt}`;
   const state = { t: Date.now(), name: opts.name, project:routeFlag(args,'project') ?? 'general',category:args[0],role:'primary',
-    reason, from, cancellationEvidenceId:`cancelled-no-work:${randomUUID()}`, depth: depth + 1, routeArgs: next,
+    reason, from, cancellationEvidenceId:`${reason === 'provider-quota-denied' ? 'provider-quota-denied' : 'cancelled-no-work'}:${randomUUID()}`, depth: depth + 1, routeArgs: next,
     alternative, status: 'routing', recovery: {
-      instructions: 'The previous attempt ended before work. Re-run the recorded route command, then launch its pick.workerArgs with continuationPrompt. Do not resume the cancelled queued turn.',
+      instructions: reason === 'provider-quota-denied' ? 'The previous main turn ended at the provider usage limit. Preserve its completed and uncommitted work, re-run the recorded company route, and launch its pick.workerArgs with continuationPrompt. Do not resume the exhausted main turn.'
+        : 'The previous attempt ended before work. Re-run the recorded route command, then launch its pick.workerArgs with continuationPrompt. Do not resume the cancelled queued turn.',
       routeCommand: [process.execPath, path.join(scripts, 'route.mjs'), ...next, '--json'],
       continuationPrompt: handover, cwd: opts.cwd ?? routeFlag(args, 'cwd'),
     } };

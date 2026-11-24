@@ -90,6 +90,8 @@ import { lifecycle, resolveOwner, validOwner, inbox, readEvents, readAck, eventL
   saveWorkerContext, workerContext, answerQuestion, followerAlive, retiredWorkers, workerKey, retireWorker, validWorkerIdentifier, workerRunStates, processWorker } from './lib/worker-events.mjs';
 import { runningWorker, trackedWorkers } from './lib/worker-running.mjs';
 import { pollWorkerQuota } from './lib/worker-quota-refresh.mjs';
+import { activeMainProviderDenial, isUsageLimitExceeded, recordMainProviderDenial } from './lib/main-provider-denial.mjs';
+import { readQuotaCache } from './lib/routing-observations.mjs';
 import { completionEvidence, classifyCompletion, completionLeases, continuationCommand, TRUNCATED_EXIT, isCompletedFinalItem } from './lib/worker-completion.mjs';
 import { appendWorkerAlert } from './lib/worker-events.mjs';
 setEventObserver(requestBoardRefresh);
@@ -1224,7 +1226,7 @@ const autoReroute = async (reason, queue = {}, policy = false, selection = null)
   const from = { vendor: 'codex', model: String(opts.model ?? '').toLowerCase(), effort: opts.effort ?? null,
     account: account ?? 'main', position: queue.position ?? null, waitedMin: queue.waitedMin ?? 0,
     predictedStartMin: queue.predictedStartMin ?? null,
-    workStarted:!!selection?.midTurn,
+    workStarted:!!selection?.midTurn || queue.workStarted === true,
     threadId: cancelledTurn?.threadId ?? attemptThreadId, turnId: cancelledTurn?.turnId ?? null };
   try {
     const code = await rerouteWorker({ args: selection?.sourceArgs ?? ROUTE_ARGS, depth: REROUTE_DEPTH, from, reason, prompt: text,
@@ -1380,10 +1382,12 @@ const report = async (threadId, turn, final, usage, observation = {}) => {
     project: opts.project ?? tracker?.metadata().project, task: opts.task ?? tracker?.metadata().task, name: opts.name });
   const rawPolicyBlock = isPolicyBlock(turn);
   const providerError = JSON.stringify(turn.error ?? '');
+  let mainDenied = (account ?? 'main') === 'main' && !observation.unconfirmed && turn.status === 'failed'
+    && isUsageLimitExceeded(turn.error);
   const traeFailureModel = PROF?.kind === 'trae' ? (opts.model ?? actualModel ?? threadModel(PROF.home, threadId)) : null;
   const accessFailure = !!traeFailureModel && !rawPolicyBlock && turn.status === 'failed' && isModelAccessFailure(providerError);
   const familyRestricted = !!traeFailureModel && !rawPolicyBlock && turn.status === 'failed' && /\b983\b/.test(providerError);
-  const completion = classifyCompletion({ turn: accessFailure ? { ...turn, status: 'transport-failed' } : turn,
+  const completion = classifyCompletion({ turn: mainDenied ? { ...turn, error: null } : accessFailure ? { ...turn, status: 'transport-failed' } : turn,
     final, leases: resourceState.held, ...observation });
   const truncated = completion?.status === 'TRUNCATED' ? completion : null;
   const uncertain = completion?.status === 'uncertain' ? completion : null;
@@ -1401,6 +1405,18 @@ const report = async (threadId, turn, final, usage, observation = {}) => {
   if (rejectedModel) console.error(`review-model-rejected: requested ${REQUESTED_MODEL ?? 'default'}, actual ${actualModel ?? 'unknown'}, delegated ${delegatedModels.map((row) => row.model).join(', ') || 'none'}`);
   console.log(`turn ${turn.status}${turn.error ? ' error=' + JSON.stringify(turn.error) : ''}`);
   const errorText = JSON.stringify(turn.error ?? '');
+  if (mainDenied) {
+    const cached = readQuotaCache(process.env.QUOTA_CACHE || path.join(rulesShared(), 'quota.json'));
+    const main = cached?.codexAccounts?.find(row => row.name === 'main');
+    const mainObservation = main && { ...main, seenAt: main.seenAt ?? cached.checkedAt };
+    recordMainProviderDenial({ shared: rulesShared(), error: turn.error, thread: threadId, turn: turn.id,
+      observation: mainObservation });
+    mainDenied = !!activeMainProviderDenial({ shared: rulesShared(), observation: mainObservation });
+    const message = 'main provider usageLimitExceeded denial: main is exhausted; falling back to the best qualified company option now, without waiting for a reset or redeeming a card.';
+    if (mainDenied) console.log(message);
+    if (mainDenied && tracker?.owner) appendWorkerAlert({ ...tracker.metadata(), thread: threadId, turn: turn.id,
+      event: 'message', kind: 'risk', severity: 'risk', wake: true, text: message }, `main-provider-denial:${threadId}:${turn.id}`);
+  }
   if (turn.status === 'failed' && failureKind(errorText) === 'thread-too-large') {
     // Do not wait for another hub read while retry/reroute timers are still armed.
     outcomeTurn = turn; outcomeFinal = final ?? lastMessage(turn.items) ?? '';
@@ -1455,6 +1471,15 @@ const report = async (threadId, turn, final, usage, observation = {}) => {
   outcomeTurn = turn; outcomeFinal = final ?? '';
   printFinal(final);
   await redactEndedTurn(threadId);
+  if (mainDenied && ROUTE_ARGS && !BACKGROUND && !rejectedModel && !policyBlock) {
+    const current = await boundedTransportRead(() => call('thread/read', { threadId, includeTurns: true })).catch(() => null);
+    if (current && !transportSourceBlock({ result: current, threadId, sourceTurn: turn.id })) {
+      recordOutcome(1);
+      await autoReroute('provider-quota-denied', { workStarted: workStarted || turnHasWork(turn) });
+      return;
+    }
+    console.log('reroute-skipped: provider-denied turn terminal state is unconfirmed; reconcile before replacement');
+  }
   if (completion?.status === 'transport-failed' && !rejectedModel && !policyBlock) {
     recordOutcome(1);
     const continueCommand = [process.execPath,fileURLToPath(import.meta.url),'--account',account ?? 'main','turn','--thread',threadId,
@@ -1466,6 +1491,9 @@ const report = async (threadId, turn, final, usage, observation = {}) => {
       return line;
     };
     const quotaBlock = async () => {
+      if ((account ?? 'main') === 'main' && activeMainProviderDenial({ shared: rulesShared(),
+        observation: readQuotaCache(process.env.QUOTA_CACHE || path.join(rulesShared(), 'quota.json'))?.codexAccounts?.find(row => row.name === 'main') }))
+        return 'main provider quota denial is active; use a qualified company lane';
       const health = transportHealthBlock({home:PROF?.home ?? process.env.CODEX_HOME ?? path.join(os.homedir(),'.codex'),model:opts.model ?? actualModel});
       if (health) return health;
       try {

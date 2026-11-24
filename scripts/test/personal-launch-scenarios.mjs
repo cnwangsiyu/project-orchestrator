@@ -56,7 +56,7 @@ try {
   assert.equal(POLICY.deadlineTieH, 6);
   // The allocator scenarios use a synthetic peer; real b is refused by routing policy.
   for (const [label, other, main, want] of [['98/0', 98, 0, 'main'], ['90/0', 90, 0, 'fixture-b'], ['95/0 boundary', 95, 0, 'fixture-b'],
-    ['both low, main has more', 98, 96, 'main'], ['both low, fixture-b has more', 96, 98, 'fixture-b']]) {
+    ['both low, main has more', 98, 96, 'main'], ['main weekly use is advisory', 96, 98, 'main']]) {
     check(`${label}: quota and hard Astra launch choose ${want}`, () => {
       const d = data(other, main), st = analyze(d), r = route(d);
       assert.equal(st.codex.pick.a.name, want); assert.equal(r.kind, 'launch');
@@ -142,7 +142,7 @@ try {
     }
   });
   check('spent accounts retain card suggestions and never redeem automatically', () => {
-    const d = data(99, 100), st = analyze(d), r = route(d);
+    const d = data(99, 100, {main:{allowed:false}}), st = analyze(d), r = route(d);
     assert.equal(st.codex.pick, null); assert.ok(st.codex.redeem);
     assert.notEqual(r.kind, 'launch'); assert.ok(r.needsUserOK.some(s => /redeem|reset/i.test(s)));
   });

@@ -315,7 +315,9 @@ export function pLaunchMatches(t, s, c, context = {}) {
     const checked = t.queueOwnerChoice?.candidateId === c.id ? prior.filter(a=>a.id === t.queueOwnerChoice.previousAttemptId) : prior;
     const ownerInterruption = t.queueOwnerChoice?.owner && t.queueOwnerChoice.decisionId && t.queueOwnerChoice.midTurn === true;
     const confirmed = a => a.cancellationEvidenceId && (a.state === 'cancelled-no-work' && a.usefulWork === false
-      || ownerInterruption && a.id === t.queueOwnerChoice.previousAttemptId && a.state === 'interrupted' && a.usefulWork === true);
+      || ownerInterruption && a.id === t.queueOwnerChoice.previousAttemptId && a.state === 'interrupted' && a.usefulWork === true
+      || a.terminalProviderDenial === true && a.rerouteReason === 'provider-quota-denied' && a.state === 'failed'
+        && a.actual?.accountId === 'main' && a.failureKind === 'infra' && company(candidateParts(s,c).account));
     if (!checked.length || checked.some(a => !confirmed(a)))
       return deny('pLaunchMatches', 'CANCELLATION_UNCONFIRMED', 'Automatic replacement requires terminal no-work cancellation evidence.', c);
   }

@@ -61,7 +61,7 @@ try {
   const blocked=cli(['computer-use','--apps','com.example.calc'],broken);
   assert.equal(blocked.kind,'blocked');assert.equal(blocked.pick,null);assert.equal(blocked.plan.reasons.length,1);
   assert.match(blocked.why[0],/on (main|alt):/);assert.doesNotMatch(blocked.why.join('\n'),/CATEGORY_MODEL_FIT|ASTRA_SUBSTITUTION_HARD_ONLY|company lane progress/);
-  const spent=copy();spent.codexAccounts.forEach(a=>a.windows=[window(100,24)]);
+  const spent=copy();spent.codexAccounts.forEach(a=>Object.assign(a,{allowed:false,windows:[window(100,24)]}));
   const denied=cli(['image-gen'],spent);assert.equal(denied.kind,'blocked');assert.equal(denied.plan.reasons.length,1);
   assert.match(denied.why[0],/Provider explicitly denied quota capacity/);assert.equal(denied.needsUserOK.length,0);
   const cards=structuredClone(spent);cards.codexAccounts[0].resets={credits:[{id:'card-1',expiresAt:now+h}]};

@@ -167,7 +167,7 @@ try {
     const shown = execFileSync(process.execPath, [path.join(root, 'quota.mjs')], { env, encoding: 'utf8' });
     assert.equal(shown.includes('lean: TTADK SSO expires in '), expected, `quota CLI notice at ${left} hours`);
   }
-  const traeOnly={...data(),codexAccounts:[{...main,windows:[{...window,used:99}]},{name:'trae',kind:'trae',home:tmp,live:true,healthy:true,models:['gpt-6.1-sol'],quota:{sampledAt:now,daily:{}}}]};
+  const traeOnly={...data(),codexAccounts:[{...main,allowed:false,windows:[{...window,used:99}]},{name:'trae',kind:'trae',home:tmp,live:true,healthy:true,models:['gpt-6.1-sol'],quota:{sampledAt:now,daily:{}}}]};
   const lean=leanLines(analyze(traeOnly),traeOnly).join(' ');
   assert.match(lean,/this company device/);assert.match(lean,/qualified company work continues/);
   assert.doesNotMatch(lean,/add.*second.opinion|at stronger settings|codex out on every account|route as if Codex has room/);

@@ -49,6 +49,12 @@ export function presentRoute(plan, view, context) {
     if (reviewer.personalFallback?.approvalRef === snapshot.personalPriority.userDecisionRef)
       why.push(`second reviewer: ${reviewer.personalFallback.text}`);
   }
+  const main = snapshot.accounts.find(a => a.id === 'main' && a.kind === 'chatgpt');
+  const weekly = main?.budget?.source !== 'last-good-stale' && known(main?.budget)?.weekly;
+  if (weekly?.resetsAt > snapshot.decisionAt && Number.isFinite(weekly.used) && Number.isFinite(weekly.projected))
+    tellUser.push(`main at ${weekly.used}% of the week, projected ${weekly.projected}% at reset`);
+  if (plan.kind === 'launch' && known(main?.providerDenied) === true && company(candidateParts(snapshot,c).account))
+    tellUser.push(`main quota denied by provider; using ${c.modelId} on ${c.accountId}.`);
   const priorityGuard = personalPriorityGuard(snapshot);
   if (priorityGuard) why.push(snapshot.personalPriority.mode === 'exclusive'
     ? `company lanes first; personal overflow only on main: ${priorityGuard}; other personal Codex accounts remain ineligible`
@@ -334,5 +340,5 @@ export function presentRoute(plan, view, context) {
     eta,queuePatienceMin:patience,queueMode:snapshot.personalFallback?.enabled?'owner':'legacy',queueNoticeAfterMin:snapshot.personalFallback?.enabled?0:null,
     queueAlt,queueAlternative,pick,queueFallbackPolicy:snapshot.personalFallback?.enabled?snapshot.personalFallback:null,secondOpinion:plan.reviewers[0]?launch(plan.reviewers[0],plan.kind==='launch'):plan.reviewerProposals?.[0]?launch(plan.reviewerProposals[0],false):null,
     needsUserOK:[...new Set(needsUserOK)],tellUser:[...new Set(tellUser)],why,shortWhy,notes,shortNotes,fixedNotes,workerRulesVersion:sourceDigest.version,
-    redeemFirst:c?known(candidateParts(snapshot,c).account.budget)?.redemption??null:null,balance,quota,quotaSummary,plan };
+    redeemFirst:c && plan.gates.some(g=>g.kind==='reset-redemption') ? known(candidateParts(snapshot,c).account.budget)?.redemption??null : null,balance,quota,quotaSummary,plan };
 }

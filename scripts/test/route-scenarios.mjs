@@ -37,14 +37,14 @@ const S = {
   quiet: { claude: cl(30, 80), codex: [acc('main', 55, 80)] }, // on pace everywhere, no cards
   claudeOver: { claude: cl(60, 72), codex: [acc('main', 30, 72)] },
   claudeNearReset: { claude: cl(85, 2), codex: [acc('main', 50, 80)] }, // 85% with 2h left and a slow burn: spare
-  codexOut: { claude: cl(30, 48), codex: [acc('main', 99, 48)] },
-  codexOutClaudeOver: { claude: cl(85, 48), codex: [acc('main', 99, 48)] },
+  codexOut: { claude: cl(30, 48), codex: [acc('main', 99, 48, [], { allowed:false })] },
+  codexOutClaudeOver: { claude: cl(85, 48), codex: [acc('main', 99, 48, [], { allowed:false })] },
   twoAccounts: { claude: cl(10, 120), codex: [acc('main', 99, 120, [400]), acc('fixture-b', 40, 20)] },
-  bothSpent: { claude: cl(10, 120), codex: [acc('main', 99, 120, [400]), acc('b', 99, 20)] },
+  bothSpent: { claude: cl(10, 120), codex: [acc('main', 99, 120, [400], { allowed:false }), acc('b', 99, 20)] },
   expiringCard: { claude: cl(10, 120), codex: [acc('main', 60, 120, [0.5])] },
   cardDeadline: { claude: cl(10, 120), codex: [acc('main', 40, 120, [30]), acc('fixture-b', 10, 20)] },
   claude5h: { claude: [...cl(10, 120), { ...five(97, 3), label: 'session' }], codex: [acc('main', 20, 120)] },
-  codex5h: { claude: cl(70, 120), codex: [{ ...acc('main', 40, 120), windows: [wk(40, 120), five(99, 2)] }] },
+  codex5h: { claude: cl(70, 120), codex: [{ ...acc('main', 40, 120), allowed:false, windows: [wk(40, 120), five(99, 2)] }] },
   stale: { claude: cl(10, 120), codex: [{ ...acc('main', 20, 120), live: false, seenAt: now - 5 * h, error: 'hub down' }, acc('fixture-b', 50, 100)] },
   unreadable: { claude: null, codex: [] },
   // TTADK (company gateway) account: no rate-limit windows; healthy = ttadk CLI + SSO + gpt-6.1-sol listed.
@@ -61,11 +61,11 @@ const S = {
   // Browser work on Codex without a company account (2026-11-10: the MacBook sent it all to Claude).
   macBrowser: { claude: cl(10, 120), codex: [acc('main', 20, 120, [], { browser: true, desktop:true, chromePlugin: '/tmp/chrome-main' })] },
   traeBrowserB: { claude: cl(10, 120), codex: [acc('main', 20, 120), acc('fixture-b', 30, 100, [], { browser: true,desktop:true }), tr()] },
-  ttChatOut: { claude: cl(10, 48), codex: [acc('main', 99, 48), tt()] },
+  ttChatOut: { claude: cl(10, 48), codex: [acc('main', 99, 48, [], { allowed:false }), tt()] },
   // From the 2026-11-07 review: a hub never read; a spent account with a card next to TTADK; an excluded pick next to
   // a spent account with an urgent card; two accounts that must both be spent soon.
   unreadHub: { claude: cl(10, 120), codex: [{ name: 'main', live: false, email: 'm@example.com', home: path.join(tmp, 'main'), seenAt: null, windows: null, resets: null }] },
-  ttCard: { claude: cl(10, 120), codex: [acc('main', 99, 100, [400]), tt()] },
+  ttCard: { claude: cl(10, 120), codex: [acc('main', 99, 100, [400], { allowed:false }), tt()] },
   ttClaudeOver: { claude: cl(93, 30), codex: [acc('main', 20, 120), tt()] },
   ttKimi: { claude: cl(10, 120), codex: [acc('main', 20, 120), tt({ models: ['gpt-6.1-sol', 'gpt-5.6-terra', 'kimi-k3'] })] },
   // TTADK with its web search hub + proxy set up (ttadk-setup).
@@ -320,9 +320,9 @@ const run = (sc, args0, overrides = {}) => {
     for (const [used, earlier, reason] of [[87, 83, /projected at reset 95%/], [90, 90, /used 90%/]]) {
       S.priority.codex[0].windows = [wk(used, 10)];
       S.priority.history = { 'codex:main': [{ t: now - 5 * h, used: earlier, resetsAt: until }] };
-      const guarded = read(['analysis']);
-      assert.equal(guarded.pick.account, normal.pick.account);
-      assert.ok(guarded.why.some(line => line.includes('weekly quota guard') && reason.test(line)));
+      const guarded = read(['analysis','--exclude-account','ttadk,trae']);
+      assert.equal(guarded.pick.account, 'main');
+      assert.ok(guarded.tellUser.some(line => line.includes('main at '+used+'%') && line.includes('projected')));
     }
     {
       const file = path.join(shared, 'personal-priority-window.json');
@@ -331,11 +331,11 @@ const run = (sc, args0, overrides = {}) => {
         fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(saved), exhaustAtUsed: 98 }));
         S.priority.history = { 'codex:main': [{ t: now - 5 * h, used: 83, resetsAt: until }] };
         S.priority.codex[0].windows = [wk(97, 10)];
-        assert.equal(read(['analysis','--exclude-account','ttadk,trae']).pick.account, 'main', 'spend-until keeps main below the threshold despite the projection');
+        assert.equal(read(['analysis','--exclude-account','ttadk,trae']).pick.account, 'main');
         S.priority.codex[0].windows = [wk(98, 10)];
-        const spent = read(['analysis']);
-        assert.equal(spent.pick.account, normal.pick.account);
-        assert.ok(spent.why.some(line => line.includes('weekly quota used up')));
+        const spent = read(['analysis','--exclude-account','ttadk,trae']);
+        assert.equal(spent.pick.account, 'main');
+        assert.ok(spent.tellUser.some(line => line.includes('main at 98%')));
         fs.writeFileSync(file, saved);
       } else assert.fail('window fixture file expected');
     }

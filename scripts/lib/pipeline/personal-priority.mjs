@@ -1,6 +1,5 @@
 import { idOK, isAstra, known, nonnegative, object } from './common.mjs';
 import { modelPreference } from './policy.mjs';
-import { PERSONAL_LAUNCH_HEADROOM } from '../personal-launch.mjs';
 
 export const PERSONAL_PRIORITY_FILE = 'personal-priority-window.json';
 const utc = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
@@ -35,38 +34,14 @@ export function freshPersonalWeekly(snapshot) {
 
 export function personalPriorityGuard(snapshot) {
   const window = snapshot.personalPriority;
-  if (!window) return null;
+  if (window?.mode !== 'prefer-first') return null;
   const weekly = freshPersonalWeekly(snapshot);
-  // The decision may name a reset at minute precision. Guard against using the
-  // next week's telemetry if the observed reset precedes the window expiry.
-  if (!weekly || window.mode !== 'exclusive' && Math.abs(weekly.resetsAt - Date.parse(window.until)) >= 60000)
-    return 'fresh weekly quota for this reset is unavailable';
-  if (window.mode === 'exclusive') {
-    const exhaust = window.exhaustAtUsed ?? 99;
-    if (weekly.used >= exhaust) return `weekly quota used up (used ${weekly.used}% / ${exhaust}% spend-until threshold)`;
-    return 100 - weekly.used < PERSONAL_LAUNCH_HEADROOM ? `main ${weekly.used}% used: below launch headroom ${PERSONAL_LAUNCH_HEADROOM}%` : null;
-  }
-  if (window.exhaustAtUsed !== undefined)
-    return weekly.used >= window.exhaustAtUsed
-      ? `weekly quota used up (used ${weekly.used}% / ${window.exhaustAtUsed}% spend-until threshold)` : null;
-  if (weekly.used >= 90 || weekly.projected >= 95)
-    return `weekly quota guard (used ${weekly.used}% / 90% threshold, projected at reset ${weekly.projected}% / 95% threshold)`;
-  return null;
+  return !weekly || Math.abs(weekly.resetsAt - Date.parse(window.until)) >= 60000
+    ? 'fresh weekly quota for this reset is unavailable' : null;
 }
 
 export const exclusiveCodexTask = (task, snapshot) => snapshot.personalPriority?.mode === 'exclusive'
   && task.category !== 'claude-tools' && modelPreference(task, { kind: 'chatgpt' }, snapshot).some(id => ['sol', 'astra'].includes(id) || id.startsWith('gpt-'));
-
-export function personalMainWaitText(task, snapshot) {
-  const account = snapshot.accounts.find(a => a.id === 'main' && a.kind === 'chatgpt');
-  const used = account?.budget?.value?.weekly?.used;
-  const weekly = freshPersonalWeekly(snapshot);
-  // Below the weekly exhaustion boundary, a reset card would not address the
-  // refusal (e.g. launch headroom, missing transport or an excluded lane).
-  const redeem = weekly?.used >= 99 && known(account?.resetCards) > 0 && !task.flags?.['no-redeem'];
-  const blocker = personalPriorityGuard(snapshot) ?? 'no executable main lane for this task';
-  return `[personal-main-wait] main ${Number.isFinite(used) ? used : '?'}%: ${task.flags?.name ?? task.taskId} waiting (${redeem ? 'redeem main card?' : blocker})`;
-}
 
 export function standingPersonalPriority(task, snapshot, candidate, account) {
   const window = snapshot.personalPriority;

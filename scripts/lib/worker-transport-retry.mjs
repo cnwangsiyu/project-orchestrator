@@ -54,6 +54,7 @@ export const transportQuotaBlock = ({ kind, payload, account, now = Date.now(), 
   if (bucket.credits?.unlimited === true) return null;
   const windows = [bucket.primary,bucket.secondary].filter(r => r && Number.isFinite(r.usedPercent));
   if (!windows.length) return 'lane quota unknown';
+  if (account === 'main') return payload?.ordinaryUsageAllowed === false ? 'lane provider denied quota' : null;
   return windows.some(r => r.usedPercent >= 100) ? 'lane quota exhausted' : null;
 };
 export async function boundedTransportRead(readQuota, timeoutMs = 5000) {

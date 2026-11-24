@@ -31,6 +31,8 @@ export function orderCandidates(task, snapshot, rows) {
   cohort = cohort.filter(r => !demoted(r) || !healthyClasses.has(company(candidateParts(snapshot,r.candidate).account)));
   const backgroundChoice=task.background&&!['browser','ui-browser','computer-use','build-run'].includes(task.category);
   const parts=r=>candidateParts(snapshot,r.candidate);
+  if (known(snapshot.accounts.find(account => account.id === 'main' && account.kind === 'chatgpt')?.providerDenied) === true
+    && cohort.some(row => row.ok && company(parts(row).account))) cohort = cohort.filter(row => company(parts(row).account));
   const ready=r=>!stalled(r)&&!r.estimate.capacityReset&&r.estimate.startDelayMin===0
     &&(parts(r).account.kind!=='trae'||r.estimate.balance?.freeNow===true);
   const hardAstra = task.tier === 'hard' ? cohort.filter(r => r.ok && ready(r) && isAstra(r.candidate.modelId)
