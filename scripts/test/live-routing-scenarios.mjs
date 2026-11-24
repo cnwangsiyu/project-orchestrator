@@ -218,7 +218,7 @@ try {
   assert.equal(legacy.plan.task.previousAttempts[0].actual.accountId,'claude');assert.ok(legacy.pick.command);
   fs.writeFileSync(attempts,JSON.stringify([{id:'uncertain',taskId:'named-task',project:'fixture',category:'debug',role:'primary',state:'UNKNOWN',actualStatus:'UNKNOWN',actual:null}]));
   const liveUnknown=cli([...retryArgs,'--previous-attempt','attempts.json']);
-  assert.equal(liveUnknown.kind,'blocked');assert.ok(liveUnknown.plan.rejected.some(r=>r.reason.code==='ATTEMPT_RECONCILIATION_REQUIRED'));
+  assert.equal(liveUnknown.kind,'defer');assert.ok(liveUnknown.plan.rejected.some(r=>r.reason.code==='ATTEMPT_RECONCILIATION_REQUIRED'));
   fs.rmSync(attempts);
   fs.writeFileSync(env.ROUTE_LOG_FILE,JSON.stringify({t:captured.decisionAt-1000,kind:'route',name:'claude-retry',project:'fixture',pick:{vendor:'claude',model:'sonnet',effort:'medium'}})+'\n');
   const claudeRetry=cli(['claude-tools','--name','claude-retry','--project','fixture','--failures','1']);

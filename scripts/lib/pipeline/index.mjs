@@ -101,7 +101,7 @@ export function routePure(taskSpec, stateSnapshot, history = []) {
     ordering: ordered.rows.map((r) => ({ candidateId: r.candidate.id, terms: r.orderingTerms })), comparator: ordered.terms, diagnostics };
   const fields = { warnings: reviewBlock?.code === 'REVIEW_BUDGET_WARNING' ? [reviewBlock] : [], rejected: dedupe([...rejected, ...reviewerRejections]), trace };
   const reconciliation = assessment.rows.find(r => r.predicates.some(p => p.reason?.code === 'ATTEMPT_RECONCILIATION_REQUIRED')
-    && r.predicates.every(p => p.ok || p.reason?.code === 'ATTEMPT_RECONCILIATION_REQUIRED'));
+    && r.predicates.every(p => p.ok || ['ATTEMPT_RECONCILIATION_REQUIRED','PREVIOUS_ATTEMPT_UNKNOWN'].includes(p.reason?.code)));
   if (reconciliation) return makePlan('defer', task, snapshot, { ...fields, deferUntil: null, trigger: 'attempt-reconciliation',
     reason: reconciliation.predicates.find(p => p.reason?.code === 'ATTEMPT_RECONCILIATION_REQUIRED').reason });
   const exhausted = assessment.rows.flatMap(r => r.predicates.filter(p => p.reason?.code === 'DAY_QUOTA_EXHAUSTED'));

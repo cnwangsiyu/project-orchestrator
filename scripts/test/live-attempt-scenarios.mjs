@@ -56,5 +56,32 @@ try {
     const v=JSON.parse(invoke(true));assert.equal(v.plan.task.previousAttempts[0].queueWaitMinutes,undefined);
     assert.doesNotMatch(v.plan.reason.text,/queued 25 min/);
   }
+  // W784's c2 decision was 61 ms before the interruption became visible.
+  const record = JSON.parse(fs.readFileSync(new URL('./fixtures/w784-infra-recovery.json',import.meta.url)));
+  const { name, project, category, excludeAccount, c2, c3 } = record;
+  const replay = structuredClone(raw), astra = c3.pick.model;
+  replay.personalFallback = JSON.parse(fs.readFileSync(path.join(root,'references/personal-fallback.json')));
+  replay.accounts[1].catalog = [astra];
+  replay.accounts[1].budget.weekly.used = 78;
+  replay.accounts[1].budget.weekly.resetsAt = c3.at+86400000;
+  replay.models.push({...replay.models[0], id:astra});
+  Object.assign(replay.lanes[1], {modelId:astra,id:`main:${astra}`});
+  fs.unlinkSync(path.join(tmp,'attempts.json'));
+  const runW = (input,at) => {
+    fs.writeFileSync(env.ROUTE_SNAPSHOT_FILE,JSON.stringify({...replay,decisionAt:at,collectedFrom:at,collectedThrough:at}));
+    return JSON.parse(execFileSync(process.execPath,[args[0],category,'--impact','service','--project',project,
+      '--name',name,'--exclude-account',excludeAccount,'--failures',String(input.failures),
+      ...(input.failureKind?['--failure-kind',input.failureKind]:[]),'--dry','--json'],{env:{...env,ROUTE_NOW:String(at)},encoding:'utf8'}));
+  };
+  const row = {...attempt, kind:'launch-model',taskId:name,name,project,accepted:true,actual:null,actualStatus:'UNKNOWN',t:record.submittedAt};
+  fs.writeFileSync(env.ROUTE_LOG_FILE, JSON.stringify(row)+'\n');
+  const before = runW(c2,c2.at);
+  assert.equal(before.plan.trigger,'attempt-reconciliation');
+  assert.ok(!before.tellUser.includes(c2.tellUser));
+  fs.appendFileSync(env.ROUTE_LOG_FILE,JSON.stringify({...row,t:record.interruptedAt,state:'interrupted',actualStatus:'KNOWN',actual:attempt.actual})+'\n');
+  for(const input of [c2,c3]) {
+    const { account,model,effort }=runW(input,c3.at).pick;
+    assert.deepEqual({account,model,effort},c3.pick);
+  }
   console.log('PASS live-attempt reconciliation explains actual account/model/thread and queue age, keeps duplicate-dispatch guard and ignores stale queue evidence');
 } finally { fs.rmSync(tmp,{recursive:true,force:true}); }

@@ -1,0 +1,27 @@
+{
+  "name": "W784-film-export-cache-dir-and-trial",
+  "project": "video-agent",
+  "category": "implement-hard",
+  "excludeAccount": "trae",
+  "submittedAt": 1795531842666,
+  "interruptedAt": 1795531946758,
+  "c2": {
+    "source": "route-c2.out",
+    "at": 1795531946697,
+    "failures": 1,
+    "failureKind": "infra",
+    "decision": "DEFER implement-hard",
+    "tellUser": "[personal-main-wait] main 78%: W784-film-export-cache-dir-and-trial waiting (no executable main lane for this task)"
+  },
+  "c3": {
+    "source": "route-c3.out",
+    "at": 1795531956341,
+    "failures": 0,
+    "decision": "LAUNCH implement-hard → gpt-6.2-astra xhigh on main",
+    "pick": {
+      "model": "gpt-6.2-astra",
+      "effort": "xhigh",
+      "account": "main"
+    }
+  }
+}

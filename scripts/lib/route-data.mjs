@@ -200,7 +200,7 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
     else if (outcome?.result) r = {...r, result:outcome.result, ...(outcome.cause ? {cause:outcome.cause} : {})};
     if (outcome?.correction && outcome.result !== 'pass' && ['quality','spec','process'].includes(outcome.failureKind))
       r = {...r, failureKind:outcome.failureKind, qualityFailure:true};
-    const terminal=['failed','completed','cancelled-no-work','cancelled','succeeded'].includes(r.state);
+    const terminal=['failed','completed','cancelled-no-work','interrupted','cancelled','succeeded'].includes(r.state);
     if ((!terminal && !['starting','queued','running','cancel-pending','UNKNOWN'].includes(r.state))
       || (r.kind && !['attempt','launch','launch-model'].includes(r.kind)) || r.accepted===false) return;
     if(terminal && r.actualStatus!=='KNOWN') {
@@ -314,7 +314,7 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
     }
   }
   let retryAssumption = missingTerminalActual ? 'A finished attempt had no confirmed actual tuple; using the next available recorded retry baseline.' : null;
-  if (retryHistory && !attempts.length && parsed.failureKind !== 'tool') {
+  if (retryHistory && !attempts.length && !['tool','infra'].includes(parsed.failureKind)) {
     const deviceAccounts=env.ROUTE_SNAPSHOT_FILE?array(injectedSnapshot?.accounts):accounts;
     const a = deviceAccounts.some(a=>['trae','ttadk'].includes(a.kind)) && !['image-gen','claude-tools','computer-use'].includes(parsed.category) ? {kind:'trae'} : {kind:'chatgpt'}, initial = createTaskSpec({...parsed, flags:{...flags,failures:'0'}, failures:0, previousAttempts:[]});
     const model = modelId(modelPreference(initial,a)[0]), effort = policyEffort(initial,{family:familyOf(model),modelId:model},a,{accounts:[]});
