@@ -24,7 +24,12 @@ try {
   assert.equal(digestText.match(/^version:/gm)?.length, 1, 'integration must publish one digest version');
   assert.equal(digestText.match(/^## Changes In This Version$/gm)?.length, 1);
   assert.ok(digestText.split('\n').length<=61,'digest line budget');
-  assert.equal(digest.version, '2026-11-24.6');
+  assert.equal(digest.version, '2026-11-24.7');
+  assert.match(digestText, /^- 2026-11-24\.7: fail-closed masking scope/m);
+  assert.match(digestText, /^- 2026-11-24\.6:.*2026-11-24\.5:.*2026-11-24\.4:.*2026-11-24\.3: restored this history line.*2026-11-24\.2: device-app guard.*2026-11-18\.14:/m);
+  assert.ok(digest.worker.includes('For printing only: never write the result back, never use perl -i/sed -i, and never redirect over the source'));
+  assert.match(digest.worker, /Masking tools run only on task-dir logs; never inside a git work tree/);
+  assert.match(digest.worker, /startup baseline.*size\/time-bounded untracked/);
   assert.ok(digest.worker.includes("ask `res place` (or use `claim-any`) instead of naming a machine; name a machine only with a stated reason"));
   assert.match(digest.worker, /process checks list PID and process name only.*pgrep -l.*ps -o pid,comm/);
   assert.match(digest.worker, /never print other tools' full command lines.*pgrep -a\/-f.*args\/command/);
