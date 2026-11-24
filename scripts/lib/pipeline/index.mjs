@@ -88,6 +88,10 @@ export function routePure(taskSpec, stateSnapshot, history = []) {
   const trace = { candidates: assessment.rows.map((r) => ({ candidate: r.candidate, predicates: r.predicates, estimate: r.estimate })),
     ordering: ordered.rows.map((r) => ({ candidateId: r.candidate.id, terms: r.orderingTerms })), comparator: ordered.terms, diagnostics };
   const fields = { warnings: reviewBlock?.code === 'REVIEW_BUDGET_WARNING' ? [reviewBlock] : [], rejected: dedupe([...rejected, ...reviewerRejections]), trace };
+  const reconciliation = assessment.rows.find(r => r.predicates.some(p => p.reason?.code === 'ATTEMPT_RECONCILIATION_REQUIRED')
+    && r.predicates.every(p => p.ok || p.reason?.code === 'ATTEMPT_RECONCILIATION_REQUIRED'));
+  if (reconciliation) return makePlan('defer', task, snapshot, { ...fields, deferUntil: null, trigger: 'attempt-reconciliation',
+    reason: reconciliation.predicates.find(p => p.reason?.code === 'ATTEMPT_RECONCILIATION_REQUIRED').reason });
   const mainOfferable = assessment.rows.some(r => r.candidate.accountId === 'main' && !r.estimate.stalled
     && r.predicates.every(p => p.ok || p.gate));
   if (exclusiveCodexTask(task, snapshot) && !mainOfferable && (!rankedNow.winner || rankedNow.winner.estimate.stalled))

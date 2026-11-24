@@ -19,6 +19,7 @@ import { isQueueOrStall } from './trae-health.mjs';
 import { readRoutingAccount, readRoutingClaude, traeBrowserReady } from './state.mjs';
 import { routePure } from './pipeline/index.mjs';
 import { modelPreference, policyEffort } from './pipeline/policy.mjs';
+import { readQueue } from './worker-queue.mjs';
 import { readLeases } from './resource-data.mjs';
 import { publishMainQuota, readRoutingObservations, saveRoutingObservations } from './routing-observations.mjs';
 import { canonicalPathOptions, canonicalPath } from './launch-paths.mjs';
@@ -319,6 +320,16 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
     const model = modelId(modelPreference(initial,a)[0]), effort = policyEffort(initial,{family:familyOf(model),modelId:model},a,{accounts:[]});
     addActual({model,effort,account:familyOf(model)==='claude'?'claude':a.kind==='trae'?'assumed-company':'assumed-personal'}, {id:'assumed-first-rung',failureKind:parsed.failures?parsed.failureKind:'infra',assumed:true});
     retryAssumption = `No actual launch history found; assumed first category ladder rung ${model}/${effort} for --failures ${parsed.failures}.`;
+  }
+  // Public per-thread queue metadata explains the live-attempt gate. Launch
+  // time is not queue time, and another turn or a stale sample cannot supply it.
+  for (const a of attempts.filter(a => ['starting','queued','running','cancel-pending','UNKNOWN'].includes(a.state))) {
+    const home = profiles[a.actual?.accountId]?.home;
+    const queue = home && a.thread ? readQueue(home, a.thread) : null;
+    const at = queue?.at ?? queue?.t;
+    if (queue?.turnId === a.turn && ['queued','waiting'].includes(queue.state) && !queue.reporting && !queue.completing
+      && nonnegative(queue.since) && queue.since <= now && nonnegative(at) && at <= now && now-at <= 1800000)
+      Object.assign(a, { queueState: queue.state, queueSince: queue.since, queueWaitMinutes: (now-queue.since)/60000 });
   }
   const writes = parsed.writes || !!flags.signing;
   const sandbox = flags.sandbox ?? (writes ? 'danger-full-access' : parsed.runsTests ? 'workspace-write' : 'read-only');

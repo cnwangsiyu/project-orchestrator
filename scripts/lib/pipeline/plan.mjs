@@ -49,7 +49,7 @@ export function renderPlan(plan, context = null) {
     notes.push(`${c.modelId}/${c.effort} on ${c.accountId}; ${taskEstimateText(e)}; lane: ${laneStartText(e)}.`);
     notes.push(...e.uncertainty.map((r) => r.text));
     if (e.patienceMin !== null) notes.push(`Queue patience: ${Math.round(e.patienceMin)} min; cancel/reconcile before any replacement.`);
-  } else if (plan.kind === 'defer') tellUser.push(plan.trigger === 'personal-main-capacity' ? plan.reason.text
+  } else if (plan.kind === 'defer') tellUser.push(['personal-main-capacity','attempt-reconciliation'].includes(plan.trigger) ? plan.reason.text
     : `${plan.reason.text} Owner ${plan.task.owner} must record a ${plan.trigger} wake and replan.`);
   else tellUser.push(...plan.reasons.map((r) => `${r.code}: ${r.text}`));
   const view = { notes: unique(notes), needsOK: unique(needsOK), tellUser: unique(tellUser), command: plan.kind === 'launch' ? plan.primary.argv.map(quote).join(' ') : null };

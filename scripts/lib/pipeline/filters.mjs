@@ -6,6 +6,7 @@ import { companyServesInfraRetry, estimateCandidate, usesExclusiveInfraOverflow 
 import { standingPersonalFallback, hardPersonalXhighFallback } from './personal-fallback.mjs';
 import { standingPersonalPriority, personalPriorityGuard, exclusiveCodexTask } from './personal-priority.mjs';
 import { ttadkReserve } from './ttadk-reserve.mjs';
+import { liveAttempts, liveAttemptText } from './live-attempt.mjs';
 import { previousReleaseFallback } from './release-fallback.mjs';
 import { rejectedQualityAttempt } from '../worker-result.mjs';
 
@@ -308,9 +309,7 @@ export function pReviewerSet(t, s, c, context = {}) {
 }
 export function pLaunchMatches(t, s, c, context = {}) {
   if (s.policyVersion !== VERSION || s.qualityRelationVersion !== t.floor.relationVersion) return deny('pLaunchMatches', 'POLICY_VERSION_MISMATCH', 'Plan policy/relation version must be pinned and supported.', c);
-  const live = t.previousAttempts.some((a) => a.taskId === t.taskId && (a.role ?? 'primary') === t.role
-    && ['starting', 'queued', 'running', 'cancel-pending', 'UNKNOWN'].includes(a.state));
-  if (live) return deny('pLaunchMatches', 'ATTEMPT_RECONCILIATION_REQUIRED', 'A live or uncertain accepted attempt prevents duplicate dispatch.', c);
+  if (liveAttempts(t).length) return deny('pLaunchMatches', 'ATTEMPT_RECONCILIATION_REQUIRED', liveAttemptText(t, s.decisionAt), c);
   if (t.autoRerouteDepth > 0) {
     const prior = t.previousAttempts.filter((a) => a.taskId === t.taskId && (a.role ?? 'primary') === t.role);
     const personalQueue = !company(candidateParts(s,c).account) && s.personalFallback?.enabled

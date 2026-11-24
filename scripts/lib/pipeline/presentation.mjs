@@ -285,10 +285,11 @@ export function presentRoute(plan, view, context) {
   }
   if(plan.reviewers.length) fixedNotes.push(WORKER_NOTES.reviewers);
   if(t.background&&!c) tellUser.push('No runnable authorized background lane: present the plan’s decision and keep dispatching independent work.');
+  if(plan.trigger==='attempt-reconciliation') why.unshift(plan.reason.text);
   if(plan.kind==='blocked') why.unshift(...plan.reasons.map(r=>r.text));
   why.push(...new Set(plan.rejected.filter(r=>r.reason?.code==='BROWSER_RUNTIME_UNAVAILABLE').map(r=>r.reason.text)));
   if(!why.length) why.push(...(plan.reasons??[plan.reason]).filter(Boolean).map((r)=>r.text));
-  if(companyDevice(snapshot)&&plan.trigger!=='personal-main-capacity'&&(plan.kind==='defer' || (plan.kind==='blocked' && plan.gates.some(g=>g.kind==='personal-quota')))) {
+  if(companyDevice(snapshot)&&!['personal-main-capacity','attempt-reconciliation'].includes(plan.trigger)&&(plan.kind==='defer' || (plan.kind==='blocked' && plan.gates.some(g=>g.kind==='personal-quota')))) {
     const reset=plan.deferUntil??Math.min(...snapshot.accounts.filter(company).map(a=>known(a.denialResetAt)).filter(at=>at>snapshot.decisionAt));
     const question=`No company lane can start now. Use personal quota now, or wait until ${Number.isFinite(reset)?new Date(reset).toISOString():'company lane progress'}?`;
     needsUserOK.push(question);tellUser.push(question);
