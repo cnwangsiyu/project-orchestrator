@@ -121,7 +121,7 @@ def report(root, days):
                 for line in stream:
                     try:
                         row=json.loads(line)
-                        if row["schema"]!=1 or row["at"]<cutoff:
+                        if row["schema"]!=1 or row["at"]<cutoff or row.get("type")=="placement":
                             continue
                         group=groups[(row["project"],row["profile"])]
                         if name=="admission":

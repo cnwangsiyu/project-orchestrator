@@ -6,11 +6,13 @@ import os
 import platform
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
 
+from host_records import append, label
 import local_control as local
 import mini2_control as mini
 
@@ -111,6 +113,7 @@ def calculate(root, args):
     for row in boxes:
         reason = constraint(args, row["machine"], row.pop("tags"))
         if reason: row.update(candidate(row["machine"], reason, row["spareCores"]))
+    boxes.sort(key=lambda r: (r["reason"] != "open", not r["eligible"]))
     for row in macs + boxes:
         machine = row["machine"]
         if machine == "main":
@@ -150,9 +153,77 @@ def parser():
     p.add_argument("--pin", choices=("main", "mini2", "devbox"))
     for name in ("cores", "mem-gib", "disk-gib"):
         p.add_argument("--" + name, type=float)
+    p.add_argument("operation", choices=("place", "claim-any"))
+    for name in ("by", "task", "for"):
+        p.add_argument("--" + name, dest="purpose" if name == "for" else name, default="")
+    p.add_argument("--pid", type=int)
+    p.add_argument("--wrapper", action="store_true")
+    p.add_argument("--timeout", type=float, default=0)
     p.add_argument("--json", action="store_true")
     p.set_defaults(checkout="", action="wait-build", resource="")
     return p
+
+
+def reconsider():
+    """Called outside the admission guard, only after an unsuccessful attempt."""
+    context = os.environ.get("RES_PLACEMENT_REQUEST")
+    if not context: return
+    request = argparse.Namespace(**json.loads(context))
+    current = os.environ["RES_PLACEMENT_MACHINE"]
+    rows = calculate(mini.root_dir(), request)
+    other = next((r for r in rows if r["machine"] != current and r["reason"] == "open"), None)
+    if other:
+        print("re-place=" + other["machine"], flush=True)
+        raise SystemExit(75)
+
+
+def claim(root, args):
+    if not all((args.by, args.project, args.task, args.purpose)) or not args.pid or args.pid <= 1:
+        raise ValueError("claim-any requires --by --project --task --for --pid")
+    if not math.isfinite(args.timeout) or args.timeout < 0: raise ValueError("invalid timeout")
+    if not mini.process_start(args.pid): raise ValueError("holder exited")
+    deadline = time.monotonic() + args.timeout * 60
+    preferred = None
+    while True:
+        rows = calculate(root, args)
+        possible = [r for r in rows if r["eligible"]]
+        chosen = next((r for r in possible if r["machine"] == preferred and r["reason"] == "open"),
+                      possible[0] if possible else None)
+        append(root, "admission", dict(type="placement", project=label(args.project), task=label(args.task),
+               profile=args.profile, chosen=chosen["machine"] if chosen else None,
+               candidates=[{k:r[k] for k in ("machine","reason","spareCores","waitSeconds")} for r in rows]))
+        if not chosen: raise ValueError("no eligible machine: " + ", ".join(r["machine"]+"="+r["reason"] for r in rows))
+        machine = chosen["machine"]
+        cmd = [RES, *chosen["argv"], "--timeout", "%.8f" % (max(0, deadline-time.monotonic())/60),
+               "--by", args.by, "--project", args.project, "--task", args.task,
+               "--for", args.purpose, "--pid", str(args.pid)]
+        if machine == "main" and args.wrapper: cmd.append("--wrapper")
+        env = dict(os.environ, RES_PLACEMENT_MACHINE=machine, RES_PLACEMENT_REQUEST=json.dumps(vars(args)))
+        with subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True, env=env) as proc:
+            def cancel(sig, frame):
+                proc.send_signal(sig)
+            handlers = {sig:signal.signal(sig,cancel) for sig in (signal.SIGINT,signal.SIGTERM,signal.SIGHUP)}
+            try: output, _ = proc.communicate()
+            finally:
+                for sig, handler in handlers.items(): signal.signal(sig,handler)
+        if proc.returncode == 75:
+            if time.monotonic() >= deadline: raise ValueError("placement timed out")
+            preferred = output.strip().split("re-place=")[-1]
+            continue
+        if proc.returncode: raise SystemExit(proc.returncode if proc.returncode > 0 else 128-proc.returncode)
+        if machine == "mini2":
+            lease = json.loads(output)["slot"]
+            release = ["return",lease,"--by",args.by,"--receipt","CLEAN_RECEIPT"]
+        elif machine == "main":
+            lease = re.search(r"^build-id=(heavy-build(?:-\d+)?)$",output,re.M)[1]
+            release = ["return-build","--by",args.by,"--pid",str(args.pid)]
+        else:
+            lease = re.search(r"^slot=(devbox-cn-[\w.-]+)$",output,re.M)[1]
+            release = ["return",lease,"--by",args.by]
+        print("machine="+machine+" lease="+lease)
+        if machine == "main": print(output.rstrip())
+        print("return="+shlex.join(["res",*release]))
+        return
 
 
 def main():
@@ -160,6 +231,7 @@ def main():
     if args.need and not re.fullmatch(r"[\w.:-]+(?:,[\w.:-]+)*", args.need): raise ValueError("invalid --need")
     for value, minimum in ((args.cores, .25), (args.mem_gib, .25), (args.disk_gib, 0)):
         if value is not None and not (minimum <= value <= 65536): raise ValueError("invalid cost")
+    if args.operation == "claim-any": return claim(mini.root_dir(), args)
     rows = calculate(mini.root_dir(), args)
     for row in rows:
         row["command"] = shlex.join(["res", *row.pop("argv")]) + ' --by "$holder" --project ' + (

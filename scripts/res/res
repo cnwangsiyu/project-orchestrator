@@ -3491,6 +3491,10 @@ try:
         if id in dynamic_ids and pool in ('devbox-cn', 'devbox-cn-light'): return True
         return bool(re.fullmatch(re.escape(pool) + r'-[0-9]+', id) or pool.endswith('-light') and id == pool)
     if action == 'wait':
+        selected = os.environ.get('RES_PLACEMENT_MACHINE', '')
+        if selected.startswith('devbox:'):
+            hard_boxes.update(box for box in hosts if box != selected[7:])
+            excluded_boxes |= hard_boxes
         compatible = [id for id in rows if pool_member(id, request) and eligible(id, skip=hard_skip, boxes=hard_boxes)]
         if not compatible: raise ValueError("no open remote member of pool '%s' satisfies --need '%s'" % (request, need or '(none)'))
         queue = os.path.join(root, 'pool-waiters', request)
@@ -3586,7 +3590,7 @@ try:
     def quarantined(id, state):
         value = state.get(remote[id][1], {})
         return value.get('manual', False) or value.get('quarantinedUntil', 0) > time.time()
-    if host_rows and request.startswith('devbox-cn') and not queue: queue = os.path.join(root, 'pool-waiters', 'devbox-cn')
+    if action != 'place-devboxes' and host_rows and request.startswith('devbox-cn') and not queue: queue = os.path.join(root, 'pool-waiters', 'devbox-cn')
     state = health()
     def current_waiter(directory, value):
         return bool(waiter and (directory == waiter or all(value.get(key) == own.get(key) for key in ('order', 'holder', 'pid', 'host'))))
@@ -4020,6 +4024,9 @@ try:
     if remaining <= 0:
         log('waiter-timeout', request + '-any', by + ' (' + project + ('/' + task if task else '') + ')', 'after ' + timeout + ' minutes')
         remove_waiter(); print("res: timed out waiting for pool '%s' after %s minutes" % (request, timeout), file=sys.stderr); sys.exit(2)
+    if os.environ.get("RES_PLACEMENT_REQUEST"):
+        from placement import reconsider
+        reconsider()
     wait = min(float(delay), remaining)
     print("res: waiting for pool '%s' (FIFO); retry in %ss" % (request, '%g' % wait), file=sys.stderr, flush=True)
     scratch = os.path.realpath(root) != os.path.realpath(os.path.expanduser('~/.claude/orchestrator/_shared'))
@@ -4450,7 +4457,7 @@ cmd_log() { [ -f "$LOG" ] && tail -n "${1:-20}" "$LOG" || true; }
 
 case "${1:-}" in
   status) shift; cmd_status "$@"; if [ -f "$RES_DIR/mini2-config.json" ]; then mini2_controller status; fi ;;
-  place) shift; exec python3 -B "$(dirname "$(realpath "$RES_SELF_COMMAND")")/placement.py" "$@" ;;
+  place|claim-any) exec python3 -B "$(dirname "$(realpath "$RES_SELF_COMMAND")")/placement.py" "$@" ;;
   place-devboxes)
     shift; request="$1"; POOL_NEED="$2"; shift 2
     ALLOW_PID=1 parse "$@"

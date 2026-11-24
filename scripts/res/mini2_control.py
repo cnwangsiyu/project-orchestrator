@@ -582,6 +582,9 @@ def acquire(root, args):
                 if time.monotonic() >= deadline:
                     ticket.unlink(missing_ok=True)
                     raise ValueError("mini2 admission closed: "+reason)
+            if os.environ.get("RES_PLACEMENT_REQUEST"):
+                from placement import reconsider
+                reconsider()
             time.sleep(1)
     finally:
         ticket.unlink(missing_ok=True)

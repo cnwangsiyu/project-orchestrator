@@ -70,6 +70,28 @@ class PlacementTests(unittest.TestCase):
         self.assertEqual(ranked["chosen"],"devbox:"+hosts[0], ranked)
         self.assertIn("facts-stale", [r["reason"] for r in ranked["candidates"]])
 
+    def test_claim_retains_queue_until_mini2_opens(self):
+        import subprocess
+        cap = self.configure()
+        link = dict(at=time.time(), link="DOWN", maintenance=False)
+        self.write("mini2-link.json", link)
+        args = ["--by","test","--project","p","--task","t","--for","fixture","--pid",str(os.getpid())]
+        with subprocess.Popen([self.res,"claim-any","--need",cap,"--timeout","0.12",*args],
+                              env=self.env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True) as proc:
+            limit = time.monotonic()+4
+            while not list((self.root/"local-waiters").glob("*.json")) and time.monotonic()<limit:
+                time.sleep(.02)
+            self.assertTrue(list((self.root/"local-waiters").glob("*.json")))
+            self.write("mini2-link.json", dict(link, link="UP"))
+            out, err = proc.communicate(timeout=10)
+        self.assertEqual(proc.returncode,0,err)
+        self.assertIn("machine=mini2 lease=mini2-exec-1",out)
+        events = [json.loads(line) for line in (self.root/"host-samples/admission.ndjson").read_text().splitlines()]
+        choices = [e for e in events if e.get("type")=="placement"]
+        self.assertEqual([e["chosen"] for e in choices],["main","mini2"])
+        self.assertEqual(choices[0]["candidates"][1]["reason"],"link-stale-or-down")
+        self.assertFalse(list((self.root/"local-waiters").glob("*.json")))
+
     def test_main_headroom_preference(self):
         cap = self.configure()
         for load, chosen in [(3, "mini2"), (0, "main")]:

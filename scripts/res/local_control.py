@@ -298,6 +298,9 @@ def acquire(root,args):
                 if time.monotonic()>=deadline:
                     ticket.unlink(missing_ok=True)
                     raise ValueError("local admission closed: "+reason)
+            if os.environ.get("RES_PLACEMENT_REQUEST"):
+                from placement import reconsider
+                reconsider()
             time.sleep(1)
     finally:
         if ticket is not None: ticket.unlink(missing_ok=True)
