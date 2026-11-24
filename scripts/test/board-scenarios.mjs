@@ -205,6 +205,46 @@ try {
   assert.ok(first.events.some((row) => row.text === 'TTADK 今日 额度用完'));
   assert.equal(first.quota.items.find((q) => q.id === 'ttadk').exhausted, true);
   assert.equal(first.quota.items.find((q) => q.id === 'main').resetCards, 3);
+
+  // A loop-mode collector calls collect() repeatedly in one process. Capacity
+  // results and host aliases must be rebuilt for every call, not merged with a
+  // prior cycle or retained through makeSources() promise caches.
+  const cycleData = path.join(root, 'cycle-data');
+  const cycleHosts = ['cycle-a', 'cycle-b', 'cycle-c'];
+  const cycleLabels = { local: 'cycle-local', 'mini2-exec-1': 'cycle-mini2',
+    'devbox-cn-1': 'cycle-1', 'devbox-cn-37': 'cycle-37', 'devbox-cn-66': 'cycle-66' };
+  const cycleRegistry = cycleHosts.map((host, index) => ({ slot: ['devbox-cn-1', 'devbox-cn-37', 'devbox-cn-66'][index],
+    host, kind: 'remote', policy: 'open' }));
+  let cycleCapacity = Object.fromEntries(cycleHosts.map((host) => [host,
+    { claims: 0, gate: 'closed-stale-or-missing-metrics' }]));
+  let cycleCapacityReads = 0;
+  const cycleCommand = async (bin, args, signal) => {
+    if (args.join(' ') === 'devbox-registry') return JSON.stringify(cycleRegistry);
+    if (args.join(' ') === 'pool-capacity devbox-cn') {
+      cycleCapacityReads += 1;
+      return JSON.stringify(cycleCapacity);
+    }
+    return command(bin, args, signal);
+  };
+  const staleCycle = await collect({ ...options, data: cycleData, labels: cycleLabels, command: cycleCommand, prune: false });
+  assert.equal(cycleCapacityReads, 1);
+  assert.deepEqual(staleCycle.blocks['pool:devbox-cn'].data.map(({ host, claims, gate }) => ({ host, claims, gate })), [
+    { host: 'cycle-1', claims: 0, gate: 'closed-stale-or-missing-metrics' },
+    { host: 'cycle-37', claims: 0, gate: 'closed-stale-or-missing-metrics' },
+    { host: 'cycle-66', claims: 0, gate: 'closed-stale-or-missing-metrics' },
+  ]);
+  cycleCapacity = Object.fromEntries(cycleHosts.map((host, index) => [host,
+    { claims: index + 2, gate: 'headroom' }]));
+  const freshCycle = await collect({ ...options, data: cycleData, labels: cycleLabels, command: cycleCommand,
+    now: now + 250, prune: false });
+  assert.equal(cycleCapacityReads, 2);
+  assert.equal(freshCycle.blocks['pool:devbox-cn'].stale, false);
+  assert.equal(freshCycle.blocks['pool:devbox-cn'].updatedAt, freshCycle.at);
+  assert.deepEqual(freshCycle.blocks['pool:devbox-cn'].data.map(({ host, claims, gate }) => ({ host, claims, gate })), [
+    { host: 'cycle-1', claims: 2, gate: 'headroom' },
+    { host: 'cycle-37', claims: 3, gate: 'headroom' },
+    { host: 'cycle-66', claims: 4, gate: 'headroom' },
+  ]);
   const missingRelease = await collect({ ...options, now: now + 500, sourcePaths: {
     ...sourcePaths, productionReleases: path.join(root, 'missing-prod-releases.tsv') } });
   assert.equal(missingRelease.releases.production.version, '1.0.0.105');
