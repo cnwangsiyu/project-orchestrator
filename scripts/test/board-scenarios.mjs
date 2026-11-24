@@ -24,15 +24,18 @@ const w = { account: 'trae', model: 'gpt-6.2-sol', effort: 'high', project, task
 const old = { ...w, task: 'W749', name: 'W749-old' };
 const lockHeader = 'ID KIND POLICY LINK HOLDER SINCE → UNTIL / PURPOSE\n';
 const status = `${lockHeader}iphone11 device open connected W746-rehearsal (${project}/W746-rehearsal) 2026-11-23 11:00 → +120m · ${fakeSerial}\n`
-  + 'iphone8 device open not seen FREE\ns21 device open connected FREE\niphone15pm device ask-user connected FREE\n';
-const remote = `${lockHeader}devbox-cn-66 remote open - W746-check (${project}/W746) 2026-11-23 12:00 → ? · test\n`
+  + 'iphone8 device open not seen FREE\ns21 device open connected FREE\niphone15pm device ask-user connected FREE\n'
+  + `heavy-build-4 slot open - W746-check (${project}/W746) 2026-11-23 12:00 → ? · test\n`
+  + 'heavy-lane-1 slot open - HELD\n'
+  + `mini2-exec-1 remote open - W746-check (${project}/W746) 2026-11-23 12:00 → ? · test\n`;
+const heldRemote = `${lockHeader}devbox-cn-66 remote open - W746-check (${project}/W746) 2026-11-23 12:00 → ? · test\n`
   + `devbox-cn-67 remote open - W7460 (${project}/W7460) 2026-11-23 12:00 → ? · test\n`
   + `Host ${fakeHost} heldSlots=2 cores=64\n  heavy admitted=2 load5=12.5 reserved_cores=3\n`;
 const registry = [{ slot: 'devbox-cn-66', host: fakeHost, kind: 'remote', policy: 'open' },
   { slot: 'devbox-cn-67', host: fakeHost, kind: 'remote', policy: 'open' },
   { slot: 'heavy-build-4', host: 'main.local', kind: 'slot', policy: 'open' },
   { slot: 'mini2-exec-1', host: 'mini2.local', kind: 'remote', policy: 'open' }];
-let fault;
+let fault, remote = heldRemote, auditHeld = 2, devboxLink;
 async function command(bin, args, signal) {
   assert.ok(signal instanceof AbortSignal);
   if (bin === process.execPath) {
@@ -49,12 +52,15 @@ async function command(bin, args, signal) {
     case 'devbox-registry': return JSON.stringify(registry);
     case 'holder heavy-build-4': return JSON.stringify({ state: 'held', holder: 'W746-check', task: 'W746', project });
     case 'holder mini2-exec-1': return JSON.stringify({ by: 'W746-check', task: 'W746', project });
-    case 'audit --json': return JSON.stringify({ hosts: { [fakeHost]: { cores: 64, heldSlots: 2, spareCores: 48, metricsFresh: true } } });
-    case 'pool-capacity devbox-cn': return JSON.stringify({ [fakeHost]: { claims: 3, gate: 'headroom' } });
+    case 'audit --json':
+      if (fault === 'audit') throw Error('fixture: audit unavailable');
+      return JSON.stringify({ hosts: { [fakeHost]: { cores: 64, heldSlots: auditHeld, spareCores: 48, metricsFresh: true } } });
+    case 'pool-capacity devbox-cn': return JSON.stringify({ [fakeHost]: { claims: 3, gate: 'headroom', link: devboxLink } });
     case 'pool-capacity devbox-cn-light':
       if (fault === 'pool') return new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
       return JSON.stringify({ [fakeHost]: { claims: 6, gate: 'headroom' } });
-    case 'pool-capacity mini2': return JSON.stringify({ 'mini2.local': { held: 1, gate: 'headroom', capacity: { cores: 10, load5: 1.2 } } });
+    case 'pool-capacity mini2': return JSON.stringify({ 'mini2.local': { held: 1, claims: 0,
+      gate: 'metrics-stale-or-foreign', capacity: { cores: 10, load5: 1.2 } } });
     default:
       assert.match(args.join(' '), /^pool-capacity local(?:-light|-build)?$/);
       return JSON.stringify({ 'main.local': { cores: 14, claims: fault === 'pool' ? 1 : 2, load5: 4, pressure: 1, gate: 'headroom' } });
@@ -66,7 +72,12 @@ let server;
 try {
   const boardRoot = path.join(root, '.claude/orchestrator', project);
   const briefRoot = path.join(root, 'code/.claude-data/orchestrator', project, 'tasks', old.task);
-  await Promise.all([shared, boardRoot, briefRoot, path.join(data, 'history')].map((dir) => fs.mkdir(dir, { recursive: true })));
+  await Promise.all([shared, path.join(shared, 'devbox-metrics'), boardRoot, briefRoot, path.join(data, 'history')]
+    .map((dir) => fs.mkdir(dir, { recursive: true })));
+  const freshMetric = (at = now - 5 * 60_000) => ({ at: at / 1000, cores: 64, load5: 3.1, memAvailableGiB: 40, freeGiB: 300 });
+  await fs.writeFile(path.join(shared, 'devbox-metrics', `${fakeHost}.json`), JSON.stringify(freshMetric()));
+  await fs.writeFile(path.join(shared, 'mini2-metrics.json'), JSON.stringify({ at: (now - 4 * 60_000) / 1000,
+    cores: 10, load5: 1.1, availableGiB: 12, freeGiB: 100 }));
   await fs.writeFile(path.join(boardRoot, 'board.json'), JSON.stringify({ tasks: [{ id: 'W746', title: '编辑后画面检查', next: '检查第 3 组' }] }));
   await fs.writeFile(path.join(briefRoot, 'brief.md'), '# 旧任务标题\n\n正文不可见\n');
   await putLines(path.join(shared, 'worker-events.jsonl'), [
@@ -95,8 +106,13 @@ try {
   assert.equal(task.title, '编辑后画面检查'); assert.equal(task.summary, '检查第 3 组'); assert.equal(task.routeWhy, '公司通道优先');
   assert.match(task.latestNote, /MASKED|隐藏/);
   assert.equal(first.tasks.find((row) => row.task === old.task).title, '旧任务标题');
-  assert.equal(first.machines.find((m) => m.name === '开发机 9').load5, 12.5);
+  assert.equal(first.machines.find((m) => m.name === '开发机 9').load5, 3.1);
+  assert.equal(first.machines.find((m) => m.name === '开发机 9').sampleOnDemand, true);
+  assert.equal(first.machines.find((m) => m.name === '开发机 9').fault, false);
   assert.equal(first.machines.find((m) => m.name === '开发机 9').holders.length, 2);
+  assert.equal(first.machines.find((m) => m.name === '主 mini').holders[0].task, 'W746');
+  assert.equal(first.machines.find((m) => m.name === '主 mini').holders[1].holder, '');
+  assert.equal(first.machines.find((m) => m.name === 'mini2').claims.mini2.gate, 'metrics-stale-or-foreign');
   assert.deepEqual(task.resources.map((r) => r.host ?? r.label), ['开发机 9', '主 mini', 'mini2', 'iPhone 11']);
   assert.equal(Date.parse(first.devices[0].until) - Date.parse(first.devices[0].since), 120 * 60_000);
   assert.equal(first.devices.length, 3); assert.equal(first.cards.length, 1); assert.equal(first.cards[0].title, '确认出包');
@@ -110,22 +126,46 @@ try {
   assert.equal(daily, snapshot);
   assert.deepEqual(await fs.readdir(history), ['2026-11-21.ndjson', '2026-11-23.ndjson']);
   assert.match(await fs.readFile(path.join(history, '2026-11-21.ndjson'), 'utf8'), /^\{"at":"2026-11-21T20:01:00.000Z"\}\n$/);
+
+  const metricFile = path.join(shared, 'devbox-metrics', `${fakeHost}.json`);
+  await fs.rm(metricFile);
+  const missingMetric = await collect({ ...options, now: now + 10_000 });
+  assert.deepEqual(missingMetric.machines.find((m) => m.name === '开发机 9').faults, ['metrics-missing']);
+  await fs.writeFile(metricFile, '{');
+  const invalidMetric = await collect({ ...options, now: now + 20_000 });
+  assert.deepEqual(invalidMetric.machines.find((m) => m.name === '开发机 9').faults, ['metrics-invalid']);
+  await fs.writeFile(metricFile, JSON.stringify(freshMetric(now - 7 * 3600_000)));
+  remote = `${lockHeader}Host ${fakeHost} heldSlots=0 cores=64\n  heavy admitted=0 load5=3.1 reserved_cores=0\n`;
+  auditHeld = 0;
+  const oldIdleMetric = await collect({ ...options, now: now + 30_000 });
+  assert.equal(oldIdleMetric.machines.find((m) => m.name === '开发机 9').fault, false);
+  remote = heldRemote; auditHeld = 2;
+  const oldHeldMetric = await collect({ ...options, now: now + 40_000 });
+  assert.ok(oldHeldMetric.machines.find((m) => m.name === '开发机 9').faults.includes('metrics-old-with-lease'));
+  await fs.writeFile(metricFile, JSON.stringify(freshMetric()));
+  devboxLink = 'DOWN';
+  const linkDown = await collect({ ...options, now: now + 50_000 });
+  assert.ok(linkDown.machines.find((m) => m.name === '开发机 9').faults.includes('link-down'));
+  devboxLink = undefined; fault = 'audit';
+  const resFailure = await collect({ ...options, now: now + 60_000 });
+  assert.ok(resFailure.machines.find((m) => m.name === '开发机 9').faults.includes('res-failed'));
+  fault = undefined;
   fault = 'pool';
-  const second = await collect({ ...options, now: now + 30_000, timeout: 180 });
+  const second = await collect({ ...options, now: now + 70_000, timeout: 180 });
   const pool = 'pool:devbox-cn-light';
   assert.deepEqual(second.blocks[pool].data, first.blocks[pool].data);
   assert.equal(second.blocks[pool].since, second.at);
-  assert.equal(second.blocks[pool].updatedAt, first.at);
+  assert.equal(second.blocks[pool].updatedAt, resFailure.at);
   assert.match(second.blocks[pool].error, /超时/);
   assert.equal(second.blocks['pool:local'].data[0].claims, 1);
   assert.equal(Object.values(second.blocks).filter((b) => b.stale).length, 1);
-  const third = await collect({ ...options, now: now + 60_000, timeout: 180 });
+  const third = await collect({ ...options, now: now + 100_000, timeout: 180 });
   assert.equal(third.blocks[pool].since, second.at);
   fault = 'quota';
   await fs.writeFile(path.join(shared, 'quota.json'), JSON.stringify({ checkedAt: now, codexAccounts: [
     { name: 'main', windows: [{ windowMins: 10080, used: 21, resetsAt: reset }], resets: { count: 2 } }],
     claude: [{ windowMins: 10080, used: 33, resetsAt: reset }] }));
-  const fallback = await collect({ ...options, now: now + 90_000 });
+  const fallback = await collect({ ...options, now: now + 130_000 });
   assert.equal(fallback.quota.fallback, true);
   assert.equal(fallback.quota.items.find((q) => q.id === 'main').percent, 21);
   assert.equal(fallback.blocks[pool].stale, false);
@@ -176,6 +216,9 @@ try {
   assert.doesNotMatch(page.body, /(?:https?:\/\/|\b(?:src|href)=["']\/\/|url\s*\()/i);
   assert.match(page.body, /fetch\('\/snapshot\.json'/);
   assert.doesNotMatch(page.body, /最近发生的事|发布与回归/);
+  assert.match(page.body, /开发机和 mini2 只在有任务申请时采样/);
+  assert.match(page.body, /申请时计算/);
+  assert.match(page.body, /持有者未知/);
   execFileSync('python3', ['-c', `
 from html.parser import HTMLParser
 import sys

@@ -90,7 +90,7 @@ body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.7 var(--body)}
       <div id="tasksNotice"></div><div id="lanes"></div>
     </div>
     <div class="pane">
-      <section class="block" aria-labelledby="machinesTitle"><h2 class="sec" id="machinesTitle">机器 <span>谁在用</span></h2><div id="machinesNotice"></div><div id="machines"></div></section>
+      <section class="block" aria-labelledby="machinesTitle"><h2 class="sec" id="machinesTitle">机器 <span>开发机和 mini2 只在有任务申请时采样</span></h2><div id="machinesNotice"></div><div id="machines"></div></section>
       <section class="block" aria-labelledby="devicesTitle"><h2 class="sec" id="devicesTitle">测试设备</h2><div id="devicesNotice"></div><div id="devices"></div></section>
       <section class="block" aria-labelledby="quotaTitle"><h2 class="sec" id="quotaTitle">额度 <span>重置时间</span></h2><div id="quotaNotice"></div><div id="quota"></div></section>
     </div>
@@ -101,7 +101,7 @@ body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.7 var(--body)}
 const $ = (id) => document.getElementById(id);
 const projects = { 'video-agent': 'VAK', 'vesdk-mainline': 'Webview', 'lynx-view': 'Lynx', orchestrator: '全局规则' };
 const accounts = { trae: 'TRAE', ttadk: 'TTADK', main: '个人 main', b: '个人 b', claude: 'Claude' };
-const sources = { workers: '任务状态', notes: '进展', routes: '路由', cards: '待确认事项', audit: '开发机审计', devboxLeases: '开发机租约', localLeases: 'mini 租约', devices: '设备', quota: '额度' };
+const sources = { workers: '任务状态', notes: '进展', routes: '路由', cards: '待确认事项', audit: '开发机审计', hostMetrics: '机器样本', devboxLeases: '开发机租约', localLeases: 'mini 租约', devices: '设备', quota: '额度' };
 const poolLabels = { 'devbox-cn': '重型', 'devbox-cn-light': '轻型', local: '通道', 'local-light': '轻型', 'local-build': '完整构建', mini2: '轻型' };
 const order = ['开发机 9', '开发机 8', '开发机 1', '主 mini', 'mini2'];
 const signatures = new WeakMap();
@@ -219,16 +219,21 @@ function meter(percent, label, tone = '') {
 }
 function holderText(row) {
   const project = projects[row.project] ?? '';
-  return [project, row.task || row.holder || '持有者未返回'].filter(Boolean).join(' ');
+  return [project, row.task || row.holder || '持有者未知'].filter(Boolean).join(' ');
 }
 function renderMachines(machines) {
   return [...machines].sort((a, b) => (order.indexOf(a.name) + 6) % 6 - (order.indexOf(b.name) + 6) % 6).map((m) => {
     const load = Number.isFinite(m.load5) && m.cores > 0;
-    const status = [load ? `负载 ${decimal(m.load5)}/${m.cores}` : '负载未知', Number.isFinite(m.availableGiB) ? `可用 ${decimal(m.availableGiB)} GiB` : ''].filter(Boolean).join(' · ');
+    const sampled = m.sampleOnDemand && m.sampledAt ? `${duration(age(m.sampledAt))}前采样` : '';
+    const status = [load ? `负载 ${decimal(m.load5)}/${m.cores}` : '负载未知', sampled,
+      Number.isFinite(m.availableGiB) ? `可用 ${decimal(m.availableGiB)} GiB` : ''].filter(Boolean).join(' · ');
     const metrics = [Number.isFinite(m.spareCores) ? `预计余 ${decimal(m.spareCores)} 核` : '',
       Number.isFinite(m.freeGiB) ? `磁盘剩 ${decimal(m.freeGiB)} GiB` : '', m.link ? `链路${m.link === 'up' ? '正常' : '未就绪'}` : '',
       m.pressure === 1 ? '内存压力正常' : Number.isFinite(m.pressure) ? '内存压力异常' : ''];
-    for (const [pool, cap] of Object.entries(m.claims)) if (Number.isFinite(cap.count)) metrics.push(`${poolLabels[pool]}可接 ${cap.count}`);
+    for (const [pool, cap] of Object.entries(m.claims)) {
+      if (['closed-stale-or-missing-metrics', 'metrics-stale-or-foreign'].includes(cap.gate)) metrics.push(`${poolLabels[pool]}申请时计算`);
+      else if (Number.isFinite(cap.count)) metrics.push(`${poolLabels[pool]}可接 ${cap.count}`);
+    }
     const owners = new Map();
     for (const holder of m.holders) {
       const text = holderText(holder);
@@ -237,10 +242,12 @@ function renderMachines(machines) {
       owners.set(label, { count: (prev?.count ?? 0) + 1, match: selected !== 'all' && holder.project === selected });
     }
     const list = [...owners].flatMap(([name, row], i) => [i ? '、' : '', el('span', row.match ? 'match' : '', `${name}${row.count > 1 ? ` × ${row.count}` : ''}`)]);
+    const faultLabels = { 'metrics-missing': '机器样本文件缺失', 'metrics-invalid': '机器样本无法读取',
+      'metrics-old-with-lease': '有租约，机器样本已超过 6 小时', 'link-down': '链路未就绪', 'res-failed': '资源状态读取失败' };
     return el('div', 'host', el('div', 'h', `${m.name}${m.cores ? ` · ${m.cores} 核` : ''}${m.memGiB ? ` / ${m.memGiB} GiB` : ''}`, el('span', '', status)),
-      meter(load ? 100 * m.load5 / m.cores : null, `${m.name} 负载`, m.factsStale ? 'warn' : ''),
-      el('small', '', m.held ? `${m.held} 个租约${list.length ? '：' : ' · 持有者未返回'}` : '空闲', ...list),
-      el('small', '', metrics.filter(Boolean).join(' · ')), m.factsStale ? el('p', 'notice', '机器状态采样已过期或缺失') : null);
+      meter(load ? 100 * m.load5 / m.cores : null, `${m.name} 负载`, m.fault ? 'warn' : ''),
+      el('small', '', m.held ? `${m.held} 个租约${list.length ? '：' : ' · 持有者未知'}` : '空闲', ...list),
+      el('small', '', metrics.filter(Boolean).join(' · ')), m.fault ? el('p', 'notice', m.faults.map((f) => faultLabels[f] ?? f).join(' · ')) : null);
   });
 }
 function renderDevices(devices) {
@@ -280,11 +287,13 @@ function render() {
   const trouble = tasks.filter((t) => status(t)[2] < 2).length;
   const spent = quota.items.filter((q) => q.exhausted && (!q.resetsAt || Date.parse(q.resetsAt) > Date.now())).length;
   const stale = Object.values(blocks).filter((b) => b.stale).length;
+  const machineFaults = machines.filter((m) => m.fault).length;
   $('bar').className = `bar ${severity}`;
-  $('verdictDot').className = `dot ${severity || (trouble ? 'bad' : cards.length || spent || stale || unavailable ? 'warn' : '')}`;
+  $('verdictDot').className = `dot ${severity || (trouble ? 'bad' : cards.length || spent || stale || machineFaults || unavailable ? 'warn' : '')}`;
   const count = (key, value) => blocks[key]?.stale && !blocks[key]?.updatedAt ? '—' : value;
   $('verdict').textContent = [`${count('cards', cards.length)} 件事等你`, `${count('workers', running)} 个任务在跑`,
-    trouble ? `${trouble} 个任务需留意` : '', spent ? `${spent} 条通道额度用完` : '', stale ? `${stale} 项数据未更新` : ''].filter(Boolean).join(' · ');
+    trouble ? `${trouble} 个任务需留意` : '', spent ? `${spent} 条通道额度用完` : '', machineFaults ? `${machineFaults} 台机器需留意` : '',
+    stale ? `${stale} 项数据未更新` : ''].filter(Boolean).join(' · ');
   $('fresh').textContent = `${time(at, fullClock)} · ${old < 60_000 ? `${Math.floor(old / 1000)} 秒` : duration(old)}前更新${unavailable ? ' · 连接中断' : ''}`;
   $('cardCount').textContent = count('cards', cards.length);
   update($('cards'), [cards, blocks.cards?.stale && !blocks.cards.updatedAt], ([cards, missing]) => cards.length ? cards.map((c) => el('div', 'ask', c.title)) : [el('small', 'empty', missing ? '暂无可用的待确认事项数据' : '没有等你的事')]);
@@ -294,7 +303,7 @@ function render() {
   update($('quota'), quota, renderQuota);
   notices('cardsNotice', ['cards']);
   notices('tasksNotice', ['workers', 'notes', 'routes', ...Object.keys(projects).filter((p) => selected === 'all' || selected === p).map((p) => `tasks:${p}`)]);
-  notices('machinesNotice', ['audit', 'devboxLeases', 'localLeases', ...Object.keys(poolLabels).map((p) => `pool:${p}`)]);
+  notices('machinesNotice', ['audit', 'hostMetrics', 'devboxLeases', 'localLeases', ...Object.keys(poolLabels).map((p) => `pool:${p}`)]);
   notices('devicesNotice', ['devices']);
   notices('quotaNotice', ['quota'], quota.fallback ? '实时额度不可读，显示本地缓存 · ' + time(quota.checkedAt, fullClock) : '');
 }

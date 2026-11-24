@@ -90,24 +90,41 @@ function assignHolds(tasks, leases) {
   return result;
 }
 
-function derive(blocks) {
+function derive(blocks, now) {
   const get = (id) => blocks[id]?.data ?? emptySource(id);
   const audit = get('audit');
+  const metrics = get('hostMetrics');
   const devbox = get('devboxLeases');
   // Prefer a fresh command when overlapping status views disagree. A failed
   // source can still show its last good values, explicitly marked below.
   const devices = get('devices');
   const holds = [...devbox.holds, ...get('localLeases')];
-  const machineNames = new Set([...audit.map((r) => r.host), ...holds.map((r) => r.host), ...pools.flatMap((p) => get(`pool:${p}`).map((r) => r.host))]);
+  const machineNames = new Set([...audit.map((r) => r.host), ...metrics.map((r) => r.host), ...holds.map((r) => r.host),
+    ...pools.flatMap((p) => get(`pool:${p}`).map((r) => r.host))]);
   const machines = [...machineNames].map((name) => {
     const fact = audit.find((r) => r.host === name);
+    const metric = metrics.find((r) => r.host === name);
     const capacity = Object.fromEntries(pools.flatMap((p) => get(`pool:${p}`).filter((r) => r.host === name).map((r) => [p, r])));
     const sample = capacity.local ?? capacity['local-light'] ?? capacity['local-build'] ?? capacity.mini2;
     const holders = holds.filter((row) => row.host === name);
-    return { name, cores: sample?.cores ?? fact?.cores, memGiB: sample?.memGiB, load5: sample?.load5 ?? devbox.load[name],
-      availableGiB: sample?.availableGiB, freeGiB: sample?.freeGiB ?? fact?.freeGiB, pressure: sample?.pressure,
-      spareCores: fact?.spareCores, factsStale: fact?.factsStale ?? /stale|invalid/.test(sample?.gate ?? ''),
-      link: sample?.link, held: Math.max(holders.length, fact?.held ?? sample?.held ?? 0), holders,
+    const held = Math.max(holders.length, fact?.held ?? sample?.held ?? 0);
+    const metricOk = metric?.state === 'ok';
+    const related = Object.keys(capacity).map((pool) => `pool:${pool}`);
+    if (metric?.kind === 'devbox') related.push('audit', 'devboxLeases');
+    else if (metric?.kind === 'mini2' || Object.hasOwn(capacity, 'local')) related.push('localLeases');
+    const faults = [];
+    if (metric?.state === 'missing') faults.push('metrics-missing');
+    if (metric?.state === 'invalid') faults.push('metrics-invalid');
+    if (metricOk && held > 0 && now - Date.parse(metric.sampledAt) > 6 * HOUR) faults.push('metrics-old-with-lease');
+    if (Object.values(capacity).some((row) => row.link === 'down')) faults.push('link-down');
+    if ((metric && blocks.hostMetrics?.stale) || related.some((id) => blocks[id]?.stale)) faults.push('res-failed');
+    return { name, cores: metricOk ? metric.cores : sample?.cores ?? fact?.cores, memGiB: sample?.memGiB,
+      load5: metricOk ? metric.load5 : metric ? null : sample?.load5 ?? devbox.load[name],
+      sampledAt: metricOk ? metric.sampledAt : null, sampleOnDemand: Boolean(metric), sampleState: metric?.state ?? null,
+      availableGiB: metricOk ? metric.availableGiB : metric ? null : sample?.availableGiB,
+      freeGiB: metricOk ? metric.freeGiB : metric ? null : sample?.freeGiB ?? fact?.freeGiB, pressure: sample?.pressure,
+      spareCores: fact?.spareCores, link: Object.values(capacity).find((row) => row.link)?.link ?? sample?.link,
+      held, holders, faults: [...new Set(faults)], fault: faults.length > 0,
       claims: Object.fromEntries(Object.entries(capacity).map(([p, r]) => [p, { count: r.claims, gate: r.gate }])) };
   });
   const notes = get('notes');
@@ -175,7 +192,7 @@ export async function collect({ data = defaultData, now = Date.now(), timeout = 
   const routeWorkers = [...active, ...(await pending.notes).data.failed];
   for (const id of ['routes', ...Object.keys(projects).map((p) => `tasks:${p}`)]) pending[id] = fetch(id, routeWorkers);
   const blocks = Object.fromEntries(await Promise.all(Object.entries(pending).map(async ([id, value]) => [id, await value])));
-  const snapshot = { at, version: 1, ...derive(blocks), blocks };
+  const snapshot = { at, version: 1, ...derive(blocks, now), blocks };
   await fs.mkdir(data, { mode: 0o700, recursive: true });
   const history = path.join(data, 'history');
   await fs.mkdir(history, { mode: 0o700, recursive: true });

@@ -194,6 +194,29 @@ function poolItems(pool, value, name) {
   });
 }
 
+function metricSample(value) {
+  record(value, '机器样本');
+  const sampledAt = iso(value.at);
+  const cores = number(value.cores);
+  const load5 = number(value.load5);
+  const availableGiB = number(value.memAvailableGiB ?? value.availableGiB);
+  const freeGiB = number(value.freeGiB);
+  if (!sampledAt || cores === null || load5 === null || availableGiB === null || freeGiB === null) {
+    throw boardError('机器样本格式无法识别');
+  }
+  return { sampledAt, cores, load5, availableGiB, freeGiB };
+}
+
+async function readMetric(file, signal) {
+  try { return { state: 'ok', ...metricSample(await jsonFile(file, signal)) }; }
+  catch (error) {
+    if (signal.aborted) throw error;
+    if (error.code === 'ENOENT') return { state: 'missing' };
+    if (error instanceof SyntaxError || error.boardMessage) return { state: 'invalid' };
+    throw error;
+  }
+}
+
 export function makeSources({ data, shared = process.env.RULES_SHARED || path.join(os.homedir(), '.claude/orchestrator/_shared'),
   home = os.homedir(), command = run, labels, now }) {
   const res = (...args) => command(path.join(shared, 'res'), args.slice(1), args[0]);
@@ -227,6 +250,15 @@ export function makeSources({ data, shared = process.env.RULES_SHARED || path.jo
         cores: number(row.cores), spareCores: number(row.spareCores), freeGiB: number(row.freeGiB), held: number(row.heldSlots),
         factsStale: row.probeStale === true || row.metricsFresh === false }));
     },
+    hostMetrics: async (signal) => {
+      const [registry, name] = await Promise.all([getRegistry(), names()]);
+      const hosts = [...new Set(registry.filter((row) => row.policy === 'open' && row.kind === 'remote' && /^devbox-cn-/.test(row.slot))
+        .map((row) => string(row.host)).filter((host) => host && path.basename(host) === host))];
+      const devboxes = await Promise.all(hosts.map(async (host) => ({ host: name.remote(host), kind: 'devbox',
+        ...await readMetric(path.join(shared, 'devbox-metrics', `${host}.json`), signal) })));
+      return [...devboxes, { host: labels['mini2-exec-1'], kind: 'mini2',
+        ...await readMetric(path.join(shared, 'mini2-metrics.json'), signal) }];
+    },
     devboxLeases: async (signal) => {
       const [raw, registry, name] = await Promise.all([res(signal, 'status', 'devbox-cn'), getRegistry(), names()]);
       const hosts = new Map(registry.filter((row) => row.policy === 'open' && row.kind === 'remote').map((row) => [row.slot, row.host]));
@@ -244,16 +276,9 @@ export function makeSources({ data, shared = process.env.RULES_SHARED || path.jo
       return { holds, load };
     },
     localLeases: async (signal) => {
-      const registry = await getRegistry();
-      const slots = [...new Set(registry.map((r) => r.slot).filter((id) => /^(?:heavy-(?:build(?:-\d+)?|lane-\d+)|mini2-exec-\d+)$/.test(id)))];
-      const holds = await Promise.all(slots.map(async (id) => {
-        const raw = JSON.parse(await res(signal, 'holder', id));
-        const mini2 = id.startsWith('mini2');
-        const item = mini2 ? { ...raw, held: Boolean(raw.by), holder: raw.by } : raw;
-        return { ...lease(id, item), host: mini2 ? labels['mini2-exec-1'] : labels.local,
-          label: mini2 ? '租约' : id.startsWith('heavy-build') ? '构建位' : '通道' };
-      }));
-      return holds.filter((row) => row.held);
+      return (await getStatus()).filter((row) => row.held && /^(?:heavy-(?:build(?:-\d+)?|lane-\d+)|mini2-exec-\d+)$/.test(row.id))
+        .map((row) => ({ ...row, host: row.id.startsWith('mini2') ? labels['mini2-exec-1'] : labels.local,
+          label: row.id.startsWith('mini2') ? '租约' : row.id.startsWith('heavy-build') ? '构建位' : '通道' }));
     },
     cards: async (signal) => {
       const events = [];
