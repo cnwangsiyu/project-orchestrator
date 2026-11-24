@@ -354,7 +354,7 @@ if (cmd === 'rules-push') {
     if (opts.run !== undefined && !processWorker(row)) die('retire --run is only for tracked exec followers; use --thread');
     const context = validWorkerIdentifier(row.thread) ? workerContext(row.account, row.thread, true) : null;
     if (context?.owner && context.owner !== owner) die('retire belongs to a different launching owner');
-    if (opts.run !== undefined) {
+    if (opts.run !== undefined && row.pidIdentity) {
       const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
       const waitGone = async (identity, timeout) => {
         const until = Date.now() + timeout;
@@ -380,7 +380,7 @@ if (cmd === 'rules-push') {
       if (gone.includes(false)) die('retire refused: tracked process did not exit after bounded cleanup');
       const latest = [...workerRunStates(readEvents()).values()].map(state => state.row)
         .find(current => current.owner === owner && current.account === row.account && current.runId === row.runId);
-      if (latest?.event === 'running' && !latest.settled) retireWorker(latest, opts.reason ?? 'finished exec follower terminated');
+      if ((latest ?? row).event !== 'retired') retireWorker(latest ?? row, opts.reason ?? 'finished exec follower terminated');
       console.log(`retired account=${row.account} run=${row.runId}; ${actions.length ? actions.join('; ') : 'tracked process already exited'}; tracking cleared`);
       process.exit(0);
     }
