@@ -12,10 +12,12 @@ const args = process.argv.slice(2), listFailing = args.includes('--list-failing'
 const noClaim = args.includes('--no-claim');
 const filesAt = args.indexOf('--files'), selected = filesAt < 0 ? null : args[filesAt + 1]?.split(',');
 const reportAt = args.indexOf('--report'), report = reportAt < 0 ? null : args[reportAt + 1];
+const onAt = args.indexOf('--on'), onArg = onAt < 0 ? null : args[onAt + 1];
 if (filesAt >= 0 && (!selected?.length || selected.some(name => !name))) throw Error('--files needs comma-separated suite names');
 if (reportAt >= 0 && (!report || report.startsWith('--'))) throw Error('--report needs a new JSON file');
 if (report && fs.existsSync(report)) throw Error('--report refuses to overwrite an existing file');
-if (args.some((arg, index) => !['--list-failing', '--stop-on-failure', '--no-claim', '--files', '--report'].includes(arg) && ![filesAt, reportAt].some(at => at >= 0 && index === at + 1))) throw Error('usage: run-all.mjs [--list-failing] [--stop-on-failure] [--no-claim] [--files NAME,...] [--report FILE]');
+if (onAt >= 0 && !['local', 'devbox'].includes(onArg)) throw Error('--on needs local or devbox');
+if (args.some((arg, index) => !['--list-failing', '--stop-on-failure', '--no-claim', '--files', '--report', '--on'].includes(arg) && ![filesAt, reportAt, onAt].some(at => at >= 0 && index === at + 1))) throw Error('usage: run-all.mjs [--list-failing] [--stop-on-failure] [--no-claim] [--on local|devbox] [--files NAME,...] [--report FILE]');
 if (report) fs.mkdirSync(path.dirname(path.resolve(report)), { recursive: true });
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'project-orchestrator-tests-'));
 const home = path.join(tmp, 'fixture-home'); fs.mkdirSync(home, { recursive: true });
@@ -36,6 +38,37 @@ if (selected) {
   suites = suites.filter(suite => selected.includes(suite.name));
 }
 const fullRun = !selected || selected.length > 8;
+const explicitOn = onArg || process.env.SUITE_ON;
+if (explicitOn && !['local', 'devbox'].includes(explicitOn)) throw Error('SUITE_ON must be local or devbox');
+const location = process.env.SUITE_LOCATION || 'local';
+const localOnly = new Set(['devbox-tree-scenarios.mjs', 'mini2-scenarios.mjs', 'worker-inbox-fix-scenarios.mjs']);
+const originalSuites = suites;
+let remoteResults = [];
+const chosenOn = process.env.SUITE_REMOTE_CHILD ? 'local' : (explicitOn || (fullRun ? 'devbox' : 'local'));
+if (chosenOn === 'devbox') {
+  const remoteSuites = suites.filter(suite => !localOnly.has(suite.name));
+  const localSuites = suites.filter(suite => localOnly.has(suite.name));
+  const quote = value => `'${String(value).replaceAll("'", "'\\''")}'`;
+  const remoteArgs = ['scripts/test/run-all.mjs', '--on', 'local', '--no-claim', '--files', remoteSuites.map(suite => suite.name).join(',')];
+  if (listFailing) remoteArgs.push('--list-failing');
+  if (stopOnFailure) remoteArgs.push('--stop-on-failure');
+  const command = `SUITE_REMOTE_CHILD=1 SUITE_LOCATION=devbox SUITE_RESULT_STDOUT=1 SUITE_NO_CLAIM_REASON=${quote('devbox lease owns remote resources')} ${[process.execPath, ...remoteArgs].map(quote).join(' ')}`;
+  const out = path.join(tmp, 'devbox-run');
+  const devbox = process.env.SUITE_DEVBOX_RUN_BIN || path.join(root, 'scripts/devbox-run.mjs');
+  const run = spawnSync(process.execPath, [devbox, '--project', 'project-orchestrator', '--task', 'full-suite', '--repo', root, '--ref', 'HEAD', '--pool', 'devbox-cn', '--need', 'node', '--cores', '1', '--mem-gib', '2', '--disk-gib', '2', '--out', out, '--timeout', '120', '--queue-timeout', '30', '--', command], { cwd: root, env: process.env, encoding: 'utf8', timeout: 3 * 60 * 60 * 1000, maxBuffer: 32 * 2 ** 20 });
+  const marker = run.stdout?.match(/^SUITE_RESULT_JSON=([A-Za-z0-9+/=]+)$/m)?.[1];
+  process.stdout.write((run.stdout ?? '').split('\n').filter(line => !line.startsWith('SUITE_RESULT_JSON=')).join('\n'));
+  process.stderr.write(run.stderr ?? '');
+  if (marker) {
+    remoteResults = JSON.parse(Buffer.from(marker, 'base64').toString('utf8'));
+    suites = localSuites;
+  } else if (explicitOn === 'devbox') {
+    throw Error(`devbox suite run failed before returning results (${run.error?.message || `exit ${run.status}`})`);
+  } else {
+    console.warn(`WARNING: devbox suite unavailable; falling back to local (${run.error?.message || `exit ${run.status}`})`);
+    suites = originalSuites;
+  }
+}
 const res = process.env.SUITE_RES_BIN || path.join(root, 'scripts/res/res');
 const claimTimeout = process.env.SUITE_CLAIM_TIMEOUT_MIN || '20';
 if (!/^\d+(?:\.\d+)?$/.test(claimTimeout)) throw Error('SUITE_CLAIM_TIMEOUT_MIN must be a non-negative number of minutes');
@@ -52,7 +85,7 @@ const capacity = () => {
   try { return { result, row: Object.values(JSON.parse(result.stdout))[0] ?? null }; }
   catch { return { result, row: null }; }
 };
-if (fullRun) {
+if (fullRun && suites.length) {
   if (noClaim) {
     const reason = process.env.SUITE_NO_CLAIM_REASON?.trim();
     if (!process.stdin.isTTY && !reason) throw Error('--no-claim is refused without a TTY unless SUITE_NO_CLAIM_REASON is set');
@@ -87,8 +120,8 @@ if (fullRun) {
     }
   }
 }
-let failed = 0;
-const results = [];
+let failed = remoteResults.filter(result => !result.pass).length;
+const results = [...remoteResults];
 for (const suite of suites) {
   // Six res suites run sequentially, including v1.5 fairness, the build/signal matrix and real backoff.
   // The runner file includes all sixteen selector groups. Keep its individual
@@ -107,9 +140,10 @@ for (const suite of suites) {
   results.push({ file: suite.name, pass: success, exit: r.status, error: r.error?.code ?? null, durationSec, log });
   fs.writeFileSync(path.join(tmp, 'results.json'), JSON.stringify(results, null, 2) + '\n');
   if (report) fs.writeFileSync(report, JSON.stringify({ platform: process.platform, node: process.version, results }, null, 2) + '\n', { mode: 0o600 });
-  console.log(`${success ? 'PASS' : 'FAIL'} ${suite.name}: duration=${durationSec.toFixed(3)}s exit=${r.status ?? 'unknown'}${r.error ? ' ' + r.error.code : ''}`);
+  console.log(`${success ? 'PASS' : 'FAIL'} [${location}] ${suite.name}: duration=${durationSec.toFixed(3)}s exit=${r.status ?? 'unknown'}${r.error ? ' ' + r.error.code : ''}`);
   if (!success && !listFailing) console.log(fs.readFileSync(log, 'utf8').slice(-6000));
   if (!success && stopOnFailure) break;
 }
-console.log(`Full suite: ${results.length - failed}/${suites.length} passed; attempted=${results.length}; fixture logs: ${tmp}`);
+if (process.env.SUITE_RESULT_STDOUT) console.log(`SUITE_RESULT_JSON=${Buffer.from(JSON.stringify(results)).toString('base64')}`);
+if (!process.env.SUITE_REMOTE_CHILD) console.log(`Full suite: ${results.length - failed}/${originalSuites.length} passed; attempted=${results.length}; fixture logs: ${tmp}`);
 process.exitCode = failed ? 1 : 0;
