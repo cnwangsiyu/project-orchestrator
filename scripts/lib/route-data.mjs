@@ -327,7 +327,7 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
     const home = profiles[a.actual?.accountId]?.home;
     const queue = home && a.thread ? readQueue(home, a.thread) : null;
     const at = queue?.at ?? queue?.t;
-    if (queue?.turnId === a.turn && ['queued','waiting'].includes(queue.state) && !queue.reporting && !queue.completing
+    if (a.turn && queue?.turnId === a.turn && ['queued','waiting'].includes(queue.state) && !queue.reporting && !queue.completing
       && nonnegative(queue.since) && queue.since <= now && nonnegative(at) && at <= now && now-at <= 1800000)
       Object.assign(a, { queueState: queue.state, queueSince: queue.since, queueWaitMinutes: (now-queue.since)/60000 });
   }
