@@ -273,7 +273,7 @@ def throttled(root, category, identity, event, resource, holder, detail):
             return True
     except OSError: return True
 
-def machine_config(root, warn=True):
+def machine_config(root, warn=True, readonly=False):
     file = os.path.join(root, 'machine.conf'); saved = os.path.join(root, 'machine-last-good.json')
     try:
         try: content = regular_config(file); source = 'machine.conf'
@@ -281,7 +281,7 @@ def machine_config(root, warn=True):
             if os.path.lexists(file): raise ValueError('machine.conf is a dangling symlink')
             content = '\n'; source = 'defaults'
         result = parse_config(content)
-        atomic_json(saved, dict(version=1, source=source, content='\n'.join(
+        if not readonly: atomic_json(saved, dict(version=1, source=source, content='\n'.join(
             ['%s=%s' % (n, v) for n, v in {**result['heavy'], **result['devbox']}.items()
              if n != 'HEAD_OVERRIDE_BASE_LOAD' or v != 0] + ['%s=ignored' % n for n in result['unknown']]) + '\n'))
     except (OSError, ValueError) as error:
@@ -290,7 +290,7 @@ def machine_config(root, warn=True):
             raise ValueError('invalid machine.conf; no last-good thresholds: ' + str(error))
         result = parse_config(cached['content']); source = cached.get('source', 'machine.conf')
         result['fallback'] = True
-        if throttled(root, 'config-invalid', 'config', 'config-invalid', 'machine.conf', '-', 'using last-good thresholds') and warn:
+        if not readonly and throttled(root, 'config-invalid', 'config', 'config-invalid', 'machine.conf', '-', 'using last-good thresholds') and warn:
             print('res: warning: invalid machine.conf reload; keeping last-good thresholds and FIFO position', file=__import__('sys').stderr)
     result['source'] = source
     return result
@@ -2752,7 +2752,7 @@ try:
     observation_namespace = {}
     if action == 'status': exec(os.environ['RES_OBSERVATION_SOURCE'], observation_namespace)
     if any(c in value for value in (by, project, task, purpose, until, warm_family) for c in '\t\r\n'): raise ValueError('hold metadata must be one line')
-    if action not in ('box-health', 'scores', 'status', 'audit', 'slot-host', 'devbox-registry', 'pool-capacity', 'reserved-disk'): os.makedirs(locks, exist_ok=True)
+    if action not in ('box-health', 'scores', 'status', 'audit', 'place-devboxes', 'slot-host', 'devbox-registry', 'pool-capacity', 'reserved-disk'): os.makedirs(locks, exist_ok=True)
     if action in ('cancel', 'cleanup'):
         queue = os.path.join(root, 'pool-waiters', request)
         waiter = os.path.join(root, 'pool-waiters', request, 'waiter.' + controller_key)
@@ -2886,10 +2886,10 @@ try:
         host_pattern = r'[A-Za-z0-9][A-Za-z0-9.-]*'
         defaults = machine_helpers['DEVBOX_DEFAULTS']
         if action in ('return','retain-remote','release-dead'): return {},False,5
-        config = machine_helpers['machine_config'](root)
+        config = machine_helpers['machine_config'](root, readonly=action=='place-devboxes')
         status_machine_config = config
         values = config['devbox']; unknown = set(config['unknown'])
-        for name in sorted(unknown-config_unknown_warned):
+        for name in sorted(unknown-config_unknown_warned) if action != 'place-devboxes' else ():
             print('res: warning: ignoring unknown machine.conf key '+name,file=sys.stderr,flush=True)
         config_unknown_warned.update(unknown); config_current_values=values
         config_invalid_warned = config.get('fallback', False)
@@ -2963,6 +2963,10 @@ try:
     def io_reading(value, name):
         reading = value.get(name)
         return reading if number(reading) and 0 <= reading <= 100 else None
+    def io_pressure_state(closed, readings, limits):
+        if any(reading > limit for reading, limit in zip(readings, limits)): return True
+        if all(limit == 100 or reading < 0.8 * limit for reading, limit in zip(readings, limits)): return False
+        return closed
     def io_closed(box, value, settings):
         # Separate state in the metrics cache survives the runner's atomic sample refresh.
         # Its own lock also serializes status/diagnostic evaluations outside host_guard.
@@ -2970,20 +2974,17 @@ try:
         full = io_reading(value, 'io_full_avg10')
         if some is None or full is None: return False
         limits = (settings['IO_SOME_AVG60_MAX'], settings['IO_FULL_AVG10_MAX'])
-        os.makedirs(metrics_dir, exist_ok=True)
         file = os.path.join(metrics_dir, box + '.io-state.json')
+        if action == 'place-devboxes':
+            was_closed = machine_helpers['read_json'](file, {}).get('closed', False)
+            return io_pressure_state(was_closed, (some, full), limits)
+        os.makedirs(metrics_dir, exist_ok=True)
         with open(file + '.lock', 'a') as guard:
             fcntl.flock(guard, fcntl.LOCK_EX)
             try: state = json.loads(regular_text(file))
             except (OSError, ValueError): state = {}
             closed = isinstance(state, dict) and state.get('closed') is True
-            readings = (some, full)
-            # 100 disables that signal, including a previously latched closure.
-            if any(reading > limit for reading, limit in zip(readings, limits)):
-                closed = True
-            elif all(limit == 100 or reading < 0.8 * limit
-                     for reading, limit in zip(readings, limits)):
-                closed = False
+            closed = io_pressure_state(closed, (some, full), limits)
             updated = dict(closed=closed)
             if state != updated: machine_helpers['atomic_json'](file, updated)
             return closed
@@ -3581,7 +3582,7 @@ try:
         if request.endswith('-light') or re.fullmatch(r'.+-[0-9]+', request):
             pool = request if request.endswith('-light') else request.rsplit('-', 1)[0]
             queue = os.path.join(root, 'pool-waiters', pool)
-    else: raise ValueError('invalid pool action')
+    elif action != 'place-devboxes': raise ValueError('invalid pool action')
     def quarantined(id, state):
         value = state.get(remote[id][1], {})
         return value.get('manual', False) or value.get('quarantinedUntil', 0) > time.time()
@@ -3736,7 +3737,7 @@ try:
         # Removing this slot must preserve the best allocation for earlier
         # waiters, including overlaps in their capabilities and exclusions.
         return matching_size(options, free - {id}) == matching_size(options, free)
-    heads = waiting()
+    heads = [] if action == 'place-devboxes' else waiting()
     blocked = action == 'take' and bool(heads)
     preferred_host = remote.get(preferred_slot, (None, None))[1]
     rank_spare = (config_current_values or {}).get('DEVBOX_RANK_BY_SPARE', '1') == '1'
@@ -3773,6 +3774,31 @@ try:
             gate_reasons.add(reason)
             log('gate-deny', id, holder, 'reason=' + reason + ' ' + detail)
         return reason, detail, entries, cost, current
+    if action == 'place-devboxes':
+        from placement import devbox_rows
+        scores = capacity(hosts)
+        warm = warm_slots(project, remote)
+        candidates = []
+        for id in remote:
+            if not id.startswith('devbox-') or id.startswith('devbox-host-'): continue
+            policy, box, caps, _ = remote[id]
+            reason = 'open'
+            if not pool_member(id, request): reason = 'pool'
+            elif policy != 'open': reason = 'policy'
+            elif required - caps: reason = 'missing-cap:' + ','.join(sorted(required - caps))
+            elif scores[box]['probeStale']: reason = 'facts-stale'
+            elif quarantined(id, state): reason = 'quarantined'
+            elif os.path.isdir(os.path.join(locks, id + '.d')): reason = 'held'
+            elif os.path.lexists(pending_file(id)): reason = 'cleanup-pending'
+            else:
+                reason = evaluate(id, box, diagnostic=True)[0]
+                if gate_open(reason): reason = 'open'
+            tier = preference_tier(id)
+            spare = scores[box]['spareCores']
+            if reason == 'open' and spare is not None: best_spare[tier] = max(best_spare.get(tier, 0), spare)
+            candidates.append((id, box, reason, spare, rows[id][3]))
+        print(json.dumps(devbox_rows(candidates, rank)))
+        committed = True; sys.exit(0)
     def is_head():
         heads = waiting()
         return bool(heads and current_waiter(heads[0][1], heads[0][2]))
@@ -4424,6 +4450,11 @@ cmd_log() { [ -f "$LOG" ] && tail -n "${1:-20}" "$LOG" || true; }
 
 case "${1:-}" in
   status) shift; cmd_status "$@"; if [ -f "$RES_DIR/mini2-config.json" ]; then mini2_controller status; fi ;;
+  place) shift; exec python3 -B "$(dirname "$(realpath "$RES_SELF_COMMAND")")/placement.py" "$@" ;;
+  place-devboxes)
+    shift; request="$1"; POOL_NEED="$2"; shift 2
+    ALLOW_PID=1 parse "$@"
+    pool_controller place-devboxes "$request" 0 0 ;;
   capacity-report) shift; python3 -B "$(dirname "$(realpath "$RES_SELF_COMMAND")")/host_records.py" "$RES_DIR" "$@" ;;
   holder) shift; cmd_holder "$@" ;;
   take) shift; cmd_take "$@" ;;
