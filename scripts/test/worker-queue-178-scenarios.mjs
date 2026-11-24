@@ -37,7 +37,7 @@ try {
   for (const model of [SOL, ASTRA]) for (const excluded of [false, true]) for (const failures of [1, 9]) {
     const scopedTask = structuredClone(task(model, 'xhigh', excluded)); scopedTask.qualityFailures = failures;
     const snapshot = createSnapshot(fixture()), plan = routePure(scopedTask, snapshot);
-    assert.equal(plan.kind, 'launch'); assert.equal(plan.primary.candidate.accountId, 'b');
+    assert.equal(plan.kind, 'launch'); assert.equal(plan.primary.candidate.accountId, 'main');
     assert.equal(plan.primary.candidate.modelId, ASTRA); assert.equal(plan.primary.candidate.effort, 'xhigh');
     assert.equal(plan.primary.personalFallback.maxUnavailable, true);
     assert.match(plan.primary.personalFallback.text, /max was unavailable.*xhigh on personal Astra instead/);
@@ -80,15 +80,18 @@ try {
   console.log('PASS unreadable queue or health metadata cannot prove a company stall or enable personal quota');
 
   const available = structuredClone(source); available.personalFallback = policy;
+  const observed = available.lanes.find(l => l.accountId === 'trae' && l.modelId === ASTRA);
+  observed.lowQueue = {position:observed.position.value, drainPerMin:observed.drainPerMin.value};
   const ready = routePure(task(), createSnapshot(available));
   assert.equal(ready.primary.candidate.accountId, 'trae'); assert.equal(ready.primary.candidate.effort, 'max');
   const fast = fixture(), fastLane = fast.lanes.find(lane => lane.accountId === 'trae' && lane.modelId === ASTRA);
   fastLane.position.value = 1; fastLane.drainPerMin.value = 100; fastLane.progressAt.value = fast.decisionAt;
+  fastLane.lowQueue = {position:fastLane.position.value, drainPerMin:fastLane.drainPerMin.value};
   const draining = routePure(task(), createSnapshot(fast));
   assert.equal(draining.primary.candidate.accountId, 'trae'); assert.equal(draining.primary.candidate.effort, 'max');
   const denied = structuredClone(available); denied.accounts.find(account => account.id === 'trae').providerDenied.value = true;
   const unavailableProvider = routePure(task(), createSnapshot(denied));
-  assert.equal(unavailableProvider.primary.candidate.accountId, 'b'); assert.equal(unavailableProvider.primary.candidate.effort, 'xhigh');
+  assert.equal(unavailableProvider.primary.candidate.accountId, 'main'); assert.equal(unavailableProvider.primary.candidate.effort, 'xhigh');
   const alreadyMax = routePure(task(ASTRA, 'max'), createSnapshot(fixture()));
   assert.notEqual(alreadyMax.kind, 'launch', 'an executed max quality floor cannot be lowered');
   for (const variant of [{ state: 'planned' }, { role: 'second' }, { taskId: 'another-task' }]) {
@@ -96,7 +99,7 @@ try {
     scoped.previousAttempts.push({ ...scoped.previousAttempts[0], id: 'ignored-max', actual: { accountId: 'trae', modelId: ASTRA, effort: 'max' }, ...variant });
     assert.equal(routePure(scoped, createSnapshot(fixture())).primary.candidate.effort, 'xhigh');
   }
-  const priorPersonal = structuredClone(task()); priorPersonal.previousAttempts[0].actual.accountId = 'b';
+  const priorPersonal = structuredClone(task()); priorPersonal.previousAttempts[0].actual.accountId = 'main';
   const repeated = routePure(priorPersonal, createSnapshot(fixture()));
   assert.notEqual(repeated.kind, 'launch', 'standing approval does not repeat a failed personal quality step');
   const disabled = fixture(); disabled.personalFallback = { ...policy, enabled: false };

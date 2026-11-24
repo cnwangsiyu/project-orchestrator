@@ -14,6 +14,9 @@ const root=new URL('../../',import.meta.url).pathname;
 const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'router-tail-'));
 const oldShared=process.env.RULES_SHARED;process.env.RULES_SHARED=tmp;
 const snapshot=parseRouteJSON(fs.readFileSync(new URL('./fixtures/free-trae-fresh-ttadk-2026-11-15.json',import.meta.url),'utf8'));
+// The tool-channel retry control has a measured low-priority queue for TRAE Sol.
+const sol = snapshot.lanes.find(l=>l.accountId==='trae' && l.modelId==='gpt-6.1-sol');
+sol.lowQueue = {position:sol.position.value,drainPerMin:sol.drainPerMin.value};
 for(const part of [...snapshot.accounts,...snapshot.lanes]) {
   part.capabilities['app:com.apple.calculator']={status:'KNOWN',value:true,sampledAt:snapshot.decisionAt,receivedAt:snapshot.decisionAt,maxAgeMs:600000,source:'fixture'};
   for(const scope of ['*.bytedance.net','*.byted.org','*.larkoffice.com','*.feishu.cn','*.tiktok-row.net','*.byteintl.net','*.bytedance.com','localhost','127.0.0.1'])
@@ -46,7 +49,7 @@ try {
     approvedSnapshot.approvals=[{id:'fixture-ok',userDecisionRef:'synthetic-user-yes',grantedAt:snapshot.decisionAt-1000,expiresAt:snapshot.decisionAt+60000,revoked:false,
       scopes:personal.plan.gates.filter(g=>g.scope).map(g=>({...g.scope,allowPersonalWithCompany:true}))}];
     fs.writeFileSync(file,JSON.stringify(approvedSnapshot));
-    const approved=cli([...personalArgs,'--user-ok','fixture-ok']);assert.equal(approved.kind,'launch',JSON.stringify({why:approved.why,gates:approved.plan.gates}));assert.ok(['main','b'].includes(approved.pick.account));
+    const approved=cli([...personalArgs,'--user-ok','fixture-ok']);assert.equal(approved.kind,'launch',JSON.stringify({why:approved.why,gates:approved.plan.gates}));assert.equal(approved.pick.account,'main');
     fs.writeFileSync(file,JSON.stringify(snapshot));
     const claude=cli([...base,'--actual','codex:gpt-6.1-sol:medium@trae,codex:gpt-6.1-sol:medium@ttadk,codex:gpt-6.1-sol:medium@main']);
     assert.equal(claude.pick.vendor,'claude');assert.equal(claude.kind,'blocked');assert.ok(claude.needsUserOK.length);assert.equal(claude.pick.command,null);

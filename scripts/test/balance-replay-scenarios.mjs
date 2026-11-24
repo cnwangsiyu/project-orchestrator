@@ -141,7 +141,7 @@ try {
   assert.equal(fallback.pick.account, 'trae'); assert.equal(fallback.pick.model, SOL56,'depleted Sol has no model-specific short-start measurement');
   assert.equal(run(['implement'], { traeHealthy: false }).pick.account, 'ttadk');
 
-  const readyQueue = { gpt: { t: now, state: 'ready', position: 0 }, lanes: { [SOL]: { t: now, state: 'ready', position: 0 } } };
+  const readyQueue = { gpt: { t: now, state: 'ready', position: 0 }, lanes: { [SOL]: { t: now, state: 'ready', position: 0, lowStart:{t:now,minutes:0.5} } } };
   const readySol = run(['implement'], { queue: readyQueue });
   assert.deepEqual([readySol.pick.account, readySol.pick.model], ['trae', SOL]);
   assert.equal(readySol.balance.freeNow, true, 'fresh direct load plus ready state qualifies depleted Sol');

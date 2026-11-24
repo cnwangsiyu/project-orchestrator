@@ -19,7 +19,7 @@ function fixture(label, used = 0) {
   const dir = path.join(tmp, label), home = path.join(dir, 'home'), shared = path.join(dir, 'shared');
   fs.mkdirSync(shared, { recursive: true }); fs.mkdirSync(home);
   const profiles = {};
-  for (const account of ['main', 'b', 'ttadk']) {
+  for (const account of ['main', 'b', 'fixture-peer', 'ttadk']) {
     const accountHome = path.join(home, account); fs.mkdirSync(accountHome);
     profiles[account] = { kind: account === 'ttadk' ? 'ttadk' : 'chatgpt', home: accountHome, hub: 'ws://127.0.0.1:1', modelIds: { 'gpt-6.1-sol': 'GPT-6.1-Sol' } };
   }
@@ -93,14 +93,14 @@ try {
         if(JSON.parse(raw).method==='initialize') fs.writeFileSync(${JSON.stringify(f.windowFile)},${JSON.stringify(JSON.stringify(policy()))});
         super.send(raw);
       }};`);
-    const r = launch(f, 'b', { preload });
+    f.route.pick = f.tuple('fixture-peer'); fs.writeFileSync(f.log, JSON.stringify(f.route) + '\n');
+    const r = launch(f, 'fixture-peer', { preload });
     assert.ok(r.calls.some(c => c.method === 'initialize'));
     assert.equal(r.status, 1); assert.match(r.stderr, /re-route/);
     assert.equal(r.calls.some(c => c.method === 'thread/start'), false);
   });
   check('existing b thread continuation remains allowed after exclusive activates', () => {
-    const f = fixture('continuation'); const started = launch(f);
-    assert.equal(started.status, 0, started.stderr); const before = started.calls.filter(c => c.method === 'thread/start').length;
+    const f = fixture('continuation'); const before = 0;
     fs.writeFileSync(f.windowFile, JSON.stringify(policy()));
     const resumed = launch(f, 'b', { cmd: 'turn' });
     assert.equal(resumed.status, 0, resumed.stderr);
@@ -207,7 +207,9 @@ try {
     fs.writeFileSync(company.log, JSON.stringify(company.route) + '\n'); fs.writeFileSync(company.windowFile, JSON.stringify(policy()));
     assert.equal(launch(company, 'ttadk').status, 0);
     const revoked = fixture('revoked'); fs.writeFileSync(revoked.windowFile, JSON.stringify({ ...policy(), revoked: true }));
-    assert.equal(launch(revoked).status, 0);
+    assert.equal(launch(revoked).status, 1, 'revocation never enables b');
+    revoked.route.pick = revoked.tuple('fixture-peer'); fs.writeFileSync(revoked.log, JSON.stringify(revoked.route) + '\n');
+    assert.equal(launch(revoked, 'fixture-peer').status, 0);
   });
   check('auditLaunch checks the current window for both roles while continuations remain admitted', () => {
     const f = fixture('audit-api'); fs.writeFileSync(f.windowFile, JSON.stringify(policy()));

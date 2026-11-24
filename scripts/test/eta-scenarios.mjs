@@ -22,7 +22,7 @@ const env = {...process.env, HOME:home, PATH:`${bin}:${process.env.PATH}`, CODEX
   QUOTA_CACHE:cache, ROUTE_NOW:String(now), ROUTE_LOG:'0', ROUTE_LOG_FILE:outcomes, QUOTA_LOG:'0', QUOTA_LOG_FILE:path.join(tmp,'no-quota-history'),
   TRAE_PROBE:'0', ROUTE_RR:path.join(tmp,'rotation')};
 const bucket = (depleted=true) => ({depleted, used:depleted?80:1, limit:80, remaining:depleted?0:79, resetsAt:now+360*min});
-const lane = (position, drainPerMin, extra={}) => ({t:now, state:'queued', position, drainPerMin, ...extra});
+const lane = (position, drainPerMin, extra={}) => ({t:now, state:'queued', position, drainPerMin, lowQueue:{t:extra.t??now,position,drainPerMin}, ...extra});
 const route = ({lanes={}, familyQueue={}, resetMin=540, ttAvailable=false, daily={[SOL]:bucket(),[ASTRA]:bucket()}, args=['implement-hard'], history=[]}={}) => {
   fs.writeFileSync(path.join(traeHome,'lane-state.json'),JSON.stringify(lanes));
   fs.writeFileSync(path.join(traeHome,'queue-state.json'),JSON.stringify(familyQueue));
@@ -98,7 +98,7 @@ try {
     assert.equal(e.basis,'stalled');assert.equal(e.unknown,false);assert.equal(e.completionMin,null);
   }
   assert.equal(laneEta({workMin:90,requests:120,bucketDepleted:true,unknown:true}).basis,'unknown');
-  r = route({lanes:{[SOL]:lane(500,0.5),[ASTRA]:lane(null,null,{state:'ready',lastProgressAt:now})},args:['implement-hard','--shared-lock']});
+  r = route({lanes:{[SOL]:lane(500,0.5),[ASTRA]:lane(null,null,{state:'ready',lastProgressAt:now,lowStart:{t:now,minutes:1}})},args:['implement-hard','--shared-lock']});
   assert.deepEqual([r.pick.account,r.pick.model],['trae',ASTRA],'ready Astra starts before the long depleted Sol queue');
   assert.ok([...r.notes,...r.fixedNotes].some((s)=>/take the lease\/lock only after the first model response/.test(s)));
   // Same moderately queued lane: a small task beats the reset, a large one is scheduled for it.
@@ -133,6 +133,21 @@ try {
   assert.deepEqual(review.routing.eta.byCategoryEffort['implement-hard:xhigh'],{samples:3,medianMinutes:9,usable:true});
   // Progress/drain are model-specific; a requeue or position increase clears incompatible old evidence.
   const telemetry = path.join(tmp,'telemetry'); fs.mkdirSync(telemetry);
+  const low = createQueueRecorder(telemetry,SOL,now-4*min);
+  low({state:'waiting',modelQuotaLowPriority:true,position:30},now-3*min);
+  low({state:'waiting',modelQuotaLowPriority:true,position:15},now-2*min);
+  assert.equal(readLaneState(telemetry,now)[SOL].lowQueue.drainPerMin,15);
+  low({state:'ready',firstWork:true},now-min);
+  assert.equal(readLaneState(telemetry,now)[SOL].lowStart.minutes,3);
+  low.stop();
+  for (const [model, upgraded] of [['low-start',false],['upgraded-start',true]]) {
+    const admit = createQueueRecorder(telemetry,model,now-2*min);
+    admit({state:'waiting',modelQuotaLowPriority:true},now-min);
+    if (upgraded) admit({state:'ready',modelQuotaLowPriority:false},now-1000);
+    admit({state:'ready',firstWork:true},now);
+    admit.stop();
+    assert.equal(readLaneState(telemetry,now)[model].lowStart?.minutes,upgraded ? undefined : 2);
+  }
   const record = createQueueRecorder(telemetry,SOL);
   record({state:'queued',position:100},now-2*min); record({state:'queued',position:90},now);
   assert.equal(readLaneState(telemetry,now)[SOL].drainPerMin,5);

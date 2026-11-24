@@ -1,0 +1,97 @@
+[
+  {
+    "name": "W784-film-export-cache-dir-and-trial",
+    "category": "implement-hard",
+    "impact": "service",
+    "t": 1795531838836,
+    "model": "gpt-6.2-sol",
+    "effort": "xhigh",
+    "familyQueue": {
+      "high": {
+        "position": 304,
+        "t": 1795530655611
+      },
+      "lowPriority": true,
+      "position": 50,
+      "state": "waiting",
+      "t": 1795531781200
+    },
+    "remainingShare": 0
+  },
+  {
+    "name": "W785-parity-tests-in-landing-bar",
+    "category": "implement",
+    "impact": "service",
+    "t": 1795531839081,
+    "model": "gpt-6.2-sol",
+    "effort": "high",
+    "familyQueue": {
+      "high": {
+        "position": 304,
+        "t": 1795530655611
+      },
+      "lowPriority": true,
+      "position": 50,
+      "state": "waiting",
+      "t": 1795531781200
+    },
+    "remainingShare": 0
+  },
+  {
+    "name": "W786-ppe-mobile-device-checks",
+    "category": "implement",
+    "impact": "service",
+    "t": 1795531839340,
+    "model": "gpt-6.2-sol",
+    "effort": "high",
+    "familyQueue": {
+      "high": {
+        "position": 304,
+        "t": 1795530655611
+      },
+      "lowPriority": true,
+      "position": 50,
+      "state": "waiting",
+      "t": 1795531781200
+    },
+    "remainingShare": 0
+  },
+  {
+    "name": "T268-ios-cov-8633426",
+    "category": "build-run",
+    "impact": "service",
+    "t": 1795531842746,
+    "model": "gpt-6.2-sol",
+    "effort": "medium",
+    "familyQueue": {
+      "high": {
+        "position": 304,
+        "t": 1795530655611
+      },
+      "lowPriority": null,
+      "position": null,
+      "state": "ready",
+      "t": 1795531839171
+    },
+    "remainingShare": 0
+  },
+  {
+    "name": "T269-r14-fps-rootcause",
+    "category": "implement",
+    "impact": "throwaway",
+    "t": 1795531843006,
+    "model": "gpt-6.2-sol",
+    "effort": "high",
+    "familyQueue": {
+      "high": {
+        "position": 304,
+        "t": 1795530655611
+      },
+      "lowPriority": null,
+      "position": null,
+      "state": "ready",
+      "t": 1795531839171
+    },
+    "remainingShare": 0
+  }
+]

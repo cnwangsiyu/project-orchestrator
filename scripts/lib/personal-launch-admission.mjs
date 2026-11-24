@@ -9,10 +9,11 @@ import { readPersonalCodexQuota } from './codex-quota.mjs';
 
 export function assertExclusiveNewThread({ account = 'main', vendor = 'codex', continuation,
   profiles = {}, shared, name, time = Date.now(), cache }, allowRefresh = true) {
-  if (continuation || vendor !== 'codex' || company(profiles[account])
-    || !profiles[account] && ['ttadk', 'trae'].includes(account)) return;
+  if (continuation || vendor !== 'codex') return;
   const refuse = detail => { throw Object.assign(Error(`[personal-exclusive-launch-refused] ${detail}; re-route ${name ?? account} under the current policy before starting a new thread.`),
     { code: 'PERSONAL_EXCLUSIVE_LAUNCH_REFUSED', exitCode: 1 }); };
+  if (account === 'b') refuse('account b is ineligible for new work');
+  if (company(profiles[account]) || !profiles[account] && ['ttadk', 'trae'].includes(account)) return;
   let raw;
   try { raw = JSON.parse(fs.readFileSync(path.join(shared, PERSONAL_PRIORITY_FILE), 'utf8')); }
   catch (error) { if (error.code === 'ENOENT') return; refuse('current personal priority window is unreadable'); }

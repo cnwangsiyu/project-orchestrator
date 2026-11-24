@@ -27,15 +27,18 @@ export function dayExhaustion(account, lane, now) {
 export function unavailableDayQuota(account, lane, snapshot) {
   const quota = dayExhaustion(account, lane, snapshot.decisionAt);
   if (!quota || account.kind !== 'trae') return quota;
-  const position = known(lane.position), drain = known(lane.drainPerMin), state = known(lane.queueState);
   const patience = snapshot.personalFallback?.queueWaitMinutes ?? 5;
-  if (state === 'waiting' && known(lane.progressAt) === null || position > 0 && drain === 0)
-    return { ...quota, reason: `flat/stalled queue > ${patience} min` };
-  if (position > 0 && drain > 0) {
-    const delay = position / drain;
-    return delay <= patience ? null : { ...quota, reason: `predicted start ~${Math.round(delay)} min > ${patience} min` };
+  if (known(lane.ownWaiting)) return { ...quota, reason: 'another turn is waiting on this model' };
+  const family = known(lane.familyQueue);
+  const queues = [known(lane.lowQueue), family?.lowPriority === true && family].filter(q => q?.position > 0 || q?.position === 0 && q.drainPerMin > 0);
+  for (const q of queues) {
+    if (!(Number.isFinite(q.drainPerMin) && q.drainPerMin > 0))
+      return { ...quota, reason: 'low-priority queue has no measured drain' };
+    const delay = q.position / q.drainPerMin;
+    if (delay > patience) return { ...quota, reason: `predicted start ~${Math.round(delay)} min > ${patience} min` };
   }
-  if ((position === null || position === 0) && (state === 'ready' || position === 0 && state !== 'waiting')) return null;
+  const start = known(lane.lowStart);
+  if (queues.length || start !== null && start <= patience) return null;
   return { ...quota, reason: 'low-priority start unmeasured' };
 }
 

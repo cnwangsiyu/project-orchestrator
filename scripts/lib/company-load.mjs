@@ -56,7 +56,7 @@ const queueRow = (r, now) => {
   const high = age(r.high?.t, now) != null && highPos > BALANCE.queuePosition ? { t: r.high.t, position: highPos } : null;
   return { t: r.t, position: position != null && position >= 0 ? position : null,
     state: ['queued', 'waiting', 'ready'].includes(r.state) ? r.state : 'unknown',
-    lowPriority: typeof r.lowPriority === 'boolean' ? r.lowPriority : null, ...(high ? { high } : {}) };
+    ...(num(r.drainPerMin) !== null ? { drainPerMin:num(r.drainPerMin) } : {}), lowPriority: typeof r.lowPriority === 'boolean' ? r.lowPriority : null, ...(high ? { high } : {}) };
 };
 export const freshQueue = (rows, now = Date.now()) => Object.fromEntries(Object.entries(rows ?? {}).flatMap(([family, r]) => {
   const q = queueRow(r, now);
@@ -74,7 +74,7 @@ export const readLaneState = (home, now = Date.now()) => home ? Object.fromEntri
     const t = num(r.t), ageMin = age(t, now);
     if (ageMin == null) return [];
     return [[model.toLowerCase(), { t, ageMin, position: num(r.position), drainPerMin: num(r.drainPerMin),
-      lastProgressAt: num(r.lastProgressAt), itemsPerMin: num(r.itemsPerMin),
+      lowQueue: r.lowQueue, lowStart: r.lowStart, lastProgressAt: num(r.lastProgressAt), itemsPerMin: num(r.itemsPerMin),
       state: ['queued', 'waiting', 'ready'].includes(r.state) ? r.state : 'unknown' }]];
   })) : {};
 const writeLaneState = (home, model, sample, now = Date.now()) => {
@@ -92,11 +92,11 @@ const writeLaneState = (home, model, sample, now = Date.now()) => {
       const dt = (t - prev.t) / 60000, drop = prev.position - sample.position;
       if (dt > 0 && drop >= 0) drainPerMin = drop / dt;
     }
-    rows[model] = { t, position: num(sample.position), drainPerMin,
+    rows[model] = { t, lowQueue: sample.lowQueue ?? prev?.lowQueue, lowStart: sample.lowStart ?? prev?.lowStart, position: num(sample.position), drainPerMin,
       lastProgressAt: sample.progress ? t : sample.state === 'ready' ? prev?.lastProgressAt ?? null : null,
       itemsPerMin: num(sample.itemsPerMin) ?? (sample.state === 'ready' ? prev?.itemsPerMin ?? null : null),
       state: ['queued', 'waiting', 'ready'].includes(sample.state) ? sample.state : 'unknown' };
-    const clean = Object.fromEntries(Object.entries(rows).map(([k, v]) => [k, { t: v.t, position: v.position,
+    const clean = Object.fromEntries(Object.entries(rows).map(([k, v]) => [k, { t: v.t, lowQueue: v.lowQueue, lowStart: v.lowStart, position: v.position,
       drainPerMin: v.drainPerMin, lastProgressAt: v.lastProgressAt, itemsPerMin: v.itemsPerMin, state: v.state }]));
     const tmp = `${file}.${process.pid}`;
     try { fs.writeFileSync(tmp, JSON.stringify(clean)); fs.renameSync(tmp, file); }
@@ -133,9 +133,10 @@ export const writeQueueState = (home, family, pending, now = Date.now()) => {
   } catch { return BALANCE.queueWriteMs; }
   finally { if (held) try { fs.rmdirSync(lock); } catch {} }
 };
-export const createQueueRecorder = (home, model) => {
+export const createQueueRecorder = (home, model, submittedAt = null) => {
   const family = poolOf(model), key = String(model ?? '').toLowerCase();
   let pending = null, timer = null, stopped = false;
+  let priorPosition = null, lowPriorityTurn = false, sawWork = false;
   const flush = () => {
     timer = null;
     const delay = writeQueueState(home, family, pending);
@@ -147,9 +148,26 @@ export const createQueueRecorder = (home, model) => {
     const high = position > BALANCE.queuePosition ? { t, position } : pending?.high;
     pending = { t, position, state: event.state ?? 'queued', lowPriority: event.modelQuotaLowPriority ?? event.lowPriority ?? null,
       ...(high ? { high } : {}) };
+    let lowQueue, lowStart;
+    if (!sawWork && typeof pending.lowPriority === 'boolean') lowPriorityTurn = pending.lowPriority;
+    if (pending.lowPriority === true && position > 0 && ['queued','waiting'].includes(pending.state)) {
+      const drain = priorPosition && age(priorPosition.t,t) !== null && t > priorPosition.t && position <= priorPosition.position
+        ? (priorPosition.position - position) * 60000 / (t - priorPosition.t) : null;
+      pending.drainPerMin = drain;
+      lowQueue = { t, position, drainPerMin: drain };
+      priorPosition = { t, position };
+    } else {
+      priorPosition = null;
+    }
+    if (event.firstWork && !sawWork) {
+      if (lowPriorityTurn && Number.isFinite(submittedAt) && submittedAt <= t)
+        lowStart = { t, minutes: (t - submittedAt) / 60000 };
+      if (lowPriorityTurn) lowQueue = { t, position: 0 };
+      sawWork = true;
+    }
     if (!timer) flush();
     if (idOK(key)) writeLaneState(home, key, { t, position, state: event.state ?? 'queued',
-      progress: !!event.progress, itemsPerMin: event.itemsPerMin }, t);
+      lowQueue, lowStart, progress: !!event.progress, itemsPerMin: event.itemsPerMin }, t);
   };
   record.stop = () => { stopped = true; if (timer) clearTimeout(timer); timer = null; pending = null; };
   return record;

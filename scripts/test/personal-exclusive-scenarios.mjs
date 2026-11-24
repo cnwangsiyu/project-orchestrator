@@ -71,7 +71,7 @@ try {
     historical.decisionAt = before; historical.collectedFrom = before; historical.collectedThrough = before;
     historical.accounts = historical.accounts.filter(a => a.id === 'b');
     historical.lanes = historical.lanes.filter(l => l.accountId === 'b');
-    assert.equal(run(historical).plan.primary.candidate.accountId, 'b', 'pre-decision historical routes remain valid');
+    assert.ok(run(historical).plan.rejected.some(p => p.reason?.code === 'PERSONAL_B_REFUSED'), 'old telemetry cannot authorize new work on b');
   });
   check('company headroom wins during exclusive despite main and b headroom and earlier deadlines', () => {
     const raw = fixture(40, true), { plan, snapshot, view } = run(raw);

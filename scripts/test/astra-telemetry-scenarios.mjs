@@ -77,9 +77,9 @@ try {
   check('published Astra load 60', tr => { tr.load[ASTRA] = { percent: 60, t: now }; }, SOL);
   const loaded = check('published Astra load 55', tr => { tr.load[ASTRA] = { percent: 55, t: now }; });
   assert.match(loaded.why.join('\n'), /gpt-6-astra load 55%/);
-  check('published free depleted lane unchanged', tr => {
+  check('published model load still needs a timed low-priority start when depleted', tr => {
     tr.load[ASTRA] = { percent: 55, t: now }; tr.quota.daily[ASTRA] = bucket(58);
-    write('lane-state.json', { [ASTRA]: { t: now, position: 0, state: 'ready' } });
+    write('lane-state.json', { [ASTRA]: { t: now, position: 0, state: 'ready', lowStart: {t:now,minutes:0.5} } });
   });
   check('depleted units cannot replace unpublished load even with ready telemetry', tr => {
     tr.quota.daily[ASTRA] = bucket(58); write('lane-state.json', { [ASTRA]: { t: now, position: 0, state: 'ready' } });

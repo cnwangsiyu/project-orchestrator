@@ -1557,7 +1557,7 @@ const report = async (threadId, turn, final, usage, observation = {}) => {
 // one line a minute), and the wait's length once it clears. `status --thread` reads the last state from the file.
 const LONG_COMMAND_MAX_MIN = Number(process.env.CODEX_WORKER_LONG_COMMAND_MAX_MIN ?? 240);
 const runningCommands = new Set(); let quietNoted = false;
-const follow = (threadId, turnId, items = []) => {
+const follow = (threadId, turnId, items = [], submittedAt = null) => {
   clearTimeout(setupAlarm);
   const runningTools = new Set(items.filter(item => isToolItem(item) && turnHasRunningTools({items:[item]})).map(item => item.id));
   handlers.push((m) => {
@@ -1576,7 +1576,7 @@ const follow = (threadId, turnId, items = []) => {
   for (const item of items) relay({ method: 'item/completed', params: { threadId, turnId, item } });
   recordModelEvidence(threadId, turnId);
   console.log(`thread=${threadId} turn=${turnId}`);
-  const recordQueue = ['trae','ttadk'].includes(PROF?.kind) ? createQueueRecorder(PROF.home, opts.model ?? threadModel(PROF.home, threadId)) : null;
+  const recordQueue = ['trae','ttadk'].includes(PROF?.kind) ? createQueueRecorder(PROF.home, opts.model ?? threadModel(PROF.home, threadId), submittedAt) : null;
   if (recordQueue) cleanups.add(() => recordQueue.stop());
   let final, usage, last = Date.now();
   const evidence = completionEvidence(items);
@@ -1779,6 +1779,7 @@ const follow = (threadId, turnId, items = []) => {
     void cancel();
     return true;
   };
+  let startObserved = false;
   const queueUpdate = (p) => {
     if (reporting || done) return;
     const t = Date.now(), state = String(p.state ?? 'queued');
@@ -1792,7 +1793,7 @@ const follow = (threadId, turnId, items = []) => {
       queueSince = Math.min(queueSince ?? t,t);
     }
     observedQueueSince = ['waiting', 'queued'].includes(state) ? observedQueueSince ?? t : null;
-    const queue = { state, position: pos, modelQuotaLowPriority: p.modelQuotaLowPriority === true, since: observedQueueSince, turnId,workStarted,
+    const queue = { state, modelId: opts.model ?? threadModel(PROF?.home, threadId), position: pos, modelQuotaLowPriority: p.modelQuotaLowPriority === true, since: observedQueueSince, turnId,workStarted,
       workedMinutesBefore:workedBeforeKnown?workedMs/60000:null,runningTools:runningTools.size,at: t };
     if (PROF?.home) saveQueue(PROF.home, threadId, queue);
     recordQueue?.(p, t);
@@ -1859,6 +1860,10 @@ const follow = (threadId, turnId, items = []) => {
     if ((p.threadId === threadId || p.turnId === turnId) &&
       ((m.method.startsWith('item/') && p.item?.type !== 'userMessage')
         || (m.method === 'thread/tokenUsage/updated' && p.tokenUsage?.total?.outputTokens > 0))) markWorkStarted();
+    if (!startObserved && p.turnId === turnId && m.method.startsWith('item/') && p.item?.type && p.item.type !== 'userMessage') {
+      recordQueue?.({ state:'ready', firstWork:true });
+      startObserved = true;
+    }
     if (!reporting && (p.threadId === threadId || p.turnId === turnId)
       && m.method.startsWith('item/') && p.item?.type !== 'userMessage') {
       clearQueueEpisode();
@@ -1955,11 +1960,12 @@ try {
     const configured = await call('thread/resume', { threadId, config: { ...browserConfig, ...talkback.config }, developerInstructions: instructions }).catch(resumeFallback);
     await waitBrowserTools(threadId);
     markOutputStart();
+    const submittedAt = Date.now();
     const ts = await call('turn/start', {
       threadId, input: textInput(configured ? text : `${talkback.instructions}\n\n${text}`), effort: opts.effort, model: opts.model,
       sandboxPolicy: opts.network !== undefined ? sandboxPolicy(opts.sandbox) : undefined,
     });
-    follow(threadId, ts.turn?.id ?? ts.turnId);
+    follow(threadId, ts.turn?.id ?? ts.turnId, [], submittedAt);
   } else if (cmd === 'turn') {
     if (!opts.thread || !text) die('turn needs --thread and a prompt');
     if (PROF?.kind === 'trae') checkModelAccessAdmission(opts.model ?? threadModel(PROF.home, opts.thread));
@@ -1976,12 +1982,13 @@ try {
     saveLaunch(account ?? 'main', opts.thread, { ...opts, 'auto-reroute-depth': REROUTE_DEPTH }, resolveOwner(opts.owner), { ...modelEvidence(), rolloutFile: sessionPath, rulesVersion });
     await waitBrowserTools(opts.thread);
     markOutputStart();
+    const submittedAt = Date.now();
     const ts = await call('turn/start', {
       threadId: opts.thread, input: textInput(resumed ? text : `${talkback.instructions}\n\n${text}`), effort: opts.effort, model: opts.model,
       sandboxPolicy: opts.sandbox && sandboxPolicy(opts.sandbox), approvalPolicy: CU_APPS.length || BU_ORIGINS.length ? APPROVAL_POLICY : undefined,
     });
     if (PROF?.kind === 'trae' && opts.model) rememberThreadModel(PROF.home, opts.thread, opts.model);
-    follow(opts.thread, ts.turn?.id ?? ts.turnId);
+    follow(opts.thread, ts.turn?.id ?? ts.turnId, [], submittedAt);
   } else if (cmd === 'wait') {
     if (!opts.thread) die('wait needs --thread');
     const resumed = await call('thread/resume', { threadId: opts.thread }).catch(() => null);

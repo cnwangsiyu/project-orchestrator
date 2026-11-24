@@ -63,11 +63,11 @@ test('B2 ordinary full-access company signing works on both roles', () => {
   for (const role of ['primary', 'second']) { const p = run(task('build-run', { flags: { signing: true }, role, sandbox:'danger-full-access',sandboxCeiling:'danger-full-access' }), fixture()); assert.equal(p.kind,'launch'); assert.equal(p.primary.candidate.accountId,'company-a'); }
 });
 test('V02 hidden hard company witness survives exclusions', () => {
-  const p = run(task('debug', { flags: { 'exclude-model': SOL } }), fixture([['a', 'ttadk', [SOL, FLASH]], ['b', 'trae', [ASTRA]]]));
-  assert.equal(p.kind, 'launch'); assert.equal(p.primary.candidate.accountId, 'b'); assert.equal(p.primary.candidate.modelId, ASTRA);
+  const p = run(task('debug', { flags: { 'exclude-model': SOL } }), fixture([['a', 'ttadk', [SOL, FLASH]], ['b-company', 'trae', [ASTRA]]]));
+  assert.equal(p.kind, 'launch'); assert.equal(p.primary.candidate.accountId, 'b-company'); assert.equal(p.primary.candidate.modelId, ASTRA);
 });
 test('V03 catalog without Sol, unavailable efforts and unknown supervisor', () => {
-  const raw = fixture([['a', 'ttadk', [FLASH]], ['b', 'trae', [SOL]]]); raw.accounts[1].transport = null;
+  const raw = fixture([['a', 'ttadk', [FLASH]], ['b-company', 'trae', [SOL]]]); raw.accounts[1].transport = null;
   const p = run(task(), raw); assert.equal(p.primary.candidate.modelId, FLASH);
   const s = createSnapshot(raw), c = candidate(s, 'a', FLASH);
   assert.equal(pAvailable(task(), s, { ...c, effort: 'unsupported' }).reason.code, 'CATALOG_UNSUPPORTED');
@@ -115,7 +115,7 @@ test('V09 exact launch identity and fresh-state approval revocation', () => {
   raw.accounts[0].auth = false; assert.equal(validatePlan(p, createSnapshot(raw)).ok, false);
 });
 test('V10/V11 real retry floor and missing history', () => {
-  const raw = fixture([['b', 'trae', [SOL, ASTRA, 'gpt-5.6-sol']]]);
+  const raw = fixture([['b-company', 'trae', [SOL, ASTRA, 'gpt-5.6-sol']]]);
   let p = run(task('debug', { failures: 1, previousAttempts: [attempt()] }), raw); assert.equal(p.kind, 'launch'); assert.equal(p.primary.candidate.modelId, ASTRA);
   p = run(task('debug', { failures: 1 }), raw); assert.equal(p.kind,'launch');assert.ok(!hasCode(p,'PREVIOUS_ATTEMPT_UNKNOWN'));
   p = run(task('analysis', { previousAttempts: [attempt(SOL, 'high')] }), fixture([['a', 'ttadk', ['gpt-5.6-sol']]]));
@@ -186,7 +186,7 @@ test('actual health storage rejects old success and superseded probe claims', ()
 });
 test('V16 required two-family adversarial set and scarce reviewer gate', () => {
   const t = task('review-high', { flags: { security: true,'review-class':'D','review-reason':'named adversarial review' }, artifactRevision: 'artifact-1' });
-  const raw = fixture([['a', 'ttadk', [KIMI]], ['b', 'trae', [FLASH]]]);
+  const raw = fixture([['a', 'ttadk', [KIMI]], ['b-company', 'trae', [FLASH]]]);
   const p = run(t, raw); assert.equal(p.kind, 'launch'); assert.equal(p.primary.candidate.modelId, KIMI); assert.equal(p.reviewers[0].candidate.modelId, FLASH);
   assert.equal(p.gates.some((g) => /GPT\/Claude/.test(g.reason.text)), false);
   const pending = run(t, fixture([['a', 'ttadk', [KIMI]]])); assert.equal(pending.kind,'launch');assert.ok(pending.gates.some(g=>g.phase==='acceptance'&&g.reason.code==='REVIEWER_PENDING'));
@@ -279,16 +279,16 @@ test('unknown ETA remains optimistic, bounded and explicitly uncertain', () => {
   assert.equal(p.primary.estimate.startDelayMin, null); assert.equal(p.primary.estimate.patienceMin, 30);
 });
 test('fresh stalled lanes rank after runnable lanes and never get an optimistic ETA', () => {
-  const raw=fixture([['a','ttadk',[SOL]],['b','trae',[ASTRA]]]);
+  const raw=fixture([['a','ttadk',[SOL]],['b-company','trae',[ASTRA]]]);
   Object.assign(raw.lanes[1],{mode:'bucket-free',position:181,drainPerMin:0,state:'waiting',progressAt:null});
   for(const background of [false,true]) assert.equal(run(task('debug',{background}),raw).primary.candidate.accountId,'a');
-  const snapshot=createSnapshot(raw),e=estimateCandidate(task('debug'),snapshot,candidate(snapshot,'b',ASTRA,'xhigh'));
+  const snapshot=createSnapshot(raw),e=estimateCandidate(task('debug'),snapshot,candidate(snapshot,'b-company',ASTRA,'xhigh'));
   assert.equal(e.confidence,'STALLED');assert.equal(e.startDelayMin,null);assert.equal(e.completionMin,null);
-  const only=fixture([['b','trae',[ASTRA]]]);Object.assign(only.lanes[0],raw.lanes[1],{id:'b:gpt-6-astra',accountId:'b'});
+  const only=fixture([['b-company','trae',[ASTRA]]]);Object.assign(only.lanes[0],raw.lanes[1],{id:'b:gpt-6-astra',accountId:'b-company'});
   const p=run(task('debug'),only);noCommand(p);assert.equal(p.kind,'defer');assert.equal(p.reason.code,'ETA_STALLED');
-  const waiting=fixture([['b','trae',[ASTRA]]]);Object.assign(waiting.lanes[0],{position:null,drainPerMin:null,state:'waiting'});
+  const waiting=fixture([['b-company','trae',[ASTRA]]]);Object.assign(waiting.lanes[0],{position:null,drainPerMin:null,state:'waiting'});
   assert.equal(run(task('debug'),waiting).reason.code,'ETA_STALLED');
-  const personal=fixture([['b','trae',[ASTRA]],['personal','chatgpt',[SOL]]]);Object.assign(personal.lanes[0],{position:181,drainPerMin:0,state:'waiting'});
+  const personal=fixture([['b-company','trae',[ASTRA]],['personal','chatgpt',[SOL]]]);Object.assign(personal.lanes[0],{position:181,drainPerMin:0,state:'waiting'});
   const approved=approve(personal,task('debug'),candidate(createSnapshot(personal),'personal',SOL,'xhigh'),'personal-quota',true);
   assert.equal(run(approved,personal).primary.candidate.accountId,'personal','scoped runnable personal capacity also ranks before a stalled company lane');
 });
@@ -317,18 +317,18 @@ test('light work keeps its ladder when depleted Sol would finish sooner', () => 
   const p=run(task('lookup'),raw);assert.equal(p.primary.candidate.modelId,'gpt-5.6-terra');
 });
 test('runnable measured company queue beats reset; auth cannot project recovery', () => {
-  const raw = fixture([['a', 'ttadk', [SOL]], ['b', 'trae', [SOL]]]); raw.accounts[0].providerDenied = true; raw.accounts[0].denialResetAt = NOW + 600000;
+  const raw = fixture([['a', 'ttadk', [SOL]], ['b-company', 'trae', [SOL]]]); raw.accounts[0].providerDenied = true; raw.accounts[0].denialResetAt = NOW + 600000;
   Object.assign(raw.lanes[1], { mode: 'low-priority', position: 500, drainPerMin: 1 });
-  let p = run(task(), raw); assert.equal(p.kind, 'launch');assert.equal(p.primary.candidate.accountId,'b');
-  raw.accounts[0].auth = false; p = run(task(), raw); assert.equal(p.kind, 'launch'); assert.equal(p.primary.candidate.accountId, 'b');
+  let p = run(task(), raw); assert.equal(p.kind, 'launch');assert.equal(p.primary.candidate.accountId,'b-company');
+  raw.accounts[0].auth = false; p = run(task(), raw); assert.equal(p.kind, 'launch'); assert.equal(p.primary.candidate.accountId, 'b-company');
   raw.accounts[0].auth = true; raw.accounts[0].providerDenied = false; raw.accounts[0].quota = [{ bucketId: 'daily', unit: 'tokens', usage: { used: 100, limit: 100, resetsAt: NOW + 600000 }, priority: 'depleted' }];
   assert.equal(run(task(), raw).primary.candidate.accountId, 'a');
 });
 test('incomparable costs omit term for the entire cohort and sort transitively', () => {
-  const raw = fixture([['a', 'ttadk', [SOL]], ['b', 'ttadk', [SOL]], ['c', 'ttadk', [SOL]]]);
+  const raw = fixture([['a', 'ttadk', [SOL]], ['b-company', 'ttadk', [SOL]], ['c', 'ttadk', [SOL]]]);
   raw.lanes.forEach((l, i) => l.costs = [{ bucketId: i === 1 ? 'other' : 'one', unit: 'tokens', normalizedShare: 0.3 - i * 0.1 }]);
   const s = createSnapshot(raw), t = task(), rows = enumerateCandidates(t, s).candidates.filter((c) => c.effort === 'medium').map((c) => ({ candidate: c, estimate: estimateCandidate(t, s, c) }));
-  const expected = ['a', 'b', 'c'];
+  const expected = ['a', 'b-company', 'c'];
   for (const perm of [rows, [...rows].reverse(), [rows[1], rows[2], rows[0]]]) { const ordered = orderCandidates(t, s, perm); assert.equal(ordered.terms.costComparable, false); assert.deepEqual(ordered.rows.map((r) => r.candidate.accountId), expected); }
 });
 test('direct progress overrides coarse congested family load', () => {
@@ -407,13 +407,13 @@ test('canonical launch tuple rejects forged model family and constraint hashes',
   assert.equal(validatePlan(p, s, { proposed: { ...p.primary.candidate, taskId: t.taskId, routeId: p.routeId, planHash: p.planHash, role: t.role, sandbox: t.sandbox } }).ok, true);
 });
 test('adversarial policy lock precedes light conservation and ETA', () => {
-  const raw = fixture([['a', 'ttadk', [KIMI]], ['b', 'trae', [FLASH]]]); raw.lanes[0].readyAt = NOW + 600000; raw.lanes[1].mode = 'bucket-free';
+  const raw = fixture([['a', 'ttadk', [KIMI]], ['b-company', 'trae', [FLASH]]]); raw.lanes[0].readyAt = NOW + 600000; raw.lanes[1].mode = 'bucket-free';
   const p = run(task('lookup', { flags: { adversarial: true } }), raw); assert.equal(p.primary.candidate.modelId, KIMI);
-  const sameRung=fixture([['a','ttadk',[FLASH]],['b','trae',[FLASH]]]);
+  const sameRung=fixture([['a','ttadk',[FLASH]],['b-company','trae',[FLASH]]]);
   Object.assign(sameRung.lanes[1],{mode:'low-priority',progressAt:NOW,drainPerMin:5,queueState:'ready',loadPercent:70,loadSource:'model'});
   const hot=run(task('review',{flags:{adversarial:true}}),sameRung);assert.equal(hot.primary.candidate.accountId,'a');
   sameRung.lanes[1].loadPercent=40;
-  const free=run(task('review',{flags:{adversarial:true}}),sameRung);assert.equal(free.primary.candidate.accountId,'b');
+  const free=run(task('review',{flags:{adversarial:true}}),sameRung);assert.equal(free.primary.candidate.accountId,'b-company');
 });
 test('ordinary class-A release preserves the pending independent strong family obligation', () => {
   const raw=fixture([['a','ttadk',[SOL]],['p','claude',['opus']]]);
@@ -493,7 +493,7 @@ for (let seed = 1; seed <= sequences; seed++) {
   const attempts = [attempt(seed % 2 ? ASTRA : SOL, seed % 2 ? 'xhigh' : 'high')];
   let strongest = attempts[0].actual.modelId, floorEffort = EFFORTS.indexOf(attempts[0].actual.effort);
   for (let step = 0; step < steps; step++) {
-    const raw = fixture([['a', 'ttadk', [SOL, ASTRA]], ['b', 'trae', [ASTRA]]]);
+    const raw = fixture([['a', 'ttadk', [SOL, ASTRA]], ['b-company', 'trae', [ASTRA]]]);
     raw.accounts[0].auth = r() > 0.15; raw.accounts[1].transport = r() > 0.15;
     raw.accounts[0].catalog = r() > 0.3 ? [SOL, ASTRA] : [SOL]; raw.accounts[1].catalog = r() > 0.3 ? [ASTRA] : [];
     raw.lanes[2].mode = r() > 0.5 ? 'priority' : 'low-priority';

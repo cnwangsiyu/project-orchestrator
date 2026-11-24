@@ -14,15 +14,25 @@ const file = path.join(tmp,'snapshot.json');
 const env = {...process.env, HOME:tmp, RULES_SHARED:tmp, QUOTA_CACHE:path.join(tmp,'cache.json'),
   CODEX_ACCOUNTS:path.join(tmp,'accounts.json'), ROUTE_LOG:'0', ROUTE_NOW:String(captured.decisionAt),
   ROUTE_SNAPSHOT_FILE:file, ROUTE_LOG_FILE:path.join(tmp,'route-log.jsonl'), ROUTE_REQUEST_ID:'live-fixture'};
-const cli = (args, raw=captured, approve=false) => {
+const cli = (args, raw=startable, approve=false) => {
   if (['browser', 'ui-browser'].includes(args[0]) && !args.includes('--origins') && !args.includes('--browser-origins'))
     args = [...args, '--browser-origins', '*.bytedance.net'];
   if(approve) {const clean=args.slice(),at=clean.indexOf('--user-ok');if(at>=0)clean.splice(at,2);const offered=cli(clean,raw),yes=structuredClone(raw);yes.approvals=[{id:'fixture-approval',userDecisionRef:'synthetic-user-yes',revoked:false,grantedAt:captured.decisionAt-1000,expiresAt:captured.decisionAt+60000,scopes:offered.plan.gates.filter(g=>g.scope).map(g=>({...g.scope,allowPersonalWithCompany:true}))}];return cli([...clean,'--user-ok','fixture-approval'],yes);}
-  fs.writeFileSync(file,JSON.stringify(raw));
+  const input = structuredClone(raw);
+  for (const lane of input.lanes) {
+    if (lane.mode === 'low-priority' && lane.position.source === 'owner-reproduction-2026-11-15')
+      lane.lowQueue = {position:lane.position.value,drainPerMin:lane.drainPerMin.value};
+  }
+  fs.writeFileSync(file, JSON.stringify(input));
   return parseRouteJSON(execFileSync(process.execPath,[route,...args,'--dry','--json'],{env,encoding:'utf8',maxBuffer:16<<20}));
 };
-const copy=()=>structuredClone(captured);
+// The CLI controls below exercise independent capabilities and gates on a startable lane.
+const startable = structuredClone(captured);
+for (const lane of startable.lanes.filter(l=>l.accountId==='trae' && l.mode==='low-priority')) lane.lowStart=0;
+const copy=()=>structuredClone(startable);
 try {
+  const original = cli(['implement-hard','--impact','service'],captured);
+  assert.notEqual(original.pick?.account,'trae','raw captured progress alone cannot qualify the exhausted hard lane');
   const quality=parseRouteJSON(fs.readFileSync(new URL('./fixtures/quality-first-2026-11-15.json',import.meta.url),'utf8'));
   for(const args of [['analysis'],['research'],['implement','--impact','service'],['docs'],['review']]) {
     const o=cli(args,quality);assert.equal(o.pick.model,'gpt-6.1-sol');assert.equal(o.pick.account,'trae',args.join(' '));

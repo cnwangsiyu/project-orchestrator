@@ -40,10 +40,10 @@ try {
     assert.equal(plan.trace.candidates.find(r => r.candidate.accountId === 'ttadk').estimate.expiryOpportunity, true);
     assert.equal(plan.primary.candidate.accountId, 'trae', 'free TRAE wins even while TTADK quota expires unused');
   }
-  assert.equal(fixture({ depleted: true, telemetry: { t: now, state: 'ready', position: 0, lastProgressAt: now } }).primary.candidate.accountId, 'trae');
+  assert.equal(fixture({ depleted: true, telemetry: { t: now, state: 'ready', position: 0, lastProgressAt: now } }).primary.candidate.accountId, 'ttadk');
   assert.equal(fixture({ percent: 65 }).primary.candidate.accountId, 'ttadk');
   assert.equal(fixture({ depleted: true, telemetry: { t: now, state: 'queued', position: 500, drainPerMin: 1 } }).primary.candidate.accountId, 'ttadk');
-  console.log('PASS free/depleted-progressing TRAE before expiring TTADK; congestion and queue fallback preserved');
+  console.log('PASS free TRAE remains eligible; generic progress on an exhausted model yields to ready TTADK');
 } finally {
   for (const name of Object.keys(process.env)) if (!(name in saved)) delete process.env[name];
   Object.assign(process.env, saved);

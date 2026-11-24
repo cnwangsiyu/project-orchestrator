@@ -52,6 +52,13 @@ try {
     console.log(JSON.stringify({ at: '2026-11-23 18:45 PT', kind: result.kind, pick: result.pick && { account: result.pick.account, model: result.pick.model, effort: result.pick.effort },
       reason: result.why.filter(s => /previous release|waiting|stalled/.test(s)), previousRejections: rejected(rowFor(result.plan, 'trae', previous)) }, null, 2));
   } else {
+    for (const record of JSON.parse(fs.readFileSync(path.join(root,'scripts/test/fixtures/depleted-sol-routes.json')))) {
+      const raw = exhaust(fixture([record.model]));
+      raw.decisionAt = raw.collectedFrom = raw.collectedThrough = record.t;
+      Object.assign(raw.lanes[0], {position:0, readyAt:record.t, progressAt:record.t, queueState:'ready', familyQueue:record.familyQueue});
+      const plan = run(raw,task({taskId:record.name,category:record.category,impact:record.impact}));
+      assert.ok(plan.trace.candidates.filter(r=>r.candidate.accountId==='trae').every(r=>rejected(r).includes('DAY_QUOTA_EXHAUSTED')),record.name);
+    }
     // Replay the two original route-log inputs, before the manual account exclusions.
     const terra = 'gpt-5.6-terra', astra = 'gpt-6-astra';
     for (const [name, project, category, impact, at, expected] of [
@@ -108,8 +115,11 @@ try {
       assert.deepEqual([plan.primary.candidate.accountId, plan.primary.candidate.modelId], ['trae', latest], condition);
     }
     for (const [label, telemetry, expected] of [
-      ['ready', { position: 0, queueState: 'ready' }, latest],
-      ['at threshold', { position: 10, drainPerMin: 2 }, latest],
+      ['ready without submit evidence', { position: 0, queueState: 'ready' }, previous],
+      ['observed low-priority start', { position:0,queueState:'ready',lowStart: 2 }, latest],
+      ['own waiter', { lowStart: 1, ownWaiting: true }, previous],
+      ['unmeasured family wait', { lowStart: 1, familyQueue: {lowPriority:true,position:157} }, previous],
+      ['at threshold', { position: 10, drainPerMin: 2, lowQueue:{position:10,drainPerMin:2} }, latest],
       ['over threshold', { position: 11, drainPerMin: 2 }, previous],
       ['flat', { position: 301, drainPerMin: 0 }, previous],
       ['unmeasured', { position: null, queueState: null }, previous],
