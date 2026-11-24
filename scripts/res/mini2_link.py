@@ -94,6 +94,16 @@ def resolve():
     return address
 
 
+def cable_ssh(address, timeout=10):
+    if not re.fullmatch(r"fe80:[0-9a-f:]+%en[0-9]+", address, re.I):
+        raise ValueError("invalid cable address")
+    return ["/usr/bin/ssh", "-6", "-Tax", "-oBatchMode=yes", f"-oConnectTimeout={timeout}",
+            "-oConnectionAttempts=1", "-oStrictHostKeyChecking=yes", "-oUpdateHostKeys=no",
+            "-oHostKeyAlias=" + HOST, "-oHostname=" + address.replace("%", "%%"), "-oControlPath=none",
+            "-oProxyCommand=none", "-oProxyJump=none", "-oClearAllForwardings=yes",
+            "-oPermitLocalCommand=no", "bytedance@" + HOST]
+
+
 def observation(mode):
     if mode != "probe":
         return {"link": mode.upper()}
@@ -110,11 +120,7 @@ def observation(mode):
         return result
 
     address = result["address"]
-    args = ["/usr/bin/ssh", "-6", "-nTax", "-oBatchMode=yes", "-oConnectTimeout=10",
-            "-oConnectionAttempts=1", "-oStrictHostKeyChecking=yes", "-oUpdateHostKeys=no",
-            "-oHostKeyAlias=" + HOST, "-oHostname=" + address.replace("%", "%%"), "-oControlPath=none",
-            "-oProxyCommand=none", "-oProxyJump=none", "-oClearAllForwardings=yes",
-            "-oPermitLocalCommand=no", "bytedance@" + HOST,
+    args = cable_ssh(address) + [
             'test "$(hostname)" = Bytedances-Mac-mini.local && true && printf "mini2-link-ok\\n"']
     try:
         ssh = subprocess.run(args, capture_output=True, timeout=12)
