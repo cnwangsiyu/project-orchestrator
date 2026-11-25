@@ -30,7 +30,7 @@ try {
   assert.match(verbose,/fixedNotes: build brief:/);assert.ok(verbose.length>output.length);
   const noDeepSeek = JSON.parse(cli([...args, '--exclude-model', 'deepseek', '--json']));
   assert.ok(!noDeepSeek.notes.some(note => note.startsWith('DeepSeek:')), 'catalog presence alone cannot emit DeepSeek limits');
-  const deepSeek = JSON.parse(cli(['implement', '--read-only', '--impact', 'service', '--exclude-model', 'gpt,seed,gemini', '--exclude-account', 'main', '--json']));
+  const deepSeek = JSON.parse(cli(['implement', '--read-only', '--impact', 'service', '--exclude-model', 'gpt,seed,gemini', '--exclude-account', 'main,b', '--json']));
   assert.match(deepSeek.pick.model, /^deepseek/);
   assert.ok(deepSeek.notes.some(note => note.startsWith('DeepSeek:')), 'chosen DeepSeek receives its limits');
   const timed = structuredClone(raw);
