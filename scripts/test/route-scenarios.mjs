@@ -40,7 +40,7 @@ const S = {
   codexOut: { claude: cl(30, 48), codex: [acc('main', 99, 48, [], { allowed:false })] },
   codexOutClaudeOver: { claude: cl(85, 48), codex: [acc('main', 99, 48, [], { allowed:false })] },
   twoAccounts: { claude: cl(10, 120), codex: [acc('main', 99, 120, [400]), acc('fixture-b', 40, 20)] },
-  bothSpent: { claude: cl(10, 120), codex: [acc('main', 99, 120, [400], { allowed:false }), acc('b', 99, 20)] },
+  bothSpent: { claude: cl(10, 120), codex: [acc('main', 99, 120, [400], { allowed:false }), acc('b', 99, 20, [], { allowed:false })] },
   expiringCard: { claude: cl(10, 120), codex: [acc('main', 60, 120, [0.5])] },
   cardDeadline: { claude: cl(10, 120), codex: [acc('main', 40, 120, [30]), acc('fixture-b', 10, 20)] },
   claude5h: { claude: [...cl(10, 120), { ...five(97, 3), label: 'session' }], codex: [acc('main', 20, 120)] },
