@@ -24,8 +24,9 @@ try {
   assert.equal(digestText.match(/^version:/gm)?.length, 1, 'integration must publish one digest version');
   assert.equal(digestText.match(/^## Changes In This Version$/gm)?.length, 1);
   assert.ok(digestText.split('\n').length<=61,'digest line budget');
-  assert.equal(digest.version, '2026-11-24.7');
-  assert.match(digestText, /^- 2026-11-24\.7: fail-closed masking scope/m);
+  assert.equal(digest.version, '2026-11-24.8');
+  assert.match(digestText, /^- 2026-11-24\.\d+: /m);
+  assert.match(digestText, /2026-11-24\.7: fail-closed masking scope/);
   assert.match(digestText, /^- 2026-11-24\.6:.*2026-11-24\.5:.*2026-11-24\.4:.*2026-11-24\.3: restored this history line.*2026-11-24\.2: device-app guard.*2026-11-18\.14:/m);
   assert.ok(digest.worker.includes('For printing only: never write the result back, never use perl -i/sed -i, and never redirect over the source'));
   assert.match(digest.worker, /Masking tools run only on task-dir logs; never inside a git work tree/);
@@ -40,7 +41,7 @@ try {
   assert.match(digest.worker, /If `codex-worker` is not on PATH, use the launcher's absolute Node\/script command with its RULES_SHARED, account and thread/);
   assert.ok(digest.worker.includes('node <skill>/scripts/codex-worker.mjs --account <account> note --thread <thread> --kind risk "<file and issue, no value>"'));
   assert.match(digest.worker, /Save downloaded CI\/job\/build logs \(bytedcli, curl, etc\.\).*as `\.log`\/`\.txt`\/`\.out`; immediately after download and before any read/);
-  assert.ok(digest.worker.includes('node <skill>/scripts/mask-logs.mjs --force <log-file-or-log-only-dir>'));
+  assert.ok(digest.worker.includes('node <skill>/scripts/mask-logs.mjs --force <log-file>...'));
   assert.match(digest.worker, /proceed only after successful masking.*Read only named masked CI logs with credential-excluding greps/);
   assert.ok(digest.worker.includes('rg -vi "password|passwd|token|secret|apikey|api_key|credential|auth"'));
   assert.match(digest.worker, /Identity uses explicit flags, CODEX_WORKER_\*, runtime CODEX_THREAD_ID\/TRAECLI_THREAD_ID or exactly one running public context matching cwd; ambiguity exits 2/);
