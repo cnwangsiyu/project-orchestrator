@@ -58,7 +58,7 @@ export const heldTaskResources = (args, name) => {
     || (project && r.project === project && r.task && [r.task, `${project}-${r.task}`].includes(name)));
   return hold ? `resource ${hold.id} is still held; exit the owning wrapper so it returns the hold before redispatch` : null;
 };
-const runNode = (script, args, { capture = false, timeout = 0,cwd } = {}) => new Promise((resolve, reject) => {
+const runNode = (script, args, { capture = false, timeout = 0,cwd,onSpawn } = {}) => new Promise((resolve, reject) => {
   const child = spawn(process.execPath, [...process.execArgv, script, ...args],
     { cwd,stdio: capture ? ['ignore', 'pipe', 'inherit'] : ['ignore', 'inherit', 'inherit'] });
   let stdout = '', signal = null;
@@ -69,6 +69,7 @@ const runNode = (script, args, { capture = false, timeout = 0,cwd } = {}) => new
   process.once('SIGHUP', onHup);
   const timer = timeout ? setTimeout(() => forward('SIGTERM'), timeout) : null;
   const cleanup = () => { clearTimeout(timer); process.removeListener('SIGINT', onInt); process.removeListener('SIGTERM', onTerm); process.removeListener('SIGHUP', onHup); };
+  if (onSpawn) child.once('spawn', onSpawn);
   child.on('error', (e) => { cleanup(); reject(e); });
   child.on('close', (code, s) => { cleanup(); resolve({ code: code ?? ((s ?? signal) === 'SIGINT' ? 130 : (s ?? signal) === 'SIGHUP' ? 129 : 143), stdout }); });
 });
@@ -183,7 +184,7 @@ export const rerouteWorker = async ({ args, depth, from, reason, prompt, opts, p
       '--vendor','claude','--account',to.account,'--model',pick.model,'--effort',pick.effort,'--user-ok',pick.approvalRef]);
     if(audit.code!==0){state.status='launch-failed';state.exitCode=audit.code;persist();return audit.code;}
     const launched=await runNode(path.join(scripts,'launch-claude-worker.mjs'),claudeArgs,{cwd});
-    state.status=launched.code===0?'following-background':'launch-failed';state.exitCode=launched.code;persist();return launched.code;
+    state.status=launched.code===0?'following-background':'launch-failed';state.exitCode=launched.code;persist();if(launched.code===0)selection.onApplied?.();return launched.code;
   }
   const childArgs = [...pick.workerArgs];
   if(selection?.resume) {
@@ -199,7 +200,7 @@ export const rerouteWorker = async ({ args, depth, from, reason, prompt, opts, p
     }
   }
   state.status = 'following'; state.recovery.workerArgs = childArgs; persist();
-  const result = await runNode(path.join(scripts, 'codex-worker.mjs'), [...childArgs, handover]);
+  const result = await runNode(path.join(scripts, 'codex-worker.mjs'), [...childArgs, handover], {onSpawn:selection?.onApplied});
   state.status = 'finished'; state.exitCode = result.code; persist();
   if (result.code === 0 && route.secondOpinion) {
     // Required company second opinions stay separate, read-only, and never restart the primary task.

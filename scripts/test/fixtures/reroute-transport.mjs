@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { appendNote } from '../../lib/worker-events.mjs';
 import { queueDecisionFile, notifyQueueOwner } from '../../lib/queue-decision.mjs';
 import { saveQueue } from '../../lib/worker-queue.mjs';
 const config = JSON.parse(process.env.REROUTE_FIXTURE);
@@ -51,7 +52,7 @@ globalThis.WebSocket = class {
           message: config.mode === 'policy-start' ? 'cyberPolicy: flagged for possible cybersecurity risk' : 'Model access temporarily restricted. (983)' } }) }); return;
       }
       const turn = { id: 'turn', status: config.readStatus ?? (this.failed ? 'failed' : this.interrupted && config.cancel !== 'unconfirmed' ? 'interrupted' : 'inProgress'),
-        items: config.midTurn && fail && this.midWorked ? [{id:'mid-tool',type:config.midToolType??'commandExecution',status:config.midToolRunning||config.midReadRunning?'inProgress':'completed'}]
+        items: config.midTurn && fail && this.midWorked ? [{id:'mid-tool',type:config.midToolType??'commandExecution',status:this.toolLive||config.midReadRunning?'inProgress':'completed'}]
           : config.readWork && fail ? [{ type: 'commandExecution' }] : [] };
       if(this.interrupted&&config.cancel==='completed') {
         turn.status='completed';turn.items.push({type:'agentMessage',text:'DONE original completed during queue choice'});
@@ -59,6 +60,7 @@ globalThis.WebSocket = class {
       const result = m.method === 'account/rateLimits/read' ? config.usage ?? {}
         : m.method === 'thread/start' ? { thread: { id: 'fixture' } }
         : m.method === 'turn/start' ? { turn } : m.method === 'thread/read' ? { thread: { turns: [turn] } } : {};
+      if (m.method==='thread/read' && this.readyDuringRead) { const notify=this.readyDuringRead;this.readyDuringRead=null;notify(); }
       this.onmessage({ data: JSON.stringify({ id: m.id, result }) });
       if (m.method !== 'turn/start') return;
       setTimeout(() => {
@@ -91,7 +93,7 @@ globalThis.WebSocket = class {
         if(config.queueOwnerSelect) {
           const timer=setInterval(()=>{
             let state;try{state=JSON.parse(fs.readFileSync(queueDecisionFile({account,thread:'fixture',turn:'turn'})));}catch{return;}
-            if(state.status!=='waiting'||!state.options)return;
+            if(state.status!=='waiting'||!state.options||config.chooseDuringTool&&!this.toolLive)return;
             const option=state.options.find(o=>Object.entries(config.queueOwnerSelect).every(([k,v])=>o[k]===v));
             if(!option)return;
             clearInterval(timer);
@@ -106,9 +108,23 @@ globalThis.WebSocket = class {
               fs.writeFileSync(process.env.ROUTE_SNAPSHOT_FILE,JSON.stringify(snapshot));
               choice+=` --user-ok ${granted.stdout.trim()}`;
             }
-            const result=spawnSync('/bin/sh',['-c',choice],{env:process.env,encoding:'utf8',timeout:5000});
-            if(result.status!==0)console.error(`fixture queue choice failed: ${result.stdout} ${result.stderr}`);
-          },100);timer.unref();
+            const chooser=spawn('/bin/sh',['-c',choice],{env:process.env,stdio:['ignore','pipe','pipe']});
+            let stdout='',stderr='';
+            chooser.stdout.on('data',chunk=>{stdout+=chunk;});chooser.stderr.on('data',chunk=>{stderr+=chunk;});
+            chooser.on('close',status=>{
+              fs.appendFileSync(config.rpc,JSON.stringify({method:'fixture/choice-result',status,stdout,stderr})+'\n');
+              if(config.chooseDuringTool && !config.endWithPending) {
+                // A new waiting notification, not the cached sample during the
+                // tool, is the authority to attempt the recorded choice.
+                this.toolLive=false;
+                const realNow=Date.now;
+                Date.now=()=>realNow()-61000;
+                notify('item/completed',{item:{id:'mid-tool',type:config.midToolType??'commandExecution',status:'completed'}});
+                Date.now=realNow;
+                if(!config.noFreshQueue)notify('queue/status',{state:'queued',position:490});
+              }
+            });
+          },50);timer.unref();
         }
         if (config.midTurn) {
           const realNow=Date.now, at=realNow(), queuedAt=at-(config.queueAgeMin??6)*60000;
@@ -121,13 +137,21 @@ globalThis.WebSocket = class {
             if(!config.midToolRunning)notify('item/completed',{item:{...item,status:'completed'}});
           }
           this.midWorked=true;
+          this.toolLive=!!config.midToolRunning;
           Date.now=()=>queuedAt;
+          if (config.midNote) appendNote({ account,thread:'fixture',turn:'turn',owner:flag('owner'),runId:'fixture-stage-note' },'progress','Tool stage completed');
           notify('queue/status',{state:'queued',position:501});
           for(const age of config.midSamples??[]) {
             Date.now=()=>queuedAt+age*60000;
             notify('queue/status',{state:'queued',position:501});
           }
           Date.now=realNow;
+          if (config.chooseDuringTool) setTimeout(()=>{
+            this.toolLive=true;
+            notify('item/started',{item:{...item,status:'inProgress'}});
+            notify('queue/status',{state:'queued',position:500});
+          },125);
+          if (config.readyDuringRead) this.readyDuringRead=()=>notify('queue/status',{state:'ready',position:0});
         } else {
         if (config.progress) notify('item/started', { item: { type: 'commandExecution' } });
         if (config.ready) notify('queue/status', { state: 'ready', position: 0 });

@@ -5,17 +5,17 @@ import { fileURLToPath } from 'node:url';
 import { rulesShared } from './global-rules.mjs';
 import { withLock, writeJson } from './shared-file.mjs';
 import { savedLaunch } from './worker-launch.mjs';
-import { readQueue } from './worker-queue.mjs';
+import { readQueue, queueWaiting as waiting, queueBusy, lastQueueNoteAt, sameQueueEpisode } from './worker-queue.mjs';
 import { readLeases } from './resource-data.mjs';
 import { personalFallbackPolicy } from './pipeline/personal-fallback.mjs';
 import { parseTaskSpec } from './pipeline/taskspec.mjs';
 import { shellQuote } from './pipeline/presentation.mjs';
 import { flagArgs, scopedFlags } from './route-args.mjs';
-import { notifyQueueOwner,settleQueueChoice,queueOwnerNotice } from './queue-decision.mjs';
+import { followerAlive } from './worker-events.mjs';
+import { notifyQueueOwner,queueOwnerNotice } from './queue-decision.mjs';
 
 const root = fileURLToPath(new URL('../..', import.meta.url)).replace(/\/$/, '');
 const read = (file, fallback = null) => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; } };
-const waiting = queue => ['waiting', 'queued'].includes(queue?.state);
 export const queuePolicy = (now = Date.now()) => {
   const file = process.env.PERSONAL_FALLBACK_FILE || path.join(rulesShared(), 'personal-fallback.json');
   return personalFallbackPolicy(fs.existsSync(file) ? read(file) : read(path.join(root, 'references/personal-fallback.json')), now);
@@ -27,7 +27,7 @@ export const queueStatus = (row, profiles) => {
   return queue?.turnId === row.turn ? queue : null;
 };
 export function queueStallLabel(queue, now = Date.now(), row = null) {
-  if (!waiting(queue) || !Number.isFinite(queue.since)) return '';
+  if (!waiting(queue) || queueBusy(queue,now) || !Number.isFinite(queue.since)) return '';
   const elapsed = (now - queue.since) / 60000;
   return elapsed >= (queuePolicy(now)?.queueWaitMinutes ?? 5)
     ? `QUEUE-STALLED ${Math.floor(elapsed)} min @${queue.position ?? '?'} notice=${queueOwnerNotice(row,queue)??'none'}` : '';
@@ -154,7 +154,7 @@ export function createPoolStallMonitor(owner, { emit, waitsOf = readPoolWaits } 
 
 export function createQueueStallMonitor(owner, { profiles = {}, statusOf = row => queueStatus(row, profiles),
   launchOf = row => savedLaunch(row.account, row.thread), quotaOf = () => read(process.env.QUOTA_CACHE || path.join(rulesShared(), 'quota.json'), {}),
-  emit, policyOf = queuePolicy, holdsOf = holdsFor } = {}) {
+  emit, policyOf = queuePolicy, holdsOf = holdsFor, readNotes } = {}) {
   const file = path.join(rulesShared(), 'queue-stall-watch', `${createHash('sha256').update(owner).digest('hex')}.json`);
   const poolPoll = createPoolStallMonitor(owner, { emit });
   const retainProgress = (rows, notes) => rows.filter(row => profiles[row.account]?.kind === 'trae')
@@ -170,7 +170,9 @@ export function createQueueStallMonitor(owner, { profiles = {}, statusOf = row =
       for (const { row, queue, unknown } of statuses) {
         const key = JSON.stringify([row.account, row.thread, row.turn ?? row.runId]); active.add(key);
         if (unknown) continue;
-        if (!waiting(queue)) {delete states[key];settleQueueChoice(row,'ended',now);continue;}
+        if (!waiting(queue)) {delete states[key];continue;}
+        if (queueBusy(queue,now,lastQueueNoteAt(row,notes))) continue;
+        const noteNow=()=>readNotes?.()??notes;
         // A mid-turn re-queue is still waiting: its live follower owns the notice, so never end it here.
         if (queue.workStarted) {delete states[key];continue;}
         let state = states[key];
@@ -178,11 +180,21 @@ export function createQueueStallMonitor(owner, { profiles = {}, statusOf = row =
           lastDecreaseAt: now, position: queue.position ?? null, emitted: false };
         if (Number.isFinite(queue.position) && Number.isFinite(state.position) && queue.position < state.position) state.lastDecreaseAt = now;
         if (Number.isFinite(queue.position)) state.position = queue.position;
+        const validate = () => {
+          // Production statusOf is synchronous. A custom asynchronous observer
+          // must provide an equally current synchronous snapshot to emit.
+          const latest=statusOf(row);
+          return waiting(latest) && (latest.since==null ? queue.since==null && latest.turnId===queue.turnId
+            : sameQueueEpisode(latest,{turn:queue.turnId},queue.since)) && !latest.workStarted
+            && !queueBusy(latest,now,lastQueueNoteAt(row,noteNow()));
+        };
         if(policy?.enabled) {
           let launch;try{launch=launchOf(row);}catch{}
           if(launch?.turn&&launch.turn!==row.turn)launch=null;
           if(!likelyWrapUp(row,launch,notes,now,holdsOf(row,launch))) {
-            const event=notifyQueueOwner(row,{...queue,since:state.since},launch,{now,policy,emit});
+            // A live follower can validate against thread/read and owns this notice.
+            if (['start','turn','wait'].includes(row.followerCommand) && followerAlive(row)) continue;
+            const event=notifyQueueOwner(row,{...queue,since:state.since,lastAdvanceAt:queue.lastAdvanceAt??state.lastDecreaseAt},launch,{now,policy,emit,validate});
             if(event)events.push(event);
             states[key]=state;continue;
           }
@@ -196,8 +208,8 @@ export function createQueueStallMonitor(owner, { profiles = {}, statusOf = row =
           if (launch?.turn && launch.turn !== row.turn) launch = null;
           const details = queueStallText(row, { ...queue, since: state.since }, {
             launch, quota: quotaOf(), notes, holds: holdsOf(row, launch), now, policy });
-          const event = emit({ ...row, event: 'message', kind: 'queue-stalled', severity: 'risk', wake: true,
-            text: details.text, queueEpisode: key, queueSince: state.since, wrapUp: !!details.wrapUp });
+          const event = validate() && emit({ ...row, event: 'message', kind: 'queue-stalled', severity: 'risk', wake: true,
+            text: details.text, verifyQueueNotice:Number.isFinite(queue.since), queueEpisode: key, queueSince: state.since, wrapUp: !!details.wrapUp });
           if (event) { state.emitted = true; events.push(event); }
         }
         states[key] = state;

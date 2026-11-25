@@ -17,17 +17,17 @@ import { company, known, isAstra, newestRelease, policyModel } from './pipeline/
 import { flagArgs } from './route-args.mjs';
 import { nextRouteArgs, setRouteFlag, turnHasWork, turnHasRunningTools } from './worker-reroute.mjs';
 import { shellQuote } from './pipeline/presentation.mjs';
-import { readQueue } from './worker-queue.mjs';
+import { readQueue, queueHome, queueDecisionKey as key, queueDecisionFile, readQueueDecision,
+  queueWaiting, queueBusy, sameQueueEpisode } from './worker-queue.mjs';
+export { queueDecisionFile };
 
 const root = fileURLToPath(new URL('../..',import.meta.url)).replace(/\/$/,'');
 const read = file => { try { return JSON.parse(fs.readFileSync(file,'utf8')); } catch { return null; } };
-const key = row => createHash('sha256').update(JSON.stringify([row.account,row.thread,row.turn])).digest('hex');
-export const queueDecisionFile = row => path.join(rulesShared(),'queue-decisions',`${key(row)}.json`);
-const waiting = q => ['queued','waiting'].includes(q?.state);
+export const QUEUE_CHOICE_PENDING = 3;
 export function queueChoiceSafety(turn, queue, {runningTools = 0, reporting = false, workStarted = false} = {}) {
   if (reporting || !turn || turn.status !== 'inProgress' || !Array.isArray(turn.items)) return 'turn is completing or ended';
-  if (!waiting(queue) || queue.reporting || queue.completing) return 'turn is no longer queued';
-  if (runningTools || queue.runningTools || turnHasRunningTools(turn)) return 'a tool call is still running; choice refused, queue retained; notice will repeat later';
+  if (!queueWaiting(queue)) return 'turn is no longer queued';
+  if (runningTools || queue.runningTools || turnHasRunningTools(turn)) return 'a tool call is still running';
   if (!queue.workStarted && (workStarted || turnHasWork(turn))) return 'turn started during option validation';
   return null;
 }
@@ -183,25 +183,31 @@ export function automaticQueueOption(row,queue,launch,context,noticeId) {
   return best ?? null;
 }
 
-export function notifyQueueOwner(row,queue,launch,{now=Date.now(),policy=queuePolicy(now),emit=appendEvent,context}={}) {
-  if (row.effort == null) row = { ...row, effort: launchEffort(row, launch) };
-  const file=queueDecisionFile(row);
-  if (!policy?.enabled||!waiting(queue)||queue.reporting||queue.completing) { const old=read(file); if(old?.status==='waiting') writeJson(file,{...old,status:'ended'}); return null; }
-  if (!Number.isFinite(queue.since)||now < queue.since) return null;
-  const old=read(file), same=old?.since===queue.since;
-  const wait = same && old.status === 'waiting' ? old.explicitWait : null;
+function noticeTiming(state, queue, now, policy) {
+  const stalled = now - (queue.lastAdvanceAt ?? queue.since) >= (policy.queueWaitMinutes ?? 5)*60000;
+  if (state?.since !== queue.since) return { due: true, stalled };
+  if (state.choice || state.choiceExecutedAt || !['waiting','ended'].includes(state.status)) return { due: false };
+  const wait = state.status === 'waiting' ? state.explicitWait : null;
   const snoozed = wait && now < wait.until;
   const resetPassed = snoozed && wait.resetAt != null && now >= wait.resetAt && !wait.resetReported;
+  const reminder = (!wait && stalled || state.status === 'ended')
+    && now-state.lastNoticeAt >= (policy.queueReminderMinutes??10)*60000;
+  return { wait, snoozed, resetPassed, stalled, reminder, due: state.pendingNotice || resetPassed
+    || !!wait && !snoozed || reminder || state.status === 'waiting' && now >= (state.nextOptionCheckAt ?? 0) };
+}
+
+export function queueNoticeDue(row, queue, now, policy) {
+  return !!policy?.enabled && queueWaiting(queue) && Number.isFinite(queue.since) && now >= queue.since
+    && !queueBusy(queue, now) && noticeTiming(readQueueDecision(row), queue, now, policy).due;
+}
+
+export function notifyQueueOwner(row,queue,launch,{now=Date.now(),policy=queuePolicy(now),emit=appendEvent,context,validate}={}) {
+  if (!queueNoticeDue(row,queue,now,policy)) return null;
+  if (row.effort == null) row = { ...row, effort: launchEffort(row, launch) };
+  const file=queueDecisionFile(row),old=read(file),same=old?.since===queue.since;
+  const {due,wait,snoozed,resetPassed,stalled,reminder}=noticeTiming(old,queue,now,policy);
+  if (!due) return null;
   const answered = wait ? !!snoozed : same && old.ownerAnswered;
-  const canNotify = state => {
-    if (state?.since !== queue.since) return true;
-    if (state.choice || state.choiceExecutedAt || !['waiting','ended'].includes(state.status)) return false;
-    if (wait && !state.pendingNotice)
-      return !snoozed || resetPassed || now >= (state.nextOptionCheckAt ?? 0);
-    return state.status === 'waiting' && state.pendingNotice
-      || now-state.lastNoticeAt >= (policy.queueReminderMinutes??10)*60000;
-  };
-  if (!canNotify(old)) return null;
   const renewing = same && old.status === 'ended';
   const noticeId=same&&!renewing?old.noticeId:randomUUID();
   let options, autoOption=null, optionError=null;
@@ -230,14 +236,20 @@ export function notifyQueueOwner(row,queue,launch,{now=Date.now(),policy=queuePo
   }
   return withLock(file,()=>{
     const current=read(file);
-    if (!canNotify(current) || current?.noticeId !== old?.noticeId || current?.status !== old?.status
+    if (current?.noticeId !== old?.noticeId || current?.status !== old?.status
       || current?.lastNoticeAt !== old?.lastNoticeAt || current?.explicitWait?.at !== old?.explicitWait?.at
-      || current?.noticeCount !== old?.noticeCount || current?.pendingNotice !== old?.pendingNotice) return null;
-    const optionIds = options.filter(o => o.type === 'switch').map(o => o.id);
-    const addedOption = snoozed && optionIds.some(id => !wait.optionIds.includes(id));
+      || current?.noticeCount !== old?.noticeCount || current?.pendingNotice !== old?.pendingNotice
+      || !noticeTiming(current,queue,now,policy).due || validate && !validate()) return null;
+    const optionIds = options.filter(o => o.type === 'switch' && !o.needsUserApproval).map(o => o.id).sort();
+    const laneUnavailable = context?.snapshot.lanes.find(l => l.accountId === row.account && l.modelId === row.model)?.selectable === false
+      || context?.snapshot.accounts.find(a => a.id === row.account)?.fallbackUnavailable === true;
+    const optionsChanged = same && !!old.optionIds && JSON.stringify(optionIds) !== JSON.stringify(old.optionIds);
+    const laneChanged = same && old.laneUnavailable !== undefined && laneUnavailable !== old.laneUnavailable;
+    const material = !same || renewing || !!old.pendingNotice || resetPassed || !!wait && !snoozed
+      || optionsChanged || laneChanged || reminder && stalled && !old.stallAnnounced;
     const nextOptionCheckAt = now + Math.min(1, policy.queueReminderMinutes ?? 10) * 60000;
-    if (snoozed && !current.pendingNotice && !resetPassed && !addedOption) {
-      writeJson(file,{...current,nextOptionCheckAt});
+    if (!material && (snoozed || !reminder)) {
+      writeJson(file,{...current,nextOptionCheckAt,...(!stalled ? {stallAnnounced:false} : {})});
       return null;
     }
     const account = context?.snapshot.accounts.find(a => a.id === row.account);
@@ -251,7 +263,8 @@ export function notifyQueueOwner(row,queue,launch,{now=Date.now(),policy=queuePo
     const optionKinds = same && !renewing ? {...old.optionKinds} : {};
     for (const option of [...(same && !renewing ? old.options : []), ...options])
       optionKinds[option.id] = option.type === 'switch' ? (option.company ? 'company' : 'personal') : option.type;
-    const prepared={autoOption,ownerAnswered:!!answered,resetAt,nextOptionCheckAt,
+    const prepared={autoOption,ownerAnswered:!!answered,resetAt,nextOptionCheckAt,optionIds,laneUnavailable,
+      choiceResults:old?.choiceResults, stallAnnounced:!!stalled,
       explicitWait:snoozed ? {...wait,optionIds:[...new Set([...wait.optionIds,...optionIds])],resetReported:wait.resetReported || resetPassed} : null,optionKinds,row,since:queue.since,queue,launch,options,noticeId,noticeCount:count,lastNoticeAt:now,status:'waiting',pendingNotice:true};
     // Commands are usable when the event becomes visible. A crash before emit
     // leaves a pending notice to retry, rather than an acknowledged silent wait.
@@ -260,7 +273,7 @@ export function notifyQueueOwner(row,queue,launch,{now=Date.now(),policy=queuePo
     const workedMinutesBefore=queue.workedMinutesBefore??null,queuedMinutes=Math.max(0,(now-queue.since)/60000);
     const choiceCommand=command([process.execPath,`${root}/scripts/codex-worker.mjs`,'queue-choice','--notice',noticeId,'--best','--owner',row.owner]);
     const summary=`queue-stalled notice ${count} for ${String(row.name??row.task).slice(0,80)} at ${row.account}/${row.model}; ${queuedMinutes.toFixed(1)} min queued.${count>1?relay:''}`;
-    const event=emit({...row,event:'message',kind:'queue-stalled',severity:'risk',wake:true,
+    const event=emit({...row,event:'message',kind:'queue-stalled',severity:'risk',wake:material,verifyQueueNotice:!!validate,
       choiceCommand,summary,text:`${choiceCommand}\nphase=${phase}; worked before queue=${workedMinutesBefore??'?'} min; ${text}`,options,noticeId,noticeCount:count,
       phase,workedMinutesBefore,queuedMinutes,
       queueEpisode:JSON.stringify([row.account,row.thread,row.turn]),queueSince:queue.since,queuePosition:queue.position??null,
@@ -290,10 +303,10 @@ export function requestQueueChoice(row,noticeId,optionId,userOK=null,now=Date.no
   let option=state.options.find(o=>o.id===optionId);
   const kind=state.optionKinds?.[optionId];
   if(!option && optionId!=='best' && !kind) throw Error('unknown queue option');
-  const profiles=read(process.env.CODEX_ACCOUNTS??path.join(rulesShared(),'codex-accounts.json'))??{};
-  const current=readQueue(profiles[row.account]?.home,row.thread);
-  if(!current||current.turnId!==row.turn||!waiting(current)||current.reporting||current.completing||current.since!==state.since)
-    throw Error('source turn is no longer in this queue episode');
+  const home=queueHome(row), current=readQueue(home,row.thread);
+  const compatible = queue => sameQueueEpisode(queue,row,state.since)
+    && (queueWaiting(queue) || queue.state === 'tool-active' && !queue.reporting && !queue.completing);
+  if(!compatible(current)) throw Error('source turn is no longer in this queue episode');
   let context;
   if (optionId === 'best' || option?.type === 'switch' || !option) {
     context=queueRouteContext(state.row,state.launch,now);
@@ -303,20 +316,26 @@ export function requestQueueChoice(row,noticeId,optionId,userOK=null,now=Date.no
       ?? options.find(o=>o.type==='switch' && o.company===companyKind);
     if (!option) throw Error('no current replacement of the requested kind; queue retained');
   }
-  if(option.type!=='wait'&&current.runningTools) throw Error('a tool call is still running; choice refused, queue retained; notice will repeat later');
   let route=null;
   if(option.type==='switch') {
     route=queueOptionPlan(context,state.row,state.queue,option.candidateId,noticeId,option.id===optionId?userOK:null);
-    if(route.blocked||route.needsUserOK.length||!route.pick?.command) return {exitCode:8,route,option};
+    if(route.blocked||route.needsUserOK.length||!route.pick?.command) return {exitCode:8,applied:false,pending:false,reason:'selected option requires approval or is unavailable; queue retained',route,option};
   }
   return withLock(file,()=>{
     const latest=read(file);
-    if(latest.noticeId!==noticeId||latest.status!=='waiting'||latest.choice) throw Error('this notice already has a choice');
+    if(latest?.noticeId!==noticeId||latest.status!=='waiting'||latest.choice) throw Error('this notice already has a choice');
+    const fresh=readQueue(home,row.thread);
+    if(!compatible(fresh)) throw Error('source turn is no longer in this queue episode');
     const explicitWait = option.type === 'wait' ? { at:now, until:now + policy.queueWaitSnoozeMinutes * 60000,
-      optionIds:latest.options.filter(o => o.type === 'switch').map(o => o.id),
-      resetAt:latest.resetAt > now ? latest.resetAt : null } : null;
-    writeJson(file,{...latest,explicitWait,nextOptionCheckAt:now,autoOption:null,ownerAnswered:true,choice:explicitWait ? null : {optionId:option.id,option,requestedOptionId:optionId,userOK:option.id===optionId?userOK:null,at:now,owner:row.owner}});
-    return {exitCode:0,option};
+      optionIds:latest.optionIds ?? [], resetAt:latest.resetAt > now ? latest.resetAt : null } : null;
+    const busy = !queueWaiting(fresh) || queueBusy(fresh, now);
+    const choiceId = explicitWait ? null : randomUUID();
+    writeJson(file,{...latest,explicitWait,nextOptionCheckAt:now,autoOption:null,ownerAnswered:true,choice:explicitWait ? null : {
+      id:choiceId,optionId:option.id,option,requestedOptionId:optionId,userOK:option.id===optionId?userOK:null,at:now,owner:row.owner,deferred:busy }});
+    return explicitWait ? {exitCode:0,option,applied:true,pending:false} : {
+      exitCode:QUEUE_CHOICE_PENDING,option,choiceId,applied:false,pending:true,busy,
+      reason:busy?'recorded; waiting for tool activity to end and a model queue observation':'recorded; waiting for follower confirmation' };
+
   });
 }
 export const pendingQueueChoice = row => {const state=read(queueDecisionFile(row));return state?.status==='waiting'&&state.choice?state:null;};
@@ -324,7 +343,7 @@ export function claimQueueChoice(row, {policy, since, now=Date.now()}={}) {
   const file=queueDecisionFile(row);if(!fs.existsSync(file))return null;
   return withLock(file,()=>{
     const state=read(file);
-    if(state?.status!=='waiting') return null;
+    if(state?.status!=='waiting' || state.row.owner!==row.owner || since!==undefined && state.since!==since || policy && !policy.enabled) return null;
     if(!state.choice) {
       const threshold=policy?.queueAutoChoiceAfterNotices;
       if(!policy?.enabled || !(threshold>0) || state.noticeCount<threshold || state.pendingNotice || state.ownerAnswered
@@ -334,12 +353,39 @@ export function claimQueueChoice(row, {policy, since, now=Date.now()}={}) {
       state.lastAutoNotice=state.noticeCount;
       state.choice={option,optionId:option.id,decidedBy:'auto',owner:row.owner,at:now};
     }
-    writeJson(file,{...state,status:'choosing',choicePid:process.pid});return state;
+    writeJson(file,{...state,row:{...state.row,...row},status:'choosing',choicePid:process.pid});return state;
   });
 }
-export function settleQueueChoice(row,status,now=Date.now(),selected) {
-  const file=queueDecisionFile(row); if(!fs.existsSync(file))return;withLock(file,()=>{
-    const s=read(file);if(s&&(status!=='ended'||['waiting','choosing'].includes(s.status)))writeJson(file,{...s,status,lastNoticeAt:now,choice:null,choicePid:null,
-      ...(['selected','parked'].includes(status)?{choiceExecutedAt:now,decision:selected?{...s.choice,option:selected,optionId:selected.id}:s.choice}:{})});
+export function deferQueueChoice(row, choice) {
+  const file=queueDecisionFile(row);
+  return withLock(file,()=>{
+    const state=read(file);
+    if(state?.status!=='choosing' || !state.choice || state.choice.id!==choice.id || state.choicePid!==process.pid) return;
+    if(choice.decidedBy==='auto') writeJson(file,{...state,status:'waiting',choice:null,choicePid:null});
+    else writeJson(file,{...state,status:'waiting',choice:{...state.choice,deferred:true},choicePid:null});
   });
+}
+
+export function queueChoiceResult(row, choiceId) {
+  const state=readQueueDecision(row);
+  return state?.choiceResults?.[choiceId] ?? (state?.choice?.id===choiceId && state.choice.deferred ? {
+    exitCode:QUEUE_CHOICE_PENDING,applied:false,pending:true,
+    reason:'recorded; waiting for tool activity to end and a model queue observation' } : null);
+}
+
+export function settleQueueChoice(row,status,now=Date.now(),selected,failure) {
+  const file=queueDecisionFile(row); if(!fs.existsSync(file))return;
+  const failed=withLock(file,()=>{
+    const s=read(file);if(!s || status==='ended' && !['waiting','choosing'].includes(s.status))return null;
+    const applied=['selected','parked'].includes(status), choice=s.choice;
+    const result=applied ? {exitCode:0,applied:true,pending:false,option:selected??choice?.option,status} : {
+      exitCode:failure?.exitCode??7,applied:false,pending:false,reason:failure?.reason??'source turn left the queue; no choice was applied' };
+    const choiceResults=choice?.id ? Object.fromEntries(Object.entries({...s.choiceResults,[choice.id]:result}).slice(-8)) : s.choiceResults;
+    writeJson(file,{...s,status,lastNoticeAt:now,choice:null,choicePid:null,choiceResults,
+      ...(applied?{choiceExecutedAt:now,decision:selected?{...choice,option:selected,optionId:selected.id}:choice}:{})});
+    return !applied && choice && (choice.id || failure) ? {choice,result,row:s.row} : null;
+  });
+  if(failed) appendEvent({...failed.row,event:'message',kind:'queue-choice-failed',severity:'risk',wake:true,
+    text:`Queue choice not applied: ${failed.result.reason}; task=${failed.row.name} thread=${row.thread}.`,
+    noticeId:readQueueDecision(row)?.noticeId,choiceId:failed.choice.id});
 }

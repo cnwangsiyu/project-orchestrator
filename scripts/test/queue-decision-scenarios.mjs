@@ -12,10 +12,14 @@ import {readEvents,eventLine,hookEventLine} from '../lib/worker-events.mjs';
 const root=new URL('../../',import.meta.url).pathname.replace(/\/$/,''),tmp=fs.mkdtempSync(path.join(os.tmpdir(),'queue-decisions-'));
 const now=Date.now(),min=60000,owner='c2987dae-1fac-5a84-a312-a29117f1b8c7',SOL='gpt-6.1-sol',TERRA='gpt-5.6-terra',ASTRA='gpt-6-astra';
 const policy=JSON.parse(fs.readFileSync(path.join(root,'references/personal-fallback.json')));
-const envBefore={...process.env};
-Object.assign(process.env,{HOME:tmp,RULES_SHARED:tmp,RES_DIR:tmp,CODEX_ACCOUNTS:path.join(tmp,'accounts.json'),
+const callerPath=process.env.PATH;
+const fixtureEnv={PATH:callerPath,HOME:tmp,TMPDIR:tmp,TMP:tmp,TEMP:tmp,ORCHESTRATOR_OWNER:'',
+  ROUTE_APPROVAL_FILE:path.join(tmp,'route-approvals.json'),RULES_SHARED:tmp,RES_DIR:tmp,CODEX_ACCOUNTS:path.join(tmp,'accounts.json'),
   QUOTA_CACHE:path.join(tmp,'quota.json'),ROUTE_SNAPSHOT_FILE:path.join(tmp,'snapshot.json'),ROUTE_LOG_FILE:path.join(tmp,'routes.jsonl'),
-  PERSONAL_FALLBACK_FILE:path.join(tmp,'policy.json'),ROUTE_NOW:String(now),TRAE_PROBE:'0',QUOTA_LOG:'0'});
+  PERSONAL_FALLBACK_FILE:path.join(tmp,'policy.json'),ROUTE_NOW:String(now),TRAE_PROBE:'0',QUOTA_LOG:'0'};
+const envBefore=new Map();
+for (const k of Object.keys(process.env)) {envBefore.set(k,process.env[k]);delete process.env[k];}
+Object.assign(process.env,fixtureEnv);
 fs.writeFileSync(process.env.PERSONAL_FALLBACK_FILE,JSON.stringify(policy));fs.writeFileSync(process.env.QUOTA_CACHE,'{}');
 function fixture(ttReady=false,models=[SOL,ASTRA],personalEfforts=['medium','high','xhigh','max']) {
   const caps={search:true,vision:true},accounts=[['trae','trae',[SOL,TERRA]],['ttadk','ttadk',[SOL]],['main','chatgpt',models],['b','chatgpt',models],['claude','claude',['opus','fable']]];
@@ -118,7 +122,8 @@ try {
   for(const o of notice.options)assert.ok(o.command.includes('queue-choice')&&o.command.includes('--owner')&&o.command.includes('--option'));
   assert.equal(notifyQueueOwner(f.row,f.queue,f.launch,{now:now+9*min,policy,context:f.context,emit}),null);
   const second=notifyQueueOwner(f.row,f.queue,f.launch,{now:now+10*min,policy,context:f.context,emit});
-  assert.equal(second.noticeCount,2);assert.match(second.text,/SECOND NOTICE/);assert.ok(second.secretaryRelay);
+  assert.equal(second.wake,false,'identical stalled reminder does not wake an armed watcher');
+  assert.equal(second.noticeCount,2); assert.equal(second.wake,false,'identical stalled reminder does not wake an armed watcher');assert.match(second.text,/SECOND NOTICE/);assert.ok(second.secretaryRelay);
   assert.match(eventLine(second),/secretary-relay: owner queue decision still pending/);
   assert.equal(notifyQueueOwner(f.row,f.queue,f.launch,{now:now+19*min,policy,context:f.context,emit}),null);
   assert.equal(notifyQueueOwner(f.row,f.queue,f.launch,{now:now+20*min,policy,context:f.context,emit}).noticeCount,3);
@@ -131,12 +136,12 @@ try {
   assert.equal(approved.status,0,approved.stderr+approved.stdout);
   f.raw.approvals=JSON.parse(fs.readFileSync(path.join(tmp,'route-approvals.json')));
   fs.writeFileSync(process.env.ROUTE_SNAPSHOT_FILE,JSON.stringify(f.raw));
-  assert.equal(requestQueueChoice(f.row,notice.noticeId,astraOption.id,approved.stdout.trim(),Date.now()).exitCode,0);
+  assert.equal(requestQueueChoice(f.row,notice.noticeId,astraOption.id,approved.stdout.trim(),Date.now()).exitCode,3);
   settleQueueChoice(f.row,'waiting',now);
-  assert.equal(requestQueueChoice(f.row,notice.noticeId,'park',null,now).exitCode,0);
+  assert.equal(requestQueueChoice(f.row,notice.noticeId,'park',null,now).exitCode,3);
   assert.ok(claimQueueChoice(f.row));assert.equal(claimQueueChoice(f.row),null,'only one follower may execute an owner choice');
   settleQueueChoice(f.row,'waiting',now);assert.equal(JSON.parse(fs.readFileSync(queueDecisionFile(f.row))).choice,null);
-  assert.equal(requestQueueChoice(f.row,notice.noticeId,notice.options.find(o=>o.account==='main'&&o.model===SOL).id,null,now).exitCode,0);
+  assert.equal(requestQueueChoice(f.row,notice.noticeId,notice.options.find(o=>o.account==='main'&&o.model===SOL).id,null,now).exitCode,3);
   settleQueueChoice(f.row,'selected',now);assert.throws(()=>requestQueueChoice(f.row,notice.noticeId,'park',null,now));
   fs.rmSync(queueDecisionFile(f.row));
   // A mistaken ending must not silence the same queue episode forever.
@@ -147,7 +152,9 @@ try {
   const renewed=notifyQueueOwner(f.row,f.queue,f.launch,{now:now+10*min,policy,context:f.context,emit});
   assert.notEqual(renewed.noticeId,endedNotice.noticeId);assert.equal(renewed.noticeCount,2);
   assert.throws(()=>requestQueueChoice(f.row,endedNotice.noticeId,'wait',null,now),/stale/);
-  assert.equal(requestQueueChoice(f.row,renewed.noticeId,'park',null,now).exitCode,0);
+  const stale=spawnSync(process.execPath,[path.join(root,'scripts/codex-worker.mjs'),'queue-choice','--notice',endedNotice.noticeId,'--best','--owner',owner],{env:process.env,encoding:'utf8'});
+  assert.equal(stale.status,2);assert.equal(JSON.parse(stale.stdout).applied,false);assert.match(stale.stderr,/stale/);
+  assert.equal(requestQueueChoice(f.row,renewed.noticeId,'park',null,now).exitCode,3);
   assert.equal(notifyQueueOwner(f.row,f.queue,f.launch,{now:now+20*min,policy,context:f.context,emit}),null,'pending choice is not replaced');
   assert.ok(claimQueueChoice(f.row));
   assert.equal(notifyQueueOwner(f.row,f.queue,f.launch,{now:now+20*min,policy,context:f.context,emit}),null,'claimed choice is not replaced');
@@ -157,7 +164,7 @@ try {
   fs.rmSync(queueDecisionFile(f.row));
   f=fixture(true);assert.ok(queueOptions(f.row,f.queue,f.launch,now,f.context).some(o=>o.account==='ttadk'&&!o.needsUserApproval));
   const tt=notifyQueueOwner(f.row,f.queue,f.launch,{now,policy,context:f.context,emit});
-  assert.equal(requestQueueChoice(f.row,tt.noticeId,tt.options.find(o=>o.account==='ttadk').id,null,now).exitCode,0);
+  assert.equal(requestQueueChoice(f.row,tt.noticeId,tt.options.find(o=>o.account==='ttadk').id,null,now).exitCode,3);
   settleQueueChoice(f.row,'ended',now);fs.rmSync(queueDecisionFile(f.row));
   // A reminder drops the old TTADK option. Its printed ID still selects a current company lane.
   f=fixture(true);
@@ -167,12 +174,12 @@ try {
   const changed=notifyQueueOwner(f.row,f.queue,f.launch,{now:now+10*min,policy,context:f.context,emit});
   assert.ok(!changed.options.some(o=>o.id===gone.id));
   const substitute=requestQueueChoice(f.row,changed.noticeId,gone.id,null,now);
-  assert.equal(substitute.exitCode,0); assert.equal(substitute.option.company,true);
+  assert.equal(substitute.exitCode,3); assert.equal(substitute.option.company,true);
   assert.notEqual(substitute.option.id,gone.id);
   settleQueueChoice(f.row,'waiting',now);
   const compact=spawnSync(process.execPath,[path.join(root,'scripts/codex-worker.mjs'),'queue-choice','--notice',changed.noticeId,'--best'],
     {env:{...process.env,ORCHESTRATOR_OWNER:owner},encoding:'utf8'});
-  assert.equal(compact.status,0,compact.stderr);
+  assert.equal(compact.status,3,compact.stderr);assert.equal(JSON.parse(compact.stdout).pending,true);
   assert.equal(JSON.parse(compact.stdout).option.id,changed.options.find(o=>o.type!=='wait').id);
   fs.rmSync(queueDecisionFile(f.row));
   f=fixture(false,[SOL],['max']);assert.ok(queueOptions(f.row,f.queue,f.launch,now,f.context).some(o=>o.account==='main'&&o.effort==='max'&&o.needsUserApproval));
@@ -185,15 +192,17 @@ try {
   const midTurn={status:'inProgress',items:[{type:'commandExecution',status:'completed'}]};
   assert.equal(queueChoiceSafety(midTurn,midQueue,{workStarted:true}),null);
   assert.match(queueChoiceSafety(midTurn,{...midQueue,completing:true}),/no longer queued/);
-  assert.match(queueChoiceSafety(midTurn,midQueue,{runningTools:1}),/tool call.*refused/);
-  assert.match(queueChoiceSafety({...midTurn,items:[{type:'mcpToolCall',status:'inProgress'}]},midQueue),/tool call.*refused/);
-  assert.match(queueChoiceSafety({...midTurn,items:[{type:'commandExecution'}]},midQueue),/tool call.*refused/,'unknown tool status cannot confirm idle');
+  assert.match(queueChoiceSafety(midTurn,midQueue,{runningTools:1}),/tool call is still running/);
+  assert.match(queueChoiceSafety({...midTurn,items:[{type:'mcpToolCall',status:'inProgress'}]},midQueue),/tool call is still running/);
+  assert.match(queueChoiceSafety({...midTurn,items:[{type:'commandExecution'}]},midQueue),/tool call is still running/,'unknown tool status cannot confirm idle');
   saveQueue(f.profiles.trae.home,f.row.thread,{...midQueue,runningTools:1});
-  assert.throws(()=>requestQueueChoice(f.row,midNotice.noticeId,'park',null,now),/tool call.*refused/);
+  const busyChoice=requestQueueChoice(f.row,midNotice.noticeId,'park',null,now);
+  assert.equal(busyChoice.busy,true);assert.equal(busyChoice.pending,true);assert.equal(busyChoice.exitCode,3);
+  settleQueueChoice(f.row,'waiting',now);
   assert.equal(requestQueueChoice(f.row,midNotice.noticeId,'wait',null,now).exitCode,0);
   settleQueueChoice(f.row,'waiting',now);
   saveQueue(f.profiles.trae.home,f.row.thread,midQueue);
-  assert.equal(requestQueueChoice(f.row,midNotice.noticeId,'park',null,now).exitCode,0);
+  assert.equal(requestQueueChoice(f.row,midNotice.noticeId,'park',null,now).exitCode,3);
   settleQueueChoice(f.row,'waiting',now);
   assert.equal(notifyQueueOwner(f.row,midQueue,f.launch,{now:now+9*min,policy,context:f.context,emit}),null);
   assert.equal(notifyQueueOwner(f.row,midQueue,f.launch,{now:now+10*min,policy,context:f.context,emit}).noticeCount,2);
@@ -236,7 +245,7 @@ try {
     const parked=spawnSync('/bin/sh',['-c',parkCommand],
       {env:{...process.env,NODE_OPTIONS:`--import=${path.join(root,'scripts/test/fixtures/reroute-transport.mjs')}`,
         REROUTE_FIXTURE:JSON.stringify({source:SOL,rpc:detachedRpc})},encoding:'utf8',timeout:10000});
-    assert.equal(parked.status,0,parked.stdout+parked.stderr);assert.match(parked.stdout,/queue-choice: parked/);
+    assert.equal(parked.status,0,parked.stdout+parked.stderr);assert.equal(JSON.parse(parked.stdout).applied,true);
     assert.equal(JSON.parse(fs.readFileSync(queueDecisionFile(f.row))).status,'parked');
     assert.throws(()=>requestQueueChoice(f.row,detachedNotice.noticeId,'wait'),/stale, ended/);
     assert.equal(fs.readFileSync(detachedRpc,'utf8').trim().split('\n').map(JSON.parse).filter(c=>c.method==='turn/interrupt').length,1);
@@ -275,12 +284,13 @@ try {
   console.log('PASS mid-turn hard queue lists personal Astra with honest interrupted-work evidence');
   for(const [label,selection,ttReady] of [['first-auto',null,true],['mid-auto',null,true],['no-switch',null,false],['continued',null,false],['work-started',null,false],['legacy-disabled',null,true],
     ['mid-wait',null,false],['mid-threshold',null,false],['mid-repeat',null,false],['mid-resume',{model:TERRA},false],
-    ['mid-fresh',{account:'ttadk'},true],['mid-park',{id:'park'},false],['mid-tool-running',{id:'park'},false],
-    ['mid-tool-race',{id:'park'},false],['mid-reporting',null,false],['mid-items-only',null,false],['mid-server-request',null,false],
+    ['mid-fresh',{account:'ttadk'},true],['mid-park',{id:'park'},false],['mid-tool-running',null,false],
+    ['mid-tool-race',null,false],['mid-stale',null,false],
+    ['mid-deferred',{id:'park'},false],['mid-no-fresh',{id:'park'},false],['mid-ended-pending',{id:'park'},false],['mid-reporting',null,false],['mid-items-only',null,false],['mid-server-request',null,false],
     ['mid-complete-race',{id:'park'},false],
     ['trae-resume',{model:TERRA},false],['ttadk',{account:'ttadk'},true],['personal',{account:'main',model:SOL},false],
     ['claude-approved',{model:'opus'},false],['cancel-silent',{id:'park'},false],['cancel-unconfirmed',{account:'main',model:SOL},false],
-    ['wait',{id:'wait'},false],['park',{id:'park'},false]]) {
+    ['wait',{id:'wait'},false],['park',{id:'park'},false],['mid-note',null,false]]) {
     fs.rmSync(queueDecisionFile(f.row),{force:true});f=fixture(ttReady);
     fs.writeFileSync(process.env.ROUTE_LOG_FILE,'');
     const log=path.join(tmp,`${label}.log`),rpc=path.join(tmp,`${label}.rpc.jsonl`),out=path.join(tmp,`${label}.md`);
@@ -288,9 +298,9 @@ try {
     if(label==='claude-approved') {
       const bin=path.join(tmp,'bin');fs.mkdirSync(bin,{recursive:true});
       fs.writeFileSync(path.join(bin,'claude'),'#!/bin/sh\nprintf "%s\\n" "$@" > "$QUEUE_CLAUDE_ARGS"\nexit 0\n',{mode:0o755});
-      process.env.PATH=`${bin}:${envBefore.PATH}`;process.env.QUEUE_CLAUDE_ARGS=path.join(tmp,'claude-args.log');
+      process.env.PATH=`${bin}:${callerPath}`;process.env.QUEUE_CLAUDE_ARGS=path.join(tmp,'claude-args.log');
     }
-    const mid=label.startsWith('mid-'),age=label==='first-auto'||selection?0:['mid-threshold','mid-reporting'].includes(label)?4:['no-switch','continued'].includes(label)?40:6;
+    const mid=label.startsWith('mid-'),age=label==='first-auto'||label==='mid-note'||selection?0:['mid-threshold','mid-reporting'].includes(label)?4:['no-switch','continued'].includes(label)?40:6;
     saveQueue(f.profiles.trae.home,'fixture',{...f.queue,since:now-age*min});
     fs.writeFileSync(process.env.PERSONAL_FALLBACK_FILE,JSON.stringify(label==='legacy-disabled'?{...policy,enabled:false}:!['first-auto','mid-auto'].includes(label)?{...policy,queueAutoChoiceAfterNotices:0}:policy));
     const args=['--import',transport,path.join(root,'scripts/codex-worker.mjs'),'--account','trae',label==='continued'?'turn':'start',
@@ -306,21 +316,39 @@ try {
         midWithoutReady:['mid-items-only','mid-server-request'].includes(label),midServerRequest:label==='mid-server-request',
         ...(['mid-auto','mid-repeat'].includes(label)?{midSamples:[5,5.01,15.01]}:{})}:{}),
       ...(cancelCase?{cancel:label==='cancel-silent'?'silent':'unconfirmed'}:{})};
+    if (label==='mid-note') config.midNote=true;
+    if (label==='mid-stale') config.readyDuringRead=true;
+    if (['mid-deferred','mid-no-fresh','mid-ended-pending'].includes(label)) config.chooseDuringTool=true;
+    if (label==='mid-no-fresh') config.noFreshQueue=true;
+    if (label==='mid-ended-pending') config.endWithPending=true;
     if(label==='mid-complete-race')config.cancel='completed';
     const r=spawnSync(process.execPath,args,{env:{...process.env,REROUTE_FIXTURE:JSON.stringify(config)},encoding:'utf8',timeout:15000});
     assert.equal(r.error,undefined,label);assert.equal(r.status,cancelCase?7:0,r.stderr+r.stdout);
     const calls=fs.readFileSync(rpc,'utf8').trim().split('\n').map(JSON.parse);
     const interrupts=calls.filter(c=>c.method==='turn/interrupt');
-    assert.equal(interrupts.length,label==='first-auto'||label==='legacy-disabled'||selection&&!['wait'].includes(selection.id)&&!label.startsWith('mid-tool')?1:0,label);
-    if(label==='legacy-disabled')assert.equal(fs.existsSync(queueDecisionFile(f.row)),false,label);
+    const suppressed=['mid-tool-running','mid-tool-race','mid-note','mid-stale','work-started'].includes(label);
+    assert.equal(interrupts.length,label==='first-auto'||label==='legacy-disabled'||selection&& !['wait'].includes(selection.id) && !['mid-no-fresh','mid-ended-pending'].includes(label)?1:0,label);
+    if(label==='legacy-disabled'||suppressed)assert.equal(fs.existsSync(queueDecisionFile(f.row)),false,label);
     else assert.ok(JSON.parse(fs.readFileSync(queueDecisionFile(f.row))).noticeCount>=1,label);
-    if(mid) {
+    if(mid&&!suppressed) {
       const decision=JSON.parse(fs.readFileSync(queueDecisionFile(f.row)));
       assert.equal(decision.queue.workStarted,true,label);
       assert.equal(decision.queue.workedMinutesBefore,24,label);
-      assert.equal(decision.noticeCount,['mid-repeat','mid-auto'].includes(label)?2:1,label);
-      if(label==='mid-tool-running')assert.equal(decision.queue.runningTools,1);
-      if(label.startsWith('mid-tool'))assert.match(r.stderr,/tool call is still running.*refused/);
+      assert.ok(decision.noticeCount>=1,label);
+      if(config.chooseDuringTool) {
+        const result=calls.find(c=>c.method==='fixture/choice-result');
+        assert.equal(result?.status,3,result?.stderr??label);assert.deepEqual(
+          [JSON.parse(result.stdout).applied,JSON.parse(result.stdout).pending],[false,true]);
+        assert.equal(decision.status,label==='mid-deferred'?'parked':'ended');
+        assert.equal(Object.values(decision.choiceResults).at(-1).applied,label==='mid-deferred');
+      }
+    }
+    // Park and Claude dispatch can exit the fixture follower before its
+    // asynchronous owner subprocess's close callback; their outcomes are
+    // covered by the reattach receipt and tracked launcher assertions.
+    if(selection && !config.chooseDuringTool && !cancelCase && selection.id!=='park' && label!=='claude-approved') {
+      const result=calls.find(c=>c.method==='fixture/choice-result');
+      assert.equal(result?.status,0,result?.stderr??label);assert.equal(JSON.parse(result.stdout).applied,true,label);
     }
     if(label==='first-auto') {
       const state=JSON.parse(fs.readFileSync(queueDecisionFile(f.row)));
@@ -348,6 +376,9 @@ try {
     if((!selection&&!['legacy-disabled','first-auto'].includes(label))||selection?.id==='wait')assert.match(fs.readFileSync(out,'utf8'),/DONE original/);
     console.log(`PASS one-step queue choice ${label}`);
   }
+  assert.ok(readEvents().some(e=>e.kind==='queue-stalled'&&e.wake));
+  // Give the steer fixture a fresh event store: prior fake turns reused its IDs and ended.
+  process.env.RULES_SHARED=path.join(tmp,'steer-shared');
   // A steer is accepted without interrupting, but acceptance is not an answer while queued.
   for(const state of ['queued','waiting','ready']) {
     f=fixture();saveQueue(f.profiles.trae.home,f.row.thread,{...f.queue,state,workStarted:true});
@@ -360,5 +391,4 @@ try {
     else assert.doesNotMatch(r.stdout,/delivered only when/);
     assert.ok(!fs.readFileSync(rpc,'utf8').includes('turn/interrupt'));
   }
-  assert.ok(readEvents().some(e=>e.kind==='queue-stalled'&&e.wake));
-} finally {Object.keys(process.env).filter(k=>!(k in envBefore)).forEach(k=>delete process.env[k]);Object.assign(process.env,envBefore);fs.rmSync(tmp,{recursive:true,force:true});}
+} finally {for (const k of Object.keys(process.env)) delete process.env[k];for (const [k,v] of envBefore)process.env[k]=v;fs.rmSync(tmp,{recursive:true,force:true});}

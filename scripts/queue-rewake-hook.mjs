@@ -3,6 +3,7 @@
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { rulesShared } from './lib/global-rules.mjs';
+import { currentQueueNotice } from './lib/worker-queue.mjs';
 import { acquireLock } from './lib/shared-file.mjs';
 import { validOwner, createEventTail, inbox, readAck, deliverAsync, hookEventLine } from './lib/worker-events.mjs';
 
@@ -14,7 +15,7 @@ async function listen(input) {
     await tail.read();
     return inbox(tail.rows(), owner, readAck(owner));
   };
-  const hasNotice = state => state.pending.some(row => row.kind === 'queue-stalled' && row.wake);
+  const hasNotice = state => state.pending.some(row => ['queue-stalled','queue-choice-failed'].includes(row.kind) && row.wake && currentQueueNotice(row,tail.rows()));
   let state = await snapshot();
   if (!hasNotice(state) && !state.running.some(row => !row.stale)) return;
   const release = acquireLock(path.join(rulesShared(), 'queue-rewake', owner), { timeoutMs: 0, ownerPid: true });
@@ -23,10 +24,13 @@ async function listen(input) {
     for (;;) {
       if (hasNotice(state)) {
         // Deliver the pending prefix together, preserving the shared inbox cursor.
-        const result = await deliverAsync(owner, rows => new Promise((resolve, reject) => {
-          process.stderr.write(rows.map(hookEventLine).join('\n') + '\n', err => err ? reject(err) : resolve());
-        }), Infinity, { rows: tail.rows() });
-        if (result.delivered.length) { process.exitCode = 2; return; }
+        let woke = false;
+        await deliverAsync(owner, async rows => {
+          if (!rows.some(row=>['queue-stalled','queue-choice-failed'].includes(row.kind) && row.wake)) return;
+          await new Promise((resolve,reject)=>process.stderr.write(rows.map(hookEventLine).join('\n') + '\n', err => err ? reject(err) : resolve()));
+          woke = true;
+        }, Infinity, { rows: tail.rows() });
+        if (woke) { process.exitCode = 2; return; }
       } else if (!state.running.some(row => !row.stale)) return;
       await delay(2000);
       state = await snapshot();

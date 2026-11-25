@@ -6,7 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { createPoolStallMonitor, createQueueStallMonitor, fallbackRouteArgs, queueStallText } from '../lib/queue-stall-watch.mjs';
-import { appendEvent, readEvents } from '../lib/worker-events.mjs';
+import { appendEvent, readEvents, deliver, watch } from '../lib/worker-events.mjs';
 import { saveQueue } from '../lib/worker-queue.mjs';
 import { queueDecisionFile, notifyQueueOwner, requestQueueChoice, settleQueueChoice } from '../lib/queue-decision.mjs';
 import { saveLaunch } from '../lib/worker-launch.mjs';
@@ -140,7 +140,8 @@ try {
   saveLaunch('trae', row.thread, { ...defaults, project: row.project }, owner, { turn: row.turn });
   saveQueue(tmp, row.thread, wait(Date.now() - 13 * min));
   appendEvent({ ...row, event: 'running' });
-  appendEvent(done);
+  const realNow=Date.now;Date.now=()=>now-2*min;
+  try { appendEvent(done); } finally {Date.now=realNow;}
   const run = (script, args = []) => spawnSync(process.execPath, [path.join(scripts, script), ...args],
     { encoding: 'utf8', timeout: 8000 });
   const status = run('quota.mjs', ['--running']);
@@ -154,6 +155,33 @@ try {
   assert.equal(events.length, 1);
   assert.equal(events[0].wrapUp, true);
   console.log('PASS the real watcher exits via owner risk-note delivery and quota --running shows the active queue');
+  const coalesce = { ...row, owner:'coalesce-owner',thread:'coalesce-thread',runId:'coalesce-run' };
+  const flat = wait(now-15*min);
+  saveQueue(tmp,coalesce.thread,flat);
+  appendEvent({...coalesce,event:'running'});
+  const options = {policy,validate:()=>true};
+  const initial = notifyQueueOwner(coalesce,flat,launch,{...options,now});
+  assert.equal(initial.wake,true);
+  let printed=[];
+  // State changed between durable append and delivery; the old command must not print.
+  saveQueue(tmp,coalesce.thread,{...flat,state:'ready'});
+  deliver(coalesce.owner,rows=>printed.push(...rows));
+  assert.deepEqual(printed,[]);
+  saveQueue(tmp,coalesce.thread,flat);
+  const repeat=notifyQueueOwner(coalesce,flat,launch,{...options,now:now+10*min});
+  assert.equal(repeat.noticeCount,2);assert.equal(repeat.wake,false);
+  let stopped=false;
+  const watcherRun=watch(coalesce.owner,async rows=>{printed.push(...rows);}, {
+    debounceSec:0,queueMonitor:{poll:async()=>[],retainProgress:()=>[]},quotaPoll:async()=>{},
+  }).then(()=>{stopped=true;});
+  await new Promise(resolve=>setTimeout(resolve,350));
+  const stoppedOnRepeat=stopped;
+  appendEvent({...coalesce,event:'message',kind:'risk',wake:true,text:'fixture material wake'});
+  await watcherRun;
+  assert.equal(stoppedOnRepeat,false,'the identical reminder did not end the real watcher');
+  assert.ok(printed.some(row=>row.text==='fixture material wake'));
+  console.log('PASS stale appended commands are not printed, and identical reminders keep the watcher armed');
+
   const poolWait = { key: 'devbox-cn/waiter.fixture', holder: 'fixture-s1', project: row.project, task: row.name,
     worker_owner: owner, worker_account: row.account, worker_thread: row.thread, self_restricted: '192.0.2.2,192.0.2.3',
     exclude_reason: 'fixture binding', started_at: (now - 10 * min) / 1000, heartbeat: now / 1000 };

@@ -5,6 +5,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { StringDecoder } from 'node:string_decoder';
 import { rulesShared } from './global-rules.mjs';
 import { writeJson } from './shared-file.mjs';
+import { currentQueueNotice } from './worker-queue.mjs';
 import { processIdentity } from './process-identity.mjs';
 
 export const RETENTION_MS = 7 * 86400000;
@@ -449,6 +450,12 @@ const appendReceiptSync = (entry) => {
   fs.appendFileSync(file, JSON.stringify(entry) + '\n', { mode: 0o600 });
 };
 
+const visibleForDelivery = rows => {
+  if (!rows.some(row=>row.verifyQueueNotice)) return rows;
+  const latest=readEvents();
+  return rows.filter(row=>currentQueueNotice(row,latest));
+};
+
 // Intent never advances the acknowledgement. Output runs outside the lock; stale intents can be retried.
 export const deliver = (owner, print) => {
   if(shortOwner(owner)) owner=eventOwner(owner,readEvents());
@@ -467,7 +474,7 @@ export const deliver = (owner, print) => {
       if (!rows.length) return delivered;
       prepared = prepareTransaction(ack, rows); atomicSync(file, JSON.stringify(prepared));
     } finally { release(); }
-    try { print(rows); } catch (e) {
+    try { const visible=visibleForDelivery(rows);if(visible.length)print(visible); } catch (e) {
       const abort = acquireAckLock(owner);
       if (abort) try {
         const ack = readAck(owner);
@@ -582,7 +589,7 @@ export const deliverAsync = async (owner, print, limit = 10, { rows: knownRows }
       }
       prepared = prepareTransaction(ack, rows); await atomicAsync(file, JSON.stringify(prepared));
     } finally { release(); }
-    try { await print(rows); } catch (e) {
+    try { const visible=visibleForDelivery(rows);if(visible.length)await print(visible); } catch (e) {
       const abort = acquireAckLock(owner);
       if (abort) try {
         const ack = await readAckAsync(owner);
@@ -678,7 +685,7 @@ export const watch = async (owner, print = (rows) => new Promise((resolve, rejec
       const { createQueueStallMonitor } = await import('./queue-stall-watch.mjs');
       const { readProfiles } = await import('./state.mjs');
       let profiles = {}; try { profiles = readProfiles(); } catch {}
-      queueMonitor = createQueueStallMonitor(owner, { profiles, emit: appendEvent });
+      queueMonitor = createQueueStallMonitor(owner, { profiles, emit: appendEvent, readNotes:readEvents });
     }
     if (!quotaPoll) {
       const { pollWorkerQuota } = await import('./worker-quota-refresh.mjs');
@@ -706,7 +713,7 @@ export const watch = async (owner, print = (rows) => new Promise((resolve, rejec
       for (const row of snapshot.running.filter((row) => !row.stale)) waitingRuns.add(row.runId);
       // A hook's successful delivery owns the wake. Forget its settled runs silently.
       for (const row of own) if (terminal(row) && acknowledged(row, ack)) waitingRuns.delete(row.runId);
-      const triggers = snapshot.pending.filter(waking);
+      const triggers = snapshot.pending.filter(row=>waking(row)&&currentQueueNotice(row,own));
       if (triggers.length && flushAt === undefined) flushAt = Date.now() + debounceSec * 1000;
       if (flushAt !== undefined) {
         // Reserve 80% of each ask's original timeout, including asks arriving late in this batch.
@@ -714,7 +721,7 @@ export const watch = async (owner, print = (rows) => new Promise((resolve, rejec
         if (Date.now() >= flushAt) {
           let delivered = false, printError;
           try { await deliverAsync(owner, async (rows) => {
-            try { await print(rows); delivered = true; } catch (e) { printError = e; throw e; }
+            try { await print(rows); delivered ||= rows.some(waking); } catch (e) { printError = e; throw e; }
           }, Number.MAX_SAFE_INTEGER, { rows: own }); }
           catch { if (printError) throw printError; /* Retry an unavailable acknowledgement transaction. */ }
           if (delivered) return 0;
