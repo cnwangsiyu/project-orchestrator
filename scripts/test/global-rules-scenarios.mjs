@@ -24,7 +24,7 @@ try {
   assert.equal(digestText.match(/^version:/gm)?.length, 1, 'integration must publish one digest version');
   assert.equal(digestText.match(/^## Changes In This Version$/gm)?.length, 1);
   assert.ok(digestText.split('\n').length<=61,'digest line budget');
-  assert.equal(digest.version, '2026-11-24.10');
+  assert.equal(digest.version, '2026-11-24.11');
   assert.match(digestText, /^- 2026-11-24\.\d+: /m);
   assert.match(digestText, /2026-11-24\.7: fail-closed masking scope/);
   assert.match(digestText, /^- 2026-11-24\.6:.*2026-11-24\.5:.*2026-11-24\.4:.*2026-11-24\.3: restored this history line.*2026-11-24\.2: device-app guard.*2026-11-18\.14:/m);
