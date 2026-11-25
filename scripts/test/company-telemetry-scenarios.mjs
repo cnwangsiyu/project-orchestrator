@@ -20,13 +20,17 @@ const now = Date.now(), min = 60000, SOL = 'gpt-6.1-sol';
 const catalog = { models: [{ id: 'GPT-6.1-Sol', _meta: { trae: { load: { percent: 35 } } }, message: 'discard-me' },
   { slug: 'DeepSeek-V4.1-Flash', _meta: { trae: { load: { percent: '59' } } } },
   { id: 'bad/id', _meta: { trae: { load: { percent: 20 } } } },
-  { id: 'GPT-6-Astra', _meta: { trae: { load: { percent: null } } } }] };
+  { id: 'GPT-6.2-Sol', _meta: { trae: { load: { percent: 110 } } } },
+  { id: 'GPT-6-Astra', _meta: { trae: { load: { percent: 330 } } } },
+  { id: 'GPT-6.1-Terra', _meta: { trae: { load: { percent: null } } } }] };
 const exec = childProcess.execFileSync;
 try {
   const parsed = parseTraeModels(catalog, now);
   assert.equal(parsed.load[SOL].percent, 35);
   assert.equal(parsed.load['deepseek-v4.1-flash'].percent, 59);
-  assert.equal(parsed.load['gpt-6-astra'], undefined);
+  assert.equal(parsed.load['gpt-6.2-sol'].percent, 110);
+  assert.equal(parsed.load['gpt-6-astra'].percent, 330);
+  assert.equal(parsed.load['gpt-6.1-terra'], undefined);
   assert.equal(parsed.modelIds['bad/id'], undefined);
   let invocation;
   const read = readTraeModels('fixture-cli', (...args) => { invocation = args; return JSON.stringify(catalog); });
@@ -134,6 +138,8 @@ try {
   const env = { ...process.env, QUOTA_LOG: '0', TRAE_PROBE: '0' };
   const shown = exec(process.execPath, [path.join(root, 'quota.mjs')], { env, encoding: 'utf8' });
   assert.match(shown, /gpt-6.1-sol load 35%/);
+  assert.match(shown, /gpt-6.2-sol load 110%/);
+  assert.match(shown, /gpt-6-astra load 330%/);
   assert.match(shown, /gpt queue \? \(ready/);
   const shownJson = JSON.parse(exec(process.execPath, [path.join(root, 'quota.mjs'), '--json'], { env, encoding: 'utf8' }));
   assert.equal(shownJson.trae.queue.gpt.high.position, 3100);

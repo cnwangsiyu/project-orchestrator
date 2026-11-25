@@ -53,7 +53,12 @@ try {
   for(const args of [['analysis'],['research'],['implement','--impact','service'],['docs'],['image-read'],['browser'],['ui-browser','--impact','service']]) {
     const o=cli(args,freeTrae);assert.equal(o.kind,'launch');assert.equal(o.pick.account,'trae',args.join(' '));
     assert.match(o.why.join('\n'),/TRAE lane free/);
-    if(['browser','ui-browser'].includes(args[0])) {assert.equal(o.pick.model,'gpt-6.1-sol');assert.match(o.why.join('\n'),/gpt-6.1-sol load 42%/);assert.doesNotMatch(o.why.join('\n'),/load 70%/);}
+    if (['browser','ui-browser'].includes(args[0])) {
+      assert.equal(o.pick.model,'gpt-6.1-sol');
+      assert.match(o.shortWhy.join('\n'),/gpt-6.1-sol load 42%/);
+      assert.doesNotMatch(o.shortWhy.join('\n'),/load 70%/, "do not attribute an alternate model's load to the chosen model");
+      assert.match(o.why.join('\n'),/gpt-5.6-terra@trae start wait unknown[^;]*gpt-5.6-terra load 70%/);
+    }
     for(const variant of ['hot','queued','stalled']) {
       const x=structuredClone(freeTrae);
       for(const l of x.lanes.filter(l=>l.accountId==='trae')) {

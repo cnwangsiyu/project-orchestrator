@@ -129,7 +129,7 @@ export function createSnapshot(raw, options = {}) {
       drainPerMin: obs(l.drainPerMin, `${prefix}.drainPerMin`, nonnegative, FRESHNESS.telemetryMs),
       queueState: obs(l.queueState ?? l.state, `${prefix}.queueState`, (v) => ['queued', 'waiting', 'ready'].includes(v), FRESHNESS.telemetryMs),
       progressAt: obs(l.progressAt, `${prefix}.progressAt`, (v) => nonnegative(v) && v <= decisionAt && decisionAt - v <= FRESHNESS.telemetryMs, FRESHNESS.telemetryMs),
-      loadPercent: obs(l.loadPercent, `${prefix}.loadPercent`, (v) => nonnegative(v) && v <= 100, FRESHNESS.telemetryMs),
+      loadPercent: obs(l.loadPercent, `${prefix}.loadPercent`, nonnegative, FRESHNESS.telemetryMs),
       loadSource: ['model', 'family', 'account'].includes(l.loadSource) ? l.loadSource : 'UNKNOWN',
       ownWaiting:obs(l.ownWaiting,`${prefix}.ownWaiting`,bool,FRESHNESS.telemetryMs),
       lowQueue:obs(l.lowQueue,`${prefix}.lowQueue`,object,FRESHNESS.telemetryMs),

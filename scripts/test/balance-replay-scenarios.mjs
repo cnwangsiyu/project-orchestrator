@@ -85,6 +85,50 @@ try {
   assert.equal(run(['implement-hard'], { loads: { [SOL]: load(20), [SOL56]: load(60) } }).pick.account, 'trae');
   assert.equal(run(['implement-hard'], { loads: {} }).pick.account, 'trae');
 
+  // A speculative zero start is not a customer-facing readiness estimate.
+  const day = { [SOL]: bucket(.8) }, traeEta = r => r.eta.find(e => e.account === 'trae' && e.model === SOL);
+  const wait = r => [traeEta(r).startDelayMin, traeEta(r).basis, traeEta(r).confidence];
+  for (const percent of [110, null]) {
+    const loads = percent === null ? {} : { [SOL]: load(percent) };
+    for (const company of [true, false]) {
+      const r = run(['implement'], { models: [SOL], daily: day, loads, company });
+      assert.equal(r.pick.account, company ? 'ttadk' : 'trae', 'do not change choice or bounded fallback');
+      const b = r.balance.candidates[0];
+      const why = percent === null ? /no fresh model load reading/ : /load 110%/;
+      assert.equal(b.load?.percent ?? null, percent);
+      assert.equal(b.freeNow, false);
+      assert.match(b.reasons.join(' '), why);
+      if (percent !== null) assert.doesNotMatch(b.reasons.join(' '), /no fresh model load reading/);
+      assert.deepEqual(wait(r), [null, 'unknown', 'UNKNOWN']);
+      assert.match(r.why.join('\n'), why);
+      assert.match(r.shortWhy.join('\n'), why);
+      assert.doesNotMatch(r.why.join('\n'), /gpt-6.1-sol@trae start now/);
+      assert.doesNotMatch(r.shortWhy.join('\n'), /gpt-6.1-sol@trae start now/);
+    }
+  }
+  const ready59 = run(['implement'], { models: [SOL], daily: day, loads: { [SOL]: load(59) } });
+  assert.equal(ready59.pick.account, 'trae');
+  assert.equal(traeEta(ready59).startDelayMin, 0);
+  assert.match(ready59.shortWhy.join('\n'), /gpt-6.1-sol@trae start now/);
+
+  // The live adapter keys direct telemetry by account home and model. A flat
+  // positive queue overrides cool load through the exact 30-minute boundary.
+  for (const expired of [false, true]) {
+    const lane = { state: 'queued', position: 421, drainPerMin: 0, t: now - 30 * min - Number(expired) };
+    const r = run(['implement'], { models: [SOL], daily: day, loads: { [SOL]: load(59) }, queue: { lanes: { [SOL]: lane } } });
+    assert.equal(r.pick.account, expired ? 'trae' : 'ttadk');
+    assert.equal(traeEta(r).stalled, !expired);
+  }
+  const measured = run(['implement'], { models: [SOL], daily: day, loads: { [SOL]: load(59) },
+    queue: { lanes: { [SOL]: { t: now, position: 2, drainPerMin: 2, state: 'queued' } } } });
+  assert.equal(traeEta(measured).basis, 'queue');
+  assert.equal(traeEta(measured).startDelayMin, 1, 'measured positive waits remain visible');
+  const unknownDrain = run(['implement'], { models: [SOL], daily: day, loads: { [SOL]: load(59) },
+    queue: { lanes: { [SOL]: { t: now, position: 421, drainPerMin: null, state: 'queued' } } } });
+  assert.equal(unknownDrain.pick.account, 'ttadk');
+  assert.deepEqual(wait(unknownDrain), [null, 'unknown', 'UNKNOWN']);
+  assert.match(unknownDrain.why.join('\n'), /queue observed, gpt-6.1-sol load 59%/);
+
   // Walk diagnostics in tier order; same-model TTADK wins after TRAE readiness, catalog, pause or exclusion misses.
   assert.deepEqual(run(['implement']).balance.candidates.map((c) => c.model), [SOL, SOL56, TERRA, FLASH]);
   const fresh = { [SOL]: bucket(.99), [ASTRA]: bucket(.6), [SOL56]: bucket(.94) };

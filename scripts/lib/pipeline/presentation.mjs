@@ -8,7 +8,7 @@ import {mandatoryReview,projectReviewPolicy} from '../review-policy-data.mjs';
 import { deriveReview } from './taskspec.mjs';
 import { reviewAfterWrite } from './review-policy.mjs';
 import { estimateCandidate } from './estimate.mjs';
-import { etaText, taskEstimateText, laneStartText } from '../eta.mjs';
+import { taskEstimateText, laneStartText } from '../eta.mjs';
 import { modelPreference, normalTierOverflow, companyDowngrade, tierDecision,
   mandatoryClaudeReview, mandatoryClaudeSeat, mandatoryClaudeApprovalRef } from './policy.mjs';
 import { flagArgs } from '../route-args.mjs';
@@ -16,6 +16,17 @@ import { personalPriorityGuard } from './personal-priority.mjs';
 import { transportLaneFailures } from '../worker-completion.mjs';
 export const shellQuote = (v) => /^[a-zA-Z0-9_./:@-]+$/.test(String(v)) ? String(v) : `'${String(v).replaceAll("'", "'\\''")}'`;
 const command = (args) => args.map(shellQuote).join(' ');
+// An optimistic zero used by the pipeline is not proof that a TRAE lane is
+// free. Keep selection and queue policy on the original estimate.
+const displayEstimate = e => e.balance && !e.balance.freeNow && !e.capacityReset && e.startDelayMin === 0
+  ? { ...e, startDelayMin:null, basis:'unknown', confidence:'UNKNOWN' } : e;
+const traeWaitReason = ({ balance: b, capacityReset }) => b && !b.freeNow && !capacityReset
+  ? [b.queued && 'queue observed', b.reasons.find(r => /^(recent Astra queue|family queue|daily bucket depleted)/.test(r)),
+    b.load ? `${b.model} load ${b.load.percent}%` : 'no fresh model load reading'].filter(Boolean).join(', ') : null;
+const startText = e => {
+  const reason = traeWaitReason(e);
+  return reason ? `${laneStartText(e)} — ${reason}` : laneStartText(e);
+};
 export function presentRoute(plan, view, context) {
   const { snapshot, root, owner, profiles = {}, digest:sourceDigest = { version:'UNKNOWN',worker:'' } } = context;
   const resources=known(snapshot.resources)??{}, hasTrae=snapshot.accounts.some(a=>a.kind==='trae');
@@ -146,8 +157,12 @@ export function presentRoute(plan, view, context) {
   const estimatedRows = (plan.trace?.candidates ?? []).map((r) => r.predicates.some((p)=>p.reason?.code==='PROVIDER_QUOTA_DENIED')
     ? {...r, estimate:estimateCandidate(t,snapshot,r.candidate,{capacityReset:true})} : r);
   const eta = estimatedRows.filter((r)=>r.predicates.every((p)=>p.ok || ['PROVIDER_QUOTA_DENIED','DAY_QUOTA_EXHAUSTED'].includes(p.reason?.code)))
-    .filter((r)=>!seat || r.candidate.effort===seat.candidate.effort).map((r)=>({ ...r.estimate, model:r.candidate.modelId, account:r.candidate.accountId, effort:r.candidate.effort,
-      unknown:r.estimate.confidence==='UNKNOWN', lane:{position:known(candidateParts(snapshot,r.candidate).lane.position),drainPerMin:known(candidateParts(snapshot,r.candidate).lane.drainPerMin)} }));
+    .filter((r)=>!seat || r.candidate.effort===seat.candidate.effort).map((r)=>{
+      const estimate = displayEstimate(r.estimate), { lane } = candidateParts(snapshot,r.candidate);
+      return { ...estimate, model:r.candidate.modelId, account:r.candidate.accountId, effort:r.candidate.effort,
+        unknown:estimate.confidence==='UNKNOWN', lane:{position:known(lane.position),drainPerMin:known(lane.drainPerMin)} };
+    });
+  const chosenEstimate = seat && displayEstimate(seat.estimate);
   const low = c && company(candidateParts(snapshot,c).account) && (seat.estimate.patienceMin!==null);
   let patience = low ? seat.estimate.patienceMin ?? 30 : null;
   const altRows = estimatedRows.filter((r)=>r.candidate.accountId!==c?.accountId || r.candidate.modelId!==c?.modelId)
@@ -237,7 +252,13 @@ export function presentRoute(plan, view, context) {
     const releaseFallback = previousReleaseFallback(t, snapshot, c);
     if (releaseFallback) why.push(releaseFallback.text);
     const alternatives=eta.filter(e=>e.account!==c.accountId||e.model!==c.modelId);
-    why.push(`ETA: ${taskEstimateText(seat.estimate)}; chosen lane: ${company(account)?'company':'personal'} ${c.modelId}@${c.accountId} ${laneStartText(seat.estimate)}${alternatives.length?`; alternatives: ${alternatives.map(e=>`${company(snapshot.accounts.find(a=>a.id===e.account))?'company':'personal'} ${etaText(e)}`).join('; ')}`:''}; expected finish ~${Math.round(seat.estimate.completionMin)} min`);
+    const finish = chosenEstimate.confidence !== 'UNKNOWN' && Number.isFinite(chosenEstimate.completionMin)
+      ? `; expected finish ~${Math.round(chosenEstimate.completionMin)} min` : '';
+    why.push(`ETA: ${taskEstimateText(chosenEstimate)}; chosen lane: ${company(account)?'company':'personal'} ${c.modelId}@${c.accountId} ${startText(chosenEstimate)}${alternatives.length?`; alternatives: ${alternatives.map(e=>`${company(snapshot.accounts.find(a=>a.id===e.account))?'company':'personal'} ${e.model}@${e.account} ${startText(e)}`).join('; ')}`:''}${finish}`);
+    if (account.kind !== 'trae') {
+      const comparable = alternatives.find(e => policyModel(e.model) === policyModel(c.modelId) && traeWaitReason(e));
+      if (comparable) why.push(`TRAE alternative ${comparable.model}@${comparable.account}: ${startText(comparable)}.`);
+    }
     const comparison = plan.trace?.comparator?.finishComparison;
     if (comparison) {
       const fallbackIds = new Set(comparison.fallbackCandidateIds);
@@ -255,7 +276,7 @@ export function presentRoute(plan, view, context) {
       why.push(`${c.accountId}/${c.modelId} day quota exhausted until ${exhausted.until ? new Date(exhausted.until).toISOString() : 'provider reset (time unknown)'}. ${start}`);
     }
     if(candidateParts(snapshot,c).lane.mode==='low-priority') why.push(`TRAE ${c.modelId} low-priority lane (bucket depleted): provider capacity remains eligible with ${snapshot.personalFallback?.enabled?'an owner queue decision':'bounded queue patience'}.`);
-    if(!exhausted && seat.estimate.basis==='progressing') why.push(`${c.modelId} low-priority lane (bucket depleted): slower bucket designation, but progressing without queue cycles in fresh per-model telemetry.`);
+    if(!exhausted && lane.mode==='low-priority' && seat.estimate.basis==='progressing') why.push(`${c.modelId} low-priority lane (bucket depleted): slower bucket designation, but progressing without queue cycles in fresh per-model telemetry.`);
     if(['browser','ui-browser'].includes(t.category)&&c.family==='claude') fixedNotes.push(WORKER_NOTES.claudeBrowser);
     if(t.writes||['browser','computer-use'].includes(t.category)) fixedNotes.unshift(sourceDigest.worker.split('\n').find(line=>line.startsWith('- Scope safety:'))??'');
     if(t.writes&&context.slowTests?.length) notes.push('brief: slow tests for this project — run each ONLY when the listed code is touched, never inside a heavy lane, and report "<file> not run: untouched code" otherwise: '+context.slowTests.map(x=>`${x.file} (${x.cost}; run when touching ${[].concat(x.runWhen??[]).join(', ')})`).join(' | '));
@@ -344,7 +365,7 @@ export function presentRoute(plan, view, context) {
   // JSON retains full diagnostics; text repeats only the choice and task context.
   const shortWhy = [...new Set(why.map(line => {
     if (c && line.startsWith('ETA:'))
-      return `ETA: ${taskEstimateText(seat.estimate)}; chosen lane: ${c.modelId}@${c.accountId} ${laneStartText(seat.estimate)}; alternative waits: --json/--verbose.`;
+      return `ETA: ${taskEstimateText(chosenEstimate)}; chosen lane: ${c.modelId}@${c.accountId} ${startText(chosenEstimate)}; alternative waits: --json/--verbose.`;
     if (c && line.includes('low-priority lane (bucket depleted)'))
       return `${c.modelId}: low-priority capacity; ${snapshot.personalFallback?.enabled?'owner decides queued handoffs':seat.estimate.basis==='progressing'?'fresh progress observed':'bounded queue patience'}.`;
     return line;

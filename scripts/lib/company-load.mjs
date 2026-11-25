@@ -22,7 +22,8 @@ export const parseTraeModels = (payload, t = Date.now()) => {
     const key = id.toLowerCase();
     modelIds[key] = id;
     const percent = num(m?._meta?.trae?.load?.percent);
-    if (percent != null && percent >= 0 && percent <= 100) load[key] = { percent, t };
+    // TRAE can publish load above 100%; preserve the reading for the hot-lane check.
+    if (percent != null && percent >= 0) load[key] = { percent, t };
   }
   return { modelIds, load };
 };
@@ -36,7 +37,7 @@ export const readTraeModels = (bin, run = execFileSync) => {
 };
 export const freshLoad = (rows, now = Date.now()) => Object.fromEntries(Object.entries(rows ?? {}).flatMap(([model, r]) => {
   const ageMin = age(r?.t, now), percent = num(r?.percent);
-  return idOK(model) && ageMin != null && percent != null && percent >= 0 && percent <= 100
+  return idOK(model) && ageMin != null && percent != null && percent >= 0
     ? [[model.toLowerCase(), { percent, t: r.t, ageMin }]] : [];
 }));
 // Some listed models (including Astra) have no direct load. Use the busiest fresh family observation,
