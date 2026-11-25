@@ -252,7 +252,10 @@ try {
   assert.deepEqual([normalSkip.pick.account, normalSkip.pick.model], ['main', SOL]);
   assert.ok(normalSkip.why.length>0);
   const second = run(['review-high', '--author', 'codex']);
-  assert.equal(second.pick.vendor,'claude'); assert.equal(second.blocked,true); assert.equal(second.pick.command,null);
+  assert.equal(second.pick.vendor,'claude'); assert.equal(second.blocked,false);
+  assert.equal(second.pick.model,'opus'); assert.equal(second.pick.effort,'medium');
+  assert.equal(second.pick.approvalRef,'standing:codex-mandatory-review-2026-11-24');
+  assert.ok(second.pick.command); assert.equal(personalGate(second),false);
   const sameFamily = run(['design'], { claudeUsed: 93, models: ids.filter((id) => id !== FLASH) });
   assert.equal(sameFamily.secondOpinion,null,'ordinary design has no second reviewer');
   const quality = run(['analysis', '--failures', '4'], { daily: active });

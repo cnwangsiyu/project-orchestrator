@@ -236,7 +236,7 @@ const CASES = [
   // A Codex-written change is reviewed by Claude first.
   ['ttFresh', ['review', '--author', 'codex'], 'codex gpt-6.1-sol xhigh @ttadk', 'second TTADK reviewer'],
   ['ttKimi', ['review', '--author', 'codex'], 'codex gpt-6.1-sol xhigh @ttadk', 'Kimi-K3, a different model family'],
-  ['ttFresh', ['review-high', '--author', 'codex'], 'claude opus xhigh'],
+  ['ttFresh', ['review-high', '--author', 'codex'], 'claude opus medium'],
   ['fresh', ['review', '--author', 'codex'], 'claude sonnet high'],
   // Claude has no room: a fresh TTADK reviewer stands in instead of deferring or dropping the second opinion.
   ['ttClaudeOver', ['second-opinion', '--against', 'codex'], 'codex gpt-6.1-sol xhigh @ttadk'],
@@ -490,7 +490,7 @@ for (const [sc,args,oldWant,oldNote] of CASES) {
     const rec = parseRouteJSON(fs.readFileSync(log, 'utf8').trim());
     assert.equal(rec.tier, 'hard'); assert.equal(rec.tier, merged.tier);
     assert.equal(rec.second?.account, merged.secondOpinion?.account);
-    assert.equal(rec.personalApproved, true); assert.equal(merged.blocked,false); assert.equal(rec.approvalRef, 'fixture-approval');
+    assert.equal(rec.personalApproved, true); assert.equal(merged.blocked,false); assert.equal(rec.approvalRef, 'standing:codex-mandatory-review-2026-11-24');
     assert.ok(merged.pick?.command);
     for (const sc of ['ttFresh', 'ttOutTraeDown', 'fresh']) {
       const routed = parseRouteJSON(run(sc, ['build-run']));
@@ -949,14 +949,14 @@ for (const [sc, args] of ERRORS) {
   S.traeReviewChatOut = { ...S.traeReviewFull, codex: [acc('main', 99, 120), ...S.traeFull.codex.slice(1)] };
   for (const [args, claudePick] of [
     [['review', '--author', 'codex'], 'sonnet high @undefined'],
-    [['review-high', '--author', 'codex'], 'opus xhigh @undefined'],
+    [['review-high', '--author', 'codex'], 'opus medium @undefined'],
     [['second-opinion', '--against', 'codex'], 'opus high @undefined'],
   ]) {
     const personalPick = claudePick;
-    // A --security review is adversarial: with no company non-GPT model eligible it lands on Opus behind the gate.
-    const advPick = args[0] === 'second-opinion' ? 'opus high @undefined' : 'opus xhigh @undefined';
-    // A hard review (review-high) uses Sol/Astra only; with those paused or excluded the rung drops to Claude behind
-    // the gate. Normal reviews keep the fallback ladder.
+    // This legacy helper explicitly classifies security cases as D and review-high as B.
+    // Codex authors therefore receive the standing Opus-medium grant in those cases.
+    const advPick = 'opus medium @undefined';
+    // Optional normal reviews keep the fallback ladder and their quota gates.
     const hardRow = args[0] === 'review-high';
     for (const [sc, flags, priorWant, priorGate] of [
       ['traeReviewFull', ['--security', '--exclude-model', 'deepseek', '--dry'], advPick, true],
@@ -982,6 +982,7 @@ for (const [sc, args] of ERRORS) {
       else if(!flags.length&&['traeReviewFull','traeFull'].includes(sc)) {want=hardRow?claudePick:'deepseek-v4.1-flash high @trae';gate=hardRow;}
       else if(flags.includes('--urgent')&&want.includes('@undefined')) gate=true;
       if(want==='gpt-6.1-sol high @main') {want=args[0]==='second-opinion'?'opus high @undefined':'sonnet high @undefined';gate=true;}
+      if(!flags.includes('--failures')&&(hardRow||flags.includes('--security'))) {want='opus medium @undefined';gate=false;}
       if(want!==priorWant||gate!==priorGate) expectationChanges.push({scenario:sc,args:routeArgs,old:priorWant,next:want,oldGate:priorGate,gate,reason:'V08/V10/V16: scoped consent, real actual floor and routine single independent reviewer'});
       const result = o(sc, routeArgs);
       const got = result.deferred ? 'DEFER' : `${result.pick?.model} ${result.pick?.effort} @${result.pick?.account}`;
@@ -1844,7 +1845,7 @@ for (const [sc, args] of ERRORS) {
     const allGPTs=[SOL,ASTRA,SOL56,GPT55,TERRA56];
     assert.ok(gated(r(['lookup'],{models:[SOL],daily:depleted})));
     for(const args of [['image-gen'],['claude-tools'],['second-opinion','--against','codex'],['review-high','--author','codex']])
-      assert.equal(gated(r(args,{models:[SOL]})),!['image-gen','claude-tools'].includes(args[0]),`personal consent/standing exception: ${args[0]}`);
+      assert.equal(gated(r(args,{models:[SOL]})),!['image-gen','claude-tools','review-high'].includes(args[0]),`personal consent/standing exception: ${args[0]}`);
     assert.equal(r(['computer-use']).blocked,true);
     const design=r(['design'],{models:[SOL]});
     assert.equal(design.pick.account,'trae'); assert.equal(design.secondOpinion,null); assert.ok(!gated(design));
