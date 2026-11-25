@@ -13,8 +13,6 @@ const shared = path.join(tmp, 'shared'); fs.mkdirSync(shared);
 Object.assign(process.env, { HOME: tmp, RULES_SHARED: shared, TRAE_PROBE: '0', QUOTA_LOG: '0', ROUTE_LOG: '0', ORCHESTRATOR_OWNER: '' });
 const { createTaskSpec, createSnapshot, routePure, renderPlan, validatePlan } = await import('../lib/pipeline/index.mjs');
 const { personalPriorityWindow, activePersonalPriority, personalPriorityGuard } = await import('../lib/pipeline/personal-priority.mjs');
-const { checkPersonalPriorityNotices } = await import('../lib/personal-priority-notices.mjs');
-const { eventLine, readEvents, inbox } = await import('../lib/worker-events.mjs');
 const { analyze, now: stateNow } = await import('../lib/state.mjs');
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const NOW = stateNow, h = 3600000, SOL = 'gpt-6.1-sol', ASTRA = 'gpt-6.2-astra';
@@ -48,7 +46,7 @@ try {
   check('exclusive accepts open-ended/account-bound windows; prefer-first still needs explicit expiry', () => {
     assert.equal(personalPriorityWindow(window()).until, null);
     assert.equal(personalPriorityWindow(window({ mode: 'prefer-first' })), null);
-    for (const extra of [{ mode: 'unknown' }, { account: 'b' }, { from: 'bad' }, { until: 'bad' }, { exhaustAtUsed: 89 }])
+    for (const extra of [{ mode: 'unknown' }, { account: 'other' }, { from: 'bad' }, { until: 'bad' }, { exhaustAtUsed: 89 }])
       assert.equal(personalPriorityWindow(window(extra)), null);
     assert.ok(activePersonalPriority(window(), NOW + 30 * 24 * h));
     assert.equal(activePersonalPriority(window({ revoked: true }), NOW), null);
@@ -56,28 +54,28 @@ try {
     assert.ok(activePersonalPriority(window({ until }), NOW));
     assert.equal(activePersonalPriority(window({ until }), NOW + h), null);
   });
-  check('dated b refusal survives absent, invalid and revoked personal windows', () => {
-    for (const priority of [undefined, window({ account: 'invalid' }), window({ revoked: true })]) {
-      const raw = fixture(0, true);
-      raw.personalPriority = priority;
-      raw.accounts = raw.accounts.filter(a => a.id === 'b');
-      raw.lanes = raw.lanes.filter(l => l.accountId === 'b');
-      const { plan } = run(raw);
-      assert.notEqual(plan.kind, 'launch', 'a window state cannot re-enable personal b');
-      assert.ok(plan.rejected.some(p => p.reason?.code === 'PERSONAL_B_REFUSED'));
-    }
-    const historical = fixture(0, true), before = Date.parse('2026-11-21T08:00:00Z') - 1;
-    delete historical.personalPriority;
-    historical.decisionAt = before; historical.collectedFrom = before; historical.collectedThrough = before;
-    historical.accounts = historical.accounts.filter(a => a.id === 'b');
-    historical.lanes = historical.lanes.filter(l => l.accountId === 'b');
-    assert.ok(run(historical).plan.rejected.some(p => p.reason?.code === 'PERSONAL_B_REFUSED'), 'old telemetry cannot authorize new work on b');
+  check('by-quota chooses the available weekly capacity per hour until reset', () => {
+    const raw = fixture(40);
+    raw.personalPriority.account = 'by-quota';
+    const [main, b] = raw.accounts;
+    assert.equal(run(raw).view.pick.account, 'b');
+    b.budget.weekly.used = 40;
+    assert.equal(run(raw).view.pick.account, 'main');
+    b.budget.weekly.resetsAt -= 24 * h;
+    assert.equal(run(raw).view.pick.account, 'b');
+    delete b.budget.weekly;
+    assert.equal(run(raw).view.pick.account, 'main');
+    main.providerDenied = true;
+    assert.equal(run(raw).view.pick.account, 'b');
+    b.providerDenied = true;
+    raw.accounts[2].providerDenied = false;
+    assert.equal(run(raw).view.pick.account, 'ttadk');
   });
   check('company headroom wins during exclusive despite main and b headroom and earlier deadlines', () => {
     const raw = fixture(40, true), { plan, snapshot, view } = run(raw);
     assert.equal(plan.kind, 'launch'); assert.equal(plan.primary.candidate.accountId, 'trae');
     assert.equal(validatePlan(plan, snapshot).ok, true);
-    assert.match(view.why.join('\n'), /company lanes first; personal overflow only on main/);
+    assert.match(view.why.join('\n'), /company lanes first; personal overflow/);
     raw.accounts[1].budget.deadline = 167; raw.rotationState = 1;
     assert.equal(run(raw).plan.primary.candidate.accountId, 'trae');
     raw.accounts.find(a => a.id === 'trae').providerDenied = true;
@@ -88,7 +86,7 @@ try {
     assert.equal(plan.kind, 'launch'); assert.equal(plan.primary.candidate.accountId, 'main');
     assert.equal(validatePlan(plan, snapshot).ok, true);
     assert.equal(view.pick.approvalRef, ref);
-    assert.match(view.why.join('\n'), /company lanes first; personal overflow only on main/);
+    assert.match(view.why.join('\n'), /company lanes first; personal overflow/);
     raw.accounts[1].budget.deadline = 1;
     assert.equal(run(raw).plan.primary.candidate.accountId, 'main');
   });
@@ -137,7 +135,7 @@ try {
       assert.equal(view.pick.model, ASTRA); assert.equal(view.pick.effort, 'xhigh');
       assert.equal(view.pick.approvalRef, ref); assert.equal(view.pick.astraApprovalRef, fallback.hardAstraDecisionRef);
       assert.equal(validatePlan(plan, snapshot).ok, true);
-      assert.ok(plan.rejected.some(p => p.reason?.code === 'PERSONAL_B_REFUSED'));
+      assert.ok(plan.rejected.some(p => p.reason?.code === 'PERSONAL_EXCLUSIVE_ACCOUNT'));
       assert.doesNotMatch(view.tellUser.join('\n'), /personal-main-wait|redeem main card/);
     };
     Object.assign(astra, { readyAt: null, position: 501, drainPerMin: 0, queueState: 'queued' });
@@ -163,12 +161,11 @@ try {
   for (const used of [96,99,100]) check(`main ${used}% remains available until provider denial`, () => {
     const raw = fixture(used), {plan,view} = run(raw);
     assert.equal(plan.primary.candidate.accountId,'main');
-    assert.ok(view.tellUser.includes(`main at ${used}% of the week, projected ${raw.accounts[0].budget.weekly.projected}% at reset`));
+    assert.ok(!view.tellUser.includes(`main at ${used}% of the week, projected ${raw.accounts[0].budget.weekly.projected}% at reset`));
     raw.accounts[0].providerDenied = true;
     raw.accounts[2].providerDenied = false;
     const fallback = run(raw);
     assert.equal(fallback.view.pick.account,'ttadk');
-    assert.match(fallback.view.tellUser.join(' '),/main quota denied by provider/);
     raw.accounts[0].transport = false;
     assert.equal(run(raw).view.pick.account,'ttadk');
   });
@@ -204,7 +201,7 @@ try {
     assert.equal(overflow.view.pick.account, 'main');
     assert.equal(overflow.view.pick.model, ASTRA); assert.equal(overflow.view.pick.effort, 'xhigh');
     assert.equal(overflow.view.pick.approvalRef, ref);
-    assert.match(overflow.view.why.join('\n'), /company lanes first; personal overflow only on main/);
+    assert.match(overflow.view.why.join('\n'), /company lanes first; personal overflow/);
     for (const a of raw.accounts.filter(a => ['ttadk', 'trae'].includes(a.kind))) a.providerDenied = false;
     raw.accounts[0].budget.weekly.used = 96;
     assert.ok(['ttadk', 'trae'].includes(run(raw, hard).view.pick.account));
@@ -227,95 +224,6 @@ try {
     data.codexAccounts[0].observationStale = false; data.codexAccounts[0].live = false;
     assert.equal(analyze(data).codex.pick, null);
   });
-  check('90% notice is once per reset window across owners, and reopens after a manual reset', () => {
-    const file = path.join(tmp, 'notices.json'), rows = [], emit = row => { rows.push(row); return row; };
-    function notify(used, extra = {}) { const { snapshot, plan } = run(fixture(used));
-      return checkPersonalPriorityNotices({ snapshot, plan, task: task(), owner, file, emit, ...extra }); }
-    assert.deepEqual(notify(89), []); assert.equal(notify(90).length, 1);
-    assert.equal(rows[0].text, `[personal-main-90] main 90% used, resets ${new Date(NOW + 168 * h).toISOString()}, cards 3`);
-    assert.deepEqual(notify(91, { owner: 'another-fixture-owner' }), []);
-    const raw = fixture(90); raw.accounts[0].budget.weekly.resetsAt += 7 * 24 * h; raw.accounts[0].resets.count = 2;
-    const { snapshot, plan } = run(raw);
-    assert.equal(checkPersonalPriorityNotices({ snapshot, plan, task: task(), owner, file, emit }).length, 1);
-    assert.equal(rows.length, 2);
-    assert.match(rows[1].text, /cards 2$/);
-    assert.equal(eventLine({ ...rows[0], event: 'message' }), rows[0].text);
-  });
-  check('90% notice keeps one cycle across forward and backward reset-time corrections', () => {
-    const file = path.join(tmp, 'notice-drift.json'), rows = [], emit = row => { rows.push(row); return row; };
-    function notify(used, drift) {
-      const raw = fixture(used); raw.accounts[0].budget.weekly.resetsAt += drift;
-      return checkPersonalPriorityNotices({ snapshot: run(raw).snapshot, task: task(), owner, file, emit });
-    }
-    assert.equal(notify(90, 0).length, 1);
-    assert.deepEqual(notify(91, 102000), []);
-    assert.deepEqual(notify(92, -102000), []);
-    assert.equal(rows.length, 1);
-  });
-  check('fresh usage after a manual reset reopens the notice even with the same deadline', () => {
-    const file = path.join(tmp, 'notice-same-deadline-reset.json'), rows = [], emit = row => { rows.push(row); return row; };
-    function notify(used, cards) {
-      const raw = fixture(used); raw.accounts[0].resets.count = cards;
-      return checkPersonalPriorityNotices({ snapshot: run(raw).snapshot, task: task(), owner, file, emit });
-    }
-    assert.equal(notify(90, 3).length, 1);
-    assert.deepEqual(notify(0, 2), []);
-    assert.equal(notify(90, 2).length, 1);
-    assert.deepEqual(notify(91, 2), []);
-    assert.equal(rows.length, 2); assert.match(rows[1].text, /cards 2$/);
-  });
-  check('stale low usage cannot create another 90% notice cycle', () => {
-    const file = path.join(tmp, 'notice-stale-reset.json'), rows = [], emit = row => { rows.push(row); return row; };
-    const notify = snapshot => checkPersonalPriorityNotices({ snapshot, task: task(), owner, file, emit });
-    assert.equal(notify(run(fixture(90)).snapshot).length, 1);
-    const raw = fixture(0);
-    raw.accounts[0].budget = { status: 'KNOWN', value: raw.accounts[0].budget, sampledAt: NOW, receivedAt: NOW, source: 'last-good-stale' };
-    assert.deepEqual(notify(run(raw).snapshot), []);
-    assert.deepEqual(notify(run(fixture(91)).snapshot), []);
-    assert.equal(rows.length, 1);
-    assert.deepEqual(notify(run(fixture(0)).snapshot), []);
-    assert.equal(notify(run(fixture(90)).snapshot).length, 1);
-  });
-  check('older fresh observations cannot consume a reset cycle notice', () => {
-    const file = path.join(tmp, 'notice-observation-order.json'), rows = [], emit = row => { rows.push(row); return row; };
-    function notify(used, sampledAt, at) {
-      const raw = fixture(used); raw.decisionAt = at;
-      raw.collectedFrom = Math.min(sampledAt, at); raw.collectedThrough = at;
-      raw.accounts[0].budget = { status: 'KNOWN', value: raw.accounts[0].budget, sampledAt, receivedAt: at, source: 'public-status-cache' };
-      const snapshot = run(raw).snapshot;
-      return checkPersonalPriorityNotices({ snapshot, task: task(), owner, file, emit });
-    }
-    assert.equal(notify(90, NOW, NOW).length, 1);
-    assert.deepEqual(notify(0, NOW - 1000, NOW + 1000), []);
-    assert.deepEqual(notify(91, NOW + 1000, NOW + 1000), []);
-    assert.deepEqual(notify(0, NOW + 2000, NOW + 2000), []);
-    assert.deepEqual(notify(91, NOW + 1000, NOW + 3000), []);
-    assert.deepEqual(notify(89, NOW + 3000, NOW + 3000), []);
-    assert.equal(notify(90, NOW + 4000, NOW + 4000).length, 1);
-    assert.equal(rows.length, 2);
-  });
-  check('wait notices preserve the exact tag/text, deduplicate the task, and dry/missing-owner calls consume nothing', () => {
-    const { snapshot, plan } = run(fixture(96)), file = path.join(tmp, 'wait-notices.json'), rows = [], emit = row => { rows.push(row); return row; };
-    const args = { snapshot, plan, task: task(), owner, file, emit };
-    assert.deepEqual(checkPersonalPriorityNotices({ ...args, dry: true }), []);
-    assert.deepEqual(checkPersonalPriorityNotices({ ...args, owner: null }), []); assert.equal(fs.existsSync(file), false);
-    assert.equal(checkPersonalPriorityNotices(args).length, 1); assert.equal(checkPersonalPriorityNotices(args).length, 0);
-    const wait = rows.find(r => r.kind === 'personal-main-wait');
-    assert.equal(wait,undefined);
-    assert.equal(checkPersonalPriorityNotices({ ...args, task: task({ taskId: 'W-next' }),
-      plan: run(fixture(96), task({ taskId: 'W-next' })).plan }).length, 0);
-  });
-  check('stale usage cannot consume the 90% notice; a later fresh reading delivers it', () => {
-    const raw = fixture(90), file = path.join(tmp, 'stale-notices.json'), rows = [], emit = row => { rows.push(row); return row; };
-    raw.accounts[0].budget = { status: 'KNOWN', value: raw.accounts[0].budget, sampledAt: NOW, receivedAt: NOW,
-      source: 'last-good-stale' };
-    let result = run(raw);
-    checkPersonalPriorityNotices({ ...result, task: task(), owner, file, emit });
-    assert.equal(rows.some(row => row.kind === 'personal-main-90'), false);
-    raw.accounts[0].budget.source = 'public-status-cache'; result = run(raw);
-    checkPersonalPriorityNotices({ ...result, task: task(), owner, file, emit });
-    assert.equal(rows.filter(row => row.kind === 'personal-main-90').length, 1);
-  });
   check('CLI adds/inspects/revokes exclusive mode and keeps legacy prefer-first syntax', () => {
     const cli = (...args) => JSON.parse(execFileSync(process.execPath, [path.join(root, 'scripts/personal-priority.mjs'), ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: process.env }));
     const from = new Date(NOW - 1000).toISOString(), until = new Date(NOW + h).toISOString();
@@ -332,19 +240,13 @@ try {
     assert.equal(cli('inspect').active, true); assert.equal(cli('inspect').window.until, null);
     cli('revoke', ref);
   });
-  check('router CLI emits durable main notices and never launches b while exclusive waits', () => {
+  check('router CLI selects a legacy window account without usage notices', () => {
     const raw = fixture(96), snap = path.join(tmp, 'snapshot.json'), registry = path.join(tmp, 'registry.json');
     fs.writeFileSync(snap, JSON.stringify(raw)); fs.writeFileSync(registry, '{}');
     const env = { ...process.env, ROUTE_SNAPSHOT_FILE: snap, CODEX_ACCOUNTS: registry, QUOTA_CACHE: path.join(tmp, 'quota.json'), ROUTE_LOG_FILE: path.join(tmp, 'route.log') };
     const cli = () => JSON.parse(execFileSync(process.execPath, [path.join(root, 'scripts/route.mjs'), 'analysis', '--json', '--owner', owner], { encoding: 'utf8', env }));
     const result = cli(); assert.equal(result.kind,'launch'); assert.equal(result.pick.account,'main');
-    assert.ok(result.tellUser.some(text => text.startsWith('[personal-main-90]')));
-    assert.match(result.tellUser.join(' '),/main at 96% of the week/);
-    cli(); const events = readEvents().filter(row => row.kind?.startsWith('personal-main-'));
-    assert.equal(events.filter(row => row.kind === 'personal-main-90').length, 1);
-    assert.equal(events.filter(row => row.kind === 'personal-main-wait').length, 0);
-    assert.equal(inbox(events, owner).pending.length, 1);
-    assert.ok(inbox(events, owner).pending.every(row => eventLine(row).startsWith(`[${row.kind}] `)));
+    assert.doesNotMatch(result.tellUser.join(' '), /personal-main-90|% of the week/);
   });
   const server = http.createServer((req, res) => { res.writeHead(200); res.end('ok'); });
   server.on('upgrade', (req, socket) => socket.destroy());
@@ -364,14 +266,13 @@ try {
     const exec = promisify(execFile), save = () => fs.writeFileSync(cache, JSON.stringify({ checkedAt: at, codexAccounts: accounts, claude: [], history: {}, errors: {} }));
     save();
     const first = JSON.parse((await exec(process.execPath, [path.join(root, 'scripts/quota.mjs'), '--json'], { env })).stdout);
-    assert.equal(first.codexPick, 'main'); assert.equal(first.personalPriorityNotices.length, 1);
-    assert.match(first.personalPriorityNotices[0], /\[personal-main-90\] main 90% used, resets .*cards 3/);
+    assert.equal(first.codexPick, 'main'); assert.equal(first.personalPriorityNotices.length, 0);
     const second = JSON.parse((await exec(process.execPath, [path.join(root, 'scripts/quota.mjs'), '--json'], { env })).stdout);
     assert.deepEqual(second.personalPriorityNotices, []);
     accounts[0].windows[0].used = 96; save();
     const waited = (await exec(process.execPath, [path.join(root, 'scripts/quota.mjs')], { env })).stdout;
     assert.match(waited, /budget:.*codex → main/);
-    count++; console.log('PASS quota CLI respects exclusive main and delivers the 90% notice only once');
+    count++; console.log('PASS quota CLI respects exclusive main without emitting usage notices');
   } finally { await new Promise(resolve => server.close(resolve)); }
   console.log(`Personal exclusive scenarios: ${count} passed`);
 } finally { fs.rmSync(tmp, { recursive: true, force: true }); }

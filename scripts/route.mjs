@@ -12,7 +12,6 @@ import { loadDigest } from './lib/global-rules.mjs';
 import { launcherIdentity, validOwner } from './lib/worker-events.mjs';
 import { taskLaunchPaths } from './lib/launch-paths.mjs';
 import { approvalMismatchHints, mismatchHintText } from './lib/approval-diagnostics.mjs';
-import { checkPersonalPriorityNotices } from './lib/personal-priority-notices.mjs';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 if (process.argv.includes('--help') || process.argv.includes('-h') || process.argv[2] === 'help') {
@@ -58,10 +57,8 @@ try {
       .filter(s => s?.task.flags['task-dir']).map(s => [s.role, taskLaunchPaths(s.task.taskDir, s.role)]));
     const view = renderPlan(plan, {...context, launchPaths, owner, digest: loadDigest()});
     const approvalHints = approvalMismatchHints(plan, context.snapshot, root, process.env.ORCHESTRATOR_OWNER);
-    const notices = checkPersonalPriorityNotices({ snapshot: context.snapshot, task: context.task, plan, owner, dry: !!task.flags.dry });
-    const notifiedView = notices.length ? { ...view, tellUser: [...new Set([...view.tellUser, ...notices.map(r => r.text)])] } : view;
-    const out = approvalHints.length ? { ...notifiedView, approvalMismatchHints: approvalHints,
-      needsUserOK: [...view.needsUserOK, ...approvalHints.map(mismatchHintText)] } : notifiedView;
+    const out = approvalHints.length ? { ...view, approvalMismatchHints: approvalHints,
+      needsUserOK: [...view.needsUserOK, ...approvalHints.map(mismatchHintText)] } : view;
     if (!task.flags.dry && process.env.ROUTE_LOG !== '0') {
       const tuple = p => p ? {vendor:p.vendor,model:p.model,effort:p.effort,account:p.account,sandbox:p.sandbox,company:p.company} : null;
       const rec = {t:context.now,kind:'route',project:plan.task.project,name:plan.task.flags.name??plan.task.taskId,requestId:plan.task.requestId,

@@ -46,7 +46,7 @@ function run([command, ...args]) {
     args = positional;
     const [from, until, userDecisionRef, quote] = args;
     if (replace && mode !== 'exclusive') throw Error('--replace requires exclusive mode');
-    const window = personalPriorityWindow({ account: 'main', mode, from, until: until === 'none' ? null : until,
+    const window = personalPriorityWindow({ account: mode === 'exclusive' ? 'by-quota' : 'main', mode, from, until: until === 'none' ? null : until,
       userDecisionRef, quote, revoked: false, ...(exhaustAtUsed === undefined ? {} : { exhaustAtUsed }) });
     if (!window) throw Error('invalid window bounds, decision reference, or quote');
     return withLock(file, () => {

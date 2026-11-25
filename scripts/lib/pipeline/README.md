@@ -33,16 +33,9 @@ TTADK, personal ChatGPT Astra, Fable and reset redemption keep their separate de
 proposals contain no executable commands; gated second reviewers do not stop
 an eligible company primary, and remain required before acceptance.
 On devices without company accounts, personal ChatGPT is the normal lane with
-standing permission. Main weekly usage and its projection are reported at routing time. A provider denial removes main from runnable choices. Other personal accounts retain their applicable account policy.
-Deadlines within `POLICY.deadlineTieH` (6 hours) of the earliest eligible
-deadline are tied: lower weekly usage wins, then a live hub, then account name.
-This balances launches as usage changes when weekly resets are close together.
-Eligible tie groups with deadlines within 48 hours rotate, using each group's
-least-used account;
-otherwise the earliest deadline wins. Nondry personal launches advance the CLI
-counter under a short lock. Max effort and reset redemption still ask separately.
+standing permission. A provider denial removes the affected account. Rank main and b by remaining weekly percentage per hour until reset. Known weekly readings precede unknown, with main first on ties. The secretary handles reset cards after provider denial under the standing approval of 2026-11-24.
 
-An active exclusive window allows only main for personal Codex. Compare qualified lanes by expected finish, with a three-minute company tie band. Measured starts take precedence over unknown starts. Confirm an infrastructure interruption before rerouting the original task.
+The by-quota exclusive window covers main and b. Compare qualified lanes by expected finish, with a three-minute company tie band. Measured starts take precedence over unknown starts. Confirm an infrastructure interruption before rerouting the original task.
 The window follows the account across card redemption, with an explicit expiry
 or `until: null` (until revoked). Six-hour deadline ties apply outside exclusive
 mode. `personal-priority.mjs add FROM none REF QUOTE --mode exclusive

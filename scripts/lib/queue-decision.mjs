@@ -91,7 +91,6 @@ export function queueOptionPlan(context, row, queue, candidateId, decisionId, us
   const {snapshot} = context;
   const c = enumerateCandidates(context.task,snapshot).candidates.find(c=>c.id===candidateId);
   if (!c) throw Error('selected tuple is no longer in the current catalog');
-  if (c.accountId === 'b') throw Error('Account b is unavailable for new work or queue switches');
   const account = candidateParts(snapshot,c).account, attemptId=`queue-choice:${decisionId}`;
   const actual = context.args && routeFlag(context.args, 'actual');
   const flags={...context.task.flags,...(actual ? {actual} : {}),'exclude-lane':[context.task.flags['exclude-lane'],`${row.account}:${row.model}`].filter(Boolean).join(','),
@@ -134,7 +133,7 @@ export function queueOptions(row,queue,launch,now=Date.now(),context=queueRouteC
   const executable = route => route.pick?.command && !route.blocked && !route.needsUserOK.length && !route.redeemFirst;
   const efforts = ['low','medium','high','xhigh','max'];
   for (const c of [...candidates].sort((a,b)=>efforts.indexOf(a.effort)-efforts.indexOf(b.effort))) {
-    if (c.accountId==='b' || c.accountId===row.account&&c.modelId===row.model) continue;
+    if (c.accountId===row.account&&c.modelId===row.model) continue;
     const group=`${c.accountId}:${c.modelId}`;
     if (groups.get(group)?.strict) continue;
     let strict, route;

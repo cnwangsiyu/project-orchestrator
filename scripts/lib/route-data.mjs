@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { activeMainProviderDenial } from './main-provider-denial.mjs';
+import { denialFile, activePersonalProviderDenial } from './main-provider-denial.mjs';
 import { createTaskSpec } from './pipeline/taskspec.mjs';
 import { createSnapshot } from './pipeline/snapshot.mjs';
 import { policyModel, isAstra, modelId, familyOf, object, array, nonnegative, VERSION } from './pipeline/common.mjs';
@@ -22,7 +22,7 @@ import { routePure } from './pipeline/index.mjs';
 import { modelPreference, policyEffort } from './pipeline/policy.mjs';
 import { readQueue } from './worker-queue.mjs';
 import { readLeases } from './resource-data.mjs';
-import { publishMainQuota, readRoutingObservations, saveRoutingObservations } from './routing-observations.mjs';
+import { publishPersonalQuota, readRoutingObservations, saveRoutingObservations } from './routing-observations.mjs';
 import { canonicalPathOptions, canonicalPath } from './launch-paths.mjs';
 import { probeBrowserRuntime } from './browser-runtime.mjs';
 
@@ -117,8 +117,8 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
           a.usage = previous?.usage;a.usageSeenAt=previous?.usageSeenAt??data.checkedAt;
         } else if(a.kind==='ttadk') a.usageSeenAt=a.seenAt;
         profiles[a.name] = {...p, modelIds: observed.modelIds ?? p.modelIds};
-        if (a.name === 'main' && (a.kind === 'chatgpt' || a.kind === undefined)) {
-          try { publishMainQuota(cachePath, a); } catch { /* launch admission can refresh if the cache is busy */ }
+        if (['main', 'b'].includes(a.name) && (a.kind === 'chatgpt' || a.kind === undefined)) {
+          try { publishPersonalQuota(cachePath, a); } catch { /* launch admission can refresh if the cache is busy */ }
         }
       } catch { a.statusSource = 'last-good-stale'; a.observationStale=true; }
     }
@@ -282,8 +282,8 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
       && r.from && attempts.length===1
       && attempts[0].actual.accountId===r.from.account && attempts[0].actual.modelId===modelId(r.from.model)
       && attempts[0].actual.effort===r.from.effort) {
-      const denial = r.reason === 'provider-quota-denied' ? metadata(path.join(shared, 'main-provider-denial.json')) : null;
-      const terminalProviderDenial = r.from.account === 'main' && denial?.code === 'usageLimitExceeded'
+      const denial = r.reason === 'provider-quota-denied' && ['main','b'].includes(r.from.account) ? metadata(denialFile(shared, r.from.account)) : null;
+      const terminalProviderDenial = denial?.account === r.from.account && denial?.code === 'usageLimitExceeded'
         && array(denial.receipts ?? [denial]).some(receipt => receipt.thread === r.from.threadId && receipt.turn === r.from.turnId)
         && r.cancellationEvidenceId.startsWith('provider-quota-denied:');
       Object.assign(attempts[0],{
@@ -398,7 +398,7 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
     const unknownHealth = !object(healthRaw) || (h.pools !== undefined && !object(h.pools)) || (h.modelPauses !== undefined && !object(h.modelPauses))
       || Object.values(h.pools??{}).some((r)=>!object(r)) || Object.values(h.modelPauses??{}).some((r)=>!object(r));
     const currentLimit=kind==='ttadk'&&home?read(path.join(home,'quota-limit.json')):null;
-    const mainLimit = kind === 'chatgpt' && name === 'main' ? activeMainProviderDenial({ shared, observation: { ...a, seenAt: accountAt }, now }) : null;
+    const personalLimit = kind === 'chatgpt' && ['main','b'].includes(name) ? activePersonalProviderDenial({ shared, account: name, observation: { ...a, seenAt: accountAt }, now }) : null;
     const quotaDenied = currentLimit?.resetsAt>now || !!(a.quotaOut && (!a.quotaOut.resetsAt || a.quotaOut.resetsAt>now)) || (!a.healthy && /quota|daily token/i.test(a.reason ?? ''));
     const windows = array(isClaude ? data.claude : a.windows), badWindows = (isClaude ? data.claude : a.windows) !== undefined
       && (!Array.isArray(isClaude ? data.claude : a.windows) || windows.some((w)=>!object(w)));
@@ -420,13 +420,19 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
       projectedAtReset: a.usage.used + (a.usage.used - prior.ttadk.used) / (at - prior.t) * (a.usage.resetsAt - at) };
     const declared=(value)=>isClaude||profileCatalog?{...globalStamp(value,now),source:'declared-harness'}:stamp(value);
     const history = data.history?.[isClaude ? 'claude' : `codex:${name}`];
+    const standing = kind === 'chatgpt' && ['main','b'].includes(name);
     const budget = personalBudget(windows, a.resets, history, now, isClaude);
+    if (standing) {
+      const card = array(a.resets?.credits).filter(c => c.expiresAt > now).sort((a,b) => a.expiresAt - b.expiresAt)[0];
+      budget.redemption = card && (personalLimit || quotaDenied || a.allowed === false)
+        ? { account: name, cardId: card.id, expiresAt: card.expiresAt } : null;
+    }
     if (kind === 'chatgpt' && name === personalPriority?.account) budget.weekly = weeklyProjection(windows, history, now);
     normalized.push({ id: name, kind, catalog: declared(catalog), auth: stamp(((registryInvalid||invalidProfiles.has(name))&&!isClaude||a.stateUnknown)?null:a.auth ?? (isClaude ? Array.isArray(data.claude)?true:null : company ? a.healthy || quotaDenied : a.live === true)),
       transport: stamp(a.stateUnknown?null:a.transport ?? (isClaude ? Array.isArray(data.claude)?true:null : a.live ?? (company ? a.healthy || quotaDenied : null))), health: declared(!unknownHealth && !badWindows),
       capabilities: Object.fromEntries(Object.entries(caps).map(([k,v]) => [k,declared(v)])), quota, burn: stamp(burn),
       ...(a.browserRuntime ? { browserRuntime: { ...stamp(a.browserRuntime, a.browserRuntime.checkedAt, 30000), source: 'local-browser-runtime' } } : {}),
-      providerDenied: mainLimit || currentLimit?.resetsAt>now?globalStamp(true,now):stamp(quotaDenied || (kind === 'chatgpt' && name === 'main' ? a.allowed === false : !company && spent)), denialResetAt: stamp(mainLimit?.resetsAt ?? currentLimit?.resetsAt ?? a.quotaOut?.resetsAt ?? a.usage?.resetsAt ?? windows.find((w) => w?.used >= 95)?.resetsAt),
+      providerDenied: personalLimit || currentLimit?.resetsAt>now?globalStamp(true,now):stamp(quotaDenied || (kind === 'chatgpt' && ['main','b'].includes(name) ? a.allowed === false : !company && spent)), denialResetAt: stamp(personalLimit?.resetsAt ?? currentLimit?.resetsAt ?? a.quotaOut?.resetsAt ?? a.usage?.resetsAt ?? windows.find((w) => w?.used >= 95)?.resetsAt),
       resets: a.resets, workerClass: a.workerClass,
       budget:stamp(budget) });
     const appendPause = (r, extra = {}) => {

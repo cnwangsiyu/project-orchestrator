@@ -5,7 +5,7 @@ import { modelPreference, policyEffort, claudeBrowserPolicy, tierApprovalRef, ti
   mandatoryClaudeSeat, mandatoryClaudeApprovalRef, mandatoryClaudeDecision } from './policy.mjs';
 import { estimateCandidate } from './estimate.mjs';
 import { standingPersonalFallback, hardPersonalXhighFallback } from './personal-fallback.mjs';
-import { standingPersonalPriority, personalPriorityGuard, exclusiveCodexTask } from './personal-priority.mjs';
+import { standingPersonalPriority, personalAccount, windowIncludes, exclusiveCodexTask } from './personal-priority.mjs';
 import { liveAttempts, liveAttemptText } from './live-attempt.mjs';
 import { unavailableDayQuota, previousReleaseFallback } from './release-fallback.mjs';
 import { rejectedQualityAttempt } from '../worker-result.mjs';
@@ -39,12 +39,10 @@ export function pUserRules(t, s, c) {
 }
 export function pExclusions(t, s, c) {
   const { account } = candidateParts(s, c);
-  if (account.id === 'b')
-    return deny('pExclusions', 'PERSONAL_B_REFUSED', 'The 2026-11-21 rule forbids new personal work on b independently of the priority window.', c);
   if (s.personalPriority?.mode === 'exclusive' && (!company(account) && account.kind !== 'claude'
-    && (account.id !== s.personalPriority.account || account.kind !== 'chatgpt')
+    && (!windowIncludes(s.personalPriority, account.id) || account.kind !== 'chatgpt')
     || account.kind === 'claude' && exclusiveCodexTask(t, s) && !mandatoryClaudeSeat(t, c, account)))
-    return deny('pExclusions', 'PERSONAL_EXCLUSIVE_ACCOUNT', 'New personal Codex work is restricted to main until the standing window is revoked.', c);
+    return deny('pExclusions', 'PERSONAL_EXCLUSIVE_ACCOUNT', 'The standing window does not include this account.', c);
   const toolChannelFailed = ['browser','ui-browser','computer-use'].includes(t.category) && t.previousAttempts.some(a =>
     a.taskId === t.taskId && (a.role ?? 'primary') === t.role && ['failed','completed','succeeded'].includes(a.state) && a.failureKind === 'tool'
     && a.actualStatus === 'KNOWN' && (a.browserChannel ?? s.accounts.find(p => p.id === a.actual?.accountId)?.kind) === account.kind);
@@ -60,10 +58,6 @@ export function pAvailable(t, s, c) {
     || c.family !== m.family || c.qualityProfileId !== m.qualityProfiles[c.effort])
     return deny('pAvailable', 'CATALOG_UNSUPPORTED', 'The exact model, effort and harness must be declared.', c);
   if (!l.selectable && !l.evidenced) return deny('pAvailable', 'LANE_NOT_EVIDENCED', 'Provider-assigned lanes need current evidence; they cannot be forced.', c);
-  if (s.personalPriority?.mode === 'exclusive' && a.kind === 'chatgpt' && a.id === s.personalPriority.account) {
-    const guard = personalPriorityGuard(s);
-    if (guard) return deny('pAvailable', 'PERSONAL_EXCLUSIVE_WAIT', guard, c);
-  }
   if (known(a.auth) !== true) return deny('pAvailable', 'AUTH_UNKNOWN_OR_DENIED', 'Fresh positive authentication status is required.', c);
   if (known(a.transport) !== true) return deny('pAvailable', 'TRANSPORT_UNKNOWN_OR_DENIED', 'Fresh positive transport/supervisor status is required.', c);
   if (known(a.health) !== true) return deny('pAvailable', 'HEALTH_UNKNOWN', 'Health status is unknown.', c);
@@ -72,8 +66,8 @@ export function pAvailable(t, s, c) {
   // Q1/Q2: only explicit provider denial is authoritative. Dashboard disagreement
   // and undocumented weekly semantics affect uncertainty, not account admission.
   if (known(a.providerDenied) === true && !company(a) && known(a.budget)?.redemption && !t.flags['no-redeem'])
-    return deny('pAvailable','RESET_REDEMPTION_OK_REQUIRED','Redeem the named reset card with a separate scoped decision, then refresh quota and replan.',c,
-      {gate:approvalGate(t,c,'reset-redemption','RESET_REDEMPTION_OK_REQUIRED','Reset redemption requires its own decision and refreshed capacity evidence.')});
+    return deny('pAvailable','RESET_REDEMPTION_OK_REQUIRED',`The secretary redeems the soonest-expiring card on ${a.id} under the standing approval of 2026-11-24. Refresh quota before launch.`,c,
+      {gate:approvalGate(t,c,'reset-redemption','RESET_REDEMPTION_OK_REQUIRED',`Await secretary redemption for ${a.id} under the standing approval of 2026-11-24 and refreshed quota.`)});
   if (known(a.providerDenied) === true) return deny('pAvailable', 'PROVIDER_QUOTA_DENIED', 'Provider explicitly denied quota capacity.', c,
     { reconsiderAt: known(a.denialResetAt) > s.decisionAt ? known(a.denialResetAt) : null });
   const exhausted = unavailableDayQuota(a, l, s);
@@ -254,16 +248,16 @@ export function pScopedApproval(t, s, c, context = {}) {
     approvalRef: mandatoryClaudeApprovalRef, quotaApproved: true,
     text: `Codex-authored mandatory class ${t.reviewClass} review uses Claude Opus 5.5 medium under the standing user decision of ${mandatoryClaudeDecision}.`
   } : standingPersonalPriority(t, s, c, a);
-  const tierMain = context.tierDowngrade && a.id === 'main' && a.kind === 'chatgpt' && policyModel(c.modelId) === 'sol'
+  const tierPersonal = context.tierDowngrade && personalAccount(a.id) && a.kind === 'chatgpt' && policyModel(c.modelId) === 'sol'
     && c.effort !== 'max';
   let personalFallback = personalPriority ?? (a.kind === 'chatgpt' && s.personalFallback?.enabled ? standingPersonalFallback(t, s, c,
     context.companyRows ?? enumerateCandidates(t, s).candidates.filter(p => company(candidateParts(s, p).account))
       .map(candidate => ({ candidate, predicates: evaluateCandidate(t, s, candidate, context), estimate: estimateCandidate(t, s, candidate) }))) : null);
-  if (!personalFallback && tierMain) {
+  if (!personalFallback && tierPersonal) {
     const start = estimateCandidate(t, s, c);
     if (!start.stalled && start.startDelayMin === 0) personalFallback = {
       approvalRef: tierApprovalRef, quotaApproved: true,
-      text: `Personal main approved for a proper-tier route ahead of a company downgrade under the user decision of ${tierDecision}.` };
+      text: `Personal ${a.id} approved for a proper-tier route ahead of a company downgrade under the user decision of ${tierDecision}.` };
   }
   const requirements = [];
   if (!company(a) && (a.kind==='claude'||companyDevice(s)) && !personalFallback?.quotaApproved) requirements.push(['personal-quota', 'PERSONAL_QUOTA_OK_REQUIRED', 'Current scoped personal-quota approval is required.', context.companyEligible || context.companyUnknown]);
@@ -322,14 +316,17 @@ export function pLaunchMatches(t, s, c, context = {}) {
       && prior.at(-1)?.rerouteReason === 'queue-too-slow'
       && Number.isFinite(prior.at(-1)?.queueWaitMinutes) && prior.at(-1).queueWaitMinutes >= s.personalFallback.queueWaitMinutes
       && pScopedApproval(t,s,c,context).personalFallback?.quotaApproved;
+    const previous = prior.at(-1);
+    const denialHandoff = previous?.terminalProviderDenial === true && previous.actual?.accountId !== c.accountId
+      && personalAccount(c.accountId) && pScopedApproval(t,s,c,context).ok;
     const ownerChoice=t.queueOwnerChoice?.candidateId===c.id&&t.queueOwnerChoice.owner&&t.queueOwnerChoice.decisionId;
-    if (t.autoRerouteDepth > 2 || t.background&&!ownerChoice || t.flags.signing || (!company(candidateParts(s,c).account) && !personalQueue&&!ownerChoice)) return deny('pLaunchMatches', 'AUTO_REROUTE_FORBIDDEN', 'Automatic hop limit or task scope forbids replacement.', c);
+    if (t.autoRerouteDepth > 2 || t.background&&!ownerChoice || t.flags.signing || (!company(candidateParts(s,c).account) && !personalQueue&&!denialHandoff&&!ownerChoice)) return deny('pLaunchMatches', 'AUTO_REROUTE_FORBIDDEN', 'Automatic hop limit or task scope forbids replacement.', c);
     const checked = (ownerChoice || t.queueOwnerChoice?.requireFloor) ? prior.filter(a=>a.id === t.queueOwnerChoice.previousAttemptId) : prior;
     const ownerInterruption = t.queueOwnerChoice?.owner && t.queueOwnerChoice.decisionId && t.queueOwnerChoice.midTurn === true;
     const confirmed = a => a.cancellationEvidenceId && (a.state === 'cancelled-no-work' && a.usefulWork === false
       || ownerInterruption && a.id === t.queueOwnerChoice.previousAttemptId && a.state === 'interrupted' && a.usefulWork === true
       || a.terminalProviderDenial === true && a.rerouteReason === 'provider-quota-denied' && a.state === 'failed'
-        && a.actual?.accountId === 'main' && a.failureKind === 'infra' && company(candidateParts(s,c).account));
+        && personalAccount(a.actual?.accountId) && a.failureKind === 'infra' && (company(candidateParts(s,c).account) || denialHandoff));
     if (!checked.length || checked.some(a => !confirmed(a)))
       return deny('pLaunchMatches', 'CANCELLATION_UNCONFIRMED', 'Automatic replacement requires terminal no-work cancellation evidence.', c);
   }

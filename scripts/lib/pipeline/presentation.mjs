@@ -40,10 +40,6 @@ export function presentRoute(plan, view, context) {
   const notes = [...view.notes,...(t.policyNotes??[])], why = [...(t.policyNotes??[])], tellUser = [...view.tellUser], needsUserOK = [...view.needsOK];
   if(c && candidateParts(snapshot,c).account.kind==='chatgpt' && plan.trace?.comparator?.personalLaunchWhy)
     why.push(plan.trace.comparator.personalLaunchWhy);
-  if (!c || !company(candidateParts(snapshot,c).account)) {
-    for (const text of new Set(plan.rejected.filter(p => p.reason?.code === 'PERSONAL_B_REFUSED').map(p => p.reason.text)))
-      if (!why.some(line => line.includes(text))) why.push(text);
-  }
   if(snapshot.personalFallback?.enabled) {
     const i=notes.findIndex(line=>line.startsWith('Queue patience:'));
     if(i>=0) {
@@ -54,7 +50,7 @@ export function presentRoute(plan, view, context) {
   }
   if (plan.kind === 'launch' && snapshot.personalPriority?.mode === 'exclusive'
     && company(candidateParts(snapshot, c).account))
-    why.push(`company lanes first; personal overflow only on main under the standing routing window ${snapshot.personalPriority.until === null ? 'until revoked' : `until ${snapshot.personalPriority.until}`}`);
+    why.push(`company lanes first; personal overflow under the standing routing window ${snapshot.personalPriority.until === null ? 'until revoked' : `until ${snapshot.personalPriority.until}`}`);
   if (plan.kind === 'launch' && seat?.personalFallback) why.push(seat.personalFallback.text);
   for (const reviewer of plan.reviewers) if (reviewer.personalFallback?.approvalRef === mandatoryClaudeApprovalRef)
     why.push(`second reviewer: ${reviewer.personalFallback.text}`);
@@ -70,23 +66,16 @@ export function presentRoute(plan, view, context) {
       why.push(`second reviewer: ${reviewer.personalFallback.text}`);
   }
   const main = snapshot.accounts.find(a => a.id === 'main' && a.kind === 'chatgpt');
-  if (plan.kind === 'launch' && plan.trace?.comparator?.tierOverflow && c.accountId === 'main'
+  if (plan.kind === 'launch' && plan.trace?.comparator?.tierOverflow && ['main','b'].includes(c.accountId)
     && !seat.personalFallback?.text.includes(tierDecision))
-    why.push(`Ready main ${c.modelId} takes precedence over the lower-tier company lane under the user decision of ${tierDecision}.`);
+    why.push(`Ready ${c.accountId} ${c.modelId} takes precedence over the lower-tier company lane under the user decision of ${tierDecision}.`);
   if (plan.kind === 'launch' && normalTierOverflow(t) && company(candidateParts(snapshot, c).account) && companyDowngrade(c.modelId)) {
     const excluded = t.exclusions.some(e => e.scope === 'account' && e.value === 'main');
-    const cause = known(main?.providerDenied) === true ? 'main quota denied by provider' : excluded ? 'main excluded' : 'no eligible proper-tier main lane can start';
+    const cause = known(main?.providerDenied) === true ? 'main quota denied by provider' : excluded ? 'main excluded' : 'no eligible proper-tier personal lane can start';
     why.push(`${cause}; using the company downgrade order (${c.modelId} on ${c.accountId}).`);
   }
-  const weekly = main?.budget?.source !== 'last-good-stale' && known(main?.budget)?.weekly;
-  if (weekly?.resetsAt > snapshot.decisionAt && Number.isFinite(weekly.used) && Number.isFinite(weekly.projected))
-    tellUser.push(`main at ${weekly.used}% of the week, projected ${weekly.projected}% at reset`);
-  if (plan.kind === 'launch' && known(main?.providerDenied) === true && company(candidateParts(snapshot,c).account))
-    tellUser.push(`main quota denied by provider; using ${c.modelId} on ${c.accountId}.`);
   const priorityGuard = personalPriorityGuard(snapshot);
-  if (priorityGuard) why.push(snapshot.personalPriority.mode === 'exclusive'
-    ? `company lanes first; personal overflow only on main: ${priorityGuard}; other personal Codex accounts remain ineligible`
-    : `personal main-first window until ${snapshot.personalPriority.until} paused: ${priorityGuard}; using normal routing order`);
+  if (priorityGuard) why.push(`personal ${snapshot.personalPriority.account}-first window paused: ${priorityGuard}`);
   if (t.needsCli.length) notes.push('signed-in CLIs need the full-access sandbox (keychain); stay read-only by instruction: queries only, no writes');
   else if (f['read-only']) notes.push('read-only sandbox: keychain-backed CLIs (lark-cli, bytedcli) will not work; add --needs-cli if the task must use them');
   if(['implement','implement-hard','build-run','debug','ui-browser'].includes(t.category))fixedNotes.push(sourceDigest.worker.split('\n').find(line=>line.startsWith('- Project dependencies'))??'');

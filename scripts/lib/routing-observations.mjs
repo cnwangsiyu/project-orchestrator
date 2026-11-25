@@ -38,13 +38,13 @@ export function readRoutingObservations(file, now) {
   return mergeRoutingObservations(readQuotaCache(file),read(`${file}.routing-last-good.json`),now);
 }
 // Keep the launch cache current when routing reads main independently of quota.mjs.
-export function publishMainQuota(file, main) {
+export function publishPersonalQuota(file, main) {
   withLock(file, () => {
     const cache = readQuotaCache(file);
     const accounts = Array.isArray(cache?.codexAccounts) ? cache.codexAccounts : [];
-    const previous = accounts.find(account => account?.name === 'main');
+    const previous = accounts.find(account => account?.name === main.name);
     if ((previous?.seenAt ?? cache?.checkedAt) > main.seenAt) return;
-    const codexAccounts = accounts.filter(account => account?.name !== 'main');
+    const codexAccounts = accounts.filter(account => account?.name !== main.name);
     writeJson(file, { ...cache, codexAccounts: [...codexAccounts, main] });
   }, { timeoutMs: 0 });
 }

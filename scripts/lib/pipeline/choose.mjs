@@ -5,6 +5,7 @@ import { matchingApproval, needsReviewer } from './filters.mjs';
 import { companyServesInfraRetry, laneTransportDemoted, usesExclusiveInfraOverflow } from './estimate.mjs';
 import { modelPreference, hardPreference, companyDowngrade, normalTierOverflow, mandatoryClaudeSeat, TIERS, SOL, ASTRA } from './policy.mjs';
 import { personalLaunchChoice, personalLaunchExplanation } from '../personal-launch.mjs';
+import { personalAccount } from './personal-priority.mjs';
 export const prefersPersonalCodex = task => ['lookup','extract','analysis','implement','implement-hard','debug','science','review','draft','build-run','image-gen','second-opinion'].includes(task.category);
 
 // Use the existing company ladder to scope the new grant. A Flash entry in the
@@ -72,16 +73,20 @@ export function orderCandidates(task, snapshot, rows) {
   cohort = cohort.filter(r => !demoted(r) || !healthyClasses.has(company(candidateParts(snapshot,r.candidate).account)));
   const backgroundChoice=task.background&&!['browser','ui-browser','computer-use','build-run'].includes(task.category);
   const parts=r=>candidateParts(snapshot,r.candidate);
-  if (known(snapshot.accounts.find(account => account.id === 'main' && account.kind === 'chatgpt')?.providerDenied) === true
-    && cohort.some(row => row.ok && company(parts(row).account))) cohort = cohort.filter(row => company(parts(row).account));
+  const deniedSource = task.previousAttempts.at(-1);
+  if (deniedSource?.terminalProviderDenial && deniedSource.rerouteReason === 'provider-quota-denied') {
+    const sibling = cohort.filter(r => r.ok && personalAccount(r.candidate.accountId)
+      && r.candidate.accountId !== deniedSource.actual?.accountId && !stalled(r) && !r.estimate.capacityReset);
+    if (sibling.length) cohort = sibling;
+  }
   const ready=r=>!stalled(r)&&!r.estimate.capacityReset&&r.estimate.startDelayMin===0
     &&(parts(r).account.kind!=='trae'||r.estimate.balance?.freeNow===true);
   // Remove light fallback rungs before computing the fastest finish and company tie band.
-  const readyMain = r => r.ok && ready(r) && parts(r).account.kind === 'chatgpt'
-    && r.candidate.accountId === 'main' && ['sol', 'astra'].includes(policyModel(r.candidate.modelId));
+  const readyPersonal = r => r.ok && ready(r) && parts(r).account.kind === 'chatgpt'
+    && personalAccount(r.candidate.accountId) && ['sol', 'astra'].includes(policyModel(r.candidate.modelId));
   const belowTier = r => company(parts(r).account) && companyDowngrade(r.candidate.modelId);
-  const tierOverflow = normalTierOverflow(task) && cohort.some(readyMain) && cohort.some(r => r.ok && belowTier(r));
-  if (tierOverflow) cohort = cohort.filter(r => readyMain(r) || (company(parts(r).account) && !belowTier(r)));
+  const tierOverflow = normalTierOverflow(task) && cohort.some(readyPersonal) && cohort.some(r => r.ok && belowTier(r));
+  if (tierOverflow) cohort = cohort.filter(r => readyPersonal(r) || (company(parts(r).account) && !belowTier(r)));
   const hardAstra = task.tier === 'hard' ? cohort.filter(r => r.ok && ready(r) && isAstra(r.candidate.modelId)
     && r.predicates.some(p => p.personalFallback?.astraApprovalRef && p.personalFallback.preferOverLowerCompany)) : [];
   if (hardAstra.length) cohort = hardAstra;
@@ -131,12 +136,12 @@ export function orderCandidates(task, snapshot, rows) {
       && !parts(r).account.fallbackUnavailable && !r.estimate.capacityReset);
     const infraOverflow = usesExclusiveInfraOverflow(task, snapshot);
     const measuredCompany = infraOverflow ? usableCompany.filter(r => companyServesInfraRetry(snapshot, r)) : [];
-    const mainOverflow = infraOverflow && !measuredCompany.length ? cohort.filter(r => r.ok && ready(r)
-      && r.candidate.accountId === 'main' && r.predicates.some(p => p.personalFallback?.approvalRef === priority.userDecisionRef)) : [];
+    const personalOverflow = infraOverflow && !measuredCompany.length ? cohort.filter(r => r.ok && ready(r)
+      && personalAccount(r.candidate.accountId) && r.predicates.some(p => p.personalFallback?.approvalRef === priority.userDecisionRef)) : [];
     const companyServing = usableCompany.filter(r => r.estimate.confidence === 'UNKNOWN'
       || r.estimate.startDelayMin <= (snapshot.personalFallback?.queueWaitMinutes ?? 5));
     if (measuredCompany.length) cohort = measuredCompany;
-    else if (mainOverflow.length) cohort = mainOverflow;
+    else if (personalOverflow.length) cohort = personalOverflow;
     else if (companyServing.length) cohort = companyServing;
   }
   if (priority?.mode === 'prefer-first') {
@@ -196,9 +201,13 @@ export function orderCandidates(task, snapshot, rows) {
     const account=snapshot.accounts.find(a=>a.id===id);
     // A last-good usage reading still limits launch headroom; it never proves
     // a hub is reachable (the account predicates enforce that independently).
-    const used=account.budget?.value?.weekly?.used??null;
-    return {id,used,deadline:known(account.budget)?.deadline,live:known(account.transport)===true};
+    const weekly = account.budget?.source !== 'last-good-stale' && known(account.budget)?.weekly;
+    const used = weekly?.used ?? null;
+    const hoursLeft = (weekly?.resetsAt - snapshot.decisionAt) / 3600000;
+    return {id,used,hoursLeft,deadline:known(account.budget)?.deadline,live:known(account.transport)===true};
   }));
+  if (availablePersonal.includes('main') && availablePersonal.includes('b') && availablePersonal.length === 2)
+    cohort = cohort.filter(r => !personalAccount(r.candidate.accountId) || r.candidate.accountId === launch.pick.id);
   const personalAccounts=launch.open.map(r=>r.id);
   const personalOrder=new Map(personalAccounts.map((id,i)=>[id,i]));
   if(launch.below.length) cohort=cohort.filter(r=>candidateParts(snapshot,r.candidate).account.kind!=='chatgpt'

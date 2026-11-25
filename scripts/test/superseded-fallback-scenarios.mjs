@@ -161,7 +161,7 @@ try {
     assert.equal(p.primary.candidate.effort, 'xhigh'); assert.equal(validatePlan(p, createSnapshot(raw)).ok, true);
     assert.ok(rejected(rowFor(p, 'trae', previous, 'high')).includes('TIER_EFFORT_FLOOR'));
     assert.ok(rejected(rowFor(p, 'main', previous)).includes('MODEL_SUPERSEDED'));
-    assert.ok(rejected(rowFor(p, 'b', latest)).includes('PERSONAL_B_REFUSED'));
+    assert.ok(rowFor(p, 'b', latest));
     const view = cli(raw);
     assert.equal(view.kind, 'launch'); assert.equal(view.pick.model, previous); assert.equal(view.pick.effort, 'xhigh');
     assert.ok(view.why.some(s => s.includes(`${latest} day quota exhausted until`) && s.includes(`using previous release ${previous}`)));

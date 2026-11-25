@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { activeMainProviderDenial, isUsageLimitExceeded, recordMainProviderDenial } from '../lib/main-provider-denial.mjs';
+import { activePersonalProviderDenial, isUsageLimitExceeded, recordPersonalProviderDenial } from '../lib/main-provider-denial.mjs';
 import { assertExclusiveNewThread } from '../lib/personal-launch-admission.mjs';
 import { transportQuotaBlock } from '../lib/worker-transport-retry.mjs';
 
@@ -26,20 +26,20 @@ try {
   });
   check('98% reading remains informative; receipt survives unchanged fresh readings until actual recovery', () => {
     const shared = path.join(tmp, 'receipt'); fs.mkdirSync(shared);
-    assert.equal(activeMainProviderDenial({ shared, observation: main, now }), null);
-    assert.equal(recordMainProviderDenial({ shared, error: { message: '429' }, observation: main, now }), null);
-    const receipt = recordMainProviderDenial({ shared, error: denied, observation: main, thread: 'thread', turn: 'turn', now });
+    assert.equal(activePersonalProviderDenial({ shared, observation: main, now }), null);
+    assert.equal(recordPersonalProviderDenial({ shared, error: { message: '429' }, observation: main, now }), null);
+    const receipt = recordPersonalProviderDenial({ shared, error: denied, observation: main, thread: 'thread', turn: 'turn', now });
     assert.equal(receipt.resetsAt, now + week);
-    assert.equal(activeMainProviderDenial({ shared, observation: { ...main, seenAt: now + 1 }, now: now + 1 }).code, 'usageLimitExceeded');
-    assert.ok(activeMainProviderDenial({ shared, observation: main, now: now + week + 1 }), 'elapsed reset alone cannot prove capacity');
+    assert.equal(activePersonalProviderDenial({ shared, observation: { ...main, seenAt: now + 1 }, now: now + 1 }).code, 'usageLimitExceeded');
+    assert.ok(activePersonalProviderDenial({ shared, observation: main, now: now + week + 1 }), 'elapsed reset alone cannot prove capacity');
     const restored = { ...main, seenAt: now + 2, windows: [{ ...main.windows[0], used: 0 }] };
-    assert.equal(activeMainProviderDenial({ shared, observation: restored, now: now + 2 }), null);
+    assert.equal(activePersonalProviderDenial({ shared, observation: restored, now: now + 2 }), null);
     const cache = path.join(shared, 'quota.json'); fs.writeFileSync(cache, JSON.stringify({ codexAccounts: [main] }));
     assert.throws(() => assertExclusiveNewThread({ account: 'main', shared, cache, time: now + 1 }, false), /usageLimitExceeded/);
     fs.writeFileSync(cache, JSON.stringify({ codexAccounts: [restored] }));
     assert.doesNotThrow(() => assertExclusiveNewThread({ account: 'main', shared, cache, time: now + 2 }, false));
-    recordMainProviderDenial({ shared, error: denied, observation: restored, thread: 'thread', turn: 'turn', now: now + 3 });
-    assert.equal(activeMainProviderDenial({ shared, observation: restored, now: now + 3 }), null, 'reattaching the old failed turn cannot undo a confirmed recovery');
+    recordPersonalProviderDenial({ shared, error: denied, observation: restored, thread: 'thread', turn: 'turn', now: now + 3 });
+    assert.equal(activePersonalProviderDenial({ shared, observation: restored, now: now + 3 }), null, 'reattaching the old failed turn cannot undo a confirmed recovery');
     assert.equal(JSON.parse(fs.readFileSync(path.join(shared, 'main-provider-denial.json'))).at, now);
     const withoutAt = { ...restored }; delete withoutAt.seenAt;
     fs.writeFileSync(cache, JSON.stringify({ checkedAt: now + 2, codexAccounts: [withoutAt] }));
@@ -54,14 +54,14 @@ try {
   check('simultaneous exhausted turns keep distinct terminal receipts; recovery has no percentage ceiling', () => {
     const shared = path.join(tmp, 'concurrent'); fs.mkdirSync(shared);
     const low = { ...main, windows: [{ ...main.windows[0], used: 70 }] };
-    recordMainProviderDenial({ shared, error: denied, observation: low, thread: 'first', turn: 'one', now });
-    recordMainProviderDenial({ shared, error: denied, observation: low, thread: 'second', turn: 'two', now: now + 1 });
+    recordPersonalProviderDenial({ shared, error: denied, observation: low, thread: 'first', turn: 'one', now });
+    recordPersonalProviderDenial({ shared, error: denied, observation: low, thread: 'second', turn: 'two', now: now + 1 });
     assert.deepEqual(JSON.parse(fs.readFileSync(path.join(shared, 'main-provider-denial.json'))).receipts.map(row => row.thread), ['first', 'second']);
-    assert.ok(activeMainProviderDenial({ shared, observation: { ...low, seenAt: now + 2 }, now: now + 2 }));
-    assert.equal(activeMainProviderDenial({ shared, observation: { ...low, seenAt: now + 2, windows: [{ ...low.windows[0], used: 0 }] }, now: now + 2 }), null);
+    assert.ok(activePersonalProviderDenial({ shared, observation: { ...low, seenAt: now + 2 }, now: now + 2 }));
+    assert.equal(activePersonalProviderDenial({ shared, observation: { ...low, seenAt: now + 2, windows: [{ ...low.windows[0], used: 0 }] }, now: now + 2 }), null);
   });
-  for (const unknownHub of [false, true]) check(`main terminal denial ${unknownHub ? 'does not duplicate an unconfirmed turn' : 'hands completed work to the best company lane immediately'}`, () => {
-    const dir = path.join(tmp, `worker-${unknownHub}`), bin = path.join(dir, 'bin'); fs.mkdirSync(bin, { recursive: true });
+  for (const [unknownHub, bothDenied] of [[false,false],[false,true],[true,false]]) check(`main terminal denial ${unknownHub ? 'does not duplicate an unconfirmed turn' : 'hands completed work to the best company lane immediately'}`, () => {
+    const dir = path.join(tmp, `worker-${unknownHub}-${bothDenied}`), bin = path.join(dir, 'bin'); fs.mkdirSync(bin, { recursive: true });
     for (const executable of ['codex', 'claude']) fs.writeFileSync(path.join(bin, executable), '#!/bin/sh\nprintf \'%s\\n\' \'{"models":[]}\'\n', { mode: 0o755 });
     const profiles = {}, accounts = [{ ...main, home: path.join(dir, 'main') },
       { name: 'trae', kind: 'trae', live: true, healthy: true, models: ['gpt-6.2-sol'], seenAt: now,
@@ -72,6 +72,10 @@ try {
     const cache = path.join(dir, 'quota.json'), registry = path.join(dir, 'accounts.json'), rpc = path.join(dir, 'rpc.jsonl');
     fs.writeFileSync(cache, JSON.stringify({ checkedAt: now, codexAccounts: accounts, history: {}, errors: {}, claude: null }));
     fs.writeFileSync(registry, JSON.stringify(profiles));
+    fs.writeFileSync(path.join(dir,'personal-priority-window.json'), JSON.stringify({ account:'by-quota', mode:'exclusive',
+      from:new Date(now-1000).toISOString(), until:null, userDecisionRef:'standing:personal-priority-fixture',
+      quote:'fixture account selection', revoked:false }));
+    if (bothDenied) recordPersonalProviderDenial({ shared:dir, account:'b', observation:accounts[2], error:denied, now });
     const routeArgs = ['implement', '--impact', 'service', '--project', 'p', '--name', 'denial', '--cwd', dir, '--task-dir', dir, '--no-local-build'];
     const env = { ...process.env, HOME: dir, CODEX_HOME: accounts[0].home, CODEX_ACCOUNTS: registry, CODEX_HUB: 'ws://127.0.0.1:1',
       RULES_SHARED: dir, QUOTA_CACHE: cache, ROUTE_LOG_FILE: path.join(dir, 'routes.jsonl'), QUOTA_LOG_FILE: path.join(dir, 'empty-quota'),
@@ -87,11 +91,11 @@ try {
     assert.match(result.stdout, /main provider usageLimitExceeded denial/);
     assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'main-provider-denial.json'))).code, 'usageLimitExceeded');
     const starts = readRows(rpc).filter(row => row.method === 'turn/start');
-    assert.deepEqual(starts.map(row => row.account), unknownHub ? ['main'] : ['main', 'trae'], `worker exit=${result.status}`);
+    assert.deepEqual(starts.map(row => row.account), unknownHub ? ['main'] : ['main', bothDenied ? 'trae' : 'b'], `worker exit=${result.status}`);
     if (!unknownHub) {
       assert.equal(result.status, 0, result.stderr + result.stdout);
       const recovery = JSON.parse(fs.readFileSync(path.join(dir, 'reroute.json')));
-      assert.equal(recovery.route.pick.company, true);
+      assert.equal(recovery.route.pick.company, bothDenied);
       assert.equal(recovery.route.plan.task.qualityFailures, 0);
       assert.match(recovery.recovery.continuationPrompt, /preserve its completed and uncommitted work/);
       assert.ok(recovery.routeArgs.includes('main'));

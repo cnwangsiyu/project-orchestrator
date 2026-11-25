@@ -4,8 +4,12 @@ import { modelPreference } from './policy.mjs';
 export const PERSONAL_PRIORITY_FILE = 'personal-priority-window.json';
 const utc = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
 
+export const personalAccount = id => id === 'main' || id === 'b';
+export const windowIncludes = (window, id) => window?.account === 'by-quota'
+  ? personalAccount(id) : window?.account === id;
+
 export function personalPriorityWindow(raw) {
-  if (!object(raw) || raw.account !== 'main' || !['prefer-first', 'exclusive'].includes(raw.mode)
+  if (!object(raw) || !(personalAccount(raw.account) || raw.mode === 'exclusive' && raw.account === 'by-quota') || !['prefer-first', 'exclusive'].includes(raw.mode)
     || !idOK(raw.userDecisionRef) || !raw.userDecisionRef.startsWith('standing:personal-priority-')
     || typeof raw.quote !== 'string' || !raw.quote.trim() || typeof raw.revoked !== 'boolean'
     || !utc.test(raw.from) || !(utc.test(raw.until) || raw.mode === 'exclusive' && raw.until == null)) return null;
@@ -45,7 +49,7 @@ export const exclusiveCodexTask = (task, snapshot) => snapshot.personalPriority?
 
 export function standingPersonalPriority(task, snapshot, candidate, account) {
   const window = snapshot.personalPriority;
-  if (!window || account.id !== window.account || account.kind !== 'chatgpt' || candidate.family !== 'gpt'
+  if (!window || !windowIncludes(window, account.id) || account.kind !== 'chatgpt' || candidate.family !== 'gpt'
     || candidate.effort === 'max' || task.requirements.resetRedemption || task.reviewClass
     || task.contentLabels.some(l => ['security', 'adversarial', 'attack-material', 'policy-blocked'].includes(l))) return null;
   const fallback = snapshot.personalFallback;
@@ -53,5 +57,5 @@ export function standingPersonalPriority(task, snapshot, candidate, account) {
     ? fallback.hardAstraDecisionRef : null;
   if ((isAstra(candidate.modelId) && !astraApprovalRef) || personalPriorityGuard(snapshot)) return null;
   return { approvalRef: window.userDecisionRef, quotaApproved: true, astraApprovalRef,
-    text: `${window.mode === 'exclusive' ? `company lanes first; personal overflow only on ${window.account}` : `personal ${window.account} first`} under the standing routing window ${window.until === null ? 'until revoked' : `until ${window.until}`}` };
+    text: `${window.mode === 'exclusive' ? `company lanes first; personal overflow on ${account.id}` : `personal ${window.account} first`} under the standing routing window ${window.until === null ? 'until revoked' : `until ${window.until}`}` };
 }

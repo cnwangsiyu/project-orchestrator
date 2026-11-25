@@ -322,7 +322,7 @@ const run = (sc, args0, overrides = {}) => {
       S.priority.history = { 'codex:main': [{ t: now - 5 * h, used: earlier, resetsAt: until }] };
       const guarded = read(['analysis','--exclude-account','ttadk,trae']);
       assert.equal(guarded.pick.account, 'main');
-      assert.ok(guarded.tellUser.some(line => line.includes('main at '+used+'%') && line.includes('projected')));
+      assert.ok(!guarded.tellUser.some(line => line.includes('main at '+used+'%') && line.includes('projected')));
     }
     {
       const file = path.join(shared, 'personal-priority-window.json');
@@ -335,7 +335,7 @@ const run = (sc, args0, overrides = {}) => {
         S.priority.codex[0].windows = [wk(98, 10)];
         const spent = read(['analysis','--exclude-account','ttadk,trae']);
         assert.equal(spent.pick.account, 'main');
-        assert.ok(spent.tellUser.some(line => line.includes('main at 98%')));
+        assert.ok(!spent.tellUser.some(line => line.includes('main at 98%')));
         fs.writeFileSync(file, saved);
       } else assert.fail('window fixture file expected');
     }

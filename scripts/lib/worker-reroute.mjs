@@ -90,7 +90,7 @@ export const rerouteWorker = async ({ args, depth, from, reason, prompt, opts, p
   const alternative = reason === 'queue-too-slow' ? opts.queueAlternative : null;
   let next = nextRouteArgs(args, from, depth, policy, alternative);
   if (reason === 'provider-quota-denied') next = setRouteFlag(next, 'exclude-account',
-    [...new Set([...(routeFlag(next, 'exclude-account') || '').split(',').filter(Boolean), 'main'])].join(','));
+    [...new Set([...(routeFlag(next, 'exclude-account') || '').split(',').filter(Boolean), from.account])].join(','));
   const scripts = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   const taskDir = typeof routeFlag(args, 'task-dir') === 'string' ? routeFlag(args, 'task-dir')
     : path.join(path.resolve(opts.cwd ?? '.'), '.reroute', String(opts.name ?? 'worker').replace(/[^a-zA-Z0-9._-]/g, '_'));
@@ -99,7 +99,7 @@ export const rerouteWorker = async ({ args, depth, from, reason, prompt, opts, p
   const state = { t: Date.now(), name: opts.name, project:routeFlag(args,'project') ?? 'general',category:args[0],role:'primary',
     reason, from, cancellationEvidenceId:`${reason === 'provider-quota-denied' ? 'provider-quota-denied' : 'cancelled-no-work'}:${randomUUID()}`, depth: depth + 1, routeArgs: next,
     alternative, status: 'routing', recovery: {
-      instructions: reason === 'provider-quota-denied' ? 'The previous main turn ended at the provider usage limit. Preserve its completed and uncommitted work, re-run the recorded company route, and launch its pick.workerArgs with continuationPrompt. Do not resume the exhausted main turn.'
+      instructions: reason === 'provider-quota-denied' ? 'The previous turn ended at the provider usage limit. Preserve its completed and uncommitted work, re-run the recorded route, and launch its pick.workerArgs with continuationPrompt. Do not resume the exhausted turn.'
         : 'The previous attempt ended before work. Re-run the recorded route command, then launch its pick.workerArgs with continuationPrompt. Do not resume the cancelled queued turn.',
       routeCommand: [process.execPath, path.join(scripts, 'route.mjs'), ...next, '--json'],
       continuationPrompt: handover, cwd: opts.cwd ?? routeFlag(args, 'cwd'),
@@ -154,11 +154,13 @@ export const rerouteWorker = async ({ args, depth, from, reason, prompt, opts, p
   const pick = route.pick;
   const picks = [pick, route.secondOpinion].filter(Boolean);
   const fallback = route.queueFallbackPolicy;
+  const denialReplacement = reason === 'provider-quota-denied' && !policy && ['main','b'].includes(pick.account)
+    && pick.account !== from.account && pick.approvalRef && !pick.company;
   const standingPersonal = (p) => p === pick && reason === 'queue-too-slow' && !policy && fallback?.enabled
     && from.waitedMin >= fallback.queueWaitMinutes && p.personalFallback?.quotaApproved
     && p.approvalRef === p.personalFallback.approvalRef
     && (p.approvalRef === fallback.userDecisionRef || p.approvalRef?.startsWith('standing:personal-priority-'));
-  if (picks.some((p) => (!p.company && !standingPersonal(p) && !(selection&&p.approvalRef))
+  if (picks.some((p) => (!p.company && !standingPersonal(p) && !(p === pick && denialReplacement) && !(selection&&p.approvalRef))
     || !(selection&&p.vendor==='claude')&&(p.vendor !== 'codex' || !p.workerArgs)
     || (policy && /^(gpt|claude)/i.test(p.model))) || route.signing) {
     state.status = 'needs-user'; state.exitCode = REROUTE_EXIT.needsUser; persist();
@@ -167,7 +169,7 @@ export const rerouteWorker = async ({ args, depth, from, reason, prompt, opts, p
   }
   const to = { vendor: pick.vendor, model: pick.model, effort: pick.effort, account: pick.account??selection?.option.account };
   if (!pick.company) console.log(selection?`why: owner selected personal ${to.account}; queue decision ${selection.noticeId}; approval ${pick.approvalRef}`
-    :`why: queued > ${fallback.queueWaitMinutes} min → personal ${pick.account} by routing`);
+    :denialReplacement ? `why: provider denial on ${from.account} → ${pick.account}` :`why: queued > ${fallback.queueWaitMinutes} min → personal ${pick.account} by routing`);
   const record = { t: Date.now(), kind: 'reroute', automatic: !selection || selection.decidedBy==='auto',decidedBy:selection?.decidedBy,ownerDecision:selection?.noticeId??null, project: routeFlag(args, 'project'), name: opts.name,
     from, to, reason, category: route.category, depth: depth + 1, toStartEstimateMin: route.eta?.find((r) => r.model === pick.model && r.account === pick.account)?.startDelayMin ?? null };
   fs.mkdirSync(path.dirname(rulesLog()), { recursive: true });

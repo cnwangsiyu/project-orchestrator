@@ -12,8 +12,9 @@ import { BALANCE, readTraeModels, freshLoad, readQueueState, companySnapshot, re
 import { normalizeTraeDaily } from './trae-quota-aliases.mjs';
 import { withLock, writeJson as atomicJson } from './shared-file.mjs';
 import { readHubState } from './hub-state.mjs';
+import { activePersonalProviderDenial } from './main-provider-denial.mjs';
 import { PERSONAL_LAUNCH_HEADROOM, PERSONAL_DEADLINE_TIE_H, personalLaunchChoice } from './personal-launch.mjs';
-import { activePersonalPriority, personalPriorityGuard } from './pipeline/personal-priority.mjs';
+import { activePersonalPriority, personalPriorityGuard, personalAccount, windowIncludes } from './pipeline/personal-priority.mjs';
 import { weeklyProjection } from './pipeline/quota.mjs';
 import { hubBroken, readCodexUsage, readPersonalCodexQuota } from './codex-quota.mjs';
 export { hubBroken, PANIC_WINDOW_MIN, recentPanic } from './codex-quota.mjs';
@@ -691,15 +692,18 @@ export const POLICY = {
 // weeks: a full new week, minus the unused share forfeited, minus the delay to the next natural reset (the clock
 // restarts). So redeem once the week is spent (gain ≈ d/T): the earlier in a cycle, the more it gains. A card that
 // expires before the natural reset sets a deadline for spending the account.
-const cardPlan = (s, resets, spent) => {
+const cardPlan = (s, resets, spent, standing) => {
   if (!s || s.left == null || !resets?.count) return null;
-  const card = resets.credits[0] ?? null;
+  const card = [...(resets.credits ?? [])].filter(c => !c.expiresAt || c.expiresAt > now)
+    .sort((a,b) => (a.expiresAt ?? Infinity) - (b.expiresAt ?? Infinity))[0] ?? null;
   const expH = card?.expiresAt ? (card.expiresAt - now) / 3600000 : null;
   const gainAt = (u) => u / 100 + s.left / s.windowH - 1;
   const txt = card ? `${card.id.slice(-8)}${expH != null ? `, expires in ${hours(expH)}` : ''}` : '(not listed)';
   const beforeReset = expH != null && expH < s.left;
   const p = { count: resets.count, card, txt, expH, redeem: false, urgent: false, lapse: false, gain: 0, deadlineH: null, breakEven: null, line: '',
     beforeResetCount: resets.credits.filter((c) => c.expiresAt && (c.expiresAt - now) / 3600000 < s.left).length };
+  if (standing) return { ...p, redeem: spent && !!card, urgent: spent && !!card,
+    line: spent ? `provider denied usage; soonest-expiring card ${txt}` : `card ${txt} held until provider denial` };
   if (beforeReset) p.breakEven = Math.max(0, Math.ceil(100 * (1 - (s.left - expH) / s.windowH)));
   if (spent) {
     p.gain = gainAt(100);
@@ -775,9 +779,10 @@ export const analyze = (data) => {
   const rows = (data.codexAccounts ?? []).filter((a) => a.kind !== 'ttadk' && a.kind !== 'trae').map((a) => {
     const w = weekly(a.windows), s = winState(w, hist[`codex:${a.name}`]), w5 = shortWin(a.windows);
     const unconstrained = !!a.windows && !w; // read fine, but no limit window (or unlimited credits)
-    const spent = a.name === 'main' ? a.allowed === false : !unconstrained && !!s && (s.used >= P.redeemAt || (a.allowed === false && !(w5 && w5.used >= P.throttle5h)));
-    const throttledUntil = a.name !== 'main' && w5 && w5.used >= P.throttle5h && w5.resetsAt && !spent ? w5.resetsAt : null;
-    const cp = cardPlan(s, a.resets, spent);
+    const spent = personalAccount(a.name) ? a.allowed === false || !!activePersonalProviderDenial({
+      shared: SHARED, account: a.name, observation: { ...a, seenAt: a.seenAt ?? data.checkedAt }, now }) : !unconstrained && !!s && (s.used >= P.redeemAt || (a.allowed === false && !(w5 && w5.used >= P.throttle5h)));
+    const throttledUntil = !personalAccount(a.name) && w5 && w5.used >= P.throttle5h && w5.resetsAt && !spent ? w5.resetsAt : null;
+    const cp = cardPlan(s, a.resets, spent, personalAccount(a.name));
     const deadline = unconstrained ? Infinity : Math.min(s?.left ?? Infinity, cp?.deadlineH ?? Infinity);
     return { a, s, unconstrained, spent, throttledUntil, cp, deadline, known: unconstrained || !!s };
   });
@@ -793,14 +798,15 @@ export const analyze = (data) => {
   // Stale readings still consume headroom and retain their quota deadline.
   let available = rows.filter(usable);
   const exclusive = personalPriority?.mode === 'exclusive';
-  if (exclusive) available = priorityGuard ? [] : available.filter(r => r.a.name === personalPriority.account && r.a.live === true);
-  else if (personalPriority && !priorityGuard && available.some(r => r.a.name === personalPriority.account && r.a.live === true))
-    available = available.filter(r => r.a.name === personalPriority.account);
+  if (exclusive) available = priorityGuard ? [] : available.filter(r => windowIncludes(personalPriority, r.a.name) && r.a.live === true);
+  else if (personalPriority && !priorityGuard && available.some(r => windowIncludes(personalPriority, r.a.name) && r.a.live === true))
+    available = available.filter(r => windowIncludes(personalPriority, r.a.name));
   // A reachable hub must be able to take the choice. Keep last-good readings
   // when every hub is down, as before, for the quota diagnostic.
   const reachable = available.filter(r => r.a.live);
   const launch = personalLaunchChoice((reachable.length ? reachable : available)
-    .map(r => ({ id: r.a.name, used: r.s?.used ?? null, deadline: r.deadline, live: r.a.live,
+    .map(r => ({ id: r.a.name, used: r.s?.used ?? null,
+      hoursLeft: r.a.observationStale || r.a.usageLive === false ? null : (weeklyProjection(r.a.windows, [], now)?.resetsAt - now) / 3600000, deadline: r.deadline, live: r.a.live,
       remaining: r.unconstrained ? Infinity : 100 - r.s.used, row: r })), P.launchHeadroom, P.deadlineTieH);
   const open = launch.open.map(r => r.row);
   const pick = launch.pick?.row ?? null;
@@ -808,7 +814,7 @@ export const analyze = (data) => {
   // Each six-hour tie group contributes its least-used account to rotation.
   const expiring = launch.groups.map(group => group[0].row).filter(r => r.deadline <= 48);
   const rotate = launch.hasHeadroom && expiring.length >= 2 ? expiring : null;
-  const cardRows = exclusive ? rows.filter(r => r.a.name === personalPriority.account) : rows;
+  const cardRows = exclusive ? rows.filter(r => windowIncludes(personalPriority, r.a.name)) : rows;
   const urgent = cardRows.filter((r) => r.cp?.urgent);
   const redeemable = cardRows.filter((r) => r.spent && r.cp?.redeem).sort((x, y) => y.cp.gain - x.cp.gain);
   const redeem = urgent[0] ?? (!pick ? redeemable[0] ?? null : null);
@@ -820,7 +826,7 @@ export const analyze = (data) => {
     companyAccounts: registeredCompany,
     companyUnknown: companyUnknown(data, registeredCompany), registryError: data.errors?.registry ?? null,
     readable: rows.some((r) => r.known), rows, pick, redeem, cardsHeld, throttled, rotate, open,
-    launchWhy: exclusive ? `personal main only until ${personalPriority.until ?? 'revoked'}${priorityGuard ? `: ${priorityGuard}` : ''}` : launch.why,
+    launchWhy: launch.why,
     exclusiveWait: exclusive && !pick, prioritySnapshot,
     out: !pick && !redeem && rows.some((r) => r.known),
     // Out only because 5-hour windows are full: a pause of hours, not a spent week.
@@ -885,12 +891,10 @@ export const leanLines = (st, data) => {
       out.push(`TRAE ${model}'s daily high-priority quota is used up${q.resetsAt ? ` until ${fmt(q.resetsAt)}` : ''}: its requests use low priority; depletion alone does not prove a queue, and fresh ready/progress telemetry can show immediate capacity`);
     if (TR.healthy && !TR.live) out.push(`TRAE hub down — probe codex-worker.mjs --account ${TR.name} list --limit 1; only if unreachable, start with codex-worker.mjs --account ${TR.name} hub; tell the global-rules owner (traecli exec runs don't need it)`);
   }
-  if (X.redeem && companyDevice) out.push(`reset card due${multi ? ` on ${who(X.redeem)}` : ''}: ${X.redeem.cp.line} — on this company device ask the user only when route.mjs prints redeemFirst (ChatGPT-only work landing on that account); the other device spends that quota`);
-  else if (X.redeem) out.push(`redeem a reset card${multi ? ` on ${who(X.redeem)}` : ''}: ${X.redeem.cp.line} — ask the user first, every time; only after a yes: `
-    + `codex-worker.mjs --account ${X.redeem.a.name} reset-credit-use --key <new uuid>${X.redeem.cp.card ? ` --credit ${X.redeem.cp.card.id}` : ''}, then quota.mjs --fresh`);
+  if (X.redeem) out.push(`Reset card due on ${X.redeem.a.name}. The secretary redeems its soonest-expiring card under the standing approval of 2026-11-24.`);
   if (X.rotate) out.push(`${companyDevice ? 'approved ChatGPT-account work' : 'new Codex work'} → rotate across ${X.rotate.map((r) => r.a.name).join(', ')} (each must be spent within ${hours(Math.max(...X.rotate.map((r) => r.deadline)))}); route.mjs alternates per launch`);
   else if (X.pick && multi) out.push(`${companyDevice ? 'approved ChatGPT-account work (images, company capability fallback)' : 'new Codex work'} → account ${who(X.pick)} (week ${X.pick.s?.used ?? '-'}%, quota deadline in ${hours(X.pick.deadline)})${X.pickStale ? ' — from a stale reading' : ''}`);
-  if (X.exclusiveWait) out.push('New personal Codex work waits for main capacity; qualified company lanes remain available through route.mjs.');
+  if (X.exclusiveWait) out.push('New personal Codex work waits for personal capacity; qualified company lanes remain available through route.mjs.');
   else if (X.out && (T?.usable||TR?.usable)) out.push('Personal ChatGPT accounts are out; qualified company work continues through route.mjs on TTADK/TRAE; ask for any remaining personal option.');
   else if (X.out && X.throttledOnly) out.push(`codex paused: 5h windows full, free in ${hours(X.nextFree)} — Claude takes it only while it has spare; otherwise request a capacity decision`);
   else if (X.out) out.push(`codex out on every account (next free in ${hours(X.nextFree)}): tell the user; ${C.status === 'over' || C.status === 'unknown'
@@ -910,8 +914,6 @@ export const leanLines = (st, data) => {
   if (X.overspending) out.push('personal ChatGPT overspending: lower effort one notch where an automatic check catches misses; save Sol xhigh and Astra for what matters');
   for (const r of X.rows) if (r.cp && r.cp !== X.redeem?.cp && (r.cp.deadlineH || r.cp.lapse || (r.spent && !r.cp.redeem)))
     out.push(`${multi ? `${r.a.name}: ` : ''}${r.cp.line}`);
-  for (const r of X.rows) if (r.spent && r.cp?.redeem && X.redeem !== r)
-    out.push(`${r.a.name}: spent; hold its card ${r.cp.txt} while another account has quota (quota first) — it gains ~${Math.round(r.cp.gain * 100)}% now, falling ~${Math.round(2400 / r.s.windowH)}%/day while held; redeem when the open accounts are spent${r.cp.expH != null && r.cp.expH < r.s.left ? ', or a day before it expires' : ''}`);
   if (C.avoidFable) out.push('Fable window nearly used: no Fable');
   if (C.expiring && !companyDevice) out.push(`claude week resets in ${hours(cw.left)} with ${C.room}% spendable beyond the ${C.reserve}% reserve: stronger settings are fine on Claude`);
   for (const r of X.rows) if (!companyDevice && r.s?.left != null && r.s.left < POLICY.expiringH && 100 - r.s.used >= POLICY.expiringRoom && !r.spent)

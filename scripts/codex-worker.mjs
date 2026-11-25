@@ -93,7 +93,7 @@ import { lifecycle, resolveOwner, validOwner, inbox, readEvents, eventFile, read
   saveWorkerContext, workerContext, answerQuestion, followerAlive, retiredWorkers, workerKey, retireWorker, validWorkerIdentifier, workerRunStates, processWorker } from './lib/worker-events.mjs';
 import { runningWorker, trackedWorkers } from './lib/worker-running.mjs';
 import { pollWorkerQuota } from './lib/worker-quota-refresh.mjs';
-import { activeMainProviderDenial, isUsageLimitExceeded, recordMainProviderDenial } from './lib/main-provider-denial.mjs';
+import { activePersonalProviderDenial, isUsageLimitExceeded, recordPersonalProviderDenial } from './lib/main-provider-denial.mjs';
 import { readQuotaCache } from './lib/routing-observations.mjs';
 import { completionEvidence, classifyCompletion, completionLeases, continuationCommand, TRUNCATED_EXIT, isCompletedFinalItem } from './lib/worker-completion.mjs';
 import { appendWorkerAlert } from './lib/worker-events.mjs';
@@ -1415,12 +1415,12 @@ const report = async (threadId, turn, final, usage, observation = {}) => {
     project: opts.project ?? tracker?.metadata().project, task: opts.task ?? tracker?.metadata().task, name: opts.name });
   const rawPolicyBlock = isPolicyBlock(turn);
   const providerError = JSON.stringify(turn.error ?? '');
-  let mainDenied = (account ?? 'main') === 'main' && !observation.unconfirmed && turn.status === 'failed'
+  let personalDenied = ['main', 'b'].includes(account ?? 'main') && !observation.unconfirmed && turn.status === 'failed'
     && isUsageLimitExceeded(turn.error);
   const traeFailureModel = PROF?.kind === 'trae' ? (opts.model ?? actualModel ?? threadModel(PROF.home, threadId)) : null;
   const accessFailure = !!traeFailureModel && !rawPolicyBlock && turn.status === 'failed' && isModelAccessFailure(providerError);
   const familyRestricted = !!traeFailureModel && !rawPolicyBlock && turn.status === 'failed' && /\b983\b/.test(providerError);
-  const completion = classifyCompletion({ turn: mainDenied ? { ...turn, error: null } : accessFailure ? { ...turn, status: 'transport-failed' } : turn,
+  const completion = classifyCompletion({ turn: personalDenied ? { ...turn, error: null } : accessFailure ? { ...turn, status: 'transport-failed' } : turn,
     final, leases: resourceState.held, ...observation });
   const truncated = completion?.status === 'TRUNCATED' ? completion : null;
   const uncertain = completion?.status === 'uncertain' ? completion : null;
@@ -1438,17 +1438,17 @@ const report = async (threadId, turn, final, usage, observation = {}) => {
   if (rejectedModel) console.error(`review-model-rejected: requested ${REQUESTED_MODEL ?? 'default'}, actual ${actualModel ?? 'unknown'}, delegated ${delegatedModels.map((row) => row.model).join(', ') || 'none'}`);
   console.log(`turn ${turn.status}${turn.error ? ' error=' + JSON.stringify(turn.error) : ''}`);
   const errorText = JSON.stringify(turn.error ?? '');
-  if (mainDenied) {
+  if (personalDenied) {
     const cached = readQuotaCache(process.env.QUOTA_CACHE || path.join(rulesShared(), 'quota.json'));
-    const main = cached?.codexAccounts?.find(row => row.name === 'main');
+    const main = cached?.codexAccounts?.find(row => row.name === (account ?? 'main'));
     const mainObservation = main && { ...main, seenAt: main.seenAt ?? cached.checkedAt };
-    recordMainProviderDenial({ shared: rulesShared(), error: turn.error, thread: threadId, turn: turn.id,
+    recordPersonalProviderDenial({ shared: rulesShared(), account: account ?? 'main', error: turn.error, thread: threadId, turn: turn.id,
       observation: mainObservation });
-    mainDenied = !!activeMainProviderDenial({ shared: rulesShared(), observation: mainObservation });
-    const message = 'main provider usageLimitExceeded denial: main is exhausted; falling back to the best qualified company option now, without waiting for a reset or redeeming a card.';
-    if (mainDenied) console.log(message);
-    if (mainDenied && tracker?.owner) appendWorkerAlert({ ...tracker.metadata(), thread: threadId, turn: turn.id,
-      event: 'message', kind: 'risk', severity: 'risk', wake: true, text: message }, `main-provider-denial:${threadId}:${turn.id}`);
+    personalDenied = !!activePersonalProviderDenial({ shared: rulesShared(), account: account ?? 'main', observation: mainObservation });
+    const message = `${account ?? 'main'} provider usageLimitExceeded denial. Route new work to an eligible account. The secretary handles reset cards under the standing approval of 2026-11-24.`;
+    if (personalDenied) console.log(message);
+    if (personalDenied && tracker?.owner) appendWorkerAlert({ ...tracker.metadata(), thread: threadId, turn: turn.id,
+      event: 'message', kind: 'risk', severity: 'risk', wake: true, text: message }, `${account ?? 'main'}-provider-denial:${threadId}:${turn.id}`);
   }
   if (turn.status === 'failed' && failureKind(errorText) === 'thread-too-large') {
     // Do not wait for another hub read while retry/reroute timers are still armed.
@@ -1504,7 +1504,7 @@ const report = async (threadId, turn, final, usage, observation = {}) => {
   outcomeTurn = turn; outcomeFinal = final ?? '';
   printFinal(final);
   await redactEndedTurn(threadId);
-  if (mainDenied && ROUTE_ARGS && !BACKGROUND && !rejectedModel && !policyBlock) {
+  if (personalDenied && ROUTE_ARGS && !BACKGROUND && !rejectedModel && !policyBlock) {
     const current = await boundedTransportRead(() => call('thread/read', { threadId, includeTurns: true })).catch(() => null);
     if (current && !transportSourceBlock({ result: current, threadId, sourceTurn: turn.id })) {
       recordOutcome(1);
@@ -1524,9 +1524,9 @@ const report = async (threadId, turn, final, usage, observation = {}) => {
       return line;
     };
     const quotaBlock = async () => {
-      if ((account ?? 'main') === 'main' && activeMainProviderDenial({ shared: rulesShared(),
-        observation: readQuotaCache(process.env.QUOTA_CACHE || path.join(rulesShared(), 'quota.json'))?.codexAccounts?.find(row => row.name === 'main') }))
-        return 'main provider quota denial is active; use a qualified company lane';
+      if (['main', 'b'].includes(account ?? 'main') && activePersonalProviderDenial({ shared: rulesShared(), account: account ?? 'main',
+        observation: readQuotaCache(process.env.QUOTA_CACHE || path.join(rulesShared(), 'quota.json'))?.codexAccounts?.find(row => row.name === (account ?? 'main')) }))
+        return `${account ?? 'main'} provider quota denial is active; reroute`;
       const health = transportHealthBlock({home:PROF?.home ?? process.env.CODEX_HOME ?? path.join(os.homedir(),'.codex'),model:opts.model ?? actualModel});
       if (health) return health;
       try {

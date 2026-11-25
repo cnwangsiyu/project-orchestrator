@@ -54,7 +54,6 @@ function check(name, fn) { fn(); count++; console.log(`PASS ${name}`); }
 try {
   assert.equal(POLICY.launchHeadroom, 5);
   assert.equal(POLICY.deadlineTieH, 6);
-  // The allocator scenarios use a synthetic peer; real b is refused by routing policy.
   for (const [label, other, main, want] of [['98/0', 98, 0, 'main'], ['90/0', 90, 0, 'fixture-b'], ['95/0 boundary', 95, 0, 'fixture-b'],
     ['both low, main has more', 98, 96, 'main'], ['main weekly use is advisory', 96, 98, 'main']]) {
     check(`${label}: quota and hard Astra launch choose ${want}`, () => {
@@ -146,13 +145,12 @@ try {
     assert.equal(st.codex.pick, null); assert.ok(st.codex.redeem);
     assert.notEqual(r.kind, 'launch'); assert.ok(r.needsUserOK.some(s => /redeem|reset/i.test(s)));
   });
-  check('dated b refusal is visible when personal main wins', () => {
+  check('quota comparison explains why main wins', () => {
     const d = data();
     d.codexAccounts[0] = account('b', 98, 110);
     const r = route(d);
     assert.equal(r.kind, 'launch'); assert.equal(r.pick.account, 'main');
-    assert.match(r.why.join('\n'), /2026-11-21 rule forbids new personal work on b/);
-    assert.match(r.shortWhy.join('\n'), /2026-11-21 rule forbids new personal work on b/);
+    assert.match(r.why.join('\n'), /weekly quota remaining per hour until reset favors main/);
     assert.doesNotMatch(r.why.join('\n'), /b 98% used: below launch headroom/);
   });
   const d = data();

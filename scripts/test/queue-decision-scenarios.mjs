@@ -183,10 +183,9 @@ try {
   assert.equal(notice.wake,true);assert.match(notice.text,/queued 6.0 min position=100 drain=0/);
   assert.ok(notice.options.some(o=>o.account==='trae'&&o.model===TERRA&&o.context==='same thread / resume'));
   assert.ok(notice.options.some(o=>o.account==='main'&&o.approvalRef===policy.userDecisionRef&&!o.needsUserApproval));
-  assert.ok(!notice.options.some(o=>o.account==='b'), 'queue choices cannot re-enable refused personal b');
-  const banned = queueOptionPlan(f.context,f.row,f.queue,notice.options.find(o=>o.account==='main').candidateId,notice.noticeId)
-    .plan.trace.candidates.find(r=>r.candidate.accountId==='b').candidate;
-  assert.throws(()=>queueOptionPlan(f.context,f.row,f.queue,banned.id,notice.noticeId,'old-approval'),/Account b/);
+  const bOption = notice.options.find(o => o.account === 'b' && o.bestEligible);
+  assert.ok(bOption);
+  assert.equal(queueOptionPlan(f.context,f.row,f.queue,bOption.candidateId,notice.noticeId).pick.account,'b');
   assert.ok(notice.options.some(o=>o.model===ASTRA&&o.needsUserApproval));
   assert.ok(notice.options.some(o=>o.model==='opus'&&o.needsUserApproval));
   const hardContext={...f.context,task:createTaskSpec({...f.context.task,category:'debug'})};
