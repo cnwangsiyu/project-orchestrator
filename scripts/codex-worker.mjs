@@ -1760,6 +1760,7 @@ const follow = (threadId, turnId, items = [], submittedAt = null) => {
       if (routeFlag(source,'signing') || opts.signing) throw Error('signing work is protected; original queue retained');
       if (option?.type==='switch' && REROUTE_DEPTH>=2) throw Object.assign(Error('at most two reroute hops; original queue retained'),{exitCode:10});
       const automatic=state.choice.decidedBy==='auto';
+      const requireFloor=automatic || state.choice.requestedOptionId==='best' || option?.bestEligible;
       let sourceQueue = state.queue;
       const select=()=>{
         const context=queueRouteContext(ownerRow,ownerLaunch);
@@ -1782,7 +1783,7 @@ const follow = (threadId, turnId, items = [], submittedAt = null) => {
           if(!best || (cancelSent && best.id!==option.id)) throw Error('automatic queue choice is no longer eligible');
           option=best;
         }
-        return queueOptionPlan(context,ownerRow,state.queue,option.candidateId,state.noticeId,state.choice.userOK,automatic);
+        return queueOptionPlan(context,ownerRow,state.queue,option.candidateId,state.noticeId,state.choice.userOK,requireFloor);
       };
       if(option?.type==='switch') {const route=select();if(route.blocked||route.needsUserOK.length||!route.pick?.command||route.signing||route.redeemFirst||route.deferred||route.deferUntil)
         throw Object.assign(Error('selected option now requires approval or is unavailable; original queue retained'),{exitCode:8});}

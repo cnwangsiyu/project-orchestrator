@@ -324,7 +324,7 @@ export function pLaunchMatches(t, s, c, context = {}) {
       && pScopedApproval(t,s,c,context).personalFallback?.quotaApproved;
     const ownerChoice=t.queueOwnerChoice?.candidateId===c.id&&t.queueOwnerChoice.owner&&t.queueOwnerChoice.decisionId;
     if (t.autoRerouteDepth > 2 || t.background&&!ownerChoice || t.flags.signing || (!company(candidateParts(s,c).account) && !personalQueue&&!ownerChoice)) return deny('pLaunchMatches', 'AUTO_REROUTE_FORBIDDEN', 'Automatic hop limit or task scope forbids replacement.', c);
-    const checked = t.queueOwnerChoice?.candidateId === c.id ? prior.filter(a=>a.id === t.queueOwnerChoice.previousAttemptId) : prior;
+    const checked = (ownerChoice || t.queueOwnerChoice?.requireFloor) ? prior.filter(a=>a.id === t.queueOwnerChoice.previousAttemptId) : prior;
     const ownerInterruption = t.queueOwnerChoice?.owner && t.queueOwnerChoice.decisionId && t.queueOwnerChoice.midTurn === true;
     const confirmed = a => a.cancellationEvidenceId && (a.state === 'cancelled-no-work' && a.usefulWork === false
       || ownerInterruption && a.id === t.queueOwnerChoice.previousAttemptId && a.state === 'interrupted' && a.usefulWork === true

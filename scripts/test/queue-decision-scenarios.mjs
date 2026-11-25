@@ -89,6 +89,79 @@ try {
   assert.equal(immediate.noticeCount,1);
   assert.ok(claimQueueChoice(f.row,{policy,since:now,now})?.choice.option.company);
   fs.rmSync(queueDecisionFile(f.row));
+  const chooseBest = notice => {
+    const result = spawnSync(process.execPath, [path.join(root,'scripts/codex-worker.mjs'),
+      'queue-choice','--notice',notice.noticeId,'--best','--owner',owner], {env:process.env,encoding:'utf8'});
+    return {...JSON.parse(result.stdout),status:result.status};
+  };
+  const addLane = (fixture, account, model, capacity = {}) => {
+    const {raw} = fixture;
+    const template = raw.lanes.find(l => l.accountId === account);
+    raw.accounts.find(a => a.id === account).catalog.push(model);
+    if (!raw.models.some(m => m.id === model)) raw.models.push({...raw.models[0],id:model});
+    raw.lanes.push({...template,id:`${account}:${model}`,modelId:model,readyAt:now,position:0,queueState:'ready',...capacity});
+  };
+  const hardQueue = withAstra => {
+    const f = fixture(true, []);
+    const doubao = 'doubao-seed-2.1-pro';
+    addLane(f, 'trae', ASTRA, {readyAt:null,queueState:'queued',position:100,drainPerMin:0,mode:'low-priority'});
+    addLane(f, 'trae', doubao, {mode:'priority',loadPercent:10});
+    if (withAstra) addLane(f, 'ttadk', 'gpt-6.2-astra');
+    Object.assign(f.row,{model:ASTRA,effort:'xhigh'});
+    const args = JSON.parse(f.launch.defaults['route-args']);
+    args[0]='implement-hard';
+    f.launch.defaults['route-args']=JSON.stringify(args);
+    fs.writeFileSync(process.env.ROUTE_SNAPSHOT_FILE, JSON.stringify(f.raw));
+    return f;
+  };
+  for (const withAstra of [true, false]) {
+    f=hardQueue(withAstra);
+    const notice=notifyQueueOwner(f.row,f.queue,f.launch,{now,policy,emit});
+    const downgrade=notice.options.find(o=>o.model==='doubao-seed-2.1-pro');
+    assert.ok(downgrade?.belowTier);
+    assert.match(notice.text,new RegExp(`${downgrade.id}: .*start=0 min; .*below tier; explicit choice only`));
+    const first=notice.options[0];
+    assert.ok(notice.text.split('\n')[2].startsWith(`${first.id}: `));
+    assert.equal(first.id === 'wait',!withAstra);
+    if (withAstra) {
+      assert.equal(first.model,'gpt-6.2-astra');
+      assert.equal(first.effort,'xhigh');
+    }
+    assert.equal(JSON.parse(fs.readFileSync(queueDecisionFile(f.row))).autoOption?.id,withAstra?first.id:undefined);
+    const best=chooseBest(notice);
+    assert.equal(best.status,withAstra?3:0,best.reason);
+    assert.equal(best.option.id,first.id);
+    if (withAstra) settleQueueChoice(f.row,'waiting',now);
+    else assert.match(best.reason,/quality floor.*keeping the existing queue/);
+    const explicit=requestQueueChoice(f.row,notice.noticeId,downgrade.id,null,now);
+    assert.equal(explicit.exitCode,3);
+    assert.equal(explicit.option.id,downgrade.id);
+    fs.rmSync(queueDecisionFile(f.row));
+  }
+  console.log('PASS hard queue defaults keep the actual tier and effort; an exact downgrade ID stays selectable');
+  f=fixture(true, []);
+  const savedArgs=JSON.parse(f.launch.defaults['route-args']);
+  savedArgs[0]='implement-hard';
+  savedArgs.push('--actual',`codex:${ASTRA}:xhigh@trae`);
+  f.launch.defaults['route-args']=JSON.stringify(savedArgs);
+  f.row.effort='xhigh';
+  const olderFloor=notifyQueueOwner(f.row,f.queue,f.launch,{now,policy,emit});
+  assert.equal(olderFloor.options[0].id,'wait','a saved actual floor survives a later explicit downgrade');
+  assert.equal(olderFloor.options.find(o=>o.account==='ttadk')?.belowTier,true);
+  fs.rmSync(queueDecisionFile(f.row));
+  f=fixture();
+  f.raw.personalFallback={...policy,enabled:false};
+  fs.writeFileSync(process.env.ROUTE_SNAPSHOT_FILE, JSON.stringify(f.raw));
+  const mainFirst=notifyQueueOwner(f.row,f.queue,f.launch,{now,policy,emit});
+  assert.equal(mainFirst.options[0].account,'main');
+  assert.equal(mainFirst.options[0].approvalRef,'standing:normal-tier-main-2026-11-24');
+  assert.ok(mainFirst.options.some(o=>o.model===TERRA && o.belowTier));
+  assert.equal(JSON.parse(fs.readFileSync(queueDecisionFile(f.row))).autoOption,null);
+  const mainBest=chooseBest(mainFirst);
+  assert.equal(mainBest.status,3,mainBest.reason);
+  assert.equal(mainBest.option.id,mainFirst.options[0].id);
+  fs.rmSync(queueDecisionFile(f.row));
+  console.log('PASS ready personal main outranks a light company fallback');
   f=fixture();
   const legacy = {defaults:{...f.launch.defaults,'route-args':undefined,'routed-seat':JSON.stringify({
     name:f.row.name,project:f.row.project,category:'build-run',role:'primary',routeId:'route:fixture',effort:'high'})}};
@@ -166,21 +239,18 @@ try {
   const tt=notifyQueueOwner(f.row,f.queue,f.launch,{now,policy,context:f.context,emit});
   assert.equal(requestQueueChoice(f.row,tt.noticeId,tt.options.find(o=>o.account==='ttadk').id,null,now).exitCode,3);
   settleQueueChoice(f.row,'ended',now);fs.rmSync(queueDecisionFile(f.row));
-  // A reminder drops the old TTADK option. Its printed ID still selects a current company lane.
+  // A reminder drops the old TTADK option. Its ID cannot silently select a below-tier company lane.
   f=fixture(true);
   const beforeChange=notifyQueueOwner(f.row,f.queue,f.launch,{now,policy,context:f.context,emit});
   const gone=beforeChange.options.find(o=>o.account==='ttadk');
   f=fixture(false);
   const changed=notifyQueueOwner(f.row,f.queue,f.launch,{now:now+10*min,policy,context:f.context,emit});
   assert.ok(!changed.options.some(o=>o.id===gone.id));
-  const substitute=requestQueueChoice(f.row,changed.noticeId,gone.id,null,now);
-  assert.equal(substitute.exitCode,3); assert.equal(substitute.option.company,true);
-  assert.notEqual(substitute.option.id,gone.id);
-  settleQueueChoice(f.row,'waiting',now);
+  assert.throws(()=>requestQueueChoice(f.row,changed.noticeId,gone.id,null,now),/no current replacement.*queue retained/);
   const compact=spawnSync(process.execPath,[path.join(root,'scripts/codex-worker.mjs'),'queue-choice','--notice',changed.noticeId,'--best'],
     {env:{...process.env,ORCHESTRATOR_OWNER:owner},encoding:'utf8'});
   assert.equal(compact.status,3,compact.stderr);assert.equal(JSON.parse(compact.stdout).pending,true);
-  assert.equal(JSON.parse(compact.stdout).option.id,changed.options.find(o=>o.type!=='wait').id);
+  assert.equal(JSON.parse(compact.stdout).option.id,changed.options[0].id);
   fs.rmSync(queueDecisionFile(f.row));
   f=fixture(false,[SOL],['max']);assert.ok(queueOptions(f.row,f.queue,f.launch,now,f.context).some(o=>o.account==='main'&&o.effort==='max'&&o.needsUserApproval));
   const midQueue={...f.queue,workStarted:true,workedMinutesBefore:24};

@@ -11,7 +11,11 @@ export const prefersPersonalCodex = task => ['lookup','extract','analysis','impl
 // catalog does not justify personal spend when company routing would pick Sol.
 export function companyWouldDowngrade(task, snapshot, companyRows) {
   if (!normalTierOverflow(task)) return false;
-  const eligible = companyRows.filter(row => row.predicates.every(predicate => predicate.ok));
+  // A light company lane can justify the standing main grant even when the
+  // current queue's actual floor rules that lane out as a replacement.
+  const eligible = companyRows.filter(row => row.predicates.every(predicate => predicate.ok
+    || task.queueOwnerChoice?.requireFloor && companyDowngrade(row.candidate.modelId)
+      && predicate.reason?.code === 'RETRY_BELOW_ACTUAL_FLOOR'));
   if (!eligible.some(row => companyDowngrade(row.candidate.modelId))) return false;
   const best = orderCandidates(task, snapshot, eligible.map(row => ({ ...row, ok: true }))).winner;
   return !!best && companyDowngrade(best.candidate.modelId);

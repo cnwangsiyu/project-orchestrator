@@ -9,7 +9,7 @@ export const companyDowngrade = model => TIERS.light.includes(policyModel(model)
   || /(?:^doubao-|-(?:terra|luna)$)/.test(model);
 export const normalTierOverflow = task => ['normal', 'hard'].includes(task.tier)
   && task.contentLabels.includes('ordinary') && !task.reviewClass && !task.flags.signing
-  && !task.flags['allow-low-priority-queue'] && !task.queueOwnerChoice && !task.requirements.resetRedemption;
+  && !task.flags['allow-low-priority-queue'] && (!task.queueOwnerChoice || task.queueOwnerChoice.requireFloor) && !task.requirements.resetRedemption;
 export const tierApprovalRef = 'standing:normal-tier-main-2026-11-24';
 export const tierDecision = '2026-11-24 “可以按照路由规则走个人的几个模型，不需要授权”';
 export const mandatoryClaudeApprovalRef = 'standing:codex-mandatory-review-2026-11-24';
