@@ -19,7 +19,7 @@ export function captureMaskAudit({ cwd, paths = [], taskDirectory, startedAt = D
       const baseline = resumed ? scan.findings.filter(item => {
         try { return fs.lstatSync(path.join(tree.root, item.file)).ctimeMs < startedAt; } catch { return false; }
       }) : scan.findings;
-      audit.roots.set(tree.root, { signatures: new Map(baseline.map(item => [id(item), item.signature])), complete: !resumed && !scan.bounded && !scan.skipped.length });
+      audit.roots.set(tree.root, { signatures: new Map(baseline.map(item => [id(item), item.signature])), complete: !resumed && !scan.bounded && !scan.skippedCount });
     } catch { /* Unknown paths never grant masking permission. */ }
   }
   return audit;
@@ -64,7 +64,7 @@ export function finishMaskAudit(audit, { paths = [], note = () => {}, warn = () 
         if (prior.complete || prior.signatures.has(id(item))) return true;
         try { return fs.lstatSync(path.join(repo, item.file)).ctimeMs >= audit.startedAt; } catch { return false; }
       });
-      if (scan.bounded || scan.skipped.length) warn(`mask artifact audit: bounded/incomplete scan for ${repo}`);
+      if (scan.bounded || scan.skippedCount) warn(`mask artifact audit: bounded/incomplete scan for ${repo}`);
       if (!added.length) continue;
       const files = [...new Set(added.map(item => item.file))];
       let directory = audit.taskDirectory;
