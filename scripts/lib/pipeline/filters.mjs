@@ -1,7 +1,8 @@
 import {mandatoryReview} from '../review-policy-data.mjs';
 import { policyModel, matchesModel, isAstra, newestRelease, VERSION, EFFORTS, array, company, companyDevice, known, modelId, familyOf, isReview, adversarial, result, reason, fingerprint, stable } from './common.mjs';
 import { candidateParts, enumerateCandidates } from './candidates.mjs';
-import { modelPreference, policyEffort, claudeBrowserPolicy, tierApprovalRef, tierDecision } from './policy.mjs';
+import { modelPreference, policyEffort, claudeBrowserPolicy, tierApprovalRef, tierDecision,
+  mandatoryClaudeSeat, mandatoryClaudeApprovalRef, mandatoryClaudeDecision } from './policy.mjs';
 import { estimateCandidate } from './estimate.mjs';
 import { standingPersonalFallback, hardPersonalXhighFallback } from './personal-fallback.mjs';
 import { standingPersonalPriority, personalPriorityGuard, exclusiveCodexTask } from './personal-priority.mjs';
@@ -42,7 +43,7 @@ export function pExclusions(t, s, c) {
     return deny('pExclusions', 'PERSONAL_B_REFUSED', 'The 2026-11-21 rule forbids new personal work on b independently of the priority window.', c);
   if (s.personalPriority?.mode === 'exclusive' && (!company(account) && account.kind !== 'claude'
     && (account.id !== s.personalPriority.account || account.kind !== 'chatgpt')
-    || account.kind === 'claude' && exclusiveCodexTask(t, s)))
+    || account.kind === 'claude' && exclusiveCodexTask(t, s) && !mandatoryClaudeSeat(t, c, account)))
     return deny('pExclusions', 'PERSONAL_EXCLUSIVE_ACCOUNT', 'New personal Codex work is restricted to main until the standing window is revoked.', c);
   const toolChannelFailed = ['browser','ui-browser','computer-use'].includes(t.category) && t.previousAttempts.some(a =>
     a.taskId === t.taskId && (a.role ?? 'primary') === t.role && ['failed','completed','succeeded'].includes(a.state) && a.failureKind === 'tool'
@@ -249,7 +250,10 @@ export function pDevice(t, s, c) {
 }
 export function pScopedApproval(t, s, c, context = {}) {
   const a = candidateParts(s, c).account;
-  const personalPriority = standingPersonalPriority(t, s, c, a);
+  const personalPriority = mandatoryClaudeSeat(t, c, a) ? {
+    approvalRef: mandatoryClaudeApprovalRef, quotaApproved: true,
+    text: `Codex-authored mandatory class ${t.reviewClass} review uses Claude Opus 5.5 medium under the standing user decision of ${mandatoryClaudeDecision}.`
+  } : standingPersonalPriority(t, s, c, a);
   const tierMain = context.tierDowngrade && a.id === 'main' && a.kind === 'chatgpt' && policyModel(c.modelId) === 'sol'
     && c.effort !== 'max';
   let personalFallback = personalPriority ?? (a.kind === 'chatgpt' && s.personalFallback?.enabled ? standingPersonalFallback(t, s, c,

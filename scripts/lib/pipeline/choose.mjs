@@ -1,9 +1,9 @@
 import { policyModel, newestRelease, isAstra, EFFORTS, company, companyDevice, adversarial, compare, freeze, stable, known, isReview } from './common.mjs';
 import { unavailableDayQuota, previousReleaseFallback, releaseUnavailable } from './release-fallback.mjs';
 import { candidateParts } from './candidates.mjs';
-import { matchingApproval } from './filters.mjs';
+import { matchingApproval, needsReviewer } from './filters.mjs';
 import { companyServesInfraRetry, laneTransportDemoted, usesExclusiveInfraOverflow } from './estimate.mjs';
-import { modelPreference, hardPreference, companyDowngrade, normalTierOverflow, TIERS, SOL, ASTRA } from './policy.mjs';
+import { modelPreference, hardPreference, companyDowngrade, normalTierOverflow, mandatoryClaudeSeat, TIERS, SOL, ASTRA } from './policy.mjs';
 import { personalLaunchChoice, personalLaunchExplanation } from '../personal-launch.mjs';
 export const prefersPersonalCodex = task => ['lookup','extract','analysis','implement','implement-hard','debug','science','review','draft','build-run','image-gen','second-opinion'].includes(task.category);
 
@@ -45,6 +45,11 @@ export function orderCandidates(task, snapshot, rows) {
   const stageKey=(c)=>`${c.accountId}:${c.modelId}`;
   for (const { candidate: c } of rows) minimum.set(stageKey(c), Math.min(minimum.get(stageKey(c)) ?? Infinity, EFFORTS.indexOf(c.effort)));
   let cohort = rows.filter(({ candidate: c }) => EFFORTS.indexOf(c.effort) === minimum.get(stageKey(c)));
+  // The mandatory-review decision precedes ETA/quota preferences, but never admission.
+  const mandatoryClaude = cohort.filter(r => r.ok && !r.estimate.stalled && !r.estimate.capacityReset
+    && mandatoryClaudeSeat(task, r.candidate, candidateParts(snapshot, r.candidate).account));
+  // Adversarial pairs retain their primary family order; prefer the approved Claude second.
+  if (mandatoryClaude.length && (!adversarial(task) || !needsReviewer(task, snapshot))) cohort = mandatoryClaude;
   if (task.flags['allow-low-priority-queue']) {
     const immediate = cohort.filter(r => {
       const { account, lane } = candidateParts(snapshot, r.candidate);

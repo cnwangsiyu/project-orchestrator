@@ -8,7 +8,8 @@ import { companyWouldDowngrade, orderCandidates, prefersPersonalCodex } from './
 import { makePlan } from './plan.mjs';
 import { validatePlan } from './validate.mjs';
 import { reviewDecision, reviewAfterWrite } from './review-policy.mjs';
-import { isAstra, array, company, companyDevice, known, reason, fingerprint, compare, clone, freeze } from './common.mjs';
+import { isAstra, array, company, companyDevice, known, reason, fingerprint, compare, clone, freeze, adversarial } from './common.mjs';
+import { mandatoryClaudeReview } from './policy.mjs';
 
 function assess(task, snapshot, context = {}) {
   const { candidates, diagnostics } = enumerateCandidates(task, snapshot);
@@ -47,7 +48,9 @@ export function routePure(taskSpec, stateSnapshot, history = []) {
   for (const row of valid) {
     let reviewers = [], reviewerGates = [], reviewerProposals = [];
     if (needsReviewer(task,snapshot)) {
-      const reviewerTask = deriveReview(task, { role: 'second', authorAttemptId: task.authorAttemptId });
+      let reviewerTask = deriveReview(task, { role: 'second', authorAttemptId: task.authorAttemptId });
+      if (adversarial(task) && mandatoryClaudeReview(task)) reviewerTask = createTaskSpec({ ...reviewerTask,
+        flags: { ...reviewerTask.flags, ...Object.fromEntries(['author', 'against'].filter(k => task.flags[k]).map(k => [k, task.flags[k]])) } });
       const author = task.previousAttempts.find((a) => a.id === task.authorAttemptId);
       let entry=reviewerCache.get(row.candidate.family);
       if(!entry) {

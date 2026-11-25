@@ -1,5 +1,6 @@
 // Category qualification and preferences, shared by admission and ordering.
-import { EFFORTS, company, adversarial, known, policyModel, isAstra } from './common.mjs';
+import { EFFORTS, company, adversarial, known, policyModel, isAstra, isReview } from './common.mjs';
+import { mandatoryReview } from '../review-policy-data.mjs';
 export const SOL='sol', ASTRA='astra';
 // Company hard-tier trial: 2026-11-16 through the 2026-11-23 review.
 export const TIERS = {hard:[ASTRA,SOL],normal:[SOL,'gpt-5.6-sol','gpt-5.6-terra','deepseek-v4.1-flash'],light:['gpt-5.6-terra','gpt-5.5','deepseek-v4.1-flash']};
@@ -11,6 +12,13 @@ export const normalTierOverflow = task => ['normal', 'hard'].includes(task.tier)
   && !task.flags['allow-low-priority-queue'] && !task.queueOwnerChoice && !task.requirements.resetRedemption;
 export const tierApprovalRef = 'standing:normal-tier-main-2026-11-24';
 export const tierDecision = '2026-11-24 “可以按照路由规则走个人的几个模型，不需要授权”';
+export const mandatoryClaudeApprovalRef = 'standing:codex-mandatory-review-2026-11-24';
+export const mandatoryClaudeDecision = '2026-11-24 “A 可以，四类必审直接用 Claude 评审（不用每次问）”';
+export const mandatoryClaudeReview = t => isReview(t) && mandatoryReview(t) && !!t.reviewReason?.trim()
+  && [t.flags.author, t.flags.against].includes('codex') && ![t.flags.author, t.flags.against].includes('claude');
+// The declared Claude catalog uses `opus` for Opus 5.5. No other model or effort is approved.
+export const mandatoryClaudeSeat = (t, c, a) => mandatoryClaudeReview(t) && a.kind === 'claude'
+  && c.family === 'claude' && c.modelId === 'opus' && c.effort === 'medium';
 export function hardPreference(t) {
   // Retain Sol's effort escalation (including company max) after a Sol attempt.
   // Astra actuals still forbid Sol through pPreviousFloor; preference is not a floor.
@@ -65,6 +73,7 @@ export function modelPreference(t,a,s = null) {
   return preference;
 }
 export function policyEffort(t,c,a,s) {
+  if (mandatoryClaudeReview(t) && a.kind === 'claude' && c.modelId === 'opus') return 'medium';
   const browser = claudeBrowserPolicy(t);
   if (c.family === 'claude' && browser) return browser[1];
   if(['deepseek','kimi','gemini'].includes(c.family)) return 'high';

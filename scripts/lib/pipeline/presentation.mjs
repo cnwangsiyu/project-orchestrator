@@ -9,7 +9,8 @@ import { deriveReview } from './taskspec.mjs';
 import { reviewAfterWrite } from './review-policy.mjs';
 import { estimateCandidate } from './estimate.mjs';
 import { etaText, taskEstimateText, laneStartText } from '../eta.mjs';
-import { modelPreference, normalTierOverflow, companyDowngrade, tierDecision } from './policy.mjs';
+import { modelPreference, normalTierOverflow, companyDowngrade, tierDecision,
+  mandatoryClaudeReview, mandatoryClaudeSeat, mandatoryClaudeApprovalRef } from './policy.mjs';
 import { flagArgs } from '../route-args.mjs';
 import { personalPriorityGuard } from './personal-priority.mjs';
 import { transportLaneFailures } from '../worker-completion.mjs';
@@ -44,6 +45,14 @@ export function presentRoute(plan, view, context) {
     && company(candidateParts(snapshot, c).account))
     why.push(`company lanes first; personal overflow only on main under the standing routing window ${snapshot.personalPriority.until === null ? 'until revoked' : `until ${snapshot.personalPriority.until}`}`);
   if (plan.kind === 'launch' && seat?.personalFallback) why.push(seat.personalFallback.text);
+  for (const reviewer of plan.reviewers) if (reviewer.personalFallback?.approvalRef === mandatoryClaudeApprovalRef)
+    why.push(`second reviewer: ${reviewer.personalFallback.text}`);
+  if (plan.trace && mandatoryClaudeReview(t) && ![seat, ...plan.reviewers].some(s => s?.personalFallback?.approvalRef === mandatoryClaudeApprovalRef)) {
+    const preferred = (plan.trace?.candidates ?? []).filter(r => mandatoryClaudeSeat(t, r.candidate, candidateParts(snapshot, r.candidate).account));
+    const causes = [...new Set(preferred.flatMap(r => r.predicates.filter(p => !p.ok).map(p => p.reason.code)
+      .concat(r.estimate.stalled ? ['ETA_STALLED'] : [])))];
+    why.push(`Claude Opus 5.5 medium unavailable or denied (${causes.join(', ') || 'no eligible catalog seat'}); retaining the previous review routing behavior.`);
+  }
   if (plan.kind === 'launch' && seat?.personalFallback?.maxUnavailable) tellUser.push(seat.personalFallback.text);
   if (plan.kind === 'launch' && snapshot.personalPriority) for (const reviewer of plan.reviewers) {
     if (reviewer.personalFallback?.approvalRef === snapshot.personalPriority.userDecisionRef)
