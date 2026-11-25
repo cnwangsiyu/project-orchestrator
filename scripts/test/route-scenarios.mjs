@@ -982,7 +982,12 @@ for (const [sc, args] of ERRORS) {
       else if(!flags.length&&['traeReviewFull','traeFull'].includes(sc)) {want=hardRow?claudePick:'deepseek-v4.1-flash high @trae';gate=hardRow;}
       else if(flags.includes('--urgent')&&want.includes('@undefined')) gate=true;
       if(want==='gpt-6.1-sol high @main') {want=args[0]==='second-opinion'?'opus high @undefined':'sonnet high @undefined';gate=true;}
-      if(!flags.includes('--failures')&&(hardRow||flags.includes('--security'))) {want='opus medium @undefined';gate=false;}
+      if(!flags.includes('--failures')&&(hardRow||flags.includes('--security'))) {
+        want='opus medium @undefined';
+        // Opus is approved. A separate personal GPT second still asks when company GPT is unavailable.
+        const excludesGPT=flags.includes('--exclude-model')&&flags[flags.indexOf('--exclude-model')+1].split(',').includes('gpt');
+        gate=hardRow&&!flags.includes('--security')&&(sc==='traeReviewGptOut'||excludesGPT);
+      }
       if(want!==priorWant||gate!==priorGate) expectationChanges.push({scenario:sc,args:routeArgs,old:priorWant,next:want,oldGate:priorGate,gate,reason:'V08/V10/V16: scoped consent, real actual floor and routine single independent reviewer'});
       const result = o(sc, routeArgs);
       const got = result.deferred ? 'DEFER' : `${result.pick?.model} ${result.pick?.effort} @${result.pick?.account}`;
