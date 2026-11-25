@@ -8,7 +8,7 @@ const windows=v=>Array.isArray(v)&&v.every(w=>object(w)&&nonnegative(w.used));
 const good=a=>object(a)&&typeof a.name==='string'&&Array.isArray(a.models)&&a.models.every(m=>typeof m==='string')
   &&!a.stateUnknown&&!a.statusReadFailed&&typeof a.live==='boolean'&&(typeof a.healthy==='boolean'||a.kind==='chatgpt'&&windows(a.windows))
   &&nonnegative(a.seenAt)&&(a.models.length>0||a.healthy===false);
-const keys=['name','kind','models','modelIds','healthy','live','auth','transport','seenAt','windows','resets','usage','usageSeenAt','quota','quotaOut',
+const keys=['name','kind','models','modelIds','healthy','live','auth','transport','seenAt','windows','allowed','resets','usage','usageSeenAt','quota','quotaOut',
   'quotaKeys','load','browser','desktop','publicBrowser','search','searchLive','traeBrowser','active'];
 export function mergeRoutingObservations(current, previous, now) {
   const data=object(current)?{...current}:{};
@@ -37,15 +37,15 @@ export function readQuotaCache(file) {
 export function readRoutingObservations(file, now) {
   return mergeRoutingObservations(readQuotaCache(file),read(`${file}.routing-last-good.json`),now);
 }
-// Keep the launch cache current when routing reads main independently of quota.mjs.
-export function publishPersonalQuota(file, main) {
+// Refresh the selected account without replacing its peer in the shared cache.
+export function publishPersonalQuota(file, observed) {
   withLock(file, () => {
     const cache = readQuotaCache(file);
     const accounts = Array.isArray(cache?.codexAccounts) ? cache.codexAccounts : [];
-    const previous = accounts.find(account => account?.name === main.name);
-    if ((previous?.seenAt ?? cache?.checkedAt) > main.seenAt) return;
-    const codexAccounts = accounts.filter(account => account?.name !== main.name);
-    writeJson(file, { ...cache, codexAccounts: [...codexAccounts, main] });
+    const previous = accounts.find(account => account?.name === observed.name);
+    if ((previous?.seenAt ?? cache?.checkedAt) > observed.seenAt) return;
+    const codexAccounts = accounts.filter(account => account?.name !== observed.name);
+    writeJson(file, { ...cache, codexAccounts: [...codexAccounts, observed] });
   }, { timeoutMs: 0 });
 }
 export function saveRoutingObservations(file,data) {

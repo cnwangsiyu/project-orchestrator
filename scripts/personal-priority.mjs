@@ -54,7 +54,7 @@ function run([command, ...args]) {
       if (window.until !== null && Date.parse(window.until) <= now) throw Error('window expiry is in the past');
       const existing = readWindow();
       if (JSON.stringify(existing) === JSON.stringify(window)) return window;
-      const promotion = replace && window.mode === 'exclusive' && existing?.account === window.account
+      const promotion = replace && window.mode === 'exclusive' && existing && (existing.account === window.account || existing.mode === 'prefer-first' && window.account === 'by-quota')
         && existing.userDecisionRef === window.userDecisionRef;
       if (existing && !existing.revoked && (existing.until === null || Date.parse(existing.until) > now) && !promotion)
         throw Error('revoke the existing window or use --replace for the same decision reference in exclusive mode');

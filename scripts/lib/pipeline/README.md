@@ -36,22 +36,10 @@ On devices without company accounts, personal ChatGPT is the normal lane with
 standing permission. A provider denial removes the affected account. Rank main and b by remaining weekly percentage per hour until reset. Known weekly readings precede unknown, with main first on ties. The secretary handles reset cards after provider denial under the standing approval of 2026-11-24.
 
 The by-quota exclusive window covers main and b. Compare qualified lanes by expected finish, with a three-minute company tie band. Measured starts take precedence over unknown starts. Confirm an infrastructure interruption before rerouting the original task.
-The window follows the account across card redemption, with an explicit expiry
-or `until: null` (until revoked). Six-hour deadline ties apply outside exclusive
-mode. `personal-priority.mjs add FROM none REF QUOTE --mode exclusive
---exhaust-at-used 99` creates an open-ended window. Add `--replace` to atomically
-promote or renew the existing window under the same decision reference in
-exclusive mode. The existing prefer-first command remains supported.
-Fresh readings at 90% emit `[personal-main-90]` once per reset window through
-the durable owner inbox. The ledger records fresh usage below 90% too: a usage
-drop opens a new notice cycle even if its deadline stays the same. Reset-time
-corrections within six hours retain the cycle; stale or older observations
-cannot reopen it. Dry routing previews emit no notices. Reset cards
-remain manual.
-New Codex threads recheck the current exclusive window at launch audit and
-immediately before `thread/start`; saved primary or reviewer routes from before
-activation cannot admit b. Main requires fresh positive availability at that boundary. Existing b threads may
-continue.
+The window stays active across card resets until its explicit expiry or revocation.
+`personal-priority.mjs add FROM none REF QUOTE --mode exclusive` creates the open-ended by-quota window.
+Existing single-account files and prefer-first windows retain their original scope.
+New Codex threads recheck account availability at launch audit and immediately before `thread/start`.
 
 `--actual vendor:model:effort[@account]` supplies sanitized actual attempt evidence.
 An omitted account stays UNKNOWN while its explicit model/effort floor remains

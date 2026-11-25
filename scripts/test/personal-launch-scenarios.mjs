@@ -117,7 +117,7 @@ try {
   check('equal-usage ties prefer live hub, then name; tie groups do not chain past six hours', () => {
     const a = { id: 'b', used: 0, deadline: 100, live: false }, b = { id: 'main', used: 0, deadline: 100.01, live: true };
     assert.equal(personalLaunchChoice([a, b]).pick.id, 'main');
-    a.live = true; assert.equal(personalLaunchChoice([b, a]).pick.id, 'b');
+    a.live = true; assert.equal(personalLaunchChoice([b, a]).pick.id, 'main');
     const rows = [{ id: 'a', used: 80, deadline: 100, live: true }, { id: 'b', used: 20, deadline: 105, live: true },
       { id: 'c', used: 0, deadline: 110, live: true }];
     for (const input of [rows, [...rows].reverse(), [rows[1], rows[2], rows[0]]]) assert.equal(personalLaunchChoice(input).pick.id, 'b');

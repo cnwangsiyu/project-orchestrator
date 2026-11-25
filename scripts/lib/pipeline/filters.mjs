@@ -67,7 +67,7 @@ export function pAvailable(t, s, c) {
   // and undocumented weekly semantics affect uncertainty, not account admission.
   if (known(a.providerDenied) === true && !company(a) && known(a.budget)?.redemption && !t.flags['no-redeem'])
     return deny('pAvailable','RESET_REDEMPTION_OK_REQUIRED',`The secretary redeems the soonest-expiring card on ${a.id} under the standing approval of 2026-11-24. Refresh quota before launch.`,c,
-      {gate:approvalGate(t,c,'reset-redemption','RESET_REDEMPTION_OK_REQUIRED',`Await secretary redemption for ${a.id} under the standing approval of 2026-11-24 and refreshed quota.`)});
+      {gate:approvalGate(t,c,'reset-redemption','RESET_REDEMPTION_OK_REQUIRED',`Await secretary reset-card redemption for ${a.id} under the standing approval of 2026-11-24 and refreshed quota.`)});
   if (known(a.providerDenied) === true) return deny('pAvailable', 'PROVIDER_QUOTA_DENIED', 'Provider explicitly denied quota capacity.', c,
     { reconsiderAt: known(a.denialResetAt) > s.decisionAt ? known(a.denialResetAt) : null });
   const exhausted = unavailableDayQuota(a, l, s);
@@ -318,7 +318,7 @@ export function pLaunchMatches(t, s, c, context = {}) {
       && pScopedApproval(t,s,c,context).personalFallback?.quotaApproved;
     const previous = prior.at(-1);
     const denialHandoff = previous?.terminalProviderDenial === true && previous.actual?.accountId !== c.accountId
-      && personalAccount(c.accountId) && pScopedApproval(t,s,c,context).ok;
+      && personalAccount(c.accountId) && candidateParts(s,c).account.kind === 'chatgpt';
     const ownerChoice=t.queueOwnerChoice?.candidateId===c.id&&t.queueOwnerChoice.owner&&t.queueOwnerChoice.decisionId;
     if (t.autoRerouteDepth > 2 || t.background&&!ownerChoice || t.flags.signing || (!company(candidateParts(s,c).account) && !personalQueue&&!denialHandoff&&!ownerChoice)) return deny('pLaunchMatches', 'AUTO_REROUTE_FORBIDDEN', 'Automatic hop limit or task scope forbids replacement.', c);
     const checked = (ownerChoice || t.queueOwnerChoice?.requireFloor) ? prior.filter(a=>a.id === t.queueOwnerChoice.previousAttemptId) : prior;

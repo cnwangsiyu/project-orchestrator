@@ -21,8 +21,8 @@ const envBefore=new Map();
 for (const k of Object.keys(process.env)) {envBefore.set(k,process.env[k]);delete process.env[k];}
 Object.assign(process.env,fixtureEnv);
 fs.writeFileSync(process.env.PERSONAL_FALLBACK_FILE,JSON.stringify(policy));fs.writeFileSync(process.env.QUOTA_CACHE,'{}');
-function fixture(ttReady=false,models=[SOL,ASTRA],personalEfforts=['medium','high','xhigh','max']) {
-  const caps={search:true,vision:true},accounts=[['trae','trae',[SOL,TERRA]],['ttadk','ttadk',[SOL]],['main','chatgpt',models],['b','chatgpt',models],['claude','claude',['opus','fable']]];
+function fixture(ttReady=false,models=[SOL,ASTRA],personalEfforts=['medium','high','xhigh','max'],bothPersonal=false) {
+  const caps={search:true,vision:true},accounts=[['trae','trae',[SOL,TERRA]],['ttadk','ttadk',[SOL]],['main','chatgpt',models],...(bothPersonal ? [['b','chatgpt',models]] : []),['claude','claude',['opus','fable']]];
   const raw={schemaVersion:'pipeline-v1',collectedFrom:now,collectedThrough:now,decisionAt:now,personalFallback:policy,
     resources:{held:false,ownedReturned:true},health:[],approvals:[],dependencies:[],
     accounts:accounts.map(([id,kind,catalog])=>({id,kind,catalog,auth:true,transport:true,health:true,capabilities:caps,
@@ -149,20 +149,21 @@ try {
   assert.equal(olderFloor.options[0].id,'wait','a saved actual floor survives a later explicit downgrade');
   assert.equal(olderFloor.options.find(o=>o.account==='ttadk')?.belowTier,true);
   fs.rmSync(queueDecisionFile(f.row));
-  f=fixture();
+  f=fixture(false,undefined,undefined,true);
   f.raw.personalFallback={...policy,enabled:false};
+  f.raw.accounts.find(a => a.id === 'b').budget.weekly = { used:10, projected:20, resetsAt:now + 86400000 };
   fs.writeFileSync(process.env.ROUTE_SNAPSHOT_FILE, JSON.stringify(f.raw));
-  const mainFirst=notifyQueueOwner(f.row,f.queue,f.launch,{now,policy,emit});
-  assert.equal(mainFirst.options[0].account,'main');
-  assert.equal(mainFirst.options[0].approvalRef,'standing:normal-tier-main-2026-11-24');
-  assert.ok(mainFirst.options.some(o=>o.model===TERRA && o.belowTier));
+  const quotaFirst=notifyQueueOwner(f.row,f.queue,f.launch,{now,policy,emit});
+  assert.equal(quotaFirst.options[0].account,'b');
+  assert.equal(quotaFirst.options[0].approvalRef,'standing:normal-tier-main-2026-11-24');
+  assert.ok(quotaFirst.options.some(o=>o.model===TERRA && o.belowTier));
   assert.equal(JSON.parse(fs.readFileSync(queueDecisionFile(f.row))).autoOption,null);
-  const mainBest=chooseBest(mainFirst);
-  assert.equal(mainBest.status,3,mainBest.reason);
-  assert.equal(mainBest.option.id,mainFirst.options[0].id);
+  const quotaBest=chooseBest(quotaFirst);
+  assert.equal(quotaBest.status,3,quotaBest.reason);
+  assert.equal(quotaBest.option.id,quotaFirst.options[0].id);
   fs.rmSync(queueDecisionFile(f.row));
-  console.log('PASS ready personal main outranks a light company fallback');
-  f=fixture();
+  console.log('PASS --best chooses b by quota ahead of a light company fallback');
+  f=fixture(false,undefined,undefined,true);
   const legacy = {defaults:{...f.launch.defaults,'route-args':undefined,'routed-seat':JSON.stringify({
     name:f.row.name,project:f.row.project,category:'build-run',role:'primary',routeId:'route:fixture',effort:'high'})}};
   const incompleteRow = { ...f.row, effort: undefined };

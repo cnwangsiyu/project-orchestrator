@@ -30,6 +30,7 @@ try {
     assert.equal(recordPersonalProviderDenial({ shared, error: { message: '429' }, observation: main, now }), null);
     const receipt = recordPersonalProviderDenial({ shared, error: denied, observation: main, thread: 'thread', turn: 'turn', now });
     assert.equal(receipt.resetsAt, now + week);
+    assert.equal(activePersonalProviderDenial({ shared, account:'b', observation:main, now }), null);
     assert.equal(activePersonalProviderDenial({ shared, observation: { ...main, seenAt: now + 1 }, now: now + 1 }).code, 'usageLimitExceeded');
     assert.ok(activePersonalProviderDenial({ shared, observation: main, now: now + week + 1 }), 'elapsed reset alone cannot prove capacity');
     const restored = { ...main, seenAt: now + 2, windows: [{ ...main.windows[0], used: 0 }] };
@@ -60,7 +61,7 @@ try {
     assert.ok(activePersonalProviderDenial({ shared, observation: { ...low, seenAt: now + 2 }, now: now + 2 }));
     assert.equal(activePersonalProviderDenial({ shared, observation: { ...low, seenAt: now + 2, windows: [{ ...low.windows[0], used: 0 }] }, now: now + 2 }), null);
   });
-  for (const [unknownHub, bothDenied] of [[false,false],[false,true],[true,false]]) check(`main terminal denial ${unknownHub ? 'does not duplicate an unconfirmed turn' : 'hands completed work to the best company lane immediately'}`, () => {
+  for (const [unknownHub, bothDenied] of [[false,false],[false,true],[true,false]]) check(`main terminal denial ${unknownHub ? 'does not duplicate an unconfirmed turn' : 'hands completed work to a qualified replacement'}`, () => {
     const dir = path.join(tmp, `worker-${unknownHub}-${bothDenied}`), bin = path.join(dir, 'bin'); fs.mkdirSync(bin, { recursive: true });
     for (const executable of ['codex', 'claude']) fs.writeFileSync(path.join(bin, executable), '#!/bin/sh\nprintf \'%s\\n\' \'{"models":[]}\'\n', { mode: 0o755 });
     const profiles = {}, accounts = [{ ...main, home: path.join(dir, 'main') },

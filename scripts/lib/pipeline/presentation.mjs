@@ -65,13 +65,14 @@ export function presentRoute(plan, view, context) {
     if (reviewer.personalFallback?.approvalRef === snapshot.personalPriority.userDecisionRef)
       why.push(`second reviewer: ${reviewer.personalFallback.text}`);
   }
-  const main = snapshot.accounts.find(a => a.id === 'main' && a.kind === 'chatgpt');
   if (plan.kind === 'launch' && plan.trace?.comparator?.tierOverflow && ['main','b'].includes(c.accountId)
     && !seat.personalFallback?.text.includes(tierDecision))
     why.push(`Ready ${c.accountId} ${c.modelId} takes precedence over the lower-tier company lane under the user decision of ${tierDecision}.`);
   if (plan.kind === 'launch' && normalTierOverflow(t) && company(candidateParts(snapshot, c).account) && companyDowngrade(c.modelId)) {
-    const excluded = t.exclusions.some(e => e.scope === 'account' && e.value === 'main');
-    const cause = known(main?.providerDenied) === true ? 'main quota denied by provider' : excluded ? 'main excluded' : 'no eligible proper-tier personal lane can start';
+    const unavailable = snapshot.accounts.filter(a => a.kind === 'chatgpt' && ['main','b'].includes(a.id))
+      .map(a => known(a.providerDenied) === true ? `${a.id} quota denied by provider`
+        : t.exclusions.some(e => e.scope === 'account' && e.value === a.id) ? `${a.id} excluded` : null).filter(Boolean);
+    const cause = unavailable.join(', ') || 'no eligible proper-tier personal lane can start';
     why.push(`${cause}; using the company downgrade order (${c.modelId} on ${c.accountId}).`);
   }
   const priorityGuard = personalPriorityGuard(snapshot);
@@ -350,6 +351,8 @@ export function presentRoute(plan, view, context) {
   fixedNotes.push(WORKER_NOTES.output);
   fixedNotes.push(WORKER_NOTES.audit);
   const profile=snapshot.projectProfiles?.[t.project]; if(profile) notes.push(`project profile ${profile.profile}${profile.landingGate ? `; landing gate: ${profile.landingGate}` : ''}`);
+  const redemption = c && plan.gates.find(g => g.kind === 'reset-redemption');
+  const card = redemption && known(candidateParts(snapshot,c).account.budget)?.redemption;
   const blocked=plan.kind==='blocked', pick=seat?launch(seat,plan.kind==='launch'):null;
   // JSON retains full diagnostics; text repeats only the choice and task context.
   const shortWhy = [...new Set(why.map(line => {
@@ -375,5 +378,5 @@ export function presentRoute(plan, view, context) {
     eta,queuePatienceMin:patience,queueMode:snapshot.personalFallback?.enabled?'owner':'legacy',queueNoticeAfterMin:snapshot.personalFallback?.enabled?0:null,
     queueAlt,queueAlternative,pick,queueFallbackPolicy:snapshot.personalFallback?.enabled?snapshot.personalFallback:null,secondOpinion:plan.reviewers[0]?launch(plan.reviewers[0],plan.kind==='launch'):plan.reviewerProposals?.[0]?launch(plan.reviewerProposals[0],false):null,
     needsUserOK:[...new Set(needsUserOK)],tellUser:[...new Set(tellUser)],why,shortWhy,notes,shortNotes,fixedNotes,workerRulesVersion:sourceDigest.version,
-    redeemFirst:c && plan.gates.some(g=>g.kind==='reset-redemption') ? known(candidateParts(snapshot,c).account.budget)?.redemption??null : null,balance,quota,quotaSummary,plan };
+    redeemFirst:card ? { ...card, account:c.accountId, message:redemption.reason.text } : null,balance,quota,quotaSummary,plan };
 }

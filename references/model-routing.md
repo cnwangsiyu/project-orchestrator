@@ -166,7 +166,7 @@ TRAE foreground tier lists are:
 | Normal | Current Sol, GPT-5.6-Sol, GPT-5.6-Terra, DeepSeek-V4.1-Flash |
 | Hard | Astra on a free company lane, then current Sol |
 
-For ordinary normal and hard work, rank a ready proper-tier personal Codex lane ahead of light company fallback models. The standing decision of 2026-11-24 (“可以按照路由规则走个人的几个模型，不需要授权”) covers personal quota for this choice. A proper-tier company lane within three minutes of the fastest measured finish still wins. Provider denial or exclusion of main restores the company fallback order. Personal max, Astra and Fable retain their separate approval rules.
+For ordinary normal and hard work, rank a ready proper-tier personal Codex lane ahead of light company fallback models. The standing decision of 2026-11-24 (“可以按照路由规则走个人的几个模型，不需要授权”) covers personal quota for this choice. A proper-tier company lane within three minutes of the fastest measured finish still wins. When both personal accounts are unavailable, the company fallback order applies. Personal max, Astra and Fable retain their separate approval rules.
 
 Use the tier preference table to resolve equivalent qualified lanes. For an exhausted TRAE bucket, a fresh timed submit-to-first-work observation for that model on low priority, or a low-priority queue position divided by its measured drain, must show a start within the configured wait. Any waiting turn of ours on that model, or an undrained positive low-priority queue, prevents short-start admission.
 

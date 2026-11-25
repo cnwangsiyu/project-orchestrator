@@ -146,8 +146,9 @@ try {
   assert.match(excluded.why.join(' '), /main excluded.*company downgrade/);
   assert.equal(run(['lookup'], spent).pick.model, FLASH);
   const onlyB = run(['implement', '--exclude-account', 'ttadk,trae,claude'], { ...spent, personalName: 'b' });
-  assert.ok(['blocked', 'defer'].includes(onlyB.kind));
-  assert.notEqual(onlyB.pick?.account, 'b');
+  const bOverflow = run(['implement'], { ...spent, personalName: 'b' });
+  assert.equal(bOverflow.pick.account, 'b');
+  assert.equal(onlyB.pick?.account === 'b' && onlyB.kind === 'launch', run(['implement', '--exclude-account', 'ttadk,trae,claude'], spent).kind === 'launch');
   assert.equal(run(['implement'], { daily: { ...depleted, [SOL56]: bucket(true) } }).pick.account, 'main');
   assert.equal(run(['implement', '--exclude-model', `${SOL56},${TERRA56}`]).pick.account, 'main');
   for (const args of [['analysis'], ['lookup'], ['draft']]) {
@@ -340,9 +341,9 @@ try {
           const crossVendorException = pick.vendor === 'claude' && companyHasSol
             && (secondary || (category === 'review-high' && args.includes('--author') && args.includes('codex'))
               || (category === 'second-opinion' && args.includes('codex')));
-          const approvedTierMain = pick.account === 'main' && pick.model === SOL && pick.effort !== 'max' && !security
+          const approvedTierPersonal = ['main','b'].includes(pick.account) && pick.model === SOL && pick.effort !== 'max' && !security
             && r.tier !== 'light' && pick.approvalRef === 'standing:normal-tier-main-2026-11-24';
-          if (personal && !crossVendorException && !approvedTierMain) assert.ok(personalGate(r), label);
+          if (personal && !crossVendorException && !approvedTierPersonal) assert.ok(personalGate(r), label);
           approvalChecks++;
         }
       }

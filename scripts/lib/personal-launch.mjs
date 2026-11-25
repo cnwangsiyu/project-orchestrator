@@ -24,25 +24,29 @@ function deadlineOrder(rows, tieHours) {
 export function personalLaunchChoice(rows, headroom = PERSONAL_LAUNCH_HEADROOM, tieHours = PERSONAL_DEADLINE_TIE_H) {
   // For the two standing accounts quota is spendable weekly percentage per hour
   // until reset. Unknown readings sort last and equal scores prefer main.
-  if (rows.length && rows.every(r => r.id === 'main' || r.id === 'b')) {
-    const score = r => Number.isFinite(r.used) && Number.isFinite(r.hoursLeft) && r.hoursLeft > 0
+  let lowerRankedPeer = null;
+  const standing = rows.filter(r => r.id === 'main' || r.id === 'b');
+  if (standing.length) {
+    const score = r => Number.isFinite(r.used) && r.used >= 0 && Number.isFinite(r.hoursLeft) && r.hoursLeft > 0
       ? Math.max(0, 100 - r.used) / r.hoursLeft : -1;
-    const ordered = [...rows].sort((a, b) => score(b) - score(a) || Number(b.id === 'main') - Number(a.id === 'main'));
-    return { open: ordered, pick: ordered[0], below: [], groups: [], hasHeadroom: true,
-      why: ordered.length > 1 ? `weekly quota remaining per hour until reset favors ${ordered[0].id}` : null };
+    const ordered = standing.sort((a, b) => score(b) - score(a) || Number(b.id === 'main') - Number(a.id === 'main'));
+    lowerRankedPeer = ordered[1]?.id ?? null;
+    if (standing.length === rows.length) return { open: ordered, pick: ordered[0], below: [], groups: [], hasHeadroom: true,
+      lowerRankedPeer, why: lowerRankedPeer ? `weekly quota remaining per hour until reset favors ${ordered[0].id}` : null };
+    if (lowerRankedPeer) rows = rows.filter(r => r.id !== lowerRankedPeer);
   }
-  const below = rows.filter(r => r.id !== 'main' && Number.isFinite(r.used) && 100 - r.used < headroom);
+  const below = rows.filter(r => !['main','b'].includes(r.id) && Number.isFinite(r.used) && 100 - r.used < headroom);
   const open = rows.filter(r => !below.includes(r));
   const hasHeadroom = open.length > 0;
   const { ordered, groups } = deadlineOrder(hasHeadroom ? open : rows, tieHours);
   const eligible = hasHeadroom ? ordered : ordered.sort((a, b) => (b.remaining ?? 100 - b.used) - (a.remaining ?? 100 - a.used));
   const pick = eligible[0] ?? null;
-  const choice = { open: eligible, pick, below, hasHeadroom, groups, headroom, tieHours };
+  const choice = { lowerRankedPeer, open: eligible, pick, below, hasHeadroom, groups, headroom, tieHours };
   return { ...choice, why: personalLaunchExplanation(choice) };
 }
 
 export function personalLaunchExplanation(choice, pick = choice.pick) {
-  if (choice.why) return choice.why;
+  if (choice.lowerRankedPeer && !choice.groups.length) return choice.why;
   const { below, hasHeadroom, groups, headroom, tieHours } = choice, messages = [];
   if (pick && below.length) messages.push(`${below.map(r => `${r.id} ${r.used}% used: below launch headroom ${headroom}%`).join('; ')}${hasHeadroom ? '' : '; no usable account has launch headroom, using most remaining'} -> ${pick.id}`);
   const tied = groups.find(group => group.some(r => r.id === pick?.id));

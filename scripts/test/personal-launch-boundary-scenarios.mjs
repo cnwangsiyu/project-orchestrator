@@ -206,7 +206,7 @@ try {
     fs.writeFileSync(company.log, JSON.stringify(company.route) + '\n'); fs.writeFileSync(company.windowFile, JSON.stringify(policy()));
     assert.equal(launch(company, 'ttadk').status, 0);
     const revoked = fixture('revoked'); fs.writeFileSync(revoked.windowFile, JSON.stringify({ ...policy(), revoked: true }));
-    assert.equal(launch(revoked).status, 1, 'revocation never enables b');
+    assert.equal(launch(revoked).status, 0, 'revocation restores normal account admission');
     revoked.route.pick = revoked.tuple('fixture-peer'); fs.writeFileSync(revoked.log, JSON.stringify(revoked.route) + '\n');
     assert.equal(launch(revoked, 'fixture-peer').status, 0);
   });

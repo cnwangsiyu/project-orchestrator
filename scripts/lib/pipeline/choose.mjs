@@ -12,7 +12,7 @@ export const prefersPersonalCodex = task => ['lookup','extract','analysis','impl
 // catalog does not justify personal spend when company routing would pick Sol.
 export function companyWouldDowngrade(task, snapshot, companyRows) {
   if (!normalTierOverflow(task)) return false;
-  // A light company lane can justify the standing main grant even when the
+  // A light company lane can justify the standing personal grant even when the
   // current queue's actual floor rules that lane out as a replacement.
   const eligible = companyRows.filter(row => row.predicates.every(predicate => predicate.ok
     || task.queueOwnerChoice?.requireFloor && companyDowngrade(row.candidate.modelId)
@@ -102,6 +102,14 @@ export function orderCandidates(task, snapshot, rows) {
     const { anchor, rows: leaders } = finishLeaders(timed);
     const companyTies = timed.filter(r => company(parts(r).account) && finishDelta(r, anchor) <= 3);
     cohort = companyTies.length ? finishLeaders(companyTies).rows : leaders;
+    // Once personal wins the finish race, quota chooses between ready accounts
+    // offering the same model and effort. Keep the company tie band intact.
+    if (!companyTies.length) {
+      const winningSeats = new Set(leaders.filter(r => personalAccount(r.candidate.accountId) && ready(r))
+        .map(r => `${r.candidate.modelId}:${r.candidate.effort}`));
+      cohort = timed.filter(r => leaders.includes(r) || personalAccount(r.candidate.accountId) && ready(r)
+        && winningSeats.has(`${r.candidate.modelId}:${r.candidate.effort}`));
+    }
     if (timed.length > 1) {
       const fallback = timed.filter(r => !hasOwnWork(r));
       finishComparison = { comparedOwnWork: timed.length - fallback.length > 1,
@@ -130,8 +138,8 @@ export function orderCandidates(task, snapshot, rows) {
   if (priority?.mode === 'exclusive') {
     // Exclusive selects the personal overflow account, never the quota class.
     // Keep company capacity through the existing short-queue threshold before
-    // considering main. On ordinary dispatch, unknown wait evidence does not
-    // establish overflow; infra recovery with ready main needs observed capacity.
+    // considering personal capacity. On ordinary dispatch, unknown wait evidence does not
+    // establish overflow; infra recovery with ready personal capacity needs observed capacity.
     const usableCompany = cohort.filter(r => r.ok && company(parts(r).account) && !stalled(r)
       && !parts(r).account.fallbackUnavailable && !r.estimate.capacityReset);
     const infraOverflow = usesExclusiveInfraOverflow(task, snapshot);
@@ -206,8 +214,7 @@ export function orderCandidates(task, snapshot, rows) {
     const hoursLeft = (weekly?.resetsAt - snapshot.decisionAt) / 3600000;
     return {id,used,hoursLeft,deadline:known(account.budget)?.deadline,live:known(account.transport)===true};
   }));
-  if (availablePersonal.includes('main') && availablePersonal.includes('b') && availablePersonal.length === 2)
-    cohort = cohort.filter(r => !personalAccount(r.candidate.accountId) || r.candidate.accountId === launch.pick.id);
+  if (launch.lowerRankedPeer) cohort = cohort.filter(r => r.candidate.accountId !== launch.lowerRankedPeer);
   const personalAccounts=launch.open.map(r=>r.id);
   const personalOrder=new Map(personalAccounts.map((id,i)=>[id,i]));
   if(launch.below.length) cohort=cohort.filter(r=>candidateParts(snapshot,r.candidate).account.kind!=='chatgpt'

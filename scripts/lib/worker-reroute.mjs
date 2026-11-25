@@ -155,7 +155,8 @@ export const rerouteWorker = async ({ args, depth, from, reason, prompt, opts, p
   const picks = [pick, route.secondOpinion].filter(Boolean);
   const fallback = route.queueFallbackPolicy;
   const denialReplacement = reason === 'provider-quota-denied' && !policy && ['main','b'].includes(pick.account)
-    && pick.account !== from.account && pick.approvalRef && !pick.company;
+    && pick.account !== from.account && route.plan?.kind === 'launch'
+    && route.plan.primary?.candidate.accountId === pick.account && !pick.company;
   const standingPersonal = (p) => p === pick && reason === 'queue-too-slow' && !policy && fallback?.enabled
     && from.waitedMin >= fallback.queueWaitMinutes && p.personalFallback?.quotaApproved
     && p.approvalRef === p.personalFallback.approvalRef

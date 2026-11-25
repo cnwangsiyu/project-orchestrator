@@ -780,7 +780,7 @@ export const analyze = (data) => {
     const w = weekly(a.windows), s = winState(w, hist[`codex:${a.name}`]), w5 = shortWin(a.windows);
     const unconstrained = !!a.windows && !w; // read fine, but no limit window (or unlimited credits)
     const spent = personalAccount(a.name) ? a.allowed === false || !!activePersonalProviderDenial({
-      shared: SHARED, account: a.name, observation: { ...a, seenAt: a.seenAt ?? data.checkedAt }, now }) : !unconstrained && !!s && (s.used >= P.redeemAt || (a.allowed === false && !(w5 && w5.used >= P.throttle5h)));
+      shared: process.env.RULES_SHARED || SHARED, account: a.name, observation: { ...a, seenAt: a.seenAt ?? data.checkedAt }, now }) : !unconstrained && !!s && (s.used >= P.redeemAt || (a.allowed === false && !(w5 && w5.used >= P.throttle5h)));
     const throttledUntil = !personalAccount(a.name) && w5 && w5.used >= P.throttle5h && w5.resetsAt && !spent ? w5.resetsAt : null;
     const cp = cardPlan(s, a.resets, spent, personalAccount(a.name));
     const deadline = unconstrained ? Infinity : Math.min(s?.left ?? Infinity, cp?.deadlineH ?? Infinity);
@@ -806,7 +806,7 @@ export const analyze = (data) => {
   const reachable = available.filter(r => r.a.live);
   const launch = personalLaunchChoice((reachable.length ? reachable : available)
     .map(r => ({ id: r.a.name, used: r.s?.used ?? null,
-      hoursLeft: r.a.observationStale || r.a.usageLive === false ? null : (weeklyProjection(r.a.windows, [], now)?.resetsAt - now) / 3600000, deadline: r.deadline, live: r.a.live,
+      hoursLeft: (prioritySnapshot.accounts.find(a => a.id === r.a.name && a.budget.status === 'KNOWN')?.budget.value.weekly?.resetsAt - now) / 3600000, deadline: r.deadline, live: r.a.live,
       remaining: r.unconstrained ? Infinity : 100 - r.s.used, row: r })), P.launchHeadroom, P.deadlineTieH);
   const open = launch.open.map(r => r.row);
   const pick = launch.pick?.row ?? null;

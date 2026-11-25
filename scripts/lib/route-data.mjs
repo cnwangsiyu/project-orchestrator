@@ -287,7 +287,7 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
         && array(denial.receipts ?? [denial]).some(receipt => receipt.thread === r.from.threadId && receipt.turn === r.from.turnId)
         && r.cancellationEvidenceId.startsWith('provider-quota-denied:');
       Object.assign(attempts[0],{
-        state:terminalProviderDenial?'failed':r.from.workStarted?'interrupted':'cancelled-no-work',usefulWork:!!r.from.workStarted,cancellationEvidenceId:r.cancellationEvidenceId,
+        state:r.reason === 'provider-quota-denied'?'failed':r.from.workStarted?'interrupted':'cancelled-no-work',usefulWork:!!r.from.workStarted,cancellationEvidenceId:r.cancellationEvidenceId,
         ...(terminalProviderDenial ? { terminalProviderDenial: true } : {}),
         rerouteReason:r.reason,queueWaitMinutes:r.reason==='queue-too-slow'?r.from.waitedMin:null,
         failureKind:r.reason==='policy-block'?'policy-block':'infra'});
@@ -423,7 +423,8 @@ export function acquireRoute(parsed, { env = process.env, now = Number(env.ROUTE
     const standing = kind === 'chatgpt' && ['main','b'].includes(name);
     const budget = personalBudget(windows, a.resets, history, now, isClaude);
     if (standing) {
-      const card = array(a.resets?.credits).filter(c => c.expiresAt > now).sort((a,b) => a.expiresAt - b.expiresAt)[0];
+      const card = array(a.resets?.credits).filter(c => c?.id && (c.expiresAt == null || c.expiresAt > now))
+        .sort((a,b) => (a.expiresAt ?? Infinity) - (b.expiresAt ?? Infinity))[0];
       budget.redemption = card && (personalLimit || quotaDenied || a.allowed === false)
         ? { account: name, cardId: card.id, expiresAt: card.expiresAt } : null;
     }
