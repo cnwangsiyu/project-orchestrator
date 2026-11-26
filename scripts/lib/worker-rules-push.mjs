@@ -109,7 +109,7 @@ export const pushWorkerRules = async ({ owner, digest = loadDigest(), onWork = (
     const unconfirmed = reason => `UNCONFIRMED ${label} (${reason})`;
     const skipped = reason => targetState(row, true, reason) ? `SKIPPED ${label} (not running: ${reason})` : null;
     try {
-      if (row.event === 'retired') return null;
+      if (row.event === 'retired' || Number.isFinite(row.interruptedAt)) return null;
       if (terminalWorker(row)) {
         // Invalid legacy targets have no receipt path. Keep normal thread-keyed
         // skip receipts and live Claude status probing unchanged.

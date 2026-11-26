@@ -30,7 +30,7 @@ const live = (pid) => { try { return Number.isInteger(pid) && pid > 0 && (proces
 const talkback = (row) => ['message', 'question', 'answered'].includes(row.event);
 const terminal = (row) => !talkback(row) && row.event !== 'running';
 const notification = (row) => row.event !== 'running' && row.event !== 'observed' && row.event !== 'answered' && row.event !== 'retired';
-const waking = (row) => notification(row) && (row.event !== 'message' || row.wake !== false);
+const waking = (row) => notification(row) && (!['message', 'owner-interrupted'].includes(row.event) || row.wake !== false);
 export const followerAlive = (row) => live(row.pid);
 // Exec JSON may contain a session ID, but it is not a registered hub thread.
 export const processWorker = row => row.followerCommand === 'exec' || !validWorkerIdentifier(row.thread);
@@ -61,7 +61,7 @@ export const retiredWorkers = rows => {
 };
 const parseRows = (text) => text.split('\n').flatMap((line) => {
   try { const row = JSON.parse(line); return typeof row?.id === 'string' && typeof row.runId === 'string' && Number.isFinite(row.t)
-    && (row.owner == null || validOwner(row.owner)) && ['running', 'finished', 'completed', 'truncated', 'failed', 'cancelled', 'retired', 'stalled', 're-routed', 'needs-user', 'follower-ended', 'observed', 'message', 'question', 'answered'].includes(row.event) ? [row] : []; } catch { return []; }
+    && (row.owner == null || validOwner(row.owner)) && ['running', 'finished', 'completed', 'truncated', 'failed', 'owner-interrupted', 'cancelled', 'retired', 'stalled', 're-routed', 'needs-user', 'follower-ended', 'observed', 'message', 'question', 'answered'].includes(row.event) ? [row] : []; } catch { return []; }
 });
 const readText = (file) => { try { return fs.readFileSync(file, 'utf8'); } catch (e) { if (e.code === 'ENOENT') return ''; throw e; } };
 const fullOwner = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
@@ -246,6 +246,10 @@ export const inbox = (rows, owner, ack = emptyAck(owner), now = Date.now()) => {
   const pending = own.filter(row => notification(row) && !acknowledged(row,ack)).map(row => {
     const answer = row.event === 'question' && answers.get(questionKey(row));
     // Keep the question's delivery identity so the existing cursor delivers it once.
+    if (row.event === 'owner-interrupted' && running.some(candidate => !candidate.stale
+      && candidate.thread && (candidate.thread !== row.thread || candidate.account !== row.account)
+      && candidate.name === row.name
+      && (candidate.startedAt ?? candidate.t) > (row.interruptedAt ?? row.t))) return { ...row, wake: false };
     return answer ? {...row,event:'answered',questionText:row.text,text:answer.text,answeredAt:answer.answeredAt} : row;
   });
   return {pending,running,unresolved,questions: openQuestions(own, { owner, now })};
@@ -415,7 +419,11 @@ const firstLine = (file) => {
     return buf.subarray(0, n).toString('utf8').split('\n').find((line) => line.trim()) ?? '';
   } catch { return ''; } finally { if (fd !== undefined) fs.closeSync(fd); }
 };
+const eventIdentity = row => `account=${clean(row.account)} thread=${clean(row.thread)}`;
+const ownerInterruptLine = row =>
+  `worker ${clean(row.name ?? row.thread)} interrupted by owner (${eventIdentity(row)} model=${clean(row.model)})`;
 export const eventLine = (row, message = row.finalLine ?? firstLine(row.outFile)) => {
+  if (row.event === 'owner-interrupted') return ownerInterruptLine(row);
   if (row.event === 'message' && ['personal-main-90', 'personal-main-wait'].includes(row.kind)
     && row.text?.startsWith(`[${row.kind}] `)) return clean(row.text, Infinity);
   const alertTag = row.event === 'truncated' || row.alertId?.startsWith('truncated:') ? 'truncated'
@@ -433,13 +441,18 @@ export const eventLine = (row, message = row.finalLine ?? firstLine(row.outFile)
     + `${row.default !== undefined ? ` — default: ${clean(row.default)}` : ''} — timeout ${row.timeoutMin}m`
     + `${Number.isFinite(row.expiresAt) && Number.isFinite(new Date(row.expiresAt).getTime()) ? `; deadline ${new Date(row.expiresAt).toISOString()}` : ''}`
     + `${row.reminder ? `; reminder: ${row.reminder}` : ''}; answer with codex-worker reply${row.owner ? ` --owner ${clean(row.owner)}` : ''} --thread ${clean(row.thread)} --account ${clean(row.account)} --question ${clean(row.questionId)} "<text>"`;
-  return `${clean(row.name ?? row.thread)}\t${clean(row.event)}\t${clean(row.outFile)}\t${clean(message)}`;
+  return `${clean(row.name ?? row.thread)}\t${clean(row.event)}\t${clean(row.outFile)}\t${clean(message)}`
+    + (row.event === 'failed' ? `\t${eventIdentity(row)}` : '');
 };
-export const hookEventLine = row => row.kind === 'queue-stalled' && row.choiceCommand
+const readResultInstruction = row =>
+  `read ${JSON.stringify(String(row.outFile ?? row.logFile ?? 'the worker log').slice(0, 500))} and act`;
+export const hookEventLine = row => row.event === 'owner-interrupted' ? ownerInterruptLine(row)
+  : row.kind === 'queue-stalled' && row.choiceCommand
   ? `[queue-stalled] ${clean(row.summary, Math.max(0, 480 - row.choiceCommand.length))}\n${row.choiceCommand}`
   : ['message', 'question', 'answered'].includes(row.event) ? eventLine(row)
   : row.event === 'truncated' ? `${eventLine({ ...row, outFile: '' }, '')}: read the recorded output and act`
-  : `worker ${eventLine({ ...row, name: String(row.name ?? row.thread ?? '-').slice(0, 120), outFile: '' }, '').replaceAll('\t', ' ').trim()}: read ${JSON.stringify(String(row.outFile ?? row.logFile ?? 'the worker log').slice(0, 500))} and act`;
+  : row.event === 'failed' ? `worker ${clean(row.name ?? row.thread ?? '-', 120).trim()} failed: ${readResultInstruction(row)} (${eventIdentity(row)})`
+  : `worker ${eventLine({ ...row, name: String(row.name ?? row.thread ?? '-').slice(0, 120), outFile: '' }, '').replaceAll('\t', ' ').trim()}: ${readResultInstruction(row)}`;
 const receipt = (owner, rows, ack) => ({ owner, t: Date.now(), from: rows.reduce((n, row) => Math.min(n, row.seq ?? Infinity), Infinity),
   through: ack.highWater, ids: rows.filter((row) => !row.seq).map((row) => row.id) });
 const appendReceiptSync = (entry) => {
@@ -713,6 +726,7 @@ export const watch = async (owner, print = (rows) => new Promise((resolve, rejec
       for (const row of snapshot.running.filter((row) => !row.stale)) waitingRuns.add(row.runId);
       // A hook's successful delivery owns the wake. Forget its settled runs silently.
       for (const row of own) if (terminal(row) && acknowledged(row, ack)) waitingRuns.delete(row.runId);
+      for (const row of snapshot.pending) if (row.event === 'owner-interrupted' && row.wake === false) waitingRuns.delete(row.runId);
       const triggers = snapshot.pending.filter(row=>waking(row)&&currentQueueNotice(row,own));
       if (triggers.length && flushAt === undefined) flushAt = Date.now() + debounceSec * 1000;
       if (flushAt !== undefined) {
@@ -749,10 +763,17 @@ export const watch = async (owner, print = (rows) => new Promise((resolve, rejec
 export const lifecycle = (metadata) => {
   const launcher = launcherIdentity(metadata.owner), owner = resolveOwner(metadata.owner);
   const state = { name: null, thread: null, account: 'main', model: null, exit: null, outFile: null, logFile: null, finalLine: '',
-    ...metadata, launcher, owner, runId: randomUUID(), pid: process.pid, pidIdentity: processIdentity(process.pid), parentPid: process.ppid };
+    startedAt: Date.now(), ...metadata, launcher, owner, runId: randomUUID(), pid: process.pid, pidIdentity: processIdentity(process.pid), parentPid: process.ppid };
   let ended = false, result = null, mayRun = false;
-  const emit = (event, extra = {}) => { try { return appendEvent({ ...state, event, ...extra }); }
-    catch (e) { process.stderr.write(`worker-events: NOT RECORDED: ${e.message}\n`); return null; } };
+  const emit = (event, extra = {}) => {
+    try {
+      const row = { ...state, event, ...extra };
+      if (event === 'owner-interrupted') {
+        const notice = appendWorkerAlert(row, `owner-interrupted:${JSON.stringify([row.account, row.thread, row.turn])}`);
+        return notice.runId === row.runId ? notice : appendEvent({ ...row, event: 'observed' });
+      }
+      return appendEvent(row);
+    } catch (e) { process.stderr.write(`worker-events: NOT RECORDED: ${e.message}\n`); return null; } };
   emit('running');
   const tracker = {
     owner, sessionId: launcher.sessionId,

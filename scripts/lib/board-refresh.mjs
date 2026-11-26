@@ -22,7 +22,7 @@ const flush = () => {
 process.on('exit', flush);
 export const requestBoardRefresh = row => {
   pending.set(row.project || JSON.stringify([row.account, row.owner]), row);
-  if (['finished', 'failed', 'stalled', 'needs-user', 're-routed', 'follower-ended'].includes(row.event)) { flush(); return; }
+  if (['finished', 'failed', 'owner-interrupted', 'stalled', 'needs-user', 're-routed', 'follower-ended'].includes(row.event)) { flush(); return; }
   // Forking during thread setup competes with its short RPC deadline. Coalesce requests, not facts.
   if (!timer) { timer = setTimeout(flush, 500); timer.unref(); }
 };

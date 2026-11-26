@@ -5,7 +5,7 @@ const trackedStatus = (row, alive) => {
   if (!row.mayRun && (row.status === 'TRUNCATED' || row.event === 'truncated')) return 'TRUNCATED';
   if (!row.mayRun && row.status === 'uncertain') return 'uncertain';
   if (!row.settled && (row.event === 'running' || row.mayRun)) return alive(row) ? 'inProgress' : 'unknown';
-  if (!row.mayRun && ['finished', 'failed', 'observed', 'needs-user'].includes(row.event))
+  if (!row.mayRun && ['finished', 'failed', 'owner-interrupted', 'observed', 'needs-user'].includes(row.event))
     return ended(row.status) ? row.status : row.event === 'finished' || row.exit === 0 ? 'completed' : 'failed';
   return 'unknown';
 };

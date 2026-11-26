@@ -8,6 +8,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { loadDigest } from '../lib/global-rules.mjs';
+import { saveLaunch } from '../lib/worker-launch.mjs';
 import { appendEvent, compactWorkerEvents, createEventTail, readEvents, readAck, eventFile, ackFile, inbox,
   hasWatcher, watch, deliverAsync, auditWorkerEvents, ACK_RECEIPTS, RETENTION_MS, ROTATE_BYTES, TRANSACTION_RETRY_MS } from '../lib/worker-events.mjs';
 
@@ -297,6 +299,42 @@ globalThis.setTimeout = (fn, ms, ...args) => {
 
   const invokeWorker = (args, config) => spawnSync(process.execPath, ['--import', transport, worker, ...args],
     { env: { ...env, WORKER_EVENTS_FIXTURE: JSON.stringify(config) }, encoding: 'utf8', timeout: 15000 });
+  const interruptedOwner = randomUUID(), interruptedName = 'retry-on-another-lane';
+  const oldThread = 'old-lane-thread', newThread = 'new-lane-thread', oldTurn = 'queued-old-turn';
+  const oldLaunch = { owner: interruptedOwner, account: 'main', model: 'gpt-6.1-sol', name: interruptedName,
+    thread: oldThread, turn: oldTurn, pid: process.pid, runId: 'old-lane', outFile: path.join(tmp, 'old-lane-final.md') };
+  record(interruptedOwner, 'running', oldLaunch);
+  saveLaunch('main', oldThread, { owner: interruptedOwner, name: interruptedName }, interruptedOwner, { turn: oldTurn });
+  const cancel = invokeWorker(['interrupt', '--thread', oldThread, '--turn', oldTurn], {});
+  assert.equal(cancel.status, 0, cancel.stderr);
+  const replacement = { ...oldLaunch, account: 'trae', thread: newThread, turn: 'new-turn', runId: 'new-lane', rulesVersion: loadDigest().version, outFile: path.join(tmp, 'new-lane-final.md') };
+  record(interruptedOwner, 'running', replacement);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const ended = invokeWorker(['wait', '--thread', oldThread, '--model', oldLaunch.model, '--owner', interruptedOwner,
+      '--name', interruptedName, '--out', oldLaunch.outFile], { status: 'interrupted', turn: oldTurn, items: [] });
+    assert.equal(ended.status, 1, ended.stderr);
+  }
+  assert.equal(fs.existsSync(oldLaunch.outFile), false);
+  const pending = inbox(readEvents(), interruptedOwner).pending;
+  assert.equal(pending.length, 1, 'duplicate followers share one interruption notice');
+  assert.equal(pending[0].wake, false, 'the replacement is running under the same owner and task name');
+  const nonWaking = startWatch(interruptedOwner);
+  await until(() => hasWatcher(interruptedOwner), 'interruption watcher armed');
+  await new Promise(resolve => setTimeout(resolve, 350));
+  assert.equal(nonWaking.output(), '', 'the watcher stays quiet until the replacement finishes');
+  assert.match(assertBlock(hookRun(interruptedOwner), 'natural Stop delivers the interruption').reason,
+    /interrupted by owner \(account=main thread=old-lane-thread model=gpt-6.1-sol\)/);
+  record(interruptedOwner, 'failed', replacement);
+  const replacementResult = await nonWaking.done;
+  assert.equal(replacementResult.code, 0, replacementResult.stderr);
+  assert.match(replacementResult.stdout, /retry-on-another-lane\tfailed.*account=trae thread=new-lane-thread/);
+  assert.doesNotMatch(replacementResult.stdout, /interrupted by owner/);
+  const failureOwner = randomUUID();
+  record(failureOwner, 'failed', { ...replacement, owner: failureOwner });
+  assert.match(assertBlock(hookRun(failureOwner), 'real failure still points to its output').reason,
+    /retry-on-another-lane failed: read .*new-lane-final.md.* and act \(account=trae thread=new-lane-thread\)/);
+  console.log('PASS owner interrupt is reported once and does not wake the watcher while its replacement is running');
+
   const lost = invokeWorker(['start', '--owner', '7bef4f73-d37d-5025-b238-980dd81876ae', '--name', 'lost', '--cwd', tmp, '--sandbox', 'read-only', '--effort', 'high', 'fixture'],
     { lostAtTurnStart: true, thread: 'lost-thread' });
   assert.equal(lost.status, 2); assert.equal(inbox(readEvents(), '7bef4f73-d37d-5025-b238-980dd81876ae').running.length, 1);

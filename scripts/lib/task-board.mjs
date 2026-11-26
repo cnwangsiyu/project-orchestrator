@@ -208,7 +208,7 @@ export const resultFields = text => {
     ? { passed: passed === undefined ? null : +passed, failed: failed === undefined ? null : +failed } : null };
 };
 const stateEvent = event => ({ running: 'running', finished: 'finished', failed: 'failed', stalled: 'stalled', 'needs-user': 'blocked',
-  're-routed': 'rerouted', 'follower-ended': 'unknown' })[event];
+  're-routed': 'rerouted', 'owner-interrupted': 'interrupted', 'follower-ended': 'unknown' })[event];
 export const workerFacts = async ({ launches = readLaunches(), events = readEvents() } = {}) => {
   // This passive view uses public local evidence only. Missing followers stay UNKNOWN, never probe a hub on a read.
   const profiles = readJson(process.env.CODEX_ACCOUNTS || path.join(sharedDir(), 'codex-accounts.json'), {});
@@ -252,7 +252,7 @@ const refreshOnce = async (project, { thread, account, facts, now = Date.now() }
           || row.task.links?.some(link => link.thread === base.thread && (!link.account || link.account === base.account))))) continue;
       // Do not seed a migration with old completions, even if later notes were appended.
       const live = facts.live.threads.find(worker => workerKey(worker) === key);
-      if (!existing && !manual && !live && ['finished', 'failed'].includes(stateRow?.event) && eventAt < now - 86400000) continue;
+      if (!existing && !manual && !live && ['finished', 'failed', 'owner-interrupted'].includes(stateRow?.event) && eventAt < now - 86400000) continue;
       const task = ensureTask(board, id, defaults.name ?? latest?.name ?? id, eventAt || now);
       // Collapse the provisional start row into its final account/thread identity.
       const prior = task.auto.workers.find(worker => workerKey(worker) === key || base.runId && worker.runId === base.runId);
@@ -291,6 +291,7 @@ const refreshOnce = async (project, { thread, account, facts, now = Date.now() }
       }
       const progress = events.findLast(event => event.event === 'message' && ['progress', 'info'].includes(event.kind));
       if (progress && progress.t >= timeOf(worker.lastProgressAt)) { worker.lastProgress = oneLine(progress.text, 500); worker.lastProgressAt = iso(progress.t); }
+      if (worker.state === 'interrupted') worker.finishedAt = iso(worker.eventAt);
       if (['finished', 'failed', 'stalled', 'blocked'].includes(worker.state)) {
         worker.finishedAt = worker.state === 'stalled' ? null : iso(worker.eventAt);
         const result = tail(output, prior?._result);
@@ -309,7 +310,7 @@ const refreshOnce = async (project, { thread, account, facts, now = Date.now() }
     }
     for (const task of board.tasks) {
       if (task.aliasOf) continue;
-      const workers = task.auto.workers.filter(worker => worker.state !== 'rerouted'), recent = [...workers].sort((a, b) => b.eventAt - a.eventAt)[0];
+      const workers = task.auto.workers.filter(worker => !['rerouted', 'interrupted'].includes(worker.state)), recent = [...workers].sort((a, b) => b.eventAt - a.eventAt)[0];
       if (task.state === 'waiting-user' && task.queueWait) continue;
       if (!recent || recent.eventAt <= timeOf(task.stateUpdatedAt)) continue;
       // Active peers prevent an earlier finisher from moving a multi-worker task into review.

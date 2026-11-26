@@ -46,6 +46,7 @@ export const saveLaunch = (account, thread, opts, owner, evidence = {}) => {
     // --force-large permits a turn without clearing the provider's size evidence.
     writeJson(file, { account, thread, t: Date.now(), defaults, effort: opts.effort ?? record?.effort ?? null, ...evidence,
       ...(record?.requestBufferExceededAt != null ? { requestBufferExceededAt: record.requestBufferExceededAt } : {}),
+      ...(record?.ownerInterrupts ? { ownerInterrupts: record.ownerInterrupts } : {}),
       ...(record?.transportRetry ? { transportRetry: record.transportRetry } : {}) });
   });
 };
@@ -82,6 +83,17 @@ export const saveTransportContinuation = (account, thread, sourceTurn, continuat
       phase:'acknowledged',acknowledgedAt:Date.now(),continuationTurn } });
   });
 };
+// Record the request before the RPC so a fast hub completion can see it.
+export const markOwnerInterrupt = (account, thread, turn) => {
+  const file = launchFile(account, thread);
+  withLock(file, () => {
+    const record = readLaunch(file);
+    if (record && !Object.hasOwn(record.ownerInterrupts ?? {}, turn)) writeJson(file, { ...record, ownerInterrupts: { ...record.ownerInterrupts, [turn]: Date.now() } });
+  });
+};
+export const ownerInterruptAt = (account, thread, turn) =>
+  savedLaunch(account, thread)?.ownerInterrupts?.[turn];
+
 export const readRequestBufferExceededAt = (account, thread) => readLaunch(launchFile(account, thread))?.requestBufferExceededAt ?? null;
 export const markRequestBufferExceeded = (account, thread, opts = {}, now = Date.now()) => {
   const file = launchFile(account, thread);

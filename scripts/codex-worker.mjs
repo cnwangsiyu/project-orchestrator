@@ -74,7 +74,7 @@ import { parseRouteArgs, routeFlag, rerouteWorker, turnHasWork, heldTaskResource
 import { notifyQueueOwner, queueNoticeDue, pendingQueueChoice, claimQueueChoice, deferQueueChoice, settleQueueChoice, queueChoiceResult,
   queueSourceArgs, queueRouteContext, automaticQueueOption, queueOptionPlan, queueChoiceSafety } from './lib/queue-decision.mjs';
 import { queuePolicy } from './lib/queue-stall-watch.mjs';
-import { sharedCliEnv, inheritedLaunch, savedLaunch, saveLaunch, recordLaunchModel, readRequestBufferExceededAt, markRequestBufferExceeded } from './lib/worker-launch.mjs';
+import { sharedCliEnv, inheritedLaunch, savedLaunch, saveLaunch, recordLaunchModel, readRequestBufferExceededAt, markRequestBufferExceeded, markOwnerInterrupt, ownerInterruptAt } from './lib/worker-launch.mjs';
 import { recordWorkerOutcome, reviewSeat, reviewInstructions } from './lib/worker-outcome.mjs';
 import { workerResultInstructions } from './lib/worker-result.mjs';
 import { completionKind } from './lib/worker-completion.mjs';
@@ -1398,6 +1398,10 @@ const report = async (threadId, turn, final, usage, observation = {}) => {
   // confirmed turn evidence, before asynchronous readback/reporting can yield.
   if(!observation.unconfirmed&&['completed','failed','interrupted'].includes(turn.status))
     settleQueueChoice({account:account??'main',thread:threadId,turn:turn.id},'ended');
+  const interruptedAt = !observation.unconfirmed && turn.status === 'interrupted'
+    ? ownerInterruptAt(account ?? 'main', threadId, turn.id) : undefined;
+  const ownerInterrupted = Number.isFinite(interruptedAt);
+  if (ownerInterrupted) outcomeSkip = true;
   // Publish before historical readback or redaction yields to a quota poll.
   tracker?.update({ reporting: true, thread: threadId, turn: turn.id, status: turn.status });
   if (observation.live && observation.evidence?.pendingFinal) {
@@ -1594,8 +1598,9 @@ const report = async (threadId, turn, final, usage, observation = {}) => {
     event: 'message', kind: 'info', wake: false,
     text: `completion uncertain: ${uncertain.reasons.join('; ')}; inspect the recorded output` },
     `completion-uncertain:${account}:${threadId}:${turn.id}`);
-  tracker?.result(truncated ? 'truncated' : uncertain ? 'observed' : rejectedModel ? 'failed' : /^(?:\S+\s+)?(?:BLOCKED|QUESTION)\b/.test(final?.trim() ?? '') ? 'needs-user'
+  tracker?.result(ownerInterrupted ? 'owner-interrupted' : truncated ? 'truncated' : uncertain ? 'observed' : rejectedModel ? 'failed' : /^(?:\S+\s+)?(?:BLOCKED|QUESTION)\b/.test(final?.trim() ?? '') ? 'needs-user'
     : turn.status === 'completed' ? 'finished' : 'failed', { thread: threadId, turn: turn.id, status: turn.status, mayRun: false,
+      ...(ownerInterrupted ? { interruptedAt } : {}),
       ...(truncated ? { mayRun: !!observation.unconfirmed, settled: !observation.unconfirmed, leases: truncated.leases, continuation } : {}),
       reason: completion ? completion.reasons.join('; ') : rejectedModel ? 'review model rejected' : turn.status === 'completed' ? null : JSON.stringify(turn.error ?? turn.status),
       finalLine: maskPasswordStyleValues(final?.split('\n').find((line) => line.trim()) ?? '').text });
@@ -2160,6 +2165,8 @@ try {
       if (!validWorkerIdentifier(t.id)) die('interrupt received no valid active turn ID; provide --turn <public turn-id>');
       turnId = t.id;
     }
+    if (!validWorkerIdentifier(turnId)) die('interrupt requires a valid public turn ID');
+    markOwnerInterrupt(account ?? 'main', opts.thread, turnId);
     await call('turn/interrupt', { threadId: opts.thread, turnId });
     console.log(`interrupted turn ${turnId}`); finish(0);
   } else if (cmd === 'status') {
