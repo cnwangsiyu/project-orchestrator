@@ -24,7 +24,7 @@ try {
   assert.equal(digestText.match(/^version:/gm)?.length, 1, 'integration must publish one digest version');
   assert.equal(digestText.match(/^## Changes In This Version$/gm)?.length, 1);
   assert.ok(digestText.split('\n').length<=61,'digest line budget');
-  assert.equal(digest.version, '2026-11-24.11');
+  assert.equal(digest.version, '2026-11-24.12');
   assert.match(digestText, /^- 2026-11-24\.\d+: /m);
   assert.match(digestText, /2026-11-24\.7: fail-closed masking scope/);
   assert.match(digestText, /^- 2026-11-24\.6:.*2026-11-24\.5:.*2026-11-24\.4:.*2026-11-24\.3: restored this history line.*2026-11-24\.2: device-app guard.*2026-11-18\.14:/m);
@@ -57,6 +57,9 @@ try {
   assert.ok(loginAt >= 0 && signingAt > loginAt, 'worker digest must contain adjacent login and test-signing rules');
   assert.match(digest.worker, /registered shared test phones iphone8\/iphone11\/s21.*freely tap Allow\/Authorize\/Trust\/OK/);
   assert.match(digest.worker, /Before stopping, uninstalling or installing on a shared device, run the device-app guard; a bundle id owned by another project is a stop, report to both orchestrators/);
+  assert.match(digest.worker, /No unattended auto-take waiter while another project is queued or has been promised the shared device/);
+  assert.match(digest.worker, /waiter starts only on an explicit "returned" or at an agreed time with `res` idle/);
+  assert.match(digest.worker, /Cleanup reads back and reports every state it changes, writing UNVERIFIED when readback is unavailable/);
   assert.match(digest.worker, /personal iPhone 15 Pro Max \(`policy=never`\).*device not registered in `res`/);
   assert.match(digest.worker, /lease <=2 h.*never enter personal-account credentials\/passwords\/verification codes.*no purchases/);
   assert.match(digest.worker, /never make whole-container or device backups.*pymobiledevice3 apps pull.*devicectl device copy from.*idevicebackup2.*adb backup.*adb exec-out run-as.*use in-place installs/);
