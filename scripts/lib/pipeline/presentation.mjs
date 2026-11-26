@@ -1,4 +1,4 @@
-import { sharedCliEnv } from '../worker-launch.mjs';
+import { claudeWorkspacePreamble, sharedCliEnv } from '../worker-launch.mjs';
 import { WORKER_NOTES } from '../fixed-worker-notes.mjs';
 // Pure compatibility rendering. Receives paths, owner and digest from the CLI;
 // it never launches, reads metadata, or changes the selected tuple.
@@ -193,14 +193,13 @@ export function presentRoute(plan, view, context) {
     const audit=command(['node',`${root}/scripts/launch-audit.mjs`,'--name',name,'--project',task.project,'--role',s.role,'--vendor',vendor,'--account',an,'--model',c.modelId,
       '--effort',c.effort,'--sandbox',task.sandbox,'--routed-seat',JSON.stringify(routed),...(f['user-ok']?['--user-ok',f['user-ok']]:[])]);
     if(vendor==='claude') {
-      const trustedCwd = context.trustedCwd ?? task.flags['trusted-cwd'] ?? cwd;
-      if (!task.flags['trusted-cwd'] && !context.trustedCwd) notes.push('Claude launch: no trusted project root configured; launch uses the working directory; verify it is trusted or pass --trusted-cwd with the trusted project root.');
+      const review = /^(?:review(?:-high)?|second-opinion)$/.test(task.category);
       const browserScope = ['browser', 'ui-browser'].includes(task.category);
-      const claudePrompt = `Working directory: ${cwd}. ${browserScope ? `Allowed browser origins (--browser-origins): ${task.allowedOrigins.join(',')}. ` : ''}${prompt}`;
+      const claudePrompt = `${claudeWorkspacePreamble(cwd, review)} ${browserScope ? `Allowed browser origins (--browser-origins): ${task.allowedOrigins.join(',')}. ` : ''}${prompt}`;
       const metadata = JSON.stringify({ name, model: c.modelId, effort: c.effort, project: task.project, owner,
         ...(browserScope ? { browserOrigins: task.allowedOrigins, browserKind: task.browserKind, routeArgs } : {}) });
       if (browserScope) out.routeArgs = routeArgs;
-      out.command=`${audit} && cd ${shellQuote(trustedCwd)} && ${command(['node',`${root}/scripts/launch-claude-worker.mjs`,metadata,
+      out.command=`${audit} && cd ${shellQuote(taskDir)} && ${command(['node',`${root}/scripts/launch-claude-worker.mjs`,metadata,
         'claude','--bg','--remote-control',...(browserScope ? ['--chrome'] : []),'--permission-mode','bypassPermissions','-n',name,'--model',c.modelId,'--effort',c.effort,claudePrompt])}`;
       return out;
     }

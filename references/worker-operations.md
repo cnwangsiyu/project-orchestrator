@@ -42,10 +42,10 @@ If a browser worker has no browser tool, re-run `route.mjs browser --browser-ori
 Use the full printed Claude command, including `--chrome`, model, effort and Bypass mode;
 never select a Claude browser model by hand. The [browser row](model-evidence.md) defines the lane policy.
 
-Claude commands use the trusted project root (`--trusted-cwd`, otherwise configured root), explicitly
-name the working directory in the prompt, and include `--bg --remote-control --permission-mode
+Claude commands start in the task directory, explicitly name the workspace in the prompt, and include `--bg --remote-control --permission-mode
 bypassPermissions`, plus the routed model/effort. Remote Control/Bypass are user decisions of
-2026-11-13, independent of settings/defaultMode; `--mode` is compatibility-only. Do not construct a
+2026-11-13, independent of settings/defaultMode; `--mode` is compatibility-only. If Claude rejects task-directory
+trust, the user decides whether to grant it. Do not construct a
 replacement command that omits its audit or digest injection. Codex writers default full access;
 reviewers stay read-only, test-generated files may use workspace-write, and explicit narrower sandboxes
 remain available. See [Codex workers](codex-workers.md#permissions-and-environment).

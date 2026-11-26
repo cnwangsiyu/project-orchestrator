@@ -50,6 +50,11 @@ for (const reviewClass of ['A', 'B', 'C']) for (const authorFlag of ['author', '
 }
 for (const flags of [{ stakes: 'high' }, { stakes: 'low' }, { background: true }, { 'auto-check': true }, { 'runs-tests': true }])
   checkClaude(route(required(flags)));
+const separateDirs = route(required({ cwd: '/fixture/review repo', 'task-dir': '/fixture/review task',
+  'trusted-cwd': '/fixture/legacy trusted root' }));
+checkClaude(separateDirs);
+assert.match(separateDirs.pick.command, /cd '\/fixture\/review task' && node/);
+assert.match(separateDirs.pick.command, /The repository under review is \/fixture\/review repo.*git -C or absolute paths.*own worktree for tests/);
 const exclusive = fixture();
 exclusive.personalPriority = { account: 'main', mode: 'exclusive', from: new Date(now - 1000).toISOString(), until: null,
   revoked: false, userDecisionRef: 'standing:personal-priority-fixture', quote: 'fixture priority' };

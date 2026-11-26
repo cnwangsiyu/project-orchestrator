@@ -77,9 +77,8 @@ try {
   for(const args of [['build-run'],['browser','--failures','1'],['analysis','--failures','1']])assert.match(cli(args).allNotes.join('\n'),/full checked checklist.*non-secret variables.*expected artifacts/);
   assert.match(cli(['build-run']).allNotes.join('\n'),/in-place install for apps that can hold login sessions.*APK\/IPA-only backup/);
   const claude=cli(['claude-tools','--cwd','/fixture/work tree','--task-dir','/fixture/task dir','--trusted-cwd','/fixture/trusted root']);
-  assert.match(claude.pick.command,/cd '\/fixture\/trusted root' && node .*\/launch-claude-worker\.mjs .*claude --bg/);
-  assert.match(claude.pick.command,/Working directory: \/fixture\/work tree/);
-  assert.match(cli(['claude-tools']).allNotes.join('\n'),/no trusted project root configured/);
+  assert.match(claude.pick.command,/cd '\/fixture\/task dir' && node .*\/launch-claude-worker\.mjs .*claude --bg/);
+  assert.match(claude.pick.command,/The task workspace is \/fixture\/work tree/);
   console.log('PASS BC-13/18/19/22/48 checklist, trusted launch, origins, release tier and backup notes');
 
   // AU-7 ("--dry never refreshes") was withdrawn by the owner on 2026-11-15: a preview must read state like a real

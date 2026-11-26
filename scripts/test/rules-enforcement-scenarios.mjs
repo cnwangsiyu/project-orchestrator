@@ -139,6 +139,12 @@ if(m.method==='turn/start')setImmediate(()=>this.onmessage({data:JSON.stringify(
   fs.writeFileSync(claudeEnv, 'process.stdout.write(process.env.BYTEDCLI_NO_AUTO_UPGRADE ?? "unset");');
   assert.equal(cli('launch-claude-worker.mjs', [JSON.stringify({ name: 'claude-env' }), process.execPath, claudeEnv, 'fixture'],
     { BYTEDCLI_NO_AUTO_UPGRADE: '0' }), '1');
+  fs.writeFileSync(claudeEnv, `process.stderr.write('error: Workspace not trusted\\nUse interactive Claude to approve.\\n'); process.exitCode = 1;`);
+  const untrusted = spawnSync(process.execPath, [path.join(scripts, 'launch-claude-worker.mjs'),
+    JSON.stringify({ name: 'untrusted' }), process.execPath, claudeEnv, 'fixture'], { cwd: tmp, env, encoding: 'utf8', timeout: 5000 });
+  assert.equal(untrusted.status, 1, untrusted.error?.message);
+  assert.equal(untrusted.stdout, '');
+  assert.equal(untrusted.stderr.trim(), `BLOCKED: Claude task directory is not trusted: ${JSON.stringify(fs.realpathSync(tmp))}. The user must approve workspace trust.`);
   const probeBin = path.join(tmp, 'probe-bin'), spawned = path.join(tmp, 'unexpected-hub-spawn');
   fs.mkdirSync(probeBin);
   fs.writeFileSync(path.join(probeBin, 'codex'), `#!/bin/sh\ntouch '${spawned}'\nexit 1\n`, { mode: 0o755 });

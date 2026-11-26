@@ -6,6 +6,10 @@ import { canonicalPath } from './launch-paths.mjs';
 
 export const sharedCliEnv = Object.freeze({ BYTEDCLI_NO_AUTO_UPGRADE: '1' });
 
+export const claudeWorkspacePreamble = (workspace, review = false) => review
+  ? `The repository under review is ${workspace}. Read it with git -C or absolute paths. Make your own worktree for tests.`
+  : `The task workspace is ${workspace}. Use git -C or absolute paths to access it.`;
+
 const keys = ['route-args', 'auto-reroute-depth', 'owner', 'name', 'cwd', 'log', 'out', 'stall-min',
   'queue-patience-min', 'alt', 'queue-alternative', 'queue-alt-start-min', 'background', 'require-model', 'no-auto-continue', 'model', 'effort',
   // Browser/desktop scope must survive a continuation: without it the hub answers every site approval with a decline

@@ -1,3 +1,4 @@
+import { claudeWorkspacePreamble } from './worker-launch.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -179,9 +180,12 @@ export const rerouteWorker = async ({ args, depth, from, reason, prompt, opts, p
   console.log(`rerouted: ${from.model}@${from.account} (queued ${from.position ?? '?'}, waited ${Number(from.waitedMin ?? 0).toFixed(1)} min) → ${to.model}@${to.account}`);
   if(selection&&pick.vendor==='claude') {
     const metadata={name:opts.name,model:pick.model,effort:pick.effort,project:routeFlag(args,'project'),owner:selection.owner};
+    const workspace = route.plan.task.cwd ?? opts.cwd;
+    const review = /^(?:review(?:-high)?|second-opinion)$/.test(route.category);
     const claudeArgs=[JSON.stringify(metadata),'claude','--bg','--remote-control',
-      '--permission-mode','bypassPermissions','-n',opts.name,'--model',pick.model,'--effort',pick.effort,handover];
-    const cwd=route.plan.task.flags['trusted-cwd']??opts.cwd;
+      '--permission-mode','bypassPermissions','-n',opts.name,'--model',pick.model,'--effort',pick.effort,
+      `${claudeWorkspacePreamble(workspace, review)}\n\n${handover}`];
+    const cwd=taskDir;
     state.recovery.claudeArgs=claudeArgs;state.recovery.cwd=cwd;persist();
     const audit=await runNode(path.join(scripts,'launch-audit.mjs'),['--name',opts.name,'--project',metadata.project,
       '--vendor','claude','--account',to.account,'--model',pick.model,'--effort',pick.effort,'--user-ok',pick.approvalRef]);
