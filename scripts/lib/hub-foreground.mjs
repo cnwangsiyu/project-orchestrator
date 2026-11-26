@@ -1,3 +1,4 @@
+import { sharedCliEnv } from './worker-launch.mjs';
 import { spawn, execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { readHubState, writeHubState, writeHubLog } from './hub-state.mjs';
@@ -68,7 +69,7 @@ export const runHubForeground = async ({ account, profile, hub, script, home, in
     if (stopped) return 0;
     if (failed) throw Error('owned child failed');
     if (!reachable) {
-      const env = { ...process.env };
+      const env = { ...process.env, ...sharedCliEnv };
       if (profile?.kind === 'trae') delete env.CODEX_HOME;
       hubChild = launch(profile?.kind === 'trae' ? profile.bin ?? 'traex' : 'codex', ['app-server', '--listen', hub], env);
       log(`hub recovered: ${name}; tell the global-rules owner`, true);

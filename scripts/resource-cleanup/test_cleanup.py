@@ -158,6 +158,7 @@ class ProtectionTests(unittest.TestCase):
                 self.assertEqual(launcher.main(), 0)
             self.assertEqual(launcher.main(), 0)
             self.assertEqual(run.call_count, 1)
+            self.assertEqual(run.call_args.kwargs["env"]["BYTEDCLI_NO_AUTO_UPGRADE"], "1")
             self.assertIn("--remote-control", run.call_args_list[0].args[0])
             self.assertIn("bypassPermissions", run.call_args_list[0].args[0])
 

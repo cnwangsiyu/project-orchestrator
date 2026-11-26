@@ -74,7 +74,7 @@ import { parseRouteArgs, routeFlag, rerouteWorker, turnHasWork, heldTaskResource
 import { notifyQueueOwner, queueNoticeDue, pendingQueueChoice, claimQueueChoice, deferQueueChoice, settleQueueChoice, queueChoiceResult,
   queueSourceArgs, queueRouteContext, automaticQueueOption, queueOptionPlan, queueChoiceSafety } from './lib/queue-decision.mjs';
 import { queuePolicy } from './lib/queue-stall-watch.mjs';
-import { inheritedLaunch, savedLaunch, saveLaunch, recordLaunchModel, readRequestBufferExceededAt, markRequestBufferExceeded } from './lib/worker-launch.mjs';
+import { sharedCliEnv, inheritedLaunch, savedLaunch, saveLaunch, recordLaunchModel, readRequestBufferExceededAt, markRequestBufferExceeded } from './lib/worker-launch.mjs';
 import { recordWorkerOutcome, reviewSeat, reviewInstructions } from './lib/worker-outcome.mjs';
 import { workerResultInstructions } from './lib/worker-result.mjs';
 import { completionKind } from './lib/worker-completion.mjs';
@@ -545,7 +545,7 @@ const talkbackContext = (thread) => {
     taskDir: opts['task-dir'] ?? prior?.taskDir ?? state.taskDir ?? (opts.log || opts.out ? path.dirname(opts.log || opts.out) : null),
     maskAuditStartedAt: maskAudit?.startedAt ?? followerStartedAt };
   const file = saveWorkerContext(metadata);
-  const env = { CODEX_WORKER_THREAD: thread, CODEX_WORKER_ACCOUNT: metadata.account,
+  const env = { ...sharedCliEnv, CODEX_WORKER_THREAD: thread, CODEX_WORKER_ACCOUNT: metadata.account,
     CODEX_WORKER_OWNER: metadata.owner ?? '', CODEX_WORKER_NAME: String(metadata.name), CODEX_WORKER_TASK_DIR: metadata.taskDir ?? '', RULES_SHARED: path.dirname(path.dirname(path.dirname(file))) };
   return { metadata, config: { shell_environment_policy: { set: env } }, instructions:
     `Worker talkback identity: thread=${thread} account=${metadata.account} owner=${metadata.owner ?? 'unknown'}. Public context: ${file}.\n`
@@ -1068,7 +1068,7 @@ if (cmd === 'hub') {
   // A TRAE account's hub is TRAE CLI's own app-server (`traex`, a Codex fork speaking the same protocol); it keeps its
   // home in ~/.trae, so CODEX_HOME is not passed on.
   const trae = PROF?.kind === 'trae';
-  const env = { ...process.env }; if (trae) delete env.CODEX_HOME;
+  const env = { ...process.env, ...sharedCliEnv }; if (trae) delete env.CODEX_HOME;
   spawn(trae ? PROF.bin : 'codex', ['app-server', '--listen', hub], { detached: true, stdio: ['ignore', out, out], cwd: os.homedir(), env }).unref();
   for (let i = 0; i < 30; i++) {
     await new Promise((r) => setTimeout(r, 500));
@@ -2083,7 +2083,7 @@ try {
       cwd: path.resolve(opts.cwd), model: opts.model, sandbox: opts.sandbox, approvalPolicy: APPROVAL_POLICY,
       developerInstructions: [browserHowTo, projectWorkerInstructions(digest), reviewHowTo].filter(Boolean).join('\n'),
       ...(browserThread && !TRAE_EXTENSION_BROWSER && !TRAE_HEADLESS_BROWSER ? { approvalsReviewer: 'user' } : {}),
-      ...(browserConfig ? { config: browserConfig } : {}),
+      config: { ...browserConfig, shell_environment_policy: { set: sharedCliEnv } },
     });
     const threadId = th.thread?.id ?? th.threadId;
     attemptThreadId = threadId;

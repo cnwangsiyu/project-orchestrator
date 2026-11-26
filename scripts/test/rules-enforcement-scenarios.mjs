@@ -127,6 +127,7 @@ if(m.method==='turn/start')setImmediate(()=>this.onmessage({data:JSON.stringify(
   execFileSync(process.execPath, ['--import', transport, path.join(scripts, 'codex-worker.mjs'), '--account', 'main', 'start',
     '--cwd', tmp, '--effort', 'high', '--sandbox', 'read-only', '--model', 'gpt-6.1-sol', '--name', 'digest-fixture', '--log', path.join(tmp, 'worker.jsonl'), 'reply DONE'],
   { env: { ...env, CODEX_ACCOUNTS: profiles, CAPTURE: captured }, encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'] });
+  assert.equal(JSON.parse(fs.readFileSync(captured)).config.shell_environment_policy.set.BYTEDCLI_NO_AUTO_UPGRADE, '1');
   assert.equal(JSON.parse(fs.readFileSync(captured)).developerInstructions, `Global worker rules ${digest.version}\n${digest.worker}\n${workerResultInstructions}`);
   for(const clause of Object.values(WORKER_NOTES)) assert.ok(JSON.parse(fs.readFileSync(captured)).developerInstructions.includes(clause), clause);
   assert.match(JSON.parse(fs.readFileSync(captured)).developerInstructions, /never overwrite, delete or move files outside the task's scope.*restore.*byte-for-byte/);
@@ -134,6 +135,10 @@ if(m.method==='turn/start')setImmediate(()=>this.onmessage({data:JSON.stringify(
   assert.equal(workerLaunch.account, 'main'); assert.equal(workerLaunch.sandbox, 'read-only');
   assert.equal(rows().at(-1).kind, 'launch-model'); assert.equal(rows().at(-1).thread, 'fixture');
   console.log('ok   real codex-worker start preserves the worker digest, adds the outcome protocol and records launch evidence');
+  const claudeEnv = path.join(tmp, 'claude-env.mjs');
+  fs.writeFileSync(claudeEnv, 'process.stdout.write(process.env.BYTEDCLI_NO_AUTO_UPGRADE ?? "unset");');
+  assert.equal(cli('launch-claude-worker.mjs', [JSON.stringify({ name: 'claude-env' }), process.execPath, claudeEnv, 'fixture'],
+    { BYTEDCLI_NO_AUTO_UPGRADE: '0' }), '1');
   const probeBin = path.join(tmp, 'probe-bin'), spawned = path.join(tmp, 'unexpected-hub-spawn');
   fs.mkdirSync(probeBin);
   fs.writeFileSync(path.join(probeBin, 'codex'), `#!/bin/sh\ntouch '${spawned}'\nexit 1\n`, { mode: 0o755 });

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const [dir] = process.argv.slice(2), parent = process.ppid;
-fs.writeFileSync(path.join(dir, 'ready.json'), JSON.stringify({ pid: process.pid }));
+fs.writeFileSync(path.join(dir, 'ready.json'), JSON.stringify({ pid: process.pid, noAutoUpgrade: process.env.BYTEDCLI_NO_AUTO_UPGRADE }));
 const timer = setInterval(() => {
   // A killed wrapper cannot clean up its process group. Keep this fixture bounded.
   if (process.ppid !== parent) process.exit(0);

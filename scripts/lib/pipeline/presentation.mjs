@@ -1,3 +1,4 @@
+import { sharedCliEnv } from '../worker-launch.mjs';
 import { WORKER_NOTES } from '../fixed-worker-notes.mjs';
 // Pure compatibility rendering. Receives paths, owner and digest from the CLI;
 // it never launches, reads metadata, or changes the selected tuple.
@@ -227,6 +228,7 @@ export function presentRoute(plan, view, context) {
       const accountEnv=profiles[an]?.home?`CODEX_HOME=${shellQuote(profiles[an].home)} `:'';
       const inner=(a.kind==='ttadk'&&known(a.capabilities.search)?`${command(['node',`${root}/scripts/codex-worker.mjs`,'--account',an,'proxy'])} >/dev/null && `:'')+accountEnv+command([bin,'exec','--skip-git-repo-check','-C',cwd,...sandboxArgs,'-m',launchModel,'-c',`model_reasoning_effort="${c.effort}"`,
         ...(task.flags.network&&task.sandbox==='workspace-write'?['-c',`sandbox_workspace_write.network_access=${task.flags.network==='on'}`]:[]),
+          '-c', `shell_environment_policy.set.BYTEDCLI_NO_AUTO_UPGRADE=${JSON.stringify(sharedCliEnv.BYTEDCLI_NO_AUTO_UPGRADE)}`,
         ])+' -c "$ORCHESTRATOR_WORKER_RULES_CONFIG" '+command(['--json','-o',paths.out,prompt]);
       out.launcher=a.kind==='trae'?'traecli-exec':'codex-exec';
       out.command=command(['sh',`${root}/scripts/run-tracked.sh`,'--name',name,'--account',an,'--model',c.modelId,'--effort',c.effort,'--cwd',cwd,

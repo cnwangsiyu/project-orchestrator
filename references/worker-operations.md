@@ -14,6 +14,8 @@ in [SKILL.md](../SKILL.md); do not load this file merely to repeat launcher outp
 
 ## Identity, launch and follow
 
+The rules owner upgrades shared global CLIs at one controlled point when no worker is running.
+
 For irreversible external work, launch with `--no-auto-continue`; otherwise proven `transport-failed` turns receive one 60-second same-thread continuation, with `[transport-retry]` owner alerts and a manual command after a second failure (transport failures never advance the quality ladder).
 
 Load deferred SendMessage/ListAgents when using Claude messaging; ListAgents names this session.

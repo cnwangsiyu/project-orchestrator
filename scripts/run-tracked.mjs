@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { sharedCliEnv } from './lib/worker-launch.mjs';
 import { spawn } from 'node:child_process';
 import { lifecycle, signalExit, resolveOwner, setEventObserver } from './lib/worker-events.mjs';
 import { redactWorkerTurn, hubThreadIdle } from './lib/worker-redaction.mjs';
@@ -142,7 +143,7 @@ try {
   const command = args[sep + 1], commandArgs = args.slice(sep + 2);
   const cliPaths = /^(codex|traex|traecli)$/.test(path.basename(command))
     || /codex-worker\.mjs$/.test(commandArgs[0] ?? '');
-  let env = { ...process.env, CODEX_WORKER_TASK_DIR: maskAudit.taskDirectory ?? '' };
+  let env = { ...process.env, ...sharedCliEnv, CODEX_WORKER_TASK_DIR: maskAudit.taskDirectory ?? '' };
   let rulesVersion = null;
   if (opts['inject-rules'] === 'on') {
     const digest = loadDigest();

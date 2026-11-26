@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { sharedCliEnv } from './lib/worker-launch.mjs';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { loadDigest, workerInstructions } from './lib/global-rules.mjs';
@@ -16,7 +17,7 @@ const row = { account: 'claude', owner, thread, name, model, effort, project, ru
 if (owner) saveWorkerContext(row);
 const prompt = args.pop();
 const child = spawnSync(command, [...args, '--session-id', thread, '--append-system-prompt', workerInstructions(digest), prompt],
-  { stdio: 'inherit' });
+  { stdio: 'inherit', env: { ...process.env, ...sharedCliEnv } });
 if (child.status === 0) appendEvent({ ...row, event: 'running', mayRun: true });
 if (child.error) console.error(`launch-claude-worker: ${child.error.message}`);
 process.exitCode = child.status ?? 1;

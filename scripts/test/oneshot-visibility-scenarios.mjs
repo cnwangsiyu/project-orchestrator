@@ -49,7 +49,8 @@ const start = async (account, project, name, task = name) => {
     child.once('close', (code, signal) => { children.delete(child); resolve({ code, signal, stderr }); });
   });
   await until(() => fs.existsSync(path.join(dir, 'ready.json')), `${name} child ready`);
-  const pid = JSON.parse(fs.readFileSync(path.join(dir, 'ready.json'), 'utf8')).pid;
+  const { pid, noAutoUpgrade } = JSON.parse(fs.readFileSync(path.join(dir, 'ready.json'), 'utf8'));
+  assert.equal(noAutoUpgrade, '1');
   childPids.add(pid);
   return { child, done, dir, account, project, name, task,
     registration: { id: name, pid: child.pid, status: 'running', command: ['/bin/sh', ...args].map(arg => JSON.stringify(arg)).join(' ') } };

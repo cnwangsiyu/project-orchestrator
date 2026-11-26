@@ -65,6 +65,7 @@ def main():
                        "--model", "sonnet", "--effort", "medium", prompt]
             note("starting " + name)
             p = subprocess.run(command, cwd=health, stdin=subprocess.DEVNULL,
+                               env={**os.environ, "BYTEDCLI_NO_AUTO_UPGRADE": "1"},
                                stdout=log, stderr=log, timeout=60)
             if p.returncode:
                 raise RuntimeError("BLOCKED: Claude launch failed; no cleanup authorized")

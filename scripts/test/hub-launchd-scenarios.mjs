@@ -57,7 +57,7 @@ try {
   fs.writeFileSync(worker, `import fs from 'node:fs';
 if(process.env.PROBE_HANG){setInterval(()=>{},1000);}else process.exit(fs.existsSync(process.env.HUB_MARKER)?0:1);`);
   const fakeHub = `#!/usr/bin/env node
-const fs=require('fs');fs.appendFileSync(process.env.STARTS,JSON.stringify({bin:process.argv[1],args:process.argv.slice(2),pid:process.pid,codexHome:process.env.CODEX_HOME??null})+'\\n');
+const fs=require('fs');fs.appendFileSync(process.env.STARTS,JSON.stringify({bin:process.argv[1],args:process.argv.slice(2),pid:process.pid,codexHome:process.env.CODEX_HOME??null,noAutoUpgrade:process.env.BYTEDCLI_NO_AUTO_UPGRADE})+'\\n');
 if(process.env.HUB_FAIL)process.exit(1);
 if(process.env.HUB_PORT){require('net').createServer().listen(Number(process.env.HUB_PORT),'127.0.0.1');}
 fs.writeFileSync(process.env.HUB_MARKER,String(process.pid));
@@ -97,6 +97,7 @@ script:${JSON.stringify(worker)},home:process.env.HOME,interval:30,...JSON.parse
   };
   reset();
   let run = start('main'); await waitFile(marker, run);
+  assert.equal(JSON.parse(fs.readFileSync(starts, 'utf8').trim()).noAutoUpgrade, '1');
   const hubPid = Number(fs.readFileSync(marker, 'utf8'));
   run.child.kill('SIGTERM'); assert.equal((await run.exited)[0], 0);
   assert.ok(!fs.existsSync(marker)); assert.throws(() => process.kill(hubPid, 0));
@@ -109,7 +110,8 @@ script:${JSON.stringify(worker)},home:process.env.HOME,interval:30,...JSON.parse
   assert.equal(fs.readFileSync(marker, 'utf8'), 'external');
   console.log('ok   successful empty-list probe retains reachable hub without restart/duplicate/kill');
 
-  reset(); run = start('trae', { kind: 'trae', bin: path.join(bin, 'traex') }); await waitFile(marker, run);
+  reset(); run = start('trae', { kind: 'trae', bin: path.join(bin, 'traex') }, { BYTEDCLI_NO_AUTO_UPGRADE: '0' }); await waitFile(marker, run);
+  assert.equal(JSON.parse(fs.readFileSync(starts, 'utf8').trim()).noAutoUpgrade, '1');
   const details = JSON.parse(fs.readFileSync(starts, 'utf8').trim());
   assert.equal(details.codexHome, null); assert.ok(details.bin.endsWith('/traex'));
   process.kill(Number(fs.readFileSync(marker)), 'SIGKILL'); assert.equal((await run.exited)[0], 1);
