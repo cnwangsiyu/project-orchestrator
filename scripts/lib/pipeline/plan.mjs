@@ -34,6 +34,7 @@ export function seatArgv(plan, seat) {
   return ['validated-launch', '--plan-hash', plan.planHash, '--route-id', plan.routeId, '--task-id', t.taskId, '--role', t.role,
     '--account', c.accountId, '--model', c.modelId, '--lane', c.laneId, '--harness', c.harness, '--effort', c.effort,
     '--sandbox', t.sandbox, '--cwd', t.cwd, '--task-dir', t.taskDir,
+    ...(t.needsRes ? ['--needs-res'] : []),
     ...(t.allowedOrigins.length ? ['--origins', t.allowedOrigins.join(',')] : []), ...(t.allowedApps.length ? ['--apps', t.allowedApps.join(',')] : []),
     ...(t.contentLabels.includes('security') ? ['--security'] : []), ...(t.contentLabels.includes('adversarial') ? ['--adversarial'] : [])];
 }

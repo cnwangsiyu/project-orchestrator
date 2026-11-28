@@ -10,6 +10,7 @@ import { noteFailure, noteSuccess, claimProbes, probeResult, readPoolPauses } fr
 import { routePure, parseTaskSpec, createTaskSpec, deriveReview, createSnapshot, snapshotFromAnalyze, enumerateCandidates, validatePlan, renderPlan } from '../lib/pipeline/index.mjs';
 import { evaluateCandidate, pAvailable, pCapabilities, pContent, pTierFloor, pModelFit, pSigning, pBackground, pScopedApproval, pPreviousFloor, pResourceScope, pDevice, pLaunchMatches, approvalScope, dominates } from '../lib/pipeline/filters.mjs';
 import { estimateCandidate } from '../lib/pipeline/estimate.mjs';
+import { resWorkerSandbox } from '../lib/worker-launch.mjs';
 import { orderCandidates } from '../lib/pipeline/choose.mjs';
 import { VERSION, EFFORTS, stable } from '../lib/pipeline/common.mjs';
 
@@ -45,6 +46,43 @@ const attempt = (modelId = ASTRA, effort = 'xhigh', extra = {}) => ({ id: 'attem
   actual: { accountId: 'company-b', modelId, effort }, failureKind: 'infra', ...extra });
 let fixed = 0;
 function test(name, fn) { try { fn(); fixed++; console.log(`PASS ${name}`); } catch (e) { e.message = `${name}: ${e.message}`; throw e; } }
+
+test('res checks preserve the bounded sandbox through routing and worker configuration', () => {
+  const context = { taskId: 'task-1', requestId: 'request-1' };
+  const lookup = parseTaskSpec(['lookup', '--needs-res'], context);
+  assert.throws(() => parseTaskSpec(['lookup', '--needs-res'], { ...context, sandboxCeiling: 'read-only' }),
+    {code: 'SANDBOX_CEILING'});
+  assert.equal(lookup.sandbox, 'read-only');
+  const check = parseTaskSpec(['build-run', '--read-only', '--needs-res'], context);
+  assert.equal(check.sandbox, 'read-only');
+  assert.equal(check.writes, false);
+  assert.equal(parseTaskSpec(['build-run', '--needs-res'], context).sandbox, 'workspace-write');
+  assert.throws(() => parseTaskSpec(['lookup', '--needs-res', '--needs-cli', 'adb'], context), {code: 'CONFLICTING_FLAGS'});
+
+  for (const [kind, modelId] of [['chatgpt', 'gpt-6-luna'], ['ttadk', SOL], ['trae', 'gpt-5.6-terra']]) {
+    const raw = fixture([['fixture-account', kind, [modelId]]]);
+    raw.models[0].efforts.unshift('low');
+    const snapshot = createSnapshot(raw);
+    const plan = routePure(lookup, snapshot);
+    assert.equal(plan.kind, 'launch', kind);
+    assert.ok(plan.primary.argv.includes('--needs-res'));
+    assert.ok(validatePlan(plan, snapshot).ok);
+    const {pick} = renderPlan(plan, { snapshot, root: '/fixture' });
+    assert.equal(pick.launcher, 'codex-worker');
+    assert.equal(pick.sandbox, 'read-only');
+    assert.ok(pick.workerArgs.includes('--needs-res'));
+  }
+
+  const directory = path.join(fs.realpathSync(os.tmpdir()), 'fixture-res-state');
+  const config = resWorkerSandbox('read-only', { directory, network: false });
+  assert.deepEqual(config.permissions[config.default_permissions], {
+    extends: ':read-only', filesystem: { [directory]: 'write' }, network: { enabled: false },
+  });
+  assert.equal(config.shell_environment_policy.set.RES_DIR, directory);
+  assert.equal(config.shell_environment_policy.set.TMPDIR, directory);
+  assert.equal(resWorkerSandbox('workspace-write', { directory }).permissions[config.default_permissions].extends, ':workspace');
+  assert.throws(() => resWorkerSandbox('danger-full-access', { directory }));
+});
 
 test('personal Luna image generation keeps its standing exception on a company device', () => {
   const raw = fixture([['company-a','ttadk',[SOL]],['company-b','trae',[SOL]],['personal','chatgpt',['gpt-6-luna',SOL]]]);

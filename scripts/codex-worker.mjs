@@ -74,7 +74,7 @@ import { parseRouteArgs, routeFlag, rerouteWorker, turnHasWork, heldTaskResource
 import { notifyQueueOwner, queueNoticeDue, pendingQueueChoice, claimQueueChoice, deferQueueChoice, settleQueueChoice, queueChoiceResult,
   queueSourceArgs, queueRouteContext, automaticQueueOption, queueOptionPlan, queueChoiceSafety } from './lib/queue-decision.mjs';
 import { queuePolicy } from './lib/queue-stall-watch.mjs';
-import { sharedCliEnv, inheritedLaunch, savedLaunch, saveLaunch, recordLaunchModel, readRequestBufferExceededAt, markRequestBufferExceeded, markOwnerInterrupt, ownerInterruptAt } from './lib/worker-launch.mjs';
+import { sharedCliEnv, resWorkerSandbox, inheritedLaunch, savedLaunch, saveLaunch, recordLaunchModel, readRequestBufferExceededAt, markRequestBufferExceeded, markOwnerInterrupt, ownerInterruptAt } from './lib/worker-launch.mjs';
 import { recordWorkerOutcome, reviewSeat, reviewInstructions } from './lib/worker-outcome.mjs';
 import { workerResultInstructions } from './lib/worker-result.mjs';
 import { completionKind } from './lib/worker-completion.mjs';
@@ -136,7 +136,7 @@ const earlyOpts = {};
 for (let i = 1; i < argv.length; i++) if (argv[i].startsWith('--')) {
   if (argv[i] === '--no-auto-continue') { earlyOpts['no-auto-continue'] = true; continue; }
   const key = argv[i].slice(2);
-  earlyOpts[key] = key === 'force-large' || key === 'background' || key === 'no-browser-preflight' || key === 'headless-playwright' || key === 'no-headless-playwright' || (key === 'require-model' && !['on', 'off'].includes(argv[i + 1]))
+  earlyOpts[key] = key === 'force-large' || key === 'needs-res' || key === 'background' || key === 'no-browser-preflight' || key === 'headless-playwright' || key === 'no-headless-playwright' || (key === 'require-model' && !['on', 'off'].includes(argv[i + 1]))
     || argv[i + 1] === undefined || argv[i + 1].startsWith('--') ? true : argv[++i];
 }
 if (argv[0] === 'queue-choice') {
@@ -287,6 +287,7 @@ for (let i = 0; i < rest.length; i++) {
   else if (rest[i] === '--headless-playwright' || rest[i] === '--no-headless-playwright') opts[rest[i].slice(2)] = true;
   else if (rest[i] === '--wake') opts.wake = true;
   else if (rest[i] === '--force-large') opts['force-large'] = true;
+  else if (rest[i] === '--needs-res') opts['needs-res'] = true;
   else if (rest[i] === '--background') opts.background = true;
   else if (rest[i] === '--no-auto-continue') opts['no-auto-continue'] = true;
   else if (rest[i] === '--require-model' && !['on', 'off'].includes(rest[i + 1])) opts['require-model'] = true;
@@ -588,6 +589,23 @@ const configNetwork = () => {
 const sandboxPolicy = (mode) => mode === 'workspace-write'
   ? { type: 'workspaceWrite', networkAccess: opts.network === undefined ? configNetwork() : opts.network === 'on' }
   : { type: SANDBOX_POLICY[mode], ...(mode==='read-only'&&opts.network!==undefined?{networkAccess:opts.network==='on'}:{}) };
+
+let resSandboxConfig;
+if (opts['needs-res']) {
+  try {
+    resSandboxConfig = resWorkerSandbox(opts.sandbox, {
+      directory: opts['res-state-directory'],
+      network: opts.network === undefined ? (opts.sandbox === 'workspace-write' ? configNetwork() : undefined) : opts.network === 'on',
+    });
+    opts['res-state-directory'] = resSandboxConfig.shell_environment_policy.set.RES_DIR;
+  } catch (error) { die(error.message); }
+}
+const turnSandbox = () => !resSandboxConfig && opts.sandbox ? sandboxPolicy(opts.sandbox) : undefined;
+const workerConfig = (config, env) => ({
+  ...config,
+  ...resSandboxConfig,
+  shell_environment_policy: { set: { ...env, ...resSandboxConfig?.shell_environment_policy.set } },
+});
 
 if (cmd === 'accounts') {
   const reg = readAccounts();
@@ -1568,7 +1586,7 @@ const report = async (threadId, turn, final, usage, observation = {}) => {
         try {
           markTransportContinuationStarting(account ?? 'main',threadId,turn.id);
           const started = await boundedTransportRead(() => call('turn/start',{threadId,input:textInput(TRANSPORT_CONTINUE_MESSAGE),model,effort:opts.effort,
-            sandboxPolicy:opts.sandbox && sandboxPolicy(opts.sandbox),approvalPolicy:CU_APPS.length || BU_ORIGINS.length ? APPROVAL_POLICY : undefined}));
+            sandboxPolicy:turnSandbox(),approvalPolicy:CU_APPS.length || BU_ORIGINS.length ? APPROVAL_POLICY : undefined}));
           nextTurn = started.turn?.id ?? started.turnId;
           if (!nextTurn) throw Error('no turn id');
         } catch {
@@ -2085,10 +2103,10 @@ try {
     checkNewThreadAdmission();
     checkModelAccessAdmission(opts.model);
     const th = await call('thread/start', {
-      cwd: path.resolve(opts.cwd), model: opts.model, sandbox: opts.sandbox, approvalPolicy: APPROVAL_POLICY,
+      cwd: path.resolve(opts.cwd), model: opts.model, sandbox: resSandboxConfig ? undefined : opts.sandbox, approvalPolicy: APPROVAL_POLICY,
       developerInstructions: [browserHowTo, projectWorkerInstructions(digest), reviewHowTo].filter(Boolean).join('\n'),
       ...(browserThread && !TRAE_EXTENSION_BROWSER && !TRAE_HEADLESS_BROWSER ? { approvalsReviewer: 'user' } : {}),
-      config: { ...browserConfig, shell_environment_policy: { set: sharedCliEnv } },
+      config: workerConfig(browserConfig, sharedCliEnv),
     });
     const threadId = th.thread?.id ?? th.threadId;
     attemptThreadId = threadId;
@@ -2099,23 +2117,26 @@ try {
     if (opts.name) await call('thread/name/set', { threadId, name: opts.name }).catch(() => {});
     const talkback = talkbackContext(threadId);
     const instructions = [browserHowTo, projectWorkerInstructions(digest), talkback.instructions, reviewHowTo].filter(Boolean).join('\n');
-    const configured = await call('thread/resume', { threadId, config: { ...browserConfig, ...talkback.config }, developerInstructions: instructions }).catch(resumeFallback);
+    const configured = await call('thread/resume', { threadId, config: workerConfig(browserConfig, talkback.config.shell_environment_policy.set), developerInstructions: instructions }).catch(resumeFallback);
     await waitBrowserTools(threadId);
     markOutputStart();
     const submittedAt = Date.now();
     const ts = await call('turn/start', {
       threadId, input: textInput(configured ? text : `${talkback.instructions}\n\n${text}`), effort: opts.effort, model: opts.model,
-      sandboxPolicy: opts.network !== undefined ? sandboxPolicy(opts.sandbox) : undefined,
+      sandboxPolicy: opts.network !== undefined ? turnSandbox() : undefined,
     });
     follow(threadId, ts.turn?.id ?? ts.turnId, [], submittedAt);
   } else if (cmd === 'turn') {
     if (!opts.thread || !text) die('turn needs --thread and a prompt');
     if (PROF?.kind === 'trae') checkModelAccessAdmission(opts.model ?? threadModel(PROF.home, opts.thread));
     const talkback = talkbackContext(opts.thread);
-    const config = { ...talkback.config, ...TRAE_MCP_CONFIG };
+    const config = workerConfig(TRAE_MCP_CONFIG, talkback.config.shell_environment_policy.set);
     const resumedDigest=loadDigest();
     const resumed = await call('thread/resume', { threadId: opts.thread, model: opts.model, config,
-      developerInstructions:[projectWorkerInstructions(resumedDigest), talkback.instructions, reviewHowTo].filter(Boolean).join('\n') }).catch(resumeFallback);
+      developerInstructions:[projectWorkerInstructions(resumedDigest), talkback.instructions, reviewHowTo].filter(Boolean).join('\n') }).catch(error => {
+      if (resSandboxConfig) throw error;
+      return resumeFallback(error);
+    });
     const rulesVersion = resumed ? rememberWorkerRules(resumedDigest) : null;
     tracker?.set({ rulesVersion });
     sessionPath = resumed?.thread?.path ?? null;
@@ -2127,7 +2148,7 @@ try {
     const submittedAt = Date.now();
     const ts = await call('turn/start', {
       threadId: opts.thread, input: textInput(resumed ? text : `${talkback.instructions}\n\n${text}`), effort: opts.effort, model: opts.model,
-      sandboxPolicy: opts.sandbox && sandboxPolicy(opts.sandbox), approvalPolicy: CU_APPS.length || BU_ORIGINS.length ? APPROVAL_POLICY : undefined,
+      sandboxPolicy: turnSandbox(), approvalPolicy: CU_APPS.length || BU_ORIGINS.length ? APPROVAL_POLICY : undefined,
     });
     if (PROF?.kind === 'trae' && opts.model) rememberThreadModel(PROF.home, opts.thread, opts.model);
     follow(opts.thread, ts.turn?.id ?? ts.turnId, [], submittedAt);

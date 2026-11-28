@@ -7,7 +7,7 @@ import { VERSION, array, object, idOK, modelSelector, modelId, unique, clone, fr
 export const CATEGORIES = Object.freeze(['lookup', 'extract', 'analysis', 'research', 'implement', 'implement-hard', 'ui-browser',
   'debug', 'review', 'review-high', 'design', 'docs', 'draft', 'build-run', 'browser', 'computer-use', 'claude-tools', 'science', 'image-gen', 'image-read', 'second-opinion']);
 const BOOLEANS = new Set(['allow-low-priority-queue', 'auto-check', 'writes', 'read-only', 'runs-tests', 'signing', 'fresh', 'json', 'verbose', 'table', 'no-redeem', 'dry',
-  'urgent', 'security', 'adversarial', 'defensive', 'background', 'device-lease', 'shared-lock', 'no-local-build', 'worker', 'installed', 'no-browser-preflight', 'no-auto-continue']);
+  'urgent', 'security', 'adversarial', 'defensive', 'background', 'device-lease', 'shared-lock', 'no-local-build', 'worker', 'installed', 'no-browser-preflight', 'no-auto-continue', 'needs-res']);
 const VALUES = new Set(['stakes', 'failures', 'against', 'author', 'impact', 'env', 'exclude-account', 'exclude-model', 'origins', 'mode',
   'sandbox', 'cwd', 'task-dir', 'task', 'name', 'project', 'apps', 'browser-origins', 'browser-kind', 'computer-use-apps', 'user-ok', 'auto-reroute-depth', 'previous-attempt', 'execution', 'actual',
   'owner', 'failure-kind', 'trusted-cwd', 'exclude-lane', 'review-override', 'review-required', 'profile-override', 'artifact-ref', 'network', 'review-class', 'review-reason', 'review-scope', 'needs-cli']);
@@ -110,12 +110,18 @@ export function createTaskSpec(input) {
   if (execution === 'remote' && f['shared-lock']) fail('EXECUTION_CONFLICT', 'Remote work cannot acquire local shared locks.');
   const needsCli = unique(list(f['needs-cli']));
   if (needsCli.some(cli => !/^[a-z][a-z0-9-]*$/.test(cli))) fail('INVALID_CLI', 'needs-cli takes comma-separated CLI names, e.g. lark,bytedcli.');
-  const sandbox = needsCli.length ? 'danger-full-access' : f.sandbox ?? input.sandbox ?? 'workspace-write', ceiling = input.sandboxCeiling ?? 'workspace-write';
+  const needsRes = f['needs-res'] === true;
+  const writes = f['read-only'] ? false : (f.writes ?? input.writes ?? ['implement', 'implement-hard', 'debug', 'science', 'docs', 'draft', 'ui-browser', 'build-run', 'computer-use', 'claude-tools', 'image-gen'].includes(cat));
+  if (needsRes && needsCli.length) fail('CONFLICTING_FLAGS', '--needs-res and --needs-cli require different sandbox policies.');
+  const sandbox = needsCli.length ? 'danger-full-access' : f.sandbox ??
+    (needsRes ? (f['read-only'] || (!writes && !(f['runs-tests'] ?? input.runsTests)) ? 'read-only' : 'workspace-write')
+      : input.sandbox ?? 'workspace-write');
+  const ceiling = input.sandboxCeiling ?? 'workspace-write';
   if(f.network==='off'&&sandbox==='danger-full-access') fail('INVALID_NETWORK_SANDBOX','Network off requires a read-only or workspace-write sandbox.');
   if (![sandbox, ceiling].every((s) => ['danger-full-access', 'workspace-write', 'read-only'].includes(s))) fail('INVALID_SANDBOX', 'Unsupported sandbox.');
   if (f.sandbox && !['workspace-write', 'read-only'].includes(f.sandbox)) fail('INVALID_SANDBOX', 'Explicit sandbox only narrows the default. For signed-in or network CLIs (bytedcli, lark-cli) add --needs-cli <names> instead: full-access sandbox, read-only by instruction.');
   if (ceiling === 'workspace-write' && sandbox === 'danger-full-access') fail('SANDBOX_CEILING', 'Requested sandbox exceeds parent ceiling.');
-  if (ceiling === 'read-only' && sandbox !== 'read-only') fail('SANDBOX_CEILING', 'Requested sandbox exceeds parent ceiling.');
+  if (ceiling === 'read-only' && (sandbox !== 'read-only' || needsRes)) fail('SANDBOX_CEILING', 'Requested sandbox exceeds parent ceiling.');
   if (f.apps && f['computer-use-apps']) fail('REPEATED_OPTION', 'Use only one of --apps and --computer-use-apps.');
   if (f.origins && f['browser-origins']) fail('REPEATED_OPTION', 'Use only one of --origins and --browser-origins.');
   const appScope = f['computer-use-apps'] ?? f.apps, originScope = f['browser-origins'] ?? f.origins;
@@ -160,7 +166,6 @@ export function createTaskSpec(input) {
   if (!labels.size) labels.add('ordinary');
   if ([...labels].some((x) => !['ordinary', 'security', 'attack-material', 'adversarial', 'defensive-confirmation', 'policy-blocked'].includes(x))) fail('INVALID_CONTENT', 'Unknown content label.');
   if (labels.size > 1) labels.delete('ordinary');
-  const writes = f['read-only'] ? false : (f.writes ?? input.writes ?? ['implement', 'implement-hard', 'debug', 'science', 'docs', 'draft', 'ui-browser', 'build-run', 'computer-use', 'claude-tools', 'image-gen'].includes(cat));
   if (browserKind === 'poll' && writes) fail('BROWSER_POLL_READ_ONLY', '--browser-kind poll only re-reads pages and reports status; use page for page changes.');
   const background = f.background ?? input.background ?? false;
   const qualityFailures = failureKind === 'quality' && !infraRetry ? failures : failedActualIds.size;
@@ -192,7 +197,7 @@ export function createTaskSpec(input) {
     floor: clone(input.floor ?? { profileIds: [], previousAttemptIds: [], relationVersion: VERSION, historyStatus: failures || autoRerouteDepth || f['previous-attempt'] ? 'UNKNOWN' : 'KNOWN' }),
     authorAttemptId: input.authorAttemptId ?? null, againstAttemptId: input.againstAttemptId ?? null,
     cwd: f.cwd ?? input.cwd ?? '.', taskDir: f['task-dir'] ?? input.taskDir ?? '.', sandbox, sandboxCeiling: ceiling,
-    needsCli, readOnlyByInstruction: needsCli.length > 0 && !writes,
+    needsCli, ...(needsRes ? { needsRes } : {}), readOnlyByInstruction: needsCli.length > 0 && !writes,
     allowedOrigins, allowedApps: apps, deviceId: input.deviceId ?? null, ownTestApp: input.ownTestApp === true,
     signingManifestRef: input.signingManifestRef ?? null, approvalRefs: unique([...array(input.approvalRefs), ...list(f['user-ok'])]),
     autoRerouteDepth, notifyBy: input.notifyBy ?? null, timezone: input.timezone ?? 'America/Los_Angeles',

@@ -79,6 +79,7 @@ export function presentRoute(plan, view, context) {
   const priorityGuard = personalPriorityGuard(snapshot);
   if (priorityGuard) why.push(`personal ${snapshot.personalPriority.account}-first window paused: ${priorityGuard}`);
   if (t.needsCli.length) notes.push('signed-in CLIs need the full-access sandbox (keychain); stay read-only by instruction: queries only, no writes');
+  else if (t.needsRes) notes.push('The worker sandbox adds the res state directory as a writable root.');
   else if (f['read-only']) notes.push('read-only sandbox: keychain-backed CLIs (lark-cli, bytedcli) will not work; add --needs-cli if the task must use them');
   if(['implement','implement-hard','build-run','debug','ui-browser'].includes(t.category))fixedNotes.push(sourceDigest.worker.split('\n').find(line=>line.startsWith('- Project dependencies'))??'');
   const noReview=projectReviewPolicy(t.project,snapshot.projectProfiles).profile==='no-review'&&!mandatoryReview(t);
@@ -211,6 +212,7 @@ export function presentRoute(plan, view, context) {
     if(task.background) args.push('--background');
     if(task.flags['no-auto-continue']) args.push('--no-auto-continue');
     if(f['user-ok']) args.push('--user-ok',f['user-ok']);
+    if(task.needsRes) args.push('--needs-res');
     if(task.flags.network) args.push('--network',task.flags.network);
     if(seatPatience!==null) args.push('--queue-patience-min',String(seatPatience),'--alt',primary?queueAlt:'Return this result to the owner and replan the required reviewer set, preserving artifact and family independence.',...(primary?['--queue-alternative',JSON.stringify(queueAlternative)]:[]));
     if(primary&&queueAlternative?.startDelayMin!==null && queueAlternative?.startDelayMin!==undefined) args.push('--queue-alt-start-min',String(queueAlternative.startDelayMin));
@@ -218,7 +220,7 @@ export function presentRoute(plan, view, context) {
     if(['browser','ui-browser'].includes(task.category)) args.push('--browser-origins',task.allowedOrigins.join(','));
     if(task.flags['no-browser-preflight']) args.push('--no-browser-preflight');
     out.workerArgs=args;
-    const oneShot=['lookup','extract','draft','image-gen','second-opinion'].includes(task.category)&&!task.background&&!f.worker&&!low&&!isAstra(c.modelId);
+    const oneShot=['lookup','extract','draft','image-gen','second-opinion'].includes(task.category)&&!task.needsRes&&!task.background&&!f.worker&&!low&&!isAstra(c.modelId);
     if(oneShot) {
       const bin=a.kind==='trae'?(profiles[an]?.bin??'traecli'):'codex';
       const readOnlyNetwork=task.flags.network&&task.sandbox==='read-only', profile=`route_read_only_${plan.planHash}`;

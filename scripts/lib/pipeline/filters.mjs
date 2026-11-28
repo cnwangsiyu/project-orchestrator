@@ -33,7 +33,7 @@ export function approvalGate(t, c, action, code, text, phase = 'prelaunch') {
   return { id: `gate:${fingerprint([scope, code])}`, kind: action, phase, state: 'needsOK', scope, reason: r, evidenceIds: [] };
 }
 export function pUserRules(t, s, c) {
-  if (t.sandboxCeiling === 'read-only' && (t.sandbox !== 'read-only' || t.writes)) return deny('pUserRules', 'SANDBOX_CEILING', 'Task exceeds the parent workspace ceiling.', c);
+  if (t.sandboxCeiling === 'read-only' && (t.sandbox !== 'read-only' || t.writes || t.needsRes)) return deny('pUserRules', 'SANDBOX_CEILING', 'Task exceeds the parent workspace ceiling.', c);
   if (t.requirements.credentialAccess) return deny('pUserRules', 'CREDENTIAL_ACCESS_FORBIDDEN', 'Credential/session access is not available to this pipeline.', c);
   return pass('pUserRules');
 }
@@ -78,6 +78,8 @@ export function pAvailable(t, s, c) {
 }
 export function pCapabilities(t, s, c) {
   const { account: a, model: m, lane: l } = candidateParts(s, c);
+  if (t.needsRes && a?.kind === 'claude')
+    return deny('pCapabilities', 'CAPABILITY_RES_SANDBOX', 'This launcher has no sandbox with a scoped res state directory.', c);
   if (['browser', 'ui-browser', 'computer-use'].includes(t.category) && a?.browserRuntime !== undefined) {
     const runtime = known(a.browserRuntime);
     if (runtime?.ready !== true) return deny('pCapabilities', 'BROWSER_RUNTIME_UNAVAILABLE',

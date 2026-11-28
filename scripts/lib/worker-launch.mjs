@@ -1,10 +1,31 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { rulesShared } from './global-rules.mjs';
 import { withLock, writeJson } from './shared-file.mjs';
 import { canonicalPath } from './launch-paths.mjs';
 
 export const sharedCliEnv = Object.freeze({ BYTEDCLI_NO_AUTO_UPGRADE: '1' });
+
+export function resWorkerSandbox(mode, { directory, network } = {}) {
+  if (!['read-only', 'workspace-write'].includes(mode)) throw Error('--needs-res requires a bounded sandbox');
+  // Pin the same path in the sandbox rules and child environment, including
+  // temp files created by res helpers that use mktemp without a directory.
+  const root = canonicalPath(directory || process.env.RES_DIR || path.join(os.homedir(), '.claude/orchestrator/_shared'));
+  if (root === path.parse(root).root) throw Error('--needs-res requires a res state directory below the filesystem root');
+  const profile = 'orchestrator_res';
+  return {
+    default_permissions: profile,
+    permissions: {
+      [profile]: {
+        extends: mode === 'read-only' ? ':read-only' : ':workspace',
+        filesystem: { [root]: 'write' },
+        ...(network === undefined ? {} : { network: { enabled: network } }),
+      },
+    },
+    shell_environment_policy: { set: { ...sharedCliEnv, RES_DIR: root, TMPDIR: root } },
+  };
+}
 
 export const claudeWorkspacePreamble = (workspace, review = false) => review
   ? `The repository under review is ${workspace}. Read it with git -C or absolute paths. Make your own worktree for tests.`
@@ -14,7 +35,7 @@ const keys = ['route-args', 'auto-reroute-depth', 'owner', 'name', 'cwd', 'log',
   'queue-patience-min', 'alt', 'queue-alternative', 'queue-alt-start-min', 'background', 'require-model', 'no-auto-continue', 'model', 'effort',
   // Browser/desktop scope must survive a continuation: without it the hub answers every site approval with a decline
   // and the worker reports "The user declined approval" (VAK W304-queue-cancel-2, 2026-11-15).
-  'browser-origins', 'computer-use-apps', 'chrome-profile-dir','project','task','role','routed-seat','sandbox','network'];
+  'browser-origins', 'computer-use-apps', 'chrome-profile-dir','project','task','role','routed-seat','sandbox','network','needs-res','res-state-directory'];
 const launchFile = (account, thread) => {
   if (![account, thread].every((v) => typeof v === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/.test(v)))
     throw Error('invalid public account/thread identifier');
