@@ -2,6 +2,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 // Runner-only settings: res ignores these forward-compatible machine.conf names.
+export function gcTreeId(workspace) {
+  return /^id-([a-f0-9]{12})/i.exec(path.posix.basename(path.posix.dirname(workspace ?? '')))?.[1] ?? null;
+}
+
 export function treeSettings(dir) {
   let text;
   try {
@@ -256,6 +260,39 @@ def tree_process_live(ws,proc_root=pathlib.Path('/proc')):
         except OSError: return True
     return False
 
+def tree_protected_state(ws, git):
+    protected=re.compile(r'^(?:\.env(?:\..*)?|\.ssh|\.netrc|\.npmrc|login|cookies?|sessions?)$|\.(?:pem|p12|pfx|key|keystore)$',re.I)
+    tracked={entry[2:] for entry in subprocess.check_output(git+['ls-files','-v','-z']).split(b'\0') if entry.startswith(b'H ')}
+    def fail(error): raise error
+    for parent,dirs,files in os.walk(ws,followlinks=False,onerror=fail):
+        for name in dirs+files:
+            if not protected.search(name): continue
+            p=pathlib.Path(parent)/name
+            # A tracked configuration file is reproducible after the clean status check.
+            # For local state, preserve the tree even when the path is Git-ignored.
+            if name=='.npmrc' and not p.is_symlink() and p.is_file() and os.fsencode(p.relative_to(ws)) in tracked: continue
+            return True
+    return False
+
+def tree_retention_reason(ws,repo):
+    if tree_process_live(ws): return 'live or unknown process'
+    git=['git','--no-optional-locks','-C',str(ws)]
+    common=subprocess.check_output(git+['rev-parse','--path-format=absolute','--git-common-dir'],text=True).strip()
+    if pathlib.Path(common).resolve()!=repo: return 'foreign git worktree'
+    dirty=subprocess.check_output(git+['status','--porcelain','--untracked-files=all'],text=True)
+    if dirty: return 'uncommitted edits'
+    # Git removes the symlink itself and leaves its target alone. Never follow links in this scan.
+    if tree_protected_state(ws,git): return 'protected local state'
+    return None
+
+def tree_gc_receipt(d, result):
+    match=re.match(r'id-([a-f0-9]{12})',pathlib.Path(d['workspace']).parent.name,re.I)
+    receipt={'slot':d['slot'],'tree':match[1] if match else None}
+    if 'skipped' in result: receipt['skipped']=result['skipped']
+    elif 'failed' in result: receipt['failed']=result['failed']
+    else: receipt.update(reason=result['reason'],reclaimedBytes=result['bytes'])
+    print(json.dumps(receipt))
+
 def tree_evict(d):
     primary=pathlib.Path(d['root']); ws=pathlib.Path(d['workspace']); root=pathlib.Path(d['treeRoot'])
     registered=tree_roots(d)
@@ -270,16 +307,8 @@ def tree_evict(d):
         row=candidates[0]; disk=os.statvfs(root); free=disk.f_bavail*disk.f_frsize/TREE_GIB
         below=not d.get('coldOnly') and free<max(d.get('targetFreeGiB',roots[root]),roots[root]); cold=row['lastUsed']<time.time()-d.get('days',d['treeConfig']['coldDays'])*86400
         if not below and not cold: return {'skipped':'warm and above floor'}
-        if tree_process_live(ws): return {'skipped':'live or unknown process'}
-        # Preserve edits and any private/symlink state rather than treating it as rebuildable.
-        for parent,dirs,files in os.walk(ws,followlinks=False):
-            for name in dirs+files:
-                p=pathlib.Path(parent)/name
-                if p.is_symlink() or re.search(r'^(?:\.env(?:\..*)?|\.ssh|\.netrc|\.npmrc|login|cookies?|sessions?)$|\.(?:pem|p12|pfx|key|keystore)$',name,re.I): return {'skipped':'private or symlink state'}
-        common=subprocess.check_output(['git','-C',str(ws),'rev-parse','--path-format=absolute','--git-common-dir'],text=True).strip()
-        if pathlib.Path(common).resolve()!=repo: return {'skipped':'foreign git worktree'}
-        dirty=subprocess.check_output(['git','-C',str(ws),'status','--porcelain','--untracked-files=all'],text=True)
-        if dirty: return {'skipped':'uncommitted edits'}
+        skipped=tree_retention_reason(ws,repo)
+        if skipped: return {'skipped':skipped}
         size=int(subprocess.check_output(['du','-sk',str(ws)],text=True).split()[0])*1024
         record=tree_map_read(primary)
         subprocess.run(['git','--git-dir='+str(repo),'worktree','remove','--force',str(ws)],check=True)
@@ -298,7 +327,14 @@ export function treeScript(operation, legacy, header, data) {
   if (operation === 'tree-place') return body('print(json.dumps(tree_place(d)))\n');
   if (operation === 'tree-release') return body('print(json.dumps(tree_release(d)))\n');
   if (operation === 'tree-evict') return body('print(json.dumps(tree_evict(d)))\n');
-  if (operation === 'gc') return body("d['coldOnly']=True\nprint(json.dumps(tree_evict(d)))\n");
+  if (operation === 'gc') return body(String.raw`
+d['coldOnly']=True
+try: result=tree_evict(d)
+except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+    tree_gc_receipt(d, {'failed':'tree check or removal failed'})
+    sys.exit(1)
+tree_gc_receipt(d,result)
+`);
   if (operation === 'inventory') return body("print(json.dumps([row for row in tree_list(d) if row['lastUsed']<time.time()-d['days']*86400]))\n");
   if (operation === 'recent') return body("rows=tree_list(d); recent={}\nfor row in rows:\n    if row['project']==d['project']: recent[row['slot']]=max(recent.get(row['slot'],0),row['lastUsed'])\nprint(json.dumps(recent))\n");
   if (operation === 'workspaces' || operation === 'warm-path') return body(String.raw`

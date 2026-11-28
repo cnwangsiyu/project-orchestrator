@@ -34,7 +34,9 @@ function coldTree(slot, treeRoot = secondary) {
   if (!fs.existsSync(path.join(temp, 'source'))) {
     const source = path.join(temp, 'source'); fs.mkdirSync(source);
     for (const args of [['init', '-q'], ['config', 'user.name', 'Fixture'], ['config', 'user.email', 'fixture@example.invalid']]) execFileSync('git', ['-C', source, ...args]);
-    fs.writeFileSync(path.join(source, 'source.txt'), 'public\n'); fs.writeFileSync(path.join(source, '.gitignore'), '/.devbox-run.json\n/build/\n');
+    fs.writeFileSync(path.join(source, 'source.txt'), 'public\n'); fs.writeFileSync(path.join(source, '.gitignore'), '/.devbox-run.json\n/build/\n/.env\n');
+    fs.writeFileSync(path.join(source, '.npmrc'), 'engine-strict=true\n');
+    fs.symlinkSync('source.txt', path.join(source, 'source-link'));
     execFileSync('git', ['-C', source, 'add', '.']); execFileSync('git', ['-C', source, 'commit', '-qm', 'fixture']);
     execFileSync('git', ['--git-dir=' + repo, 'fetch', '-q', source, 'HEAD:refs/heads/main']);
   }
@@ -112,13 +114,44 @@ try {
   fs.appendFileSync(path.join(kept.workspace, 'source.txt'), 'local edit');
   assert.equal(python("print(json.dumps(tree_evict(d)))", kept).skipped, 'uncommitted edits');
   const privateTree = coldTree('devbox-cn-2'); fs.writeFileSync(path.join(privateTree.workspace, '.env'), '');
-  assert.equal(python("print(json.dumps(tree_evict(d)))", privateTree).skipped, 'private or symlink state');
+  assert.equal(python("print(json.dumps(tree_evict(d)))", privateTree).skipped, 'protected local state');
   const linked = coldTree('devbox-cn-3'); fs.symlinkSync(kept.workspace, path.join(linked.workspace, 'build/link'));
-  assert.equal(python("print(json.dumps(tree_evict(d)))", linked).skipped, 'private or symlink state');
+  fs.symlinkSync(kept.workspace, path.join(linked.workspace, 'unsaved-link'));
+  assert.equal(python("print(json.dumps(tree_evict(d)))", linked).skipped, 'uncommitted edits');
+  fs.unlinkSync(path.join(linked.workspace, 'unsaved-link'));
+  assert.equal(python("print(json.dumps(tree_evict(d)))", linked).path, linked.workspace);
+  assert.ok(fs.existsSync(path.join(kept.workspace, 'source.txt')), 'eviction did not follow the ignored link');
+
   const foreign = path.join(temp, 'foreign'); fs.mkdirSync(foreign); fs.writeFileSync(path.join(foreign, 'keep'), 'outside');
   const linkRoot = path.join(temp, 'linked-root'); fs.symlinkSync(foreign, linkRoot);
   refused({ ...kept, treeConfig: { ...config, extraRoots: [linkRoot] }, treeRoot: linkRoot });
   assert.equal(fs.readFileSync(path.join(foreign, 'keep'), 'utf8'), 'outside');
+  const hashedStore = 'id-' + createHash('sha256').update('repo').digest('hex');
+  const hashedRepo = path.join(root, 'repos/fixture', hashedStore);
+  const hashedWs = path.join(secondary, 'wt/fixture', hashedStore, 'devbox-cn-5');
+  execFileSync('git', ['init', '--bare', '-q', hashedRepo]);
+  execFileSync('git', ['--git-dir=' + hashedRepo, 'fetch', '-q', kept.repository, 'refs/heads/main:refs/heads/main']);
+  fs.mkdirSync(path.dirname(hashedWs), { recursive: true });
+  execFileSync('git', ['--git-dir=' + hashedRepo, 'worktree', 'add', '-q', '--detach', hashedWs, 'main']);
+  const hashed = { ...kept, slot: 'devbox-cn-5', workspace: hashedWs, repository: hashedRepo, days: 2 };
+  fs.writeFileSync(path.join(hashedWs, '.devbox-run.json'), JSON.stringify({
+    slot: hashed.slot, repository: hashedRepo, lastUsed: Date.now() / 1000 - 4 * 86400,
+  }));
+  const gc = treeScript('gc', remoteScripts.gc, h, hashed);
+  const invokeGc = () => {
+    const result = spawnSync('python3', ['-c', gc], { input: JSON.stringify(hashed), encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.doesNotMatch(result.stdout, new RegExp(hashedStore));
+    return JSON.parse(result.stdout);
+  };
+  fs.writeFileSync(path.join(hashedWs, '.env'), '');
+  assert.deepEqual(invokeGc(), { slot: hashed.slot, tree: hashedStore.slice(3, 15), skipped: 'protected local state' });
+  fs.unlinkSync(path.join(hashedWs, '.env'));
+  const gcReceipt = invokeGc();
+  assert.equal(gcReceipt.reason, 'cold');
+  assert.equal(gcReceipt.tree, hashedStore.slice(3, 15));
+  assert.ok(gcReceipt.reclaimedBytes > 0);
+  assert.equal(fs.existsSync(hashedWs), false);
   const removed = coldTree('devbox-cn-4');
   const proc = path.join(temp, 'fixture-proc');
   const pid = path.join(proc, '1234');

@@ -20,7 +20,7 @@ import { controlOptions, muxFailure, muxRetrySafe } from './lib/devbox-ssh.mjs';
 import { retentionPython } from './lib/devbox-retention.mjs';
 import { cleanupEvidencePython } from './lib/devbox-cleanup-pending.mjs';
 import { runTmpdirPython } from './lib/devbox-tmpdir.mjs';
-import { treeSettings, treePreference, treeScript } from './lib/devbox-trees.mjs';
+import { gcTreeId, treeSettings, treePreference, treeScript } from './lib/devbox-trees.mjs';
 
 const script = fileURLToPath(import.meta.url);
 const GiB = 1024 ** 3;
@@ -2313,10 +2313,12 @@ async function collectGarbage({ rows, days = 7, host, state, emit = text => proc
     const jobs = [...inventory, ...(maintenance ? [{ slot: maintenance.slot, maintenance: true }] : [])];
     for (const item of jobs) {
       const member = rows.find(r => r.slot === item.slot && r.host === row.host);
-      if (!member || item.slot === skipSlot || state.cancel) continue;
+      if (item.slot === skipSlot || state.cancel) continue;
+      const skipped = reason => emit(JSON.stringify({ slot: item.slot, tree: gcTreeId(item.workspace), skipped: reason }) + '\n');
+      if (!member) { skipped('slot not mapped'); continue; }
       const by = `devbox-gc-${process.pid}-${randomUUID()}`;
       const take = await executeRes(['take', member.slot, '--by', by, '--project', 'devbox-run', '--task', 'gc', '--for', 'expired worktree cleanup', '--maintenance', '--pid', String(process.pid)], { state });
-      if (take.code === 2 || take.code === 3) continue;
+      if (take.code === 2 || take.code === 3) { skipped('slot busy or admission closed'); continue; }
       if (take.code) {
         try {
           const info = Object.fromEntries(fs.readFileSync(path.join(sharedDir(), 'locks', `${member.slot}.d/info`), 'utf8').trim().split('\n').map(line => line.split('\t')));
