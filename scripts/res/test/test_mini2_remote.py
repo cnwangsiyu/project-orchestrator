@@ -174,10 +174,9 @@ class RemoteTests(unittest.TestCase):
 
             cases = [
                 ["-version"], ["-showsdks"], ["-list", "-json"],
-                ["-scheme", "Fixture App", "-showdestinations"],
                 ["-downloadPlatform", "iOS"],
                 ["-downloadAllPlatforms"], ["-importPlatform", "runtime image.dmg"],
-                ["-checkFirstLaunchStatus"], ["-runFirstLaunch"], ["-license"],
+                ["-checkFirstLaunchStatus"],
             ]
             def invoke(args):
                 result = subprocess.check_output([str(wrapper), *args], env={**os.environ, **env})
@@ -189,12 +188,25 @@ class RemoteTests(unittest.TestCase):
             # Build-settings queries keep the isolation flags so reported paths match the real build.
             for build in (["-scheme", "Fixture App", "build"],
                           ["-workspace", "Fixture App.xcworkspace", "-scheme", "Fixture App", "-showBuildSettings"],
-                          ["-showBuildSettingsForIndex"]):
+                          ["-showBuildSettingsForIndex"],
+                          ["-scheme", "Fixture App", "-showdestinations"],
+                          ["-list", "-scheme", "Fixture App"],
+                          ["-scheme", "Fixture App", "-list"]):
                 with self.subTest(args=build):
                     self.assertEqual(invoke(build), [
                         *build, "-derivedDataPath", env["MINI2_DERIVED_DATA"], "-jobs", "4",
                         "CLANG_MODULE_CACHE_PATH=" + env["MINI2_MODULE_CACHE"],
                     ])
+
+            for action in ("-runFirstLaunch", "-license"):
+                with self.subTest(action=action):
+                    result = subprocess.run(
+                        [str(wrapper), "-version", action], env={**os.environ, **env},
+                        capture_output=True, text=True,
+                    )
+                    self.assertEqual(result.returncode, 64)
+                    self.assertEqual(result.stdout, "")
+                    self.assertIn(action + " changes host-wide state", result.stderr)
 
     def test_cleanup_checks_cache_files_and_excludes_its_guard(self):
         with tempfile.TemporaryDirectory() as temp,patch.object(m,"ROOT",Path(temp)/"runner"):

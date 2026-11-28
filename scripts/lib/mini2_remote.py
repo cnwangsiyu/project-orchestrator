@@ -263,14 +263,24 @@ def isolation(run, cores):
     for folder in paths.values(): folder.mkdir(mode=0o700,exist_ok=True)
     wrapper = paths["bin"]/"xcodebuild"
     wrapper.write_text('''#!/bin/bash
+passthrough=0
+list=0
+scheme=0
 for arg in "$@"; do
     case "$arg" in
-        -version|-showsdks|-list|-showdestinations|\\
-        -downloadPlatform|-downloadAllPlatforms|-importPlatform|-checkFirstLaunchStatus|-runFirstLaunch|-license)
-            exec /usr/bin/xcodebuild "$@"
+        -runFirstLaunch|-runFirstLaunch=*|-license|-license=*)
+            printf 'mini2 xcodebuild: %s changes host-wide state and is disabled\\n' "$arg" >&2
+            exit 64
             ;;
+        -scheme|-scheme=*) scheme=1 ;;
+        -list) list=1 ;;
+        -version|-showsdks|-downloadPlatform|-downloadAllPlatforms|-importPlatform|-checkFirstLaunchStatus)
+            passthrough=1 ;;
     esac
 done
+if [[ "$passthrough" == 1 || ( "$list" == 1 && "$scheme" == 0 ) ]]; then
+    exec /usr/bin/xcodebuild "$@"
+fi
 exec /usr/bin/xcodebuild "$@" -derivedDataPath "$MINI2_DERIVED_DATA" -jobs "$MINI2_JOBS" CLANG_MODULE_CACHE_PATH="$MINI2_MODULE_CACHE"
 ''')
     wrapper.chmod(0o700)
