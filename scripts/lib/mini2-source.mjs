@@ -5,29 +5,48 @@ import { readBatch } from './devbox-transfer-check.mjs';
 
 const sourceExtension = /\.(?:[cm]?[jt]sx?|swift|m{1,2}|[ch](?:pp|xx)?|cc|hh|py|rb|go|rs|java|kts?|sh|bash|zsh|php|cs|scala|vue|svelte)$/i;
 
+const sensitiveName = /session|sso|auth|tokens?|keys?|credentials?|cookies?|secret|password|passwd|signing|keystore|keychain/i;
+const reviewableExtension = /\.(?:md|json|ya?ml|plist|xcconfig)$/i;
+const privateKeyBlock = /-----BEGIN [A-Z ]*PRIVATE KEY-----/;
+
 export function safeSourcePath(name) {
   if (typeof name !== 'string' || !name || /[\x00-\x1f\x7f\\]/.test(name)
       || /^(?:\/|[a-z]:)/i.test(name)) return false;
+  const filename = path.posix.basename(name);
+  if (/cookie/i.test(filename) || /^(?:\.git-credentials|credentials|\.pgpass)$/i.test(filename)) return false;
+  if (/private.*key/i.test(filename) && !sourceExtension.test(filename)) return false;
+  if (sensitiveName.test(filename) && !sourceExtension.test(filename) && !reviewableExtension.test(filename)) return false;
   return name.split('/').every(part => part && part !== '.' && part !== '..'
     && !/^(?:\.env.*|\.netrc|\.pypirc|\.ssh|\.aws|\.kube|\.docker|\.git|id_rsa.*|id_ed25519.*)$/i.test(part)
     && !/\.local\.(?:plist|json|xcconfig|ya?ml|toml|ini)$/i.test(part)
-    && !/\.(?:pem|p12|pfx|jks|key|keystore|mobileprovision|provisionprofile|p8|cer|der|keychain.*)$/i.test(part)
-    && (!/private.*key/i.test(part) || sourceExtension.test(part)));
+    && !/\.(?:pem|p12|pfx|jks|key|keystore|mobileprovision|provisionprofile|p8|cer|der|keychain.*)$/i.test(part));
 }
 
 const contentRules = [
-  ['private-key-block', /-----BEGIN [A-Z ]*PRIVATE KEY-----/],
+  ['private-key-block', privateKeyBlock],
   ['npm-credential', /^[ \t]*(?:_auth(?:Token)?|\/\/[^\r\n]*?:(?:_auth(?:Token)?|_password))[ \t]*=/im],
   ['aws-access-key-id', /AKIA[0-9A-Z]{16}/],
   ['slack-token', /xox[baprs]-/],
   ['github-token', /gh[pousr]_[A-Za-z0-9]{30,}/],
   ['credential-assignment', /(?:password|passwd|secret|api[_-]?key|access[_-]?token)\s*[:=]\s*['"][^'"\s]{12,}['"]/i],
+  ['jwt', /eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/],
+  ['bearer-authorization', /Authorization:\s*Bearer\s+[A-Za-z0-9._~+/-]{16,}/i],
+  ['url-credentials', /[a-z][a-z0-9+.-]*:\/\/[^/\s:@]+:[^/\s@]{6,}@/i],
+  ['structured-credential', /"?(?:password|passwd|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret)"?\s*:\s*"?[^\s"]{12,}/i],
 ];
 
 export function checkSourceContent(name, bytes) {
+  const refuse = id => { throw Error('mini2 source content refused: ' + JSON.stringify(name) + ' (' + id + ')'); };
+  if (sensitiveName.test(path.posix.basename(name))) {
+    const sample = bytes.subarray(0, 8192);
+    let nuls = 0;
+    for (const byte of sample) if (byte === 0) nuls++;
+    if (nuls > sample.length / 10) refuse('binary-sensitive-name');
+  }
   const text = bytes.toString('utf8');
-  for (const [id, pattern] of contentRules) {
-    if (pattern.test(text)) throw Error('mini2 source content refused: ' + JSON.stringify(name) + ' (' + id + ')');
+  for (const [id, pattern] of contentRules) if (pattern.test(text)) refuse(id);
+  for (const [encoded] of text.matchAll(/[A-Za-z0-9+/]{36,}={0,2}/g)) {
+    if (privateKeyBlock.test(Buffer.from(encoded, 'base64').toString('latin1'))) refuse('base64-private-key-block');
   }
 }
 
@@ -77,7 +96,8 @@ export async function checkUploads({ allowed, bundle, patchFile, commit, temp, e
   const add = (name, mode, oid) => {
     if (!names.has(name) || !['000000', '100644', '100755'].includes(mode))
       throw Error('mini2 upload path is outside the regular-file allowlist: ' + JSON.stringify(name));
-    if (mode !== '000000' && !blobs.has(oid)) blobs.set(oid, name);
+    // A shared blob must still be checked under a sensitive basename.
+    if (mode !== '000000' && (!blobs.has(oid) || sensitiveName.test(path.posix.basename(name)))) blobs.set(oid, name);
   };
   const changes = (await inRepo(['log', '--full-history', '-m', '--root', '--format=', '--raw',
     '-z', '--no-renames', '--no-abbrev', commit])).split('\0');
