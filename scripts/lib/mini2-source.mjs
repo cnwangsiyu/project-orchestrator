@@ -5,8 +5,9 @@ import { readBatch } from './devbox-transfer-check.mjs';
 
 const sourceExtension = /\.(?:[cm]?[jt]sx?|swift|m{1,2}|[ch](?:pp|xx)?|cc|hh|py|rb|go|rs|java|kts?|sh|bash|zsh|php|cs|scala|vue|svelte)$/i;
 
-const sensitiveName = /session|sso|auth|tokens?|keys?|credentials?|cookies?|secret|password|passwd|signing|keystore|keychain/i;
-const reviewableExtension = /\.(?:md|json|ya?ml|plist|xcconfig)$/i;
+const sensitiveName = /session|sso|o?auth(?!or|ori|ent|ic)|tokens?|keys?|credentials?|cookies?|secret|password|passwd|signing|keystore|keychain/i;
+// Text formats that may sit under a sensitive name only after the content scan (which covers cookie jars and session/token values).
+const scannedTextExtension = /\.(?:md|json)$/i;
 const privateKeyBlock = /-----BEGIN [A-Z ]*PRIVATE KEY-----/;
 
 export function safeSourcePath(name) {
@@ -15,38 +16,66 @@ export function safeSourcePath(name) {
   const filename = path.posix.basename(name);
   if (/cookie/i.test(filename) || /^(?:\.git-credentials|credentials|\.pgpass)$/i.test(filename)) return false;
   if (/private.*key/i.test(filename) && !sourceExtension.test(filename)) return false;
-  if (sensitiveName.test(filename) && !sourceExtension.test(filename) && !reviewableExtension.test(filename)) return false;
+  // A sensitive word anywhere in the path (directory or file name) is allowed only for source-code files and
+  // .md/.json text, all content-scanned. Other data/config under such names, HAR files and anything inside an
+  // `auth`/`.auth` directory (Playwright storage state) never cross.
+  if (name.split('/').some(part => sensitiveName.test(part)) && !sourceExtension.test(filename)
+      && !(scannedTextExtension.test(filename) && !/\.har\.json$/i.test(filename) && !name.split('/').some(part => /^\.?auth$/i.test(part)))) return false;
   return name.split('/').every(part => part && part !== '.' && part !== '..'
     && !/^(?:\.env.*|\.netrc|\.pypirc|\.ssh|\.aws|\.kube|\.docker|\.git|id_rsa.*|id_ed25519.*)$/i.test(part)
     && !/\.local\.(?:plist|json|xcconfig|ya?ml|toml|ini)$/i.test(part)
     && !/\.(?:pem|p12|pfx|jks|key|keystore|mobileprovision|provisionprofile|p8|cer|der|keychain.*)$/i.test(part));
 }
 
+// Obvious placeholders (example configs, docs, fixtures) and file paths are not secrets.
+const notPlaceholder = '(?!/|\\$|<|\\{|(?:replace|change|example|your|dummy|placeholder|fake|fixture|test|sample|redacted|xxx|password|secret)[^\\s]*)';
+// High-confidence secret formats: applied to every uploaded blob.
 const contentRules = [
   ['private-key-block', privateKeyBlock],
   ['npm-credential', /^[ \t]*(?:_auth(?:Token)?|\/\/[^\r\n]*?:(?:_auth(?:Token)?|_password))[ \t]*=/im],
-  ['aws-access-key-id', /AKIA[0-9A-Z]{16}/],
+  ['aws-access-key-id', /(?<![A-Za-z0-9])AKIA[0-9A-Z]{16}(?![A-Za-z0-9])/],
   ['slack-token', /xox[baprs]-/],
   ['github-token', /gh[pousr]_[A-Za-z0-9]{30,}/],
-  ['credential-assignment', /(?:password|passwd|secret|api[_-]?key|access[_-]?token)\s*[:=]\s*['"][^'"\s]{12,}['"]/i],
   ['jwt', /eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/],
   ['bearer-authorization', /Authorization:\s*Bearer\s+[A-Za-z0-9._~+/-]{16,}/i],
-  ['url-credentials', /[a-z][a-z0-9+.-]*:\/\/[^/\s:@]+:[^/\s@]{6,}@/i],
-  ['structured-credential', /"?(?:password|passwd|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret)"?\s*:\s*"?[^\s"]{12,}/i],
+  ['url-credentials', new RegExp('[a-z][a-z0-9+.-]*://[^/\\s:@$]+:' + notPlaceholder + '[^/\\s@${}]{6,}@', 'i')],
+];
+// Generic heuristics: applied to non-source files (docs, JSON, config, data), where captured login state lives.
+// Source code is exempt because test fixtures routinely contain fake values of these shapes.
+const dataRules = [
+  ['credential-assignment', new RegExp('(?:password|passwd|secret|api[_-]?key|access[_-]?token)\\s*[:=]\\s*[\'"]' + notPlaceholder + '[^\'"\\s]{12,}[\'"]', 'i')],
+  ['structured-credential', new RegExp('"?(?:password|passwd|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret)"?\\s*:\\s*"?' + notPlaceholder + '[^\\s"]{12,}', 'i')],
+  ['env-secret-assignment', new RegExp('(?:^|[\\s;])(?:export\\s+)?[A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|ACCESS_KEY|PRIVATE_KEY)(?!_FILE|_PATH)[A-Z0-9_]*\\s*=\\s*' + notPlaceholder + '[^\\s\'"$]{12,}', 'm')],
+  ['curl-user-credentials', /\bcurl\b[^\n]*\s-u\s*[^\s:]+:[^\s]{6,}/],
+  ['cookie-jar-json', /"cookies"\s*:\s*\[/],
+  ['session-token-value', new RegExp('"?(?:token|session(?:[_-]?id)?|sid|cookie)"?\\s*[:=]\\s*"?' + notPlaceholder + '[A-Za-z0-9._~+/=-]{20,}', 'i')],
+  ['bearer-value', /\bBearer\s+[A-Za-z0-9._~+/-]{20,}/],
 ];
 
 export function checkSourceContent(name, bytes) {
   const refuse = id => { throw Error('mini2 source content refused: ' + JSON.stringify(name) + ' (' + id + ')'); };
-  if (sensitiveName.test(path.posix.basename(name))) {
-    const sample = bytes.subarray(0, 8192);
-    let nuls = 0;
-    for (const byte of sample) if (byte === 0) nuls++;
-    if (nuls > sample.length / 10) refuse('binary-sensitive-name');
-  }
-  const text = bytes.toString('utf8');
-  for (const [id, pattern] of contentRules) if (pattern.test(text)) refuse(id);
-  for (const [encoded] of text.matchAll(/[A-Za-z0-9+/]{36,}={0,2}/g)) {
-    if (privateKeyBlock.test(Buffer.from(encoded, 'base64').toString('latin1'))) refuse('base64-private-key-block');
+  const sample = bytes.subarray(0, 8192);
+  let nuls = 0;
+  for (const byte of sample) if (byte === 0) nuls++;
+  // Binary blobs (models, images): only key blocks are meaningful; random bytes would trip text heuristics.
+  const binary = nuls > 0;
+  const rules = binary ? [contentRules[0]] : sourceExtension.test(path.posix.basename(name)) ? contentRules : [...contentRules, ...dataRules];
+  const scan = (text, active, base64 = true) => {
+    for (const [id, pattern] of active) if (pattern.test(text)) refuse(id);
+    if (base64) for (const [encoded] of text.matchAll(/[A-Za-z0-9+/]{36,}={0,2}/g)) {
+      for (let offset = 0; offset < 4; offset++) {
+        if (privateKeyBlock.test(Buffer.from(encoded.slice(offset), 'base64').toString('latin1'))) refuse('base64-private-key-block');
+      }
+    }
+  };
+  scan(bytes.toString(binary ? 'latin1' : 'utf8'), rules, !binary);
+  // UTF-16 text (any name): many NUL bytes. Decode both byte orders and scan with every rule.
+  if (nuls > sample.length / 10) {
+    // Binary content under a sensitive name (session.ts, auth.json, ...) could be a cookie/credential store.
+    if (name.split('/').some(part => sensitiveName.test(part))) refuse('binary-sensitive-name');
+    const all = [...contentRules, ...dataRules];
+    scan(bytes.toString('utf16le'), all);
+    if (bytes.length > 1) scan(Buffer.from(bytes.subarray(1)).toString('utf16le'), all);
   }
 }
 

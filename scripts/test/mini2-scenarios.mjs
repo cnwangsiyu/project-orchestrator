@@ -21,12 +21,14 @@ assert.equal(embedded.status,0,embedded.stdout+embedded.stderr);
 const cleanNames = ['session.ts', 'employee-auth.test.ts', 'fixture-token.mjs',
   'snapshot-key.mjs', 'private-key.ts', '.npmrc',
   'infra/deploy/sg/employee-auth/README.md', 'Fixtures/server-session-events.json',
-  'cookies/session-fixtures/ordinary.txt'];
+  'services/employee-auth/package.mjs', 'adapter/v6-fixture/authority.json'];
 for (const name of cleanNames) assert.equal(safeSourcePath(name), true, name);
 for (const name of ['.env', 'nested/.envrc', '.git/config', 'id_rsa', 'nested/id_ed25519.pub',
   'foo.p12', 'private-key.txt', 'Fixture.keychain-db', 'app.local.plist', 'nested/.docker/config.json',
   '.git-credentials', 'cookies.txt', 'token.txt', 'session.har', 'cookies.sqlite', '.binarycookies',
   'session.sqlite3', 'auth.db', 'session.cookies', 'key', 'cookie-fixture.ts', 'credentials', '.pgpass',
+  'cookies/session-fixtures/ordinary.txt', 'secrets/prod.txt', 'auth/staging', 'playwright/.auth/user.json',
+  'tests/.auth/admin.json', 'config/token.yml', 'auth.plist', 'session.har.json',
   '../safe.cc', '/safe.cc', 'C:/safe.cc', 'safe\x7f.cc']) assert.equal(safeSourcePath(name), false, name);
 const marker = '-----BEGIN ' + 'OPENSSH PRIVATE' + ' KEY-----';
 for (const name of cleanNames) {
@@ -41,13 +43,25 @@ for (const [rule, content] of [
   ['aws-access-key-id', 'AK' + 'IA' + '0'.repeat(16)],
   ['slack-token', 'xo' + 'xb-fake-fixture'],
   ['github-token', 'gh' + 'p_' + '0'.repeat(30)],
-  ['credential-assignment', 'pass' + 'word="' + '0'.repeat(12) + '"'],
 ]) assert.throws(() => checkSourceContent('source.ts', Buffer.from(content)), {
   message: 'mini2 source content refused: "source.ts" (' + rule + ')',
 });
+// Generic heuristics apply to data/docs only; source fixtures with fake values of these shapes pass.
+checkSourceContent('source.ts', Buffer.from('pass' + 'word="' + '0'.repeat(12) + '"'));
+for (const [rule, content] of [
+  ['credential-assignment', 'pass' + 'word="' + '0'.repeat(12) + '"'],
+  ['cookie-jar-json', '{"cook' + 'ies":[{"name":"sid"}]}'],
+  ['session-token-value', '{"session' + 'id":"' + 'Q9'.repeat(12) + '"}'],
+  ['bearer-value', '{"value":"Bear' + 'er ' + 'Q9'.repeat(12) + '"}'],
+  ['env-secret-assignment', 'export GITHUB_' + 'TOKEN=' + 'Q9'.repeat(8)],
+]) assert.throws(() => checkSourceContent('data.json', Buffer.from(content)), {
+  message: 'mini2 source content refused: "data.json" (' + rule + ')',
+});
+checkSourceContent('example.env', Buffer.from('API_' + 'TOKEN=replace-with-real-token-value\nSECRET_FILE=/run/secrets/x'));
 for (const [name, id, bytes] of [
   ['key.py', 'base64-private-key-block', Buffer.from(Buffer.from(marker + '\nfixture').toString('base64'))],
   ['session.ts', 'binary-sensitive-name', Buffer.from(marker, 'utf16le')],
+  ['notes.txt', 'private-key-block', Buffer.from(marker, 'utf16le')],
   ['server-session-events.json', 'jwt', Buffer.from(['ey' + 'J'+ 'a'.repeat(12), 'ey' + 'J' + 'b'.repeat(12), 'c'.repeat(16)].join('.'))],
   ['employee-auth.test.ts', 'bearer-authorization', Buffer.from('Author' + 'ization: Be' + 'arer ' + 'A'.repeat(20))],
   ['config.yaml', 'url-credentials', Buffer.from('https://' + 'fixture:' + 'z'.repeat(8) + '@example.invalid')],
