@@ -262,7 +262,17 @@ def isolation(run, cores):
     paths = {name:run/name for name in ("home","tmp","cache","DerivedData","ModuleCache","bin")}
     for folder in paths.values(): folder.mkdir(mode=0o700,exist_ok=True)
     wrapper = paths["bin"]/"xcodebuild"
-    wrapper.write_text('#!/bin/bash\nexec /usr/bin/xcodebuild "$@" -derivedDataPath "$MINI2_DERIVED_DATA" -jobs "$MINI2_JOBS" CLANG_MODULE_CACHE_PATH="$MINI2_MODULE_CACHE"\n')
+    wrapper.write_text('''#!/bin/bash
+for arg in "$@"; do
+    case "$arg" in
+        -version|-showsdks|-list|-showBuildSettings|-showBuildSettingsForIndex|-showdestinations|\\
+        -downloadPlatform|-downloadAllPlatforms|-importPlatform|-checkFirstLaunchStatus|-runFirstLaunch|-license)
+            exec /usr/bin/xcodebuild "$@"
+            ;;
+    esac
+done
+exec /usr/bin/xcodebuild "$@" -derivedDataPath "$MINI2_DERIVED_DATA" -jobs "$MINI2_JOBS" CLANG_MODULE_CACHE_PATH="$MINI2_MODULE_CACHE"
+''')
     wrapper.chmod(0o700)
     return dict(MINI2_TASK_HOME=str(paths["home"]),TMPDIR=str(paths["tmp"])+"/",
                 CCACHE_DIR=str(paths["cache"]),CCACHE_BASEDIR=str(run/"work"),

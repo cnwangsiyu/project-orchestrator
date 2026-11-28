@@ -4,6 +4,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shlex
 import signal
 import subprocess
 import sys
@@ -158,6 +159,39 @@ class RemoteTests(unittest.TestCase):
                 self.assertIn('CLANG_MODULE_CACHE_PATH="$MINI2_MODULE_CACHE"',wrapper)
             for name in ("MINI2_TASK_HOME","TMPDIR","CCACHE_DIR","MINI2_DERIVED_DATA","MINI2_MODULE_CACHE","XDG_CACHE_HOME","MINI2_TASK_BIN"):
                 self.assertEqual(len({env[name] for env in environments}),3,name)
+
+    def test_xcodebuild_only_adds_isolation_flags_to_build_actions(self):
+        with tempfile.TemporaryDirectory(prefix="mini2 wrapper ") as temp:
+            run = Path(temp)
+            env = m.isolation(run, 4)
+            wrapper = run / "bin" / "xcodebuild"
+            fake = run / "fake-xcodebuild"
+            fake.write_text('#!/bin/bash\nprintf "%s\\0" "$@"\n')
+            fake.chmod(0o700)
+            script = wrapper.read_text()
+            self.assertEqual(script.count("exec /usr/bin/xcodebuild "), 2)
+            wrapper.write_text(script.replace("/usr/bin/xcodebuild", shlex.quote(str(fake))))
+
+            cases = [
+                ["-version"], ["-showsdks"], ["-list", "-json"],
+                ["-workspace", "Fixture App.xcworkspace", "-scheme", "Fixture App", "-showBuildSettings"],
+                ["-scheme", "Fixture App", "-showdestinations"],
+                ["-showBuildSettingsForIndex"], ["-downloadPlatform", "iOS"],
+                ["-downloadAllPlatforms"], ["-importPlatform", "runtime image.dmg"],
+                ["-checkFirstLaunchStatus"], ["-runFirstLaunch"], ["-license"],
+            ]
+            def invoke(args):
+                result = subprocess.check_output([str(wrapper), *args], env={**os.environ, **env})
+                return result.decode().split("\0")[:-1]
+
+            for args in cases:
+                with self.subTest(args=args):
+                    self.assertEqual(invoke(args), args)
+            build = ["-scheme", "Fixture App", "build"]
+            self.assertEqual(invoke(build), [
+                *build, "-derivedDataPath", env["MINI2_DERIVED_DATA"], "-jobs", "4",
+                "CLANG_MODULE_CACHE_PATH=" + env["MINI2_MODULE_CACHE"],
+            ])
 
     def test_cleanup_checks_cache_files_and_excludes_its_guard(self):
         with tempfile.TemporaryDirectory() as temp,patch.object(m,"ROOT",Path(temp)/"runner"):
