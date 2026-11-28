@@ -228,6 +228,11 @@ def parse_config(content):
             values[name] = value
         else:
             setting, _, suffix = name[7:].partition('.') if name.startswith('DEVBOX_') else ('', '', '')
+            # devbox-run owns these host-scoped values and validates them when used.
+            if re.fullmatch(r'(?:[0-9]{1,3}\.){3}[0-9]{1,3}', suffix) and setting in (
+                    'EXTRA_ROOTS', 'TREE_PLACEMENT', 'TREE_PRIMARY_FLOOR_GIB',
+                    'TREE_SECONDARY_FLOOR_GIB', 'TREE_RESERVE_GIB', 'TREE_COLD_DAYS'):
+                continue
             if setting not in DEVBOX_DEFAULTS and not (setting == 'SOFT_EXCLUDE_MINUTES' and not suffix):
                 unknown.add(name); continue
             pattern = r'[A-Za-z0-9][A-Za-z0-9_.-]*' if suffix.startswith('project.') and setting.endswith('_DISK_GIB') else host

@@ -34,6 +34,22 @@ try{
  config('FUTURE_GATE.rule_one=alpha=beta\n');const future=run(['heavy-check']);eq(future.status,0,future.stderr);ok(future.stderr.includes('ignoring unknown machine.conf key FUTURE_GATE.rule_one'));
  for(const text of ['bad line\n','lowercase=1\n','LOAD_LIMIT=oops\n','LOAD_LIMIT=12\nLOAD_LIMIT=12\n','FUTURE_GATE=1\nFUTURE_GATE=2\n','LOAD_POLL_SECONDS=31\n']){fs.rmSync(path.join(state,'machine-last-good.json'),{force:true});config(text);eq(run(['heavy-check']).status,1,'invalid configuration without last-good fails closed');}
  config('LOAD_POLL_SECONDS=15\nFUTURE_GATE.rule_one=alpha\n');
+ const treeHost='192.0.2.1';
+ config([
+   'DEVBOX_EXTRA_ROOTS.'+treeHost+'=/scratch/tree',
+   'DEVBOX_TREE_PLACEMENT.'+treeHost+'=1',
+   'DEVBOX_TREE_PRIMARY_FLOOR_GIB.'+treeHost+'=53',
+   'DEVBOX_TREE_SECONDARY_FLOOR_GIB.'+treeHost+'=20',
+   'DEVBOX_TREE_RESERVE_GIB.'+treeHost+'=20',
+   'DEVBOX_TREE_COLD_DAYS.'+treeHost+'=3',
+   'DEVBOX_TREE_TYPO.'+treeHost+'=1', '',
+ ].join('\n'));
+ const treeSettings=run(['heavy-check']);
+ eq(treeSettings.status,0);
+ const warnings=treeSettings.stderr.split('\n').filter(line=>line.includes('ignoring unknown machine.conf'));
+ eq(warnings.length,1);
+ ok(warnings[0].includes('DEVBOX_TREE_TYPO.'+treeHost));
+ config('LOAD_POLL_SECONDS=15\nFUTURE_GATE.rule_one=alpha\n');
  const build=start(['wait-build',...args('build-reload'),'--timeout','2'],{RES_TEST_LOAD1M:'100'});
  await until(()=>fs.existsSync(path.join(root,'sleep.1')),build);
  const original=waiter('build-waiters','build-reload');ok(original);const order=original.order;
