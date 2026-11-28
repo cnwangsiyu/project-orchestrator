@@ -174,9 +174,8 @@ class RemoteTests(unittest.TestCase):
 
             cases = [
                 ["-version"], ["-showsdks"], ["-list", "-json"],
-                ["-workspace", "Fixture App.xcworkspace", "-scheme", "Fixture App", "-showBuildSettings"],
                 ["-scheme", "Fixture App", "-showdestinations"],
-                ["-showBuildSettingsForIndex"], ["-downloadPlatform", "iOS"],
+                ["-downloadPlatform", "iOS"],
                 ["-downloadAllPlatforms"], ["-importPlatform", "runtime image.dmg"],
                 ["-checkFirstLaunchStatus"], ["-runFirstLaunch"], ["-license"],
             ]
@@ -187,11 +186,15 @@ class RemoteTests(unittest.TestCase):
             for args in cases:
                 with self.subTest(args=args):
                     self.assertEqual(invoke(args), args)
-            build = ["-scheme", "Fixture App", "build"]
-            self.assertEqual(invoke(build), [
-                *build, "-derivedDataPath", env["MINI2_DERIVED_DATA"], "-jobs", "4",
-                "CLANG_MODULE_CACHE_PATH=" + env["MINI2_MODULE_CACHE"],
-            ])
+            # Build-settings queries keep the isolation flags so reported paths match the real build.
+            for build in (["-scheme", "Fixture App", "build"],
+                          ["-workspace", "Fixture App.xcworkspace", "-scheme", "Fixture App", "-showBuildSettings"],
+                          ["-showBuildSettingsForIndex"]):
+                with self.subTest(args=build):
+                    self.assertEqual(invoke(build), [
+                        *build, "-derivedDataPath", env["MINI2_DERIVED_DATA"], "-jobs", "4",
+                        "CLANG_MODULE_CACHE_PATH=" + env["MINI2_MODULE_CACHE"],
+                    ])
 
     def test_cleanup_checks_cache_files_and_excludes_its_guard(self):
         with tempfile.TemporaryDirectory() as temp,patch.object(m,"ROOT",Path(temp)/"runner"):

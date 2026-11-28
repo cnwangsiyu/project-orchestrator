@@ -265,7 +265,7 @@ def isolation(run, cores):
     wrapper.write_text('''#!/bin/bash
 for arg in "$@"; do
     case "$arg" in
-        -version|-showsdks|-list|-showBuildSettings|-showBuildSettingsForIndex|-showdestinations|\\
+        -version|-showsdks|-list|-showdestinations|\\
         -downloadPlatform|-downloadAllPlatforms|-importPlatform|-checkFirstLaunchStatus|-runFirstLaunch|-license)
             exec /usr/bin/xcodebuild "$@"
             ;;
