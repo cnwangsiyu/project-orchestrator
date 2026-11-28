@@ -362,4 +362,33 @@ os.setsid(); os.close(1); os.close(2); time.sleep(5); os._exit(0)
             with self.assertRaises(RuntimeError): m.collect(dict(runId=run.name,artifacts=["artifact"]))
             self.assertEqual(outside.read_text(),"fixture")
 
+class TransientIdentityTests(unittest.TestCase):
+    def test_transient_unreadable_pid_is_tolerated_only_in_supervision(self):
+        calls = {"n": 0}
+        def fake_identity(pid):
+            if pid == 2: raise RuntimeError("process identity unreadable")
+            return dict(pid=pid, ppid=1, pgid=pid, uid=501, start=[1, 0], version=pid, originalParentVersion=1)
+        with patch.object(m, "command", lambda *a, **k: "1\n2\n"), patch.object(m, "identity", fake_identity), patch.object(m.time, "sleep", lambda s: None):
+            m.unreadable_streak.clear()
+            with self.assertRaises(RuntimeError): m.processes()
+            self.assertEqual(set(m.processes(tolerant=True)), {1})
+            self.assertEqual(set(m.processes(tolerant=True)), {1})
+            with self.assertRaises(RuntimeError): m.processes(tolerant=True)
+        m.unreadable_streak.clear()
+        with patch.object(m, "command", lambda *a, **k: "1\n2\n"), patch.object(m, "identity", fake_identity), patch.object(m.time, "sleep", lambda s: None):
+            m.processes(tolerant=True)
+        with patch.object(m, "command", lambda *a, **k: "1\n"), patch.object(m, "identity", fake_identity):
+            m.processes(tolerant=True)
+        self.assertEqual(m.unreadable_streak, {})
+
+    def test_retry_recovers_a_briefly_unreadable_pid(self):
+        state = {"n": 0}
+        def flaky(pid):
+            state["n"] += 1
+            if state["n"] == 1: raise RuntimeError("process identity unreadable")
+            return dict(pid=pid, ppid=1, pgid=pid, uid=501, start=[1, 0], version=pid, originalParentVersion=1)
+        with patch.object(m, "command", lambda *a, **k: "7\n"), patch.object(m, "identity", flaky), patch.object(m.time, "sleep", lambda s: None):
+            self.assertEqual(set(m.processes()), {7})
+
+
 if __name__ == "__main__": unittest.main()

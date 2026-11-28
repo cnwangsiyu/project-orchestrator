@@ -144,12 +144,39 @@ def identity(pid):
                 originalParentVersion=combined.unique.original_parent_version)
 
 
-def processes():
+UNREADABLE_POLLS = 3
+unreadable_streak = {}
+
+
+def stable_identity(pid, attempts=3):
+    # A process caught mid-exec or mid-exit can be briefly unreadable; retry before treating it as evidence loss.
+    for attempt in range(attempts):
+        try: return identity(pid)
+        except RuntimeError:
+            if attempt == attempts - 1: raise
+            time.sleep(0.02)
+
+
+def processes(tolerant=False):
+    """Same-uid process table. Strict callers (baseline, settle, reconcile) fail on any pid that stays
+    unreadable after short retries. The supervision loop is tolerant: a pid stays unknown only while it is
+    unreadable, and the run fails when the same pid is unreadable for UNREADABLE_POLLS consecutive polls."""
     listing = command(["/bin/ps", "-U", str(os.getuid()), "-o", "pid="])
     rows = {}
+    seen = set()
     for value in listing.split():
-        row = identity(int(value))
+        pid = int(value)
+        try: row = stable_identity(pid)
+        except RuntimeError:
+            if not tolerant: raise
+            seen.add(pid)
+            unreadable_streak[pid] = unreadable_streak.get(pid, 0) + 1
+            if unreadable_streak[pid] >= UNREADABLE_POLLS: raise RuntimeError("process identity unreadable")
+            continue
         if row: rows[row["pid"]] = row
+    if tolerant:
+        for pid in list(unreadable_streak):
+            if pid not in seen: unreadable_streak.pop(pid)
     return rows
 
 
@@ -361,7 +388,7 @@ def execute_owned(data):
         last_sample = 0
         while child.poll() is None:
             try:
-                current = processes()
+                current = processes(tolerant=True)
                 for row in current.values():
                     if row["pgid"] == leader["pgid"] and row["start"] >= leader["start"]:
                         ownership[row["version"]]=True
