@@ -65,6 +65,26 @@ try {
     const data = await collect({ registry, leases: { held: [], registered: ['heavy-build', 'heavy-lane-1', 'heavy-lane-2'], complete: true, errors: [] }, journal: { events: [], complete: true, errors: [] }, probe: async (label) => ({ ps: '100 1 501 01:00 0.0 1024 S 00:00 Fri Nov 13 01:00:00 2026 xcodebuild --token=PRIVATE\n101 100 501 01:00 0.0 1024 S 00:00 Fri Nov 13 01:00:00 2026 clang -DPRIVATE\n', cwd: 'p100\nn/tmp/test\n', CPU: 'CPU usage: 10% user, 20% sys, 70% idle', 'memory pages': 'page size of 16384 bytes\nPages free: 1.\nPages inactive: 2.\nPages speculative: 3.\n', 'memory pressure': 'System-wide memory free percentage: 70%', swap: 'used = 0M', memorystatus: '50\n', 'heavy-check': 'load1m=2.00 avail=20.00GiB (memorystatus 50%) pages_headroom=18.00GiB swap_used=0.00GiB gate=OK' })[label] ?? '' });
     assert.equal(data.heavyRoots.length, 1); assert.equal(data.counts.native, 1); assert.equal(data.complete, true); assert.ok(!JSON.stringify(data).includes('PRIVATE')); assert.ok(!JSON.stringify(data).includes('_command'));
   });
+  await test('current res heavy-check output combines legacy and dynamic gates', async () => {
+    const legacy = 'thresholds source=machine.conf LOAD_LIMIT=12 LOAD_LIMIT_WITH_LANES=20 MIN_AVAIL_GIB=16 LANE3_LOAD=8 LANE3_AVAIL_GIB=32\n'
+      + 'load1m=2.00 limit=12 lanes_held=0 avail=32.00GiB (memorystatus 50%) pages_headroom=18.00GiB swap_used=0.00GiB gate=OK lane3=OPEN';
+    const dynamic = '\ndynamic_gate=CLOSED dynamic_reason=load dynamic_claims=3 dynamic_reserved=[4,8,4] dynamic_memory_floor_gib=8.0\n';
+    const sampleGate = async (stdout, exitCode) => (await collect({
+      registry: { complete: true, errors: [], tasks: [], mappings: [], projects: [] },
+      leases: { held: [], registered: [], complete: true, errors: [] }, journal: { events: [], complete: true, errors: [] },
+      probe: label => label === 'heavy-check' ? { stdout, exitCode } : '',
+    })).heavyGate;
+    const closed = await sampleGate(legacy + dynamic, 5);
+    assert.equal(closed.state, 'OVERLOADED');
+    assert.equal(closed.legacyState, 'OK');
+    assert.deepEqual(closed.dynamic, { state: 'CLOSED', reason: 'load', claims: 3 });
+    assert.equal(closed.lane3, 'OPEN');
+    const open = dynamic.replace('CLOSED', 'OPEN').replace('reason=load', 'reason=headroom');
+    assert.equal((await sampleGate(legacy + open, 0)).state, 'OK');
+    assert.equal((await sampleGate(legacy.replace('gate=OK', 'gate=OVERLOADED') + open, 5)).state, 'OVERLOADED');
+    assert.equal((await sampleGate(legacy + dynamic, 0)).state, 'UNKNOWN');
+    assert.equal((await sampleGate(legacy + dynamic.replace('CLOSED', 'bad'), 5)).state, 'UNKNOWN');
+  });
   await test('denied, timed-out, malformed probes retain partial UNKNOWN data', async () => {
     const options = { registry: { complete: true, errors: [], tasks: [], mappings: [], projects: [] },
       leases: { held: [], registered: ['heavy-build', 'heavy-lane-1', 'heavy-lane-2'], complete: true, errors: [] },

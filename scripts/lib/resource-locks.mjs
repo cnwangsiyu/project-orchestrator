@@ -78,6 +78,13 @@ export function parseHeavyCheck(text, exitCode = 0) {
   if (![0, 5].includes(exitCode)) return unknown('heavy-check metrics unavailable (output omitted)');
   const number = '(\\d+(?:\\.\\d+)?)';
   let source = String(text).trim(), loadGate = 12, lanesHeld = null;
+  // Current res appends the weighted controller verdict after the legacy reading.
+  let dynamic = null;
+  const dynamicLine = source.match(/\ndynamic_gate=(OPEN|CLOSED) dynamic_reason=([a-z0-9-]+) dynamic_claims=(\d+) dynamic_reserved=(\S+) dynamic_memory_floor_gib=(None|\d+(?:\.\d+)?)$/);
+  if (dynamicLine) {
+    dynamic = { state: dynamicLine[1], reason: dynamicLine[2], claims: Number(dynamicLine[3]) };
+    source = source.slice(0, dynamicLine.index);
+  }
   let thresholds = null;
   if (source.startsWith('thresholds ')) {
     const header = source.match(/^thresholds source=(defaults|machine\.conf) LOAD_LIMIT=(\S+) LOAD_LIMIT_WITH_LANES=(\S+) MIN_AVAIL_GIB=(\S+) LANE3_LOAD=(\S+) LANE3_AVAIL_GIB=(\S+)\n/);
@@ -108,7 +115,8 @@ export function parseHeavyCheck(text, exitCode = 0) {
   const darwin = source.match(new RegExp(`^load1m=${number} avail=${number}GiB \\((memorystatus \\d+%|memorystatus unavailable; pages fallback)\\) pages_headroom=${number}GiB swap_used=${number}GiB gate=(OK|OVERLOADED)$`));
   const linux = source.match(new RegExp(`^load1m=${number} headroom=${number} GiB gate=(OK|OVERLOADED)$`));
   if (!darwin && !linux) return unknown('unparseable heavy-check reading (output omitted)');
-  const m = darwin ?? linux, state = darwin ? m[6] : m[3];
+  const m = darwin ?? linux, legacyState = darwin ? m[6] : m[3];
+  const state = dynamic?.state === 'CLOSED' ? 'OVERLOADED' : legacyState;
   if (!(darwin ? [m[1], m[2], m[4], m[5]] : [m[1], m[2]]).every((v) => finite(+v))) return unknown('non-finite heavy-check metrics');
   if ((state === 'OK' ? 0 : 5) !== exitCode) return unknown('heavy-check exit/state mismatch');
   const level = darwin?.[3].match(/memorystatus (\d+)%/)?.[1];
@@ -117,7 +125,7 @@ export function parseHeavyCheck(text, exitCode = 0) {
     availableBasis: darwin ? level !== undefined ? 'memorystatus-level' : 'pages-fallback (sysctl explicitly missing)' : 'Linux MemAvailable',
     memorystatusPct: level === undefined ? null : +level, pageHeadroomBytes: darwin ? +m[4] * GIB : null,
     swapUsedBytes: darwin ? +m[5] * GIB : null, limit: loadGate, lanes_held: lanesHeld,
-    loadGate, lanesHeld, lane3, memoryGateGiB: thresholds?.MIN_AVAIL_GIB ?? 16, thresholds,
+    loadGate, lanesHeld, lane3, ...(dynamic ? { legacyState, dynamic } : {}), memoryGateGiB: thresholds?.MIN_AVAIL_GIB ?? 16, thresholds,
     controllerPolicy: thresholds && v12 ? 'v1.6-machine-gates' : lane3 && v12 ? 'v1.3-lane-aware' : v12 ? 'v1.2-lane-aware' : 'legacy-fixed-12',
     note: 'Controller state is authoritative; printed load/memory readings are rounded to 0.01, so do not recompute boundary verdicts.' };
 }
