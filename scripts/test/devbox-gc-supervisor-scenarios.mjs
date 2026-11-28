@@ -11,7 +11,8 @@ import { remoteScripts } from '../devbox-run.mjs';
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'devbox-gc-supervisor-'));
 const bin = path.join(temp, 'bin'), shared = path.join(temp, 'shared'), root = path.join(temp, 'devbox-run');
 for (const dir of [bin, shared, root, path.join(shared, 'locks'), path.join(temp, 'home')]) fs.mkdirSync(dir, { recursive: true });
-const registry = ['devbox-cn-1', 'devbox-cn-light-1'].map(slot => `${slot}\tremote\topen\t-\tfixture nobody@192.0.2.1 caps=node`).join('\n');
+const registry = [['devbox-cn-1', '192.0.2.1'], ['devbox-cn-2', '192.0.2.1'], ['devbox-cn-light-1', '192.0.2.1'],
+  ['devbox-cn-3', '192.0.2.2']].map(([slot, host]) => `${slot}\tremote\topen\t-\tfixture nobody@${host} caps=node`).join('\n');
 fs.writeFileSync(path.join(shared, 'resources.tsv'), registry + '\n');
 
 // Linux runs the supervisor unchanged. On macOS only Linux kernel interfaces
@@ -65,38 +66,45 @@ const payload=wire.match(/'([A-Za-z0-9+/=]+)'$/)?.[1];
 if(!payload)throw Error('missing payload');
 const d=JSON.parse(Buffer.from(payload,'base64')); event(op,{slot:d.slot,control:d.control});
 if(op==='probe')console.log(JSON.stringify({root,cores:8,fs:root,user:d.user,probedAt:new Date().toISOString()}));
-else if(op==='inventory')console.log(JSON.stringify([{slot:'devbox-cn-1'}]));
+else if(op==='inventory')console.log(JSON.stringify(a.includes('nobody@192.0.2.1')
+  ? [{slot:'devbox-cn-1',workspace:root+'/wt/fixture/id-1234567890abcdef/devbox-cn-1'},{slot:'devbox-cn-2'}]
+  : [{slot:'devbox-cn-3'}]));
 else if(op==='inspect')fs.mkdirSync(d.control,{recursive:true});
 else if(op==='run') {
-  // Only maintenance's command is stubbed; the real supervisor still consumes
-  // the exact GC request, including its slot, and publishes all control receipts.
-  d.command='sleep .1; printf '+"'"+'{"reclaimedBytes":7}\n'+"'";
+  // Stub the tree command while exercising the real supervisor and slot lifecycle.
+  const failed=d.slot==='devbox-cn-1';
+  const receipt=failed ? {slot:d.slot,tree:'1234567890ab',failed:'tree check or removal failed'} : {reclaimedBytes:1073741824};
+  d.command='sleep .1; printf '+"'"+JSON.stringify(receipt)+'\n'+"'"+(failed?'; exit 1':'');
   const r=cp.spawnSync('python3',[path.join(temp,'adapter.py'),supervisor,Buffer.from(JSON.stringify(d)).toString('base64')],{encoding:'utf8',timeout:15000});
   process.stdout.write(r.stdout||'');process.stderr.write(r.stderr||'');process.exit(r.status??1);
 } else if(op==='cleanup') {
   const group=JSON.parse(fs.readFileSync(path.join(d.control,'group.json'))), done=JSON.parse(fs.readFileSync(path.join(d.control,'done.json')));
-  if(!done.gone||done.exit!==0)throw Error('supervisor did not confirm shutdown');
+  if(!done.gone||done.exit!==(group.slot==='devbox-cn-1'?1:0))throw Error('supervisor did not confirm shutdown');
   try {process.kill(group.pid,0);throw Error('command remains alive');}catch(e){if(e.code!=='ESRCH')throw e;}
   event('group-gone',{slot:group.slot});console.log('group-gone');
 } else throw Error('unexpected SSH operation: '+op);
 `, { mode: 0o755 });
 
 try {
-  const result = spawnSync(process.execPath, [fileURLToPath(new URL('../devbox-run.mjs', import.meta.url)), 'gc', '--host', '192.0.2.1'], {
+  const result = spawnSync(process.execPath, [fileURLToPath(new URL('../devbox-run.mjs', import.meta.url)), 'gc'], {
     env: { ...process.env, HOME: path.join(temp, 'home'), PATH: `${bin}:${process.env.PATH}`, RULES_SHARED: shared, RES_DIR: shared, DEVBOX_CACHE_DIR: shared, RES_COMMAND: 'res' },
     encoding: 'utf8', timeout: 45000,
   });
-  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(result.status, 1, result.stdout + result.stderr);
   const events = fs.readFileSync(path.join(temp, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
-  const runs = events.filter(event => event.op === 'run'); assert.equal(runs.length, 2, 'expired worktree and maintenance paths');
+  const runs = events.filter(event => event.op === 'run');
+  assert.deepEqual(runs.map(run => run.slot), ['devbox-cn-1', 'devbox-cn-2', 'devbox-cn-light-1', 'devbox-cn-3', 'devbox-cn-3']);
   for (const run of runs) {
     const group = JSON.parse(fs.readFileSync(path.join(run.control, 'group.json')));
     assert.equal(group.run, path.basename(run.control)); assert.equal(group.slot, run.slot); assert.equal(group.workspace, root);
     assert.ok(Number.isInteger(group.pid) && group.pid > 0); assert.ok(typeof group.start === 'string' && group.start.length);
-    const gone = events.findIndex(event => event.op === 'group-gone' && event.slot === run.slot);
-    assert.ok(gone >= 0 && events.findIndex(event => event.op === 'return' && event.slot === run.slot) > gone);
+    const current = events.indexOf(run);
+    const gone = events.findIndex((event, index) => index > current && event.op === 'group-gone' && event.slot === run.slot);
+    assert.ok(gone > current && events.findIndex((event, index) => index > current && event.op === 'return' && event.slot === run.slot) > gone);
   }
   assert.deepEqual(fs.readdirSync(path.join(shared, 'locks')), []);
-  assert.match(result.stdout, /reclaimedGiB=/);
-  console.log(`PASS GC CLI through generated supervisor: both acquired slots recorded, confirmed shutdown before return (${process.platform === 'linux' ? 'native Linux' : 'macOS kernel adapter'})`);
+  assert.equal(result.stdout.match(/"failed":"tree check or removal failed"/g)?.length, 1);
+  assert.match(result.stdout, /reclaimedGiB=4\.000/);
+  assert.match(result.stdout, /failedJobs=1/);
+  console.log(`PASS GC records a failed tree and continues across slots and hosts, confirming shutdown before each return (${process.platform === 'linux' ? 'native Linux' : 'macOS kernel adapter'})`);
 } finally { fs.rmSync(temp, { recursive: true, force: true }); }

@@ -38,7 +38,7 @@ function coldTree(slot, treeRoot = secondary) {
     fs.writeFileSync(path.join(source, '.npmrc'), 'engine-strict=true\n');
     fs.symlinkSync('source.txt', path.join(source, 'source-link'));
     execFileSync('git', ['-C', source, 'add', '.']); execFileSync('git', ['-C', source, 'commit', '-qm', 'fixture']);
-    execFileSync('git', ['--git-dir=' + repo, 'fetch', '-q', source, 'HEAD:refs/heads/main']);
+    execFileSync('git', ['--git-dir=' + repo, 'fetch', '-q', source, 'HEAD:refs/heads/main', 'HEAD:refs/remotes/origin/main']);
   }
   fs.mkdirSync(path.dirname(ws), { recursive: true });
   execFileSync('git', ['--git-dir=' + repo, 'worktree', 'add', '-q', '--detach', ws, 'main']);
@@ -122,6 +122,42 @@ try {
   assert.equal(python("print(json.dumps(tree_evict(d)))", linked).path, linked.workspace);
   assert.ok(fs.existsSync(path.join(kept.workspace, 'source.txt')), 'eviction did not follow the ignored link');
 
+  const local = coldTree('devbox-cn-24', root);
+  const inLocal = (...args) => execFileSync('git', ['-C', local.workspace, ...args]);
+  const evict = () => python("print(json.dumps(tree_evict(d)))", local);
+  const legacyGc = () => {
+    const data = Buffer.from(JSON.stringify({ ...local, days: 2 })).toString('base64');
+    const result = spawnSync('python3', ['-c', remoteScripts.gc, data], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout);
+  };
+  const original = inLocal('rev-parse', 'HEAD').toString().trim();
+  for (const flag of ['--assume-unchanged', '--skip-worktree']) {
+    inLocal('update-index', flag, 'source.txt');
+    fs.appendFileSync(path.join(local.workspace, 'source.txt'), 'hidden edit');
+    assert.equal(evict().skipped, 'uncommitted edits');
+    inLocal('update-index', flag.replace('--', '--no-'), 'source.txt');
+    inLocal('restore', 'source.txt');
+  }
+  const commitLocal = () => {
+    inLocal('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'local work');
+    return inLocal('rev-parse', 'HEAD').toString().trim();
+  };
+  const unpublished = commitLocal();
+  inLocal('tag', 'local-tag', unpublished);
+  assert.equal(evict().skipped, 'local commits', 'a local tag does not publish detached HEAD');
+  assert.equal(legacyGc().skipped, 'local commits');
+  assert.equal(inLocal('rev-parse', 'HEAD').toString().trim(), unpublished);
+  inLocal('branch', 'local-work', unpublished);
+  inLocal('checkout', '-q', '--detach', original);
+  assert.equal(evict().skipped, 'local commits', 'another local branch protects the tree');
+  assert.equal(legacyGc().skipped, 'local commits');
+  inLocal('checkout', '-q', '--detach', unpublished);
+  const pushedTip = commitLocal();
+  inLocal('update-ref', 'refs/remotes/origin/published', pushedTip);
+  inLocal('checkout', '-q', '--detach', unpublished);
+  assert.equal(evict().path, local.workspace, 'an ancestor of a remote-tracking tip is retained by the store');
+
   const foreign = path.join(temp, 'foreign'); fs.mkdirSync(foreign); fs.writeFileSync(path.join(foreign, 'keep'), 'outside');
   const linkRoot = path.join(temp, 'linked-root'); fs.symlinkSync(foreign, linkRoot);
   refused({ ...kept, treeConfig: { ...config, extraRoots: [linkRoot] }, treeRoot: linkRoot });
@@ -130,7 +166,8 @@ try {
   const hashedRepo = path.join(root, 'repos/fixture', hashedStore);
   const hashedWs = path.join(secondary, 'wt/fixture', hashedStore, 'devbox-cn-5');
   execFileSync('git', ['init', '--bare', '-q', hashedRepo]);
-  execFileSync('git', ['--git-dir=' + hashedRepo, 'fetch', '-q', kept.repository, 'refs/heads/main:refs/heads/main']);
+  execFileSync('git', ['--git-dir=' + hashedRepo, 'fetch', '-q', kept.repository,
+    'refs/heads/main:refs/heads/main', 'refs/heads/main:refs/devbox-run/' + original]);
   fs.mkdirSync(path.dirname(hashedWs), { recursive: true });
   execFileSync('git', ['--git-dir=' + hashedRepo, 'worktree', 'add', '-q', '--detach', hashedWs, 'main']);
   const hashed = { ...kept, slot: 'devbox-cn-5', workspace: hashedWs, repository: hashedRepo, days: 2 };
@@ -147,6 +184,16 @@ try {
   fs.writeFileSync(path.join(hashedWs, '.env'), '');
   assert.deepEqual(invokeGc(), { slot: hashed.slot, tree: hashedStore.slice(3, 15), skipped: 'protected local state' });
   fs.unlinkSync(path.join(hashedWs, '.env'));
+  const unreadable = spawnSync('python3', ['-c', gc.replace("d['coldOnly']=True", String.raw`
+def unreadable(*args,**kwargs): kwargs['onerror'](PermissionError('fixture unreadable directory'))
+os.walk=unreadable
+d['coldOnly']=True
+`)], { input: JSON.stringify(hashed), encoding: 'utf8' });
+  assert.equal(unreadable.status, 1);
+  assert.deepEqual(JSON.parse(unreadable.stdout), {
+    slot: hashed.slot, tree: hashedStore.slice(3, 15), failed: 'tree check or removal failed',
+  });
+  assert.ok(fs.existsSync(hashedWs));
   const gcReceipt = invokeGc();
   assert.equal(gcReceipt.reason, 'cold');
   assert.equal(gcReceipt.tree, hashedStore.slice(3, 15));
@@ -241,11 +288,11 @@ with patch.object(pathlib.Path,'resolve',resolve):
   assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'wt-map.json'))).slots['devbox-cn-20']['fixture/id-fixture'].treeRoot, root);
 
   // Preserve unrelated land-7 scripts; pin intentional supervisor/cleanup,
-  // donor-completeness, input diagnostics and the hardware probe separately.
+  // donor-completeness, input diagnostics, the hardware probe and GC separately.
   const legacyWire = value => value.replaceAll('|[A-Za-z0-9][A-Za-z0-9_.-]*-[1-9][0-9]*', '');
   const hash = value => createHash('sha256').update(legacyWire(value)).digest('hex');
-  const nonRun = Object.fromEntries(Object.entries(remoteScripts).filter(([operation]) => !['run', 'submodule', 'checkout', 'cleanup', 'reconnect', 'input-exists', 'probe'].includes(operation)));
-  assert.equal(hash(JSON.stringify(nonRun)), '16260909d3a7ddde7ed6e8c3004784500ca251241e7526e9363d14e12a2f8dc9', 'unrelated remote scripts retain land-7 bytes except dynamic lease syntax');
+  const nonRun = Object.fromEntries(Object.entries(remoteScripts).filter(([operation]) => !['run', 'submodule', 'checkout', 'cleanup', 'reconnect', 'input-exists', 'probe', 'gc'].includes(operation)));
+  assert.equal(hash(JSON.stringify(nonRun)), '61f054fe78012ba7a13400fbf54fb879881d4e00a1ed525549db77823c920eaf', 'unrelated remote scripts retain land-7 bytes except dynamic lease syntax');
   assert.equal(hash(remoteScripts.probe), '266f43d35379eb247cf9c12b961594fd7a9b69818ebcbb6d664a8b37f9c878a6', 'hardware probe measures the registered root and reports OS/architecture for placement');
   assert.equal(hash(remoteScripts['input-exists']), 'c7833da1018f3e20a66668d29ee5566123efc51e3fec9a3419a1fc8951bdfccf', 'input creation diagnostic uses validated paths and stat-only existence checks');
   assert.equal(hash(remoteScripts.checkout), '162239ccf56fc01ed8ccb1239f1821525146932fa4f2744e800779c2aba9130e', 'checkout snapshot includes pinned donor completeness check');

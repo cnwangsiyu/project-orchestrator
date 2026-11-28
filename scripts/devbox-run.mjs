@@ -20,7 +20,7 @@ import { controlOptions, muxFailure, muxRetrySafe } from './lib/devbox-ssh.mjs';
 import { retentionPython } from './lib/devbox-retention.mjs';
 import { cleanupEvidencePython } from './lib/devbox-cleanup-pending.mjs';
 import { runTmpdirPython } from './lib/devbox-tmpdir.mjs';
-import { gcTreeId, treeSettings, treePreference, treeScript } from './lib/devbox-trees.mjs';
+import { gcTreeId, treeGitRetentionPython, treeSettings, treePreference, treeScript } from './lib/devbox-trees.mjs';
 
 const script = fileURLToPath(import.meta.url);
 const GiB = 1024 ** 3;
@@ -1054,7 +1054,7 @@ if file.exists():
     if records.get('run')!=ctl.name: raise RuntimeError('unit timing run mismatch')
 print(json.dumps(records))
 `,
-  gc: pythonHeader + `import subprocess, fcntl, shutil
+  gc: pythonHeader + treeGitRetentionPython + `import subprocess, fcntl, shutil, re
 root=pathlib.Path(d['root']); ws=pathlib.Path(d['workspace']); repo=pathlib.Path(d['repository'])
 before=os.statvfs(root); before=before.f_bavail*before.f_frsize
 if not ws.resolve().is_relative_to((root/'wt').resolve()) or not repo.resolve().is_relative_to((root/'repos').resolve()): raise RuntimeError('GC path outside runner root')
@@ -1064,6 +1064,12 @@ with open(str(repo)+'.lock','a') as lock:
     if meta.exists():
         row=json.loads(meta.read_text())
         if row['slot']!=d['slot'] or row['lastUsed']>=time.time()-d['days']*86400: sys.exit(0)
+        git=['git','--no-optional-locks','--no-replace-objects','-C',str(ws)]
+        index=subprocess.check_output(git+['ls-files','-v','-z']).split(b'\\0')
+        skipped=tree_git_retention_reason(git,repo.resolve(),index)
+        if skipped:
+            tree_gc_receipt(d,{'skipped':skipped})
+            sys.exit(0)
         subprocess.run(['git','--git-dir='+str(repo),'worktree','remove','--force',str(ws)],check=True)
     subprocess.run(['git','--git-dir='+str(repo),'worktree','prune'],check=True)
     subprocess.run(['git','-c','gc.autoDetach=false','--git-dir='+str(repo),'gc','--auto'],check=True)
@@ -2303,8 +2309,9 @@ async function planPrewarm(opts, state) {
 }
 
 async function collectGarbage({ rows, days = 7, host, state, emit = text => process.stdout.write(text), skipSlot }) {
-  let reclaimed = 0;
+  let reclaimed = 0, failures = 0;
   for (const row of [...new Map(rows.filter(row => row.target && (!host || row.host === host)).map(row => [row.host, row])).values()]) {
+    if (state.cancel) break;
     const root = await hostRoot(row, state);
     const inventory = JSON.parse(checked(await ssh(row, 'inventory', { root, days }, { state }), 'GC inventory'));
     // One extra short lease performs repo/image maintenance even with no expired trees.
@@ -2314,7 +2321,12 @@ async function collectGarbage({ rows, days = 7, host, state, emit = text => proc
     for (const item of jobs) {
       const member = rows.find(r => r.slot === item.slot && r.host === row.host);
       if (item.slot === skipSlot || state.cancel) continue;
-      const skipped = reason => emit(JSON.stringify({ slot: item.slot, tree: gcTreeId(item.workspace), skipped: reason }) + '\n');
+      const receipt = { slot: item.slot, tree: gcTreeId(item.workspace) };
+      const skipped = reason => emit(JSON.stringify({ ...receipt, skipped: reason }) + '\n');
+      const failed = (reason, exit) => {
+        failures++;
+        if (reason) emit(JSON.stringify({ ...receipt, failed: reason, exit }) + '\n');
+      };
       if (!member) { skipped('slot not mapped'); continue; }
       const by = `devbox-gc-${process.pid}-${randomUUID()}`;
       const take = await executeRes(['take', member.slot, '--by', by, '--project', 'devbox-run', '--task', 'gc', '--for', 'expired worktree cleanup', '--maintenance', '--pid', String(process.pid)], { state });
@@ -2332,21 +2344,31 @@ async function collectGarbage({ rows, days = 7, host, state, emit = text => proc
       const control = `${root}/gc/${randomUUID()}`;
       try {
         // Inventory is rechecked by gc AFTER leasing. GC itself gets the same supervisor.
-        checked(await ssh(row, 'inspect', { root, control, reuseAllowed: false, repository: item.repository || `${root}/repos/.gc-unused`, commit: '0'.repeat(40) }, { state }), 'GC preparation');
+        const prep = await ssh(row, 'inspect', { root, control, reuseAllowed: false, repository: item.repository || `${root}/repos/.gc-unused`, commit: '0'.repeat(40) }, { state });
+        if (prep.code) { failed('GC preparation failed', prep.code); continue; }
         const op = item.maintenance ? 'maintenance' : 'gc';
         const result = await ssh(row, 'run', { workspace: root, control, slot: member.slot, command: remoteCommand(op, treeScript(op, remoteScripts[op], pythonHeader, data), data), env: {}, seconds: 120 }, { state, timeout: 140000, onOutput: emit });
         const cleanup = await ssh(row, 'cleanup', { control, started: true }, { state, cancellable: false, timeout: 35000 });
         clean = cleanup.code === 0 && cleanup.stdout.includes('group-gone');
         if (!clean) throw Error(`BLOCKED: GC cleanup unconfirmed; retaining ${member.slot}`);
-        checked(result, 'GC');
-        for (const line of result.stdout.split('\n')) { try { reclaimed += JSON.parse(line).reclaimedBytes || 0; } catch {} }
+        let reportedFailure = false;
+        for (const line of result.stdout.split('\n')) {
+          try {
+            const result = JSON.parse(line);
+            reclaimed += result.reclaimedBytes || 0;
+            reportedFailure ||= typeof result.failed === 'string';
+          } catch {}
+        }
+        if (reportedFailure) failed();
+        else if (result.code) failed(item.maintenance ? 'maintenance failed' : 'tree check or removal failed', result.code);
       } finally {
         if (clean) checked(await executeRes(['return', member.slot, '--by', by], { state, cancellable: false, timeout: 30000 }), 'GC slot return');
       }
     }
   }
   emit(`reclaimedGiB=${(reclaimed / GiB).toFixed(3)}\n`);
-  return reclaimed;
+  if (failures) emit(`failedJobs=${failures}\n`);
+  return failures;
 }
 
 function cancellationState(values = []) {
@@ -3453,8 +3475,8 @@ async function main(args) {
     try {
       const rows = [...readRegistry(sharedDir(), 'devbox-cn'), ...readRegistry(sharedDir(), 'devbox-cn-light')];
       if (opts.host && !rows.some(row => row.host === opts.host)) throw Error('GC host has no open mapped slots');
-      await collectGarbage({ rows, days: opts.days, host: opts.host, state });
-      return state.cancel;
+      const failures = await collectGarbage({ rows, days: opts.days, host: opts.host, state });
+      return state.cancel || (failures ? 1 : 0);
     } finally { clearInterval(watch); await closeControlConnections(state); }
   }
   opts.maskScope = prepareRunOutput(opts.out, { prefix: 'devbox-run-output-' });

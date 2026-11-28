@@ -63,9 +63,34 @@ export function treePreference(rows, inventory, project, store, preferredHost) {
     : best.rank === 1 ? 'empty slot tree inventory' : 'least recently used slot', lastUsed: best.lastUsed };
 }
 
+export const treeGitRetentionPython = String.raw`
+def tree_git_retention_reason(git,repo,index):
+    common=subprocess.check_output(git+['rev-parse','--path-format=absolute','--git-common-dir'],text=True).strip()
+    if pathlib.Path(common).resolve()!=repo: return 'foreign git worktree'
+    # These index flags can hide local edits from status.
+    if any(entry.startswith((b'h ',b'S ',b's ')) for entry in index): return 'uncommitted edits'
+    dirty=subprocess.check_output(git+['status','--porcelain','--untracked-files=all'],text=True)
+    if dirty: return 'uncommitted edits'
+    # A runner import is pinned by an explicit ref in the bare store. Local heads,
+    # tags and other refs do not establish that a commit was pushed or imported.
+    unpublished=subprocess.check_output(git+['rev-list','--max-count=1','HEAD','--branches','--not',
+        '--remotes','--glob=refs/devbox-run/*'],env={**os.environ,'GIT_NO_LAZY_FETCH':'1','GIT_ALLOW_PROTOCOL':''})
+    if unpublished: return 'local commits'
+    return None
+
+def tree_gc_receipt(d, result):
+    match=re.match(r'id-([a-f0-9]{12})',pathlib.Path(d['workspace']).parent.name,re.I)
+    receipt={'slot':d['slot'],'tree':match[1] if match else None}
+    if 'skipped' in result: receipt['skipped']=result['skipped']
+    elif 'failed' in result: receipt['failed']=result['failed']
+    else: receipt.update(reason=result['reason'],reclaimedBytes=result['bytes'])
+    print(json.dumps(receipt))
+`;
+
 // Shared by opt-in runner operations and the owner-only eviction entry point.
 export const treePython = String.raw`
 import fcntl, re, subprocess, tempfile, math
+${treeGitRetentionPython}
 TREE_GIB=1073741824
 def tree_roots(d):
     primary=pathlib.Path(d['root']); config=d['treeConfig']
@@ -260,9 +285,9 @@ def tree_process_live(ws,proc_root=pathlib.Path('/proc')):
         except OSError: return True
     return False
 
-def tree_protected_state(ws, git):
+def tree_protected_state(ws,index):
     protected=re.compile(r'^(?:\.env(?:\..*)?|\.ssh|\.netrc|\.npmrc|login|cookies?|sessions?)$|\.(?:pem|p12|pfx|key|keystore)$',re.I)
-    tracked={entry[2:] for entry in subprocess.check_output(git+['ls-files','-v','-z']).split(b'\0') if entry.startswith(b'H ')}
+    tracked={entry[2:] for entry in index if entry.startswith(b'H ')}
     def fail(error): raise error
     for parent,dirs,files in os.walk(ws,followlinks=False,onerror=fail):
         for name in dirs+files:
@@ -276,22 +301,13 @@ def tree_protected_state(ws, git):
 
 def tree_retention_reason(ws,repo):
     if tree_process_live(ws): return 'live or unknown process'
-    git=['git','--no-optional-locks','-C',str(ws)]
-    common=subprocess.check_output(git+['rev-parse','--path-format=absolute','--git-common-dir'],text=True).strip()
-    if pathlib.Path(common).resolve()!=repo: return 'foreign git worktree'
-    dirty=subprocess.check_output(git+['status','--porcelain','--untracked-files=all'],text=True)
-    if dirty: return 'uncommitted edits'
+    git=['git','--no-optional-locks','--no-replace-objects','-C',str(ws)]
+    index=subprocess.check_output(git+['ls-files','-v','-z']).split(b'\0')
+    skipped=tree_git_retention_reason(git,repo,index)
+    if skipped: return skipped
     # Git removes the symlink itself and leaves its target alone. Never follow links in this scan.
-    if tree_protected_state(ws,git): return 'protected local state'
+    if tree_protected_state(ws,index): return 'protected local state'
     return None
-
-def tree_gc_receipt(d, result):
-    match=re.match(r'id-([a-f0-9]{12})',pathlib.Path(d['workspace']).parent.name,re.I)
-    receipt={'slot':d['slot'],'tree':match[1] if match else None}
-    if 'skipped' in result: receipt['skipped']=result['skipped']
-    elif 'failed' in result: receipt['failed']=result['failed']
-    else: receipt.update(reason=result['reason'],reclaimedBytes=result['bytes'])
-    print(json.dumps(receipt))
 
 def tree_evict(d):
     primary=pathlib.Path(d['root']); ws=pathlib.Path(d['workspace']); root=pathlib.Path(d['treeRoot'])
