@@ -266,6 +266,15 @@ try {
   assert.deepEqual(ignored.processProbe.ignoredUnreadableOwnComms, { sshd: 1 });
   assert.equal(ignored.processProbe.uncertaintyUnattributed, 0);
 
+  for (const [error, reclaimed] of [['EACCES', 3], ['EPERM', 3], ['EIO', 0]]) {
+    const f = groupFixture();
+    f.process(1234, 1234);
+    const cwdPath = JSON.stringify(path.join(f.proc, '1234/cwd'));
+    const setup = "import errno\n" +
+      `original_readlink=os.readlink\ndef readlink(file,*a,**kw):\n    if pathlib.Path(file)==pathlib.Path(${cwdPath}): raise OSError(errno.${error}, 'fixture')\n    return original_readlink(file,*a,**kw)\nos.readlink=readlink`;
+    assert.equal(invoke(f, setup).bytes, reclaimed, error);
+  }
+
   for (const uid of [0, 1000]) {
     for (const scoped of [true, false]) {
       const f = groupFixture(); f.process(1234, 1234, null, '42', uid);

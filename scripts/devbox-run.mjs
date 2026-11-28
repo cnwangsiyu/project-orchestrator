@@ -503,11 +503,15 @@ def process_snapshot(proc_root,probe):
             probe['ignoredOtherUid']+=1
             row['ignored']=True
             rows.append(row); continue
-        cwd=None; cwd_readable=False; paths=[]
+        cwd=None; cwd_readable=False; cwd_hidden=False; paths=[]
         try: cwd=probe_link(process/'cwd'); cwd_readable=cwd is not None
         except (OSError,ValueError,RuntimeError) as error:
             if not process_exists(process): continue
-            probe['cwdErrors']+=1; errors.append('cwd unreadable ('+type(error).__name__+')')
+            probe['cwdErrors']+=1
+            cwd_hidden=uid==os.geteuid() and isinstance(error,PermissionError)
+            if not cwd_hidden: errors.append('cwd unreadable ('+type(error).__name__+')')
+            cwd_missing=isinstance(error,(FileNotFoundError,ProcessLookupError))
+        else: cwd_missing=cwd is None
         fd_readable=False; fd_denied=False
         try:
             descriptors=list((process/'fd').iterdir()); fd_readable=not descriptors
@@ -521,7 +525,7 @@ def process_snapshot(proc_root,probe):
             except (FileNotFoundError,ProcessLookupError): continue # A closed descriptor no longer holds a file.
             except (OSError,ValueError,RuntimeError) as error:
                 fd_denied=True; probe['fdErrors']+=1; errors.append('fd link unreadable ('+type(error).__name__+')')
-        if uid==os.geteuid() and not cwd_readable and fd_denied and not fd_readable:
+        if uid==os.geteuid() and (cwd_hidden or cwd_missing) and fd_denied and not fd_readable:
             probe['ignoredUnreadableOwn']+=1
             names=probe['ignoredUnreadableOwnComms']; names[comm]=names.get(comm,0)+1
             row['ignored']=True

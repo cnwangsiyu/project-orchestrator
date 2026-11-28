@@ -120,7 +120,36 @@ try {
   refused({ ...kept, treeConfig: { ...config, extraRoots: [linkRoot] }, treeRoot: linkRoot });
   assert.equal(fs.readFileSync(path.join(foreign, 'keep'), 'utf8'), 'outside');
   const removed = coldTree('devbox-cn-4');
-  const deletion = python("print(json.dumps(tree_evict(d)))", removed);
+  const proc = path.join(temp, 'fixture-proc');
+  const pid = path.join(proc, '1234');
+  fs.mkdirSync(pid, { recursive: true });
+  fs.symlinkSync(path.join(removed.workspace, 'build'), path.join(pid, 'cwd'));
+  const evictWithProc = error => python(String.raw`
+import errno
+from unittest.mock import patch
+proc=pathlib.Path(d['proc'])
+live=tree_process_live
+tree_process_live=lambda ws:live(ws,proc)
+original=pathlib.Path.resolve
+def resolve(self,*args,**kwargs):
+    if self==proc/'1234'/'cwd' and d['error']:
+        code=getattr(errno,d['error'])
+        raise OSError(code,os.strerror(code))
+    return original(self,*args,**kwargs)
+with patch.object(pathlib.Path,'resolve',resolve):
+    print(json.dumps(tree_evict(d)))
+`, { ...removed, proc, error });
+  assert.equal(evictWithProc('EIO').skipped, 'live or unknown process');
+  assert.equal(evictWithProc(null).skipped, 'live or unknown process');
+  for (const error of ['EACCES', 'EPERM']) {
+    // A denied cwd must not hide another process with a real cwd in the tree.
+    const otherPid = path.join(proc, '1235');
+    fs.mkdirSync(otherPid);
+    fs.symlinkSync(removed.workspace, path.join(otherPid, 'cwd'));
+    assert.equal(evictWithProc(error).skipped, 'live or unknown process');
+    fs.rmSync(otherPid, { recursive: true });
+  }
+  const deletion = evictWithProc('EACCES');
   assert.equal(deletion.path, removed.workspace); assert.ok(deletion.bytes > 0); assert.equal(deletion.reason, 'cold');
   assert.ok(!fs.existsSync(removed.workspace)); assert.ok(fs.existsSync(kept.workspace));
   const fresh = coldTree('devbox-cn-5');
@@ -188,7 +217,7 @@ try {
   assert.equal(hash(remoteScripts['input-exists']), 'c7833da1018f3e20a66668d29ee5566123efc51e3fec9a3419a1fc8951bdfccf', 'input creation diagnostic uses validated paths and stat-only existence checks');
   assert.equal(hash(remoteScripts.checkout), '162239ccf56fc01ed8ccb1239f1821525146932fa4f2744e800779c2aba9130e', 'checkout snapshot includes pinned donor completeness check');
   assert.equal(hash(remoteScripts.submodule), 'c6143ab3755aeb71b0f56d09d3e465d2e291b9f55491809330c53941b3c3d6a0', 'submodule snapshot includes pinned donor completeness and offline legacy-clone pin import');
-  assert.equal(hash(remoteScripts.run), '0438d90db7523d9e33443e72d948b38f14583ec4af7b5394bc94a14d186c8413', 'run wire snapshot includes owned TMPDIR handling and cleanup reason counters');
+  assert.equal(hash(remoteScripts.run), 'ca3049171a6dabe13f0be9d6d77b1f9dd2b3b41c60a2b675a3ce740ed441c999', 'run wire snapshot includes the scoped cwd permission handling');
   assert.equal(hash(remoteScripts.cleanup), '3136aefe64ad220eff3bae5b7fc07eb9c5080247c812efbc3679041ec9c06ac4', 'cleanup wire snapshot includes guarded read-only owned-tree TMPDIR removal');
   assert.equal(hash(remoteScripts.reconnect), 'f295dcd2e9b544f8880451391c4eb59e36748e9be32410c200ea986482b09a73', 'reconnect wire snapshot includes guarded read-only owned-tree TMPDIR recovery');
   for (const [operation, source] of Object.entries(remoteScripts)) assert.equal(treeScript(operation, source, '', {}), source, 'legacy script unchanged: ' + operation);

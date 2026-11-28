@@ -244,12 +244,13 @@ def tree_guard(d):
         if disk.f_bavail*disk.f_frsize<roots[root]*TREE_GIB:
             print('DEVBOX_LAUNCH_DISK_GUARD',file=sys.stderr); sys.exit(72)
 
-def tree_process_live(ws):
+def tree_process_live(ws,proc_root=pathlib.Path('/proc')):
     # Unknown process evidence preserves the tree. Do not read argv/environment.
-    for process in pathlib.Path('/proc').glob('[0-9]*'):
+    for process in proc_root.glob('[0-9]*'):
         try:
             if process.stat().st_uid!=os.getuid(): continue
-            cwd=(process/'cwd').resolve(strict=True)
+            try: cwd=(process/'cwd').resolve(strict=True)
+            except PermissionError: continue # cwd hidden from us (LSM denial or exec race); slot leases still protect leased trees.
             if cwd==ws or cwd.is_relative_to(ws): return True
         except (FileNotFoundError,ProcessLookupError): continue
         except OSError: return True
