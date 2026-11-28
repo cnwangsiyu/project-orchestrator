@@ -182,11 +182,13 @@ function appendCleanOids(file, oids) {
 }
 
 let activeBatch;
-async function readBatch(repo, oids, consume) {
+export async function readBatch(repo, oids, consume, state) {
   if (!oids.length) return;
   await new Promise((resolve, reject) => {
     const child = spawn('git', ['-C', repo, 'cat-file', '--batch'], { stdio: ['pipe', 'pipe', 'ignore'] });
     activeBatch = child;
+    const stop = signal => child.kill(signal);
+    state?.children.add(stop);
     let pending = Buffer.alloc(0), current, index = 0, failure;
     const fail = error => {
       failure ||= error;
@@ -218,9 +220,11 @@ async function readBatch(repo, oids, consume) {
     child.on('error', fail);
     child.on('close', code => {
       if (activeBatch === child) activeBatch = undefined;
+      state?.children.delete(stop);
       if (!failure && (code || current || pending.length || index !== oids.length)) failure = Error('git cat-file batch did not return every blob');
       if (failure) reject(failure); else resolve();
     });
+    if (state?.cancel) stop('SIGTERM');
     child.stdin.end(`${oids.join('\n')}\n`);
   });
 }

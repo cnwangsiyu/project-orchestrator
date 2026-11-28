@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { execute, snapshot, makeBundle } from './devbox-run.mjs';
 import { redactLogFile } from './lib/log-redaction.mjs';
 import { prepareRunOutput, assertMaskTarget, scopeForDirectory } from './lib/masking-scope.mjs';
-import { checkAllowlist, checkWorktree } from './lib/mini2-source.mjs';
+import { checkAllowlist, checkWorktree, checkUploads } from './lib/mini2-source.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const quote = value => `'${String(value).replaceAll("'", "'\\''")}'`;
@@ -111,7 +111,7 @@ export async function main(argv) {
   const evidence = { runId, at: new Date().toISOString(), host: 'Bytedances-Mac-mini.local' };
   const operation = (name, data, options={}) => remote(name,data,{maskScope,errorFile:path.join(opts.out,'operation-error.log'),...options});
   try {
-    // Names first: do not inspect, package or read a sensitive-looking source.
+    // Reject forbidden paths before reading or packaging source.
     const git=async arguments_ => {
       const result=await execute('git',['-C',opts.repo,...arguments_],{state});
       if(result.code) throw Error('mini2 source inventory failed');
@@ -137,6 +137,7 @@ export async function main(argv) {
     if (source.extra || source.modules.length) throw Error('Darwin qualification supports tracked source and tracked worktree patches only');
     const bundle = await makeBundle(source, [], state);
     const uploads = { 'source.bundle': bundle, ...(source.patchFile ? { 'worktree.patch': source.patchFile } : {}) };
+    await checkUploads({ allowed, bundle, patchFile: source.patchFile, commit: source.commit, temp, execute, state });
     evidence.commit = source.commit;
     evidence.uploads = Object.fromEntries(Object.entries(uploads).map(([name,file]) => [name, { bytes: fs.statSync(file).size, sha256: digest(file) }]));
     write(path.join(opts.out, 'upload-list.json'), evidence.uploads);
