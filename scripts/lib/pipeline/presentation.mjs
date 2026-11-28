@@ -79,7 +79,7 @@ export function presentRoute(plan, view, context) {
   const priorityGuard = personalPriorityGuard(snapshot);
   if (priorityGuard) why.push(`personal ${snapshot.personalPriority.account}-first window paused: ${priorityGuard}`);
   if (t.needsCli.length) notes.push('signed-in CLIs need the full-access sandbox (keychain); stay read-only by instruction: queries only, no writes');
-  else if (t.needsRes) notes.push('The worker sandbox adds the res state directory as a writable root.');
+  else if (t.needsRes) notes.push('The hub worker sandbox adds a per-task res scratch directory as a writable root.');
   else if (f['read-only']) notes.push('read-only sandbox: keychain-backed CLIs (lark-cli, bytedcli) will not work; add --needs-cli if the task must use them');
   if(['implement','implement-hard','build-run','debug','ui-browser'].includes(t.category))fixedNotes.push(sourceDigest.worker.split('\n').find(line=>line.startsWith('- Project dependencies'))??'');
   const noReview=projectReviewPolicy(t.project,snapshot.projectProfiles).profile==='no-review'&&!mandatoryReview(t);
