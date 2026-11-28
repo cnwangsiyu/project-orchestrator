@@ -77,6 +77,16 @@ export function parsePs(text) {
   }
   return { rows, errors };
 }
+// Keep name-only fallback rows distinct from full process identities.
+export function parsePsFallback(text) {
+  return text.split('\n').flatMap(line => {
+    const m = line.match(/^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+(?:\.\d+)?)\s+(\d+)\s+(.+?)\s*$/);
+    if (!m) return [];
+    const [, pid, ppid, uid, cpu, rss, name] = m;
+    return [{ pid: +pid, ppid: +ppid, uid: +uid, cpuPct: +cpu, rssBytes: +rss * 1024,
+      elapsedSeconds: null, cpuSeconds: null, state: null, started: null, _command: name }];
+  });
+}
 export function parseCwd(text) {
   const result = new Map(); let pid;
   for (const line of text.split('\n')) {

@@ -7,7 +7,7 @@ import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { attribute, category, commandName, GIB, LOG, SHARED, parseCpu, parseCwd, parsePs, parseSwap, parseVm, readLeases, readRegistry, unsafeFile } from './lib/resource-data.mjs';
+import { attribute, category, commandName, GIB, LOG, SHARED, parseCpu, parseCwd, parsePs, parsePsFallback, parseSwap, parseVm, readLeases, readRegistry, unsafeFile } from './lib/resource-data.mjs';
 import { lockSnapshot, matchBuildLock, observeWaiters, parseHeavyCheck, parseHeavyStatus, readLockJournal, workload } from './lib/resource-locks.mjs';
 import { parseCcacheStats, parseHubListeners } from './lib/resource-extras.mjs';
 import { readHubDiagnostics } from './lib/hub-state.mjs';
@@ -48,6 +48,15 @@ export async function collect({ registry = null, budgetMs = 1750, cpuBudgetMs = 
       return typeof result?.stdout === 'string' ? result.stdout : failProbe(label, 'invalid probe result');
     } catch (e) { return failProbe(label, e?.killed ? 'timeout' : 'unavailable'); }
   };
+  const processProbe = async () => {
+    const parsed = parsePs(await run('ps', '/bin/ps', ['-axo', 'pid=,ppid=,uid=,etime=,pcpu=,rss=,state=,time=,lstart=,command=']));
+    errors.push(...parsed.errors);
+    if (parsed.rows.length && !parsed.errors.length && !failedProbes.has('ps')) return parsed.rows;
+    failProbe('ps', 'empty/malformed process listing / UNKNOWN');
+    const fallback = parsePsFallback(await run('ps fallback', '/bin/ps', ['-axco', 'pid=,ppid=,uid=,pcpu=,rss=,comm=']));
+    if (!fallback.length) failProbe('ps fallback', 'empty/malformed process listing');
+    return fallback.length ? fallback : parsed.rows;
+  };
   const gateProbe = async () => {
     try {
       const result = await callProbe('heavy-check', path.join(shared, 'res'), ['heavy-check'], {
@@ -71,8 +80,8 @@ export async function collect({ registry = null, budgetMs = 1750, cpuBudgetMs = 
   };
   const ccacheExe = ['/opt/homebrew/bin/ccache', '/usr/local/bin/ccache', '/usr/bin/ccache'].find((f) => fs.existsSync(f)) ?? '/opt/homebrew/bin/ccache';
   const cacheDir = path.join(os.homedir(), '.vesdk-dev/ccache');
-  const [ps, cwdText, cpuText, vmText, pressureText, swapText, memLevel, heavyGate, hubsReading, cacheReading] = await Promise.all([
-    run('ps', '/bin/ps', ['-axo', 'pid=,ppid=,uid=,etime=,pcpu=,rss=,state=,time=,lstart=,command=']),
+  const [processRows, cwdText, cpuText, vmText, pressureText, swapText, memLevel, heavyGate, hubsReading, cacheReading] = await Promise.all([
+    processProbe(),
     run('cwd', '/usr/sbin/lsof', ['-nP', '-a', '-u', String(process.getuid()), '-d', 'cwd', '-Fpfn']),
     run('CPU', '/usr/bin/top', ['-l', '2', '-s', '1', '-n', '0']),
     run('memory pages', '/usr/bin/vm_stat', []),
@@ -94,11 +103,9 @@ export async function collect({ registry = null, budgetMs = 1750, cpuBudgetMs = 
   }
   leases ??= readLeases(shared);
   journal ??= readLockJournal(shared);
-  const parsed = parsePs(ps), cwds = parseCwd(cwdText);
-  errors.push(...parsed.errors);
-  if (!parsed.rows.length || parsed.errors.length) failProbe('ps', 'empty/malformed process listing / UNKNOWN');
+  const cwds = parseCwd(cwdText);
   if (!cwds.size) failProbe('cwd', 'empty/malformed cwd listing / UNKNOWN');
-  const rows = parsed.rows.map((p) => ({ ...p, cwd: cwds.get(p.pid) ?? null }));
+  const rows = processRows.map((p) => ({ ...p, cwd: cwds.get(p.pid) ?? null }));
   const owners = attribute(rows, registry), cpu = parseCpu(cpuText), vm = parseVm(vmText);
   const swapUsedBytes = parseSwap(swapText);
   const pressureValue = Number(pressureText.match(/free percentage:\s*(\d+)%/)?.[1]);
@@ -111,8 +118,8 @@ export async function collect({ registry = null, budgetMs = 1750, cpuBudgetMs = 
   if (swapUsedBytes === null) failProbe('swap', 'empty/malformed swap reading');
   if (!validLevel) failProbe('memorystatus', 'empty/malformed memorystatus reading; fallback is diagnostic only');
   const totalBytes = os.totalmem(), availableBytes = validLevel ? totalBytes * level / 100 : vm?.pageHeadroomBytes ?? null;
-  const processes = rows.map(({ _command, ...p }) => ({ ...p, id: `${p.pid}:${p.started}:${crypto.createHash('sha256').update(_command).digest('hex').slice(0, 16)}`, name: commandName(_command), kind: category(_command), owner: owners.get(p.pid) }));
-  const processComplete = parsed.rows.length > 0 && !failedProbes.has('ps'), t = Date.now();
+  const processComplete = !failedProbes.has('ps'), t = Date.now();
+  const processes = (processComplete ? rows : [...rows].sort((a, b) => b.cpuPct - a.cpuPct).slice(0, 20)).map(({ _command, ...p }) => ({ ...p, id: `${p.pid}:${p.started}:${crypto.createHash('sha256').update(_command).digest('hex').slice(0, 16)}`, name: commandName(_command), kind: category(_command), owner: owners.get(p.pid) }));
   const heavyLocks = lockSnapshot(leases, rows, { host: os.hostname(), psStartedAt, now: t, processComplete });
   heavyLocks.journal = journal;
   heavyLocks.waiters = observeWaiters(rows, processes, psStartedAt);
@@ -123,7 +130,7 @@ export async function collect({ registry = null, budgetMs = 1750, cpuBudgetMs = 
   const heavy = new Set(['xcodebuild', 'gradle', 'native', 'node-test']);
   const byPid = new Map(processes.map((p) => [p.pid, p]));
   const scopes = new Map(rows.filter((p) => heavy.has(category(p._command))).map((p) => [p.pid, workload(p, rows)]));
-  const heavyRoots = processes.filter((p) => {
+  const heavyRoots = (processComplete ? processes : []).filter((p) => {
     if (!heavy.has(p.kind)) return false;
     const scope = scopes.get(p.pid).class;
     let q = p; const seen = new Set([p.pid]);

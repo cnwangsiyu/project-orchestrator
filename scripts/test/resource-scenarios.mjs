@@ -95,12 +95,36 @@ try {
         if (label === 'hub listeners') assert.equal(data.hubs.state, 'UNKNOWN');
       }
     }
+    let fallbackCalls = 0;
+    const fallback = await collect({ ...options, registry: { ...options.registry, mappings: [{ path: '/tmp/test', project: 'p' }] }, budgetMs: 30, probe: (label, bin, args, { signal }) => {
+      if (label === 'ps') return new Promise(() => {});
+      if (label !== 'ps fallback') return readings[label];
+      fallbackCalls++;
+      assert.equal(bin, '/bin/ps');
+      assert.ok(args.includes('pid=,ppid=,uid=,pcpu=,rss=,comm='));
+      assert.equal(signal.aborted, false);
+      return Array.from({ length: 26 }, (_, j) => `${100 + j} ${j ? 100 : 1} 501 ${j}.0 ${1000 + j} clang`).join('\n');
+    } });
+    assert.equal(fallbackCalls, 1);
+    assert.equal(fallback.probeTimeouts['ps fallback'], 30);
+    assert.equal(fallback.processComplete, false);
+    assert.equal(fallback.counts.native, null);
+    assert.equal(fallback.heavyLocks.waitersComplete, false);
+    assert.equal(fallback.processes.length, 20);
+    assert.deepEqual(fallback.topCpu, fallback.processes.map(p => p.id));
+    const [top] = fallback.processes;
+    assert.deepEqual([top.pid, top.name, top.cpuPct, top.rssBytes], [125, 'clang', 25, 1025 * 1024]);
+    assert.equal(top.owner.evidence, 'ancestor:100');
+    const timedOut = await collect({ ...options, budgetMs: 20, probe: label =>
+      label.startsWith('ps') ? new Promise(() => {}) : readings[label] });
+    assert.deepEqual(timedOut.failedProbes, ['ps', 'ps fallback']);
+    assert.deepEqual(timedOut.processes, []);
     const blocked = await collect({ ...options, probe: (label) => {
       if (['ps', 'CPU', 'swap', 'memorystatus'].includes(label)) throw Object.assign(Error('PRIVATE'), { code: 'EPERM' });
       return readings[label];
     } });
     assert.equal(blocked.complete, false); assert.equal(blocked.cpu, null); assert.equal(blocked.memory.swapUsedBytes, null);
-    assert.deepEqual(new Set(blocked.failedProbes), new Set(['ps', 'CPU', 'swap', 'memorystatus']));
+    assert.deepEqual(new Set(blocked.failedProbes), new Set(['ps', 'ps fallback', 'CPU', 'swap', 'memorystatus']));
     assert.ok(blocked.disk.freeBytes > 0); assert.equal(blocked.hubs.state, 'ALL_MISSING');
   });
   await test('synthetic 24h utilisation, overlapping roots and owner shares', () => {
