@@ -101,6 +101,7 @@ export const saveLaunch = (account, thread, opts, owner, evidence = {}) => {
     // --force-large permits a turn without clearing the provider's size evidence.
     writeJson(file, { account, thread, t: Date.now(), defaults, effort: opts.effort ?? record?.effort ?? null, ...evidence,
       ...(record?.requestBufferExceededAt != null ? { requestBufferExceededAt: record.requestBufferExceededAt } : {}),
+      ...(record?.retirement ? { retirement: record.retirement } : {}),
       ...(record?.ownerInterrupts ? { ownerInterrupts: record.ownerInterrupts } : {}),
       ...(record?.transportRetry ? { transportRetry: record.transportRetry } : {}) });
   });
@@ -168,3 +169,30 @@ export const recordLaunchModel = (account, thread, turn, evidence) => {
       writeJson(file, { ...record, turn, ...evidence, modelObservedAt: Date.now() });
   });
 };
+
+const retireAfterMs = 6 * 60 * 60 * 1000;
+export function retirementHint(record, now = Date.now(), turn = record?.turn) {
+  const stats = record?.retirement;
+  const activeMs = turn && turn === record?.turn && turn !== stats?.measuredTurn && Number.isFinite(record.t)
+    ? Math.max(0, now - record.t) : 0;
+  const turnHours = ((stats?.turnMs ?? 0) + activeMs) / 3600000, steers = stats?.steers ?? 0;
+  return turnHours >= retireAfterMs / 3600000 || steers >= 15
+    ? `large-thread: ${record.thread}: ${turnHours.toFixed(1)}h of turn time, ${steers} steers; consider retiring this thread` : null;
+}
+
+export function recordRetirementEvidence(account, thread, turn, event, now = Date.now()) {
+  const file = launchFile(account, thread);
+  return withLock(file, () => {
+    const record = readLaunch(file);
+    if (!record) return null;
+    const retirement = { ...record.retirement };
+    if (event === 'steer') retirement.steers = (retirement.steers ?? 0) + 1;
+    if (event === 'ended' && record.turn === turn && retirement.measuredTurn !== turn) {
+      retirement.turnMs = (retirement.turnMs ?? 0) + (Number.isFinite(record.t) ? Math.max(0, now - record.t) : 0);
+      retirement.measuredTurn = turn;
+    }
+    const next = { ...record, retirement };
+    writeJson(file, next);
+    return retirementHint(next, now, turn);
+  });
+}

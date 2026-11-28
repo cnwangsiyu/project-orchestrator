@@ -74,9 +74,10 @@ import { parseRouteArgs, routeFlag, rerouteWorker, turnHasWork, heldTaskResource
 import { notifyQueueOwner, queueNoticeDue, pendingQueueChoice, claimQueueChoice, deferQueueChoice, settleQueueChoice, queueChoiceResult,
   queueSourceArgs, queueRouteContext, automaticQueueOption, queueOptionPlan, queueChoiceSafety } from './lib/queue-decision.mjs';
 import { queuePolicy } from './lib/queue-stall-watch.mjs';
-import { sharedCliEnv, resWorkerSandbox, resWorkerSandboxVerified, inheritedLaunch, savedLaunch, saveLaunch, recordLaunchModel, readRequestBufferExceededAt, markRequestBufferExceeded, markOwnerInterrupt, ownerInterruptAt } from './lib/worker-launch.mjs';
+import { sharedCliEnv, resWorkerSandbox, resWorkerSandboxVerified, inheritedLaunch, savedLaunch, saveLaunch, recordLaunchModel, readRequestBufferExceededAt, markRequestBufferExceeded, markOwnerInterrupt, ownerInterruptAt, retirementHint, recordRetirementEvidence } from './lib/worker-launch.mjs';
 import { recordWorkerOutcome, reviewSeat, reviewInstructions } from './lib/worker-outcome.mjs';
 import { workerResultInstructions } from './lib/worker-result.mjs';
+import { isIncoherentFinal } from './lib/worker-final-quality.mjs';
 import { completionKind } from './lib/worker-completion.mjs';
 import { claimTransportContinuation, markTransportContinuationStarting, saveTransportContinuation } from './lib/worker-launch.mjs';
 import { TRANSPORT_BACKOFF_MS, TRANSPORT_CONTINUE_MESSAGE, transportHealthBlock, transportQuotaBlock, transportSourceBlock, boundedTransportRead } from './lib/worker-transport-retry.mjs';
@@ -322,6 +323,10 @@ const largeThreadMessage = (thread, reason) => {
   tracker?.result('needs-user', { thread: thread ?? null, settled: true, mayRun: false, phase: 'thread-size', reason: 'thread-too-large', finalLine: line });
   return line;
 };
+if (cmd === 'turn' && opts.thread) {
+  const hint = retirementHint(savedLaunch(account ?? 'main', opts.thread), Date.now(), null);
+  if (hint) console.log(hint);
+}
 if (cmd === 'turn' && opts.thread && !opts['force-large']) {
   let limits;
   try { limits = sizeLimits(opts); } catch (e) { die(e.message, 2); }
@@ -1243,11 +1248,11 @@ let maskAudit = ['start', 'turn', 'wait'].includes(cmd) ? captureMaskAudit({
   startedAt: cmd === 'wait' && Number.isFinite(originalAuditStart) ? originalAuditStart : Date.now(), resumed: cmd === 'wait',
   paths: [logFile, typeof opts.out === 'string' ? opts.out : null],
   taskDirectory: opts['task-dir'] ?? auditContext?.taskDir ?? (logFile || typeof opts.out === 'string' ? path.dirname(logFile || opts.out) : null) }) : null;
-const redactEndedTurn = (thread = activeTurn?.threadId ?? attemptThreadId ?? opts.thread) => {
+const redactEndedTurn = (thread = activeTurn?.threadId ?? attemptThreadId ?? opts.thread, out = opts.out) => {
   if (!tracker) return Promise.resolve();
   done = true; stopFollowing();
   redactionPromise ??= redactWorkerTurn({ home: PROF?.home ?? process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex'),
-    thread, log: logFile, out: typeof opts.out === 'string' ? path.resolve(opts.out) : null, tracker, maskAudit,
+    thread, log: logFile, out: typeof out === 'string' ? path.resolve(out) : null, tracker, maskAudit,
     checkIdle: () => checkThreadIdle((method, params) => call(method, params, { audit: false }), thread,
       { statusOnly: redactionStatusOnly }) });
   return redactionPromise;
@@ -1452,6 +1457,12 @@ const report = async (threadId, turn, final, usage, observation = {}) => {
     if (loaded?.items?.length) turn = { ...turn, items: loaded.items };
     final = lastMessage(turn.items);
   }
+  let ageHint;
+  if (!observation.unconfirmed && ['completed', 'failed', 'interrupted'].includes(turn.status)) {
+    try { ageHint = recordRetirementEvidence(account ?? 'main', threadId, turn.id, 'ended'); }
+    catch { console.error('retirement hint: launch metadata unavailable'); }
+    if (ageHint) console.log(ageHint);
+  }
   const resourceState = completionLeases({ ...tracker?.metadata(), by: opts.by, account: account ?? 'main', thread: threadId,
     project: opts.project ?? tracker?.metadata().project, task: opts.task ?? tracker?.metadata().task, name: opts.name });
   const rawPolicyBlock = isPolicyBlock(turn);
@@ -1466,6 +1477,31 @@ const report = async (threadId, turn, final, usage, observation = {}) => {
   const truncated = completion?.status === 'TRUNCATED' ? completion : null;
   const uncertain = completion?.status === 'uncertain' ? completion : null;
   if (completion) turn = { ...turn, status: completion.status };
+  if (turn.reason === 'incoherent-final' || (!completion && turn.status === 'completed' && isIncoherentFinal(final))) {
+    const reason = 'incoherent-final';
+    const taskDir = opts['task-dir'] ?? tracker?.metadata().taskDir ?? (logFile ? path.dirname(logFile) : null);
+    const base = opts.out ?? (taskDir ? path.join(taskDir, 'codex-last.md') : null);
+    const ext = base ? path.extname(base) : '';
+    const out = base ? path.resolve(base.slice(0, base.length - ext.length) + '.incoherent' + (ext || '.md')) : null;
+    let saved = null;
+    if (out && final) {
+      try {
+        assertMaskTarget(out);
+        fs.writeFileSync(out, final + '\n', { mode: 0o600 });
+        saved = out;
+      } catch { console.error('incoherent-final: could not save the quarantined final'); }
+    }
+    outcomeTurn = { ...turn, status: 'failed', error: { message: reason } };
+    outcomeFinal = '';
+    const finalLine = `${reason}${ageHint ? ' — consider retiring this thread' : ''}`;
+    console.log(`turn failed: ${finalLine}${saved ? ` (recorded in ${saved})` : ''}`);
+    tracker?.result('failed', { thread: threadId, turn: turn.id, status: 'failed', settled: true,
+      mayRun: false, reason, finalLine, outFile: saved ?? (turn.reason === reason ? tracker?.metadata().outFile : null) });
+    await redactEndedTurn(threadId, saved);
+    await finish(1);
+    return;
+  }
+
   if (PROF?.kind === 'ttadk' && turn.status === 'completed') outcomeInput = usage?.inputTokens;
   if (PROF?.kind === 'trae' && !observation.unconfirmed) saveQueue(PROF.home, threadId, { state: 'ready', turnId: turn.id, at: Date.now() });
   if (!actualModel || PROF?.kind === 'ttadk') observeModel(rolloutTurnModel(PROF?.home ?? process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex'),
@@ -1640,7 +1676,8 @@ const report = async (threadId, turn, final, usage, observation = {}) => {
       ...(ownerInterrupted ? { interruptedAt } : {}),
       ...(truncated ? { mayRun: !!observation.unconfirmed, settled: !observation.unconfirmed, leases: truncated.leases, continuation } : {}),
       reason: completion ? completion.reasons.join('; ') : rejectedModel ? 'review model rejected' : turn.status === 'completed' ? null : JSON.stringify(turn.error ?? turn.status),
-      finalLine: maskPasswordStyleValues(final?.split('\n').find((line) => line.trim()) ?? '').text });
+      finalLine: [maskPasswordStyleValues(final?.split('\n').find((line) => line.trim()) ?? '').text,
+        ageHint ? 'consider retiring this thread' : ''].filter(Boolean).join(' — ') });
   const infrastructureMiss = (['trae','ttadk'].includes(PROF?.kind)&&failureKind(errorText)==='unavailable')||(PROF?.kind==='trae'&&/access (temporarily )?restricted|\b983\b/i.test(errorText));
   if (!(strictReviewModel && modelMismatch) && turn.status === 'failed' && ROUTE_ARGS && !BACKGROUND && !workStarted && !turnHasWork(turn) && !final
     && (infrastructureMiss || (policyBlock && (routeFlag(ROUTE_ARGS, 'security') || routeFlag(ROUTE_ARGS, 'adversarial'))))) {
@@ -2197,6 +2234,10 @@ try {
     const t = await currentTurn(opts.thread, resumed?.thread);
     if (!t || t.status !== 'inProgress') die(`no turn in progress (last: ${t?.status ?? 'none'}); use \`turn\` to start a new one`, 3);
     const r = await call('turn/steer', { threadId: opts.thread, expectedTurnId: t.id, input: textInput(text) });
+    try {
+      const hint = recordRetirementEvidence(account ?? 'main', opts.thread, t.id, 'steer');
+      if (hint) console.log(hint);
+    } catch { console.error('retirement hint: launch metadata unavailable'); }
     const queue = PROF?.home ? readQueue(PROF.home,opts.thread) : null;
     const queued = queue?.turnId === t.id && ['queued','waiting'].includes(queue.state);
     const age = Number.isFinite(queue?.since) ? Math.max(0,(Date.now()-queue.since)/60000).toFixed(1) : '?';

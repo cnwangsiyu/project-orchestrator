@@ -451,7 +451,7 @@ export const hookEventLine = row => row.event === 'owner-interrupted' ? ownerInt
   ? `[queue-stalled] ${clean(row.summary, Math.max(0, 480 - row.choiceCommand.length))}\n${row.choiceCommand}`
   : ['message', 'question', 'answered'].includes(row.event) ? eventLine(row)
   : row.event === 'truncated' ? `${eventLine({ ...row, outFile: '' }, '')}: read the recorded output and act`
-  : row.event === 'failed' ? `worker ${clean(row.name ?? row.thread ?? '-', 120).trim()} failed: ${readResultInstruction(row)} (${eventIdentity(row)})`
+  : row.event === 'failed' ? `worker ${clean(row.name ?? row.thread ?? '-', 120).trim()} failed: ${row.reason === 'incoherent-final' ? 'incoherent-final; ' : ''}${readResultInstruction(row)} (${eventIdentity(row)})`
   : `worker ${eventLine({ ...row, name: String(row.name ?? row.thread ?? '-').slice(0, 120), outFile: '' }, '').replaceAll('\t', ' ').trim()}: ${readResultInstruction(row)}`;
 const receipt = (owner, rows, ack) => ({ owner, t: Date.now(), from: rows.reduce((n, row) => Math.min(n, row.seq ?? Infinity), Infinity),
   through: ack.highWater, ids: rows.filter((row) => !row.seq).map((row) => row.id) });

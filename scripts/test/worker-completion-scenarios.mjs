@@ -5,6 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { isIncoherentFinal } from '../lib/worker-final-quality.mjs';
+import { retirementHint, recordRetirementEvidence, saveLaunch } from '../lib/worker-launch.mjs';
 import { classifyCompletion, completionEvidence, completionLeases, TRUNCATED_EXIT } from '../lib/worker-completion.mjs';
 import { resolveTurnState } from '../lib/worker-turn.mjs';
 import { terminalWorker } from '../lib/worker-running.mjs';
@@ -146,6 +148,53 @@ try {
   assert.equal(reportingWindow.events.some(event => event.alertId?.startsWith('quota-refresh-failure:')), false);
   console.log('PASS report publishes lifecycle state before historical readback awaits; reporting window emits no quota notice');
   console.log('PASS normal completion, legacy final items, completed wait reattachment, and provider failures retain existing paths');
+
+  const salad = Array.from({ length: 12 }, () =>
+    'zblЖ响qtr skл仿nк tвq夕pж zbд罫n uvчk闰w rжa眷ф xнp祺v').join('\n');
+  const goodReports = [
+    'Updated the sampler. It now preserves a list of processes when the probe times out.\n'
+      + '- Run the resource scenarios with `node scripts/test/resource-scenarios.mjs`.\n',
+    '已修复资源采样。进程探测超时后仍会记录 CPU 占用最高的进程，相关场景测试全部通过。\n',
+    '已更新Devbox回收规则，保留包含本地改动的工作树。回归测试覆盖了PMC和Git操作。\n'
+      + '运行命令：`node scripts/devbox-run.mjs`，详情见 [报告](/tmp/report.md)。\n',
+  ];
+  assert.equal(isIncoherentFinal(salad), true);
+  for (const prose of goodReports) assert.equal(isIncoherentFinal(prose.repeat(10)), false);
+  assert.equal(isIncoherentFinal('Fixed this report.\n```text\n' + salad + '\n```'), false);
+  const broken = run({ status: 'completed', historyItems: [[item(salad)]] }, { wait: true });
+  assert.equal(broken.status, 1, broken.stdout + broken.stderr);
+  const badEvent = broken.events.at(-1);
+  assert.deepEqual([badEvent.event, badEvent.status, badEvent.reason, badEvent.mayRun], ['failed', 'failed', 'incoherent-final', false]);
+  assert.equal(badEvent.outFile, path.join(fs.realpathSync(broken.dir), 'last.incoherent.md'));
+  assert.equal(fs.readFileSync(badEvent.outFile, 'utf8'), salad + '\n');
+  assert.equal(fs.existsSync(broken.out), false);
+  assert.doesNotMatch(broken.stdout, /zblЖ/);
+  assert.match(eventLine(badEvent), /incoherent-final/);
+  assert.match(hookEventLine(badEvent), /incoherent-final/);
+  assert.equal(resolveTurnState({ account: 'fixture', thread: 'guard-thread', rows: broken.events,
+    result: { thread: { turns: [completed] } }, alive: () => false }).turn.reason, 'incoherent-final');
+  console.log('PASS incoherent completed output is quarantined and surfaced through inbox, hook and turn status');
+
+  const sixHours = 6 * 3600000;
+  const stats = { thread: 'aged', turn: 'current', t: 100 };
+  assert.equal(retirementHint(stats, 100 + sixHours - 1), null);
+  assert.match(retirementHint(stats, 100 + sixHours), /6.0h.*consider retiring this thread/);
+  const rules = process.env.RULES_SHARED;
+  process.env.RULES_SHARED = tmp;
+  try {
+    saveLaunch('fixture', 'aged', {}, undefined, { turn: 'first' });
+    const t = Date.now();
+    for (let i = 0; i < 14; i++) assert.equal(recordRetirementEvidence('fixture', 'aged', 'first', 'steer', t), null);
+    assert.match(recordRetirementEvidence('fixture', 'aged', 'first', 'steer', t), /15 steers.*consider retiring this thread/);
+    recordRetirementEvidence('fixture', 'aged', 'first', 'ended', t + sixHours / 2);
+    assert.match(recordRetirementEvidence('fixture', 'aged', 'first', 'ended', t + sixHours * 2), /3.0h/);
+    saveLaunch('fixture', 'aged', {}, undefined, { turn: 'second', t: t + sixHours });
+    assert.match(recordRetirementEvidence('fixture', 'aged', 'second', 'ended', t + sixHours * 1.5), /6.0h.*15 steers/);
+  } finally {
+    if (rules === undefined) delete process.env.RULES_SHARED;
+    else process.env.RULES_SHARED = rules;
+  }
+  console.log('PASS soft retirement hint tracks six hours and fifteen accepted steers across turns');
 
   const evidence = completionEvidence(); evidence.observe(messages[0]);
   assert.equal(classifyCompletion({ turn: completed, evidence: evidence.snapshot(), final }), null);
