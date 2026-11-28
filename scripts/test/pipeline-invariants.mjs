@@ -10,7 +10,7 @@ import { noteFailure, noteSuccess, claimProbes, probeResult, readPoolPauses } fr
 import { routePure, parseTaskSpec, createTaskSpec, deriveReview, createSnapshot, snapshotFromAnalyze, enumerateCandidates, validatePlan, renderPlan } from '../lib/pipeline/index.mjs';
 import { evaluateCandidate, pAvailable, pCapabilities, pContent, pTierFloor, pModelFit, pSigning, pBackground, pScopedApproval, pPreviousFloor, pResourceScope, pDevice, pLaunchMatches, approvalScope, dominates } from '../lib/pipeline/filters.mjs';
 import { estimateCandidate } from '../lib/pipeline/estimate.mjs';
-import { resWorkerSandbox } from '../lib/worker-launch.mjs';
+import { resWorkerSandbox, resWorkerSandboxVerified } from '../lib/worker-launch.mjs';
 import { orderCandidates } from '../lib/pipeline/choose.mjs';
 import { VERSION, EFFORTS, stable } from '../lib/pipeline/common.mjs';
 
@@ -74,14 +74,31 @@ test('res checks preserve the bounded sandbox through routing and worker configu
   }
 
   const directory = path.join(fs.realpathSync(os.tmpdir()), 'fixture-res-state');
-  const config = resWorkerSandbox('read-only', { directory, network: false });
-  assert.deepEqual(config.permissions[config.default_permissions], {
-    extends: ':read-only', filesystem: { [directory]: 'write' }, network: { enabled: false },
-  });
-  assert.equal(config.shell_environment_policy.set.RES_DIR, directory);
-  assert.equal(config.shell_environment_policy.set.TMPDIR, directory);
-  assert.equal(resWorkerSandbox('workspace-write', { directory }).permissions[config.default_permissions].extends, ':workspace');
-  assert.throws(() => resWorkerSandbox('danger-full-access', { directory }));
+  const scratch = path.join(directory, 'tmp/needs-res/task-1');
+  const prior = process.env.RES_DIR;
+  process.env.RES_DIR = directory;
+  try {
+    const config = resWorkerSandbox('read-only', { directory, task: 'task-1', network: false });
+    assert.deepEqual(config.permissions[config.default_permissions], {
+      extends: ':read-only', filesystem: { [scratch]: 'write' }, network: { enabled: false },
+    });
+    assert.equal(config.shell_environment_policy.set.RES_DIR, directory);
+    assert.equal(config.shell_environment_policy.set.TMPDIR, scratch);
+    assert.equal(resWorkerSandbox('workspace-write', { task: 'task-1' }).permissions[config.default_permissions].extends, ':workspace');
+    assert.throws(() => resWorkerSandbox('danger-full-access', { task: 'task-1' }));
+    assert.throws(() => resWorkerSandbox('read-only', { directory: path.dirname(directory), task: 'task-1' }));
+    assert.throws(() => resWorkerSandbox('workspace-write', { cwd: path.dirname(directory), task: 'task-1' }));
+
+    const activePermissionProfile = { id: config.default_permissions, extends: ':read-only' };
+    const sandbox = { type: 'workspaceWrite', networkAccess: false, writableRoots: [scratch] };
+    assert.equal(resWorkerSandboxVerified({ sandbox, activePermissionProfile }, config), true);
+    assert.equal(resWorkerSandboxVerified({ sandbox }, config), null);
+    assert.equal(resWorkerSandboxVerified({ sandbox: { ...sandbox, writableRoots: [directory] }, activePermissionProfile }, config), false);
+    assert.equal(resWorkerSandboxVerified({ sandbox: { type: 'dangerFullAccess' }, activePermissionProfile }, config), false);
+  } finally {
+    if (prior === undefined) delete process.env.RES_DIR;
+    else process.env.RES_DIR = prior;
+  }
 });
 
 test('personal Luna image generation keeps its standing exception on a company device', () => {

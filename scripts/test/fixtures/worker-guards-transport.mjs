@@ -18,6 +18,15 @@ globalThis.WebSocket = class {
       : m.method === 'thread/list' ? { data: config.listData ?? [], nextCursor: config.listCursor ?? null }
       : m.method === 'account/rateLimits/read' ? config.rateLimits ?? {}
       : m.method === 'turn/start' ? { turn } : m.method === 'thread/read' ? { thread: { name: 'guard-fixture', turns: [turn] } } : {};
+    if (['thread/start', 'thread/resume'].includes(m.method) && config.resSandbox) {
+      const profile = m.params.config?.default_permissions;
+      const permission = m.params.config?.permissions?.[profile];
+      if (config.resSandbox === 'danger') result.sandbox = { type: 'dangerFullAccess' };
+      else if (permission && (config.resSandbox === 'verified' || config.resSandbox === 'fallback' && m.params.sandbox)) {
+        result.activePermissionProfile = { id: profile, extends: permission.extends };
+        result.sandbox = { type: 'workspaceWrite', writableRoots: Object.keys(permission.filesystem) };
+      }
+    }
     if (m.method === 'turn/interrupt') this.interrupted = true;
     setImmediate(() => {
       if (m.method === 'turn/start' && config.beforeReply) for (const message of config.messages ?? []) this.notify(message);

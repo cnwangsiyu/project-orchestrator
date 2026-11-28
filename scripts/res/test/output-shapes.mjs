@@ -47,6 +47,21 @@ try {
   const baseSlots=['devbox-cn-1','devbox-cn-2','devbox-cn-fixture-1','devbox-cn-light','devbox-cn-other-1','devbox-cn-setup-8'];
   fs.writeFileSync(registry,legacyRegistry);
   assert.deepEqual(catalog(),baseSlots);
+  const scratch=fs.realpathSync(fs.mkdtempSync(path.join(root,'query-')));
+  const bin=path.join(scratch,'bin');
+  fs.mkdirSync(bin);
+  for (const name of ['idevice_id','xcrun','adb'])
+    fs.writeFileSync(path.join(bin,name),'#!/bin/sh\nexit 0\n',{mode:0o700});
+  fs.writeFileSync(registry,legacyRegistry+'fixture-device\tdevice\topen\tfixture-id\tfixture device\n');
+  write('devbox-metrics/'+host+'.json',{at:now,cores:64,load5:0,memAvailableGiB:256,freeGiB:2000,io_some_avg60:0,io_full_avg10:0});
+  const before=fs.readdirSync(root).sort();
+  for(const args of [['status'],['holder','fixture-device'],['holder','heavy-build'],['audit'],['slot-host','devbox-cn-1'],['device-app','list','--device','fixture-device']]) {
+    const query=spawnSync(source,args,{env:{...env, RES_QUERY_SCRATCH:scratch,TMPDIR:scratch,PATH:bin+':'+env.PATH},encoding:'utf8',timeout:15000});
+    assert.equal(query.status,0,args.join(' ')+': '+query.stderr);
+  }
+  assert.deepEqual(fs.readdirSync(root).sort(),before,'bounded queries do not publish shared state');
+  assert.deepEqual(fs.readdirSync(path.join(root,'devbox-metrics')),[host+'.json'],'bounded queries do not write I/O status');
+
   fs.writeFileSync(registry,legacyRegistry.replace('os=darwin caps=cmake-native','os=darwin caps=cmake-native dynamic-host')
     .replace('Full build\n','Full build dynamic-local\n'));
   fs.writeFileSync(path.join(root,'machine.conf'),'DEVBOX_MAX_BYPASS=3\n');

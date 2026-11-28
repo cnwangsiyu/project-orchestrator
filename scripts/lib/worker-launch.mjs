@@ -7,24 +7,58 @@ import { canonicalPath } from './launch-paths.mjs';
 
 export const sharedCliEnv = Object.freeze({ BYTEDCLI_NO_AUTO_UPGRADE: '1' });
 
-export function resWorkerSandbox(mode, { directory, network } = {}) {
+export function resWorkerSandbox(mode, { directory, task, network, cwd } = {}) {
   if (!['read-only', 'workspace-write'].includes(mode)) throw Error('--needs-res requires a bounded sandbox');
-  // Pin the same path in the sandbox rules and child environment, including
-  // temp files created by res helpers that use mktemp without a directory.
-  const root = canonicalPath(directory || process.env.RES_DIR || path.join(os.homedir(), '.claude/orchestrator/_shared'));
+  const root = canonicalPath(process.env.RES_DIR || path.join(os.homedir(), '.claude/orchestrator/_shared'));
   if (root === path.parse(root).root) throw Error('--needs-res requires a res state directory below the filesystem root');
+  if (directory !== undefined && (typeof directory !== 'string' || canonicalPath(directory) !== root))
+    throw Error('--res-state-directory must match RES_DIR or the default res directory');
+  if (typeof task !== 'string' || !task.trim() || task === '.' || task === '..') throw Error('--needs-res requires a task name');
+  const scratch = path.join(root, 'tmp', 'needs-res', encodeURIComponent(task));
+  if (canonicalPath(scratch) !== scratch) throw Error('--needs-res scratch directory must be inside the res scratch tree without symlinks');
+  if (mode === 'workspace-write' && cwd) {
+    const workspace = canonicalPath(cwd);
+    const fromRes = path.relative(root, workspace);
+    const inRes = fromRes !== '' && !fromRes.startsWith('..' + path.sep) && fromRes !== '..' && !path.isAbsolute(fromRes);
+    const taskWorkspace = fromRes.split(path.sep)[0] === 'tasks' && fromRes.split(path.sep).length >= 2;
+    const coversRes = workspace === root || root.startsWith(workspace.endsWith(path.sep) ? workspace : workspace + path.sep);
+    if (coversRes || (inRes && !taskWorkspace)) throw Error('--needs-res workspace overlaps the res control directory');
+  }
   const profile = 'orchestrator_res';
   return {
     default_permissions: profile,
     permissions: {
       [profile]: {
         extends: mode === 'read-only' ? ':read-only' : ':workspace',
-        filesystem: { [root]: 'write' },
+        filesystem: { [scratch]: 'write' },
         ...(network === undefined ? {} : { network: { enabled: network } }),
       },
     },
-    shell_environment_policy: { set: { ...sharedCliEnv, RES_DIR: root, TMPDIR: root } },
+    shell_environment_policy: { set: { ...sharedCliEnv, RES_DIR: root, RES_QUERY_SCRATCH: scratch, TMPDIR: scratch } },
   };
+}
+
+// A legacy workspaceWrite reply can represent several filesystem profiles.
+// For a read-only baseline, require the named profile or explicit read-only
+// evidence with the exact root. False means mismatch, null means no proof.
+export function resWorkerSandboxVerified(response, config) {
+  const profile = response?.activePermissionProfile ?? response?.thread?.activePermissionProfile;
+  const sandbox = response?.sandbox ?? response?.thread?.sandbox;
+  const name = config.default_permissions;
+  const { extends: base, network } = config.permissions[name];
+  const type = typeof sandbox === 'string' ? sandbox : sandbox?.type;
+  if (type && !['workspaceWrite', 'workspace-write', 'readOnly', 'read-only'].includes(type)) return false;
+  const roots = sandbox?.writableRoots ?? undefined;
+  const expected = config.shell_environment_policy.set.TMPDIR;
+  if (roots !== undefined && (!Array.isArray(roots) || roots.length !== 1 || roots[0] !== expected)) return false;
+  if (network && typeof sandbox?.networkAccess === 'boolean' && sandbox.networkAccess !== network.enabled) return false;
+  if (profile != null) {
+    const id = typeof profile === 'string' ? profile : profile.id;
+    return id === name && (profile.extends == null || profile.extends === base);
+  }
+  if (roots !== undefined && ['workspaceWrite', 'workspace-write', 'readOnly', 'read-only'].includes(type))
+    return base === ':workspace' || type === 'readOnly' || type === 'read-only' ? true : null;
+  return null;
 }
 
 export const claudeWorkspacePreamble = (workspace, review = false) => review
@@ -35,7 +69,7 @@ const keys = ['route-args', 'auto-reroute-depth', 'owner', 'name', 'cwd', 'log',
   'queue-patience-min', 'alt', 'queue-alternative', 'queue-alt-start-min', 'background', 'require-model', 'no-auto-continue', 'model', 'effort',
   // Browser/desktop scope must survive a continuation: without it the hub answers every site approval with a decline
   // and the worker reports "The user declined approval" (VAK W304-queue-cancel-2, 2026-11-15).
-  'browser-origins', 'computer-use-apps', 'chrome-profile-dir','project','task','role','routed-seat','sandbox','network','needs-res','res-state-directory'];
+  'browser-origins', 'computer-use-apps', 'chrome-profile-dir','project','task','role','routed-seat','sandbox','network','needs-res'];
 const launchFile = (account, thread) => {
   if (![account, thread].every((v) => typeof v === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/.test(v)))
     throw Error('invalid public account/thread identifier');

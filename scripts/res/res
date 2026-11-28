@@ -10,6 +10,19 @@
 set -euo pipefail
 export PYTHONDONTWRITEBYTECODE=1
 
+# A bounded worker's query scratch is also its working directory on macOS:
+# the system Bash creates here-document files in the working directory.
+if [ -n "${RES_QUERY_SCRATCH:-}" ] && [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  case "${1:-}:${2:-}" in
+    status:*|holder:*|audit:*|slot-host:*|device-app:check|device-app:list)
+      if [ "$PWD" != "$RES_QUERY_SCRATCH" ]; then
+        case "$0" in /*) query_res="$0" ;; *) query_res="$PWD/$0" ;; esac
+        cd -P -- "$RES_QUERY_SCRATCH"
+        exec /bin/bash "$query_res" "$@"
+      fi ;;
+  esac
+fi
+
 # The shell retains the flock's open-file description after Python exits.
 # This also preserves sourcing callers' traps and protects copied legacy res.
 allocator_kind=
@@ -447,7 +460,7 @@ def memory_probe(root, config, platform=None, readings=None, prefer_native=False
                      samples=len(samples), compressor_high=compressor_high, swap_high=swap_high,
                      sample_source='external' if samples else 'single')
     except (OSError, ValueError, subprocess.SubprocessError):
-        if throttled(root, 'memory-warning', 'probe', '', '', '', ''):
+        if os.environ.get('RES_QUERY_SCRATCH') or throttled(root, 'memory-warning', 'probe', '', '', '', ''):
             print('res: warning: memory guard unavailable (%s); no memory-pressure denial' % state['guard'], file=__import__('sys').stderr)
     return state
 
@@ -676,7 +689,7 @@ def observation_main(root, action, id, by=''):
         memory = {}
         if id.startswith('heavy-'):
             namespace = {}; exec(os.environ['RES_MACHINE_SOURCE'], namespace)
-            memory['memory'] = namespace['memory_probe'](root, namespace['machine_config'](root), prefer_native=True)['memory']
+            memory['memory'] = namespace['memory_probe'](root, namespace['machine_config'](root, readonly=bool(os.environ.get('RES_QUERY_SCRATCH'))), prefer_native=True)['memory']
         print(json.dumps({**memory, 'id': id, 'state': state, 'holder': value.get('by'), 'project': value.get('project'),
                           'task': value.get('task'), 'since': value.get('since'), 'until': value.get('until'),
                           'mine': 'yes' if by and value.get('by') == by else 'no',
@@ -2682,7 +2695,7 @@ def print_build_capacity():
         print('\nLocal capacity: ' + (result.stdout.strip() if result.returncode==0 else 'closed: local capacity probe unavailable'))
         return
     count = sum(os.path.isdir(os.path.join(locks, name + '.d')) for name in ('heavy-build', 'heavy-build-2', 'heavy-build-3'))
-    config = globals().get('status_machine_config') or machine_helpers['machine_config'](root)
+    config = globals().get('status_machine_config') or machine_helpers['machine_config'](root, readonly=bool(os.environ.get('RES_QUERY_SCRATCH')))
     limit = config['heavy']['BUILD_MAX_CONCURRENCY']
     print('\nBuild capacity: heavy-build %d/%s' % (count, limit))
     print('  ' + machine_helpers['memory_line'](machine_helpers['memory_probe'](root, config, prefer_native=True)) + (' config=last-good' if config.get('fallback') else ''))
@@ -2761,7 +2774,7 @@ try:
     observation_namespace = {}
     if action == 'status': exec(os.environ['RES_OBSERVATION_SOURCE'], observation_namespace)
     if any(c in value for value in (by, project, task, purpose, until, warm_family) for c in '\t\r\n'): raise ValueError('hold metadata must be one line')
-    if action not in ('box-health', 'scores', 'status', 'audit', 'place-devboxes', 'slot-host', 'devbox-registry', 'pool-capacity', 'reserved-disk'): os.makedirs(locks, exist_ok=True)
+    if action not in ('box-health', 'scores', 'status', 'audit', 'cleanup-pending-status', 'place-devboxes', 'slot-host', 'devbox-registry', 'pool-capacity', 'reserved-disk'): os.makedirs(locks, exist_ok=True)
     if action in ('cancel', 'cleanup'):
         queue = os.path.join(root, 'pool-waiters', request)
         waiter = os.path.join(root, 'pool-waiters', request, 'waiter.' + controller_key)
@@ -2895,7 +2908,7 @@ try:
         host_pattern = r'[A-Za-z0-9][A-Za-z0-9.-]*'
         defaults = machine_helpers['DEVBOX_DEFAULTS']
         if action in ('return','retain-remote','release-dead'): return {},False,5
-        config = machine_helpers['machine_config'](root, readonly=action=='place-devboxes')
+        config = machine_helpers['machine_config'](root, readonly=action=='place-devboxes' or bool(os.environ.get('RES_QUERY_SCRATCH')))
         status_machine_config = config
         values = config['devbox']; unknown = set(config['unknown'])
         for name in sorted(unknown-config_unknown_warned) if action != 'place-devboxes' else ():
@@ -2984,7 +2997,7 @@ try:
         if some is None or full is None: return False
         limits = (settings['IO_SOME_AVG60_MAX'], settings['IO_FULL_AVG10_MAX'])
         file = os.path.join(metrics_dir, box + '.io-state.json')
-        if action == 'place-devboxes':
+        if action == 'place-devboxes' or os.environ.get('RES_QUERY_SCRATCH'):
             was_closed = machine_helpers['read_json'](file, {}).get('closed', False)
             return io_pressure_state(was_closed, (some, full), limits)
         os.makedirs(metrics_dir, exist_ok=True)

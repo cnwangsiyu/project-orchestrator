@@ -74,7 +74,7 @@ import { parseRouteArgs, routeFlag, rerouteWorker, turnHasWork, heldTaskResource
 import { notifyQueueOwner, queueNoticeDue, pendingQueueChoice, claimQueueChoice, deferQueueChoice, settleQueueChoice, queueChoiceResult,
   queueSourceArgs, queueRouteContext, automaticQueueOption, queueOptionPlan, queueChoiceSafety } from './lib/queue-decision.mjs';
 import { queuePolicy } from './lib/queue-stall-watch.mjs';
-import { sharedCliEnv, resWorkerSandbox, inheritedLaunch, savedLaunch, saveLaunch, recordLaunchModel, readRequestBufferExceededAt, markRequestBufferExceeded, markOwnerInterrupt, ownerInterruptAt } from './lib/worker-launch.mjs';
+import { sharedCliEnv, resWorkerSandbox, resWorkerSandboxVerified, inheritedLaunch, savedLaunch, saveLaunch, recordLaunchModel, readRequestBufferExceededAt, markRequestBufferExceeded, markOwnerInterrupt, ownerInterruptAt } from './lib/worker-launch.mjs';
 import { recordWorkerOutcome, reviewSeat, reviewInstructions } from './lib/worker-outcome.mjs';
 import { workerResultInstructions } from './lib/worker-result.mjs';
 import { completionKind } from './lib/worker-completion.mjs';
@@ -594,10 +594,12 @@ let resSandboxConfig;
 if (opts['needs-res']) {
   try {
     resSandboxConfig = resWorkerSandbox(opts.sandbox, {
-      directory: opts['res-state-directory'],
+      directory: opts['res-state-directory'], task: opts.task ?? opts.name ?? opts.thread, cwd: opts.cwd,
       network: opts.network === undefined ? (opts.sandbox === 'workspace-write' ? configNetwork() : undefined) : opts.network === 'on',
     });
-    opts['res-state-directory'] = resSandboxConfig.shell_environment_policy.set.RES_DIR;
+    const scratch = resSandboxConfig.shell_environment_policy.set.TMPDIR;
+    fs.mkdirSync(scratch, { recursive: true, mode: 0o700 });
+    if (fs.realpathSync.native(scratch) !== scratch) throw Error('--needs-res scratch directory changed during setup');
   } catch (error) { die(error.message); }
 }
 const turnSandbox = () => !resSandboxConfig && opts.sandbox ? sandboxPolicy(opts.sandbox) : undefined;
@@ -606,6 +608,23 @@ const workerConfig = (config, env) => ({
   ...resSandboxConfig,
   shell_environment_policy: { set: { ...env, ...resSandboxConfig?.shell_environment_policy.set } },
 });
+
+const callWithWorkerSandbox = async (method, params, { allowMissingRollout = false } = {}) => {
+  if (!resSandboxConfig) return call(method, params);
+  let response;
+  try { response = await call(method, params); }
+  catch (error) {
+    // A fresh thread can lack a rollout until its first turn. Its start
+    // response has already been checked before this optional resume.
+    if (allowMissingRollout && /no rollout found/i.test(error.message)) return null;
+    throw error;
+  }
+  if (resWorkerSandboxVerified(response, resSandboxConfig) === null)
+    response = await call(method, { ...params, sandbox: opts.sandbox });
+  if (resWorkerSandboxVerified(response, resSandboxConfig) !== true)
+    throw Error('--needs-res hub did not confirm the bounded res permission profile');
+  return response;
+};
 
 if (cmd === 'accounts') {
   const reg = readAccounts();
@@ -2102,7 +2121,7 @@ try {
     tracker?.set({ rulesVersion });
     checkNewThreadAdmission();
     checkModelAccessAdmission(opts.model);
-    const th = await call('thread/start', {
+    const th = await callWithWorkerSandbox('thread/start', {
       cwd: path.resolve(opts.cwd), model: opts.model, sandbox: resSandboxConfig ? undefined : opts.sandbox, approvalPolicy: APPROVAL_POLICY,
       developerInstructions: [browserHowTo, projectWorkerInstructions(digest), reviewHowTo].filter(Boolean).join('\n'),
       ...(browserThread && !TRAE_EXTENSION_BROWSER && !TRAE_HEADLESS_BROWSER ? { approvalsReviewer: 'user' } : {}),
@@ -2117,7 +2136,12 @@ try {
     if (opts.name) await call('thread/name/set', { threadId, name: opts.name }).catch(() => {});
     const talkback = talkbackContext(threadId);
     const instructions = [browserHowTo, projectWorkerInstructions(digest), talkback.instructions, reviewHowTo].filter(Boolean).join('\n');
-    const configured = await call('thread/resume', { threadId, config: workerConfig(browserConfig, talkback.config.shell_environment_policy.set), developerInstructions: instructions }).catch(resumeFallback);
+    const configured = await callWithWorkerSandbox('thread/resume', {
+      threadId, config: workerConfig(browserConfig, talkback.config.shell_environment_policy.set), developerInstructions: instructions,
+    }, { allowMissingRollout: true }).catch(error => {
+      if (resSandboxConfig) throw error;
+      return resumeFallback(error);
+    });
     await waitBrowserTools(threadId);
     markOutputStart();
     const submittedAt = Date.now();
@@ -2132,7 +2156,7 @@ try {
     const talkback = talkbackContext(opts.thread);
     const config = workerConfig(TRAE_MCP_CONFIG, talkback.config.shell_environment_policy.set);
     const resumedDigest=loadDigest();
-    const resumed = await call('thread/resume', { threadId: opts.thread, model: opts.model, config,
+    const resumed = await callWithWorkerSandbox('thread/resume', { threadId: opts.thread, model: opts.model, config,
       developerInstructions:[projectWorkerInstructions(resumedDigest), talkback.instructions, reviewHowTo].filter(Boolean).join('\n') }).catch(error => {
       if (resSandboxConfig) throw error;
       return resumeFallback(error);
@@ -2154,7 +2178,9 @@ try {
     follow(opts.thread, ts.turn?.id ?? ts.turnId, [], submittedAt);
   } else if (cmd === 'wait') {
     if (!opts.thread) die('wait needs --thread');
-    const resumed = await call('thread/resume', { threadId: opts.thread }).catch(() => null);
+    const resumed = resSandboxConfig
+      ? await callWithWorkerSandbox('thread/resume', { threadId: opts.thread, config: resSandboxConfig })
+      : await call('thread/resume', { threadId: opts.thread }).catch(() => null);
     sessionPath = resumed?.thread?.path ?? null;
     const t = await currentTurn(opts.thread, resumed?.thread);
     if (!t) die('thread has no turns', 3);

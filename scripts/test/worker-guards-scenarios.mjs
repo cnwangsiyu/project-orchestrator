@@ -105,6 +105,44 @@ try {
     assert.equal(r.calls.find(c=>c.method==='thread/start').params.sandbox,'read-only');
     assert.deepEqual(r.calls.find(c=>c.method==='turn/start').params.sandboxPolicy,{type:'readOnly',networkAccess:true});
   });
+  check('res workers scope scratch, verify hub permissions and ignore saved root overrides', () => {
+    for (const resSandbox of ['verified', 'fallback', 'unknown', 'danger']) {
+      const f = fixture('res-' + resSandbox);
+      const directory = path.join(f.dir, 'state');
+      const scratch = path.join(directory, 'tmp/needs-res/fixture-task');
+      f.env.RES_DIR = directory;
+      const r = run(f, 'start', { resSandbox }, ['--needs-res', '--name', 'fixture-task']);
+      const starts = r.calls.filter(c => c.method === 'thread/start');
+      const start = starts[0].params;
+      assert.equal(start.sandbox, undefined);
+      assert.deepEqual(start.config.permissions.orchestrator_res.filesystem, { [scratch]: 'write' });
+      assert.equal(start.config.shell_environment_policy.set.RES_DIR, directory);
+      assert.equal(start.config.shell_environment_policy.set.TMPDIR, scratch);
+      assert.ok(fs.statSync(scratch).isDirectory());
+      assert.equal(starts.length, ['unknown', 'fallback'].includes(resSandbox) ? 2 : 1);
+      if (starts.length === 2) assert.equal(starts[1].params.sandbox, 'read-only');
+      if (resSandbox === 'unknown' || resSandbox === 'danger') {
+        assert.notEqual(r.status, 0);
+        assert.match(r.stderr, /hub did not confirm the bounded res permission profile/);
+        assert.ok(!r.calls.some(c => c.method === 'turn/start'));
+        continue;
+      }
+
+      assert.equal(r.status, 0, r.stderr);
+      assert.ok(r.calls.some(c => c.method === 'turn/start'));
+      const saved = path.join(f.dir, 'worker-launches/fixture/guard-thread.json');
+      const launch = JSON.parse(fs.readFileSync(saved, 'utf8'));
+      assert.ok(!Object.hasOwn(launch.defaults, 'res-state-directory'));
+      launch.defaults['res-state-directory'] = f.dir;
+      fs.writeFileSync(saved, JSON.stringify(launch));
+      fs.writeFileSync(f.rpc, '');
+      const continued = run(f, 'turn', { resSandbox: 'verified' });
+      assert.equal(continued.status, 0, continued.stderr);
+      assert.deepEqual(continued.calls.find(c => c.method === 'thread/resume').params.config.permissions.orchestrator_res.filesystem, {
+        [scratch]: 'write',
+      });
+    }
+  });
   check('launch mismatch warns for model, effort and wider sandbox without holding company work',()=>{
     const f=fixture('launch-warning');
     fs.writeFileSync(f.log,JSON.stringify({t:Date.now()-1000,kind:'route',name:'launch-warning',project:'guards',category:'analysis',
