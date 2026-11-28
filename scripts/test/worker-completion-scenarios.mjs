@@ -25,6 +25,11 @@ function run(config = {}, options = {}) {
   const dir = path.join(tmp, String(++serial)), home = path.join(dir, 'account'); fs.mkdirSync(home, { recursive: true });
   const profiles = path.join(dir, 'accounts.json'), out = path.join(dir, 'last.md'), rpc = path.join(dir, 'rpc.log');
   fs.writeFileSync(profiles, JSON.stringify({ fixture: { kind: 'trae', home, hub: 'ws://127.0.0.1:1', modelIds: { 'gpt-6.1-sol': 'GPT-6.1-Sol' } } }));
+  if (options.previousFinal) fs.writeFileSync(out, options.previousFinal);
+  if (options.quarantineCollision) fs.mkdirSync(path.join(dir, 'last.incoherent.md'));
+  if (options.queued) fs.writeFileSync(path.join(home, 'queue-status.json'), JSON.stringify({
+    'guard-thread': { state: 'queued', turnId: 'guard-turn' },
+  }));
   if (options.lease) {
     fs.mkdirSync(path.join(dir, 'locks', 'devbox-cn-light-1.d'), { recursive: true });
     fs.writeFileSync(path.join(dir, 'resources.tsv'), 'devbox-cn-light-1\tdevbox\topen\t-\tfixture\n');
@@ -39,7 +44,7 @@ function run(config = {}, options = {}) {
   const args = ['--import', path.join(scripts, 'test/fixtures/worker-completion-transport.mjs'), path.join(scripts, 'codex-worker.mjs'),
     '--account', 'fixture', options.wait ? 'wait' : 'start', '--thread', 'guard-thread',
     ...(options.wait ? [] : ['--cwd', dir, '--sandbox', 'read-only', '--model', 'gpt-6.1-sol', '--effort', 'high']),
-    '--owner', owner, '--name', 'fixture', '--out', out, '--by', 'worker-holder',
+    '--owner', owner, '--name', 'fixture', ...(options.noOut ? [] : ['--out', out]), '--by', 'worker-holder',
     ...(options.wait ? [] : ['Complete the synthetic brief.'])];
   const result = spawnSync(process.execPath, args, { env, encoding: 'utf8', timeout: 7000 });
   assert.equal(result.error, undefined, result.stderr + result.stdout);
@@ -158,21 +163,48 @@ try {
     '已更新Devbox回收规则，保留包含本地改动的工作树。回归测试覆盖了PMC和Git操作。\n'
       + '运行命令：`node scripts/devbox-run.mjs`，详情见 [报告](/tmp/report.md)。\n',
   ];
+  const terseLines = ['已修复devbox9的GC问题 原因是symlink检查过严', '新增GC回执 每行显示slot和12位treeId'];
+  const numbered = Array.from({ length: 24 }, (_, index) => `${index + 1}. ${terseLines[index % 2]}`).join('\n');
+  const bullets = Array.from({ length: 15 }, (_, index) => `- ${terseLines[index % 2]}`).join('\n');
+  for (const prose of [numbered, bullets, `## 结果：\n${salad}`]) {
+    assert.ok(prose.length >= 400);
+    assert.equal(isIncoherentFinal(prose), false);
+  }
+  const mixed = run({ status: 'completed', historyItems: [[item(numbered)]] }, { wait: true });
+  assert.equal(mixed.status, 0, mixed.stderr);
+  assert.equal(fs.readFileSync(mixed.out, 'utf8'), numbered + '\n');
   assert.equal(isIncoherentFinal(salad), true);
   for (const prose of goodReports) assert.equal(isIncoherentFinal(prose.repeat(10)), false);
   assert.equal(isIncoherentFinal('Fixed this report.\n```text\n' + salad + '\n```'), false);
-  const broken = run({ status: 'completed', historyItems: [[item(salad)]] }, { wait: true });
+  const brokenConfig = { status: 'completed', historyItems: [[item(salad)]] };
+  const broken = run(brokenConfig, { wait: true, previousFinal: 'DONE previous turn', queued: true, lease: 'worker-holder' });
   assert.equal(broken.status, 1, broken.stdout + broken.stderr);
   const badEvent = broken.events.at(-1);
   assert.deepEqual([badEvent.event, badEvent.status, badEvent.reason, badEvent.mayRun], ['failed', 'failed', 'incoherent-final', false]);
   assert.equal(badEvent.outFile, path.join(fs.realpathSync(broken.dir), 'last.incoherent.md'));
   assert.equal(fs.readFileSync(badEvent.outFile, 'utf8'), salad + '\n');
-  assert.equal(fs.existsSync(broken.out), false);
+  assert.equal(fs.statSync(badEvent.outFile).mode & 0o777, 0o600);
+  assert.equal(fs.readFileSync(broken.out, 'utf8'), `incoherent-final. Quarantined final: ${badEvent.outFile}\n`);
+  assert.deepEqual(badEvent.leases.map(lease => lease.id), ['devbox-cn-light-1']);
+  assert.match(badEvent.finalLine, /Held leases: devbox-cn-light-1/);
+  const queue = JSON.parse(fs.readFileSync(path.join(broken.dir, 'account/queue-status.json'), 'utf8'));
+  assert.equal(queue['guard-thread'].state, 'ready');
   assert.doesNotMatch(broken.stdout, /zblЖ/);
   assert.match(eventLine(badEvent), /incoherent-final/);
   assert.match(hookEventLine(badEvent), /incoherent-final/);
-  assert.equal(resolveTurnState({ account: 'fixture', thread: 'guard-thread', rows: broken.events,
-    result: { thread: { turns: [completed] } }, alive: () => false }).turn.reason, 'incoherent-final');
+  const readback = resolveTurnState({ account: 'fixture', thread: 'guard-thread', rows: broken.events,
+    result: { thread: { turns: [completed] } }, alive: () => false }).turn;
+  assert.equal(readback.reason, 'incoherent-final');
+  assert.equal(readback.quarantinePath, badEvent.outFile);
+  for (const options of [{ noOut: true }, { quarantineCollision: true, previousFinal: 'DONE previous turn' }]) {
+    const result = run(brokenConfig, { wait: true, ...options });
+    assert.equal(result.status, 1, result.stderr);
+    const { outFile } = result.events.at(-1);
+    assert.ok(outFile.startsWith(path.join(fs.realpathSync(result.dir), 'account/incoherent-final-')));
+    assert.equal(fs.readFileSync(outFile, 'utf8'), salad + '\n');
+    assert.equal(fs.statSync(outFile).mode & 0o777, 0o600);
+    if (!options.noOut) assert.match(fs.readFileSync(result.out, 'utf8'), /incoherent-final/);
+  }
   console.log('PASS incoherent completed output is quarantined and surfaced through inbox, hook and turn status');
 
   const sixHours = 6 * 3600000;

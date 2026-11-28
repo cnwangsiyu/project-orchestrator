@@ -85,7 +85,7 @@ import { sizeLimits, threadSize, freshThreadRoute } from './lib/worker-thread-si
 import { modelFamily, modelObservation, rolloutTurnModel } from './lib/worker-model.mjs';
 import { redactWorkerTurn, checkThreadIdle } from './lib/worker-redaction.mjs';
 import { captureMaskAudit } from './lib/worker-mask-audit.mjs';
-import { assertMaskTarget } from './lib/masking-scope.mjs';
+import { assertMaskTarget, safeTempRoot } from './lib/masking-scope.mjs';
 import { maskPasswordStyleValues } from './lib/nightly-audit.mjs';
 import { canonicalPathOptions, canonicalBriefPrompt } from './lib/launch-paths.mjs';
 import { requestBoardRefresh } from './lib/board-refresh.mjs';
@@ -1429,6 +1429,47 @@ const printFinal = (final) => {
   }
   console.log(`final: ${maskPasswordStyleValues(final.split('\n').find((l) => l.trim()) ?? '').text}`);
 };
+const accountHome = () => PROF?.home ?? process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex');
+const quarantineFinal = (final, base) => {
+  if (!final) return null;
+  const save = file => {
+    const target = assertMaskTarget(file);
+    fs.writeFileSync(target, final + '\n', { flag: 'wx', mode: 0o600 });
+    return target;
+  };
+  if (base) {
+    const ext = path.extname(base);
+    try { return save(base.slice(0, base.length - ext.length) + '.incoherent' + (ext || '.md')); }
+    catch { console.error('incoherent-final: preferred quarantine path unavailable'); }
+  }
+  for (const root of [accountHome, safeTempRoot]) {
+    let directory;
+    try {
+      const prefix = assertMaskTarget(path.join(root(), 'incoherent-final-'));
+      directory = fs.mkdtempSync(prefix);
+      return save(path.join(directory, 'final.md'));
+    } catch {
+      if (directory) try { fs.rmSync(directory, { recursive: true, force: true }); } catch {}
+    }
+  }
+  return null;
+};
+const replaceFinalWithNotice = notice => {
+  if (!opts.out) return true;
+  try {
+    const target = assertMaskTarget(opts.out);
+    const dir = fs.mkdtempSync(path.join(path.dirname(target), '.final-notice-'));
+    try {
+      const temporary = path.join(dir, 'notice');
+      fs.writeFileSync(temporary, notice + '\n', { mode: 0o600 });
+      fs.renameSync(temporary, target);
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    return true;
+  } catch {
+    console.error('incoherent-final: could not replace --out; treat its contents as stale');
+    return false;
+  }
+};
 // A cyberPolicy block is recorded for the nightly review as kind:'policy-block' on every account. TTADK stops there
 // (telemetry only, no pause); TRAE also writes its 983-style family restriction below (until the next 00:00 UTC).
 const recordPolicyBlock = (model, error) => {
@@ -1477,30 +1518,6 @@ const report = async (threadId, turn, final, usage, observation = {}) => {
   const truncated = completion?.status === 'TRUNCATED' ? completion : null;
   const uncertain = completion?.status === 'uncertain' ? completion : null;
   if (completion) turn = { ...turn, status: completion.status };
-  if (turn.reason === 'incoherent-final' || (!completion && turn.status === 'completed' && isIncoherentFinal(final))) {
-    const reason = 'incoherent-final';
-    const taskDir = opts['task-dir'] ?? tracker?.metadata().taskDir ?? (logFile ? path.dirname(logFile) : null);
-    const base = opts.out ?? (taskDir ? path.join(taskDir, 'codex-last.md') : null);
-    const ext = base ? path.extname(base) : '';
-    const out = base ? path.resolve(base.slice(0, base.length - ext.length) + '.incoherent' + (ext || '.md')) : null;
-    let saved = null;
-    if (out && final) {
-      try {
-        assertMaskTarget(out);
-        fs.writeFileSync(out, final + '\n', { mode: 0o600 });
-        saved = out;
-      } catch { console.error('incoherent-final: could not save the quarantined final'); }
-    }
-    outcomeTurn = { ...turn, status: 'failed', error: { message: reason } };
-    outcomeFinal = '';
-    const finalLine = `${reason}${ageHint ? ' — consider retiring this thread' : ''}`;
-    console.log(`turn failed: ${finalLine}${saved ? ` (recorded in ${saved})` : ''}`);
-    tracker?.result('failed', { thread: threadId, turn: turn.id, status: 'failed', settled: true,
-      mayRun: false, reason, finalLine, outFile: saved ?? (turn.reason === reason ? tracker?.metadata().outFile : null) });
-    await redactEndedTurn(threadId, saved);
-    await finish(1);
-    return;
-  }
 
   if (PROF?.kind === 'ttadk' && turn.status === 'completed') outcomeInput = usage?.inputTokens;
   if (PROF?.kind === 'trae' && !observation.unconfirmed) saveQueue(PROF.home, threadId, { state: 'ready', turnId: turn.id, at: Date.now() });
@@ -1511,6 +1528,41 @@ const report = async (threadId, turn, final, usage, observation = {}) => {
   const explicitStrict = opts['require-model'] === true || opts['require-model'] === 'on';
   const rejectedModel = strictReviewModel && (modelMismatch || (explicitStrict && (!actualModel || !REQUESTED_MODEL)));
   if (strictReviewModel && !rejectedModel && !actualModel) console.log(`actual-model: unknown (requested ${REQUESTED_MODEL ?? 'default'}; no execution evidence from this hub)`);
+  const leaseOnly = truncated?.reasons.length === 1 && resourceState.held.length > 0
+    && truncated.reasons[0] === 'worker still holds res leases';
+  const incoherent = turn.reason === 'incoherent-final' || (!observation.unconfirmed
+    && (turn.status === 'completed' || leaseOnly) && isIncoherentFinal(final));
+  if (incoherent) {
+    const reason = 'incoherent-final';
+    const taskDir = opts['task-dir'] ?? tracker?.metadata().taskDir ?? (logFile ? path.dirname(logFile) : null);
+    const base = opts.out ?? (taskDir ? path.join(taskDir, 'codex-last.md') : null);
+    let saved = null;
+    if (turn.reason === reason && turn.quarantinePath) {
+      try {
+        const existing = assertMaskTarget(turn.quarantinePath);
+        if (fs.statSync(existing).isFile()) saved = existing;
+      } catch {}
+    }
+    if (!saved) {
+      if (!final) final = lastMessage((await readTurns(threadId).catch(() => [])).find(t => t.id === turn.id)?.items);
+      saved = quarantineFinal(final, base);
+    }
+    const recovery = saved ? `Quarantined final: ${saved}` : `Final recoverable only from thread ${threadId}, turn ${turn.id}`;
+    const currentOut = replaceFinalWithNotice(`${reason}. ${recovery}`);
+    const leases = resourceState.held.map(({ id, holder, pid }) => ({ id, holder, pid }));
+    const leaseLine = `Held leases: ${leases.map(lease => lease.id).join(', ') || 'none'}${resourceState.complete ? '' : ' (metadata incomplete)'}`;
+    const finalLine = [reason, recovery, currentOut ? null : '--out may be stale', leaseLine,
+      ageHint ? 'consider retiring this thread' : null].filter(Boolean).join(' — ');
+    outcomeTurn = { ...turn, status: 'failed', error: { message: reason } };
+    outcomeFinal = '';
+    recordModelEvidence(threadId, turn.id, 'failed');
+    console.log(`turn failed: ${finalLine}`);
+    tracker?.result('failed', { thread: threadId, turn: turn.id, status: 'failed', settled: true,
+      mayRun: false, reason, finalLine, leases, outFile: saved });
+    await redactEndedTurn(threadId, saved);
+    await finish(1);
+    return;
+  }
   recordModelEvidence(threadId, turn.id, completionKind(turn));
   if (rejectedModel) console.error(`review-model-rejected: requested ${REQUESTED_MODEL ?? 'default'}, actual ${actualModel ?? 'unknown'}, delegated ${delegatedModels.map((row) => row.model).join(', ') || 'none'}`);
   console.log(`turn ${turn.status}${turn.error ? ' error=' + JSON.stringify(turn.error) : ''}`);
